@@ -1,0 +1,36 @@
+"""配置管理 — 从环境变量读取 API Key 等敏感信息"""
+
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
+# 当前使用的模型提供商: "deepseek" 或 "mimo"
+LLM_PROVIDER = os.getenv("LLM_PROVIDER", "mimo")
+
+# DeepSeek API 配置（OpenAI 兼容接口）
+DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "")
+DEEPSEEK_BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
+DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
+
+# 小米 MIMO API 配置（OpenAI 兼容接口）
+MIMO_API_KEY = os.getenv("MIMO_API_KEY", "")
+MIMO_BASE_URL = os.getenv("MIMO_BASE_URL", "https://api.xiaomimimo.com/v1")
+MIMO_MODEL = os.getenv("MIMO_MODEL", "mimo-v2.5-pro")
+
+# 视觉模型配置（用于图片解析）
+VISION_API_KEY = os.getenv("VISION_API_KEY", MIMO_API_KEY)
+VISION_BASE_URL = os.getenv("VISION_BASE_URL", MIMO_BASE_URL)
+VISION_MODEL = os.getenv("VISION_MODEL", "mimo-v2-omni")
+
+
+def get_llm_config() -> tuple[str, str, str]:
+    """根据 LLM_PROVIDER 返回 (api_key, base_url, model)。"""
+    if LLM_PROVIDER == "mimo":
+        return MIMO_API_KEY, MIMO_BASE_URL, MIMO_MODEL
+    return DEEPSEEK_API_KEY, DEEPSEEK_BASE_URL, DEEPSEEK_MODEL
+
+
+def get_vision_config() -> tuple[str, str, str]:
+    """返回视觉模型配置 (api_key, base_url, model)。"""
+    return VISION_API_KEY, VISION_BASE_URL, VISION_MODEL

@@ -1,0 +1,607 @@
+<script setup>
+import { ref, computed, onMounted } from 'vue'
+import { marked } from 'marked'
+import { listLinkedArticles, uploadDocument, downloadDocument, deleteLinkedArticle, getDocumentContent, embedDocument } from '../api'
+import ConfirmDialog from './ConfirmDialog.vue'
+
+const documents = ref([])
+const loading = ref(false)
+const uploading = ref(false)
+const searchQuery = ref('')
+const selectedDoc = ref(null)
+const previewContent = ref('')
+const previewLoading = ref(false)
+
+const confirm = ref({ visible: false, title: '', message: '', danger: false, action: null })
+const embeddingIds = ref(new Set())
+function showConfirm(title, message, action, danger = false) {
+  confirm.value = { visible: true, title, message, danger, action, loading: false }
+}
+async function onConfirmOk() {
+  if (!confirm.value.action) return
+  confirm.value.loading = true
+  try { await confirm.value.action() }
+  finally { confirm.value.loading = false; confirm.value.visible = false; confirm.value.action = null }
+}
+function onConfirmCancel() {
+  confirm.value.visible = false
+  confirm.value.action = null
+}
+
+const filteredDocs = computed(() => {
+  if (!searchQuery.value.trim()) return documents.value
+  const q = searchQuery.value.toLowerCase()
+  return documents.value.filter(d => d.title?.toLowerCase().includes(q))
+})
+
+async function loadDocuments() {
+  loading.value = true
+  try {
+    const { data } = await listLinkedArticles()
+    documents.value = data
+  } catch (e) {
+    console.error('加载文档列表失败', e)
+  } finally {
+    loading.value = false
+  }
+}
+
+function onFileInput(e) {
+  const files = e.target.files
+  if (!files?.length) return
+  handleFiles(files)
+  e.target.value = ''
+}
+
+async function handleFiles(files) {
+  const allowed = ['.txt', '.md', '.pdf', '.docx', '.doc']
+  for (const file of files) {
+    const ext = '.' + file.name.split('.').pop().toLowerCase()
+    if (!allowed.includes(ext)) {
+      alert(`不支持的文件类型: ${ext}，仅支持 .txt / .md / .pdf / .docx`)
+      continue
+    }
+    uploading.value = true
+    try {
+      await uploadDocument(file)
+    } catch (e) {
+      alert(`上传失败 (${file.name}): ` + (e.response?.data?.detail || e.message))
+    }
+  }
+  uploading.value = false
+  await loadDocuments()
+}
+
+async function previewDoc(item) {
+  if (selectedDoc.value?.id === item.id) {
+    selectedDoc.value = null
+    previewContent.value = ''
+    return
+  }
+  selectedDoc.value = item
+  previewLoading.value = true
+  previewContent.value = ''
+  try {
+    const { data } = await getDocumentContent(item.id)
+    previewContent.value = data.content || ''
+  } catch (e) {
+    previewContent.value = '加载失败: ' + (e.response?.data?.detail || e.message)
+  } finally {
+    previewLoading.value = false
+  }
+}
+
+async function downloadFile(item) {
+  try {
+    const { data } = await downloadDocument(item.id)
+    const url = URL.createObjectURL(data)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = item.title + '.' + (item.file_type || '')
+    a.click()
+    URL.revokeObjectURL(url)
+  } catch (e) {
+    alert('下载失败: ' + (e.response?.data?.detail || e.message))
+  }
+}
+
+function removeDoc(item) {
+  showConfirm('删除文档', `确定删除「${item.title}」？删除后不可恢复。`, async () => {
+    await deleteLinkedArticle(item.id)
+    if (selectedDoc.value?.id === item.id) { selectedDoc.value = null; previewContent.value = '' }
+    await loadDocuments()
+  }, true)
+}
+
+async function embedDoc(item) {
+  embeddingIds.value.add(item.id)
+  try {
+    const { data } = await embedDocument(item.id)
+    alert(`索引完成，共 ${data.chunks_indexed} 个文本块已入库`)
+  } catch (e) {
+    alert('索引失败: ' + (e.response?.data?.detail || e.message))
+  } finally {
+    embeddingIds.value.delete(item.id)
+  }
+}
+
+function formatSize(bytes) {
+  if (!bytes) return '-'
+  if (bytes < 1024) return bytes + ' B'
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB'
+  return (bytes / (1024 * 1024)).toFixed(1) + ' MB'
+}
+
+function formatDate(ts) {
+  if (!ts) return ''
+  return ts.replace('T', ' ').slice(0, 16)
+}
+
+function getTypeBadge(type) {
+  return { txt: 'TXT', md: 'MD', pdf: 'PDF', docx: 'DOCX', doc: 'DOC' }[type] || type?.toUpperCase() || '-'
+}
+
+function getTypeClass(type) {
+  return 'type-' + (type || 'default')
+}
+
+function renderMarkdown(text) {
+  try { return marked(text || '') } catch { return text }
+}
+
+onMounted(loadDocuments)
+</script>
+
+<template>
+  <div class="linked-page">
+    <!-- Header -->
+    <div class="page-header">
+      <div class="header-left">
+        <h2 class="page-title">个人文档</h2>
+        <span class="doc-count">共 {{ documents.length }} 份文档</span>
+      </div>
+      <div class="header-actions">
+        <div class="search-box">
+          <svg class="search-icon" width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/>
+          </svg>
+          <input v-model="searchQuery" type="text" placeholder="搜索文件名..." class="search-input" />
+        </div>
+        <label class="btn-primary upload-btn" :class="{ uploading }">
+          <svg v-if="!uploading" width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/>
+          </svg>
+          <svg v-else class="spinner" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M12 2v4m0 12v4m-7.07-3.93l2.83-2.83m8.48-8.48l2.83-2.83M2 12h4m12 0h4M4.93 4.93l2.83 2.83m8.48 8.48l2.83 2.83"/>
+          </svg>
+          {{ uploading ? '上传中...' : '上传文档' }}
+          <input type="file" accept=".txt,.md,.pdf,.docx,.doc" multiple class="file-input-hidden" @change="onFileInput" :disabled="uploading" />
+        </label>
+      </div>
+    </div>
+
+    <!-- Content -->
+    <div class="content-area">
+      <!-- List -->
+      <div class="doc-list" :class="{ 'has-preview': selectedDoc }">
+        <div v-if="loading" class="list-empty">加载中...</div>
+        <div v-else-if="filteredDocs.length === 0" class="list-empty">
+          {{ searchQuery ? '没有匹配的文档' : '还没有上传文档' }}
+        </div>
+
+        <table v-else class="doc-table">
+          <thead>
+            <tr>
+              <th class="col-type">类型</th>
+              <th class="col-name">文件名</th>
+              <th class="col-size">大小</th>
+              <th class="col-time">上传时间</th>
+              <th class="col-actions">操作</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="item in filteredDocs" :key="item.id"
+              class="doc-row" :class="{ active: selectedDoc?.id === item.id }"
+              @click="previewDoc(item)">
+              <td class="col-type">
+                <span :class="['type-badge', getTypeClass(item.file_type)]">{{ getTypeBadge(item.file_type) }}</span>
+              </td>
+              <td class="col-name">
+                <span class="file-name">{{ item.title }}</span>
+              </td>
+              <td class="col-size">{{ formatSize(item.file_size) }}</td>
+              <td class="col-time">{{ formatDate(item.created_at) }}</td>
+              <td class="col-actions" @click.stop>
+                <button @click="embedDoc(item)" class="action-btn embed-btn" :disabled="embeddingIds.has(item.id)" :title="embeddingIds.has(item.id) ? '索引中...' : '索引到知识库'">
+                  <svg v-if="embeddingIds.has(item.id)" class="spinner" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M12 2v4m0 12v4m-7.07-3.93l2.83-2.83m8.48-8.48l2.83-2.83M2 12h4m12 0h4M4.93 4.93l2.83 2.83m8.48 8.48l2.83 2.83"/>
+                  </svg>
+                  <svg v-else width="15" height="15" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/>
+                  </svg>
+                </button>
+                <button @click="downloadFile(item)" class="action-btn" title="下载">
+                  <svg width="15" height="15" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/>
+                  </svg>
+                </button>
+                <button @click="removeDoc(item)" class="action-btn delete-btn" title="删除">
+                  <svg width="15" height="15" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/>
+                  </svg>
+                </button>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <!-- Preview panel -->
+      <div v-if="selectedDoc" class="preview-panel">
+        <div class="preview-header">
+          <div class="preview-title-row">
+            <span :class="['type-badge', getTypeClass(selectedDoc.file_type)]">{{ getTypeBadge(selectedDoc.file_type) }}</span>
+            <h3 class="preview-title">{{ selectedDoc.title }}</h3>
+          </div>
+          <button @click="selectedDoc = null; previewContent = ''" class="action-btn" title="关闭">
+            <svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>
+            </svg>
+          </button>
+        </div>
+        <div class="preview-body">
+          <div v-if="previewLoading" class="preview-loading">加载内容...</div>
+          <div v-else-if="selectedDoc.file_type === 'md'" class="preview-markdown" v-html="renderMarkdown(previewContent)"></div>
+          <pre v-else class="preview-text">{{ previewContent }}</pre>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <ConfirmDialog
+    :visible="confirm.visible" :title="confirm.title" :message="confirm.message"
+    :danger="confirm.danger" :loading="confirm.loading"
+    confirm-text="确定" cancel-text="取消"
+    @confirm="onConfirmOk" @cancel="onConfirmCancel"
+  />
+</template>
+
+<style scoped>
+.linked-page {
+  display: flex;
+  flex-direction: column;
+  height: calc(100vh - 120px);
+}
+
+/* Header */
+.page-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 1rem;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+}
+
+.header-left {
+  display: flex;
+  align-items: baseline;
+  gap: 0.75rem;
+}
+
+.doc-count {
+  font-size: 0.8rem;
+  color: var(--color-text-muted);
+}
+
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.search-box {
+  position: relative;
+}
+
+.search-icon {
+  position: absolute;
+  left: 0.65rem;
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--color-text-muted);
+  pointer-events: none;
+}
+
+.search-input {
+  padding: 0.5rem 0.75rem 0.5rem 2.2rem;
+  font-size: 0.85rem;
+  width: 220px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-bg-input);
+  color: var(--color-text-primary);
+  transition: border-color var(--transition-fast);
+}
+
+.search-input:focus {
+  outline: none;
+  border-color: var(--color-primary-400);
+}
+
+.upload-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.5rem 1rem;
+  font-size: 0.85rem;
+  cursor: pointer;
+  position: relative;
+}
+
+.upload-btn.uploading {
+  opacity: 0.7;
+  pointer-events: none;
+}
+
+.file-input-hidden {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
+/* Content area */
+.content-area {
+  display: flex;
+  gap: 1rem;
+  flex: 1;
+  min-height: 0;
+}
+
+.doc-list {
+  flex: 1;
+  min-width: 0;
+  overflow-y: auto;
+}
+
+.doc-list.has-preview {
+  flex: 0 0 420px;
+}
+
+.list-empty {
+  text-align: center;
+  padding: 3rem;
+  color: var(--color-text-muted);
+  font-size: 0.85rem;
+}
+
+/* Table */
+.doc-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.85rem;
+}
+
+.doc-table th {
+  text-align: left;
+  padding: 0.6rem 0.75rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--color-text-muted);
+  border-bottom: 1px solid var(--color-border);
+  white-space: nowrap;
+}
+
+.doc-table td {
+  padding: 0.6rem 0.75rem;
+  border-bottom: 1px solid var(--color-border-light, var(--color-border));
+}
+
+.doc-row {
+  cursor: pointer;
+  transition: background var(--transition-fast);
+}
+
+.doc-row:hover {
+  background: var(--color-bg-hover);
+}
+
+.doc-row.active {
+  background: var(--color-primary-50);
+}
+
+.dark .doc-row.active {
+  background: var(--color-primary-bg);
+}
+
+.col-type { width: 60px; }
+.col-size { width: 80px; font-size: 0.75rem; color: var(--color-text-muted); }
+.col-time { width: 130px; font-size: 0.75rem; color: var(--color-text-muted); white-space: nowrap; }
+.col-actions { width: 100px; text-align: center; }
+
+.file-name {
+  font-weight: 500;
+  color: var(--color-text-primary);
+}
+
+.type-badge {
+  display: inline-block;
+  font-size: 0.6rem;
+  font-weight: 700;
+  padding: 0.1rem 0.35rem;
+  border-radius: var(--radius-sm);
+  letter-spacing: 0.02em;
+}
+
+.type-txt { background: #dbeafe; color: #2563eb; }
+.type-md { background: #d1fae5; color: #059669; }
+.type-pdf { background: #fee2e2; color: #dc2626; }
+.type-docx, .type-doc { background: #e0e7ff; color: #4f46e5; }
+.type-default { background: #f3f4f6; color: #6b7280; }
+.dark .type-txt { background: rgba(37,99,235,0.2); color: #60a5fa; }
+.dark .type-md { background: rgba(5,150,105,0.2); color: #34d399; }
+.dark .type-pdf { background: rgba(220,38,38,0.2); color: #f87171; }
+.dark .type-docx, .dark .type-doc { background: rgba(79,70,229,0.2); color: #a5b4fc; }
+.dark .type-default { background: rgba(107,114,128,0.2); color: #9ca3af; }
+
+.doc-actions {
+  display: flex;
+  gap: 0.25rem;
+  justify-content: center;
+}
+
+.action-btn {
+  padding: 0.35rem;
+  border-radius: var(--radius-md);
+  color: var(--color-text-muted);
+  transition: all var(--transition-fast);
+}
+
+.action-btn:hover {
+  background: var(--color-bg-hover);
+  color: var(--color-text-primary);
+}
+
+.delete-btn:hover {
+  color: #ef4444;
+  background: rgba(239, 68, 68, 0.08);
+}
+
+.embed-btn:hover {
+  color: var(--color-primary-600);
+  background: var(--color-primary-50);
+}
+
+.dark .embed-btn:hover {
+  background: rgba(99, 102, 241, 0.15);
+}
+
+.embed-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.spinner {
+  animation: spin 1s linear infinite;
+}
+
+/* Preview panel */
+.preview-panel {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--color-bg-card);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+}
+
+.preview-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.75rem 1rem;
+  border-bottom: 1px solid var(--color-border);
+  flex-shrink: 0;
+}
+
+.preview-title-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-width: 0;
+}
+
+.preview-title {
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: var(--color-text-primary);
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.preview-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 1rem;
+}
+
+.preview-loading {
+  text-align: center;
+  padding: 2rem;
+  color: var(--color-text-muted);
+}
+
+.preview-text {
+  font-size: 0.85rem;
+  line-height: 1.7;
+  color: var(--color-text-primary);
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: inherit;
+  margin: 0;
+}
+
+.preview-markdown {
+  font-size: 0.85rem;
+  line-height: 1.7;
+}
+
+.preview-markdown :deep(h1),
+.preview-markdown :deep(h2),
+.preview-markdown :deep(h3) {
+  margin-top: 1em;
+  margin-bottom: 0.5em;
+  color: var(--color-text-primary);
+}
+
+.preview-markdown :deep(p) {
+  margin: 0.5em 0;
+}
+
+.preview-markdown :deep(blockquote) {
+  border-left: 3px solid var(--color-primary-400);
+  padding-left: 1em;
+  color: var(--color-text-secondary);
+  margin: 0.75em 0;
+}
+
+.preview-markdown :deep(code) {
+  background: var(--color-bg-input);
+  padding: 0.15em 0.4em;
+  border-radius: var(--radius-sm);
+  font-size: 0.85em;
+}
+
+.preview-markdown :deep(pre) {
+  background: var(--color-bg-input);
+  padding: 0.75rem;
+  border-radius: var(--radius-md);
+  overflow-x: auto;
+}
+
+@media (max-width: 768px) {
+  .page-header {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+  .header-actions {
+    width: 100%;
+  }
+  .search-input {
+    width: 100%;
+    flex: 1;
+  }
+  .content-area {
+    flex-direction: column;
+  }
+  .doc-list.has-preview {
+    flex: none;
+    max-height: 300px;
+  }
+}
+</style>

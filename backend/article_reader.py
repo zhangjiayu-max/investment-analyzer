@@ -1,0 +1,236 @@
+"""公众号文章抓取模块 — 用 Playwright 异步抓取微信公众号文章
+
+优化：
+- 过滤带水印图片（URL含 watermark=1）
+- 按图片key去重，避免重复下载
+- 只保留无水印原图
+"""
+
+import os
+import re
+import time
+from urllib.parse import urlparse
+
+import requests
+from playwright.async_api import async_playwright
+
+
+HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/120.0.0.0 Safari/537.36"
+    ),
+}
+
+
+def _extract_image_key(url: str) -> str:
+    """从微信图片URL提取唯一key（去掉查询参数差异）。"""
+    parsed = urlparse(url)
+    return f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
+
+
+def _has_watermark(url: str) -> bool:
+    """判断URL是否指向带水印的图片。"""
+    return "watermark=1" in url
+
+
+def _is_prefetch(url: str) -> bool:
+    """判断是否为浏览器预加载图（带 wxfrom=12 等参数）。"""
+    return "wxfrom=" in url and "from=appmsg" not in url
+
+
+async def fetch_article(url: str) -> dict:
+    """
+    异步抓取微信公众号文章（使用 Playwright 渲染 JS）。
+
+    返回:
+        {
+            "title": str,
+            "author": str,
+            "publish_time": str,
+            "content_text": str,
+            "content_html": str,
+            "images": list[str],
+            "image_count": int,
+        }
+    """
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        context = await browser.new_context(
+            viewport={"width": 390, "height": 844},
+            user_agent=(
+                "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Version/17.0 Mobile/15E148 Safari/537.36"
+            ),
+        )
+        page = await context.new_page()
+
+        await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+        try:
+            await page.wait_for_selector("h1#activity-name", timeout=25000)
+            await page.wait_for_timeout(3000)
+        except Exception:
+            pass
+
+        try:
+            readmore = await page.query_selector("button:has-text('轻触阅读原文')")
+            if readmore:
+                await readmore.scroll_into_view_if_needed()
+                await page.wait_for_timeout(500)
+                await readmore.click(force=True, timeout=5000)
+                await page.wait_for_timeout(3000)
+        except Exception:
+            pass
+
+        try:
+            await page.wait_for_selector("#js_content, #js_image_content", timeout=15000)
+        except Exception:
+            pass
+
+        try:
+            await page.wait_for_selector('[data-src*="mmbiz"]', timeout=15000)
+            await page.wait_for_timeout(2000)
+        except Exception:
+            pass
+
+        # 标题
+        title = ""
+        title_el = await page.query_selector("h1#activity-name") or await page.query_selector("h1")
+        if title_el:
+            title = (await title_el.inner_text()).strip()
+
+        # 作者
+        author = ""
+        author_el = await page.query_selector("span.rich_media_meta_nickname a") or \
+                    await page.query_selector("span.rich_media_meta_nickname")
+        if author_el:
+            author = (await author_el.inner_text()).strip()
+
+        # 发布时间
+        publish_time = ""
+        em_el = await page.query_selector("em#publish_time")
+        if em_el:
+            publish_time = (await em_el.inner_text()).strip()
+        if not publish_time:
+            ct = await page.evaluate("() => { try { return ct } catch(e) { return '' } }")
+            if ct and str(ct).isdigit():
+                publish_time = time.strftime("%Y-%m-%d %H:%M", time.localtime(int(ct)))
+
+        # 正文
+        content_el = await page.query_selector("#js_content")
+        content_html = ""
+        content_text = ""
+        if content_el:
+            content_html = await content_el.inner_html()
+            content_text = (await content_el.inner_text()).strip()
+        else:
+            desc_el = await page.query_selector("meta[name=description]")
+            if desc_el:
+                content_text = (await desc_el.get_attribute("content") or "").strip()
+
+        # 图片提取（去重 + 过滤水印 + 过滤预加载）
+        images = []
+        seen_keys = set()
+
+        # 1. <img> 标签
+        if content_el:
+            img_els = await content_el.query_selector_all("img")
+            for img in img_els:
+                alt = await img.get_attribute("alt") or ""
+                if "赞赏" in alt or "二维码" in alt:
+                    continue
+                src = await img.get_attribute("data-src") or await img.get_attribute("src") or ""
+                if not src or src.startswith("data:"):
+                    continue
+                if _has_watermark(src) or _is_prefetch(src):
+                    continue
+                key = _extract_image_key(src)
+                if key in seen_keys:
+                    continue
+                images.append(src)
+                seen_keys.add(key)
+
+        # 2. 页面级 div[data-src*="mmbiz"]
+        div_imgs = await page.query_selector_all('[data-src*="mmbiz"]')
+        for div in div_imgs:
+            src = await div.get_attribute("data-src") or ""
+            if not src or not src.startswith("http"):
+                continue
+            if _has_watermark(src) or _is_prefetch(src):
+                continue
+            key = _extract_image_key(src)
+            if key in seen_keys:
+                continue
+            images.append(src)
+            seen_keys.add(key)
+
+        await browser.close()
+
+    # 去掉第一张图（通常是封面/占位图）
+    if len(images) > 1:
+        images = images[1:]
+
+    return {
+        "title": title,
+        "author": author,
+        "publish_time": publish_time,
+        "content_text": content_text,
+        "content_html": content_html,
+        "images": images,
+        "image_count": len(images),
+    }
+
+
+async def download_images(image_urls: list, save_dir: str) -> list:
+    """异步下载图片到本地。"""
+    import aiohttp
+
+    os.makedirs(save_dir, exist_ok=True)
+    local_paths = []
+
+    import ssl
+    ssl_ctx = ssl.create_default_context()
+    ssl_ctx.check_hostname = False
+    ssl_ctx.verify_mode = ssl.CERT_NONE
+    conn = aiohttp.TCPConnector(ssl=ssl_ctx)
+
+    async with aiohttp.ClientSession(headers=HEADERS, connector=conn) as session:
+        for i, url in enumerate(image_urls):
+            try:
+                async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                    if resp.status != 200:
+                        continue
+                    ct = resp.headers.get("Content-Type", "image/jpeg")
+                    ext = ".jpg"
+                    if "png" in ct:
+                        ext = ".png"
+                    elif "gif" in ct:
+                        ext = ".gif"
+                    elif "webp" in ct:
+                        ext = ".webp"
+
+                    filename = f"img_{i:03d}{ext}"
+                    filepath = os.path.join(save_dir, filename)
+                    data = await resp.read()
+                    with open(filepath, "wb") as f:
+                        f.write(data)
+                    local_paths.append(filepath)
+            except Exception as e:
+                print(f"  下载失败 [{i}]: {e}")
+
+    return local_paths
+
+
+def extract_stock_codes(text: str) -> list:
+    """
+    从文章文本中提取可能的股票/基金代码。
+    """
+    prefixed = re.findall(r"(?:sh|sz|SH|SZ)(\d{6})", text)
+    standalone = re.findall(r"(?<!\d)(\d{6})(?!\d)", text)
+    codes = []
+    for code in set(prefixed + standalone):
+        if code.startswith(("6", "0", "1", "3", "5")):
+            codes.append(code)
+    return sorted(set(codes))
