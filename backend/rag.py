@@ -1,8 +1,11 @@
 """RAG 检索服务 — SQLite FTS5 全文检索 + ChromaDB 向量语义搜索"""
 
 import json
+import logging
 import sqlite3
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 DB_PATH = Path(__file__).parent.parent / "data" / "valuations.db"
 CHROMA_DIR = Path(__file__).parent.parent / "data" / "chroma_db"
@@ -240,11 +243,44 @@ def _ensure_embed_model():
         return _embed_model
 
     import os
-    os.environ.setdefault("CURL_CA_BUNDLE", "")  # 跳过 SSL 验证（macOS 问题）
-    os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
+    import ssl
+    import warnings
+    warnings.filterwarnings("ignore", message=".*certificate.*")
+
+    # 修复 macOS SSL 证书问题
+    os.environ["HF_HUB_DISABLE_TELEMETRY"] = "1"
+    os.environ["HF_HUB_DISABLE_SSL_VERIFICATION"] = "1"
+    os.environ["CURL_CA_BUNDLE"] = ""
+    os.environ["REQUESTS_CA_BUNDLE"] = ""
+
+    # 强制禁用 SSL 验证
+    try:
+        ssl._create_default_https_context = ssl._create_unverified_context
+    except Exception:
+        pass
 
     from sentence_transformers import SentenceTransformer
-    _embed_model = SentenceTransformer("BAAI/bge-small-zh-v1.5")
+    try:
+        _embed_model = SentenceTransformer("BAAI/bge-small-zh-v1.5", local_files_only=True)
+        logger.info("Embedding 模型从本地加载成功")
+    except Exception as e:
+        logger.warning(f"本地加载失败，尝试在线下载: {e}")
+        # 如果本地文件不完整，尝试在线下载（忽略 SSL 错误）
+        import httpx
+        old_client = httpx.Client
+        class NoVerifyClient(old_client):
+            def __init__(self, *args, **kwargs):
+                kwargs["verify"] = False
+                super().__init__(*args, **kwargs)
+        httpx.Client = NoVerifyClient
+        try:
+            _embed_model = SentenceTransformer("BAAI/bge-small-zh-v1.5")
+            logger.info("Embedding 模型在线下载成功")
+        except Exception as e2:
+            logger.error(f"Embedding 模型加载失败: {e2}")
+            _embed_model = None
+        finally:
+            httpx.Client = old_client
     return _embed_model
 
 
@@ -324,6 +360,7 @@ def search_chroma(query: str, content_type: str = None, limit: int = 5) -> list[
     collection = _get_chroma()
     model = _get_embed_model()
     if not collection or not model:
+        logger.warning(f"search_chroma 跳过: collection={collection is not None}, model={model is not None}")
         return []
 
     query_embedding = model.encode([query], normalize_embeddings=True).tolist()
@@ -339,7 +376,8 @@ def search_chroma(query: str, content_type: str = None, limit: int = 5) -> list[
             where=where,
             include=["documents", "metadatas", "distances"],
         )
-    except Exception:
+    except Exception as e:
+        logger.error(f"search_chroma 查询异常: {e}")
         return []
 
     if not results or not results["ids"] or not results["ids"][0]:
@@ -392,14 +430,35 @@ def build_rag_context_with_details(query: str, content_types: list[str] = None, 
     # 向量搜索
     chroma_results = search_chroma(query, content_type=content_types[0] if content_types and len(content_types) == 1 else None, limit=limit)
 
-    # 合并去重（按 content_type + reference_id 去重，保留 rank 更好的）
+    logger.info(f"RAG 搜索: query='{query}', FTS5={len(fts_results)}条, 向量={len(chroma_results)}条")
+
+    # 归一化分数：FTS5 rank 和 cosine distance 量纲不同，需统一到 0~1
+    def _normalize_scores(results: list[dict]) -> list[dict]:
+        if not results:
+            return results
+        scores = [r["rank"] for r in results]
+        min_s, max_s = min(scores), max(scores)
+        if max_s == min_s:
+            for r in results:
+                r["_score"] = 1.0
+        else:
+            for r in results:
+                # rank 越小越好 → 归一化后越大越好
+                r["_score"] = 1.0 - (r["rank"] - min_s) / (max_s - min_s)
+        return results
+
+    _normalize_scores(fts_results)
+    _normalize_scores(chroma_results)
+
+    # 合并去重（按 content_type + reference_id 去重，保留分数更高的）
     seen = {}
     for r in fts_results + chroma_results:
         key = f"{r['content_type']}:{r['reference_id']}"
-        if key not in seen or r.get("rank", 0) < seen[key].get("rank", 0):
+        if key not in seen or r.get("_score", 0) > seen[key].get("_score", 0):
             seen[key] = r
 
-    all_results = sorted(seen.values(), key=lambda x: x.get("rank", 0))[:limit]
+    all_results = sorted(seen.values(), key=lambda x: x.get("_score", 0), reverse=True)[:limit]
+    logger.info(f"RAG 合并后: {len(all_results)}条, 类型: {[r['content_type'] for r in all_results]}")
 
     # 添加标签
     label_map = {"article": "文章", "valuation": "估值", "analysis": "分析记录",

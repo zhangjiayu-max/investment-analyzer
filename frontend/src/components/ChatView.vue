@@ -123,11 +123,15 @@ function renderMarkdown(text) {
 
 function formatTime(ts) {
   if (!ts) return ''
-  const d = new Date(ts)
+  const d = new Date(ts.replace(' ', 'T'))
+  if (isNaN(d.getTime())) return ''
   const now = new Date()
   const isToday = d.toDateString() === now.toDateString()
-  const time = d.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })
-  return isToday ? time : d.toLocaleDateString('zh-CN', { month: 'short', day: 'short' }) + ' ' + time
+  const hh = String(d.getHours()).padStart(2, '0')
+  const mm = String(d.getMinutes()).padStart(2, '0')
+  const time = `${hh}:${mm}`
+  if (isToday) return time
+  return `${d.getMonth() + 1}/${d.getDate()} ${time}`
 }
 
 function agentIcon(icon) {

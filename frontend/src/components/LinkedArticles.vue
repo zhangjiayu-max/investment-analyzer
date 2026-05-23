@@ -1,7 +1,7 @@
 <script setup>
 import { ref, computed, onMounted } from 'vue'
 import { marked } from 'marked'
-import { listLinkedArticles, uploadDocument, downloadDocument, deleteLinkedArticle, getDocumentContent, embedDocument } from '../api'
+import { listLinkedArticles, uploadDocument, downloadDocument, deleteLinkedArticle, getDocumentContent, embedDocument, getDocumentChunks, testRagSearch } from '../api'
 import ConfirmDialog from './ConfirmDialog.vue'
 
 const documents = ref([])
@@ -12,8 +12,20 @@ const selectedDoc = ref(null)
 const previewContent = ref('')
 const previewLoading = ref(false)
 
-const confirm = ref({ visible: false, title: '', message: '', danger: false, action: null })
+// Embed 相关
 const embeddingIds = ref(new Set())
+
+// 分块详情
+const chunksDoc = ref(null)
+const chunksData = ref([])
+const chunksLoading = ref(false)
+
+// 命中测试
+const testQuery = ref('')
+const testResults = ref(null)
+const testLoading = ref(false)
+
+const confirm = ref({ visible: false, title: '', message: '', danger: false, action: null })
 function showConfirm(title, message, action, danger = false) {
   confirm.value = { visible: true, title, message, danger, action, loading: false }
 }
@@ -109,20 +121,57 @@ function removeDoc(item) {
   showConfirm('删除文档', `确定删除「${item.title}」？删除后不可恢复。`, async () => {
     await deleteLinkedArticle(item.id)
     if (selectedDoc.value?.id === item.id) { selectedDoc.value = null; previewContent.value = '' }
+    if (chunksDoc.value?.id === item.id) { chunksDoc.value = null; chunksData.value = [] }
     await loadDocuments()
   }, true)
 }
 
-async function embedDoc(item) {
+function confirmEmbed(item) {
+  showConfirm('索引到知识库', `确定对「${item.title}」进行 Embedding 索引？`, async () => {
+    await doEmbed(item)
+  })
+}
+
+async function doEmbed(item) {
   embeddingIds.value.add(item.id)
   try {
     const { data } = await embedDocument(item.id)
     alert(`索引完成，共 ${data.chunks_indexed} 个文本块已入库`)
+    await loadDocuments()
   } catch (e) {
     alert('索引失败: ' + (e.response?.data?.detail || e.message))
   } finally {
     embeddingIds.value.delete(item.id)
   }
+}
+
+async function showChunks(item) {
+  if (chunksDoc.value?.id === item.id) {
+    chunksDoc.value = null
+    chunksData.value = []
+    return
+  }
+  chunksDoc.value = item
+  chunksLoading.value = true
+  chunksData.value = []
+  try {
+    const { data } = await getDocumentChunks(item.id)
+    chunksData.value = data.chunks || []
+  } catch (e) {
+    chunksData.value = []
+  } finally {
+    chunksLoading.value = false
+  }
+}
+
+function getEmbedStatus(item) {
+  const s = item.embed_status || 'pending'
+  return {
+    pending: { label: '未索引', cls: 'status-pending' },
+    embedding: { label: '索引中', cls: 'status-embedding' },
+    done: { label: '已索引', cls: 'status-done' },
+    failed: { label: '失败', cls: 'status-failed' },
+  }[s] || { label: s, cls: 'status-pending' }
 }
 
 function formatSize(bytes) {
@@ -147,6 +196,20 @@ function getTypeClass(type) {
 
 function renderMarkdown(text) {
   try { return marked(text || '') } catch { return text }
+}
+
+async function testSearch() {
+  if (!testQuery.value.trim()) return
+  testLoading.value = true
+  testResults.value = null
+  try {
+    const { data } = await testRagSearch(testQuery.value)
+    testResults.value = data
+  } catch (e) {
+    alert('测试失败: ' + (e.response?.data?.detail || e.message))
+  } finally {
+    testLoading.value = false
+  }
 }
 
 onMounted(loadDocuments)
@@ -183,7 +246,7 @@ onMounted(loadDocuments)
     <!-- Content -->
     <div class="content-area">
       <!-- List -->
-      <div class="doc-list" :class="{ 'has-preview': selectedDoc }">
+      <div class="doc-list" :class="{ 'has-panel': selectedDoc || chunksDoc }">
         <div v-if="loading" class="list-empty">加载中...</div>
         <div v-else-if="filteredDocs.length === 0" class="list-empty">
           {{ searchQuery ? '没有匹配的文档' : '还没有上传文档' }}
@@ -194,6 +257,8 @@ onMounted(loadDocuments)
             <tr>
               <th class="col-type">类型</th>
               <th class="col-name">文件名</th>
+              <th class="col-status">索引状态</th>
+              <th class="col-chunks">分块</th>
               <th class="col-size">大小</th>
               <th class="col-time">上传时间</th>
               <th class="col-actions">操作</th>
@@ -201,7 +266,7 @@ onMounted(loadDocuments)
           </thead>
           <tbody>
             <tr v-for="item in filteredDocs" :key="item.id"
-              class="doc-row" :class="{ active: selectedDoc?.id === item.id }"
+              class="doc-row" :class="{ active: selectedDoc?.id === item.id || chunksDoc?.id === item.id }"
               @click="previewDoc(item)">
               <td class="col-type">
                 <span :class="['type-badge', getTypeClass(item.file_type)]">{{ getTypeBadge(item.file_type) }}</span>
@@ -209,15 +274,29 @@ onMounted(loadDocuments)
               <td class="col-name">
                 <span class="file-name">{{ item.title }}</span>
               </td>
+              <td class="col-status">
+                <span :class="['status-badge', getEmbedStatus(item).cls]">
+                  {{ getEmbedStatus(item).label }}
+                </span>
+              </td>
+              <td class="col-chunks">
+                <span v-if="item.chunks_count" class="chunks-count" @click.stop="showChunks(item)">{{ item.chunks_count }}</span>
+                <span v-else class="chunks-empty">-</span>
+              </td>
               <td class="col-size">{{ formatSize(item.file_size) }}</td>
               <td class="col-time">{{ formatDate(item.created_at) }}</td>
               <td class="col-actions" @click.stop>
-                <button @click="embedDoc(item)" class="action-btn embed-btn" :disabled="embeddingIds.has(item.id)" :title="embeddingIds.has(item.id) ? '索引中...' : '索引到知识库'">
-                  <svg v-if="embeddingIds.has(item.id)" class="spinner" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <button @click="confirmEmbed(item)" class="action-btn embed-btn" :disabled="embeddingIds.has(item.id) || item.embed_status === 'embedding'" :title="embeddingIds.has(item.id) || item.embed_status === 'embedding' ? '索引中...' : '索引到知识库'">
+                  <svg v-if="embeddingIds.has(item.id) || item.embed_status === 'embedding'" class="spinner" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                     <path d="M12 2v4m0 12v4m-7.07-3.93l2.83-2.83m8.48-8.48l2.83-2.83M2 12h4m12 0h4M4.93 4.93l2.83 2.83m8.48 8.48l2.83 2.83"/>
                   </svg>
                   <svg v-else width="15" height="15" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/>
+                  </svg>
+                </button>
+                <button @click="showChunks(item)" class="action-btn" :class="{ 'btn-active': chunksDoc?.id === item.id }" title="查看分块">
+                  <svg width="15" height="15" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 10h16M4 14h16M4 18h16"/>
                   </svg>
                 </button>
                 <button @click="downloadFile(item)" class="action-btn" title="下载">
@@ -255,6 +334,74 @@ onMounted(loadDocuments)
           <pre v-else class="preview-text">{{ previewContent }}</pre>
         </div>
       </div>
+
+      <!-- Chunks panel -->
+      <div v-if="chunksDoc && !selectedDoc" class="preview-panel">
+        <div class="preview-header">
+          <div class="preview-title-row">
+            <h3 class="preview-title">分块详情：{{ chunksDoc.title }}</h3>
+            <span class="chunks-summary" v-if="chunksData.length">共 {{ chunksData.length }} 块</span>
+          </div>
+          <button @click="chunksDoc = null; chunksData = []" class="action-btn" title="关闭">
+            <svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>
+            </svg>
+          </button>
+        </div>
+        <div class="preview-body">
+          <div v-if="chunksLoading" class="preview-loading">加载分块...</div>
+          <div v-else-if="chunksData.length === 0" class="preview-loading">暂无分块数据，请先索引</div>
+          <div v-else class="chunks-list">
+            <div v-for="chunk in chunksData" :key="chunk.id" class="chunk-item">
+              <div class="chunk-header">
+                <span class="chunk-index">#{{ chunk.chunk_index + 1 }}</span>
+                <span class="chunk-size">{{ chunk.char_count }} 字</span>
+              </div>
+              <pre class="chunk-content">{{ chunk.content }}</pre>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 命中测试区域 -->
+    <div class="test-section">
+      <h3 class="section-title">命中测试</h3>
+      <div class="test-bar">
+        <input v-model="testQuery" type="text" placeholder="输入查询词测试检索效果..." class="test-input" @keyup.enter="testSearch" />
+        <button class="btn-primary" :disabled="testLoading || !testQuery.trim()" @click="testSearch">
+          {{ testLoading ? '检索中...' : '测试' }}
+        </button>
+      </div>
+      <div v-if="testResults" class="test-results">
+        <!-- 诊断信息 -->
+        <div v-if="testResults.debug" class="test-debug">
+          <span>FTS5 关键词命中: {{ testResults.debug.fts_count }} 条</span>
+          <span>向量语义命中: {{ testResults.debug.vector_count }} 条</span>
+          <span>向量库总量: {{ testResults.debug.total_in_chroma }} 条</span>
+          <span :class="testResults.debug.chroma_available ? 'status-ok' : 'status-err'">
+            {{ testResults.debug.chroma_available ? '向量检索可用' : '向量检索不可用' }}
+          </span>
+        </div>
+        <div v-if="testResults.results.length === 0" class="test-empty">无命中结果</div>
+        <div v-else class="test-result-list">
+          <div v-for="(r, i) in testResults.results" :key="i" class="test-result-item">
+            <div class="result-header">
+              <span class="result-rank">#{{ i + 1 }}</span>
+              <span class="result-type">{{ r.label }}</span>
+              <span class="result-title">{{ r.title }}</span>
+              <div class="result-score-bar">
+                <div class="score-fill" :style="{ width: (r._score * 100) + '%' }"></div>
+                <span class="score-text">{{ (r._score * 100)?.toFixed(0) }}%</span>
+              </div>
+            </div>
+            <pre class="result-body">{{ r.body?.slice(0, 300) }}{{ r.body?.length > 300 ? '...' : '' }}</pre>
+          </div>
+        </div>
+        <div v-if="testResults.keywords?.length" class="test-keywords">
+          关键词：{{ testResults.keywords.join('、') }}
+        </div>
+      </div>
     </div>
   </div>
 
@@ -271,6 +418,7 @@ onMounted(loadDocuments)
   display: flex;
   flex-direction: column;
   height: calc(100vh - 120px);
+  overflow-y: auto;
 }
 
 /* Header */
@@ -365,7 +513,7 @@ onMounted(loadDocuments)
   overflow-y: auto;
 }
 
-.doc-list.has-preview {
+.doc-list.has-panel {
   flex: 0 0 420px;
 }
 
@@ -412,13 +560,15 @@ onMounted(loadDocuments)
 }
 
 .dark .doc-row.active {
-  background: var(--color-primary-bg);
+  background: rgba(99, 102, 241, 0.1);
 }
 
 .col-type { width: 60px; }
+.col-status { width: 80px; }
+.col-chunks { width: 50px; text-align: center; }
 .col-size { width: 80px; font-size: 0.75rem; color: var(--color-text-muted); }
 .col-time { width: 130px; font-size: 0.75rem; color: var(--color-text-muted); white-space: nowrap; }
-.col-actions { width: 100px; text-align: center; }
+.col-actions { width: 130px; text-align: center; }
 
 .file-name {
   font-weight: 500;
@@ -445,6 +595,41 @@ onMounted(loadDocuments)
 .dark .type-docx, .dark .type-doc { background: rgba(79,70,229,0.2); color: #a5b4fc; }
 .dark .type-default { background: rgba(107,114,128,0.2); color: #9ca3af; }
 
+/* Status badges */
+.status-badge {
+  display: inline-block;
+  font-size: 0.65rem;
+  font-weight: 600;
+  padding: 0.15rem 0.4rem;
+  border-radius: var(--radius-sm);
+}
+
+.status-pending { background: #f3f4f6; color: #6b7280; }
+.status-embedding { background: #dbeafe; color: #2563eb; }
+.status-done { background: #d1fae5; color: #059669; }
+.status-failed { background: #fee2e2; color: #dc2626; }
+.dark .status-pending { background: rgba(107,114,128,0.2); color: #9ca3af; }
+.dark .status-embedding { background: rgba(37,99,235,0.2); color: #60a5fa; }
+.dark .status-done { background: rgba(5,150,105,0.2); color: #34d399; }
+.dark .status-failed { background: rgba(220,38,38,0.2); color: #f87171; }
+
+/* Chunks count */
+.chunks-count {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--color-primary-600);
+  cursor: pointer;
+}
+
+.chunks-count:hover {
+  text-decoration: underline;
+}
+
+.chunks-empty {
+  color: var(--color-text-muted);
+  font-size: 0.75rem;
+}
+
 .doc-actions {
   display: flex;
   gap: 0.25rem;
@@ -461,6 +646,15 @@ onMounted(loadDocuments)
 .action-btn:hover {
   background: var(--color-bg-hover);
   color: var(--color-text-primary);
+}
+
+.action-btn.btn-active {
+  color: var(--color-primary-600);
+  background: var(--color-primary-50);
+}
+
+.dark .action-btn.btn-active {
+  background: rgba(99, 102, 241, 0.15);
 }
 
 .delete-btn:hover {
@@ -484,6 +678,11 @@ onMounted(loadDocuments)
 
 .spinner {
   animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
 }
 
 /* Preview panel */
@@ -522,6 +721,11 @@ onMounted(loadDocuments)
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.chunks-summary {
+  font-size: 0.75rem;
+  color: var(--color-text-muted);
 }
 
 .preview-body {
@@ -584,6 +788,214 @@ onMounted(loadDocuments)
   overflow-x: auto;
 }
 
+/* Chunks list */
+.chunks-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.chunk-item {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+}
+
+.chunk-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.4rem 0.75rem;
+  background: var(--color-bg-hover);
+  font-size: 0.75rem;
+}
+
+.chunk-index {
+  font-weight: 600;
+  color: var(--color-primary-600);
+}
+
+.chunk-size {
+  color: var(--color-text-muted);
+}
+
+.chunk-content {
+  padding: 0.5rem 0.75rem;
+  font-size: 0.8rem;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+  margin: 0;
+  max-height: 200px;
+  overflow-y: auto;
+  color: var(--color-text-primary);
+}
+
+/* Test section */
+.test-section {
+  margin-top: 1.5rem;
+  padding-top: 1.5rem;
+  border-top: 1px solid var(--color-border);
+}
+
+.section-title {
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: var(--color-text-primary);
+  margin: 0 0 0.75rem 0;
+}
+
+.test-bar {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.test-input {
+  flex: 1;
+  padding: 0.5rem 0.75rem;
+  font-size: 0.85rem;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-bg-input);
+  color: var(--color-text-primary);
+}
+
+.test-input:focus {
+  outline: none;
+  border-color: var(--color-primary-400);
+}
+
+.test-results {
+  margin-top: 0.75rem;
+}
+
+.test-debug {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  padding: 0.5rem 0.75rem;
+  margin-bottom: 0.5rem;
+  background: var(--color-bg-hover);
+  border-radius: var(--radius-md);
+  font-size: 0.75rem;
+  color: var(--color-text-secondary);
+}
+
+.test-debug .status-ok {
+  color: #16a34a;
+  font-weight: 600;
+}
+
+.test-debug .status-err {
+  color: #dc2626;
+  font-weight: 600;
+}
+
+.result-rank {
+  font-size: 0.7rem;
+  font-weight: 700;
+  color: var(--color-primary-600);
+  min-width: 1.5rem;
+}
+
+.test-empty {
+  text-align: center;
+  padding: 1.5rem;
+  color: var(--color-text-muted);
+  font-size: 0.85rem;
+}
+
+.test-result-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.test-result-item {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+}
+
+.result-header {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.4rem 0.75rem;
+  background: var(--color-bg-hover);
+  font-size: 0.8rem;
+}
+
+.result-type {
+  font-size: 0.65rem;
+  font-weight: 600;
+  padding: 0.1rem 0.35rem;
+  border-radius: var(--radius-sm);
+  background: var(--color-primary-50);
+  color: var(--color-primary-700);
+}
+
+.dark .result-type {
+  background: rgba(99, 102, 241, 0.15);
+  color: var(--color-primary-300);
+}
+
+.result-title {
+  font-weight: 500;
+  color: var(--color-text-primary);
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.result-score {
+  font-size: 0.7rem;
+  color: var(--color-text-muted);
+  font-family: monospace;
+}
+
+.result-score-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  min-width: 80px;
+}
+
+.score-fill {
+  height: 6px;
+  background: linear-gradient(90deg, var(--color-primary-400), var(--color-primary-600));
+  border-radius: 3px;
+  min-width: 4px;
+  transition: width 0.3s ease;
+}
+
+.score-text {
+  font-size: 0.7rem;
+  font-weight: 600;
+  color: var(--color-primary-600);
+  min-width: 2.5rem;
+  text-align: right;
+}
+
+.result-body {
+  padding: 0.5rem 0.75rem;
+  font-size: 0.8rem;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+  margin: 0;
+  color: var(--color-text-secondary);
+  max-height: 150px;
+  overflow-y: auto;
+}
+
+.test-keywords {
+  margin-top: 0.5rem;
+  font-size: 0.75rem;
+  color: var(--color-text-muted);
+}
+
 @media (max-width: 768px) {
   .page-header {
     flex-direction: column;
@@ -599,9 +1011,12 @@ onMounted(loadDocuments)
   .content-area {
     flex-direction: column;
   }
-  .doc-list.has-preview {
+  .doc-list.has-panel {
     flex: none;
     max-height: 300px;
+  }
+  .col-status, .col-chunks {
+    display: none;
   }
 }
 </style>

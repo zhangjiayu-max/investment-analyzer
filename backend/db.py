@@ -195,6 +195,20 @@ def init_db():
     _add_column_if_not_exists(conn, "linked_articles", "file_path", "TEXT")
     _add_column_if_not_exists(conn, "linked_articles", "file_size", "INTEGER")
     _add_column_if_not_exists(conn, "linked_articles", "file_type", "TEXT")
+    _add_column_if_not_exists(conn, "linked_articles", "embed_status", "TEXT DEFAULT 'pending'")
+    _add_column_if_not_exists(conn, "linked_articles", "chunks_count", "INTEGER DEFAULT 0")
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS document_chunks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            article_id INTEGER NOT NULL,
+            chunk_index INTEGER NOT NULL,
+            content TEXT NOT NULL,
+            char_count INTEGER DEFAULT 0,
+            created_at TEXT DEFAULT (datetime('now','localtime')),
+            FOREIGN KEY (article_id) REFERENCES linked_articles(id) ON DELETE CASCADE
+        )
+    """)
 
     # 初始化预设 Agent
     _init_preset_agents(conn)
@@ -1313,3 +1327,38 @@ def delete_linked_article(article_id: int) -> bool:
     deleted = cur.rowcount > 0
     conn.close()
     return deleted
+
+
+def update_linked_article_embed_status(article_id: int, status: str, chunks_count: int = 0):
+    """更新文档的 embedding 状态。"""
+    conn = _get_conn()
+    conn.execute(
+        "UPDATE linked_articles SET embed_status = ?, chunks_count = ? WHERE id = ?",
+        (status, chunks_count, article_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def save_document_chunks(article_id: int, chunks: list[str]):
+    """保存文档分块数据（先删旧的再插入新的）。"""
+    conn = _get_conn()
+    conn.execute("DELETE FROM document_chunks WHERE article_id = ?", (article_id,))
+    for i, chunk in enumerate(chunks):
+        conn.execute(
+            "INSERT INTO document_chunks (article_id, chunk_index, content, char_count) VALUES (?, ?, ?, ?)",
+            (article_id, i, chunk, len(chunk)),
+        )
+    conn.commit()
+    conn.close()
+
+
+def get_document_chunks(article_id: int) -> list[dict]:
+    """获取文档的所有分块。"""
+    conn = _get_conn()
+    rows = conn.execute(
+        "SELECT * FROM document_chunks WHERE article_id = ? ORDER BY chunk_index",
+        (article_id,),
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]

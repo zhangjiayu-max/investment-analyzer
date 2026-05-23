@@ -287,6 +287,16 @@ export function embedDocument(id) {
   return api.post(`/linked-articles/${id}/embed`, {}, { timeout: 300000 })
 }
 
+/** 获取文档分块详情 */
+export function getDocumentChunks(id) {
+  return api.get(`/linked-articles/${id}/chunks`)
+}
+
+/** RAG 命中测试 */
+export function testRagSearch(query, limit = 5, contentTypes = null) {
+  return api.post('/rag/test-search', { query, limit, content_types: contentTypes })
+}
+
 /** 删除文档 */
 export function deleteLinkedArticle(id) {
   return api.delete(`/linked-articles/${id}`)

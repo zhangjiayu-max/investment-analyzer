@@ -2,9 +2,12 @@
 
 import asyncio
 import json
+import logging
 import os
 import time
 from pathlib import Path
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(message)s")
 from fastapi import FastAPI, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, FileResponse, HTMLResponse
@@ -26,14 +29,14 @@ from db import (
     create_author_article, update_author_article, get_author_article_by_url,
     list_author_articles, get_author_article, delete_author_article, count_author_articles,
     create_linked_article, list_linked_articles, get_linked_article, delete_linked_article,
-    update_linked_article_file,
+    update_linked_article_file, update_linked_article_embed_status, save_document_chunks, get_document_chunks,
 )
 from article_reader import fetch_article, download_images, extract_stock_codes
 from market_data import get_stock_info, get_index_valuation
 from valuation import analyze_stock, analyze_fund
 from llm_service import analyze_article, analyze_article_stream, chat_about_investment, analyze_images_batch, chat_with_agent
 from image_parser import ImageParser
-from rag import init_fts, init_chroma, index_article, index_valuation, index_analysis_record, build_rag_context, build_rag_context_with_details, log_rag_search, index_author_article, index_skill_document, index_skill_extraction, index_to_chroma
+from rag import init_fts, init_chroma, index_article, index_valuation, index_analysis_record, build_rag_context, build_rag_context_with_details, log_rag_search, index_author_article, index_skill_document, index_skill_extraction, index_to_chroma, _get_chroma, _get_embed_model
 
 app = FastAPI(title="投资分析助手", version="0.4.0")
 
@@ -1548,6 +1551,7 @@ async def upload_document(file: UploadFile):
 
 async def _embed_linked_doc(article_id: int, file_type: str, raw_content: bytes, title: str):
     """后台任务：提取文档文本并 embedding。"""
+    update_linked_article_embed_status(article_id, "embedding")
     try:
         text = ""
         if file_type in ("txt", "md"):
@@ -1564,9 +1568,15 @@ async def _embed_linked_doc(article_id: int, file_type: str, raw_content: bytes,
             doc = Document(io.BytesIO(raw_content))
             text = "\n\n".join(p.text for p in doc.paragraphs if p.text.strip())
         if text.strip():
-            index_to_chroma("linked_doc", str(article_id), title, text)
+            chunks_count = index_to_chroma("linked_doc", str(article_id), title, text)
+            from rag import _chunk_text
+            chunks = _chunk_text(text)
+            save_document_chunks(article_id, chunks)
+            update_linked_article_embed_status(article_id, "done", chunks_count)
+        else:
+            update_linked_article_embed_status(article_id, "failed")
     except Exception:
-        pass
+        update_linked_article_embed_status(article_id, "failed")
 
 @app.get("/api/linked-articles/{article_id}/download")
 async def download_document(article_id: int):
@@ -1645,6 +1655,9 @@ async def embed_document(article_id: int):
     if not file_path.exists():
         raise HTTPException(status_code=404, detail="文件已被删除")
 
+    # 标记为 embedding 中
+    update_linked_article_embed_status(article_id, "embedding")
+
     file_type = article.get("file_type", "")
     content = ""
 
@@ -1661,18 +1674,67 @@ async def embed_document(article_id: int):
             doc = Document(str(file_path))
             content = "\n\n".join(p.text for p in doc.paragraphs if p.text.strip())
         elif file_type == "doc":
+            update_linked_article_embed_status(article_id, "failed")
             raise HTTPException(status_code=400, detail=".doc 格式暂不支持 embedding，请先转换为 .docx")
     except HTTPException:
         raise
     except Exception as e:
+        update_linked_article_embed_status(article_id, "failed")
         raise HTTPException(status_code=500, detail=f"内容提取失败: {e}")
 
     if not content.strip():
+        update_linked_article_embed_status(article_id, "failed")
         raise HTTPException(status_code=400, detail="文档内容为空，无法索引")
 
-    chunks_count = index_to_chroma("linked_doc", str(article_id), article.get("title", ""), content)
+    try:
+        # 分块并存入 ChromaDB
+        chunks_count = index_to_chroma("linked_doc", str(article_id), article.get("title", ""), content)
 
-    return {"ok": True, "chunks_indexed": chunks_count}
+        # 保存分块到 SQLite（用于展示）
+        from rag import _chunk_text
+        chunks = _chunk_text(content)
+        save_document_chunks(article_id, chunks)
+
+        # 更新状态
+        update_linked_article_embed_status(article_id, "done", chunks_count)
+
+        return {"ok": True, "chunks_indexed": chunks_count}
+    except Exception as e:
+        update_linked_article_embed_status(article_id, "failed")
+        raise HTTPException(status_code=500, detail=f"Embedding 失败: {e}")
+
+
+@app.get("/api/linked-articles/{article_id}/chunks")
+async def get_document_chunks_api(article_id: int):
+    """获取文档的分块详情。"""
+    article = get_linked_article(article_id)
+    if not article:
+        raise HTTPException(status_code=404, detail="文档不存在")
+    chunks = get_document_chunks(article_id)
+    return {"chunks": chunks, "total": len(chunks)}
+
+
+@app.post("/api/rag/test-search")
+async def rag_test_search(body: dict):
+    """命中测试：输入查询词，返回 FTS5 + 向量搜索结果。"""
+    query = body.get("query", "").strip()
+    if not query:
+        raise HTTPException(status_code=400, detail="query 不能为空")
+
+    limit = body.get("limit", 5)
+    content_types = body.get("content_types")
+
+    result = build_rag_context_with_details(query, content_types=content_types, limit=limit)
+
+    # 诊断信息
+    chroma_ok = _get_chroma() is not None and _get_embed_model() is not None
+    result["debug"] = {
+        "chroma_available": chroma_ok,
+        "fts_count": sum(1 for r in result["results"] if r.get("content_type") != "linked_doc"),
+        "vector_count": sum(1 for r in result["results"] if r.get("content_type") == "linked_doc"),
+        "total_in_chroma": _get_chroma().count() if _get_chroma() else 0,
+    }
+    return result
 
 
 # ── 债市数据 API ──────────────────────────────────────────
