@@ -30,11 +30,16 @@ from db import (
     list_author_articles, get_author_article, delete_author_article, count_author_articles,
     create_linked_article, list_linked_articles, get_linked_article, delete_linked_article,
     update_linked_article_file, update_linked_article_embed_status, save_document_chunks, get_document_chunks,
+    create_holding, get_holding, list_holdings, update_holding, delete_holding, get_portfolio_summary,
+    create_transaction, list_transactions,
 )
 from article_reader import fetch_article, download_images, extract_stock_codes
 from market_data import get_stock_info, get_index_valuation
 from valuation import analyze_stock, analyze_fund
-from llm_service import analyze_article, analyze_article_stream, chat_about_investment, analyze_images_batch, chat_with_agent
+from llm_service import (analyze_article, analyze_article_stream, chat_about_investment,
+                         analyze_images_batch, chat_with_agent, chat_with_tools, ORCHESTRATOR_PROMPT)
+from orchestrator import orchestrate, orchestrate_stream, clarify_requirement
+from multi_agent import run_specialist
 from image_parser import ImageParser
 from rag import init_fts, init_chroma, index_article, index_valuation, index_analysis_record, build_rag_context, build_rag_context_with_details, log_rag_search, index_author_article, index_skill_document, index_skill_extraction, index_to_chroma, _get_chroma, _get_embed_model
 
@@ -564,21 +569,18 @@ async def get_messages_api(conv_id: int, limit: int = 50):
 
 @app.post("/api/conversations/{conv_id}/messages")
 async def send_message_api(conv_id: int, req: SendMessageRequest):
-    """发送消息并获取 AI 回复。"""
+    """发送消息并获取 AI 回复（多 Agent 协作模式）。"""
     conv = get_conversation(conv_id)
     if not conv:
         raise HTTPException(404, "对话不存在")
 
-    agent = get_agent(conv["agent_id"]) if conv.get("agent_id") else None
-    agent_prompt = agent["system_prompt"] if agent else "你是一位专业的投资分析师，请简洁明了地回答用户问题。"
-
     # 1. 存储用户消息
     create_message(conv_id, "user", req.content)
 
-    # 2. RAG 检索（根据 agent 的 knowledge_scope 过滤）
+    # 2. RAG 检索
+    agent = get_agent(conv["agent_id"]) if conv.get("agent_id") else None
     rag_types = []
     if agent and agent.get("knowledge_scope"):
-        import json
         try:
             scope = json.loads(agent["knowledge_scope"]) if isinstance(agent["knowledge_scope"], str) else agent["knowledge_scope"]
             rag_types = scope.get("rag_types", [])
@@ -590,19 +592,29 @@ async def send_message_api(conv_id: int, req: SendMessageRequest):
 
     # 3. 获取对话历史
     history = get_messages(conv_id, limit=20)
-    # 转为 LLM 消息格式（排除刚存的用户消息，chat_with_agent 会自行处理）
     msg_list = [{"role": m["role"], "content": m["content"]} for m in history]
 
-    # 4. 调用 LLM
+    # 4. 调用 Orchestrator（多 Agent 协作）
     try:
-        answer = chat_with_agent(agent_prompt, msg_list, rag_context)
+        llm_result = orchestrate(req.content, msg_list, rag_context)
+        answer = llm_result["answer"]
     except Exception as e:
         answer = f"AI 回复失败: {str(e)}"
+        llm_result = {"answer": answer, "specialist_results": [], "tool_calls": [], "turns": 0}
 
     # 5. 存储 AI 回复
-    msg_id = create_message(conv_id, "assistant", answer)
+    specialist_results = llm_result.get("specialist_results", [])
+    metadata_dict = {
+        "specialist_results": [
+            {"agent": s["agent"], "icon": s["icon"], "analysis": s.get("analysis", "")[:500]}
+            for s in specialist_results
+        ],
+        "tool_calls": llm_result.get("tool_calls", []),
+    }
+    metadata = json.dumps(metadata_dict, ensure_ascii=False) if specialist_results else None
+    msg_id = create_message(conv_id, "assistant", answer, metadata=metadata)
 
-    # 6. 记录 RAG 检索日志
+    # 6. 记录 RAG 日志
     log_rag_search(
         conversation_id=conv_id,
         message_id=msg_id,
@@ -612,28 +624,278 @@ async def send_message_api(conv_id: int, req: SendMessageRequest):
         content_types=rag_types if rag_types else None,
     )
 
-    # 7. 自动更新对话标题（首条消息时）
+    # 7. 自动更新对话标题
     if len(history) <= 1 and conv.get("title") == "新对话":
         short_title = req.content[:30] + ("..." if len(req.content) > 30 else "")
         update_conversation(conv_id, title=short_title)
 
-    # 构建来源摘要
-    sources = []
-    for r in rag_result.get("results", []):
-        sources.append({
-            "type": r.get("label", r.get("content_type", "")),
-            "title": r.get("title", ""),
-            "reference_id": r.get("reference_id", ""),
-        })
-
     return {
         "answer": answer,
+        "specialist_results": [
+            {"agent": s["agent"], "icon": s["icon"], "analysis": s.get("analysis", "")}
+            for s in specialist_results
+        ],
         "rag": {
             "keywords": rag_result.get("keywords", []),
-            "sources": sources,
+            "sources": [{"type": r.get("label", r.get("content_type")), "title": r.get("title")} for r in rag_result.get("results", [])[:3]],
             "results_count": len(rag_result.get("results", [])),
-        }
+        },
+        "tool_calls": llm_result.get("tool_calls", []),
+        "turns": llm_result.get("turns", 1),
     }
+
+
+@app.post("/api/conversations/{conv_id}/messages/stream")
+async def send_message_stream(conv_id: int, req: SendMessageRequest):
+    """SSE 流式对话，支持多 Agent 专家分析实时展示。"""
+    conv = get_conversation(conv_id)
+    if not conv:
+        raise HTTPException(404, "对话不存在")
+
+    # 解析 knowledge_scope
+    rag_types = []
+    agent = get_agent(conv["agent_id"]) if conv.get("agent_id") else None
+    if agent and agent.get("knowledge_scope"):
+        try:
+            scope = json.loads(agent["knowledge_scope"]) if isinstance(agent["knowledge_scope"], str) else agent["knowledge_scope"]
+            rag_types = scope.get("rag_types", [])
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+    async def event_stream():
+        import asyncio
+
+        # 1. 存储用户消息
+        create_message(conv_id, "user", req.content)
+        yield _sse_event("user_message", {"content": req.content})
+
+        # 2. 需求澄清（使用 LLM 分析问题）
+        yield _sse_event("status", {"message": "正在理解您的问题..."})
+        clarification = clarify_requirement(req.content)
+        complexity = clarification["complexity"]
+        yield _sse_event("status", {"message": f"问题类型: {complexity} ({clarification.get('reason', '')})"})
+
+        # 3. 简单任务：直接路由到专家，跳过 Orchestrator
+        if complexity == "simple" and len(clarification.get("specialists", [])) == 1:
+            # 只需要1个专家，直接调用
+            agent_key = clarification["specialists"][0]
+            if agent_key:
+                yield _sse_event("status", {"message": f"正在咨询{_get_specialist_name(agent_key)}..."})
+
+                # 直接运行专家
+                def _run_expert():
+                    try:
+                        return run_specialist(agent_key, req.content)
+                    except Exception as e:
+                        return {"error": str(e)}
+
+                result = await asyncio.to_thread(_run_expert)
+
+                if "error" not in result:
+                    # 发送专家完成事件
+                    yield _sse_event("specialist_done", {
+                        "agent_key": result.get("agent_key", agent_key),
+                        "agent": result.get("agent", ""),
+                        "icon": result.get("icon", ""),
+                        "analysis": result.get("analysis", ""),
+                        "duration_ms": result.get("duration_ms", 0),
+                    })
+
+                    # 发送最终回答
+                    answer = result.get("analysis", "")
+                    specialist_results = [{
+                        "agent_key": result.get("agent_key", agent_key),
+                        "agent": result.get("agent", ""),
+                        "icon": result.get("icon", ""),
+                        "analysis": answer,
+                        "duration_ms": result.get("duration_ms", 0),
+                    }]
+
+                    yield _sse_event("answer", {
+                        "content": answer,
+                        "specialist_results": specialist_results,
+                    })
+
+                    # 存储回复
+                    metadata_dict = {
+                        "specialist_results": [
+                            {"agent": s["agent"], "icon": s["icon"], "analysis": s.get("analysis", "")[:500]}
+                            for s in specialist_results
+                        ],
+                        "complexity": complexity,
+                    }
+                    metadata = json.dumps(metadata_dict, ensure_ascii=False)
+                    msg_id = create_message(conv_id, "assistant", answer, metadata=metadata)
+                    yield _sse_event("done", {"message_id": msg_id})
+                    return
+                else:
+                    # 专家执行失败，回退到 Orchestrator
+                    yield _sse_event("status", {"message": "专家执行失败，切换到完整分析模式..."})
+
+        # 4. RAG 检索（中等和复杂任务）
+        yield _sse_event("status", {"message": "正在检索知识库..."})
+        rag_result = build_rag_context_with_details(req.content, content_types=rag_types if rag_types else None)
+        rag_context = rag_result["context"]
+
+        if rag_result.get("results"):
+            sources = [{"type": r.get("label", r.get("content_type")), "title": r.get("title")} for r in rag_result["results"][:3]]
+            yield _sse_event("rag_sources", {"sources": sources})
+
+        # 5. 获取对话历史
+        history = get_messages(conv_id, limit=20)
+        msg_list = [{"role": m["role"], "content": m["content"]} for m in history]
+
+        # 6. 调用 Orchestrator（多 Agent 协作）
+        yield _sse_event("status", {"message": "正在分析问题，决定需要咨询哪些专家..."})
+
+        def _run_orchestrator_stream():
+            """在线程中运行 orchestrator 流式生成器，通过队列传递事件。"""
+            import queue
+            q = queue.Queue()
+
+            def _producer():
+                try:
+                    for event in orchestrate_stream(req.content, msg_list, rag_context):
+                        q.put(event)
+                except Exception as e:
+                    q.put({"type": "error", "message": str(e)})
+                finally:
+                    q.put(None)  # 结束信号
+
+            import threading
+            t = threading.Thread(target=_producer, daemon=True)
+            t.start()
+            return q
+
+        q = await asyncio.to_thread(_run_orchestrator_stream)
+
+        specialist_results = []
+        all_tool_calls = []
+        final_answer = ""
+
+        while True:
+            event = await asyncio.to_thread(q.get)
+            if event is None:
+                break
+
+            event_type = event.get("type")
+
+            if event_type == "status":
+                yield _sse_event("status", event)
+
+            elif event_type == "specialist_start":
+                yield _sse_event("specialist_start", {
+                    "agent_key": event.get("agent_key"),
+                    "agent": event.get("agent"),
+                    "icon": event.get("icon"),
+                })
+
+            elif event_type == "specialist_done":
+                specialist_results.append({
+                    "agent_key": event.get("agent_key"),
+                    "agent": event.get("agent"),
+                    "icon": event.get("icon"),
+                    "analysis": event.get("analysis"),
+                    "duration_ms": event.get("duration_ms"),
+                })
+                yield _sse_event("specialist_done", {
+                    "agent_key": event.get("agent_key"),
+                    "agent": event.get("agent"),
+                    "icon": event.get("icon"),
+                    "analysis": event.get("analysis"),
+                    "duration_ms": event.get("duration_ms"),
+                })
+
+            elif event_type == "answer":
+                final_answer = event.get("content", "")
+                all_tool_calls = event.get("tool_calls", [])
+                if not specialist_results:
+                    specialist_results = event.get("specialist_results", [])
+
+            elif event_type == "error":
+                yield _sse_event("error", {"message": event.get("message", "未知错误")})
+                return
+
+        # 5. 发送最终回答
+        answer = final_answer
+        yield _sse_event("answer", {
+            "content": answer,
+            "specialist_results": specialist_results,
+        })
+
+        # 6. 存储 AI 回复
+        metadata_dict = {
+            "specialist_results": [
+                {"agent": s["agent"], "icon": s["icon"], "analysis": s.get("analysis", "")[:500]}
+                for s in specialist_results
+            ],
+            "tool_calls": all_tool_calls,
+        }
+        metadata = json.dumps(metadata_dict, ensure_ascii=False) if specialist_results or all_tool_calls else None
+        msg_id = create_message(conv_id, "assistant", answer, metadata=metadata)
+
+        # 7. 记录 RAG 日志
+        log_rag_search(
+            conversation_id=conv_id,
+            message_id=msg_id,
+            query=req.content,
+            keywords=rag_result.get("keywords", []),
+            results=rag_result.get("results", []),
+            content_types=rag_types if rag_types else None,
+        )
+
+        # 8. 自动更新对话标题
+        if len(history) <= 1 and conv.get("title") == "新对话":
+            short_title = req.content[:30] + ("..." if len(req.content) > 30 else "")
+            update_conversation(conv_id, title=short_title)
+
+        yield _sse_event("done", {"message_id": msg_id})
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
+def _sse_event(event_type: str, data: dict) -> str:
+    """格式化 SSE 事件。"""
+    return f"data: {json.dumps({'type': event_type, 'data': data}, ensure_ascii=False)}\n\n"
+
+
+def _route_to_specialist(query: str) -> str | None:
+    """根据问题关键词路由到最合适的专家。返回 agent_key 或 None。"""
+    query = query.strip()
+
+    # 估值相关关键词 → 估值专家
+    valuation_keywords = ["估值", "PE", "PB", "百分位", "z-score", "高估", "低估", "贵不贵", "便宜"]
+    if any(kw in query for kw in valuation_keywords):
+        return "valuation_expert"
+
+    # 新闻/市场动态关键词 → 择时分析师
+    news_keywords = ["新闻", "最新", "动态", "政策", "消息", "市场", "今天", "昨天"]
+    if any(kw in query for kw in news_keywords):
+        return "market_analyst"
+
+    # 风险相关关键词 → 风险评估师
+    risk_keywords = ["风险", "回撤", "波动", "最大回撤"]
+    if any(kw in query for kw in risk_keywords):
+        return "risk_assessor"
+
+    # 配置相关关键词 → 资产配置师
+    allocation_keywords = ["配置", "配比", "定投", "股债", "组合"]
+    if any(kw in query for kw in allocation_keywords):
+        return "allocation_advisor"
+
+    # 默认返回估值专家（最常见的查询）
+    return "valuation_expert"
+
+
+def _get_specialist_name(agent_key: str) -> str:
+    """获取专家名称。"""
+    names = {
+        "valuation_expert": "估值专家",
+        "market_analyst": "择时分析师",
+        "risk_assessor": "风险评估师",
+        "allocation_advisor": "资产配置师",
+    }
+    return names.get(agent_key, "专家")
 
 
 @app.get("/api/conversations/{conv_id}/rag-logs")
@@ -747,6 +1009,54 @@ async def get_rag_stats_api(days: int = 7):
         "top_keywords": top_keywords,
         "type_distribution": type_distribution,
         "avg_results": round(avg_results, 1),
+    }
+
+
+@app.get("/api/token-usage")
+async def get_token_usage_api(days: int = 7):
+    """获取 Token 用量统计。"""
+    from db import _get_conn
+    conn = _get_conn()
+
+    # 检查表是否存在
+    table_exists = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='token_usage'"
+    ).fetchone()
+    if not table_exists:
+        conn.close()
+        return {"total": 0, "daily": [], "by_model": []}
+
+    # 总量
+    row = conn.execute("""
+        SELECT COUNT(*) as calls, SUM(prompt_tokens) as prompt, SUM(completion_tokens) as completion, SUM(total_tokens) as total
+        FROM token_usage WHERE created_at >= datetime('now', ?)
+    """, (f"-{days} days",)).fetchone()
+
+    # 按天统计
+    daily = conn.execute("""
+        SELECT date(created_at) as day, COUNT(*) as calls, SUM(total_tokens) as tokens
+        FROM token_usage WHERE created_at >= datetime('now', ?)
+        GROUP BY date(created_at) ORDER BY day DESC
+    """, (f"-{days} days",)).fetchall()
+
+    # 按模型统计
+    by_model = conn.execute("""
+        SELECT model, COUNT(*) as calls, SUM(prompt_tokens) as prompt, SUM(completion_tokens) as completion, SUM(total_tokens) as total
+        FROM token_usage WHERE created_at >= datetime('now', ?)
+        GROUP BY model ORDER BY total DESC
+    """, (f"-{days} days",)).fetchall()
+
+    conn.close()
+
+    return {
+        "total": {
+            "calls": row[0] or 0,
+            "prompt_tokens": row[1] or 0,
+            "completion_tokens": row[2] or 0,
+            "total_tokens": row[3] or 0,
+        },
+        "daily": [dict(r) for r in daily],
+        "by_model": [dict(r) for r in by_model],
     }
 
 
@@ -1735,6 +2045,115 @@ async def rag_test_search(body: dict):
         "total_in_chroma": _get_chroma().count() if _get_chroma() else 0,
     }
     return result
+
+
+# ══════════════════════════════════════════════════════
+# 持仓管理 API
+# ══════════════════════════════════════════════════════
+
+
+class CreateHoldingRequest(BaseModel):
+    fund_code: str
+    fund_name: str
+    shares: float = 0
+    cost_price: float = 0
+    index_code: str = None
+    index_name: str = None
+    buy_date: str = None
+    notes: str = None
+
+
+class UpdateHoldingRequest(BaseModel):
+    fund_name: str = None
+    shares: float = None
+    cost_price: float = None
+    current_price: float = None
+    index_code: str = None
+    index_name: str = None
+    buy_date: str = None
+    notes: str = None
+
+
+class CreateTransactionRequest(BaseModel):
+    fund_code: str
+    transaction_type: str  # 'buy' | 'sell' | 'dividend'
+    amount: float
+    transaction_date: str
+    shares: float = None
+    price: float = None
+    holding_id: int = None
+    notes: str = None
+
+
+@app.get("/api/portfolio")
+async def list_portfolio_api():
+    """获取所有持仓。"""
+    return {"holdings": list_holdings()}
+
+
+@app.get("/api/portfolio/summary")
+async def portfolio_summary_api():
+    """获取持仓汇总（总市值、总盈亏、收益率）。"""
+    return get_portfolio_summary()
+
+
+@app.post("/api/portfolio")
+async def create_holding_api(req: CreateHoldingRequest):
+    """新增持仓。"""
+    holding_id = create_holding(
+        fund_code=req.fund_code, fund_name=req.fund_name,
+        shares=req.shares, cost_price=req.cost_price,
+        index_code=req.index_code, index_name=req.index_name,
+        buy_date=req.buy_date, notes=req.notes,
+    )
+    return {"ok": True, "holding_id": holding_id}
+
+
+@app.get("/api/portfolio/{holding_id}")
+async def get_holding_api(holding_id: int):
+    """获取单个持仓详情。"""
+    holding = get_holding(holding_id)
+    if not holding:
+        raise HTTPException(404, "持仓不存在")
+    return holding
+
+
+@app.put("/api/portfolio/{holding_id}")
+async def update_holding_api(holding_id: int, req: UpdateHoldingRequest):
+    """更新持仓。"""
+    holding = get_holding(holding_id)
+    if not holding:
+        raise HTTPException(404, "持仓不存在")
+    fields = {k: v for k, v in req.model_dump().items() if v is not None}
+    if fields:
+        update_holding(holding_id, **fields)
+    return {"ok": True}
+
+
+@app.delete("/api/portfolio/{holding_id}")
+async def delete_holding_api(holding_id: int):
+    """删除持仓。"""
+    if not delete_holding(holding_id):
+        raise HTTPException(404, "持仓不存在")
+    return {"ok": True}
+
+
+@app.get("/api/portfolio/{holding_id}/transactions")
+async def list_transactions_api(holding_id: int, limit: int = 100):
+    """获取持仓的交易记录。"""
+    return {"transactions": list_transactions(holding_id=holding_id, limit=limit)}
+
+
+@app.post("/api/portfolio/transactions")
+async def create_transaction_api(req: CreateTransactionRequest):
+    """新增交易记录。"""
+    tx_id = create_transaction(
+        fund_code=req.fund_code, transaction_type=req.transaction_type,
+        amount=req.amount, transaction_date=req.transaction_date,
+        shares=req.shares, price=req.price,
+        holding_id=req.holding_id, notes=req.notes,
+    )
+    return {"ok": True, "transaction_id": tx_id}
 
 
 # ── 债市数据 API ──────────────────────────────────────────

@@ -432,32 +432,26 @@ def build_rag_context_with_details(query: str, content_types: list[str] = None, 
 
     logger.info(f"RAG 搜索: query='{query}', FTS5={len(fts_results)}条, 向量={len(chroma_results)}条")
 
-    # 归一化分数：FTS5 rank 和 cosine distance 量纲不同，需统一到 0~1
-    def _normalize_scores(results: list[dict]) -> list[dict]:
-        if not results:
-            return results
-        scores = [r["rank"] for r in results]
-        min_s, max_s = min(scores), max(scores)
-        if max_s == min_s:
-            for r in results:
-                r["_score"] = 1.0
-        else:
-            for r in results:
-                # rank 越小越好 → 归一化后越大越好
-                r["_score"] = 1.0 - (r["rank"] - min_s) / (max_s - min_s)
-        return results
+    # RRF (Reciprocal Rank Fusion) 合并排序 — 比独立归一化更可靠
+    def _rrf_score(results: list[dict], k: int = 60) -> dict:
+        """返回 {key: rrf_score} 的映射。rank 越小越好。"""
+        sorted_r = sorted(results, key=lambda x: x["rank"])
+        return {f"{r['content_type']}:{r['reference_id']}": 1.0 / (k + i + 1) for i, r in enumerate(sorted_r)}
 
-    _normalize_scores(fts_results)
-    _normalize_scores(chroma_results)
+    fts_rrf = _rrf_score(fts_results)
+    chroma_rrf = _rrf_score(chroma_results)
 
-    # 合并去重（按 content_type + reference_id 去重，保留分数更高的）
+    # 合并去重（按 content_type + reference_id 去重，用 RRF 分数合并）
     seen = {}
     for r in fts_results + chroma_results:
         key = f"{r['content_type']}:{r['reference_id']}"
-        if key not in seen or r.get("_score", 0) > seen[key].get("_score", 0):
+        rft_score = fts_rrf.get(key, 0)
+        chroma_score = chroma_rrf.get(key, 0)
+        r["_score"] = rft_score + chroma_score  # RRF: 两个排名分数直接相加
+        if key not in seen or r["_score"] > seen[key]["_score"]:
             seen[key] = r
 
-    all_results = sorted(seen.values(), key=lambda x: x.get("_score", 0), reverse=True)[:limit]
+    all_results = sorted(seen.values(), key=lambda x: x["_score"], reverse=True)[:limit]
     logger.info(f"RAG 合并后: {len(all_results)}条, 类型: {[r['content_type'] for r in all_results]}")
 
     # 添加标签
@@ -476,6 +470,15 @@ def build_rag_context_with_details(query: str, content_types: list[str] = None, 
             body_preview = r["body"][:500]
             part += f"\n{body_preview}"
         parts.append(part)
+
+    # Lost-in-the-Middle 缓解：最相关的放首尾，次要的放中间
+    if len(parts) > 2:
+        reordered = [parts[0]]  # 最相关放最前面
+        middle = parts[1:-1]
+        reordered.append(parts[-1])  # 次相关放最后面
+        # 中间按原序（已经按分数排过）
+        reordered = [parts[0]] + middle + [parts[-1]]
+        parts = reordered
 
     return {
         "context": "\n\n---\n\n".join(parts),
