@@ -339,7 +339,10 @@ onMounted(() => {
 onUnmounted(() => {
   document.removeEventListener('click', handleOutsideClick)
 })
-watch(selectedMetric, loadHistory)
+// 切换指数或指标类型时重新加载数据
+watch([selectedCode, selectedMetric], () => {
+  if (selectedCode.value && selectedMetric.value) loadHistory()
+})
 watch(activeTab, (tab) => {
   if (tab === 'analysis' && selectedCode.value) loadAnalysisHistory()
 })
