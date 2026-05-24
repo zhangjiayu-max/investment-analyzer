@@ -11,6 +11,7 @@ import AuthorArticles from '../components/AuthorArticles.vue'
 import LinkedArticles from '../components/LinkedArticles.vue'
 import BondMarket from '../components/BondMarket.vue'
 import RagAnalysis from '../components/RagAnalysis.vue'
+import PortfolioManagement from '../components/PortfolioManagement.vue'
 
 const props = defineProps({
   activePage: String,
@@ -143,6 +144,11 @@ function onBack() {
     <!-- 债市市场温度页 -->
     <div v-if="activePage === 'bond'" class="page-section">
       <BondMarket />
+    </div>
+
+    <!-- 持仓管理页 -->
+    <div v-if="activePage === 'portfolio'" class="page-section">
+      <PortfolioManagement />
     </div>
   </div>
 </template>

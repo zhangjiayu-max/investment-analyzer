@@ -210,6 +210,71 @@ def init_db():
         )
     """)
 
+    # 专家 Agent 调用记录表
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS agent_runs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            conversation_id INTEGER,
+            message_id INTEGER,
+            agent_key TEXT NOT NULL,
+            agent_name TEXT NOT NULL,
+            query TEXT,
+            result TEXT,
+            tool_calls TEXT,
+            duration_ms INTEGER,
+            created_at TEXT DEFAULT (datetime('now','localtime'))
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_agent_runs_conv ON agent_runs(conversation_id)")
+
+    # ── 持仓管理表 ──────────────────────────────────────
+
+    # 持仓表
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS portfolio_holdings (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id TEXT DEFAULT 'default',
+            fund_code TEXT NOT NULL,
+            fund_name TEXT NOT NULL,
+            index_code TEXT,
+            index_name TEXT,
+            shares REAL DEFAULT 0,
+            cost_price REAL DEFAULT 0,
+            current_price REAL,
+            total_cost REAL DEFAULT 0,
+            current_value REAL,
+            profit_loss REAL,
+            profit_rate REAL,
+            buy_date TEXT,
+            last_update TEXT,
+            notes TEXT,
+            created_at TEXT DEFAULT (datetime('now','localtime')),
+            updated_at TEXT DEFAULT (datetime('now','localtime')),
+            UNIQUE(user_id, fund_code)
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_holdings_user ON portfolio_holdings(user_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_holdings_index ON portfolio_holdings(index_code)")
+
+    # 交易记录表
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS portfolio_transactions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            holding_id INTEGER REFERENCES portfolio_holdings(id) ON DELETE CASCADE,
+            user_id TEXT DEFAULT 'default',
+            fund_code TEXT NOT NULL,
+            transaction_type TEXT NOT NULL,
+            amount REAL NOT NULL,
+            shares REAL,
+            price REAL,
+            transaction_date TEXT NOT NULL,
+            notes TEXT,
+            created_at TEXT DEFAULT (datetime('now','localtime'))
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_tx_holding ON portfolio_transactions(holding_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_tx_fund ON portfolio_transactions(fund_code)")
+
     # 初始化预设 Agent
     _init_preset_agents(conn)
 
@@ -1014,6 +1079,49 @@ def _init_preset_agents(conn):
             "icon": "pie",
             "is_preset": 1,
         },
+        {
+            "name": "需求澄清",
+            "description": "分析用户问题，判断任务复杂度，决定需要咨询哪些专家",
+            "system_prompt": (
+                "## 人设\n"
+                "你是一位需求分析专家，负责理解用户的投资问题，并决定如何最优地回答它。\n\n"
+                "## 分析任务\n"
+                "收到用户问题后，你需要分析并返回以下 JSON 格式的结果：\n"
+                "```json\n"
+                "{\n"
+                "  \"complexity\": \"simple|medium|complex\",\n"
+                "  \"specialists\": [\"valuation_expert\", \"market_analyst\", \"risk_assessor\", \"allocation_advisor\"],\n"
+                "  \"reason\": \"简要说明为什么这样分类\",\n"
+                "  \"refined_query\": \"优化后的问题（如果需要）\"\n"
+                "}\n"
+                "```\n\n"
+                "## 复杂度判断标准\n"
+                "### simple（简单）\n"
+                "- 单一数据查询：如\"沪深300估值多少\"、\"债市温度\"\n"
+                "- 直接查表类：如\"PE是多少\"、\"百分位多少\"\n"
+                "- 只需要1个专家即可回答\n\n"
+                "### medium（中等）\n"
+                "- 需要分析但范围明确：如\"白酒估值高吗\"、\"最近有什么新闻\"\n"
+                "- 需要1-2个专家协作\n"
+                "- 可能需要RAG知识库辅助\n\n"
+                "### complex（复杂）\n"
+                "- 投资决策类：如\"白酒能买吗\"、\"该加仓还是减仓\"\n"
+                "- 多维度分析：如\"帮我做个定投方案\"、\"现在怎么配置\"\n"
+                "- 需要3-4个专家协作\n"
+                "- 必须结合估值、新闻、风险等多方面信息\n\n"
+                "## 专家选择指南\n"
+                "- **估值相关**（PE/PB/百分位/高估低估）→ valuation_expert\n"
+                "- **新闻/政策/市场动态** → market_analyst\n"
+                "- **风险/回撤/波动率/持仓风险** → risk_assessor\n"
+                "- **配置/定投/股债配比/持仓配置** → allocation_advisor\n"
+                "- **持仓/加仓/减仓/盈亏/我的基金** → 需要结合持仓数据，选 risk_assessor 或 allocation_advisor\n\n"
+                "## 输出要求\n"
+                "只输出 JSON，不要其他文字。"
+            ),
+            "knowledge_scope": '{}',
+            "icon": "robot",
+            "is_preset": 1,
+        },
     ]
     for agent in presets:
         conn.execute("""
@@ -1362,3 +1470,241 @@ def get_document_chunks(article_id: int) -> list[dict]:
     ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
+
+
+# ── Agent Runs ──────────────────────────────────────────
+
+
+def create_agent_run(conversation_id: int, message_id: int, agent_key: str,
+                     agent_name: str, query: str, result: str = "",
+                     tool_calls: str = "", duration_ms: int = 0) -> int:
+    """记录一次专家 Agent 调用，返回 run_id。"""
+    conn = _get_conn()
+    cur = conn.execute("""
+        INSERT INTO agent_runs (conversation_id, message_id, agent_key, agent_name,
+                                query, result, tool_calls, duration_ms)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    """, (conversation_id, message_id, agent_key, agent_name,
+          query, result, tool_calls, duration_ms))
+    run_id = cur.lastrowid
+    conn.commit()
+    conn.close()
+    return run_id
+
+
+def get_agent_runs(conversation_id: int, limit: int = 50) -> list[dict]:
+    """获取对话的专家 Agent 调用记录。"""
+    conn = _get_conn()
+    rows = conn.execute("""
+        SELECT * FROM agent_runs
+        WHERE conversation_id = ?
+        ORDER BY id DESC
+        LIMIT ?
+    """, (conversation_id, limit)).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+# ── 持仓管理 CRUD ──────────────────────────────────────
+
+
+def create_holding(fund_code: str, fund_name: str, shares: float = 0,
+                   cost_price: float = 0, index_code: str = None,
+                   index_name: str = None, buy_date: str = None,
+                   notes: str = None, user_id: str = "default") -> int:
+    """新增持仓，返回 holding_id。"""
+    total_cost = shares * cost_price
+    conn = _get_conn()
+    cur = conn.execute("""
+        INSERT INTO portfolio_holdings
+            (user_id, fund_code, fund_name, index_code, index_name,
+             shares, cost_price, total_cost, buy_date, notes)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (user_id, fund_code, fund_name, index_code, index_name,
+          shares, cost_price, total_cost, buy_date, notes))
+    holding_id = cur.lastrowid
+    conn.commit()
+    conn.close()
+    return holding_id
+
+
+def get_holding(holding_id: int) -> dict | None:
+    """获取单个持仓。"""
+    conn = _get_conn()
+    row = conn.execute("SELECT * FROM portfolio_holdings WHERE id = ?", (holding_id,)).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def list_holdings(user_id: str = "default") -> list[dict]:
+    """获取用户所有持仓，按更新时间倒序。"""
+    conn = _get_conn()
+    rows = conn.execute("""
+        SELECT * FROM portfolio_holdings
+        WHERE user_id = ?
+        ORDER BY updated_at DESC
+    """, (user_id,)).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def update_holding(holding_id: int, **fields):
+    """更新持仓字段。自动重算 total_cost / current_value / profit_loss / profit_rate。"""
+    if not fields:
+        return
+    fields["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    # 如果更新了 shares 或 cost_price，重算 total_cost
+    conn = _get_conn()
+    current = conn.execute("SELECT * FROM portfolio_holdings WHERE id = ?", (holding_id,)).fetchone()
+    if not current:
+        conn.close()
+        return
+    current = dict(current)
+
+    shares = fields.get("shares", current.get("shares", 0))
+    cost_price = fields.get("cost_price", current.get("cost_price", 0))
+    current_price = fields.get("current_price", current.get("current_price"))
+
+    fields["total_cost"] = shares * cost_price
+    if current_price is not None and current_price > 0:
+        fields["current_value"] = shares * current_price
+        fields["profit_loss"] = fields["current_value"] - fields["total_cost"]
+        fields["profit_rate"] = fields["profit_loss"] / fields["total_cost"] if fields["total_cost"] > 0 else 0
+
+    set_clause = ", ".join(f"{k} = ?" for k in fields)
+    values = list(fields.values()) + [holding_id]
+    conn.execute(f"UPDATE portfolio_holdings SET {set_clause} WHERE id = ?", values)
+    conn.commit()
+    conn.close()
+
+
+def delete_holding(holding_id: int) -> bool:
+    """删除持仓及其交易记录。"""
+    conn = _get_conn()
+    conn.execute("DELETE FROM portfolio_transactions WHERE holding_id = ?", (holding_id,))
+    cur = conn.execute("DELETE FROM portfolio_holdings WHERE id = ?", (holding_id,))
+    conn.commit()
+    deleted = cur.rowcount > 0
+    conn.close()
+    return deleted
+
+
+def get_portfolio_summary(user_id: str = "default") -> dict:
+    """获取持仓汇总：总市值、总成本、总盈亏、收益率。"""
+    holdings = list_holdings(user_id)
+    total_cost = sum(h.get("total_cost", 0) or 0 for h in holdings)
+    total_value = sum(h.get("current_value", 0) or 0 for h in holdings)
+    total_profit = total_value - total_cost
+    profit_rate = total_profit / total_cost if total_cost > 0 else 0
+
+    return {
+        "holding_count": len(holdings),
+        "total_cost": round(total_cost, 2),
+        "total_value": round(total_value, 2),
+        "total_profit": round(total_profit, 2),
+        "profit_rate": round(profit_rate, 4),
+        "holdings": holdings,
+    }
+
+
+# ── 交易记录 CRUD ──────────────────────────────────────
+
+
+def create_transaction(fund_code: str, transaction_type: str, amount: float,
+                       transaction_date: str, shares: float = None,
+                       price: float = None, holding_id: int = None,
+                       notes: str = None, user_id: str = "default") -> int:
+    """新增交易记录，返回 transaction_id。自动更新持仓数据。"""
+    conn = _get_conn()
+    cur = conn.execute("""
+        INSERT INTO portfolio_transactions
+            (holding_id, user_id, fund_code, transaction_type, amount, shares, price, transaction_date, notes)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (holding_id, user_id, fund_code, transaction_type, amount, shares, price, transaction_date, notes))
+    tx_id = cur.lastrowid
+    conn.commit()
+    conn.close()
+
+    # 自动更新持仓数据
+    if holding_id:
+        _recalculate_holding(holding_id)
+
+    return tx_id
+
+
+def list_transactions(fund_code: str = None, holding_id: int = None,
+                      user_id: str = "default", limit: int = 100) -> list[dict]:
+    """获取交易记录列表。"""
+    conn = _get_conn()
+    conditions = ["user_id = ?"]
+    params = [user_id]
+    if fund_code:
+        conditions.append("fund_code = ?")
+        params.append(fund_code)
+    if holding_id:
+        conditions.append("holding_id = ?")
+        params.append(holding_id)
+
+    where = " AND ".join(conditions)
+    params.append(limit)
+    rows = conn.execute(f"""
+        SELECT * FROM portfolio_transactions
+        WHERE {where}
+        ORDER BY transaction_date DESC, id DESC
+        LIMIT ?
+    """, params).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def _recalculate_holding(holding_id: int):
+    """根据交易记录重新计算持仓数据。"""
+    conn = _get_conn()
+    holding = conn.execute("SELECT * FROM portfolio_holdings WHERE id = ?", (holding_id,)).fetchone()
+    if not holding:
+        conn.close()
+        return
+    holding = dict(holding)
+
+    txs = conn.execute("""
+        SELECT * FROM portfolio_transactions
+        WHERE holding_id = ?
+        ORDER BY transaction_date ASC
+    """, (holding_id,)).fetchall()
+
+    total_shares = 0
+    total_cost = 0
+    for tx in txs:
+        tx = dict(tx)
+        if tx["transaction_type"] == "buy":
+            total_shares += tx.get("shares", 0) or 0
+            total_cost += tx.get("amount", 0) or 0
+        elif tx["transaction_type"] == "sell":
+            sold_shares = tx.get("shares", 0) or 0
+            if total_shares > 0:
+                avg_cost = total_cost / total_shares
+                total_cost -= avg_cost * sold_shares
+            total_shares -= sold_shares
+        elif tx["transaction_type"] == "dividend":
+            total_cost -= tx.get("amount", 0) or 0  # 分红降低成本
+
+    cost_price = total_cost / total_shares if total_shares > 0 else 0
+    current_price = holding.get("current_price") or 0
+    current_value = total_shares * current_price if current_price > 0 else None
+    profit_loss = (current_value - total_cost) if current_value is not None else None
+    profit_rate = (profit_loss / total_cost) if (profit_loss is not None and total_cost > 0) else None
+
+    conn.execute("""
+        UPDATE portfolio_holdings SET
+            shares = ?, cost_price = ?, total_cost = ?,
+            current_value = ?, profit_loss = ?, profit_rate = ?,
+            updated_at = datetime('now','localtime')
+        WHERE id = ?
+    """, (total_shares, round(cost_price, 4), round(total_cost, 2),
+          round(current_value, 2) if current_value is not None else None,
+          round(profit_loss, 2) if profit_loss is not None else None,
+          round(profit_rate, 4) if profit_rate is not None else None,
+          holding_id))
+    conn.commit()
+    conn.close()

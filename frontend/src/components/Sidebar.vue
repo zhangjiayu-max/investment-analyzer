@@ -12,6 +12,7 @@ const navItems = [
   { key: 'articles', label: '文章管理', icon: 'articles' },
   { key: 'valuation', label: '估值数据', icon: 'valuation' },
   { key: 'gallery', label: '图片浏览', icon: 'gallery' },
+  { key: 'portfolio', label: '持仓管理', icon: 'portfolio' },
   {
     key: 'group-knowledge', label: '知识库', icon: 'author',
     children: [
@@ -86,6 +87,9 @@ const activeGroup = computed(() => {
           </svg>
           <svg v-else-if="item.icon === 'gallery'" class="nav-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"/>
+          </svg>
+          <svg v-else-if="item.icon === 'portfolio'" class="nav-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M2 7l10-4 10 4-10 4-10-4zM2 17l10 4 10-4M2 12l10 4 10-4"/>
           </svg>
           <span class="nav-label">{{ item.label }}</span>
         </button>

@@ -189,6 +189,62 @@ export function sendMessage(convId, content) {
   return api.post(`/conversations/${convId}/messages`, { content }, { timeout: 120000 })
 }
 
+/**
+ * SSE 流式发送消息，实时接收工具调用和回答。
+ * @param {number} convId - 对话 ID
+ * @param {string} content - 消息内容
+ * @param {function} onEvent - 事件回调 (event: {type, data}) => void
+ * @returns {AbortController} 用于取消请求
+ */
+export function sendMessageStream(convId, content, onEvent) {
+  const controller = new AbortController()
+  const baseURL = api.defaults.baseURL || ''
+
+  fetch(`${baseURL}/conversations/${convId}/messages/stream`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ content }),
+    signal: controller.signal,
+  }).then(async response => {
+    const reader = response.body.getReader()
+    const decoder = new TextDecoder()
+    let buffer = ''
+
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      buffer += decoder.decode(value, { stream: true })
+
+      const lines = buffer.split('\n')
+      buffer = lines.pop() // 保留不完整的行
+
+      for (const line of lines) {
+        if (line.startsWith('data: ')) {
+          try {
+            const event = JSON.parse(line.slice(6))
+            onEvent(event)
+          } catch (e) {
+            // 忽略解析错误
+          }
+        }
+      }
+    }
+    // 处理剩余 buffer
+    if (buffer.startsWith('data: ')) {
+      try {
+        const event = JSON.parse(buffer.slice(6))
+        onEvent(event)
+      } catch (e) {}
+    }
+  }).catch(err => {
+    if (err.name !== 'AbortError') {
+      onEvent({ type: 'error', data: { message: err.message } })
+    }
+  })
+
+  return controller
+}
+
 /** 重建 RAG 索引 */
 export function reindexRag() {
   return api.post('/rag/reindex')
@@ -307,6 +363,48 @@ export function deleteLinkedArticle(id) {
 /** 获取债市温度数据 */
 export function getBondMarketTemperature() {
   return api.get('/bond/market-temperature')
+}
+
+// ── 持仓管理 API ──────────────────────────────────────
+
+/** 获取所有持仓 */
+export function listPortfolios() {
+  return api.get('/portfolio')
+}
+
+/** 获取持仓汇总 */
+export function getPortfolioSummary() {
+  return api.get('/portfolio/summary')
+}
+
+/** 新增持仓 */
+export function createPortfolio(data) {
+  return api.post('/portfolio', data)
+}
+
+/** 获取单个持仓 */
+export function getPortfolio(id) {
+  return api.get(`/portfolio/${id}`)
+}
+
+/** 更新持仓 */
+export function updatePortfolio(id, data) {
+  return api.put(`/portfolio/${id}`, data)
+}
+
+/** 删除持仓 */
+export function deletePortfolio(id) {
+  return api.delete(`/portfolio/${id}`)
+}
+
+/** 获取持仓交易记录 */
+export function listPortfolioTransactions(holdingId, limit = 100) {
+  return api.get(`/portfolio/${holdingId}/transactions`, { params: { limit } })
+}
+
+/** 新增交易记录 */
+export function createPortfolioTransaction(data) {
+  return api.post('/portfolio/transactions', data)
 }
 
 export default api

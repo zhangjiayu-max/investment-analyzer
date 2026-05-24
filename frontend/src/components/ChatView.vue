@@ -2,31 +2,27 @@
 import { ref, onMounted, nextTick, watch } from 'vue'
 import { marked } from 'marked'
 import {
-  listAgents, listConversations, createConversation, deleteConversation,
-  getMessages, sendMessage,
+  listConversations, createConversation, deleteConversation,
+  getMessages, sendMessage, sendMessageStream,
 } from '../api'
 
-const agents = ref([])
 const conversations = ref([])
 const selectedConv = ref(null)
 const messages = ref([])
 const inputText = ref('')
 const sending = ref(false)
-const showAgentPicker = ref(false)
 const messagesContainer = ref(null)
 
-onMounted(async () => {
-  await Promise.all([loadAgents(), loadConversations()])
-})
+// 流式对话状态
+const streamStatus = ref('')  // '' | 'searching' | 'calling_tool' | 'thinking' | 'answering'
+const currentToolCalls = ref([])  // 当前正在执行的工具调用
+const streamAbort = ref(null)  // AbortController
+const activeSpecialists = ref([])  // 正在工作的专家列表
+const completedSpecialists = ref([])  // 已完成的专家分析结果
 
-async function loadAgents() {
-  try {
-    const { data } = await listAgents()
-    agents.value = data.agents || []
-  } catch (e) {
-    console.error('Failed to load agents:', e)
-  }
-}
+onMounted(async () => {
+  await loadConversations()
+})
 
 async function loadConversations() {
   try {
@@ -50,12 +46,10 @@ async function selectConversation(conv) {
   }
 }
 
-async function handleNewConversation(agentId) {
-  showAgentPicker.value = false
+async function handleNewConversation() {
   try {
     const { data } = await createConversation({
       title: '新对话',
-      agent_id: agentId,
     })
     await loadConversations()
     const conv = conversations.value.find(c => c.id === data.conversation_id)
@@ -86,35 +80,137 @@ async function handleSend() {
 
   inputText.value = ''
   sending.value = true
+  streamStatus.value = 'searching'
+  currentToolCalls.value = []
+  activeSpecialists.value = []
+  completedSpecialists.value = []
 
   // 立即显示用户消息
   messages.value.push({ role: 'user', content: text, created_at: new Date().toISOString() })
   await nextTick()
   scrollToBottom()
 
-  try {
-    const { data } = await sendMessage(selectedConv.value.id, text)
-    messages.value.push({
-      role: 'assistant',
-      content: data.answer,
-      created_at: new Date().toISOString(),
-      rag: data.rag || null,
-    })
-    await nextTick()
-    scrollToBottom()
-    // 刷新对话列表（更新标题和时间）
-    await loadConversations()
-  } catch (e) {
-    messages.value.push({ role: 'assistant', content: '发送失败: ' + e.message, created_at: new Date().toISOString() })
-  } finally {
-    sending.value = false
+  // 使用 SSE 流式接口
+  streamAbort.value = sendMessageStream(selectedConv.value.id, text, (event) => {
+    handleStreamEvent(event)
+  })
+}
+
+function handleStreamEvent(event) {
+  const { type, data } = event
+
+  switch (type) {
+    case 'status':
+      streamStatus.value = data.message.includes('检索') ? 'searching' : 'thinking'
+      break
+
+    case 'rag_sources':
+      currentToolCalls.value._ragSources = data.sources
+      break
+
+    case 'tool_call':
+      streamStatus.value = 'calling_tool'
+      currentToolCalls.value.push({
+        name: data.name,
+        arguments: data.arguments,
+        result_preview: data.result_preview,
+        expanded: false,
+      })
+      nextTick(() => scrollToBottom())
+      break
+
+    case 'specialist_start':
+      streamStatus.value = 'calling_specialist'
+      activeSpecialists.value.push({
+        agent_key: data.agent_key,
+        agent: data.agent,
+        icon: data.icon,
+        status: 'running',
+      })
+      nextTick(() => scrollToBottom())
+      break
+
+    case 'specialist_done':
+      // 从活跃列表移到完成列表
+      activeSpecialists.value = activeSpecialists.value.filter(s => s.agent_key !== data.agent_key)
+      completedSpecialists.value.push({
+        agent_key: data.agent_key,
+        agent: data.agent,
+        icon: data.icon,
+        analysis: data.analysis,
+        duration_ms: data.duration_ms,
+        expanded: false,
+      })
+      nextTick(() => scrollToBottom())
+      break
+
+    case 'answer':
+      streamStatus.value = 'answering'
+      // 构建最终消息
+      const assistantMsg = {
+        role: 'assistant',
+        content: data.content,
+        created_at: new Date().toISOString(),
+        specialist_results: data.specialist_results || (completedSpecialists.value.length > 0 ? [...completedSpecialists.value] : null),
+        tool_calls: currentToolCalls.value.length > 0 ? [...currentToolCalls.value] : null,
+        rag: currentToolCalls.value._ragSources ? { sources: currentToolCalls.value._ragSources } : null,
+      }
+      messages.value.push(assistantMsg)
+      nextTick(() => scrollToBottom())
+      break
+
+    case 'done':
+      sending.value = false
+      streamStatus.value = ''
+      currentToolCalls.value = []
+      activeSpecialists.value = []
+      completedSpecialists.value = []
+      loadConversations()
+      break
+
+    case 'error':
+      messages.value.push({
+        role: 'assistant',
+        content: '发生错误: ' + (data.message || '未知错误'),
+        created_at: new Date().toISOString(),
+      })
+      sending.value = false
+      streamStatus.value = ''
+      currentToolCalls.value = []
+      activeSpecialists.value = []
+      completedSpecialists.value = []
+      break
   }
+}
+
+function cancelStream() {
+  if (streamAbort.value) {
+    streamAbort.value.abort()
+    streamAbort.value = null
+  }
+  sending.value = false
+  streamStatus.value = ''
+  currentToolCalls.value = []
+  activeSpecialists.value = []
+  completedSpecialists.value = []
 }
 
 function scrollToBottom() {
   if (messagesContainer.value) {
     messagesContainer.value.scrollTop = messagesContainer.value.scrollHeight
   }
+}
+
+function toolDisplayName(name) {
+  const map = {
+    query_valuation: '查询估值',
+    search_knowledge: '检索知识库',
+    get_bond_temperature: '债市温度',
+    get_valuation_list: '估值概览',
+    get_author_opinions: '作者观点',
+    calculate_metrics: '计算指标',
+  }
+  return map[name] || name
 }
 
 function renderMarkdown(text) {
@@ -134,9 +230,6 @@ function formatTime(ts) {
   return `${d.getMonth() + 1}/${d.getDate()} ${time}`
 }
 
-function agentIcon(icon) {
-  return { chart: '📊', research: '🔬', robot: '🤖', shield: '🛡️', pie: '🥧', bull: '🐂' }[icon] || '🤖'
-}
 </script>
 
 <template>
@@ -145,7 +238,7 @@ function agentIcon(icon) {
     <div class="conv-sidebar">
       <div class="conv-header">
         <h3>对话</h3>
-        <button @click="showAgentPicker = true" class="btn-new-conv" title="新建对话">
+        <button @click="handleNewConversation()" class="btn-new-conv" title="新建对话">
           <svg width="18" height="18" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/>
           </svg>
@@ -157,11 +250,10 @@ function agentIcon(icon) {
           @click="selectConversation(conv)"
           :class="['conv-item', { active: selectedConv?.id === conv.id }]"
         >
-          <div class="conv-icon">{{ agentIcon(conv.agent_icon) }}</div>
+          <div class="conv-icon">🤖</div>
           <div class="conv-info">
             <div class="conv-title">{{ conv.title }}</div>
             <div class="conv-meta">
-              <span v-if="conv.agent_name" class="conv-agent">{{ conv.agent_name }}</span>
               <span class="conv-time">{{ formatTime(conv.updated_at) }}</span>
             </div>
           </div>
@@ -184,8 +276,8 @@ function agentIcon(icon) {
         <!-- 聊天头部 -->
         <div class="chat-header">
           <div class="chat-header-info">
-            <span class="chat-agent-icon">{{ agentIcon(selectedConv.agent_icon) }}</span>
-            <span class="chat-agent-name">{{ selectedConv.agent_name || 'AI 助手' }}</span>
+            <span class="chat-agent-icon">🤖</span>
+            <span class="chat-agent-name">投资分析助手</span>
           </div>
         </div>
 
@@ -194,6 +286,30 @@ function agentIcon(icon) {
           <div v-for="(msg, i) in messages" :key="i" :class="['message', msg.role]">
             <div class="message-bubble" v-if="msg.role === 'user'">{{ msg.content }}</div>
             <div v-else>
+              <!-- 专家分析展示 -->
+              <div v-if="msg.specialist_results && msg.specialist_results.length" class="specialists-container">
+                <div v-for="(s, j) in msg.specialist_results" :key="j" class="specialist-item">
+                  <div class="specialist-header" @click="s.expanded = !s.expanded">
+                    <span class="specialist-icon">{{ s.icon }}</span>
+                    <span class="specialist-name">{{ s.agent }}</span>
+                    <span v-if="s.duration_ms" class="specialist-time">{{ (s.duration_ms / 1000).toFixed(1) }}s</span>
+                    <span class="specialist-toggle">{{ s.expanded ? '▲' : '▼' }}</span>
+                  </div>
+                  <div v-if="s.expanded" class="specialist-analysis markdown-body" v-html="renderMarkdown(s.analysis)"></div>
+                </div>
+              </div>
+              <!-- 工具调用展示 -->
+              <div v-if="msg.tool_calls && msg.tool_calls.length" class="tool-calls-container">
+                <div v-for="(tc, j) in msg.tool_calls" :key="j" class="tool-call-item">
+                  <div class="tool-call-header" @click="tc.expanded = !tc.expanded">
+                    <span class="tool-icon">&#128295;</span>
+                    <span class="tool-name">{{ toolDisplayName(tc.name) }}</span>
+                    <span class="tool-args">{{ JSON.stringify(tc.arguments || {}).slice(0, 40) }}</span>
+                    <span class="tool-toggle">{{ tc.expanded ? '▲' : '▼' }}</span>
+                  </div>
+                  <pre v-if="tc.expanded" class="tool-result">{{ tc.result_preview }}</pre>
+                </div>
+              </div>
               <div class="message-bubble markdown-body" v-html="renderMarkdown(msg.content)"></div>
               <!-- RAG 来源标注 -->
               <div v-if="msg.rag && msg.rag.sources && msg.rag.sources.length" class="rag-sources">
@@ -201,22 +317,72 @@ function agentIcon(icon) {
                   <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253"/>
                   </svg>
-                  <span>参考来源 ({{ msg.rag.results_count }})</span>
+                  <span>参考来源 ({{ msg.rag.results_count || msg.rag.sources.length }})</span>
                 </div>
                 <div class="rag-tags">
                   <span v-for="(s, j) in msg.rag.sources.slice(0, 5)" :key="j" :class="['rag-tag', 'rag-tag-' + s.type]">
                     {{ s.type }}: {{ s.title ? s.title.slice(0, 20) : '' }}
                   </span>
                 </div>
-                <div v-if="msg.rag.keywords && msg.rag.keywords.length" class="rag-keywords">
-                  检索词: {{ msg.rag.keywords.join(', ') }}
-                </div>
               </div>
             </div>
             <div class="message-time">{{ formatTime(msg.created_at) }}</div>
           </div>
+          <!-- 流式状态指示器 -->
           <div v-if="sending" class="message assistant">
-            <div class="message-bubble typing">
+            <!-- 已完成的专家分析 -->
+            <div v-if="completedSpecialists.length > 0" class="specialists-container streaming">
+              <div v-for="(s, j) in completedSpecialists" :key="j" class="specialist-item completed">
+                <div class="specialist-header" @click="s.expanded = !s.expanded">
+                  <span class="specialist-icon">{{ s.icon }}</span>
+                  <span class="specialist-name">{{ s.agent }}</span>
+                  <span class="specialist-status done">✓</span>
+                  <span v-if="s.duration_ms" class="specialist-time">{{ (s.duration_ms / 1000).toFixed(1) }}s</span>
+                  <span class="specialist-toggle">{{ s.expanded ? '▲' : '▼' }}</span>
+                </div>
+                <div v-if="s.expanded" class="specialist-analysis markdown-body" v-html="renderMarkdown(s.analysis)"></div>
+              </div>
+            </div>
+            <!-- 正在工作的专家 -->
+            <div v-if="activeSpecialists.length > 0" class="specialists-container streaming">
+              <div v-for="(s, j) in activeSpecialists" :key="j" class="specialist-item running">
+                <div class="specialist-header">
+                  <span class="specialist-icon spinning">{{ s.icon }}</span>
+                  <span class="specialist-name">正在咨询{{ s.agent }}...</span>
+                  <span class="specialist-status running">
+                    <span class="dot"></span><span class="dot"></span><span class="dot"></span>
+                  </span>
+                </div>
+              </div>
+            </div>
+            <!-- 实时工具调用 -->
+            <div v-if="currentToolCalls.length > 0" class="tool-calls-container streaming">
+              <div v-for="(tc, j) in currentToolCalls" :key="j" class="tool-call-item">
+                <div class="tool-call-header">
+                  <span class="tool-icon spinning">&#9881;</span>
+                  <span class="tool-name">{{ toolDisplayName(tc.name) }}</span>
+                  <span class="tool-args">{{ JSON.stringify(tc.arguments || {}).slice(0, 40) }}</span>
+                </div>
+              </div>
+            </div>
+            <!-- 状态文字 -->
+            <div v-if="streamStatus === 'searching'" class="stream-status">
+              <span class="dot"></span><span class="dot"></span><span class="dot"></span>
+              <span class="status-text">正在检索知识库...</span>
+            </div>
+            <div v-else-if="streamStatus === 'thinking'" class="stream-status">
+              <span class="dot"></span><span class="dot"></span><span class="dot"></span>
+              <span class="status-text">正在分析问题，决定需要咨询哪些专家...</span>
+            </div>
+            <div v-else-if="streamStatus === 'calling_specialist'" class="stream-status">
+              <span class="dot"></span><span class="dot"></span><span class="dot"></span>
+              <span class="status-text">专家团队正在分析中...</span>
+            </div>
+            <div v-else-if="streamStatus === 'calling_tool'" class="stream-status">
+              <span class="dot"></span><span class="dot"></span><span class="dot"></span>
+              <span class="status-text">正在调用工具...</span>
+            </div>
+            <div v-else class="message-bubble typing">
               <span class="dot"></span><span class="dot"></span><span class="dot"></span>
             </div>
           </div>
@@ -250,28 +416,6 @@ function agentIcon(icon) {
       </div>
     </div>
 
-    <!-- Agent 选择弹窗 -->
-    <Teleport to="body">
-      <Transition name="fade">
-        <div v-if="showAgentPicker" class="modal-overlay" @click.self="showAgentPicker = false">
-          <div class="modal-content">
-            <h3>选择 Agent</h3>
-            <div class="agent-grid">
-              <div
-                v-for="agent in agents" :key="agent.id"
-                @click="handleNewConversation(agent.id)"
-                class="agent-card"
-              >
-                <div class="agent-icon">{{ agentIcon(agent.icon) }}</div>
-                <div class="agent-name">{{ agent.name }}</div>
-                <div class="agent-desc">{{ agent.description }}</div>
-              </div>
-            </div>
-            <button @click="showAgentPicker = false" class="btn-secondary modal-close">取消</button>
-          </div>
-        </div>
-      </Transition>
-    </Teleport>
   </div>
 </template>
 
@@ -599,66 +743,6 @@ function agentIcon(icon) {
 .chat-empty h3 { margin: 0; font-size: 1rem; color: var(--color-text-secondary); }
 .chat-empty p { margin: 0; font-size: 0.8rem; }
 
-/* ── Agent 选择弹窗 ── */
-.modal-overlay {
-  position: fixed;
-  inset: 0;
-  z-index: var(--z-modal);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: rgba(0,0,0,0.5);
-  backdrop-filter: blur(4px);
-}
-
-.modal-content {
-  background: var(--color-bg-card);
-  border-radius: var(--radius-lg);
-  padding: 1.5rem;
-  width: 90%;
-  max-width: 480px;
-  box-shadow: 0 20px 60px rgba(0,0,0,0.3);
-}
-
-.modal-content h3 {
-  margin: 0 0 1rem;
-  font-size: 1rem;
-}
-
-.agent-grid {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 0.75rem;
-  margin-bottom: 1rem;
-}
-
-.agent-card {
-  padding: 1rem;
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
-  cursor: pointer;
-  transition: all var(--transition-fast);
-  text-align: center;
-}
-
-.agent-card:hover {
-  border-color: var(--color-primary-400);
-  background: var(--color-primary-50);
-}
-
-.dark .agent-card:hover {
-  background: var(--color-primary-bg);
-}
-
-.agent-icon { font-size: 2rem; margin-bottom: 0.5rem; }
-.agent-name { font-size: 0.85rem; font-weight: 600; color: var(--color-text-primary); }
-.agent-desc { font-size: 0.7rem; color: var(--color-text-muted); margin-top: 0.3rem; }
-
-.modal-close {
-  width: 100%;
-  padding: 0.5rem;
-  font-size: 0.8rem;
-}
 
 /* ── Markdown 样式 ── */
 .markdown-body :deep(h1),
@@ -743,6 +827,195 @@ function agentIcon(icon) {
 .rag-keywords {
   font-size: 0.6rem;
   color: var(--color-text-muted);
+}
+
+/* ── 工具调用展示 ── */
+.tool-calls-container {
+  margin-bottom: 0.4rem;
+  border-left: 3px solid var(--color-primary-300);
+  padding-left: 0.5rem;
+}
+
+.tool-calls-container.streaming {
+  border-left-color: var(--color-primary-400);
+  opacity: 0.8;
+}
+
+.tool-call-item {
+  margin-bottom: 0.2rem;
+}
+
+.tool-call-header {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.75rem;
+  color: var(--color-text-secondary);
+  padding: 0.2rem 0;
+  cursor: pointer;
+}
+
+.tool-call-header:hover {
+  color: var(--color-text-primary);
+}
+
+.tool-icon {
+  font-size: 0.7rem;
+}
+
+.tool-icon.spinning {
+  animation: spin 1.5s linear infinite;
+}
+
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+.tool-name {
+  font-weight: 600;
+  color: var(--color-primary-600);
+}
+
+.tool-args {
+  font-size: 0.65rem;
+  color: var(--color-text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 200px;
+}
+
+.tool-toggle {
+  font-size: 0.6rem;
+  color: var(--color-text-muted);
+  margin-left: auto;
+}
+
+.tool-result {
+  background: var(--color-bg-hover);
+  padding: 0.4rem 0.6rem;
+  border-radius: var(--radius-sm);
+  font-size: 0.7rem;
+  max-height: 120px;
+  overflow-y: auto;
+  margin: 0.2rem 0 0.3rem;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--color-text-secondary);
+}
+
+.stream-status {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.4rem 0.75rem;
+  font-size: 0.8rem;
+  color: var(--color-text-muted);
+}
+
+.stream-status .status-text {
+  margin-left: 0.3rem;
+}
+
+/* ── 专家分析展示 ── */
+.specialists-container {
+  margin-bottom: 0.5rem;
+}
+
+.specialists-container.streaming {
+  opacity: 0.9;
+}
+
+.specialist-item {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  margin-bottom: 0.4rem;
+  overflow: hidden;
+  background: var(--color-bg-card);
+}
+
+.specialist-item.running {
+  border-color: var(--color-primary-300);
+  background: var(--color-primary-50);
+}
+
+.dark .specialist-item.running {
+  background: var(--color-primary-bg);
+}
+
+.specialist-item.completed {
+  border-color: var(--color-success-border, #10b981);
+}
+
+.specialist-header {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 0.75rem;
+  cursor: pointer;
+  transition: background var(--transition-fast);
+}
+
+.specialist-header:hover {
+  background: var(--color-bg-hover);
+}
+
+.specialist-icon {
+  font-size: 1rem;
+  flex-shrink: 0;
+}
+
+.specialist-icon.spinning {
+  animation: spin 2s linear infinite;
+}
+
+.specialist-name {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--color-text-primary);
+}
+
+.specialist-status {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 0.2rem;
+}
+
+.specialist-status.done {
+  color: var(--color-success, #10b981);
+  font-size: 0.8rem;
+  font-weight: 600;
+}
+
+.specialist-status.running .dot {
+  width: 5px;
+  height: 5px;
+  background: var(--color-primary-400);
+  border-radius: 50%;
+  animation: typingBounce 1.4s infinite ease-in-out;
+}
+
+.specialist-status.running .dot:nth-child(2) { animation-delay: 0.2s; }
+.specialist-status.running .dot:nth-child(3) { animation-delay: 0.4s; }
+
+.specialist-time {
+  font-size: 0.65rem;
+  color: var(--color-text-muted);
+}
+
+.specialist-toggle {
+  font-size: 0.6rem;
+  color: var(--color-text-muted);
+}
+
+.specialist-analysis {
+  padding: 0.5rem 0.75rem;
+  border-top: 1px solid var(--color-border);
+  font-size: 0.8rem;
+  max-height: 400px;
+  overflow-y: auto;
 }
 
 /* ── 响应式 ── */
