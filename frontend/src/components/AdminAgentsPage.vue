@@ -1,6 +1,6 @@
 <script setup>
 import { ref, onMounted, computed } from 'vue'
-import { listAgents, getAgent, updateAgent, deleteAgent, listAnalysisAgents, updateAnalysisAgent } from '../api'
+import { listAgents, getAgent, updateAgent, deleteAgent, listAnalysisAgents, updateAnalysisAgent, generateAgentPrompt } from '../api'
 
 const agents = ref([])
 const analysisAgents = ref([])
@@ -12,6 +12,10 @@ const selectedAgent = ref(null)
 const editingAgent = ref(null)
 const saving = ref(false)
 const showDeleteConfirm = ref(false)
+const showGenerateDialog = ref(false)
+const showOptimizeConfirm = ref(false)
+const generateForm = ref({ name: '', description: '' })
+const aiLoading = ref(false)
 const toast = ref({ show: false, message: '', type: 'success' })
 
 function showToast(message, type = 'success') {
@@ -47,6 +51,64 @@ function startEdit() {
 
 function cancelEdit() {
   editingAgent.value = null
+}
+
+// AI 优化当前提示词
+async function aiOptimize() {
+  if (!editingAgent.value?.system_prompt) return
+  aiLoading.value = true
+  try {
+    const { data } = await generateAgentPrompt({
+      name: editingAgent.value.name,
+      description: editingAgent.value.description,
+      current_prompt: editingAgent.value.system_prompt,
+      mode: 'optimize',
+    })
+    if (data.prompt) {
+      editingAgent.value.system_prompt = data.prompt
+      showToast('AI 优化完成，请检查后保存')
+    }
+  } catch (e) {
+    showToast('AI 优化失败: ' + (e.response?.data?.detail || e.message), 'error')
+  } finally {
+    aiLoading.value = false
+  }
+}
+
+// 打开 AI 生成对话框
+function openGenerateDialog() {
+  generateForm.value = {
+    name: editingAgent.value?.name || '',
+    description: editingAgent.value?.description || '',
+  }
+  showGenerateDialog.value = true
+}
+
+// AI 从零生成提示词
+async function aiGenerate() {
+  if (!generateForm.value.name) return
+  aiLoading.value = true
+  showGenerateDialog.value = false
+  try {
+    const { data } = await generateAgentPrompt({
+      name: generateForm.value.name,
+      description: generateForm.value.description,
+      mode: 'generate',
+    })
+    if (data.prompt) {
+      if (!editingAgent.value) {
+        editingAgent.value = { name: generateForm.value.name, description: generateForm.value.description, system_prompt: '' }
+      }
+      editingAgent.value.system_prompt = data.prompt
+      if (generateForm.value.name) editingAgent.value.name = generateForm.value.name
+      if (generateForm.value.description) editingAgent.value.description = generateForm.value.description
+      showToast('AI 生成完成，请检查后保存')
+    }
+  } catch (e) {
+    showToast('AI 生成失败: ' + (e.response?.data?.detail || e.message), 'error')
+  } finally {
+    aiLoading.value = false
+  }
 }
 
 async function saveEdit() {
@@ -192,6 +254,16 @@ onMounted(loadAgents)
             </div>
             <div class="edit-field">
               <label class="edit-label">系统提示词</label>
+              <div class="prompt-toolbar">
+                <button class="btn btn-outline btn-xs" @click="showOptimizeConfirm = true" :disabled="aiLoading || !editingAgent.system_prompt">
+                  <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>
+                  {{ aiLoading ? '生成中...' : 'AI 优化' }}
+                </button>
+                <button class="btn btn-outline btn-xs" @click="openGenerateDialog" :disabled="aiLoading">
+                  <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6v6m0 0v6m0-6h6m-6 0H6"/></svg>
+                  AI 生成
+                </button>
+              </div>
               <textarea v-model="editingAgent.system_prompt" class="input-field prompt-textarea" rows="20"></textarea>
             </div>
             <div v-if="activeTab === 'conversation'" class="edit-field">
@@ -226,6 +298,44 @@ onMounted(loadAgents)
           <div class="modal-actions">
             <button class="btn btn-outline" @click="showDeleteConfirm = false">取消</button>
             <button class="btn btn-danger" @click="handleDelete">确认删除</button>
+          </div>
+        </div>
+      </div>
+    </Teleport>
+
+    <!-- AI Optimize Confirm -->
+    <Teleport to="body">
+      <div v-if="showOptimizeConfirm" class="modal-overlay" @click.self="showOptimizeConfirm = false">
+        <div class="modal-dialog">
+          <h3 class="modal-title">AI 优化提示词</h3>
+          <p class="modal-desc">AI 将基于当前提示词进行优化重写，补充缺失的结构（如 Few-shot 示例、负面约束等）。优化后内容将替换当前提示词，请确认继续？</p>
+          <div class="modal-actions">
+            <button class="btn btn-outline" @click="showOptimizeConfirm = false">取消</button>
+            <button class="btn btn-primary" @click="showOptimizeConfirm = false; aiOptimize()">确认优化</button>
+          </div>
+        </div>
+      </div>
+    </Teleport>
+
+    <!-- AI Generate Dialog -->
+    <Teleport to="body">
+      <div v-if="showGenerateDialog" class="modal-overlay" @click.self="showGenerateDialog = false">
+        <div class="modal-dialog">
+          <h3 class="modal-title">AI 生成提示词</h3>
+          <p class="modal-desc">描述 Agent 的角色和职责，AI 将为你生成专业的系统提示词。</p>
+          <div class="edit-field">
+            <label class="edit-label">Agent 名称</label>
+            <input v-model="generateForm.name" class="input-field" placeholder="如：基金定投顾问" />
+          </div>
+          <div class="edit-field">
+            <label class="edit-label">角色描述</label>
+            <textarea v-model="generateForm.description" class="input-field" rows="3" placeholder="如：帮助用户制定基金定投计划，分析定投收益，给出定投策略建议"></textarea>
+          </div>
+          <div class="modal-actions">
+            <button class="btn btn-outline" @click="showGenerateDialog = false">取消</button>
+            <button class="btn btn-primary" @click="aiGenerate" :disabled="!generateForm.name || aiLoading">
+              {{ aiLoading ? '生成中...' : '开始生成' }}
+            </button>
           </div>
         </div>
       </div>
@@ -476,6 +586,41 @@ onMounted(loadAgents)
   resize: vertical;
   min-height: 200px;
 }
+
+.prompt-toolbar {
+  display: flex;
+  gap: 0.5rem;
+  margin-bottom: 0.5rem;
+}
+
+.btn-xs {
+  font-size: 0.72rem;
+  padding: 0.25rem 0.6rem;
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  background: linear-gradient(135deg, #6366f1, #8b5cf6);
+  color: white;
+  border: none;
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.btn-xs:hover {
+  background: linear-gradient(135deg, #4f46e5, #7c3aed);
+  box-shadow: 0 2px 8px rgba(99,102,241,0.35);
+  transform: translateY(-1px);
+}
+
+.btn-xs:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  transform: none;
+  box-shadow: none;
+}
+
+.btn-xs svg { flex-shrink: 0; }
 
 .toggle-label {
   display: flex;

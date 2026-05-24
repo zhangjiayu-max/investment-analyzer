@@ -70,6 +70,9 @@ const showConfirmTx = ref(false)
 const confirmTxData = ref(null)
 const confirmTxPrice = ref(0)
 
+// Pending transactions reminder
+const pendingTxs = ref([])
+
 // Toast
 const toast = ref({ show: false, message: '', type: 'success' })
 function showToast(message, type = 'success') {
@@ -109,11 +112,29 @@ async function loadData() {
     const { data } = await getPortfolioSummary()
     summary.value = data
     holdings.value = data.holdings || []
+    // 加载所有待确认交易
+    await loadPendingTxs()
   } catch (e) {
     showToast('加载失败: ' + e.message, 'error')
   } finally {
     loading.value = false
   }
+}
+
+async function loadPendingTxs() {
+  const allPending = []
+  for (const h of holdings.value) {
+    try {
+      const { data } = await listPortfolioTransactions(h.id)
+      const pending = (data.transactions || []).filter(tx => tx.status === 'pending')
+      for (const tx of pending) {
+        tx._fund_name = h.fund_name
+        tx._fund_code = h.fund_code
+      }
+      allPending.push(...pending)
+    } catch (e) { /* ignore */ }
+  }
+  pendingTxs.value = allPending
 }
 
 onMounted(loadData)
@@ -481,6 +502,28 @@ function txDisplayAmount(tx) {
           </svg>
           新增持仓
         </button>
+      </div>
+    </div>
+
+    <!-- Pending Transactions Reminder -->
+    <div v-if="pendingTxs.length > 0" class="pending-banner">
+      <div class="pending-banner-header">
+        <svg width="18" height="18" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/>
+        </svg>
+        <strong>{{ pendingTxs.length }} 笔交易待确认</strong>
+        <span class="pending-hint">（提交后 T+1 才能确认净值，请在确认后点击「确认」填入实际净值）</span>
+      </div>
+      <div class="pending-list">
+        <div v-for="tx in pendingTxs" :key="tx.id" class="pending-item">
+          <span :class="['badge', txTypeBadge(tx.transaction_type)]">{{ txTypeLabel(tx.transaction_type) }}</span>
+          <span class="pending-fund">{{ tx._fund_name }}</span>
+          <span class="pending-detail">
+            {{ tx.transaction_type === 'buy' ? '¥' + (tx.submitted_amount || 0).toLocaleString() : (tx.submitted_shares || 0).toLocaleString() + ' 份' }}
+          </span>
+          <span class="pending-date">{{ tx.transaction_date }}</span>
+          <button class="btn-ghost btn-sm btn-primary-text" @click="openConfirmTx(tx)">确认</button>
+        </div>
       </div>
     </div>
 
@@ -1048,6 +1091,78 @@ function txDisplayAmount(tx) {
   border-radius: var(--radius-lg);
   padding: 1rem 1.25rem;
   transition: all var(--transition-fast);
+}
+
+/* Pending transactions banner */
+.pending-banner {
+  background: #fffbeb;
+  border: 1px solid #fde68a;
+  border-radius: var(--radius-lg);
+  padding: 1rem 1.25rem;
+  margin-bottom: 1.5rem;
+}
+
+.pending-banner-header {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  color: #92400e;
+  font-size: 0.9rem;
+  margin-bottom: 0.75rem;
+}
+
+.pending-hint {
+  font-size: 0.75rem;
+  color: #a16207;
+  font-weight: 400;
+}
+
+.pending-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.pending-item {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.5rem 0.75rem;
+  background: rgba(255, 255, 255, 0.6);
+  border-radius: var(--radius-md);
+  font-size: 0.82rem;
+}
+
+.pending-fund {
+  font-weight: 600;
+  color: var(--color-text-primary);
+}
+
+.pending-detail {
+  color: var(--color-text-secondary);
+}
+
+.pending-date {
+  color: var(--color-text-muted);
+  font-size: 0.75rem;
+  margin-left: auto;
+}
+
+.dark .pending-banner {
+  background: #422006;
+  border-color: #92400e;
+}
+
+.dark .pending-banner-header {
+  color: #fbbf24;
+}
+
+.dark .pending-hint {
+  color: #d97706;
+}
+
+.dark .pending-item {
+  background: rgba(0, 0, 0, 0.2);
 }
 
 .summary-card:hover {

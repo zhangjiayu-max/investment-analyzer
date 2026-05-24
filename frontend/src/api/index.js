@@ -186,6 +186,11 @@ export function deleteAgent(id) {
   return api.delete(`/agents/${id}`)
 }
 
+/** AI 生成/优化 Agent 提示词 */
+export function generateAgentPrompt(data) {
+  return api.post('/agents/generate-prompt', data, { timeout: 120000 })
+}
+
 /** 对话列表 */
 export function listConversations() {
   return api.get('/conversations')

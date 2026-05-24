@@ -637,6 +637,97 @@ async def delete_agent_api(agent_id: int):
     return {"ok": True}
 
 
+class GeneratePromptRequest(BaseModel):
+    name: str = ""
+    description: str = ""
+    current_prompt: str = ""
+    mode: str = "optimize"  # "optimize" 或 "generate"
+
+# 可用工具列表（供 AI 生成提示词时参考）
+AVAILABLE_TOOLS_DESC = """
+- query_valuation: 查询指定指数的估值数据（PE、PB、百分位、z-score）
+- search_knowledge: 从知识库检索相关文章、分析记录
+- get_bond_temperature: 获取当前债市温度
+- get_valuation_list: 获取所有指数估值概览，可筛选低估/高估
+- calculate_metrics: 计算投资指标（定投收益率、年化收益、最大回撤、风险等级）
+- web_search: 搜索最新财经新闻和市场资讯
+- query_portfolio: 查询用户持仓信息
+- query_fund_info: 查询基金详细信息
+"""
+
+PROMPT_GENERATOR_META = """你是一位 AI 提示词工程专家，专门为投资分析领域的 Agent 编写系统提示词。
+
+## 编写规范
+一个高质量的 Agent 提示词必须包含以下部分：
+
+1. **人设**：清晰的角色定义（经验年限、专注领域、专业背景）
+2. **分析框架**：具体的方法论，带数值阈值（如"百分位 <20% 为深度低估"）
+3. **输出规范**：明确的格式要求（结论先行、数据支撑、风险提示等）
+4. **思维链**：分步推理流程（理解诉求→检索数据→分析→结论→标注置信度）
+5. **知识边界**：能力范围声明（擅长什么、不擅长什么、超出范围怎么处理）
+6. **Few-shot 示例**：一个好的回答样例（让模型知道期望的输出质量）
+7. **负面约束**：明确列出不要做的事（如"不要给出具体买卖时点"、"不要编造数据"）
+
+## 注意事项
+- 使用 Markdown 标题层级（## / ###），结构清晰
+- 数值判断标准必须具体（如百分位区间、z-score 阈值）
+- 语气专业但不晦涩，面向普通投资者
+- 篇幅控制在 300-600 字，不要太长
+"""
+
+
+@app.post("/api/agents/generate-prompt")
+async def generate_prompt_api(req: GeneratePromptRequest):
+    """AI 辅助生成或优化 Agent 系统提示词。"""
+    if req.mode == "optimize" and not req.current_prompt:
+        raise HTTPException(400, "优化模式需要提供 current_prompt")
+
+    if req.mode == "optimize":
+        user_content = f"""请优化以下 Agent 系统提示词。保持原有角色定位不变，但按规范补充缺失的部分（如 Few-shot 示例、负面约束等），让提示词更专业、更完整。
+
+## 当前 Agent 信息
+- 名称：{req.name}
+- 描述：{req.description}
+
+## 当前提示词
+{req.current_prompt}
+
+## 可用工具
+{AVAILABLE_TOOLS_DESC}
+
+请直接输出优化后的完整提示词，不要加任何解释说明。"""
+    else:
+        user_content = f"""请根据以下信息从零生成一个 Agent 系统提示词。
+
+## Agent 信息
+- 名称：{req.name}
+- 描述：{req.description}
+
+## 可用工具
+{AVAILABLE_TOOLS_DESC}
+
+请直接输出完整的提示词，不要加任何解释说明。"""
+
+    try:
+        resp = _call_llm(
+            messages=[
+                {"role": "system", "content": PROMPT_GENERATOR_META},
+                {"role": "user", "content": user_content},
+            ],
+            model=MODEL,
+            max_tokens=2000,
+        )
+        result = resp.choices[0].message.content if resp and resp.choices else ""
+        if not result:
+            raise HTTPException(500, "AI 生成失败，返回为空")
+        return {"ok": True, "prompt": result.strip()}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logging.warning(f"AI 生成提示词失败: {e}")
+        raise HTTPException(500, f"AI 生成失败: {str(e)}")
+
+
 @app.get("/api/conversations")
 async def list_conversations_api():
     """对话列表。"""
