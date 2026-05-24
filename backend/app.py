@@ -32,12 +32,16 @@ from db import (
     update_linked_article_file, update_linked_article_embed_status, save_document_chunks, get_document_chunks,
     create_holding, get_holding, list_holdings, update_holding, delete_holding, get_portfolio_summary,
     create_transaction, list_transactions,
+    refresh_holding_price, refresh_all_fund_prices, fetch_fund_nav,
+    list_analysis_agents, get_analysis_agent, update_analysis_agent,
+    create_analysis_history, list_analysis_history, get_analysis_history_item, delete_analysis_history,
 )
 from article_reader import fetch_article, download_images, extract_stock_codes
 from market_data import get_stock_info, get_index_valuation
 from valuation import analyze_stock, analyze_fund
 from llm_service import (analyze_article, analyze_article_stream, chat_about_investment,
-                         analyze_images_batch, chat_with_agent, chat_with_tools, ORCHESTRATOR_PROMPT)
+                         analyze_images_batch, chat_with_agent, chat_with_tools, ORCHESTRATOR_PROMPT,
+                         _call_llm, MODEL)
 from orchestrator import orchestrate, orchestrate_stream, clarify_requirement
 from multi_agent import run_specialist
 from image_parser import ImageParser
@@ -1058,6 +1062,127 @@ async def get_token_usage_api(days: int = 7):
         "daily": [dict(r) for r in daily],
         "by_model": [dict(r) for r in by_model],
     }
+
+
+# ── AI 市场分析 API ──────────────────────────────────────
+
+
+class AnalysisRunRequest(BaseModel):
+    index_code: str = ""
+    index_name: str = ""
+    agent_id: int = 1
+
+
+class AnalysisAgentUpdateRequest(BaseModel):
+    name: str = None
+    description: str = None
+    system_prompt: str = None
+    is_active: int = None
+
+
+@app.post("/api/analysis/run")
+async def run_analysis(req: AnalysisRunRequest):
+    """触发 AI 市场分析。"""
+    # 1. 获取 agent 配置
+    agent = get_analysis_agent(req.agent_id)
+    if not agent:
+        raise HTTPException(404, "分析 Agent 不存在")
+
+    # 2. 获取当前指数估值数据
+    valuation_context = ""
+    if req.index_code:
+        try:
+            latest = get_latest_valuation(req.index_code)
+            if latest:
+                valuation_context = json.dumps(latest, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+
+    # 3. 检索最新新闻
+    news_context = ""
+    try:
+        from tools import execute_tool
+        news_result = execute_tool("web_search", {"query": "A股 今日行情 板块 热点", "max_results": 5})
+        news_context = news_result if news_result else ""
+    except Exception as e:
+        logger.warning(f"新闻检索失败: {e}")
+
+    # 4. 拼装 prompt
+    full_prompt = agent["system_prompt"]
+    if valuation_context:
+        full_prompt += f"\n\n<current_valuation>\n当前指数估值数据（{req.index_name or req.index_code}）：\n{valuation_context}\n</current_valuation>"
+    if news_context:
+        full_prompt += f"\n\n<latest_news>\n最新财经新闻：\n{news_context}\n</latest_news>"
+
+    # 5. 调用 LLM
+    try:
+        response = _call_llm(
+            model=MODEL,
+            messages=[
+                {"role": "system", "content": full_prompt},
+                {"role": "user", "content": "请生成今日市场分析报告。"},
+            ],
+            temperature=0.3,
+            max_tokens=4000,
+        )
+        result_text = response.choices[0].message.content or ""
+        token_usage = response.usage.total_tokens if response.usage else 0
+    except Exception as e:
+        logger.error(f"AI 分析失败: {e}")
+        raise HTTPException(500, f"AI 分析失败: {str(e)}")
+
+    # 6. 保存历史
+    history_id = create_analysis_history(
+        index_code=req.index_code,
+        index_name=req.index_name,
+        agent_id=agent["id"],
+        agent_name=agent["name"],
+        prompt_used=full_prompt,
+        news_context=news_context,
+        valuation_context=valuation_context,
+        result=result_text,
+        token_usage=token_usage,
+    )
+
+    return {"id": history_id, "result": result_text, "token_usage": token_usage}
+
+
+@app.get("/api/analysis/history")
+async def get_analysis_history_api(index_code: str = "", limit: int = 50):
+    """获取分析历史列表。"""
+    return {"history": list_analysis_history(index_code or None, limit)}
+
+
+@app.get("/api/analysis/history/{history_id}")
+async def get_analysis_history_detail_api(history_id: int):
+    """获取单条分析历史详情。"""
+    item = get_analysis_history_item(history_id)
+    if not item:
+        raise HTTPException(404, "记录不存在")
+    return item
+
+
+@app.delete("/api/analysis/history/{history_id}")
+async def delete_analysis_history_api(history_id: int):
+    """删除分析历史。"""
+    delete_analysis_history(history_id)
+    return {"ok": True}
+
+
+@app.get("/api/analysis-agents")
+async def list_analysis_agents_api():
+    """获取分析 Agent 列表。"""
+    return {"agents": list_analysis_agents()}
+
+
+@app.put("/api/analysis-agents/{agent_id}")
+async def update_analysis_agent_api(agent_id: int, req: AnalysisAgentUpdateRequest):
+    """更新分析 Agent 配置。"""
+    kwargs = {k: v for k, v in req.dict().items() if v is not None}
+    if not kwargs:
+        raise HTTPException(400, "无更新内容")
+    update_analysis_agent(agent_id, **kwargs)
+    return {"ok": True}
 
 
 @app.get("/api/health")
@@ -2154,6 +2279,25 @@ async def create_transaction_api(req: CreateTransactionRequest):
         holding_id=req.holding_id, notes=req.notes,
     )
     return {"ok": True, "transaction_id": tx_id}
+
+
+@app.post("/api/portfolio/refresh")
+async def refresh_all_prices_api():
+    """批量刷新所有持仓的最新净值。"""
+    results = refresh_all_fund_prices()
+    return {"ok": True, "results": results, "total": len(results)}
+
+
+@app.post("/api/portfolio/{holding_id}/refresh")
+async def refresh_single_price_api(holding_id: int):
+    """刷新单个持仓的最新净值。"""
+    holding = get_holding(holding_id)
+    if not holding:
+        raise HTTPException(404, "持仓不存在")
+    nav_data = refresh_holding_price(holding_id)
+    if not nav_data:
+        raise HTTPException(502, "净值获取失败，请稍后重试")
+    return {"ok": True, "fund_code": holding["fund_code"], "nav": nav_data}
 
 
 # ── 债市数据 API ──────────────────────────────────────────

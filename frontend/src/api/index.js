@@ -358,6 +358,40 @@ export function deleteLinkedArticle(id) {
   return api.delete(`/linked-articles/${id}`)
 }
 
+// ── AI 市场分析 API ──────────────────────────────────────
+
+/** 触发 AI 分析 */
+export function runAnalysis(indexCode, indexName, agentId = 1) {
+  return api.post('/analysis/run', { index_code: indexCode, index_name: indexName, agent_id: agentId }, { timeout: 300000 })
+}
+
+/** 分析历史列表 */
+export function listAnalysisHistory(indexCode = '', limit = 50) {
+  const params = { limit }
+  if (indexCode) params.index_code = indexCode
+  return api.get('/analysis/history', { params })
+}
+
+/** 分析历史详情 */
+export function getAnalysisHistoryDetail(id) {
+  return api.get(`/analysis/history/${id}`)
+}
+
+/** 删除分析历史 */
+export function deleteAnalysisHistory(id) {
+  return api.delete(`/analysis/history/${id}`)
+}
+
+/** Agent 配置列表 */
+export function listAnalysisAgents() {
+  return api.get('/analysis-agents')
+}
+
+/** 更新 Agent 配置 */
+export function updateAnalysisAgent(id, data) {
+  return api.put(`/analysis-agents/${id}`, data)
+}
+
 // ── 债市数据 API ──────────────────────────────────────
 
 /** 获取债市温度数据 */
@@ -405,6 +439,16 @@ export function listPortfolioTransactions(holdingId, limit = 100) {
 /** 新增交易记录 */
 export function createPortfolioTransaction(data) {
   return api.post('/portfolio/transactions', data)
+}
+
+/** 刷新所有持仓净值 */
+export function refreshAllPortfolioPrices() {
+  return api.post('/portfolio/refresh', {}, { timeout: 120000 })
+}
+
+/** 刷新单个持仓净值 */
+export function refreshPortfolioPrice(holdingId) {
+  return api.post(`/portfolio/${holdingId}/refresh`, {}, { timeout: 30000 })
 }
 
 export default api
