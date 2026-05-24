@@ -275,6 +275,23 @@ def init_db():
     """)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_tx_holding ON portfolio_transactions(holding_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_tx_fund ON portfolio_transactions(fund_code)")
+    # 交易状态字段迁移（pending/confirmed/settled）
+    _add_column_if_not_exists(conn, "portfolio_transactions", "status", "TEXT DEFAULT 'confirmed'")
+    _add_column_if_not_exists(conn, "portfolio_transactions", "submitted_shares", "REAL")
+    _add_column_if_not_exists(conn, "portfolio_transactions", "submitted_amount", "REAL")
+    _add_column_if_not_exists(conn, "portfolio_transactions", "confirmed_at", "TEXT")
+    _add_column_if_not_exists(conn, "portfolio_transactions", "settled_at", "TEXT")
+
+    # 指数信息缓存表
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS index_info (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            index_code TEXT NOT NULL UNIQUE,
+            index_name TEXT,
+            info TEXT NOT NULL,
+            created_at TEXT DEFAULT (datetime('now','localtime'))
+        )
+    """)
 
     # 初始化预设 Agent
     _init_preset_agents(conn)
@@ -691,6 +708,38 @@ def search_indexes_by_keyword(keyword: str) -> list[dict]:
     """, (f"%{keyword}%", f"%{keyword}%")).fetchall()
     conn.close()
     return [dict(r) for r in rows]
+
+
+# ── 指数信息 CRUD ──────────────────────────────────────
+
+
+def get_index_info(index_code: str) -> dict | None:
+    """查询指数信息缓存。"""
+    conn = _get_conn()
+    row = conn.execute(
+        "SELECT * FROM index_info WHERE index_code = ?", (index_code,)
+    ).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def save_index_info(index_code: str, index_name: str, info: str) -> int:
+    """保存指数信息（UPSERT）。"""
+    conn = _get_conn()
+    conn.execute("""
+        INSERT INTO index_info (index_code, index_name, info)
+        VALUES (?, ?, ?)
+        ON CONFLICT(index_code) DO UPDATE SET
+            index_name = excluded.index_name,
+            info = excluded.info,
+            created_at = datetime('now','localtime')
+    """, (index_code, index_name, info))
+    conn.commit()
+    row = conn.execute(
+        "SELECT id FROM index_info WHERE index_code = ?", (index_code,)
+    ).fetchone()
+    conn.close()
+    return row["id"] if row else 0
 
 
 # ── 文章管理 CRUD ──────────────────────────────────────
@@ -1618,20 +1667,47 @@ def get_portfolio_summary(user_id: str = "default") -> dict:
 def create_transaction(fund_code: str, transaction_type: str, amount: float,
                        transaction_date: str, shares: float = None,
                        price: float = None, holding_id: int = None,
-                       notes: str = None, user_id: str = "default") -> int:
-    """新增交易记录，返回 transaction_id。自动更新持仓数据。"""
+                       notes: str = None, user_id: str = "default",
+                       status: str = None, submitted_shares: float = None,
+                       submitted_amount: float = None) -> int:
+    """新增交易记录，返回 transaction_id。自动更新持仓数据。
+
+    status: 'pending' | 'confirmed' | None(默认confirmed)
+      - pending: 买入时 amount 存入 submitted_amount，卖出时 shares 存入 submitted_shares
+      - confirmed: 直接确认，amount/shares/price 存入实际值
+    """
+    # 确定状态
+    if status is None:
+        status = 'confirmed'
+
+    if status == 'pending':
+        # pending 交易：amount=0, shares=NULL，实际值存 submitted_* 字段
+        actual_amount = 0
+        actual_shares = None
+        actual_price = None
+        if transaction_type == 'buy':
+            submitted_amount = submitted_amount or amount
+        elif transaction_type == 'sell':
+            submitted_shares = submitted_shares or shares
+    else:
+        actual_amount = amount
+        actual_shares = shares
+        actual_price = price
+
     conn = _get_conn()
     cur = conn.execute("""
         INSERT INTO portfolio_transactions
-            (holding_id, user_id, fund_code, transaction_type, amount, shares, price, transaction_date, notes)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """, (holding_id, user_id, fund_code, transaction_type, amount, shares, price, transaction_date, notes))
+            (holding_id, user_id, fund_code, transaction_type, amount, shares, price,
+             transaction_date, notes, status, submitted_shares, submitted_amount)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (holding_id, user_id, fund_code, transaction_type, actual_amount, actual_shares,
+          actual_price, transaction_date, notes, status, submitted_shares, submitted_amount))
     tx_id = cur.lastrowid
     conn.commit()
     conn.close()
 
-    # 自动更新持仓数据
-    if holding_id:
+    # 只有 confirmed 状态才更新持仓数据
+    if holding_id and status in ('confirmed', 'settled'):
         _recalculate_holding(holding_id)
 
     return tx_id
@@ -1673,7 +1749,7 @@ def _recalculate_holding(holding_id: int):
 
     txs = conn.execute("""
         SELECT * FROM portfolio_transactions
-        WHERE holding_id = ?
+        WHERE holding_id = ? AND (status IN ('confirmed', 'settled') OR status IS NULL)
         ORDER BY transaction_date ASC
     """, (holding_id,)).fetchall()
 
@@ -1712,6 +1788,81 @@ def _recalculate_holding(holding_id: int):
           holding_id))
     conn.commit()
     conn.close()
+
+
+def confirm_transaction(tx_id: int, confirmed_price: float,
+                        confirmed_shares: float = None,
+                        confirmed_amount: float = None) -> bool:
+    """确认交易：填入实际净值，计算实际份额/金额。
+
+    买入：confirmed_shares = submitted_amount / confirmed_price
+    卖出：confirmed_amount = submitted_shares * confirmed_price
+    """
+    conn = _get_conn()
+    tx = conn.execute("SELECT * FROM portfolio_transactions WHERE id = ?", (tx_id,)).fetchone()
+    if not tx:
+        conn.close()
+        return False
+    tx = dict(tx)
+
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    tx_type = tx["transaction_type"]
+
+    if tx_type == "buy":
+        # 买入确认：金额 / 净值 = 份额
+        sub_amount = confirmed_amount or tx.get("submitted_amount") or tx.get("amount") or 0
+        if confirmed_price > 0:
+            actual_shares = round(sub_amount / confirmed_price, 2)
+        else:
+            actual_shares = confirmed_shares or 0
+        actual_amount = sub_amount
+        actual_price = confirmed_price
+    elif tx_type == "sell":
+        # 卖出确认：份额 × 净值 = 金额
+        sub_shares = confirmed_shares or tx.get("submitted_shares") or tx.get("shares") or 0
+        actual_amount = round(sub_shares * confirmed_price, 2)
+        actual_shares = sub_shares
+        actual_price = confirmed_price
+    else:
+        # 分红等其他类型
+        actual_amount = confirmed_amount or tx.get("amount") or 0
+        actual_shares = confirmed_shares
+        actual_price = confirmed_price
+
+    conn.execute("""
+        UPDATE portfolio_transactions SET
+            status = 'confirmed', amount = ?, shares = ?, price = ?,
+            confirmed_at = ?
+        WHERE id = ?
+    """, (actual_amount, actual_shares, actual_price, now, tx_id))
+    conn.commit()
+    conn.close()
+
+    if tx.get("holding_id"):
+        _recalculate_holding(tx["holding_id"])
+
+    return True
+
+
+def settle_transaction(tx_id: int) -> bool:
+    """标记卖出交易已到账。"""
+    conn = _get_conn()
+    tx = conn.execute("SELECT * FROM portfolio_transactions WHERE id = ?", (tx_id,)).fetchone()
+    if not tx:
+        conn.close()
+        return False
+    tx = dict(tx)
+    if tx.get("status") != "confirmed":
+        conn.close()
+        return False
+
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    conn.execute("""
+        UPDATE portfolio_transactions SET status = 'settled', settled_at = ? WHERE id = ?
+    """, (now, tx_id))
+    conn.commit()
+    conn.close()
+    return True
 
 
 # ── 基金净值更新 ──────────────────────────────────────
@@ -1836,6 +1987,139 @@ def refresh_all_fund_prices(user_id: str = "default") -> list[dict]:
         })
 
     return results
+
+
+# ── 基金信息查询 ──────────────────────────────────────
+
+
+def lookup_fund_info(fund_code: str) -> dict | None:
+    """通过 akshare 查询基金基本信息，自动填充名称、类型、跟踪标的。"""
+    try:
+        import akshare as ak
+        df = ak.fund_overview_em(symbol=fund_code)
+        if df is None or len(df) == 0:
+            return None
+        row = df.iloc[0]
+        return {
+            "fund_code": str(row.get("基金代码", fund_code)),
+            "fund_name": str(row.get("基金简称", "")),
+            "fund_full_name": str(row.get("基金全称", "")),
+            "fund_type": str(row.get("基金类型", "")),
+            "tracking_index": str(row.get("跟踪标的", "")),
+            "fund_manager": str(row.get("基金经理人", "")),
+            "scale": str(row.get("净资产规模", "")),
+            "established": str(row.get("成立日期/规模", "")),
+            "benchmark": str(row.get("业绩比较基准", "")),
+        }
+    except Exception as e:
+        print(f"[db] 查询基金信息失败 {fund_code}: {e}")
+        return None
+
+
+def classify_bond_type(bond_name: str) -> str:
+    """根据债券名称推断类型：利率债/信用债/可转债。"""
+    name = bond_name.strip()
+    # 可转债
+    if "转债" in name:
+        return "可转债"
+    # 利率债：国债、政金债（国开/进出/农发）、地方政府债
+    rate_keywords = ("国债", "国开", "进出", "农发", "政金", "地方债", "政府债", "央行")
+    for kw in rate_keywords:
+        if kw in name:
+            return "利率债"
+    # 其余归为信用债
+    return "信用债"
+
+
+def get_fund_holdings(fund_code: str, year: str = None) -> dict:
+    """获取基金持仓详情：股票重仓 + 债券持仓 + 资产配置。"""
+    if not year:
+        from datetime import datetime
+        year = str(datetime.now().year)
+
+    result = {
+        "fund_code": fund_code,
+        "top_stocks": [],
+        "bond_holdings": [],
+        "asset_allocation": [],
+        "industry_allocation": [],
+        "bond_type_summary": {},
+    }
+
+    # 1. 股票持仓 Top 10
+    try:
+        import akshare as ak
+        df = ak.fund_portfolio_hold_em(symbol=fund_code, date=year)
+        if df is not None and len(df) > 0:
+            # 取最新一期的前 10
+            quarters = df["季度"].unique()
+            if len(quarters) > 0:
+                latest_q = quarters[-1]
+                latest = df[df["季度"] == latest_q].head(10)
+                for _, r in latest.iterrows():
+                    result["top_stocks"].append({
+                        "stock_code": str(r.get("股票代码", "")),
+                        "stock_name": str(r.get("股票名称", "")),
+                        "pct_nav": float(r.get("占净值比例", 0)),
+                        "shares": float(r.get("持股数", 0)),
+                        "market_value": float(r.get("持仓市值", 0)),
+                    })
+    except Exception as e:
+        print(f"[db] 获取股票持仓失败 {fund_code}: {e}")
+
+    # 2. 债券持仓
+    bond_type_counter = {}
+    try:
+        import akshare as ak
+        df = ak.fund_portfolio_bond_hold_em(symbol=fund_code, date=year)
+        if df is not None and len(df) > 0:
+            quarters = df["季度"].unique()
+            if len(quarters) > 0:
+                latest_q = quarters[-1]
+                latest = df[df["季度"] == latest_q].head(10)
+                for _, r in latest.iterrows():
+                    bond_name = str(r.get("债券名称", ""))
+                    btype = classify_bond_type(bond_name)
+                    bond_type_counter[btype] = bond_type_counter.get(btype, 0) + float(r.get("占净值比例", 0))
+                    result["bond_holdings"].append({
+                        "bond_code": str(r.get("债券代码", "")),
+                        "bond_name": bond_name,
+                        "pct_nav": float(r.get("占净值比例", 0)),
+                        "market_value": float(r.get("持仓市值", 0)),
+                        "bond_type": btype,
+                    })
+    except Exception as e:
+        print(f"[db] 获取债券持仓失败 {fund_code}: {e}")
+
+    result["bond_type_summary"] = {k: round(v, 2) for k, v in bond_type_counter.items()}
+
+    # 3. 资产配置（股票/债券/现金/其他）
+    try:
+        import akshare as ak
+        df = ak.fund_individual_detail_hold_xq(symbol=fund_code)
+        if df is not None and len(df) > 0:
+            for _, r in df.iterrows():
+                result["asset_allocation"].append({
+                    "type": str(r.get("资产类型", "")),
+                    "pct": str(r.get("仓位占比", "")),
+                })
+    except Exception as e:
+        print(f"[db] 获取资产配置失败 {fund_code}: {e}")
+
+    # 4. 行业配置
+    try:
+        import akshare as ak
+        df = ak.fund_portfolio_industry_allocation_em(symbol=fund_code, date=year)
+        if df is not None and len(df) > 0:
+            for _, r in df.head(10).iterrows():
+                result["industry_allocation"].append({
+                    "industry": str(r.get("行业类别", "")),
+                    "pct_nav": float(r.get("占净值比例", 0)),
+                })
+    except Exception as e:
+        print(f"[db] 获取行业配置失败 {fund_code}: {e}")
+
+    return result
 
 
 # ── AI 市场分析 Agent + 历史 ──────────────────────────────────────
@@ -1983,5 +2267,3 @@ def delete_analysis_history(history_id: int) -> bool:
     conn.commit()
     conn.close()
     return True
-
-    return results

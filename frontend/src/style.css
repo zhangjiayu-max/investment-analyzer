@@ -120,6 +120,20 @@ body {
   transition: background-color var(--transition-normal), color var(--transition-normal);
 }
 
+/* ── Page Header ── */
+.page-title {
+  font-size: 1.25rem;
+  font-weight: 700;
+  color: var(--color-text-primary);
+  margin: 0;
+}
+
+.page-desc {
+  font-size: 0.875rem;
+  color: var(--color-text-muted);
+  margin: 0.25rem 0 0 0;
+}
+
 /* ── Button Base ── */
 button {
   cursor: pointer;

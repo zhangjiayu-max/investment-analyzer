@@ -31,10 +31,12 @@ from db import (
     create_linked_article, list_linked_articles, get_linked_article, delete_linked_article,
     update_linked_article_file, update_linked_article_embed_status, save_document_chunks, get_document_chunks,
     create_holding, get_holding, list_holdings, update_holding, delete_holding, get_portfolio_summary,
-    create_transaction, list_transactions,
+    create_transaction, list_transactions, confirm_transaction, settle_transaction,
     refresh_holding_price, refresh_all_fund_prices, fetch_fund_nav,
+    lookup_fund_info, get_fund_holdings,
     list_analysis_agents, get_analysis_agent, update_analysis_agent,
     create_analysis_history, list_analysis_history, get_analysis_history_item, delete_analysis_history,
+    get_index_info, save_index_info,
 )
 from article_reader import fetch_article, download_images, extract_stock_codes
 from market_data import get_stock_info, get_index_valuation
@@ -391,6 +393,59 @@ async def get_history(index_code: str, days: int = 30, metric_type: str = None):
     }
 
 
+# ── 常见指数简介（静态字典，兜底用）────────────────────
+INDEX_INFO_DICT = {
+    "000300": "沪深300指数由沪深A股中规模大、流动性好的最具代表性的300只股票组成，于2005年4月8日正式发布，以综合反映沪深A股市场整体表现。沪深300是A股市场最核心的宽基指数，常被用作业绩基准和指数基金跟踪标的。",
+    "000905": "中证500指数由A股中剔除沪深300指数成份股后，总市值排名靠前的500只股票组成，反映中小市值上市公司的整体表现。与沪深300形成互补，是衡量中小盘股走势的重要指标。",
+    "000016": "上证50指数由沪市A股中规模大、流动性好的最具代表性的50只股票组成，主要覆盖金融、能源等大盘蓝筹股，反映沪市最具影响力的一批龙头企业的整体表现。",
+    "399006": "创业板指由创业板中市值大、流动性好的100只股票组成，代表创业板市场核心资产。创业板以成长型创新企业为主，集中在新能源、医药、TMT等高景气赛道。",
+    "399001": "深证成指从深交所上市股票中选取500只代表性的股票作为样本，覆盖主板、中小板和创业板，是衡量深市整体表现的核心指标。",
+    "000688": "科创50指数由科创板中市值大、流动性好的50只股票组成，集中体现科创板龙头企业的表现，行业以半导体、生物医药、新能源等硬科技为主。",
+    "000852": "中证1000指数由A股中剔除沪深300和中证500成份股后，规模偏小且流动性好的1000只股票组成，是小盘股的代表性指数。",
+    "399303": "国证2000指数由深交所市值排名1001-3000的股票组成，覆盖小盘股，是比中证1000更下沉的小盘股指数。",
+    "000015": "红利指数由沪市A股中现金股息率高、分红稳定、具有一定规模及流动性的50只股票组成，反映高红利股票的整体表现，适合追求稳定分红收益的投资者。",
+    "931009": "中证转债指数选取沪深交易所上市的可转换公司债券作为样本，反映可转债市场的整体表现。可转债兼具债券和股票特性，是攻守兼备的投资品种。",
+    "HSI": "恒生指数由港交所上市的市值最大及成交最活跃的50只股票组成，是香港股市最重要的指标，涵盖金融、地产、科技等核心行业。",
+    "HSTECH": "恒生科技指数由港交所上市的30只最大型科技企业股票组成，涵盖互联网、软件、半导体、消费电子等领域，被称为'港版纳斯达克'。",
+}
+
+
+@app.get("/api/index-info/{index_code}")
+async def get_index_info_api(index_code: str, index_name: str = ""):
+    """获取指数简介信息。优先查缓存（5天有效），其次查静态字典，最后用 LLM 生成。"""
+    # 1. 查缓存（5天过期）
+    cached = get_index_info(index_code)
+    if cached:
+        from datetime import datetime, timedelta
+        try:
+            created = datetime.strptime(cached["created_at"], "%Y-%m-%d %H:%M:%S")
+            if datetime.now() - created < timedelta(days=5):
+                return {"index_code": index_code, "info": cached["info"], "source": "cache"}
+        except (ValueError, KeyError):
+            pass  # 解析失败则视为过期，继续重新获取
+
+    # 2. 静态字典（去掉 .SH/.SZ 等后缀再匹配）
+    clean_code = index_code.split('.')[0] if '.' in index_code else index_code
+    lookup_code = clean_code if clean_code in INDEX_INFO_DICT else index_code
+    if lookup_code in INDEX_INFO_DICT:
+        info = INDEX_INFO_DICT[lookup_code]
+        save_index_info(index_code, index_name, info)
+        return {"index_code": index_code, "info": info, "source": "dict"}
+
+    # 3. LLM 生成
+    try:
+        prompt = f"请用2-3句话简洁介绍「{index_name or index_code}」这个股票指数，包括它由哪些股票组成、覆盖什么行业、适合什么样的投资者。不要使用markdown格式，直接输出纯文本。"
+        resp = _call_llm(messages=[{"role": "user", "content": prompt}], model=MODEL, max_tokens=800)
+        info = resp.choices[0].message.content if resp and resp.choices else ""
+        if info:
+            save_index_info(index_code, index_name, info.strip())
+            return {"index_code": index_code, "info": info.strip(), "source": "llm"}
+    except Exception as e:
+        logging.warning(f"LLM生成指数信息失败: {e}")
+
+    return {"index_code": index_code, "info": "", "source": "none"}
+
+
 @app.post("/api/rag/reindex")
 async def reindex_rag():
     """重建 RAG 全文索引 + 向量索引。"""
@@ -539,6 +594,47 @@ async def create_agent_api(req: CreateAgentRequest):
         description=req.description, knowledge_scope=req.knowledge_scope, icon=req.icon,
     )
     return {"ok": True, "agent_id": agent_id}
+
+
+@app.get("/api/agents/{agent_id}")
+async def get_agent_api(agent_id: int):
+    """获取单个 Agent 详情。"""
+    agent = get_agent(agent_id)
+    if not agent:
+        raise HTTPException(404, "Agent 不存在")
+    return agent
+
+
+class UpdateAgentRequest(BaseModel):
+    name: str = None
+    description: str = None
+    system_prompt: str = None
+    knowledge_scope: str = None
+    icon: str = None
+
+
+@app.put("/api/agents/{agent_id}")
+async def update_agent_api(agent_id: int, req: UpdateAgentRequest):
+    """更新 Agent 信息。"""
+    agent = get_agent(agent_id)
+    if not agent:
+        raise HTTPException(404, "Agent 不存在")
+    fields = {k: v for k, v in req.model_dump().items() if v is not None}
+    if fields:
+        update_agent(agent_id, **fields)
+    return {"ok": True}
+
+
+@app.delete("/api/agents/{agent_id}")
+async def delete_agent_api(agent_id: int):
+    """删除自定义 Agent（预设 Agent 不可删除）。"""
+    agent = get_agent(agent_id)
+    if not agent:
+        raise HTTPException(404, "Agent 不存在")
+    if agent.get("is_preset"):
+        raise HTTPException(400, "预设 Agent 不可删除")
+    delete_agent(agent_id)
+    return {"ok": True}
 
 
 @app.get("/api/conversations")
@@ -2202,12 +2298,21 @@ class UpdateHoldingRequest(BaseModel):
 class CreateTransactionRequest(BaseModel):
     fund_code: str
     transaction_type: str  # 'buy' | 'sell' | 'dividend'
-    amount: float
+    amount: float = 0      # 买入金额 / 卖出时可为0（pending）
     transaction_date: str
     shares: float = None
     price: float = None
     holding_id: int = None
     notes: str = None
+    status: str = None     # 'pending' | 'confirmed' | None(默认confirmed)
+    submitted_shares: float = None  # 卖出时提交的份额
+    submitted_amount: float = None  # 买入时提交的金额
+
+
+class ConfirmTransactionRequest(BaseModel):
+    confirmed_price: float  # T+1 确认净值
+    confirmed_shares: float = None
+    confirmed_amount: float = None
 
 
 @app.get("/api/portfolio")
@@ -2277,8 +2382,30 @@ async def create_transaction_api(req: CreateTransactionRequest):
         amount=req.amount, transaction_date=req.transaction_date,
         shares=req.shares, price=req.price,
         holding_id=req.holding_id, notes=req.notes,
+        status=req.status, submitted_shares=req.submitted_shares,
+        submitted_amount=req.submitted_amount,
     )
     return {"ok": True, "transaction_id": tx_id}
+
+
+@app.post("/api/portfolio/transactions/{tx_id}/confirm")
+async def confirm_transaction_api(tx_id: int, req: ConfirmTransactionRequest):
+    """确认交易：填入 T+1 实际净值，计算实际份额/金额。"""
+    ok = confirm_transaction(tx_id, req.confirmed_price,
+                             confirmed_shares=req.confirmed_shares,
+                             confirmed_amount=req.confirmed_amount)
+    if not ok:
+        raise HTTPException(404, "交易记录不存在")
+    return {"ok": True}
+
+
+@app.post("/api/portfolio/transactions/{tx_id}/settle")
+async def settle_transaction_api(tx_id: int):
+    """标记卖出交易已到账。"""
+    ok = settle_transaction(tx_id)
+    if not ok:
+        raise HTTPException(400, "只能标记已确认的卖出交易为已到账")
+    return {"ok": True}
 
 
 @app.post("/api/portfolio/refresh")
@@ -2298,6 +2425,29 @@ async def refresh_single_price_api(holding_id: int):
     if not nav_data:
         raise HTTPException(502, "净值获取失败，请稍后重试")
     return {"ok": True, "fund_code": holding["fund_code"], "nav": nav_data}
+
+
+# ── 基金信息查询 API ──────────────────────────────────────────
+
+
+@app.get("/api/fund/lookup")
+async def fund_lookup_api(code: str):
+    """根据基金代码查询基本信息（名称、类型、跟踪标的等）。"""
+    if not code.strip():
+        raise HTTPException(400, "基金代码不能为空")
+    info = lookup_fund_info(code.strip())
+    if not info:
+        raise HTTPException(404, f"未找到基金 {code} 的信息")
+    return info
+
+
+@app.get("/api/fund/holdings")
+async def fund_holdings_api(code: str, year: str = None):
+    """获取基金持仓详情（重仓股、债券持仓、资产配置、行业配置）。"""
+    if not code.strip():
+        raise HTTPException(400, "基金代码不能为空")
+    result = get_fund_holdings(code.strip(), year)
+    return result
 
 
 # ── 债市数据 API ──────────────────────────────────────────

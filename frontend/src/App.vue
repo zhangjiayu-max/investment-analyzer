@@ -1,9 +1,13 @@
 <script setup>
-import { ref } from 'vue'
+import { ref, watch } from 'vue'
 import Sidebar from './components/Sidebar.vue'
 import Home from './views/Home.vue'
 
-const activePage = ref('articles')
+const activePage = ref(localStorage.getItem('activePage') || 'articles')
+
+watch(activePage, (val) => {
+  localStorage.setItem('activePage', val)
+})
 </script>
 
 <template>

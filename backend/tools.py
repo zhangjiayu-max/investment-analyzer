@@ -14,6 +14,10 @@ from db import (
     list_holdings,
     get_portfolio_summary,
     list_transactions,
+    refresh_holding_price,
+    refresh_all_fund_prices,
+    lookup_fund_info,
+    get_fund_holdings,
 )
 
 logger = logging.getLogger(__name__)
@@ -194,8 +198,8 @@ TOOLS = [
                 "properties": {
                     "query_type": {
                         "type": "string",
-                        "enum": ["summary", "detail", "by_index"],
-                        "description": "查询类型：summary=汇总概览, detail=持仓详情, by_index=按指数查询",
+                        "enum": ["summary", "detail", "by_index", "refresh"],
+                        "description": "查询类型：summary=汇总概览, detail=持仓详情, by_index=按指数查询, refresh=刷新最新净值后返回详情",
                     },
                     "index_name": {
                         "type": "string",
@@ -203,6 +207,29 @@ TOOLS = [
                     },
                 },
                 "required": ["query_type"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "query_fund_info",
+            "description": "查询基金详细信息，包括基本信息（名称、类型、跟踪标的）、持仓详情（重仓股票、债券持仓及类型）、资产配置。当用户问到某只基金的持仓、重仓股、债券类型等问题时调用。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "fund_code": {
+                        "type": "string",
+                        "description": "基金代码，如 '161725'",
+                    },
+                    "detail_type": {
+                        "type": "string",
+                        "enum": ["basic", "holdings", "all"],
+                        "description": "查询类型：basic=基本信息, holdings=持仓详情（含重仓股、债券、资产配置）, all=全部",
+                        "default": "all",
+                    },
+                },
+                "required": ["fund_code"],
             },
         },
     },
@@ -231,6 +258,8 @@ def execute_tool(name: str, arguments: dict) -> str:
             return _web_search(arguments)
         elif name == "query_portfolio":
             return _query_portfolio(arguments)
+        elif name == "query_fund_info":
+            return _query_fund_info(arguments)
         else:
             return json.dumps({"error": f"未知工具: {name}"}, ensure_ascii=False)
     except Exception as e:
@@ -781,16 +810,45 @@ def _web_search(args: dict) -> str:
     }, ensure_ascii=False)
 
 
+def _auto_refresh_if_stale(holdings: list) -> list:
+    """如果持仓净值数据超过 1 天未更新，自动刷新。"""
+    from datetime import datetime, timedelta
+    today = datetime.now().strftime("%Y-%m-%d")
+    yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+
+    stale_ids = []
+    for h in holdings:
+        updated = h.get("price_updated_at", "")
+        if not updated or updated < yesterday:
+            stale_ids.append(h["id"])
+
+    if stale_ids:
+        logger.info(f"[portfolio] 自动刷新 {len(stale_ids)} 个过期持仓净值")
+        for hid in stale_ids:
+            try:
+                refresh_holding_price(hid)
+            except Exception as e:
+                logger.warning(f"[portfolio] 刷新持仓 {hid} 失败: {e}")
+        # 重新获取更新后的数据
+        return list_holdings()
+
+    return holdings
+
+
 def _query_portfolio(args: dict) -> str:
     """查询用户持仓信息。"""
     query_type = args.get("query_type", "summary")
 
     if query_type == "summary":
+        # 先自动刷新过期数据
+        holdings = list_holdings()
+        holdings = _auto_refresh_if_stale(holdings)
         summary = get_portfolio_summary()
         return json.dumps(summary, ensure_ascii=False)
 
     elif query_type == "detail":
         holdings = list_holdings()
+        holdings = _auto_refresh_if_stale(holdings)
         return json.dumps({
             "holding_count": len(holdings),
             "holdings": holdings,
@@ -799,6 +857,7 @@ def _query_portfolio(args: dict) -> str:
     elif query_type == "by_index":
         index_name = args.get("index_name", "")
         holdings = list_holdings()
+        holdings = _auto_refresh_if_stale(holdings)
         matched = [
             h for h in holdings
             if index_name in (h.get("index_name") or "")
@@ -811,4 +870,55 @@ def _query_portfolio(args: dict) -> str:
             "holdings": matched,
         }, ensure_ascii=False)
 
+    elif query_type == "refresh":
+        results = refresh_all_fund_prices()
+        holdings = list_holdings()
+        return json.dumps({
+            "refreshed": results,
+            "holding_count": len(holdings),
+            "holdings": holdings,
+        }, ensure_ascii=False)
+
     return json.dumps({"error": f"未知查询类型: {query_type}"}, ensure_ascii=False)
+
+
+def _query_fund_info(args: dict) -> str:
+    """查询基金详细信息。"""
+    fund_code = args.get("fund_code", "").strip()
+    detail_type = args.get("detail_type", "all")
+
+    if not fund_code:
+        return json.dumps({"error": "请提供基金代码"}, ensure_ascii=False)
+
+    result = {"fund_code": fund_code}
+
+    # 基本信息
+    if detail_type in ("basic", "all"):
+        info = lookup_fund_info(fund_code)
+        if info:
+            result["basic_info"] = info
+        else:
+            result["basic_info_error"] = f"未找到基金 {fund_code} 的基本信息"
+
+    # 持仓详情
+    if detail_type in ("holdings", "all"):
+        holdings = get_fund_holdings(fund_code)
+        result["holdings"] = holdings
+
+        # 生成简要分析
+        analysis_parts = []
+        if holdings.get("top_stocks"):
+            top3 = holdings["top_stocks"][:3]
+            names = "、".join(s["stock_name"] for s in top3)
+            analysis_parts.append(f"重仓股：{names}")
+        if holdings.get("asset_allocation"):
+            for a in holdings["asset_allocation"]:
+                analysis_parts.append(f"{a['type']}: {a['pct']}")
+        if holdings.get("bond_type_summary"):
+            bt = holdings["bond_type_summary"]
+            if bt:
+                bt_str = "、".join(f"{k}{v}%" for k, v in bt.items())
+                analysis_parts.append(f"债券类型：{bt_str}")
+        result["brief_analysis"] = "；".join(analysis_parts)
+
+    return json.dumps(result, ensure_ascii=False)

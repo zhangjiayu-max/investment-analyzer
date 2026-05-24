@@ -77,7 +77,7 @@ SPECIALIST_AGENTS = {
         "name": "风险评估师",
         "icon": "🛡️",
         "description": "评估投资风险，计算回撤/波动率，给出风控建议",
-        "tools": ["calculate_metrics", "query_valuation", "query_portfolio"],
+        "tools": ["calculate_metrics", "query_valuation", "query_portfolio", "query_fund_info"],
         "system_prompt": """你是一位专业的风险评估师，专注于投资风险分析和控制。
 
 ## 核心职责
@@ -109,7 +109,7 @@ SPECIALIST_AGENTS = {
         "name": "资产配置师",
         "icon": "🥧",
         "description": "给出股债配比、行业轮动、定投策略建议",
-        "tools": ["get_valuation_list", "get_bond_temperature", "search_knowledge", "query_portfolio"],
+        "tools": ["get_valuation_list", "get_bond_temperature", "search_knowledge", "query_portfolio", "query_fund_info"],
         "system_prompt": """你是一位专业的资产配置师，专注于投资组合构建和资产配置策略。
 
 ## 核心职责

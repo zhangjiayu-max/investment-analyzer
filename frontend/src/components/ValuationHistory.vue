@@ -2,7 +2,7 @@
 import { ref, watch, onMounted, onUnmounted, computed } from 'vue'
 import * as echarts from 'echarts'
 import { marked } from 'marked'
-import { listValuationIndexes, getValuationHistory, runAnalysis, listAnalysisHistory, getAnalysisHistoryDetail, deleteAnalysisHistory } from '../api'
+import { listValuationIndexes, getValuationHistory, getIndexInfo, runAnalysis, listAnalysisHistory, getAnalysisHistoryDetail, deleteAnalysisHistory } from '../api'
 import { isDark } from '../composables/useTheme'
 
 const indexes = ref([])
@@ -26,6 +26,24 @@ const showConfirmRun = ref(false)
 // 搜索相关
 const searchQuery = ref('')
 const dropdownOpen = ref(false)
+
+// 指数信息 popover
+const indexInfoText = ref('')
+const indexInfoLoading = ref(false)
+const showIndexInfo = ref(false)
+const indexInfoCache = {}
+
+// 金融术语解释
+const metricGlossary = {
+  '市盈率': '市盈率（PE）= 股价 ÷ 每股收益。表示投资者为每1元收益愿意支付的价格。PE越低通常表示越"便宜"，但不同行业的合理PE差异很大。',
+  '市净率': '市净率（PB）= 股价 ÷ 每股净资产。表示股价相对于公司净资产的倍数。PB<1称为"破净"，常用于银行、地产等重资产行业估值。',
+  '百分位': '百分位表示当前估值在历史数据中所处的位置。例如30%意味着历史上有30%的时间估值比现在低，70%的时间比现在高。通常<30%为低估，>70%为高估。',
+  'Z分数': 'Z分数（Z-score）= (当前值 - 平均值) ÷ 标准差。衡量当前估值偏离均值的程度。Z>2表示显著偏高，Z<-2表示显著偏低，绝对值越大越异常。',
+  '分位点': '分位点与百分位含义相同，表示当前估值在历史序列中的相对位置。',
+  '机会值': '机会值通常是历史估值的较低分位（如20%分位），代表一个相对"便宜"的买入参考价位。',
+  '危险值': '危险值通常是历史估值的较高分位（如80%分位），代表估值偏高的警示价位。',
+  '中位数': '中位数是历史估值数据的中间值，有一半时间估值高于它，一半时间低于它，是衡量"正常"水平的参考。',
+}
 
 // 当前指数拥有的指标类型列表
 const availableMetrics = computed(() => {
@@ -102,6 +120,61 @@ function selectIndex(code) {
 
 function selectMetric(metric) {
   selectedMetric.value = metric
+}
+
+async function loadIndexInfo() {
+  if (!selectedCode.value) return
+  const code = selectedCode.value
+  if (indexInfoCache[code]) {
+    indexInfoText.value = indexInfoCache[code]
+    return
+  }
+  // 清空旧数据，避免切换指数时残留上一个的信息
+  indexInfoText.value = ''
+  indexInfoLoading.value = true
+  try {
+    const { data } = await getIndexInfo(code, selectedIndexName.value)
+    // 仅当 code 没变时才写入（防止快速切换时竞态覆盖）
+    if (selectedCode.value === code) {
+      const info = data.info || ''
+      indexInfoCache[code] = info
+      indexInfoText.value = info || '暂无该指数的介绍信息'
+    }
+  } catch {
+    if (selectedCode.value === code) {
+      indexInfoText.value = '获取指数信息失败'
+    }
+  } finally {
+    if (selectedCode.value === code) {
+      indexInfoLoading.value = false
+    }
+  }
+}
+
+function onIndexNameEnter() {
+  showIndexInfo.value = true
+  if (!indexInfoCache[selectedCode.value]) loadIndexInfo()
+}
+
+function onIndexNameLeave() {
+  showIndexInfo.value = false
+}
+
+// 表格内 tooltip（用 fixed 定位，不受 overflow 裁剪）
+const tableTip = ref({ show: false, text: '', x: 0, y: 0 })
+
+function onTableTipEnter(e, text) {
+  const rect = e.currentTarget.getBoundingClientRect()
+  tableTip.value = {
+    show: true,
+    text,
+    x: rect.left + rect.width / 2,
+    y: rect.bottom + 8,
+  }
+}
+
+function onTableTipLeave() {
+  tableTip.value.show = false
 }
 
 const selectedIndexName = computed(() => {
@@ -384,12 +457,31 @@ defineExpose({ loadHistory })
     <!-- Current Index Header -->
     <div v-if="selectedCode" class="card index-header-card">
       <div class="index-header-left">
-        <div class="index-header-name">{{ selectedIndexName }}</div>
+        <div class="index-name-wrapper" @mouseenter="onIndexNameEnter" @mouseleave="onIndexNameLeave">
+          <div class="index-header-name">
+            {{ selectedIndexName }}
+            <svg class="index-info-icon" width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
+            </svg>
+          </div>
+          <Transition name="fade">
+            <div v-if="showIndexInfo" class="index-info-popover">
+              <div v-if="indexInfoLoading" class="index-info-loading">
+                <span class="spinner-sm"></span> 加载中...
+              </div>
+              <div v-else class="index-info-text">{{ indexInfoText }}</div>
+            </div>
+          </Transition>
+        </div>
         <div class="index-header-code">{{ selectedCode }}</div>
         <div v-if="latest" class="index-header-metrics">
-          <span class="hdr-metric">{{ latest.metric_type || 'PE' }}: <b>{{ latest.current_value ?? '-' }}</b></span>
+          <span class="hdr-metric">
+            <span class="term-with-tip">{{ latest.metric_type || 'PE' }}<span class="term-tip">{{ metricGlossary[latest.metric_type] || metricGlossary['市盈率'] }}</span></span>: <b>{{ latest.current_value ?? '-' }}</b>
+          </span>
           <span class="hdr-divider">|</span>
-          <span class="hdr-metric">百分位: <b :class="getPercentileLevel(latest.percentile) === 'success' ? 'val-low' : getPercentileLevel(latest.percentile) === 'danger' ? 'val-high' : ''">{{ latest.percentile != null ? latest.percentile + '%' : '-' }}</b></span>
+          <span class="hdr-metric">
+            <span class="term-with-tip">百分位<span class="term-tip">{{ metricGlossary['百分位'] }}</span></span>: <b :class="getPercentileLevel(latest.percentile) === 'success' ? 'val-low' : getPercentileLevel(latest.percentile) === 'danger' ? 'val-high' : ''">{{ latest.percentile != null ? latest.percentile + '%' : '-' }}</b>
+          </span>
           <span class="hdr-divider">|</span>
           <span :class="['hdr-status', 'status-' + getPercentileLevel(latest.percentile)]">
             {{ latest.percentile == null ? '-' : latest.percentile < 30 ? '低估' : latest.percentile <= 70 ? '合理' : '高估' }}
@@ -461,11 +553,15 @@ defineExpose({ loadHistory })
       <!-- Metric Cards -->
       <div class="metric-grid">
         <div class="card metric-card">
-          <div class="metric-label">当前 {{ latest.metric_type || '值' }}</div>
+          <div class="metric-label">
+            <span class="term-with-tip">当前 {{ latest.metric_type || '值' }}<span class="term-tip">{{ metricGlossary[latest.metric_type] || '' }}</span></span>
+          </div>
           <div class="metric-value">{{ latest.current_value ?? '-' }}</div>
         </div>
         <div :class="['card', 'metric-card', 'metric-' + getPercentileLevel(latest.percentile)]">
-          <div class="metric-label">分位点</div>
+          <div class="metric-label">
+            <span class="term-with-tip">分位点<span class="term-tip">{{ metricGlossary['分位点'] }}</span></span>
+          </div>
           <div class="metric-value">{{ latest.percentile != null ? latest.percentile + '%' : '-' }}</div>
         </div>
         <div class="card metric-card">
@@ -502,11 +598,22 @@ defineExpose({ loadHistory })
         </div>
       </Teleport>
 
+      <!-- Table Header Tooltip (fixed positioned, escapes overflow) -->
+      <Teleport to="body">
+        <Transition name="fade">
+          <div v-if="tableTip.show" class="table-tip-fixed" :style="{ left: tableTip.x + 'px', top: tableTip.y + 'px' }">
+            {{ tableTip.text }}
+          </div>
+        </Transition>
+      </Teleport>
+
       <!-- Valuation Range Bar -->
       <div class="card range-card">
         <div class="range-header">
           <span class="range-title">{{ latest.metric_type || '估值' }} 估值区间</span>
-          <span class="range-zscore" v-if="latest.zscore != null">Z分数: {{ latest.zscore }}</span>
+          <span class="range-zscore" v-if="latest.zscore != null">
+            <span class="term-with-tip">Z分数<span class="term-tip">{{ metricGlossary['Z分数'] }}</span></span>: {{ latest.zscore }}
+          </span>
         </div>
 
         <!-- Gauge visualization -->
@@ -539,15 +646,15 @@ defineExpose({ loadHistory })
               <span class="label-val">{{ latest.min_value ?? '-' }}</span>
             </div>
             <div class="gauge-label">
-              <span class="label-key val-low">机会</span>
+              <span class="label-key val-low"><span class="term-with-tip">机会<span class="term-tip">{{ metricGlossary['机会值'] }}</span></span></span>
               <span class="label-val val-low">{{ latest.opportunity_value ?? '-' }}</span>
             </div>
             <div class="gauge-label">
-              <span class="label-key">中位</span>
+              <span class="label-key"><span class="term-with-tip">中位<span class="term-tip">{{ metricGlossary['中位数'] }}</span></span></span>
               <span class="label-val">{{ latest.median ?? '-' }}</span>
             </div>
             <div class="gauge-label">
-              <span class="label-key val-high">危险</span>
+              <span class="label-key val-high"><span class="term-with-tip">危险<span class="term-tip">{{ metricGlossary['危险值'] }}</span></span></span>
               <span class="label-val val-high">{{ latest.danger_value ?? '-' }}</span>
             </div>
             <div class="gauge-label">
@@ -585,14 +692,14 @@ defineExpose({ loadHistory })
             <thead>
               <tr>
                 <th>日期</th>
-                <th>指标</th>
+                <th><span class="term-with-tip th-tip" @mouseenter="onTableTipEnter($event, '估值指标类型，如市盈率(PE)、市净率(PB)等。')" @mouseleave="onTableTipLeave">指标</span></th>
                 <th>当前值</th>
                 <th>点位</th>
-                <th>分位点</th>
-                <th>机会值</th>
-                <th>中位数</th>
-                <th>危险值</th>
-                <th>Z分数</th>
+                <th><span class="term-with-tip th-tip" @mouseenter="onTableTipEnter($event, metricGlossary['分位点'])" @mouseleave="onTableTipLeave">分位点</span></th>
+                <th><span class="term-with-tip th-tip" @mouseenter="onTableTipEnter($event, metricGlossary['机会值'])" @mouseleave="onTableTipLeave">机会值</span></th>
+                <th><span class="term-with-tip th-tip" @mouseenter="onTableTipEnter($event, metricGlossary['中位数'])" @mouseleave="onTableTipLeave">中位数</span></th>
+                <th><span class="term-with-tip th-tip" @mouseenter="onTableTipEnter($event, metricGlossary['危险值'])" @mouseleave="onTableTipLeave">危险值</span></th>
+                <th><span class="term-with-tip th-tip" @mouseenter="onTableTipEnter($event, metricGlossary['Z分数'])" @mouseleave="onTableTipLeave">Z分数</span></th>
               </tr>
             </thead>
             <tbody>
@@ -1563,5 +1670,136 @@ defineExpose({ loadHistory })
   border-top-color: var(--color-primary-500);
   border-radius: 50%;
   animation: spin 0.6s linear infinite;
+}
+
+/* ── Index Info Popover ───────────────────────────── */
+.index-name-wrapper {
+  position: relative;
+  display: inline-block;
+}
+
+.index-info-icon {
+  display: inline;
+  vertical-align: middle;
+  margin-left: 4px;
+  color: var(--color-text-muted);
+  opacity: 0.6;
+  cursor: help;
+  transition: opacity 0.2s;
+}
+
+.index-name-wrapper:hover .index-info-icon {
+  opacity: 1;
+  color: var(--color-primary-500);
+}
+
+.index-info-popover {
+  position: absolute;
+  top: calc(100% + 8px);
+  left: 0;
+  z-index: 200;
+  width: 320px;
+  background: var(--color-bg-hover);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-lg);
+  padding: 0.85rem 1rem;
+  font-size: 0.8rem;
+  line-height: 1.65;
+  color: var(--color-text-secondary);
+  backdrop-filter: blur(8px);
+}
+
+.index-info-popover::before {
+  content: '';
+  position: absolute;
+  top: -6px;
+  left: 16px;
+  width: 12px;
+  height: 12px;
+  background: var(--color-bg-hover);
+  border-left: 1px solid var(--color-border);
+  border-top: 1px solid var(--color-border);
+  transform: rotate(45deg);
+}
+
+.index-info-loading {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  color: var(--color-text-muted);
+  font-size: 0.8rem;
+}
+
+.index-info-text {
+  white-space: pre-wrap;
+}
+
+/* ── Financial Term Tooltips ──────────────────────── */
+.term-with-tip {
+  position: relative;
+  cursor: help;
+  border-bottom: 1px dashed var(--color-text-muted);
+}
+
+.term-tip {
+  display: none;
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 300;
+  width: 260px;
+  background: var(--color-bg-hover);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-lg);
+  padding: 0.65rem 0.85rem;
+  font-size: 0.75rem;
+  line-height: 1.6;
+  color: var(--color-text-secondary);
+  font-weight: 400;
+  border-bottom: none;
+  white-space: normal;
+  pointer-events: none;
+  backdrop-filter: blur(8px);
+}
+
+.term-tip::after {
+  content: '';
+  position: absolute;
+  top: 100%;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 0;
+  height: 0;
+  border-left: 6px solid transparent;
+  border-right: 6px solid transparent;
+  border-top: 6px solid var(--color-bg-hover);
+}
+
+.term-with-tip:hover .term-tip {
+  display: block;
+}
+
+/* 表格表头 tooltip 用 JS 定位，不需要 CSS hover */
+.th-tip { cursor: help; border-bottom: 1px dashed var(--color-text-muted); }
+.th-tip .term-tip { display: none !important; }
+
+.table-tip-fixed {
+  position: fixed;
+  transform: translateX(-50%);
+  z-index: 9999;
+  width: 260px;
+  background: var(--color-bg-hover);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-lg);
+  padding: 0.65rem 0.85rem;
+  font-size: 0.75rem;
+  line-height: 1.6;
+  color: var(--color-text-secondary);
+  pointer-events: none;
+  backdrop-filter: blur(8px);
 }
 </style>

@@ -66,6 +66,13 @@ export function getValuationHistory(indexCode, days = 30, metricType = null) {
   return api.get(`/valuations/${indexCode}`, { params })
 }
 
+/** 获取指数简介信息 */
+export function getIndexInfo(indexCode, indexName = '') {
+  const params = {}
+  if (indexName) params.index_name = indexName
+  return api.get(`/index-info/${indexCode}`, { params })
+}
+
 // ── 轮询工具 ──────────────────────────────────────
 
 /**
@@ -162,6 +169,21 @@ export function listAgents() {
 /** 创建自定义 Agent */
 export function createAgent(data) {
   return api.post('/agents', data)
+}
+
+/** 获取单个 Agent 详情 */
+export function getAgent(id) {
+  return api.get(`/agents/${id}`)
+}
+
+/** 更新 Agent */
+export function updateAgent(id, data) {
+  return api.put(`/agents/${id}`, data)
+}
+
+/** 删除自定义 Agent */
+export function deleteAgent(id) {
+  return api.delete(`/agents/${id}`)
 }
 
 /** 对话列表 */
@@ -441,6 +463,16 @@ export function createPortfolioTransaction(data) {
   return api.post('/portfolio/transactions', data)
 }
 
+/** 确认交易（填入 T+1 实际净值） */
+export function confirmTransaction(txId, data) {
+  return api.post(`/portfolio/transactions/${txId}/confirm`, data)
+}
+
+/** 标记卖出交易已到账 */
+export function settleTransaction(txId) {
+  return api.post(`/portfolio/transactions/${txId}/settle`)
+}
+
 /** 刷新所有持仓净值 */
 export function refreshAllPortfolioPrices() {
   return api.post('/portfolio/refresh', {}, { timeout: 120000 })
@@ -449,6 +481,20 @@ export function refreshAllPortfolioPrices() {
 /** 刷新单个持仓净值 */
 export function refreshPortfolioPrice(holdingId) {
   return api.post(`/portfolio/${holdingId}/refresh`, {}, { timeout: 30000 })
+}
+
+// ── 基金信息查询 API ──────────────────────────────────────
+
+/** 根据基金代码查询基本信息 */
+export function lookupFundInfo(fundCode) {
+  return api.get('/fund/lookup', { params: { code: fundCode } })
+}
+
+/** 获取基金持仓详情（重仓股、债券、资产配置） */
+export function getFundHoldings(fundCode, year = null) {
+  const params = { code: fundCode }
+  if (year) params.year = year
+  return api.get('/fund/holdings', { params, timeout: 30000 })
 }
 
 export default api

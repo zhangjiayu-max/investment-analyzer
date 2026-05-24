@@ -27,6 +27,7 @@ const navItems = [
       { key: 'bond', label: '债市市场温度', icon: 'bond' },
     ],
   },
+  { key: 'admin-agents', label: 'Agent 管理', icon: 'admin' },
 ]
 
 const expandedGroups = ref(new Set(
@@ -90,6 +91,9 @@ const activeGroup = computed(() => {
           </svg>
           <svg v-else-if="item.icon === 'portfolio'" class="nav-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M2 7l10-4 10 4-10 4-10-4zM2 17l10 4 10-4M2 12l10 4 10-4"/>
+          </svg>
+          <svg v-else-if="item.icon === 'admin'" class="nav-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"/>
           </svg>
           <span class="nav-label">{{ item.label }}</span>
         </button>

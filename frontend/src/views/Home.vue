@@ -12,6 +12,7 @@ import LinkedArticles from '../components/LinkedArticles.vue'
 import BondMarket from '../components/BondMarket.vue'
 import RagAnalysis from '../components/RagAnalysis.vue'
 import PortfolioManagement from '../components/PortfolioManagement.vue'
+import AdminAgentsPage from '../components/AdminAgentsPage.vue'
 
 const props = defineProps({
   activePage: String,
@@ -150,6 +151,11 @@ function onBack() {
     <div v-if="activePage === 'portfolio'" class="page-section">
       <PortfolioManagement />
     </div>
+
+    <!-- Agent 管理页 -->
+    <div v-if="activePage === 'admin-agents'" class="page-section">
+      <AdminAgentsPage />
+    </div>
   </div>
 </template>
 
@@ -166,19 +172,6 @@ function onBack() {
 @keyframes fadeIn {
   from { opacity: 0; transform: translateY(4px); }
   to { opacity: 1; transform: translateY(0); }
-}
-
-.page-title {
-  font-size: 1.25rem;
-  font-weight: 700;
-  color: var(--color-text-primary);
-  margin: 0;
-}
-
-.page-desc {
-  font-size: 0.875rem;
-  color: var(--color-text-muted);
-  margin: 0.25rem 0 0 0;
 }
 
 /* Analysis card */

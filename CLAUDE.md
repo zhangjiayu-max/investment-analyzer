@@ -77,6 +77,12 @@ investment-analyzer/
 - **需求澄清**：`clarify_requirement()` 用 LLM 分析问题复杂度和专家选择
 - **流式输出**：用 generator `yield {"type": "...", ...}` 传递 SSE 事件
 
+## 文档规范
+
+- **设计文档**：保存到 `doc/plans/` 目录，文件名加时间前缀，如 `2026-05-24-xxx-design.md`
+- **CLAUDE.md**：项目根目录，记录开发规范和编码约定
+- **skill 文档**：保存到 `backend/skill_document.md`
+
 ## 开发流程
 
 ### 新增数据库表
