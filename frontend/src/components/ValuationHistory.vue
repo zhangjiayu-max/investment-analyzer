@@ -2,7 +2,7 @@
 import { ref, watch, onMounted, onUnmounted, computed } from 'vue'
 import * as echarts from 'echarts'
 import { marked } from 'marked'
-import { listValuationIndexes, getValuationHistory, getIndexInfo, runAnalysis, listAnalysisHistory, getAnalysisHistoryDetail, deleteAnalysisHistory } from '../api'
+import { listValuationIndexes, getValuationHistory, getIndexInfo, runAnalysis, listAnalysisHistory, getAnalysisHistoryDetail, deleteAnalysisHistory, refreshValuationPrices } from '../api'
 import { isDark } from '../composables/useTheme'
 
 const indexes = ref([])
@@ -19,6 +19,7 @@ const activeTab = ref('valuation') // 'valuation' | 'analysis'
 const analysisLoading = ref(false)
 const analysisResult = ref(null) // 当前分析结果 {id, result, agent_name, token_usage, created_at}
 const analysisHistory = ref([])
+const refreshingPrices = ref(false)
 const historyLoading = ref(false)
 const viewingHistory = ref(null) // 正在查看的历史详情
 const showConfirmRun = ref(false)
@@ -208,6 +209,19 @@ async function handleRunAnalysis() {
     analysisResult.value = { result: '分析失败：' + (e.response?.data?.detail || e.message), error: true }
   } finally {
     analysisLoading.value = false
+  }
+}
+
+async function handleRefreshPrices() {
+  refreshingPrices.value = true
+  try {
+    const { data } = await refreshValuationPrices()
+    alert(`行情价格已刷新，更新了 ${data.updated} 只指数`)
+    if (selectedCode.value) loadHistory()
+  } catch (e) {
+    alert('价格刷新失败：' + (e.response?.data?.detail || e.message))
+  } finally {
+    refreshingPrices.value = false
   }
 }
 
@@ -452,6 +466,12 @@ defineExpose({ loadHistory })
       <span v-if="selectedIndexInfo" class="selector-meta">
         最新: {{ selectedIndexInfo.latest_date || '-' }}
       </span>
+      <button class="btn-ghost btn-sm" @click="handleRefreshPrices" :disabled="refreshingPrices" style="margin-left:auto;">
+        <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24" :class="{ spinning: refreshingPrices }">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
+        </svg>
+        刷新行情
+      </button>
     </div>
 
     <!-- Current Index Header -->
@@ -1736,70 +1756,6 @@ defineExpose({ loadHistory })
 }
 
 /* ── Financial Term Tooltips ──────────────────────── */
-.term-with-tip {
-  position: relative;
-  cursor: help;
-  border-bottom: 1px dashed var(--color-text-muted);
-}
-
-.term-tip {
-  display: none;
-  position: absolute;
-  bottom: calc(100% + 8px);
-  left: 50%;
-  transform: translateX(-50%);
-  z-index: 300;
-  width: 260px;
-  background: var(--color-bg-hover);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
-  box-shadow: var(--shadow-lg);
-  padding: 0.65rem 0.85rem;
-  font-size: 0.75rem;
-  line-height: 1.6;
-  color: var(--color-text-secondary);
-  font-weight: 400;
-  border-bottom: none;
-  white-space: normal;
-  pointer-events: none;
-  backdrop-filter: blur(8px);
-}
-
-.term-tip::after {
-  content: '';
-  position: absolute;
-  top: 100%;
-  left: 50%;
-  transform: translateX(-50%);
-  width: 0;
-  height: 0;
-  border-left: 6px solid transparent;
-  border-right: 6px solid transparent;
-  border-top: 6px solid var(--color-bg-hover);
-}
-
-.term-with-tip:hover .term-tip {
-  display: block;
-}
-
 /* 表格表头 tooltip 用 JS 定位，不需要 CSS hover */
 .th-tip { cursor: help; border-bottom: 1px dashed var(--color-text-muted); }
-.th-tip .term-tip { display: none !important; }
-
-.table-tip-fixed {
-  position: fixed;
-  transform: translateX(-50%);
-  z-index: 9999;
-  width: 260px;
-  background: var(--color-bg-hover);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
-  box-shadow: var(--shadow-lg);
-  padding: 0.65rem 0.85rem;
-  font-size: 0.75rem;
-  line-height: 1.6;
-  color: var(--color-text-secondary);
-  pointer-events: none;
-  backdrop-filter: blur(8px);
-}
 </style>

@@ -6,7 +6,7 @@ import re
 import time
 
 from llm_service import client, MODEL, _call_llm, _parse_tool_args
-from multi_agent import SPECIALIST_AGENTS, run_specialist
+from agent.multi_agent import SPECIALIST_AGENTS, run_specialist
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +51,8 @@ CLARIFICATION_PROMPT = """<role>你是一位需求分析专家，负责理解用
 - **风险/回撤/波动率/持仓风险** → risk_assessor
 - **配置/定投/股债配比/持仓配置** → allocation_advisor
 - **持仓/加仓/减仓/盈亏/我的基金** → 需要结合持仓数据，选 risk_assessor 或 allocation_advisor
+- **基金分析/操作复盘/交易记录/基金表现** → fund_analyst
+- **债券相关**（债券基金/久期/收益率曲线/债市/利率）→ market_analyst 或 allocation_advisor，market_analyst 有 get_bond_yield_curve 和 get_bond_market_overview 工具
 </specialist_guide>
 
 <examples>
@@ -81,6 +83,7 @@ def clarify_requirement(query: str) -> dict:
     """
     try:
         response = _call_llm(
+            caller="clarify",
             model=MODEL,
             messages=[
                 {"role": "system", "content": CLARIFICATION_PROMPT},
@@ -106,7 +109,7 @@ def clarify_requirement(query: str) -> dict:
             complexity = "medium"
 
         specialists = result.get("specialists", [])
-        valid_specialists = ["valuation_expert", "market_analyst", "risk_assessor", "allocation_advisor"]
+        valid_specialists = ["valuation_expert", "market_analyst", "risk_assessor", "allocation_advisor", "fund_analyst"]
         specialists = [s for s in specialists if s in valid_specialists]
 
         # 如果没有选择专家，默认选估值专家
@@ -219,6 +222,15 @@ def route_to_specialists_by_keywords(query: str) -> list[str]:
     if any(kw in query for kw in risk_keywords):
         specialists.append("risk_assessor")
 
+    # 债券相关关键词 → 市场分析师 + 资产配置师
+    bond_keywords = ["债券", "债市", "国债", "利率债", "信用债", "可转债", "收益率",
+                     "久期", "债券基金", "短债", "长债", "纯债", "债基",
+                     "资金面", "货币宽松", "加息", "降息", "央行"]
+    if any(kw in query for kw in bond_keywords):
+        specialists.append("market_analyst")
+        if "allocation_advisor" not in specialists:
+            specialists.append("allocation_advisor")
+
     # 配置相关关键词 → 资产配置师
     allocation_keywords = ["配置", "配比", "定投", "股债", "组合"]
     if any(kw in query for kw in allocation_keywords):
@@ -231,6 +243,14 @@ def route_to_specialists_by_keywords(query: str) -> list[str]:
             specialists.append("risk_assessor")
         if "allocation_advisor" not in specialists:
             specialists.append("allocation_advisor")
+
+    # 基金分析关键词 → 基金分析师
+    fund_analysis_keywords = ["操作记录", "交易记录", "基金分析", "基金表现", "复盘",
+                               "收益怎么样", "赚了", "亏了", "买卖", "操作复盘",
+                               "我的操作", "这只基金", "基金持仓"]
+    if any(kw in query for kw in fund_analysis_keywords):
+        if "fund_analyst" not in specialists:
+            specialists.append("fund_analyst")
 
     # 默认返回估值专家
     if not specialists:
@@ -259,7 +279,7 @@ def get_context_config(complexity: str) -> dict:
         return {
             "history_limit": 10,
             "rag_enabled": True,
-            "max_specialists": 4,
+            "max_specialists": 5,
             "rag_max_chars": 2500,   # RAG上下文压缩到2500字符
         }
 
@@ -387,6 +407,23 @@ ORCHESTRATOR_TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "consult_fund_analyst",
+            "description": "咨询基金分析师，获取单只基金的收益表现、操作复盘、持仓结构分析。适用于：查某只基金赚了还是亏了、操作记录分析、基金持仓分析等。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "具体问题，如'基金161725收益怎么样'、'帮我复盘白酒基金的操作记录'、'分析我的中证500持仓'",
+                    },
+                },
+                "required": ["query"],
+            },
+        },
+    },
 ]
 
 # 专家名称到 agent_key 的映射
@@ -395,6 +432,7 @@ _EXPERT_MAP = {
     "consult_market_analyst": "market_analyst",
     "consult_risk_assessor": "risk_assessor",
     "consult_allocation_advisor": "allocation_advisor",
+    "consult_fund_analyst": "fund_analyst",
 }
 
 ORCHESTRATOR_SYSTEM_PROMPT = """你是投资分析助手的主控（Orchestrator），负责协调各领域专家 Agent 完成投资分析。
@@ -410,6 +448,7 @@ ORCHESTRATOR_SYSTEM_PROMPT = """你是投资分析助手的主控（Orchestrator
 - 📰 **择时分析师**：分析市场新闻、政策变化，判断市场时机
 - 🛡️ **风险评估师**：评估投资风险，计算回撤/波动率，给出风控建议
 - 🥧 **资产配置师**：给出股债配比、定投策略、行业配置建议
+- 🔍 **基金分析师**：分析具体基金的投资表现、操作复盘、持仓结构
 
 ## 调用策略
 - **简单估值问题**（如"沪深300估值多少"）→ 只调估值专家
@@ -417,7 +456,9 @@ ORCHESTRATOR_SYSTEM_PROMPT = """你是投资分析助手的主控（Orchestrator
 - **投资决策问题**（如"白酒能买吗"）→ 调估值专家 + 风险评估师
 - **买卖建议问题**（如"该加仓还是减仓"）→ 调估值专家 + 风险评估师 + 择时分析师
 - **配置方案问题**（如"帮我做个定投方案"）→ 调资产配置师 + 估值专家
-- **综合性问题**（如"白酒现在怎么操作"）→ 全部 4 个专家
+- **基金分析问题**（如"我的白酒基金收益怎么样"）→ 调基金分析师 + 估值专家
+- **操作复盘问题**（如"帮我复盘基金操作"）→ 调基金分析师 + 风险评估师
+- **综合性问题**（如"白酒现在怎么操作"）→ 全部 5 个专家
 
 ## 回答原则
 - 综合各专家意见，给出明确的判断和建议
@@ -503,6 +544,7 @@ def orchestrate(query: str, history: list, rag_context: str = "") -> dict:
     for turn in range(MAX_TURNS):
         try:
             response = _call_llm(
+                caller="orchestrator",
                 model=MODEL,
                 messages=llm_messages,
                 tools=ORCHESTRATOR_TOOLS,
@@ -606,6 +648,7 @@ def orchestrate(query: str, history: list, rag_context: str = "") -> dict:
             "content": "请根据以上各专家的分析结果，给出最终的综合投资建议。",
         })
         response = _call_llm(
+            caller="orchestrator",
             model=MODEL,
             messages=llm_messages,
             temperature=0.3,
@@ -684,6 +727,7 @@ def orchestrate_stream(query: str, history: list, rag_context: str = ""):
     for turn in range(MAX_TURNS):
         try:
             response = _call_llm(
+                caller="orchestrator",
                 model=MODEL,
                 messages=llm_messages,
                 tools=ORCHESTRATOR_TOOLS,
@@ -819,6 +863,7 @@ def orchestrate_stream(query: str, history: list, rag_context: str = ""):
             "content": "请根据以上各专家的分析结果，给出最终的综合投资建议。",
         })
         response = _call_llm(
+            caller="orchestrator",
             model=MODEL,
             messages=llm_messages,
             temperature=0.3,

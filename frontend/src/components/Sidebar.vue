@@ -8,11 +8,12 @@ const props = defineProps({
 const emit = defineEmits(['navigate'])
 
 const navItems = [
+  { key: 'dashboard', label: '每日看板 🔥', icon: 'dashboard', hot: true },
   { key: 'chat', label: 'AI 对话', icon: 'chat' },
   { key: 'articles', label: '文章管理', icon: 'articles' },
-  { key: 'valuation', label: '估值数据', icon: 'valuation' },
+  { key: 'valuation', label: '估值数据 🔥', icon: 'valuation', hot: true },
   { key: 'gallery', label: '图片浏览', icon: 'gallery' },
-  { key: 'portfolio', label: '持仓管理', icon: 'portfolio' },
+  { key: 'portfolio', label: '持仓管理 🔥', icon: 'portfolio', hot: true },
   {
     key: 'group-knowledge', label: '知识库', icon: 'author',
     children: [
@@ -28,6 +29,14 @@ const navItems = [
     ],
   },
   { key: 'admin-agents', label: 'Agent 管理', icon: 'admin' },
+  { key: 'token-usage', label: 'Token 用量', icon: 'token' },
+  {
+    key: 'group-evolution', label: '进化系统', icon: 'evolution',
+    children: [
+      { key: 'bad-cases', label: 'Bad Case', icon: 'bug' },
+      { key: 'eval-suite', label: '评测集', icon: 'check' },
+    ],
+  },
 ]
 
 const expandedGroups = ref(new Set(
@@ -75,9 +84,12 @@ const activeGroup = computed(() => {
         <button
           v-if="!item.children"
           @click="navigate(item.key)"
-          :class="['nav-item', { active: activePage === item.key }]"
+          :class="['nav-item', { active: activePage === item.key, 'nav-item-hot': item.hot }]"
         >
-          <svg v-if="item.icon === 'chat'" class="nav-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <svg v-if="item.icon === 'dashboard'" class="nav-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6"/>
+          </svg>
+          <svg v-else-if="item.icon === 'chat'" class="nav-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"/>
           </svg>
           <svg v-else-if="item.icon === 'articles'" class="nav-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -95,6 +107,9 @@ const activeGroup = computed(() => {
           <svg v-else-if="item.icon === 'admin'" class="nav-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"/>
           </svg>
+          <svg v-else-if="item.icon === 'token'" class="nav-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"/>
+          </svg>
           <span class="nav-label">{{ item.label }}</span>
         </button>
 
@@ -109,6 +124,9 @@ const activeGroup = computed(() => {
             </svg>
             <svg v-else-if="item.icon === 'bond'" class="nav-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6"/>
+            </svg>
+            <svg v-else-if="item.icon === 'evolution'" class="nav-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M13 10V3L4 14h7v7l9-11h-7z"/>
             </svg>
             <span class="nav-label">{{ item.label }}</span>
             <svg class="chevron" :class="{ expanded: expandedGroups.has(item.key) }" width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -133,6 +151,12 @@ const activeGroup = computed(() => {
               </svg>
               <svg v-else-if="child.icon === 'bond'" class="nav-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6"/>
+              </svg>
+              <svg v-else-if="child.icon === 'bug'" class="nav-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M12 8V4m3 2l-3 3-3-3m0 6l3-3 3 3M8 12h8m-5 4h2"/>
+              </svg>
+              <svg v-else-if="child.icon === 'check'" class="nav-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/>
               </svg>
               <span class="nav-label">{{ child.label }}</span>
             </button>
@@ -248,6 +272,33 @@ const activeGroup = computed(() => {
 .dark .nav-item.active {
   background: var(--color-primary-bg);
   color: var(--color-primary-300);
+}
+
+/* Hot items (持仓管理、估值数据) */
+.nav-item-hot {
+  color: #d97706 !important;
+}
+.nav-item-hot .nav-icon {
+  color: #f59e0b;
+  stroke: #f59e0b;
+}
+.nav-item-hot:hover {
+  background: rgba(245, 158, 11, 0.1) !important;
+}
+.nav-item-hot.active {
+  background: rgba(245, 158, 11, 0.15) !important;
+  color: #b45309 !important;
+}
+.dark .nav-item-hot {
+  color: #fbbf24 !important;
+}
+.dark .nav-item-hot .nav-icon {
+  color: #fbbf24;
+  stroke: #fbbf24;
+}
+.dark .nav-item-hot.active {
+  background: rgba(245, 158, 11, 0.2) !important;
+  color: #f59e0b !important;
 }
 
 .nav-icon {

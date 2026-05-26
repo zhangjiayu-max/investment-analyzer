@@ -18,6 +18,13 @@ from db import (
     refresh_all_fund_prices,
     lookup_fund_info,
     get_fund_holdings,
+    get_portfolio_diversification,
+    get_transaction_summary,
+    get_holding,
+    create_alert,
+    get_transaction_tags,
+    add_transaction_tag,
+    remove_transaction_tag,
 )
 
 logger = logging.getLogger(__name__)
@@ -233,8 +240,123 @@ TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "analyze_holding_performance",
+            "description": "分析单只持仓基金的投资表现，包括累计盈亏、收益率、持有时间、交易频率、操作质量评估。当用户问到某只基金赚了还是亏了、操作怎么样时调用。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "fund_code": {
+                        "type": "string",
+                        "description": "基金代码，如 '161725'",
+                    },
+                    "holding_id": {
+                        "type": "integer",
+                        "description": "持仓ID（可选，传 fund_code 可替代）",
+                    },
+                },
+                "required": ["fund_code"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "query_transaction_history",
+            "description": "查询交易记录并附带分析，用于基金操作复盘。当用户问到操作记录、买入卖出记录、交易历史时调用。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "fund_code": {
+                        "type": "string",
+                        "description": "基金代码，如 '161725'；为空则查全部",
+                    },
+                    "transaction_type": {
+                        "type": "string",
+                        "enum": ["buy", "sell", ""],
+                        "description": "交易类型筛选：buy=买入, sell=卖出, 空=全部",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "返回条数",
+                        "default": 20,
+                    },
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "analyze_portfolio_diversification",
+            "description": "分析持仓分散度，包括基金数量、指数分布、基金类型分布、仓位集中度。当用户问到持仓是否分散、仓位集中度、配置均衡性时调用。",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "generate_portfolio_alert",
+            "description": "根据当前持仓状况、市场估值、新闻动态等，生成风险预警或加减仓提醒。当需要提醒用户注意持仓风险或加减仓机会时调用。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "alert_type": {
+                        "type": "string",
+                        "enum": ["risk_warning", "add_position", "reduce_position", "news_impact", "valuation_alert"],
+                        "description": "预警类型：risk_warning=风险警告, add_position=加仓提示, reduce_position=减仓提示, news_impact=新闻影响, valuation_alert=估值预警",
+                    },
+                    "fund_code": {
+                        "type": "string",
+                        "description": "关联的基金代码（可选）",
+                    },
+                    "reason": {
+                        "type": "string",
+                        "description": "触发预警的原因说明",
+                    },
+                },
+                "required": ["alert_type", "reason"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_bond_yield_curve",
+            "description": "获取中国/美国国债收益率曲线数据，包括1Y/2Y/5Y/10Y/30Y各期限收益率及利差。用于分析利率走向、判断债市环境、久期管理参考。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "country": {
+                        "type": "string",
+                        "enum": ["china", "us", "both"],
+                        "description": "选择数据范围：china=中国国债, us=美国国债, both=两者",
+                    },
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_bond_market_overview",
+            "description": "获取当前债市综合概况，包括债市温度、国债收益率曲线最新数据、收益率变化趋势。用于回答\"现在债市怎么样\"\"利率走势如何\"\"债券值得配置吗\"等宏观债市问题。",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+            },
+        },
+    },
 ]
-
 
 # ── Tool 执行器 ──────────────────────────────────────
 
@@ -260,6 +382,18 @@ def execute_tool(name: str, arguments: dict) -> str:
             return _query_portfolio(arguments)
         elif name == "query_fund_info":
             return _query_fund_info(arguments)
+        elif name == "analyze_holding_performance":
+            return _analyze_holding_performance(arguments)
+        elif name == "query_transaction_history":
+            return _query_transaction_history(arguments)
+        elif name == "analyze_portfolio_diversification":
+            return _analyze_portfolio_diversification(arguments)
+        elif name == "generate_portfolio_alert":
+            return _generate_portfolio_alert(arguments)
+        elif name == "get_bond_yield_curve":
+            return _get_bond_yield_curve(arguments)
+        elif name == "get_bond_market_overview":
+            return _get_bond_market_overview()
         else:
             return json.dumps({"error": f"未知工具: {name}"}, ensure_ascii=False)
     except Exception as e:
@@ -922,3 +1056,281 @@ def _query_fund_info(args: dict) -> str:
         result["brief_analysis"] = "；".join(analysis_parts)
 
     return json.dumps(result, ensure_ascii=False)
+
+
+def _analyze_holding_performance(args: dict) -> str:
+    """分析单只持仓基金的投资表现。"""
+    fund_code = args.get("fund_code", "").strip()
+    holding_id = args.get("holding_id")
+
+    if not fund_code and not holding_id:
+        return json.dumps({"error": "请提供基金代码或持仓ID"}, ensure_ascii=False)
+
+    holdings = list_holdings()
+    target = None
+    if holding_id:
+        target = get_holding(holding_id)
+    if not target:
+        for h in holdings:
+            if h.get("fund_code") == fund_code:
+                target = h
+                break
+
+    if not target:
+        return json.dumps({"error": f"未找到基金 {fund_code} 的持仓记录"}, ensure_ascii=False)
+
+    fund_code = target["fund_code"]
+    txs = list_transactions(fund_code=fund_code, limit=100)
+
+    buy_txs = [t for t in txs if t["transaction_type"] == "buy"]
+    sell_txs = [t for t in txs if t["transaction_type"] == "sell"]
+    buy_total = sum(t.get("amount", 0) or 0 for t in buy_txs)
+    sell_total = sum(t.get("amount", 0) or 0 for t in sell_txs)
+
+    profit = target.get("profit_loss", 0) or 0
+    profit_rate = target.get("profit_rate", 0) or 0
+    shares = target.get("shares", 0) or 0
+    cost_price = target.get("cost_price", 0) or 0
+    current_price = target.get("current_price", 0) or 0
+
+    buy_dates = [t.get("transaction_date", "") for t in buy_txs if t.get("transaction_date")]
+    first_buy = min(buy_dates) if buy_dates else None
+
+    result = {
+        "fund_code": fund_code,
+        "fund_name": target.get("fund_name", ""),
+        "shares": shares,
+        "cost_price": cost_price,
+        "current_price": current_price,
+        "total_cost": target.get("total_cost", 0),
+        "current_value": target.get("current_value", 0),
+        "profit_loss": round(profit, 2),
+        "profit_rate": round(profit_rate * 100, 2),
+        "buy_count": len(buy_txs),
+        "sell_count": len(sell_txs),
+        "buy_total": round(buy_total, 2),
+        "sell_total": round(sell_total, 2),
+        "first_buy_date": first_buy,
+        "notes": target.get("notes", ""),
+    }
+    return json.dumps(result, ensure_ascii=False)
+
+
+def _query_transaction_history(args: dict) -> str:
+    """查询交易记录并附带分析。"""
+    fund_code = args.get("fund_code", "").strip() or None
+    tx_type = args.get("transaction_type", "") or None
+    limit = args.get("limit", 50)
+
+    txs = list_transactions(fund_code=fund_code, limit=limit)
+
+    if tx_type:
+        txs = [t for t in txs if t["transaction_type"] == tx_type]
+
+    for t in txs:
+        tags = get_transaction_tags(t["id"])
+        t["tags"] = tags
+
+    buy_count = sum(1 for t in txs if t["transaction_type"] == "buy")
+    sell_count = sum(1 for t in txs if t["transaction_type"] == "sell")
+    buy_total = sum(t.get("amount", 0) or 0 for t in txs if t["transaction_type"] == "buy")
+    sell_total = sum(t.get("amount", 0) or 0 for t in txs if t["transaction_type"] == "sell")
+
+    return json.dumps({
+        "count": len(txs),
+        "buy_count": buy_count,
+        "sell_count": sell_count,
+        "buy_total": round(buy_total, 2),
+        "sell_total": round(sell_total, 2),
+        "transactions": txs,
+    }, ensure_ascii=False)
+
+
+def _analyze_portfolio_diversification(args: dict) -> str:
+    """分析持仓分散度。"""
+    div = get_portfolio_diversification()
+    tx_summary = get_transaction_summary()
+    result = {**div, "transaction_summary": tx_summary}
+    return json.dumps(result, ensure_ascii=False)
+
+
+def _generate_portfolio_alert(args: dict) -> str:
+    """生成风险预警。"""
+    alert_type = args.get("alert_type", "risk_warning")
+    reason = args.get("reason", "")
+    fund_code = args.get("fund_code", "")
+
+    fund_name = ""
+    if fund_code:
+        info = lookup_fund_info(fund_code)
+        if info:
+            fund_name = info.get("fund_name", "")
+
+    type_labels = {
+        "risk_warning": "风险警告",
+        "add_position": "加仓提醒",
+        "reduce_position": "减仓提醒",
+        "news_impact": "新闻影响",
+        "valuation_alert": "估值预警",
+    }
+    type_label = type_labels.get(alert_type, alert_type)
+    title = f"{type_label}"
+    if fund_name:
+        title += f"：{fund_name}"
+
+    severity_map = {
+        "risk_warning": "danger",
+        "add_position": "info",
+        "reduce_position": "warning",
+        "news_impact": "info",
+        "valuation_alert": "warning",
+    }
+    severity = severity_map.get(alert_type, "info")
+
+    alert_id = create_alert(
+        alert_type=alert_type,
+        title=title,
+        content=reason,
+        severity=severity,
+        related_fund_code=fund_code or None,
+        related_fund_name=fund_name or None,
+        source="ai_analysis",
+    )
+
+    return json.dumps({
+        "ok": True,
+        "alert_id": alert_id,
+        "title": title,
+        "severity": severity,
+    }, ensure_ascii=False)
+
+
+# ── 债券市场工具 ──────────────────────────────────
+
+
+def _get_bond_yield_curve(args: dict) -> str:
+    """获取国债收益率曲线数据。"""
+    country = args.get("country", "china")
+    try:
+        import akshare as ak
+        df = ak.bond_zh_us_rate()
+        if df.empty:
+            return json.dumps({"error": "暂无收益率曲线数据"}, ensure_ascii=False)
+        # 取最近 10 个交易日
+        df = df.tail(10).copy()
+        df = df.where(df.notna(), None)
+
+        china_cols = ["中国国债收益率2年", "中国国债收益率5年", "中国国债收益率10年",
+                      "中国国债收益率30年", "中国国债收益率10年-2年"]
+        us_cols = ["美国国债收益率2年", "美国国债收益率5年", "美国国债收益率10年",
+                   "美国国债收益率30年", "美国国债收益率10年-2年"]
+
+        result = {"dates": df["日期"].tolist()}
+        if country in ("china", "both"):
+            china_data = {}
+            for col in china_cols:
+                if col in df.columns:
+                    china_data[col] = df[col].tolist()
+            result["china"] = china_data
+        if country in ("us", "both"):
+            us_data = {}
+            for col in us_cols:
+                if col in df.columns:
+                    us_data[col] = df[col].tolist()
+            result["us"] = us_data
+
+        # 最新数据摘要
+        latest = df.iloc[-1]
+        summary = {}
+        if country in ("china", "both"):
+            summary["中国"] = {
+                "2年": latest.get("中国国债收益率2年"),
+                "5年": latest.get("中国国债收益率5年"),
+                "10年": latest.get("中国国债收益率10年"),
+                "30年": latest.get("中国国债收益率30年"),
+                "10-2年利差": latest.get("中国国债收益率10年-2年"),
+            }
+        if country in ("us", "both"):
+            summary["美国"] = {
+                "2年": latest.get("美国国债收益率2年"),
+                "5年": latest.get("美国国债收益率5年"),
+                "10年": latest.get("美国国债收益率10年"),
+                "30年": latest.get("美国国债收益率30年"),
+                "10-2年利差": latest.get("美国国债收益率10年-2年"),
+            }
+        result["summary"] = summary
+
+        # 趋势判断
+        if country in ("china", "both") and len(df) >= 5:
+            ch_10y = df["中国国债收益率10年"].tolist()
+            ch_10y_valid = [v for v in ch_10y if v is not None]
+            if len(ch_10y_valid) >= 5:
+                trend = "下行" if ch_10y_valid[-1] < ch_10y_valid[0] - 0.05 else \
+                        "上行" if ch_10y_valid[-1] > ch_10y_valid[0] + 0.05 else "平稳"
+                result["china_trend"] = f"近5日中国10年期国债收益率{trend}"
+                ch_spread = latest.get("中国国债收益率10年-2年")
+                if ch_spread is not None:
+                    if ch_spread < 0.3:
+                        result["china_curve"] = "平坦（利差<0.3%，经济放缓预期）"
+                    elif ch_spread < 0.7:
+                        result["china_curve"] = "正常（利差0.3-0.7%）"
+                    else:
+                        result["china_curve"] = "陡峭（利差>0.7%，经济复苏预期）"
+
+        return json.dumps(result, ensure_ascii=False, default=str)
+    except Exception as e:
+        logger.error(f"获取收益率曲线失败: {e}")
+        return json.dumps({"error": f"获取收益率曲线失败: {e}"}, ensure_ascii=False)
+
+
+def _get_bond_market_overview() -> str:
+    """获取当前债市综合概况。"""
+    try:
+        # 1. 债市温度
+        temp_data = json.loads(_get_bond_temperature())
+
+        # 2. 收益率曲线
+        curve_data = json.loads(_get_bond_yield_curve({"country": "china"}))
+
+        result = {"bond_market": {}}
+
+        if "error" not in temp_data:
+            result["bond_market"]["temperature"] = temp_data.get("temperature")
+            result["bond_market"]["rate"] = temp_data.get("rate")
+            result["bond_market"]["level"] = temp_data.get("level")
+            result["bond_market"]["date"] = temp_data.get("date")
+
+        if "error" not in curve_data:
+            result["bond_market"]["yield_curve"] = {
+                "china_summary": curve_data.get("summary", {}).get("中国", {}),
+                "trend": curve_data.get("china_trend", ""),
+                "curve_shape": curve_data.get("china_curve", ""),
+            }
+
+        # 3. 综合判断
+        temp = temp_data.get("temperature")
+        assessments = []
+        if temp is not None:
+            if temp < 30:
+                assessments.append("债市温度偏低，债券有配置价值")
+            elif temp < 70:
+                assessments.append("债市温度适中")
+            else:
+                assessments.append("债市温度偏高，谨慎配置")
+
+        # 收益率用 yield_curve 中的 10Y 值（百分比格式）
+        china_summary = curve_data.get("summary", {}).get("中国", {})
+        rate_10y = china_summary.get("10年")
+        if rate_10y is not None:
+            assessments.append(f"当前10Y国债收益率约{rate_10y}%")
+        if curve_data.get("china_trend"):
+            assessments.append(curve_data["china_trend"])
+        if curve_data.get("china_curve"):
+            assessments.append(f"收益率曲线形态：{curve_data['china_curve']}")
+
+        result["bond_market"]["assessment"] = "；".join(assessments) if assessments else "暂无数据"
+
+        return json.dumps(result, ensure_ascii=False)
+    except Exception as e:
+        logger.error(f"获取债市概况失败: {e}")
+        return json.dumps({"error": f"获取债市概况失败: {e}"}, ensure_ascii=False)

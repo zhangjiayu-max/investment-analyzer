@@ -23,6 +23,9 @@ VISION_API_KEY = os.getenv("VISION_API_KEY", MIMO_API_KEY)
 VISION_BASE_URL = os.getenv("VISION_BASE_URL", MIMO_BASE_URL)
 VISION_MODEL = os.getenv("VISION_MODEL", "mimo-v2-omni")
 
+# 盈米且慢 MCP API
+YINGMI_API_KEY = os.getenv("YINGMI_API_KEY", "")
+
 
 def get_llm_config() -> tuple[str, str, str]:
     """根据 LLM_PROVIDER 返回 (api_key, base_url, model)。"""

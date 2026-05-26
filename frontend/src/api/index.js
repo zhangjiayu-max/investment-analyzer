@@ -66,6 +66,21 @@ export function getValuationHistory(indexCode, days = 30, metricType = null) {
   return api.get(`/valuations/${indexCode}`, { params })
 }
 
+/** 获取估值数据新鲜度 */
+export function getValuationFreshness() {
+  return api.get('/valuations/freshness')
+}
+
+/** 刷新指数实时价格 */
+export function refreshValuationPrices() {
+  return api.post('/valuations/refresh-prices', {}, { timeout: 60000 })
+}
+
+/** AI 债券配置推荐 */
+export function getBondRecommend() {
+  return api.post('/bond/ai-recommend', {}, { timeout: 120000 })
+}
+
 /** 获取指数简介信息 */
 export function getIndexInfo(indexCode, indexName = '') {
   const params = {}
@@ -189,6 +204,26 @@ export function deleteAgent(id) {
 /** AI 生成/优化 Agent 提示词 */
 export function generateAgentPrompt(data) {
   return api.post('/agents/generate-prompt', data, { timeout: 120000 })
+}
+
+/** 获取 Agent 提示词版本历史 */
+export function listAgentVersions(agentId) {
+  return api.get(`/agents/${agentId}/versions`)
+}
+
+/** 回滚 Agent 提示词到指定版本 */
+export function rollbackAgentPrompt(agentId, versionId) {
+  return api.post(`/agents/${agentId}/rollback/${versionId}`)
+}
+
+/** 获取分析 Agent 提示词版本历史 */
+export function listAnalysisAgentVersions(agentId) {
+  return api.get(`/analysis-agents/${agentId}/versions`)
+}
+
+/** 回滚分析 Agent 提示词到指定版本 */
+export function rollbackAnalysisAgentPrompt(agentId, versionId) {
+  return api.post(`/analysis-agents/${agentId}/rollback/${versionId}`)
 }
 
 /** 对话列表 */
@@ -419,11 +454,75 @@ export function updateAnalysisAgent(id, data) {
   return api.put(`/analysis-agents/${id}`, data)
 }
 
+// ── 每日看板 API ──────────────────────────────────────
+
+/** 获取 Dashboard 聚合数据 */
+export function getDashboard() {
+  return api.get('/dashboard')
+}
+
+/** 获取今日市场热点（YingMi MCP） */
+export function getHotTopics() {
+  return api.get('/dashboard/hot-topics')
+}
+
+/** 获取今日自动生成的日报 */
+export function getDailyReport() {
+  return api.get('/dashboard/daily-report')
+}
+
+/** 获取结构化热点分析（AI 推荐卡片） */
+export function getHotspotsAnalysis() {
+  return api.get('/dashboard/hotspots-analysis', { timeout: 90000 })
+}
+
+/** 获取最近一次热点分析缓存（刷新页面后还原） */
+export function getLatestHotspotsAnalysis() {
+  return api.get('/dashboard/hotspots-analysis/latest')
+}
+
+/** 获取推荐验证历史 */
+export function getRecommendations(limit = 50, status = '') {
+  const params = { limit }
+  if (status) params.status = status
+  return api.get('/dashboard/recommendations', { params })
+}
+
+/** 获取推荐验证统计 */
+export function getRecommendationStats() {
+  return api.get('/dashboard/recommendations/stats')
+}
+
+/** 提交推荐反馈（点赞/点踩） */
+export function submitRecommendationFeedback(recId, { rating, tags = '', comment = '' }) {
+  return api.post(`/dashboard/recommendations/${recId}/feedback`, { rating, tags, comment })
+}
+
+/** 获取推荐反馈统计 */
+export function getRecommendationFeedbackStats() {
+  return api.get('/dashboard/recommendations/feedback-stats')
+}
+
+/** 提交 LLM 输出反馈（进化系统） */
+export function submitLlmFeedback({ caller, input_summary = '', output_summary = '', rating, tags = '', comment = '' }) {
+  return api.post('/llm-feedback', { caller, input_summary, output_summary, rating, tags, comment })
+}
+
 // ── 债市数据 API ──────────────────────────────────────
 
 /** 获取债市温度数据 */
 export function getBondMarketTemperature() {
   return api.get('/bond/market-temperature')
+}
+
+/** 获取国债收益率曲线 */
+export function getBondYieldCurve(country = 'china') {
+  return api.get('/bond/yield-curve', { params: { country } })
+}
+
+/** 获取债市综合概况 */
+export function getBondMarketOverview() {
+  return api.get('/bond/market-overview')
 }
 
 // ── 持仓管理 API ──────────────────────────────────────
@@ -433,9 +532,29 @@ export function listPortfolios() {
   return api.get('/portfolio')
 }
 
+/** 清空所有持仓数据 */
+export function clearAllPortfolio() {
+  return api.post('/portfolio/clear')
+}
+
+/** 获取零钱余额 */
+export function getCashBalance() {
+  return api.get('/portfolio/cash')
+}
+
+/** 调整零钱余额（正数存入，负数支出） */
+export function adjustCashBalance(amount, mode = 'add') {
+  return api.post('/portfolio/cash', { amount, mode })
+}
+
+/** 获取基金净值历史 + 买卖点标记（用于交易行为图表） */
+export function getFundNavHistory(fundCode, days = 365) {
+  return api.get(`/portfolio/fund-nav-history/${fundCode}`, { params: { days } })
+}
+
 /** 获取持仓汇总 */
-export function getPortfolioSummary() {
-  return api.get('/portfolio/summary')
+export function getPortfolioSummary(params = {}) {
+  return api.get('/portfolio/summary', { params })
 }
 
 /** 新增持仓 */
@@ -478,6 +597,11 @@ export function settleTransaction(txId) {
   return api.post(`/portfolio/transactions/${txId}/settle`)
 }
 
+/** 撤销待确认（pending）交易 */
+export function deletePortfolioTransaction(txId) {
+  return api.delete(`/portfolio/transactions/${txId}`)
+}
+
 /** 刷新所有持仓净值 */
 export function refreshAllPortfolioPrices() {
   return api.post('/portfolio/refresh', {}, { timeout: 120000 })
@@ -486,6 +610,153 @@ export function refreshAllPortfolioPrices() {
 /** 刷新单个持仓净值 */
 export function refreshPortfolioPrice(holdingId) {
   return api.post(`/portfolio/${holdingId}/refresh`, {}, { timeout: 30000 })
+}
+
+/** 获取持仓分散度分析 */
+export function getPortfolioDiversification() {
+  return api.get('/portfolio/analysis/diversification')
+}
+
+/** 获取单只基金收益表现分析 */
+export function getHoldingPerformance(holdingId) {
+  return api.get(`/portfolio/analysis/${holdingId}/performance`)
+}
+
+/** 获取交易行为汇总分析 */
+export function getTransactionSummary() {
+  return api.get('/portfolio/analysis/transactions-summary')
+}
+
+// ── 分散度 AI 解读 API ──────────────────────────────────────
+
+/** 触发 AI 分散度分析解读 */
+export function runDiversificationAiSummary() {
+  return api.post('/portfolio/analysis/diversification/ai-summary', {}, { timeout: 120000 })
+}
+
+/** 查询今天是否已有 AI 分散度分析 */
+export function getAiSummaryTodayStatus() {
+  return api.get('/portfolio/analysis/ai-summary/today-status')
+}
+
+// ── AI 持仓分析 API ──────────────────────────────────────
+
+/** 触发 AI 持仓分析 */
+export function runPortfolioAiAnalysis(question = '') {
+  return api.post('/portfolio/analysis/ai', { question }, { timeout: 300000 })
+}
+
+/** 列出 AI 持仓分析记录 */
+export function listPortfolioAiAnalysisRecords(limit = 20) {
+  return api.get('/portfolio/analysis/ai-records', { params: { limit } })
+}
+
+/** 获取单条 AI 持仓分析记录详情 */
+export function getPortfolioAiAnalysisRecord(id) {
+  return api.get(`/portfolio/analysis/ai-records/${id}`)
+}
+
+/** 删除 AI 持仓分析记录 */
+export function deletePortfolioAiAnalysisRecord(id) {
+  return api.delete(`/portfolio/analysis/ai-records/${id}`)
+}
+
+/** 提交分析反馈（helpful/unhelpful） */
+export function submitAnalysisFeedback(recordId, feedback, note = '') {
+  return api.post(`/portfolio/analysis/feedback/${recordId}`, { feedback, note })
+}
+
+/** 获取 Bad Cases 列表 */
+export function listBadCases(analysisType = '', limit = 50) {
+  const params = { limit }
+  if (analysisType) params.analysis_type = analysisType
+  return api.get('/portfolio/analysis/bad-cases', { params })
+}
+
+// ── AI 持仓分析 4 模式 API ──────────────────────────────────
+
+/** 模式1：全景诊断 */
+export function runPanoramaAnalysis() {
+  return api.post('/portfolio/analysis/panorama', {}, { timeout: 300000 })
+}
+
+/** 模式2：单基金深度分析 */
+export function runDeepDiveAnalysis(holdingId) {
+  return api.post(`/portfolio/analysis/deep-dive/${holdingId}`, {}, { timeout: 300000 })
+}
+
+/** 模式3：交易复盘 */
+export function runTradeReview(startDate, endDate) {
+  return api.post('/portfolio/analysis/trade-review', { start_date: startDate, end_date: endDate }, { timeout: 300000 })
+}
+
+/** 模式4：情景推演 */
+export function runWhatIfAnalysis(scenario, parameter) {
+  return api.post('/portfolio/analysis/what-if', { scenario, parameter }, { timeout: 300000 })
+}
+
+/** 列出全景诊断记录 */
+export function listPanoramaRecords(limit = 10) {
+  return api.get('/portfolio/analysis/panorama/records', { params: { limit } })
+}
+
+/** 列出深度分析记录 */
+export function listDeepDiveRecords(limit = 10) {
+  return api.get('/portfolio/analysis/deep-dive/records', { params: { limit } })
+}
+
+/** 列出交易复盘记录 */
+export function listTradeReviewRecords(limit = 10) {
+  return api.get('/portfolio/analysis/trade-review/records', { params: { limit } })
+}
+
+/** 列出情景推演记录 */
+export function listWhatIfRecords(limit = 10) {
+  return api.get('/portfolio/analysis/what-if/records', { params: { limit } })
+}
+
+// ── 风险预警 API ──────────────────────────────────────
+
+/** 获取预警列表 */
+export function listAlerts(unreadOnly = false, limit = 50) {
+  return api.get('/portfolio/alerts', { params: { unread_only: unreadOnly, limit } })
+}
+
+/** 获取未读预警数量 */
+export function getUnreadAlertCount() {
+  return api.get('/portfolio/alerts/unread-count')
+}
+
+/** 标记预警为已读 */
+export function markAlertRead(alertId) {
+  return api.put(`/portfolio/alerts/${alertId}/read`)
+}
+
+/** 删除预警 */
+export function deleteAlert(alertId) {
+  return api.delete(`/portfolio/alerts/${alertId}`)
+}
+
+/** 生成预警 */
+export function generateAlert(data) {
+  return api.post('/portfolio/alerts/generate', data)
+}
+
+// ── 交易标签 API ──────────────────────────────────────
+
+/** 添加交易标签 */
+export function addTransactionTag(txId, tag) {
+  return api.post(`/portfolio/transactions/${txId}/tags`, { tag })
+}
+
+/** 移除交易标签 */
+export function removeTransactionTag(txId, tag) {
+  return api.delete(`/portfolio/transactions/${txId}/tags/${encodeURIComponent(tag)}`)
+}
+
+/** 获取交易标签 */
+export function getTransactionTags(txId) {
+  return api.get(`/portfolio/transactions/${txId}/tags`)
 }
 
 // ── 基金信息查询 API ──────────────────────────────────────
@@ -500,6 +771,90 @@ export function getFundHoldings(fundCode, year = null) {
   const params = { code: fundCode }
   if (year) params.year = year
   return api.get('/fund/holdings', { params, timeout: 30000 })
+}
+
+// ── Token 用量 API ──────────────────────────────────────
+
+/** 获取 Token 用量统计（总量/按天/按模型） */
+export function getTokenUsage(days = 7) {
+  return api.get('/token-usage', { params: { days } })
+}
+
+/** 获取最近 LLM 调用记录（分页） */
+export function getTokenUsageRecent(page = 1, pageSize = 20, days = 7) {
+  return api.get('/token-usage/recent', { params: { page, page_size: pageSize, days } })
+}
+
+/** 获取 Token 用量汇总（今日/累计） */
+export function getTokenUsageSummary(days = 30) {
+  return api.get('/token-usage/summary', { params: { days } })
+}
+
+/** 按 caller 分组统计 */
+export function getTokenUsageByCaller(days = 7) {
+  return api.get('/token-usage/by-caller', { params: { days } })
+}
+
+/** 按天获取趋势 */
+export function getTokenUsageDaily(days = 30) {
+  return api.get('/token-usage/daily', { params: { days } })
+}
+
+// ── 性能监控 API ──────────────────────────────────────
+
+/** 获取 Agent 调用性能统计 */
+export function getPerformanceStats(days = 7) {
+  return api.get('/performance/stats', { params: { days } })
+}
+
+/** 按 Agent 分组统计性能 */
+export function getPerformanceByAgent(days = 7) {
+  return api.get('/performance/by-agent', { params: { days } })
+}
+
+// ── 评测集 API (Eval Suite) ──────────────────────────
+
+/** 列出评测用例 */
+export function listEvalCases(analysisType = '', activeOnly = true) {
+  const params = { active_only: activeOnly }
+  if (analysisType) params.analysis_type = analysisType
+  return api.get('/eval/cases', { params })
+}
+
+/** 创建评测用例 */
+export function createEvalCase(data) {
+  return api.post('/eval/cases', data)
+}
+
+/** 删除评测用例 */
+export function deleteEvalCase(caseId) {
+  return api.delete(`/eval/cases/${caseId}`)
+}
+
+/** 运行评测用例 */
+export function runEvalCase(caseId) {
+  return api.post(`/eval/cases/${caseId}/run`, {}, { timeout: 600000 })
+}
+
+/** 列出评测运行记录 */
+export function listEvalRuns(caseId = 0, limit = 50) {
+  const params = { limit }
+  if (caseId) params.case_id = caseId
+  return api.get('/eval/runs', { params })
+}
+
+/** 获取单条运行记录详情 */
+export function getEvalRunDetail(runId) {
+  return api.get(`/eval/runs/${runId}`)
+}
+
+/** 获取评测统计概览 */
+export function getEvalStats() {
+  return api.get('/eval/stats')
+}
+
+export function getFinanceQuoteBar() {
+  return api.get('/finance/quote-bar')
 }
 
 export default api

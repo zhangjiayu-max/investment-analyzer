@@ -1,6 +1,6 @@
 <script setup>
 import { ref, onMounted, computed } from 'vue'
-import { listAgents, getAgent, updateAgent, deleteAgent, listAnalysisAgents, updateAnalysisAgent, generateAgentPrompt } from '../api'
+import { listAgents, getAgent, updateAgent, deleteAgent, listAnalysisAgents, updateAnalysisAgent, generateAgentPrompt, listAgentVersions, rollbackAgentPrompt, listAnalysisAgentVersions, rollbackAnalysisAgentPrompt } from '../api'
 
 const agents = ref([])
 const analysisAgents = ref([])
@@ -16,6 +16,14 @@ const showGenerateDialog = ref(false)
 const showOptimizeConfirm = ref(false)
 const generateForm = ref({ name: '', description: '' })
 const aiLoading = ref(false)
+
+// 版本历史
+const versions = ref([])
+const versionsLoading = ref(false)
+const showVersions = ref(false)
+const showRollbackConfirm = ref(false)
+const rollbackTarget = ref(null)
+
 const toast = ref({ show: false, message: '', type: 'success' })
 
 function showToast(message, type = 'success') {
@@ -111,6 +119,64 @@ async function aiGenerate() {
   }
 }
 
+// 版本历史
+async function loadVersions() {
+  if (!selectedAgent.value) return
+  versionsLoading.value = true
+  try {
+    const agentId = selectedAgent.value.id
+    const { data } = activeTab.value === 'conversation'
+      ? await listAgentVersions(agentId)
+      : await listAnalysisAgentVersions(agentId)
+    versions.value = data.versions || []
+  } catch (e) {
+    console.error('Failed to load versions:', e)
+  } finally {
+    versionsLoading.value = false
+  }
+}
+
+function toggleVersions() {
+  showVersions.value = !showVersions.value
+  if (showVersions.value && versions.value.length === 0) loadVersions()
+}
+
+function formatVersionTime(ts) {
+  if (!ts) return ''
+  const d = new Date(ts.replace(' ', 'T'))
+  const M = d.getMonth() + 1
+  const D = d.getDate()
+  const h = String(d.getHours()).padStart(2, '0')
+  const m = String(d.getMinutes()).padStart(2, '0')
+  return `${M}/${D} ${h}:${m}`
+}
+
+function confirmRollback(version) {
+  rollbackTarget.value = version
+  showRollbackConfirm.value = true
+}
+
+async function doRollback() {
+  if (!rollbackTarget.value || !selectedAgent.value) return
+  try {
+    const agentId = selectedAgent.value.id
+    const versionId = rollbackTarget.value.id
+    const { data } = activeTab.value === 'conversation'
+      ? await rollbackAgentPrompt(agentId, versionId)
+      : await rollbackAnalysisAgentPrompt(agentId, versionId)
+    showToast('已回滚到 v' + rollbackTarget.value.version)
+    selectedAgent.value.system_prompt = data.system_prompt
+    showRollbackConfirm.value = false
+    rollbackTarget.value = null
+    // 刷新版本列表
+    await loadVersions()
+    await loadAgents()
+  } catch (e) {
+    showToast('回滚失败: ' + (e.response?.data?.detail || e.message), 'error')
+    showRollbackConfirm.value = false
+  }
+}
+
 async function saveEdit() {
   if (!editingAgent.value) return
   saving.value = true
@@ -144,6 +210,14 @@ async function handleDelete() {
     showToast('删除失败: ' + (e.response?.data?.detail || e.message), 'error')
     showDeleteConfirm.value = false
   }
+}
+
+function copyPrompt(text) {
+  navigator.clipboard.writeText(text).then(() => {
+    showToast('已复制到剪贴板')
+  }).catch(() => {
+    showToast('复制失败', 'error')
+  })
 }
 
 function getAgentIcon(icon) {
@@ -233,12 +307,42 @@ onMounted(loadAgents)
               <div class="detail-value">{{ selectedAgent.description || '—' }}</div>
             </div>
             <div class="detail-section">
-              <div class="detail-label">系统提示词</div>
+              <div class="detail-label">
+                <span>系统提示词</span>
+                <button class="copy-btn" @click="copyPrompt(selectedAgent.system_prompt)" title="复制">
+                  <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"/></svg>
+                </button>
+              </div>
               <pre class="prompt-block">{{ selectedAgent.system_prompt }}</pre>
             </div>
             <div v-if="selectedAgent.knowledge_scope" class="detail-section">
               <div class="detail-label">知识范围</div>
               <pre class="prompt-block prompt-sm">{{ selectedAgent.knowledge_scope }}</pre>
+            </div>
+
+            <!-- Version History -->
+            <div class="detail-section">
+              <button class="version-toggle" @click="toggleVersions">
+                <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+                {{ showVersions ? '收起版本历史' : '查看版本历史' }}
+                <span v-if="versions.length" class="version-count">{{ versions.length }}</span>
+              </button>
+              <Transition name="fade">
+                <div v-if="showVersions" class="version-list">
+                  <div v-if="versionsLoading" class="version-loading">
+                    <span class="spinner-sm"></span> 加载中...
+                  </div>
+                  <div v-else-if="versions.length === 0" class="version-empty">暂无历史版本</div>
+                  <div v-else v-for="v in versions" :key="v.id" class="version-item">
+                    <div class="version-info">
+                      <span class="version-tag">v{{ v.version }}</span>
+                      <span class="version-time">{{ formatVersionTime(v.created_at) }}</span>
+                      <span class="version-preview">{{ (v.system_prompt || '').substring(0, 60) }}...</span>
+                    </div>
+                    <button class="btn btn-outline btn-xs version-rollback-btn" @click="confirmRollback(v)">回滚</button>
+                  </div>
+                </div>
+              </Transition>
             </div>
           </template>
 
@@ -298,6 +402,20 @@ onMounted(loadAgents)
           <div class="modal-actions">
             <button class="btn btn-outline" @click="showDeleteConfirm = false">取消</button>
             <button class="btn btn-danger" @click="handleDelete">确认删除</button>
+          </div>
+        </div>
+      </div>
+    </Teleport>
+
+    <!-- Rollback Confirm -->
+    <Teleport to="body">
+      <div v-if="showRollbackConfirm" class="modal-overlay" @click.self="showRollbackConfirm = false">
+        <div class="modal-dialog">
+          <h3 class="modal-title">确认回滚</h3>
+          <p class="modal-desc">将回滚到 v{{ rollbackTarget?.version }}（{{ formatVersionTime(rollbackTarget?.created_at) }}）。当前提示词会自动保存为新版本，确认继续？</p>
+          <div class="modal-actions">
+            <button class="btn btn-outline" @click="showRollbackConfirm = false">取消</button>
+            <button class="btn btn-primary" @click="doRollback">确认回滚</button>
           </div>
         </div>
       </div>
@@ -541,6 +659,26 @@ onMounted(loadAgents)
   text-transform: uppercase;
   letter-spacing: 0.05em;
   margin-bottom: 0.4rem;
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.copy-btn {
+  background: none;
+  border: none;
+  color: var(--color-text-muted);
+  cursor: pointer;
+  padding: 2px;
+  border-radius: 4px;
+  display: flex;
+  align-items: center;
+  transition: all 0.15s;
+}
+
+.copy-btn:hover {
+  color: var(--color-primary-600);
+  background: var(--color-bg-hover);
 }
 
 .detail-value {
@@ -621,6 +759,107 @@ onMounted(loadAgents)
 }
 
 .btn-xs svg { flex-shrink: 0; }
+
+/* Version History */
+.version-toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  background: none;
+  border: none;
+  color: var(--color-primary-600);
+  font-size: 0.8rem;
+  font-weight: 500;
+  cursor: pointer;
+  padding: 0;
+  transition: color 0.15s;
+}
+
+.version-toggle:hover { color: var(--color-primary-700); }
+
+.version-count {
+  font-size: 0.65rem;
+  background: var(--color-primary-50);
+  color: var(--color-primary-600);
+  padding: 0.1rem 0.35rem;
+  border-radius: 999px;
+}
+
+.version-list {
+  margin-top: 0.75rem;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  max-height: 300px;
+  overflow-y: auto;
+}
+
+.version-loading,
+.version-empty {
+  padding: 1.25rem;
+  text-align: center;
+  font-size: 0.8rem;
+  color: var(--color-text-muted);
+}
+
+.version-loading { display: flex; align-items: center; justify-content: center; gap: 0.5rem; }
+
+.version-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.6rem 0.85rem;
+  border-bottom: 1px solid var(--color-border-light);
+  transition: background 0.15s;
+}
+
+.version-item:last-child { border-bottom: none; }
+.version-item:hover { background: var(--color-bg-hover); }
+
+.version-info {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-width: 0;
+  flex: 1;
+}
+
+.version-tag {
+  font-size: 0.7rem;
+  font-weight: 600;
+  background: var(--color-bg-input);
+  color: var(--color-text-secondary);
+  padding: 0.15rem 0.4rem;
+  border-radius: var(--radius-sm);
+  white-space: nowrap;
+}
+
+.version-time {
+  font-size: 0.72rem;
+  color: var(--color-text-muted);
+  white-space: nowrap;
+}
+
+.version-preview {
+  font-size: 0.72rem;
+  color: var(--color-text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.version-rollback-btn {
+  flex-shrink: 0;
+  font-size: 0.68rem;
+  padding: 0.2rem 0.5rem;
+  color: var(--color-primary-600);
+  border-color: var(--color-primary-300);
+}
+
+.version-rollback-btn:hover {
+  background: var(--color-primary-50);
+}
 
 .toggle-label {
   display: flex;

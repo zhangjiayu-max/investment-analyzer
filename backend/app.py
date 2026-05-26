@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import time
 from pathlib import Path
 
@@ -19,6 +20,7 @@ ROOT = Path(__file__).parent.parent
 from db import (
     init_db, create_task, update_task, get_task, list_tasks, delete_task,
     save_valuation, get_valuation_history, get_latest_valuation, list_valuation_indexes,
+    list_index_freshness,
     sync_articles, list_articles, get_article, get_article_by_seq, get_article_by_url, create_article,
     update_article, create_analysis_record, update_analysis_record,
     get_analysis_records, get_analysis_record, get_valuation_by_image,
@@ -31,22 +33,38 @@ from db import (
     create_linked_article, list_linked_articles, get_linked_article, delete_linked_article,
     update_linked_article_file, update_linked_article_embed_status, save_document_chunks, get_document_chunks,
     create_holding, get_holding, list_holdings, update_holding, delete_holding, get_portfolio_summary,
-    create_transaction, list_transactions, confirm_transaction, settle_transaction,
+    create_transaction, list_transactions, confirm_transaction, settle_transaction, delete_transaction,
     refresh_holding_price, refresh_all_fund_prices, fetch_fund_nav,
     lookup_fund_info, get_fund_holdings,
+    get_portfolio_diversification, get_transaction_summary, clear_all_portfolio_data,
+    get_cash_balance, add_cash,
+    get_fund_nav_history,
+    create_alert, list_alerts, get_unread_alert_count, mark_alert_read, delete_alert,
+    add_transaction_tag, remove_transaction_tag, get_transaction_tags,
+    create_portfolio_analysis_record, list_portfolio_analysis_records,
+    get_portfolio_analysis_record, delete_portfolio_analysis_record,
+    update_analysis_feedback, list_bad_cases,
     list_analysis_agents, get_analysis_agent, update_analysis_agent,
     create_analysis_history, list_analysis_history, get_analysis_history_item, delete_analysis_history,
-    get_index_info, save_index_info,
+    get_index_info, save_index_info, search_indexes_by_keyword,
+    save_prompt_version, list_prompt_versions, get_prompt_version,
+    list_token_usage, get_token_usage_summary, get_token_usage_by_caller, get_token_usage_daily,
+    count_token_usage,
+    get_performance_stats, get_performance_by_agent,
+    create_eval_case, list_eval_cases, get_eval_case, update_eval_case, delete_eval_case,
+    create_eval_run, list_eval_runs, get_eval_run_detail, get_eval_stats,
+    DEFAULT_BOND_PROMPT,
 )
 from article_reader import fetch_article, download_images, extract_stock_codes
 from market_data import get_stock_info, get_index_valuation
 from valuation import analyze_stock, analyze_fund
 from llm_service import (analyze_article, analyze_article_stream, chat_about_investment,
                          analyze_images_batch, chat_with_agent, chat_with_tools, ORCHESTRATOR_PROMPT,
-                         _call_llm, MODEL)
-from orchestrator import orchestrate, orchestrate_stream, clarify_requirement
-from multi_agent import run_specialist
+                         _call_llm, MODEL, _record_token_usage)
+from agent.orchestrator import orchestrate, orchestrate_stream, clarify_requirement
+from agent.multi_agent import run_specialist
 from image_parser import ImageParser
+from mcp.trading_calendar import expected_confirm_date
 from rag import init_fts, init_chroma, index_article, index_valuation, index_analysis_record, build_rag_context, build_rag_context_with_details, log_rag_search, index_author_article, index_skill_document, index_skill_extraction, index_to_chroma, _get_chroma, _get_embed_model
 
 app = FastAPI(title="投资分析助手", version="0.4.0")
@@ -74,6 +92,7 @@ app.mount("/static/images", StaticFiles(directory=str(IMAGES_DIR)), name="articl
 OUTPUT_DIR = ROOT / "output" / "tasks"
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 app.mount("/static/tasks", StaticFiles(directory=str(OUTPUT_DIR)), name="task_images")
+app.mount("/assets", StaticFiles(directory=str(STATIC_DIR / "assets")), name="frontend_assets")
 UPLOADS_DIR = ROOT / "data" / "uploads"
 UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -83,6 +102,79 @@ async def startup():
     init_db()
     init_fts()
     init_chroma()
+    # 种子债券知识库
+    try:
+        from db import seed_bond_knowledge
+        if seed_bond_knowledge():
+            logging.info("债券知识库已写入 skill_documents")
+    except Exception:
+        pass
+    # 启动后台每日分析任务
+    asyncio.create_task(_auto_daily_report())
+
+
+async def _auto_daily_report():
+    """启动时自动检查并生成今日市场分析报告。"""
+    import time
+    try:
+        # 等待服务完全启动
+        await asyncio.sleep(5)
+        # 检查今日是否已有报告
+        today = time.strftime("%Y-%m-%d")
+        from db import _get_conn
+        conn = _get_conn()
+        row = conn.execute(
+            "SELECT id FROM analysis_history WHERE agent_id = 1 AND date(created_at) = ? LIMIT 1",
+            (today,)
+        ).fetchone()
+        conn.close()
+
+        if row:
+            logging.info(f"今日市场报告已存在 (id={row['id']})，跳过自动生成")
+            return
+
+        logging.info("今日市场报告不存在，后台自动生成中...")
+        agent = get_analysis_agent(1)
+        if not agent:
+            logging.warning("市场日报分析师未配置，跳过自动生成")
+            return
+
+        # 获取新闻
+        news_context = ""
+        try:
+            from tools import execute_tool
+            news_result = execute_tool("web_search", {"query": "A股 今日行情 板块 热点", "max_results": 5})
+            news_context = news_result if news_result else ""
+        except Exception as e:
+            logging.warning(f"自动报告新闻检索失败: {e}")
+
+        full_prompt = agent["system_prompt"]
+        if news_context:
+            full_prompt += f"\n\n<latest_news>\n最新财经新闻：\n{news_context}\n</latest_news>"
+
+        response = await asyncio.to_thread(lambda: _call_llm(
+            caller="daily_report",
+            model=MODEL,
+            messages=[
+                {"role": "system", "content": full_prompt},
+                {"role": "user", "content": "请生成今日市场分析报告。"},
+            ],
+            temperature=0.3,
+            max_tokens=8192,
+        ))
+        result_text = response.choices[0].message.content or ""
+        token_usage = response.usage.total_tokens if response.usage else 0
+
+        create_analysis_history(
+            index_code="", index_name="",
+            agent_id=1, agent_name=agent["name"],
+            prompt_used=full_prompt, news_context=news_context,
+            valuation_context="", result=result_text,
+            token_usage=token_usage,
+        )
+        logging.info(f"今日市场报告后台自动生成完成，token用量: {token_usage}")
+    except Exception as e:
+        logging.warning(f"自动生成市场报告失败: {e}")
 
 
 # ── 请求模型 ──────────────────────────────────────────
@@ -263,8 +355,20 @@ def _build_valuation_context(question: str) -> str:
     if not matched_indexes:
         return ""
 
+    # 全局数据新鲜度摘要
+    from datetime import date as dt_date
+    freshness = list_index_freshness()
+    stale_summary = []
+    for f in freshness:
+        sd = f.get("stale_days")
+        if sd is not None and sd >= 5:
+            stale_summary.append(f"{f['index_name']}({sd:.0f}天)")
+    if stale_summary:
+        parts = [f"⚠️ 数据新鲜度警告: 以下指数估值数据超过5天未更新: {'; '.join(stale_summary[:6])}，分析时请注意数据可能滞后。"]
+    else:
+        parts = []
+
     # 查询每个匹配指数的最新估值和近期趋势
-    parts = []
     for idx in matched_indexes:
         code = idx["index_code"]
         name = idx["index_name"]
@@ -302,6 +406,15 @@ def _build_valuation_context(question: str) -> str:
                 line += f", z-score={zscore}"
             if date:
                 line += f" [{date}]"
+                # 数据新鲜度提示，超过10天标记为过期
+                from datetime import date as dt_date
+                try:
+                    d = dt_date.fromisoformat(str(date))
+                    stale_days = (dt_date.today() - d).days
+                    if stale_days >= 10:
+                        line += f" [数据已过期{stale_days}天]"
+                except:
+                    pass
             lines.append(line)
 
             # 近5日趋势
@@ -379,6 +492,56 @@ async def parse_and_save(req: ParseAndSaveRequest):
 async def list_indexes():
     """列出所有有估值数据的指数。"""
     return {"indexes": list_valuation_indexes()}
+
+
+@app.get("/api/valuations/freshness")
+async def index_freshness():
+    """所有估值指数的数据新鲜度。"""
+    return {"indexes": list_index_freshness()}
+
+
+@app.post("/api/valuations/refresh-prices")
+async def refresh_index_prices():
+    """用实时行情刷新指数最新价（仅更新 current_point/change_pct，估值百分位不变）。"""
+    from datetime import date
+    import ssl
+    ssl._create_default_https_context = ssl._create_unverified_context
+    import akshare as ak
+    from db import _get_conn
+
+    freshness = list_index_freshness()
+    updated = 0
+    errors = []
+    today = date.today().isoformat()
+
+    try:
+        spot_df = ak.stock_zh_index_spot_sina()
+        conn = _get_conn()
+        for idx in freshness:
+            code = idx["index_code"]
+            base = code.replace(".SZ", "").replace(".SH", "").replace(".CSI", "")
+            for prefix in ["sh", "sz"]:
+                sina_code = f"{prefix}{base}"
+                match = spot_df[spot_df["代码"] == sina_code]
+                if not match.empty:
+                    row = match.iloc[0]
+                    current_point = float(row["最新价"])
+                    change_pct = float(row["涨跌幅"])
+                    conn.execute("""
+                        UPDATE index_valuations
+                        SET current_point = ?, change_pct = ?
+                        WHERE index_code = ? AND snapshot_date = (
+                            SELECT MAX(snapshot_date) FROM index_valuations WHERE index_code = ?
+                        )
+                    """, (current_point, change_pct, code, code))
+                    updated += 1
+                    break
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        errors.append(f"实时行情刷新失败: {e}")
+
+    return {"ok": True, "updated": updated, "errors": errors}
 
 
 @app.get("/api/valuations/{index_code}")
@@ -615,11 +778,14 @@ class UpdateAgentRequest(BaseModel):
 
 @app.put("/api/agents/{agent_id}")
 async def update_agent_api(agent_id: int, req: UpdateAgentRequest):
-    """更新 Agent 信息。"""
+    """更新 Agent 信息。修改提示词时自动保存版本历史。"""
     agent = get_agent(agent_id)
     if not agent:
         raise HTTPException(404, "Agent 不存在")
     fields = {k: v for k, v in req.model_dump().items() if v is not None}
+    # 提示词变更前，保存当前版本
+    if 'system_prompt' in fields and fields['system_prompt'] != agent.get('system_prompt'):
+        save_prompt_version(agent_id, 'conversation', agent['system_prompt'])
     if fields:
         update_agent(agent_id, **fields)
     return {"ok": True}
@@ -726,6 +892,50 @@ async def generate_prompt_api(req: GeneratePromptRequest):
     except Exception as e:
         logging.warning(f"AI 生成提示词失败: {e}")
         raise HTTPException(500, f"AI 生成失败: {str(e)}")
+
+
+@app.get("/api/agents/{agent_id}/versions")
+async def list_agent_versions_api(agent_id: int):
+    """列出某 Agent 的提示词版本历史。"""
+    versions = list_prompt_versions(agent_id, 'conversation')
+    return {"versions": versions}
+
+
+@app.post("/api/agents/{agent_id}/rollback/{version_id}")
+async def rollback_agent_prompt_api(agent_id: int, version_id: int):
+    """回滚到指定版本的提示词。"""
+    version = get_prompt_version(version_id)
+    if not version:
+        raise HTTPException(404, "版本不存在")
+    agent = get_agent(agent_id)
+    if not agent:
+        raise HTTPException(404, "Agent 不存在")
+    # 保存当前提示词为新版本
+    save_prompt_version(agent_id, 'conversation', agent['system_prompt'])
+    # 回滚
+    update_agent(agent_id, system_prompt=version['system_prompt'])
+    return {"ok": True, "system_prompt": version['system_prompt']}
+
+
+@app.get("/api/analysis-agents/{agent_id}/versions")
+async def list_analysis_agent_versions_api(agent_id: int):
+    """列出某分析 Agent 的提示词版本历史。"""
+    versions = list_prompt_versions(agent_id, 'analysis')
+    return {"versions": versions}
+
+
+@app.post("/api/analysis-agents/{agent_id}/rollback/{version_id}")
+async def rollback_analysis_agent_prompt_api(agent_id: int, version_id: int):
+    """回滚分析 Agent 到指定版本的提示词。"""
+    version = get_prompt_version(version_id)
+    if not version:
+        raise HTTPException(404, "版本不存在")
+    current = get_analysis_agent(agent_id)
+    if not current:
+        raise HTTPException(404, "Agent 不存在")
+    save_prompt_version(agent_id, 'analysis', current['system_prompt'])
+    update_analysis_agent(agent_id, system_prompt=version['system_prompt'])
+    return {"ok": True, "system_prompt": version['system_prompt']}
 
 
 @app.get("/api/conversations")
@@ -1014,6 +1224,9 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest):
             "specialist_results": specialist_results,
         })
 
+        # 5.1 主动分析是否产生预警（后台异步执行）
+        asyncio.create_task(_proactive_alert_check(req.content, answer, specialist_results))
+
         # 6. 存储 AI 回复
         metadata_dict = {
             "specialist_results": [
@@ -1048,6 +1261,68 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest):
 def _sse_event(event_type: str, data: dict) -> str:
     """格式化 SSE 事件。"""
     return f"data: {json.dumps({'type': event_type, 'data': data}, ensure_ascii=False)}\n\n"
+
+
+async def _proactive_alert_check(query: str, answer: str, specialist_results: list):
+    """对话结束后，主动检测是否需要对持仓生成预警。"""
+    try:
+        # 检测是否涉及政策/新闻/估值变化等可能影响持仓的内容
+        alert_keywords = ["政策", "新闻", "利好", "利空", "上涨", "下跌", "大涨", "大跌",
+                          "风险", "泡沫", "危机", "加息", "降息", "降准", "监管",
+                          "高估", "低估", "加仓", "减仓", "卖出", "买入", "注意"]
+        if not any(kw in query for kw in alert_keywords) and not any(kw in answer for kw in alert_keywords):
+            return
+
+        # 获取持仓数据
+        holdings = list_holdings()
+        if not holdings:
+            return
+
+        # 检查各专家分析中是否有关联持仓的内容
+        fund_names = {h.get("fund_name", "") for h in holdings if h.get("fund_name")}
+        index_names = {h.get("index_name", "") for h in holdings if h.get("index_name")}
+
+        # 构建预警内容
+        alert_holdings = []
+        combined_text = query + " " + answer
+
+        for sr in specialist_results:
+            analysis = sr.get("analysis", "")
+            if not analysis:
+                continue
+            combined_text += " " + analysis[:2000]
+
+        for h in holdings:
+            fname = h.get("fund_name", "")
+            iname = h.get("index_name", "")
+            if (fname and fname in combined_text) or (iname and iname in combined_text):
+                alert_holdings.append(h)
+
+        if not alert_holdings and any(kw in combined_text for kw in ["政策", "新闻", "利好", "利空", "市场"]):
+            # 虽然没直接提到某只基金，但涉及政策/新闻，对全部持仓生成轻度预警
+            for h in holdings[:3]:  # 最多3只
+                create_alert(
+                    alert_type="news_impact",
+                    title=f"市场动态可能影响 {h.get('fund_name', '')}",
+                    content=f"当前对话涉及市场变化，可能影响您的持仓 {h.get('fund_name', '')}（{h.get('fund_code', '')}）。建议关注后续走势。",
+                    severity="info",
+                    related_fund_code=h.get("fund_code"),
+                    related_fund_name=h.get("fund_name"),
+                    source="ai_analysis",
+                )
+        elif alert_holdings:
+            for h in alert_holdings[:5]:
+                create_alert(
+                    alert_type="news_impact",
+                    title=f"对话涉及 {h.get('fund_name', '')}，建议关注",
+                    content=f"当前对话内容涉及您的持仓 {h.get('fund_name', '')}（{h.get('fund_code', '')}），可能影响该持仓。",
+                    severity="info",
+                    related_fund_code=h.get("fund_code"),
+                    related_fund_name=h.get("fund_name"),
+                    source="ai_analysis",
+                )
+    except Exception as e:
+        logger.warning(f"[proactive_alert] 生成预警异常: {e}")
 
 
 def _route_to_specialist(query: str) -> str | None:
@@ -1251,6 +1526,189 @@ async def get_token_usage_api(days: int = 7):
     }
 
 
+@app.get("/api/token-usage/recent")
+async def get_token_usage_recent(page: int = 1, page_size: int = 20, days: int = 7):
+    """获取最近 LLM 调用记录（分页）。"""
+    offset = (page - 1) * page_size
+    records = list_token_usage(days=days, limit=page_size, offset=offset)
+    total = count_token_usage(days=days)
+    return {"records": records, "total": total, "page": page, "page_size": page_size}
+
+
+@app.get("/api/token-usage/summary")
+async def get_token_usage_summary_api(days: int = 30):
+    """获取 Token 用量汇总。"""
+    return get_token_usage_summary(days=days)
+
+
+@app.get("/api/token-usage/by-caller")
+async def get_token_usage_by_caller_api(days: int = 7):
+    """按 caller 分组统计。"""
+    return {"items": get_token_usage_by_caller(days=days)}
+
+
+@app.get("/api/token-usage/daily")
+async def get_token_usage_daily_api(days: int = 30):
+    """按天获取 Token 用量趋势。"""
+    return {"items": get_token_usage_daily(days=days)}
+
+
+# ── 性能监控 API ──────────────────────────────────────
+
+
+@app.get("/api/performance/stats")
+async def get_performance_stats_api(days: int = 7):
+    """获取 Agent 调用性能统计。"""
+    return get_performance_stats(days=days)
+
+
+@app.get("/api/performance/by-agent")
+async def get_performance_by_agent_api(days: int = 7):
+    """按 Agent 分组统计性能。"""
+    return {"items": get_performance_by_agent(days=days)}
+
+
+# ── 评测集 API (Eval Suite) ─────────────────────────────
+
+
+class CreateEvalCaseRequest(BaseModel):
+    name: str
+    analysis_type: str
+    input_params: str = "{}"
+    description: str = ""
+    expected_quality: str = ""
+
+
+class UpdateEvalCaseRequest(BaseModel):
+    name: str | None = None
+    description: str | None = None
+    input_params: str | None = None
+    expected_quality: str | None = None
+    is_active: int | None = None
+
+
+@app.get("/api/eval/cases")
+async def list_eval_cases_api(analysis_type: str = "", active_only: bool = True):
+    """列出评测用例。"""
+    return {"cases": list_eval_cases(analysis_type=analysis_type or None, active_only=active_only)}
+
+
+@app.post("/api/eval/cases")
+async def create_eval_case_api(req: CreateEvalCaseRequest):
+    """创建评测用例。"""
+    case_id = create_eval_case(
+        name=req.name, analysis_type=req.analysis_type,
+        input_params=req.input_params, description=req.description,
+        expected_quality=req.expected_quality,
+    )
+    return {"ok": True, "id": case_id}
+
+
+@app.delete("/api/eval/cases/{case_id}")
+async def delete_eval_case_api(case_id: int):
+    """删除评测用例。"""
+    ok = delete_eval_case(case_id)
+    if not ok:
+        raise HTTPException(404, "评测用例不存在")
+    return {"ok": True}
+
+
+@app.post("/api/eval/cases/{case_id}/run")
+async def run_eval_case_api(case_id: int):
+    """运行单个评测用例：调用对应的分析模式，记录结果。"""
+    case = get_eval_case(case_id)
+    if not case:
+        raise HTTPException(404, "评测用例不存在")
+
+    import json
+
+    input_params = json.loads(case["input_params"] or "{}")
+    analysis_type = case["analysis_type"]
+    start = time.time()
+
+    try:
+        if analysis_type == "panorama":
+            result = await panorama_analysis_api(PanoramaAnalysisRequest())
+            # 如果返回的是 StreamingResponse 或 dict
+            if isinstance(result, StreamingResponse):
+                result_summary = "流式输出（已在后台执行）"
+                result_data = "{}"
+            else:
+                result_summary = json.dumps(result, ensure_ascii=False)[:500]
+                result_data = json.dumps(result, ensure_ascii=False)[:5000]
+        elif analysis_type == "deep_dive":
+            holding_id = input_params.get("holding_id")
+            if not holding_id:
+                raise HTTPException(400, "deep_dive 需要 holding_id 参数")
+            result = await fund_deep_dive_api(holding_id, DeepDiveRequest())
+            result_summary = json.dumps(result, ensure_ascii=False)[:500]
+            result_data = json.dumps(result, ensure_ascii=False)[:5000]
+        elif analysis_type == "trade_review":
+            result = await trade_review_api(TradeReviewRequest(
+                start_date=input_params.get("start_date", ""),
+                end_date=input_params.get("end_date", ""),
+            ))
+            result_summary = json.dumps(result, ensure_ascii=False)[:500]
+            result_data = json.dumps(result, ensure_ascii=False)[:5000]
+        elif analysis_type == "what_if":
+            result = await what_if_analysis_api(WhatIfRequest(
+                scenario=input_params.get("scenario", ""),
+                parameter=input_params.get("parameter", ""),
+            ))
+            result_summary = json.dumps(result, ensure_ascii=False)[:500]
+            result_data = json.dumps(result, ensure_ascii=False)[:5000]
+        elif analysis_type == "diversification_ai":
+            result = await portfolio_diversification_ai_summary()
+            result_summary = json.dumps(result, ensure_ascii=False)[:500]
+            result_data = json.dumps(result, ensure_ascii=False)[:5000]
+        elif analysis_type == "ai":
+            question = input_params.get("question", "")
+            result = await portfolio_ai_analysis_api(PortfolioAiAnalysisRequest(question=question))
+            result_summary = json.dumps(result, ensure_ascii=False)[:500]
+            result_data = json.dumps(result, ensure_ascii=False)[:5000]
+        else:
+            raise HTTPException(400, f"不支持的分析类型: {analysis_type}")
+
+        duration_ms = int((time.time() - start) * 1000)
+        run_id = create_eval_run(
+            case_id=case_id, analysis_type=analysis_type,
+            result_summary=result_summary,
+            result_data=result_data,
+            duration_ms=duration_ms,
+        )
+        return {"ok": True, "run_id": run_id, "duration_ms": duration_ms}
+    except Exception as e:
+        duration_ms = int((time.time() - start) * 1000)
+        run_id = create_eval_run(
+            case_id=case_id, analysis_type=analysis_type,
+            result_summary=f"错误: {str(e)[:200]}",
+            error_msg=str(e)[:1000],
+            duration_ms=duration_ms,
+        )
+        return {"ok": False, "run_id": run_id, "error": str(e)}
+
+
+@app.get("/api/eval/runs")
+async def list_eval_runs_api(case_id: int = 0, limit: int = 50):
+    """列出评测运行记录。"""
+    return {"runs": list_eval_runs(case_id=case_id or None, limit=limit)}
+
+
+@app.get("/api/eval/runs/{run_id}")
+async def get_eval_run_detail_api(run_id: int):
+    """获取单条运行记录详情。"""
+    run = get_eval_run_detail(run_id)
+    if not run:
+        raise HTTPException(404, "运行记录不存在")
+    return run
+
+
+@app.get("/api/eval/stats")
+async def get_eval_stats_api():
+    """获取评测统计概览。"""
+    return get_eval_stats()
+
+
 # ── AI 市场分析 API ──────────────────────────────────────
 
 
@@ -1303,15 +1761,16 @@ async def run_analysis(req: AnalysisRunRequest):
 
     # 5. 调用 LLM
     try:
-        response = _call_llm(
+        response = await asyncio.to_thread(lambda: _call_llm(
+            caller="market_analysis",
             model=MODEL,
             messages=[
                 {"role": "system", "content": full_prompt},
                 {"role": "user", "content": "请生成今日市场分析报告。"},
             ],
             temperature=0.3,
-            max_tokens=4000,
-        )
+            max_tokens=8192,
+        ))
         result_text = response.choices[0].message.content or ""
         token_usage = response.usage.total_tokens if response.usage else 0
     except Exception as e:
@@ -1364,10 +1823,15 @@ async def list_analysis_agents_api():
 
 @app.put("/api/analysis-agents/{agent_id}")
 async def update_analysis_agent_api(agent_id: int, req: AnalysisAgentUpdateRequest):
-    """更新分析 Agent 配置。"""
+    """更新分析 Agent 配置。修改提示词时自动保存版本历史。"""
     kwargs = {k: v for k, v in req.dict().items() if v is not None}
     if not kwargs:
         raise HTTPException(400, "无更新内容")
+    # 提示词变更前，保存当前版本
+    if 'system_prompt' in kwargs:
+        current = get_analysis_agent(agent_id)
+        if current and kwargs['system_prompt'] != current.get('system_prompt'):
+            save_prompt_version(agent_id, 'analysis', current['system_prompt'])
     update_analysis_agent(agent_id, **kwargs)
     return {"ok": True}
 
@@ -2368,11 +2832,13 @@ class CreateHoldingRequest(BaseModel):
     fund_code: str
     fund_name: str
     shares: float = 0
-    cost_price: float = 0
+    cost_price: float = None
+    current_price: float = None
     index_code: str = None
     index_name: str = None
     buy_date: str = None
     notes: str = None
+    account: str = "花无缺"
 
 
 class UpdateHoldingRequest(BaseModel):
@@ -2384,6 +2850,7 @@ class UpdateHoldingRequest(BaseModel):
     index_name: str = None
     buy_date: str = None
     notes: str = None
+    account: str = None
 
 
 class CreateTransactionRequest(BaseModel):
@@ -2391,44 +2858,1476 @@ class CreateTransactionRequest(BaseModel):
     transaction_type: str  # 'buy' | 'sell' | 'dividend'
     amount: float = 0      # 买入金额 / 卖出时可为0（pending）
     transaction_date: str
-    shares: float = None
-    price: float = None
-    holding_id: int = None
-    notes: str = None
-    status: str = None     # 'pending' | 'confirmed' | None(默认confirmed)
-    submitted_shares: float = None  # 卖出时提交的份额
-    submitted_amount: float = None  # 买入时提交的金额
+    shares: float | None = None
+    price: float | None = None
+    holding_id: int | None = None
+    notes: str | None = None
+    status: str | None = None     # 'pending' | 'confirmed' | None(默认confirmed)
+    submitted_shares: float | None = None  # 卖出时提交的份额
+    submitted_amount: float | None = None  # 买入时提交的金额
+    transaction_time: str | None = None    # HH:MM 格式，如 14:30
 
 
 class ConfirmTransactionRequest(BaseModel):
-    confirmed_price: float  # T+1 确认净值
-    confirmed_shares: float = None
-    confirmed_amount: float = None
+    confirmed_price: float
+    confirmed_shares: float | None = None
+    confirmed_amount: float | None = None
+
+
+class CreateAlertRequest(BaseModel):
+    alert_type: str  # risk_warning | add_position | reduce_position | news_impact | valuation_alert
+    title: str
+    content: str = None
+    severity: str = "info"  # info | warning | danger
+    related_fund_code: str = None
+    related_fund_name: str = None
+    source: str = None
+
+
+class TagRequest(BaseModel):
+    tag: str
+
+
+class AdjustCashRequest(BaseModel):
+    amount: float
+    mode: str = "add"  # "add" 存入/支出, "set" 直接设置
 
 
 @app.get("/api/portfolio")
-async def list_portfolio_api():
-    """获取所有持仓。"""
-    return {"holdings": list_holdings()}
+async def list_portfolio_api(account: str = None):
+    """获取所有持仓。可选 ?account=花无缺 筛选。"""
+    return {"holdings": list_holdings(account=account) if account else list_holdings()}
 
 
 @app.get("/api/portfolio/summary")
-async def portfolio_summary_api():
-    """获取持仓汇总（总市值、总盈亏、收益率）。"""
+async def portfolio_summary_api(account: str = None):
+    """获取持仓汇总。可选 ?account=花无缺 筛选。"""
+    if account:
+        return get_portfolio_summary(account=account)
     return get_portfolio_summary()
+
+
+@app.post("/api/portfolio/clear")
+async def clear_portfolio_api():
+    """清空所有持仓数据。"""
+    clear_all_portfolio_data()
+    return {"ok": True, "message": "所有持仓数据已清空"}
+
+
+@app.get("/api/portfolio/cash")
+async def get_cash_api():
+    """获取零钱余额。"""
+    return get_cash_balance()
+
+
+@app.post("/api/portfolio/cash")
+async def adjust_cash_api(req: AdjustCashRequest):
+    """调整零钱余额。mode='add' 时 amount 正数存入/负数支出，mode='set' 时直接设置余额。"""
+    from db import add_cash, set_cash_balance
+    if req.mode == "set":
+        new_balance = set_cash_balance("default", req.amount)
+    else:
+        new_balance = add_cash("default", req.amount)
+    return {"ok": True, "balance": new_balance}
+
+
+@app.get("/api/portfolio/fund-nav-history/{fund_code}")
+async def fund_nav_history_api(fund_code: str, days: int = 365):
+    """获取基金净值历史 + 买卖点标记，用于交易行为图表。"""
+    result = get_fund_nav_history(fund_code, days=days)
+    if not result:
+        raise HTTPException(404, f"获取 {fund_code} 净值数据失败")
+    return result
 
 
 @app.post("/api/portfolio")
 async def create_holding_api(req: CreateHoldingRequest):
     """新增持仓。"""
-    holding_id = create_holding(
+    try:
+        holding_id = create_holding(
         fund_code=req.fund_code, fund_name=req.fund_name,
         shares=req.shares, cost_price=req.cost_price,
+        current_price=req.current_price,
         index_code=req.index_code, index_name=req.index_name,
         buy_date=req.buy_date, notes=req.notes,
-    )
-    return {"ok": True, "holding_id": holding_id}
+        account=req.account,
+        )
+        return {"ok": True, "holding_id": holding_id}
+    except ValueError as e:
+        raise HTTPException(400, str(e))
 
+
+
+# ── 持仓分析 API ──────────────────────────────────────────
+
+
+@app.get("/api/portfolio/analysis/diversification")
+async def portfolio_diversification_api():
+    """分析持仓分散度：基金数量、指数分布、类型分布、仓位集中度。"""
+    result = get_portfolio_diversification()
+
+    # 补充 MCP 分析数据（每个 MCP 调用独立 try/except，返回状态信息）
+    mcp_data = {}
+    try:
+        from mcp.yingmi_client import get_yingmi_client
+        mcp = get_yingmi_client()
+        holdings = list_holdings()
+        fund_codes = [h["fund_code"] for h in holdings if h.get("fund_code") and h["fund_code"].strip()]
+
+        if not fund_codes:
+            mcp_data["error"] = "持仓中没有有效的基金代码"
+        else:
+            # 构建持仓映射 {fund_code: current_value} 用于 MCP 参数
+            holding_map = {h["fund_code"]: h.get("current_value", 0) or 0 for h in holdings if h.get("fund_code")}
+
+            # 资产大类穿透分析（需 holdingList: [{fundCode, amount}]）
+            try:
+                raw = mcp.call_tool_text("GetFundAssetClassAnalysis", {
+                    "holdingList": [{"fundCode": c, "amount": int(holding_map.get(c, 0))} for c in fund_codes],
+                })
+                mcp_data["asset_class"] = {"status": "ok", "data": raw}
+            except Exception as e:
+                mcp_data["asset_class"] = {"status": "error", "message": str(e)}
+
+            # 基金相关性分析（需 fundList: [{fundCode}]）
+            try:
+                raw = mcp.call_tool_text("GetFundsCorrelation", {
+                    "fundList": [{"fundCode": c} for c in fund_codes],
+                })
+                mcp_data["correlation"] = {"status": "ok", "data": raw}
+            except Exception as e:
+                mcp_data["correlation"] = {"status": "error", "message": str(e)}
+
+            # 持仓最大基金的行业配置
+            try:
+                top = max(holdings, key=lambda h: (h.get("current_value", 0) or 0))
+                raw = mcp.call_tool_text("getFundIndustryAllocation", {
+                    "fundCode": top["fund_code"],
+                })
+                mcp_data["top_holding_industry"] = {
+                    "status": "ok",
+                    "fund_name": top.get("fund_name", ""),
+                    "fund_code": top["fund_code"],
+                    "data": raw,
+                }
+            except Exception as e:
+                mcp_data["top_holding_industry"] = {"status": "error", "message": str(e)}
+
+            # 市场行情
+            try:
+                raw = mcp.get_latest_quotations()
+                mcp_data["market"] = {"status": "ok", "data": raw}
+            except Exception as e:
+                mcp_data["market"] = {"status": "error", "message": str(e)}
+    except Exception as e:
+        mcp_data["error"] = f"MCP 客户端异常: {e}"
+
+    result["mcp"] = mcp_data
+    return result
+
+
+# ── MCP 解析辅助函数（分散度分析使用） ──
+
+def _parse_mcp_pct_pairs(text: str) -> list[tuple[str, float]]:
+    """提取文本中的(标签, 百分比)对，如 ('股票', 85.0)。"""
+    try:
+        return [(m.group(1), float(m.group(2)))
+                for m in re.finditer(r'([一-龥]{2,})\s*[:：]?\s*(\d+\.?\d*)%', text)]
+    except Exception:
+        return []
+
+
+def _parse_mcp_correlation(text: str) -> list[dict]:
+    """提取基金对相关系数，返回 [{"fund_a": str, "fund_b": str, "coefficient": float}]。"""
+    pairs = []
+    try:
+        # 匹配 "A 和 B 的相关系数为 0.88" / "A vs B: 0.88" / "A, B, 0.88"
+        for m in re.finditer(
+            r'([一-龥a-zA-Z]{2,})[\s和vsVS、,]+([一-龥a-zA-Z]{2,})[\s\S]{0,40}?(\d+\.\d{2})',
+            text,
+        ):
+            c = float(m.group(3))
+            if 0 < c <= 1:
+                pairs.append({"fund_a": m.group(1).strip(), "fund_b": m.group(2).strip(), "coefficient": c})
+    except Exception:
+        pass
+    return pairs
+
+
+@app.post("/api/portfolio/analysis/diversification/ai-summary")
+async def portfolio_diversification_ai_summary(agent_id: int = 2):
+    """基于 MCP + 持仓数据，生成 AI 分散度分析解读。"""
+    # 1. 获取 agent 配置
+    agent = get_analysis_agent(agent_id)
+    if not agent:
+        raise HTTPException(404, "分析 Agent 不存在")
+    system_prompt = agent["system_prompt"]
+
+    # 2. 获取持仓 + 分散度数据
+    result = get_portfolio_diversification()
+    holdings = list_holdings()
+    if not holdings:
+        raise HTTPException(400, "暂无持仓数据")
+
+    total_value = result.get('total_value', 1) or 1
+
+    # 3. 预计算：基金集中度检验（本地数据，高置信度）
+    concentration_items = []
+    for h in sorted(holdings, key=lambda x: (x.get('current_value', 0) or 0), reverse=True):
+        pct = (h.get('current_value', 0) or 0) / total_value * 100
+        if pct > 25:
+            level = "⚠️ 高度集中"
+        elif pct > 15:
+            level = "⚡ 适度集中"
+        else:
+            level = "✅ 合理"
+        concentration_items.append(f"- {level} {h.get('fund_name','')}({h.get('fund_code','')}): {pct:.1f}%（阈值: >25%高度集中, >15%适度集中）")
+
+    # 4. 获取 MCP 数据 + 结构化提取
+    mcp_raw_sections = []
+    mcp_parsed = {"correlation": [], "asset_class_pcts": [], "industry_pcts": {}}
+
+    try:
+        from mcp.yingmi_client import get_yingmi_client
+        mcp = get_yingmi_client()
+        fund_codes = [h["fund_code"] for h in holdings if h.get("fund_code") and h["fund_code"].strip()]
+
+        if fund_codes:
+            holding_map = {h["fund_code"]: h.get("current_value", 0) or 0 for h in holdings if h.get("fund_code")}
+
+            # 4a. 资产大类穿透分析
+            try:
+                raw = mcp.call_tool_text("GetFundAssetClassAnalysis", {
+                    "holdingList": [{"fundCode": c, "amount": int(holding_map.get(c, 0))} for c in fund_codes]
+                })
+                mcp_raw_sections.append(f"【资产大类穿透分析】\n{raw}")
+                mcp_parsed["asset_class_pcts"] = _parse_mcp_pct_pairs(raw)
+            except Exception as e:
+                mcp_raw_sections.append(f"【资产大类穿透分析】调用失败: {e}")
+
+            # 4b. 基金相关性分析
+            try:
+                raw = mcp.call_tool_text("GetFundsCorrelation", {
+                    "fundList": [{"fundCode": c} for c in fund_codes]
+                })
+                mcp_raw_sections.append(f"【基金相关性分析】\n{raw}")
+                mcp_parsed["correlation"] = _parse_mcp_correlation(raw)
+            except Exception as e:
+                mcp_raw_sections.append(f"【基金相关性分析】调用失败: {e}")
+
+            # 4c. 行业配置（top 5 基金，原来是 top 1）
+            sorted_holdings = sorted(holdings, key=lambda h: (h.get("current_value", 0) or 0), reverse=True)
+            for h in sorted_holdings[:5]:
+                fc = h.get("fund_code", "")
+                if fc and fc.strip():
+                    try:
+                        raw = mcp.call_tool_text("getFundIndustryAllocation", {"fundCode": fc})
+                        label = f"{h.get('fund_name','')}行业配置"
+                        mcp_raw_sections.append(f"【{label}】\n{raw}")
+                        mcp_parsed["industry_pcts"][fc] = {"name": h.get("fund_name", ""), "pcts": _parse_mcp_pct_pairs(raw)}
+                    except Exception:
+                        pass
+
+            # 4d. 组合诊断（新增：MCP 第三方综合诊断作为参考）
+            try:
+                raw = mcp.call_tool_text("DiagnoseFundPortfolio", {
+                    "fundList": [{"fundCode": c, "amount": int(holding_map.get(c, 0))} for c in fund_codes]
+                })
+                mcp_raw_sections.append(f"【组合诊断】\n{raw}")
+            except Exception:
+                pass
+
+            # 4e. 市场行情
+            try:
+                raw = mcp.get_latest_quotations()
+                mcp_raw_sections.append(f"【市场行情】\n{raw}")
+            except Exception:
+                pass
+
+            # 4f. 政策热点新闻
+            try:
+                hot_raw = mcp.call_tool_text("SearchHotTopic", {})
+                mcp_raw_sections.append(f"【市场热点】\n{hot_raw}")
+            except Exception:
+                pass
+            # 对主要持仓行业搜索相关新闻
+            industry_keywords = set()
+            for h in sorted_holdings[:3]:
+                idx = (h.get("index_name") or "").strip()
+                if idx and idx != "该基金无跟踪标的":
+                    kw = idx.replace("指数", "").replace("中证", "").replace("全指", "").strip()
+                    if kw:
+                        industry_keywords.add(kw)
+            for kw in industry_keywords:
+                try:
+                    news_raw = mcp.call_tool_text("SearchFinancialNews", {"keyword": kw, "pageSize": 3})
+                    mcp_raw_sections.append(f"【{kw}相关新闻】\n{news_raw}")
+                except Exception:
+                    pass
+    except Exception as e:
+        mcp_raw_sections.append(f"MCP 数据获取异常: {e}")
+
+    # 5. 预计算：相关性阈值检验
+    correlation_lines = []
+    if mcp_parsed["correlation"]:
+        for cp in mcp_parsed["correlation"]:
+            c = cp["coefficient"]
+            if c >= 0.85:
+                correlation_lines.append(f"- ⚠️ {cp['fund_a']} vs {cp['fund_b']}: {c:.2f}（强同向波动 ≥0.85）")
+            elif c >= 0.7:
+                correlation_lines.append(f"- ⚡ {cp['fund_a']} vs {cp['fund_b']}: {c:.2f}（中等相关 0.7-0.85）")
+            else:
+                correlation_lines.append(f"- ✅ {cp['fund_a']} vs {cp['fund_b']}: {c:.2f}（分散有效 <0.7）")
+    if not correlation_lines:
+        correlation_lines.append("（相关性数据暂缺，无法检验）")
+
+    correlation_block = "\n".join(correlation_lines)
+
+    # 6. 预计算：行业集中度汇总（从解析的 MCP 行业数据中提取）
+    industry_summary_lines = []
+    total_industry_pcts = {}
+    for fc, indata in mcp_parsed["industry_pcts"].items():
+        for label, pct in indata["pcts"]:
+            total_industry_pcts[label] = total_industry_pcts.get(label, 0) + pct
+    if total_industry_pcts:
+        sorted_industries = sorted(total_industry_pcts.items(), key=lambda x: -x[1])
+        industry_summary_lines.append(f"累计行业暴露（top {len(mcp_parsed['industry_pcts'])} 只基金）:")
+        for label, pct in sorted_industries[:5]:
+            flag = "⚠️" if pct > 35 else ("⚡" if pct > 20 else "✅")
+            industry_summary_lines.append(f"- {flag} {label}: {pct:.0f}%（阈值: >35%过高, >20%偏高）")
+    industry_block = "\n".join(industry_summary_lines) if industry_summary_lines else "（行业数据暂缺）"
+
+    # 7. 资产大类汇总
+    asset_class_block = ""
+    if mcp_parsed["asset_class_pcts"]:
+        asset_lines = [f"- {label}: {pct:.0f}%" for label, pct in mcp_parsed["asset_class_pcts"]]
+        asset_class_block = "底层资产穿透:\n" + "\n".join(asset_lines)
+
+    # 7.5 估值参考（查询持仓基金跟踪指数的估值数据）
+    valuation_ref_lines = []
+    seen_indexes = set()
+    for h in holdings:
+        idx_name = (h.get("index_name") or "").strip()
+        if not idx_name or idx_name == "该基金无跟踪标的" or idx_name in seen_indexes:
+            continue
+        seen_indexes.add(idx_name)
+        try:
+            matches = search_indexes_by_keyword(idx_name.replace("指数", ""))
+            for m in matches:
+                val = get_latest_valuation(m["index_code"])
+                if val and val.get("percentile") is not None:
+                    pct = val["percentile"]
+                    z = val.get("zscore")
+                    metric = val.get("metric_type", "")
+                    current_val = val.get("current_value")
+                    level = "🔥 高估" if pct > 80 else ("⚠️ 偏高" if pct > 50 else "✅ 低估" if pct < 20 else "⚡ 适中")
+                    z_note = f"z-score={z:+.2f}" if z is not None else ""
+                    valuation_ref_lines.append(
+                        f"- {m['index_name']}({metric}={current_val}, "
+                        f"历史分位={pct:.1f}% {level} {z_note})"
+                    )
+                    break
+        except Exception:
+            pass
+    valuation_block = ""
+    if valuation_ref_lines:
+        valuation_block = "跟踪指数估值参考:\n" + "\n".join(valuation_ref_lines)
+        valuation_block += "\n\n💡 估值分位<20%为低估区域，可适度容忍集中；>80%为高估区域，宜警惕集中风险。"
+
+    # 8. 拼装 LLM prompt（预计算分析 + 原始 MCP 数据）
+    holdings_text = "\n".join(
+        f"- {h.get('fund_name','')}({h.get('fund_code','')}): "
+        f"持仓占比 {(h.get('current_value',0) or 0) / total_value * 100:.1f}%, "
+        f"盈亏 {h.get('profit_loss',0):+.2f}元"
+        for h in holdings
+    )
+
+    mcp_raw_block = "\n\n".join(mcp_raw_sections) if mcp_raw_sections else "（无 MCP 数据）"
+
+    user_content = f"""## 持仓概览
+持有基金 {result.get('holding_count',0)} 只 | 总投资 {result.get('total_cost',0):.0f}元 | 总市值 {result.get('total_value',0):.0f}元
+
+## 持仓明细
+{holdings_text}
+
+## 类型分布
+{json.dumps(result.get('type_distribution',{}), ensure_ascii=False)}
+
+## 📊 预计算分析（系统已自动计算以下指标供你参考）
+
+### 基金集中度检验
+{chr(10).join(concentration_items)}
+
+### 相关性检验
+{correlation_block}
+
+### 行业集中度（基于 MCP 行业配置数据）
+{industry_block}
+
+{f"### 资产大类穿透\n{asset_class_block}" if asset_class_block else ""}
+
+{f"### 估值参考（跟踪指数）\n{valuation_block}" if valuation_block else ""}
+
+## 📄 MCP 原始数据（供验证和深度参考）
+{mcp_raw_block}
+
+请对以上持仓分散度进行专业解读。"""
+
+    try:
+        from llm_service import _call_llm, MODEL
+        response = await asyncio.to_thread(lambda: _call_llm(
+            caller="diversification_analysis",
+            model=MODEL,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_content},
+            ],
+            temperature=0.3,
+            max_tokens=8192,
+        ))
+        analysis = response.choices[0].message.content or ""
+        tokens = response.usage.total_tokens if response.usage else 0
+    except Exception as e:
+        raise HTTPException(500, f"AI 分析失败: {e}")
+
+    # 保存记录
+    record_id = create_portfolio_analysis_record(
+        analysis_type="diversification_ai",
+        summary=f"分散度解读 · {result.get('holding_count',0)}只基金",
+        input_data=json.dumps({"holdings": result}, ensure_ascii=False),
+        result_data=analysis,
+        token_usage=tokens,
+        agent_id=agent_id,
+    )
+
+    return {"id": record_id, "result": analysis, "token_usage": tokens}
+
+
+@app.get("/api/portfolio/analysis/ai-summary/today-status")
+async def portfolio_ai_summary_today_status():
+    """查询今天是否已有 AI 分散度分析结果。"""
+    records = list_portfolio_analysis_records(analysis_type="diversification_ai", limit=5)
+    from datetime import datetime
+    today = datetime.now().strftime("%Y-%m-%d")
+    for r in records:
+        if r.get("created_at", "").startswith(today):
+            return {"analyzed_today": True, "record_id": r["id"]}
+    return {"analyzed_today": False, "record_id": None}
+
+
+@app.get("/api/portfolio/analysis/{holding_id}/performance")
+async def holding_performance_api(holding_id: int):
+    """分析单只持仓基金的投资表现。"""
+    holding = get_holding(holding_id)
+    if not holding:
+        raise HTTPException(404, "持仓不存在")
+    fund_code = holding["fund_code"]
+    txs = list_transactions(fund_code=fund_code, limit=100)
+    buy_txs = [t for t in txs if t["transaction_type"] == "buy"]
+    sell_txs = [t for t in txs if t["transaction_type"] == "sell"]
+    buy_total = sum(t.get("amount", 0) or 0 for t in buy_txs)
+    sell_total = sum(t.get("amount", 0) or 0 for t in sell_txs)
+    return {
+        "fund_code": fund_code,
+        "fund_name": holding.get("fund_name", ""),
+        "shares": holding.get("shares", 0),
+        "cost_price": holding.get("cost_price", 0),
+        "current_price": holding.get("current_price", 0),
+        "total_cost": holding.get("total_cost", 0),
+        "current_value": holding.get("current_value", 0),
+        "profit_loss": round(holding.get("profit_loss", 0) or 0, 2),
+        "profit_rate": round((holding.get("profit_rate", 0) or 0) * 100, 2),
+        "buy_count": len(buy_txs),
+        "sell_count": len(sell_txs),
+        "buy_total": round(buy_total, 2),
+        "sell_total": round(sell_total, 2),
+    }
+
+
+@app.get("/api/portfolio/analysis/transactions-summary")
+async def transactions_summary_api():
+    """交易行为汇总分析。"""
+    return get_transaction_summary()
+
+
+class PortfolioAiAnalysisRequest(BaseModel):
+    question: str = ""
+
+
+@app.post("/api/portfolio/analysis/ai")
+async def portfolio_ai_analysis_api(req: PortfolioAiAnalysisRequest):
+    """AI 持仓分析：调用 MCP 工具获取专业数据 + LLM 生成分析报告。"""
+    # 1. 获取持仓数据
+    holdings = list_holdings()
+    if not holdings:
+        raise HTTPException(400, "暂无持仓数据")
+
+    # 2. 调用 MCP 工具
+    mcp_context = {}
+    try:
+        from mcp.yingmi_client import get_yingmi_client
+        mcp = get_yingmi_client()
+
+        # 并行调用多个 MCP 工具
+        fund_codes = [h["fund_code"] for h in holdings if h.get("fund_code")]
+
+        # 组合诊断（所有基金）
+        if fund_codes:
+            try:
+                mcp_context["portfolio_diagnosis"] = mcp.diagnose_portfolio(fund_codes)
+            except Exception as e:
+                mcp_context["portfolio_diagnosis"] = f"诊断失败: {e}"
+
+        # 市场行情
+        try:
+            mcp_context["market_quotations"] = mcp.get_latest_quotations()
+        except Exception as e:
+            mcp_context["market_quotations"] = f"行情获取失败: {e}"
+
+        # 热点话题
+        try:
+            mcp_context["hot_topics"] = mcp.get_hot_topics()
+        except Exception as e:
+            mcp_context["hot_topics"] = f"热点获取失败: {e}"
+
+        # 各基金诊断（最多3只，避免 token 过多）
+        fund_diagnoses = {}
+        for code in fund_codes[:3]:
+            try:
+                fund_diagnoses[code] = mcp.get_fund_diagnosis(code)
+            except Exception as e:
+                fund_diagnoses[code] = f"诊断失败: {e}"
+        mcp_context["fund_diagnoses"] = fund_diagnoses
+
+    except ImportError:
+        mcp_context["error"] = "MCP 客户端未配置"
+    except Exception as e:
+        mcp_context["error"] = f"MCP 调用异常: {e}"
+
+    # 3. 拼装 LLM 上下文
+    holdings_summary = []
+    for h in holdings:
+        holdings_summary.append(
+            f"- {h.get('fund_name', '')}({h.get('fund_code', '')}): "
+            f"持有 {h.get('shares', 0)} 份, "
+            f"成本价 {h.get('cost_price', 'N/A')}, "
+            f"当前净值 {h.get('current_price', 'N/A')}, "
+            f"盈亏 {h.get('profit_loss', 0):.2f}元"
+        )
+
+    user_question = req.question or "请全面分析我的持仓情况，包括资产配置合理性、风险分散度、各基金表现，以及改进建议。"
+
+    system_prompt = """你是一位专业的投资组合分析师。请根据以下持仓数据和专业分析工具的输出，给出全面的投资组合分析报告。
+
+分析要求：
+1. **资产配置分析** — 持仓的基金类型分布、行业分布是否合理
+2. **风险评价** — 组合的集中度风险、相关性风险、回撤风险
+3. **各基金表现** — 逐个评价每只基金的表现（收益、波动、性价比）
+4. **改进建议** — 具体的调仓建议、定投策略、风险控制措施
+5. **市场环境** — 结合当前市场行情和热点，给出背景判断
+
+输出格式：使用 Markdown 标题层级，结论先行，数据支撑，内容专业易懂。"""
+
+    user_content = f"""## 当前持仓
+{chr(10).join(holdings_summary)}
+
+## 专业分析数据
+{json.dumps(mcp_context, ensure_ascii=False, indent=2)}
+
+## 用户问题
+{user_question}
+
+请给出全面的分析报告。"""
+
+    # 4. 调用 LLM
+    try:
+        from llm_service import _call_llm, MODEL
+        response = await asyncio.to_thread(lambda: _call_llm(
+            caller="portfolio_analysis",
+            model=MODEL,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_content},
+            ],
+            temperature=0.3,
+            max_tokens=8192,
+        ))
+        result_text = response.choices[0].message.content or ""
+        tokens = response.usage.total_tokens if response.usage else 0
+    except Exception as e:
+        logger.error(f"AI 分析失败: {e}")
+        raise HTTPException(500, f"AI 分析失败: {str(e)}")
+
+    # 5. 保存记录
+    record_id = create_portfolio_analysis_record(
+        analysis_type="ai",
+        summary=f"AI持仓分析 · {len(holdings)}只基金",
+        input_data=json.dumps({
+            "holdings": [{k: h.get(k) for k in ("fund_code", "fund_name", "shares", "cost_price", "current_price", "profit_loss")} for h in holdings],
+            "question": user_question,
+        }, ensure_ascii=False),
+        result_data=result_text,
+        token_usage=tokens,
+    )
+
+    return {
+        "id": record_id,
+        "result": result_text,
+        "token_usage": tokens,
+        "holdings_count": len(holdings),
+        "mcp_used": list(mcp_context.keys()),
+    }
+
+
+@app.get("/api/portfolio/analysis/ai-records")
+async def list_ai_analysis_records_api(limit: int = 20):
+    """列出 AI 持仓分析记录。"""
+    records = list_portfolio_analysis_records(analysis_type="ai", limit=limit)
+    return {"records": records}
+
+
+@app.get("/api/portfolio/analysis/ai-records/{record_id}")
+async def get_ai_analysis_record_api(record_id: int):
+    """获取单条 AI 持仓分析记录详情。"""
+    record = get_portfolio_analysis_record(record_id)
+    if not record:
+        raise HTTPException(404, "分析记录不存在")
+    return record
+
+
+@app.delete("/api/portfolio/analysis/ai-records/{record_id}")
+async def delete_ai_analysis_record_api(record_id: int):
+    """删除 AI 持仓分析记录。"""
+    if not delete_portfolio_analysis_record(record_id):
+        raise HTTPException(404, "分析记录不存在")
+    return {"ok": True}
+
+
+class FeedbackRequest(BaseModel):
+    feedback: str
+    note: str = ""
+
+
+@app.post("/api/portfolio/analysis/feedback/{record_id}")
+async def submit_analysis_feedback_api(record_id: int, req: FeedbackRequest):
+    """提交对分析结果的反馈。"""
+    if req.feedback not in ("helpful", "unhelpful"):
+        raise HTTPException(400, "feedback 必须为 helpful 或 unhelpful")
+    if not update_analysis_feedback(record_id, req.feedback, req.note):
+        raise HTTPException(404, "分析记录不存在")
+    return {"ok": True}
+
+
+@app.get("/api/portfolio/analysis/bad-cases")
+async def list_bad_cases_api(analysis_type: str = None, limit: int = 50):
+    """列出被标记为 unhelpful 的分析记录（Bad Cases）。"""
+    cases = list_bad_cases(analysis_type=analysis_type, limit=limit)
+    return {"cases": cases, "count": len(cases)}
+
+
+# ── AI 持仓分析 4 模式 ─────────────────────────────────────
+
+
+class PanoramaAnalysisRequest(BaseModel):
+    """全景诊断请求。"""
+    pass  # 无参数，基于当前持仓分析
+
+
+class DeepDiveRequest(BaseModel):
+    """单基金深度分析请求。"""
+    pass  # holding_id 通过路径参数传入
+
+
+class TradeReviewRequest(BaseModel):
+    """交易复盘请求。"""
+    start_date: str | None = None
+    end_date: str | None = None
+
+
+class WhatIfRequest(BaseModel):
+    """情景推演请求。"""
+    scenario: str  # 'market_drop' | 'repair_to_median' | 'repair_to_opportunity'
+    parameter: float | None = None  # 市场下跌场景的跌幅百分比
+
+
+def _get_valuation_context() -> str:
+    """获取当前所有持仓的估值数据摘要。"""
+    try:
+        indexes = list_valuation_indexes()
+        lines = []
+
+        # 新鲜度总览
+        freshness = list_index_freshness()
+        stale = [f for f in freshness if f.get("stale_days", 0) >= 10]
+        if stale:
+            lines.append("[数据新鲜度] 以下指数数据超过10天未更新: " +
+                         ", ".join(f"{f['index_name']}({int(f['stale_days'])}天)" for f in stale[:5]))
+
+        for idx in indexes[:20]:
+            val = get_latest_valuation(idx.get("index_code", ""))
+            if val:
+                pe_percentile = val.get("pe_percentile", "N/A")
+                pb_percentile = val.get("pb_percentile", "N/A")
+                date_str = val.get("snapshot_date", "")
+                stale_mark = ""
+                if date_str:
+                    from datetime import date as dt_date
+                    try:
+                        d = dt_date.fromisoformat(str(date_str))
+                        sd = (dt_date.today() - d).days
+                        if sd >= 10:
+                            stale_mark = f" [数据过期{sd}天]"
+                    except:
+                        pass
+                lines.append(f"- {idx.get('index_name','')}({idx.get('index_code','')}): PE分位 {pe_percentile}, PB分位 {pb_percentile} [{date_str}]{stale_mark}")
+        if lines:
+            return "## 估值参考（跟踪指数）\n" + "\n".join(lines)
+        return "## 估值参考\n暂无估值数据"
+    except Exception as e:
+        return f"## 估值参考\n获取失败: {e}"
+
+
+def _format_news_section(mcp_context: dict) -> str:
+    """从 mcp_context 中提取新闻数据并格式化为 Markdown 段落。"""
+    parts = []
+
+    # 市场行情
+    quotations = mcp_context.get("market_quotations", "")
+    if quotations and not quotations.startswith("获取失败") and not quotations.startswith("调用失败"):
+        parts.append(f"### 市场行情\n{quotations[:1500]}")
+
+    # MCP 热点新闻（带关键词搜索的）
+    news_map = mcp_context.get("news", {})
+    if isinstance(news_map, dict) and news_map:
+        hot_news = []
+        fund_news = []
+        for key, val in news_map.items():
+            if isinstance(val, str) and not val.startswith("获取失败"):
+                if key in ("market_hot", "market_trend"):
+                    hot_news.append(val[:1000])
+                else:
+                    fund_news.append(val[:800])
+        if hot_news:
+            parts.append("### 近期市场热点\n" + "\n---\n".join(hot_news))
+        if fund_news:
+            parts.append("### 持仓相关新闻\n" + "\n---\n".join(fund_news))
+
+    # akshare 实时新闻
+    akshare = mcp_context.get("akshare_news", [])
+    if isinstance(akshare, list) and akshare:
+        news_lines = []
+        for item in akshare:
+            title = item.get("title", "")
+            snippet = item.get("snippet", "")
+            time = item.get("time", "")
+            source = item.get("source", "")
+            if title:
+                news_lines.append(f"- **{title}**  {snippet[:120]}")
+        if news_lines:
+            parts.append("### 实时财经新闻\n" + "\n".join(news_lines[:8]))
+
+    # hot_topics（兜底）
+    hot_topics = mcp_context.get("hot_topics", "")
+    if hot_topics and not hot_topics.startswith("获取失败") and not hot_topics.startswith("调用失败"):
+        if not news_map:  # 只有 news 搜索失败时才展示 hot_topics
+            parts.append(f"### 市场热点\n{hot_topics[:1500]}")
+
+    if not parts:
+        return "## 新闻热点\n暂无最新新闻数据。"
+
+    return "## 新闻热点\n" + "\n\n".join(parts)
+
+
+def _add_akshare_news(mcp_context: dict, max_results: int = 8):
+    """用 akshare 补充实时财经新闻。"""
+    try:
+        import akshare as ak
+        news_items = []
+        # 东方财富 A 股新闻
+        try:
+            df = ak.stock_news_em(symbol="A股")
+            if df is not None and len(df) > 0:
+                for _, row in df.head(max_results).iterrows():
+                    news_items.append({
+                        "title": str(row.get("新闻标题", "")),
+                        "snippet": str(row.get("新闻内容", ""))[:200],
+                        "time": str(row.get("发布时间", "")),
+                        "source": "东方财富",
+                    })
+        except Exception:
+            pass
+        # 央视新闻补充
+        if len(news_items) < 3:
+            try:
+                from datetime import datetime
+                df2 = ak.news_cctv(date=datetime.now().strftime("%Y%m%d"))
+                if df2 is not None and len(df2) > 0:
+                    for _, row in df2.head(max_results - len(news_items)).iterrows():
+                        title = str(row.get("title", ""))
+                        if any(kw in title for kw in ["股", "基金", "央行", "利率", "经济", "金融", "市场", "投资", "GDP", "通胀", "行情"]):
+                            news_items.append({
+                                "title": title,
+                                "snippet": str(row.get("content", ""))[:200],
+                                "time": str(row.get("date", "")),
+                                "source": "央视新闻",
+                            })
+            except Exception:
+                pass
+        if news_items:
+            mcp_context["akshare_news"] = news_items
+    except ImportError:
+        pass
+    except Exception as e:
+        logger.warning(f"akshare 新闻获取异常: {e}")
+
+
+def _get_mcp_context(holdings: list[dict]) -> dict:
+    """获取 MCP 相关数据，包含实时市场新闻和热点搜索。"""
+    mcp_context = {}
+    try:
+        from mcp.yingmi_client import get_yingmi_client
+        mcp = get_yingmi_client()
+        fund_codes = [h["fund_code"] for h in holdings if h.get("fund_code") and h["fund_code"].strip()]
+
+        if not fund_codes:
+            return {}
+
+        holding_map = {h["fund_code"]: h.get("current_value", 0) or 0 for h in holdings if h.get("fund_code")}
+
+        # 资产大类穿透
+        try:
+            raw = mcp.call_tool_text("GetFundAssetClassAnalysis", {
+                "holdingList": [{"fundCode": c, "amount": int(holding_map.get(c, 0))} for c in fund_codes]
+            })
+            mcp_context["asset_class_analysis"] = raw
+        except Exception as e:
+            mcp_context["asset_class_analysis"] = f"调用失败: {e}"
+
+        # 基金相关性
+        try:
+            raw = mcp.call_tool_text("GetFundsCorrelation", {
+                "fundList": [{"fundCode": c} for c in fund_codes]
+            })
+            mcp_context["correlation"] = raw
+        except Exception as e:
+            mcp_context["correlation"] = f"调用失败: {e}"
+
+        # 组合诊断
+        try:
+            raw = mcp.call_tool_text("DiagnoseFundPortfolio", {
+                "fundList": [{"fundCode": c, "amount": int(holding_map.get(c, 0))} for c in fund_codes]
+            })
+            mcp_context["portfolio_diagnosis"] = raw
+        except Exception as e:
+            mcp_context["portfolio_diagnosis"] = f"调用失败: {e}"
+
+        # 市场行情
+        try:
+            mcp_context["market_quotations"] = mcp.get_latest_quotations()
+        except Exception as e:
+            mcp_context["market_quotations"] = f"获取失败: {e}"
+
+        # ── 实时热点新闻 — 精简版，只查市场热点 + 前3持仓 ──
+        try:
+            news_map = {}
+
+            # 市场整体热点（2个关键词）
+            for kw, label in [("A股 热门 板块 基金", "market_hot"), ("市场热点 行情", "market_trend")]:
+                try:
+                    news_map[label] = mcp.search_news(kw, 5)
+                except Exception:
+                    pass
+
+            # 前3大持仓相关新闻
+            top3 = sorted(holdings, key=lambda x: (x.get('current_value', 0) or 0), reverse=True)[:3]
+            for h in top3:
+                name = h.get("fund_name", "") or ""
+                kw = name.replace("ETF", "").replace("联接", "").replace("基金", "").replace("LOF", "").strip()[:10]
+                if len(kw) >= 2:
+                    try:
+                        news_map[f"fund_{h.get('fund_code','')}"] = mcp.search_news(kw, 3)
+                    except Exception:
+                        pass
+
+            if news_map:
+                mcp_context["news"] = news_map
+
+            # 热点话题
+            try:
+                mcp_context["hot_topics"] = mcp.call_tool_text("SearchHotTopic", {"keyword": "市场热点 热门基金"})
+            except Exception:
+                try:
+                    mcp_context["hot_topics"] = mcp.call_tool_text("SearchHotTopic", {})
+                except Exception as e:
+                    mcp_context["hot_topics"] = f"获取失败: {e}"
+
+        except Exception as e:
+            mcp_context["news"] = f"获取失败: {e}"
+
+        # 用 akshare 补充实时新闻
+        _add_akshare_news(mcp_context)
+
+        # 各基金诊断（最多3只）
+        for code in fund_codes[:3]:
+            try:
+                mcp_context[f"fund_diagnosis_{code}"] = mcp.call_tool_text("GetFundDiagnosis", {"fundCode": code})
+            except Exception:
+                pass
+
+    except ImportError:
+        mcp_context["error"] = "MCP 客户端未配置"
+    except Exception as e:
+        mcp_context["error"] = f"MCP 调用异常: {e}"
+    return mcp_context
+
+
+@app.post("/api/portfolio/analysis/panorama")
+async def panorama_analysis_api(req: PanoramaAnalysisRequest):
+    """模式 1：全景诊断 — 从全局视角诊断投资组合健康状况。"""
+    holdings = list_holdings()
+    if not holdings:
+        raise HTTPException(400, "暂无持仓数据")
+
+    agent = get_analysis_agent(3)
+    if not agent:
+        raise HTTPException(404, "全景诊断分析师未配置")
+    system_prompt = agent["system_prompt"]
+
+    # 收集数据
+    diversification = get_portfolio_diversification()
+    total_value = diversification.get('total_value', 1) or 1
+
+    # 持仓明细
+    holdings_lines = []
+    for h in sorted(holdings, key=lambda x: (x.get('current_value', 0) or 0), reverse=True):
+        pct = (h.get('current_value', 0) or 0) / total_value * 100
+        holdings_lines.append(
+            f"- {h.get('fund_name','')}({h.get('fund_code','')}): "
+            f"账户 {h.get('account','花无缺')}, "
+            f"市值 {h.get('current_value',0):.2f}, "
+            f"盈亏 {h.get('profit_loss',0):.2f} ({h.get('profit_rate',0)*100:.1f}%), "
+            f"占比 {pct:.1f}%"
+        )
+
+    # 类型分布
+    type_dist = diversification.get('type_distribution', {})
+    type_lines = [f"  - {k}: {v:.1f}%" for k, v in type_dist.items()]
+
+    # MCP 数据
+    mcp_context = _get_mcp_context(holdings)
+
+    # 估值数据
+    valuation_context = _get_valuation_context()
+
+    # 从 mcp_context 中提取新闻数据，单独格式化
+    news_section = _format_news_section(mcp_context)
+
+    user_content = (
+        f"## 持仓明细\n" + "\n".join(holdings_lines) +
+        f"\n\n## 类型分布\n" + "\n".join(type_lines) +
+        f"\n\n## 集中度\n- 前3大持仓占比: {diversification.get('top3_concentration', 0):.1f}%"
+        f"\n- 前5大持仓占比: {diversification.get('top5_concentration', 0):.1f}%\n"
+        f"\n## MCP 专业数据\n{json.dumps(mcp_context, ensure_ascii=False, indent=2)}\n"
+        f"\n{valuation_context}"
+        f"\n\n{news_section}"
+    )
+
+    # 调用 LLM（带 90 秒超时）
+    try:
+        from llm_service import _call_llm, MODEL
+        response = await asyncio.wait_for(asyncio.to_thread(lambda: _call_llm(
+            caller="portfolio_panorama",
+            model=MODEL,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_content},
+            ],
+            temperature=0.3,
+            max_tokens=8192,
+        )), timeout=90)
+        result_text = response.choices[0].message.content or ""
+        tokens = response.usage.total_tokens if response.usage else 0
+    except asyncio.TimeoutError:
+        logger.error(f"全景诊断 LLM 调用超时")
+        raise HTTPException(504, "AI 分析超时，请重试")
+    except Exception as e:
+        logger.error(f"全景诊断失败: {e}")
+        raise HTTPException(500, f"AI 分析失败: {str(e)}")
+
+    # 保存记录
+    record_id = create_portfolio_analysis_record(
+        analysis_type="panorama",
+        summary=f"全景诊断 · {len(holdings)}只基金",
+        input_data=json.dumps({"holdings_count": len(holdings), "total_value": diversification.get('total_value')}, ensure_ascii=False),
+        result_data=result_text,
+        token_usage=tokens,
+        agent_id=3,
+    )
+
+    return {"id": record_id, "result": result_text, "token_usage": tokens}
+
+
+def _get_fund_mcp_diagnosis(fund_code: str) -> str:
+    """获取单只基金的 MCP 诊断数据。"""
+    try:
+        from mcp.yingmi_client import get_yingmi_client
+        mcp = get_yingmi_client()
+        # 基金诊断
+        diagnosis = mcp.call_tool_text("GetFundDiagnosis", {"fundCode": fund_code})
+        # 相关性（如果 MCP 支持单只查询）
+        return diagnosis or "MCP 诊断不可用"
+    except ImportError:
+        return "MCP 客户端未配置"
+    except Exception as e:
+        return f"MCP 诊断获取失败: {e}"
+
+
+@app.post("/api/portfolio/analysis/deep-dive/{holding_id}")
+async def fund_deep_dive_api(holding_id: int, req: DeepDiveRequest):
+    """模式 2：单基金深度分析 — 分析买入质量、持有收益、操作记录。"""
+    holding = get_holding(holding_id)
+    if not holding:
+        raise HTTPException(404, "持仓不存在")
+
+    agent = get_analysis_agent(4)
+    if not agent:
+        raise HTTPException(404, "基金深度分析师未配置")
+
+    fund_code = holding["fund_code"]
+    fund_name = holding.get("fund_name", "")
+
+    # 1) 交易记录
+    txs = list_transactions(fund_code=fund_code, limit=100)
+    tx_lines = []
+    for t in sorted(txs, key=lambda x: x.get("transaction_date", "")):
+        tx_lines.append(
+            f"- {t['transaction_date']} {'买入' if t['transaction_type']=='buy' else '卖出'}: "
+            f"金额 {t.get('amount',0):.2f}, 份额 {t.get('shares',0):.4f}, "
+            f"价格 {t.get('price',0):.4f}, 状态 {t.get('status','confirmed')}"
+        )
+
+    # 2) 估值历史 — 带趋势
+    valuation_section = ""
+    try:
+        index_code = holding.get("index_code") or ""
+        if index_code:
+            hist = get_valuation_history(index_code, days=365)
+            if hist and len(hist) > 0:
+                latest_day = hist[-1]
+                # 当前值
+                parts = []
+                for mt in ["pe", "pb"]:
+                    lv = get_latest_valuation(index_code, mt)
+                    if lv:
+                        pct = lv.get("percentile", "N/A")
+                        val = lv.get("current_value", "N/A")
+                        parts.append(f"{mt.upper()}: {val} (分位 {pct}%)")
+                if parts:
+                    valuation_section += "当前估值: " + ", ".join(parts) + "\n"
+                # 趋势（近30天分位变化）
+                recent = hist[-30:]
+                if len(recent) >= 5:
+                    pe_pcts = [get_latest_valuation(index_code, "pe").get("percentile") for _ in recent[:5]]
+                    # 简化：月初 vs 月末
+                    first = recent[0]
+                    last = recent[-1]
+                    valuation_section += (
+                        f"估值趋势: {first.get('date','?')}→{last.get('date','?')}, "
+                        f"PE {first.get('current_value','?')}→{last.get('current_value','?')}\n"
+                    )
+                # 买入时估值
+                if txs:
+                    first_buy = next((t for t in txs if t["transaction_type"] == "buy"), None)
+                    if first_buy:
+                        buy_date = first_buy.get("transaction_date", "")
+                        if buy_date:
+                            buy_val = get_latest_valuation(index_code, "pe")
+                            if buy_val:
+                                valuation_section += f"首次买入时估值: PE {buy_val.get('current_value','?')} (分位 {buy_val.get('percentile','?')}%)\n"
+            else:
+                valuation_section = "暂无估值历史数据\n"
+        else:
+            val = get_latest_valuation(fund_code)
+            if val:
+                valuation_section = f"当前PE分位: {val.get('percentile','N/A')}%\n"
+            else:
+                valuation_section = "该基金无跟踪指数数据\n"
+    except Exception as e:
+        valuation_section = f"估值获取失败: {e}\n"
+
+    # 3) 基金基本面（重仓股、行业配置、资产配置）
+    fundamentals_section = ""
+    try:
+        info = lookup_fund_info(fund_code)
+        if info:
+            cnt_lines = []
+            for k in ("fund_name", "fund_type", "index_name", "management_rate", "custody_rate", "fund_scale", "establish_date"):
+                v = info.get(k)
+                if v is not None:
+                    cnt_lines.append(f"- {k}: {v}")
+            if cnt_lines:
+                fundamentals_section += "### 基金基本信息\n" + "\n".join(cnt_lines) + "\n"
+
+        holdings_data = get_fund_holdings(fund_code)
+        if holdings_data:
+            # 重仓股
+            stocks = holdings_data.get("top_stocks", [])
+            if stocks:
+                stock_lines = [f"  - {s['stock_name']}({s.get('stock_code','')}): {s.get('pct_nav','?')}%" for s in stocks[:5]]
+                fundamentals_section += "### 重仓股\n" + "\n".join(stock_lines) + "\n"
+            # 资产配置
+            alloc = holdings_data.get("asset_allocation", [])
+            if alloc:
+                alloc_lines = [f"  - {a['type']}: {a['pct']}%" for a in alloc]
+                fundamentals_section += "### 资产配置\n" + "\n".join(alloc_lines) + "\n"
+            # 债券类型
+            bt = holdings_data.get("bond_type_summary", {})
+            if bt:
+                bt_lines = [f"  - {k}: {v}%" for k, v in bt.items() if v]
+                if bt_lines:
+                    fundamentals_section += "### 债券类型\n" + "\n".join(bt_lines) + "\n"
+    except Exception as e:
+        fundamentals_section = f"基本面获取失败: {e}\n"
+
+    # 4) 组合上下文 — 该基金在整体组合中的位置
+    portfolio_context = ""
+    try:
+        all_holdings = list_holdings()
+        total_value = sum((h.get("current_value", 0) or 0) for h in all_holdings)
+        this_value = holding.get("current_value", 0) or 0
+        this_pct = this_value / total_value * 100 if total_value > 0 else 0
+        # 相关性数据（从 MCP 获取）
+        portfolio_context += f"该基金在组合中占比: {this_pct:.1f}%\n"
+        # 与其他基金的对比
+        if len(all_holdings) > 1:
+            others = [(h.get("fund_name",""), h.get("current_value",0) or 0) for h in all_holdings if h["id"] != holding_id]
+            others.sort(key=lambda x: x[1], reverse=True)
+            portfolio_context += "组合中其他主要持仓: " + ", ".join(f"{n}(市值{v:.0f})" for n, v in others[:3]) + "\n"
+    except Exception as e:
+        portfolio_context = f"组合上下文获取失败: {e}\n"
+
+    # 5) 新闻/市场上下文（简版，基于指数名或基金名搜索）
+    news_context = ""
+    try:
+        from mcp.yingmi_client import get_yingmi_client
+        mcp = get_yingmi_client()
+        # 用基金名或指数名搜相关新闻
+        kw = (fund_name or index_code or "")[:10]
+        if kw and len(kw) >= 2:
+            news_text = mcp.search_news(kw, 3)
+            if news_text and not news_text.startswith("获取失败"):
+                news_context = f"### 相关新闻\n{news_text[:1500]}"
+        # 补充大盘新闻
+        try:
+            import akshare as ak
+            df = ak.stock_news_em(symbol="A股")
+            if df is not None and len(df) > 0:
+                ak_lines = []
+                for _, row in df.head(3).iterrows():
+                    title = str(row.get("新闻标题", ""))
+                    if title:
+                        ak_lines.append(f"- {title}")
+                if ak_lines:
+                    news_context += "\n### 实时财经新闻\n" + "\n".join(ak_lines)
+        except ImportError:
+            pass
+    except Exception:
+        pass
+
+    user_content = (
+        f"## 基金持仓信息\n"
+        f"- 基金: {fund_name}({fund_code})\n"
+        f"- 账户: {holding.get('account','花无缺')}\n"
+        f"- 持有份额: {holding.get('shares',0):.4f}\n"
+        f"- 成本净值: {holding.get('cost_price',0):.4f}\n"
+        f"- 当前净值: {holding.get('current_price',0):.4f}\n"
+        f"- 市值: {holding.get('current_value',0):.2f}\n"
+        f"- 盈亏: {holding.get('profit_loss',0):.2f} ({holding.get('profit_rate',0)*100:.1f}%)\n"
+        f"- 持有时间: 自首次交易起\n"
+        f"\n## 交易记录\n" + ("\n".join(tx_lines) if tx_lines else "无交易记录") +
+        f"\n\n## 估值数据\n{valuation_section}"
+        f"\n\n{fundamentals_section}"
+        f"\n\n## 组合角色上下文\n{portfolio_context}"
+        f"\n\n## MCP 诊断\n{_get_fund_mcp_diagnosis(fund_code)}"
+        f"\n\n{news_context}"
+    )
+
+    try:
+        from llm_service import _call_llm, MODEL
+        response = await asyncio.to_thread(lambda: _call_llm(
+            caller="portfolio_deep_dive",
+            model=MODEL,
+            messages=[
+                {"role": "system", "content": agent["system_prompt"]},
+                {"role": "user", "content": user_content},
+            ],
+            temperature=0.3,
+            max_tokens=8192,
+        ))
+        result_text = response.choices[0].message.content or ""
+        tokens = response.usage.total_tokens if response.usage else 0
+    except Exception as e:
+        logger.error(f"深度分析失败: {e}")
+        raise HTTPException(500, f"AI 分析失败: {str(e)}")
+
+    record_id = create_portfolio_analysis_record(
+        analysis_type="deep_dive",
+        summary=f"深度分析 · {fund_name}",
+        input_data=json.dumps({"holding_id": holding_id, "fund_code": fund_code}, ensure_ascii=False),
+        result_data=result_text,
+        token_usage=tokens,
+        agent_id=4,
+    )
+
+    return {"id": record_id, "result": result_text, "token_usage": tokens}
+
+
+@app.post("/api/portfolio/analysis/trade-review")
+async def trade_review_api(req: TradeReviewRequest):
+    """模式 3：交易复盘 — 分析交易行为模式和操作质量。"""
+    txs = list_transactions(limit=500)
+    if not txs:
+        raise HTTPException(400, "暂无交易记录")
+
+    agent = get_analysis_agent(5)
+    if not agent:
+        raise HTTPException(404, "交易复盘分析师未配置")
+
+    # 过滤日期范围
+    if req.start_date:
+        txs = [t for t in txs if t.get("transaction_date", "") >= req.start_date]
+    if req.end_date:
+        txs = [t for t in txs if t.get("transaction_date", "") <= req.end_date]
+    if not txs:
+        raise HTTPException(400, "所选日期范围内无交易记录")
+
+    # 交易记录 + 标签
+    tx_lines = []
+    for t in sorted(txs, key=lambda x: x.get("transaction_date", "")):
+        tags = get_transaction_tags(t["id"])
+        tag_str = f" [{','.join(tags)}]" if tags else ""
+        tx_lines.append(
+            f"- {t['transaction_date']} {t.get('transaction_time','')} "
+            f"{'买入' if t['transaction_type']=='buy' else '卖出'}"
+            f"{tag_str}: "
+            f"{t.get('fund_name','')}({t.get('fund_code','')}), "
+            f"金额 {t.get('amount',0):.2f}, 价格 {t.get('price',0):.4f}, "
+            f"状态 {t.get('status','confirmed')}"
+        )
+
+    # 汇总统计
+    buy_count = len([t for t in txs if t["transaction_type"] == "buy"])
+    sell_count = len([t for t in txs if t["transaction_type"] == "sell"])
+    buy_total = sum(t.get("amount", 0) or 0 for t in txs if t["transaction_type"] == "buy")
+    sell_total = sum(t.get("amount", 0) or 0 for t in txs if t["transaction_type"] == "sell")
+
+    # 估值数据
+    valuation_context = _get_valuation_context()
+
+    user_content = (
+        f"## 操作总览\n- 买入 {buy_count} 笔, 共 {buy_total:.2f} 元\n"
+        f"- 卖出 {sell_count} 笔, 共 {sell_total:.2f} 元\n"
+        f"- 净投入: {buy_total - sell_total:.2f} 元\n"
+        f"\n## 交易明细\n" + "\n".join(tx_lines) +
+        f"\n\n{valuation_context}"
+    )
+
+    try:
+        from llm_service import _call_llm, MODEL
+        response = await asyncio.to_thread(lambda: _call_llm(
+            caller="portfolio_trade_review",
+            model=MODEL,
+            messages=[
+                {"role": "system", "content": agent["system_prompt"]},
+                {"role": "user", "content": user_content},
+            ],
+            temperature=0.3,
+            max_tokens=8192,
+        ))
+        result_text = response.choices[0].message.content or ""
+        tokens = response.usage.total_tokens if response.usage else 0
+    except Exception as e:
+        logger.error(f"交易复盘失败: {e}")
+        raise HTTPException(500, f"AI 分析失败: {str(e)}")
+
+    record_id = create_portfolio_analysis_record(
+        analysis_type="trade_review",
+        summary=f"交易复盘 · {buy_count}买{sell_count}卖",
+        input_data=json.dumps({"start_date": req.start_date, "end_date": req.end_date, "tx_count": len(txs)},
+                              ensure_ascii=False),
+        result_data=result_text,
+        token_usage=tokens,
+        agent_id=5,
+    )
+
+    return {"id": record_id, "result": result_text, "token_usage": tokens}
+
+
+@app.post("/api/portfolio/analysis/what-if")
+async def what_if_analysis_api(req: WhatIfRequest):
+    """模式 4：情景推演 — 模拟不同市场情景下的组合变化。"""
+    holdings = list_holdings()
+    if not holdings:
+        raise HTTPException(400, "暂无持仓数据")
+
+    agent = get_analysis_agent(6)
+    if not agent:
+        raise HTTPException(404, "情景推演分析师未配置")
+
+    # 持仓数据
+    total_value = sum(h.get('current_value', 0) or 0 for h in holdings)
+    holdings_lines = []
+    for h in sorted(holdings, key=lambda x: (x.get('current_value', 0) or 0), reverse=True):
+        pct = (h.get('current_value', 0) or 0) / total_value * 100 if total_value else 0
+        holdings_lines.append(
+            f"- {h.get('fund_name','')}({h.get('fund_code','')}): "
+            f"市值 {h.get('current_value',0):.2f}, 占比 {pct:.1f}%, "
+            f"成本 {h.get('total_cost',0):.2f}"
+        )
+
+    # 估值数据
+    valuation_context = _get_valuation_context()
+
+    scenario_desc = {
+        "market_drop": f"市场整体下跌 {req.parameter or 10}%",
+        "repair_to_median": "估值修复到历史中位数",
+        "repair_to_opportunity": "估值修复到机会值（20%分位）",
+    }.get(req.scenario, req.scenario)
+
+    user_content = (
+        f"## 用户选择的情景\n{scenario_desc}"
+        f"{'(跌幅: ' + str(req.parameter) + '%)' if req.scenario == 'market_drop' and req.parameter else ''}"
+        f"\n\n## 当前持仓\n" + "\n".join(holdings_lines) +
+        f"\n总市值: {total_value:.2f}\n"
+        f"\n{valuation_context}"
+    )
+
+    try:
+        from llm_service import _call_llm, MODEL
+        response = await asyncio.to_thread(lambda: _call_llm(
+            caller="portfolio_whatif",
+            model=MODEL,
+            messages=[
+                {"role": "system", "content": agent["system_prompt"]},
+                {"role": "user", "content": user_content},
+            ],
+            temperature=0.3,
+            max_tokens=8192,
+        ))
+        result_text = response.choices[0].message.content or ""
+        tokens = response.usage.total_tokens if response.usage else 0
+    except Exception as e:
+        logger.error(f"情景推演失败: {e}")
+        raise HTTPException(500, f"AI 分析失败: {str(e)}")
+
+    record_id = create_portfolio_analysis_record(
+        analysis_type="what_if",
+        summary=f"情景推演 · {scenario_desc}",
+        input_data=json.dumps({"scenario": req.scenario, "parameter": req.parameter}, ensure_ascii=False),
+        result_data=result_text,
+        token_usage=tokens,
+        agent_id=6,
+    )
+
+    return {"id": record_id, "result": result_text, "token_usage": tokens}
+
+
+@app.get("/api/portfolio/analysis/panorama/records")
+async def list_panorama_records_api(limit: int = 10):
+    """列出全景诊断历史记录。"""
+    records = list_portfolio_analysis_records(analysis_type="panorama", limit=limit)
+    return {"records": records}
+
+
+@app.get("/api/portfolio/analysis/deep-dive/records")
+async def list_deep_dive_records_api(limit: int = 10):
+    """列出深度分析历史记录。"""
+    records = list_portfolio_analysis_records(analysis_type="deep_dive", limit=limit)
+    return {"records": records}
+
+
+@app.get("/api/portfolio/analysis/trade-review/records")
+async def list_trade_review_records_api(limit: int = 10):
+    """列出交易复盘历史记录。"""
+    records = list_portfolio_analysis_records(analysis_type="trade_review", limit=limit)
+    return {"records": records}
+
+
+@app.get("/api/portfolio/analysis/what-if/records")
+async def list_whatif_records_api(limit: int = 10):
+    """列出情景推演历史记录。"""
+    records = list_portfolio_analysis_records(analysis_type="what_if", limit=limit)
+    return {"records": records}
+
+
+# ── 风险预警 API ──────────────────────────────────────────
+
+
+@app.get("/api/portfolio/alerts")
+async def list_alerts_api(unread_only: bool = False, limit: int = 50):
+    """获取预警列表。"""
+    return {"alerts": list_alerts(limit=limit, unread_only=unread_only)}
+
+
+@app.get("/api/portfolio/alerts/unread-count")
+async def unread_alert_count_api():
+    """获取未读预警数量。"""
+    return {"count": get_unread_alert_count()}
+
+
+@app.put("/api/portfolio/alerts/{alert_id}/read")
+async def mark_alert_read_api(alert_id: int):
+    """标记预警为已读。"""
+    if not mark_alert_read(alert_id):
+        raise HTTPException(404, "预警不存在")
+    return {"ok": True}
+
+
+@app.delete("/api/portfolio/alerts/{alert_id}")
+async def delete_alert_api(alert_id: int):
+    """删除预警。"""
+    if not delete_alert(alert_id):
+        raise HTTPException(404, "预警不存在")
+    return {"ok": True}
+
+
+@app.post("/api/portfolio/alerts/generate")
+async def generate_alert_api(req: CreateAlertRequest):
+    """AI 主动生成预警。"""
+    alert_id = create_alert(
+        alert_type=req.alert_type,
+        title=req.title,
+        content=req.content,
+        severity=req.severity,
+        related_fund_code=req.related_fund_code,
+        related_fund_name=req.related_fund_name,
+        source=req.source or "system",
+    )
+    return {"ok": True, "alert_id": alert_id}
+
+
+# ── 交易标签 API ──────────────────────────────────────────
+
+
+@app.post("/api/portfolio/transactions/{tx_id}/tags")
+async def add_transaction_tag_api(tx_id: int, req: TagRequest):
+    """给交易记录添加标签。"""
+    tag_id = add_transaction_tag(tx_id, req.tag)
+    return {"ok": True, "tag_id": tag_id}
+
+
+@app.delete("/api/portfolio/transactions/{tx_id}/tags/{tag}")
+async def remove_transaction_tag_api(tx_id: int, tag: str):
+    """移除交易记录的标签。"""
+    if not remove_transaction_tag(tx_id, tag):
+        raise HTTPException(404, "标签不存在")
+    return {"ok": True}
+
+
+@app.get("/api/portfolio/transactions/{tx_id}/tags")
+async def get_transaction_tags_api(tx_id: int):
+    """获取交易记录的所有标签。"""
+    return {"tags": get_transaction_tags(tx_id)}
 
 @app.get("/api/portfolio/{holding_id}")
 async def get_holding_api(holding_id: int):
@@ -2468,6 +4367,16 @@ async def list_transactions_api(holding_id: int, limit: int = 100):
 @app.post("/api/portfolio/transactions")
 async def create_transaction_api(req: CreateTransactionRequest):
     """新增交易记录。"""
+    # 自动计算 T+1 确认日
+    expected_confirm = None
+    if req.status == "pending" and req.transaction_date:
+        try:
+            from datetime import datetime as dt
+            d = dt.strptime(req.transaction_date, "%Y-%m-%d").date()
+            expected_confirm = str(expected_confirm_date(d, req.transaction_time))
+        except (ValueError, TypeError):
+            pass
+
     tx_id = create_transaction(
         fund_code=req.fund_code, transaction_type=req.transaction_type,
         amount=req.amount, transaction_date=req.transaction_date,
@@ -2475,8 +4384,10 @@ async def create_transaction_api(req: CreateTransactionRequest):
         holding_id=req.holding_id, notes=req.notes,
         status=req.status, submitted_shares=req.submitted_shares,
         submitted_amount=req.submitted_amount,
+        transaction_time=req.transaction_time,
+        expected_confirm_date=expected_confirm,
     )
-    return {"ok": True, "transaction_id": tx_id}
+    return {"ok": True, "transaction_id": tx_id, "expected_confirm_date": expected_confirm}
 
 
 @app.post("/api/portfolio/transactions/{tx_id}/confirm")
@@ -2496,6 +4407,15 @@ async def settle_transaction_api(tx_id: int):
     ok = settle_transaction(tx_id)
     if not ok:
         raise HTTPException(400, "只能标记已确认的卖出交易为已到账")
+    return {"ok": True}
+
+
+@app.delete("/api/portfolio/transactions/{tx_id}")
+async def delete_transaction_api(tx_id: int):
+    """撤销 pending 状态的交易记录。"""
+    ok = delete_transaction(tx_id)
+    if not ok:
+        raise HTTPException(400, "只能撤销待确认（pending）状态的交易")
     return {"ok": True}
 
 
@@ -2541,57 +4461,814 @@ async def fund_holdings_api(code: str, year: str = None):
     return result
 
 
-# ── 债市数据 API ──────────────────────────────────────────
+# ── Dashboard 每日投资决策看板 ────────────────────────────
 
-@app.get("/api/bond/market-temperature")
-async def get_bond_market_temperature():
-    """抓取有知有行债市温度数据。"""
-    import re, html as html_mod
-    import requests as req
+
+def _assess_valuation(percentile: float) -> dict:
+    """根据百分位给出估值评估。"""
+    if percentile <= 10:
+        return {"label": "极度低估", "level": "extreme"}
+    elif percentile <= 25:
+        return {"label": "低估", "level": "undervalued"}
+    elif percentile <= 40:
+        return {"label": "偏低", "level": "slightly_low"}
+    elif percentile <= 60:
+        return {"label": "合理", "level": "fair"}
+    elif percentile <= 80:
+        return {"label": "偏高", "level": "slightly_high"}
+    elif percentile <= 90:
+        return {"label": "高估", "level": "overvalued"}
+    else:
+        return {"label": "极度高估", "level": "extreme_high"}
+
+
+def _get_cash_advice(temperature, balance: float) -> dict:
+    """根据债市温度给出零钱配置建议。temperature 为 None 时给出保守建议。"""
+    if not balance or balance <= 0:
+        return {"summary": "暂无可用零钱", "allocation": []}
+
+    if temperature is None:
+        return {
+            "summary": "债市数据暂缺，建议暂时放在货币基金中",
+            "allocation": [
+                {"name": "货币基金", "ratio": 100, "desc": "流动性好，风险低"},
+            ],
+        }
+    elif temperature <= 20:
+        return {
+            "summary": f"债市温度 {temperature}°，处于历史低位。债券收益率高，是配置中长期债券基金的好时机",
+            "allocation": [
+                {"name": "中长期债券基金", "ratio": 60, "desc": "收益率高位锁定收益"},
+                {"name": "短债基金", "ratio": 25, "desc": "兼顾收益与流动性"},
+                {"name": "货币基金", "ratio": 15, "desc": "日常备用"},
+            ],
+        }
+    elif temperature <= 35:
+        return {
+            "summary": f"债市温度 {temperature}°，仍处于偏低区域，适合增加债券配置",
+            "allocation": [
+                {"name": "中长期债券基金", "ratio": 40, "desc": "获取较高收益"},
+                {"name": "短债基金", "ratio": 40, "desc": "灵活调整"},
+                {"name": "货币基金", "ratio": 20, "desc": "日常备用"},
+            ],
+        }
+    elif temperature <= 50:
+        return {
+            "summary": f"债市温度 {temperature}°，处于适中区域，建议短债为主均衡配置",
+            "allocation": [
+                {"name": "短债基金", "ratio": 50, "desc": "收益率尚可，风险可控"},
+                {"name": "中长期债券基金", "ratio": 25, "desc": "少量参与"},
+                {"name": "货币基金", "ratio": 25, "desc": "保留流动性"},
+            ],
+        }
+    elif temperature <= 70:
+        return {
+            "summary": f"债市温度 {temperature}°，偏高区域，债券价格已在高位，注意利率风险",
+            "allocation": [
+                {"name": "货币基金", "ratio": 50, "desc": "规避回调风险"},
+                {"name": "短债基金", "ratio": 50, "desc": "短久期低波动"},
+            ],
+        }
+    else:
+        return {
+            "summary": f"债市温度 {temperature}°，高温预警！债券价格处于历史高位，建议减配债券等待回调",
+            "allocation": [
+                {"name": "货币基金", "ratio": 70, "desc": "等待债市回调"},
+                {"name": "短债基金", "ratio": 30, "desc": "极小仓位保持参与"},
+            ],
+        }
+
+
+@app.get("/api/dashboard")
+async def get_dashboard():
+    """每日投资决策看板 — 聚合四块核心数据。每个模块独立容错。"""
+    from datetime import datetime
+    today = datetime.now().strftime("%Y-%m-%d")
+
+    # ── Section 1: 低估指数 ──
+    undervalued = []
+    try:
+        indexes = list_valuation_indexes()
+        # 按 index_code 去重，保留百分位最低的指标
+        best_per_code = {}
+        for idx in indexes:
+            code = idx["index_code"]
+            p = idx.get("percentile")
+            if p is None:
+                continue
+            if code not in best_per_code or p < best_per_code[code]["percentile"]:
+                assess = _assess_valuation(p)
+                best_per_code[code] = {
+                    "index_code": code,
+                    "index_name": idx.get("index_name", ""),
+                    "metric_type": idx.get("metric_type", ""),
+                    "current_value": idx.get("current_value"),
+                    "percentile": p,
+                    "latest_date": idx.get("latest_date", ""),
+                    "assessment": assess["label"],
+                    "assessment_level": assess["level"],
+                }
+        # 过滤：百分位 <= 30% 且数据新鲜（30天内）
+        from datetime import datetime, timedelta
+        freshness_cutoff = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
+        undervalued = [
+            v for v in best_per_code.values()
+            if v["percentile"] <= 30 and v.get("latest_date", "") >= freshness_cutoff
+        ]
+        undervalued.sort(key=lambda x: x["percentile"])
+    except Exception as e:
+        logging.warning(f"Dashboard 低估指数获取失败: {e}")
+
+    # ── Section 2: 持仓健康度 ──
+    portfolio_health = None
+    try:
+        holdings = list_holdings()
+        active = [h for h in holdings if (h.get("shares") or 0) > 0]
+        if active:
+            summary = get_portfolio_summary()
+            divers = get_portfolio_diversification()
+            total_val = summary.get("total_value", 0) or 0
+            sorted_h = sorted(active, key=lambda h: (h.get("current_value", 0) or 0), reverse=True)
+            top3_pct = round(
+                sum(h.get("current_value", 0) or 0 for h in sorted_h[:3]) / total_val * 100, 1
+            ) if total_val > 0 else 0
+
+            # 集中度评估
+            if top3_pct > 60:
+                conc_level, conc_assess = "high", "前3持仓占比 %.1f%%，集中度很高，建议分散" % top3_pct
+            elif top3_pct > 40:
+                conc_level, conc_assess = "moderate", "前3持仓占比 %.1f%%，集中度偏高，可适当调整" % top3_pct
+            else:
+                conc_level, conc_assess = "low", "前3持仓占比 %.1f%%，分散度良好" % top3_pct
+
+            portfolio_health = {
+                "holding_count": summary.get("holding_count", 0),
+                "total_value": round(total_val, 2),
+                "total_profit": round(summary.get("total_profit", 0), 2),
+                "profit_rate": summary.get("profit_rate", 0),
+                "max_holding_pct": divers.get("max_holding_pct", 0),
+                "top3_concentration": top3_pct,
+                "type_distribution": divers.get("type_distribution", {}),
+                "concentration_level": conc_level,
+                "concentration_assessment": conc_assess,
+            }
+    except Exception as e:
+        logging.warning(f"Dashboard 持仓数据获取失败: {e}")
+
+    # ── Section 3: 零钱 + 债券 ──
+    cash_balance = 0
+    try:
+        cash_balance = get_cash_balance().get("balance", 0)
+    except Exception:
+        pass
+
+    bond_info = None
+    try:
+        raw_bond = _fetch_bond_data()
+        if raw_bond and len(raw_bond) > 1:
+            last = raw_bond[-1]
+            # 计算趋势：找 7天前、30天前、90天前的数据点
+            ref_dates = {}
+            last_date_str = last.get("date", "")
+            for d in raw_bond:
+                ref_dates[d["date"]] = {"temp": d.get("degree"), "yield": d.get("yield")}
+
+            def _lookup_bond(days_ago):
+                """找距离指定天数最近的交易日数据。"""
+                from datetime import datetime, timedelta
+                target = datetime.strptime(last_date_str, "%Y-%m-%d") - timedelta(days=days_ago)
+                for i in range(7):
+                    look = target.strftime("%Y-%m-%d")
+                    if look in ref_dates:
+                        return ref_dates[look]
+                    target -= timedelta(days=1)
+                return None
+
+            ref_7d = _lookup_bond(7)
+            ref_30d = _lookup_bond(30)
+
+            bond_info = {
+                "temperature": last.get("degree"),
+                "yield_val": float(last["yield"]) if last.get("yield") else None,
+                "date": last.get("date", ""),
+                "trend": {
+                    "week_ago_temp": ref_7d["temp"] if ref_7d else None,
+                    "week_ago_yield": float(ref_7d["yield"]) if ref_7d and ref_7d.get("yield") else None,
+                    "month_ago_temp": ref_30d["temp"] if ref_30d else None,
+                    "month_ago_yield": float(ref_30d["yield"]) if ref_30d and ref_30d.get("yield") else None,
+                },
+            }
+    except Exception as e:
+        logging.warning(f"Dashboard 债市数据获取失败: {e}")
+
+    cash_advice = _get_cash_advice(
+        bond_info["temperature"] if bond_info else None, cash_balance
+    )
+
+    # ── 数据新鲜度 ──
+    freshness_info = {"stale_count": 0, "stale_indexes": []}
+    try:
+        all_freshness = list_index_freshness()
+        stale = [f for f in all_freshness if f.get("stale_days", 0) >= 10]
+        freshness_info = {
+            "stale_count": len(stale),
+            "stale_indexes": [
+                {"name": f["index_name"], "code": f["index_code"],
+                 "latest_date": f["latest_date"], "stale_days": int(f["stale_days"])}
+                for f in stale[:8]
+            ],
+        }
+    except Exception as e:
+        logging.warning(f"Dashboard 新鲜度获取失败: {e}")
+
+    return {
+        "date": today,
+        "undervalued_indexes": undervalued,
+        "portfolio_health": portfolio_health,
+        "cash_management": {
+            "balance": cash_balance,
+            "bond_market": bond_info,
+            "suggestion": cash_advice,
+        },
+        "data_freshness": freshness_info,
+    }
+
+
+# ── 市场热点 API（带缓存，解析JSON结构化输出）────────────
+
+_hot_topics_cache = {"data": None, "ts": 0}
+
+
+@app.get("/api/dashboard/daily-report")
+async def get_daily_report():
+    """获取今日自动生成的日报。"""
+    from datetime import datetime
+    today = datetime.now().strftime("%Y-%m-%d")
+    from db import _get_conn
+    conn = _get_conn()
+    row = conn.execute(
+        "SELECT * FROM analysis_history WHERE agent_id = 1 AND date(created_at) = ? ORDER BY created_at DESC LIMIT 1",
+        (today,)
+    ).fetchone()
+    conn.close()
+    if row:
+        r = dict(row)
+        return {"has_report": True, "report": r}
+    return {"has_report": False, "report": None}
+
+
+@app.get("/api/dashboard/hot-topics")
+async def get_hot_topics():
+    """获取今日市场热点（YingMi MCP SearchFinancialNews，120秒缓存）。"""
+    import time
+    now = time.time()
+    if _hot_topics_cache["data"] and now - _hot_topics_cache["ts"] < 120:
+        return _hot_topics_cache["data"]
+
+    news_items = []
+    try:
+        from mcp.yingmi_client import get_yingmi_client
+        mcp = get_yingmi_client()
+        raw = mcp.call_tool("SearchFinancialNews", {"keyword": "A股", "pageSize": 6})
+        if isinstance(raw, dict):
+            for c in raw.get("content", []):
+                if c.get("type") == "text":
+                    parsed = json.loads(c["text"])
+                    if parsed.get("success") and parsed.get("data", {}).get("items"):
+                        for item in parsed["data"]["items"]:
+                            news_items.append({
+                                "title": item.get("title", ""),
+                                "summary": item.get("summary", ""),
+                                "source": item.get("sources", ""),
+                                "date": item.get("publishDate", ""),
+                                "url": item.get("url", ""),
+                            })
+    except Exception as e:
+        logging.warning(f"热点新闻获取失败: {e}")
+
+    # fallback
+    if not news_items:
+        try:
+            from tools import execute_tool
+            web_raw = execute_tool("web_search", {"query": "A股 今日热点 板块 基金", "max_results": 5})
+            if web_raw:
+                news_items.append({"title": "网络资讯", "summary": web_raw[:500], "source": "web_search", "date": "", "url": ""})
+        except Exception as e:
+            logging.warning(f"热点 web_search 失败: {e}")
+
+    result = {"news": news_items, "source": "yingmi" if news_items else "none"}
+    _hot_topics_cache["data"] = result
+    _hot_topics_cache["ts"] = now
+    return result
+
+
+# ── 热点 AI 分析（结构化推荐） ────────────────────────────────
+# prompt 通过 analysis_agents 配置管理，见 db.py 中"热点分析专家"系统提示词
+
+
+@app.get("/api/dashboard/hotspots-analysis")
+async def get_hotspots_analysis():
+    """结构化热点分析 — LLM 输出 JSON 推荐。"""
+    # 1. 收集今日数据
+    news_data = await get_hot_topics()
+    news_list = news_data.get("news", [])[:5]
+    news_text = "\n".join(
+        f"- {n.get('title','')}（{n.get('source','')}）"
+        for n in news_list if n.get('title')
+    ) if news_list else "暂无新闻"
+
+    # 估值数据 + 可参考指数代码
+    try:
+        from db import list_valuation_indexes
+        indexes = list_valuation_indexes()
+        # 去重，按 index_code 分组，优先展示最新数据
+        seen = {}
+        for i in indexes:
+            code = i.get("index_code", "")
+            if code and code not in seen:
+                seen[code] = i
+        all_indexes = list(seen.values())
+        # 可参考指数代码表
+        code_ref_text = "\n".join(
+            f"- {i['index_name']}（{i['index_code']}）: {i.get('metric_type','PE')}={i.get('current_value','?')}, "
+            f"百分位={i.get('percentile',100):.0f}%"
+            for i in all_indexes
+        ) if all_indexes else "暂无指数数据"
+
+        # 低估指数（百分位<30）
+        low_val = [i for i in all_indexes if i.get("percentile", 100) < 30]
+        val_text = "\n".join(
+            f"- {i['index_name']}（{i['index_code']}）: 百分位={i.get('percentile',100):.0f}%"
+            for i in low_val[:10]
+        ) if low_val else "暂无低估指数"
+    except Exception as e:
+        code_ref_text = "暂无"
+        val_text = "暂无"
+
+    # 持仓明细 + 概况
+    try:
+        from db import list_holdings, get_portfolio_diversification, get_cash_balance
+        holdings = list_holdings()
+        div = get_portfolio_diversification()
+        cash = get_cash_balance()
+
+        # 持仓明细文本
+        if holdings:
+            holding_lines = []
+            for h in holdings[:15]:
+                pct = h.get("profit_rate")
+                pct_str = f"{pct:+.1f}%" if pct is not None else "N/A"
+                val = h.get("current_value", 0) or 0
+                holding_lines.append(
+                    f"- {h['fund_name']}（{h.get('fund_code','')}）: "
+                    f"市值{val:.0f}元, 收益率{pct_str}"
+                )
+            holding_text = "\n".join(holding_lines)
+        else:
+            holding_text = "暂无持仓"
+
+        portfolio_text = (
+            f"持仓{div.get('holding_count',0)}只基金，"
+            f"总市值{div.get('total_value',0):.0f}元，"
+            f"盈亏{div.get('total_profit',0):.0f}元，"
+            f"可用零钱{cash:.0f}元"
+        )
+    except Exception:
+        holding_text = "暂无"
+        portfolio_text = "暂无"
+
+    # 债券
+    try:
+        from tools import _get_bond_temperature
+        bond_raw = json.loads(_get_bond_temperature())
+        bond_text = f"债券温度{bond_raw.get('temperature','?')}°，收益率{bond_raw.get('rate','?')}%"
+    except Exception:
+        bond_text = "暂无"
+
+    # 从 analysis_agents 加载热点分析 prompt，支持通过管理页面动态修改
+    try:
+        from db import get_analysis_agent
+        agent = get_analysis_agent(7)
+        base_prompt = agent["system_prompt"] if agent else ""
+    except Exception:
+        base_prompt = ""
+    if not base_prompt:
+        base_prompt = "你是一位专业的A股市场分析专家。请基于以下市场数据分析今日投资机会，输出结构化JSON。\n\n## 输出格式\n返回严格JSON：{\"summary\":\"...\", \"recommendations\":[{\"direction\":\"up|down|watch\",\"index_name\":\"...\",\"index_code\":\"...\",\"reason\":\"...\",\"confidence\":\"high|medium|low\"}]}\n\n## 今日数据："
+
+    prompt = base_prompt + f"""
+【今日新闻】
+{news_text}
+
+【可参考指数代码】
+{code_ref_text}
+
+【低估指数】
+{val_text}
+
+【持仓明细】
+{holding_text}
+
+【持仓概况】
+{portfolio_text}
+
+【债券市场】
+{bond_text}
+
+请严格按照JSON格式输出分析结果。"""
 
     try:
-        resp = req.get(
-            "https://youzhiyouxing.cn/data/macro",
-            headers={"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"},
-            timeout=15,
-        )
-        resp.raise_for_status()
+        response = await asyncio.wait_for(asyncio.to_thread(lambda: _call_llm(
+            caller="hotspots_analysis",
+            model=MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.3,
+            max_tokens=4096,
+        )), timeout=60)
+        content = response.choices[0].message.content or "{}"
+        # 尝试提取 JSON
+        import re as _re
+        json_match = _re.search(r'\{.*\}', content, _re.DOTALL)
+        if json_match:
+            parsed = json.loads(json_match.group())
+        else:
+            parsed = json.loads(content)
+        # 确保字段完整
+        recs = parsed.get("recommendations", [])
+        result = {
+            "summary": parsed.get("summary", ""),
+            "recommendations": recs,
+            "analysis_text": content,
+        }
+        # 保存到推荐验证库 + 缓存 + 分析历史
+        if recs:
+            try:
+                from datetime import datetime
+                from db import save_recommendations, save_analysis_cache
+                from db import _get_conn as _get_db_conn
+                analysis_id = datetime.now().strftime("hotspots_%Y%m%d_%H%M%S")
+                save_recommendations(recs, analysis_id)
+                save_analysis_cache("hotspots_latest", result)
+                # 记录分析历史（含使用的 prompt 版本）
+                _conn = _get_db_conn()
+                _conn.execute(
+                    "INSERT INTO analysis_history (agent_id, agent_name, prompt_used, news_context, result, token_usage) VALUES (?, ?, ?, ?, ?, ?)",
+                    (7, "热点分析专家", base_prompt[:500] if base_prompt else "", news_text[:500], content, 0)
+                )
+                _conn.commit()
+                _conn.close()
+            except Exception as e:
+                logging.warning(f"保存推荐记录失败: {e}")
+        return result
+    except asyncio.TimeoutError:
+        return {"summary": "分析超时，请重试", "recommendations": [], "analysis_text": ""}
     except Exception as e:
-        raise HTTPException(status_code=502, detail=f"数据源请求失败: {e}")
+        logging.warning(f"热点结构化分析失败: {e}")
+        return {"summary": f"分析失败: {str(e)}", "recommendations": [], "analysis_text": ""}
+
+
+@app.get("/api/dashboard/hotspots-analysis/latest")
+async def get_latest_hotspots_analysis():
+    """返回最近一次缓存的热点分析结果（刷新页面后还原用）。"""
+    from db import get_analysis_cache
+    cached = get_analysis_cache("hotspots_latest")
+    if cached:
+        # 补充 recommendations 中的 id 字段，供反馈使用
+        try:
+            from db import _get_conn
+            conn = _get_conn()
+            rows = conn.execute(
+                "SELECT id, index_name FROM recommendations WHERE analysis_id LIKE 'hotspots_%' ORDER BY id DESC LIMIT 10"
+            ).fetchall()
+            conn.close()
+            id_map = {r["index_name"]: r["id"] for r in rows}
+            for rec in cached.get("recommendations", []):
+                if rec.get("index_name") in id_map:
+                    rec["id"] = id_map[rec["index_name"]]
+        except Exception:
+            pass
+        return cached
+    # 没有缓存，尝试从历史推荐记录重建
+    try:
+        from db import list_recommendations
+        recs = list_recommendations(limit=10)
+        if recs:
+            return {
+                "summary": f"上次分析结果（共{len(recs)}条推荐）",
+                "recommendations": recs,
+                "analysis_text": "",
+            }
+    except Exception:
+        pass
+    return {"summary": "", "recommendations": [], "analysis_text": ""}
+
+
+@app.get("/api/dashboard/recommendations")
+async def list_recommendations_api(limit: int = 50, status: str = ""):
+    """列出历史推荐记录。"""
+    from db import list_recommendations
+    recs = list_recommendations(limit, status or None)
+    return {"recommendations": recs}
+
+
+@app.get("/api/dashboard/recommendations/stats")
+async def recommendations_stats_api():
+    """推荐验证统计。"""
+    from db import _get_conn
+    conn = _get_conn()
+    total = conn.execute("SELECT COUNT(*) FROM recommendations").fetchone()[0]
+    correct = conn.execute("SELECT COUNT(*) FROM recommendations WHERE status = 'correct'").fetchone()[0]
+    wrong = conn.execute("SELECT COUNT(*) FROM recommendations WHERE status = 'wrong'").fetchone()[0]
+    pending = conn.execute("SELECT COUNT(*) FROM recommendations WHERE status = 'pending'").fetchone()[0]
+    conn.close()
+    total_verified = correct + wrong
+    accuracy = round(correct / total_verified * 100, 1) if total_verified > 0 else None
+    return {
+        "total": total,
+        "correct": correct,
+        "wrong": wrong,
+        "pending": pending,
+        "verified": total_verified,
+        "accuracy": accuracy,
+    }
+
+
+# ── 推荐反馈 / 进化系统 API ──────────────────────────────
+
+
+@app.post("/api/dashboard/recommendations/{rec_id}/feedback")
+async def create_recommendation_feedback(rec_id: int, body: dict):
+    """提交推荐反馈（点赞/点踩/评论）。"""
+    from db import save_recommendation_feedback
+    fid = save_recommendation_feedback(
+        recommendation_id=rec_id,
+        rating=body.get("rating", "neutral"),
+        tags=body.get("tags", ""),
+        comment=body.get("comment", ""),
+    )
+    return {"ok": True, "id": fid}
+
+
+@app.get("/api/dashboard/recommendations/feedback")
+async def list_feedback_api():
+    """列出所有推荐反馈。"""
+    from db import list_recommendation_feedback
+    return {"feedback": list_recommendation_feedback()}
+
+
+@app.get("/api/dashboard/recommendations/feedback-stats")
+async def feedback_stats_api():
+    """推荐反馈统计（点赞率等）。"""
+    from db import get_recommendation_feedback_stats
+    return get_recommendation_feedback_stats()
+
+
+@app.post("/api/llm-feedback")
+async def create_llm_feedback(body: dict):
+    """提交 LLM 输出反馈（进化系统）。"""
+    from db import save_llm_feedback
+    fid = save_llm_feedback(
+        caller=body.get("caller", ""),
+        input_summary=body.get("input_summary", ""),
+        output_summary=body.get("output_summary", ""),
+        rating=body.get("rating", "neutral"),
+        tags=body.get("tags", ""),
+        comment=body.get("comment", ""),
+    )
+    return {"ok": True, "id": fid}
+
+
+@app.get("/api/llm-feedback")
+async def list_llm_feedback_api(caller: str = "", rating: str = ""):
+    """列出 LLM 反馈。"""
+    from db import list_llm_feedback
+    return {"feedback": list_llm_feedback(
+        caller=caller or None,
+        rating=rating or None,
+    )}
+
+
+# ── 债市数据 API ──────────────────────────────────────────
+
+
+def _fetch_bond_data():
+    """抓取有知有行债市温度数据，返回原始数据列表。"""
+    import re
+    import html as html_mod
+    import requests as req
+
+    resp = req.get(
+        "https://youzhiyouxing.cn/data/macro",
+        headers={"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"},
+        timeout=15,
+    )
+    resp.raise_for_status()
 
     match = re.search(r'data-cbond-history="([^"]+)"', resp.text)
     if not match:
-        raise HTTPException(status_code=502, detail="页面结构变化，未找到数据")
+        return []
 
     raw = html_mod.unescape(match.group(1))
-    # Find the end of the JSON array
     bracket_count = 0
     end_idx = 0
     for i, c in enumerate(raw):
-        if c == '[':
+        if c == "[":
             bracket_count += 1
-        elif c == ']':
+        elif c == "]":
             bracket_count -= 1
             if bracket_count == 0:
                 end_idx = i + 1
                 break
 
+    return json.loads(raw[:end_idx])
+
+
+@app.get("/api/bond/market-temperature")
+async def get_bond_market_temperature():
+    """抓取有知有行债市温度数据。"""
     try:
-        data = json.loads(raw[:end_idx])
-    except json.JSONDecodeError as e:
-        raise HTTPException(status_code=502, detail=f"数据解析失败: {e}")
+        data = _fetch_bond_data()
+        last = data[-1] if data else {}
+        return {
+            "history": data,
+            "current": {
+                "date": last.get("date"),
+                "temperature": last.get("degree"),
+                "rate": float(last["yield"]) if last.get("yield") else None,
+            },
+        }
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"数据源请求失败: {e}")
 
-    # Extract current info from the last data point
-    last = data[-1] if data else {}
 
-    return {
-        "history": data,
-        "current": {
-            "date": last.get("date"),
-            "temperature": last.get("degree"),
-            "rate": float(last["yield"]) if last.get("yield") else None,
-        },
-    }
+@app.get("/api/bond/yield-curve")
+async def bond_yield_curve_api(country: str = "china"):
+    """获取国债收益率曲线数据。"""
+    from tools import _get_bond_yield_curve
+    result = json.loads(_get_bond_yield_curve({"country": country}))
+    if "error" in result:
+        raise HTTPException(status_code=502, detail=result["error"])
+    return result
+
+
+@app.get("/api/bond/market-overview")
+async def bond_market_overview_api():
+    """获取债市综合概况。"""
+    from tools import _get_bond_market_overview
+    result = json.loads(_get_bond_market_overview())
+    if "error" in result:
+        raise HTTPException(status_code=502, detail=result["error"])
+    return result
+
+
+@app.post("/api/bond/ai-recommend")
+async def bond_ai_recommend():
+    """AI 债券配置推荐：结合债市温度历史趋势、收益率曲线、持仓穿透、基金排行榜给出具体购买建议。"""
+    import ssl
+    ssl._create_default_https_context = ssl._create_unverified_context
+    import akshare as ak
+    import json as json_mod
+    from tools import _get_bond_yield_curve
+
+    # 1. 债市温度（完整历史，用于趋势分析）
+    bond_history = []
+    try:
+        raw = _fetch_bond_data()
+        if raw:
+            # 取最近90天的数据
+            bond_history = raw[-90:]
+    except Exception as e:
+        pass
+
+    # 2. 收益率曲线
+    yield_curve = {}
+    try:
+        yc = json.loads(_get_bond_yield_curve({"country": "china"}))
+        if "error" not in yc:
+            yield_curve = yc
+    except Exception:
+        pass
+
+    # 3. 现有持仓穿透分析（用 akshare 查每只债券基金的底层持仓）
+    holdings_with_penetration = []
+    total_bond_value = 0
+    total_portfolio_value = 0
+    try:
+        all_h = list_holdings()
+        for h in all_h:
+            if (h.get("shares") or 0) > 0:
+                v = h.get("current_value") or 0
+                total_portfolio_value += v
+                if h.get("fund_category") == "bond":
+                    total_bond_value += v
+                    code = h.get("fund_code", "")
+                    # 查股票持仓（判断是否为二级债基）
+                    has_stock = False
+                    stock_ratio = 0
+                    try:
+                        stock_df = ak.fund_portfolio_hold_em(symbol=code, date="2025")
+                        if stock_df is not None and not stock_df.empty:
+                            has_stock = True
+                            stock_ratio = float(stock_df["占净值比例"].sum())
+                    except:
+                        pass
+                    # 查债券持仓
+                    bond_types = []
+                    try:
+                        bond_df = ak.fund_portfolio_bond_hold_em(symbol=code, date="2025")
+                        if bond_df is not None and not bond_df.empty:
+                            for _, row in bond_df.iterrows():
+                                bname = str(row.get("债券名称", ""))
+                                if "国债" in bname or "国开" in bname or "政金" in bname or "农发" in bname or "进出" in bname:
+                                    bond_types.append("利率债")
+                                elif "可转债" in bname or "转债" in bname:
+                                    bond_types.append("可转债")
+                                else:
+                                    bond_types.append("信用债")
+                    except:
+                        pass
+
+                    holdings_with_penetration.append({
+                        "code": code,
+                        "name": h.get("fund_name", ""),
+                        "value": v,
+                        "pct_of_portfolio": round(v / total_portfolio_value * 100, 1) if total_portfolio_value > 0 else 0,
+                        "profit": h.get("profit_loss", 0),
+                        "has_stock": has_stock,
+                        "stock_ratio_pct": round(stock_ratio, 2),
+                        "bond_type_tags": list(set(bond_types)) if bond_types else ["待确认"],
+                    })
+    except Exception as e:
+        pass
+
+    # 4. 零钱余额
+    cash_balance = 0
+    try:
+        cash_balance = get_cash_balance().get("balance", 0)
+    except Exception:
+        pass
+
+    # 5. 全市场纯债基金排行榜
+    all_bond_funds = []
+    try:
+        df = ak.fund_open_fund_rank_em(symbol="债券型")
+        # 排除含"可转债"的基金
+        pure_mask = ~df["基金简称"].str.contains("可转债", na=False)
+        for _, row in df[pure_mask].head(30).iterrows():
+            all_bond_funds.append({
+                "code": row["基金代码"],
+                "name": row["基金简称"],
+                "year_return": row.get("近1年"),
+                "fee": row.get("手续费"),
+            })
+    except Exception as e:
+        pass
+
+    # 6. 货币基金排行榜
+    money_funds = []
+    try:
+        mf = ak.fund_money_rank_em()
+        for _, row in mf.head(5).iterrows():
+            money_funds.append({
+                "code": row.get("基金代码", ""),
+                "name": row.get("基金简称", ""),
+                "year_return": row.get("近1年"),
+            })
+    except Exception as e:
+        pass
+
+    # 7. 构建 LLM 上下文
+    agent = get_analysis_agent(8)
+    system_prompt = agent["system_prompt"] if agent else DEFAULT_BOND_PROMPT
+
+    context_lines = [
+        f"## 债市温度历史（近90天）\n{json_mod.dumps(bond_history, ensure_ascii=False, indent=2)}",
+        f"## 收益率曲线\n{json_mod.dumps(yield_curve, ensure_ascii=False, indent=2)}",
+        f"## 现有债券持仓（含穿透数据）\n持有 {len(holdings_with_penetration)} 只，总值 {total_bond_value:.2f}，占总资产 {round(total_bond_value/total_portfolio_value*100,1) if total_portfolio_value > 0 else 0}%\n" + json_mod.dumps(holdings_with_penetration, ensure_ascii=False, indent=2),
+        f"## 零钱余额\n{cash_balance} 元（占总资产 {round(cash_balance/total_portfolio_value*100,1) if total_portfolio_value > 0 else 0}%）",
+        f"## 全市场纯债基金排行榜（Top 30）\n" + json_mod.dumps(all_bond_funds, ensure_ascii=False, indent=2),
+        f"## 货币基金排行榜（备选）\n" + json_mod.dumps(money_funds, ensure_ascii=False, indent=2),
+    ]
+
+    combined_input = "请基于以下数据给出债券配置建议：\n\n" + "\n\n".join(context_lines)
+
+    # 8. 调用 LLM
+    from llm_service import chat_with_agent
+    result = chat_with_agent(system_prompt, [{"role": "user", "content": combined_input}])
+
+    # 尝试从结果中提取 JSON
+    try:
+        parsed = json_mod.loads(result)
+        return {"ok": True, "result": parsed}
+    except:
+        import re as re_mod
+        match = re_mod.search(r'```(?:json)?\s*(\{.*?\})\s*```', result, re_mod.DOTALL)
+        if match:
+            try:
+                parsed = json_mod.loads(match.group(1))
+                return {"ok": True, "result": parsed}
+            except:
+                pass
+        return {"ok": True, "result": {"summary": "AI分析完成", "raw": result}}
 
 
 # ── 前端页面 ──────────────────────────────────────────
@@ -2606,6 +5283,68 @@ async def app_page():
     return HTMLResponse("<h1>前端文件未找到</h1><p>请创建 static/index.html</p>")
 
 
+@app.get("/favicon.svg", include_in_schema=False)
+async def _serve_favicon():
+    return FileResponse(str(STATIC_DIR / "favicon.svg"))
+
+
+@app.get("/icons.svg", include_in_schema=False)
+async def _serve_icons():
+    return FileResponse(str(STATIC_DIR / "icons.svg"))
+
+
+@app.get("/api/finance/quote-bar")
+async def finance_quote_bar():
+    """每日理财箴言 + 市场热点。"""
+    import random
+    quotes = [
+        "别人贪婪时恐惧，别人恐惧时贪婪。—— 巴菲特",
+        "投资中最重要的是：不要亏损。—— 巴菲特",
+        "复利是世界第八大奇迹。—— 爱因斯坦",
+        "退潮时才知道谁在裸泳。—— 巴菲特",
+        "投资不是比谁聪明，而是比谁更有耐心。",
+        "不要把鸡蛋放在同一个篮子里。",
+        "最好的买入时机是昨天，其次是今天。",
+        "资产配置决定了投资回报的 90% 以上。",
+        "种一棵树最好的时间是十年前，其次是现在。",
+        "市场下跌时买入，需要勇气；上涨时持有，需要定力。",
+        "风险永远和收益成正比，警惕高收益诱惑。",
+        "投资不是为了暴富，而是为了让生活更安心。",
+        "定投的魅力在于：摊低成本，积少成多。",
+        "不要试图预测市场，要适应市场。",
+        "投资最大的成本不是手续费，是无知。",
+        "市场永远在波动，情绪稳定才是最大的优势。",
+        "买你了解的东西，不懂不投。",
+        "收益是时间的函数，不是操作频率的函数。",
+        "优质资产拿得住，远比频繁交易更重要。",
+        "今晚的下跌，是为了明天的上涨留空间。",
+        "在别人悲观时买入，在别人乐观时卖出。",
+        "耐心是投资者最好的朋友。—— 格雷厄姆",
+        "价格是你支付的，价值是你得到的。—— 巴菲特",
+        "市场短期是投票机，长期是称重机。—— 格雷厄姆",
+        "永远不要投资你输不起的钱。",
+    ]
+    # 随机选择一条（每次刷新不同）
+    import random
+    daily_quote = random.choice(quotes)
+
+    # 市场热点（akshare）
+    hot_keywords = []
+    try:
+        import akshare as ak
+        df = ak.stock_hot_keyword_em()
+        seen = set()
+        for _, row in df.iterrows():
+            kw = row.get("概念名称", "")
+            if kw and kw not in seen and len(seen) < 8:
+                seen.add(kw)
+                hot_keywords.append(kw)
+    except Exception:
+        pass
+
+    return {"date": today, "quote": daily_quote, "hot_keywords": hot_keywords}
+
+
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host="0.0.0.0", port=8080)

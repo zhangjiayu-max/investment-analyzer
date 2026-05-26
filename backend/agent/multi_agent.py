@@ -48,7 +48,8 @@ SPECIALIST_AGENTS = {
         "name": "择时分析师",
         "icon": "📰",
         "description": "分析市场新闻、政策变化，判断市场时机",
-        "tools": ["web_search", "search_knowledge", "get_bond_temperature"],
+        "tools": ["web_search", "search_knowledge", "get_bond_temperature",
+                   "get_bond_yield_curve", "get_bond_market_overview"],
         "system_prompt": """你是一位专业的市场择时分析师，专注于分析市场新闻、政策变化和资金流向。
 
 ## 核心职责
@@ -105,11 +106,42 @@ SPECIALIST_AGENTS = {
 - 提醒需要注意的风险点
 - 使用 Markdown 格式""",
     },
+    "fund_analyst": {
+        "name": "基金分析师",
+        "icon": "🔍",
+        "description": "分析单只基金的投资表现、操作记录和持仓结构",
+        "tools": ["query_portfolio", "query_fund_info", "analyze_holding_performance",
+                  "query_transaction_history", "get_valuation_list", "search_knowledge",
+                  "analyze_portfolio_diversification", "generate_portfolio_alert"],
+        "system_prompt": """你是一位专业的基金分析师，专注于分析具体基金的投资表现和操作质量。
+
+## 核心职责
+对用户持有的基金进行深度分析，包括收益表现评估、操作记录复盘、持仓结构分析。
+
+## 分析方法
+1. **收益评估**：查询基金的持仓数据，计算累计收益、收益率、持有时间
+2. **操作复盘**：查看交易记录，分析买入卖出的时机和质量
+3. **持仓分析**：查看基金的资产配置、重仓股、行业分布
+4. **综合判断**：结合估值数据和知识库信息，评估基金当前的投资价值
+
+## 操作质量评估
+- **买入时机**：是否在低估区域买入？是否追涨？
+- **卖出时机**：是否止盈/止损？是否卖在低点？
+- **操作频率**：交易是否过于频繁？是否有管住手？
+- **定投纪律**：是否坚持定投？是否有中断？
+
+## 输出要求
+- 给出基金的基本收益数据
+- 分析操作记录，指出好的和不好的操作
+- 给出改进建议
+- 使用 Markdown 格式""",
+    },
     "allocation_advisor": {
         "name": "资产配置师",
         "icon": "🥧",
         "description": "给出股债配比、行业轮动、定投策略建议",
-        "tools": ["get_valuation_list", "get_bond_temperature", "search_knowledge", "query_portfolio", "query_fund_info"],
+        "tools": ["get_valuation_list", "get_bond_temperature", "search_knowledge", "query_portfolio",
+                   "query_fund_info", "get_bond_yield_curve", "get_bond_market_overview"],
         "system_prompt": """你是一位专业的资产配置师，专注于投资组合构建和资产配置策略。
 
 ## 核心职责
@@ -153,6 +185,7 @@ def run_specialist(agent_key: str, query: str, context: str = "") -> dict:
     """
     agent = SPECIALIST_AGENTS[agent_key]
     start_time = time.time()
+    _caller = f"specialist:{agent_key}"
 
     # 只给该专家分配它的专属工具
     agent_tools = [t for t in TOOLS if t["function"]["name"] in agent["tools"]]
@@ -174,6 +207,7 @@ def run_specialist(agent_key: str, query: str, context: str = "") -> dict:
     for turn in range(MAX_TURNS):
         try:
             response = _call_llm(
+                caller=_caller,
                 model=MODEL,
                 messages=llm_messages,
                 tools=agent_tools,
@@ -188,6 +222,7 @@ def run_specialist(agent_key: str, query: str, context: str = "") -> dict:
                 logger.warning(f"[{agent['name']}] 模型不兼容，回退到普通模式")
                 # 回退：不带 tools 调用
                 response = _call_llm(
+                    caller=_caller,
                     model=MODEL,
                     messages=llm_messages,
                     temperature=0.3,
@@ -261,6 +296,7 @@ def run_specialist(agent_key: str, query: str, context: str = "") -> dict:
                 "content": "请根据以上工具调用结果，给出你的专业分析。",
             })
             response = _call_llm(
+                caller=_caller,
                 model=MODEL,
                 messages=llm_messages,
                 temperature=0.3,

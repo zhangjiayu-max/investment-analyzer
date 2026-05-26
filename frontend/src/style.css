@@ -3,6 +3,7 @@
 /* ── Design Tokens ── */
 :root {
   /* Primary — Indigo */
+  --color-primary: #6366f1;
   --color-primary-50: #eef2ff;
   --color-primary-100: #e0e7ff;
   --color-primary-200: #c7d2fe;
@@ -482,4 +483,67 @@ button {
   top: 1rem;
   right: 1rem;
   z-index: var(--z-toast);
+}
+
+/* ── Term Tooltip (hover 提示) ── */
+.term-with-tip {
+  position: relative;
+  cursor: help;
+  border-bottom: 1px dashed var(--color-text-muted);
+}
+
+.term-tip {
+  display: none;
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 9999;
+  width: 260px;
+  background: var(--color-bg-hover);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-lg);
+  padding: 0.65rem 0.85rem;
+  font-size: 0.75rem;
+  line-height: 1.6;
+  color: var(--color-text-secondary);
+  font-weight: 400;
+  border-bottom: none;
+  white-space: normal;
+  pointer-events: none;
+  backdrop-filter: blur(8px);
+}
+
+.term-tip::after {
+  content: '';
+  position: absolute;
+  top: 100%;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 0;
+  height: 0;
+  border-left: 6px solid transparent;
+  border-right: 6px solid transparent;
+  border-top: 6px solid var(--color-bg-hover);
+}
+
+.term-with-tip:hover .term-tip {
+  display: block;
+}
+
+/* 表格表头 tooltip 用 JS 定位 */
+.th-tip { cursor: help; border-bottom: 1px dashed var(--color-text-muted); }
+.th-tip .term-tip { display: none !important; }
+
+.table-tip-fixed {
+  position: fixed;
+  transform: translateX(-50%);
+  z-index: 9999;
+  width: 260px;
+  background: var(--color-bg-hover);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-lg);
+  padding: 0.65rem 0.85rem;
 }
