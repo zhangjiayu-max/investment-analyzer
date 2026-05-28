@@ -139,8 +139,26 @@ const filteredArticles = computed(() => {
       (a.summary || '').toLowerCase().includes(q)
     )
   }
+  // 按时间排序（最新优先）
+  list = [...list].sort((a, b) => {
+    const timeA = parseTimeToTimestamp(a.publish_time || a.created_at || '')
+    const timeB = parseTimeToTimestamp(b.publish_time || b.created_at || '')
+    return timeB - timeA
+  })
   return list
 })
+
+function parseTimeToTimestamp(timeStr) {
+  if (!timeStr) return 0
+  // 处理 "2026年5月7日 20:23" 格式
+  const cnMatch = timeStr.match(/(\d{4})年(\d{1,2})月(\d{1,2})日\s*(\d{1,2}):(\d{2})/)
+  if (cnMatch) {
+    const [, year, month, day, hour, minute] = cnMatch
+    return new Date(year, month - 1, day, hour, minute).getTime()
+  }
+  // 处理 "2026-05-23 17:33:15" 或 "2026-05-23T17:33:15" 格式
+  return new Date(timeStr.replace('T', ' ')).getTime() || 0
+}
 
 function statusClass(s) {
   return { pending: 'badge-warning', crawling: 'badge-info', done: 'badge-success', error: 'badge-danger' }[s] || 'badge-neutral'
@@ -152,7 +170,8 @@ function statusLabel(s) {
 
 function formatDate(ts) {
   if (!ts) return ''
-  return ts.replace('T', ' ').slice(0, 10)
+  // 处理 "2026-05-27 22:54:54" 或 "2026-05-27T22:54:54" 格式
+  return ts.replace('T', ' ').slice(0, 16)
 }
 
 function parseImages(img) {
@@ -220,6 +239,7 @@ function imgUrl(url) {
             <thead>
               <tr>
                 <th class="col-title">标题</th>
+                <th class="col-time">时间</th>
                 <th class="col-status">状态</th>
               </tr>
             </thead>
@@ -230,6 +250,7 @@ function imgUrl(url) {
                 :class="['list-row', { selected: selectedArticle?.id === a.id }]"
               >
                 <td class="col-title" :title="a.title || '无标题'">{{ a.title || '无标题' }}</td>
+                <td class="col-time">{{ formatDate(a.publish_time || a.created_at) }}</td>
                 <td class="col-status">
                   <span :class="['badge', statusClass(a.status)]">{{ statusLabel(a.status) }}</span>
                 </td>
@@ -470,6 +491,12 @@ function imgUrl(url) {
   white-space: nowrap;
   font-weight: 500;
   color: var(--color-text-primary);
+}
+.col-time {
+  width: 1%;
+  white-space: nowrap;
+  font-size: 0.75rem;
+  color: var(--color-text-muted);
 }
 .col-status { width: 1%; white-space: nowrap; text-align: center; }
 

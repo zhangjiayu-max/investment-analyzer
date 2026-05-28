@@ -129,7 +129,7 @@ function onBack() {
     </div>
 
     <!-- AI 对话页 -->
-    <div v-if="activePage === 'chat'" class="page-section">
+    <div v-show="activePage === 'chat'" class="page-section">
       <ChatView />
     </div>
 
@@ -219,7 +219,7 @@ function onBack() {
     </div>
 
     <!-- 持仓管理页 -->
-    <div v-if="activePage === 'portfolio'" class="page-section">
+    <div v-show="activePage === 'portfolio'" class="page-section">
       <PortfolioManagement />
     </div>
 

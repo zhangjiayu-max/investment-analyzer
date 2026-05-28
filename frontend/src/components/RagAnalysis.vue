@@ -156,6 +156,7 @@ function closeDetail() {
             <div v-for="(r, i) in log.results" :key="i" class="log-result" @click="viewResultDetail(r)">
               <span :class="['result-type', `type-${typeColor(r.label)}`]">{{ r.label }}</span>
               <span class="result-title">{{ r.title }}</span>
+              <span v-if="r.time" class="result-time">{{ r.time }}</span>
               <span class="result-preview">{{ r.body?.slice(0, 100) }}...</span>
               <svg class="result-arrow" width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/>
@@ -175,6 +176,7 @@ function closeDetail() {
             <span :class="['result-type', `type-${typeColor(selectedResult.label)}`]">{{ selectedResult.label }}</span>
             <h3 class="detail-title">{{ selectedResult.title }}</h3>
             <span class="detail-id">ID: {{ selectedResult.reference_id }}</span>
+            <span v-if="selectedResult.time" class="detail-time">{{ selectedResult.time }}</span>
           </div>
           <button @click="closeDetail" class="btn-close">
             <svg width="20" height="20" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -450,6 +452,13 @@ function closeDetail() {
   flex-shrink: 0;
 }
 
+.result-time {
+  font-size: 0.7rem;
+  color: var(--color-text-muted);
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
 .result-preview {
   font-size: 0.75rem;
   color: var(--color-text-muted);
@@ -520,6 +529,11 @@ function closeDetail() {
 }
 
 .detail-id {
+  font-size: 0.75rem;
+  color: var(--color-text-muted);
+}
+
+.detail-time {
   font-size: 0.75rem;
   color: var(--color-text-muted);
 }

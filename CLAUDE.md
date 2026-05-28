@@ -56,7 +56,8 @@ investment-analyzer/
 - 无 vue-router，`activePage` + `v-if` 切换页面
 - API 统一在 `api/index.js`，组件内 `import { func } from '../api'`
 - 弹窗用 `<Teleport to="body">` + `<Transition name="fade">`
-- 所有删除/重要操作必须用 `ConfirmDialog` 二次确认
+- **所有操作类按钮必须用 `ConfirmDialog` 二次确认**（包括：删除、AI 分析触发、重新生成、提交等），仅纯 UI 切换（展开/收起、刷新数据展示）不需要确认
+- **所有 LLM 生成内容必须有点赞/点踩反馈按钮**（用于 bad case 收集和系统进化），包括：AI 分析结果、每日简报、热点推荐、对话回复等
 - 组件名 PascalCase，与文件名一致
 
 ### Agent 系统
@@ -73,6 +74,56 @@ investment-analyzer/
 | 新增表 | `db/core.py` init_db 加 CREATE → 模块内加 CRUD → app.py 加路由 → api/index.js 加函数 → 组件 → Sidebar → Home.vue |
 | Agent 工具 | `tools/__init__.py` 加 TOOLS 定义 + execute_tool case → 加入专家 tools 列表 |
 | 前端页面 | 创建组件 → api/index.js 加函数 → Sidebar 加导航 → Home.vue 加 v-if |
+
+## 代码变更后重启规范
+
+**每次代码改动后必须执行以下操作，确保用户看到最新效果：**
+
+| 改动类型 | 重启操作 |
+|---------|---------|
+| 后端 Python 文件 | 后端有 `--reload` 自动重载，无需手动重启；但修改 `config.py` 环境变量需重启进程 |
+| 前端 Vue/JS 文件 | 必须手动构建：`cd frontend && npm run build && cp -r dist/* ../static/` |
+| 前后端都改了 | 先构建前端，后端自动重载 |
+
+**强制重启后端（杀掉重复进程）**：
+```bash
+# 杀掉所有相关进程
+pkill -f "uvicorn app:app" 2>/dev/null; sleep 1
+# 重新启动
+cd /Users/xiaoyuer/projects/investment-analyzer/backend && nohup python3 -m uvicorn app:app --host 0.0.0.0 --port 8000 --reload > /tmp/app.log 2>&1 &
+```
+
+**注意**：前端是从 `static/` 目录提供的静态文件，不是 Vite dev server。修改前端代码后必须 `npm run build` 并复制到 `static/` 才能生效。
+
+## 金融严谨性（最高优先级）
+
+本项目涉及理财投资，任何金融相关的逻辑、指标、阈值、公式**严禁硬编码**：
+
+- **估值阈值**（如 PE/PB 百分位的高/低估分界线）必须存数据库或配置文件，不得写死在代码中
+- **计算公式**（如估值百分位、收益率、回撤等）必须抽成独立函数，参数可配置，方便审阅和调整
+- **业务规则**（如预警条件、仓位上限、止盈止损比例等）必须通过数据库 `analysis_agents` 表或配置表管理
+- **数据来源标识**：所有展示给用户的金融数据必须标注数据来源和更新时间，不得展示无来源的数据
+- **风险提示**：涉及投资建议的功能必须附带风险提示，不得给出绝对化的收益承诺
+- 任何修改金融逻辑的代码变更，需在代码注释或提交信息中说明变更原因和依据
+
+## 用户记忆机制
+
+当用户在对话中说"记住XX"、"记下XX"、"remember XX"时，必须将相关内容更新到本文件（`CLAUDE.md`）中：
+
+- 归类到合适的章节（编码规范 / 注意事项 / 金融严谨性等），不要随意堆砌
+- 如果是临时性任务指令，写入「用户临时指令」章节，任务完成后清理
+- 如果是长期偏好或规范，写入对应规范章节
+- 保持文件结构清晰，避免冗余
+
+## 用户临时指令
+
+<!-- 用户通过"记住XX"指定的临时任务指令写在此处，完成后删除 -->
+
+## Plan 模式规范
+
+- 使用 plan 模式编写设计稿时，**必须**写入项目 `doc/plans/` 目录下
+- 文件名格式：`YYYY-MM-DD-<主题>.md`（如 `2026-05-27-持仓优化.md`）
+- 禁止写入 `~/.claude/plans/` 等项目外部目录
 
 ## 注意事项
 - LLM `reasoning_content` 需在后续消息传回（MIMO thinking mode）

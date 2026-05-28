@@ -78,7 +78,7 @@ SPECIALIST_AGENTS = {
         "name": "风险评估师",
         "icon": "🛡️",
         "description": "评估投资风险，计算回撤/波动率，给出风控建议",
-        "tools": ["calculate_metrics", "query_valuation", "query_portfolio", "query_fund_info"],
+        "tools": ["calculate_metrics", "query_valuation", "query_portfolio", "query_fund_info", "search_knowledge"],
         "system_prompt": """你是一位专业的风险评估师，专注于投资风险分析和控制。
 
 ## 核心职责
@@ -104,6 +104,14 @@ SPECIALIST_AGENTS = {
 - 分析主要风险因素
 - 给出仓位建议（如：建议仓位不超过X%）
 - 提醒需要注意的风险点
+
+## 持仓亏损处理
+当用户持仓出现亏损时，使用 search_knowledge 检索「4%定投法」策略：
+- 如果估值处于低估区间，建议按4%间隔分批加仓摊低成本
+- 计算平均成本和回盈价位
+- 如果基本面恶化，才建议止损
+- 强调纪律性和仓位管理
+
 - 使用 Markdown 格式""",
     },
     "fund_analyst": {
@@ -165,12 +173,21 @@ SPECIALIST_AGENTS = {
 - 推荐当前值得关注的低估指数/基金
 - 给出定投策略建议（定投标的、金额、频率）
 - 说明配置逻辑和依据
+
+## 定投策略
+给出定投建议时，优先参考知识库中的「4%定投法（强化版）」：
+- 首次建仓后，按4%下跌间隔分批加仓
+- 跌幅越大买入越多（金字塔加仓）
+- 结合估值百分位决定是否加码
+- 给出具体的分批计划和预期成本
+
 - 使用 Markdown 格式""",
     },
 }
 
 
-def run_specialist(agent_key: str, query: str, context: str = "") -> dict:
+def run_specialist(agent_key: str, query: str, context: str = "",
+                   prebuilt_context: str = "") -> dict:
     """
     运行单个专家 Agent。
 
@@ -195,12 +212,24 @@ def run_specialist(agent_key: str, query: str, context: str = "") -> dict:
     if context:
         system_content += f"\n\n以下是相关上下文信息，请结合分析：\n{context[:3000]}"
 
+    # 注入持仓上下文（优先使用预构建的，避免重复 DB 查询）
+    if prebuilt_context:
+        system_content += f"\n\n{prebuilt_context}"
+    else:
+        try:
+            from portfolio_context import build_portfolio_context
+            portfolio_ctx = build_portfolio_context()
+            if portfolio_ctx:
+                system_content += f"\n\n## 用户当前持仓（分析时务必结合）\n{portfolio_ctx}"
+        except Exception:
+            pass
+
     llm_messages = [
         {"role": "system", "content": system_content},
         {"role": "user", "content": query},
     ]
 
-    MAX_TURNS = 4
+    MAX_TURNS = 3
     tool_calls_log = []
     answer = ""
 
@@ -315,4 +344,178 @@ def run_specialist(agent_key: str, query: str, context: str = "") -> dict:
         "analysis": answer,
         "tool_calls": tool_calls_log,
         "duration_ms": duration_ms,
+    }
+
+
+def run_specialist_with_context(agent_key: str, query: str, peer_analyses: dict,
+                                max_turns: int = 2, prebuilt_context: str = "") -> dict:
+    """
+    交叉审阅模式：专家拿到其他专家的分析结果后进行二次审阅。
+
+    与 run_specialist() 的区别：
+    - system_prompt 末尾追加 <round_table> 段，注入其他专家的分析
+    - max_turns 默认为 2（控制成本）
+    - 要求专家指出认同/质疑/补充
+
+    参数:
+        agent_key: 专家 key
+        query: 原始用户问题
+        peer_analyses: {agent_key: analysis_text} 其他专家的 Phase A 结果
+        max_turns: 最大工具调用轮次
+        prebuilt_context: 预构建的持仓+估值上下文，避免重复 DB 查询
+    """
+    agent = SPECIALIST_AGENTS[agent_key]
+    start_time = time.time()
+    _caller = f"specialist:{agent_key}:cross_review"
+
+    agent_tools = [t for t in TOOLS if t["function"]["name"] in agent["tools"]]
+
+    # 构建交叉审阅的 system prompt
+    system_content = agent["system_prompt"]
+
+    # 注入持仓上下文（优先使用预构建的）
+    if prebuilt_context:
+        system_content += f"\n\n{prebuilt_context}"
+    else:
+        try:
+            from portfolio_context import build_portfolio_context
+            portfolio_ctx = build_portfolio_context()
+            if portfolio_ctx:
+                system_content += f"\n\n## 用户当前持仓（分析时务必结合）\n{portfolio_ctx}"
+        except Exception:
+            pass
+
+    # 追加圆桌审阅指令
+    peer_sections = []
+    for peer_key, peer_analysis in peer_analyses.items():
+        if peer_key == agent_key:
+            continue
+        peer_agent = SPECIALIST_AGENTS.get(peer_key)
+        peer_name = peer_agent["name"] if peer_agent else peer_key
+        peer_sections.append(f"【{peer_name}】的分析：\n{peer_analysis[:2000]}")
+
+    if peer_sections:
+        round_table = (
+            "\n\n<round_table>\n"
+            "以下是其他专家的分析结果，请结合你的专业视角进行交叉审阅：\n\n"
+            + "\n\n---\n\n".join(peer_sections)
+            + "\n\n请在你的分析中：\n"
+            "1. 指出你认同的其他专家观点（引用具体内容）\n"
+            "2. 指出你认为有疑问或需要补充的地方（用数据或逻辑反驳）\n"
+            "3. 从你的专业角度提供其他专家未覆盖的独特见解\n"
+            "4. 如果你改变了之前的判断，说明原因\n"
+            "</round_table>"
+        )
+        system_content += round_table
+
+    llm_messages = [
+        {"role": "system", "content": system_content},
+        {"role": "user", "content": f"请基于其他专家的分析结果，从你的专业角度进行交叉审阅和补充。原始问题：{query}"},
+    ]
+
+    tool_calls_log = []
+    answer = ""
+
+    for turn in range(max_turns):
+        try:
+            response = _call_llm(
+                caller=_caller,
+                model=MODEL,
+                messages=llm_messages,
+                tools=agent_tools,
+                tool_choice="auto",
+                temperature=0.3,
+                max_tokens=2000,
+            )
+        except Exception as e:
+            err_msg = str(e)
+            logger.error(f"[{agent['name']}] 交叉审阅 LLM 调用异常 (turn {turn}): {err_msg}")
+            if any(kw in err_msg.lower() for kw in ["tool", "function", "reasoning", "thinking"]):
+                response = _call_llm(
+                    caller=_caller,
+                    model=MODEL,
+                    messages=llm_messages,
+                    temperature=0.3,
+                    max_tokens=2000,
+                )
+                answer = response.choices[0].message.content or ""
+                break
+            raise
+
+        msg = response.choices[0].message
+
+        if not msg.tool_calls:
+            answer = msg.content or ""
+            break
+
+        assistant_msg = {
+            "role": "assistant",
+            "content": msg.content,
+            "tool_calls": [
+                {
+                    "id": tc.id,
+                    "type": "function",
+                    "function": {
+                        "name": tc.function.name,
+                        "arguments": tc.function.arguments,
+                    },
+                }
+                for tc in msg.tool_calls
+            ],
+        }
+
+        reasoning = None
+        if hasattr(msg, "model_extra") and msg.model_extra:
+            reasoning = msg.model_extra.get("reasoning_content")
+        if not reasoning:
+            reasoning = getattr(msg, "reasoning_content", None)
+        if reasoning:
+            assistant_msg["reasoning_content"] = reasoning
+
+        llm_messages.append(assistant_msg)
+
+        for tc in msg.tool_calls:
+            args = _parse_tool_args(tc.function.arguments, tc.function.name)
+            logger.info(f"[{agent['name']}] 交叉审阅 Tool: {tc.function.name}({json.dumps(args, ensure_ascii=False)[:100]})")
+            result = execute_tool(tc.function.name, args)
+            if len(result) > 3000:
+                result = result[:3000] + "\n... (结果过长，已截断)"
+            tool_calls_log.append({
+                "name": tc.function.name,
+                "arguments": args,
+                "result_preview": result[:200],
+            })
+            llm_messages.append({
+                "role": "tool",
+                "tool_call_id": tc.id,
+                "content": result,
+            })
+
+    if not answer:
+        try:
+            llm_messages.append({
+                "role": "user",
+                "content": "请根据以上信息，给出你的交叉审阅结论。",
+            })
+            response = _call_llm(
+                caller=_caller,
+                model=MODEL,
+                messages=llm_messages,
+                temperature=0.3,
+                max_tokens=2000,
+            )
+            answer = response.choices[0].message.content or ""
+        except Exception:
+            answer = "交叉审阅完成，请参考以上分析。"
+
+    duration_ms = int((time.time() - start_time) * 1000)
+
+    return {
+        "agent_key": agent_key,
+        "agent": agent["name"],
+        "icon": agent["icon"],
+        "analysis": answer,
+        "tool_calls": tool_calls_log,
+        "duration_ms": duration_ms,
+        "is_cross_review": True,
     }

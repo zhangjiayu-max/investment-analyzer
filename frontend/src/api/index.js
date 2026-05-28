@@ -331,6 +331,58 @@ export function listGalleryRecords(search = '', limit = 200) {
   return api.get('/gallery', { params })
 }
 
+/** 上传螺丝钉估值图片 */
+export function uploadDdImage(file) {
+  const form = new FormData()
+  form.append('file', file)
+  return api.post('/dd-images/upload', form, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+  })
+}
+
+/** 列出螺丝钉估值图片 */
+export function listDdImages(date = null) {
+  const params = {}
+  if (date) params.date = date
+  return api.get('/dd-images', { params })
+}
+
+/** 列出螺丝钉图片日期 */
+export function listDdImageDates() {
+  return api.get('/dd-images/dates')
+}
+
+/** 删除螺丝钉估值图片 */
+export function deleteDdImage(path) {
+  return api.delete(`/dd-images/${path}`)
+}
+
+/** 上传估值图片（用户上传的估值截图） */
+export function uploadValuationImage(file) {
+  const form = new FormData()
+  form.append('file', file)
+  return api.post('/valuation-images/upload', form, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+  })
+}
+
+/** 列出估值图片 */
+export function listValuationImages(date = null) {
+  const params = {}
+  if (date) params.date = date
+  return api.get('/valuation-images', { params })
+}
+
+/** 列出估值图片日期 */
+export function listValuationImageDates() {
+  return api.get('/valuation-images/dates')
+}
+
+/** 删除估值图片 */
+export function deleteValuationImage(path) {
+  return api.delete(`/valuation-images/${path}`)
+}
+
 // ── 作者文章 API ──────────────────────────────────────
 
 /** 从 Excel 导入作者文章 */
@@ -423,7 +475,7 @@ export function deleteLinkedArticle(id) {
 // ── AI 市场分析 API ──────────────────────────────────────
 
 /** 触发 AI 分析 */
-export function runAnalysis(indexCode, indexName, agentId = 1) {
+export function runAnalysis(indexCode, indexName, agentId = 9) {
   return api.post('/analysis/run', { index_code: indexCode, index_name: indexName, agent_id: agentId }, { timeout: 300000 })
 }
 
@@ -471,6 +523,23 @@ export function getDailyReport() {
   return api.get('/dashboard/daily-report')
 }
 
+/** 重新生成今日市场简报 */
+export function regenerateDailyReport() {
+  return api.post('/dashboard/daily-report/regenerate', {}, { timeout: 120000 })
+}
+
+/** 提交每日简报反馈 */
+export function submitDailyReportFeedback({ rating, comment = '' }) {
+  return api.post('/llm-feedback', {
+    caller: 'daily_report',
+    input_summary: '每日市场简报',
+    output_summary: '',
+    rating,
+    tags: '',
+    comment
+  })
+}
+
 /** 获取结构化热点分析（AI 推荐卡片） */
 export function getHotspotsAnalysis() {
   return api.get('/dashboard/hotspots-analysis', { timeout: 90000 })
@@ -501,6 +570,11 @@ export function submitRecommendationFeedback(recId, { rating, tags = '', comment
 /** 获取推荐反馈统计 */
 export function getRecommendationFeedbackStats() {
   return api.get('/dashboard/recommendations/feedback-stats')
+}
+
+/** 自动验证 pending 推荐 */
+export function autoVerifyRecommendations() {
+  return api.get('/dashboard/recommendations/auto-verify')
 }
 
 /** 提交 LLM 输出反馈（进化系统） */
@@ -538,13 +612,13 @@ export function clearAllPortfolio() {
 }
 
 /** 获取零钱余额 */
-export function getCashBalance() {
-  return api.get('/portfolio/cash')
+export function getCashBalance(userId = 'default') {
+  return api.get('/portfolio/cash', { params: { user_id: userId } })
 }
 
 /** 调整零钱余额（正数存入，负数支出） */
-export function adjustCashBalance(amount, mode = 'add') {
-  return api.post('/portfolio/cash', { amount, mode })
+export function adjustCashBalance(amount, mode = 'add', userId = 'default') {
+  return api.post('/portfolio/cash', { amount, mode, user_id: userId })
 }
 
 /** 获取基金净值历史 + 买卖点标记（用于交易行为图表） */
@@ -627,6 +701,11 @@ export function getTransactionSummary() {
   return api.get('/portfolio/analysis/transactions-summary')
 }
 
+/** 获取智能调仓建议 */
+export function getRebalancingSuggestion() {
+  return api.get('/portfolio/rebalancing')
+}
+
 // ── 分散度 AI 解读 API ──────────────────────────────────────
 
 /** 触发 AI 分散度分析解读 */
@@ -637,6 +716,11 @@ export function runDiversificationAiSummary() {
 /** 查询今天是否已有 AI 分散度分析 */
 export function getAiSummaryTodayStatus() {
   return api.get('/portfolio/analysis/ai-summary/today-status')
+}
+
+/** 跨基金持仓穿透分析 */
+export function getPortfolioPenetration() {
+  return api.get('/portfolio/analysis/penetration')
 }
 
 // ── AI 持仓分析 API ──────────────────────────────────────
@@ -666,10 +750,21 @@ export function submitAnalysisFeedback(recordId, feedback, note = '') {
   return api.post(`/portfolio/analysis/feedback/${recordId}`, { feedback, note })
 }
 
-/** 获取 Bad Cases 列表 */
-export function listBadCases(analysisType = '', limit = 50) {
+/** 提交对话反馈（helpful/unhelpful） */
+export function submitChatFeedback(messageId, feedback, note = '', inputSummary = '', outputSummary = '') {
+  return api.post('/chat/feedback', {
+    message_id: messageId,
+    feedback,
+    note,
+    input_summary: inputSummary,
+    output_summary: outputSummary,
+  })
+}
+
+/** 获取 Bad Cases 列表（统一：分析记录 + LLM 反馈） */
+export function listBadCases(source = '', limit = 100) {
   const params = { limit }
-  if (analysisType) params.analysis_type = analysisType
+  if (source) params.source = source
   return api.get('/portfolio/analysis/bad-cases', { params })
 }
 
@@ -790,6 +885,11 @@ export function getTokenUsageSummary(days = 30) {
   return api.get('/token-usage/summary', { params: { days } })
 }
 
+/** 获取今日 token 预算使用情况 */
+export function getTokenUsageBudget() {
+  return api.get('/token-usage/budget')
+}
+
 /** 按 caller 分组统计 */
 export function getTokenUsageByCaller(days = 7) {
   return api.get('/token-usage/by-caller', { params: { days } })
@@ -855,6 +955,10 @@ export function getEvalStats() {
 
 export function getFinanceQuoteBar() {
   return api.get('/finance/quote-bar')
+}
+
+export function getRunningAgents() {
+  return api.get('/running-agents')
 }
 
 export default api

@@ -4,12 +4,13 @@ import asyncio
 import json
 import logging
 import os
+import queue
 import re
 import time
 from pathlib import Path
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(message)s")
-from fastapi import FastAPI, HTTPException, UploadFile
+from fastapi import FastAPI, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
@@ -27,7 +28,7 @@ from db import (
     list_all_analysis_records,
     list_agents, get_agent, create_agent as db_create_agent, update_agent, delete_agent,
     list_conversations, get_conversation, create_conversation, update_conversation, delete_conversation,
-    get_messages, create_message,
+    get_messages, create_message, update_message_metadata, update_message_content_and_metadata,
     create_author_article, update_author_article, get_author_article_by_url,
     list_author_articles, get_author_article, delete_author_article, count_author_articles,
     create_linked_article, list_linked_articles, get_linked_article, delete_linked_article,
@@ -43,14 +44,15 @@ from db import (
     add_transaction_tag, remove_transaction_tag, get_transaction_tags,
     create_portfolio_analysis_record, list_portfolio_analysis_records,
     get_portfolio_analysis_record, delete_portfolio_analysis_record,
-    update_analysis_feedback, list_bad_cases,
+    update_analysis_feedback, list_bad_cases, list_all_bad_cases,
     list_analysis_agents, get_analysis_agent, update_analysis_agent,
     create_analysis_history, list_analysis_history, get_analysis_history_item, delete_analysis_history,
     get_index_info, save_index_info, search_indexes_by_keyword,
     save_prompt_version, list_prompt_versions, get_prompt_version,
     list_token_usage, get_token_usage_summary, get_token_usage_by_caller, get_token_usage_daily,
+    get_token_budget_info,
     count_token_usage,
-    get_performance_stats, get_performance_by_agent,
+    get_performance_stats, get_performance_by_agent, create_agent_run,
     create_eval_case, list_eval_cases, get_eval_case, update_eval_case, delete_eval_case,
     create_eval_run, list_eval_runs, get_eval_run_detail, get_eval_stats,
     DEFAULT_BOND_PROMPT,
@@ -61,7 +63,7 @@ from valuation import analyze_stock, analyze_fund
 from llm_service import (analyze_article, analyze_article_stream, chat_about_investment,
                          analyze_images_batch, chat_with_agent, chat_with_tools, ORCHESTRATOR_PROMPT,
                          _call_llm, MODEL, _record_token_usage)
-from agent.orchestrator import orchestrate, orchestrate_stream, clarify_requirement
+from agent.orchestrator import orchestrate, orchestrate_stream, clarify_requirement, CancelledError
 from agent.multi_agent import run_specialist
 from image_parser import ImageParser
 from mcp.trading_calendar import expected_confirm_date
@@ -75,6 +77,17 @@ _analyze_cancel: set[int] = set()  # 被用户请求取消的 article_id
 _analyze_tasks: dict[int, asyncio.Task] = {}  # 当前正在执行的图片分析 Task
 _reanalyze_tasks: dict[int, asyncio.Task] = {}  # 单张图片重新分析 Task
 _vision_semaphore = asyncio.Semaphore(3)  # 限制并发 vision API 调用数
+
+# Agent 运行状态跟踪
+_running_agents: dict[str, dict] = {}  # key: unique_id, value: {agent, task, started_at, ...}
+
+def _track_agent(uid: str, agent: str, task: str = ""):
+    """注册一个正在运行的 Agent。"""
+    _running_agents[uid] = {"agent": agent, "task": task, "started_at": time.time()}
+
+def _untrack_agent(uid: str):
+    """移除已完成的 Agent。"""
+    _running_agents.pop(uid, None)
 
 app.add_middleware(
     CORSMiddleware,
@@ -95,6 +108,29 @@ app.mount("/static/tasks", StaticFiles(directory=str(OUTPUT_DIR)), name="task_im
 app.mount("/assets", StaticFiles(directory=str(STATIC_DIR / "assets")), name="frontend_assets")
 UPLOADS_DIR = ROOT / "data" / "uploads"
 UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
+DD_IMAGES_DIR = ROOT / "data" / "dd_images"
+DD_IMAGES_DIR.mkdir(parents=True, exist_ok=True)
+app.mount("/static/dd_images", StaticFiles(directory=str(DD_IMAGES_DIR)), name="dd_images")
+VALUATION_IMAGES_DIR = ROOT / "data" / "valuation_images"
+VALUATION_IMAGES_DIR.mkdir(parents=True, exist_ok=True)
+app.mount("/static/valuation_images", StaticFiles(directory=str(VALUATION_IMAGES_DIR)), name="valuation_images")
+
+
+def _index_skill_doc_by_type(doc_type: str, title: str):
+    """按 doc_type 从 skill_documents 查出并索引到 FTS + ChromaDB。"""
+    try:
+        from db import _get_conn
+        conn = _get_conn()
+        row = conn.execute(
+            "SELECT id, content FROM skill_documents WHERE doc_type = ?", (doc_type,)
+        ).fetchone()
+        conn.close()
+        if row:
+            index_skill_document(row["id"], title, row["content"])
+            index_to_chroma("skill", str(row["id"]), title, row["content"][:8000])
+            logging.info(f"已索引 skill_document: {doc_type} (id={row['id']})")
+    except Exception as e:
+        logging.warning(f"索引 skill_document {doc_type} 失败: {e}")
 
 
 @app.on_event("startup")
@@ -107,6 +143,15 @@ async def startup():
         from db import seed_bond_knowledge
         if seed_bond_knowledge():
             logging.info("债券知识库已写入 skill_documents")
+            _index_skill_doc_by_type("bond_knowledge", "债券市场专业知识库")
+    except Exception:
+        pass
+    # 种子投资策略知识库（4%定投法等）
+    try:
+        from db import seed_investment_strategy_knowledge
+        if seed_investment_strategy_knowledge():
+            logging.info("投资策略知识库已写入 skill_documents")
+            _index_skill_doc_by_type("investment_strategy", "4%定投法（强化版）")
     except Exception:
         pass
     # 启动后台每日分析任务
@@ -139,18 +184,100 @@ async def _auto_daily_report():
             logging.warning("市场日报分析师未配置，跳过自动生成")
             return
 
-        # 获取新闻
+        # ── 收集丰富数据上下文 ──
+        # 1. 新闻
         news_context = ""
         try:
-            from tools import execute_tool
-            news_result = execute_tool("web_search", {"query": "A股 今日行情 板块 热点", "max_results": 5})
-            news_context = news_result if news_result else ""
+            news_data = await get_hot_topics()
+            news_list = news_data.get("news", [])[:6]
+            news_context = "\n".join(
+                f"- {n.get('title','')}（{n.get('source','')}）"
+                for n in news_list if n.get('title')
+            ) if news_list else "暂无新闻"
         except Exception as e:
             logging.warning(f"自动报告新闻检索失败: {e}")
+            news_context = "暂无新闻"
 
-        full_prompt = agent["system_prompt"]
-        if news_context:
-            full_prompt += f"\n\n<latest_news>\n最新财经新闻：\n{news_context}\n</latest_news>"
+        # 2. 指数估值
+        val_context = "暂无估值数据"
+        try:
+            from db import list_valuation_indexes
+            indexes = list_valuation_indexes()
+            seen = {}
+            for i in indexes:
+                code = i.get("index_code", "")
+                if code and code not in seen:
+                    seen[code] = i
+            all_indexes = list(seen.values())
+            if all_indexes:
+                val_lines = []
+                for i in all_indexes:
+                    pct = i.get("percentile", None)
+                    pct_str = f"{pct:.0f}%" if pct is not None else "N/A"
+                    val_lines.append(
+                        f"- {i['index_name']}（{i['index_code']}）: "
+                        f"{i.get('metric_type','PE')}={i.get('current_value','?')}, 百分位={pct_str}"
+                    )
+                val_context = "\n".join(val_lines)
+        except Exception:
+            pass
+
+        # 3. 持仓
+        holding_text = "暂无持仓"
+        portfolio_text = "暂无"
+        try:
+            from db import list_holdings, get_portfolio_diversification, get_cash_balance
+            holdings = list_holdings()
+            div = get_portfolio_diversification()
+            cash = get_cash_balance()
+            if holdings:
+                holding_lines = []
+                for h in holdings[:15]:
+                    pct = h.get("profit_rate")
+                    pct_str = f"{pct:+.1f}%" if pct is not None else "N/A"
+                    val = h.get("current_value", 0) or 0
+                    holding_lines.append(
+                        f"- {h['fund_name']}（{h.get('fund_code','')}）: "
+                        f"市值{val:.0f}元, 收益率{pct_str}"
+                    )
+                holding_text = "\n".join(holding_lines)
+            portfolio_text = (
+                f"持仓{div.get('holding_count',0)}只基金，"
+                f"总市值{div.get('total_value',0):.0f}元，"
+                f"盈亏{div.get('total_profit',0):.0f}元，"
+                f"可用零钱{cash:.0f}元"
+            )
+        except Exception:
+            pass
+
+        # 4. 债市
+        bond_text = "暂无"
+        try:
+            from tools import _get_bond_temperature
+            bond_raw = json.loads(_get_bond_temperature())
+            bond_text = f"债券温度{bond_raw.get('temperature','?')}°，收益率{bond_raw.get('rate','?')}%"
+        except Exception:
+            pass
+
+        # ── 组装 prompt ──
+        full_prompt = agent["system_prompt"] + f"""
+
+【今日新闻】
+{news_context}
+
+【指数估值】
+{val_context}
+
+【持仓明细】
+{holding_text}
+
+【持仓概况】
+{portfolio_text}
+
+【债券市场】
+{bond_text}
+
+请按照报告结构要求，基于以上真实数据撰写今日市场简报。"""
 
         response = await asyncio.to_thread(lambda: _call_llm(
             caller="daily_report",
@@ -168,8 +295,8 @@ async def _auto_daily_report():
         create_analysis_history(
             index_code="", index_name="",
             agent_id=1, agent_name=agent["name"],
-            prompt_used=full_prompt, news_context=news_context,
-            valuation_context="", result=result_text,
+            prompt_used=full_prompt[:500], news_context=news_context[:500],
+            valuation_context=val_context[:500], result=result_text,
             token_usage=token_usage,
         )
         logging.info(f"今日市场报告后台自动生成完成，token用量: {token_usage}")
@@ -476,15 +603,69 @@ class ParseAndSaveRequest(BaseModel):
 @app.post("/api/valuations/parse")
 async def parse_and_save(req: ParseAndSaveRequest):
     """解析图片并存储估值数据。"""
-    if not req.path or not Path(req.path).exists():
-        raise HTTPException(400, "图片路径无效")
+    # 支持相对路径（相对于 images/dd_images/valuation_images 目录）和绝对路径
+    img_path = Path(req.path)
+    if not img_path.is_absolute():
+        # 按优先级尝试：images → valuation_images → dd_images
+        for base in [IMAGES_DIR, VALUATION_IMAGES_DIR, DD_IMAGES_DIR]:
+            candidate = base / img_path
+            if candidate.exists():
+                img_path = candidate
+                break
+        else:
+            img_path = IMAGES_DIR / img_path
+    if not req.path or not img_path.exists():
+        raise HTTPException(400, f"图片路径无效: {img_path}")
 
     parser = ImageParser(model_type=req.model_type)
-    result = parser.parse(req.path)
+    result = parser.parse(str(img_path))
 
-    # 存入数据库
-    valuation_id = save_valuation(result, source_image=req.path, source_url=req.source_url, snapshot_date=req.snapshot_date)
+    # 存入估值表
+    valuation_id = save_valuation(result, source_image=str(img_path), source_url=req.source_url, snapshot_date=req.snapshot_date)
     result["id"] = valuation_id
+
+    # 解析成功后，将图片重命名为指数名_指标类型
+    index_name = result.get("index_name", "")
+    metric_type = result.get("metric_type", "")
+    new_rel_path = None
+    if index_name:
+        ext = img_path.suffix
+        safe_name = re.sub(r'[\\/:*?"<>|]', '_', f"{index_name}_{metric_type}{ext}")
+        new_path = img_path.parent / safe_name
+        if not new_path.exists():
+            img_path.rename(new_path)
+            img_path = new_path
+        else:
+            img_path = new_path
+        # 计算相对于 IMAGES_DIR 的路径
+        try:
+            new_rel_path = str(img_path.relative_to(IMAGES_DIR))
+        except ValueError:
+            new_rel_path = None
+
+    # 创建 analysis_record，让图片出现在「已解析图片」gallery
+    image_rel = new_rel_path or req.path
+    image_full_path = f"data/images/{image_rel}" if not image_rel.startswith("data/") else image_rel
+    from datetime import date as _date
+    snap_date = req.snapshot_date or _date.today().isoformat()
+    conn = _get_conn()
+    existing = conn.execute("SELECT id FROM analysis_records WHERE image_path = ?", (image_full_path,)).fetchone()
+    if existing:
+        conn.execute("""UPDATE analysis_records SET
+            index_name=?, index_code=?, metric_type=?, status='success',
+            updated_at=datetime('now','localtime') WHERE id=?""",
+            (result.get("index_name"), result.get("index_code"), result.get("metric_type"), existing[0]))
+    else:
+        conn.execute("""INSERT INTO analysis_records
+            (article_id, image_index, image_path, image_url, index_name, index_code, metric_type, status)
+            VALUES (NULL, 0, ?, ?, ?, ?, ?, 'success')""",
+            (image_full_path, f"/static/images/{image_rel}",
+             result.get("index_name"), result.get("index_code"), result.get("metric_type")))
+    conn.commit()
+    conn.close()
+
+    result["new_path"] = new_rel_path
+    result["new_name"] = img_path.name if new_rel_path else None
     return result
 
 
@@ -638,7 +819,7 @@ async def reindex_rag():
     author_articles = list_author_articles(status="done", limit=500)
     for a in author_articles:
         if a.get("content_text"):
-            index_author_article(a["id"], a.get("title", ""), a["content_text"])
+            index_author_article(a["id"], a.get("title", ""), a["content_text"], a.get("publish_time", ""))
             index_to_chroma("author_article", str(a["id"]), a.get("title", ""), a["content_text"][:5000])
             author_count += 1
 
@@ -735,7 +916,7 @@ class CreateAgentRequest(BaseModel):
 
 class CreateConversationRequest(BaseModel):
     title: str = "新对话"
-    agent_id: int
+    agent_id: int = None
     context_data: str = None
 
 
@@ -965,6 +1146,13 @@ async def get_messages_api(conv_id: int, limit: int = 50):
     if not conv:
         raise HTTPException(404, "对话不存在")
     msgs = get_messages(conv_id, limit)
+    # 解析 metadata JSON 字符串为 dict
+    for msg in msgs:
+        if msg.get("metadata") and isinstance(msg["metadata"], str):
+            try:
+                msg["metadata"] = json.loads(msg["metadata"])
+            except Exception:
+                pass
     return {"conversation": conv, "messages": msgs}
 
 
@@ -975,8 +1163,10 @@ async def send_message_api(conv_id: int, req: SendMessageRequest):
     if not conv:
         raise HTTPException(404, "对话不存在")
 
-    # 1. 存储用户消息
-    create_message(conv_id, "user", req.content)
+    # 1. 存储用户消息（去重：中断重试时不重复保存）
+    existing = get_messages(conv_id, limit=1)
+    if not existing or existing[-1]["role"] != "user" or existing[-1]["content"] != req.content:
+        create_message(conv_id, "user", req.content)
 
     # 2. RAG 检索
     agent = get_agent(conv["agent_id"]) if conv.get("agent_id") else None
@@ -1007,7 +1197,7 @@ async def send_message_api(conv_id: int, req: SendMessageRequest):
     specialist_results = llm_result.get("specialist_results", [])
     metadata_dict = {
         "specialist_results": [
-            {"agent": s["agent"], "icon": s["icon"], "analysis": s.get("analysis", "")[:500]}
+            {"agent_key": s.get("agent_key", ""), "agent": s["agent"], "icon": s["icon"], "analysis": s.get("analysis", "")[:500]}
             for s in specialist_results
         ],
         "tool_calls": llm_result.get("tool_calls", []),
@@ -1033,7 +1223,7 @@ async def send_message_api(conv_id: int, req: SendMessageRequest):
     return {
         "answer": answer,
         "specialist_results": [
-            {"agent": s["agent"], "icon": s["icon"], "analysis": s.get("analysis", "")}
+            {"agent_key": s.get("agent_key", ""), "agent": s["agent"], "icon": s["icon"], "analysis": s.get("analysis", "")}
             for s in specialist_results
         ],
         "rag": {
@@ -1047,7 +1237,7 @@ async def send_message_api(conv_id: int, req: SendMessageRequest):
 
 
 @app.post("/api/conversations/{conv_id}/messages/stream")
-async def send_message_stream(conv_id: int, req: SendMessageRequest):
+async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Request):
     """SSE 流式对话，支持多 Agent 专家分析实时展示。"""
     conv = get_conversation(conv_id)
     if not conv:
@@ -1065,14 +1255,29 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest):
 
     async def event_stream():
         import asyncio
+        import threading
 
-        # 1. 存储用户消息
-        create_message(conv_id, "user", req.content)
+        cancel_event = threading.Event()
+        request_start = time.time()
+        phase_timings = {}
+
+        # 1. 存储用户消息（去重：中断重试时不重复保存）
+        existing = get_messages(conv_id, limit=1)
+        if not existing or existing[-1]["role"] != "user" or existing[-1]["content"] != req.content:
+            create_message(conv_id, "user", req.content)
         yield _sse_event("user_message", {"content": req.content})
 
         # 2. 需求澄清（使用 LLM 分析问题）
+        if await request.is_disconnected():
+            cancel_event.set()
+            return
         yield _sse_event("status", {"message": "正在理解您的问题..."})
-        clarification = clarify_requirement(req.content)
+
+        def _run_clarification():
+            return clarify_requirement(req.content)
+        t0 = time.time()
+        clarification = await asyncio.to_thread(_run_clarification)
+        phase_timings["clarification_ms"] = int((time.time() - t0) * 1000)
         complexity = clarification["complexity"]
         yield _sse_event("status", {"message": f"问题类型: {complexity} ({clarification.get('reason', '')})"})
 
@@ -1081,6 +1286,9 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest):
             # 只需要1个专家，直接调用
             agent_key = clarification["specialists"][0]
             if agent_key:
+                if await request.is_disconnected():
+                    cancel_event.set()
+                    return
                 yield _sse_event("status", {"message": f"正在咨询{_get_specialist_name(agent_key)}..."})
 
                 # 直接运行专家
@@ -1102,6 +1310,16 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest):
                         "duration_ms": result.get("duration_ms", 0),
                     })
 
+                    # 记录专家执行到 agent_runs
+                    create_agent_run(
+                        conversation_id=conv_id, message_id=0,
+                        agent_key=result.get("agent_key", agent_key),
+                        agent_name=result.get("agent", ""),
+                        query=req.content[:500],
+                        result=(result.get("analysis", "") or "")[:500],
+                        duration_ms=result.get("duration_ms", 0),
+                    )
+
                     # 发送最终回答
                     answer = result.get("analysis", "")
                     specialist_results = [{
@@ -1120,22 +1338,56 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest):
                     # 存储回复
                     metadata_dict = {
                         "specialist_results": [
-                            {"agent": s["agent"], "icon": s["icon"], "analysis": s.get("analysis", "")[:500]}
+                            {"agent_key": s.get("agent_key", ""), "agent": s["agent"], "icon": s["icon"], "analysis": s.get("analysis", "")[:500]}
                             for s in specialist_results
                         ],
                         "complexity": complexity,
                     }
                     metadata = json.dumps(metadata_dict, ensure_ascii=False)
                     msg_id = create_message(conv_id, "assistant", answer, metadata=metadata)
-                    yield _sse_event("done", {"message_id": msg_id})
+
+                    total_ms = int((time.time() - request_start) * 1000)
+                    phase_timings["specialist_ms"] = result.get("duration_ms", 0)
+                    phase_timings["total_ms"] = total_ms
+
+                    # 更新 agent_runs 的 message_id + 记录整体执行
+                    try:
+                        from db import _get_conn as _gc
+                        _c = _gc()
+                        _c.execute(
+                            "UPDATE agent_runs SET message_id = ? WHERE conversation_id = ? AND message_id = 0",
+                            (msg_id, conv_id)
+                        )
+                        _c.commit()
+                        _c.close()
+                        create_agent_run(
+                            conversation_id=conv_id, message_id=msg_id,
+                            agent_key="chat_turn", agent_name="对话整体",
+                            query=req.content[:500], result=answer[:500],
+                            tool_calls=json.dumps(phase_timings, ensure_ascii=False),
+                            duration_ms=total_ms,
+                        )
+                    except Exception as _e:
+                        logger.warning(f"记录 agent_runs 失败: {_e}")
+
+                    yield _sse_event("done", {
+                        "message_id": msg_id,
+                        "duration_ms": total_ms,
+                        "phase_timings": phase_timings,
+                    })
                     return
                 else:
                     # 专家执行失败，回退到 Orchestrator
                     yield _sse_event("status", {"message": "专家执行失败，切换到完整分析模式..."})
 
         # 4. RAG 检索（中等和复杂任务）
+        if await request.is_disconnected():
+            cancel_event.set()
+            return
         yield _sse_event("status", {"message": "正在检索知识库..."})
+        t0 = time.time()
         rag_result = build_rag_context_with_details(req.content, content_types=rag_types if rag_types else None)
+        phase_timings["rag_ms"] = int((time.time() - t0) * 1000)
         rag_context = rag_result["context"]
 
         if rag_result.get("results"):
@@ -1147,6 +1399,9 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest):
         msg_list = [{"role": m["role"], "content": m["content"]} for m in history]
 
         # 6. 调用 Orchestrator（多 Agent 协作）
+        if await request.is_disconnected():
+            cancel_event.set()
+            return
         yield _sse_event("status", {"message": "正在分析问题，决定需要咨询哪些专家..."})
 
         def _run_orchestrator_stream():
@@ -1156,42 +1411,111 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest):
 
             def _producer():
                 try:
-                    for event in orchestrate_stream(req.content, msg_list, rag_context):
+                    for event in orchestrate_stream(req.content, msg_list, rag_context, cancel_event=cancel_event):
                         q.put(event)
+                except CancelledError:
+                    q.put({"type": "cancelled", "message": "用户取消了执行"})
+                except TimeoutError as e:
+                    q.put({"type": "error", "message": f"执行超时: {e}"})
                 except Exception as e:
                     q.put({"type": "error", "message": str(e)})
                 finally:
                     q.put(None)  # 结束信号
 
-            import threading
             t = threading.Thread(target=_producer, daemon=True)
             t.start()
             return q
 
+        t_orch_start = time.time()
         q = await asyncio.to_thread(_run_orchestrator_stream)
 
         specialist_results = []
         all_tool_calls = []
         final_answer = ""
+        client_disconnected = False
+        stream_msg_id = 0  # 追踪正在构建中的 assistant 消息 ID
 
         while True:
-            event = await asyncio.to_thread(q.get)
+            try:
+                event = await asyncio.to_thread(q.get, timeout=0.5)
+            except queue.Empty:
+                # 队列超时 — 检查客户端是否断开
+                if not client_disconnected and await request.is_disconnected():
+                    logger.info("客户端断开连接，设置取消标志，等待后台任务完成后保存结果")
+                    client_disconnected = True
+                    cancel_event.set()
+                    # 清理该对话的 running agents
+                    to_remove = [k for k in _running_agents if k.startswith(f"{conv_id}_")]
+                    for k in to_remove:
+                        _running_agents.pop(k, None)
+                    # 不 return，继续消费队列直到后台线程完成
+                continue
+
             if event is None:
                 break
 
             event_type = event.get("type")
 
-            if event_type == "status":
-                yield _sse_event("status", event)
+            if event_type == "cancelled":
+                logger.info("执行已被用户取消")
+                # 清理该对话的 running agents
+                to_remove = [k for k in _running_agents if k.startswith(f"{conv_id}_")]
+                for k in to_remove:
+                    _running_agents.pop(k, None)
+                # 标记取消状态
+                if stream_msg_id > 0:
+                    try:
+                        update_message_metadata(stream_msg_id, {
+                            "execution_status": "cancelled",
+                            "complexity": complexity,
+                            "specialist_results": [
+                                {"agent_key": s.get("agent_key", ""), "agent": s["agent"], "icon": s["icon"], "analysis": s.get("analysis", "")[:500]}
+                                for s in specialist_results if not s.get("is_cross_review")
+                            ],
+                            "cross_review_results": [
+                                {"agent_key": s.get("agent_key", ""), "agent": s["agent"], "icon": s["icon"], "analysis": s.get("analysis", "")[:500]}
+                                for s in specialist_results if s.get("is_cross_review")
+                            ],
+                            "tool_calls": all_tool_calls,
+                        })
+                    except Exception as _e:
+                        logger.warning(f"标记取消状态失败: {_e}")
+                # 不 return，继续消费队列直到后台线程完成并保存结果
+
+            elif event_type == "status":
+                if not client_disconnected:
+                    yield _sse_event("status", event)
+
+            elif event_type == "plan":
+                if not client_disconnected:
+                    yield _sse_event("plan", {
+                        "complexity": event.get("complexity", ""),
+                        "reason": event.get("reason", ""),
+                        "refined_query": event.get("refined_query", ""),
+                    })
 
             elif event_type == "specialist_start":
-                yield _sse_event("specialist_start", {
-                    "agent_key": event.get("agent_key"),
-                    "agent": event.get("agent"),
-                    "icon": event.get("icon"),
-                })
+                agent_key = event.get("agent_key", "")
+                agent_name = event.get("agent", "")
+                uid = f"{conv_id}_{agent_key}_{int(time.time())}"
+                _running_agents[uid] = {
+                    "agent": agent_name,
+                    "task": f"对话 #{conv_id}",
+                    "started_at": time.time(),
+                }
+                if not client_disconnected:
+                    yield _sse_event("specialist_start", {
+                        "agent_key": agent_key,
+                        "agent": agent_name,
+                        "icon": event.get("icon"),
+                    })
 
             elif event_type == "specialist_done":
+                # 清除对应的 running agent
+                agent_key = event.get("agent_key", "")
+                to_remove = [k for k in _running_agents if k.startswith(f"{conv_id}_{agent_key}_")]
+                for k in to_remove:
+                    _running_agents.pop(k, None)
                 specialist_results.append({
                     "agent_key": event.get("agent_key"),
                     "agent": event.get("agent"),
@@ -1199,13 +1523,85 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest):
                     "analysis": event.get("analysis"),
                     "duration_ms": event.get("duration_ms"),
                 })
-                yield _sse_event("specialist_done", {
+                # 记录到 agent_runs
+                create_agent_run(
+                    conversation_id=conv_id, message_id=0,
+                    agent_key=event.get("agent_key", ""),
+                    agent_name=event.get("agent", ""),
+                    query=req.content[:500],
+                    result=(event.get("analysis", "") or "")[:500],
+                    duration_ms=event.get("duration_ms", 0),
+                )
+                # 增量保存执行进度到 metadata
+                try:
+                    _progress_metadata = {
+                        "execution_status": "streaming",
+                        "complexity": complexity,
+                        "specialist_results": [
+                            {"agent_key": s.get("agent_key", ""), "agent": s["agent"], "icon": s["icon"], "analysis": s.get("analysis", "")[:500]}
+                            for s in specialist_results
+                        ],
+                        "tool_calls": all_tool_calls,
+                    }
+                    if stream_msg_id == 0:
+                        stream_msg_id = create_message(conv_id, "assistant", "⏳ 分析进行中...", metadata=json.dumps(_progress_metadata, ensure_ascii=False))
+                    else:
+                        update_message_metadata(stream_msg_id, _progress_metadata)
+                except Exception as _e:
+                    logger.warning(f"增量保存执行进度失败: {_e}")
+                if not client_disconnected:
+                    yield _sse_event("specialist_done", {
+                        "agent_key": event.get("agent_key"),
+                        "agent": event.get("agent"),
+                        "icon": event.get("icon"),
+                        "analysis": event.get("analysis"),
+                        "duration_ms": event.get("duration_ms"),
+                    })
+
+            elif event_type == "cross_review_start":
+                if not client_disconnected:
+                    yield _sse_event("cross_review_start", {
+                        "agent_key": event.get("agent_key"),
+                        "agent": event.get("agent"),
+                        "icon": event.get("icon"),
+                    })
+
+            elif event_type == "cross_review_done":
+                specialist_results.append({
                     "agent_key": event.get("agent_key"),
                     "agent": event.get("agent"),
                     "icon": event.get("icon"),
                     "analysis": event.get("analysis"),
                     "duration_ms": event.get("duration_ms"),
+                    "is_cross_review": True,
                 })
+                # 增量保存交叉审阅进度
+                try:
+                    _cr_metadata = {
+                        "execution_status": "streaming",
+                        "complexity": complexity,
+                        "specialist_results": [
+                            {"agent_key": s.get("agent_key", ""), "agent": s["agent"], "icon": s["icon"], "analysis": s.get("analysis", "")[:500]}
+                            for s in specialist_results if not s.get("is_cross_review")
+                        ],
+                        "cross_review_results": [
+                            {"agent_key": s.get("agent_key", ""), "agent": s["agent"], "icon": s["icon"], "analysis": s.get("analysis", "")[:500]}
+                            for s in specialist_results if s.get("is_cross_review")
+                        ],
+                        "tool_calls": all_tool_calls,
+                    }
+                    if stream_msg_id > 0:
+                        update_message_metadata(stream_msg_id, _cr_metadata)
+                except Exception as _e:
+                    logger.warning(f"增量保存交叉审阅进度失败: {_e}")
+                if not client_disconnected:
+                    yield _sse_event("cross_review_done", {
+                        "agent_key": event.get("agent_key"),
+                        "agent": event.get("agent"),
+                        "icon": event.get("icon"),
+                        "analysis": event.get("analysis"),
+                        "duration_ms": event.get("duration_ms"),
+                    })
 
             elif event_type == "answer":
                 final_answer = event.get("content", "")
@@ -1214,29 +1610,98 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest):
                     specialist_results = event.get("specialist_results", [])
 
             elif event_type == "error":
-                yield _sse_event("error", {"message": event.get("message", "未知错误")})
-                return
+                # 标记失败状态
+                if stream_msg_id > 0:
+                    try:
+                        update_message_metadata(stream_msg_id, {
+                            "execution_status": "failed",
+                            "error_message": event.get("message", "未知错误"),
+                            "complexity": complexity,
+                            "specialist_results": [
+                                {"agent_key": s.get("agent_key", ""), "agent": s["agent"], "icon": s["icon"], "analysis": s.get("analysis", "")[:500]}
+                                for s in specialist_results if not s.get("is_cross_review")
+                            ],
+                            "cross_review_results": [
+                                {"agent_key": s.get("agent_key", ""), "agent": s["agent"], "icon": s["icon"], "analysis": s.get("analysis", "")[:500]}
+                                for s in specialist_results if s.get("is_cross_review")
+                            ],
+                            "tool_calls": all_tool_calls,
+                        })
+                    except Exception as _e:
+                        logger.warning(f"标记失败状态失败: {_e}")
+                if not client_disconnected:
+                    yield _sse_event("error", {"message": event.get("message", "未知错误")})
+                    return
+                # 客户端已断开，记录错误但继续保存结果
+                logger.warning(f"后台执行出错（客户端已断开）: {event.get('message', '')}")
 
-        # 5. 发送最终回答
+        phase_timings["orchestrator_ms"] = int((time.time() - t_orch_start) * 1000)
         answer = final_answer
-        yield _sse_event("answer", {
-            "content": answer,
-            "specialist_results": specialist_results,
-        })
+
+        # 5. 发送最终回答（仅客户端在线时）
+        if not client_disconnected:
+            yield _sse_event("answer", {
+                "content": answer,
+                "specialist_results": specialist_results,
+            })
 
         # 5.1 主动分析是否产生预警（后台异步执行）
-        asyncio.create_task(_proactive_alert_check(req.content, answer, specialist_results))
+        if answer:
+            asyncio.create_task(_proactive_alert_check(req.content, answer, specialist_results))
 
-        # 6. 存储 AI 回复
-        metadata_dict = {
-            "specialist_results": [
-                {"agent": s["agent"], "icon": s["icon"], "analysis": s.get("analysis", "")[:500]}
+        # 6. 存储 AI 回复（始终保存，即使客户端已断开）
+        if not answer and specialist_results:
+            # 没有最终回答但有专家结果，拼接摘要
+            answer = "\n\n".join(
+                f"**{s.get('agent', '')}**: {s.get('analysis', '')[:300]}"
                 for s in specialist_results
-            ],
-            "tool_calls": all_tool_calls,
-        }
-        metadata = json.dumps(metadata_dict, ensure_ascii=False) if specialist_results or all_tool_calls else None
-        msg_id = create_message(conv_id, "assistant", answer, metadata=metadata)
+                if s.get('analysis')
+            ) or "（执行未完成，以下为部分分析结果）"
+
+        if answer:
+            final_metadata = {
+                "execution_status": "completed",
+                "complexity": complexity,
+                "specialist_results": [
+                    {"agent_key": s.get("agent_key", ""), "agent": s["agent"], "icon": s["icon"], "analysis": s.get("analysis", "")[:500]}
+                    for s in specialist_results if not s.get("is_cross_review")
+                ],
+                "cross_review_results": [
+                    {"agent_key": s.get("agent_key", ""), "agent": s["agent"], "icon": s["icon"], "analysis": s.get("analysis", "")[:500]}
+                    for s in specialist_results if s.get("is_cross_review")
+                ],
+                "tool_calls": all_tool_calls,
+                "phase_timings": phase_timings,
+            }
+            if stream_msg_id > 0:
+                # 已有占位消息，更新 content + metadata
+                update_message_content_and_metadata(stream_msg_id, answer, final_metadata)
+                msg_id = stream_msg_id
+            else:
+                # 简单任务路径，直接创建
+                metadata = json.dumps(final_metadata, ensure_ascii=False) if specialist_results or all_tool_calls else None
+                msg_id = create_message(conv_id, "assistant", answer, metadata=metadata)
+        else:
+            msg_id = stream_msg_id if stream_msg_id > 0 else 0
+            # 有占位消息但无最终回答，标记为失败
+            if stream_msg_id > 0:
+                try:
+                    update_message_content_and_metadata(stream_msg_id, "❌ 执行未完成（超时或异常中断）", {
+                        "execution_status": "failed",
+                        "complexity": complexity,
+                        "specialist_results": [
+                            {"agent_key": s.get("agent_key", ""), "agent": s["agent"], "icon": s["icon"], "analysis": s.get("analysis", "")[:500]}
+                            for s in specialist_results if not s.get("is_cross_review")
+                        ],
+                        "cross_review_results": [
+                            {"agent_key": s.get("agent_key", ""), "agent": s["agent"], "icon": s["icon"], "analysis": s.get("analysis", "")[:500]}
+                            for s in specialist_results if s.get("is_cross_review")
+                        ],
+                        "tool_calls": all_tool_calls,
+                        "phase_timings": phase_timings,
+                    })
+                except Exception as _e:
+                    logger.warning(f"标记失败状态失败: {_e}")
 
         # 7. 记录 RAG 日志
         log_rag_search(
@@ -1248,12 +1713,41 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest):
             content_types=rag_types if rag_types else None,
         )
 
-        # 8. 自动更新对话标题
+        # 8. 更新 agent_runs 的 message_id + 记录整体执行
+        total_ms = int((time.time() - request_start) * 1000)
+        phase_timings["total_ms"] = total_ms
+        try:
+            from db import _get_conn as _gc
+            _c = _gc()
+            _c.execute(
+                "UPDATE agent_runs SET message_id = ? WHERE conversation_id = ? AND message_id = 0",
+                (msg_id, conv_id)
+            )
+            _c.commit()
+            _c.close()
+            create_agent_run(
+                conversation_id=conv_id, message_id=msg_id,
+                agent_key="chat_turn", agent_name="对话整体",
+                query=req.content[:500], result=answer[:500],
+                tool_calls=json.dumps(phase_timings, ensure_ascii=False),
+                duration_ms=total_ms,
+            )
+        except Exception as _e:
+            logger.warning(f"记录 agent_runs 失败: {_e}")
+
+        # 9. 自动更新对话标题
         if len(history) <= 1 and conv.get("title") == "新对话":
             short_title = req.content[:30] + ("..." if len(req.content) > 30 else "")
             update_conversation(conv_id, title=short_title)
 
-        yield _sse_event("done", {"message_id": msg_id})
+        if not client_disconnected:
+            yield _sse_event("done", {
+                "message_id": msg_id,
+                "duration_ms": total_ms,
+                "phase_timings": phase_timings,
+            })
+        else:
+            logger.info(f"对话 {conv_id} 结果已保存（客户端已断开），answer 长度: {len(answer)}")
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
@@ -1407,6 +1901,36 @@ async def get_all_rag_logs_api(limit: int = 100):
     return {"logs": logs}
 
 
+class ChatFeedbackRequest(BaseModel):
+    message_id: int = None
+    feedback: str  # "helpful" or "unhelpful"
+    note: str = ""
+    input_summary: str = ""
+    output_summary: str = ""
+
+
+@app.post("/api/chat/feedback")
+async def submit_chat_feedback_api(req: ChatFeedbackRequest):
+    """提交对 AI 对话回复的反馈。"""
+    if req.feedback not in ("helpful", "unhelpful"):
+        raise HTTPException(400, "feedback 必须为 helpful 或 unhelpful")
+    from db import save_llm_feedback
+    save_llm_feedback(
+        caller="chat",
+        input_summary=req.input_summary[:200],
+        output_summary=req.output_summary[:200],
+        rating=req.feedback,
+        comment=req.note,
+    )
+    # 触发反馈学习
+    try:
+        from agent.feedback_learner import update_user_profile_from_feedback
+        update_user_profile_from_feedback("default", req.feedback, req.note, req.input_summary)
+    except Exception as e:
+        logger.warning(f"反馈学习更新失败: {e}")
+    return {"ok": True}
+
+
 @app.get("/api/rag-stats")
 async def get_rag_stats_api(days: int = 7):
     """获取 RAG 检索统计。"""
@@ -1541,6 +2065,12 @@ async def get_token_usage_summary_api(days: int = 30):
     return get_token_usage_summary(days=days)
 
 
+@app.get("/api/token-usage/budget")
+async def get_token_budget_api():
+    """获取今日 Token 预算使用情况。"""
+    return get_token_budget_info()
+
+
 @app.get("/api/token-usage/by-caller")
 async def get_token_usage_by_caller_api(days: int = 7):
     """按 caller 分组统计。"""
@@ -1551,6 +2081,22 @@ async def get_token_usage_by_caller_api(days: int = 7):
 async def get_token_usage_daily_api(days: int = 30):
     """按天获取 Token 用量趋势。"""
     return {"items": get_token_usage_daily(days=days)}
+
+
+@app.get("/api/running-agents")
+async def get_running_agents():
+    """获取当前正在运行的 Agent 列表。"""
+    now = time.time()
+    agents = []
+    for uid, info in _running_agents.items():
+        agents.append({
+            "id": uid,
+            "agent": info.get("agent", ""),
+            "task": info.get("task", ""),
+            "started_at": info.get("started_at", 0),
+            "elapsed_s": round(now - info.get("started_at", now), 1),
+        })
+    return {"agents": agents}
 
 
 # ── 性能监控 API ──────────────────────────────────────
@@ -1715,7 +2261,7 @@ async def get_eval_stats_api():
 class AnalysisRunRequest(BaseModel):
     index_code: str = ""
     index_name: str = ""
-    agent_id: int = 1
+    agent_id: int = 9  # 默认使用"指数深度分析师"
 
 
 class AnalysisAgentUpdateRequest(BaseModel):
@@ -1727,46 +2273,101 @@ class AnalysisAgentUpdateRequest(BaseModel):
 
 @app.post("/api/analysis/run")
 async def run_analysis(req: AnalysisRunRequest):
-    """触发 AI 市场分析。"""
+    """触发 AI 指数深度分析（结合估值趋势、知识库 RAG、指数专属新闻）。"""
     # 1. 获取 agent 配置
     agent = get_analysis_agent(req.agent_id)
     if not agent:
         raise HTTPException(404, "分析 Agent 不存在")
 
-    # 2. 获取当前指数估值数据
+    index_label = req.index_name or req.index_code
+
+    # 2. 获取估值数据（当前 + 近60天历史趋势）
     valuation_context = ""
     if req.index_code:
         try:
             latest = get_latest_valuation(req.index_code)
             if latest:
                 valuation_context = json.dumps(latest, ensure_ascii=False, indent=2)
+            # 追加近60天估值历史
+            history = get_valuation_history(req.index_code, days=60)
+            if history:
+                valuation_context += f"\n\n近{len(history)}天估值历史趋势：\n" + json.dumps(history, ensure_ascii=False, indent=2)
         except Exception:
             pass
 
-    # 3. 检索最新新闻
+    # 3. RAG 知识库检索（搜索与该指数相关的文章、分析、估值记录）
+    rag_context = ""
+    if req.index_name:
+        try:
+            rag_query = f"{req.index_name} 估值 分析 投资"
+            rag_context = build_rag_context(query=rag_query, limit=5)
+        except Exception as e:
+            logger.warning(f"RAG 检索失败: {e}")
+
+    # 4. 用户持仓数据（与该指数相关的持仓）
+    portfolio_context = ""
+    try:
+        all_holdings = list_holdings()
+        if all_holdings and (req.index_code or req.index_name):
+            # 精确匹配：index_code 相同
+            matched = [h for h in all_holdings if h.get("index_code") and h["index_code"] == req.index_code]
+            # 模糊匹配：基金名称包含指数关键词（如"沪深300"匹配"沪深300ETF"）
+            if req.index_name:
+                keywords = req.index_name.replace("指数", "").strip()
+                fuzzy_matched = [h for h in all_holdings
+                                 if h.get("fund_name") and keywords in h["fund_name"]
+                                 and h not in matched]
+                matched.extend(fuzzy_matched)
+            if matched:
+                portfolio_lines = []
+                total_value = sum(h.get("current_value", 0) for h in all_holdings if h.get("current_value"))
+                for h in matched:
+                    val = h.get("current_value", 0)
+                    pnl = h.get("profit_loss", 0)
+                    rate = h.get("profit_rate", 0)
+                    pct = round(val / total_value * 100, 1) if total_value > 0 else 0
+                    status = "盈利" if pnl > 0 else ("亏损" if pnl < 0 else "持平")
+                    portfolio_lines.append(
+                        f"- {h['fund_name']}({h.get('fund_code','')})："
+                        f"市值 ¥{val:,.0f}，占总资产 {pct}%，"
+                        f"盈亏 ¥{pnl:,.0f}（{rate:+.2f}%），{status}"
+                    )
+                portfolio_context = (
+                    f"用户当前持有 {len(matched)} 只与{index_label}相关的基金：\n"
+                    + "\n".join(portfolio_lines)
+                )
+    except Exception as e:
+        logger.warning(f"持仓数据获取失败: {e}")
+
+    # 5. 指数专属新闻（用指数名称搜索，而非通用 A股 新闻）
     news_context = ""
     try:
         from tools import execute_tool
-        news_result = execute_tool("web_search", {"query": "A股 今日行情 板块 热点", "max_results": 5})
+        news_query = f"{index_label} 最新消息 政策" if req.index_name else "A股 今日行情 板块 热点"
+        news_result = execute_tool("web_search", {"query": news_query, "max_results": 5})
         news_context = news_result if news_result else ""
     except Exception as e:
         logger.warning(f"新闻检索失败: {e}")
 
-    # 4. 拼装 prompt
+    # 6. 拼装 prompt
     full_prompt = agent["system_prompt"]
     if valuation_context:
-        full_prompt += f"\n\n<current_valuation>\n当前指数估值数据（{req.index_name or req.index_code}）：\n{valuation_context}\n</current_valuation>"
+        full_prompt += f"\n\n<valuation_data>\n指数估值数据（{index_label}）：\n{valuation_context}\n</valuation_data>"
+    if rag_context:
+        full_prompt += f"\n\n<knowledge_base>\n知识库检索结果（与{index_label}相关的历史分析和文章）：\n{rag_context}\n</knowledge_base>"
+    if portfolio_context:
+        full_prompt += f"\n\n<user_portfolio>\n用户持仓情况（与{index_label}相关）：\n{portfolio_context}\n</user_portfolio>"
     if news_context:
-        full_prompt += f"\n\n<latest_news>\n最新财经新闻：\n{news_context}\n</latest_news>"
+        full_prompt += f"\n\n<latest_news>\n{index_label}相关新闻与政策：\n{news_context}\n</latest_news>"
 
-    # 5. 调用 LLM
+    # 6. 调用 LLM
     try:
         response = await asyncio.to_thread(lambda: _call_llm(
-            caller="market_analysis",
+            caller="index_deep_analysis",
             model=MODEL,
             messages=[
                 {"role": "system", "content": full_prompt},
-                {"role": "user", "content": "请生成今日市场分析报告。"},
+                {"role": "user", "content": f"请对 {index_label} 进行深度分析。"},
             ],
             temperature=0.3,
             max_tokens=8192,
@@ -1777,7 +2378,7 @@ async def run_analysis(req: AnalysisRunRequest):
         logger.error(f"AI 分析失败: {e}")
         raise HTTPException(500, f"AI 分析失败: {str(e)}")
 
-    # 6. 保存历史
+    # 7. 保存历史
     history_id = create_analysis_history(
         index_code=req.index_code,
         index_name=req.index_name,
@@ -1883,6 +2484,195 @@ async def list_articles_api(status: str = None):
 async def list_gallery_records(search: str = None, limit: int = 200):
     """图片浏览：列出所有分析记录，支持模糊搜索。"""
     return {"records": list_all_analysis_records(search, limit)}
+
+
+# ══════════════════════════════════════════════════════
+# 螺丝钉估值图片 API
+# ══════════════════════════════════════════════════════
+
+@app.post("/api/dd-images/upload")
+async def upload_dd_image(file: UploadFile):
+    """上传螺丝钉估值图片，按日期目录存储。"""
+    ext = Path(file.filename).suffix.lower()
+    if ext not in ('.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp'):
+        raise HTTPException(status_code=400, detail=f"不支持的图片类型: {ext}")
+
+    from datetime import datetime
+    date_dir = datetime.now().strftime("%Y-%m-%d")
+    save_dir = DD_IMAGES_DIR / date_dir
+    save_dir.mkdir(parents=True, exist_ok=True)
+
+    # 用时间戳命名避免冲突
+    ts = datetime.now().strftime("%H%M%S")
+    safe_name = f"{ts}_{file.filename}"
+    save_path = save_dir / safe_name
+    content = await file.read()
+    save_path.write_bytes(content)
+
+    relative_path = f"{date_dir}/{safe_name}"
+    return {"ok": True, "path": relative_path, "url": f"/static/dd_images/{relative_path}"}
+
+
+@app.get("/api/dd-images")
+async def list_dd_images(date: str = None):
+    """列出螺丝钉估值图片，可按日期筛选。"""
+    images = []
+    if date:
+        date_dir = DD_IMAGES_DIR / date
+        if date_dir.is_dir():
+            for f in sorted(date_dir.iterdir()):
+                if f.suffix.lower() in ('.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp'):
+                    images.append({
+                        "name": f.name,
+                        "date": date,
+                        "url": f"/static/dd_images/{date}/{f.name}",
+                        "path": f"{date}/{f.name}",
+                    })
+    else:
+        # 列出所有日期目录下的图片
+        for d in sorted(DD_IMAGES_DIR.iterdir(), reverse=True):
+            if d.is_dir() and len(d.name) == 10 and d.name[4] == '-' and d.name[7] == '-':
+                for f in sorted(d.iterdir()):
+                    if f.suffix.lower() in ('.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp'):
+                        images.append({
+                            "name": f.name,
+                            "date": d.name,
+                            "url": f"/static/dd_images/{d.name}/{f.name}",
+                            "path": f"{d.name}/{f.name}",
+                        })
+    return {"images": images}
+
+
+@app.get("/api/dd-images/dates")
+async def list_dd_image_dates():
+    """列出所有有图片的日期。"""
+    dates = []
+    if DD_IMAGES_DIR.is_dir():
+        for d in sorted(DD_IMAGES_DIR.iterdir(), reverse=True):
+            if d.is_dir() and len(d.name) == 10 and d.name[4] == '-' and d.name[7] == '-':
+                count = sum(1 for f in d.iterdir() if f.suffix.lower() in ('.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp'))
+                if count > 0:
+                    dates.append({"date": d.name, "count": count})
+    return {"dates": dates}
+
+
+@app.delete("/api/dd-images/{path:path}")
+async def delete_dd_image(path: str):
+    """删除螺丝钉估值图片。path 格式: YYYY-MM-DD/filename.ext"""
+    file_path = DD_IMAGES_DIR / path
+    if not file_path.is_file():
+        raise HTTPException(status_code=404, detail="文件不存在")
+    # 安全检查：确保路径在 DD_IMAGES_DIR 下
+    if not str(file_path.resolve()).startswith(str(DD_IMAGES_DIR.resolve())):
+        raise HTTPException(status_code=400, detail="无效路径")
+    file_path.unlink()
+    # 如果日期目录为空则删除
+    parent = file_path.parent
+    if parent.is_dir() and not any(parent.iterdir()):
+        parent.rmdir()
+    return {"ok": True}
+
+
+# ══════════════════════════════════════════════════════
+# 估值图片 API（用户上传的估值截图，与螺丝钉估值分开）
+# ══════════════════════════════════════════════════════
+
+@app.post("/api/valuation-images/upload")
+async def upload_valuation_image(file: UploadFile):
+    """上传估值图片，存到 data/images/ 日期目录下。"""
+    ext = Path(file.filename).suffix.lower()
+    if ext not in ('.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp'):
+        raise HTTPException(status_code=400, detail=f"不支持的图片类型: {ext}")
+
+    from datetime import datetime
+    date_dir = datetime.now().strftime("%Y-%m-%d")
+    save_dir = IMAGES_DIR / date_dir
+    save_dir.mkdir(parents=True, exist_ok=True)
+
+    ts = datetime.now().strftime("%H%M%S")
+    safe_name = f"{ts}_{file.filename}"
+    save_path = save_dir / safe_name
+    content = await file.read()
+    save_path.write_bytes(content)
+
+    relative_path = f"{date_dir}/{safe_name}"
+    return {"ok": True, "path": relative_path, "url": f"/static/images/{relative_path}"}
+
+
+@app.get("/api/valuation-images")
+async def list_valuation_images(date: str = None):
+    """列出待解析的估值图片（仅列出未被 analysis_records 关联的图片）。"""
+    from db import _get_conn
+    images = []
+    conn = _get_conn()
+    # 获取已关联 analysis_records 的图片路径
+    known = set()
+    for row in conn.execute("SELECT image_path FROM analysis_records WHERE image_path LIKE 'data/images/%'").fetchall():
+        known.add(row[0])
+    conn.close()
+
+    def _scan_dir(base_dir: Path, date_filter: str = None):
+        if date_filter:
+            dirs = [base_dir / date_filter] if (base_dir / date_filter).is_dir() else []
+        else:
+            dirs = sorted(
+                [d for d in base_dir.iterdir() if d.is_dir() and len(d.name) == 10 and d.name[4] == '-' and d.name[7] == '-'],
+                reverse=True
+            )
+        for d in dirs:
+            for f in sorted(d.iterdir()):
+                if f.suffix.lower() in ('.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp'):
+                    rel = f"data/images/{d.name}/{f.name}"
+                    if rel not in known:
+                        images.append({
+                            "name": f.name,
+                            "date": d.name,
+                            "url": f"/static/images/{d.name}/{f.name}",
+                            "path": f"{d.name}/{f.name}",
+                        })
+
+    _scan_dir(IMAGES_DIR, date)
+    return {"images": images}
+
+
+@app.get("/api/valuation-images/dates")
+async def list_valuation_image_dates():
+    """列出有待解析图片的日期。"""
+    from db import _get_conn
+    conn = _get_conn()
+    known = set()
+    for row in conn.execute("SELECT image_path FROM analysis_records WHERE image_path LIKE 'data/images/%'").fetchall():
+        known.add(row[0])
+    conn.close()
+
+    dates = []
+    if IMAGES_DIR.is_dir():
+        for d in sorted(IMAGES_DIR.iterdir(), reverse=True):
+            if d.is_dir() and len(d.name) == 10 and d.name[4] == '-' and d.name[7] == '-':
+                count = 0
+                for f in d.iterdir():
+                    if f.suffix.lower() in ('.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp'):
+                        rel = f"data/images/{d.name}/{f.name}"
+                        if rel not in known:
+                            count += 1
+                if count > 0:
+                    dates.append({"date": d.name, "count": count})
+    return {"dates": dates}
+
+
+@app.delete("/api/valuation-images/{path:path}")
+async def delete_valuation_image(path: str):
+    """删除估值图片。path 格式: YYYY-MM-DD/filename.ext"""
+    file_path = IMAGES_DIR / path
+    if not file_path.is_file():
+        raise HTTPException(status_code=404, detail="文件不存在")
+    if not str(file_path.resolve()).startswith(str(IMAGES_DIR.resolve())):
+        raise HTTPException(status_code=400, detail="无效路径")
+    file_path.unlink()
+    parent = file_path.parent
+    if parent.is_dir() and not any(parent.iterdir()):
+        parent.rmdir()
+    return {"ok": True}
 
 
 # ══════════════════════════════════════════════════════
@@ -2112,7 +2902,7 @@ async def _crawl_one_author_article(article_id: int, url: str):
 
         # 索引到 RAG
         if content:
-            index_author_article(article_id, title, content)
+            index_author_article(article_id, title, content, publish_time or "")
 
     except Exception as e:
         update_author_article(article_id, status="error", error_msg=str(e)[:500])
@@ -2494,7 +3284,7 @@ async def _background_analyze(article_id: int):
             all_records = get_analysis_records(article_id)
             total_success = len([r for r in all_records if r["status"] == "success"])
             if total_success > 0:
-                update_article(article_id, status="analyzed")
+                update_article(article_id, status="analyzed", error_msg="")
             elif failed > 0:
                 update_article(article_id, status="error", error_msg=f"{failed} 张图片分析失败")
     except Exception as e:
@@ -2891,6 +3681,7 @@ class TagRequest(BaseModel):
 class AdjustCashRequest(BaseModel):
     amount: float
     mode: str = "add"  # "add" 存入/支出, "set" 直接设置
+    user_id: str = "default"
 
 
 @app.get("/api/portfolio")
@@ -2907,6 +3698,16 @@ async def portfolio_summary_api(account: str = None):
     return get_portfolio_summary()
 
 
+@app.get("/api/portfolio/rebalancing")
+async def portfolio_rebalancing_api():
+    """获取智能调仓建议：结合持仓分布和市场估值，分析偏离度并给出建议。"""
+    from rebalancer import analyze_rebalancing_need
+    result = analyze_rebalancing_need()
+    if "error" in result:
+        raise HTTPException(status_code=400, detail=result["error"])
+    return result
+
+
 @app.post("/api/portfolio/clear")
 async def clear_portfolio_api():
     """清空所有持仓数据。"""
@@ -2915,19 +3716,20 @@ async def clear_portfolio_api():
 
 
 @app.get("/api/portfolio/cash")
-async def get_cash_api():
+async def get_cash_api(user_id: str = "default"):
     """获取零钱余额。"""
-    return get_cash_balance()
+    return get_cash_balance(user_id)
 
 
 @app.post("/api/portfolio/cash")
 async def adjust_cash_api(req: AdjustCashRequest):
     """调整零钱余额。mode='add' 时 amount 正数存入/负数支出，mode='set' 时直接设置余额。"""
     from db import add_cash, set_cash_balance
+    uid = req.user_id or "default"
     if req.mode == "set":
-        new_balance = set_cash_balance("default", req.amount)
+        new_balance = set_cash_balance(uid, req.amount)
     else:
-        new_balance = add_cash("default", req.amount)
+        new_balance = add_cash(uid, req.amount)
     return {"ok": True, "balance": new_balance}
 
 
@@ -3273,6 +4075,8 @@ async def portfolio_diversification_ai_summary(agent_id: int = 2):
 
 请对以上持仓分散度进行专业解读。"""
 
+    uid = f"diversification_{int(time.time())}"
+    _track_agent(uid, "分散度分析师", "持仓分散度解读")
     try:
         from llm_service import _call_llm, MODEL
         response = await asyncio.to_thread(lambda: _call_llm(
@@ -3289,6 +4093,8 @@ async def portfolio_diversification_ai_summary(agent_id: int = 2):
         tokens = response.usage.total_tokens if response.usage else 0
     except Exception as e:
         raise HTTPException(500, f"AI 分析失败: {e}")
+    finally:
+        _untrack_agent(uid)
 
     # 保存记录
     record_id = create_portfolio_analysis_record(
@@ -3313,6 +4119,14 @@ async def portfolio_ai_summary_today_status():
         if r.get("created_at", "").startswith(today):
             return {"analyzed_today": True, "record_id": r["id"]}
     return {"analyzed_today": False, "record_id": None}
+
+
+@app.get("/api/portfolio/analysis/penetration")
+async def portfolio_penetration_api():
+    """跨基金持仓穿透分析：加权聚合底层股票持仓。"""
+    from db import get_portfolio_penetration
+    result = get_portfolio_penetration()
+    return result
 
 
 @app.get("/api/portfolio/analysis/{holding_id}/performance")
@@ -3515,13 +4329,19 @@ async def submit_analysis_feedback_api(record_id: int, req: FeedbackRequest):
         raise HTTPException(400, "feedback 必须为 helpful 或 unhelpful")
     if not update_analysis_feedback(record_id, req.feedback, req.note):
         raise HTTPException(404, "分析记录不存在")
+    # 触发反馈学习，更新用户画像
+    try:
+        from agent.feedback_learner import update_user_profile_from_feedback
+        update_user_profile_from_feedback("default", req.feedback, req.note)
+    except Exception as e:
+        logger.warning(f"反馈学习更新失败: {e}")
     return {"ok": True}
 
 
 @app.get("/api/portfolio/analysis/bad-cases")
-async def list_bad_cases_api(analysis_type: str = None, limit: int = 50):
-    """列出被标记为 unhelpful 的分析记录（Bad Cases）。"""
-    cases = list_bad_cases(analysis_type=analysis_type, limit=limit)
+async def list_bad_cases_api(source: str = None, limit: int = 100):
+    """列出所有 Bad Case（分析记录 + LLM 反馈）。"""
+    cases = list_all_bad_cases(source=source, limit=limit)
     return {"cases": cases, "count": len(cases)}
 
 
@@ -3833,6 +4653,8 @@ async def panorama_analysis_api(req: PanoramaAnalysisRequest):
     )
 
     # 调用 LLM（带 90 秒超时）
+    uid = f"panorama_{int(time.time())}"
+    _track_agent(uid, "全景诊断分析师", "持仓诊断")
     try:
         from llm_service import _call_llm, MODEL
         response = await asyncio.wait_for(asyncio.to_thread(lambda: _call_llm(
@@ -3848,11 +4670,15 @@ async def panorama_analysis_api(req: PanoramaAnalysisRequest):
         result_text = response.choices[0].message.content or ""
         tokens = response.usage.total_tokens if response.usage else 0
     except asyncio.TimeoutError:
+        _untrack_agent(uid)
         logger.error(f"全景诊断 LLM 调用超时")
         raise HTTPException(504, "AI 分析超时，请重试")
     except Exception as e:
+        _untrack_agent(uid)
         logger.error(f"全景诊断失败: {e}")
         raise HTTPException(500, f"AI 分析失败: {str(e)}")
+    finally:
+        _untrack_agent(uid)
 
     # 保存记录
     record_id = create_portfolio_analysis_record(
@@ -4482,11 +5308,59 @@ def _assess_valuation(percentile: float) -> dict:
         return {"label": "极度高估", "level": "extreme_high"}
 
 
-def _get_cash_advice(temperature, balance: float) -> dict:
-    """根据债市温度给出零钱配置建议。temperature 为 None 时给出保守建议。"""
-    if not balance or balance <= 0:
-        return {"summary": "暂无可用零钱", "allocation": []}
+def _get_cash_advice(temperature, balance: float, total_assets: float = 0, undervalued_indexes: list = None) -> dict:
+    """根据债市温度 + 权益估值给出零钱配置建议。
 
+    Args:
+        temperature: 债市温度 (0-100)，None 表示数据缺失
+        balance: 现金余额
+        total_assets: 总资产（持仓+现金），用于计算现金占比
+        undervalued_indexes: 低估指数列表 [{index_name, percentile, ...}]
+    """
+    if not balance or balance <= 0:
+        return {"summary": "暂无可用零钱", "allocation": [], "alerts": []}
+
+    alerts = []
+    cash_ratio = balance / total_assets if total_assets > 0 else 0
+
+    # 现金占比预警
+    if cash_ratio > 0.20:
+        alerts.append({"level": "warning", "message": f"现金占比{cash_ratio:.0%}偏高，资金闲置会拖低整体收益"})
+    elif cash_ratio > 0.15:
+        alerts.append({"level": "info", "message": f"现金占比{cash_ratio:.0%}，可适当配置"})
+    elif cash_ratio < 0.03 and total_assets > 0:
+        alerts.append({"level": "info", "message": f"现金占比仅{cash_ratio:.0%}，建议保留少量流动性"})
+
+    # 低估权益机会
+    equity_tip = None
+    if undervalued_indexes and cash_ratio > 0.05:
+        top = undervalued_indexes[:2]
+        names = "、".join(i.get("index_name", "") for i in top if i.get("index_name"))
+        if names:
+            equity_tip = f"{names}处于低估区间，可考虑用少量零钱定投"
+            alerts.append({"level": "opportunity", "message": equity_tip})
+
+    # 债券建议
+    bond_advice = _get_bond_allocation(temperature)
+
+    # 组合建议摘要
+    summary_parts = [bond_advice["summary"]]
+    if equity_tip:
+        summary_parts.append(equity_tip)
+    if cash_ratio > 0.15:
+        summary_parts.append(f"当前现金占比{cash_ratio:.0%}，建议逐步配置")
+
+    return {
+        "summary": "；".join(summary_parts),
+        "allocation": bond_advice["allocation"],
+        "cash_ratio": round(cash_ratio, 4),
+        "alerts": alerts,
+        "equity_opportunity": equity_tip,
+    }
+
+
+def _get_bond_allocation(temperature) -> dict:
+    """根据债市温度返回债券配置建议。"""
     if temperature is None:
         return {
             "summary": "债市数据暂缺，建议暂时放在货币基金中",
@@ -4576,7 +5450,14 @@ async def get_dashboard():
             if v["percentile"] <= 30 and v.get("latest_date", "") >= freshness_cutoff
         ]
         undervalued.sort(key=lambda x: x["percentile"])
+        # 记录数据最新日期
+        if undervalued:
+            latest_dates = [v.get("latest_date", "") for v in undervalued if v.get("latest_date")]
+            undervalued_data_date = max(latest_dates) if latest_dates else ""
+        else:
+            undervalued_data_date = ""
     except Exception as e:
+        undervalued_data_date = ""
         logging.warning(f"Dashboard 低估指数获取失败: {e}")
 
     # ── Section 2: 持仓健康度 ──
@@ -4617,8 +5498,12 @@ async def get_dashboard():
 
     # ── Section 3: 零钱 + 债券 ──
     cash_balance = 0
+    cash_details = {}
     try:
-        cash_balance = get_cash_balance().get("balance", 0)
+        for uid in ["小鱼儿", "花无缺"]:
+            bal = get_cash_balance(uid).get("balance", 0)
+            cash_details[uid] = round(bal, 2)
+            cash_balance += bal
     except Exception:
         pass
 
@@ -4661,8 +5546,10 @@ async def get_dashboard():
     except Exception as e:
         logging.warning(f"Dashboard 债市数据获取失败: {e}")
 
+    total_assets = (portfolio_health or {}).get("total_value", 0) + cash_balance
     cash_advice = _get_cash_advice(
-        bond_info["temperature"] if bond_info else None, cash_balance
+        bond_info["temperature"] if bond_info else None, cash_balance,
+        total_assets=total_assets, undervalued_indexes=undervalued,
     )
 
     # ── 数据新鲜度 ──
@@ -4681,15 +5568,36 @@ async def get_dashboard():
     except Exception as e:
         logging.warning(f"Dashboard 新鲜度获取失败: {e}")
 
+    # 各模块数据实际更新时间
+    undervalued_updated_at = ""
+    portfolio_updated_at = ""
+    try:
+        from db import _get_conn
+        conn = _get_conn()
+        row = conn.execute("SELECT MAX(created_at) FROM index_valuations").fetchone()
+        if row and row[0]:
+            undervalued_updated_at = str(row[0])[:16]
+        row = conn.execute("SELECT MAX(updated_at) FROM portfolio_holdings WHERE shares > 0").fetchone()
+        if row and row[0]:
+            portfolio_updated_at = str(row[0])[:16]
+        conn.close()
+    except Exception:
+        pass
+
     return {
         "date": today,
         "undervalued_indexes": undervalued,
+        "undervalued_data_date": undervalued_data_date,
+        "undervalued_updated_at": undervalued_updated_at,
         "portfolio_health": portfolio_health,
+        "portfolio_updated_at": portfolio_updated_at,
         "cash_management": {
-            "balance": cash_balance,
+            "balance": round(cash_balance, 2),
+            "cash_details": cash_details,
             "bond_market": bond_info,
             "suggestion": cash_advice,
         },
+        "cash_updated_at": portfolio_updated_at,
         "data_freshness": freshness_info,
     }
 
@@ -4715,6 +5623,139 @@ async def get_daily_report():
         r = dict(row)
         return {"has_report": True, "report": r}
     return {"has_report": False, "report": None}
+
+
+@app.post("/api/dashboard/daily-report/regenerate")
+async def regenerate_daily_report():
+    """重新生成今日市场简报。"""
+    from db import get_analysis_agent, create_analysis_history, _get_conn
+    import time
+
+    agent = get_analysis_agent(1)
+    if not agent:
+        raise HTTPException(400, "市场日报分析师未配置")
+
+    # 删除今日旧报告
+    today = time.strftime("%Y-%m-%d")
+    conn = _get_conn()
+    conn.execute(
+        "DELETE FROM analysis_history WHERE agent_id = 1 AND date(created_at) = ?",
+        (today,)
+    )
+    conn.commit()
+    conn.close()
+
+    # 复用 _auto_daily_report 的数据收集逻辑
+    news_context = ""
+    try:
+        news_data = await get_hot_topics()
+        news_list = news_data.get("news", [])[:6]
+        news_context = "\n".join(
+            f"- {n.get('title','')}（{n.get('source','')}）"
+            for n in news_list if n.get('title')
+        ) if news_list else "暂无新闻"
+    except Exception as e:
+        logging.warning(f"简报重新生成新闻检索失败: {e}")
+        news_context = "暂无新闻"
+
+    val_context = "暂无估值数据"
+    try:
+        from db import list_valuation_indexes
+        indexes = list_valuation_indexes()
+        seen = {}
+        for i in indexes:
+            code = i.get("index_code", "")
+            if code and code not in seen:
+                seen[code] = i
+        all_indexes = list(seen.values())
+        if all_indexes:
+            val_lines = []
+            for i in all_indexes:
+                pct = i.get("percentile", None)
+                pct_str = f"{pct:.0f}%" if pct is not None else "N/A"
+                val_lines.append(
+                    f"- {i['index_name']}（{i['index_code']}）: "
+                    f"{i.get('metric_type','PE')}={i.get('current_value','?')}, 百分位={pct_str}"
+                )
+            val_context = "\n".join(val_lines)
+    except Exception:
+        pass
+
+    holding_text = "暂无持仓"
+    portfolio_text = "暂无"
+    try:
+        from db import list_holdings, get_portfolio_diversification, get_cash_balance
+        holdings = list_holdings()
+        div = get_portfolio_diversification()
+        cash = get_cash_balance()
+        if holdings:
+            holding_lines = []
+            for h in holdings[:15]:
+                pct = h.get("profit_rate")
+                pct_str = f"{pct:+.1f}%" if pct is not None else "N/A"
+                val = h.get("current_value", 0) or 0
+                holding_lines.append(
+                    f"- {h['fund_name']}（{h.get('fund_code','')}）: "
+                    f"市值{val:.0f}元, 收益率{pct_str}"
+                )
+            holding_text = "\n".join(holding_lines)
+        portfolio_text = (
+            f"持仓{div.get('holding_count',0)}只基金，"
+            f"总市值{div.get('total_value',0):.0f}元，"
+            f"盈亏{div.get('total_profit',0):.0f}元，"
+            f"可用零钱{cash:.0f}元"
+        )
+    except Exception:
+        pass
+
+    bond_text = "暂无"
+    try:
+        from tools import _get_bond_temperature
+        bond_raw = json.loads(_get_bond_temperature())
+        bond_text = f"债券温度{bond_raw.get('temperature','?')}°，收益率{bond_raw.get('rate','?')}%"
+    except Exception:
+        pass
+
+    full_prompt = agent["system_prompt"] + f"""
+
+【今日新闻】
+{news_context}
+
+【指数估值】
+{val_context}
+
+【持仓明细】
+{holding_text}
+
+【持仓概况】
+{portfolio_text}
+
+【债券市场】
+{bond_text}
+
+请按照报告结构要求，基于以上真实数据撰写今日市场简报。"""
+
+    response = await asyncio.to_thread(lambda: _call_llm(
+        caller="daily_report",
+        model=MODEL,
+        messages=[
+            {"role": "system", "content": full_prompt},
+            {"role": "user", "content": "请生成今日市场分析报告。"},
+        ],
+        temperature=0.3,
+        max_tokens=8192,
+    ))
+    result_text = response.choices[0].message.content or ""
+    token_usage = response.usage.total_tokens if response.usage else 0
+
+    new_id = create_analysis_history(
+        index_code="", index_name="",
+        agent_id=1, agent_name=agent["name"],
+        prompt_used=full_prompt[:500], news_context=news_context[:500],
+        valuation_context=val_context[:500], result=result_text,
+        token_usage=token_usage,
+    )
+    return {"ok": True, "id": new_id, "token_usage": token_usage}
 
 
 @app.get("/api/dashboard/hot-topics")
@@ -4756,7 +5797,9 @@ async def get_hot_topics():
         except Exception as e:
             logging.warning(f"热点 web_search 失败: {e}")
 
-    result = {"news": news_items, "source": "yingmi" if news_items else "none"}
+    from datetime import datetime
+    fetched_at = datetime.now().strftime("%Y-%m-%d %H:%M")
+    result = {"news": news_items, "source": "yingmi" if news_items else "none", "fetched_at": fetched_at}
     _hot_topics_cache["data"] = result
     _hot_topics_cache["ts"] = now
     return result
@@ -4795,12 +5838,14 @@ async def get_hotspots_analysis():
             for i in all_indexes
         ) if all_indexes else "暂无指数数据"
 
-        # 低估指数（百分位<30）
+        # 估值分布概览（供参考，不单独强调低估）
         low_val = [i for i in all_indexes if i.get("percentile", 100) < 30]
-        val_text = "\n".join(
-            f"- {i['index_name']}（{i['index_code']}）: 百分位={i.get('percentile',100):.0f}%"
-            for i in low_val[:10]
-        ) if low_val else "暂无低估指数"
+        high_val = [i for i in all_indexes if i.get("percentile", 100) > 70]
+        val_text = (
+            f"低估(<30%): {len(low_val)}只, "
+            f"高估(>70%): {len(high_val)}只, "
+            f"共{len(all_indexes)}只跟踪指数"
+        )
     except Exception as e:
         code_ref_text = "暂无"
         val_text = "暂无"
@@ -4856,13 +5901,13 @@ async def get_hotspots_analysis():
         base_prompt = "你是一位专业的A股市场分析专家。请基于以下市场数据分析今日投资机会，输出结构化JSON。\n\n## 输出格式\n返回严格JSON：{\"summary\":\"...\", \"recommendations\":[{\"direction\":\"up|down|watch\",\"index_name\":\"...\",\"index_code\":\"...\",\"reason\":\"...\",\"confidence\":\"high|medium|low\"}]}\n\n## 今日数据："
 
     prompt = base_prompt + f"""
-【今日新闻】
+【今日新闻】（重点关注，这是分析的核心线索）
 {news_text}
 
-【可参考指数代码】
+【可参考指数代码及估值】
 {code_ref_text}
 
-【低估指数】
+【估值分布概览】
 {val_text}
 
 【持仓明细】
@@ -4876,6 +5921,8 @@ async def get_hotspots_analysis():
 
 请严格按照JSON格式输出分析结果。"""
 
+    uid = f"hotspots_{int(time.time())}"
+    _track_agent(uid, "热点分析专家", "市场热点分析")
     try:
         response = await asyncio.wait_for(asyncio.to_thread(lambda: _call_llm(
             caller="hotspots_analysis",
@@ -4894,20 +5941,24 @@ async def get_hotspots_analysis():
             parsed = json.loads(content)
         # 确保字段完整
         recs = parsed.get("recommendations", [])
-        result = {
-            "summary": parsed.get("summary", ""),
-            "recommendations": recs,
-            "analysis_text": content,
-        }
         # 保存到推荐验证库 + 缓存 + 分析历史
         if recs:
             try:
                 from datetime import datetime
                 from db import save_recommendations, save_analysis_cache
                 from db import _get_conn as _get_db_conn
+                from market_data import get_index_current_price
                 analysis_id = datetime.now().strftime("hotspots_%Y%m%d_%H%M%S")
-                save_recommendations(recs, analysis_id)
-                save_analysis_cache("hotspots_latest", result)
+                # 获取每条推荐的当前指数点位作为验证基线
+                baselines = []
+                for rec in recs:
+                    bl = get_index_current_price(rec.get("index_code", ""))
+                    baselines.append(bl)
+                rec_ids = save_recommendations(recs, analysis_id, baselines)
+                # 将数据库 ID 回填到推荐数据中
+                for i, rid in enumerate(rec_ids):
+                    if i < len(recs):
+                        recs[i]["id"] = rid
                 # 记录分析历史（含使用的 prompt 版本）
                 _conn = _get_db_conn()
                 _conn.execute(
@@ -4918,12 +5969,24 @@ async def get_hotspots_analysis():
                 _conn.close()
             except Exception as e:
                 logging.warning(f"保存推荐记录失败: {e}")
+        result = {
+            "summary": parsed.get("summary", ""),
+            "recommendations": recs,
+            "analysis_text": content,
+        }
+        if recs:
+            try:
+                save_analysis_cache("hotspots_latest", result)
+            except Exception:
+                pass
         return result
     except asyncio.TimeoutError:
         return {"summary": "分析超时，请重试", "recommendations": [], "analysis_text": ""}
     except Exception as e:
         logging.warning(f"热点结构化分析失败: {e}")
         return {"summary": f"分析失败: {str(e)}", "recommendations": [], "analysis_text": ""}
+    finally:
+        _untrack_agent(uid)
 
 
 @app.get("/api/dashboard/hotspots-analysis/latest")
@@ -4968,6 +6031,31 @@ async def list_recommendations_api(limit: int = 50, status: str = ""):
     from db import list_recommendations
     recs = list_recommendations(limit, status or None)
     return {"recommendations": recs}
+
+
+@app.get("/api/dashboard/recommendations/auto-verify")
+async def auto_verify_recommendations():
+    """自动验证 pending 推荐：获取实时行情，与基线比较，更新状态。"""
+    from db import _get_conn, auto_verify_pending_recommendations
+    from market_data import get_index_current_price
+    from datetime import date
+    conn = _get_conn()
+    rows = conn.execute(
+        "SELECT DISTINCT index_code FROM recommendations WHERE status = 'pending' AND baseline_value IS NOT NULL"
+    ).fetchall()
+    conn.close()
+    if not rows:
+        return {"ok": True, "verified": 0, "results": []}
+    price_map = {}
+    for row in rows:
+        code = row["index_code"]
+        bl = get_index_current_price(code)
+        if bl.get("price") is not None:
+            price_map[code] = bl["price"]
+    if not price_map:
+        return {"ok": True, "verified": 0, "results": []}
+    results = auto_verify_pending_recommendations(price_map, date.today().isoformat())
+    return {"ok": True, "verified": len(results), "results": results}
 
 
 @app.get("/api/dashboard/recommendations/stats")
@@ -5034,6 +6122,14 @@ async def create_llm_feedback(body: dict):
         tags=body.get("tags", ""),
         comment=body.get("comment", ""),
     )
+    # 触发反馈学习
+    try:
+        from agent.feedback_learner import update_user_profile_from_feedback
+        feedback_type = body.get("rating", "neutral")
+        if feedback_type in ("helpful", "unhelpful"):
+            update_user_profile_from_feedback("default", feedback_type, body.get("comment", ""), body.get("input_summary", ""))
+    except Exception as e:
+        logger.warning(f"反馈学习更新失败: {e}")
     return {"ok": True, "id": fid}
 
 
@@ -5122,12 +6218,12 @@ async def bond_market_overview_api():
 
 @app.post("/api/bond/ai-recommend")
 async def bond_ai_recommend():
-    """AI 债券配置推荐：结合债市温度历史趋势、收益率曲线、持仓穿透、基金排行榜给出具体购买建议。"""
+    """AI 债券配置推荐：结合债市温度历史趋势、收益率曲线、宏观政策环境、持仓穿透、基金排行榜给出具体购买建议。"""
     import ssl
     ssl._create_default_https_context = ssl._create_unverified_context
     import akshare as ak
     import json as json_mod
-    from tools import _get_bond_yield_curve
+    from tools import _get_bond_yield_curve, _get_macro_policy_data
 
     # 1. 债市温度（完整历史，用于趋势分析）
     bond_history = []
@@ -5236,13 +6332,22 @@ async def bond_ai_recommend():
     except Exception as e:
         pass
 
-    # 7. 构建 LLM 上下文
+    # 7. 宏观货币政策数据
+    macro_data = {}
+    try:
+        macro_raw = _get_macro_policy_data()
+        macro_data = json_mod.loads(macro_raw) if isinstance(macro_raw, str) else macro_raw
+    except Exception:
+        pass
+
+    # 8. 构建 LLM 上下文
     agent = get_analysis_agent(8)
     system_prompt = agent["system_prompt"] if agent else DEFAULT_BOND_PROMPT
 
     context_lines = [
         f"## 债市温度历史（近90天）\n{json_mod.dumps(bond_history, ensure_ascii=False, indent=2)}",
         f"## 收益率曲线\n{json_mod.dumps(yield_curve, ensure_ascii=False, indent=2)}",
+        f"## 宏观货币政策环境\n{json_mod.dumps(macro_data, ensure_ascii=False, indent=2)}",
         f"## 现有债券持仓（含穿透数据）\n持有 {len(holdings_with_penetration)} 只，总值 {total_bond_value:.2f}，占总资产 {round(total_bond_value/total_portfolio_value*100,1) if total_portfolio_value > 0 else 0}%\n" + json_mod.dumps(holdings_with_penetration, ensure_ascii=False, indent=2),
         f"## 零钱余额\n{cash_balance} 元（占总资产 {round(cash_balance/total_portfolio_value*100,1) if total_portfolio_value > 0 else 0}%）",
         f"## 全市场纯债基金排行榜（Top 30）\n" + json_mod.dumps(all_bond_funds, ensure_ascii=False, indent=2),
@@ -5251,9 +6356,21 @@ async def bond_ai_recommend():
 
     combined_input = "请基于以下数据给出债券配置建议：\n\n" + "\n\n".join(context_lines)
 
-    # 8. 调用 LLM
-    from llm_service import chat_with_agent
-    result = chat_with_agent(system_prompt, [{"role": "user", "content": combined_input}])
+    # 9. 调用 LLM
+    uid = f"bond_{int(time.time())}"
+    _track_agent(uid, "债券配置顾问", "债券配置推荐")
+    try:
+        from llm_service import chat_with_agent
+        result = chat_with_agent(system_prompt, [{"role": "user", "content": combined_input}], max_tokens=8000)
+        logging.info(f"[bond_ai_recommend] LLM result length: {len(result) if result else 0}, type: {type(result)}")
+        if not result:
+            logging.warning("[bond_ai_recommend] LLM returned empty/None result")
+            result = ""
+    except Exception as e:
+        logging.error(f"[bond_ai_recommend] LLM call failed: {e}")
+        result = ""
+    finally:
+        _untrack_agent(uid)
 
     # 尝试从结果中提取 JSON
     try:
@@ -5296,6 +6413,7 @@ async def _serve_icons():
 @app.get("/api/finance/quote-bar")
 async def finance_quote_bar():
     """每日理财箴言 + 市场热点。"""
+    from datetime import date
     import random
     quotes = [
         "别人贪婪时恐惧，别人恐惧时贪婪。—— 巴菲特",
@@ -5325,8 +6443,8 @@ async def finance_quote_bar():
         "永远不要投资你输不起的钱。",
     ]
     # 随机选择一条（每次刷新不同）
-    import random
     daily_quote = random.choice(quotes)
+    today = date.today().isoformat()
 
     # 市场热点（akshare）
     hot_keywords = []

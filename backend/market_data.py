@@ -205,3 +205,26 @@ def _to_float(val) -> float | None:
         return float(val)
     except (ValueError, TypeError):
         return None
+
+
+def get_index_current_price(index_code: str) -> dict:
+    """获取指数实时点位（Sina 行情）。
+
+    返回: {"price": float, "date": str} 或 {"price": None}
+    """
+    import ssl
+    ssl._create_default_https_context = ssl._create_unverified_context
+    try:
+        spot_df = ak.stock_zh_index_spot_sina()
+        base = index_code.replace(".SZ", "").replace(".SH", "").replace(".CSI", "")
+        for prefix in ["sh", "sz"]:
+            sina_code = f"{prefix}{base}"
+            match = spot_df[spot_df["代码"] == sina_code]
+            if not match.empty:
+                return {
+                    "price": float(match.iloc[0]["最新价"]),
+                    "date": datetime.now().strftime("%Y-%m-%d"),
+                }
+        return {"price": None}
+    except Exception:
+        return {"price": None}

@@ -356,6 +356,18 @@ TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_macro_policy_data",
+            "description": "获取当前中国宏观货币政策关键数据，包括LPR利率、存款准备金率(RRR)最新调整、SHIBOR各期限利率、CPI数据。用于分析货币政策松紧、判断利率环境、评估通胀/通缩压力，辅助债券配置决策。",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+            },
+        },
+    },
 ]
 
 # ── Tool 执行器 ──────────────────────────────────────
@@ -394,6 +406,8 @@ def execute_tool(name: str, arguments: dict) -> str:
             return _get_bond_yield_curve(arguments)
         elif name == "get_bond_market_overview":
             return _get_bond_market_overview()
+        elif name == "get_macro_policy_data":
+            return _get_macro_policy_data()
         else:
             return json.dumps({"error": f"未知工具: {name}"}, ensure_ascii=False)
     except Exception as e:
@@ -1334,3 +1348,140 @@ def _get_bond_market_overview() -> str:
     except Exception as e:
         logger.error(f"获取债市概况失败: {e}")
         return json.dumps({"error": f"获取债市概况失败: {e}"}, ensure_ascii=False)
+
+
+def _get_macro_policy_data() -> str:
+    """获取当前中国宏观货币政策关键数据（LPR、降准、SHIBOR、CPI）。"""
+    import ssl
+    ssl._create_default_https_context = ssl._create_unverified_context
+    import akshare as ak
+
+    result = {}
+
+    # 1. LPR 利率
+    try:
+        lpr_df = ak.macro_china_lpr()
+        if lpr_df is not None and not lpr_df.empty:
+            latest = lpr_df.iloc[-1]
+            result["lpr"] = {
+                "date": str(latest.get("TRADE_DATE", "")),
+                "lpr_1y": float(latest.get("LPR1Y", 0)),
+                "lpr_5y": float(latest.get("LPR5Y", 0)),
+            }
+            # 取最近3条看趋势
+            recent = lpr_df.tail(3)
+            result["lpr"]["recent_trend"] = [
+                {"date": str(r.get("TRADE_DATE", "")), "1y": float(r.get("LPR1Y", 0)), "5y": float(r.get("LPR5Y", 0))}
+                for _, r in recent.iterrows()
+            ]
+    except Exception as e:
+        logger.warning(f"获取LPR数据失败: {e}")
+        result["lpr"] = {"error": str(e)}
+
+    # 2. 存款准备金率 (RRR) 最新调整
+    try:
+        rrr_df = ak.macro_china_reserve_requirement_ratio()
+        if rrr_df is not None and not rrr_df.empty:
+            latest_rrr = rrr_df.iloc[0]  # 最新一条
+            result["rrr"] = {
+                "announce_date": str(latest_rrr.get("公布时间", "")),
+                "effective_date": str(latest_rrr.get("生效时间", "")),
+                "large_before": float(latest_rrr.get("大型金融机构-调整前", 0)),
+                "large_after": float(latest_rrr.get("大型金融机构-调整后", 0)),
+                "large_change": float(latest_rrr.get("大型金融机构-调整幅度", 0)),
+                "note": str(latest_rrr.get("备注", ""))[:100],
+            }
+    except Exception as e:
+        logger.warning(f"获取RRR数据失败: {e}")
+        result["rrr"] = {"error": str(e)}
+
+    # 3. SHIBOR 各期限利率
+    try:
+        shibor_df = ak.macro_china_shibor_all()
+        if shibor_df is not None and not shibor_df.empty:
+            latest_shibor = shibor_df.iloc[-1]
+            result["shibor"] = {
+                "date": str(latest_shibor.get("日期", "")),
+                "overnight": float(latest_shibor.get("O/N-定价", 0)),
+                "1w": float(latest_shibor.get("1W-定价", 0)),
+                "1m": float(latest_shibor.get("1M-定价", 0)),
+                "3m": float(latest_shibor.get("3M-定价", 0)),
+                "6m": float(latest_shibor.get("6M-定价", 0)),
+                "1y": float(latest_shibor.get("1Y-定价", 0)),
+            }
+            # SHIBOR 趋势（最近5个交易日的3M和1Y）
+            recent_shibor = shibor_df.tail(5)
+            result["shibor"]["recent_3m_trend"] = [float(r.get("3M-定价", 0)) for _, r in recent_shibor.iterrows()]
+            result["shibor"]["recent_1y_trend"] = [float(r.get("1Y-定价", 0)) for _, r in recent_shibor.iterrows()]
+    except Exception as e:
+        logger.warning(f"获取SHIBOR数据失败: {e}")
+        result["shibor"] = {"error": str(e)}
+
+    # 4. CPI 数据
+    try:
+        cpi_df = ak.macro_china_cpi_monthly()
+        if cpi_df is not None and not cpi_df.empty:
+            latest_cpi = cpi_df.iloc[-1]
+            def _safe_val(v):
+                """将 NaN 转为 None（NaN 不是合法 JSON）。"""
+                try:
+                    import math
+                    if v is None or (isinstance(v, float) and math.isnan(v)):
+                        return None
+                    return v
+                except Exception:
+                    return v
+            result["cpi"] = {
+                "date": str(latest_cpi.get("日期", "")),
+                "value": _safe_val(latest_cpi.get("今值")),
+                "forecast": _safe_val(latest_cpi.get("预测值")),
+                "previous": _safe_val(latest_cpi.get("前值")),
+            }
+    except Exception as e:
+        logger.warning(f"获取CPI数据失败: {e}")
+        result["cpi"] = {"error": str(e)}
+
+    # 5. 综合政策环境判断
+    policy_signals = []
+    try:
+        lpr_1y = result.get("lpr", {}).get("lpr_1y", 0)
+        rrr_change = result.get("rrr", {}).get("large_change", 0)
+        shibor_3m = result.get("shibor", {}).get("3m", 0)
+        cpi_val = result.get("cpi", {}).get("value")
+
+        if rrr_change and rrr_change < 0:
+            policy_signals.append(f"近期降准{abs(rrr_change)}个百分点，货币宽松")
+        elif rrr_change and rrr_change > 0:
+            policy_signals.append(f"近期升准{rrr_change}个百分点，货币收紧")
+
+        if lpr_1y:
+            if lpr_1y <= 3.1:
+                policy_signals.append(f"LPR 1Y {lpr_1y}%处于历史低位，宽松环境")
+            elif lpr_1y >= 4.0:
+                policy_signals.append(f"LPR 1Y {lpr_1y}%偏高，偏紧环境")
+            else:
+                policy_signals.append(f"LPR 1Y {lpr_1y}%，中性水平")
+
+        if shibor_3m:
+            if shibor_3m < 1.5:
+                policy_signals.append(f"SHIBOR 3M {shibor_3m}%极低，流动性充裕")
+            elif shibor_3m < 2.0:
+                policy_signals.append(f"SHIBOR 3M {shibor_3m}%偏低，流动性较松")
+            elif shibor_3m > 3.0:
+                policy_signals.append(f"SHIBOR 3M {shibor_3m}%偏高，流动性偏紧")
+
+        if cpi_val is not None:
+            try:
+                cpi_num = float(cpi_val)
+                if cpi_num < 0:
+                    policy_signals.append(f"CPI环比{cpi_num}%，通缩压力")
+                elif cpi_num > 1:
+                    policy_signals.append(f"CPI环比{cpi_num}%，通胀压力")
+            except (ValueError, TypeError):
+                pass
+    except Exception:
+        pass
+
+    result["policy_summary"] = "；".join(policy_signals) if policy_signals else "暂无明确政策信号"
+
+    return json.dumps(result, ensure_ascii=False)

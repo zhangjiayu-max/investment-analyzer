@@ -1,6 +1,6 @@
 <script setup>
-import { ref, computed, onMounted } from 'vue'
-import { getTokenUsage, getTokenUsageRecent, getTokenUsageSummary, getTokenUsageByCaller, getTokenUsageDaily, getPerformanceStats, getPerformanceByAgent } from '../api'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { getTokenUsage, getTokenUsageRecent, getTokenUsageSummary, getTokenUsageByCaller, getTokenUsageDaily, getPerformanceStats, getPerformanceByAgent, getRunningAgents } from '../api'
 
 const loading = ref(true)
 const summary = ref({ today: {}, total_calls: 0, total_tokens: 0, avg_per_call: 0 })
@@ -14,6 +14,29 @@ const totalPages = computed(() => Math.ceil(total.value / pageSize) || 1)
 const perfStats = ref({ total_runs: 0, avg_duration_ms: 0, max_duration_ms: 0, slow_calls: 0, unique_agents: 0 })
 const perfByAgent = ref([])
 const activePerfTab = ref('stats')
+
+// ── 运行中的 Agent ──
+const runningAgents = ref([])
+let runningTimer = null
+
+async function loadRunningAgents() {
+  try {
+    const { data } = await getRunningAgents()
+    runningAgents.value = data.agents || []
+  } catch (e) { /* ignore */ }
+}
+
+function startPolling() {
+  loadRunningAgents()
+  runningTimer = setInterval(loadRunningAgents, 3000)
+}
+
+function stopPolling() {
+  if (runningTimer) {
+    clearInterval(runningTimer)
+    runningTimer = null
+  }
+}
 
 async function loadRecords() {
   try {
@@ -68,7 +91,11 @@ function pages() {
   return pgs
 }
 
-onMounted(loadAll)
+onMounted(() => {
+  loadAll()
+  startPolling()
+})
+onUnmounted(stopPolling)
 
 function formatTime(ts) {
   if (!ts) return ''
@@ -146,6 +173,21 @@ const maxCallerTokens = computed(() => {
         <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
         刷新
       </button>
+    </div>
+
+    <!-- 运行中的 Agent -->
+    <div v-if="runningAgents.length > 0" class="running-agents-bar">
+      <div class="running-agents-title">
+        <span class="running-pulse"></span>
+        运行中的 Agent ({{ runningAgents.length }})
+      </div>
+      <div class="running-agents-list">
+        <div v-for="a in runningAgents" :key="a.id" class="running-agent-item">
+          <span class="running-agent-name">{{ a.agent }}</span>
+          <span class="running-agent-task">{{ a.task }}</span>
+          <span class="running-agent-time">{{ a.elapsed_s }}s</span>
+        </div>
+      </div>
     </div>
 
     <!-- Loading -->
@@ -327,6 +369,71 @@ const maxCallerTokens = computed(() => {
   display: flex;
   align-items: center;
   gap: 0.75rem;
+}
+
+/* ── 运行中的 Agent ── */
+.running-agents-bar {
+  background: linear-gradient(135deg, rgba(99, 102, 241, 0.05), rgba(99, 102, 241, 0.02));
+  border: 1px solid rgba(99, 102, 241, 0.2);
+  border-radius: var(--radius-md);
+  padding: 0.75rem 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.running-agents-title {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--color-primary);
+}
+
+.running-pulse {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #10b981;
+  animation: pulse 1.5s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.5; transform: scale(1.3); }
+}
+
+.running-agents-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.running-agent-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  background: var(--color-bg-card);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  padding: 0.35rem 0.65rem;
+  font-size: 0.78rem;
+}
+
+.running-agent-name {
+  font-weight: 600;
+  color: var(--color-text-primary);
+}
+
+.running-agent-task {
+  color: var(--color-text-muted);
+}
+
+.running-agent-time {
+  color: var(--color-primary);
+  font-weight: 500;
+  font-family: monospace;
 }
 
 .page-title {

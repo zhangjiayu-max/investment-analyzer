@@ -1,8 +1,12 @@
 <script setup>
 import { ref, onMounted } from 'vue'
-import { getDashboard, runAnalysis, runPanoramaAnalysis, getHotTopics, getDailyReport, listPanoramaRecords, getHotspotsAnalysis, getLatestHotspotsAnalysis, getRecommendations, getRecommendationStats, submitRecommendationFeedback, getBondRecommend } from '../api'
+import { getDashboard, runAnalysis, runPanoramaAnalysis, getHotTopics, getDailyReport, regenerateDailyReport, submitDailyReportFeedback, listPanoramaRecords, getHotspotsAnalysis, getLatestHotspotsAnalysis, getRecommendations, getRecommendationStats, submitRecommendationFeedback, getBondRecommend, getRebalancingSuggestion, autoVerifyRecommendations } from '../api'
+import ConfirmDialog from './ConfirmDialog.vue'
 
 const emit = defineEmits(['navigate'])
+
+// ── 二次确认弹窗 ──
+const confirm = ref({ visible: false, title: '', message: '', danger: false, onConfirm: null })
 
 const loading = ref(true)
 const error = ref(null)
@@ -10,6 +14,7 @@ const data = ref(null)
 
 // ── 市场热点（自动加载+AI增强） ──
 const hotTopics = ref(null)
+const hotTopicsFetchedAt = ref('')
 const hotTopicsLoading = ref(true)
 const hotspotLoading = ref(false)
 const hotspotError = ref(false)
@@ -17,6 +22,86 @@ const hotspotError = ref(false)
 // ── 每日日报自动加载 ──
 const dailyReport = ref(null)
 const dailyReportLoading = ref(true)
+const dailyReportRegenerating = ref(false)
+const showBriefing = ref(true)
+const briefingFeedback = ref({ rating: null, sending: false, sent: false, showComment: false, comment: '' })
+
+function formatBriefingTime(ts) {
+  if (!ts) return ''
+  const d = new Date(ts.replace(' ', 'T'))
+  if (isNaN(d)) return ts
+  return `${d.getMonth() + 1}月${d.getDate()}日 ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
+}
+
+function renderBriefing(text) {
+  if (!text) return ''
+  return text
+    .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
+    .replace(/^\s*[-*]\s+(.*)/gm, '<li>$1</li>')
+    .replace(/(<li>.*<\/li>\n?)+/gs, m => `<ul>${m}</ul>`)
+    .replace(/\n/g, '<br>')
+}
+
+function confirmRegenerateReport() {
+  confirm.value = {
+    visible: true,
+    title: '重新生成简报',
+    message: '将使用「市场日报分析师」重新生成今日市场简报，是否继续？',
+    danger: false,
+    onConfirm: async () => {
+      confirm.value.visible = false
+      dailyReportRegenerating.value = true
+      try {
+        const { data } = await regenerateDailyReport()
+        if (data.ok) {
+          const res = await getDailyReport()
+          if (res?.has_report) dailyReport.value = res.report
+        }
+      } catch (e) {
+        console.error('重新生成简报失败:', e)
+      } finally {
+        dailyReportRegenerating.value = false
+      }
+    }
+  }
+}
+
+function toggleBriefingFeedback(rating) {
+  if (briefingFeedback.value.sending) return
+  // 再次点击相同按钮 = 取消
+  if (briefingFeedback.value.sent && briefingFeedback.value.rating === rating) {
+    briefingFeedback.value = { rating: null, sending: false, sent: false, showComment: false, comment: '' }
+    return
+  }
+  // 切换 rating
+  briefingFeedback.value.rating = rating
+  briefingFeedback.value.sent = false
+  // 点踩显示输入框，点赞直接提交
+  if (rating === 'unhelpful') {
+    briefingFeedback.value.showComment = true
+  } else {
+    submitBriefingFeedback('helpful')
+  }
+}
+
+async function submitBriefingFeedback(rating, comment = '') {
+  briefingFeedback.value.sending = true
+  try {
+    await submitDailyReportFeedback({ rating, comment })
+    briefingFeedback.value.sent = true
+    briefingFeedback.value.showComment = false
+  } catch (e) {
+    console.error('反馈提交失败:', e)
+  } finally {
+    briefingFeedback.value.sending = false
+  }
+}
+
+async function submitBriefingFeedbackWithComment() {
+  const comment = briefingFeedback.value.comment.trim()
+  if (!comment) return
+  await submitBriefingFeedback('unhelpful', comment)
+}
 
 // ── 再平衡 AI 分析 ──
 const rebalanceLoading = ref(false)
@@ -32,21 +117,23 @@ onMounted(async () => {
     }
   } catch (_) {}
 
+  // 自动验证 pending 推荐（在加载历史之前，确保 stats 是最新的）
+  try { await autoVerifyRecommendations() } catch (_) {}
+
   await Promise.all([
     loadDashboard(),
     loadHotTopics(),
     loadDailyReport(),
     loadRecHistory(),
   ])
-  if (!rebalanceResult.value) {
-    try {
-      const { data: rec } = await listPanoramaRecords(1)
-      if (rec?.records?.length && rec.records[0].result_data) {
-        rebalanceResult.value = rec.records[0].result_data
-        showRebalance.value = true
-      }
-    } catch (_) {}
-  }
+  // 自动加载调仓分析（快速，无需等待 AI）
+  try {
+    const { data: res } = await getRebalancingSuggestion()
+    if (res && !res.error) {
+      rebalanceResult.value = res
+      showRebalance.value = true
+    }
+  } catch (_) {}
 })
 
 async function loadDailyReport() {
@@ -69,6 +156,7 @@ async function loadHotTopics() {
     const { data: res } = await getHotTopics()
     if (res?.news?.length) {
       hotTopics.value = res.news
+      hotTopicsFetchedAt.value = res.fetched_at || ''
     }
   } catch (e) {
     // 静默失败，不影响看板主流程
@@ -178,6 +266,16 @@ async function handleBondRecommend() {
   }
 }
 
+function confirmBondRecommend() {
+  confirm.value = {
+    visible: true,
+    title: 'AI 债券推荐',
+    message: '将使用「债券配置顾问」分析债券市场并生成配置建议，是否继续？',
+    danger: false,
+    onConfirm: () => { confirm.value.visible = false; handleBondRecommend() }
+  }
+}
+
 async function generateHotspots() {
   hotspotLoading.value = true
   hotspotsAnalysis.value = null
@@ -185,6 +283,9 @@ async function generateHotspots() {
   try {
     const { data } = await getHotspotsAnalysis()
     hotspotsAnalysis.value = data
+    // 生成后自动验证旧的 pending 推荐，并刷新统计
+    try { await autoVerifyRecommendations() } catch (_) {}
+    loadRecHistory()
   } catch (e) {
     hotspotError.value = true
     hotspotsAnalysis.value = {
@@ -197,32 +298,42 @@ async function generateHotspots() {
   }
 }
 
+function confirmHotspots() {
+  confirm.value = {
+    visible: true,
+    title: '今日热门机会',
+    message: '将使用「热点分析专家」分析市场热点并生成投资建议，是否继续？',
+    danger: false,
+    onConfirm: () => { confirm.value.visible = false; generateHotspots() }
+  }
+}
+
 // ── 生成再平衡建议 ──
 async function generateRebalance() {
   rebalanceLoading.value = true
   rebalanceResult.value = null
   showRebalance.value = true
   try {
-    const { data: res } = await runPanoramaAnalysis()
-    rebalanceResult.value = res.result
+    const { data: res } = await getRebalancingSuggestion()
+    rebalanceResult.value = res
   } catch (e) {
-    rebalanceResult.value = '分析失败: ' + (e.response?.data?.detail || e.message)
+    rebalanceResult.value = { error: '分析失败: ' + (e.response?.data?.detail || e.message) }
   } finally {
     rebalanceLoading.value = false
   }
 }
 
-async function regenerateRebalance() {
-  rebalanceLoading.value = true
-  rebalanceResult.value = null
-  showRebalance.value = true
-  try {
-    const { data: res } = await runPanoramaAnalysis()
-    rebalanceResult.value = res.result
-  } catch (e) {
-    rebalanceResult.value = '分析失败: ' + (e.response?.data?.detail || e.message)
-  } finally {
-    rebalanceLoading.value = false
+async function handleRebalance() {
+  if (rebalanceResult.value) {
+    confirm.value = {
+      visible: true,
+      title: '刷新调仓分析',
+      message: '将重新计算持仓偏离度和目标配比，是否继续？',
+      danger: false,
+      onConfirm: () => { confirm.value.visible = false; generateRebalance() }
+    }
+  } else {
+    generateRebalance()
   }
 }
 
@@ -246,12 +357,6 @@ const concentrationIcon = { low: '✅', moderate: '⚡', high: '⚠️' }
         <h2 class="page-title">每日投资决策看板</h2>
         <p class="page-desc">{{ data?.date || '加载中...' }} · 整合估值、持仓、零钱，辅助决策</p>
       </div>
-      <button class="btn-ghost refresh-btn" @click="loadDashboard" :disabled="loading">
-        <svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24" :class="{ spinning: loading }">
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
-        </svg>
-        刷新
-      </button>
     </div>
 
     <!-- Global error -->
@@ -275,6 +380,79 @@ const concentrationIcon = { low: '✅', moderate: '⚡', high: '⚠️' }
       <button class="btn-ghost btn-sm" @click="emit('navigate', 'valuation')">查看 →</button>
     </div>
 
+    <!-- 每日简报 -->
+    <div v-if="dailyReport && !dailyReportLoading" class="briefing-card card">
+      <div class="briefing-header" @click="showBriefing = !showBriefing">
+        <div class="briefing-title-row">
+          <svg width="18" height="18" fill="none" stroke="currentColor" viewBox="0 0 24 24" class="briefing-icon">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M19 20H5a2 2 0 01-2-2V6a2 2 0 012-2h10a2 2 0 012 2v1m2 13a2 2 0 01-2-2V7m2 13a2 2 0 002-2V9a2 2 0 00-2-2h-2m-4-3H9M7 16h6M7 8h6v4H7V8z"/>
+          </svg>
+          <span class="briefing-label">每日市场简报</span>
+          <span class="briefing-time">{{ formatBriefingTime(dailyReport.created_at) }}</span>
+          <button
+            class="btn-ai-action btn-briefing-gen"
+            :class="{ 'btn-loading': dailyReportRegenerating }"
+            :disabled="dailyReportRegenerating"
+            @click.stop="confirmRegenerateReport"
+          >
+            <svg :class="['icon-spin', { 'spinning': dailyReportRegenerating }]" width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
+            </svg>
+            <span>重新生成</span>
+            <span class="ai-agent-tooltip">市场日报分析师</span>
+          </button>
+        </div>
+        <svg :class="['briefing-chevron', { 'briefing-chevron-up': showBriefing }]" width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/>
+        </svg>
+      </div>
+      <Transition name="slide-fade">
+        <div v-if="showBriefing" class="briefing-body" v-html="renderBriefing(dailyReport.result)"></div>
+      </Transition>
+      <div v-if="showBriefing" class="briefing-footer">
+        <div class="briefing-feedback">
+          <button
+            class="rec-feedback-btn helpful"
+            :class="{ active: briefingFeedback.rating === 'helpful' }"
+            :disabled="briefingFeedback.sending"
+            @click="toggleBriefingFeedback('helpful')"
+            title="点赞"
+          >
+            <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14 10h4.764a2 2 0 011.789 2.894l-3.5 7A2 2 0 0115.263 21h-4.017c-.163 0-.326-.02-.485-.06L7 20m7-10V5a2 2 0 00-2-2h-.095c-.5 0-.905.405-.905.905 0 .714-.211 1.412-.608 2.006L7 11v9m7-10h-2M7 20H5a2 2 0 01-2-2v-6a2 2 0 012-2h2.5"/>
+            </svg>
+          </button>
+          <button
+            class="rec-feedback-btn unhelpful"
+            :class="{ active: briefingFeedback.rating === 'unhelpful' }"
+            :disabled="briefingFeedback.sending"
+            @click="toggleBriefingFeedback('unhelpful')"
+            title="点踩"
+          >
+            <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 14H5.236a2 2 0 01-1.789-2.894l3.5-7A2 2 0 018.736 3h4.018c.163 0 .326.02.485.06L17 4m-7 10v5a2 2 0 002 2h.095c.5 0 .905-.405.905-.905 0-.714.211-1.412.608-2.006L17 13V4m-7 10h2m5-10h2a2 2 0 012 2v6a2 2 0 01-2 2h-2.5"/>
+            </svg>
+          </button>
+          <span v-if="briefingFeedback.sent && !briefingFeedback.showComment" class="briefing-feedback-hint">感谢反馈</span>
+        </div>
+        <Transition name="slide-fade">
+          <div v-if="briefingFeedback.showComment" class="briefing-comment-box">
+            <input
+              v-model="briefingFeedback.comment"
+              class="briefing-comment-input"
+              placeholder="请描述问题，帮助我们改进..."
+              @keydown.enter="submitBriefingFeedbackWithComment"
+            />
+            <button
+              class="briefing-comment-submit"
+              :disabled="briefingFeedback.sending || !briefingFeedback.comment.trim()"
+              @click="submitBriefingFeedbackWithComment"
+            >提交</button>
+          </div>
+        </Transition>
+      </div>
+    </div>
+
     <!-- 2x2 Grid -->
     <div v-if="!loading" class="dash-grid">
       <!-- ── Card 1: 低估指数 ── -->
@@ -286,14 +464,42 @@ const concentrationIcon = { low: '✅', moderate: '⚡', high: '⚠️' }
             </svg>
             <span>今日低估指数</span>
           </div>
-          <span v-if="data?.undervalued_indexes?.length" class="card-badge">{{ data.undervalued_indexes.length }}只</span>
+          <div class="card-header-actions">
+            <span class="card-data-time">{{ data?.undervalued_updated_at || data?.undervalued_data_date || '' }}</span>
+            <span v-if="data?.undervalued_indexes?.length" class="card-badge">{{ data.undervalued_indexes.length }}只</span>
+            <button class="btn-icon-refresh" @click="loadDashboard" :disabled="loading" title="刷新数据">
+              <svg :class="['icon-refresh', { 'spinning': loading }]" width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
+              </svg>
+            </button>
+          </div>
         </div>
         <div v-if="!data?.undervalued_indexes?.length" class="card-empty">
           <p>暂无低估指数数据</p>
           <p class="card-empty-hint">通过文章导入估值数据后自动展示</p>
         </div>
         <div v-else class="card-body">
-          <div v-for="idx in data.undervalued_indexes.slice(0, 5)" :key="idx.index_code" class="index-row" @click="emit('navigate', 'valuation')">
+          <!-- 摘要指标条 -->
+          <div class="health-metrics">
+            <div class="metric-item">
+              <span class="metric-label">低估数量</span>
+              <span class="metric-value">{{ data.undervalued_indexes.length }} 只</span>
+            </div>
+            <div class="metric-item">
+              <span class="metric-label">最低百分位</span>
+              <span class="metric-value" :style="{ color: getPercentileColor(data.undervalued_indexes[0]?.percentile) }">
+                {{ data.undervalued_indexes[0]?.percentile }}%
+              </span>
+            </div>
+            <div class="metric-item">
+              <span class="metric-label">极度低估</span>
+              <span class="metric-value" style="color: #dc2626">
+                {{ data.undervalued_indexes.filter(i => i.assessment_level === 'extreme').length }} 只
+              </span>
+            </div>
+          </div>
+
+          <div v-for="idx in data.undervalued_indexes.slice(0, 10)" :key="idx.index_code" class="index-row" @click="emit('navigate', 'valuation')">
             <div class="index-info">
               <span class="index-name">{{ idx.index_name || idx.index_code }}</span>
               <span class="index-meta">{{ idx.metric_type }} {{ idx.current_value }}</span>
@@ -323,13 +529,32 @@ const concentrationIcon = { low: '✅', moderate: '⚡', high: '⚠️' }
             </svg>
             <span>持仓健康度</span>
           </div>
-          <button
-            v-if="data?.portfolio_health && !rebalanceLoading"
-            class="btn-primary btn-sm"
-            @click="rebalanceResult ? (showRebalance = !showRebalance) : generateRebalance()"
-          >
-            {{ showRebalance ? '收起建议' : rebalanceResult ? '展开建议' : 'AI 再平衡建议' }}
-          </button>
+          <div class="card-header-actions">
+            <span v-if="data?.portfolio_health" class="card-data-time">{{ data?.portfolio_updated_at || '' }}</span>
+            <button
+              v-if="data?.portfolio_health"
+              class="btn-ai-action"
+              :class="{ 'btn-loading': rebalanceLoading }"
+              :disabled="rebalanceLoading"
+              @click="handleRebalance"
+            >
+              <svg :class="['icon-spin', { 'spinning': rebalanceLoading }]" width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
+              </svg>
+              <span>{{ rebalanceResult ? '重新生成' : 'AI 再平衡建议' }}</span>
+              <span class="ai-agent-tooltip">全景诊断分析师</span>
+            </button>
+            <button
+              v-if="rebalanceResult"
+              class="btn-toggle"
+              @click="showRebalance = !showRebalance"
+              :title="showRebalance ? '收起建议' : '展开建议'"
+            >
+              <svg :class="['toggle-arrow', { 'expanded': showRebalance }]" width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/>
+              </svg>
+            </button>
+          </div>
         </div>
         <div v-if="!data?.portfolio_health" class="card-empty">
           <p>暂无持仓数据</p>
@@ -383,17 +608,50 @@ const concentrationIcon = { low: '✅', moderate: '⚡', high: '⚠️' }
           <div v-if="showRebalance" class="rebalance-section">
             <div v-if="rebalanceLoading" class="card-loading">
               <div class="spinner"></div>
-              <p>正在生成再平衡建议...</p>
+              <p>正在分析偏离度...</p>
             </div>
-            <div v-else class="rebalance-result">
+            <div v-else-if="rebalanceResult && !rebalanceResult.error" class="rebalance-result">
+              <!-- 偏离度指示 -->
               <div class="rebalance-header">
-                <span class="rebalance-title">AI 再平衡建议</span>
-                <div class="rebalance-header-actions">
-                  <button class="btn-ghost btn-sm" @click="regenerateRebalance">重新生成</button>
-                  <button class="btn-ghost btn-sm" @click="showRebalance = false">收起</button>
+                <span class="rebalance-title">调仓分析</span>
+                <span :class="['drift-badge', rebalanceResult.drift_level]">
+                  {{ { balanced: '已平衡', slight: '轻微偏离', significant: '显著偏离' }[rebalanceResult.drift_level] || '未知' }}
+                </span>
+                <span class="market-tag">{{ rebalanceResult.market_level }} · {{ rebalanceResult.market_avg_percentile }}%</span>
+              </div>
+
+              <!-- 配比对比 -->
+              <div class="allocation-compare">
+                <div class="alloc-row" v-for="cat in ['equity','bond','index','hybrid','money','qdii','cash']" :key="cat"
+                  v-show="(rebalanceResult.current_allocation[cat] || 0) > 0.001 || (rebalanceResult.target_allocation[cat] || 0) > 0.001">
+                  <span class="alloc-label">{{ {equity:'股票型',bond:'债券型',index:'指数型',hybrid:'混合型',money:'货币型',qdii:'QDII',cash:'现金'}[cat] || cat }}</span>
+                  <div class="alloc-bars">
+                    <div class="alloc-bar-current" :style="{ width: Math.min((rebalanceResult.current_allocation[cat]||0)*100, 100) + '%' }"></div>
+                    <div class="alloc-bar-target" :style="{ width: Math.min((rebalanceResult.target_allocation[cat]||0)*100, 100) + '%' }"></div>
+                  </div>
+                  <span class="alloc-values">
+                    <span class="alloc-current">{{ ((rebalanceResult.current_allocation[cat]||0)*100).toFixed(0) }}%</span>
+                    <span class="alloc-arrow">→</span>
+                    <span class="alloc-target">{{ ((rebalanceResult.target_allocation[cat]||0)*100).toFixed(0) }}%</span>
+                  </span>
                 </div>
               </div>
-              <div class="rebalance-content">{{ rebalanceResult }}</div>
+
+              <!-- 调仓建议 -->
+              <div v-if="rebalanceResult.suggestions?.length" class="rebalance-suggestions">
+                <div v-for="(s, i) in rebalanceResult.suggestions" :key="i" class="suggestion-item">
+                  <span :class="['suggestion-action', s.action]">
+                    {{ {buy:'买入',sell:'卖出',buy_index:'定投',deploy_cash:'配置现金',reserve_cash:'保留现金'}[s.action] || s.action }}
+                  </span>
+                  <span class="suggestion-detail">
+                    {{ s.fund_name || s.category }} · {{ s.reason }}
+                    <span v-if="s.amount_range" class="suggestion-amount">{{ s.amount_range }}</span>
+                  </span>
+                </div>
+              </div>
+            </div>
+            <div v-else-if="rebalanceResult?.error" class="rebalance-result">
+              <span class="rebalance-content" style="color: var(--text-muted)">{{ rebalanceResult.error }}</span>
             </div>
           </div>
 
@@ -412,11 +670,20 @@ const concentrationIcon = { low: '✅', moderate: '⚡', high: '⚠️' }
             </svg>
             <span>今日热门机会</span>
           </div>
-          <button
-            v-if="!hotspotLoading"
-            class="btn-primary btn-sm"
-            @click="generateHotspots"
-          >{{ hotspotsAnalysis ? '重新分析' : 'AI 分析' }}</button>
+          <div class="card-header-actions">
+            <span v-if="hotTopicsFetchedAt" class="card-data-time">{{ hotTopicsFetchedAt }}</span>
+            <button
+              v-if="!hotspotLoading"
+              class="btn-ai-action"
+              @click="confirmHotspots"
+            >
+            <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z"/>
+            </svg>
+            <span>{{ hotspotsAnalysis ? '重新分析' : 'AI 分析' }}</span>
+            <span class="ai-agent-tooltip">热点分析专家</span>
+          </button>
+          </div>
         </div>
 
         <!-- 自动加载的新闻列表 -->
@@ -531,17 +798,47 @@ const concentrationIcon = { low: '✅', moderate: '⚡', high: '⚠️' }
             </svg>
             <span>零钱配置</span>
           </div>
-          <button
-            v-if="data?.cash_management?.balance > 0"
-            class="btn-primary btn-sm"
-            @click="handleBondRecommend"
-            :disabled="bondLoading"
-          >{{ bondResult ? '重新分析' : 'AI 债券推荐' }}</button>
+          <div class="card-header-actions">
+            <span v-if="data?.cash_management" class="card-data-time">{{ data?.cash_updated_at || '' }}</span>
+            <button
+              v-if="data?.cash_management?.balance > 0"
+              class="btn-ai-action"
+              :class="{ 'btn-loading': bondLoading }"
+              @click="confirmBondRecommend"
+              :disabled="bondLoading"
+            >
+            <svg v-if="bondLoading" class="icon-spin spinning" width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
+            </svg>
+            <svg v-else width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
+            </svg>
+            <span>{{ bondLoading ? '分析中...' : bondResult ? '重新分析' : 'AI 债券推荐' }}</span>
+            <span class="ai-agent-tooltip">债券配置顾问</span>
+          </button>
+          </div>
         </div>
         <div class="card-body">
           <div class="cash-balance-row">
             <span class="cash-label">可用零钱</span>
             <span class="cash-value">¥{{ (data?.cash_management?.balance || 0).toLocaleString() }}</span>
+            <span v-if="data?.cash_management?.suggestion?.cash_ratio != null" class="cash-ratio-tag">
+              占比 {{ (data.cash_management.suggestion.cash_ratio * 100).toFixed(0) }}%
+            </span>
+          </div>
+          <div v-if="data?.cash_management?.cash_details" class="cash-details-row">
+            <span v-for="(bal, uid) in data.cash_management.cash_details" :key="uid" class="cash-detail-tag">
+              {{ uid === '小鱼儿' ? '🐟' : '🌸' }} {{ uid }} ¥{{ bal.toLocaleString() }}
+            </span>
+          </div>
+
+          <!-- 现金预警 + 权益机会 -->
+          <div v-if="data?.cash_management?.suggestion?.alerts?.length" class="cash-alerts">
+            <div v-for="(alert, i) in data.cash_management.suggestion.alerts" :key="i"
+              :class="['cash-alert', alert.level]">
+              <span class="cash-alert-icon">{{ {warning:'⚠️',info:'ℹ️',opportunity:'💡'}[alert.level] || '📌' }}</span>
+              <span>{{ alert.message }}</span>
+            </div>
           </div>
 
           <div v-if="data?.cash_management?.bond_market" class="bond-info">
@@ -606,6 +903,9 @@ const concentrationIcon = { low: '✅', moderate: '⚡', high: '⚠️' }
                 <span class="bond-ai-summary">{{ bondResult.summary }}</span>
                 <span class="bond-ai-market">{{ bondResult.market_assessment }}</span>
               </div>
+              <div v-if="bondResult.policy_analysis" class="bond-ai-trend">
+                <span class="bond-ai-label">政策环境：</span>{{ bondResult.policy_analysis }}
+              </div>
               <div v-if="bondResult.trend_analysis" class="bond-ai-trend">
                 <span class="bond-ai-label">趋势判断：</span>{{ bondResult.trend_analysis }}
               </div>
@@ -644,6 +944,16 @@ const concentrationIcon = { low: '✅', moderate: '⚡', high: '⚠️' }
       </div>
     </Transition>
   </Teleport>
+
+  <!-- 二次确认弹窗 -->
+  <ConfirmDialog
+    :visible="confirm.visible"
+    :title="confirm.title"
+    :message="confirm.message"
+    :danger="confirm.danger"
+    @confirm="confirm.onConfirm"
+    @cancel="confirm.visible = false"
+  />
 </template>
 
 <style scoped>
@@ -684,6 +994,149 @@ const concentrationIcon = { low: '✅', moderate: '⚡', high: '⚠️' }
   align-items: center;
   gap: 0.75rem;
   color: var(--color-text-muted);
+}
+
+/* ── 每日简报 ── */
+.briefing-card {
+  margin-bottom: 1rem;
+  padding: 0;
+  overflow: hidden;
+  border: 1px solid rgba(99, 102, 241, 0.15);
+  background: linear-gradient(135deg, rgba(99, 102, 241, 0.03) 0%, rgba(248, 250, 252, 0.9) 100%);
+}
+.briefing-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.85rem 1.25rem;
+  cursor: pointer;
+  user-select: none;
+  transition: background 0.2s;
+}
+.briefing-header:hover {
+  background: rgba(99, 102, 241, 0.04);
+}
+.briefing-title-row {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+}
+.briefing-icon {
+  color: var(--color-primary);
+  flex-shrink: 0;
+}
+.briefing-label {
+  font-weight: 700;
+  font-size: 0.95rem;
+  color: var(--color-text-primary);
+}
+.briefing-time {
+  font-size: 0.78rem;
+  color: var(--color-text-muted);
+  background: rgba(99, 102, 241, 0.08);
+  padding: 0.15rem 0.5rem;
+  border-radius: 999px;
+}
+.btn-briefing-gen {
+  padding: 0.3rem 0.65rem;
+  font-size: 0.75rem;
+  margin-left: 0.4rem;
+}
+.briefing-chevron {
+  color: var(--color-text-muted);
+  transition: transform 0.25s ease;
+  flex-shrink: 0;
+}
+.briefing-chevron-up {
+  transform: rotate(180deg);
+}
+.briefing-body {
+  padding: 0 1.25rem 1rem;
+  font-size: 0.88rem;
+  line-height: 1.7;
+  color: var(--color-text-secondary);
+}
+.briefing-body :deep(ul) {
+  margin: 0.3rem 0;
+  padding-left: 1.2rem;
+}
+.briefing-body :deep(li) {
+  margin-bottom: 0.2rem;
+}
+.briefing-body :deep(strong) {
+  color: var(--color-text-primary);
+  font-weight: 600;
+}
+.briefing-footer {
+  display: flex;
+  justify-content: flex-end;
+  padding: 0.5rem 1.25rem 0.75rem;
+  border-top: 1px solid var(--color-border);
+}
+.briefing-feedback {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+.briefing-feedback-hint {
+  font-size: 0.75rem;
+  color: var(--color-text-muted);
+  margin-left: 0.3rem;
+}
+.briefing-comment-box {
+  display: flex;
+  gap: 0.5rem;
+  margin-top: 0.6rem;
+  width: 100%;
+}
+.briefing-comment-input {
+  flex: 1;
+  padding: 0.45rem 0.75rem;
+  font-size: 0.82rem;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-bg);
+  color: var(--color-text-primary);
+  outline: none;
+  transition: border-color 0.2s;
+}
+.briefing-comment-input:focus {
+  border-color: var(--color-primary);
+}
+.briefing-comment-input::placeholder {
+  color: var(--color-text-muted);
+}
+.briefing-comment-submit {
+  padding: 0.45rem 1rem;
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: #fff;
+  background: var(--color-primary);
+  border: none;
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  transition: opacity 0.2s;
+  white-space: nowrap;
+}
+.briefing-comment-submit:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.briefing-comment-submit:hover:not(:disabled) {
+  opacity: 0.9;
+}
+.slide-fade-enter-active {
+  transition: all 0.25s ease-out;
+}
+.slide-fade-leave-active {
+  transition: all 0.2s ease-in;
+}
+.slide-fade-enter-from,
+.slide-fade-leave-to {
+  opacity: 0;
+  max-height: 0;
+  padding-top: 0;
+  padding-bottom: 0;
 }
 
 /* ── 数据新鲜度警告 ── */
@@ -831,46 +1284,78 @@ const concentrationIcon = { low: '✅', moderate: '⚡', high: '⚠️' }
 
 /* ── Card ── */
 .dash-card {
-  padding: 1rem 1.25rem;
+  padding: 1.25rem 1.5rem;
   display: flex;
   flex-direction: column;
-  gap: 0.75rem;
+  gap: 1rem;
+  background: linear-gradient(135deg, var(--color-bg-card) 0%, rgba(248, 250, 252, 0.8) 100%);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-xl);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04), 0 4px 12px rgba(0, 0, 0, 0.02);
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  position: relative;
+  overflow: hidden;
+}
+
+.dash-card::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 3px;
+  background: linear-gradient(90deg, var(--color-primary), var(--color-primary-light));
+  opacity: 0;
+  transition: opacity 0.3s ease;
+}
+
+.dash-card:hover {
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.06), 0 8px 24px rgba(0, 0, 0, 0.04);
+  transform: translateY(-2px);
+}
+
+.dash-card:hover::before {
+  opacity: 1;
 }
 
 .card-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 0.5rem;
+  gap: 0.75rem;
 }
 
 .card-title-row {
   display: flex;
   align-items: center;
-  gap: 0.5rem;
-  font-weight: 600;
-  font-size: 0.95rem;
+  gap: 0.65rem;
+  font-weight: 700;
+  font-size: 1.05rem;
   color: var(--color-text-primary);
+  letter-spacing: -0.01em;
 }
 
 .card-icon {
   color: var(--color-primary);
   flex-shrink: 0;
+  width: 20px;
+  height: 20px;
 }
 
 .card-badge {
-  font-size: 0.7rem;
-  padding: 0.15rem 0.5rem;
+  font-size: 0.72rem;
+  padding: 0.2rem 0.6rem;
   border-radius: 999px;
-  background: var(--color-primary-bg);
+  background: linear-gradient(135deg, var(--color-primary-bg), rgba(99, 102, 241, 0.1));
   color: var(--color-primary);
-  font-weight: 600;
+  font-weight: 700;
+  border: 1px solid rgba(99, 102, 241, 0.15);
 }
 
 .card-body {
   display: flex;
   flex-direction: column;
-  gap: 0.5rem;
+  gap: 0.65rem;
 }
 
 .card-empty {
@@ -878,15 +1363,16 @@ const concentrationIcon = { low: '✅', moderate: '⚡', high: '⚠️' }
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  padding: 2rem 0;
+  padding: 2.5rem 0;
   text-align: center;
   color: var(--color-text-muted);
-  font-size: 0.85rem;
+  font-size: 0.9rem;
 }
 
 .card-empty-hint {
-  font-size: 0.75rem;
-  margin-top: 0.25rem;
+  font-size: 0.8rem;
+  margin-top: 0.35rem;
+  opacity: 0.8;
 }
 
 .card-loading {
@@ -894,40 +1380,249 @@ const concentrationIcon = { low: '✅', moderate: '⚡', high: '⚠️' }
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  padding: 2rem 0;
-  gap: 0.75rem;
+  padding: 2.5rem 0;
+  gap: 1rem;
   color: var(--color-text-muted);
-  font-size: 0.85rem;
+  font-size: 0.9rem;
 }
 
 .spinner {
-  width: 24px;
-  height: 24px;
-  border: 2.5px solid var(--color-border);
+  width: 28px;
+  height: 28px;
+  border: 3px solid var(--color-border);
   border-top-color: var(--color-primary);
   border-radius: 50%;
-  animation: spin 0.7s linear infinite;
+  animation: spin 0.8s cubic-bezier(0.4, 0, 0.2, 1) infinite;
 }
 
 .card-actions {
   display: flex;
   gap: 0.5rem;
-  margin-top: 0.25rem;
+  margin-top: 0.5rem;
+}
+
+/* ── Card Header Actions ── */
+.card-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.btn-icon-refresh {
+  background: none;
+  border: none;
+  color: var(--color-text-muted);
+  cursor: pointer;
+  padding: 0.35rem;
+  border-radius: var(--radius-md);
+  transition: all 0.2s ease;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.btn-icon-refresh:hover {
+  color: var(--color-primary);
+  background: var(--color-primary-bg);
+}
+
+.btn-icon-refresh:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.icon-refresh {
+  transition: transform 0.3s ease;
+}
+
+.icon-refresh.spinning {
+  animation: spin 1s linear infinite;
+}
+
+/* ── AI Button Group ── */
+.ai-btn-group {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.btn-toggle {
+  background: none;
+  border: 1px solid var(--color-border-light);
+  color: var(--color-text-muted);
+  cursor: pointer;
+  padding: 0.35rem;
+  border-radius: var(--radius-md);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.2s ease;
+}
+
+.btn-toggle:hover {
+  background: var(--color-bg-hover);
+  color: var(--color-text-secondary);
+  border-color: var(--color-border);
+}
+
+.toggle-arrow {
+  transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.toggle-arrow.expanded {
+  transform: rotate(180deg);
+}
+
+/* ── AI Action Button ── */
+.btn-ai-action {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.45rem 0.85rem;
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--color-primary);
+  background: linear-gradient(135deg, var(--color-primary-bg), rgba(99, 102, 241, 0.08));
+  border: 1px solid rgba(99, 102, 241, 0.2);
+  border-radius: var(--radius-lg);
+  cursor: pointer;
+  transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+  white-space: nowrap;
+}
+
+.btn-ai-action::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: -100%;
+  width: 100%;
+  height: 100%;
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.4), transparent);
+  transition: left 0.5s ease;
+}
+
+.btn-ai-action:hover {
+  background: linear-gradient(135deg, rgba(99, 102, 241, 0.15), rgba(99, 102, 241, 0.12));
+  border-color: rgba(99, 102, 241, 0.4);
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(99, 102, 241, 0.15);
+}
+
+.btn-ai-action:hover::before {
+  left: 100%;
+}
+
+.btn-ai-action:active {
+  transform: translateY(0);
+  box-shadow: none;
+}
+
+.btn-ai-action:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+  transform: none;
+  box-shadow: none;
+}
+
+.btn-ai-action.btn-loading {
+  background: linear-gradient(135deg, rgba(99, 102, 241, 0.08), rgba(99, 102, 241, 0.05));
+  border-color: rgba(99, 102, 241, 0.15);
+}
+
+.btn-ai-action.btn-loading::after {
+  content: '';
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  height: 2px;
+  width: 100%;
+  background: linear-gradient(90deg, transparent, var(--color-primary), transparent);
+  animation: loading-bar 1.5s ease-in-out infinite;
+}
+
+@keyframes loading-bar {
+  0% { transform: translateX(-100%); }
+  50% { transform: translateX(0); }
+  100% { transform: translateX(100%); }
+}
+
+.btn-ai-regenerate {
+  padding: 0.45rem;
+  background: transparent;
+  border-color: transparent;
+}
+
+.btn-ai-regenerate:hover {
+  background: var(--color-primary-bg);
+  border-color: rgba(99, 102, 241, 0.2);
+}
+
+/* ── AI Agent Tooltip ── */
+.ai-agent-tooltip {
+  position: absolute;
+  top: calc(100% + 8px);
+  left: 50%;
+  transform: translateX(-50%) scale(0.95);
+  padding: 0.4rem 0.7rem;
+  font-size: 0.7rem;
+  font-weight: 600;
+  color: white;
+  background: linear-gradient(135deg, #1e1b4b, #312e81);
+  border-radius: var(--radius-md);
+  white-space: nowrap;
+  opacity: 0;
+  visibility: hidden;
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  pointer-events: none;
+  z-index: 100;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+}
+
+.ai-agent-tooltip::after {
+  content: '';
+  position: absolute;
+  bottom: 100%;
+  left: 50%;
+  transform: translateX(-50%);
+  border: 5px solid transparent;
+  border-bottom-color: #1e1b4b;
+}
+
+.btn-ai-action:hover .ai-agent-tooltip {
+  opacity: 1;
+  visibility: visible;
+  transform: translateX(-50%) scale(1);
+}
+
+/* ── Icon Spin Animation ── */
+.icon-spin {
+  transition: transform 0.3s ease;
+}
+
+.icon-spin.spinning {
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
 }
 
 /* ── 低估指数 ── */
 .index-row {
   display: flex;
   align-items: center;
-  gap: 0.5rem;
-  padding: 0.4rem 0.35rem;
-  border-radius: var(--radius-sm);
+  gap: 0.6rem;
+  padding: 0.5rem 0.5rem;
+  border-radius: var(--radius-md);
   cursor: pointer;
-  transition: background var(--transition-fast);
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 .index-row:hover {
   background: var(--color-bg-hover);
+  transform: translateX(2px);
 }
 
 .index-info {
@@ -935,12 +1630,12 @@ const concentrationIcon = { low: '✅', moderate: '⚡', high: '⚠️' }
   flex-direction: column;
   min-width: 0;
   flex: 0 0 auto;
-  width: 100px;
+  width: 105px;
 }
 
 .index-name {
-  font-size: 0.82rem;
-  font-weight: 600;
+  font-size: 0.9rem;
+  font-weight: 700;
   color: var(--color-text-primary);
   white-space: nowrap;
   overflow: hidden;
@@ -948,275 +1643,430 @@ const concentrationIcon = { low: '✅', moderate: '⚡', high: '⚠️' }
 }
 
 .index-meta {
-  font-size: 0.65rem;
+  font-size: 0.75rem;
   color: var(--color-text-muted);
+  font-weight: 500;
 }
 
 .index-percentile {
   display: flex;
   align-items: center;
-  gap: 0.3rem;
+  gap: 0.6rem;
   flex: 1;
   min-width: 0;
 }
 
 .percentile-bar-bg {
   flex: 1;
-  height: 5px;
+  height: 8px;
   background: var(--color-bg-input);
   border-radius: 4px;
   overflow: hidden;
-  min-width: 40px;
+  min-width: 50px;
 }
 
 .percentile-bar {
   height: 100%;
   border-radius: 4px;
-  transition: width 0.4s ease;
+  transition: width 0.6s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 .percentile-value {
-  font-size: 0.8rem;
-  font-weight: 700;
-  width: 34px;
+  font-size: 0.88rem;
+  font-weight: 800;
+  width: 42px;
   text-align: right;
   flex-shrink: 0;
 }
 
 .assessment-tag {
-  font-size: 0.6rem;
-  font-weight: 600;
-  padding: 0.05rem 0.35rem;
-  border-radius: 3px;
+  font-size: 0.7rem;
+  font-weight: 700;
+  padding: 0.2rem 0.55rem;
+  border-radius: var(--radius-sm);
   white-space: nowrap;
   flex-shrink: 0;
-  letter-spacing: 0.02em;
+  letter-spacing: 0.03em;
 }
 
 .btn-link {
   background: none;
   border: none;
   color: var(--color-primary);
-  font-size: 0.78rem;
+  font-size: 0.88rem;
+  font-weight: 600;
   cursor: pointer;
-  padding: 0.25rem 0;
+  padding: 0.4rem 0;
   text-align: left;
   align-self: flex-start;
+  transition: all 0.2s ease;
 }
 
 .btn-link:hover {
-  text-decoration: underline;
+  color: var(--color-primary-dark);
+  transform: translateX(3px);
 }
 
 /* ── 持仓健康度 ── */
 .health-metrics {
   display: grid;
   grid-template-columns: 1fr 1fr 1fr;
-  gap: 0.5rem;
+  gap: 0.75rem;
+  padding: 0.75rem;
+  background: linear-gradient(135deg, rgba(248, 250, 252, 0.8), rgba(241, 245, 249, 0.5));
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--color-border-light);
 }
 
 .metric-item {
   display: flex;
   flex-direction: column;
-  gap: 0.15rem;
+  gap: 0.25rem;
 }
 
 .metric-label {
-  font-size: 0.7rem;
+  font-size: 0.78rem;
   color: var(--color-text-muted);
+  font-weight: 600;
 }
 
 .metric-value {
-  font-size: 1rem;
-  font-weight: 700;
+  font-size: 1.1rem;
+  font-weight: 800;
   color: var(--color-text-primary);
+  letter-spacing: -0.02em;
 }
 
 .metric-value.profit {
-  color: var(--color-danger);
+  color: #dc2626;
 }
 
 .metric-value.loss {
-  color: var(--color-success);
+  color: #059669;
 }
 
 .concentration-row {
   display: flex;
   align-items: flex-start;
-  gap: 0.5rem;
-  padding: 0.5rem 0;
+  gap: 0.75rem;
+  padding: 0.75rem;
   border-top: 1px solid var(--color-border-light);
   border-bottom: 1px solid var(--color-border-light);
+  background: rgba(248, 250, 252, 0.5);
+  border-radius: var(--radius-md);
 }
 
 .concentration-icon {
-  font-size: 1.1rem;
+  font-size: 1.25rem;
   line-height: 1.4;
 }
 
 .concentration-text {
-  font-size: 0.8rem;
+  font-size: 0.85rem;
   color: var(--color-text-secondary);
-  margin-bottom: 0.25rem;
+  margin-bottom: 0.35rem;
+  font-weight: 500;
 }
 
 .concentration-bar-bg {
-  height: 5px;
+  height: 7px;
   background: var(--color-bg-input);
-  border-radius: 3px;
+  border-radius: 6px;
   overflow: hidden;
-  max-width: 200px;
+  max-width: 220px;
 }
 
 .concentration-bar {
   height: 100%;
-  border-radius: 3px;
-  transition: width 0.3s ease;
+  border-radius: 6px;
+  transition: width 0.5s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 /* 类型分布 */
 .type-dist {
   display: flex;
   flex-direction: column;
-  gap: 0.3rem;
+  gap: 0.5rem;
+  padding: 0.5rem 0;
 }
 
 .type-item {
   display: flex;
   align-items: center;
-  gap: 0.4rem;
+  gap: 0.6rem;
 }
 
 .type-name {
-  font-size: 0.72rem;
+  font-size: 0.8rem;
   color: var(--color-text-secondary);
-  width: 48px;
+  width: 55px;
   flex-shrink: 0;
+  font-weight: 600;
 }
 
 .type-bar-bg {
   flex: 1;
-  height: 5px;
+  height: 7px;
   background: var(--color-bg-input);
-  border-radius: 3px;
+  border-radius: 6px;
   overflow: hidden;
-  max-width: 160px;
+  max-width: 180px;
 }
 
 .type-bar {
   height: 100%;
-  background: var(--color-primary);
-  border-radius: 3px;
+  background: linear-gradient(90deg, var(--color-primary), var(--color-primary-light));
+  border-radius: 6px;
+  transition: width 0.5s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 .type-pct {
-  font-size: 0.72rem;
+  font-size: 0.78rem;
   color: var(--color-text-muted);
-  width: 28px;
+  width: 32px;
   text-align: right;
+  font-weight: 600;
 }
 
 /* ── AI 再平衡 ── */
 .rebalance-section {
   border-top: 1px solid var(--color-border-light);
-  padding-top: 0.5rem;
+  padding-top: 0.75rem;
+  margin-top: 0.5rem;
 }
 
 .rebalance-header {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  gap: 0.5rem;
+  margin-bottom: 0.75rem;
+  flex-wrap: wrap;
 }
 
 .rebalance-title {
-  font-size: 0.8rem;
-  font-weight: 600;
+  font-size: 0.95rem;
+  font-weight: 700;
   color: var(--color-primary);
+}
+
+.drift-badge {
+  font-size: 0.7rem;
+  font-weight: 700;
+  padding: 0.15rem 0.5rem;
+  border-radius: var(--radius-sm);
+  letter-spacing: 0.03em;
+}
+.drift-badge.balanced { background: rgba(16, 185, 129, 0.12); color: #059669; }
+.drift-badge.slight { background: rgba(245, 158, 11, 0.12); color: #d97706; }
+.drift-badge.significant { background: rgba(239, 68, 68, 0.12); color: #dc2626; }
+
+.market-tag {
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  margin-left: auto;
 }
 
 .rebalance-result {
   display: flex;
   flex-direction: column;
+  gap: 0.85rem;
+}
+
+/* 配比对比 */
+.allocation-compare {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  background: linear-gradient(135deg, rgba(248, 250, 252, 0.8), rgba(241, 245, 249, 0.5));
+  border-radius: var(--radius-lg);
+  padding: 0.75rem;
+  border: 1px solid var(--color-border-light);
+}
+
+.alloc-row {
+  display: flex;
+  align-items: center;
   gap: 0.5rem;
+  font-size: 0.8rem;
+}
+
+.alloc-label {
+  width: 3.5rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+  flex-shrink: 0;
+  font-size: 0.75rem;
+}
+
+.alloc-bars {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  height: 16px;
+  position: relative;
+}
+
+.alloc-bar-current {
+  height: 7px;
+  background: var(--color-primary);
+  border-radius: 3px;
+  opacity: 0.7;
+  transition: width 0.6s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.alloc-bar-target {
+  height: 7px;
+  background: var(--color-accent, #10b981);
+  border-radius: 3px;
+  opacity: 0.4;
+  transition: width 0.6s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.alloc-values {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  flex-shrink: 0;
+  width: 5.5rem;
+  font-size: 0.75rem;
+}
+
+.alloc-current { font-weight: 700; color: var(--color-primary); }
+.alloc-arrow { color: var(--text-muted); font-size: 0.7rem; }
+.alloc-target { font-weight: 600; color: var(--color-accent, #10b981); }
+
+/* 调仓建议 */
+.rebalance-suggestions {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.suggestion-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+  padding: 0.5rem 0.65rem;
+  background: rgba(248, 250, 252, 0.6);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--color-border-light);
+  font-size: 0.82rem;
+}
+
+.suggestion-action {
+  font-size: 0.7rem;
+  font-weight: 700;
+  padding: 0.1rem 0.4rem;
+  border-radius: var(--radius-sm);
+  flex-shrink: 0;
+  letter-spacing: 0.02em;
+}
+.suggestion-action.buy, .suggestion-action.buy_index { background: rgba(16, 185, 129, 0.12); color: #059669; }
+.suggestion-action.sell { background: rgba(239, 68, 68, 0.12); color: #dc2626; }
+.suggestion-action.deploy_cash { background: rgba(59, 130, 246, 0.12); color: #2563eb; }
+.suggestion-action.reserve_cash { background: rgba(245, 158, 11, 0.12); color: #d97706; }
+
+.suggestion-detail {
+  color: var(--text-secondary);
+  line-height: 1.5;
+}
+
+.suggestion-amount {
+  display: inline-block;
+  margin-left: 0.25rem;
+  font-weight: 600;
+  color: var(--color-primary);
 }
 
 .rebalance-content {
-  font-size: 0.82rem;
-  line-height: 1.6;
+  font-size: 0.88rem;
+  line-height: 1.7;
   color: var(--color-text-secondary);
   white-space: pre-wrap;
-  max-height: 360px;
+  max-height: 380px;
   overflow-y: auto;
-  background: var(--color-bg-input);
-  border-radius: var(--radius-sm);
-  padding: 0.75rem;
+  background: linear-gradient(135deg, rgba(248, 250, 252, 0.8), rgba(241, 245, 249, 0.5));
+  border-radius: var(--radius-lg);
+  padding: 1rem;
+  border: 1px solid var(--color-border-light);
 }
 
 /* ── 热门机会 ── */
 .hotspots-body {
-  max-height: 420px;
+  max-height: 450px;
   overflow-y: auto;
 }
 
 .hotspots-summary {
-  font-size: 0.85rem;
-  font-weight: 600;
+  font-size: 0.95rem;
+  font-weight: 700;
   color: var(--color-text-primary);
-  margin-bottom: 0.75rem;
-  line-height: 1.5;
+  margin-bottom: 1rem;
+  line-height: 1.7;
+  padding-bottom: 0.85rem;
+  border-bottom: 1px solid var(--color-border-light);
 }
 
 .rec-card {
   display: flex;
   align-items: flex-start;
-  gap: 0.25rem;
-  padding: 0.5rem 0.5rem;
-  border-radius: var(--radius-sm);
-  background: var(--color-bg-input);
-  margin-bottom: 0.4rem;
+  gap: 0.6rem;
+  padding: 0.9rem;
+  border-radius: var(--radius-lg);
+  background: linear-gradient(135deg, rgba(248, 250, 252, 0.9), rgba(241, 245, 249, 0.6));
+  margin-bottom: 0.7rem;
+  border: 1px solid var(--color-border-light);
+  transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.rec-card:hover {
+  background: linear-gradient(135deg, rgba(241, 245, 249, 0.95), rgba(226, 232, 240, 0.7));
+  transform: translateX(3px);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.05);
 }
 
 .rec-main {
   display: flex;
   align-items: center;
-  gap: 0.5rem;
+  gap: 0.7rem;
   flex: 1;
   min-width: 0;
   flex-wrap: wrap;
 }
 
 .rec-code {
-  font-size: 0.65rem;
+  font-size: 0.7rem;
   color: var(--color-text-muted);
   font-family: monospace;
   flex-shrink: 0;
 }
 
 .rec-portfolio {
-  font-size: 0.6rem;
-  padding: 0.1rem 0.35rem;
-  border-radius: 3px;
+  font-size: 0.65rem;
+  padding: 0.15rem 0.4rem;
+  border-radius: var(--radius-sm);
   white-space: nowrap;
   flex-shrink: 0;
   font-weight: 600;
 }
-.rp-already_have { background: #6366f118; color: #818cf8; }
-.rp-can_add { background: #10b98118; color: #10b981; }
-.rp-reduce { background: #ef444418; color: #ef4444; }
-.rp-new { background: #f59e0b18; color: #f59e0b; }
+.rp-already_have { background: rgba(99, 102, 241, 0.12); color: #818cf8; }
+.rp-can_add { background: rgba(16, 185, 129, 0.12); color: #10b981; }
+.rp-reduce { background: rgba(239, 68, 68, 0.12); color: #ef4444; }
+.rp-new { background: rgba(245, 158, 11, 0.12); color: #f59e0b; }
 
 .rec-actions {
   display: flex;
-  gap: 0.15rem;
+  gap: 0.2rem;
   flex-shrink: 0;
-  padding-top: 0.1rem;
+  padding-top: 0.15rem;
 }
 
 .rec-feedback-btn {
-  width: 24px;
-  height: 24px;
+  width: 28px;
+  height: 28px;
   border: none;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   cursor: pointer;
   display: flex;
   align-items: center;
@@ -1224,25 +2074,26 @@ const concentrationIcon = { low: '✅', moderate: '⚡', high: '⚠️' }
   background: transparent;
   color: var(--color-text-muted);
   opacity: 0.4;
-  transition: all 0.15s;
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
   padding: 0;
 }
 
 .rec-feedback-btn:hover {
   opacity: 1;
+  transform: scale(1.15);
 }
 
 .rec-feedback-btn.helpful:hover,
 .rec-feedback-btn.helpful.active {
   color: #10b981;
-  background: #10b98118;
+  background: rgba(16, 185, 129, 0.12);
   opacity: 1;
 }
 
 .rec-feedback-btn.unhelpful:hover,
 .rec-feedback-btn.unhelpful.active {
   color: #ef4444;
-  background: #ef444418;
+  background: rgba(239, 68, 68, 0.12);
   opacity: 1;
 }
 
@@ -1251,88 +2102,96 @@ const concentrationIcon = { low: '✅', moderate: '⚡', high: '⚠️' }
 }
 
 .rec-badge {
-  font-size: 0.65rem;
+  font-size: 0.7rem;
   font-weight: 700;
-  padding: 0.15rem 0.4rem;
-  border-radius: 3px;
+  padding: 0.2rem 0.5rem;
+  border-radius: var(--radius-sm);
   white-space: nowrap;
   flex-shrink: 0;
+  letter-spacing: 0.02em;
 }
-.rec-up { background: #10b98118; color: #10b981; }
-.rec-down { background: #ef444418; color: #ef4444; }
-.rec-watch { background: #f59e0b18; color: #f59e0b; }
+.rec-up { background: rgba(16, 185, 129, 0.12); color: #10b981; }
+.rec-down { background: rgba(239, 68, 68, 0.12); color: #ef4444; }
+.rec-watch { background: rgba(245, 158, 11, 0.12); color: #f59e0b; }
 
 .rec-name {
-  font-size: 0.82rem;
+  font-size: 0.88rem;
   font-weight: 600;
   color: var(--color-text-primary);
   flex-shrink: 0;
 }
 
 .rec-reason {
-  font-size: 0.72rem;
+  font-size: 0.78rem;
   color: var(--color-text-muted);
   flex: 1;
   min-width: 0;
+  line-height: 1.4;
 }
 
 .rec-conf {
-  font-size: 0.6rem;
-  padding: 0.1rem 0.3rem;
-  border-radius: 3px;
+  font-size: 0.65rem;
+  padding: 0.15rem 0.4rem;
+  border-radius: var(--radius-sm);
   white-space: nowrap;
   flex-shrink: 0;
+  font-weight: 600;
 }
-.conf-high { background: #10b98118; color: #10b981; }
-.conf-medium { background: #f59e0b18; color: #f59e0b; }
-.conf-low { background: #6b728018; color: #6b7280; }
+.conf-high { background: rgba(16, 185, 129, 0.12); color: #10b981; }
+.conf-medium { background: rgba(245, 158, 11, 0.12); color: #f59e0b; }
+.conf-low { background: rgba(107, 114, 128, 0.12); color: #6b7280; }
 
 .hotspots-details {
-  margin-top: 0.5rem;
+  margin-top: 0.75rem;
 }
 .hotspots-details-summary {
-  font-size: 0.75rem;
+  font-size: 0.8rem;
   color: var(--color-primary);
   cursor: pointer;
   user-select: none;
+  font-weight: 500;
+  transition: color 0.2s;
 }
 .hotspots-details-summary:hover {
-  opacity: 0.8;
+  color: var(--color-primary-hover);
 }
 
 .hotspots-content {
-  font-size: 0.82rem;
-  line-height: 1.6;
+  font-size: 0.85rem;
+  line-height: 1.7;
   color: var(--color-text-secondary);
   white-space: pre-wrap;
-  margin-top: 0.5rem;
-  padding: 0.5rem;
-  background: var(--color-bg-input);
-  border-radius: var(--radius-sm);
+  margin-top: 0.75rem;
+  padding: 0.75rem 1rem;
+  background: linear-gradient(135deg, var(--color-primary-bg), rgba(99, 102, 241, 0.04));
+  border: 1px solid rgba(99, 102, 241, 0.1);
+  border-radius: var(--radius-md);
 }
 
 .news-list {
-  max-height: 340px;
+  max-height: 360px;
   overflow-y: auto;
   display: flex;
   flex-direction: column;
-  gap: 0.5rem;
+  gap: 0.6rem;
 }
 
 .news-item {
-  padding: 0.5rem 0.5rem;
-  border-radius: var(--radius-sm);
-  border-left: 3px solid var(--color-primary-200);
-  background: var(--color-bg-input);
-  transition: background var(--transition-fast);
+  padding: 0.65rem 0.75rem;
+  border-radius: var(--radius-md);
+  border-left: 3px solid var(--color-primary-300);
+  background: linear-gradient(135deg, var(--color-bg-input), rgba(248, 250, 252, 0.6));
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 .news-item:hover {
   background: var(--color-bg-hover);
+  border-left-color: var(--color-primary);
+  transform: translateX(3px);
 }
 
 .news-title {
-  font-size: 0.82rem;
+  font-size: 0.88rem;
   font-weight: 600;
   color: var(--color-text-primary);
   text-decoration: none;
@@ -1340,6 +2199,7 @@ const concentrationIcon = { low: '✅', moderate: '⚡', high: '⚠️' }
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
+  transition: color 0.2s;
 }
 
 .news-title:hover {
@@ -1347,30 +2207,30 @@ const concentrationIcon = { low: '✅', moderate: '⚡', high: '⚠️' }
 }
 
 .news-summary {
-  font-size: 0.72rem;
+  font-size: 0.78rem;
   color: var(--color-text-muted);
-  margin: 0.25rem 0 0;
-  line-height: 1.4;
+  margin: 0.3rem 0 0;
+  line-height: 1.5;
 }
 
 .news-meta {
   display: flex;
-  gap: 0.5rem;
-  font-size: 0.65rem;
+  gap: 0.6rem;
+  font-size: 0.7rem;
   color: var(--color-text-muted);
-  margin-top: 0.2rem;
+  margin-top: 0.3rem;
 }
 
 .news-source {
   color: var(--color-primary);
-  font-weight: 500;
+  font-weight: 600;
 }
 
 .hotspots-hint {
-  font-size: 0.7rem;
+  font-size: 0.75rem;
   color: var(--color-text-muted);
   text-align: center;
-  margin: 0.25rem 0 0;
+  margin: 0.4rem 0 0;
 }
 
 /* ── 零钱配置 ── */
@@ -1378,53 +2238,116 @@ const concentrationIcon = { low: '✅', moderate: '⚡', high: '⚠️' }
   display: flex;
   align-items: baseline;
   justify-content: space-between;
-  padding: 0.25rem 0;
+  padding: 0.35rem 0;
 }
 
 .cash-label {
-  font-size: 0.8rem;
+  font-size: 0.85rem;
   color: var(--color-text-muted);
 }
 
 .cash-value {
-  font-size: 1.35rem;
+  font-size: 1.5rem;
   font-weight: 700;
   color: var(--color-text-primary);
+  letter-spacing: -0.02em;
 }
 
+.cash-ratio-tag {
+  font-size: 0.7rem;
+  font-weight: 600;
+  padding: 0.1rem 0.45rem;
+  border-radius: var(--radius-sm);
+  background: rgba(99, 102, 241, 0.08);
+  color: var(--color-primary);
+}
+
+.cash-details-row {
+  display: flex;
+  gap: 0.5rem;
+  margin-top: 0.15rem;
+  padding-bottom: 0.25rem;
+}
+
+.cash-detail-tag {
+  font-size: 0.65rem;
+  color: var(--color-text-muted);
+  background: var(--color-bg-hover);
+  padding: 0.12rem 0.4rem;
+  border-radius: var(--radius-sm);
+  white-space: nowrap;
+}
+
+.card-data-time {
+  font-size: 0.6rem;
+  color: var(--color-text-muted);
+  font-weight: 400;
+  margin-left: 0.25rem;
+  opacity: 0.7;
+}
+
+.cash-alerts {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  margin: 0.35rem 0;
+}
+
+.cash-alert {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.35rem;
+  font-size: 0.78rem;
+  line-height: 1.5;
+  padding: 0.4rem 0.6rem;
+  border-radius: var(--radius-md);
+}
+.cash-alert.warning { background: rgba(239, 68, 68, 0.06); color: #b91c1c; }
+.cash-alert.info { background: rgba(59, 130, 246, 0.06); color: #1d4ed8; }
+.cash-alert.opportunity { background: rgba(16, 185, 129, 0.06); color: #047857; }
+
+.cash-alert-icon { flex-shrink: 0; }
+
 .bond-info {
-  padding: 0.5rem 0;
+  padding: 0.6rem 0;
 }
 
 .bond-temp-row {
   display: flex;
   align-items: center;
-  gap: 0.5rem;
+  gap: 0.6rem;
 }
 
 .bond-temp-label {
-  font-size: 0.78rem;
+  font-size: 0.85rem;
   color: var(--color-text-muted);
 }
 
 .bond-temp-value {
-  font-size: 1.1rem;
+  font-size: 1.15rem;
   font-weight: 700;
-  padding: 0.1rem 0.5rem;
-  border-radius: 6px;
+  padding: 0.15rem 0.6rem;
+  border-radius: var(--radius-sm);
   background: var(--color-bg-input);
+  transition: transform 0.2s;
+}
+
+.bond-temp-value:hover {
+  transform: scale(1.05);
 }
 
 .bond-temp-value.bond-cold {
   color: #3b82f6;
+  background: rgba(59, 130, 246, 0.08);
 }
 
 .bond-temp-value.bond-hot {
   color: #ef4444;
+  background: rgba(239, 68, 68, 0.08);
 }
 
 .bond-yield {
-  font-size: 0.75rem;
+  font-size: 0.8rem;
   color: var(--color-text-muted);
   margin-left: auto;
 }
@@ -1432,22 +2355,22 @@ const concentrationIcon = { low: '✅', moderate: '⚡', high: '⚠️' }
 .bond-trend {
   display: flex;
   flex-direction: column;
-  gap: 0.2rem;
-  margin-top: 0.4rem;
-  padding-top: 0.4rem;
+  gap: 0.25rem;
+  margin-top: 0.5rem;
+  padding-top: 0.5rem;
   border-top: 1px solid var(--color-border-light);
 }
 
 .trend-item {
   display: flex;
   align-items: center;
-  gap: 0.4rem;
-  font-size: 0.72rem;
+  gap: 0.5rem;
+  font-size: 0.78rem;
 }
 
 .trend-label {
   color: var(--color-text-muted);
-  width: 64px;
+  width: 68px;
   flex-shrink: 0;
 }
 
@@ -1461,85 +2384,86 @@ const concentrationIcon = { low: '✅', moderate: '⚡', high: '⚠️' }
 }
 
 .trend-note {
-  font-size: 0.62rem;
+  font-size: 0.68rem;
   color: var(--color-text-muted);
-  margin-top: 0.15rem;
+  margin-top: 0.2rem;
   font-style: italic;
 }
 
 .bond-unavailable p {
-  font-size: 0.78rem;
+  font-size: 0.85rem;
   color: var(--color-text-muted);
 }
 
 .allocation-section {
   display: flex;
   flex-direction: column;
-  gap: 0.5rem;
-  padding-top: 0.5rem;
+  gap: 0.6rem;
+  padding-top: 0.6rem;
   border-top: 1px solid var(--color-border-light);
 }
 
 .allocation-summary {
-  font-size: 0.8rem;
+  font-size: 0.85rem;
   color: var(--color-text-secondary);
-  line-height: 1.5;
+  line-height: 1.6;
   margin: 0;
 }
 
 .allocation-chart {
   display: flex;
   flex-direction: column;
-  gap: 0.4rem;
+  gap: 0.5rem;
 }
 
 .allocation-bar-item {
   display: flex;
   flex-direction: column;
-  gap: 0.15rem;
+  gap: 0.2rem;
 }
 
 .alloc-bar-label {
   display: flex;
   justify-content: space-between;
-  font-size: 0.75rem;
+  font-size: 0.8rem;
   color: var(--color-text-secondary);
 }
 
 .alloc-bar-pct {
-  font-weight: 600;
+  font-weight: 700;
   color: var(--color-text-primary);
 }
 
 .alloc-bar-bg {
-  height: 6px;
+  height: 8px;
   background: var(--color-bg-input);
-  border-radius: 3px;
+  border-radius: 4px;
   overflow: hidden;
 }
 
 .alloc-bar-fill {
   height: 100%;
-  border-radius: 3px;
-  transition: width 0.3s ease;
+  border-radius: 4px;
+  transition: width 0.6s cubic-bezier(0.4, 0, 0.2, 1);
+  background: linear-gradient(90deg, var(--color-primary-400), var(--color-primary));
 }
 
 .alloc-bar-desc {
-  font-size: 0.65rem;
+  font-size: 0.7rem;
   color: var(--color-text-muted);
 }
 
 .alloc-money {
   display: flex;
   flex-wrap: wrap;
-  gap: 0.5rem;
-  padding-top: 0.25rem;
+  gap: 0.6rem;
+  padding-top: 0.35rem;
 }
 
 .alloc-money-item {
   display: flex;
-  gap: 0.3rem;
-  font-size: 0.72rem;
+  gap: 0.35rem;
+  font-size: 0.78rem;
   color: var(--color-text-muted);
 }
 
@@ -1553,8 +2477,8 @@ const concentrationIcon = { low: '✅', moderate: '⚡', high: '⚠️' }
 
 /* ── Buttons ── */
 .btn-sm {
-  font-size: 0.75rem;
-  padding: 0.3rem 0.65rem;
+  font-size: 0.8rem;
+  padding: 0.35rem 0.75rem;
 }
 
 
@@ -1562,12 +2486,13 @@ const concentrationIcon = { low: '✅', moderate: '⚡', high: '⚠️' }
 .verify-bar {
   display: flex;
   align-items: center;
-  gap: 0.5rem;
-  padding: 0.4rem 0.5rem;
+  gap: 0.6rem;
+  padding: 0.5rem 0.65rem;
   border-top: 1px solid var(--color-border);
   cursor: pointer;
-  font-size: 0.72rem;
+  font-size: 0.78rem;
   user-select: none;
+  transition: background 0.2s;
 }
 .verify-bar:hover {
   background: var(--color-bg-hover);
@@ -1591,7 +2516,7 @@ const concentrationIcon = { low: '✅', moderate: '⚡', high: '⚠️' }
   font-weight: 400;
 }
 .verify-bar svg {
-  transition: transform 0.2s;
+  transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
   color: var(--color-text-muted);
 }
 .verify-bar svg.rotated {
@@ -1602,14 +2527,15 @@ const concentrationIcon = { low: '✅', moderate: '⚡', high: '⚠️' }
   border-top: 1px solid var(--color-border);
   max-height: 300px;
   overflow-y: auto;
-  padding: 0.3rem 0;
+  padding: 0.4rem 0;
 }
 .verify-item {
   display: flex;
   align-items: center;
-  gap: 0.4rem;
-  padding: 0.3rem 0.5rem;
-  font-size: 0.72rem;
+  gap: 0.5rem;
+  padding: 0.35rem 0.65rem;
+  font-size: 0.78rem;
+  transition: background 0.15s;
 }
 .verify-item:hover {
   background: var(--color-bg-hover);
@@ -1620,7 +2546,7 @@ const concentrationIcon = { low: '✅', moderate: '⚡', high: '⚠️' }
   font-weight: 500;
 }
 .verify-status {
-  font-size: 0.65rem;
+  font-size: 0.7rem;
   white-space: nowrap;
 }
 .vs-correct { color: #10b981; }
@@ -1634,15 +2560,21 @@ const concentrationIcon = { low: '✅', moderate: '⚡', high: '⚠️' }
   top: 1rem;
   right: 1rem;
   z-index: 10000;
-  padding: 0.6rem 1rem;
-  border-radius: 8px;
-  font-size: 0.82rem;
-  font-weight: 500;
+  padding: 0.7rem 1.2rem;
+  border-radius: var(--radius-md);
+  font-size: 0.88rem;
+  font-weight: 600;
   background: var(--color-bg-card);
   border: 1px solid var(--color-border);
-  box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+  box-shadow: 0 8px 24px rgba(0,0,0,0.18);
   color: var(--color-text-primary);
   pointer-events: none;
+  backdrop-filter: blur(8px);
+  animation: toast-in 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+@keyframes toast-in {
+  from { opacity: 0; transform: translateY(-8px); }
+  to { opacity: 1; transform: translateY(0); }
 }
 .toast-success { border-color: #10b981; color: #10b981; }
 .toast-error { border-color: #ef4444; color: #ef4444; }

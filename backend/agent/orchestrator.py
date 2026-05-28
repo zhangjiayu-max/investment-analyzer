@@ -4,69 +4,143 @@ import json
 import logging
 import re
 import time
+import threading
+import concurrent.futures
 
 from llm_service import client, MODEL, _call_llm, _parse_tool_args
-from agent.multi_agent import SPECIALIST_AGENTS, run_specialist
+from agent.multi_agent import SPECIALIST_AGENTS, run_specialist, run_specialist_with_context
+
+# 全局超时限制（秒）
+MAX_ORCHESTRATION_SECONDS = 600  # 10 分钟
+from agent.feedback_learner import get_preference_context
+from agent.memory import (
+    compress_history_semantic, build_user_memory_context,
+    get_token_budget, compress_rag_token_aware, estimate_tokens,
+)
 
 logger = logging.getLogger(__name__)
 
 
+class CancelledError(Exception):
+    """用户取消执行时抛出。"""
+    pass
+
+
+def _check_cancel(cancel_event: threading.Event | None):
+    """检查是否被取消，如果是则抛出 CancelledError。"""
+    if cancel_event and cancel_event.is_set():
+        raise CancelledError("用户取消了执行")
+
+
+def _check_timeout(start_time: float):
+    """检查是否超时，如果是则抛出异常。"""
+    elapsed = time.time() - start_time
+    if elapsed > MAX_ORCHESTRATION_SECONDS:
+        raise TimeoutError(f"执行超时（{int(elapsed)}s > {MAX_ORCHESTRATION_SECONDS}s 限制）")
+
+
+# ── 智能交叉审阅：检测专家分歧 ──────────────────────────────
+
+def _detect_specialist_disagreement(specialist_results: list) -> bool:
+    """检测专家之间是否存在方向性分歧，决定是否需要交叉审阅。
+
+    保守策略：只要有分歧就触发，只在完全一致时跳过。
+    纯字符串匹配，无 LLM 调用，零延迟。
+    """
+    if len(specialist_results) < 2:
+        return False
+
+    bullish_kw = ["低估", "机会", "建议买", "加仓", "建仓", "适合", "看好", "上行", "配置价值", "值得"]
+    bearish_kw = ["高估", "风险高", "不建议买", "减仓", "回避", "谨慎", "看空", "下行", "泡沫", "过热"]
+
+    signals = []
+    for sr in specialist_results:
+        analysis = sr.get("analysis", "").lower()
+        bull_score = sum(1 for kw in bullish_kw if kw in analysis)
+        bear_score = sum(1 for kw in bearish_kw if kw in analysis)
+
+        if bull_score > bear_score + 1:
+            direction = "bullish"
+        elif bear_score > bull_score + 1:
+            direction = "bearish"
+        else:
+            direction = "neutral"
+        signals.append(direction)
+
+    directions = set(signals)
+    # 所有专家方向一致 → 跳过交叉审阅
+    if len(directions) == 1:
+        return False
+    # 有看多+看空分歧 → 必须交叉审阅
+    if "bullish" in directions and "bearish" in directions:
+        return True
+    # 混合中性+方向性 → 交叉审阅
+    return len(directions) > 1
+
+
+# ── Token 预算检查 ──────────────────────────────────────────
+
+def check_token_budget() -> dict:
+    """检查今日 token 用量是否超限。
+
+    返回:
+        {"ok": bool, "used": int, "limit": int, "pct": float,
+         "mode": "normal"|"conservative"|"exceeded"}
+    """
+    from config import DAILY_TOKEN_LIMIT, TOKEN_WARN_THRESHOLD, TOKEN_BUDGET_BYPASS
+    from db import get_today_token_total
+
+    used = get_today_token_total()
+    pct = used / DAILY_TOKEN_LIMIT if DAILY_TOKEN_LIMIT > 0 else 0
+
+    if TOKEN_BUDGET_BYPASS:
+        return {"ok": True, "used": used, "limit": DAILY_TOKEN_LIMIT, "pct": pct, "mode": "normal"}
+
+    if pct >= 1.0:
+        return {"ok": False, "used": used, "limit": DAILY_TOKEN_LIMIT, "pct": pct, "mode": "exceeded"}
+    elif pct >= TOKEN_WARN_THRESHOLD:
+        return {"ok": True, "used": used, "limit": DAILY_TOKEN_LIMIT, "pct": pct, "mode": "conservative"}
+    else:
+        return {"ok": True, "used": used, "limit": DAILY_TOKEN_LIMIT, "pct": pct, "mode": "normal"}
+
+
 # ── 需求澄清 Agent（LLM 版）──────────────────────────────────
 
-CLARIFICATION_PROMPT = """<role>你是一位需求分析专家，负责理解用户的投资问题，并决定如何最优地回答它。</role>
+CLARIFICATION_PROMPT = """你是需求路由专家。分析用户投资问题，返回 JSON。
 
-<task>
-收到用户问题后，分析并返回以下 JSON 格式的结果：
-```json
-{
-  "complexity": "simple|medium|complex",
-  "specialists": ["valuation_expert", "market_analyst", "risk_assessor", "allocation_advisor"],
-  "reason": "简要说明为什么这样分类",
-  "refined_query": "优化后的问题（如果需要）"
-}
-```
-</task>
+## 可用专家
+- valuation_expert: 估值查询(PE/PB/百分位/高估低估/指数估值)
+- market_analyst: 市场动态(新闻/政策/债券/收益率/债市温度)
+- risk_assessor: 风险分析(回撤/波动率/持仓风险/止损)
+- allocation_advisor: 资产配置(定投/股债配比/加仓减仓/仓位管理)
+- fund_analyst: 基金分析(基金表现/交易复盘/持仓基金)
 
-<complexity_criteria>
-### simple（简单）
-- 单一数据查询：如"沪深300估值多少"、"债市温度"
-- 直接查表类：如"PE是多少"、"百分位多少"
-- 只需要1个专家即可回答
+## 复杂度
+- simple: 单一数据查询，1个专家
+- medium: 需要分析，1-2个专家
+- complex: 投资决策/多维分析，2+个专家
 
-### medium（中等）
-- 需要分析但范围明确：如"白酒估值高吗"、"最近有什么新闻"
-- 需要1-2个专家协作
-- 可能需要RAG知识库辅助
+## 输出格式（只输出JSON，无其他文字）
+{"complexity":"simple","specialists":["valuation_expert"],"reason":"原因","refined_query":"优化后的查询"}
 
-### complex（复杂）
-- 投资决策类：如"白酒能买吗"、"该加仓还是减仓"
-- 多维度分析：如"帮我做个定投方案"、"现在怎么配置"
-- 需要3-4个专家协作
-- 必须结合估值、新闻、风险等多方面信息
-</complexity_criteria>
+## 示例
+Q: 沪深300估值多少
+A: {"complexity":"simple","specialists":["valuation_expert"],"reason":"单一估值查询","refined_query":"沪深300当前PE/PB估值和百分位"}
 
-<specialist_guide>
-- **估值相关**（PE/PB/百分位/高估低估）→ valuation_expert
-- **新闻/政策/市场动态** → market_analyst
-- **风险/回撤/波动率/持仓风险** → risk_assessor
-- **配置/定投/股债配比/持仓配置** → allocation_advisor
-- **持仓/加仓/减仓/盈亏/我的基金** → 需要结合持仓数据，选 risk_assessor 或 allocation_advisor
-- **基金分析/操作复盘/交易记录/基金表现** → fund_analyst
-- **债券相关**（债券基金/久期/收益率曲线/债市/利率）→ market_analyst 或 allocation_advisor，market_analyst 有 get_bond_yield_curve 和 get_bond_market_overview 工具
-</specialist_guide>
+Q: 我想买点债券现在可以入手吗
+A: {"complexity":"complex","specialists":["market_analyst","allocation_advisor","risk_assessor"],"reason":"债券买入决策需要债市温度+配置建议+风险评估","refined_query":"当前债市估值温度、债券基金配置建议和风险提示"}
 
-<examples>
-用户: 沪深300估值多少？
-输出: {"complexity": "simple", "specialists": ["valuation_expert"], "reason": "单一估值查询", "refined_query": "沪深300当前估值"}
+Q: 白酒能买吗
+A: {"complexity":"complex","specialists":["valuation_expert","risk_assessor","allocation_advisor"],"reason":"投资决策需要估值+风险+配置","refined_query":"白酒当前估值水平、风险评估与配置建议"}
 
-用户: 白酒能买吗？
-输出: {"complexity": "complex", "specialists": ["valuation_expert", "risk_assessor", "allocation_advisor"], "reason": "投资决策需要估值+风险+配置多维度分析", "refined_query": "白酒当前估值水平、风险评估与配置建议"}
+Q: 帮我做个定投方案
+A: {"complexity":"complex","specialists":["valuation_expert","allocation_advisor"],"reason":"定投需要估值+配置策略","refined_query":"基于当前估值的定投方案"}
 
-用户: 帮我做个定投方案
-输出: {"complexity": "complex", "specialists": ["valuation_expert", "allocation_advisor"], "reason": "定投方案需要估值数据和配置策略", "refined_query": "基于当前估值的定投方案设计"}
-</examples>
+Q: 最近有什么新闻
+A: {"complexity":"medium","specialists":["market_analyst"],"reason":"市场动态查询","refined_query":"近期市场重要新闻和政策变化"}
 
-<output_rule>只输出 JSON，不要其他文字。</output_rule>"""
+Q: 债市温度多少
+A: {"complexity":"simple","specialists":["market_analyst"],"reason":"单一数据查询","refined_query":"当前债市温度指标"}"""
 
 
 def clarify_requirement(query: str) -> dict:
@@ -82,26 +156,68 @@ def clarify_requirement(query: str) -> dict:
         }
     """
     try:
+        # 注入持仓摘要，让澄清 Agent 知道用户持有什么
+        try:
+            from portfolio_context import build_portfolio_summary_line
+            portfolio_line = build_portfolio_summary_line()
+        except Exception:
+            portfolio_line = ""
+
+        user_content = query
+        if portfolio_line:
+            user_content = f"{portfolio_line}\n\n用户问题: {query}"
+
         response = _call_llm(
             caller="clarify",
             model=MODEL,
             messages=[
                 {"role": "system", "content": CLARIFICATION_PROMPT},
-                {"role": "user", "content": query},
+                {"role": "user", "content": user_content},
             ],
             temperature=0.1,
-            max_tokens=500,
+            max_tokens=2000,
         )
 
         raw = response.choices[0].message.content.strip()
 
-        # 提取 JSON
+        # 提取 JSON — 多种容错策略
+        # 1. 去除 markdown 代码块
         if "```" in raw:
-            raw = raw.split("```")[1]
+            parts = raw.split("```")
+            raw = parts[1] if len(parts) > 1 else parts[0]
             if raw.startswith("json"):
                 raw = raw[4:]
+            raw = raw.strip()
 
-        result = json.loads(raw)
+        # 2. 尝试直接解析
+        try:
+            result = json.loads(raw)
+        except json.JSONDecodeError:
+            # 3. 提取第一个 {...}
+            import re
+            match = re.search(r'\{[^{}]*\}', raw, re.DOTALL)
+            if match:
+                result = json.loads(match.group())
+            else:
+                raise
+
+        # 兼容模型返回非标准格式（如 {"需求分析": {...}} ）
+        if "complexity" not in result:
+            # 尝试从嵌套结构中提取
+            for key in result:
+                if isinstance(result[key], dict) and "complexity" in result[key]:
+                    result = result[key]
+                    break
+            # 仍然没有 → 检查是否有需求类型字段
+            if "complexity" not in result:
+                # 根据内容推断
+                needs = str(result)
+                if any(kw in needs for kw in ["买入", "建议", "配置", "决策", "风险"]):
+                    result = {"complexity": "complex", "specialists": ["market_analyst", "allocation_advisor"],
+                              "reason": "从非标准响应推断", "refined_query": query}
+                else:
+                    result = {"complexity": "medium", "specialists": ["valuation_expert"],
+                              "reason": "从非标准响应推断", "refined_query": query}
 
         # 验证并设置默认值
         complexity = result.get("complexity", "medium")
@@ -465,18 +581,30 @@ ORCHESTRATOR_SYSTEM_PROMPT = """你是投资分析助手的主控（Orchestrator
 - 如果专家意见有分歧，指出分歧点并给出你的倾向
 - 引用专家的具体数据和分析
 - 给出 actionable 的投资建议
+
+## 持仓亏损处理原则
+当用户持仓出现亏损或连续下跌时，必须参考知识库中的「4%定投法（强化版）」策略：
+- 不要简单建议割肉止损，先评估估值水平和基本面
+- 如果估值已进入低估区间，建议按4%间隔分批加仓摊低成本
+- 计算平均成本和回盈价位，给用户具体的数字参考
+- 强调纪律性：按计划执行，不因恐慌改变策略
+- 如果基本面恶化（非单纯下跌），才建议止损
 - 使用 Markdown 格式，层次清晰"""
 
 
-def _execute_specialist(tool_name: str, query: str) -> str:
+def _execute_specialist(tool_name: str, query: str, cancel_event: threading.Event | None = None,
+                        prebuilt_context: str = "") -> str:
     """执行专家 Agent 调用，返回 JSON 字符串结果。"""
     agent_key = _EXPERT_MAP.get(tool_name)
     if not agent_key:
         return json.dumps({"error": f"未知专家: {tool_name}"}, ensure_ascii=False)
 
     try:
-        result = run_specialist(agent_key, query)
+        _check_cancel(cancel_event)
+        result = run_specialist(agent_key, query, prebuilt_context=prebuilt_context)
         return json.dumps(result, ensure_ascii=False)
+    except CancelledError:
+        raise
     except Exception as e:
         logger.error(f"专家 {tool_name} 执行异常: {e}")
         return json.dumps({"error": f"专家执行失败: {e}"}, ensure_ascii=False)
@@ -509,39 +637,80 @@ def orchestrate(query: str, history: list, rag_context: str = "") -> dict:
     """
     start_time = time.time()
 
+    # 0. Token 预算检查
+    budget = check_token_budget()
+    logger.info(f"Token 预算: {budget['used']}/{budget['limit']} ({budget['pct']:.0%}) mode={budget['mode']}")
+    if budget["mode"] == "exceeded":
+        return {
+            "answer": f"今日分析额度已用完（{budget['used']:,}/{budget['limit']:,} tokens），请明天再来。",
+            "specialist_results": [],
+            "tool_calls": [],
+            "turns": 0,
+            "complexity": "simple",
+            "error": "token_budget_exceeded",
+        }
+
     # 1. 需求澄清（使用 LLM 分析问题）
     clarification = clarify_requirement(query)
     complexity = clarification["complexity"]
     context_config = get_context_config(complexity)
+    token_budget = get_token_budget(complexity)
     logger.info(f"需求澄清: {clarification}")
 
     # 使用澄清后的问题（如果有优化）
     refined_query = clarification.get("refined_query", query)
 
-    # 2. 根据复杂度优化上下文（Token 优化）
+    # 2. 根据复杂度优化上下文（Token 预算管理）
     system_content = ORCHESTRATOR_SYSTEM_PROMPT
 
-    # 只有中等和复杂任务才添加 RAG 上下文，并压缩
+    # RAG 上下文（token 感知截断）
+    rag_budget = int(token_budget["total_context"] * token_budget["rag_pct"])
     if rag_context and context_config["rag_enabled"]:
-        compressed_rag = compress_rag_context(rag_context, context_config["rag_max_chars"])
+        compressed_rag = compress_rag_token_aware(rag_context, max_tokens=rag_budget)
         system_content += f"\n\n参考信息：\n{compressed_rag}"
+
+    # 注入用户偏好画像（从反馈学习中积累）
+    preference_ctx = get_preference_context("default")
+    if preference_ctx:
+        system_content += f"\n\n{preference_ctx}"
+
+    # 注入跨对话用户记忆
+    user_memory = build_user_memory_context("default")
+    if user_memory:
+        system_content += f"\n\n<user_memory>\n{user_memory}\n</user_memory>"
+
+    # 注入持仓上下文 + 估值上下文（同时构建 prebuilt_context 供 specialist 复用）
+    prebuilt_context = ""
+    try:
+        from portfolio_context import build_portfolio_context, build_valuation_summary
+        portfolio_ctx = build_portfolio_context()
+        if portfolio_ctx:
+            system_content += f"\n\n## 用户当前持仓\n{portfolio_ctx}"
+            prebuilt_context += f"## 用户当前持仓（分析时务必结合）\n{portfolio_ctx}\n\n"
+        valuation_ctx = build_valuation_summary()
+        if valuation_ctx:
+            system_content += f"\n\n## 当前市场估值\n{valuation_ctx}"
+    except Exception as e:
+        logger.warning(f"注入持仓/估值上下文失败: {e}")
 
     llm_messages = [{"role": "system", "content": system_content}]
 
-    # 压缩历史消息（早期消息摘要化）
-    history_limit = context_config["history_limit"]
-    compressed_history = compress_history(history, history_limit)
+    # 语义化压缩历史消息（LLM 摘要 + 近期原文）
+    history_budget = int(token_budget["total_context"] * token_budget["history_pct"])
+    compressed_history = compress_history_semantic(history, max_tokens=history_budget)
     for msg in compressed_history:
         llm_messages.append({"role": msg["role"], "content": msg["content"]})
 
     # 当前用户问题（使用优化后的问题）
     llm_messages.append({"role": "user", "content": refined_query})
 
-    MAX_TURNS = 6
+    MAX_TURNS = 3 if budget["mode"] == "conservative" else 6
+    force_skip_cross_review = budget["mode"] == "conservative"
     specialist_results = []
     all_tool_calls = []
 
     for turn in range(MAX_TURNS):
+        _check_timeout(start_time)
         try:
             response = _call_llm(
                 caller="orchestrator",
@@ -562,8 +731,61 @@ def orchestrate(query: str, history: list, rag_context: str = "") -> dict:
 
         msg = response.choices[0].message
 
-        # 没有工具调用 → 最终回答
+        # 没有工具调用 → 检查是否需要交叉审阅，然后给出最终回答
         if not msg.tool_calls:
+            # Phase B: 交叉审阅（仅 complex 且 >=2 个专家且存在分歧时触发）
+            if complexity == "complex" and len(specialist_results) >= 2 and not force_skip_cross_review and _detect_specialist_disagreement(specialist_results):
+                logger.info(f"进入交叉审阅阶段，{len(specialist_results)} 个专家参与")
+                peer_analyses = {sr["agent_key"]: sr["analysis"] for sr in specialist_results}
+                cross_review_results = []
+                # 快照原始专家列表，避免迭代时 append 导致无限循环
+                original_specialists = list(specialist_results)
+                for sr in original_specialists:
+                    _check_cancel(cancel_event)
+                    _check_timeout(start_time)
+                    try:
+                        cr_result = run_specialist_with_context(
+                            sr["agent_key"], refined_query, peer_analyses, max_turns=2,
+                            prebuilt_context=prebuilt_context
+                        )
+                        cross_review_results.append(cr_result)
+                        specialist_results.append(cr_result)
+                        all_tool_calls.extend(cr_result.get("tool_calls", []))
+                    except Exception as e:
+                        logger.error(f"交叉审阅 {sr['agent_key']} 失败: {e}")
+
+                # 将交叉审阅结果追加到消息中，让 Orchestrator 做最终综合
+                if cross_review_results:
+                    cr_summary = "\n\n---\n\n".join(
+                        f"【{cr['agent']}交叉审阅】\n{cr['analysis']}"
+                        for cr in cross_review_results
+                    )
+                    llm_messages.append({
+                        "role": "user",
+                        "content": f"以下是各专家的交叉审阅结果，请结合 Phase A 和 Phase B 的分析，给出最终综合建议：\n\n{cr_summary}",
+                    })
+                    try:
+                        response = _call_llm(
+                            caller="orchestrator",
+                            model=MODEL,
+                            messages=llm_messages,
+                            temperature=0.3,
+                            max_tokens=2000,
+                        )
+                        answer = response.choices[0].message.content or ""
+                    except Exception:
+                        answer = msg.content or ""
+                    duration_ms = int((time.time() - start_time) * 1000)
+                    return {
+                        "answer": answer,
+                        "specialist_results": specialist_results,
+                        "tool_calls": all_tool_calls,
+                        "turns": turn + 1,
+                        "duration_ms": duration_ms,
+                        "complexity": complexity,
+                        "cross_review": True,
+                    }
+
             answer = msg.content or ""
             duration_ms = int((time.time() - start_time) * 1000)
             return {
@@ -603,21 +825,50 @@ def orchestrate(query: str, history: list, rag_context: str = "") -> dict:
 
         llm_messages.append(assistant_msg)
 
+        # 并行执行所有专家 Agent
+        tool_tasks = []
         for tc in msg.tool_calls:
             args = _parse_tool_args(tc.function.arguments, tc.function.name)
-
             expert_query = args.get("query", query)
             logger.info(f"Orchestrator → {tc.function.name}: {expert_query[:100]}")
+            tool_tasks.append((tc, args, expert_query))
 
-            # 执行专家 Agent
-            result_str = _execute_specialist(tc.function.name, expert_query)
+        if len(tool_tasks) == 1:
+            # 单个专家，直接执行（避免线程池开销）
+            tc, args, expert_query = tool_tasks[0]
+            result_str = _execute_specialist(tc.function.name, expert_query,
+                                              prebuilt_context=prebuilt_context)
+            ordered_results = [result_str]
+        else:
+            # 多个专家，并行执行
+            ordered_results = [None] * len(tool_tasks)
+            with concurrent.futures.ThreadPoolExecutor(max_workers=len(tool_tasks)) as executor:
+                future_to_idx = {}
+                for idx, (tc, args, expert_query) in enumerate(tool_tasks):
+                    future = executor.submit(
+                        _execute_specialist, tc.function.name, expert_query,
+                        cancel_event=None, prebuilt_context=prebuilt_context
+                    )
+                    future_to_idx[future] = idx
+
+                for future in concurrent.futures.as_completed(future_to_idx):
+                    idx = future_to_idx[future]
+                    try:
+                        ordered_results[idx] = future.result()
+                    except CancelledError:
+                        raise
+                    except Exception as e:
+                        ordered_results[idx] = json.dumps({"error": str(e)}, ensure_ascii=False)
+
+        # 按原始顺序处理结果
+        for idx, (tc, args, expert_query) in enumerate(tool_tasks):
+            result_str = ordered_results[idx]
 
             try:
                 result_data = json.loads(result_str)
             except json.JSONDecodeError:
                 result_data = {"raw": result_str}
 
-            # 记录专家结果
             if "error" not in result_data:
                 specialist_results.append({
                     "agent_key": result_data.get("agent_key", _EXPERT_MAP.get(tc.function.name, "")),
@@ -634,7 +885,6 @@ def orchestrate(query: str, history: list, rag_context: str = "") -> dict:
                 "result_preview": result_str[:300],
             })
 
-            # 将专家结果反馈给 Orchestrator
             llm_messages.append({
                 "role": "tool",
                 "tool_call_id": tc.id,
@@ -670,7 +920,7 @@ def orchestrate(query: str, history: list, rag_context: str = "") -> dict:
     }
 
 
-def orchestrate_stream(query: str, history: list, rag_context: str = ""):
+def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_event: threading.Event | None = None):
     """
     Orchestrator 的流式版本，通过生成器逐步返回事件。
 
@@ -680,32 +930,75 @@ def orchestrate_stream(query: str, history: list, rag_context: str = ""):
     - {"type": "status", "message": "..."}
     - {"type": "answer_chunk", "content": "..."}
     - {"type": "answer", "content": "...", "specialist_results": [...], "tool_calls": [...], "complexity": "..."}
+
+    参数:
+        cancel_event: 可选的取消事件，设置后会尽快终止执行
     """
     start_time = time.time()
 
+    # 0. Token 预算检查
+    budget = check_token_budget()
+    logger.info(f"Token 预算: {budget['used']}/{budget['limit']} ({budget['pct']:.0%}) mode={budget['mode']}")
+    if budget["mode"] == "exceeded":
+        yield {
+            "type": "answer",
+            "content": f"今日分析额度已用完（{budget['used']:,}/{budget['limit']:,} tokens），请明天再来。",
+            "specialist_results": [],
+            "tool_calls": [],
+            "error": "token_budget_exceeded",
+        }
+        return
+
     # 1. 需求澄清（使用 LLM 分析问题）
+    _check_cancel(cancel_event)
     yield {"type": "status", "message": "正在理解您的问题..."}
     clarification = clarify_requirement(query)
     complexity = clarification["complexity"]
     context_config = get_context_config(complexity)
+    token_budget = get_token_budget(complexity)
     logger.info(f"需求澄清: {clarification}")
 
     # 使用澄清后的问题（如果有优化）
     refined_query = clarification.get("refined_query", query)
 
-    # 2. 根据复杂度优化上下文（Token 优化）
+    # 2. 根据复杂度优化上下文（Token 预算管理）
     system_content = ORCHESTRATOR_SYSTEM_PROMPT
 
-    # 只有中等和复杂任务才添加 RAG 上下文，并压缩
+    # RAG 上下文（token 感知截断）
+    rag_budget = int(token_budget["total_context"] * token_budget["rag_pct"])
     if rag_context and context_config["rag_enabled"]:
-        compressed_rag = compress_rag_context(rag_context, context_config["rag_max_chars"])
+        compressed_rag = compress_rag_token_aware(rag_context, max_tokens=rag_budget)
         system_content += f"\n\n参考信息：\n{compressed_rag}"
+
+    # 注入用户偏好画像（从反馈学习中积累）
+    preference_ctx = get_preference_context("default")
+    if preference_ctx:
+        system_content += f"\n\n{preference_ctx}"
+
+    # 注入跨对话用户记忆
+    user_memory = build_user_memory_context("default")
+    if user_memory:
+        system_content += f"\n\n<user_memory>\n{user_memory}\n</user_memory>"
+
+    # 注入持仓上下文 + 估值上下文（同时构建 prebuilt_context 供 specialist 复用）
+    prebuilt_context = ""
+    try:
+        from portfolio_context import build_portfolio_context, build_valuation_summary
+        portfolio_ctx = build_portfolio_context()
+        if portfolio_ctx:
+            system_content += f"\n\n## 用户当前持仓\n{portfolio_ctx}"
+            prebuilt_context += f"## 用户当前持仓（分析时务必结合）\n{portfolio_ctx}\n\n"
+        valuation_ctx = build_valuation_summary()
+        if valuation_ctx:
+            system_content += f"\n\n## 当前市场估值\n{valuation_ctx}"
+    except Exception as e:
+        logger.warning(f"注入持仓/估值上下文失败: {e}")
 
     llm_messages = [{"role": "system", "content": system_content}]
 
-    # 压缩历史消息（早期消息摘要化）
-    history_limit = context_config["history_limit"]
-    compressed_history = compress_history(history, history_limit)
+    # 语义化压缩历史消息（LLM 摘要 + 近期原文）
+    history_budget = int(token_budget["total_context"] * token_budget["history_pct"])
+    compressed_history = compress_history_semantic(history, max_tokens=history_budget)
     for msg in compressed_history:
         llm_messages.append({"role": msg["role"], "content": msg["content"]})
 
@@ -720,11 +1013,22 @@ def orchestrate_stream(query: str, history: list, rag_context: str = ""):
     else:
         yield {"type": "status", "message": f"正在协调多个专家... ({clarification.get('reason', '')})"}
 
-    MAX_TURNS = 6
+    # 发送执行计划给前端
+    yield {
+        "type": "plan",
+        "complexity": complexity,
+        "reason": clarification.get("reason", ""),
+        "refined_query": refined_query if refined_query != query else "",
+    }
+
+    MAX_TURNS = 3 if budget["mode"] == "conservative" else 6
+    force_skip_cross_review = budget["mode"] == "conservative"
     specialist_results = []
     all_tool_calls = []
 
     for turn in range(MAX_TURNS):
+        _check_cancel(cancel_event)
+        _check_timeout(start_time)
         try:
             response = _call_llm(
                 caller="orchestrator",
@@ -735,6 +1039,8 @@ def orchestrate_stream(query: str, history: list, rag_context: str = ""):
                 temperature=0.3,
                 max_tokens=2000,
             )
+        except CancelledError:
+            raise
         except Exception as e:
             err_msg = str(e)
             logger.error(f"Orchestrator LLM 调用异常 (turn {turn}): {err_msg}")
@@ -753,8 +1059,86 @@ def orchestrate_stream(query: str, history: list, rag_context: str = ""):
 
         msg = response.choices[0].message
 
-        # 没有工具调用 → 最终回答
+        # 没有工具调用 → 检查是否需要交叉审阅，然后给出最终回答
         if not msg.tool_calls:
+            # Phase B: 交叉审阅（仅 complex 且 >=2 个专家且存在分歧时触发）
+            if complexity == "complex" and len(specialist_results) >= 2 and not force_skip_cross_review and _detect_specialist_disagreement(specialist_results):
+                yield {"type": "status", "message": f"正在进行交叉审阅（{len(specialist_results)} 个专家互相验证）..."}
+                peer_analyses = {sr["agent_key"]: sr["analysis"] for sr in specialist_results}
+                cross_review_results = []
+                # 快照原始专家列表，避免迭代时 append 导致无限循环
+                original_specialists = list(specialist_results)
+                for sr in original_specialists:
+                    _check_cancel(cancel_event)
+                    _check_timeout(start_time)
+                    yield {
+                        "type": "cross_review_start",
+                        "agent_key": sr["agent_key"],
+                        "agent": sr["agent"],
+                        "icon": sr["icon"],
+                    }
+                    try:
+                        cr_result = run_specialist_with_context(
+                            sr["agent_key"], refined_query, peer_analyses, max_turns=2,
+                            prebuilt_context=prebuilt_context
+                        )
+                        cross_review_results.append(cr_result)
+                        specialist_results.append(cr_result)
+                        all_tool_calls.extend(cr_result.get("tool_calls", []))
+                        yield {
+                            "type": "cross_review_done",
+                            "agent_key": sr["agent_key"],
+                            "agent": sr["agent"],
+                            "icon": sr["icon"],
+                            "analysis": cr_result["analysis"],
+                            "duration_ms": cr_result["duration_ms"],
+                        }
+                    except Exception as e:
+                        logger.error(f"交叉审阅 {sr['agent_key']} 失败: {e}")
+                        yield {
+                            "type": "cross_review_done",
+                            "agent_key": sr["agent_key"],
+                            "agent": sr["agent"],
+                            "icon": sr["icon"],
+                            "analysis": f"交叉审阅失败: {e}",
+                            "duration_ms": 0,
+                        }
+
+                # 将交叉审阅结果追加到消息中，做最终综合
+                if cross_review_results:
+                    _check_cancel(cancel_event)
+                    yield {"type": "status", "message": "正在综合所有分析结果..."}
+                    cr_summary = "\n\n---\n\n".join(
+                        f"【{cr['agent']}交叉审阅】\n{cr['analysis']}"
+                        for cr in cross_review_results
+                    )
+                    llm_messages.append({
+                        "role": "user",
+                        "content": f"以下是各专家的交叉审阅结果，请结合 Phase A 和 Phase B 的分析，给出最终综合建议：\n\n{cr_summary}",
+                    })
+                    try:
+                        response = _call_llm(
+                            caller="orchestrator",
+                            model=MODEL,
+                            messages=llm_messages,
+                            temperature=0.3,
+                            max_tokens=2000,
+                        )
+                        answer = response.choices[0].message.content or ""
+                    except Exception:
+                        answer = msg.content or ""
+                    duration_ms = int((time.time() - start_time) * 1000)
+                    yield {
+                        "type": "answer",
+                        "content": answer,
+                        "specialist_results": specialist_results,
+                        "tool_calls": all_tool_calls,
+                        "duration_ms": duration_ms,
+                        "complexity": complexity,
+                        "cross_review": True,
+                    }
+                    return
+
             answer = msg.content or ""
             duration_ms = int((time.time() - start_time) * 1000)
             yield {
@@ -794,16 +1178,19 @@ def orchestrate_stream(query: str, history: list, rag_context: str = ""):
 
         llm_messages.append(assistant_msg)
 
+        # 解析所有 tool call 参数
+        tool_tasks = []
         for tc in msg.tool_calls:
             args = _parse_tool_args(tc.function.arguments, tc.function.name)
-
             expert_query = args.get("query", query)
             agent_key = _EXPERT_MAP.get(tc.function.name, "")
             agent_info = SPECIALIST_AGENTS.get(agent_key, {})
-
             logger.info(f"Orchestrator → {tc.function.name}: {expert_query[:100]}")
+            tool_tasks.append((tc, args, expert_query, agent_key, agent_info))
 
-            # 通知前端：专家开始工作
+        # 通知前端：所有专家开始工作
+        _check_cancel(cancel_event)
+        for tc, args, expert_query, agent_key, agent_info in tool_tasks:
             yield {
                 "type": "specialist_start",
                 "agent_key": agent_key,
@@ -811,15 +1198,57 @@ def orchestrate_stream(query: str, history: list, rag_context: str = ""):
                 "icon": agent_info.get("icon", "🤖"),
             }
 
-            # 执行专家 Agent
-            result_str = _execute_specialist(tc.function.name, expert_query)
+        # 并行执行所有专家
+        import queue
+        result_queue = queue.Queue()
+
+        def _on_specialist_complete(idx, tc, args, agent_key, agent_info, future):
+            """线程回调：专家完成后将结果放入队列。"""
+            try:
+                result_str = future.result()
+            except CancelledError:
+                result_str = json.dumps({"error": "cancelled"}, ensure_ascii=False)
+            except Exception as e:
+                result_str = json.dumps({"error": str(e)}, ensure_ascii=False)
+            result_queue.put((idx, tc, args, agent_key, agent_info, result_str))
+
+        if len(tool_tasks) == 1:
+            # 单个专家，直接执行
+            tc, args, expert_query, agent_key, agent_info = tool_tasks[0]
+            result_str = _execute_specialist(tc.function.name, expert_query, cancel_event,
+                                              prebuilt_context=prebuilt_context)
+            result_queue.put((0, tc, args, agent_key, agent_info, result_str))
+        else:
+            # 多个专家，并行执行
+            with concurrent.futures.ThreadPoolExecutor(max_workers=len(tool_tasks)) as executor:
+                for idx, (tc, args, expert_query, agent_key, agent_info) in enumerate(tool_tasks):
+                    future = executor.submit(
+                        _execute_specialist, tc.function.name, expert_query,
+                        cancel_event=cancel_event, prebuilt_context=prebuilt_context
+                    )
+                    future.add_done_callback(
+                        lambda f, idx=idx, tc=tc, args=args, ak=agent_key, ai=agent_info:
+                        _on_specialist_complete(idx, tc, args, ak, ai, f)
+                    )
+
+        # 收集结果，yield specialist_done 事件
+        completed = 0
+        ordered_results = [None] * len(tool_tasks)
+        while completed < len(tool_tasks):
+            _check_cancel(cancel_event)
+            try:
+                idx, tc, args, agent_key, agent_info, result_str = result_queue.get(timeout=0.5)
+            except queue.Empty:
+                continue
+
+            ordered_results[idx] = (tc, args, result_str)
+            completed += 1
 
             try:
                 result_data = json.loads(result_str)
             except json.JSONDecodeError:
                 result_data = {"raw": result_str}
 
-            # 记录专家结果
             if "error" not in result_data:
                 specialist_result = {
                     "agent_key": result_data.get("agent_key", agent_key),
@@ -831,7 +1260,6 @@ def orchestrate_stream(query: str, history: list, rag_context: str = ""):
                 }
                 specialist_results.append(specialist_result)
 
-                # 通知前端：专家分析完成
                 yield {
                     "type": "specialist_done",
                     "agent_key": specialist_result["agent_key"],
@@ -841,13 +1269,17 @@ def orchestrate_stream(query: str, history: list, rag_context: str = ""):
                     "duration_ms": specialist_result["duration_ms"],
                 }
 
+        # 按原始顺序 append tool response 到 llm_messages
+        for idx, (tc, args, result_str) in enumerate(ordered_results):
+            if result_str is None:
+                result_str = json.dumps({"error": "执行未完成"}, ensure_ascii=False)
+
             all_tool_calls.append({
                 "name": tc.function.name,
                 "arguments": args,
                 "result_preview": result_str[:300],
             })
 
-            # 将专家结果反馈给 Orchestrator
             llm_messages.append({
                 "role": "tool",
                 "tool_call_id": tc.id,
@@ -857,6 +1289,7 @@ def orchestrate_stream(query: str, history: list, rag_context: str = ""):
         yield {"type": "status", "message": "正在综合各专家意见..."}
 
     # 超过最大轮次，做最后一次总结
+    _check_cancel(cancel_event)
     try:
         llm_messages.append({
             "role": "user",
@@ -870,6 +1303,8 @@ def orchestrate_stream(query: str, history: list, rag_context: str = ""):
             max_tokens=2000,
         )
         final_answer = response.choices[0].message.content or ""
+    except CancelledError:
+        raise
     except Exception:
         final_answer = "分析过程较长，请参考以上各专家的分析结果。"
 

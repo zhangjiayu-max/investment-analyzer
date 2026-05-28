@@ -83,14 +83,30 @@ def index_article(article_id: int, title: str, content: str):
 
 
 def index_valuation(index_code: str, index_name: str, valuation_data: dict):
-    """索引一条估值数据。"""
-    body_parts = []
-    for key in ["metric_type", "current_value", "percentile", "danger_value",
-                 "opportunity_value", "median", "zscore"]:
-        val = valuation_data.get(key)
-        if val is not None:
-            body_parts.append(f"{key}: {val}")
-    _index_document("valuation", index_name or index_code, " ".join(body_parts), index_code)
+    """索引一条估值数据（含日期，便于判断时效性）。"""
+    date_str = valuation_data.get("snapshot_date", "")
+    metric = valuation_data.get("metric_type", "")
+    cur_val = valuation_data.get("current_value", "")
+    pct = valuation_data.get("percentile", "")
+    zscore = valuation_data.get("zscore", "")
+    danger = valuation_data.get("danger_value", "")
+    opp = valuation_data.get("opportunity_value", "")
+    median = valuation_data.get("median", "")
+
+    # 构建包含日期的可读 body
+    title = f"{index_name or index_code} {metric}估值"
+    body_parts = [f"日期: {date_str}"] if date_str else []
+    body_parts.extend([
+        f"指数: {index_name or index_code}",
+        f"指标: {metric}",
+        f"当前值: {cur_val}",
+        f"百分位: {pct}%",
+        f"Z-Score: {zscore}",
+        f"危险值: {danger}",
+        f"机会值: {opp}",
+        f"中位数: {median}",
+    ])
+    _index_document("valuation", title, " | ".join(body_parts), index_code)
 
 
 def index_analysis_record(record_id: int, index_name: str, raw_response: str):
@@ -98,9 +114,11 @@ def index_analysis_record(record_id: int, index_name: str, raw_response: str):
     _index_document("analysis", index_name or "", raw_response[:3000] if raw_response else "", str(record_id))
 
 
-def index_author_article(article_id: int, title: str, content: str):
-    """索引一篇作者文章。"""
-    _index_document("author_article", title or "", content[:5000] if content else "", str(article_id))
+def index_author_article(article_id: int, title: str, content: str, publish_time: str = ""):
+    """索引一篇作者文章（含发布日期，便于判断时效性）。"""
+    # 在 body 开头添加日期前缀，让 LLM 能判断内容时效性
+    date_prefix = f"[发布日期: {publish_time}] " if publish_time else ""
+    _index_document("author_article", title or "", date_prefix + (content[:5000] if content else ""), str(article_id))
 
 
 def index_skill_document(doc_id: int, title: str, content: str):
@@ -123,56 +141,126 @@ def index_skill_extraction(article_id: int, title: str, skill_data: dict):
     _index_document("skill", title or "", body[:3000], str(article_id))
 
 
+def _sanitize_fts_token(token: str) -> str:
+    """处理 FTS5 特殊字符：含特殊字符或多字中文 token 用双引号包裹做短语匹配。"""
+    import re
+    if re.search(r'[%*"():^\-]', token):
+        return f'"{token}"'
+    # 多字中文 token 加引号，让 FTS5 做短语匹配而非单字符匹配
+    # "债券" → "\"债券\"" → FTS5 要求"债"和"券"相邻出现
+    if len(token) >= 2 and all('一' <= c <= '鿿' for c in token):
+        return f'"{token}"'
+    return token
+
+
+# ── 共享停用词表（FTS 查询和 RAG 上下文构建共用）─────────────────
+_STOPWORDS = {
+    "的", "了", "在", "是", "我", "有", "和", "就", "不", "都", "上", "也",
+    "到", "说", "要", "去", "你", "会", "着", "看", "好", "这", "他", "她",
+    "能", "下", "过", "么", "吗", "呢", "把", "让", "被", "从", "向", "对",
+    "以", "可以", "应该", "需要", "现在", "目前", "当前", "最近", "怎么样",
+    "如何", "什么", "多少", "为什么", "怎样", "哪个", "哪些", "是否",
+    "买", "卖", "持有", "投资", "分析", "看看", "帮忙", "帮我", "请问", "想问",
+    "估值", "数据", "情况", "趋势", "走势", "那", "个", "一", "人", "很", "没有",
+    "点", "想", "入手", "帮", "问",
+}
+
+
 def _build_fts_query(query: str) -> str:
-    """将用户问题转为 FTS5 查询：分词后过滤停用词，用 OR 连接。"""
+    """将用户问题转为 FTS5 查询：分词后过滤停用词，核心词用 AND、辅助词用 OR。"""
     tokens = _tokenize(query).split()
-    # 过滤掉单字和常见停用词
-    _stopwords = {"的", "了", "在", "是", "我", "有", "和", "就", "不", "都", "上", "也",
-                  "到", "说", "要", "去", "你", "会", "着", "看", "好", "这", "他", "她",
-                  "能", "下", "过", "么", "吗", "呢", "把", "让", "被", "从", "向", "对",
-                  "以", "可以", "应该", "需要", "现在", "目前", "当前", "最近", "怎么样",
-                  "如何", "什么", "多少", "为什么", "怎样", "哪个", "哪些", "是否",
-                  "买", "卖", "持有", "投资", "分析", "看看", "帮忙", "帮我", "请问", "想问",
-                  "估值", "数据", "情况", "趋势", "走势", "那", "个", "一", "人", "很", "没有"}
-    keywords = [t for t in tokens if len(t) >= 2 and t not in _stopwords]
-    if not keywords:
-        # 没有有效关键词，用原始分词结果
-        keywords = [t for t in tokens if len(t) >= 1]
-    # FTS5 OR 查询
-    return " OR ".join(keywords)
+    # 先过滤停用词，再清洗特殊字符（避免引号影响停用词匹配）
+    tokens = [t for t in tokens if t and t not in _STOPWORDS]
+    cleaned = [_sanitize_fts_token(t) for t in tokens]
+    cleaned = [t for t in cleaned if t]
+    multi_char = [t for t in cleaned if len(t) >= 2]
+    single_char = [t for t in cleaned if len(t) == 1 and '一' <= t <= '鿿']
+
+    if not multi_char and not single_char:
+        return ""
+
+    # 优先用 AND 连接多字关键词（精确匹配），单字关键词作为补充用 OR
+    if multi_char:
+        core = " AND ".join(multi_char)
+        if single_char:
+            # 核心词 AND，辅助单字 OR
+            return f"({core}) OR ({' OR '.join(single_char)})"
+        return core
+    return " OR ".join(single_char)
+
+
+# ── 时效性策略：不同类型内容的有效期不同 ──────────────────
+# author_article: 市场评论/行情分析，时效性强，2个月
+# skill: 投资方法论/认知框架，长期有效，12个月
+# valuation: 实时估值数据，不过滤
+# article/analysis: 时效性强，2个月
+_FRESHNESS_POLICY = {
+    "author_article": 2,
+    "skill": 6,
+    "valuation": 0,   # 0 = 不过滤
+    "article": 2,
+    "analysis": 2,
+    "linked_doc": 0,  # 个人文档不过滤
+}
+
+
+def _build_fts_query_relaxed(query: str) -> str:
+    """生成宽松的 FTS5 查询（OR 连接），作为 AND 无结果时的降级方案。"""
+    tokens = _tokenize(query).split()
+    tokens = [t for t in tokens if t and t not in _STOPWORDS]
+    cleaned = [_sanitize_fts_token(t) for t in tokens]
+    cleaned = [t for t in cleaned if t]
+    if not cleaned:
+        return ""
+    return " OR ".join(cleaned)
 
 
 def search_knowledge(query: str, content_type: str = None, limit: int = 5) -> list[dict]:
-    """FTS5 全文检索，返回最相关的知识片段。"""
+    """FTS5 全文检索，按内容类型自动过滤过时数据。优先 AND 匹配，无结果时降级为 OR。"""
     fts_query = _build_fts_query(query)
     if not fts_query:
         return []
 
     conn = _get_conn()
-    try:
+
+    def _execute(q: str):
         if content_type:
-            rows = conn.execute("""
+            return conn.execute("""
                 SELECT content_type, title, body, reference_id, rank
                 FROM knowledge_fts
                 WHERE knowledge_fts MATCH ? AND content_type = ?
                 ORDER BY rank
                 LIMIT ?
-            """, (fts_query, content_type, limit)).fetchall()
+            """, (q, content_type, limit * 3)).fetchall()
         else:
-            rows = conn.execute("""
+            return conn.execute("""
                 SELECT content_type, title, body, reference_id, rank
                 FROM knowledge_fts
                 WHERE knowledge_fts MATCH ?
                 ORDER BY rank
                 LIMIT ?
-            """, (fts_query, limit)).fetchall()
+            """, (q, limit * 3)).fetchall()
+
+    try:
+        rows = _execute(fts_query)
     except Exception:
         rows = []
-    finally:
-        conn.close()
 
+    # AND 无结果时降级为 OR
+    if not rows:
+        relaxed_query = _build_fts_query_relaxed(query)
+        if relaxed_query and relaxed_query != fts_query:
+            try:
+                rows = _execute(relaxed_query)
+            except Exception:
+                rows = []
+                conn.close()
+                return []
+
+    results = [dict(r) for r in rows]
+    results = _filter_old_results(results, conn=conn)
     conn.close()
-    return [dict(r) for r in rows]
+    return results[:limit]
 
 
 def build_rag_context(query: str, content_types: list[str] = None, limit: int = 5) -> str:
@@ -399,6 +487,173 @@ def search_chroma(query: str, content_type: str = None, limit: int = 5) -> list[
     return output
 
 
+def _filter_old_results(results: list[dict], conn=None) -> list[dict]:
+    """按 _FRESHNESS_POLICY 策略过滤过时数据。不同类型内容有效期不同。"""
+    if not results:
+        return results
+
+    from datetime import datetime, timedelta
+
+    # 按类型分组需要查日期的 reference_id
+    ids_by_type = {}
+    for r in results:
+        ct = r.get("content_type", "")
+        max_months = _FRESHNESS_POLICY.get(ct, 0)
+        if max_months > 0 and ct in ("author_article", "skill"):
+            ids_by_type.setdefault(ct, set()).add(r["reference_id"])
+
+    if not ids_by_type:
+        return results
+
+    # 按类型分别查日期（author_article 和 skill 来自不同表）
+    date_map = {}
+    try:
+        own_conn = conn is None
+        if own_conn:
+            conn = _get_conn()
+
+        def _normalize_date(date_str: str) -> str:
+            """规范化日期为 YYYY-MM 格式（带前导零），确保字符串比较正确。"""
+            if not date_str:
+                return ""
+            # "2025年7月12日" → "2025-07"
+            # "2025-06-09" → "2025-06"
+            # "2025-7" → "2025-07"
+            raw = date_str.replace("年", "-").replace("月", "-").replace("日", "")
+            parts = raw.split("-")
+            if len(parts) >= 2:
+                try:
+                    return f"{int(parts[0]):04d}-{int(parts[1]):02d}"
+                except (ValueError, IndexError):
+                    pass
+            return raw[:7]
+
+        # author_article 查 author_articles 表
+        if "author_article" in ids_by_type:
+            aa_ids = list(ids_by_type["author_article"])
+            placeholders = ",".join("?" * len(aa_ids))
+            date_rows = conn.execute(
+                f"SELECT id, publish_time FROM author_articles WHERE id IN ({placeholders})",
+                aa_ids
+            ).fetchall()
+            for dr in date_rows:
+                date_map[f"author_article:{dr['id']}"] = _normalize_date(dr["publish_time"] or "")
+
+        # skill 类型：reference_id 可能是 skill_documents.id 或 article_id
+        # 先查 skill_documents.created_at，再查 author_articles.publish_time
+        if "skill" in ids_by_type:
+            skill_ids = list(ids_by_type["skill"])
+            placeholders = ",".join("?" * len(skill_ids))
+            # 先查 skill_documents
+            date_rows = conn.execute(
+                f"SELECT id, created_at FROM skill_documents WHERE id IN ({placeholders})",
+                skill_ids
+            ).fetchall()
+            for dr in date_rows:
+                date_map[f"skill:{dr['id']}"] = _normalize_date(dr["created_at"] or "")
+            # 未命中的 id 视为 article_id，查 author_articles.publish_time
+            missing_ids = [i for i in skill_ids if f"skill:{i}" not in date_map]
+            if missing_ids:
+                ph2 = ",".join("?" * len(missing_ids))
+                date_rows2 = conn.execute(
+                    f"SELECT id, publish_time FROM author_articles WHERE id IN ({ph2})",
+                    missing_ids
+                ).fetchall()
+                for dr in date_rows2:
+                    date_map[f"skill:{dr['id']}"] = _normalize_date(dr["publish_time"] or "")
+
+        if own_conn:
+            conn.close()
+    except Exception:
+        pass
+
+    # 过滤
+    now = datetime.now()
+    filtered = []
+    for r in results:
+        ct = r.get("content_type", "")
+        max_months = _FRESHNESS_POLICY.get(ct, 0)
+        if max_months > 0 and ct in ("author_article", "skill"):
+            date_str = date_map.get(f"{ct}:{r['reference_id']}", "")
+            if date_str:
+                cutoff = (now - timedelta(days=max_months * 30)).strftime("%Y-%m")
+                if date_str < cutoff:
+                    continue
+        filtered.append(r)
+    return filtered
+
+
+def _enrich_results_with_time(results: list[dict]) -> list[dict]:
+    """为检索结果补充时间信息，从原表查询。"""
+    if not results:
+        return results
+
+    # 按类型分组 reference_id
+    ids_by_type = {}
+    for r in results:
+        ct = r.get("content_type", "")
+        ids_by_type.setdefault(ct, set()).add(r["reference_id"])
+
+    time_map = {}
+    try:
+        conn = _get_conn()
+
+        # articles: created_at
+        if "article" in ids_by_type:
+            ids = list(ids_by_type["article"])
+            ph = ",".join("?" * len(ids))
+            for row in conn.execute(
+                f"SELECT id, created_at FROM articles WHERE id IN ({ph})", ids
+            ).fetchall():
+                time_map[f"article:{row['id']}"] = row["created_at"] or ""
+
+        # author_article: publish_time
+        if "author_article" in ids_by_type:
+            ids = list(ids_by_type["author_article"])
+            ph = ",".join("?" * len(ids))
+            for row in conn.execute(
+                f"SELECT id, publish_time FROM author_articles WHERE id IN ({ph})", ids
+            ).fetchall():
+                time_map[f"author_article:{row['id']}"] = row["publish_time"] or ""
+
+        # skill: 来自 skill_documents(created_at) 或 author_skills(article→publish_time)
+        if "skill" in ids_by_type:
+            ids = list(ids_by_type["skill"])
+            ph = ",".join("?" * len(ids))
+            # 先查 skill_documents
+            for row in conn.execute(
+                f"SELECT id, created_at FROM skill_documents WHERE id IN ({ph})", ids
+            ).fetchall():
+                time_map[f"skill:{row['id']}"] = row["created_at"] or ""
+            # 再查 author_articles（skill extraction 的 reference_id 是 article_id）
+            missing_ids = [i for i in ids if f"skill:{i}" not in time_map]
+            if missing_ids:
+                ph2 = ",".join("?" * len(missing_ids))
+                for row in conn.execute(
+                    f"SELECT id, publish_time FROM author_articles WHERE id IN ({ph2})", missing_ids
+                ).fetchall():
+                    time_map[f"skill:{row['id']}"] = row["publish_time"] or ""
+
+        # analysis: analysis_records.created_at
+        if "analysis" in ids_by_type:
+            ids = list(ids_by_type["analysis"])
+            ph = ",".join("?" * len(ids))
+            for row in conn.execute(
+                f"SELECT id, created_at FROM analysis_records WHERE id IN ({ph})", ids
+            ).fetchall():
+                time_map[f"analysis:{row['id']}"] = row["created_at"] or ""
+
+        conn.close()
+    except Exception as e:
+        logger.warning(f"补充时间信息失败: {e}")
+
+    for r in results:
+        key = f"{r['content_type']}:{r['reference_id']}"
+        r["time"] = time_map.get(key, "")
+
+    return results
+
+
 def build_rag_context_with_details(query: str, content_types: list[str] = None, limit: int = 5) -> dict:
     """检索知识库（FTS5 + 向量混合），返回上下文文本和详细检索结果。
 
@@ -412,12 +667,13 @@ def build_rag_context_with_details(query: str, content_types: list[str] = None, 
     """
     # 提取检索关键词
     tokens = _tokenize(query).split()
-    _stopwords = {"的", "了", "在", "是", "我", "有", "和", "就", "不", "都", "上", "也",
-                  "到", "说", "要", "去", "你", "会", "着", "看", "好", "这", "他", "她",
-                  "能", "下", "过", "么", "吗", "呢", "把", "让", "被", "从", "向", "对",
-                  "以", "可以", "应该", "需要", "现在", "目前", "当前", "最近", "怎么样",
-                  "如何", "什么", "多少", "为什么", "怎样", "哪个", "哪些", "是否"}
-    keywords = [t for t in tokens if len(t) >= 2 and t not in _stopwords]
+    # 先过滤停用词，再清洗特殊字符
+    tokens = [t for t in tokens if t and t not in _STOPWORDS]
+    cleaned = [_sanitize_fts_token(t) for t in tokens]
+    cleaned = [t for t in cleaned if t]
+    multi_char = [t for t in cleaned if len(t) >= 2]
+    single_char = [t for t in cleaned if len(t) == 1 and '一' <= t <= '鿿']
+    keywords = multi_char + single_char if multi_char else (single_char or cleaned)
 
     # FTS5 搜索
     if content_types:
@@ -429,6 +685,9 @@ def build_rag_context_with_details(query: str, content_types: list[str] = None, 
 
     # 向量搜索
     chroma_results = search_chroma(query, content_type=content_types[0] if content_types and len(content_types) == 1 else None, limit=limit)
+
+    # 过滤 ChromaDB 中的旧数据（FTS 已在 search_knowledge 中过滤）
+    chroma_results = _filter_old_results(chroma_results)
 
     logger.info(f"RAG 搜索: query='{query}', FTS5={len(fts_results)}条, 向量={len(chroma_results)}条")
 
@@ -452,6 +711,15 @@ def build_rag_context_with_details(query: str, content_types: list[str] = None, 
             seen[key] = r
 
     all_results = sorted(seen.values(), key=lambda x: x["_score"], reverse=True)[:limit]
+
+    # 标题匹配加权：查询关键词出现在标题中的结果加权（提高精确度）
+    title_boost_words = [t for t in _tokenize(query).split() if len(t) >= 2]
+    for r in all_results:
+        title_text = r.get("title", "")
+        if any(w in title_text for w in title_boost_words):
+            r["_score"] += 0.1  # 加权
+
+    all_results.sort(key=lambda x: x["_score"], reverse=True)
     logger.info(f"RAG 合并后: {len(all_results)}条, 类型: {[r['content_type'] for r in all_results]}")
 
     # 添加标签
@@ -459,6 +727,9 @@ def build_rag_context_with_details(query: str, content_types: list[str] = None, 
                  "author_article": "作者文章", "skill": "技能知识", "linked_doc": "个人文档"}
     for r in all_results:
         r["label"] = label_map.get(r["content_type"], r["content_type"])
+
+    # 补充时间信息
+    _enrich_results_with_time(all_results)
 
     if not all_results:
         return {"context": "", "results": [], "keywords": keywords, "query": query}

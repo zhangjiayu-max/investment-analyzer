@@ -4,13 +4,14 @@ import { listBadCases } from '../api'
 
 const cases = ref([])
 const loading = ref(false)
+const filterSource = ref('')
 const filterType = ref('')
 const selectedCase = ref(null)
 
-const analysisTypes = computed(() => {
-  const types = new Set(cases.value.map(c => c.analysis_type).filter(Boolean))
-  return ['', ...Array.from(types)]
-})
+const sourceLabels = {
+  analysis: '分析记录',
+  chat: '对话反馈',
+}
 
 const analysisTypeLabels = {
   panorama: '全景诊断',
@@ -21,19 +22,46 @@ const analysisTypeLabels = {
   diversification_ai: '分散度分析',
 }
 
-function typeLabel(t) {
-  return analysisTypeLabels[t] || t
+const callerLabels = {
+  chat: '自由对话',
+  agent_chat: 'Agent 对话',
+  agent_tools: '工具对话',
+  clarify: '需求澄清',
+  article_analysis: '文章分析',
+  daily_report: '每日报告',
 }
 
+function typeLabel(c) {
+  if (c.source === 'chat') return callerLabels[c.type] || c.type || '对话'
+  return analysisTypeLabels[c.type] || c.type || '分析'
+}
+
+const analysisTypes = computed(() => {
+  const types = new Set(cases.value.filter(c => c.source === 'analysis').map(c => c.type).filter(Boolean))
+  return Array.from(types)
+})
+
 const filteredCases = computed(() => {
-  if (!filterType.value) return cases.value
-  return cases.value.filter(c => c.analysis_type === filterType.value)
+  let result = cases.value
+  if (filterSource.value) {
+    result = result.filter(c => c.source === filterSource.value)
+  }
+  if (filterType.value) {
+    result = result.filter(c => c.type === filterType.value)
+  }
+  return result
+})
+
+const stats = computed(() => {
+  const analysisCount = cases.value.filter(c => c.source === 'analysis').length
+  const chatCount = cases.value.filter(c => c.source === 'chat').length
+  return { total: cases.value.length, analysis: analysisCount, chat: chatCount }
 })
 
 async function load() {
   loading.value = true
   try {
-    const { data } = await listBadCases(filterType.value || '', 100)
+    const { data } = await listBadCases(filterSource.value || '', 200)
     cases.value = data.cases || []
   } catch (e) {
     console.error(e)
@@ -54,12 +82,17 @@ onMounted(load)
     <div class="page-header">
       <div>
         <h2 class="page-title">Bad Case 分析看板</h2>
-        <p class="page-desc">用户标记为「没用」的分析记录，用于定位 Agent 共性问题</p>
+        <p class="page-desc">用户标记为「没用」的模型产出，用于定位问题和持续优化</p>
       </div>
       <div class="header-actions">
-        <select v-model="filterType" class="input-field input-sm" @change="load">
+        <select v-model="filterSource" class="input-field input-sm" @change="load">
+          <option value="">全部来源</option>
+          <option value="analysis">分析记录</option>
+          <option value="chat">对话反馈</option>
+        </select>
+        <select v-if="filterSource === 'analysis' || !filterSource" v-model="filterType" class="input-field input-sm">
           <option value="">全部类型</option>
-          <option v-for="t in analysisTypes" :key="t" :value="t" v-if="t">{{ typeLabel(t) }}</option>
+          <option v-for="t in analysisTypes" :key="t" :value="t">{{ analysisTypeLabels[t] || t }}</option>
         </select>
         <button class="btn-secondary" @click="load" :disabled="loading">
           {{ loading ? '加载中...' : '刷新' }}
@@ -70,12 +103,16 @@ onMounted(load)
     <!-- Stats bar -->
     <div class="stats-bar">
       <div class="stat-card">
-        <span class="stat-value">{{ cases.length }}</span>
+        <span class="stat-value">{{ stats.total }}</span>
         <span class="stat-label">总 Bad Cases</span>
       </div>
-      <div class="stat-card" v-for="t in analysisTypes" :key="t" v-if="t">
-        <span class="stat-value">{{ cases.filter(c => c.analysis_type === t).length }}</span>
-        <span class="stat-label">{{ typeLabel(t) }}</span>
+      <div class="stat-card">
+        <span class="stat-value">{{ stats.analysis }}</span>
+        <span class="stat-label">分析记录</span>
+      </div>
+      <div class="stat-card">
+        <span class="stat-value">{{ stats.chat }}</span>
+        <span class="stat-label">对话反馈</span>
       </div>
     </div>
 
@@ -84,20 +121,21 @@ onMounted(load)
       <div class="badcase-list">
         <div
           v-for="c in filteredCases"
-          :key="c.id"
-          :class="['badcase-card', { selected: selectedCase?.id === c.id }]"
+          :key="c.source + '-' + c.id"
+          :class="['badcase-card', { selected: selectedCase?.source === c.source && selectedCase?.id === c.id }]"
           @click="selectCase(c)"
         >
           <div class="badcase-header">
-            <span class="badge badge-sm" :class="'badge-' + c.analysis_type">{{ typeLabel(c.analysis_type) }}</span>
+            <span class="badge badge-sm" :class="'badge-' + c.source">{{ sourceLabels[c.source] || c.source }}</span>
+            <span class="badge badge-sm badge-type">{{ typeLabel(c) }}</span>
             <span class="badcase-time">{{ c.created_at?.slice(0, 16) }}</span>
           </div>
           <div class="badcase-summary">{{ c.summary || '无摘要' }}</div>
-          <div v-if="c.feedback_note" class="badcase-note">📝 {{ c.feedback_note }}</div>
+          <div v-if="c.note" class="badcase-note">📝 {{ c.note }}</div>
         </div>
         <div v-if="!loading && filteredCases.length === 0" class="empty-state">
           <p>暂无 Bad Case</p>
-          <p class="text-muted">用户标记「没用」的分析会出现在这里</p>
+          <p class="text-muted">用户标记「没用」的模型产出会出现在这里</p>
         </div>
         <div v-if="loading" class="loading-state">加载中...</div>
       </div>
@@ -105,7 +143,10 @@ onMounted(load)
       <!-- Detail panel -->
       <div class="badcase-detail" v-if="selectedCase">
         <div class="detail-header">
-          <h3>{{ typeLabel(selectedCase.analysis_type) }}</h3>
+          <div class="detail-header-tags">
+            <span class="badge badge-sm" :class="'badge-' + selectedCase.source">{{ sourceLabels[selectedCase.source] || selectedCase.source }}</span>
+            <span class="badge badge-sm badge-type">{{ typeLabel(selectedCase) }}</span>
+          </div>
           <span class="detail-time">{{ selectedCase.created_at }}</span>
         </div>
 
@@ -116,27 +157,35 @@ onMounted(load)
 
         <div class="detail-section">
           <h4>反馈原因</h4>
-          <p>{{ selectedCase.feedback_note || '用户未填写原因' }}</p>
+          <p>{{ selectedCase.note || '用户未填写原因' }}</p>
         </div>
 
         <div class="detail-section">
           <h4>元数据</h4>
           <table class="meta-table">
             <tbody>
-              <tr><td>Agent ID</td><td>{{ selectedCase.agent_id ?? '--' }}</td></tr>
-              <tr><td>Token 用量</td><td>{{ selectedCase.token_usage ?? '--' }}</td></tr>
+              <template v-if="selectedCase.source === 'analysis'">
+                <tr><td>类型</td><td>{{ typeLabel(selectedCase) }}</td></tr>
+                <tr><td>Agent ID</td><td>{{ selectedCase.metadata?.agent_id ?? '--' }}</td></tr>
+                <tr><td>Token 用量</td><td>{{ selectedCase.metadata?.token_usage ?? '--' }}</td></tr>
+              </template>
+              <template v-else>
+                <tr><td>Caller</td><td>{{ selectedCase.metadata?.caller || '--' }}</td></tr>
+                <tr><td>Tags</td><td>{{ selectedCase.metadata?.tags || '--' }}</td></tr>
+              </template>
             </tbody>
           </table>
         </div>
 
         <div class="detail-section">
-          <h4>输入数据</h4>
-          <pre class="code-block">{{ (() => { try { return JSON.stringify(JSON.parse(selectedCase.input_data || '{}'), null, 2) } catch { return selectedCase.input_data || '无' } })() }}</pre>
+          <h4>{{ selectedCase.source === 'analysis' ? '输入数据' : '用户输入' }}</h4>
+          <pre class="code-block" v-if="selectedCase.source === 'analysis'">{{ (() => { try { return JSON.stringify(JSON.parse(selectedCase.input || '{}'), null, 2) } catch { return selectedCase.input || '无' } })() }}</pre>
+          <p v-else>{{ selectedCase.input || '无' }}</p>
         </div>
 
         <div class="detail-section">
-          <h4>分析结果</h4>
-          <div class="result-preview">{{ selectedCase.result_data?.slice(0, 2000) || '无' }}</div>
+          <h4>{{ selectedCase.source === 'analysis' ? '分析结果' : '模型输出' }}</h4>
+          <div class="result-preview">{{ selectedCase.output?.slice(0, 2000) || '无' }}</div>
         </div>
       </div>
       <div v-else class="badcase-detail empty-detail">
@@ -232,6 +281,7 @@ onMounted(load)
 .badcase-time {
   font-size: 0.75rem;
   color: var(--color-text-muted);
+  margin-left: auto;
 }
 .badcase-summary {
   font-size: 0.85rem;
@@ -246,12 +296,9 @@ onMounted(load)
   color: #d97706;
   margin-top: 0.3rem;
 }
-.badge-panorama { background: #6366f1; color: white; }
-.badge-deep_dive { background: #06b6d4; color: white; }
-.badge-trade_review { background: #f59e0b; color: white; }
-.badge-what_if { background: #8b5cf6; color: white; }
-.badge-ai { background: #10b981; color: white; }
-.badge-diversification_ai { background: #ec4899; color: white; }
+.badge-analysis { background: #6366f1; color: white; }
+.badge-chat { background: #06b6d4; color: white; }
+.badge-type { background: var(--color-bg); color: var(--color-text-secondary); border: 1px solid var(--color-border); }
 
 .badcase-detail {
   background: var(--color-bg-card);
@@ -272,9 +319,10 @@ onMounted(load)
   justify-content: space-between;
   margin-bottom: 1rem;
 }
-.detail-header h3 {
-  margin: 0;
-  font-size: 1rem;
+.detail-header-tags {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
 }
 .detail-time {
   font-size: 0.78rem;

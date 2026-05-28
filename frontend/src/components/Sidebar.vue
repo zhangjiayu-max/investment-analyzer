@@ -1,11 +1,40 @@
 <script setup>
-import { ref, computed } from 'vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { isDark, toggleDark } from '../composables/useTheme'
+import { getTokenUsageBudget } from '../api'
 
 const props = defineProps({
   activePage: String,
 })
 const emit = defineEmits(['navigate'])
+
+// ── Token 预算指示器 ──────────────────────────────
+const tokenUsed = ref(0)
+const tokenLimit = ref(500000)
+const tokenPct = ref(0)
+const tokenMode = ref('normal')
+const tokenLabel = computed(() => {
+  const k = (tokenUsed.value / 1000).toFixed(0)
+  const limitK = (tokenLimit.value / 1000).toFixed(0)
+  return `${k}k / ${limitK}k`
+})
+
+async function fetchTokenBudget() {
+  try {
+    const { data } = await getTokenUsageBudget()
+    tokenUsed.value = data.used || 0
+    tokenLimit.value = data.limit || 500000
+    tokenPct.value = Math.min(100, data.pct || 0)
+    tokenMode.value = data.mode || 'normal'
+  } catch { /* silent */ }
+}
+
+let tokenTimer = null
+onMounted(() => {
+  fetchTokenBudget()
+  tokenTimer = setInterval(fetchTokenBudget, 60000) // 每分钟刷新
+})
+onUnmounted(() => { clearInterval(tokenTimer) })
 
 const navItems = [
   { key: 'dashboard', label: '每日看板 🔥', icon: 'dashboard', hot: true },
@@ -164,6 +193,33 @@ const activeGroup = computed(() => {
         </div>
       </template>
     </nav>
+
+    <!-- Token 预算指示器 -->
+    <div class="token-meter" :class="`token-${tokenMode}`">
+      <div class="token-meter-header">
+        <svg class="token-meter-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M13 10V3L4 14h7v7l9-11h-7z"/>
+        </svg>
+        <span class="token-meter-label">今日 Token</span>
+        <span class="token-meter-value">{{ tokenLabel }}</span>
+      </div>
+      <div class="token-bar-track">
+        <div class="token-bar-fill" :style="{ width: tokenPct + '%' }"></div>
+        <div class="token-bar-marker" :style="{ left: '80%' }"></div>
+      </div>
+      <div v-if="tokenMode === 'exceeded'" class="token-alert">
+        <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/>
+        </svg>
+        <span>额度已用完</span>
+      </div>
+      <div v-else-if="tokenMode === 'warning'" class="token-alert token-alert-warn">
+        <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01M12 3a9 9 0 100 18 9 9 0 000-18z"/>
+        </svg>
+        <span>接近上限，自动降级</span>
+      </div>
+    </div>
 
     <!-- Bottom actions -->
     <div class="sidebar-bottom">
@@ -350,6 +406,133 @@ const activeGroup = computed(() => {
   opacity: 0.7;
 }
 
+/* ── Token 预算指示器 ──────────────────────────── */
+.token-meter {
+  margin: 0 0.5rem 0.25rem;
+  padding: 0.6rem 0.75rem;
+  border-radius: var(--radius-md);
+  background: var(--color-bg-hover);
+  transition: all var(--transition-normal);
+}
+
+.token-meter-header {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin-bottom: 0.4rem;
+}
+
+.token-meter-icon {
+  width: 14px;
+  height: 14px;
+  color: var(--color-text-muted);
+  flex-shrink: 0;
+}
+
+.token-meter-label {
+  font-size: 0.7rem;
+  color: var(--color-text-muted);
+  flex: 1;
+}
+
+.token-meter-value {
+  font-size: 0.7rem;
+  font-weight: 600;
+  color: var(--color-text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+.token-bar-track {
+  height: 6px;
+  border-radius: 3px;
+  background: var(--color-border);
+  position: relative;
+  overflow: hidden;
+}
+
+.token-bar-fill {
+  height: 100%;
+  border-radius: 3px;
+  transition: width 0.6s cubic-bezier(0.22, 1, 0.36, 1), background-color 0.4s ease;
+  position: relative;
+}
+
+.token-bar-marker {
+  position: absolute;
+  top: -1px;
+  bottom: -1px;
+  width: 1px;
+  background: var(--color-text-muted);
+  opacity: 0.4;
+}
+
+/* Normal: green */
+.token-normal .token-bar-fill {
+  background: linear-gradient(90deg, #10b981, #34d399);
+}
+.token-normal .token-meter-icon {
+  color: #10b981;
+}
+
+/* Warning: amber + pulse */
+.token-warning .token-bar-fill {
+  background: linear-gradient(90deg, #f59e0b, #fbbf24);
+  animation: token-pulse 2s ease-in-out infinite;
+}
+.token-warning .token-meter-icon {
+  color: #f59e0b;
+}
+.token-warning .token-meter-value {
+  color: #d97706;
+}
+.token-warning .token-meter {
+  background: rgba(245, 158, 11, 0.08);
+}
+
+/* Exceeded: red + shake */
+.token-exceeded .token-bar-fill {
+  background: linear-gradient(90deg, #ef4444, #f87171);
+}
+.token-exceeded .token-meter-icon {
+  color: #ef4444;
+  animation: token-shake 0.6s ease-in-out;
+}
+.token-exceeded .token-meter-value {
+  color: #dc2626;
+  font-weight: 700;
+}
+.token-exceeded .token-meter {
+  background: rgba(239, 68, 68, 0.08);
+  border: 1px solid rgba(239, 68, 68, 0.15);
+}
+
+.token-alert {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  margin-top: 0.35rem;
+  font-size: 0.65rem;
+  color: #ef4444;
+  font-weight: 600;
+}
+
+.token-alert-warn {
+  color: #d97706;
+}
+
+@keyframes token-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.7; }
+}
+
+@keyframes token-shake {
+  0%, 100% { transform: translateX(0); }
+  20% { transform: translateX(-2px); }
+  40% { transform: translateX(2px); }
+  60% { transform: translateX(-1px); }
+  80% { transform: translateX(1px); }
+}
+
 .sidebar-bottom {
   padding: 0.5rem;
   border-top: 1px solid var(--color-border);
@@ -428,6 +611,10 @@ const activeGroup = computed(() => {
   .nav-child .nav-icon {
     width: 14px;
     height: 14px;
+  }
+
+  .token-meter {
+    display: none;
   }
 
   .sidebar-bottom {

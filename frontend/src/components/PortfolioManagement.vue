@@ -18,7 +18,7 @@ import {
   addTransactionTag, removeTransactionTag, getTransactionTags, clearAllPortfolio, chat,
   runPortfolioAiAnalysis, listPortfolioAiAnalysisRecords,
   getPortfolioAiAnalysisRecord, deletePortfolioAiAnalysisRecord,
-  runDiversificationAiSummary, getAiSummaryTodayStatus,
+  runDiversificationAiSummary, getAiSummaryTodayStatus, getPortfolioPenetration,
   runPanoramaAnalysis, runDeepDiveAnalysis, runTradeReview, runWhatIfAnalysis,
   listPanoramaRecords, listDeepDiveRecords, listTradeReviewRecords, listWhatIfRecords,
   submitAnalysisFeedback,
@@ -42,13 +42,25 @@ const holdingWeights = computed(() => {
 const showIndexDist = ref(false)
 const showHoldingWeight = ref(true)
 
-// ── 今日盈亏 ──
+// ── 今日盈亏（排除已清仓持仓） ──
 const todayTotalProfit = computed(() => {
   let total = 0
   for (const h of holdings.value) {
+    if ((h.shares || 0) <= 0) continue
     if (h.today_profit != null) total += h.today_profit
   }
   return total
+})
+const todayProfitLabel = computed(() => {
+  const today = new Date().toISOString().slice(0, 10)
+  const yesterday = new Date(Date.now() - 86400000).toISOString().slice(0, 10)
+  let latest = ''
+  for (const h of holdings.value) {
+    if (h.price_updated_at && h.price_updated_at > latest) latest = h.price_updated_at
+  }
+  if (!latest || latest >= today) return { text: '今日盈亏', date: '' }
+  if (latest >= yesterday) return { text: '昨日盈亏', date: latest }
+  return { text: '盈亏', date: latest }
 })
 
 // ── 饼图颜色 ──
@@ -83,6 +95,7 @@ const sortKey = ref('')
 const sortOrder = ref(1)
 const searchQuery = ref('')
 const accountFilter = ref('')  // '' = all
+const todayFilter = ref('all')  // 'all' | 'up' | 'down'
 const expandedIndexDist = ref(null) // 展开的指数分布详情
 
 const fundsByIndex = computed(() => {
@@ -99,6 +112,13 @@ const sortableHoldings = computed(() => {
   let list = [...holdings.value]
   if (accountFilter.value) {
     list = list.filter(h => h.account === accountFilter.value)
+  }
+  if (todayFilter.value !== 'all') {
+    list = list.filter(h => {
+      const pct = h.today_change_pct
+      if (pct === undefined || pct === null) return false
+      return todayFilter.value === 'up' ? pct > 0 : pct < 0
+    })
   }
   if (searchQuery.value.trim()) {
     const q = searchQuery.value.trim().toLowerCase()
@@ -139,10 +159,16 @@ function sortIndicator(key) {
 // State
 const holdings = ref([])
 const summary = ref({ holding_count: 0, total_cost: 0, total_value: 0, total_profit: 0, profit_rate: 0 })
-const cashBalance = ref(0)
-const todayCashInterest = ref(0)
+const cashBalances = ref({ '小鱼儿': 0, '花无缺': 0 })
+const cashInterests = ref({ '小鱼儿': 0, '花无缺': 0 })
+const totalCash = computed(() => {
+  if (accountFilter.value) {
+    return cashBalances.value[accountFilter.value] || 0
+  }
+  return (cashBalances.value['小鱼儿'] || 0) + (cashBalances.value['花无缺'] || 0)
+})
 const showCashModal = ref(false)
-const cashForm = ref({ amount: 0 })
+const cashForm = ref({ amount: 0, user_id: '花无缺' })
 const cashMode = ref('add')  // 'add' 存入/支出, 'set' 直接设置
 
 // ── 交易行为图表 ──
@@ -334,6 +360,9 @@ const detailFundName = ref('')
 const chartMode = ref('')  // '' | 'detail' | 'chart5y'
 const fundChartData = ref(null)  // 5年净值数据
 const fundChartLoading = ref(false)
+const chartSearchQuery = ref('')
+const chartSearching = ref(false)
+const chartSearchError = ref('')
 
 const fundChartStats = computed(() => {
   const data = fundChartData.value
@@ -649,6 +678,111 @@ const diverShowMcp = ref(false)
 const diverAiLoading = ref(false)
 const diverAiResult = ref('')
 const diverAiRecordId = ref(null)
+
+// ── 费率侵蚀计算器 ──
+const feeRate = ref(1.5)
+const feeYears = ref(30)
+const feePrincipal = ref(100000)
+const feeReturn = ref(8)
+const showFeeCalc = ref(false)
+
+const feeErosionResult = computed(() => {
+  const p = feePrincipal.value
+  const r = feeReturn.value / 100
+  const f = feeRate.value / 100
+  const y = feeYears.value
+  const withFee = p * Math.pow(1 + r - f, y)
+  const withoutFee = p * Math.pow(1 + r, y)
+  const lowerFee = p * Math.pow(1 + r - f + 0.01, y)
+  return {
+    withFee,
+    withoutFee,
+    erosion: withoutFee - withFee,
+    savingsIfLower: lowerFee - withFee,
+    withFeeMultiple: (withFee / p).toFixed(1),
+    withoutFeeMultiple: (withoutFee / p).toFixed(1),
+  }
+})
+
+function feeCurvePoints(withFee, withoutFee, years) {
+  const maxVal = withoutFee
+  const pts = []
+  for (let y = 0; y <= years; y += Math.max(1, Math.floor(years / 60))) {
+    const wf = feePrincipal.value * Math.pow(1 + feeReturn.value / 100 - feeRate.value / 100, y)
+    const nf = feePrincipal.value * Math.pow(1 + feeReturn.value / 100, y)
+    pts.push({ y, wf, nf })
+  }
+  // Ensure last point
+  const lastY = years
+  pts.push({
+    y: lastY,
+    wf: feePrincipal.value * Math.pow(1 + feeReturn.value / 100 - feeRate.value / 100, lastY),
+    nf: feePrincipal.value * Math.pow(1 + feeReturn.value / 100, lastY),
+  })
+  return pts
+}
+
+function feeSvgPath(pts, valKey, width, height, maxVal) {
+  if (!pts.length) return ''
+  return pts.map((p, i) => {
+    const x = (i / (pts.length - 1)) * width
+    const y = height - (p[valKey] / maxVal) * height
+    return `${i === 0 ? 'M' : 'L'}${x.toFixed(1)},${y.toFixed(1)}`
+  }).join(' ')
+}
+
+function feeAreaPath(pts, width, height, maxVal) {
+  if (!pts.length) return ''
+  const line = pts.map((p, i) => {
+    const x = (i / (pts.length - 1)) * width
+    const y = height - (p.nf / maxVal) * height
+    return `${i === 0 ? 'M' : 'L'}${x.toFixed(1)},${y.toFixed(1)}`
+  }).join(' ')
+  const bottom = pts.map((p, i) => {
+    const x = ((pts.length - 1 - i) / (pts.length - 1)) * width
+    const y = height - (p.wf / maxVal) * height
+    return `L${x.toFixed(1)},${y.toFixed(1)}`
+  }).join(' ')
+  return line + ' ' + bottom + ' Z'
+}
+
+// ── 持仓穿透 ──
+const penetrationData = ref(null)
+const penetrationLoading = ref(false)
+const showPenetration = ref(false)
+
+async function loadPenetration() {
+  penetrationLoading.value = true
+  try {
+    const { data } = await getPortfolioPenetration()
+    penetrationData.value = data
+  } catch (e) {
+    penetrationData.value = { error: e.message }
+  } finally {
+    penetrationLoading.value = false
+  }
+}
+
+function overlapColor(val) {
+  if (val >= 0.5) return '#ef4444'
+  if (val >= 0.2) return '#f59e0b'
+  return '#10b981'
+}
+
+function handlePenetration() {
+  if (penetrationData.value) {
+    confirm.value = {
+      visible: true,
+      title: '刷新持仓穿透',
+      message: '将重新从 akshare 拉取基金持仓数据并计算穿透结果，首次加载可能需要 30-60 秒，是否继续？',
+      danger: false,
+      onConfirm: () => { confirm.value.visible = false; loadPenetration() }
+    }
+  } else {
+    loadPenetration()
+  }
+}
+
 const txAnalysisData = ref(null)
 const chartFundCode = ref('')
 const chartData = ref(null)
@@ -736,12 +870,14 @@ async function loadData() {
     const { data } = await getPortfolioSummary(params)
     summary.value = data
     holdings.value = data.holdings || []
-    // 加载零钱余额（自动结算每日收益）
-    try {
-      const { data: cashData } = await getCashBalance()
-      cashBalance.value = cashData.balance || 0
-      todayCashInterest.value = cashData.today_interest || 0
-    } catch (_) {}
+    // 加载各账户零钱余额
+    for (const uid of ['小鱼儿', '花无缺']) {
+      try {
+        const { data: cashData } = await getCashBalance(uid)
+        cashBalances.value[uid] = cashData.balance || 0
+        cashInterests.value[uid] = cashData.today_interest || 0
+      } catch (_) {}
+    }
     // 加载所有待确认交易
     await loadPendingTxs()
     // 加载全部基金列表（用于走势图，不受账号筛选影响）
@@ -772,8 +908,9 @@ async function submitCashAdjust() {
     return
   }
   try {
-    const { data } = await adjustCashBalance(cashForm.value.amount, cashMode.value)
-    cashBalance.value = data.balance
+    const uid = cashForm.value.user_id
+    const { data } = await adjustCashBalance(cashForm.value.amount, cashMode.value, uid)
+    cashBalances.value[uid] = data.balance
     showCashModal.value = false
     cashForm.value.amount = 0
     showToast('零钱已更新', 'success')
@@ -1046,6 +1183,57 @@ async function runDiverAiSummary() {
   }
 }
 
+// ── 确认弹窗包装 ──
+function confirmDiverAi() {
+  confirm.value = {
+    visible: true,
+    title: diverAiResult.value ? '重新生成分散度解读' : 'AI 分散度解读',
+    message: '将使用「分散度分析师」分析持仓分散度并生成解读，是否继续？',
+    danger: false,
+    onConfirm: () => { confirm.value.visible = false; runDiverAiSummary() }
+  }
+}
+
+function confirmPanorama() {
+  confirm.value = {
+    visible: true,
+    title: '全景诊断',
+    message: '将使用「全景诊断分析师」对投资组合进行全面诊断分析，是否继续？',
+    danger: false,
+    onConfirm: () => { confirm.value.visible = false; runPanoramaMode() }
+  }
+}
+
+function confirmDeepDive() {
+  confirm.value = {
+    visible: true,
+    title: '基金深度分析',
+    message: '将使用「基金深度分析师」对所选基金进行深度分析，是否继续？',
+    danger: false,
+    onConfirm: () => { confirm.value.visible = false; runDeepDiveMode() }
+  }
+}
+
+function confirmTradeReview() {
+  confirm.value = {
+    visible: true,
+    title: '交易复盘',
+    message: '将使用「交易复盘分析师」分析交易行为并生成复盘报告，是否继续？',
+    danger: false,
+    onConfirm: () => { confirm.value.visible = false; runTradeReviewMode() }
+  }
+}
+
+function confirmWhatIf() {
+  confirm.value = {
+    visible: true,
+    title: '情景推演',
+    message: '将使用「情景推演分析师」模拟市场情景并生成推演报告，是否继续？',
+    danger: false,
+    onConfirm: () => { confirm.value.visible = false; runWhatIfMode() }
+  }
+}
+
 async function submitAiAnalysis() {
   aiAnalysisLoading.value = true
   aiAnalysisResult.value = ''
@@ -1219,7 +1407,7 @@ async function refreshAll() {
   // 显示今日盈亏汇总
   const sign = totalTodayProfit > 0 ? '+' : ''
   showToast(
-    `净值更新完成 · 今日${upCount}涨${downCount}跌 · 合计${sign}¥${totalTodayProfit.toFixed(2)}`,
+    `${upCount}涨${downCount}跌 ${sign}¥${totalTodayProfit.toFixed(2)}`,
     totalTodayProfit > 0 ? 'success' : totalTodayProfit < 0 ? 'error' : 'info'
   )
 }
@@ -1288,6 +1476,8 @@ async function openDetail(h) {
 
 async function openFundAnalysis(h) {
   detailFundName.value = h.fund_name
+  chartSearchQuery.value = h.fund_code
+  chartSearchError.value = ''
   chartMode.value = 'chart5y'
   showDetail.value = true
   fundChartLoading.value = true
@@ -1301,6 +1491,50 @@ async function openFundAnalysis(h) {
   } finally {
     fundChartLoading.value = false
   }
+}
+
+async function searchAndLoadChart() {
+  const code = chartSearchQuery.value.trim()
+  if (!code) return
+  chartSearchError.value = ''
+  chartSearching.value = true
+  fundChartData.value = null
+  resetChart5yZoom()
+  try {
+    // 先查基金名称
+    const info = await lookupFundInfo(code)
+    detailFundName.value = info.data?.name || code
+  } catch {
+    detailFundName.value = code
+  }
+  try {
+    const { data } = await getFundNavHistory(code, 1825)
+    fundChartData.value = data?.nav_history || null
+    if (!fundChartData.value?.length) {
+      chartSearchError.value = '未找到该基金的净值数据'
+    }
+  } catch (e) {
+    fundChartData.value = null
+    chartSearchError.value = '获取净值数据失败，请检查基金代码'
+  } finally {
+    chartSearching.value = false
+  }
+}
+
+function switchChartFund(fundCode, fundName) {
+  chartSearchQuery.value = fundCode
+  detailFundName.value = fundName
+  chartSearchError.value = ''
+  fundChartLoading.value = true
+  fundChartData.value = null
+  resetChart5yZoom()
+  getFundNavHistory(fundCode, 1825).then(({ data }) => {
+    fundChartData.value = data?.nav_history || null
+  }).catch(() => {
+    fundChartData.value = null
+  }).finally(() => {
+    fundChartLoading.value = false
+  })
 }
 
 // Form operations
@@ -1403,7 +1637,7 @@ function openTxForm(h) {
     transaction_type: 'buy',
     amount: 0,
     shares: 0,
-    price: 0,
+    price: h.current_price || 0,
     transaction_date: new Date().toISOString().slice(0, 10),
     notes: '',
   }
@@ -1906,8 +2140,16 @@ function txDisplayAmount(tx) {
               <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"/></svg>
               <strong>AI 解读</strong>
               <span v-if="diverAiLoading" class="badge badge-neutral badge-sm">分析中...</span>
-              <button v-else-if="!diverAiResult" class="btn-diver-ai" @click="runDiverAiSummary">生成解读</button>
-              <button v-else class="btn-diver-ai" @click="runDiverAiSummary">重新生成</button>
+              <button v-else-if="!diverAiResult" class="btn-ai-action" @click="confirmDiverAi">
+                <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"/></svg>
+                <span>生成解读</span>
+                <span class="ai-agent-tooltip">分散度分析师</span>
+              </button>
+              <button v-else class="btn-ai-action" @click="confirmDiverAi">
+                <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
+                <span>重新生成</span>
+                <span class="ai-agent-tooltip">分散度分析师</span>
+              </button>
             </div>
             <div v-if="diverAiLoading" class="diver-ai-loading">
               <div class="spinner"></div><span>正在分析...</span>
@@ -1948,6 +2190,75 @@ function txDisplayAmount(tx) {
               <div v-if="diversificationData.mcp.error" class="mcp-data-item">
                 <div class="mcp-data-header"><span class="mcp-status-dot dot-err"></span>系统提示：{{ diversificationData.mcp.error }}</div>
               </div>
+            </div>
+          </div>
+
+          <!-- 持仓穿透 -->
+          <div class="analysis-section">
+            <h4 @click="showPenetration = !showPenetration" style="cursor:pointer;user-select:none">
+              <span class="collapse-icon">{{ showPenetration ? '▼' : '▶' }}</span>
+              持仓穿透分析
+            </h4>
+            <div v-show="showPenetration" class="collapse-content">
+              <div style="margin-bottom:0.75rem">
+                <button class="btn-diver-refresh" @click="handlePenetration" :disabled="penetrationLoading">
+                  <svg :class="['icon-spin', { 'spinning': penetrationLoading }]" width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h5M20 20v-5h-5M4.93 9a8 8 0 0113.14 0M19.07 15a8 8 0 01-13.14 0"/>
+                  </svg>
+                  {{ penetrationLoading ? '加载中...' : (penetrationData ? '刷新穿透数据' : '加载持仓穿透') }}
+                </button>
+                <span v-if="penetrationData?.cached_at" style="font-size:0.72rem;color:var(--color-text-muted);margin-left:0.5rem">
+                  缓存: {{ penetrationData.cached_at }}
+                </span>
+              </div>
+              <div v-if="penetrationLoading" class="loading-state"><div class="spinner"></div></div>
+              <div v-else-if="penetrationData && !penetrationData.error">
+                <!-- Top 穿透股票 -->
+                <div v-if="penetrationData.top_stocks?.length" style="margin-bottom:1rem">
+                  <h5 style="font-size:0.82rem;margin:0 0 0.5rem;color:var(--color-text-secondary)">Top {{ penetrationData.top_stocks.length }} 穿透持仓（加权聚合）</h5>
+                  <div v-for="stock in penetrationData.top_stocks" :key="stock.stock_code" class="dist-bar-row" style="margin-bottom:0.5rem">
+                    <span class="dist-label" style="min-width:5rem">{{ stock.stock_name }}</span>
+                    <div class="dist-bar-track" style="flex:1">
+                      <div class="dist-bar-fill" :style="{ width: Math.min(stock.total_weight_pct * 5, 100) + '%', background: stock.total_weight_pct > 5 ? '#ef4444' : stock.total_weight_pct > 2 ? '#f59e0b' : '#10b981' }"></div>
+                    </div>
+                    <span class="dist-value" style="min-width:3.5rem;text-align:right;font-weight:700">{{ stock.total_weight_pct }}%</span>
+                    <div style="width:100%;margin-top:0.15rem;display:flex;flex-wrap:wrap;gap:0.25rem">
+                      <span v-for="f in stock.held_in_funds" :key="f.fund_name" style="font-size:0.68rem;padding:1px 5px;background:rgba(99,102,241,0.08);border-radius:4px;color:var(--color-text-muted)">
+                        {{ f.fund_name }} {{ f.contribution_pct }}%
+                      </span>
+                    </div>
+                  </div>
+                </div>
+                <!-- 重叠度热力图 -->
+                <div v-if="penetrationData.overlap_matrix?.fund_names?.length > 1">
+                  <h5 style="font-size:0.82rem;margin:0 0 0.5rem;color:var(--color-text-secondary)">
+                    <span class="term-with-tip">基金重叠度矩阵<span class="term-tip">衡量任意两只基金之间共同持有相同股票的比例。数值越高说明两只基金持仓越相似，分散投资效果越差。例如 50% 表示两只基金有一半重仓股相同，建议选择重叠度低的基金组合以真正分散风险。</span></span>
+                  </h5>
+                  <div class="overlap-heatmap">
+                    <div class="overlap-row overlap-header">
+                      <div class="overlap-cell overlap-corner"></div>
+                      <div v-for="name in penetrationData.overlap_matrix.fund_names" :key="'h'+name" class="overlap-cell overlap-label">{{ name }}</div>
+                    </div>
+                    <div v-for="(row, i) in penetrationData.overlap_matrix.matrix" :key="'r'+i" class="overlap-row">
+                      <div class="overlap-cell overlap-label">{{ penetrationData.overlap_matrix.fund_names[i] }}</div>
+                      <div v-for="(val, j) in row" :key="'c'+j"
+                        class="overlap-cell"
+                        :style="{ background: overlapColor(val), color: val >= 0.5 ? '#fff' : '#1e293b' }"
+                        :title="penetrationData.overlap_matrix.fund_names[i] + ' × ' + penetrationData.overlap_matrix.fund_names[j]">
+                        {{ (val * 100).toFixed(0) }}%
+                      </div>
+                    </div>
+                  </div>
+                  <div style="display:flex;gap:0.75rem;margin-top:0.4rem;font-size:0.7rem;color:var(--color-text-muted)">
+                    <span><span style="display:inline-block;width:10px;height:10px;background:#10b981;border-radius:2px;vertical-align:middle"></span> 0-20%</span>
+                    <span><span style="display:inline-block;width:10px;height:10px;background:#f59e0b;border-radius:2px;vertical-align:middle"></span> 20-50%</span>
+                    <span><span style="display:inline-block;width:10px;height:10px;background:#ef4444;border-radius:2px;vertical-align:middle"></span> 50%+</span>
+                  </div>
+                </div>
+                <p style="font-size:0.72rem;color:var(--color-text-muted);margin-top:0.5rem">数据来源: akshare 基金季报 · 持仓 {{ penetrationData.fund_count }} 只基金 · 总市值 ¥{{ (penetrationData.total_portfolio_value / 10000).toFixed(1) }}万</p>
+              </div>
+              <div v-else-if="penetrationData?.error" style="color:#dc2626;font-size:0.85rem">加载失败: {{ penetrationData.error }}</div>
+              <div v-else style="color:var(--color-text-muted);font-size:0.85rem">点击上方按钮加载持仓穿透数据</div>
             </div>
           </div>
         </div>
@@ -2123,11 +2434,12 @@ function txDisplayAmount(tx) {
           <!-- Mode: Panorama -->
           <div v-if="aiMode === 'panorama'" class="ai-mode-content">
             <div class="ai-mode-desc">从全局视角诊断你的投资组合健康状况，包括集中度风险、估值水位、分散化程度和市场适配度，并给出加减仓建议。</div>
-            <button class="btn-primary" @click="runPanoramaMode" :disabled="modeLoading" style="margin:0.5rem 0">
-              <svg v-if="modeLoading" class="icon-spin spinning" width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24" style="margin-right:0.35rem">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h5M20 20v-5h-5M4.93 9a8 8 0 0113.14 0M19.07 15a8 8 0 01-13.14 0"/>
+            <button class="btn-ai-action" :class="{ 'btn-loading': modeLoading }" :disabled="modeLoading" @click="confirmPanorama" style="margin:0.5rem 0">
+              <svg :class="['icon-spin', { 'spinning': modeLoading }]" width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"/>
               </svg>
-              {{ modeLoading ? '诊断中...' : '🔍 开始全景诊断' }}
+              <span>{{ modeLoading ? '诊断中...' : '开始全景诊断' }}</span>
+              <span class="ai-agent-tooltip">全景诊断分析师</span>
             </button>
             <div v-if="modeResult && aiMode === 'panorama'" class="ai-mode-result">
               <div class="ai-result-content markdown-body">{{ modeResult }}</div>
@@ -2163,8 +2475,12 @@ function txDisplayAmount(tx) {
                 <option value="">请选择基金</option>
                 <option v-for="h in holdings" :key="h.id" :value="h.id">{{ h.fund_name }} ({{ h.fund_code }})</option>
               </select>
-              <button class="btn-primary btn-sm" @click="runDeepDiveMode" :disabled="modeLoading || !deepDiveSelectedHolding">
-                {{ modeLoading ? '分析中...' : '分析' }}
+              <button class="btn-ai-action" :class="{ 'btn-loading': modeLoading }" :disabled="modeLoading || !deepDiveSelectedHolding" @click="confirmDeepDive">
+                <svg :class="['icon-spin', { 'spinning': modeLoading }]" width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/>
+                </svg>
+                <span>{{ modeLoading ? '分析中...' : '深度分析' }}</span>
+                <span class="ai-agent-tooltip">基金深度分析师</span>
               </button>
             </div>
             <div v-if="modeResult && aiMode === 'deepdive'" class="ai-mode-result">
@@ -2201,8 +2517,12 @@ function txDisplayAmount(tx) {
               <input v-model="reviewStartDate" type="date" class="input-field" />
               <label class="ai-form-label">结束日期</label>
               <input v-model="reviewEndDate" type="date" class="input-field" />
-              <button class="btn-primary btn-sm" @click="runTradeReviewMode" :disabled="modeLoading">
-                {{ modeLoading ? '复盘分析中...' : '开始复盘' }}
+              <button class="btn-ai-action" :class="{ 'btn-loading': modeLoading }" :disabled="modeLoading" @click="confirmTradeReview">
+                <svg :class="['icon-spin', { 'spinning': modeLoading }]" width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3m-6-4h.01M9 16h.01"/>
+                </svg>
+                <span>{{ modeLoading ? '复盘中...' : '开始复盘' }}</span>
+                <span class="ai-agent-tooltip">交易复盘分析师</span>
               </button>
             </div>
             <div v-if="modeResult && aiMode === 'trade-review'" class="ai-mode-result">
@@ -2242,8 +2562,12 @@ function txDisplayAmount(tx) {
               </select>
               <label v-if="whatIfScenario === 'market_drop'" class="ai-form-label">跌幅 (%)</label>
               <input v-if="whatIfScenario === 'market_drop'" v-model.number="whatIfParameter" type="number" class="input-field" style="width:80px" min="1" max="50" />
-              <button class="btn-primary btn-sm" @click="runWhatIfMode" :disabled="modeLoading">
-                {{ modeLoading ? '推演中...' : '开始推演' }}
+              <button class="btn-ai-action" :class="{ 'btn-loading': modeLoading }" :disabled="modeLoading" @click="confirmWhatIf">
+                <svg :class="['icon-spin', { 'spinning': modeLoading }]" width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14.828 14.828a4 4 0 01-5.656 0M9 10h.01M15 10h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
+                </svg>
+                <span>{{ modeLoading ? '推演中...' : '开始推演' }}</span>
+                <span class="ai-agent-tooltip">情景推演分析师</span>
               </button>
             </div>
             <div v-if="modeResult && aiMode === 'what-if'" class="ai-mode-result">
@@ -2289,14 +2613,17 @@ function txDisplayAmount(tx) {
       <div class="summary-card summary-card-cost">
         <div class="summary-label">总成本</div>
         <div class="summary-value cost-value">{{ formatMoney(summary.total_cost) }}</div>
-        <div class="summary-sub">总资产 {{ formatMoney((summary.total_value || 0) + cashBalance) }}</div>
+        <div class="summary-sub">总资产 {{ formatMoney((summary.total_value || 0) + totalCash) }}</div>
       </div>
       <div class="summary-card">
         <div class="summary-label">总市值</div>
         <div class="summary-value value-value">{{ formatMoney(summary.total_value) }}</div>
       </div>
       <div class="summary-card summary-card-today">
-        <div class="summary-label">今日盈亏</div>
+        <div class="summary-label">
+          {{ todayProfitLabel.text }}
+          <span v-if="todayProfitLabel.date" class="today-profit-date">{{ todayProfitLabel.date }}</span>
+        </div>
         <div :class="['summary-value', profitClass(todayTotalProfit)]">
           {{ todayTotalProfit >= 0 ? '+' : '' }}{{ formatMoney(todayTotalProfit) }}
         </div>
@@ -2315,11 +2642,14 @@ function txDisplayAmount(tx) {
       </div>
       <div class="summary-card summary-card-cash" @click="showCashModal = true" style="cursor:pointer">
         <div class="summary-label">
-          零钱
+          零钱合计
           <span style="font-size:0.65rem;opacity:0.6;margin-left:4px">✎</span>
         </div>
-        <div class="summary-value cash-value">{{ formatMoney(cashBalance) }}</div>
-        <div v-if="todayCashInterest > 0" class="cash-interest">今日 +{{ formatMoney(todayCashInterest) }}</div>
+        <div class="summary-value cash-value">{{ formatMoney(totalCash) }}</div>
+        <div class="cash-accounts">
+          <span class="cash-account-tag">🐟 {{ formatMoney(cashBalances['小鱼儿']) }}</span>
+          <span class="cash-account-tag">🌸 {{ formatMoney(cashBalances['花无缺']) }}</span>
+        </div>
       </div>
     </div>
 
@@ -2360,7 +2690,16 @@ function txDisplayAmount(tx) {
             <th class="text-right">成本价</th>
             <th class="text-right th-sortable" @click="toggleSort('total_cost')">总成本{{ sortIndicator('total_cost') }}</th>
             <th class="text-right">当前净值</th>
-            <th class="text-right">今日涨跌</th>
+            <th class="text-right th-sortable" style="position:relative">
+              <span @click="toggleSort('today_profit')">今日涨跌 / 收益{{ sortIndicator('today_profit') }}</span>
+              <span class="th-filter" @click.stop="todayFilter = todayFilter === 'all' ? 'down' : todayFilter === 'down' ? 'up' : 'all'" :title="todayFilter === 'all' ? '全部' : todayFilter === 'up' ? '仅涨' : '仅跌'">
+                <svg width="12" height="12" fill="currentColor" viewBox="0 0 16 16">
+                  <path v-if="todayFilter === 'all'" d="M1.5 1.5A.5.5 0 012 1h12a.5.5 0 01.5.5v2a.5.5 0 01-.128.334L10 8.692V13.5a.5.5 0 01-.223.416l-3 2A.5.5 0 016 15.5V8.692L1.628 3.834A.5.5 0 011.5 3.5v-2z"/>
+                  <path v-else-if="todayFilter === 'up'" d="M8 15a.5.5 0 01-.5-.5V3.707L4.354 6.854a.5.5 0 11-.708-.708l4-4a.5.5 0 01.708 0l4 4a.5.5 0 01-.708.708L8.5 3.707V14.5A.5.5 0 018 15z" fill="#dc2626"/>
+                  <path v-else d="M8 1a.5.5 0 01.5.5v10.793l3.146-3.147a.5.5 0 01.708.708l-4 4a.5.5 0 01-.708 0l-4-4a.5.5 0 01.708-.708L7.5 12.293V1.5A.5.5 0 018 1z" fill="#16a34a"/>
+                </svg>
+              </span>
+            </th>
             <th class="text-right th-sortable" @click="toggleSort('current_value')">当前市值{{ sortIndicator('current_value') }}</th>
             <th class="text-right th-sortable" @click="toggleSort('profit_loss')">盈亏{{ sortIndicator('profit_loss') }}</th>
             <th class="text-right th-sortable" @click="toggleSort('profit_rate')">收益率{{ sortIndicator('profit_rate') }}</th>
@@ -2383,10 +2722,14 @@ function txDisplayAmount(tx) {
             <td class="text-right">{{ h.cost_price?.toFixed(4) }}</td>
             <td class="text-right">{{ formatMoney(h.total_cost) }}</td>
             <td class="text-right">{{ h.current_price?.toFixed(4) || '--' }}</td>
-            <td :class="['text-right', profitClass(h.today_change_pct)]" :title="h.today_profit !== undefined && h.today_profit !== null ? `今日盈亏: ¥${h.today_profit.toFixed(2)}` : ''">
+            <td :class="['text-right', profitClass(h.today_change_pct)]">
               <template v-if="h.today_change_pct !== undefined && h.today_change_pct !== null">
-                <span v-if="h.today_change_pct > 0">+{{ h.today_change_pct.toFixed(2) }}%</span>
-                <span v-else>{{ h.today_change_pct.toFixed(2) }}%</span>
+                <div class="today-change-cell">
+                  <span class="today-change-pct">{{ h.today_change_pct > 0 ? '+' : '' }}{{ h.today_change_pct.toFixed(2) }}%</span>
+                  <span v-if="h.today_profit !== undefined && h.today_profit !== null" class="today-change-profit">
+                    {{ h.today_profit >= 0 ? '+' : '' }}{{ h.today_profit.toFixed(2) }}元
+                  </span>
+                </div>
               </template>
               <span v-else class="text-muted">--</span>
             </td>
@@ -2469,9 +2812,13 @@ function txDisplayAmount(tx) {
         <div v-if="showCashModal" class="modal-overlay" @click.self="showCashModal = false">
           <div class="modal-box" style="max-width:400px">
             <h3 class="modal-title">零钱管理</h3>
-            <p style="color:var(--color-text-muted);margin-bottom:1rem">
-              当前余额：<strong style="font-size:1.2rem;color:var(--color-text)">{{ formatMoney(cashBalance) }}</strong>
-            </p>
+            <div class="cash-modal-balances">
+              <div class="cash-modal-account" v-for="uid in ['小鱼儿', '花无缺']" :key="uid"
+                   :class="{ selected: cashForm.user_id === uid }" @click="cashForm.user_id = uid">
+                <span class="cash-modal-uid">{{ uid === '小鱼儿' ? '🐟 小鱼儿' : '🌸 花无缺' }}</span>
+                <strong>{{ formatMoney(cashBalances[uid]) }}</strong>
+              </div>
+            </div>
             <form @submit.prevent="submitCashAdjust" class="modal-form">
               <div class="btn-group" style="margin-bottom:0.75rem">
                 <button type="button" :class="['btn-sm', cashMode === 'add' ? 'btn-primary' : 'btn-secondary']" @click="cashMode = 'add'">存入/支出</button>
@@ -2600,6 +2947,9 @@ function txDisplayAmount(tx) {
                 <div class="form-group">
                   <label>交易份额</label>
                   <input v-model.number="txForm.shares" type="number" step="0.01" class="input-field" />
+                  <span v-if="txForm.shares <= 0 && txForm.amount > 0 && txForm.price > 0" class="field-hint">
+                    预估份额: {{ (txForm.amount / txForm.price).toFixed(2) }}
+                  </span>
                 </div>
               </div>
               <div class="form-row">
@@ -2640,6 +2990,7 @@ function txDisplayAmount(tx) {
                   <th class="text-right">金额</th>
                   <th class="text-right">份额</th>
                   <th class="text-right">净值</th>
+                  <th>时间</th>
                   <th>备注</th>
                   <th>标签</th>
                   <th>操作</th>
@@ -2647,12 +2998,16 @@ function txDisplayAmount(tx) {
               </thead>
               <tbody>
                 <tr v-for="tx in transactions" :key="tx.id">
-                  <td>{{ tx.transaction_date }}</td>
+                  <td>
+                    {{ tx.transaction_date }}
+                    <div v-if="tx.expected_confirm_date" class="tx-confirm-hint">预计 {{ tx.expected_confirm_date }} 确认</div>
+                  </td>
                   <td><span :class="['badge', txTypeBadge(tx.transaction_type)]">{{ txTypeLabel(tx.transaction_type) }}</span></td>
                   <td><span :class="['badge', txStatusBadge(tx.status || 'confirmed')]">{{ txStatusLabel(tx.status || 'confirmed') }}</span></td>
                   <td class="text-right">{{ txDisplayAmount(tx) }}</td>
                   <td class="text-right">{{ tx.status === 'pending' ? (tx.submitted_shares ? tx.submitted_shares.toLocaleString() + ' (预估)' : '--') : (tx.shares?.toLocaleString() || '--') }}</td>
                   <td class="text-right">{{ tx.price?.toFixed(4) || '--' }}</td>
+                  <td>{{ tx.transaction_time || '--' }}</td>
                   <td>{{ tx.notes || '--' }}</td>
                   <td>
                     <div class="tx-tags-cell">
@@ -2809,8 +3164,27 @@ function txDisplayAmount(tx) {
               </span>
             </h3>
 
-            <!-- 5 年走势图模式 -->
+            <!-- 基金搜索 + 快捷切换 -->
             <template v-if="chartMode === 'chart5y'">
+              <div class="chart-search-bar">
+                <form @submit.prevent="searchAndLoadChart" class="chart-search-form">
+                  <input v-model="chartSearchQuery" type="text" class="input-field chart-search-input"
+                    placeholder="输入基金代码，如 004853" @keydown.enter.prevent="searchAndLoadChart" />
+                  <button type="submit" class="btn-primary btn-sm" :disabled="chartSearching || !chartSearchQuery.trim()">
+                    {{ chartSearching ? '查询中...' : '查看' }}
+                  </button>
+                </form>
+                <div v-if="chartSearchError" class="chart-search-error">{{ chartSearchError }}</div>
+                <div class="chart-fund-switcher">
+                  <span v-for="h in holdings" :key="h.id"
+                    :class="['fund-chip', { active: chartSearchQuery === h.fund_code }]"
+                    @click="switchChartFund(h.fund_code, h.fund_name)"
+                    :title="h.fund_name">
+                    {{ h.fund_name?.slice(0, 6) }}
+                  </span>
+                </div>
+              </div>
+
               <div v-if="fundChartLoading" class="loading-state">
                 <div class="spinner"></div>
                 <span>加载 5 年净值数据...</span>
@@ -3208,9 +3582,16 @@ function txDisplayAmount(tx) {
   border-radius: var(--radius-lg);
   padding: 1rem 1.25rem;
   transition: all var(--transition-fast);
+  overflow: hidden;
 }
 .summary-card-today {
   border-color: #3b82f6;
+}
+.today-profit-date {
+  font-size: 0.6rem;
+  font-weight: 400;
+  color: var(--color-text-muted);
+  margin-left: 2px;
 }
 .today-profit-sub {
   font-size: 0.68rem;
@@ -3300,6 +3681,66 @@ function txDisplayAmount(tx) {
   color: #16a34a;
   margin-top: 0.15rem;
   font-weight: 600;
+}
+
+.cash-accounts {
+  display: flex;
+  gap: 0.35rem;
+  margin-top: 0.35rem;
+  flex-wrap: wrap;
+}
+
+.cash-account-tag {
+  font-size: 0.6rem;
+  color: #92400e;
+  background: rgba(245, 158, 11, 0.12);
+  padding: 0.12rem 0.35rem;
+  border-radius: 4px;
+  font-weight: 500;
+  white-space: nowrap;
+  line-height: 1.3;
+}
+
+.dark .cash-account-tag {
+  color: #fbbf24;
+  background: rgba(245, 158, 11, 0.15);
+}
+
+.cash-modal-balances {
+  display: flex;
+  gap: 0.5rem;
+  margin-bottom: 1rem;
+}
+
+.cash-modal-account {
+  flex: 1;
+  padding: 0.6rem 0.75rem;
+  border: 2px solid var(--color-border);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  text-align: center;
+  transition: all 0.2s ease;
+}
+
+.cash-modal-account:hover {
+  border-color: #f59e0b;
+}
+
+.cash-modal-account.selected {
+  border-color: #f59e0b;
+  background: rgba(245, 158, 11, 0.08);
+}
+
+.cash-modal-uid {
+  display: block;
+  font-size: 0.75rem;
+  color: var(--color-text-muted);
+  margin-bottom: 0.25rem;
+}
+
+.cash-modal-account strong {
+  font-size: 1rem;
+  color: #d97706;
 }
 
 .pending-hint {
@@ -3602,6 +4043,12 @@ function txDisplayAmount(tx) {
   color: var(--color-text-secondary);
 }
 
+.field-hint {
+  font-size: 0.75rem;
+  color: var(--color-primary);
+  margin-top: 0.25rem;
+}
+
 .modal-actions {
   display: flex;
   gap: 0.75rem;
@@ -3756,14 +4203,21 @@ select.input-field {
 /* Toast */
 .toast {
   position: fixed;
-  bottom: 2rem;
-  right: 2rem;
-  padding: 0.75rem 1.25rem;
-  border-radius: var(--radius-md);
-  font-size: 0.85rem;
+  top: 5rem;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 0.4rem 0.9rem;
+  border-radius: 6px;
+  font-size: 0.75rem;
   font-weight: 500;
   z-index: 9999;
-  box-shadow: var(--shadow-lg);
+  box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+  white-space: nowrap;
+  animation: toast-pop 0.2s ease;
+}
+@keyframes toast-pop {
+  from { opacity: 0; transform: translateX(-50%) translateY(-6px); }
+  to { opacity: 1; transform: translateX(-50%) translateY(0); }
 }
 .btn-refresh-spinner {
   display: inline-block;
@@ -3776,18 +4230,21 @@ select.input-field {
 }
 
 .toast-success {
-  background: #16a34a;
-  color: white;
+  background: #f0fdf4;
+  color: #16a34a;
+  border: 1px solid #bbf7d0;
 }
 
 .toast-error {
-  background: #dc2626;
-  color: white;
+  background: #fef2f2;
+  color: #dc2626;
+  border: 1px solid #fecaca;
 }
 
 .toast-info {
-  background: #6b7280;
-  color: white;
+  background: #f9fafb;
+  color: #6b7280;
+  border: 1px solid #e5e7eb;
 }
 
 /* Responsive */
@@ -4584,29 +5041,36 @@ select.input-field {
   z-index: 9999;
   background: var(--color-bg-card);
   border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
-  padding: 0.6rem 1rem;
-  box-shadow: var(--shadow-lg);
-  min-width: 160px;
+  border-radius: 8px;
+  padding: 0.4rem 0.7rem;
+  box-shadow: 0 2px 12px rgba(0,0,0,0.08);
+  min-width: 120px;
+  backdrop-filter: blur(8px);
+  animation: toast-slide-in 0.2s ease;
+}
+@keyframes toast-slide-in {
+  from { opacity: 0; transform: translateX(12px); }
+  to { opacity: 1; transform: translateX(0); }
 }
 .refresh-toast-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 0.75rem;
-  font-size: 0.8rem;
-  color: var(--color-text);
+  gap: 0.5rem;
+  font-size: 0.72rem;
+  color: var(--color-text-secondary);
+  font-weight: 500;
 }
 .refresh-toast-track {
-  margin-top: 0.35rem;
-  height: 4px;
-  background: var(--color-border-light);
+  margin-top: 0.3rem;
+  height: 3px;
+  background: var(--color-border-light, #e5e7eb);
   border-radius: 2px;
   overflow: hidden;
 }
 .refresh-toast-bar {
   height: 100%;
-  background: #3b82f6;
+  background: linear-gradient(90deg, #6366f1, #3b82f6);
   border-radius: 2px;
   transition: width 0.3s ease;
 }
@@ -4618,6 +5082,11 @@ select.input-field {
   font-size: 0.72rem;
   color: var(--color-primary, #4f46e5);
   margin-left: 0.25rem;
+}
+.tx-confirm-hint {
+  font-size: 0.7rem;
+  color: var(--color-text-muted);
+  margin-top: 0.15rem;
 }
 .account-badge {
   display: inline-block;
@@ -4857,6 +5326,58 @@ select.input-field {
   margin-bottom: 0.2rem;
 }
 
+/* ── 基金搜索栏 ── */
+.chart-search-bar {
+  margin-bottom: 0.75rem;
+}
+.chart-search-form {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+}
+.chart-search-input {
+  flex: 1;
+  max-width: 240px;
+  font-size: 0.85rem;
+  padding: 0.4rem 0.6rem;
+}
+.chart-search-error {
+  font-size: 0.75rem;
+  color: #ef4444;
+  margin-top: 0.3rem;
+}
+.chart-fund-switcher {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin-top: 0.5rem;
+}
+.fund-chip {
+  display: inline-block;
+  padding: 0.2rem 0.55rem;
+  font-size: 0.7rem;
+  background: var(--color-bg-input);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  color: var(--color-text-secondary);
+  transition: all var(--transition-fast);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100px;
+}
+.fund-chip:hover {
+  border-color: var(--color-primary-400);
+  color: var(--color-primary);
+}
+.fund-chip.active {
+  background: var(--color-primary-50, var(--color-primary-bg));
+  border-color: var(--color-primary-400);
+  color: var(--color-primary);
+  font-weight: 500;
+}
+
 /* ── 5年走势图 ── */
 .fund-chart-5y {
   display: flex;
@@ -4902,5 +5423,318 @@ select.input-field {
   display: flex;
   gap: 0.5rem;
   justify-content: flex-end;
+}
+
+/* ── 表头筛选按钮 ── */
+.th-filter {
+  display: inline-flex;
+  align-items: center;
+  margin-left: 0.25rem;
+  cursor: pointer;
+  color: var(--color-text-muted);
+  opacity: 0.5;
+  transition: all 0.15s;
+  vertical-align: middle;
+}
+
+.th-filter:hover {
+  opacity: 1;
+  color: var(--color-primary);
+}
+
+/* ── 今日涨跌/收益单元格 ── */
+.today-change-cell {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 0.1rem;
+}
+
+.today-change-pct {
+  font-weight: 600;
+  font-size: 0.85rem;
+}
+
+.today-change-profit {
+  font-size: 0.72rem;
+  opacity: 0.8;
+}
+
+/* ── AI Action Button (与 Dashboard 一致) ── */
+.btn-ai-action {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.45rem 0.85rem;
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--color-primary);
+  background: linear-gradient(135deg, var(--color-primary-bg), rgba(99, 102, 241, 0.08));
+  border: 1px solid rgba(99, 102, 241, 0.2);
+  border-radius: var(--radius-lg);
+  cursor: pointer;
+  transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+  white-space: nowrap;
+}
+
+.btn-ai-action::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: -100%;
+  width: 100%;
+  height: 100%;
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.4), transparent);
+  transition: left 0.5s ease;
+}
+
+.btn-ai-action:hover {
+  background: linear-gradient(135deg, rgba(99, 102, 241, 0.15), rgba(99, 102, 241, 0.12));
+  border-color: rgba(99, 102, 241, 0.4);
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(99, 102, 241, 0.15);
+}
+
+.btn-ai-action:hover::before {
+  left: 100%;
+}
+
+.btn-ai-action:active {
+  transform: translateY(0);
+  box-shadow: none;
+}
+
+.btn-ai-action:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+  transform: none;
+  box-shadow: none;
+}
+
+.btn-ai-action.btn-loading {
+  background: linear-gradient(135deg, rgba(99, 102, 241, 0.08), rgba(99, 102, 241, 0.05));
+  border-color: rgba(99, 102, 241, 0.15);
+}
+
+.btn-ai-action.btn-loading::after {
+  content: '';
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  height: 2px;
+  width: 100%;
+  background: linear-gradient(90deg, transparent, var(--color-primary), transparent);
+  animation: loading-bar 1.5s ease-in-out infinite;
+}
+
+@keyframes loading-bar {
+  0% { transform: translateX(-100%); }
+  50% { transform: translateX(0); }
+  100% { transform: translateX(100%); }
+}
+
+/* ── AI Agent Tooltip ── */
+.ai-agent-tooltip {
+  position: absolute;
+  top: calc(100% + 8px);
+  left: 50%;
+  transform: translateX(-50%) scale(0.95);
+  padding: 0.4rem 0.7rem;
+  font-size: 0.7rem;
+  font-weight: 600;
+  color: white;
+  background: linear-gradient(135deg, #1e1b4b, #312e81);
+  border-radius: var(--radius-md);
+  white-space: nowrap;
+  opacity: 0;
+  visibility: hidden;
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  pointer-events: none;
+  z-index: 100;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+}
+
+.ai-agent-tooltip::after {
+  content: '';
+  position: absolute;
+  bottom: 100%;
+  left: 50%;
+  transform: translateX(-50%);
+  border: 5px solid transparent;
+  border-bottom-color: #1e1b4b;
+}
+
+.btn-ai-action:hover .ai-agent-tooltip {
+  opacity: 1;
+  visibility: visible;
+  transform: translateX(-50%) scale(1);
+}
+
+.icon-spin {
+  transition: transform 0.3s ease;
+}
+
+.icon-spin.spinning {
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+/* ── 费率侵蚀计算器 ── */
+.fee-calc-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.75rem 1.25rem;
+  margin-bottom: 1rem;
+}
+.fee-slider-group {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+.fee-slider-group label {
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: var(--color-text-secondary);
+  display: flex;
+  justify-content: space-between;
+}
+.fee-val {
+  color: var(--color-primary);
+  font-weight: 700;
+}
+.fee-slider {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 6px;
+  border-radius: 3px;
+  background: linear-gradient(90deg, var(--color-primary-bg), var(--color-border));
+  outline: none;
+  cursor: pointer;
+}
+.fee-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--color-primary);
+  box-shadow: 0 2px 6px rgba(99, 102, 241, 0.3);
+  cursor: pointer;
+  transition: transform 0.15s;
+}
+.fee-slider::-webkit-slider-thumb:hover {
+  transform: scale(1.15);
+}
+.fee-result-cards {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.75rem;
+  margin-bottom: 1rem;
+}
+.fee-result-card {
+  padding: 0.85rem 1rem;
+  border-radius: 10px;
+  text-align: center;
+}
+.fee-result-erosion {
+  background: linear-gradient(135deg, #fef2f2, #fff5f5);
+  border: 1px solid #fecaca;
+}
+.fee-result-savings {
+  background: linear-gradient(135deg, #f0fdf4, #f0fff4);
+  border: 1px solid #bbf7d0;
+}
+.fee-result-label {
+  font-size: 0.78rem;
+  color: var(--color-text-muted);
+  margin-bottom: 0.3rem;
+}
+.fee-result-value {
+  font-size: 1.3rem;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+  color: #dc2626;
+}
+.fee-result-savings .fee-result-value {
+  color: #059669;
+}
+.fee-result-sub {
+  font-size: 0.72rem;
+  color: var(--color-text-muted);
+  margin-top: 0.2rem;
+}
+.fee-chart-container {
+  background: #fafbfc;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  padding: 0.75rem;
+  margin-bottom: 0.5rem;
+}
+.fee-svg {
+  width: 100%;
+  height: auto;
+  display: block;
+}
+.fee-chart-x-labels {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.72rem;
+  color: var(--color-text-muted);
+  padding: 0.25rem 0 0;
+}
+.fee-disclaimer {
+  font-size: 0.72rem;
+  color: var(--color-text-muted);
+  font-style: italic;
+  margin: 0;
+  line-height: 1.4;
+}
+
+/* ── 重叠度热力图 ── */
+.overlap-heatmap {
+  display: inline-block;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  overflow: hidden;
+  font-size: 0.72rem;
+}
+.overlap-row {
+  display: flex;
+}
+.overlap-cell {
+  min-width: 36px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid rgba(0,0,0,0.06);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.overlap-corner {
+  min-width: 60px;
+  background: #f8fafc;
+}
+.overlap-label {
+  min-width: 60px;
+  padding: 0 6px;
+  background: #f8fafc;
+  font-weight: 500;
+  color: var(--color-text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 0.68rem;
+}
+.overlap-header .overlap-label {
+  writing-mode: vertical-lr;
+  text-orientation: mixed;
+  height: 60px;
+  min-height: 60px;
 }
 </style>
