@@ -1,0 +1,298 @@
+"""推荐验证系统 + LLM 反馈 + 用户画像。"""
+
+from datetime import datetime, timedelta
+
+from db._conn import _get_conn
+
+
+# ── 推荐验证系统 ──────────────────────────────────────
+
+
+def save_recommendations(recommendations: list[dict], analysis_id: str = None,
+                         baselines: list[dict] = None, verify_days: int = 5) -> list[int]:
+    """批量保存推荐记录。baselines 可选，每项 {"price": float, "date": str}。
+
+    verify_days: 验证窗口（交易日），默认 T+5。
+    """
+    # 简单按自然日估算交易日（1 周 ≈ 5 交易日 ≈ 7 自然日）
+    verify_after = (datetime.now() + timedelta(days=int(verify_days * 1.4))).strftime("%Y-%m-%d")
+
+    ids = []
+    conn = _get_conn()
+    for i, rec in enumerate(recommendations):
+        bl = baselines[i] if baselines and i < len(baselines) else None
+        bl_price = bl.get("price") if bl else None
+        bl_date = bl.get("date") if bl else None
+        cur = conn.execute(
+            "INSERT INTO recommendations "
+            "(analysis_id, index_name, index_code, direction, reason, confidence, "
+            "baseline_value, baseline_date, verify_after_date, verify_window_days) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                analysis_id,
+                rec.get("index_name", ""),
+                rec.get("index_code", ""),
+                rec.get("direction", ""),
+                rec.get("reason", ""),
+                rec.get("confidence", ""),
+                bl_price,
+                bl_date,
+                verify_after,
+                verify_days,
+            )
+        )
+        ids.append(cur.lastrowid)
+    conn.commit()
+    conn.close()
+    return ids
+
+
+def list_recommendations(limit: int = 50, status: str = None) -> list[dict]:
+    """列出推荐记录。"""
+    conn = _get_conn()
+    if status:
+        rows = conn.execute(
+            "SELECT * FROM recommendations WHERE status = ? ORDER BY created_at DESC LIMIT ?",
+            (status, limit)
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT * FROM recommendations ORDER BY created_at DESC LIMIT ?",
+            (limit,)
+        ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def verify_recommendation(rec_id: int, current_value: float, current_date: str) -> dict:
+    """验证单条推荐。"""
+    conn = _get_conn()
+    rec = conn.execute("SELECT * FROM recommendations WHERE id = ?", (rec_id,)).fetchone()
+    if not rec:
+        conn.close()
+        return {"ok": False, "error": "not found"}
+    rec = dict(rec)
+
+    baseline = rec["baseline_value"]
+    if not baseline:
+        conn.execute(
+            "UPDATE recommendations SET baseline_value = ?, baseline_date = ?, current_value = ?, current_date = ? WHERE id = ?",
+            (current_value, current_date, current_value, current_date, rec_id)
+        )
+        conn.commit()
+        conn.close()
+        return {"ok": True, "status": "pending", "message": "基线已记录，等待后续验证"}
+
+    change_pct = (current_value - baseline) / baseline * 100 if baseline else 0
+    direction = rec["direction"]
+
+    if direction == "up":
+        correct = change_pct > 0
+    elif direction == "down":
+        correct = change_pct < 0
+    else:
+        correct = None
+
+    status = "correct" if correct is True else ("wrong" if correct is False else "pending")
+    conn.execute(
+        "UPDATE recommendations SET current_value = ?, current_date = ?, change_pct = ?, "
+        "status = ?, verified_at = datetime('now','localtime') WHERE id = ?",
+        (current_value, current_date, round(change_pct, 2), status, rec_id)
+    )
+    conn.commit()
+    conn.close()
+    return {"ok": True, "status": status, "change_pct": round(change_pct, 2)}
+
+
+def auto_verify_pending_recommendations(price_map: dict, verify_date: str,
+                                         benchmark_change_pct: float = None,
+                                         min_change_threshold: float = 2.0) -> list[dict]:
+    """批量验证 pending 推荐。
+
+    - 仅验证到达 verify_after_date 的推荐
+    - up/down: 涨跌幅超过阈值才算有效，否则标记为 "flat"
+    - watch: 用 benchmark_change_pct 对比，跑赢基准=正确
+    """
+    conn = _get_conn()
+    rows = conn.execute(
+        "SELECT * FROM recommendations WHERE status = 'pending' AND baseline_value IS NOT NULL "
+        "AND (verify_after_date IS NULL OR verify_after_date <= ?)",
+        (verify_date,),
+    ).fetchall()
+    results = []
+    for row in rows:
+        rec = dict(row)
+        code = rec["index_code"]
+        current_price = price_map.get(code)
+        if current_price is None:
+            continue
+        baseline = rec["baseline_value"]
+        change_pct = (current_price - baseline) / baseline * 100 if baseline else 0
+        direction = rec["direction"]
+        window_days = rec.get("verify_window_days") or 5
+
+        if direction == "up":
+            if abs(change_pct) < min_change_threshold:
+                status = "flat"  # 涨跌幅太小，无意义
+            else:
+                status = "correct" if change_pct > 0 else "wrong"
+        elif direction == "down":
+            if abs(change_pct) < min_change_threshold:
+                status = "flat"
+            else:
+                status = "correct" if change_pct < 0 else "wrong"
+        elif direction == "watch":
+            # watch: 对比基准，跑赢基准=正确
+            if benchmark_change_pct is not None:
+                outperform = change_pct - benchmark_change_pct
+                if abs(outperform) < min_change_threshold:
+                    status = "flat"
+                else:
+                    status = "correct" if outperform > 0 else "wrong"
+                conn.execute(
+                    "UPDATE recommendations SET current_value = ?, current_date = ?, change_pct = ?, "
+                    "benchmark_change_pct = ?, status = ?, verified_at = datetime('now','localtime'), "
+                    "verify_window_days = ? WHERE id = ?",
+                    (current_price, verify_date, round(change_pct, 2),
+                     round(benchmark_change_pct, 2), status, window_days, rec["id"])
+                )
+                results.append({
+                    "id": rec["id"], "index_name": rec["index_name"], "status": status,
+                    "change_pct": round(change_pct, 2),
+                    "benchmark_change_pct": round(benchmark_change_pct, 2),
+                    "outperform": round(outperform, 2),
+                })
+                continue
+            else:
+                continue  # 无基准数据，跳过
+        else:
+            continue
+
+        conn.execute(
+            "UPDATE recommendations SET current_value = ?, current_date = ?, change_pct = ?, "
+            "status = ?, verified_at = datetime('now','localtime'), verify_window_days = ? WHERE id = ?",
+            (current_price, verify_date, round(change_pct, 2), status, window_days, rec["id"])
+        )
+        results.append({
+            "id": rec["id"], "index_name": rec["index_name"], "status": status,
+            "change_pct": round(change_pct, 2), "verify_window_days": window_days,
+        })
+    conn.commit()
+    conn.close()
+    return results
+
+
+# ── 推荐反馈 / 进化系统 ────────────────────────────────────
+
+
+def save_recommendation_feedback(recommendation_id: int, rating: str = "neutral",
+                                  tags: str = "", comment: str = "") -> int:
+    """保存推荐反馈（点赞/点踩）。"""
+    conn = _get_conn()
+    cur = conn.execute(
+        "INSERT INTO recommendation_feedback (recommendation_id, rating, tags, comment) VALUES (?, ?, ?, ?)",
+        (recommendation_id, rating, tags, comment)
+    )
+    conn.commit()
+    conn.close()
+    return cur.lastrowid
+
+
+def list_recommendation_feedback(recommendation_id: int = None, limit: int = 50) -> list[dict]:
+    """列出推荐反馈。"""
+    conn = _get_conn()
+    if recommendation_id:
+        rows = conn.execute(
+            "SELECT * FROM recommendation_feedback WHERE recommendation_id = ? ORDER BY id DESC LIMIT ?",
+            (recommendation_id, limit)
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT * FROM recommendation_feedback ORDER BY id DESC LIMIT ?",
+            (limit,)
+        ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_recommendation_feedback_stats() -> dict:
+    """获取推荐反馈统计。"""
+    conn = _get_conn()
+    stats = conn.execute("""
+        SELECT
+            COUNT(*) as total_feedback,
+            COALESCE(SUM(CASE WHEN rating='helpful' THEN 1 ELSE 0 END), 0) as helpful,
+            COALESCE(SUM(CASE WHEN rating='unhelpful' THEN 1 ELSE 0 END), 0) as unhelpful,
+            COALESCE(SUM(CASE WHEN rating='neutral' THEN 1 ELSE 0 END), 0) as neutral
+        FROM recommendation_feedback
+    """).fetchone()
+    conn.close()
+    return dict(stats)
+
+
+def save_llm_feedback(caller: str, input_summary: str = "", output_summary: str = "",
+                      rating: str = "neutral", tags: str = "", comment: str = "") -> int:
+    """保存 LLM 输出反馈（进化系统核心）。"""
+    conn = _get_conn()
+    cur = conn.execute(
+        "INSERT INTO llm_feedback (caller, input_summary, output_summary, rating, tags, comment) VALUES (?, ?, ?, ?, ?, ?)",
+        (caller, input_summary, output_summary, rating, tags, comment)
+    )
+    conn.commit()
+    conn.close()
+    return cur.lastrowid
+
+
+def list_llm_feedback(caller: str = None, rating: str = None, limit: int = 50) -> list[dict]:
+    """列出 LLM 反馈。"""
+    conn = _get_conn()
+    conditions = []
+    params = []
+    if caller:
+        conditions.append("caller = ?")
+        params.append(caller)
+    if rating:
+        conditions.append("rating = ?")
+        params.append(rating)
+    where = " AND ".join(conditions) if conditions else "1=1"
+    rows = conn.execute(f"""
+        SELECT * FROM llm_feedback WHERE {where} ORDER BY id DESC LIMIT ?
+    """, params + [limit]).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+# ── 用户画像 ──────────────────────────────────
+
+def get_user_profile(user_id: str = "default") -> dict | None:
+    """获取用户画像。"""
+    conn = _get_conn()
+    row = conn.execute("SELECT * FROM user_profiles WHERE user_id = ?", (user_id,)).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def update_user_profile(user_id: str = "default", **fields) -> bool:
+    """更新用户画像字段。"""
+    if not fields:
+        return False
+    conn = _get_conn()
+    # 确保记录存在
+    conn.execute("INSERT OR IGNORE INTO user_profiles (user_id) VALUES (?)", (user_id,))
+    set_clause = ", ".join(f"{k} = ?" for k in fields)
+    values = list(fields.values()) + [user_id]
+    conn.execute(f"UPDATE user_profiles SET {set_clause}, updated_at = datetime('now','localtime') WHERE user_id = ?", values)
+    conn.commit()
+    conn.close()
+    return True
+
+
+def increment_feedback_count(user_id: str = "default") -> int:
+    """增加反馈计数，返回更新后的总数。"""
+    conn = _get_conn()
+    conn.execute("INSERT OR IGNORE INTO user_profiles (user_id) VALUES (?)", (user_id,))
+    conn.execute("UPDATE user_profiles SET total_feedback_count = total_feedback_count + 1, updated_at = datetime('now','localtime') WHERE user_id = ?", (user_id,))
+    row = conn.execute("SELECT total_feedback_count FROM user_profiles WHERE user_id = ?", (user_id,)).fetchone()
+    conn.commit()
+    conn.close()
+    return row[0] if row else 0

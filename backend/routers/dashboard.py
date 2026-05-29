@@ -1,0 +1,927 @@
+"""每日投资决策看板 + 推荐反馈 + LLM 反馈路由 — /api/dashboard/*, /api/llm-feedback/*"""
+
+import asyncio
+import json
+import logging
+import re
+import time
+
+from fastapi import APIRouter, HTTPException
+
+from db import (
+    list_valuation_indexes, list_index_freshness,
+    list_holdings, get_portfolio_summary, get_portfolio_diversification,
+    get_cash_balance,
+    get_analysis_agent, create_analysis_history,
+    save_recommendations, save_analysis_cache, get_analysis_cache,
+    list_recommendations, auto_verify_pending_recommendations,
+    save_recommendation_feedback, list_recommendation_feedback,
+    get_recommendation_feedback_stats,
+    save_llm_feedback, list_llm_feedback,
+)
+from db._conn import _get_conn
+from llm_service import _call_llm, MODEL
+from market_data import get_index_current_price
+from state import track_agent as _track_agent, untrack_agent as _untrack_agent, hot_topics_cache as _hot_topics_cache
+
+router = APIRouter(tags=["dashboard"])
+
+
+# ── Dashboard 辅助函数 ────────────────────────────────────
+
+
+def _assess_valuation(percentile: float) -> dict:
+    """根据百分位给出估值评估。"""
+    if percentile <= 10:
+        return {"label": "极度低估", "level": "extreme"}
+    elif percentile <= 25:
+        return {"label": "低估", "level": "undervalued"}
+    elif percentile <= 40:
+        return {"label": "偏低", "level": "slightly_low"}
+    elif percentile <= 60:
+        return {"label": "合理", "level": "fair"}
+    elif percentile <= 80:
+        return {"label": "偏高", "level": "slightly_high"}
+    elif percentile <= 90:
+        return {"label": "高估", "level": "overvalued"}
+    else:
+        return {"label": "极度高估", "level": "extreme_high"}
+
+
+def _get_cash_advice(temperature, balance: float, total_assets: float = 0, undervalued_indexes: list = None) -> dict:
+    """根据债市温度 + 权益估值给出零钱配置建议。
+
+    Args:
+        temperature: 债市温度 (0-100)，None 表示数据缺失
+        balance: 现金余额
+        total_assets: 总资产（持仓+现金），用于计算现金占比
+        undervalued_indexes: 低估指数列表 [{index_name, percentile, ...}]
+    """
+    if not balance or balance <= 0:
+        return {"summary": "暂无可用零钱", "allocation": [], "alerts": []}
+
+    alerts = []
+    cash_ratio = balance / total_assets if total_assets > 0 else 0
+
+    # 现金占比预警
+    if cash_ratio > 0.20:
+        alerts.append({"level": "warning", "message": f"现金占比{cash_ratio:.0%}偏高，资金闲置会拖低整体收益"})
+    elif cash_ratio > 0.15:
+        alerts.append({"level": "info", "message": f"现金占比{cash_ratio:.0%}，可适当配置"})
+    elif cash_ratio < 0.03 and total_assets > 0:
+        alerts.append({"level": "info", "message": f"现金占比仅{cash_ratio:.0%}，建议保留少量流动性"})
+
+    # 低估权益机会
+    equity_tip = None
+    if undervalued_indexes and cash_ratio > 0.05:
+        top = undervalued_indexes[:2]
+        names = "、".join(i.get("index_name", "") for i in top if i.get("index_name"))
+        if names:
+            equity_tip = f"{names}处于低估区间，可考虑用少量零钱定投"
+            alerts.append({"level": "opportunity", "message": equity_tip})
+
+    # 债券建议
+    bond_advice = _get_bond_allocation(temperature)
+
+    # 组合建议摘要
+    summary_parts = [bond_advice["summary"]]
+    if equity_tip:
+        summary_parts.append(equity_tip)
+    if cash_ratio > 0.15:
+        summary_parts.append(f"当前现金占比{cash_ratio:.0%}，建议逐步配置")
+
+    return {
+        "summary": "；".join(summary_parts),
+        "allocation": bond_advice["allocation"],
+        "cash_ratio": round(cash_ratio, 4),
+        "alerts": alerts,
+        "equity_opportunity": equity_tip,
+    }
+
+
+def _get_bond_allocation(temperature) -> dict:
+    """根据债市温度返回债券配置建议。"""
+    if temperature is None:
+        return {
+            "summary": "债市数据暂缺，建议暂时放在货币基金中",
+            "allocation": [
+                {"name": "货币基金", "ratio": 100, "desc": "流动性好，风险低"},
+            ],
+        }
+    elif temperature <= 20:
+        return {
+            "summary": f"债市温度 {temperature}°，处于历史低位。债券收益率高，是配置中长期债券基金的好时机",
+            "allocation": [
+                {"name": "中长期债券基金", "ratio": 60, "desc": "收益率高位锁定收益"},
+                {"name": "短债基金", "ratio": 25, "desc": "兼顾收益与流动性"},
+                {"name": "货币基金", "ratio": 15, "desc": "日常备用"},
+            ],
+        }
+    elif temperature <= 35:
+        return {
+            "summary": f"债市温度 {temperature}°，仍处于偏低区域，适合增加债券配置",
+            "allocation": [
+                {"name": "中长期债券基金", "ratio": 40, "desc": "获取较高收益"},
+                {"name": "短债基金", "ratio": 40, "desc": "灵活调整"},
+                {"name": "货币基金", "ratio": 20, "desc": "日常备用"},
+            ],
+        }
+    elif temperature <= 50:
+        return {
+            "summary": f"债市温度 {temperature}°，处于适中区域，建议短债为主均衡配置",
+            "allocation": [
+                {"name": "短债基金", "ratio": 50, "desc": "收益率尚可，风险可控"},
+                {"name": "中长期债券基金", "ratio": 25, "desc": "少量参与"},
+                {"name": "货币基金", "ratio": 25, "desc": "保留流动性"},
+            ],
+        }
+    elif temperature <= 70:
+        return {
+            "summary": f"债市温度 {temperature}°，偏高区域，债券价格已在高位，注意利率风险",
+            "allocation": [
+                {"name": "货币基金", "ratio": 50, "desc": "规避回调风险"},
+                {"name": "短债基金", "ratio": 50, "desc": "短久期低波动"},
+            ],
+        }
+    else:
+        return {
+            "summary": f"债市温度 {temperature}°，高温预警！债券价格处于历史高位，建议减配债券等待回调",
+            "allocation": [
+                {"name": "货币基金", "ratio": 70, "desc": "等待债市回调"},
+                {"name": "短债基金", "ratio": 30, "desc": "极小仓位保持参与"},
+            ],
+        }
+
+
+# ── Dashboard 主看板 ──────────────────────────────────────
+
+
+@router.get("/api/dashboard")
+async def get_dashboard():
+    """每日投资决策看板 — 聚合四块核心数据。每个模块独立容错。"""
+    from datetime import datetime, timedelta
+    today = datetime.now().strftime("%Y-%m-%d")
+
+    # ── 自动抓取近期估值数据（如果今天没有数据）──
+    try:
+        conn = _get_conn()
+        today_count = conn.execute(
+            "SELECT COUNT(*) FROM index_valuations WHERE snapshot_date = ?", (today,)
+        ).fetchone()[0]
+        conn.close()
+        if today_count == 0:
+            logging.info("今日无估值数据，自动抓取中...")
+            # 延迟导入避免循环依赖（fetch_recent_valuations 定义在 app.py）
+            from app import fetch_recent_valuations
+            await fetch_recent_valuations()
+    except Exception as e:
+        logging.warning(f"自动抓取估值失败: {e}")
+
+    # ── Section 1: 低估指数 ──
+    undervalued = []
+    try:
+        indexes = list_valuation_indexes()
+        # 按 index_code 去重，保留百分位最低的指标
+        best_per_code = {}
+        for idx in indexes:
+            code = idx["index_code"]
+            p = idx.get("percentile")
+            if p is None:
+                continue
+            if code not in best_per_code or p < best_per_code[code]["percentile"]:
+                assess = _assess_valuation(p)
+                best_per_code[code] = {
+                    "index_code": code,
+                    "index_name": idx.get("index_name", ""),
+                    "metric_type": idx.get("metric_type", ""),
+                    "current_value": idx.get("current_value"),
+                    "percentile": p,
+                    "latest_date": idx.get("latest_date", ""),
+                    "assessment": assess["label"],
+                    "assessment_level": assess["level"],
+                }
+        # 过滤：百分位 <= 30% 且数据新鲜（30天内）
+        from datetime import datetime, timedelta
+        freshness_cutoff = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
+        undervalued = [
+            v for v in best_per_code.values()
+            if v["percentile"] <= 30 and v.get("latest_date", "") >= freshness_cutoff
+        ]
+        undervalued.sort(key=lambda x: x["percentile"])
+        # 记录数据最新日期
+        if undervalued:
+            latest_dates = [v.get("latest_date", "") for v in undervalued if v.get("latest_date")]
+            undervalued_data_date = max(latest_dates) if latest_dates else ""
+        else:
+            undervalued_data_date = ""
+    except Exception as e:
+        undervalued_data_date = ""
+        logging.warning(f"Dashboard 低估指数获取失败: {e}")
+
+    # ── Section 2: 持仓健康度 ──
+    portfolio_health = None
+    try:
+        holdings = list_holdings()
+        active = [h for h in holdings if (h.get("shares") or 0) > 0]
+        if active:
+            summary = get_portfolio_summary()
+            divers = get_portfolio_diversification()
+            total_val = summary.get("total_value", 0) or 0
+            sorted_h = sorted(active, key=lambda h: (h.get("current_value", 0) or 0), reverse=True)
+            top3_pct = round(
+                sum(h.get("current_value", 0) or 0 for h in sorted_h[:3]) / total_val * 100, 1
+            ) if total_val > 0 else 0
+
+            # 集中度评估
+            if top3_pct > 60:
+                conc_level, conc_assess = "high", "前3持仓占比 %.1f%%，集中度很高，建议分散" % top3_pct
+            elif top3_pct > 40:
+                conc_level, conc_assess = "moderate", "前3持仓占比 %.1f%%，集中度偏高，可适当调整" % top3_pct
+            else:
+                conc_level, conc_assess = "low", "前3持仓占比 %.1f%%，分散度良好" % top3_pct
+
+            portfolio_health = {
+                "holding_count": summary.get("holding_count", 0),
+                "total_value": round(total_val, 2),
+                "total_profit": round(summary.get("total_profit", 0), 2),
+                "profit_rate": summary.get("profit_rate", 0),
+                "max_holding_pct": divers.get("max_holding_pct", 0),
+                "top3_concentration": top3_pct,
+                "type_distribution": divers.get("type_distribution", {}),
+                "concentration_level": conc_level,
+                "concentration_assessment": conc_assess,
+            }
+    except Exception as e:
+        logging.warning(f"Dashboard 持仓数据获取失败: {e}")
+
+    # ── Section 3: 零钱 + 债券 ──
+    cash_balance = 0
+    cash_details = {}
+    try:
+        for uid in ["小鱼儿", "花无缺"]:
+            bal = get_cash_balance(uid).get("balance", 0)
+            cash_details[uid] = round(bal, 2)
+            cash_balance += bal
+    except Exception:
+        pass
+
+    bond_info = None
+    try:
+        from routers.bond import _fetch_bond_data
+        raw_bond = _fetch_bond_data()
+        if raw_bond and len(raw_bond) > 1:
+            last = raw_bond[-1]
+            # 计算趋势：找 7天前、30天前、90天前的数据点
+            ref_dates = {}
+            last_date_str = last.get("date", "")
+            for d in raw_bond:
+                ref_dates[d["date"]] = {"temp": d.get("degree"), "yield": d.get("yield")}
+
+            def _lookup_bond(days_ago):
+                """找距离指定天数最近的交易日数据。"""
+                from datetime import datetime, timedelta
+                target = datetime.strptime(last_date_str, "%Y-%m-%d") - timedelta(days=days_ago)
+                for i in range(7):
+                    look = target.strftime("%Y-%m-%d")
+                    if look in ref_dates:
+                        return ref_dates[look]
+                    target -= timedelta(days=1)
+                return None
+
+            ref_7d = _lookup_bond(7)
+            ref_30d = _lookup_bond(30)
+
+            bond_info = {
+                "temperature": last.get("degree"),
+                "yield_val": float(last["yield"]) if last.get("yield") else None,
+                "date": last.get("date", ""),
+                "trend": {
+                    "week_ago_temp": ref_7d["temp"] if ref_7d else None,
+                    "week_ago_yield": float(ref_7d["yield"]) if ref_7d and ref_7d.get("yield") else None,
+                    "month_ago_temp": ref_30d["temp"] if ref_30d else None,
+                    "month_ago_yield": float(ref_30d["yield"]) if ref_30d and ref_30d.get("yield") else None,
+                },
+            }
+    except Exception as e:
+        logging.warning(f"Dashboard 债市数据获取失败: {e}")
+
+    total_assets = (portfolio_health or {}).get("total_value", 0) + cash_balance
+    cash_advice = _get_cash_advice(
+        bond_info["temperature"] if bond_info else None, cash_balance,
+        total_assets=total_assets, undervalued_indexes=undervalued,
+    )
+
+    # ── 数据新鲜度 ──
+    freshness_info = {"stale_count": 0, "stale_indexes": []}
+    try:
+        all_freshness = list_index_freshness()
+        stale = [f for f in all_freshness if f.get("stale_days", 0) >= 10]
+        freshness_info = {
+            "stale_count": len(stale),
+            "stale_indexes": [
+                {"name": f["index_name"], "code": f["index_code"],
+                 "latest_date": f["latest_date"], "stale_days": int(f["stale_days"])}
+                for f in stale[:8]
+            ],
+        }
+    except Exception as e:
+        logging.warning(f"Dashboard 新鲜度获取失败: {e}")
+
+    # 各模块数据实际更新时间
+    undervalued_updated_at = ""
+    portfolio_updated_at = ""
+    try:
+        conn = _get_conn()
+        row = conn.execute("SELECT MAX(created_at) FROM index_valuations").fetchone()
+        if row and row[0]:
+            undervalued_updated_at = str(row[0])[:16]
+        row = conn.execute("SELECT MAX(updated_at) FROM portfolio_holdings WHERE shares > 0").fetchone()
+        if row and row[0]:
+            portfolio_updated_at = str(row[0])[:16]
+        conn.close()
+    except Exception:
+        pass
+
+    return {
+        "date": today,
+        "undervalued_indexes": undervalued,
+        "undervalued_data_date": undervalued_data_date,
+        "undervalued_updated_at": undervalued_updated_at,
+        "portfolio_health": portfolio_health,
+        "portfolio_updated_at": portfolio_updated_at,
+        "cash_management": {
+            "balance": round(cash_balance, 2),
+            "cash_details": cash_details,
+            "bond_market": bond_info,
+            "suggestion": cash_advice,
+        },
+        "cash_updated_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
+        "data_freshness": freshness_info,
+    }
+
+
+# ── 市场热点 API（带缓存，解析JSON结构化输出）────────────
+
+
+@router.get("/api/dashboard/daily-report")
+async def get_daily_report():
+    """获取今日自动生成的日报。"""
+    from datetime import datetime
+    today = datetime.now().strftime("%Y-%m-%d")
+    conn = _get_conn()
+    row = conn.execute(
+        "SELECT * FROM analysis_history WHERE agent_id = 1 AND date(created_at) = ? ORDER BY created_at DESC LIMIT 1",
+        (today,)
+    ).fetchone()
+    conn.close()
+    if row:
+        r = dict(row)
+        return {"has_report": True, "report": r}
+    return {"has_report": False, "report": None}
+
+
+@router.post("/api/dashboard/daily-report/regenerate")
+async def regenerate_daily_report():
+    """重新生成今日市场简报。"""
+    agent = get_analysis_agent(1)
+    if not agent:
+        raise HTTPException(400, "市场日报分析师未配置")
+
+    # 删除今日旧报告
+    today = time.strftime("%Y-%m-%d")
+    conn = _get_conn()
+    conn.execute(
+        "DELETE FROM analysis_history WHERE agent_id = 1 AND date(created_at) = ?",
+        (today,)
+    )
+    conn.commit()
+    conn.close()
+
+    # 复用 _auto_daily_report 的数据收集逻辑
+    news_context = ""
+    try:
+        news_data = await get_hot_topics()
+        news_list = news_data.get("news", [])[:6]
+        news_context = "\n".join(
+            f"- {n.get('title','')}（{n.get('source','')}）"
+            for n in news_list if n.get('title')
+        ) if news_list else "暂无新闻"
+    except Exception as e:
+        logging.warning(f"简报重新生成新闻检索失败: {e}")
+        news_context = "暂无新闻"
+
+    val_context = "暂无估值数据"
+    try:
+        indexes = list_valuation_indexes()
+        seen = {}
+        for i in indexes:
+            code = i.get("index_code", "")
+            if code and code not in seen:
+                seen[code] = i
+        all_indexes = list(seen.values())
+        if all_indexes:
+            val_lines = []
+            for i in all_indexes:
+                pct = i.get("percentile", None)
+                pct_str = f"{pct:.0f}%" if pct is not None else "N/A"
+                val_lines.append(
+                    f"- {i['index_name']}（{i['index_code']}）: "
+                    f"{i.get('metric_type','PE')}={i.get('current_value','?')}, 百分位={pct_str}"
+                )
+            val_context = "\n".join(val_lines)
+    except Exception:
+        pass
+
+    holding_text = "暂无持仓"
+    portfolio_text = "暂无"
+    try:
+        holdings = list_holdings()
+        div = get_portfolio_diversification()
+        cash = get_cash_balance()
+        if holdings:
+            holding_lines = []
+            for h in holdings[:15]:
+                pct = h.get("profit_rate")
+                pct_str = f"{pct:+.1f}%" if pct is not None else "N/A"
+                val = h.get("current_value", 0) or 0
+                holding_lines.append(
+                    f"- {h['fund_name']}（{h.get('fund_code','')}）: "
+                    f"市值{val:.0f}元, 收益率{pct_str}"
+                )
+            holding_text = "\n".join(holding_lines)
+        portfolio_text = (
+            f"持仓{div.get('holding_count',0)}只基金，"
+            f"总市值{div.get('total_value',0):.0f}元，"
+            f"盈亏{div.get('total_profit',0):.0f}元，"
+            f"可用零钱{cash:.0f}元"
+        )
+    except Exception:
+        pass
+
+    bond_text = "暂无"
+    try:
+        from tools import _get_bond_temperature
+        bond_raw = json.loads(_get_bond_temperature())
+        bond_text = f"债券温度{bond_raw.get('temperature','?')}°，收益率{bond_raw.get('rate','?')}%"
+    except Exception:
+        pass
+
+    full_prompt = agent["system_prompt"] + f"""
+
+【今日新闻】
+{news_context}
+
+【指数估值】
+{val_context}
+
+【持仓明细】
+{holding_text}
+
+【持仓概况】
+{portfolio_text}
+
+【债券市场】
+{bond_text}
+
+请按照报告结构要求，基于以上真实数据撰写今日市场简报。"""
+
+    response = await asyncio.to_thread(lambda: _call_llm(
+        caller="daily_report",
+        model=MODEL,
+        messages=[
+            {"role": "system", "content": full_prompt},
+            {"role": "user", "content": "请生成今日市场分析报告。"},
+        ],
+        temperature=0.3,
+        max_tokens=8192,
+    ))
+    result_text = response.choices[0].message.content or ""
+    token_usage = response.usage.total_tokens if response.usage else 0
+
+    new_id = create_analysis_history(
+        index_code="", index_name="",
+        agent_id=1, agent_name=agent["name"],
+        prompt_used=full_prompt[:500], news_context=news_context[:500],
+        valuation_context=val_context[:500], result=result_text,
+        token_usage=token_usage,
+    )
+    return {"ok": True, "id": new_id, "token_usage": token_usage}
+
+
+@router.get("/api/dashboard/hot-topics")
+async def get_hot_topics():
+    """获取今日市场热点（YingMi MCP SearchFinancialNews，120秒缓存）。"""
+    import time
+    now = time.time()
+    if _hot_topics_cache["data"] and now - _hot_topics_cache["ts"] < 120:
+        return _hot_topics_cache["data"]
+
+    news_items = []
+    try:
+        from mcp.yingmi_client import get_yingmi_client
+        mcp = get_yingmi_client()
+        raw = mcp.call_tool("SearchFinancialNews", {"keyword": "A股", "pageSize": 6})
+        if isinstance(raw, dict):
+            for c in raw.get("content", []):
+                if c.get("type") == "text":
+                    parsed = json.loads(c["text"])
+                    if parsed.get("success") and parsed.get("data", {}).get("items"):
+                        for item in parsed["data"]["items"]:
+                            news_items.append({
+                                "title": item.get("title", ""),
+                                "summary": item.get("summary", ""),
+                                "source": item.get("sources", ""),
+                                "date": item.get("publishDate", ""),
+                                "url": item.get("url", ""),
+                            })
+    except Exception as e:
+        logging.warning(f"热点新闻获取失败: {e}")
+
+    # fallback
+    if not news_items:
+        try:
+            from tools import execute_tool
+            web_raw = execute_tool("web_search", {"query": "A股 今日热点 板块 基金", "max_results": 5})
+            if web_raw:
+                news_items.append({"title": "网络资讯", "summary": web_raw[:500], "source": "web_search", "date": "", "url": ""})
+        except Exception as e:
+            logging.warning(f"热点 web_search 失败: {e}")
+
+    from datetime import datetime
+    fetched_at = datetime.now().strftime("%Y-%m-%d %H:%M")
+    result = {"news": news_items, "source": "yingmi" if news_items else "none", "fetched_at": fetched_at}
+    _hot_topics_cache["data"] = result
+    _hot_topics_cache["ts"] = now
+    return result
+
+
+# ── 热点 AI 分析（结构化推荐） ────────────────────────────────
+# prompt 通过 analysis_agents 配置管理，见 db.py 中"热点分析专家"系统提示词
+
+
+@router.get("/api/dashboard/hotspots-analysis")
+async def get_hotspots_analysis():
+    """结构化热点分析 — LLM 输出 JSON 推荐。"""
+    # 1. 收集今日数据
+    news_data = await get_hot_topics()
+    news_list = news_data.get("news", [])[:5]
+    news_text = "\n".join(
+        f"- {n.get('title','')}（{n.get('source','')}）"
+        for n in news_list if n.get('title')
+    ) if news_list else "暂无新闻"
+
+    # 估值数据 + 可参考指数代码
+    try:
+        indexes = list_valuation_indexes()
+        # 去重，按 index_code 分组，优先展示最新数据
+        seen = {}
+        for i in indexes:
+            code = i.get("index_code", "")
+            if code and code not in seen:
+                seen[code] = i
+        all_indexes = list(seen.values())
+        # 可参考指数代码表
+        code_ref_text = "\n".join(
+            f"- {i['index_name']}（{i['index_code']}）: {i.get('metric_type','PE')}={i.get('current_value','?')}, "
+            f"百分位={i.get('percentile',100):.0f}%"
+            for i in all_indexes
+        ) if all_indexes else "暂无指数数据"
+
+        # 估值分布概览（供参考，不单独强调低估）
+        low_val = [i for i in all_indexes if i.get("percentile", 100) < 30]
+        high_val = [i for i in all_indexes if i.get("percentile", 100) > 70]
+        val_text = (
+            f"低估(<30%): {len(low_val)}只, "
+            f"高估(>70%): {len(high_val)}只, "
+            f"共{len(all_indexes)}只跟踪指数"
+        )
+    except Exception as e:
+        code_ref_text = "暂无"
+        val_text = "暂无"
+
+    # 持仓明细 + 概况
+    try:
+        holdings = list_holdings()
+        div = get_portfolio_diversification()
+        cash = get_cash_balance()
+
+        # 持仓明细文本
+        if holdings:
+            holding_lines = []
+            for h in holdings[:15]:
+                pct = h.get("profit_rate")
+                pct_str = f"{pct:+.1f}%" if pct is not None else "N/A"
+                val = h.get("current_value", 0) or 0
+                holding_lines.append(
+                    f"- {h['fund_name']}（{h.get('fund_code','')}）: "
+                    f"市值{val:.0f}元, 收益率{pct_str}"
+                )
+            holding_text = "\n".join(holding_lines)
+        else:
+            holding_text = "暂无持仓"
+
+        portfolio_text = (
+            f"持仓{div.get('holding_count',0)}只基金，"
+            f"总市值{div.get('total_value',0):.0f}元，"
+            f"盈亏{div.get('total_profit',0):.0f}元，"
+            f"可用零钱{cash:.0f}元"
+        )
+    except Exception:
+        holding_text = "暂无"
+        portfolio_text = "暂无"
+
+    # 债券
+    try:
+        from tools import _get_bond_temperature
+        bond_raw = json.loads(_get_bond_temperature())
+        bond_text = f"债券温度{bond_raw.get('temperature','?')}°，收益率{bond_raw.get('rate','?')}%"
+    except Exception:
+        bond_text = "暂无"
+
+    # 从 analysis_agents 加载热点分析 prompt，支持通过管理页面动态修改
+    try:
+        agent = get_analysis_agent(7)
+        base_prompt = agent["system_prompt"] if agent else ""
+    except Exception:
+        base_prompt = ""
+    if not base_prompt:
+        base_prompt = "你是一位专业的A股市场分析专家。请基于以下市场数据分析今日投资机会，输出结构化JSON。\n\n## 输出格式\n返回严格JSON：{\"summary\":\"...\", \"recommendations\":[{\"direction\":\"up|down|watch\",\"index_name\":\"...\",\"index_code\":\"...\",\"reason\":\"...\",\"confidence\":\"high|medium|low\"}]}\n\n## 今日数据："
+
+    prompt = base_prompt + f"""
+【今日新闻】（重点关注，这是分析的核心线索）
+{news_text}
+
+【可参考指数代码及估值】
+{code_ref_text}
+
+【估值分布概览】
+{val_text}
+
+【持仓明细】
+{holding_text}
+
+【持仓概况】
+{portfolio_text}
+
+【债券市场】
+{bond_text}
+
+请严格按照JSON格式输出分析结果。"""
+
+    uid = f"hotspots_{int(time.time())}"
+    _track_agent(uid, "热点分析专家", "市场热点分析")
+    try:
+        response = await asyncio.wait_for(asyncio.to_thread(lambda: _call_llm(
+            caller="hotspots_analysis",
+            model=MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.3,
+            max_tokens=8192,
+        )), timeout=120)
+        content = response.choices[0].message.content or "{}"
+        # 尝试提取 JSON
+        json_match = re.search(r'\{.*\}', content, re.DOTALL)
+        if json_match:
+            parsed = json.loads(json_match.group())
+        else:
+            parsed = json.loads(content)
+        # 确保字段完整
+        recs = parsed.get("recommendations", [])
+        # 保存到推荐验证库 + 缓存 + 分析历史
+        if recs:
+            try:
+                from datetime import datetime
+                analysis_id = datetime.now().strftime("hotspots_%Y%m%d_%H%M%S")
+                # 获取每条推荐的当前指数点位作为验证基线
+                baselines = []
+                for rec in recs:
+                    bl = get_index_current_price(rec.get("index_code", ""))
+                    baselines.append(bl)
+                rec_ids = save_recommendations(recs, analysis_id, baselines)
+                # 将数据库 ID 回填到推荐数据中
+                for i, rid in enumerate(rec_ids):
+                    if i < len(recs):
+                        recs[i]["id"] = rid
+                # 记录分析历史（含使用的 prompt 版本）
+                _conn = _get_conn()
+                _conn.execute(
+                    "INSERT INTO analysis_history (agent_id, agent_name, prompt_used, news_context, result, token_usage) VALUES (?, ?, ?, ?, ?, ?)",
+                    (7, "热点分析专家", base_prompt[:500] if base_prompt else "", news_text[:500], content, 0)
+                )
+                _conn.commit()
+                _conn.close()
+            except Exception as e:
+                logging.warning(f"保存推荐记录失败: {e}")
+        result = {
+            "summary": parsed.get("summary", ""),
+            "recommendations": recs,
+            "analysis_text": content,
+        }
+        if recs:
+            try:
+                save_analysis_cache("hotspots_latest", result)
+            except Exception:
+                pass
+        return result
+    except asyncio.TimeoutError:
+        return {"summary": "分析超时，请重试", "recommendations": [], "analysis_text": ""}
+    except Exception as e:
+        logging.warning(f"热点结构化分析失败: {e}")
+        return {"summary": f"分析失败: {str(e)}", "recommendations": [], "analysis_text": ""}
+    finally:
+        _untrack_agent(uid)
+
+
+@router.get("/api/dashboard/hotspots-analysis/latest")
+async def get_latest_hotspots_analysis():
+    """返回最近一次缓存的热点分析结果（刷新页面后还原用）。"""
+    cached = get_analysis_cache("hotspots_latest")
+    if cached:
+        # 补充 recommendations 中的 id 字段，供反馈使用
+        try:
+            conn = _get_conn()
+            rows = conn.execute(
+                "SELECT id, index_name FROM recommendations WHERE analysis_id LIKE 'hotspots_%' ORDER BY id DESC LIMIT 10"
+            ).fetchall()
+            conn.close()
+            id_map = {r["index_name"]: r["id"] for r in rows}
+            for rec in cached.get("recommendations", []):
+                if rec.get("index_name") in id_map:
+                    rec["id"] = id_map[rec["index_name"]]
+        except Exception:
+            pass
+        return cached
+    # 没有缓存，尝试从历史推荐记录重建
+    try:
+        recs = list_recommendations(limit=10)
+        if recs:
+            return {
+                "summary": f"上次分析结果（共{len(recs)}条推荐）",
+                "recommendations": recs,
+                "analysis_text": "",
+            }
+    except Exception:
+        pass
+    return {"summary": "", "recommendations": [], "analysis_text": ""}
+
+
+@router.get("/api/dashboard/recommendations")
+async def list_recommendations_api(limit: int = 50, status: str = ""):
+    """列出历史推荐记录。"""
+    recs = list_recommendations(limit, status or None)
+    return {"recommendations": recs}
+
+
+@router.get("/api/dashboard/recommendations/auto-verify")
+async def auto_verify_recommendations():
+    """自动验证 pending 推荐：获取实时行情，与基线比较，更新状态。
+
+    改进：
+    - 仅验证到达 verify_after_date 的推荐（T+5 交易日）
+    - watch 方向用沪深300 做基准对比
+    - 涨跌幅 <2% 标记为 flat（无意义波动）
+    """
+    from datetime import date
+
+    today = date.today().isoformat()
+    conn = _get_conn()
+    # 仅查找到期的 pending 推荐
+    rows = conn.execute(
+        "SELECT DISTINCT index_code FROM recommendations WHERE status = 'pending' "
+        "AND baseline_value IS NOT NULL AND (verify_after_date IS NULL OR verify_after_date <= ?)",
+        (today,),
+    ).fetchall()
+
+    # 检查是否有 watch 方向需要基准对比
+    has_watch = conn.execute(
+        "SELECT COUNT(*) FROM recommendations WHERE status = 'pending' AND direction = 'watch' "
+        "AND baseline_value IS NOT NULL AND (verify_after_date IS NULL OR verify_after_date <= ?)",
+        (today,),
+    ).fetchone()[0]
+    conn.close()
+
+    if not rows:
+        return {"ok": True, "verified": 0, "results": []}
+
+    price_map = {}
+    for row in rows:
+        code = row["index_code"]
+        bl = get_index_current_price(code)
+        if bl.get("price") is not None:
+            price_map[code] = bl["price"]
+
+    if not price_map:
+        return {"ok": True, "verified": 0, "results": []}
+
+    # 获取沪深300基准涨跌幅（用于 watch 验证）
+    benchmark_change = None
+    if has_watch:
+        try:
+            hs300 = get_index_current_price("000300.SH")
+            if hs300.get("price") and hs300.get("baseline"):
+                benchmark_change = (hs300["price"] - hs300["baseline"]) / hs300["baseline"] * 100
+        except Exception:
+            pass
+
+    results = auto_verify_pending_recommendations(
+        price_map, today, benchmark_change_pct=benchmark_change, min_change_threshold=2.0
+    )
+    return {"ok": True, "verified": len(results), "results": results}
+
+
+@router.get("/api/dashboard/recommendations/stats")
+async def recommendations_stats_api():
+    """推荐验证统计（含 watch 对比和平局）。"""
+    conn = _get_conn()
+    total = conn.execute("SELECT COUNT(*) FROM recommendations").fetchone()[0]
+    correct = conn.execute("SELECT COUNT(*) FROM recommendations WHERE status = 'correct'").fetchone()[0]
+    wrong = conn.execute("SELECT COUNT(*) FROM recommendations WHERE status = 'wrong'").fetchone()[0]
+    flat = conn.execute("SELECT COUNT(*) FROM recommendations WHERE status = 'flat'").fetchone()[0]
+    pending = conn.execute("SELECT COUNT(*) FROM recommendations WHERE status = 'pending'").fetchone()[0]
+
+    # 各方向统计
+    watch_total = conn.execute("SELECT COUNT(*) FROM recommendations WHERE direction = 'watch'").fetchone()[0]
+    watch_correct = conn.execute("SELECT COUNT(*) FROM recommendations WHERE direction = 'watch' AND status = 'correct'").fetchone()[0]
+    watch_wrong = conn.execute("SELECT COUNT(*) FROM recommendations WHERE direction = 'watch' AND status = 'wrong'").fetchone()[0]
+
+    # 待验证（未到期）
+    today = __import__('datetime').date.today().isoformat()
+    pending_not_due = conn.execute(
+        "SELECT COUNT(*) FROM recommendations WHERE status = 'pending' AND verify_after_date > ?",
+        (today,),
+    ).fetchone()[0]
+    conn.close()
+
+    total_verified = correct + wrong
+    accuracy = round(correct / total_verified * 100, 1) if total_verified > 0 else None
+    return {
+        "total": total,
+        "correct": correct,
+        "wrong": wrong,
+        "flat": flat,
+        "pending": pending,
+        "pending_not_due": pending_not_due,
+        "verified": total_verified,
+        "accuracy": accuracy,
+        "watch_total": watch_total,
+        "watch_correct": watch_correct,
+        "watch_wrong": watch_wrong,
+    }
+
+
+# ── 推荐反馈 / 进化系统 API ──────────────────────────────
+
+
+@router.post("/api/dashboard/recommendations/{rec_id}/feedback")
+async def create_recommendation_feedback(rec_id: int, body: dict):
+    """提交推荐反馈（点赞/点踩/评论）。"""
+    fid = save_recommendation_feedback(
+        recommendation_id=rec_id,
+        rating=body.get("rating", "neutral"),
+        tags=body.get("tags", ""),
+        comment=body.get("comment", ""),
+    )
+    return {"ok": True, "id": fid}
+
+
+@router.get("/api/dashboard/recommendations/feedback")
+async def list_feedback_api():
+    """列出所有推荐反馈。"""
+    return {"feedback": list_recommendation_feedback()}
+
+
+@router.get("/api/dashboard/recommendations/feedback-stats")
+async def feedback_stats_api():
+    """推荐反馈统计（点赞率等）。"""
+    return get_recommendation_feedback_stats()
+
+
+@router.post("/api/llm-feedback")
+async def create_llm_feedback(body: dict):
+    """提交 LLM 输出反馈（进化系统）。"""
+    fid = save_llm_feedback(
+        caller=body.get("caller", ""),
+        input_summary=body.get("input_summary", ""),
+        output_summary=body.get("output_summary", ""),
+        rating=body.get("rating", "neutral"),
+        tags=body.get("tags", ""),
+        comment=body.get("comment", ""),
+    )
+    # 触发反馈学习
+    try:
+        from agent.feedback_learner import update_user_profile_from_feedback
+        feedback_type = body.get("rating", "neutral")
+        if feedback_type in ("helpful", "unhelpful"):
+            update_user_profile_from_feedback("default", feedback_type, body.get("comment", ""), body.get("input_summary", ""))
+    except Exception as e:
+        logging.warning(f"反馈学习更新失败: {e}")
+    return {"ok": True, "id": fid}
+
+
+@router.get("/api/llm-feedback")
+async def list_llm_feedback_api(caller: str = "", rating: str = ""):
+    """列出 LLM 反馈。"""
+    return {"feedback": list_llm_feedback(
+        caller=caller or None,
+        rating=rating or None,
+    )}
