@@ -25,6 +25,8 @@ import {
   getRebalanceConfig, updateRebalanceConfig, getRebalanceConfigHistory, rollbackRebalanceConfig,
 } from '../api'
 import ConfirmDialog from './ConfirmDialog.vue'
+import PieChart from './charts/PieChart.vue'
+import LineChart from './charts/LineChart.vue'
 
 // ── Markdown 渲染 ──
 function renderMarkdown(text) {
@@ -47,6 +49,17 @@ const holdingWeights = computed(() => {
       weightLabel: ((h.current_value || 0) / total * 100).toFixed(1) + '%',
     }))
     .sort((a, b) => b.weight - a.weight)
+})
+
+// ECharts 饼图数据格式
+const pieChartData = computed(() => {
+  if (!holdingWeights.value.length) return []
+  return holdingWeights.value
+    .filter(h => h.weight >= 0.5)
+    .map(h => ({
+      name: h.fund_name || h.fund_code,
+      value: h.current_value || 0,
+    }))
 })
 
 // ── 折叠状态 ──
@@ -182,172 +195,19 @@ const showCashModal = ref(false)
 const cashForm = ref({ amount: 0, user_id: '花无缺' })
 const cashMode = ref('add')  // 'add' 存入/支出, 'set' 直接设置
 
-// ── 交易行为图表 ──
-const chartWidth = 600
-const chartHeight = 280
-const padLeft = 55
-const padRight = 20
-const padTop = 20
-const padBottom = 40
-const markerTooltip = ref(null)
-const tooltipStyle = ref({})
-const chartHoverIndex = ref(null)
-
-const chartDataYRange = computed(() => {
-  if (!chartData.value?.nav_history?.length) return { min: 0, max: 1, range: 1 }
-  let min = Infinity, max = -Infinity
-  for (const d of chartData.value.nav_history) {
-    if (d.nav < min) min = d.nav
-    if (d.nav > max) max = d.nav
-  }
-  const pad = (max - min) * 0.1 || 0.1
-  return { min: min - pad, max: max + pad, range: max - min + 2 * pad }
-})
-
-function scaleX(i, total) {
-  return padLeft + (i / (total - 1 || 1)) * (chartWidth - padLeft - padRight)
-}
-
-function scaleY(nav) {
-  const { min, range } = chartDataYRange.value
-  return padTop + (1 - (nav - min) / range) * (chartHeight - padTop - padBottom)
-}
-
-const navLinePoints = computed(() => {
-  if (!chartData.value?.nav_history?.length) return ''
-  return chartData.value.nav_history.map((d, i) =>
-    `${scaleX(i, chartData.value.nav_history.length)},${scaleY(d.nav)}`
-  ).join(' ')
-})
-
-const gridYs = computed(() => {
-  const lines = []
-  const steps = 5
-  const { min, range } = chartDataYRange.value
-  for (let i = 0; i <= steps; i++) {
-    const nav = min + (i / steps) * range
-    lines.push(scaleY(nav))
-  }
-  return lines
-})
-
-const yAxisLabels = computed(() => {
-  const steps = 5
-  const { min, range } = chartDataYRange.value
-  const labels = []
-  for (let i = 0; i <= steps; i++) {
-    const nav = min + (i / steps) * range
-    labels.push({ y: scaleY(nav), label: nav.toFixed(4) })
-  }
-  return labels
-})
-
-const xAxisLabels = computed(() => {
-  if (!chartData.value?.nav_history?.length) return []
-  const total = chartData.value.nav_history.length
-  const count = 5
-  const step = Math.max(1, Math.floor((total - 1) / count))
-  const labels = []
-  for (let i = 0; i < total; i += step) {
-    const d = chartData.value.nav_history[i]
-    labels.push({ x: scaleX(i, total), label: d.date.slice(5) })
-  }
-  // always include last date
-  const last = chartData.value.nav_history[total - 1]
-  const lastLabel = last.date.slice(5)
-  if (labels.length === 0 || labels[labels.length - 1].label !== lastLabel) {
-    labels.push({ x: scaleX(total - 1, total), label: lastLabel })
-  }
-  return labels
-})
-
-const buyMarkers = computed(() => {
-  if (!chartData.value) return []
-  const navDates = chartData.value.nav_history.map(d => d.date)
-  return chartData.value.transactions
-    .filter(t => t.transaction_type === 'buy')
-    .map(t => {
-      let idx = navDates.indexOf(t.transaction_date)
-      if (idx === -1) {
-        idx = navDates.findIndex(d => d >= t.transaction_date)
-        if (idx === -1) idx = navDates.length - 1
-      }
-      const nav = chartData.value.nav_history[idx].nav
-      return { ...t, nav, idx, x: scaleX(idx, navDates.length), y: scaleY(nav) }
-    }).filter(Boolean)
-})
-
-const sellMarkers = computed(() => {
-  if (!chartData.value) return []
-  const navDates = chartData.value.nav_history.map(d => d.date)
-  return chartData.value.transactions
-    .filter(t => t.transaction_type === 'sell')
-    .map(t => {
-      let idx = navDates.indexOf(t.transaction_date)
-      if (idx === -1) {
-        idx = navDates.findIndex(d => d >= t.transaction_date)
-        if (idx === -1) idx = navDates.length - 1
-      }
-      const nav = chartData.value.nav_history[idx].nav
-      return { ...t, nav, idx, x: scaleX(idx, navDates.length), y: scaleY(nav) }
-    }).filter(Boolean)
-})
-
-const hoverNavPoint = computed(() => {
-  if (chartHoverIndex.value == null || !chartData.value?.nav_history?.length) return null
-  const idx = Math.min(chartHoverIndex.value, chartData.value.nav_history.length - 1)
+// ECharts 净值曲线数据
+const navChartData = computed(() => {
+  if (!chartData.value?.nav_history?.length) return { dates: [], series: [] }
+  const history = chartData.value.nav_history
   return {
-    ...chartData.value.nav_history[idx],
-    idx,
-    x: scaleX(idx, chartData.value.nav_history.length),
-    y: scaleY(chartData.value.nav_history[idx].nav),
+    dates: history.map(d => d.date),
+    series: [{
+      name: '组合净值',
+      data: history.map(d => d.nav),
+      color: '#c9a84c',
+    }],
   }
 })
-
-function onChartMouseMove(event) {
-  if (!chartData.value?.nav_history?.length) return
-  const svg = event.currentTarget
-  const svgRect = svg.getBoundingClientRect()
-  const total = chartData.value.nav_history.length
-  const plotW = chartWidth - padLeft - padRight
-  const mouseVbX = (event.clientX - svgRect.left) / svgRect.width * chartWidth
-  const rawIdx = ((mouseVbX - padLeft) / plotW) * (total - 1)
-  chartHoverIndex.value = Math.max(0, Math.min(total - 1, Math.round(rawIdx)))
-
-  const dp = hoverNavPoint.value
-  if (dp) {
-    // tooltip position in pixels relative to wrap
-    const xRatio = svgRect.width / chartWidth
-    const yRatio = svgRect.height / chartHeight
-    const wrap = svg.closest('.nav-chart-wrap')
-    const wrapRect = wrap.getBoundingClientRect()
-    tooltipStyle.value = {
-      left: (dp.x * xRatio + 12) + 'px',
-      top: (dp.y * yRatio - 10) + 'px',
-    }
-    markerTooltip.value = { ...dp, isHover: true }
-  }
-}
-
-function onChartMouseLeave() {
-  chartHoverIndex.value = null
-  markerTooltip.value = null
-}
-
-function onMarkerHover(event, marker) {
-  chartHoverIndex.value = marker.idx
-  const svg = event.currentTarget.closest('svg')
-  const svgRect = svg.getBoundingClientRect()
-  const xRatio = svgRect.width / chartWidth
-  const yRatio = svgRect.height / chartHeight
-  const wrap = svg.closest('.nav-chart-wrap')
-  const wrapRect = wrap.getBoundingClientRect()
-  tooltipStyle.value = {
-    left: (marker.x * xRatio + 12) + 'px',
-    top: (marker.y * yRatio - 10) + 'px',
-  }
-  markerTooltip.value = { ...marker, isHover: false }
-}
 const loading = ref(false)
 const showForm = ref(false)
 const editingId = ref(null)
@@ -2230,26 +2090,15 @@ function txDisplayAmount(tx) {
               持仓占比
             </h4>
             <div v-show="showHoldingWeight" class="collapse-content">
-              <div class="pie-chart-row">
-                <svg width="120" height="120" viewBox="0 0 120 120">
-                  <template v-for="(s, i) in calcPieSlices(
-                    Object.fromEntries(holdingWeights.map(h => [h.fund_name, h.current_value])),
-                    holdingWeights.reduce((s, h) => s + (h.current_value || 0), 0)
-                  )" :key="s.label">
-                    <path :d="s.path" :fill="s.color" stroke="#fff" stroke-width="1.5"/>
-                  </template>
-                </svg>
-                <div class="pie-legend">
-                  <div v-for="s in calcPieSlices(
-                    Object.fromEntries(holdingWeights.map(h => [h.fund_name, h.current_value])),
-                    holdingWeights.reduce((s, h) => s + (h.current_value || 0), 0)
-                  )" :key="s.label" class="legend-item">
-                    <span class="legend-dot" :style="{background:s.color}"></span>
-                    <span class="legend-label">{{ s.label }}</span>
-                    <span class="legend-pct">{{ s.pct }}%</span>
-                  </div>
-                </div>
-              </div>
+              <PieChart
+                v-if="pieChartData.length"
+                :data="pieChartData"
+                :inner-radius="50"
+                :outer-radius="78"
+                legend-position="right"
+                height="260px"
+              />
+              <div v-else class="chart-empty">暂无持仓数据</div>
               <div class="distribution-bars">
                 <div v-for="(h, idx) in holdingWeights" :key="h.id" class="dist-bar-row">
                   <span class="dist-label">{{ h.fund_name }}</span>
@@ -2509,58 +2358,16 @@ function txDisplayAmount(tx) {
               <span v-if="chartLoading" class="text-muted" style="font-size:0.8rem">加载中...</span>
             </div>
             <div v-if="chartData" class="nav-chart-wrap">
-              <svg class="nav-chart" :viewBox="'0 0 ' + chartWidth + ' ' + chartHeight" preserveAspectRatio="xMidYMid meet" @mousemove="onChartMouseMove" @mouseleave="onChartMouseLeave">
-                <!-- 背景 -->
-                <rect x="0" y="0" :width="chartWidth" :height="chartHeight" fill="transparent"/>
-                <!-- 网格线 -->
-                <line v-for="(y, i) in gridYs" :key="'g'+i" :x1="padLeft" :y1="y" :x2="chartWidth - padRight" :y2="y" stroke="rgba(255, 255, 255, 0.1)" stroke-width="0.5"/>
-                <!-- Y 轴标签 -->
-                <text v-for="la in yAxisLabels" :key="'yl'+la.label" :x="padLeft - 6" :y="la.y + 4" text-anchor="end" fill="#9ca3af" font-size="10" font-family="monospace">{{ la.label }}</text>
-                <!-- X 轴标签 -->
-                <text v-for="la in xAxisLabels" :key="'xl'+la.label" :x="la.x" :y="chartHeight - 8" text-anchor="middle" fill="#9ca3af" font-size="10">{{ la.label }}</text>
-                <!-- Y 轴轴线 -->
-                <line :x1="padLeft" :y1="padTop" :x2="padLeft" :y2="chartHeight - padBottom" stroke="#d1d5db" stroke-width="1"/>
-                <!-- X 轴轴线 -->
-                <line :x1="padLeft" :y1="chartHeight - padBottom" :x2="chartWidth - padRight" :y2="chartHeight - padBottom" stroke="#d1d5db" stroke-width="1"/>
-                <!-- 净值趋势线 -->
-                <polyline :points="navLinePoints" fill="none" stroke="#3b82f6" stroke-width="1.5" stroke-linejoin="round"/>
-                <!-- 净值填充区域 -->
-                <polyline :points="navLinePoints + ' ' + scaleX(chartData.nav_history.length - 1, chartData.nav_history.length) + ',' + (chartHeight - padBottom) + ' ' + scaleX(0, chartData.nav_history.length) + ',' + (chartHeight - padBottom)" fill="url(#navGrad)" opacity="0.15"/>
-                <!-- hover 竖线 -->
-                <line v-if="hoverNavPoint" :x1="hoverNavPoint.x" :y1="padTop" :x2="hoverNavPoint.x" :y2="chartHeight - padBottom" stroke="#9ca3af" stroke-width="0.8" stroke-dasharray="3,3"/>
-                <!-- hover 圆点 -->
-                <circle v-if="hoverNavPoint" :cx="hoverNavPoint.x" :cy="hoverNavPoint.y" r="4" fill="#fff" stroke="#3b82f6" stroke-width="2"/>
-                <!-- 买入标记 -->
-                <circle v-for="(p, i) in buyMarkers" :key="'b'+i" :cx="p.x" :cy="p.y" r="5" fill="#16a34a" stroke="#fff" stroke-width="2" style="cursor:pointer" @mouseenter="onMarkerHover($event, p)"/>
-                <!-- 卖出标记 -->
-                <circle v-for="(p, i) in sellMarkers" :key="'s'+i" :cx="p.x" :cy="p.y" r="5" fill="#dc2626" stroke="#fff" stroke-width="2" style="cursor:pointer" @mouseenter="onMarkerHover($event, p)"/>
-                <!-- 渐变定义 -->
-                <defs>
-                  <linearGradient id="navGrad" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="0%" stop-color="#3b82f6"/>
-                    <stop offset="100%" stop-color="#3b82f6" stop-opacity="0"/>
-                  </linearGradient>
-                </defs>
-              </svg>
-              <div class="chart-legend">
-                <span><span class="legend-dot" style="background:#3b82f6"></span>净值</span>
-                <span><span class="legend-dot" style="background:#16a34a"></span>买入</span>
-                <span><span class="legend-dot" style="background:#dc2626"></span>卖出</span>
-              </div>
-              <div v-if="markerTooltip" class="chart-tooltip" :style="tooltipStyle">
-                <div v-if="markerTooltip.isHover" class="tooltip-hover">
-                  <div class="tooltip-date">{{ markerTooltip.date }}</div>
-                  <div class="tooltip-nav">净值: <strong>{{ markerTooltip.nav?.toFixed(4) }}</strong></div>
-                </div>
-                <div v-else class="tooltip-tx">
-                  <div class="tooltip-date">{{ markerTooltip.transaction_date }}</div>
-                  <div class="tooltip-tx-type">{{ markerTooltip.transaction_type === 'buy' ? '买入' : '卖出' }}</div>
-                  <div class="tooltip-nav">净值: <strong>{{ markerTooltip.nav?.toFixed(4) }}</strong></div>
-                  <div v-if="markerTooltip.price">价格: ¥{{ markerTooltip.price?.toFixed(4) }}</div>
-                  <div v-if="markerTooltip.shares">份额: {{ Number(markerTooltip.shares).toLocaleString() }}</div>
-                  <div v-if="markerTooltip.amount">金额: ¥{{ Number(markerTooltip.amount).toLocaleString() }}</div>
-                </div>
-              </div>
+              <LineChart
+                v-if="navChartData.dates.length"
+                :dates="navChartData.dates"
+                :series="navChartData.series"
+                :y-names="['净值']"
+                :area="true"
+                :smooth="true"
+                height="280px"
+              />
+              <div v-else class="chart-empty">暂无净值数据</div>
             </div>
             <div v-else-if="chartFundCode && !chartLoading" class="text-muted" style="font-size:0.85rem;padding:0.5rem 0">暂无净值数据。</div>
           </div>

@@ -32,9 +32,13 @@ const marketTemperature = ref(null)
 // ── 螺丝钉估值相关 ──────────────────────────────────────
 const ddRecords = ref([])
 const ddLoading = ref(false)
-const ddExpandedId = ref(null)
-const ddDetail = ref(null)
 const ddDetailLoading = ref(false)
+const ddSelectedRecordId = ref(null)
+const ddSelectedRecord = ref(null)
+const ddIndexList = ref([])
+const ddSearchQuery = ref('')
+const ddSortKey = ref('')
+const ddSortAsc = ref(true)
 const analysisLoading = ref(false)
 const analysisResult = ref(null) // 当前分析结果 {id, result, agent_name, token_usage, created_at}
 const analysisHistory = ref([])
@@ -99,13 +103,26 @@ const selectedIndexInfo = computed(() => {
 })
 
 // DD image tab computed
-const ddTotalIndexes = computed(() => {
-  return ddRecords.value.reduce((sum, r) => sum + (r.index_count || 0), 0)
-})
-
-const ddLatestDate = computed(() => {
-  if (!ddRecords.value.length) return null
-  return ddRecords.value[0].update_date || ddRecords.value[0].created_at?.slice(0, 10) || null
+const ddFilteredList = computed(() => {
+  let list = ddIndexList.value
+  if (ddSearchQuery.value) {
+    const q = ddSearchQuery.value.toLowerCase()
+    list = list.filter(item =>
+      (item.index_name || '').toLowerCase().includes(q) ||
+      (item.index_code || '').toLowerCase().includes(q)
+    )
+  }
+  if (ddSortKey.value) {
+    const key = ddSortKey.value
+    const asc = ddSortAsc.value ? 1 : -1
+    list = [...list].sort((a, b) => {
+      const va = a[key] ?? ''
+      const vb = b[key] ?? ''
+      if (typeof va === 'number' && typeof vb === 'number') return (va - vb) * asc
+      return String(va).localeCompare(String(vb)) * asc
+    })
+  }
+  return list
 })
 
 async function loadIndexes() {
@@ -323,6 +340,11 @@ async function loadDDRecords() {
   try {
     const { data } = await listDDValuations()
     ddRecords.value = data.records || []
+    // 自动选中最新记录
+    if (ddRecords.value.length && !ddSelectedRecordId.value) {
+      ddSelectedRecordId.value = ddRecords.value[0].id
+      await loadDDIndexList(ddRecords.value[0].id)
+    }
   } catch (e) {
     console.error('Failed to load DD valuations:', e)
   } finally {
@@ -330,23 +352,41 @@ async function loadDDRecords() {
   }
 }
 
-async function toggleDDDetail(id) {
-  if (ddExpandedId.value === id) {
-    ddExpandedId.value = null
-    ddDetail.value = null
-    return
-  }
-  ddExpandedId.value = id
+async function loadDDIndexList(recordId) {
   ddDetailLoading.value = true
   try {
-    const { data } = await getDDValuation(id)
-    ddDetail.value = data
+    const { data } = await getDDValuation(recordId)
+    ddSelectedRecord.value = data
+    ddIndexList.value = data?.parsed_data?.data || []
   } catch (e) {
     console.error('Failed to load DD detail:', e)
-    ddDetail.value = null
+    ddIndexList.value = []
   } finally {
     ddDetailLoading.value = false
   }
+}
+
+function onDDDateChange() {
+  ddSearchQuery.value = ''
+  ddSortKey.value = ''
+  loadDDIndexList(ddSelectedRecordId.value)
+}
+
+function ddSortBy(key) {
+  if (ddSortKey.value === key) {
+    ddSortAsc.value = !ddSortAsc.value
+  } else {
+    ddSortKey.value = key
+    ddSortAsc.value = true
+  }
+}
+
+function ddPercentileClass(pct) {
+  if (pct < 20) return 'badge-success'
+  if (pct < 30) return 'badge-success-light'
+  if (pct <= 70) return 'badge-warning'
+  if (pct <= 80) return 'badge-danger-light'
+  return 'badge-danger'
 }
 
 function ddStatusClass(status) {
@@ -470,6 +510,31 @@ function renderTrendChart() {
         itemStyle: { color: '#f59e0b' },
         symbol: 'circle',
         symbolSize: 5,
+        markArea: {
+          silent: true,
+          data: [
+            [
+              { yAxis: 0, itemStyle: { color: 'rgba(16,185,129,0.08)' } },
+              { yAxis: 30 },
+            ],
+            [
+              { yAxis: 30, itemStyle: { color: 'rgba(16,185,129,0.04)' } },
+              { yAxis: 50 },
+            ],
+            [
+              { yAxis: 50, itemStyle: { color: 'transparent' } },
+              { yAxis: 70 },
+            ],
+            [
+              { yAxis: 70, itemStyle: { color: 'rgba(245,158,11,0.04)' } },
+              { yAxis: 85 },
+            ],
+            [
+              { yAxis: 85, itemStyle: { color: 'rgba(239,68,68,0.06)' } },
+              { yAxis: 100 },
+            ],
+          ],
+        },
       },
     ],
   })
@@ -516,6 +581,8 @@ onUnmounted(() => {
 watch([selectedCode, selectedMetric], () => {
   imageLoadError.value = false
   if (selectedCode.value && selectedMetric.value) loadHistory()
+  // 切换指数时，如果当前在分析 tab，也重新加载分析历史
+  if (activeTab.value === 'analysis' && selectedCode.value) loadAnalysisHistory()
 })
 watch(activeTab, (tab) => {
   if (tab === 'analysis' && selectedCode.value) loadAnalysisHistory()
@@ -547,30 +614,6 @@ defineExpose({ loadHistory })
 
     <!-- ════════ Index Tab (outerTab === 'index') ════════ -->
     <template v-if="outerTab === 'index'">
-
-    <!-- Market Temperature Card -->
-    <div v-if="marketTemperature" class="card market-temp-card">
-      <div class="market-temp-header">
-        <div class="market-temp-icon">
-          <svg width="24" height="24" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"/>
-          </svg>
-        </div>
-        <div class="market-temp-info">
-          <div class="market-temp-label">市场温度</div>
-          <div class="market-temp-value">{{ marketTemperature.temperature ?? '-' }}</div>
-        </div>
-        <div :class="['market-temp-badge', 'temp-' + (marketTemperature.status || 'unknown')]">
-          {{ marketTemperature.status || '未知' }}
-        </div>
-      </div>
-      <div v-if="marketTemperature.description" class="market-temp-desc">
-        {{ marketTemperature.description }}
-      </div>
-      <div v-if="marketTemperature.update_date" class="market-temp-date">
-        更新日期: {{ marketTemperature.update_date }}
-      </div>
-    </div>
 
     <!-- Index Selector (searchable) -->
     <div class="card selector-card">
@@ -828,6 +871,11 @@ defineExpose({ loadHistory })
       <div v-if="history.length > 1" class="card trend-card">
         <h3 class="card-title">估值趋势 <span class="count-badge">{{ history.length }} 条</span></h3>
         <div ref="trendChartRef" class="trend-chart"></div>
+        <div class="percentile-legend">
+          <span class="legend-item"><span class="legend-color" style="background:rgba(16,185,129,0.15)"></span>低估区 (&lt;30%)</span>
+          <span class="legend-item"><span class="legend-color" style="background:rgba(156,163,175,0.08)"></span>合理区 (30-70%)</span>
+          <span class="legend-item"><span class="legend-color" style="background:rgba(239,68,68,0.12)"></span>高估区 (&gt;70%)</span>
+        </div>
       </div>
 
       <!-- No trend data hint -->
@@ -983,99 +1031,98 @@ defineExpose({ loadHistory })
       </div>
 
       <template v-else>
-        <!-- Summary -->
-        <div class="dd-image-summary card">
-          <div class="dd-image-summary-left">
-            <div class="dd-image-summary-title">螺丝钉图片估值</div>
-            <div class="dd-image-summary-meta">
-              共 <b>{{ ddRecords.length }}</b> 次解析记录，
-              覆盖 <b>{{ ddTotalIndexes }}</b> 个指数
+        <!-- Toolbar: Date Selector + Summary -->
+        <div class="dd-toolbar card">
+          <div class="dd-toolbar-left">
+            <div class="dd-toolbar-title">🔩 螺丝钉指数估值</div>
+            <div class="dd-toolbar-meta">
+              <b>{{ ddIndexList.length }}</b> 个指数
+              <span v-if="ddSelectedRecord?.market_temperature != null">
+                · 市场温度 <b>{{ ddSelectedRecord.market_temperature }}</b>
+              </span>
             </div>
           </div>
-          <div v-if="ddLatestDate" class="dd-image-summary-date">
-            最新: {{ ddLatestDate }}
+          <div class="dd-toolbar-right">
+            <select v-model="ddSelectedRecordId" class="dd-date-select" @change="onDDDateChange">
+              <option v-for="r in ddRecords" :key="r.id" :value="r.id">
+                {{ r.update_date || r.created_at?.slice(0, 10) }}
+              </option>
+            </select>
           </div>
         </div>
 
-        <!-- Records List -->
-        <div v-for="record in ddRecords" :key="record.id" class="card dd-record-card">
-          <div class="dd-record-header" @click="toggleDDDetail(record.id)">
-            <div class="dd-record-left">
-              <div class="dd-record-date">
-                <svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24" style="flex-shrink:0">
-                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"/>
-                </svg>
-                {{ record.update_date || record.created_at?.slice(0, 10) || '未知日期' }}
-              </div>
-              <div class="dd-record-meta">
-                <span v-if="record.market_temperature != null" class="dd-temp">
-                  市场温度: <b>{{ record.market_temperature }}</b>
-                </span>
-                <span class="dd-count">{{ record.index_count || 0 }} 个指数</span>
-              </div>
-            </div>
-            <div class="dd-record-right">
-              <span class="dd-record-time">{{ record.created_at?.slice(11, 16) || '' }}</span>
-              <svg :class="['dd-expand-icon', { expanded: ddExpandedId === record.id }]" width="20" height="20" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/>
-              </svg>
-            </div>
-          </div>
+        <!-- Search -->
+        <div class="card dd-search-card">
+          <input
+            v-model="ddSearchQuery"
+            class="input-field"
+            placeholder="搜索指数名称或代码..."
+            style="width:100%"
+          />
+        </div>
 
-          <Transition name="expand">
-            <div v-if="ddExpandedId === record.id" class="dd-detail">
-              <div v-if="ddDetailLoading" class="loading-state" style="padding:1rem">
-                <div class="spinner-sm"></div>
-                <span>加载中...</span>
-              </div>
-              <div v-else-if="ddDetail?.parsed_data?.data" class="dd-table-wrap">
-                <table class="data-table dd-table">
-                  <thead>
-                    <tr>
-                      <th>指数名称</th>
-                      <th>代码</th>
-                      <th>PE</th>
-                      <th>PE百分位</th>
-                      <th>PB</th>
-                      <th>PB百分位</th>
-                      <th>股息率</th>
-                      <th>ROE</th>
-                      <th>估值状态</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    <tr v-for="(item, idx) in ddDetail.parsed_data.data" :key="idx">
-                      <td class="td-name">{{ item.index_name || '-' }}</td>
-                      <td class="td-code">{{ item.index_code || '-' }}</td>
-                      <td class="td-val">{{ item.pe ?? '-' }}</td>
-                      <td>
-                        <span v-if="item.pe_percentile != null" :class="['badge', item.pe_percentile < 30 ? 'badge-success' : item.pe_percentile <= 70 ? 'badge-warning' : 'badge-danger']">
-                          {{ item.pe_percentile }}%
-                        </span>
-                        <span v-else>-</span>
-                      </td>
-                      <td class="td-val">{{ item.pb ?? '-' }}</td>
-                      <td>
-                        <span v-if="item.pb_percentile != null" :class="['badge', item.pb_percentile < 30 ? 'badge-success' : item.pb_percentile <= 70 ? 'badge-warning' : 'badge-danger']">
-                          {{ item.pb_percentile }}%
-                        </span>
-                        <span v-else>-</span>
-                      </td>
-                      <td>{{ item.dividend_yield ?? '-' }}</td>
-                      <td>{{ item.roe ?? '-' }}</td>
-                      <td>
-                        <span v-if="item.valuation_status" :class="['dd-status', ddStatusClass(item.valuation_status)]">
-                          {{ item.valuation_status }}
-                        </span>
-                        <span v-else>-</span>
-                      </td>
-                    </tr>
-                  </tbody>
-                </table>
-              </div>
-              <div v-else class="dd-no-detail">无详细数据</div>
-            </div>
-          </Transition>
+        <!-- Index List Table -->
+        <div class="card dd-index-table-card">
+          <div v-if="ddDetailLoading" class="loading-state" style="padding:2rem">
+            <div class="spinner-sm"></div>
+            <span>加载中...</span>
+          </div>
+          <div v-else class="dd-table-wrap">
+            <table class="data-table dd-index-table">
+              <thead>
+                <tr>
+                  <th @click="ddSortBy('index_name')" class="sortable">
+                    指数名称 {{ ddSortKey === 'index_name' ? (ddSortAsc ? '↑' : '↓') : '' }}
+                  </th>
+                  <th>代码</th>
+                  <th @click="ddSortBy('pe')" class="sortable">
+                    PE {{ ddSortKey === 'pe' ? (ddSortAsc ? '↑' : '↓') : '' }}
+                  </th>
+                  <th @click="ddSortBy('pe_percentile')" class="sortable">
+                    PE% {{ ddSortKey === 'pe_percentile' ? (ddSortAsc ? '↑' : '↓') : '' }}
+                  </th>
+                  <th>PB</th>
+                  <th>PB%</th>
+                  <th>股息率</th>
+                  <th>ROE</th>
+                  <th @click="ddSortBy('valuation_status')" class="sortable">
+                    估值 {{ ddSortKey === 'valuation_status' ? (ddSortAsc ? '↑' : '↓') : '' }}
+                  </th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="(item, idx) in ddFilteredList" :key="idx">
+                  <td class="td-name">{{ item.index_name || '-' }}</td>
+                  <td class="td-code">{{ item.index_code || '-' }}</td>
+                  <td class="td-val">{{ item.pe ?? '-' }}</td>
+                  <td>
+                    <span v-if="item.pe_percentile != null" :class="['badge', ddPercentileClass(item.pe_percentile)]">
+                      {{ item.pe_percentile }}%
+                    </span>
+                    <span v-else>-</span>
+                  </td>
+                  <td class="td-val">{{ item.pb ?? '-' }}</td>
+                  <td>
+                    <span v-if="item.pb_percentile != null" :class="['badge', ddPercentileClass(item.pb_percentile)]">
+                      {{ item.pb_percentile }}%
+                    </span>
+                    <span v-else>-</span>
+                  </td>
+                  <td>{{ item.dividend_yield ?? '-' }}</td>
+                  <td>{{ item.roe ?? '-' }}</td>
+                  <td>
+                    <span v-if="item.valuation_status" :class="['dd-status', ddStatusClass(item.valuation_status)]">
+                      {{ item.valuation_status }}
+                    </span>
+                    <span v-else>-</span>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <div v-if="!ddDetailLoading && !ddFilteredList.length" class="empty-state" style="padding:2rem">
+            <p>无匹配指数</p>
+          </div>
         </div>
       </template>
     </template>
@@ -2309,78 +2356,99 @@ defineExpose({ loadHistory })
   color: var(--color-text-muted);
 }
 
-.dd-record-card {
-  padding: 0;
-  overflow: hidden;
-}
-
-.dd-record-header {
+/* DD Toolbar */
+.dd-toolbar {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 0.8rem 1rem;
-  cursor: pointer;
-  transition: background 0.15s;
+  padding: 1rem 1.25rem;
 }
 
-.dd-record-header:hover {
-  background: var(--color-bg-hover);
-}
-
-.dd-record-left {
+.dd-toolbar-left {
   display: flex;
   flex-direction: column;
-  gap: 0.2rem;
+  gap: 0.25rem;
 }
 
-.dd-record-date {
-  font-size: 0.9rem;
-  font-weight: 600;
+.dd-toolbar-title {
+  font-size: 1.1rem;
+  font-weight: 700;
   color: var(--color-text-primary);
 }
 
-.dd-record-meta {
-  display: flex;
-  gap: 0.75rem;
+.dd-toolbar-meta {
   font-size: 0.8rem;
   color: var(--color-text-secondary);
 }
 
-.dd-temp b {
+.dd-toolbar-meta b {
   color: var(--color-primary-500);
 }
 
-.dd-count {
-  color: var(--color-text-muted);
+.dd-date-select {
+  padding: 0.5rem 0.75rem;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: var(--color-bg-primary);
+  color: var(--color-text-primary);
+  font-size: 0.85rem;
+  cursor: pointer;
 }
 
-.dd-expand-icon {
-  transition: transform 0.25s ease;
-  color: var(--color-text-muted);
-  flex-shrink: 0;
+.dd-search-card {
+  padding: 0.75rem 1rem;
 }
 
-.dd-expand-icon.expanded {
-  transform: rotate(180deg);
-}
-
-.dd-detail {
-  border-top: 1px solid var(--color-border);
+/* DD Index Table */
+.dd-index-table-card {
+  padding: 0;
   overflow: hidden;
 }
 
-.dd-table-wrap {
+.dd-index-table-card .dd-table-wrap {
   overflow-x: auto;
-  padding: 0.5rem;
 }
 
-.dd-table {
-  font-size: 0.8rem;
+.dd-index-table {
+  font-size: 0.82rem;
+  width: 100%;
 }
 
-.dd-table th {
+.dd-index-table th {
   font-size: 0.75rem;
   white-space: nowrap;
+  position: sticky;
+  top: 0;
+  background: var(--color-bg-secondary);
+  z-index: 1;
+}
+
+.dd-index-table th.sortable {
+  cursor: pointer;
+  user-select: none;
+}
+
+.dd-index-table th.sortable:hover {
+  color: var(--color-primary-500);
+}
+
+.dd-index-table td {
+  padding: 0.5rem 0.6rem;
+  border-bottom: 1px solid var(--color-border-light);
+}
+
+.dd-index-table tr:hover td {
+  background: var(--color-bg-hover);
+}
+
+.badge-success-light {
+  background: #dcfce7;
+  color: #166534;
+}
+
+.badge-danger-light {
+  background: #fee2e2;
+  color: #991b1b;
 }
 
 .td-name {
@@ -2394,16 +2462,13 @@ defineExpose({ loadHistory })
   color: var(--color-text-muted);
 }
 
+.td-val {
+  font-variant-numeric: tabular-nums;
+}
+
 .dd-status {
   font-weight: 600;
   font-size: 0.8rem;
-}
-
-.dd-no-detail {
-  padding: 1rem;
-  text-align: center;
-  color: var(--color-text-muted);
-  font-size: 0.85rem;
 }
 
 /* expand transition */
@@ -2464,46 +2529,6 @@ defineExpose({ loadHistory })
 }
 
 /* ── DD Image Summary ── */
-.dd-image-summary {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 1.25rem 1.5rem;
-  background: linear-gradient(135deg, var(--color-bg-card) 0%, var(--color-bg-hover) 100%);
-  border-radius: var(--radius-lg);
-  border: 1px solid var(--color-border);
-}
-
-.dd-image-summary-left {
-  display: flex;
-  flex-direction: column;
-  gap: 0.25rem;
-}
-
-.dd-image-summary-title {
-  font-size: 1.1rem;
-  font-weight: 700;
-  color: var(--color-text-primary);
-}
-
-.dd-image-summary-meta {
-  font-size: 0.85rem;
-  color: var(--color-text-muted);
-}
-
-.dd-image-summary-meta b {
-  color: var(--color-primary-500);
-  font-weight: 700;
-}
-
-.dd-image-summary-date {
-  font-size: 0.85rem;
-  font-weight: 600;
-  color: var(--color-text-muted);
-  background: var(--color-bg-input);
-  padding: 0.35rem 0.75rem;
-  border-radius: var(--radius-md);
-}
 
 /* DD record right section */
 .dd-record-right {
@@ -2517,5 +2542,27 @@ defineExpose({ loadHistory })
   font-size: 0.8rem;
   color: var(--color-text-muted);
   font-family: 'SF Mono', 'Fira Code', monospace;
+}
+
+.percentile-legend {
+  display: flex;
+  justify-content: center;
+  gap: 1.5rem;
+  margin-top: 0.5rem;
+  font-size: 0.75rem;
+  color: var(--text-tertiary);
+}
+
+.percentile-legend .legend-item {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.percentile-legend .legend-color {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  border-radius: 2px;
 }
 </style>

@@ -1,6 +1,7 @@
 <script setup>
 import { ref, onMounted, onActivated } from 'vue'
-import { getDashboard, runAnalysis, runPanoramaAnalysis, getHotTopics, getDailyReport, regenerateDailyReport, submitDailyReportFeedback, listPanoramaRecords, getHotspotsAnalysis, getLatestHotspotsAnalysis, getRecommendations, getRecommendationStats, submitRecommendationFeedback, getBondRecommend, listBondRecommendRecords, autoVerifyRecommendations, fetchRecentValuations } from '../api'
+import { getDashboard, runAnalysis, runPanoramaAnalysis, getHotTopics, getDailyReport, regenerateDailyReport, submitDailyReportFeedback, listPanoramaRecords, getHotspotsAnalysis, getLatestHotspotsAnalysis, getRecommendations, getRecommendationStats, submitRecommendationFeedback, getBondRecommend, listBondRecommendRecords, autoVerifyRecommendations, fetchRecentValuations, getBondMarketTemperature } from '../api'
+import GaugeChart from './charts/GaugeChart.vue'
 import ConfirmDialog from './ConfirmDialog.vue'
 import AppToast from './AppToast.vue'
 import { useToast } from '../composables/useToast'
@@ -11,6 +12,15 @@ const emit = defineEmits(['navigate'])
 
 // ── 二次确认弹窗 ──
 const confirm = ref({ visible: false, title: '', message: '', danger: false, onConfirm: null })
+
+const bondTemperature = ref(null)
+
+async function loadBondTemperature() {
+  try {
+    const { data } = await getBondMarketTemperature()
+    bondTemperature.value = data?.current || null
+  } catch (_) {}
+}
 
 const loading = ref(true)
 const fetchingValuation = ref(false)
@@ -128,6 +138,7 @@ onMounted(async () => {
     loadHotTopics(),
     loadDailyReport(),
     loadRecHistory(),
+    loadBondTemperature(),
   ])
 
   // 自动加载最新全景诊断结果
@@ -506,6 +517,38 @@ const concentrationIcon = { low: '✅', moderate: '⚡', high: '⚠️' }
       </div>
     </div>
 
+    <!-- 市场温度仪表盘组 -->
+    <div v-if="!loading && (data?.market_temperature || bondTemperature)" class="temp-gauges-row">
+      <div v-if="data?.market_temperature" class="temp-gauge-card card">
+        <GaugeChart
+          :value="data.market_temperature.degree ?? data.market_temperature.temperature ?? 0"
+          title="A股市场温度"
+          :segments="[
+            { from: 0, to: 20, color: '#3b82f6' },
+            { from: 20, to: 40, color: '#60a5fa' },
+            { from: 40, to: 60, color: '#10b981' },
+            { from: 60, to: 80, color: '#f59e0b' },
+            { from: 80, to: 100, color: '#ef4444' },
+          ]"
+          height="180px"
+        />
+        <div class="temp-gauge-label">
+          <span class="temp-gauge-desc">{{ data.market_temperature.label || data.market_temperature.level || '' }}</span>
+          <span class="temp-gauge-hint" v-if="data.market_temperature.percentile != null">百分位: {{ data.market_temperature.percentile }}%</span>
+        </div>
+      </div>
+      <div v-if="bondTemperature" class="temp-gauge-card card">
+        <GaugeChart
+          :value="bondTemperature.degree ?? 0"
+          title="债市温度"
+          height="180px"
+        />
+        <div class="temp-gauge-label">
+          <span class="temp-gauge-desc">{{ bondTemperature.label || '' }}</span>
+        </div>
+      </div>
+    </div>
+
     <!-- 2x2 Grid -->
     <div v-if="!loading" class="dash-grid">
       <!-- ── Card 1: 低估指数 ── -->
@@ -566,6 +609,12 @@ const concentrationIcon = { low: '✅', moderate: '⚡', high: '⚠️' }
             <div class="index-percentile">
               <div class="percentile-bar-bg">
                 <div class="percentile-bar" :style="{ width: idx.percentile + '%', background: getPercentileColor(idx.percentile) }"></div>
+                <div class="percentile-marks">
+                  <span class="mark" style="left:20%">20</span>
+                  <span class="mark" style="left:40%">40</span>
+                  <span class="mark" style="left:60%">60</span>
+                  <span class="mark" style="left:80%">80</span>
+                </div>
               </div>
               <div class="percentile-value" :style="{ color: getPercentileColor(idx.percentile) }">
                 {{ idx.percentile }}%
@@ -1670,14 +1719,44 @@ const concentrationIcon = { low: '✅', moderate: '⚡', high: '⚠️' }
   height: 8px;
   background: var(--color-bg-input);
   border-radius: 4px;
-  overflow: hidden;
+  overflow: visible;
   min-width: 50px;
+  position: relative;
 }
 
 .percentile-bar {
   height: 100%;
   border-radius: 4px;
   transition: width 0.6s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.percentile-marks {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  pointer-events: none;
+}
+
+.percentile-marks .mark {
+  position: absolute;
+  top: -14px;
+  transform: translateX(-50%);
+  font-size: 0.6rem;
+  color: var(--color-text-tertiary);
+  opacity: 0.5;
+}
+
+.percentile-marks .mark::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: 100%;
+  width: 1px;
+  height: 4px;
+  background: var(--color-text-tertiary);
+  opacity: 0.3;
 }
 
 .percentile-value {
@@ -2468,5 +2547,36 @@ const concentrationIcon = { low: '✅', moderate: '⚡', high: '⚠️' }
 }
 .verify-watch-stats span {
   white-space: nowrap;
+}
+
+/* ── 市场温度仪表盘 ── */
+.temp-gauges-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 1rem;
+  margin-bottom: 1rem;
+}
+
+.temp-gauge-card {
+  text-align: center;
+  padding: 0.75rem;
+}
+
+.temp-gauge-label {
+  margin-top: -0.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.temp-gauge-desc {
+  font-size: 0.875rem;
+  font-weight: 600;
+  color: var(--color-text-primary);
+}
+
+.temp-gauge-hint {
+  font-size: 0.75rem;
+  color: var(--color-text-tertiary);
 }
 </style>
