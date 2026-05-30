@@ -4,6 +4,12 @@ import {
   listEvalCases, createEvalCase, deleteEvalCase, runEvalCase,
   listEvalRuns, getEvalRunDetail, getEvalStats,
 } from '../api'
+import ConfirmDialog from './ConfirmDialog.vue'
+import AppToast from './AppToast.vue'
+import { useToast } from '../composables/useToast'
+
+const { showToast } = useToast()
+const confirm = ref({ visible: false, title: '', message: '', danger: false, onConfirm: null })
 
 const loading = ref(false)
 const running = ref(false)
@@ -36,8 +42,15 @@ function typeLabel(t) {
 }
 
 function confirmBeforeDelete(c) {
-  if (window.confirm(`确定删除评测用例「${c.name}」吗？关联的运行记录也将删除。`)) {
-    doDelete(c.id)
+  confirm.value = {
+    visible: true,
+    title: '删除确认',
+    message: `确定删除评测用例「${c.name}」吗？关联的运行记录也将删除。`,
+    danger: true,
+    onConfirm: () => {
+      confirm.value.visible = false
+      doDelete(c.id)
+    }
   }
 }
 
@@ -47,7 +60,7 @@ async function doDelete(id) {
     await Promise.all([loadCases(), loadStats()])
   } catch (e) {
     console.error(e)
-    alert('删除失败: ' + e.message)
+    showToast('删除失败: ' + e.message, 'error')
   }
 }
 
@@ -99,7 +112,7 @@ async function submitCreate() {
     showCreateForm.value = false
     await Promise.all([loadCases(), loadStats()])
   } catch (e) {
-    alert('创建失败: ' + e.message)
+    showToast('创建失败: ' + e.message, 'error')
   }
 }
 
@@ -111,11 +124,16 @@ async function doRun(c) {
     if (data.ok) {
       await loadRuns()
       activeTab.value = 'runs'
+      showToast('运行完成，评分中...', 'info')
+      // 延迟刷新以获取异步评分结果
+      setTimeout(async () => {
+        await Promise.all([loadRuns(), loadStats(), loadCases()])
+      }, 8000)
     } else {
-      alert('运行失败: ' + (data.error || '未知错误'))
+      showToast('运行失败: ' + (data.error || '未知错误'), 'error')
     }
   } catch (e) {
-    alert('运行出错: ' + e.message)
+    showToast('运行出错: ' + e.message, 'error')
   } finally {
     running.value = false
   }
@@ -144,8 +162,17 @@ function formatDuration(ms) {
 
 function runStatusIcon(r) {
   if (r.error_msg) return '❌'
-  if (r.score !== null) return '✅'
-  return '⚠️'
+  if (r.score !== null && r.score > 0) return '✅'
+  return '⏳'
+}
+
+function scoreColor(score) {
+  if (!score || score <= 0) return 'var(--color-text-muted)'
+  if (score >= 4.5) return '#10b981'
+  if (score >= 3.5) return '#22c55e'
+  if (score >= 2.5) return '#f59e0b'
+  if (score >= 1.5) return '#f97316'
+  return '#ef4444'
 }
 
 const latestRuns = computed(() => runs.value.slice(0, 20))
@@ -182,17 +209,19 @@ onMounted(loadAll)
         <span class="stat-label">运行次数</span>
       </div>
       <div class="stat-card">
-        <span class="stat-value">{{ stats.avg_score !== null ? stats.avg_score.toFixed(1) : '-' }}</span>
+        <span class="stat-value" :style="{ color: stats.avg_score ? scoreColor(stats.avg_score) : 'inherit' }">
+          {{ stats.avg_score !== null ? Number(stats.avg_score).toFixed(1) : '-' }}
+        </span>
         <span class="stat-label">平均分</span>
       </div>
     </div>
 
     <!-- Tabs -->
-    <div class="tabs">
-      <button :class="['tab', { active: activeTab === 'cases' }]" @click="activeTab = 'cases'">
+    <div class="tab-bar">
+      <button :class="['tab-btn', { active: activeTab === 'cases' }]" @click="activeTab = 'cases'">
         评测用例 ({{ cases.length }})
       </button>
-      <button :class="['tab', { active: activeTab === 'runs' }]" @click="activeTab = 'runs'">
+      <button :class="['tab-btn', { active: activeTab === 'runs' }]" @click="activeTab = 'runs'">
         运行记录 ({{ runs.length }})
       </button>
     </div>
@@ -285,8 +314,12 @@ onMounted(loadAll)
               <span class="run-time">{{ formatTime(r.created_at) }}</span>
             </div>
             <div class="run-sub">
-              <span class="badge badge-xs" :class="'badge-' + r.analysis_type">{{ typeLabel(r.analysis_type) }}</span>
+              <span class="badge-solid badge-xs" :class="'badge-' + r.analysis_type">{{ typeLabel(r.analysis_type) }}</span>
               <span class="run-duration">{{ formatDuration(r.duration_ms) }}</span>
+              <span v-if="r.score !== null && r.score > 0" class="run-score" :style="{ color: scoreColor(r.score) }">
+                {{ Number(r.score).toFixed(0) }}分
+              </span>
+              <span v-else class="run-score scoring">评分中...</span>
             </div>
           </div>
         </div>
@@ -299,7 +332,13 @@ onMounted(loadAll)
             <div><strong>类型:</strong> {{ typeLabel(runDetail.analysis_type) }}</div>
             <div><strong>耗时:</strong> {{ formatDuration(runDetail.duration_ms) }}</div>
             <div><strong>Token:</strong> {{ runDetail.token_usage || 0 }}</div>
-            <div v-if="runDetail.score !== null"><strong>评分:</strong> {{ runDetail.score }}</div>
+            <div v-if="runDetail.score !== null && runDetail.score > 0">
+              <strong>评分:</strong>
+              <span :style="{ color: scoreColor(runDetail.score), fontWeight: 700, fontSize: '1.1em' }">
+                {{ Number(runDetail.score).toFixed(0) }} / 5
+              </span>
+            </div>
+            <div v-if="runDetail.score_reason"><strong>评语:</strong> {{ runDetail.score_reason }}</div>
             <div v-if="runDetail.error_msg"><strong>错误:</strong> <span class="error-text">{{ runDetail.error_msg }}</span></div>
           </div>
 
@@ -329,6 +368,15 @@ onMounted(loadAll)
       </div>
     </div>
   </div>
+  <ConfirmDialog
+    :visible="confirm.visible"
+    :title="confirm.title"
+    :message="confirm.message"
+    :danger="confirm.danger"
+    @confirm="() => confirm.onConfirm?.()"
+    @cancel="confirm.visible = false"
+  />
+  <AppToast />
 </template>
 
 <style scoped>
@@ -382,34 +430,6 @@ onMounted(loadAll)
 }
 
 /* Tabs */
-.tabs {
-  display: flex;
-  gap: 0.25rem;
-  margin-bottom: 1rem;
-  border-bottom: 1px solid var(--color-border);
-}
-
-.tab {
-  padding: 0.5rem 1rem;
-  font-size: 0.85rem;
-  font-weight: 500;
-  color: var(--color-text-secondary);
-  background: none;
-  border: none;
-  border-bottom: 2px solid transparent;
-  cursor: pointer;
-  transition: all 0.15s;
-}
-
-.tab:hover {
-  color: var(--color-text-primary);
-}
-
-.tab.active {
-  color: var(--color-primary);
-  border-bottom-color: var(--color-primary);
-}
-
 .tab-content {
   min-height: 300px;
 }
@@ -513,18 +533,12 @@ onMounted(loadAll)
 }
 
 /* Badges */
-.badge-panorama { background: #6366f1; color: white; }
+.badge-panorama { background: #c9a84c; color: white; }
 .badge-deep_dive { background: #06b6d4; color: white; }
 .badge-trade_review { background: #f59e0b; color: white; }
 .badge-what_if { background: #8b5cf6; color: white; }
 .badge-ai { background: #10b981; color: white; }
 .badge-diversification_ai { background: #ec4899; color: white; }
-
-.badge-xs {
-  font-size: 0.65rem;
-  padding: 0.1rem 0.35rem;
-  border-radius: 999px;
-}
 
 /* Runs Layout */
 .runs-layout {
@@ -597,6 +611,18 @@ onMounted(loadAll)
   color: var(--color-text-muted);
 }
 
+.run-score {
+  font-size: 0.75rem;
+  font-weight: 700;
+  margin-left: auto;
+}
+
+.run-score.scoring {
+  color: var(--color-text-muted);
+  font-weight: 400;
+  font-style: italic;
+}
+
 /* Run Detail */
 .run-detail {
   background: var(--color-bg-card);
@@ -667,55 +693,4 @@ onMounted(loadAll)
   color: var(--color-text-muted);
 }
 
-/* Buttons */
-.btn-xs {
-  padding: 0.25rem 0.5rem;
-  font-size: 0.72rem;
-  border-radius: var(--radius-sm);
-}
-
-.btn-sm {
-  padding: 0.35rem 0.75rem;
-  font-size: 0.78rem;
-}
-
-.btn-primary {
-  background: var(--color-primary);
-  color: white;
-  border: none;
-  border-radius: var(--radius-sm);
-  cursor: pointer;
-  font-weight: 500;
-  transition: opacity 0.15s;
-}
-
-.btn-primary:hover { opacity: 0.9; }
-.btn-primary:disabled { opacity: 0.5; cursor: default; }
-
-.btn-secondary {
-  background: var(--color-bg-input);
-  color: var(--color-text-primary);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-sm);
-  cursor: pointer;
-  font-weight: 500;
-  transition: all 0.15s;
-}
-
-.btn-secondary:hover {
-  border-color: var(--color-primary);
-  color: var(--color-primary);
-}
-
-.btn-danger {
-  background: #e53e3e;
-  color: white;
-  border: none;
-  border-radius: var(--radius-sm);
-  cursor: pointer;
-  font-weight: 500;
-  transition: opacity 0.15s;
-}
-
-.btn-danger:hover { opacity: 0.9; }
 </style>

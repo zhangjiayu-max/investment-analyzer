@@ -19,6 +19,7 @@ from db.valuations import (
     save_valuation, get_valuation_history, get_latest_valuation,
     list_valuation_indexes, list_index_freshness, search_indexes_by_keyword,
     get_index_info, save_index_info, get_valuation_by_image,
+    save_dd_valuation, list_dd_valuations, get_dd_valuation, get_dd_parsed_image_paths,
 )
 
 # 任务 CRUD
@@ -38,6 +39,7 @@ from db.dashboard import (
     list_recommendation_feedback, get_recommendation_feedback_stats,
     save_llm_feedback, list_llm_feedback, get_user_profile,
     update_user_profile, increment_feedback_count,
+    create_chat_feedback,
 )
 
 # Agent 系统
@@ -45,6 +47,7 @@ from db.agents import (
     _init_preset_agents, list_agents, get_agent, create_agent, update_agent,
     delete_agent, save_prompt_version, list_prompt_versions, get_prompt_version,
     create_agent_run, get_agent_runs,
+    load_specialist_agents, clear_specialist_cache,
 )
 
 # 对话 + 消息 + 摘要
@@ -57,8 +60,9 @@ from db.conversations import (
 # 评测集
 from db.eval import (
     init_eval_tables, create_eval_case, list_eval_cases, get_eval_case,
-    update_eval_case, delete_eval_case, create_eval_run, list_eval_runs,
-    get_eval_stats, get_eval_run_detail,
+    update_eval_case, delete_eval_case, create_eval_run, update_eval_run,
+    list_eval_runs, get_eval_stats, get_eval_run_detail,
+    list_eval_cases_by_agent, get_eval_case_avg_score,
 )
 
 # 文章 + 分析记录 + 作者文章 + 链接文章
@@ -110,6 +114,12 @@ from db.bond_knowledge import (
     seed_investment_strategy_knowledge,
 )
 
+# 系统配置
+from db.config import (
+    init_default_configs, get_config, get_config_int, get_config_float,
+    list_configs, update_config, reset_configs,
+)
+
 
 def init_db():
     """建表，启动时调用。各子模块的 init_tables(conn) 负责创建自己的表。"""
@@ -134,6 +144,7 @@ def init_db():
             min_value REAL,
             avg_value REAL,
             zscore REAL,
+            background_color TEXT,
             source_image TEXT,
             source_url TEXT,
             raw_json TEXT,
@@ -141,6 +152,9 @@ def init_db():
             UNIQUE(index_code, snapshot_date, metric_type)
         )
     """)
+
+    # 迁移：为已有表添加 background_color 字段
+    _add_column_if_not_exists(conn, "index_valuations", "background_color", "TEXT")
 
     # 迁移旧表数据（pe_ttm/pb 分列 → metric_type 统一字段）
     try:
@@ -152,6 +166,20 @@ def init_db():
 
     # 修复 UNIQUE 约束：确保包含 metric_type（处理已存在但约束不对的表）
     _fix_unique_constraint(conn)
+
+    # ── 螺丝钉估值表 ──────────────────────────────────────
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS dd_valuations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            image_path TEXT UNIQUE,
+            image_url TEXT,
+            update_date TEXT,
+            market_temperature REAL,
+            index_count INTEGER,
+            raw_json TEXT,
+            created_at TEXT DEFAULT (datetime('now','localtime'))
+        )
+    """)
 
     # ── 任务表 ──────────────────────────────────────
     conn.execute("""
@@ -507,6 +535,9 @@ def init_db():
     # 初始化评测集表
     init_eval_tables(conn)
 
+    # 初始化默认配置（传入连接避免死锁）
+    init_default_configs(conn)
+
     # Skill 文档表
     conn.execute("""
         CREATE TABLE IF NOT EXISTS skill_documents (
@@ -526,8 +557,32 @@ def init_db():
         )
     """)
 
+    # ── 系统配置表 ──────────────────────────────────────
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS system_config (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL,
+            description TEXT DEFAULT '',
+            category TEXT DEFAULT 'general',
+            updated_at TEXT DEFAULT (datetime('now','localtime'))
+        )
+    """)
+
+    # ── 指数代码映射表 ──────────────────────────────────────
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS index_code_mapping (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            index_code TEXT NOT NULL,
+            index_name TEXT,
+            aliases TEXT,
+            sina_code TEXT,
+            created_at TEXT DEFAULT (datetime('now','localtime')),
+            UNIQUE(index_code)
+        )
+    """)
+
+    # 初始化 AI 分析表（传入连接避免死锁）
+    _init_analysis_tables(conn)
+
     conn.commit()
     conn.close()
-
-    # 初始化 AI 分析表
-    _init_analysis_tables()

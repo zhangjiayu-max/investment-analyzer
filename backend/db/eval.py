@@ -3,6 +3,7 @@
 from datetime import datetime
 
 from db._conn import _get_conn
+from db._utils import _add_column_if_not_exists
 
 
 def init_eval_tables(conn):
@@ -35,6 +36,11 @@ def init_eval_tables(conn):
         )
     """)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_eval_runs_case ON eval_runs(case_id)")
+    # 评分原因字段（LLM-as-Judge 评语）
+    _add_column_if_not_exists(conn, "eval_runs", "score_reason", "TEXT DEFAULT ''")
+    # Agent 关联（用于回归测试）
+    _add_column_if_not_exists(conn, "eval_cases", "agent_id", "INTEGER")
+    _add_column_if_not_exists(conn, "eval_cases", "agent_type", "TEXT DEFAULT ''")
 
     conn.execute("""
         CREATE TABLE IF NOT EXISTS recommendations (
@@ -57,7 +63,6 @@ def init_eval_tables(conn):
     """)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_rec_status ON recommendations(status)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_rec_created ON recommendations(created_at)")
-    from db._utils import _add_column_if_not_exists
     _add_column_if_not_exists(conn, "recommendations", "verify_after_date", "TEXT")
     _add_column_if_not_exists(conn, "recommendations", "benchmark_change_pct", "REAL")
     _add_column_if_not_exists(conn, "recommendations", "verify_window_days", "INTEGER DEFAULT 5")
@@ -88,6 +93,7 @@ def init_eval_tables(conn):
     """)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_llm_feedback_caller ON llm_feedback(caller)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_llm_feedback_rating ON llm_feedback(rating)")
+    _add_column_if_not_exists(conn, "llm_feedback", "reason_tag", "TEXT DEFAULT ''")
 
     conn.execute("""
         CREATE TABLE IF NOT EXISTS analysis_cache (
@@ -261,3 +267,60 @@ def get_eval_run_detail(run_id: int) -> dict | None:
     """, (run_id,)).fetchone()
     conn.close()
     return dict(row) if row else None
+
+
+def update_eval_run(run_id: int, **fields) -> bool:
+    """更新评测运行记录（用于写入评分结果）。"""
+    if not fields:
+        return False
+    set_clause = ", ".join(f"{k} = ?" for k in fields)
+    values = list(fields.values()) + [run_id]
+    conn = _get_conn()
+    conn.execute(f"UPDATE eval_runs SET {set_clause} WHERE id = ?", values)
+    conn.commit()
+    conn.close()
+    return True
+
+
+def list_eval_cases_by_agent(agent_id: int, agent_type: str = "") -> list[dict]:
+    """列出关联到指定 Agent 的评测用例（用于回归测试）。"""
+    conn = _get_conn()
+    if agent_type:
+        rows = conn.execute("""
+            SELECT ec.*, COUNT(er.id) as run_count,
+                   AVG(er.score) as avg_score
+            FROM eval_cases ec
+            LEFT JOIN eval_runs er ON ec.id = er.case_id
+            WHERE ec.agent_id = ? AND ec.agent_type = ? AND ec.is_active = 1
+            GROUP BY ec.id
+            ORDER BY ec.id DESC
+        """, (agent_id, agent_type)).fetchall()
+    else:
+        rows = conn.execute("""
+            SELECT ec.*, COUNT(er.id) as run_count,
+                   AVG(er.score) as avg_score
+            FROM eval_cases ec
+            LEFT JOIN eval_runs er ON ec.id = er.case_id
+            WHERE ec.agent_id = ? AND ec.is_active = 1
+            GROUP BY ec.id
+            ORDER BY ec.id DESC
+        """, (agent_id,)).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_eval_case_avg_score(case_id: int, exclude_run_id: int = 0) -> float | None:
+    """获取评测用例的平均分（可排除指定 run）。"""
+    conn = _get_conn()
+    if exclude_run_id:
+        row = conn.execute(
+            "SELECT AVG(score) as avg FROM eval_runs WHERE case_id = ? AND score IS NOT NULL AND score > 0 AND id != ?",
+            (case_id, exclude_run_id)
+        ).fetchone()
+    else:
+        row = conn.execute(
+            "SELECT AVG(score) as avg FROM eval_runs WHERE case_id = ? AND score IS NOT NULL AND score > 0",
+            (case_id,)
+        ).fetchone()
+    conn.close()
+    return row["avg"] if row and row["avg"] else None

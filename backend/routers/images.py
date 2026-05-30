@@ -44,18 +44,27 @@ async def upload_dd_image(file: UploadFile):
 
 @router.get("/api/dd-images")
 async def list_dd_images(date: str = None):
-    """列出螺丝钉估值图片，可按日期筛选。"""
+    """列出螺丝钉估值图片，可按日期筛选。已解析的图片会标注 parsed=true。"""
+    # 查询已解析的 DD 图片路径
+    conn = _get_conn()
+    parsed_paths = set()
+    for row in conn.execute("SELECT image_path FROM dd_valuations").fetchall():
+        parsed_paths.add(row[0])
+    conn.close()
+
     images = []
     if date:
         date_dir = DD_IMAGES_DIR / date
         if date_dir.is_dir():
             for f in sorted(date_dir.iterdir()):
                 if f.suffix.lower() in ('.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp'):
+                    rel_path = f"data/dd_images/{date}/{f.name}"
                     images.append({
                         "name": f.name,
                         "date": date,
                         "url": f"/static/dd_images/{date}/{f.name}",
                         "path": f"{date}/{f.name}",
+                        "parsed": rel_path in parsed_paths,
                     })
     else:
         # 列出所有日期目录下的图片
@@ -63,11 +72,13 @@ async def list_dd_images(date: str = None):
             if d.is_dir() and len(d.name) == 10 and d.name[4] == '-' and d.name[7] == '-':
                 for f in sorted(d.iterdir()):
                     if f.suffix.lower() in ('.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp'):
+                        rel_path = f"data/dd_images/{d.name}/{f.name}"
                         images.append({
                             "name": f.name,
                             "date": d.name,
                             "url": f"/static/dd_images/{d.name}/{f.name}",
                             "path": f"{d.name}/{f.name}",
+                            "parsed": rel_path in parsed_paths,
                         })
     return {"images": images}
 

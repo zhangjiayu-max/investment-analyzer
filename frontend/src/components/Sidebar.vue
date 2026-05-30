@@ -59,6 +59,7 @@ const navItems = [
   },
   { key: 'admin-agents', label: 'Agent 管理', icon: 'admin' },
   { key: 'token-usage', label: 'Token 用量', icon: 'token' },
+  { key: 'system-config', label: '系统配置', icon: 'config' },
   {
     key: 'group-evolution', label: '进化系统', icon: 'evolution',
     children: [
@@ -138,6 +139,10 @@ const activeGroup = computed(() => {
           </svg>
           <svg v-else-if="item.icon === 'token'" class="nav-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"/>
+          </svg>
+          <svg v-else-if="item.icon === 'config'" class="nav-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.066 2.573c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.573 1.066c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.066-2.573c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"/>
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/>
           </svg>
           <span class="nav-label">{{ item.label }}</span>
         </button>
@@ -323,11 +328,15 @@ const activeGroup = computed(() => {
 .nav-item.active {
   background: var(--color-primary-50);
   color: var(--color-primary-700);
+  border-left: 2px solid var(--color-primary-500);
+  padding-left: calc(0.75rem - 2px);
 }
 
 .dark .nav-item.active {
   background: var(--color-primary-bg);
   color: var(--color-primary-300);
+  border-left: 2px solid var(--color-primary-500);
+  box-shadow: 0 0 12px rgba(201, 168, 76, 0.08);
 }
 
 /* Hot items (持仓管理、估值数据) */
@@ -554,7 +563,7 @@ const activeGroup = computed(() => {
     border-right: none;
     border-top: 1px solid var(--color-border);
     padding: 0;
-    box-shadow: 0 -2px 10px rgba(0,0,0,0.05);
+    box-shadow: 0 -2px 10px rgba(0,0,0,0.3);
   }
 
   .sidebar-logo {

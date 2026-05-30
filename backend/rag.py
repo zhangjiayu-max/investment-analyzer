@@ -215,11 +215,11 @@ def _build_fts_query_relaxed(query: str) -> str:
     return " OR ".join(cleaned)
 
 
-def search_knowledge(query: str, content_type: str = None, limit: int = 5) -> list[dict]:
-    """FTS5 全文检索，按内容类型自动过滤过时数据。优先 AND 匹配，无结果时降级为 OR。"""
+def search_knowledge(query: str, content_type: str = None, limit: int = 5) -> tuple[list[dict], int]:
+    """FTS5 全文检索，按内容类型自动过滤过时数据。返回 (结果列表, 被过滤条数)。"""
     fts_query = _build_fts_query(query)
     if not fts_query:
-        return []
+        return [], 0
 
     conn = _get_conn()
 
@@ -255,12 +255,12 @@ def search_knowledge(query: str, content_type: str = None, limit: int = 5) -> li
             except Exception:
                 rows = []
                 conn.close()
-                return []
+                return [], 0
 
     results = [dict(r) for r in rows]
-    results = _filter_old_results(results, conn=conn)
+    results, dropped = _filter_old_results(results, conn=conn)
     conn.close()
-    return results[:limit]
+    return results[:limit], dropped
 
 
 def build_rag_context(query: str, content_types: list[str] = None, limit: int = 5) -> str:
@@ -270,7 +270,9 @@ def build_rag_context(query: str, content_types: list[str] = None, limit: int = 
 
 
 def log_rag_search(conversation_id: int, message_id: int, query: str, keywords: list,
-                   results: list, content_types: list = None):
+                   results: list, content_types: list = None,
+                   fts_count: int = 0, chroma_count: int = 0,
+                   freshness_filtered: int = 0):
     """记录 RAG 检索日志到数据库。"""
     conn = _get_conn()
     conn.execute("""
@@ -283,12 +285,33 @@ def log_rag_search(conversation_id: int, message_id: int, query: str, keywords: 
             content_types TEXT,
             results_count INTEGER,
             results TEXT,
+            fts_count INTEGER DEFAULT 0,
+            chroma_count INTEGER DEFAULT 0,
+            freshness_filtered INTEGER DEFAULT 0,
+            result_sources TEXT,
+            result_times TEXT,
             created_at TEXT DEFAULT (datetime('now','localtime'))
         )
     """)
+    # 兜底：为已有表添加新字段（ALTER IF NOT EXISTS 不存在，用 try 忽略重复）
+    for col, typ in [("fts_count", "INTEGER DEFAULT 0"), ("chroma_count", "INTEGER DEFAULT 0"),
+                     ("freshness_filtered", "INTEGER DEFAULT 0"), ("result_sources", "TEXT"),
+                     ("result_times", "TEXT")]:
+        try:
+            conn.execute(f"ALTER TABLE rag_logs ADD COLUMN {col} {typ}")
+        except Exception:
+            pass
+    conn.commit()
+
+    # 提取每条结果的来源和时间
+    result_sources = [r.get("source", "") for r in results]
+    result_times = [r.get("time", "") for r in results]
+
     conn.execute("""
-        INSERT INTO rag_logs (conversation_id, message_id, query, keywords, content_types, results_count, results)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO rag_logs (conversation_id, message_id, query, keywords, content_types,
+                              results_count, results, fts_count, chroma_count,
+                              freshness_filtered, result_sources, result_times)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (
         conversation_id,
         message_id,
@@ -297,6 +320,11 @@ def log_rag_search(conversation_id: int, message_id: int, query: str, keywords: 
         json.dumps(content_types, ensure_ascii=False),
         len(results),
         json.dumps(results, ensure_ascii=False),
+        fts_count,
+        chroma_count,
+        freshness_filtered,
+        json.dumps(result_sources, ensure_ascii=False),
+        json.dumps(result_times, ensure_ascii=False),
     ))
     conn.commit()
     conn.close()
@@ -443,13 +471,13 @@ def index_to_chroma(content_type: str, reference_id: str, title: str, body: str)
     return len(chunks)
 
 
-def search_chroma(query: str, content_type: str = None, limit: int = 5) -> list[dict]:
-    """语义搜索，返回与 search_knowledge 相同格式的结果。"""
+def search_chroma(query: str, content_type: str = None, limit: int = 5) -> tuple[list[dict], int]:
+    """语义搜索，返回 (结果列表, 0)。过滤由调用方负责。"""
     collection = _get_chroma()
     model = _get_embed_model()
     if not collection or not model:
         logger.warning(f"search_chroma 跳过: collection={collection is not None}, model={model is not None}")
-        return []
+        return [], 0
 
     query_embedding = model.encode([query], normalize_embeddings=True).tolist()
 
@@ -466,10 +494,10 @@ def search_chroma(query: str, content_type: str = None, limit: int = 5) -> list[
         )
     except Exception as e:
         logger.error(f"search_chroma 查询异常: {e}")
-        return []
+        return [], 0
 
     if not results or not results["ids"] or not results["ids"][0]:
-        return []
+        return [], 0
 
     output = []
     for i in range(len(results["ids"][0])):
@@ -484,13 +512,13 @@ def search_chroma(query: str, content_type: str = None, limit: int = 5) -> list[
             "reference_id": meta.get("reference_id", ""),
             "rank": -distance,  # 负数，和 FTS5 rank 一致（越小越相关）
         })
-    return output
+    return output, 0
 
 
-def _filter_old_results(results: list[dict], conn=None) -> list[dict]:
-    """按 _FRESHNESS_POLICY 策略过滤过时数据。不同类型内容有效期不同。"""
+def _filter_old_results(results: list[dict], conn=None) -> tuple[list[dict], int]:
+    """按 _FRESHNESS_POLICY 策略过滤过时数据。返回 (过滤后结果, 被过滤条数)。"""
     if not results:
-        return results
+        return results, 0
 
     from datetime import datetime, timedelta
 
@@ -503,7 +531,7 @@ def _filter_old_results(results: list[dict], conn=None) -> list[dict]:
             ids_by_type.setdefault(ct, set()).add(r["reference_id"])
 
     if not ids_by_type:
-        return results
+        return results, 0
 
     # 按类型分别查日期（author_article 和 skill 来自不同表）
     date_map = {}
@@ -570,6 +598,7 @@ def _filter_old_results(results: list[dict], conn=None) -> list[dict]:
     # 过滤
     now = datetime.now()
     filtered = []
+    dropped = 0
     for r in results:
         ct = r.get("content_type", "")
         max_months = _FRESHNESS_POLICY.get(ct, 0)
@@ -578,9 +607,10 @@ def _filter_old_results(results: list[dict], conn=None) -> list[dict]:
             if date_str:
                 cutoff = (now - timedelta(days=max_months * 30)).strftime("%Y-%m")
                 if date_str < cutoff:
+                    dropped += 1
                     continue
         filtered.append(r)
-    return filtered
+    return filtered, dropped
 
 
 def _enrich_results_with_time(results: list[dict]) -> list[dict]:
@@ -660,9 +690,12 @@ def build_rag_context_with_details(query: str, content_types: list[str] = None, 
     返回:
         {
             "context": "格式化的上下文文本",
-            "results": [{"content_type", "title", "body", "reference_id", "rank", "label"}],
+            "results": [{"content_type", "title", "body", "reference_id", "rank", "label", "source", "time"}],
             "keywords": ["检索关键词"],
-            "query": "原始查询"
+            "query": "原始查询",
+            "fts_count": int,           # FTS5 原始命中数
+            "chroma_count": int,         # ChromaDB 原始命中数
+            "freshness_filtered": int,   # 被时效性策略过滤的条数
         }
     """
     # 提取检索关键词
@@ -676,20 +709,28 @@ def build_rag_context_with_details(query: str, content_types: list[str] = None, 
     keywords = multi_char + single_char if multi_char else (single_char or cleaned)
 
     # FTS5 搜索
+    total_freshness_filtered = 0
     if content_types:
         fts_results = []
         for ct in content_types:
-            fts_results.extend(search_knowledge(query, content_type=ct, limit=limit))
+            partial, dropped = search_knowledge(query, content_type=ct, limit=limit)
+            fts_results.extend(partial)
+            total_freshness_filtered += dropped
     else:
-        fts_results = search_knowledge(query, limit=limit)
+        fts_results, dropped = search_knowledge(query, limit=limit)
+        total_freshness_filtered += dropped
+
+    fts_count = len(fts_results)
 
     # 向量搜索
-    chroma_results = search_chroma(query, content_type=content_types[0] if content_types and len(content_types) == 1 else None, limit=limit)
+    chroma_results, _ = search_chroma(query, content_type=content_types[0] if content_types and len(content_types) == 1 else None, limit=limit)
+    chroma_count = len(chroma_results)
 
     # 过滤 ChromaDB 中的旧数据（FTS 已在 search_knowledge 中过滤）
-    chroma_results = _filter_old_results(chroma_results)
+    chroma_results, chroma_dropped = _filter_old_results(chroma_results)
+    total_freshness_filtered += chroma_dropped
 
-    logger.info(f"RAG 搜索: query='{query}', FTS5={len(fts_results)}条, 向量={len(chroma_results)}条")
+    logger.info(f"RAG 搜索: query='{query}', FTS5={fts_count}条, 向量={chroma_count}条, 过滤={total_freshness_filtered}条")
 
     # RRF (Reciprocal Rank Fusion) 合并排序 — 比独立归一化更可靠
     def _rrf_score(results: list[dict], k: int = 60) -> dict:
@@ -699,6 +740,10 @@ def build_rag_context_with_details(query: str, content_types: list[str] = None, 
 
     fts_rrf = _rrf_score(fts_results)
     chroma_rrf = _rrf_score(chroma_results)
+
+    # 记录每个 key 的来源
+    fts_keys = set(fts_rrf.keys())
+    chroma_keys = set(chroma_rrf.keys())
 
     # 合并去重（按 content_type + reference_id 去重，用 RRF 分数合并）
     seen = {}
@@ -722,6 +767,18 @@ def build_rag_context_with_details(query: str, content_types: list[str] = None, 
     all_results.sort(key=lambda x: x["_score"], reverse=True)
     logger.info(f"RAG 合并后: {len(all_results)}条, 类型: {[r['content_type'] for r in all_results]}")
 
+    # 标记来源（fts / chroma / both）
+    for r in all_results:
+        key = f"{r['content_type']}:{r['reference_id']}"
+        in_fts = key in fts_keys
+        in_chroma = key in chroma_keys
+        if in_fts and in_chroma:
+            r["source"] = "both"
+        elif in_fts:
+            r["source"] = "fts"
+        else:
+            r["source"] = "chroma"
+
     # 添加标签
     label_map = {"article": "文章", "valuation": "估值", "analysis": "分析记录",
                  "author_article": "作者文章", "skill": "技能知识", "linked_doc": "个人文档"}
@@ -732,7 +789,11 @@ def build_rag_context_with_details(query: str, content_types: list[str] = None, 
     _enrich_results_with_time(all_results)
 
     if not all_results:
-        return {"context": "", "results": [], "keywords": keywords, "query": query}
+        return {
+            "context": "", "results": [], "keywords": keywords, "query": query,
+            "fts_count": fts_count, "chroma_count": chroma_count,
+            "freshness_filtered": total_freshness_filtered,
+        }
 
     parts = []
     for r in all_results:
@@ -756,4 +817,7 @@ def build_rag_context_with_details(query: str, content_types: list[str] = None, 
         "results": all_results,
         "keywords": keywords,
         "query": query,
+        "fts_count": fts_count,
+        "chroma_count": chroma_count,
+        "freshness_filtered": total_freshness_filtered,
     }

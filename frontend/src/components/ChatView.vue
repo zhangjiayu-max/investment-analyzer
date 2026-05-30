@@ -5,9 +5,12 @@ import {
   listConversations, createConversation, deleteConversation,
   getMessages, sendMessage, sendMessageStream,
   submitChatFeedback, submitLlmFeedback,
+  cancelConversationExecution,
 } from '../api'
+import ConfirmDialog from './ConfirmDialog.vue'
 
 const conversations = ref([])
+const confirm = ref({ visible: false, title: '', message: '', danger: false, onConfirm: null })
 const selectedConv = ref(null)
 const messages = ref([])
 const inputText = ref('')
@@ -96,18 +99,26 @@ async function handleNewConversation() {
   }
 }
 
-async function handleDeleteConversation(conv, e) {
+function handleDeleteConversation(conv, e) {
   e.stopPropagation()
-  if (!confirm('确定删除这个对话吗？')) return
-  try {
-    await deleteConversation(conv.id)
-    if (selectedConv.value?.id === conv.id) {
-      selectedConv.value = null
-      messages.value = []
+  confirm.value = {
+    visible: true,
+    title: '删除确认',
+    message: '确定删除这个对话吗？',
+    danger: true,
+    onConfirm: async () => {
+      confirm.value.visible = false
+      try {
+        await deleteConversation(conv.id)
+        if (selectedConv.value?.id === conv.id) {
+          selectedConv.value = null
+          messages.value = []
+        }
+        await loadConversations()
+      } catch (e) {
+        console.error('Failed to delete conversation:', e)
+      }
     }
-    await loadConversations()
-  } catch (e) {
-    console.error('Failed to delete conversation:', e)
   }
 }
 
@@ -277,6 +288,10 @@ function handleStreamEvent(event) {
 }
 
 function cancelStream() {
+  // 通知后端取消执行，将 streaming 消息标记为 cancelled
+  if (selectedConv.value?.id && sending.value) {
+    cancelConversationExecution(selectedConv.value.id).catch(() => {})
+  }
   if (streamAbort.value) {
     streamAbort.value.abort()
     streamAbort.value = null
@@ -571,7 +586,7 @@ function formatTime(ts) {
                     <span class="tool-args">{{ JSON.stringify(tc.arguments || {}).slice(0, 40) }}</span>
                     <span class="tool-toggle">{{ tc.expanded ? '▲' : '▼' }}</span>
                   </div>
-                  <pre v-if="tc.expanded" class="tool-result">{{ tc.result_preview }}</pre>
+                  <pre v-if="tc.expanded" class="tool-result">{{ tc.result_preview || '（无数据返回）' }}</pre>
                 </div>
               </div>
               <div class="message-bubble markdown-body" v-html="renderMarkdown(msg.content)"></div>
@@ -796,6 +811,14 @@ function formatTime(ts) {
       </div>
     </Transition>
   </Teleport>
+  <ConfirmDialog
+    :visible="confirm.visible"
+    :title="confirm.title"
+    :message="confirm.message"
+    :danger="confirm.danger"
+    @confirm="() => confirm.onConfirm?.()"
+    @cancel="confirm.visible = false"
+  />
 </template>
 
 <style scoped>
@@ -1147,7 +1170,7 @@ function formatTime(ts) {
 
 .is-sending .chat-input {
   border-color: var(--color-primary-300);
-  background: var(--color-primary-50, rgba(99, 102, 241, 0.03));
+  background: var(--color-primary-50, rgba(201, 168, 76, 0.03));
   animation: inputPulse 2s ease-in-out infinite;
 }
 
@@ -1262,7 +1285,7 @@ function formatTime(ts) {
 }
 
 .markdown-body :deep(code) {
-  background: rgba(0,0,0,0.06);
+  background: rgba(255, 255, 255, 0.06);
   padding: 0.1rem 0.3rem;
   border-radius: 3px;
   font-size: 0.8rem;
@@ -1420,8 +1443,8 @@ function formatTime(ts) {
 .execution-plan {
   margin: 0.5rem 0;
   padding: 0.6rem 0.8rem;
-  background: linear-gradient(135deg, rgba(99, 102, 241, 0.04), rgba(99, 102, 241, 0.02));
-  border: 1px solid rgba(99, 102, 241, 0.15);
+  background: linear-gradient(135deg, rgba(201, 168, 76, 0.04), rgba(201, 168, 76, 0.02));
+  border: 1px solid rgba(201, 168, 76, 0.15);
   border-radius: var(--radius-md);
   font-size: 0.8rem;
 }
@@ -1452,7 +1475,7 @@ function formatTime(ts) {
 
 .complexity-simple { background: rgba(16, 185, 129, 0.1); color: #10b981; }
 .complexity-medium { background: rgba(245, 158, 11, 0.1); color: #f59e0b; }
-.complexity-complex { background: rgba(99, 102, 241, 0.1); color: #6366f1; }
+.complexity-complex { background: rgba(201, 168, 76, 0.1); color: #c9a84c; }
 
 .plan-reason {
   font-size: 0.75rem;
@@ -1488,7 +1511,7 @@ function formatTime(ts) {
 .step-spinner {
   width: 12px;
   height: 12px;
-  border: 2px solid rgba(99, 102, 241, 0.2);
+  border: 2px solid rgba(201, 168, 76, 0.2);
   border-top-color: var(--color-primary);
   border-radius: 50%;
   animation: spin 0.8s linear infinite;
@@ -1657,11 +1680,11 @@ function formatTime(ts) {
 
 .specialist-item.cross-review-item {
   border-color: var(--color-primary-200);
-  background: var(--color-primary-50, rgba(99, 102, 241, 0.04));
+  background: var(--color-primary-50, rgba(201, 168, 76, 0.04));
 }
 
 .dark .specialist-item.cross-review-item {
-  background: var(--color-primary-bg, rgba(99, 102, 241, 0.08));
+  background: var(--color-primary-bg, rgba(201, 168, 76, 0.08));
 }
 
 /* ── 消息反馈按钮 ── */

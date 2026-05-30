@@ -33,6 +33,11 @@ VISION_MODEL = os.getenv("VISION_MODEL", "mimo-v2-omni")
 # 盈米且慢 MCP API
 YINGMI_API_KEY = os.getenv("YINGMI_API_KEY", "")
 
+# 仲裁 Agent 配置（DeepSeek R1 高级推理模型）
+ARBITRATION_API_KEY = os.getenv("ARBITRATION_API_KEY", "")
+ARBITRATION_BASE_URL = os.getenv("ARBITRATION_BASE_URL", "https://api.deepseek.com")
+ARBITRATION_MODEL = os.getenv("ARBITRATION_MODEL", "deepseek-v4-pro")
+
 
 def get_llm_config() -> tuple[str, str, str]:
     """返回主用 LLM 配置 (api_key, base_url, model)。优先 MIMO 套餐 API。"""

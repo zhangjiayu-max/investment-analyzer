@@ -228,3 +228,108 @@ def get_index_current_price(index_code: str) -> dict:
         return {"price": None}
     except Exception:
         return {"price": None}
+
+
+def get_market_overview() -> dict:
+    """
+    获取市场全景数据，用于每日简报。
+
+    返回:
+        {
+            "indices": [{"name", "price", "change_pct", "volume_yi"}],   # 主要指数
+            "sectors_top": [{"name", "change_pct", "lead_stock", "lead_change"}],  # 领涨板块
+            "sectors_bottom": [{"name", "change_pct", "lead_stock", "lead_change"}],  # 领跌板块
+            "breadth": {"up", "down", "limit_up", "limit_down", "total_volume_yi"},  # 涨跌家数
+        }
+    """
+    import ssl
+    ssl._create_default_https_context = ssl._create_unverified_context
+    result = {
+        "indices": [],
+        "sectors_top": [],
+        "sectors_bottom": [],
+        "breadth": {},
+    }
+
+    # 1. 主要指数行情
+    try:
+        df = ak.stock_zh_index_spot_sina()
+        target_names = {
+            "上证指数", "深证成指", "创业板指", "科创50",
+            "沪深300", "中证500", "中证1000", "北证50",
+        }
+        seen = set()
+        for _, row in df.iterrows():
+            name = str(row.get("名称", ""))
+            if name in target_names and name not in seen:
+                seen.add(name)
+                result["indices"].append({
+                    "name": name,
+                    "price": float(row.get("最新价", 0)),
+                    "change_pct": round(float(row.get("涨跌幅", 0)), 2),
+                    "volume_yi": round(float(row.get("成交额", 0)) / 1e8, 0),
+                })
+    except Exception as e:
+        import logging
+        logging.warning(f"指数行情获取失败: {e}")
+
+    # 2. 行业板块涨跌幅（同花顺）
+    try:
+        df = ak.stock_board_industry_summary_ths()
+        df = df.sort_values("涨跌幅", ascending=False)
+        for _, row in df.head(5).iterrows():
+            result["sectors_top"].append({
+                "name": str(row.get("板块", "")),
+                "change_pct": round(float(row.get("涨跌幅", 0)), 2),
+                "lead_stock": str(row.get("领涨股", "")),
+                "lead_change": round(float(row.get("领涨股-涨跌幅", 0)), 2),
+            })
+        for _, row in df.tail(5).iterrows():
+            result["sectors_bottom"].append({
+                "name": str(row.get("板块", "")),
+                "change_pct": round(float(row.get("涨跌幅", 0)), 2),
+                "lead_stock": str(row.get("领涨股", "")),
+                "lead_change": round(float(row.get("领涨股-涨跌幅", 0)), 2),
+            })
+    except Exception as e:
+        import logging
+        logging.warning(f"行业板块获取失败: {e}")
+
+    # 3. 涨跌家数（多接口降级尝试）
+    # 优先用东财个股接口，失败则从板块数据估算
+    try:
+        df = ak.stock_zh_a_spot_em()
+        up_count = int((df["涨跌幅"] > 0).sum())
+        down_count = int((df["涨跌幅"] < 0).sum())
+        limit_up = int((df["涨跌幅"] >= 9.9).sum())
+        limit_down = int((df["涨跌幅"] <= -9.9).sum())
+        total_vol = round(df["成交额"].sum() / 1e8, 0)
+        result["breadth"] = {
+            "up": up_count,
+            "down": down_count,
+            "limit_up": limit_up,
+            "limit_down": limit_down,
+            "total_volume_yi": total_vol,
+        }
+    except Exception:
+        # 降级：从板块数据统计涨跌家数
+        try:
+            df = ak.stock_board_industry_summary_ths()
+            up_count = int(df["上涨家数"].sum())
+            down_count = int(df["下跌家数"].sum())
+            total_vol = round(float(df["总成交额"].sum()), 0)
+            result["breadth"] = {
+                "up": up_count,
+                "down": down_count,
+                "limit_up": 0,
+                "limit_down": 0,
+                "total_volume_yi": total_vol,
+            }
+        except Exception:
+            total_vol = sum(idx.get("volume_yi", 0) for idx in result["indices"])
+            result["breadth"] = {
+                "up": 0, "down": 0, "limit_up": 0, "limit_down": 0,
+                "total_volume_yi": total_vol,
+            }
+
+    return result

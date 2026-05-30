@@ -1,7 +1,25 @@
 <script setup>
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
-import { listGalleryRecords, uploadDdImage, listDdImages, listDdImageDates, deleteDdImage, parseAndSaveValuation, uploadValuationImage, listValuationImages, listValuationImageDates, deleteValuationImage } from '../api'
+import { listGalleryRecords, uploadDdImage, listDdImages, listDdImageDates, deleteDdImage, parseAndSaveValuation, parseValuationBatch, parseDDImage, uploadValuationImage, listValuationImages, listValuationImageDates, deleteValuationImage } from '../api'
 import ConfirmDialog from './ConfirmDialog.vue'
+
+// ── 并发限制工具函数 ──
+async function asyncPool(limit, items, fn) {
+  const results = []
+  const executing = new Set()
+  for (const item of items) {
+    const p = fn(item).then(result => {
+      executing.delete(p)
+      return result
+    })
+    results.push(p)
+    executing.add(p)
+    if (executing.size >= limit) {
+      await Promise.race(executing)
+    }
+  }
+  return Promise.all(results)
+}
 
 // ── Tab 切换 ──
 const activeTab = ref('gallery') // 'gallery' | 'dd'
@@ -64,6 +82,7 @@ function metricBadgeClass(mt) {
   if (mt.includes('市盈率')) return 'badge-info'
   if (mt.includes('市净率')) return 'badge-success'
   if (mt.includes('市销率')) return 'badge-warning'
+  if (mt.includes('市销率')) return 'badge-warning'
   if (mt.includes('市现率')) return 'badge-purple'
   if (mt.includes('股息率')) return 'badge-orange'
   if (mt.includes('风险溢价')) return 'badge-pink'
@@ -82,6 +101,8 @@ const viUploading = ref(false)
 const viFileInput = ref(null)
 const viParsingPath = ref('')
 const viParseResult = ref(null)
+const viBatchParsing = ref(false)
+const viBatchProgress = ref({ done: 0, total: 0 })
 
 async function loadViDates() {
   try {
@@ -117,7 +138,7 @@ async function handleViUpload(e) {
     await loadViImages()
   } catch (e) {
     console.error('Upload failed:', e)
-    alert('上传失败: ' + (e.response?.data?.detail || e.message))
+    showToast('上传失败: ' + (e.response?.data?.detail || e.message), 'error')
   } finally {
     viUploading.value = false
     if (viFileInput.value) viFileInput.value.value = ''
@@ -141,7 +162,7 @@ function confirmDeleteViImage(img) {
         await loadViDates()
         await loadViImages()
       } catch (e) {
-        alert('删除失败: ' + (e.response?.data?.detail || e.message))
+        showToast('删除失败: ' + (e.response?.data?.detail || e.message), 'error')
       }
     }
   }
@@ -158,16 +179,57 @@ function confirmViParseImage(img) {
       viParsingPath.value = img.path
       viParseResult.value = null
       try {
-        const { data } = await parseAndSaveValuation(img.path)
+        // 自动判断图片类型：如果是螺丝钉估值表，调用 DD 解析
+        const isDDImage = img.path.includes('dd_images') || img.name.includes('螺丝钉') || img.name.includes('dd')
+        const parseFn = isDDImage ? parseDDImage : parseAndSaveValuation
+        const { data } = await parseFn(img.path)
         viParseResult.value = { ok: true, data, name: img.name }
-
-        // 解析成功：从待解析移除，重新加载已解析列表
         viImages.value = viImages.value.filter(i => i.path !== img.path)
         await loadRecords()
       } catch (e) {
         viParseResult.value = { ok: false, message: e.response?.data?.detail || e.message, name: img.name }
       } finally {
         viParsingPath.value = ''
+      }
+    }
+  }
+}
+
+function confirmViBatchParse(date, items) {
+  confirm.value = {
+    visible: true,
+    title: '批量识别估值',
+    message: `将并发识别「${date}」的 ${items.length} 张图片中的估值数据，是否继续？`,
+    danger: false,
+    onConfirm: async () => {
+      confirm.value.visible = false
+      viBatchParsing.value = true
+      viBatchProgress.value = { done: 0, total: items.length }
+      try {
+        // 限制并发数为 3，避免占用所有浏览器连接
+        const responses = await asyncPool(3, items, async (img) => {
+          try {
+            // 自动判断图片类型：如果是螺丝钉估值表，调用 DD 解析
+            const isDDImage = img.path.includes('dd_images') || img.name.includes('螺丝钉') || img.name.includes('dd')
+            const parseFn = isDDImage ? parseDDImage : parseAndSaveValuation
+            const result = await parseFn(img.path)
+            return result
+          } catch (e) {
+            return { data: { ok: false, error: e.message } }
+          } finally {
+            viBatchProgress.value.done++
+          }
+        })
+        const results = responses.map(r => r.data)
+        const okCount = results.filter(r => r.ok).length
+        const failCount = results.filter(r => !r.ok).length
+        showToast(`批量识别完成：成功 ${okCount} 张${failCount > 0 ? '，失败 ' + failCount + ' 张' : ''}`, okCount > 0 ? 'success' : 'error')
+        await loadViImages()
+        await loadRecords()
+      } catch (e) {
+        showToast('批量识别失败: ' + (e.response?.data?.detail || e.message), 'error')
+      } finally {
+        viBatchParsing.value = false
       }
     }
   }
@@ -190,8 +252,10 @@ const ddSelectedDate = ref('')
 const ddLoading = ref(false)
 const ddUploading = ref(false)
 const fileInput = ref(null)
-const parsingPath = ref('')  // 正在解析的图片路径
-const parseResult = ref(null)  // 解析结果弹窗
+const parsingPath = ref('')
+const parseResult = ref(null)
+const ddBatchParsing = ref(false)
+const ddBatchProgress = ref({ done: 0, total: 0 })
 const confirm = ref({ visible: false, title: '', message: '', danger: false, onConfirm: null })
 
 async function loadDdDates() {
@@ -228,7 +292,7 @@ async function handleUpload(e) {
     await loadDdImages()
   } catch (e) {
     console.error('Upload failed:', e)
-    alert('上传失败: ' + (e.response?.data?.detail || e.message))
+    showToast('上传失败: ' + (e.response?.data?.detail || e.message), 'error')
   } finally {
     ddUploading.value = false
     if (fileInput.value) fileInput.value.value = ''
@@ -252,7 +316,7 @@ function confirmDeleteDdImage(img) {
         await loadDdDates()
         await loadDdImages()
       } catch (e) {
-        alert('删除失败: ' + (e.response?.data?.detail || e.message))
+        showToast('删除失败: ' + (e.response?.data?.detail || e.message), 'error')
       }
     }
   }
@@ -261,15 +325,15 @@ function confirmDeleteDdImage(img) {
 function confirmParseImage(img) {
   confirm.value = {
     visible: true,
-    title: '解析估值数据',
-    message: `将使用 AI 识别「${img.name}」中的指数估值信息（PE/PB/百分位等），识别结果会自动存入估值库。`,
+    title: '解析螺丝钉估值表',
+    message: `将使用 AI 识别「${img.name}」中的多指数估值表格数据，识别结果会自动存入估值库。`,
     danger: false,
     onConfirm: async () => {
       confirm.value.visible = false
       parsingPath.value = img.path
       parseResult.value = null
       try {
-        const { data } = await parseAndSaveValuation(img.path)
+        const { data } = await parseDDImage(img.path)
         parseResult.value = { ok: true, data, name: img.name }
       } catch (e) {
         parseResult.value = { ok: false, message: e.response?.data?.detail || e.message, name: img.name }
@@ -280,7 +344,42 @@ function confirmParseImage(img) {
   }
 }
 
-// 按日期分组 dd 图片
+function confirmDdBatchParse(date, items) {
+  confirm.value = {
+    visible: true,
+    title: '批量识别螺丝钉估值表',
+    message: `将并发识别「${date}」的 ${items.length} 张螺丝钉估值表，是否继续？`,
+    danger: false,
+    onConfirm: async () => {
+      confirm.value.visible = false
+      ddBatchParsing.value = true
+      ddBatchProgress.value = { done: 0, total: items.length }
+      try {
+        // 限制并发数为 3，避免占用所有浏览器连接
+        const responses = await asyncPool(3, items, async (img) => {
+          try {
+            const result = await parseDDImage(img.path)
+            return result
+          } catch (e) {
+            return { data: { ok: false, error: e.message } }
+          } finally {
+            ddBatchProgress.value.done++
+          }
+        })
+        const results = responses.map(r => r.data)
+        const okCount = results.filter(r => r.ok).length
+        const failCount = results.filter(r => !r.ok).length
+        showToast(`批量识别完成：成功 ${okCount} 张${failCount > 0 ? '，失败 ' + failCount + ' 张' : ''}`, okCount > 0 ? 'success' : 'error')
+        await loadDdImages()
+      } catch (e) {
+        showToast('批量识别失败: ' + (e.message || e), 'error')
+      } finally {
+        ddBatchParsing.value = false
+      }
+    }
+  }
+}
+
 const ddGroupedImages = computed(() => {
   const groups = {}
   for (const img of ddImages.value) {
@@ -291,6 +390,128 @@ const ddGroupedImages = computed(() => {
   return Object.entries(groups).sort((a, b) => b[0].localeCompare(a[0]))
 })
 
+// ── 拖拽上传 ──
+const isDragging = ref(false)
+let dragCounter = 0
+
+function handleDragEnter(e) {
+  e.preventDefault()
+  dragCounter++
+  if (e.dataTransfer?.types?.includes('Files')) {
+    isDragging.value = true
+  }
+}
+
+function handleDragOver(e) {
+  e.preventDefault()
+  if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy'
+}
+
+function handleDragLeave(e) {
+  e.preventDefault()
+  dragCounter--
+  if (dragCounter <= 0) {
+    dragCounter = 0
+    isDragging.value = false
+  }
+}
+
+async function handleDrop(e) {
+  e.preventDefault()
+  dragCounter = 0
+  isDragging.value = false
+
+  const files = [...(e.dataTransfer?.files || [])].filter(f => f.type.startsWith('image/'))
+  if (!files.length) return
+
+  const isGallery = activeTab.value === 'gallery'
+  const uploading = isGallery ? viUploading : ddUploading
+  if (uploading.value) return
+
+  uploading.value = true
+  showToast(`正在上传 ${files.length} 张图片...`, 'info')
+  try {
+    const uploadFn = isGallery ? uploadValuationImage : uploadDdImage
+    for (const file of files) {
+      await uploadFn(file)
+    }
+    if (isGallery) {
+      await loadViDates()
+      viSelectedDate.value = ''
+      await loadViImages()
+    } else {
+      await loadDdDates()
+      ddSelectedDate.value = ''
+      await loadDdImages()
+    }
+    showToast(`${files.length} 张图片上传成功`, 'success')
+  } catch (e) {
+    console.error('Drop upload failed:', e)
+    showToast('上传失败: ' + (e.response?.data?.detail || e.message), 'error')
+  } finally {
+    uploading.value = false
+  }
+}
+
+// ── 粘贴上传 ──
+async function handlePaste(e) {
+  const items = e.clipboardData?.items
+  if (!items) return
+  const imageFiles = []
+  for (const item of items) {
+    if (item.type.startsWith('image/')) {
+      const file = item.getAsFile()
+      if (file) {
+        const ext = item.type.split('/')[1]?.replace('jpeg', 'jpg') || 'png'
+        const named = new File([file], `paste-${Date.now()}.${ext}`, { type: item.type })
+        imageFiles.push(named)
+      }
+    }
+  }
+  if (!imageFiles.length) return
+  e.preventDefault()
+
+  const isGallery = activeTab.value === 'gallery'
+  const uploading = isGallery ? viUploading : ddUploading
+  if (uploading.value) return
+
+  uploading.value = true
+  showToast(`正在粘贴上传 ${imageFiles.length} 张图片...`, 'info')
+  try {
+    const uploadFn = isGallery ? uploadValuationImage : uploadDdImage
+    for (const file of imageFiles) {
+      await uploadFn(file)
+    }
+    if (isGallery) {
+      await loadViDates()
+      viSelectedDate.value = ''
+      await loadViImages()
+    } else {
+      await loadDdDates()
+      ddSelectedDate.value = ''
+      await loadDdImages()
+    }
+    showToast(`${imageFiles.length} 张图片粘贴上传成功`, 'success')
+  } catch (e) {
+    console.error('Paste upload failed:', e)
+    showToast('粘贴上传失败: ' + (e.response?.data?.detail || e.message), 'error')
+  } finally {
+    uploading.value = false
+  }
+}
+
+// ── Toast 通知 ──
+const toasts = ref([])
+let toastId = 0
+
+function showToast(message, type = 'info') {
+  const id = ++toastId
+  toasts.value.push({ id, message, type })
+  setTimeout(() => {
+    toasts.value = toasts.value.filter(t => t.id !== id)
+  }, 3000)
+}
+
 // ── 生命周期 ──
 onMounted(() => {
   loadRecords()
@@ -298,10 +519,11 @@ onMounted(() => {
   loadViImages()
   loadDdDates()
   loadDdImages()
+  document.addEventListener('paste', handlePaste)
 })
 
 onUnmounted(() => {
-  // 重置所有加载状态
+  document.removeEventListener('paste', handlePaste)
   loading.value = false
   viLoading.value = false
   viUploading.value = false
@@ -323,7 +545,28 @@ watch(activeTab, (tab) => {
 </script>
 
 <template>
-  <div class="gallery-page">
+  <div
+    class="gallery-page"
+    @dragenter="handleDragEnter"
+    @dragover="handleDragOver"
+    @dragleave="handleDragLeave"
+    @drop="handleDrop"
+  >
+    <!-- 拖拽覆盖层 -->
+    <Transition name="dropzone">
+      <div v-if="isDragging" class="drop-overlay">
+        <div class="drop-content">
+          <div class="drop-icon-ring">
+            <svg class="drop-icon" width="48" height="48" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"/>
+            </svg>
+          </div>
+          <p class="drop-text">释放鼠标上传图片</p>
+          <p class="drop-sub">支持 JPG、PNG、GIF 格式</p>
+        </div>
+      </div>
+    </Transition>
+
     <!-- Tab 切换 -->
     <div class="tab-bar">
       <button :class="['tab-btn', { active: activeTab === 'gallery' }]" @click="activeTab = 'gallery'">
@@ -338,7 +581,6 @@ watch(activeTab, (tab) => {
 
     <!-- ═══ 估值图片 Tab ═══ -->
     <template v-if="activeTab === 'gallery'">
-      <!-- 上传的估值图片 -->
       <div class="section-header">
         <span class="section-title">待解析图片</span>
         <span class="toolbar-count">共 {{ viImages.length }} 张</span>
@@ -349,6 +591,10 @@ watch(activeTab, (tab) => {
           <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"/></svg>
           {{ viUploading ? '上传中...' : '上传估值图片' }}
         </button>
+        <div class="upload-hint">
+          <svg width="12" height="12" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+          拖拽图片到页面 或 Ctrl+V 粘贴
+        </div>
         <select v-model="viSelectedDate" @change="loadViImages" class="date-select">
           <option value="">全部日期</option>
           <option v-for="d in viDates" :key="d.date" :value="d.date">{{ d.date }} ({{ d.count }})</option>
@@ -361,10 +607,13 @@ watch(activeTab, (tab) => {
       </div>
 
       <div v-else-if="!viImages.length" class="empty-state">
-        <svg width="48" height="48" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"/>
-        </svg>
-        <p>暂无估值图片，点击上方按钮上传</p>
+        <div class="empty-icon-float">
+          <svg width="48" height="48" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"/>
+          </svg>
+        </div>
+        <p>暂无估值图片</p>
+        <p class="empty-sub">点击上方按钮上传，或直接拖拽/粘贴图片</p>
       </div>
 
       <template v-else>
@@ -372,12 +621,22 @@ watch(activeTab, (tab) => {
           <div class="date-header">
             <span class="date-label">{{ date }}</span>
             <span class="date-count">{{ items.length }} 张</span>
+            <button class="btn-batch-parse" @click="confirmViBatchParse(date, items)" :disabled="viBatchParsing" title="批量识别该日期下所有图片">
+              <span v-if="viBatchParsing" class="spinner-sm"></span>
+              <svg v-else width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+              {{ viBatchParsing ? '识别中...' : '批量识别' }}
+            </button>
           </div>
           <div class="gallery-grid">
-            <div v-for="img in items" :key="img.path" class="gallery-card">
+            <div v-for="(img, idx) in items" :key="img.path" class="gallery-card" :style="{ animationDelay: `${idx * 40}ms` }">
               <div class="gallery-thumb" @click="openPreview(img.url)">
                 <img :src="img.url" loading="lazy" />
-                <button class="btn-delete-img" @click.stop="confirmDeleteViImage(img)" title="删除此图片">✕</button>
+                <div class="thumb-overlay">
+                  <svg width="20" height="20" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0zM10 7v3m0 0v3m0-3h3m-3 0H7"/></svg>
+                </div>
+                <button class="btn-delete-img" @click.stop="confirmDeleteViImage(img)" title="删除此图片">
+                  <svg width="12" height="12" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+                </button>
               </div>
               <div class="gallery-info">
                 <div class="gallery-index">{{ img.name }}</div>
@@ -425,9 +684,11 @@ watch(activeTab, (tab) => {
       </div>
 
       <div v-else-if="!records.length" class="empty-state">
-        <svg width="48" height="48" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"/>
-        </svg>
+        <div class="empty-icon-float">
+          <svg width="48" height="48" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"/>
+          </svg>
+        </div>
         <p>{{ searchQuery ? '无匹配结果' : '暂无已解析的图片' }}</p>
       </div>
 
@@ -439,9 +700,12 @@ watch(activeTab, (tab) => {
               <span class="date-count">{{ items.length }} 张</span>
             </div>
             <div class="gallery-grid">
-              <div v-for="r in items" :key="r.id" class="gallery-card" @click="openPreview(imageUrl(r.image_path))">
+              <div v-for="(r, idx) in items" :key="r.id" class="gallery-card" :style="{ animationDelay: `${idx * 40}ms` }" @click="openPreview(imageUrl(r.image_path))">
                 <div class="gallery-thumb">
                   <img :src="imageUrl(r.image_path)" loading="lazy" />
+                  <div class="thumb-overlay">
+                    <svg width="20" height="20" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0zM10 7v3m0 0v3m0-3h3m-3 0H7"/></svg>
+                  </div>
                 </div>
                 <div class="gallery-info">
                   <div class="gallery-index">{{ r.index_name || r.index_code || '未识别' }}</div>
@@ -458,9 +722,12 @@ watch(activeTab, (tab) => {
 
         <template v-else>
           <div class="gallery-grid">
-            <div v-for="r in sortedRecords" :key="r.id" class="gallery-card" @click="openPreview(imageUrl(r.image_path))">
+            <div v-for="(r, idx) in sortedRecords" :key="r.id" class="gallery-card" :style="{ animationDelay: `${idx * 40}ms` }" @click="openPreview(imageUrl(r.image_path))">
               <div class="gallery-thumb">
                 <img :src="imageUrl(r.image_path)" loading="lazy" />
+                <div class="thumb-overlay">
+                  <svg width="20" height="20" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0zM10 7v3m0 0v3m0-3h3m-3 0H7"/></svg>
+                </div>
               </div>
               <div class="gallery-info">
                 <div class="gallery-index">{{ r.index_name || r.index_code || '未识别' }}</div>
@@ -486,6 +753,10 @@ watch(activeTab, (tab) => {
             <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"/></svg>
             {{ ddUploading ? '上传中...' : '上传图片' }}
           </button>
+          <div class="upload-hint">
+            <svg width="12" height="12" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+            拖拽图片到页面 或 Ctrl+V 粘贴
+          </div>
           <select v-model="ddSelectedDate" @change="loadDdImages" class="date-select">
             <option value="">全部日期</option>
             <option v-for="d in ddDates" :key="d.date" :value="d.date">{{ d.date }} ({{ d.count }})</option>
@@ -500,10 +771,13 @@ watch(activeTab, (tab) => {
       </div>
 
       <div v-else-if="!ddImages.length" class="empty-state">
-        <svg width="48" height="48" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"/>
-        </svg>
-        <p>暂无螺丝钉估值图片，点击上方按钮上传</p>
+        <div class="empty-icon-float">
+          <svg width="48" height="48" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"/>
+          </svg>
+        </div>
+        <p>暂无螺丝钉估值图片</p>
+        <p class="empty-sub">点击上方按钮上传，或直接拖拽/粘贴图片</p>
       </div>
 
       <template v-else>
@@ -511,15 +785,36 @@ watch(activeTab, (tab) => {
           <div class="date-header">
             <span class="date-label">{{ date }}</span>
             <span class="date-count">{{ items.length }} 张</span>
+            <button class="btn-batch-parse" @click="confirmDdBatchParse(date, items)" :disabled="ddBatchParsing" title="批量识别该日期下所有图片">
+              <span v-if="ddBatchParsing" class="spinner-sm"></span>
+              <svg v-else width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+              {{ ddBatchParsing ? '识别中...' : '批量识别' }}
+            </button>
           </div>
           <div class="gallery-grid">
-            <div v-for="img in items" :key="img.path" class="gallery-card">
+            <div v-for="(img, idx) in items" :key="img.path" :class="['gallery-card', { parsed: img.parsed }]" :style="{ animationDelay: `${idx * 40}ms` }">
               <div class="gallery-thumb" @click="openPreview(img.url)">
                 <img :src="img.url" loading="lazy" />
-                <button class="btn-delete-img" @click.stop="confirmDeleteDdImage(img)" title="删除此图片">✕</button>
+                <div class="thumb-overlay">
+                  <svg width="20" height="20" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0zM10 7v3m0 0v3m0-3h3m-3 0H7"/></svg>
+                </div>
+                <button class="btn-delete-img" @click.stop="confirmDeleteDdImage(img)" title="删除此图片">
+                  <svg width="12" height="12" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+                </button>
               </div>
               <div class="gallery-info">
                 <div class="gallery-index">{{ img.name }}</div>
+                <span v-if="img.parsed" class="parsed-badge">
+                  <svg width="12" height="12" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 13l4 4L19 7"/></svg>
+                  已识别
+                </span>
+                <button v-else class="btn-parse-img" @click.stop="confirmParseImage(img)" :disabled="parsingPath === img.path" title="AI 识别图片中的估值数据并存入数据库">
+                  <span v-if="parsingPath === img.path" class="spinner-sm"></span>
+                  <svg v-else width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/>
+                  </svg>
+                  {{ parsingPath === img.path ? '识别中...' : '识别估值' }}
+                </button>
               </div>
             </div>
           </div>
@@ -529,7 +824,7 @@ watch(activeTab, (tab) => {
 
     <!-- Lightbox -->
     <Teleport to="body">
-      <Transition name="fade">
+      <Transition name="lightbox">
         <div v-if="previewImage" class="lightbox" @click.self="closePreview">
           <button @click="closePreview" class="lightbox-close">
             <svg width="24" height="24" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
@@ -537,6 +832,20 @@ watch(activeTab, (tab) => {
           <img :src="previewImage" />
         </div>
       </Transition>
+    </Teleport>
+
+    <!-- Toast 通知 -->
+    <Teleport to="body">
+      <div class="toast-container">
+        <TransitionGroup name="toast">
+          <div v-for="t in toasts" :key="t.id" :class="['toast', `toast-${t.type}`]">
+            <svg v-if="t.type === 'success'" width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+            <svg v-else-if="t.type === 'error'" width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+            <svg v-else width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+            <span>{{ t.message }}</span>
+          </div>
+        </TransitionGroup>
+      </div>
     </Teleport>
 
     <!-- Confirm Dialog -->
@@ -553,11 +862,38 @@ watch(activeTab, (tab) => {
     <Teleport to="body">
       <Transition name="fade">
         <div v-if="parseResult" class="modal-overlay" @click.self="parseResult = null">
-          <div class="modal-box" style="max-width:420px">
+          <div class="modal-box" style="max-width:500px">
             <h3 class="modal-title">{{ parseResult.ok ? '解析成功' : '解析失败' }}</h3>
             <div v-if="parseResult.ok" class="parse-result-content">
               <p class="parse-file">{{ parseResult.name }}</p>
-              <div class="parse-data">
+              <!-- 螺丝钉估值表：多指数数据 -->
+              <div v-if="parseResult.data.data && parseResult.data.data.length > 0" class="parse-data">
+                <div v-if="parseResult.data.update_date" class="parse-row">
+                  <span class="parse-label">更新日期</span>
+                  <span>{{ parseResult.data.update_date }}</span>
+                </div>
+                <div v-if="parseResult.data.market_temperature != null" class="parse-row">
+                  <span class="parse-label">市场温度</span>
+                  <span>{{ parseResult.data.market_temperature }}</span>
+                </div>
+                <div class="parse-row">
+                  <span class="parse-label">识别指数</span>
+                  <span>{{ parseResult.data.count }} 个</span>
+                </div>
+                <div class="dd-index-list">
+                  <div v-for="(item, idx) in parseResult.data.data.slice(0, 10)" :key="idx" class="dd-index-item">
+                    <span class="dd-index-name">{{ item.index_name || '未知' }}</span>
+                    <span v-if="item.pe" class="dd-index-val">PE {{ item.pe }}</span>
+                    <span v-if="item.pe_percentile" class="dd-index-val">{{ item.pe_percentile }}%</span>
+                    <span v-if="item.valuation_status" :class="['dd-index-status', item.valuation_status === '低估' ? 'low' : item.valuation_status === '高估' ? 'high' : '']">{{ item.valuation_status }}</span>
+                  </div>
+                  <div v-if="parseResult.data.data.length > 10" class="dd-index-more">
+                    还有 {{ parseResult.data.data.length - 10 }} 个指数...
+                  </div>
+                </div>
+              </div>
+              <!-- 单指数估值图 -->
+              <div v-else class="parse-data">
                 <div v-if="parseResult.data.index_name" class="parse-row">
                   <span class="parse-label">指数</span>
                   <span>{{ parseResult.data.index_name }}</span>
@@ -634,7 +970,73 @@ watch(activeTab, (tab) => {
   display: flex;
   flex-direction: column;
   gap: 1rem;
+  position: relative;
 }
+
+/* ── 拖拽覆盖层 ── */
+.drop-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  background: rgba(99, 102, 241, 0.08);
+  backdrop-filter: blur(4px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+}
+
+.drop-content {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1rem;
+}
+
+.drop-icon-ring {
+  width: 96px;
+  height: 96px;
+  border-radius: 50%;
+  border: 3px dashed var(--color-primary-400);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--color-primary-500);
+  animation: drop-ring-pulse 1.5s ease-in-out infinite;
+}
+
+@keyframes drop-ring-pulse {
+  0%, 100% { transform: scale(1); border-color: var(--color-primary-400); opacity: 0.8; }
+  50% { transform: scale(1.08); border-color: var(--color-primary-500); opacity: 1; }
+}
+
+.drop-icon {
+  animation: drop-icon-bounce 1.5s ease-in-out infinite;
+}
+
+@keyframes drop-icon-bounce {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-6px); }
+}
+
+.drop-text {
+  font-size: 1.1rem;
+  font-weight: 600;
+  color: var(--color-primary-600);
+  margin: 0;
+}
+
+.drop-sub {
+  font-size: 0.8rem;
+  color: var(--color-text-muted);
+  margin: 0;
+}
+
+.dropzone-enter-active { transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1); }
+.dropzone-leave-active { transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1); }
+.dropzone-enter-from { opacity: 0; }
+.dropzone-enter-from .drop-icon-ring { transform: scale(0.7); }
+.dropzone-leave-to { opacity: 0; }
 
 /* ── Tab 栏 ── */
 .tab-bar {
@@ -656,7 +1058,20 @@ watch(activeTab, (tab) => {
   border-bottom: 2px solid transparent;
   margin-bottom: -2px;
   cursor: pointer;
-  transition: all 0.15s;
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  position: relative;
+}
+
+.tab-btn::after {
+  content: '';
+  position: absolute;
+  bottom: -2px;
+  left: 50%;
+  width: 0;
+  height: 2px;
+  background: var(--color-primary-500);
+  transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+  transform: translateX(-50%);
 }
 
 .tab-btn:hover {
@@ -666,7 +1081,11 @@ watch(activeTab, (tab) => {
 
 .tab-btn.active {
   color: var(--color-primary-600);
-  border-bottom-color: var(--color-primary-500);
+  border-bottom-color: transparent;
+}
+
+.tab-btn.active::after {
+  width: 100%;
 }
 
 /* ── 工具栏 ── */
@@ -743,16 +1162,54 @@ watch(activeTab, (tab) => {
   border: none;
   border-radius: var(--radius-md);
   cursor: pointer;
-  transition: all 0.15s;
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  position: relative;
+  overflow: hidden;
+}
+
+.btn-upload::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: -100%;
+  width: 100%;
+  height: 100%;
+  background: linear-gradient(90deg, transparent, rgba(255,255,255,0.15), transparent);
+  transition: left 0.5s ease;
+}
+
+.btn-upload:hover::before {
+  left: 100%;
 }
 
 .btn-upload:hover {
   background: linear-gradient(135deg, var(--color-primary-700), var(--color-primary-600));
+  box-shadow: 0 2px 8px rgba(99, 102, 241, 0.3);
+  transform: translateY(-1px);
+}
+
+.btn-upload:active {
+  transform: translateY(0);
 }
 
 .btn-upload:disabled {
   opacity: 0.5;
   cursor: not-allowed;
+  transform: none;
+}
+
+.btn-upload:disabled::before { display: none; }
+
+.upload-hint {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  font-size: 0.72rem;
+  color: var(--color-text-tertiary);
+  padding: 0.3rem 0.6rem;
+  background: var(--color-bg-input);
+  border-radius: var(--radius-sm);
+  border: 1px dashed var(--color-border);
 }
 
 .date-select {
@@ -764,6 +1221,7 @@ watch(activeTab, (tab) => {
   color: var(--color-text-primary);
   cursor: pointer;
   outline: none;
+  transition: border-color 0.2s;
 }
 
 .date-select:focus {
@@ -811,6 +1269,17 @@ watch(activeTab, (tab) => {
 }
 
 .empty-state p { font-size: 0.875rem; margin: 0; }
+.empty-sub { font-size: 0.75rem !important; color: var(--color-text-tertiary); }
+
+.empty-icon-float {
+  color: var(--color-text-tertiary);
+  animation: empty-float 3s ease-in-out infinite;
+}
+
+@keyframes empty-float {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-8px); }
+}
 
 /* Date Groups */
 .date-group {
@@ -854,13 +1323,25 @@ watch(activeTab, (tab) => {
   border-radius: var(--radius-lg);
   overflow: hidden;
   cursor: pointer;
-  transition: all 0.2s;
+  transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+  animation: card-in 0.4s cubic-bezier(0.4, 0, 0.2, 1) both;
+}
+
+@keyframes card-in {
+  from {
+    opacity: 0;
+    transform: translateY(12px) scale(0.97);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
 }
 
 .gallery-card:hover {
   border-color: var(--color-primary-300);
-  box-shadow: var(--shadow-md);
-  transform: translateY(-2px);
+  box-shadow: 0 8px 24px -4px rgba(99, 102, 241, 0.12), 0 4px 8px -2px rgba(0, 0, 0, 0.06);
+  transform: translateY(-3px);
 }
 
 .gallery-thumb {
@@ -876,34 +1357,57 @@ watch(activeTab, (tab) => {
   width: 100%;
   height: 100%;
   object-fit: cover;
+  transition: transform 0.35s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.gallery-card:hover .gallery-thumb img {
+  transform: scale(1.06);
+}
+
+.thumb-overlay {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.25);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: white;
+  opacity: 0;
+  transition: opacity 0.25s ease;
+}
+
+.gallery-card:hover .thumb-overlay {
+  opacity: 1;
 }
 
 .btn-delete-img {
   position: absolute;
   top: 0.4rem;
   right: 0.4rem;
-  width: 22px;
-  height: 22px;
+  width: 26px;
+  height: 26px;
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 0.65rem;
   color: white;
-  background: rgba(0, 0, 0, 0.45);
+  background: rgba(0, 0, 0, 0.5);
+  backdrop-filter: blur(4px);
   border: none;
   border-radius: var(--radius-sm);
   cursor: pointer;
   opacity: 0;
-  transition: all var(--transition-fast);
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  transform: scale(0.8);
 }
 
 .gallery-card:hover .btn-delete-img {
   opacity: 1;
+  transform: scale(1);
 }
 
 .btn-delete-img:hover {
-  color: white;
   background: var(--color-danger);
+  transform: scale(1.1) !important;
 }
 
 .btn-parse-img {
@@ -918,13 +1422,15 @@ watch(activeTab, (tab) => {
   border: 1px solid var(--color-primary-200);
   border-radius: var(--radius-sm);
   cursor: pointer;
-  transition: all var(--transition-fast);
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
   margin-top: 0.25rem;
   width: fit-content;
 }
 
 .btn-parse-img:hover:not(:disabled) {
   background: var(--color-primary-100);
+  transform: translateY(-1px);
+  box-shadow: 0 2px 6px rgba(99, 102, 241, 0.15);
 }
 
 .btn-parse-img:disabled {
@@ -933,6 +1439,39 @@ watch(activeTab, (tab) => {
 }
 
 .btn-parse-img .spinner-sm {
+  width: 12px;
+  height: 12px;
+  border-width: 1.5px;
+}
+
+.btn-batch-parse {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  margin-left: auto;
+  padding: 0.2rem 0.5rem;
+  font-size: 0.7rem;
+  font-weight: 500;
+  color: var(--color-primary);
+  background: var(--color-primary-bg);
+  border: 1px solid var(--color-primary-200);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.btn-batch-parse:hover:not(:disabled) {
+  background: var(--color-primary-100);
+  transform: translateY(-1px);
+  box-shadow: 0 2px 6px rgba(99, 102, 41, 0.15);
+}
+
+.btn-batch-parse:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.btn-batch-parse .spinner-sm {
   width: 12px;
   height: 12px;
   border-width: 1.5px;
@@ -980,6 +1519,57 @@ watch(activeTab, (tab) => {
   font-size: 0.85rem;
 }
 
+/* 螺丝钉估值表 - 指数列表 */
+.dd-index-list {
+  margin-top: 0.5rem;
+  border-top: 1px solid var(--color-border);
+  padding-top: 0.5rem;
+}
+
+.dd-index-item {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.25rem 0;
+  font-size: 0.8rem;
+  border-bottom: 1px dashed var(--color-border-light);
+}
+
+.dd-index-name {
+  flex: 1;
+  font-weight: 500;
+  color: var(--color-text-primary);
+}
+
+.dd-index-val {
+  color: var(--color-text-secondary);
+  font-size: 0.75rem;
+}
+
+.dd-index-status {
+  font-size: 0.7rem;
+  padding: 0.1rem 0.3rem;
+  border-radius: 4px;
+  font-weight: 500;
+}
+
+.dd-index-status.low {
+  background: rgba(16, 185, 129, 0.1);
+  color: #10b981;
+}
+
+.dd-index-status.high {
+  background: rgba(239, 68, 68, 0.1);
+  color: #ef4444;
+}
+
+.dd-index-more {
+  font-size: 0.75rem;
+  color: var(--color-text-muted);
+  text-align: center;
+  padding: 0.3rem 0;
+}
+
 .gallery-info {
   padding: 0.6rem 0.75rem;
   display: flex;
@@ -1021,12 +1611,31 @@ watch(activeTab, (tab) => {
 .badge-orange { background: rgba(249, 115, 22, 0.1); color: #ea580c; }
 .badge-pink { background: rgba(236, 72, 153, 0.1); color: #db2777; }
 
+/* 已识别徽章 */
+.parsed-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  font-size: 0.7rem;
+  font-weight: 600;
+  color: #16a34a;
+  background: rgba(22, 163, 74, 0.08);
+  padding: 0.15rem 0.5rem;
+  border-radius: 9999px;
+  align-self: flex-start;
+}
+
+.gallery-card.parsed {
+  border-left: 3px solid #22c55e;
+}
+
 /* Lightbox */
 .lightbox {
   position: fixed;
   inset: 0;
   z-index: var(--z-lightbox);
-  background: rgba(0, 0, 0, 0.85);
+  background: rgba(0, 0, 0, 0.88);
+  backdrop-filter: blur(8px);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -1037,12 +1646,19 @@ watch(activeTab, (tab) => {
   position: absolute;
   top: 1rem;
   right: 1.5rem;
-  background: none;
+  background: rgba(255, 255, 255, 0.1);
   border: none;
   color: white;
   cursor: pointer;
   z-index: 10000;
   padding: 0.5rem;
+  border-radius: var(--radius-md);
+  transition: all 0.2s;
+}
+
+.lightbox-close:hover {
+  background: rgba(255, 255, 255, 0.2);
+  transform: rotate(90deg);
 }
 
 .lightbox img {
@@ -1051,6 +1667,58 @@ watch(activeTab, (tab) => {
   object-fit: contain;
   border-radius: var(--radius-md);
 }
+
+.lightbox-enter-active { transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1); }
+.lightbox-leave-active { transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1); }
+.lightbox-enter-from { opacity: 0; }
+.lightbox-enter-from img { transform: scale(0.92); }
+.lightbox-leave-to { opacity: 0; }
+.lightbox-leave-to img { transform: scale(0.95); }
+
+/* Toast 通知 */
+.toast-container {
+  position: fixed;
+  top: 1rem;
+  right: 1rem;
+  z-index: 10001;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  pointer-events: none;
+}
+
+.toast {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.6rem 1rem;
+  border-radius: var(--radius-md);
+  font-size: 0.8rem;
+  font-weight: 500;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.12), 0 1px 3px rgba(0, 0, 0, 0.08);
+  pointer-events: auto;
+  backdrop-filter: blur(8px);
+}
+
+.toast-success {
+  background: rgba(22, 163, 74, 0.9);
+  color: white;
+}
+
+.toast-error {
+  background: rgba(220, 38, 38, 0.9);
+  color: white;
+}
+
+.toast-info {
+  background: rgba(99, 102, 241, 0.9);
+  color: white;
+}
+
+.toast-enter-active { transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1); }
+.toast-leave-active { transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1); }
+.toast-enter-from { opacity: 0; transform: translateX(40px) scale(0.95); }
+.toast-leave-to { opacity: 0; transform: translateX(20px) scale(0.95); }
 
 /* Transitions */
 .fade-enter-active, .fade-leave-active { transition: opacity 0.2s; }

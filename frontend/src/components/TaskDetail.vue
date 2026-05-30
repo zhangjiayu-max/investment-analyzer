@@ -644,7 +644,7 @@ watch(() => props.taskId, () => {
 
 .dark .chat-bubble.ai {
   background: var(--color-primary-bg);
-  border-color: rgba(99, 102, 241, 0.2);
+  border-color: rgba(201, 168, 76, 0.2);
 }
 
 .text-danger {

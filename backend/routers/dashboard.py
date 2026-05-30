@@ -18,6 +18,7 @@ from db import (
     save_recommendation_feedback, list_recommendation_feedback,
     get_recommendation_feedback_stats,
     save_llm_feedback, list_llm_feedback,
+    get_config_int, get_config_float,
 )
 from db._conn import _get_conn
 from llm_service import _call_llm, MODEL
@@ -31,18 +32,27 @@ router = APIRouter(tags=["dashboard"])
 
 
 def _assess_valuation(percentile: float) -> dict:
-    """根据百分位给出估值评估。"""
-    if percentile <= 10:
+    """根据百分位给出估值评估（阈值从 system_config 读取）。"""
+    extreme_low = get_config_int('valuation.extreme_undervalued', 10)
+    undervalued = get_config_int('valuation.undervalued_percentile', 30)
+    overvalued = get_config_int('valuation.overvalued_percentile', 70)
+    extreme_high = get_config_int('valuation.extreme_overvalued', 90)
+    # 中等阈值为可配置高低阈值的中间值
+    low_mid = (extreme_low + undervalued) // 2
+    fair_range = (undervalued + overvalued) // 2
+    high_mid = (overvalued + extreme_high) // 2
+
+    if percentile <= extreme_low:
         return {"label": "极度低估", "level": "extreme"}
-    elif percentile <= 25:
+    elif percentile <= low_mid:
         return {"label": "低估", "level": "undervalued"}
-    elif percentile <= 40:
+    elif percentile <= undervalued:
         return {"label": "偏低", "level": "slightly_low"}
-    elif percentile <= 60:
+    elif percentile <= fair_range:
         return {"label": "合理", "level": "fair"}
-    elif percentile <= 80:
+    elif percentile <= overvalued:
         return {"label": "偏高", "level": "slightly_high"}
-    elif percentile <= 90:
+    elif percentile <= high_mid:
         return {"label": "高估", "level": "overvalued"}
     else:
         return {"label": "极度高估", "level": "extreme_high"}
@@ -63,12 +73,16 @@ def _get_cash_advice(temperature, balance: float, total_assets: float = 0, under
     alerts = []
     cash_ratio = balance / total_assets if total_assets > 0 else 0
 
+    cash_warning = get_config_float('cash.ratio_warning', 0.20)
+    cash_low = get_config_float('cash.ratio_low', 0.03)
+    cash_info = (cash_warning + cash_low) / 2  # 中间点用于 info 级别提示
+
     # 现金占比预警
-    if cash_ratio > 0.20:
+    if cash_ratio > cash_warning:
         alerts.append({"level": "warning", "message": f"现金占比{cash_ratio:.0%}偏高，资金闲置会拖低整体收益"})
-    elif cash_ratio > 0.15:
+    elif cash_ratio > cash_info:
         alerts.append({"level": "info", "message": f"现金占比{cash_ratio:.0%}，可适当配置"})
-    elif cash_ratio < 0.03 and total_assets > 0:
+    elif cash_ratio < cash_low and total_assets > 0:
         alerts.append({"level": "info", "message": f"现金占比仅{cash_ratio:.0%}，建议保留少量流动性"})
 
     # 低估权益机会
@@ -100,7 +114,11 @@ def _get_cash_advice(temperature, balance: float, total_assets: float = 0, under
 
 
 def _get_bond_allocation(temperature) -> dict:
-    """根据债市温度返回债券配置建议。"""
+    """根据债市温度返回债券配置建议（阈值从 system_config 读取）。"""
+    temp_cold = get_config_int('bond.temp_cold', 30)
+    temp_cool = get_config_int('bond.temp_cool', 50)
+    temp_warm = get_config_int('bond.temp_warm', 70)
+
     if temperature is None:
         return {
             "summary": "债市数据暂缺，建议暂时放在货币基金中",
@@ -108,7 +126,7 @@ def _get_bond_allocation(temperature) -> dict:
                 {"name": "货币基金", "ratio": 100, "desc": "流动性好，风险低"},
             ],
         }
-    elif temperature <= 20:
+    elif temperature <= temp_cold:
         return {
             "summary": f"债市温度 {temperature}°，处于历史低位。债券收益率高，是配置中长期债券基金的好时机",
             "allocation": [
@@ -117,7 +135,7 @@ def _get_bond_allocation(temperature) -> dict:
                 {"name": "货币基金", "ratio": 15, "desc": "日常备用"},
             ],
         }
-    elif temperature <= 35:
+    elif temperature <= (temp_cold + temp_cool) // 2:
         return {
             "summary": f"债市温度 {temperature}°，仍处于偏低区域，适合增加债券配置",
             "allocation": [
@@ -126,7 +144,7 @@ def _get_bond_allocation(temperature) -> dict:
                 {"name": "货币基金", "ratio": 20, "desc": "日常备用"},
             ],
         }
-    elif temperature <= 50:
+    elif temperature <= temp_cool:
         return {
             "summary": f"债市温度 {temperature}°，处于适中区域，建议短债为主均衡配置",
             "allocation": [
@@ -135,7 +153,7 @@ def _get_bond_allocation(temperature) -> dict:
                 {"name": "货币基金", "ratio": 25, "desc": "保留流动性"},
             ],
         }
-    elif temperature <= 70:
+    elif temperature <= temp_warm:
         return {
             "summary": f"债市温度 {temperature}°，偏高区域，债券价格已在高位，注意利率风险",
             "allocation": [
@@ -200,12 +218,14 @@ async def get_dashboard():
                     "assessment": assess["label"],
                     "assessment_level": assess["level"],
                 }
-        # 过滤：百分位 <= 30% 且数据新鲜（30天内）
+        # 过滤：低于系统配置的低估百分位阈值且数据新鲜
+        undervalued_threshold = get_config_int('valuation.undervalued_percentile', 30)
+        freshness_days = get_config_int('valuation.freshness_days', 30)
         from datetime import datetime, timedelta
-        freshness_cutoff = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
+        freshness_cutoff = (datetime.now() - timedelta(days=freshness_days)).strftime("%Y-%m-%d")
         undervalued = [
             v for v in best_per_code.values()
-            if v["percentile"] <= 30 and v.get("latest_date", "") >= freshness_cutoff
+            if v["percentile"] <= undervalued_threshold and v.get("latest_date", "") >= freshness_cutoff
         ]
         undervalued.sort(key=lambda x: x["percentile"])
         # 记录数据最新日期
@@ -232,10 +252,12 @@ async def get_dashboard():
                 sum(h.get("current_value", 0) or 0 for h in sorted_h[:3]) / total_val * 100, 1
             ) if total_val > 0 else 0
 
-            # 集中度评估
-            if top3_pct > 60:
+            # 集中度评估（从 system_config 读取阈值）
+            conc_high = get_config_int('concentration.top3_high', 60)
+            conc_moderate = get_config_int('concentration.top3_moderate', 40)
+            if top3_pct > conc_high:
                 conc_level, conc_assess = "high", "前3持仓占比 %.1f%%，集中度很高，建议分散" % top3_pct
-            elif top3_pct > 40:
+            elif top3_pct > conc_moderate:
                 conc_level, conc_assess = "moderate", "前3持仓占比 %.1f%%，集中度偏高，可适当调整" % top3_pct
             else:
                 conc_level, conc_assess = "low", "前3持仓占比 %.1f%%，分散度良好" % top3_pct
@@ -401,7 +423,7 @@ async def regenerate_daily_report():
     news_context = ""
     try:
         news_data = await get_hot_topics()
-        news_list = news_data.get("news", [])[:6]
+        news_list = news_data.get("news", [])[:8]
         news_context = "\n".join(
             f"- {n.get('title','')}（{n.get('source','')}）"
             for n in news_list if n.get('title')
@@ -409,6 +431,43 @@ async def regenerate_daily_report():
     except Exception as e:
         logging.warning(f"简报重新生成新闻检索失败: {e}")
         news_context = "暂无新闻"
+
+    # 盈米 MCP 数据（市场温度 + 行情解读）
+    yingmi_context = ""
+    try:
+        from mcp.yingmi_client import get_yingmi_client
+        ym = get_yingmi_client()
+        quotations = ym.call_tool_text("GetLatestQuotations")
+        if quotations:
+            yingmi_context = f"【盈米市场温度计及行情解读】\n{quotations[:2000]}"
+    except Exception as e:
+        logging.warning(f"盈米 MCP 数据获取失败: {e}")
+
+    # 市场全景（指数行情 + 板块涨跌 + 涨跌家数）
+    market_context = "暂无行情数据"
+    try:
+        from market_data import get_market_overview
+        overview = get_market_overview()
+        market_lines = []
+        if overview.get("indices"):
+            market_lines.append("【主要指数】")
+            for idx in overview["indices"]:
+                sign = "+" if idx["change_pct"] >= 0 else ""
+                market_lines.append(f"- {idx['name']}: {idx['price']}（{sign}{idx['change_pct']}%）成交{idx.get('volume_yi',0):.0f}亿")
+        b = overview.get("breadth", {})
+        if b.get("up"):
+            market_lines.append(f"\n【涨跌统计】上涨{b['up']} / 下跌{b['down']} / 涨停{b.get('limit_up',0)} / 跌停{b.get('limit_down',0)} / 成交{b.get('total_volume_yi',0):.0f}亿")
+        if overview.get("sectors_top"):
+            market_lines.append("\n【领涨板块】")
+            for s in overview["sectors_top"]:
+                market_lines.append(f"- {s['name']}: +{s['change_pct']}%  领涨:{s['lead_stock']}{s['lead_change']}%")
+        if overview.get("sectors_bottom"):
+            market_lines.append("\n【领跌板块】")
+            for s in overview["sectors_bottom"]:
+                market_lines.append(f"- {s['name']}: {s['change_pct']}%  领涨:{s['lead_stock']}{s['lead_change']}%")
+        market_context = "\n".join(market_lines) if market_lines else "暂无行情数据"
+    except Exception as e:
+        logging.warning(f"行情数据获取失败: {e}")
 
     val_context = "暂无估值数据"
     try:
@@ -439,20 +498,22 @@ async def regenerate_daily_report():
         div = get_portfolio_diversification()
         cash = get_cash_balance()
         if holdings:
+            sorted_holdings = sorted(holdings, key=lambda x: x.get("profit_rate") or 0, reverse=True)
             holding_lines = []
-            for h in holdings[:15]:
+            for h in sorted_holdings[:15]:
                 pct = h.get("profit_rate")
                 pct_str = f"{pct:+.1f}%" if pct is not None else "N/A"
                 val = h.get("current_value", 0) or 0
+                profit = h.get("profit", 0) or 0
                 holding_lines.append(
                     f"- {h['fund_name']}（{h.get('fund_code','')}）: "
-                    f"市值{val:.0f}元, 收益率{pct_str}"
+                    f"市值{val:.0f}元, 收益率{pct_str}, 盈亏{profit:+.0f}元"
                 )
             holding_text = "\n".join(holding_lines)
         portfolio_text = (
             f"持仓{div.get('holding_count',0)}只基金，"
             f"总市值{div.get('total_value',0):.0f}元，"
-            f"盈亏{div.get('total_profit',0):.0f}元，"
+            f"累计盈亏{div.get('total_profit',0):+.0f}元，"
             f"可用零钱{cash:.0f}元"
         )
     except Exception:
@@ -468,13 +529,21 @@ async def regenerate_daily_report():
 
     full_prompt = agent["system_prompt"] + f"""
 
+【今日日期】
+{time.strftime("%Y-%m-%d")}（{["周一","周二","周三","周四","周五","周六","周日"][time.localtime().tm_wday]}）
+
 【今日新闻】
 {news_context}
+
+{yingmi_context}
+
+【市场行情】
+{market_context}
 
 【指数估值】
 {val_context}
 
-【持仓明细】
+【持仓明细】（已按收益率从高到低排序）
 {holding_text}
 
 【持仓概况】
@@ -492,8 +561,8 @@ async def regenerate_daily_report():
             {"role": "system", "content": full_prompt},
             {"role": "user", "content": "请生成今日市场分析报告。"},
         ],
-        temperature=0.3,
-        max_tokens=8192,
+        temperature=get_config_float('llm.temperature_default', 0.3),
+        max_tokens=get_config_int('llm.max_tokens_report', 8192),
     ))
     result_text = response.choices[0].message.content or ""
     token_usage = response.usage.total_tokens if response.usage else 0
@@ -510,10 +579,11 @@ async def regenerate_daily_report():
 
 @router.get("/api/dashboard/hot-topics")
 async def get_hot_topics():
-    """获取今日市场热点（YingMi MCP SearchFinancialNews，120秒缓存）。"""
+    """获取今日市场热点（YingMi MCP SearchFinancialNews，300秒缓存）。"""
     import time
+    from pathlib import Path
     now = time.time()
-    if _hot_topics_cache["data"] and now - _hot_topics_cache["ts"] < 120:
+    if _hot_topics_cache["data"] and now - _hot_topics_cache["ts"] < 300:
         return _hot_topics_cache["data"]
 
     news_items = []
@@ -548,10 +618,16 @@ async def get_hot_topics():
             logging.warning(f"热点 web_search 失败: {e}")
 
     from datetime import datetime
+    from config import ROOT
     fetched_at = datetime.now().strftime("%Y-%m-%d %H:%M")
     result = {"news": news_items, "source": "yingmi" if news_items else "none", "fetched_at": fetched_at}
     _hot_topics_cache["data"] = result
     _hot_topics_cache["ts"] = now
+    # 持久化 fetched_at，进程重启后仍可读取
+    try:
+        (ROOT / "data" / "hot_topics_fetched_at.txt").write_text(fetched_at)
+    except Exception:
+        pass
     return result
 
 
@@ -675,8 +751,8 @@ async def get_hotspots_analysis():
             caller="hotspots_analysis",
             model=MODEL,
             messages=[{"role": "user", "content": prompt}],
-            temperature=0.3,
-            max_tokens=8192,
+            temperature=get_config_float('llm.temperature_default', 0.3),
+            max_tokens=get_config_int('llm.max_tokens_report', 8192),
         )), timeout=120)
         content = response.choices[0].message.content or "{}"
         # 尝试提取 JSON
@@ -906,6 +982,7 @@ async def create_llm_feedback(body: dict):
         rating=body.get("rating", "neutral"),
         tags=body.get("tags", ""),
         comment=body.get("comment", ""),
+        reason_tag=body.get("reason_tag", ""),
     )
     # 触发反馈学习
     try:

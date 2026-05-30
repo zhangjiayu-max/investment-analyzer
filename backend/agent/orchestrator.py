@@ -8,7 +8,9 @@ import threading
 import concurrent.futures
 
 from llm_service import client, MODEL, _call_llm, _parse_tool_args
-from agent.multi_agent import SPECIALIST_AGENTS, run_specialist, run_specialist_with_context
+from agent.multi_agent import run_specialist, run_specialist_with_context, run_arbitration
+from db.agents import load_specialist_agents
+from config import ARBITRATION_API_KEY
 
 # 全局超时限制（秒）
 MAX_ORCHESTRATION_SECONDS = 600  # 10 分钟
@@ -78,6 +80,23 @@ def _detect_specialist_disagreement(specialist_results: list) -> bool:
     return len(directions) > 1
 
 
+def should_arbitrate(complexity: str, specialist_results: list) -> bool:
+    """判断是否需要仲裁 Agent 介入。
+
+    条件：
+    - ARBITRATION_API_KEY 已配置
+    - complexity == "complex"
+    - ≥2 个专家参与分析
+    """
+    if not ARBITRATION_API_KEY:
+        return False
+    if complexity != "complex":
+        return False
+    if len([sr for sr in specialist_results if not sr.get("is_cross_review")]) < 2:
+        return False
+    return True
+
+
 # ── Token 预算检查 ──────────────────────────────────────────
 
 def check_token_budget() -> dict:
@@ -106,14 +125,19 @@ def check_token_budget() -> dict:
 
 # ── 需求澄清 Agent（LLM 版）──────────────────────────────────
 
-CLARIFICATION_PROMPT = """你是需求路由专家。分析用户投资问题，返回 JSON。
+def build_clarification_prompt() -> str:
+    """从数据库动态生成需求路由提示词。"""
+    specialists = load_specialist_agents()
+    expert_lines = []
+    for key, info in specialists.items():
+        expert_lines.append(f"- {key}: {info['description']}")
+    expert_list = "\n".join(expert_lines)
+    keys_json = json.dumps(list(specialists.keys()), ensure_ascii=False)
+
+    return f"""你是需求路由专家。分析用户投资问题，返回 JSON。
 
 ## 可用专家
-- valuation_expert: 估值查询(PE/PB/百分位/高估低估/指数估值)
-- market_analyst: 市场动态(新闻/政策/债券/收益率/债市温度)
-- risk_assessor: 风险分析(回撤/波动率/持仓风险/止损)
-- allocation_advisor: 资产配置(定投/股债配比/加仓减仓/仓位管理)
-- fund_analyst: 基金分析(基金表现/交易复盘/持仓基金)
+{expert_list}
 
 ## 复杂度
 - simple: 单一数据查询，1个专家
@@ -121,26 +145,28 @@ CLARIFICATION_PROMPT = """你是需求路由专家。分析用户投资问题，
 - complex: 投资决策/多维分析，2+个专家
 
 ## 输出格式（只输出JSON，无其他文字）
-{"complexity":"simple","specialists":["valuation_expert"],"reason":"原因","refined_query":"优化后的查询"}
+{{"complexity":"simple","specialists":["专家key"],"reason":"原因","refined_query":"优化后的查询"}}
+
+注意：specialists 数组中的值必须是以下之一：{keys_json}
 
 ## 示例
 Q: 沪深300估值多少
-A: {"complexity":"simple","specialists":["valuation_expert"],"reason":"单一估值查询","refined_query":"沪深300当前PE/PB估值和百分位"}
+A: {{"complexity":"simple","specialists":["valuation_expert"],"reason":"单一估值查询","refined_query":"沪深300当前PE/PB估值和百分位"}}
 
 Q: 我想买点债券现在可以入手吗
-A: {"complexity":"complex","specialists":["market_analyst","allocation_advisor","risk_assessor"],"reason":"债券买入决策需要债市温度+配置建议+风险评估","refined_query":"当前债市估值温度、债券基金配置建议和风险提示"}
+A: {{"complexity":"complex","specialists":["market_analyst","allocation_advisor","risk_assessor"],"reason":"债券买入决策需要债市温度+配置建议+风险评估","refined_query":"当前债市估值温度、债券基金配置建议和风险提示"}}
 
 Q: 白酒能买吗
-A: {"complexity":"complex","specialists":["valuation_expert","risk_assessor","allocation_advisor"],"reason":"投资决策需要估值+风险+配置","refined_query":"白酒当前估值水平、风险评估与配置建议"}
+A: {{"complexity":"complex","specialists":["valuation_expert","risk_assessor","allocation_advisor"],"reason":"投资决策需要估值+风险+配置","refined_query":"白酒当前估值水平、风险评估与配置建议"}}
 
 Q: 帮我做个定投方案
-A: {"complexity":"complex","specialists":["valuation_expert","allocation_advisor"],"reason":"定投需要估值+配置策略","refined_query":"基于当前估值的定投方案"}
+A: {{"complexity":"complex","specialists":["valuation_expert","allocation_advisor"],"reason":"定投需要估值+配置策略","refined_query":"基于当前估值的定投方案"}}
 
 Q: 最近有什么新闻
-A: {"complexity":"medium","specialists":["market_analyst"],"reason":"市场动态查询","refined_query":"近期市场重要新闻和政策变化"}
+A: {{"complexity":"medium","specialists":["market_analyst"],"reason":"市场动态查询","refined_query":"近期市场重要新闻和政策变化"}}
 
 Q: 债市温度多少
-A: {"complexity":"simple","specialists":["market_analyst"],"reason":"单一数据查询","refined_query":"当前债市温度指标"}"""
+A: {{"complexity":"simple","specialists":["market_analyst"],"reason":"单一数据查询","refined_query":"当前债市温度指标"}}"""
 
 
 def clarify_requirement(query: str) -> dict:
@@ -171,7 +197,7 @@ def clarify_requirement(query: str) -> dict:
             caller="clarify",
             model=MODEL,
             messages=[
-                {"role": "system", "content": CLARIFICATION_PROMPT},
+                {"role": "system", "content": build_clarification_prompt()},
                 {"role": "user", "content": user_content},
             ],
             temperature=0.1,
@@ -225,7 +251,7 @@ def clarify_requirement(query: str) -> dict:
             complexity = "medium"
 
         specialists = result.get("specialists", [])
-        valid_specialists = ["valuation_expert", "market_analyst", "risk_assessor", "allocation_advisor", "fund_analyst"]
+        valid_specialists = list(load_specialist_agents().keys())
         specialists = [s for s in specialists if s in valid_specialists]
 
         # 如果没有选择专家，默认选估值专家
@@ -454,104 +480,45 @@ def compress_rag_context(rag_context: str, max_chars: int = 2000) -> str:
 
 # ── Orchestrator 的工具 = 调用各个专家 Agent ──────────────
 
-ORCHESTRATOR_TOOLS = [
-    {
-        "type": "function",
-        "function": {
-            "name": "consult_valuation_expert",
-            "description": "咨询估值专家，获取指数/基金的估值分析（PE/PB/百分位/z-score/估值趋势）。适用于：估值高低判断、是否值得投资、估值对比等。",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "具体问题，如'白酒指数当前估值如何'、'沪深300和中证500哪个估值更低'",
+def build_orchestrator_tools() -> list:
+    """从数据库动态生成 Orchestrator 可调用的 consult_* 工具定义。"""
+    specialists = load_specialist_agents()
+    tools = []
+    for key, info in specialists.items():
+        tools.append({
+            "type": "function",
+            "function": {
+                "name": f"consult_{key}",
+                "description": f"咨询{info['name']}，{info['description']}",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": f"向{info['name']}提出的具体问题",
+                        },
                     },
+                    "required": ["query"],
                 },
-                "required": ["query"],
             },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "consult_market_analyst",
-            "description": "咨询择时分析师，获取市场新闻、政策解读、入场/出场信号。适用于：最新市场动态、政策影响、市场情绪判断等。",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "具体问题，如'最近有什么利好政策'、'白酒板块最近有什么新闻'",
-                    },
-                },
-                "required": ["query"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "consult_risk_assessor",
-            "description": "咨询风险评估师，获取风险等级、最大回撤、仓位建议。适用于：风险评估、回撤计算、仓位控制等。",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "具体问题，如'白酒指数风险大吗'、'沪深300最大回撤多少'",
-                    },
-                },
-                "required": ["query"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "consult_allocation_advisor",
-            "description": "咨询资产配置师，获取股债配比、定投策略、行业配置建议。适用于：资产配置方案、定投计划、再平衡建议等。",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "具体问题，如'现在股债怎么配'、'帮我做个定投方案'",
-                    },
-                },
-                "required": ["query"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "consult_fund_analyst",
-            "description": "咨询基金分析师，获取单只基金的收益表现、操作复盘、持仓结构分析。适用于：查某只基金赚了还是亏了、操作记录分析、基金持仓分析等。",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "具体问题，如'基金161725收益怎么样'、'帮我复盘白酒基金的操作记录'、'分析我的中证500持仓'",
-                    },
-                },
-                "required": ["query"],
-            },
-        },
-    },
-]
+        })
+    return tools
 
-# 专家名称到 agent_key 的映射
-_EXPERT_MAP = {
-    "consult_valuation_expert": "valuation_expert",
-    "consult_market_analyst": "market_analyst",
-    "consult_risk_assessor": "risk_assessor",
-    "consult_allocation_advisor": "allocation_advisor",
-    "consult_fund_analyst": "fund_analyst",
-}
 
-ORCHESTRATOR_SYSTEM_PROMPT = """你是投资分析助手的主控（Orchestrator），负责协调各领域专家 Agent 完成投资分析。
+def build_expert_map() -> dict:
+    """从数据库动态生成 consult_* 工具名到 agent_key 的映射。"""
+    specialists = load_specialist_agents()
+    return {f"consult_{key}": key for key in specialists}
+
+def build_orchestrator_system_prompt() -> str:
+    """从数据库动态生成 Orchestrator 的 system prompt。"""
+    specialists = load_specialist_agents()
+    team_lines = []
+    for key, info in specialists.items():
+        team_lines.append(f"- {info['icon']} **{info['name']}**：{info['description']}")
+    team_list = "\n".join(team_lines)
+
+    return f"""你是投资分析助手的主控（Orchestrator），负责协调各领域专家 Agent 完成投资分析。
 
 ## 工作方式
 1. 理解用户问题的核心意图
@@ -560,21 +527,7 @@ ORCHESTRATOR_SYSTEM_PROMPT = """你是投资分析助手的主控（Orchestrator
 4. 综合各专家意见，给出最终的投资建议
 
 ## 专家团队
-- 📊 **估值专家**：分析指数估值水平（PE/PB/百分位），判断高估/低估
-- 📰 **择时分析师**：分析市场新闻、政策变化，判断市场时机
-- 🛡️ **风险评估师**：评估投资风险，计算回撤/波动率，给出风控建议
-- 🥧 **资产配置师**：给出股债配比、定投策略、行业配置建议
-- 🔍 **基金分析师**：分析具体基金的投资表现、操作复盘、持仓结构
-
-## 调用策略
-- **简单估值问题**（如"沪深300估值多少"）→ 只调估值专家
-- **市场动态问题**（如"最近有什么新闻"）→ 只调择时分析师
-- **投资决策问题**（如"白酒能买吗"）→ 调估值专家 + 风险评估师
-- **买卖建议问题**（如"该加仓还是减仓"）→ 调估值专家 + 风险评估师 + 择时分析师
-- **配置方案问题**（如"帮我做个定投方案"）→ 调资产配置师 + 估值专家
-- **基金分析问题**（如"我的白酒基金收益怎么样"）→ 调基金分析师 + 估值专家
-- **操作复盘问题**（如"帮我复盘基金操作"）→ 调基金分析师 + 风险评估师
-- **综合性问题**（如"白酒现在怎么操作"）→ 全部 5 个专家
+{team_list}
 
 ## 回答原则
 - 综合各专家意见，给出明确的判断和建议
@@ -595,7 +548,7 @@ ORCHESTRATOR_SYSTEM_PROMPT = """你是投资分析助手的主控（Orchestrator
 def _execute_specialist(tool_name: str, query: str, cancel_event: threading.Event | None = None,
                         prebuilt_context: str = "") -> str:
     """执行专家 Agent 调用，返回 JSON 字符串结果。"""
-    agent_key = _EXPERT_MAP.get(tool_name)
+    agent_key = build_expert_map().get(tool_name)
     if not agent_key:
         return json.dumps({"error": f"未知专家: {tool_name}"}, ensure_ascii=False)
 
@@ -661,7 +614,7 @@ def orchestrate(query: str, history: list, rag_context: str = "") -> dict:
     refined_query = clarification.get("refined_query", query)
 
     # 2. 根据复杂度优化上下文（Token 预算管理）
-    system_content = ORCHESTRATOR_SYSTEM_PROMPT
+    system_content = build_orchestrator_system_prompt()
 
     # RAG 上下文（token 感知截断）
     rag_budget = int(token_budget["total_context"] * token_budget["rag_pct"])
@@ -716,7 +669,7 @@ def orchestrate(query: str, history: list, rag_context: str = "") -> dict:
                 caller="orchestrator",
                 model=MODEL,
                 messages=llm_messages,
-                tools=ORCHESTRATOR_TOOLS,
+                tools=build_orchestrator_tools(),
                 tool_choice="auto",
                 temperature=0.3,
                 max_tokens=2000,
@@ -775,6 +728,16 @@ def orchestrate(query: str, history: list, rag_context: str = "") -> dict:
                         answer = response.choices[0].message.content or ""
                     except Exception:
                         answer = msg.content or ""
+
+                    # Phase C: 仲裁（高级模型最终裁决）
+                    if should_arbitrate(complexity, specialist_results):
+                        logger.info("进入仲裁阶段（Phase C）")
+                        arb_result = run_arbitration(refined_query, specialist_results, rag_context)
+                        specialist_results.append(arb_result)
+                        answer = arb_result["analysis"]
+                        all_tool_calls.append({"name": "arbitration", "arguments": {"query": refined_query},
+                                               "result_preview": arb_result["analysis"][:300]})
+
                     duration_ms = int((time.time() - start_time) * 1000)
                     return {
                         "answer": answer,
@@ -784,9 +747,20 @@ def orchestrate(query: str, history: list, rag_context: str = "") -> dict:
                         "duration_ms": duration_ms,
                         "complexity": complexity,
                         "cross_review": True,
+                        "arbitration": should_arbitrate(complexity, specialist_results),
                     }
 
             answer = msg.content or ""
+
+            # Phase C: 仲裁（高级模型最终裁决，无交叉审阅时也可触发）
+            if should_arbitrate(complexity, specialist_results):
+                logger.info("进入仲裁阶段（Phase C）")
+                arb_result = run_arbitration(refined_query, specialist_results, rag_context)
+                specialist_results.append(arb_result)
+                answer = arb_result["analysis"]
+                all_tool_calls.append({"name": "arbitration", "arguments": {"query": refined_query},
+                                       "result_preview": arb_result["analysis"][:300]})
+
             duration_ms = int((time.time() - start_time) * 1000)
             return {
                 "answer": answer,
@@ -795,6 +769,7 @@ def orchestrate(query: str, history: list, rag_context: str = "") -> dict:
                 "turns": turn + 1,
                 "duration_ms": duration_ms,
                 "complexity": complexity,
+                "arbitration": should_arbitrate(complexity, specialist_results),
             }
 
         # 有工具调用 → 执行专家
@@ -871,7 +846,7 @@ def orchestrate(query: str, history: list, rag_context: str = "") -> dict:
 
             if "error" not in result_data:
                 specialist_results.append({
-                    "agent_key": result_data.get("agent_key", _EXPERT_MAP.get(tc.function.name, "")),
+                    "agent_key": result_data.get("agent_key", build_expert_map().get(tc.function.name, "")),
                     "agent": result_data.get("agent", tc.function.name),
                     "icon": result_data.get("icon", "🤖"),
                     "analysis": result_data.get("analysis", ""),
@@ -962,7 +937,7 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
     refined_query = clarification.get("refined_query", query)
 
     # 2. 根据复杂度优化上下文（Token 预算管理）
-    system_content = ORCHESTRATOR_SYSTEM_PROMPT
+    system_content = build_orchestrator_system_prompt()
 
     # RAG 上下文（token 感知截断）
     rag_budget = int(token_budget["total_context"] * token_budget["rag_pct"])
@@ -1034,7 +1009,7 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
                 caller="orchestrator",
                 model=MODEL,
                 messages=llm_messages,
-                tools=ORCHESTRATOR_TOOLS,
+                tools=build_orchestrator_tools(),
                 tool_choice="auto",
                 temperature=0.3,
                 max_tokens=2000,
@@ -1127,6 +1102,32 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
                         answer = response.choices[0].message.content or ""
                     except Exception:
                         answer = msg.content or ""
+
+                    # Phase C: 仲裁（高级模型最终裁决）
+                    if should_arbitrate(complexity, specialist_results):
+                        _check_cancel(cancel_event)
+                        yield {"type": "status", "message": "正在由仲裁法官做最终裁决..."}
+                        yield {
+                            "type": "specialist_start",
+                            "agent_key": "arbitrator",
+                            "agent": "仲裁法官",
+                            "icon": "⚖️",
+                        }
+                        arb_result = run_arbitration(refined_query, specialist_results, rag_context)
+                        specialist_results.append(arb_result)
+                        all_tool_calls.append({"name": "arbitration", "arguments": {"query": refined_query},
+                                               "result_preview": arb_result["analysis"][:300]})
+                        answer = arb_result["analysis"]
+                        yield {
+                            "type": "specialist_done",
+                            "agent_key": "arbitrator",
+                            "agent": "仲裁法官",
+                            "icon": "⚖️",
+                            "analysis": arb_result["analysis"],
+                            "duration_ms": arb_result["duration_ms"],
+                            "is_arbitration": True,
+                        }
+
                     duration_ms = int((time.time() - start_time) * 1000)
                     yield {
                         "type": "answer",
@@ -1136,10 +1137,37 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
                         "duration_ms": duration_ms,
                         "complexity": complexity,
                         "cross_review": True,
+                        "arbitration": should_arbitrate(complexity, specialist_results),
                     }
                     return
 
             answer = msg.content or ""
+
+            # Phase C: 仲裁（高级模型最终裁决，无交叉审阅时也可触发）
+            if should_arbitrate(complexity, specialist_results):
+                _check_cancel(cancel_event)
+                yield {"type": "status", "message": "正在由仲裁法官做最终裁决..."}
+                yield {
+                    "type": "specialist_start",
+                    "agent_key": "arbitrator",
+                    "agent": "仲裁法官",
+                    "icon": "⚖️",
+                }
+                arb_result = run_arbitration(refined_query, specialist_results, rag_context)
+                specialist_results.append(arb_result)
+                all_tool_calls.append({"name": "arbitration", "arguments": {"query": refined_query},
+                                       "result_preview": arb_result["analysis"][:300]})
+                answer = arb_result["analysis"]
+                yield {
+                    "type": "specialist_done",
+                    "agent_key": "arbitrator",
+                    "agent": "仲裁法官",
+                    "icon": "⚖️",
+                    "analysis": arb_result["analysis"],
+                    "duration_ms": arb_result["duration_ms"],
+                    "is_arbitration": True,
+                }
+
             duration_ms = int((time.time() - start_time) * 1000)
             yield {
                 "type": "answer",
@@ -1147,6 +1175,7 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
                 "specialist_results": specialist_results,
                 "tool_calls": all_tool_calls,
                 "duration_ms": duration_ms,
+                "arbitration": should_arbitrate(complexity, specialist_results),
             }
             return
 
@@ -1183,8 +1212,8 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
         for tc in msg.tool_calls:
             args = _parse_tool_args(tc.function.arguments, tc.function.name)
             expert_query = args.get("query", query)
-            agent_key = _EXPERT_MAP.get(tc.function.name, "")
-            agent_info = SPECIALIST_AGENTS.get(agent_key, {})
+            agent_key = build_expert_map().get(tc.function.name, "")
+            agent_info = load_specialist_agents().get(agent_key, {})
             logger.info(f"Orchestrator → {tc.function.name}: {expert_query[:100]}")
             tool_tasks.append((tc, args, expert_query, agent_key, agent_info))
 
@@ -1324,7 +1353,7 @@ def _fallback_orchestrate(query: str, history: list, rag_context: str = "") -> d
     """当模型不支持 function calling 时，回退到普通对话模式。"""
     from llm_service import chat_with_agent
 
-    answer = chat_with_agent(ORCHESTRATOR_SYSTEM_PROMPT, history + [{"role": "user", "content": query}], rag_context)
+    answer = chat_with_agent(build_orchestrator_system_prompt(), history + [{"role": "user", "content": query}], rag_context)
     return {
         "answer": answer,
         "specialist_results": [],

@@ -2,9 +2,15 @@
 import { ref, watch, onMounted, onUnmounted, computed } from 'vue'
 import * as echarts from 'echarts'
 import { marked } from 'marked'
-import { listValuationIndexes, getValuationHistory, getIndexInfo, runAnalysis, listAnalysisHistory, getAnalysisHistoryDetail, deleteAnalysisHistory, refreshValuationPrices } from '../api'
+import { listValuationIndexes, getValuationHistory, getIndexInfo, runAnalysis, listAnalysisHistory, getAnalysisHistoryDetail, deleteAnalysisHistory, refreshValuationPrices, listDDValuations, getDDValuation, getMarketTemperature } from '../api'
 import { isDark } from '../composables/useTheme'
+import { useToast } from '../composables/useToast'
+import ConfirmDialog from './ConfirmDialog.vue'
+import AppToast from './AppToast.vue'
 
+const { showToast } = useToast()
+
+const confirm = ref({ visible: false, title: '', message: '', danger: false, onConfirm: null })
 const indexes = ref([])
 const selectedCode = ref('')   // 当前选中的 index_code
 const selectedMetric = ref('') // 当前选中的 metric_type
@@ -14,8 +20,21 @@ const loading = ref(false)
 const trendChartRef = ref(null)
 let trendChart = null
 
+// ── 外层 Tab ──────────────────────────────────────
+const outerTab = ref('index') // 'index' | 'dd-image'
+
 // ── AI 分析相关 ──────────────────────────────────────
-const activeTab = ref('valuation') // 'valuation' | 'analysis'
+const activeTab = ref('valuation') // 'valuation' | 'analysis' | 'dd'
+
+// ── 市场温度相关 ──────────────────────────────────────
+const marketTemperature = ref(null)
+
+// ── 螺丝钉估值相关 ──────────────────────────────────────
+const ddRecords = ref([])
+const ddLoading = ref(false)
+const ddExpandedId = ref(null)
+const ddDetail = ref(null)
+const ddDetailLoading = ref(false)
 const analysisLoading = ref(false)
 const analysisResult = ref(null) // 当前分析结果 {id, result, agent_name, token_usage, created_at}
 const analysisHistory = ref([])
@@ -79,6 +98,16 @@ const selectedIndexInfo = computed(() => {
   ) || null
 })
 
+// DD image tab computed
+const ddTotalIndexes = computed(() => {
+  return ddRecords.value.reduce((sum, r) => sum + (r.index_count || 0), 0)
+})
+
+const ddLatestDate = computed(() => {
+  if (!ddRecords.value.length) return null
+  return ddRecords.value[0].update_date || ddRecords.value[0].created_at?.slice(0, 10) || null
+})
+
 async function loadIndexes() {
   try {
     const { data } = await listValuationIndexes()
@@ -95,6 +124,15 @@ async function loadIndexes() {
     }
   } catch (e) {
     console.error('Failed to load indexes:', e)
+  }
+}
+
+async function loadMarketTemperature() {
+  try {
+    const { data } = await getMarketTemperature()
+    marketTemperature.value = data
+  } catch (e) {
+    console.error('Failed to load market temperature:', e)
   }
 }
 
@@ -216,10 +254,10 @@ async function handleRefreshPrices() {
   refreshingPrices.value = true
   try {
     const { data } = await refreshValuationPrices()
-    alert(`行情价格已刷新，更新了 ${data.updated} 只指数`)
+    showToast(`行情价格已刷新，更新了 ${data.updated} 只指数`, 'success')
     if (selectedCode.value) loadHistory()
   } catch (e) {
-    alert('价格刷新失败：' + (e.response?.data?.detail || e.message))
+    showToast('价格刷新失败：' + (e.response?.data?.detail || e.message), 'error')
   } finally {
     refreshingPrices.value = false
   }
@@ -252,13 +290,21 @@ function closeHistoryDetail() {
 }
 
 async function handleDeleteHistory(id) {
-  if (!confirm('确定删除这条分析记录？')) return
-  try {
-    await deleteAnalysisHistory(id)
-    analysisHistory.value = analysisHistory.value.filter(h => h.id !== id)
-    if (viewingHistory.value?.id === id) viewingHistory.value = null
-  } catch (e) {
-    console.error('Failed to delete:', e)
+  confirm.value = {
+    visible: true,
+    title: '删除确认',
+    message: '确定删除这条分析记录？',
+    danger: true,
+    onConfirm: async () => {
+      confirm.value.visible = false
+      try {
+        await deleteAnalysisHistory(id)
+        analysisHistory.value = analysisHistory.value.filter(h => h.id !== id)
+        if (viewingHistory.value?.id === id) viewingHistory.value = null
+      } catch (e) {
+        console.error('Failed to delete:', e)
+      }
+    }
   }
 }
 
@@ -270,6 +316,44 @@ function formatAnalysisTime(ts) {
   const h = String(d.getHours()).padStart(2, '0')
   const m = String(d.getMinutes()).padStart(2, '0')
   return `${M}/${D} ${h}:${m}`
+}
+
+async function loadDDRecords() {
+  ddLoading.value = true
+  try {
+    const { data } = await listDDValuations()
+    ddRecords.value = data.records || []
+  } catch (e) {
+    console.error('Failed to load DD valuations:', e)
+  } finally {
+    ddLoading.value = false
+  }
+}
+
+async function toggleDDDetail(id) {
+  if (ddExpandedId.value === id) {
+    ddExpandedId.value = null
+    ddDetail.value = null
+    return
+  }
+  ddExpandedId.value = id
+  ddDetailLoading.value = true
+  try {
+    const { data } = await getDDValuation(id)
+    ddDetail.value = data
+  } catch (e) {
+    console.error('Failed to load DD detail:', e)
+    ddDetail.value = null
+  } finally {
+    ddDetailLoading.value = false
+  }
+}
+
+function ddStatusClass(status) {
+  if (!status) return ''
+  if (status === '低估') return 'val-low'
+  if (status === '高估') return 'val-high'
+  return ''
 }
 
 async function loadHistory() {
@@ -308,17 +392,17 @@ function renderTrendChart() {
   const valueData = sorted.map(r => r.current_value || null)
   const percentileData = sorted.map(r => r.percentile || null)
 
-  const gridColor = isDark.value ? '#334155' : '#f1f5f9'
-  const textColor = isDark.value ? '#94a3b8' : '#64748b'
+  const gridColor = isDark.value ? 'rgba(255, 255, 255, 0.06)' : '#f1f5f9'
+  const textColor = isDark.value ? '#9aa0a6' : '#64748b'
   const metricName = latest.value?.metric_type || '估值'
 
   trendChart.setOption({
     backgroundColor: 'transparent',
     tooltip: {
       trigger: 'axis',
-      backgroundColor: isDark.value ? '#334155' : '#ffffff',
-      borderColor: isDark.value ? '#475569' : '#e2e8f0',
-      textStyle: { color: isDark.value ? '#f1f5f9' : '#0f172a', fontSize: 12 },
+      backgroundColor: isDark.value ? 'rgba(13, 18, 32, 0.95)' : '#ffffff',
+      borderColor: isDark.value ? 'rgba(255, 255, 255, 0.1)' : '#e2e8f0',
+      textStyle: { color: isDark.value ? '#e8eaed' : '#0f172a', fontSize: 12 },
       formatter: function(params) {
         let html = `<div style="font-weight:600;margin-bottom:4px">${params[0].axisValue}</div>`
         params.forEach(p => {
@@ -365,8 +449,8 @@ function renderTrendChart() {
         type: 'line',
         data: valueData,
         smooth: true,
-        lineStyle: { width: 2, color: '#6366f1' },
-        itemStyle: { color: '#6366f1' },
+        lineStyle: { width: 2, color: '#c9a84c' },
+        itemStyle: { color: '#c9a84c' },
         symbol: 'circle',
         symbolSize: 5,
         areaStyle: {
@@ -400,6 +484,7 @@ function getPercentileLevel(p) {
 
 // 来源图片
 const showLightbox = ref(false)
+const imageLoadError = ref(false)
 
 const sourceImageUrl = computed(() => {
   const src = latest.value?.source_image
@@ -421,6 +506,7 @@ const sourceImageUrl = computed(() => {
 
 onMounted(() => {
   loadIndexes()
+  loadMarketTemperature()
   document.addEventListener('click', handleOutsideClick)
 })
 onUnmounted(() => {
@@ -428,10 +514,14 @@ onUnmounted(() => {
 })
 // 切换指数或指标类型时重新加载数据
 watch([selectedCode, selectedMetric], () => {
+  imageLoadError.value = false
   if (selectedCode.value && selectedMetric.value) loadHistory()
 })
 watch(activeTab, (tab) => {
   if (tab === 'analysis' && selectedCode.value) loadAnalysisHistory()
+})
+watch(outerTab, (tab) => {
+  if (tab === 'dd-image' && ddRecords.value.length === 0) loadDDRecords()
 })
 
 defineExpose({ loadHistory })
@@ -439,6 +529,49 @@ defineExpose({ loadHistory })
 
 <template>
   <div class="valuation-page">
+    <!-- Outer Tab Bar -->
+    <div class="outer-tab-bar">
+      <button :class="['outer-tab-btn', { active: outerTab === 'index' }]" @click="outerTab = 'index'">
+        <svg width="18" height="18" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"/>
+        </svg>
+        指数估值
+      </button>
+      <button :class="['outer-tab-btn', { active: outerTab === 'dd-image' }]" @click="outerTab = 'dd-image'">
+        <svg width="18" height="18" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"/>
+        </svg>
+        螺丝钉图片估值
+      </button>
+    </div>
+
+    <!-- ════════ Index Tab (outerTab === 'index') ════════ -->
+    <template v-if="outerTab === 'index'">
+
+    <!-- Market Temperature Card -->
+    <div v-if="marketTemperature" class="card market-temp-card">
+      <div class="market-temp-header">
+        <div class="market-temp-icon">
+          <svg width="24" height="24" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"/>
+          </svg>
+        </div>
+        <div class="market-temp-info">
+          <div class="market-temp-label">市场温度</div>
+          <div class="market-temp-value">{{ marketTemperature.temperature ?? '-' }}</div>
+        </div>
+        <div :class="['market-temp-badge', 'temp-' + (marketTemperature.status || 'unknown')]">
+          {{ marketTemperature.status || '未知' }}
+        </div>
+      </div>
+      <div v-if="marketTemperature.description" class="market-temp-desc">
+        {{ marketTemperature.description }}
+      </div>
+      <div v-if="marketTemperature.update_date" class="market-temp-date">
+        更新日期: {{ marketTemperature.update_date }}
+      </div>
+    </div>
+
     <!-- Index Selector (searchable) -->
     <div class="card selector-card">
       <label class="selector-label">选择指数</label>
@@ -508,12 +641,13 @@ defineExpose({ loadHistory })
           </span>
         </div>
       </div>
-      <button class="btn btn-primary btn-ai-analysis" @click="showConfirmRun = true" :disabled="analysisLoading" title="使用「市场日报分析师」Agent 生成分析报告">
+      <button class="btn btn-primary btn-ai-analysis" @click="showConfirmRun = true" :disabled="analysisLoading">
         <svg v-if="!analysisLoading" width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z"/>
         </svg>
         <span v-if="analysisLoading" class="spinner-sm"></span>
         {{ analysisLoading ? '分析中...' : 'AI 市场分析' }}
+        <span class="ai-agent-tooltip">指数深度分析师</span>
       </button>
     </div>
 
@@ -533,7 +667,7 @@ defineExpose({ loadHistory })
     </Teleport>
 
     <!-- Main Tab Bar -->
-    <div v-if="selectedCode" class="tab-bar">
+    <div class="tab-bar">
       <button :class="['tab-btn', { active: activeTab === 'valuation' }]" @click="activeTab = 'valuation'">估值历史</button>
       <button :class="['tab-btn', { active: activeTab === 'analysis' }]" @click="activeTab = 'analysis'">AI 分析历史</button>
     </div>
@@ -597,10 +731,10 @@ defineExpose({ loadHistory })
       </div>
 
       <!-- Source Image -->
-      <div v-if="sourceImageUrl" class="card source-image-card">
+      <div v-if="sourceImageUrl && !imageLoadError" class="card source-image-card">
         <h3 class="card-title">来源图片 <span v-if="latest.snapshot_date" class="count-badge">{{ latest.snapshot_date }}</span></h3>
         <div class="source-image-wrap" @click="showLightbox = true">
-          <img :src="sourceImageUrl" alt="估值来源图" class="source-image" loading="lazy" />
+          <img :src="sourceImageUrl" alt="估值来源图" class="source-image" loading="lazy" @error="imageLoadError = true" />
           <div class="image-zoom-hint">
             <svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0zM10 7v3m0 0v3m0-3h3m-3 0H7"/>
@@ -830,7 +964,131 @@ defineExpose({ loadHistory })
         </div>
       </Teleport>
     </template>
+
+    </template><!-- end outerTab === 'index' -->
+
+    <!-- ════════ DD Image Tab (outerTab === 'dd-image') ════════ -->
+    <template v-if="outerTab === 'dd-image'">
+      <div v-if="ddLoading" class="loading-state">
+        <div class="spinner-lg"></div>
+        <span>加载中...</span>
+      </div>
+
+      <div v-else-if="!ddRecords.length" class="empty-state">
+        <svg width="48" height="48" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"/>
+        </svg>
+        <p>暂无螺丝钉图片估值数据</p>
+        <p class="empty-sub">请先在「图片浏览 → 螺丝钉估值」中上传并解析图片</p>
+      </div>
+
+      <template v-else>
+        <!-- Summary -->
+        <div class="dd-image-summary card">
+          <div class="dd-image-summary-left">
+            <div class="dd-image-summary-title">螺丝钉图片估值</div>
+            <div class="dd-image-summary-meta">
+              共 <b>{{ ddRecords.length }}</b> 次解析记录，
+              覆盖 <b>{{ ddTotalIndexes }}</b> 个指数
+            </div>
+          </div>
+          <div v-if="ddLatestDate" class="dd-image-summary-date">
+            最新: {{ ddLatestDate }}
+          </div>
+        </div>
+
+        <!-- Records List -->
+        <div v-for="record in ddRecords" :key="record.id" class="card dd-record-card">
+          <div class="dd-record-header" @click="toggleDDDetail(record.id)">
+            <div class="dd-record-left">
+              <div class="dd-record-date">
+                <svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24" style="flex-shrink:0">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"/>
+                </svg>
+                {{ record.update_date || record.created_at?.slice(0, 10) || '未知日期' }}
+              </div>
+              <div class="dd-record-meta">
+                <span v-if="record.market_temperature != null" class="dd-temp">
+                  市场温度: <b>{{ record.market_temperature }}</b>
+                </span>
+                <span class="dd-count">{{ record.index_count || 0 }} 个指数</span>
+              </div>
+            </div>
+            <div class="dd-record-right">
+              <span class="dd-record-time">{{ record.created_at?.slice(11, 16) || '' }}</span>
+              <svg :class="['dd-expand-icon', { expanded: ddExpandedId === record.id }]" width="20" height="20" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/>
+              </svg>
+            </div>
+          </div>
+
+          <Transition name="expand">
+            <div v-if="ddExpandedId === record.id" class="dd-detail">
+              <div v-if="ddDetailLoading" class="loading-state" style="padding:1rem">
+                <div class="spinner-sm"></div>
+                <span>加载中...</span>
+              </div>
+              <div v-else-if="ddDetail?.parsed_data?.data" class="dd-table-wrap">
+                <table class="data-table dd-table">
+                  <thead>
+                    <tr>
+                      <th>指数名称</th>
+                      <th>代码</th>
+                      <th>PE</th>
+                      <th>PE百分位</th>
+                      <th>PB</th>
+                      <th>PB百分位</th>
+                      <th>股息率</th>
+                      <th>ROE</th>
+                      <th>估值状态</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr v-for="(item, idx) in ddDetail.parsed_data.data" :key="idx">
+                      <td class="td-name">{{ item.index_name || '-' }}</td>
+                      <td class="td-code">{{ item.index_code || '-' }}</td>
+                      <td class="td-val">{{ item.pe ?? '-' }}</td>
+                      <td>
+                        <span v-if="item.pe_percentile != null" :class="['badge', item.pe_percentile < 30 ? 'badge-success' : item.pe_percentile <= 70 ? 'badge-warning' : 'badge-danger']">
+                          {{ item.pe_percentile }}%
+                        </span>
+                        <span v-else>-</span>
+                      </td>
+                      <td class="td-val">{{ item.pb ?? '-' }}</td>
+                      <td>
+                        <span v-if="item.pb_percentile != null" :class="['badge', item.pb_percentile < 30 ? 'badge-success' : item.pb_percentile <= 70 ? 'badge-warning' : 'badge-danger']">
+                          {{ item.pb_percentile }}%
+                        </span>
+                        <span v-else>-</span>
+                      </td>
+                      <td>{{ item.dividend_yield ?? '-' }}</td>
+                      <td>{{ item.roe ?? '-' }}</td>
+                      <td>
+                        <span v-if="item.valuation_status" :class="['dd-status', ddStatusClass(item.valuation_status)]">
+                          {{ item.valuation_status }}
+                        </span>
+                        <span v-else>-</span>
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+              <div v-else class="dd-no-detail">无详细数据</div>
+            </div>
+          </Transition>
+        </div>
+      </template>
+    </template>
   </div>
+  <ConfirmDialog
+    :visible="confirm.visible"
+    :title="confirm.title"
+    :message="confirm.message"
+    :danger="confirm.danger"
+    @confirm="() => confirm.onConfirm?.()"
+    @cancel="confirm.visible = false"
+  />
+  <AppToast />
 </template>
 
 <style scoped>
@@ -839,6 +1097,91 @@ defineExpose({ loadHistory })
   flex-direction: column;
   gap: 1.25rem;
   font-family: 'SF Pro Display', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+}
+
+/* Market Temperature Card */
+.market-temp-card {
+  background: linear-gradient(135deg, var(--color-bg-secondary), var(--color-bg-primary));
+  border: 1px solid var(--color-border);
+  padding: 1rem 1.25rem;
+}
+
+.market-temp-header {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.market-temp-icon {
+  width: 40px;
+  height: 40px;
+  border-radius: 10px;
+  background: linear-gradient(135deg, var(--color-primary-50), var(--color-primary-100));
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--color-primary-600);
+}
+
+.market-temp-info {
+  flex: 1;
+}
+
+.market-temp-label {
+  font-size: 0.75rem;
+  color: var(--color-text-secondary);
+  margin-bottom: 0.25rem;
+}
+
+.market-temp-value {
+  font-size: 1.5rem;
+  font-weight: 700;
+  color: var(--color-text-primary);
+}
+
+.market-temp-badge {
+  font-size: 0.75rem;
+  font-weight: 600;
+  padding: 0.375rem 0.75rem;
+  border-radius: 999px;
+}
+
+.market-temp-badge.temp-低温 {
+  background: linear-gradient(135deg, #dcfce7, #bbf7d0);
+  color: #166534;
+  border: 1px solid #86efac;
+}
+
+.market-temp-badge.temp-适中 {
+  background: linear-gradient(135deg, #fef9c3, #fef08a);
+  color: #854d0e;
+  border: 1px solid #fde047;
+}
+
+.market-temp-badge.temp-高温 {
+  background: linear-gradient(135deg, #fee2e2, #fecaca);
+  color: #991b1b;
+  border: 1px solid #fca5a5;
+}
+
+.market-temp-badge.temp-未知 {
+  background: linear-gradient(135deg, var(--color-bg-secondary), var(--color-bg-primary));
+  color: var(--color-text-secondary);
+  border: 1px solid var(--color-border);
+}
+
+.market-temp-desc {
+  font-size: 0.8125rem;
+  color: var(--color-text-secondary);
+  margin-top: 0.5rem;
+  padding-top: 0.5rem;
+  border-top: 1px solid var(--color-border-light);
+}
+
+.market-temp-date {
+  font-size: 0.75rem;
+  color: var(--color-text-tertiary);
+  margin-top: 0.375rem;
 }
 
 .card-title {
@@ -872,6 +1215,8 @@ defineExpose({ loadHistory })
   border: 1px solid var(--color-border);
   border-radius: var(--radius-lg);
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.04);
+  position: relative;
+  z-index: 1;
 }
 
 .selector-label {
@@ -906,7 +1251,7 @@ defineExpose({ loadHistory })
   top: 100%;
   left: 0;
   right: 0;
-  z-index: 100;
+  z-index: var(--z-modal);
   margin-top: 6px;
   background: var(--color-bg-card);
   border: 1px solid var(--color-border);
@@ -1020,7 +1365,6 @@ defineExpose({ loadHistory })
 }
 
 .metric-card:hover {
-  transform: translateY(-2px);
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.08);
 }
 
@@ -1136,7 +1480,7 @@ defineExpose({ loadHistory })
   padding: 0.35rem 0.75rem;
   border-radius: var(--radius-md);
   white-space: nowrap;
-  box-shadow: 0 4px 12px rgba(79, 70, 229, 0.4);
+  box-shadow: 0 4px 12px rgba(201, 168, 76, 0.4);
 }
 
 .marker-arrow {
@@ -1437,7 +1781,6 @@ defineExpose({ loadHistory })
 }
 
 .btn-ai-analysis:hover {
-  transform: translateY(-2px);
   box-shadow: 0 6px 20px var(--color-primary-300);
 }
 
@@ -1908,4 +2251,271 @@ defineExpose({ loadHistory })
 /* ── Financial Term Tooltips ──────────────────────── */
 /* 表格表头 tooltip 用 JS 定位，不需要 CSS hover */
 .th-tip { cursor: help; border-bottom: 1px dashed var(--color-text-muted); }
+
+/* ── AI Agent Tooltip ── */
+.btn-ai-analysis {
+  position: relative;
+}
+
+.ai-agent-tooltip {
+  position: absolute;
+  top: calc(100% + 8px);
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 0.4rem 0.7rem;
+  font-size: 0.7rem;
+  font-weight: 600;
+  color: white;
+  background: linear-gradient(135deg, #0d1220, #1a1f35);
+  border-radius: var(--radius-md, 8px);
+  white-space: nowrap;
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  z-index: 100;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+}
+
+.ai-agent-tooltip::after {
+  content: '';
+  position: absolute;
+  bottom: 100%;
+  left: 50%;
+  transform: translateX(-50%);
+  border: 5px solid transparent;
+  border-bottom-color: #0d1220;
+}
+
+.btn-ai-analysis:hover .ai-agent-tooltip {
+  opacity: 1;
+  visibility: visible;
+}
+
+/* ── 螺丝钉估值 Tab ── */
+.dd-summary {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.dd-summary-title {
+  font-size: 1rem;
+  font-weight: 600;
+  color: var(--color-text-primary);
+}
+
+.dd-summary-meta {
+  font-size: 0.8rem;
+  color: var(--color-text-muted);
+}
+
+.dd-record-card {
+  padding: 0;
+  overflow: hidden;
+}
+
+.dd-record-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.8rem 1rem;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.dd-record-header:hover {
+  background: var(--color-bg-hover);
+}
+
+.dd-record-left {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+
+.dd-record-date {
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: var(--color-text-primary);
+}
+
+.dd-record-meta {
+  display: flex;
+  gap: 0.75rem;
+  font-size: 0.8rem;
+  color: var(--color-text-secondary);
+}
+
+.dd-temp b {
+  color: var(--color-primary-500);
+}
+
+.dd-count {
+  color: var(--color-text-muted);
+}
+
+.dd-expand-icon {
+  transition: transform 0.25s ease;
+  color: var(--color-text-muted);
+  flex-shrink: 0;
+}
+
+.dd-expand-icon.expanded {
+  transform: rotate(180deg);
+}
+
+.dd-detail {
+  border-top: 1px solid var(--color-border);
+  overflow: hidden;
+}
+
+.dd-table-wrap {
+  overflow-x: auto;
+  padding: 0.5rem;
+}
+
+.dd-table {
+  font-size: 0.8rem;
+}
+
+.dd-table th {
+  font-size: 0.75rem;
+  white-space: nowrap;
+}
+
+.td-name {
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.td-code {
+  font-family: monospace;
+  font-size: 0.75rem;
+  color: var(--color-text-muted);
+}
+
+.dd-status {
+  font-weight: 600;
+  font-size: 0.8rem;
+}
+
+.dd-no-detail {
+  padding: 1rem;
+  text-align: center;
+  color: var(--color-text-muted);
+  font-size: 0.85rem;
+}
+
+/* expand transition */
+.expand-enter-active,
+.expand-leave-active {
+  transition: all 0.25s ease;
+  max-height: 600px;
+}
+
+.expand-enter-from,
+.expand-leave-to {
+  max-height: 0;
+  opacity: 0;
+}
+
+/* ── Outer Tab Bar ── */
+.outer-tab-bar {
+  display: flex;
+  gap: 0.5rem;
+  padding: 0.25rem;
+  background: var(--color-bg-card);
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--color-border);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.04);
+}
+
+.outer-tab-btn {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.6rem;
+  padding: 0.85rem 1.25rem;
+  font-size: 1rem;
+  font-weight: 600;
+  color: var(--color-text-muted);
+  background: transparent;
+  border: 2px solid transparent;
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.outer-tab-btn:hover {
+  color: var(--color-text-secondary);
+  background: var(--color-bg-hover);
+}
+
+.outer-tab-btn.active {
+  color: var(--color-primary-600);
+  background: linear-gradient(135deg, var(--color-primary-50), var(--color-primary-100));
+  border-color: var(--color-primary-300);
+  box-shadow: 0 2px 8px var(--color-primary-100);
+}
+
+.outer-tab-btn.active svg {
+  color: var(--color-primary-500);
+}
+
+/* ── DD Image Summary ── */
+.dd-image-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 1.25rem 1.5rem;
+  background: linear-gradient(135deg, var(--color-bg-card) 0%, var(--color-bg-hover) 100%);
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--color-border);
+}
+
+.dd-image-summary-left {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.dd-image-summary-title {
+  font-size: 1.1rem;
+  font-weight: 700;
+  color: var(--color-text-primary);
+}
+
+.dd-image-summary-meta {
+  font-size: 0.85rem;
+  color: var(--color-text-muted);
+}
+
+.dd-image-summary-meta b {
+  color: var(--color-primary-500);
+  font-weight: 700;
+}
+
+.dd-image-summary-date {
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--color-text-muted);
+  background: var(--color-bg-input);
+  padding: 0.35rem 0.75rem;
+  border-radius: var(--radius-md);
+}
+
+/* DD record right section */
+.dd-record-right {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  flex-shrink: 0;
+}
+
+.dd-record-time {
+  font-size: 0.8rem;
+  color: var(--color-text-muted);
+  font-family: 'SF Mono', 'Fira Code', monospace;
+}
 </style>

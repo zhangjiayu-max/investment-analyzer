@@ -51,6 +51,38 @@ investment-analyzer/
 - 异步任务用 `asyncio.create_task()` 后台执行
 - snake_case 函数/变量，UPPER_SNAKE_CASE 常量，中文模块注释
 
+### API 路径规范（强制）
+
+**路径格式**：`/api/{模块}/{资源}[/{动作}]`
+
+**命名规则**：
+- 统一使用 kebab-case（短横线分隔），如 `/api/valuation/market-temperature`
+- 资源使用名词，动作使用动词，如 `/api/agent/create`、`/api/valuation/parse`
+- 动态参数放在路径末尾，如 `/api/agent/{agent_id}`
+- 静态路由必须在动态路由之前定义，避免路由冲突
+
+**模块划分**：
+
+| 模块 | 路径前缀 | 路由文件 | 说明 |
+|------|----------|----------|------|
+| 估值 | `/api/valuation` | `routers/valuation.py` | 指数估值数据管理 |
+| 持仓 | `/api/portfolio` | `routers/portfolio_new.py` | 投资组合管理 |
+| Agent | `/api/agent` | `routers/agent.py` | Agent 系统管理 |
+| 对话 | `/api/conversation` | `routers/conversation.py` | 对话和聊天 |
+| 任务 | `/api/task` | `routers/task.py` | 任务管理 |
+| 文章 | `/api/article` | `routers/article.py` | 文章管理 |
+| Dashboard | `/api/dashboard` | `routers/dashboard.py` | 仪表盘和报告 |
+| 评测 | `/api/eval` | `routers/eval.py` | 评测系统 |
+| Token | `/api/token` | `routers/token_usage.py` | Token 用量统计 |
+| 配置 | `/api/config` | `routers/config.py` | 系统配置 |
+| 债券 | `/api/bond` | `routers/bond.py` | 债券市场分析 |
+
+**新增 API 必须遵循**：
+1. 在对应的路由文件中定义，不要在 `app.py` 中直接定义
+2. 路径必须以 `/api/{模块}/` 开头
+3. 使用规范的 HTTP 方法（GET 查询、POST 创建/操作、PUT 更新、DELETE 删除）
+4. 返回值统一格式：`{"ok": true, "data": ...}` 或 `{"error": "message"}`
+
 ### Vue 前端
 - `<script setup>` + Composition API，无 Pinia/Vuex
 - 无 vue-router，`activePage` + `v-if` 切换页面
@@ -82,7 +114,7 @@ investment-analyzer/
 | 改动类型 | 重启操作 |
 |---------|---------|
 | 后端 Python 文件 | 后端有 `--reload` 自动重载，无需手动重启；但修改 `config.py` 环境变量需重启进程 |
-| 前端 Vue/JS 文件 | 必须手动构建：`cd frontend && npm run build && cp -r dist/* ../static/` |
+| 前端 Vue/JS 文件 | 必须手动构建：`cd frontend && npm run build:deploy`（会自动清理旧文件再复制） |
 | 前后端都改了 | 先构建前端，后端自动重载 |
 
 **强制重启后端（杀掉重复进程）**：
@@ -93,7 +125,7 @@ pkill -f "uvicorn app:app" 2>/dev/null; sleep 1
 cd /Users/xiaoyuer/projects/investment-analyzer/backend && nohup python3 -m uvicorn app:app --host 0.0.0.0 --port 8000 --reload > /tmp/app.log 2>&1 &
 ```
 
-**注意**：前端是从 `static/` 目录提供的静态文件，不是 Vite dev server。修改前端代码后必须 `npm run build` 并复制到 `static/` 才能生效。
+**注意**：前端是从 `static/` 目录提供的静态文件，不是 Vite dev server。修改前端代码后必须 `npm run build:deploy`（会清理旧打包文件再复制到 `static/`）才能生效。
 
 ## 金融严谨性（最高优先级）
 

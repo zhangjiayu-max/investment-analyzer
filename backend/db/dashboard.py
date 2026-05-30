@@ -231,16 +231,28 @@ def get_recommendation_feedback_stats() -> dict:
 
 
 def save_llm_feedback(caller: str, input_summary: str = "", output_summary: str = "",
-                      rating: str = "neutral", tags: str = "", comment: str = "") -> int:
+                      rating: str = "neutral", tags: str = "", comment: str = "",
+                      reason_tag: str = "") -> int:
     """保存 LLM 输出反馈（进化系统核心）。"""
     conn = _get_conn()
     cur = conn.execute(
-        "INSERT INTO llm_feedback (caller, input_summary, output_summary, rating, tags, comment) VALUES (?, ?, ?, ?, ?, ?)",
-        (caller, input_summary, output_summary, rating, tags, comment)
+        "INSERT INTO llm_feedback (caller, input_summary, output_summary, rating, tags, comment, reason_tag) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (caller, input_summary, output_summary, rating, tags, comment, reason_tag)
     )
     conn.commit()
     conn.close()
     return cur.lastrowid
+
+
+def create_chat_feedback(message_id: int, rating: str = "neutral", comment: str = "") -> int:
+    """保存对话消息反馈（点赞/点踩）。"""
+    return save_llm_feedback(
+        caller="chat",
+        input_summary=f"message_id={message_id}",
+        output_summary="",
+        rating=rating,
+        comment=comment,
+    )
 
 
 def list_llm_feedback(caller: str = None, rating: str = None, limit: int = 50) -> list[dict]:

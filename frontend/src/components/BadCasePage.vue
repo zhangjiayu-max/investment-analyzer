@@ -1,9 +1,16 @@
 <script setup>
 import { ref, onMounted, computed } from 'vue'
-import { listBadCases } from '../api'
+import { listBadCases, createEvalFromBadCase } from '../api'
+import ConfirmDialog from './ConfirmDialog.vue'
+import AppToast from './AppToast.vue'
+import { useToast } from '../composables/useToast'
+
+const { showToast } = useToast()
+const confirm = ref({ visible: false, title: '', message: '', danger: false, onConfirm: null })
 
 const cases = ref([])
 const loading = ref(false)
+const converting = ref(false)
 const filterSource = ref('')
 const filterType = ref('')
 const selectedCase = ref(null)
@@ -72,6 +79,34 @@ async function load() {
 
 function selectCase(c) {
   selectedCase.value = c
+}
+
+function confirmConvertToEval(c) {
+  const typeLabel = analysisTypeLabels[c.type] || callerLabels[c.type] || c.type || '未知'
+  confirm.value = {
+    visible: true,
+    title: '转为 Eval 用例',
+    message: `将这条 Bad Case（${typeLabel}）转化为评测用例？系统会自动分析失败原因并生成质量标准。`,
+    danger: false,
+    onConfirm: () => doConvertToEval(c),
+  }
+}
+
+async function doConvertToEval(c) {
+  confirm.value.visible = false
+  converting.value = true
+  try {
+    const { data } = await createEvalFromBadCase(c.source, c.id)
+    if (data.ok) {
+      showToast(`已创建评测用例「${data.name}」`, 'success')
+    } else {
+      showToast('转化失败', 'error')
+    }
+  } catch (e) {
+    showToast('转化失败: ' + (e.response?.data?.detail || e.message), 'error')
+  } finally {
+    converting.value = false
+  }
 }
 
 onMounted(load)
@@ -187,12 +222,27 @@ onMounted(load)
           <h4>{{ selectedCase.source === 'analysis' ? '分析结果' : '模型输出' }}</h4>
           <div class="result-preview">{{ selectedCase.output?.slice(0, 2000) || '无' }}</div>
         </div>
+
+        <div class="detail-actions">
+          <button class="btn-primary btn-sm" :disabled="converting" @click="confirmConvertToEval(selectedCase)">
+            {{ converting ? '转化中...' : '🔄 转为 Eval 用例' }}
+          </button>
+        </div>
       </div>
       <div v-else class="badcase-detail empty-detail">
         <p class="text-muted">选择一条记录查看详情</p>
       </div>
     </div>
   </div>
+  <ConfirmDialog
+    :visible="confirm.visible"
+    :title="confirm.title"
+    :message="confirm.message"
+    :danger="confirm.danger"
+    @confirm="() => confirm.onConfirm?.()"
+    @cancel="confirm.visible = false"
+  />
+  <AppToast />
 </template>
 
 <style scoped>
@@ -296,7 +346,7 @@ onMounted(load)
   color: #d97706;
   margin-top: 0.3rem;
 }
-.badge-analysis { background: #6366f1; color: white; }
+.badge-analysis { background: #c9a84c; color: white; }
 .badge-chat { background: #06b6d4; color: white; }
 .badge-type { background: var(--color-bg); color: var(--color-text-secondary); border: 1px solid var(--color-border); }
 
@@ -382,5 +432,12 @@ onMounted(load)
   text-align: center;
   padding: 2rem;
   color: var(--color-text-muted);
+}
+.detail-actions {
+  margin-top: 1.25rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--color-border);
+  display: flex;
+  gap: 0.5rem;
 }
 </style>

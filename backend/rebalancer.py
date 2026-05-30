@@ -4,41 +4,22 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-# 资产类型基础配比（默认均衡型）
-DEFAULT_BASE_ALLOCATION = {
-    "equity": 0.40,   # 股票型
-    "bond": 0.30,     # 债券型
-    "money": 0.05,    # 货币型
-    "hybrid": 0.10,   # 混合型
-    "index": 0.10,    # 指数型
-    "qdii": 0.05,     # QDII
-}
 
-# 估值调整系数
-VALUATION_ADJUSTMENT = {
-    "极度低估": 1.4,   # 低估 → 多配
-    "低估": 1.2,
-    "合理": 1.0,
-    "偏高": 0.8,
-    "极度高估": 0.6,   # 高估 → 少配
-}
-
-
-def _get_valuation_level(percentile: float) -> str:
-    """根据百分位返回估值水平标签。"""
-    if percentile <= 20:
+def _get_valuation_level(percentile: float, percentiles_config: dict) -> str:
+    """根据百分位和配置的分界线返回估值水平标签。"""
+    if percentile <= percentiles_config["极度低估"]:
         return "极度低估"
-    elif percentile <= 30:
+    elif percentile <= percentiles_config["低估"]:
         return "低估"
-    elif percentile <= 70:
+    elif percentile <= percentiles_config["合理"]:
         return "合理"
-    elif percentile <= 80:
+    elif percentile <= percentiles_config["偏高"]:
         return "偏高"
     else:
         return "极度高估"
 
 
-def _get_market_overall_level(valuations: list) -> tuple[str, float]:
+def _get_market_overall_level(valuations: list, percentiles_config: dict) -> tuple[str, float]:
     """计算市场整体估值水平和平均百分位。
 
     返回: (水平标签, 平均百分位)
@@ -56,7 +37,7 @@ def _get_market_overall_level(valuations: list) -> tuple[str, float]:
         return "合理", 50.0
 
     avg_pct = sum(percentiles) / len(percentiles)
-    return _get_valuation_level(avg_pct), avg_pct
+    return _get_valuation_level(avg_pct, percentiles_config), avg_pct
 
 
 def analyze_rebalancing_need(user_id: str = "default") -> dict:
@@ -80,7 +61,20 @@ def analyze_rebalancing_need(user_id: str = "default") -> dict:
     }
     """
     try:
+        from config import get_rebalance_config
         from db import list_holdings, get_cash_balance, list_valuation_indexes
+
+        # 加载配置
+        cfg = get_rebalance_config()
+        base_allocation = cfg["base_allocation"]
+        valuation_adjustment = cfg["valuation_adjustment"]
+        percentiles_cfg = cfg["valuation_percentiles"]
+        drift_thresholds = cfg["drift_thresholds"]
+        cash_targets = cfg["cash_targets"]
+        cash_triggers = cfg["cash_triggers"]
+        drift_ignore = cfg["drift_ignore"]
+        undervalue_max = cfg["undervalue_max"]
+        undervalue_amount = cfg["undervalue_amount"]
 
         # 1. 获取持仓数据
         holdings = list_holdings(user_id)
@@ -130,22 +124,22 @@ def analyze_rebalancing_need(user_id: str = "default") -> dict:
 
         # 4. 计算目标配比（根据市场整体估值调整）
         market_level, avg_pct = _get_market_overall_level(
-            [v for v in index_valuation.values()]
+            [v for v in index_valuation.values()], percentiles_cfg
         )
-        adjustment = VALUATION_ADJUSTMENT.get(market_level, 1.0)
+        adjustment = valuation_adjustment.get(market_level, 1.0)
 
         # 现金目标：根据市场估值调整
-        if avg_pct <= 30:
-            cash_target = 0.05  # 低估时少持现金
-        elif avg_pct <= 70:
-            cash_target = 0.10  # 合理时适度持现
+        if avg_pct <= percentiles_cfg["低估"]:
+            cash_target = cash_targets["low"]
+        elif avg_pct <= percentiles_cfg["合理"]:
+            cash_target = cash_targets["fair"]
         else:
-            cash_target = 0.15  # 高估时多持现金
+            cash_target = cash_targets["high"]
 
         # 计算各类资产目标配比
         target_allocation = {}
         remaining = 1.0 - cash_target
-        for cat, base_ratio in DEFAULT_BASE_ALLOCATION.items():
+        for cat, base_ratio in base_allocation.items():
             # 根据市场估值微调（股票/指数类更敏感）
             if cat in ("equity", "index", "hybrid"):
                 adjusted = base_ratio * adjustment
@@ -171,9 +165,9 @@ def analyze_rebalancing_need(user_id: str = "default") -> dict:
 
         max_drift = max(abs(d) for d in drift.values()) if drift else 0
 
-        if max_drift < 0.03:
+        if max_drift < drift_thresholds["balanced"]:
             drift_level = "balanced"
-        elif max_drift < 0.08:
+        elif max_drift < drift_thresholds["slight"]:
             drift_level = "slight"
         else:
             drift_level = "significant"
@@ -183,7 +177,7 @@ def analyze_rebalancing_need(user_id: str = "default") -> dict:
         cash_ratio = cash_balance / total_assets if total_assets > 0 else 0
 
         # 现金建议
-        if cash_ratio > cash_target + 0.05:
+        if cash_ratio > cash_target + cash_triggers["excess"]:
             excess = cash_balance - cash_target * total_assets
             suggestions.append({
                 "action": "deploy_cash",
@@ -191,7 +185,7 @@ def analyze_rebalancing_need(user_id: str = "default") -> dict:
                 "reason": f"现金占比{cash_ratio:.0%}超过目标{cash_target:.0%}，建议配置",
                 "amount_range": f"¥{excess * 0.5:,.0f} - ¥{excess:,.0f}",
             })
-        elif cash_ratio < cash_target - 0.02:
+        elif cash_ratio < cash_target - cash_triggers["shortage"]:
             shortage = cash_target * total_assets - cash_balance
             suggestions.append({
                 "action": "reserve_cash",
@@ -206,7 +200,7 @@ def analyze_rebalancing_need(user_id: str = "default") -> dict:
             "hybrid": "混合型", "index": "指数型", "qdii": "QDII",
         }
         for cat, delta in sorted(drift.items(), key=lambda x: abs(x[1]), reverse=True):
-            if cat == "cash" or abs(delta) < 0.05:
+            if cat == "cash" or abs(delta) < drift_ignore:
                 continue
             label = category_labels.get(cat, cat)
             if delta > 0:
@@ -235,19 +229,19 @@ def analyze_rebalancing_need(user_id: str = "default") -> dict:
                 })
 
         # 低估指数加仓建议（如果有现金空间）
-        if cash_ratio > 0.05:
+        if cash_ratio > cash_targets["low"]:
             undervalued = [
                 (code, info) for code, info in index_valuation.items()
-                if info["percentile"] <= 30
+                if info["percentile"] <= percentiles_cfg["低估"]
             ]
-            for code, info in undervalued[:2]:
+            for code, info in undervalued[:undervalue_max]:
                 suggestions.append({
                     "action": "buy_index",
                     "category": "index",
                     "fund_code": code,
                     "fund_name": info["name"],
                     "reason": f"{info['name']}估值{info['percentile']:.0f}%百分位（低估），可考虑定投",
-                    "amount_range": "¥1,000 - ¥3,000",
+                    "amount_range": f"¥{undervalue_amount['min']:,.0f} - ¥{undervalue_amount['max']:,.0f}",
                 })
 
         return {

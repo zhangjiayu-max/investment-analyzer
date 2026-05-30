@@ -3,11 +3,13 @@
   <head>
     <meta charset="UTF-8" />
     <script>
-      // Prevent flash of wrong theme
+      // Prevent flash of wrong theme — default to dark
       try {
         const saved = localStorage.getItem('ia-theme')
-        const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches
-        if (saved === 'true' || (!saved && prefersDark)) {
+        if (saved === 'false') {
+          // User explicitly chose light mode
+        } else {
+          // Default dark (no preference or saved === 'true')
           document.documentElement.classList.add('dark')
         }
       } catch(e) {}

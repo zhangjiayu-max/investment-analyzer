@@ -127,49 +127,4 @@ const emit = defineEmits(['confirm', 'cancel'])
   padding: 0.6rem 1rem;
   font-size: 0.85rem;
 }
-
-.btn-secondary {
-  background: var(--color-bg-card);
-  color: var(--color-text-secondary);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
-  font-weight: 500;
-  cursor: pointer;
-  transition: all var(--transition-fast);
-}
-
-.btn-secondary:hover {
-  background: var(--color-bg-hover);
-}
-
-.btn-primary {
-  background: linear-gradient(135deg, var(--color-primary-600), var(--color-primary-500));
-  color: white;
-  border: none;
-  border-radius: var(--radius-md);
-  font-weight: 500;
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 0.4rem;
-  transition: all var(--transition-fast);
-}
-
-.btn-primary:hover {
-  background: linear-gradient(135deg, var(--color-primary-700), var(--color-primary-600));
-}
-
-.btn-primary:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
-.btn-danger {
-  background: linear-gradient(135deg, #dc2626, var(--color-danger));
-}
-
-.btn-danger:hover {
-  background: linear-gradient(135deg, #b91c1c, #dc2626);
-}
 </style>

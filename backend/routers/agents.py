@@ -1,5 +1,6 @@
 """Agent 管理路由 — /api/agents/*, /api/analysis-agents/*/versions, /api/analysis-agents/*/rollback"""
 
+import asyncio
 import logging
 
 from fastapi import APIRouter, HTTPException
@@ -73,15 +74,29 @@ async def get_agent_api(agent_id: int):
 
 @router.put("/api/agents/{agent_id}")
 async def update_agent_api(agent_id: int, req: UpdateAgentRequest):
-    """更新 Agent 信息。修改提示词时自动保存版本历史。"""
+    """更新 Agent 信息。修改提示词时自动保存版本历史，并触发回归测试。"""
     agent = get_agent(agent_id)
     if not agent:
         raise HTTPException(404, "Agent 不存在")
     fields = {k: v for k, v in req.model_dump().items() if v is not None}
+    prompt_changed = False
     if 'system_prompt' in fields and fields['system_prompt'] != agent.get('system_prompt'):
         save_prompt_version(agent_id, 'conversation', agent['system_prompt'])
+        prompt_changed = True
     if fields:
         update_agent(agent_id, **fields)
+    # 如果更新的是编排专家，清除缓存使新 prompt 立即生效
+    if agent.get("is_specialist"):
+        from db.agents import clear_specialist_cache
+        clear_specialist_cache()
+    # prompt 变更后触发回归测试
+    if prompt_changed:
+        try:
+            from agent.regression import run_regression_tests
+            agent_type = "specialist" if agent.get("is_specialist") else "conversation"
+            asyncio.create_task(run_regression_tests(agent_id, agent_type))
+        except Exception as e:
+            logging.warning(f"触发回归测试失败: {e}")
     return {"ok": True}
 
 
@@ -176,6 +191,16 @@ async def list_analysis_agent_versions_api(agent_id: int):
     """列出某分析 Agent 的提示词版本历史。"""
     versions = list_prompt_versions(agent_id, 'analysis')
     return {"versions": versions}
+
+
+@router.get("/api/agents/{agent_id}/regression")
+async def get_regression_result_api(agent_id: int, agent_type: str = "conversation"):
+    """获取 Agent 的最近回归测试结果。"""
+    from agent.regression import get_regression_result
+    result = get_regression_result(agent_id, agent_type)
+    if not result:
+        return {"status": "none", "message": "暂无回归测试记录"}
+    return result
 
 
 @router.post("/api/analysis-agents/{agent_id}/rollback/{version_id}")

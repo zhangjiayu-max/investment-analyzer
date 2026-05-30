@@ -45,32 +45,58 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ── 路由注册 ──────────────────────────────────────────
+# ── 路由注册（规范化路径: /api/{module}/{resource}）──────────────────────────────────────
+
+# 新路径路由（规范化）
+from routers.valuation import router as valuation_router          # /api/valuation/*
+from routers.agent import router as agent_router                  # /api/agent/*
+from routers.conversation import router as conversation_router    # /api/conversation/*
+from routers.task import router as task_router                    # /api/task/*
+from routers.article import router as article_router              # /api/article/*
+from routers.portfolio_new import router as portfolio_new_router  # /api/portfolio/*
+
+# 旧路径路由（保持兼容，逐步迁移到新路径）
 from routers.valuations import router as valuations_router, index_info_router
-from routers.bond import router as bond_router
-from routers.token_usage import router as token_usage_router
 from routers.agents import router as agents_router
 from routers.conversations import router as conversations_router
 from routers.tasks import router as tasks_router
 from routers.articles import router as articles_router
-from routers.images import router as images_router
 from routers.portfolio import router as portfolio_router
+
+# 其他路由
+from routers.bond import router as bond_router
+from routers.token_usage import router as token_usage_router
+from routers.images import router as images_router
 from routers.eval import router as eval_router
 from routers.analysis import router as analysis_router
 from routers.dashboard import router as dashboard_router
+from routers.config import router as config_router
+
+# 注册新路径路由（优先级高）
+app.include_router(valuation_router)
+app.include_router(agent_router)
+app.include_router(conversation_router)
+app.include_router(task_router)
+app.include_router(article_router)
+app.include_router(portfolio_new_router)
+
+# 注册旧路径路由（保持兼容）
 app.include_router(valuations_router)
 app.include_router(index_info_router)
-app.include_router(bond_router)
-app.include_router(token_usage_router)
 app.include_router(agents_router)
 app.include_router(conversations_router)
 app.include_router(tasks_router)
 app.include_router(articles_router)
-app.include_router(images_router)
 app.include_router(portfolio_router)
+
+# 注册其他路由
+app.include_router(bond_router)
+app.include_router(token_usage_router)
+app.include_router(images_router)
 app.include_router(eval_router)
 app.include_router(analysis_router)
 app.include_router(dashboard_router)
+app.include_router(config_router)
 
 # 静态文件目录
 for _d in (STATIC_DIR, IMAGES_DIR, OUTPUT_DIR, UPLOADS_DIR, DD_IMAGES_DIR, VALUATION_IMAGES_DIR):
@@ -101,27 +127,44 @@ def _index_skill_doc_by_type(doc_type: str, title: str):
 
 @app.on_event("startup")
 async def startup():
+    """应用启动时的初始化。"""
+    import asyncio
+
+    logging.info("=== 启动初始化开始 ===")
+
+    # 1. 同步初始化（必须在启动前完成）
+    logging.info("初始化数据库...")
     init_db()
+    logging.info("数据库初始化完成")
+
+    logging.info("初始化 FTS5...")
     init_fts()
-    init_chroma()
-    # 种子债券知识库
-    try:
-        from db import seed_bond_knowledge
-        if seed_bond_knowledge():
-            logging.info("债券知识库已写入 skill_documents")
-            _index_skill_doc_by_type("bond_knowledge", "债券市场专业知识库")
-    except Exception:
-        pass
-    # 种子投资策略知识库（4%定投法等）
-    try:
-        from db import seed_investment_strategy_knowledge
-        if seed_investment_strategy_knowledge():
-            logging.info("投资策略知识库已写入 skill_documents")
-            _index_skill_doc_by_type("investment_strategy", "4%定投法（强化版）")
-    except Exception:
-        pass
-    # 启动后台每日分析任务
+    logging.info("FTS5 初始化完成")
+
+    # 2. 异步初始化（后台执行，不阻塞启动）
+    async def _async_init():
+        """后台异步初始化 ChromaDB 和种子数据。"""
+        try:
+            logging.info("后台初始化 ChromaDB...")
+            init_chroma()
+            logging.info("ChromaDB 初始化完成")
+        except Exception as e:
+            logging.warning(f"ChromaDB 初始化失败: {e}")
+
+        try:
+            from db import seed_bond_knowledge, seed_investment_strategy_knowledge
+            seed_bond_knowledge()
+            seed_investment_strategy_knowledge()
+        except Exception as e:
+            logging.warning(f"种子数据初始化失败: {e}")
+
+    # 后台执行异步初始化
+    asyncio.create_task(_async_init())
+    logging.info("后台初始化任务已启动")
+
+    # 后台每日报告
     asyncio.create_task(_auto_daily_report())
+    logging.info("=== 启动初始化完成 ===")
 
 
 async def _auto_daily_report():
@@ -154,10 +197,9 @@ async def _auto_daily_report():
         # 1. 新闻
         news_context = ""
         try:
-            # 延迟导入避免循环依赖（get_hot_topics 定义在 routers/dashboard.py）
             from routers.dashboard import get_hot_topics
             news_data = await get_hot_topics()
-            news_list = news_data.get("news", [])[:6]
+            news_list = news_data.get("news", [])[:8]
             news_context = "\n".join(
                 f"- {n.get('title','')}（{n.get('source','')}）"
                 for n in news_list if n.get('title')
@@ -166,7 +208,49 @@ async def _auto_daily_report():
             logging.warning(f"自动报告新闻检索失败: {e}")
             news_context = "暂无新闻"
 
-        # 2. 指数估值
+        # 1.5 盈米 MCP 数据（市场温度 + 行情解读）
+        yingmi_context = ""
+        try:
+            from mcp.yingmi_client import get_yingmi_client
+            ym = get_yingmi_client()
+            # 市场温度计 + 行情解读
+            quotations = ym.call_tool_text("GetLatestQuotations")
+            if quotations:
+                yingmi_context = f"【盈米市场温度计及行情解读】\n{quotations[:2000]}"
+        except Exception as e:
+            logging.warning(f"盈米 MCP 数据获取失败: {e}")
+
+        # 2. 市场全景（指数行情 + 板块涨跌 + 涨跌家数）
+        market_context = "暂无行情数据"
+        try:
+            from market_data import get_market_overview
+            overview = get_market_overview()
+            market_lines = []
+            # 主要指数
+            if overview.get("indices"):
+                market_lines.append("【主要指数】")
+                for idx in overview["indices"]:
+                    sign = "+" if idx["change_pct"] >= 0 else ""
+                    market_lines.append(f"- {idx['name']}: {idx['price']}（{sign}{idx['change_pct']}%）成交{idx.get('volume_yi',0):.0f}亿")
+            # 涨跌家数
+            b = overview.get("breadth", {})
+            if b.get("up"):
+                market_lines.append(f"\n【涨跌统计】上涨{b['up']} / 下跌{b['down']} / 涨停{b.get('limit_up',0)} / 跌停{b.get('limit_down',0)} / 成交{b.get('total_volume_yi',0):.0f}亿")
+            # 领涨板块
+            if overview.get("sectors_top"):
+                market_lines.append("\n【领涨板块】")
+                for s in overview["sectors_top"]:
+                    market_lines.append(f"- {s['name']}: +{s['change_pct']}%  领涨:{s['lead_stock']}{s['lead_change']}%")
+            # 领跌板块
+            if overview.get("sectors_bottom"):
+                market_lines.append("\n【领跌板块】")
+                for s in overview["sectors_bottom"]:
+                    market_lines.append(f"- {s['name']}: {s['change_pct']}%  领涨:{s['lead_stock']}{s['lead_change']}%")
+            market_context = "\n".join(market_lines) if market_lines else "暂无行情数据"
+        except Exception as e:
+            logging.warning(f"行情数据获取失败: {e}")
+
+        # 3. 指数估值（分高估/低估两组展示）
         val_context = "暂无估值数据"
         try:
             from db import list_valuation_indexes
@@ -190,7 +274,7 @@ async def _auto_daily_report():
         except Exception:
             pass
 
-        # 3. 持仓
+        # 4. 持仓（按涨跌幅排序）
         holding_text = "暂无持仓"
         portfolio_text = "暂无"
         try:
@@ -199,26 +283,29 @@ async def _auto_daily_report():
             div = get_portfolio_diversification()
             cash = get_cash_balance()
             if holdings:
+                # 按收益率排序，方便 LLM 找出涨跌幅前3
+                sorted_holdings = sorted(holdings, key=lambda x: x.get("profit_rate") or 0, reverse=True)
                 holding_lines = []
-                for h in holdings[:15]:
+                for h in sorted_holdings[:15]:
                     pct = h.get("profit_rate")
                     pct_str = f"{pct:+.1f}%" if pct is not None else "N/A"
                     val = h.get("current_value", 0) or 0
+                    profit = h.get("profit", 0) or 0
                     holding_lines.append(
                         f"- {h['fund_name']}（{h.get('fund_code','')}）: "
-                        f"市值{val:.0f}元, 收益率{pct_str}"
+                        f"市值{val:.0f}元, 收益率{pct_str}, 盈亏{profit:+.0f}元"
                     )
                 holding_text = "\n".join(holding_lines)
             portfolio_text = (
                 f"持仓{div.get('holding_count',0)}只基金，"
                 f"总市值{div.get('total_value',0):.0f}元，"
-                f"盈亏{div.get('total_profit',0):.0f}元，"
+                f"累计盈亏{div.get('total_profit',0):+.0f}元，"
                 f"可用零钱{cash:.0f}元"
             )
         except Exception:
             pass
 
-        # 4. 债市
+        # 5. 债市
         bond_text = "暂无"
         try:
             from tools import _get_bond_temperature
@@ -230,13 +317,21 @@ async def _auto_daily_report():
         # ── 组装 prompt ──
         full_prompt = agent["system_prompt"] + f"""
 
+【今日日期】
+{time.strftime("%Y-%m-%d")}（{["周一","周二","周三","周四","周五","周六","周日"][time.localtime().tm_wday]}）
+
 【今日新闻】
 {news_context}
+
+{yingmi_context}
+
+【市场行情】
+{market_context}
 
 【指数估值】
 {val_context}
 
-【持仓明细】
+【持仓明细】（已按收益率从高到低排序）
 {holding_text}
 
 【持仓概况】

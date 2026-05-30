@@ -40,7 +40,7 @@ function renderChart(data) {
     tooltip: {
       trigger: 'axis',
       backgroundColor: 'rgba(255,255,255,0.95)',
-      borderColor: '#e5e7eb',
+      borderColor: 'rgba(255, 255, 255, 0.1)',
       borderWidth: 1,
       textStyle: { color: '#1f2937', fontSize: 13 },
       formatter(params) {
@@ -59,7 +59,7 @@ function renderChart(data) {
       data: ['收益率', '债市温度'],
       top: 4,
       right: 16,
-      textStyle: { color: '#6b7280', fontSize: 12 },
+      textStyle: { color: '#9aa0a6', fontSize: 12 },
     },
     grid: {
       left: 56,
@@ -80,19 +80,19 @@ function renderChart(data) {
         height: 20,
         bottom: 8,
         borderColor: 'transparent',
-        backgroundColor: '#f3f4f6',
+        backgroundColor: 'rgba(255, 255, 255, 0.06)',
         fillerColor: 'rgba(99,102,241,0.15)',
-        handleStyle: { color: '#6366f1', borderColor: '#6366f1' },
-        textStyle: { color: '#9ca3af', fontSize: 10 },
+        handleStyle: { color: '#c9a84c', borderColor: '#c9a84c' },
+        textStyle: { color: '#5f6368', fontSize: 10 },
       },
     ],
     xAxis: {
       type: 'category',
       data: dates,
-      axisLine: { lineStyle: { color: '#e5e7eb' } },
+      axisLine: { lineStyle: { color: 'rgba(255, 255, 255, 0.1)' } },
       axisTick: { show: false },
       axisLabel: {
-        color: '#9ca3af',
+        color: '#5f6368',
         fontSize: 11,
         formatter(v) { return v.substring(0, 7) },
       },
@@ -101,13 +101,13 @@ function renderChart(data) {
       {
         type: 'value',
         name: '收益率(%)',
-        nameTextStyle: { color: '#9ca3af', fontSize: 11, padding: [0, 40, 0, 0] },
+        nameTextStyle: { color: '#5f6368', fontSize: 11, padding: [0, 40, 0, 0] },
         position: 'left',
         axisLine: { show: false },
         axisTick: { show: false },
-        splitLine: { lineStyle: { color: '#f3f4f6', type: 'dashed' } },
+        splitLine: { lineStyle: { color: 'rgba(255, 255, 255, 0.06)', type: 'dashed' } },
         axisLabel: {
-          color: '#9ca3af',
+          color: '#5f6368',
           fontSize: 11,
           formatter: '{value}%',
         },
@@ -116,14 +116,14 @@ function renderChart(data) {
       {
         type: 'value',
         name: '温度',
-        nameTextStyle: { color: '#9ca3af', fontSize: 11, padding: [0, 0, 0, 40] },
+        nameTextStyle: { color: '#5f6368', fontSize: 11, padding: [0, 0, 0, 40] },
         position: 'right',
         min: 0,
         max: 100,
         axisLine: { show: false },
         axisTick: { show: false },
         splitLine: { show: false },
-        axisLabel: { color: '#9ca3af', fontSize: 11 },
+        axisLabel: { color: '#5f6368', fontSize: 11 },
       },
     ],
     visualMap: {
@@ -145,7 +145,7 @@ function renderChart(data) {
         yAxisIndex: 0,
         smooth: true,
         symbol: 'none',
-        lineStyle: { width: 2, color: '#6366f1' },
+        lineStyle: { width: 2, color: '#c9a84c' },
         areaStyle: {
           color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
             { offset: 0, color: 'rgba(99,102,241,0.25)' },

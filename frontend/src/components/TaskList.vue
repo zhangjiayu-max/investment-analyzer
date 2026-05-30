@@ -1,8 +1,10 @@
 <script setup>
 import { ref, onMounted } from 'vue'
 import { listTasks, deleteTask } from '../api'
+import ConfirmDialog from './ConfirmDialog.vue'
 
 const emit = defineEmits(['select', 'newTask'])
+const confirm = ref({ visible: false, title: '', message: '', danger: false, onConfirm: null })
 const tasks = ref([])
 const loading = ref(false)
 
@@ -18,11 +20,19 @@ async function loadTasks() {
   }
 }
 
-async function onDelete(taskId, e) {
+function onDelete(taskId, e) {
   e.stopPropagation()
-  if (!confirm('确定删除？')) return
-  await deleteTask(taskId)
-  tasks.value = tasks.value.filter(t => t.id !== taskId)
+  confirm.value = {
+    visible: true,
+    title: '删除确认',
+    message: '确定删除这个任务？',
+    danger: true,
+    onConfirm: async () => {
+      confirm.value.visible = false
+      await deleteTask(taskId)
+      tasks.value = tasks.value.filter(t => t.id !== taskId)
+    }
+  }
 }
 
 function statusText(status) {
@@ -80,6 +90,14 @@ onMounted(loadTasks)
       </div>
     </div>
   </div>
+  <ConfirmDialog
+    :visible="confirm.visible"
+    :title="confirm.title"
+    :message="confirm.message"
+    :danger="confirm.danger"
+    @confirm="() => confirm.onConfirm?.()"
+    @cancel="confirm.visible = false"
+  />
 </template>
 
 <style scoped>

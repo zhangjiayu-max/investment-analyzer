@@ -91,6 +91,28 @@ async def get_messages_api(conv_id: int, limit: int = 50):
     return {"conversation": conv, "messages": msgs}
 
 
+@router.post("/api/conversations/{conv_id}/cancel")
+async def cancel_conversation_execution(conv_id: int):
+    """客户端通知取消执行，将 streaming 状态的消息标记为 cancelled。"""
+    msgs = get_messages(conv_id, limit=5)
+    updated = 0
+    for msg in reversed(msgs):
+        meta = msg.get("metadata")
+        if isinstance(meta, str):
+            try:
+                meta = json.loads(meta)
+            except Exception:
+                continue
+        if isinstance(meta, dict) and meta.get("execution_status") == "streaming":
+            meta["execution_status"] = "cancelled"
+            try:
+                update_message_metadata(msg["id"], meta)
+                updated += 1
+            except Exception as e:
+                logger.warning(f"标记取消状态失败: {e}")
+    return {"ok": True, "updated": updated}
+
+
 @router.post("/api/conversations/{conv_id}/messages")
 async def send_message_api(conv_id: int, req: SendMessageRequest):
     """发送消息并获取 AI 回复（多 Agent 协作模式）。"""
@@ -148,6 +170,9 @@ async def send_message_api(conv_id: int, req: SendMessageRequest):
         keywords=rag_result.get("keywords", []),
         results=rag_result.get("results", []),
         content_types=rag_types if rag_types else None,
+        fts_count=rag_result.get("fts_count", 0),
+        chroma_count=rag_result.get("chroma_count", 0),
+        freshness_filtered=rag_result.get("freshness_filtered", 0),
     )
 
     # 7. 自动更新对话标题
@@ -645,6 +670,9 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
             keywords=rag_result.get("keywords", []),
             results=rag_result.get("results", []),
             content_types=rag_types if rag_types else None,
+            fts_count=rag_result.get("fts_count", 0),
+            chroma_count=rag_result.get("chroma_count", 0),
+            freshness_filtered=rag_result.get("freshness_filtered", 0),
         )
 
         # 8. 更新 agent_runs 的 message_id + 记录整体执行
@@ -784,14 +812,11 @@ def _route_to_specialist(query: str) -> str | None:
 
 
 def _get_specialist_name(agent_key: str) -> str:
-    """获取专家名称。"""
-    names = {
-        "valuation_expert": "估值专家",
-        "market_analyst": "择时分析师",
-        "risk_assessor": "风险评估师",
-        "allocation_advisor": "资产配置师",
-    }
-    return names.get(agent_key, "专家")
+    """获取专家名称（从数据库加载）。"""
+    from db.agents import load_specialist_agents
+    specialists = load_specialist_agents()
+    agent = specialists.get(agent_key)
+    return agent["name"] if agent else "专家"
 
 
 # ── RAG 日志 API ─────────────────────────────────────────

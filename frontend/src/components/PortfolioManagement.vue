@@ -1,5 +1,5 @@
 <script setup>
-import { ref, computed, onMounted, watch } from 'vue'
+import { ref, computed, onMounted, onActivated, watch } from 'vue'
 
 const maxIndustryPct = computed(() => {
   if (!detailData.value?.industry_allocation?.length) return 100
@@ -22,8 +22,19 @@ import {
   runPanoramaAnalysis, runDeepDiveAnalysis, runTradeReview, runWhatIfAnalysis,
   listPanoramaRecords, listDeepDiveRecords, listTradeReviewRecords, listWhatIfRecords,
   submitAnalysisFeedback,
+  getRebalanceConfig, updateRebalanceConfig, getRebalanceConfigHistory, rollbackRebalanceConfig,
 } from '../api'
 import ConfirmDialog from './ConfirmDialog.vue'
+
+// ── Markdown 渲染 ──
+function renderMarkdown(text) {
+  if (!text) return ''
+  return text
+    .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
+    .replace(/^\s*[-*]\s+(.*)/gm, '<li>$1</li>')
+    .replace(/(<li>.*<\/li>\n?)+/gs, m => `<ul>${m}</ul>`)
+    .replace(/\n/g, '<br>')
+}
 
 // ── 持仓占比计算 ──
 const holdingWeights = computed(() => {
@@ -64,7 +75,7 @@ const todayProfitLabel = computed(() => {
 })
 
 // ── 饼图颜色 ──
-const pieColors = ['#6366f1', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#06b6d4', '#f97316', '#ec4899', '#14b8a6', '#84cc16']
+const pieColors = ['#c9a84c', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#06b6d4', '#f97316', '#ec4899', '#14b8a6', '#84cc16']
 
 function calcPieSlices(data, total) {
   const slices = []
@@ -978,6 +989,8 @@ function switchAnalysisTab(tab) {
     loadTxAnalysis()
   } else if (tab === 'ai') {
     loadAllModeRecords()
+  } else if (tab === 'config') {
+    loadRebalanceConfig()
   }
 }
 
@@ -1128,6 +1141,113 @@ async function loadDiversification() {
   }
 }
 
+// ── 调仓策略配置 ──
+const rebalanceConfig = ref(null)
+const rebalancePresets = ref([])
+const rebalanceCurrentStrategy = ref(null)
+const rebalanceLoading = ref(false)
+const rebalanceEditing = ref(false)
+const rebalanceEditData = ref({})
+
+const CATEGORY_LABELS = { equity: '股票型', bond: '债券型', money: '货币型', hybrid: '混合型', index: '指数型', qdii: 'QDII' }
+
+async function loadRebalanceConfig() {
+  rebalanceLoading.value = true
+  try {
+    const { data } = await getRebalanceConfig()
+    rebalanceConfig.value = data.config
+    rebalancePresets.value = data.presets
+    rebalanceCurrentStrategy.value = data.current_strategy
+  } catch (e) {
+    showToast('加载调仓配置失败', 'error')
+  } finally {
+    rebalanceLoading.value = false
+  }
+}
+
+function startEditRebalance() {
+  rebalanceEditing.value = true
+  const cfg = rebalanceConfig.value
+  rebalanceEditData.value = {
+    strategy: cfg.strategy,
+    base_allocation: { ...cfg.base_allocation },
+    valuation_adjustment: { ...cfg.valuation_adjustment },
+    valuation_percentiles: { ...cfg.valuation_percentiles },
+    drift_thresholds: { ...cfg.drift_thresholds },
+    cash_targets: { ...cfg.cash_targets },
+    cash_triggers: { ...cfg.cash_triggers },
+    drift_ignore: cfg.drift_ignore,
+    undervalue_max: cfg.undervalue_max,
+    undervalue_amount: { ...cfg.undervalue_amount },
+  }
+}
+
+function selectPresetStrategy(key) {
+  rebalanceEditData.value.strategy = key
+  const preset = rebalancePresets.value.find(p => p.key === key)
+  if (preset?.base_allocation) {
+    rebalanceEditData.value.base_allocation = { ...preset.base_allocation }
+  }
+}
+
+async function saveRebalanceConfig() {
+  try {
+    const payload = { ...rebalanceEditData.value }
+    const { data } = await updateRebalanceConfig(payload)
+    if (data.ok) {
+      showToast('配置已保存', 'success')
+      rebalanceEditing.value = false
+      await loadRebalanceConfig()
+    } else {
+      showToast(data.message || '保存失败', 'error')
+    }
+  } catch (e) {
+    showToast('保存失败: ' + (e.response?.data?.detail || e.message), 'error')
+  }
+}
+
+function cancelEditRebalance() {
+  rebalanceEditing.value = false
+  rebalanceEditData.value = {}
+}
+
+// 配置变更历史
+const configHistory = ref([])
+const configHistoryLoading = ref(false)
+const configHistoryExpanded = ref(false)
+
+async function loadConfigHistory() {
+  configHistoryLoading.value = true
+  try {
+    const { data } = await getRebalanceConfigHistory(20)
+    configHistory.value = data.records || []
+  } catch (e) {
+    showToast('加载历史失败', 'error')
+  } finally {
+    configHistoryLoading.value = false
+  }
+}
+
+async function handleRollbackConfig(configId) {
+  try {
+    const { data } = await rollbackRebalanceConfig(configId)
+    if (data.ok) {
+      showToast('已回滚', 'success')
+      await loadRebalanceConfig()
+      await loadConfigHistory()
+    }
+  } catch (e) {
+    showToast('回滚失败', 'error')
+  }
+}
+
+function toggleConfigHistory() {
+  configHistoryExpanded.value = !configHistoryExpanded.value
+  if (configHistoryExpanded.value && configHistory.value.length === 0) {
+    loadConfigHistory()
+  }
+}
+
 async function loadTxAnalysis() {
   try {
     const { data } = await getTransactionSummary()
@@ -1215,6 +1335,7 @@ function confirmDeepDive() {
 }
 
 function confirmTradeReview() {
+  aiMode.value = 'trade-review'
   confirm.value = {
     visible: true,
     title: '交易复盘',
@@ -1359,6 +1480,12 @@ onMounted(async () => {
       }
     } catch (e) { /* silent */ }
   }
+})
+
+// KeepAlive 组件激活时重新加载数据（切换页面回来时触发）
+onActivated(async () => {
+  await loadData()
+  loadAlerts()
 })
 
 // 账号切换时重新加载数据
@@ -1986,6 +2113,10 @@ function txDisplayAmount(tx) {
         <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"/></svg>
         <span class="term-with-tip">AI 分析<span class="term-tip">AI 结合估值数据、新闻热点和盈米 MCP 数据源，综合分析你的持仓情况。可以问：我的持仓有什么风险？当前估值下是否该调仓？某某基金表现如何？</span></span>
       </button>
+      <button :class="['analysis-tab', { active: activeAnalysisTab === 'config' }]" @click="switchAnalysisTab('config')">
+        <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.066 2.573c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.573 1.066c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.066-2.573c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/></svg>
+        <span class="term-with-tip">策略配置<span class="term-tip">管理调仓分析的资产配比策略、估值阈值和偏离度参数</span></span>
+      </button>
     </div>
 
     <!-- Analysis Panel Content -->
@@ -2303,6 +2434,33 @@ function txDisplayAmount(tx) {
             </div>
           </div>
 
+          <!-- AI 交易复盘 -->
+          <div class="tx-ai-review">
+            <button
+              class="btn-ai-action"
+              :class="{ 'btn-loading': modeLoading }"
+              :disabled="modeLoading"
+              @click="confirmTradeReview()"
+            >
+              <svg :class="['icon-spin', { 'spinning': modeLoading }]" width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
+              </svg>
+              <span>{{ modeLoading ? '复盘中...' : 'AI 交易复盘' }}</span>
+              <span class="ai-agent-tooltip">交易复盘分析师</span>
+            </button>
+          </div>
+          <div v-if="modeResult && aiMode === 'trade-review'" class="trade-review-result-inline">
+            <div class="result-header">
+              <span class="result-title">📊 交易复盘结果</span>
+              <span class="result-time">{{ new Date().toLocaleString() }}</span>
+            </div>
+            <div class="result-body" v-html="renderMarkdown(modeResult)"></div>
+            <div class="result-feedback">
+              <button class="btn-feedback" @click="submitFeedback(modeRecordId, 'helpful')">👍</button>
+              <button class="btn-feedback" @click="submitFeedback(modeRecordId, 'unhelpful')">👎</button>
+            </div>
+          </div>
+
           <!-- 交易明细 -->
           <div class="analysis-section" style="margin-top:1rem">
             <h4 style="margin:0 0 0.5rem 0;font-size:0.85rem">交易明细（最近 {{ txAnalysisData.recent_transactions?.length || 0 }} 笔）</h4>
@@ -2355,7 +2513,7 @@ function txDisplayAmount(tx) {
                 <!-- 背景 -->
                 <rect x="0" y="0" :width="chartWidth" :height="chartHeight" fill="transparent"/>
                 <!-- 网格线 -->
-                <line v-for="(y, i) in gridYs" :key="'g'+i" :x1="padLeft" :y1="y" :x2="chartWidth - padRight" :y2="y" stroke="#e5e7eb" stroke-width="0.5"/>
+                <line v-for="(y, i) in gridYs" :key="'g'+i" :x1="padLeft" :y1="y" :x2="chartWidth - padRight" :y2="y" stroke="rgba(255, 255, 255, 0.1)" stroke-width="0.5"/>
                 <!-- Y 轴标签 -->
                 <text v-for="la in yAxisLabels" :key="'yl'+la.label" :x="padLeft - 6" :y="la.y + 4" text-anchor="end" fill="#9ca3af" font-size="10" font-family="monospace">{{ la.label }}</text>
                 <!-- X 轴标签 -->
@@ -2601,6 +2759,212 @@ function txDisplayAmount(tx) {
             <div class="spinner"></div>
             <span>正在分析...</span>
           </div>
+        </div>
+      </template>
+
+      <!-- Strategy Config -->
+      <template v-if="activeAnalysisTab === 'config'">
+        <div class="analysis-panel-header">
+          <h3>调仓策略配置</h3>
+          <div class="analysis-panel-actions">
+            <template v-if="!rebalanceEditing">
+              <button class="btn-primary btn-sm" @click="startEditRebalance">编辑配置</button>
+            </template>
+            <template v-else>
+              <button class="btn-ghost btn-sm" @click="cancelEditRebalance">取消</button>
+              <button class="btn-primary btn-sm" @click="saveRebalanceConfig">保存</button>
+            </template>
+            <button class="btn-ghost btn-sm" @click="switchAnalysisTab('config')">&#x2715;</button>
+          </div>
+        </div>
+        <div v-if="rebalanceLoading" class="loading-state"><div class="spinner"></div></div>
+        <div v-else-if="rebalanceConfig" class="analysis-panel-body">
+
+          <!-- Strategy Presets -->
+          <div class="config-section">
+            <h4 class="config-section-title">配置策略</h4>
+            <div v-if="!rebalanceEditing" class="config-current-strategy">
+              <div class="strategy-badge">{{ rebalanceCurrentStrategy?.name || rebalanceConfig.strategy }}</div>
+              <div class="strategy-desc">{{ rebalanceCurrentStrategy?.description }}</div>
+              <div class="strategy-source" v-if="rebalanceCurrentStrategy?.source">来源：{{ rebalanceCurrentStrategy.source }}</div>
+            </div>
+            <div v-else class="strategy-presets-grid">
+              <div v-for="p in rebalancePresets" :key="p.key"
+                :class="['strategy-preset-card', { active: rebalanceEditData.strategy === p.key }]"
+                @click="selectPresetStrategy(p.key)">
+                <div class="preset-name">{{ p.name }}</div>
+                <div class="preset-desc">{{ p.description }}</div>
+                <div class="preset-alloc" v-if="p.base_allocation">
+                  <span v-for="(v, k) in p.base_allocation" :key="k" class="alloc-tag">
+                    {{ CATEGORY_LABELS[k] || k }} {{ (v * 100).toFixed(0) }}%
+                  </span>
+                </div>
+                <div class="preset-source">{{ p.source }}</div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Base Allocation -->
+          <div class="config-section">
+            <h4 class="config-section-title">资产基础配比</h4>
+            <div class="config-alloc-grid">
+              <div v-for="(label, key) in CATEGORY_LABELS" :key="key" class="config-alloc-item">
+                <span class="config-alloc-label">{{ label }}</span>
+                <template v-if="!rebalanceEditing">
+                  <span class="config-alloc-value">{{ ((rebalanceConfig.base_allocation[key] || 0) * 100).toFixed(0) }}%</span>
+                </template>
+                <template v-else>
+                  <input type="number" class="config-input config-input-sm"
+                    v-model.number="rebalanceEditData.base_allocation[key]"
+                    min="0" max="1" step="0.01" />
+                  <span class="config-input-unit">%</span>
+                </template>
+              </div>
+            </div>
+          </div>
+
+          <!-- Valuation Adjustment -->
+          <div class="config-section">
+            <h4 class="config-section-title">估值调整系数</h4>
+            <p class="config-hint">市场估值偏离时，股票/指数/混合类资产配比的调整倍数</p>
+            <div class="config-kv-grid">
+              <div v-for="(v, k) in (rebalanceEditing ? rebalanceEditData.valuation_adjustment : rebalanceConfig.valuation_adjustment)" :key="k" class="config-kv-item">
+                <span class="config-kv-key">{{ k }}</span>
+                <template v-if="!rebalanceEditing">
+                  <span class="config-kv-val">{{ v }}x</span>
+                </template>
+                <template v-else>
+                  <input type="number" class="config-input config-input-sm"
+                    v-model.number="rebalanceEditData.valuation_adjustment[k]"
+                    min="0.1" max="3" step="0.1" />
+                  <span class="config-input-unit">x</span>
+                </template>
+              </div>
+            </div>
+          </div>
+
+          <!-- Valuation Percentiles -->
+          <div class="config-section">
+            <h4 class="config-section-title">估值百分位分界线</h4>
+            <p class="config-hint">PE/PB 历史百分位的区间划分（%）</p>
+            <div class="config-kv-grid">
+              <div v-for="(v, k) in (rebalanceEditing ? rebalanceEditData.valuation_percentiles : rebalanceConfig.valuation_percentiles)" :key="k" class="config-kv-item">
+                <span class="config-kv-key">{{ k }}</span>
+                <template v-if="!rebalanceEditing">
+                  <span class="config-kv-val">{{ v }}%</span>
+                </template>
+                <template v-else>
+                  <input type="number" class="config-input config-input-sm"
+                    v-model.number="rebalanceEditData.valuation_percentiles[k]"
+                    min="0" max="100" step="5" />
+                  <span class="config-input-unit">%</span>
+                </template>
+              </div>
+            </div>
+          </div>
+
+          <!-- Drift Thresholds -->
+          <div class="config-section">
+            <h4 class="config-section-title">偏离度阈值</h4>
+            <p class="config-hint">当前配比与目标配比的偏差超过阈值时触发调仓建议</p>
+            <div class="config-kv-grid">
+              <div class="config-kv-item">
+                <span class="config-kv-key">平衡上限</span>
+                <template v-if="!rebalanceEditing">
+                  <span class="config-kv-val">{{ (rebalanceConfig.drift_thresholds.balanced * 100).toFixed(0) }}%</span>
+                </template>
+                <template v-else>
+                  <input type="number" class="config-input config-input-sm"
+                    v-model.number="rebalanceEditData.drift_thresholds.balanced"
+                    min="0.01" max="0.2" step="0.01" />
+                  <span class="config-input-unit">%</span>
+                </template>
+              </div>
+              <div class="config-kv-item">
+                <span class="config-kv-key">轻微上限</span>
+                <template v-if="!rebalanceEditing">
+                  <span class="config-kv-val">{{ (rebalanceConfig.drift_thresholds.slight * 100).toFixed(0) }}%</span>
+                </template>
+                <template v-else>
+                  <input type="number" class="config-input config-input-sm"
+                    v-model.number="rebalanceEditData.drift_thresholds.slight"
+                    min="0.03" max="0.3" step="0.01" />
+                  <span class="config-input-unit">%</span>
+                </template>
+              </div>
+            </div>
+          </div>
+
+          <!-- Cash Targets -->
+          <div class="config-section">
+            <h4 class="config-section-title">现金目标比例</h4>
+            <p class="config-hint">根据市场估值水平调整的现金持有目标</p>
+            <div class="config-kv-grid">
+              <div class="config-kv-item">
+                <span class="config-kv-key">低估时</span>
+                <template v-if="!rebalanceEditing">
+                  <span class="config-kv-val">{{ (rebalanceConfig.cash_targets.low * 100).toFixed(0) }}%</span>
+                </template>
+                <template v-else>
+                  <input type="number" class="config-input config-input-sm"
+                    v-model.number="rebalanceEditData.cash_targets.low"
+                    min="0" max="0.5" step="0.01" />
+                  <span class="config-input-unit">%</span>
+                </template>
+              </div>
+              <div class="config-kv-item">
+                <span class="config-kv-key">合理时</span>
+                <template v-if="!rebalanceEditing">
+                  <span class="config-kv-val">{{ (rebalanceConfig.cash_targets.fair * 100).toFixed(0) }}%</span>
+                </template>
+                <template v-else>
+                  <input type="number" class="config-input config-input-sm"
+                    v-model.number="rebalanceEditData.cash_targets.fair"
+                    min="0" max="0.5" step="0.01" />
+                  <span class="config-input-unit">%</span>
+                </template>
+              </div>
+              <div class="config-kv-item">
+                <span class="config-kv-key">高估时</span>
+                <template v-if="!rebalanceEditing">
+                  <span class="config-kv-val">{{ (rebalanceConfig.cash_targets.high * 100).toFixed(0) }}%</span>
+                </template>
+                <template v-else>
+                  <input type="number" class="config-input config-input-sm"
+                    v-model.number="rebalanceEditData.cash_targets.high"
+                    min="0" max="0.5" step="0.01" />
+                  <span class="config-input-unit">%</span>
+                </template>
+              </div>
+            </div>
+          </div>
+
+          <!-- Config History -->
+          <div class="config-section">
+            <h4 class="config-section-title" style="cursor:pointer;display:flex;align-items:center;gap:0.4rem" @click="toggleConfigHistory">
+              <span>变更历史</span>
+              <svg :class="['arrow-icon', { rotated: configHistoryExpanded }]" width="12" height="12" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/>
+              </svg>
+            </h4>
+            <div v-if="configHistoryExpanded">
+              <div v-if="configHistoryLoading" class="loading-state"><div class="spinner"></div></div>
+              <div v-else-if="configHistory.length === 0" class="config-hint">暂无变更记录</div>
+              <div v-else class="config-history-list">
+                <div v-for="h in configHistory" :key="h.id" :class="['config-history-item', { active: h.is_active }]">
+                  <div class="history-meta">
+                    <span class="history-id">#{{ h.id }}</span>
+                    <span class="history-strategy">{{ h.strategy }}</span>
+                    <span v-if="h.is_active" class="history-active-badge">当前</span>
+                    <span class="history-note" v-if="h.note">{{ h.note }}</span>
+                  </div>
+                  <div class="history-time">{{ h.created_at }}</div>
+                  <button v-if="!h.is_active" class="btn-ghost btn-xs" @click="handleRollbackConfig(h.id)">回滚</button>
+                </div>
+              </div>
+            </div>
+          </div>
+
         </div>
       </template>
     </div>
@@ -3193,7 +3557,7 @@ function txDisplayAmount(tx) {
                 <div class="chart-5y-canvas">
                   <svg class="nav-chart" :viewBox="'0 0 700 300'" preserveAspectRatio="xMidYMid meet" @mousedown="onChart5yMouseDown" @mousemove="onChart5yMouseMove" @mouseup="onChart5yMouseUp" @mouseleave="onChart5yMouseLeave">
                     <!-- 网格线 -->
-                    <line v-for="(y, i) in chart5yGridY" :key="'g'+i" :x1="55" :y1="y" :x2="680" :y2="y" stroke="#e5e7eb" stroke-width="0.5"/>
+                    <line v-for="(y, i) in chart5yGridY" :key="'g'+i" :x1="55" :y1="y" :x2="680" :y2="y" stroke="rgba(255, 255, 255, 0.1)" stroke-width="0.5"/>
                     <!-- Y 轴标签 -->
                     <text v-for="la in chart5yYLabels" :key="'yl'+la.label" :x="50" :y="la.y + 4" text-anchor="end" fill="#9ca3af" font-size="11" font-family="monospace">{{ la.label }}</text>
                     <!-- X 轴标签 -->
@@ -3539,7 +3903,7 @@ function txDisplayAmount(tx) {
   min-height: 40px;
 }
 .quote-text {
-  color: #e0e7ff;
+  color: #e8eaed;
   font-size: 0.85rem;
   line-height: 1.5;
 }
@@ -3876,7 +4240,7 @@ function txDisplayAmount(tx) {
 .badge-category-convertible_bond { background: #7c3aed; color: white; }
 .badge-category-money_market { background: #059669; color: white; }
 .badge-category-hybrid { background: #d97706; color: white; }
-.badge-category-index { background: #6366f1; color: white; }
+.badge-category-index { background: #c9a84c; color: white; }
 .badge-category-equity { background: #dc2626; color: white; }
 
 .actions-cell {
@@ -4013,7 +4377,7 @@ function txDisplayAmount(tx) {
   align-items: center;
   gap: 0.5rem;
   padding: 0.6rem 0.8rem;
-  background: var(--color-primary-bg, rgba(99, 102, 241, 0.08));
+  background: var(--color-primary-bg, rgba(201, 168, 76, 0.08));
   border-radius: var(--radius-md);
   font-size: 0.9rem;
   color: var(--color-primary-600);
@@ -4144,7 +4508,7 @@ select.input-field {
 .alloc-bar-bg {
   flex: 1;
   height: 14px;
-  background: var(--color-border-light, #e5e7eb);
+  background: var(--color-border-light, rgba(255, 255, 255, 0.1));
   border-radius: 7px;
   overflow: hidden;
 }
@@ -4244,7 +4608,7 @@ select.input-field {
 .toast-info {
   background: #f9fafb;
   color: #6b7280;
-  border: 1px solid #e5e7eb;
+  border: 1px solid rgba(255, 255, 255, 0.1);
 }
 
 /* Responsive */
@@ -4839,7 +5203,7 @@ select.input-field {
   border-bottom: none;
 }
 .ai-history-current {
-  background: var(--color-primary-bg, rgba(99, 102, 241, 0.06));
+  background: var(--color-primary-bg, rgba(201, 168, 76, 0.06));
 }
 .ai-history-info {
   display: flex;
@@ -5064,13 +5428,13 @@ select.input-field {
 .refresh-toast-track {
   margin-top: 0.3rem;
   height: 3px;
-  background: var(--color-border-light, #e5e7eb);
+  background: var(--color-border-light, rgba(255, 255, 255, 0.1));
   border-radius: 2px;
   overflow: hidden;
 }
 .refresh-toast-bar {
   height: 100%;
-  background: linear-gradient(90deg, #6366f1, #3b82f6);
+  background: linear-gradient(90deg, #c9a84c, #3b82f6);
   border-radius: 2px;
   transition: width 0.3s ease;
 }
@@ -5080,7 +5444,7 @@ select.input-field {
 }
 .pending-confirm-hint {
   font-size: 0.72rem;
-  color: var(--color-primary, #4f46e5);
+  color: var(--color-primary, #a88a3a);
   margin-left: 0.25rem;
 }
 .tx-confirm-hint {
@@ -5093,8 +5457,8 @@ select.input-field {
   padding: 0.1rem 0.5rem;
   border-radius: 999px;
   font-size: 0.72rem;
-  background: var(--color-primary-bg, #eef2ff);
-  color: var(--color-primary, #4f46e5);
+  background: var(--color-primary-bg, rgba(201, 168, 76, 0.06));
+  color: var(--color-primary, #a88a3a);
   white-space: nowrap;
 }
 
@@ -5126,8 +5490,8 @@ select.input-field {
   color: var(--color-text-primary);
 }
 .ai-mode-tab.active {
-  background: var(--color-primary-bg, #eef2ff);
-  color: var(--color-primary, #4f46e5);
+  background: var(--color-primary-bg, rgba(201, 168, 76, 0.06));
+  color: var(--color-primary, #a88a3a);
   font-weight: 600;
 }
 .ai-mode-icon {
@@ -5470,8 +5834,8 @@ select.input-field {
   font-size: 0.8rem;
   font-weight: 600;
   color: var(--color-primary);
-  background: linear-gradient(135deg, var(--color-primary-bg), rgba(99, 102, 241, 0.08));
-  border: 1px solid rgba(99, 102, 241, 0.2);
+  background: linear-gradient(135deg, var(--color-primary-bg), rgba(201, 168, 76, 0.08));
+  border: 1px solid rgba(201, 168, 76, 0.2);
   border-radius: var(--radius-lg);
   cursor: pointer;
   transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
@@ -5490,10 +5854,10 @@ select.input-field {
 }
 
 .btn-ai-action:hover {
-  background: linear-gradient(135deg, rgba(99, 102, 241, 0.15), rgba(99, 102, 241, 0.12));
-  border-color: rgba(99, 102, 241, 0.4);
+  background: linear-gradient(135deg, rgba(201, 168, 76, 0.15), rgba(201, 168, 76, 0.12));
+  border-color: rgba(201, 168, 76, 0.4);
   transform: translateY(-1px);
-  box-shadow: 0 4px 12px rgba(99, 102, 241, 0.15);
+  box-shadow: 0 4px 12px rgba(201, 168, 76, 0.15);
 }
 
 .btn-ai-action:hover::before {
@@ -5513,8 +5877,8 @@ select.input-field {
 }
 
 .btn-ai-action.btn-loading {
-  background: linear-gradient(135deg, rgba(99, 102, 241, 0.08), rgba(99, 102, 241, 0.05));
-  border-color: rgba(99, 102, 241, 0.15);
+  background: linear-gradient(135deg, rgba(201, 168, 76, 0.08), rgba(201, 168, 76, 0.05));
+  border-color: rgba(201, 168, 76, 0.15);
 }
 
 .btn-ai-action.btn-loading::after {
@@ -5584,6 +5948,71 @@ select.input-field {
   to { transform: rotate(360deg); }
 }
 
+/* ── 交易复盘结果（嵌入 tx tab） ── */
+.tx-ai-review {
+  display: flex;
+  justify-content: center;
+  padding: 0.75rem 0;
+}
+
+.trade-review-result-inline {
+  margin-top: 0.75rem;
+  padding: 0.75rem;
+  background: var(--color-bg-card);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  font-size: 0.85rem;
+  line-height: 1.7;
+}
+
+.trade-review-result-inline .result-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 0.5rem;
+  padding-bottom: 0.5rem;
+  border-bottom: 1px solid var(--color-border-light, var(--color-border));
+}
+
+.trade-review-result-inline .result-title {
+  font-weight: 600;
+  font-size: 0.9rem;
+}
+
+.trade-review-result-inline .result-time {
+  font-size: 0.72rem;
+  color: var(--color-text-muted);
+}
+
+.trade-review-result-inline .result-body {
+  max-height: 400px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+}
+
+.trade-review-result-inline .result-feedback {
+  display: flex;
+  gap: 0.5rem;
+  margin-top: 0.5rem;
+  padding-top: 0.5rem;
+  border-top: 1px solid var(--color-border-light, var(--color-border));
+}
+
+.btn-feedback {
+  background: none;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  padding: 0.25rem 0.5rem;
+  cursor: pointer;
+  font-size: 1rem;
+  transition: all 0.2s;
+}
+
+.btn-feedback:hover {
+  background: var(--color-bg-hover);
+  transform: scale(1.1);
+}
+
 /* ── 费率侵蚀计算器 ── */
 .fee-calc-grid {
   display: grid;
@@ -5623,7 +6052,7 @@ select.input-field {
   height: 18px;
   border-radius: 50%;
   background: var(--color-primary);
-  box-shadow: 0 2px 6px rgba(99, 102, 241, 0.3);
+  box-shadow: 0 2px 6px rgba(201, 168, 76, 0.3);
   cursor: pointer;
   transition: transform 0.15s;
 }
@@ -5737,4 +6166,140 @@ select.input-field {
   height: 60px;
   min-height: 60px;
 }
+
+/* ── 调仓策略配置 ── */
+.config-section {
+  margin-bottom: 1.25rem;
+  padding-bottom: 1rem;
+  border-bottom: 1px solid var(--color-border);
+}
+.config-section:last-child { border-bottom: none; margin-bottom: 0; padding-bottom: 0; }
+.config-section-title {
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--color-text);
+  margin-bottom: 0.4rem;
+}
+.config-hint {
+  font-size: 0.75rem;
+  color: var(--color-text-secondary);
+  margin-bottom: 0.5rem;
+}
+.config-current-strategy {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+.strategy-badge {
+  display: inline-block;
+  padding: 0.2rem 0.75rem;
+  background: var(--color-primary);
+  color: #fff;
+  border-radius: 999px;
+  font-size: 0.8rem;
+  font-weight: 600;
+  width: fit-content;
+}
+.strategy-desc {
+  font-size: 0.8rem;
+  color: var(--color-text-secondary);
+}
+.strategy-source {
+  font-size: 0.72rem;
+  color: var(--color-text-tertiary);
+  font-style: italic;
+}
+.strategy-presets-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 0.6rem;
+}
+.strategy-preset-card {
+  padding: 0.6rem 0.75rem;
+  border: 2px solid var(--color-border);
+  border-radius: 8px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.strategy-preset-card:hover { border-color: var(--color-primary-light); }
+.strategy-preset-card.active { border-color: var(--color-primary); background: var(--color-primary-bg); }
+.preset-name { font-size: 0.82rem; font-weight: 600; color: var(--color-text); }
+.preset-desc { font-size: 0.72rem; color: var(--color-text-secondary); margin-top: 0.15rem; }
+.preset-alloc { display: flex; flex-wrap: wrap; gap: 0.25rem; margin-top: 0.3rem; }
+.alloc-tag {
+  font-size: 0.68rem;
+  padding: 0.1rem 0.35rem;
+  background: var(--color-bg-secondary);
+  border-radius: 4px;
+  color: var(--color-text-secondary);
+}
+.preset-source { font-size: 0.65rem; color: var(--color-text-tertiary); margin-top: 0.2rem; font-style: italic; }
+.config-alloc-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: 0.4rem;
+}
+.config-alloc-item {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.3rem 0.5rem;
+  background: var(--color-bg-secondary);
+  border-radius: 6px;
+}
+.config-alloc-label { font-size: 0.78rem; color: var(--color-text-secondary); min-width: 3rem; }
+.config-alloc-value { font-size: 0.82rem; font-weight: 600; color: var(--color-text); }
+.config-kv-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  gap: 0.4rem;
+}
+.config-kv-item {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.3rem 0.5rem;
+  background: var(--color-bg-secondary);
+  border-radius: 6px;
+}
+.config-kv-key { font-size: 0.78rem; color: var(--color-text-secondary); min-width: 4rem; }
+.config-kv-val { font-size: 0.82rem; font-weight: 600; color: var(--color-text); }
+.config-input {
+  width: 60px;
+  padding: 0.15rem 0.3rem;
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+  font-size: 0.78rem;
+  background: var(--color-bg);
+  color: var(--color-text);
+  text-align: right;
+}
+.config-input:focus { outline: none; border-color: var(--color-primary); }
+.config-input-unit { font-size: 0.72rem; color: var(--color-text-secondary); }
+.arrow-icon { transition: transform 0.2s; }
+.arrow-icon.rotated { transform: rotate(180deg); }
+.config-history-list { display: flex; flex-direction: column; gap: 0.35rem; }
+.config-history-item {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.4rem 0.6rem;
+  background: var(--color-bg-secondary);
+  border-radius: 6px;
+  border-left: 3px solid transparent;
+}
+.config-history-item.active { border-left-color: var(--color-primary); background: var(--color-primary-bg); }
+.history-meta { display: flex; align-items: center; gap: 0.4rem; flex: 1; min-width: 0; }
+.history-id { font-size: 0.72rem; color: var(--color-text-tertiary); font-family: monospace; }
+.history-strategy { font-size: 0.78rem; font-weight: 600; color: var(--color-text); }
+.history-active-badge {
+  font-size: 0.65rem;
+  padding: 0.05rem 0.4rem;
+  background: var(--color-primary);
+  color: #fff;
+  border-radius: 999px;
+}
+.history-note { font-size: 0.72rem; color: var(--color-text-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.history-time { font-size: 0.7rem; color: var(--color-text-tertiary); white-space: nowrap; }
+.btn-xs { font-size: 0.7rem; padding: 0.15rem 0.4rem; }
 </style>

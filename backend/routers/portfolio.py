@@ -1079,7 +1079,7 @@ async def panorama_analysis_api(req: PanoramaAnalysisRequest):
         f"\n\n{news_section}"
     )
 
-    # 调用 LLM（带 90 秒超时）
+    # 调用 LLM（带 10 分钟超时）
     uid = f"panorama_{int(time.time())}"
     _track_agent(uid, "全景诊断分析师", "持仓诊断")
     try:
@@ -1093,7 +1093,7 @@ async def panorama_analysis_api(req: PanoramaAnalysisRequest):
             ],
             temperature=0.3,
             max_tokens=8192,
-        )), timeout=90)
+        )), timeout=600)
         result_text = response.choices[0].message.content or ""
         tokens = response.usage.total_tokens if response.usage else 0
     except asyncio.TimeoutError:

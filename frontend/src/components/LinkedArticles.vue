@@ -3,6 +3,10 @@ import { ref, computed, onMounted } from 'vue'
 import { marked } from 'marked'
 import { listLinkedArticles, uploadDocument, downloadDocument, deleteLinkedArticle, getDocumentContent, embedDocument, getDocumentChunks, testRagSearch } from '../api'
 import ConfirmDialog from './ConfirmDialog.vue'
+import AppToast from './AppToast.vue'
+import { useToast } from '../composables/useToast'
+
+const { showToast } = useToast()
 
 const documents = ref([])
 const loading = ref(false)
@@ -70,14 +74,14 @@ async function handleFiles(files) {
   for (const file of files) {
     const ext = '.' + file.name.split('.').pop().toLowerCase()
     if (!allowed.includes(ext)) {
-      alert(`不支持的文件类型: ${ext}，仅支持 .txt / .md / .pdf / .docx`)
+      showToast(`不支持的文件类型: ${ext}，仅支持 .txt / .md / .pdf / .docx`, 'error')
       continue
     }
     uploading.value = true
     try {
       await uploadDocument(file)
     } catch (e) {
-      alert(`上传失败 (${file.name}): ` + (e.response?.data?.detail || e.message))
+      showToast(`上传失败 (${file.name}): ` + (e.response?.data?.detail || e.message), 'error')
     }
   }
   uploading.value = false
@@ -113,7 +117,7 @@ async function downloadFile(item) {
     a.click()
     URL.revokeObjectURL(url)
   } catch (e) {
-    alert('下载失败: ' + (e.response?.data?.detail || e.message))
+    showToast('下载失败: ' + (e.response?.data?.detail || e.message), 'error')
   }
 }
 
@@ -136,10 +140,10 @@ async function doEmbed(item) {
   embeddingIds.value.add(item.id)
   try {
     const { data } = await embedDocument(item.id)
-    alert(`索引完成，共 ${data.chunks_indexed} 个文本块已入库`)
+    showToast(`索引完成，共 ${data.chunks_indexed} 个文本块已入库`, 'success')
     await loadDocuments()
   } catch (e) {
-    alert('索引失败: ' + (e.response?.data?.detail || e.message))
+    showToast('索引失败: ' + (e.response?.data?.detail || e.message), 'error')
   } finally {
     embeddingIds.value.delete(item.id)
   }
@@ -206,7 +210,7 @@ async function testSearch() {
     const { data } = await testRagSearch(testQuery.value)
     testResults.value = data
   } catch (e) {
-    alert('测试失败: ' + (e.response?.data?.detail || e.message))
+    showToast('测试失败: ' + (e.response?.data?.detail || e.message), 'error')
   } finally {
     testLoading.value = false
   }
@@ -411,6 +415,7 @@ onMounted(loadDocuments)
     confirm-text="确定" cancel-text="取消"
     @confirm="onConfirmOk" @cancel="onConfirmCancel"
   />
+  <AppToast />
 </template>
 
 <style scoped>
@@ -560,7 +565,7 @@ onMounted(loadDocuments)
 }
 
 .dark .doc-row.active {
-  background: rgba(99, 102, 241, 0.1);
+  background: rgba(201, 168, 76, 0.1);
 }
 
 .col-type { width: 60px; }
@@ -587,12 +592,12 @@ onMounted(loadDocuments)
 .type-txt { background: #dbeafe; color: #2563eb; }
 .type-md { background: #d1fae5; color: #059669; }
 .type-pdf { background: #fee2e2; color: #dc2626; }
-.type-docx, .type-doc { background: #e0e7ff; color: #4f46e5; }
+.type-docx, .type-doc { background: rgba(201, 168, 76, 0.10); color: #a88a3a; }
 .type-default { background: #f3f4f6; color: #6b7280; }
 .dark .type-txt { background: rgba(37,99,235,0.2); color: #60a5fa; }
 .dark .type-md { background: rgba(5,150,105,0.2); color: #34d399; }
 .dark .type-pdf { background: rgba(220,38,38,0.2); color: #f87171; }
-.dark .type-docx, .dark .type-doc { background: rgba(79,70,229,0.2); color: #a5b4fc; }
+.dark .type-docx, .dark .type-doc { background: rgba(201, 168, 76, 0.18); color: #d4b65a; }
 .dark .type-default { background: rgba(107,114,128,0.2); color: #9ca3af; }
 
 /* Status badges */
@@ -654,7 +659,7 @@ onMounted(loadDocuments)
 }
 
 .dark .action-btn.btn-active {
-  background: rgba(99, 102, 241, 0.15);
+  background: rgba(201, 168, 76, 0.15);
 }
 
 .delete-btn:hover {
@@ -668,7 +673,7 @@ onMounted(loadDocuments)
 }
 
 .dark .embed-btn:hover {
-  background: rgba(99, 102, 241, 0.15);
+  background: rgba(201, 168, 76, 0.15);
 }
 
 .embed-btn:disabled {
@@ -936,7 +941,7 @@ onMounted(loadDocuments)
 }
 
 .dark .result-type {
-  background: rgba(99, 102, 241, 0.15);
+  background: rgba(201, 168, 76, 0.15);
   color: var(--color-primary-300);
 }
 

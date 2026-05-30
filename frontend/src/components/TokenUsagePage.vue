@@ -1,6 +1,7 @@
 <script setup>
 import { ref, computed, onMounted, onUnmounted } from 'vue'
-import { getTokenUsage, getTokenUsageRecent, getTokenUsageSummary, getTokenUsageByCaller, getTokenUsageDaily, getPerformanceStats, getPerformanceByAgent, getRunningAgents } from '../api'
+import { getTokenUsage, getTokenUsageRecent, getTokenUsageSummary, getTokenUsageByCaller, getTokenUsageDaily, getPerformanceStats, getPerformanceByAgent, getRunningAgents, clearTokenUsage } from '../api'
+import ConfirmDialog from './ConfirmDialog.vue'
 
 const loading = ref(true)
 const summary = ref({ today: {}, total_calls: 0, total_tokens: 0, avg_per_call: 0 })
@@ -14,6 +15,7 @@ const totalPages = computed(() => Math.ceil(total.value / pageSize) || 1)
 const perfStats = ref({ total_runs: 0, avg_duration_ms: 0, max_duration_ms: 0, slow_calls: 0, unique_agents: 0 })
 const perfByAgent = ref([])
 const activePerfTab = ref('stats')
+const confirm = ref({ visible: false, title: '', message: '', danger: false, onConfirm: null })
 
 // ── 运行中的 Agent ──
 const runningAgents = ref([])
@@ -97,6 +99,24 @@ onMounted(() => {
 })
 onUnmounted(stopPolling)
 
+function confirmClearTokenUsage() {
+  confirm.value = {
+    visible: true,
+    title: '清空 Token 用量数据',
+    message: '确定要清空所有 Token 用量记录吗？此操作不可撤销。',
+    danger: true,
+    onConfirm: async () => {
+      confirm.value.visible = false
+      try {
+        await clearTokenUsage()
+        loadAll()
+      } catch (e) {
+        console.error('Failed to clear token usage:', e)
+      }
+    }
+  }
+}
+
 function formatTime(ts) {
   if (!ts) return ''
   const d = new Date(ts.replace(' ', 'T'))
@@ -121,23 +141,31 @@ function formatDate(ts) {
 }
 
 const LABEL_MAP = {
-  orchestrator: 'Orchestrator 主控',
-  clarify: '需求澄清',
-  article_analysis: '文章分析',
-  agent_chat: 'Agent 对话',
-  agent_tools: 'Agent 工具调用',
-  chat: '自由问答',
-  market_analysis: '市场日报分析师',
-  diversification_analysis: '分散度分析师',
-  portfolio_analysis: '持仓 AI 分析',
+  orchestrator: '🧠 Orchestrator 主控',
+  clarify: '🔍 需求澄清',
+  article_analysis: '📰 文章分析',
+  agent_chat: '💬 Agent 对话',
+  agent_tools: '🔧 Agent 工具调用',
+  chat: '💭 自由问答',
+  market_analysis: '📊 市场日报分析师',
+  diversification_analysis: '🎯 分散度分析师',
+  portfolio_analysis: '📈 持仓 AI 分析',
+  daily_report: '📋 每日简报',
+  hotspots_analysis: '🔥 热点分析专家',
+  bond_recommend: '💰 债券配置顾问',
+  panorama_analysis: '🌐 全景诊断分析师',
+  trade_review: '📊 交易复盘分析师',
+  deep_dive: '🔬 基金深度分析师',
+  what_if: '🔮 情景推演分析师',
+  index_deep_analysis: '📉 指数深度分析师',
 }
 
 const AGENT_NAME_MAP = {
-  valuation_expert: '估值专家',
-  market_analyst: '择时分析师',
-  risk_assessor: '风险评估师',
-  allocation_advisor: '资产配置师',
-  fund_analyst: '基金分析师',
+  valuation_expert: '📊 估值专家',
+  market_analyst: '📰 择时分析师',
+  risk_assessor: '⚠️ 风险评估师',
+  allocation_advisor: '💰 资产配置师',
+  fund_analyst: '📈 基金分析师',
 }
 
 function callerLabel(c) {
@@ -169,11 +197,25 @@ const maxCallerTokens = computed(() => {
     <div class="page-header">
       <h2 class="page-title">Token 用量</h2>
       <span class="page-desc">LLM 调用消耗统计</span>
-      <button class="btn btn-outline btn-sm" style="margin-left: auto;" @click="loadAll" :disabled="loading">
-        <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
-        刷新
-      </button>
+      <div style="display: flex; gap: 0.5rem; margin-left: auto;">
+        <button class="btn-outline btn-sm" @click="loadAll" :disabled="loading">
+          <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
+          刷新
+        </button>
+        <button class="btn-outline btn-sm btn-danger-text" @click="confirmClearTokenUsage">
+          清空数据
+        </button>
+      </div>
     </div>
+
+    <ConfirmDialog
+      :visible="confirm.visible"
+      :title="confirm.title"
+      :message="confirm.message"
+      :danger="confirm.danger"
+      @confirm="confirm.onConfirm"
+      @cancel="confirm.visible = false"
+    />
 
     <!-- 运行中的 Agent -->
     <div v-if="runningAgents.length > 0" class="running-agents-bar">
@@ -373,8 +415,8 @@ const maxCallerTokens = computed(() => {
 
 /* ── 运行中的 Agent ── */
 .running-agents-bar {
-  background: linear-gradient(135deg, rgba(99, 102, 241, 0.05), rgba(99, 102, 241, 0.02));
-  border: 1px solid rgba(99, 102, 241, 0.2);
+  background: linear-gradient(135deg, rgba(201, 168, 76, 0.05), rgba(201, 168, 76, 0.02));
+  border: 1px solid rgba(201, 168, 76, 0.2);
   border-radius: var(--radius-md);
   padding: 0.75rem 1rem;
   display: flex;
@@ -870,5 +912,14 @@ const maxCallerTokens = computed(() => {
 .page-dots {
   border: none;
   color: var(--color-text-muted);
+}
+
+.btn-danger-text {
+  color: #ef4444;
+  border-color: #ef4444;
+}
+
+.btn-danger-text:hover {
+  background: rgba(239, 68, 68, 0.1);
 }
 </style>

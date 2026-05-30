@@ -1,7 +1,11 @@
 <script setup>
-import { ref, onMounted } from 'vue'
-import { getDashboard, runAnalysis, runPanoramaAnalysis, getHotTopics, getDailyReport, regenerateDailyReport, submitDailyReportFeedback, listPanoramaRecords, getHotspotsAnalysis, getLatestHotspotsAnalysis, getRecommendations, getRecommendationStats, submitRecommendationFeedback, getBondRecommend, getRebalancingSuggestion, autoVerifyRecommendations } from '../api'
+import { ref, onMounted, onActivated } from 'vue'
+import { getDashboard, runAnalysis, runPanoramaAnalysis, getHotTopics, getDailyReport, regenerateDailyReport, submitDailyReportFeedback, listPanoramaRecords, getHotspotsAnalysis, getLatestHotspotsAnalysis, getRecommendations, getRecommendationStats, submitRecommendationFeedback, getBondRecommend, listBondRecommendRecords, autoVerifyRecommendations, fetchRecentValuations } from '../api'
 import ConfirmDialog from './ConfirmDialog.vue'
+import AppToast from './AppToast.vue'
+import { useToast } from '../composables/useToast'
+
+const { showToast } = useToast()
 
 const emit = defineEmits(['navigate'])
 
@@ -9,6 +13,7 @@ const emit = defineEmits(['navigate'])
 const confirm = ref({ visible: false, title: '', message: '', danger: false, onConfirm: null })
 
 const loading = ref(true)
+const fetchingValuation = ref(false)
 const error = ref(null)
 const data = ref(null)
 
@@ -54,7 +59,7 @@ function confirmRegenerateReport() {
       try {
         const { data } = await regenerateDailyReport()
         if (data.ok) {
-          const res = await getDailyReport()
+          const { data: res } = await getDailyReport()
           if (res?.has_report) dailyReport.value = res.report
         }
       } catch (e) {
@@ -87,7 +92,8 @@ function toggleBriefingFeedback(rating) {
 async function submitBriefingFeedback(rating, comment = '') {
   briefingFeedback.value.sending = true
   try {
-    await submitDailyReportFeedback({ rating, comment })
+    const reportSummary = dailyReport.value?.result?.substring(0, 500) || ''
+    await submitDailyReportFeedback({ rating, comment, reportSummary })
     briefingFeedback.value.sent = true
     briefingFeedback.value.showComment = false
   } catch (e) {
@@ -103,10 +109,7 @@ async function submitBriefingFeedbackWithComment() {
   await submitBriefingFeedback('unhelpful', comment)
 }
 
-// ── 再平衡 AI 分析 ──
-const rebalanceLoading = ref(false)
-const rebalanceResult = ref(null)
-const showRebalance = ref(false)
+// ── 全景诊断 AI 分析 ──
 
 onMounted(async () => {
   // 先加载缓存的最新热点分析结果（要在 loadDailyReport 之前，防止被覆盖）
@@ -126,14 +129,39 @@ onMounted(async () => {
     loadDailyReport(),
     loadRecHistory(),
   ])
-  // 自动加载调仓分析（快速，无需等待 AI）
+
+  // 自动加载最新全景诊断结果
   try {
-    const { data: res } = await getRebalancingSuggestion()
-    if (res && !res.error) {
-      rebalanceResult.value = res
-      showRebalance.value = true
+    const { data: recs } = await listPanoramaRecords(1)
+    console.log('panorama records:', recs)
+    if (recs?.records?.length) {
+      panoramaResult.value = recs.records[0]
+      console.log('panoramaResult set:', panoramaResult.value)
     }
-  } catch (_) {}
+  } catch (e) {
+    console.error('load panorama failed:', e)
+  }
+
+  // 自动加载最新债券推荐结果
+  try {
+    const { data: bondRecs } = await listBondRecommendRecords(1)
+    if (bondRecs?.records?.length) {
+      const rec = bondRecs.records[0]
+      bondResult.value = typeof rec.result_data === 'string' ? JSON.parse(rec.result_data) : rec.result_data
+    }
+  } catch (e) {
+    console.error('load bond recommend failed:', e)
+  }
+})
+
+// KeepAlive 组件激活时重新加载数据（切换页面回来时触发）
+onActivated(async () => {
+  await Promise.all([
+    loadDashboard(),
+    loadHotTopics(),
+    loadDailyReport(),
+    loadRecHistory(),
+  ])
 })
 
 async function loadDailyReport() {
@@ -156,7 +184,10 @@ async function loadHotTopics() {
     const { data: res } = await getHotTopics()
     if (res?.news?.length) {
       hotTopics.value = res.news
-      hotTopicsFetchedAt.value = res.fetched_at || ''
+      // 只在没有本地分析时间时，才用后端返回的时间
+      if (!hotTopicsAnalyzedAt.value) {
+        hotTopicsFetchedAt.value = res.fetched_at || ''
+      }
     }
   } catch (e) {
     // 静默失败，不影响看板主流程
@@ -165,16 +196,42 @@ async function loadHotTopics() {
   }
 }
 
+// 本地记录的分析时间（不从后端获取）
+const cashAnalyzedAt = ref('')
+const hotTopicsAnalyzedAt = ref('')
+
 async function loadDashboard() {
   loading.value = true
   error.value = null
   try {
     const { data: res } = await getDashboard()
     data.value = res
+    // 用本地记录的时间覆盖后端返回的时间
+    if (cashAnalyzedAt.value) {
+      data.value.cash_updated_at = cashAnalyzedAt.value
+    }
   } catch (e) {
     error.value = e.response?.data?.detail || e.message || '加载失败'
   } finally {
     loading.value = false
+  }
+}
+
+async function handleFetchValuations() {
+  fetchingValuation.value = true
+  try {
+    const { data: res } = await fetchRecentValuations()
+    // 只更新低估指数数据，不重新加载整个 Dashboard（避免页面闪 loading）
+    const { data: dashData } = await getDashboard()
+    if (data.value) {
+      data.value.undervalued_indexes = dashData.undervalued_indexes
+      data.value.undervalued_data_date = dashData.undervalued_data_date
+      data.value.undervalued_updated_at = res.checked_at || dashData.undervalued_updated_at
+    }
+  } catch (e) {
+    console.error('抓取估值失败:', e)
+  } finally {
+    fetchingValuation.value = false
   }
 }
 
@@ -227,22 +284,16 @@ async function loadRecHistory() {
 }
 
 // ── 推荐反馈（进化系统） ──
-const feedbackToast = ref({ show: false, message: '', type: '' })
 const feedbackSending = ref({})
-
-function showFeedbackToast(message, type = 'success') {
-  feedbackToast.value = { show: true, message, type }
-  setTimeout(() => { feedbackToast.value.show = false }, 2500)
-}
 
 async function submitFeedback(rec, rating) {
   if (feedbackSending.value[rec.id]) return
   feedbackSending.value[rec.id] = rating
   try {
     await submitRecommendationFeedback(rec.id, { rating, comment: '' })
-    showFeedbackToast(rating === 'helpful' ? '已标记有用' : '已标记反馈')
+    showToast(rating === 'helpful' ? '已标记有用' : '已标记反馈', 'success')
   } catch (e) {
-    showFeedbackToast('提交失败', 'error')
+    showToast('提交失败', 'error')
   } finally {
     setTimeout(() => { feedbackSending.value[rec.id] = false }, 2000)
   }
@@ -257,10 +308,15 @@ async function handleBondRecommend() {
   bondLoading.value = true
   bondResult.value = null
   try {
-    const { data } = await getBondRecommend()
-    bondResult.value = data.result
+    const { data: res } = await getBondRecommend()
+    bondResult.value = res.result
+    // 记录分析完成的时间
+    cashAnalyzedAt.value = new Date().toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
+    if (data.value) {
+      data.value.cash_updated_at = cashAnalyzedAt.value
+    }
   } catch (e) {
-    alert('AI 债券推荐失败：' + (e.response?.data?.detail || e.message))
+    showToast('AI 债券推荐失败：' + (e.response?.data?.detail || e.message), 'error')
   } finally {
     bondLoading.value = false
   }
@@ -283,6 +339,9 @@ async function generateHotspots() {
   try {
     const { data } = await getHotspotsAnalysis()
     hotspotsAnalysis.value = data
+    // 记录分析完成的时间
+    hotTopicsAnalyzedAt.value = new Date().toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
+    hotTopicsFetchedAt.value = hotTopicsAnalyzedAt.value
     // 生成后自动验证旧的 pending 推荐，并刷新统计
     try { await autoVerifyRecommendations() } catch (_) {}
     loadRecHistory()
@@ -308,32 +367,26 @@ function confirmHotspots() {
   }
 }
 
-// ── 生成再平衡建议 ──
-async function generateRebalance() {
-  rebalanceLoading.value = true
-  rebalanceResult.value = null
-  showRebalance.value = true
-  try {
-    const { data: res } = await getRebalancingSuggestion()
-    rebalanceResult.value = res
-  } catch (e) {
-    rebalanceResult.value = { error: '分析失败: ' + (e.response?.data?.detail || e.message) }
-  } finally {
-    rebalanceLoading.value = false
-  }
-}
+// ── 全景诊断 AI 分析 ──
+const panoramaLoading = ref(false)
+const panoramaResult = ref(null)
 
-async function handleRebalance() {
-  if (rebalanceResult.value) {
-    confirm.value = {
-      visible: true,
-      title: '刷新调仓分析',
-      message: '将重新计算持仓偏离度和目标配比，是否继续？',
-      danger: false,
-      onConfirm: () => { confirm.value.visible = false; generateRebalance() }
+async function generatePanorama() {
+  panoramaLoading.value = true
+  panoramaResult.value = null
+  try {
+    const { data: res } = await runPanoramaAnalysis()
+    panoramaResult.value = res
+    // 重新获取持仓健康度数据（不触发全局 loading）
+    const { data: dashData } = await getDashboard()
+    if (data.value && dashData.portfolio_health) {
+      data.value.portfolio_health = dashData.portfolio_health
+      data.value.portfolio_updated_at = dashData.portfolio_updated_at
     }
-  } else {
-    generateRebalance()
+  } catch (e) {
+    panoramaResult.value = { error: '分析失败: ' + (e.response?.data?.detail || e.message) }
+  } finally {
+    panoramaLoading.value = false
   }
 }
 
@@ -467,10 +520,16 @@ const concentrationIcon = { low: '✅', moderate: '⚡', high: '⚠️' }
           <div class="card-header-actions">
             <span class="card-data-time">{{ data?.undervalued_updated_at || data?.undervalued_data_date || '' }}</span>
             <span v-if="data?.undervalued_indexes?.length" class="card-badge">{{ data.undervalued_indexes.length }}只</span>
-            <button class="btn-icon-refresh" @click="loadDashboard" :disabled="loading" title="刷新数据">
-              <svg :class="['icon-refresh', { 'spinning': loading }]" width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <button
+              class="btn-ai-action btn-card-refresh"
+              :class="{ 'btn-loading': fetchingValuation }"
+              :disabled="fetchingValuation"
+              @click="handleFetchValuations"
+            >
+              <svg :class="['icon-spin', { 'spinning': fetchingValuation }]" width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
               </svg>
+              <span>{{ fetchingValuation ? '抓取中...' : '刷新' }}</span>
             </button>
           </div>
         </div>
@@ -534,25 +593,15 @@ const concentrationIcon = { low: '✅', moderate: '⚡', high: '⚠️' }
             <button
               v-if="data?.portfolio_health"
               class="btn-ai-action"
-              :class="{ 'btn-loading': rebalanceLoading }"
-              :disabled="rebalanceLoading"
-              @click="handleRebalance"
+              :class="{ 'btn-loading': panoramaLoading }"
+              :disabled="panoramaLoading"
+              @click="generatePanorama"
             >
-              <svg :class="['icon-spin', { 'spinning': rebalanceLoading }]" width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <svg :class="['icon-spin', { 'spinning': panoramaLoading }]" width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
               </svg>
-              <span>{{ rebalanceResult ? '重新生成' : 'AI 再平衡建议' }}</span>
+              <span>{{ panoramaLoading ? '分析中...' : 'AI 全景诊断' }}</span>
               <span class="ai-agent-tooltip">全景诊断分析师</span>
-            </button>
-            <button
-              v-if="rebalanceResult"
-              class="btn-toggle"
-              @click="showRebalance = !showRebalance"
-              :title="showRebalance ? '收起建议' : '展开建议'"
-            >
-              <svg :class="['toggle-arrow', { 'expanded': showRebalance }]" width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/>
-              </svg>
             </button>
           </div>
         </div>
@@ -604,55 +653,16 @@ const concentrationIcon = { low: '✅', moderate: '⚡', high: '⚠️' }
             </div>
           </div>
 
-          <!-- AI 再平衡建议 -->
-          <div v-if="showRebalance" class="rebalance-section">
-            <div v-if="rebalanceLoading" class="card-loading">
-              <div class="spinner"></div>
-              <p>正在分析偏离度...</p>
+          <!-- AI 全景诊断结果 -->
+          <div v-if="panoramaResult && !panoramaResult.error" class="panorama-section">
+            <div class="panorama-header">
+              <span class="panorama-title">AI 全景诊断</span>
+              <span class="panorama-time">{{ panoramaResult.created_at?.slice(0, 16) }}</span>
             </div>
-            <div v-else-if="rebalanceResult && !rebalanceResult.error" class="rebalance-result">
-              <!-- 偏离度指示 -->
-              <div class="rebalance-header">
-                <span class="rebalance-title">调仓分析</span>
-                <span :class="['drift-badge', rebalanceResult.drift_level]">
-                  {{ { balanced: '已平衡', slight: '轻微偏离', significant: '显著偏离' }[rebalanceResult.drift_level] || '未知' }}
-                </span>
-                <span class="market-tag">{{ rebalanceResult.market_level }} · {{ rebalanceResult.market_avg_percentile }}%</span>
-              </div>
-
-              <!-- 配比对比 -->
-              <div class="allocation-compare">
-                <div class="alloc-row" v-for="cat in ['equity','bond','index','hybrid','money','qdii','cash']" :key="cat"
-                  v-show="(rebalanceResult.current_allocation[cat] || 0) > 0.001 || (rebalanceResult.target_allocation[cat] || 0) > 0.001">
-                  <span class="alloc-label">{{ {equity:'股票型',bond:'债券型',index:'指数型',hybrid:'混合型',money:'货币型',qdii:'QDII',cash:'现金'}[cat] || cat }}</span>
-                  <div class="alloc-bars">
-                    <div class="alloc-bar-current" :style="{ width: Math.min((rebalanceResult.current_allocation[cat]||0)*100, 100) + '%' }"></div>
-                    <div class="alloc-bar-target" :style="{ width: Math.min((rebalanceResult.target_allocation[cat]||0)*100, 100) + '%' }"></div>
-                  </div>
-                  <span class="alloc-values">
-                    <span class="alloc-current">{{ ((rebalanceResult.current_allocation[cat]||0)*100).toFixed(0) }}%</span>
-                    <span class="alloc-arrow">→</span>
-                    <span class="alloc-target">{{ ((rebalanceResult.target_allocation[cat]||0)*100).toFixed(0) }}%</span>
-                  </span>
-                </div>
-              </div>
-
-              <!-- 调仓建议 -->
-              <div v-if="rebalanceResult.suggestions?.length" class="rebalance-suggestions">
-                <div v-for="(s, i) in rebalanceResult.suggestions" :key="i" class="suggestion-item">
-                  <span :class="['suggestion-action', s.action]">
-                    {{ {buy:'买入',sell:'卖出',buy_index:'定投',deploy_cash:'配置现金',reserve_cash:'保留现金'}[s.action] || s.action }}
-                  </span>
-                  <span class="suggestion-detail">
-                    {{ s.fund_name || s.category }} · {{ s.reason }}
-                    <span v-if="s.amount_range" class="suggestion-amount">{{ s.amount_range }}</span>
-                  </span>
-                </div>
-              </div>
-            </div>
-            <div v-else-if="rebalanceResult?.error" class="rebalance-result">
-              <span class="rebalance-content" style="color: var(--text-muted)">{{ rebalanceResult.error }}</span>
-            </div>
+            <div class="panorama-content" v-html="renderBriefing(panoramaResult.result_data)"></div>
+          </div>
+          <div v-else-if="panoramaResult?.error" class="panorama-section">
+            <span class="panorama-error">{{ panoramaResult.error }}</span>
           </div>
 
           <div class="card-actions">
@@ -768,23 +778,34 @@ const concentrationIcon = { low: '✅', moderate: '⚡', high: '⚠️' }
           <span class="verify-stat">总计 {{ recStats.total }} 条</span>
           <span v-if="recStats.verified > 0" class="verify-stat correct">正确 {{ recStats.correct }}</span>
           <span v-if="recStats.verified > 0" class="verify-stat wrong">错误 {{ recStats.wrong }}</span>
+          <span v-if="recStats.flat > 0" class="verify-stat flat">平局 {{ recStats.flat }}</span>
+          <span v-if="recStats.pending_not_due > 0" class="verify-stat pending">待到期 {{ recStats.pending_not_due }}</span>
           <span v-if="recStats.accuracy != null" class="verify-accuracy">命中率 {{ recStats.accuracy }}%</span>
           <span v-else class="verify-accuracy pending">暂无验证数据</span>
           <svg width="12" height="12" fill="none" stroke="currentColor" viewBox="0 0 24 24" :class="{ rotated: showVerify }">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/>
           </svg>
         </div>
-        <div v-if="showVerify && recHistory?.length" class="verify-list">
-          <div v-for="rec in recHistory.slice(0, 10)" :key="rec.id" class="verify-item">
-            <span :class="['rec-badge', 'rec-' + rec.direction]">
-              {{ rec.direction === 'up' ? '关注' : rec.direction === 'down' ? '回避' : '观察' }}
-            </span>
-            <span class="verify-name">{{ rec.index_name }}</span>
-            <span :class="['verify-status', 'vs-' + rec.status]">
-              {{ rec.status === 'correct' ? '✅' : rec.status === 'wrong' ? '❌' : '⏳' }}
-              {{ rec.status === 'correct' ? '正确' : rec.status === 'wrong' ? '错误' : '待验证' }}
-              <template v-if="rec.change_pct != null">({{ rec.change_pct > 0 ? '+' : '' }}{{ rec.change_pct }}%)</template>
-            </span>
+        <div v-if="showVerify" class="verify-detail">
+          <div class="verify-hint">验证规则：T+5 交易日后自动对比行情，涨跌 &lt;2% 为平局；观察方向对比沪深300</div>
+          <div v-if="recStats.watch_total > 0" class="verify-watch-stats">
+            <span>观察方向：{{ recStats.watch_total }} 条</span>
+            <span v-if="recStats.watch_correct > 0" class="correct">跑赢基准 {{ recStats.watch_correct }}</span>
+            <span v-if="recStats.watch_wrong > 0" class="wrong">跑输基准 {{ recStats.watch_wrong }}</span>
+          </div>
+          <div v-if="recHistory?.length" class="verify-list">
+            <div v-for="rec in recHistory.slice(0, 10)" :key="rec.id" class="verify-item">
+              <span :class="['rec-badge', 'rec-' + rec.direction]">
+                {{ rec.direction === 'up' ? '关注' : rec.direction === 'down' ? '回避' : '观察' }}
+              </span>
+              <span class="verify-name">{{ rec.index_name }}</span>
+              <span :class="['verify-status', 'vs-' + rec.status]">
+                {{ rec.status === 'correct' ? '✅' : rec.status === 'wrong' ? '❌' : rec.status === 'flat' ? '➡️' : '⏳' }}
+                {{ rec.status === 'correct' ? '正确' : rec.status === 'wrong' ? '错误' : rec.status === 'flat' ? '平局' : '待验证' }}
+                <template v-if="rec.change_pct != null">({{ rec.change_pct > 0 ? '+' : '' }}{{ rec.change_pct }}%)</template>
+                <template v-if="rec.benchmark_change_pct != null"> vs 基准{{ rec.benchmark_change_pct > 0 ? '+' : '' }}{{ rec.benchmark_change_pct }}%</template>
+              </span>
+            </div>
           </div>
         </div>
       </div>
@@ -879,7 +900,7 @@ const concentrationIcon = { low: '✅', moderate: '⚡', high: '⚠️' }
                   <span class="alloc-bar-pct">{{ item.ratio }}%</span>
                 </div>
                 <div class="alloc-bar-bg">
-                  <div class="alloc-bar-fill" :style="{ width: item.ratio + '%', background: ['#6366f1', '#10b981', '#f59e0b'][i % 3] }"></div>
+                  <div class="alloc-bar-fill" :style="{ width: item.ratio + '%', background: ['#c9a84c', '#10b981', '#f59e0b'][i % 3] }"></div>
                 </div>
                 <div class="alloc-bar-desc">{{ item.desc }}</div>
               </div>
@@ -936,24 +957,16 @@ const concentrationIcon = { low: '✅', moderate: '⚡', high: '⚠️' }
     </div>
   </div>
 
-  <!-- 反馈 Toast -->
-  <Teleport to="body">
-    <Transition name="fade">
-      <div v-if="feedbackToast.show" :class="['toast', 'toast-' + feedbackToast.type]">
-        {{ feedbackToast.message }}
-      </div>
-    </Transition>
-  </Teleport>
-
   <!-- 二次确认弹窗 -->
   <ConfirmDialog
     :visible="confirm.visible"
     :title="confirm.title"
     :message="confirm.message"
     :danger="confirm.danger"
-    @confirm="confirm.onConfirm"
+    @confirm="() => confirm.onConfirm?.()"
     @cancel="confirm.visible = false"
   />
+  <AppToast />
 </template>
 
 <style scoped>
@@ -983,10 +996,6 @@ const concentrationIcon = { low: '✅', moderate: '⚡', high: '⚠️' }
   animation: spin 1s linear infinite;
 }
 
-@keyframes spin {
-  to { transform: rotate(360deg); }
-}
-
 .dash-error {
   padding: 2rem;
   display: flex;
@@ -1001,8 +1010,8 @@ const concentrationIcon = { low: '✅', moderate: '⚡', high: '⚠️' }
   margin-bottom: 1rem;
   padding: 0;
   overflow: hidden;
-  border: 1px solid rgba(99, 102, 241, 0.15);
-  background: linear-gradient(135deg, rgba(99, 102, 241, 0.03) 0%, rgba(248, 250, 252, 0.9) 100%);
+  border: 1px solid rgba(212, 168, 67, 0.18);
+  background: linear-gradient(135deg, rgba(212, 168, 67, 0.04) 0%, var(--color-bg-card) 100%);
 }
 .briefing-header {
   display: flex;
@@ -1011,10 +1020,9 @@ const concentrationIcon = { low: '✅', moderate: '⚡', high: '⚠️' }
   padding: 0.85rem 1.25rem;
   cursor: pointer;
   user-select: none;
-  transition: background 0.2s;
 }
 .briefing-header:hover {
-  background: rgba(99, 102, 241, 0.04);
+  background: rgba(212, 168, 67, 0.05);
 }
 .briefing-title-row {
   display: flex;
@@ -1033,14 +1041,18 @@ const concentrationIcon = { low: '✅', moderate: '⚡', high: '⚠️' }
 .briefing-time {
   font-size: 0.78rem;
   color: var(--color-text-muted);
-  background: rgba(99, 102, 241, 0.08);
+  background: var(--color-primary-50);
   padding: 0.15rem 0.5rem;
   border-radius: 999px;
+  margin-right: 0.5rem;
 }
 .btn-briefing-gen {
   padding: 0.3rem 0.65rem;
   font-size: 0.75rem;
-  margin-left: 0.4rem;
+}
+.btn-card-refresh {
+  padding: 0.3rem 0.65rem;
+  font-size: 0.75rem;
 }
 .briefing-chevron {
   color: var(--color-text-muted);
@@ -1145,8 +1157,8 @@ const concentrationIcon = { low: '✅', moderate: '⚡', high: '⚠️' }
   align-items: center;
   gap: 0.75rem;
   padding: 0.75rem 1rem;
-  background: #fef3c7;
-  border: 1px solid #fbbf24;
+  background: var(--color-warning-bg);
+  border: 1px solid var(--color-warning-border, #fbbf24);
   border-radius: 8px;
   margin-bottom: 1rem;
 }
@@ -1159,11 +1171,11 @@ const concentrationIcon = { low: '✅', moderate: '⚡', high: '⚠️' }
 .stale-warning-title {
   font-size: 0.9rem;
   font-weight: 600;
-  color: #92400e;
+  color: var(--color-warning-text, #92400e);
 }
 .stale-warning-list {
   font-size: 0.8rem;
-  color: #a16207;
+  color: var(--color-warning-text-secondary, #a16207);
   line-height: 1.4;
 }
 
@@ -1171,8 +1183,8 @@ const concentrationIcon = { low: '✅', moderate: '⚡', high: '⚠️' }
 .bond-ai-result {
   margin-top: 1rem;
   padding: 0.75rem;
-  background: #f0f9ff;
-  border: 1px solid #bae6fd;
+  background: var(--color-info-bg);
+  border: 1px solid var(--color-border);
   border-radius: 8px;
 }
 .bond-ai-loading {
@@ -1191,21 +1203,21 @@ const concentrationIcon = { low: '✅', moderate: '⚡', high: '⚠️' }
 .bond-ai-summary {
   font-size: 1rem;
   font-weight: 600;
-  color: #0369a1;
+  color: var(--color-primary);
 }
 .bond-ai-market {
   font-size: 0.8rem;
-  color: #0284c7;
+  color: var(--color-text-secondary);
 }
 .bond-ai-analysis {
   font-size: 0.8rem;
-  color: #475569;
+  color: var(--color-text-secondary);
   margin-bottom: 0.5rem;
   line-height: 1.4;
 }
 .bond-ai-label {
   font-weight: 600;
-  color: #334155;
+  color: var(--color-text-primary);
 }
 .bond-rec-list {
   display: flex;
@@ -1214,8 +1226,8 @@ const concentrationIcon = { low: '✅', moderate: '⚡', high: '⚠️' }
 }
 .bond-rec-item {
   padding: 0.5rem;
-  background: white;
-  border: 1px solid #e2e8f0;
+  background: var(--color-bg-card);
+  border: 1px solid var(--color-border);
   border-radius: 6px;
 }
 .bond-rec-head {
@@ -1227,19 +1239,19 @@ const concentrationIcon = { low: '✅', moderate: '⚡', high: '⚠️' }
 .bond-rec-name {
   font-weight: 600;
   font-size: 0.85rem;
-  color: #0f172a;
+  color: var(--color-text-primary);
 }
 .bond-rec-code {
   font-size: 0.75rem;
-  color: #64748b;
+  color: var(--color-text-muted);
   font-family: monospace;
 }
 .bond-rec-type {
   font-size: 0.7rem;
   padding: 1px 6px;
   border-radius: 4px;
-  background: #dbeafe;
-  color: #1d4ed8;
+  background: var(--color-primary-100);
+  color: var(--color-primary-700);
 }
 .bond-rec-body {
   display: flex;
@@ -1250,22 +1262,22 @@ const concentrationIcon = { low: '✅', moderate: '⚡', high: '⚠️' }
 }
 .bond-rec-reason {
   font-size: 0.78rem;
-  color: #475569;
+  color: var(--color-text-secondary);
   flex: 1;
 }
 .bond-rec-amount {
   font-size: 0.85rem;
   font-weight: 600;
-  color: #059669;
+  color: var(--color-success, #059669);
 }
 .bond-rec-desc {
   font-size: 0.7rem;
-  color: #94a3b8;
+  color: var(--color-text-muted);
 }
 .bond-rec-alt {
   margin-top: 0.4rem;
   font-size: 0.78rem;
-  color: #78716c;
+  color: var(--color-text-muted);
   font-style: italic;
 }
 
@@ -1288,13 +1300,15 @@ const concentrationIcon = { low: '✅', moderate: '⚡', high: '⚠️' }
   display: flex;
   flex-direction: column;
   gap: 1rem;
-  background: linear-gradient(135deg, var(--color-bg-card) 0%, rgba(248, 250, 252, 0.8) 100%);
+  background: var(--color-bg-card);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-xl);
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04), 0 4px 12px rgba(0, 0, 0, 0.02);
-  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  box-shadow: var(--shadow-sm);
+  transition: box-shadow 0.3s cubic-bezier(0.4, 0, 0.2, 1), border-color 0.3s ease;
   position: relative;
   overflow: hidden;
+  min-height: 420px;
+  max-height: 540px;
 }
 
 .dash-card::before {
@@ -1310,8 +1324,8 @@ const concentrationIcon = { low: '✅', moderate: '⚡', high: '⚠️' }
 }
 
 .dash-card:hover {
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.06), 0 8px 24px rgba(0, 0, 0, 0.04);
-  transform: translateY(-2px);
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4), 0 0 24px rgba(212, 168, 67, 0.06);
+  border-color: rgba(212, 168, 67, 0.2);
 }
 
 .dash-card:hover::before {
@@ -1346,16 +1360,19 @@ const concentrationIcon = { low: '✅', moderate: '⚡', high: '⚠️' }
   font-size: 0.72rem;
   padding: 0.2rem 0.6rem;
   border-radius: 999px;
-  background: linear-gradient(135deg, var(--color-primary-bg), rgba(99, 102, 241, 0.1));
+  background: var(--color-primary-50);
   color: var(--color-primary);
   font-weight: 700;
-  border: 1px solid rgba(99, 102, 241, 0.15);
+  border: 1px solid rgba(212, 168, 67, 0.2);
 }
 
 .card-body {
   display: flex;
   flex-direction: column;
   gap: 0.65rem;
+  flex: 1;
+  overflow-y: auto;
+  min-height: 0;
 }
 
 .card-empty {
@@ -1483,8 +1500,8 @@ const concentrationIcon = { low: '✅', moderate: '⚡', high: '⚠️' }
   font-size: 0.8rem;
   font-weight: 600;
   color: var(--color-primary);
-  background: linear-gradient(135deg, var(--color-primary-bg), rgba(99, 102, 241, 0.08));
-  border: 1px solid rgba(99, 102, 241, 0.2);
+  background: linear-gradient(135deg, var(--color-primary-bg), rgba(212, 168, 67, 0.08));
+  border: 1px solid rgba(212, 168, 67, 0.2);
   border-radius: var(--radius-lg);
   cursor: pointer;
   transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
@@ -1503,10 +1520,10 @@ const concentrationIcon = { low: '✅', moderate: '⚡', high: '⚠️' }
 }
 
 .btn-ai-action:hover {
-  background: linear-gradient(135deg, rgba(99, 102, 241, 0.15), rgba(99, 102, 241, 0.12));
-  border-color: rgba(99, 102, 241, 0.4);
+  background: linear-gradient(135deg, rgba(212, 168, 67, 0.15), rgba(212, 168, 67, 0.12));
+  border-color: rgba(212, 168, 67, 0.4);
   transform: translateY(-1px);
-  box-shadow: 0 4px 12px rgba(99, 102, 241, 0.15);
+  box-shadow: 0 4px 12px rgba(212, 168, 67, 0.15);
 }
 
 .btn-ai-action:hover::before {
@@ -1526,8 +1543,8 @@ const concentrationIcon = { low: '✅', moderate: '⚡', high: '⚠️' }
 }
 
 .btn-ai-action.btn-loading {
-  background: linear-gradient(135deg, rgba(99, 102, 241, 0.08), rgba(99, 102, 241, 0.05));
-  border-color: rgba(99, 102, 241, 0.15);
+  background: linear-gradient(135deg, rgba(212, 168, 67, 0.08), rgba(212, 168, 67, 0.05));
+  border-color: rgba(212, 168, 67, 0.15);
 }
 
 .btn-ai-action.btn-loading::after {
@@ -1555,7 +1572,7 @@ const concentrationIcon = { low: '✅', moderate: '⚡', high: '⚠️' }
 
 .btn-ai-regenerate:hover {
   background: var(--color-primary-bg);
-  border-color: rgba(99, 102, 241, 0.2);
+  border-color: rgba(212, 168, 67, 0.2);
 }
 
 /* ── AI Agent Tooltip ── */
@@ -1563,17 +1580,16 @@ const concentrationIcon = { low: '✅', moderate: '⚡', high: '⚠️' }
   position: absolute;
   top: calc(100% + 8px);
   left: 50%;
-  transform: translateX(-50%) scale(0.95);
+  transform: translateX(-50%);
   padding: 0.4rem 0.7rem;
   font-size: 0.7rem;
   font-weight: 600;
   color: white;
-  background: linear-gradient(135deg, #1e1b4b, #312e81);
+  background: linear-gradient(135deg, #0d1220, #1a1f35);
   border-radius: var(--radius-md);
   white-space: nowrap;
   opacity: 0;
   visibility: hidden;
-  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
   pointer-events: none;
   z-index: 100;
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
@@ -1586,13 +1602,12 @@ const concentrationIcon = { low: '✅', moderate: '⚡', high: '⚠️' }
   left: 50%;
   transform: translateX(-50%);
   border: 5px solid transparent;
-  border-bottom-color: #1e1b4b;
+  border-bottom-color: #0d1220;
 }
 
 .btn-ai-action:hover .ai-agent-tooltip {
   opacity: 1;
   visibility: visible;
-  transform: translateX(-50%) scale(1);
 }
 
 /* ── Icon Spin Animation ── */
@@ -1602,11 +1617,6 @@ const concentrationIcon = { low: '✅', moderate: '⚡', high: '⚠️' }
 
 .icon-spin.spinning {
   animation: spin 1s linear infinite;
-}
-
-@keyframes spin {
-  from { transform: rotate(0deg); }
-  to { transform: rotate(360deg); }
 }
 
 /* ── 低估指数 ── */
@@ -1622,7 +1632,6 @@ const concentrationIcon = { low: '✅', moderate: '⚡', high: '⚠️' }
 
 .index-row:hover {
   background: var(--color-bg-hover);
-  transform: translateX(2px);
 }
 
 .index-info {
@@ -1704,7 +1713,6 @@ const concentrationIcon = { low: '✅', moderate: '⚡', high: '⚠️' }
 
 .btn-link:hover {
   color: var(--color-primary-dark);
-  transform: translateX(3px);
 }
 
 /* ── 持仓健康度 ── */
@@ -1713,7 +1721,7 @@ const concentrationIcon = { low: '✅', moderate: '⚡', high: '⚠️' }
   grid-template-columns: 1fr 1fr 1fr;
   gap: 0.75rem;
   padding: 0.75rem;
-  background: linear-gradient(135deg, rgba(248, 250, 252, 0.8), rgba(241, 245, 249, 0.5));
+  background: linear-gradient(135deg, var(--color-bg-card), var(--color-bg-card));
   border-radius: var(--radius-lg);
   border: 1px solid var(--color-border-light);
 }
@@ -1752,7 +1760,7 @@ const concentrationIcon = { low: '✅', moderate: '⚡', high: '⚠️' }
   padding: 0.75rem;
   border-top: 1px solid var(--color-border-light);
   border-bottom: 1px solid var(--color-border-light);
-  background: rgba(248, 250, 252, 0.5);
+  background: var(--color-bg-card);
   border-radius: var(--radius-md);
 }
 
@@ -1828,168 +1836,61 @@ const concentrationIcon = { low: '✅', moderate: '⚡', high: '⚠️' }
   font-weight: 600;
 }
 
-/* ── AI 再平衡 ── */
-.rebalance-section {
+/* ── 全景诊断 ── */
+.panorama-section {
   border-top: 1px solid var(--color-border-light);
   padding-top: 0.75rem;
-  margin-top: 0.5rem;
+  margin-top: 0.75rem;
 }
-
-.rebalance-header {
+.panorama-header {
   display: flex;
   align-items: center;
-  gap: 0.5rem;
-  margin-bottom: 0.75rem;
-  flex-wrap: wrap;
+  justify-content: space-between;
+  margin-bottom: 0.5rem;
 }
-
-.rebalance-title {
+.panorama-title {
   font-size: 0.95rem;
   font-weight: 700;
   color: var(--color-primary);
 }
-
-.drift-badge {
-  font-size: 0.7rem;
-  font-weight: 700;
-  padding: 0.15rem 0.5rem;
-  border-radius: var(--radius-sm);
-  letter-spacing: 0.03em;
-}
-.drift-badge.balanced { background: rgba(16, 185, 129, 0.12); color: #059669; }
-.drift-badge.slight { background: rgba(245, 158, 11, 0.12); color: #d97706; }
-.drift-badge.significant { background: rgba(239, 68, 68, 0.12); color: #dc2626; }
-
-.market-tag {
-  font-size: 0.7rem;
-  color: var(--text-muted);
-  margin-left: auto;
-}
-
-.rebalance-result {
-  display: flex;
-  flex-direction: column;
-  gap: 0.85rem;
-}
-
-/* 配比对比 */
-.allocation-compare {
-  display: flex;
-  flex-direction: column;
-  gap: 0.4rem;
-  background: linear-gradient(135deg, rgba(248, 250, 252, 0.8), rgba(241, 245, 249, 0.5));
-  border-radius: var(--radius-lg);
-  padding: 0.75rem;
-  border: 1px solid var(--color-border-light);
-}
-
-.alloc-row {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-  font-size: 0.8rem;
-}
-
-.alloc-label {
-  width: 3.5rem;
-  font-weight: 600;
-  color: var(--text-secondary);
-  flex-shrink: 0;
+.panorama-time {
   font-size: 0.75rem;
+  color: var(--color-text-muted);
 }
-
-.alloc-bars {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  height: 16px;
-  position: relative;
-}
-
-.alloc-bar-current {
-  height: 7px;
-  background: var(--color-primary);
-  border-radius: 3px;
-  opacity: 0.7;
-  transition: width 0.6s cubic-bezier(0.4, 0, 0.2, 1);
-}
-
-.alloc-bar-target {
-  height: 7px;
-  background: var(--color-accent, #10b981);
-  border-radius: 3px;
-  opacity: 0.4;
-  transition: width 0.6s cubic-bezier(0.4, 0, 0.2, 1);
-}
-
-.alloc-values {
-  display: flex;
-  align-items: center;
-  gap: 0.25rem;
-  flex-shrink: 0;
-  width: 5.5rem;
-  font-size: 0.75rem;
-}
-
-.alloc-current { font-weight: 700; color: var(--color-primary); }
-.alloc-arrow { color: var(--text-muted); font-size: 0.7rem; }
-.alloc-target { font-weight: 600; color: var(--color-accent, #10b981); }
-
-/* 调仓建议 */
-.rebalance-suggestions {
-  display: flex;
-  flex-direction: column;
-  gap: 0.4rem;
-}
-
-.suggestion-item {
-  display: flex;
-  align-items: flex-start;
-  gap: 0.5rem;
-  padding: 0.5rem 0.65rem;
-  background: rgba(248, 250, 252, 0.6);
-  border-radius: var(--radius-md);
-  border: 1px solid var(--color-border-light);
-  font-size: 0.82rem;
-}
-
-.suggestion-action {
-  font-size: 0.7rem;
-  font-weight: 700;
-  padding: 0.1rem 0.4rem;
-  border-radius: var(--radius-sm);
-  flex-shrink: 0;
-  letter-spacing: 0.02em;
-}
-.suggestion-action.buy, .suggestion-action.buy_index { background: rgba(16, 185, 129, 0.12); color: #059669; }
-.suggestion-action.sell { background: rgba(239, 68, 68, 0.12); color: #dc2626; }
-.suggestion-action.deploy_cash { background: rgba(59, 130, 246, 0.12); color: #2563eb; }
-.suggestion-action.reserve_cash { background: rgba(245, 158, 11, 0.12); color: #d97706; }
-
-.suggestion-detail {
-  color: var(--text-secondary);
-  line-height: 1.5;
-}
-
-.suggestion-amount {
-  display: inline-block;
-  margin-left: 0.25rem;
-  font-weight: 600;
-  color: var(--color-primary);
-}
-
-.rebalance-content {
-  font-size: 0.88rem;
+.panorama-content {
+  font-size: 0.85rem;
   line-height: 1.7;
   color: var(--color-text-secondary);
-  white-space: pre-wrap;
-  max-height: 380px;
+  max-height: 400px;
   overflow-y: auto;
-  background: linear-gradient(135deg, rgba(248, 250, 252, 0.8), rgba(241, 245, 249, 0.5));
+  background: linear-gradient(135deg, var(--color-bg-card), var(--color-bg-card));
   border-radius: var(--radius-lg);
   padding: 1rem;
   border: 1px solid var(--color-border-light);
+}
+.panorama-content :deep(strong) {
+  color: var(--color-text-primary);
+  font-weight: 600;
+}
+.panorama-content :deep(table) {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 0.5rem 0;
+  font-size: 0.8rem;
+}
+.panorama-content :deep(th),
+.panorama-content :deep(td) {
+  padding: 0.4rem 0.6rem;
+  border: 1px solid var(--color-border-light);
+  text-align: left;
+}
+.panorama-content :deep(th) {
+  background: var(--color-bg-hover);
+  font-weight: 600;
+}
+.panorama-error {
+  color: var(--color-danger);
+  font-size: 0.85rem;
 }
 
 /* ── 热门机会 ── */
@@ -2014,15 +1915,14 @@ const concentrationIcon = { low: '✅', moderate: '⚡', high: '⚠️' }
   gap: 0.6rem;
   padding: 0.9rem;
   border-radius: var(--radius-lg);
-  background: linear-gradient(135deg, rgba(248, 250, 252, 0.9), rgba(241, 245, 249, 0.6));
+  background: linear-gradient(135deg, var(--color-bg-card), var(--color-bg-card));
   margin-bottom: 0.7rem;
   border: 1px solid var(--color-border-light);
   transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 .rec-card:hover {
-  background: linear-gradient(135deg, rgba(241, 245, 249, 0.95), rgba(226, 232, 240, 0.7));
-  transform: translateX(3px);
+  background: linear-gradient(135deg, rgba(13, 18, 32, 0.95), rgba(255, 255, 255, 0.04 0.7));
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.05);
 }
 
@@ -2050,7 +1950,7 @@ const concentrationIcon = { low: '✅', moderate: '⚡', high: '⚠️' }
   flex-shrink: 0;
   font-weight: 600;
 }
-.rp-already_have { background: rgba(99, 102, 241, 0.12); color: #818cf8; }
+.rp-already_have { background: rgba(212, 168, 67, 0.12); color: #d4b65a; }
 .rp-can_add { background: rgba(16, 185, 129, 0.12); color: #10b981; }
 .rp-reduce { background: rgba(239, 68, 68, 0.12); color: #ef4444; }
 .rp-new { background: rgba(245, 158, 11, 0.12); color: #f59e0b; }
@@ -2163,8 +2063,8 @@ const concentrationIcon = { low: '✅', moderate: '⚡', high: '⚠️' }
   white-space: pre-wrap;
   margin-top: 0.75rem;
   padding: 0.75rem 1rem;
-  background: linear-gradient(135deg, var(--color-primary-bg), rgba(99, 102, 241, 0.04));
-  border: 1px solid rgba(99, 102, 241, 0.1);
+  background: linear-gradient(135deg, var(--color-primary-bg), rgba(212, 168, 67, 0.04));
+  border: 1px solid rgba(212, 168, 67, 0.1);
   border-radius: var(--radius-md);
 }
 
@@ -2180,14 +2080,13 @@ const concentrationIcon = { low: '✅', moderate: '⚡', high: '⚠️' }
   padding: 0.65rem 0.75rem;
   border-radius: var(--radius-md);
   border-left: 3px solid var(--color-primary-300);
-  background: linear-gradient(135deg, var(--color-bg-input), rgba(248, 250, 252, 0.6));
+  background: linear-gradient(135deg, var(--color-bg-input), var(--color-bg-card));
   transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 .news-item:hover {
   background: var(--color-bg-hover);
   border-left-color: var(--color-primary);
-  transform: translateX(3px);
 }
 
 .news-title {
@@ -2258,7 +2157,7 @@ const concentrationIcon = { low: '✅', moderate: '⚡', high: '⚠️' }
   font-weight: 600;
   padding: 0.1rem 0.45rem;
   border-radius: var(--radius-sm);
-  background: rgba(99, 102, 241, 0.08);
+  background: rgba(212, 168, 67, 0.08);
   color: var(--color-primary);
 }
 
@@ -2475,13 +2374,6 @@ const concentrationIcon = { low: '✅', moderate: '⚡', high: '⚠️' }
   font-weight: 600;
 }
 
-/* ── Buttons ── */
-.btn-sm {
-  font-size: 0.8rem;
-  padding: 0.35rem 0.75rem;
-}
-
-
 /* ── 推荐验证历史 ── */
 .verify-bar {
   display: flex;
@@ -2551,31 +2443,30 @@ const concentrationIcon = { low: '✅', moderate: '⚡', high: '⚠️' }
 }
 .vs-correct { color: #10b981; }
 .vs-wrong { color: #ef4444; }
+.vs-flat { color: #f59e0b; }
 .vs-pending { color: var(--color-text-muted); }
-</style>
 
-<style>
-.toast {
-  position: fixed;
-  top: 1rem;
-  right: 1rem;
-  z-index: 10000;
-  padding: 0.7rem 1.2rem;
-  border-radius: var(--radius-md);
-  font-size: 0.88rem;
-  font-weight: 600;
-  background: var(--color-bg-card);
-  border: 1px solid var(--color-border);
-  box-shadow: 0 8px 24px rgba(0,0,0,0.18);
-  color: var(--color-text-primary);
-  pointer-events: none;
-  backdrop-filter: blur(8px);
-  animation: toast-in 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+.verify-stat.flat { color: #f59e0b; }
+.verify-stat.pending { color: var(--color-text-muted); }
+
+.verify-detail {
+  border-top: 1px solid var(--color-border);
+  padding: 0.5rem 0.65rem;
 }
-@keyframes toast-in {
-  from { opacity: 0; transform: translateY(-8px); }
-  to { opacity: 1; transform: translateY(0); }
+.verify-hint {
+  font-size: 0.72rem;
+  color: var(--color-text-muted);
+  margin-bottom: 0.4rem;
+  line-height: 1.5;
 }
-.toast-success { border-color: #10b981; color: #10b981; }
-.toast-error { border-color: #ef4444; color: #ef4444; }
+.verify-watch-stats {
+  display: flex;
+  gap: 0.8rem;
+  font-size: 0.75rem;
+  margin-bottom: 0.4rem;
+  color: var(--color-text-secondary);
+}
+.verify-watch-stats span {
+  white-space: nowrap;
+}
 </style>

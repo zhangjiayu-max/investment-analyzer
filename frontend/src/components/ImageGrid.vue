@@ -180,7 +180,7 @@ function percentileColor(p) {
   border-radius: var(--radius-sm);
   opacity: 0;
   transition: all var(--transition-fast);
-  box-shadow: 0 2px 6px rgba(79, 70, 229, 0.4);
+  box-shadow: 0 2px 6px rgba(201, 168, 76, 0.4);
 }
 
 .image-item:hover .parse-btn {

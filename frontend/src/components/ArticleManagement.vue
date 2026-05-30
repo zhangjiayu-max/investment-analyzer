@@ -5,6 +5,10 @@ import {
   downloadArticleImages, analyzeArticleImages, getAnalyzeStatus, cancelAnalyze, reanalyzeImage, getReanalyzeStatus,
 } from '../api'
 import ConfirmDialog from './ConfirmDialog.vue'
+import AppToast from './AppToast.vue'
+import { useToast } from '../composables/useToast'
+
+const { showToast } = useToast()
 
 const articles = ref([])
 const selectedArticle = ref(null)
@@ -19,13 +23,6 @@ const recordMetricFilter = ref('all')
 const analyzingRecordId = ref(null)
 const cancelling = ref(false)
 const reanalyzePoller = ref(null)
-const toast = ref({ show: false, message: '', type: 'success' })
-let toastTimer = null
-function showToast(message, type = 'success') {
-  if (toastTimer) clearTimeout(toastTimer)
-  toast.value = { show: true, message, type }
-  toastTimer = setTimeout(() => { toast.value.show = false }, 3000)
-}
 
 // 添加文章
 const addUrl = ref('')
@@ -164,7 +161,7 @@ const poller = ref(null)
 onMounted(() => loadArticles())
 onUnmounted(() => {
   if (poller.value) clearInterval(poller.value)
-  if (reanalyzePoller.value) clearInterval(reanalyzePoller.value)
+  clearReanalyzePoller()  // 清除所有重分析轮询
   if (addPoller) { clearInterval(addPoller); addPoller = null }
 })
 
@@ -260,7 +257,7 @@ function clearPoller() {
 async function handleDownload(id) {
   try {
     const { data } = await downloadArticleImages(id)
-    if (!data.ok) { alert(data.message || '下载失败'); return }
+    if (!data.ok) { showToast(data.message || '下载失败', 'error'); return }
     selectedArticle.value.status = 'downloading'
     syncArticleInList(id, { status: 'downloading' })
 
@@ -276,17 +273,17 @@ async function handleDownload(id) {
         }
       } catch { clearPoller() }
     }, 2000)
-  } catch (e) { alert('下载失败: ' + e.message) }
+  } catch (e) { showToast('下载失败: ' + e.message, 'error') }
 }
 
 async function handleAnalyze(id) {
   try {
     const { data } = await analyzeArticleImages(id)
-    if (!data.ok) { alert(data.message || '分析失败'); return }
+    if (!data.ok) { showToast(data.message || '分析失败', 'error'); return }
     selectedArticle.value.status = 'analyzing'
     syncArticleInList(id, { status: 'analyzing' })
     startAnalyzePolling(id)
-  } catch (e) { alert('分析失败: ' + e.message) }
+  } catch (e) { showToast('分析失败: ' + e.message, 'error') }
 }
 
 async function handleCancelAnalyze(id) {
@@ -295,7 +292,7 @@ async function handleCancelAnalyze(id) {
   try {
     const { data } = await cancelAnalyze(id)
     if (!data.ok) {
-      alert(data.message || '取消失败')
+      showToast(data.message || '取消失败', 'error')
       cancelling.value = false
       return
     }
@@ -303,13 +300,17 @@ async function handleCancelAnalyze(id) {
     // 超时保护：如果 30 秒后后端还没响应，重置状态
     setTimeout(() => { cancelling.value = false }, 30000)
   } catch (e) {
-    alert('取消失败: ' + e.message)
+    showToast('取消失败: ' + e.message, 'error')
     cancelling.value = false
   }
 }
 
+// 支持多个并发分析任务
+const analyzingRecords = ref(new Set())
+const reanalyzePollers = ref({})
+
 async function handleReanalyze(recordId) {
-  if (reanalyzePoller.value) return  // 已有轮询在进行
+  if (analyzingRecords.value.has(recordId)) return  // 该记录已在分析中
   try {
     const { data } = await reanalyzeImage(recordId)
     if (!data.ok) {
@@ -317,42 +318,50 @@ async function handleReanalyze(recordId) {
       return
     }
     // 立即在 UI 上显示"分析中"状态
-    analyzingRecordId.value = recordId
+    analyzingRecords.value.add(recordId)
     const rec = records.value.find(r => r.id === recordId)
     if (rec) rec.status = 'analyzing'
     showToast('重新分析已开始，后台执行中...', 'success')
 
     // 轮询状态
-    reanalyzePoller.value = setInterval(async () => {
+    reanalyzePollers.value[recordId] = setInterval(async () => {
       try {
         const { data: st } = await getReanalyzeStatus(recordId)
-        // 分析中：更新本地记录状态让 badge 变化
         if (st.status === 'analyzing') {
           const r2 = records.value.find(r => r.id === recordId)
           if (r2) r2.status = 'analyzing'
           return
         }
         if (st.status === 'success' || st.status === 'error' || st.status === 'timeout') {
-          clearReanalyzePoller()
-          analyzingRecordId.value = null
+          clearReanalyzePoller(recordId)
+          analyzingRecords.value.delete(recordId)
           await openArticle(selectedArticle.value)
         }
       } catch {
-        clearReanalyzePoller()
-        analyzingRecordId.value = null
+        clearReanalyzePoller(recordId)
+        analyzingRecords.value.delete(recordId)
       }
     }, 1500)
   } catch (e) {
-    alert('重新分析失败: ' + e.message)
-    clearReanalyzePoller()
-    analyzingRecordId.value = null
+    showToast('重新分析失败: ' + e.message, 'error')
+    clearReanalyzePoller(recordId)
+    analyzingRecords.value.delete(recordId)
   }
 }
 
-function clearReanalyzePoller() {
-  if (reanalyzePoller.value) {
-    clearInterval(reanalyzePoller.value)
-    reanalyzePoller.value = null
+function clearReanalyzePoller(recordId) {
+  if (recordId) {
+    if (reanalyzePollers.value[recordId]) {
+      clearInterval(reanalyzePollers.value[recordId])
+      delete reanalyzePollers.value[recordId]
+    }
+  } else {
+    // 清除所有轮询
+    Object.keys(reanalyzePollers.value).forEach(id => {
+      clearInterval(reanalyzePollers.value[id])
+    })
+    reanalyzePollers.value = {}
+    analyzingRecords.value.clear()
   }
 }
 
@@ -534,11 +543,6 @@ function closePreview() { previewImage.value = null }
           </div>
         </div>
 
-        <!-- Toast 通知 -->
-        <Transition name="toast">
-          <div v-if="toast.show" :class="['toast', 'toast-' + toast.type]">{{ toast.message }}</div>
-        </Transition>
-
         <!-- Record Filter Bar -->
         <div v-if="records.length" class="record-filter-bar">
           <button
@@ -575,10 +579,10 @@ function closePreview() { previewImage.value = null }
 
         <!-- Image Grid -->
         <div v-if="records.length" class="record-grid">
-          <div v-for="r in filteredRecords" :key="r.id" :class="['record-card', { 'record-analyzing': analyzingRecordId === r.id }]">
+          <div v-for="r in filteredRecords" :key="r.id" :class="['record-card', { 'record-analyzing': analyzingRecords.has(r.id) }]">
             <div class="record-thumb" @click="openPreview(r.image_path)">
               <img :src="imageUrl(r.image_path)" loading="lazy" />
-              <span v-if="analyzingRecordId === r.id" class="record-status st-analyzing">
+              <span v-if="analyzingRecords.has(r.id)" class="record-status st-analyzing">
                 <span class="analyzing-spinner"></span> 分析中
               </span>
               <span v-else :class="['record-status', recordStatusClass(r.status)]">
@@ -637,6 +641,7 @@ function closePreview() { previewImage.value = null }
       confirm-text="确定" cancel-text="取消"
       @confirm="onConfirmOk" @cancel="onConfirmCancel"
     />
+    <AppToast />
   </div>
 </template>
 
@@ -1085,7 +1090,7 @@ function closePreview() { previewImage.value = null }
 .badge-orange .metric-dot { background: #ea580c; }
 .badge-pink .metric-dot { background: #db2777; }
 .badge-success .metric-dot { background: #059669; }
-.badge-info .metric-dot { background: #4f46e5; }
+.badge-info .metric-dot { background: #a88a3a; }
 .badge-warning .metric-dot { background: #d97706; }
 .badge-neutral .metric-dot { background: #64748b; }
 
@@ -1216,43 +1221,6 @@ function closePreview() { previewImage.value = null }
 .badge-danger .error-count-badge {
   background: rgba(255, 255, 255, 0.25);
   color: white;
-}
-
-/* Toast */
-.toast {
-  position: fixed;
-  top: 1rem;
-  left: 50%;
-  transform: translateX(-50%);
-  z-index: var(--z-toast);
-  padding: 0.6rem 1.2rem;
-  border-radius: var(--radius-md);
-  font-size: 0.8rem;
-  font-weight: 500;
-  box-shadow: 0 4px 12px rgba(0,0,0,0.15);
-  pointer-events: none;
-}
-.toast-success {
-  background: #059669;
-  color: white;
-}
-.toast-error {
-  background: #dc2626;
-  color: white;
-}
-.toast-warning {
-  background: #d97706;
-  color: white;
-}
-.toast-enter-active { animation: toastIn 0.25s ease-out; }
-.toast-leave-active { animation: toastOut 0.25s ease-in; }
-@keyframes toastIn {
-  from { opacity: 0; transform: translateX(-50%) translateY(-12px); }
-  to { opacity: 1; transform: translateX(-50%) translateY(0); }
-}
-@keyframes toastOut {
-  from { opacity: 1; transform: translateX(-50%) translateY(0); }
-  to { opacity: 0; transform: translateX(-50%) translateY(-12px); }
 }
 
 /* Responsive */

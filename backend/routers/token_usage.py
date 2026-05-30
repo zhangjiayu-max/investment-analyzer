@@ -115,3 +115,15 @@ async def get_performance_stats_api(days: int = 7):
 async def get_performance_by_agent_api(days: int = 7):
     """按 Agent 分组统计性能。"""
     return {"items": get_performance_by_agent(days=days)}
+
+
+@router.post("/api/token-usage/clear")
+async def clear_token_usage():
+    """清空所有 token 用量数据。"""
+    conn = _get_conn()
+    try:
+        conn.execute("DELETE FROM token_usage")
+        conn.commit()
+        return {"ok": True, "message": "Token 用量数据已清空"}
+    except Exception as e:
+        return {"ok": False, "message": str(e)}

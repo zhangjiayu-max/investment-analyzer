@@ -176,14 +176,23 @@ async def list_analysis_agents_api():
 
 @router.put("/api/analysis-agents/{agent_id}")
 async def update_analysis_agent_api(agent_id: int, req: AnalysisAgentUpdateRequest):
-    """更新分析 Agent 配置。修改提示词时自动保存版本历史。"""
+    """更新分析 Agent 配置。修改提示词时自动保存版本历史，并触发回归测试。"""
     kwargs = {k: v for k, v in req.dict().items() if v is not None}
     if not kwargs:
         raise HTTPException(400, "无更新内容")
     # 提示词变更前，保存当前版本
+    prompt_changed = False
     if 'system_prompt' in kwargs:
         current = get_analysis_agent(agent_id)
         if current and kwargs['system_prompt'] != current.get('system_prompt'):
             save_prompt_version(agent_id, 'analysis', current['system_prompt'])
+            prompt_changed = True
     update_analysis_agent(agent_id, **kwargs)
+    # prompt 变更后触发回归测试
+    if prompt_changed:
+        try:
+            from agent.regression import run_regression_tests
+            asyncio.create_task(run_regression_tests(agent_id, "analysis"))
+        except Exception as e:
+            logger.warning(f"触发回归测试失败: {e}")
     return {"ok": True}

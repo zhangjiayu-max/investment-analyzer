@@ -1,5 +1,5 @@
 <script setup>
-import { ref, onMounted, onUnmounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { createTask, getFinanceQuoteBar } from '../api'
 import TaskList from '../components/TaskList.vue'
 import TaskDetail from '../components/TaskDetail.vue'
@@ -17,11 +17,39 @@ import TokenUsagePage from '../components/TokenUsagePage.vue'
 import BadCasePage from '../components/BadCasePage.vue'
 import EvalSuitePage from '../components/EvalSuitePage.vue'
 import Dashboard from '../components/Dashboard.vue'
+import SystemConfigPage from '../components/SystemConfigPage.vue'
 
 const props = defineProps({
   activePage: String,
 })
 const emit = defineEmits(['navigate'])
+
+// ── KeepAlive 页面（除 analysis 外的所有页面）──
+const pageComponents = {
+  dashboard: Dashboard,
+  chat: ChatView,
+  articles: ArticleManagement,
+  valuation: ValuationHistory,
+  gallery: ImageGallery,
+  author: AuthorArticles,
+  linked: LinkedArticles,
+  rag: RagAnalysis,
+  bond: BondMarket,
+  portfolio: PortfolioManagement,
+  'admin-agents': AdminAgentsPage,
+  'token-usage': TokenUsagePage,
+  'bad-cases': BadCasePage,
+  'eval-suite': EvalSuitePage,
+  'system-config': SystemConfigPage,
+}
+
+const pageComponent = computed(() => pageComponents[props.activePage] || null)
+const pageProps = computed(() => {
+  if (props.activePage === 'dashboard') {
+    return { onNavigate: (page) => emit('navigate', page) }
+  }
+  return {}
+})
 
 const taskListRef = ref(null)
 const currentTaskId = ref(null)
@@ -123,22 +151,7 @@ function onBack() {
         <span v-for="kw in hotKeywords" :key="kw" class="quote-hot-tag">{{ kw }}</span>
       </div>
     </div>
-    <!-- 每日看板 -->
-    <div v-show="activePage === 'dashboard'" class="page-section">
-      <Dashboard @navigate="(page) => emit('navigate', page)" />
-    </div>
-
-    <!-- AI 对话页 -->
-    <div v-show="activePage === 'chat'" class="page-section">
-      <ChatView />
-    </div>
-
-    <!-- 文章管理页 -->
-    <div v-if="activePage === 'articles'" class="page-section">
-      <ArticleManagement />
-    </div>
-
-    <!-- AI 分析页 -->
+    <!-- AI 分析页（特殊处理，不使用 KeepAlive） -->
     <div v-if="activePage === 'analysis'" class="page-section">
       <div v-if="!currentTaskId" class="card analysis-card">
         <div class="analysis-header">
@@ -165,8 +178,6 @@ function onBack() {
           </button>
         </form>
         <p class="analysis-hint">支持微信公众号文章链接</p>
-
-        <!-- 任务列表 -->
         <div class="task-list-section">
           <TaskList
             ref="taskListRef"
@@ -175,73 +186,13 @@ function onBack() {
           />
         </div>
       </div>
-
-      <!-- 任务详情 -->
-      <TaskDetail
-        v-else
-        :taskId="currentTaskId"
-        @back="onBack"
-      />
+      <TaskDetail v-else :taskId="currentTaskId" @back="onBack" />
     </div>
 
-    <!-- 估值数据页 -->
-    <div v-if="activePage === 'valuation'" class="page-section">
-      <h2 class="page-title">估值数据</h2>
-      <p class="page-desc" style="margin-bottom: 1.5rem;">查看指数估值历史和分析</p>
-      <ValuationHistory />
-    </div>
-
-    <!-- 图片浏览页 -->
-    <div v-if="activePage === 'gallery'" class="page-section">
-      <h2 class="page-title">图片浏览</h2>
-      <p class="page-desc" style="margin-bottom: 1.5rem;">搜索和浏览所有已解析的估值图片</p>
-      <ImageGallery />
-    </div>
-
-    <!-- 文章库页 -->
-    <div v-if="activePage === 'author'" class="page-section">
-      <AuthorArticles />
-    </div>
-
-    <!-- 链接文章页 -->
-    <div v-if="activePage === 'linked'" class="page-section">
-      <LinkedArticles />
-    </div>
-
-    <!-- RAG 分析页 -->
-    <div v-if="activePage === 'rag'" class="page-section">
-      <RagAnalysis />
-    </div>
-
-    <!-- 债市市场温度页 -->
-    <div v-if="activePage === 'bond'" class="page-section">
-      <BondMarket />
-    </div>
-
-    <!-- 持仓管理页 -->
-    <div v-show="activePage === 'portfolio'" class="page-section">
-      <PortfolioManagement />
-    </div>
-
-    <!-- Agent 管理页 -->
-    <div v-if="activePage === 'admin-agents'" class="page-section">
-      <AdminAgentsPage />
-    </div>
-
-    <!-- Token 用量页 -->
-    <div v-if="activePage === 'token-usage'" class="page-section">
-      <TokenUsagePage />
-    </div>
-
-    <!-- Bad Case 看板 -->
-    <div v-if="activePage === 'bad-cases'" class="page-section">
-      <BadCasePage />
-    </div>
-
-    <!-- 评测集 -->
-    <div v-if="activePage === 'eval-suite'" class="page-section">
-      <EvalSuitePage />
-    </div>
+    <!-- 其他页面使用 KeepAlive 缓存 -->
+    <KeepAlive v-else :exclude="['ChatView']">
+      <component :is="pageComponent" v-bind="pageProps" />
+    </KeepAlive>
   </div>
 </template>
 
@@ -277,14 +228,14 @@ function onBack() {
   font-size: 0.9rem;
 }
 .quote-main {
-  color: #e0e7ff;
+  color: #e8eaed;
   font-size: 0.85rem;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 .quote-hint {
-  color: #93c5fd;
+  color: #d4b65a;
   font-size: 0.65rem;
   opacity: 0.5;
   flex-shrink: 0;
@@ -296,8 +247,8 @@ function onBack() {
   flex-wrap: wrap;
 }
 .quote-hot-tag {
-  background: rgba(255,255,255,0.12);
-  color: #bfdbfe;
+  background: rgba(201, 168, 76, 0.15);
+  color: #d4b65a;
   font-size: 0.7rem;
   padding: 0.15rem 0.5rem;
   border-radius: 999px;

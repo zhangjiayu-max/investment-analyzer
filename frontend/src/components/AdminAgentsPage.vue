@@ -1,6 +1,11 @@
 <script setup>
 import { ref, onMounted, computed } from 'vue'
-import { listAgents, getAgent, updateAgent, deleteAgent, listAnalysisAgents, updateAnalysisAgent, generateAgentPrompt, listAgentVersions, rollbackAgentPrompt, listAnalysisAgentVersions, rollbackAnalysisAgentPrompt } from '../api'
+import { listAgents, getAgent, updateAgent, deleteAgent, listAnalysisAgents, updateAnalysisAgent, generateAgentPrompt, listAgentVersions, rollbackAgentPrompt, listAnalysisAgentVersions, rollbackAnalysisAgentPrompt, getAgentRegressionResult } from '../api'
+import ConfirmDialog from './ConfirmDialog.vue'
+import AppToast from './AppToast.vue'
+import { useToast } from '../composables/useToast'
+
+const { showToast } = useToast()
 
 const agents = ref([])
 const analysisAgents = ref([])
@@ -24,12 +29,10 @@ const showVersions = ref(false)
 const showRollbackConfirm = ref(false)
 const rollbackTarget = ref(null)
 
-const toast = ref({ show: false, message: '', type: 'success' })
-
-function showToast(message, type = 'success') {
-  toast.value = { show: true, message, type }
-  setTimeout(() => { toast.value.show = false }, 2500)
-}
+// 回归测试
+const regressionResult = ref(null)
+const regressionLoading = ref(false)
+const showRegression = ref(false)
 
 async function loadAgents() {
   loading.value = true
@@ -51,6 +54,48 @@ const currentList = computed(() =>
 function selectAgent(agent) {
   selectedAgent.value = { ...agent }
   editingAgent.value = null
+  // 重置回归测试状态
+  regressionResult.value = null
+  showRegression.value = false
+  // 异步加载回归测试结果
+  loadRegression()
+}
+
+async function loadRegression() {
+  if (!selectedAgent.value) return
+  regressionLoading.value = true
+  try {
+    const agentType = activeTab.value === 'conversation'
+      ? (selectedAgent.value.is_specialist ? 'specialist' : 'conversation')
+      : 'analysis'
+    const { data } = await getAgentRegressionResult(selectedAgent.value.id, agentType)
+    regressionResult.value = data
+  } catch (e) {
+    regressionResult.value = null
+  } finally {
+    regressionLoading.value = false
+  }
+}
+
+function toggleRegression() {
+  showRegression.value = !showRegression.value
+}
+
+function scoreColor(score) {
+  if (!score || score <= 0) return 'var(--color-text-muted)'
+  if (score >= 4.5) return '#10b981'
+  if (score >= 3.5) return '#22c55e'
+  if (score >= 2.5) return '#f59e0b'
+  if (score >= 1.5) return '#f97316'
+  return '#ef4444'
+}
+
+function statusIcon(status) {
+  if (status === 'improved') return '📈'
+  if (status === 'degraded') return '📉'
+  if (status === 'error') return '❌'
+  if (status === 'new') return '🆕'
+  return '➡️'
 }
 
 function startEdit() {
@@ -182,15 +227,23 @@ async function saveEdit() {
   saving.value = true
   try {
     const { id, name, description, system_prompt, knowledge_scope, icon, is_active } = editingAgent.value
+    const promptChanged = system_prompt !== selectedAgent.value?.system_prompt
     if (activeTab.value === 'conversation') {
       await updateAgent(id, { name, description, system_prompt, knowledge_scope, icon })
     } else {
       await updateAnalysisAgent(id, { name, description, system_prompt, is_active })
     }
     showToast('保存成功')
+    if (promptChanged) {
+      showToast('Prompt 已变更，回归测试将在后台运行...', 'info')
+    }
     selectedAgent.value = { ...editingAgent.value }
     editingAgent.value = null
     await loadAgents()
+    // 延迟加载回归测试结果
+    if (promptChanged) {
+      setTimeout(loadRegression, 10000)
+    }
   } catch (e) {
     showToast('保存失败: ' + (e.response?.data?.detail || e.message), 'error')
   } finally {
@@ -223,6 +276,7 @@ function copyPrompt(text) {
 function getAgentIcon(icon) {
   const icons = {
     chart: '📊', research: '🔍', shield: '🛡️', pie: '🥧', robot: '🤖',
+    newspaper: '📰', search: '🔍', bull: '🐂',
   }
   return icons[icon] || '🤖'
 }
@@ -266,6 +320,7 @@ onMounted(loadAgents)
           <div class="agent-item-info">
             <div class="agent-item-name">
               {{ agent.name }}
+              <span class="agent-id-tag">#{{ agent.id }}</span>
               <span v-if="agent.is_preset" class="badge-preset">预设</span>
               <span v-if="agent.is_active === 0" class="badge-inactive">已停用</span>
             </div>
@@ -285,18 +340,18 @@ onMounted(loadAgents)
               <span v-if="selectedAgent.is_preset" class="badge-preset">预设</span>
             </div>
             <div class="detail-actions" v-if="!editingAgent">
-              <button class="btn btn-primary btn-sm" @click="startEdit">编辑</button>
+              <button class="btn-primary btn-sm" @click="startEdit">编辑</button>
               <button
                 v-if="!selectedAgent.is_preset && activeTab === 'conversation'"
-                class="btn btn-outline btn-sm btn-danger"
+                class="btn-danger-outline btn-sm"
                 @click="showDeleteConfirm = true"
               >删除</button>
             </div>
             <div class="detail-actions" v-else>
-              <button class="btn btn-primary btn-sm" @click="saveEdit" :disabled="saving">
+              <button class="btn-primary btn-sm" @click="saveEdit" :disabled="saving">
                 {{ saving ? '保存中...' : '保存' }}
               </button>
-              <button class="btn btn-outline btn-sm" @click="cancelEdit">取消</button>
+              <button class="btn-outline btn-sm" @click="cancelEdit">取消</button>
             </div>
           </div>
 
@@ -344,6 +399,65 @@ onMounted(loadAgents)
                 </div>
               </Transition>
             </div>
+
+            <!-- Regression Test Results -->
+            <div class="detail-section">
+              <button class="version-toggle" @click="toggleRegression">
+                <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"/></svg>
+                {{ showRegression ? '收起回归测试' : '查看回归测试' }}
+              </button>
+              <Transition name="fade">
+                <div v-if="showRegression" class="regression-panel">
+                  <div v-if="regressionLoading" class="version-loading">
+                    <span class="spinner-sm"></span> 加载中...
+                  </div>
+                  <div v-else-if="!regressionResult || regressionResult.status === 'none'" class="version-empty">
+                    暂无回归测试记录
+                  </div>
+                  <div v-else-if="regressionResult.status === 'running'" class="regression-status running">
+                    <span class="spinner-sm"></span> 回归测试运行中...
+                  </div>
+                  <div v-else-if="regressionResult.status === 'error'" class="regression-status error">
+                    ❌ 测试失败: {{ regressionResult.error }}
+                  </div>
+                  <div v-else-if="regressionResult.status === 'completed'">
+                    <div v-if="regressionResult.message" class="version-empty">{{ regressionResult.message }}</div>
+                    <template v-else>
+                      <div class="regression-summary">
+                        <div class="regression-stat">
+                          <span class="stat-num">{{ regressionResult.summary?.total || 0 }}</span>
+                          <span class="stat-lbl">总用例</span>
+                        </div>
+                        <div class="regression-stat improved">
+                          <span class="stat-num">{{ regressionResult.summary?.improved || 0 }}</span>
+                          <span class="stat-lbl">📈 提升</span>
+                        </div>
+                        <div class="regression-stat degraded">
+                          <span class="stat-num">{{ regressionResult.summary?.degraded || 0 }}</span>
+                          <span class="stat-lbl">📉 退步</span>
+                        </div>
+                        <div class="regression-stat">
+                          <span class="stat-num">{{ regressionResult.summary?.unchanged || 0 }}</span>
+                          <span class="stat-lbl">➡️ 持平</span>
+                        </div>
+                      </div>
+                      <div class="regression-cases">
+                        <div v-for="c in regressionResult.cases" :key="c.case_id" class="regression-case">
+                          <span class="regression-status-icon">{{ statusIcon(c.status) }}</span>
+                          <span class="regression-case-name">{{ c.case_name }}</span>
+                          <span class="regression-score" :style="{ color: scoreColor(c.score) }">
+                            {{ c.score?.toFixed(1) || '-' }}分
+                          </span>
+                          <span v-if="c.old_avg" class="regression-old-avg">
+                            (旧: {{ c.old_avg?.toFixed(1) }})
+                          </span>
+                        </div>
+                      </div>
+                    </template>
+                  </div>
+                </div>
+              </Transition>
+            </div>
           </template>
 
           <!-- Edit Mode -->
@@ -359,11 +473,11 @@ onMounted(loadAgents)
             <div class="edit-field">
               <label class="edit-label">系统提示词</label>
               <div class="prompt-toolbar">
-                <button class="btn btn-outline btn-xs" @click="showOptimizeConfirm = true" :disabled="aiLoading || !editingAgent.system_prompt">
+                <button class="btn-outline btn-xs" @click="showOptimizeConfirm = true" :disabled="aiLoading || !editingAgent.system_prompt">
                   <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>
                   {{ aiLoading ? '生成中...' : 'AI 优化' }}
                 </button>
-                <button class="btn btn-outline btn-xs" @click="openGenerateDialog" :disabled="aiLoading">
+                <button class="btn-outline btn-xs" @click="openGenerateDialog" :disabled="aiLoading">
                   <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6v6m0 0v6m0-6h6m-6 0H6"/></svg>
                   AI 生成
                 </button>
@@ -400,8 +514,8 @@ onMounted(loadAgents)
           <h3 class="modal-title">确认删除</h3>
           <p class="modal-desc">确定删除 Agent「{{ selectedAgent?.name }}」？此操作不可撤销。</p>
           <div class="modal-actions">
-            <button class="btn btn-outline" @click="showDeleteConfirm = false">取消</button>
-            <button class="btn btn-danger" @click="handleDelete">确认删除</button>
+            <button class="btn-secondary" @click="showDeleteConfirm = false">取消</button>
+            <button class="btn-danger" @click="handleDelete">确认删除</button>
           </div>
         </div>
       </div>
@@ -414,8 +528,8 @@ onMounted(loadAgents)
           <h3 class="modal-title">确认回滚</h3>
           <p class="modal-desc">将回滚到 v{{ rollbackTarget?.version }}（{{ formatVersionTime(rollbackTarget?.created_at) }}）。当前提示词会自动保存为新版本，确认继续？</p>
           <div class="modal-actions">
-            <button class="btn btn-outline" @click="showRollbackConfirm = false">取消</button>
-            <button class="btn btn-primary" @click="doRollback">确认回滚</button>
+            <button class="btn-secondary" @click="showRollbackConfirm = false">取消</button>
+            <button class="btn-primary" @click="doRollback">确认回滚</button>
           </div>
         </div>
       </div>
@@ -428,8 +542,8 @@ onMounted(loadAgents)
           <h3 class="modal-title">AI 优化提示词</h3>
           <p class="modal-desc">AI 将基于当前提示词进行优化重写，补充缺失的结构（如 Few-shot 示例、负面约束等）。优化后内容将替换当前提示词，请确认继续？</p>
           <div class="modal-actions">
-            <button class="btn btn-outline" @click="showOptimizeConfirm = false">取消</button>
-            <button class="btn btn-primary" @click="showOptimizeConfirm = false; aiOptimize()">确认优化</button>
+            <button class="btn-secondary" @click="showOptimizeConfirm = false">取消</button>
+            <button class="btn-primary" @click="showOptimizeConfirm = false; aiOptimize()">确认优化</button>
           </div>
         </div>
       </div>
@@ -450,8 +564,8 @@ onMounted(loadAgents)
             <textarea v-model="generateForm.description" class="input-field" rows="3" placeholder="如：帮助用户制定基金定投计划，分析定投收益，给出定投策略建议"></textarea>
           </div>
           <div class="modal-actions">
-            <button class="btn btn-outline" @click="showGenerateDialog = false">取消</button>
-            <button class="btn btn-primary" @click="aiGenerate" :disabled="!generateForm.name || aiLoading">
+            <button class="btn-secondary" @click="showGenerateDialog = false">取消</button>
+            <button class="btn-primary" @click="aiGenerate" :disabled="!generateForm.name || aiLoading">
               {{ aiLoading ? '生成中...' : '开始生成' }}
             </button>
           </div>
@@ -460,9 +574,7 @@ onMounted(loadAgents)
     </Teleport>
 
     <!-- Toast -->
-    <Transition name="fade">
-      <div v-if="toast.show" :class="['toast', 'toast-' + toast.type]">{{ toast.message }}</div>
-    </Transition>
+    <AppToast />
   </div>
 </template>
 
@@ -477,54 +589,6 @@ onMounted(loadAgents)
   display: flex;
   align-items: baseline;
   gap: 0.75rem;
-}
-
-.page-title {
-  font-size: 1.2rem;
-  font-weight: 700;
-  color: var(--color-text-primary);
-  margin: 0;
-}
-
-.page-desc {
-  font-size: 0.8rem;
-  color: var(--color-text-muted);
-}
-
-/* Tab Bar */
-.tab-bar {
-  display: flex;
-  gap: 0;
-  border-bottom: 1px solid var(--color-border);
-}
-
-.tab-btn {
-  padding: 0.5rem 1.25rem;
-  font-size: 0.85rem;
-  font-weight: 500;
-  color: var(--color-text-muted);
-  background: none;
-  border: none;
-  border-bottom: 2px solid transparent;
-  cursor: pointer;
-  transition: all 0.2s;
-  display: flex;
-  align-items: center;
-  gap: 0.4rem;
-}
-
-.tab-btn:hover { color: var(--color-text-secondary); }
-.tab-btn.active {
-  color: var(--color-primary-600);
-  border-bottom-color: var(--color-primary-500);
-}
-
-.tab-count {
-  font-size: 0.7rem;
-  background: var(--color-bg-input);
-  color: var(--color-text-muted);
-  padding: 0.1rem 0.4rem;
-  border-radius: 999px;
 }
 
 /* Layout */
@@ -598,6 +662,13 @@ onMounted(loadAgents)
   border-radius: 999px;
 }
 
+.agent-id-tag {
+  font-size: 0.65rem;
+  font-weight: 500;
+  color: var(--color-text-tertiary);
+  margin-left: 0.25rem;
+}
+
 /* Agent Detail */
 .agent-detail {
   padding: 1.25rem;
@@ -634,17 +705,12 @@ onMounted(loadAgents)
   gap: 0.5rem;
 }
 
-.btn-sm {
-  font-size: 0.78rem;
-  padding: 0.35rem 0.85rem;
-}
-
-.btn-danger {
+.btn-danger-outline {
   color: #dc2626;
   border-color: #fca5a5;
 }
 
-.btn-danger:hover {
+.btn-danger-outline:hover {
   background: rgba(239,68,68,0.08);
 }
 
@@ -730,35 +796,6 @@ onMounted(loadAgents)
   gap: 0.5rem;
   margin-bottom: 0.5rem;
 }
-
-.btn-xs {
-  font-size: 0.72rem;
-  padding: 0.25rem 0.6rem;
-  display: flex;
-  align-items: center;
-  gap: 0.3rem;
-  background: linear-gradient(135deg, #6366f1, #8b5cf6);
-  color: white;
-  border: none;
-  border-radius: var(--radius-md);
-  cursor: pointer;
-  transition: all 0.2s;
-}
-
-.btn-xs:hover {
-  background: linear-gradient(135deg, #4f46e5, #7c3aed);
-  box-shadow: 0 2px 8px rgba(99,102,241,0.35);
-  transform: translateY(-1px);
-}
-
-.btn-xs:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-  transform: none;
-  box-shadow: none;
-}
-
-.btn-xs svg { flex-shrink: 0; }
 
 /* Version History */
 .version-toggle {
@@ -906,17 +943,6 @@ onMounted(loadAgents)
   font-size: 0.875rem;
 }
 
-.spinner-lg {
-  width: 32px;
-  height: 32px;
-  border: 3px solid var(--color-border);
-  border-top-color: var(--color-primary-500);
-  border-radius: 50%;
-  animation: spin 0.6s linear infinite;
-}
-
-@keyframes spin { to { transform: rotate(360deg); } }
-
 /* Modal */
 .modal-overlay {
   position: fixed;
@@ -958,22 +984,6 @@ onMounted(loadAgents)
   gap: 0.75rem;
 }
 
-/* Toast */
-.toast {
-  position: fixed;
-  top: 1.5rem;
-  right: 1.5rem;
-  z-index: 9999;
-  padding: 0.65rem 1.25rem;
-  border-radius: var(--radius-md);
-  font-size: 0.85rem;
-  font-weight: 500;
-  box-shadow: var(--shadow-lg);
-}
-
-.toast-success { background: #059669; color: white; }
-.toast-error { background: #dc2626; color: white; }
-
 /* Responsive */
 @media (max-width: 768px) {
   .agent-layout {
@@ -982,5 +992,92 @@ onMounted(loadAgents)
   .agent-list {
     max-height: 250px;
   }
+}
+
+/* Regression Test */
+.regression-panel {
+  margin-top: 0.75rem;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+}
+
+.regression-status {
+  padding: 1.25rem;
+  text-align: center;
+  font-size: 0.85rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+}
+
+.regression-status.running { color: var(--color-primary-600); }
+.regression-status.error { color: #dc2626; }
+
+.regression-summary {
+  display: flex;
+  gap: 0.75rem;
+  padding: 0.75rem;
+  border-bottom: 1px solid var(--color-border-light);
+  flex-wrap: wrap;
+}
+
+.regression-stat {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.15rem;
+  min-width: 60px;
+}
+
+.regression-stat .stat-num {
+  font-size: 1.1rem;
+  font-weight: 700;
+  color: var(--color-text-primary);
+}
+
+.regression-stat .stat-lbl {
+  font-size: 0.68rem;
+  color: var(--color-text-muted);
+}
+
+.regression-stat.improved .stat-num { color: #10b981; }
+.regression-stat.degraded .stat-num { color: #ef4444; }
+
+.regression-cases {
+  max-height: 250px;
+  overflow-y: auto;
+}
+
+.regression-case {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 0.75rem;
+  border-bottom: 1px solid var(--color-border-light);
+  font-size: 0.8rem;
+}
+
+.regression-case:last-child { border-bottom: none; }
+
+.regression-status-icon { font-size: 0.9rem; flex-shrink: 0; }
+
+.regression-case-name {
+  flex: 1;
+  color: var(--color-text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.regression-score {
+  font-weight: 700;
+  font-size: 0.85rem;
+}
+
+.regression-old-avg {
+  font-size: 0.72rem;
+  color: var(--color-text-muted);
 }
 </style>

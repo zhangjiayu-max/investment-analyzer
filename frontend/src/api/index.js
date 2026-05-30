@@ -5,75 +5,117 @@ const api = axios.create({
   timeout: 120000,
 })
 
-// ── 任务 API ──────────────────────────────────────
+// ── 任务 API（新路径: /api/task/*）─────────────────────────────────────
 
 /** 创建任务（提交链接） */
 export function createTask(url) {
-  return api.post('/tasks', { url })
+  return api.post('/task/create', { url })
 }
 
 /** 任务列表 */
 export function listTasks(limit = 50) {
-  return api.get('/tasks', { params: { limit } })
+  return api.get('/task/list', { params: { limit } })
 }
 
 /** 任务详情 */
 export function getTask(taskId) {
-  return api.get(`/tasks/${taskId}`)
+  return api.get(`/task/${taskId}`)
 }
 
 /** 删除任务 */
 export function deleteTask(taskId) {
-  return api.delete(`/tasks/${taskId}`)
+  return api.delete(`/task/${taskId}`)
 }
 
 /** 获取任务图片 */
 export function getTaskImages(taskId) {
-  return api.get(`/tasks/${taskId}/images`)
+  return api.get(`/task/${taskId}/images`)
 }
+
+/** 分析任务中的所有图片 */
+export function analyzeTaskImages(taskId) {
+  return api.post(`/task/${taskId}/analyze`, {}, { timeout: 300000 })
+}
+
+// ── 对话 API（新路径: /api/conversation/*）─────────────────────────────────────
 
 /** 自由问答 */
 export function chat(question, context = '') {
   return api.post('/chat', { question, context })
 }
 
+// ── 图表 API ──────────────────────────────────────
+
 /** 获取 K 线图数据 */
 export function getChart(symbol, days = 180, isFund = false) {
   return api.get(`/chart/${symbol}`, { params: { days, fund: isFund } })
 }
 
-/** 分析任务中的所有图片 */
-export function analyzeTaskImages(taskId) {
-  return api.post(`/tasks/${taskId}/analyze-images`, {}, { timeout: 300000 })
-}
-
-// ── 估值数据 API ──────────────────────────────────────
+// ── 估值数据 API（新路径: /api/valuation/*）──────────────────────────────────────
 
 /** 解析图片并存储估值数据 */
 export function parseAndSaveValuation(path, modelType = 'mimo', snapshotDate = null) {
-  return api.post('/valuations/parse', { path, model_type: modelType, snapshot_date: snapshotDate }, { timeout: 300000 })
+  return api.post('/valuation/parse', { path, model_type: modelType, snapshot_date: snapshotDate }, { timeout: 300000 })
+}
+
+/** 批量并发解析多张估值图片 */
+export function parseValuationBatch(paths, modelType = 'mimo') {
+  return api.post('/valuation/parse-batch', { paths, model_type: modelType }, { timeout: 600000 })
+}
+
+/** 解析螺丝钉估值表图片（多指数表格数据） */
+export function parseDDImage(path, modelType = 'mimo') {
+  return api.post('/valuation/parse-dd', { path, model_type: modelType }, { timeout: 300000 })
 }
 
 /** 列出所有有估值数据的指数 */
 export function listValuationIndexes() {
-  return api.get('/valuations')
+  return api.get('/valuation/indexes')
 }
 
 /** 查询某指数的估值历史 */
 export function getValuationHistory(indexCode, days = 30, metricType = null) {
   const params = { days }
   if (metricType) params.metric_type = metricType
-  return api.get(`/valuations/${indexCode}`, { params })
+  return api.get(`/valuation/history/${indexCode}`, { params })
 }
 
 /** 获取估值数据新鲜度 */
 export function getValuationFreshness() {
-  return api.get('/valuations/freshness')
+  return api.get('/valuation/freshness')
 }
 
 /** 刷新指数实时价格 */
 export function refreshValuationPrices() {
-  return api.post('/valuations/refresh-prices', {}, { timeout: 60000 })
+  return api.post('/valuation/refresh-prices', {}, { timeout: 60000 })
+}
+
+/** 列出螺丝钉估值记录 */
+export function listDDValuations() {
+  return api.get('/valuation/dd/list')
+}
+
+/** 获取螺丝钉估值记录详情 */
+export function getDDValuation(id) {
+  return api.get(`/valuation/dd/${id}`)
+}
+
+/** 获取最新市场温度 */
+export function getMarketTemperature() {
+  return api.get('/valuation/market-temperature')
+}
+
+/** 获取螺丝钉指数列表 */
+export function getDDIndexes(ddId = null) {
+  const params = ddId ? { dd_id: ddId } : {}
+  return api.get('/valuation/dd/indexes', { params })
+}
+
+/** 统一估值查询（智能降级） */
+export function getUnifiedValuation(indexCode = null, metricType = '市盈率', source = 'all', maxDays = 7) {
+  const params = { metric_type: metricType, source, max_days: maxDays }
+  if (indexCode) params.index_code = indexCode
+  return api.get('/valuation/unified', { params })
 }
 
 /** AI 债券配置推荐 */
@@ -120,135 +162,142 @@ export function pollTask(taskId, onProgress, interval = 2000) {
   return () => { stopped = true }
 }
 
-// ── 文章管理 API ──────────────────────────────────────
+// ── 文章管理 API（新路径: /api/article/*）─────────────────────────────────────
 
 /** 添加文章（粘贴链接，自动解析+下载+分析） */
 export function addArticle(url) {
-  return api.post('/articles/add', { url })
+  return api.post('/article/create', { url })
 }
 
 /** 同步文章 */
 export function syncArticles() {
-  return api.post('/articles/sync')
+  return api.post('/article/sync')
 }
 
 /** 文章列表 */
 export function fetchArticles(status = '') {
   const params = { _t: Date.now() }
   if (status) params.status = status
-  return api.get('/articles', { params })
+  return api.get('/article/list', { params })
 }
 
 /** 文章详情（含分析记录） */
 export function fetchArticle(id) {
-  return api.get(`/articles/${id}`, { params: { _t: Date.now() } })
+  return api.get(`/article/${id}`, { params: { _t: Date.now() } })
 }
 
 /** 下载文章图片 */
 export function downloadArticleImages(id) {
-  return api.post(`/articles/${id}/download`, {}, { timeout: 120000 })
+  return api.post(`/article/${id}/download`, {}, { timeout: 120000 })
 }
 
 /** 分析文章所有图片（异步触发） */
 export function analyzeArticleImages(id) {
-  return api.post(`/articles/${id}/analyze`, {}, { timeout: 30000 })
+  return api.post(`/article/${id}/analyze`, {}, { timeout: 30000 })
 }
 
 /** 查询分析任务进度 */
 export function getAnalyzeStatus(id) {
-  return api.get(`/articles/${id}/analyze-status`)
+  return api.get(`/article/${id}/status`)
 }
 
 /** 取消分析任务 */
 export function cancelAnalyze(id) {
-  return api.post(`/articles/${id}/cancel-analyze`)
+  return api.post(`/article/${id}/cancel`)
 }
 
 /** 重新分析单张图片（异步触发） */
 export function reanalyzeImage(recordId) {
-  return api.post(`/records/${recordId}/reanalyze`, {}, { timeout: 10000 })
+  return api.post(`/article/records/${recordId}/reanalyze`, {}, { timeout: 10000 })
 }
 
 /** 查询单张图片重新分析状态 */
 export function getReanalyzeStatus(recordId) {
-  return api.get(`/records/${recordId}/reanalyze-status`)
+  return api.get(`/article/records/${recordId}/status`)
 }
 
-// ── Agent 对话 API ──────────────────────────────────────
+// ── Agent API（新路径: /api/agent/*）─────────────────────────────────────
 
 /** 列出所有 Agent */
 export function listAgents() {
-  return api.get('/agents')
+  return api.get('/agent/list')
 }
 
 /** 创建自定义 Agent */
 export function createAgent(data) {
-  return api.post('/agents', data)
+  return api.post('/agent/create', data)
 }
 
 /** 获取单个 Agent 详情 */
 export function getAgent(id) {
-  return api.get(`/agents/${id}`)
+  return api.get(`/agent/${id}`)
 }
 
 /** 更新 Agent */
 export function updateAgent(id, data) {
-  return api.put(`/agents/${id}`, data)
+  return api.put(`/agent/${id}`, data)
 }
 
 /** 删除自定义 Agent */
 export function deleteAgent(id) {
-  return api.delete(`/agents/${id}`)
+  return api.delete(`/agent/${id}`)
 }
 
 /** AI 生成/优化 Agent 提示词 */
 export function generateAgentPrompt(data) {
-  return api.post('/agents/generate-prompt', data, { timeout: 120000 })
+  return api.post('/agent/generate-prompt', data, { timeout: 120000 })
 }
 
 /** 获取 Agent 提示词版本历史 */
 export function listAgentVersions(agentId) {
-  return api.get(`/agents/${agentId}/versions`)
+  return api.get(`/agent/${agentId}/versions`)
 }
 
 /** 回滚 Agent 提示词到指定版本 */
 export function rollbackAgentPrompt(agentId, versionId) {
-  return api.post(`/agents/${agentId}/rollback/${versionId}`)
+  return api.post(`/agent/${agentId}/rollback/${versionId}`)
 }
 
 /** 获取分析 Agent 提示词版本历史 */
 export function listAnalysisAgentVersions(agentId) {
-  return api.get(`/analysis-agents/${agentId}/versions`)
+  return api.get(`/agent/${agentId}/versions`, { params: { agent_type: 'analysis' } })
 }
 
 /** 回滚分析 Agent 提示词到指定版本 */
 export function rollbackAnalysisAgentPrompt(agentId, versionId) {
-  return api.post(`/analysis-agents/${agentId}/rollback/${versionId}`)
+  return api.post(`/agent/${agentId}/rollback/${versionId}`, {}, { params: { agent_type: 'analysis' } })
 }
+
+/** 获取 Agent 回归测试结果 */
+export function getAgentRegressionResult(agentId, agentType = 'conversation') {
+  return api.get(`/agent/${agentId}/regression`, { params: { agent_type: agentType } })
+}
+
+// ── 对话 API（新路径: /api/conversation/*）─────────────────────────────────────
 
 /** 对话列表 */
 export function listConversations() {
-  return api.get('/conversations')
+  return api.get('/conversation/list')
 }
 
 /** 创建对话 */
 export function createConversation(data) {
-  return api.post('/conversations', data)
+  return api.post('/conversation/create', data)
 }
 
 /** 删除对话 */
 export function deleteConversation(id) {
-  return api.delete(`/conversations/${id}`)
+  return api.delete(`/conversation/${id}`)
 }
 
 /** 获取对话消息历史 */
 export function getMessages(convId, limit = 50) {
-  return api.get(`/conversations/${convId}/messages`, { params: { limit } })
+  return api.get(`/conversation/${convId}/messages`, { params: { limit } })
 }
 
 /** 发送消息 */
 export function sendMessage(convId, content) {
-  return api.post(`/conversations/${convId}/messages`, { content }, { timeout: 120000 })
+  return api.post(`/conversation/${convId}/messages`, { content }, { timeout: 120000 })
 }
 
 /**
@@ -262,7 +311,7 @@ export function sendMessageStream(convId, content, onEvent) {
   const controller = new AbortController()
   const baseURL = api.defaults.baseURL || ''
 
-  fetch(`${baseURL}/conversations/${convId}/messages/stream`, {
+  fetch(`${baseURL}/conversation/${convId}/messages/stream`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ content }),
@@ -307,6 +356,11 @@ export function sendMessageStream(convId, content, onEvent) {
   return controller
 }
 
+/** 取消对话执行（切页面时通知后端更新 streaming 状态） */
+export function cancelConversationExecution(convId) {
+  return api.post(`/conversation/${convId}/cancel`)
+}
+
 /** 重建 RAG 索引 */
 export function reindexRag() {
   return api.post('/rag/reindex')
@@ -314,12 +368,12 @@ export function reindexRag() {
 
 /** 获取 RAG 检索统计 */
 export function getRagStats(days = 7) {
-  return api.get('/rag-stats', { params: { days } })
+  return api.get('/conversation/rag-stats', { params: { days } })
 }
 
 /** 获取 RAG 检索日志 */
 export function getRagLogs(limit = 100) {
-  return api.get('/rag-logs', { params: { limit } })
+  return api.get('/conversation/rag-logs', { params: { limit } })
 }
 
 // ── 图片浏览 API ──────────────────────────────────────
@@ -383,60 +437,60 @@ export function deleteValuationImage(path) {
   return api.delete(`/valuation-images/${path}`)
 }
 
-// ── 作者文章 API ──────────────────────────────────────
+// ── 作者文章 API（新路径: /api/article/author/*）─────────────────────────────────────
 
 /** 从 Excel 导入作者文章 */
 export function importAuthorArticles() {
-  return api.post('/author-articles/import')
+  return api.post('/article/author/import')
 }
 
 /** 从 URL 提取文章信息 */
 export function extractAuthorArticle(url) {
-  return api.post('/author-articles/extract', { url }, { timeout: 30000 })
+  return api.post('/article/author/extract', { url }, { timeout: 30000 })
 }
 
 /** 直接创建作者文章 */
 export function createAuthorArticle(data) {
-  return api.post('/author-articles', data)
+  return api.post('/article/author/create', data)
 }
 
 /** 批量爬取所有 pending 文章 */
 export function crawlAuthorArticles() {
-  return api.post('/author-articles/crawl', {}, { timeout: 600000 })
+  return api.post('/article/author/crawl', {}, { timeout: 600000 })
 }
 
 /** 作者文章列表 */
 export function listAuthorArticles(params = {}) {
-  return api.get('/author-articles', { params })
+  return api.get('/article/author/list', { params })
 }
 
 /** 作者文章详情 */
 export function getAuthorArticle(id) {
-  return api.get(`/author-articles/${id}`)
+  return api.get(`/article/author/${id}`)
 }
 
 /** 删除作者文章 */
 export function deleteAuthorArticle(id) {
-  return api.delete(`/author-articles/${id}`)
+  return api.delete(`/article/author/${id}`)
 }
 
 /** 爬取单篇作者文章 */
 export function crawlSingleAuthorArticle(id) {
-  return api.post(`/author-articles/${id}/crawl`, {}, { timeout: 120000 })
+  return api.post(`/article/author/${id}/crawl`, {}, { timeout: 120000 })
 }
 
-// ── 个人文档 API ──────────────────────────────────────
+// ── 个人文档 API（新路径: /api/article/linked/*）─────────────────────────────────────
 
 /** 文档列表 */
 export function listLinkedArticles(limit = 200) {
-  return api.get('/linked-articles', { params: { limit } })
+  return api.get('/article/linked/list', { params: { limit } })
 }
 
 /** 上传文档 */
 export function uploadDocument(file) {
   const form = new FormData()
   form.append('file', file)
-  return api.post('/linked-articles', form, {
+  return api.post('/article/linked/create', form, {
     headers: { 'Content-Type': 'multipart/form-data' },
     timeout: 300000,
   })
@@ -444,22 +498,22 @@ export function uploadDocument(file) {
 
 /** 下载文档 */
 export function downloadDocument(id) {
-  return api.get(`/linked-articles/${id}/download`, { responseType: 'blob' })
+  return api.get(`/article/linked/${id}/download`, { responseType: 'blob' })
 }
 
 /** 获取文档内容 */
 export function getDocumentContent(id) {
-  return api.get(`/linked-articles/${id}/content`)
+  return api.get(`/article/linked/${id}/content`)
 }
 
 /** 对文档做 embedding */
 export function embedDocument(id) {
-  return api.post(`/linked-articles/${id}/embed`, {}, { timeout: 300000 })
+  return api.post(`/article/linked/${id}/embed`, {}, { timeout: 300000 })
 }
 
 /** 获取文档分块详情 */
 export function getDocumentChunks(id) {
-  return api.get(`/linked-articles/${id}/chunks`)
+  return api.get(`/article/linked/${id}/chunks`)
 }
 
 /** RAG 命中测试 */
@@ -469,7 +523,7 @@ export function testRagSearch(query, limit = 5, contentTypes = null) {
 
 /** 删除文档 */
 export function deleteLinkedArticle(id) {
-  return api.delete(`/linked-articles/${id}`)
+  return api.delete(`/article/linked/${id}`)
 }
 
 // ── AI 市场分析 API ──────────────────────────────────────
@@ -523,17 +577,22 @@ export function getDailyReport() {
   return api.get('/dashboard/daily-report')
 }
 
+/** 手动抓取近期估值数据 */
+export function fetchRecentValuations() {
+  return api.post('/valuations/fetch-recent', {}, { timeout: 60000 })
+}
+
 /** 重新生成今日市场简报 */
 export function regenerateDailyReport() {
   return api.post('/dashboard/daily-report/regenerate', {}, { timeout: 120000 })
 }
 
 /** 提交每日简报反馈 */
-export function submitDailyReportFeedback({ rating, comment = '' }) {
+export function submitDailyReportFeedback({ rating, comment = '', reportSummary = '' }) {
   return api.post('/llm-feedback', {
     caller: 'daily_report',
     input_summary: '每日市场简报',
-    output_summary: '',
+    output_summary: reportSummary,
     rating,
     tags: '',
     comment
@@ -706,6 +765,31 @@ export function getRebalancingSuggestion() {
   return api.get('/portfolio/rebalancing')
 }
 
+/** 获取调仓配置和策略预设 */
+export function getRebalanceConfig() {
+  return api.get('/portfolio/rebalance/config')
+}
+
+/** 更新调仓配置 */
+export function updateRebalanceConfig(config) {
+  return api.post('/portfolio/rebalance/config', config)
+}
+
+/** 获取调仓配置变更历史 */
+export function getRebalanceConfigHistory(limit = 20) {
+  return api.get('/portfolio/rebalance/config/history', { params: { limit } })
+}
+
+/** 获取指定版本的配置详情 */
+export function getRebalanceConfigDetail(configId) {
+  return api.get(`/portfolio/rebalance/config/${configId}`)
+}
+
+/** 回滚到指定配置版本 */
+export function rollbackRebalanceConfig(configId) {
+  return api.post(`/portfolio/rebalance/config/${configId}/rollback`)
+}
+
 // ── 分散度 AI 解读 API ──────────────────────────────────────
 
 /** 触发 AI 分散度分析解读 */
@@ -810,6 +894,11 @@ export function listWhatIfRecords(limit = 10) {
   return api.get('/portfolio/analysis/what-if/records', { params: { limit } })
 }
 
+/** 列出债券推荐记录 */
+export function listBondRecommendRecords(limit = 5) {
+  return api.get('/bond/ai-recommend/records', { params: { limit } })
+}
+
 // ── 风险预警 API ──────────────────────────────────────
 
 /** 获取预警列表 */
@@ -900,6 +989,11 @@ export function getTokenUsageDaily(days = 30) {
   return api.get('/token-usage/daily', { params: { days } })
 }
 
+/** 清空所有 token 用量数据 */
+export function clearTokenUsage() {
+  return api.post('/token-usage/clear')
+}
+
 // ── 性能监控 API ──────────────────────────────────────
 
 /** 获取 Agent 调用性能统计 */
@@ -953,12 +1047,41 @@ export function getEvalStats() {
   return api.get('/eval/stats')
 }
 
+/** 从 Bad Case 转化为 Eval Case */
+export function createEvalFromBadCase(source, sourceId, name = '') {
+  return api.post('/eval/cases/from-bad-case', { source, source_id: sourceId, name })
+}
+
 export function getFinanceQuoteBar() {
   return api.get('/finance/quote-bar')
 }
 
 export function getRunningAgents() {
   return api.get('/running-agents')
+}
+
+// ── 系统配置 API ──────────────────────────────────────
+
+/** 获取所有系统配置 */
+export function getSystemConfigs(category = null) {
+  const params = {}
+  if (category) params.category = category
+  return api.get('/system-config', { params })
+}
+
+/** 获取单个配置 */
+export function getSystemConfig(key) {
+  return api.get(`/system-config/${key}`)
+}
+
+/** 更新单个配置 */
+export function updateSystemConfig(key, value) {
+  return api.put(`/system-config/${key}`, { value })
+}
+
+/** 重置所有配置为默认值 */
+export function resetSystemConfigs() {
+  return api.post('/system-config/reset')
 }
 
 export default api

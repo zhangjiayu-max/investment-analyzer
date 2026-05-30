@@ -6,7 +6,8 @@ import logging
 from functools import wraps
 from openai import OpenAI, RateLimitError, APIStatusError, APITimeoutError, APIConnectionError
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type, before_sleep_log
-from config import get_llm_config, get_llm_fallback_config
+from config import get_llm_config, get_llm_fallback_config, ARBITRATION_API_KEY, ARBITRATION_BASE_URL, ARBITRATION_MODEL
+from db.config import get_config_float, get_config_int
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +39,10 @@ MODEL = _model
 _fallback_config = get_llm_fallback_config()
 _fallback_client = OpenAI(api_key=_fallback_config[0], base_url=_fallback_config[1]) if _fallback_config else None
 _fallback_model = _fallback_config[2] if _fallback_config else None
+
+# 仲裁 Agent 客户端（高级推理模型，如 DeepSeek R1）
+_arbitration_client = OpenAI(api_key=ARBITRATION_API_KEY, base_url=ARBITRATION_BASE_URL) if ARBITRATION_API_KEY else None
+_arbitration_model = ARBITRATION_MODEL if ARBITRATION_API_KEY else None
 
 SYSTEM_PROMPT = """<role>你是一位专业的投资分析师。请根据提供的微信公众号文章内容和市场数据，给出客观的投资分析。</role>
 
@@ -81,6 +86,26 @@ def _call_llm(caller: str = "", **kwargs):
             _record_token_usage(resp.usage, resp.model, caller)
         return resp
     return _do_call()
+
+
+def call_arbitration_llm(**kwargs):
+    """仲裁 Agent 专用 LLM 调用（高级推理模型，如 DeepSeek R1）。未配置则返回 None。"""
+    if not _arbitration_client or not _arbitration_model:
+        return None
+    kwargs.setdefault("model", _arbitration_model)
+    try:
+        resp = _arbitration_client.chat.completions.create(**kwargs)
+        if resp.usage:
+            logger.info(
+                f"Arbitration LLM tokens — prompt: {resp.usage.prompt_tokens}, "
+                f"completion: {resp.usage.completion_tokens}, "
+                f"total: {resp.usage.total_tokens}, model: {resp.model}"
+            )
+            _record_token_usage(resp.usage, resp.model, "arbitration")
+        return resp
+    except Exception as e:
+        logger.error(f"仲裁 LLM 调用异常: {e}")
+        return None
 
 
 _token_log_conn = None
@@ -140,8 +165,8 @@ def analyze_article(title: str, content: str, market_data: dict = None) -> str:
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": user_msg},
         ],
-        temperature=0.3,
-        max_tokens=4000,
+        temperature=get_config_float('llm.temperature_default', 0.3),
+        max_tokens=get_config_int('llm.max_tokens_chat', 4000),
     )
 
     return response.choices[0].message.content
@@ -168,8 +193,8 @@ def analyze_article_stream(title: str, content: str, market_data: dict = None):
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": user_msg},
             ],
-            temperature=0.3,
-            max_tokens=4000,
+            temperature=get_config_float('llm.temperature_default', 0.3),
+            max_tokens=get_config_int('llm.max_tokens_chat', 4000),
             stream=True,
         )
 
@@ -214,8 +239,8 @@ def chat_about_investment(question: str, context: str = "", valuation_context: s
         caller="chat",
         model=MODEL,
         messages=messages,
-        temperature=0.3,
-        max_tokens=2000,
+        temperature=get_config_float('llm.temperature_default', 0.3),
+        max_tokens=get_config_int('llm.max_tokens_analysis', 2000),
     )
 
     return response.choices[0].message.content
@@ -252,7 +277,7 @@ def chat_with_agent(
             caller="agent_chat",
             model=MODEL,
             messages=llm_messages,
-            temperature=0.3,
+            temperature=get_config_float('llm.temperature_default', 0.3),
             max_tokens=max_tokens,
         )
 
@@ -308,8 +333,8 @@ def analyze_image(image_path: str) -> dict:
                 {"type": "image_url", "image_url": {"url": f"data:image/{mime};base64,{img_b64}"}},
             ],
         }],
-        temperature=0.1,
-        max_tokens=2000,
+        temperature=get_config_float('llm.temperature_vision', 0.1),
+        max_tokens=get_config_int('llm.max_tokens_analysis', 2000),
     )
 
     raw = response.choices[0].message.content.strip()
@@ -454,8 +479,8 @@ def chat_with_tools(
                 messages=llm_messages,
                 tools=TOOLS,
                 tool_choice="auto",
-                temperature=0.3,
-                max_tokens=2000,
+                temperature=get_config_float('llm.temperature_default', 0.3),
+                max_tokens=get_config_int('llm.max_tokens_analysis', 2000),
             )
         except Exception as e:
             err_msg = str(e)
@@ -533,8 +558,8 @@ def chat_with_tools(
             caller="agent_tools",
             model=MODEL,
             messages=llm_messages,
-            temperature=0.3,
-            max_tokens=2000,
+            temperature=get_config_float('llm.temperature_default', 0.3),
+            max_tokens=get_config_int('llm.max_tokens_analysis', 2000),
         )
         final_answer = response.choices[0].message.content or ""
     except Exception:

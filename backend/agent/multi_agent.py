@@ -1,190 +1,71 @@
-"""多 Agent 协作架构 — 专家 Agent 定义与执行"""
+"""多 Agent 协作架构 — 专家 Agent 执行引擎"""
 
 import json
 import logging
+import re
 import time
 
 from llm_service import client, MODEL, _call_llm, _parse_tool_args
 from tools import TOOLS, execute_tool
+from db.agents import load_specialist_agents
 
 logger = logging.getLogger(__name__)
 
-# ── 专家 Agent 定义 ──────────────────────────────────────
 
-SPECIALIST_AGENTS = {
-    "valuation_expert": {
-        "name": "估值专家",
-        "icon": "📊",
-        "description": "分析指数估值水平，判断高估/低估",
-        "tools": ["query_valuation", "get_valuation_list", "calculate_metrics"],
-        "system_prompt": """你是一位专业的估值分析师，专注于指数和基金的估值分析。
+def _extract_text_tool_calls(content_str):
+    """从 LLM 文本中提取 XML 格式的 tool_call。"""
+    if not content_str or '<tool_call>' not in content_str:
+        return None
+    import re as _re
+    # Build pattern with chr() to avoid XML interpretation
+    tc_open = chr(60) + 'tool' + '_call' + chr(62)
+    tc_close = chr(60) + '/tool' + '_call' + chr(62)
+    fn_open = chr(60) + 'function='
+    fn_close = chr(60) + '/function' + chr(62)
+    param_open = chr(60) + 'parameter='
+    param_close = chr(60) + '/parameter' + chr(62)
+    
+    pattern = tc_open + r'\s*' + fn_open + r'(\w+)>' + r'(.*?)' + fn_close + r'\s*' + tc_close
+    matches = _re.findall(pattern, content_str, _re.DOTALL)
+    if not matches:
+        return None
+    results = []
+    for func_name, params_block in matches:
+        pp = param_open + r'(\w+)>' + r'(.*?)' + param_close
+        param_matches = _re.findall(pp, params_block, _re.DOTALL)
+        args = {pname: pval.strip() for pname, pval in param_matches}
+        results.append({'name': func_name, 'arguments': args})
+    return results if results else None
 
-## 核心职责
-分析指数/基金的估值水平，判断当前是高估还是低估，给出估值相关的投资建议。
 
-## 分析方法
-1. 查询目标指数的 PE、PB、股息率等核心估值指标
-2. 关注百分位（percentile）和 z-score，判断估值在历史中的位置
-3. 分析估值趋势（近期是上升还是下降）
-4. 对比同类指数的估值水平
+def _process_text_tool_calls(content_str, llm_messages, tool_calls_log, agent_name):
+    """处理文本格式的 tool_call：解析、执行、将结果追加到消息列表。"""
+    text_calls = _extract_text_tool_calls(content_str)
+    if not text_calls:
+        return False
+    logger.info(f'[{agent_name}] 检测到文本格式 tool_call: {[tc["name"] for tc in text_calls]}')
+    for tc in text_calls:
+        args = tc['arguments']
+        logger.info(f'[{agent_name}] 文本 Tool: {tc["name"]}({json.dumps(args, ensure_ascii=False)[:100]})')
+        result = execute_tool(tc['name'], args)
+        if len(result) > 3000:
+            result = result[:3000] + chr(10) + '... (结果过长，已截断)'
+        tool_calls_log.append({
+            'name': tc['name'],
+            'arguments': args,
+            'result_preview': result[:200] if result.strip() else '（无数据返回）',
+        })
+        llm_messages.append({
+            'role': 'user',
+            'content': f'工具 {tc["name"]} 的执行结果：' + chr(10) + result,
+        })
+    return True
 
-## 估值判断标准
-- 百分位 <20%：深度低估，极具投资价值
-- 百分位 20%-40%：偏低估，适合逐步建仓
-- 百分位 40%-60%：合理区间，持有观望
-- 百分位 60%-80%：偏高估，谨慎投资
-- 百分位 >80%：高估区间，注意风险，考虑减仓
-- z-score >2：极度高估，风险警示
-- z-score <-2：极度低估，机会提示
 
-## 输出要求
-- 列出具体的估值数据（PE、PB、百分位、z-score）
-- 给出明确的估值判断（低估/合理/高估）
-- 分析估值趋势
-- 给出基于估值的投资建议
-- 使用 Markdown 格式""",
-    },
-    "market_analyst": {
-        "name": "择时分析师",
-        "icon": "📰",
-        "description": "分析市场新闻、政策变化，判断市场时机",
-        "tools": ["web_search", "search_knowledge", "get_bond_temperature",
-                   "get_bond_yield_curve", "get_bond_market_overview"],
-        "system_prompt": """你是一位专业的市场择时分析师，专注于分析市场新闻、政策变化和资金流向。
+# ── 专家 Agent 加载 ──────────────────────────────────────
 
-## 核心职责
-分析当前市场环境，解读最新新闻和政策，判断市场情绪和投资时机。
-
-## 分析方法
-1. 搜索最新财经新闻和市场动态
-2. 解读政策变化对市场的影响
-3. 分析资金流向和市场情绪
-4. 结合债市温度判断股债配置时机
-5. 检索知识库中的专业观点作为参考
-
-## 市场情绪判断
-- 利好政策出台 + 资金流入 + 情绪乐观 → 市场偏热，注意追高风险
-- 利空政策 + 资金流出 + 情绪悲观 → 市场偏冷，可能是布局机会
-- 政策平稳 + 资金震荡 + 情绪中性 → 市场震荡，观望为主
-
-## 输出要求
-- 列出近期重要新闻和政策变化
-- 分析市场情绪和资金流向
-- 给出入场/出场信号判断
-- 引用具体新闻来源
-- 使用 Markdown 格式""",
-    },
-    "risk_assessor": {
-        "name": "风险评估师",
-        "icon": "🛡️",
-        "description": "评估投资风险，计算回撤/波动率，给出风控建议",
-        "tools": ["calculate_metrics", "query_valuation", "query_portfolio", "query_fund_info", "search_knowledge"],
-        "system_prompt": """你是一位专业的风险评估师，专注于投资风险分析和控制。
-
-## 核心职责
-评估投资标的的风险水平，计算关键风险指标，给出风险控制建议。
-
-## 分析方法
-1. 计算最大回撤（Max Drawdown）
-2. 评估波动率和变异系数
-3. 分析当前估值水平（高估值=高风险）
-4. 评估风险等级（低/中/高）
-5. 给出仓位建议和风控措施
-
-## 风险等级判断
-- 变异系数 <0.15：低风险，适合重仓
-- 变异系数 0.15-0.30：中等风险，适度配置
-- 变异系数 >0.30：高风险，轻仓或回避
-- 百分位 >80%：估值过高，风险加大
-- 百分位 <20%：估值较低，风险相对较小
-
-## 输出要求
-- 列出关键风险指标（最大回撤、波动率、变异系数）
-- 给出明确的风险等级（低/中/高）
-- 分析主要风险因素
-- 给出仓位建议（如：建议仓位不超过X%）
-- 提醒需要注意的风险点
-
-## 持仓亏损处理
-当用户持仓出现亏损时，使用 search_knowledge 检索「4%定投法」策略：
-- 如果估值处于低估区间，建议按4%间隔分批加仓摊低成本
-- 计算平均成本和回盈价位
-- 如果基本面恶化，才建议止损
-- 强调纪律性和仓位管理
-
-- 使用 Markdown 格式""",
-    },
-    "fund_analyst": {
-        "name": "基金分析师",
-        "icon": "🔍",
-        "description": "分析单只基金的投资表现、操作记录和持仓结构",
-        "tools": ["query_portfolio", "query_fund_info", "analyze_holding_performance",
-                  "query_transaction_history", "get_valuation_list", "search_knowledge",
-                  "analyze_portfolio_diversification", "generate_portfolio_alert"],
-        "system_prompt": """你是一位专业的基金分析师，专注于分析具体基金的投资表现和操作质量。
-
-## 核心职责
-对用户持有的基金进行深度分析，包括收益表现评估、操作记录复盘、持仓结构分析。
-
-## 分析方法
-1. **收益评估**：查询基金的持仓数据，计算累计收益、收益率、持有时间
-2. **操作复盘**：查看交易记录，分析买入卖出的时机和质量
-3. **持仓分析**：查看基金的资产配置、重仓股、行业分布
-4. **综合判断**：结合估值数据和知识库信息，评估基金当前的投资价值
-
-## 操作质量评估
-- **买入时机**：是否在低估区域买入？是否追涨？
-- **卖出时机**：是否止盈/止损？是否卖在低点？
-- **操作频率**：交易是否过于频繁？是否有管住手？
-- **定投纪律**：是否坚持定投？是否有中断？
-
-## 输出要求
-- 给出基金的基本收益数据
-- 分析操作记录，指出好的和不好的操作
-- 给出改进建议
-- 使用 Markdown 格式""",
-    },
-    "allocation_advisor": {
-        "name": "资产配置师",
-        "icon": "🥧",
-        "description": "给出股债配比、行业轮动、定投策略建议",
-        "tools": ["get_valuation_list", "get_bond_temperature", "search_knowledge", "query_portfolio",
-                   "query_fund_info", "get_bond_yield_curve", "get_bond_market_overview"],
-        "system_prompt": """你是一位专业的资产配置师，专注于投资组合构建和资产配置策略。
-
-## 核心职责
-根据市场环境和估值水平，给出股债配比、行业配置和定投策略建议。
-
-## 分析方法
-1. 获取当前债市温度，判断债券投资价值
-2. 查看各指数估值概览，找出低估/高估品种
-3. 检索知识库中的配置策略和专家观点
-4. 综合给出资产配置建议
-
-## 配置原则
-- 股债平衡：根据债市温度调整股债比例
-- 低估多配：低估指数加大配置比例
-- 高估减配：高估指数减少配置或回避
-- 分散投资：跨行业、跨市场分散风险
-- 定投策略：波动大的品种适合定投
-
-## 输出要求
-- 给出股债配置比例建议（如：股6债4）
-- 推荐当前值得关注的低估指数/基金
-- 给出定投策略建议（定投标的、金额、频率）
-- 说明配置逻辑和依据
-
-## 定投策略
-给出定投建议时，优先参考知识库中的「4%定投法（强化版）」：
-- 首次建仓后，按4%下跌间隔分批加仓
-- 跌幅越大买入越多（金字塔加仓）
-- 结合估值百分位决定是否加码
-- 给出具体的分批计划和预期成本
-
-- 使用 Markdown 格式""",
-    },
-}
-
+# SPECIALIST_AGENTS 从数据库加载（db.agents.load_specialist_agents），不再硬编码。
+# 通过 Agent 管理页面修改 prompt 后，编排器自动使用新版本。
 
 def run_specialist(agent_key: str, query: str, context: str = "",
                    prebuilt_context: str = "") -> dict:
@@ -200,7 +81,7 @@ def run_specialist(agent_key: str, query: str, context: str = "",
     返回:
         {"agent": "估值专家", "icon": "📊", "analysis": "...", "tool_calls": [...], "duration_ms": 1234}
     """
-    agent = SPECIALIST_AGENTS[agent_key]
+    agent = load_specialist_agents()[agent_key]
     start_time = time.time()
     _caller = f"specialist:{agent_key}"
 
@@ -263,8 +144,10 @@ def run_specialist(agent_key: str, query: str, context: str = "",
 
         msg = response.choices[0].message
 
-        # 没有工具调用 → 最终回答
+        # 没有工具调用 → 检查文本格式 tool_call，否则为最终回答
         if not msg.tool_calls:
+            if _process_text_tool_calls(msg.content or "", llm_messages, tool_calls_log, agent["name"]):
+                continue
             answer = msg.content or ""
             break
 
@@ -308,7 +191,7 @@ def run_specialist(agent_key: str, query: str, context: str = "",
             tool_calls_log.append({
                 "name": tc.function.name,
                 "arguments": args,
-                "result_preview": result[:200],
+                "result_preview": result[:200] if result.strip() else "（无数据返回）",
             })
 
             llm_messages.append({
@@ -337,6 +220,12 @@ def run_specialist(agent_key: str, query: str, context: str = "",
 
     duration_ms = int((time.time() - start_time) * 1000)
 
+    # 清理：如果 answer 中仍包含文本格式 tool_call，去除之
+    if answer and '<tool_call>' in answer:
+        answer = re.sub(r'<tool_call>.*?</tool_call>', '', answer, flags=re.DOTALL).strip()
+        if not answer:
+            answer = "分析完成，请参考以上工具调用结果。"
+
     return {
         "agent_key": agent_key,
         "agent": agent["name"],
@@ -364,7 +253,7 @@ def run_specialist_with_context(agent_key: str, query: str, peer_analyses: dict,
         max_turns: 最大工具调用轮次
         prebuilt_context: 预构建的持仓+估值上下文，避免重复 DB 查询
     """
-    agent = SPECIALIST_AGENTS[agent_key]
+    agent = load_specialist_agents()[agent_key]
     start_time = time.time()
     _caller = f"specialist:{agent_key}:cross_review"
 
@@ -390,7 +279,7 @@ def run_specialist_with_context(agent_key: str, query: str, peer_analyses: dict,
     for peer_key, peer_analysis in peer_analyses.items():
         if peer_key == agent_key:
             continue
-        peer_agent = SPECIALIST_AGENTS.get(peer_key)
+        peer_agent = load_specialist_agents().get(peer_key)
         peer_name = peer_agent["name"] if peer_agent else peer_key
         peer_sections.append(f"【{peer_name}】的分析：\n{peer_analysis[:2000]}")
 
@@ -445,6 +334,8 @@ def run_specialist_with_context(agent_key: str, query: str, peer_analyses: dict,
         msg = response.choices[0].message
 
         if not msg.tool_calls:
+            if _process_text_tool_calls(msg.content or "", llm_messages, tool_calls_log, agent["name"]):
+                continue
             answer = msg.content or ""
             break
 
@@ -483,7 +374,7 @@ def run_specialist_with_context(agent_key: str, query: str, peer_analyses: dict,
             tool_calls_log.append({
                 "name": tc.function.name,
                 "arguments": args,
-                "result_preview": result[:200],
+                "result_preview": result[:200] if result.strip() else "（无数据返回）",
             })
             llm_messages.append({
                 "role": "tool",
@@ -510,6 +401,12 @@ def run_specialist_with_context(agent_key: str, query: str, peer_analyses: dict,
 
     duration_ms = int((time.time() - start_time) * 1000)
 
+    # 清理：如果 answer 中仍包含文本格式 tool_call，去除之
+    if answer and '<tool_call>' in answer:
+        answer = re.sub(r'<tool_call>.*?</tool_call>', '', answer, flags=re.DOTALL).strip()
+        if not answer:
+            answer = "交叉审阅完成。"
+
     return {
         "agent_key": agent_key,
         "agent": agent["name"],
@@ -518,4 +415,112 @@ def run_specialist_with_context(agent_key: str, query: str, peer_analyses: dict,
         "tool_calls": tool_calls_log,
         "duration_ms": duration_ms,
         "is_cross_review": True,
+    }
+
+
+# ── 仲裁 Agent（高级推理模型）──────────────────────────────────
+
+ARBITRATION_SYSTEM_PROMPT = """你是投资仲裁法官（Arbitration Agent），负责综合多位投资专家的分析结果，做出最终裁决。
+
+## 职责
+1. **审查分歧**：指出各专家之间的核心分歧点，评估谁的论据更有数据支撑
+2. **数据验证**：检查专家引用的数据是否一致，指出可能的数据错误
+3. **逻辑裁判**：当专家意见矛盾时，基于投资逻辑和数据权重做出裁决
+4. **最终建议**：给出明确、可执行的投资建议
+
+## 裁决原则
+- 数据优先：有数据支撑的观点优先于主观判断
+- 风险优先：在收益和风险之间，优先考虑风险控制
+- 逆向思维：市场极度一致时保持警惕
+- 时效性：优先考虑近期数据和当前市场环境
+
+## 输出格式
+1. **分歧分析**：各专家的核心分歧点
+2. **裁决依据**：你做出判断的数据和逻辑依据
+3. **最终建议**：明确的投资建议（买入/持有/卖出/观望）
+4. **风险提示**：需要关注的风险因素
+
+注意：你的裁决将直接影响用户的投资决策，请务必严谨、客观、有据可依。"""
+
+
+def run_arbitration(query: str, specialist_results: list, rag_context: str = "") -> dict:
+    """
+    仲裁 Agent：使用高级推理模型（如 DeepSeek R1）审查所有专家分析，给出最终裁决。
+
+    参数:
+        query: 原始用户问题
+        specialist_results: 所有专家的分析结果列表
+        rag_context: RAG 检索上下文
+
+    返回:
+        {"agent_key": "arbitrator", "agent": "仲裁法官", "icon": "⚖️",
+         "analysis": "...", "duration_ms": ..., "is_arbitration": True}
+    """
+    from llm_service import call_arbitration_llm
+
+    start_time = time.time()
+
+    # 构建专家分析摘要
+    expert_sections = []
+    for sr in specialist_results:
+        agent_name = sr.get("agent", sr.get("agent_key", "未知"))
+        icon = sr.get("icon", "🤖")
+        analysis = sr.get("analysis", "")
+        expert_sections.append(f"### {icon} {agent_name}\n{analysis[:2000]}")
+
+    experts_text = "\n\n---\n\n".join(expert_sections)
+
+    # 构建用户消息
+    user_content = f"""## 用户问题
+{query}
+
+## 各专家分析结果
+{experts_text}"""
+
+    if rag_context:
+        user_content += f"\n\n## 参考知识库\n{rag_context[:1500]}"
+
+    llm_messages = [
+        {"role": "system", "content": ARBITRATION_SYSTEM_PROMPT},
+        {"role": "user", "content": user_content},
+    ]
+
+    # 调用高级推理模型
+    response = call_arbitration_llm(
+        messages=llm_messages,
+        temperature=0.2,
+        max_tokens=3000,
+    )
+
+    if response is None:
+        # 仲裁模型未配置或调用失败，回退到主模型
+        logger.warning("仲裁模型不可用，回退到主模型")
+        response = _call_llm(
+            caller="arbitration_fallback",
+            model=MODEL,
+            messages=llm_messages,
+            temperature=0.2,
+            max_tokens=3000,
+        )
+
+    answer = response.choices[0].message.content or ""
+
+    # 提取 reasoning_content（DeepSeek R1 的思考过程）
+    reasoning = None
+    if hasattr(response.choices[0].message, "model_extra") and response.choices[0].message.model_extra:
+        reasoning = response.choices[0].message.model_extra.get("reasoning_content")
+    if not reasoning:
+        reasoning = getattr(response.choices[0].message, "reasoning_content", None)
+
+    duration_ms = int((time.time() - start_time) * 1000)
+
+    return {
+        "agent_key": "arbitrator",
+        "agent": "仲裁法官",
+        "icon": "⚖️",
+        "analysis": answer,
+        "tool_calls": [],
+        "duration_ms": duration_ms,
+        "is_arbitration": True,
+        "reasoning": reasoning,  # R1 的思考过程，前端可选择性展示
     }

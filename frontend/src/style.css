@@ -18,6 +18,18 @@
   --color-warning: #f59e0b;
   --color-danger: #ef4444;
 
+  /* Financial */
+  --color-profit: #dc2626;
+  --color-loss: #059669;
+  --color-accent: #0ea5e9;
+  --color-accent-50: #f0f9ff;
+  --color-accent-100: #e0f2fe;
+  --color-accent-200: #bae6fd;
+  --color-accent-400: #38bdf8;
+  --color-accent-500: #0ea5e9;
+  --color-accent-600: #0284c7;
+  --color-accent-700: #0369a1;
+
   /* Surface */
   --color-bg: #f8fafc;
   --color-bg-card: #ffffff;
@@ -55,13 +67,13 @@
   --transition-normal: 250ms cubic-bezier(0.4, 0, 0.2, 1);
 
   /* Active state background */
-  --color-primary-bg: rgba(99, 102, 241, 0.08);
+  --color-primary-bg: rgba(201, 168, 76, 0.08);
 
   /* Badge backgrounds */
   --color-success-bg: rgba(16, 185, 129, 0.1);
   --color-warning-bg: rgba(245, 158, 11, 0.1);
   --color-danger-bg: rgba(239, 68, 68, 0.1);
-  --color-info-bg: rgba(99, 102, 241, 0.1);
+  --color-info-bg: rgba(201, 168, 76, 0.1);
 
   /* Z-index layers */
   --z-dropdown: 50;
@@ -73,32 +85,99 @@
   --spinner-sm: 14px;
   --spinner-md: 20px;
   --spinner-lg: 32px;
+
+  /* Typography */
+  --font-sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
+  --font-mono: 'SF Mono', 'Menlo', 'Monaco', 'Consolas', monospace;
+  --font-size-xs: 0.75rem;
+  --font-size-sm: 0.875rem;
+  --font-size-base: 1rem;
+  --font-size-lg: 1.125rem;
+  --font-size-xl: 1.25rem;
+
+  /* Spacing */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+
+  /* Extended tokens (fix undefined references) */
+  --color-primary-light: #818cf8;
+  --color-primary-dark: #4338ca;
+  --color-primary-hover: #818cf8;
+  --color-success-border: rgba(16, 185, 129, 0.3);
+  --color-bg-secondary: #f1f5f9;
+  --color-text: var(--color-text-primary);
+  --color-text-tertiary: #9ca3af;
+  --text-muted: var(--color-text-muted);
+  --text-secondary: var(--color-text-secondary);
 }
 
-/* ── Dark Mode Tokens ── */
+/* ── Dark Fintech Tokens ── */
 .dark {
-  --color-bg: #0f172a;
-  --color-bg-card: #1e293b;
-  --color-bg-sidebar: #1e293b;
-  --color-bg-input: #334155;
-  --color-bg-hover: #334155;
+  /* Primary — Warm Gold */
+  --color-primary: #d4a843;
+  --color-primary-50: rgba(212, 168, 67, 0.08);
+  --color-primary-100: rgba(212, 168, 67, 0.14);
+  --color-primary-200: rgba(212, 168, 67, 0.22);
+  --color-primary-300: #c49a35;
+  --color-primary-400: #ddb756;
+  --color-primary-500: #d4a843;
+  --color-primary-600: #b8903a;
+  --color-primary-700: #9a7830;
 
-  --color-border: #334155;
-  --color-border-light: #1e293b;
+  /* Surface — Warm Charcoal */
+  --color-bg: #161618;
+  --color-bg-card: #1e1e22;
+  --color-bg-sidebar: #1a1a1e;
+  --color-bg-input: #252529;
+  --color-bg-hover: #28282e;
+  --color-bg-secondary: #1c1c20;
 
-  --color-text-primary: #f1f5f9;
-  --color-text-secondary: #94a3b8;
-  --color-text-muted: #64748b;
+  /* Border — Subtle Definition */
+  --color-border: rgba(255, 255, 255, 0.10);
+  --color-border-light: rgba(255, 255, 255, 0.06);
 
-  --shadow-sm: 0 1px 2px rgba(0,0,0,0.3);
-  --shadow-md: 0 4px 6px -1px rgba(0,0,0,0.4);
-  --shadow-lg: 0 10px 25px -5px rgba(0,0,0,0.5);
+  /* Text — Crisp Warm White */
+  --color-text-primary: #eae8e4;
+  --color-text-secondary: #a8a4a0;
+  --color-text-muted: #706c68;
+  --color-text-inverse: #161618;
+  --color-text-tertiary: #8a8680;
 
-  --color-primary-bg: rgba(99, 102, 241, 0.15);
-  --color-success-bg: rgba(16, 185, 129, 0.15);
-  --color-warning-bg: rgba(245, 158, 11, 0.15);
-  --color-danger-bg: rgba(239, 68, 68, 0.15);
-  --color-info-bg: rgba(99, 102, 241, 0.15);
+  /* Shadows — Warm Depth */
+  --shadow-sm: 0 1px 3px rgba(0,0,0,0.4), 0 0 0 1px rgba(255,255,255,0.04);
+  --shadow-md: 0 4px 12px rgba(0,0,0,0.5), 0 0 0 1px rgba(255,255,255,0.05);
+  --shadow-lg: 0 10px 30px rgba(0,0,0,0.6), 0 0 0 1px rgba(255,255,255,0.06);
+
+  /* Active & Badge backgrounds */
+  --color-primary-bg: rgba(212, 168, 67, 0.12);
+  --color-success-bg: rgba(52, 211, 153, 0.12);
+  --color-warning-bg: rgba(251, 191, 36, 0.12);
+  --color-danger-bg: rgba(248, 113, 113, 0.12);
+  --color-info-bg: rgba(212, 168, 67, 0.08);
+
+  /* Extended tokens */
+  --color-primary-light: #ddb756;
+  --color-primary-dark: #9a7830;
+  --color-primary-hover: #ddb756;
+  --color-success-border: rgba(52, 211, 153, 0.3);
+  --color-text: #eae8e4;
+  --text-muted: #706c68;
+  --text-secondary: #a8a4a0;
+
+  /* Warning semantic */
+  --color-warning-border: rgba(251, 191, 36, 0.3);
+  --color-warning-text: #fcd34d;
+  --color-warning-text-secondary: #d4a017;
+
+  /* Accent — Warm Cyan */
+  --color-accent-50: rgba(56, 189, 248, 0.08);
+  --color-accent-100: rgba(56, 189, 248, 0.14);
+  --color-accent-200: rgba(56, 189, 248, 0.22);
 }
 
 /* ── Global Reset ── */
@@ -115,7 +194,7 @@ html {
 
 body {
   margin: 0;
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
+  font-family: var(--font-sans);
   background-color: var(--color-bg);
   color: var(--color-text-primary);
   transition: background-color var(--transition-normal), color var(--transition-normal);
@@ -224,9 +303,12 @@ button {
   border-radius: var(--radius-lg);
   box-shadow: var(--shadow-sm);
   transition: box-shadow var(--transition-fast), border-color var(--transition-fast);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
 }
 .card:hover {
   box-shadow: var(--shadow-md);
+  border-color: rgba(255, 255, 255, 0.12);
 }
 
 .btn-primary {
@@ -237,11 +319,11 @@ button {
   font-size: 0.875rem;
   padding: 0.5rem 1rem;
   transition: all var(--transition-fast);
-  box-shadow: 0 1px 2px rgba(79, 70, 229, 0.3);
+  box-shadow: 0 1px 2px rgba(201, 168, 76, 0.3);
 }
 .btn-primary:hover {
   background: linear-gradient(135deg, var(--color-primary-700), var(--color-primary-600));
-  box-shadow: 0 4px 12px rgba(79, 70, 229, 0.35);
+  box-shadow: 0 4px 12px rgba(201, 168, 76, 0.35);
   transform: translateY(-1px);
 }
 .btn-primary:active {
@@ -313,6 +395,81 @@ button {
   background: var(--color-danger-bg);
 }
 
+/* Button — solid danger */
+.btn-danger {
+  background: linear-gradient(135deg, #dc2626, var(--color-danger));
+  color: var(--color-text-inverse);
+  border-radius: var(--radius-md);
+  font-weight: 500;
+  font-size: 0.875rem;
+  padding: 0.5rem 1rem;
+  transition: all var(--transition-fast);
+  box-shadow: 0 1px 2px rgba(220, 38, 38, 0.3);
+}
+.btn-danger:hover {
+  background: linear-gradient(135deg, #b91c1c, #dc2626);
+  box-shadow: 0 4px 12px rgba(220, 38, 38, 0.35);
+  transform: translateY(-1px);
+}
+.btn-danger:active { transform: translateY(0); }
+.btn-danger:disabled { opacity: 0.5; cursor: not-allowed; transform: none; box-shadow: none; }
+
+/* Button — outline */
+.btn-outline {
+  background: transparent;
+  color: var(--color-text-secondary);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  font-weight: 500;
+  font-size: 0.875rem;
+  padding: 0.5rem 1rem;
+  transition: all var(--transition-fast);
+}
+.btn-outline:hover {
+  background: var(--color-bg-hover);
+  border-color: var(--color-primary-300);
+  color: var(--color-text-primary);
+}
+
+/* Button — link */
+.btn-link {
+  background: none;
+  color: var(--color-primary-600);
+  border: none;
+  border-radius: var(--radius-md);
+  font-weight: 500;
+  font-size: 0.875rem;
+  padding: 0;
+  transition: all var(--transition-fast);
+}
+.btn-link:hover {
+  color: var(--color-primary-700);
+  text-decoration: underline;
+}
+
+/* Button — shared inline-flex alignment */
+.btn-primary, .btn-secondary, .btn-ghost, .btn-success,
+.btn-danger-outline, .btn-danger, .btn-outline {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.4rem;
+}
+
+/* Button size modifiers */
+.btn-sm {
+  font-size: 0.78rem;
+  padding: 0.35rem 0.85rem;
+}
+.btn-xs {
+  font-size: 0.72rem;
+  padding: 0.25rem 0.6rem;
+}
+.btn-lg {
+  font-size: 1rem;
+  padding: 0.625rem 1.25rem;
+}
+
 .input-field {
   background: var(--color-bg-input);
   border: 1px solid var(--color-border);
@@ -326,7 +483,7 @@ button {
 }
 .input-field:focus {
   border-color: var(--color-primary-500);
-  box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.15);
+  box-shadow: 0 0 0 3px rgba(201, 168, 76, 0.15);
 }
 .input-field::placeholder {
   color: var(--color-text-muted);
@@ -361,7 +518,7 @@ button {
 .badge-info {
   background: var(--color-info-bg);
   color: var(--color-primary-600);
-  border-color: rgba(99, 102, 241, 0.2);
+  border-color: rgba(201, 168, 76, 0.2);
 }
 .badge-neutral {
   background: var(--color-bg-input);
@@ -372,7 +529,27 @@ button {
 .dark .badge-success { background: var(--color-success-bg); color: #34d399; }
 .dark .badge-warning { background: var(--color-warning-bg); color: #fbbf24; }
 .dark .badge-danger { background: var(--color-danger-bg); color: #f87171; }
-.dark .badge-info { background: var(--color-info-bg); color: #a5b4fc; }
+.dark .badge-info { background: var(--color-info-bg); color: #d4b65a; }
+
+/* Badge size variants */
+.badge-xs {
+  font-size: 0.65rem;
+  padding: 0.1rem 0.35rem;
+  border-radius: 999px;
+}
+
+/* Badge — solid base for category/type tags */
+.badge-solid {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
+  padding: 0.2rem 0.5rem;
+  border-radius: var(--radius-sm);
+  font-size: 0.75rem;
+  font-weight: 500;
+  color: var(--color-text-inverse);
+  border: none;
+}
 
 /* Spin animation */
 .spinner {
@@ -421,10 +598,28 @@ button {
 }
 .tab-btn:hover {
   background: var(--color-bg-hover);
+  color: var(--color-text-primary);
 }
 .tab-btn.active {
   color: var(--color-primary-600);
+  background: transparent;
+  border-bottom: 2px solid var(--color-primary-500);
+  margin-bottom: -0.5rem;
+  padding-bottom: calc(0.5rem - 2px);
+}
+
+/* Tab count badge */
+.tab-count {
+  font-size: 0.65rem;
+  padding: 0.1rem 0.4rem;
+  border-radius: 999px;
+  background: var(--color-bg-input);
+  color: var(--color-text-muted);
+  font-weight: 600;
+}
+.tab-btn.active .tab-count {
   background: var(--color-primary-bg);
+  color: var(--color-primary-600);
 }
 
 /* Badge size variant */
@@ -458,12 +653,13 @@ button {
 .modal-overlay {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.5);
+  background: rgba(0, 0, 0, 0.6);
   display: flex;
   align-items: center;
   justify-content: center;
   z-index: var(--z-modal);
-  backdrop-filter: blur(4px);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
 }
 
 /* Lightbox overlay */
@@ -483,6 +679,38 @@ button {
   top: 1rem;
   right: 1rem;
   z-index: var(--z-toast);
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+.toast {
+  padding: 0.75rem 1rem;
+  border-radius: var(--radius-md);
+  font-size: 0.85rem;
+  font-weight: 500;
+  box-shadow: var(--shadow-lg);
+  backdrop-filter: blur(8px);
+  animation: toast-in 0.3s ease-out;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  max-width: 360px;
+}
+.toast-success {
+  background: rgba(16, 185, 129, 0.95);
+  color: white;
+}
+.toast-error {
+  background: rgba(239, 68, 68, 0.95);
+  color: white;
+}
+.toast-info {
+  background: rgba(201, 168, 76, 0.95);
+  color: white;
+}
+@keyframes toast-in {
+  from { transform: translateX(100%); opacity: 0; }
+  to { transform: translateX(0); opacity: 1; }
 }
 
 /* ── Term Tooltip (hover 提示) ── */

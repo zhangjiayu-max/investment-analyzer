@@ -12,6 +12,9 @@ from config import IMAGES_DIR, VALUATION_IMAGES_DIR, DD_IMAGES_DIR
 from db.valuations import (
     save_valuation, get_valuation_history, get_latest_valuation,
     list_valuation_indexes, list_index_freshness, get_index_info, save_index_info,
+    save_dd_valuation, list_dd_valuations, get_dd_valuation,
+    get_best_valuation, get_latest_market_temperature, get_latest_dd_valuation_for_index,
+    list_index_code_mappings, save_index_code_mapping,
 )
 from db._conn import _get_conn
 from image_parser import DDImageParser
@@ -66,6 +69,29 @@ async def parse_dd_image(req: ParseDDRequest):
     dd_parser = DDImageParser(model_type=req.model_type)
     result = dd_parser.parse(str(img_path))
     result["source_path"] = str(img_path)
+
+    # 解析成功后持久化到数据库
+    if result.get("ok"):
+        # 计算相对路径
+        try:
+            rel_path = f"data/dd_images/{img_path.relative_to(DD_IMAGES_DIR)}"
+        except ValueError:
+            rel_path = f"data/dd_images/{req.path}"
+        image_url = f"/static/dd_images/{img_path.relative_to(DD_IMAGES_DIR)}"
+        dd_id = save_dd_valuation(result, rel_path, image_url)
+        result["dd_id"] = dd_id
+
+        # 写 analysis_records 用于图片状态追踪
+        conn = _get_conn()
+        existing = conn.execute("SELECT id FROM analysis_records WHERE image_path = ?", (rel_path,)).fetchone()
+        if existing:
+            conn.execute("""UPDATE analysis_records SET status='success', updated_at=datetime('now','localtime') WHERE id=?""", (existing[0],))
+        else:
+            conn.execute("""INSERT INTO analysis_records (image_path, image_url, status) VALUES (?, ?, 'success')""",
+                         (rel_path, image_url))
+        conn.commit()
+        conn.close()
+
     return result
 
 
@@ -120,6 +146,148 @@ async def refresh_index_prices():
         errors.append(f"实时行情刷新失败: {e}")
 
     return {"ok": True, "updated": updated, "errors": errors}
+
+
+@router.get("/dd")
+async def list_dd_valuations_api():
+    """列出所有螺丝钉估值记录。"""
+    return {"records": list_dd_valuations()}
+
+
+@router.get("/dd/{dd_id}")
+async def get_dd_valuation_api(dd_id: int):
+    """获取单条螺丝钉估值记录详情。"""
+    record = get_dd_valuation(dd_id)
+    if not record:
+        raise HTTPException(404, "记录不存在")
+    return record
+
+
+# ── 统一估值查询 API ──────────────────────────────────────
+
+@router.get("/unified")
+async def unified_valuation_query(
+    index_code: str = None,
+    metric_type: str = "市盈率",
+    source: str = "all",
+    max_days: int = 7
+):
+    """统一估值查询接口（智能降级）。
+
+    参数:
+        index_code: 指数代码（可选，不传则返回所有指数）
+        metric_type: 指标类型（默认市盈率）
+        source: 数据来源筛选（all/manual/akshare/螺丝钉）
+        max_days: 最大有效天数（默认 7 天）
+
+    返回:
+        合并后的估值数据列表，包含数据来源和时效性信息
+    """
+    if index_code:
+        # 查询单个指数
+        result = get_best_valuation(index_code, metric_type)
+        if not result:
+            raise HTTPException(404, f"未找到 {index_code} 的估值数据")
+        return {"indexes": [result]}
+
+    # 查询所有指数
+    indexes = list_valuation_indexes()
+    results = []
+
+    for idx in indexes:
+        code = idx.get("index_code")
+        if not code:
+            continue
+
+        # 获取最佳估值数据
+        best = get_best_valuation(code, metric_type)
+        if best:
+            # 按来源筛选
+            if source != "all" and best.get("data_source") != source:
+                continue
+            results.append(best)
+
+    # 获取市场温度
+    market_temp = get_latest_market_temperature()
+
+    return {
+        "indexes": results,
+        "market_temperature": market_temp.get("market_temperature") if market_temp else None,
+        "market_temperature_status": market_temp.get("status") if market_temp else None,
+        "summary": {
+            "total": len(results),
+            "valid": len([r for r in results if not r.get("is_expired")]),
+            "expired": len([r for r in results if r.get("is_expired")]),
+            "degraded": len([r for r in results if r.get("degraded")]),
+        }
+    }
+
+
+# ── 市场温度 API ──────────────────────────────────────
+
+@router.get("/market-temperature")
+async def get_market_temperature():
+    """获取最新市场温度。"""
+    result = get_latest_market_temperature()
+    if not result:
+        return {"temperature": None, "status": "未知", "description": "暂无市场温度数据"}
+    return result
+
+
+# ── 螺丝钉指数列表 API ──────────────────────────────────────
+
+@router.get("/dd-indexes")
+async def get_dd_indexes(dd_id: int = None):
+    """获取螺丝钉估值表中的指数列表。
+
+    参数:
+        dd_id: 螺丝钉记录 ID（可选，默认最新）
+
+    返回:
+        螺丝钉估值表的完整数据，包含市场温度和指数列表
+    """
+    if dd_id:
+        record = get_dd_valuation(dd_id)
+    else:
+        # 获取最新记录
+        records = list_dd_valuations()
+        record = records[0] if records else None
+
+    if not record:
+        raise HTTPException(404, "未找到螺丝钉估值记录")
+
+    # 解析 raw_json
+    parsed_data = None
+    if record.get("raw_json"):
+        try:
+            import json
+            parsed_data = json.loads(record["raw_json"])
+        except Exception:
+            pass
+
+    return {
+        "dd_id": record["id"],
+        "update_date": record.get("update_date"),
+        "market_temperature": record.get("market_temperature"),
+        "index_count": record.get("index_count"),
+        "image_url": record.get("image_url"),
+        "indexes": parsed_data.get("data", []) if parsed_data else [],
+    }
+
+
+# ── 指数代码映射 API ──────────────────────────────────────
+
+@router.get("/code-mappings")
+async def list_code_mappings():
+    """列出所有指数代码映射。"""
+    return {"mappings": list_index_code_mappings()}
+
+
+@router.post("/code-mappings")
+async def create_code_mapping(index_code: str, index_name: str, aliases: list = None, sina_code: str = None):
+    """创建或更新指数代码映射。"""
+    save_index_code_mapping(index_code, index_name, aliases, sina_code)
+    return {"ok": True, "index_code": index_code}
 
 
 @router.get("/{index_code}")

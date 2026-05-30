@@ -6,6 +6,10 @@ import {
   extractAuthorArticle, createAuthorArticle,
 } from '../api'
 import ConfirmDialog from './ConfirmDialog.vue'
+import AppToast from './AppToast.vue'
+import { useToast } from '../composables/useToast'
+
+const { showToast } = useToast()
 
 const articles = ref([])
 const stats = ref({ total: 0, pending: 0, crawling: 0, done: 0, error: 0 })
@@ -43,10 +47,14 @@ async function loadArticles() {
     const { data } = await listAuthorArticles({ limit: 500 })
     articles.value = data.articles || []
     stats.value = data.stats || {}
-    // 如果当前选中的文章在列表中，同步状态
+    // 如果当前选中的文章在列表中，同步完整状态
     if (selectedArticle.value) {
       const updated = articles.value.find(a => a.id === selectedArticle.value.id)
-      if (updated) selectedArticle.value.status = updated.status
+      if (updated) {
+        selectedArticle.value.status = updated.status
+        selectedArticle.value.content_text = updated.content_text || selectedArticle.value.content_text
+        selectedArticle.value.summary = updated.summary || selectedArticle.value.summary
+      }
     }
   } catch (e) {
     console.error(e)
@@ -64,7 +72,7 @@ async function handleExtract() {
     const { data } = await extractAuthorArticle(url)
     extractedData.value = data
   } catch (e) {
-    alert('提取失败: ' + (e.response?.data?.detail || e.message))
+    showToast('提取失败: ' + (e.response?.data?.detail || e.message), 'error')
   } finally {
     extracting.value = false
   }
@@ -78,7 +86,7 @@ async function handleSaveExtracted() {
     extractUrl.value = ''
     await loadArticles()
   } catch (e) {
-    alert('保存失败: ' + (e.response?.data?.detail || e.message))
+    showToast('保存失败: ' + (e.response?.data?.detail || e.message), 'error')
   }
 }
 
@@ -90,9 +98,13 @@ function cancelExtract() {
 async function handleCrawlSingle(id) {
   try {
     await crawlSingleAuthorArticle(id)
+    // 立即更新选中文章状态
+    if (selectedArticle.value?.id === id) {
+      selectedArticle.value.status = 'crawling'
+    }
     startPolling()
   } catch (e) {
-    alert('爬取失败: ' + e.message)
+    showToast('爬取失败: ' + e.message, 'error')
   }
 }
 
@@ -102,17 +114,22 @@ async function handleDelete(id) {
     if (selectedArticle.value?.id === id) selectedArticle.value = null
     await loadArticles()
   } catch (e) {
-    alert('删除失败: ' + e.message)
+    showToast('删除失败: ' + e.message, 'error')
   }
 }
 
 async function openArticle(article) {
-  // 总是加载完整详情，确保 images 等字段齐全
+  // 先立即显示基本信息，避免点击无响应
+  selectedArticle.value = { ...article }
+  // 后台加载完整详情
   try {
     const { data } = await getAuthorArticle(article.id)
-    selectedArticle.value = data
+    // 确保用户没有切换到其他文章
+    if (selectedArticle.value?.id === article.id) {
+      selectedArticle.value = data
+    }
   } catch {
-    selectedArticle.value = { ...article }
+    // 加载失败时保留基本信息
   }
 }
 
@@ -125,6 +142,13 @@ function startPolling() {
     if (pending === 0 && crawling === 0) {
       clearInterval(pollTimer)
       pollTimer = null
+      // 轮询结束后，如果还有选中的文章，刷新其详情
+      if (selectedArticle.value) {
+        try {
+          const { data } = await getAuthorArticle(selectedArticle.value.id)
+          selectedArticle.value = data
+        } catch {}
+      }
     }
   }, 3000)
 }
@@ -351,6 +375,7 @@ function imgUrl(url) {
     confirm-text="确定" cancel-text="取消"
     @confirm="onConfirmOk" @cancel="onConfirmCancel"
   />
+  <AppToast />
 </template>
 
 <style scoped>

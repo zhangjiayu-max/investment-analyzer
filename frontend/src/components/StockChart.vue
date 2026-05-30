@@ -66,9 +66,9 @@ function renderChart(plotlyData) {
   const ma10 = calculateMA(closes, 10)
   const ma20 = calculateMA(closes, 20)
 
-  const bgColor = isDark.value ? '#1e293b' : '#ffffff'
-  const textColor = isDark.value ? '#94a3b8' : '#64748b'
-  const gridColor = isDark.value ? '#334155' : '#f1f5f9'
+  const bgColor = isDark.value ? '#0a0e1a' : '#ffffff'
+  const textColor = isDark.value ? '#9aa0a6' : '#64748b'
+  const gridColor = isDark.value ? 'rgba(255, 255, 255, 0.06)' : '#f1f5f9'
 
   const option = {
     backgroundColor: bgColor,
@@ -78,15 +78,15 @@ function renderChart(plotlyData) {
       textStyle: {
         fontSize: 13,
         fontWeight: 600,
-        color: isDark.value ? '#f1f5f9' : '#0f172a',
+        color: isDark.value ? '#e8eaed' : '#0f172a',
       },
     },
     tooltip: {
       trigger: 'axis',
       axisPointer: { type: 'cross' },
-      backgroundColor: isDark.value ? '#334155' : '#ffffff',
-      borderColor: isDark.value ? '#475569' : '#e2e8f0',
-      textStyle: { color: isDark.value ? '#f1f5f9' : '#0f172a', fontSize: 12 },
+      backgroundColor: isDark.value ? 'rgba(13, 18, 32, 0.95)' : '#ffffff',
+      borderColor: isDark.value ? 'rgba(255, 255, 255, 0.1)' : '#e2e8f0',
+      textStyle: { color: isDark.value ? '#e8eaed' : '#0f172a', fontSize: 12 },
     },
     legend: {
       data: ['K线', 'MA5', 'MA10', 'MA20'],
@@ -146,7 +146,7 @@ function renderChart(plotlyData) {
         end: 100,
         borderColor: gridColor,
         fillerColor: isDark.value ? 'rgba(99,102,241,0.15)' : 'rgba(99,102,241,0.1)',
-        handleStyle: { color: '#6366f1' },
+        handleStyle: { color: '#c9a84c' },
         textStyle: { color: textColor },
       },
     ],

@@ -289,6 +289,63 @@ def delete_agent(agent_id: int):
     conn.close()
 
 
+# ── 编排专家 Agent 加载（带缓存） ──────────────────────────────
+
+import time as _time
+import json as _json
+
+_specialist_cache = None
+_specialist_cache_ts = 0
+_SPECIALIST_CACHE_TTL = 60  # 秒
+
+
+def load_specialist_agents() -> dict:
+    """从数据库加载所有编排专家 Agent，返回 {agent_key: {name, icon, description, tools, system_prompt}}。
+
+    带 60 秒内存缓存，避免每次请求都查库。
+    """
+    global _specialist_cache, _specialist_cache_ts
+    if _specialist_cache is not None and (_time.time() - _specialist_cache_ts) < _SPECIALIST_CACHE_TTL:
+        return _specialist_cache
+
+    conn = _get_conn()
+    rows = conn.execute(
+        "SELECT agent_key, name, icon, description, tools, system_prompt FROM agents WHERE is_specialist = 1"
+    ).fetchall()
+    conn.close()
+
+    # 文字 icon → emoji 映射（与前端 getAgentIcon 保持一致）
+    _icon_map = {
+        "chart": "📊", "research": "🔍", "shield": "🛡️", "pie": "🥧",
+        "robot": "🤖", "newspaper": "📰", "search": "🔍", "bull": "🐂",
+    }
+
+    result = {}
+    for r in rows:
+        tools = _json.loads(r["tools"]) if r["tools"] else []
+        raw_icon = r["icon"] or "robot"
+        emoji_icon = _icon_map.get(raw_icon, raw_icon)
+        # 如果已经是 emoji（不在 map 中），直接使用
+        result[r["agent_key"]] = {
+            "name": r["name"],
+            "icon": emoji_icon,
+            "description": r["description"] or "",
+            "tools": tools,
+            "system_prompt": r["system_prompt"],
+        }
+
+    _specialist_cache = result
+    _specialist_cache_ts = _time.time()
+    return result
+
+
+def clear_specialist_cache():
+    """清除专家 Agent 缓存（更新 Agent 后调用）。"""
+    global _specialist_cache, _specialist_cache_ts
+    _specialist_cache = None
+    _specialist_cache_ts = 0
+
+
 # ── Agent 提示词版本 CRUD ──────────────────────────────
 
 
