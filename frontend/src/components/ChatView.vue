@@ -55,11 +55,11 @@ async function loadConversations() {
   }
 }
 
+// 记录正在执行的对话 ID（切换后让 stream 后台继续完成）
+const executingConvId = ref(null)
+
 async function selectConversation(conv) {
-  // 切换对话时重置执行状态
-  if (sending.value && streamAbort.value) {
-    streamAbort.value.abort()
-  }
+  // 切换对话时重置 UI 状态，但不 abort stream（让它后台完成）
   sending.value = false
   statusMessage.value = ''
   currentToolCalls.value = []
@@ -167,8 +167,13 @@ async function handleSend() {
   scrollToBottom()
 
   // 使用 SSE 流式接口
-  streamAbort.value = sendMessageStream(selectedConv.value.id, text, (event) => {
-    handleStreamEvent(event)
+  const convId = selectedConv.value.id
+  executingConvId.value = convId
+  streamAbort.value = sendMessageStream(convId, text, (event) => {
+    // 只处理当前对话的事件，否则跳过 UI 更新
+    if (selectedConv.value?.id === convId) {
+      handleStreamEvent(event)
+    }
   })
 }
 
@@ -282,6 +287,7 @@ function handleStreamEvent(event) {
         lastMsg.phase_timings = lastTiming.value.phase_timings
       }
       sending.value = false
+      executingConvId.value = null
       streamStatus.value = ''
       currentToolCalls.value = []
       activeSpecialists.value = []
@@ -299,6 +305,7 @@ function handleStreamEvent(event) {
         created_at: new Date().toISOString(),
       })
       sending.value = false
+      executingConvId.value = null
       streamStatus.value = ''
       currentToolCalls.value = []
       activeSpecialists.value = []
