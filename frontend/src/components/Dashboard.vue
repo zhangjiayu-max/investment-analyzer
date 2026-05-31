@@ -527,27 +527,9 @@ const concentrationIcon = { low: '✅', moderate: '⚡', high: '⚠️' }
       </div>
     </div>
 
-    <!-- 市场温度仪表盘组 -->
-    <div v-if="!loading && (data?.market_temperature || bondTemperature)" class="temp-gauges-row">
-      <div v-if="data?.market_temperature" class="temp-gauge-card card">
-        <GaugeChart
-          :value="data.market_temperature.degree ?? data.market_temperature.temperature ?? 0"
-          title="A股市场温度"
-          :segments="[
-            { from: 0, to: 20, color: '#3b82f6' },
-            { from: 20, to: 40, color: '#60a5fa' },
-            { from: 40, to: 60, color: '#10b981' },
-            { from: 60, to: 80, color: '#f59e0b' },
-            { from: 80, to: 100, color: '#ef4444' },
-          ]"
-          height="180px"
-        />
-        <div class="temp-gauge-label">
-          <span class="temp-gauge-desc">{{ data.market_temperature.label || data.market_temperature.level || '' }}</span>
-          <span class="temp-gauge-hint" v-if="data.market_temperature.percentile != null">百分位: {{ data.market_temperature.percentile }}%</span>
-        </div>
-      </div>
-      <div v-if="bondTemperature" class="temp-gauge-card card">
+    <!-- 债市温度仪表盘 -->
+    <div v-if="!loading && bondTemperature" class="temp-gauges-row">
+      <div class="temp-gauge-card card">
         <GaugeChart
           :value="bondTemperature.temperature ?? 0"
           title="债市温度"
