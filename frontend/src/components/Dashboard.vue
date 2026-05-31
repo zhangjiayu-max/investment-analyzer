@@ -24,6 +24,14 @@ async function loadBondTemperature() {
   } catch (_) {}
 }
 
+function getBondTempLabel(temp) {
+  if (temp == null) return ''
+  if (temp <= 30) return '低温（适合买入）'
+  if (temp <= 50) return '偏低'
+  if (temp <= 70) return '偏高'
+  return '高温（谨慎买入）'
+}
+
 const loading = ref(true)
 const fetchingValuation = ref(false)
 const error = ref(null)
@@ -541,12 +549,12 @@ const concentrationIcon = { low: '✅', moderate: '⚡', high: '⚠️' }
       </div>
       <div v-if="bondTemperature" class="temp-gauge-card card">
         <GaugeChart
-          :value="bondTemperature.degree ?? 0"
+          :value="bondTemperature.temperature ?? 0"
           title="债市温度"
           height="180px"
         />
         <div class="temp-gauge-label">
-          <span class="temp-gauge-desc">{{ bondTemperature.label || '' }}</span>
+          <span class="temp-gauge-desc">{{ getBondTempLabel(bondTemperature.temperature) }}</span>
         </div>
       </div>
     </div>
