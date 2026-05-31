@@ -217,8 +217,7 @@ async function loadHotTopics() {
   }
 }
 
-// 本地记录的分析时间（不从后端获取）
-const cashAnalyzedAt = ref('')
+// 本地记录的热点分析时间
 const hotTopicsAnalyzedAt = ref('')
 
 async function loadDashboard() {
@@ -227,10 +226,6 @@ async function loadDashboard() {
   try {
     const { data: res } = await getDashboard()
     data.value = res
-    // 用本地记录的时间覆盖后端返回的时间
-    if (cashAnalyzedAt.value) {
-      data.value.cash_updated_at = cashAnalyzedAt.value
-    }
   } catch (e) {
     error.value = e.response?.data?.detail || e.message || '加载失败'
   } finally {
@@ -331,11 +326,8 @@ async function handleBondRecommend() {
   try {
     const { data: res } = await getBondRecommend()
     bondResult.value = res.result
-    // 记录分析完成的时间
-    cashAnalyzedAt.value = new Date().toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
-    if (data.value) {
-      data.value.cash_updated_at = cashAnalyzedAt.value
-    }
+    // 重新加载 dashboard 获取债券数据的实际日期
+    await loadDashboard()
   } catch (e) {
     showToast('AI 债券推荐失败：' + (e.response?.data?.detail || e.message), 'error')
   } finally {

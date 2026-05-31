@@ -377,7 +377,7 @@ async def get_dashboard():
             "bond_market": bond_info,
             "suggestion": cash_advice,
         },
-        "cash_updated_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
+        "cash_updated_at": bond_info.get("date", "") if bond_info else "",
         "data_freshness": freshness_info,
     }
 
