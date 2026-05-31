@@ -1,49 +1,43 @@
 <script setup>
-import { ref, onMounted, onBeforeUnmount, nextTick, watch } from 'vue'
+import { ref, computed, onMounted, onBeforeUnmount, nextTick, watch } from 'vue'
 import {
   listConversations, createConversation, deleteConversation,
   getMessages, sendMessage, sendMessageStream,
   submitChatFeedback, submitLlmFeedback,
   cancelConversationExecution,
+  listTraces,
 } from '../api'
 import ConfirmDialog from './ConfirmDialog.vue'
 import AppToast from './AppToast.vue'
+import TraceDetail from './TraceDetail.vue'
 import { useToast } from '../composables/useToast'
 import { renderMarkdown } from '../composables/useMarkdown'
+import { useStreamingState } from '../composables/useStreamingState'
 
 const { showToast } = useToast()
+const {
+  streamStates, getStreamState, startStream,
+  handleStreamEvent: routeStreamEvent,
+  finishStream, cancelStream: cancelStreamState,
+} = useStreamingState()
 
 const conversations = ref([])
 const confirm = ref({ visible: false, title: '', message: '', danger: false, onConfirm: null })
 const selectedConv = ref(null)
 const messages = ref([])
 const inputText = ref('')
-const sending = ref(false)
 const messagesContainer = ref(null)
 
-// 流式对话状态
-const streamStatus = ref('')  // '' | 'searching' | 'calling_tool' | 'thinking' | 'answering'
-const statusMessage = ref('')  // 详细状态消息
-const executionPlan = ref(null)  // 执行计划
-const currentToolCalls = ref([])  // 当前正在执行的工具调用
-const streamAbort = ref(null)  // AbortController
-const activeSpecialists = ref([])  // 正在工作的专家列表
-const completedSpecialists = ref([])  // 已完成的专家分析结果
-const crossReviewSpecialists = ref([])  // 正在交叉审阅的专家
-const completedCrossReviews = ref([])  // 已完成的交叉审阅结果
-
-// 计时器
-const elapsedMs = ref(0)
-let elapsedTimer = null
-const lastTiming = ref(null)
+// 当前选中对话的流式状态（computed，自动跟随 selectedConv 切换）
+const currentStream = computed(() => getStreamState(selectedConv.value?.id))
+const sending = computed(() => currentStream.value?.sending || false)
 
 onMounted(async () => {
   await loadConversations()
 })
 
 onBeforeUnmount(() => {
-  if (elapsedTimer) { clearInterval(elapsedTimer); elapsedTimer = null }
-  cancelStream()
+  // 不自动取消流式执行，让后台继续完成
 })
 
 async function loadConversations() {
@@ -55,18 +49,9 @@ async function loadConversations() {
   }
 }
 
-// 记录正在执行的对话 ID（切换后让 stream 后台继续完成）
-const executingConvId = ref(null)
-
 async function selectConversation(conv) {
-  // 切换对话时重置 UI 状态，但不 abort stream（让它后台完成）
-  sending.value = false
-  statusMessage.value = ''
-  currentToolCalls.value = []
-  activeSpecialists.value = []
-  completedSpecialists.value = []
-  crossReviewSpecialists.value = []
-  completedCrossReviews.value = []
+  // 切换对话时不清除流式状态（composable 保留所有对话的状态）
+  // UI 自动通过 currentStream computed 跟随 selectedConv 切换
 
   selectedConv.value = conv
   try {
@@ -147,184 +132,78 @@ async function handleSend() {
   if (!text || !selectedConv.value || sending.value) return
 
   inputText.value = ''
-  sending.value = true
-  streamStatus.value = 'searching'
-  statusMessage.value = ''
-  executionPlan.value = null
-  currentToolCalls.value = []
-  activeSpecialists.value = []
-  completedSpecialists.value = []
-  lastTiming.value = null
-
-  // 启动计时器
-  elapsedMs.value = 0
-  if (elapsedTimer) clearInterval(elapsedTimer)
-  elapsedTimer = setInterval(() => { elapsedMs.value += 1000 }, 1000)
 
   // 立即显示用户消息
   messages.value.push({ role: 'user', content: text, created_at: new Date().toISOString() })
   await nextTick()
   scrollToBottom()
 
-  // 使用 SSE 流式接口
+  // 使用 SSE 流式接口，通过 composable 管理 per-conversation 状态
   const convId = selectedConv.value.id
-  executingConvId.value = convId
-  streamAbort.value = sendMessageStream(convId, text, (event) => {
-    // 只处理当前对话的事件，否则跳过 UI 更新
-    if (selectedConv.value?.id === convId) {
-      handleStreamEvent(event)
-    }
+  const controller = sendMessageStream(convId, text, (event) => {
+    // 所有事件都路由到 composable，由它按 convId 分发
+    routeStreamEvent(convId, event, {
+      onAnswer: (cid, data, state) => {
+        // 只有当前选中的对话才更新 messages UI
+        if (selectedConv.value?.id !== cid) return
+        // 分离 Phase A 和 Phase B 的专家结果
+        const allSpecResults = data.specialist_results || (state.completedSpecialists.length > 0 ? [...state.completedSpecialists] : [])
+        const phaseAResults = allSpecResults.filter(s => !s.is_cross_review)
+        const phaseBResults = allSpecResults.filter(s => s.is_cross_review)
+        // 构建最终消息
+        const assistantMsg = {
+          role: 'assistant',
+          content: data.content,
+          created_at: new Date().toISOString(),
+          specialist_results: phaseAResults.length > 0 ? phaseAResults : null,
+          cross_review_results: phaseBResults.length > 0 ? phaseBResults : (state.completedCrossReviews.length > 0 ? [...state.completedCrossReviews] : null),
+          tool_calls: state.currentToolCalls.length > 0 ? [...state.currentToolCalls] : null,
+          rag: state.currentToolCalls._ragSources ? { sources: state.currentToolCalls._ragSources } : null,
+        }
+        messages.value.push(assistantMsg)
+        nextTick(() => scrollToBottom())
+      },
+      onDone: (cid, data) => {
+        // 将 timing 附加到最后一条 assistant 消息（仅当前选中对话）
+        if (selectedConv.value?.id === cid) {
+          const state = getStreamState(cid)
+          const lastMsg = messages.value[messages.value.length - 1]
+          if (lastMsg && lastMsg.role === 'assistant' && state?.lastTiming) {
+            lastMsg.duration_ms = state.lastTiming.duration_ms
+            lastMsg.phase_timings = state.lastTiming.phase_timings
+          }
+        }
+        // 清理 composable 状态
+        finishStream(cid)
+        loadConversations()
+      },
+      onError: (cid, data) => {
+        if (selectedConv.value?.id === cid) {
+          messages.value.push({
+            role: 'assistant',
+            content: '发生错误: ' + (data.message || '未知错误'),
+            created_at: new Date().toISOString(),
+          })
+        }
+        finishStream(cid)
+      },
+    })
   })
+
+  // 在 composable 中注册这个流
+  startStream(convId, controller)
 }
 
-function handleStreamEvent(event) {
-  const { type, data } = event
+function handleCancelStream() {
+  const convId = selectedConv.value?.id
+  if (!convId) return
 
-  switch (type) {
-    case 'status':
-      streamStatus.value = data.message.includes('检索') ? 'searching' : 'thinking'
-      statusMessage.value = data.message
-      break
+  // 通知后端取消执行
+  cancelConversationExecution(convId).catch(() => {})
 
-    case 'plan':
-      executionPlan.value = data
-      break
+  // 取消 composable 中的状态
+  cancelStreamState(convId)
 
-    case 'rag_sources':
-      currentToolCalls.value._ragSources = data.sources
-      break
-
-    case 'tool_call':
-      streamStatus.value = 'calling_tool'
-      currentToolCalls.value.push({
-        name: data.name,
-        arguments: data.arguments,
-        result_preview: data.result_preview,
-        expanded: false,
-      })
-      nextTick(() => scrollToBottom())
-      break
-
-    case 'specialist_start':
-      streamStatus.value = 'calling_specialist'
-      activeSpecialists.value.push({
-        agent_key: data.agent_key,
-        agent: data.agent,
-        icon: data.icon,
-        status: 'running',
-      })
-      nextTick(() => scrollToBottom())
-      break
-
-    case 'specialist_done':
-      // 从活跃列表移到完成列表
-      activeSpecialists.value = activeSpecialists.value.filter(s => s.agent_key !== data.agent_key)
-      completedSpecialists.value.push({
-        agent_key: data.agent_key,
-        agent: data.agent,
-        icon: data.icon,
-        analysis: data.analysis,
-        duration_ms: data.duration_ms,
-        expanded: false,
-      })
-      nextTick(() => scrollToBottom())
-      break
-
-    case 'cross_review_start':
-      streamStatus.value = 'cross_reviewing'
-      crossReviewSpecialists.value.push({
-        agent_key: data.agent_key,
-        agent: data.agent,
-        icon: data.icon,
-        status: 'running',
-      })
-      nextTick(() => scrollToBottom())
-      break
-
-    case 'cross_review_done':
-      crossReviewSpecialists.value = crossReviewSpecialists.value.filter(s => s.agent_key !== data.agent_key)
-      completedCrossReviews.value.push({
-        agent_key: data.agent_key,
-        agent: data.agent,
-        icon: data.icon,
-        analysis: data.analysis,
-        duration_ms: data.duration_ms,
-        expanded: false,
-      })
-      nextTick(() => scrollToBottom())
-      break
-
-    case 'answer':
-      streamStatus.value = 'answering'
-      // 分离 Phase A 和 Phase B 的专家结果
-      const allSpecResults = data.specialist_results || (completedSpecialists.value.length > 0 ? [...completedSpecialists.value] : [])
-      const phaseAResults = allSpecResults.filter(s => !s.is_cross_review)
-      const phaseBResults = allSpecResults.filter(s => s.is_cross_review)
-      // 构建最终消息
-      const assistantMsg = {
-        role: 'assistant',
-        content: data.content,
-        created_at: new Date().toISOString(),
-        specialist_results: phaseAResults.length > 0 ? phaseAResults : null,
-        cross_review_results: phaseBResults.length > 0 ? phaseBResults : (completedCrossReviews.value.length > 0 ? [...completedCrossReviews.value] : null),
-        tool_calls: currentToolCalls.value.length > 0 ? [...currentToolCalls.value] : null,
-        rag: currentToolCalls.value._ragSources ? { sources: currentToolCalls.value._ragSources } : null,
-      }
-      messages.value.push(assistantMsg)
-      nextTick(() => scrollToBottom())
-      break
-
-    case 'done':
-      if (elapsedTimer) { clearInterval(elapsedTimer); elapsedTimer = null }
-      lastTiming.value = {
-        duration_ms: data.duration_ms,
-        phase_timings: data.phase_timings,
-      }
-      // 将 timing 附加到最后一条 assistant 消息
-      const lastMsg = messages.value[messages.value.length - 1]
-      if (lastMsg && lastMsg.role === 'assistant' && lastTiming.value) {
-        lastMsg.duration_ms = lastTiming.value.duration_ms
-        lastMsg.phase_timings = lastTiming.value.phase_timings
-      }
-      sending.value = false
-      executingConvId.value = null
-      streamStatus.value = ''
-      currentToolCalls.value = []
-      activeSpecialists.value = []
-      completedSpecialists.value = []
-      crossReviewSpecialists.value = []
-      completedCrossReviews.value = []
-      loadConversations()
-      break
-
-    case 'error':
-      if (elapsedTimer) { clearInterval(elapsedTimer); elapsedTimer = null }
-      messages.value.push({
-        role: 'assistant',
-        content: '发生错误: ' + (data.message || '未知错误'),
-        created_at: new Date().toISOString(),
-      })
-      sending.value = false
-      executingConvId.value = null
-      streamStatus.value = ''
-      currentToolCalls.value = []
-      activeSpecialists.value = []
-      completedSpecialists.value = []
-      break
-  }
-}
-
-function cancelStream() {
-  // 通知后端取消执行，将 streaming 消息标记为 cancelled
-  if (selectedConv.value?.id && sending.value) {
-    cancelConversationExecution(selectedConv.value.id).catch(() => {})
-  }
-  if (streamAbort.value) {
-    streamAbort.value.abort()
-    streamAbort.value = null
-  }
-  if (elapsedTimer) { clearInterval(elapsedTimer); elapsedTimer = null }
-  elapsedMs.value = 0
   // 显示取消提示消息
   messages.value.push({
     role: 'assistant',
@@ -332,15 +211,6 @@ function cancelStream() {
     created_at: new Date().toISOString(),
     cancelled: true,
   })
-  sending.value = false
-  streamStatus.value = ''
-  statusMessage.value = ''
-  executionPlan.value = null
-  currentToolCalls.value = []
-  activeSpecialists.value = []
-  completedSpecialists.value = []
-  crossReviewSpecialists.value = []
-  completedCrossReviews.value = []
   nextTick(() => scrollToBottom())
 }
 
@@ -494,6 +364,29 @@ function formatTime(ts) {
   return `${d.getMonth() + 1}/${d.getDate()} ${time}`
 }
 
+// Trace 详情
+const traceDetailVisible = ref({})
+const traceDetailData = ref({})
+
+async function toggleTraceDetail(msg, index) {
+  const key = `${selectedConv.value?.id}_${index}`
+  if (traceDetailVisible.value[key]) {
+    traceDetailVisible.value[key] = false
+    return
+  }
+  // 从消息的 phase_timings 中获取 trace_id（如果有）
+  // 否则加载最新的 trace
+  try {
+    const { data } = await listTraces(selectedConv.value.id, 1)
+    if (data.traces?.length > 0) {
+      traceDetailData.value[key] = data.traces[0]
+      traceDetailVisible.value[key] = true
+    }
+  } catch (e) {
+    console.error('加载 trace 失败:', e)
+  }
+}
+
 </script>
 
 <template>
@@ -512,9 +405,12 @@ function formatTime(ts) {
         <div
           v-for="conv in conversations" :key="conv.id"
           @click="selectConversation(conv)"
-          :class="['conv-item', { active: selectedConv?.id === conv.id }]"
+          :class="['conv-item', { active: selectedConv?.id === conv.id, streaming: streamStates.has(conv.id) }]"
         >
-          <div class="conv-icon">🤖</div>
+          <div class="conv-icon">
+            <span v-if="streamStates.has(conv.id)" class="conv-streaming-indicator">●</span>
+            <span v-else>🤖</span>
+          </div>
           <div class="conv-info">
             <div class="conv-title">{{ conv.title }}</div>
             <div class="conv-meta">
@@ -643,6 +539,15 @@ function formatTime(ts) {
                     <div v-if="msg.tool_calls?.length" class="execution-tools">
                       <span>工具调用：{{ msg.tool_calls.length }} 次</span>
                     </div>
+                    <!-- Trace 详情按钮 -->
+                    <button class="btn-trace-detail" @click.stop="toggleTraceDetail(msg, i)">
+                      🔍 查看执行链路详情
+                    </button>
+                    <TraceDetail
+                      v-if="traceDetailVisible[`${selectedConv?.id}_${i}`]"
+                      :convId="selectedConv.id"
+                      :traceId="traceDetailData[`${selectedConv?.id}_${i}`]?.trace_id"
+                    />
                   </div>
                 </Transition>
               </div>
@@ -709,11 +614,11 @@ function formatTime(ts) {
             </div>
             <div class="message-time">{{ formatTime(msg.created_at) }}</div>
           </div>
-          <!-- 流式状态指示器 -->
-          <div v-if="sending" class="message assistant">
+          <!-- 流式状态指示器（从 currentStream 读取 per-conversation 状态） -->
+          <div v-if="currentStream?.sending" class="message assistant">
             <!-- 已完成的专家分析 -->
-            <div v-if="completedSpecialists.length > 0" class="specialists-container streaming">
-              <div v-for="(s, j) in completedSpecialists" :key="j" class="specialist-item completed">
+            <div v-if="currentStream.completedSpecialists.length > 0" class="specialists-container streaming">
+              <div v-for="(s, j) in currentStream.completedSpecialists" :key="j" class="specialist-item completed">
                 <div class="specialist-header" @click="s.expanded = !s.expanded">
                   <span class="specialist-icon">{{ s.icon }}</span>
                   <span class="specialist-name">{{ s.agent }}</span>
@@ -725,8 +630,8 @@ function formatTime(ts) {
               </div>
             </div>
             <!-- 正在工作的专家 -->
-            <div v-if="activeSpecialists.length > 0" class="specialists-container streaming">
-              <div v-for="(s, j) in activeSpecialists" :key="j" class="specialist-item running">
+            <div v-if="currentStream.activeSpecialists.length > 0" class="specialists-container streaming">
+              <div v-for="(s, j) in currentStream.activeSpecialists" :key="j" class="specialist-item running">
                 <div class="specialist-header">
                   <span class="specialist-icon spinning">{{ s.icon }}</span>
                   <span class="specialist-name">正在咨询{{ s.agent }}...</span>
@@ -737,9 +642,9 @@ function formatTime(ts) {
               </div>
             </div>
             <!-- 交叉审阅进度 -->
-            <div v-if="completedCrossReviews.length > 0" class="specialists-container streaming cross-review">
+            <div v-if="currentStream.completedCrossReviews.length > 0" class="specialists-container streaming cross-review">
               <div class="cross-review-label">交叉审阅</div>
-              <div v-for="(s, j) in completedCrossReviews" :key="j" class="specialist-item completed cross-review-item">
+              <div v-for="(s, j) in currentStream.completedCrossReviews" :key="j" class="specialist-item completed cross-review-item">
                 <div class="specialist-header" @click="s.expanded = !s.expanded">
                   <span class="specialist-icon">{{ s.icon }}</span>
                   <span class="specialist-name">{{ s.agent }} 审阅</span>
@@ -750,8 +655,8 @@ function formatTime(ts) {
                 <div v-if="s.expanded" class="specialist-analysis markdown-body" v-html="renderMarkdown(s.analysis || '（暂无审阅内容）')"></div>
               </div>
             </div>
-            <div v-if="crossReviewSpecialists.length > 0" class="specialists-container streaming cross-review">
-              <div v-for="(s, j) in crossReviewSpecialists" :key="j" class="specialist-item running cross-review-item">
+            <div v-if="currentStream.crossReviewSpecialists.length > 0" class="specialists-container streaming cross-review">
+              <div v-for="(s, j) in currentStream.crossReviewSpecialists" :key="j" class="specialist-item running cross-review-item">
                 <div class="specialist-header">
                   <span class="specialist-icon spinning">{{ s.icon }}</span>
                   <span class="specialist-name">{{ s.agent }} 交叉审阅中...</span>
@@ -762,8 +667,8 @@ function formatTime(ts) {
               </div>
             </div>
             <!-- 实时工具调用 -->
-            <div v-if="filterToolCalls(currentToolCalls).length > 0" class="tool-calls-container streaming">
-              <div v-for="(tc, j) in filterToolCalls(currentToolCalls)" :key="j" class="tool-call-item">
+            <div v-if="filterToolCalls(currentStream.currentToolCalls).length > 0" class="tool-calls-container streaming">
+              <div v-for="(tc, j) in filterToolCalls(currentStream.currentToolCalls)" :key="j" class="tool-call-item">
                 <div class="tool-call-header">
                   <span class="tool-icon spinning">&#9881;</span>
                   <span class="tool-name">{{ toolDisplayName(tc.name) }}</span>
@@ -772,44 +677,53 @@ function formatTime(ts) {
               </div>
             </div>
             <!-- 执行计划 -->
-            <div v-if="executionPlan" class="execution-plan">
+            <div v-if="currentStream.executionPlan" class="execution-plan">
               <div class="plan-header">
                 <span class="plan-icon">📋</span>
                 <span class="plan-label">执行计划</span>
-                <span class="plan-complexity" :class="'complexity-' + executionPlan.complexity">
-                  {{ {simple: '简单', medium: '中等', complex: '复杂'}[executionPlan.complexity] || executionPlan.complexity }}
+                <span class="plan-complexity" :class="'complexity-' + currentStream.executionPlan.complexity">
+                  {{ {simple: '简单', medium: '中等', complex: '复杂'}[currentStream.executionPlan.complexity] || currentStream.executionPlan.complexity }}
                 </span>
               </div>
-              <div v-if="executionPlan.reason" class="plan-reason">{{ executionPlan.reason }}</div>
-              <div v-if="activeSpecialists.length > 0 || completedSpecialists.length > 0" class="plan-steps">
-                <div v-for="(s, i) in completedSpecialists" :key="'done-'+i" class="plan-step done">
+              <div v-if="currentStream.executionPlan.reason" class="plan-reason">{{ currentStream.executionPlan.reason }}</div>
+              <div v-if="currentStream.activeSpecialists.length > 0 || currentStream.completedSpecialists.length > 0" class="plan-steps">
+                <div v-for="(s, i) in currentStream.completedSpecialists" :key="'done-'+i" class="plan-step done">
                   <span class="step-check">✓</span>
                   <span class="step-name">{{ s.agent }}</span>
                 </div>
-                <div v-for="(s, i) in activeSpecialists" :key="'run-'+i" class="plan-step running">
+                <div v-for="(s, i) in currentStream.activeSpecialists" :key="'run-'+i" class="plan-step running">
                   <span class="step-spinner"></span>
                   <span class="step-name">{{ s.agent }}</span>
                 </div>
               </div>
             </div>
+            <!-- 阶段进度条（Phase C 完善） -->
+            <div v-if="currentStream.totalPhases > 0" class="stream-progress">
+              <div class="progress-bar-container">
+                <div class="progress-bar-fill" :style="{ width: currentStream.progressPct + '%' }"></div>
+              </div>
+              <div v-if="currentStream.substep" class="substep-text">
+                <span class="dot-pulse"></span> {{ currentStream.substep }}
+              </div>
+            </div>
             <!-- 状态文字 -->
-            <div v-if="streamStatus === 'searching'" class="stream-status">
+            <div v-else-if="currentStream.streamStatus === 'searching'" class="stream-status">
               <span class="dot"></span><span class="dot"></span><span class="dot"></span>
-              <span class="status-text">{{ statusMessage || '正在检索知识库...' }}</span>
+              <span class="status-text">{{ currentStream.statusMessage || '正在检索知识库...' }}</span>
             </div>
-            <div v-else-if="streamStatus === 'thinking'" class="stream-status">
+            <div v-else-if="currentStream.streamStatus === 'thinking'" class="stream-status">
               <span class="dot"></span><span class="dot"></span><span class="dot"></span>
-              <span class="status-text">{{ statusMessage || '正在分析问题，决定需要咨询哪些专家...' }}</span>
+              <span class="status-text">{{ currentStream.statusMessage || '正在分析问题，决定需要咨询哪些专家...' }}</span>
             </div>
-            <div v-else-if="streamStatus === 'calling_specialist'" class="stream-status">
+            <div v-else-if="currentStream.streamStatus === 'calling_specialist'" class="stream-status">
               <span class="dot"></span><span class="dot"></span><span class="dot"></span>
-              <span class="status-text">{{ statusMessage || '专家团队正在分析中...' }}</span>
+              <span class="status-text">{{ currentStream.statusMessage || '专家团队正在分析中...' }}</span>
             </div>
-            <div v-else-if="streamStatus === 'calling_tool'" class="stream-status">
+            <div v-else-if="currentStream.streamStatus === 'calling_tool'" class="stream-status">
               <span class="dot"></span><span class="dot"></span><span class="dot"></span>
               <span class="status-text">正在调用工具...</span>
             </div>
-            <div v-else-if="streamStatus === 'cross_reviewing'" class="stream-status">
+            <div v-else-if="currentStream.streamStatus === 'cross_reviewing'" class="stream-status">
               <span class="dot"></span><span class="dot"></span><span class="dot"></span>
               <span class="status-text">正在进行交叉审阅...</span>
             </div>
@@ -817,9 +731,9 @@ function formatTime(ts) {
               <span class="dot"></span><span class="dot"></span><span class="dot"></span>
             </div>
             <!-- 实时计时器 -->
-            <div v-if="elapsedMs > 0" class="elapsed-timer">
+            <div v-if="currentStream.elapsedMs > 0" class="elapsed-timer">
               <span class="elapsed-icon">⏱</span>
-              <span class="elapsed-text">已执行 {{ formatElapsed(elapsedMs) }}</span>
+              <span class="elapsed-text">已执行 {{ formatElapsed(currentStream.elapsedMs) }}</span>
             </div>
           </div>
         </div>
@@ -838,7 +752,7 @@ function formatTime(ts) {
               @keydown.enter.exact.prevent="handleSend"
               rows="1"
             ></textarea>
-            <button v-if="sending" type="button" @click="cancelStream" class="btn-stop" title="终止执行">
+            <button v-if="sending" type="button" @click="handleCancelStream" class="btn-stop" title="终止执行">
               <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
                 <rect x="6" y="6" width="12" height="12" rx="2"/>
               </svg>
@@ -851,7 +765,7 @@ function formatTime(ts) {
           </form>
           <div v-if="sending" class="sending-hint">
             <span class="sending-spinner"></span>
-            <span class="sending-text">{{ statusMessage || 'AI 正在分析中...' }}</span>
+            <span class="sending-text">{{ currentStream?.statusMessage || 'AI 正在分析中...' }}</span>
           </div>
         </div>
       </template>
@@ -985,6 +899,22 @@ function formatTime(ts) {
 .conv-icon {
   font-size: 1.3rem;
   flex-shrink: 0;
+  position: relative;
+}
+
+.conv-item.streaming {
+  background: var(--color-primary-50);
+}
+
+.conv-streaming-indicator {
+  color: var(--color-primary);
+  animation: pulse-streaming 1.5s ease-in-out infinite;
+  font-size: 1rem;
+}
+
+@keyframes pulse-streaming {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
 }
 
 .conv-info {
@@ -1520,6 +1450,48 @@ function formatTime(ts) {
   margin-left: 0.3rem;
 }
 
+/* ── 阶段进度条 ── */
+.stream-progress {
+  padding: 0.5rem 0.75rem;
+}
+
+.progress-bar-container {
+  height: 4px;
+  background: var(--color-border);
+  border-radius: 2px;
+  overflow: hidden;
+  margin-bottom: 0.4rem;
+}
+
+.progress-bar-fill {
+  height: 100%;
+  background: linear-gradient(90deg, var(--color-primary), var(--color-primary-light, var(--color-primary)));
+  border-radius: 2px;
+  transition: width 0.3s ease;
+}
+
+.substep-text {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.75rem;
+  color: var(--color-text-muted);
+}
+
+.dot-pulse {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--color-primary);
+  animation: dot-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes dot-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.5; transform: scale(0.8); }
+}
+
 /* ── 执行计划 ── */
 .execution-plan {
   margin: 0.5rem 0;
@@ -1720,6 +1692,26 @@ function formatTime(ts) {
 .execution-tools {
   font-size: 0.75rem;
   color: var(--color-text-muted);
+}
+
+.btn-trace-detail {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  margin-top: 0.4rem;
+  padding: 0.25rem 0.6rem;
+  font-size: 0.72rem;
+  color: var(--color-primary);
+  background: transparent;
+  border: 1px solid var(--color-primary);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+
+.btn-trace-detail:hover {
+  background: var(--color-primary);
+  color: white;
 }
 
 /* ── 专家分析展示 ── */

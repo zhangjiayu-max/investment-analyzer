@@ -391,15 +391,16 @@ def get_prompt_version(version_id: int) -> dict | None:
 
 def create_agent_run(conversation_id: int, message_id: int, agent_key: str,
                      agent_name: str, query: str, result: str = "",
-                     tool_calls: str = "", duration_ms: int = 0) -> int:
+                     tool_calls: str = "", duration_ms: int = 0,
+                     trace_id: str = "") -> int:
     """记录一次专家 Agent 调用，返回 run_id。"""
     conn = _get_conn()
     cur = conn.execute("""
         INSERT INTO agent_runs (conversation_id, message_id, agent_key, agent_name,
-                                query, result, tool_calls, duration_ms)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                                query, result, tool_calls, duration_ms, trace_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (conversation_id, message_id, agent_key, agent_name,
-          query, result, tool_calls, duration_ms))
+          query, result, tool_calls, duration_ms, trace_id))
     run_id = cur.lastrowid
     conn.commit()
     conn.close()

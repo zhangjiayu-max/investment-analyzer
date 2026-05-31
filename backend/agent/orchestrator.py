@@ -23,6 +23,18 @@ from agent.memory import (
 logger = logging.getLogger(__name__)
 
 
+def get_orchestration_config(key: str, default=None):
+    """从数据库读取编排配置。"""
+    try:
+        from db._conn import _get_conn
+        conn = _get_conn()
+        row = conn.execute("SELECT value FROM orchestration_config WHERE key = ?", (key,)).fetchone()
+        conn.close()
+        return row["value"] if row else default
+    except Exception:
+        return default
+
+
 class CancelledError(Exception):
     """用户取消执行时抛出。"""
     pass
@@ -83,14 +95,19 @@ def _detect_specialist_disagreement(specialist_results: list) -> bool:
 def should_arbitrate(complexity: str, specialist_results: list) -> bool:
     """判断是否需要仲裁 Agent 介入。
 
-    条件：
+    条件（从 orchestration_config 读取）：
+    - arbitration_enabled == "true"
     - ARBITRATION_API_KEY 已配置
-    - complexity == "complex"
+    - complexity >= arbitration_complexity
     - ≥2 个专家参与分析
     """
+    if get_orchestration_config("arbitration_enabled", "true") != "true":
+        return False
     if not ARBITRATION_API_KEY:
         return False
-    if complexity != "complex":
+    min_complexity = get_orchestration_config("arbitration_complexity", "complex")
+    complexity_order = {"simple": 0, "medium": 1, "complex": 2}
+    if complexity_order.get(complexity, 0) < complexity_order.get(min_complexity, 2):
         return False
     if len([sr for sr in specialist_results if not sr.get("is_cross_review")]) < 2:
         return False
@@ -169,6 +186,11 @@ Q: 债市温度多少
 A: {{"complexity":"simple","specialists":["market_analyst"],"reason":"单一数据查询","refined_query":"当前债市温度指标"}}"""
 
 
+# Clarification 结果缓存（相同查询直接返回缓存结果，节省 2-5s LLM 调用）
+_clarification_cache: dict[int, dict] = {}
+_CLARIFICATION_CACHE_MAX = 128
+
+
 def clarify_requirement(query: str) -> dict:
     """
     使用 LLM 分析用户问题，返回需求澄清结果。
@@ -181,6 +203,12 @@ def clarify_requirement(query: str) -> dict:
             "refined_query": "..."
         }
     """
+    # 检查缓存
+    cache_key = hash(query)
+    if cache_key in _clarification_cache:
+        logger.debug(f"Clarification 缓存命中: {query[:30]}...")
+        return _clarification_cache[cache_key]
+
     try:
         # 注入持仓摘要，让澄清 Agent 知道用户持有什么
         try:
@@ -258,12 +286,19 @@ def clarify_requirement(query: str) -> dict:
         if not specialists:
             specialists = ["valuation_expert"]
 
-        return {
+        result_out = {
             "complexity": complexity,
             "specialists": specialists,
             "reason": result.get("reason", ""),
             "refined_query": result.get("refined_query", query),
         }
+
+        # 缓存结果
+        if len(_clarification_cache) >= _CLARIFICATION_CACHE_MAX:
+            _clarification_cache.pop(next(iter(_clarification_cache)))
+        _clarification_cache[cache_key] = result_out
+
+        return result_out
 
     except Exception as e:
         logger.warning(f"需求澄清失败，回退到关键词匹配: {e}")
@@ -1036,8 +1071,20 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
 
         # 没有工具调用 → 检查是否需要交叉审阅，然后给出最终回答
         if not msg.tool_calls:
-            # Phase B: 交叉审阅（仅 complex 且 >=2 个专家且存在分歧时触发）
-            if complexity == "complex" and len(specialist_results) >= 2 and not force_skip_cross_review and _detect_specialist_disagreement(specialist_results):
+            # Phase B: 交叉审阅（从 orchestration_config 读取配置）
+            cross_review_enabled = get_orchestration_config("cross_review_enabled", "true") == "true"
+            cross_review_min = int(get_orchestration_config("cross_review_min_specialists", "2"))
+            cross_review_trigger = get_orchestration_config("cross_review_trigger", "disagreement")
+            should_cross_review = (
+                cross_review_enabled
+                and not force_skip_cross_review
+                and len(specialist_results) >= cross_review_min
+                and (
+                    cross_review_trigger == "always"
+                    or (cross_review_trigger == "disagreement" and _detect_specialist_disagreement(specialist_results))
+                )
+            )
+            if should_cross_review:
                 yield {"type": "status", "message": f"正在进行交叉审阅（{len(specialist_results)} 个专家互相验证）..."}
                 peer_analyses = {sr["agent_key"]: sr["analysis"] for sr in specialist_results}
                 cross_review_results = []

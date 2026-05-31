@@ -361,6 +361,18 @@ export function cancelConversationExecution(convId) {
   return api.post(`/conversation/${convId}/cancel`)
 }
 
+// ── Trace 执行链路 API ──────────────────────────────────────
+
+/** 获取对话的执行链路列表 */
+export function listTraces(convId, limit = 20) {
+  return api.get(`/conversations/${convId}/traces`, { params: { limit } })
+}
+
+/** 获取单条执行链路详情 */
+export function getTraceDetail(convId, traceId) {
+  return api.get(`/conversations/${convId}/trace/${traceId}`)
+}
+
 // ── RAG 管理 API（新路径: /api/rag/*）─────────────────────────────────────
 
 /** 重建 RAG 索引 */

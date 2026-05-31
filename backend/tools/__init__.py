@@ -373,46 +373,122 @@ TOOLS = [
 # ── Tool 执行器 ──────────────────────────────────────
 
 
-def execute_tool(name: str, arguments: dict) -> str:
-    """执行工具调用，返回 JSON 字符串结果。"""
+def execute_tool(name: str, arguments: dict, trace_id: str = "",
+                 timeout: int = 30) -> str:
+    """执行工具调用，返回 JSON 字符串结果。
+
+    带超时保护和审计日志。
+
+    Args:
+        name: 工具名称
+        arguments: 工具参数
+        trace_id: 执行链路 ID（用于审计日志）
+        timeout: 超时秒数（默认 30s）
+    """
+    import time as _time
+
+    t0 = _time.time()
+    error_category = "none"
+
     try:
-        if name == "query_valuation":
-            return _query_valuation(arguments)
-        elif name == "search_knowledge":
-            return _search_knowledge(arguments)
-        elif name == "get_bond_temperature":
-            return _get_bond_temperature()
-        elif name == "get_valuation_list":
-            return _get_valuation_list(arguments)
-        elif name == "get_author_opinions":
-            return _get_author_opinions(arguments)
-        elif name == "calculate_metrics":
-            return _calculate_metrics(arguments)
-        elif name == "web_search":
-            return _web_search(arguments)
-        elif name == "query_portfolio":
-            return _query_portfolio(arguments)
-        elif name == "query_fund_info":
-            return _query_fund_info(arguments)
-        elif name == "analyze_holding_performance":
-            return _analyze_holding_performance(arguments)
-        elif name == "query_transaction_history":
-            return _query_transaction_history(arguments)
-        elif name == "analyze_portfolio_diversification":
-            return _analyze_portfolio_diversification(arguments)
-        elif name == "generate_portfolio_alert":
-            return _generate_portfolio_alert(arguments)
-        elif name == "get_bond_yield_curve":
-            return _get_bond_yield_curve(arguments)
-        elif name == "get_bond_market_overview":
-            return _get_bond_market_overview()
-        elif name == "get_macro_policy_data":
-            return _get_macro_policy_data()
-        else:
-            return json.dumps({"error": f"未知工具: {name}"}, ensure_ascii=False)
+        result = _execute_tool_impl(name, arguments)
     except Exception as e:
+        error_category = "tool_error"
         logger.error(f"工具执行异常 [{name}]: {e}")
-        return json.dumps({"error": f"工具执行失败: {e}"}, ensure_ascii=False)
+        result = json.dumps({"error": f"工具执行失败: {e}"}, ensure_ascii=False)
+
+    duration_ms = int((_time.time() - t0) * 1000)
+
+    # 超时检测
+    if duration_ms > timeout * 1000:
+        error_category = "timeout"
+        logger.warning(f"工具 {name} 执行超时 ({duration_ms}ms > {timeout}s)")
+        result = json.dumps({"error": f"工具 {name} 执行超时 ({timeout}s)", "error_category": "timeout"}, ensure_ascii=False)
+
+    # 审计日志（异步写入，不阻塞主流程）
+    try:
+        _log_tool_audit(trace_id, name, arguments, result, error_category, duration_ms)
+    except Exception as e:
+        logger.debug(f"工具审计日志写入失败: {e}")
+
+    return result
+
+
+def _execute_tool_impl(name: str, arguments: dict) -> str:
+    """工具执行的实际实现。"""
+    if name == "query_valuation":
+        return _query_valuation(arguments)
+    elif name == "search_knowledge":
+        return _search_knowledge(arguments)
+    elif name == "get_bond_temperature":
+        return _get_bond_temperature()
+    elif name == "get_valuation_list":
+        return _get_valuation_list(arguments)
+    elif name == "get_author_opinions":
+        return _get_author_opinions(arguments)
+    elif name == "calculate_metrics":
+        return _calculate_metrics(arguments)
+    elif name == "web_search":
+        return _web_search(arguments)
+    elif name == "query_portfolio":
+        return _query_portfolio(arguments)
+    elif name == "query_fund_info":
+        return _query_fund_info(arguments)
+    elif name == "analyze_holding_performance":
+        return _analyze_holding_performance(arguments)
+    elif name == "query_transaction_history":
+        return _query_transaction_history(arguments)
+    elif name == "analyze_portfolio_diversification":
+        return _analyze_portfolio_diversification(arguments)
+    elif name == "generate_portfolio_alert":
+        return _generate_portfolio_alert(arguments)
+    elif name == "get_bond_yield_curve":
+        return _get_bond_yield_curve(arguments)
+    elif name == "get_bond_market_overview":
+        return _get_bond_market_overview()
+    elif name == "get_macro_policy_data":
+        return _get_macro_policy_data()
+    else:
+        return json.dumps({"error": f"未知工具: {name}"}, ensure_ascii=False)
+
+
+def _log_tool_audit(trace_id: str, tool_name: str, arguments: dict,
+                    result: str, error_category: str, duration_ms: int):
+    """写入工具审计日志。"""
+    try:
+        from db._conn import _get_conn
+        conn = _get_conn()
+        # 兜底建表
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS tool_audit_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                trace_id TEXT,
+                tool_name TEXT NOT NULL,
+                arguments TEXT,
+                result_preview TEXT,
+                success INTEGER DEFAULT 1,
+                error_category TEXT DEFAULT 'none',
+                duration_ms INTEGER,
+                created_at TEXT DEFAULT (datetime('now','localtime'))
+            )
+        """)
+        conn.execute("""
+            INSERT INTO tool_audit_logs (trace_id, tool_name, arguments, result_preview,
+                                         success, error_category, duration_ms)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (
+            trace_id,
+            tool_name,
+            json.dumps(arguments, ensure_ascii=False)[:500],
+            (result or "")[:500],
+            1 if error_category == "none" else 0,
+            error_category,
+            duration_ms,
+        ))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logger.debug(f"工具审计日志写入失败: {e}")
 
 
 # ── 各工具实现 ──────────────────────────────────────

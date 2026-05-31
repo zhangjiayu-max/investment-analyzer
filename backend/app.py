@@ -145,13 +145,22 @@ async def startup():
 
     # 2. 异步初始化（后台执行，不阻塞启动）
     async def _async_init():
-        """后台异步初始化 ChromaDB 和种子数据。"""
+        """后台异步初始化 ChromaDB、Embedding 模型和种子数据。"""
         try:
             logging.info("后台初始化 ChromaDB...")
             init_chroma()
             logging.info("ChromaDB 初始化完成")
         except Exception as e:
             logging.warning(f"ChromaDB 初始化失败: {e}")
+
+        # 预加载 Embedding 模型（消除首次查询的 2-5s 延迟）
+        try:
+            logging.info("预加载 Embedding 模型...")
+            from rag import _ensure_embed_model
+            _ensure_embed_model()
+            logging.info("Embedding 模型预加载完成")
+        except Exception as e:
+            logging.warning(f"Embedding 模型预加载失败: {e}")
 
         try:
             from db import seed_bond_knowledge, seed_investment_strategy_knowledge

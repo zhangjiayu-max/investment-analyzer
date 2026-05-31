@@ -191,8 +191,8 @@ function onBack() {
       <TaskDetail v-else :taskId="currentTaskId" @back="onBack" />
     </div>
 
-    <!-- 其他页面使用 KeepAlive 缓存 -->
-    <KeepAlive v-else :exclude="['ChatView']">
+    <!-- 其他页面使用 KeepAlive 缓存（ChatView 的流式状态由 useStreamingState composable 管理，不受 KeepAlive 影响） -->
+    <KeepAlive v-else>
       <component :is="pageComponent" v-bind="pageProps" />
     </KeepAlive>
   </div>

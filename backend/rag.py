@@ -426,7 +426,7 @@ def build_rag_context(query: str, content_types: list[str] = None, limit: int = 
 def log_rag_search(conversation_id: int, message_id: int, query: str, keywords: list,
                    results: list, content_types: list = None,
                    fts_count: int = 0, chroma_count: int = 0,
-                   freshness_filtered: int = 0):
+                   freshness_filtered: int = 0, trace_id: str = ""):
     """记录 RAG 检索日志到数据库。"""
     conn = _get_conn()
     conn.execute("""
@@ -444,6 +444,7 @@ def log_rag_search(conversation_id: int, message_id: int, query: str, keywords: 
             freshness_filtered INTEGER DEFAULT 0,
             result_sources TEXT,
             result_times TEXT,
+            trace_id TEXT DEFAULT '',
             created_at TEXT DEFAULT (datetime('now','localtime'))
         )
     """)
@@ -461,11 +462,18 @@ def log_rag_search(conversation_id: int, message_id: int, query: str, keywords: 
     result_sources = [r.get("source", "") for r in results]
     result_times = [r.get("time", "") for r in results]
 
+    # 兜底：为已有表添加 trace_id 字段
+    try:
+        conn.execute("ALTER TABLE rag_logs ADD COLUMN trace_id TEXT DEFAULT ''")
+    except Exception:
+        pass
+    conn.commit()
+
     conn.execute("""
         INSERT INTO rag_logs (conversation_id, message_id, query, keywords, content_types,
                               results_count, results, fts_count, chroma_count,
-                              freshness_filtered, result_sources, result_times)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                              freshness_filtered, result_sources, result_times, trace_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (
         conversation_id,
         message_id,
@@ -479,6 +487,7 @@ def log_rag_search(conversation_id: int, message_id: int, query: str, keywords: 
         freshness_filtered,
         json.dumps(result_sources, ensure_ascii=False),
         json.dumps(result_times, ensure_ascii=False),
+        trace_id,
     ))
     conn.commit()
     conn.close()
@@ -1060,9 +1069,10 @@ def build_rag_context_with_details(query: str, content_types: list[str] = None, 
     all_results.sort(key=lambda x: x["_score"], reverse=True)
     logger.info(f"RAG 合并后: {len(all_results)}条, 类型: {[r['content_type'] for r in all_results]}")
 
-    # Reranker 重排序（可选，提升精度）
-    # 注意：Reranker 会增加延迟，仅在结果较多时启用
-    if len(all_results) > 3:
+    # Reranker 重排序（可选，提升精度，但增加 3-15s 延迟）
+    # 默认关闭：RRF + 标题加权 + 时效性加权已能提供合理排序
+    # 设置环境变量 RERANK_ENABLED=true 可开启
+    if RERANK_ENABLED and len(all_results) > 3:
         all_results = rerank_results(query, all_results, top_k=limit)
         logger.info(f"Rerank 后: {len(all_results)}条")
 

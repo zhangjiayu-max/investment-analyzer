@@ -585,5 +585,75 @@ def init_db():
     # 初始化 AI 分析表（传入连接避免死锁）
     _init_analysis_tables(conn)
 
+    # ── Agent Harness 工程化：Trace 全链路追踪 ──────────────────────────
+    # execution_traces 表：记录一次对话的完整执行链路
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS execution_traces (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            trace_id TEXT UNIQUE NOT NULL,
+            conversation_id INTEGER,
+            query TEXT,
+            complexity TEXT,
+            status TEXT DEFAULT 'running',
+            started_at TEXT DEFAULT (datetime('now','localtime')),
+            finished_at TEXT,
+            total_ms INTEGER,
+            phase_timings TEXT,
+            quality_metrics TEXT,
+            error_category TEXT DEFAULT 'none',
+            created_at TEXT DEFAULT (datetime('now','localtime'))
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_traces_conv ON execution_traces(conversation_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_traces_status ON execution_traces(status)")
+
+    # tool_audit_logs 表：记录每次工具调用的审计日志
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS tool_audit_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            trace_id TEXT,
+            tool_name TEXT NOT NULL,
+            arguments TEXT,
+            result_preview TEXT,
+            success INTEGER DEFAULT 1,
+            error_category TEXT DEFAULT 'none',
+            duration_ms INTEGER,
+            created_at TEXT DEFAULT (datetime('now','localtime'))
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_tool_audit_trace ON tool_audit_logs(trace_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_tool_audit_name ON tool_audit_logs(tool_name)")
+
+    # orchestration_config 表：编排策略配置
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS orchestration_config (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL,
+            description TEXT,
+            updated_at TEXT DEFAULT (datetime('now','localtime'))
+        )
+    """)
+
+    # agent_runs / rag_logs / token_usage 增加 trace_id 字段
+    _add_column_if_not_exists(conn, "agent_runs", "trace_id", "TEXT DEFAULT ''")
+    _add_column_if_not_exists(conn, "token_usage", "trace_id", "TEXT DEFAULT ''")
+    # rag_logs 的 trace_id 在 log_rag_search 中通过 CREATE TABLE 包含
+
+    # 编排配置默认值
+    _default_orchestration_config = [
+        ("cross_review_enabled", "true", "是否启用交叉审阅"),
+        ("cross_review_min_specialists", "2", "触发交叉审阅的最少专家数"),
+        ("cross_review_trigger", "disagreement", "触发条件: always / disagreement / never"),
+        ("arbitration_enabled", "true", "是否启用仲裁"),
+        ("arbitration_complexity", "complex", "仲裁触发的最低复杂度"),
+        ("max_turns", "6", "orchestrator 最大轮次"),
+        ("max_tool_timeout", "30", "工具调用超时秒数"),
+    ]
+    for key, value, desc in _default_orchestration_config:
+        conn.execute("""
+            INSERT OR IGNORE INTO orchestration_config (key, value, description)
+            VALUES (?, ?, ?)
+        """, (key, value, desc))
+
     conn.commit()
     conn.close()

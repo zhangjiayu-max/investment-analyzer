@@ -6,6 +6,7 @@ import logging
 import queue
 import threading
 import time
+import uuid
 from collections import Counter
 
 from fastapi import APIRouter, HTTPException, Request
@@ -24,6 +25,7 @@ from agent.orchestrator import orchestrate, orchestrate_stream, clarify_requirem
 from agent.multi_agent import run_specialist
 from rag import build_rag_context_with_details, log_rag_search
 from llm_service import _call_llm, MODEL, ORCHESTRATOR_PROMPT
+from output_reviewer import review_output
 
 logger = logging.getLogger(__name__)
 
@@ -220,6 +222,11 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
         cancel_event = threading.Event()
         request_start = time.time()
         phase_timings = {}
+        error_category = "none"
+
+        # 生成 trace_id，关联本次对话的所有事件
+        trace_id = str(uuid.uuid4())[:12]
+        logger.info(f"[trace:{trace_id}] 对话 {conv_id} 开始: {req.content[:50]}...")
 
         # 1. 存储用户消息（去重：中断重试时不重复保存）
         existing = get_messages(conv_id, limit=1)
@@ -227,19 +234,54 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
             create_message(conv_id, "user", req.content)
         yield _sse_event("user_message", {"content": req.content})
 
-        # 2. 需求澄清（使用 LLM 分析问题）
+        # 2. 并行执行：需求澄清 + RAG 检索（节省 0.5-2s）
         if await request.is_disconnected():
             cancel_event.set()
             return
-        yield _sse_event("status", {"message": "正在理解您的问题..."})
+        yield _sse_event("status", {"message": "正在理解问题并检索知识库..."})
 
         def _run_clarification():
             return clarify_requirement(req.content)
+
+        def _run_rag():
+            return build_rag_context_with_details(req.content, content_types=rag_types if rag_types else None)
+
         t0 = time.time()
-        clarification = await asyncio.to_thread(_run_clarification)
-        phase_timings["clarification_ms"] = int((time.time() - t0) * 1000)
+        clarification_task = asyncio.to_thread(_run_clarification)
+        rag_task = asyncio.to_thread(_run_rag)
+
+        # 等待两者都完成
+        clarification, rag_result = await asyncio.gather(clarification_task, rag_task)
+        phase_timings["clarification_rag_ms"] = int((time.time() - t0) * 1000)
         complexity = clarification["complexity"]
+        rag_context = rag_result["context"]
+
         yield _sse_event("status", {"message": f"问题类型: {complexity} ({clarification.get('reason', '')})"})
+
+        # 进度：澄清 + RAG 完成
+        total_phases = 3 if complexity == "simple" else (4 if complexity == "medium" else 6)
+        yield _sse_event("progress", {
+            "phase": "clarification",
+            "phase_index": 1,
+            "total_phases": total_phases,
+            "phase_label": "理解问题",
+            "substep": None,
+            "pct": 15,
+        })
+
+        # 发送 RAG 来源
+        if rag_result.get("results"):
+            sources = [{"type": r.get("label", r.get("content_type")), "title": r.get("title")} for r in rag_result["results"][:3]]
+            yield _sse_event("rag_sources", {"sources": sources})
+            # 进度：RAG 检索完成
+            yield _sse_event("progress", {
+                "phase": "rag",
+                "phase_index": 2,
+                "total_phases": total_phases,
+                "phase_label": "知识检索",
+                "substep": f"找到 {len(rag_result['results'])} 条相关知识",
+                "pct": 25,
+            })
 
         # 3. 简单任务：直接路由到专家，跳过 Orchestrator
         if complexity == "simple" and len(clarification.get("specialists", [])) == 1:
@@ -250,6 +292,15 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
                     cancel_event.set()
                     return
                 yield _sse_event("status", {"message": f"正在咨询{_get_specialist_name(agent_key)}..."})
+                # 进度：开始专家分析
+                yield _sse_event("progress", {
+                    "phase": "specialist",
+                    "phase_index": 2,
+                    "total_phases": 3,
+                    "phase_label": "专家分析",
+                    "substep": f"{_get_specialist_name(agent_key)} 分析中",
+                    "pct": 50,
+                })
 
                 # 直接运行专家
                 def _run_expert():
@@ -278,10 +329,15 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
                         query=req.content[:500],
                         result=(result.get("analysis", "") or "")[:500],
                         duration_ms=result.get("duration_ms", 0),
+                        trace_id=trace_id,
                     )
 
-                    # 发送最终回答
+                    # 输出审核
                     answer = result.get("analysis", "")
+                    review = review_output(answer, specialist_results)
+                    if review["warnings"]:
+                        logger.warning(f"[trace:{trace_id}] 输出审核警告: {review['warnings']}")
+                    answer = review["content"]
                     specialist_results = [{
                         "agent_key": result.get("agent_key", agent_key),
                         "agent": result.get("agent", ""),
@@ -325,9 +381,14 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
                             query=req.content[:500], result=answer[:500],
                             tool_calls=json.dumps(phase_timings, ensure_ascii=False),
                             duration_ms=total_ms,
+                            trace_id=trace_id,
                         )
                     except Exception as _e:
                         logger.warning(f"记录 agent_runs 失败: {_e}")
+
+                    # 写入 execution_traces
+                    _save_execution_trace(trace_id, conv_id, req.content, "simple", "completed",
+                                          total_ms, phase_timings, error_category)
 
                     yield _sse_event("done", {
                         "message_id": msg_id,
@@ -339,29 +400,24 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
                     # 专家执行失败，回退到 Orchestrator
                     yield _sse_event("status", {"message": "专家执行失败，切换到完整分析模式..."})
 
-        # 4. RAG 检索（中等和复杂任务）
-        if await request.is_disconnected():
-            cancel_event.set()
-            return
-        yield _sse_event("status", {"message": "正在检索知识库..."})
-        t0 = time.time()
-        rag_result = build_rag_context_with_details(req.content, content_types=rag_types if rag_types else None)
-        phase_timings["rag_ms"] = int((time.time() - t0) * 1000)
-        rag_context = rag_result["context"]
-
-        if rag_result.get("results"):
-            sources = [{"type": r.get("label", r.get("content_type")), "title": r.get("title")} for r in rag_result["results"][:3]]
-            yield _sse_event("rag_sources", {"sources": sources})
-
-        # 5. 获取对话历史
+        # 4. 获取对话历史
         history = get_messages(conv_id, limit=20)
         msg_list = [{"role": m["role"], "content": m["content"]} for m in history]
 
-        # 6. 调用 Orchestrator（多 Agent 协作）
+        # 5. 调用 Orchestrator（多 Agent 协作）
         if await request.is_disconnected():
             cancel_event.set()
             return
         yield _sse_event("status", {"message": "正在分析问题，决定需要咨询哪些专家..."})
+        # 进度：开始编排
+        yield _sse_event("progress", {
+            "phase": "orchestrator",
+            "phase_index": 3,
+            "total_phases": total_phases,
+            "phase_label": "专家协作",
+            "substep": "正在协调专家团队",
+            "pct": 35,
+        })
 
         def _run_orchestrator_stream():
             """在线程中运行 orchestrator 流式生成器，通过队列传递事件。"""
@@ -417,6 +473,7 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
 
             if event_type == "cancelled":
                 logger.info("执行已被用户取消")
+                error_category = "cancelled"
                 # 清理该对话的 running agents
                 to_remove = [k for k in _running_agents if k.startswith(f"{conv_id}_")]
                 for k in to_remove:
@@ -468,6 +525,20 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
                         "agent": agent_name,
                         "icon": event.get("icon"),
                     })
+                    # 进度：专家开始
+                    active_count = len([s for s in specialist_results if not s.get("is_cross_review")])
+                    yield _sse_event("progress", {
+                        "phase": "specialists",
+                        "phase_index": 4,
+                        "total_phases": total_phases,
+                        "phase_label": "专家分析",
+                        "substep": f"{agent_name} 分析中 ({active_count + 1} 个专家并行)",
+                        "pct": min(35 + (active_count * 15), 70),
+                        "detail": {
+                            "active": [agent_name],
+                            "completed": [s.get("agent", "") for s in specialist_results if not s.get("is_cross_review")],
+                        },
+                    })
 
             elif event_type == "specialist_done":
                 # 清除对应的 running agent
@@ -482,6 +553,17 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
                     "analysis": event.get("analysis"),
                     "duration_ms": event.get("duration_ms"),
                 })
+                # 进度：专家完成
+                if not client_disconnected:
+                    done_count = len([s for s in specialist_results if not s.get("is_cross_review")])
+                    yield _sse_event("progress", {
+                        "phase": "specialists",
+                        "phase_index": 4,
+                        "total_phases": total_phases,
+                        "phase_label": "专家分析",
+                        "substep": f"{event.get('agent', '')} 完成 ({done_count} 个已完成)",
+                        "pct": min(35 + (done_count * 15), 70),
+                    })
                 # 记录到 agent_runs
                 create_agent_run(
                     conversation_id=conv_id, message_id=0,
@@ -490,6 +572,7 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
                     query=req.content[:500],
                     result=(event.get("analysis", "") or "")[:500],
                     duration_ms=event.get("duration_ms", 0),
+                    trace_id=trace_id,
                 )
                 # 增量保存执行进度到 metadata
                 try:
@@ -523,6 +606,15 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
                         "agent_key": event.get("agent_key"),
                         "agent": event.get("agent"),
                         "icon": event.get("icon"),
+                    })
+                    # 进度：交叉审阅开始
+                    yield _sse_event("progress", {
+                        "phase": "cross_review",
+                        "phase_index": 5,
+                        "total_phases": total_phases,
+                        "phase_label": "交叉审阅",
+                        "substep": f"{event.get('agent', '')} 交叉审阅中",
+                        "pct": 80,
                     })
 
             elif event_type == "cross_review_done":
@@ -569,6 +661,8 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
                     specialist_results = event.get("specialist_results", [])
 
             elif event_type == "error":
+                # 设置错误分类
+                error_category = "model_error"
                 # 标记失败状态
                 if stream_msg_id > 0:
                     try:
@@ -596,6 +690,17 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
 
         phase_timings["orchestrator_ms"] = int((time.time() - t_orch_start) * 1000)
         answer = final_answer
+
+        # 进度：生成回答
+        if not client_disconnected:
+            yield _sse_event("progress", {
+                "phase": "answer",
+                "phase_index": total_phases,
+                "total_phases": total_phases,
+                "phase_label": "生成回答",
+                "substep": "正在综合所有分析结果",
+                "pct": 95,
+            })
 
         # 5. 发送最终回答（仅客户端在线时）
         if not client_disconnected:
@@ -673,6 +778,7 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
             fts_count=rag_result.get("fts_count", 0),
             chroma_count=rag_result.get("chroma_count", 0),
             freshness_filtered=rag_result.get("freshness_filtered", 0),
+            trace_id=trace_id,
         )
 
         # 8. 更新 agent_runs 的 message_id + 记录整体执行
@@ -692,9 +798,23 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
                 query=req.content[:500], result=answer[:500],
                 tool_calls=json.dumps(phase_timings, ensure_ascii=False),
                 duration_ms=total_ms,
+                trace_id=trace_id,
             )
         except Exception as _e:
             logger.warning(f"记录 agent_runs 失败: {_e}")
+
+        # 8.5 输出审核（在发送 done 之前）
+        if answer:
+            review = review_output(answer, specialist_results)
+            if review["warnings"]:
+                logger.warning(f"[trace:{trace_id}] 输出审核警告: {review['warnings']}")
+            answer = review["content"]
+
+        # 8.6 计算质量指标并写入 execution_traces
+        quality_metrics = _calculate_quality_metrics(specialist_results, rag_result, all_tool_calls)
+        final_status = "completed" if answer else ("cancelled" if error_category == "cancelled" else "failed")
+        _save_execution_trace(trace_id, conv_id, req.content, complexity, final_status,
+                              total_ms, phase_timings, error_category, quality_metrics)
 
         # 9. 自动更新对话标题
         if len(history) <= 1 and conv.get("title") == "新对话":
@@ -957,3 +1077,128 @@ async def get_rag_stats_api(days: int = 7):
         "type_distribution": type_distribution,
         "avg_results": round(avg_results, 1),
     }
+
+
+# ── Trace 全链路追踪辅助函数 ──────────────────────────────────────
+
+
+def _save_execution_trace(trace_id: str, conversation_id: int, query: str,
+                          complexity: str, status: str, total_ms: int,
+                          phase_timings: dict, error_category: str = "none",
+                          quality_metrics: dict = None):
+    """写入 execution_traces 表，记录一次对话的完整执行链路。"""
+    try:
+        conn = _get_conn()
+        conn.execute("""
+            INSERT OR REPLACE INTO execution_traces
+            (trace_id, conversation_id, query, complexity, status,
+             finished_at, total_ms, phase_timings, quality_metrics, error_category)
+            VALUES (?, ?, ?, ?, ?, datetime('now','localtime'), ?, ?, ?, ?)
+        """, (
+            trace_id, conversation_id, query[:500], complexity, status,
+            total_ms, json.dumps(phase_timings, ensure_ascii=False),
+            json.dumps(quality_metrics or {}, ensure_ascii=False),
+            error_category,
+        ))
+        conn.commit()
+        conn.close()
+        logger.info(f"[trace:{trace_id}] 执行链路已保存: status={status}, total_ms={total_ms}")
+    except Exception as e:
+        logger.warning(f"保存 execution_trace 失败: {e}")
+
+
+def _calculate_quality_metrics(specialist_results: list, rag_result: dict,
+                               tool_calls: list) -> dict:
+    """计算本次执行的质量指标。"""
+    # RAG 覆盖率：是否找到相关信息
+    rag_coverage = 1.0 if (rag_result and rag_result.get("results")) else 0.0
+
+    # 工具成功率：检查是否有实际错误（不是结果中包含"error"字样）
+    if tool_calls:
+        success_count = 0
+        for tc in tool_calls:
+            # 有 result_preview 且不是错误消息就算成功
+            has_result = bool(tc.get("result_preview"))
+            is_error = tc.get("error") or (tc.get("result_preview", "").startswith("错误") or tc.get("result_preview", "").startswith("Error"))
+            if has_result and not is_error:
+                success_count += 1
+        tool_success_rate = success_count / len(tool_calls)
+    else:
+        tool_success_rate = 1.0
+
+    # 专家完成度：有分析内容就算完成（不限制长度）
+    if specialist_results:
+        completed = len([s for s in specialist_results
+                        if s.get("analysis") and len(s["analysis"].strip()) > 0])
+        specialist_completion = completed / len(specialist_results)
+    else:
+        specialist_completion = 0.0
+
+    return {
+        "rag_coverage": round(rag_coverage, 2),
+        "tool_success_rate": round(tool_success_rate, 2),
+        "specialist_completion": round(specialist_completion, 2),
+        "specialist_count": len(specialist_results or []),
+        "tool_count": len(tool_calls or []),
+    }
+
+
+# ── Trace 查询 API ──────────────────────────────────────
+
+
+@router.get("/api/conversations/{conv_id}/trace/{trace_id}")
+async def get_trace_api(conv_id: int, trace_id: str):
+    """获取一次对话的完整执行链路。"""
+    conn = _get_conn()
+
+    # 获取 trace 元数据
+    trace = conn.execute(
+        "SELECT * FROM execution_traces WHERE trace_id = ? AND conversation_id = ?",
+        (trace_id, conv_id)
+    ).fetchone()
+    if not trace:
+        conn.close()
+        raise HTTPException(404, "执行链路不存在")
+
+    # 获取关联的 agent_runs
+    runs = conn.execute(
+        "SELECT * FROM agent_runs WHERE trace_id = ? ORDER BY id",
+        (trace_id,)
+    ).fetchall()
+
+    # 获取关联的 rag_logs
+    rag_logs = conn.execute(
+        "SELECT * FROM rag_logs WHERE trace_id = ? ORDER BY id",
+        (trace_id,)
+    ).fetchall()
+
+    # 获取关联的工具审计日志
+    tool_logs = conn.execute(
+        "SELECT * FROM tool_audit_logs WHERE trace_id = ? ORDER BY id",
+        (trace_id,)
+    ).fetchall()
+
+    conn.close()
+
+    return {
+        "trace": dict(trace),
+        "agent_runs": [dict(r) for r in runs],
+        "rag_logs": [dict(r) for r in rag_logs],
+        "tool_audit_logs": [dict(r) for r in tool_logs],
+    }
+
+
+@router.get("/api/conversations/{conv_id}/traces")
+async def list_traces_api(conv_id: int, limit: int = 20):
+    """获取对话的执行链路列表。"""
+    conn = _get_conn()
+    rows = conn.execute("""
+        SELECT trace_id, complexity, status, total_ms, error_category,
+               quality_metrics, started_at, finished_at
+        FROM execution_traces
+        WHERE conversation_id = ?
+        ORDER BY id DESC
+        LIMIT ?
+    """, (conv_id, limit)).fetchall()
+    conn.close()
+    return {"traces": [dict(r) for r in rows]}
