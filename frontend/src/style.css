@@ -775,3 +775,69 @@ button {
   box-shadow: var(--shadow-lg);
   padding: 0.65rem 0.85rem;
 }
+
+/* ══════════════════════════════════════════════════════
+   全局移动端响应式（768px 以下）
+   ══════════════════════════════════════════════════════ */
+@media (max-width: 768px) {
+  /* 卡片：减小 padding，去掉固定高度 */
+  .card {
+    padding: 0.75rem;
+    min-height: auto;
+  }
+
+  /* 表格：横向滚动，不挤压内容 */
+  .list-table,
+  .data-table,
+  .doc-table,
+  .usage-table,
+  .meta-table,
+  .dd-index-table,
+  .closed-holdings-table,
+  .tx-detail-table,
+  .mini-table,
+  table {
+    display: block;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    white-space: nowrap;
+  }
+
+  /* 工具栏：允许换行 */
+  .toolbar {
+    flex-wrap: wrap;
+    gap: 0.5rem;
+  }
+  .toolbar-search,
+  .toolbar-select {
+    min-width: 0;
+    flex: 1 1 100%;
+  }
+
+  /* 内容区：纵向排列 */
+  .content-area {
+    flex-direction: column !important;
+  }
+  .content-area > * {
+    width: 100% !important;
+    max-width: 100% !important;
+  }
+
+  /* 输入框/按钮：适当全宽 */
+  .input-field {
+    font-size: 16px; /* 防止 iOS 自动缩放 */
+  }
+
+  /* 弹窗适配 */
+  .modal-content,
+  .dialog-content {
+    max-width: 95vw;
+    max-height: 85vh;
+    margin: 1rem;
+  }
+
+  /* 标签/徽章不换行 */
+  .badge {
+    white-space: nowrap;
+  }
+}

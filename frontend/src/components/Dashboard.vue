@@ -1406,6 +1406,9 @@ const concentrationIcon = { low: '✅', moderate: '⚡', high: '⚠️' }
   .dash-grid {
     grid-template-columns: 1fr;
   }
+  .health-metrics {
+    grid-template-columns: 1fr;
+  }
 }
 
 /* ── Card ── */

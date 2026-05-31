@@ -576,7 +576,6 @@ async def regenerate_daily_report():
     )
 
     # 后台自动质量评估
-    import asyncio
     async def _auto_eval():
         try:
             from agent.eval_scorer import evaluate_llm_output
@@ -736,7 +735,6 @@ async def hotspots_relate_indexes():
 3. 只返回 JSON，不要其他文字"""
 
         try:
-            import asyncio
             response = await asyncio.to_thread(lambda: _call_llm(
                 caller="hotspots_relate",
                 model=MODEL,
@@ -803,7 +801,6 @@ async def hotspots_relate_indexes():
     # 并行调用 LLM（如果有需要推理的）
     llm_results = {}
     if llm_indices:
-        import asyncio
         tasks = [llm_infer_sectors(news_list[i]["title"], news_list[i].get("summary", "")) for i in llm_indices]
         results = await asyncio.gather(*tasks, return_exceptions=True)
         for idx, result in zip(llm_indices, results):

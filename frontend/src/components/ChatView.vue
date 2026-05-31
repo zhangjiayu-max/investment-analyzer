@@ -27,6 +27,7 @@ const selectedConv = ref(null)
 const messages = ref([])
 const inputText = ref('')
 const messagesContainer = ref(null)
+const showMobileSidebar = ref(false)
 
 // 当前选中对话的流式状态（computed，自动跟随 selectedConv 切换）
 const currentStream = computed(() => getStreamState(selectedConv.value?.id))
@@ -52,7 +53,7 @@ async function loadConversations() {
 async function selectConversation(conv) {
   // 切换对话时不清除流式状态（composable 保留所有对话的状态）
   // UI 自动通过 currentStream computed 跟随 selectedConv 切换
-
+  showMobileSidebar.value = false
   selectedConv.value = conv
   try {
     const { data } = await getMessages(conv.id)
@@ -391,8 +392,16 @@ async function toggleTraceDetail(msg, index) {
 
 <template>
   <div class="chat-page">
+    <!-- 移动端：对话列表切换按钮 -->
+    <button class="mobile-sidebar-toggle" @click="showMobileSidebar = !showMobileSidebar" title="对话列表">
+      <svg width="20" height="20" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16"/>
+      </svg>
+    </button>
+    <!-- 移动端遮罩 -->
+    <div v-if="showMobileSidebar" class="mobile-sidebar-overlay" @click="showMobileSidebar = false"></div>
     <!-- 对话列表 -->
-    <div class="conv-sidebar">
+    <div :class="['conv-sidebar', { 'mobile-open': showMobileSidebar }]">
       <div class="conv-header">
         <h3>对话</h3>
         <button @click="handleNewConversation()" class="btn-new-conv" title="新建对话">
@@ -1983,10 +1992,74 @@ async function toggleTraceDetail(msg, index) {
   color: var(--color-border);
 }
 
+/* ── 移动端菜单按钮 ── */
+.mobile-sidebar-toggle {
+  display: none;
+}
+.mobile-sidebar-overlay {
+  display: none;
+}
+
 /* ── 响应式 ── */
 @media (max-width: 768px) {
-  .conv-sidebar { width: 100%; max-width: 280px; }
-  .chat-page { flex-direction: row; }
+  .chat-page {
+    flex-direction: column;
+    position: relative;
+    height: 100%;
+    border-radius: 0;
+    border: none;
+  }
+
+  /* 移动端：隐藏侧边栏，用按钮切换 */
+  .mobile-sidebar-toggle {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    position: absolute;
+    top: 0.5rem;
+    left: 0.5rem;
+    z-index: 51;
+    width: 36px;
+    height: 36px;
+    border-radius: var(--radius-md);
+    background: var(--color-bg-card);
+    border: 1px solid var(--color-border);
+    color: var(--color-text-secondary);
+    cursor: pointer;
+  }
+
+  .mobile-sidebar-overlay {
+    display: block;
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.4);
+    z-index: 49;
+  }
+
+  .conv-sidebar {
+    position: fixed;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    width: 280px;
+    max-width: 80vw;
+    z-index: 50;
+    transform: translateX(-100%);
+    transition: transform 0.25s ease;
+  }
+  .conv-sidebar.mobile-open {
+    transform: translateX(0);
+  }
+
+  .chat-area {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .chat-header {
+    padding-left: 2.5rem;
+  }
+
   .agent-grid { grid-template-columns: 1fr; }
 }
 

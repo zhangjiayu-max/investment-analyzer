@@ -742,12 +742,22 @@ async def fetch_recent_valuations():
 # ── 前端页面 ──────────────────────────────────────────
 
 
+@app.get("/")
+async def root():
+    """根路径重定向到应用页面。"""
+    from fastapi.responses import RedirectResponse
+    return RedirectResponse(url="/app")
+
+
 @app.get("/app", response_class=HTMLResponse)
 async def app_page():
     """Web 管理页面。"""
     index_path = STATIC_DIR / "index.html"
     if index_path.exists():
-        return HTMLResponse(index_path.read_text(encoding="utf-8"))
+        return HTMLResponse(
+            index_path.read_text(encoding="utf-8"),
+            headers={"Cache-Control": "no-cache, no-store, must-revalidate"},
+        )
     return HTMLResponse("<h1>前端文件未找到</h1><p>请创建 static/index.html</p>")
 
 

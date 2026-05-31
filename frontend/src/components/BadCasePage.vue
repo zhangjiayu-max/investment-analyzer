@@ -440,4 +440,10 @@ onMounted(load)
   display: flex;
   gap: 0.5rem;
 }
+
+@media (max-width: 768px) {
+  .badcase-content {
+    grid-template-columns: 1fr;
+  }
+}
 </style>
