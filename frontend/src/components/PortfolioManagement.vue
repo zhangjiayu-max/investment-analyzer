@@ -14,7 +14,7 @@ import {
   getCashBalance, adjustCashBalance,
   getFundNavHistory,
   getPortfolioDiversification, getHoldingPerformance, getTransactionSummary,
-  listAlerts, getUnreadAlertCount, markAlertRead, deleteAlert, generateAlert,
+  listAlerts, getUnreadAlertCount, markAlertRead, deleteAlert, generateAlert, scanPortfolioAlerts,
   addTransactionTag, removeTransactionTag, getTransactionTags, clearAllPortfolio, chat,
   runPortfolioAiAnalysis, listPortfolioAiAnalysisRecords,
   getPortfolioAiAnalysisRecord, deletePortfolioAiAnalysisRecord,
@@ -827,6 +827,24 @@ async function handleDeleteAlert(alertId) {
     unreadAlertCount.value = Math.max(0, unreadAlertCount.value - 1)
   } catch (e) {
     showToast('操作失败', 'error')
+  }
+}
+
+const alertScanning = ref(false)
+async function handleScanAlerts() {
+  alertScanning.value = true
+  try {
+    const { data } = await scanPortfolioAlerts()
+    if (data.generated > 0) {
+      showToast(`巡检完成，发现 ${data.generated} 条新预警`, 'success')
+      await loadAlerts()
+    } else {
+      showToast('巡检完成，未发现新的风险', 'success')
+    }
+  } catch (e) {
+    showToast('巡检失败：' + (e.response?.data?.detail || e.message), 'error')
+  } finally {
+    alertScanning.value = false
   }
 }
 
@@ -1917,18 +1935,28 @@ function txDisplayAmount(tx) {
     </div>
 
     <!-- Alert Panel -->
-    <div v-if="alerts.length > 0" class="alert-panel">
+    <div class="alert-panel">
       <div class="alert-panel-header" @click="showAlerts = !showAlerts" style="cursor: pointer">
         <svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
         </svg>
         <strong>风险预警</strong>
-        <span class="alert-badge" :class="unreadAlertCount > 0 ? 'has-unread' : ''">{{ unreadAlertCount }}</span>
+        <span v-if="unreadAlertCount > 0" class="alert-badge has-unread">{{ unreadAlertCount }}</span>
         <span class="alert-toggle-icon" v-html="showAlerts ? '&#9660;' : '&#9654;'"></span>
         <span style="flex:1"></span>
+        <button class="btn-ghost btn-sm" :class="{ 'btn-loading': alertScanning }" :disabled="alertScanning" @click.stop="handleScanAlerts" title="持仓巡检">
+          <svg :class="['icon-spin', { 'spinning': alertScanning }]" width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/>
+          </svg>
+          <span>{{ alertScanning ? '巡检中...' : '巡检' }}</span>
+        </button>
         <button class="btn-ghost btn-sm" @click.stop="loadAlerts" title="刷新">刷新</button>
       </div>
       <div v-if="showAlerts" class="alert-list">
+        <div v-if="alerts.length === 0" class="alert-empty">
+          <span>暂无预警</span>
+          <span class="alert-empty-hint">点击「巡检」主动扫描持仓风险</span>
+        </div>
         <div v-for="a in alerts" :key="a.id" :class="['alert-item', 'alert-' + a.severity]">
           <div class="alert-icon">
             <svg v-if="a.severity === 'danger'" width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -1946,7 +1974,9 @@ function txDisplayAmount(tx) {
             <div v-if="a.content" class="alert-content">{{ a.content }}</div>
             <div class="alert-meta">
               <span class="alert-type-badge">{{ a.alert_type }}</span>
-              <span class="alert-source">{{ a.source }}</span>
+              <span v-if="a.source === 'system_scan'" class="alert-source-badge scan">系统巡检</span>
+              <span v-else-if="a.source === 'ai_analysis'" class="alert-source-badge ai">AI 对话</span>
+              <span v-else class="alert-source-badge">{{ a.source }}</span>
               <span class="alert-time">{{ a.created_at }}</span>
             </div>
           </div>
@@ -4521,6 +4551,34 @@ select.input-field {
   background: var(--color-bg-hover);
   padding: 0.1rem 0.4rem;
   border-radius: 4px;
+}
+.alert-source-badge {
+  font-size: 0.7rem;
+  padding: 0.1rem 0.4rem;
+  border-radius: 4px;
+  background: var(--color-bg-hover);
+  color: var(--color-text-tertiary);
+}
+.alert-source-badge.scan {
+  background: rgba(99,102,241,0.1);
+  color: #6366f1;
+}
+.alert-source-badge.ai {
+  background: rgba(201,168,76,0.1);
+  color: #c9a84c;
+}
+.alert-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 1.5rem;
+  color: var(--color-text-tertiary);
+  font-size: 0.85rem;
+}
+.alert-empty-hint {
+  font-size: 0.75rem;
+  opacity: 0.6;
 }
 .alert-actions {
   display: flex;

@@ -81,7 +81,36 @@ async def run_eval_case_api(case_id: int):
     start = time.time()
 
     try:
-        if analysis_type == "panorama":
+        # 专家 Agent 类型：直接调用对应的 specialist
+        specialist_types = {"valuation_expert", "market_analyst", "risk_assessor",
+                            "allocation_advisor", "fund_analyst", "orchestrator"}
+
+        if analysis_type in specialist_types:
+            question = input_params.get("question", "")
+            if not question:
+                raise HTTPException(400, f"{analysis_type} 需要 question 参数")
+
+            from agent.multi_agent import run_specialist
+            from db.agents import load_specialist_agents
+
+            specialists = load_specialist_agents()
+            if analysis_type == "orchestrator":
+                # orchestrator 模式：调用完整编排流程
+                from agent.orchestrator import orchestrate
+                result = await asyncio.to_thread(lambda: orchestrate(question, []))
+                result_summary = result.get("answer", "")[:500]
+                result_data = json.dumps(result, ensure_ascii=False)[:5000]
+            elif analysis_type in specialists:
+                # 单个专家 Agent
+                result = await asyncio.to_thread(
+                    lambda: run_specialist(analysis_type, question)
+                )
+                result_summary = result.get("analysis", "")[:500]
+                result_data = json.dumps(result, ensure_ascii=False)[:5000]
+            else:
+                raise HTTPException(400, f"未找到专家: {analysis_type}")
+
+        elif analysis_type == "panorama":
             result = await panorama_analysis_api(PanoramaAnalysisRequest())
             if isinstance(result, StreamingResponse):
                 result_summary = "流式输出（已在后台执行）"
@@ -123,11 +152,16 @@ async def run_eval_case_api(case_id: int):
             raise HTTPException(400, f"不支持的分析类型: {analysis_type}")
 
         duration_ms = int((time.time() - start) * 1000)
+        # 提取 token_usage
+        tokens = 0
+        if isinstance(result, dict):
+            tokens = result.get("token_usage", 0)
         run_id = create_eval_run(
             case_id=case_id, analysis_type=analysis_type,
             result_summary=result_summary,
             result_data=result_data,
             duration_ms=duration_ms,
+            token_usage=tokens,
         )
 
         # 异步触发自动评分（不阻塞返回）
@@ -277,9 +311,40 @@ async def _generate_expected_quality(bad_case: dict) -> str:
 
 @router.get("/api/eval/quality-summary")
 async def quality_summary_api(days: int = 30):
-    """获取质量评分概览。"""
-    from db import get_quality_summary
-    return get_quality_summary(days)
+    """获取质量评分概览（合并 llm_feedback + eval_runs）。"""
+    from db import get_quality_summary, _get_conn
+
+    # llm_feedback 数据
+    fb = get_quality_summary(days)
+
+    # eval_runs 数据
+    conn = _get_conn()
+    eval_row = conn.execute("""
+        SELECT
+            COUNT(*) as total_runs,
+            COUNT(CASE WHEN score > 0 THEN 1 END) as scored_runs,
+            COALESCE(AVG(CASE WHEN score > 0 THEN score END), 0) as avg_score,
+            COUNT(CASE WHEN score >= 7 THEN 1 END) as good_count,
+            COUNT(CASE WHEN score > 0 AND score < 5 THEN 1 END) as bad_count
+        FROM eval_runs
+        WHERE created_at >= datetime('now', ?)
+    """, (f"-{days} days",)).fetchone()
+    conn.close()
+
+    eval_data = dict(eval_row) if eval_row else {}
+
+    return {
+        "total_feedback": fb.get("total_feedback", 0) + eval_data.get("total_runs", 0),
+        "scored_count": fb.get("scored_count", 0) + eval_data.get("scored_runs", 0),
+        "avg_overall": eval_data.get("avg_score", 0) or fb.get("avg_overall", 0),
+        "avg_data_accuracy": fb.get("avg_data_accuracy", 0),
+        "avg_logic": fb.get("avg_logic", 0),
+        "avg_actionability": fb.get("avg_actionability", 0),
+        "low_quality_count": fb.get("low_quality_count", 0) + eval_data.get("bad_count", 0),
+        "eval_avg_score": eval_data.get("avg_score", 0),
+        "eval_good_count": eval_data.get("good_count", 0),
+        "eval_bad_count": eval_data.get("bad_count", 0),
+    }
 
 
 @router.get("/api/eval/quality-trend")
@@ -294,3 +359,50 @@ async def low_quality_api(limit: int = 20):
     """获取低分产出列表（bad cases）。"""
     from db import get_low_quality_items
     return {"items": get_low_quality_items(limit)}
+
+
+@router.get("/api/eval/stats-by-agent")
+async def stats_by_agent_api():
+    """按 Agent 类型分组的评测统计。"""
+    from db import _get_conn
+    conn = _get_conn()
+    rows = conn.execute("""
+        SELECT
+            c.analysis_type,
+            COUNT(DISTINCT c.id) as case_count,
+            COUNT(r.id) as run_count,
+            COALESCE(AVG(r.score), 0) as avg_score,
+            COALESCE(MIN(r.score), 0) as min_score,
+            COALESCE(MAX(r.score), 0) as max_score,
+            COUNT(CASE WHEN r.score >= 7 THEN 1 END) as good_count,
+            COUNT(CASE WHEN r.score < 5 THEN 1 END) as bad_count
+        FROM eval_cases c
+        LEFT JOIN eval_runs r ON c.id = r.case_id
+        GROUP BY c.analysis_type
+        ORDER BY avg_score DESC
+    """).fetchall()
+    conn.close()
+
+    # Agent 名称映射
+    agent_names = {
+        "valuation_expert": "估值分析师",
+        "market_analyst": "择时分析师",
+        "risk_assessor": "风险管理师",
+        "allocation_advisor": "资产配置师",
+        "fund_analyst": "基金分析师",
+        "orchestrator": "编排器（多Agent）",
+        "ai": "AI 分析",
+        "panorama": "全景诊断",
+        "deep_dive": "单基金深度",
+        "trade_review": "交易复盘",
+        "what_if": "情景推演",
+        "diversification_ai": "分散度分析",
+    }
+
+    result = []
+    for row in rows:
+        r = dict(row)
+        r["agent_name"] = agent_names.get(r["analysis_type"], r["analysis_type"])
+        result.append(r)
+
+    return {"agents": result}

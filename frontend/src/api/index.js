@@ -678,6 +678,11 @@ export function getLowQualityItems(limit = 20) {
   return api.get('/eval/low-quality', { params: { limit } })
 }
 
+/** 按 Agent 类型分组的评测统计 */
+export function getEvalStatsByAgent() {
+  return api.get('/eval/stats-by-agent')
+}
+
 // ── 债市数据 API ──────────────────────────────────────
 
 /** 获取债市温度数据 */
@@ -961,6 +966,11 @@ export function deleteAlert(alertId) {
 /** 生成预警 */
 export function generateAlert(data) {
   return api.post('/portfolio/alerts/generate', data)
+}
+
+/** 持仓风险巡检 */
+export function scanPortfolioAlerts() {
+  return api.post('/portfolio/alerts/scan')
 }
 
 // ── 交易标签 API ──────────────────────────────────────

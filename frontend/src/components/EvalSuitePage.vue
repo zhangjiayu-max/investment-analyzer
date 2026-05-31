@@ -13,7 +13,7 @@ const { showToast } = useToast()
 const confirm = ref({ visible: false, title: '', message: '', danger: false, onConfirm: null })
 
 const loading = ref(false)
-const running = ref(false)
+const runningCases = ref(new Set()) // 正在运行的用例 ID 集合
 const activeTab = ref('cases')
 
 // Stats
@@ -38,6 +38,7 @@ const analysisTypeOptions = ref([
   { value: 'what_if', label: '情景推演' },
   { value: 'ai', label: 'AI 分析' },
   { value: 'diversification_ai', label: '分散度分析' },
+  { value: 'orchestrator', label: '编排器（多Agent）' },
 ])
 
 // 加载 Agent 列表，补充到分析类型选项
@@ -46,9 +47,10 @@ async function loadAgents() {
     const { data } = await listAgents()
     const agents = data.agents || []
     agents.forEach(agent => {
-      const key = agent.name.toLowerCase().replace(/\s+/g, '_')
+      // 用 agent_key（如 valuation_expert）作为 value
+      const key = agent.agent_key || agent.name.toLowerCase().replace(/\s+/g, '_')
       if (!analysisTypeOptions.value.find(o => o.value === key)) {
-        analysisTypeOptions.value.push({ value: key, label: agent.name })
+        analysisTypeOptions.value.push({ value: key, label: `${agent.icon || '🤖'} ${agent.name}` })
       }
     })
   } catch (e) {
@@ -57,7 +59,8 @@ async function loadAgents() {
 }
 
 function typeLabel(t) {
-  return analysisTypeOptions.value.find(o => o.value === t)?.label || t
+  const opt = analysisTypeOptions.value.find(o => o.value === t)
+  return opt?.label || t
 }
 
 function confirmBeforeDelete(c) {
@@ -113,6 +116,10 @@ function openEdit(c) {
   }
   editingId.value = c.id
   showForm.value = true
+  // 确保当前 analysis_type 在选项中
+  if (!analysisTypeOptions.value.find(o => o.value === c.analysis_type)) {
+    analysisTypeOptions.value.push({ value: c.analysis_type, label: c.analysis_type })
+  }
   // 滚动到表单位置
   nextTick(() => {
     document.querySelector('.form-card')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
@@ -138,25 +145,31 @@ async function submitForm() {
 }
 
 async function doRun(c) {
-  if (running.value) return
-  running.value = true
+  if (runningCases.value.has(c.id)) return
+  runningCases.value.add(c.id)
   try {
     const { data } = await runEvalCase(c.id)
     if (data.ok) {
-      showToast('运行完成，等待评分...', 'info')
-      // 等待评分完成后刷新
-      setTimeout(async () => {
-        await Promise.all([loadRuns(), loadStats(), loadCases()])
-        activeTab.value = 'runs'
-      }, 10000)
+      showToast(`「${c.name}」运行完成`, 'success')
+      await Promise.all([loadRuns(), loadStats(), loadCases()])
     } else {
-      showToast('运行失败: ' + (data.error || '未知错误'), 'error')
+      showToast(`「${c.name}」失败: ${data.error || '未知错误'}`, 'error')
     }
   } catch (e) {
-    showToast('运行出错: ' + e.message, 'error')
+    showToast(`「${c.name}」出错: ${e.message}`, 'error')
   } finally {
-    running.value = false
+    runningCases.value.delete(c.id)
   }
+}
+
+// 批量运行所有用例
+async function runAll() {
+  if (runningCases.value.size > 0) return
+  showToast('开始批量运行...', 'info')
+  // 并发执行所有用例
+  const promises = cases.value.map(c => doRun(c))
+  await Promise.all(promises)
+  showToast('批量运行完成', 'success')
 }
 
 async function viewRunDetail(r) {
@@ -273,7 +286,11 @@ onMounted(loadAll)
     <!-- Cases Tab -->
     <div v-if="activeTab === 'cases'" class="tab-content">
       <div class="section-header">
-        <span></span>
+        <div class="section-actions">
+          <button class="btn-secondary btn-sm" @click="runAll" :disabled="runningCases.size > 0">
+            {{ runningCases.size > 0 ? `运行中 (${runningCases.size})` : '▶ 全部运行' }}
+          </button>
+        </div>
         <button class="btn-primary btn-sm" @click="openCreate">+ 新建用例</button>
       </div>
 
@@ -338,8 +355,8 @@ onMounted(loadAll)
             </div>
             <div v-if="c.description" class="case-desc">{{ c.description }}</div>
             <div class="case-actions">
-              <button class="btn-primary btn-xs" :disabled="running" @click="doRun(c)">
-                {{ running ? '⏳' : '▶ 运行' }}
+              <button class="btn-primary btn-xs" :disabled="runningCases.has(c.id)" @click="doRun(c)">
+                {{ runningCases.has(c.id) ? '⏳ 运行中' : '▶ 运行' }}
               </button>
               <button class="btn-secondary btn-xs" @click="openEdit(c)">✏️ 编辑</button>
               <button class="btn-danger btn-xs" @click="confirmBeforeDelete(c)">🗑️</button>
@@ -557,6 +574,11 @@ onMounted(loadAll)
   align-items: center;
   justify-content: space-between;
   margin-bottom: 0.75rem;
+}
+
+.section-actions {
+  display: flex;
+  gap: 0.5rem;
 }
 
 .section-title {

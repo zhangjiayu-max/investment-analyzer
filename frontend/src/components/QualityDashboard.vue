@@ -11,32 +11,32 @@
       <span>加载中...</span>
     </div>
 
-    <template v-else>
+    <div v-else>
       <!-- Summary Cards -->
       <div class="summary-grid">
         <div class="card summary-card">
-          <div class="summary-label">综合评分</div>
-          <div class="summary-value" :class="scoreClass(summary.avg_overall)">
-            {{ summary.avg_overall?.toFixed(1) || '-' }}
+          <div class="summary-label">评测平均分</div>
+          <div class="summary-value" :class="scoreClass(summary.eval_avg_score)">
+            {{ summary.eval_avg_score?.toFixed(1) || '-' }}
           </div>
-          <div class="summary-sub">/ 5.0</div>
+          <div class="summary-sub">/ 10</div>
         </div>
         <div class="card summary-card">
-          <div class="summary-label">数据准确性</div>
-          <div class="summary-value" :class="scoreClass(summary.avg_data_accuracy)">
-            {{ summary.avg_data_accuracy?.toFixed(1) || '-' }}
-          </div>
-        </div>
-        <div class="card summary-card">
-          <div class="summary-label">逻辑一致性</div>
-          <div class="summary-value" :class="scoreClass(summary.avg_logic)">
-            {{ summary.avg_logic?.toFixed(1) || '-' }}
+          <div class="summary-label">优秀 (≥7分)</div>
+          <div class="summary-value score-good">
+            {{ summary.eval_good_count || 0 }}
           </div>
         </div>
         <div class="card summary-card">
-          <div class="summary-label">可执行性</div>
-          <div class="summary-value" :class="scoreClass(summary.avg_actionability)">
-            {{ summary.avg_actionability?.toFixed(1) || '-' }}
+          <div class="summary-label">较差 (<5分)</div>
+          <div class="summary-value" :class="summary.eval_bad_count > 0 ? 'score-bad' : ''">
+            {{ summary.eval_bad_count || 0 }}
+          </div>
+        </div>
+        <div class="card summary-card">
+          <div class="summary-label">总评测次数</div>
+          <div class="summary-value">
+            {{ summary.scored_count || 0 }}
           </div>
         </div>
       </div>
@@ -89,6 +89,35 @@
         </div>
       </div>
 
+      <!-- Agent Performance -->
+      <div class="card">
+        <div class="card-header">
+          <h3>🤖 Agent 评分对比</h3>
+        </div>
+        <div v-if="agentStats.length" class="agent-grid">
+          <div v-for="agent in agentStats" :key="agent.analysis_type" class="agent-card">
+            <div class="agent-header">
+              <span class="agent-name">{{ agent.agent_name }}</span>
+              <span class="agent-score" :style="{ color: scoreColor(agent.avg_score) }">
+                {{ agent.avg_score?.toFixed(1) || '-' }}
+              </span>
+            </div>
+            <div class="agent-bar">
+              <div class="agent-bar-fill" :style="{ width: (agent.avg_score * 10) + '%', background: scoreColor(agent.avg_score) }"></div>
+            </div>
+            <div class="agent-meta">
+              <span>{{ agent.case_count }} 用例</span>
+              <span>{{ agent.run_count }} 次运行</span>
+              <span v-if="agent.good_count" class="text-success">{{ agent.good_count }} 优秀</span>
+              <span v-if="agent.bad_count" class="text-danger">{{ agent.bad_count }} 较差</span>
+            </div>
+          </div>
+        </div>
+        <div v-else class="empty-state" style="padding:2rem">
+          <p>暂无评测数据</p>
+        </div>
+      </div>
+
       <!-- Low Quality List -->
       <div class="card">
         <div class="card-header">
@@ -115,22 +144,23 @@
           <p>暂无低分产出 👍</p>
         </div>
       </div>
-    </template>
+    </div>
   </div>
 </template>
 
 <script setup>
 import { ref, onMounted } from 'vue'
-import { getQualitySummary, getQualityTrend, getLowQualityItems } from '../api'
+import { getQualitySummary, getQualityTrend, getLowQualityItems, getEvalStatsByAgent } from '../api'
 
 const loading = ref(true)
 const summary = ref({})
 const trend = ref([])
 const trendDays = ref(30)
 const lowQualityItems = ref([])
+const agentStats = ref([])
 
 onMounted(async () => {
-  await Promise.all([loadSummary(), loadTrend(), loadLowQuality()])
+  await Promise.all([loadSummary(), loadTrend(), loadLowQuality(), loadAgentStats()])
   loading.value = false
 })
 
@@ -161,23 +191,41 @@ async function loadLowQuality() {
   }
 }
 
+async function loadAgentStats() {
+  try {
+    const { data } = await getEvalStatsByAgent()
+    agentStats.value = data.agents || []
+  } catch (e) {
+    console.error('Load agent stats failed:', e)
+  }
+}
+
 function scoreClass(score) {
   if (!score) return ''
-  if (score >= 4) return 'score-good'
-  if (score >= 3) return 'score-ok'
+  if (score >= 7) return 'score-good'
+  if (score >= 5) return 'score-ok'
   return 'score-bad'
+}
+
+function scoreColor(score) {
+  if (!score || score <= 0) return 'var(--color-text-muted)'
+  if (score >= 8) return '#10b981'
+  if (score >= 6) return '#22c55e'
+  if (score >= 4) return '#f59e0b'
+  if (score >= 2) return '#f97316'
+  return '#ef4444'
 }
 
 function dimClass(score) {
   if (!score) return ''
-  if (score >= 4) return 'dim-good'
-  if (score >= 3) return 'dim-ok'
+  if (score >= 7) return 'dim-good'
+  if (score >= 5) return 'dim-ok'
   return 'dim-bad'
 }
 
 function barHeight(score) {
   if (!score) return '0%'
-  return `${(score / 5) * 100}%`
+  return `${(score / 10) * 100}%`
 }
 </script>
 
@@ -356,6 +404,61 @@ function barHeight(score) {
   border-radius: 2px;
   display: inline-block;
 }
+
+/* Agent Grid */
+.agent-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 0.75rem;
+}
+
+.agent-card {
+  background: var(--color-bg-secondary);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: 1rem;
+}
+
+.agent-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 0.5rem;
+}
+
+.agent-name {
+  font-weight: 600;
+  font-size: 0.9rem;
+}
+
+.agent-score {
+  font-size: 1.5rem;
+  font-weight: 700;
+}
+
+.agent-bar {
+  height: 6px;
+  background: var(--color-border-light);
+  border-radius: 3px;
+  overflow: hidden;
+  margin-bottom: 0.5rem;
+}
+
+.agent-bar-fill {
+  height: 100%;
+  border-radius: 3px;
+  transition: width 0.5s ease;
+}
+
+.agent-meta {
+  display: flex;
+  gap: 0.75rem;
+  font-size: 0.75rem;
+  color: var(--color-text-muted);
+}
+
+.text-success { color: #16a34a; }
+.text-danger { color: #dc2626; }
 
 /* Low Quality List */
 .lq-list {
