@@ -1030,7 +1030,9 @@ async function toggleTraceDetail(msg, index) {
 /* ── 消息列表 ── */
 .messages-container {
   flex: 1;
+  min-height: 0;
   overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
   padding: 1.25rem;
   display: flex;
   flex-direction: column;
@@ -2005,7 +2007,9 @@ async function toggleTraceDetail(msg, index) {
   .chat-page {
     flex-direction: column;
     position: relative;
-    height: 100%;
+    flex: 1;
+    min-height: 0;
+    height: auto;
     border-radius: 0;
     border: none;
   }
@@ -2054,6 +2058,8 @@ async function toggleTraceDetail(msg, index) {
   .chat-area {
     flex: 1;
     min-width: 0;
+    min-height: 0;
+    overflow: hidden;
   }
 
   .chat-header {

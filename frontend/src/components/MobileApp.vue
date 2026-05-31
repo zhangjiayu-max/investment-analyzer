@@ -97,6 +97,8 @@ const pageProps = computed(() => {
   return {}
 })
 
+const isChatPage = computed(() => activePage.value === 'chat')
+
 // ── 分析页状态 ──
 const taskListRef = ref(null)
 const currentTaskId = ref(null)
@@ -146,7 +148,7 @@ function onBack() {
     </header>
 
     <!-- 内容区 -->
-    <div class="mobile-content">
+    <div :class="['mobile-content', { 'is-chat': isChatPage }]">
       <!-- 分析页（特殊处理） -->
       <template v-if="activePage === 'analysis'">
         <div v-if="!currentTaskId" class="mobile-analysis">
@@ -283,13 +285,14 @@ function onBack() {
   overflow-y: auto;
   -webkit-overflow-scrolling: touch;
   padding: 0.75rem;
-  position: relative;
 }
 
-/* ChatView 需要填满整个内容区，内部自行滚动 */
-.mobile-content > :deep(.chat-page) {
-  margin: -0.75rem;
-  height: calc(100% + 1.5rem);
+/* ChatView 自行管理滚动，外层不滚动 */
+.mobile-content.is-chat {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  padding: 0;
 }
 
 /* ── 分析页 ── */

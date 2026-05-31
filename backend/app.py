@@ -130,8 +130,6 @@ def _index_skill_doc_by_type(doc_type: str, title: str):
 @app.on_event("startup")
 async def startup():
     """应用启动时的初始化。"""
-    import asyncio
-
     logging.info("=== 启动初始化开始 ===")
 
     # 1. 同步初始化（必须在启动前完成）

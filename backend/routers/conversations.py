@@ -216,7 +216,6 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
             pass
 
     async def event_stream():
-        import asyncio
         import threading
 
         cancel_event = threading.Event()

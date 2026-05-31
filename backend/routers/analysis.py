@@ -144,7 +144,6 @@ async def run_analysis(req: AnalysisRunRequest):
     )
 
     # 8. 后台自动质量评估（不阻塞返回）
-    import asyncio
     async def _auto_evaluate():
         try:
             from agent.eval_scorer import evaluate_llm_output
