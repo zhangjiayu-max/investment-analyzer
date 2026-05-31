@@ -582,9 +582,25 @@ async def get_hot_topics():
     """获取今日市场热点（YingMi MCP SearchFinancialNews，300秒缓存）。"""
     import time
     from pathlib import Path
+    from config import ROOT
     now = time.time()
     if _hot_topics_cache["data"] and now - _hot_topics_cache["ts"] < 300:
         return _hot_topics_cache["data"]
+
+    # 进程重启后首次请求：尝试从持久化文件恢复今日数据
+    persisted_file = ROOT / "data" / "hot_topics_cache.json"
+    if not _hot_topics_cache["data"]:
+        try:
+            import os
+            if persisted_file.exists() and (now - os.path.getmtime(persisted_file)) < 86400:
+                import json as _json
+                cached = _json.loads(persisted_file.read_text())
+                if cached.get("news") and cached.get("fetched_at"):
+                    _hot_topics_cache["data"] = cached
+                    _hot_topics_cache["ts"] = now
+                    return cached
+        except Exception:
+            pass
 
     news_items = []
     try:
@@ -618,14 +634,14 @@ async def get_hot_topics():
             logging.warning(f"热点 web_search 失败: {e}")
 
     from datetime import datetime
-    from config import ROOT
     fetched_at = datetime.now().strftime("%Y-%m-%d %H:%M")
     result = {"news": news_items, "source": "yingmi" if news_items else "none", "fetched_at": fetched_at}
     _hot_topics_cache["data"] = result
     _hot_topics_cache["ts"] = now
-    # 持久化 fetched_at，进程重启后仍可读取
+    # 持久化完整数据，进程重启后可恢复（含 fetched_at）
     try:
-        (ROOT / "data" / "hot_topics_fetched_at.txt").write_text(fetched_at)
+        import json as _json
+        persisted_file.write_text(_json.dumps(result, ensure_ascii=False))
     except Exception:
         pass
     return result
