@@ -670,7 +670,7 @@ async def get_hot_topics():
 
 @router.post("/api/dashboard/hotspots-relate")
 async def hotspots_relate_indexes():
-    """热点→指数关联：找出热点新闻相关的指数和持仓敞口。"""
+    """热点→指数关联：关键词匹配 + LLM 兜底推理。"""
     from db import list_valuation_indexes, list_holdings
 
     news_data = await get_hot_topics()
@@ -678,32 +678,36 @@ async def hotspots_relate_indexes():
     if not news_list:
         return {"items": []}
 
-    # 构建指数关键词映射
     indexes = list_valuation_indexes()
     holdings = list_holdings()
-    holding_codes = {h.get("fund_code") for h in holdings if h.get("fund_code")}
 
-    # 行业/主题关键词 → 指数代码映射
+    # ── 关键词映射（快速匹配，覆盖常见场景）──
     sector_keywords = {
-        "半导体": ["芯片", "半导体", "集成电路", "晶圆"],
-        "人工智能": ["AI", "人工智能", "大模型", "算力", "智谱", "GPT", "机器人"],
-        "新能源": ["新能源", "光伏", "风电", "储能", "锂电"],
-        "消费": ["消费", "白酒", "食品", "啤酒", "世界杯", "餐饮"],
-        "医药": ["医药", "医疗", "创新药", "疫苗", "CXO"],
-        "金融": ["银行", "保险", "券商", "金融"],
-        "地产": ["地产", "房地产", "楼市", "房价"],
-        "军工": ["军工", "国防", "航天", "导弹"],
-        "教育": ["教育", "高考", "培训", "考研"],
-        "体育": ["体育", "世界杯", "奥运", "足球", "赛事"],
-        "传媒": ["传媒", "游戏", "影视", "短视频", "直播"],
-        "汽车": ["汽车", "新能源车", "电动车", "自动驾驶"],
-        "基建": ["基建", "铁路", "公路", "水利"],
-        "科技": ["科技", "互联网", "云计算", "数据", "5G", "6G"],
-        "农业": ["农业", "种业", "养殖", "猪肉"],
-        "环保": ["环保", "碳中和", "碳达峰", "绿色"],
+        "半导体": ["芯片", "半导体", "集成电路", "晶圆", "封测"],
+        "人工智能": ["AI", "人工智能", "大模型", "算力", "智谱", "GPT", "机器人", "深度学习", "机器学习"],
+        "新能源": ["新能源", "光伏", "风电", "储能", "锂电", "电池"],
+        "消费": ["消费", "白酒", "食品", "啤酒", "餐饮", "零售", "家电"],
+        "医药": ["医药", "医疗", "创新药", "疫苗", "CXO", "中药", "器械"],
+        "金融": ["银行", "保险", "券商", "金融", "证券"],
+        "地产": ["地产", "房地产", "楼市", "房价", "万科"],
+        "军工": ["军工", "国防", "航天", "导弹", "航空"],
+        "教育": ["教育", "高考", "培训", "考研", "留学"],
+        "体育": ["体育", "世界杯", "奥运", "足球", "赛事", "NBA"],
+        "传媒": ["传媒", "游戏", "影视", "短视频", "直播", "出版"],
+        "汽车": ["汽车", "新能源车", "电动车", "自动驾驶", "造车"],
+        "基建": ["基建", "铁路", "公路", "水利", "城投"],
+        "科技": ["科技", "互联网", "云计算", "数据", "5G", "6G", "量子"],
+        "农业": ["农业", "种业", "养殖", "猪肉", "粮食"],
+        "环保": ["环保", "碳中和", "碳达峰", "绿色", "减排"],
+        "有色": ["有色", "铜", "铝", "黄金", "稀土", "锂矿"],
+        "化工": ["化工", "石化", "化学", "材料"],
     }
 
-    def match_news_to_sectors(title, summary):
+    # 构建已有行业列表（供 LLM 参考）
+    known_sectors = list(sector_keywords.keys())
+
+    def keyword_match(title, summary):
+        """关键词快速匹配。"""
         text = f"{title} {summary}".lower()
         matched = []
         for sector, keywords in sector_keywords.items():
@@ -713,15 +717,52 @@ async def hotspots_relate_indexes():
                     break
         return matched
 
+    async def llm_infer_sectors(title, summary):
+        """LLM 推理未匹配的新闻。"""
+        from llm_service import _call_llm, MODEL
+        prompt = f"""分析以下财经新闻，判断涉及哪些行业/板块。
+
+新闻标题：{title}
+新闻摘要：{summary[:200]}
+
+已知行业列表：{', '.join(known_sectors)}
+
+请返回 JSON 格式：
+{{"sectors": ["行业1", "行业2"], "reason": "简短说明"}}
+
+要求：
+1. sectors 从已知行业中选择，如果没有完全匹配的，可以新增合理的行业名
+2. 最多返回 3 个最相关的行业
+3. 只返回 JSON，不要其他文字"""
+
+        try:
+            import asyncio
+            response = await asyncio.to_thread(lambda: _call_llm(
+                caller="hotspots_relate",
+                model=MODEL,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.1,
+                max_tokens=200,
+            ))
+            text = response.choices[0].message.content or ""
+            # 提取 JSON
+            import re, json as _json
+            match = re.search(r'\{[^{}]+\}', text, re.DOTALL)
+            if match:
+                parsed = _json.loads(match.group())
+                return parsed.get("sectors", [])
+        except Exception as e:
+            logging.warning(f"[hotspots-relate] LLM 推理失败: {e}")
+        return []
+
     def find_related_indexes(sectors):
         results = []
         for idx in indexes:
             name = (idx.get("index_name") or "").lower()
-            code = idx.get("index_code", "")
             for sector in sectors:
                 if sector.lower() in name:
                     results.append({
-                        "index_code": code,
+                        "index_code": idx.get("index_code"),
                         "index_name": idx.get("index_name"),
                         "percentile": idx.get("percentile"),
                         "assessment": idx.get("assessment"),
@@ -743,11 +784,43 @@ async def hotspots_relate_indexes():
                     break
         return results
 
-    items = []
-    for n in news_list:
+    # ── 处理每条新闻：先关键词，未匹配则 LLM ──
+    llm_tasks = []
+    llm_indices = []  # 需要 LLM 推理的新闻索引
+
+    for i, n in enumerate(news_list):
         title = n.get("title", "")
         summary = n.get("summary", "")
-        sectors = match_news_to_sectors(title, summary)
+        sectors = keyword_match(title, summary)
+        if sectors:
+            # 关键词命中，直接用
+            llm_tasks.append(None)
+        else:
+            # 未命中，标记需要 LLM 推理
+            llm_tasks.append((title, summary))
+            llm_indices.append(i)
+
+    # 并行调用 LLM（如果有需要推理的）
+    llm_results = {}
+    if llm_indices:
+        import asyncio
+        tasks = [llm_infer_sectors(news_list[i]["title"], news_list[i].get("summary", "")) for i in llm_indices]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        for idx, result in zip(llm_indices, results):
+            llm_results[idx] = result if isinstance(result, list) else []
+
+    # ── 组装结果 ──
+    items = []
+    for i, n in enumerate(news_list):
+        title = n.get("title", "")
+        summary = n.get("summary", "")
+        if llm_tasks[i] is None:
+            sectors = keyword_match(title, summary)
+            source = "keyword"
+        else:
+            sectors = llm_results.get(i, [])
+            source = "llm"
+
         related_indexes = find_related_indexes(sectors) if sectors else []
         related_holdings = find_related_holdings(sectors) if sectors else []
         items.append({
@@ -755,6 +828,7 @@ async def hotspots_relate_indexes():
             "sectors": sectors,
             "related_indexes": related_indexes[:5],
             "related_holdings": related_holdings[:3],
+            "match_source": source,
         })
 
     return {"items": items}
