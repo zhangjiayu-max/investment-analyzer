@@ -1,8 +1,8 @@
 <script setup>
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, nextTick } from 'vue'
 import {
   listEvalCases, createEvalCase, updateEvalCase, deleteEvalCase, runEvalCase,
-  listEvalRuns, getEvalRunDetail, getEvalStats,
+  listEvalRuns, getEvalRunDetail, getEvalStats, listAgents,
 } from '../api'
 import ConfirmDialog from './ConfirmDialog.vue'
 import AppToast from './AppToast.vue'
@@ -30,17 +30,34 @@ const runs = ref([])
 const selectedRun = ref(null)
 const runDetail = ref(null)
 
-const analysisTypeOptions = [
+// 分析类型选项（从 Agent 列表动态加载）
+const analysisTypeOptions = ref([
   { value: 'panorama', label: '全景诊断' },
   { value: 'deep_dive', label: '单基金深度' },
   { value: 'trade_review', label: '交易复盘' },
   { value: 'what_if', label: '情景推演' },
   { value: 'ai', label: 'AI 分析' },
   { value: 'diversification_ai', label: '分散度分析' },
-]
+])
+
+// 加载 Agent 列表，补充到分析类型选项
+async function loadAgents() {
+  try {
+    const { data } = await listAgents()
+    const agents = data.agents || []
+    agents.forEach(agent => {
+      const key = agent.name.toLowerCase().replace(/\s+/g, '_')
+      if (!analysisTypeOptions.value.find(o => o.value === key)) {
+        analysisTypeOptions.value.push({ value: key, label: agent.name })
+      }
+    })
+  } catch (e) {
+    console.error('Load agents failed:', e)
+  }
+}
 
 function typeLabel(t) {
-  return analysisTypeOptions.find(o => o.value === t)?.label || t
+  return analysisTypeOptions.value.find(o => o.value === t)?.label || t
 }
 
 function confirmBeforeDelete(c) {
@@ -77,7 +94,7 @@ async function loadRuns() {
 
 async function loadAll() {
   loading.value = true
-  try { await Promise.all([loadStats(), loadCases(), loadRuns()]) } finally { loading.value = false }
+  try { await Promise.all([loadStats(), loadCases(), loadRuns(), loadAgents()]) } finally { loading.value = false }
 }
 
 function openCreate() {
@@ -96,6 +113,10 @@ function openEdit(c) {
   }
   editingId.value = c.id
   showForm.value = true
+  // 滚动到表单位置
+  nextTick(() => {
+    document.querySelector('.form-card')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  })
 }
 
 async function submitForm() {
@@ -256,10 +277,10 @@ onMounted(loadAll)
         <button class="btn-primary btn-sm" @click="openCreate">+ 新建用例</button>
       </div>
 
-      <!-- Create/Edit Form -->
+      <!-- Create Form (新建时在顶部) -->
       <Transition name="expand">
-        <div v-if="showForm" class="form-card card">
-          <h4>{{ editingId ? '编辑评测用例' : '新建评测用例' }}</h4>
+        <div v-if="showForm && !editingId" class="form-card card">
+          <h4>新建评测用例</h4>
           <div class="form-grid">
             <div class="form-row">
               <label>名称 *</label>
@@ -287,8 +308,8 @@ onMounted(loadAll)
               placeholder="1. 必须引用具体数据&#10;2. 必须给出明确建议&#10;3. 必须附带风险提示"></textarea>
           </div>
           <div class="form-actions">
-            <button class="btn-primary" @click="submitForm">{{ editingId ? '保存' : '创建' }}</button>
-            <button class="btn-secondary" @click="showForm = false; editingId = null">取消</button>
+            <button class="btn-primary" @click="submitForm">创建</button>
+            <button class="btn-secondary" @click="showForm = false">取消</button>
           </div>
         </div>
       </Transition>
@@ -300,28 +321,66 @@ onMounted(loadAll)
       </div>
 
       <div v-else class="case-list">
-        <div v-for="c in cases" :key="c.id" class="case-card card">
-          <div class="case-header">
-            <div class="case-info">
-              <span class="badge badge-sm" :class="'badge-' + c.analysis_type">{{ typeLabel(c.analysis_type) }}</span>
-              <span class="case-name">{{ c.name }}</span>
+        <template v-for="c in cases" :key="c.id">
+          <!-- 用例卡片 -->
+          <div class="case-card card">
+            <div class="case-header">
+              <div class="case-info">
+                <span class="badge badge-sm" :class="'badge-' + c.analysis_type">{{ typeLabel(c.analysis_type) }}</span>
+                <span class="case-name">{{ c.name }}</span>
+              </div>
+              <div class="case-meta">
+                <span class="case-stat">运行 {{ c.run_count || 0 }} 次</span>
+                <span v-if="c.avg_score" class="case-stat" :style="{ color: scoreColor(c.avg_score) }">
+                  平均 {{ Number(c.avg_score).toFixed(1) }}分
+                </span>
+              </div>
             </div>
-            <div class="case-meta">
-              <span class="case-stat">运行 {{ c.run_count || 0 }} 次</span>
-              <span v-if="c.avg_score" class="case-stat" :style="{ color: scoreColor(c.avg_score) }">
-                平均 {{ Number(c.avg_score).toFixed(1) }}分
-              </span>
+            <div v-if="c.description" class="case-desc">{{ c.description }}</div>
+            <div class="case-actions">
+              <button class="btn-primary btn-xs" :disabled="running" @click="doRun(c)">
+                {{ running ? '⏳' : '▶ 运行' }}
+              </button>
+              <button class="btn-secondary btn-xs" @click="openEdit(c)">✏️ 编辑</button>
+              <button class="btn-danger btn-xs" @click="confirmBeforeDelete(c)">🗑️</button>
             </div>
           </div>
-          <div v-if="c.description" class="case-desc">{{ c.description }}</div>
-          <div class="case-actions">
-            <button class="btn-primary btn-xs" :disabled="running" @click="doRun(c)">
-              {{ running ? '⏳' : '▶ 运行' }}
-            </button>
-            <button class="btn-secondary btn-xs" @click="openEdit(c)">✏️ 编辑</button>
-            <button class="btn-danger btn-xs" @click="confirmBeforeDelete(c)">🗑️</button>
-          </div>
-        </div>
+
+          <!-- 编辑表单：展开在用例下方 -->
+          <Transition name="expand">
+            <div v-if="showForm && editingId === c.id" class="form-card card">
+              <h4>编辑评测用例</h4>
+              <div class="form-grid">
+                <div class="form-row">
+                  <label>名称 *</label>
+                  <input v-model="form.name" class="input-field" />
+                </div>
+                <div class="form-row">
+                  <label>分析类型</label>
+                  <select v-model="form.analysis_type" class="input-field">
+                    <option v-for="o in analysisTypeOptions" :key="o.value" :value="o.value">{{ o.label }}</option>
+                  </select>
+                </div>
+              </div>
+              <div class="form-row">
+                <label>描述</label>
+                <input v-model="form.description" class="input-field" />
+              </div>
+              <div class="form-row">
+                <label>参数 (JSON)</label>
+                <textarea v-model="form.input_params" class="input-field code-input" rows="2"></textarea>
+              </div>
+              <div class="form-row">
+                <label>预期质量标准</label>
+                <textarea v-model="form.expected_quality" class="input-field" rows="3"></textarea>
+              </div>
+              <div class="form-actions">
+                <button class="btn-primary" @click="submitForm">保存</button>
+                <button class="btn-secondary" @click="showForm = false; editingId = null">取消</button>
+              </div>
+            </div>
+          </Transition>
+        </template>
       </div>
     </div>
 
@@ -601,6 +660,7 @@ onMounted(loadAll)
   flex-shrink: 0;
   border-right: 1px solid var(--color-border);
   padding-right: 1rem;
+  overflow-y: auto;
 }
 
 .run-item {
@@ -669,7 +729,6 @@ onMounted(loadAll)
   flex: 1;
   padding-left: 1rem;
   overflow-y: auto;
-  max-height: 70vh;
 }
 
 .detail-header {
