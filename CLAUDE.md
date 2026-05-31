@@ -106,6 +106,14 @@ investment-analyzer/
 | 新增表 | `db/core.py` init_db 加 CREATE → 模块内加 CRUD → app.py 加路由 → api/index.js 加函数 → 组件 → Sidebar → Home.vue |
 | Agent 工具 | `tools/__init__.py` 加 TOOLS 定义 + execute_tool case → 加入专家 tools 列表 |
 | 前端页面 | 创建组件 → api/index.js 加函数 → Sidebar 加导航 → Home.vue 加 v-if |
+| 前端测试 | `cd frontend && npm test` — 关键交互必须有测试覆盖 |
+
+**前端测试规范（强制）：**
+- 修改 API 路径后必须更新 `api-urls.test.js`
+- 修改对话/流式相关逻辑后必须更新 `chat-state.test.js`
+- 修改 composable 后必须更新 `composables.test.js`
+- 新增关键交互（状态管理、数据流）必须写对应测试
+- 每次代码变更后运行 `cd frontend && npm test` 确认通过
 
 ## 代码变更后重启规范
 
