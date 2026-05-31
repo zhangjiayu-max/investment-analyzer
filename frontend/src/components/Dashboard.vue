@@ -1,6 +1,6 @@
 <script setup>
 import { ref, onMounted, onActivated } from 'vue'
-import { getDashboard, runAnalysis, runPanoramaAnalysis, getHotTopics, getDailyReport, regenerateDailyReport, submitDailyReportFeedback, listPanoramaRecords, getHotspotsAnalysis, getLatestHotspotsAnalysis, getRecommendations, getRecommendationStats, submitRecommendationFeedback, getBondRecommend, listBondRecommendRecords, autoVerifyRecommendations, fetchRecentValuations, getBondMarketTemperature } from '../api'
+import { getDashboard, runAnalysis, runPanoramaAnalysis, getHotTopics, getDailyReport, regenerateDailyReport, submitDailyReportFeedback, listPanoramaRecords, getHotspotsAnalysis, getLatestHotspotsAnalysis, getRecommendations, getRecommendationStats, submitRecommendationFeedback, getBondRecommend, listBondRecommendRecords, autoVerifyRecommendations, fetchRecentValuations, getBondMarketTemperature, getHotspotsRelate } from '../api'
 import GaugeChart from './charts/GaugeChart.vue'
 import ConfirmDialog from './ConfirmDialog.vue'
 import AppToast from './AppToast.vue'
@@ -43,6 +43,7 @@ const hotTopicsFetchedAt = ref('')
 const hotTopicsLoading = ref(true)
 const hotspotLoading = ref(false)
 const hotspotError = ref(false)
+const hotspotsRelate = ref(null) // 热点→指数关联数据
 
 // ── 每日日报自动加载 ──
 const dailyReport = ref(null)
@@ -209,12 +210,21 @@ async function loadHotTopics() {
       if (!hotTopicsAnalyzedAt.value) {
         hotTopicsFetchedAt.value = res.fetched_at || ''
       }
+      // 自动加载热点→指数关联
+      loadHotspotsRelate()
     }
   } catch (e) {
     // 静默失败，不影响看板主流程
   } finally {
     hotTopicsLoading.value = false
   }
+}
+
+async function loadHotspotsRelate() {
+  try {
+    const { data } = await getHotspotsRelate()
+    hotspotsRelate.value = data.items || []
+  } catch (_) {}
 }
 
 // 本地记录的热点分析时间
@@ -757,6 +767,25 @@ const concentrationIcon = { low: '✅', moderate: '⚡', high: '⚠️' }
             <a v-if="item.url" :href="item.url" target="_blank" rel="noopener" class="news-title">{{ item.title }}</a>
             <span v-else class="news-title">{{ item.title }}</span>
             <p class="news-summary">{{ item.summary?.slice(0, 120) }}{{ item.summary?.length > 120 ? '...' : '' }}</p>
+            <!-- 关联指数和持仓 -->
+            <div v-if="hotspotsRelate?.[i]?.sectors?.length" class="news-relate">
+              <div class="news-sectors">
+                <span v-for="s in hotspotsRelate[i].sectors" :key="s" class="sector-tag">{{ s }}</span>
+              </div>
+              <div v-if="hotspotsRelate[i].related_indexes?.length" class="news-indexes">
+                <span class="relate-label">相关指数：</span>
+                <span v-for="idx in hotspotsRelate[i].related_indexes.slice(0, 3)" :key="idx.index_code" class="index-link" @click="emit('navigate', 'valuation')">
+                  {{ idx.index_name }}
+                  <em v-if="idx.percentile != null" :style="{ color: getPercentileColor(idx.percentile) }">{{ idx.percentile }}%</em>
+                </span>
+              </div>
+              <div v-if="hotspotsRelate[i].related_holdings?.length" class="news-holdings">
+                <span class="relate-label">持仓关联：</span>
+                <span v-for="h in hotspotsRelate[i].related_holdings" :key="h.fund_code" class="holding-tag">
+                  {{ h.fund_name }}
+                </span>
+              </div>
+            </div>
             <div class="news-meta">
               <span class="news-source">{{ item.source }}</span>
               <span v-if="item.date" class="news-date">{{ item.date?.slice(0, 10) }}</span>
@@ -2208,6 +2237,66 @@ const concentrationIcon = { low: '✅', moderate: '⚡', high: '⚠️' }
 .news-source {
   color: var(--color-primary);
   font-weight: 600;
+}
+
+/* 热点→指数关联 */
+.news-relate {
+  margin-top: 0.4rem;
+  padding-top: 0.4rem;
+  border-top: 1px dashed var(--color-border);
+}
+
+.news-sectors {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+  margin-bottom: 0.3rem;
+}
+
+.sector-tag {
+  font-size: 0.65rem;
+  padding: 0.1rem 0.4rem;
+  border-radius: 4px;
+  background: rgba(99,102,241,0.1);
+  color: #6366f1;
+  font-weight: 600;
+}
+
+.news-indexes, .news-holdings {
+  font-size: 0.72rem;
+  color: var(--color-text-secondary);
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.3rem;
+  margin-top: 0.2rem;
+}
+
+.relate-label {
+  color: var(--color-text-muted);
+  font-size: 0.68rem;
+}
+
+.index-link {
+  cursor: pointer;
+  color: var(--color-primary);
+  font-weight: 500;
+}
+
+.index-link:hover { text-decoration: underline; }
+.index-link em {
+  font-style: normal;
+  font-size: 0.65rem;
+  margin-left: 0.15rem;
+}
+
+.holding-tag {
+  font-size: 0.65rem;
+  padding: 0.1rem 0.4rem;
+  border-radius: 4px;
+  background: rgba(16,185,129,0.1);
+  color: #10b981;
+  font-weight: 500;
 }
 
 .hotspots-hint {

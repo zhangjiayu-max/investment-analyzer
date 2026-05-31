@@ -668,6 +668,98 @@ async def get_hot_topics():
 # prompt 通过 analysis_agents 配置管理，见 db.py 中"热点分析专家"系统提示词
 
 
+@router.post("/api/dashboard/hotspots-relate")
+async def hotspots_relate_indexes():
+    """热点→指数关联：找出热点新闻相关的指数和持仓敞口。"""
+    from db import list_valuation_indexes, list_holdings
+
+    news_data = await get_hot_topics()
+    news_list = news_data.get("news", [])[:6]
+    if not news_list:
+        return {"items": []}
+
+    # 构建指数关键词映射
+    indexes = list_valuation_indexes()
+    holdings = list_holdings()
+    holding_codes = {h.get("fund_code") for h in holdings if h.get("fund_code")}
+
+    # 行业/主题关键词 → 指数代码映射
+    sector_keywords = {
+        "半导体": ["芯片", "半导体", "集成电路", "晶圆"],
+        "人工智能": ["AI", "人工智能", "大模型", "算力", "智谱", "GPT", "机器人"],
+        "新能源": ["新能源", "光伏", "风电", "储能", "锂电"],
+        "消费": ["消费", "白酒", "食品", "啤酒", "世界杯", "餐饮"],
+        "医药": ["医药", "医疗", "创新药", "疫苗", "CXO"],
+        "金融": ["银行", "保险", "券商", "金融"],
+        "地产": ["地产", "房地产", "楼市", "房价"],
+        "军工": ["军工", "国防", "航天", "导弹"],
+        "教育": ["教育", "高考", "培训", "考研"],
+        "体育": ["体育", "世界杯", "奥运", "足球", "赛事"],
+        "传媒": ["传媒", "游戏", "影视", "短视频", "直播"],
+        "汽车": ["汽车", "新能源车", "电动车", "自动驾驶"],
+        "基建": ["基建", "铁路", "公路", "水利"],
+        "科技": ["科技", "互联网", "云计算", "数据", "5G", "6G"],
+        "农业": ["农业", "种业", "养殖", "猪肉"],
+        "环保": ["环保", "碳中和", "碳达峰", "绿色"],
+    }
+
+    def match_news_to_sectors(title, summary):
+        text = f"{title} {summary}".lower()
+        matched = []
+        for sector, keywords in sector_keywords.items():
+            for kw in keywords:
+                if kw.lower() in text:
+                    matched.append(sector)
+                    break
+        return matched
+
+    def find_related_indexes(sectors):
+        results = []
+        for idx in indexes:
+            name = (idx.get("index_name") or "").lower()
+            code = idx.get("index_code", "")
+            for sector in sectors:
+                if sector.lower() in name:
+                    results.append({
+                        "index_code": code,
+                        "index_name": idx.get("index_name"),
+                        "percentile": idx.get("percentile"),
+                        "assessment": idx.get("assessment"),
+                    })
+                    break
+        return results
+
+    def find_related_holdings(sectors):
+        results = []
+        for h in holdings:
+            name = (h.get("fund_name") or "").lower()
+            for sector in sectors:
+                if sector.lower() in name:
+                    results.append({
+                        "fund_code": h.get("fund_code"),
+                        "fund_name": h.get("fund_name"),
+                        "current_value": h.get("current_value"),
+                    })
+                    break
+        return results
+
+    items = []
+    for n in news_list:
+        title = n.get("title", "")
+        summary = n.get("summary", "")
+        sectors = match_news_to_sectors(title, summary)
+        related_indexes = find_related_indexes(sectors) if sectors else []
+        related_holdings = find_related_holdings(sectors) if sectors else []
+        items.append({
+            "title": title,
+            "sectors": sectors,
+            "related_indexes": related_indexes[:5],
+            "related_holdings": related_holdings[:3],
+        })
+
+    return {"items": items}
+
+
 @router.get("/api/dashboard/hotspots-analysis")
 async def get_hotspots_analysis():
     """结构化热点分析 — LLM 输出 JSON 推荐。"""

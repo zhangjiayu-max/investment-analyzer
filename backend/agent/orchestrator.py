@@ -13,7 +13,7 @@ from db.agents import load_specialist_agents
 from config import ARBITRATION_API_KEY
 
 # 全局超时限制（秒）
-MAX_ORCHESTRATION_SECONDS = 600  # 10 分钟
+MAX_ORCHESTRATION_SECONDS = 1800  # 30 分钟
 from agent.feedback_learner import get_preference_context
 from agent.memory import (
     compress_history_semantic, build_user_memory_context,

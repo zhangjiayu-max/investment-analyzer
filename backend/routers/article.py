@@ -47,10 +47,13 @@ async def create_article_api(req: CreateArticleRequest):
 
 @router.get("/{article_id}")
 async def get_article_api(article_id: int):
-    """获取文章详情。"""
+    """获取文章详情（含分析记录）。"""
+    from db import get_analysis_records
     article = get_article(article_id)
     if not article:
         raise HTTPException(404, "文章不存在")
+    # 补充分析记录
+    article["analysis_records"] = get_analysis_records(article_id)
     return article
 
 

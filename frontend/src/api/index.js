@@ -594,6 +594,11 @@ export function getHotTopics() {
   return api.get('/dashboard/hot-topics')
 }
 
+/** 热点→指数关联 */
+export function getHotspotsRelate() {
+  return api.post('/dashboard/hotspots-relate')
+}
+
 /** 获取今日自动生成的日报 */
 export function getDailyReport() {
   return api.get('/dashboard/daily-report')
