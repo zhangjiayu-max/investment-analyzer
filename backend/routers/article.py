@@ -33,9 +33,9 @@ class CreateArticleRequest(BaseModel):
 # ── 文章管理 ──────────────────────────────────────
 
 @router.get("/list")
-async def list_articles_api(limit: int = 50):
+async def list_articles_api(limit: int = 50, status: str = None):
     """文章列表。"""
-    return {"articles": list_articles(limit)}
+    return {"articles": list_articles(status)}
 
 
 @router.post("/create")

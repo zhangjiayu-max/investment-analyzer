@@ -357,7 +357,7 @@ async def _auto_daily_report():
         result_text = response.choices[0].message.content or ""
         token_usage = response.usage.total_tokens if response.usage else 0
 
-        create_analysis_history(
+        report_id = create_analysis_history(
             index_code="", index_name="",
             agent_id=1, agent_name=agent["name"],
             prompt_used=full_prompt[:500], news_context=news_context[:500],
@@ -365,6 +365,21 @@ async def _auto_daily_report():
             token_usage=token_usage,
         )
         logging.info(f"今日市场报告后台自动生成完成，token用量: {token_usage}")
+
+        # 后台自动质量评估
+        async def _auto_eval_report():
+            try:
+                from agent.eval_scorer import evaluate_llm_output
+                await evaluate_llm_output(
+                    query="生成今日市场简报",
+                    output=result_text,
+                    context=f"新闻: {news_context[:300]}\n估值: {val_context[:300]}",
+                    target_type="daily_report",
+                    target_id=report_id,
+                )
+            except Exception as e:
+                logging.warning(f"简报自动质量评估失败: {e}")
+        asyncio.create_task(_auto_eval_report())
     except Exception as e:
         logging.warning(f"自动生成市场报告失败: {e}")
 

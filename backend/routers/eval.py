@@ -46,6 +46,20 @@ async def create_eval_case_api(req: CreateEvalCaseRequest):
     return {"ok": True, "id": case_id}
 
 
+@router.put("/api/eval/cases/{case_id}")
+async def update_eval_case_api(case_id: int, body: dict):
+    """更新评测用例。"""
+    from db import update_eval_case
+    allowed = {"name", "description", "analysis_type", "input_params", "expected_quality", "is_active"}
+    fields = {k: v for k, v in body.items() if k in allowed and v is not None}
+    if not fields:
+        raise HTTPException(400, "无有效字段")
+    ok = update_eval_case(case_id, **fields)
+    if not ok:
+        raise HTTPException(404, "评测用例不存在")
+    return {"ok": True}
+
+
 @router.delete("/api/eval/cases/{case_id}")
 async def delete_eval_case_api(case_id: int):
     """删除评测用例。"""
@@ -257,3 +271,26 @@ async def _generate_expected_quality(bad_case: dict) -> str:
     except Exception as e:
         logger.warning(f"生成期望质量标准失败: {e}")
         return "专业、准确、可操作的投资分析"
+
+
+# ── 质量评估 API ──────────────────────────────────────
+
+@router.get("/api/eval/quality-summary")
+async def quality_summary_api(days: int = 30):
+    """获取质量评分概览。"""
+    from db import get_quality_summary
+    return get_quality_summary(days)
+
+
+@router.get("/api/eval/quality-trend")
+async def quality_trend_api(days: int = 30):
+    """获取按天的质量评分趋势。"""
+    from db import get_quality_trend
+    return {"trend": get_quality_trend(days)}
+
+
+@router.get("/api/eval/low-quality")
+async def low_quality_api(limit: int = 20):
+    """获取低分产出列表（bad cases）。"""
+    from db import get_low_quality_items
+    return {"items": get_low_quality_items(limit)}

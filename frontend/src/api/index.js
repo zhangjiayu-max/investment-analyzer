@@ -659,8 +659,23 @@ export function autoVerifyRecommendations() {
 }
 
 /** 提交 LLM 输出反馈（进化系统） */
-export function submitLlmFeedback({ caller, input_summary = '', output_summary = '', rating, tags = '', comment = '' }) {
-  return api.post('/llm-feedback', { caller, input_summary, output_summary, rating, tags, comment })
+export function submitLlmFeedback({ caller, input_summary = '', output_summary = '', rating, tags = '', comment = '', score_data_accuracy = null, score_logic = null, score_actionability = null, target_type = '', target_id = null }) {
+  return api.post('/llm-feedback', { caller, input_summary, output_summary, rating, tags, comment, score_data_accuracy, score_logic, score_actionability, target_type, target_id })
+}
+
+/** 获取质量评分概览 */
+export function getQualitySummary(days = 30) {
+  return api.get('/eval/quality-summary', { params: { days } })
+}
+
+/** 获取质量评分趋势 */
+export function getQualityTrend(days = 30) {
+  return api.get('/eval/quality-trend', { params: { days } })
+}
+
+/** 获取低分产出列表 */
+export function getLowQualityItems(limit = 20) {
+  return api.get('/eval/low-quality', { params: { limit } })
 }
 
 // ── 债市数据 API ──────────────────────────────────────
@@ -1040,6 +1055,11 @@ export function listEvalCases(analysisType = '', activeOnly = true) {
 /** 创建评测用例 */
 export function createEvalCase(data) {
   return api.post('/eval/cases', data)
+}
+
+/** 更新评测用例 */
+export function updateEvalCase(caseId, data) {
+  return api.put(`/eval/cases/${caseId}`, data)
 }
 
 /** 删除评测用例 */

@@ -94,6 +94,13 @@ def init_eval_tables(conn):
     conn.execute("CREATE INDEX IF NOT EXISTS idx_llm_feedback_caller ON llm_feedback(caller)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_llm_feedback_rating ON llm_feedback(rating)")
     _add_column_if_not_exists(conn, "llm_feedback", "reason_tag", "TEXT DEFAULT ''")
+    # 多维度评分
+    _add_column_if_not_exists(conn, "llm_feedback", "score_data_accuracy", "INTEGER")
+    _add_column_if_not_exists(conn, "llm_feedback", "score_logic", "INTEGER")
+    _add_column_if_not_exists(conn, "llm_feedback", "score_actionability", "INTEGER")
+    _add_column_if_not_exists(conn, "llm_feedback", "overall_score", "REAL")
+    _add_column_if_not_exists(conn, "llm_feedback", "target_type", "TEXT DEFAULT ''")
+    _add_column_if_not_exists(conn, "llm_feedback", "target_id", "INTEGER")
 
     conn.execute("""
         CREATE TABLE IF NOT EXISTS analysis_cache (

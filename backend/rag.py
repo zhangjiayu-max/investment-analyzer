@@ -57,8 +57,8 @@ def rerank_results(query: str, results: list[dict], top_k: int = 5) -> list[dict
         return results[:top_k]
 
     try:
-        # 构建 query-document 对
-        pairs = [(query, r.get("body", "")[:512]) for r in results]
+        # 构建 query-document 对（扩展到 1024 字符，保留更多上下文）
+        pairs = [(query, r.get("body", "")[:1024]) for r in results]
 
         # 计算相关性分数
         scores = reranker.predict(pairs)
@@ -154,7 +154,12 @@ def _get_conn() -> sqlite3.Connection:
 
 
 def init_fts():
-    """初始化 FTS5 虚拟表，应用启动时调用。"""
+    """初始化 FTS5 虚拟表，应用启动时调用。
+
+    使用 unicode61 tokenizer，配合 jieba 预分词：
+    - 入库时：jieba 分词 -> 空格连接 -> 存入 FTS5
+    - 查询时：jieba 分词 -> 空格连接 -> FTS5 MATCH
+    """
     conn = _get_conn()
     conn.execute("""
         CREATE VIRTUAL TABLE IF NOT EXISTS knowledge_fts USING fts5(
@@ -266,15 +271,15 @@ def _sanitize_fts_token(token: str) -> str:
 
 
 # ── 共享停用词表（FTS 查询和 RAG 上下文构建共用）─────────────────
+# 注意：投资领域高价值词汇（估值、投资、分析、趋势等）已移除，避免检索退化
 _STOPWORDS = {
     "的", "了", "在", "是", "我", "有", "和", "就", "不", "都", "上", "也",
     "到", "说", "要", "去", "你", "会", "着", "看", "好", "这", "他", "她",
     "能", "下", "过", "么", "吗", "呢", "把", "让", "被", "从", "向", "对",
     "以", "可以", "应该", "需要", "现在", "目前", "当前", "最近", "怎么样",
     "如何", "什么", "多少", "为什么", "怎样", "哪个", "哪些", "是否",
-    "买", "卖", "持有", "投资", "分析", "看看", "帮忙", "帮我", "请问", "想问",
-    "估值", "数据", "情况", "趋势", "走势", "那", "个", "一", "人", "很", "没有",
-    "点", "想", "入手", "帮", "问",
+    "看看", "帮忙", "帮我", "请问", "想问", "情况", "那", "个", "一", "人",
+    "很", "没有", "点", "想", "入手", "帮", "问", "数据",
 }
 
 
@@ -340,7 +345,7 @@ def _extract_key_phrases(query: str) -> list[str]:
 # article/analysis: 时效性强，2个月
 _FRESHNESS_POLICY = {
     "author_article": 2,
-    "skill": 6,
+    "skill": 12,  # 投资方法论长期有效，12个月
     "valuation": 0,   # 0 = 不过滤
     "article": 2,
     "analysis": 2,
@@ -554,20 +559,112 @@ def _get_embed_model():
     return _ensure_embed_model()
 
 
-def _chunk_text(text: str, chunk_size: int = 500, overlap: int = 50) -> list[str]:
-    """将长文本切分为 chunk_size 字符的块，overlap 字符重叠。"""
+def _chunk_text(text: str, chunk_size: int = 800, overlap: int = 100) -> list[str]:
+    """将长文本切分为 chunk_size 字符的块，优先按语义边界切分。
+
+    语义感知切分策略：
+    1. 优先按段落（\\n\\n）切分
+    2. 其次按句子（。！？；）切分
+    3. 最后按字符位置切分
+
+    Args:
+        text: 待切分文本
+        chunk_size: 目标 chunk 大小（字符数）
+        overlap: 重叠字符数
+
+    Returns:
+        chunk 列表
+    """
     if not text or len(text) <= chunk_size:
         return [text] if text else []
 
+    # 语义边界标记（按优先级排序）
+    separators = ["\n\n", "\n", "。", "！", "？", "；", "，", "、"]
+
     chunks = []
     start = 0
+
     while start < len(text):
-        end = start + chunk_size
-        chunk = text[start:end]
+        # 计算理想的结束位置
+        ideal_end = start + chunk_size
+
+        if ideal_end >= len(text):
+            # 剩余文本不足一个 chunk，直接取完
+            chunk = text[start:]
+            if chunk.strip():
+                chunks.append(chunk)
+            break
+
+        # 在理想结束位置附近寻找语义边界
+        best_end = ideal_end
+        search_window = min(200, chunk_size // 4)  # 搜索窗口：前后 200 字符或 chunk_size 的 1/4
+
+        for sep in separators:
+            # 在理想位置附近寻找分隔符
+            search_start = max(start + chunk_size // 2, ideal_end - search_window)
+            search_end = min(len(text), ideal_end + search_window)
+
+            # 在搜索窗口内找最后一个分隔符
+            pos = text.rfind(sep, search_start, search_end)
+            if pos != -1:
+                best_end = pos + len(sep)
+                break
+
+        # 提取 chunk
+        chunk = text[start:best_end]
         if chunk.strip():
             chunks.append(chunk)
-        start += chunk_size - overlap
+
+        # 计算下一个 chunk 的起始位置（考虑 overlap）
+        start = best_end - overlap
+        if start <= 0:
+            start = best_end
+
     return chunks
+
+
+def _chunk_by_structure(text: str, content_type: str) -> list[str]:
+    """根据内容类型使用不同的切分策略。
+
+    Args:
+        text: 待切分文本
+        content_type: 内容类型
+
+    Returns:
+        chunk 列表
+    """
+    # 估值数据：按指标维度切分
+    if content_type == "valuation":
+        # 估值数据通常格式为 "指标: 值 | 指标: 值"
+        parts = text.split(" | ")
+        if len(parts) > 1:
+            # 每 3-5 个指标组成一个 chunk
+            chunks = []
+            for i in range(0, len(parts), 4):
+                chunk = " | ".join(parts[i:i+4])
+                if chunk.strip():
+                    chunks.append(chunk)
+            return chunks
+
+    # 分析记录：按段落切分
+    if content_type == "analysis":
+        paragraphs = text.split("\n\n")
+        if len(paragraphs) > 1:
+            chunks = []
+            current_chunk = ""
+            for para in paragraphs:
+                if len(current_chunk) + len(para) > 800:
+                    if current_chunk:
+                        chunks.append(current_chunk)
+                    current_chunk = para
+                else:
+                    current_chunk += "\n\n" + para if current_chunk else para
+            if current_chunk:
+                chunks.append(current_chunk)
+            return chunks
+
+    # 默认：使用语义感知切分
+    return _chunk_text(text)
 
 
 def index_to_chroma(content_type: str, reference_id: str, title: str, body: str):
@@ -763,7 +860,7 @@ def _filter_old_results(results: list[dict], conn=None) -> tuple[list[dict], int
 
 
 def _enrich_results_with_time(results: list[dict]) -> list[dict]:
-    """为检索结果补充时间信息，从原表查询。"""
+    """为检索结果补充时间信息和来源元数据，从原表查询。"""
     if not results:
         return results
 
@@ -774,6 +871,8 @@ def _enrich_results_with_time(results: list[dict]) -> list[dict]:
         ids_by_type.setdefault(ct, set()).add(r["reference_id"])
 
     time_map = {}
+    author_map = {}
+    url_map = {}
     try:
         conn = _get_conn()
 
@@ -782,18 +881,21 @@ def _enrich_results_with_time(results: list[dict]) -> list[dict]:
             ids = list(ids_by_type["article"])
             ph = ",".join("?" * len(ids))
             for row in conn.execute(
-                f"SELECT id, created_at FROM articles WHERE id IN ({ph})", ids
+                f"SELECT id, created_at, url FROM articles WHERE id IN ({ph})", ids
             ).fetchall():
                 time_map[f"article:{row['id']}"] = row["created_at"] or ""
+                url_map[f"article:{row['id']}"] = row["url"] or ""
 
-        # author_article: publish_time
+        # author_article: publish_time, author
         if "author_article" in ids_by_type:
             ids = list(ids_by_type["author_article"])
             ph = ",".join("?" * len(ids))
             for row in conn.execute(
-                f"SELECT id, publish_time FROM author_articles WHERE id IN ({ph})", ids
+                f"SELECT id, publish_time, author, url FROM author_articles WHERE id IN ({ph})", ids
             ).fetchall():
                 time_map[f"author_article:{row['id']}"] = row["publish_time"] or ""
+                author_map[f"author_article:{row['id']}"] = row["author"] or ""
+                url_map[f"author_article:{row['id']}"] = row["url"] or ""
 
         # skill: 来自 skill_documents(created_at) 或 author_skills(article→publish_time)
         if "skill" in ids_by_type:
@@ -809,9 +911,10 @@ def _enrich_results_with_time(results: list[dict]) -> list[dict]:
             if missing_ids:
                 ph2 = ",".join("?" * len(missing_ids))
                 for row in conn.execute(
-                    f"SELECT id, publish_time FROM author_articles WHERE id IN ({ph2})", missing_ids
+                    f"SELECT id, publish_time, author FROM author_articles WHERE id IN ({ph2})", missing_ids
                 ).fetchall():
                     time_map[f"skill:{row['id']}"] = row["publish_time"] or ""
+                    author_map[f"skill:{row['id']}"] = row["author"] or ""
 
         # analysis: analysis_records.created_at
         if "analysis" in ids_by_type:
@@ -822,6 +925,16 @@ def _enrich_results_with_time(results: list[dict]) -> list[dict]:
             ).fetchall():
                 time_map[f"analysis:{row['id']}"] = row["created_at"] or ""
 
+        # valuation: snapshot_date
+        if "valuation" in ids_by_type:
+            ids = list(ids_by_type["valuation"])
+            ph = ",".join("?" * len(ids))
+            for row in conn.execute(
+                f"SELECT index_code, snapshot_date, source_url FROM index_valuations WHERE index_code IN ({ph})", ids
+            ).fetchall():
+                time_map[f"valuation:{row['index_code']}"] = row["snapshot_date"] or ""
+                url_map[f"valuation:{row['index_code']}"] = row["source_url"] or ""
+
         conn.close()
     except Exception as e:
         logger.warning(f"补充时间信息失败: {e}")
@@ -829,6 +942,8 @@ def _enrich_results_with_time(results: list[dict]) -> list[dict]:
     for r in results:
         key = f"{r['content_type']}:{r['reference_id']}"
         r["time"] = time_map.get(key, "")
+        r["author"] = author_map.get(key, "")
+        r["source_url"] = url_map.get(key, "")
 
     return results
 
@@ -911,12 +1026,31 @@ def build_rag_context_with_details(query: str, content_types: list[str] = None, 
 
     all_results = sorted(seen.values(), key=lambda x: x["_score"], reverse=True)[:limit]
 
-    # 标题匹配加权：查询关键词出现在标题中的结果加权（提高精确度）
+    # 标题匹配加权：按关键词覆盖率比例加权（更精准）
     title_boost_words = [t for t in _tokenize(query).split() if len(t) >= 2]
+    if title_boost_words:
+        for r in all_results:
+            title_text = r.get("title", "")
+            matched_count = sum(1 for w in title_boost_words if w in title_text)
+            if matched_count > 0:
+                # 按覆盖率加权：匹配越多，权重越高
+                boost = 0.1 * (matched_count / len(title_boost_words))
+                r["_score"] += boost
+
+    # 估值数据最新优先：snapshot_date 越新，权重越高
     for r in all_results:
-        title_text = r.get("title", "")
-        if any(w in title_text for w in title_boost_words):
-            r["_score"] += 0.1  # 加权
+        if r.get("content_type") == "valuation" and r.get("time"):
+            try:
+                from datetime import datetime
+                date_str = r["time"][:10]  # 取日期部分
+                days_old = (datetime.now() - datetime.strptime(date_str, "%Y-%m-%d")).days
+                # 7天内的数据加权，超过7天逐渐衰减
+                if days_old <= 7:
+                    r["_score"] += 0.05
+                elif days_old <= 30:
+                    r["_score"] += 0.02
+            except Exception:
+                pass
 
     all_results.sort(key=lambda x: x["_score"], reverse=True)
     logger.info(f"RAG 合并后: {len(all_results)}条, 类型: {[r['content_type'] for r in all_results]}")
@@ -955,29 +1089,54 @@ def build_rag_context_with_details(query: str, content_types: list[str] = None, 
             "freshness_filtered": total_freshness_filtered,
         }
 
+    # 构建上下文：以完整结果为单位，避免截断丢失来源标注
     parts = []
-    for r in all_results:
-        part = f"[{r['label']}] {r['title']}"
-        if r["body"]:
-            body_preview = r["body"][:500]
-            part += f"\n{body_preview}"
-        parts.append(part)
+    total_chars = 0
+    max_context_chars = 3000  # 最大上下文字符数
 
-    # Lost-in-the-Middle 缓解：最相关的放首尾，次要的放中间
+    for r in all_results:
+        # 构建单条结果（包含来源标注）
+        part = f"[{r['label']}] {r['title']}"
+        if r.get("time"):
+            part += f" ({r['time']})"
+        if r.get("source"):
+            part += f" [来源: {r['source']}]"
+
+        # 添加 body（限制长度但保持完整性）
+        if r["body"]:
+            body_preview = r["body"][:600]
+            part += f"\n{body_preview}"
+
+        # 以完整结果为单位截断
+        if total_chars + len(part) > max_context_chars and parts:
+            break  # 超出预算，停止添加更多结果
+
+        parts.append(part)
+        total_chars += len(part)
+
+    # Lost-in-the-Middle 缓解：正确的实现
     # 原理：LLM 对开头和结尾的内容关注度更高，中间内容容易被忽略
+    # 策略：最相关的放首位，次相关的放末位，中间按交替顺序排列
     if len(parts) > 2:
-        # 按分数排序后重新排列
         sorted_indices = sorted(range(len(all_results)),
                                key=lambda i: all_results[i]["_score"], reverse=True)
-        reordered = []
-        # 最相关的放最前面
-        reordered.append(parts[sorted_indices[0]])
-        # 中间部分按原序（保持相对顺序）
+
+        # 分离首尾
+        best_idx = sorted_indices[0]
+        worst_idx = sorted_indices[-1]
         middle_indices = sorted_indices[1:-1]
-        for idx in middle_indices:
+
+        # 交替排列中间部分：奇数位放前面，偶数位放后面
+        front_middle = [middle_indices[i] for i in range(0, len(middle_indices), 2)]
+        back_middle = [middle_indices[i] for i in range(1, len(middle_indices), 2)]
+
+        reordered = []
+        reordered.append(parts[best_idx])  # 最相关的放最前面
+        for idx in front_middle:
             reordered.append(parts[idx])
-        # 次相关的放最后面
-        reordered.append(parts[sorted_indices[-1]])
+        for idx in reversed(back_middle):
+            reordered.append(parts[idx])
+        reordered.append(parts[worst_idx])  # 次相关的放最后面
         parts = reordered
 
     return {

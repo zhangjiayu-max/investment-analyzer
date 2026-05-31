@@ -63,6 +63,7 @@ const navItems = [
   {
     key: 'group-evolution', label: '进化系统', icon: 'evolution',
     children: [
+      { key: 'quality-dashboard', label: '质量仪表盘', icon: 'chart' },
       { key: 'bad-cases', label: 'Bad Case', icon: 'bug' },
       { key: 'eval-suite', label: '评测集', icon: 'check' },
     ],

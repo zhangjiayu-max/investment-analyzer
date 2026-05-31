@@ -882,10 +882,12 @@ async function runPanoramaMode() {
   modeLoading.value = true
   modeResult.value = ''
   modeRecordId.value = null
+  aiTokenUsage.value = 0
   try {
     const { data } = await runPanoramaAnalysis()
     modeResult.value = data.result
     modeRecordId.value = data.id
+    aiTokenUsage.value = data.token_usage || 0
     loadPanoramaRecords()
   } catch (e) {
     modeResult.value = '分析失败：' + (e.response?.data?.detail || e.message)
@@ -906,10 +908,12 @@ async function runDeepDiveMode() {
   modeLoading.value = true
   modeResult.value = ''
   modeRecordId.value = null
+  aiTokenUsage.value = 0
   try {
     const { data } = await runDeepDiveAnalysis(deepDiveSelectedHolding.value)
     modeResult.value = data.result
     modeRecordId.value = data.id
+    aiTokenUsage.value = data.token_usage || 0
     loadDeepDiveRecords()
   } catch (e) {
     modeResult.value = '分析失败：' + (e.response?.data?.detail || e.message)
@@ -929,10 +933,12 @@ async function runTradeReviewMode() {
   modeLoading.value = true
   modeResult.value = ''
   modeRecordId.value = null
+  aiTokenUsage.value = 0
   try {
     const { data } = await runTradeReview(reviewStartDate.value || null, reviewEndDate.value || null)
     modeResult.value = data.result
     modeRecordId.value = data.id
+    aiTokenUsage.value = data.token_usage || 0
     loadTradeReviewRecords()
   } catch (e) {
     modeResult.value = '分析失败：' + (e.response?.data?.detail || e.message)
@@ -952,11 +958,13 @@ async function runWhatIfMode() {
   modeLoading.value = true
   modeResult.value = ''
   modeRecordId.value = null
+  aiTokenUsage.value = 0
   try {
     const param = whatIfScenario.value === 'market_drop' ? whatIfParameter.value : null
     const { data } = await runWhatIfAnalysis(whatIfScenario.value, param)
     modeResult.value = data.result
     modeRecordId.value = data.id
+    aiTokenUsage.value = data.token_usage || 0
     loadWhatIfRecords()
   } catch (e) {
     modeResult.value = '分析失败：' + (e.response?.data?.detail || e.message)
@@ -977,6 +985,7 @@ async function viewModeRecord(record) {
     const resp = await getPortfolioAiAnalysisRecord(record.id)
     modeResult.value = resp.data.result_data || resp.data.result
     modeRecordId.value = record.id
+    aiTokenUsage.value = resp.data.token_usage || record.token_usage || 0
   } catch (e) {
     showToast('加载记录失败', 'error')
   }

@@ -1,12 +1,13 @@
 <script setup>
 import { ref, computed, onMounted } from 'vue'
 import {
-  listEvalCases, createEvalCase, deleteEvalCase, runEvalCase,
+  listEvalCases, createEvalCase, updateEvalCase, deleteEvalCase, runEvalCase,
   listEvalRuns, getEvalRunDetail, getEvalStats,
 } from '../api'
 import ConfirmDialog from './ConfirmDialog.vue'
 import AppToast from './AppToast.vue'
 import { useToast } from '../composables/useToast'
+import { renderMarkdown } from '../composables/useMarkdown'
 
 const { showToast } = useToast()
 const confirm = ref({ visible: false, title: '', message: '', danger: false, onConfirm: null })
@@ -20,8 +21,9 @@ const stats = ref({ total_cases: 0, active_cases: 0, total_runs: 0, avg_score: n
 
 // Cases
 const cases = ref([])
-const showCreateForm = ref(false)
-const editForm = ref({ name: '', description: '', analysis_type: 'panorama', input_params: '{}', expected_quality: '' })
+const showForm = ref(false)
+const editingId = ref(null)
+const form = ref({ name: '', description: '', analysis_type: 'ai', input_params: '{}', expected_quality: '' })
 
 // Runs
 const runs = ref([])
@@ -47,10 +49,7 @@ function confirmBeforeDelete(c) {
     title: '删除确认',
     message: `确定删除评测用例「${c.name}」吗？关联的运行记录也将删除。`,
     danger: true,
-    onConfirm: () => {
-      confirm.value.visible = false
-      doDelete(c.id)
-    }
+    onConfirm: () => { confirm.value.visible = false; doDelete(c.id) }
   }
 }
 
@@ -58,61 +57,62 @@ async function doDelete(id) {
   try {
     await deleteEvalCase(id)
     await Promise.all([loadCases(), loadStats()])
+    showToast('已删除', 'success')
   } catch (e) {
-    console.error(e)
     showToast('删除失败: ' + e.message, 'error')
   }
 }
 
 async function loadStats() {
-  try {
-    const { data } = await getEvalStats()
-    stats.value = data
-  } catch (e) {
-    console.error(e)
-  }
+  try { const { data } = await getEvalStats(); stats.value = data } catch (e) { console.error(e) }
 }
 
 async function loadCases() {
-  try {
-    const { data } = await listEvalCases()
-    cases.value = data.cases || []
-  } catch (e) {
-    console.error(e)
-  }
+  try { const { data } = await listEvalCases(); cases.value = data.cases || [] } catch (e) { console.error(e) }
 }
 
 async function loadRuns() {
-  try {
-    const { data } = await listEvalRuns()
-    runs.value = data.runs || []
-  } catch (e) {
-    console.error(e)
-  }
+  try { const { data } = await listEvalRuns(); runs.value = data.runs || [] } catch (e) { console.error(e) }
 }
 
 async function loadAll() {
   loading.value = true
-  try {
-    await Promise.all([loadStats(), loadCases(), loadRuns()])
-  } finally {
-    loading.value = false
-  }
+  try { await Promise.all([loadStats(), loadCases(), loadRuns()]) } finally { loading.value = false }
 }
 
 function openCreate() {
-  editForm.value = { name: '', description: '', analysis_type: 'panorama', input_params: '{}', expected_quality: '' }
-  showCreateForm.value = true
+  form.value = { name: '', description: '', analysis_type: 'ai', input_params: '{}', expected_quality: '' }
+  editingId.value = null
+  showForm.value = true
 }
 
-async function submitCreate() {
-  if (!editForm.value.name.trim()) return
+function openEdit(c) {
+  form.value = {
+    name: c.name,
+    description: c.description || '',
+    analysis_type: c.analysis_type,
+    input_params: c.input_params || '{}',
+    expected_quality: c.expected_quality || '',
+  }
+  editingId.value = c.id
+  showForm.value = true
+}
+
+async function submitForm() {
+  if (!form.value.name.trim()) return
   try {
-    await createEvalCase(editForm.value)
-    showCreateForm.value = false
+    if (editingId.value) {
+      await updateEvalCase(editingId.value, form.value)
+      showToast('已更新', 'success')
+    } else {
+      await createEvalCase(form.value)
+      showToast('已创建', 'success')
+    }
+    showForm.value = false
+    editingId.value = null
     await Promise.all([loadCases(), loadStats()])
   } catch (e) {
-    showToast('创建失败: ' + e.message, 'error')
+    showToast('保存失败: ' + e.message, 'error')
   }
 }
 
@@ -122,13 +122,12 @@ async function doRun(c) {
   try {
     const { data } = await runEvalCase(c.id)
     if (data.ok) {
-      await loadRuns()
-      activeTab.value = 'runs'
-      showToast('运行完成，评分中...', 'info')
-      // 延迟刷新以获取异步评分结果
+      showToast('运行完成，等待评分...', 'info')
+      // 等待评分完成后刷新
       setTimeout(async () => {
         await Promise.all([loadRuns(), loadStats(), loadCases()])
-      }, 8000)
+        activeTab.value = 'runs'
+      }, 10000)
     } else {
       showToast('运行失败: ' + (data.error || '未知错误'), 'error')
     }
@@ -144,16 +143,10 @@ async function viewRunDetail(r) {
     const { data } = await getEvalRunDetail(r.id)
     selectedRun.value = r
     runDetail.value = data
-  } catch (e) {
-    console.error(e)
-  }
+  } catch (e) { console.error(e) }
 }
 
-function formatTime(ts) {
-  if (!ts) return ''
-  return ts.slice(0, 16)
-}
-
+function formatTime(ts) { return ts ? ts.slice(0, 16) : '' }
 function formatDuration(ms) {
   if (!ms) return '-'
   if (ms < 1000) return `${ms}ms`
@@ -168,14 +161,44 @@ function runStatusIcon(r) {
 
 function scoreColor(score) {
   if (!score || score <= 0) return 'var(--color-text-muted)'
-  if (score >= 4.5) return '#10b981'
-  if (score >= 3.5) return '#22c55e'
-  if (score >= 2.5) return '#f59e0b'
-  if (score >= 1.5) return '#f97316'
+  if (score >= 8) return '#10b981'
+  if (score >= 6) return '#22c55e'
+  if (score >= 4) return '#f59e0b'
+  if (score >= 2) return '#f97316'
   return '#ef4444'
 }
 
-const latestRuns = computed(() => runs.value.slice(0, 20))
+function scoreLabel(score) {
+  if (!score || score <= 0) return ''
+  if (score >= 9) return '优秀'
+  if (score >= 7) return '良好'
+  if (score >= 5) return '合格'
+  if (score >= 3) return '较差'
+  return '不可用'
+}
+
+// 解析 result_data，提取 markdown 内容
+function extractResult(resultData) {
+  if (!resultData) return ''
+  try {
+    const obj = JSON.parse(resultData)
+    // 如果有 result 字段，返回 markdown 内容
+    if (obj.result) return obj.result
+    // 如果有 analysis 字段
+    if (obj.analysis) return obj.analysis
+    // 否则格式化 JSON
+    return JSON.stringify(obj, null, 2)
+  } catch {
+    return resultData
+  }
+}
+
+// 检查是否是 markdown 内容
+function isMarkdown(text) {
+  return text && (text.includes('#') || text.includes('**') || text.includes('- ') || text.includes('\n'))
+}
+
+const latestRuns = computed(() => runs.value.slice(0, 30))
 
 onMounted(loadAll)
 </script>
@@ -184,12 +207,12 @@ onMounted(loadAll)
   <div class="evalsuite-page">
     <div class="page-header">
       <div>
-        <h2 class="page-title">评测集</h2>
+        <h2 class="page-title">📊 评测集</h2>
         <p class="page-desc">运行测试用例，评估 Agent 分析质量</p>
       </div>
       <div class="header-actions">
         <button class="btn-secondary" @click="loadAll" :disabled="loading">
-          {{ loading ? '加载中...' : '刷新' }}
+          {{ loading ? '加载中...' : '🔄 刷新' }}
         </button>
       </div>
     </div>
@@ -212,7 +235,7 @@ onMounted(loadAll)
         <span class="stat-value" :style="{ color: stats.avg_score ? scoreColor(stats.avg_score) : 'inherit' }">
           {{ stats.avg_score !== null ? Number(stats.avg_score).toFixed(1) : '-' }}
         </span>
-        <span class="stat-label">平均分</span>
+        <span class="stat-label">平均分 /10</span>
       </div>
     </div>
 
@@ -229,42 +252,46 @@ onMounted(loadAll)
     <!-- Cases Tab -->
     <div v-if="activeTab === 'cases'" class="tab-content">
       <div class="section-header">
-        <span class="section-title">用例列表</span>
+        <span></span>
         <button class="btn-primary btn-sm" @click="openCreate">+ 新建用例</button>
       </div>
 
-      <!-- Create Form -->
-      <div v-if="showCreateForm" class="create-form card">
-        <h4>新建评测用例</h4>
-        <div class="form-row">
-          <label>名称</label>
-          <input v-model="editForm.name" class="input-field" placeholder="例: 全景诊断-正常持仓" />
+      <!-- Create/Edit Form -->
+      <Transition name="expand">
+        <div v-if="showForm" class="form-card card">
+          <h4>{{ editingId ? '编辑评测用例' : '新建评测用例' }}</h4>
+          <div class="form-grid">
+            <div class="form-row">
+              <label>名称 *</label>
+              <input v-model="form.name" class="input-field" placeholder="例: 沪深300估值分析" />
+            </div>
+            <div class="form-row">
+              <label>分析类型</label>
+              <select v-model="form.analysis_type" class="input-field">
+                <option v-for="o in analysisTypeOptions" :key="o.value" :value="o.value">{{ o.label }}</option>
+              </select>
+            </div>
+          </div>
+          <div class="form-row">
+            <label>描述</label>
+            <input v-model="form.description" class="input-field" placeholder="用例说明" />
+          </div>
+          <div class="form-row">
+            <label>参数 (JSON)</label>
+            <textarea v-model="form.input_params" class="input-field code-input" rows="2"
+              placeholder='{"question": "沪深300估值怎么样？"}'></textarea>
+          </div>
+          <div class="form-row">
+            <label>预期质量标准</label>
+            <textarea v-model="form.expected_quality" class="input-field" rows="3"
+              placeholder="1. 必须引用具体数据&#10;2. 必须给出明确建议&#10;3. 必须附带风险提示"></textarea>
+          </div>
+          <div class="form-actions">
+            <button class="btn-primary" @click="submitForm">{{ editingId ? '保存' : '创建' }}</button>
+            <button class="btn-secondary" @click="showForm = false; editingId = null">取消</button>
+          </div>
         </div>
-        <div class="form-row">
-          <label>描述</label>
-          <input v-model="editForm.description" class="input-field" placeholder="用例说明" />
-        </div>
-        <div class="form-row">
-          <label>分析类型</label>
-          <select v-model="editForm.analysis_type" class="input-field">
-            <option v-for="o in analysisTypeOptions" :key="o.value" :value="o.value">{{ o.label }}</option>
-          </select>
-        </div>
-        <div class="form-row">
-          <label>参数 (JSON)</label>
-          <textarea v-model="editForm.input_params" class="input-field code-input" rows="2"
-            placeholder='{"holding_id": 1} 或 {}'></textarea>
-        </div>
-        <div class="form-row">
-          <label>预期质量</label>
-          <textarea v-model="editForm.expected_quality" class="input-field" rows="2"
-            placeholder="期望的输出质量标准（可选）"></textarea>
-        </div>
-        <div class="form-actions">
-          <button class="btn-primary" @click="submitCreate">保存</button>
-          <button class="btn-secondary" @click="showCreateForm = false">取消</button>
-        </div>
-      </div>
+      </Transition>
 
       <!-- Case List -->
       <div v-if="!loading && cases.length === 0" class="empty-state">
@@ -281,15 +308,18 @@ onMounted(loadAll)
             </div>
             <div class="case-meta">
               <span class="case-stat">运行 {{ c.run_count || 0 }} 次</span>
-              <span v-if="c.avg_score" class="case-stat">平均 {{ Number(c.avg_score).toFixed(1) }}分</span>
+              <span v-if="c.avg_score" class="case-stat" :style="{ color: scoreColor(c.avg_score) }">
+                平均 {{ Number(c.avg_score).toFixed(1) }}分
+              </span>
             </div>
           </div>
           <div v-if="c.description" class="case-desc">{{ c.description }}</div>
           <div class="case-actions">
             <button class="btn-primary btn-xs" :disabled="running" @click="doRun(c)">
-              {{ running ? '运行中...' : '▶ 运行' }}
+              {{ running ? '⏳' : '▶ 运行' }}
             </button>
-            <button class="btn-danger btn-xs" @click="confirmBeforeDelete(c)">删除</button>
+            <button class="btn-secondary btn-xs" @click="openEdit(c)">✏️ 编辑</button>
+            <button class="btn-danger btn-xs" @click="confirmBeforeDelete(c)">🗑️</button>
           </div>
         </div>
       </div>
@@ -303,7 +333,6 @@ onMounted(loadAll)
           <h4 class="section-title">运行记录</h4>
           <div v-if="runs.length === 0" class="empty-state">
             <p>暂无运行记录</p>
-            <p class="text-muted">在「用例」页点击运行按钮触发评测</p>
           </div>
           <div v-for="r in latestRuns" :key="r.id"
             :class="['run-item', { selected: selectedRun?.id === r.id }]"
@@ -317,7 +346,7 @@ onMounted(loadAll)
               <span class="badge-solid badge-xs" :class="'badge-' + r.analysis_type">{{ typeLabel(r.analysis_type) }}</span>
               <span class="run-duration">{{ formatDuration(r.duration_ms) }}</span>
               <span v-if="r.score !== null && r.score > 0" class="run-score" :style="{ color: scoreColor(r.score) }">
-                {{ Number(r.score).toFixed(0) }}分
+                {{ Number(r.score).toFixed(0) }}/10
               </span>
               <span v-else class="run-score scoring">评分中...</span>
             </div>
@@ -326,44 +355,73 @@ onMounted(loadAll)
 
         <!-- Run Detail -->
         <div class="run-detail" v-if="runDetail">
-          <h4 class="section-title">运行详情</h4>
-          <div class="detail-meta">
-            <div><strong>用例:</strong> {{ runDetail.case_name }}</div>
-            <div><strong>类型:</strong> {{ typeLabel(runDetail.analysis_type) }}</div>
-            <div><strong>耗时:</strong> {{ formatDuration(runDetail.duration_ms) }}</div>
-            <div><strong>Token:</strong> {{ runDetail.token_usage || 0 }}</div>
-            <div v-if="runDetail.score !== null && runDetail.score > 0">
-              <strong>评分:</strong>
-              <span :style="{ color: scoreColor(runDetail.score), fontWeight: 700, fontSize: '1.1em' }">
-                {{ Number(runDetail.score).toFixed(0) }} / 5
-              </span>
+          <div class="detail-header">
+            <h4 class="section-title">运行详情</h4>
+            <button class="btn-secondary btn-xs" @click="runDetail = null; selectedRun = null">✕ 关闭</button>
+          </div>
+
+          <!-- Meta Grid -->
+          <div class="detail-meta-grid">
+            <div class="meta-item">
+              <span class="meta-label">用例</span>
+              <span class="meta-value">{{ runDetail.case_name }}</span>
             </div>
-            <div v-if="runDetail.score_reason"><strong>评语:</strong> {{ runDetail.score_reason }}</div>
-            <div v-if="runDetail.error_msg"><strong>错误:</strong> <span class="error-text">{{ runDetail.error_msg }}</span></div>
+            <div class="meta-item">
+              <span class="meta-label">类型</span>
+              <span class="meta-value">{{ typeLabel(runDetail.analysis_type) }}</span>
+            </div>
+            <div class="meta-item">
+              <span class="meta-label">耗时</span>
+              <span class="meta-value">{{ formatDuration(runDetail.duration_ms) }}</span>
+            </div>
+            <div class="meta-item">
+              <span class="meta-label">Token</span>
+              <span class="meta-value">{{ (runDetail.token_usage || 0).toLocaleString() }}</span>
+            </div>
           </div>
 
-          <div v-if="runDetail.result_summary" class="detail-section">
-            <h5>结果摘要</h5>
-            <pre class="code-block">{{ runDetail.result_summary }}</pre>
+          <!-- Score Card -->
+          <div v-if="runDetail.score !== null && runDetail.score > 0" class="score-card">
+            <div class="score-big" :style="{ color: scoreColor(runDetail.score) }">
+              {{ Number(runDetail.score).toFixed(0) }}
+              <span class="score-max">/10</span>
+            </div>
+            <div class="score-label" :style="{ color: scoreColor(runDetail.score) }">
+              {{ scoreLabel(runDetail.score) }}
+            </div>
+            <div v-if="runDetail.score_reason" class="score-reason">
+              {{ runDetail.score_reason }}
+            </div>
           </div>
 
-          <div v-if="runDetail.result_data && runDetail.result_data.length > 100" class="detail-section">
-            <h5>完整结果</h5>
-            <pre class="code-block code-full">{{ runDetail.result_data }}</pre>
+          <!-- Error -->
+          <div v-if="runDetail.error_msg" class="error-card">
+            <span class="error-icon">❌</span>
+            <span>{{ runDetail.error_msg }}</span>
           </div>
 
-          <div v-if="runDetail.expected_quality" class="detail-section">
-            <h5>预期质量</h5>
-            <pre class="code-block">{{ runDetail.expected_quality }}</pre>
-          </div>
-
+          <!-- Input Params -->
           <div v-if="runDetail.input_params && runDetail.input_params !== '{}'" class="detail-section">
-            <h5>输入参数</h5>
+            <h5>📥 输入参数</h5>
             <pre class="code-block">{{ (() => { try { return JSON.stringify(JSON.parse(runDetail.input_params), null, 2) } catch { return runDetail.input_params } })() }}</pre>
           </div>
+
+          <!-- Expected Quality -->
+          <div v-if="runDetail.expected_quality" class="detail-section">
+            <h5>📋 预期质量标准</h5>
+            <pre class="code-block quality-block">{{ runDetail.expected_quality }}</pre>
+          </div>
+
+          <!-- Full Result -->
+          <div v-if="runDetail.result_data" class="detail-section">
+            <h5>📤 完整结果</h5>
+            <div v-if="isMarkdown(extractResult(runDetail.result_data))" class="result-content markdown-body" v-html="renderMarkdown(extractResult(runDetail.result_data))"></div>
+            <pre v-else class="code-block result-block">{{ extractResult(runDetail.result_data) }}</pre>
+          </div>
         </div>
+
         <div v-else class="run-detail empty-detail">
-          <p class="text-muted">选择一条运行记录查看详情</p>
+          <p class="text-muted">← 选择一条运行记录查看详情</p>
         </div>
       </div>
     </div>
@@ -445,42 +503,48 @@ onMounted(loadAll)
 .section-title {
   font-size: 0.9rem;
   font-weight: 600;
-  color: var(--color-text-primary);
 }
 
-/* Create Form */
-.create-form {
-  padding: 1rem 1.25rem;
+/* Form */
+.form-card {
+  padding: 1.25rem;
   margin-bottom: 1rem;
+  background: var(--color-bg-secondary);
 }
 
-.create-form h4 {
-  margin: 0 0 0.75rem;
-  font-size: 0.95rem;
+.form-card h4 {
+  margin-bottom: 1rem;
+  font-size: 1rem;
+}
+
+.form-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.75rem;
 }
 
 .form-row {
   display: flex;
   flex-direction: column;
-  gap: 0.25rem;
-  margin-bottom: 0.6rem;
+  gap: 0.35rem;
+  margin-bottom: 0.75rem;
 }
 
 .form-row label {
-  font-size: 0.78rem;
+  font-size: 0.8rem;
   font-weight: 600;
-  color: var(--color-text-muted);
+  color: var(--color-text-secondary);
 }
 
 .code-input {
-  font-family: 'SF Mono', 'Menlo', monospace;
-  font-size: 0.78rem;
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  font-size: 0.8rem;
 }
 
 .form-actions {
   display: flex;
   gap: 0.5rem;
-  margin-top: 0.75rem;
+  margin-top: 0.5rem;
 }
 
 /* Case List */
@@ -491,14 +555,14 @@ onMounted(loadAll)
 }
 
 .case-card {
-  padding: 0.75rem 1rem;
+  padding: 0.85rem 1rem;
 }
 
 .case-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 0.5rem;
+  gap: 0.75rem;
 }
 
 .case-info {
@@ -508,129 +572,310 @@ onMounted(loadAll)
 }
 
 .case-name {
-  font-size: 0.9rem;
   font-weight: 600;
-  color: var(--color-text-primary);
+  font-size: 0.9rem;
 }
 
 .case-meta {
   display: flex;
   gap: 0.75rem;
-  font-size: 0.72rem;
+  font-size: 0.8rem;
   color: var(--color-text-muted);
 }
 
 .case-desc {
   font-size: 0.8rem;
   color: var(--color-text-secondary);
-  margin-top: 0.35rem;
+  margin: 0.35rem 0;
 }
 
 .case-actions {
   display: flex;
-  gap: 0.4rem;
+  gap: 0.5rem;
   margin-top: 0.5rem;
 }
 
-/* Badges */
-.badge-panorama { background: #c9a84c; color: white; }
-.badge-deep_dive { background: #06b6d4; color: white; }
-.badge-trade_review { background: #f59e0b; color: white; }
-.badge-what_if { background: #8b5cf6; color: white; }
-.badge-ai { background: #10b981; color: white; }
-.badge-diversification_ai { background: #ec4899; color: white; }
-
-/* Runs Layout */
-.runs-layout {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 1rem;
-  min-height: 400px;
-}
-
+/* Run List */
 .run-list {
-  display: flex;
-  flex-direction: column;
-  gap: 0.35rem;
-  max-height: 70vh;
-  overflow-y: auto;
+  width: 320px;
+  flex-shrink: 0;
+  border-right: 1px solid var(--color-border);
+  padding-right: 1rem;
 }
 
 .run-item {
-  display: flex;
-  flex-direction: column;
-  gap: 0.3rem;
   padding: 0.6rem 0.75rem;
-  background: var(--color-bg-card);
-  border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
   cursor: pointer;
-  transition: all 0.15s;
+  margin-bottom: 0.35rem;
+  transition: background 0.15s;
 }
 
 .run-item:hover {
-  border-color: var(--color-primary);
+  background: var(--color-bg-hover);
 }
 
 .run-item.selected {
-  border-color: var(--color-primary);
   background: var(--color-primary-50);
-}
-
-.dark .run-item.selected {
-  background: var(--color-primary-bg);
+  border-left: 3px solid var(--color-primary-500);
 }
 
 .run-header {
   display: flex;
   align-items: center;
-  gap: 0.4rem;
+  gap: 0.5rem;
 }
 
 .run-case-name {
+  font-weight: 600;
+  font-size: 0.85rem;
   flex: 1;
-  font-size: 0.82rem;
-  font-weight: 500;
-  color: var(--color-text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .run-time {
-  font-size: 0.7rem;
+  font-size: 0.72rem;
   color: var(--color-text-muted);
-  white-space: nowrap;
 }
 
 .run-sub {
   display: flex;
   align-items: center;
   gap: 0.5rem;
+  margin-top: 0.25rem;
+  padding-left: 1.5rem;
 }
 
 .run-duration {
-  font-size: 0.7rem;
+  font-size: 0.75rem;
   color: var(--color-text-muted);
 }
 
 .run-score {
-  font-size: 0.75rem;
   font-weight: 700;
-  margin-left: auto;
+  font-size: 0.85rem;
 }
 
 .run-score.scoring {
   color: var(--color-text-muted);
   font-weight: 400;
-  font-style: italic;
+  font-size: 0.75rem;
 }
 
 /* Run Detail */
 .run-detail {
-  background: var(--color-bg-card);
+  flex: 1;
+  padding-left: 1rem;
+  overflow-y: auto;
+  max-height: 70vh;
+}
+
+.detail-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 1rem;
+}
+
+.detail-meta-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 0.75rem;
+  margin-bottom: 1rem;
+}
+
+.meta-item {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+
+.meta-label {
+  font-size: 0.72rem;
+  color: var(--color-text-muted);
+}
+
+.meta-value {
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+
+/* Score Card */
+.score-card {
+  background: linear-gradient(135deg, var(--color-bg-secondary), var(--color-bg-primary));
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  padding: 1.25rem;
+  text-align: center;
+  margin-bottom: 1rem;
+}
+
+.score-big {
+  font-size: 3rem;
+  font-weight: 800;
+  line-height: 1;
+}
+
+.score-max {
+  font-size: 1.25rem;
+  font-weight: 400;
+  color: var(--color-text-muted);
+}
+
+.score-label {
+  font-size: 1rem;
+  font-weight: 600;
+  margin-top: 0.25rem;
+}
+
+.score-reason {
+  font-size: 0.8rem;
+  color: var(--color-text-secondary);
+  margin-top: 0.75rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid var(--color-border-light);
+  text-align: left;
+  line-height: 1.5;
+}
+
+/* Error Card */
+.error-card {
+  background: #fef2f2;
+  border: 1px solid #fecaca;
+  border-radius: var(--radius-md);
+  padding: 0.75rem 1rem;
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+  margin-bottom: 1rem;
+  font-size: 0.85rem;
+  color: #991b1b;
+}
+
+/* Detail Sections */
+.detail-section {
+  margin-bottom: 1rem;
+}
+
+.detail-section h5 {
+  font-size: 0.85rem;
+  font-weight: 600;
+  margin-bottom: 0.5rem;
+  color: var(--color-text-secondary);
+}
+
+.code-block {
+  background: var(--color-bg-secondary);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
-  padding: 1.25rem;
-  max-height: 70vh;
+  padding: 0.75rem 1rem;
+  font-size: 0.8rem;
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  overflow-x: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 400px;
   overflow-y: auto;
+}
+
+.quality-block {
+  background: #fefce8;
+  border-color: #fde047;
+}
+
+.result-block {
+  max-height: 600px;
+}
+
+.result-content {
+  background: var(--color-bg-primary);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: 1rem 1.25rem;
+  max-height: 600px;
+  overflow-y: auto;
+  font-size: 0.85rem;
+  line-height: 1.6;
+}
+
+.result-content :deep(h1),
+.result-content :deep(h2),
+.result-content :deep(h3) {
+  margin-top: 1rem;
+  margin-bottom: 0.5rem;
+  font-weight: 700;
+}
+
+.result-content :deep(h1) { font-size: 1.1rem; }
+.result-content :deep(h2) { font-size: 1rem; }
+.result-content :deep(h3) { font-size: 0.95rem; }
+
+.result-content :deep(p) {
+  margin-bottom: 0.5rem;
+}
+
+.result-content :deep(ul),
+.result-content :deep(ol) {
+  padding-left: 1.5rem;
+  margin-bottom: 0.5rem;
+}
+
+.result-content :deep(li) {
+  margin-bottom: 0.25rem;
+}
+
+.result-content :deep(strong) {
+  font-weight: 700;
+  color: var(--color-text-primary);
+}
+
+.result-content :deep(table) {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 0.5rem 0;
+  font-size: 0.8rem;
+}
+
+.result-content :deep(th),
+.result-content :deep(td) {
+  padding: 0.4rem 0.6rem;
+  border: 1px solid var(--color-border);
+  text-align: left;
+}
+
+.result-content :deep(th) {
+  background: var(--color-bg-secondary);
+  font-weight: 600;
+}
+
+.result-content :deep(code) {
+  background: var(--color-bg-secondary);
+  padding: 0.15rem 0.35rem;
+  border-radius: 3px;
+  font-size: 0.8rem;
+  font-family: 'SF Mono', 'Fira Code', monospace;
+}
+
+.result-content :deep(pre) {
+  background: var(--color-bg-secondary);
+  padding: 0.75rem;
+  border-radius: var(--radius-md);
+  overflow-x: auto;
+  margin: 0.5rem 0;
+}
+
+.result-content :deep(pre code) {
+  background: none;
+  padding: 0;
+}
+
+.result-content :deep(blockquote) {
+  border-left: 3px solid var(--color-primary-400);
+  padding-left: 0.75rem;
+  margin: 0.5rem 0;
+  color: var(--color-text-secondary);
 }
 
 .empty-detail {
@@ -639,58 +884,58 @@ onMounted(loadAll)
   justify-content: center;
 }
 
-.detail-meta {
+.runs-layout {
   display: flex;
-  flex-direction: column;
-  gap: 0.35rem;
-  font-size: 0.82rem;
-  color: var(--color-text-secondary);
-  margin-bottom: 1rem;
+  gap: 1rem;
 }
 
-.error-text {
-  color: #e53e3e;
-}
-
-.detail-section {
-  margin-bottom: 0.75rem;
-}
-
-.detail-section h5 {
-  font-size: 0.78rem;
-  font-weight: 600;
-  color: var(--color-text-muted);
-  text-transform: uppercase;
-  letter-spacing: 0.03em;
-  margin: 0 0 0.35rem;
-}
-
-.code-block {
-  background: var(--color-bg);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-sm);
-  padding: 0.6rem;
+/* Buttons */
+.btn-xs {
+  padding: 0.3rem 0.6rem;
   font-size: 0.75rem;
-  max-height: 200px;
-  overflow: auto;
-  white-space: pre-wrap;
-  word-break: break-all;
-  margin: 0;
 }
 
-.code-full {
-  max-height: 400px;
+.btn-sm {
+  padding: 0.45rem 0.85rem;
+  font-size: 0.8rem;
 }
 
-.empty-state {
-  text-align: center;
-  padding: 3rem 1rem;
-  color: var(--color-text-muted);
+/* Transition */
+.expand-enter-active,
+.expand-leave-active {
+  transition: all 0.2s ease;
+  overflow: hidden;
 }
 
-.text-muted {
-  font-size: 0.82rem;
-  color: var(--color-text-muted);
+.expand-enter-from,
+.expand-leave-to {
+  opacity: 0;
+  max-height: 0;
 }
 
+.expand-enter-to,
+.expand-leave-from {
+  opacity: 1;
+  max-height: 500px;
+}
+
+/* Responsive */
+@media (max-width: 768px) {
+  .runs-layout {
+    flex-direction: column;
+  }
+  .run-list {
+    width: 100%;
+    border-right: none;
+    border-bottom: 1px solid var(--color-border);
+    padding-right: 0;
+    padding-bottom: 1rem;
+  }
+  .form-grid {
+    grid-template-columns: 1fr;
+  }
+  .detail-meta-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
 </style>

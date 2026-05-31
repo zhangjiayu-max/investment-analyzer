@@ -40,6 +40,7 @@ from db.dashboard import (
     save_llm_feedback, list_llm_feedback, get_user_profile,
     update_user_profile, increment_feedback_count,
     create_chat_feedback,
+    get_quality_summary, get_quality_trend, get_low_quality_items,
 )
 
 # Agent 系统

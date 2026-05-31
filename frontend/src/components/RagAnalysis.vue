@@ -1,8 +1,9 @@
 <script setup>
 import { ref, onMounted } from 'vue'
-import { getRagStats, getRagLogs, getAuthorArticle } from '../api'
+import { getRagStats, getRagLogs, getRagIndexStats, getAuthorArticle } from '../api'
 
 const stats = ref(null)
+const indexStats = ref(null)
 const logs = ref([])
 const loading = ref(false)
 const selectedLog = ref(null)
@@ -11,6 +12,7 @@ const activeTab = ref('stats')
 
 onMounted(() => {
   loadStats()
+  loadIndexStats()
   loadLogs()
 })
 
@@ -23,6 +25,15 @@ async function loadStats() {
     console.error('Failed to load RAG stats:', e)
   } finally {
     loading.value = false
+  }
+}
+
+async function loadIndexStats() {
+  try {
+    const { data } = await getRagIndexStats()
+    indexStats.value = data
+  } catch (e) {
+    console.error('Failed to load RAG index stats:', e)
   }
 }
 
@@ -49,6 +60,18 @@ function typeColor(type) {
     '分析记录': 'neutral',
   }
   return map[type] || 'neutral'
+}
+
+function getTypeName(type) {
+  const map = {
+    'article': '文章',
+    'analysis': '分析记录',
+    'author_article': '作者文章',
+    'skill': '技能知识',
+    'valuation': '估值数据',
+    'linked_doc': '个人文档',
+  }
+  return map[type] || type
 }
 
 async function viewResultDetail(result) {
@@ -81,14 +104,49 @@ function closeDetail() {
     <!-- 统计概览 -->
     <div v-if="activeTab === 'stats'" class="stats-section">
       <div v-if="loading" class="loading-state">加载中...</div>
-      <div v-else-if="stats" class="stats-grid">
+
+      <!-- 知识库索引统计 -->
+      <div v-if="indexStats" class="index-stats-section">
+        <h3 class="section-title">📚 知识库索引</h3>
+        <div class="index-stats-grid">
+          <div class="index-stat-card">
+            <div class="index-stat-value">{{ indexStats.total_fts || 0 }}</div>
+            <div class="index-stat-label">FTS 索引总数</div>
+          </div>
+          <div class="index-stat-card">
+            <div class="index-stat-value">{{ indexStats.total_chroma || 0 }}</div>
+            <div class="index-stat-label">向量索引总数</div>
+          </div>
+        </div>
+
+        <!-- 各类型详情 -->
+        <div class="index-type-list">
+          <div v-for="(count, type) in indexStats.fts" :key="type" class="index-type-item">
+            <span class="index-type-name">{{ getTypeName(type) }}</span>
+            <div class="index-type-bars">
+              <div class="index-type-bar">
+                <span class="bar-label">FTS:</span>
+                <span class="bar-value">{{ count }}</span>
+              </div>
+              <div class="index-type-bar">
+                <span class="bar-label">向量:</span>
+                <span class="bar-value">{{ indexStats.chroma?.[type] || 0 }}</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 检索统计 -->
+      <div v-if="stats" class="stats-grid">
+        <h3 class="section-title">📊 检索统计（近30天）</h3>
         <!-- 核心指标 -->
         <div class="stat-card">
-          <div class="stat-value">{{ stats.total }}</div>
+          <div class="stat-value">{{ stats.total || 0 }}</div>
           <div class="stat-label">总检索次数</div>
         </div>
         <div class="stat-card">
-          <div class="stat-value">{{ stats.avg_results }}</div>
+          <div class="stat-value">{{ stats.avg_results || 0 }}</div>
           <div class="stat-label">平均命中数</div>
         </div>
         <div class="stat-card">
@@ -209,6 +267,90 @@ function closeDetail() {
   overflow-y: auto;
 }
 
+.section-title {
+  font-size: 1.1rem;
+  font-weight: 600;
+  color: var(--color-text-primary);
+  margin: 1.5rem 0 1rem;
+}
+
+/* Index Stats */
+.index-stats-section {
+  background: var(--color-bg-card);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: 1.5rem;
+  margin-bottom: 1.5rem;
+}
+
+.index-stats-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 1rem;
+  margin-bottom: 1.5rem;
+}
+
+.index-stat-card {
+  text-align: center;
+  padding: 1rem;
+  background: var(--color-bg-secondary);
+  border-radius: var(--radius-sm);
+}
+
+.index-stat-value {
+  font-size: 2.5rem;
+  font-weight: 700;
+  color: var(--color-primary-600);
+}
+
+.index-stat-label {
+  font-size: 0.85rem;
+  color: var(--color-text-muted);
+  margin-top: 0.25rem;
+}
+
+.index-type-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.index-type-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.75rem 1rem;
+  background: var(--color-bg-secondary);
+  border-radius: var(--radius-sm);
+}
+
+.index-type-name {
+  font-weight: 500;
+  color: var(--color-text-primary);
+}
+
+.index-type-bars {
+  display: flex;
+  gap: 1.5rem;
+}
+
+.index-type-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.bar-label {
+  font-size: 0.75rem;
+  color: var(--color-text-muted);
+}
+
+.bar-value {
+  font-weight: 600;
+  color: var(--color-primary-600);
+}
+
+/* Stats Grid */
 .stats-grid {
   display: grid;
   grid-template-columns: repeat(3, 1fr);

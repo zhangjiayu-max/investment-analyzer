@@ -232,12 +232,22 @@ def get_recommendation_feedback_stats() -> dict:
 
 def save_llm_feedback(caller: str, input_summary: str = "", output_summary: str = "",
                       rating: str = "neutral", tags: str = "", comment: str = "",
-                      reason_tag: str = "") -> int:
+                      reason_tag: str = "", score_data_accuracy: int = None,
+                      score_logic: int = None, score_actionability: int = None,
+                      target_type: str = "", target_id: int = None) -> int:
     """保存 LLM 输出反馈（进化系统核心）。"""
+    # 计算综合评分
+    scores = [s for s in [score_data_accuracy, score_logic, score_actionability] if s is not None]
+    overall_score = round(sum(scores) / len(scores), 1) if scores else None
+
     conn = _get_conn()
     cur = conn.execute(
-        "INSERT INTO llm_feedback (caller, input_summary, output_summary, rating, tags, comment, reason_tag) VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (caller, input_summary, output_summary, rating, tags, comment, reason_tag)
+        """INSERT INTO llm_feedback
+           (caller, input_summary, output_summary, rating, tags, comment, reason_tag,
+            score_data_accuracy, score_logic, score_actionability, overall_score, target_type, target_id)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (caller, input_summary, output_summary, rating, tags, comment, reason_tag,
+         score_data_accuracy, score_logic, score_actionability, overall_score, target_type, target_id)
     )
     conn.commit()
     conn.close()
@@ -270,6 +280,57 @@ def list_llm_feedback(caller: str = None, rating: str = None, limit: int = 50) -
     rows = conn.execute(f"""
         SELECT * FROM llm_feedback WHERE {where} ORDER BY id DESC LIMIT ?
     """, params + [limit]).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_quality_summary(days: int = 30) -> dict:
+    """获取质量评分概览。"""
+    conn = _get_conn()
+    row = conn.execute("""
+        SELECT
+            COUNT(*) as total_feedback,
+            COUNT(CASE WHEN overall_score IS NOT NULL THEN 1 END) as scored_count,
+            COALESCE(AVG(overall_score), 0) as avg_overall,
+            COALESCE(AVG(score_data_accuracy), 0) as avg_data_accuracy,
+            COALESCE(AVG(score_logic), 0) as avg_logic,
+            COALESCE(AVG(score_actionability), 0) as avg_actionability,
+            COUNT(CASE WHEN overall_score IS NOT NULL AND overall_score < 3 THEN 1 END) as low_quality_count
+        FROM llm_feedback
+        WHERE created_at >= datetime('now', ?)
+    """, (f"-{days} days",)).fetchone()
+    conn.close()
+    return dict(row) if row else {}
+
+
+def get_quality_trend(days: int = 30) -> list[dict]:
+    """获取按天的质量评分趋势。"""
+    conn = _get_conn()
+    rows = conn.execute("""
+        SELECT
+            date(created_at) as day,
+            COUNT(*) as feedback_count,
+            COALESCE(AVG(overall_score), 0) as avg_score,
+            COALESCE(AVG(score_data_accuracy), 0) as avg_accuracy,
+            COALESCE(AVG(score_logic), 0) as avg_logic,
+            COALESCE(AVG(score_actionability), 0) as avg_actionability
+        FROM llm_feedback
+        WHERE created_at >= datetime('now', ?) AND overall_score IS NOT NULL
+        GROUP BY date(created_at)
+        ORDER BY day ASC
+    """, (f"-{days} days",)).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_low_quality_items(limit: int = 20) -> list[dict]:
+    """获取低分产出列表（bad cases）。"""
+    conn = _get_conn()
+    rows = conn.execute("""
+        SELECT * FROM llm_feedback
+        WHERE overall_score IS NOT NULL AND overall_score < 3
+        ORDER BY created_at DESC LIMIT ?
+    """, (limit,)).fetchall()
     conn.close()
     return [dict(r) for r in rows]
 

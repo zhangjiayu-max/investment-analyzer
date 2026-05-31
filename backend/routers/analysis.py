@@ -143,6 +143,22 @@ async def run_analysis(req: AnalysisRunRequest):
         token_usage=token_usage,
     )
 
+    # 8. 后台自动质量评估（不阻塞返回）
+    import asyncio
+    async def _auto_evaluate():
+        try:
+            from agent.eval_scorer import evaluate_llm_output
+            await evaluate_llm_output(
+                query=f"分析 {req.index_name}({req.index_code}) 的估值",
+                output=result_text,
+                context=f"新闻: {news_context[:300]}\n估值: {valuation_context[:300]}",
+                target_type="analysis",
+                target_id=history_id,
+            )
+        except Exception as e:
+            logger.warning(f"自动质量评估失败: {e}")
+    asyncio.create_task(_auto_evaluate())
+
     return {"id": history_id, "result": result_text, "token_usage": token_usage}
 
 

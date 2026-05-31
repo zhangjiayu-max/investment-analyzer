@@ -574,6 +574,23 @@ async def regenerate_daily_report():
         valuation_context=val_context[:500], result=result_text,
         token_usage=token_usage,
     )
+
+    # 后台自动质量评估
+    import asyncio
+    async def _auto_eval():
+        try:
+            from agent.eval_scorer import evaluate_llm_output
+            await evaluate_llm_output(
+                query="生成今日市场简报",
+                output=result_text,
+                context=f"新闻: {news_context[:300]}\n估值: {val_context[:300]}",
+                target_type="daily_report",
+                target_id=new_id,
+            )
+        except Exception as e:
+            logging.warning(f"简报自动质量评估失败: {e}")
+    asyncio.create_task(_auto_eval())
+
     return {"ok": True, "id": new_id, "token_usage": token_usage}
 
 
@@ -999,6 +1016,11 @@ async def create_llm_feedback(body: dict):
         tags=body.get("tags", ""),
         comment=body.get("comment", ""),
         reason_tag=body.get("reason_tag", ""),
+        score_data_accuracy=body.get("score_data_accuracy"),
+        score_logic=body.get("score_logic"),
+        score_actionability=body.get("score_actionability"),
+        target_type=body.get("target_type", ""),
+        target_id=body.get("target_id"),
     )
     # 触发反馈学习
     try:

@@ -16,6 +16,7 @@ import AdminAgentsPage from '../components/AdminAgentsPage.vue'
 import TokenUsagePage from '../components/TokenUsagePage.vue'
 import BadCasePage from '../components/BadCasePage.vue'
 import EvalSuitePage from '../components/EvalSuitePage.vue'
+import QualityDashboard from '../components/QualityDashboard.vue'
 import Dashboard from '../components/Dashboard.vue'
 import SystemConfigPage from '../components/SystemConfigPage.vue'
 
@@ -38,6 +39,7 @@ const pageComponents = {
   portfolio: PortfolioManagement,
   'admin-agents': AdminAgentsPage,
   'token-usage': TokenUsagePage,
+  'quality-dashboard': QualityDashboard,
   'bad-cases': BadCasePage,
   'eval-suite': EvalSuitePage,
   'system-config': SystemConfigPage,

@@ -83,6 +83,18 @@ def parse_single_valuation(path: str, model_type: str = "mimo", source_url: str 
         result["id"] = valuation_id
         result["type"] = "valuation"
 
+        # 自动触发 RAG 索引（增量索引）
+        try:
+            from rag import index_valuation
+            index_valuation(
+                result.get("index_code", ""),
+                result.get("index_name", ""),
+                result
+            )
+            logger.info(f"已索引估值数据到 RAG: {result.get('index_name', '')}")
+        except Exception as e:
+            logger.warning(f"索引估值数据失败: {e}")
+
         # 创建/更新 analysis_record
         image_rel = new_rel_path or path
         image_full_path = f"data/images/{image_rel}" if not image_rel.startswith("data/") else image_rel
