@@ -7,7 +7,11 @@ import {
   cancelConversationExecution,
 } from '../api'
 import ConfirmDialog from './ConfirmDialog.vue'
+import AppToast from './AppToast.vue'
+import { useToast } from '../composables/useToast'
 import { renderMarkdown } from '../composables/useMarkdown'
+
+const { showToast } = useToast()
 
 const conversations = ref([])
 const confirm = ref({ visible: false, title: '', message: '', danger: false, onConfirm: null })
@@ -52,6 +56,18 @@ async function loadConversations() {
 }
 
 async function selectConversation(conv) {
+  // 切换对话时重置执行状态
+  if (sending.value && streamAbort.value) {
+    streamAbort.value.abort()
+  }
+  sending.value = false
+  statusMessage.value = ''
+  currentToolCalls.value = []
+  activeSpecialists.value = []
+  completedSpecialists.value = []
+  crossReviewSpecialists.value = []
+  completedCrossReviews.value = []
+
   selectedConv.value = conv
   try {
     const { data } = await getMessages(conv.id)
@@ -93,11 +109,13 @@ async function handleNewConversation() {
     const { data } = await createConversation({
       title: '新对话',
     })
+    showToast('新对话已创建', 'success')
     await loadConversations()
     const conv = conversations.value.find(c => c.id === data.conversation_id)
     if (conv) selectConversation(conv)
   } catch (e) {
     console.error('Failed to create conversation:', e)
+    showToast('创建对话失败', 'error')
   }
 }
 
@@ -874,6 +892,7 @@ function formatTime(ts) {
     @confirm="() => confirm.onConfirm?.()"
     @cancel="confirm.visible = false"
   />
+  <AppToast />
 </template>
 
 <style scoped>
