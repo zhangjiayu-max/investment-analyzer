@@ -1,7 +1,7 @@
 <script setup>
 import { ref, computed, onMounted } from 'vue'
-import { marked } from 'marked'
 import { listLinkedArticles, uploadDocument, downloadDocument, deleteLinkedArticle, getDocumentContent, embedDocument, getDocumentChunks, testRagSearch } from '../api'
+import { renderMarkdown } from '../composables/useMarkdown'
 import ConfirmDialog from './ConfirmDialog.vue'
 import AppToast from './AppToast.vue'
 import { useToast } from '../composables/useToast'
@@ -196,10 +196,6 @@ function getTypeBadge(type) {
 
 function getTypeClass(type) {
   return 'type-' + (type || 'default')
-}
-
-function renderMarkdown(text) {
-  try { return marked(text || '') } catch { return text }
 }
 
 async function testSearch() {

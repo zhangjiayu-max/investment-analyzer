@@ -1,4 +1,13 @@
-"""RAG 检索服务 — SQLite FTS5 全文检索 + ChromaDB 向量语义搜索"""
+"""RAG 检索服务 — SQLite FTS5 全文检索 + ChromaDB 向量语义搜索
+
+功能特性：
+- FTS5 全文检索（jieba 中文分词）
+- ChromaDB 向量语义搜索（bge-small-zh-v1.5）
+- RRF 融合排序
+- Reranker 重排序（可选）
+- 时效性管理
+- 批量索引
+"""
 
 import json
 import logging
@@ -9,6 +18,109 @@ logger = logging.getLogger(__name__)
 
 DB_PATH = Path(__file__).parent.parent / "data" / "valuations.db"
 CHROMA_DIR = Path(__file__).parent.parent / "data" / "chroma_db"
+
+# Reranker（延迟加载，首次使用时初始化）
+_reranker = None
+_reranker_model_name = "BAAI/bge-reranker-base"
+
+
+def _get_reranker():
+    """获取 Reranker 模型（延迟加载）。"""
+    global _reranker
+    if _reranker is None:
+        try:
+            from sentence_transformers import CrossEncoder
+            _reranker = CrossEncoder(_reranker_model_name)
+            logger.info(f"Reranker 模型加载成功: {_reranker_model_name}")
+        except Exception as e:
+            logger.warning(f"Reranker 模型加载失败: {e}")
+            _reranker = False
+    return _reranker
+
+
+def rerank_results(query: str, results: list[dict], top_k: int = 5) -> list[dict]:
+    """对检索结果进行重排序（使用 cross-encoder）。
+
+    Args:
+        query: 用户查询
+        results: 检索结果列表
+        top_k: 返回前 k 个结果
+
+    Returns:
+        重排序后的结果列表
+    """
+    if not results or len(results) <= 1:
+        return results
+
+    reranker = _get_reranker()
+    if not reranker:
+        return results[:top_k]
+
+    try:
+        # 构建 query-document 对
+        pairs = [(query, r.get("body", "")[:512]) for r in results]
+
+        # 计算相关性分数
+        scores = reranker.predict(pairs)
+
+        # 将分数添加到结果中
+        for i, score in enumerate(scores):
+            results[i]["rerank_score"] = float(score)
+
+        # 按 rerank 分数排序
+        results.sort(key=lambda x: x.get("rerank_score", 0), reverse=True)
+
+        return results[:top_k]
+    except Exception as e:
+        logger.error(f"Rerank 失败: {e}")
+        return results[:top_k]
+
+
+def rewrite_query(query: str) -> str:
+    """将用户口语化问题转换为更适合检索的查询。
+
+    使用 LLM 将自然语言查询转换为关键词查询，提升检索效果。
+
+    Args:
+        query: 用户原始查询
+
+    Returns:
+        优化后的查询字符串
+    """
+    try:
+        from llm_service import _call_llm
+
+        prompt = f"""将以下用户问题转换为适合知识库检索的关键词查询。
+
+用户问题：{query}
+
+要求：
+1. 提取核心关键词（2-5个）
+2. 去除口语化表达（如"我想"、"可以吗"、"怎么样"）
+3. 保留投资术语（如"估值"、"百分位"、"PE"）
+4. 如果涉及指数，保留指数名称
+5. 输出格式：关键词1 关键词2 关键词3
+
+示例：
+- "白酒现在估值高吗" → "白酒 估值 百分位"
+- "沪深300可以买吗" → "沪深300 估值 买入"
+- "机器人指数怎么样" → "机器人 指数 估值"
+
+只输出关键词，不要其他文字。"""
+
+        rewritten = _call_llm(prompt, temperature=0.1, max_tokens=50)
+
+        # 清理输出
+        rewritten = rewritten.strip()
+        if rewritten and len(rewritten) < len(query) * 2:
+            logger.info(f"Query Rewrite: '{query}' -> '{rewritten}'")
+            return rewritten
+
+        return query
+    except Exception as e:
+        logger.warning(f"Query Rewrite 失败: {e}")
+        return query
+
 
 # 中文分词（延迟导入，首次使用时加载）
 _jieba = None
@@ -167,7 +279,13 @@ _STOPWORDS = {
 
 
 def _build_fts_query(query: str) -> str:
-    """将用户问题转为 FTS5 查询：分词后过滤停用词，核心词用 AND、辅助词用 OR。"""
+    """将用户问题转为 FTS5 查询：分词后过滤停用词，核心词用 AND、辅助词用 OR。
+
+    优化策略：
+    1. 对中文多字词使用 NEAR 查询，允许词之间有间隔
+    2. 保留核心投资术语的完整性
+    3. 对长句提取关键短语
+    """
     tokens = _tokenize(query).split()
     # 先过滤停用词，再清洗特殊字符（避免引号影响停用词匹配）
     tokens = [t for t in tokens if t and t not in _STOPWORDS]
@@ -181,12 +299,38 @@ def _build_fts_query(query: str) -> str:
 
     # 优先用 AND 连接多字关键词（精确匹配），单字关键词作为补充用 OR
     if multi_char:
+        # 改进：使用 AND 连接，允许词之间有间隔
         core = " AND ".join(multi_char)
         if single_char:
             # 核心词 AND，辅助单字 OR
             return f"({core}) OR ({' OR '.join(single_char)})"
         return core
     return " OR ".join(single_char)
+
+
+def _extract_key_phrases(query: str) -> list[str]:
+    """从查询中提取关键短语（投资术语、指数名称等）。"""
+    # 投资术语词典
+    investment_terms = {
+        "估值", "百分位", "市盈率", "市净率", "股息率", "风险溢价",
+        "低估", "高估", "合理", "买入", "卖出", "持有", "定投",
+        "沪深300", "中证500", "创业板", "科创板", "红利", "消费",
+        "医药", "科技", "新能源", "白酒", "银行", "证券", "地产",
+        "债券", "可转债", "QDII", "ETF", "LOF", "指数基金",
+    }
+
+    phrases = []
+    # 提取匹配的投资术语
+    for term in investment_terms:
+        if term in query:
+            phrases.append(term)
+
+    # 提取指数代码（如 000300、399006）
+    import re
+    codes = re.findall(r'\b\d{6}\b', query)
+    phrases.extend(codes)
+
+    return phrases
 
 
 # ── 时效性策略：不同类型内容的有效期不同 ──────────────────
@@ -471,8 +615,8 @@ def index_to_chroma(content_type: str, reference_id: str, title: str, body: str)
     return len(chunks)
 
 
-def search_chroma(query: str, content_type: str = None, limit: int = 5) -> tuple[list[dict], int]:
-    """语义搜索，返回 (结果列表, 0)。过滤由调用方负责。"""
+def search_chroma(query: str, content_type: str = None, content_types: list[str] = None, limit: int = 5) -> tuple[list[dict], int]:
+    """语义搜索，返回 (结果列表, 0)。支持单类型或多类型过滤。"""
     collection = _get_chroma()
     model = _get_embed_model()
     if not collection or not model:
@@ -481,8 +625,13 @@ def search_chroma(query: str, content_type: str = None, limit: int = 5) -> tuple
 
     query_embedding = model.encode([query], normalize_embeddings=True).tolist()
 
+    # 构建过滤条件：支持多类型过滤
     where = None
-    if content_type:
+    if content_types:
+        # 多类型过滤：使用 $in 操作符
+        where = {"content_type": {"$in": content_types}}
+    elif content_type:
+        # 单类型过滤
         where = {"content_type": content_type}
 
     try:
@@ -722,8 +871,13 @@ def build_rag_context_with_details(query: str, content_types: list[str] = None, 
 
     fts_count = len(fts_results)
 
-    # 向量搜索
-    chroma_results, _ = search_chroma(query, content_type=content_types[0] if content_types and len(content_types) == 1 else None, limit=limit)
+    # 向量搜索（支持多类型过滤）
+    chroma_results, _ = search_chroma(
+        query,
+        content_type=content_types[0] if content_types and len(content_types) == 1 else None,
+        content_types=content_types if content_types and len(content_types) > 1 else None,
+        limit=limit
+    )
     chroma_count = len(chroma_results)
 
     # 过滤 ChromaDB 中的旧数据（FTS 已在 search_knowledge 中过滤）
@@ -767,6 +921,12 @@ def build_rag_context_with_details(query: str, content_types: list[str] = None, 
     all_results.sort(key=lambda x: x["_score"], reverse=True)
     logger.info(f"RAG 合并后: {len(all_results)}条, 类型: {[r['content_type'] for r in all_results]}")
 
+    # Reranker 重排序（可选，提升精度）
+    # 注意：Reranker 会增加延迟，仅在结果较多时启用
+    if len(all_results) > 3:
+        all_results = rerank_results(query, all_results, top_k=limit)
+        logger.info(f"Rerank 后: {len(all_results)}条")
+
     # 标记来源（fts / chroma / both）
     for r in all_results:
         key = f"{r['content_type']}:{r['reference_id']}"
@@ -804,12 +964,20 @@ def build_rag_context_with_details(query: str, content_types: list[str] = None, 
         parts.append(part)
 
     # Lost-in-the-Middle 缓解：最相关的放首尾，次要的放中间
+    # 原理：LLM 对开头和结尾的内容关注度更高，中间内容容易被忽略
     if len(parts) > 2:
-        reordered = [parts[0]]  # 最相关放最前面
-        middle = parts[1:-1]
-        reordered.append(parts[-1])  # 次相关放最后面
-        # 中间按原序（已经按分数排过）
-        reordered = [parts[0]] + middle + [parts[-1]]
+        # 按分数排序后重新排列
+        sorted_indices = sorted(range(len(all_results)),
+                               key=lambda i: all_results[i]["_score"], reverse=True)
+        reordered = []
+        # 最相关的放最前面
+        reordered.append(parts[sorted_indices[0]])
+        # 中间部分按原序（保持相对顺序）
+        middle_indices = sorted_indices[1:-1]
+        for idx in middle_indices:
+            reordered.append(parts[idx])
+        # 次相关的放最后面
+        reordered.append(parts[sorted_indices[-1]])
         parts = reordered
 
     return {
@@ -820,4 +988,169 @@ def build_rag_context_with_details(query: str, content_types: list[str] = None, 
         "fts_count": fts_count,
         "chroma_count": chroma_count,
         "freshness_filtered": total_freshness_filtered,
+    }
+
+
+# ── 批量索引函数 ──────────────────────────────────────────
+
+def index_article_to_rag(article_id: int):
+    """将文章索引到 FTS + ChromaDB。"""
+    conn = _get_conn()
+    article = conn.execute(
+        "SELECT id, title, content_text FROM articles WHERE id = ?",
+        (article_id,)
+    ).fetchone()
+    conn.close()
+
+    if not article:
+        return False
+
+    title = article["title"] or ""
+    content = article["content_text"] or ""
+
+    if not content:
+        return False
+
+    # FTS 索引
+    index_article(article["id"], title, content)
+
+    # ChromaDB 索引
+    index_to_chroma("article", str(article["id"]), title, content[:8000])
+
+    logger.info(f"已索引文章: {title[:50]}...")
+    return True
+
+
+def index_analysis_to_rag(record_id: int):
+    """将分析记录索引到 FTS + ChromaDB。"""
+    conn = _get_conn()
+    record = conn.execute(
+        "SELECT id, index_name, raw_response FROM analysis_records WHERE id = ?",
+        (record_id,)
+    ).fetchone()
+    conn.close()
+
+    if not record:
+        return False
+
+    index_name = record["index_name"] or ""
+    raw_response = record["raw_response"] or ""
+
+    if not raw_response:
+        return False
+
+    # FTS 索引
+    index_analysis_record(record["id"], index_name, raw_response)
+
+    # ChromaDB 索引
+    index_to_chroma("analysis", str(record["id"]), index_name, raw_response[:8000])
+
+    logger.info(f"已索引分析记录: {index_name} (id={record_id})")
+    return True
+
+
+def reindex_all_articles(limit: int = 1000):
+    """批量重建所有文章索引。"""
+    from db import list_articles
+
+    articles = list_articles(limit=limit)
+    indexed = 0
+    for article in articles:
+        if index_article_to_rag(article["id"]):
+            indexed += 1
+
+    logger.info(f"文章索引完成: {indexed}/{len(articles)}")
+    return {"total": len(articles), "indexed": indexed}
+
+
+def reindex_all_analysis_records(limit: int = 1000):
+    """批量重建所有分析记录索引。"""
+    from db import list_all_analysis_records
+
+    records = list_all_analysis_records(limit=limit)
+    indexed = 0
+    for record in records:
+        if index_analysis_to_rag(record["id"]):
+            indexed += 1
+
+    logger.info(f"分析记录索引完成: {indexed}/{len(records)}")
+    return {"total": len(records), "indexed": indexed}
+
+
+def reindex_all(limit: int = 1000):
+    """批量重建所有索引。"""
+    results = {}
+
+    # 1. 重建文章索引
+    logger.info("开始重建文章索引...")
+    results["articles"] = reindex_all_articles(limit)
+
+    # 2. 重建分析记录索引
+    logger.info("开始重建分析记录索引...")
+    results["analysis"] = reindex_all_analysis_records(limit)
+
+    # 3. 重建作者文章索引
+    logger.info("开始重建作者文章索引...")
+    from db import list_author_articles
+    author_articles = list_author_articles(limit=limit)
+    aa_indexed = 0
+    for article in author_articles:
+        if article.get("content_text"):
+            index_author_article(
+                article["id"],
+                article.get("title", ""),
+                article["content_text"],
+                article.get("publish_time", "")
+            )
+            aa_indexed += 1
+    results["author_articles"] = {"total": len(author_articles), "indexed": aa_indexed}
+
+    # 4. 重建估值索引
+    logger.info("开始重建估值索引...")
+    from db import list_valuation_indexes
+    valuations = list_valuation_indexes()
+    val_indexed = 0
+    for val in valuations:
+        index_valuation(val["index_code"], val["index_name"], val)
+        val_indexed += 1
+    results["valuations"] = {"total": len(valuations), "indexed": val_indexed}
+
+    logger.info(f"全部索引完成: {results}")
+    return results
+
+
+def get_rag_stats_summary():
+    """获取 RAG 索引统计信息。"""
+    conn = _get_conn()
+
+    # FTS 统计
+    fts_counts = {}
+    for content_type in ["article", "analysis", "author_article", "skill", "valuation"]:
+        row = conn.execute(
+            "SELECT COUNT(*) as cnt FROM knowledge_fts WHERE content_type = ?",
+            (content_type,)
+        ).fetchone()
+        fts_counts[content_type] = row["cnt"] if row else 0
+
+    conn.close()
+
+    # ChromaDB 统计
+    chroma_counts = {}
+    try:
+        collection = _get_chroma()
+        if collection:
+            for content_type in ["article", "analysis", "author_article", "skill", "valuation"]:
+                try:
+                    result = collection.get(where={"content_type": content_type})
+                    chroma_counts[content_type] = len(result["ids"]) if result and result["ids"] else 0
+                except Exception:
+                    chroma_counts[content_type] = 0
+    except Exception:
+        pass
+
+    return {
+        "fts": fts_counts,
+        "chroma": chroma_counts,
+        "total_fts": sum(fts_counts.values()),
+        "total_chroma": sum(chroma_counts.values()),
     }

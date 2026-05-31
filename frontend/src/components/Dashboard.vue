@@ -4,6 +4,8 @@ import { getDashboard, runAnalysis, runPanoramaAnalysis, getHotTopics, getDailyR
 import GaugeChart from './charts/GaugeChart.vue'
 import ConfirmDialog from './ConfirmDialog.vue'
 import AppToast from './AppToast.vue'
+import Skeleton from './ui/Skeleton.vue'
+import EmptyState from './ui/EmptyState.vue'
 import { useToast } from '../composables/useToast'
 
 const { showToast } = useToast()
@@ -549,6 +551,18 @@ const concentrationIcon = { low: '✅', moderate: '⚡', high: '⚠️' }
       </div>
     </div>
 
+    <!-- Loading Skeleton -->
+    <div v-if="loading" class="dash-loading">
+      <Skeleton variant="title" width="40%" />
+      <Skeleton variant="text" :count="3" />
+      <div class="dash-grid" style="margin-top:1rem">
+        <Skeleton variant="card" />
+        <Skeleton variant="card" />
+        <Skeleton variant="card" />
+        <Skeleton variant="card" />
+      </div>
+    </div>
+
     <!-- 2x2 Grid -->
     <div v-if="!loading" class="dash-grid">
       <!-- ── Card 1: 低估指数 ── -->
@@ -577,8 +591,13 @@ const concentrationIcon = { low: '✅', moderate: '⚡', high: '⚠️' }
           </div>
         </div>
         <div v-if="!data?.undervalued_indexes?.length" class="card-empty">
-          <p>暂无低估指数数据</p>
-          <p class="card-empty-hint">通过文章导入估值数据后自动展示</p>
+          <EmptyState
+            icon="chart"
+            title="暂无低估指数数据"
+            description="通过文章导入估值数据后自动展示"
+            action-text="去导入"
+            @action="emit('navigate', 'articles')"
+          />
         </div>
         <div v-else class="card-body">
           <!-- 摘要指标条 -->
@@ -655,8 +674,13 @@ const concentrationIcon = { low: '✅', moderate: '⚡', high: '⚠️' }
           </div>
         </div>
         <div v-if="!data?.portfolio_health" class="card-empty">
-          <p>暂无持仓数据</p>
-          <p class="card-empty-hint">在持仓管理中添加基金后自动分析</p>
+          <EmptyState
+            icon="briefcase"
+            title="暂无持仓数据"
+            description="在持仓管理中添加基金后自动分析"
+            action-text="去添加"
+            @action="emit('navigate', 'portfolio')"
+          />
         </div>
         <div v-else class="card-body">
           <div class="health-metrics">

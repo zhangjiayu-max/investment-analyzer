@@ -71,6 +71,7 @@ from routers.eval import router as eval_router
 from routers.analysis import router as analysis_router
 from routers.dashboard import router as dashboard_router
 from routers.config import router as config_router
+from routers.rag import router as rag_router
 
 # 注册新路径路由（优先级高）
 app.include_router(valuation_router)
@@ -97,6 +98,7 @@ app.include_router(eval_router)
 app.include_router(analysis_router)
 app.include_router(dashboard_router)
 app.include_router(config_router)
+app.include_router(rag_router)
 
 # 静态文件目录
 for _d in (STATIC_DIR, IMAGES_DIR, OUTPUT_DIR, UPLOADS_DIR, DD_IMAGES_DIR, VALUATION_IMAGES_DIR):
@@ -640,33 +642,6 @@ async def proxy_image(url: str):
 async def list_gallery_records(search: str = None, limit: int = 200):
     """图片浏览：列出所有分析记录，支持模糊搜索。"""
     return {"records": list_all_analysis_records(search, limit)}
-
-
-
-
-
-@app.post("/api/rag/test-search")
-async def rag_test_search(body: dict):
-    """命中测试：输入查询词，返回 FTS5 + 向量搜索结果。"""
-    query = body.get("query", "").strip()
-    if not query:
-        raise HTTPException(status_code=400, detail="query 不能为空")
-
-    limit = body.get("limit", 5)
-    content_types = body.get("content_types")
-
-    result = build_rag_context_with_details(query, content_types=content_types, limit=limit)
-
-    # 诊断信息
-    chroma_ok = _get_chroma() is not None and _get_embed_model() is not None
-    result["debug"] = {
-        "chroma_available": chroma_ok,
-        "fts_count": sum(1 for r in result["results"] if r.get("content_type") != "linked_doc"),
-        "vector_count": sum(1 for r in result["results"] if r.get("content_type") == "linked_doc"),
-        "total_in_chroma": _get_chroma().count() if _get_chroma() else 0,
-    }
-    return result
-
 
 
 # ── 基金信息查询 API ──────────────────────────────────────────

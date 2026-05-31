@@ -1,12 +1,13 @@
 <script setup>
 import { ref, watch, onMounted, onUnmounted, computed } from 'vue'
 import * as echarts from 'echarts'
-import { marked } from 'marked'
 import { listValuationIndexes, getValuationHistory, getIndexInfo, runAnalysis, listAnalysisHistory, getAnalysisHistoryDetail, deleteAnalysisHistory, refreshValuationPrices, listDDValuations, getDDValuation, getMarketTemperature } from '../api'
+import { renderMarkdown } from '../composables/useMarkdown'
 import { isDark } from '../composables/useTheme'
 import { useToast } from '../composables/useToast'
 import ConfirmDialog from './ConfirmDialog.vue'
 import AppToast from './AppToast.vue'
+import EmptyState from './ui/EmptyState.vue'
 
 const { showToast } = useToast()
 
@@ -238,10 +239,6 @@ const selectedIndexName = computed(() => {
   const idx = indexes.value.find(i => i.index_code === selectedCode.value)
   return idx?.index_name || selectedCode.value
 })
-
-function renderMarkdown(text) {
-  try { return marked(text || '') } catch { return text || '' }
-}
 
 async function handleRunAnalysis() {
   if (!selectedCode.value) return
@@ -738,10 +735,11 @@ defineExpose({ loadHistory })
 
     <!-- No Data -->
     <div v-else-if="indexes.length === 0" class="empty-state">
-      <svg width="48" height="48" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"/>
-      </svg>
-      <p>暂无估值数据，请先解析图片</p>
+      <EmptyState
+        icon="chart"
+        title="暂无估值数据"
+        description="请先解析图片获取估值数据"
+      />
     </div>
 
     <!-- ════════ Valuation Tab Content ════════ -->
@@ -966,7 +964,11 @@ defineExpose({ loadHistory })
         </div>
 
         <div v-else-if="analysisHistory.length === 0" class="empty-hint">
-          暂无分析记录，点击上方「AI 市场分析」按钮开始
+          <EmptyState
+            icon="analysis"
+            title="暂无分析记录"
+            description="点击上方「AI 市场分析」按钮开始"
+          />
         </div>
 
         <div v-else class="history-list">
@@ -1023,11 +1025,11 @@ defineExpose({ loadHistory })
       </div>
 
       <div v-else-if="!ddRecords.length" class="empty-state">
-        <svg width="48" height="48" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"/>
-        </svg>
-        <p>暂无螺丝钉图片估值数据</p>
-        <p class="empty-sub">请先在「图片浏览 → 螺丝钉估值」中上传并解析图片</p>
+        <EmptyState
+          icon="image"
+          title="暂无螺丝钉图片估值数据"
+          description="请先在「图片浏览 → 螺丝钉估值」中上传并解析图片"
+        />
       </div>
 
       <template v-else>

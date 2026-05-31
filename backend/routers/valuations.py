@@ -80,17 +80,8 @@ async def parse_dd_image(req: ParseDDRequest):
         image_url = f"/static/dd_images/{img_path.relative_to(DD_IMAGES_DIR)}"
         dd_id = save_dd_valuation(result, rel_path, image_url)
         result["dd_id"] = dd_id
-
-        # 写 analysis_records 用于图片状态追踪
-        conn = _get_conn()
-        existing = conn.execute("SELECT id FROM analysis_records WHERE image_path = ?", (rel_path,)).fetchone()
-        if existing:
-            conn.execute("""UPDATE analysis_records SET status='success', updated_at=datetime('now','localtime') WHERE id=?""", (existing[0],))
-        else:
-            conn.execute("""INSERT INTO analysis_records (image_path, image_url, status) VALUES (?, ?, 'success')""",
-                         (rel_path, image_url))
-        conn.commit()
-        conn.close()
+        # 注意：螺丝钉图片只存 dd_valuations，不写 analysis_records
+        # 避免在估值图片列表中误显示
 
     return result
 

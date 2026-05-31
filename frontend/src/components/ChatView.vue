@@ -1,6 +1,5 @@
 <script setup>
 import { ref, onMounted, onBeforeUnmount, nextTick, watch } from 'vue'
-import { marked } from 'marked'
 import {
   listConversations, createConversation, deleteConversation,
   getMessages, sendMessage, sendMessageStream,
@@ -8,6 +7,7 @@ import {
   cancelConversationExecution,
 } from '../api'
 import ConfirmDialog from './ConfirmDialog.vue'
+import { renderMarkdown } from '../composables/useMarkdown'
 
 const conversations = ref([])
 const confirm = ref({ visible: false, title: '', message: '', danger: false, onConfirm: null })
@@ -380,10 +380,6 @@ function toolDisplayName(name) {
 function filterToolCalls(toolCalls) {
   if (!toolCalls) return []
   return toolCalls.filter(tc => !tc.name?.startsWith('consult_'))
-}
-
-function renderMarkdown(text) {
-  return marked(text || '')
 }
 
 // 反馈功能

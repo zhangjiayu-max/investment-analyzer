@@ -361,17 +361,44 @@ export function cancelConversationExecution(convId) {
   return api.post(`/conversation/${convId}/cancel`)
 }
 
+// ── RAG 管理 API（新路径: /api/rag/*）─────────────────────────────────────
+
 /** 重建 RAG 索引 */
-export function reindexRag() {
-  return api.post('/rag/reindex')
+export function reindexRag(limit = 1000) {
+  return api.post('/rag/reindex', {}, { params: { limit }, timeout: 600000 })
 }
 
-/** 获取 RAG 检索统计 */
+/** 重建文章索引 */
+export function reindexArticles(limit = 1000) {
+  return api.post('/rag/reindex/articles', {}, { params: { limit }, timeout: 300000 })
+}
+
+/** 重建分析记录索引 */
+export function reindexAnalysisRecords(limit = 1000) {
+  return api.post('/rag/reindex/analysis', {}, { params: { limit }, timeout: 300000 })
+}
+
+/** 获取 RAG 索引统计 */
+export function getRagIndexStats() {
+  return api.get('/rag/stats')
+}
+
+/** 测试 RAG 搜索 */
+export function testRagSearch(query, limit = 5, contentTypes = null, useRewrite = false) {
+  return api.post('/rag/test-search', { query, limit, content_types: contentTypes, use_rewrite: useRewrite })
+}
+
+/** 测试 Query Rewrite */
+export function testQueryRewrite(query) {
+  return api.post('/rag/rewrite', {}, { params: { query } })
+}
+
+/** 获取 RAG 检索统计（旧路径兼容） */
 export function getRagStats(days = 7) {
   return api.get('/conversation/rag-stats', { params: { days } })
 }
 
-/** 获取 RAG 检索日志 */
+/** 获取 RAG 检索日志（旧路径兼容） */
 export function getRagLogs(limit = 100) {
   return api.get('/conversation/rag-logs', { params: { limit } })
 }
@@ -514,11 +541,6 @@ export function embedDocument(id) {
 /** 获取文档分块详情 */
 export function getDocumentChunks(id) {
   return api.get(`/article/linked/${id}/chunks`)
-}
-
-/** RAG 命中测试 */
-export function testRagSearch(query, limit = 5, contentTypes = null) {
-  return api.post('/rag/test-search', { query, limit, content_types: contentTypes })
 }
 
 /** 删除文档 */

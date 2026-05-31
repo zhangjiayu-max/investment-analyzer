@@ -27,16 +27,10 @@ import {
 import ConfirmDialog from './ConfirmDialog.vue'
 import PieChart from './charts/PieChart.vue'
 import LineChart from './charts/LineChart.vue'
-
-// ── Markdown 渲染 ──
-function renderMarkdown(text) {
-  if (!text) return ''
-  return text
-    .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
-    .replace(/^\s*[-*]\s+(.*)/gm, '<li>$1</li>')
-    .replace(/(<li>.*<\/li>\n?)+/gs, m => `<ul>${m}</ul>`)
-    .replace(/\n/g, '<br>')
-}
+import Skeleton from './ui/Skeleton.vue'
+import EmptyState from './ui/EmptyState.vue'
+import AnalysisCard from './ui/AnalysisCard.vue'
+import { renderMarkdown } from '../composables/useMarkdown'
 
 // ── 持仓占比计算 ──
 const holdingWeights = computed(() => {
@@ -2243,7 +2237,13 @@ function txDisplayAmount(tx) {
           </div>
         </div>
         <div v-else class="analysis-panel-body">
-          <p class="text-muted">暂无持仓数据，添加持仓后即可查看分散度分析。</p>
+          <EmptyState
+            icon="portfolio"
+            title="暂无持仓数据"
+            description="添加持仓后即可查看分散度分析"
+            action-text="添加持仓"
+            @action="openAddForm"
+          />
         </div>
       </template>
 
@@ -2407,15 +2407,14 @@ function txDisplayAmount(tx) {
               <span class="ai-agent-tooltip">全景诊断分析师</span>
             </button>
             <div v-if="modeResult && aiMode === 'panorama'" class="ai-mode-result">
-              <div class="ai-result-content markdown-body">{{ modeResult }}</div>
-              <div v-if="modeRecordId && !feedbackGiven" class="ai-feedback">
-                <span class="ai-feedback-label">对结果满意吗？</span>
-                <button class="btn-feedback btn-feedback-up" @click="submitFeedback('helpful')" title="有用">👍</button>
-                <button class="btn-feedback btn-feedback-down" @click="submitFeedback('unhelpful')" title="没用">👎</button>
-              </div>
-              <div v-else-if="feedbackGiven" class="ai-feedback ai-feedback-done">
-                已反馈 · {{ feedbackGiven === 'helpful' ? '感谢支持' : '我们会改进' }}
-              </div>
+              <AnalysisCard
+                :result="modeResult"
+                agent-name="全景诊断分析师"
+                :token-usage="aiTokenUsage"
+                :created-at="new Date().toISOString()"
+                :feedback="feedbackGiven"
+                @feedback="(val) => submitFeedback(val)"
+              />
             </div>
             <div v-if="panoramaRecords.length > 0" class="ai-mode-history">
               <div class="ai-mode-history-header" @click="panoramaShowAll = !panoramaShowAll">
@@ -2837,17 +2836,20 @@ function txDisplayAmount(tx) {
           {{ activeHoldings.length }} / {{ holdings.length }}
         </span>
       </div>
-      <div v-if="loading" class="loading-state">
-        <div class="spinner"></div>
-        <span>加载中...</span>
+      <div v-if="loading" class="portfolio-loading">
+        <Skeleton variant="title" width="30%" />
+        <Skeleton variant="card" />
+        <Skeleton variant="text" :count="5" />
       </div>
 
-      <div v-else-if="holdings.length === 0" class="empty-state">
-        <svg width="48" height="48" fill="none" stroke="currentColor" viewBox="0 0 24 24" opacity="0.3">
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4"/>
-        </svg>
-        <p>暂无持仓数据</p>
-        <button class="btn-secondary" @click="openAddForm">添加第一笔持仓</button>
+      <div v-else-if="holdings.length === 0">
+        <EmptyState
+          icon="portfolio"
+          title="暂无持仓数据"
+          description="添加持仓后即可查看投资组合分析"
+          action-text="添加第一笔持仓"
+          @action="openAddForm"
+        />
       </div>
 
       <table v-else class="data-table">

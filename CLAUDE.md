@@ -157,6 +157,14 @@ cd /Users/xiaoyuer/projects/investment-analyzer/backend && nohup python3 -m uvic
 - 文件名格式：`YYYY-MM-DD-<主题>.md`（如 `2026-05-27-持仓优化.md`）
 - 禁止写入 `~/.claude/plans/` 等项目外部目录
 
+## 质量门禁（每次代码变更前检查）
+- SQL 必须参数化，禁止拼接用户输入
+- LLM 输出必须做 sanitization（防 prompt 注入）
+- 金融公式/阈值从配置读取，不硬编码（见「金融严谨性」）
+- 改完代码必须跑验证命令，不能空口说"完成"（verification-before-completion）
+- **前端状态联动**：改筛选条件/watch 时，检查所有关联数据是否同步刷新（见 `doc/checklists/frontend-state.md`）
+- 详细检查清单见 `doc/checklists/code-review.md`
+
 ## 注意事项
 - LLM `reasoning_content` 需在后续消息传回（MIMO thinking mode）
 - 复杂任务用 `compress_history()` / `compress_rag_context()` 控制 token
