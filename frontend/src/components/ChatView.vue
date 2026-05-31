@@ -551,27 +551,6 @@ async function toggleTraceDetail(msg, index) {
                   </div>
                 </Transition>
               </div>
-              <!-- 专家分析展示 -->
-              <div v-if="msg.specialist_results && msg.specialist_results.length" class="specialists-container">
-                <div v-for="(s, j) in msg.specialist_results" :key="j" class="specialist-item">
-                  <div class="specialist-header" @click="s.expanded = !s.expanded">
-                    <span class="specialist-icon">{{ s.icon }}</span>
-                    <span class="specialist-name">{{ s.agent }}</span>
-                    <span v-if="s.duration_ms" class="specialist-time">{{ (s.duration_ms / 1000).toFixed(1) }}s</span>
-                    <div class="specialist-feedback" @click.stop>
-                      <template v-if="specialistFeedback[i + '_' + s.agent_key]">
-                        <span class="feedback-done">{{ specialistFeedback[i + '_' + s.agent_key] === 'helpful' ? '👍 已赞' : '👎 已踩' }}</span>
-                      </template>
-                      <template v-else>
-                        <button class="btn-spec-feedback" @click="handleSpecialistFeedback(s, i, 'helpful')" title="分析准确">👍</button>
-                        <button class="btn-spec-feedback" @click="handleSpecialistFeedback(s, i, 'unhelpful')" title="分析不准">👎</button>
-                      </template>
-                    </div>
-                    <span class="specialist-toggle">{{ s.expanded ? '▲' : '▼' }}</span>
-                  </div>
-                  <div v-if="s.expanded" class="specialist-analysis markdown-body" v-html="renderMarkdown(s.analysis || '（暂无分析内容）')"></div>
-                </div>
-              </div>
               <!-- 工具调用展示 -->
               <div v-if="filterToolCalls(msg.tool_calls).length" class="tool-calls-container">
                 <div v-for="(tc, j) in filterToolCalls(msg.tool_calls)" :key="j" class="tool-call-item">
@@ -1310,6 +1289,40 @@ async function toggleTraceDetail(msg, index) {
   font-weight: 600;
 }
 
+.markdown-body :deep(table) {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 0.5rem 0;
+  font-size: 0.8rem;
+}
+
+.markdown-body :deep(th),
+.markdown-body :deep(td) {
+  padding: 0.35rem 0.6rem;
+  border: 1px solid var(--color-border);
+  text-align: left;
+}
+
+.markdown-body :deep(th) {
+  background: var(--color-surface-hover);
+  font-weight: 600;
+}
+
+.markdown-body :deep(blockquote) {
+  border-left: 3px solid var(--color-primary-300);
+  padding: 0.3rem 0.75rem;
+  margin: 0.5rem 0;
+  color: var(--color-text-secondary);
+  background: var(--color-surface-hover);
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+}
+
+.markdown-body :deep(hr) {
+  border: none;
+  border-top: 1px solid var(--color-border);
+  margin: 0.75rem 0;
+}
+
 /* ── Transition ── */
 .fade-enter-active { transition: opacity 0.2s; }
 .fade-leave-active { transition: opacity 0.15s; }
@@ -1847,10 +1860,11 @@ async function toggleTraceDetail(msg, index) {
 }
 
 .specialist-analysis {
-  padding: 0.5rem 0.75rem;
+  padding: 0.75rem 1rem;
   border-top: 1px solid var(--color-border);
-  font-size: 0.8rem;
-  max-height: 400px;
+  font-size: 0.82rem;
+  line-height: 1.6;
+  max-height: 500px;
   overflow-y: auto;
 }
 

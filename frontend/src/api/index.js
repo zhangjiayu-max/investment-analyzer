@@ -162,58 +162,58 @@ export function pollTask(taskId, onProgress, interval = 2000) {
   return () => { stopped = true }
 }
 
-// ── 文章管理 API（新路径: /api/article/*）─────────────────────────────────────
+// ── 文章管理 API（新路径: /api/articles/*）─────────────────────────────────────
 
 /** 添加文章（粘贴链接，自动解析+下载+分析） */
 export function addArticle(url) {
-  return api.post('/article/create', { url })
+  return api.post('/articles/add', { url })
 }
 
 /** 同步文章 */
 export function syncArticles() {
-  return api.post('/article/sync')
+  return api.post('/articles/sync')
 }
 
 /** 文章列表 */
 export function fetchArticles(status = '') {
   const params = { _t: Date.now() }
   if (status) params.status = status
-  return api.get('/article/list', { params })
+  return api.get('/articles', { params })
 }
 
 /** 文章详情（含分析记录） */
 export function fetchArticle(id) {
-  return api.get(`/article/${id}`, { params: { _t: Date.now() } })
+  return api.get(`/articles/${id}`, { params: { _t: Date.now() } })
 }
 
 /** 下载文章图片 */
 export function downloadArticleImages(id) {
-  return api.post(`/article/${id}/download`, {}, { timeout: 120000 })
+  return api.post(`/articles/${id}/download`, {}, { timeout: 120000 })
 }
 
 /** 分析文章所有图片（异步触发） */
 export function analyzeArticleImages(id) {
-  return api.post(`/article/${id}/analyze`, {}, { timeout: 30000 })
+  return api.post(`/articles/${id}/analyze`, {}, { timeout: 30000 })
 }
 
 /** 查询分析任务进度 */
 export function getAnalyzeStatus(id) {
-  return api.get(`/article/${id}/status`)
+  return api.get(`/articles/${id}/analyze-status`)
 }
 
 /** 取消分析任务 */
 export function cancelAnalyze(id) {
-  return api.post(`/article/${id}/cancel`)
+  return api.post(`/articles/${id}/cancel-analyze`)
 }
 
 /** 重新分析单张图片（异步触发） */
 export function reanalyzeImage(recordId) {
-  return api.post(`/article/records/${recordId}/reanalyze`, {}, { timeout: 10000 })
+  return api.post(`/records/${recordId}/reanalyze`, {}, { timeout: 10000 })
 }
 
 /** 查询单张图片重新分析状态 */
 export function getReanalyzeStatus(recordId) {
-  return api.get(`/article/records/${recordId}/status`)
+  return api.get(`/records/${recordId}/reanalyze-status`)
 }
 
 // ── Agent API（新路径: /api/agent/*）─────────────────────────────────────
@@ -476,46 +476,46 @@ export function deleteValuationImage(path) {
   return api.delete(`/valuation-images/${path}`)
 }
 
-// ── 作者文章 API（新路径: /api/article/author/*）─────────────────────────────────────
+// ── 作者文章 API（新路径: /api/author-articles/*）─────────────────────────────────────
 
 /** 从 Excel 导入作者文章 */
 export function importAuthorArticles() {
-  return api.post('/article/author/import')
+  return api.post('/author-articles/import')
 }
 
 /** 从 URL 提取文章信息 */
 export function extractAuthorArticle(url) {
-  return api.post('/article/author/extract', { url }, { timeout: 30000 })
+  return api.post('/author-articles/extract', { url }, { timeout: 30000 })
 }
 
 /** 直接创建作者文章 */
 export function createAuthorArticle(data) {
-  return api.post('/article/author/create', data)
+  return api.post('/author-articles', data)
 }
 
 /** 批量爬取所有 pending 文章 */
 export function crawlAuthorArticles() {
-  return api.post('/article/author/crawl', {}, { timeout: 600000 })
+  return api.post('/author-articles/crawl', {}, { timeout: 600000 })
 }
 
 /** 作者文章列表 */
 export function listAuthorArticles(params = {}) {
-  return api.get('/article/author/list', { params })
+  return api.get('/author-articles', { params })
 }
 
 /** 作者文章详情 */
 export function getAuthorArticle(id) {
-  return api.get(`/article/author/${id}`)
+  return api.get(`/author-articles/${id}`)
 }
 
 /** 删除作者文章 */
 export function deleteAuthorArticle(id) {
-  return api.delete(`/article/author/${id}`)
+  return api.delete(`/author-articles/${id}`)
 }
 
 /** 爬取单篇作者文章 */
 export function crawlSingleAuthorArticle(id) {
-  return api.post(`/article/author/${id}/crawl`, {}, { timeout: 120000 })
+  return api.post(`/author-articles/${id}/crawl`, {}, { timeout: 120000 })
 }
 
 // ── 个人文档 API（新路径: /api/article/linked/*）─────────────────────────────────────

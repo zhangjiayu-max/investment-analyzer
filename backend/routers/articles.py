@@ -14,7 +14,9 @@ import os
 import re
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException, UploadFile
+logger = logging.getLogger(__name__)
+
+from fastapi import APIRouter, HTTPException, UploadFile, BackgroundTasks
 from fastapi.responses import FileResponse
 
 from config import ROOT, IMAGES_DIR, UPLOADS_DIR
@@ -71,7 +73,7 @@ async def list_articles_api(status: str = None):
 
 
 @router.post("/api/articles/add")
-async def add_article_api(req: CreateTaskRequest):
+async def add_article_api(req: CreateTaskRequest, background_tasks: BackgroundTasks):
     """粘贴公众号链接，自动解析+下载+分析（全流程）。"""
     url = req.url.strip()
     if not url:
@@ -80,13 +82,19 @@ async def add_article_api(req: CreateTaskRequest):
     # 去重检查
     existing = get_article_by_url(url)
     if existing:
+        # 如果之前的状态是 pending 或 error，允许重新触发
+        if existing["status"] in ("pending", "error"):
+            article_id = existing["id"]
+            update_article(article_id, status="pending", title="解析中...", error_msg=None)
+            background_tasks.add_task(_background_add_article, article_id, url)
+            return {"ok": True, "message": "已重新提交解析", "article_id": article_id}
         return {"ok": False, "message": "文章已存在", "article_id": existing["id"], "status": existing["status"]}
 
     # 先插入占位记录
     article_id = create_article(url, title="解析中...")
 
-    # 后台全流程：解析 → 下载 → 分析
-    asyncio.create_task(_background_add_article(article_id, url))
+    # 后台全流程：解析 → 下载 → 分析（使用 FastAPI BackgroundTasks 确保任务执行）
+    background_tasks.add_task(_background_add_article, article_id, url)
     return {"ok": True, "message": "已提交，正在解析", "article_id": article_id}
 
 
@@ -592,6 +600,7 @@ def _clean_article_html(html: str) -> str:
 
 async def _background_add_article(article_id: int, url: str):
     """全流程后台任务：解析文章 → 下载图片 → 分析估值。"""
+    logger.info(f"[article:{article_id}] 开始后台解析: {url[:50]}...")
     try:
         # 1. 解析文章
         update_article(article_id, status="downloading")
@@ -684,8 +693,10 @@ async def _background_add_article(article_id: int, url: str):
 
         err_msg = f"{failed} 张失败" if failed > 0 else None
         update_article(article_id, status="analyzed", error_msg=err_msg)
+        logger.info(f"[article:{article_id}] 解析完成: success={success}, failed={failed}")
 
     except Exception as e:
+        logger.error(f"[article:{article_id}] 后台任务异常: {e}")
         update_article(article_id, status="error", error_msg=str(e))
 
 
