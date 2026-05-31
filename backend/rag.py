@@ -11,6 +11,7 @@
 
 import json
 import logging
+import os
 import sqlite3
 from pathlib import Path
 
@@ -18,6 +19,10 @@ logger = logging.getLogger(__name__)
 
 DB_PATH = Path(__file__).parent.parent / "data" / "valuations.db"
 CHROMA_DIR = Path(__file__).parent.parent / "data" / "chroma_db"
+
+# Reranker 配置：默认关闭，RRF + 标题加权 + 时效性加权已能提供合理排序
+# 设置环境变量 RERANK_ENABLED=true 可开启
+RERANK_ENABLED = os.getenv("RERANK_ENABLED", "false").lower() == "true"
 
 # Reranker（延迟加载，首次使用时初始化）
 _reranker = None
