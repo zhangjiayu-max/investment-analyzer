@@ -75,6 +75,8 @@ async function selectConversation(conv) {
         // 为 specialist_results 添加 expanded 属性
         msg.specialist_results.forEach(s => { s.expanded = false })
         msg.cross_review_results.forEach(s => { s.expanded = false })
+        // 执行过程面板默认关闭
+        msg._showExecution = false
       }
       return msg
     })
@@ -573,11 +575,78 @@ function formatTime(ts) {
                   <div v-if="s.expanded" class="specialist-analysis markdown-body" v-html="renderMarkdown(s.analysis || '（暂无审阅内容）')"></div>
                 </div>
               </div>
-              <!-- 工具调用展示（过滤掉 consult_* 编排调用） -->
+              <!-- 执行过程面板（可展开） -->
+              <div v-if="msg.specialist_results?.length || msg.phase_timings" class="execution-panel">
+                <div class="execution-toggle" @click="msg._showExecution = !msg._showExecution">
+                  <span class="execution-toggle-icon">⚙️</span>
+                  <span>执行过程</span>
+                  <span v-if="msg.complexity" class="execution-complexity" :class="'complexity-' + msg.complexity">
+                    {{ msg.complexity === 'complex' ? '复杂' : msg.complexity === 'medium' ? '中等' : '简单' }}
+                  </span>
+                  <span v-if="msg.duration_ms" class="execution-total-time">{{ formatDuration(msg.duration_ms) }}</span>
+                  <span class="execution-toggle-arrow">{{ msg._showExecution ? '▲' : '▼' }}</span>
+                </div>
+                <Transition name="expand">
+                  <div v-if="msg._showExecution" class="execution-detail">
+                    <!-- 时间线 -->
+                    <div v-if="msg.phase_timings" class="execution-timeline">
+                      <div class="timeline-item" v-if="msg.phase_timings.clarification_ms">
+                        <span class="timeline-dot"></span>
+                        <span class="timeline-label">理解问题</span>
+                        <span class="timeline-time">{{ formatDuration(msg.phase_timings.clarification_ms) }}</span>
+                      </div>
+                      <div class="timeline-item" v-if="msg.phase_timings.rag_ms">
+                        <span class="timeline-dot"></span>
+                        <span class="timeline-label">知识检索</span>
+                        <span class="timeline-time">{{ formatDuration(msg.phase_timings.rag_ms) }}</span>
+                      </div>
+                      <div class="timeline-item" v-if="msg.phase_timings.orchestrator_ms">
+                        <span class="timeline-dot"></span>
+                        <span class="timeline-label">专家协作</span>
+                        <span class="timeline-time">{{ formatDuration(msg.phase_timings.orchestrator_ms) }}</span>
+                      </div>
+                    </div>
+                    <!-- 专家列表 -->
+                    <div v-if="msg.specialist_results?.length" class="execution-agents">
+                      <span class="execution-agents-label">参与专家：</span>
+                      <span v-for="s in msg.specialist_results" :key="s.agent_key" class="execution-agent-tag">
+                        {{ s.icon }} {{ s.agent }}
+                        <span v-if="s.duration_ms" class="execution-agent-time">{{ (s.duration_ms / 1000).toFixed(0) }}s</span>
+                      </span>
+                    </div>
+                    <!-- 工具调用统计 -->
+                    <div v-if="msg.tool_calls?.length" class="execution-tools">
+                      <span>工具调用：{{ msg.tool_calls.length }} 次</span>
+                    </div>
+                  </div>
+                </Transition>
+              </div>
+              <!-- 专家分析展示 -->
+              <div v-if="msg.specialist_results && msg.specialist_results.length" class="specialists-container">
+                <div v-for="(s, j) in msg.specialist_results" :key="j" class="specialist-item">
+                  <div class="specialist-header" @click="s.expanded = !s.expanded">
+                    <span class="specialist-icon">{{ s.icon }}</span>
+                    <span class="specialist-name">{{ s.agent }}</span>
+                    <span v-if="s.duration_ms" class="specialist-time">{{ (s.duration_ms / 1000).toFixed(1) }}s</span>
+                    <div class="specialist-feedback" @click.stop>
+                      <template v-if="specialistFeedback[i + '_' + s.agent_key]">
+                        <span class="feedback-done">{{ specialistFeedback[i + '_' + s.agent_key] === 'helpful' ? '👍 已赞' : '👎 已踩' }}</span>
+                      </template>
+                      <template v-else>
+                        <button class="btn-spec-feedback" @click="handleSpecialistFeedback(s, i, 'helpful')" title="分析准确">👍</button>
+                        <button class="btn-spec-feedback" @click="handleSpecialistFeedback(s, i, 'unhelpful')" title="分析不准">👎</button>
+                      </template>
+                    </div>
+                    <span class="specialist-toggle">{{ s.expanded ? '▲' : '▼' }}</span>
+                  </div>
+                  <div v-if="s.expanded" class="specialist-analysis markdown-body" v-html="renderMarkdown(s.analysis || '（暂无分析内容）')"></div>
+                </div>
+              </div>
+              <!-- 工具调用展示 -->
               <div v-if="filterToolCalls(msg.tool_calls).length" class="tool-calls-container">
                 <div v-for="(tc, j) in filterToolCalls(msg.tool_calls)" :key="j" class="tool-call-item">
                   <div class="tool-call-header" @click="tc.expanded = !tc.expanded">
-                    <span class="tool-icon">&#128295;</span>
+                    <span class="tool-icon">🔧</span>
                     <span class="tool-name">{{ toolDisplayName(tc.name) }}</span>
                     <span class="tool-args">{{ JSON.stringify(tc.arguments || {}).slice(0, 40) }}</span>
                     <span class="tool-toggle">{{ tc.expanded ? '▲' : '▼' }}</span>
@@ -586,16 +655,6 @@ function formatTime(ts) {
                 </div>
               </div>
               <div class="message-bubble markdown-body" v-html="renderMarkdown(msg.content)"></div>
-              <!-- 耗时摘要 -->
-              <div v-if="msg.duration_ms" class="message-timing">
-                <span class="timing-total">总耗时 {{ formatDuration(msg.duration_ms) }}</span>
-                <template v-if="msg.phase_timings">
-                  <span v-if="msg.phase_timings.clarification_ms" class="timing-phase">理解 {{ formatDuration(msg.phase_timings.clarification_ms) }}</span>
-                  <span v-if="msg.phase_timings.rag_ms" class="timing-phase">检索 {{ formatDuration(msg.phase_timings.rag_ms) }}</span>
-                  <span v-if="msg.phase_timings.orchestrator_ms" class="timing-phase">分析 {{ formatDuration(msg.phase_timings.orchestrator_ms) }}</span>
-                  <span v-if="msg.phase_timings.specialist_ms" class="timing-phase">专家 {{ formatDuration(msg.phase_timings.specialist_ms) }}</span>
-                </template>
-              </div>
               <!-- 反馈按钮 -->
               <div v-if="msg.role === 'assistant' && !feedbackGiven[i]" class="message-feedback">
                 <button class="btn-msg-feedback" @click="handleFeedback(msg, i, 'helpful')" title="有用">
@@ -1515,6 +1574,126 @@ function formatTime(ts) {
 
 @keyframes spin {
   to { transform: rotate(360deg); }
+}
+
+/* ── 执行过程面板 ── */
+.execution-panel {
+  margin-bottom: 0.5rem;
+  border: 1px solid var(--color-border-light);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.execution-toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 0.75rem;
+  background: var(--color-bg-secondary);
+  cursor: pointer;
+  font-size: 0.8rem;
+  color: var(--color-text-secondary);
+  transition: background 0.15s;
+}
+
+.execution-toggle:hover {
+  background: var(--color-bg-hover);
+}
+
+.execution-toggle-icon {
+  font-size: 0.9rem;
+}
+
+.execution-complexity {
+  font-size: 0.7rem;
+  padding: 0.15rem 0.5rem;
+  border-radius: 4px;
+  font-weight: 600;
+}
+
+.complexity-simple { background: #dcfce7; color: #166534; }
+.complexity-medium { background: #fef9c3; color: #854d0e; }
+.complexity-complex { background: #fee2e2; color: #991b1b; }
+
+.execution-total-time {
+  margin-left: auto;
+  font-weight: 600;
+  color: var(--color-text-primary);
+}
+
+.execution-toggle-arrow {
+  color: var(--color-text-muted);
+  font-size: 0.75rem;
+}
+
+.execution-detail {
+  padding: 0.75rem;
+  background: var(--color-bg-primary);
+  border-top: 1px solid var(--color-border-light);
+}
+
+.execution-timeline {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.75rem;
+  padding: 0.5rem 0;
+}
+
+.timeline-item {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.75rem;
+}
+
+.timeline-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--color-primary-500);
+}
+
+.timeline-label {
+  color: var(--color-text-secondary);
+}
+
+.timeline-time {
+  font-weight: 600;
+  color: var(--color-text-primary);
+}
+
+.execution-agents {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-bottom: 0.5rem;
+  font-size: 0.8rem;
+}
+
+.execution-agents-label {
+  color: var(--color-text-secondary);
+}
+
+.execution-agent-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.2rem 0.5rem;
+  background: var(--color-bg-secondary);
+  border-radius: 4px;
+  font-size: 0.75rem;
+}
+
+.execution-agent-time {
+  color: var(--color-text-muted);
+  font-size: 0.7rem;
+}
+
+.execution-tools {
+  font-size: 0.75rem;
+  color: var(--color-text-muted);
 }
 
 /* ── 专家分析展示 ── */

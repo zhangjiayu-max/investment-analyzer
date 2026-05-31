@@ -311,7 +311,7 @@ export function sendMessageStream(convId, content, onEvent) {
   const controller = new AbortController()
   const baseURL = api.defaults.baseURL || ''
 
-  fetch(`${baseURL}/conversation/${convId}/messages/stream`, {
+  fetch(`${baseURL}/conversations/${convId}/messages/stream`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ content }),
