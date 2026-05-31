@@ -1,5 +1,5 @@
 <script setup>
-import { ref, onMounted, onActivated } from 'vue'
+import { ref, computed, onMounted, onActivated } from 'vue'
 import { getDashboard, runAnalysis, runPanoramaAnalysis, getHotTopics, getDailyReport, regenerateDailyReport, submitDailyReportFeedback, listPanoramaRecords, getHotspotsAnalysis, getLatestHotspotsAnalysis, getRecommendations, getRecommendationStats, submitRecommendationFeedback, getBondRecommend, listBondRecommendRecords, autoVerifyRecommendations, fetchRecentValuations, getBondMarketTemperature, getHotspotsRelate } from '../api'
 import GaugeChart from './charts/GaugeChart.vue'
 import ConfirmDialog from './ConfirmDialog.vue'
@@ -44,6 +44,30 @@ const hotTopicsLoading = ref(true)
 const hotspotLoading = ref(false)
 const hotspotError = ref(false)
 const hotspotsRelate = ref(null) // 热点→指数关联数据
+
+// 聚合所有关联行业和持仓
+const allSectors = computed(() => {
+  if (!hotspotsRelate.value) return []
+  const set = new Set()
+  for (const item of hotspotsRelate.value) {
+    for (const s of (item.sectors || [])) set.add(s)
+  }
+  return [...set]
+})
+const allRelatedHoldings = computed(() => {
+  if (!hotspotsRelate.value) return []
+  const seen = new Set()
+  const result = []
+  for (const item of hotspotsRelate.value) {
+    for (const h of (item.related_holdings || [])) {
+      if (!seen.has(h.fund_code)) {
+        seen.add(h.fund_code)
+        result.push(h)
+      }
+    }
+  }
+  return result
+})
 
 // ── 每日日报自动加载 ──
 const dailyReport = ref(null)
@@ -814,6 +838,12 @@ const concentrationIcon = { low: '✅', moderate: '⚡', high: '⚠️' }
 
         <!-- AI 结果（结构化推荐卡片） -->
         <div v-if="hotspotsAnalysis && !hotspotLoading" class="card-body hotspots-body">
+          <!-- 关联行业和持仓概览 -->
+          <div v-if="hotspotsRelate?.length" class="hotspots-relate-summary">
+            <span class="relate-label">涉及行业：</span>
+            <span v-for="s in allSectors" :key="s" class="sector-tag">{{ s }}</span>
+            <span v-if="allRelatedHoldings.length" class="relate-holding-hint">· 持仓关联 {{ allRelatedHoldings.length }} 只</span>
+          </div>
           <p class="hotspots-summary">{{ hotspotsAnalysis.summary }}</p>
           <div v-for="(rec, i) in hotspotsAnalysis.recommendations" :key="i" class="rec-card">
             <div class="rec-main">
@@ -2008,6 +2038,21 @@ const concentrationIcon = { low: '✅', moderate: '⚡', high: '⚠️' }
 }
 
 /* ── 热门机会 ── */
+.hotspots-relate-summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.3rem;
+  margin-bottom: 0.75rem;
+  padding-bottom: 0.5rem;
+  border-bottom: 1px dashed var(--color-border);
+}
+
+.relate-holding-hint {
+  font-size: 0.7rem;
+  color: var(--color-text-muted);
+}
+
 .hotspots-body {
   max-height: 450px;
   overflow-y: auto;
