@@ -81,7 +81,7 @@ from db.articles import (
 # 持仓管理全领域
 from db.portfolio import (
     create_holding, get_holding, list_holdings, update_holding, delete_holding,
-    get_portfolio_summary, get_cash_balance, add_cash, set_cash_balance,
+    get_portfolio_summary, get_cash_balance, get_total_cash_balance, add_cash, set_cash_balance,
     accrue_cash_interest, save_rebalance_config, get_active_rebalance_config,
     list_rebalance_configs, get_rebalance_config_by_id, rollback_rebalance_config,
     create_transaction, list_transactions, _recalculate_holding, confirm_transaction,

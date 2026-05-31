@@ -10,7 +10,7 @@ import requests as req
 from fastapi import APIRouter, HTTPException
 
 from db import (
-    list_holdings, get_cash_balance, get_analysis_agent,
+    list_holdings, get_cash_balance, get_total_cash_balance, get_analysis_agent,
     create_portfolio_analysis_record, list_portfolio_analysis_records,
     DEFAULT_BOND_PROMPT,
 )
@@ -164,7 +164,7 @@ async def bond_ai_recommend():
     # 4. 零钱余额
     cash_balance = 0
     try:
-        cash_balance = get_cash_balance().get("balance", 0)
+        cash_balance = get_total_cash_balance()
     except Exception:
         pass
 

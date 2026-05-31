@@ -289,10 +289,10 @@ async def _auto_daily_report():
         holding_text = "暂无持仓"
         portfolio_text = "暂无"
         try:
-            from db import list_holdings, get_portfolio_diversification, get_cash_balance
+            from db import list_holdings, get_portfolio_diversification, get_total_cash_balance
             holdings = list_holdings()
             div = get_portfolio_diversification()
-            cash = get_cash_balance()
+            cash = {"balance": get_total_cash_balance()}
             if holdings:
                 # 按收益率排序，方便 LLM 找出涨跌幅前3
                 sorted_holdings = sorted(holdings, key=lambda x: x.get("profit_rate") or 0, reverse=True)

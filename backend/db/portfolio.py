@@ -187,6 +187,14 @@ def get_cash_balance(user_id: str = "default") -> dict:
     return result
 
 
+def get_total_cash_balance() -> float:
+    """汇总所有账户的零钱余额。"""
+    conn = _get_conn()
+    row = conn.execute("SELECT COALESCE(SUM(balance), 0) as total FROM portfolio_cash").fetchone()
+    conn.close()
+    return row["total"] if row else 0
+
+
 def add_cash(user_id: str, amount: float) -> float:
     """增加（或减少）零钱余额。amount 可为负数（支出）。返回新余额。"""
     conn = _get_conn()

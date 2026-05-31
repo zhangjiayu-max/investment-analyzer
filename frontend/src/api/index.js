@@ -405,14 +405,14 @@ export function testQueryRewrite(query) {
   return api.post('/rag/rewrite', {}, { params: { query } })
 }
 
-/** 获取 RAG 检索统计（旧路径兼容） */
+/** 获取 RAG 检索统计 */
 export function getRagStats(days = 7) {
-  return api.get('/conversation/rag-stats', { params: { days } })
+  return api.get('/rag-stats', { params: { days } })
 }
 
-/** 获取 RAG 检索日志（旧路径兼容） */
+/** 获取 RAG 检索日志 */
 export function getRagLogs(limit = 100) {
-  return api.get('/conversation/rag-logs', { params: { limit } })
+  return api.get('/rag-logs', { params: { limit } })
 }
 
 // ── 图片浏览 API ──────────────────────────────────────
@@ -518,18 +518,18 @@ export function crawlSingleAuthorArticle(id) {
   return api.post(`/author-articles/${id}/crawl`, {}, { timeout: 120000 })
 }
 
-// ── 个人文档 API（新路径: /api/article/linked/*）─────────────────────────────────────
+// ── 个人文档 API（新路径: /api/linked-articles/*）─────────────────────────────────────
 
 /** 文档列表 */
 export function listLinkedArticles(limit = 200) {
-  return api.get('/article/linked/list', { params: { limit } })
+  return api.get('/linked-articles', { params: { limit } })
 }
 
 /** 上传文档 */
 export function uploadDocument(file) {
   const form = new FormData()
   form.append('file', file)
-  return api.post('/article/linked/create', form, {
+  return api.post('/linked-articles', form, {
     headers: { 'Content-Type': 'multipart/form-data' },
     timeout: 300000,
   })
@@ -537,27 +537,27 @@ export function uploadDocument(file) {
 
 /** 下载文档 */
 export function downloadDocument(id) {
-  return api.get(`/article/linked/${id}/download`, { responseType: 'blob' })
+  return api.get(`/linked-articles/${id}/download`, { responseType: 'blob' })
 }
 
 /** 获取文档内容 */
 export function getDocumentContent(id) {
-  return api.get(`/article/linked/${id}/content`)
+  return api.get(`/linked-articles/${id}/content`)
 }
 
 /** 对文档做 embedding */
 export function embedDocument(id) {
-  return api.post(`/article/linked/${id}/embed`, {}, { timeout: 300000 })
+  return api.post(`/linked-articles/${id}/embed`, {}, { timeout: 300000 })
 }
 
 /** 获取文档分块详情 */
 export function getDocumentChunks(id) {
-  return api.get(`/article/linked/${id}/chunks`)
+  return api.get(`/linked-articles/${id}/chunks`)
 }
 
 /** 删除文档 */
 export function deleteLinkedArticle(id) {
-  return api.delete(`/article/linked/${id}`)
+  return api.delete(`/linked-articles/${id}`)
 }
 
 // ── AI 市场分析 API ──────────────────────────────────────

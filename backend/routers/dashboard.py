@@ -11,7 +11,7 @@ from fastapi import APIRouter, HTTPException
 from db import (
     list_valuation_indexes, list_index_freshness,
     list_holdings, get_portfolio_summary, get_portfolio_diversification,
-    get_cash_balance,
+    get_cash_balance, get_total_cash_balance,
     get_analysis_agent, create_analysis_history,
     save_recommendations, save_analysis_cache, get_analysis_cache,
     list_recommendations, auto_verify_pending_recommendations,
@@ -496,7 +496,7 @@ async def regenerate_daily_report():
     try:
         holdings = list_holdings()
         div = get_portfolio_diversification()
-        cash = get_cash_balance()
+        cash = {"balance": get_total_cash_balance()}
         if holdings:
             sorted_holdings = sorted(holdings, key=lambda x: x.get("profit_rate") or 0, reverse=True)
             holding_lines = []
@@ -878,7 +878,7 @@ async def get_hotspots_analysis():
     try:
         holdings = list_holdings()
         div = get_portfolio_diversification()
-        cash = get_cash_balance()
+        cash = {"balance": get_total_cash_balance()}
 
         # 持仓明细文本
         if holdings:
