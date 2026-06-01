@@ -694,14 +694,15 @@ def orchestrate(query: str, history: list, rag_context: str = "") -> dict:
     except Exception as e:
         logger.warning(f"注入债市数据失败: {e}")
 
-    # 注入近期热点新闻到 prebuilt_context
+    # 注入近期热点新闻到 prebuilt_context（同步调用，从缓存读取）
     try:
-        from routers.dashboard import get_hot_topics
-        hot_data = await get_hot_topics()
-        news_list = hot_data.get("news", [])[:3]
-        if news_list:
-            news_lines = "\n".join(f"- {n.get('title', '')}" for n in news_list if n.get("title"))
-            prebuilt_context += f"## 今日市场热点\n{news_lines}\n\n"
+        from routers.dashboard import _hot_topics_cache
+        hot_cache = _hot_topics_cache.get("data")
+        if hot_cache:
+            news_list = hot_cache.get("news", [])[:3]
+            if news_list:
+                news_lines = "\n".join(f"- {n.get('title', '')}" for n in news_list if n.get("title"))
+                prebuilt_context += f"## 今日市场热点\n{news_lines}\n\n"
     except Exception as e:
         logger.warning(f"注入热点新闻失败: {e}")
 
@@ -1041,14 +1042,15 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
     except Exception as e:
         logger.warning(f"注入债市数据失败: {e}")
 
-    # 注入近期热点新闻到 prebuilt_context
+    # 注入近期热点新闻到 prebuilt_context（同步调用，从缓存读取）
     try:
-        from routers.dashboard import get_hot_topics
-        hot_data = await get_hot_topics()
-        news_list = hot_data.get("news", [])[:3]
-        if news_list:
-            news_lines = "\n".join(f"- {n.get('title', '')}" for n in news_list if n.get("title"))
-            prebuilt_context += f"## 今日市场热点\n{news_lines}\n\n"
+        from routers.dashboard import _hot_topics_cache
+        hot_cache = _hot_topics_cache.get("data")
+        if hot_cache:
+            news_list = hot_cache.get("news", [])[:3]
+            if news_list:
+                news_lines = "\n".join(f"- {n.get('title', '')}" for n in news_list if n.get("title"))
+                prebuilt_context += f"## 今日市场热点\n{news_lines}\n\n"
     except Exception as e:
         logger.warning(f"注入热点新闻失败: {e}")
 

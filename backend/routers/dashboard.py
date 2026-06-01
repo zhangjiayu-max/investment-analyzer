@@ -496,15 +496,15 @@ async def regenerate_daily_report():
     try:
         holdings = list_holdings()
         div = get_portfolio_diversification()
-        cash = {"balance": get_total_cash_balance()}
+        cash_balance = get_total_cash_balance()
         if holdings:
             sorted_holdings = sorted(holdings, key=lambda x: x.get("profit_rate") or 0, reverse=True)
             holding_lines = []
             for h in sorted_holdings[:15]:
                 pct = h.get("profit_rate")
-                pct_str = f"{pct:+.1f}%" if pct is not None else "N/A"
+                pct_str = f"{pct:+.1%}" if pct is not None else "N/A"
                 val = h.get("current_value", 0) or 0
-                profit = h.get("profit", 0) or 0
+                profit = h.get("profit_loss", 0) or 0
                 holding_lines.append(
                     f"- {h['fund_name']}（{h.get('fund_code','')}）: "
                     f"市值{val:.0f}元, 收益率{pct_str}, 盈亏{profit:+.0f}元"
@@ -514,7 +514,7 @@ async def regenerate_daily_report():
             f"持仓{div.get('holding_count',0)}只基金，"
             f"总市值{div.get('total_value',0):.0f}元，"
             f"累计盈亏{div.get('total_profit',0):+.0f}元，"
-            f"可用零钱{cash:.0f}元"
+            f"可用零钱{cash_balance:.0f}元"
         )
     except Exception:
         pass
@@ -875,18 +875,19 @@ async def get_hotspots_analysis():
     try:
         holdings = list_holdings()
         div = get_portfolio_diversification()
-        cash = {"balance": get_total_cash_balance()}
+        cash_balance = get_total_cash_balance()
 
         # 持仓明细文本
         if holdings:
             holding_lines = []
             for h in holdings[:15]:
                 pct = h.get("profit_rate")
-                pct_str = f"{pct:+.1f}%" if pct is not None else "N/A"
+                pct_str = f"{pct:+.1%}" if pct is not None else "N/A"
                 val = h.get("current_value", 0) or 0
+                profit = h.get("profit_loss", 0) or 0
                 holding_lines.append(
                     f"- {h['fund_name']}（{h.get('fund_code','')}）: "
-                    f"市值{val:.0f}元, 收益率{pct_str}"
+                    f"市值{val:.0f}元, 收益率{pct_str}, 盈亏{profit:+.0f}元"
                 )
             holding_text = "\n".join(holding_lines)
         else:
@@ -895,8 +896,8 @@ async def get_hotspots_analysis():
         portfolio_text = (
             f"持仓{div.get('holding_count',0)}只基金，"
             f"总市值{div.get('total_value',0):.0f}元，"
-            f"盈亏{div.get('total_profit',0):.0f}元，"
-            f"可用零钱{cash:.0f}元"
+            f"累计盈亏{div.get('total_profit',0):+.0f}元，"
+            f"可用零钱{cash_balance:.0f}元"
         )
     except Exception:
         holding_text = "暂无"
