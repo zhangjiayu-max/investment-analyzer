@@ -173,6 +173,9 @@ function selectIndex(code) {
   searchQuery.value = ''
   // 失焦搜索框
   document.querySelector('.select-search-input')?.blur()
+  // 立即加载该指数的估值历史和分析历史
+  if (selectedMetric.value) loadHistory()
+  if (activeTab.value === 'analysis') loadAnalysisHistory()
 }
 
 function selectMetric(metric) {
