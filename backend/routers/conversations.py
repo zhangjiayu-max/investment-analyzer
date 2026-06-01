@@ -841,65 +841,83 @@ def _sse_event(event_type: str, data: dict) -> str:
 
 
 async def _proactive_alert_check(query: str, answer: str, specialist_results: list):
-    """对话结束后，主动检测是否需要对持仓生成预警。"""
+    """对话结束后，主动检测是否需要对持仓生成预警。
+
+    仅在对话中**明确建议**对某只持仓基金进行加减仓、或明确提示未来风险/涨幅时才触发。
+    普通的持仓查看、市场分析、估值讨论等不会触发预警。
+    """
     try:
-        # 检测是否涉及政策/新闻/估值变化等可能影响持仓的内容
-        alert_keywords = ["政策", "新闻", "利好", "利空", "上涨", "下跌", "大涨", "大跌",
-                          "风险", "泡沫", "危机", "加息", "降息", "降准", "监管",
-                          "高估", "低估", "加仓", "减仓", "卖出", "买入", "注意"]
-        if not any(kw in query for kw in alert_keywords) and not any(kw in answer for kw in alert_keywords):
+        # ── 第一关：必须包含明确的动作/建议类关键词 ──
+        # 仅当 AI 回复中出现明确的买卖建议、风险提示时才继续
+        action_keywords = [
+            "建议加仓", "建议买入", "建议减仓", "建议卖出", "建议赎回", "建议清仓",
+            "可以加仓", "可以买入", "可以减仓", "可以卖出", "可以赎回",
+            "考虑加仓", "考虑买入", "考虑减仓", "考虑卖出",
+            "应该买入", "应该卖出", "应该加仓", "应该减仓",
+            "适当加仓", "适当减仓", "适当买入", "适当卖出",
+            "分批买入", "分批卖出", "分批加仓", "分批减仓",
+            "止盈", "止损", "预警风险", "重大风险", "需要注意",
+            "及时调整", "及时减仓", "及时止盈",
+        ]
+        combined_text = query + " " + answer
+        for sr in specialist_results:
+            analysis = sr.get("analysis", "")
+            if analysis:
+                combined_text += " " + analysis[:2000]
+
+        has_action = any(kw in combined_text for kw in action_keywords)
+        if not has_action:
             return
 
-        # 获取持仓数据
+        # ── 第二关：必须关联到具体的持仓基金 ──
         holdings = list_holdings()
         if not holdings:
             return
 
-        # 检查各专家分析中是否有关联持仓的内容
-        fund_names = {h.get("fund_name", "") for h in holdings if h.get("fund_name")}
-        index_names = {h.get("index_name", "") for h in holdings if h.get("index_name")}
-
-        # 构建预警内容
         alert_holdings = []
-        combined_text = query + " " + answer
-
-        for sr in specialist_results:
-            analysis = sr.get("analysis", "")
-            if not analysis:
-                continue
-            combined_text += " " + analysis[:2000]
-
         for h in holdings:
             fname = h.get("fund_name", "")
             iname = h.get("index_name", "")
             if (fname and fname in combined_text) or (iname and iname in combined_text):
                 alert_holdings.append(h)
 
-        if not alert_holdings and any(kw in combined_text for kw in ["政策", "新闻", "利好", "利空", "市场"]):
-            # 虽然没直接提到某只基金，但涉及政策/新闻，对全部持仓生成轻度预警
-            for h in holdings[:3]:  # 最多3只
-                create_alert(
-                    alert_type="news_impact",
-                    title=f"市场动态可能影响 {h.get('fund_name', '')}",
-                    content=f"当前对话涉及市场变化，可能影响您的持仓 {h.get('fund_name', '')}（{h.get('fund_code', '')}）。建议关注后续走势。",
-                    severity="info",
-                    related_fund_code=h.get("fund_code"),
-                    related_fund_name=h.get("fund_name"),
-                    source="ai_analysis",
-                )
-        elif alert_holdings:
-            for h in alert_holdings[:5]:
-                create_alert(
-                    alert_type="news_impact",
-                    title=f"对话涉及 {h.get('fund_name', '')}，建议关注",
-                    content=f"当前对话内容涉及您的持仓 {h.get('fund_name', '')}（{h.get('fund_code', '')}），可能影响该持仓。",
-                    severity="info",
-                    related_fund_code=h.get("fund_code"),
-                    related_fund_name=h.get("fund_name"),
-                    source="ai_analysis",
-                )
+        if not alert_holdings:
+            return
+
+        # ── 第三关：为匹配的持仓生成预警 ──
+        for h in alert_holdings[:3]:
+            # 从对话内容中截取相关片段作为预警依据
+            fname = h.get("fund_name", "")
+            reason = _extract_alert_reason(combined_text, fname)
+            create_alert(
+                alert_type="news_impact",
+                title=f"对话中提及 {fname} 的操作建议",
+                content=reason or f"对话中涉及对 {fname}（{h.get('fund_code', '')}）的操作建议，请留意。",
+                severity="info",
+                related_fund_code=h.get("fund_code"),
+                related_fund_name=fname,
+                source="ai_analysis",
+            )
     except Exception as e:
         logger.warning(f"[proactive_alert] 生成预警异常: {e}")
+
+
+def _extract_alert_reason(text: str, fund_name: str) -> str:
+    """从对话文本中提取与基金相关的建议片段（最多 200 字）。"""
+    if not fund_name:
+        return ""
+    idx = text.find(fund_name)
+    if idx < 0:
+        return ""
+    # 取基金名前后各 100 字符作为上下文
+    start = max(0, idx - 100)
+    end = min(len(text), idx + len(fund_name) + 100)
+    snippet = text[start:end].strip()
+    if start > 0:
+        snippet = "..." + snippet
+    if end < len(text):
+        snippet = snippet + "..."
+    return snippet
 
 
 def _route_to_specialist(query: str) -> str | None:

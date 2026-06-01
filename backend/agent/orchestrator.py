@@ -678,8 +678,32 @@ def orchestrate(query: str, history: list, rag_context: str = "") -> dict:
         valuation_ctx = build_valuation_summary()
         if valuation_ctx:
             system_content += f"\n\n## 当前市场估值\n{valuation_ctx}"
+            prebuilt_context += f"## 当前市场估值数据\n{valuation_ctx}\n\n"
     except Exception as e:
         logger.warning(f"注入持仓/估值上下文失败: {e}")
+
+    # 注入债市数据到 prebuilt_context
+    try:
+        from routers.bond import _fetch_bond_data
+        bond_raw = _fetch_bond_data()
+        if bond_raw and len(bond_raw) > 1:
+            last = bond_raw[-1]
+            temp = last.get("degree", "?")
+            rate = float(last["yield"]) * 100 if last.get("yield") else "?"
+            prebuilt_context += f"## 债市数据\n- 债市温度: {temp}°\n- 10年期国债收益率: {rate}%\n\n"
+    except Exception as e:
+        logger.warning(f"注入债市数据失败: {e}")
+
+    # 注入近期热点新闻到 prebuilt_context
+    try:
+        from routers.dashboard import get_hot_topics
+        hot_data = await get_hot_topics()
+        news_list = hot_data.get("news", [])[:3]
+        if news_list:
+            news_lines = "\n".join(f"- {n.get('title', '')}" for n in news_list if n.get("title"))
+            prebuilt_context += f"## 今日市场热点\n{news_lines}\n\n"
+    except Exception as e:
+        logger.warning(f"注入热点新闻失败: {e}")
 
     llm_messages = [{"role": "system", "content": system_content}]
 
@@ -1001,8 +1025,32 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
         valuation_ctx = build_valuation_summary()
         if valuation_ctx:
             system_content += f"\n\n## 当前市场估值\n{valuation_ctx}"
+            prebuilt_context += f"## 当前市场估值数据\n{valuation_ctx}\n\n"
     except Exception as e:
         logger.warning(f"注入持仓/估值上下文失败: {e}")
+
+    # 注入债市数据到 prebuilt_context
+    try:
+        from routers.bond import _fetch_bond_data
+        bond_raw = _fetch_bond_data()
+        if bond_raw and len(bond_raw) > 1:
+            last = bond_raw[-1]
+            temp = last.get("degree", "?")
+            rate = float(last["yield"]) * 100 if last.get("yield") else "?"
+            prebuilt_context += f"## 债市数据\n- 债市温度: {temp}°\n- 10年期国债收益率: {rate}%\n\n"
+    except Exception as e:
+        logger.warning(f"注入债市数据失败: {e}")
+
+    # 注入近期热点新闻到 prebuilt_context
+    try:
+        from routers.dashboard import get_hot_topics
+        hot_data = await get_hot_topics()
+        news_list = hot_data.get("news", [])[:3]
+        if news_list:
+            news_lines = "\n".join(f"- {n.get('title', '')}" for n in news_list if n.get("title"))
+            prebuilt_context += f"## 今日市场热点\n{news_lines}\n\n"
+    except Exception as e:
+        logger.warning(f"注入热点新闻失败: {e}")
 
     llm_messages = [{"role": "system", "content": system_content}]
 
