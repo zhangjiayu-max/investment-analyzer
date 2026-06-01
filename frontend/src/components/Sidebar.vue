@@ -41,7 +41,7 @@ const navItems = [
   { key: 'chat', label: 'AI 对话', icon: 'chat' },
   { key: 'articles', label: '文章管理', icon: 'articles' },
   { key: 'valuation', label: '估值数据 🔥', icon: 'valuation', hot: true },
-  { key: 'gallery', label: '图片浏览', icon: 'gallery' },
+  { key: 'gallery', label: '估值图片', icon: 'gallery' },
   { key: 'portfolio', label: '持仓管理 🔥', icon: 'portfolio', hot: true },
   {
     key: 'group-knowledge', label: '知识库', icon: 'author',

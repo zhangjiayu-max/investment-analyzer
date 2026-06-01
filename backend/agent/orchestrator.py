@@ -624,6 +624,7 @@ def orchestrate(query: str, history: list, rag_context: str = "", cancel_event: 
         }
     """
     start_time = time.time()
+    total_tokens = 0  # 累计 token 用量
 
     # 0. Token 预算检查
     budget = check_token_budget()
@@ -945,6 +946,18 @@ def orchestrate(query: str, history: list, rag_context: str = "", cancel_event: 
 
     duration_ms = int((time.time() - start_time) * 1000)
 
+    # 计算本次 token 用量（从数据库读取本次调用期间的记录）
+    try:
+        from db._conn import _get_conn
+        conn = _get_conn()
+        row = conn.execute(
+            "SELECT COALESCE(SUM(total_tokens), 0) as total FROM token_usage WHERE created_at >= datetime('now', '-5 minutes')"
+        ).fetchone()
+        total_tokens = row["total"] if row else 0
+        conn.close()
+    except Exception:
+        total_tokens = 0
+
     return {
         "answer": final_answer,
         "specialist_results": specialist_results,
@@ -952,6 +965,7 @@ def orchestrate(query: str, history: list, rag_context: str = "", cancel_event: 
         "turns": MAX_TURNS,
         "duration_ms": duration_ms,
         "complexity": complexity,
+        "token_usage": total_tokens,
     }
 
 

@@ -40,7 +40,7 @@ const tabs = [
 // ── 更多菜单项 ──
 const moreItems = [
   { key: 'articles', label: '文章管理', icon: 'articles' },
-  { key: 'gallery', label: '图片浏览', icon: 'gallery' },
+  { key: 'gallery', label: '估值图片', icon: 'gallery' },
   { key: 'author', label: '作者文章', icon: 'author' },
   { key: 'linked', label: '个人文档', icon: 'link' },
   { key: 'rag', label: 'RAG 分析', icon: 'rag' },

@@ -216,9 +216,9 @@ function extractResult(resultData) {
   if (!resultData) return ''
   try {
     const obj = JSON.parse(resultData)
-    // 如果有 result 字段，返回 markdown 内容
+    // 按优先级提取内容
+    if (obj.answer) return obj.answer
     if (obj.result) return obj.result
-    // 如果有 analysis 字段
     if (obj.analysis) return obj.analysis
     // 否则格式化 JSON
     return JSON.stringify(obj, null, 2)
