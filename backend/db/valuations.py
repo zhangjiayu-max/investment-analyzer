@@ -83,19 +83,24 @@ def get_valuation_history(index_code: str, days: int = 30, metric_type: str = No
     return [dict(r) for r in rows]
 
 
-def get_latest_valuation(index_code: str, metric_type: str = None) -> dict | None:
-    """获取某指数最新一条估值。"""
+def get_latest_valuation(index_code: str, metric_type: str = None, max_days: int = None) -> dict | None:
+    """获取某指数最新一条估值。max_days 限制只取最近 N 天内的数据。"""
+    from datetime import datetime, timedelta
     conn = _get_conn()
+    date_filter = ""
+    if max_days:
+        cutoff = (datetime.now() - timedelta(days=max_days)).strftime("%Y-%m-%d")
+        date_filter = f" AND snapshot_date >= '{cutoff}'"
     if metric_type:
-        row = conn.execute("""
+        row = conn.execute(f"""
             SELECT * FROM index_valuations
-            WHERE index_code = ? AND metric_type = ?
+            WHERE index_code = ? AND metric_type = ?{date_filter}
             ORDER BY snapshot_date DESC LIMIT 1
         """, (index_code, metric_type)).fetchone()
     else:
-        row = conn.execute("""
+        row = conn.execute(f"""
             SELECT * FROM index_valuations
-            WHERE index_code = ?
+            WHERE index_code = ?{date_filter}
             ORDER BY snapshot_date DESC LIMIT 1
         """, (index_code,)).fetchone()
     conn.close()

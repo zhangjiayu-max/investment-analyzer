@@ -84,13 +84,19 @@ async def parse_dd_image(req: ParseDDRequest):
         result["dd_id"] = dd_id
 
         # 写 analysis_records 用于图片状态追踪
+        # 螺丝钉估值图片包含多指数，用 index_name 标识避免显示"未识别"
+        update_date = result.get("update_date", "")
+        index_count = result.get("count", 0)
+        dd_label = f"螺丝钉估值表（{update_date}，{index_count}个指数）" if update_date else "螺丝钉估值表"
+
         conn = _get_conn()
         existing = conn.execute("SELECT id FROM analysis_records WHERE image_path = ?", (rel_path,)).fetchone()
         if existing:
-            conn.execute("""UPDATE analysis_records SET status='success', updated_at=datetime('now','localtime') WHERE id=?""", (existing[0],))
+            conn.execute("""UPDATE analysis_records SET status='success', index_name=?, updated_at=datetime('now','localtime') WHERE id=?""",
+                         (dd_label, existing[0]))
         else:
-            conn.execute("""INSERT INTO analysis_records (image_path, image_url, status) VALUES (?, ?, 'success')""",
-                         (rel_path, image_url))
+            conn.execute("""INSERT INTO analysis_records (image_path, image_url, index_name, status) VALUES (?, ?, ?, 'success')""",
+                         (rel_path, image_url, dd_label))
         conn.commit()
         conn.close()
 

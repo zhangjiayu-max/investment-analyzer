@@ -598,7 +598,7 @@ def _execute_specialist(tool_name: str, query: str, cancel_event: threading.Even
         return json.dumps({"error": f"专家执行失败: {e}"}, ensure_ascii=False)
 
 
-def orchestrate(query: str, history: list, rag_context: str = "") -> dict:
+def orchestrate(query: str, history: list, rag_context: str = "", cancel_event: threading.Event | None = None) -> dict:
     """
     Orchestrator 主循环。
 
