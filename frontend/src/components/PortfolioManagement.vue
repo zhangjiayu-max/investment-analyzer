@@ -674,20 +674,24 @@ const feedbackGiven = ref(null)  // null | 'helpful' | 'unhelpful'
 
 // 全景诊断
 const panoramaRecords = ref([])
+const panoramaShowAll = ref(false)
 
 // 单基金深度分析
 const deepDiveSelectedHolding = ref('')
 const deepDiveRecords = ref([])
+const deepDiveShowAll = ref(false)
 
 // 交易复盘
 const reviewStartDate = ref('')
 const reviewEndDate = ref('')
 const tradeReviewRecords = ref([])
+const tradeReviewShowAll = ref(false)
 
 // 情景推演
 const whatIfScenario = ref('market_drop')
 const whatIfParameter = ref(10)
 const whatIfRecords = ref([])
+const whatIfShowAll = ref(false)
 const aiHistoryLoading = ref(false)
 
 // Transaction tags
@@ -2344,8 +2348,8 @@ function txDisplayAmount(tx) {
             </div>
             <div class="result-body" v-html="renderMarkdown(modeResult)"></div>
             <div class="result-feedback">
-              <button class="btn-feedback" @click="submitFeedback(modeRecordId, 'helpful')">👍</button>
-              <button class="btn-feedback" @click="submitFeedback(modeRecordId, 'unhelpful')">👎</button>
+              <button class="btn-feedback" @click="submitFeedback('helpful')">👍</button>
+              <button class="btn-feedback" @click="submitFeedback('unhelpful')">👎</button>
             </div>
           </div>
 
@@ -2487,7 +2491,7 @@ function txDisplayAmount(tx) {
               </button>
             </div>
             <div v-if="modeResult && aiMode === 'deepdive'" class="ai-mode-result">
-              <div class="ai-result-content markdown-body">{{ modeResult }}</div>
+              <div class="ai-result-content markdown-body" v-html="renderMarkdown(modeResult)"></div>
               <div v-if="modeRecordId && !feedbackGiven" class="ai-feedback">
                 <span class="ai-feedback-label">对结果满意吗？</span>
                 <button class="btn-feedback btn-feedback-up" @click="submitFeedback('helpful')" title="有用">👍</button>
@@ -2529,7 +2533,7 @@ function txDisplayAmount(tx) {
               </button>
             </div>
             <div v-if="modeResult && aiMode === 'trade-review'" class="ai-mode-result">
-              <div class="ai-result-content markdown-body">{{ modeResult }}</div>
+              <div class="ai-result-content markdown-body" v-html="renderMarkdown(modeResult)"></div>
               <div v-if="modeRecordId && !feedbackGiven" class="ai-feedback">
                 <span class="ai-feedback-label">对结果满意吗？</span>
                 <button class="btn-feedback btn-feedback-up" @click="submitFeedback('helpful')" title="有用">👍</button>
@@ -2574,7 +2578,7 @@ function txDisplayAmount(tx) {
               </button>
             </div>
             <div v-if="modeResult && aiMode === 'what-if'" class="ai-mode-result">
-              <div class="ai-result-content markdown-body">{{ modeResult }}</div>
+              <div class="ai-result-content markdown-body" v-html="renderMarkdown(modeResult)"></div>
               <div v-if="modeRecordId && !feedbackGiven" class="ai-feedback">
                 <span class="ai-feedback-label">对结果满意吗？</span>
                 <button class="btn-feedback btn-feedback-up" @click="submitFeedback('helpful')" title="有用">👍</button>

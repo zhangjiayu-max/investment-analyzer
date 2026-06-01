@@ -34,7 +34,7 @@ export function getTaskImages(taskId) {
 
 /** 分析任务中的所有图片 */
 export function analyzeTaskImages(taskId) {
-  return api.post(`/task/${taskId}/analyze`, {}, { timeout: 300000 })
+  return api.post(`/tasks/${taskId}/analyze-images`, {}, { timeout: 300000 })
 }
 
 // ── 对话 API（新路径: /api/conversation/*）─────────────────────────────────────
@@ -402,7 +402,7 @@ export function testRagSearch(query, limit = 5, contentTypes = null, useRewrite 
 
 /** 测试 Query Rewrite */
 export function testQueryRewrite(query) {
-  return api.post('/rag/rewrite', {}, { params: { query } })
+  return api.get('/rag/rewrite', { params: { query } })
 }
 
 /** 获取 RAG 检索统计 */

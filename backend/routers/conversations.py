@@ -331,12 +331,8 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
                         trace_id=trace_id,
                     )
 
-                    # 输出审核
+                    # 构建专家结果
                     answer = result.get("analysis", "")
-                    review = review_output(answer, specialist_results)
-                    if review["warnings"]:
-                        logger.warning(f"[trace:{trace_id}] 输出审核警告: {review['warnings']}")
-                    answer = review["content"]
                     specialist_results = [{
                         "agent_key": result.get("agent_key", agent_key),
                         "agent": result.get("agent", ""),
@@ -344,6 +340,12 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
                         "analysis": answer,
                         "duration_ms": result.get("duration_ms", 0),
                     }]
+                    # 输出审核
+                    review = review_output(answer, specialist_results)
+                    if review["warnings"]:
+                        logger.warning(f"[trace:{trace_id}] 输出审核警告: {review['warnings']}")
+                    answer = review["content"]
+                    specialist_results[0]["analysis"] = answer
 
                     yield _sse_event("answer", {
                         "content": answer,
@@ -1057,7 +1059,7 @@ async def get_rag_stats_api(days: int = 7):
             kws = json.loads(row[0] or "[]")
             for kw in kws:
                 keyword_counter[kw] += 1
-        except:
+        except Exception:
             pass
     top_keywords = [{"keyword": k, "count": c} for k, c in keyword_counter.most_common(20)]
 
@@ -1075,7 +1077,7 @@ async def get_rag_stats_api(days: int = 7):
             types = json.loads(row[0] or "[]")
             for t in types:
                 type_counter[t] += 1
-        except:
+        except Exception:
             pass
     type_distribution = [{"type": t, "count": c} for t, c in type_counter.most_common()]
 

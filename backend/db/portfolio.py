@@ -1304,12 +1304,12 @@ def get_portfolio_analysis_record(record_id: int) -> dict | None:
 def update_analysis_feedback(record_id: int, feedback: str, note: str = "") -> bool:
     """提交用户对分析结果的反馈（helpful/unhelpful）。"""
     conn = _get_conn()
-    conn.execute(
+    cursor = conn.execute(
         "UPDATE portfolio_analysis_records SET feedback = ?, feedback_note = ? WHERE id = ?",
         (feedback, note, record_id)
     )
     conn.commit()
-    affected = conn.total_changes
+    affected = cursor.rowcount
     conn.close()
     return affected > 0
 
