@@ -335,6 +335,9 @@ function confirmParseImage(img) {
       try {
         const { data } = await parseDDImage(img.path)
         parseResult.value = { ok: true, data, name: img.name }
+        // 解析成功后从待解析列表移除，刷新已解析列表
+        ddImages.value = ddImages.value.filter(i => i.path !== img.path)
+        await loadRecords()
       } catch (e) {
         parseResult.value = { ok: false, message: e.response?.data?.detail || e.message, name: img.name }
       } finally {

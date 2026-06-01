@@ -127,6 +127,19 @@ investment-analyzer/
 
 **强制重启后端（杀掉重复进程）**：
 ```bash
+# 使用脚本（推荐）：
+./scripts/restart-backend.sh
+
+# 或手动（注意必须 cd 到 backend 目录）：
+cd /Users/xiaoyuer/projects/investment-analyzer/backend && pkill -f "uvicorn app:app" 2>/dev/null; sleep 1 && nohup python3 -m uvicorn app:app --host 0.0.0.0 --port 8000 --reload > /tmp/app.log 2>&1 &
+```
+
+**⚠️ 易错提醒**：uvicorn 必须在 `backend/` 目录下启动，否则会报 `Could not import module "app"` 错误！
+| 前端 Vue/JS 文件 | 必须手动构建：`cd frontend && npm run build:deploy`（会自动清理旧文件再复制） |
+| 前后端都改了 | 先构建前端，后端自动重载 |
+
+**强制重启后端（杀掉重复进程）**：
+```bash
 # 杀掉所有相关进程
 pkill -f "uvicorn app:app" 2>/dev/null; sleep 1
 # 重新启动
