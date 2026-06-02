@@ -16,6 +16,7 @@
   "dependencies": {
     "@vueuse/core": "^14.3.0",
     "axios": "^1.16.1",
+    "dompurify": "^3.4.7",
     "echarts": "^6.0.0",
     "fuse.js": "^7.3.0",
     "lightweight-charts": "^5.2.0",

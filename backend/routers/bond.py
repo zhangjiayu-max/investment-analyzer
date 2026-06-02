@@ -21,30 +21,47 @@ router = APIRouter(prefix="/api/bond", tags=["bond"])
 
 def _fetch_bond_data():
     """抓取有知有行债市温度数据，返回原始数据列表。"""
-    resp = req.get(
-        "https://youzhiyouxing.cn/data/macro",
-        headers={"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"},
-        timeout=15,
-    )
-    resp.raise_for_status()
+    try:
+        resp = req.get(
+            "https://youzhiyouxing.cn/data/macro",
+            headers={"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"},
+            timeout=15,
+        )
+        resp.raise_for_status()
 
-    match = re.search(r'data-cbond-history="([^"]+)"', resp.text)
-    if not match:
+        match = re.search(r'data-cbond-history="([^"]+)"', resp.text)
+        if not match:
+            return []
+
+        raw = html_mod.unescape(match.group(1))
+        bracket_count = 0
+        end_idx = 0
+        for i, c in enumerate(raw):
+            if c == "[":
+                bracket_count += 1
+            elif c == "]":
+                bracket_count -= 1
+                if bracket_count == 0:
+                    end_idx = i + 1
+                    break
+
+        if end_idx == 0:
+            logging.warning("[_fetch_bond_data] 未找到完整 JSON 数组")
+            return []
+
+        return json.loads(raw[:end_idx])
+    except req.exceptions.Timeout:
+        logging.warning("[_fetch_bond_data] 请求超时")
         return []
-
-    raw = html_mod.unescape(match.group(1))
-    bracket_count = 0
-    end_idx = 0
-    for i, c in enumerate(raw):
-        if c == "[":
-            bracket_count += 1
-        elif c == "]":
-            bracket_count -= 1
-            if bracket_count == 0:
-                end_idx = i + 1
-                break
-
-    return json.loads(raw[:end_idx])
+    except req.exceptions.RequestException as e:
+        logging.warning(f"[_fetch_bond_data] 网络请求失败: {e}")
+        return []
+    except (json.JSONDecodeError, ValueError) as e:
+        logging.warning(f"[_fetch_bond_data] JSON 解析失败: {e}")
+        return []
+    except Exception as e:
+        logging.warning(f"[_fetch_bond_data] 未知错误: {e}")
+        return []
 
 
 @router.get("/market-temperature")

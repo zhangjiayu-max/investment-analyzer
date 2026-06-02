@@ -7,6 +7,7 @@ import AppToast from './AppToast.vue'
 import Skeleton from './ui/Skeleton.vue'
 import EmptyState from './ui/EmptyState.vue'
 import { useToast } from '../composables/useToast'
+import DOMPurify from 'dompurify'
 
 const { showToast } = useToast()
 
@@ -85,11 +86,12 @@ function formatBriefingTime(ts) {
 
 function renderBriefing(text) {
   if (!text) return ''
-  return text
+  const html = text
     .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
     .replace(/^\s*[-*]\s+(.*)/gm, '<li>$1</li>')
     .replace(/(<li>.*<\/li>\n?)+/gs, m => `<ul>${m}</ul>`)
     .replace(/\n/g, '<br>')
+  return DOMPurify.sanitize(html)
 }
 
 function confirmRegenerateReport() {
@@ -207,6 +209,7 @@ onActivated(async () => {
     loadHotTopics(),
     loadDailyReport(),
     loadRecHistory(),
+    loadBondTemperature(),
   ])
 })
 
@@ -748,7 +751,7 @@ const concentrationIcon = { low: '✅', moderate: '⚡', high: '⚠️' }
               <span class="panorama-title">AI 全景诊断</span>
               <span class="panorama-time">{{ panoramaResult.created_at?.slice(0, 16) }}</span>
             </div>
-            <div class="panorama-content" v-html="renderBriefing(panoramaResult.result_data)"></div>
+            <div class="panorama-content" v-html="renderBriefing(panoramaResult.result_data || panoramaResult.result)"></div>
           </div>
           <div v-else-if="panoramaResult?.error" class="panorama-section">
             <span class="panorama-error">{{ panoramaResult.error }}</span>
@@ -1033,7 +1036,7 @@ const concentrationIcon = { low: '✅', moderate: '⚡', high: '⚠️' }
               <div class="spinner"></div>
               <p>AI 分析中...</p>
             </div>
-            <template v-if="!bondLoading">
+            <template v-if="!bondLoading && bondResult">
               <div class="bond-ai-header">
                 <span class="bond-ai-summary">{{ bondResult.summary }}</span>
                 <span class="bond-ai-market">{{ bondResult.market_assessment }}</span>

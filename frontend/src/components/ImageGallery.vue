@@ -526,6 +526,7 @@ onMounted(() => {
 })
 
 onUnmounted(() => {
+  if (searchTimer) clearTimeout(searchTimer)
   document.removeEventListener('paste', handlePaste)
   loading.value = false
   viLoading.value = false
@@ -858,7 +859,7 @@ watch(activeTab, (tab) => {
       :message="confirm.message"
       :danger="confirm.danger"
       @cancel="confirm.visible = false"
-      @confirm="confirm.onConfirm"
+      @confirm="() => confirm.onConfirm?.()"
     />
 
     <!-- Parse Result Modal (螺丝钉) -->

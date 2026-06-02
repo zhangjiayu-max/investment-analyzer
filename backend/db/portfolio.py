@@ -84,10 +84,23 @@ def list_holdings(user_id: str = "default", account: str = None) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+# 持仓表允许更新的字段白名单
+_HOLDING_ALLOWED_FIELDS = {
+    'fund_code', 'fund_name', 'account', 'index_code', 'index_name',
+    'shares', 'cost_price', 'total_cost', 'current_price', 'current_value',
+    'profit_loss', 'profit_rate', 'buy_date', 'last_update', 'notes',
+    'price_updated_at', 'today_change_pct', 'today_profit', 'fund_category',
+    'has_base_position', 'updated_at',
+}
+
 def update_holding(holding_id: int, **fields):
     """更新持仓字段。自动重算 total_cost / current_value / profit_loss / profit_rate。"""
     if not fields:
         return
+    # 字段名白名单校验，防止 SQL 注入
+    invalid = set(fields.keys()) - _HOLDING_ALLOWED_FIELDS
+    if invalid:
+        raise ValueError(f"非法字段名: {invalid}")
     fields["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     # 如果更新了 fund_name 且未指定 fund_category，自动分类
