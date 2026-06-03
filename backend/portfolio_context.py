@@ -23,7 +23,7 @@ def build_portfolio_context(user_id: str = "default") -> str:
         active = [h for h in holdings if (h.get("shares") or 0) > 0]
 
         if not active:
-            return ""
+            return "用户当前无持仓记录。请勿编造任何持仓数据，仅基于市场公开信息进行分析。"
 
         # 现金
         cash_info = get_cash_balance(user_id)

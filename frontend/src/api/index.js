@@ -85,6 +85,16 @@ export function getValuationFreshness() {
   return api.get('/valuation/freshness')
 }
 
+/** 超性价比指数识别 */
+export function getSuperValue() {
+  return api.get('/valuation/super-value')
+}
+
+/** 增强策略分析（LLM 判断机会 vs 陷阱） */
+export function getEnhancedStrategy() {
+  return api.get('/valuation/enhanced-strategy', { timeout: 150000 })
+}
+
 /** 刷新指数实时价格 */
 export function refreshValuationPrices() {
   return api.post('/valuation/refresh-prices', {}, { timeout: 60000 })
@@ -359,6 +369,52 @@ export function sendMessageStream(convId, content, onEvent) {
 /** 取消对话执行（切页面时通知后端更新 streaming 状态） */
 export function cancelConversationExecution(convId) {
   return api.post(`/conversation/${convId}/cancel`)
+}
+
+/** 恢复中断的对话执行（跳过已完成的专家） */
+export function resumeConversationStream(convId, onEvent) {
+  const controller = new AbortController()
+  const baseURL = api.defaults.baseURL || ''
+
+  fetch(`${baseURL}/conversations/${convId}/resume`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    signal: controller.signal,
+  }).then(async response => {
+    const reader = response.body.getReader()
+    const decoder = new TextDecoder()
+    let buffer = ''
+
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      buffer += decoder.decode(value, { stream: true })
+
+      const lines = buffer.split('\n')
+      buffer = lines.pop()
+
+      for (const line of lines) {
+        if (line.startsWith('data: ')) {
+          try {
+            const event = JSON.parse(line.slice(6))
+            onEvent(event)
+          } catch (e) {}
+        }
+      }
+    }
+    if (buffer.startsWith('data: ')) {
+      try {
+        const event = JSON.parse(buffer.slice(6))
+        onEvent(event)
+      } catch (e) {}
+    }
+  }).catch(err => {
+    if (err.name !== 'AbortError') {
+      onEvent({ type: 'error', data: { message: err.message } })
+    }
+  })
+
+  return controller
 }
 
 // ── Trace 执行链路 API ──────────────────────────────────────
@@ -648,6 +704,18 @@ export function getLatestHotspotsAnalysis() {
   return api.get('/dashboard/hotspots-analysis/latest')
 }
 
+// ── 市场热点情报 ─────────────────────────────────────────
+
+/** 市场热点情报概览（force=true 强制重新分析） */
+export function getMarketIntelligenceOverview(force = false) {
+  return api.get('/market-intelligence/overview', { params: { force }, timeout: 120000 })
+}
+
+/** 单个板块深度分析 */
+export function getSectorDetail(sectorName) {
+  return api.get(`/market-intelligence/sector-detail/${encodeURIComponent(sectorName)}`)
+}
+
 /** 获取推荐验证历史 */
 export function getRecommendations(limit = 50, status = '') {
   const params = { limit }
@@ -772,6 +840,11 @@ export function deletePortfolio(id) {
 /** 获取持仓交易记录 */
 export function listPortfolioTransactions(holdingId, limit = 100) {
   return api.get(`/portfolio/${holdingId}/transactions`, { params: { limit } })
+}
+
+/** 获取所有待确认交易 */
+export function listPendingTransactions() {
+  return api.get('/portfolio/pending-transactions')
 }
 
 /** 新增交易记录 */

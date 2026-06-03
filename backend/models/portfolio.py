@@ -30,7 +30,7 @@ class UpdateHoldingRequest(BaseModel):
 
 class CreateTransactionRequest(BaseModel):
     fund_code: str
-    transaction_type: str  # 'buy' | 'sell' | 'dividend'
+    transaction_type: str  # 'buy' | 'sell' | 'dividend' | 'convert'
     amount: float = 0      # 买入金额 / 卖出时可为0（pending）
     transaction_date: str
     shares: float | None = None
@@ -41,12 +41,16 @@ class CreateTransactionRequest(BaseModel):
     submitted_shares: float | None = None  # 卖出时提交的份额
     submitted_amount: float | None = None  # 买入时提交的金额
     transaction_time: str | None = None    # HH:MM 格式，如 14:30
+    fund_name: str | None = None           # 新建买入时基金名称
+    account: str | None = None             # 账户：花无缺/小鱼儿
 
 
 class ConfirmTransactionRequest(BaseModel):
     confirmed_price: float
     confirmed_shares: float | None = None
     confirmed_amount: float | None = None
+    target_fund_code: str | None = None     # 转换时：目标基金代码
+    target_fund_name: str | None = None     # 转换时：目标基金名称
 
 
 class CreateAlertRequest(BaseModel):

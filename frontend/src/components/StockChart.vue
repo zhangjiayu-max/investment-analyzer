@@ -258,4 +258,19 @@ function renderChart(plotlyData) {
   width: 100%;
 }
 
+/* 移动端适配 */
+@media (max-width: 768px) {
+  .chart-card {
+    min-height: 200px;
+    padding: 0.5rem;
+  }
+
+  .chart-loading {
+    height: 200px;
+  }
+
+  .chart-container {
+    height: 250px;
+  }
+}
 </style>

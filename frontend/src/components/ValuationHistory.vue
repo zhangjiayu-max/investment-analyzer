@@ -1,7 +1,7 @@
 <script setup>
 import { ref, watch, onMounted, onUnmounted, computed } from 'vue'
 import * as echarts from 'echarts'
-import { listValuationIndexes, getValuationHistory, getIndexInfo, runAnalysis, listAnalysisHistory, getAnalysisHistoryDetail, deleteAnalysisHistory, refreshValuationPrices, listDDValuations, getDDValuation, getMarketTemperature } from '../api'
+import { listValuationIndexes, getValuationHistory, getIndexInfo, runAnalysis, listAnalysisHistory, getAnalysisHistoryDetail, deleteAnalysisHistory, refreshValuationPrices, listDDValuations, getDDValuation, getMarketTemperature, getSuperValue, getEnhancedStrategy } from '../api'
 import { renderMarkdown } from '../composables/useMarkdown'
 import { isDark } from '../composables/useTheme'
 import { useToast } from '../composables/useToast'
@@ -40,9 +40,28 @@ const ddIndexList = ref([])
 const ddSearchQuery = ref('')
 const ddSortKey = ref('')
 const ddSortAsc = ref(true)
-const analysisLoading = ref(false)
-const analysisResult = ref(null) // 当前分析结果 {id, result, agent_name, token_usage, created_at}
+// 分析状态：按指数 code 独立存储，支持并发分析多个指数
+const analysisLoadingMap = ref({})   // { [indexCode]: boolean }
+const analysisResultMap = ref({})    // { [indexCode]: {id, result, agent_name, token_usage, created_at} }
 const analysisHistory = ref([])
+
+// 超性价比
+const superValueLoading = ref(false)
+const superValueData = ref(null)
+const strategyLoading = ref(false)
+const strategyData = ref(null)
+const breakdownLabels = {
+  valuation: '估值水位',
+  consecutive: '连续下跌',
+  drop_7d: '近期跌幅',
+  zscore: 'Z-score',
+  acceleration: '趋势',
+}
+
+// 当前选中指数的 loading/result（computed 代理）
+const analysisLoading = computed(() => !!analysisLoadingMap.value[selectedCode.value])
+const analysisResult = computed(() => analysisResultMap.value[selectedCode.value] || null)
+const runningCount = computed(() => Object.values(analysisLoadingMap.value).filter(Boolean).length)
 const refreshingPrices = ref(false)
 const historyLoading = ref(false)
 const viewingHistory = ref(null) // 正在查看的历史详情
@@ -245,25 +264,38 @@ const selectedIndexName = computed(() => {
 
 async function handleRunAnalysis() {
   if (!selectedCode.value) return
+  const code = selectedCode.value
+  const name = selectedIndexName.value
   showConfirmRun.value = false
-  analysisLoading.value = true
-  analysisResult.value = null
+  // 设置当前指数为 loading
+  analysisLoadingMap.value = { ...analysisLoadingMap.value, [code]: true }
+  // 清空当前指数的旧结果
+  const newResultMap = { ...analysisResultMap.value }
+  delete newResultMap[code]
+  analysisResultMap.value = newResultMap
   try {
-    const { data } = await runAnalysis(selectedCode.value, selectedIndexName.value)
-    analysisResult.value = {
-      id: data.id,
-      result: data.result,
-      agent_name: '市场日报分析师',
-      token_usage: data.token_usage || 0,
-      created_at: new Date().toISOString(),
+    const { data } = await runAnalysis(code, name)
+    // 写入该指数的结果（即使用户已切换到其他指数，结果也会保留）
+    analysisResultMap.value = {
+      ...analysisResultMap.value,
+      [code]: {
+        id: data.id,
+        result: data.result,
+        agent_name: '指数深度分析师',
+        token_usage: data.token_usage || 0,
+        created_at: new Date().toISOString(),
+      }
     }
     // 刷新历史列表
     loadAnalysisHistory()
   } catch (e) {
     console.error('Analysis failed:', e)
-    analysisResult.value = { result: '分析失败：' + (e.response?.data?.detail || e.message), error: true }
+    analysisResultMap.value = {
+      ...analysisResultMap.value,
+      [code]: { result: '分析失败：' + (e.response?.data?.detail || e.message), error: true }
+    }
   } finally {
-    analysisLoading.value = false
+    analysisLoadingMap.value = { ...analysisLoadingMap.value, [code]: false }
   }
 }
 
@@ -349,6 +381,32 @@ async function loadDDRecords() {
     console.error('Failed to load DD valuations:', e)
   } finally {
     ddLoading.value = false
+  }
+}
+
+async function loadSuperValue() {
+  if (superValueData.value) return  // 已加载过，不重复请求
+  superValueLoading.value = true
+  try {
+    const { data } = await getSuperValue()
+    superValueData.value = data
+  } catch (e) {
+    console.error('Failed to load super value:', e)
+  } finally {
+    superValueLoading.value = false
+  }
+}
+
+async function loadStrategy() {
+  if (strategyData.value) return
+  strategyLoading.value = true
+  try {
+    const { data } = await getEnhancedStrategy()
+    strategyData.value = data
+  } catch (e) {
+    console.error('Failed to load enhanced strategy:', e)
+  } finally {
+    strategyLoading.value = false
   }
 }
 
@@ -610,6 +668,12 @@ defineExpose({ loadHistory })
         </svg>
         螺丝钉图片估值
       </button>
+      <button :class="['outer-tab-btn', { active: outerTab === 'super-value' }]" @click="outerTab = 'super-value'; loadSuperValue()">
+        <svg width="18" height="18" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6"/>
+        </svg>
+        超性价比
+      </button>
     </div>
 
     <!-- ════════ Index Tab (outerTab === 'index') ════════ -->
@@ -690,6 +754,7 @@ defineExpose({ loadHistory })
         </svg>
         <span v-if="analysisLoading" class="spinner-sm"></span>
         {{ analysisLoading ? '分析中...' : 'AI 市场分析' }}
+        <span v-if="runningCount > 1" class="running-badge">{{ runningCount }} 个分析中</span>
         <span class="ai-agent-tooltip">指数深度分析师</span>
       </button>
     </div>
@@ -935,8 +1000,8 @@ defineExpose({ loadHistory })
         <div class="analysis-loading-inner">
           <div class="spinner-lg"></div>
           <div class="analysis-loading-text">
-            <div class="loading-title">AI 正在分析中...</div>
-            <div class="loading-desc">正在检索最新财经新闻并生成分析报告，请稍候</div>
+            <div class="loading-title">AI 正在分析「{{ selectedIndexName }}」...</div>
+            <div class="loading-desc">正在检索最新财经新闻并生成分析报告，可切换指数查看其他分析</div>
           </div>
         </div>
       </div>
@@ -1130,6 +1195,121 @@ defineExpose({ loadHistory })
           </div>
         </div>
       </template>
+    </template><!-- end outerTab === 'dd-image' -->
+
+    <!-- ════════ Super Value Tab (outerTab === 'super-value') ════════ -->
+    <template v-if="outerTab === 'super-value'">
+      <div class="super-value-page">
+        <div v-if="superValueLoading" class="loading-state">
+          <div class="spinner-lg"></div>
+          <span>扫描中...</span>
+        </div>
+        <div v-else-if="superValueData">
+          <div class="sv-header">
+            <div class="sv-summary">
+              <span>扫描 {{ superValueData.total_scanned }} 个指数</span>
+              <span>·</span>
+              <span>数据范围 {{ superValueData.data_range }}</span>
+              <span>·</span>
+              <span>{{ superValueData.scan_time }}</span>
+            </div>
+          </div>
+          <div v-if="superValueData.opportunities?.length" class="sv-list">
+            <div v-for="(item, i) in superValueData.opportunities" :key="item.index_code" class="sv-card">
+              <div class="sv-rank">#{{ i + 1 }}</div>
+              <div class="sv-main">
+                <div class="sv-top">
+                  <span class="sv-name">{{ item.index_name }}</span>
+                  <span class="sv-score" :class="item.score >= 70 ? 'sv-score-high' : item.score >= 55 ? 'sv-score-mid' : ''">{{ item.score }}分</span>
+                  <span class="sv-level" :class="'sv-level-' + item.valuation_level">{{ item.valuation_level }}</span>
+                </div>
+                <div class="sv-metrics">
+                  <span>百分位 <b>{{ item.current_percentile }}%</b></span>
+                  <span v-if="item.current_value">· {{ item.current_value }}</span>
+                  <span v-if="item.zscore != null">· Z-score <b>{{ item.zscore }}</b></span>
+                  <span v-if="item.consecutive_drop_days > 0">· 连续下跌 <b>{{ item.consecutive_drop_days }}天</b></span>
+                  <span v-if="item.drop_7d > 0">· 7日跌 <b>{{ item.drop_7d }}%</b></span>
+                  <span class="sv-source">{{ item.data_source }} · {{ item.data_points }}天</span>
+                </div>
+                <div v-if="item.tags?.length" class="sv-tags">
+                  <span v-for="tag in item.tags" :key="tag" class="sv-tag">{{ tag }}</span>
+                </div>
+                <div class="sv-summary-text">{{ item.summary }}</div>
+                <!-- 打分明细 -->
+                <div v-if="item.score_breakdown" class="sv-breakdown">
+                  <div v-for="(dim, key) in item.score_breakdown" :key="key" class="sv-breakdown-item">
+                    <span class="sv-breakdown-label">{{ breakdownLabels[key] }}</span>
+                    <div class="sv-breakdown-bar">
+                      <div class="sv-breakdown-fill" :style="{ width: (dim.score / dim.max * 100) + '%' }"></div>
+                    </div>
+                    <span class="sv-breakdown-score">{{ dim.score }}/{{ dim.max }}</span>
+                    <span class="sv-breakdown-detail">{{ dim.detail }}</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div v-else class="empty-state" style="padding:2rem">
+            <p>暂无超性价比指数（所有指数评分均低于 40 分）</p>
+          </div>
+
+          <!-- 增强策略分析 -->
+          <div class="sv-strategy-section">
+            <div class="sv-strategy-header">
+              <h3>🧠 增强策略分析</h3>
+              <button
+                v-if="!strategyData && !strategyLoading"
+                class="btn btn-primary btn-sm"
+                @click="loadStrategy"
+              >AI 深度分析</button>
+              <span v-if="strategyLoading" class="spinner-sm"></span>
+            </div>
+
+            <div v-if="strategyLoading" class="loading-state" style="padding:1.5rem">
+              <div class="spinner-lg"></div>
+              <span>增强策略分析师正在分析每个低估指数的机会与风险...</span>
+            </div>
+
+            <div v-else-if="strategyData">
+              <div v-if="strategyData.agent_name || strategyData.token_usage" class="sv-strategy-meta">
+                <span v-if="strategyData.agent_name">{{ strategyData.agent_name }}</span>
+                <span v-if="strategyData.token_usage">· {{ strategyData.token_usage }} tokens</span>
+              </div>
+              <div v-if="strategyData.overall_summary" class="sv-strategy-summary">
+                {{ strategyData.overall_summary }}
+              </div>
+              <div class="sv-strategy-list">
+                <div v-for="s in strategyData.strategies" :key="s.index_code" class="sv-strategy-card">
+                  <div class="sv-strategy-top">
+                    <span class="sv-strategy-name">{{ s.index_name }}</span>
+                    <span :class="['sv-action-badge', 'sv-action-' + (s.action || '').replace(/[立即买入分批建仓观望回避]/g, m => ({'立即买入':'buy','分批建仓':'buy','观望':'hold','回避':'avoid'}[m] || 'hold'))]">
+                      {{ s.action }}
+                    </span>
+                    <span :class="['sv-type-badge', s.opportunity_type === '真低估' ? 'sv-type-good' : s.opportunity_type === '价值陷阱' ? 'sv-type-bad' : 'sv-type-neutral']">
+                      {{ s.opportunity_type }}
+                    </span>
+                  </div>
+                  <div class="sv-strategy-detail">
+                    <div v-if="s.recovery_time" class="sv-strategy-row">
+                      <span class="sv-strategy-label">预期恢复</span>
+                      <span>{{ s.recovery_time }}</span>
+                    </div>
+                    <div v-if="s.catalysts?.length" class="sv-strategy-row">
+                      <span class="sv-strategy-label">催化剂</span>
+                      <span>{{ s.catalysts.join('、') }}</span>
+                    </div>
+                    <div v-if="s.risk_factors?.length" class="sv-strategy-row">
+                      <span class="sv-strategy-label">风险</span>
+                      <span>{{ s.risk_factors.join('、') }}</span>
+                    </div>
+                    <div v-if="s.action_detail" class="sv-strategy-action">{{ s.action_detail }}</div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
     </template>
   </div>
   <ConfirmDialog
@@ -2343,6 +2523,16 @@ defineExpose({ loadHistory })
   visibility: visible;
 }
 
+.running-badge {
+  font-size: 0.6rem;
+  padding: 0.1rem 0.35rem;
+  background: #f59e0b;
+  color: white;
+  border-radius: 8px;
+  margin-left: 0.25rem;
+  font-weight: 600;
+}
+
 /* ── 螺丝钉估值 Tab ── */
 .dd-summary {
   display: flex;
@@ -2569,5 +2759,468 @@ defineExpose({ loadHistory })
   width: 12px;
   height: 12px;
   border-radius: 2px;
+}
+
+/* ── 超性价比 ── */
+
+.super-value-page {
+  padding: 0;
+}
+
+.sv-header {
+  margin-bottom: 1rem;
+}
+
+.sv-summary {
+  display: flex;
+  gap: 0.5rem;
+  font-size: 0.8rem;
+  color: var(--color-text-muted);
+}
+
+.sv-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.sv-card {
+  display: flex;
+  gap: 0.75rem;
+  padding: 1rem;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  transition: border-color 0.15s;
+}
+
+.sv-card:hover {
+  border-color: var(--color-primary-300);
+}
+
+.sv-rank {
+  font-size: 1.5rem;
+  font-weight: 700;
+  color: var(--color-text-muted);
+  min-width: 2.5rem;
+  text-align: center;
+  line-height: 1;
+  padding-top: 0.25rem;
+}
+
+.sv-main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.sv-top {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.sv-name {
+  font-weight: 600;
+  font-size: 0.95rem;
+}
+
+.sv-score {
+  font-size: 0.85rem;
+  font-weight: 700;
+  padding: 0.15rem 0.5rem;
+  border-radius: 4px;
+  background: var(--color-bg-secondary);
+  color: var(--color-text-secondary);
+}
+
+.sv-score-high {
+  background: #fef2f2;
+  color: #dc2626;
+}
+
+.sv-score-mid {
+  background: #fffbeb;
+  color: #d97706;
+}
+
+.sv-level {
+  font-size: 0.75rem;
+  padding: 0.1rem 0.4rem;
+  border-radius: 4px;
+}
+
+.sv-level-极度低估 { background: #fef2f2; color: #dc2626; }
+.sv-level-低估 { background: #fff7ed; color: #ea580c; }
+.sv-level-偏低 { background: #fefce8; color: #ca8a04; }
+.sv-level-适中 { background: #f0fdf4; color: #16a34a; }
+
+.sv-metrics {
+  font-size: 0.8rem;
+  color: var(--color-text-secondary);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+}
+
+.sv-metrics b {
+  color: var(--color-text-primary);
+}
+
+.sv-source {
+  margin-left: auto;
+  font-size: 0.7rem;
+  opacity: 0.5;
+}
+
+.sv-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+
+.sv-tag {
+  font-size: 0.7rem;
+  padding: 0.1rem 0.4rem;
+  background: var(--color-primary-50);
+  color: var(--color-primary-600);
+  border-radius: 4px;
+}
+
+.sv-summary-text {
+  font-size: 0.8rem;
+  color: var(--color-text-muted);
+  line-height: 1.5;
+}
+
+/* ── 打分明细 ── */
+
+.sv-breakdown {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  margin-top: 0.4rem;
+  padding-top: 0.4rem;
+  border-top: 1px dashed var(--color-border-light);
+}
+
+.sv-breakdown-item {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.72rem;
+}
+
+.sv-breakdown-label {
+  min-width: 4rem;
+  color: var(--color-text-muted);
+  flex-shrink: 0;
+}
+
+.sv-breakdown-bar {
+  width: 50px;
+  height: 4px;
+  background: var(--color-border-light);
+  border-radius: 2px;
+  overflow: hidden;
+  flex-shrink: 0;
+}
+
+.sv-breakdown-fill {
+  height: 100%;
+  background: var(--color-primary-500);
+  border-radius: 2px;
+  transition: width 0.3s;
+}
+
+.sv-breakdown-score {
+  min-width: 2rem;
+  text-align: right;
+  font-weight: 600;
+  color: var(--color-text-secondary);
+}
+
+.sv-breakdown-detail {
+  color: var(--color-text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ── 增强策略 ── */
+
+.sv-strategy-section {
+  margin-top: 1.5rem;
+  padding-top: 1.5rem;
+  border-top: 2px solid var(--color-border);
+}
+
+.sv-strategy-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 1rem;
+}
+
+.sv-strategy-header h3 {
+  font-size: 1rem;
+  font-weight: 600;
+}
+
+.btn-sm {
+  padding: 0.35rem 0.75rem;
+  font-size: 0.8rem;
+}
+
+.sv-strategy-meta {
+  font-size: 0.75rem;
+  color: var(--color-text-muted);
+  margin-bottom: 0.5rem;
+  display: flex;
+  gap: 0.25rem;
+}
+
+.sv-strategy-summary {
+  font-size: 0.85rem;
+  line-height: 1.6;
+  color: var(--color-text-secondary);
+  padding: 0.75rem 1rem;
+  background: var(--color-bg-secondary);
+  border-radius: var(--radius-md);
+  margin-bottom: 1rem;
+}
+
+.sv-strategy-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.sv-strategy-card {
+  padding: 1rem;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+}
+
+.sv-strategy-top {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.5rem;
+}
+
+.sv-strategy-name {
+  font-weight: 600;
+  font-size: 0.95rem;
+}
+
+.sv-action-badge {
+  font-size: 0.75rem;
+  padding: 0.15rem 0.5rem;
+  border-radius: 4px;
+  font-weight: 600;
+}
+
+.sv-action-buy { background: #dcfce7; color: #16a34a; }
+.sv-action-hold { background: #fef3c7; color: #d97706; }
+.sv-action-avoid { background: #fef2f2; color: #dc2626; }
+
+.sv-type-badge {
+  font-size: 0.7rem;
+  padding: 0.1rem 0.4rem;
+  border-radius: 4px;
+  margin-left: auto;
+}
+
+.sv-type-good { background: #dcfce7; color: #16a34a; }
+.sv-type-bad { background: #fef2f2; color: #dc2626; }
+.sv-type-neutral { background: #f3f4f6; color: #6b7280; }
+
+.sv-strategy-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  font-size: 0.8rem;
+}
+
+.sv-strategy-row {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.sv-strategy-label {
+  color: var(--color-text-muted);
+  min-width: 3.5rem;
+  flex-shrink: 0;
+}
+
+.sv-strategy-action {
+  margin-top: 0.35rem;
+  padding-top: 0.35rem;
+  border-top: 1px solid var(--color-border-light);
+  color: var(--color-text-secondary);
+  line-height: 1.5;
+}
+
+/* ── 移动端响应式 ────────────────────────────────────────── */
+@media (max-width: 768px) {
+  /* 选择器卡片 */
+  .selector-card {
+    flex-wrap: wrap;
+    padding: 0.75rem;
+    gap: 0.5rem;
+  }
+
+  .selector-label {
+    font-size: 0.85rem;
+    width: 100%;
+  }
+
+  .searchable-select {
+    max-width: 100%;
+    width: 100%;
+  }
+
+  .select-search-input {
+    font-size: 0.9rem;
+    padding: 0.75rem 1rem;
+  }
+
+  .select-dropdown {
+    max-height: 250px;
+  }
+
+  .select-option {
+    padding: 0.85rem 1rem;
+    font-size: 0.9rem;
+  }
+
+  .selector-meta {
+    font-size: 0.75rem;
+    width: 100%;
+  }
+
+  .btn-ghost.btn-sm {
+    width: 100%;
+    justify-content: center;
+    padding: 0.6rem;
+    min-height: 44px;
+  }
+
+  /* 指数头部 */
+  .index-header-card {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0.75rem;
+  }
+
+  .index-header-left {
+    width: 100%;
+  }
+
+  .index-name-wrapper {
+    width: 100%;
+  }
+
+  .index-header-name {
+    font-size: 1rem;
+  }
+
+  /* 历史列表 */
+  .history-item {
+    flex-direction: column;
+    gap: 0.75rem;
+  }
+
+  .history-item-main {
+    width: 100%;
+  }
+
+  .history-item-actions {
+    width: 100%;
+    justify-content: space-between;
+  }
+
+  .history-item-preview {
+    white-space: normal;
+    font-size: 0.85rem;
+  }
+
+  /* 弹窗适配 */
+  .modal-overlay {
+    padding: 1rem;
+  }
+
+  .modal-dialog {
+    max-width: 100%;
+    margin: 0;
+  }
+
+  .modal-lg {
+    max-width: 100%;
+  }
+
+  /* 按钮触摸区域 */
+  .btn-icon-danger {
+    min-width: 44px;
+    min-height: 44px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  /* hover 预览改为始终显示 */
+  .history-item-main:hover .history-item-preview {
+    color: var(--color-text-muted);
+  }
+
+  /* 表格横向滚动 */
+  .valuation-table-wrap {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  /* 网格布局调整 */
+  .valuation-cards {
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 0.75rem;
+  }
+
+  /* 指标选择器 */
+  .metric-tabs {
+    flex-wrap: wrap;
+    gap: 0.5rem;
+  }
+
+  .metric-tab {
+    padding: 0.5rem 0.75rem;
+    font-size: 0.8rem;
+    min-height: 40px;
+  }
+
+  /* 图表容器 */
+  .chart-container {
+    height: 250px;
+  }
+
+  /* 估值卡片 */
+  .valuation-grid {
+    grid-template-columns: 1fr 1fr;
+    gap: 0.75rem;
+  }
+
+  .valuation-item {
+    padding: 0.75rem;
+  }
+
+  .valuation-label {
+    font-size: 0.75rem;
+  }
+
+  .valuation-value {
+    font-size: 1.1rem;
+  }
 }
 </style>

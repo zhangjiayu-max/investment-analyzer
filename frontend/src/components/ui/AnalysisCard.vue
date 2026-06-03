@@ -8,6 +8,7 @@ const props = defineProps({
   agentName: { type: String, default: '' },
   tokenUsage: { type: Number, default: 0 },
   createdAt: { type: String, default: '' },
+  recordId: { type: [Number, String], default: null },
 })
 
 const emit = defineEmits(['feedback'])
@@ -21,6 +22,12 @@ const formattedTime = computed(() => {
 })
 
 const renderedContent = computed(() => renderMarkdown(props.result))
+
+function copyRecordId() {
+  if (props.recordId) {
+    navigator.clipboard.writeText(String(props.recordId)).catch(() => {})
+  }
+}
 </script>
 
 <template>
@@ -34,6 +41,7 @@ const renderedContent = computed(() => renderMarkdown(props.result))
         <span class="analysis-agent">{{ agentName || 'AI 分析' }}</span>
         <span v-if="formattedTime" class="analysis-time">{{ formattedTime }}</span>
         <span v-if="tokenUsage" class="analysis-tokens">{{ tokenUsage }} tokens</span>
+        <span v-if="recordId" class="analysis-record-id" title="点击复制记录 ID" @click="copyRecordId">ID:{{ recordId }}</span>
       </div>
       <div class="analysis-actions">
         <button
@@ -105,6 +113,21 @@ const renderedContent = computed(() => renderMarkdown(props.result))
 .analysis-tokens::before {
   content: '·';
   margin-right: 0.25rem;
+}
+
+.analysis-record-id {
+  opacity: 0.5;
+  font-size: 0.75rem;
+  font-family: monospace;
+  cursor: pointer;
+  padding: 0.1rem 0.3rem;
+  border-radius: 3px;
+  transition: all 0.15s;
+}
+
+.analysis-record-id:hover {
+  opacity: 1;
+  background: var(--color-surface-hover);
 }
 
 .analysis-actions {

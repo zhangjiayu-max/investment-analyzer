@@ -127,4 +127,27 @@ const emit = defineEmits(['confirm', 'cancel'])
   padding: 0.6rem 1rem;
   font-size: 0.85rem;
 }
+
+/* 移动端适配 */
+@media (max-width: 768px) {
+  .dialog-box {
+    margin: 0 0.75rem;
+    max-width: calc(100% - 1.5rem);
+  }
+
+  .dialog-body {
+    padding: 1.25rem 1rem 0.75rem;
+  }
+
+  .dialog-actions {
+    padding: 0 1rem 1rem;
+    flex-direction: column;
+  }
+
+  .dialog-actions button {
+    padding: 0.75rem 1rem;
+    font-size: 0.9rem;
+    min-height: 44px;
+  }
+}
 </style>

@@ -5,6 +5,7 @@ import {
   getMessages, sendMessage, sendMessageStream,
   submitChatFeedback, submitLlmFeedback,
   cancelConversationExecution,
+  resumeConversationStream,
   listTraces,
 } from '../api'
 import ConfirmDialog from './ConfirmDialog.vue'
@@ -35,11 +36,47 @@ const sending = computed(() => currentStream.value?.sending || false)
 
 onMounted(async () => {
   await loadConversations()
+  // 监听页面可见性变化（移动端切后台/锁屏后恢复时刷新）
+  document.addEventListener('visibilitychange', handleVisibilityChange)
+  window.addEventListener('pageshow', handlePageShow)
 })
 
 onBeforeUnmount(() => {
-  // 不自动取消流式执行，让后台继续完成
+  document.removeEventListener('visibilitychange', handleVisibilityChange)
+  window.removeEventListener('pageshow', handlePageShow)
+  // 不取消流式执行，让后端任务继续完成
 })
+
+// 移动端切后台/锁屏 → SSE 断开 → 恢复时刷新消息
+function handleVisibilityChange() {
+  if (document.visibilityState === 'visible') {
+    recoverFromDisconnect()
+  }
+}
+
+function handlePageShow(e) {
+  // bfcache 恢复时也会触发
+  if (e.persisted) {
+    recoverFromDisconnect()
+  }
+}
+
+function recoverFromDisconnect() {
+  if (!selectedConv.value?.id) return
+
+  const convId = selectedConv.value.id
+  const state = getStreamState(convId)
+
+  if (state?.sending) {
+    // 有进行中的任务，但 SSE 可能已断开
+    // 不取消后端任务，只清理前端状态
+    finishStream(convId)
+    showToast('正在刷新消息...', 'info')
+  }
+
+  // 刷新消息（后端可能已完成任务并保存了结果）
+  loadMessages(convId)
+}
 
 async function loadConversations() {
   try {
@@ -55,8 +92,12 @@ async function selectConversation(conv) {
   // UI 自动通过 currentStream computed 跟随 selectedConv 切换
   showMobileSidebar.value = false
   selectedConv.value = conv
+  await loadMessages(conv.id)
+}
+
+async function loadMessages(convId) {
   try {
-    const { data } = await getMessages(conv.id)
+    const { data } = await getMessages(convId)
     messages.value = (data.messages || []).map(msg => {
       // 解析 metadata JSON（后端已解析，此处兜底）
       if (msg.metadata && typeof msg.metadata === 'string') {
@@ -239,8 +280,82 @@ function copyConvId() {
 
 function retryMessage(userMsg) {
   if (!userMsg || userMsg.role !== 'user' || sending.value) return
+
+  // 检查是否有中断的 assistant 消息
+  const userMsgIndex = messages.value.indexOf(userMsg)
+  const assistantMsg = messages.value.find(
+    (m, idx) => idx > userMsgIndex && m.role === 'assistant'
+  )
+
+  if (assistantMsg) {
+    const executionStatus = assistantMsg.execution_status || (assistantMsg.metadata?.execution_status)
+
+    if (executionStatus === 'streaming' || executionStatus === 'cancelled') {
+      // 有中断的执行，提示恢复
+      if (confirm(`检测到上次执行中断，是否从断点继续？\n\n点击"确定"恢复执行，点击"取消"重新执行。`)) {
+        handleResume()
+        return
+      }
+    }
+  }
+
+  // 没有可恢复的结果，重新执行
   inputText.value = userMsg.content
   handleSend()
+}
+
+async function handleResume() {
+  const convId = selectedConv.value?.id
+  if (!convId || sending.value) return
+
+  sending.value = true
+  const controller = resumeConversationStream(convId, (event) => {
+    routeStreamEvent(convId, event, {
+      onAnswer: (cid, data, state) => {
+        if (selectedConv.value?.id !== cid) return
+        const allSpecResults = data.specialist_results || (state.completedSpecialists.length > 0 ? [...state.completedSpecialists] : [])
+        const phaseAResults = allSpecResults.filter(s => !s.is_cross_review)
+        const phaseBResults = allSpecResults.filter(s => s.is_cross_review)
+        const assistantMsg = {
+          role: 'assistant',
+          content: data.content,
+          created_at: new Date().toISOString(),
+          specialist_results: phaseAResults.length > 0 ? phaseAResults : null,
+          cross_review_results: phaseBResults.length > 0 ? phaseBResults : (state.completedCrossReviews.length > 0 ? [...state.completedCrossReviews] : null),
+          tool_calls: state.currentToolCalls.length > 0 ? [...state.currentToolCalls] : null,
+          rag: state.currentToolCalls._ragSources ? { sources: state.currentToolCalls._ragSources } : null,
+        }
+        messages.value.push(assistantMsg)
+        nextTick(() => scrollToBottom())
+      },
+      onDone: (cid, data) => {
+        if (selectedConv.value?.id === cid) {
+          const state = getStreamState(cid)
+          const lastMsg = messages.value[messages.value.length - 1]
+          if (lastMsg && lastMsg.role === 'assistant' && state?.lastTiming) {
+            lastMsg.duration_ms = state.lastTiming.duration_ms
+            lastMsg.phase_timings = state.lastTiming.phase_timings
+          }
+        }
+        finishStream(cid)
+        sending.value = false
+        loadConversations()
+      },
+      onError: (cid, data) => {
+        if (selectedConv.value?.id === cid) {
+          messages.value.push({
+            role: 'assistant',
+            content: '恢复执行失败: ' + (data.message || '未知错误'),
+            created_at: new Date().toISOString(),
+          })
+        }
+        finishStream(cid)
+        sending.value = false
+      },
+    })
+  })
+
+  startStream(convId, controller)
 }
 
 function formatDuration(ms) {
@@ -2067,6 +2182,34 @@ async function toggleTraceDetail(msg, index) {
   }
 
   .agent-grid { grid-template-columns: 1fr; }
+
+  /* 移动端按钮触摸区域优化 */
+  .btn-new-conv {
+    width: 44px;
+    height: 44px;
+  }
+
+  .btn-delete-conv {
+    min-width: 44px;
+    min-height: 44px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .conv-item {
+    padding: 0.8rem 0.6rem;
+    min-height: 48px;
+  }
+
+  /* 消息反馈按钮 */
+  .message-feedback {
+    opacity: 0.8;
+  }
+
+  .specialist-feedback {
+    opacity: 0.8;
+  }
 }
 
 /* ── 执行状态徽章 ── */

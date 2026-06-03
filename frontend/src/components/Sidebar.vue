@@ -38,6 +38,7 @@ onUnmounted(() => { clearInterval(tokenTimer) })
 
 const navItems = [
   { key: 'dashboard', label: '每日看板 🔥', icon: 'dashboard', hot: true },
+  { key: 'market-intelligence', label: '市场热点', icon: 'fire' },
   { key: 'chat', label: 'AI 对话', icon: 'chat' },
   { key: 'articles', label: '文章管理', icon: 'articles' },
   { key: 'valuation', label: '估值数据 🔥', icon: 'valuation', hot: true },
@@ -144,6 +145,10 @@ const activeGroup = computed(() => {
           <svg v-else-if="item.icon === 'config'" class="nav-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.066 2.573c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.573 1.066c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.066-2.573c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"/>
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/>
+          </svg>
+          <svg v-else-if="item.icon === 'fire'" class="nav-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M17.657 18.657A8 8 0 016.343 7.343S7 9 9 10c0-2 .5-5 2.986-7C14 5 16.09 5.777 17.656 7.343A7.975 7.975 0 0120 13a7.975 7.975 0 01-2.343 5.657z"/>
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9.879 16.121A3 3 0 1012.015 11L11 14H9c0 .768.293 1.536.879 2.121z"/>
           </svg>
           <span class="nav-label">{{ item.label }}</span>
         </button>
@@ -593,17 +598,17 @@ const activeGroup = computed(() => {
   .nav-item {
     flex-direction: column;
     gap: 0.2rem;
-    padding: 0.5rem 0.75rem;
-    font-size: 0.65rem;
+    padding: 0.6rem 0.75rem;
+    font-size: 0.75rem;
   }
 
   .nav-icon {
-    width: 22px;
-    height: 22px;
+    width: 24px;
+    height: 24px;
   }
 
   .nav-label {
-    font-size: 0.6rem;
+    font-size: 0.7rem;
   }
 
   .chevron {
@@ -617,13 +622,13 @@ const activeGroup = computed(() => {
   }
 
   .nav-child {
-    padding: 0.35rem 0.5rem;
-    font-size: 0.55rem;
+    padding: 0.5rem 0.6rem;
+    font-size: 0.65rem;
   }
 
   .nav-child .nav-icon {
-    width: 14px;
-    height: 14px;
+    width: 18px;
+    height: 18px;
   }
 
   .token-meter {

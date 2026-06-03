@@ -7,7 +7,7 @@ const maxIndustryPct = computed(() => {
 })
 import {
   getPortfolioSummary, createPortfolio, updatePortfolio, deletePortfolio,
-  listPortfolioTransactions, createPortfolioTransaction,
+  listPortfolioTransactions, listPendingTransactions, createPortfolioTransaction,
   confirmTransaction, settleTransaction, deletePortfolioTransaction,
   refreshPortfolioPrice,
   lookupFundInfo, getFundHoldings,
@@ -391,8 +391,12 @@ function onChart5yMouseMove(event) {
     const svgRect = svg.getBoundingClientRect()
     const xRatio = svgRect.width / chart5yW
     const yRatio = svgRect.height / chart5yH
+    const tooltipW = 160 // 预估 tooltip 宽度
+    const px = dp.x * xRatio
+    // 靠近右侧时 tooltip 放左边，避免被遮挡
+    const left = (px + tooltipW > svgRect.width) ? (px - tooltipW - 12) : (px + 12)
     chart5yTooltipStyle.value = {
-      left: (dp.x * xRatio + 12) + 'px',
+      left: left + 'px',
       top: (dp.y * yRatio - 10) + 'px',
     }
   }
@@ -485,6 +489,144 @@ const addPurchaseEstShares = computed(() => {
   if (!price || price <= 0) return 0
   return (addPurchaseForm.value.amount / price).toFixed(2)
 })
+
+// New Buy (新建买入) — for funds not yet in portfolio
+const showNewBuy = ref(false)
+const newBuyForm = ref({
+  fund_code: '',
+  fund_name: '',
+  amount: 0,
+  transaction_date: new Date().toISOString().slice(0, 10),
+  transaction_time: new Date().toTimeString().slice(0, 5),
+  notes: '',
+  account: '花无缺',
+})
+const newBuyLookingUp = ref(false)
+const newBuyLookupResult = ref(null)
+
+async function openNewBuy() {
+  newBuyForm.value = {
+    fund_code: '',
+    fund_name: '',
+    amount: 0,
+    transaction_date: new Date().toISOString().slice(0, 10),
+    transaction_time: new Date().toTimeString().slice(0, 5),
+    notes: '',
+    account: '花无缺',
+  }
+  newBuyLookupResult.value = null
+  showNewBuy.value = true
+}
+
+async function lookupNewBuyFund() {
+  const code = newBuyForm.value.fund_code.trim()
+  if (!code) return
+  newBuyLookingUp.value = true
+  try {
+    const { data } = await lookupFundInfo(code)
+    newBuyLookupResult.value = data
+    if (data.fund_name) newBuyForm.value.fund_name = data.fund_name
+  } catch {
+    newBuyLookupResult.value = null
+  } finally {
+    newBuyLookingUp.value = false
+  }
+}
+
+async function submitNewBuy() {
+  const f = newBuyForm.value
+  if (!f.fund_code.trim()) { showToast('请输入基金代码', 'error'); return }
+  if (f.amount <= 0) { showToast('买入金额必须大于 0', 'error'); return }
+  try {
+    await createPortfolioTransaction({
+      fund_code: f.fund_code.trim(),
+      fund_name: f.fund_name || f.fund_code.trim(),
+      transaction_type: 'buy',
+      amount: 0,
+      transaction_date: f.transaction_date,
+      transaction_time: f.transaction_time,
+      notes: f.notes,
+      status: 'pending',
+      submitted_amount: f.amount,
+      account: f.account,
+    })
+    showToast('已提交买入，待 T+1 确认')
+    showNewBuy.value = false
+    loadData()
+  } catch (e) {
+    showToast('提交失败: ' + (e.response?.data?.detail || e.message), 'error')
+  }
+}
+
+// Convert (基金转换) — shares-based
+const showConvert = ref(false)
+const convertHolding = ref(null)
+const convertForm = ref({
+  shares: 0,
+  target_fund_code: '',
+  target_fund_name: '',
+  transaction_date: new Date().toISOString().slice(0, 10),
+  transaction_time: new Date().toTimeString().slice(0, 5),
+  notes: '',
+})
+const convertTargetLookup = ref(null)
+const convertLookingUp = ref(false)
+
+function openConvert(h) {
+  convertHolding.value = h
+  convertForm.value = {
+    shares: 0,
+    target_fund_code: '',
+    target_fund_name: '',
+    transaction_date: new Date().toISOString().slice(0, 10),
+    transaction_time: new Date().toTimeString().slice(0, 5),
+    notes: '',
+  }
+  convertTargetLookup.value = null
+  showConvert.value = true
+}
+
+async function lookupConvertTarget() {
+  const code = convertForm.value.target_fund_code.trim()
+  if (!code) return
+  convertLookingUp.value = true
+  try {
+    const { data } = await lookupFundInfo(code)
+    convertTargetLookup.value = data
+    if (data.fund_name) convertForm.value.target_fund_name = data.fund_name
+  } catch {
+    convertTargetLookup.value = null
+  } finally {
+    convertLookingUp.value = false
+  }
+}
+
+async function submitConvert() {
+  const f = convertForm.value
+  const h = convertHolding.value
+  if (!f.target_fund_code.trim()) { showToast('请输入目标基金代码', 'error'); return }
+  if (f.shares <= 0) { showToast('转换份额必须大于 0', 'error'); return }
+  if (f.shares > (h.shares || 0)) { showToast(`转换份额不能超过持有份额 ${h.shares}`, 'error'); return }
+  try {
+    await createPortfolioTransaction({
+      fund_code: h.fund_code,
+      holding_id: h.id,
+      transaction_type: 'convert',
+      amount: 0,
+      shares: 0,
+      transaction_date: f.transaction_date,
+      transaction_time: f.transaction_time,
+      notes: f.notes ? `${f.notes} → ${f.target_fund_name || f.target_fund_code}` : `转换为 ${f.target_fund_name || f.target_fund_code}`,
+      status: 'pending',
+      submitted_shares: f.shares,
+    })
+    showToast('已提交转换，待 T+1 确认')
+    showConvert.value = false
+    loadData()
+  } catch (e) {
+    showToast('提交失败: ' + (e.response?.data?.detail || e.message), 'error')
+  }
+}
 
 // Sell (卖出) panel — shares-based
 const showSell = ref(false)
@@ -671,6 +813,9 @@ const modeLoading = ref(false)
 const modeResult = ref('')
 const modeRecordId = ref(null)
 const feedbackGiven = ref(null)  // null | 'helpful' | 'unhelpful'
+const showFeedbackDialog = ref(false)
+const feedbackNoteInput = ref('')
+let feedbackDialogResolve = null
 
 // 全景诊断
 const panoramaRecords = ref([])
@@ -789,19 +934,24 @@ async function submitCashAdjust() {
 }
 
 async function loadPendingTxs() {
-  const allPending = []
-  for (const h of holdings.value) {
-    try {
-      const { data } = await listPortfolioTransactions(h.id)
-      const pending = (data.transactions || []).filter(tx => tx.status === 'pending')
-      for (const tx of pending) {
-        tx._fund_name = h.fund_name
-        tx._fund_code = h.fund_code
+  try {
+    const { data } = await listPendingTransactions()
+    const allPending = data.transactions || []
+    // 为有 holding_id 的交易补充基金名称
+    for (const tx of allPending) {
+      if (tx.holding_id && !tx._fund_name) {
+        const h = holdings.value.find(h => h.id === tx.holding_id)
+        if (h) {
+          tx._fund_name = h.fund_name
+          tx._fund_code = h.fund_code
+        }
       }
-      allPending.push(...pending)
-    } catch (e) { /* ignore */ }
+    }
+    pendingTxs.value = allPending
+  } catch (e) {
+    console.error('加载待确认交易失败:', e)
+    pendingTxs.value = []
   }
-  pendingTxs.value = allPending
 }
 
 // Load alerts
@@ -1143,10 +1293,20 @@ async function loadTxAnalysis() {
 }
 
 async function submitFeedback(feedback) {
-  if (!modeRecordId.value || feedbackGiven.value) return
+  if (!modeRecordId.value) return
+  // toggle：再次点击同一按钮取消反馈
+  if (feedback === null) {
+    feedbackGiven.value = null
+    return
+  }
   let note = ''
   if (feedback === 'unhelpful') {
-    note = window.prompt('请简要说明为什么没用？（可选）', '')
+    // 弹出自定义输入框（非 window.prompt）
+    note = await new Promise(resolve => {
+      feedbackDialogResolve = resolve
+      feedbackNoteInput.value = ''
+      showFeedbackDialog.value = true
+    })
     if (note === null) return  // 用户取消
   }
   try {
@@ -1156,6 +1316,16 @@ async function submitFeedback(feedback) {
   } catch (e) {
     showToast('提交失败', 'error')
   }
+}
+
+function confirmFeedbackDialog() {
+  showFeedbackDialog.value = false
+  if (feedbackDialogResolve) feedbackDialogResolve(feedbackNoteInput.value || '')
+}
+
+function cancelFeedbackDialog() {
+  showFeedbackDialog.value = false
+  if (feedbackDialogResolve) feedbackDialogResolve(null)
 }
 
 async function loadFundChart(fundCode) {
@@ -1383,6 +1553,16 @@ watch(accountFilter, () => {
 const refreshProgress = ref(null)
 const refreshingRowId = ref(null)
 const refreshRowResult = ref(null)  // { id, pct, profit } | null
+const moreActionsId = ref(null)  // 当前展开"更多"菜单的持仓 ID
+
+function toggleMoreActions(id) {
+  moreActionsId.value = moreActionsId.value === id ? null : id
+}
+
+// 点击外部关闭更多菜单
+function closeMoreActions() {
+  moreActionsId.value = null
+}
 
 async function refreshAll() {
   if (holdings.value.length === 0) return
@@ -1662,11 +1842,15 @@ async function submitTx() {
     return
   }
   try {
-    await createPortfolioTransaction({
+    const payload = {
       fund_code: txFundCode.value,
       holding_id: txHoldingId.value,
       ...txForm.value,
-    })
+    }
+    // 清理空值，避免 Pydantic 校验失败
+    if (payload.shares == null || payload.shares === '') delete payload.shares
+    if (payload.price == null || payload.price === '') delete payload.price
+    await createPortfolioTransaction(payload)
     showToast('交易记录已添加')
     showTxForm.value = false
     loadData()
@@ -1757,7 +1941,6 @@ async function submitSell() {
       holding_id: h.id,
       transaction_type: 'sell',
       amount: 0,
-      shares: null,
       transaction_date: f.transaction_date,
       transaction_time: f.transaction_time,
       notes: f.notes,
@@ -1774,9 +1957,14 @@ async function submitSell() {
 }
 
 // Confirm transaction (确认交易)
+const confirmTargetFundCode = ref('')
+const confirmTargetFundName = ref('')
+
 function openConfirmTx(tx) {
   confirmTxData.value = tx
   confirmTxPrice.value = 0
+  confirmTargetFundCode.value = ''
+  confirmTargetFundName.value = ''
   showConfirmTx.value = true
 }
 
@@ -1785,10 +1973,18 @@ async function submitConfirmTx() {
     showToast('确认净值必须大于 0', 'error')
     return
   }
+  const payload = { confirmed_price: confirmTxPrice.value }
+  // 转换交易需要目标基金信息
+  if (confirmTxData.value?.transaction_type === 'convert') {
+    if (!confirmTargetFundCode.value.trim()) {
+      showToast('转换交易需要填写目标基金代码', 'error')
+      return
+    }
+    payload.target_fund_code = confirmTargetFundCode.value.trim()
+    payload.target_fund_name = confirmTargetFundName.value || confirmTargetFundCode.value.trim()
+  }
   try {
-    await confirmTransaction(confirmTxData.value.id, {
-      confirmed_price: confirmTxPrice.value,
-    })
+    await confirmTransaction(confirmTxData.value.id, payload)
     showToast('交易已确认')
     showConfirmTx.value = false
     loadData()
@@ -1864,11 +2060,11 @@ function profitClass(v) {
 }
 
 function txTypeLabel(t) {
-  return { buy: '买入', sell: '卖出', dividend: '分红' }[t] || t
+  return { buy: '买入', sell: '卖出', dividend: '分红', convert: '转换' }[t] || t
 }
 
 function txTypeBadge(t) {
-  return { buy: 'badge-success', sell: 'badge-danger', dividend: 'badge-info' }[t] || 'badge-neutral'
+  return { buy: 'badge-success', sell: 'badge-danger', dividend: 'badge-info', convert: 'badge-warning' }[t] || 'badge-neutral'
 }
 
 function txStatusLabel(s) {
@@ -1883,6 +2079,7 @@ function txDisplayAmount(tx) {
   if (tx.status === 'pending') {
     if (tx.transaction_type === 'buy') return '¥' + (tx.submitted_amount || 0).toLocaleString()
     if (tx.transaction_type === 'sell') return (tx.submitted_shares || 0).toLocaleString() + ' 份'
+    if (tx.transaction_type === 'convert') return (tx.submitted_shares || 0).toLocaleString() + ' 份'
   }
   return formatMoney(tx.amount)
 }
@@ -1905,11 +2102,14 @@ function txDisplayAmount(tx) {
           </svg>
           {{ refreshProgress ? `刷新中 ${refreshProgress.done}/${refreshProgress.total}` : '刷新净值' }}
         </button>
-        <button class="btn-primary" @click="openAddForm">
+        <button class="btn-primary" @click="openNewBuy">
           <svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/>
           </svg>
-          新增持仓
+          新建买入
+        </button>
+        <button class="btn-secondary" @click="openAddForm">
+          手动录入
         </button>
       </div>
     </div>
@@ -1929,6 +2129,7 @@ function txDisplayAmount(tx) {
           <span class="pending-fund">{{ tx._fund_name }}</span>
           <span class="pending-detail">
             {{ tx.transaction_type === 'buy' ? '¥' + (tx.submitted_amount || 0).toLocaleString() : (tx.submitted_shares || 0).toLocaleString() + ' 份' }}
+            <span v-if="tx.transaction_type === 'convert' && tx.notes" class="pending-convert-target" style="font-size:0.72rem;color:var(--color-text-muted)"> → {{ tx.notes.split('→')[1]?.trim() || '' }}</span>
           </span>
           <span class="pending-date">{{ tx.transaction_date }}</span>
           <span v-if="tx.expected_confirm_date" class="pending-confirm-hint">→ {{ tx.expected_confirm_date }} 确认</span>
@@ -2491,15 +2692,15 @@ function txDisplayAmount(tx) {
               </button>
             </div>
             <div v-if="modeResult && aiMode === 'deepdive'" class="ai-mode-result">
-              <div class="ai-result-content markdown-body" v-html="renderMarkdown(modeResult)"></div>
-              <div v-if="modeRecordId && !feedbackGiven" class="ai-feedback">
-                <span class="ai-feedback-label">对结果满意吗？</span>
-                <button class="btn-feedback btn-feedback-up" @click="submitFeedback('helpful')" title="有用">👍</button>
-                <button class="btn-feedback btn-feedback-down" @click="submitFeedback('unhelpful')" title="没用">👎</button>
-              </div>
-              <div v-else-if="feedbackGiven" class="ai-feedback ai-feedback-done">
-                已反馈 · {{ feedbackGiven === 'helpful' ? '感谢支持' : '我们会改进' }}
-              </div>
+              <AnalysisCard
+                :result="modeResult"
+                agent-name="基金深度分析师"
+                :token-usage="aiTokenUsage"
+                :record-id="modeRecordId"
+                :created-at="new Date().toISOString()"
+                :feedback="feedbackGiven"
+                @feedback="(val) => submitFeedback(val)"
+              />
             </div>
             <div v-if="deepDiveRecords.length > 0" class="ai-mode-history">
               <div class="ai-mode-history-header" @click="deepDiveShowAll = !deepDiveShowAll">
@@ -2533,15 +2734,15 @@ function txDisplayAmount(tx) {
               </button>
             </div>
             <div v-if="modeResult && aiMode === 'trade-review'" class="ai-mode-result">
-              <div class="ai-result-content markdown-body" v-html="renderMarkdown(modeResult)"></div>
-              <div v-if="modeRecordId && !feedbackGiven" class="ai-feedback">
-                <span class="ai-feedback-label">对结果满意吗？</span>
-                <button class="btn-feedback btn-feedback-up" @click="submitFeedback('helpful')" title="有用">👍</button>
-                <button class="btn-feedback btn-feedback-down" @click="submitFeedback('unhelpful')" title="没用">👎</button>
-              </div>
-              <div v-else-if="feedbackGiven" class="ai-feedback ai-feedback-done">
-                已反馈 · {{ feedbackGiven === 'helpful' ? '感谢支持' : '我们会改进' }}
-              </div>
+              <AnalysisCard
+                :result="modeResult"
+                agent-name="交易复盘分析师"
+                :token-usage="aiTokenUsage"
+                :record-id="modeRecordId"
+                :created-at="new Date().toISOString()"
+                :feedback="feedbackGiven"
+                @feedback="(val) => submitFeedback(val)"
+              />
             </div>
             <div v-if="tradeReviewRecords.length > 0" class="ai-mode-history">
               <div class="ai-mode-history-header" @click="tradeReviewShowAll = !tradeReviewShowAll">
@@ -2578,15 +2779,15 @@ function txDisplayAmount(tx) {
               </button>
             </div>
             <div v-if="modeResult && aiMode === 'what-if'" class="ai-mode-result">
-              <div class="ai-result-content markdown-body" v-html="renderMarkdown(modeResult)"></div>
-              <div v-if="modeRecordId && !feedbackGiven" class="ai-feedback">
-                <span class="ai-feedback-label">对结果满意吗？</span>
-                <button class="btn-feedback btn-feedback-up" @click="submitFeedback('helpful')" title="有用">👍</button>
-                <button class="btn-feedback btn-feedback-down" @click="submitFeedback('unhelpful')" title="没用">👎</button>
-              </div>
-              <div v-else-if="feedbackGiven" class="ai-feedback ai-feedback-done">
-                已反馈 · {{ feedbackGiven === 'helpful' ? '感谢支持' : '我们会改进' }}
-              </div>
+              <AnalysisCard
+                :result="modeResult"
+                agent-name="情景推演分析师"
+                :token-usage="aiTokenUsage"
+                :record-id="modeRecordId"
+                :created-at="new Date().toISOString()"
+                :feedback="feedbackGiven"
+                @feedback="(val) => submitFeedback(val)"
+              />
             </div>
             <div v-if="whatIfRecords.length > 0" class="ai-mode-history">
               <div class="ai-mode-history-header" @click="whatIfShowAll = !whatIfShowAll">
@@ -2958,22 +3159,21 @@ function txDisplayAmount(tx) {
               </span>
             </td>
             <td class="actions-cell">
-              <button class="btn-ghost btn-sm" @click="openDetail(h)" title="查看详情">详情</button>
-              <button class="btn-ghost btn-sm btn-analysis-text" @click="openFundAnalysis(h)" title="基金分析">分析</button>
-              <button class="btn-ghost btn-sm" @click="refreshSingle(h)" :title="'刷新净值'" :disabled="refreshingRowId === h.id">
-                <span v-if="refreshingRowId === h.id && !refreshRowResult" class="btn-refresh-spinner"></span>
-                <span v-else-if="refreshRowResult?.id === h.id && refreshRowResult.error" style="color:#dc2626">失败</span>
-                <span v-else-if="refreshRowResult?.id === h.id && refreshRowResult.pct != null" :class="refreshRowResult.pct >= 0 ? 'profit-positive' : 'profit-negative'">
-                  {{ refreshRowResult.pct >= 0 ? '+' : '' }}{{ refreshRowResult.pct?.toFixed(2) }}%
-                </span>
-                <span v-else>刷新</span>
-              </button>
-              <button class="btn-ghost btn-sm btn-primary-text" @click="openAddPurchase(h)" title="买入">买入</button>
-              <button class="btn-ghost btn-sm btn-sell-text" @click="openSell(h)" title="卖出">卖出</button>
-              <button class="btn-ghost btn-sm" @click="openTxForm(h)" title="记账（分红等）">记账</button>
-              <button class="btn-ghost btn-sm" @click="viewTransactions(h)" title="交易记录">记录</button>
-              <button class="btn-ghost btn-sm" @click="openEditForm(h)" title="编辑">编辑</button>
-              <button class="btn-ghost btn-sm btn-danger-text" @click="handleDelete(h)" title="删除">删除</button>
+              <button class="btn-ghost btn-sm btn-primary-text" @click="openAddPurchase(h)" title="买入">↑买</button>
+              <button class="btn-ghost btn-sm btn-sell-text" @click="openSell(h)" title="卖出">↓卖</button>
+              <button class="btn-ghost btn-sm btn-analysis-text" @click="openFundAnalysis(h)" title="基金分析">📊</button>
+              <div class="action-more-wrap">
+                <button class="btn-ghost btn-sm" @click="toggleMoreActions(h.id)" title="更多">⋯</button>
+                <div v-if="moreActionsId === h.id" class="action-more-menu">
+                  <button @click="openDetail(h); moreActionsId = null">详情</button>
+                  <button @click="openConvert(h); moreActionsId = null">转换</button>
+                  <button @click="openTxForm(h); moreActionsId = null">记账</button>
+                  <button @click="viewTransactions(h); moreActionsId = null">记录</button>
+                  <button @click="refreshSingle(h); moreActionsId = null">刷新净值</button>
+                  <button @click="openEditForm(h); moreActionsId = null">编辑</button>
+                  <button class="danger" @click="handleDelete(h); moreActionsId = null">删除</button>
+                </div>
+              </div>
             </td>
           </tr>
         </tbody>
@@ -3148,6 +3348,7 @@ function txDisplayAmount(tx) {
                     <option value="buy">买入</option>
                     <option value="sell">卖出</option>
                     <option value="dividend">分红</option>
+                    <option value="convert">转换</option>
                   </select>
                 </div>
                 <div class="form-group">
@@ -3243,6 +3444,120 @@ function txDisplayAmount(tx) {
             <div class="modal-actions" style="margin-top: 1rem">
               <button class="btn-secondary" @click="showTxHistory = false">关闭</button>
             </div>
+          </div>
+        </div>
+      </Transition>
+    </Teleport>
+
+    <!-- New Buy Modal (新建买入) — for funds not yet in portfolio -->
+    <Teleport to="body">
+      <Transition name="fade">
+        <div v-if="showNewBuy" class="modal-overlay" @click.self="showNewBuy = false">
+          <div class="modal-box">
+            <h3 class="modal-title">新建买入</h3>
+            <p class="modal-desc">基金未在持仓中，提交后待 T+1 确认净值</p>
+            <form @submit.prevent="submitNewBuy" class="modal-form">
+              <div class="form-row">
+                <div class="form-group" style="flex:2">
+                  <label>基金代码</label>
+                  <div style="display:flex;gap:0.5rem">
+                    <input v-model="newBuyForm.fund_code" class="input-field" placeholder="如 161725" required @blur="lookupNewBuyFund" />
+                    <button type="button" class="btn-secondary btn-sm" @click="lookupNewBuyFund" :disabled="newBuyLookingUp">
+                      {{ newBuyLookingUp ? '...' : '查询' }}
+                    </button>
+                  </div>
+                  <span v-if="newBuyLookupResult?.fund_name" class="field-hint" style="color:var(--color-success)">{{ newBuyLookupResult.fund_name }}</span>
+                </div>
+                <div class="form-group" style="flex:1">
+                  <label>基金名称</label>
+                  <input v-model="newBuyForm.fund_name" class="input-field" placeholder="自动填充" />
+                </div>
+              </div>
+              <div class="form-row">
+                <div class="form-group">
+                  <label>买入账户</label>
+                  <select v-model="newBuyForm.account" class="input-field">
+                    <option value="花无缺">花无缺</option>
+                    <option value="小鱼儿">小鱼儿</option>
+                  </select>
+                </div>
+                <div class="form-group">
+                  <label>买入金额</label>
+                  <input v-model.number="newBuyForm.amount" type="number" step="0.01" class="input-field" placeholder="如 10000" required />
+                </div>
+                <div class="form-group">
+                  <label>交易日期</label>
+                  <input v-model="newBuyForm.transaction_date" type="date" class="input-field" />
+                </div>
+                <div class="form-group">
+                  <label>交易时间</label>
+                  <input v-model="newBuyForm.transaction_time" type="time" class="input-field" />
+                </div>
+              </div>
+              <div class="form-group">
+                <label>备注</label>
+                <input v-model="newBuyForm.notes" class="input-field" placeholder="可选" />
+              </div>
+              <div class="form-actions">
+                <button type="button" class="btn-ghost" @click="showNewBuy = false">取消</button>
+                <button type="submit" class="btn-primary" :disabled="newBuyForm.amount <= 0">提交买入</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      </Transition>
+    </Teleport>
+
+    <!-- Convert Modal (基金转换) -->
+    <Teleport to="body">
+      <Transition name="fade">
+        <div v-if="showConvert" class="modal-overlay" @click.self="showConvert = false">
+          <div class="modal-box">
+            <h3 class="modal-title">基金转换</h3>
+            <p class="modal-desc">卖出 {{ convertHolding?.fund_name }}，买入目标基金</p>
+            <form @submit.prevent="submitConvert" class="modal-form">
+              <div class="form-row">
+                <div class="form-group">
+                  <label>转换份额</label>
+                  <input v-model.number="convertForm.shares" type="number" step="0.01" class="input-field" :placeholder="'最多 ' + (convertHolding?.shares || 0)" required />
+                  <span class="field-hint">持有 {{ convertHolding?.shares || 0 }} 份</span>
+                </div>
+              </div>
+              <div class="form-row">
+                <div class="form-group" style="flex:2">
+                  <label>目标基金代码</label>
+                  <div style="display:flex;gap:0.5rem">
+                    <input v-model="convertForm.target_fund_code" class="input-field" placeholder="如 110011" required @blur="lookupConvertTarget" />
+                    <button type="button" class="btn-secondary btn-sm" @click="lookupConvertTarget" :disabled="convertLookingUp">
+                      {{ convertLookingUp ? '...' : '查询' }}
+                    </button>
+                  </div>
+                  <span v-if="convertTargetLookup?.fund_name" class="field-hint" style="color:var(--color-success)">{{ convertTargetLookup.fund_name }}</span>
+                </div>
+                <div class="form-group" style="flex:1">
+                  <label>目标基金名称</label>
+                  <input v-model="convertForm.target_fund_name" class="input-field" placeholder="自动填充" />
+                </div>
+              </div>
+              <div class="form-row">
+                <div class="form-group">
+                  <label>交易日期</label>
+                  <input v-model="convertForm.transaction_date" type="date" class="input-field" />
+                </div>
+                <div class="form-group">
+                  <label>交易时间</label>
+                  <input v-model="convertForm.transaction_time" type="time" class="input-field" />
+                </div>
+              </div>
+              <div class="form-group">
+                <label>备注</label>
+                <input v-model="convertForm.notes" class="input-field" placeholder="可选" />
+              </div>
+              <div class="form-actions">
+                <button type="button" class="btn-ghost" @click="showConvert = false">取消</button>
+                <button type="submit" class="btn-primary" :disabled="convertForm.shares <= 0 || !convertForm.target_fund_code.trim()">提交转换</button>
+              </div>
+            </form>
           </div>
         </div>
       </Transition>
@@ -3349,9 +3664,17 @@ function txDisplayAmount(tx) {
                 <label>T+1 确认净值 *</label>
                 <input v-model.number="confirmTxPrice" type="number" step="0.0001" class="input-field" placeholder="输入确认日的实际净值" required />
               </div>
+              <div v-if="confirmTxData?.transaction_type === 'convert'" class="form-group" style="margin-top:0.75rem">
+                <label>目标基金代码 *</label>
+                <input v-model="confirmTargetFundCode" class="input-field" placeholder="转换目标基金代码" required />
+                <span v-if="confirmTargetFundName" class="field-hint" style="color:var(--color-success)">{{ confirmTargetFundName }}</span>
+              </div>
               <div v-if="confirmTxPrice > 0" class="add-purchase-preview">
                 <span v-if="confirmTxData?.transaction_type === 'buy'">
                   实际买入约 <strong>{{ ((confirmTxData?.submitted_amount || 0) / confirmTxPrice).toFixed(2) }}</strong> 份
+                </span>
+                <span v-else-if="confirmTxData?.transaction_type === 'convert'">
+                  转换约 <strong>{{ (confirmTxData?.submitted_shares || 0) }}</strong> 份，价值约 <strong>¥{{ ((confirmTxData?.submitted_shares || 0) * confirmTxPrice).toFixed(2) }}</strong>
                 </span>
                 <span v-else>
                   实际赎回约 <strong>¥{{ ((confirmTxData?.submitted_shares || 0) * confirmTxPrice).toFixed(2) }}</strong>
@@ -3617,6 +3940,29 @@ function txDisplayAmount(tx) {
       @confirm="confirm.onConfirm"
       @cancel="confirm.visible = false"
     />
+
+    <!-- Feedback Note Dialog -->
+    <Teleport to="body">
+      <Transition name="fade">
+        <div v-if="showFeedbackDialog" class="modal-overlay" @click.self="cancelFeedbackDialog">
+          <div class="modal-dialog" style="max-width:400px">
+            <h3 class="modal-title">反馈意见</h3>
+            <p class="modal-desc" style="margin-bottom:0.75rem">请简要说明分析哪里不够好（可选）</p>
+            <textarea
+              v-model="feedbackNoteInput"
+              class="input-field"
+              rows="3"
+              placeholder="例如：数据不够准确 / 分析不够深入 / 没有考虑我的持仓..."
+              style="width:100%;resize:vertical"
+            ></textarea>
+            <div class="modal-actions" style="margin-top:0.75rem">
+              <button class="btn btn-outline" @click="cancelFeedbackDialog">取消</button>
+              <button class="btn btn-primary" @click="confirmFeedbackDialog">提交反馈</button>
+            </div>
+          </div>
+        </div>
+      </Transition>
+    </Teleport>
 
     <!-- Tag Editor Modal -->
     <Teleport to="body">
@@ -4098,6 +4444,49 @@ function txDisplayAmount(tx) {
 .actions-cell {
   display: flex;
   gap: 0.25rem;
+  align-items: center;
+  flex-wrap: nowrap;
+}
+
+.action-more-wrap {
+  position: relative;
+}
+
+.action-more-menu {
+  position: absolute;
+  right: 0;
+  top: 100%;
+  z-index: 20;
+  background: var(--color-bg-card);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-lg);
+  min-width: 100px;
+  padding: 0.25rem 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.action-more-menu button {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 0.4rem 0.75rem;
+  font-size: 0.78rem;
+  color: var(--color-text-secondary);
+  background: none;
+  border: none;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.action-more-menu button:hover {
+  background: var(--color-bg-hover);
+  color: var(--color-text-primary);
+}
+
+.action-more-menu button.danger {
+  color: var(--color-danger);
 }
 
 .btn-sm {
@@ -6182,4 +6571,63 @@ select.input-field {
 .history-note { font-size: 0.72rem; color: var(--color-text-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .history-time { font-size: 0.7rem; color: var(--color-text-tertiary); white-space: nowrap; }
 .btn-xs { font-size: 0.7rem; padding: 0.15rem 0.4rem; }
+
+/* ── 移动端补充样式 ────────────────────────────────────────── */
+@media (max-width: 768px) {
+  /* 持仓卡片 */
+  .summary-cards {
+    grid-template-columns: 1fr;
+  }
+
+  .summary-cards .summary-card:last-child {
+    grid-column: span 1;
+  }
+
+  /* 表格横向滚动 */
+  .table-wrap {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  /* 按钮触摸区域 */
+  .btn-action {
+    min-height: 44px;
+    padding: 0.6rem;
+  }
+
+  /* 弹窗适配 */
+  .modal-dialog {
+    max-width: 95vw;
+    margin: 0.5rem;
+  }
+
+  /* 表单 */
+  .form-row {
+    grid-template-columns: 1fr;
+    gap: 0.75rem;
+  }
+
+  .form-group {
+    width: 100%;
+  }
+
+  .form-input {
+    font-size: 16px; /* 防止 iOS 自动缩放 */
+  }
+
+  /* 配置项 */
+  .config-kv-item {
+    flex-wrap: wrap;
+    gap: 0.25rem;
+  }
+
+  .config-kv-key {
+    min-width: auto;
+    flex: 1;
+  }
+
+  .config-input {
+    width: 80px;
+  }
+}
 </style>

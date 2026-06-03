@@ -11,6 +11,16 @@ from db.agents import load_specialist_agents
 
 logger = logging.getLogger(__name__)
 
+# ── 通用数据约束（追加到所有 Agent prompt 末尾） ──
+_UNIVERSAL_DATA_CONSTRAINT = """
+## ⚠️ 数据真实性约束（强制遵守）
+1. **只使用上下文中明确提供的数据**，包括持仓、估值、新闻等
+2. **绝对禁止编造**任何基金名称、基金代码、金额、收益率、持仓比例等数据
+3. 如果上下文中没有持仓数据或显示"无持仓"，**必须明确告知用户**"未获取到持仓信息"，不得自行补充
+4. 如果某个数据在上下文中缺失，直接说明"暂无该数据"，不要猜测或杜撰
+5. 所有数字必须来自上下文或工具返回结果，不得凭记忆或推测给出具体数值
+"""
+
 
 def _extract_text_tool_calls(content_str):
     """从 LLM 文本中提取 XML 格式的 tool_call。"""
@@ -100,10 +110,12 @@ def run_specialist(agent_key: str, query: str, context: str = "",
         try:
             from portfolio_context import build_portfolio_context
             portfolio_ctx = build_portfolio_context()
-            if portfolio_ctx:
-                system_content += f"\n\n## 用户当前持仓（分析时务必结合）\n{portfolio_ctx}"
+            system_content += f"\n\n## 用户当前持仓\n{portfolio_ctx}"
         except Exception:
             pass
+
+    # 追加通用数据约束
+    system_content += _UNIVERSAL_DATA_CONSTRAINT
 
     llm_messages = [
         {"role": "system", "content": system_content},

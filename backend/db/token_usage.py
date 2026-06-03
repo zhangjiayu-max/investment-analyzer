@@ -138,7 +138,7 @@ def get_token_usage_daily(days: int = 30) -> list[dict]:
 
 
 def get_performance_stats(days: int = 7) -> dict:
-    """获取 Agent 调用性能统计（平均耗时、最慢调用等）。"""
+    """获取 Agent 调用性能统计（平均耗时、最慢调用、成功率等）。"""
     conn = _get_conn()
     stats = conn.execute("""
         SELECT
@@ -146,16 +146,21 @@ def get_performance_stats(days: int = 7) -> dict:
             COALESCE(AVG(duration_ms), 0) as avg_duration_ms,
             COALESCE(MAX(duration_ms), 0) as max_duration_ms,
             COUNT(CASE WHEN duration_ms > 30000 THEN 1 END) as slow_calls,
-            COUNT(DISTINCT agent_key) as unique_agents
+            COUNT(DISTINCT agent_key) as unique_agents,
+            SUM(CASE WHEN COALESCE(status, 'success') = 'success' THEN 1 ELSE 0 END) as success_count,
+            SUM(CASE WHEN COALESCE(status, 'success') != 'success' THEN 1 ELSE 0 END) as error_count
         FROM agent_runs
         WHERE created_at >= datetime('now', ?)
     """, (f"-{days} days",)).fetchone()
+    result = dict(stats)
+    total = result.get("total_runs", 0)
+    result["success_rate"] = round(result["success_count"] / total * 100, 1) if total > 0 else 0.0
     conn.close()
-    return dict(stats)
+    return result
 
 
 def get_performance_by_agent(days: int = 7) -> list[dict]:
-    """按 Agent 分组统计性能。"""
+    """按 Agent 分组统计性能（含成功率）。"""
     conn = _get_conn()
     rows = conn.execute("""
         SELECT
@@ -164,11 +169,19 @@ def get_performance_by_agent(days: int = 7) -> list[dict]:
             COUNT(*) as runs,
             COALESCE(AVG(duration_ms), 0) as avg_duration_ms,
             COALESCE(MAX(duration_ms), 0) as max_duration_ms,
-            COALESCE(SUM(CASE WHEN duration_ms > 30000 THEN 1 ELSE 0 END), 0) as slow_calls
+            COALESCE(SUM(CASE WHEN duration_ms > 30000 THEN 1 ELSE 0 END), 0) as slow_calls,
+            SUM(CASE WHEN COALESCE(status, 'success') = 'success' THEN 1 ELSE 0 END) as success_count,
+            SUM(CASE WHEN COALESCE(status, 'success') != 'success' THEN 1 ELSE 0 END) as error_count
         FROM agent_runs
         WHERE created_at >= datetime('now', ?)
         GROUP BY agent_key
-        ORDER BY avg_duration_ms DESC
+        ORDER BY runs DESC
     """, (f"-{days} days",)).fetchall()
+    result = []
+    for r in rows:
+        d = dict(r)
+        total = d.get("runs", 0)
+        d["success_rate"] = round(d["success_count"] / total * 100, 1) if total > 0 else 0.0
+        result.append(d)
     conn.close()
-    return [dict(r) for r in rows]
+    return result

@@ -18,6 +18,7 @@ import BadCasePage from '../components/BadCasePage.vue'
 import EvalSuitePage from '../components/EvalSuitePage.vue'
 import QualityDashboard from '../components/QualityDashboard.vue'
 import Dashboard from '../components/Dashboard.vue'
+import MarketIntelligence from '../components/MarketIntelligence.vue'
 import SystemConfigPage from '../components/SystemConfigPage.vue'
 
 const props = defineProps({
@@ -28,6 +29,7 @@ const emit = defineEmits(['navigate'])
 // ── KeepAlive 页面（除 analysis 外的所有页面）──
 const pageComponents = {
   dashboard: Dashboard,
+  'market-intelligence': MarketIntelligence,
   chat: ChatView,
   articles: ArticleManagement,
   valuation: ValuationHistory,

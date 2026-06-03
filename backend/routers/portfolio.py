@@ -680,7 +680,7 @@ async def portfolio_ai_analysis_api(req: PortfolioAiAnalysisRequest):
             f"持有 {h.get('shares', 0)} 份, "
             f"成本价 {h.get('cost_price', 'N/A')}, "
             f"当前净值 {h.get('current_price', 'N/A')}, "
-            f"盈亏 {h.get('profit_loss', 0):.2f}元"
+            f"盈亏 {(h.get('profit_loss') or 0):.2f}元"
         )
 
     user_question = req.question or "请全面分析我的持仓情况，包括资产配置合理性、风险分散度、各基金表现，以及改进建议。"
@@ -832,6 +832,48 @@ def _get_valuation_context() -> str:
         return "## 估值参考\n暂无估值数据"
     except Exception as e:
         return f"## 估值参考\n获取失败: {e}"
+
+
+def _get_holdings_valuation_context(holdings: list) -> str:
+    """按持仓匹配估值数据 — 让 LLM 知道每只基金对应的估值。"""
+    from db.valuations import search_indexes_by_keyword, get_latest_valuation
+    lines = []
+    matched = 0
+    for h in holdings:
+        idx_name = (h.get("index_name") or "").strip()
+        fund_name = h.get("fund_name", "")
+        if not idx_name or idx_name == "该基金无跟踪标的":
+            lines.append(f"- {fund_name}: 无跟踪指数，估值数据不可用")
+            continue
+        # 搜索匹配的估值数据
+        found = False
+        search_term = idx_name.replace("指数", "").replace("中证", "").replace("全指", "")
+        try:
+            matches = search_indexes_by_keyword(search_term)
+            for m in matches:
+                val = get_latest_valuation(m["index_code"])
+                if val and val.get("percentile") is not None:
+                    pct = val["percentile"]
+                    current_val = val.get("current_value")
+                    metric = val.get("metric_type", "PE")
+                    level = "🔥高估" if pct > 80 else ("⚠️偏高" if pct > 50 else ("✅低估" if pct < 20 else "⚡适中"))
+                    profit_info = ""
+                    pr = h.get("profit_rate")
+                    if pr is not None:
+                        profit_info = f", 盈亏{pr:+.1%}"
+                    lines.append(f"- {fund_name} → {m['index_name']}: {metric}={current_val}, 百分位={pct:.0f}% {level}{profit_info}")
+                    matched += 1
+                    found = True
+                    break
+        except Exception:
+            pass
+        if not found:
+            lines.append(f"- {fund_name}（{idx_name}）: 估值数据未匹配到")
+
+    header = f"## 持仓估值匹配（已匹配 {matched}/{len([h for h in holdings if (h.get('shares') or 0) > 0])} 只）"
+    if not lines:
+        return header + "\n暂无估值数据"
+    return header + "\n" + "\n".join(lines)
 
 
 def _format_news_section(mcp_context: dict) -> str:
@@ -1050,9 +1092,9 @@ async def panorama_analysis_api(req: PanoramaAnalysisRequest):
         pct = (h.get('current_value', 0) or 0) / total_value * 100
         holdings_lines.append(
             f"- {h.get('fund_name','')}({h.get('fund_code','')}): "
-            f"账户 {h.get('account','花无缺')}, "
-            f"市值 {h.get('current_value',0):.2f}, "
-            f"盈亏 {h.get('profit_loss',0):.2f} ({h.get('profit_rate',0)*100:.1f}%), "
+            f"账户 {h.get('account') or '花无缺'}, "
+            f"市值 {(h.get('current_value') or 0):.2f}, "
+            f"盈亏 {(h.get('profit_loss') or 0):.2f} ({(h.get('profit_rate') or 0)*100:.1f}%), "
             f"占比 {pct:.1f}%"
         )
 
@@ -1063,8 +1105,8 @@ async def panorama_analysis_api(req: PanoramaAnalysisRequest):
     # MCP 数据
     mcp_context = _get_mcp_context(holdings)
 
-    # 估值数据
-    valuation_context = _get_valuation_context()
+    # 估值数据（按持仓匹配，而非通用列表）
+    valuation_context = _get_holdings_valuation_context(holdings)
 
     # 从 mcp_context 中提取新闻数据，单独格式化
     news_section = _format_news_section(mcp_context)
@@ -1154,9 +1196,9 @@ async def fund_deep_dive_api(holding_id: int, req: DeepDiveRequest):
     tx_lines = []
     for t in sorted(txs, key=lambda x: x.get("transaction_date", "")):
         tx_lines.append(
-            f"- {t['transaction_date']} {'买入' if t['transaction_type']=='buy' else '卖出'}: "
-            f"金额 {t.get('amount',0):.2f}, 份额 {t.get('shares',0):.4f}, "
-            f"价格 {t.get('price',0):.4f}, 状态 {t.get('status','confirmed')}"
+            f"- {t.get('transaction_date','')} {'买入' if t.get('transaction_type')=='buy' else '卖出'}: "
+            f"金额 {(t.get('amount') or 0):.2f}, 份额 {(t.get('shares') or 0):.4f}, "
+            f"价格 {(t.get('price') or 0):.4f}, 状态 {t.get('status') or 'confirmed'}"
         )
 
     # 2) 估值历史 — 带趋势
@@ -1364,8 +1406,8 @@ async def trade_review_api(req: TradeReviewRequest):
             f"{'买入' if t['transaction_type']=='buy' else '卖出'}"
             f"{tag_str}: "
             f"{t.get('fund_name','')}({t.get('fund_code','')}), "
-            f"金额 {t.get('amount',0):.2f}, 价格 {t.get('price',0):.4f}, "
-            f"状态 {t.get('status','confirmed')}"
+            f"金额 {(t.get('amount') or 0):.2f}, 价格 {(t.get('price') or 0):.4f}, "
+            f"状态 {t.get('status') or 'confirmed'}"
         )
 
     # 汇总统计
@@ -1434,8 +1476,8 @@ async def what_if_analysis_api(req: WhatIfRequest):
         pct = (h.get('current_value', 0) or 0) / total_value * 100 if total_value else 0
         holdings_lines.append(
             f"- {h.get('fund_name','')}({h.get('fund_code','')}): "
-            f"市值 {h.get('current_value',0):.2f}, 占比 {pct:.1f}%, "
-            f"成本 {h.get('total_cost',0):.2f}"
+            f"市值 {(h.get('current_value') or 0):.2f}, 占比 {pct:.1f}%, "
+            f"成本 {(h.get('total_cost') or 0):.2f}"
         )
 
     # 估值数据
@@ -1754,6 +1796,19 @@ async def get_transaction_tags_api(tx_id: int):
     """获取交易记录的所有标签。"""
     return {"tags": get_transaction_tags(tx_id)}
 
+
+@router.get("/api/portfolio/pending-transactions")
+async def list_pending_transactions_api():
+    """获取所有待确认交易（包括没有 holding_id 的新建买入）。"""
+    txs = list_transactions(status="pending", limit=200, include_system=False)
+    # 为没有 holding_id 的交易补充基金名称
+    for tx in txs:
+        if not tx.get("holding_id") and not tx.get("_fund_name"):
+            tx["_fund_name"] = tx.get("fund_name") or tx.get("fund_code", "未知基金")
+            tx["_fund_code"] = tx.get("fund_code", "")
+    return {"transactions": txs}
+
+
 @router.get("/api/portfolio/{holding_id}")
 async def get_holding_api(holding_id: int):
     """获取单个持仓详情。"""
@@ -1820,7 +1875,9 @@ async def confirm_transaction_api(tx_id: int, req: ConfirmTransactionRequest):
     """确认交易：填入 T+1 实际净值，计算实际份额/金额。"""
     ok = confirm_transaction(tx_id, req.confirmed_price,
                              confirmed_shares=req.confirmed_shares,
-                             confirmed_amount=req.confirmed_amount)
+                             confirmed_amount=req.confirmed_amount,
+                             target_fund_code=req.target_fund_code,
+                             target_fund_name=req.target_fund_name)
     if not ok:
         raise HTTPException(404, "交易记录不存在")
     return {"ok": True}

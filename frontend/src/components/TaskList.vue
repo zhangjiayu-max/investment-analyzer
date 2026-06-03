@@ -216,4 +216,17 @@ onMounted(loadTasks)
   color: var(--color-danger);
   background: rgba(239, 68, 68, 0.1);
 }
+
+/* 移动端：始终显示删除按钮 */
+@media (max-width: 768px) {
+  .delete-btn {
+    opacity: 0.7;
+    padding: 0.5rem;
+    min-width: 44px;
+    min-height: 44px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+}
 </style>

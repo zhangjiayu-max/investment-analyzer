@@ -118,6 +118,70 @@
         </div>
       </div>
 
+      <!-- Agent Runtime Performance -->
+      <div class="card">
+        <div class="card-header">
+          <h3>⚡ Agent 运行监控</h3>
+          <div class="card-header-actions">
+            <select v-model="perfDays" @change="refreshPerf" class="day-select">
+              <option :value="7">近 7 天</option>
+              <option :value="30">近 30 天</option>
+              <option :value="90">近 90 天</option>
+            </select>
+          </div>
+        </div>
+
+        <!-- 概览卡片 -->
+        <div class="perf-overview">
+          <div class="perf-stat-card">
+            <span class="perf-stat-value">{{ perfStats.total_runs }}</span>
+            <span class="perf-stat-label">总调用</span>
+          </div>
+          <div class="perf-stat-card">
+            <span class="perf-stat-value">{{ formatDuration(perfStats.avg_duration_ms) }}</span>
+            <span class="perf-stat-label">平均耗时</span>
+          </div>
+          <div class="perf-stat-card">
+            <span class="perf-stat-value" :class="perfStats.success_rate >= 90 ? 'text-success' : perfStats.success_rate >= 70 ? '' : 'text-danger'">
+              {{ perfStats.success_rate }}%
+            </span>
+            <span class="perf-stat-label">成功率</span>
+          </div>
+          <div class="perf-stat-card">
+            <span class="perf-stat-value" :class="perfStats.slow_calls > 0 ? 'text-danger' : ''">{{ perfStats.slow_calls }}</span>
+            <span class="perf-stat-label">慢调用(&gt;30s)</span>
+          </div>
+        </div>
+
+        <!-- 按 Agent 分组表格 -->
+        <div v-if="perfByAgent.length" class="perf-agent-table">
+          <div class="perf-agent-header">
+            <span class="col-name">Agent</span>
+            <span class="col-runs">调用</span>
+            <span class="col-avg">平均耗时</span>
+            <span class="col-max">最大耗时</span>
+            <span class="col-rate">成功率</span>
+            <span class="col-slow">慢调用</span>
+          </div>
+          <div v-for="a in perfByAgent" :key="a.agent_key" class="perf-agent-row">
+            <span class="col-name">{{ a.agent_name }}</span>
+            <span class="col-runs">{{ a.runs }}</span>
+            <span class="col-avg">{{ formatDuration(a.avg_duration_ms) }}</span>
+            <span class="col-max">{{ formatDuration(a.max_duration_ms) }}</span>
+            <span class="col-rate">
+              <span class="rate-bar">
+                <span class="rate-bar-fill" :style="{ width: a.success_rate + '%', background: a.success_rate >= 90 ? '#10b981' : a.success_rate >= 70 ? '#f59e0b' : '#ef4444' }"></span>
+              </span>
+              <span :class="a.success_rate >= 90 ? 'text-success' : a.success_rate >= 70 ? '' : 'text-danger'">{{ a.success_rate }}%</span>
+            </span>
+            <span class="col-slow" :class="a.slow_calls > 0 ? 'text-danger' : ''">{{ a.slow_calls }}</span>
+          </div>
+        </div>
+        <div v-else class="empty-state" style="padding:2rem">
+          <p>暂无运行数据</p>
+        </div>
+      </div>
+
       <!-- Low Quality List -->
       <div class="card">
         <div class="card-header">
@@ -150,7 +214,7 @@
 
 <script setup>
 import { ref, onMounted } from 'vue'
-import { getQualitySummary, getQualityTrend, getLowQualityItems, getEvalStatsByAgent } from '../api'
+import { getQualitySummary, getQualityTrend, getLowQualityItems, getEvalStatsByAgent, getPerformanceStats, getPerformanceByAgent } from '../api'
 
 const loading = ref(true)
 const summary = ref({})
@@ -159,8 +223,13 @@ const trendDays = ref(30)
 const lowQualityItems = ref([])
 const agentStats = ref([])
 
+// Agent 运行时性能监控
+const perfStats = ref({ total_runs: 0, avg_duration_ms: 0, max_duration_ms: 0, slow_calls: 0, unique_agents: 0, success_count: 0, error_count: 0, success_rate: 0 })
+const perfByAgent = ref([])
+const perfDays = ref(7)
+
 onMounted(async () => {
-  await Promise.all([loadSummary(), loadTrend(), loadLowQuality(), loadAgentStats()])
+  await Promise.all([loadSummary(), loadTrend(), loadLowQuality(), loadAgentStats(), loadPerfStats(), loadPerfByAgent()])
   loading.value = false
 })
 
@@ -198,6 +267,36 @@ async function loadAgentStats() {
   } catch (e) {
     console.error('Load agent stats failed:', e)
   }
+}
+
+async function loadPerfStats() {
+  try {
+    const { data } = await getPerformanceStats(perfDays.value)
+    perfStats.value = data
+  } catch (e) {
+    console.error('Load performance stats failed:', e)
+  }
+}
+
+async function loadPerfByAgent() {
+  try {
+    const { data } = await getPerformanceByAgent(perfDays.value)
+    perfByAgent.value = data.items || []
+  } catch (e) {
+    console.error('Load performance by agent failed:', e)
+  }
+}
+
+function refreshPerf() {
+  loadPerfStats()
+  loadPerfByAgent()
+}
+
+function formatDuration(ms) {
+  if (!ms) return '0ms'
+  if (ms < 1000) return `${Math.round(ms)}ms`
+  if (ms < 60000) return `${(ms / 1000).toFixed(1)}s`
+  return `${Math.floor(ms / 60000)}m${Math.floor((ms % 60000) / 1000)}s`
 }
 
 function scoreClass(score) {
@@ -527,6 +626,99 @@ function barHeight(score) {
   margin-top: 0.25rem;
 }
 
+/* ── Agent 运行监控 ── */
+
+.card-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.day-select {
+  padding: 0.35rem 0.75rem;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  font-size: 0.8rem;
+  background: var(--color-bg-primary);
+}
+
+.perf-overview {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 0.75rem;
+  margin-bottom: 1.25rem;
+}
+
+.perf-stat-card {
+  text-align: center;
+  padding: 1rem 0.75rem;
+  background: var(--color-bg-secondary);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+}
+
+.perf-stat-value {
+  display: block;
+  font-size: 1.5rem;
+  font-weight: 700;
+  color: var(--color-primary-500);
+}
+
+.perf-stat-label {
+  display: block;
+  font-size: 0.7rem;
+  color: var(--color-text-muted);
+  margin-top: 0.25rem;
+}
+
+.perf-agent-table {
+  display: flex;
+  flex-direction: column;
+  font-size: 0.8rem;
+}
+
+.perf-agent-header {
+  display: flex;
+  align-items: center;
+  padding: 0.5rem 0;
+  border-bottom: 2px solid var(--color-border);
+  font-weight: 600;
+  color: var(--color-text-muted);
+  font-size: 0.75rem;
+}
+
+.perf-agent-row {
+  display: flex;
+  align-items: center;
+  padding: 0.6rem 0;
+  border-bottom: 1px solid var(--color-border-light);
+}
+
+.perf-agent-row:last-child {
+  border-bottom: none;
+}
+
+.col-name { flex: 2; font-weight: 500; }
+.col-runs { flex: 1; text-align: center; }
+.col-avg { flex: 1; text-align: center; }
+.col-max { flex: 1; text-align: center; }
+.col-rate { flex: 2; display: flex; align-items: center; gap: 0.5rem; }
+.col-slow { flex: 1; text-align: center; }
+
+.rate-bar {
+  flex: 1;
+  height: 6px;
+  background: var(--color-border-light);
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.rate-bar-fill {
+  height: 100%;
+  border-radius: 3px;
+  transition: width 0.5s ease;
+}
+
 /* Responsive */
 @media (max-width: 768px) {
   .summary-grid {
@@ -534,6 +726,12 @@ function barHeight(score) {
   }
   .stats-row {
     flex-wrap: wrap;
+  }
+  .perf-overview {
+    grid-template-columns: repeat(2, 1fr);
+  }
+  .col-max {
+    display: none;
   }
 }
 </style>

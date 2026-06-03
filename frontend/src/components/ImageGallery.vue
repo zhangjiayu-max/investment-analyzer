@@ -24,6 +24,9 @@ async function asyncPool(limit, items, fn) {
 // ── Tab 切换 ──
 const activeTab = ref('gallery') // 'gallery' | 'dd'
 
+// ── 组件卸载标志 ──
+let isUnmounted = false
+
 // ── 图片浏览 Tab ──
 const records = ref([])
 const searchQuery = ref('')
@@ -98,6 +101,7 @@ const viDates = ref([])
 const viSelectedDate = ref('')
 const viLoading = ref(false)
 const viUploading = ref(false)
+const viAutoParsing = ref(false) // 自动解析状态
 const viFileInput = ref(null)
 const viParsingPath = ref('')
 const viParseResult = ref(null)
@@ -128,19 +132,59 @@ async function loadViImages() {
 async function handleViUpload(e) {
   const files = e.target.files
   if (!files || !files.length) return
+  if (isUnmounted) return
   viUploading.value = true
   try {
+    const uploadedPaths = []
     for (const file of files) {
-      await uploadValuationImage(file)
+      if (isUnmounted) break
+      const { data } = await uploadValuationImage(file)
+      if (data?.path) {
+        uploadedPaths.push({ path: data.path, name: file.name })
+      }
     }
+    if (isUnmounted) return
     await loadViDates()
     viSelectedDate.value = ''
     await loadViImages()
+
+    // 自动解析上传的图片
+    if (uploadedPaths.length > 0 && !isUnmounted) {
+      viAutoParsing.value = true
+      showToast(`上传成功，开始自动解析 ${uploadedPaths.length} 张图片...`, 'info')
+      let successCount = 0
+      let failCount = 0
+      for (const img of uploadedPaths) {
+        if (isUnmounted) break
+        try {
+          // 自动判断图片类型
+          const isDDImage = img.path.includes('dd_images') || img.name.includes('螺丝钉') || img.name.includes('dd')
+          const parseFn = isDDImage ? parseDDImage : parseAndSaveValuation
+          await parseFn(img.path)
+          successCount++
+        } catch (parseErr) {
+          console.error(`解析失败: ${img.name}`, parseErr)
+          failCount++
+        }
+      }
+      if (isUnmounted) return
+      // 刷新列表（已解析的会从待解析列表消失）
+      await loadViImages()
+      await loadRecords()
+      if (failCount > 0) {
+        showToast(`解析完成：${successCount} 张成功，${failCount} 张失败`, 'warning')
+      } else {
+        showToast(`自动解析完成：${successCount} 张图片已识别`, 'success')
+      }
+    }
   } catch (e) {
-    console.error('Upload failed:', e)
-    showToast('上传失败: ' + (e.response?.data?.detail || e.message), 'error')
+    if (!isUnmounted) {
+      console.error('Upload failed:', e)
+      showToast('上传失败: ' + (e.response?.data?.detail || e.message), 'error')
+    }
   } finally {
     viUploading.value = false
+    viAutoParsing.value = false
     if (viFileInput.value) viFileInput.value.value = ''
   }
 }
@@ -426,6 +470,7 @@ async function handleDrop(e) {
 
   const files = [...(e.dataTransfer?.files || [])].filter(f => f.type.startsWith('image/'))
   if (!files.length) return
+  if (isUnmounted) return
 
   const isGallery = activeTab.value === 'gallery'
   const uploading = isGallery ? viUploading : ddUploading
@@ -435,9 +480,15 @@ async function handleDrop(e) {
   showToast(`正在上传 ${files.length} 张图片...`, 'info')
   try {
     const uploadFn = isGallery ? uploadValuationImage : uploadDdImage
+    const uploadedPaths = []
     for (const file of files) {
-      await uploadFn(file)
+      if (isUnmounted) break
+      const { data } = await uploadFn(file)
+      if (data?.path) {
+        uploadedPaths.push({ path: data.path, name: file.name })
+      }
     }
+    if (isUnmounted) return
     if (isGallery) {
       await loadViDates()
       viSelectedDate.value = ''
@@ -447,12 +498,44 @@ async function handleDrop(e) {
       ddSelectedDate.value = ''
       await loadDdImages()
     }
-    showToast(`${files.length} 张图片上传成功`, 'success')
+
+    // 自动解析上传的图片
+    if (uploadedPaths.length > 0 && isGallery && !isUnmounted) {
+      viAutoParsing.value = true
+      showToast(`上传成功，开始自动解析 ${uploadedPaths.length} 张图片...`, 'info')
+      let successCount = 0
+      let failCount = 0
+      for (const img of uploadedPaths) {
+        if (isUnmounted) break
+        try {
+          const isDDImage = img.path.includes('dd_images') || img.name.includes('螺丝钉') || img.name.includes('dd')
+          const parseFn = isDDImage ? parseDDImage : parseAndSaveValuation
+          await parseFn(img.path)
+          successCount++
+        } catch (parseErr) {
+          console.error(`解析失败: ${img.name}`, parseErr)
+          failCount++
+        }
+      }
+      if (isUnmounted) return
+      await loadViImages()
+      await loadRecords()
+      if (failCount > 0) {
+        showToast(`解析完成：${successCount} 张成功，${failCount} 张失败`, 'warning')
+      } else {
+        showToast(`自动解析完成：${successCount} 张图片已识别`, 'success')
+      }
+    } else if (!isUnmounted) {
+      showToast(`${files.length} 张图片上传成功`, 'success')
+    }
   } catch (e) {
-    console.error('Drop upload failed:', e)
-    showToast('上传失败: ' + (e.response?.data?.detail || e.message), 'error')
+    if (!isUnmounted) {
+      console.error('Drop upload failed:', e)
+      showToast('上传失败: ' + (e.response?.data?.detail || e.message), 'error')
+    }
   } finally {
     uploading.value = false
+    viAutoParsing.value = false
   }
 }
 
@@ -473,6 +556,7 @@ async function handlePaste(e) {
   }
   if (!imageFiles.length) return
   e.preventDefault()
+  if (isUnmounted) return
 
   const isGallery = activeTab.value === 'gallery'
   const uploading = isGallery ? viUploading : ddUploading
@@ -482,9 +566,15 @@ async function handlePaste(e) {
   showToast(`正在粘贴上传 ${imageFiles.length} 张图片...`, 'info')
   try {
     const uploadFn = isGallery ? uploadValuationImage : uploadDdImage
+    const uploadedPaths = []
     for (const file of imageFiles) {
-      await uploadFn(file)
+      if (isUnmounted) break
+      const { data } = await uploadFn(file)
+      if (data?.path) {
+        uploadedPaths.push({ path: data.path, name: file.name })
+      }
     }
+    if (isUnmounted) return
     if (isGallery) {
       await loadViDates()
       viSelectedDate.value = ''
@@ -494,12 +584,44 @@ async function handlePaste(e) {
       ddSelectedDate.value = ''
       await loadDdImages()
     }
-    showToast(`${imageFiles.length} 张图片粘贴上传成功`, 'success')
+
+    // 自动解析上传的图片
+    if (uploadedPaths.length > 0 && isGallery && !isUnmounted) {
+      viAutoParsing.value = true
+      showToast(`粘贴上传成功，开始自动解析 ${uploadedPaths.length} 张图片...`, 'info')
+      let successCount = 0
+      let failCount = 0
+      for (const img of uploadedPaths) {
+        if (isUnmounted) break
+        try {
+          const isDDImage = img.path.includes('dd_images') || img.name.includes('螺丝钉') || img.name.includes('dd')
+          const parseFn = isDDImage ? parseDDImage : parseAndSaveValuation
+          await parseFn(img.path)
+          successCount++
+        } catch (parseErr) {
+          console.error(`解析失败: ${img.name}`, parseErr)
+          failCount++
+        }
+      }
+      if (isUnmounted) return
+      await loadViImages()
+      await loadRecords()
+      if (failCount > 0) {
+        showToast(`解析完成：${successCount} 张成功，${failCount} 张失败`, 'warning')
+      } else {
+        showToast(`自动解析完成：${successCount} 张图片已识别`, 'success')
+      }
+    } else if (!isUnmounted) {
+      showToast(`${imageFiles.length} 张图片粘贴上传成功`, 'success')
+    }
   } catch (e) {
-    console.error('Paste upload failed:', e)
-    showToast('粘贴上传失败: ' + (e.response?.data?.detail || e.message), 'error')
+    if (!isUnmounted) {
+      console.error('Paste upload failed:', e)
+      showToast('粘贴上传失败: ' + (e.response?.data?.detail || e.message), 'error')
+    }
   } finally {
     uploading.value = false
+    viAutoParsing.value = false
   }
 }
 
@@ -526,11 +648,14 @@ onMounted(() => {
 })
 
 onUnmounted(() => {
+  // 设置卸载标志，阻止异步操作继续
+  isUnmounted = true
   if (searchTimer) clearTimeout(searchTimer)
   document.removeEventListener('paste', handlePaste)
   loading.value = false
   viLoading.value = false
   viUploading.value = false
+  viAutoParsing.value = false
   ddLoading.value = false
   ddUploading.value = false
   viParsingPath.value = ''
@@ -591,9 +716,9 @@ watch(activeTab, (tab) => {
       </div>
       <div class="toolbar">
         <input ref="viFileInput" type="file" accept="image/*" multiple @change="handleViUpload" class="hidden-input" />
-        <button class="btn-upload" @click="triggerViUpload" :disabled="viUploading">
+        <button class="btn-upload" @click="triggerViUpload" :disabled="viUploading || viAutoParsing">
           <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"/></svg>
-          {{ viUploading ? '上传中...' : '上传估值图片' }}
+          {{ viAutoParsing ? '解析中...' : viUploading ? '上传中...' : '上传估值图片' }}
         </button>
         <div class="upload-hint">
           <svg width="12" height="12" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
@@ -1412,6 +1537,25 @@ watch(activeTab, (tab) => {
 .btn-delete-img:hover {
   background: var(--color-danger);
   transform: scale(1.1) !important;
+}
+
+/* 移动端：始终显示删除按钮和操作提示 */
+@media (max-width: 768px) {
+  .thumb-overlay {
+    opacity: 1;
+    background: rgba(0, 0, 0, 0.1);
+  }
+
+  .btn-delete-img {
+    opacity: 1;
+    transform: scale(1);
+    width: 36px;
+    height: 36px;
+  }
+
+  .gallery-thumb {
+    height: 120px;
+  }
 }
 
 .btn-parse-img {

@@ -9,7 +9,13 @@ import concurrent.futures
 
 from llm_service import client, MODEL, _call_llm, _parse_tool_args
 from agent.multi_agent import run_specialist, run_specialist_with_context, run_arbitration
-from db.agents import load_specialist_agents
+from db.agents import (
+    load_specialist_agents,
+    create_pending_agent_run,
+    update_agent_run_status,
+    get_completed_agents_for_message,
+    cancel_running_agents,
+)
 from config import ARBITRATION_API_KEY
 
 # 全局超时限制（秒）
@@ -151,39 +157,101 @@ def build_clarification_prompt() -> str:
     expert_list = "\n".join(expert_lines)
     keys_json = json.dumps(list(specialists.keys()), ensure_ascii=False)
 
-    return f"""你是需求路由专家。分析用户投资问题，返回 JSON。
+    return f"""你是投资分析需求路由专家。分析用户问题，返回 JSON。
 
 ## 可用专家
 {expert_list}
 
-## 复杂度
-- simple: 单一数据查询，1个专家
-- medium: 需要分析，1-2个专家
-- complex: 投资决策/多维分析，2+个专家
+## 复杂度判断规则（按优先级）
+
+### chat - 闲聊/科普（不调用任何专家）
+判断条件（满足任一即为 chat）：
+1. 纯问候/感谢/道歉（"你好"、"谢谢"、"抱歉"）
+2. 概念解释（"什么是PE"、"解释定投"、"Z分数什么意思"）
+3. 系统功能询问（"你能做什么"、"怎么用"）
+4. 与投资无关的问题（"今天天气"、"推荐电影"）
+5. 观点讨论但不需要数据支持（"你觉得价值投资怎么样"）
+
+### simple - 单一数据查询（1个专家，无需深度分析）
+判断条件：
+1. 查询单一指标（"沪深300估值"、"债市温度"）
+2. 查询单一基金信息（"161725怎么样"）
+3. 查询持仓概况（"我持有什么"、"仓位多少"）
+4. 简单事实查询（"最近有什么新闻"）
+
+### medium - 分析任务（1-2个专家，需要分析判断）
+判断条件：
+1. 对比分析（"A和B哪个好"、"红利质量vs中证红利"）
+2. 单一维度深度分析（"白酒估值高吗"、"现在适合买债券吗"）
+3. 持仓诊断（"我的持仓健康吗"、"需要调仓吗"）
+4. 基金筛选（"推荐几只低估值基金"）
+
+### complex - 综合决策（2+个专家，多维分析）
+判断条件（必须同时满足）：
+1. 需要多维度分析（估值+配置+风险）
+2. 涉及具体操作建议（买入/卖出/定投方案）
+3. 需要个性化定制（基于用户持仓/偏好）
+
+典型场景：
+- "帮我做个定投方案"
+- "我现在应该怎么配置"
+- "分析一下我的持仓并给建议"
+
+## 关键区分规则
+
+1. **"可以买吗"/"值得买吗"** → medium（只问估值判断，不需要配置建议）
+2. **"帮我做个方案"/"应该怎么配置"** → complex（需要多维分析）
+3. **对比类问题** → medium（只需估值专家对比数据）
+4. **持仓查询** → simple（只查数据，不分析）
+5. **持仓诊断** → medium（需要分析，但不需要多专家协作）
 
 ## 输出格式（只输出JSON，无其他文字）
-{{"complexity":"simple","specialists":["专家key"],"reason":"原因","refined_query":"优化后的查询"}}
+{{"complexity":"chat|simple|medium|complex","specialists":["expert1"],"reason":"判断原因","refined_query":"优化后的查询","confidence":0.95}}
 
-注意：specialists 数组中的值必须是以下之一：{keys_json}
+注意：
+- specialists 数组中的值必须是以下之一：{keys_json}，chat 时为空数组
+- confidence 表示判断置信度（0-1），低于 0.7 时系统会降级处理
 
 ## 示例
+
+Q: 你好
+A: {{"complexity":"chat","specialists":[],"reason":"纯问候","refined_query":"你好","confidence":0.99}}
+
+Q: 什么是PE
+A: {{"complexity":"chat","specialists":[],"reason":"概念解释，无需查数据","refined_query":"PE（市盈率）的定义","confidence":0.98}}
+
+Q: 谢谢
+A: {{"complexity":"chat","specialists":[],"reason":"闲聊","refined_query":"谢谢","confidence":0.99}}
+
 Q: 沪深300估值多少
-A: {{"complexity":"simple","specialists":["valuation_expert"],"reason":"单一估值查询","refined_query":"沪深300当前PE/PB估值和百分位"}}
-
-Q: 我想买点债券现在可以入手吗
-A: {{"complexity":"complex","specialists":["market_analyst","allocation_advisor","risk_assessor"],"reason":"债券买入决策需要债市温度+配置建议+风险评估","refined_query":"当前债市估值温度、债券基金配置建议和风险提示"}}
-
-Q: 白酒能买吗
-A: {{"complexity":"complex","specialists":["valuation_expert","risk_assessor","allocation_advisor"],"reason":"投资决策需要估值+风险+配置","refined_query":"白酒当前估值水平、风险评估与配置建议"}}
-
-Q: 帮我做个定投方案
-A: {{"complexity":"complex","specialists":["valuation_expert","allocation_advisor"],"reason":"定投需要估值+配置策略","refined_query":"基于当前估值的定投方案"}}
-
-Q: 最近有什么新闻
-A: {{"complexity":"medium","specialists":["market_analyst"],"reason":"市场动态查询","refined_query":"近期市场重要新闻和政策变化"}}
+A: {{"complexity":"simple","specialists":["valuation_expert"],"reason":"单一指数估值查询","refined_query":"沪深300当前PE/PB估值和百分位","confidence":0.95}}
 
 Q: 债市温度多少
-A: {{"complexity":"simple","specialists":["market_analyst"],"reason":"单一数据查询","refined_query":"当前债市温度指标"}}"""
+A: {{"complexity":"simple","specialists":["market_analyst"],"reason":"单一数据查询","refined_query":"当前债市温度指标","confidence":0.95}}
+
+Q: 我持有什么基金
+A: {{"complexity":"simple","specialists":[],"reason":"持仓查询，无需分析","refined_query":"查看当前持仓列表","confidence":0.90}}
+
+Q: 红利质量和中证红利有什么区别
+A: {{"complexity":"medium","specialists":["valuation_expert"],"reason":"两个指数的对比分析","refined_query":"红利质量和中证红利的估值对比（PE/PB/百分位/股息率）","confidence":0.90}}
+
+Q: 白酒估值高吗
+A: {{"complexity":"medium","specialists":["valuation_expert"],"reason":"单一板块估值分析","refined_query":"白酒板块当前估值水平和历史百分位","confidence":0.85}}
+
+Q: 现在适合买债券吗
+A: {{"complexity":"medium","specialists":["market_analyst"],"reason":"债券买入时机判断，需要债市温度","refined_query":"当前债市温度和债券投资建议","confidence":0.85}}
+
+Q: 我的持仓健康吗
+A: {{"complexity":"medium","specialists":["allocation_advisor"],"reason":"持仓诊断分析","refined_query":"持仓健康度诊断和优化建议","confidence":0.85}}
+
+Q: 帮我做个定投方案
+A: {{"complexity":"complex","specialists":["valuation_expert","allocation_advisor"],"reason":"定投需要估值+配置策略","refined_query":"基于当前估值的定投方案","confidence":0.92}}
+
+Q: 我现在应该怎么配置资产
+A: {{"complexity":"complex","specialists":["valuation_expert","allocation_advisor","risk_assessor"],"reason":"资产配置需要多维分析","refined_query":"基于当前市场和个人持仓的资产配置建议","confidence":0.90}}
+
+Q: 分析一下我的持仓并给建议
+A: {{"complexity":"complex","specialists":["allocation_advisor","risk_assessor"],"reason":"持仓分析需要配置+风险评估","refined_query":"持仓分析和优化建议","confidence":0.88}}"""
 
 
 # Clarification 结果缓存（相同查询直接返回缓存结果，节省 2-5s LLM 调用）
@@ -275,15 +343,25 @@ def clarify_requirement(query: str) -> dict:
 
         # 验证并设置默认值
         complexity = result.get("complexity", "medium")
-        if complexity not in ("simple", "medium", "complex"):
+        if complexity not in ("chat", "simple", "medium", "complex"):
             complexity = "medium"
 
         specialists = result.get("specialists", [])
         valid_specialists = list(load_specialist_agents().keys())
         specialists = [s for s in specialists if s in valid_specialists]
 
-        # 如果没有选择专家，默认选估值专家
-        if not specialists:
+        # chat 类型不需要专家
+        if complexity == "chat":
+            specialists = []
+        # 如果没有选择专家，默认选估值专家（chat 除外）
+        elif not specialists:
+            specialists = ["valuation_expert"]
+
+        # 置信度检查
+        confidence = result.get("confidence", 0.8)
+        if confidence < 0.7:
+            logger.warning(f"澄清置信度过低 ({confidence})，降级为 simple")
+            complexity = "simple"
             specialists = ["valuation_expert"]
 
         result_out = {
@@ -291,6 +369,7 @@ def clarify_requirement(query: str) -> dict:
             "specialists": specialists,
             "reason": result.get("reason", ""),
             "refined_query": result.get("refined_query", query),
+            "confidence": confidence,
         }
 
         # 缓存结果
@@ -325,15 +404,21 @@ def detect_complexity_by_keywords(query: str) -> str:
     """
     query = query.strip()
 
-    # 复杂任务关键词（需要多专家协作）
+    # 复杂任务关键词（需要多专家协作：投资决策+仓位+风险）
     complex_keywords = [
-        "加仓", "减仓", "买入", "卖出", "持有", "建仓", "清仓",
+        "加仓", "减仓", "建仓", "清仓",
         "定投", "配置", "组合", "方案", "策略", "计划",
         "风险", "回撤", "波动",
-        "对比", "比较", "哪个更好", "选哪个",
-        "怎么样", "怎么看", "怎么看", "值得买", "能买吗",
-        "现在", "当前", "适合", "应该",
         "持仓", "盈亏", "我的基金", "仓位",
+        "怎么分配", "如何配置",
+    ]
+
+    # 中等任务关键词（对比分析、单一维度分析）
+    medium_keywords = [
+        "对比", "比较", "区别", "差异", "哪个好", "选哪个", "还是",
+        "怎么样", "怎么看", "值得买", "能买吗", "可以买", "买入",
+        "卖出", "持有",
+        "现在", "当前", "适合", "应该",
     ]
 
     # 简单任务关键词（单一数据查询）
@@ -344,14 +429,32 @@ def detect_complexity_by_keywords(query: str) -> str:
         "最新", "今天", "最近",
     ]
 
+    # 闲聊关键词（不需要专家分析）
+    chat_keywords = [
+        "你好", "谢谢", "好的", "明白了", "知道了",
+        "什么是", "解释", "介绍", "定义", "含义",
+        "天气", "笑话", "故事",
+    ]
+
     # 检查是否是复杂任务
     complex_score = sum(1 for kw in complex_keywords if kw in query)
-
+    # 检查是否是中等任务
+    medium_score = sum(1 for kw in medium_keywords if kw in query)
     # 检查是否是简单任务
     simple_score = sum(1 for kw in simple_keywords if kw in query)
+    # 检查是否是闲聊
+    chat_score = sum(1 for kw in chat_keywords if kw in query)
 
-    # 如果包含"吗"、"呢"等疑问词，倾向于中等或复杂
+    # 如果包含"吗"、"呢"等疑问词
     has_question_mark = bool(re.search(r'[吗呢？?]', query))
+
+    # 纯闲聊：短消息 + 闲聊关键词 + 无投资关键词
+    if len(query) <= 10 and chat_score > 0 and complex_score == 0 and medium_score == 0 and simple_score == 0:
+        return "chat"
+
+    # 很短的消息（<6字），没有投资关键词，也没有疑问词 → chat
+    if len(query) <= 5 and complex_score == 0 and medium_score == 0 and simple_score == 0 and not has_question_mark:
+        return "chat"
 
     # 如果只是查询单一指标（很短的查询，且无疑问词），倾向于简单
     if len(query) <= 6 and simple_score > 0 and not has_question_mark and complex_score == 0:
@@ -362,6 +465,9 @@ def detect_complexity_by_keywords(query: str) -> str:
         # 包含复杂关键词 → complex
         if complex_score >= 1:
             return "complex"
+        # 包含中等关键词 → medium（如"可以买吗"、"A和B区别"）
+        if medium_score >= 1:
+            return "medium"
         # 包含简单关键词但有疑问 → medium（如"估值高吗"）
         if simple_score >= 1:
             return "medium"
@@ -371,7 +477,7 @@ def detect_complexity_by_keywords(query: str) -> str:
     # 无疑问词时
     if complex_score >= 2:
         return "complex"
-    elif complex_score >= 1:
+    elif complex_score >= 1 or medium_score >= 1:
         return "medium"
     elif simple_score >= 1:
         return "medium"
@@ -673,9 +779,9 @@ def orchestrate(query: str, history: list, rag_context: str = "", cancel_event: 
     try:
         from portfolio_context import build_portfolio_context, build_valuation_summary
         portfolio_ctx = build_portfolio_context()
-        if portfolio_ctx:
-            system_content += f"\n\n## 用户当前持仓\n{portfolio_ctx}"
-            prebuilt_context += f"## 用户当前持仓（分析时务必结合）\n{portfolio_ctx}\n\n"
+        # 始终注入持仓上下文（空持仓时也会明确告知"无持仓"，防止 AI 编造）
+        system_content += f"\n\n## 用户当前持仓\n{portfolio_ctx}"
+        prebuilt_context += f"## 用户当前持仓\n{portfolio_ctx}\n\n"
         valuation_ctx = build_valuation_summary()
         if valuation_ctx:
             system_content += f"\n\n## 当前市场估值\n{valuation_ctx}"
@@ -969,7 +1075,7 @@ def orchestrate(query: str, history: list, rag_context: str = "", cancel_event: 
     }
 
 
-def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_event: threading.Event | None = None):
+def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_event: threading.Event | None = None, resume_from: dict | None = None):
     """
     Orchestrator 的流式版本，通过生成器逐步返回事件。
 
@@ -982,6 +1088,7 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
 
     参数:
         cancel_event: 可选的取消事件，设置后会尽快终止执行
+        resume_from: 恢复数据，包含 message_id 用于查询已完成的 agent
     """
     start_time = time.time()
 
@@ -998,9 +1105,28 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
         }
         return
 
+    # 0.5 恢复模式：从 agent_runs 表查询已完成的专家
+    completed_specialists = set()
+    resumed_results = []
+    resume_message_id = resume_from.get("message_id") if resume_from else None
+    if resume_message_id:
+        completed_runs = get_completed_agents_for_message(resume_message_id)
+        for run in completed_runs:
+            completed_specialists.add(run["agent_key"])
+            resumed_results.append({
+                "agent_key": run["agent_key"],
+                "agent": run["agent_name"],
+                "analysis": run["result"] or "",
+                "duration_ms": run["duration_ms"] or 0,
+            })
+        logger.info(f"恢复模式：已完成的专家 {completed_specialists}")
+        if completed_specialists:
+            yield {"type": "status", "message": f"正在恢复执行（{len(completed_specialists)} 个专家已完成）..."}
+
     # 1. 需求澄清（使用 LLM 分析问题）
     _check_cancel(cancel_event)
-    yield {"type": "status", "message": "正在理解您的问题..."}
+    if not resume_from:
+        yield {"type": "status", "message": "正在理解您的问题..."}
     clarification = clarify_requirement(query)
     complexity = clarification["complexity"]
     context_config = get_context_config(complexity)
@@ -1034,9 +1160,9 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
     try:
         from portfolio_context import build_portfolio_context, build_valuation_summary
         portfolio_ctx = build_portfolio_context()
-        if portfolio_ctx:
-            system_content += f"\n\n## 用户当前持仓\n{portfolio_ctx}"
-            prebuilt_context += f"## 用户当前持仓（分析时务必结合）\n{portfolio_ctx}\n\n"
+        # 始终注入持仓上下文（空持仓时也会明确告知"无持仓"，防止 AI 编造）
+        system_content += f"\n\n## 用户当前持仓\n{portfolio_ctx}"
+        prebuilt_context += f"## 用户当前持仓\n{portfolio_ctx}\n\n"
         valuation_ctx = build_valuation_summary()
         if valuation_ctx:
             system_content += f"\n\n## 当前市场估值\n{valuation_ctx}"
@@ -1099,6 +1225,11 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
     force_skip_cross_review = budget["mode"] == "conservative"
     specialist_results = []
     all_tool_calls = []
+
+    # 恢复模式：添加已有结果
+    if resumed_results:
+        specialist_results.extend(resumed_results)
+        logger.info(f"恢复模式：已加载 {len(resumed_results)} 个专家结果")
 
     for turn in range(MAX_TURNS):
         _check_cancel(cancel_event)
@@ -1320,17 +1451,63 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
 
         # 解析所有 tool call 参数
         tool_tasks = []
+        skipped_tasks = []
         for tc in msg.tool_calls:
             args = _parse_tool_args(tc.function.arguments, tc.function.name)
             expert_query = args.get("query", query)
             agent_key = build_expert_map().get(tc.function.name, "")
             agent_info = load_specialist_agents().get(agent_key, {})
+
+            # 恢复模式：跳过已完成的专家
+            if agent_key in completed_specialists:
+                logger.info(f"跳过已完成的专家: {agent_key}")
+                skipped_tasks.append((tc, args, expert_query, agent_key, agent_info))
+                continue
+
             logger.info(f"Orchestrator → {tc.function.name}: {expert_query[:100]}")
             tool_tasks.append((tc, args, expert_query, agent_key, agent_info))
 
-        # 通知前端：所有专家开始工作
+        # 恢复模式：为跳过的专家添加 tool response
+        for tc, args, expert_query, agent_key, agent_info in skipped_tasks:
+            # 从已有结果中找到对应的分析
+            existing_result = next(
+                (sr for sr in resumed_results if sr.get("agent_key") == agent_key),
+                None
+            )
+            if existing_result:
+                all_tool_calls.append({
+                    "name": tc.function.name,
+                    "arguments": args,
+                    "result_preview": existing_result.get("analysis", "")[:300],
+                })
+                llm_messages.append({
+                    "role": "tool",
+                    "tool_call_id": tc.id,
+                    "content": existing_result.get("analysis", "")[:4000],
+                })
+
+        # 如果所有专家都已完成，直接进入下一轮（让 LLM 综合结果）
+        if not tool_tasks:
+            yield {"type": "status", "message": "所有专家已完成，正在综合结果..."}
+            continue
+
+        # 创建 pending 状态的 agent 执行记录
+        agent_run_ids = {}
+        for tc, args, expert_query, agent_key, agent_info in tool_tasks:
+            run_id = create_pending_agent_run(
+                conversation_id=conv_id,
+                message_id=stream_msg_id,
+                agent_key=agent_key,
+                agent_name=agent_info.get("name", tc.function.name),
+                query=expert_query[:500],
+                trace_id=trace_id,
+            )
+            agent_run_ids[agent_key] = run_id
+
+        # 通知前端：专家开始工作
         _check_cancel(cancel_event)
         for tc, args, expert_query, agent_key, agent_info in tool_tasks:
+            update_agent_run_status(agent_run_ids[agent_key], "running")
             yield {
                 "type": "specialist_start",
                 "agent_key": agent_key,
@@ -1400,6 +1577,14 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
                 }
                 specialist_results.append(specialist_result)
 
+                # 更新 agent 执行记录为 completed
+                update_agent_run_status(
+                    agent_run_ids.get(agent_key),
+                    "completed",
+                    result=result_data.get("analysis", "")[:2000],
+                    duration_ms=result_data.get("duration_ms", 0),
+                )
+
                 yield {
                     "type": "specialist_done",
                     "agent_key": specialist_result["agent_key"],
@@ -1408,6 +1593,13 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
                     "analysis": specialist_result["analysis"],
                     "duration_ms": specialist_result["duration_ms"],
                 }
+            else:
+                # 更新 agent 执行记录为 failed
+                update_agent_run_status(
+                    agent_run_ids.get(agent_key),
+                    "failed",
+                    error_message=result_data.get("error", "未知错误"),
+                )
 
         # 按原始顺序 append tool response 到 llm_messages
         for idx, (tc, args, result_str) in enumerate(ordered_results):

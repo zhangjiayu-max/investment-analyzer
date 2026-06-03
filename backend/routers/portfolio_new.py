@@ -40,12 +40,20 @@ class UpdateHoldingRequest(BaseModel):
 
 
 class CreateTransactionRequest(BaseModel):
-    holding_id: int
-    transaction_type: str  # buy/sell
-    shares: float
-    price: float
-    transaction_date: Optional[str] = None
-    notes: Optional[str] = None
+    fund_code: str
+    transaction_type: str  # buy/sell/convert
+    amount: float = 0
+    transaction_date: str
+    holding_id: int | None = None
+    shares: float | None = None
+    price: float | None = None
+    notes: str | None = None
+    status: str | None = None
+    submitted_shares: float | None = None
+    submitted_amount: float | None = None
+    transaction_time: str | None = None
+    fund_name: str | None = None
+    account: str | None = None
 
 
 class AdjustCashRequest(BaseModel):

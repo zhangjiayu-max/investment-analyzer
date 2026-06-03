@@ -191,6 +191,27 @@ function percentileColor(p) {
   background: var(--color-primary-700);
 }
 
+/* 移动端：始终显示操作按钮 */
+@media (max-width: 768px) {
+  .image-overlay {
+    background: rgba(0,0,0,0.15);
+  }
+
+  .image-overlay svg {
+    opacity: 0.8;
+  }
+
+  .parse-btn {
+    opacity: 1;
+    padding: 0.5rem 0.8rem;
+    font-size: 0.8rem;
+  }
+
+  .image-item .parse-btn {
+    opacity: 1;
+  }
+}
+
 .parse-btn:disabled {
   opacity: 0.7;
   cursor: not-allowed;

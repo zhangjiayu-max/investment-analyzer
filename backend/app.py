@@ -72,6 +72,7 @@ from routers.analysis import router as analysis_router
 from routers.dashboard import router as dashboard_router
 from routers.config import router as config_router
 from routers.rag import router as rag_router
+from routers.market_intelligence import router as market_intelligence_router
 
 # 注册新路径路由（优先级高）
 app.include_router(valuation_router)
@@ -99,6 +100,7 @@ app.include_router(analysis_router)
 app.include_router(dashboard_router)
 app.include_router(config_router)
 app.include_router(rag_router)
+app.include_router(market_intelligence_router)
 
 # 静态文件目录
 for _d in (STATIC_DIR, IMAGES_DIR, OUTPUT_DIR, UPLOADS_DIR, DD_IMAGES_DIR, VALUATION_IMAGES_DIR):
@@ -173,6 +175,9 @@ async def startup():
 
     # 后台每日报告
     asyncio.create_task(_auto_daily_report())
+
+    # 后台每日净值自动刷新（15:30 收盘后）
+    asyncio.create_task(_auto_refresh_nav())
     logging.info("=== 启动初始化完成 ===")
 
 
@@ -389,6 +394,37 @@ async def _auto_daily_report():
         asyncio.create_task(_auto_eval_report())
     except Exception as e:
         logging.warning(f"自动生成市场报告失败: {e}")
+
+
+async def _auto_refresh_nav():
+    """每天 15:30 自动刷新所有持仓基金净值。"""
+    import time
+    while True:
+        try:
+            now = time.localtime()
+            # 计算距离下一个 15:30 的秒数
+            target = time.struct_time((
+                now.tm_year, now.tm_mon, now.tm_mday,
+                20, 0, 0,  # 20:00:00
+                now.tm_wday, now.tm_yday, now.tm_isdst,
+            ))
+            target_ts = time.mktime(target)
+            now_ts = time.mktime(now)
+            wait = target_ts - now_ts
+            if wait <= 0:
+                # 已过今天 15:30，等到明天
+                wait += 86400
+            logging.info(f"[auto-nav] 下次净值自动刷新: {wait/3600:.1f} 小时后")
+            await asyncio.sleep(wait)
+
+            # 执行刷新
+            logging.info("[auto-nav] 开始自动刷新持仓净值...")
+            from db.portfolio import refresh_all_fund_prices
+            result = refresh_all_fund_prices()
+            logging.info(f"[auto-nav] 净值刷新完成: {result}")
+        except Exception as e:
+            logging.warning(f"[auto-nav] 自动刷新净值异常: {e}")
+            await asyncio.sleep(300)  # 出错后 5 分钟重试
 
 
 # ── 请求模型 ──────────────────────────────────────────

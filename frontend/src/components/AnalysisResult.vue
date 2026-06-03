@@ -145,4 +145,30 @@ const renderedAnalysis = computed(() => {
 .badge-success { background: rgba(16, 185, 129, 0.1); color: #059669; }
 .badge-warning { background: rgba(245, 158, 11, 0.1); color: #d97706; }
 .badge-danger { background: rgba(239, 68, 68, 0.1); color: #dc2626; }
+
+/* 移动端适配 */
+@media (max-width: 768px) {
+  .card {
+    padding: 1rem;
+  }
+
+  .card-header-row {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0.75rem;
+  }
+
+  .codes-grid {
+    grid-template-columns: 1fr;
+    gap: 0.5rem;
+  }
+
+  .code-item {
+    padding: 0.65rem;
+  }
+
+  .article-title {
+    font-size: 1rem;
+  }
+}
 </style>

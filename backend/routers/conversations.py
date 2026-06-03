@@ -115,6 +115,206 @@ async def cancel_conversation_execution(conv_id: int):
     return {"ok": True, "updated": updated}
 
 
+@router.post("/api/conversations/{conv_id}/resume")
+async def resume_conversation(conv_id: int, request: Request):
+    """恢复中断的对话执行，跳过已完成的专家。"""
+    from db.agents import get_completed_agents_for_message
+
+    conv = get_conversation(conv_id)
+    if not conv:
+        raise HTTPException(404, "对话不存在")
+
+    # 获取消息
+    msgs = get_messages(conv_id)
+    if not msgs:
+        raise HTTPException(404, "对话无消息")
+
+    # 找到最后一条 assistant 消息（中断的）
+    last_assistant = None
+    original_query = None
+    for msg in reversed(msgs):
+        if msg["role"] == "assistant" and not last_assistant:
+            meta = msg.get("metadata")
+            if isinstance(meta, str):
+                try:
+                    meta = json.loads(meta)
+                except Exception:
+                    meta = {}
+            if isinstance(meta, dict) and meta.get("execution_status") in ("streaming", "cancelled"):
+                last_assistant = msg
+                last_assistant["_parsed_metadata"] = meta
+        elif msg["role"] == "user" and last_assistant:
+            original_query = msg["content"]
+            break
+
+    if not last_assistant or not original_query:
+        raise HTTPException(400, "没有可恢复的中断对话")
+
+    # 从 agent_runs 表查询已完成的专家
+    message_id = last_assistant["id"]
+    completed_runs = get_completed_agents_for_message(message_id)
+
+    if not completed_runs:
+        raise HTTPException(400, "没有已完成的专家结果可恢复")
+
+    logger.info(f"恢复对话 {conv_id}：找到 {len(completed_runs)} 个已完成的专家")
+
+    # 解析 knowledge_scope
+    rag_types = []
+    agent = get_agent(conv["agent_id"]) if conv.get("agent_id") else None
+    if agent and agent.get("knowledge_scope"):
+        try:
+            scope = json.loads(agent["knowledge_scope"]) if isinstance(agent["knowledge_scope"], str) else agent["knowledge_scope"]
+            rag_types = scope.get("rag_types", [])
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+    async def event_stream():
+        import threading
+
+        cancel_event = threading.Event()
+        request_start = time.time()
+        phase_timings = {}
+        trace_id = str(uuid.uuid4())[:12]
+        logger.info(f"[trace:{trace_id}] 恢复对话 {conv_id}: {original_query[:50]}...")
+
+        # 更新状态为 resuming
+        metadata = last_assistant.get("_parsed_metadata", {})
+        metadata["execution_status"] = "resuming"
+        update_message_metadata(last_assistant["id"], metadata)
+        stream_msg_id = last_assistant["id"]
+
+        yield _sse_event("status", {"message": f"正在恢复执行（{len(completed_runs)} 个专家已完成）..."})
+
+        # RAG 检索
+        if await request.is_disconnected():
+            cancel_event.set()
+            return
+
+        def _run_rag():
+            return build_rag_context_with_details(original_query, content_types=rag_types if rag_types else None)
+
+        rag_result = await asyncio.to_thread(_run_rag)
+        rag_context = rag_result["context"]
+
+        # 获取历史
+        history = get_messages(conv_id, limit=20)
+        msg_list = [{"role": m["role"], "content": m["content"]} for m in history if m["id"] != stream_msg_id]
+
+        # 恢复执行，传递 message_id
+        resume_data = {
+            "message_id": message_id,
+            "original_query": original_query,
+        }
+
+        def _run_resume_stream():
+            try:
+                for event in orchestrate_stream(original_query, msg_list, rag_context, cancel_event, resume_from=resume_data):
+                    _running_agents[trace_id] = {"conv_id": conv_id, "cancel": cancel_event}
+                    yield event
+            except CancelledError:
+                yield {"type": "cancelled", "message": "执行已取消"}
+            except Exception as e:
+                logger.error(f"恢复执行异常: {e}", exc_info=True)
+                yield {"type": "error", "message": str(e)}
+            finally:
+                _running_agents.pop(trace_id, None)
+
+        # 消费事件流
+        specialist_results_so_far = []
+        tool_calls_so_far = []
+        final_content = ""
+        final_complexity = metadata.get("complexity", "medium")
+
+        for event in _run_resume_stream():
+            if await request.is_disconnected():
+                cancel_event.set()
+                break
+
+            event_type = event.get("type")
+
+            if event_type == "status":
+                yield _sse_event("status", event)
+            elif event_type == "plan":
+                yield _sse_event("plan", event)
+            elif event_type == "specialist_start":
+                yield _sse_event("specialist_start", event)
+            elif event_type == "specialist_done":
+                agent_key = event.get("agent_key")
+                # 更新或添加结果
+                existing_idx = next(
+                    (i for i, sr in enumerate(specialist_results_so_far) if sr.get("agent_key") == agent_key),
+                    None
+                )
+                result_item = {
+                    "agent_key": agent_key,
+                    "agent": event.get("agent", ""),
+                    "icon": event.get("icon", "🤖"),
+                    "analysis": event.get("analysis", ""),
+                    "duration_ms": event.get("duration_ms", 0),
+                }
+                if existing_idx is not None:
+                    specialist_results_so_far[existing_idx] = result_item
+                else:
+                    specialist_results_so_far.append(result_item)
+
+                update_message_metadata(stream_msg_id, {
+                    "execution_status": "streaming",
+                    "complexity": final_complexity,
+                    "specialist_results": specialist_results_so_far,
+                    "tool_calls": tool_calls_so_far,
+                    "trace_id": trace_id,
+                })
+                yield _sse_event("specialist_done", event)
+            elif event_type == "answer_chunk":
+                final_content += event.get("content", "")
+                yield _sse_event("answer_chunk", event)
+            elif event_type == "answer":
+                final_content = event.get("content", final_content)
+                specialist_results_so_far = event.get("specialist_results", specialist_results_so_far)
+                tool_calls_so_far = event.get("tool_calls", tool_calls_so_far)
+                final_complexity = event.get("complexity", final_complexity)
+
+                duration_ms = int((time.time() - request_start) * 1000)
+                update_message_content_and_metadata(stream_msg_id, final_content, {
+                    "execution_status": "completed",
+                    "complexity": final_complexity,
+                    "specialist_results": [
+                        {"agent_key": s.get("agent_key", ""), "agent": s["agent"], "icon": s["icon"], "analysis": s.get("analysis", "")[:500]}
+                        for s in specialist_results_so_far
+                    ],
+                    "tool_calls": tool_calls_so_far,
+                    "phase_timings": phase_timings,
+                    "trace_id": trace_id,
+                })
+
+                yield _sse_event("answer", {
+                    "content": final_content,
+                    "specialist_results": specialist_results_so_far,
+                    "complexity": final_complexity,
+                    "duration_ms": duration_ms,
+                })
+            elif event_type == "cancelled":
+                update_message_metadata(stream_msg_id, {
+                    "execution_status": "cancelled",
+                    "complexity": final_complexity,
+                    "specialist_results": specialist_results_so_far,
+                    "tool_calls": tool_calls_so_far,
+                    "trace_id": trace_id,
+                })
+                yield _sse_event("cancelled", event)
+            elif event_type == "error":
+                update_message_metadata(stream_msg_id, {
+                    "execution_status": "failed",
+                    "error_message": event.get("message", ""),
+                    "specialist_results": specialist_results_so_far,
+                    "trace_id": trace_id,
+                })
+                yield _sse_event("error", event)
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
 @router.post("/api/conversations/{conv_id}/messages")
 async def send_message_api(conv_id: int, req: SendMessageRequest):
     """发送消息并获取 AI 回复（多 Agent 协作模式）。"""
@@ -222,6 +422,7 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
         request_start = time.time()
         phase_timings = {}
         error_category = "none"
+        client_disconnected = False  # 标记客户端是否断开
 
         # 生成 trace_id，关联本次对话的所有事件
         trace_id = str(uuid.uuid4())[:12]
@@ -234,9 +435,7 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
         yield _sse_event("user_message", {"content": req.content})
 
         # 2. 并行执行：需求澄清 + RAG 检索（节省 0.5-2s）
-        if await request.is_disconnected():
-            cancel_event.set()
-            return
+        # 不检查断开连接，让后端任务继续执行
         yield _sse_event("status", {"message": "正在理解问题并检索知识库..."})
 
         def _run_clarification():
@@ -282,14 +481,54 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
                 "pct": 25,
             })
 
-        # 3. 简单任务：直接路由到专家，跳过 Orchestrator
+        # 3. 普通聊天：直接调用 LLM 回答，不走专家流程
+        if complexity == "chat" and not clarification.get("specialists"):
+            yield _sse_event("status", {"message": "思考中..."})
+            yield _sse_event("progress", {
+                "phase": "chat",
+                "phase_index": 2,
+                "total_phases": 3,
+                "phase_label": "回答",
+                "substep": None,
+                "pct": 50,
+            })
+            # 构建上下文
+            chat_messages = [{"role": "system", "content": ORCHESTRATOR_PROMPT}]
+            for m in msg_list[-10:]:
+                chat_messages.append({"role": m["role"], "content": m["content"][:500]})
+            if rag_context:
+                chat_messages.append({"role": "system", "content": f"相关知识库参考：\n{rag_context[:1000]}"})
+            chat_messages.append({"role": "user", "content": req.content})
+            try:
+                resp = await asyncio.to_thread(lambda: _call_llm(
+                    caller="chat", model=MODEL, messages=chat_messages,
+                    temperature=get_config_float("llm.temperature_default", 0.3),
+                    max_tokens=get_config_int("llm.max_tokens_report", 4096),
+                ))
+                answer = resp.choices[0].message.content or "抱歉，我无法回答这个问题。"
+                # 清理 reasoning_content
+                if hasattr(resp.choices[0].message, 'reasoning_content') and resp.choices[0].message.reasoning_content:
+                    answer = resp.choices[0].message.content or answer
+            except Exception as e:
+                logger.warning(f"Chat LLM 调用失败: {e}")
+                answer = "抱歉，处理您的问题时出现了错误，请重试。"
+
+            # 输出结果
+            yield _sse_event("answer", {"content": answer, "specialist_results": []})
+            yield _sse_event("done", {"duration_ms": int((time.time() - request_start) * 1000), "complexity": "chat"})
+
+            # 保存消息
+            msg_id = create_message(conv_id, "user", req.content)
+            metadata = {"complexity": "chat", "execution_status": "completed"}
+            create_message(conv_id, "assistant", answer, metadata=json.dumps(metadata, ensure_ascii=False))
+            return
+
+        # 4. 简单任务：直接路由到专家，跳过 Orchestrator
         if complexity == "simple" and len(clarification.get("specialists", [])) == 1:
             # 只需要1个专家，直接调用
             agent_key = clarification["specialists"][0]
             if agent_key:
-                if await request.is_disconnected():
-                    cancel_event.set()
-                    return
+                # 不检查断开连接，让后端任务继续执行
                 yield _sse_event("status", {"message": f"正在咨询{_get_specialist_name(agent_key)}..."})
                 # 进度：开始专家分析
                 yield _sse_event("progress", {
@@ -329,6 +568,7 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
                         result=(result.get("analysis", "") or "")[:500],
                         duration_ms=result.get("duration_ms", 0),
                         trace_id=trace_id,
+                        status="success",
                     )
 
                     # 构建专家结果
@@ -383,6 +623,7 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
                             tool_calls=json.dumps(phase_timings, ensure_ascii=False),
                             duration_ms=total_ms,
                             trace_id=trace_id,
+                            status="success",
                         )
                     except Exception as _e:
                         logger.warning(f"记录 agent_runs 失败: {_e}")
@@ -406,9 +647,7 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
         msg_list = [{"role": m["role"], "content": m["content"]} for m in history]
 
         # 5. 调用 Orchestrator（多 Agent 协作）
-        if await request.is_disconnected():
-            cancel_event.set()
-            return
+        # 不检查断开连接，让后端任务继续执行
         yield _sse_event("status", {"message": "正在分析问题，决定需要咨询哪些专家..."})
         # 进度：开始编排
         yield _sse_event("progress", {
@@ -457,14 +696,9 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
             except queue.Empty:
                 # 队列超时 — 检查客户端是否断开
                 if not client_disconnected and await request.is_disconnected():
-                    logger.info("客户端断开连接，设置取消标志，等待后台任务完成后保存结果")
+                    logger.info("客户端断开连接，后端任务继续执行，等待完成后保存结果")
                     client_disconnected = True
-                    cancel_event.set()
-                    # 清理该对话的 running agents
-                    to_remove = [k for k in _running_agents if k.startswith(f"{conv_id}_")]
-                    for k in to_remove:
-                        _running_agents.pop(k, None)
-                    # 不 return，继续消费队列直到后台线程完成
+                    # 不设置 cancel_event，让后端任务继续执行
                 continue
 
             if event is None:
@@ -566,14 +800,17 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
                         "pct": min(35 + (done_count * 15), 70),
                     })
                 # 记录到 agent_runs
+                _ar_analysis = (event.get("analysis", "") or "")
+                _ar_status = "error" if ("error" in _ar_analysis.lower() or "失败" in _ar_analysis or "异常" in _ar_analysis) else "success"
                 create_agent_run(
                     conversation_id=conv_id, message_id=0,
                     agent_key=event.get("agent_key", ""),
                     agent_name=event.get("agent", ""),
                     query=req.content[:500],
-                    result=(event.get("analysis", "") or "")[:500],
+                    result=_ar_analysis[:500],
                     duration_ms=event.get("duration_ms", 0),
                     trace_id=trace_id,
+                    status=_ar_status,
                 )
                 # 增量保存执行进度到 metadata
                 try:
@@ -793,13 +1030,15 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
             )
             _c.commit()
             _c.close()
+            _ct_status = "error" if ("error" in (answer or "").lower() or "失败" in (answer or "") or "异常" in (answer or "")) else "success"
             create_agent_run(
                 conversation_id=conv_id, message_id=msg_id,
                 agent_key="chat_turn", agent_name="对话整体",
-                query=req.content[:500], result=answer[:500],
+                query=req.content[:500], result=(answer or "")[:500],
                 tool_calls=json.dumps(phase_timings, ensure_ascii=False),
                 duration_ms=total_ms,
                 trace_id=trace_id,
+                status=_ct_status,
             )
         except Exception as _e:
             logger.warning(f"记录 agent_runs 失败: {_e}")

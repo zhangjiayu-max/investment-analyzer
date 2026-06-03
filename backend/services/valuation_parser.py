@@ -1,10 +1,13 @@
 """估值图片解析服务。"""
 
+import logging
 import re
 from datetime import date
 from pathlib import Path
 
 from config import IMAGES_DIR, VALUATION_IMAGES_DIR, DD_IMAGES_DIR
+
+logger = logging.getLogger(__name__)
 from db._conn import _get_conn
 from db.valuations import save_valuation, save_dd_valuation
 from image_parser import ImageParser, DDImageParser

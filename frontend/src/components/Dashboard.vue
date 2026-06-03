@@ -7,6 +7,7 @@ import AppToast from './AppToast.vue'
 import Skeleton from './ui/Skeleton.vue'
 import EmptyState from './ui/EmptyState.vue'
 import { useToast } from '../composables/useToast'
+import { renderMarkdown } from '../composables/useMarkdown'
 import DOMPurify from 'dompurify'
 
 const { showToast } = useToast()
@@ -751,7 +752,7 @@ const concentrationIcon = { low: '✅', moderate: '⚡', high: '⚠️' }
               <span class="panorama-title">AI 全景诊断</span>
               <span class="panorama-time">{{ panoramaResult.created_at?.slice(0, 16) }}</span>
             </div>
-            <div class="panorama-content" v-html="renderBriefing(panoramaResult.result_data || panoramaResult.result)"></div>
+            <div class="panorama-content markdown-body" v-html="renderMarkdown(panoramaResult.result_data || panoramaResult.result)"></div>
           </div>
           <div v-else-if="panoramaResult?.error" class="panorama-section">
             <span class="panorama-error">{{ panoramaResult.error }}</span>
@@ -2724,5 +2725,61 @@ const concentrationIcon = { low: '✅', moderate: '⚡', high: '⚠️' }
 .temp-gauge-hint {
   font-size: 0.75rem;
   color: var(--color-text-tertiary);
+}
+
+/* ── 移动端响应式 ────────────────────────────────────────── */
+@media (max-width: 768px) {
+  /* 卡片高度调整 */
+  .dash-card {
+    min-height: auto;
+    max-height: none;
+    padding: 1rem;
+  }
+
+  /* 网格布局 */
+  .dash-grid {
+    grid-template-columns: 1fr;
+    gap: 0.75rem;
+  }
+
+  .health-metrics {
+    grid-template-columns: 1fr;
+  }
+
+  /* 按钮触摸区域 */
+  .card-icon {
+    width: 24px;
+    height: 24px;
+  }
+
+  .btn-ai-action {
+    min-width: 44px;
+    min-height: 44px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  /* 温度仪表盘 */
+  .temp-gauges-row {
+    grid-template-columns: 1fr;
+    gap: 0.75rem;
+  }
+
+  /* 验证栏 */
+  .verify-item {
+    padding: 0.5rem 0.65rem;
+    min-height: 44px;
+  }
+
+  /* 推荐卡片 */
+  .rec-card {
+    padding: 0.75rem;
+  }
+
+  .rec-grid {
+    grid-template-columns: 1fr;
+    gap: 0.75rem;
+  }
 }
 </style>

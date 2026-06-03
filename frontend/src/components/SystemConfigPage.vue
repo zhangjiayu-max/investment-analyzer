@@ -341,4 +341,30 @@ onMounted(loadConfigs)
 .btn-danger-text:hover {
   background: rgba(239, 68, 68, 0.1);
 }
+
+/* 移动端适配 */
+@media (max-width: 768px) {
+  .config-item {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0.5rem;
+    padding: 0.75rem;
+  }
+
+  .config-info {
+    width: 100%;
+  }
+
+  .config-value {
+    width: 100%;
+    justify-content: space-between;
+  }
+
+  .btn-primary,
+  .btn-ghost,
+  .btn-outline {
+    min-height: 44px;
+    padding: 0.5rem 1rem;
+  }
+}
 </style>

@@ -91,7 +91,7 @@ async def run_analysis(req: AnalysisRunRequest):
     except Exception as e:
         logger.warning(f"持仓数据获取失败: {e}")
 
-    # 5. 指数专属新闻（用指数名称搜索，而非通用 A股 新闻）
+    # 5. 指数专属新闻（多源 + 关联词扩展搜索）
     news_context = ""
     try:
         from tools import execute_tool
@@ -99,10 +99,70 @@ async def run_analysis(req: AnalysisRunRequest):
         news_result = execute_tool("web_search", {"query": news_query, "max_results": 5})
         news_context = news_result if news_result else ""
     except Exception as e:
-        logger.warning(f"新闻检索失败: {e}")
+        logger.warning(f"akshare 新闻检索失败: {e}")
 
-    # 6. 拼装 prompt
+    # YingMi MCP 搜索：直接关键词 + 关联关键词
+    try:
+        from mcp.yingmi_client import get_yingmi_client
+        mcp = get_yingmi_client()
+        # 构建搜索关键词列表：先搜直接名称，再搜关联词
+        search_keywords = [index_label] if index_label else []
+        # 补充关联搜索词（提高覆盖率，尤其是港股/跨市场指数）
+        name_lower = (req.index_name or "").lower()
+        if "恒生" in name_lower or "港" in name_lower:
+            search_keywords.extend(["港股科技", "南向资金", "港股通 科技"])
+        elif "科技" in name_lower or "信息" in name_lower or "电子" in name_lower:
+            search_keywords.extend(["科技板块", "半导体 AI"])
+        elif "消费" in name_lower:
+            search_keywords.extend(["消费板块", "白酒 食品"])
+        elif "医药" in name_lower or "生物" in name_lower:
+            search_keywords.extend(["医药板块", "创新药"])
+        elif "新能源" in name_lower or "光伏" in name_lower:
+            search_keywords.extend(["新能源", "光伏 锂电"])
+        elif "金融" in name_lower or "银行" in name_lower or "证券" in name_lower:
+            search_keywords.extend(["金融板块", "银行 券商"])
+        # A 股大盘相关（所有指数都可能受此影响）
+        search_keywords.append("A股 市场")
+
+        mcp_items = []
+        seen_titles = set()
+        for kw in search_keywords[:3]:  # 最多 3 轮搜索，避免太慢
+            try:
+                mcp_raw = await asyncio.to_thread(
+                    lambda _kw=kw: mcp.call_tool("SearchFinancialNews", {"keyword": _kw, "pageSize": 3})
+                )
+                if isinstance(mcp_raw, dict):
+                    for c in mcp_raw.get("content", []):
+                        if c.get("type") == "text":
+                            parsed = json.loads(c["text"])
+                            if parsed.get("success") and parsed.get("data", {}).get("items"):
+                                for item in parsed["data"]["items"]:
+                                    title = item.get("title", "").strip()
+                                    if title and title not in seen_titles:
+                                        seen_titles.add(title)
+                                        mcp_items.append(
+                                            f"- {title}（{item.get('sources', '')}）: {item.get('summary', '')[:120]}"
+                                        )
+            except Exception:
+                continue
+
+        if mcp_items:
+            mcp_news = "\n".join(mcp_items)
+            news_context = (news_context + "\n\n" + mcp_news).strip() if news_context else mcp_news
+    except Exception as e:
+        logger.warning(f"MCP 新闻检索失败: {e}")
+
+    # 6. 拼装 prompt（加入关联推理引导）
     full_prompt = agent["system_prompt"]
+    # 引导 LLM 做跨市场关联分析
+    full_prompt += """
+
+## 重要提示：关联性分析
+- 如果没有直接关于该指数的新闻，**不要说"没有相关新闻"就结束**
+- 分析 A 股大盘、相关板块、宏观政策对该指数的**间接影响**
+- 对于港股指数：A 股科技板块动态、南向资金流向、中美关系、美联储政策都会影响
+- 对于行业指数：上下游产业链新闻、政策风向、资金轮动都是重要信号
+- **从已有新闻中提炼与该指数相关的信息**，而不是只看标题是否包含指数名称"""
     if valuation_context:
         full_prompt += f"\n\n<valuation_data>\n指数估值数据（{index_label}）：\n{valuation_context}\n</valuation_data>"
     if rag_context:

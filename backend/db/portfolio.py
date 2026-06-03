@@ -65,6 +65,17 @@ def get_holding(holding_id: int) -> dict | None:
     return dict(row) if row else None
 
 
+def get_holding_by_fund(fund_code: str, user_id: str = "default") -> dict | None:
+    """根据基金代码获取持仓。"""
+    conn = _get_conn()
+    row = conn.execute(
+        "SELECT * FROM portfolio_holdings WHERE fund_code = ? AND user_id = ?",
+        (fund_code, user_id)
+    ).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
 def list_holdings(user_id: str = "default", account: str = None) -> list[dict]:
     """获取用户所有持仓，可选按账号筛选。"""
     conn = _get_conn()
@@ -391,7 +402,8 @@ def create_transaction(fund_code: str, transaction_type: str, amount: float,
                        status: str = None, submitted_shares: float = None,
                        submitted_amount: float = None,
                        transaction_time: str = None,
-                       expected_confirm_date: str = None) -> int:
+                       expected_confirm_date: str = None,
+                       fund_name: str = None, account: str = None) -> int:
     """新增交易记录，返回 transaction_id。自动更新持仓数据。
 
     status: 'pending' | 'confirmed' | None(默认confirmed)
@@ -409,7 +421,7 @@ def create_transaction(fund_code: str, transaction_type: str, amount: float,
         actual_price = None
         if transaction_type == 'buy':
             submitted_amount = submitted_amount or amount
-        elif transaction_type == 'sell':
+        elif transaction_type in ('sell', 'convert'):
             submitted_shares = submitted_shares or shares
     else:
         actual_amount = amount
@@ -419,13 +431,13 @@ def create_transaction(fund_code: str, transaction_type: str, amount: float,
     conn = _get_conn()
     cur = conn.execute("""
         INSERT INTO portfolio_transactions
-            (holding_id, user_id, fund_code, transaction_type, amount, shares, price,
+            (holding_id, user_id, fund_code, fund_name, transaction_type, amount, shares, price,
              transaction_date, notes, status, submitted_shares, submitted_amount,
-             transaction_time, expected_confirm_date)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """, (holding_id, user_id, fund_code, transaction_type, actual_amount, actual_shares,
+             transaction_time, expected_confirm_date, account)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (holding_id, user_id, fund_code, fund_name, transaction_type, actual_amount, actual_shares,
           actual_price, transaction_date, notes, status, submitted_shares, submitted_amount,
-          transaction_time, expected_confirm_date))
+          transaction_time, expected_confirm_date, account))
     tx_id = cur.lastrowid
     conn.commit()
     conn.close()
@@ -439,7 +451,7 @@ def create_transaction(fund_code: str, transaction_type: str, amount: float,
 
 def list_transactions(fund_code: str = None, holding_id: int = None,
                       user_id: str = "default", limit: int = 100,
-                      include_system: bool = False) -> list[dict]:
+                      include_system: bool = False, status: str = None) -> list[dict]:
     """获取交易记录列表。默认不包含系统自动生成的（is_system=1）交易。"""
     conn = _get_conn()
     conditions = ["user_id = ?"]
@@ -450,6 +462,9 @@ def list_transactions(fund_code: str = None, holding_id: int = None,
     if holding_id:
         conditions.append("holding_id = ?")
         params.append(holding_id)
+    if status:
+        conditions.append("status = ?")
+        params.append(status)
     if not include_system:
         conditions.append("(is_system IS NULL OR is_system = 0)")
 
@@ -555,11 +570,14 @@ def _recalculate_holding(holding_id: int):
 
 def confirm_transaction(tx_id: int, confirmed_price: float,
                         confirmed_shares: float = None,
-                        confirmed_amount: float = None) -> bool:
+                        confirmed_amount: float = None,
+                        target_fund_code: str = None,
+                        target_fund_name: str = None) -> bool:
     """确认交易：填入实际净值，计算实际份额/金额。
 
     买入：confirmed_shares = submitted_amount / confirmed_price
     卖出：confirmed_amount = submitted_shares * confirmed_price
+    转换：卖出源基金份额 → 买入目标基金（target_fund_code 必填）
     """
     conn = _get_conn()
     tx = conn.execute("SELECT * FROM portfolio_transactions WHERE id = ?", (tx_id,)).fetchone()
@@ -570,6 +588,8 @@ def confirm_transaction(tx_id: int, confirmed_price: float,
 
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     tx_type = tx["transaction_type"]
+    user_id = tx.get("user_id", "default")
+    holding_id = tx.get("holding_id")
 
     if tx_type == "buy":
         # 买入确认：金额 / 净值 = 份额
@@ -582,6 +602,12 @@ def confirm_transaction(tx_id: int, confirmed_price: float,
         actual_price = confirmed_price
     elif tx_type == "sell":
         # 卖出确认：份额 × 净值 = 金额
+        sub_shares = confirmed_shares or tx.get("submitted_shares") or tx.get("shares") or 0
+        actual_amount = round(sub_shares * confirmed_price, 2)
+        actual_shares = sub_shares
+        actual_price = confirmed_price
+    elif tx_type == "convert":
+        # 转换确认：按份额卖出源基金，同时买入目标基金
         sub_shares = confirmed_shares or tx.get("submitted_shares") or tx.get("shares") or 0
         actual_amount = round(sub_shares * confirmed_price, 2)
         actual_shares = sub_shares
@@ -601,12 +627,67 @@ def confirm_transaction(tx_id: int, confirmed_price: float,
     conn.commit()
     conn.close()
 
-    if tx.get("holding_id"):
-        _recalculate_holding(tx["holding_id"])
+    # ── 新基金买入：holding_id 为空时自动创建持仓 ──
+    if tx_type == "buy" and not holding_id and actual_shares and actual_shares > 0:
+        fund_code = tx["fund_code"]
+        fund_name = tx.get("fund_name", fund_code)
+        existing = get_holding_by_fund(fund_code, user_id)
+        if existing:
+            holding_id = existing["id"]
+            # 更新交易记录关联
+            conn2 = _get_conn()
+            conn2.execute("UPDATE portfolio_transactions SET holding_id = ? WHERE id = ?", (holding_id, tx_id))
+            conn2.commit()
+            conn2.close()
+        else:
+            holding_id = create_holding(
+                fund_code=fund_code, fund_name=fund_name,
+                shares=actual_shares, cost_price=actual_price,
+                current_price=actual_price, user_id=user_id,
+                account=tx.get("account", "花无缺"),
+            )
+            # 更新交易记录关联
+            conn2 = _get_conn()
+            conn2.execute("UPDATE portfolio_transactions SET holding_id = ? WHERE id = ?", (holding_id, tx_id))
+            conn2.commit()
+            conn2.close()
+
+    if holding_id:
+        _recalculate_holding(holding_id)
 
     # 卖出确认后，自动将金额计入零钱
     if tx_type == "sell" and actual_amount > 0:
-        add_cash(tx.get("user_id", "default"), actual_amount)
+        add_cash(user_id, actual_amount)
+
+    # ── 基金转换：减少源基金份额，创建/增加目标基金 ──
+    if tx_type == "convert" and target_fund_code and actual_shares and actual_shares > 0:
+        # 1. 源基金减少份额（通过 _recalculate_holding 已处理）
+        # 2. 创建目标基金的买入交易
+        target_name = target_fund_name or target_fund_code
+        target_holding = get_holding_by_fund(target_fund_code, user_id)
+        if not target_holding:
+            # 自动创建目标基金持仓
+            target_holding_id = create_holding(
+                fund_code=target_fund_code, fund_name=target_name,
+                shares=0, cost_price=confirmed_price,
+                current_price=confirmed_price, user_id=user_id,
+            )
+        else:
+            target_holding_id = target_holding["id"]
+        # 为目标基金创建一笔确认的买入交易
+        conn3 = _get_conn()
+        conn3.execute("""
+            INSERT INTO portfolio_transactions
+                (holding_id, user_id, fund_code, transaction_type, amount, shares, price,
+                 transaction_date, status, confirmed_at, notes)
+            VALUES (?, ?, ?, 'buy', ?, ?, ?, ?, 'confirmed', ?, ?)
+        """, (target_holding_id, user_id, target_fund_code,
+              actual_amount, actual_shares, confirmed_price,
+              tx.get("transaction_date", now[:10]), now,
+              f"从 {tx.get('fund_code', '')} 转换"))
+        conn3.commit()
+        conn3.close()
+        _recalculate_holding(target_holding_id)
 
     return True
 
@@ -655,24 +736,83 @@ def delete_transaction(tx_id: int) -> bool:
 
 def fetch_fund_nav(fund_code: str) -> dict | None:
     """
-    通过 akshare 获取基金最新净值。
+    获取基金最新净值。优先 akshare，如果日期不是今天则尝试盈米 MCP。
 
     返回: {"nav": 0.57, "date": "2026-05-22", "change_pct": -2.1} 或 None
     """
+    from datetime import datetime, timedelta
+
+    today = datetime.now().strftime("%Y-%m-%d")
+    yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+
+    # ── 优先 akshare ──
     try:
         import akshare as ak
         df = ak.fund_open_fund_info_em(symbol=fund_code, indicator='单位净值走势')
-        if df is None or len(df) == 0:
-            return None
-        last = df.iloc[-1]
-        return {
-            "nav": float(last["单位净值"]),
-            "date": str(last["净值日期"]),
-            "change_pct": float(last["日增长率"]) if last.get("日增长率") else None,
-        }
+        if df is not None and len(df) > 0:
+            last = df.iloc[-1]
+            nav_date = str(last["净值日期"])
+            # 如果 akshare 返回的是今天的数据，直接使用
+            if nav_date >= today:
+                return {
+                    "nav": float(last["单位净值"]),
+                    "date": nav_date,
+                    "change_pct": float(last["日增长率"]) if last.get("日增长率") else None,
+                }
+            # 如果是昨天或更早的数据，继续尝试 MCP
+            print(f"[db] akshare 返回 {fund_code} 日期 {nav_date}，尝试 MCP 获取最新")
     except Exception as e:
-        print(f"[db] 获取基金 {fund_code} 净值失败: {e}")
-        return None
+        print(f"[db] akshare 获取 {fund_code} 净值失败: {e}")
+
+    # ── 尝试盈米 MCP（可能有更新的数据）──
+    try:
+        from mcp.yingmi_client import get_yingmi_client
+        client = get_yingmi_client()
+        result = client.call_tool("BatchGetFundsDetail", {"fundCodes": [fund_code]})
+        # 解析返回的文本内容
+        text = ""
+        for item in result.get("content", []):
+            if item.get("type") == "text":
+                text = item["text"]
+                break
+        if not text:
+            return None
+        import json
+        data = json.loads(text) if text.strip().startswith(("{", "[")) else {}
+        # BatchGetFundsDetail 返回数组，取第一个
+        funds = data if isinstance(data, list) else data.get("data", data.get("result", []))
+        if not funds:
+            return None
+        fund_data = funds[0] if isinstance(funds, list) else funds
+        # MCP 返回结构: {fundCode, data: {summary: {nav, navDate, dailyReturn}}}
+        summary = fund_data.get("data", {}).get("summary", {})
+        nav = summary.get("nav") or summary.get("unitNav") or summary.get("latest_nav")
+        nav_date = summary.get("navDate") or summary.get("nav_date") or summary.get("updateDate")
+        change_pct = summary.get("dailyReturn") or summary.get("change_pct") or summary.get("dayGrowthRate")
+        if nav is not None:
+            # 转换日期格式（"2026年06月03日" -> "2026-06-03"）
+            if nav_date and "年" in str(nav_date):
+                try:
+                    from datetime import datetime
+                    nav_date = datetime.strptime(str(nav_date), "%Y年%m月%d日").strftime("%Y-%m-%d")
+                except:
+                    pass
+            # 处理百分比格式（"-0.89%" -> -0.89）
+            if change_pct is not None and isinstance(change_pct, str):
+                change_pct = change_pct.replace("%", "").strip()
+            try:
+                change_pct = float(change_pct) if change_pct else None
+            except (ValueError, TypeError):
+                change_pct = None
+            return {
+                "nav": float(nav),
+                "date": str(nav_date) if nav_date else "",
+                "change_pct": change_pct,
+            }
+    except Exception as e:
+        print(f"[db] 盈米 MCP 获取 {fund_code} 净值失败: {e}")
+
+    return None
 
 
 def get_fund_nav_history(fund_code: str, user_id: str = "default", days: int = 365) -> dict | None:

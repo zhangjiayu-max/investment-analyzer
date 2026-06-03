@@ -349,9 +349,11 @@ def clear_specialist_cache():
 # ── Agent 提示词版本 CRUD ──────────────────────────────
 
 
-def save_prompt_version(agent_id: int, agent_type: str, system_prompt: str):
+def save_prompt_version(agent_id: int, agent_type: str, system_prompt: str, conn=None):
     """保存当前提示词到版本历史（在更新 agent 前调用）。"""
-    conn = _get_conn()
+    own_conn = conn is None
+    if own_conn:
+        conn = _get_conn()
     row = conn.execute(
         "SELECT MAX(version) as max_ver FROM agent_prompt_versions WHERE agent_id = ? AND agent_type = ?",
         (agent_id, agent_type)
@@ -361,8 +363,9 @@ def save_prompt_version(agent_id: int, agent_type: str, system_prompt: str):
         "INSERT INTO agent_prompt_versions (agent_id, agent_type, system_prompt, version) VALUES (?, ?, ?, ?)",
         (agent_id, agent_type, system_prompt, next_ver)
     )
-    conn.commit()
-    conn.close()
+    if own_conn:
+        conn.commit()
+        conn.close()
 
 
 def list_prompt_versions(agent_id: int, agent_type: str = 'conversation') -> list[dict]:
@@ -392,19 +395,82 @@ def get_prompt_version(version_id: int) -> dict | None:
 def create_agent_run(conversation_id: int, message_id: int, agent_key: str,
                      agent_name: str, query: str, result: str = "",
                      tool_calls: str = "", duration_ms: int = 0,
-                     trace_id: str = "") -> int:
-    """记录一次专家 Agent 调用，返回 run_id。"""
+                     trace_id: str = "", status: str = "success") -> int:
+    """记录一次专家 Agent 调用，返回 run_id。status: success / error / timeout。"""
     conn = _get_conn()
     cur = conn.execute("""
         INSERT INTO agent_runs (conversation_id, message_id, agent_key, agent_name,
-                                query, result, tool_calls, duration_ms, trace_id)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                query, result, tool_calls, duration_ms, trace_id, status)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (conversation_id, message_id, agent_key, agent_name,
-          query, result, tool_calls, duration_ms, trace_id))
+          query, result, tool_calls, duration_ms, trace_id, status))
     run_id = cur.lastrowid
     conn.commit()
     conn.close()
     return run_id
+
+
+def create_pending_agent_run(conversation_id: int, message_id: int, agent_key: str,
+                              agent_name: str, query: str = "", trace_id: str = "") -> int:
+    """创建 pending 状态的 agent 执行记录，返回 run_id。"""
+    conn = _get_conn()
+    cur = conn.execute("""
+        INSERT INTO agent_runs (conversation_id, message_id, agent_key, agent_name,
+                                query, trace_id, status)
+        VALUES (?, ?, ?, ?, ?, ?, 'pending')
+    """, (conversation_id, message_id, agent_key, agent_name, query, trace_id))
+    run_id = cur.lastrowid
+    conn.commit()
+    conn.close()
+    return run_id
+
+
+def update_agent_run_status(run_id: int, status: str, result: str = None,
+                             duration_ms: int = None, error_message: str = None):
+    """更新 agent 执行记录状态。status: running / completed / failed / cancelled。"""
+    conn = _get_conn()
+    updates = ["status = ?"]
+    params = [status]
+
+    if result is not None:
+        updates.append("result = ?")
+        params.append(result)
+    if duration_ms is not None:
+        updates.append("duration_ms = ?")
+        params.append(duration_ms)
+    if status == "completed":
+        updates.append("completed_at = datetime('now','localtime')")
+    elif status == "running":
+        updates.append("started_at = datetime('now','localtime')")
+
+    params.append(run_id)
+    conn.execute(f"UPDATE agent_runs SET {', '.join(updates)} WHERE id = ?", params)
+    conn.commit()
+    conn.close()
+
+
+def get_completed_agents_for_message(message_id: int) -> list[dict]:
+    """获取某条消息下已完成的 agent 执行记录。"""
+    conn = _get_conn()
+    rows = conn.execute("""
+        SELECT agent_key, agent_name, result, duration_ms, tool_calls
+        FROM agent_runs
+        WHERE message_id = ? AND status = 'completed'
+        ORDER BY id ASC
+    """, (message_id,)).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def cancel_running_agents(message_id: int):
+    """取消某条消息下所有 running/pending 状态的 agent。"""
+    conn = _get_conn()
+    conn.execute("""
+        UPDATE agent_runs SET status = 'cancelled'
+        WHERE message_id = ? AND status IN ('pending', 'running')
+    """, (message_id,))
+    conn.commit()
+    conn.close()
 
 
 def get_agent_runs(conversation_id: int, limit: int = 50) -> list[dict]:

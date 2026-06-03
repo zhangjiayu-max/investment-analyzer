@@ -324,4 +324,41 @@ function errorCategoryLabel(c) {
   font-size: 0.68rem;
   color: var(--color-danger, #ef4444);
 }
+
+/* 移动端适配 */
+@media (max-width: 768px) {
+  .trace-detail {
+    padding: 0.75rem;
+  }
+
+  .trace-header {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0.5rem;
+  }
+
+  .trace-stats {
+    flex-wrap: wrap;
+    gap: 0.5rem;
+  }
+
+  .run-item,
+  .tool-item {
+    flex-wrap: wrap;
+    gap: 0.25rem;
+    padding: 0.4rem 0;
+  }
+
+  .run-time,
+  .tool-time {
+    margin-left: 0;
+    width: 100%;
+  }
+
+  /* 表格横向滚动 */
+  .trace-table-wrap {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+}
 </style>

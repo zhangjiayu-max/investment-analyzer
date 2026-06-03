@@ -80,7 +80,7 @@ from db.articles import (
 
 # 持仓管理全领域
 from db.portfolio import (
-    create_holding, get_holding, list_holdings, update_holding, delete_holding,
+    create_holding, get_holding, get_holding_by_fund, list_holdings, update_holding, delete_holding,
     get_portfolio_summary, get_cash_balance, get_total_cash_balance, add_cash, set_cash_balance,
     accrue_cash_interest, save_rebalance_config, get_active_rebalance_config,
     list_rebalance_configs, get_rebalance_config_by_id, rollback_rebalance_config,
@@ -412,6 +412,8 @@ def init_db():
     _add_column_if_not_exists(conn, "portfolio_transactions", "transaction_time", "TEXT")
     _add_column_if_not_exists(conn, "portfolio_transactions", "expected_confirm_date", "TEXT")
     _add_column_if_not_exists(conn, "portfolio_transactions", "is_system", "INTEGER DEFAULT 0")
+    _add_column_if_not_exists(conn, "portfolio_transactions", "fund_name", "TEXT")
+    _add_column_if_not_exists(conn, "portfolio_transactions", "account", "TEXT")
 
     _add_column_if_not_exists(conn, "portfolio_cash", "last_interest_date", "TEXT")
     _add_column_if_not_exists(conn, "portfolio_cash", "today_interest", "REAL DEFAULT 0")
@@ -638,6 +640,13 @@ def init_db():
     _add_column_if_not_exists(conn, "agent_runs", "trace_id", "TEXT DEFAULT ''")
     _add_column_if_not_exists(conn, "token_usage", "trace_id", "TEXT DEFAULT ''")
     # rag_logs 的 trace_id 在 log_rag_search 中通过 CREATE TABLE 包含
+
+    # agent_runs 增加 status 字段（success / error / timeout）
+    _add_column_if_not_exists(conn, "agent_runs", "status", "TEXT DEFAULT 'success'")
+
+    # agent_runs 增加时间追踪字段
+    _add_column_if_not_exists(conn, "agent_runs", "started_at", "TEXT")
+    _add_column_if_not_exists(conn, "agent_runs", "completed_at", "TEXT")
 
     # 编排配置默认值
     _default_orchestration_config = [
