@@ -194,7 +194,8 @@ function selectIndex(code) {
   document.querySelector('.select-search-input')?.blur()
   // 立即加载该指数的估值历史和分析历史
   if (selectedMetric.value) loadHistory()
-  if (activeTab.value === 'analysis') loadAnalysisHistory()
+  // 总是加载分析历史（用于恢复最新结果）
+  loadAnalysisHistory()
 }
 
 function selectMetric(metric) {
@@ -318,6 +319,23 @@ async function loadAnalysisHistory() {
   try {
     const { data } = await listAnalysisHistory(selectedCode.value)
     analysisHistory.value = data.history || data.items || []
+
+    // 从历史记录中恢复最新一条到 analysisResultMap（用于页面切换后恢复）
+    if (analysisHistory.value.length > 0 && selectedCode.value) {
+      const latest = analysisHistory.value[0]
+      if (!analysisResultMap.value[selectedCode.value]) {
+        analysisResultMap.value = {
+          ...analysisResultMap.value,
+          [selectedCode.value]: {
+            id: latest.id,
+            result: latest.result,
+            agent_name: latest.agent_name || '指数深度分析师',
+            token_usage: latest.token_usage || 0,
+            created_at: latest.created_at,
+          }
+        }
+      }
+    }
   } catch (e) {
     console.error('Failed to load analysis history:', e)
   } finally {
@@ -631,6 +649,10 @@ onMounted(() => {
   loadIndexes()
   loadMarketTemperature()
   document.addEventListener('click', handleOutsideClick)
+  // 加载分析历史（用于恢复最新结果）
+  if (selectedCode.value) {
+    loadAnalysisHistory()
+  }
 })
 onUnmounted(() => {
   document.removeEventListener('click', handleOutsideClick)
