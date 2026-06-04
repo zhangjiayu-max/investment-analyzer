@@ -96,6 +96,7 @@ from db.portfolio import (
     update_analysis_feedback, list_bad_cases, list_all_bad_cases,
     delete_portfolio_analysis_record, save_analysis_cache, get_analysis_cache,
     get_cached_fund_holdings, get_portfolio_penetration,
+    backfill_valuation_snapshots,
 )
 
 # AI 分析 Agent + 历史 + Prompt 常量

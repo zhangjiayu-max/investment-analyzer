@@ -2085,6 +2085,28 @@ function txStatusBadge(s) {
   return { pending: 'badge-warning', confirmed: 'badge-success', settled: 'badge-info' }[s] || 'badge-success'
 }
 
+function getValuationClass(snapshotStr) {
+  if (!snapshotStr) return ''
+  try {
+    const snap = JSON.parse(snapshotStr)
+    const pe = snap.pe_percentile
+    if (pe == null) return ''
+    if (pe < 30) return 'val-low'
+    if (pe <= 70) return 'val-mid'
+    return 'val-high'
+  } catch { return '' }
+}
+
+function getValuationText(snapshotStr) {
+  if (!snapshotStr) return '--'
+  try {
+    const snap = JSON.parse(snapshotStr)
+    const pe = snap.pe_percentile
+    if (pe == null) return '--'
+    return `PE ${pe.toFixed(1)}%`
+  } catch { return '--' }
+}
+
 function txDisplayAmount(tx) {
   if (tx.status === 'pending') {
     if (tx.transaction_type === 'buy') return '¥' + (tx.submitted_amount || 0).toLocaleString()
@@ -2581,6 +2603,7 @@ function txDisplayAmount(tx) {
                     <th>份额</th>
                     <th>价格</th>
                     <th>金额</th>
+                    <th>估值分位</th>
                     <th>日期</th>
                   </tr>
                 </thead>
@@ -2598,6 +2621,12 @@ function txDisplayAmount(tx) {
                     <td class="text-right">{{ (tx.shares || 0).toLocaleString() }}</td>
                     <td class="text-right">{{ tx.price ? '¥' + tx.price.toFixed(4) : '--' }}</td>
                     <td class="text-right">{{ tx.amount ? '¥' + tx.amount.toLocaleString() : '--' }}</td>
+                    <td>
+                      <span v-if="tx.valuation_snapshot" :class="['val-badge', getValuationClass(tx.valuation_snapshot)]">
+                        {{ getValuationText(tx.valuation_snapshot) }}
+                      </span>
+                      <span v-else class="text-muted">--</span>
+                    </td>
                     <td class="text-right">{{ tx.transaction_date }}</td>
                   </tr>
                 </tbody>
@@ -5396,6 +5425,29 @@ select.input-field {
 .tx-sell {
   background: #fef3c7;
   color: #92400e;
+}
+
+.val-badge {
+  display: inline-block;
+  padding: 0.1rem 0.4rem;
+  border-radius: 3px;
+  font-size: 0.7rem;
+  font-weight: 600;
+}
+
+.val-low {
+  background: #dcfce7;
+  color: #166534;
+}
+
+.val-mid {
+  background: #fef9c3;
+  color: #854d0e;
+}
+
+.val-high {
+  background: #fee2e2;
+  color: #991b1b;
 }
 
 /* ── AI Analysis ─── */

@@ -1588,6 +1588,14 @@ async def list_trade_review_records_api(limit: int = 10):
     return {"records": records}
 
 
+@router.post("/api/portfolio/backfill-snapshots")
+async def backfill_snapshots_api():
+    """回填历史交易的估值快照。"""
+    from db import backfill_valuation_snapshots
+    updated = backfill_valuation_snapshots()
+    return {"ok": True, "updated": updated}
+
+
 @router.get("/api/portfolio/analysis/what-if/records")
 async def list_whatif_records_api(limit: int = 10):
     """列出情景推演历史记录。"""

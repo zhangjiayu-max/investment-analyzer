@@ -78,6 +78,11 @@ function recoverFromDisconnect() {
     showToast('正在刷新消息...', 'info')
   }
 
+  // 移除任何错误消息（可能是 SSE 断开导致的）
+  messages.value = messages.value.filter(m =>
+    !(m.role === 'assistant' && m.content?.startsWith('发生错误:'))
+  )
+
   // 刷新消息（后端可能已完成任务并保存了结果）
   loadMessages(convId)
   // 刷新对话列表（标题可能已更新）
