@@ -262,6 +262,7 @@ function imgUrl(url) {
           <table class="list-table">
             <thead>
               <tr>
+                <th class="col-id">ID</th>
                 <th class="col-title">标题</th>
                 <th class="col-time">时间</th>
                 <th class="col-status">状态</th>
@@ -273,7 +274,11 @@ function imgUrl(url) {
                 @click="openArticle(a)"
                 :class="['list-row', { selected: selectedArticle?.id === a.id }]"
               >
-                <td class="col-title" :title="a.title || '无标题'">{{ a.title || '无标题' }}</td>
+                <td class="col-id">{{ a.id }}</td>
+                <td class="col-title">
+                  <span class="title-text">{{ a.title || '无标题' }}</span>
+                  <span class="title-tooltip">{{ a.title || '无标题' }}</span>
+                </td>
                 <td class="col-time">{{ formatDate(a.publish_time || a.created_at) }}</td>
                 <td class="col-status">
                   <span :class="['badge', statusClass(a.status)]">{{ statusLabel(a.status) }}</span>
@@ -491,6 +496,7 @@ function imgUrl(url) {
   width: 100%;
   border-collapse: collapse;
   font-size: 0.8rem;
+  table-layout: fixed;
 }
 
 .list-table thead {
@@ -510,20 +516,64 @@ function imgUrl(url) {
   color: var(--color-text-muted);
 }
 
+.list-table td {
+  padding: 0.5rem 0.5rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.col-id {
+  width: 50px;
+  white-space: nowrap;
+  font-size: 0.75rem;
+  color: var(--color-text-muted);
+  text-align: center;
+}
 .col-title {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   font-weight: 500;
   color: var(--color-text-primary);
+  position: relative;
+}
+.col-title .title-text {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.col-title .title-tooltip {
+  display: none;
+  position: absolute;
+  left: 0;
+  top: 100%;
+  z-index: 10;
+  background: var(--color-bg-elevated, #1e1e2e);
+  color: var(--color-text-primary);
+  padding: 0.5rem 0.75rem;
+  border-radius: 6px;
+  font-size: 0.8rem;
+  white-space: normal;
+  word-break: break-all;
+  max-width: 400px;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+  pointer-events: none;
+}
+.col-title:hover .title-tooltip {
+  display: block;
 }
 .col-time {
-  width: 1%;
+  width: 90px;
   white-space: nowrap;
   font-size: 0.75rem;
   color: var(--color-text-muted);
 }
-.col-status { width: 1%; white-space: nowrap; text-align: center; }
+.col-status {
+  width: 70px;
+  white-space: nowrap;
+  text-align: center;
+}
 
 .list-row {
   cursor: pointer;

@@ -17,7 +17,7 @@ from pydantic import BaseModel
 from typing import Optional
 
 from db import (
-    list_articles, get_article, create_article,
+    list_articles, get_article, create_article, delete_article,
     list_author_articles, get_author_article, delete_author_article,
     list_linked_articles, get_linked_article, delete_linked_article,
 )

@@ -8,6 +8,7 @@
 """
 
 import logging
+from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
@@ -54,6 +55,16 @@ async def delete_task_api(task_id: int):
 
 @router.get("/{task_id}/images")
 async def get_task_images_api(task_id: int):
-    """获取任务图片。"""
-    images = get_task_images(task_id)
+    """获取任务图片列表（本地路径 + URL）。"""
+    task = get_task(task_id)
+    if not task:
+        raise HTTPException(404, "任务不存在")
+    local_images = task.get("local_images") or []
+    images = []
+    for path in local_images:
+        filename = Path(path).name
+        images.append({
+            "local_path": path,
+            "url": f"/static/tasks/{task_id}/images/{filename}",
+        })
     return {"images": images}

@@ -1075,7 +1075,7 @@ def orchestrate(query: str, history: list, rag_context: str = "", cancel_event: 
     }
 
 
-def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_event: threading.Event | None = None, resume_from: dict | None = None):
+def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_event: threading.Event | None = None, resume_from: dict | None = None, conversation_id: int = 0, message_id: int = 0, trace_id: str = ""):
     """
     Orchestrator 的流式版本，通过生成器逐步返回事件。
 
@@ -1089,6 +1089,9 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
     参数:
         cancel_event: 可选的取消事件，设置后会尽快终止执行
         resume_from: 恢复数据，包含 message_id 用于查询已完成的 agent
+        conversation_id: 对话 ID，用于创建 agent_runs 记录
+        message_id: 消息 ID，用于创建 agent_runs 记录
+        trace_id: 追踪 ID，用于关联执行记录
     """
     start_time = time.time()
 
@@ -1495,8 +1498,8 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
         agent_run_ids = {}
         for tc, args, expert_query, agent_key, agent_info in tool_tasks:
             run_id = create_pending_agent_run(
-                conversation_id=conv_id,
-                message_id=stream_msg_id,
+                conversation_id=conversation_id,
+                message_id=message_id,
                 agent_key=agent_key,
                 agent_name=agent_info.get("name", tc.function.name),
                 query=expert_query[:500],

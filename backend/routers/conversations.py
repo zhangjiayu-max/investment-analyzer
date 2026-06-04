@@ -20,6 +20,7 @@ from db import (
     list_holdings, create_alert, save_llm_feedback,
     _get_conn,
 )
+from db.config import get_config_float, get_config_int
 from state import running_agents as _running_agents
 from agent.orchestrator import orchestrate, orchestrate_stream, clarify_requirement, CancelledError
 from agent.multi_agent import run_specialist
@@ -209,7 +210,7 @@ async def resume_conversation(conv_id: int, request: Request):
 
         def _run_resume_stream():
             try:
-                for event in orchestrate_stream(original_query, msg_list, rag_context, cancel_event, resume_from=resume_data):
+                for event in orchestrate_stream(original_query, msg_list, rag_context, cancel_event, resume_from=resume_data, conversation_id=conv_id, message_id=message_id, trace_id=trace_id):
                     _running_agents[trace_id] = {"conv_id": conv_id, "cancel": cancel_event}
                     yield event
             except CancelledError:
@@ -689,7 +690,7 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
 
             def _producer():
                 try:
-                    for event in orchestrate_stream(req.content, msg_list, rag_context, cancel_event=cancel_event):
+                    for event in orchestrate_stream(req.content, msg_list, rag_context, cancel_event=cancel_event, conversation_id=conv_id, message_id=stream_msg_id, trace_id=trace_id):
                         q.put(event)
                 except CancelledError:
                     q.put({"type": "cancelled", "message": "用户取消了执行"})
@@ -705,13 +706,16 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
             return q
 
         t_orch_start = time.time()
+
+        # 提前创建 assistant 消息，获取 message_id 传给 orchestrator
+        stream_msg_id = create_message(conv_id, "assistant", "⏳ 分析进行中...", metadata=json.dumps({"execution_status": "streaming"}, ensure_ascii=False))
+
         q = await asyncio.to_thread(_run_orchestrator_stream)
 
         specialist_results = []
         all_tool_calls = []
         final_answer = ""
         client_disconnected = False
-        stream_msg_id = 0  # 追踪正在构建中的 assistant 消息 ID
 
         while True:
             try:
@@ -846,10 +850,7 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
                         ],
                         "tool_calls": all_tool_calls,
                     }
-                    if stream_msg_id == 0:
-                        stream_msg_id = create_message(conv_id, "assistant", "⏳ 分析进行中...", metadata=json.dumps(_progress_metadata, ensure_ascii=False))
-                    else:
-                        update_message_metadata(stream_msg_id, _progress_metadata)
+                    update_message_metadata(stream_msg_id, _progress_metadata)
                 except Exception as _e:
                     logger.warning(f"增量保存执行进度失败: {_e}")
                 if not client_disconnected:

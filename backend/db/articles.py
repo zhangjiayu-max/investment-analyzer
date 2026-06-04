@@ -120,6 +120,16 @@ def update_article(article_id: int, **fields):
     conn.close()
 
 
+def delete_article(article_id: int) -> bool:
+    """删除文章。"""
+    conn = _get_conn()
+    cur = conn.execute("DELETE FROM articles WHERE id = ?", (article_id,))
+    deleted = cur.rowcount > 0
+    conn.commit()
+    conn.close()
+    return deleted
+
+
 # ── 图片分析记录 CRUD ────────────────────────────────
 
 

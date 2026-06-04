@@ -69,7 +69,8 @@ from db.eval import (
 # 文章 + 分析记录 + 作者文章 + 链接文章
 from db.articles import (
     sync_articles, list_articles, get_article, get_article_by_seq, get_article_by_url,
-    create_article, update_article, create_analysis_record, update_analysis_record,
+    create_article, update_article, delete_article,
+    create_analysis_record, update_analysis_record,
     list_all_analysis_records, get_analysis_records, get_analysis_record,
     create_author_article, update_author_article, get_author_article_by_url,
     list_author_articles, get_author_article, delete_author_article, count_author_articles,
@@ -537,6 +538,27 @@ def init_db():
 
     # 初始化评测集表
     init_eval_tables(conn)
+
+    # 初始化记忆表（记忆生命周期管理）
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS user_memories (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id TEXT NOT NULL DEFAULT 'default',
+            memory_type TEXT NOT NULL,
+            content TEXT NOT NULL,
+            source TEXT DEFAULT '',
+            evidence_count INTEGER DEFAULT 1,
+            confidence REAL DEFAULT 0.5,
+            is_pinned INTEGER DEFAULT 0,
+            is_compacted INTEGER DEFAULT 0,
+            is_archived INTEGER DEFAULT 0,
+            metadata TEXT DEFAULT '{}',
+            created_at TEXT DEFAULT (datetime('now','localtime')),
+            last_accessed TEXT DEFAULT (datetime('now','localtime'))
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_user_memories_user ON user_memories(user_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_user_memories_type ON user_memories(memory_type)")
 
     # 初始化默认配置（传入连接避免死锁）
     init_default_configs(conn)

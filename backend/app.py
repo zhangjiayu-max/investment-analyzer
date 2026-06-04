@@ -169,6 +169,15 @@ async def startup():
         except Exception as e:
             logging.warning(f"种子数据初始化失败: {e}")
 
+        # 记忆维护（压缩过时记忆 + 蒸馏行业知识）
+        try:
+            logging.info("启动记忆维护...")
+            from agent.memory_governance import run_governance_maintenance
+            run_governance_maintenance()
+            logging.info("记忆维护完成")
+        except Exception as e:
+            logging.warning(f"记忆维护失败: {e}")
+
     # 后台执行异步初始化
     asyncio.create_task(_async_init())
     logging.info("后台初始化任务已启动")
