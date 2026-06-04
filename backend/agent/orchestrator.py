@@ -297,7 +297,7 @@ def clarify_requirement(query: str) -> dict:
                 {"role": "user", "content": user_content},
             ],
             temperature=0.1,
-            max_tokens=2000,
+            max_tokens=4096,
         )
 
         raw = response.choices[0].message.content.strip()
@@ -839,7 +839,7 @@ def orchestrate(query: str, history: list, rag_context: str = "", cancel_event: 
                 tools=build_orchestrator_tools(),
                 tool_choice="auto",
                 temperature=0.3,
-                max_tokens=2000,
+                max_tokens=4096,
             )
         except Exception as e:
             err_msg = str(e)
@@ -890,7 +890,7 @@ def orchestrate(query: str, history: list, rag_context: str = "", cancel_event: 
                             model=MODEL,
                             messages=llm_messages,
                             temperature=0.3,
-                            max_tokens=2000,
+                            max_tokens=4096,
                         )
                         answer = response.choices[0].message.content or ""
                     except Exception:
@@ -1044,7 +1044,7 @@ def orchestrate(query: str, history: list, rag_context: str = "", cancel_event: 
             model=MODEL,
             messages=llm_messages,
             temperature=0.3,
-            max_tokens=2000,
+            max_tokens=4096,
         )
         final_answer = response.choices[0].message.content or ""
     except Exception:
@@ -1245,7 +1245,7 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
                 tools=build_orchestrator_tools(),
                 tool_choice="auto",
                 temperature=0.3,
-                max_tokens=2000,
+                max_tokens=4096,
             )
         except CancelledError:
             raise
@@ -1342,7 +1342,7 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
                             model=MODEL,
                             messages=llm_messages,
                             temperature=0.3,
-                            max_tokens=2000,
+                            max_tokens=4096,
                         )
                         answer = response.choices[0].message.content or ""
                     except Exception:
@@ -1635,7 +1635,7 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
             model=MODEL,
             messages=llm_messages,
             temperature=0.3,
-            max_tokens=2000,
+            max_tokens=4096,
         )
         final_answer = response.choices[0].message.content or ""
     except CancelledError:

@@ -1207,6 +1207,11 @@ defineExpose({ loadHistory })
                       {{ item.valuation_status }}
                     </span>
                     <span v-else>-</span>
+                    <span v-if="item.pe_percentile != null && item.pb_percentile != null && Math.abs(item.pe_percentile - item.pb_percentile) > 20"
+                          class="dd-diverge-warn"
+                          :title="`PE%(${item.pe_percentile})与PB%(${item.pb_percentile})差异${Math.abs(item.pe_percentile - item.pb_percentile).toFixed(0)}%，建议参考${item.pb_percentile < item.pe_percentile ? 'PB' : 'PE'}`">
+                      ⚠️
+                    </span>
                   </td>
                 </tr>
               </tbody>
@@ -1310,6 +1315,21 @@ defineExpose({ loadHistory })
                     <span :class="['sv-type-badge', s.opportunity_type === '真低估' ? 'sv-type-good' : s.opportunity_type === '价值陷阱' ? 'sv-type-bad' : 'sv-type-neutral']">
                       {{ s.opportunity_type }}
                     </span>
+                  </div>
+                  <!-- 估值风险预警 -->
+                  <div v-if="s.valuation_warnings?.length || s.recommended_metric || s.history_years" class="sv-warnings">
+                    <div v-for="w in s.valuation_warnings" :key="w.type" :class="['sv-warning-item', 'sv-warning-' + w.level]">
+                      <span class="sv-warning-icon">{{ w.level === 'danger' ? '🔴' : w.level === 'warning' ? '🟡' : '🔵' }}</span>
+                      <span>{{ w.message }}</span>
+                    </div>
+                    <div v-if="s.recommended_metric" class="sv-warning-item sv-warning-tip">
+                      <span class="sv-warning-icon">📊</span>
+                      <span>建议参考 <strong>{{ s.recommended_metric }}</strong> 百分位判断估值</span>
+                    </div>
+                    <div v-if="s.history_years && s.history_years < 5" class="sv-warning-item sv-warning-info">
+                      <span class="sv-warning-icon">📅</span>
+                      <span>数据仅覆盖 {{ s.history_years }} 年，未经历完整牛熊周期</span>
+                    </div>
                   </div>
                   <div class="sv-strategy-detail">
                     <div v-if="s.recovery_time" class="sv-strategy-row">
@@ -2687,6 +2707,11 @@ defineExpose({ loadHistory })
   font-weight: 600;
   font-size: 0.8rem;
 }
+.dd-diverge-warn {
+  margin-left: 0.25rem;
+  cursor: help;
+  font-size: 0.75rem;
+}
 
 /* expand transition */
 .expand-enter-active,
@@ -3059,6 +3084,29 @@ defineExpose({ loadHistory })
 .sv-type-good { background: #dcfce7; color: #16a34a; }
 .sv-type-bad { background: #fef2f2; color: #dc2626; }
 .sv-type-neutral { background: #f3f4f6; color: #6b7280; }
+
+.sv-warnings {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  margin: 0.5rem 0;
+  padding: 0.5rem 0.65rem;
+  background: var(--color-bg-secondary, #f9fafb);
+  border-radius: 6px;
+  border-left: 3px solid var(--color-border-light);
+}
+.sv-warning-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.4rem;
+  font-size: 0.75rem;
+  line-height: 1.4;
+}
+.sv-warning-icon { flex-shrink: 0; }
+.sv-warning-danger { color: #dc2626; }
+.sv-warning-warning { color: #d97706; }
+.sv-warning-info { color: #6b7280; }
+.sv-warning-tip { color: #2563eb; }
 
 .sv-strategy-detail {
   display: flex;

@@ -434,3 +434,103 @@ def _score_fund(price_stats, user_val) -> tuple:
         rec = "高估"
 
     return score, rec, "；".join(reasons) if reasons else "数据不足"
+
+
+def check_pe_pb_divergence(index_code: str) -> dict | None:
+    """检查同一指数的 PE 和 PB 百分位背离情况。
+
+    返回 warning dict 或 None：
+    {
+        "type": "pe_pb_diverge",
+        "level": "danger" | "warning" | "info",
+        "message": str,
+        "pe_percentile": float,
+        "pb_percentile": float,
+        "diverge_pct": float,
+        "recommended_metric": "PB" | "PE",
+    }
+    """
+    from db.valuations import get_latest_valuation
+
+    pe_row = get_latest_valuation(index_code, metric_type="市盈率", max_days=30)
+    pb_row = get_latest_valuation(index_code, metric_type="市净率", max_days=30)
+
+    if not pe_row or not pb_row:
+        return None
+
+    pe_pct = pe_row.get("percentile")
+    pb_pct = pb_row.get("percentile")
+
+    if pe_pct is None or pb_pct is None:
+        return None
+
+    diverge = abs(pe_pct - pb_pct)
+
+    if diverge < 10:
+        return None
+
+    # 谁更低就推荐谁（更稳定的指标）
+    if pb_pct < pe_pct:
+        recommended = "PB"
+        stable_pct = pb_pct
+    else:
+        recommended = "PE"
+        stable_pct = pe_pct
+
+    if diverge > 30:
+        level = "danger"
+        msg = f"PE百分位({pe_pct:.1f}%)与PB百分位({pb_pct:.1f}%)严重背离({diverge:.0f}%)，盈利波动导致PE失真，强烈建议参考{recommended}百分位({stable_pct:.1f}%)"
+    elif diverge > 20:
+        level = "warning"
+        msg = f"PE百分位({pe_pct:.1f}%)与PB百分位({pb_pct:.1f}%)差异较大({diverge:.0f}%)，建议参考{recommended}百分位({stable_pct:.1f}%)"
+    else:
+        level = "info"
+        msg = f"PE百分位({pe_pct:.1f}%)与PB百分位({pb_pct:.1f}%)存在差异({diverge:.0f}%)，可结合参考"
+
+    return {
+        "type": "pe_pb_diverge",
+        "level": level,
+        "message": msg,
+        "pe_percentile": pe_pct,
+        "pb_percentile": pb_pct,
+        "diverge_pct": diverge,
+        "recommended_metric": recommended,
+    }
+
+
+def get_index_history_years(index_code: str) -> float:
+    """获取指数数据覆盖年限（年）。"""
+    from db._conn import _get_conn
+
+    conn = _get_conn()
+    row = conn.execute("""
+        SELECT MIN(snapshot_date) as earliest, MAX(snapshot_date) as latest
+        FROM index_valuations
+        WHERE index_code = ?
+    """, (index_code,)).fetchone()
+    conn.close()
+
+    if not row or not row["earliest"] or not row["latest"]:
+        return 0
+
+    from datetime import datetime
+    try:
+        d1 = datetime.strptime(row["earliest"], "%Y-%m-%d")
+        d2 = datetime.strptime(row["latest"], "%Y-%m-%d")
+        years = (d2 - d1).days / 365.25
+        return round(years, 1)
+    except Exception:
+        return 0
+
+
+def get_history_years_warning(years: float) -> dict | None:
+    """根据覆盖年限返回警告信息。"""
+    if years <= 0:
+        return None
+    if years < 3:
+        return {"level": "danger", "message": f"数据仅覆盖{years}年，不足3年，百分位参考价值很低"}
+    if years < 5:
+        return {"level": "warning", "message": f"数据覆盖{years}年，未经历完整牛熊周期，百分位需谨慎参考"}
+    if years < 7:
+        return {"level": "info", "message": f"数据覆盖{years}年，基本可信"}
+    return None

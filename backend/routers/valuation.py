@@ -625,6 +625,29 @@ async def get_enhanced_strategy():
             "data_source": index_source.get(code, ""),
         })
 
+    # 2.5 为每个候选指数附加 PE/PB 背离预警和数据覆盖年限
+    from valuation import check_pe_pb_divergence, get_index_history_years, get_history_years_warning
+    for c in candidates:
+        # PE/PB 背离检查
+        divergence = check_pe_pb_divergence(c["code"])
+        if divergence:
+            c["valuation_warnings"] = [divergence]
+            c["recommended_metric"] = divergence["recommended_metric"]
+        else:
+            c["valuation_warnings"] = []
+            c["recommended_metric"] = None
+
+        # 数据覆盖年限
+        years = get_index_history_years(c["code"])
+        c["history_years"] = years
+        years_warning = get_history_years_warning(years)
+        if years_warning:
+            c["valuation_warnings"].append({
+                "type": "short_history",
+                "level": years_warning["level"],
+                "message": years_warning["message"],
+            })
+
     if not candidates:
         return {"strategies": [], "message": "当前没有明显低估的指数"}
 
@@ -649,11 +672,20 @@ async def get_enhanced_strategy():
         news_text = "暂无新闻"
 
     # 4. 构建 LLM prompt
-    candidate_text = "\n".join(
-        f"- {c['name']}({c['code']}): 百分位{c['percentile']}%, Z-score{c['zscore']}, "
-        f"连续下跌{c['consecutive_drop']}天, 7日跌幅{c['drop_7d']}%"
-        for c in candidates
-    )
+    candidate_lines = []
+    for c in candidates:
+        line = (f"- {c['name']}({c['code']}): 百分位{c['percentile']}%, Z-score{c['zscore']}, "
+                f"连续下跌{c['consecutive_drop']}天, 7日跌幅{c['drop_7d']}%")
+        # 附加风险提示
+        warnings = c.get("valuation_warnings", [])
+        for w in warnings:
+            line += f"\n  ⚠️ {w['message']}"
+        if c.get("recommended_metric"):
+            line += f"\n  📊 建议参考{c['recommended_metric']}百分位"
+        if c.get("history_years") and c["history_years"] < 5:
+            line += f"\n  📅 数据仅覆盖{c['history_years']}年"
+        candidate_lines.append(line)
+    candidate_text = "\n".join(candidate_lines)
 
     prompt = f"""你是一位资深的 A 股投资策略分析师。以下是一批当前估值较低的指数，请对每个指数进行深度分析。
 
@@ -786,11 +818,19 @@ async def get_enhanced_strategy():
     except Exception as e:
         logger.warning(f"记录 agent_run 失败: {e}")
 
-    # 8. 附加原始数据到结果
+    # 8. 附加原始数据和风险预警到结果
     strategy_map = {s.get("index_code", ""): s for s in parsed.get("strategies", [])}
     for c in candidates:
         if c["code"] in strategy_map:
-            strategy_map[c["code"]]["raw_data"] = c
+            s = strategy_map[c["code"]]
+            s["raw_data"] = c
+            # 提升关键字段到顶层，方便前端直接使用
+            if c.get("valuation_warnings"):
+                s["valuation_warnings"] = c["valuation_warnings"]
+            if c.get("recommended_metric"):
+                s["recommended_metric"] = c["recommended_metric"]
+            if c.get("history_years"):
+                s["history_years"] = c["history_years"]
 
     return {
         "strategies": parsed.get("strategies", []),
