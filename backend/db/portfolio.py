@@ -568,6 +568,84 @@ def _recalculate_holding(holding_id: int):
     conn.close()
 
 
+def _capture_valuation_snapshot(holding_id: int, transaction_date: str) -> str | None:
+    """根据持仓的 index_code 查询交易日期附近的估值数据，返回 JSON 快照。"""
+    if not holding_id or not transaction_date:
+        return None
+    conn = _get_conn()
+    holding = conn.execute(
+        "SELECT index_code, index_name FROM portfolio_holdings WHERE id = ?",
+        (holding_id,)
+    ).fetchone()
+    if not holding or not holding["index_code"]:
+        conn.close()
+        return None
+
+    index_code = holding["index_code"]
+    index_name = holding["index_name"] or ""
+
+    # 查找交易日期附近 7 天内的 PE 估值
+    row = conn.execute("""
+        SELECT percentile, snapshot_date FROM index_valuations
+        WHERE index_code = ? AND metric_type = '市盈率'
+        AND snapshot_date BETWEEN date(?, '-7 days') AND date(?, '+7 days')
+        ORDER BY ABS(julianday(snapshot_date) - julianday(?))
+        LIMIT 1
+    """, (index_code, transaction_date, transaction_date, transaction_date)).fetchone()
+
+    pe_percentile = row["percentile"] if row else None
+    pe_date = row["snapshot_date"] if row else None
+
+    # 查找交易日期附近 7 天内的 PB 估值
+    row_pb = conn.execute("""
+        SELECT percentile FROM index_valuations
+        WHERE index_code = ? AND metric_type = '市净率'
+        AND snapshot_date BETWEEN date(?, '-7 days') AND date(?, '+7 days')
+        ORDER BY ABS(julianday(snapshot_date) - julianday(?))
+        LIMIT 1
+    """, (index_code, transaction_date, transaction_date, transaction_date)).fetchone()
+
+    pb_percentile = row_pb["percentile"] if row_pb else None
+    conn.close()
+
+    if pe_percentile is None and pb_percentile is None:
+        return None
+
+    import json
+    return json.dumps({
+        "index_code": index_code,
+        "index_name": index_name,
+        "pe_percentile": pe_percentile,
+        "pb_percentile": pb_percentile,
+        "snapshot_date": pe_date or transaction_date
+    }, ensure_ascii=False)
+
+
+def backfill_valuation_snapshots() -> int:
+    """为历史交易回填估值快照。返回更新的记录数。"""
+    conn = _get_conn()
+    txs = conn.execute("""
+        SELECT t.id, t.holding_id, t.transaction_date
+        FROM portfolio_transactions t
+        JOIN portfolio_holdings h ON t.holding_id = h.id
+        WHERE t.status IN ('confirmed', 'settled')
+        AND t.valuation_snapshot IS NULL
+        AND h.index_code IS NOT NULL AND h.index_code != ''
+    """).fetchall()
+
+    updated = 0
+    for tx in txs:
+        snapshot = _capture_valuation_snapshot(tx["holding_id"], tx["transaction_date"])
+        if snapshot:
+            conn.execute("UPDATE portfolio_transactions SET valuation_snapshot = ? WHERE id = ?",
+                        (snapshot, tx["id"]))
+            updated += 1
+
+    conn.commit()
+    conn.close()
+    return updated
+
+
 def confirm_transaction(tx_id: int, confirmed_price: float,
                         confirmed_shares: float = None,
                         confirmed_amount: float = None,
@@ -658,6 +736,16 @@ def confirm_transaction(tx_id: int, confirmed_price: float,
 
     if holding_id:
         _recalculate_holding(holding_id)
+
+    # 捕获交易时点估值快照
+    if holding_id:
+        snapshot = _capture_valuation_snapshot(holding_id, tx.get("transaction_date", ""))
+        if snapshot:
+            conn3 = _get_conn()
+            conn3.execute("UPDATE portfolio_transactions SET valuation_snapshot = ? WHERE id = ?",
+                         (snapshot, tx_id))
+            conn3.commit()
+            conn3.close()
 
     # 卖出确认后，自动将金额计入零钱
     if tx_type == "sell" and actual_amount > 0:

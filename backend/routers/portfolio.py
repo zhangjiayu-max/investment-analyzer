@@ -1396,18 +1396,40 @@ async def trade_review_api(req: TradeReviewRequest):
     if not txs:
         raise HTTPException(400, "所选日期范围内无交易记录")
 
-    # 交易记录 + 标签
+    # 交易记录 + 标签 + 估值快照
     tx_lines = []
+    total_fee = 0
     for t in sorted(txs, key=lambda x: x.get("transaction_date", "")):
         tags = get_transaction_tags(t["id"])
         tag_str = f" [{','.join(tags)}]" if tags else ""
+
+        # 解析估值快照
+        snapshot_str = t.get("valuation_snapshot")
+        valuation_str = ""
+        if snapshot_str:
+            try:
+                snap = json.loads(snapshot_str)
+                pe_pct = snap.get("pe_percentile")
+                pb_pct = snap.get("pb_percentile")
+                if pe_pct is not None:
+                    valuation_str = f" [PE分位:{pe_pct:.1f}%"
+                    if pb_pct is not None:
+                        valuation_str += f", PB分位:{pb_pct:.1f}%"
+                    valuation_str += "]"
+            except:
+                pass
+
+        # 手续费
+        fee = t.get("fee") or 0
+        total_fee += fee
+        fee_str = f", 手续费 {fee:.2f}" if fee > 0 else ""
+
         tx_lines.append(
             f"- {t['transaction_date']} {t.get('transaction_time','')} "
             f"{'买入' if t['transaction_type']=='buy' else '卖出'}"
-            f"{tag_str}: "
+            f"{tag_str}{valuation_str}: "
             f"{t.get('fund_name','')}({t.get('fund_code','')}), "
-            f"金额 {(t.get('amount') or 0):.2f}, 价格 {(t.get('price') or 0):.4f}, "
-            f"状态 {t.get('status') or 'confirmed'}"
+            f"金额 {(t.get('amount') or 0):.2f}, 价格 {(t.get('price') or 0):.4f}{fee_str}"
         )
 
     # 汇总统计
@@ -1416,15 +1438,33 @@ async def trade_review_api(req: TradeReviewRequest):
     buy_total = sum(t.get("amount", 0) or 0 for t in txs if t["transaction_type"] == "buy")
     sell_total = sum(t.get("amount", 0) or 0 for t in txs if t["transaction_type"] == "sell")
 
-    # 估值数据
-    valuation_context = _get_valuation_context()
+    # 有估值快照的交易统计
+    txs_with_valuation = [t for t in txs if t.get("valuation_snapshot")]
+    valuation_summary = ""
+    if txs_with_valuation:
+        buy_with_val = [t for t in txs_with_valuation if t["transaction_type"] == "buy"]
+        sell_with_val = [t for t in txs_with_valuation if t["transaction_type"] == "sell"]
+        if buy_with_val:
+            avg_buy_pe = sum(json.loads(t["valuation_snapshot"]).get("pe_percentile", 50)
+                           for t in buy_with_val) / len(buy_with_val)
+            low_buy = len([t for t in buy_with_val
+                          if json.loads(t["valuation_snapshot"]).get("pe_percentile", 50) < 30])
+            valuation_summary += f"\n买入时估值分析: 平均PE分位 {avg_buy_pe:.1f}%, 低估买入(PE<30%) {low_buy}/{len(buy_with_val)} 笔"
+        if sell_with_val:
+            avg_sell_pe = sum(json.loads(t["valuation_snapshot"]).get("pe_percentile", 50)
+                            for t in sell_with_val) / len(sell_with_val)
+            high_sell = len([t for t in sell_with_val
+                           if json.loads(t["valuation_snapshot"]).get("pe_percentile", 50) > 70])
+            valuation_summary += f"\n卖出时估值分析: 平均PE分位 {avg_sell_pe:.1f}%, 高估卖出(PE>70%) {high_sell}/{len(sell_with_val)} 笔"
 
     user_content = (
-        f"## 操作总览\n- 买入 {buy_count} 笔, 共 {buy_total:.2f} 元\n"
+        f"## 操作总览\n"
+        f"- 买入 {buy_count} 笔, 共 {buy_total:.2f} 元\n"
         f"- 卖出 {sell_count} 笔, 共 {sell_total:.2f} 元\n"
         f"- 净投入: {buy_total - sell_total:.2f} 元\n"
-        f"\n## 交易明细\n" + "\n".join(tx_lines) +
-        f"\n\n{valuation_context}"
+        f"- 手续费总计: {total_fee:.2f} 元\n"
+        f"{valuation_summary}\n"
+        f"\n## 交易明细（含交易时点估值）\n" + "\n".join(tx_lines)
     )
 
     try:

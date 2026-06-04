@@ -358,9 +358,12 @@ export function sendMessageStream(convId, content, onEvent) {
       } catch (e) {}
     }
   }).catch(err => {
-    if (err.name !== 'AbortError') {
-      onEvent({ type: 'error', data: { message: err.message } })
-    }
+    // 忽略用户取消的错误
+    if (err.name === 'AbortError') return
+
+    // 网络错误（如息屏断开）不发送 error 事件，让前端通过 visibilitychange 恢复
+    console.warn('SSE 连接断开:', err.message)
+    // 不调用 onEvent，避免显示错误
   })
 
   return controller
