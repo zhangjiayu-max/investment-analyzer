@@ -51,6 +51,7 @@ class ConfirmTransactionRequest(BaseModel):
     confirmed_amount: float | None = None
     target_fund_code: str | None = None     # 转换时：目标基金代码
     target_fund_name: str | None = None     # 转换时：目标基金名称
+    fee: float = 0                          # 手续费（申购费/赎回费）
 
 
 class CreateAlertRequest(BaseModel):

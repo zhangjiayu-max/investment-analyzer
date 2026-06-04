@@ -15,9 +15,10 @@ import os
 import sqlite3
 from pathlib import Path
 
+from db._conn import DB_PATH
+
 logger = logging.getLogger(__name__)
 
-DB_PATH = Path(__file__).parent.parent / "data" / "valuations.db"
 CHROMA_DIR = Path(__file__).parent.parent / "data" / "chroma_db"
 
 # Reranker 配置：默认关闭，RRF + 标题加权 + 时效性加权已能提供合理排序

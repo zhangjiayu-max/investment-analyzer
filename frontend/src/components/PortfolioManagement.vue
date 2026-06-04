@@ -647,6 +647,7 @@ const sellEstAmount = computed(() => {
 const showConfirmTx = ref(false)
 const confirmTxData = ref(null)
 const confirmTxPrice = ref(0)
+const confirmTxFee = ref(0)
 
 // Pending transactions reminder
 const pendingTxs = ref([])
@@ -1539,6 +1540,11 @@ onMounted(async () => {
 
 // KeepAlive 组件激活时重新加载数据（切换页面回来时触发）
 onActivated(async () => {
+  // 重置 loading 状态（避免切换页面后一直显示加载中）
+  modeLoading.value = false
+  diversificationLoading.value = false
+  diverAiLoading.value = false
+
   await loadData()
   loadAlerts()
 })
@@ -1963,6 +1969,7 @@ const confirmTargetFundName = ref('')
 function openConfirmTx(tx) {
   confirmTxData.value = tx
   confirmTxPrice.value = 0
+  confirmTxFee.value = 0
   confirmTargetFundCode.value = ''
   confirmTargetFundName.value = ''
   showConfirmTx.value = true
@@ -1973,7 +1980,10 @@ async function submitConfirmTx() {
     showToast('确认净值必须大于 0', 'error')
     return
   }
-  const payload = { confirmed_price: confirmTxPrice.value }
+  const payload = {
+    confirmed_price: confirmTxPrice.value,
+    fee: confirmTxFee.value || 0
+  }
   // 转换交易需要目标基金信息
   if (confirmTxData.value?.transaction_type === 'convert') {
     if (!confirmTargetFundCode.value.trim()) {
@@ -3664,6 +3674,11 @@ function txDisplayAmount(tx) {
                 <label>T+1 确认净值 *</label>
                 <input v-model.number="confirmTxPrice" type="number" step="0.0001" class="input-field" placeholder="输入确认日的实际净值" required />
               </div>
+              <div class="form-group" style="margin-top:0.75rem">
+                <label>手续费 (可选)</label>
+                <input v-model.number="confirmTxFee" type="number" step="0.01" min="0" class="input-field" placeholder="0" />
+                <span class="field-hint">申购费/赎回费/转换费，从金额中扣除</span>
+              </div>
               <div v-if="confirmTxData?.transaction_type === 'convert'" class="form-group" style="margin-top:0.75rem">
                 <label>目标基金代码 *</label>
                 <input v-model="confirmTargetFundCode" class="input-field" placeholder="转换目标基金代码" required />
@@ -3671,13 +3686,16 @@ function txDisplayAmount(tx) {
               </div>
               <div v-if="confirmTxPrice > 0" class="add-purchase-preview">
                 <span v-if="confirmTxData?.transaction_type === 'buy'">
-                  实际买入约 <strong>{{ ((confirmTxData?.submitted_amount || 0) / confirmTxPrice).toFixed(2) }}</strong> 份
+                  实际买入约 <strong>{{ (((confirmTxData?.submitted_amount || 0) - (confirmTxFee || 0)) / confirmTxPrice).toFixed(2) }}</strong> 份
+                  <span v-if="confirmTxFee" style="color:var(--color-text-muted);font-size:0.85em"> (扣手续费 ¥{{ confirmTxFee }})</span>
                 </span>
                 <span v-else-if="confirmTxData?.transaction_type === 'convert'">
-                  转换约 <strong>{{ (confirmTxData?.submitted_shares || 0) }}</strong> 份，价值约 <strong>¥{{ ((confirmTxData?.submitted_shares || 0) * confirmTxPrice).toFixed(2) }}</strong>
+                  转换约 <strong>{{ (confirmTxData?.submitted_shares || 0) }}</strong> 份，价值约 <strong>¥{{ ((confirmTxData?.submitted_shares || 0) * confirmTxPrice - (confirmTxFee || 0)).toFixed(2) }}</strong>
+                  <span v-if="confirmTxFee" style="color:var(--color-text-muted);font-size:0.85em"> (扣手续费 ¥{{ confirmTxFee }})</span>
                 </span>
                 <span v-else>
-                  实际赎回约 <strong>¥{{ ((confirmTxData?.submitted_shares || 0) * confirmTxPrice).toFixed(2) }}</strong>
+                  实际赎回约 <strong>¥{{ ((confirmTxData?.submitted_shares || 0) * confirmTxPrice - (confirmTxFee || 0)).toFixed(2) }}</strong>
+                  <span v-if="confirmTxFee" style="color:var(--color-text-muted);font-size:0.85em"> (扣手续费 ¥{{ confirmTxFee }})</span>
                 </span>
               </div>
               <div class="modal-actions">

@@ -1877,7 +1877,8 @@ async def confirm_transaction_api(tx_id: int, req: ConfirmTransactionRequest):
                              confirmed_shares=req.confirmed_shares,
                              confirmed_amount=req.confirmed_amount,
                              target_fund_code=req.target_fund_code,
-                             target_fund_name=req.target_fund_name)
+                             target_fund_name=req.target_fund_name,
+                             fee=req.fee)
     if not ok:
         raise HTTPException(404, "交易记录不存在")
     return {"ok": True}

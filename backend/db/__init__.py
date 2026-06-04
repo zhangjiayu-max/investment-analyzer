@@ -415,6 +415,7 @@ def init_db():
     _add_column_if_not_exists(conn, "portfolio_transactions", "is_system", "INTEGER DEFAULT 0")
     _add_column_if_not_exists(conn, "portfolio_transactions", "fund_name", "TEXT")
     _add_column_if_not_exists(conn, "portfolio_transactions", "account", "TEXT")
+    _add_column_if_not_exists(conn, "portfolio_transactions", "fee", "REAL DEFAULT 0")
 
     _add_column_if_not_exists(conn, "portfolio_cash", "last_interest_date", "TEXT")
     _add_column_if_not_exists(conn, "portfolio_cash", "today_interest", "REAL DEFAULT 0")

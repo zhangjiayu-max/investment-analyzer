@@ -530,11 +530,11 @@ def _recalculate_holding(holding_id: int):
             total_shares += shares
             total_cost += amount
 
-    # 再处理所有卖出（按平均成本扣减）
+    # 再处理所有卖出和转换（按平均成本扣减）
     for tx in txs:
         tx = dict(tx)
         shares = tx.get("shares", 0) or 0
-        if tx["transaction_type"] == "sell" and shares > 0:
+        if tx["transaction_type"] in ("sell", "convert") and shares > 0:
             if total_shares > 0:
                 avg_cost = total_cost / total_shares
                 total_cost -= avg_cost * shares
@@ -572,11 +572,12 @@ def confirm_transaction(tx_id: int, confirmed_price: float,
                         confirmed_shares: float = None,
                         confirmed_amount: float = None,
                         target_fund_code: str = None,
-                        target_fund_name: str = None) -> bool:
+                        target_fund_name: str = None,
+                        fee: float = 0) -> bool:
     """确认交易：填入实际净值，计算实际份额/金额。
 
-    买入：confirmed_shares = submitted_amount / confirmed_price
-    卖出：confirmed_amount = submitted_shares * confirmed_price
+    买入：confirmed_shares = (submitted_amount - fee) / confirmed_price
+    卖出：confirmed_amount = submitted_shares * confirmed_price - fee
     转换：卖出源基金份额 → 买入目标基金（target_fund_code 必填）
     """
     conn = _get_conn()
@@ -592,24 +593,27 @@ def confirm_transaction(tx_id: int, confirmed_price: float,
     holding_id = tx.get("holding_id")
 
     if tx_type == "buy":
-        # 买入确认：金额 / 净值 = 份额
+        # 买入确认：(金额 - 手续费) / 净值 = 份额
         sub_amount = confirmed_amount or tx.get("submitted_amount") or tx.get("amount") or 0
         if confirmed_price > 0:
-            actual_shares = round(sub_amount / confirmed_price, 2)
+            net_amount = sub_amount - fee  # 扣除手续费后的净金额
+            actual_shares = round(net_amount / confirmed_price, 2)
         else:
             actual_shares = confirmed_shares or 0
-        actual_amount = sub_amount
+        actual_amount = sub_amount  # 记录总金额（含手续费）
         actual_price = confirmed_price
     elif tx_type == "sell":
-        # 卖出确认：份额 × 净值 = 金额
+        # 卖出确认：份额 × 净值 - 手续费 = 实际到账
         sub_shares = confirmed_shares or tx.get("submitted_shares") or tx.get("shares") or 0
-        actual_amount = round(sub_shares * confirmed_price, 2)
+        gross_amount = round(sub_shares * confirmed_price, 2)
+        actual_amount = round(gross_amount - fee, 2)  # 扣除赎回费
         actual_shares = sub_shares
         actual_price = confirmed_price
     elif tx_type == "convert":
         # 转换确认：按份额卖出源基金，同时买入目标基金
         sub_shares = confirmed_shares or tx.get("submitted_shares") or tx.get("shares") or 0
-        actual_amount = round(sub_shares * confirmed_price, 2)
+        gross_amount = round(sub_shares * confirmed_price, 2)
+        actual_amount = round(gross_amount - fee, 2)  # 扣除转换费
         actual_shares = sub_shares
         actual_price = confirmed_price
     else:
@@ -621,9 +625,9 @@ def confirm_transaction(tx_id: int, confirmed_price: float,
     conn.execute("""
         UPDATE portfolio_transactions SET
             status = 'confirmed', amount = ?, shares = ?, price = ?,
-            confirmed_at = ?
+            fee = ?, confirmed_at = ?
         WHERE id = ?
-    """, (actual_amount, actual_shares, actual_price, now, tx_id))
+    """, (actual_amount, actual_shares, actual_price, fee, now, tx_id))
     conn.commit()
     conn.close()
 
