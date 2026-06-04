@@ -155,10 +155,12 @@ async def resume_conversation(conv_id: int, request: Request):
     message_id = last_assistant["id"]
     completed_runs = get_completed_agents_for_message(message_id)
 
-    if not completed_runs:
-        raise HTTPException(400, "没有已完成的专家结果可恢复")
-
     logger.info(f"恢复对话 {conv_id}：找到 {len(completed_runs)} 个已完成的专家")
+
+    # 如果没有已完成的专家，将消息状态重置为待执行
+    if not completed_runs:
+        update_message_metadata(message_id, {"execution_status": "pending"})
+        logger.info(f"恢复对话 {conv_id}：无已完成专家，重新执行整个任务")
 
     # 解析 knowledge_scope
     rag_types = []

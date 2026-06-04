@@ -455,7 +455,7 @@ def get_completed_agents_for_message(message_id: int) -> list[dict]:
     rows = conn.execute("""
         SELECT agent_key, agent_name, result, duration_ms, tool_calls
         FROM agent_runs
-        WHERE message_id = ? AND status = 'completed'
+        WHERE message_id = ? AND status IN ('completed', 'success')
         ORDER BY id ASC
     """, (message_id,)).fetchall()
     conn.close()
