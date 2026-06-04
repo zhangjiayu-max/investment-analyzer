@@ -1134,8 +1134,9 @@ def build_rag_context_with_details(query: str, content_types: list[str] = None, 
     # 原理：LLM 对开头和结尾的内容关注度更高，中间内容容易被忽略
     # 策略：最相关的放首位，次相关的放末位，中间按交替顺序排列
     if len(parts) > 2:
-        sorted_indices = sorted(range(len(all_results)),
-                               key=lambda i: all_results[i]["_score"], reverse=True)
+        # 使用 parts 的长度来限制索引范围（parts 可能被截断）
+        sorted_indices = sorted(range(len(parts)),
+                               key=lambda i: all_results[i]["_score"] if i < len(all_results) else 0, reverse=True)
 
         # 分离首尾
         best_idx = sorted_indices[0]
