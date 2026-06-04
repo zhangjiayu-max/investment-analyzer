@@ -2559,8 +2559,13 @@ function txDisplayAmount(tx) {
             </div>
             <div class="result-body" v-html="renderMarkdown(modeResult)"></div>
             <div class="result-feedback">
-              <button class="btn-feedback" @click="submitFeedback('helpful')">👍</button>
-              <button class="btn-feedback" @click="submitFeedback('unhelpful')">👎</button>
+              <template v-if="!feedbackGiven">
+                <button class="btn-feedback btn-feedback-up" @click="submitFeedback('helpful')" title="有用">👍</button>
+                <button class="btn-feedback btn-feedback-down" @click="submitFeedback('unhelpful')" title="没用">👎</button>
+              </template>
+              <span v-else class="feedback-given-text">
+                {{ feedbackGiven === 'helpful' ? '✅ 已标记有用' : '📝 已记录，感谢反馈' }}
+              </span>
             </div>
           </div>
 
@@ -5897,6 +5902,11 @@ select.input-field {
 .btn-feedback-down:hover {
   background: #fee2e2;
   border-color: #dc2626;
+}
+.feedback-given-text {
+  font-size: 0.85rem;
+  color: var(--color-text-muted);
+  padding: 0.25rem 0;
 }
 
 /* ── NAV 图表 ─── */

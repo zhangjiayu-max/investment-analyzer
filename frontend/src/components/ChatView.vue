@@ -67,7 +67,11 @@ function recoverFromDisconnect() {
   const convId = selectedConv.value.id
   const state = getStreamState(convId)
 
-  if (state?.sending) {
+  // 检查是否有进行中的任务
+  const hasActiveTask = state?.sending ||
+    messages.value.some(m => m.execution_status === 'streaming')
+
+  if (hasActiveTask) {
     // 有进行中的任务，但 SSE 可能已断开
     // 不取消后端任务，只清理前端状态
     finishStream(convId)
@@ -76,6 +80,8 @@ function recoverFromDisconnect() {
 
   // 刷新消息（后端可能已完成任务并保存了结果）
   loadMessages(convId)
+  // 刷新对话列表（标题可能已更新）
+  loadConversations()
 }
 
 async function loadConversations() {
