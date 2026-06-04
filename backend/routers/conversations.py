@@ -187,11 +187,7 @@ async def resume_conversation(conv_id: int, request: Request):
 
         yield _sse_event("status", {"message": f"正在恢复执行（{len(completed_runs)} 个专家已完成）..."})
 
-        # RAG 检索
-        if await request.is_disconnected():
-            cancel_event.set()
-            return
-
+        # RAG 检索（不检查断开连接，让后端任务继续执行）
         def _run_rag():
             return build_rag_context_with_details(original_query, content_types=rag_types if rag_types else None)
 
@@ -227,19 +223,24 @@ async def resume_conversation(conv_id: int, request: Request):
         final_content = ""
         final_complexity = metadata.get("complexity", "medium")
 
+        client_disconnected = False
         for event in _run_resume_stream():
-            if await request.is_disconnected():
-                cancel_event.set()
-                break
+            # 不检查断开连接，让后端任务继续执行
+            if not client_disconnected and await request.is_disconnected():
+                client_disconnected = True
+                # 不设置 cancel_event，让任务继续执行
 
             event_type = event.get("type")
 
             if event_type == "status":
-                yield _sse_event("status", event)
+                if not client_disconnected:
+                    yield _sse_event("status", event)
             elif event_type == "plan":
-                yield _sse_event("plan", event)
+                if not client_disconnected:
+                    yield _sse_event("plan", event)
             elif event_type == "specialist_start":
-                yield _sse_event("specialist_start", event)
+                if not client_disconnected:
+                    yield _sse_event("specialist_start", event)
             elif event_type == "specialist_done":
                 agent_key = event.get("agent_key")
                 # 更新或添加结果
@@ -266,10 +267,12 @@ async def resume_conversation(conv_id: int, request: Request):
                     "tool_calls": tool_calls_so_far,
                     "trace_id": trace_id,
                 })
-                yield _sse_event("specialist_done", event)
+                if not client_disconnected:
+                    yield _sse_event("specialist_done", event)
             elif event_type == "answer_chunk":
                 final_content += event.get("content", "")
-                yield _sse_event("answer_chunk", event)
+                if not client_disconnected:
+                    yield _sse_event("answer_chunk", event)
             elif event_type == "answer":
                 final_content = event.get("content", final_content)
                 specialist_results_so_far = event.get("specialist_results", specialist_results_so_far)
@@ -289,12 +292,13 @@ async def resume_conversation(conv_id: int, request: Request):
                     "trace_id": trace_id,
                 })
 
-                yield _sse_event("answer", {
-                    "content": final_content,
-                    "specialist_results": specialist_results_so_far,
-                    "complexity": final_complexity,
-                    "duration_ms": duration_ms,
-                })
+                if not client_disconnected:
+                    yield _sse_event("answer", {
+                        "content": final_content,
+                        "specialist_results": specialist_results_so_far,
+                        "complexity": final_complexity,
+                        "duration_ms": duration_ms,
+                    })
             elif event_type == "cancelled":
                 update_message_metadata(stream_msg_id, {
                     "execution_status": "cancelled",
@@ -303,7 +307,8 @@ async def resume_conversation(conv_id: int, request: Request):
                     "tool_calls": tool_calls_so_far,
                     "trace_id": trace_id,
                 })
-                yield _sse_event("cancelled", event)
+                if not client_disconnected:
+                    yield _sse_event("cancelled", event)
             elif event_type == "error":
                 update_message_metadata(stream_msg_id, {
                     "execution_status": "failed",
