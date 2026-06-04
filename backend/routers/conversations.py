@@ -328,6 +328,16 @@ async def send_message_api(conv_id: int, req: SendMessageRequest):
     if not existing or existing[-1]["role"] != "user" or existing[-1]["content"] != req.content:
         create_message(conv_id, "user", req.content)
 
+    # 1.1 首次对话时立即更新标题（异步，不阻塞）
+    if conv.get("title") == "新对话":
+        history_count = len(get_messages(conv_id, limit=2))
+        if history_count <= 1:
+            short_title = req.content[:30] + ("..." if len(req.content) > 30 else "")
+            try:
+                update_conversation(conv_id, title=short_title)
+            except Exception as e:
+                logger.warning(f"更新对话标题失败: {e}")
+
     # 2. RAG 检索
     agent = get_agent(conv["agent_id"]) if conv.get("agent_id") else None
     rag_types = []
@@ -378,10 +388,8 @@ async def send_message_api(conv_id: int, req: SendMessageRequest):
         freshness_filtered=rag_result.get("freshness_filtered", 0),
     )
 
-    # 7. 自动更新对话标题
-    if len(history) <= 1 and conv.get("title") == "新对话":
-        short_title = req.content[:30] + ("..." if len(req.content) > 30 else "")
-        update_conversation(conv_id, title=short_title)
+    # 7. 自动更新对话标题（如果还没有更新过）
+    # 注意：标题更新已提前到消息处理开始时执行
 
     return {
         "answer": answer,
@@ -454,6 +462,17 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
         if not existing or existing[-1]["role"] != "user" or existing[-1]["content"] != req.content:
             create_message(conv_id, "user", req.content)
         yield _sse_event("user_message", {"content": req.content})
+
+        # 1.1 首次对话时立即更新标题
+        if conv.get("title") == "新对话":
+            history_count = len(get_messages(conv_id, limit=2))
+            if history_count <= 1:
+                short_title = req.content[:30] + ("..." if len(req.content) > 30 else "")
+                try:
+                    update_conversation(conv_id, title=short_title)
+                    yield _sse_event("title_updated", {"title": short_title})
+                except Exception as e:
+                    logger.warning(f"更新对话标题失败: {e}")
 
         # 2. 并行执行：需求澄清 + RAG 检索（节省 0.5-2s）
         # 不检查断开连接，让后端任务继续执行

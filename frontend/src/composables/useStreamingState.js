@@ -180,6 +180,13 @@ function handleStreamEvent(convId, event, callbacks = {}) {
       state.phaseIndex = data.phase_index || 0
       break
 
+    case 'title_updated':
+      // 标题更新事件，通知前端刷新对话列表
+      if (callbacks.onTitleUpdated) {
+        callbacks.onTitleUpdated(convId, data.title)
+      }
+      break
+
     default:
       return false
   }

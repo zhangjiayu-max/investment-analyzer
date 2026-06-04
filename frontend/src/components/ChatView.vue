@@ -229,6 +229,14 @@ async function handleSend() {
         }
         finishStream(cid)
       },
+      onTitleUpdated: (cid, title) => {
+        // 标题更新时立即刷新对话列表
+        loadConversations()
+        // 更新当前选中对话的标题
+        if (selectedConv.value?.id === cid) {
+          selectedConv.value.title = title
+        }
+      },
     })
   })
 
