@@ -428,6 +428,26 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
         trace_id = str(uuid.uuid4())[:12]
         logger.info(f"[trace:{trace_id}] 对话 {conv_id} 开始: {req.content[:50]}...")
 
+        # 执行 before_prompt hooks
+        try:
+            from agent.hooks import run_hooks
+            from agent.session_signals import detect_signals, get_adaptive_behavior
+            hook_context = {
+                "conversation_id": conv_id,
+                "query": req.content,
+                "user_id": "default",
+            }
+            hook_context = run_hooks("before_prompt", hook_context)
+
+            # 检测会话信号
+            detect_signals(conv_id, "user_message", {"content": req.content})
+            adaptive = get_adaptive_behavior(conv_id)
+            if adaptive.get("should_inject_context"):
+                hook_context["system_prompt"] = (hook_context.get("system_prompt", "") +
+                    f"\n\n<adaptive_context>{adaptive['should_inject_context']}</adaptive_context>")
+        except Exception as e:
+            logger.warning(f"Hooks 执行失败: {e}")
+
         # 1. 存储用户消息（去重：中断重试时不重复保存）
         existing = get_messages(conv_id, limit=1)
         if not existing or existing[-1]["role"] != "user" or existing[-1]["content"] != req.content:
@@ -484,6 +504,9 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
         # 3. 普通聊天：直接调用 LLM 回答，不走专家流程
         if complexity == "chat" and not clarification.get("specialists"):
             yield _sse_event("status", {"message": "思考中..."})
+            # 获取对话历史（chat 类型需要）
+            history = get_messages(conv_id, limit=20)
+            msg_list = [{"role": m["role"], "content": m["content"]} for m in history]
             yield _sse_event("progress", {
                 "phase": "chat",
                 "phase_index": 2,
@@ -1069,6 +1092,26 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
             })
         else:
             logger.info(f"对话 {conv_id} 结果已保存（客户端已断开），answer 长度: {len(answer)}")
+
+        # 执行 after_response hooks 和记忆提取（后台异步）
+        try:
+            from agent.hooks import run_hooks
+            from agent.memory_lifecycle import save_memory
+            from agent.memory_governance import SessionSteward
+
+            # after_response hooks
+            hook_context = {
+                "conversation_id": conv_id,
+                "response": answer[:2000],
+                "analysis_type": complexity,
+                "user_id": "default",
+            }
+            run_hooks("after_response", hook_context)
+
+            # 提取记忆候选
+            SessionSteward.extract_and_save_candidates(conv_id, "default")
+        except Exception as e:
+            logger.warning(f"after_response hooks 失败: {e}")
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
