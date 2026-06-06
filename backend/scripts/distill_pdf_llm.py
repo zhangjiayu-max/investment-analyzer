@@ -14,8 +14,13 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from PyPDF2 import PdfReader
+from openai import OpenAI
 from db.knowledge import add_knowledge
-from llm_service import _call_llm
+
+# 小米 mimo 模型配置
+MIMO_API_KEY = "tp-c3xohciv87feg14h86h4j25176516vn1y37fxn9ms8xvaa8a"
+MIMO_BASE_URL = "https://token-plan-cn.xiaomimimo.com/v1"
+MIMO_MODEL = "mimo-v2.5"
 
 
 EXTRACT_PROMPT = """你是一位专业的投资知识提取专家。请从以下书籍内容中提取核心知识点。
@@ -63,7 +68,7 @@ def extract_pdf_text(pdf_path: str, start_page: int = 0, end_page: int = None) -
 
 
 def distill_with_llm(text: str, book_title: str, chunk_id: int) -> list[dict]:
-    """使用 LLM 蒸馏文本内容。"""
+    """使用小米 mimo 模型蒸馏文本内容。"""
     # 截断到合适长度（避免 token 超限）
     max_chars = 8000
     if len(text) > max_chars:
@@ -72,9 +77,10 @@ def distill_with_llm(text: str, book_title: str, chunk_id: int) -> list[dict]:
     prompt = EXTRACT_PROMPT + text
 
     try:
-        response = _call_llm(
-            caller="distill",
-            model=None,  # 使用默认模型
+        client = OpenAI(api_key=MIMO_API_KEY, base_url=MIMO_BASE_URL)
+
+        response = client.chat.completions.create(
+            model=MIMO_MODEL,
             messages=[
                 {"role": "system", "content": "你是投资知识提取专家，只输出 JSON。"},
                 {"role": "user", "content": prompt}
