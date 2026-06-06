@@ -4,6 +4,8 @@
 - FTS5 全文检索（jieba 中文分词）
 - ChromaDB 向量语义搜索（bge-small-zh-v1.5）
 - RRF 融合排序
+- 查询扩展（同义词 + 知识图谱）
+- 轻量级重排序
 - Reranker 重排序（可选）
 - 时效性管理
 - 批量索引
@@ -16,6 +18,7 @@ import sqlite3
 from pathlib import Path
 
 from db._conn import DB_PATH
+from rag_enhanced import expand_query, lightweight_rerank
 
 logger = logging.getLogger(__name__)
 
@@ -987,21 +990,26 @@ def build_rag_context_with_details(query: str, content_types: list[str] = None, 
     single_char = [t for t in cleaned if len(t) == 1 and '一' <= t <= '鿿']
     keywords = multi_char + single_char if multi_char else (single_char or cleaned)
 
-    # FTS5 搜索
+    # 查询扩展（同义词 + 知识图谱）
+    expanded_query = expand_query(query)
+    if expanded_query != query:
+        logger.info(f"查询扩展: '{query}' -> '{expanded_query[:100]}...'")
+
+    # FTS5 搜索（使用扩展查询）
     total_freshness_filtered = 0
     if content_types:
         fts_results = []
         for ct in content_types:
-            partial, dropped = search_knowledge(query, content_type=ct, limit=limit)
+            partial, dropped = search_knowledge(expanded_query, content_type=ct, limit=limit)
             fts_results.extend(partial)
             total_freshness_filtered += dropped
     else:
-        fts_results, dropped = search_knowledge(query, limit=limit)
+        fts_results, dropped = search_knowledge(expanded_query, limit=limit)
         total_freshness_filtered += dropped
 
     fts_count = len(fts_results)
 
-    # 向量搜索（支持多类型过滤）
+    # 向量搜索（使用原始查询，保持语义准确性）
     chroma_results, _ = search_chroma(
         query,
         content_type=content_types[0] if content_types and len(content_types) == 1 else None,
@@ -1070,7 +1078,12 @@ def build_rag_context_with_details(query: str, content_types: list[str] = None, 
     all_results.sort(key=lambda x: x["_score"], reverse=True)
     logger.info(f"RAG 合并后: {len(all_results)}条, 类型: {[r['content_type'] for r in all_results]}")
 
-    # Reranker 重排序（可选，提升精度，但增加 3-15s 延迟）
+    # 轻量级重排序（基于 token 重叠率，快速提升精度）
+    if len(all_results) > 3:
+        all_results = lightweight_rerank(query, all_results, top_k=limit)
+        logger.info(f"轻量级重排序后: {len(all_results)}条")
+
+    # Reranker 重排序（可选，进一步提升精度，但增加 3-15s 延迟）
     # 默认关闭：RRF + 标题加权 + 时效性加权已能提供合理排序
     # 设置环境变量 RERANK_ENABLED=true 可开启
     if RERANK_ENABLED and len(all_results) > 3:
@@ -1090,8 +1103,15 @@ def build_rag_context_with_details(query: str, content_types: list[str] = None, 
             r["source"] = "chroma"
 
     # 添加标签
-    label_map = {"article": "文章", "valuation": "估值", "analysis": "分析记录",
-                 "author_article": "作者文章", "skill": "技能知识", "linked_doc": "个人文档"}
+    label_map = {
+        "article": "文章",
+        "valuation": "估值",
+        "analysis": "分析记录",
+        "author_article": "作者文章",
+        "skill": "技能知识",
+        "linked_doc": "个人文档",
+        "knowledge": "投资知识",
+    }
     for r in all_results:
         r["label"] = label_map.get(r["content_type"], r["content_type"])
 
