@@ -13,13 +13,14 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+import os
 from PyPDF2 import PdfReader
 from openai import OpenAI
 from db.knowledge import add_knowledge
 
-# 小米 mimo 模型配置
-MIMO_API_KEY = "tp-c3xohciv87feg14h86h4j25176516vn1y37fxn9ms8xvaa8a"
-MIMO_BASE_URL = "https://token-plan-cn.xiaomimimo.com/v1"
+# 小米 mimo 模型配置（从环境变量读取）
+MIMO_API_KEY = os.environ.get("MIMO_API_KEY", "")
+MIMO_BASE_URL = os.environ.get("MIMO_BASE_URL", "https://token-plan-cn.xiaomimimo.com/v1")
 MIMO_MODEL = "mimo-v2.5"
 
 
