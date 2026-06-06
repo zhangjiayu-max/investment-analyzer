@@ -154,10 +154,10 @@ const filteredItems = computed(() => {
       <button
         v-for="sub in stats.subcategories"
         :key="`${sub.category}-${sub.subcategory}`"
-        :class="['filter-btn', { active: activeSubcategory === sub.subcategory }]"
-        @click="filterBySubcategory(sub.subcategory)"
+        :class="['filter-btn', { active: activeSubcategory === sub.subcategory && activeCategory === sub.category }]"
+        @click="activeCategory = sub.category; activeSubcategory = sub.subcategory; loadItems()"
       >
-        {{ subcategoryMap[sub.subcategory] || sub.subcategory }} ({{ sub.count }})
+        {{ categoryMap[sub.category]?.label || sub.category }}-{{ subcategoryMap[sub.subcategory] || sub.subcategory }} ({{ sub.count }})
       </button>
     </div>
 
