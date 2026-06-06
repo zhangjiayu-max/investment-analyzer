@@ -149,13 +149,131 @@ async def resume_conversation(conv_id: int, request: Request):
             break
 
     if not last_assistant or not original_query:
-        raise HTTPException(400, "没有可恢复的中断对话")
+        # 没有 assistant 回复 → 检查最后一条是否是用户消息，从零重新执行
+        last_msg = msgs[-1] if msgs else None
+        if last_msg and last_msg["role"] == "user" and not original_query:
+            original_query = last_msg["content"]
+            logger.info(f"恢复对话 {conv_id}：检测到用户消息无回复（消息 {last_msg['id']}），从零重新执行")
+            # 创建 assistant 占位消息，假装是"中断的"
+            stream_msg_id = create_message(conv_id, "assistant", "⏳ 分析进行中...",
+                metadata=json.dumps({"execution_status": "pending"}, ensure_ascii=False))
+            last_assistant = {"id": stream_msg_id, "role": "assistant", "_parsed_metadata": {"execution_status": "pending"}}
+            completed_runs = []
+        else:
+            raise HTTPException(400, "没有可恢复的中断对话")
 
     # 从 agent_runs 表查询已完成的专家
     message_id = last_assistant["id"]
     completed_runs = get_completed_agents_for_message(message_id)
 
     logger.info(f"恢复对话 {conv_id}：找到 {len(completed_runs)} 个已完成的专家")
+
+    # 检查是否已有正在运行的任务 —— 如果有，启动监控模式，不重新执行
+    running_trace_ids = [k for k, v in _running_agents.items() if v.get("conv_id") == conv_id]
+    if running_trace_ids:
+        logger.info(f"恢复对话 {conv_id}：检测到正在运行的任务 {running_trace_ids}，启动监控模式")
+
+        async def _monitor_stream():
+            stream_msg_id = last_assistant["id"]
+            metadata = last_assistant.get("_parsed_metadata", {})
+            last_spec_count = len(completed_runs)
+            last_cross_count = len(metadata.get("cross_review_results", []))
+
+            yield _sse_event("status", {"message": f"检测到后台执行中的任务（{last_spec_count} 个专家已完成），正在恢复连接..."})
+
+            # 推送已有的专家结果（让前端恢复状态）
+            for run in completed_runs:
+                yield _sse_event("specialist_done", {
+                    "agent_key": run.get("agent_key", ""),
+                    "agent": run.get("agent_name", ""),
+                    "icon": "🤖",
+                    "analysis": run.get("result", ""),
+                    "duration_ms": run.get("duration_ms", 0),
+                })
+
+            # 轮询监控数据库进度
+            max_polls = 150  # 最多等待 5 分钟
+            for _ in range(max_polls):
+                await asyncio.sleep(2)
+
+                msgs = get_messages(conv_id, limit=1)
+                if not msgs or msgs[0]["id"] != stream_msg_id:
+                    yield _sse_event("error", {"message": "消息状态异常"})
+                    return
+
+                meta = msgs[0].get("metadata")
+                if isinstance(meta, str):
+                    try:
+                        meta = json.loads(meta)
+                    except Exception:
+                        meta = {}
+
+                status = meta.get("execution_status", "unknown")
+
+                # 推送新增的专家结果
+                spec_results = meta.get("specialist_results", [])
+                if len(spec_results) > last_spec_count:
+                    for i in range(last_spec_count, len(spec_results)):
+                        s = spec_results[i]
+                        yield _sse_event("specialist_done", {
+                            "agent_key": s.get("agent_key", ""),
+                            "agent": s.get("agent", ""),
+                            "icon": s.get("icon", "🤖"),
+                            "analysis": s.get("analysis", ""),
+                            "duration_ms": s.get("duration_ms", 0),
+                        })
+                    last_spec_count = len(spec_results)
+
+                # 推送新增的交叉审阅结果
+                cross_results = meta.get("cross_review_results", [])
+                if len(cross_results) > last_cross_count:
+                    for i in range(last_cross_count, len(cross_results)):
+                        s = cross_results[i]
+                        yield _sse_event("cross_review_done", {
+                            "agent_key": s.get("agent_key", ""),
+                            "agent": s.get("agent", ""),
+                            "icon": s.get("icon", "🤖"),
+                            "analysis": s.get("analysis", ""),
+                            "duration_ms": s.get("duration_ms", 0),
+                        })
+                    last_cross_count = len(cross_results)
+
+                # 推送进度
+                total_expected = 3 if meta.get("complexity") == "simple" else (4 if meta.get("complexity") == "medium" else 6)
+                if total_expected > 0 and last_spec_count > 0:
+                    pct = min(35 + (last_spec_count * 10), 95)
+                    yield _sse_event("progress", {
+                        "phase": "specialists",
+                        "phase_index": 4,
+                        "total_phases": total_expected,
+                        "phase_label": "专家分析",
+                        "substep": f"已完成 {last_spec_count} 个专家",
+                        "pct": pct,
+                    })
+
+                # 任务结束
+                if status == "completed":
+                    yield _sse_event("answer", {
+                        "content": msgs[0].get("content", ""),
+                        "specialist_results": spec_results,
+                    })
+                    total_ms = meta.get("phase_timings", {}).get("total_ms", 0)
+                    yield _sse_event("done", {
+                        "message_id": stream_msg_id,
+                        "duration_ms": total_ms,
+                        "phase_timings": meta.get("phase_timings", {}),
+                    })
+                    return
+                elif status == "failed":
+                    yield _sse_event("error", {"message": meta.get("error_message", "执行失败")})
+                    return
+                elif status == "cancelled":
+                    yield _sse_event("cancelled", {"message": "执行已取消"})
+                    return
+
+            yield _sse_event("error", {"message": "等待任务完成超时，请刷新页面查看最新结果"})
+
+        return StreamingResponse(_monitor_stream(), media_type="text/event-stream")
 
     # 如果没有已完成的专家，将消息状态重置为待执行
     if not completed_runs:
@@ -710,48 +828,136 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
         })
 
         def _run_orchestrator_stream():
-            """在线程中运行 orchestrator 流式生成器，通过队列传递事件。"""
+            """在线程中运行 orchestrator + 自动持久化（不受 SSE 断开影响）。"""
             import queue
             q = queue.Queue()
+            _prod_spec_results = []
+            _prod_start = time.time()
+
+            def _save_progress(status="streaming"):
+                try:
+                    p1 = [{"agent_key": s["agent_key"], "agent": s["agent"], "icon": s.get("icon", ""), "analysis": s.get("analysis", "")[:500]} for s in _prod_spec_results if not s.get("is_cross_review")]
+                    p2 = [{"agent_key": s["agent_key"], "agent": s["agent"], "icon": s.get("icon", ""), "analysis": s.get("analysis", "")[:500]} for s in _prod_spec_results if s.get("is_cross_review")]
+                    update_message_metadata(stream_msg_id, {
+                        "execution_status": status, "complexity": complexity,
+                        "specialist_results": p1, "cross_review_results": p2,
+                        "trace_id": trace_id,
+                    })
+                except Exception as e:
+                    logger.warning(f"增量保存进度失败: {e}")
+
+            def _save_final(content, spec_results, tool_calls, orch_ms):
+                total_ms = int((time.time() - request_start) * 1000)
+                pt = {"orchestrator_ms": orch_ms, "total_ms": total_ms}
+                # 输出审核
+                try:
+                    review = review_output(content, spec_results)
+                    if review["warnings"]:
+                        logger.warning(f"[trace:{trace_id}] 输出审核: {review['warnings']}")
+                    content = review["content"]
+                except Exception:
+                    pass
+                p1 = [{"agent_key": s["agent_key"], "agent": s["agent"], "icon": s.get("icon", ""), "analysis": s.get("analysis", "")[:500]} for s in _prod_spec_results if not s.get("is_cross_review")]
+                p2 = [{"agent_key": s["agent_key"], "agent": s["agent"], "icon": s.get("icon", ""), "analysis": s.get("analysis", "")[:500]} for s in _prod_spec_results if s.get("is_cross_review")]
+                if stream_msg_id > 0:
+                    update_message_content_and_metadata(stream_msg_id, content, {
+                        "execution_status": "completed", "complexity": complexity,
+                        "specialist_results": p1, "cross_review_results": p2,
+                        "tool_calls": tool_calls, "phase_timings": pt, "trace_id": trace_id,
+                    })
+                try:
+                    conn = _get_conn()
+                    conn.execute("UPDATE agent_runs SET message_id = ? WHERE conversation_id = ? AND message_id = 0", (stream_msg_id, conv_id))
+                    conn.commit()
+                    conn.close()
+                    create_agent_run(conversation_id=conv_id, message_id=stream_msg_id,
+                        agent_key="chat_turn", agent_name="对话整体",
+                        query=req.content[:500], result=content[:500],
+                        tool_calls=json.dumps(pt, ensure_ascii=False), duration_ms=total_ms,
+                        trace_id=trace_id, status="success")
+                except Exception as e:
+                    logger.warning(f"记录 agent_runs 失败: {e}")
+                log_rag_search(conversation_id=conv_id, message_id=stream_msg_id, query=req.content,
+                    keywords=rag_result.get("keywords", []), results=rag_result.get("results", []),
+                    content_types=rag_types if rag_types else None,
+                    fts_count=rag_result.get("fts_count", 0), chroma_count=rag_result.get("chroma_count", 0),
+                    freshness_filtered=rag_result.get("freshness_filtered", 0), trace_id=trace_id)
+                qm = _calculate_quality_metrics(_prod_spec_results, rag_result, tool_calls)
+                _save_execution_trace(trace_id, conv_id, req.content, complexity, "completed", total_ms, pt, "none", qm)
+                return content
+
+            def _save_failed(err_msg):
+                if stream_msg_id <= 0:
+                    return
+                p1 = [{"agent_key": s["agent_key"], "agent": s["agent"], "icon": s.get("icon", ""), "analysis": s.get("analysis", "")[:500]} for s in _prod_spec_results if not s.get("is_cross_review")]
+                p2 = [{"agent_key": s["agent_key"], "agent": s["agent"], "icon": s.get("icon", ""), "analysis": s.get("analysis", "")[:500]} for s in _prod_spec_results if s.get("is_cross_review")]
+                update_message_content_and_metadata(stream_msg_id, f"❌ 执行失败: {err_msg}", {
+                    "execution_status": "failed", "complexity": complexity,
+                    "specialist_results": p1, "cross_review_results": p2, "trace_id": trace_id,
+                })
 
             def _producer():
                 try:
+                    _running_agents[f"prod_{conv_id}"] = {"conv_id": conv_id, "started_at": time.time(), "trace_id": trace_id}
                     for event in orchestrate_stream(req.content, msg_list, rag_context, cancel_event=cancel_event, conversation_id=conv_id, message_id=stream_msg_id, trace_id=trace_id):
+                        et = event.get("type")
+                        # === 在线程中持久化（独立于 SSE 连接）===
+                        if et == "specialist_done":
+                            _prod_spec_results.append({"agent_key": event["agent_key"], "agent": event["agent"], "icon": event.get("icon", "🤖"), "analysis": event.get("analysis", ""), "duration_ms": event.get("duration_ms", 0)})
+                            _save_progress("streaming")
+                            create_agent_run(conversation_id=conv_id, message_id=0, agent_key=event["agent_key"],
+                                agent_name=event.get("agent", ""), query=req.content[:500],
+                                result=(event.get("analysis", "") or "")[:500], duration_ms=event.get("duration_ms", 0),
+                                trace_id=trace_id, status="success")
+                        elif et == "cross_review_done":
+                            _prod_spec_results.append({"agent_key": event.get("agent_key"), "agent": event.get("agent"), "icon": event.get("icon"), "analysis": event.get("analysis"), "duration_ms": event.get("duration_ms"), "is_cross_review": True})
+                            _save_progress("streaming")
+                        elif et == "answer":
+                            reviewed = _save_final(event.get("content", ""), event.get("specialist_results", []), event.get("tool_calls", []), int((time.time() - _prod_start) * 1000))
+                            event = dict(event)
+                            event["content"] = reviewed
+                        elif et == "cancelled":
+                            _save_progress("cancelled")
+                        elif et == "error":
+                            _save_failed(event.get("message", "未知错误"))
                         q.put(event)
                 except CancelledError:
                     q.put({"type": "cancelled", "message": "用户取消了执行"})
+                    _save_progress("cancelled")
                 except TimeoutError as e:
-                    q.put({"type": "error", "message": f"执行超时: {e}"})
+                    err = f"执行超时: {e}"
+                    _save_failed(err)
+                    q.put({"type": "error", "message": err})
                 except Exception as e:
-                    q.put({"type": "error", "message": str(e)})
+                    logger.error(f"后台执行异常: {e}", exc_info=True)
+                    err = str(e)
+                    _save_failed(err)
+                    q.put({"type": "error", "message": err})
                 finally:
-                    q.put(None)  # 结束信号
+                    _running_agents.pop(f"prod_{conv_id}", None)
+                    q.put(None)
 
             t = threading.Thread(target=_producer, daemon=True)
             t.start()
             return q
-
-        t_orch_start = time.time()
 
         # 提前创建 assistant 消息，获取 message_id 传给 orchestrator
         stream_msg_id = create_message(conv_id, "assistant", "⏳ 分析进行中...", metadata=json.dumps({"execution_status": "streaming"}, ensure_ascii=False))
 
         q = await asyncio.to_thread(_run_orchestrator_stream)
 
-        specialist_results = []
-        all_tool_calls = []
-        final_answer = ""
         client_disconnected = False
+        done_data = {}
+        _spec_done_count = 0
 
+        # 简化的事件中继循环 — 持久化已在生产者线程完成
         while True:
             try:
-                event = await asyncio.to_thread(q.get, timeout=0.5)
+                event = await asyncio.to_thread(lambda: q.get(timeout=0.5))
             except queue.Empty:
-                # 队列超时 — 检查客户端是否断开
                 if not client_disconnected and await request.is_disconnected():
-                    logger.info("客户端断开连接，后端任务继续执行，等待完成后保存结果")
+                    logger.info("客户端断开连接，后台任务将继续自动保存结果")
                     client_disconnected = True
-                    # 不设置 cancel_event，让后端任务继续执行
                 continue
 
             if event is None:
@@ -760,31 +966,8 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
             event_type = event.get("type")
 
             if event_type == "cancelled":
-                logger.info("执行已被用户取消")
-                error_category = "cancelled"
-                # 清理该对话的 running agents
-                to_remove = [k for k in _running_agents if k.startswith(f"{conv_id}_")]
-                for k in to_remove:
-                    _running_agents.pop(k, None)
-                # 标记取消状态
-                if stream_msg_id > 0:
-                    try:
-                        update_message_metadata(stream_msg_id, {
-                            "execution_status": "cancelled",
-                            "complexity": complexity,
-                            "specialist_results": [
-                                {"agent_key": s.get("agent_key", ""), "agent": s["agent"], "icon": s["icon"], "analysis": s.get("analysis", "")[:500]}
-                                for s in specialist_results if not s.get("is_cross_review")
-                            ],
-                            "cross_review_results": [
-                                {"agent_key": s.get("agent_key", ""), "agent": s["agent"], "icon": s["icon"], "analysis": s.get("analysis", "")[:500]}
-                                for s in specialist_results if s.get("is_cross_review")
-                            ],
-                            "tool_calls": all_tool_calls,
-                        })
-                    except Exception as _e:
-                        logger.warning(f"标记取消状态失败: {_e}")
-                # 不 return，继续消费队列直到后台线程完成并保存结果
+                if not client_disconnected:
+                    yield _sse_event("cancelled", {"message": event.get("message", "执行已取消")})
 
             elif event_type == "status":
                 if not client_disconnected:
@@ -799,86 +982,23 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
                     })
 
             elif event_type == "specialist_start":
-                agent_key = event.get("agent_key", "")
-                agent_name = event.get("agent", "")
-                uid = f"{conv_id}_{agent_key}_{int(time.time())}"
-                _running_agents[uid] = {
-                    "agent": agent_name,
+                _running_agents[f"{conv_id}_{event.get('agent_key', '')}_{int(time.time())}"] = {
+                    "agent": event.get("agent", ""),
                     "task": f"对话 #{conv_id}",
                     "started_at": time.time(),
                 }
                 if not client_disconnected:
                     yield _sse_event("specialist_start", {
-                        "agent_key": agent_key,
-                        "agent": agent_name,
+                        "agent_key": event.get("agent_key"),
+                        "agent": event.get("agent"),
                         "icon": event.get("icon"),
-                    })
-                    # 进度：专家开始
-                    active_count = len([s for s in specialist_results if not s.get("is_cross_review")])
-                    yield _sse_event("progress", {
-                        "phase": "specialists",
-                        "phase_index": 4,
-                        "total_phases": total_phases,
-                        "phase_label": "专家分析",
-                        "substep": f"{agent_name} 分析中 ({active_count + 1} 个专家并行)",
-                        "pct": min(35 + (active_count * 15), 70),
-                        "detail": {
-                            "active": [agent_name],
-                            "completed": [s.get("agent", "") for s in specialist_results if not s.get("is_cross_review")],
-                        },
                     })
 
             elif event_type == "specialist_done":
-                # 清除对应的 running agent
-                agent_key = event.get("agent_key", "")
-                to_remove = [k for k in _running_agents if k.startswith(f"{conv_id}_{agent_key}_")]
+                _spec_done_count += 1
+                to_remove = [k for k in _running_agents if k.startswith(f"{conv_id}_{event.get('agent_key', '')}_")]
                 for k in to_remove:
                     _running_agents.pop(k, None)
-                specialist_results.append({
-                    "agent_key": event.get("agent_key"),
-                    "agent": event.get("agent"),
-                    "icon": event.get("icon"),
-                    "analysis": event.get("analysis"),
-                    "duration_ms": event.get("duration_ms"),
-                })
-                # 进度：专家完成
-                if not client_disconnected:
-                    done_count = len([s for s in specialist_results if not s.get("is_cross_review")])
-                    yield _sse_event("progress", {
-                        "phase": "specialists",
-                        "phase_index": 4,
-                        "total_phases": total_phases,
-                        "phase_label": "专家分析",
-                        "substep": f"{event.get('agent', '')} 完成 ({done_count} 个已完成)",
-                        "pct": min(35 + (done_count * 15), 70),
-                    })
-                # 记录到 agent_runs
-                _ar_analysis = (event.get("analysis", "") or "")
-                _ar_status = "error" if ("error" in _ar_analysis.lower() or "失败" in _ar_analysis or "异常" in _ar_analysis) else "success"
-                create_agent_run(
-                    conversation_id=conv_id, message_id=0,
-                    agent_key=event.get("agent_key", ""),
-                    agent_name=event.get("agent", ""),
-                    query=req.content[:500],
-                    result=_ar_analysis[:500],
-                    duration_ms=event.get("duration_ms", 0),
-                    trace_id=trace_id,
-                    status=_ar_status,
-                )
-                # 增量保存执行进度到 metadata
-                try:
-                    _progress_metadata = {
-                        "execution_status": "streaming",
-                        "complexity": complexity,
-                        "specialist_results": [
-                            {"agent_key": s.get("agent_key", ""), "agent": s["agent"], "icon": s["icon"], "analysis": s.get("analysis", "")[:500]}
-                            for s in specialist_results
-                        ],
-                        "tool_calls": all_tool_calls,
-                    }
-                    update_message_metadata(stream_msg_id, _progress_metadata)
-                except Exception as _e:
-                    logger.warning(f"增量保存执行进度失败: {_e}")
                 if not client_disconnected:
                     yield _sse_event("specialist_done", {
                         "agent_key": event.get("agent_key"),
@@ -886,6 +1006,15 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
                         "icon": event.get("icon"),
                         "analysis": event.get("analysis"),
                         "duration_ms": event.get("duration_ms"),
+                    })
+                    # 进度
+                    yield _sse_event("progress", {
+                        "phase": "specialists",
+                        "phase_index": 4,
+                        "total_phases": total_phases,
+                        "phase_label": "专家分析",
+                        "substep": f"{event.get('agent', '')} 完成 ({_spec_done_count} 个已完成)",
+                        "pct": min(35 + (_spec_done_count * 15), 70),
                     })
 
             elif event_type == "cross_review_start":
@@ -895,7 +1024,6 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
                         "agent": event.get("agent"),
                         "icon": event.get("icon"),
                     })
-                    # 进度：交叉审阅开始
                     yield _sse_event("progress", {
                         "phase": "cross_review",
                         "phase_index": 5,
@@ -906,33 +1034,6 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
                     })
 
             elif event_type == "cross_review_done":
-                specialist_results.append({
-                    "agent_key": event.get("agent_key"),
-                    "agent": event.get("agent"),
-                    "icon": event.get("icon"),
-                    "analysis": event.get("analysis"),
-                    "duration_ms": event.get("duration_ms"),
-                    "is_cross_review": True,
-                })
-                # 增量保存交叉审阅进度
-                try:
-                    _cr_metadata = {
-                        "execution_status": "streaming",
-                        "complexity": complexity,
-                        "specialist_results": [
-                            {"agent_key": s.get("agent_key", ""), "agent": s["agent"], "icon": s["icon"], "analysis": s.get("analysis", "")[:500]}
-                            for s in specialist_results if not s.get("is_cross_review")
-                        ],
-                        "cross_review_results": [
-                            {"agent_key": s.get("agent_key", ""), "agent": s["agent"], "icon": s["icon"], "analysis": s.get("analysis", "")[:500]}
-                            for s in specialist_results if s.get("is_cross_review")
-                        ],
-                        "tool_calls": all_tool_calls,
-                    }
-                    if stream_msg_id > 0:
-                        update_message_metadata(stream_msg_id, _cr_metadata)
-                except Exception as _e:
-                    logger.warning(f"增量保存交叉审阅进度失败: {_e}")
                 if not client_disconnected:
                     yield _sse_event("cross_review_done", {
                         "agent_key": event.get("agent_key"),
@@ -943,199 +1044,42 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
                     })
 
             elif event_type == "answer":
-                final_answer = event.get("content", "")
-                all_tool_calls = event.get("tool_calls", [])
-                if not specialist_results:
-                    specialist_results = event.get("specialist_results", [])
+                done_data = event
+                if not client_disconnected:
+                    yield _sse_event("answer", {
+                        "content": event.get("content", ""),
+                        "specialist_results": event.get("specialist_results", []),
+                    })
 
             elif event_type == "error":
-                # 设置错误分类
-                error_category = "model_error"
-                # 标记失败状态
-                if stream_msg_id > 0:
-                    try:
-                        update_message_metadata(stream_msg_id, {
-                            "execution_status": "failed",
-                            "error_message": event.get("message", "未知错误"),
-                            "complexity": complexity,
-                            "specialist_results": [
-                                {"agent_key": s.get("agent_key", ""), "agent": s["agent"], "icon": s["icon"], "analysis": s.get("analysis", "")[:500]}
-                                for s in specialist_results if not s.get("is_cross_review")
-                            ],
-                            "cross_review_results": [
-                                {"agent_key": s.get("agent_key", ""), "agent": s["agent"], "icon": s["icon"], "analysis": s.get("analysis", "")[:500]}
-                                for s in specialist_results if s.get("is_cross_review")
-                            ],
-                            "tool_calls": all_tool_calls,
-                        })
-                    except Exception as _e:
-                        logger.warning(f"标记失败状态失败: {_e}")
                 if not client_disconnected:
                     yield _sse_event("error", {"message": event.get("message", "未知错误")})
                     return
-                # 客户端已断开，记录错误但继续保存结果
-                logger.warning(f"后台执行出错（客户端已断开）: {event.get('message', '')}")
 
-        phase_timings["orchestrator_ms"] = int((time.time() - t_orch_start) * 1000)
-        answer = final_answer
-
-        # 进度：生成回答
+        # 生产者已完成 — 发送完成事件
         if not client_disconnected:
-            yield _sse_event("progress", {
-                "phase": "answer",
-                "phase_index": total_phases,
-                "total_phases": total_phases,
-                "phase_label": "生成回答",
-                "substep": "正在综合所有分析结果",
-                "pct": 95,
+            total_ms = int((time.time() - request_start) * 1000)
+            yield _sse_event("done", {
+                "message_id": stream_msg_id,
+                "duration_ms": total_ms,
+                "phase_timings": {"total_ms": total_ms},
             })
 
-        # 5. 发送最终回答（仅客户端在线时）
-        if not client_disconnected:
-            yield _sse_event("answer", {
-                "content": answer,
-                "specialist_results": specialist_results,
-            })
-
-        # 5.1 主动分析是否产生预警（后台异步执行）
-        if answer:
-            asyncio.create_task(_proactive_alert_check(req.content, answer, specialist_results))
-
-        # 6. 存储 AI 回复（始终保存，即使客户端已断开）
-        if not answer and specialist_results:
-            # 没有最终回答但有专家结果，拼接摘要
-            answer = "\n\n".join(
-                f"**{s.get('agent', '')}**: {s.get('analysis', '')[:300]}"
-                for s in specialist_results
-                if s.get('analysis')
-            ) or "（执行未完成，以下为部分分析结果）"
-
-        if answer:
-            final_metadata = {
-                "execution_status": "completed",
-                "complexity": complexity,
-                "specialist_results": [
-                    {"agent_key": s.get("agent_key", ""), "agent": s["agent"], "icon": s["icon"], "analysis": s.get("analysis", "")[:500]}
-                    for s in specialist_results if not s.get("is_cross_review")
-                ],
-                "cross_review_results": [
-                    {"agent_key": s.get("agent_key", ""), "agent": s["agent"], "icon": s["icon"], "analysis": s.get("analysis", "")[:500]}
-                    for s in specialist_results if s.get("is_cross_review")
-                ],
-                "tool_calls": all_tool_calls,
-                "phase_timings": phase_timings,
-            }
-            if stream_msg_id > 0:
-                # 已有占位消息，更新 content + metadata
-                update_message_content_and_metadata(stream_msg_id, answer, final_metadata)
-                msg_id = stream_msg_id
-            else:
-                # 简单任务路径，直接创建
-                metadata = json.dumps(final_metadata, ensure_ascii=False) if specialist_results or all_tool_calls else None
-                msg_id = create_message(conv_id, "assistant", answer, metadata=metadata)
-        else:
-            msg_id = stream_msg_id if stream_msg_id > 0 else 0
-            # 有占位消息但无最终回答，标记为失败
-            if stream_msg_id > 0:
-                try:
-                    update_message_content_and_metadata(stream_msg_id, "❌ 执行未完成（超时或异常中断）", {
-                        "execution_status": "failed",
-                        "complexity": complexity,
-                        "specialist_results": [
-                            {"agent_key": s.get("agent_key", ""), "agent": s["agent"], "icon": s["icon"], "analysis": s.get("analysis", "")[:500]}
-                            for s in specialist_results if not s.get("is_cross_review")
-                        ],
-                        "cross_review_results": [
-                            {"agent_key": s.get("agent_key", ""), "agent": s["agent"], "icon": s["icon"], "analysis": s.get("analysis", "")[:500]}
-                            for s in specialist_results if s.get("is_cross_review")
-                        ],
-                        "tool_calls": all_tool_calls,
-                        "phase_timings": phase_timings,
-                    })
-                except Exception as _e:
-                    logger.warning(f"标记失败状态失败: {_e}")
-
-        # 7. 记录 RAG 日志
-        log_rag_search(
-            conversation_id=conv_id,
-            message_id=msg_id,
-            query=req.content,
-            keywords=rag_result.get("keywords", []),
-            results=rag_result.get("results", []),
-            content_types=rag_types if rag_types else None,
-            fts_count=rag_result.get("fts_count", 0),
-            chroma_count=rag_result.get("chroma_count", 0),
-            freshness_filtered=rag_result.get("freshness_filtered", 0),
-            trace_id=trace_id,
-        )
-
-        # 8. 更新 agent_runs 的 message_id + 记录整体执行
-        total_ms = int((time.time() - request_start) * 1000)
-        phase_timings["total_ms"] = total_ms
-        try:
-            _c = _get_conn()
-            _c.execute(
-                "UPDATE agent_runs SET message_id = ? WHERE conversation_id = ? AND message_id = 0",
-                (msg_id, conv_id)
-            )
-            _c.commit()
-            _c.close()
-            _ct_status = "error" if ("error" in (answer or "").lower() or "失败" in (answer or "") or "异常" in (answer or "")) else "success"
-            create_agent_run(
-                conversation_id=conv_id, message_id=msg_id,
-                agent_key="chat_turn", agent_name="对话整体",
-                query=req.content[:500], result=(answer or "")[:500],
-                tool_calls=json.dumps(phase_timings, ensure_ascii=False),
-                duration_ms=total_ms,
-                trace_id=trace_id,
-                status=_ct_status,
-            )
-        except Exception as _e:
-            logger.warning(f"记录 agent_runs 失败: {_e}")
-
-        # 8.5 输出审核（在发送 done 之前）
-        if answer:
-            review = review_output(answer, specialist_results)
-            if review["warnings"]:
-                logger.warning(f"[trace:{trace_id}] 输出审核警告: {review['warnings']}")
-            answer = review["content"]
-
-        # 8.6 计算质量指标并写入 execution_traces
-        quality_metrics = _calculate_quality_metrics(specialist_results, rag_result, all_tool_calls)
-        final_status = "completed" if answer else ("cancelled" if error_category == "cancelled" else "failed")
-        _save_execution_trace(trace_id, conv_id, req.content, complexity, final_status,
-                              total_ms, phase_timings, error_category, quality_metrics)
-
-        # 9. 自动更新对话标题
+        # 首次对话更新标题
         if len(history) <= 1 and conv.get("title") == "新对话":
             short_title = req.content[:30] + ("..." if len(req.content) > 30 else "")
             update_conversation(conv_id, title=short_title)
 
-        if not client_disconnected:
-            yield _sse_event("done", {
-                "message_id": msg_id,
-                "duration_ms": total_ms,
-                "phase_timings": phase_timings,
-            })
-        else:
-            logger.info(f"对话 {conv_id} 结果已保存（客户端已断开），answer 长度: {len(answer)}")
+        # 主动预警检查
+        content = done_data.get("content", "")
+        if content:
+            asyncio.create_task(_proactive_alert_check(req.content, content, done_data.get("specialist_results", [])))
 
-        # 执行 after_response hooks 和记忆提取（后台异步）
+        # after_response hooks（后台异步）
         try:
             from agent.hooks import run_hooks
-            from agent.memory_lifecycle import save_memory
             from agent.memory_governance import SessionSteward
-
-            # after_response hooks
-            hook_context = {
-                "conversation_id": conv_id,
-                "response": answer[:2000],
-                "analysis_type": complexity,
-                "user_id": "default",
-            }
-            run_hooks("after_response", hook_context)
-
-            # 提取记忆候选
+            run_hooks("after_response", {"conversation_id": conv_id, "response": (content or "")[:2000], "analysis_type": complexity, "user_id": "default"})
             SessionSteward.extract_and_save_candidates(conv_id, "default")
         except Exception as e:
             logger.warning(f"after_response hooks 失败: {e}")
@@ -1530,3 +1474,22 @@ async def list_traces_api(conv_id: int, limit: int = 20):
     """, (conv_id, limit)).fetchall()
     conn.close()
     return {"traces": [dict(r) for r in rows]}
+
+
+# ── 任务状态查询 API ──────────────────────────────────────────
+
+
+@router.get("/api/conversations/tasks/running")
+async def get_running_tasks():
+    """获取所有正在运行的任务。"""
+    from db.conversations import get_running_conversations
+    tasks = get_running_conversations()
+    return {"tasks": tasks}
+
+
+@router.get("/api/conversations/tasks/{conv_id}/status")
+async def get_task_status(conv_id: int):
+    """获取指定对话的任务状态。"""
+    from db.conversations import get_conversation_progress
+    progress = get_conversation_progress(conv_id)
+    return progress

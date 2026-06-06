@@ -189,6 +189,63 @@ async def _fetch_web_news() -> list[dict]:
     return []
 
 
+async def _fetch_cctv_news() -> list[dict]:
+    """获取央视新闻（新闻联播等），返回带分类的新闻列表。
+
+    分类：经济、金融、政策、农业、科技、贸易
+    """
+    try:
+        import akshare as ak
+        today = datetime.now().strftime("%Y%m%d")
+        df = await asyncio.to_thread(ak.news_cctv, date=today)
+
+        if df is None or len(df) == 0:
+            return []
+
+        # 央视新闻分类关键词
+        CCTV_CATEGORIES = {
+            "经济": ["经济", "GDP", "增长", "发展", "改革", "开放", "市场", "企业", "产业", "消费", "投资"],
+            "金融": ["金融", "银行", "证券", "保险", "基金", "股市", "债券", "利率", "汇率", "央行", "货币政策"],
+            "政策": ["政策", "国务院", "发改委", "财政部", "证监会", "监管", "法规", "条例"],
+            "农业": ["农业", "粮食", "农村", "乡村振兴", "农产品", "种业", "耕地", "水利"],
+            "科技": ["科技", "创新", "芯片", "人工智能", "数字经济", "5G", "新能源", "半导体", "量子"],
+            "贸易": ["贸易", "出口", "进口", "关税", "外贸", "一带一路", "自贸区", "RCEP"],
+        }
+
+        results = []
+        for _, row in df.iterrows():
+            title = str(row.get("title", ""))
+            content = str(row.get("content", ""))[:500]
+
+            # 分类匹配
+            category = "其他"
+            for cat, keywords in CCTV_CATEGORIES.items():
+                if any(kw in title or kw in content for kw in keywords):
+                    category = cat
+                    break
+
+            # 只保留与经济金融相关的新闻
+            if category == "其他":
+                continue
+
+            # 构建央视网搜索链接
+            search_url = f"https://search.cctv.com/search.php?qtext={title}&type=web"
+
+            results.append({
+                "title": title,
+                "summary": content[:200],
+                "source": "央视新闻",
+                "category": category,
+                "date": str(row.get("date", "")),
+                "url": search_url,
+            })
+
+        return results[:10]  # 最多10条
+    except Exception as e:
+        logger.warning(f"央视新闻获取失败: {e}")
+        return []
+
+
 async def _fetch_hot_topics() -> list[dict]:
     """获取热门话题（YingMi MCP SearchHotTopic）。"""
     try:
@@ -381,20 +438,27 @@ async def get_market_intelligence_overview(force: bool = False):
 
     now = time.time()
 
-    # 1. 并行获取多源数据
-    news, web_news, hot_topics, macro = await asyncio.gather(
+    # 1. 并行获取多源数据（增加央视新闻）
+    news, web_news, hot_topics, macro, cctv_news = await asyncio.gather(
         _fetch_news_multi(),
         _fetch_web_news(),
         _fetch_hot_topics(),
         asyncio.to_thread(_fetch_macro_data),
+        _fetch_cctv_news(),
     )
-    all_news = news + web_news
+    all_news = news + web_news + cctv_news  # 合并到新闻列表
 
     # 2. 构建新闻文本
     news_text = "\n".join(
         f"- {n['title']}（{n.get('source', '')}）: {n.get('summary', '')[:150]}"
         for n in all_news if n.get("title")
     ) if all_news else "暂无新闻"
+
+    # 央视新闻单独构建（带分类）
+    cctv_text = "\n".join(
+        f"- 【{n.get('category', '经济')}】{n['title']}: {n.get('summary', '')[:150]}"
+        for n in cctv_news if n.get("title")
+    ) if cctv_news else "暂无央视新闻"
 
     topics_text = "\n".join(
         f"- {t['title']}: {t.get('summary', '')[:100]}"
@@ -439,6 +503,9 @@ async def get_market_intelligence_overview(force: bool = False):
 
 ---
 
+【央视新闻联播（政策风向标）】
+{cctv_text}
+
 【今日财经新闻（多源聚合）】
 {news_text}
 
@@ -455,7 +522,7 @@ async def get_market_intelligence_overview(force: bool = False):
 债券市场：{bond_text}
 政策指标：{policy_text or '暂无'}
 
-请从以上新闻中提炼今日真正的市场热点，输出严格JSON。"""
+请从以上新闻中提炼今日真正的市场热点，特别关注央视新闻的政策信号，输出严格JSON。"""
 
     # 4. LLM 推断 + 记录
     sectors = []
@@ -481,6 +548,7 @@ async def get_market_intelligence_overview(force: bool = False):
             parsed = json.loads(content)
         sectors = parsed.get("sectors", [])
         summary = parsed.get("summary", "")
+        cctv_signal = parsed.get("cctv_signal", "")
     except Exception as e:
         logger.warning(f"市场情报 LLM 推断失败: {e}")
         summary = f"分析失败: {e}"
@@ -519,7 +587,9 @@ async def get_market_intelligence_overview(force: bool = False):
 
     # 7. 组装结果
     result = {
-        "news": all_news,
+        "news": all_news[:15],  # 合并后的新闻（最多15条）
+        "cctv_news": cctv_news,  # 央视新闻（单独展示）
+        "cctv_signal": cctv_signal,  # 央视新闻政策信号
         "hot_topics": hot_topics,
         "sectors": sectors,
         "macro": {

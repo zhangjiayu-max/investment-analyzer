@@ -384,6 +384,17 @@ export function resumeConversationStream(convId, onEvent) {
     headers: { 'Content-Type': 'application/json' },
     signal: controller.signal,
   }).then(async response => {
+    if (!response.ok) {
+      // HTTP 错误（如 400 无辅助回复）→ 转成 error 事件
+      const body = await response.text().catch(() => '')
+      let msg = '恢复执行失败'
+      try {
+        const err = JSON.parse(body)
+        msg = err.detail || msg
+      } catch {}
+      onEvent({ type: 'error', data: { message: msg, code: 'RESUME_FAILED', status: response.status } })
+      return
+    }
     const reader = response.body.getReader()
     const decoder = new TextDecoder()
     let buffer = ''

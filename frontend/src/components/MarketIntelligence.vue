@@ -142,6 +142,27 @@
         </div>
       </div>
 
+      <!-- 央视新闻 -->
+      <div v-if="data.cctv_news?.length" class="card cctv-card">
+        <div class="card-header">
+          <h3>📺 央视新闻联播</h3>
+          <span class="badge badge-cctv">{{ data.cctv_news.length }}条</span>
+        </div>
+        <div v-if="data.cctv_signal" class="cctv-signal">
+          <span class="signal-label">政策信号：</span>
+          <span class="signal-value" :class="outlookMap[data.cctv_signal] || 'neutral'">
+            {{ data.cctv_signal }}
+          </span>
+        </div>
+        <div class="news-list">
+          <div v-for="(n, i) in data.cctv_news" :key="i" class="news-item cctv-item">
+            <span class="cctv-category">{{ n.category }}</span>
+            <span class="news-title">{{ n.title }}</span>
+            <p class="news-summary">{{ n.summary?.slice(0, 120) }}{{ n.summary?.length > 120 ? '...' : '' }}</p>
+          </div>
+        </div>
+      </div>
+
       <!-- 今日要闻 -->
       <div v-if="data.news?.length" class="card">
         <div class="card-header">
@@ -676,6 +697,55 @@ function pctColor(pct) {
 .text-success { color: #16a34a; }
 .text-danger { color: #dc2626; }
 .text-muted { color: var(--color-text-muted); font-size: 0.8rem; }
+
+/* ── 央视新闻 ── */
+
+.cctv-card {
+  border-left: 3px solid #c62828;
+}
+
+.badge-cctv {
+  background: #c62828;
+  color: white;
+  border: none;
+}
+
+.cctv-signal {
+  padding: 8px 12px;
+  margin-bottom: 12px;
+  border-radius: 6px;
+  background: var(--color-bg-secondary);
+}
+
+.signal-label {
+  font-weight: 500;
+  font-size: 0.85rem;
+}
+
+.signal-value {
+  font-weight: 600;
+  font-size: 0.85rem;
+}
+
+.signal-value.good { color: #2e7d32; }
+.signal-value.bad { color: #c62828; }
+.signal-value.neutral { color: #757575; }
+
+.cctv-category {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 4px;
+  background: #e3f2fd;
+  color: #1565c0;
+  font-size: 12px;
+  margin-right: 8px;
+  margin-bottom: 4px;
+}
+
+.cctv-item {
+  border-left: 2px solid #c62828;
+  padding-left: 12px;
+}
 
 .loading-state {
   display: flex;

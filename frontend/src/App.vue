@@ -3,15 +3,25 @@ import { ref, watch } from 'vue'
 import Sidebar from './components/Sidebar.vue'
 import Home from './views/Home.vue'
 import MobileApp from './components/MobileApp.vue'
+import TaskNotification from './components/TaskNotification.vue'
 import { useMobile } from './composables/useMobile'
+import { useTaskTracker } from './composables/useTaskTracker'
 
 const { isMobile } = useMobile()
+const { completedTask, clearCompletedTask } = useTaskTracker()
 
 const activePage = ref(localStorage.getItem('activePage') || 'articles')
 
 watch(activePage, (val) => {
   localStorage.setItem('activePage', val)
 })
+
+// 任务完成时跳转到对话页面
+function handleViewResult(convId) {
+  activePage.value = 'chat'
+  // 可以通过事件总线或 store 传递 convId 给 Chat 组件
+  clearCompletedTask()
+}
 </script>
 
 <template>
@@ -25,6 +35,13 @@ watch(activePage, (val) => {
       <Home :activePage="activePage" @navigate="activePage = $event" />
     </main>
   </div>
+
+  <!-- 任务完成通知 -->
+  <TaskNotification
+    :task="completedTask"
+    @view="handleViewResult"
+    @close="clearCompletedTask"
+  />
 </template>
 
 <style scoped>

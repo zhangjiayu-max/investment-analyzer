@@ -142,3 +142,96 @@ def save_conversation_summary(conversation_id: int, up_to_message_id: int, summa
     conn.commit()
     conn.close()
     return cur.lastrowid
+
+
+# ── 任务状态查询 ──────────────────────────────────
+
+def get_running_conversations() -> list[dict]:
+    """获取所有正在执行的对话（状态为 streaming 的消息）。"""
+    conn = _get_conn()
+    rows = conn.execute("""
+        SELECT DISTINCT
+            m.conversation_id,
+            c.title as conversation_title,
+            m.id as message_id,
+            m.created_at as started_at,
+            m.metadata
+        FROM messages m
+        JOIN conversations c ON c.id = m.conversation_id
+        WHERE m.role = 'assistant'
+          AND json_extract(m.metadata, '$.execution_status') = 'streaming'
+        ORDER BY m.created_at DESC
+    """).fetchall()
+    conn.close()
+
+    results = []
+    for row in rows:
+        metadata = {}
+        try:
+            import json
+            metadata = json.loads(row['metadata']) if row['metadata'] else {}
+        except:
+            pass
+
+        results.append({
+            "conversation_id": row['conversation_id'],
+            "conversation_title": row['conversation_title'],
+            "message_id": row['message_id'],
+            "started_at": row['started_at'],
+            "complexity": metadata.get('complexity', 'unknown'),
+            "specialist_results": metadata.get('specialist_results', {}),
+        })
+
+    return results
+
+
+def get_conversation_progress(conv_id: int) -> dict:
+    """获取对话执行进度。"""
+    conn = _get_conn()
+
+    # 获取最新的 assistant 消息
+    msg = conn.execute("""
+        SELECT id, metadata FROM messages
+        WHERE conversation_id = ? AND role = 'assistant'
+        ORDER BY id DESC LIMIT 1
+    """, (conv_id,)).fetchone()
+
+    if not msg:
+        conn.close()
+        return {"status": "no_message", "progress": 0}
+
+    metadata = {}
+    try:
+        import json
+        metadata = json.loads(msg['metadata']) if msg['metadata'] else {}
+    except:
+        pass
+
+    status = metadata.get('execution_status', 'unknown')
+
+    # 从 agent_runs 获取已完成的专家数量
+    completed_runs = conn.execute("""
+        SELECT COUNT(*) as count FROM agent_runs
+        WHERE conversation_id = ? AND message_id = ? AND status = 'completed'
+    """, (conv_id, msg['id'])).fetchone()['count']
+
+    total_runs = conn.execute("""
+        SELECT COUNT(*) as count FROM agent_runs
+        WHERE conversation_id = ? AND message_id = ?
+    """, (conv_id, msg['id'])).fetchone()['count']
+
+    conn.close()
+
+    # 计算进度百分比
+    progress = 0
+    if total_runs > 0:
+        progress = int((completed_runs / total_runs) * 100)
+
+    return {
+        "status": status,
+        "message_id": msg['id'],
+        "completed_specialists": completed_runs,
+        "total_specialists": total_runs,
+        "progress": progress,
+        "complexity": metadata.get('complexity', 'unknown'),
+    }
