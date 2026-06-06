@@ -1,5 +1,5 @@
 <script setup>
-import { ref, watch, onMounted, onUnmounted, computed } from 'vue'
+import { ref, watch, onMounted, onUnmounted, onActivated, computed } from 'vue'
 import * as echarts from 'echarts'
 import { listValuationIndexes, getValuationHistory, getIndexInfo, runAnalysis, listAnalysisHistory, getAnalysisHistoryDetail, deleteAnalysisHistory, refreshValuationPrices, listDDValuations, getDDValuation, getMarketTemperature, getSuperValue, getEnhancedStrategy } from '../api'
 import { renderMarkdown } from '../composables/useMarkdown'
@@ -656,6 +656,16 @@ onMounted(() => {
 })
 onUnmounted(() => {
   document.removeEventListener('click', handleOutsideClick)
+})
+// KeepAlive 激活时重新加载数据（切换页面回来时触发）
+onActivated(() => {
+  // 重新加载市场温度
+  loadMarketTemperature()
+  // 如果在增强策略 tab，重新加载数据
+  if (outerTab.value === 'super-value') {
+    loadSuperValue()
+    loadStrategy()
+  }
 })
 // 切换指数或指标类型时重新加载数据
 watch([selectedCode, selectedMetric], () => {

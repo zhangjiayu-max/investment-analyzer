@@ -751,7 +751,21 @@ async def get_enhanced_strategy():
     except Exception:
         news_text = "暂无新闻"
 
-    # 4. 构建 LLM prompt
+    # 4. 检索知识库（获取相关投资知识）
+    knowledge_context = ""
+    try:
+        from db.knowledge import search_knowledge
+        # 搜索与低估指数相关的知识
+        knowledge_results = search_knowledge("低估 估值 百分位 价值投资", limit=5)
+        if knowledge_results:
+            knowledge_lines = []
+            for k in knowledge_results:
+                knowledge_lines.append(f"- 【{k['title']}】{k['content'][:200]}")
+            knowledge_context = "\n\n## 参考知识库\n" + "\n".join(knowledge_lines)
+    except Exception as e:
+        logger.warning(f"知识库检索失败: {e}")
+
+    # 5. 构建 LLM prompt
     candidate_lines = []
     for c in candidates:
         line = (f"- {c['name']}({c['code']}): 百分位{c['percentile']}%, Z-score{c['zscore']}, "
@@ -818,8 +832,9 @@ async def get_enhanced_strategy():
 
 ## 今日新闻（供参考）
 {news_text}
+{knowledge_context}
 
-请基于以上数据，结合你对 A 股市场的理解，给出专业分析。"""
+请基于以上数据和知识库参考，结合你对 A 股市场的理解，给出专业分析。"""
 
     # 5. 加载 agent 配置
     from db import get_analysis_agent, create_analysis_history
