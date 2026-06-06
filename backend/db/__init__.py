@@ -25,6 +25,12 @@ from db.valuations import (
 # 任务 CRUD
 from db.tasks import create_task, update_task, get_task, list_tasks, delete_task
 
+# 螺丝钉图片解析任务 CRUD
+from db.dd_tasks import (
+    create_dd_parse_task, update_dd_parse_task, get_dd_parse_task,
+    find_running_task, list_dd_parse_tasks,
+)
+
 # Token 用量 + 性能监控
 from db.token_usage import (
     list_token_usage, count_token_usage, get_today_token_total,
@@ -181,6 +187,22 @@ def init_db():
             index_count INTEGER,
             raw_json TEXT,
             created_at TEXT DEFAULT (datetime('now','localtime'))
+        )
+    """)
+
+    # ── 螺丝钉图片解析任务表 ──────────────────────────────────────
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS dd_parse_tasks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            image_path TEXT NOT NULL,
+            image_name TEXT,
+            parse_type TEXT DEFAULT 'dd',
+            status TEXT DEFAULT 'pending',
+            result_json TEXT,
+            dd_id INTEGER,
+            error_msg TEXT,
+            created_at TEXT DEFAULT (datetime('now','localtime')),
+            updated_at TEXT DEFAULT (datetime('now','localtime'))
         )
     """)
 
@@ -672,6 +694,25 @@ def init_db():
     # agent_runs 增加时间追踪字段
     _add_column_if_not_exists(conn, "agent_runs", "started_at", "TEXT")
     _add_column_if_not_exists(conn, "agent_runs", "completed_at", "TEXT")
+
+    # knowledge_base 表：投资知识库
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS knowledge_base (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            category TEXT NOT NULL,
+            subcategory TEXT,
+            title TEXT NOT NULL UNIQUE,
+            content TEXT NOT NULL,
+            source TEXT,
+            keywords TEXT,
+            importance INTEGER DEFAULT 5,
+            created_at TEXT DEFAULT (datetime('now','localtime')),
+            updated_at TEXT DEFAULT (datetime('now','localtime'))
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_kb_category ON knowledge_base(category)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_kb_subcategory ON knowledge_base(subcategory)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_kb_importance ON knowledge_base(importance)")
 
     # 编排配置默认值
     _default_orchestration_config = [

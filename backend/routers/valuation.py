@@ -23,7 +23,7 @@ from db._conn import _get_conn
 from image_parser import DDImageParser
 
 logger = logging.getLogger(__name__)
-from models.valuations import ParseAndSaveRequest, ParseBatchRequest, ParseDDRequest
+from models.valuations import ParseAndSaveRequest, ParseBatchRequest, ParseDDRequest, ParseDDBatchRequest
 from services.valuation_parser import parse_single_valuation
 
 router = APIRouter(prefix="/api/valuation", tags=["valuation"])
@@ -91,6 +91,86 @@ async def parse_dd_image(req: ParseDDRequest):
         # 注意：螺丝钉估值写入 dd_valuations 表，不写 analysis_records（那是雷牛牛估值图片的表）
 
     return result
+
+
+@router.post("/parse-dd-async")
+async def parse_dd_image_async(req: ParseDDRequest):
+    """异步解析螺丝钉估值表图片。立即返回 task_id，后台执行解析。"""
+    img_path = Path(req.path)
+    if not img_path.is_absolute():
+        for base in [DD_IMAGES_DIR, IMAGES_DIR, VALUATION_IMAGES_DIR]:
+            candidate = base / img_path
+            if candidate.exists():
+                img_path = candidate
+                break
+        else:
+            img_path = DD_IMAGES_DIR / req.path
+    if not req.path or not img_path.exists():
+        raise HTTPException(400, f"图片路径无效: {img_path}")
+
+    str_path = str(img_path)
+
+    # 去重：检查是否已有正在运行的任务
+    from db.dd_tasks import find_running_task, create_dd_parse_task
+    existing = find_running_task(str_path)
+    if existing:
+        return {"task_id": existing["id"], "status": existing["status"], "dedup": True}
+
+    task_id = create_dd_parse_task(str_path, Path(req.path).name, parse_type="dd")
+
+    # 后台启动解析
+    from dd_parse_worker import run_dd_parse
+    asyncio.create_task(run_dd_parse(task_id, str_path, "dd"))
+
+    return {"task_id": task_id, "status": "pending"}
+
+
+@router.get("/parse-dd-task/{task_id}")
+async def get_dd_parse_task_status(task_id: int):
+    """查询螺丝钉图片解析任务状态。"""
+    from db.dd_tasks import get_dd_parse_task
+    task = get_dd_parse_task(task_id)
+    if not task:
+        raise HTTPException(404, "任务不存在")
+    return task
+
+
+@router.post("/parse-dd-batch-async")
+async def parse_dd_batch_async(req: ParseDDBatchRequest):
+    """批量异步解析螺丝钉估值表图片。"""
+    from db.dd_tasks import find_running_task, create_dd_parse_task
+    from dd_parse_worker import run_dd_parse
+
+    tasks = []
+    for path in req.paths:
+        img_path = Path(path)
+        if not img_path.is_absolute():
+            for base in [DD_IMAGES_DIR, IMAGES_DIR, VALUATION_IMAGES_DIR]:
+                candidate = base / img_path
+                if candidate.exists():
+                    img_path = candidate
+                    break
+            else:
+                img_path = DD_IMAGES_DIR / path
+
+        str_path = str(img_path)
+        name = Path(path).name
+
+        # 去重
+        existing = find_running_task(str_path)
+        if existing:
+            tasks.append({"task_id": existing["id"], "image_path": str_path, "status": existing["status"], "dedup": True})
+            continue
+
+        if not img_path.exists():
+            tasks.append({"task_id": None, "image_path": str_path, "status": "error", "error": "文件不存在"})
+            continue
+
+        task_id = create_dd_parse_task(str_path, name, parse_type="dd")
+        asyncio.create_task(run_dd_parse(task_id, str_path, "dd"))
+        tasks.append({"task_id": task_id, "image_path": str_path, "status": "pending"})
+
+    return {"tasks": tasks}
 
 
 # ── 指数列表 ──────────────────────────────────────

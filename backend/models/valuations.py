@@ -18,3 +18,8 @@ class ParseBatchRequest(BaseModel):
 class ParseDDRequest(BaseModel):
     path: str
     model_type: str = "mimo"
+
+
+class ParseDDBatchRequest(BaseModel):
+    paths: list[str]
+    model_type: str = "mimo"

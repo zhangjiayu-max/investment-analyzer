@@ -1,6 +1,6 @@
 <script setup>
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
-import { listGalleryRecords, uploadDdImage, listDdImages, listDdImageDates, deleteDdImage, parseAndSaveValuation, parseValuationBatch, parseDDImage, uploadValuationImage, listValuationImages, listValuationImageDates, deleteValuationImage } from '../api'
+import { listGalleryRecords, uploadDdImage, listDdImages, listDdImageDates, deleteDdImage, parseAndSaveValuation, parseValuationBatch, parseDDImage, parseDDImageAsync, parseDDBatchAsync, getDDParseTask, pollDDParseTask, uploadValuationImage, listValuationImages, listValuationImageDates, deleteValuationImage } from '../api'
 import ConfirmDialog from './ConfirmDialog.vue'
 
 // ── 并发限制工具函数 ──
@@ -159,6 +159,7 @@ async function handleViUpload(e) {
         try {
           // 自动判断图片类型
           const isDDImage = img.path.includes('dd_images') || img.name.includes('螺丝钉') || img.name.includes('dd')
+          // TODO: DD 图片也应改用 parseDDImageAsync 异步模式
           const parseFn = isDDImage ? parseDDImage : parseAndSaveValuation
           await parseFn(img.path)
           successCount++
@@ -255,7 +256,8 @@ function confirmViBatchParse(date, items) {
           try {
             // 自动判断图片类型：如果是螺丝钉估值表，调用 DD 解析
             const isDDImage = img.path.includes('dd_images') || img.name.includes('螺丝钉') || img.name.includes('dd')
-            const parseFn = isDDImage ? parseDDImage : parseAndSaveValuation
+            // TODO: DD 图片也应改用 parseDDImageAsync 异步模式
+          const parseFn = isDDImage ? parseDDImage : parseAndSaveValuation
             const result = await parseFn(img.path)
             return result
           } catch (e) {
@@ -301,6 +303,11 @@ const parseResult = ref(null)
 const ddBatchParsing = ref(false)
 const ddBatchProgress = ref({ done: 0, total: 0 })
 const confirm = ref({ visible: false, title: '', message: '', danger: false, onConfirm: null })
+
+// ── 异步解析任务追踪 ──
+// key: image_path, value: { taskId, status, pollCancel }
+const ddParseTasks = ref({})
+const ddBatchPollCancel = ref(null)
 
 async function loadDdDates() {
   try {
@@ -374,18 +381,36 @@ function confirmParseImage(img) {
     danger: false,
     onConfirm: async () => {
       confirm.value.visible = false
-      parsingPath.value = img.path
       parseResult.value = null
       try {
-        const { data } = await parseDDImage(img.path)
-        parseResult.value = { ok: true, data, name: img.name }
-        // 解析成功后从待解析列表移除，刷新已解析列表
-        ddImages.value = ddImages.value.filter(i => i.path !== img.path)
-        await loadRecords()
+        const { data } = await parseDDImageAsync(img.path)
+        const taskId = data.task_id
+        // 存储任务状态
+        ddParseTasks.value = { ...ddParseTasks.value, [img.path]: { taskId, status: data.status || 'pending' } }
+        // 启动轮询
+        const cancel = pollDDParseTask(taskId, (taskData) => {
+          if (isUnmounted) return
+          ddParseTasks.value = { ...ddParseTasks.value, [img.path]: { taskId, status: taskData.status } }
+          if (taskData.status === 'done') {
+            const result = taskData.result_json || {}
+            parseResult.value = { ok: true, data: result, name: img.name }
+            ddImages.value = ddImages.value.filter(i => i.path !== img.path)
+            loadRecords()
+            // 清理任务追踪
+            const { [img.path]: _, ...rest } = ddParseTasks.value
+            ddParseTasks.value = rest
+            showToast(`「${img.name}」识别完成`, 'success')
+          } else if (taskData.status === 'error') {
+            parseResult.value = { ok: false, message: taskData.error_msg || '解析失败', name: img.name }
+            const { [img.path]: _, ...rest } = ddParseTasks.value
+            ddParseTasks.value = rest
+            showToast(`「${img.name}」识别失败: ${taskData.error_msg || ''}`, 'error')
+          }
+        })
+        // 存储取消函数
+        ddParseTasks.value = { ...ddParseTasks.value, [img.path]: { ...ddParseTasks.value[img.path], pollCancel: cancel } }
       } catch (e) {
-        parseResult.value = { ok: false, message: e.response?.data?.detail || e.message, name: img.name }
-      } finally {
-        parsingPath.value = ''
+        showToast('提交解析任务失败: ' + (e.response?.data?.detail || e.message), 'error')
       }
     }
   }
@@ -402,25 +427,53 @@ function confirmDdBatchParse(date, items) {
       ddBatchParsing.value = true
       ddBatchProgress.value = { done: 0, total: items.length }
       try {
-        // 限制并发数为 3，避免占用所有浏览器连接
-        const responses = await asyncPool(3, items, async (img) => {
-          try {
-            const result = await parseDDImage(img.path)
-            return result
-          } catch (e) {
-            return { data: { ok: false, error: e.message } }
-          } finally {
-            ddBatchProgress.value.done++
+        const paths = items.map(img => img.path)
+        const { data } = await parseDDBatchAsync(paths)
+        const taskList = data.tasks || []
+        const validTasks = taskList.filter(t => t.task_id)
+        ddBatchProgress.value = { done: 0, total: validTasks.length }
+
+        // 轮询所有任务
+        let completed = 0
+        let okCount = 0
+        let failCount = 0
+        const taskIds = validTasks.map(t => t.task_id)
+
+        const pollAll = () => {
+          if (isUnmounted) return
+          let checked = 0
+          for (const tid of taskIds) {
+            getDDParseTask(tid).then(({ data: taskData }) => {
+              if (taskData.status === 'done' || taskData.status === 'error') {
+                completed++
+                if (taskData.status === 'done') okCount++
+                else failCount++
+                ddBatchProgress.value = { ...ddBatchProgress.value, done: completed }
+              }
+              checked++
+              if (checked === taskIds.length) {
+                if (completed >= taskIds.length) {
+                  // 全部完成
+                  showToast(`批量识别完成：成功 ${okCount} 张${failCount > 0 ? '，失败 ' + failCount + ' 张' : ''}`, okCount > 0 ? 'success' : 'error')
+                  loadDdImages()
+                  ddBatchParsing.value = false
+                } else {
+                  // 继续轮询
+                  ddBatchPollCancel.value = setTimeout(pollAll, 3000)
+                }
+              }
+            }).catch(() => {
+              checked++
+              if (checked === taskIds.length && completed < taskIds.length) {
+                ddBatchPollCancel.value = setTimeout(pollAll, 3000)
+              }
+            })
           }
-        })
-        const results = responses.map(r => r.data)
-        const okCount = results.filter(r => r.ok).length
-        const failCount = results.filter(r => !r.ok).length
-        showToast(`批量识别完成：成功 ${okCount} 张${failCount > 0 ? '，失败 ' + failCount + ' 张' : ''}`, okCount > 0 ? 'success' : 'error')
-        await loadDdImages()
+        }
+        // 首次轮询稍等一下
+        ddBatchPollCancel.value = setTimeout(pollAll, 2000)
       } catch (e) {
         showToast('批量识别失败: ' + (e.message || e), 'error')
-      } finally {
         ddBatchParsing.value = false
       }
     }
@@ -509,6 +562,7 @@ async function handleDrop(e) {
         if (isUnmounted) break
         try {
           const isDDImage = img.path.includes('dd_images') || img.name.includes('螺丝钉') || img.name.includes('dd')
+          // TODO: DD 图片也应改用 parseDDImageAsync 异步模式
           const parseFn = isDDImage ? parseDDImage : parseAndSaveValuation
           await parseFn(img.path)
           successCount++
@@ -595,6 +649,7 @@ async function handlePaste(e) {
         if (isUnmounted) break
         try {
           const isDDImage = img.path.includes('dd_images') || img.name.includes('螺丝钉') || img.name.includes('dd')
+          // TODO: DD 图片也应改用 parseDDImageAsync 异步模式
           const parseFn = isDDImage ? parseDDImage : parseAndSaveValuation
           await parseFn(img.path)
           successCount++
@@ -660,6 +715,11 @@ onUnmounted(() => {
   ddUploading.value = false
   viParsingPath.value = ''
   parsingPath.value = ''
+  // 取消所有轮询
+  for (const task of Object.values(ddParseTasks.value)) {
+    if (task.pollCancel) task.pollCancel()
+  }
+  if (ddBatchPollCancel.value) clearTimeout(ddBatchPollCancel.value)
 })
 
 watch(activeTab, (tab) => {
@@ -917,7 +977,7 @@ watch(activeTab, (tab) => {
             <button class="btn-batch-parse" @click="confirmDdBatchParse(date, items)" :disabled="ddBatchParsing" title="批量识别该日期下所有图片">
               <span v-if="ddBatchParsing" class="spinner-sm"></span>
               <svg v-else width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
-              {{ ddBatchParsing ? '识别中...' : '批量识别' }}
+              {{ ddBatchParsing ? `识别中 ${ddBatchProgress.done}/${ddBatchProgress.total}...` : '批量识别' }}
             </button>
           </div>
           <div class="gallery-grid">
@@ -937,12 +997,12 @@ watch(activeTab, (tab) => {
                   <svg width="12" height="12" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 13l4 4L19 7"/></svg>
                   已识别
                 </span>
-                <button v-else class="btn-parse-img" @click.stop="confirmParseImage(img)" :disabled="parsingPath === img.path" title="AI 识别图片中的估值数据并存入数据库">
-                  <span v-if="parsingPath === img.path" class="spinner-sm"></span>
+                <button v-else class="btn-parse-img" @click.stop="confirmParseImage(img)" :disabled="!!ddParseTasks[img.path]" title="AI 识别图片中的估值数据并存入数据库">
+                  <span v-if="ddParseTasks[img.path]" class="spinner-sm"></span>
                   <svg v-else width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/>
                   </svg>
-                  {{ parsingPath === img.path ? '识别中...' : '识别估值' }}
+                  {{ ddParseTasks[img.path] ? '识别中...' : '识别估值' }}
                 </button>
               </div>
             </div>

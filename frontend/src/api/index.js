@@ -68,6 +68,39 @@ export function parseDDImage(path, modelType = 'mimo') {
   return api.post('/valuation/parse-dd', { path, model_type: modelType }, { timeout: 300000 })
 }
 
+/** 异步解析螺丝钉估值表图片（推荐，不受页面切换影响） */
+export function parseDDImageAsync(path, modelType = 'mimo') {
+  return api.post('/valuation/parse-dd-async', { path, model_type: modelType })
+}
+
+/** 批量异步解析螺丝钉估值表图片 */
+export function parseDDBatchAsync(paths, modelType = 'mimo') {
+  return api.post('/valuation/parse-dd-batch-async', { paths, model_type: modelType }, { timeout: 30000 })
+}
+
+/** 查询螺丝钉图片解析任务状态 */
+export function getDDParseTask(taskId) {
+  return api.get(`/valuation/parse-dd-task/${taskId}`)
+}
+
+/** 轮询螺丝钉图片解析任务（返回取消函数） */
+export function pollDDParseTask(taskId, onProgress, interval = 3000) {
+  let stopped = false
+  const check = async () => {
+    if (stopped) return
+    try {
+      const { data } = await getDDParseTask(taskId)
+      onProgress(data)
+      if (data.status === 'done' || data.status === 'error') return
+    } catch (e) {
+      console.error('DD parse poll error:', e)
+    }
+    if (!stopped) setTimeout(check, interval)
+  }
+  check()
+  return () => { stopped = true }
+}
+
 /** 列出所有有估值数据的指数 */
 export function listValuationIndexes() {
   return api.get('/valuation/indexes')
