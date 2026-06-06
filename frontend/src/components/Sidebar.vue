@@ -49,6 +49,7 @@ const navItems = [
     children: [
       { key: 'author', label: '作者文章', icon: 'author' },
       { key: 'linked', label: '个人文档', icon: 'link' },
+      { key: 'knowledge', label: '蒸馏知识', icon: 'book' },
       { key: 'rag', label: 'RAG 分析', icon: 'rag' },
     ],
   },

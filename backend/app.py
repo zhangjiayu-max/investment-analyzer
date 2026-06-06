@@ -73,6 +73,7 @@ from routers.dashboard import router as dashboard_router
 from routers.config import router as config_router
 from routers.rag import router as rag_router
 from routers.market_intelligence import router as market_intelligence_router
+from routers.knowledge import router as knowledge_router
 
 # 注册新路径路由（优先级高）
 app.include_router(valuation_router)
@@ -100,6 +101,7 @@ app.include_router(analysis_router)
 app.include_router(dashboard_router)
 app.include_router(config_router)
 app.include_router(rag_router)
+app.include_router(knowledge_router)
 app.include_router(market_intelligence_router)
 
 # 静态文件目录

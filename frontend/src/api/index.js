@@ -488,6 +488,33 @@ export function reindexArticles(limit = 1000) {
   return api.post('/rag/reindex/articles', {}, { params: { limit }, timeout: 300000 })
 }
 
+// ── 知识库 API ──────────────────────────────────────
+
+/** 获取知识库统计信息 */
+export function getKnowledgeStats() {
+  return api.get('/knowledge/stats')
+}
+
+/** 列出知识条目 */
+export function listKnowledge(category = null, subcategory = null, limit = 100) {
+  const params = { limit }
+  if (category) params.category = category
+  if (subcategory) params.subcategory = subcategory
+  return api.get('/knowledge/list', { params })
+}
+
+/** 搜索知识库 */
+export function searchKnowledge(query, category = null, limit = 20) {
+  const params = { q: query, limit }
+  if (category) params.category = category
+  return api.get('/knowledge/search', { params })
+}
+
+/** 删除知识条目 */
+export function deleteKnowledge(id) {
+  return api.delete(`/knowledge/${id}`)
+}
+
 /** 重建分析记录索引 */
 export function reindexAnalysisRecords(limit = 1000) {
   return api.post('/rag/reindex/analysis', {}, { params: { limit }, timeout: 300000 })

@@ -20,6 +20,7 @@ import QualityDashboard from '../components/QualityDashboard.vue'
 import Dashboard from '../components/Dashboard.vue'
 import MarketIntelligence from '../components/MarketIntelligence.vue'
 import SystemConfigPage from '../components/SystemConfigPage.vue'
+import KnowledgeBase from '../components/KnowledgeBase.vue'
 
 const props = defineProps({
   activePage: String,
@@ -45,6 +46,7 @@ const pageComponents = {
   'bad-cases': BadCasePage,
   'eval-suite': EvalSuitePage,
   'system-config': SystemConfigPage,
+  knowledge: KnowledgeBase,
 }
 
 const pageComponent = computed(() => pageComponents[props.activePage] || null)
