@@ -406,3 +406,362 @@ async def stats_by_agent_api():
         result.append(r)
 
     return {"agents": result}
+
+
+# ── 对话质量评估 API ──────────────────────────────────────
+
+@router.post("/api/eval/conversation/{conversation_id}")
+async def evaluate_conversation_api(conversation_id: int):
+    """自动评估对话质量"""
+    from agent.conversation_evaluator import get_evaluator
+    from db.eval import (
+        create_conversation_evaluation, save_eval_details,
+        get_conversation_evaluation,
+    )
+
+    # 检查是否已有评估
+    existing = get_conversation_evaluation(conversation_id)
+    if existing and existing.get("auto_score"):
+        return {"ok": True, "evaluation": existing, "cached": True}
+
+    try:
+        evaluator = get_evaluator()
+        result = evaluator.evaluate(conversation_id)
+
+        # 保存评估结果
+        eval_id = create_conversation_evaluation(
+            conversation_id=conversation_id,
+            message_id=result.message_id,
+            auto_score=result.auto_score,
+            auto_score_breakdown=json.dumps(result.auto_score_breakdown, ensure_ascii=False),
+            complexity=result.metadata.get("complexity", "medium"),
+            specialist_count=result.metadata.get("specialist_count", 0),
+            duration_ms=result.metadata.get("duration_ms", 0),
+            has_cross_review=result.metadata.get("has_cross_review", False),
+            has_arbitration=result.metadata.get("has_arbitration", False),
+            duplicate_calls=result.metadata.get("duplicate_calls", 0),
+            suggestions=json.dumps(result.suggestions, ensure_ascii=False),
+        )
+
+        # 保存评估详情
+        details_to_save = []
+        for dim in result.dimensions:
+            for metric, value in dim.get("metrics", {}).items():
+                if isinstance(value, (int, float)):
+                    details_to_save.append({
+                        "dimension": dim["name"],
+                        "metric": metric,
+                        "value": value,
+                    })
+
+        if details_to_save:
+            save_eval_details(eval_id, details_to_save)
+
+        # 等待进化处理完成（最多等待2秒）
+        evolution_result = None
+        try:
+            import asyncio
+            from agent.conversation_evolution import process_conversation_evaluation
+
+            evolution_data = {
+                "auto_score": result.auto_score,
+                "auto_score_breakdown": result.auto_score_breakdown,
+                "suggestions": result.suggestions,
+            }
+
+            # 直接调用并等待结果
+            evolution_result = await asyncio.wait_for(
+                process_conversation_evaluation(conversation_id, evolution_data),
+                timeout=2.0
+            )
+        except asyncio.TimeoutError:
+            logger.info("进化处理超时，已在后台继续执行")
+        except Exception as e:
+            logger.warning(f"进化处理失败: {e}")
+
+        return {
+            "ok": True,
+            "evaluation": {
+                "id": eval_id,
+                "auto_score": result.auto_score,
+                "auto_score_breakdown": result.auto_score_breakdown,
+                "dimensions": result.dimensions,
+                "metadata": result.metadata,
+                "suggestions": result.suggestions,
+            },
+            "evolution": evolution_result,
+        }
+
+    except Exception as e:
+        logger.error(f"对话评估失败: {e}", exc_info=True)
+        raise HTTPException(500, f"评估失败: {str(e)}")
+
+
+@router.get("/api/eval/conversation/{conversation_id}")
+async def get_conversation_evaluation_api(conversation_id: int, message_id: int = None):
+    """获取对话评估结果
+
+    参数:
+        conversation_id: 对话 ID
+        message_id: 消息 ID（可选，如果指定则返回该消息的评估）
+    """
+    from db.eval import get_conversation_evaluation
+
+    evaluation = get_conversation_evaluation(conversation_id, message_id)
+    if not evaluation:
+        return {"ok": True, "evaluation": None}
+
+    return {"ok": True, "evaluation": evaluation}
+
+
+@router.post("/api/eval/conversation/{conversation_id}/llm")
+async def evaluate_conversation_with_llm_api(conversation_id: int, message_id: int = None):
+    """使用 LLM 进行智能评估"""
+    from agent.conversation_evaluator import evaluate_with_llm
+
+    try:
+        result = await evaluate_with_llm(conversation_id, message_id)
+        if "error" in result:
+            raise HTTPException(400, result["error"])
+        return {"ok": True, "evaluation": result}
+    except Exception as e:
+        logger.error(f"LLM 评估失败: {e}", exc_info=True)
+        raise HTTPException(500, f"评估失败: {str(e)}")
+
+    evaluation = get_conversation_evaluation(conversation_id, message_id)
+    if not evaluation:
+        return {"ok": True, "evaluation": None}
+
+    return {"ok": True, "evaluation": evaluation}
+
+
+@router.post("/api/eval/conversation/{conversation_id}/user-score")
+async def submit_conversation_user_score_api(conversation_id: int, body: dict):
+    """提交用户对对话的评分"""
+    from db.eval import (
+        get_conversation_evaluation, update_conversation_evaluation_user_score,
+    )
+
+    evaluation = get_conversation_evaluation(conversation_id)
+    if not evaluation:
+        raise HTTPException(404, "请先运行自动评估")
+
+    user_score = body.get("score")
+    if user_score is None or not (0 <= user_score <= 5):
+        raise HTTPException(400, "评分必须在 0-5 之间")
+
+    breakdown = body.get("breakdown", {})
+    comment = body.get("comment", "")
+
+    update_conversation_evaluation_user_score(
+        eval_id=evaluation["id"],
+        user_score=user_score,
+        user_score_breakdown=json.dumps(breakdown, ensure_ascii=False),
+        user_comment=comment,
+    )
+
+    return {"ok": True}
+
+
+@router.get("/api/eval/conversation-stats")
+async def conversation_eval_stats_api():
+    """获取对话评估统计"""
+    from db.eval import get_conversation_eval_stats
+    return {"ok": True, "stats": get_conversation_eval_stats()}
+
+
+@router.get("/api/eval/conversation-list")
+async def conversation_eval_list_api(limit: int = 50, min_score: float = None):
+    """列出对话评估记录"""
+    from db.eval import list_conversation_evaluations
+    evaluations = list_conversation_evaluations(limit=limit, min_score=min_score)
+    return {"ok": True, "evaluations": evaluations}
+
+
+# ── 进化系统 API ──────────────────────────────────────
+
+@router.get("/api/eval/evolution-stats")
+async def evolution_stats_api(days: int = 30):
+    """获取进化效果统计"""
+    from agent.conversation_evolution import get_evolution_stats
+    return {"ok": True, "stats": get_evolution_stats(days)}
+
+
+@router.get("/api/eval/suggestions")
+async def list_eval_suggestions_api(status: str = None, limit: int = 50):
+    """获取评估建议（高分对话转化为 Eval 用例）"""
+    from agent.conversation_evolution import get_eval_suggestions
+    return {"ok": True, "suggestions": get_eval_suggestions(status=status, limit=limit)}
+
+
+@router.post("/api/eval/suggestions/{suggestion_id}/accept")
+async def accept_eval_suggestion_api(suggestion_id: int):
+    """接受评估建议，转化为 Eval 用例"""
+    from agent.conversation_evolution import get_eval_suggestions, update_eval_suggestion_status
+    from db.eval import create_eval_case
+
+    # 获取建议
+    suggestions = get_eval_suggestions()
+    suggestion = None
+    for s in suggestions:
+        if s["id"] == suggestion_id:
+            suggestion = s
+            break
+
+    if not suggestion:
+        raise HTTPException(404, "建议不存在")
+
+    # 创建 Eval 用例
+    case_id = create_eval_case(
+        name=suggestion["name"],
+        analysis_type=suggestion["analysis_type"],
+        input_params=suggestion["input_params"],
+        description=f"从对话 {suggestion['conversation_id']} 转化（评分: {suggestion['auto_score']:.0f}）",
+        expected_quality=suggestion["expected_quality"] or "",
+    )
+
+    # 更新建议状态
+    update_eval_suggestion_status(suggestion_id, "accepted")
+
+    return {"ok": True, "case_id": case_id}
+
+
+@router.post("/api/eval/suggestions/{suggestion_id}/reject")
+async def reject_eval_suggestion_api(suggestion_id: int):
+    """拒绝评估建议"""
+    from agent.conversation_evolution import update_eval_suggestion_status
+    update_eval_suggestion_status(suggestion_id, "rejected")
+    return {"ok": True}
+
+
+@router.get("/api/eval/expert-alerts")
+async def expert_alerts_api(days: int = 7, limit: int = 50):
+    """获取专家表现告警"""
+    from agent.conversation_evolution import get_expert_alerts
+    return {"ok": True, "alerts": get_expert_alerts(days=days, limit=limit)}
+
+
+# ── LLM 评估 Agent API ──────────────────────────────────────
+
+@router.post("/api/eval/llm")
+async def evaluate_with_llm_agent_api(
+    target_type: str,
+    target_id: int,
+    message_id: int = None,
+):
+    """使用 LLM 评估 Agent 进行智能评估
+
+    参数:
+        target_type: 评估场景（conversation/daily_report/hot_topics/portfolio）
+        target_id: 目标 ID
+        message_id: 消息 ID（对话场景可选）
+    """
+    import time
+    from db.eval import save_llm_evaluation, get_llm_evaluation
+
+    # 检查是否已有评估
+    existing = get_llm_evaluation(target_type, target_id, message_id)
+    if existing and existing.get("total_score"):
+        return {"ok": True, "evaluation": existing, "cached": True}
+
+    start_time = time.time()
+
+    try:
+        if target_type == "conversation":
+            from agent.llm_evaluator_agent import evaluate_conversation_output
+            result = evaluate_conversation_output(target_id, message_id)
+        elif target_type == "daily_report":
+            from agent.llm_evaluator_agent import evaluate_daily_report_output
+            # 从数据库获取日报内容
+            from db.dashboard import get_daily_report
+            report = get_daily_report(target_id)
+            if not report:
+                raise HTTPException(404, "日报不存在")
+            result = evaluate_daily_report_output(report.get("content", ""))
+        elif target_type == "hot_topics":
+            from agent.llm_evaluator_agent import evaluate_hot_topics_output
+            # 从数据库获取热点内容
+            from db.dashboard import get_hot_topics
+            topics = get_hot_topics(target_id)
+            if not topics:
+                raise HTTPException(404, "热点不存在")
+            result = evaluate_hot_topics_output(topics.get("content", ""))
+        elif target_type == "portfolio":
+            from agent.llm_evaluator_agent import evaluate_portfolio_output
+            # 从数据库获取持仓分析
+            from db.portfolio import get_portfolio_analysis
+            analysis = get_portfolio_analysis(target_id)
+            if not analysis:
+                raise HTTPException(404, "持仓分析不存在")
+            result = evaluate_portfolio_output(analysis.get("content", ""))
+        else:
+            raise HTTPException(400, f"不支持的评估类型: {target_type}")
+
+        if "error" in result:
+            raise HTTPException(400, result["error"])
+
+        duration_ms = int((time.time() - start_time) * 1000)
+
+        # 保存评估结果
+        eval_id = save_llm_evaluation(
+            target_type=target_type,
+            target_id=target_id,
+            message_id=message_id,
+            total_score=result.get("total_score", 0),
+            dimensions=result.get("dimensions", {}),
+            strengths=result.get("strengths", []),
+            weaknesses=result.get("weaknesses", []),
+            suggestions=result.get("suggestions", []),
+            user_preference_hints=result.get("user_preference_hints", []),
+            duration_ms=duration_ms,
+        )
+
+        return {
+            "ok": True,
+            "evaluation": {
+                "id": eval_id,
+                **result,
+            },
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"LLM 评估失败: {e}", exc_info=True)
+        raise HTTPException(500, f"评估失败: {str(e)}")
+
+
+@router.get("/api/eval/llm/{target_type}/{target_id}")
+async def get_llm_evaluation_api(target_type: str, target_id: int, message_id: int = None):
+    """获取 LLM 评估结果"""
+    from db.eval import get_llm_evaluation
+
+    evaluation = get_llm_evaluation(target_type, target_id, message_id)
+    if not evaluation:
+        return {"ok": True, "evaluation": None}
+
+    return {"ok": True, "evaluation": evaluation}
+
+
+@router.get("/api/eval/llm-stats")
+async def llm_eval_stats_api(days: int = 30):
+    """获取 LLM 评估统计"""
+    from db.eval import get_llm_eval_stats
+    return {"ok": True, "stats": get_llm_eval_stats(days)}
+
+
+@router.get("/api/eval/user-insights/{user_id}")
+async def user_insights_api(user_id: str = "default"):
+    """获取用户偏好洞察"""
+    from db.eval import get_user_preferences, get_failure_patterns
+
+    preferences = get_user_preferences(user_id)
+    failure_patterns = get_failure_patterns(limit=10)
+
+    return {
+        "ok": True,
+        "insights": {
+            "preferences": preferences,
+            "failure_patterns": failure_patterns,
+        },
+    }

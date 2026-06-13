@@ -72,6 +72,7 @@ TOOLS = [
                                 "analysis",
                                 "skill",
                                 "linked_doc",
+                                "book",
                             ],
                         },
                         "description": "限定搜索范围，为空则搜索全部",
@@ -368,6 +369,148 @@ TOOLS = [
             },
         },
     },
+
+    # ── 天天基金 Skills API ──────────────────────────────
+    {
+        "type": "function",
+        "function": {
+            "name": "ttfund_fund_info",
+            "description": "查询基金综合信息（类型、规模、经理、费率、收益率等）。数据源：天天基金官方API。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "fund_code": {"type": "string", "description": "基金代码，如 110011"},
+                },
+                "required": ["fund_code"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "ttfund_index_info",
+            "description": "查询指数行情、估值、成分股、历史业绩。数据源：天天基金官方API。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "index_name": {"type": "string", "description": "指数名称或代码，如 沪深300、000300"},
+                },
+                "required": ["index_name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "ttfund_stock_price",
+            "description": "查询股票实时行情（价格、涨跌幅、成交量等）。数据源：天天基金官方API。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "stock_code": {"type": "string", "description": "股票代码，如 600519"},
+                },
+                "required": ["stock_code"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "ttfund_bond_market",
+            "description": "查询债市行情（利率债、信用债盘面、国债收益率等）。数据源：天天基金官方API。",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "ttfund_search",
+            "description": "搜索基金（按名称、代码、主题关键词模糊搜索）。数据源：天天基金官方API。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "keyword": {"type": "string", "description": "搜索关键词，如 半导体、新能源"},
+                },
+                "required": ["keyword"],
+            },
+        },
+    },
+
+    # ── 东方财富妙想 API ──────────────────────────────────
+    {
+        "type": "function",
+        "function": {
+            "name": "eastmoney_hotspot",
+            "description": "获取市场热点板块、题材概念、资金流向分析。数据源：东方财富妙想AI。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "热点查询，如 今日AI概念股热度"},
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "eastmoney_search",
+            "description": "搜索金融资讯（研报、公告、新闻）。数据源：东方财富妙想AI。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "搜索关键词，如 寒武纪 最新研报"},
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "eastmoney_stock_diagnosis",
+            "description": "股票综合诊断（基本面、技术面、资金面、估值等多维度分析）。数据源：东方财富妙想AI。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "股票相关问题，如 贵州茅台估值分析"},
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "eastmoney_fund_diagnosis",
+            "description": "基金诊断（经理、规模、业绩、持仓配置等分析）。数据源：东方财富妙想AI。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "基金相关问题，如 招商中证白酒指数基金怎么样"},
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "eastmoney_financial_assistant",
+            "description": "金融问答（通用金融分析能力）。数据源：东方财富妙想AI。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "金融问题，如 半导体行业未来趋势"},
+                },
+                "required": ["query"],
+            },
+        },
+    },
 ]
 
 # ── Tool 执行器 ──────────────────────────────────────
@@ -448,6 +591,28 @@ def _execute_tool_impl(name: str, arguments: dict) -> str:
         return _get_bond_market_overview()
     elif name == "get_macro_policy_data":
         return _get_macro_policy_data()
+    # 天天基金 Skills
+    elif name == "ttfund_fund_info":
+        return _ttfund_fund_info(arguments)
+    elif name == "ttfund_index_info":
+        return _ttfund_index_info(arguments)
+    elif name == "ttfund_stock_price":
+        return _ttfund_stock_price(arguments)
+    elif name == "ttfund_bond_market":
+        return _ttfund_bond_market()
+    elif name == "ttfund_search":
+        return _ttfund_search(arguments)
+    # 东方财富妙想
+    elif name == "eastmoney_hotspot":
+        return _eastmoney_hotspot(arguments)
+    elif name == "eastmoney_search":
+        return _eastmoney_search(arguments)
+    elif name == "eastmoney_stock_diagnosis":
+        return _eastmoney_stock_diagnosis(arguments)
+    elif name == "eastmoney_fund_diagnosis":
+        return _eastmoney_fund_diagnosis(arguments)
+    elif name == "eastmoney_financial_assistant":
+        return _eastmoney_financial_assistant(arguments)
     else:
         return json.dumps({"error": f"未知工具: {name}"}, ensure_ascii=False)
 
@@ -1561,3 +1726,119 @@ def _get_macro_policy_data() -> str:
     result["policy_summary"] = "；".join(policy_signals) if policy_signals else "暂无明确政策信号"
 
     return json.dumps(result, ensure_ascii=False)
+
+
+# ── 天天基金 Skills 工具 ──────────────────────────────────
+
+
+def _ttfund_fund_info(args: dict) -> str:
+    """基金综合信息查询。"""
+    try:
+        from mcp.ttfund_client import get_ttfund_client
+        client = get_ttfund_client()
+        result = client.fund_base_info(args["fund_code"])
+        return json.dumps(result, ensure_ascii=False, indent=2)[:3000]
+    except Exception as e:
+        return json.dumps({"error": str(e)}, ensure_ascii=False)
+
+
+def _ttfund_index_info(args: dict) -> str:
+    """指数行情/估值查询。"""
+    try:
+        from mcp.ttfund_client import get_ttfund_client
+        client = get_ttfund_client()
+        result = client.fund_index(args["index_name"])
+        return result[:3000] if result else json.dumps({"error": "无数据"}, ensure_ascii=False)
+    except Exception as e:
+        return json.dumps({"error": str(e)}, ensure_ascii=False)
+
+
+def _ttfund_stock_price(args: dict) -> str:
+    """股票实时行情。"""
+    try:
+        from mcp.ttfund_client import get_ttfund_client
+        client = get_ttfund_client()
+        result = client.stock_price(args["stock_code"])
+        return result[:2000] if result else json.dumps({"error": "无数据"}, ensure_ascii=False)
+    except Exception as e:
+        return json.dumps({"error": str(e)}, ensure_ascii=False)
+
+
+def _ttfund_bond_market() -> str:
+    """债市行情。"""
+    try:
+        from mcp.ttfund_client import get_ttfund_client
+        client = get_ttfund_client()
+        result = client.bond_market()
+        return result[:3000] if result else json.dumps({"error": "无数据"}, ensure_ascii=False)
+    except Exception as e:
+        return json.dumps({"error": str(e)}, ensure_ascii=False)
+
+
+def _ttfund_search(args: dict) -> str:
+    """基金搜索。"""
+    try:
+        from mcp.ttfund_client import get_ttfund_client
+        client = get_ttfund_client()
+        result = client.fund_search(args["keyword"])
+        return result[:2000] if result else json.dumps({"error": "无数据"}, ensure_ascii=False)
+    except Exception as e:
+        return json.dumps({"error": str(e)}, ensure_ascii=False)
+
+
+# ── 东方财富妙想 工具 ──────────────────────────────────
+
+
+def _eastmoney_hotspot(args: dict) -> str:
+    """市场热点分析。"""
+    try:
+        from mcp.eastmoney_client import get_eastmoney_client
+        client = get_eastmoney_client()
+        result = client.stock_hotspot(args["query"])
+        return result[:3000] if result else json.dumps({"error": "无数据"}, ensure_ascii=False)
+    except Exception as e:
+        return json.dumps({"error": str(e)}, ensure_ascii=False)
+
+
+def _eastmoney_search(args: dict) -> str:
+    """金融资讯搜索。"""
+    try:
+        from mcp.eastmoney_client import get_eastmoney_client
+        client = get_eastmoney_client()
+        result = client.financial_search(args["query"])
+        return result[:3000] if result else json.dumps({"error": "无数据"}, ensure_ascii=False)
+    except Exception as e:
+        return json.dumps({"error": str(e)}, ensure_ascii=False)
+
+
+def _eastmoney_stock_diagnosis(args: dict) -> str:
+    """股票诊断。"""
+    try:
+        from mcp.eastmoney_client import get_eastmoney_client
+        client = get_eastmoney_client()
+        result = client.stock_diagnosis(args["query"])
+        return result[:3000] if result else json.dumps({"error": "无数据"}, ensure_ascii=False)
+    except Exception as e:
+        return json.dumps({"error": str(e)}, ensure_ascii=False)
+
+
+def _eastmoney_fund_diagnosis(args: dict) -> str:
+    """基金诊断。"""
+    try:
+        from mcp.eastmoney_client import get_eastmoney_client
+        client = get_eastmoney_client()
+        result = client.fund_diagnosis(args["query"])
+        return result[:3000] if result else json.dumps({"error": "无数据"}, ensure_ascii=False)
+    except Exception as e:
+        return json.dumps({"error": str(e)}, ensure_ascii=False)
+
+
+def _eastmoney_financial_assistant(args: dict) -> str:
+    """金融问答。"""
+    try:
+        from mcp.eastmoney_client import get_eastmoney_client
+        client = get_eastmoney_client()
+        result = client.financial_assistant(args["query"])
+        return result[:3000] if result else json.dumps({"error": "无数据"}, ensure_ascii=False)
+    except Exception as e:
+        return json.dumps({"error": str(e)}, ensure_ascii=False)

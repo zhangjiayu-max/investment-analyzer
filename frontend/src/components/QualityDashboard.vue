@@ -182,6 +182,203 @@
         </div>
       </div>
 
+      <!-- 对话质量评估 -->
+      <div class="card">
+        <div class="card-header">
+          <h3>💬 对话质量评估</h3>
+          <div class="card-header-actions">
+            <select v-model="convEvalDays" @change="loadConvEvalStats" class="day-select">
+              <option :value="7">近 7 天</option>
+              <option :value="30">近 30 天</option>
+              <option :value="90">近 90 天</option>
+            </select>
+          </div>
+        </div>
+
+        <!-- 对话质量概览 -->
+        <div v-if="convEvalStats" class="conv-eval-summary">
+          <div class="conv-eval-stats-grid">
+            <div class="conv-eval-stat">
+              <div class="conv-eval-stat-value">{{ convEvalStats.total_evals || 0 }}</div>
+              <div class="conv-eval-stat-label">总评估数</div>
+            </div>
+            <div class="conv-eval-stat">
+              <div class="conv-eval-stat-value" :class="scoreClass(convEvalStats.avg_auto_score / 10)">
+                {{ convEvalStats.avg_auto_score?.toFixed(0) || '-' }}
+              </div>
+              <div class="conv-eval-stat-label">平均分</div>
+            </div>
+            <div class="conv-eval-stat">
+              <div class="conv-eval-stat-value score-good">{{ convEvalStats.high_score_count || 0 }}</div>
+              <div class="conv-eval-stat-label">高质量 (≥80)</div>
+            </div>
+            <div class="conv-eval-stat">
+              <div class="conv-eval-stat-value" :class="convEvalStats.low_score_count > 0 ? 'score-bad' : ''">
+                {{ convEvalStats.low_score_count || 0 }}
+              </div>
+              <div class="conv-eval-stat-label">低质量 (<60)</div>
+            </div>
+          </div>
+
+          <!-- 按复杂度统计 -->
+          <div v-if="convEvalStats.by_complexity?.length" class="conv-eval-complexity">
+            <h4>按复杂度分布</h4>
+            <div class="complexity-bars">
+              <div v-for="item in convEvalStats.by_complexity" :key="item.complexity" class="complexity-bar-item">
+                <div class="complexity-label">{{ complexityLabel(item.complexity) }}</div>
+                <div class="complexity-bar">
+                  <div
+                    class="complexity-bar-fill"
+                    :style="{ width: (item.avg_score || 0) + '%', backgroundColor: scoreColor(item.avg_score) }"
+                  ></div>
+                </div>
+                <div class="complexity-score">{{ item.avg_score?.toFixed(0) || '-' }}</div>
+                <div class="complexity-count">{{ item.count }}次</div>
+              </div>
+            </div>
+          </div>
+
+          <!-- 对话质量趋势 -->
+          <div v-if="convEvalStats.trend?.length" class="conv-eval-trend">
+            <h4>每日趋势</h4>
+            <div class="trend-mini-chart">
+              <div v-for="item in convEvalStats.trend" :key="item.date" class="trend-mini-bar-group">
+                <div class="trend-mini-bar" :style="{ height: barHeight(item.avg_score / 10) }"></div>
+                <div class="trend-mini-date">{{ item.date?.slice(5) }}</div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div v-else class="empty-state" style="padding:2rem">
+          <p>暂无对话质量评估数据</p>
+        </div>
+      </div>
+
+      <!-- 进化效果统计 -->
+      <div class="card">
+        <div class="card-header">
+          <h3>🔄 进化效果统计</h3>
+          <button class="btn-text" @click="loadEvolutionStats">刷新</button>
+        </div>
+
+        <div v-if="evolutionStats" class="evolution-summary">
+          <!-- 概览卡片 -->
+          <div class="evolution-stats-grid">
+            <div class="evolution-stat">
+              <div class="evolution-stat-value">{{ evolutionStats.low_score_count || 0 }}</div>
+              <div class="evolution-stat-label">低分对话</div>
+            </div>
+            <div class="evolution-stat">
+              <div class="evolution-stat-value">{{ evolutionStats.feedback_count || 0 }}</div>
+              <div class="evolution-stat-label">自动反馈</div>
+            </div>
+            <div class="evolution-stat">
+              <div class="evolution-stat-value">{{ evolutionStats.suggestion_count || 0 }}</div>
+              <div class="evolution-stat-label">高分建议</div>
+            </div>
+            <div class="evolution-stat">
+              <div class="evolution-stat-value" :class="evolutionStats.alert_count > 0 ? 'score-bad' : ''">
+                {{ evolutionStats.alert_count || 0 }}
+              </div>
+              <div class="evolution-stat-label">专家告警</div>
+            </div>
+          </div>
+
+          <!-- 质量趋势 -->
+          <div v-if="evolutionStats.trend?.length" class="evolution-trend">
+            <h4>质量趋势</h4>
+            <div class="trend-mini-chart">
+              <div v-for="item in evolutionStats.trend" :key="item.date" class="trend-mini-bar-group">
+                <div class="trend-mini-bar" :style="{ height: barHeight(item.avg_score / 10) }"></div>
+                <div class="trend-mini-date">{{ item.date?.slice(5) }}</div>
+              </div>
+            </div>
+          </div>
+
+          <!-- 专家表现 -->
+          <div v-if="evolutionStats.expert_stats?.length" class="evolution-experts">
+            <h4>专家表现</h4>
+            <div class="expert-alert-list">
+              <div v-for="expert in evolutionStats.expert_stats" :key="expert.agent_key" class="expert-alert-item">
+                <span class="expert-alert-name">{{ expert.agent_name }}</span>
+                <span class="expert-alert-rate" :class="expert.avg_success_rate < 0.8 ? 'score-bad' : ''">
+                  {{ (expert.avg_success_rate * 100).toFixed(0) }}% 成功率
+                </span>
+                <span class="expert-alert-count">{{ expert.alert_count }} 次告警</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div v-else class="empty-state" style="padding:2rem">
+          <p>暂无进化统计数据</p>
+        </div>
+      </div>
+
+      <!-- 评估建议 -->
+      <div class="card">
+        <div class="card-header">
+          <h3>💡 评估建议</h3>
+          <button class="btn-text" @click="loadEvalSuggestions">刷新</button>
+        </div>
+
+        <div v-if="evalSuggestions.length" class="suggestion-list">
+          <div v-for="item in evalSuggestions" :key="item.id" class="suggestion-item">
+            <div class="suggestion-header">
+              <span class="suggestion-title">{{ item.name }}</span>
+              <span class="suggestion-score" :style="{ color: scoreColor(item.auto_score) }">
+                {{ item.auto_score?.toFixed(0) }}分
+              </span>
+            </div>
+            <div class="suggestion-meta">
+              <span class="suggestion-conv">对话 #{{ item.conversation_id }}</span>
+              <span class="suggestion-type">{{ item.analysis_type }}</span>
+            </div>
+            <div v-if="item.expected_quality" class="suggestion-quality">
+              期望质量: {{ item.expected_quality }}
+            </div>
+            <div class="suggestion-actions">
+              <button class="btn-accept" @click="handleAcceptSuggestion(item.id)">接受</button>
+              <button class="btn-reject" @click="handleRejectSuggestion(item.id)">拒绝</button>
+            </div>
+          </div>
+        </div>
+
+        <div v-else class="empty-state" style="padding:2rem">
+          <p>暂无评估建议</p>
+        </div>
+      </div>
+
+      <!-- 最近对话评估列表 -->
+      <div class="card">
+        <div class="card-header">
+          <h3>📋 最近对话评估</h3>
+          <button class="btn-text" @click="loadConvEvaluations">刷新</button>
+        </div>
+        <div v-if="convEvaluations.length" class="conv-eval-list">
+          <div v-for="item in convEvaluations" :key="item.id" class="conv-eval-item">
+            <div class="conv-eval-item-header">
+              <span class="conv-eval-item-title">{{ item.conversation_title || '未命名对话' }}</span>
+              <span class="conv-eval-item-score" :style="{ color: scoreColor(item.auto_score) }">
+                {{ item.auto_score?.toFixed(0) || '-' }}
+              </span>
+            </div>
+            <div class="conv-eval-item-meta">
+              <span class="conv-eval-item-complexity">{{ complexityLabel(item.complexity) }}</span>
+              <span class="conv-eval-item-specialists">{{ item.specialist_count }}个专家</span>
+              <span class="conv-eval-item-time">{{ item.created_at?.slice(5, 16) }}</span>
+            </div>
+            <div v-if="item.user_score" class="conv-eval-item-user-score">
+              用户评分: {{ item.user_score }}/5
+            </div>
+          </div>
+        </div>
+        <div v-else class="empty-state" style="padding:2rem">
+          <p>暂无对话评估记录</p>
+        </div>
+      </div>
+
       <!-- Low Quality List -->
       <div class="card">
         <div class="card-header">
@@ -214,7 +411,7 @@
 
 <script setup>
 import { ref, onMounted } from 'vue'
-import { getQualitySummary, getQualityTrend, getLowQualityItems, getEvalStatsByAgent, getPerformanceStats, getPerformanceByAgent } from '../api'
+import { getQualitySummary, getQualityTrend, getLowQualityItems, getEvalStatsByAgent, getPerformanceStats, getPerformanceByAgent, getConversationEvalStats, listConversationEvaluations, getEvolutionStats, listEvalSuggestions, acceptEvalSuggestion, rejectEvalSuggestion, getExpertAlerts } from '../api'
 
 const loading = ref(true)
 const summary = ref({})
@@ -228,8 +425,23 @@ const perfStats = ref({ total_runs: 0, avg_duration_ms: 0, max_duration_ms: 0, s
 const perfByAgent = ref([])
 const perfDays = ref(7)
 
+// 对话质量评估
+const convEvalStats = ref(null)
+const convEvaluations = ref([])
+const convEvalDays = ref(30)
+
+// 进化系统
+const evolutionStats = ref(null)
+const evalSuggestions = ref([])
+const expertAlerts = ref([])
+
 onMounted(async () => {
-  await Promise.all([loadSummary(), loadTrend(), loadLowQuality(), loadAgentStats(), loadPerfStats(), loadPerfByAgent()])
+  await Promise.all([
+    loadSummary(), loadTrend(), loadLowQuality(), loadAgentStats(),
+    loadPerfStats(), loadPerfByAgent(),
+    loadConvEvalStats(), loadConvEvaluations(),
+    loadEvolutionStats(), loadEvalSuggestions(), loadExpertAlerts(),
+  ])
   loading.value = false
 })
 
@@ -287,6 +499,75 @@ async function loadPerfByAgent() {
   }
 }
 
+async function loadConvEvalStats() {
+  try {
+    const { data } = await getConversationEvalStats()
+    convEvalStats.value = data.stats || null
+  } catch (e) {
+    console.error('Load conversation eval stats failed:', e)
+  }
+}
+
+async function loadConvEvaluations() {
+  try {
+    const { data } = await listConversationEvaluations(20)
+    convEvaluations.value = data.evaluations || []
+  } catch (e) {
+    console.error('Load conversation evaluations failed:', e)
+  }
+}
+
+async function loadEvolutionStats() {
+  try {
+    const { data } = await getEvolutionStats(30)
+    evolutionStats.value = data.stats || null
+  } catch (e) {
+    console.error('Load evolution stats failed:', e)
+  }
+}
+
+async function loadEvalSuggestions() {
+  try {
+    const { data } = await listEvalSuggestions('pending', 10)
+    evalSuggestions.value = data.suggestions || []
+  } catch (e) {
+    console.error('Load eval suggestions failed:', e)
+  }
+}
+
+async function loadExpertAlerts() {
+  try {
+    const { data } = await getExpertAlerts(7, 10)
+    expertAlerts.value = data.alerts || []
+  } catch (e) {
+    console.error('Load expert alerts failed:', e)
+  }
+}
+
+async function handleAcceptSuggestion(suggestionId) {
+  try {
+    const { data } = await acceptEvalSuggestion(suggestionId)
+    if (data.ok) {
+      // 移除已接受的建议
+      evalSuggestions.value = evalSuggestions.value.filter(s => s.id !== suggestionId)
+    }
+  } catch (e) {
+    console.error('Accept suggestion failed:', e)
+  }
+}
+
+async function handleRejectSuggestion(suggestionId) {
+  try {
+    const { data } = await rejectEvalSuggestion(suggestionId)
+    if (data.ok) {
+      // 移除已拒绝的建议
+      evalSuggestions.value = evalSuggestions.value.filter(s => s.id !== suggestionId)
+    }
+  } catch (e) {
+    console.error('Reject suggestion failed:', e)
+  }
+}
+
 function refreshPerf() {
   loadPerfStats()
   loadPerfByAgent()
@@ -308,11 +589,29 @@ function scoreClass(score) {
 
 function scoreColor(score) {
   if (!score || score <= 0) return 'var(--color-text-muted)'
+  // 支持 0-100 分制（对话质量评估）
+  if (score > 10) {
+    if (score >= 80) return '#10b981'
+    if (score >= 60) return '#f59e0b'
+    if (score >= 40) return '#f97316'
+    return '#ef4444'
+  }
+  // 0-10 分制（原有评估）
   if (score >= 8) return '#10b981'
   if (score >= 6) return '#22c55e'
   if (score >= 4) return '#f59e0b'
   if (score >= 2) return '#f97316'
   return '#ef4444'
+}
+
+function complexityLabel(complexity) {
+  const labels = {
+    simple: '简单',
+    medium: '中等',
+    complex: '复杂',
+    chat: '闲聊',
+  }
+  return labels[complexity] || complexity || '未知'
 }
 
 function dimClass(score) {
@@ -719,6 +1018,344 @@ function barHeight(score) {
   transition: width 0.5s ease;
 }
 
+/* ── 对话质量评估样式 ── */
+
+.conv-eval-summary {
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+}
+
+.conv-eval-stats-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 0.75rem;
+}
+
+.conv-eval-stat {
+  text-align: center;
+  padding: 1rem 0.75rem;
+  background: var(--color-bg-secondary);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+}
+
+.conv-eval-stat-value {
+  font-size: 1.5rem;
+  font-weight: 700;
+  color: var(--color-text-primary);
+}
+
+.conv-eval-stat-label {
+  font-size: 0.7rem;
+  color: var(--color-text-muted);
+  margin-top: 0.25rem;
+}
+
+.conv-eval-complexity h4,
+.conv-eval-trend h4 {
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--color-text-secondary);
+  margin-bottom: 0.75rem;
+}
+
+.complexity-bars {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.complexity-bar-item {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.complexity-label {
+  width: 40px;
+  font-size: 0.75rem;
+  color: var(--color-text-muted);
+}
+
+.complexity-bar {
+  flex: 1;
+  height: 8px;
+  background: var(--color-border-light);
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.complexity-bar-fill {
+  height: 100%;
+  border-radius: 4px;
+  transition: width 0.5s ease;
+}
+
+.complexity-score {
+  width: 35px;
+  text-align: right;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--color-text-primary);
+}
+
+.complexity-count {
+  width: 40px;
+  text-align: right;
+  font-size: 0.7rem;
+  color: var(--color-text-muted);
+}
+
+.conv-eval-trend {
+  margin-top: 0.5rem;
+}
+
+.trend-mini-chart {
+  display: flex;
+  gap: 4px;
+  height: 60px;
+  align-items: flex-end;
+}
+
+.trend-mini-bar-group {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  height: 100%;
+}
+
+.trend-mini-bar {
+  width: 100%;
+  background: var(--color-primary-500);
+  border-radius: 2px 2px 0 0;
+  transition: height 0.3s ease;
+  min-height: 2px;
+}
+
+.trend-mini-date {
+  font-size: 0.6rem;
+  color: var(--color-text-muted);
+  margin-top: 4px;
+}
+
+/* 对话评估列表 */
+.conv-eval-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.conv-eval-item {
+  padding: 0.75rem;
+  background: var(--color-bg-secondary);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+}
+
+.conv-eval-item-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 0.5rem;
+}
+
+.conv-eval-item-title {
+  font-size: 0.85rem;
+  font-weight: 500;
+  color: var(--color-text-primary);
+}
+
+.conv-eval-item-score {
+  font-size: 1.1rem;
+  font-weight: 700;
+}
+
+.conv-eval-item-meta {
+  display: flex;
+  gap: 0.75rem;
+  font-size: 0.7rem;
+  color: var(--color-text-muted);
+}
+
+.conv-eval-item-complexity {
+  padding: 1px 6px;
+  background: var(--color-primary-100);
+  color: var(--color-primary-700);
+  border-radius: 4px;
+}
+
+.conv-eval-item-user-score {
+  margin-top: 0.5rem;
+  font-size: 0.75rem;
+  color: var(--color-text-secondary);
+}
+
+/* ── 进化效果统计样式 ── */
+
+.evolution-summary {
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+}
+
+.evolution-stats-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 0.75rem;
+}
+
+.evolution-stat {
+  text-align: center;
+  padding: 1rem 0.75rem;
+  background: var(--color-bg-secondary);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+}
+
+.evolution-stat-value {
+  font-size: 1.5rem;
+  font-weight: 700;
+  color: var(--color-text-primary);
+}
+
+.evolution-stat-label {
+  font-size: 0.7rem;
+  color: var(--color-text-muted);
+  margin-top: 0.25rem;
+}
+
+.evolution-trend h4,
+.evolution-experts h4 {
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--color-text-secondary);
+  margin-bottom: 0.75rem;
+}
+
+.evolution-trend {
+  margin-top: 0.5rem;
+}
+
+.expert-alert-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.expert-alert-item {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.5rem;
+  background: var(--color-bg-secondary);
+  border-radius: var(--radius-sm);
+}
+
+.expert-alert-name {
+  flex: 1;
+  font-size: 0.85rem;
+  font-weight: 500;
+  color: var(--color-text-primary);
+}
+
+.expert-alert-rate {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--color-text-secondary);
+}
+
+.expert-alert-count {
+  font-size: 0.75rem;
+  color: var(--color-text-muted);
+}
+
+/* ── 评估建议样式 ── */
+
+.suggestion-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.suggestion-item {
+  padding: 0.75rem;
+  background: var(--color-bg-secondary);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+}
+
+.suggestion-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 0.5rem;
+}
+
+.suggestion-title {
+  font-size: 0.85rem;
+  font-weight: 500;
+  color: var(--color-text-primary);
+}
+
+.suggestion-score {
+  font-size: 1.1rem;
+  font-weight: 700;
+}
+
+.suggestion-meta {
+  display: flex;
+  gap: 0.75rem;
+  font-size: 0.7rem;
+  color: var(--color-text-muted);
+  margin-bottom: 0.5rem;
+}
+
+.suggestion-quality {
+  font-size: 0.75rem;
+  color: var(--color-text-secondary);
+  margin-bottom: 0.5rem;
+  padding: 0.5rem;
+  background: var(--color-bg-primary);
+  border-radius: var(--radius-sm);
+}
+
+.suggestion-actions {
+  display: flex;
+  gap: 0.5rem;
+  justify-content: flex-end;
+}
+
+.btn-accept,
+.btn-reject {
+  padding: 0.35rem 0.75rem;
+  border: none;
+  border-radius: 4px;
+  font-size: 0.75rem;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.btn-accept {
+  background: var(--color-primary-500);
+  color: white;
+}
+
+.btn-accept:hover {
+  background: var(--color-primary-600);
+}
+
+.btn-reject {
+  background: var(--color-bg-primary);
+  color: var(--color-text-secondary);
+  border: 1px solid var(--color-border);
+}
+
+.btn-reject:hover {
+  background: var(--color-bg-secondary);
+}
+
 /* Responsive */
 @media (max-width: 768px) {
   .summary-grid {
@@ -732,6 +1369,12 @@ function barHeight(score) {
   }
   .col-max {
     display: none;
+  }
+  .conv-eval-stats-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+  .evolution-stats-grid {
+    grid-template-columns: repeat(2, 1fr);
   }
 }
 </style>

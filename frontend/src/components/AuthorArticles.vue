@@ -388,6 +388,7 @@ function imgUrl(url) {
   display: flex;
   flex-direction: column;
   height: calc(100vh - 120px);
+  height: calc(100dvh - 120px);
 }
 
 /* Extract bar */
@@ -829,4 +830,5 @@ function imgUrl(url) {
     max-width: none;
   }
 }
+
 </style>

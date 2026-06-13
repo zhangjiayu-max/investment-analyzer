@@ -1,6 +1,6 @@
 <script setup>
 import { ref, onMounted } from 'vue'
-import { getRagStats, getRagLogs, getRagIndexStats, getAuthorArticle } from '../api'
+import { getRagStats, getRagLogs, getRagIndexStats, getAuthorArticle, runRagEval, runRagEvalSuite, getRagEvalResults } from '../api'
 
 const stats = ref(null)
 const indexStats = ref(null)
@@ -9,6 +9,14 @@ const loading = ref(false)
 const selectedLog = ref(null)
 const selectedResult = ref(null)
 const activeTab = ref('stats')
+
+// 评估状态
+const evalQuery = ref('')
+const evalTopics = ref('')
+const evalLoading = ref(false)
+const evalResult = ref(null)
+const evalSuiteResult = ref(null)
+const evalSuiteLoading = ref(false)
 
 onMounted(() => {
   loadStats()
@@ -81,6 +89,58 @@ async function viewResultDetail(result) {
 function closeDetail() {
   selectedResult.value = null
 }
+
+function copyText(text, event) {
+  navigator.clipboard.writeText(text).then(() => {
+    const el = event?.target?.closest('.log-id')
+    if (el) {
+      el.classList.add('copied')
+      setTimeout(() => el.classList.remove('copied'), 1000)
+    }
+  })
+}
+
+async function runSingleEval() {
+  if (!evalQuery.value.trim()) return
+  evalLoading.value = true
+  evalResult.value = null
+  try {
+    const topics = evalTopics.value ? evalTopics.value.split(/[,，、\s]+/).filter(Boolean) : []
+    const { data } = await runRagEval(evalQuery.value, topics)
+    evalResult.value = data.result
+  } catch (e) {
+    console.error('RAG 评估失败:', e)
+  } finally {
+    evalLoading.value = false
+  }
+}
+
+async function loadEvalResults() {
+  try {
+    const { data } = await getRagEvalResults()
+    evalSuiteResult.value = data.result
+  } catch (e) {
+    console.error('加载评估结果失败:', e)
+  }
+}
+
+async function runSuite() {
+  evalSuiteLoading.value = true
+  try {
+    const { data } = await runRagEvalSuite()
+    evalSuiteResult.value = { cases: data.cases, summary: data.summary }
+  } catch (e) {
+    console.error('评估套件失败:', e)
+  } finally {
+    evalSuiteLoading.value = false
+  }
+}
+
+function scoreColor(score) {
+  if (score >= 0.8) return 'var(--color-success)'
+  if (score >= 0.6) return 'var(--color-warning)'
+  return 'var(--color-danger)'
+}
 </script>
 
 <template>
@@ -98,6 +158,12 @@ function closeDetail() {
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"/>
         </svg>
         检索日志
+      </button>
+      <button :class="['tab-btn', { active: activeTab === 'eval' }]" @click="activeTab = 'eval'; loadEvalResults()">
+        <svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/>
+        </svg>
+        质量评估
       </button>
     </div>
 
@@ -199,6 +265,7 @@ function closeDetail() {
       <div class="logs-list">
         <div v-for="log in logs" :key="log.id" class="log-item" @click="selectedLog = selectedLog?.id === log.id ? null : log">
           <div class="log-header">
+            <span class="log-id" @click.stop="copyText(`#${log.id}`, $event)" title="点击复制">#{{ log.id }}</span>
             <span class="log-query">{{ log.query?.slice(0, 50) }}</span>
             <span class="log-time">{{ formatDate(log.created_at) }}</span>
           </div>
@@ -223,6 +290,97 @@ function closeDetail() {
           </div>
         </div>
         <div v-if="!logs.length" class="empty-state">暂无检索日志</div>
+      </div>
+    </div>
+
+    <!-- 质量评估 -->
+    <div v-if="activeTab === 'eval'" class="eval-section">
+      <!-- 单次评估 -->
+      <div class="eval-card">
+        <h3 class="section-title">🔍 单次检索评估</h3>
+        <div class="eval-form">
+          <input v-model="evalQuery" placeholder="输入检索查询词..." class="input-field" @keyup.enter="runSingleEval" />
+          <input v-model="evalTopics" placeholder="期望主题（逗号分隔，可选）" class="input-field" />
+          <button class="btn-primary" :disabled="evalLoading || !evalQuery.trim()" @click="runSingleEval">
+            {{ evalLoading ? '评估中...' : '开始评估' }}
+          </button>
+        </div>
+
+        <div v-if="evalResult" class="eval-result">
+          <div class="eval-metrics">
+            <div class="metric-item">
+              <div class="metric-value" :style="{ color: scoreColor(evalResult.precision) }">{{ (evalResult.precision * 100).toFixed(0) }}%</div>
+              <div class="metric-label">精确率</div>
+            </div>
+            <div class="metric-item">
+              <div class="metric-value" :style="{ color: scoreColor(evalResult.mrr) }">{{ (evalResult.mrr * 100).toFixed(0) }}%</div>
+              <div class="metric-label">MRR</div>
+            </div>
+            <div class="metric-item">
+              <div class="metric-value" :style="{ color: scoreColor(evalResult.ndcg) }">{{ (evalResult.ndcg * 100).toFixed(0) }}%</div>
+              <div class="metric-label">NDCG</div>
+            </div>
+            <div class="metric-item">
+              <div class="metric-value" :style="{ color: scoreColor(evalResult.recall) }">{{ (evalResult.recall * 100).toFixed(0) }}%</div>
+              <div class="metric-label">召回率</div>
+            </div>
+          </div>
+
+          <div class="eval-details">
+            <div v-for="d in evalResult.details" :key="d.index" class="eval-detail-item">
+              <span :class="['relevance-badge', d.relevance]">
+                {{ d.relevance === 'relevant' ? '✅ 相关' : d.relevance === 'partial' ? '⚠️ 部分' : '❌ 不相关' }}
+              </span>
+              <span class="eval-detail-type">{{ d.content_type }}</span>
+              <span class="eval-detail-title">{{ d.title }}</span>
+              <span class="eval-detail-score">{{ d.score.toFixed(4) }}</span>
+            </div>
+          </div>
+
+          <div v-if="evalResult.suggestions?.length" class="eval-suggestions">
+            <div class="suggestions-title">💡 优化建议</div>
+            <ul>
+              <li v-for="(s, i) in evalResult.suggestions" :key="i">{{ s }}</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+
+      <!-- 评估套件 -->
+      <div class="eval-card">
+        <h3 class="section-title">📊 评估套件 <span class="badge">{{ evalSuiteResult?.summary?.total_cases || 16 }} 个用例</span></h3>
+        <button class="btn-primary" :disabled="evalSuiteLoading" @click="runSuite">
+          {{ evalSuiteLoading ? '运行中...' : '运行完整评估' }}
+        </button>
+
+        <div v-if="evalSuiteResult?.summary" class="suite-summary">
+          <div class="eval-metrics">
+            <div class="metric-item">
+              <div class="metric-value" :style="{ color: scoreColor(evalSuiteResult.summary.avg_precision) }">{{ (evalSuiteResult.summary.avg_precision * 100).toFixed(0) }}%</div>
+              <div class="metric-label">平均精确率</div>
+            </div>
+            <div class="metric-item">
+              <div class="metric-value" :style="{ color: scoreColor(evalSuiteResult.summary.avg_mrr) }">{{ (evalSuiteResult.summary.avg_mrr * 100).toFixed(0) }}%</div>
+              <div class="metric-label">平均 MRR</div>
+            </div>
+            <div class="metric-item">
+              <div class="metric-value" :style="{ color: scoreColor(evalSuiteResult.summary.avg_ndcg) }">{{ (evalSuiteResult.summary.avg_ndcg * 100).toFixed(0) }}%</div>
+              <div class="metric-label">平均 NDCG</div>
+            </div>
+            <div class="metric-item">
+              <div class="metric-value">{{ evalSuiteResult.summary.elapsed_seconds }}s</div>
+              <div class="metric-label">耗时</div>
+            </div>
+          </div>
+
+          <div v-if="evalSuiteResult.summary.by_category" class="category-stats">
+            <div v-for="(cat, name) in evalSuiteResult.summary.by_category" :key="name" class="category-item">
+              <span class="category-name">{{ name }}</span>
+              <span class="category-score">P={{ (cat.avg_precision * 100).toFixed(0) }}% MRR={{ (cat.avg_mrr * 100).toFixed(0) }}%</span>
+              <span class="category-count">{{ cat.count }}条</span>
+            </div>
+          </div>
+        </div>
       </div>
     </div>
 
@@ -255,6 +413,7 @@ function closeDetail() {
   display: flex;
   flex-direction: column;
   height: calc(100vh - 120px);
+  height: calc(100dvh - 120px);
 }
 
 .tab-bar {
@@ -523,6 +682,24 @@ function closeDetail() {
   justify-content: space-between;
   align-items: center;
   margin-bottom: 0.4rem;
+  gap: 0.5rem;
+}
+
+.log-id {
+  font-size: 0.65rem;
+  font-family: monospace;
+  color: var(--color-primary-500);
+  background: var(--color-primary-50);
+  padding: 0.1rem 0.4rem;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: all 0.15s;
+  flex-shrink: 0;
+}
+.log-id:hover { background: var(--color-primary-100); }
+.log-id.copied {
+  background: var(--color-success);
+  color: white;
 }
 
 .log-query {
@@ -717,6 +894,102 @@ function closeDetail() {
   padding: 3rem;
   color: var(--color-text-muted);
 }
+
+/* ── 质量评估 ── */
+.eval-section {
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+}
+.eval-card {
+  background: var(--color-bg-card);
+  border-radius: var(--radius-lg);
+  padding: 1.5rem;
+  border: 1px solid var(--color-border-light);
+}
+.eval-card .section-title {
+  margin-bottom: 1rem;
+}
+.eval-form {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+.eval-form .input-field { flex: 1; min-width: 200px; }
+.eval-result { margin-top: 1rem; }
+.eval-metrics {
+  display: flex;
+  gap: 1.5rem;
+  flex-wrap: wrap;
+  margin-bottom: 1rem;
+}
+.metric-item {
+  text-align: center;
+  min-width: 80px;
+}
+.metric-value {
+  font-size: 1.5rem;
+  font-weight: 700;
+}
+.metric-label {
+  font-size: 0.7rem;
+  color: var(--color-text-muted);
+  margin-top: 0.2rem;
+}
+.eval-details {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  margin-bottom: 1rem;
+}
+.eval-detail-item {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.4rem 0.6rem;
+  background: var(--color-bg-secondary);
+  border-radius: var(--radius-sm);
+  font-size: 0.8rem;
+}
+.relevance-badge {
+  font-size: 0.7rem;
+  padding: 0.1rem 0.4rem;
+  border-radius: var(--radius-sm);
+  flex-shrink: 0;
+}
+.relevance-badge.relevant { background: #dcfce7; color: #166534; }
+.relevance-badge.partial { background: #fef9c3; color: #854d0e; }
+.relevance-badge.irrelevant { background: #fee2e2; color: #991b1b; }
+.eval-detail-type { color: var(--color-text-muted); font-size: 0.7rem; }
+.eval-detail-title { flex: 1; }
+.eval-detail-score { font-family: monospace; color: var(--color-text-muted); }
+.eval-suggestions {
+  background: var(--color-bg-secondary);
+  padding: 1rem;
+  border-radius: var(--radius-md);
+}
+.suggestions-title {
+  font-weight: 600;
+  margin-bottom: 0.5rem;
+}
+.eval-suggestions ul { margin: 0; padding-left: 1.2rem; }
+.eval-suggestions li { font-size: 0.8rem; color: var(--color-text-secondary); margin-bottom: 0.3rem; }
+.suite-summary { margin-top: 1rem; }
+.category-stats {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  margin-top: 0.5rem;
+}
+.category-item {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.8rem;
+}
+.category-name { font-weight: 500; min-width: 80px; }
+.category-score { color: var(--color-text-secondary); }
+.category-count { color: var(--color-text-muted); }
 
 /* Responsive */
 @media (max-width: 768px) {

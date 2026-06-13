@@ -1,6 +1,6 @@
 <script setup>
 import { ref, computed, onMounted, onActivated } from 'vue'
-import { getDashboard, runAnalysis, runPanoramaAnalysis, getHotTopics, getDailyReport, regenerateDailyReport, submitDailyReportFeedback, listPanoramaRecords, getHotspotsAnalysis, getLatestHotspotsAnalysis, getRecommendations, getRecommendationStats, submitRecommendationFeedback, getBondRecommend, listBondRecommendRecords, autoVerifyRecommendations, fetchRecentValuations, getBondMarketTemperature, getHotspotsRelate } from '../api'
+import { getDashboard, runAnalysis, runPanoramaAnalysis, getHotTopics, getDailyReport, regenerateDailyReport, submitDailyReportFeedback, listPanoramaRecords, getHotspotsAnalysis, getLatestHotspotsAnalysis, getRecommendations, getRecommendationStats, submitRecommendationFeedback, getBondRecommend, listBondRecommendRecords, autoVerifyRecommendations, fetchRecentValuations, getBondMarketTemperature, getHotspotsRelate, getRebalancingSuggestion } from '../api'
 import GaugeChart from './charts/GaugeChart.vue'
 import ConfirmDialog from './ConfirmDialog.vue'
 import AppToast from './AppToast.vue'
@@ -190,6 +190,15 @@ onMounted(async () => {
   } catch (e) {
     console.error('load panorama failed:', e)
   }
+
+  // 自动加载调仓分析（快速，无需等待 AI）
+  try {
+    const { data: res } = await getRebalancingSuggestion()
+    if (res && !res.error) {
+      rebalanceResult.value = res
+      showRebalance.value = true
+    }
+  } catch (_) {}
 
   // 自动加载最新债券推荐结果
   try {
@@ -418,6 +427,11 @@ function confirmHotspots() {
   }
 }
 
+// ── 再平衡 AI 分析 ──
+const rebalanceLoading = ref(false)
+const rebalanceResult = ref(null)
+const showRebalance = ref(false)
+
 // ── 全景诊断 AI 分析 ──
 const panoramaLoading = ref(false)
 const panoramaResult = ref(null)
@@ -438,6 +452,35 @@ async function generatePanorama() {
     panoramaResult.value = { error: '分析失败: ' + (e.response?.data?.detail || e.message) }
   } finally {
     panoramaLoading.value = false
+  }
+}
+
+// ── 生成再平衡建议 ──
+async function generateRebalance() {
+  rebalanceLoading.value = true
+  rebalanceResult.value = null
+  showRebalance.value = true
+  try {
+    const { data: res } = await getRebalancingSuggestion()
+    rebalanceResult.value = res
+  } catch (e) {
+    rebalanceResult.value = { error: '分析失败: ' + (e.response?.data?.detail || e.message) }
+  } finally {
+    rebalanceLoading.value = false
+  }
+}
+
+function handleRebalance() {
+  if (rebalanceResult.value) {
+    confirm.value = {
+      visible: true,
+      title: '刷新调仓分析',
+      message: '将重新计算持仓偏离度和目标配比，是否继续？',
+      danger: false,
+      onConfirm: () => { confirm.value.visible = false; generateRebalance() }
+    }
+  } else {
+    generateRebalance()
   }
 }
 
@@ -681,6 +724,19 @@ const concentrationIcon = { low: '✅', moderate: '⚡', high: '⚠️' }
             <button
               v-if="data?.portfolio_health"
               class="btn-ai-action"
+              :class="{ 'btn-loading': rebalanceLoading }"
+              :disabled="rebalanceLoading"
+              @click="handleRebalance"
+            >
+              <svg :class="['icon-spin', { 'spinning': rebalanceLoading }]" width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
+              </svg>
+              <span>{{ rebalanceResult ? '重新生成' : 'AI 再平衡建议' }}</span>
+              <span class="ai-agent-tooltip">全景诊断分析师</span>
+            </button>
+            <button
+              v-if="data?.portfolio_health"
+              class="btn-ai-action"
               :class="{ 'btn-loading': panoramaLoading }"
               :disabled="panoramaLoading"
               @click="generatePanorama"
@@ -746,6 +802,57 @@ const concentrationIcon = { low: '✅', moderate: '⚡', high: '⚠️' }
             </div>
           </div>
 
+          <!-- AI 再平衡建议 -->
+          <div v-if="showRebalance" class="rebalance-section">
+            <div v-if="rebalanceLoading" class="card-loading">
+              <div class="spinner"></div>
+              <p>正在分析偏离度...</p>
+            </div>
+            <div v-else-if="rebalanceResult && !rebalanceResult.error" class="rebalance-result">
+              <!-- 偏离度指示 -->
+              <div class="rebalance-header">
+                <span class="rebalance-title">调仓分析</span>
+                <span :class="['drift-badge', rebalanceResult.drift_level]">
+                  {{ { balanced: '已平衡', slight: '轻微偏离', significant: '显著偏离' }[rebalanceResult.drift_level] || '未知' }}
+                </span>
+                <span class="market-tag">{{ rebalanceResult.market_level }} · {{ rebalanceResult.market_avg_percentile }}%</span>
+              </div>
+
+              <!-- 配比对比 -->
+              <div class="allocation-compare">
+                <div class="alloc-row" v-for="cat in ['equity','bond','index','hybrid','money','qdii','cash']" :key="cat"
+                  v-show="(rebalanceResult.current_allocation[cat] || 0) > 0.001 || (rebalanceResult.target_allocation[cat] || 0) > 0.001">
+                  <span class="alloc-label">{{ {equity:'股票型',bond:'债券型',index:'指数型',hybrid:'混合型',money:'货币型',qdii:'QDII',cash:'现金'}[cat] || cat }}</span>
+                  <div class="alloc-bars">
+                    <div class="alloc-bar-current" :style="{ width: Math.min((rebalanceResult.current_allocation[cat]||0)*100, 100) + '%' }"></div>
+                    <div class="alloc-bar-target" :style="{ width: Math.min((rebalanceResult.target_allocation[cat]||0)*100, 100) + '%' }"></div>
+                  </div>
+                  <span class="alloc-values">
+                    <span class="alloc-current">{{ ((rebalanceResult.current_allocation[cat]||0)*100).toFixed(0) }}%</span>
+                    <span class="alloc-arrow">→</span>
+                    <span class="alloc-target">{{ ((rebalanceResult.target_allocation[cat]||0)*100).toFixed(0) }}%</span>
+                  </span>
+                </div>
+              </div>
+
+              <!-- 调仓建议 -->
+              <div v-if="rebalanceResult.suggestions?.length" class="rebalance-suggestions">
+                <div v-for="(s, i) in rebalanceResult.suggestions" :key="i" class="suggestion-item">
+                  <span :class="['suggestion-action', s.action]">
+                    {{ {buy:'买入',sell:'卖出',buy_index:'定投',deploy_cash:'配置现金',reserve_cash:'保留现金'}[s.action] || s.action }}
+                  </span>
+                  <span class="suggestion-detail">
+                    {{ s.fund_name || s.category }} · {{ s.reason }}
+                    <span v-if="s.amount_range" class="suggestion-amount">{{ s.amount_range }}</span>
+                  </span>
+                </div>
+              </div>
+            </div>
+            <div v-else-if="rebalanceResult?.error" class="rebalance-result">
+              <span class="rebalance-content" style="color: var(--text-muted)">{{ rebalanceResult.error }}</span>
+            </div>
+          </div>
+
           <!-- AI 全景诊断结果 -->
           <div v-if="panoramaResult && !panoramaResult.error" class="panorama-section">
             <div class="panorama-header">
@@ -789,12 +896,12 @@ const concentrationIcon = { low: '✅', moderate: '⚡', high: '⚠️' }
           </div>
         </div>
 
-        <!-- 自动加载的新闻列表 -->
-        <div v-if="hotTopics?.length && !hotspotsAnalysis && !hotspotLoading" class="card-body news-list">
-          <div v-for="(item, i) in hotTopics.slice(0, 4)" :key="i" class="news-item">
+        <!-- 自动加载的新闻列表（始终显示） -->
+        <div v-if="hotTopics?.length && !hotspotLoading" class="card-body news-list" :class="{ 'news-list-compact': hotspotsAnalysis }">
+          <div v-for="(item, i) in hotTopics.slice(0, hotspotsAnalysis ? 3 : 4)" :key="i" class="news-item">
             <a v-if="item.url" :href="item.url" target="_blank" rel="noopener" class="news-title">{{ item.title }}</a>
             <span v-else class="news-title">{{ item.title }}</span>
-            <p class="news-summary">{{ item.summary?.slice(0, 120) }}{{ item.summary?.length > 120 ? '...' : '' }}</p>
+            <p v-if="!hotspotsAnalysis" class="news-summary">{{ item.summary?.slice(0, 120) }}{{ item.summary?.length > 120 ? '...' : '' }}</p>
             <!-- 关联指数和持仓 -->
             <div v-if="hotspotsRelate?.[i]?.sectors?.length" class="news-relate">
               <div class="news-sectors">
@@ -819,17 +926,17 @@ const concentrationIcon = { low: '✅', moderate: '⚡', high: '⚠️' }
               <span v-if="item.date" class="news-date">{{ item.date?.slice(0, 10) }}</span>
             </div>
           </div>
-          <p class="hotspots-hint">点击「AI 分析」获取结构化投资机会推荐</p>
+          <p v-if="!hotspotsAnalysis" class="hotspots-hint">点击「AI 分析」获取结构化投资机会推荐</p>
         </div>
 
         <!-- 热点数据加载中 -->
-        <div v-if="hotTopicsLoading && !hotspotsAnalysis && !hotspotLoading" class="card-empty">
+        <div v-if="hotTopicsLoading && !hotspotLoading" class="card-empty">
           <div class="spinner" style="width:20px;height:20px;border-width:2px"></div>
           <p style="margin-top:0.5rem">加载今日热点...</p>
         </div>
 
         <!-- 无数据 → 提示用户点击 -->
-        <div v-if="!hotTopics?.length && !hotTopicsLoading && !hotspotsAnalysis && !hotspotLoading" class="card-empty">
+        <div v-if="!hotTopics?.length && !hotTopicsLoading && !hotspotLoading" class="card-empty">
           <p>点击「AI 分析」获取今日市场热点</p>
           <p class="card-empty-hint">AI 基于最新财经新闻生成板块解读和投资机会分析</p>
         </div>
@@ -854,8 +961,11 @@ const concentrationIcon = { low: '✅', moderate: '⚡', high: '⚠️' }
               <span :class="['rec-badge', 'rec-' + rec.direction]">
                 {{ rec.direction === 'up' ? '关注' : rec.direction === 'down' ? '回避' : '观察' }}
               </span>
-              <span class="rec-name">{{ rec.index_name }}</span>
+              <span class="rec-name rec-name-link" @click="emit('navigate', 'valuation')">{{ rec.index_name }}</span>
               <span v-if="rec.index_code" class="rec-code">{{ rec.index_code }}</span>
+              <span v-if="rec.percentile != null" class="rec-pct" :style="{ color: getPercentileColor(rec.percentile) }">
+                {{ rec.percentile }}%
+              </span>
               <span v-if="rec.user_portfolio" :class="['rec-portfolio', 'rp-' + rec.user_portfolio]">
                 {{ rec.user_portfolio === 'already_have' ? '已持有' : rec.user_portfolio === 'can_add' ? '可加仓' : rec.user_portfolio === 'reduce' ? '应减仓' : '新机会' }}
               </span>
@@ -1987,6 +2097,157 @@ const concentrationIcon = { low: '✅', moderate: '⚡', high: '⚠️' }
   font-weight: 600;
 }
 
+/* ── AI 再平衡 ── */
+.rebalance-section {
+  border-top: 1px solid var(--color-border-light);
+  padding-top: 0.75rem;
+  margin-top: 0.5rem;
+}
+
+.rebalance-header {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.rebalance-title {
+  font-size: 0.95rem;
+  font-weight: 700;
+  color: var(--color-primary);
+}
+
+.drift-badge {
+  font-size: 0.7rem;
+  font-weight: 700;
+  padding: 0.15rem 0.5rem;
+  border-radius: var(--radius-sm);
+  letter-spacing: 0.03em;
+}
+.drift-badge.balanced { background: rgba(16, 185, 129, 0.12); color: #059669; }
+.drift-badge.slight { background: rgba(245, 158, 11, 0.12); color: #d97706; }
+.drift-badge.significant { background: rgba(239, 68, 68, 0.12); color: #dc2626; }
+
+.market-tag {
+  font-size: 0.7rem;
+  color: var(--color-text-muted);
+  margin-left: auto;
+}
+
+.rebalance-result {
+  display: flex;
+  flex-direction: column;
+  gap: 0.85rem;
+}
+
+/* 配比对比 */
+.allocation-compare {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  background: linear-gradient(135deg, var(--color-bg-card), var(--color-bg-card));
+  border-radius: var(--radius-lg);
+  padding: 0.75rem;
+  border: 1px solid var(--color-border-light);
+}
+
+.alloc-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.8rem;
+}
+
+.alloc-label {
+  width: 3.5rem;
+  font-weight: 600;
+  color: var(--color-text-secondary);
+  flex-shrink: 0;
+  font-size: 0.75rem;
+}
+
+.alloc-bars {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  height: 16px;
+  position: relative;
+}
+
+.alloc-bar-current {
+  height: 7px;
+  background: var(--color-primary);
+  border-radius: 3px;
+  opacity: 0.7;
+  transition: width 0.6s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.alloc-bar-target {
+  height: 7px;
+  background: var(--color-accent, #10b981);
+  border-radius: 3px;
+  opacity: 0.4;
+  transition: width 0.6s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.alloc-values {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  flex-shrink: 0;
+  width: 5.5rem;
+  font-size: 0.75rem;
+}
+
+.alloc-current { font-weight: 700; color: var(--color-primary); }
+.alloc-arrow { color: var(--color-text-muted); font-size: 0.7rem; }
+.alloc-target { font-weight: 600; color: var(--color-accent, #10b981); }
+
+/* 调仓建议 */
+.rebalance-suggestions {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.suggestion-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+  padding: 0.5rem 0.65rem;
+  background: var(--color-bg-card);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--color-border-light);
+  font-size: 0.82rem;
+}
+
+.suggestion-action {
+  font-size: 0.7rem;
+  font-weight: 700;
+  padding: 0.1rem 0.4rem;
+  border-radius: var(--radius-sm);
+  flex-shrink: 0;
+  letter-spacing: 0.02em;
+}
+.suggestion-action.buy, .suggestion-action.buy_index { background: rgba(16, 185, 129, 0.12); color: #059669; }
+.suggestion-action.sell { background: rgba(239, 68, 68, 0.12); color: #dc2626; }
+.suggestion-action.deploy_cash { background: rgba(59, 130, 246, 0.12); color: #2563eb; }
+.suggestion-action.reserve_cash { background: rgba(245, 158, 11, 0.12); color: #d97706; }
+
+.suggestion-detail {
+  color: var(--color-text-secondary);
+  line-height: 1.5;
+}
+
+.suggestion-amount {
+  display: inline-block;
+  margin-left: 0.25rem;
+  font-weight: 600;
+  color: var(--color-primary);
+}
+
 /* ── 全景诊断 ── */
 .panorama-section {
   border-top: 1px solid var(--color-border-light);
@@ -2187,6 +2448,25 @@ const concentrationIcon = { low: '✅', moderate: '⚡', high: '⚠️' }
   flex-shrink: 0;
 }
 
+.rec-name-link {
+  cursor: pointer;
+  transition: color 0.2s;
+}
+
+.rec-name-link:hover {
+  color: var(--color-primary);
+  text-decoration: underline;
+}
+
+.rec-pct {
+  font-size: 0.75rem;
+  font-weight: 700;
+  padding: 0.1rem 0.35rem;
+  border-radius: var(--radius-sm);
+  background: var(--color-bg-input);
+  flex-shrink: 0;
+}
+
 .rec-reason {
   font-size: 0.78rem;
   color: var(--color-text-muted);
@@ -2240,6 +2520,14 @@ const concentrationIcon = { low: '✅', moderate: '⚡', high: '⚠️' }
   display: flex;
   flex-direction: column;
   gap: 0.6rem;
+}
+
+.news-list-compact {
+  max-height: 200px;
+  gap: 0.4rem;
+  border-bottom: 1px dashed var(--color-border);
+  padding-bottom: 0.5rem;
+  margin-bottom: 0.25rem;
 }
 
 .news-item {

@@ -11,6 +11,7 @@ import AuthorArticles from '../components/AuthorArticles.vue'
 import LinkedArticles from '../components/LinkedArticles.vue'
 import BondMarket from '../components/BondMarket.vue'
 import RagAnalysis from '../components/RagAnalysis.vue'
+import RagTestPage from '../components/RagTestPage.vue'
 import PortfolioManagement from '../components/PortfolioManagement.vue'
 import AdminAgentsPage from '../components/AdminAgentsPage.vue'
 import TokenUsagePage from '../components/TokenUsagePage.vue'
@@ -38,6 +39,7 @@ const pageComponents = {
   author: AuthorArticles,
   linked: LinkedArticles,
   rag: RagAnalysis,
+  'rag-test': RagTestPage,
   bond: BondMarket,
   portfolio: PortfolioManagement,
   'admin-agents': AdminAgentsPage,

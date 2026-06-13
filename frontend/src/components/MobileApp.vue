@@ -11,6 +11,7 @@ import AuthorArticles from './AuthorArticles.vue'
 import LinkedArticles from './LinkedArticles.vue'
 import BondMarket from './BondMarket.vue'
 import RagAnalysis from './RagAnalysis.vue'
+import RagTestPage from './RagTestPage.vue'
 import PortfolioManagement from './PortfolioManagement.vue'
 import AdminAgentsPage from './AdminAgentsPage.vue'
 import TokenUsagePage from './TokenUsagePage.vue'
@@ -18,6 +19,8 @@ import BadCasePage from './BadCasePage.vue'
 import EvalSuitePage from './EvalSuitePage.vue'
 import QualityDashboard from './QualityDashboard.vue'
 import Dashboard from './Dashboard.vue'
+import MarketIntelligence from './MarketIntelligence.vue'
+import KnowledgeBase from './KnowledgeBase.vue'
 import SystemConfigPage from './SystemConfigPage.vue'
 import { isDark, toggleDark } from '../composables/useTheme'
 
@@ -39,11 +42,14 @@ const tabs = [
 
 // ── 更多菜单项 ──
 const moreItems = [
+  { key: 'market-intelligence', label: '市场热点', icon: 'fire' },
   { key: 'articles', label: '文章管理', icon: 'articles' },
   { key: 'gallery', label: '估值图片', icon: 'gallery' },
   { key: 'author', label: '作者文章', icon: 'author' },
   { key: 'linked', label: '个人文档', icon: 'link' },
+  { key: 'knowledge', label: '知识库', icon: 'book' },
   { key: 'rag', label: 'RAG 分析', icon: 'rag' },
+  { key: 'rag-test', label: '命中测试', icon: 'test' },
   { key: 'bond', label: '债市温度', icon: 'bond' },
   { key: 'admin-agents', label: 'Agent 管理', icon: 'admin' },
   { key: 'token-usage', label: 'Token 用量', icon: 'token' },
@@ -65,13 +71,16 @@ function navigate(key) {
 // ── 页面组件映射 ──
 const pageComponents = {
   dashboard: Dashboard,
+  'market-intelligence': MarketIntelligence,
   chat: ChatView,
   articles: ArticleManagement,
   valuation: ValuationHistory,
   gallery: ImageGallery,
   author: AuthorArticles,
   linked: LinkedArticles,
+  knowledge: KnowledgeBase,
   rag: RagAnalysis,
+  'rag-test': RagTestPage,
   bond: BondMarket,
   portfolio: PortfolioManagement,
   'admin-agents': AdminAgentsPage,

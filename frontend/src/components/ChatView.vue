@@ -7,10 +7,12 @@ import {
   cancelConversationExecution,
   resumeConversationStream,
   listTraces,
+  getConversationEvaluation, evaluateConversation, evaluateConversationWithLLM,
 } from '../api'
 import ConfirmDialog from './ConfirmDialog.vue'
 import AppToast from './AppToast.vue'
 import TraceDetail from './TraceDetail.vue'
+import ConversationEvalCard from './ui/ConversationEvalCard.vue'
 import { useToast } from '../composables/useToast'
 import { renderMarkdown } from '../composables/useMarkdown'
 import { useStreamingState } from '../composables/useStreamingState'
@@ -32,10 +34,129 @@ const messages = ref([])
 const inputText = ref('')
 const messagesContainer = ref(null)
 const showMobileSidebar = ref(false)
+const isRecovering = ref(false)  // 恢复互斥锁，防止并发恢复
 
 // 当前选中对话的流式状态（computed，自动跟随 selectedConv 切换）
 const currentStream = computed(() => getStreamState(selectedConv.value?.id))
 const sending = computed(() => currentStream.value?.sending || false)
+
+// 消息评估状态管理
+const messageEvalStates = ref({})  // { messageId: { score, loading, expanded, evaluation, evolution } }
+
+// 获取评估状态类名
+function getEvalStatusClass(messageId) {
+  const state = messageEvalStates.value[messageId]
+  if (!state) return 'eval-status--none'
+  if (state.loading) return 'eval-status--loading'
+  if (state.score >= 80) return 'eval-status--good'
+  if (state.score >= 60) return 'eval-status--ok'
+  if (state.score > 0) return 'eval-status--bad'
+  return 'eval-status--none'
+}
+
+// 获取评估状态图标
+function getEvalStatusIcon(messageId) {
+  const state = messageEvalStates.value[messageId]
+  if (!state || state.loading) return '📊'
+  if (state.score >= 80) return '✅'
+  if (state.score >= 60) return '⚠️'
+  if (state.score > 0) return '❌'
+  return '📊'
+}
+
+// 获取评估状态标题
+function getEvalStatusTitle(messageId) {
+  const state = messageEvalStates.value[messageId]
+  if (!state) return '点击进行质量评估'
+  if (state.loading) return '正在评估中...'
+  if (state.score >= 80) return `质量优秀 (${state.score.toFixed(0)}分)，点击查看详情`
+  if (state.score >= 60) return `质量一般 (${state.score.toFixed(0)}分)，点击查看详情`
+  if (state.score > 0) return `质量较差 (${state.score.toFixed(0)}分)，点击查看详情`
+  return '点击进行质量评估'
+}
+
+// 切换消息评估展开/折叠
+async function toggleMessageEval(messageId) {
+  const state = messageEvalStates.value[messageId]
+
+  // 如果没有评估数据，询问是否评估
+  if (!state || (!state.evaluation && !state.loading)) {
+    confirm.value = {
+      visible: true,
+      title: '质量评估',
+      message: '是否对此消息进行质量评估？',
+      danger: false,
+      onConfirm: async () => {
+        confirm.value.visible = false
+        await triggerMessageEval(messageId)
+      },
+    }
+    return
+  }
+
+  // 如果正在加载，忽略点击
+  if (state.loading) {
+    showToast('正在评估中，请稍候...', 'info')
+    return
+  }
+
+  // 切换展开/折叠
+  if (!messageEvalStates.value[messageId]) {
+    messageEvalStates.value[messageId] = { score: 0, loading: false, expanded: true }
+  } else {
+    messageEvalStates.value[messageId].expanded = !messageEvalStates.value[messageId].expanded
+  }
+}
+
+// 加载消息评估
+async function loadMessageEval(messageId) {
+  if (!selectedConv.value?.id) return
+
+  messageEvalStates.value[messageId] = { score: 0, loading: true, expanded: true }
+
+  try {
+    const { data } = await getConversationEvaluation(selectedConv.value.id, messageId)
+    if (data.ok && data.evaluation) {
+      messageEvalStates.value[messageId] = {
+        score: data.evaluation.auto_score || 0,
+        loading: false,
+        expanded: true,
+        evaluation: data.evaluation,
+      }
+    } else {
+      messageEvalStates.value[messageId] = { score: 0, loading: false, expanded: true }
+    }
+  } catch (e) {
+    messageEvalStates.value[messageId] = { score: 0, loading: false, expanded: true }
+  }
+}
+
+// 触发消息评估
+async function triggerMessageEval(messageId) {
+  if (!selectedConv.value?.id) return
+
+  messageEvalStates.value[messageId] = { score: 0, loading: true, expanded: true }
+
+  try {
+    const { data } = await evaluateConversation(selectedConv.value.id, messageId)
+    if (data.ok && data.evaluation) {
+      messageEvalStates.value[messageId] = {
+        score: data.evaluation.auto_score || 0,
+        loading: false,
+        expanded: true,
+        evaluation: data.evaluation,
+        evolution: data.evolution,
+      }
+      showToast('评估完成', 'success')
+    } else {
+      messageEvalStates.value[messageId] = { score: 0, loading: false, expanded: true }
+      showToast('评估失败', 'error')
+    }
+  } catch (e) {
+    messageEvalStates.value[messageId] = { score: 0, loading: false, expanded: true }
+    showToast('评估失败', 'error')
+  }
+}
 
 onMounted(async () => {
   await loadConversations()
@@ -70,39 +191,45 @@ function handlePageShow(e) {
 
 async function recoverFromDisconnect() {
   if (!selectedConv.value?.id) return
+  if (isRecovering.value) return  // 互斥锁：已有恢复流程在执行
+  isRecovering.value = true
 
-  const convId = selectedConv.value.id
-  const state = getStreamState(convId)
+  try {
+    const convId = selectedConv.value.id
+    const state = getStreamState(convId)
 
-  // 检查是否有进行中的任务
-  const hasActiveTask = state?.sending ||
-    messages.value.some(m => m.execution_status === 'streaming')
+    // 检查是否有进行中的任务
+    const hasActiveTask = state?.sending ||
+      messages.value.some(m => m.execution_status === 'streaming')
 
-  if (hasActiveTask) {
-    // 有进行中的任务，但 SSE 可能已断开
-    // 不取消后端任务，只清理前端状态
-    finishStream(convId)
-    showToast('正在刷新消息...', 'info')
+    if (hasActiveTask) {
+      // 有进行中的任务，但 SSE 可能已断开
+      // 不取消后端任务，只清理前端状态
+      finishStream(convId)
+      showToast('正在刷新消息...', 'info')
+    }
+
+    // 移除任何错误消息（可能是 SSE 断开导致的）
+    messages.value = messages.value.filter(m =>
+      !(m.role === 'assistant' && m.content?.startsWith('发生错误:'))
+    )
+
+    // 刷新消息（后端可能已完成任务并保存了结果）
+    await loadMessages(convId)
+
+    // 刷新后再次检查是否有 streaming 状态的消息
+    const lastAssistant = [...messages.value].reverse().find(m => m.role === 'assistant')
+    if (lastAssistant?.execution_status === 'streaming') {
+      // 任务还在后台运行，恢复 SSE 连接
+      showToast('检测到后台执行中的任务，正在恢复连接...', 'info')
+      reconnectStream(convId, lastAssistant)
+    }
+
+    // 刷新对话列表（标题可能已更新）
+    loadConversations()
+  } finally {
+    isRecovering.value = false
   }
-
-  // 移除任何错误消息（可能是 SSE 断开导致的）
-  messages.value = messages.value.filter(m =>
-    !(m.role === 'assistant' && m.content?.startsWith('发生错误:'))
-  )
-
-  // 刷新消息（后端可能已完成任务并保存了结果）
-  await loadMessages(convId)
-
-  // 刷新后再次检查是否有 streaming 状态的消息
-  const lastAssistant = [...messages.value].reverse().find(m => m.role === 'assistant')
-  if (lastAssistant?.execution_status === 'streaming') {
-    // 任务还在后台运行，恢复 SSE 连接
-    showToast('检测到后台执行中的任务，正在恢复连接...', 'info')
-    reconnectStream(convId, lastAssistant)
-  }
-
-  // 刷新对话列表（标题可能已更新）
-  loadConversations()
 }
 
 const LAST_CONV_KEY = 'investment_last_conv'
@@ -158,27 +285,38 @@ async function selectConversation(conv) {
 
 // 检查对话是否有后台执行中的任务，自动恢复
 async function autoRecoverIfNeeded(convId) {
-  const msgs = messages.value
-  if (msgs.length === 0) return
-  const lastMsg = msgs[msgs.length - 1]
+  if (isRecovering.value) return  // 互斥锁：已有恢复流程在执行
+  isRecovering.value = true
 
-  // 场景 1：assistant 还在 streaming → 调 resume 接口收尾
-  const lastAssistant = [...msgs].reverse().find(m => m.role === 'assistant')
-  if (lastAssistant?.execution_status === 'streaming') {
-    const state = getStreamState(convId)
-    if (state?.sending) return
-    showToast('正在恢复任务...', 'info')
-    tryResumeConversation(convId)
-    return
-  }
+  try {
+    const msgs = messages.value
+    if (msgs.length === 0) return
+    const lastMsg = msgs[msgs.length - 1]
 
-  // 场景 2：用户消息没有 assistant 回复 → 重新发送
-  if (lastMsg.role === 'user') {
-    const hasAssistantAfter = msgs.some((m, i) => i > msgs.indexOf(lastMsg) && m.role === 'assistant')
-    if (!hasAssistantAfter) {
-      showToast('检测到中断的请求，正在重新执行...', 'info')
-      sendMessageAndTrack(convId, lastMsg.content)
+    // 场景 1：assistant 还在 streaming → 调 resume 接口收尾
+    const lastAssistant = [...msgs].reverse().find(m => m.role === 'assistant')
+    if (lastAssistant?.execution_status === 'streaming') {
+      const state = getStreamState(convId)
+      if (state?.sending) return
+      showToast('正在恢复任务...', 'info')
+      tryResumeConversation(convId)
+      return
     }
+
+    // 场景 2：用户消息没有 assistant 回复 → 重新发送
+    if (lastMsg.role === 'user') {
+      // 先检查是否已有进行中的流（防止重复发送）
+      const state = getStreamState(convId)
+      if (state?.sending) return
+
+      const hasAssistantAfter = msgs.some((m, i) => i > msgs.indexOf(lastMsg) && m.role === 'assistant')
+      if (!hasAssistantAfter) {
+        showToast('检测到中断的请求，正在重新执行...', 'info')
+        sendMessageAndTrack(convId, lastMsg.content)
+      }
+    }
+  } finally {
+    isRecovering.value = false
   }
 }
 
@@ -213,11 +351,21 @@ function tryResumeConversation(convId) {
         if (errorData.code === 'RESUME_FAILED') {
           finishStream(cid)
           removeTask(cid)
-          const lastUserMsg = [...messages.value].reverse().find(m => m.role === 'user')
-          if (lastUserMsg) {
-            showToast('正在重新执行...', 'info')
-            sendMessageAndTrack(cid, lastUserMsg.content)
-          }
+          // 先刷新消息，检查后端是否已完成
+          loadMessages(cid).then(() => {
+            const lastAssistant = [...messages.value].reverse().find(m => m.role === 'assistant')
+            if (lastAssistant && lastAssistant.execution_status !== 'streaming') {
+              // 后端已完成，无需重发
+              showToast('任务已完成', 'success')
+              return
+            }
+            // 确实需要重发
+            const lastUserMsg = [...messages.value].reverse().find(m => m.role === 'user')
+            if (lastUserMsg) {
+              showToast('正在重新执行...', 'info')
+              sendMessageAndTrack(cid, lastUserMsg.content)
+            }
+          })
           return
         }
         finishStream(cid)
@@ -256,6 +404,13 @@ function parseMessageMeta(msg) {
 
 // 直接发送消息并跟踪，不经过 handleSend 的 sending 守卫
 function sendMessageAndTrack(convId, text) {
+  // 防重复发送：检查是否已有进行中的流
+  const existingState = getStreamState(convId)
+  if (existingState?.sending) {
+    console.warn(`对话 ${convId} 已有进行中的请求，跳过重复发送`)
+    return
+  }
+
   const controller = sendMessageStream(convId, text, (event) => {
     routeStreamEvent(convId, event, {
       onAnswer: (cid, data, state) => {
@@ -310,11 +465,44 @@ async function loadMessages(convId) {
   try {
     const { data } = await getMessages(convId)
     messages.value = (data.messages || []).map(msg => parseMessageMeta(msg))
+
+    // 加载每条 assistant 消息的评估状态
+    for (const msg of messages.value) {
+      if (msg.role === 'assistant' && msg.id) {
+        loadMessageEvalStatus(msg.id)
+      }
+    }
+
     await nextTick()
     scrollToBottom()
   } catch (e) {
     console.error('Failed to load messages:', e)
     messages.value = []
+  }
+}
+
+// 加载消息评估状态（不展开详情）
+async function loadMessageEvalStatus(messageId) {
+  if (!selectedConv.value?.id) {
+    console.log('loadMessageEvalStatus: no selectedConv')
+    return
+  }
+
+  try {
+    console.log(`loadMessageEvalStatus: loading eval for message ${messageId}`)
+    const { data } = await getConversationEvaluation(selectedConv.value.id, messageId)
+    console.log(`loadMessageEvalStatus: result for message ${messageId}`, data)
+    if (data.ok && data.evaluation) {
+      messageEvalStates.value[messageId] = {
+        score: data.evaluation.auto_score || 0,
+        loading: false,
+        expanded: false,  // 默认不展开
+        evaluation: data.evaluation,
+      }
+      console.log(`loadMessageEvalStatus: set state for message ${messageId}`, messageEvalStates.value[messageId])
+    }
+  } catch (e) {
+    console.error(`loadMessageEvalStatus: error for message ${messageId}`, e)
   }
 }
 
@@ -886,6 +1074,131 @@ function formatTime(ts) {
   return `${d.getMonth() + 1}/${d.getDate()} ${time}`
 }
 
+// 获取评估维度分数
+function getEvalDimensions(messageId) {
+  const state = messageEvalStates.value[messageId]
+  if (!state?.evaluation?.auto_score_breakdown) return {}
+
+  let breakdown = state.evaluation.auto_score_breakdown
+  if (typeof breakdown === 'string') {
+    try {
+      breakdown = JSON.parse(breakdown)
+    } catch {
+      return {}
+    }
+  }
+
+  const dimConfig = {
+    execution: { name: '执行效率', icon: '⚡' },
+    data: { name: '数据利用', icon: '📊' },
+    collaboration: { name: '专家协作', icon: '🤝' },
+    response: { name: '响应质量', icon: '📝' },
+  }
+
+  const result = {}
+  for (const [key, config] of Object.entries(dimConfig)) {
+    if (breakdown[key] !== undefined) {
+      result[key] = {
+        ...config,
+        score: Math.round(breakdown[key]),
+      }
+    }
+  }
+  return result
+}
+
+// 触发 LLM 评估
+async function triggerLLMEval(messageId) {
+  if (!selectedConv.value?.id) return
+
+  messageEvalStates.value[messageId] = {
+    ...messageEvalStates.value[messageId],
+    loading: true,
+    expanded: true,
+  }
+
+  try {
+    const { data } = await evaluateConversationWithLLM(selectedConv.value.id, messageId)
+    if (data.ok && data.evaluation) {
+      // 合并 LLM 评估结果
+      const llmEval = data.evaluation
+      messageEvalStates.value[messageId] = {
+        score: llmEval.total_score || 0,
+        loading: false,
+        expanded: true,
+        evaluation: {
+          ...messageEvalStates.value[messageId]?.evaluation,
+          llm_evaluation: llmEval,
+        },
+      }
+      showToast('LLM 评估完成', 'success')
+    } else {
+      showToast('LLM 评估失败', 'error')
+      messageEvalStates.value[messageId].loading = false
+    }
+  } catch (e) {
+    showToast('LLM 评估失败: ' + (e.response?.data?.detail || e.message), 'error')
+    messageEvalStates.value[messageId].loading = false
+  }
+}
+
+// 获取评估等级
+function getEvalLevel(score) {
+  if (score >= 80) return '优秀'
+  if (score >= 60) return '一般'
+  if (score >= 40) return '较差'
+  return '很差'
+}
+
+// 获取评估等级类名
+function getEvalLevelClass(score) {
+  if (score >= 80) return 'eval-level--good'
+  if (score >= 60) return 'eval-level--ok'
+  if (score >= 40) return 'eval-level--bad'
+  return 'eval-level--very-bad'
+}
+
+// 获取评估建议
+function getEvalSuggestions(messageId) {
+  const state = messageEvalStates.value[messageId]
+  if (!state?.evaluation?.suggestions) return []
+
+  let suggestions = state.evaluation.suggestions
+  if (typeof suggestions === 'string') {
+    try {
+      suggestions = JSON.parse(suggestions)
+    } catch {
+      return []
+    }
+  }
+  return Array.isArray(suggestions) ? suggestions : []
+}
+
+// 评估分数颜色
+function scoreColor(score) {
+  if (score >= 80) return '#52c41a'
+  if (score >= 60) return '#faad14'
+  if (score >= 40) return '#fa8c16'
+  return '#ff4d4f'
+}
+
+// 复制消息 ID
+function copyMessageId(msgId) {
+  const text = String(msgId)
+  navigator.clipboard.writeText(text).then(() => {
+    showToast('已复制消息ID: ' + text, 'success')
+  }).catch(() => {
+    // 降级方案
+    const input = document.createElement('input')
+    input.value = text
+    document.body.appendChild(input)
+    input.select()
+    document.execCommand('copy')
+    document.body.removeChild(input)
+    showToast('已复制消息ID: ' + text, 'success')
+  })
+}
+
 // Trace 详情
 const traceDetailVisible = ref({})
 const traceDetailData = ref({})
@@ -982,15 +1295,38 @@ async function toggleTraceDetail(msg, index) {
         <!-- 消息列表 -->
         <div ref="messagesContainer" class="messages-container">
           <div v-for="(msg, i) in messages" :key="i" :class="['message', msg.role]">
-            <div class="message-bubble" v-if="msg.role === 'user'">{{ msg.content }}</div>
+            <div class="message-bubble" v-if="msg.role === 'user'">
+              <span class="message-id-badge" v-if="msg.id" @click="copyMessageId(msg.id)" :title="'点击复制消息ID: ' + msg.id">
+                #{{ msg.id }}
+              </span>
+              {{ msg.content }}
+            </div>
             <div v-else>
+              <!-- 消息 ID 标识 + 评估状态 -->
+              <div class="message-id-header" v-if="msg.id">
+                <span class="message-id-badge" @click="copyMessageId(msg.id)" :title="'点击复制消息ID: ' + msg.id">
+                  #{{ msg.id }} 📋
+                </span>
+                <!-- 评估状态指示器 -->
+                <span
+                  class="eval-status-badge"
+                  :class="getEvalStatusClass(msg.id)"
+                  @click.stop="toggleMessageEval(msg.id)"
+                  :title="getEvalStatusTitle(msg.id)"
+                >
+                  <span v-if="messageEvalStates[msg.id]?.score > 0" class="eval-score-mini">
+                    {{ messageEvalStates[msg.id].score.toFixed(0) }}
+                  </span>
+                  <span v-else>{{ getEvalStatusIcon(msg.id) }}</span>
+                </span>
+              </div>
               <!-- 执行状态徽章 -->
               <div v-if="msg.execution_status && msg.execution_status !== 'completed'" class="execution-status-badge" :class="'status-' + msg.execution_status">
-                <template v-if="msg.execution_status === 'streaming'">⏳ 后台执行中 <button class="btn-retry" @click="tryResumeConversation(selectedConv?.id)" title="恢复">🔄 恢复</button></template>
+                <template v-if="msg.execution_status === 'streaming'">⏳ 后台执行中 <button class="btn-retry btn-ai-action" @click="tryResumeConversation(selectedConv?.id)" title="恢复">🔄 恢复<span class="ai-agent-tooltip">投资分析助手</span></button></template>
                 <template v-else-if="msg.execution_status === 'failed'">❌ 执行失败{{ msg.error_message ? ': ' + msg.error_message : '（超时或异常）' }}</template>
                 <template v-else-if="msg.execution_status === 'cancelled'">⏹ 已取消</template>
                 <template v-else-if="msg.execution_status === 'timeout'">⏰ 执行超时</template>
-                <button v-if="i > 0" class="btn-retry" @click="retryMessage(messages[i - 1])" title="重试">🔄 重试</button>
+                <button v-if="i > 0" class="btn-retry btn-ai-action" @click="retryMessage(messages[i - 1])" title="重试">🔄 重试<span class="ai-agent-tooltip">投资分析助手</span></button>
               </div>
               <!-- 专家分析展示 -->
               <div v-if="msg.specialist_results && msg.specialist_results.length" class="specialists-container">
@@ -1119,6 +1455,60 @@ async function toggleTraceDetail(msg, index) {
                   <span v-for="(s, j) in msg.rag.sources.slice(0, 5)" :key="j" :class="['rag-tag', 'rag-tag-' + s.type]">
                     {{ s.type }}: {{ s.title ? s.title.slice(0, 20) : '' }}
                   </span>
+                </div>
+              </div>
+              <!-- 消息评估详情（可展开） -->
+              <div v-if="msg.id && messageEvalStates[msg.id]?.expanded" class="message-eval-detail">
+                <div v-if="messageEvalStates[msg.id]?.loading" class="eval-loading">
+                  <div class="eval-spinner"></div>
+                  <span>正在评估中，请稍候...</span>
+                </div>
+                <div v-else-if="messageEvalStates[msg.id]?.evaluation" class="eval-content">
+                  <!-- 评估分数概览 -->
+                  <div class="eval-header">
+                    <div class="eval-total">
+                      <span class="eval-total-score" :style="{ color: scoreColor(messageEvalStates[msg.id].evaluation.auto_score) }">
+                        {{ messageEvalStates[msg.id].evaluation.auto_score?.toFixed(0) }}
+                      </span>
+                      <span class="eval-total-label">总分</span>
+                    </div>
+                    <span class="eval-level" :class="getEvalLevelClass(messageEvalStates[msg.id].evaluation.auto_score)">
+                      {{ getEvalLevel(messageEvalStates[msg.id].evaluation.auto_score) }}
+                    </span>
+                  </div>
+
+                  <!-- 维度分数 -->
+                  <div class="eval-dimensions">
+                    <div v-for="(dim, key) in getEvalDimensions(msg.id)" :key="key" class="eval-dim">
+                      <span class="eval-dim-icon">{{ dim.icon }}</span>
+                      <span class="eval-dim-name">{{ dim.name }}</span>
+                      <div class="eval-dim-bar">
+                        <div class="eval-dim-bar-fill" :style="{ width: dim.score + '%', backgroundColor: scoreColor(dim.score) }"></div>
+                      </div>
+                      <span class="eval-dim-score" :style="{ color: scoreColor(dim.score) }">{{ dim.score }}</span>
+                    </div>
+                  </div>
+
+                  <!-- 优化建议 -->
+                  <div v-if="getEvalSuggestions(msg.id).length" class="eval-suggestions">
+                    <div class="eval-suggestions-title">💡 优化建议</div>
+                    <div v-for="(s, idx) in getEvalSuggestions(msg.id)" :key="idx" class="eval-suggestion">
+                      {{ s }}
+                    </div>
+                  </div>
+
+                  <!-- 操作按钮 -->
+                  <div class="eval-actions">
+                    <button class="btn-eval-llm" @click="triggerLLMEval(msg.id)">
+                      🤖 LLM 深度评估
+                    </button>
+                  </div>
+                </div>
+                <div v-else class="eval-empty">
+                  <div class="eval-empty-text">暂无评估数据</div>
+                  <button class="btn-eval-trigger" @click="triggerMessageEval(msg.id)">
+                    📊 快速评估
+                  </button>
                 </div>
               </div>
             </div>
@@ -1330,6 +1720,7 @@ async function toggleTraceDetail(msg, index) {
 .chat-page {
   display: flex;
   height: calc(100vh - 120px);
+  height: calc(100dvh - 120px);
   gap: 0;
   border-radius: var(--radius-lg);
   overflow: hidden;
@@ -1613,6 +2004,296 @@ async function toggleTraceDetail(msg, index) {
 
 .message.user .message-time {
   text-align: right;
+}
+
+/* 消息 ID 样式 */
+.message-id-badge {
+  display: inline-block;
+  font-size: 10px;
+  color: var(--color-text-muted, #999);
+  background: rgba(0, 0, 0, 0.06);
+  padding: 1px 6px;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: background 0.2s;
+  margin-right: 6px;
+  vertical-align: middle;
+}
+
+.message-id-badge:hover {
+  background: rgba(0, 0, 0, 0.1);
+}
+
+.message.user .message-id-badge {
+  background: rgba(255, 255, 255, 0.2);
+  color: rgba(255, 255, 255, 0.8);
+}
+
+.message.user .message-id-badge:hover {
+  background: rgba(255, 255, 255, 0.3);
+}
+
+.message-id-header {
+  margin-bottom: 4px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* 评估状态指示器 */
+.eval-status-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.eval-status-badge:hover {
+  transform: scale(1.1);
+}
+
+.eval-score-mini {
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.eval-status--none {
+  background: var(--color-bg-secondary, #f0f0f0);
+  opacity: 0.7;
+}
+
+.eval-status--loading {
+  background: var(--color-primary-100, #e6f7ff);
+  animation: pulse 1.5s infinite;
+}
+
+.eval-status--good {
+  background: #f6ffed;
+}
+
+.eval-status--ok {
+  background: #fffbe6;
+}
+
+.eval-status--bad {
+  background: #fff2f0;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
+/* 消息评估详情 */
+.message-eval-detail {
+  margin-top: 8px;
+  padding: 10px;
+  background: var(--color-bg-secondary, #f5f5f5);
+  border-radius: 8px;
+  border-left: 3px solid var(--color-primary-500, #1890ff);
+}
+
+.eval-loading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--color-text-muted, #999);
+}
+
+.eval-spinner {
+  width: 14px;
+  height: 14px;
+  border: 2px solid var(--color-border, #e8e8e8);
+  border-top-color: var(--color-primary-500, #1890ff);
+  border-radius: 50%;
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+.eval-content {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+/* 评估头部 */
+.eval-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.eval-total {
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+}
+
+.eval-total-score {
+  font-size: 28px;
+  font-weight: 700;
+}
+
+.eval-total-label {
+  font-size: 12px;
+  color: var(--color-text-muted, #999);
+}
+
+.eval-level {
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-weight: 500;
+}
+
+.eval-level--good {
+  background: #f6ffed;
+  color: #52c41a;
+}
+
+.eval-level--ok {
+  background: #fffbe6;
+  color: #faad14;
+}
+
+.eval-level--bad {
+  background: #fff7e6;
+  color: #fa8c16;
+}
+
+.eval-level--very-bad {
+  background: #fff2f0;
+  color: #ff4d4f;
+}
+
+/* 维度分数 */
+.eval-dimensions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.eval-dim {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.eval-dim-icon {
+  font-size: 14px;
+  width: 20px;
+  text-align: center;
+}
+
+.eval-dim-name {
+  width: 60px;
+  color: var(--color-text-secondary, #666);
+}
+
+.eval-dim-bar {
+  flex: 1;
+  height: 6px;
+  background: var(--color-bg-secondary, #f0f0f0);
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.eval-dim-bar-fill {
+  height: 100%;
+  border-radius: 3px;
+  transition: width 0.5s ease;
+}
+
+.eval-dim-score {
+  width: 30px;
+  text-align: right;
+  font-weight: 600;
+}
+
+.eval-suggestions {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.eval-suggestions-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--color-text-primary, #333);
+  margin-bottom: 4px;
+}
+
+.eval-suggestion {
+  font-size: 12px;
+  color: var(--color-text-secondary, #666);
+  padding-left: 16px;
+  position: relative;
+}
+
+.eval-suggestion::before {
+  content: '•';
+  position: absolute;
+  left: 4px;
+  color: var(--color-primary-500, #1890ff);
+}
+
+.eval-empty {
+  text-align: center;
+  padding: 8px;
+}
+
+.eval-empty-text {
+  font-size: 12px;
+  color: var(--color-text-muted, #999);
+  margin-bottom: 8px;
+}
+
+.btn-eval-trigger {
+  padding: 6px 12px;
+  background: var(--color-primary-500, #1890ff);
+  color: white;
+  border: none;
+  border-radius: 6px;
+  font-size: 12px;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.btn-eval-trigger:hover {
+  background: var(--color-primary-600, #40a9ff);
+}
+
+/* 评估操作按钮 */
+.eval-actions {
+  display: flex;
+  gap: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--color-border, #e8e8e8);
+}
+
+.btn-eval-llm {
+  padding: 6px 12px;
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  color: white;
+  border: none;
+  border-radius: 6px;
+  font-size: 12px;
+  cursor: pointer;
+  transition: opacity 0.2s;
+}
+
+.btn-eval-llm:hover {
+  opacity: 0.9;
 }
 
 /* typing animation */
@@ -2370,8 +3051,18 @@ async function toggleTraceDetail(msg, index) {
   transition: opacity var(--transition-fast);
 }
 
-.specialist-item:hover .specialist-feedback {
-  opacity: 1;
+/* 触屏设备始终显示反馈按钮 */
+@media (hover: none) {
+  .specialist-feedback {
+    opacity: 0.8;
+  }
+}
+
+/* 支持 hover 的设备悬停显示 */
+@media (hover: hover) {
+  .specialist-item:hover .specialist-feedback {
+    opacity: 1;
+  }
 }
 
 .btn-spec-feedback {
@@ -2445,8 +3136,18 @@ async function toggleTraceDetail(msg, index) {
   transition: opacity var(--transition-fast);
 }
 
-.message:hover .message-feedback {
-  opacity: 1;
+/* 触屏设备始终显示反馈按钮 */
+@media (hover: none) {
+  .message-feedback {
+    opacity: 0.8;
+  }
+}
+
+/* 支持 hover 的设备悬停显示 */
+@media (hover: hover) {
+  .message:hover .message-feedback {
+    opacity: 1;
+  }
 }
 
 .btn-msg-feedback {

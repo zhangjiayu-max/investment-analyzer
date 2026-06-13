@@ -191,10 +191,11 @@ watch(() => props.taskId, () => {
           <button
             @click="onAnalyzeImages"
             :disabled="imageAnalysisLoading"
-            class="btn-primary"
+            class="btn-primary btn-ai-action"
           >
             <svg v-if="imageAnalysisLoading" class="spinner" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v4m0 12v4m-7.07-3.93l2.83-2.83m8.48-8.48l2.83-2.83M2 12h4m12 0h4M4.93 4.93l2.83 2.83m8.48 8.48l2.83 2.83"/></svg>
             {{ imageAnalysisLoading ? '分析中...' : '解读全部图片' }}
+            <span class="ai-agent-tooltip">文章解读助手</span>
           </button>
         </div>
         <ImageGrid :images="images" @parsed="onImageParsed" />
@@ -293,9 +294,10 @@ watch(() => props.taskId, () => {
             placeholder="针对分析结果提问..."
             class="input-field"
           />
-          <button type="submit" :disabled="chatLoading || !chatQuestion.trim()" class="btn-primary">
+          <button type="submit" :disabled="chatLoading || !chatQuestion.trim()" class="btn-primary btn-ai-action">
             <svg v-if="chatLoading" class="spinner" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v4m0 12v4m-7.07-3.93l2.83-2.83m8.48-8.48l2.83-2.83M2 12h4m12 0h4M4.93 4.93l2.83 2.83m8.48 8.48l2.83 2.83"/></svg>
             {{ chatLoading ? '思考中...' : '发送' }}
+            <span class="ai-agent-tooltip">投资研究助手</span>
           </button>
         </form>
         <div v-if="chatAnswer" class="chat-answer">

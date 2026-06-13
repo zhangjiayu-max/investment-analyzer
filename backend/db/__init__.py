@@ -618,6 +618,16 @@ def init_db():
         )
     """)
 
+    # ── RAG 检索配置表 ──────────────────────────────────────
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS rag_config (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL,
+            description TEXT DEFAULT '',
+            updated_at TEXT DEFAULT (datetime('now','localtime'))
+        )
+    """)
+
     # ── 指数代码映射表 ──────────────────────────────────────
     conn.execute("""
         CREATE TABLE IF NOT EXISTS index_code_mapping (

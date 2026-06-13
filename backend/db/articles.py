@@ -178,10 +178,11 @@ def list_all_analysis_records(search: str = None, limit: int = 200) -> list[dict
                a.url as article_url
         FROM analysis_records ar
         LEFT JOIN articles a ON ar.article_id = a.id
+        WHERE ar.image_path NOT LIKE 'data/dd_images/%'
     """
     params = []
     if search:
-        base += " WHERE ar.index_name LIKE ? OR ar.index_code LIKE ? OR ar.metric_type LIKE ? OR a.title LIKE ?"
+        base += " AND (ar.index_name LIKE ? OR ar.index_code LIKE ? OR ar.metric_type LIKE ? OR a.title LIKE ?)"
         q = f"%{search}%"
         params = [q, q, q, q]
     base += " ORDER BY COALESCE(a.publish_time, ar.created_at) DESC, ar.image_index LIMIT ?"

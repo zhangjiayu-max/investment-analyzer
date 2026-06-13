@@ -7,11 +7,12 @@
       </div>
       <div class="header-actions">
         <span v-if="data?.fetched_at" class="data-time">{{ data.fetched_at }}</span>
-        <button class="btn-primary" :disabled="loading" @click="loadData(true)">
-          <svg v-if="!loading" width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <button class="btn-primary btn-ai-action" :disabled="loading" @click="loadData(true)">
+          <svg class="icon-refresh" :class="{ spinning: loading }" width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
           </svg>
           <span>{{ loading ? '分析中...' : '刷新分析' }}</span>
+          <span class="ai-agent-tooltip">市场情报分析师</span>
         </button>
       </div>
     </div>
@@ -49,6 +50,7 @@
             >
               <span class="sector-rank" :class="'heat-' + (s.heat || 'low')">{{ i + 1 }}</span>
               <span class="sector-name">{{ s.name }}</span>
+              <span class="sector-id">#{{ i }}</span>
               <span class="sector-heat-tag" :class="'heat-' + (s.heat || 'low')">
                 {{ heatLabel(s.heat) }}
               </span>
@@ -91,6 +93,7 @@
             <div v-if="activeSector.related_indexes?.length" class="index-grid">
               <div v-for="idx in activeSector.related_indexes" :key="idx.index_code" class="index-card">
                 <div class="index-name">{{ idx.index_name }}</div>
+                <div class="index-code">{{ idx.index_code }}</div>
                 <div class="index-metric">
                   <span>{{ idx.metric_type || 'PE' }}: {{ idx.current_value }}</span>
                 </div>
@@ -108,6 +111,7 @@
             <div v-if="activeSector.related_funds?.length" class="fund-list">
               <div v-for="f in activeSector.related_funds" :key="f.fund_code" class="fund-item">
                 <span class="fund-name">{{ f.fund_name }}</span>
+                <span class="fund-code">{{ f.fund_code }}</span>
                 <span class="fund-tag">已持仓</span>
                 <span v-if="f.profit_rate != null" class="fund-pct" :class="f.profit_rate >= 0 ? 'text-success' : 'text-danger'">
                   {{ (f.profit_rate * 100).toFixed(1) }}%
@@ -329,6 +333,15 @@ function pctColor(pct) {
 .btn-primary:hover { opacity: 0.9; }
 .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
 
+.icon-refresh.spinning {
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
 /* ── 综合研判 ── */
 
 .summary-card {
@@ -397,6 +410,13 @@ function pctColor(pct) {
   flex: 1;
   font-weight: 600;
   font-size: 0.85rem;
+}
+
+.sector-id {
+  font-size: 0.65rem;
+  color: var(--color-primary);
+  font-family: monospace;
+  opacity: 0.8;
 }
 
 .sector-heat-tag {
@@ -534,7 +554,15 @@ function pctColor(pct) {
 .index-name {
   font-size: 0.8rem;
   font-weight: 600;
+  margin-bottom: 0.15rem;
+}
+
+.index-code {
+  font-size: 0.7rem;
+  color: var(--color-primary);
+  font-family: monospace;
   margin-bottom: 0.25rem;
+  opacity: 0.85;
 }
 
 .index-metric {
@@ -565,6 +593,13 @@ function pctColor(pct) {
   flex: 1;
   font-size: 0.85rem;
   font-weight: 500;
+}
+
+.fund-code {
+  font-size: 0.7rem;
+  color: var(--color-primary);
+  font-family: monospace;
+  opacity: 0.85;
 }
 
 .fund-tag {

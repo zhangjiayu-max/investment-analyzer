@@ -53,6 +53,17 @@ function getStreamState(convId) {
  * @param {AbortController} abortController
  */
 function startStream(convId, abortController) {
+  // 如果已有流，先中止旧的（防止覆盖导致 AbortController 孤立）
+  const existing = streamStates.get(convId)
+  if (existing) {
+    if (existing.streamAbort) {
+      existing.streamAbort.abort()
+    }
+    if (existing.elapsedTimer) {
+      clearInterval(existing.elapsedTimer)
+    }
+  }
+
   const state = createStreamState()
   state.streamAbort = abortController
 

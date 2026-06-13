@@ -42,6 +42,7 @@ from db import (
     set_cash_balance, get_portfolio_penetration,
 )
 from mcp.trading_calendar import expected_confirm_date
+from rag import build_rag_context_with_details, log_rag_search
 from models.portfolio import (
     CreateHoldingRequest, UpdateHoldingRequest,
     CreateTransactionRequest, ConfirmTransactionRequest,
@@ -411,7 +412,8 @@ async def portfolio_diversification_ai_summary(agent_id: int = 2):
                 mcp_raw_sections.append(f"【市场热点】\n{hot_raw}")
             except Exception:
                 pass
-            # 对主要持仓行业搜索相关新闻
+
+            # 4g. 对主要持仓行业搜索相关新闻
             industry_keywords = set()
             for h in sorted_holdings[:3]:
                 idx = (h.get("index_name") or "").strip()
@@ -685,6 +687,27 @@ async def portfolio_ai_analysis_api(req: PortfolioAiAnalysisRequest):
 
     user_question = req.question or "请全面分析我的持仓情况，包括资产配置合理性、风险分散度、各基金表现，以及改进建议。"
 
+    # RAG 知识库检索（搜索与持仓相关的文章、分析）
+    rag_context = ""
+    try:
+        fund_names = " ".join([h.get("fund_name", "") for h in holdings[:5]])
+        rag_query = f"持仓分析 基金投资 {fund_names}"
+        rag_result = build_rag_context_with_details(query=rag_query, limit=5)
+        rag_context = rag_result.get("context", "")
+        # 记录 RAG 检索日志
+        log_rag_search(
+            conversation_id=0,
+            message_id=0,
+            query=rag_query,
+            keywords=rag_result.get("keywords", []),
+            results=rag_result.get("results", []),
+            fts_count=rag_result.get("fts_count", 0),
+            chroma_count=rag_result.get("chroma_count", 0),
+            freshness_filtered=rag_result.get("freshness_filtered", 0),
+        )
+    except Exception as e:
+        logger.warning(f"RAG 检索失败: {e}")
+
     system_prompt = """你是一位专业的投资组合分析师。请根据以下持仓数据和专业分析工具的输出，给出全面的投资组合分析报告。
 
 分析要求：
@@ -701,6 +724,9 @@ async def portfolio_ai_analysis_api(req: PortfolioAiAnalysisRequest):
 
 ## 专业分析数据
 {json.dumps(mcp_context, ensure_ascii=False, indent=2)}
+
+## 知识库参考（历史分析/文章）
+{rag_context[:1500] if rag_context else '暂无相关知识库内容'}
 
 ## 用户问题
 {user_question}
@@ -1111,6 +1137,24 @@ async def panorama_analysis_api(req: PanoramaAnalysisRequest):
     # 从 mcp_context 中提取新闻数据，单独格式化
     news_section = _format_news_section(mcp_context)
 
+    # RAG 知识库检索
+    rag_context = ""
+    try:
+        fund_names = " ".join([h.get("fund_name", "") for h in holdings[:5]])
+        rag_query = f"投资组合 资产配置 风险分析 {fund_names}"
+        rag_result = build_rag_context_with_details(query=rag_query, limit=5)
+        rag_context = rag_result.get("context", "")
+        log_rag_search(
+            conversation_id=0, message_id=0, query=rag_query,
+            keywords=rag_result.get("keywords", []),
+            results=rag_result.get("results", []),
+            fts_count=rag_result.get("fts_count", 0),
+            chroma_count=rag_result.get("chroma_count", 0),
+            freshness_filtered=rag_result.get("freshness_filtered", 0),
+        )
+    except Exception as e:
+        logger.warning(f"RAG 检索失败: {e}")
+
     user_content = (
         f"## 持仓明细\n" + "\n".join(holdings_lines) +
         f"\n\n## 类型分布\n" + "\n".join(type_lines) +
@@ -1119,6 +1163,7 @@ async def panorama_analysis_api(req: PanoramaAnalysisRequest):
         f"\n## MCP 专业数据\n{json.dumps(mcp_context, ensure_ascii=False, indent=2)}\n"
         f"\n{valuation_context}"
         f"\n\n{news_section}"
+        f"\n\n## 知识库参考\n{rag_context[:1500] if rag_context else '暂无相关知识库内容'}"
     )
 
     # 调用 LLM（带 10 分钟超时）
@@ -1329,6 +1374,23 @@ async def fund_deep_dive_api(holding_id: int, req: DeepDiveRequest):
     except Exception:
         pass
 
+    # RAG 知识库检索
+    rag_context = ""
+    try:
+        rag_query = f"{fund_name} 基金分析 投资策略"
+        rag_result = build_rag_context_with_details(query=rag_query, limit=5)
+        rag_context = rag_result.get("context", "")
+        log_rag_search(
+            conversation_id=0, message_id=0, query=rag_query,
+            keywords=rag_result.get("keywords", []),
+            results=rag_result.get("results", []),
+            fts_count=rag_result.get("fts_count", 0),
+            chroma_count=rag_result.get("chroma_count", 0),
+            freshness_filtered=rag_result.get("freshness_filtered", 0),
+        )
+    except Exception as e:
+        logger.warning(f"RAG 检索失败: {e}")
+
     user_content = (
         f"## 基金持仓信息\n"
         f"- 基金: {fund_name}({fund_code})\n"
@@ -1345,6 +1407,7 @@ async def fund_deep_dive_api(holding_id: int, req: DeepDiveRequest):
         f"\n\n## 组合角色上下文\n{portfolio_context}"
         f"\n\n## MCP 诊断\n{_get_fund_mcp_diagnosis(fund_code)}"
         f"\n\n{news_context}"
+        f"\n\n## 知识库参考\n{rag_context[:1500] if rag_context else '暂无相关知识库内容'}"
     )
 
     try:

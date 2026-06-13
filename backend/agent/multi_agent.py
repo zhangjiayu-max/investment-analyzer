@@ -21,6 +21,46 @@ _UNIVERSAL_DATA_CONSTRAINT = """
 5. 所有数字必须来自上下文或工具返回结果，不得凭记忆或推测给出具体数值
 """
 
+# ── 专家主动检索指令（追加到有 search_knowledge 工具的 Agent） ──
+_ACTIVE_RETRIEVAL_INSTRUCTION = """
+## 📚 书籍知识主动检索指令
+你拥有 search_knowledge 工具，可以检索投资经典书籍的知识库。在以下场景**必须主动调用**：
+
+1. **提出估值判断时** → 检索 query="估值 安全边际 PE PB 百分位"，content_types=["book"]
+2. **建议买卖操作时** → 检索 query="择时 仓位 策略 买入卖出"，content_types=["book"]
+3. **分析市场情绪时** → 检索 query="心理 偏差 情绪 损失厌恶"，content_types=["book"]
+4. **评估企业质量时** → 检索 query="护城河 ROE 竞争优势 现金流"，content_types=["book"]
+5. **讨论资产配置时** → 检索 query="配置 分散 再平衡 股债比例"，content_types=["book"]
+6. **分析周期位置时** → 检索 query="周期 牛熊 转折 估值温度"，content_types=["book"]
+
+引用书籍观点时请注明来源（如"根据《聪明的投资者》..."），增强分析的可信度。
+"""
+
+# ── 风险与深度分析约束（追加到所有专家 prompt） ──
+_RISK_AND_DEPTH_CONSTRAINT = """
+## 🎯 分析质量要求（必须遵守）
+
+### 1. 风险分析必须到位
+- **不要只看估值**，必须同时分析风险因素
+- 考虑：近期波动、政策风险、市场情绪、流动性风险
+- 如果用户问"可以买吗"，必须同时说明风险
+
+### 2. 分析要透彻
+- 如果用户问基金，要穿透查看重仓股、历史业绩、基金经理
+- 不要泛泛而谈，要有具体数据支撑
+- 对比类问题要列出具体差异点
+
+### 3. 回答要直接相关
+- 直接回答用户问题，不要绕圈子
+- 不要重复用户已经知道的信息
+- 如果用户问"A和B区别"，直接说区别，不要从头分析两个
+
+### 4. 数据要准确
+- 使用工具获取最新数据，不要凭记忆
+- 如果数据获取失败，明确告知用户
+- 不要编造数据或使用过时数据
+"""
+
 
 def _extract_text_tool_calls(content_str):
     """从 LLM 文本中提取 XML 格式的 tool_call。"""
@@ -114,8 +154,15 @@ def run_specialist(agent_key: str, query: str, context: str = "",
         except Exception:
             pass
 
+    # 追加主动检索指令（仅当专家有 search_knowledge 工具时）
+    if "search_knowledge" in agent.get("tools", []):
+        system_content += _ACTIVE_RETRIEVAL_INSTRUCTION
+
     # 追加通用数据约束
     system_content += _UNIVERSAL_DATA_CONSTRAINT
+
+    # 追加风险与深度分析约束
+    system_content += _RISK_AND_DEPTH_CONSTRAINT
 
     llm_messages = [
         {"role": "system", "content": system_content},
@@ -472,13 +519,26 @@ def run_arbitration(query: str, specialist_results: list, rag_context: str = "")
 
     start_time = time.time()
 
+    # 从数据库加载仲裁 Agent 配置（支持通过 Agent 管理界面优化 prompt）
+    agents = load_specialist_agents()
+    arbitrator = agents.get("arbitrator")
+    if arbitrator and arbitrator.get("system_prompt"):
+        system_prompt = arbitrator["system_prompt"]
+        agent_name = arbitrator.get("name", "仲裁法官")
+        agent_icon = arbitrator.get("icon", "⚖️")
+    else:
+        # 回退到硬编码 prompt
+        system_prompt = ARBITRATION_SYSTEM_PROMPT
+        agent_name = "仲裁法官"
+        agent_icon = "⚖️"
+
     # 构建专家分析摘要
     expert_sections = []
     for sr in specialist_results:
-        agent_name = sr.get("agent", sr.get("agent_key", "未知"))
+        sr_name = sr.get("agent", sr.get("agent_key", "未知"))
         icon = sr.get("icon", "🤖")
         analysis = sr.get("analysis", "")
-        expert_sections.append(f"### {icon} {agent_name}\n{analysis[:2000]}")
+        expert_sections.append(f"### {icon} {sr_name}\n{analysis[:2000]}")
 
     experts_text = "\n\n---\n\n".join(expert_sections)
 
@@ -493,7 +553,7 @@ def run_arbitration(query: str, specialist_results: list, rag_context: str = "")
         user_content += f"\n\n## 参考知识库\n{rag_context[:1500]}"
 
     llm_messages = [
-        {"role": "system", "content": ARBITRATION_SYSTEM_PROMPT},
+        {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_content},
     ]
 
@@ -528,8 +588,8 @@ def run_arbitration(query: str, specialist_results: list, rag_context: str = "")
 
     return {
         "agent_key": "arbitrator",
-        "agent": "仲裁法官",
-        "icon": "⚖️",
+        "agent": agent_name,
+        "icon": agent_icon,
         "analysis": answer,
         "tool_calls": [],
         "duration_ms": duration_ms,

@@ -360,6 +360,18 @@ export function sendMessageStream(convId, content, onEvent) {
     body: JSON.stringify({ content }),
     signal: controller.signal,
   }).then(async response => {
+    // 检查 HTTP 错误状态（如 409 重复请求）
+    if (!response.ok) {
+      const body = await response.text().catch(() => '')
+      let msg = '请求失败'
+      try {
+        const err = JSON.parse(body)
+        msg = err.detail || msg
+      } catch {}
+      onEvent({ type: 'error', data: { message: msg, code: 'HTTP_ERROR', status: response.status } })
+      return
+    }
+
     const reader = response.body.getReader()
     const decoder = new TextDecoder()
     let buffer = ''
@@ -495,11 +507,17 @@ export function getKnowledgeStats() {
   return api.get('/knowledge/stats')
 }
 
+/** 列出已蒸馏的书籍 */
+export function getKnowledgeBooks() {
+  return api.get('/knowledge/books')
+}
+
 /** 列出知识条目 */
-export function listKnowledge(category = null, subcategory = null, limit = 100) {
+export function listKnowledge(category = null, subcategory = null, source = null, limit = 100) {
   const params = { limit }
   if (category) params.category = category
   if (subcategory) params.subcategory = subcategory
+  if (source) params.source = source
   return api.get('/knowledge/list', { params })
 }
 
@@ -543,6 +561,21 @@ export function getRagStats(days = 7) {
 /** 获取 RAG 检索日志 */
 export function getRagLogs(limit = 100) {
   return api.get('/rag-logs', { params: { limit } })
+}
+
+/** 运行单次 RAG 质量评估 */
+export function runRagEval(query, expectedTopics = []) {
+  return api.post('/rag/eval/run', { query, expected_topics: expectedTopics }, { timeout: 60000 })
+}
+
+/** 运行完整 RAG 评估套件 */
+export function runRagEvalSuite() {
+  return api.post('/rag/eval/suite', {}, { timeout: 600000 })
+}
+
+/** 获取 RAG 评估结果 */
+export function getRagEvalResults() {
+  return api.get('/rag/eval/results')
 }
 
 // ── 图片浏览 API ──────────────────────────────────────
@@ -1266,6 +1299,97 @@ export function getEvalStats() {
 /** 从 Bad Case 转化为 Eval Case */
 export function createEvalFromBadCase(source, sourceId, name = '') {
   return api.post('/eval/cases/from-bad-case', { source, source_id: sourceId, name })
+}
+
+// ── 对话质量评估 API ──────────────────────────────────────
+
+/** 自动评估对话质量 */
+export function evaluateConversation(conversationId) {
+  return api.post(`/eval/conversation/${conversationId}`, {}, { timeout: 120000 })
+}
+
+/** 获取对话评估结果 */
+export function getConversationEvaluation(conversationId, messageId = null) {
+  const params = {}
+  if (messageId) params.message_id = messageId
+  return api.get(`/eval/conversation/${conversationId}`, { params })
+}
+
+/** 使用 LLM 进行智能评估（旧接口） */
+export function evaluateConversationWithLLM(conversationId, messageId = null) {
+  const params = {}
+  if (messageId) params.message_id = messageId
+  return api.post(`/eval/conversation/${conversationId}/llm`, {}, { params, timeout: 120000 })
+}
+
+/** 使用 LLM 评估 Agent 进行智能评估（新接口） */
+export function evaluateWithLLMAgent(targetType, targetId, messageId = null) {
+  const params = { target_type: targetType, target_id: targetId }
+  if (messageId) params.message_id = messageId
+  return api.post('/eval/llm', {}, { params, timeout: 120000 })
+}
+
+/** 获取 LLM 评估结果 */
+export function getLLMEvaluation(targetType, targetId, messageId = null) {
+  const params = {}
+  if (messageId) params.message_id = messageId
+  return api.get(`/eval/llm/${targetType}/${targetId}`, { params })
+}
+
+/** 获取 LLM 评估统计 */
+export function getLLMEvalStats(days = 30) {
+  return api.get('/eval/llm-stats', { params: { days } })
+}
+
+/** 获取用户偏好洞察 */
+export function getUserInsights(userId = 'default') {
+  return api.get(`/eval/user-insights/${userId}`)
+}
+
+/** 提交用户对对话的评分 */
+export function submitConversationUserScore(conversationId, score, breakdown = {}, comment = '') {
+  return api.post(`/eval/conversation/${conversationId}/user-score`, { score, breakdown, comment })
+}
+
+/** 获取对话评估统计 */
+export function getConversationEvalStats() {
+  return api.get('/eval/conversation-stats')
+}
+
+/** 列出对话评估记录 */
+export function listConversationEvaluations(limit = 50, minScore = null) {
+  const params = { limit }
+  if (minScore !== null) params.min_score = minScore
+  return api.get('/eval/conversation-list', { params })
+}
+
+// ── 进化系统 API ──────────────────────────────────────
+
+/** 获取进化效果统计 */
+export function getEvolutionStats(days = 30) {
+  return api.get('/eval/evolution-stats', { params: { days } })
+}
+
+/** 获取评估建议（高分对话转化为 Eval 用例） */
+export function listEvalSuggestions(status = null, limit = 50) {
+  const params = { limit }
+  if (status) params.status = status
+  return api.get('/eval/suggestions', { params })
+}
+
+/** 接受评估建议 */
+export function acceptEvalSuggestion(suggestionId) {
+  return api.post(`/eval/suggestions/${suggestionId}/accept`)
+}
+
+/** 拒绝评估建议 */
+export function rejectEvalSuggestion(suggestionId) {
+  return api.post(`/eval/suggestions/${suggestionId}/reject`)
+}
+
+/** 获取专家表现告警 */
+export function getExpertAlerts(days = 7, limit = 50) {
+  return api.get('/eval/expert-alerts', { params: { days, limit } })
 }
 
 export function getFinanceQuoteBar() {

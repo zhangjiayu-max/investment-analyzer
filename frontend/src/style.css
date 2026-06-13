@@ -470,6 +470,40 @@ button {
   padding: 0.625rem 1.25rem;
 }
 
+/* AI Agent Tooltip — hover 显示 agent 名称 */
+.btn-ai-action { position: relative; }
+.ai-agent-tooltip {
+  position: absolute;
+  top: calc(100% + 8px);
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 0.4rem 0.7rem;
+  font-size: 0.7rem;
+  font-weight: 600;
+  color: white;
+  background: linear-gradient(135deg, #0d1220, #1a1f35);
+  border-radius: var(--radius-md);
+  white-space: nowrap;
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  z-index: 100;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+}
+.ai-agent-tooltip::after {
+  content: '';
+  position: absolute;
+  bottom: 100%;
+  left: 50%;
+  transform: translateX(-50%);
+  border: 5px solid transparent;
+  border-bottom-color: #0d1220;
+}
+.btn-ai-action:hover .ai-agent-tooltip {
+  opacity: 1;
+  visibility: visible;
+}
+
 .input-field {
   background: var(--color-bg-input);
   border: 1px solid var(--color-border);
@@ -839,5 +873,27 @@ button {
   /* 标签/徽章不换行 */
   .badge {
     white-space: nowrap;
+  }
+
+  /* Tooltip 适配小屏幕 */
+  .term-tip,
+  .table-tip-fixed {
+    width: auto;
+    max-width: calc(100vw - 2rem);
+    left: 1rem;
+    right: 1rem;
+    transform: none;
+  }
+
+  .term-tip::after {
+    left: 2rem;
+    transform: none;
+  }
+
+  /* Toast 适配小屏幕 */
+  .toast {
+    max-width: min(360px, calc(100vw - 2rem));
+    right: 1rem;
+    left: 1rem;
   }
 }

@@ -2,7 +2,7 @@
 
 功能特性：
 - FTS5 全文检索（jieba 中文分词）
-- ChromaDB 向量语义搜索（bge-small-zh-v1.5）
+- ChromaDB 向量语义搜索（可配置 embedding 模型）
 - RRF 融合排序
 - 查询扩展（同义词 + 知识图谱）
 - 轻量级重排序
@@ -18,13 +18,100 @@ import sqlite3
 from pathlib import Path
 
 from db._conn import DB_PATH
-from rag_enhanced import expand_query, lightweight_rerank
+from rag_enhanced import expand_query, lightweight_rerank, get_rrf_params
 
 logger = logging.getLogger(__name__)
 
 CHROMA_DIR = Path(__file__).parent.parent / "data" / "chroma_db"
 
-# Reranker 配置：默认关闭，RRF + 标题加权 + 时效性加权已能提供合理排序
+
+# ══════════════════════════════════════════════════════════════
+# RAG 配置管理（从 rag_config 表读取，带内存缓存）
+# ══════════════════════════════════════════════════════════════
+
+# 默认配置值
+_RAG_CONFIG_DEFAULTS = {
+    "score_threshold": ("0.018", "RRF 分数阈值，低于此值的结果被过滤"),
+    "rrf_k": ("60", "RRF (Reciprocal Rank Fusion) k 参数"),
+    "and_fallback_threshold": ("3", "FTS5 AND 查询结果少于此值时降级为 OR"),
+    "max_context_chars": ("3000", "上下文最大字符数"),
+    "body_preview_chars": ("600", "正文预览字符数"),
+    "book_diversity_penalty": ("0.85", "同书惩罚系数（超过 2 条后每条乘此系数）"),
+    "short_content_penalty": ("0.9", "短内容惩罚系数（<200 字的内容）"),
+    "short_content_threshold": ("200", "短内容阈值（字符数）"),
+    "dual_hit_boost": ("1.15", "双通道命中加成系数"),
+    "chroma_max_distance": ("0.8", "ChromaDB 最大余弦距离阈值"),
+    "rrf_top_n": ("5", "每个来源参与 RRF 融合的最大候选数"),
+    "rrf_cross_bonus": ("0.01", "跨来源（FTS+Chroma）命中加成"),
+}
+
+_rag_config_cache: dict[str, str] = {}
+_rag_config_cache_ts: float = 0
+_RAG_CONFIG_CACHE_TTL = 300  # 5 分钟
+
+
+def get_rag_config(key: str, default=None):
+    """从 rag_config 表读取配置，带 5 分钟内存缓存。
+
+    Args:
+        key: 配置键名
+        default: 默认值（如果表中不存在）
+
+    Returns:
+        配置值（字符串）
+    """
+    import time
+    global _rag_config_cache, _rag_config_cache_ts
+
+    now = time.time()
+    if now - _rag_config_cache_ts > _RAG_CONFIG_CACHE_TTL:
+        _rag_config_cache.clear()
+        try:
+            conn = sqlite3.connect(str(DB_PATH))
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute("SELECT key, value FROM rag_config").fetchall()
+            for row in rows:
+                _rag_config_cache[row["key"]] = row["value"]
+            conn.close()
+            _rag_config_cache_ts = now
+        except Exception as e:
+            logger.warning(f"读取 rag_config 失败: {e}")
+
+    if key in _rag_config_cache:
+        return _rag_config_cache[key]
+
+    # 回退到默认值
+    if default is not None:
+        return str(default)
+    if key in _RAG_CONFIG_DEFAULTS:
+        return _RAG_CONFIG_DEFAULTS[key][0]
+    return None
+
+
+def get_rag_config_float(key: str, default: float = 0.0) -> float:
+    """读取浮点型配置。"""
+    val = get_rag_config(key, str(default))
+    try:
+        return float(val)
+    except (ValueError, TypeError):
+        return default
+
+
+def get_rag_config_int(key: str, default: int = 0) -> int:
+    """读取整型配置。"""
+    val = get_rag_config(key, str(default))
+    try:
+        return int(val)
+    except (ValueError, TypeError):
+        return default
+
+
+def _invalidate_rag_config_cache():
+    """使配置缓存失效（更新配置后调用）。"""
+    global _rag_config_cache_ts
+    _rag_config_cache_ts = 0
+
+# Reranker 配置：默认关闭（轻量级重排序已够用，reranker 增加 500ms+ 延迟）
 # 设置环境变量 RERANK_ENABLED=true 可开启
 RERANK_ENABLED = os.getenv("RERANK_ENABLED", "false").lower() == "true"
 
@@ -107,13 +194,19 @@ def rewrite_query(query: str) -> str:
 1. 提取核心关键词（2-5个）
 2. 去除口语化表达（如"我想"、"可以吗"、"怎么样"）
 3. 保留投资术语（如"估值"、"百分位"、"PE"）
-4. 如果涉及指数，保留指数名称
-5. 输出格式：关键词1 关键词2 关键词3
+4. 如果涉及指数/资产，保留名称（如"沪深300"、"黄金"、"美债"）
+5. 跨市场查询保留关键关联词（如"美联储降息对A股影响"需保留"美联储"、"降息"、"A股"）
+6. 输出格式：关键词1 关键词2 关键词3
 
 示例：
 - "白酒现在估值高吗" → "白酒 估值 百分位"
 - "沪深300可以买吗" → "沪深300 估值 买入"
 - "机器人指数怎么样" → "机器人 指数 估值"
+- "黄金还能买吗" → "黄金 价格 投资策略 实际利率"
+- "纳斯达克现在贵吗" → "NASDAQ 估值 PE 百分位"
+- "Fed降息对A股有什么影响" → "美联储 降息 中国 A股 影响"
+- "美债收益率倒挂意味着什么" → "美债 收益率曲线 倒挂 经济衰退"
+- "实际利率和黄金的关系" → "实际利率 黄金 价格 负相关"
 
 只输出关键词，不要其他文字。"""
 
@@ -232,24 +325,100 @@ def index_valuation(index_code: str, index_name: str, valuation_data: dict):
         f"机会值: {opp}",
         f"中位数: {median}",
     ])
-    _index_document("valuation", title, " | ".join(body_parts), index_code)
+    body = " | ".join(body_parts)
+    _index_document("valuation", title, body, index_code)
+    # ChromaDB 索引
+    index_to_chroma("valuation", index_code, title, body)
+
+
+def _format_analysis_json(raw_response: str, index_name: str = "") -> str:
+    """将 analysis_records 的 JSON raw_response 格式化为可读文本。"""
+    if not raw_response:
+        return ""
+    try:
+        import json
+        data = json.loads(raw_response) if isinstance(raw_response, str) else raw_response
+        if not isinstance(data, dict):
+            return raw_response[:3000]
+
+        def _float(v, default=None):
+            """安全转 float。"""
+            if v is None:
+                return default
+            try:
+                return float(v)
+            except (ValueError, TypeError):
+                return default
+
+        parts = []
+        name = data.get("index_name") or index_name or ""
+        metric = data.get("metric_type", "估值")
+        if name:
+            parts.append(f"指数: {name}")
+
+        # 估值核心数据
+        val = _float(data.get("current_value"))
+        if val is not None:
+            parts.append(f"当前{metric}: {val}")
+        pct = _float(data.get("percentile"))
+        if pct is not None:
+            parts.append(f"百分位: {pct:.1f}%")
+        point = _float(data.get("current_point"))
+        if point is not None:
+            parts.append(f"当前点位: {point}")
+        change = _float(data.get("change_pct"))
+        if change is not None:
+            parts.append(f"涨跌幅: {change:+.2f}%")
+
+        # 估值区间
+        for key, label in [("danger_value", "危险值"), ("median", "中位数"), ("opportunity_value", "机会值"),
+                           ("max_value", "历史最高"), ("min_value", "历史最低"), ("avg_value", "历史均值")]:
+            v = _float(data.get(key))
+            if v is not None:
+                parts.append(f"{label}: {v}")
+
+        zscore = _float(data.get("zscore"))
+        if zscore is not None:
+            parts.append(f"Z-Score: {zscore}")
+
+        # 评估结论
+        if pct is not None:
+            if pct >= 80:
+                parts.append("估值评估: 高估区域，注意风险")
+            elif pct >= 50:
+                parts.append("估值评估: 适中偏高")
+            elif pct >= 20:
+                parts.append("估值评估: 适中偏低，可关注")
+            else:
+                parts.append("估值评估: 低估区域，投资机会")
+
+        return " | ".join(parts) if parts else raw_response[:3000]
+    except (json.JSONDecodeError, TypeError):
+        return raw_response[:3000]
 
 
 def index_analysis_record(record_id: int, index_name: str, raw_response: str):
     """索引一条分析记录。"""
-    _index_document("analysis", index_name or "", raw_response[:3000] if raw_response else "", str(record_id))
+    formatted = _format_analysis_json(raw_response, index_name)
+    _index_document("analysis", index_name or "", formatted[:3000] if formatted else "", str(record_id))
 
 
 def index_author_article(article_id: int, title: str, content: str, publish_time: str = ""):
     """索引一篇作者文章（含发布日期，便于判断时效性）。"""
     # 在 body 开头添加日期前缀，让 LLM 能判断内容时效性
     date_prefix = f"[发布日期: {publish_time}] " if publish_time else ""
-    _index_document("author_article", title or "", date_prefix + (content[:5000] if content else ""), str(article_id))
+    body = date_prefix + (content[:5000] if content else "")
+    _index_document("author_article", title or "", body, str(article_id))
+    # ChromaDB 索引
+    index_to_chroma("author_article", str(article_id), title or "", body[:8000])
 
 
 def index_skill_document(doc_id: int, title: str, content: str):
     """索引一篇 Skill 文档（蒸馏后的结构化知识）。"""
-    _index_document("skill", title or "", content[:8000] if content else "", str(doc_id))
+    body = content[:8000] if content else ""
+    _index_document("skill", title or "", body, str(doc_id))
+    # ChromaDB 索引
+    index_to_chroma("skill", str(doc_id), title or "", body)
 
 
 def index_skill_extraction(article_id: int, title: str, skill_data: dict):
@@ -265,12 +434,15 @@ def index_skill_extraction(article_id: int, title: str, skill_data: dict):
         parts.append("经典观点: " + "; ".join(skill_data["classic_quotes"][:3]))
     body = "\n".join(parts)
     _index_document("skill", title or "", body[:3000], str(article_id))
+    # ChromaDB 索引
+    index_to_chroma("skill", str(article_id), title or "", body[:3000])
 
 
 def _sanitize_fts_token(token: str) -> str:
     """处理 FTS5 特殊字符：含特殊字符或多字中文 token 用双引号包裹做短语匹配。"""
     import re
-    if re.search(r'[%*"():^\-]', token):
+    # FTS5 特殊字符：% * " ( ) : ^ - & 等，全部需要引号包裹
+    if re.search(r'[%*"():^\-&]', token):
         return f'"{token}"'
     # 多字中文 token 加引号，让 FTS5 做短语匹配而非单字符匹配
     # "债券" → "\"债券\"" → FTS5 要求"债"和"券"相邻出现
@@ -282,7 +454,7 @@ def _sanitize_fts_token(token: str) -> str:
 # ── 共享停用词表（FTS 查询和 RAG 上下文构建共用）─────────────────
 # 注意：投资领域高价值词汇（估值、投资、分析、趋势等）已移除，避免检索退化
 _STOPWORDS = {
-    "的", "了", "在", "是", "我", "有", "和", "就", "不", "都", "上", "也",
+    "的", "了", "在", "是", "我", "有", "和", "就", "都", "上", "也",
     "到", "说", "要", "去", "你", "会", "着", "看", "好", "这", "他", "她",
     "能", "下", "过", "么", "吗", "呢", "把", "让", "被", "从", "向", "对",
     "以", "可以", "应该", "需要", "现在", "目前", "当前", "最近", "怎么样",
@@ -321,44 +493,18 @@ def _build_fts_query(query: str) -> str:
         return core
     return " OR ".join(single_char)
 
-
-def _extract_key_phrases(query: str) -> list[str]:
-    """从查询中提取关键短语（投资术语、指数名称等）。"""
-    # 投资术语词典
-    investment_terms = {
-        "估值", "百分位", "市盈率", "市净率", "股息率", "风险溢价",
-        "低估", "高估", "合理", "买入", "卖出", "持有", "定投",
-        "沪深300", "中证500", "创业板", "科创板", "红利", "消费",
-        "医药", "科技", "新能源", "白酒", "银行", "证券", "地产",
-        "债券", "可转债", "QDII", "ETF", "LOF", "指数基金",
-    }
-
-    phrases = []
-    # 提取匹配的投资术语
-    for term in investment_terms:
-        if term in query:
-            phrases.append(term)
-
-    # 提取指数代码（如 000300、399006）
-    import re
-    codes = re.findall(r'\b\d{6}\b', query)
-    phrases.extend(codes)
-
-    return phrases
-
-
 # ── 时效性策略：不同类型内容的有效期不同 ──────────────────
-# author_article: 市场评论/行情分析，时效性强，2个月
-# skill: 投资方法论/认知框架，长期有效，12个月
-# valuation: 实时估值数据，不过滤
-# article/analysis: 时效性强，2个月
+# 书籍知识(book)和估值数据(valuation)长期有效，不过滤
+# 作者文章/分析记录有时效性，3个月
+# 投资方法论(skill)长期有效，12个月
 _FRESHNESS_POLICY = {
-    "author_article": 2,
+    "author_article": 3,  # 作者文章，季度内有效
     "skill": 12,  # 投资方法论长期有效，12个月
     "valuation": 0,   # 0 = 不过滤
-    "article": 2,
-    "analysis": 2,
+    "article": 3,  # 文章，季度内有效
+    "analysis": 3,  # 分析记录，季度内有效
     "linked_doc": 0,  # 个人文档不过滤
+    "book": 0,  # 书籍知识长期有效，不过滤
 }
 
 
@@ -404,8 +550,9 @@ def search_knowledge(query: str, content_type: str = None, limit: int = 5) -> tu
     except Exception:
         rows = []
 
-    # AND 无结果时降级为 OR
-    if not rows:
+    # AND 结果太少时降级为 OR
+    and_fallback_threshold = get_rag_config_int("and_fallback_threshold", 3)
+    if len(rows) < and_fallback_threshold:
         relaxed_query = _build_fts_query_relaxed(query)
         if relaxed_query and relaxed_query != fts_query:
             try:
@@ -421,7 +568,7 @@ def search_knowledge(query: str, content_type: str = None, limit: int = 5) -> tu
     return results[:limit], dropped
 
 
-def build_rag_context(query: str, content_types: list[str] = None, limit: int = 5) -> str:
+def build_rag_context(query: str, content_types: list[str] = None, limit: int = 8) -> str:
     """检索知识库并格式化为 LLM 上下文文本。"""
     result = build_rag_context_with_details(query, content_types, limit)
     return result["context"]
@@ -519,8 +666,36 @@ def init_chroma():
     )
 
 
+def reset_chroma_collection():
+    """删除并重建 ChromaDB collection（切换 embedding 模型后必须调用）。
+
+    不同 embedding 模型的向量维度不同（如 bge-small=512, m3e-base=768），
+    旧向量无法与新模型混用，必须清空后重新生成。
+    """
+    global _chroma_collection
+    import chromadb
+
+    CHROMA_DIR.mkdir(parents=True, exist_ok=True)
+    client = chromadb.PersistentClient(path=str(CHROMA_DIR))
+
+    # 删除旧 collection
+    try:
+        client.delete_collection("knowledge")
+        logger.info("已删除旧 ChromaDB collection")
+    except Exception:
+        pass
+
+    # 用新维度重建
+    _chroma_collection = client.create_collection(
+        name="knowledge",
+        metadata={"hnsw:space": "cosine"},
+    )
+    logger.info("已重建 ChromaDB collection")
+    return _chroma_collection
+
+
 def _ensure_embed_model():
-    """延迟加载 embedding 模型（首次调用时下载 ~100MB）。"""
+    """延迟加载 embedding 模型。模型名从 config.EMBED_MODEL_NAME 读取。"""
     global _embed_model
     if _embed_model is not None:
         return _embed_model
@@ -530,25 +705,29 @@ def _ensure_embed_model():
     import warnings
     warnings.filterwarnings("ignore", message=".*certificate.*")
 
-    # 修复 macOS SSL 证书问题
+    # 修复 macOS SSL 证书问题 + 国内镜像加速
     os.environ["HF_HUB_DISABLE_TELEMETRY"] = "1"
     os.environ["HF_HUB_DISABLE_SSL_VERIFICATION"] = "1"
+    if not os.environ.get("HF_ENDPOINT"):
+        os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
     os.environ["CURL_CA_BUNDLE"] = ""
     os.environ["REQUESTS_CA_BUNDLE"] = ""
 
-    # 强制禁用 SSL 验证
     try:
         ssl._create_default_https_context = ssl._create_unverified_context
     except Exception:
         pass
 
+    from config import EMBED_MODEL_NAME
     from sentence_transformers import SentenceTransformer
+
+    logger.info(f"加载 Embedding 模型: {EMBED_MODEL_NAME}")
     try:
-        _embed_model = SentenceTransformer("BAAI/bge-small-zh-v1.5", local_files_only=True)
-        logger.info("Embedding 模型从本地加载成功")
+        _embed_model = SentenceTransformer(EMBED_MODEL_NAME, local_files_only=True)
+        dim = _embed_model.get_embedding_dimension()
+        logger.info(f"Embedding 模型从本地加载成功 (维度: {dim})")
     except Exception as e:
         logger.warning(f"本地加载失败，尝试在线下载: {e}")
-        # 如果本地文件不完整，尝试在线下载（忽略 SSL 错误）
         import httpx
         old_client = httpx.Client
         class NoVerifyClient(old_client):
@@ -557,8 +736,9 @@ def _ensure_embed_model():
                 super().__init__(*args, **kwargs)
         httpx.Client = NoVerifyClient
         try:
-            _embed_model = SentenceTransformer("BAAI/bge-small-zh-v1.5")
-            logger.info("Embedding 模型在线下载成功")
+            _embed_model = SentenceTransformer(EMBED_MODEL_NAME)
+            dim = _embed_model.get_embedding_dimension()
+            logger.info(f"Embedding 模型在线下载成功 (维度: {dim})")
         except Exception as e2:
             logger.error(f"Embedding 模型加载失败: {e2}")
             _embed_model = None
@@ -685,8 +865,17 @@ def _chunk_by_structure(text: str, content_type: str) -> list[str]:
     return _chunk_text(text)
 
 
-def index_to_chroma(content_type: str, reference_id: str, title: str, body: str):
-    """将文档 chunk 后存入 ChromaDB。"""
+def index_to_chroma(content_type: str, reference_id: str, title: str, body: str,
+                    extra_metadata: dict = None):
+    """将文档 chunk 后存入 ChromaDB。
+
+    Args:
+        content_type: 内容类型
+        reference_id: 引用 ID
+        title: 标题
+        body: 正文内容
+        extra_metadata: 额外元数据（会合并到每个 chunk 的 metadata 中）
+    """
     collection = _get_chroma()
     model = _get_embed_model()
     if not collection or not model:
@@ -716,10 +905,16 @@ def index_to_chroma(content_type: str, reference_id: str, title: str, body: str)
     embeddings = model.encode(chunks, normalize_embeddings=True).tolist()
 
     ids = [f"{content_type}:{reference_id}:chunk{i}" for i in range(len(chunks))]
-    metadatas = [
-        {"content_type": content_type, "reference_id": reference_id, "title": title or "", "chunk_index": i}
-        for i in range(len(chunks))
-    ]
+    base_meta = {"content_type": content_type, "reference_id": reference_id,
+                 "title": title or "", "chunk_index": 0}
+    if extra_metadata:
+        base_meta.update(extra_metadata)
+
+    metadatas = []
+    for i in range(len(chunks)):
+        meta = base_meta.copy()
+        meta["chunk_index"] = i
+        metadatas.append(meta)
 
     collection.add(
         ids=ids,
@@ -728,6 +923,36 @@ def index_to_chroma(content_type: str, reference_id: str, title: str, body: str)
         metadatas=metadatas,
     )
     return len(chunks)
+
+
+def delete_chroma_by_filter(content_type: str, **filters) -> int:
+    """按过滤条件删除 ChromaDB 中的文档，返回删除条数。"""
+    collection = _get_chroma()
+    if not collection:
+        return 0
+
+    try:
+        conditions = [{"content_type": content_type}]
+        for k, v in filters.items():
+            conditions.append({k: v})
+
+        where = {"$and": conditions} if len(conditions) > 1 else conditions[0]
+        existing = collection.get(where=where)
+        if existing and existing["ids"]:
+            collection.delete(ids=existing["ids"])
+            return len(existing["ids"])
+    except Exception as e:
+        logger.warning(f"ChromaDB 删除失败: {e}")
+    return 0
+
+
+def index_book_knowledge(knowledge_id: int, title: str, content: str, source: str):
+    """索引一条书籍知识到 FTS + ChromaDB。"""
+    # FTS 索引
+    _index_document("book", title, content, str(knowledge_id))
+    # ChromaDB 索引（带上 source 便于后续清理）
+    index_to_chroma("book", str(knowledge_id), title, content,
+                    extra_metadata={"source": source or ""})
 
 
 def search_chroma(query: str, content_type: str = None, content_types: list[str] = None, limit: int = 5) -> tuple[list[dict], int]:
@@ -763,11 +988,17 @@ def search_chroma(query: str, content_type: str = None, content_types: list[str]
     if not results or not results["ids"] or not results["ids"][0]:
         return [], 0
 
+    # 距离阈值：过滤低相关结果
+    max_distance = get_rag_config_float("chroma_max_distance", 0.8)
+
     output = []
     for i in range(len(results["ids"][0])):
         meta = results["metadatas"][0][i]
         doc = results["documents"][0][i]
         distance = results["distances"][0][i]
+        # cosine distance 越小越相似，超过阈值的跳过
+        if distance > max_distance:
+            continue
         # cosine distance -> similarity score (越小越相似，转为负数做 rank)
         output.append({
             "content_type": meta.get("content_type", ""),
@@ -791,7 +1022,7 @@ def _filter_old_results(results: list[dict], conn=None) -> tuple[list[dict], int
     for r in results:
         ct = r.get("content_type", "")
         max_months = _FRESHNESS_POLICY.get(ct, 0)
-        if max_months > 0 and ct in ("author_article", "skill"):
+        if max_months > 0:
             ids_by_type.setdefault(ct, set()).add(r["reference_id"])
 
     if not ids_by_type:
@@ -854,6 +1085,29 @@ def _filter_old_results(results: list[dict], conn=None) -> tuple[list[dict], int
                 for dr in date_rows2:
                     date_map[f"skill:{dr['id']}"] = _normalize_date(dr["publish_time"] or "")
 
+        # article 类型：查 articles 表
+        if "article" in ids_by_type:
+            art_ids = list(ids_by_type["article"])
+            placeholders = ",".join("?" * len(art_ids))
+            date_rows = conn.execute(
+                f"SELECT id, publish_time FROM articles WHERE id IN ({placeholders})",
+                art_ids
+            ).fetchall()
+            for dr in date_rows:
+                date_map[f"article:{dr['id']}"] = _normalize_date(dr["publish_time"] or "")
+
+        # analysis 类型：通过 article_id 关联 articles 表
+        if "analysis" in ids_by_type:
+            ana_ids = list(ids_by_type["analysis"])
+            placeholders = ",".join("?" * len(ana_ids))
+            date_rows = conn.execute(
+                f"SELECT ar.id, a.publish_time FROM analysis_records ar "
+                f"JOIN articles a ON ar.article_id = a.id WHERE ar.id IN ({placeholders})",
+                ana_ids
+            ).fetchall()
+            for dr in date_rows:
+                date_map[f"analysis:{dr['id']}"] = _normalize_date(dr["publish_time"] or "")
+
         if own_conn:
             conn.close()
     except Exception:
@@ -866,7 +1120,7 @@ def _filter_old_results(results: list[dict], conn=None) -> tuple[list[dict], int
     for r in results:
         ct = r.get("content_type", "")
         max_months = _FRESHNESS_POLICY.get(ct, 0)
-        if max_months > 0 and ct in ("author_article", "skill"):
+        if max_months > 0:
             date_str = date_map.get(f"{ct}:{r['reference_id']}", "")
             if date_str:
                 cutoff = (now - timedelta(days=max_months * 30)).strftime("%Y-%m")
@@ -966,7 +1220,125 @@ def _enrich_results_with_time(results: list[dict]) -> list[dict]:
     return results
 
 
-def build_rag_context_with_details(query: str, content_types: list[str] = None, limit: int = 5) -> dict:
+# ── 指数名称检测 + 估值直接注入 ──────────────────────────────
+
+# 已知指数名称缓存（启动时加载，5 分钟刷新）
+_known_index_names: list[str] = []
+_known_index_names_ts: float = 0
+
+
+def _get_known_index_names() -> list[str]:
+    """从 index_valuations 表获取所有已知指数名称。"""
+    global _known_index_names, _known_index_names_ts
+    import time
+
+    now = time.time()
+    if now - _known_index_names_ts < 300 and _known_index_names:
+        return _known_index_names
+
+    try:
+        conn = _get_conn()
+        rows = conn.execute(
+            "SELECT DISTINCT index_name FROM index_valuations WHERE index_name IS NOT NULL"
+        ).fetchall()
+        conn.close()
+        _known_index_names = [r["index_name"] for r in rows if r["index_name"]]
+        _known_index_names_ts = now
+    except Exception:
+        pass
+    return _known_index_names
+
+
+def _detect_index_names(query: str) -> list[str]:
+    """从查询中检测指数名称（如"恒生科技"、"沪深300"等）。"""
+    names = _get_known_index_names()
+    matched = []
+    # 按名称长度降序匹配，优先匹配长名称
+    for name in sorted(names, key=len, reverse=True):
+        if name in query and name not in matched:
+            matched.append(name)
+    return matched
+
+
+def _inject_valuation_data(query: str, detected_indexes: list[str]) -> tuple[str, list[dict]]:
+    """当检测到指数名称时，直接从 index_valuations 表注入最新估值数据。
+
+    返回 (注入的上下文文本, 估值结果列表)。
+    """
+    if not detected_indexes:
+        return "", []
+
+    try:
+        conn = _get_conn()
+        valuation_results = []
+
+        for index_name in detected_indexes:
+            # 查该指数的所有指标最新数据
+            rows = conn.execute("""
+                SELECT index_code, index_name, metric_type, snapshot_date,
+                       current_value, percentile, zscore, danger_value,
+                       opportunity_value, median
+                FROM index_valuations
+                WHERE index_name = ?
+                ORDER BY snapshot_date DESC
+                LIMIT 3
+            """, (index_name,)).fetchall()
+
+            for r in rows:
+                r = dict(r)
+                # 构建标准化的 body
+                body_parts = [f"日期: {r.get('snapshot_date', '')}"]
+                body_parts.append(f"指数: {r.get('index_name', '')}")
+                body_parts.append(f"指标: {r.get('metric_type', '')}")
+                body_parts.append(f"当前值: {r.get('current_value', '')}")
+                body_parts.append(f"百分位: {r.get('percentile', '')}%")
+                body_parts.append(f"Z-Score: {r.get('zscore', '')}")
+                body_parts.append(f"危险值: {r.get('danger_value', '')}")
+                body_parts.append(f"机会值: {r.get('opportunity_value', '')}")
+                body_parts.append(f"中位数: {r.get('median', '')}")
+                body = " | ".join(body_parts)
+
+                title = f"{r['index_name']} {r['metric_type']}估值"
+
+                valuation_results.append({
+                    "content_type": "valuation",
+                    "title": title,
+                    "body": body,
+                    "reference_id": r.get("index_code", ""),
+                    "rank": -100,  # 最高优先级
+                    "label": "估值",
+                    "source": "direct",
+                    "time": r.get("snapshot_date", ""),
+                    "_score": 1.0,  # 最高分
+                    "_direct_inject": True,
+                })
+
+        conn.close()
+
+        # 去重（同一指数+指标只保留最新）
+        seen = set()
+        unique_results = []
+        for r in valuation_results:
+            key = f"{r['reference_id']}:{r['body'].split('指标:')[1].split('|')[0].strip() if '指标:' in r['body'] else ''}"
+            if key not in seen:
+                seen.add(key)
+                unique_results.append(r)
+
+        # 构建注入文本
+        if unique_results:
+            parts = []
+            for r in unique_results:
+                parts.append(f"[{r['label']}] {r['title']} ({r['time']})\n{r['body']}")
+            inject_text = "\n\n---\n\n".join(parts)
+            return inject_text, unique_results
+
+        return "", []
+    except Exception as e:
+        logger.warning(f"注入估值数据失败: {e}")
+        return "", []
+
+
+def build_rag_context_with_details(query: str, content_types: list[str] = None, limit: int = 8) -> dict:
     """检索知识库（FTS5 + 向量混合），返回上下文文本和详细检索结果。
 
     返回:
@@ -980,6 +1352,12 @@ def build_rag_context_with_details(query: str, content_types: list[str] = None, 
             "freshness_filtered": int,   # 被时效性策略过滤的条数
         }
     """
+    # 检测查询中的指数名称，直接注入估值数据
+    detected_indexes = _detect_index_names(query)
+    direct_valuation_text, direct_valuation_results = _inject_valuation_data(query, detected_indexes)
+    if detected_indexes:
+        logger.info(f"检测到指数名称: {detected_indexes}，注入估值数据 {len(direct_valuation_results)} 条")
+
     # 提取检索关键词
     tokens = _tokenize(query).split()
     # 先过滤停用词，再清洗特殊字符
@@ -990,31 +1368,32 @@ def build_rag_context_with_details(query: str, content_types: list[str] = None, 
     single_char = [t for t in cleaned if len(t) == 1 and '一' <= t <= '鿿']
     keywords = multi_char + single_char if multi_char else (single_char or cleaned)
 
-    # 查询扩展（同义词 + 知识图谱）
+    # 查询扩展（同义词 + 知识图谱）— 仅用于 ChromaDB 语义搜索
     expanded_query = expand_query(query)
     if expanded_query != query:
         logger.info(f"查询扩展: '{query}' -> '{expanded_query[:100]}...'")
 
-    # FTS5 搜索（使用扩展查询）
+    # FTS5 搜索（使用原始查询，避免扩展的英文特殊字符破坏 FTS 语法）
     total_freshness_filtered = 0
     if content_types:
         fts_results = []
         for ct in content_types:
-            partial, dropped = search_knowledge(expanded_query, content_type=ct, limit=limit)
+            partial, dropped = search_knowledge(query, content_type=ct, limit=limit)
             fts_results.extend(partial)
             total_freshness_filtered += dropped
     else:
-        fts_results, dropped = search_knowledge(expanded_query, limit=limit)
+        fts_results, dropped = search_knowledge(query, limit=limit)
         total_freshness_filtered += dropped
 
     fts_count = len(fts_results)
 
-    # 向量搜索（使用原始查询，保持语义准确性）
+    # 向量搜索（使用扩展查询，补充口语化同义词提升语义匹配）
+    # 候选数量放大 2 倍，经 RRF 融合 + 分数阈值后再截取 top limit
     chroma_results, _ = search_chroma(
-        query,
+        expanded_query,
         content_type=content_types[0] if content_types and len(content_types) == 1 else None,
         content_types=content_types if content_types and len(content_types) > 1 else None,
-        limit=limit
+        limit=limit * 2
     )
     chroma_count = len(chroma_results)
 
@@ -1025,17 +1404,31 @@ def build_rag_context_with_details(query: str, content_types: list[str] = None, 
     logger.info(f"RAG 搜索: query='{query}', FTS5={fts_count}条, 向量={chroma_count}条, 过滤={total_freshness_filtered}条")
 
     # RRF (Reciprocal Rank Fusion) 合并排序 — 比独立归一化更可靠
-    def _rrf_score(results: list[dict], k: int = 60) -> dict:
+    # 优先使用意图分类的 k 值，配置值作为覆盖
+    intent_k = get_rrf_params(query)
+    config_k = get_rag_config_int("rrf_k", 0)
+    rrf_k = config_k if config_k > 0 else intent_k
+    logger.info(f"RRF k={rrf_k} (intent={intent_k}, config={config_k})")
+
+    # 每个来源只取 top-N 参与融合，避免长尾低质量结果干扰排序
+    rrf_top_n = get_rag_config_int("rrf_top_n", 5)
+    fts_candidates = sorted(fts_results, key=lambda x: x["rank"])[:rrf_top_n]
+    chroma_candidates = sorted(chroma_results, key=lambda x: x["rank"])[:rrf_top_n]
+
+    def _rrf_score(results: list[dict], k: int = None) -> dict:
         """返回 {key: rrf_score} 的映射。rank 越小越好。"""
+        if k is None:
+            k = rrf_k
         sorted_r = sorted(results, key=lambda x: x["rank"])
         return {f"{r['content_type']}:{r['reference_id']}": 1.0 / (k + i + 1) for i, r in enumerate(sorted_r)}
 
-    fts_rrf = _rrf_score(fts_results)
-    chroma_rrf = _rrf_score(chroma_results)
+    fts_rrf = _rrf_score(fts_candidates)
+    chroma_rrf = _rrf_score(chroma_candidates)
 
     # 记录每个 key 的来源
     fts_keys = set(fts_rrf.keys())
     chroma_keys = set(chroma_rrf.keys())
+    cross_source_bonus = get_rag_config_float("rrf_cross_bonus", 0.01)
 
     # 合并去重（按 content_type + reference_id 去重，用 RRF 分数合并）
     seen = {}
@@ -1043,7 +1436,10 @@ def build_rag_context_with_details(query: str, content_types: list[str] = None, 
         key = f"{r['content_type']}:{r['reference_id']}"
         rft_score = fts_rrf.get(key, 0)
         chroma_score = chroma_rrf.get(key, 0)
-        r["_score"] = rft_score + chroma_score  # RRF: 两个排名分数直接相加
+        # 跨来源加权：同时出现在 FTS5 和 ChromaDB 的结果更可信
+        cross_bonus = cross_source_bonus if (key in fts_keys and key in chroma_keys) else 0
+        r["_score"] = rft_score + chroma_score + cross_bonus
+        r["source"] = ("both" if cross_bonus else ("fts" if key in fts_keys else "chroma"))
         if key not in seen or r["_score"] > seen[key]["_score"]:
             seen[key] = r
 
@@ -1074,6 +1470,103 @@ def build_rag_context_with_details(query: str, content_types: list[str] = None, 
                     r["_score"] += 0.02
             except Exception:
                 pass
+
+    # 指数名称匹配加权：当查询包含指数名称时，提升估值和分析结果的权重
+    if detected_indexes:
+        for r in all_results:
+            if r.get("_direct_inject"):
+                continue  # 直接注入的已经是最高分，跳过
+            if r.get("content_type") == "valuation":
+                r["_score"] *= 1.5  # 估值数据加权 50%
+            elif r.get("content_type") == "analysis":
+                r["_score"] *= 1.2  # 分析记录加权 20%
+
+    all_results.sort(key=lambda x: x["_score"], reverse=True)
+
+    # 同书多样性：同一本书的结果超过 2 条后，逐条递减分数
+    book_diversity_penalty = get_rag_config_float("book_diversity_penalty", 0.85)
+    book_count = {}
+    for r in all_results:
+        if r.get("content_type") == "book":
+            source = r.get("source", "")
+            if not source:
+                # 从 title 中提取书名
+                title = r.get("title", "")
+                if title.startswith("["):
+                    source = title.split("]")[0].strip("[")
+            book_count[source] = book_count.get(source, 0) + 1
+            if book_count[source] > 2:
+                r["_score"] *= book_diversity_penalty
+
+    # 内容长度加权：低质量碎片额外降权，抑制目录级摘要淹没高质量内容
+    short_content_penalty = get_rag_config_float("short_content_penalty", 0.9)
+    short_content_threshold = get_rag_config_int("short_content_threshold", 200)
+    for r in all_results:
+        body_len = len(r.get("body", ""))
+        if body_len > 0 and body_len < short_content_threshold:
+            r["_score"] *= short_content_penalty
+
+    # 双路命中加分：同时被 FTS5 和 ChromaDB 命中的结果更可靠
+    # 必须在阈值过滤之前，避免边界结果被误杀
+    dual_hit_boost = get_rag_config_float("dual_hit_boost", 1.15)
+    for r in all_results:
+        key = f"{r['content_type']}:{r['reference_id']}"
+        if key in fts_keys and key in chroma_keys:
+            r["_score"] *= dual_hit_boost
+
+    # 最低分数阈值：过滤明显不相关的结果
+    # 绝对阈值 0.018（RRF k=60 时，排名第 55 的结果分数约为 1/(60+55) ≈ 0.0087）
+    # 双路命中加分后的最低有效分数约 0.018
+    SCORE_THRESHOLD = get_rag_config_float("score_threshold", 0.018)
+    if all_results:
+        before_count = len(all_results)
+        all_results = [r for r in all_results if r["_score"] >= SCORE_THRESHOLD]
+        if len(all_results) < before_count:
+            logger.info(f"分数阈值过滤: {before_count} → {len(all_results)}条 (阈值={SCORE_THRESHOLD})")
+
+    # 同指数 analysis 去重：同一指数最多保留 2 条（最新 + 最高分），避免重复记录占满结果
+    _analysis_dedup = {}
+    for r in all_results:
+        if r.get("content_type") == "analysis":
+            key = r.get("title", "").strip()
+            if key not in _analysis_dedup:
+                _analysis_dedup[key] = []
+            _analysis_dedup[key].append(r)
+    _dedup_limit = 2
+    _to_remove = []
+    for key, items in _analysis_dedup.items():
+        if len(items) > _dedup_limit:
+            # 保留分数最高的 2 条
+            items.sort(key=lambda x: x.get("_score", 0), reverse=True)
+            _to_remove.extend(items[_dedup_limit:])
+    if _to_remove:
+        remove_ids = {id(r) for r in _to_remove}
+        all_results = [r for r in all_results if id(r) not in remove_ids]
+        logger.info(f"analysis 去重: 移除 {len(_to_remove)} 条重复记录")
+
+    # 查询实体过滤：当查询包含具体指数名时，移除 valuation/analysis 中标题不匹配的结果
+    # 避免语义搜索返回"中证白酒""中证红利"等不相关指数
+    detected_indexes = _detect_index_names(query)
+    if detected_indexes:
+        before_count = len(all_results)
+        index_keywords = set()
+        for name in detected_indexes:
+            index_keywords.add(name)
+            core = name.replace("中证", "").replace("上证", "").replace("深证", "").strip()
+            if core and len(core) >= 2:
+                index_keywords.add(core)
+        _strict_types = {"valuation", "analysis"}
+        filtered = []
+        for r in all_results:
+            if r.get("content_type") in _strict_types:
+                title = r.get("title", "")
+                if any(kw in title for kw in index_keywords):
+                    filtered.append(r)
+            else:
+                filtered.append(r)  # book/skill/knowledge 不过滤
+        all_results = filtered
+        if len(all_results) < before_count:
+            logger.info(f"实体过滤: {before_count} → {len(all_results)}条 (指数: {index_keywords})")
 
     all_results.sort(key=lambda x: x["_score"], reverse=True)
     logger.info(f"RAG 合并后: {len(all_results)}条, 类型: {[r['content_type'] for r in all_results]}")
@@ -1111,12 +1604,22 @@ def build_rag_context_with_details(query: str, content_types: list[str] = None, 
         "skill": "技能知识",
         "linked_doc": "个人文档",
         "knowledge": "投资知识",
+        "book": "书籍知识",
     }
     for r in all_results:
         r["label"] = label_map.get(r["content_type"], r["content_type"])
 
     # 补充时间信息
     _enrich_results_with_time(all_results)
+
+    # 合并直接注入的估值数据（放在最前面，确保 LLM 优先看到）
+    if direct_valuation_results:
+        # 去重：如果 RAG 已经有相同的估值结果，用直接注入的替换
+        rag_keys = {f"{r['content_type']}:{r['reference_id']}" for r in all_results}
+        for r in direct_valuation_results:
+            key = f"{r['content_type']}:{r['reference_id']}"
+            if key not in rag_keys:
+                all_results.insert(0, r)
 
     if not all_results:
         return {
@@ -1128,7 +1631,8 @@ def build_rag_context_with_details(query: str, content_types: list[str] = None, 
     # 构建上下文：以完整结果为单位，避免截断丢失来源标注
     parts = []
     total_chars = 0
-    max_context_chars = 3000  # 最大上下文字符数
+    max_context_chars = get_rag_config_int("max_context_chars", 3000)
+    body_preview_chars = get_rag_config_int("body_preview_chars", 600)
 
     for r in all_results:
         # 构建单条结果（包含来源标注）
@@ -1140,7 +1644,7 @@ def build_rag_context_with_details(query: str, content_types: list[str] = None, 
 
         # 添加 body（限制长度但保持完整性）
         if r["body"]:
-            body_preview = r["body"][:600]
+            body_preview = r["body"][:body_preview_chars]
             part += f"\n{body_preview}"
 
         # 以完整结果为单位截断
@@ -1184,6 +1688,8 @@ def build_rag_context_with_details(query: str, content_types: list[str] = None, 
         "fts_count": fts_count,
         "chroma_count": chroma_count,
         "freshness_filtered": total_freshness_filtered,
+        "detected_indexes": detected_indexes,
+        "direct_valuation_count": len(direct_valuation_results),
     }
 
 
@@ -1192,19 +1698,30 @@ def build_rag_context_with_details(query: str, content_types: list[str] = None, 
 def index_article_to_rag(article_id: int):
     """将文章索引到 FTS + ChromaDB。"""
     conn = _get_conn()
-    article = conn.execute(
-        "SELECT id, title, content_text FROM articles WHERE id = ?",
-        (article_id,)
-    ).fetchone()
+    # articles 表可能没有 content_text 列（图片格式的文章）
+    try:
+        article = conn.execute(
+            "SELECT id, title, content_text FROM articles WHERE id = ?",
+            (article_id,)
+        ).fetchone()
+    except Exception:
+        # 没有 content_text 列，只用 title
+        article = conn.execute(
+            "SELECT id, title FROM articles WHERE id = ?",
+            (article_id,)
+        ).fetchone()
+        if article:
+            article = dict(article)
+            article["content_text"] = ""
     conn.close()
 
     if not article:
         return False
 
     title = article["title"] or ""
-    content = article["content_text"] or ""
+    content = article.get("content_text") or ""
 
-    if not content:
+    if not content and not title:
         return False
 
     # FTS 索引
@@ -1235,11 +1752,14 @@ def index_analysis_to_rag(record_id: int):
     if not raw_response:
         return False
 
+    # 格式化为可读文本（FTS5 和 ChromaDB 都用格式化后的内容）
+    formatted = _format_analysis_json(raw_response, index_name)
+
     # FTS 索引
-    index_analysis_record(record["id"], index_name, raw_response)
+    index_analysis_record(record["id"], index_name, formatted)
 
     # ChromaDB 索引
-    index_to_chroma("analysis", str(record["id"]), index_name, raw_response[:8000])
+    index_to_chroma("analysis", str(record["id"]), index_name, formatted[:8000])
 
     logger.info(f"已索引分析记录: {index_name} (id={record_id})")
     return True
@@ -1249,7 +1769,9 @@ def reindex_all_articles(limit: int = 1000):
     """批量重建所有文章索引。"""
     from db import list_articles
 
-    articles = list_articles(limit=limit)
+    articles = list_articles()
+    if len(articles) > limit:
+        articles = articles[:limit]
     indexed = 0
     for article in articles:
         if index_article_to_rag(article["id"]):
@@ -1274,8 +1796,12 @@ def reindex_all_analysis_records(limit: int = 1000):
 
 
 def reindex_all(limit: int = 1000):
-    """批量重建所有索引。"""
+    """批量重建所有索引（含 ChromaDB collection 重建）。"""
     results = {}
+
+    # 0. 重建 ChromaDB collection（清除旧向量，用当前 embedding 模型维度重建）
+    logger.info("重建 ChromaDB collection...")
+    reset_chroma_collection()
 
     # 1. 重建文章索引
     logger.info("开始重建文章索引...")
@@ -1311,6 +1837,24 @@ def reindex_all(limit: int = 1000):
         val_indexed += 1
     results["valuations"] = {"total": len(valuations), "indexed": val_indexed}
 
+    # 5. 重建书籍知识索引
+    logger.info("开始重建书籍知识索引...")
+    from db.knowledge import list_knowledge
+    books = list_knowledge(category="book", limit=limit)
+    book_indexed = 0
+    for item in books:
+        try:
+            index_book_knowledge(
+                knowledge_id=item["id"],
+                title=item["title"],
+                content=item["content"],
+                source=item.get("source", ""),
+            )
+            book_indexed += 1
+        except Exception as e:
+            logger.warning(f"书籍索引失败 id={item['id']}: {e}")
+    results["books"] = {"total": len(books), "indexed": book_indexed}
+
     logger.info(f"全部索引完成: {results}")
     return results
 
@@ -1321,7 +1865,7 @@ def get_rag_stats_summary():
 
     # FTS 统计
     fts_counts = {}
-    for content_type in ["article", "analysis", "author_article", "skill", "valuation"]:
+    for content_type in ["article", "analysis", "author_article", "skill", "valuation", "book"]:
         row = conn.execute(
             "SELECT COUNT(*) as cnt FROM knowledge_fts WHERE content_type = ?",
             (content_type,)
@@ -1330,12 +1874,13 @@ def get_rag_stats_summary():
 
     conn.close()
 
-    # ChromaDB 统计
+    # ChromaDB 统计（确保已初始化）
     chroma_counts = {}
     try:
+        init_chroma()
         collection = _get_chroma()
         if collection:
-            for content_type in ["article", "analysis", "author_article", "skill", "valuation"]:
+            for content_type in ["article", "analysis", "author_article", "skill", "valuation", "book"]:
                 try:
                     result = collection.get(where={"content_type": content_type})
                     chroma_counts[content_type] = len(result["ids"]) if result and result["ids"] else 0

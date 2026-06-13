@@ -1,6 +1,6 @@
 <script setup>
 import { ref, computed, onMounted } from 'vue'
-import { listLinkedArticles, uploadDocument, downloadDocument, deleteLinkedArticle, getDocumentContent, embedDocument, getDocumentChunks, testRagSearch } from '../api'
+import { listLinkedArticles, uploadDocument, downloadDocument, deleteLinkedArticle, getDocumentContent, embedDocument, getDocumentChunks } from '../api'
 import { renderMarkdown } from '../composables/useMarkdown'
 import ConfirmDialog from './ConfirmDialog.vue'
 import AppToast from './AppToast.vue'
@@ -24,10 +24,6 @@ const chunksDoc = ref(null)
 const chunksData = ref([])
 const chunksLoading = ref(false)
 
-// 命中测试
-const testQuery = ref('')
-const testResults = ref(null)
-const testLoading = ref(false)
 
 const confirm = ref({ visible: false, title: '', message: '', danger: false, action: null })
 function showConfirm(title, message, action, danger = false) {
@@ -198,20 +194,6 @@ function getTypeClass(type) {
   return 'type-' + (type || 'default')
 }
 
-async function testSearch() {
-  if (!testQuery.value.trim()) return
-  testLoading.value = true
-  testResults.value = null
-  try {
-    const { data } = await testRagSearch(testQuery.value)
-    testResults.value = data
-  } catch (e) {
-    showToast('测试失败: ' + (e.response?.data?.detail || e.message), 'error')
-  } finally {
-    testLoading.value = false
-  }
-}
-
 onMounted(loadDocuments)
 </script>
 
@@ -364,45 +346,6 @@ onMounted(loadDocuments)
       </div>
     </div>
 
-    <!-- 命中测试区域 -->
-    <div class="test-section">
-      <h3 class="section-title">命中测试</h3>
-      <div class="test-bar">
-        <input v-model="testQuery" type="text" placeholder="输入查询词测试检索效果..." class="test-input" @keyup.enter="testSearch" />
-        <button class="btn-primary" :disabled="testLoading || !testQuery.trim()" @click="testSearch">
-          {{ testLoading ? '检索中...' : '测试' }}
-        </button>
-      </div>
-      <div v-if="testResults" class="test-results">
-        <!-- 诊断信息 -->
-        <div v-if="testResults.debug" class="test-debug">
-          <span>FTS5 关键词命中: {{ testResults.debug.fts_count }} 条</span>
-          <span>向量语义命中: {{ testResults.debug.vector_count }} 条</span>
-          <span>向量库总量: {{ testResults.debug.total_in_chroma }} 条</span>
-          <span :class="testResults.debug.chroma_available ? 'status-ok' : 'status-err'">
-            {{ testResults.debug.chroma_available ? '向量检索可用' : '向量检索不可用' }}
-          </span>
-        </div>
-        <div v-if="testResults.results.length === 0" class="test-empty">无命中结果</div>
-        <div v-else class="test-result-list">
-          <div v-for="(r, i) in testResults.results" :key="i" class="test-result-item">
-            <div class="result-header">
-              <span class="result-rank">#{{ i + 1 }}</span>
-              <span class="result-type">{{ r.label }}</span>
-              <span class="result-title">{{ r.title }}</span>
-              <div class="result-score-bar">
-                <div class="score-fill" :style="{ width: (r._score * 100) + '%' }"></div>
-                <span class="score-text">{{ (r._score * 100)?.toFixed(0) }}%</span>
-              </div>
-            </div>
-            <pre class="result-body">{{ r.body?.slice(0, 300) }}{{ r.body?.length > 300 ? '...' : '' }}</pre>
-          </div>
-        </div>
-        <div v-if="testResults.keywords?.length" class="test-keywords">
-          关键词：{{ testResults.keywords.join('、') }}
-        </div>
-      </div>
-    </div>
   </div>
 
   <ConfirmDialog
@@ -419,6 +362,7 @@ onMounted(loadDocuments)
   display: flex;
   flex-direction: column;
   height: calc(100vh - 120px);
+  height: calc(100dvh - 120px);
   overflow-y: auto;
 }
 
@@ -830,171 +774,6 @@ onMounted(loadDocuments)
   max-height: 200px;
   overflow-y: auto;
   color: var(--color-text-primary);
-}
-
-/* Test section */
-.test-section {
-  margin-top: 1.5rem;
-  padding-top: 1.5rem;
-  border-top: 1px solid var(--color-border);
-}
-
-.section-title {
-  font-size: 0.95rem;
-  font-weight: 600;
-  color: var(--color-text-primary);
-  margin: 0 0 0.75rem 0;
-}
-
-.test-bar {
-  display: flex;
-  gap: 0.5rem;
-}
-
-.test-input {
-  flex: 1;
-  padding: 0.5rem 0.75rem;
-  font-size: 0.85rem;
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
-  background: var(--color-bg-input);
-  color: var(--color-text-primary);
-}
-
-.test-input:focus {
-  outline: none;
-  border-color: var(--color-primary-400);
-}
-
-.test-results {
-  margin-top: 0.75rem;
-}
-
-.test-debug {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.75rem;
-  padding: 0.5rem 0.75rem;
-  margin-bottom: 0.5rem;
-  background: var(--color-bg-hover);
-  border-radius: var(--radius-md);
-  font-size: 0.75rem;
-  color: var(--color-text-secondary);
-}
-
-.test-debug .status-ok {
-  color: #16a34a;
-  font-weight: 600;
-}
-
-.test-debug .status-err {
-  color: #dc2626;
-  font-weight: 600;
-}
-
-.result-rank {
-  font-size: 0.7rem;
-  font-weight: 700;
-  color: var(--color-primary-600);
-  min-width: 1.5rem;
-}
-
-.test-empty {
-  text-align: center;
-  padding: 1.5rem;
-  color: var(--color-text-muted);
-  font-size: 0.85rem;
-}
-
-.test-result-list {
-  display: flex;
-  flex-direction: column;
-  gap: 0.5rem;
-}
-
-.test-result-item {
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
-  overflow: hidden;
-}
-
-.result-header {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-  padding: 0.4rem 0.75rem;
-  background: var(--color-bg-hover);
-  font-size: 0.8rem;
-}
-
-.result-type {
-  font-size: 0.65rem;
-  font-weight: 600;
-  padding: 0.1rem 0.35rem;
-  border-radius: var(--radius-sm);
-  background: var(--color-primary-50);
-  color: var(--color-primary-700);
-}
-
-.dark .result-type {
-  background: rgba(201, 168, 76, 0.15);
-  color: var(--color-primary-300);
-}
-
-.result-title {
-  font-weight: 500;
-  color: var(--color-text-primary);
-  flex: 1;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.result-score {
-  font-size: 0.7rem;
-  color: var(--color-text-muted);
-  font-family: monospace;
-}
-
-.result-score-bar {
-  display: flex;
-  align-items: center;
-  gap: 0.35rem;
-  min-width: 80px;
-}
-
-.score-fill {
-  height: 6px;
-  background: linear-gradient(90deg, var(--color-primary-400), var(--color-primary-600));
-  border-radius: 3px;
-  min-width: 4px;
-  transition: width 0.3s ease;
-}
-
-.score-text {
-  font-size: 0.7rem;
-  font-weight: 600;
-  color: var(--color-primary-600);
-  min-width: 2.5rem;
-  text-align: right;
-}
-
-.result-body {
-  padding: 0.5rem 0.75rem;
-  font-size: 0.8rem;
-  line-height: 1.5;
-  white-space: pre-wrap;
-  word-break: break-word;
-  margin: 0;
-  color: var(--color-text-secondary);
-  max-height: 150px;
-  overflow-y: auto;
-}
-
-.test-keywords {
-  margin-top: 0.5rem;
-  font-size: 0.75rem;
-  color: var(--color-text-muted);
 }
 
 @media (max-width: 768px) {

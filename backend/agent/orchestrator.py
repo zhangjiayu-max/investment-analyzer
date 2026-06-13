@@ -17,6 +17,7 @@ from db.agents import (
     cancel_running_agents,
 )
 from config import ARBITRATION_API_KEY
+from agent.orchestrator_optimizer import OrchestratorOptimizer, ParallelExecutor
 
 # 全局超时限制（秒）
 MAX_ORCHESTRATION_SECONDS = 1800  # 30 分钟
@@ -67,35 +68,8 @@ def _detect_specialist_disagreement(specialist_results: list) -> bool:
     保守策略：只要有分歧就触发，只在完全一致时跳过。
     纯字符串匹配，无 LLM 调用，零延迟。
     """
-    if len(specialist_results) < 2:
-        return False
-
-    bullish_kw = ["低估", "机会", "建议买", "加仓", "建仓", "适合", "看好", "上行", "配置价值", "值得"]
-    bearish_kw = ["高估", "风险高", "不建议买", "减仓", "回避", "谨慎", "看空", "下行", "泡沫", "过热"]
-
-    signals = []
-    for sr in specialist_results:
-        analysis = sr.get("analysis", "").lower()
-        bull_score = sum(1 for kw in bullish_kw if kw in analysis)
-        bear_score = sum(1 for kw in bearish_kw if kw in analysis)
-
-        if bull_score > bear_score + 1:
-            direction = "bullish"
-        elif bear_score > bull_score + 1:
-            direction = "bearish"
-        else:
-            direction = "neutral"
-        signals.append(direction)
-
-    directions = set(signals)
-    # 所有专家方向一致 → 跳过交叉审阅
-    if len(directions) == 1:
-        return False
-    # 有看多+看空分歧 → 必须交叉审阅
-    if "bullish" in directions and "bearish" in directions:
-        return True
-    # 混合中性+方向性 → 交叉审阅
-    return len(directions) > 1
+    # 使用优化器的快速检测
+    return not OrchestratorOptimizer.should_skip_cross_review(specialist_results, "complex")
 
 
 def should_arbitrate(complexity: str, specialist_results: list) -> bool:
@@ -107,6 +81,10 @@ def should_arbitrate(complexity: str, specialist_results: list) -> bool:
     - complexity >= arbitration_complexity
     - ≥2 个专家参与分析
     """
+    # 使用优化器的快速检测
+    if OrchestratorOptimizer.should_skip_arbitration(specialist_results, complexity):
+        return False
+
     if get_orchestration_config("arbitration_enabled", "true") != "true":
         return False
     if not ARBITRATION_API_KEY:
@@ -162,96 +140,59 @@ def build_clarification_prompt() -> str:
 ## 可用专家
 {expert_list}
 
-## 复杂度判断规则（按优先级）
+## 复杂度判断规则
 
 ### chat - 闲聊/科普（不调用任何专家）
-判断条件（满足任一即为 chat）：
-1. 纯问候/感谢/道歉（"你好"、"谢谢"、"抱歉"）
-2. 概念解释（"什么是PE"、"解释定投"、"Z分数什么意思"）
-3. 系统功能询问（"你能做什么"、"怎么用"）
-4. 与投资无关的问题（"今天天气"、"推荐电影"）
-5. 观点讨论但不需要数据支持（"你觉得价值投资怎么样"）
+- 纯问候/感谢/道歉（"你好"、"谢谢"）
+- 概念解释（"什么是PE"、"解释定投"）
+- 与投资无关的问题（"今天天气"）
 
-### simple - 单一数据查询（1个专家，无需深度分析）
-判断条件：
-1. 查询单一指标（"沪深300估值"、"债市温度"）
-2. 查询单一基金信息（"161725怎么样"）
-3. 查询持仓概况（"我持有什么"、"仓位多少"）
-4. 简单事实查询（"最近有什么新闻"）
+### simple - 单一数据查询（1个专家）
+- 查询单一指标（"沪深300估值"、"债市温度"）
+- 查询持仓概况（"我持有什么"）
 
-### medium - 分析任务（1-2个专家，需要分析判断）
-判断条件：
-1. 对比分析（"A和B哪个好"、"红利质量vs中证红利"）
-2. 单一维度深度分析（"白酒估值高吗"、"现在适合买债券吗"）
-3. 持仓诊断（"我的持仓健康吗"、"需要调仓吗"）
-4. 基金筛选（"推荐几只低估值基金"）
+### medium - 分析任务（1个专家）
+- **对比分析**（"A和B区别"、"A和B哪个好"）→ 只用 1 个估值专家
+- 单一维度深度分析（"白酒估值高吗"、"适合买债券吗"）
+- **"可以买吗"/"值得买吗"** → 只问估值判断
+- 持仓诊断（"我的持仓健康吗"）
+- 简单建议（"买点货币基金可以吗"）
 
-### complex - 综合决策（2+个专家，多维分析）
-判断条件（必须同时满足）：
-1. 需要多维度分析（估值+配置+风险）
-2. 涉及具体操作建议（买入/卖出/定投方案）
-3. 需要个性化定制（基于用户持仓/偏好）
+### complex - 综合决策（2+个专家）
+- 需要多维度分析（估值+配置+风险）
+- 涉及具体操作建议（"帮我做个定投方案"）
+- 多市场联动分析（"美股大跌对A股影响"）
 
-典型场景：
-- "帮我做个定投方案"
-- "我现在应该怎么配置"
-- "分析一下我的持仓并给建议"
+## 关键规则
+1. **对比类问题只用 1 个专家**，不要触发多 agent
+2. **"可以买吗"是 medium**，不是 complex
+3. **简单建议类是 medium**，只需 1 个专家
 
-## 关键区分规则
-
-1. **"可以买吗"/"值得买吗"** → medium（只问估值判断，不需要配置建议）
-2. **"帮我做个方案"/"应该怎么配置"** → complex（需要多维分析）
-3. **对比类问题** → medium（只需估值专家对比数据）
-4. **持仓查询** → simple（只查数据，不分析）
-5. **持仓诊断** → medium（需要分析，但不需要多专家协作）
-
-## 输出格式（只输出JSON，无其他文字）
+## 输出格式（只输出JSON）
 {{"complexity":"chat|simple|medium|complex","specialists":["expert1"],"reason":"判断原因","refined_query":"优化后的查询","confidence":0.95}}
 
-注意：
-- specialists 数组中的值必须是以下之一：{keys_json}，chat 时为空数组
-- confidence 表示判断置信度（0-1），低于 0.7 时系统会降级处理
+- specialists 中的值必须是：{keys_json}，chat 时为空数组
+- confidence 低于 0.7 时系统会降级处理
 
 ## 示例
 
 Q: 你好
 A: {{"complexity":"chat","specialists":[],"reason":"纯问候","refined_query":"你好","confidence":0.99}}
 
-Q: 什么是PE
-A: {{"complexity":"chat","specialists":[],"reason":"概念解释，无需查数据","refined_query":"PE（市盈率）的定义","confidence":0.98}}
-
-Q: 谢谢
-A: {{"complexity":"chat","specialists":[],"reason":"闲聊","refined_query":"谢谢","confidence":0.99}}
-
 Q: 沪深300估值多少
 A: {{"complexity":"simple","specialists":["valuation_expert"],"reason":"单一指数估值查询","refined_query":"沪深300当前PE/PB估值和百分位","confidence":0.95}}
 
-Q: 债市温度多少
-A: {{"complexity":"simple","specialists":["market_analyst"],"reason":"单一数据查询","refined_query":"当前债市温度指标","confidence":0.95}}
-
-Q: 我持有什么基金
-A: {{"complexity":"simple","specialists":[],"reason":"持仓查询，无需分析","refined_query":"查看当前持仓列表","confidence":0.90}}
-
 Q: 红利质量和中证红利有什么区别
-A: {{"complexity":"medium","specialists":["valuation_expert"],"reason":"两个指数的对比分析","refined_query":"红利质量和中证红利的估值对比（PE/PB/百分位/股息率）","confidence":0.90}}
+A: {{"complexity":"medium","specialists":["valuation_expert"],"reason":"对比分析，只需1个估值专家","refined_query":"红利质量和中证红利的估值对比（PE/PB/百分位/股息率）","confidence":0.90}}
 
-Q: 白酒估值高吗
-A: {{"complexity":"medium","specialists":["valuation_expert"],"reason":"单一板块估值分析","refined_query":"白酒板块当前估值水平和历史百分位","confidence":0.85}}
-
-Q: 现在适合买债券吗
-A: {{"complexity":"medium","specialists":["market_analyst"],"reason":"债券买入时机判断，需要债市温度","refined_query":"当前债市温度和债券投资建议","confidence":0.85}}
-
-Q: 我的持仓健康吗
-A: {{"complexity":"medium","specialists":["allocation_advisor"],"reason":"持仓诊断分析","refined_query":"持仓健康度诊断和优化建议","confidence":0.85}}
+Q: 恒生科技怎么样，可以买吗
+A: {{"complexity":"medium","specialists":["valuation_expert"],"reason":"估值判断，不需要多专家","refined_query":"恒生科技指数估值水平和投资建议","confidence":0.90}}
 
 Q: 帮我做个定投方案
 A: {{"complexity":"complex","specialists":["valuation_expert","allocation_advisor"],"reason":"定投需要估值+配置策略","refined_query":"基于当前估值的定投方案","confidence":0.92}}
 
-Q: 我现在应该怎么配置资产
-A: {{"complexity":"complex","specialists":["valuation_expert","allocation_advisor","risk_assessor"],"reason":"资产配置需要多维分析","refined_query":"基于当前市场和个人持仓的资产配置建议","confidence":0.90}}
-
-Q: 分析一下我的持仓并给建议
-A: {{"complexity":"complex","specialists":["allocation_advisor","risk_assessor"],"reason":"持仓分析需要配置+风险评估","refined_query":"持仓分析和优化建议","confidence":0.88}}"""
+Q: 美股大跌，A股明天会怎么走
+A: {{"complexity":"complex","specialists":["market_analyst","valuation_expert","risk_assessor"],"reason":"多市场联动分析，需要多维分析","refined_query":"美股大跌原因、A股走势预判及持仓影响","confidence":0.90}}"""
 
 
 # Clarification 结果缓存（相同查询直接返回缓存结果，节省 2-5s LLM 调用）
@@ -542,14 +483,77 @@ def route_to_specialists_by_keywords(query: str) -> list[str]:
     return specialists
 
 
+# ── 场景化 RAG 映射 ──────────────────────────────────────
+
+SCENARIO_RAG_MAP = {
+    "valuation_expert": {
+        "query_suffix": "估值 PE PB 安全边际 内在价值 百分位",
+        "content_types": ["book", "valuation", "analysis"],
+    },
+    "market_analyst": {
+        "query_suffix": "市场周期 择时 牛熊 情绪 资金流向",
+        "content_types": ["book", "article", "author_article", "valuation"],
+    },
+    "allocation_advisor": {
+        "query_suffix": "资产配置 分散投资 仓位 再平衡 股债比例",
+        "content_types": ["book", "valuation", "analysis"],
+    },
+    "risk_assessor": {
+        "query_suffix": "风险 回撤 波动 最大回撤 风险控制",
+        "content_types": ["book", "valuation", "analysis"],
+    },
+    "fund_analyst": {
+        "query_suffix": "基金选择 业绩 费用 基金经理 跟踪误差",
+        "content_types": ["book", "analysis", "valuation"],
+    },
+}
+
+
+def build_scenario_rag_context(query: str, specialists: list[str],
+                                original_rag_context: str = "") -> str:
+    """
+    根据命中的专家类型，对原始 RAG 上下文做场景化增强。
+    如果原始 RAG 已有内容，补充场景化检索结果；否则全新构建。
+    """
+    from rag import build_rag_context_with_details
+
+    # 收集所有命中专家的场景配置
+    scenario_queries = []
+    all_content_types = set()
+    for specialist in specialists:
+        if specialist in SCENARIO_RAG_MAP:
+            cfg = SCENARIO_RAG_MAP[specialist]
+            scenario_queries.append(cfg["query_suffix"])
+            all_content_types.update(cfg["content_types"])
+
+    if not scenario_queries:
+        return original_rag_context
+
+    # 构建场景化查询：原始问题 + 场景关键词
+    scenario_query = f"{query} {' '.join(scenario_queries)}"
+
+    # 场景化检索（限制 3 条，避免过多）
+    result = build_rag_context_with_details(
+        scenario_query,
+        content_types=list(all_content_types) if all_content_types else None,
+        limit=3,
+    )
+    scenario_context = result.get("context", "")
+
+    # 合并：原始 RAG + 场景化 RAG
+    if original_rag_context and scenario_context:
+        return f"{original_rag_context}\n\n---\n\n{scenario_context}"
+    return scenario_context or original_rag_context
+
+
 def get_context_config(complexity: str) -> dict:
     """根据复杂度返回上下文配置。"""
     if complexity == "simple":
         return {
             "history_limit": 3,      # 只保留最近3条历史
-            "rag_enabled": False,    # 简单查询不需要RAG
+            "rag_enabled": True,     # 简单查询也启用 RAG（轻量级）
             "max_specialists": 1,    # 只调用1个专家
-            "rag_max_chars": 0,      # RAG上下文最大字符数
+            "rag_max_chars": 800,    # 轻量级 RAG 上下文
         }
     elif complexity == "medium":
         return {
@@ -755,6 +759,10 @@ def orchestrate(query: str, history: list, rag_context: str = "", cancel_event: 
     # 使用澄清后的问题（如果有优化）
     refined_query = clarification.get("refined_query", query)
 
+    # 1.5 场景化 RAG 增强：根据命中的专家类型补充相关书籍知识
+    specialists = clarification.get("specialists", [])
+    rag_context = build_scenario_rag_context(refined_query, specialists, rag_context)
+
     # 2. 根据复杂度优化上下文（Token 预算管理）
     system_content = build_orchestrator_system_prompt()
 
@@ -776,6 +784,12 @@ def orchestrate(query: str, history: list, rag_context: str = "", cancel_event: 
 
     # 注入持仓上下文 + 估值上下文（同时构建 prebuilt_context 供 specialist 复用）
     prebuilt_context = ""
+
+    # 注入 RAG 知识库上下文到 prebuilt_context（让专家也能参考书籍/文章知识）
+    if rag_context:
+        compressed_rag_for_specialist = compress_rag_token_aware(rag_context, max_tokens=1500)
+        prebuilt_context += f"## 知识库参考（书籍/文章/技能）\n{compressed_rag_for_specialist}\n\n"
+
     try:
         from portfolio_context import build_portfolio_context, build_valuation_summary
         portfolio_ctx = build_portfolio_context()
@@ -828,6 +842,7 @@ def orchestrate(query: str, history: list, rag_context: str = "", cancel_event: 
     force_skip_cross_review = budget["mode"] == "conservative"
     specialist_results = []
     all_tool_calls = []
+    arbitration_done = False  # 标记仲裁是否已完成，避免重复调用
 
     for turn in range(MAX_TURNS):
         _check_timeout(start_time)
@@ -897,6 +912,7 @@ def orchestrate(query: str, history: list, rag_context: str = "", cancel_event: 
                         answer = msg.content or ""
 
                     # Phase C: 仲裁（高级模型最终裁决）
+                    arbitration_done = False
                     if should_arbitrate(complexity, specialist_results):
                         logger.info("进入仲裁阶段（Phase C）")
                         arb_result = run_arbitration(refined_query, specialist_results, rag_context)
@@ -904,6 +920,7 @@ def orchestrate(query: str, history: list, rag_context: str = "", cancel_event: 
                         answer = arb_result["analysis"]
                         all_tool_calls.append({"name": "arbitration", "arguments": {"query": refined_query},
                                                "result_preview": arb_result["analysis"][:300]})
+                        arbitration_done = True
 
                     duration_ms = int((time.time() - start_time) * 1000)
                     return {
@@ -914,13 +931,13 @@ def orchestrate(query: str, history: list, rag_context: str = "", cancel_event: 
                         "duration_ms": duration_ms,
                         "complexity": complexity,
                         "cross_review": True,
-                        "arbitration": should_arbitrate(complexity, specialist_results),
+                        "arbitration": arbitration_done,
                     }
 
             answer = msg.content or ""
 
             # Phase C: 仲裁（高级模型最终裁决，无交叉审阅时也可触发）
-            if should_arbitrate(complexity, specialist_results):
+            if not arbitration_done and should_arbitrate(complexity, specialist_results):
                 logger.info("进入仲裁阶段（Phase C）")
                 arb_result = run_arbitration(refined_query, specialist_results, rag_context)
                 specialist_results.append(arb_result)
@@ -936,7 +953,7 @@ def orchestrate(query: str, history: list, rag_context: str = "", cancel_event: 
                 "turns": turn + 1,
                 "duration_ms": duration_ms,
                 "complexity": complexity,
-                "arbitration": should_arbitrate(complexity, specialist_results),
+                "arbitration": arbitration_done,
             }
 
         # 有工具调用 → 执行专家
@@ -1095,6 +1112,12 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
     """
     start_time = time.time()
 
+    # 性能监控
+    perf_metrics = {
+        "start_time": start_time,
+        "phases": {},
+    }
+
     # 0. Token 预算检查
     budget = check_token_budget()
     logger.info(f"Token 预算: {budget['used']}/{budget['limit']} ({budget['pct']:.0%}) mode={budget['mode']}")
@@ -1136,8 +1159,15 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
     token_budget = get_token_budget(complexity)
     logger.info(f"需求澄清: {clarification}")
 
+    # 性能监控：需求澄清耗时
+    perf_metrics["phases"]["clarification"] = int((time.time() - start_time) * 1000)
+
     # 使用澄清后的问题（如果有优化）
     refined_query = clarification.get("refined_query", query)
+
+    # 1.5 场景化 RAG 增强：根据命中的专家类型补充相关书籍知识
+    specialists = clarification.get("specialists", [])
+    rag_context = build_scenario_rag_context(refined_query, specialists, rag_context)
 
     # 2. 根据复杂度优化上下文（Token 预算管理）
     system_content = build_orchestrator_system_prompt()
@@ -1160,6 +1190,12 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
 
     # 注入持仓上下文 + 估值上下文（同时构建 prebuilt_context 供 specialist 复用）
     prebuilt_context = ""
+
+    # 注入 RAG 知识库上下文到 prebuilt_context（让专家也能参考书籍/文章知识）
+    if rag_context:
+        compressed_rag_for_specialist = compress_rag_token_aware(rag_context, max_tokens=1500)
+        prebuilt_context += f"## 知识库参考（书籍/文章/技能）\n{compressed_rag_for_specialist}\n\n"
+
     try:
         from portfolio_context import build_portfolio_context, build_valuation_summary
         portfolio_ctx = build_portfolio_context()
@@ -1228,6 +1264,7 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
     force_skip_cross_review = budget["mode"] == "conservative"
     specialist_results = []
     all_tool_calls = []
+    arbitration_done = False  # 标记仲裁是否已完成，避免重复调用
 
     # 恢复模式：添加已有结果
     if resumed_results:
@@ -1324,29 +1361,11 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
                             "duration_ms": 0,
                         }
 
-                # 将交叉审阅结果追加到消息中，做最终综合
+                # 优化：跳过中间的综合 LLM 调用，直接进入仲裁
                 if cross_review_results:
                     _check_cancel(cancel_event)
-                    yield {"type": "status", "message": "正在综合所有分析结果..."}
-                    cr_summary = "\n\n---\n\n".join(
-                        f"【{cr['agent']}交叉审阅】\n{cr['analysis']}"
-                        for cr in cross_review_results
-                    )
-                    llm_messages.append({
-                        "role": "user",
-                        "content": f"以下是各专家的交叉审阅结果，请结合 Phase A 和 Phase B 的分析，给出最终综合建议：\n\n{cr_summary}",
-                    })
-                    try:
-                        response = _call_llm(
-                            caller="orchestrator",
-                            model=MODEL,
-                            messages=llm_messages,
-                            temperature=0.3,
-                            max_tokens=8192,
-                        )
-                        answer = response.choices[0].message.content or ""
-                    except Exception:
-                        answer = msg.content or ""
+                    # 直接使用交叉审阅结果，不进行额外的 LLM 调用
+                    answer = msg.content or ""
 
                     # Phase C: 仲裁（高级模型最终裁决）
                     if should_arbitrate(complexity, specialist_results):
@@ -1363,6 +1382,7 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
                         all_tool_calls.append({"name": "arbitration", "arguments": {"query": refined_query},
                                                "result_preview": arb_result["analysis"][:300]})
                         answer = arb_result["analysis"]
+                        arbitration_done = True
                         yield {
                             "type": "specialist_done",
                             "agent_key": "arbitrator",
@@ -1382,14 +1402,14 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
                         "duration_ms": duration_ms,
                         "complexity": complexity,
                         "cross_review": True,
-                        "arbitration": should_arbitrate(complexity, specialist_results),
+                        "arbitration": arbitration_done,
                     }
                     return
 
             answer = msg.content or ""
 
             # Phase C: 仲裁（高级模型最终裁决，无交叉审阅时也可触发）
-            if should_arbitrate(complexity, specialist_results):
+            if not arbitration_done and should_arbitrate(complexity, specialist_results):
                 _check_cancel(cancel_event)
                 yield {"type": "status", "message": "正在由仲裁法官做最终裁决..."}
                 yield {
@@ -1403,6 +1423,7 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
                 all_tool_calls.append({"name": "arbitration", "arguments": {"query": refined_query},
                                        "result_preview": arb_result["analysis"][:300]})
                 answer = arb_result["analysis"]
+                arbitration_done = True
                 yield {
                     "type": "specialist_done",
                     "agent_key": "arbitrator",
@@ -1420,7 +1441,7 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
                 "specialist_results": specialist_results,
                 "tool_calls": all_tool_calls,
                 "duration_ms": duration_ms,
-                "arbitration": should_arbitrate(complexity, specialist_results),
+                "arbitration": arbitration_done,
             }
             return
 
@@ -1645,6 +1666,19 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
 
     duration_ms = int((time.time() - start_time) * 1000)
 
+    # 性能监控：记录总耗时
+    perf_metrics["phases"]["total"] = duration_ms
+    perf_metrics["complexity"] = complexity
+    perf_metrics["specialist_count"] = len([s for s in specialist_results if not s.get("is_cross_review")])
+
+    # 记录性能指标（异步，不阻塞）
+    try:
+        if conversation_id > 0 and message_id > 0:
+            from agent.orchestrator_optimizer import log_performance_metrics
+            log_performance_metrics(conversation_id, message_id, perf_metrics)
+    except Exception as e:
+        logger.warning(f"记录性能指标失败: {e}")
+
     yield {
         "type": "answer",
         "content": final_answer,
@@ -1652,6 +1686,7 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
         "tool_calls": all_tool_calls,
         "duration_ms": duration_ms,
         "complexity": complexity,
+        "perf_metrics": perf_metrics,  # 添加性能指标到返回结果
     }
 
 

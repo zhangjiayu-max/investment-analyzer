@@ -48,6 +48,7 @@ function handleViewResult(convId) {
 .app-layout {
   display: flex;
   min-height: 100vh;
+  min-height: 100dvh;
 }
 
 .app-main {
@@ -55,6 +56,7 @@ function handleViewResult(convId) {
   margin-left: var(--sidebar-width);
   padding: 1.5rem 2rem;
   min-height: 100vh;
+  min-height: 100dvh;
   transition: margin-left var(--transition-normal);
 }
 </style>

@@ -5,7 +5,11 @@ import os
 from pathlib import Path
 from dotenv import load_dotenv
 
-load_dotenv()
+_ROOT = Path(__file__).resolve().parent.parent
+# 优先加载 .env.keys（API Key），再加载 .env（配置项）
+# load_dotenv 不覆盖已存在的环境变量，所以顺序很重要
+load_dotenv(_ROOT / ".env.keys")
+load_dotenv(_ROOT / ".env")
 
 # 当前使用的模型提供商: "deepseek" 或 "mimo"
 LLM_PROVIDER = os.getenv("LLM_PROVIDER", "mimo")
@@ -30,8 +34,18 @@ VISION_API_KEY = os.getenv("VISION_API_KEY", MIMO_API_KEY)
 VISION_BASE_URL = os.getenv("VISION_BASE_URL", MIMO_BASE_URL)
 VISION_MODEL = os.getenv("VISION_MODEL", "mimo-v2-omni")
 
+# Embedding 模型配置（用于 ChromaDB 向量检索）
+# 可选: "BAAI/bge-small-zh-v1.5" (512维, 92MB) / "moka-ai/m3e-base" (768维, 400MB) / "BAAI/bge-large-zh-v1.5" (1024维, 1.2GB)
+EMBED_MODEL_NAME = os.getenv("EMBED_MODEL_NAME", "moka-ai/m3e-base")
+
 # 盈米且慢 MCP API
 YINGMI_API_KEY = os.getenv("YINGMI_API_KEY", "")
+
+# 东方财富妙想 API
+EASTMONEY_API_KEY = os.getenv("MX_APIKEY", "") or os.getenv("MX_API_KEY", "")
+
+# 天天基金 Skills API
+TTFUND_APIKEY = os.getenv("TTFUND_APIKEY", "")
 
 # 仲裁 Agent 配置（DeepSeek R1 高级推理模型）
 ARBITRATION_API_KEY = os.getenv("ARBITRATION_API_KEY", "")
@@ -124,8 +138,6 @@ REBALANCE_AGE = int(os.getenv("REBALANCE_AGE", "30"))
 
 # 资产类型基础配比（JSON，键为类别，值为比例）
 # 仅在 REBALANCE_STRATEGY=custom 时生效，其他策略自动覆盖
-REBALANCE_BASE_ALLOCATION = os.getenv("REBALANCE_BASE_ALLOCATION",
-    '{"equity":0.40,"bond":0.30,"money":0.05,"hybrid":0.10,"index":0.10,"qdii":0.05}')
 REBALANCE_BASE_ALLOCATION = os.getenv("REBALANCE_BASE_ALLOCATION",
     '{"equity":0.40,"bond":0.30,"money":0.05,"hybrid":0.10,"index":0.10,"qdii":0.05}')
 

@@ -404,7 +404,7 @@ async def resume_conversation(conv_id: int, request: Request):
                     "execution_status": "completed",
                     "complexity": final_complexity,
                     "specialist_results": [
-                        {"agent_key": s.get("agent_key", ""), "agent": s["agent"], "icon": s["icon"], "analysis": s.get("analysis", "")[:500]}
+                        {"agent_key": s.get("agent_key", ""), "agent": s["agent"], "icon": s["icon"], "analysis": s.get("analysis", "")[:3000]}
                         for s in specialist_results_so_far
                     ],
                     "tool_calls": tool_calls_so_far,
@@ -492,7 +492,7 @@ async def send_message_api(conv_id: int, req: SendMessageRequest):
     specialist_results = llm_result.get("specialist_results", [])
     metadata_dict = {
         "specialist_results": [
-            {"agent_key": s.get("agent_key", ""), "agent": s["agent"], "icon": s["icon"], "analysis": s.get("analysis", "")[:500]}
+            {"agent_key": s.get("agent_key", ""), "agent": s["agent"], "icon": s["icon"], "analysis": s.get("analysis", "")[:3000]}
             for s in specialist_results
         ],
         "tool_calls": llm_result.get("tool_calls", []),
@@ -538,6 +538,13 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
     conv = get_conversation(conv_id)
     if not conv:
         raise HTTPException(404, "对话不存在")
+
+    # 防重复发送：检查是否有进行中的 agent 任务
+    from db.agents import get_running_agent_count
+    running_count = get_running_agent_count(conv_id)
+    if running_count > 0:
+        logger.warning(f"对话 {conv_id} 有 {running_count} 个进行中的任务，拒绝重复请求")
+        raise HTTPException(409, f"该对话有 {running_count} 个进行中的任务，请等待完成后再试")
 
     # 解析 knowledge_scope
     rag_types = []
@@ -689,6 +696,21 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
             msg_id = create_message(conv_id, "user", req.content)
             metadata = {"complexity": "chat", "execution_status": "completed"}
             create_message(conv_id, "assistant", answer, metadata=json.dumps(metadata, ensure_ascii=False))
+
+            # 记录 RAG 日志
+            if rag_result and rag_result.get("results"):
+                try:
+                    log_rag_search(
+                        conversation_id=conv_id, message_id=msg_id, query=req.content,
+                        keywords=rag_result.get("keywords", []),
+                        results=rag_result.get("results", []),
+                        content_types=rag_types if rag_types else None,
+                        fts_count=rag_result.get("fts_count", 0),
+                        chroma_count=rag_result.get("chroma_count", 0),
+                        freshness_filtered=rag_result.get("freshness_filtered", 0),
+                    )
+                except Exception as e:
+                    logger.warning(f"chat RAG 日志记录失败: {e}")
             return
 
         # 4. 简单任务：直接路由到专家，跳过 Orchestrator
@@ -708,10 +730,18 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
                     "pct": 50,
                 })
 
-                # 直接运行专家
+                # 直接运行专家（传递轻量级 RAG 上下文）
                 def _run_expert():
                     try:
-                        return run_specialist(agent_key, req.content)
+                        prebuilt = ""
+                        if rag_context:
+                            prebuilt += f"## 知识库参考（书籍/文章）\n{rag_context[:800]}\n\n"
+                        try:
+                            from portfolio_context import build_portfolio_context
+                            prebuilt += f"## 用户当前持仓\n{build_portfolio_context()}\n\n"
+                        except Exception:
+                            pass
+                        return run_specialist(agent_key, req.content, prebuilt_context=prebuilt)
                     except Exception as e:
                         return {"error": str(e)}
 
@@ -733,7 +763,7 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
                         agent_key=result.get("agent_key", agent_key),
                         agent_name=result.get("agent", ""),
                         query=req.content[:500],
-                        result=(result.get("analysis", "") or "")[:500],
+                        result=(result.get("analysis", "") or "")[:3000],
                         duration_ms=result.get("duration_ms", 0),
                         trace_id=trace_id,
                         status="success",
@@ -763,7 +793,7 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
                     # 存储回复
                     metadata_dict = {
                         "specialist_results": [
-                            {"agent_key": s.get("agent_key", ""), "agent": s["agent"], "icon": s["icon"], "analysis": s.get("analysis", "")[:500]}
+                            {"agent_key": s.get("agent_key", ""), "agent": s["agent"], "icon": s["icon"], "analysis": s.get("analysis", "")[:3000]}
                             for s in specialist_results
                         ],
                         "complexity": complexity,
@@ -787,7 +817,7 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
                         create_agent_run(
                             conversation_id=conv_id, message_id=msg_id,
                             agent_key="chat_turn", agent_name="对话整体",
-                            query=req.content[:500], result=answer[:500],
+                            query=req.content[:500], result=answer[:3000],
                             tool_calls=json.dumps(phase_timings, ensure_ascii=False),
                             duration_ms=total_ms,
                             trace_id=trace_id,
@@ -836,8 +866,8 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
 
             def _save_progress(status="streaming"):
                 try:
-                    p1 = [{"agent_key": s["agent_key"], "agent": s["agent"], "icon": s.get("icon", ""), "analysis": s.get("analysis", "")[:500]} for s in _prod_spec_results if not s.get("is_cross_review")]
-                    p2 = [{"agent_key": s["agent_key"], "agent": s["agent"], "icon": s.get("icon", ""), "analysis": s.get("analysis", "")[:500]} for s in _prod_spec_results if s.get("is_cross_review")]
+                    p1 = [{"agent_key": s["agent_key"], "agent": s["agent"], "icon": s.get("icon", ""), "analysis": s.get("analysis", "")[:3000]} for s in _prod_spec_results if not s.get("is_cross_review")]
+                    p2 = [{"agent_key": s["agent_key"], "agent": s["agent"], "icon": s.get("icon", ""), "analysis": s.get("analysis", "")[:3000]} for s in _prod_spec_results if s.get("is_cross_review")]
                     update_message_metadata(stream_msg_id, {
                         "execution_status": status, "complexity": complexity,
                         "specialist_results": p1, "cross_review_results": p2,
@@ -857,8 +887,8 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
                     content = review["content"]
                 except Exception:
                     pass
-                p1 = [{"agent_key": s["agent_key"], "agent": s["agent"], "icon": s.get("icon", ""), "analysis": s.get("analysis", "")[:500]} for s in _prod_spec_results if not s.get("is_cross_review")]
-                p2 = [{"agent_key": s["agent_key"], "agent": s["agent"], "icon": s.get("icon", ""), "analysis": s.get("analysis", "")[:500]} for s in _prod_spec_results if s.get("is_cross_review")]
+                p1 = [{"agent_key": s["agent_key"], "agent": s["agent"], "icon": s.get("icon", ""), "analysis": s.get("analysis", "")[:3000]} for s in _prod_spec_results if not s.get("is_cross_review")]
+                p2 = [{"agent_key": s["agent_key"], "agent": s["agent"], "icon": s.get("icon", ""), "analysis": s.get("analysis", "")[:3000]} for s in _prod_spec_results if s.get("is_cross_review")]
                 if stream_msg_id > 0:
                     update_message_content_and_metadata(stream_msg_id, content, {
                         "execution_status": "completed", "complexity": complexity,
@@ -872,7 +902,7 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
                     conn.close()
                     create_agent_run(conversation_id=conv_id, message_id=stream_msg_id,
                         agent_key="chat_turn", agent_name="对话整体",
-                        query=req.content[:500], result=content[:500],
+                        query=req.content[:500], result=content[:3000],
                         tool_calls=json.dumps(pt, ensure_ascii=False), duration_ms=total_ms,
                         trace_id=trace_id, status="success")
                 except Exception as e:
@@ -889,8 +919,8 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
             def _save_failed(err_msg):
                 if stream_msg_id <= 0:
                     return
-                p1 = [{"agent_key": s["agent_key"], "agent": s["agent"], "icon": s.get("icon", ""), "analysis": s.get("analysis", "")[:500]} for s in _prod_spec_results if not s.get("is_cross_review")]
-                p2 = [{"agent_key": s["agent_key"], "agent": s["agent"], "icon": s.get("icon", ""), "analysis": s.get("analysis", "")[:500]} for s in _prod_spec_results if s.get("is_cross_review")]
+                p1 = [{"agent_key": s["agent_key"], "agent": s["agent"], "icon": s.get("icon", ""), "analysis": s.get("analysis", "")[:3000]} for s in _prod_spec_results if not s.get("is_cross_review")]
+                p2 = [{"agent_key": s["agent_key"], "agent": s["agent"], "icon": s.get("icon", ""), "analysis": s.get("analysis", "")[:3000]} for s in _prod_spec_results if s.get("is_cross_review")]
                 update_message_content_and_metadata(stream_msg_id, f"❌ 执行失败: {err_msg}", {
                     "execution_status": "failed", "complexity": complexity,
                     "specialist_results": p1, "cross_review_results": p2, "trace_id": trace_id,
@@ -905,10 +935,7 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
                         if et == "specialist_done":
                             _prod_spec_results.append({"agent_key": event["agent_key"], "agent": event["agent"], "icon": event.get("icon", "🤖"), "analysis": event.get("analysis", ""), "duration_ms": event.get("duration_ms", 0)})
                             _save_progress("streaming")
-                            create_agent_run(conversation_id=conv_id, message_id=0, agent_key=event["agent_key"],
-                                agent_name=event.get("agent", ""), query=req.content[:500],
-                                result=(event.get("analysis", "") or "")[:500], duration_ms=event.get("duration_ms", 0),
-                                trace_id=trace_id, status="success")
+                            # 注：orchestrator.py 已创建并更新 agent_run 记录，此处不再重复创建
                         elif et == "cross_review_done":
                             _prod_spec_results.append({"agent_key": event.get("agent_key"), "agent": event.get("agent"), "icon": event.get("icon"), "analysis": event.get("analysis"), "duration_ms": event.get("duration_ms"), "is_cross_review": True})
                             _save_progress("streaming")

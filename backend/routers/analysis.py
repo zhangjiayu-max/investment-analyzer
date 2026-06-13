@@ -15,7 +15,7 @@ from db import (
     list_holdings,
 )
 from llm_service import _call_llm, MODEL
-from rag import build_rag_context
+from rag import build_rag_context_with_details, log_rag_search
 from models.analysis import AnalysisRunRequest, AnalysisAgentUpdateRequest
 
 logger = logging.getLogger(__name__)
@@ -49,10 +49,23 @@ async def run_analysis(req: AnalysisRunRequest):
 
     # 3. RAG 知识库检索（搜索与该指数相关的文章、分析、估值记录）
     rag_context = ""
+    rag_result = {}
     if req.index_name:
         try:
             rag_query = f"{req.index_name} 估值 分析 投资"
-            rag_context = build_rag_context(query=rag_query, limit=5)
+            rag_result = build_rag_context_with_details(query=rag_query, limit=5)
+            rag_context = rag_result.get("context", "")
+            # 记录 RAG 检索日志
+            log_rag_search(
+                conversation_id=0,  # 单次分析无对话 ID
+                message_id=0,
+                query=rag_query,
+                keywords=rag_result.get("keywords", []),
+                results=rag_result.get("results", []),
+                fts_count=rag_result.get("fts_count", 0),
+                chroma_count=rag_result.get("chroma_count", 0),
+                freshness_filtered=rag_result.get("freshness_filtered", 0),
+            )
         except Exception as e:
             logger.warning(f"RAG 检索失败: {e}")
 

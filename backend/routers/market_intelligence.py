@@ -23,6 +23,7 @@ from db.portfolio import save_analysis_cache, get_analysis_cache
 from db.agents import create_agent_run
 from db._conn import _get_conn
 from llm_service import _call_llm, MODEL
+from rag import build_rag_context_with_details, log_rag_search
 
 router = APIRouter(prefix="/api/market-intelligence", tags=["market-intelligence"])
 
@@ -279,6 +280,76 @@ async def _fetch_hot_topics() -> list[dict]:
     return []
 
 
+async def _fetch_market_hotspots() -> list[dict]:
+    """获取市场热点板块和题材。
+
+    数据源：
+    1. 东方财富妙想 API（stockHotspot）— 官方 AI 热点分析
+    2. 东方财富人气排名 — 直接 API
+    """
+    hotspots = []
+
+    # 1. 东方财富妙想热点分析
+    try:
+        from mcp.eastmoney_client import get_eastmoney_client
+        from config import EASTMONEY_API_KEY
+        if EASTMONEY_API_KEY:
+            client = get_eastmoney_client()
+            hotspot_text = await asyncio.to_thread(
+                client.stock_hotspot, "今日A股市场热点板块和题材概念"
+            )
+            if hotspot_text:
+                hotspots.append({
+                    "source": "东方财富妙想",
+                    "name": "AI热点分析",
+                    "content": hotspot_text[:1500],
+                })
+    except Exception as e:
+        logger.warning(f"东方财富妙想热点获取失败: {e}")
+
+    # 2. 东方财富资讯搜索（最新研报、新闻）
+    try:
+        from mcp.eastmoney_client import get_eastmoney_client
+        from config import EASTMONEY_API_KEY
+        if EASTMONEY_API_KEY:
+            client = get_eastmoney_client()
+            search_text = await asyncio.to_thread(
+                client.financial_search, "今日A股热门板块 热点题材 资金流向"
+            )
+            if search_text:
+                hotspots.append({
+                    "source": "东方财富资讯",
+                    "name": "最新资讯",
+                    "content": search_text[:1000],
+                })
+    except Exception as e:
+        logger.warning(f"东方财富资讯搜索失败: {e}")
+
+    # 3. 东方财富人气排名（直接 API，不依赖 SDK）
+    try:
+        import httpx
+        async with httpx.AsyncClient(timeout=10) as http_client:
+            resp = await http_client.post(
+                "https://emappdata.eastmoney.com/stockrank/getAllCurrentList",
+                json={"appId": "appId01", "pageNo": 1, "pageSize": 10},
+                headers={"User-Agent": "Mozilla/5.0"},
+            )
+            data = resp.json()
+        for item in (data.get("data", []) or [])[:10]:
+            name = item.get("name", "")
+            code = item.get("sc", "")
+            if name:
+                hotspots.append({
+                    "source": "东财人气",
+                    "name": name,
+                    "code": code,
+                })
+    except Exception as e:
+        logger.warning(f"东财人气获取失败: {e}")
+
+    return hotspots
+
+
 def _fetch_macro_data() -> dict:
     """获取宏观数据快照。"""
     macro = {}
@@ -438,15 +509,15 @@ async def get_market_intelligence_overview(force: bool = False):
 
     now = time.time()
 
-    # 1. 并行获取多源数据（增加央视新闻）
-    news, web_news, hot_topics, macro, cctv_news = await asyncio.gather(
+    # 1. 并行获取多源数据
+    news, hot_topics, macro, cctv_news, market_hotspots = await asyncio.gather(
         _fetch_news_multi(),
-        _fetch_web_news(),
         _fetch_hot_topics(),
         asyncio.to_thread(_fetch_macro_data),
         _fetch_cctv_news(),
+        _fetch_market_hotspots(),
     )
-    all_news = news + web_news + cctv_news  # 合并到新闻列表
+    all_news = news  # 盈米 MCP 新闻质量足够，不再混入低质量 akshare 泛财经
 
     # 2. 构建新闻文本
     news_text = "\n".join(
@@ -465,8 +536,42 @@ async def get_market_intelligence_overview(force: bool = False):
         for t in hot_topics[:6] if t.get("title")
     ) if hot_topics else "暂无热门话题"
 
+    # 市场热点板块/题材聚合
+    hotspots_text = ""
+    if market_hotspots:
+        for h in market_hotspots:
+            source = h.get("source", "")
+            name = h.get("name", "")
+            content = h.get("content", "")
+            if content:
+                # AI 分析类结果（有长文本内容）
+                hotspots_text += f"【{source} - {name}】\n{content}\n\n"
+            elif name:
+                # 简单列表类结果
+                hotspots_text += f"- [{source}] {name}\n"
+
     index_catalog = _build_index_catalog()
     holdings_text = _build_holdings_text()
+
+    # RAG 知识库检索（搜索与市场热点相关的文章、分析）
+    rag_context = ""
+    try:
+        rag_query = "市场热点 板块轮动 投资策略 行业分析"
+        rag_result = build_rag_context_with_details(query=rag_query, limit=5)
+        rag_context = rag_result.get("context", "")
+        # 记录 RAG 检索日志
+        log_rag_search(
+            conversation_id=0,
+            message_id=0,
+            query=rag_query,
+            keywords=rag_result.get("keywords", []),
+            results=rag_result.get("results", []),
+            fts_count=rag_result.get("fts_count", 0),
+            chroma_count=rag_result.get("chroma_count", 0),
+            freshness_filtered=rag_result.get("freshness_filtered", 0),
+        )
+    except Exception as e:
+        logger.warning(f"RAG 检索失败: {e}")
 
     # 宏观摘要
     bond = macro.get("bond", {})
@@ -512,6 +617,8 @@ async def get_market_intelligence_overview(force: bool = False):
 【热门话题】
 {topics_text}
 
+{f"【实时热点板块/题材】{chr(10)}{hotspots_text}" if hotspots_text else ""}
+
 【指数估值目录】
 {index_catalog}
 
@@ -521,6 +628,9 @@ async def get_market_intelligence_overview(force: bool = False):
 【宏观环境】
 债券市场：{bond_text}
 政策指标：{policy_text or '暂无'}
+
+【知识库参考（历史分析/文章）】
+{rag_context[:1500] if rag_context else '暂无相关知识库内容'}
 
 请从以上新闻中提炼今日真正的市场热点，特别关注央视新闻的政策信号，输出严格JSON。"""
 

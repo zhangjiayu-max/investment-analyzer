@@ -49,7 +49,7 @@ def _init_preset_agents(conn):
                 "- 超出范围时说明：\"这超出了我的专业范围，建议咨询...\"\n\n"
                 "回答时必须引用具体数字，不要泛泛而谈。"
             ),
-            "knowledge_scope": '{"rag_types": ["valuation", "analysis"]}',
+            "knowledge_scope": '{"rag_types": ["valuation", "analysis", "book"]}',
             "icon": "chart",
             "is_preset": 1,
         },
@@ -89,7 +89,7 @@ def _init_preset_agents(conn):
                 "- 不擅长：个股推荐、时机预测、政策解读\n"
                 "- 超出范围时诚实说明"
             ),
-            "knowledge_scope": '{"rag_types": ["article", "valuation", "analysis"]}',
+            "knowledge_scope": '{"rag_types": ["article", "valuation", "analysis", "book"]}',
             "icon": "research",
             "is_preset": 1,
         },
@@ -132,7 +132,7 @@ def _init_preset_agents(conn):
                 "- 不擅长：收益预测、个股推荐、宏观政策\n"
                 "- 超出范围时说明：\"风险评估是我的专长，但这个问题超出了我的能力范围\""
             ),
-            "knowledge_scope": '{"rag_types": ["valuation", "analysis"]}',
+            "knowledge_scope": '{"rag_types": ["valuation", "analysis", "book"]}',
             "icon": "shield",
             "is_preset": 1,
         },
@@ -175,7 +175,7 @@ def _init_preset_agents(conn):
                 "- 不擅长：个股推荐、时机预测、衍生品\n"
                 "- 超出范围时说明：\"资产配置是我的专长，但这个问题建议咨询...\""
             ),
-            "knowledge_scope": '{"rag_types": ["valuation", "article"]}',
+            "knowledge_scope": '{"rag_types": ["valuation", "article", "book"]}',
             "icon": "pie",
             "is_preset": 1,
         },
@@ -484,3 +484,14 @@ def get_agent_runs(conversation_id: int, limit: int = 50) -> list[dict]:
     """, (conversation_id, limit)).fetchall()
     conn.close()
     return [dict(r) for r in rows]
+
+
+def get_running_agent_count(conversation_id: int) -> int:
+    """获取对话中正在运行的 agent 数量（用于防重复发送）。"""
+    conn = _get_conn()
+    row = conn.execute("""
+        SELECT COUNT(*) as cnt FROM agent_runs
+        WHERE conversation_id = ? AND status IN ('pending', 'running')
+    """, (conversation_id,)).fetchone()
+    conn.close()
+    return row["cnt"] if row else 0

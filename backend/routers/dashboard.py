@@ -387,19 +387,28 @@ async def get_dashboard():
 
 @router.get("/api/dashboard/daily-report")
 async def get_daily_report():
-    """获取今日自动生成的日报。"""
+    """获取今日自动生成的日报。如果没有今日的，返回最近一条。"""
+    import logging
+    logging.warning("=== get_daily_report called (NEW VERSION) ===")
     from datetime import datetime
     today = datetime.now().strftime("%Y-%m-%d")
     conn = _get_conn()
+    # 先查今天的
     row = conn.execute(
         "SELECT * FROM analysis_history WHERE agent_id = 1 AND date(created_at) = ? ORDER BY created_at DESC LIMIT 1",
         (today,)
     ).fetchone()
+    # 没有则查最近一条
+    if not row:
+        row = conn.execute(
+            "SELECT * FROM analysis_history WHERE agent_id = 1 ORDER BY created_at DESC LIMIT 1"
+        ).fetchone()
     conn.close()
     if row:
         r = dict(row)
-        return {"has_report": True, "report": r}
-    return {"has_report": False, "report": None}
+        is_today = r.get("created_at", "").startswith(today)
+        return {"has_report": True, "report": r, "is_today": is_today}
+    return {"has_report": False, "report": None, "is_today": False}
 
 
 @router.post("/api/dashboard/daily-report/regenerate")
@@ -595,7 +604,7 @@ async def regenerate_daily_report():
 
 @router.get("/api/dashboard/hot-topics")
 async def get_hot_topics():
-    """获取今日市场热点（YingMi MCP SearchFinancialNews，300秒缓存）。"""
+    """获取今日市场热点（盈米MCP + 东方财富互补，300秒缓存）。"""
     import time
     from pathlib import Path
     from config import ROOT
@@ -619,6 +628,9 @@ async def get_hot_topics():
             pass
 
     news_items = []
+    sources_used = []
+
+    # ── 数据源 1: 盈米 MCP SearchFinancialNews ──
     try:
         from mcp.yingmi_client import get_yingmi_client
         mcp = get_yingmi_client()
@@ -632,26 +644,94 @@ async def get_hot_topics():
                             news_items.append({
                                 "title": item.get("title", ""),
                                 "summary": item.get("summary", ""),
-                                "source": item.get("sources", ""),
+                                "source": item.get("sources", "盈米"),
                                 "date": item.get("publishDate", ""),
                                 "url": item.get("url", ""),
                             })
+        if news_items:
+            sources_used.append("yingmi")
     except Exception as e:
-        logging.warning(f"热点新闻获取失败: {e}")
+        logging.warning(f"盈米热点新闻获取失败: {e}")
 
-    # fallback
+    # ── 数据源 2: 东方财富 financialSearch 金融资讯 ──
+    eastmoney_items = []
+    try:
+        from mcp.eastmoney_client import get_eastmoney_client
+        client = get_eastmoney_client()
+        raw_text = client.financial_search("今日A股市场热点新闻")
+        if raw_text:
+            import re
+            # 东方财富返回的可能是 markdown/文本格式，提取标题和摘要
+            # 尝试按行解析，每条新闻通常有标题和摘要
+            lines = [l.strip() for l in raw_text.split('\n') if l.strip()]
+            current_item = None
+            for line in lines:
+                # 跳过纯标记行
+                if line.startswith('#') or line.startswith('---') or len(line) < 5:
+                    continue
+                # 识别标题行（数字开头、或带【】、或较短的加粗文本）
+                is_title = (
+                    re.match(r'^\d+[.、）)]\s*', line) or
+                    re.match(r'^【.+】', line) or
+                    (len(line) < 50 and '**' in line)
+                )
+                if is_title:
+                    if current_item and current_item.get("title"):
+                        eastmoney_items.append(current_item)
+                    title = re.sub(r'^\d+[.、）)]\s*', '', line)
+                    title = re.sub(r'\*\*', '', title)
+                    current_item = {"title": title.strip(), "summary": "", "source": "东方财富", "date": "", "url": ""}
+                elif current_item:
+                    # 作为摘要追加
+                    if current_item["summary"]:
+                        current_item["summary"] += " " + line
+                    else:
+                        current_item["summary"] = line
+                    # 限制摘要长度
+                    if len(current_item["summary"]) > 300:
+                        current_item["summary"] = current_item["summary"][:300]
+            if current_item and current_item.get("title"):
+                eastmoney_items.append(current_item)
+
+            # 如果文本解析没提取到结构化新闻，整段作为一条
+            if not eastmoney_items and len(raw_text) > 50:
+                eastmoney_items.append({
+                    "title": "东方财富市场资讯",
+                    "summary": raw_text[:500],
+                    "source": "东方财富",
+                    "date": "",
+                    "url": "",
+                })
+        if eastmoney_items:
+            sources_used.append("eastmoney")
+    except Exception as e:
+        logging.warning(f"东方财富资讯获取失败: {e}")
+
+    # ── 合并去重（按标题相似度） ──
+    if eastmoney_items:
+        existing_titles = {item["title"][:15] for item in news_items}
+        for item in eastmoney_items:
+            # 标题前 15 字符去重
+            short_title = item["title"][:15]
+            if short_title not in existing_titles:
+                news_items.append(item)
+                existing_titles.add(short_title)
+
+    # ── 兜底: web_search ──
     if not news_items:
         try:
             from tools import execute_tool
             web_raw = execute_tool("web_search", {"query": "A股 今日热点 板块 基金", "max_results": 5})
             if web_raw:
                 news_items.append({"title": "网络资讯", "summary": web_raw[:500], "source": "web_search", "date": "", "url": ""})
+                sources_used.append("web_search")
         except Exception as e:
             logging.warning(f"热点 web_search 失败: {e}")
 
     from datetime import datetime
     fetched_at = datetime.now().strftime("%Y-%m-%d %H:%M")
-    result = {"news": news_items, "source": "yingmi" if news_items else "none", "fetched_at": fetched_at}
+    source_label = "+".join(sources_used) if sources_used else "none"
+    result = {"news": news_items, "source": source_label, "fetched_at": fetched_at}
     _hot_topics_cache["data"] = result
     _hot_topics_cache["ts"] = now
     # 持久化完整数据，进程重启后可恢复（含 fetched_at）
@@ -960,6 +1040,14 @@ async def get_hotspots_analysis():
             parsed = json.loads(content)
         # 确保字段完整
         recs = parsed.get("recommendations", [])
+        # 回填估值百分位（LLM 输出不带此字段，从本地估值数据补充）
+        index_lookup = {i["index_code"]: i for i in all_indexes} if all_indexes else {}
+        for rec in recs:
+            code = rec.get("index_code", "")
+            if code and code in index_lookup:
+                rec["percentile"] = index_lookup[code].get("percentile")
+                rec["current_value"] = index_lookup[code].get("current_value")
+                rec["metric_type"] = index_lookup[code].get("metric_type")
         # 保存到推荐验证库 + 缓存 + 分析历史
         if recs:
             try:
@@ -1021,6 +1109,22 @@ async def get_latest_hotspots_analysis():
             for rec in cached.get("recommendations", []):
                 if rec.get("index_name") in id_map:
                     rec["id"] = id_map[rec["index_name"]]
+        except Exception:
+            pass
+        # 补充估值百分位（缓存中可能没有）
+        try:
+            indexes = list_valuation_indexes()
+            index_lookup = {}
+            for i in indexes:
+                code = i.get("index_code", "")
+                if code and code not in index_lookup:
+                    index_lookup[code] = i
+            for rec in cached.get("recommendations", []):
+                code = rec.get("index_code", "")
+                if code and code in index_lookup and rec.get("percentile") is None:
+                    rec["percentile"] = index_lookup[code].get("percentile")
+                    rec["current_value"] = index_lookup[code].get("current_value")
+                    rec["metric_type"] = index_lookup[code].get("metric_type")
         except Exception:
             pass
         return cached

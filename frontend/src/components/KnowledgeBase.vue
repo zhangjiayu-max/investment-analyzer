@@ -1,6 +1,6 @@
 <script setup>
 import { ref, onMounted, computed } from 'vue'
-import { getKnowledgeStats, listKnowledge, searchKnowledge, deleteKnowledge } from '../api'
+import { getKnowledgeStats, getKnowledgeBooks, listKnowledge, searchKnowledge, deleteKnowledge } from '../api'
 import { useToast } from '../composables/useToast'
 import ConfirmDialog from './ConfirmDialog.vue'
 
@@ -12,6 +12,8 @@ const loading = ref(false)
 const searchQuery = ref('')
 const activeCategory = ref('')
 const activeSubcategory = ref('')
+const activeSource = ref('')
+const books = ref([])
 
 const confirm = ref({ visible: false, title: '', message: '', danger: false, onConfirm: null })
 
@@ -48,6 +50,15 @@ async function loadStats() {
   }
 }
 
+async function loadBooks() {
+  try {
+    const { data } = await getKnowledgeBooks()
+    books.value = data.books || []
+  } catch (e) {
+    console.error('Failed to load books:', e)
+  }
+}
+
 async function loadItems() {
   loading.value = true
   try {
@@ -55,7 +66,8 @@ async function loadItems() {
       const { data } = await searchKnowledge(searchQuery.value, activeCategory.value || null)
       items.value = data.results || []
     } else {
-      const { data } = await listKnowledge(activeCategory.value || null, activeSubcategory.value || null)
+      const source = activeSource.value || null
+      const { data } = await listKnowledge(activeCategory.value || null, activeSubcategory.value || null, source)
       items.value = data.items || []
     }
   } catch (e) {
@@ -68,11 +80,21 @@ async function loadItems() {
 function filterByCategory(cat) {
   activeCategory.value = activeCategory.value === cat ? '' : cat
   activeSubcategory.value = ''
+  activeSource.value = ''
+  if (activeCategory.value === 'book') {
+    loadBooks()
+  }
   loadItems()
 }
 
 function filterBySubcategory(sub) {
   activeSubcategory.value = activeSubcategory.value === sub ? '' : sub
+  activeSource.value = ''
+  loadItems()
+}
+
+function filterByBook(source) {
+  activeSource.value = activeSource.value === source ? '' : source
   loadItems()
 }
 
@@ -148,6 +170,27 @@ const filteredItems = computed(() => {
       <button v-if="searchQuery" class="btn-ghost" @click="searchQuery = ''; loadItems()">清除</button>
     </div>
 
+    <!-- 书籍列表 -->
+    <div v-if="activeCategory === 'book' && books.length" class="books-section">
+      <div class="books-header">
+        <span class="filter-label">📖 已蒸馏书籍：</span>
+        <button v-if="activeSource" class="btn-ghost btn-sm" @click="activeSource = ''; loadItems()">
+          ← 返回全部
+        </button>
+      </div>
+      <div class="books-grid">
+        <div
+          v-for="book in books"
+          :key="book.source"
+          :class="['book-card', { active: activeSource === book.source }]"
+          @click="filterByBook(book.source)"
+        >
+          <div class="book-name">{{ book.source }}</div>
+          <div class="book-meta">{{ book.count }} 个知识点</div>
+        </div>
+      </div>
+    </div>
+
     <!-- 子分类筛选 -->
     <div v-if="stats?.subcategories?.length" class="filter-bar">
       <span class="filter-label">筛选：</span>
@@ -195,6 +238,7 @@ const filteredItems = computed(() => {
         <div v-if="item.source" class="item-source">来源: {{ item.source }}</div>
       </div>
     </div>
+
   </div>
 </template>
 
@@ -424,6 +468,62 @@ function renderContent(content) {
   color: var(--color-text-muted);
 }
 
+/* 书籍列表 */
+.books-section {
+  margin-bottom: 1.5rem;
+}
+
+.books-header {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.75rem;
+}
+
+.btn-sm {
+  padding: 0.25rem 0.6rem;
+  font-size: 0.8rem;
+}
+
+.books-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 0.75rem;
+}
+
+.book-card {
+  background: var(--color-bg-card);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  padding: 0.85rem 1rem;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.book-card:hover {
+  border-color: var(--color-primary-300);
+  box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+}
+
+.book-card.active {
+  background: var(--color-primary-50);
+  border-color: var(--color-primary-400);
+}
+
+.book-name {
+  font-size: 0.9rem;
+  font-weight: 600;
+  margin-bottom: 0.25rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.book-meta {
+  font-size: 0.75rem;
+  color: var(--color-text-muted);
+}
+
 /* 加载和空状态 */
 .loading-state {
   display: flex;
@@ -444,4 +544,51 @@ function renderContent(content) {
   font-size: 2rem;
   margin-bottom: 0.5rem;
 }
+
+/* 移动端适配 */
+@media (max-width: 768px) {
+  .books-grid {
+    grid-template-columns: repeat(2, 1fr);
+    gap: 0.5rem;
+  }
+
+  .book-card {
+    padding: 0.65rem 0.75rem;
+  }
+
+  .book-name {
+    font-size: 0.8rem;
+  }
+
+  .search-bar {
+    flex-direction: column;
+    gap: 0.5rem;
+  }
+
+  .search-bar input {
+    width: 100%;
+  }
+
+  .filter-bar {
+    flex-direction: column;
+    gap: 0.5rem;
+  }
+
+  .filter-tags {
+    flex-wrap: wrap;
+    gap: 0.35rem;
+  }
+
+  .filter-tag {
+    font-size: 0.7rem;
+    padding: 0.25rem 0.5rem;
+  }
+}
+
+@media (max-width: 480px) {
+  .books-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
 </style>
