@@ -64,9 +64,7 @@ BOOKS_DIR = Path(__file__).parent.parent.parent / "data" / "books"
 # ══════════════════════════════════════════════════════════════
 
 _DISTILL_API_KEYS = [
-    "tp-c5p6nwfbi21nbr1oc1d3ezmwxb27pb5mtidv5f7y5nhcgitn",
-    "tp-c91hcq2rlhtzvok8yuntpya2omtedoncp7wsz5l8rs4w3863",
-    "tp-ca65d13uw5f06odkihv9336gb69avpj3hjrx6r38og6e8ejw",
+    "tp-czk5aswnmkkomrt2d6oy8p5me8rjnz2bdl70txopb0q8m8qp",
 ]
 
 _, _base_url, _ = get_llm_config()

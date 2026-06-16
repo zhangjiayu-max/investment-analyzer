@@ -1,6 +1,5 @@
 <script setup>
 import { ref, onMounted, onUnmounted } from 'vue'
-import * as echarts from 'echarts'
 import { getChart } from '../api'
 import { isDark } from '../composables/useTheme'
 
@@ -13,15 +12,22 @@ const chartRef = ref(null)
 const loading = ref(true)
 let chartInstance = null
 let resizeObserver = null
+let echartsModule = null
 
 onMounted(async () => {
-  try {
-    const { data } = await getChart(props.symbol, 180)
-    renderChart(data)
-  } catch (e) {
-    console.error('Chart load failed:', e)
-  } finally {
-    loading.value = false
+  // Load echarts and API data in parallel
+  const [, plotlyData] = await Promise.all([
+    import('echarts').then(m => { echartsModule = m }),
+    getChart(props.symbol, 180).then(res => res.data).catch(e => {
+      console.error('Chart load failed:', e)
+      return null
+    }),
+  ])
+
+  loading.value = false
+
+  if (plotlyData?.data) {
+    renderChart(plotlyData)
   }
 
   resizeObserver = new ResizeObserver(() => chartInstance?.resize())
@@ -50,8 +56,9 @@ function calculateMA(data, period) {
 }
 
 function renderChart(plotlyData) {
-  if (!chartRef.value || !plotlyData?.data) return
+  if (!chartRef.value || !plotlyData?.data || !echartsModule) return
 
+  const echarts = echartsModule
   chartInstance = echarts.init(chartRef.value, isDark.value ? 'dark' : null)
 
   const traces = plotlyData.data

@@ -1,7 +1,7 @@
 <!-- 通用仪表盘：用于市场温度、估值温度等 0-100 指标 -->
 <script setup>
-import { ref, watch, onMounted, onUnmounted, computed } from 'vue'
-import * as echarts from 'echarts'
+import { ref, computed } from 'vue'
+import { useLazyChart } from '../../composables/useLazyChart'
 import { useChartTheme } from '../../composables/useChartTheme'
 
 const props = defineProps({
@@ -23,76 +23,56 @@ const props = defineProps({
 })
 
 const chartRef = ref(null)
-let chart = null
 const { isDark } = useChartTheme()
 
-const option = computed(() => ({
-  backgroundColor: 'transparent',
-  series: [
-    {
-      type: 'gauge',
-      min: props.min,
-      max: props.max,
-      startAngle: 210,
-      endAngle: -30,
-      progress: { show: true, width: 18, roundCap: true },
-      pointer: { show: true, length: '60%', width: 5, itemStyle: { color: 'auto' } },
-      axisLine: {
-        lineStyle: {
-          width: 18,
-          color: props.segments.map(s => [s.to / props.max, s.color]),
+function getOption(echarts) {
+  return {
+    backgroundColor: 'transparent',
+    series: [
+      {
+        type: 'gauge',
+        min: props.min,
+        max: props.max,
+        startAngle: 210,
+        endAngle: -30,
+        progress: { show: true, width: 18, roundCap: true },
+        pointer: { show: true, length: '60%', width: 5, itemStyle: { color: 'auto' } },
+        axisLine: {
+          lineStyle: {
+            width: 18,
+            color: props.segments.map(s => [s.to / props.max, s.color]),
+          },
         },
+        axisTick: { show: false },
+        splitLine: { show: false },
+        axisLabel: {
+          distance: 24,
+          color: isDark.value ? '#9aa0a6' : '#64748b',
+          fontSize: 11,
+          formatter: v => v === props.min || v === props.max ? v : '',
+        },
+        title: {
+          show: !!props.title,
+          offsetCenter: [0, '70%'],
+          fontSize: 13,
+          color: isDark.value ? '#e8eaed' : '#0f172a',
+          fontWeight: 600,
+        },
+        detail: {
+          valueAnimation: true,
+          fontSize: 28,
+          fontWeight: 700,
+          color: 'auto',
+          offsetCenter: [0, '40%'],
+          formatter: v => `${v}${props.unit}`,
+        },
+        data: [{ value: props.value, name: props.title }],
       },
-      axisTick: { show: false },
-      splitLine: { show: false },
-      axisLabel: {
-        distance: 24,
-        color: isDark.value ? '#9aa0a6' : '#64748b',
-        fontSize: 11,
-        formatter: v => v === props.min || v === props.max ? v : '',
-      },
-      title: {
-        show: !!props.title,
-        offsetCenter: [0, '70%'],
-        fontSize: 13,
-        color: isDark.value ? '#e8eaed' : '#0f172a',
-        fontWeight: 600,
-      },
-      detail: {
-        valueAnimation: true,
-        fontSize: 28,
-        fontWeight: 700,
-        color: 'auto',
-        offsetCenter: [0, '40%'],
-        formatter: v => `${v}${props.unit}`,
-      },
-      data: [{ value: props.value, name: props.title }],
-    },
-  ],
-}))
-
-function renderChart() {
-  if (!chartRef.value) return
-  if (chart) chart.dispose()
-  chart = echarts.init(chartRef.value, isDark.value ? 'dark' : null)
-  chart.setOption(option.value)
+    ],
+  }
 }
 
-function handleResize() { chart?.resize() }
-
-watch(() => [props.value, isDark.value], () => {
-  if (chart) chart.setOption(option.value)
-})
-
-onMounted(() => {
-  renderChart()
-  window.addEventListener('resize', handleResize)
-})
-
-onUnmounted(() => {
-  chart?.dispose()
-  window.removeEventListener('resize', handleResize)
-})
+useLazyChart(chartRef, getOption, [() => props.value, isDark])
 </script>
 
 <template>

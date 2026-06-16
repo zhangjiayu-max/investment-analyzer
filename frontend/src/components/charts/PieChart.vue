@@ -1,7 +1,7 @@
 <!-- 通用饼图/环形图：用于持仓分布、行业配置等 -->
 <script setup>
-import { ref, watch, onMounted, onUnmounted, computed } from 'vue'
-import * as echarts from 'echarts'
+import { ref, computed } from 'vue'
+import { useLazyChart } from '../../composables/useLazyChart'
 import { useChartTheme } from '../../composables/useChartTheme'
 
 const props = defineProps({
@@ -15,19 +15,9 @@ const props = defineProps({
 })
 
 const chartRef = ref(null)
-let chart = null
 const { theme, isDark } = useChartTheme()
 
-function getTooltipOpts() {
-  return {
-    backgroundColor: isDark.value ? 'rgba(13,18,32,0.95)' : '#ffffff',
-    borderColor: theme.value.borderColor,
-    borderWidth: 1,
-    textStyle: { color: theme.value.titleColor, fontSize: 12 },
-  }
-}
-
-const option = computed(() => {
+function getOption(echarts) {
   const colors = theme.value.colors.series
   const seriesData = props.data.map((d, i) => ({
     name: d.name,
@@ -56,7 +46,10 @@ const option = computed(() => {
       textStyle: { color: theme.value.titleColor, fontSize: 13, fontWeight: 600 },
     } : undefined,
     tooltip: {
-      ...getTooltipOpts(),
+      backgroundColor: isDark.value ? 'rgba(13,18,32,0.95)' : '#ffffff',
+      borderColor: theme.value.borderColor,
+      borderWidth: 1,
+      textStyle: { color: theme.value.titleColor, fontSize: 12 },
       trigger: 'item',
       formatter: p => `<b>${p.name}</b><br/>金额: ¥${p.value.toLocaleString()}<br/>占比: ${p.percent}%`,
     },
@@ -80,30 +73,9 @@ const option = computed(() => {
       data: seriesData,
     }],
   }
-})
-
-function renderChart() {
-  if (!chartRef.value) return
-  if (chart) chart.dispose()
-  chart = echarts.init(chartRef.value, isDark.value ? 'dark' : null)
-  chart.setOption(option.value)
 }
 
-function handleResize() { chart?.resize() }
-
-watch(() => [() => props.data, isDark.value], () => {
-  if (chart) chart.setOption(option.value)
-}, { deep: true })
-
-onMounted(() => {
-  renderChart()
-  window.addEventListener('resize', handleResize)
-})
-
-onUnmounted(() => {
-  chart?.dispose()
-  window.removeEventListener('resize', handleResize)
-})
+useLazyChart(chartRef, getOption, [() => props.data, isDark])
 </script>
 
 <template>

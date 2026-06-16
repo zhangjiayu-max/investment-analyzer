@@ -3,7 +3,7 @@
 含五大板块：
   - 持仓 CRUD：持仓列表/汇总/创建、现金、基金净值历史、清空
   - 调仓管理：调仓分析、配置 CRUD（获取/更新/历史/详情/回滚）
-  - 持仓分析：分散度、AI 汇总、穿透、表现、交易汇总、AI 分析、AI 记录、反馈、bad-case、全景、深度、交易复盘、情景推演、今日状态
+  - 持仓分析：分散度、AI 汇总、穿透、表现、交易汇总、AI 分析、AI 记录、反馈、bad-case、全景、深度、交易复盘、指定基金分析、今日状态
   - 风险预警：列表、未读数、标记已读、删除、生成
   - 交易标签：添加/移除/获取交易标签
 """
@@ -860,6 +860,40 @@ def _get_valuation_context() -> str:
         return f"## 估值参考\n获取失败: {e}"
 
 
+def _get_valuation_context_for_fund(fund_code: str, fund_name: str) -> str:
+    """获取指定基金的估值数据。"""
+    try:
+        # 获取基金持仓信息，查找跟踪指数
+        fund_info = lookup_fund_info(fund_code)
+        if not fund_info:
+            return f"\n## 目标基金估值\n基金 {fund_name}({fund_code}) 暂无跟踪指数信息"
+
+        index_code = fund_info.get("index_code", "")
+        index_name = fund_info.get("index_name", "")
+
+        if not index_code or not index_name:
+            return f"\n## 目标基金估值\n基金 {fund_name}({fund_code}) 未设置跟踪指数"
+
+        # 获取估值数据
+        val = get_latest_valuation(index_code)
+        if val:
+            pe_percentile = val.get("pe_percentile", "N/A")
+            pb_percentile = val.get("pb_percentile", "N/A")
+            date_str = val.get("snapshot_date", "")
+            level = ""
+            if pe_percentile != "N/A":
+                try:
+                    pct = float(pe_percentile)
+                    level = "🔥高估" if pct > 80 else ("⚠️偏高" if pct > 50 else ("✅低估" if pct < 20 else "⚡适中"))
+                except:
+                    pass
+            return f"\n## 目标基金估值\n- {index_name}({index_code}): PE分位 {pe_percentile}, PB分位 {pb_percentile} [{date_str}] {level}"
+        else:
+            return f"\n## 目标基金估值\n{index_name}({index_code}): 暂无估值数据"
+    except Exception as e:
+        return f"\n## 目标基金估值\n获取失败: {e}"
+
+
 def _get_holdings_valuation_context(holdings: list) -> str:
     """按持仓匹配估值数据 — 让 LLM 知道每只基金对应的估值。"""
     from db.valuations import search_indexes_by_keyword, get_latest_valuation
@@ -1662,6 +1696,96 @@ async def backfill_snapshots_api():
 @router.get("/api/portfolio/analysis/what-if/records")
 async def list_whatif_records_api(limit: int = 10):
     """列出情景推演历史记录。"""
+    records = list_portfolio_analysis_records(analysis_type="what_if", limit=limit)
+    return {"records": records}
+
+
+@router.post("/api/portfolio/analysis/fund-analysis")
+async def fund_analysis_api(req: dict):
+    """模式4：指定基金分析 — 输入任意基金代码，结合持仓和估值分析是否建仓。"""
+    fund_code = req.get("fund_code", "").strip()
+    if not fund_code:
+        raise HTTPException(400, "请输入基金代码")
+
+    agent = get_analysis_agent(6)
+    if not agent:
+        raise HTTPException(404, "AI 基金分析师未配置")
+
+    # 确保 system_prompt 是字符串类型
+    system_prompt = agent.get("system_prompt", "")
+    if isinstance(system_prompt, bytes):
+        system_prompt = system_prompt.decode("utf-8")
+
+    # 获取目标基金信息
+    fund_info = lookup_fund_info(fund_code)
+    fund_name = fund_info.get("fund_name", "未知基金") if fund_info else "未知基金"
+
+    # 获取目标基金净值
+    nav_data = fetch_fund_nav(fund_code)
+    nav_info = f"最新净值: {nav_data.get('nav', 'N/A')}，日期: {nav_data.get('date', 'N/A')}" if nav_data else "净值数据获取失败"
+
+    # 获取目标基金估值数据
+    target_valuation = _get_valuation_context_for_fund(fund_code, fund_name)
+
+    # 获取用户持仓数据
+    holdings = list_holdings()
+    total_value = sum(h.get('current_value', 0) or 0 for h in holdings)
+    holdings_lines = []
+    for h in sorted(holdings, key=lambda x: (x.get('current_value', 0) or 0), reverse=True):
+        pct = (h.get('current_value', 0) or 0) / total_value * 100 if total_value else 0
+        holdings_lines.append(
+            f"- {h.get('fund_name','')}({h.get('fund_code','')}): "
+            f"市值 {(h.get('current_value') or 0):.2f}, 占比 {pct:.1f}%, "
+            f"成本 {(h.get('total_cost') or 0):.2f}"
+        )
+
+    # 获取整体估值上下文
+    valuation_context = _get_valuation_context()
+
+    user_content = (
+        f"## 待分析基金\n"
+        f"- 基金代码: {fund_code}\n"
+        f"- 基金名称: {fund_name}\n"
+        f"- {nav_info}\n"
+        f"{target_valuation}\n\n"
+        f"## 用户当前持仓\n" + "\n".join(holdings_lines) +
+        f"\n总市值: {total_value:.2f}\n"
+        f"\n{valuation_context}"
+    )
+
+    try:
+        from llm_service import _call_llm, MODEL
+        response = await asyncio.to_thread(lambda: _call_llm(
+            caller="portfolio_fund_analysis",
+            model=MODEL,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_content},
+            ],
+            temperature=0.3,
+            max_tokens=8192,
+        ))
+        result_text = response.choices[0].message.content or ""
+        tokens = response.usage.total_tokens if response.usage else 0
+    except Exception as e:
+        logger.error(f"指定基金分析失败: {e}")
+        raise HTTPException(500, f"AI 分析失败: {str(e)}")
+
+    record_id = create_portfolio_analysis_record(
+        analysis_type="what_if",
+        summary=f"指定基金分析 · {fund_name}({fund_code})",
+        input_data=json.dumps({"fund_code": fund_code, "fund_name": fund_name}, ensure_ascii=False),
+        result_data=result_text,
+        token_usage=tokens,
+        agent_id=6,
+    )
+
+    return {"id": record_id, "result": result_text, "token_usage": tokens}
+
+
+@router.get("/api/portfolio/analysis/fund-analysis/records")
+async def list_fund_analysis_records_api(limit: int = 10):
+    """列出指定基金分析历史记录。"""
     records = list_portfolio_analysis_records(analysis_type="what_if", limit=limit)
     return {"records": records}
 

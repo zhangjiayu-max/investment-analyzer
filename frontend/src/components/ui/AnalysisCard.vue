@@ -82,7 +82,7 @@ function copyRecordId() {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 0.625rem 0.875rem;
+  padding: 0.5rem 0.875rem;
   border-bottom: 1px solid var(--color-border);
   background: var(--color-surface-hover);
 }
@@ -135,35 +135,73 @@ function copyRecordId() {
   gap: 0.25rem;
 }
 
+/* ── Report Body ── */
 .analysis-body {
-  padding: 1rem;
+  padding: 0.875rem 1.25rem;
   font-size: 0.875rem;
-  line-height: 1.7;
+  line-height: 1.6;
   color: var(--color-text-primary);
 }
 
-.analysis-body :deep(h1),
-.analysis-body :deep(h2),
-.analysis-body :deep(h3) {
-  margin-top: 1rem;
-  margin-bottom: 0.5rem;
+/* h2 作为主章节标题：紧凑分隔线 + 渐变左边框 */
+.analysis-body :deep(h2) {
+  font-size: 1em;
+  font-weight: 700;
+  margin: 0.8rem 0 0.3rem;
+  padding: 0.25rem 0 0.2rem 0.6rem;
+  border-left: 3px solid var(--color-primary);
+  background: linear-gradient(90deg, var(--color-surface-hover), transparent);
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+  color: var(--color-text-primary);
+  letter-spacing: 0.02em;
 }
 
+.analysis-body :deep(h2:first-child) {
+  margin-top: 0;
+}
+
+/* h3 子标题 */
+.analysis-body :deep(h3) {
+  font-size: 0.9rem;
+  font-weight: 600;
+  margin: 0.5rem 0 0.2rem;
+  color: var(--color-text-secondary);
+}
+
+/* h1 基本不用，保留安全样式 */
+.analysis-body :deep(h1) {
+  font-size: 1.1em;
+  font-weight: 700;
+  margin: 0.6rem 0 0.3rem;
+}
+
+/* 段落紧凑 */
+.analysis-body :deep(p) {
+  margin: 0.2rem 0;
+}
+
+/* 列表紧凑 */
 .analysis-body :deep(ul),
 .analysis-body :deep(ol) {
   padding-left: 1.25rem;
-  margin: 0.5rem 0;
+  margin: 0.2rem 0;
 }
 
+.analysis-body :deep(li) {
+  margin: 0.1rem 0;
+}
+
+/* 表格：紧凑行高 + 斑马纹 */
 .analysis-body :deep(table) {
   width: 100%;
   border-collapse: collapse;
-  margin: 0.75rem 0;
+  margin: 0.4rem 0;
+  font-size: 0.8125rem;
 }
 
 .analysis-body :deep(th),
 .analysis-body :deep(td) {
-  padding: 0.375rem 0.625rem;
+  padding: 0.25rem 0.5rem;
   border: 1px solid var(--color-border);
   text-align: left;
 }
@@ -171,6 +209,57 @@ function copyRecordId() {
 .analysis-body :deep(th) {
   background: var(--color-surface-hover);
   font-weight: 600;
+  font-size: 0.8rem;
+  color: var(--color-text-secondary);
+}
+
+.analysis-body :deep(tbody tr:nth-child(even)) {
+  background: var(--color-surface-hover);
+}
+
+/* 引用块 */
+.analysis-body :deep(blockquote) {
+  border-left: 3px solid var(--color-primary);
+  padding: 0.25rem 0.75rem;
+  margin: 0.4rem 0;
+  color: var(--color-text-secondary);
+  font-style: italic;
+  background: var(--color-surface-hover);
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+}
+
+/* 代码 */
+.analysis-body :deep(code) {
+  background: var(--color-surface-hover);
+  padding: 0.1em 0.35em;
+  border-radius: 3px;
+  font-size: 0.85em;
+}
+
+.analysis-body :deep(pre) {
+  background: var(--color-surface-hover);
+  padding: 0.75rem;
+  border-radius: var(--radius-sm);
+  overflow-x: auto;
+  margin: 0.5rem 0;
+}
+
+.analysis-body :deep(pre code) {
+  background: none;
+  padding: 0;
+}
+
+/* 强调文本 */
+.analysis-body :deep(strong) {
+  font-weight: 600;
+  color: var(--color-text-primary);
+}
+
+/* 分隔线 */
+.analysis-body :deep(hr) {
+  border: none;
+  border-top: 1px solid var(--color-border);
+  margin: 0.75rem 0;
 }
 
 .rec-feedback-btn {

@@ -1,6 +1,5 @@
 <script setup>
 import { ref, onMounted, onUnmounted, nextTick, computed } from 'vue'
-import * as echarts from 'echarts'
 import { getBondMarketTemperature } from '../api'
 
 const chartRef = ref(null)
@@ -8,6 +7,7 @@ const loading = ref(true)
 const error = ref(null)
 const rawData = ref(null)
 let chart = null
+let echartsModule = null
 
 const current = computed(() => rawData.value?.current)
 const history = computed(() => rawData.value?.history)
@@ -26,10 +26,14 @@ function getTempLabel(degree) {
   return '高温（谨慎买入）'
 }
 
-function renderChart(data) {
+async function renderChart(data) {
   if (!chartRef.value) return
+  if (!echartsModule) {
+    echartsModule = await import('echarts')
+  }
   if (chart) chart.dispose()
 
+  const echarts = echartsModule
   chart = echarts.init(chartRef.value)
 
   const dates = data.map(d => d.date)
@@ -192,7 +196,7 @@ async function fetchData() {
     rawData.value = data
     loading.value = false
     await nextTick()
-    renderChart(data.history)
+    await renderChart(data.history)
   } catch (e) {
     error.value = e.response?.data?.detail || e.message || '加载失败'
     loading.value = false
@@ -334,54 +338,55 @@ onUnmounted(() => {
 }
 
 .current-grid {
-  display: flex;
-  gap: 2rem;
-  flex-wrap: wrap;
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 1rem;
 }
 
 .current-item {
   display: flex;
   flex-direction: column;
-  gap: 0.25rem;
+  gap: 0.375rem;
 }
 
 .current-label {
-  font-size: 0.75rem;
+  font-size: 0.8rem;
   color: var(--color-text-muted);
 }
 
 .current-value {
   font-size: 1.25rem;
   font-weight: 700;
-  color: var(--color-text-primary);
 }
 
 .temp-value {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   gap: 0.5rem;
 }
 
 .temp-tag {
   font-size: 0.75rem;
   font-weight: 500;
-  opacity: 0.8;
+  padding: 0.15rem 0.5rem;
+  border-radius: 999px;
+  background: var(--color-bg-tertiary);
 }
 
 .rate-value {
-  color: var(--color-primary-600);
+  color: var(--color-primary);
 }
 
-/* Chart */
+/* Chart card */
 .chart-card {
-  padding: 1rem;
-  min-height: 480px;
+  padding: 0.75rem;
+  min-height: 360px;
   position: relative;
 }
 
 .chart-container {
+  height: 350px;
   width: 100%;
-  height: 500px;
 }
 
 .chart-overlay {
@@ -392,18 +397,49 @@ onUnmounted(() => {
   align-items: center;
   justify-content: center;
   gap: 0.75rem;
+  background: var(--color-bg-primary);
+  opacity: 0.9;
   color: var(--color-text-muted);
-  font-size: 0.9rem;
-  background: var(--color-bg-card);
   border-radius: var(--radius-lg);
-  z-index: 10;
 }
 
-.chart-overlay svg {
-  color: var(--color-text-muted);
-  opacity: 0.5;
+.spinner-large {
+  width: 32px;
+  height: 32px;
+  border: 3px solid var(--color-border);
+  border-top-color: var(--color-primary-500);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
 }
 
+.btn-secondary {
+  padding: 0.5rem 1.25rem;
+  font-size: 0.88rem;
+  font-weight: 600;
+  color: var(--color-primary);
+  background: var(--color-primary-bg);
+  border: 1px solid var(--color-primary-border);
+  border-radius: var(--radius-lg);
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+.btn-secondary:hover {
+  background: var(--color-primary-bg-hover);
+}
+
+.btn-ghost {
+  background: none;
+  border: 1px solid var(--color-border);
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  border-radius: var(--radius-md);
+  transition: all 0.2s ease;
+}
+.btn-ghost:hover {
+  background: var(--color-bg-hover);
+  border-color: var(--color-primary);
+  color: var(--color-primary);
+}
 
 /* Legend guide */
 .legend-guide {
@@ -411,15 +447,14 @@ onUnmounted(() => {
 }
 
 .legend-title {
-  font-size: 0.85rem;
+  font-size: 0.9rem;
   font-weight: 600;
-  color: var(--color-text-secondary);
-  margin: 0 0 0.75rem 0;
+  margin-bottom: 0.75rem;
 }
 
 .legend-items {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  grid-template-columns: repeat(2, 1fr);
   gap: 0.5rem;
 }
 
@@ -427,7 +462,6 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   gap: 0.5rem;
-  font-size: 0.8rem;
 }
 
 .legend-dot {
@@ -438,30 +472,24 @@ onUnmounted(() => {
 }
 
 .legend-label {
-  font-weight: 500;
-  color: var(--color-text-primary);
-  white-space: nowrap;
+  font-size: 0.8rem;
+  font-weight: 600;
+  min-width: 100px;
 }
 
 .legend-hint {
-  color: var(--color-text-muted);
   font-size: 0.75rem;
+  color: var(--color-text-muted);
 }
 
-@media (max-width: 640px) {
-  .bond-header {
-    flex-direction: column;
-  }
-
+/* Mobile */
+@media (max-width: 768px) {
   .current-grid {
-    flex-direction: column;
-    gap: 0.75rem;
+    grid-template-columns: 1fr;
   }
-
   .chart-container {
-    height: 300px;
+    height: 250px;
   }
-
   .legend-items {
     grid-template-columns: 1fr;
   }

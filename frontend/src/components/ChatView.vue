@@ -11,8 +11,7 @@ import {
 } from '../api'
 import ConfirmDialog from './ConfirmDialog.vue'
 import AppToast from './AppToast.vue'
-import TraceDetail from './TraceDetail.vue'
-import ConversationEvalCard from './ui/ConversationEvalCard.vue'
+import { ChatSidebar, ChatMessage, ChatInput, StreamIndicator, FeedbackModal } from './chat'
 import { useToast } from '../composables/useToast'
 import { renderMarkdown } from '../composables/useMarkdown'
 import { useStreamingState } from '../composables/useStreamingState'
@@ -34,136 +33,29 @@ const messages = ref([])
 const inputText = ref('')
 const messagesContainer = ref(null)
 const showMobileSidebar = ref(false)
-const isRecovering = ref(false)  // 恢复互斥锁，防止并发恢复
+const isRecovering = ref(false)
 
-// 当前选中对话的流式状态（computed，自动跟随 selectedConv 切换）
 const currentStream = computed(() => getStreamState(selectedConv.value?.id))
 const sending = computed(() => currentStream.value?.sending || false)
 
 // 消息评估状态管理
-const messageEvalStates = ref({})  // { messageId: { score, loading, expanded, evaluation, evolution } }
+const messageEvalStates = ref({})
 
-// 获取评估状态类名
-function getEvalStatusClass(messageId) {
-  const state = messageEvalStates.value[messageId]
-  if (!state) return 'eval-status--none'
-  if (state.loading) return 'eval-status--loading'
-  if (state.score >= 80) return 'eval-status--good'
-  if (state.score >= 60) return 'eval-status--ok'
-  if (state.score > 0) return 'eval-status--bad'
-  return 'eval-status--none'
-}
+// 反馈功能
+const feedbackGiven = ref({})
+const specialistFeedback = ref({})
+const feedbackModal = ref({ visible: false, type: '', feedbackType: '', msgIndex: 0, msg: null, specialist: null, note: '' })
 
-// 获取评估状态图标
-function getEvalStatusIcon(messageId) {
-  const state = messageEvalStates.value[messageId]
-  if (!state || state.loading) return '📊'
-  if (state.score >= 80) return '✅'
-  if (state.score >= 60) return '⚠️'
-  if (state.score > 0) return '❌'
-  return '📊'
-}
+// Trace 详情
+const traceDetailVisible = ref({})
+const traceDetailData = ref({})
 
-// 获取评估状态标题
-function getEvalStatusTitle(messageId) {
-  const state = messageEvalStates.value[messageId]
-  if (!state) return '点击进行质量评估'
-  if (state.loading) return '正在评估中...'
-  if (state.score >= 80) return `质量优秀 (${state.score.toFixed(0)}分)，点击查看详情`
-  if (state.score >= 60) return `质量一般 (${state.score.toFixed(0)}分)，点击查看详情`
-  if (state.score > 0) return `质量较差 (${state.score.toFixed(0)}分)，点击查看详情`
-  return '点击进行质量评估'
-}
-
-// 切换消息评估展开/折叠
-async function toggleMessageEval(messageId) {
-  const state = messageEvalStates.value[messageId]
-
-  // 如果没有评估数据，询问是否评估
-  if (!state || (!state.evaluation && !state.loading)) {
-    confirm.value = {
-      visible: true,
-      title: '质量评估',
-      message: '是否对此消息进行质量评估？',
-      danger: false,
-      onConfirm: async () => {
-        confirm.value.visible = false
-        await triggerMessageEval(messageId)
-      },
-    }
-    return
-  }
-
-  // 如果正在加载，忽略点击
-  if (state.loading) {
-    showToast('正在评估中，请稍候...', 'info')
-    return
-  }
-
-  // 切换展开/折叠
-  if (!messageEvalStates.value[messageId]) {
-    messageEvalStates.value[messageId] = { score: 0, loading: false, expanded: true }
-  } else {
-    messageEvalStates.value[messageId].expanded = !messageEvalStates.value[messageId].expanded
-  }
-}
-
-// 加载消息评估
-async function loadMessageEval(messageId) {
-  if (!selectedConv.value?.id) return
-
-  messageEvalStates.value[messageId] = { score: 0, loading: true, expanded: true }
-
-  try {
-    const { data } = await getConversationEvaluation(selectedConv.value.id, messageId)
-    if (data.ok && data.evaluation) {
-      messageEvalStates.value[messageId] = {
-        score: data.evaluation.auto_score || 0,
-        loading: false,
-        expanded: true,
-        evaluation: data.evaluation,
-      }
-    } else {
-      messageEvalStates.value[messageId] = { score: 0, loading: false, expanded: true }
-    }
-  } catch (e) {
-    messageEvalStates.value[messageId] = { score: 0, loading: false, expanded: true }
-  }
-}
-
-// 触发消息评估
-async function triggerMessageEval(messageId) {
-  if (!selectedConv.value?.id) return
-
-  messageEvalStates.value[messageId] = { score: 0, loading: true, expanded: true }
-
-  try {
-    const { data } = await evaluateConversation(selectedConv.value.id, messageId)
-    if (data.ok && data.evaluation) {
-      messageEvalStates.value[messageId] = {
-        score: data.evaluation.auto_score || 0,
-        loading: false,
-        expanded: true,
-        evaluation: data.evaluation,
-        evolution: data.evolution,
-      }
-      showToast('评估完成', 'success')
-    } else {
-      messageEvalStates.value[messageId] = { score: 0, loading: false, expanded: true }
-      showToast('评估失败', 'error')
-    }
-  } catch (e) {
-    messageEvalStates.value[messageId] = { score: 0, loading: false, expanded: true }
-    showToast('评估失败', 'error')
-  }
-}
+// ─── 生命周期 ───
 
 onMounted(async () => {
   await loadConversations()
-  // 监听页面可见性变化（移动端切后台/锁屏后恢复时刷新）
   document.addEventListener('visibilitychange', handleVisibilityChange)
   window.addEventListener('pageshow', handlePageShow)
-  // 自动选中上一次的对话
   if (!(await checkPendingTasks())) {
     await autoSelectLastConversation()
   }
@@ -172,60 +64,39 @@ onMounted(async () => {
 onBeforeUnmount(() => {
   document.removeEventListener('visibilitychange', handleVisibilityChange)
   window.removeEventListener('pageshow', handlePageShow)
-  // 不取消流式执行，让后端任务继续完成
 })
 
-// 移动端切后台/锁屏 → SSE 断开 → 恢复时刷新消息
+// ─── 移动端恢复 ───
+
 function handleVisibilityChange() {
-  if (document.visibilityState === 'visible') {
-    recoverFromDisconnect()
-  }
+  if (document.visibilityState === 'visible') recoverFromDisconnect()
 }
 
 function handlePageShow(e) {
-  // bfcache 恢复时也会触发
-  if (e.persisted) {
-    recoverFromDisconnect()
-  }
+  if (e.persisted) recoverFromDisconnect()
 }
 
 async function recoverFromDisconnect() {
   if (!selectedConv.value?.id) return
-  if (isRecovering.value) return  // 互斥锁：已有恢复流程在执行
+  if (isRecovering.value) return
   isRecovering.value = true
-
   try {
     const convId = selectedConv.value.id
     const state = getStreamState(convId)
-
-    // 检查是否有进行中的任务
-    const hasActiveTask = state?.sending ||
-      messages.value.some(m => m.execution_status === 'streaming')
-
+    const hasActiveTask = state?.sending || messages.value.some(m => m.execution_status === 'streaming')
     if (hasActiveTask) {
-      // 有进行中的任务，但 SSE 可能已断开
-      // 不取消后端任务，只清理前端状态
       finishStream(convId)
       showToast('正在刷新消息...', 'info')
     }
-
-    // 移除任何错误消息（可能是 SSE 断开导致的）
     messages.value = messages.value.filter(m =>
       !(m.role === 'assistant' && m.content?.startsWith('发生错误:'))
     )
-
-    // 刷新消息（后端可能已完成任务并保存了结果）
     await loadMessages(convId)
-
-    // 刷新后再次检查是否有 streaming 状态的消息
     const lastAssistant = [...messages.value].reverse().find(m => m.role === 'assistant')
     if (lastAssistant?.execution_status === 'streaming') {
-      // 任务还在后台运行，恢复 SSE 连接
       showToast('检测到后台执行中的任务，正在恢复连接...', 'info')
       reconnectStream(convId, lastAssistant)
     }
-
-    // 刷新对话列表（标题可能已更新）
     loadConversations()
   } finally {
     isRecovering.value = false
@@ -234,7 +105,6 @@ async function recoverFromDisconnect() {
 
 const LAST_CONV_KEY = 'investment_last_conv'
 
-// 页面切换重建后，检查待恢复的任务（返回 true 表示已恢复）
 async function checkPendingTasks() {
   if (pendingTasks.value.length === 0) return false
   const sorted = [...pendingTasks.value].sort((a, b) => b.addedAt - a.addedAt)
@@ -247,7 +117,6 @@ async function checkPendingTasks() {
   return false
 }
 
-// 自动选中上次查看的对话
 async function autoSelectLastConversation() {
   if (selectedConv.value) return
   const lastId = localStorage.getItem(LAST_CONV_KEY)
@@ -258,12 +127,11 @@ async function autoSelectLastConversation() {
       return
     }
   }
-  // 没有记录，选最新有消息的对话
   const valid = conversations.value.find(c => c.message_count > 0)
-  if (valid) {
-    await selectConversation(valid)
-  }
+  if (valid) await selectConversation(valid)
 }
+
+// ─── 对话管理 ───
 
 async function loadConversations() {
   try {
@@ -279,21 +147,16 @@ async function selectConversation(conv) {
   selectedConv.value = conv
   localStorage.setItem(LAST_CONV_KEY, String(conv.id))
   await loadMessages(conv.id)
-  // 恢复或启动后台任务
   await autoRecoverIfNeeded(conv.id)
 }
 
-// 检查对话是否有后台执行中的任务，自动恢复
 async function autoRecoverIfNeeded(convId) {
-  if (isRecovering.value) return  // 互斥锁：已有恢复流程在执行
+  if (isRecovering.value) return
   isRecovering.value = true
-
   try {
     const msgs = messages.value
     if (msgs.length === 0) return
     const lastMsg = msgs[msgs.length - 1]
-
-    // 场景 1：assistant 还在 streaming → 调 resume 接口收尾
     const lastAssistant = [...msgs].reverse().find(m => m.role === 'assistant')
     if (lastAssistant?.execution_status === 'streaming') {
       const state = getStreamState(convId)
@@ -302,13 +165,9 @@ async function autoRecoverIfNeeded(convId) {
       tryResumeConversation(convId)
       return
     }
-
-    // 场景 2：用户消息没有 assistant 回复 → 重新发送
     if (lastMsg.role === 'user') {
-      // 先检查是否已有进行中的流（防止重复发送）
       const state = getStreamState(convId)
       if (state?.sending) return
-
       const hasAssistantAfter = msgs.some((m, i) => i > msgs.indexOf(lastMsg) && m.role === 'assistant')
       if (!hasAssistantAfter) {
         showToast('检测到中断的请求，正在重新执行...', 'info')
@@ -320,7 +179,6 @@ async function autoRecoverIfNeeded(convId) {
   }
 }
 
-// 通过 resume 接口恢复中断的任务
 function tryResumeConversation(convId) {
   const controller = resumeConversationStream(convId, (event) => {
     routeStreamEvent(convId, event, {
@@ -351,15 +209,12 @@ function tryResumeConversation(convId) {
         if (errorData.code === 'RESUME_FAILED') {
           finishStream(cid)
           removeTask(cid)
-          // 先刷新消息，检查后端是否已完成
           loadMessages(cid).then(() => {
             const lastAssistant = [...messages.value].reverse().find(m => m.role === 'assistant')
             if (lastAssistant && lastAssistant.execution_status !== 'streaming') {
-              // 后端已完成，无需重发
               showToast('任务已完成', 'success')
               return
             }
-            // 确实需要重发
             const lastUserMsg = [...messages.value].reverse().find(m => m.role === 'user')
             if (lastUserMsg) {
               showToast('正在重新执行...', 'info')
@@ -402,15 +257,12 @@ function parseMessageMeta(msg) {
   return msg
 }
 
-// 直接发送消息并跟踪，不经过 handleSend 的 sending 守卫
 function sendMessageAndTrack(convId, text) {
-  // 防重复发送：检查是否已有进行中的流
   const existingState = getStreamState(convId)
   if (existingState?.sending) {
     console.warn(`对话 ${convId} 已有进行中的请求，跳过重复发送`)
     return
   }
-
   const controller = sendMessageStream(convId, text, (event) => {
     routeStreamEvent(convId, event, {
       onAnswer: (cid, data, state) => {
@@ -465,14 +317,11 @@ async function loadMessages(convId) {
   try {
     const { data } = await getMessages(convId)
     messages.value = (data.messages || []).map(msg => parseMessageMeta(msg))
-
-    // 加载每条 assistant 消息的评估状态
     for (const msg of messages.value) {
       if (msg.role === 'assistant' && msg.id) {
         loadMessageEvalStatus(msg.id)
       }
     }
-
     await nextTick()
     scrollToBottom()
   } catch (e) {
@@ -481,36 +330,28 @@ async function loadMessages(convId) {
   }
 }
 
-// 加载消息评估状态（不展开详情）
 async function loadMessageEvalStatus(messageId) {
-  if (!selectedConv.value?.id) {
-    console.log('loadMessageEvalStatus: no selectedConv')
-    return
-  }
-
+  if (!selectedConv.value?.id) return
   try {
-    console.log(`loadMessageEvalStatus: loading eval for message ${messageId}`)
     const { data } = await getConversationEvaluation(selectedConv.value.id, messageId)
-    console.log(`loadMessageEvalStatus: result for message ${messageId}`, data)
     if (data.ok && data.evaluation) {
       messageEvalStates.value[messageId] = {
         score: data.evaluation.auto_score || 0,
         loading: false,
-        expanded: false,  // 默认不展开
+        expanded: false,
         evaluation: data.evaluation,
       }
-      console.log(`loadMessageEvalStatus: set state for message ${messageId}`, messageEvalStates.value[messageId])
     }
   } catch (e) {
     console.error(`loadMessageEvalStatus: error for message ${messageId}`, e)
   }
 }
 
+// ─── 对话 CRUD ───
+
 async function handleNewConversation() {
   try {
-    const { data } = await createConversation({
-      title: '新对话',
-    })
+    const { data } = await createConversation({ title: '新对话' })
     showToast('新对话已创建', 'success')
     await loadConversations()
     const conv = conversations.value.find(c => c.id === data.conversation_id)
@@ -521,8 +362,7 @@ async function handleNewConversation() {
   }
 }
 
-function handleDeleteConversation(conv, e) {
-  e.stopPropagation()
+function handleDeleteConversation(conv) {
   confirm.value = {
     visible: true,
     title: '删除确认',
@@ -544,31 +384,26 @@ function handleDeleteConversation(conv, e) {
   }
 }
 
+// ─── 发送消息 ───
+
 async function handleSend() {
   const text = inputText.value.trim()
   if (!text || !selectedConv.value || sending.value) return
 
   inputText.value = ''
-
-  // 立即显示用户消息
   messages.value.push({ role: 'user', content: text, created_at: new Date().toISOString() })
   await nextTick()
   scrollToBottom()
 
-  // 使用 SSE 流式接口，通过 composable 管理 per-conversation 状态
   const convId = selectedConv.value.id
   const controller = sendMessageStream(convId, text, (event) => {
-    // 所有事件都路由到 composable，由它按 convId 分发
     routeStreamEvent(convId, event, {
       onAnswer: (cid, data, state) => {
-        // 只有当前选中的对话才更新 messages UI
         if (selectedConv.value?.id !== cid) return
-        // 分离 Phase A 和 Phase B 的专家结果
         const allSpecResults = data.specialist_results || (state.completedSpecialists.length > 0 ? [...state.completedSpecialists] : [])
         const phaseAResults = allSpecResults.filter(s => !s.is_cross_review)
         const phaseBResults = allSpecResults.filter(s => s.is_cross_review)
-        // 构建最终消息
-        const assistantMsg = {
+        messages.value.push({
           role: 'assistant',
           content: data.content,
           created_at: new Date().toISOString(),
@@ -576,12 +411,10 @@ async function handleSend() {
           cross_review_results: phaseBResults.length > 0 ? phaseBResults : (state.completedCrossReviews.length > 0 ? [...state.completedCrossReviews] : null),
           tool_calls: state.currentToolCalls.length > 0 ? [...state.currentToolCalls] : null,
           rag: state.currentToolCalls._ragSources ? { sources: state.currentToolCalls._ragSources } : null,
-        }
-        messages.value.push(assistantMsg)
+        })
         nextTick(() => scrollToBottom())
       },
       onDone: (cid, data) => {
-        // 将 timing 附加到最后一条 assistant 消息（仅当前选中对话）
         if (selectedConv.value?.id === cid) {
           const state = getStreamState(cid)
           const lastMsg = messages.value[messages.value.length - 1]
@@ -590,9 +423,7 @@ async function handleSend() {
             lastMsg.phase_timings = state.lastTiming.phase_timings
           }
         }
-        // 清理 composable 状态
         finishStream(cid)
-        // 从任务追踪中移除
         removeTask(cid)
         loadConversations()
       },
@@ -605,38 +436,25 @@ async function handleSend() {
           })
         }
         finishStream(cid)
-        // 从任务追踪中移除
         removeTask(cid)
       },
       onTitleUpdated: (cid, title) => {
-        // 标题更新时立即刷新对话列表
         loadConversations()
-        // 更新当前选中对话的标题
         if (selectedConv.value?.id === cid) {
           selectedConv.value.title = title
         }
       },
     })
   })
-
-  // 在 composable 中注册这个流
   startStream(convId, controller)
-
-  // 添加到任务追踪（用于后台执行）
   addTask(convId, null, selectedConv.value?.title || `对话 #${convId}`)
 }
 
 function handleCancelStream() {
   const convId = selectedConv.value?.id
   if (!convId) return
-
-  // 通知后端取消执行
   cancelConversationExecution(convId).catch(() => {})
-
-  // 取消 composable 中的状态
   cancelStreamState(convId)
-
-  // 显示取消提示消息
   messages.value.push({
     role: 'assistant',
     content: '⏹ 执行已取消',
@@ -656,73 +474,47 @@ function copyConvId() {
   if (!selectedConv.value) return
   const text = `对话ID: ${selectedConv.value.id}`
   navigator.clipboard.writeText(text).then(() => {
-    // 简单提示
     const btn = document.querySelector('.btn-conv-id')
     if (btn) {
       btn.classList.add('copied')
       setTimeout(() => btn.classList.remove('copied'), 1500)
     }
   }).catch(() => {
-    // fallback
     window.prompt('复制对话ID:', selectedConv.value.id)
   })
 }
 
-// 从消息数据恢复流式状态（切回页面时立即显示进度条和已完成专家）
+// ─── 恢复流 ───
+
 function restoreStreamStateFromMessage(convId, msg) {
   if (streamStates.has(convId)) return
-
-  // 创建流式状态
   const controller = new AbortController()
   startStream(convId, controller)
-
   const state = getStreamState(convId)
   if (!state) return
 
-  // 恢复已完成的专家
   if (msg.specialist_results?.length) {
     state.completedSpecialists = msg.specialist_results.map(s => ({
-      agent_key: s.agent_key,
-      agent: s.agent,
-      icon: s.icon || '🤖',
-      analysis: s.analysis,
-      duration_ms: s.duration_ms,
-      expanded: false,
+      agent_key: s.agent_key, agent: s.agent, icon: s.icon || '🤖',
+      analysis: s.analysis, duration_ms: s.duration_ms, expanded: false,
     }))
   }
-
-  // 恢复交叉审阅
   if (msg.cross_review_results?.length) {
     state.completedCrossReviews = msg.cross_review_results.map(s => ({
-      agent_key: s.agent_key,
-      agent: s.agent,
-      icon: s.icon || '🤖',
-      analysis: s.analysis,
-      duration_ms: s.duration_ms,
-      expanded: false,
+      agent_key: s.agent_key, agent: s.agent, icon: s.icon || '🤖',
+      analysis: s.analysis, duration_ms: s.duration_ms, expanded: false,
       is_cross_review: true,
     }))
   }
-
-  // 恢复工具调用
   if (msg.tool_calls?.length) {
-    state.currentToolCalls = msg.tool_calls.map(tc => ({
-      ...tc,
-      expanded: false,
-    }))
+    state.currentToolCalls = msg.tool_calls.map(tc => ({ ...tc, expanded: false }))
   }
-
-  // 恢复 RAG 来源
   if (msg.rag?.sources) {
     state.currentToolCalls._ragSources = msg.rag.sources
   }
-
-  // 恢复复杂度
   if (msg.complexity) {
     state.executionPlan = { complexity: msg.complexity }
   }
-
-  // 恢复进度
   const totalPhases = msg.complexity === 'simple' ? 3 : (msg.complexity === 'medium' ? 4 : 6)
   state.totalPhases = totalPhases
   state.progressPct = Math.min(35 + (state.completedSpecialists.length * 10), 95)
@@ -730,39 +522,22 @@ function restoreStreamStateFromMessage(convId, msg) {
   state.substep = `已完成 ${state.completedSpecialists.length} 个专家`
 }
 
-// 重新建立 SSE 连接恢复实时进度
 async function reconnectStream(convId, existingMsg) {
-  // 先恢复流式状态（立即显示进度条和已完成专家）
   restoreStreamStateFromMessage(convId, existingMsg)
-
-  // 记录已有的专家 key，用于去重
-  const existingSpecKeys = new Set(
-    (existingMsg?.specialist_results || []).map(s => s.agent_key)
-  )
-  const existingCrossKeys = new Set(
-    (existingMsg?.cross_review_results || []).map(s => s.agent_key)
-  )
+  const existingSpecKeys = new Set((existingMsg?.specialist_results || []).map(s => s.agent_key))
+  const existingCrossKeys = new Set((existingMsg?.cross_review_results || []).map(s => s.agent_key))
 
   const controller = resumeConversationStream(convId, (event) => {
     const { type, data } = event
-
-    // 去重：跳过已存在的专家结果
-    if (type === 'specialist_done' && existingSpecKeys.has(data.agent_key)) {
-      return
-    }
-    if (type === 'cross_review_done' && existingCrossKeys.has(data.agent_key)) {
-      return
-    }
+    if (type === 'specialist_done' && existingSpecKeys.has(data.agent_key)) return
+    if (type === 'cross_review_done' && existingCrossKeys.has(data.agent_key)) return
 
     routeStreamEvent(convId, event, {
       onAnswer: (cid, answerData, state) => {
         if (selectedConv.value?.id !== cid) return
-
-        // 找到现有的 streaming 消息并更新
         const msgIndex = messages.value.findIndex(m =>
           m.role === 'assistant' && m.execution_status === 'streaming'
         )
-
         if (msgIndex >= 0) {
           const msg = messages.value[msgIndex]
           msg.content = answerData.content
@@ -771,7 +546,6 @@ async function reconnectStream(convId, existingMsg) {
           msg.tool_calls = state.currentToolCalls
           msg.rag = state.currentToolCalls._ragSources ? { sources: state.currentToolCalls._ragSources } : null
         } else {
-          // 没有现有消息，添加新消息
           messages.value.push({
             role: 'assistant',
             content: answerData.content,
@@ -787,7 +561,6 @@ async function reconnectStream(convId, existingMsg) {
       onDone: (cid, doneData) => {
         if (selectedConv.value?.id === cid) {
           const state = getStreamState(cid)
-          // 更新最后一条消息的 timing 和状态
           const msgIndex = messages.value.findIndex(m =>
             m.role === 'assistant' && m.execution_status === 'streaming'
           )
@@ -807,11 +580,9 @@ async function reconnectStream(convId, existingMsg) {
       },
       onError: (cid, errorData) => {
         if (selectedConv.value?.id === cid) {
-          // 恢复失败（如无 assistant 消息），重新发送用户消息
           if (errorData.code === 'RESUME_FAILED') {
             finishStream(cid)
             removeTask(cid)
-            // 找到最后一条用户消息重新发送
             const lastUserMsg = [...messages.value].reverse().find(m => m.role === 'user')
             if (lastUserMsg) {
               showToast('恢复执行失败，正在重新发送消息...', 'info')
@@ -826,15 +597,11 @@ async function reconnectStream(convId, existingMsg) {
             }
             return
           }
-          // 检查是否是任务已完成导致的恢复失败
           const msgIndex = messages.value.findIndex(m =>
             m.role === 'assistant' && m.execution_status === 'streaming'
           )
           if (msgIndex >= 0) {
-            // 可能是任务已完成，刷新消息获取最新状态
-            loadMessages(cid).then(() => {
-              showToast('任务状态已更新', 'info')
-            })
+            loadMessages(cid).then(() => { showToast('任务状态已更新', 'info') })
           } else {
             messages.value.push({
               role: 'assistant',
@@ -849,7 +616,6 @@ async function reconnectStream(convId, existingMsg) {
     })
   })
 
-  // 更新流式状态的 abort controller
   const state = streamStates.get(convId)
   if (state) {
     state.streamAbort = controller
@@ -858,26 +624,19 @@ async function reconnectStream(convId, existingMsg) {
 
 function retryMessage(userMsg) {
   if (!userMsg || userMsg.role !== 'user' || sending.value) return
-
-  // 检查是否有中断的 assistant 消息
   const userMsgIndex = messages.value.indexOf(userMsg)
   const assistantMsg = messages.value.find(
     (m, idx) => idx > userMsgIndex && m.role === 'assistant'
   )
-
   if (assistantMsg) {
     const executionStatus = assistantMsg.execution_status || (assistantMsg.metadata?.execution_status)
-
     if (executionStatus === 'streaming' || executionStatus === 'cancelled') {
-      // 有中断的执行，提示恢复
       if (confirm(`检测到上次执行中断，是否从断点继续？\n\n点击"确定"恢复执行，点击"取消"重新执行。`)) {
         handleResume()
         return
       }
     }
   }
-
-  // 没有可恢复的结果，重新执行
   inputText.value = userMsg.content
   handleSend()
 }
@@ -885,7 +644,6 @@ function retryMessage(userMsg) {
 async function handleResume() {
   const convId = selectedConv.value?.id
   if (!convId || sending.value) return
-
   sending.value = true
   const controller = resumeConversationStream(convId, (event) => {
     routeStreamEvent(convId, event, {
@@ -894,7 +652,7 @@ async function handleResume() {
         const allSpecResults = data.specialist_results || (state.completedSpecialists.length > 0 ? [...state.completedSpecialists] : [])
         const phaseAResults = allSpecResults.filter(s => !s.is_cross_review)
         const phaseBResults = allSpecResults.filter(s => s.is_cross_review)
-        const assistantMsg = {
+        messages.value.push({
           role: 'assistant',
           content: data.content,
           created_at: new Date().toISOString(),
@@ -902,8 +660,7 @@ async function handleResume() {
           cross_review_results: phaseBResults.length > 0 ? phaseBResults : (state.completedCrossReviews.length > 0 ? [...state.completedCrossReviews] : null),
           tool_calls: state.currentToolCalls.length > 0 ? [...state.currentToolCalls] : null,
           rag: state.currentToolCalls._ragSources ? { sources: state.currentToolCalls._ragSources } : null,
-        }
-        messages.value.push(assistantMsg)
+        })
         nextTick(() => scrollToBottom())
       },
       onDone: (cid, data) => {
@@ -943,56 +700,127 @@ async function handleResume() {
       },
     })
   })
-
   startStream(convId, controller)
 }
 
-// 检查任务是否在后台运行
 function isTaskRunning(convId) {
   return pendingTasks.value.some(t => t.convId === convId)
 }
 
-function formatDuration(ms) {
-  if (!ms) return '0ms'
-  if (ms < 1000) return `${ms}ms`
-  if (ms < 60000) return `${(ms / 1000).toFixed(1)}s`
-  return `${Math.floor(ms / 60000)}m${Math.floor((ms % 60000) / 1000)}s`
+// ─── 消息评估 ───
+
+function getEvalStatusClass(messageId) {
+  const state = messageEvalStates.value[messageId]
+  if (!state) return 'eval-status--none'
+  if (state.loading) return 'eval-status--loading'
+  if (state.score >= 80) return 'eval-status--good'
+  if (state.score >= 60) return 'eval-status--ok'
+  if (state.score > 0) return 'eval-status--bad'
+  return 'eval-status--none'
 }
 
-function formatElapsed(ms) {
-  if (!ms) return '0s'
-  const s = Math.floor(ms / 1000)
-  if (s < 60) return `${s}s`
-  return `${Math.floor(s / 60)}m${s % 60}s`
-}
-
-function toolDisplayName(name) {
-  const map = {
-    query_valuation: '查询估值',
-    search_knowledge: '检索知识库',
-    get_bond_temperature: '债市温度',
-    get_valuation_list: '估值概览',
-    get_author_opinions: '作者观点',
-    calculate_metrics: '计算指标',
-    consult_valuation_expert: '咨询估值专家',
-    consult_market_analyst: '咨询择时分析师',
-    consult_risk_assessor: '咨询风险评估师',
-    consult_allocation_advisor: '咨询资产配置师',
-    consult_fund_analyst: '咨询基金分析师',
+async function toggleMessageEval(messageId) {
+  const state = messageEvalStates.value[messageId]
+  if (!state || (!state.evaluation && !state.loading)) {
+    confirm.value = {
+      visible: true,
+      title: '质量评估',
+      message: '是否对此消息进行质量评估？',
+      danger: false,
+      onConfirm: async () => {
+        confirm.value.visible = false
+        await triggerMessageEval(messageId)
+      },
+    }
+    return
   }
-  return map[name] || name
+  if (state.loading) {
+    showToast('正在评估中，请稍候...', 'info')
+    return
+  }
+  if (!messageEvalStates.value[messageId]) {
+    messageEvalStates.value[messageId] = { score: 0, loading: false, expanded: true }
+  } else {
+    messageEvalStates.value[messageId].expanded = !messageEvalStates.value[messageId].expanded
+  }
 }
 
-// 过滤掉 consult_* 的编排调用（已在专家结果中展示）
-function filterToolCalls(toolCalls) {
-  if (!toolCalls) return []
-  return toolCalls.filter(tc => !tc.name?.startsWith('consult_'))
+async function loadMessageEval(messageId) {
+  if (!selectedConv.value?.id) return
+  messageEvalStates.value[messageId] = { score: 0, loading: true, expanded: true }
+  try {
+    const { data } = await getConversationEvaluation(selectedConv.value.id, messageId)
+    if (data.ok && data.evaluation) {
+      messageEvalStates.value[messageId] = {
+        score: data.evaluation.auto_score || 0,
+        loading: false,
+        expanded: true,
+        evaluation: data.evaluation,
+      }
+    } else {
+      messageEvalStates.value[messageId] = { score: 0, loading: false, expanded: true }
+    }
+  } catch (e) {
+    messageEvalStates.value[messageId] = { score: 0, loading: false, expanded: true }
+  }
 }
 
-// 反馈功能
-const feedbackGiven = ref({})  // {msgIndex: 'helpful'|'unhelpful'}
-const specialistFeedback = ref({})  // {msgIndex_agentKey: 'helpful'|'unhelpful'}
-const feedbackModal = ref({ visible: false, type: '', feedbackType: '', msgIndex: 0, msg: null, specialist: null, note: '' })
+async function triggerMessageEval(messageId) {
+  if (!selectedConv.value?.id) return
+  messageEvalStates.value[messageId] = { score: 0, loading: true, expanded: true }
+  try {
+    const { data } = await evaluateConversation(selectedConv.value.id, messageId)
+    if (data.ok && data.evaluation) {
+      messageEvalStates.value[messageId] = {
+        score: data.evaluation.auto_score || 0,
+        loading: false,
+        expanded: true,
+        evaluation: data.evaluation,
+        evolution: data.evolution,
+      }
+      showToast('评估完成', 'success')
+    } else {
+      messageEvalStates.value[messageId] = { score: 0, loading: false, expanded: true }
+      showToast('评估失败', 'error')
+    }
+  } catch (e) {
+    messageEvalStates.value[messageId] = { score: 0, loading: false, expanded: true }
+    showToast('评估失败', 'error')
+  }
+}
+
+async function triggerLLMEval(messageId) {
+  if (!selectedConv.value?.id) return
+  messageEvalStates.value[messageId] = {
+    ...messageEvalStates.value[messageId],
+    loading: true,
+    expanded: true,
+  }
+  try {
+    const { data } = await evaluateConversationWithLLM(selectedConv.value.id, messageId)
+    if (data.ok && data.evaluation) {
+      const llmEval = data.evaluation
+      messageEvalStates.value[messageId] = {
+        score: llmEval.total_score || 0,
+        loading: false,
+        expanded: true,
+        evaluation: {
+          ...messageEvalStates.value[messageId]?.evaluation,
+          llm_evaluation: llmEval,
+        },
+      }
+      showToast('LLM 评估完成', 'success')
+    } else {
+      showToast('LLM 评估失败', 'error')
+      messageEvalStates.value[messageId].loading = false
+    }
+  } catch (e) {
+    showToast('LLM 评估失败: ' + (e.response?.data?.detail || e.message), 'error')
+    messageEvalStates.value[messageId].loading = false
+  }
+}
+
+// ─── 反馈 ───
 
 function submitFeedback() {
   if (feedbackModal.value.type === 'message') {
@@ -1005,7 +833,6 @@ function submitFeedback() {
 async function handleSpecialistFeedback(s, msgIndex, feedbackType) {
   const key = `${msgIndex}_${s.agent_key}`
   if (specialistFeedback.value[key]) return
-  // 弹出反馈输入框
   feedbackModal.value = {
     visible: true,
     type: 'specialist',
@@ -1037,7 +864,6 @@ async function submitSpecialistFeedback() {
 
 async function handleFeedback(msg, index, feedbackType) {
   if (feedbackGiven.value[index]) return
-  // 弹出反馈输入框
   feedbackModal.value = {
     visible: true,
     type: 'message',
@@ -1061,6 +887,49 @@ async function submitMessageFeedback() {
   }
 }
 
+function copyMessageId(msgId) {
+  const text = String(msgId)
+  navigator.clipboard.writeText(text).then(() => {
+    showToast('已复制消息ID: ' + text, 'success')
+  }).catch(() => {
+    const input = document.createElement('input')
+    input.value = text
+    document.body.appendChild(input)
+    input.select()
+    document.execCommand('copy')
+    document.body.removeChild(input)
+    showToast('已复制消息ID: ' + text, 'success')
+  })
+}
+
+// ─── Trace 详情 ───
+
+async function toggleTraceDetail(msg, index) {
+  const key = `${selectedConv.value?.id}_${index}`
+  if (traceDetailVisible.value[key]) {
+    traceDetailVisible.value[key] = false
+    return
+  }
+  try {
+    const { data } = await listTraces(selectedConv.value.id, 1)
+    if (data.traces?.length > 0) {
+      traceDetailData.value[key] = data.traces[0]
+      traceDetailVisible.value[key] = true
+    }
+  } catch (e) {
+    console.error('加载 trace 失败:', e)
+  }
+}
+
+// ─── 格式化工具函数 ───
+
+function formatDuration(ms) {
+  if (!ms) return '0ms'
+  if (ms < 1000) return `${ms}ms`
+  if (ms < 60000) return `${(ms / 1000).toFixed(1)}s`
+  return `${Math.floor(ms / 60000)}m${Math.floor((ms % 60000) / 1000)}s`
+}
+
 function formatTime(ts) {
   if (!ts) return ''
   const d = new Date(ts.replace(' ', 'T'))
@@ -1074,154 +943,26 @@ function formatTime(ts) {
   return `${d.getMonth() + 1}/${d.getDate()} ${time}`
 }
 
-// 获取评估维度分数
-function getEvalDimensions(messageId) {
-  const state = messageEvalStates.value[messageId]
-  if (!state?.evaluation?.auto_score_breakdown) return {}
+// ─── 进度轮询 ───
 
-  let breakdown = state.evaluation.auto_score_breakdown
-  if (typeof breakdown === 'string') {
-    try {
-      breakdown = JSON.parse(breakdown)
-    } catch {
-      return {}
+let pollingTimer = null
+function startPollingProgress(convId) {
+  stopPollingProgress()
+  pollingTimer = setInterval(async () => {
+    const state = getStreamState(convId)
+    if (!state?.sending) {
+      stopPollingProgress()
+      return
     }
-  }
-
-  const dimConfig = {
-    execution: { name: '执行效率', icon: '⚡' },
-    data: { name: '数据利用', icon: '📊' },
-    collaboration: { name: '专家协作', icon: '🤝' },
-    response: { name: '响应质量', icon: '📝' },
-  }
-
-  const result = {}
-  for (const [key, config] of Object.entries(dimConfig)) {
-    if (breakdown[key] !== undefined) {
-      result[key] = {
-        ...config,
-        score: Math.round(breakdown[key]),
-      }
-    }
-  }
-  return result
+  }, 3000)
 }
 
-// 触发 LLM 评估
-async function triggerLLMEval(messageId) {
-  if (!selectedConv.value?.id) return
-
-  messageEvalStates.value[messageId] = {
-    ...messageEvalStates.value[messageId],
-    loading: true,
-    expanded: true,
-  }
-
-  try {
-    const { data } = await evaluateConversationWithLLM(selectedConv.value.id, messageId)
-    if (data.ok && data.evaluation) {
-      // 合并 LLM 评估结果
-      const llmEval = data.evaluation
-      messageEvalStates.value[messageId] = {
-        score: llmEval.total_score || 0,
-        loading: false,
-        expanded: true,
-        evaluation: {
-          ...messageEvalStates.value[messageId]?.evaluation,
-          llm_evaluation: llmEval,
-        },
-      }
-      showToast('LLM 评估完成', 'success')
-    } else {
-      showToast('LLM 评估失败', 'error')
-      messageEvalStates.value[messageId].loading = false
-    }
-  } catch (e) {
-    showToast('LLM 评估失败: ' + (e.response?.data?.detail || e.message), 'error')
-    messageEvalStates.value[messageId].loading = false
+function stopPollingProgress() {
+  if (pollingTimer) {
+    clearInterval(pollingTimer)
+    pollingTimer = null
   }
 }
-
-// 获取评估等级
-function getEvalLevel(score) {
-  if (score >= 80) return '优秀'
-  if (score >= 60) return '一般'
-  if (score >= 40) return '较差'
-  return '很差'
-}
-
-// 获取评估等级类名
-function getEvalLevelClass(score) {
-  if (score >= 80) return 'eval-level--good'
-  if (score >= 60) return 'eval-level--ok'
-  if (score >= 40) return 'eval-level--bad'
-  return 'eval-level--very-bad'
-}
-
-// 获取评估建议
-function getEvalSuggestions(messageId) {
-  const state = messageEvalStates.value[messageId]
-  if (!state?.evaluation?.suggestions) return []
-
-  let suggestions = state.evaluation.suggestions
-  if (typeof suggestions === 'string') {
-    try {
-      suggestions = JSON.parse(suggestions)
-    } catch {
-      return []
-    }
-  }
-  return Array.isArray(suggestions) ? suggestions : []
-}
-
-// 评估分数颜色
-function scoreColor(score) {
-  if (score >= 80) return '#52c41a'
-  if (score >= 60) return '#faad14'
-  if (score >= 40) return '#fa8c16'
-  return '#ff4d4f'
-}
-
-// 复制消息 ID
-function copyMessageId(msgId) {
-  const text = String(msgId)
-  navigator.clipboard.writeText(text).then(() => {
-    showToast('已复制消息ID: ' + text, 'success')
-  }).catch(() => {
-    // 降级方案
-    const input = document.createElement('input')
-    input.value = text
-    document.body.appendChild(input)
-    input.select()
-    document.execCommand('copy')
-    document.body.removeChild(input)
-    showToast('已复制消息ID: ' + text, 'success')
-  })
-}
-
-// Trace 详情
-const traceDetailVisible = ref({})
-const traceDetailData = ref({})
-
-async function toggleTraceDetail(msg, index) {
-  const key = `${selectedConv.value?.id}_${index}`
-  if (traceDetailVisible.value[key]) {
-    traceDetailVisible.value[key] = false
-    return
-  }
-  // 从消息的 phase_timings 中获取 trace_id（如果有）
-  // 否则加载最新的 trace
-  try {
-    const { data } = await listTraces(selectedConv.value.id, 1)
-    if (data.traces?.length > 0) {
-      traceDetailData.value[key] = data.traces[0]
-      traceDetailVisible.value[key] = true
-    }
-  } catch (e) {
-    console.error('加载 trace 失败:', e)
-  }
-}
-
 </script>
 
 <template>
@@ -1232,47 +973,19 @@ async function toggleTraceDetail(msg, index) {
         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16"/>
       </svg>
     </button>
-    <!-- 移动端遮罩 -->
-    <div v-if="showMobileSidebar" class="mobile-sidebar-overlay" @click="showMobileSidebar = false"></div>
-    <!-- 对话列表 -->
-    <div :class="['conv-sidebar', { 'mobile-open': showMobileSidebar }]">
-      <div class="conv-header">
-        <h3>对话</h3>
-        <button @click="handleNewConversation()" class="btn-new-conv" title="新建对话">
-          <svg width="18" height="18" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/>
-          </svg>
-        </button>
-      </div>
-      <div class="conv-list">
-        <div
-          v-for="conv in conversations" :key="conv.id"
-          @click="selectConversation(conv)"
-          :class="['conv-item', { active: selectedConv?.id === conv.id, streaming: streamStates.has(conv.id) || isTaskRunning(conv.id) }]"
-        >
-          <div class="conv-icon">
-            <span v-if="streamStates.has(conv.id) || isTaskRunning(conv.id)" class="conv-streaming-indicator">●</span>
-            <span v-else>🤖</span>
-          </div>
-          <div class="conv-info">
-            <div class="conv-title">{{ conv.title }}</div>
-            <div class="conv-meta">
-              <span v-if="isTaskRunning(conv.id)" class="conv-task-status">后台执行中...</span>
-              <span class="conv-time">{{ formatTime(conv.updated_at) }}</span>
-            </div>
-          </div>
-          <button @click="handleDeleteConversation(conv, $event)" class="btn-delete-conv" title="删除">
-            <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>
-            </svg>
-          </button>
-        </div>
-        <div v-if="!conversations.length" class="conv-empty">
-          <p>暂无对话</p>
-          <p class="conv-empty-hint">点击右上角 + 创建</p>
-        </div>
-      </div>
-    </div>
+
+    <!-- 对话侧边栏 -->
+    <ChatSidebar
+      :conversations="conversations"
+      :selectedConv="selectedConv"
+      :streamStates="streamStates"
+      :isTaskRunning="isTaskRunning"
+      :showMobileSidebar="showMobileSidebar"
+      @select="selectConversation"
+      @new="handleNewConversation"
+      @delete="handleDeleteConversation"
+      @update:showMobileSidebar="showMobileSidebar = $event"
+    />
 
     <!-- 聊天区域 -->
     <div class="chat-area">
@@ -1294,380 +1007,40 @@ async function toggleTraceDetail(msg, index) {
 
         <!-- 消息列表 -->
         <div ref="messagesContainer" class="messages-container">
-          <div v-for="(msg, i) in messages" :key="i" :class="['message', msg.role]">
-            <div class="message-bubble" v-if="msg.role === 'user'">
-              <span class="message-id-badge" v-if="msg.id" @click="copyMessageId(msg.id)" :title="'点击复制消息ID: ' + msg.id">
-                #{{ msg.id }}
-              </span>
-              {{ msg.content }}
-            </div>
-            <div v-else>
-              <!-- 消息 ID 标识 + 评估状态 -->
-              <div class="message-id-header" v-if="msg.id">
-                <span class="message-id-badge" @click="copyMessageId(msg.id)" :title="'点击复制消息ID: ' + msg.id">
-                  #{{ msg.id }} 📋
-                </span>
-                <!-- 评估状态指示器 -->
-                <span
-                  class="eval-status-badge"
-                  :class="getEvalStatusClass(msg.id)"
-                  @click.stop="toggleMessageEval(msg.id)"
-                  :title="getEvalStatusTitle(msg.id)"
-                >
-                  <span v-if="messageEvalStates[msg.id]?.score > 0" class="eval-score-mini">
-                    {{ messageEvalStates[msg.id].score.toFixed(0) }}
-                  </span>
-                  <span v-else>{{ getEvalStatusIcon(msg.id) }}</span>
-                </span>
-              </div>
-              <!-- 执行状态徽章 -->
-              <div v-if="msg.execution_status && msg.execution_status !== 'completed'" class="execution-status-badge" :class="'status-' + msg.execution_status">
-                <template v-if="msg.execution_status === 'streaming'">⏳ 后台执行中 <button class="btn-retry btn-ai-action" @click="tryResumeConversation(selectedConv?.id)" title="恢复">🔄 恢复<span class="ai-agent-tooltip">投资分析助手</span></button></template>
-                <template v-else-if="msg.execution_status === 'failed'">❌ 执行失败{{ msg.error_message ? ': ' + msg.error_message : '（超时或异常）' }}</template>
-                <template v-else-if="msg.execution_status === 'cancelled'">⏹ 已取消</template>
-                <template v-else-if="msg.execution_status === 'timeout'">⏰ 执行超时</template>
-                <button v-if="i > 0" class="btn-retry btn-ai-action" @click="retryMessage(messages[i - 1])" title="重试">🔄 重试<span class="ai-agent-tooltip">投资分析助手</span></button>
-              </div>
-              <!-- 专家分析展示 -->
-              <div v-if="msg.specialist_results && msg.specialist_results.length" class="specialists-container">
-                <div v-for="(s, j) in msg.specialist_results" :key="j" class="specialist-item">
-                  <div class="specialist-header" @click="s.expanded = !s.expanded">
-                    <span class="specialist-icon">{{ s.icon }}</span>
-                    <span class="specialist-name">{{ s.agent }}</span>
-                    <span v-if="s.duration_ms" class="specialist-time">{{ (s.duration_ms / 1000).toFixed(1) }}s</span>
-                    <!-- 专家反馈按钮 -->
-                    <div class="specialist-feedback" @click.stop>
-                      <template v-if="specialistFeedback[i + '_' + s.agent_key]">
-                        <span class="feedback-done">{{ specialistFeedback[i + '_' + s.agent_key] === 'helpful' ? '👍 已赞' : '👎 已踩' }}</span>
-                      </template>
-                      <template v-else>
-                        <button class="btn-spec-feedback" @click="handleSpecialistFeedback(s, i, 'helpful')" title="分析准确">👍</button>
-                        <button class="btn-spec-feedback" @click="handleSpecialistFeedback(s, i, 'unhelpful')" title="分析不准">👎</button>
-                      </template>
-                    </div>
-                    <span class="specialist-toggle">{{ s.expanded ? '▲' : '▼' }}</span>
-                  </div>
-                  <div v-if="s.expanded" class="specialist-analysis markdown-body" v-html="renderMarkdown(s.analysis || '（暂无分析内容）')"></div>
-                </div>
-              </div>
-              <!-- 交叉审阅展示 -->
-              <div v-if="msg.cross_review_results && msg.cross_review_results.length" class="specialists-container cross-review">
-                <div class="cross-review-label">交叉审阅</div>
-                <div v-for="(s, j) in msg.cross_review_results" :key="j" class="specialist-item cross-review-item">
-                  <div class="specialist-header" @click="s.expanded = !s.expanded">
-                    <span class="specialist-icon">{{ s.icon }}</span>
-                    <span class="specialist-name">{{ s.agent }} 审阅</span>
-                    <span v-if="s.duration_ms" class="specialist-time">{{ (s.duration_ms / 1000).toFixed(1) }}s</span>
-                    <span class="specialist-toggle">{{ s.expanded ? '▲' : '▼' }}</span>
-                  </div>
-                  <div v-if="s.expanded" class="specialist-analysis markdown-body" v-html="renderMarkdown(s.analysis || '（暂无审阅内容）')"></div>
-                </div>
-              </div>
-              <!-- 执行过程面板（可展开） -->
-              <div v-if="msg.specialist_results?.length || msg.phase_timings" class="execution-panel">
-                <div class="execution-toggle" @click="msg._showExecution = !msg._showExecution">
-                  <span class="execution-toggle-icon">⚙️</span>
-                  <span>执行过程</span>
-                  <span v-if="msg.complexity" class="execution-complexity" :class="'complexity-' + msg.complexity">
-                    {{ msg.complexity === 'complex' ? '复杂' : msg.complexity === 'medium' ? '中等' : '简单' }}
-                  </span>
-                  <span v-if="msg.duration_ms" class="execution-total-time">{{ formatDuration(msg.duration_ms) }}</span>
-                  <span class="execution-toggle-arrow">{{ msg._showExecution ? '▲' : '▼' }}</span>
-                </div>
-                <Transition name="expand">
-                  <div v-if="msg._showExecution" class="execution-detail">
-                    <!-- 时间线 -->
-                    <div v-if="msg.phase_timings" class="execution-timeline">
-                      <div class="timeline-item" v-if="msg.phase_timings.clarification_ms">
-                        <span class="timeline-dot"></span>
-                        <span class="timeline-label">理解问题</span>
-                        <span class="timeline-time">{{ formatDuration(msg.phase_timings.clarification_ms) }}</span>
-                      </div>
-                      <div class="timeline-item" v-if="msg.phase_timings.rag_ms">
-                        <span class="timeline-dot"></span>
-                        <span class="timeline-label">知识检索</span>
-                        <span class="timeline-time">{{ formatDuration(msg.phase_timings.rag_ms) }}</span>
-                      </div>
-                      <div class="timeline-item" v-if="msg.phase_timings.orchestrator_ms">
-                        <span class="timeline-dot"></span>
-                        <span class="timeline-label">专家协作</span>
-                        <span class="timeline-time">{{ formatDuration(msg.phase_timings.orchestrator_ms) }}</span>
-                      </div>
-                    </div>
-                    <!-- 专家列表 -->
-                    <div v-if="msg.specialist_results?.length" class="execution-agents">
-                      <span class="execution-agents-label">参与专家：</span>
-                      <span v-for="s in msg.specialist_results" :key="s.agent_key" class="execution-agent-tag">
-                        {{ s.icon }} {{ s.agent }}
-                        <span v-if="s.duration_ms" class="execution-agent-time">{{ (s.duration_ms / 1000).toFixed(0) }}s</span>
-                      </span>
-                    </div>
-                    <!-- 工具调用统计 -->
-                    <div v-if="msg.tool_calls?.length" class="execution-tools">
-                      <span>工具调用：{{ msg.tool_calls.length }} 次</span>
-                    </div>
-                    <!-- Trace 详情按钮 -->
-                    <button class="btn-trace-detail" @click.stop="toggleTraceDetail(msg, i)">
-                      🔍 查看执行链路详情
-                    </button>
-                    <TraceDetail
-                      v-if="traceDetailVisible[`${selectedConv?.id}_${i}`]"
-                      :convId="selectedConv.id"
-                      :traceId="traceDetailData[`${selectedConv?.id}_${i}`]?.trace_id"
-                    />
-                  </div>
-                </Transition>
-              </div>
-              <!-- 工具调用展示 -->
-              <div v-if="filterToolCalls(msg.tool_calls).length" class="tool-calls-container">
-                <div v-for="(tc, j) in filterToolCalls(msg.tool_calls)" :key="j" class="tool-call-item">
-                  <div class="tool-call-header" @click="tc.expanded = !tc.expanded">
-                    <span class="tool-icon">🔧</span>
-                    <span class="tool-name">{{ toolDisplayName(tc.name) }}</span>
-                    <span class="tool-args">{{ JSON.stringify(tc.arguments || {}).slice(0, 40) }}</span>
-                    <span class="tool-toggle">{{ tc.expanded ? '▲' : '▼' }}</span>
-                  </div>
-                  <pre v-if="tc.expanded" class="tool-result">{{ tc.result_preview || '（无数据返回）' }}</pre>
-                </div>
-              </div>
-              <div class="message-bubble markdown-body" v-html="renderMarkdown(msg.content)"></div>
-              <!-- 反馈按钮 -->
-              <div v-if="msg.role === 'assistant' && !feedbackGiven[i]" class="message-feedback">
-                <button class="btn-msg-feedback" @click="handleFeedback(msg, i, 'helpful')" title="有用">
-                  <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14 9V5a3 3 0 00-3-3l-4 9v11h11.28a2 2 0 002-1.7l1.38-9a2 2 0 00-2-2.3H14z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 22H4a2 2 0 01-2-2v-7a2 2 0 012-2h3"/></svg>
-                </button>
-                <button class="btn-msg-feedback" @click="handleFeedback(msg, i, 'unhelpful')" title="没用">
-                  <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 15v4a3 3 0 003 3l4-9V2H5.72a2 2 0 00-2 1.7l-1.38 9a2 2 0 002 2.3H10z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 2h3a2 2 0 012 2v7a2 2 0 01-2 2h-3"/></svg>
-                </button>
-              </div>
-              <div v-else-if="feedbackGiven[i]" class="message-feedback-given">
-                {{ feedbackGiven[i] === 'helpful' ? '已标记有用' : '已标记，感谢反馈' }}
-              </div>
-              <!-- RAG 来源标注 -->
-              <div v-if="msg.rag && msg.rag.sources && msg.rag.sources.length" class="rag-sources">
-                <div class="rag-header">
-                  <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253"/>
-                  </svg>
-                  <span>参考来源 ({{ msg.rag.results_count || msg.rag.sources.length }})</span>
-                </div>
-                <div class="rag-tags">
-                  <span v-for="(s, j) in msg.rag.sources.slice(0, 5)" :key="j" :class="['rag-tag', 'rag-tag-' + s.type]">
-                    {{ s.type }}: {{ s.title ? s.title.slice(0, 20) : '' }}
-                  </span>
-                </div>
-              </div>
-              <!-- 消息评估详情（可展开） -->
-              <div v-if="msg.id && messageEvalStates[msg.id]?.expanded" class="message-eval-detail">
-                <div v-if="messageEvalStates[msg.id]?.loading" class="eval-loading">
-                  <div class="eval-spinner"></div>
-                  <span>正在评估中，请稍候...</span>
-                </div>
-                <div v-else-if="messageEvalStates[msg.id]?.evaluation" class="eval-content">
-                  <!-- 评估分数概览 -->
-                  <div class="eval-header">
-                    <div class="eval-total">
-                      <span class="eval-total-score" :style="{ color: scoreColor(messageEvalStates[msg.id].evaluation.auto_score) }">
-                        {{ messageEvalStates[msg.id].evaluation.auto_score?.toFixed(0) }}
-                      </span>
-                      <span class="eval-total-label">总分</span>
-                    </div>
-                    <span class="eval-level" :class="getEvalLevelClass(messageEvalStates[msg.id].evaluation.auto_score)">
-                      {{ getEvalLevel(messageEvalStates[msg.id].evaluation.auto_score) }}
-                    </span>
-                  </div>
+          <ChatMessage
+            v-for="(msg, i) in messages"
+            :key="i"
+            :msg="msg"
+            :index="i"
+            :convId="selectedConv?.id"
+            :feedbackGiven="feedbackGiven"
+            :specialistFeedback="specialistFeedback"
+            :messageEvalStates="messageEvalStates"
+            :traceDetailVisible="traceDetailVisible"
+            :traceDetailData="traceDetailData"
+            @feedback="handleFeedback"
+            @specialist-feedback="handleSpecialistFeedback"
+            @toggle-eval="toggleMessageEval"
+            @trigger-eval="triggerMessageEval"
+            @trigger-llm-eval="triggerLLMEval"
+            @copy-message-id="copyMessageId"
+            @toggle-trace="toggleTraceDetail"
+            @retry="retryMessage"
+            @resume="tryResumeConversation"
+          />
 
-                  <!-- 维度分数 -->
-                  <div class="eval-dimensions">
-                    <div v-for="(dim, key) in getEvalDimensions(msg.id)" :key="key" class="eval-dim">
-                      <span class="eval-dim-icon">{{ dim.icon }}</span>
-                      <span class="eval-dim-name">{{ dim.name }}</span>
-                      <div class="eval-dim-bar">
-                        <div class="eval-dim-bar-fill" :style="{ width: dim.score + '%', backgroundColor: scoreColor(dim.score) }"></div>
-                      </div>
-                      <span class="eval-dim-score" :style="{ color: scoreColor(dim.score) }">{{ dim.score }}</span>
-                    </div>
-                  </div>
-
-                  <!-- 优化建议 -->
-                  <div v-if="getEvalSuggestions(msg.id).length" class="eval-suggestions">
-                    <div class="eval-suggestions-title">💡 优化建议</div>
-                    <div v-for="(s, idx) in getEvalSuggestions(msg.id)" :key="idx" class="eval-suggestion">
-                      {{ s }}
-                    </div>
-                  </div>
-
-                  <!-- 操作按钮 -->
-                  <div class="eval-actions">
-                    <button class="btn-eval-llm" @click="triggerLLMEval(msg.id)">
-                      🤖 LLM 深度评估
-                    </button>
-                  </div>
-                </div>
-                <div v-else class="eval-empty">
-                  <div class="eval-empty-text">暂无评估数据</div>
-                  <button class="btn-eval-trigger" @click="triggerMessageEval(msg.id)">
-                    📊 快速评估
-                  </button>
-                </div>
-              </div>
-            </div>
-            <div class="message-time">{{ formatTime(msg.created_at) }}</div>
-          </div>
-          <!-- 流式状态指示器（从 currentStream 读取 per-conversation 状态） -->
-          <div v-if="currentStream?.sending" class="message assistant">
-            <!-- 已完成的专家分析 -->
-            <div v-if="currentStream.completedSpecialists.length > 0" class="specialists-container streaming">
-              <div v-for="(s, j) in currentStream.completedSpecialists" :key="j" class="specialist-item completed">
-                <div class="specialist-header" @click="s.expanded = !s.expanded">
-                  <span class="specialist-icon">{{ s.icon }}</span>
-                  <span class="specialist-name">{{ s.agent }}</span>
-                  <span class="specialist-status done">✓</span>
-                  <span v-if="s.duration_ms" class="specialist-time">{{ (s.duration_ms / 1000).toFixed(1) }}s</span>
-                  <span class="specialist-toggle">{{ s.expanded ? '▲' : '▼' }}</span>
-                </div>
-                <div v-if="s.expanded" class="specialist-analysis markdown-body" v-html="renderMarkdown(s.analysis || '（暂无分析内容）')"></div>
-              </div>
-            </div>
-            <!-- 正在工作的专家 -->
-            <div v-if="currentStream.activeSpecialists.length > 0" class="specialists-container streaming">
-              <div v-for="(s, j) in currentStream.activeSpecialists" :key="j" class="specialist-item running">
-                <div class="specialist-header">
-                  <span class="specialist-icon spinning">{{ s.icon }}</span>
-                  <span class="specialist-name">正在咨询{{ s.agent }}...</span>
-                  <span class="specialist-status running">
-                    <span class="dot"></span><span class="dot"></span><span class="dot"></span>
-                  </span>
-                </div>
-              </div>
-            </div>
-            <!-- 交叉审阅进度 -->
-            <div v-if="currentStream.completedCrossReviews.length > 0" class="specialists-container streaming cross-review">
-              <div class="cross-review-label">交叉审阅</div>
-              <div v-for="(s, j) in currentStream.completedCrossReviews" :key="j" class="specialist-item completed cross-review-item">
-                <div class="specialist-header" @click="s.expanded = !s.expanded">
-                  <span class="specialist-icon">{{ s.icon }}</span>
-                  <span class="specialist-name">{{ s.agent }} 审阅</span>
-                  <span class="specialist-status done">✓</span>
-                  <span v-if="s.duration_ms" class="specialist-time">{{ (s.duration_ms / 1000).toFixed(1) }}s</span>
-                  <span class="specialist-toggle">{{ s.expanded ? '▲' : '▼' }}</span>
-                </div>
-                <div v-if="s.expanded" class="specialist-analysis markdown-body" v-html="renderMarkdown(s.analysis || '（暂无审阅内容）')"></div>
-              </div>
-            </div>
-            <div v-if="currentStream.crossReviewSpecialists.length > 0" class="specialists-container streaming cross-review">
-              <div v-for="(s, j) in currentStream.crossReviewSpecialists" :key="j" class="specialist-item running cross-review-item">
-                <div class="specialist-header">
-                  <span class="specialist-icon spinning">{{ s.icon }}</span>
-                  <span class="specialist-name">{{ s.agent }} 交叉审阅中...</span>
-                  <span class="specialist-status running">
-                    <span class="dot"></span><span class="dot"></span><span class="dot"></span>
-                  </span>
-                </div>
-              </div>
-            </div>
-            <!-- 实时工具调用 -->
-            <div v-if="filterToolCalls(currentStream.currentToolCalls).length > 0" class="tool-calls-container streaming">
-              <div v-for="(tc, j) in filterToolCalls(currentStream.currentToolCalls)" :key="j" class="tool-call-item">
-                <div class="tool-call-header">
-                  <span class="tool-icon spinning">&#9881;</span>
-                  <span class="tool-name">{{ toolDisplayName(tc.name) }}</span>
-                  <span class="tool-args">{{ JSON.stringify(tc.arguments || {}).slice(0, 40) }}</span>
-                </div>
-              </div>
-            </div>
-            <!-- 执行计划 -->
-            <div v-if="currentStream.executionPlan" class="execution-plan">
-              <div class="plan-header">
-                <span class="plan-icon">📋</span>
-                <span class="plan-label">执行计划</span>
-                <span class="plan-complexity" :class="'complexity-' + currentStream.executionPlan.complexity">
-                  {{ {simple: '简单', medium: '中等', complex: '复杂'}[currentStream.executionPlan.complexity] || currentStream.executionPlan.complexity }}
-                </span>
-              </div>
-              <div v-if="currentStream.executionPlan.reason" class="plan-reason">{{ currentStream.executionPlan.reason }}</div>
-              <div v-if="currentStream.activeSpecialists.length > 0 || currentStream.completedSpecialists.length > 0" class="plan-steps">
-                <div v-for="(s, i) in currentStream.completedSpecialists" :key="'done-'+i" class="plan-step done">
-                  <span class="step-check">✓</span>
-                  <span class="step-name">{{ s.agent }}</span>
-                </div>
-                <div v-for="(s, i) in currentStream.activeSpecialists" :key="'run-'+i" class="plan-step running">
-                  <span class="step-spinner"></span>
-                  <span class="step-name">{{ s.agent }}</span>
-                </div>
-              </div>
-            </div>
-            <!-- 阶段进度条（Phase C 完善） -->
-            <div v-if="currentStream.totalPhases > 0" class="stream-progress">
-              <div class="progress-bar-container">
-                <div class="progress-bar-fill" :style="{ width: currentStream.progressPct + '%' }"></div>
-              </div>
-              <div v-if="currentStream.substep" class="substep-text">
-                <span class="dot-pulse"></span> {{ currentStream.substep }}
-              </div>
-            </div>
-            <!-- 状态文字 -->
-            <div v-else-if="currentStream.streamStatus === 'searching'" class="stream-status">
-              <span class="dot"></span><span class="dot"></span><span class="dot"></span>
-              <span class="status-text">{{ currentStream.statusMessage || '正在检索知识库...' }}</span>
-            </div>
-            <div v-else-if="currentStream.streamStatus === 'thinking'" class="stream-status">
-              <span class="dot"></span><span class="dot"></span><span class="dot"></span>
-              <span class="status-text">{{ currentStream.statusMessage || '正在分析问题，决定需要咨询哪些专家...' }}</span>
-            </div>
-            <div v-else-if="currentStream.streamStatus === 'calling_specialist'" class="stream-status">
-              <span class="dot"></span><span class="dot"></span><span class="dot"></span>
-              <span class="status-text">{{ currentStream.statusMessage || '专家团队正在分析中...' }}</span>
-            </div>
-            <div v-else-if="currentStream.streamStatus === 'calling_tool'" class="stream-status">
-              <span class="dot"></span><span class="dot"></span><span class="dot"></span>
-              <span class="status-text">正在调用工具...</span>
-            </div>
-            <div v-else-if="currentStream.streamStatus === 'cross_reviewing'" class="stream-status">
-              <span class="dot"></span><span class="dot"></span><span class="dot"></span>
-              <span class="status-text">正在进行交叉审阅...</span>
-            </div>
-            <div v-else class="message-bubble typing">
-              <span class="dot"></span><span class="dot"></span><span class="dot"></span>
-            </div>
-            <!-- 实时计时器 -->
-            <div v-if="currentStream.elapsedMs > 0" class="elapsed-timer">
-              <span class="elapsed-icon">⏱</span>
-              <span class="elapsed-text">已执行 {{ formatElapsed(currentStream.elapsedMs) }}</span>
-            </div>
-          </div>
+          <!-- 流式状态指示器 -->
+          <StreamIndicator v-if="currentStream?.sending" :currentStream="currentStream" />
         </div>
 
         <!-- 输入框 -->
-        <div :class="['chat-input-area', { 'is-sending': sending }]">
-          <div v-if="sending" class="input-progress-bar">
-            <div class="input-progress-fill"></div>
-          </div>
-          <form @submit.prevent="handleSend" class="chat-form">
-            <textarea
-              v-model="inputText"
-              :placeholder="sending ? '正在执行中，请稍候...' : '输入消息...'"
-              class="chat-input"
-              :disabled="sending"
-              @keydown.enter.exact.prevent="handleSend"
-              rows="1"
-            ></textarea>
-            <button v-if="sending" type="button" @click="handleCancelStream" class="btn-stop" title="终止执行">
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
-                <rect x="6" y="6" width="12" height="12" rx="2"/>
-              </svg>
-            </button>
-            <button v-else type="submit" :disabled="!inputText.trim()" class="btn-send">
-              <svg width="20" height="20" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 12h14M12 5l7 7-7 7"/>
-              </svg>
-            </button>
-          </form>
-          <div v-if="sending" class="sending-hint">
-            <span class="sending-spinner"></span>
-            <span class="sending-text">{{ currentStream?.statusMessage || 'AI 正在分析中...' }}</span>
-          </div>
-        </div>
+        <ChatInput
+          v-model:inputText="inputText"
+          :sending="sending"
+          :statusMessage="currentStream?.statusMessage"
+          @send="handleSend"
+          @cancel="handleCancelStream"
+        />
       </template>
 
       <!-- 空状态 -->
@@ -1677,34 +1050,19 @@ async function toggleTraceDetail(msg, index) {
         <p>选择左侧对话继续，或点击 + 创建新对话</p>
       </div>
     </div>
-
   </div>
 
   <!-- 反馈输入弹窗 -->
-  <Teleport to="body">
-    <Transition name="fade">
-      <div v-if="feedbackModal.visible" class="dialog-backdrop" @click.self="feedbackModal.visible = false">
-        <div class="feedback-dialog">
-          <div class="feedback-dialog-header">
-            <span class="feedback-dialog-icon">{{ feedbackModal.feedbackType === 'helpful' ? '👍' : '👎' }}</span>
-            <span class="feedback-dialog-title">{{ feedbackModal.feedbackType === 'helpful' ? '标记为有用' : '标记为需改进' }}</span>
-          </div>
-          <div class="feedback-dialog-body">
-            <textarea
-              v-model="feedbackModal.note"
-              placeholder="可选：描述您的反馈意见，帮助我们改进..."
-              class="feedback-textarea"
-              rows="3"
-            ></textarea>
-          </div>
-          <div class="feedback-dialog-actions">
-            <button class="btn-secondary" @click="feedbackModal.note = ''; submitFeedback()">跳过</button>
-            <button class="btn-primary" @click="submitFeedback">提交反馈</button>
-          </div>
-        </div>
-      </div>
-    </Transition>
-  </Teleport>
+  <FeedbackModal
+    :visible="feedbackModal.visible"
+    :feedbackType="feedbackModal.feedbackType"
+    :note="feedbackModal.note"
+    @update:visible="feedbackModal.visible = $event"
+    @update:note="feedbackModal.note = $event"
+    @skip="feedbackModal.note = ''; submitFeedback()"
+    @submit="submitFeedback"
+  />
+
   <ConfirmDialog
     :visible="confirm.visible"
     :title="confirm.title"
@@ -1727,170 +1085,6 @@ async function toggleTraceDetail(msg, index) {
   border: 1px solid var(--color-border);
   background: var(--color-bg-card);
 }
-
-/* ── 对话侧边栏 ── */
-.conv-sidebar {
-  width: 280px;
-  flex-shrink: 0;
-  display: flex;
-  flex-direction: column;
-  border-right: 1px solid var(--color-border);
-  background: var(--color-bg-input);
-}
-
-.conv-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 1rem;
-  border-bottom: 1px solid var(--color-border);
-}
-
-.conv-header h3 {
-  margin: 0;
-  font-size: 0.95rem;
-  font-weight: 600;
-}
-
-.btn-new-conv {
-  width: 32px;
-  height: 32px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: var(--radius-md);
-  color: var(--color-primary-600);
-  background: var(--color-primary-50);
-  transition: all var(--transition-fast);
-}
-
-.btn-new-conv:hover {
-  background: var(--color-primary-100);
-}
-
-.conv-list {
-  flex: 1;
-  overflow-y: auto;
-  padding: 0.5rem;
-}
-
-.conv-item {
-  display: flex;
-  align-items: center;
-  gap: 0.6rem;
-  padding: 0.7rem 0.6rem;
-  border-radius: var(--radius-md);
-  cursor: pointer;
-  transition: all var(--transition-fast);
-  position: relative;
-}
-
-.conv-item:hover {
-  background: var(--color-bg-hover);
-}
-
-.conv-item.active {
-  background: var(--color-primary-50);
-}
-
-.dark .conv-item.active {
-  background: var(--color-primary-bg);
-}
-
-.conv-icon {
-  font-size: 1.3rem;
-  flex-shrink: 0;
-  position: relative;
-}
-
-.conv-item.streaming {
-  background: var(--color-primary-50);
-}
-
-.conv-streaming-indicator {
-  color: var(--color-primary);
-  animation: pulse-streaming 1.5s ease-in-out infinite;
-  font-size: 1rem;
-}
-
-@keyframes pulse-streaming {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.4; }
-}
-
-.conv-info {
-  flex: 1;
-  min-width: 0;
-}
-
-.conv-title {
-  font-size: 0.8rem;
-  font-weight: 500;
-  color: var(--color-text-primary);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.conv-meta {
-  display: flex;
-  align-items: center;
-  gap: 0.4rem;
-  margin-top: 0.15rem;
-}
-
-.conv-agent {
-  font-size: 0.65rem;
-  color: var(--color-primary-600);
-  background: var(--color-primary-50);
-  padding: 0.05rem 0.3rem;
-  border-radius: var(--radius-sm);
-}
-
-.conv-time {
-  font-size: 0.65rem;
-  color: var(--color-text-muted);
-}
-
-.conv-task-status {
-  font-size: 0.65rem;
-  color: var(--color-primary-600);
-  background: var(--color-primary-50);
-  padding: 0.05rem 0.3rem;
-  border-radius: var(--radius-sm);
-  animation: pulse-streaming 1.5s ease-in-out infinite;
-}
-
-.btn-delete-conv {
-  opacity: 0;
-  width: 24px;
-  height: 24px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: var(--radius-sm);
-  color: var(--color-text-muted);
-  transition: all var(--transition-fast);
-  flex-shrink: 0;
-}
-
-.conv-item:hover .btn-delete-conv {
-  opacity: 1;
-}
-
-.btn-delete-conv:hover {
-  color: var(--color-danger);
-  background: rgba(239, 68, 68, 0.1);
-}
-
-.conv-empty {
-  padding: 2rem 1rem;
-  text-align: center;
-  color: var(--color-text-muted);
-}
-
-.conv-empty p { margin: 0; font-size: 0.8rem; }
-.conv-empty-hint { font-size: 0.7rem; margin-top: 0.3rem !important; }
 
 /* ── 聊天区域 ── */
 .chat-area {
@@ -1961,507 +1155,6 @@ async function toggleTraceDetail(msg, index) {
   gap: 1rem;
 }
 
-.message {
-  display: flex;
-  flex-direction: column;
-  max-width: 80%;
-}
-
-.message.user {
-  align-self: flex-end;
-}
-
-.message.assistant {
-  align-self: flex-start;
-}
-
-.message-bubble {
-  padding: 0.75rem 1rem;
-  border-radius: var(--radius-lg);
-  font-size: 0.85rem;
-  line-height: 1.6;
-  word-break: break-word;
-}
-
-.message.user .message-bubble {
-  background: var(--color-primary-500);
-  color: white;
-  border-bottom-right-radius: var(--radius-sm);
-}
-
-.message.assistant .message-bubble {
-  background: var(--color-bg-input);
-  color: var(--color-text-primary);
-  border-bottom-left-radius: var(--radius-sm);
-}
-
-.message-time {
-  font-size: 0.6rem;
-  color: var(--color-text-muted);
-  margin-top: 0.25rem;
-  padding: 0 0.25rem;
-}
-
-.message.user .message-time {
-  text-align: right;
-}
-
-/* 消息 ID 样式 */
-.message-id-badge {
-  display: inline-block;
-  font-size: 10px;
-  color: var(--color-text-muted, #999);
-  background: rgba(0, 0, 0, 0.06);
-  padding: 1px 6px;
-  border-radius: 4px;
-  cursor: pointer;
-  transition: background 0.2s;
-  margin-right: 6px;
-  vertical-align: middle;
-}
-
-.message-id-badge:hover {
-  background: rgba(0, 0, 0, 0.1);
-}
-
-.message.user .message-id-badge {
-  background: rgba(255, 255, 255, 0.2);
-  color: rgba(255, 255, 255, 0.8);
-}
-
-.message.user .message-id-badge:hover {
-  background: rgba(255, 255, 255, 0.3);
-}
-
-.message-id-header {
-  margin-bottom: 4px;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-/* 评估状态指示器 */
-.eval-status-badge {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 24px;
-  height: 24px;
-  border-radius: 50%;
-  font-size: 12px;
-  cursor: pointer;
-  transition: all 0.2s;
-}
-
-.eval-status-badge:hover {
-  transform: scale(1.1);
-}
-
-.eval-score-mini {
-  font-size: 11px;
-  font-weight: 700;
-}
-
-.eval-status--none {
-  background: var(--color-bg-secondary, #f0f0f0);
-  opacity: 0.7;
-}
-
-.eval-status--loading {
-  background: var(--color-primary-100, #e6f7ff);
-  animation: pulse 1.5s infinite;
-}
-
-.eval-status--good {
-  background: #f6ffed;
-}
-
-.eval-status--ok {
-  background: #fffbe6;
-}
-
-.eval-status--bad {
-  background: #fff2f0;
-}
-
-@keyframes pulse {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.5; }
-}
-
-/* 消息评估详情 */
-.message-eval-detail {
-  margin-top: 8px;
-  padding: 10px;
-  background: var(--color-bg-secondary, #f5f5f5);
-  border-radius: 8px;
-  border-left: 3px solid var(--color-primary-500, #1890ff);
-}
-
-.eval-loading {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 12px;
-  color: var(--color-text-muted, #999);
-}
-
-.eval-spinner {
-  width: 14px;
-  height: 14px;
-  border: 2px solid var(--color-border, #e8e8e8);
-  border-top-color: var(--color-primary-500, #1890ff);
-  border-radius: 50%;
-  animation: spin 1s linear infinite;
-}
-
-@keyframes spin {
-  to { transform: rotate(360deg); }
-}
-
-.eval-content {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
-
-/* 评估头部 */
-.eval-header {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-}
-
-.eval-total {
-  display: flex;
-  align-items: baseline;
-  gap: 4px;
-}
-
-.eval-total-score {
-  font-size: 28px;
-  font-weight: 700;
-}
-
-.eval-total-label {
-  font-size: 12px;
-  color: var(--color-text-muted, #999);
-}
-
-.eval-level {
-  font-size: 11px;
-  padding: 2px 8px;
-  border-radius: 4px;
-  font-weight: 500;
-}
-
-.eval-level--good {
-  background: #f6ffed;
-  color: #52c41a;
-}
-
-.eval-level--ok {
-  background: #fffbe6;
-  color: #faad14;
-}
-
-.eval-level--bad {
-  background: #fff7e6;
-  color: #fa8c16;
-}
-
-.eval-level--very-bad {
-  background: #fff2f0;
-  color: #ff4d4f;
-}
-
-/* 维度分数 */
-.eval-dimensions {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.eval-dim {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 12px;
-}
-
-.eval-dim-icon {
-  font-size: 14px;
-  width: 20px;
-  text-align: center;
-}
-
-.eval-dim-name {
-  width: 60px;
-  color: var(--color-text-secondary, #666);
-}
-
-.eval-dim-bar {
-  flex: 1;
-  height: 6px;
-  background: var(--color-bg-secondary, #f0f0f0);
-  border-radius: 3px;
-  overflow: hidden;
-}
-
-.eval-dim-bar-fill {
-  height: 100%;
-  border-radius: 3px;
-  transition: width 0.5s ease;
-}
-
-.eval-dim-score {
-  width: 30px;
-  text-align: right;
-  font-weight: 600;
-}
-
-.eval-suggestions {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-
-.eval-suggestions-title {
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--color-text-primary, #333);
-  margin-bottom: 4px;
-}
-
-.eval-suggestion {
-  font-size: 12px;
-  color: var(--color-text-secondary, #666);
-  padding-left: 16px;
-  position: relative;
-}
-
-.eval-suggestion::before {
-  content: '•';
-  position: absolute;
-  left: 4px;
-  color: var(--color-primary-500, #1890ff);
-}
-
-.eval-empty {
-  text-align: center;
-  padding: 8px;
-}
-
-.eval-empty-text {
-  font-size: 12px;
-  color: var(--color-text-muted, #999);
-  margin-bottom: 8px;
-}
-
-.btn-eval-trigger {
-  padding: 6px 12px;
-  background: var(--color-primary-500, #1890ff);
-  color: white;
-  border: none;
-  border-radius: 6px;
-  font-size: 12px;
-  cursor: pointer;
-  transition: background 0.2s;
-}
-
-.btn-eval-trigger:hover {
-  background: var(--color-primary-600, #40a9ff);
-}
-
-/* 评估操作按钮 */
-.eval-actions {
-  display: flex;
-  gap: 8px;
-  padding-top: 8px;
-  border-top: 1px solid var(--color-border, #e8e8e8);
-}
-
-.btn-eval-llm {
-  padding: 6px 12px;
-  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-  color: white;
-  border: none;
-  border-radius: 6px;
-  font-size: 12px;
-  cursor: pointer;
-  transition: opacity 0.2s;
-}
-
-.btn-eval-llm:hover {
-  opacity: 0.9;
-}
-
-/* typing animation */
-.typing {
-  display: flex;
-  align-items: center;
-  gap: 0.3rem;
-  padding: 0.75rem 1.25rem;
-}
-
-.dot {
-  width: 7px;
-  height: 7px;
-  background: var(--color-text-muted);
-  border-radius: 50%;
-  animation: typingBounce 1.4s infinite ease-in-out;
-}
-
-.dot:nth-child(2) { animation-delay: 0.2s; }
-.dot:nth-child(3) { animation-delay: 0.4s; }
-
-@keyframes typingBounce {
-  0%, 80%, 100% { transform: scale(0.6); opacity: 0.4; }
-  40% { transform: scale(1); opacity: 1; }
-}
-
-/* ── 输入框 ── */
-.chat-input-area {
-  padding: 0.75rem 1.25rem;
-  border-top: 1px solid var(--color-border);
-  background: var(--color-bg-card);
-  position: relative;
-}
-
-.chat-input-area.is-sending {
-  border-top-color: var(--color-primary-300);
-}
-
-.input-progress-bar {
-  position: absolute;
-  top: 0;
-  left: 0;
-  right: 0;
-  height: 2px;
-  background: var(--color-primary-100);
-  overflow: hidden;
-}
-
-.input-progress-fill {
-  height: 100%;
-  width: 30%;
-  background: linear-gradient(90deg, var(--color-primary-400), var(--color-primary-600));
-  border-radius: 2px;
-  animation: progressSlide 1.5s ease-in-out infinite;
-}
-
-@keyframes progressSlide {
-  0% { transform: translateX(-100%); }
-  50% { transform: translateX(233%); }
-  100% { transform: translateX(-100%); }
-}
-
-.chat-form {
-  display: flex;
-  gap: 0.5rem;
-  align-items: flex-end;
-}
-
-.chat-input {
-  flex: 1;
-  resize: none;
-  padding: 0.6rem 0.85rem;
-  font-size: 0.85rem;
-  line-height: 1.5;
-  max-height: 120px;
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
-  background: var(--color-bg-input);
-  color: var(--color-text-primary);
-  outline: none;
-  transition: border-color var(--transition-fast);
-}
-
-.chat-input:focus {
-  border-color: var(--color-primary-400);
-}
-
-.is-sending .chat-input {
-  border-color: var(--color-primary-300);
-  background: var(--color-primary-50, rgba(201, 168, 76, 0.03));
-  animation: inputPulse 2s ease-in-out infinite;
-}
-
-@keyframes inputPulse {
-  0%, 100% { border-color: var(--color-primary-200); }
-  50% { border-color: var(--color-primary-400); }
-}
-
-.btn-send {
-  width: 40px;
-  height: 40px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: var(--radius-md);
-  background: var(--color-primary-500);
-  color: white;
-  transition: all var(--transition-fast);
-  flex-shrink: 0;
-}
-
-.btn-send:hover:not(:disabled) {
-  background: var(--color-primary-600);
-}
-
-.btn-send:disabled {
-  opacity: 0.4;
-  cursor: not-allowed;
-}
-
-.btn-stop {
-  width: 40px;
-  height: 40px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: var(--radius-md);
-  background: #ef4444;
-  color: white;
-  transition: all var(--transition-fast);
-  flex-shrink: 0;
-  animation: pulseStop 2s ease-in-out infinite;
-}
-
-.btn-stop:hover {
-  background: #dc2626;
-  transform: scale(1.05);
-}
-
-@keyframes pulseStop {
-  0%, 100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.3); }
-  50% { box-shadow: 0 0 0 6px rgba(239, 68, 68, 0); }
-}
-
-.sending-hint {
-  display: flex;
-  align-items: center;
-  gap: 0.4rem;
-  margin-top: 0.4rem;
-  padding: 0.2rem 0;
-}
-
-.sending-spinner {
-  width: 12px;
-  height: 12px;
-  border: 2px solid var(--color-primary-200);
-  border-top-color: var(--color-primary-500);
-  border-radius: 50%;
-  animation: spin 0.8s linear infinite;
-  flex-shrink: 0;
-}
-
-.sending-text {
-  font-size: 0.72rem;
-  color: var(--color-primary-500);
-  font-weight: 500;
-}
-
 /* ── 空状态 ── */
 .chat-empty {
   flex: 1;
@@ -2477,760 +1170,13 @@ async function toggleTraceDetail(msg, index) {
 .chat-empty h3 { margin: 0; font-size: 1rem; color: var(--color-text-secondary); }
 .chat-empty p { margin: 0; font-size: 0.8rem; }
 
-
-/* ── Markdown 样式 ── */
-.markdown-body :deep(h1),
-.markdown-body :deep(h2),
-.markdown-body :deep(h3) {
-  margin-top: 0.75rem;
-  margin-bottom: 0.4rem;
-  font-size: 0.9rem;
-}
-
-.markdown-body :deep(p) {
-  margin: 0.3rem 0;
-}
-
-.markdown-body :deep(ul),
-.markdown-body :deep(ol) {
-  padding-left: 1.2rem;
-  margin: 0.3rem 0;
-}
-
-.markdown-body :deep(code) {
-  background: rgba(255, 255, 255, 0.06);
-  padding: 0.1rem 0.3rem;
-  border-radius: 3px;
-  font-size: 0.8rem;
-}
-
-.dark .markdown-body :deep(code) {
-  background: rgba(255,255,255,0.1);
-}
-
-.markdown-body :deep(strong) {
-  font-weight: 600;
-}
-
-.markdown-body :deep(table) {
-  width: 100%;
-  border-collapse: collapse;
-  margin: 0.5rem 0;
-  font-size: 0.8rem;
-}
-
-.markdown-body :deep(th),
-.markdown-body :deep(td) {
-  padding: 0.35rem 0.6rem;
-  border: 1px solid var(--color-border);
-  text-align: left;
-}
-
-.markdown-body :deep(th) {
-  background: var(--color-surface-hover);
-  font-weight: 600;
-}
-
-.markdown-body :deep(blockquote) {
-  border-left: 3px solid var(--color-primary-300);
-  padding: 0.3rem 0.75rem;
-  margin: 0.5rem 0;
-  color: var(--color-text-secondary);
-  background: var(--color-surface-hover);
-  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
-}
-
-.markdown-body :deep(hr) {
-  border: none;
-  border-top: 1px solid var(--color-border);
-  margin: 0.75rem 0;
-}
-
 /* ── Transition ── */
 .fade-enter-active { transition: opacity 0.2s; }
 .fade-leave-active { transition: opacity 0.15s; }
 .fade-enter-from, .fade-leave-to { opacity: 0; }
 
-/* ── RAG 来源标注 ── */
-.rag-sources {
-  margin-top: 0.5rem;
-  padding: 0.5rem 0.75rem;
-  background: var(--color-bg-input);
-  border-radius: var(--radius-sm);
-  font-size: 0.7rem;
-}
-
-.rag-header {
-  display: flex;
-  align-items: center;
-  gap: 0.3rem;
-  color: var(--color-text-secondary);
-  font-weight: 500;
-  margin-bottom: 0.4rem;
-}
-
-.rag-tags {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.3rem;
-  margin-bottom: 0.3rem;
-}
-
-.rag-tag {
-  display: inline-flex;
-  align-items: center;
-  padding: 0.15rem 0.4rem;
-  border-radius: var(--radius-sm);
-  font-size: 0.65rem;
-  background: var(--color-bg-card);
-  border: 1px solid var(--color-border);
-  color: var(--color-text-secondary);
-}
-
-.rag-tag-估值 { border-color: #f59e0b; color: #d97706; background: var(--color-warning-bg); }
-.rag-tag-作者文章 { border-color: #10b981; color: #059669; background: var(--color-success-bg); }
-.rag-tag-技能知识 { border-color: #8b5cf6; color: #7c3aed; background: rgba(139, 92, 246, 0.1); }
-.rag-tag-文章 { border-color: #3b82f6; color: #2563eb; background: var(--color-info-bg); }
-
-.rag-keywords {
-  font-size: 0.6rem;
-  color: var(--color-text-muted);
-}
-
-/* ── 工具调用展示 ── */
-.tool-calls-container {
-  margin-bottom: 0.4rem;
-  border-left: 3px solid var(--color-primary-300);
-  padding-left: 0.5rem;
-}
-
-.tool-calls-container.streaming {
-  border-left-color: var(--color-primary-400);
-  opacity: 0.8;
-}
-
-.tool-call-item {
-  margin-bottom: 0.2rem;
-}
-
-.tool-call-header {
-  display: flex;
-  align-items: center;
-  gap: 0.4rem;
-  font-size: 0.75rem;
-  color: var(--color-text-secondary);
-  padding: 0.2rem 0;
-  cursor: pointer;
-}
-
-.tool-call-header:hover {
-  color: var(--color-text-primary);
-}
-
-.tool-icon {
-  font-size: 0.7rem;
-}
-
-.tool-icon.spinning {
-  animation: spin 1.5s linear infinite;
-}
-
-@keyframes spin {
-  from { transform: rotate(0deg); }
-  to { transform: rotate(360deg); }
-}
-
-.tool-name {
-  font-weight: 600;
-  color: var(--color-primary-600);
-}
-
-.tool-args {
-  font-size: 0.65rem;
-  color: var(--color-text-muted);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  max-width: 200px;
-}
-
-.tool-toggle {
-  font-size: 0.6rem;
-  color: var(--color-text-muted);
-  margin-left: auto;
-}
-
-.tool-result {
-  background: var(--color-bg-hover);
-  padding: 0.4rem 0.6rem;
-  border-radius: var(--radius-sm);
-  font-size: 0.7rem;
-  max-height: 120px;
-  overflow-y: auto;
-  margin: 0.2rem 0 0.3rem;
-  white-space: pre-wrap;
-  word-break: break-word;
-  color: var(--color-text-secondary);
-}
-
-.stream-status {
-  display: flex;
-  align-items: center;
-  gap: 0.3rem;
-  padding: 0.4rem 0.75rem;
-  font-size: 0.8rem;
-  color: var(--color-text-muted);
-}
-
-.stream-status .status-text {
-  margin-left: 0.3rem;
-}
-
-/* ── 阶段进度条 ── */
-.stream-progress {
-  padding: 0.5rem 0.75rem;
-}
-
-.progress-bar-container {
-  height: 4px;
-  background: var(--color-border);
-  border-radius: 2px;
-  overflow: hidden;
-  margin-bottom: 0.4rem;
-}
-
-.progress-bar-fill {
-  height: 100%;
-  background: linear-gradient(90deg, var(--color-primary), var(--color-primary-light, var(--color-primary)));
-  border-radius: 2px;
-  transition: width 0.3s ease;
-}
-
-.substep-text {
-  display: flex;
-  align-items: center;
-  gap: 0.4rem;
-  font-size: 0.75rem;
-  color: var(--color-text-muted);
-}
-
-.dot-pulse {
-  display: inline-block;
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--color-primary);
-  animation: dot-pulse 1.2s ease-in-out infinite;
-}
-
-@keyframes dot-pulse {
-  0%, 100% { opacity: 1; transform: scale(1); }
-  50% { opacity: 0.5; transform: scale(0.8); }
-}
-
-/* ── 执行计划 ── */
-.execution-plan {
-  margin: 0.5rem 0;
-  padding: 0.6rem 0.8rem;
-  background: linear-gradient(135deg, rgba(201, 168, 76, 0.04), rgba(201, 168, 76, 0.02));
-  border: 1px solid rgba(201, 168, 76, 0.15);
-  border-radius: var(--radius-md);
-  font-size: 0.8rem;
-}
-
-.plan-header {
-  display: flex;
-  align-items: center;
-  gap: 0.4rem;
-  margin-bottom: 0.3rem;
-}
-
-.plan-icon {
-  font-size: 0.9rem;
-}
-
-.plan-label {
-  font-weight: 600;
-  color: var(--color-text-primary);
-}
-
-.plan-complexity {
-  font-size: 0.7rem;
-  font-weight: 600;
-  padding: 0.1rem 0.4rem;
-  border-radius: var(--radius-sm);
-  margin-left: auto;
-}
-
-.complexity-simple { background: rgba(16, 185, 129, 0.1); color: #10b981; }
-.complexity-medium { background: rgba(245, 158, 11, 0.1); color: #f59e0b; }
-.complexity-complex { background: rgba(201, 168, 76, 0.1); color: #c9a84c; }
-
-.plan-reason {
-  font-size: 0.75rem;
-  color: var(--color-text-muted);
-  margin-bottom: 0.4rem;
-}
-
-.plan-steps {
-  display: flex;
-  flex-direction: column;
-  gap: 0.25rem;
-}
-
-.plan-step {
-  display: flex;
-  align-items: center;
-  gap: 0.4rem;
-  font-size: 0.78rem;
-}
-
-.plan-step.done {
-  color: #10b981;
-}
-
-.plan-step.running {
-  color: var(--color-primary);
-}
-
-.step-check {
-  font-weight: 700;
-}
-
-.step-spinner {
-  width: 12px;
-  height: 12px;
-  border: 2px solid rgba(201, 168, 76, 0.2);
-  border-top-color: var(--color-primary);
-  border-radius: 50%;
-  animation: spin 0.8s linear infinite;
-}
-
-@keyframes spin {
-  to { transform: rotate(360deg); }
-}
-
-/* ── 执行过程面板 ── */
-.execution-panel {
-  margin-bottom: 0.5rem;
-  border: 1px solid var(--color-border-light);
-  border-radius: 8px;
-  overflow: hidden;
-}
-
-.execution-toggle {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-  padding: 0.5rem 0.75rem;
-  background: var(--color-bg-secondary);
-  cursor: pointer;
-  font-size: 0.8rem;
-  color: var(--color-text-secondary);
-  transition: background 0.15s;
-}
-
-.execution-toggle:hover {
-  background: var(--color-bg-hover);
-}
-
-.execution-toggle-icon {
-  font-size: 0.9rem;
-}
-
-.execution-complexity {
-  font-size: 0.7rem;
-  padding: 0.15rem 0.5rem;
-  border-radius: 4px;
-  font-weight: 600;
-}
-
-.complexity-simple { background: #dcfce7; color: #166534; }
-.complexity-medium { background: #fef9c3; color: #854d0e; }
-.complexity-complex { background: #fee2e2; color: #991b1b; }
-
-.execution-total-time {
-  margin-left: auto;
-  font-weight: 600;
-  color: var(--color-text-primary);
-}
-
-.execution-toggle-arrow {
-  color: var(--color-text-muted);
-  font-size: 0.75rem;
-}
-
-.execution-detail {
-  padding: 0.75rem;
-  background: var(--color-bg-primary);
-  border-top: 1px solid var(--color-border-light);
-}
-
-.execution-timeline {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-  margin-bottom: 0.75rem;
-  padding: 0.5rem 0;
-}
-
-.timeline-item {
-  display: flex;
-  align-items: center;
-  gap: 0.35rem;
-  font-size: 0.75rem;
-}
-
-.timeline-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: var(--color-primary-500);
-}
-
-.timeline-label {
-  color: var(--color-text-secondary);
-}
-
-.timeline-time {
-  font-weight: 600;
-  color: var(--color-text-primary);
-}
-
-.execution-agents {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 0.5rem;
-  margin-bottom: 0.5rem;
-  font-size: 0.8rem;
-}
-
-.execution-agents-label {
-  color: var(--color-text-secondary);
-}
-
-.execution-agent-tag {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.25rem;
-  padding: 0.2rem 0.5rem;
-  background: var(--color-bg-secondary);
-  border-radius: 4px;
-  font-size: 0.75rem;
-}
-
-.execution-agent-time {
-  color: var(--color-text-muted);
-  font-size: 0.7rem;
-}
-
-.execution-tools {
-  font-size: 0.75rem;
-  color: var(--color-text-muted);
-}
-
-.btn-trace-detail {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.3rem;
-  margin-top: 0.4rem;
-  padding: 0.25rem 0.6rem;
-  font-size: 0.72rem;
-  color: var(--color-primary);
-  background: transparent;
-  border: 1px solid var(--color-primary);
-  border-radius: var(--radius-sm);
-  cursor: pointer;
-  transition: all var(--transition-fast);
-}
-
-.btn-trace-detail:hover {
-  background: var(--color-primary);
-  color: white;
-}
-
-/* ── 专家分析展示 ── */
-.specialists-container {
-  margin-bottom: 0.5rem;
-}
-
-.specialists-container.streaming {
-  opacity: 0.9;
-}
-
-.specialist-item {
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
-  margin-bottom: 0.4rem;
-  overflow: hidden;
-  background: var(--color-bg-card);
-}
-
-.specialist-item.running {
-  border-color: var(--color-primary-300);
-  background: var(--color-primary-50);
-}
-
-.dark .specialist-item.running {
-  background: var(--color-primary-bg);
-}
-
-.specialist-item.completed {
-  border-color: var(--color-success-border, #10b981);
-}
-
-.specialist-header {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-  padding: 0.5rem 0.75rem;
-  cursor: pointer;
-  transition: background var(--transition-fast);
-}
-
-.specialist-header:hover {
-  background: var(--color-bg-hover);
-}
-
-.specialist-icon {
-  font-size: 1rem;
-  flex-shrink: 0;
-}
-
-.specialist-icon.spinning {
-  animation: spin 2s linear infinite;
-}
-
-.specialist-name {
-  font-size: 0.8rem;
-  font-weight: 600;
-  color: var(--color-text-primary);
-}
-
-.specialist-status {
-  margin-left: auto;
-  display: flex;
-  align-items: center;
-  gap: 0.2rem;
-}
-
-.specialist-status.done {
-  color: var(--color-success, #10b981);
-  font-size: 0.8rem;
-  font-weight: 600;
-}
-
-.specialist-status.running .dot {
-  width: 5px;
-  height: 5px;
-  background: var(--color-primary-400);
-  border-radius: 50%;
-  animation: typingBounce 1.4s infinite ease-in-out;
-}
-
-.specialist-status.running .dot:nth-child(2) { animation-delay: 0.2s; }
-.specialist-status.running .dot:nth-child(3) { animation-delay: 0.4s; }
-
-.specialist-time {
-  font-size: 0.65rem;
-  color: var(--color-text-muted);
-}
-
-.specialist-toggle {
-  font-size: 0.6rem;
-  color: var(--color-text-muted);
-}
-
-.specialist-feedback {
-  display: flex;
-  align-items: center;
-  gap: 0.2rem;
-  margin-left: 0.3rem;
-  opacity: 0;
-  transition: opacity var(--transition-fast);
-}
-
-/* 触屏设备始终显示反馈按钮 */
-@media (hover: none) {
-  .specialist-feedback {
-    opacity: 0.8;
-  }
-}
-
-/* 支持 hover 的设备悬停显示 */
-@media (hover: hover) {
-  .specialist-item:hover .specialist-feedback {
-    opacity: 1;
-  }
-}
-
-.btn-spec-feedback {
-  width: 22px;
-  height: 22px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 0.65rem;
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-sm);
-  background: var(--color-bg-card);
-  cursor: pointer;
-  transition: all var(--transition-fast);
-  padding: 0;
-}
-
-.btn-spec-feedback:hover {
-  border-color: var(--color-primary-400);
-  background: var(--color-primary-50);
-  transform: scale(1.15);
-}
-
-.feedback-done {
-  font-size: 0.6rem;
-  color: var(--color-text-muted);
-  white-space: nowrap;
-}
-
-.specialist-analysis {
-  padding: 0.75rem 1rem;
-  border-top: 1px solid var(--color-border);
-  font-size: 0.82rem;
-  line-height: 1.6;
-  max-height: 500px;
-  overflow-y: auto;
-}
-
-/* ── 交叉审阅 ── */
-.specialists-container.cross-review {
-  margin-top: 0.5rem;
-  margin-bottom: 0.5rem;
-  padding-left: 0.5rem;
-  border-left: 3px solid var(--color-primary-300);
-}
-
-.cross-review-label {
-  font-size: 0.75rem;
-  font-weight: 600;
-  color: var(--color-primary);
-  padding: 0.25rem 0.75rem;
-  margin-bottom: 0.25rem;
-  letter-spacing: 0.05em;
-}
-
-.specialist-item.cross-review-item {
-  border-color: var(--color-primary-200);
-  background: var(--color-primary-50, rgba(201, 168, 76, 0.04));
-}
-
-.dark .specialist-item.cross-review-item {
-  background: var(--color-primary-bg, rgba(201, 168, 76, 0.08));
-}
-
-/* ── 消息反馈按钮 ── */
-.message-feedback {
-  display: flex;
-  gap: 0.25rem;
-  padding: 0.25rem 0;
-  opacity: 0;
-  transition: opacity var(--transition-fast);
-}
-
-/* 触屏设备始终显示反馈按钮 */
-@media (hover: none) {
-  .message-feedback {
-    opacity: 0.8;
-  }
-}
-
-/* 支持 hover 的设备悬停显示 */
-@media (hover: hover) {
-  .message:hover .message-feedback {
-    opacity: 1;
-  }
-}
-
-.btn-msg-feedback {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 28px;
-  height: 28px;
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-sm);
-  background: var(--color-bg-card);
-  color: var(--color-text-secondary);
-  cursor: pointer;
-  transition: all var(--transition-fast);
-}
-
-.btn-msg-feedback:hover {
-  color: var(--color-primary);
-  border-color: var(--color-primary);
-  background: var(--color-primary-50);
-}
-
-.message-feedback-given {
-  font-size: 0.7rem;
-  color: var(--color-text-muted);
-  padding: 0.25rem 0;
-}
-
-/* ── 实时计时器 ── */
-.elapsed-timer {
-  display: flex;
-  align-items: center;
-  gap: 0.4rem;
-  padding: 0.3rem 0.75rem;
-  font-size: 0.75rem;
-  color: var(--color-text-muted);
-  opacity: 0.85;
-}
-
-.elapsed-icon {
-  font-size: 0.8rem;
-  animation: pulse 2s ease-in-out infinite;
-}
-
-@keyframes pulse {
-  0%, 100% { opacity: 0.6; }
-  50% { opacity: 1; }
-}
-
-.elapsed-text {
-  font-variant-numeric: tabular-nums;
-  font-weight: 500;
-  color: var(--color-primary-500);
-}
-
-/* ── 耗时摘要 ── */
-.message-timing {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 0.3rem;
-  padding: 0.25rem 0.75rem;
-  font-size: 0.68rem;
-  color: var(--color-text-muted);
-  opacity: 0.7;
-}
-
-.timing-total {
-  font-weight: 600;
-  color: var(--color-text-secondary);
-}
-
-.timing-phase::before {
-  content: '·';
-  margin-right: 0.3rem;
-  color: var(--color-border);
-}
-
 /* ── 移动端菜单按钮 ── */
 .mobile-sidebar-toggle {
-  display: none;
-}
-.mobile-sidebar-overlay {
   display: none;
 }
 
@@ -3246,7 +1192,6 @@ async function toggleTraceDetail(msg, index) {
     border: none;
   }
 
-  /* 移动端：隐藏侧边栏，用按钮切换 */
   .mobile-sidebar-toggle {
     display: flex;
     align-items: center;
@@ -3264,29 +1209,6 @@ async function toggleTraceDetail(msg, index) {
     cursor: pointer;
   }
 
-  .mobile-sidebar-overlay {
-    display: block;
-    position: fixed;
-    inset: 0;
-    background: rgba(0,0,0,0.4);
-    z-index: 49;
-  }
-
-  .conv-sidebar {
-    position: fixed;
-    left: 0;
-    top: 0;
-    bottom: 0;
-    width: 280px;
-    max-width: 80vw;
-    z-index: 50;
-    transform: translateX(-100%);
-    transition: transform 0.25s ease;
-  }
-  .conv-sidebar.mobile-open {
-    transform: translateX(0);
-  }
-
   .chat-area {
     flex: 1;
     min-width: 0;
@@ -3297,191 +1219,5 @@ async function toggleTraceDetail(msg, index) {
   .chat-header {
     padding-left: 2.5rem;
   }
-
-  .agent-grid { grid-template-columns: 1fr; }
-
-  /* 移动端按钮触摸区域优化 */
-  .btn-new-conv {
-    width: 44px;
-    height: 44px;
-  }
-
-  .btn-delete-conv {
-    min-width: 44px;
-    min-height: 44px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-  }
-
-  .conv-item {
-    padding: 0.8rem 0.6rem;
-    min-height: 48px;
-  }
-
-  /* 消息反馈按钮 */
-  .message-feedback {
-    opacity: 0.8;
-  }
-
-  .specialist-feedback {
-    opacity: 0.8;
-  }
-}
-
-/* ── 执行状态徽章 ── */
-.execution-status-badge {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-  padding: 0.4rem 0.75rem;
-  border-radius: var(--radius-md);
-  font-size: 0.8rem;
-  margin-bottom: 0.5rem;
-  font-weight: 500;
-}
-.execution-status-badge.status-streaming {
-  background: #fef3c7;
-  color: #92400e;
-  border: 1px solid #fcd34d;
-}
-.dark .execution-status-badge.status-streaming {
-  background: #451a03;
-  color: #fcd34d;
-  border-color: #78350f;
-}
-.execution-status-badge.status-failed {
-  background: #fee2e2;
-  color: #991b1b;
-  border: 1px solid #fca5a5;
-}
-.dark .execution-status-badge.status-failed {
-  background: #450a0a;
-  color: #fca5a5;
-  border-color: #7f1d1d;
-}
-.execution-status-badge.status-cancelled {
-  background: #f3f4f6;
-  color: #4b5563;
-  border: 1px solid #d1d5db;
-}
-.dark .execution-status-badge.status-cancelled {
-  background: #1f2937;
-  color: #9ca3af;
-  border-color: #374151;
-}
-.execution-status-badge.status-timeout {
-  background: #fef3c7;
-  color: #92400e;
-  border: 1px solid #fcd34d;
-}
-.btn-retry {
-  margin-left: auto;
-  padding: 0.2rem 0.5rem;
-  border: 1px solid currentColor;
-  border-radius: var(--radius-sm);
-  background: transparent;
-  color: inherit;
-  font-size: 0.75rem;
-  cursor: pointer;
-  opacity: 0.7;
-  transition: opacity 0.15s;
-}
-.btn-retry:hover {
-  opacity: 1;
-}
-
-/* ── 反馈输入弹窗 ── */
-.dialog-backdrop {
-  position: fixed;
-  inset: 0;
-  z-index: var(--z-modal, 1000);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: rgba(0,0,0,0.4);
-  backdrop-filter: blur(4px);
-}
-.feedback-dialog {
-  background: var(--color-bg-card);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-xl);
-  box-shadow: var(--shadow-lg, 0 10px 25px rgba(0,0,0,0.15));
-  width: 100%;
-  max-width: 420px;
-  margin: 0 1rem;
-  overflow: hidden;
-}
-.feedback-dialog-header {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-  padding: 1.25rem 1.25rem 0.75rem;
-}
-.feedback-dialog-icon {
-  font-size: 1.25rem;
-}
-.feedback-dialog-title {
-  font-size: 0.95rem;
-  font-weight: 600;
-  color: var(--color-text-primary);
-}
-.feedback-dialog-body {
-  padding: 0 1.25rem;
-}
-.feedback-textarea {
-  width: 100%;
-  padding: 0.6rem 0.75rem;
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
-  background: var(--color-bg-input);
-  color: var(--color-text-primary);
-  font-size: 0.85rem;
-  line-height: 1.5;
-  resize: vertical;
-  outline: none;
-  transition: border-color 0.15s;
-  box-sizing: border-box;
-}
-.feedback-textarea:focus {
-  border-color: var(--color-primary-500, #3b82f6);
-}
-.feedback-textarea::placeholder {
-  color: var(--color-text-tertiary, #9ca3af);
-}
-.feedback-dialog-actions {
-  display: flex;
-  gap: 0.5rem;
-  padding: 1rem 1.25rem 1.25rem;
-}
-.feedback-dialog-actions .btn-secondary {
-  flex: 1;
-  padding: 0.55rem 1rem;
-  font-size: 0.85rem;
-  background: var(--color-bg-card);
-  color: var(--color-text-secondary);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
-  font-weight: 500;
-  cursor: pointer;
-  transition: all 0.15s;
-}
-.feedback-dialog-actions .btn-secondary:hover {
-  background: var(--color-bg-hover);
-}
-.feedback-dialog-actions .btn-primary {
-  flex: 1;
-  padding: 0.55rem 1rem;
-  font-size: 0.85rem;
-  background: linear-gradient(135deg, var(--color-primary-600, #2563eb), var(--color-primary-500, #3b82f6));
-  color: white;
-  border: none;
-  border-radius: var(--radius-md);
-  font-weight: 500;
-  cursor: pointer;
-  transition: all 0.15s;
-}
-.feedback-dialog-actions .btn-primary:hover {
-  background: linear-gradient(135deg, var(--color-primary-700, #1d4ed8), var(--color-primary-600, #2563eb));
 }
 </style>

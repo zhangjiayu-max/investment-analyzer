@@ -16,6 +16,17 @@ export default defineConfig({
       },
     },
   },
+  build: {
+    rolldownOptions: {
+      output: {
+        manualChunks(id) {
+          if (id.includes('node_modules/vue/') || id.includes('node_modules/@vue/') || id.includes('node_modules/vue-router/')) return 'vendor-vue'
+          if (id.includes('node_modules/marked/') || id.includes('node_modules/dompurify/')) return 'vendor-markdown'
+          if (id.includes('node_modules/echarts/') || id.includes('node_modules/lightweight-charts/')) return 'vendor-chart'
+        },
+      },
+    },
+  },
   test: {
     environment: 'jsdom',
     globals: true,

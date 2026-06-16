@@ -1,6 +1,10 @@
 <script setup>
 import { ref, watch, onMounted, onUnmounted, onActivated, computed } from 'vue'
-import * as echarts from 'echarts'
+let echartsModule = null
+async function getEcharts() {
+  if (!echartsModule) echartsModule = await import('echarts')
+  return echartsModule
+}
 import { listValuationIndexes, getValuationHistory, getIndexInfo, runAnalysis, listAnalysisHistory, getAnalysisHistoryDetail, deleteAnalysisHistory, refreshValuationPrices, listDDValuations, getDDValuation, getMarketTemperature, getSuperValue, getEnhancedStrategy } from '../api'
 import { renderMarkdown } from '../composables/useMarkdown'
 import { isDark } from '../composables/useTheme'
@@ -497,9 +501,10 @@ function handleOutsideClick(e) {
   }
 }
 
-function renderTrendChart() {
+async function renderTrendChart() {
   if (!trendChartRef.value || history.value.length < 2) return
 
+  const echarts = await getEcharts()
   if (trendChart) trendChart.dispose()
   trendChart = echarts.init(trendChartRef.value, isDark.value ? 'dark' : null)
 

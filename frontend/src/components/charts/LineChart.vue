@@ -1,7 +1,7 @@
 <!-- 通用折线图：用于收益曲线、净值走势等 -->
 <script setup>
-import { ref, watch, onMounted, onUnmounted, computed } from 'vue'
-import * as echarts from 'echarts'
+import { ref } from 'vue'
+import { useLazyChart } from '../../composables/useLazyChart'
 import { useChartTheme } from '../../composables/useChartTheme'
 
 const props = defineProps({
@@ -17,10 +17,9 @@ const props = defineProps({
 })
 
 const chartRef = ref(null)
-let chart = null
 const { theme, isDark, getTooltipOpts, getGridOpts, getCategoryAxis, getValueAxis, getDataZoomOpts } = useChartTheme()
 
-const option = computed(() => {
+function getOption(echarts) {
   const colors = theme.value.colors.series
   const seriesConfig = props.series.map((s, i) => {
     const color = s.color || colors[i % colors.length]
@@ -74,30 +73,9 @@ const option = computed(() => {
     dataZoom: props.zoomable ? getDataZoomOpts(props.dates.length, props.zoomThreshold) : undefined,
     series: seriesConfig,
   }
-})
-
-function renderChart() {
-  if (!chartRef.value) return
-  if (chart) chart.dispose()
-  chart = echarts.init(chartRef.value, isDark.value ? 'dark' : null)
-  chart.setOption(option.value)
 }
 
-function handleResize() { chart?.resize() }
-
-watch(() => [props.dates, props.series, isDark.value], () => {
-  if (chart) chart.setOption(option.value, true)
-}, { deep: true })
-
-onMounted(() => {
-  renderChart()
-  window.addEventListener('resize', handleResize)
-})
-
-onUnmounted(() => {
-  chart?.dispose()
-  window.removeEventListener('resize', handleResize)
-})
+useLazyChart(chartRef, getOption, [() => props.dates, () => props.series, isDark])
 </script>
 
 <template>

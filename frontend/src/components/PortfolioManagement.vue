@@ -19,8 +19,8 @@ import {
   runPortfolioAiAnalysis, listPortfolioAiAnalysisRecords,
   getPortfolioAiAnalysisRecord, deletePortfolioAiAnalysisRecord,
   runDiversificationAiSummary, getAiSummaryTodayStatus, getPortfolioPenetration,
-  runPanoramaAnalysis, runDeepDiveAnalysis, runTradeReview, runWhatIfAnalysis,
-  listPanoramaRecords, listDeepDiveRecords, listTradeReviewRecords, listWhatIfRecords,
+  runPanoramaAnalysis, runDeepDiveAnalysis, runTradeReview, runFundAnalysis,
+  listPanoramaRecords, listDeepDiveRecords, listTradeReviewRecords, listFundAnalysisRecords,
   submitAnalysisFeedback,
   getRebalanceConfig, updateRebalanceConfig, getRebalanceConfigHistory, rollbackRebalanceConfig,
 } from '../api'
@@ -833,11 +833,10 @@ const reviewEndDate = ref('')
 const tradeReviewRecords = ref([])
 const tradeReviewShowAll = ref(false)
 
-// 情景推演
-const whatIfScenario = ref('market_drop')
-const whatIfParameter = ref(10)
-const whatIfRecords = ref([])
-const whatIfShowAll = ref(false)
+// 指定基金分析
+const fundAnalysisCode = ref('')
+const fundAnalysisRecords = ref([])
+const fundAnalysisShowAll = ref(false)
 const aiHistoryLoading = ref(false)
 
 // Transaction tags
@@ -1025,7 +1024,7 @@ const aiModes = [
   { key: 'panorama', icon: '🔍', label: '全景诊断' },
   { key: 'deepdive', icon: '🔎', label: '单基金分析' },
   { key: 'trade-review', icon: '📊', label: '交易复盘' },
-  { key: 'what-if', icon: '🔮', label: '情景推演' },
+  { key: 'fund-analysis', icon: '🔍', label: '指定基金分析' },
 ]
 
 function switchAiMode(mode) {
@@ -1042,12 +1041,12 @@ async function loadAllModeRecords() {
       listPanoramaRecords(10),
       listDeepDiveRecords(10),
       listTradeReviewRecords(10),
-      listWhatIfRecords(10),
+      listFundAnalysisRecords(10),
     ])
     if (p.status === 'fulfilled') panoramaRecords.value = p.value.data.records || []
     if (d.status === 'fulfilled') deepDiveRecords.value = d.value.data.records || []
     if (t.status === 'fulfilled') tradeReviewRecords.value = t.value.data.records || []
-    if (w.status === 'fulfilled') whatIfRecords.value = w.value.data.records || []
+    if (w.status === 'fulfilled') fundAnalysisRecords.value = w.value.data.records || []
   } catch (e) { /* ignore */ }
 }
 
@@ -1127,18 +1126,21 @@ async function loadTradeReviewRecords() {
   } catch (e) { /* ignore */ }
 }
 
-async function runWhatIfMode() {
+async function runFundAnalysisMode() {
+  if (!fundAnalysisCode.value.trim()) {
+    showToast('请输入基金代码', 'error')
+    return
+  }
   modeLoading.value = true
   modeResult.value = ''
   modeRecordId.value = null
   aiTokenUsage.value = 0
   try {
-    const param = whatIfScenario.value === 'market_drop' ? whatIfParameter.value : null
-    const { data } = await runWhatIfAnalysis(whatIfScenario.value, param)
+    const { data } = await runFundAnalysis(fundAnalysisCode.value.trim())
     modeResult.value = data.result
     modeRecordId.value = data.id
     aiTokenUsage.value = data.token_usage || 0
-    loadWhatIfRecords()
+    loadFundAnalysisRecords()
   } catch (e) {
     modeResult.value = '分析失败：' + (e.response?.data?.detail || e.message)
   } finally {
@@ -1146,10 +1148,10 @@ async function runWhatIfMode() {
   }
 }
 
-async function loadWhatIfRecords() {
+async function loadFundAnalysisRecords() {
   try {
-    const { data } = await listWhatIfRecords(10)
-    whatIfRecords.value = data.records || []
+    const { data } = await listFundAnalysisRecords(10)
+    fundAnalysisRecords.value = data.records || []
   } catch (e) { /* ignore */ }
 }
 
@@ -1401,13 +1403,17 @@ function confirmTradeReview() {
   }
 }
 
-function confirmWhatIf() {
+function confirmFundAnalysis() {
+  if (!fundAnalysisCode.value.trim()) {
+    showToast('请输入基金代码', 'error')
+    return
+  }
   confirm.value = {
     visible: true,
-    title: '情景推演',
-    message: '将使用「情景推演分析师」模拟市场情景并生成推演报告，是否继续？',
+    title: '指定基金分析',
+    message: `将使用 AI 分析基金 ${fundAnalysisCode.value}，结合您的持仓和当前估值数据，是否继续？`,
     danger: false,
-    onConfirm: () => { confirm.value.visible = false; runWhatIfMode() }
+    onConfirm: () => { confirm.value.visible = false; runFundAnalysisMode() }
   }
 }
 
@@ -2803,29 +2809,23 @@ function txDisplayAmount(tx) {
             </div>
           </div>
 
-          <!-- Mode: What-If -->
-          <div v-if="aiMode === 'what-if'" class="ai-mode-content">
-            <div class="ai-mode-desc">模拟不同市场情景下你的组合变化，了解潜在风险和收益，提前做好准备。</div>
+          <!-- Mode: Fund Analysis -->
+          <div v-if="aiMode === 'fund-analysis'" class="ai-mode-content">
+            <div class="ai-mode-desc">输入任意基金代码，AI 将结合您的持仓和当前估值数据，分析是否适合建仓、加仓或减仓。</div>
             <div class="ai-mode-form">
-              <select v-model="whatIfScenario" class="input-field" style="flex:1">
-                <option value="market_drop">市场整体下跌</option>
-                <option value="repair_to_median">估值修复到历史中位数</option>
-                <option value="repair_to_opportunity">估值修复到机会值</option>
-              </select>
-              <label v-if="whatIfScenario === 'market_drop'" class="ai-form-label">跌幅 (%)</label>
-              <input v-if="whatIfScenario === 'market_drop'" v-model.number="whatIfParameter" type="number" class="input-field" style="width:80px" min="1" max="50" />
-              <button class="btn-ai-action" :class="{ 'btn-loading': modeLoading }" :disabled="modeLoading" @click="confirmWhatIf">
+              <input v-model="fundAnalysisCode" type="text" class="input-field" style="flex:1" placeholder="输入基金代码，如 161725" />
+              <button class="btn-ai-action" :class="{ 'btn-loading': modeLoading }" :disabled="modeLoading" @click="confirmFundAnalysis">
                 <svg :class="['icon-spin', { 'spinning': modeLoading }]" width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14.828 14.828a4 4 0 01-5.656 0M9 10h.01M15 10h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
                 </svg>
-                <span>{{ modeLoading ? '推演中...' : '开始推演' }}</span>
-                <span class="ai-agent-tooltip">情景推演分析师</span>
+                <span>{{ modeLoading ? '分析中...' : '开始分析' }}</span>
+                <span class="ai-agent-tooltip">AI 基金分析师</span>
               </button>
             </div>
-            <div v-if="modeResult && aiMode === 'what-if'" class="ai-mode-result">
+            <div v-if="modeResult && aiMode === 'fund-analysis'" class="ai-mode-result">
               <AnalysisCard
                 :result="modeResult"
-                agent-name="情景推演分析师"
+                agent-name="AI 基金分析师"
                 :token-usage="aiTokenUsage"
                 :record-id="modeRecordId"
                 :created-at="new Date().toISOString()"
@@ -2833,13 +2833,13 @@ function txDisplayAmount(tx) {
                 @feedback="(val) => submitFeedback(val)"
               />
             </div>
-            <div v-if="whatIfRecords.length > 0" class="ai-mode-history">
-              <div class="ai-mode-history-header" @click="whatIfShowAll = !whatIfShowAll">
-                <span>📋 历史推演记录 ({{ whatIfRecords.length }})</span>
-                <span class="ai-mode-history-toggle">{{ whatIfShowAll ? '收起' : '展开全部' }}</span>
+            <div v-if="fundAnalysisRecords.length > 0" class="ai-mode-history">
+              <div class="ai-mode-history-header" @click="fundAnalysisShowAll = !fundAnalysisShowAll">
+                <span>📋 历史分析记录 ({{ fundAnalysisRecords.length }})</span>
+                <span class="ai-mode-history-toggle">{{ fundAnalysisShowAll ? '收起' : '展开全部' }}</span>
               </div>
               <div class="ai-mode-history-list">
-                <div v-for="r in (whatIfShowAll ? whatIfRecords : whatIfRecords.slice(0,3))" :key="r.id" class="ai-history-item">
+                <div v-for="r in (fundAnalysisShowAll ? fundAnalysisRecords : fundAnalysisRecords.slice(0,3))" :key="r.id" class="ai-history-item">
                   <span class="ai-history-time">{{ formatAiTime(r.created_at) }}</span>
                   <span class="ai-history-summary">{{ r.summary }}</span>
                   <button class="btn-ghost btn-sm" @click="viewModeRecord(r)">查看</button>
@@ -5010,7 +5010,7 @@ select.input-field {
 }
 .alert-source-badge.ai {
   background: rgba(201,168,76,0.1);
-  color: #c9a84c;
+  color: var(--color-primary);
 }
 .alert-empty {
   display: flex;

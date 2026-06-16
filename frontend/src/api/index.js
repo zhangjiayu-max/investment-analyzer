@@ -1,9 +1,7 @@
-import axios from 'axios'
+import api from './http'
+import './interceptors'
 
-const api = axios.create({
-  baseURL: '/api',
-  timeout: 120000,
-})
+// 拦截器在 interceptors.js 中注册
 
 // ── 任务 API（新路径: /api/task/*）─────────────────────────────────────
 
@@ -1108,9 +1106,9 @@ export function runTradeReview(startDate, endDate) {
   return api.post('/portfolio/analysis/trade-review', { start_date: startDate, end_date: endDate }, { timeout: 300000 })
 }
 
-/** 模式4：情景推演 */
-export function runWhatIfAnalysis(scenario, parameter) {
-  return api.post('/portfolio/analysis/what-if', { scenario, parameter }, { timeout: 300000 })
+/** 模式4：指定基金分析 */
+export function runFundAnalysis(fundCode) {
+  return api.post('/portfolio/analysis/fund-analysis', { fund_code: fundCode }, { timeout: 300000 })
 }
 
 /** 列出全景诊断记录 */
@@ -1128,9 +1126,9 @@ export function listTradeReviewRecords(limit = 10) {
   return api.get('/portfolio/analysis/trade-review/records', { params: { limit } })
 }
 
-/** 列出情景推演记录 */
-export function listWhatIfRecords(limit = 10) {
-  return api.get('/portfolio/analysis/what-if/records', { params: { limit } })
+/** 列出指定基金分析记录 */
+export function listFundAnalysisRecords(limit = 10) {
+  return api.get('/portfolio/analysis/fund-analysis/records', { params: { limit } })
 }
 
 /** 列出债券推荐记录 */

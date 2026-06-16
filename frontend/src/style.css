@@ -21,6 +21,14 @@
   /* Financial */
   --color-profit: #dc2626;
   --color-loss: #059669;
+  --color-success: #10b981;
+  --color-success-bg: rgba(16, 185, 129, 0.12);
+  --color-danger: #ef4444;
+  --color-danger-bg: rgba(239, 68, 68, 0.12);
+  --color-warning: #f59e0b;
+  --color-warning-bg: rgba(245, 158, 11, 0.12);
+  --color-info: #3b82f6;
+  --color-info-bg: rgba(59, 130, 246, 0.06);
   --color-accent: #0ea5e9;
   --color-accent-50: #f0f9ff;
   --color-accent-100: #e0f2fe;
@@ -68,6 +76,19 @@
 
   /* Active state background */
   --color-primary-bg: rgba(201, 168, 76, 0.08);
+
+  /* Primary color with various opacities (replaces hardcoded rgba(212,168,67,...)) */
+  --color-primary-border: rgba(212, 168, 67, 0.2);
+  --color-primary-border-strong: rgba(212, 168, 67, 0.4);
+  --color-primary-border-weak: rgba(212, 168, 67, 0.15);
+  --color-primary-bg-hover: rgba(212, 168, 67, 0.12);
+  --color-primary-bg-strong: rgba(212, 168, 67, 0.15);
+  --color-primary-bg-weak: rgba(212, 168, 67, 0.05);
+  --color-primary-bg-gradient-start: rgba(212, 168, 67, 0.04);
+  --color-primary-bg-gradient-end: rgba(212, 168, 67, 0.08);
+  --color-primary-glow: rgba(212, 168, 67, 0.06);
+  --color-primary-glow-strong: rgba(212, 168, 67, 0.15);
+  --color-primary-shadow: rgba(212, 168, 67, 0.15);
 
   /* Badge backgrounds */
   --color-success-bg: rgba(16, 185, 129, 0.1);
@@ -130,23 +151,23 @@
   --color-primary-700: #9a7830;
 
   /* Surface — Warm Charcoal */
-  --color-bg: #161618;
-  --color-bg-card: #1e1e22;
-  --color-bg-sidebar: #1a1a1e;
-  --color-bg-input: #252529;
+  --color-bg: #121214;
+  --color-bg-card: #1c1c20;
+  --color-bg-sidebar: #18181c;
+  --color-bg-input: #242428;
   --color-bg-hover: #28282e;
-  --color-bg-secondary: #1c1c20;
+  --color-bg-secondary: #1a1a1e;
 
-  /* Border — Subtle Definition */
-  --color-border: rgba(255, 255, 255, 0.10);
-  --color-border-light: rgba(255, 255, 255, 0.06);
+  /* Border — Subtle Definition（降低不透明度，减少视觉干扰）*/
+  --color-border: rgba(255, 255, 255, 0.08);
+  --color-border-light: rgba(255, 255, 255, 0.04);
 
-  /* Text — Crisp Warm White */
-  --color-text-primary: #eae8e4;
-  --color-text-secondary: #a8a4a0;
-  --color-text-muted: #706c68;
-  --color-text-inverse: #161618;
-  --color-text-tertiary: #8a8680;
+  /* Text — Crisp Warm White（提高对比度）*/
+  --color-text-primary: #f0ede8;
+  --color-text-secondary: #b0aca6;
+  --color-text-muted: #787470;
+  --color-text-inverse: #121214;
+  --color-text-tertiary: #94908a;
 
   /* Shadows — Warm Depth */
   --shadow-sm: 0 1px 3px rgba(0,0,0,0.4), 0 0 0 1px rgba(255,255,255,0.04);
@@ -811,8 +832,21 @@ button {
 }
 
 /* ══════════════════════════════════════════════════════
-   全局移动端响应式（768px 以下）
+   全局移动端响应式（多断点）
    ══════════════════════════════════════════════════════ */
+
+/* ── 平板（768px - 1024px）── */
+@media (min-width: 769px) and (max-width: 1024px) {
+  .app-main {
+    padding: 1.25rem !important;
+  }
+  .dash-grid {
+    grid-template-columns: 1fr 1fr !important;
+    gap: 0.75rem !important;
+  }
+}
+
+/* ── 手机横屏（小于 768px）── */
 @media (max-width: 768px) {
   /* 卡片：减小 padding，去掉固定高度 */
   .card {
@@ -895,5 +929,42 @@ button {
     max-width: min(360px, calc(100vw - 2rem));
     right: 1rem;
     left: 1rem;
+  }
+
+  /* Dashboard 移动端优化 */
+  .app-main {
+    padding: 0.75rem !important;
+    margin-left: 0;
+  }
+  .home {
+    max-width: 100% !important;
+  }
+  .dash-grid {
+    grid-template-columns: 1fr !important;
+    gap: 0.6rem !important;
+  }
+  .dash-card {
+    padding: 1rem !important;
+  }
+  .analysis-form {
+    flex-direction: column;
+  }
+  .global-quote-bar {
+    flex-direction: column;
+    gap: 0.5rem;
+  }
+  .quote-hot {
+    justify-content: flex-start;
+  }
+  .card-header {
+    flex-wrap: wrap;
+  }
+  .card-header-actions {
+    width: 100%;
+    justify-content: space-between;
+  }
+  .briefing-header {
+    flex-wrap: wrap;
+    gap: 0.5rem;
   }
 }

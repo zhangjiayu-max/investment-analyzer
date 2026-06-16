@@ -1,6 +1,7 @@
 """持仓管理全领域 CRUD（持仓、交易、零钱、调仓、净值、基金信息、预警、标签、分析记录、缓存）。"""
 
 import json
+import logging
 import sqlite3
 from datetime import datetime
 
@@ -828,7 +829,7 @@ def delete_transaction(tx_id: int) -> bool:
 
 def fetch_fund_nav(fund_code: str) -> dict | None:
     """
-    获取基金最新净值。优先 akshare，如果日期不是今天则尝试盈米 MCP。
+    获取基金最新净值。优先盈米 MCP（数据更新更快），失败则尝试 akshare。
 
     返回: {"nav": 0.57, "date": "2026-05-22", "change_pct": -2.1} 或 None
     """
@@ -837,29 +838,11 @@ def fetch_fund_nav(fund_code: str) -> dict | None:
     today = datetime.now().strftime("%Y-%m-%d")
     yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
 
-    # ── 优先 akshare ──
-    try:
-        import akshare as ak
-        df = ak.fund_open_fund_info_em(symbol=fund_code, indicator='单位净值走势')
-        if df is not None and len(df) > 0:
-            last = df.iloc[-1]
-            nav_date = str(last["净值日期"])
-            # 如果 akshare 返回的是今天的数据，直接使用
-            if nav_date >= today:
-                return {
-                    "nav": float(last["单位净值"]),
-                    "date": nav_date,
-                    "change_pct": float(last["日增长率"]) if last.get("日增长率") else None,
-                }
-            # 如果是昨天或更早的数据，继续尝试 MCP
-            print(f"[db] akshare 返回 {fund_code} 日期 {nav_date}，尝试 MCP 获取最新")
-    except Exception as e:
-        print(f"[db] akshare 获取 {fund_code} 净值失败: {e}")
-
-    # ── 尝试盈米 MCP（可能有更新的数据）──
+    # ── 优先盈米 MCP（数据更新更快）──
     try:
         from mcp.yingmi_client import get_yingmi_client
         client = get_yingmi_client()
+        logging.info(f"[db] MCP 获取 {fund_code} 净值...")
         result = client.call_tool("BatchGetFundsDetail", {"fundCodes": [fund_code]})
         # 解析返回的文本内容
         text = ""
@@ -868,12 +851,14 @@ def fetch_fund_nav(fund_code: str) -> dict | None:
                 text = item["text"]
                 break
         if not text:
+            logging.warning(f"[db] MCP {fund_code} 返回空内容")
             return None
         import json
         data = json.loads(text) if text.strip().startswith(("{", "[")) else {}
         # BatchGetFundsDetail 返回数组，取第一个
         funds = data if isinstance(data, list) else data.get("data", data.get("result", []))
         if not funds:
+            logging.warning(f"[db] MCP {fund_code} 无基金数据")
             return None
         fund_data = funds[0] if isinstance(funds, list) else funds
         # MCP 返回结构: {fundCode, data: {summary: {nav, navDate, dailyReturn}}}
@@ -881,6 +866,7 @@ def fetch_fund_nav(fund_code: str) -> dict | None:
         nav = summary.get("nav") or summary.get("unitNav") or summary.get("latest_nav")
         nav_date = summary.get("navDate") or summary.get("nav_date") or summary.get("updateDate")
         change_pct = summary.get("dailyReturn") or summary.get("change_pct") or summary.get("dayGrowthRate")
+        logging.info(f"[db] MCP {fund_code} 返回: nav={nav}, date={nav_date}, change={change_pct}")
         if nav is not None:
             # 转换日期格式（"2026年06月03日" -> "2026-06-03"）
             if nav_date and "年" in str(nav_date):
@@ -902,7 +888,23 @@ def fetch_fund_nav(fund_code: str) -> dict | None:
                 "change_pct": change_pct,
             }
     except Exception as e:
-        print(f"[db] 盈米 MCP 获取 {fund_code} 净值失败: {e}")
+        logging.warning(f"[db] 盈米 MCP 获取 {fund_code} 净值失败: {e}")
+
+    # ── MCP 失败，尝试 akshare ──
+    try:
+        import akshare as ak
+        df = ak.fund_open_fund_info_em(symbol=fund_code, indicator='单位净值走势')
+        if df is not None and len(df) > 0:
+            last = df.iloc[-1]
+            nav_date = str(last["净值日期"])
+            logging.info(f"[db] akshare 返回 {fund_code} 日期 {nav_date}（MCP 失败后兜底）")
+            return {
+                "nav": float(last["单位净值"]),
+                "date": nav_date,
+                "change_pct": float(last["日增长率"]) if last.get("日增长率") else None,
+            }
+    except Exception as e:
+        logging.warning(f"[db] akshare 获取 {fund_code} 净值失败: {e}")
 
     return None
 

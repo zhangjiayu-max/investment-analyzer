@@ -17,7 +17,13 @@ marked.setOptions({
 export function renderMarkdown(text) {
   if (!text) return ''
   try {
-    const html = marked(text)
+    // 清理多余的空行和空格
+    const cleaned = text
+      .replace(/\n{3,}/g, '\n\n')  // 3个以上连续空行合并为2个
+      .replace(/\n\s*\n\s*\n/g, '\n\n')  // 清理包含空格的空行
+      .replace(/^\s+$/gm, '')  // 清理只有空格的行
+      .trim()
+    const html = marked(cleaned)
     return DOMPurify.sanitize(html, {
       ALLOWED_TAGS: ['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'p', 'br', 'hr',
         'ul', 'ol', 'li', 'blockquote', 'pre', 'code', 'em', 'strong',
