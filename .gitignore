@@ -49,3 +49,5 @@ logs/
 *.bak
 
 .doc/
+# ttskill CLI binary
+backend/bin/
