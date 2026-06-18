@@ -6,6 +6,7 @@ import re
 import time
 import threading
 import concurrent.futures
+import asyncio
 
 from llm_service import client, MODEL, _call_llm, _parse_tool_args
 from agent.multi_agent import run_specialist, run_specialist_with_context, run_arbitration
@@ -28,6 +29,126 @@ from agent.memory import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+# ── 文章缓存（避免 orchestrator 预抓取与 agent 工具双重抓取） ──
+_article_cache: dict[str, dict] = {}
+_ARTICLE_CACHE_MAX = 32
+
+
+def _cache_article(url: str, article: dict):
+    """缓存文章抓取结果。"""
+    if len(_article_cache) >= _ARTICLE_CACHE_MAX:
+        # 移除最早的条目
+        oldest = next(iter(_article_cache))
+        del _article_cache[oldest]
+    _article_cache[url] = article
+
+
+def detect_urls(text: str) -> list[str]:
+    """检测文本中的 URL。"""
+    url_pattern = r'https?://[^\s<>"{}|\\^`\[\]]+'
+    return re.findall(url_pattern, text)
+
+
+def fetch_article_content(url: str) -> dict | None:
+    """同步获取文章内容（用于 orchestrator 中）。优先使用缓存。"""
+    # 先查缓存
+    if url in _article_cache:
+        logger.info(f"文章缓存命中: {url}")
+        return _article_cache[url]
+
+    try:
+        from article_reader import fetch_article
+        # 在后台线程中创建新的事件循环运行异步函数
+        # （不能用 asyncio.get_event_loop()，后台线程没有默认事件循环）
+        loop = asyncio.new_event_loop()
+        try:
+            result = loop.run_until_complete(fetch_article(url))
+        except Exception as e:
+            logger.warning(f"获取文章失败: {e}")
+            return None
+        finally:
+            loop.close()
+
+        # 缓存成功结果
+        if result:
+            _cache_article(url, result)
+        return result
+    except ImportError:
+        logger.warning("article_reader 模块未安装")
+        return None
+
+
+def enrich_query_with_article(query: str) -> tuple[str, str]:
+    """
+    检测查询中的链接，抓取文章内容并注入到查询中。
+
+    返回: (enriched_query, article_context)
+    article_context 为失败提示时以 "[抓取失败]" 开头。
+    """
+    urls = detect_urls(query)
+    if not urls:
+        return query, ""
+
+    # 只处理第一个链接
+    url = urls[0]
+    logger.info(f"检测到链接: {url}，正在抓取文章内容...")
+
+    article = fetch_article_content(url)
+    if not article:
+        logger.warning(f"文章抓取失败: {url}")
+        fail_hint = (
+            f"[抓取失败] 无法获取链接内容: {url}\n"
+            "可能原因：链接已失效、被防爬机制拦截、或非文章页面。\n"
+            "请引导用户：1) 检查链接是否可正常打开 2) 直接粘贴文章正文。"
+        )
+        enriched_query = f"{query}\n\n{fail_hint}"
+        return enriched_query, fail_hint
+
+    title = article.get("title", "未知标题")
+    content = article.get("content_text", "") or article.get("content", "")
+    author = article.get("author", "")
+    publish_time = article.get("publish_time", "")
+
+    if not content:
+        logger.warning(f"文章内容为空: {url}")
+        fail_hint = (
+            f"[抓取失败] 链接已打开但未提取到正文: {url}\n"
+            "请引导用户直接粘贴文章正文。"
+        )
+        enriched_query = f"{query}\n\n{fail_hint}"
+        return enriched_query, fail_hint
+
+    # 截取策略：前 2000 + 后 1500，保留开头背景和结尾结论
+    max_chars = 3500
+    if len(content) > max_chars:
+        head = content[:2000]
+        tail = content[-1500:]
+        content = f"{head}\n\n...（中间内容省略）...\n\n{tail}"
+
+    # 构建文章上下文
+    meta_parts = [f"标题: {title}"]
+    if author:
+        meta_parts.append(f"作者: {author}")
+    if publish_time:
+        meta_parts.append(f"发布时间: {publish_time}")
+    meta_parts.append(f"来源: {url}")
+
+    article_context = f"""## 参考文章
+{chr(10).join(meta_parts)}
+
+{content}"""
+
+    # 注入查询，明确告知 agent 已提供文章内容，避免重复调用 fetch_article
+    enriched_query = (
+        f"{query}\n\n"
+        "请参考以下文章内容进行分析（文章已抓取完毕，无需再次调用 fetch_article 工具）：\n"
+        f"{article_context}"
+    )
+
+    logger.info(f"文章抓取成功: {title} ({len(content)} 字符)")
+    return enriched_query, article_context
 
 
 def get_orchestration_config(key: str, default=None):
@@ -431,6 +552,14 @@ def route_to_specialists_by_keywords(query: str) -> list[str]:
     query = query.strip()
     specialists = []
 
+    # 链接检测 → 文章解读专家
+    if detect_urls(query):
+        specialists.append("article_expert")
+        # 如果只是链接+简单指令，只用文章专家
+        query_without_url = re.sub(r'https?://[^\s]+', '', query).strip()
+        if len(query_without_url) < 20:
+            return specialists
+
     # 估值相关关键词 → 估值专家
     valuation_keywords = ["估值", "PE", "PB", "百分位", "z-score", "高估", "低估", "贵不贵", "便宜"]
     if any(kw in query for kw in valuation_keywords):
@@ -505,6 +634,10 @@ SCENARIO_RAG_MAP = {
     "fund_analyst": {
         "query_suffix": "基金选择 业绩 费用 基金经理 跟踪误差",
         "content_types": ["book", "analysis", "valuation"],
+    },
+    "article_expert": {
+        "query_suffix": "文章解读 观点分析 投资逻辑 研报",
+        "content_types": ["article", "author_article", "book"],
     },
 }
 
@@ -708,7 +841,7 @@ def _execute_specialist(tool_name: str, query: str, cancel_event: threading.Even
         return json.dumps({"error": f"专家执行失败: {e}"}, ensure_ascii=False)
 
 
-def orchestrate(query: str, history: list, rag_context: str = "", cancel_event: threading.Event | None = None) -> dict:
+def orchestrate(query: str, history: list, rag_context: str = "", cancel_event: threading.Event | None = None, target_specialists: list[str] = None) -> dict:
     """
     Orchestrator 主循环。
 
@@ -749,18 +882,52 @@ def orchestrate(query: str, history: list, rag_context: str = "", cancel_event: 
             "error": "token_budget_exceeded",
         }
 
-    # 1. 需求澄清（使用 LLM 分析问题）
-    clarification = clarify_requirement(query)
-    complexity = clarification["complexity"]
-    context_config = get_context_config(complexity)
-    token_budget = get_token_budget(complexity)
-    logger.info(f"需求澄清: {clarification}")
+    # 0.5 链接检测与文章抓取
+    article_context = ""
+    article_fetch_failed = False
+    if detect_urls(query):
+        query, article_context = enrich_query_with_article(query)
+        if article_context:
+            if article_context.startswith("[抓取失败]"):
+                article_fetch_failed = True
+                logger.warning(f"文章抓取失败: {article_context}")
+            else:
+                logger.info(f"已注入文章内容到查询中")
 
-    # 使用澄清后的问题（如果有优化）
-    refined_query = clarification.get("refined_query", query)
+    # 1. 需求澄清（使用 LLM 分析问题）
+    if target_specialists:
+        all_agents = load_specialist_agents()
+        valid_specialists = [s for s in target_specialists if s in all_agents]
+        if valid_specialists:
+            clarification = {
+                "complexity": "simple" if len(valid_specialists) == 1 else "medium",
+                "specialists": valid_specialists,
+                "reason": f"用户通过 @mention 指定了专家: {', '.join(valid_specialists)}",
+                "refined_query": query,
+                "confidence": 1.0,
+            }
+            complexity = clarification["complexity"]
+            context_config = get_context_config(complexity)
+            token_budget = get_token_budget(complexity)
+            refined_query = query
+            specialists = valid_specialists
+            logger.info(f"@mention 指定专家: {valid_specialists}")
+        else:
+            logger.warning(f"@mention 指定了无效的 agent_key: {target_specialists}，回退到自动路由")
+            target_specialists = None
+
+    if not target_specialists:
+        clarification = clarify_requirement(query)
+        complexity = clarification["complexity"]
+        context_config = get_context_config(complexity)
+        token_budget = get_token_budget(complexity)
+        logger.info(f"需求澄清: {clarification}")
+
+        # 使用澄清后的问题（如果有优化）
+        refined_query = clarification.get("refined_query", query)
+        specialists = clarification.get("specialists", [])
 
     # 1.5 场景化 RAG 增强：根据命中的专家类型补充相关书籍知识
-    specialists = clarification.get("specialists", [])
     rag_context = build_scenario_rag_context(refined_query, specialists, rag_context)
 
     # 2. 根据复杂度优化上下文（Token 预算管理）
@@ -1092,7 +1259,7 @@ def orchestrate(query: str, history: list, rag_context: str = "", cancel_event: 
     }
 
 
-def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_event: threading.Event | None = None, resume_from: dict | None = None, conversation_id: int = 0, message_id: int = 0, trace_id: str = ""):
+def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_event: threading.Event | None = None, resume_from: dict | None = None, conversation_id: int = 0, message_id: int = 0, trace_id: str = "", target_specialists: list[str] = None):
     """
     Orchestrator 的流式版本，通过生成器逐步返回事件。
 
@@ -1131,6 +1298,21 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
         }
         return
 
+    # 0.3 链接检测与文章抓取
+    article_context = ""
+    article_fetch_failed = False
+    if detect_urls(query):
+        yield {"type": "status", "message": "检测到链接，正在抓取文章内容..."}
+        query, article_context = enrich_query_with_article(query)
+        if article_context:
+            if article_context.startswith("[抓取失败]"):
+                article_fetch_failed = True
+                logger.warning(f"文章抓取失败: {article_context}")
+                yield {"type": "status", "message": "文章链接无法访问，将尝试分析，请稍候..."}
+            else:
+                logger.info(f"已注入文章内容到查询中")
+                yield {"type": "status", "message": "文章内容已获取，正在分析..."}
+
     # 0.5 恢复模式：从 agent_runs 表查询已完成的专家
     completed_specialists = set()
     resumed_results = []
@@ -1151,22 +1333,49 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
 
     # 1. 需求澄清（使用 LLM 分析问题）
     _check_cancel(cancel_event)
-    if not resume_from:
-        yield {"type": "status", "message": "正在理解您的问题..."}
-    clarification = clarify_requirement(query)
-    complexity = clarification["complexity"]
-    context_config = get_context_config(complexity)
-    token_budget = get_token_budget(complexity)
-    logger.info(f"需求澄清: {clarification}")
+
+    # 如果用户通过 @mention 指定了专家，跳过自动路由
+    if target_specialists:
+        all_agents = load_specialist_agents()
+        valid_specialists = [s for s in target_specialists if s in all_agents]
+        if valid_specialists:
+            specialist_names = [all_agents[s]["name"] for s in valid_specialists]
+            yield {"type": "status", "message": f"已指定专家：{'、'.join(specialist_names)}"}
+            clarification = {
+                "complexity": "simple" if len(valid_specialists) == 1 else "medium",
+                "specialists": valid_specialists,
+                "reason": f"用户通过 @mention 指定了专家: {', '.join(valid_specialists)}",
+                "refined_query": query,
+                "confidence": 1.0,
+            }
+            complexity = clarification["complexity"]
+            context_config = get_context_config(complexity)
+            token_budget = get_token_budget(complexity)
+            refined_query = query
+            specialists = valid_specialists
+            logger.info(f"@mention 指定专家: {valid_specialists}")
+        else:
+            # 指定的 agent_key 无效，回退到自动路由
+            logger.warning(f"@mention 指定了无效的 agent_key: {target_specialists}，回退到自动路由")
+            target_specialists = None
+
+    if not target_specialists:
+        if not resume_from:
+            yield {"type": "status", "message": "正在理解您的问题..."}
+        clarification = clarify_requirement(query)
+        complexity = clarification["complexity"]
+        context_config = get_context_config(complexity)
+        token_budget = get_token_budget(complexity)
+        logger.info(f"需求澄清: {clarification}")
+
+        # 使用澄清后的问题（如果有优化）
+        refined_query = clarification.get("refined_query", query)
+        specialists = clarification.get("specialists", [])
 
     # 性能监控：需求澄清耗时
     perf_metrics["phases"]["clarification"] = int((time.time() - start_time) * 1000)
 
-    # 使用澄清后的问题（如果有优化）
-    refined_query = clarification.get("refined_query", query)
-
     # 1.5 场景化 RAG 增强：根据命中的专家类型补充相关书籍知识
-    specialists = clarification.get("specialists", [])
     rag_context = build_scenario_rag_context(refined_query, specialists, rag_context)
 
     # 2. 根据复杂度优化上下文（Token 预算管理）

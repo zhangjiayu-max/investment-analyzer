@@ -7,6 +7,40 @@ from datetime import datetime
 
 from db._conn import _get_conn, _row_to_dict
 
+logger = logging.getLogger(__name__)
+
+
+# ── 审计日志 ──────────────────────────────────────
+
+def _log_tx_audit(action: str, tx_id: int = None, holding_id: int = None,
+                  fund_code: str = None, fund_name: str = None,
+                  operator: str = "user",
+                  before: dict = None, after: dict = None,
+                  input_shares: float = None, input_amount: float = None,
+                  input_price: float = None, detail: str = None):
+    """记录交易操作审计日志。"""
+    try:
+        conn = _get_conn()
+        conn.execute("""
+            INSERT INTO portfolio_tx_audit_log
+                (tx_id, holding_id, fund_code, fund_name, action, operator,
+                 before_status, before_shares, before_amount, before_price,
+                 after_status, after_shares, after_amount, after_price,
+                 input_shares, input_amount, input_price, detail)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            tx_id, holding_id, fund_code, fund_name, action, operator,
+            (before or {}).get("status"), (before or {}).get("shares"),
+            (before or {}).get("amount"), (before or {}).get("price"),
+            (after or {}).get("status"), (after or {}).get("shares"),
+            (after or {}).get("amount"), (after or {}).get("price"),
+            input_shares, input_amount, input_price, detail,
+        ))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logger.warning(f"审计日志写入失败: {e}")
+
 
 # ── 持仓管理 CRUD ──────────────────────────────────────
 
@@ -102,7 +136,7 @@ _HOLDING_ALLOWED_FIELDS = {
     'shares', 'cost_price', 'total_cost', 'current_price', 'current_value',
     'profit_loss', 'profit_rate', 'buy_date', 'last_update', 'notes',
     'price_updated_at', 'today_change_pct', 'today_profit', 'fund_category',
-    'has_base_position', 'updated_at',
+    'has_base_position', 'last_buy_price', 'last_buy_date', 'updated_at',
 }
 
 def update_holding(holding_id: int, **fields):
@@ -146,12 +180,26 @@ def update_holding(holding_id: int, **fields):
 
 def delete_holding(holding_id: int) -> bool:
     """删除持仓及其交易记录。"""
+    # 先查持仓信息用于审计
     conn = _get_conn()
+    h = conn.execute("SELECT * FROM portfolio_holdings WHERE id = ?", (holding_id,)).fetchone()
+    h = dict(h) if h else {}
+
     conn.execute("DELETE FROM portfolio_transactions WHERE holding_id = ?", (holding_id,))
     cur = conn.execute("DELETE FROM portfolio_holdings WHERE id = ?", (holding_id,))
     conn.commit()
     deleted = cur.rowcount > 0
     conn.close()
+
+    # 审计日志
+    if deleted:
+        _log_tx_audit(
+            action="delete_holding", holding_id=holding_id,
+            fund_code=h.get("fund_code"), fund_name=h.get("fund_name"),
+            detail=json.dumps({"shares": h.get("shares"), "total_cost": h.get("total_cost")},
+                              ensure_ascii=False),
+        )
+
     return deleted
 
 
@@ -447,6 +495,19 @@ def create_transaction(fund_code: str, transaction_type: str, amount: float,
     if holding_id and status in ('confirmed', 'settled'):
         _recalculate_holding(holding_id)
 
+    # 审计日志
+    _log_tx_audit(
+        action="create", tx_id=tx_id, holding_id=holding_id,
+        fund_code=fund_code, fund_name=fund_name,
+        after={"status": status, "shares": actual_shares, "amount": actual_amount, "price": actual_price},
+        input_shares=submitted_shares or shares,
+        input_amount=submitted_amount or amount,
+        input_price=price,
+        detail=json.dumps({"transaction_type": transaction_type, "transaction_date": transaction_date,
+                           "expected_confirm_date": expected_confirm_date, "notes": notes},
+                          ensure_ascii=False),
+    )
+
     return tx_id
 
 
@@ -509,14 +570,18 @@ def _recalculate_holding(holding_id: int):
 
     # 如果持仓有基准数据（直接导入/手动创建的初始持仓），先加入基准
     has_base = holding.get("has_base_position")
-    print(f"[DEBUG _recalculate_holding] holding_id={holding_id}, has_base_position={has_base}, shares={holding.get('shares')}, total_cost={holding.get('total_cost')}, tx_count={len(txs)}")
+    base_shares = holding.get("base_shares") or 0
+    print(f"[DEBUG _recalculate_holding] holding_id={holding_id}, has_base_position={has_base}, base_shares={base_shares}, shares={holding.get('shares')}, total_cost={holding.get('total_cost')}, tx_count={len(txs)}")
     if has_base:
-        total_shares = holding.get("shares") or 0
+        # 优先使用 base_shares（原始基准），避免被重算覆盖
+        total_shares = base_shares if base_shares > 0 else (holding.get("shares") or 0)
         total_cost = holding.get("total_cost") or 0
 
     current_price = holding.get("current_price") or 0
 
     # 先处理所有买入
+    last_buy_price = None
+    last_buy_date = None
     for tx in txs:
         tx = dict(tx)
         shares = tx.get("shares", 0) or 0
@@ -530,6 +595,10 @@ def _recalculate_holding(holding_id: int):
                     shares = amount / price
             total_shares += shares
             total_cost += amount
+            # 跟踪最近一次买入价格和日期
+            if tx_price > 0:
+                last_buy_price = tx_price
+                last_buy_date = tx.get("transaction_date") or ""
 
     # 再处理所有卖出和转换（按平均成本扣减）
     for tx in txs:
@@ -558,12 +627,14 @@ def _recalculate_holding(holding_id: int):
         UPDATE portfolio_holdings SET
             shares = ?, cost_price = ?, total_cost = ?,
             current_value = ?, profit_loss = ?, profit_rate = ?,
+            last_buy_price = ?, last_buy_date = ?,
             updated_at = datetime('now','localtime')
         WHERE id = ?
     """, (total_shares, round(cost_price, 4), round(total_cost, 2),
           round(current_value, 2) if current_value is not None else None,
           round(profit_loss, 2) if profit_loss is not None else None,
           round(profit_rate, 4) if profit_rate is not None else None,
+          last_buy_price, last_buy_date,
           holding_id))
     conn.commit()
     conn.close()
@@ -748,6 +819,31 @@ def confirm_transaction(tx_id: int, confirmed_price: float,
             conn3.commit()
             conn3.close()
 
+    # ── 补仓后跌幅即时预警 ──
+    if tx_type == "buy" and holding_id and actual_price > 0:
+        try:
+            from db.config import get_config_int as _get_cfg_int
+            buy_drop_pct = _get_cfg_int('alert.buy_drop_pct', 4)
+            h = get_holding(holding_id)
+            if h:
+                cp = h.get("current_price") or 0
+                if cp > 0:
+                    drop = (actual_price - cp) / actual_price * 100
+                    if drop >= buy_drop_pct:
+                        fund_code = h.get("fund_code", "")
+                        fund_name = h.get("fund_name", fund_code)
+                        create_alert(
+                            alert_type="buy_drop_alert",
+                            title=f"{fund_name} 补仓价已低于净值 {drop:.1f}%",
+                            content=f"{fund_name}（{fund_code}）本次买入价 {actual_price:.4f}，当前净值 {cp:.4f}，已低于买入价 {drop:.1f}%（阈值 {buy_drop_pct}%）。",
+                            severity="danger" if drop >= buy_drop_pct * 1.5 else "warning",
+                            related_fund_code=fund_code,
+                            related_fund_name=fund_name,
+                            source="transaction_confirm",
+                        )
+        except Exception as e:
+            logging.warning(f"[confirm_tx] 补仓后跌幅即时预警异常: {e}")
+
     # 卖出确认后，自动将金额计入零钱
     if tx_type == "sell" and actual_amount > 0:
         add_cash(user_id, actual_amount)
@@ -782,6 +878,23 @@ def confirm_transaction(tx_id: int, confirmed_price: float,
         conn3.close()
         _recalculate_holding(target_holding_id)
 
+    # 审计日志
+    _log_tx_audit(
+        action="confirm", tx_id=tx_id, holding_id=holding_id,
+        fund_code=tx.get("fund_code"), fund_name=tx.get("fund_name"),
+        before={"status": tx.get("status"), "shares": tx.get("shares"),
+                "amount": tx.get("amount"), "price": tx.get("price")},
+        after={"status": "confirmed", "shares": actual_shares,
+               "amount": actual_amount, "price": actual_price},
+        input_shares=confirmed_shares,
+        input_amount=confirmed_amount,
+        input_price=confirmed_price,
+        detail=json.dumps({"fee": fee, "target_fund_code": target_fund_code,
+                           "submitted_shares": tx.get("submitted_shares"),
+                           "submitted_amount": tx.get("submitted_amount")},
+                          ensure_ascii=False),
+    )
+
     return True
 
 
@@ -803,6 +916,17 @@ def settle_transaction(tx_id: int) -> bool:
     """, (now, tx_id))
     conn.commit()
     conn.close()
+
+    # 审计日志
+    _log_tx_audit(
+        action="settle", tx_id=tx_id, holding_id=tx.get("holding_id"),
+        fund_code=tx.get("fund_code"), fund_name=tx.get("fund_name"),
+        before={"status": "confirmed", "shares": tx.get("shares"),
+                "amount": tx.get("amount"), "price": tx.get("price")},
+        after={"status": "settled", "shares": tx.get("shares"),
+               "amount": tx.get("amount"), "price": tx.get("price")},
+    )
+
     return True
 
 
@@ -821,6 +945,19 @@ def delete_transaction(tx_id: int) -> bool:
     conn.execute("DELETE FROM portfolio_transactions WHERE id = ?", (tx_id,))
     conn.commit()
     conn.close()
+
+    # 审计日志
+    _log_tx_audit(
+        action="cancel", tx_id=tx_id, holding_id=tx.get("holding_id"),
+        fund_code=tx.get("fund_code"), fund_name=tx.get("fund_name"),
+        before={"status": tx.get("status"), "shares": tx.get("shares") or tx.get("submitted_shares"),
+                "amount": tx.get("amount"), "price": tx.get("price")},
+        detail=json.dumps({"transaction_type": tx.get("transaction_type"),
+                           "submitted_shares": tx.get("submitted_shares"),
+                           "submitted_amount": tx.get("submitted_amount")},
+                          ensure_ascii=False),
+    )
+
     return True
 
 
@@ -1482,6 +1619,13 @@ def get_transaction_summary(user_id: str = "default") -> dict:
 
 def clear_all_portfolio_data(user_id: str = "default"):
     """删除用户的所有持仓、交易记录、预警和标签。"""
+    # 审计日志（在删除前写入）
+    _log_tx_audit(
+        action="clear_all", operator="user",
+        detail=json.dumps({"user_id": user_id, "scope": "持仓/交易/预警/标签/分析记录/现金"},
+                          ensure_ascii=False),
+    )
+
     conn = _get_conn()
     conn.execute("DELETE FROM portfolio_alerts WHERE user_id = ?", (user_id,))
     conn.execute("""
@@ -1497,21 +1641,48 @@ def clear_all_portfolio_data(user_id: str = "default"):
 
 
 def create_portfolio_analysis_record(analysis_type: str, summary: str,
-                                     input_data: str, result_data: str,
+                                     input_data: str, result_data: str = "",
                                      token_usage: int = 0,
                                      user_id: str = "default",
-                                     agent_id: int = None) -> int:
-    """保存持仓分析记录。"""
+                                     agent_id: int = None,
+                                     status: str = "done") -> int:
+    """保存持仓分析记录。status: running / done / error"""
     conn = _get_conn()
     cur = conn.execute("""
         INSERT INTO portfolio_analysis_records
-            (user_id, analysis_type, summary, input_data, result_data, token_usage, agent_id)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-    """, (user_id, analysis_type, summary, input_data, result_data, token_usage, agent_id))
+            (user_id, analysis_type, summary, input_data, result_data, token_usage, agent_id, status)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    """, (user_id, analysis_type, summary, input_data, result_data, token_usage, agent_id, status))
     conn.commit()
     row_id = cur.lastrowid
     conn.close()
     return row_id
+
+
+def update_analysis_record(record_id: int, **fields) -> bool:
+    """更新分析记录字段（result_data, status, token_usage 等）。"""
+    if not fields:
+        return False
+    conn = _get_conn()
+    sets = ", ".join(f"{k} = ?" for k in fields)
+    vals = list(fields.values()) + [record_id]
+    conn.execute(f"UPDATE portfolio_analysis_records SET {sets} WHERE id = ?", vals)
+    conn.commit()
+    conn.close()
+    return True
+
+
+def get_analysis_record_status(record_id: int) -> dict | None:
+    """查询分析记录状态。"""
+    conn = _get_conn()
+    row = conn.execute(
+        "SELECT id, status, result_data, token_usage, error_msg FROM portfolio_analysis_records WHERE id = ?",
+        (record_id,)
+    ).fetchone()
+    conn.close()
+    if not row:
+        return None
+    return dict(row)
 
 
 def list_portfolio_analysis_records(analysis_type: str = None,

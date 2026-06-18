@@ -45,7 +45,7 @@ YINGMI_API_KEY = os.getenv("YINGMI_API_KEY", "")
 EASTMONEY_API_KEY = os.getenv("MX_APIKEY", "") or os.getenv("MX_API_KEY", "")
 
 # 天天基金 Skills API
-TTFUND_APIKEY = os.getenv("TTFUND_APIKEY", "")
+TTFUND_APIKEY = os.getenv("TTFUND_APIKEY", "")  # 已废弃：ttskill CLI 登录型，不再需要 API Key
 
 # 仲裁 Agent 配置（DeepSeek R1 高级推理模型）
 ARBITRATION_API_KEY = os.getenv("ARBITRATION_API_KEY", "")

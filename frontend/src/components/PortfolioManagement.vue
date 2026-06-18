@@ -19,10 +19,14 @@ import {
   runPortfolioAiAnalysis, listPortfolioAiAnalysisRecords,
   getPortfolioAiAnalysisRecord, deletePortfolioAiAnalysisRecord,
   runDiversificationAiSummary, getAiSummaryTodayStatus, getPortfolioPenetration,
-  runPanoramaAnalysis, runDeepDiveAnalysis, runTradeReview, runFundAnalysis,
+  runPanoramaAnalysis, pollPanoramaStatus, pollAnalysisStatus, runDeepDiveAnalysis, runTradeReview, runFundAnalysis,
   listPanoramaRecords, listDeepDiveRecords, listTradeReviewRecords, listFundAnalysisRecords,
   submitAnalysisFeedback,
   getRebalanceConfig, updateRebalanceConfig, getRebalanceConfigHistory, rollbackRebalanceConfig,
+  getAuditLog,
+  listWatchlist, addToWatchlist, updateWatchlistItem, removeWatchlistItem,
+  refreshWatchlistNavs as refreshWatchlistNavsApi, markWatchlistBought as markWatchlistBoughtApi,
+  lookupWatchlistFund as lookupWatchlistFundApi,
 } from '../api'
 import ConfirmDialog from './ConfirmDialog.vue'
 import PieChart from './charts/PieChart.vue'
@@ -210,6 +214,9 @@ const txHoldingId = ref(null)
 const txFundCode = ref('')
 const transactions = ref([])
 const showTxHistory = ref(false)
+const showAuditLog = ref(false)
+const auditLogs = ref([])
+const auditLogLoading = ref(false)
 
 // Fund lookup
 const lookupLoading = ref(false)
@@ -504,6 +511,149 @@ const newBuyForm = ref({
 const newBuyLookingUp = ref(false)
 const newBuyLookupResult = ref(null)
 
+// ── Watchlist State ──────────────────────────────
+const watchlistItems = ref([])
+const watchlistLoading = ref(false)
+const watchlistRefreshing = ref(false)
+const showAddWatchlist = ref(false)
+const showEditWatchlist = ref(false)
+const watchlistForm = ref({
+  id: null,
+  fund_code: '',
+  fund_name: '',
+  fund_category: '',
+  index_code: '',
+  index_name: '',
+  target_price: null,
+  target_percentile: null,
+  priority: 0,
+  notes: '',
+})
+
+async function loadWatchlist() {
+  watchlistLoading.value = true
+  try {
+    const { data } = await listWatchlist()
+    watchlistItems.value = data.items || []
+  } catch (e) {
+    console.error('加载关注列表失败:', e)
+  } finally {
+    watchlistLoading.value = false
+  }
+}
+
+async function submitAddWatchlist() {
+  try {
+    await addToWatchlist(watchlistForm.value)
+    showAddWatchlist.value = false
+    showToast('已添加到关注列表', 'success')
+    resetWatchlistForm()
+    loadWatchlist()
+  } catch (e) {
+    showToast(e.response?.data?.detail || '添加失败', 'error')
+  }
+}
+
+function editWatchlistItem(item) {
+  watchlistForm.value = {
+    id: item.id,
+    fund_code: item.fund_code,
+    fund_name: item.fund_name || '',
+    fund_category: item.fund_category || '',
+    index_code: item.index_code || '',
+    index_name: item.index_name || '',
+    target_price: item.target_price,
+    target_percentile: item.target_percentile,
+    priority: item.priority || 0,
+    notes: item.notes || '',
+  }
+  showEditWatchlist.value = true
+}
+
+async function submitEditWatchlist() {
+  try {
+    const { id, fund_code, ...updates } = watchlistForm.value
+    await updateWatchlistItem(id, updates)
+    showEditWatchlist.value = false
+    showToast('已更新', 'success')
+    resetWatchlistForm()
+    loadWatchlist()
+  } catch (e) {
+    showToast(e.response?.data?.detail || '更新失败', 'error')
+  }
+}
+
+function deleteWatchlistItem(item) {
+  confirm.value = {
+    visible: true,
+    title: '移除关注',
+    message: `确定移除 ${item.fund_name || item.fund_code}？`,
+    danger: true,
+    onConfirm: async () => {
+      confirm.value.visible = false
+      try {
+        await removeWatchlistItem(item.id)
+        showToast('已移除', 'success')
+        loadWatchlist()
+      } catch (e) {
+        showToast('移除失败', 'error')
+      }
+    }
+  }
+}
+
+async function markWatchlistBought(item) {
+  try {
+    await markWatchlistBoughtApi(item.id)
+    showToast(`${item.fund_name || item.fund_code} 已标记为已买入`, 'success')
+    loadWatchlist()
+  } catch (e) {
+    showToast(e.response?.data?.detail || '标记失败', 'error')
+  }
+}
+
+async function lookupWatchlistFund(item) {
+  try {
+    const { data } = await lookupWatchlistFundApi(item.id)
+    if (data.updates && Object.keys(data.updates).length > 0) {
+      showToast('已更新基金信息', 'success')
+    } else {
+      showToast('未找到额外信息', 'info')
+    }
+    loadWatchlist()
+  } catch (e) {
+    showToast(e.response?.data?.detail || '查询失败', 'error')
+  }
+}
+
+async function refreshWatchlistNavs() {
+  watchlistRefreshing.value = true
+  try {
+    const { data } = await refreshWatchlistNavsApi()
+    showToast(`刷新完成，更新 ${data.results?.length || 0} 条`, 'success')
+    loadWatchlist()
+  } catch (e) {
+    showToast('刷新净值失败', 'error')
+  } finally {
+    watchlistRefreshing.value = false
+  }
+}
+
+function resetWatchlistForm() {
+  watchlistForm.value = {
+    id: null,
+    fund_code: '',
+    fund_name: '',
+    fund_category: '',
+    index_code: '',
+    index_name: '',
+    target_price: null,
+    target_percentile: null,
+    priority: 0,
+    notes: '',
+  }
+}
+
 async function openNewBuy() {
   newBuyForm.value = {
     fund_code: '',
@@ -648,6 +798,7 @@ const showConfirmTx = ref(false)
 const confirmTxData = ref(null)
 const confirmTxPrice = ref(0)
 const confirmTxFee = ref(0)
+const confirmTxShares = ref(0)
 
 // Pending transactions reminder
 const pendingTxs = ref([])
@@ -937,14 +1088,17 @@ async function loadPendingTxs() {
   try {
     const { data } = await listPendingTransactions()
     const allPending = data.transactions || []
-    // 为有 holding_id 的交易补充基金名称
+    // 为交易补充基金名称（优先用交易自带的，其次从持仓查）
     for (const tx of allPending) {
-      if (tx.holding_id && !tx._fund_name) {
-        const h = holdings.value.find(h => h.id === tx.holding_id)
+      if (!tx.fund_name) {
+        const h = holdings.value.find(h => h.fund_code === tx.fund_code || h.id === tx.holding_id)
         if (h) {
-          tx._fund_name = h.fund_name
-          tx._fund_code = h.fund_code
+          tx.fund_name = h.fund_name
         }
+      }
+      // 兜底：如果还没有名称，用基金代码
+      if (!tx.fund_name) {
+        tx.fund_name = tx.fund_code || '未知基金'
       }
     }
     pendingTxs.value = allPending
@@ -1017,6 +1171,8 @@ function switchAnalysisTab(tab) {
     loadAllModeRecords()
   } else if (tab === 'config') {
     loadRebalanceConfig()
+  } else if (tab === 'watchlist') {
+    loadWatchlist()
   }
 }
 
@@ -1050,6 +1206,10 @@ async function loadAllModeRecords() {
   } catch (e) { /* ignore */ }
 }
 
+// 全局轮询状态（切页面后继续轮询）
+let _panoramaCancelPoll = null
+const _panoramaGlobalState = { recordId: null, status: null, result: null }
+
 async function runPanoramaMode() {
   modeLoading.value = true
   modeResult.value = ''
@@ -1057,15 +1217,59 @@ async function runPanoramaMode() {
   aiTokenUsage.value = 0
   try {
     const { data } = await runPanoramaAnalysis()
-    modeResult.value = data.result
-    modeRecordId.value = data.id
-    aiTokenUsage.value = data.token_usage || 0
-    loadPanoramaRecords()
+    const recordId = data.id
+    modeRecordId.value = recordId
+    _panoramaGlobalState.recordId = recordId
+    _panoramaGlobalState.status = 'running'
+
+    // 开始轮询
+    _panoramaCancelPoll = pollPanoramaStatus(recordId, (status) => {
+      _panoramaGlobalState.status = status.status
+      if (status.status === 'done') {
+        modeResult.value = status.result || ''
+        aiTokenUsage.value = status.token_usage || 0
+        _panoramaGlobalState.result = status.result
+        modeLoading.value = false
+        loadPanoramaRecords()
+      } else if (status.status === 'error') {
+        modeResult.value = '分析失败：' + (status.error || '未知错误')
+        modeLoading.value = false
+      }
+    }, 3000)
   } catch (e) {
     modeResult.value = '分析失败：' + (e.response?.data?.detail || e.message)
-  } finally {
     modeLoading.value = false
   }
+}
+
+// 恢复轮询（切页面回来时调用）
+function resumePanoramaPoll() {
+  const state = _panoramaGlobalState
+  if (!state.recordId || state.status === 'done' || state.status === 'error') {
+    // 已完成或无任务，直接恢复结果
+    if (state.result) {
+      modeResult.value = state.result
+      modeRecordId.value = state.recordId
+      modeLoading.value = false
+    }
+    return
+  }
+  // 还在运行中，继续轮询
+  modeLoading.value = true
+  modeRecordId.value = state.recordId
+  _panoramaCancelPoll = pollPanoramaStatus(state.recordId, (status) => {
+    _panoramaGlobalState.status = status.status
+    if (status.status === 'done') {
+      modeResult.value = status.result || ''
+      aiTokenUsage.value = status.token_usage || 0
+      _panoramaGlobalState.result = status.result
+      modeLoading.value = false
+      loadPanoramaRecords()
+    } else if (status.status === 'error') {
+      modeResult.value = '分析失败：' + (status.error || '未知错误')
+      modeLoading.value = false
+    }
+  }, 3000)
 }
 
 async function loadPanoramaRecords() {
@@ -1083,13 +1287,21 @@ async function runDeepDiveMode() {
   aiTokenUsage.value = 0
   try {
     const { data } = await runDeepDiveAnalysis(deepDiveSelectedHolding.value)
-    modeResult.value = data.result
-    modeRecordId.value = data.id
-    aiTokenUsage.value = data.token_usage || 0
-    loadDeepDiveRecords()
+    const recordId = data.id
+    modeRecordId.value = recordId
+    pollAnalysisStatus(recordId, (status) => {
+      if (status.status === 'done') {
+        modeResult.value = status.result || ''
+        aiTokenUsage.value = status.token_usage || 0
+        modeLoading.value = false
+        loadDeepDiveRecords()
+      } else if (status.status === 'error') {
+        modeResult.value = '分析失败：' + (status.error || '未知错误')
+        modeLoading.value = false
+      }
+    })
   } catch (e) {
     modeResult.value = '分析失败：' + (e.response?.data?.detail || e.message)
-  } finally {
     modeLoading.value = false
   }
 }
@@ -1108,13 +1320,21 @@ async function runTradeReviewMode() {
   aiTokenUsage.value = 0
   try {
     const { data } = await runTradeReview(reviewStartDate.value || null, reviewEndDate.value || null)
-    modeResult.value = data.result
-    modeRecordId.value = data.id
-    aiTokenUsage.value = data.token_usage || 0
-    loadTradeReviewRecords()
+    const recordId = data.id
+    modeRecordId.value = recordId
+    pollAnalysisStatus(recordId, (status) => {
+      if (status.status === 'done') {
+        modeResult.value = status.result || ''
+        aiTokenUsage.value = status.token_usage || 0
+        modeLoading.value = false
+        loadTradeReviewRecords()
+      } else if (status.status === 'error') {
+        modeResult.value = '分析失败：' + (status.error || '未知错误')
+        modeLoading.value = false
+      }
+    })
   } catch (e) {
     modeResult.value = '分析失败：' + (e.response?.data?.detail || e.message)
-  } finally {
     modeLoading.value = false
   }
 }
@@ -1137,13 +1357,21 @@ async function runFundAnalysisMode() {
   aiTokenUsage.value = 0
   try {
     const { data } = await runFundAnalysis(fundAnalysisCode.value.trim())
-    modeResult.value = data.result
-    modeRecordId.value = data.id
-    aiTokenUsage.value = data.token_usage || 0
-    loadFundAnalysisRecords()
+    const recordId = data.id
+    modeRecordId.value = recordId
+    pollAnalysisStatus(recordId, (status) => {
+      if (status.status === 'done') {
+        modeResult.value = status.result || ''
+        aiTokenUsage.value = status.token_usage || 0
+        modeLoading.value = false
+        loadFundAnalysisRecords()
+      } else if (status.status === 'error') {
+        modeResult.value = '分析失败：' + (status.error || '未知错误')
+        modeLoading.value = false
+      }
+    })
   } catch (e) {
     modeResult.value = '分析失败：' + (e.response?.data?.detail || e.message)
-  } finally {
     modeLoading.value = false
   }
 }
@@ -1546,8 +1774,13 @@ onMounted(async () => {
 
 // KeepAlive 组件激活时重新加载数据（切换页面回来时触发）
 onActivated(async () => {
-  // 重置 loading 状态（避免切换页面后一直显示加载中）
-  modeLoading.value = false
+  // 检查是否有正在运行的全景诊断
+  if (_panoramaGlobalState.recordId && _panoramaGlobalState.status === 'running') {
+    // 恢复轮询，不重置 loading
+    resumePanoramaPoll()
+  } else {
+    modeLoading.value = false
+  }
   diversificationLoading.value = false
   diverAiLoading.value = false
 
@@ -1692,6 +1925,25 @@ async function openFundAnalysis(h) {
   } catch (e) {
     fundChartData.value = null
     showToast('获取 5 年净值数据失败', 'error')
+  } finally {
+    fundChartLoading.value = false
+  }
+}
+
+async function openWatchlistChart(item) {
+  detailFundName.value = item.fund_name
+  chartSearchQuery.value = item.fund_code
+  chartSearchError.value = ''
+  chartMode.value = 'chart5y'
+  showDetail.value = true
+  fundChartLoading.value = true
+  fundChartData.value = null
+  try {
+    const { data } = await getFundNavHistory(item.fund_code, 1825)  // ~5年
+    fundChartData.value = data?.nav_history || null
+  } catch (e) {
+    fundChartData.value = null
+    showToast('获取净值数据失败', 'error')
   } finally {
     fundChartLoading.value = false
   }
@@ -1873,6 +2125,7 @@ async function submitTx() {
 
 async function viewTransactions(h) {
   txHoldingId.value = h.id
+  txFundCode.value = h.fund_code
   try {
     const { data } = await listPortfolioTransactions(h.id)
     transactions.value = data.transactions || []
@@ -1880,6 +2133,27 @@ async function viewTransactions(h) {
   } catch (e) {
     showToast('加载交易记录失败', 'error')
   }
+}
+
+async function loadAuditLog() {
+  auditLogLoading.value = true
+  showAuditLog.value = true
+  try {
+    const { data } = await getAuditLog({ fund_code: txFundCode.value, limit: 50 })
+    auditLogs.value = data.logs || []
+  } catch (e) {
+    showToast('加载操作日志失败', 'error')
+    auditLogs.value = []
+  } finally {
+    auditLogLoading.value = false
+  }
+}
+
+function auditActionLabel(action) {
+  return { create: '提交', confirm: '确认', settle: '到账', cancel: '撤销', delete_holding: '删除持仓', clear_all: '清空数据' }[action] || action
+}
+function auditActionBadge(action) {
+  return { create: 'badge-info', confirm: 'badge-success', settle: 'badge-neutral', cancel: 'badge-danger', delete_holding: 'badge-danger', clear_all: 'badge-danger' }[action] || 'badge-neutral'
 }
 
 // Add purchase (追加买入) — amount-based, pending status
@@ -1976,6 +2250,7 @@ function openConfirmTx(tx) {
   confirmTxData.value = tx
   confirmTxPrice.value = 0
   confirmTxFee.value = 0
+  confirmTxShares.value = 0
   confirmTargetFundCode.value = ''
   confirmTargetFundName.value = ''
   showConfirmTx.value = true
@@ -1989,6 +2264,10 @@ async function submitConfirmTx() {
   const payload = {
     confirmed_price: confirmTxPrice.value,
     fee: confirmTxFee.value || 0
+  }
+  // 卖出交易：如果指定了实际份额，使用指定值
+  if (confirmTxData.value?.transaction_type === 'sell' && confirmTxShares.value > 0) {
+    payload.confirmed_shares = confirmTxShares.value
   }
   // 转换交易需要目标基金信息
   if (confirmTxData.value?.transaction_type === 'convert') {
@@ -2164,7 +2443,7 @@ function txDisplayAmount(tx) {
       <div class="pending-list">
         <div v-for="tx in pendingTxs" :key="tx.id" class="pending-item">
           <span :class="['badge', txTypeBadge(tx.transaction_type)]">{{ txTypeLabel(tx.transaction_type) }}</span>
-          <span class="pending-fund">{{ tx._fund_name }}</span>
+          <span class="pending-fund">{{ tx.fund_name || tx.fund_code || '未知基金' }}</span>
           <span class="pending-detail">
             {{ tx.transaction_type === 'buy' ? '¥' + (tx.submitted_amount || 0).toLocaleString() : (tx.submitted_shares || 0).toLocaleString() + ' 份' }}
             <span v-if="tx.transaction_type === 'convert' && tx.notes" class="pending-convert-target" style="font-size:0.72rem;color:var(--color-text-muted)"> → {{ tx.notes.split('→')[1]?.trim() || '' }}</span>
@@ -2232,7 +2511,7 @@ function txDisplayAmount(tx) {
     </div>
 
     <!-- Tab Bar -->
-    <div class="analysis-tabs" v-if="holdings.length > 0">
+    <div class="analysis-tabs" v-if="holdings.length > 0 || activeAnalysisTab === 'watchlist'">
       <button :class="['analysis-tab', { active: activeAnalysisTab === 'holdings' }]" @click="switchAnalysisTab('holdings')">
         <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4"/></svg>
         <span>持仓列表</span>
@@ -2252,6 +2531,10 @@ function txDisplayAmount(tx) {
       <button :class="['analysis-tab', { active: activeAnalysisTab === 'config' }]" @click="switchAnalysisTab('config')">
         <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.066 2.573c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.573 1.066c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.066-2.573c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/></svg>
         <span class="term-with-tip">策略配置<span class="term-tip">管理调仓分析的资产配比策略、估值阈值和偏离度参数</span></span>
+      </button>
+      <button :class="['analysis-tab', { active: activeAnalysisTab === 'watchlist' }]" @click="switchAnalysisTab('watchlist')">
+        <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11.049 2.927c.3-.921 1.603-.921 1.902 0l1.519 4.674a1 1 0 00.95.69h4.915c.969 0 1.371 1.24.588 1.81l-3.976 2.888a1 1 0 00-.363 1.118l1.518 4.674c.3.922-.755 1.688-1.538 1.118l-3.976-2.888a1 1 0 00-1.176 0l-3.976 2.888c-.783.57-1.838-.197-1.538-1.118l1.518-4.674a1 1 0 00-.363-1.118l-3.976-2.888c-.784-.57-.38-1.81.588-1.81h4.914a1 1 0 00.951-.69l1.519-4.674z"/></svg>
+        <span class="term-with-tip">关注列表<span class="term-tip">管理看好的基金，设定目标价和估值百分位，择机买入</span></span>
       </button>
     </div>
 
@@ -3061,6 +3344,75 @@ function txDisplayAmount(tx) {
 
         </div>
       </template>
+
+      <!-- Watchlist Panel -->
+      <template v-if="activeAnalysisTab === 'watchlist'">
+        <div class="analysis-panel-header">
+          <h3>关注列表</h3>
+          <div class="analysis-panel-actions">
+            <button class="btn-primary btn-sm" @click="showAddWatchlist = true" style="margin-right:0.5rem">+ 添加关注</button>
+            <button class="btn-secondary btn-sm" @click="refreshWatchlistNavs" :disabled="watchlistRefreshing" style="margin-right:0.5rem">
+              {{ watchlistRefreshing ? '刷新中...' : '刷新净值' }}
+            </button>
+            <button class="btn-ghost btn-sm" @click="switchAnalysisTab('watchlist')">✕</button>
+          </div>
+        </div>
+
+        <div v-if="watchlistLoading" class="loading-state"><div class="spinner"></div></div>
+        <div v-else-if="watchlistItems.length === 0" class="empty-state" style="padding:2rem;text-align:center">
+          <p style="color:var(--color-muted);margin-bottom:1rem">还没有关注任何基金</p>
+          <button class="btn-primary btn-sm" @click="showAddWatchlist = true">添加第一个关注</button>
+        </div>
+        <div v-else class="analysis-panel-body">
+          <table class="data-table" style="margin-bottom:1rem">
+            <thead>
+              <tr>
+                <th>基金</th>
+                <th>类型</th>
+                <th>跟踪指数</th>
+                <th>当前净值</th>
+                <th>目标价</th>
+                <th>估值百分位</th>
+                <th>优先级</th>
+                <th>备注</th>
+                <th>操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="item in watchlistItems" :key="item.id">
+                <td>
+                  <div class="fund-name-cell">
+                    <span class="fund-code">{{ item.fund_code }}</span>
+                    <span class="fund-name">{{ item.fund_name || '-' }}</span>
+                  </div>
+                </td>
+                <td>{{ item.fund_category || '-' }}</td>
+                <td>{{ item.index_name || item.index_code || '-' }}</td>
+                <td>{{ item.current_nav ? item.current_nav.toFixed(4) : '-' }}</td>
+                <td>{{ item.target_price ? item.target_price.toFixed(4) : '-' }}</td>
+                <td>
+                  <span v-if="item.target_percentile" :class="['percentile-badge', item.target_percentile <= 30 ? 'low' : item.target_percentile <= 70 ? 'mid' : 'high']">
+                    ≤{{ item.target_percentile }}%
+                  </span>
+                  <span v-else>-</span>
+                </td>
+                <td>
+                  <span :class="['priority-badge', `priority-${item.priority || 0}`]">
+                    {{ ['普通','关注','重点','必买'][item.priority || 0] || item.priority }}
+                  </span>
+                </td>
+                <td class="notes-cell" :title="item.notes">{{ item.notes || '-' }}</td>
+                <td class="actions-cell">
+                  <button class="btn-ghost btn-xs" @click="editWatchlistItem(item)" title="编辑">✎</button>
+                  <button class="btn-ghost btn-xs" @click="openWatchlistChart(item)" title="查看走势">📈</button>
+                  <button class="btn-ghost btn-xs" @click="lookupWatchlistFund(item)" title="查询基金信息">🔍</button>
+                  <button class="btn-ghost btn-xs" style="color:var(--color-danger)" @click="deleteWatchlistItem(item)" title="移除">✕</button>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </template>
     </div>
     <!-- Summary Cards -->
     <div v-if="activeAnalysisTab === 'holdings'" class="summary-cards">
@@ -3138,6 +3490,9 @@ function txDisplayAmount(tx) {
           action-text="添加第一笔持仓"
           @action="openAddForm"
         />
+        <div style="text-align:center;margin-top:1rem">
+          <button class="btn-secondary" @click="switchAnalysisTab('watchlist')">⭐ 查看关注列表</button>
+        </div>
       </div>
 
       <table v-else class="data-table">
@@ -3436,57 +3791,111 @@ function txDisplayAmount(tx) {
     <!-- Transaction History Modal -->
     <Teleport to="body">
       <Transition name="fade">
-        <div v-if="showTxHistory" class="modal-overlay" @click.self="showTxHistory = false">
+        <div v-if="showTxHistory" class="modal-overlay" @click.self="showTxHistory = false; showAuditLog = false">
           <div class="modal-box modal-wide">
-            <h3 class="modal-title">交易记录</h3>
-            <div v-if="transactions.length === 0" class="empty-state" style="padding: 2rem">
-              <p>暂无交易记录</p>
-            </div>
-            <table v-else class="data-table">
-              <thead>
-                <tr>
-                  <th>日期</th>
-                  <th>类型</th>
-                  <th>状态</th>
-                  <th class="text-right">金额</th>
-                  <th class="text-right">份额</th>
-                  <th class="text-right">净值</th>
-                  <th>时间</th>
-                  <th>备注</th>
-                  <th>标签</th>
-                  <th>操作</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr v-for="tx in transactions" :key="tx.id">
-                  <td>
-                    {{ tx.transaction_date }}
-                    <div v-if="tx.expected_confirm_date" class="tx-confirm-hint">预计 {{ tx.expected_confirm_date }} 确认</div>
-                  </td>
-                  <td><span :class="['badge', txTypeBadge(tx.transaction_type)]">{{ txTypeLabel(tx.transaction_type) }}</span></td>
-                  <td><span :class="['badge', txStatusBadge(tx.status || 'confirmed')]">{{ txStatusLabel(tx.status || 'confirmed') }}</span></td>
-                  <td class="text-right">{{ txDisplayAmount(tx) }}</td>
-                  <td class="text-right">{{ tx.status === 'pending' ? (tx.submitted_shares ? tx.submitted_shares.toLocaleString() + ' (预估)' : '--') : (tx.shares?.toLocaleString() || '--') }}</td>
-                  <td class="text-right">{{ tx.price?.toFixed(4) || '--' }}</td>
-                  <td>{{ tx.transaction_time || '--' }}</td>
-                  <td>{{ tx.notes || '--' }}</td>
-                  <td>
-                    <div class="tx-tags-cell">
-                      <span v-for="tag in (tx.tags || [])" :key="tag" class="badge badge-neutral badge-sm">{{ tag }}</span>
-                      <button class="btn-ghost btn-xs" @click="openTxTags(tx.id)" title="编辑标签">🏷️</button>
-                    </div>
-                  </td>
-                  <td>
-                    <button v-if="tx.status === 'pending'" class="btn-ghost btn-sm btn-primary-text" @click="openConfirmTx(tx)">确认</button>
-                    <button v-if="tx.status === 'pending'" class="btn-ghost btn-sm btn-danger-text" @click="handleCancelPendingTx(tx)">撤销</button>
-                    <button v-if="(tx.status || 'confirmed') === 'confirmed' && tx.transaction_type === 'sell'" class="btn-ghost btn-sm btn-info-text" @click="handleSettle(tx)">已到账</button>
-                    <span v-if="tx.status === 'settled'" class="text-muted">已完成</span>
-                  </td>
-                </tr>
-              </tbody>
-            </table>
+            <h3 class="modal-title">
+              {{ showAuditLog ? '操作日志' : '交易记录' }}
+              <button v-if="!showAuditLog" class="btn-ghost btn-sm" style="margin-left:auto" @click="loadAuditLog()">📋 操作日志</button>
+              <button v-else class="btn-ghost btn-sm" style="margin-left:auto" @click="showAuditLog = false">← 返回交易记录</button>
+            </h3>
+
+            <!-- 操作日志视图 -->
+            <template v-if="showAuditLog">
+              <div v-if="auditLogLoading" class="empty-state" style="padding:2rem"><p>加载中...</p></div>
+              <div v-else-if="auditLogs.length === 0" class="empty-state" style="padding:2rem"><p>暂无操作日志</p></div>
+              <table v-else class="data-table">
+                <thead>
+                  <tr>
+                    <th>时间</th>
+                    <th>操作</th>
+                    <th>用户输入</th>
+                    <th>变更前</th>
+                    <th>变更后</th>
+                    <th>详情</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="log in auditLogs" :key="log.id">
+                    <td style="white-space:nowrap;font-size:0.82em">{{ log.created_at }}</td>
+                    <td><span :class="['badge', auditActionBadge(log.action)]">{{ auditActionLabel(log.action) }}</span></td>
+                    <td style="font-size:0.82em">
+                      <div v-if="log.input_shares != null">份额: {{ log.input_shares?.toLocaleString() }}</div>
+                      <div v-if="log.input_amount != null">金额: ¥{{ log.input_amount?.toLocaleString() }}</div>
+                      <div v-if="log.input_price != null">净值: {{ log.input_price }}</div>
+                    </td>
+                    <td style="font-size:0.82em">
+                      <template v-if="log.before_status">
+                        <div>{{ log.before_status }}</div>
+                        <div v-if="log.before_shares != null">份额: {{ log.before_shares?.toLocaleString() }}</div>
+                      </template>
+                      <span v-else class="text-muted">—</span>
+                    </td>
+                    <td style="font-size:0.82em">
+                      <template v-if="log.after_status">
+                        <div>{{ log.after_status }}</div>
+                        <div v-if="log.after_shares != null">份额: {{ log.after_shares?.toLocaleString() }}</div>
+                        <div v-if="log.after_amount != null">金额: ¥{{ log.after_amount?.toLocaleString() }}</div>
+                      </template>
+                      <span v-else class="text-muted">—</span>
+                    </td>
+                    <td style="font-size:0.78em;max-width:200px;word-break:break-all">{{ log.detail }}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </template>
+
+            <!-- 交易记录视图 -->
+            <template v-else>
+              <div v-if="transactions.length === 0" class="empty-state" style="padding: 2rem">
+                <p>暂无交易记录</p>
+              </div>
+              <table v-else class="data-table">
+                <thead>
+                  <tr>
+                    <th>日期</th>
+                    <th>类型</th>
+                    <th>状态</th>
+                    <th class="text-right">金额</th>
+                    <th class="text-right">份额</th>
+                    <th class="text-right">净值</th>
+                    <th>时间</th>
+                    <th>备注</th>
+                    <th>标签</th>
+                    <th>操作</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="tx in transactions" :key="tx.id">
+                    <td>
+                      {{ tx.transaction_date }}
+                      <div v-if="tx.expected_confirm_date" class="tx-confirm-hint">预计 {{ tx.expected_confirm_date }} 确认</div>
+                    </td>
+                    <td><span :class="['badge', txTypeBadge(tx.transaction_type)]">{{ txTypeLabel(tx.transaction_type) }}</span></td>
+                    <td><span :class="['badge', txStatusBadge(tx.status || 'confirmed')]">{{ txStatusLabel(tx.status || 'confirmed') }}</span></td>
+                    <td class="text-right">{{ txDisplayAmount(tx) }}</td>
+                    <td class="text-right">{{ tx.status === 'pending' ? (tx.submitted_shares ? tx.submitted_shares.toLocaleString() + ' (预估)' : '--') : (tx.shares?.toLocaleString() || '--') }}</td>
+                    <td class="text-right">{{ tx.price?.toFixed(4) || '--' }}</td>
+                    <td>{{ tx.transaction_time || '--' }}</td>
+                    <td>{{ tx.notes || '--' }}</td>
+                    <td>
+                      <div class="tx-tags-cell">
+                        <span v-for="tag in (tx.tags || [])" :key="tag" class="badge badge-neutral badge-sm">{{ tag }}</span>
+                        <button class="btn-ghost btn-xs" @click="openTxTags(tx.id)" title="编辑标签">🏷️</button>
+                      </div>
+                    </td>
+                    <td>
+                      <button v-if="tx.status === 'pending'" class="btn-ghost btn-sm btn-primary-text" @click="openConfirmTx(tx)">确认</button>
+                      <button v-if="tx.status === 'pending'" class="btn-ghost btn-sm btn-danger-text" @click="handleCancelPendingTx(tx)">撤销</button>
+                      <button v-if="(tx.status || 'confirmed') === 'confirmed' && tx.transaction_type === 'sell'" class="btn-ghost btn-sm btn-info-text" @click="handleSettle(tx)">已到账</button>
+                      <span v-if="tx.status === 'settled'" class="text-muted">已完成</span>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </template>
+
             <div class="modal-actions" style="margin-top: 1rem">
-              <button class="btn-secondary" @click="showTxHistory = false">关闭</button>
+              <button class="btn-secondary" @click="showTxHistory = false; showAuditLog = false">关闭</button>
             </div>
           </div>
         </div>
@@ -3545,6 +3954,147 @@ function txDisplayAmount(tx) {
               <div class="form-actions">
                 <button type="button" class="btn-ghost" @click="showNewBuy = false">取消</button>
                 <button type="submit" class="btn-primary" :disabled="newBuyForm.amount <= 0">提交买入</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      </Transition>
+    </Teleport>
+
+    <!-- Add Watchlist Modal -->
+    <Teleport to="body">
+      <Transition name="fade">
+        <div v-if="showAddWatchlist" class="modal-overlay" @click.self="showAddWatchlist = false">
+          <div class="modal-box" style="max-width:520px">
+            <h3 class="modal-title">添加关注基金</h3>
+            <p class="modal-desc">看好但未持有的基金，设定目标价择机买入</p>
+            <form @submit.prevent="submitAddWatchlist" class="modal-form">
+              <div class="form-row">
+                <div class="form-group" style="flex:1">
+                  <label>基金代码 *</label>
+                  <input v-model="watchlistForm.fund_code" class="input-field" placeholder="如 161725" required />
+                </div>
+                <div class="form-group" style="flex:2">
+                  <label>基金名称</label>
+                  <input v-model="watchlistForm.fund_name" class="input-field" placeholder="自动查询填充" />
+                </div>
+              </div>
+              <div class="form-row">
+                <div class="form-group">
+                  <label>基金类型</label>
+                  <select v-model="watchlistForm.fund_category" class="input-field">
+                    <option value="">未指定</option>
+                    <option value="index">指数型</option>
+                    <option value="stock">股票型</option>
+                    <option value="mixed">混合型</option>
+                    <option value="bond">债券型</option>
+                    <option value="qdii">QDII</option>
+                    <option value="money">货币型</option>
+                  </select>
+                </div>
+                <div class="form-group">
+                  <label>跟踪指数</label>
+                  <input v-model="watchlistForm.index_name" class="input-field" placeholder="如 中证医疗" />
+                </div>
+              </div>
+              <div class="form-row">
+                <div class="form-group">
+                  <label>目标买入价</label>
+                  <input v-model.number="watchlistForm.target_price" type="number" step="0.0001" class="input-field" placeholder="净值目标" />
+                </div>
+                <div class="form-group">
+                  <label>目标估值百分位</label>
+                  <input v-model.number="watchlistForm.target_percentile" type="number" step="5" min="0" max="100" class="input-field" placeholder="如 30（低估区）" />
+                </div>
+                <div class="form-group">
+                  <label>优先级</label>
+                  <select v-model.number="watchlistForm.priority" class="input-field">
+                    <option :value="0">普通</option>
+                    <option :value="1">关注</option>
+                    <option :value="2">重点</option>
+                    <option :value="3">必买</option>
+                  </select>
+                </div>
+              </div>
+              <div class="form-row">
+                <div class="form-group" style="flex:1">
+                  <label>备注</label>
+                  <input v-model="watchlistForm.notes" class="input-field" placeholder="为什么看好、什么条件买入..." />
+                </div>
+              </div>
+              <div class="form-actions">
+                <button type="button" class="btn-ghost" @click="showAddWatchlist = false">取消</button>
+                <button type="submit" class="btn-primary">添加关注</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      </Transition>
+    </Teleport>
+
+    <!-- Edit Watchlist Modal -->
+    <Teleport to="body">
+      <Transition name="fade">
+        <div v-if="showEditWatchlist" class="modal-overlay" @click.self="showEditWatchlist = false">
+          <div class="modal-box" style="max-width:520px">
+            <h3 class="modal-title">编辑关注基金</h3>
+            <form @submit.prevent="submitEditWatchlist" class="modal-form">
+              <div class="form-row">
+                <div class="form-group" style="flex:1">
+                  <label>基金代码</label>
+                  <input :value="watchlistForm.fund_code" class="input-field" disabled />
+                </div>
+                <div class="form-group" style="flex:2">
+                  <label>基金名称</label>
+                  <input v-model="watchlistForm.fund_name" class="input-field" />
+                </div>
+              </div>
+              <div class="form-row">
+                <div class="form-group">
+                  <label>基金类型</label>
+                  <select v-model="watchlistForm.fund_category" class="input-field">
+                    <option value="">未指定</option>
+                    <option value="index">指数型</option>
+                    <option value="stock">股票型</option>
+                    <option value="mixed">混合型</option>
+                    <option value="bond">债券型</option>
+                    <option value="qdii">QDII</option>
+                    <option value="money">货币型</option>
+                  </select>
+                </div>
+                <div class="form-group">
+                  <label>跟踪指数</label>
+                  <input v-model="watchlistForm.index_name" class="input-field" />
+                </div>
+              </div>
+              <div class="form-row">
+                <div class="form-group">
+                  <label>目标买入价</label>
+                  <input v-model.number="watchlistForm.target_price" type="number" step="0.0001" class="input-field" />
+                </div>
+                <div class="form-group">
+                  <label>目标估值百分位</label>
+                  <input v-model.number="watchlistForm.target_percentile" type="number" step="5" min="0" max="100" class="input-field" />
+                </div>
+                <div class="form-group">
+                  <label>优先级</label>
+                  <select v-model.number="watchlistForm.priority" class="input-field">
+                    <option :value="0">普通</option>
+                    <option :value="1">关注</option>
+                    <option :value="2">重点</option>
+                    <option :value="3">必买</option>
+                  </select>
+                </div>
+              </div>
+              <div class="form-row">
+                <div class="form-group" style="flex:1">
+                  <label>备注</label>
+                  <input v-model="watchlistForm.notes" class="input-field" />
+                </div>
+              </div>
+              <div class="form-actions">
+                <button type="button" class="btn-ghost" @click="showEditWatchlist = false">取消</button>
+                <button type="submit" class="btn-primary">保存修改</button>
               </div>
             </form>
           </div>
@@ -3708,6 +4258,11 @@ function txDisplayAmount(tx) {
                 <label>T+1 确认净值 *</label>
                 <input v-model.number="confirmTxPrice" type="number" step="0.0001" class="input-field" placeholder="输入确认日的实际净值" required />
               </div>
+              <div v-if="confirmTxData?.transaction_type === 'sell'" class="form-group" style="margin-top:0.75rem">
+                <label>实际卖出份额</label>
+                <input v-model.number="confirmTxShares" type="number" step="0.01" min="0" class="input-field" :placeholder="'提交份额: ' + (confirmTxData?.submitted_shares || 0)" />
+                <span class="field-hint">留空则使用提交的 {{ (confirmTxData?.submitted_shares || 0).toLocaleString() }} 份</span>
+              </div>
               <div class="form-group" style="margin-top:0.75rem">
                 <label>手续费 (可选)</label>
                 <input v-model.number="confirmTxFee" type="number" step="0.01" min="0" class="input-field" placeholder="0" />
@@ -3728,7 +4283,7 @@ function txDisplayAmount(tx) {
                   <span v-if="confirmTxFee" style="color:var(--color-text-muted);font-size:0.85em"> (扣手续费 ¥{{ confirmTxFee }})</span>
                 </span>
                 <span v-else>
-                  实际赎回约 <strong>¥{{ ((confirmTxData?.submitted_shares || 0) * confirmTxPrice - (confirmTxFee || 0)).toFixed(2) }}</strong>
+                  实际赎回约 <strong>¥{{ ((confirmTxShares > 0 ? confirmTxShares : (confirmTxData?.submitted_shares || 0)) * confirmTxPrice - (confirmTxFee || 0)).toFixed(2) }}</strong>
                   <span v-if="confirmTxFee" style="color:var(--color-text-muted);font-size:0.85em"> (扣手续费 ¥{{ confirmTxFee }})</span>
                 </span>
               </div>
@@ -4120,31 +4675,40 @@ function txDisplayAmount(tx) {
 /* Freshness tags */
 .freshness-tag {
   display: inline-block;
-  padding: 0.15rem 0.5rem;
+  padding: 0.2rem 0.55rem;
   border-radius: 9999px;
-  font-size: 0.7rem;
+  font-size: 0.72rem;
   font-weight: 600;
   white-space: nowrap;
 }
 .fresh-today {
-  background: #dcfce7;
+  background: var(--color-success-bg);
   color: #16a34a;
 }
+.dark .fresh-today {
+  color: #34d399;
+}
 .fresh-yesterday {
-  background: #fef9c3;
+  background: var(--color-warning-bg);
   color: #a16207;
 }
+.dark .fresh-yesterday {
+  color: #fbbf24;
+}
 .fresh-stale {
-  background: #fee2e2;
+  background: var(--color-danger-bg);
   color: #dc2626;
+}
+.dark .fresh-stale {
+  color: #f87171;
 }
 
 /* ── 理财彩蛋 ── */
 .quote-bar {
   background: linear-gradient(135deg, #1e3a5f 0%, #2d5a87 100%);
   border-radius: var(--radius-md);
-  padding: 0.6rem 1rem;
-  margin-bottom: 1rem;
+  padding: 0.75rem 1.25rem;
+  margin-bottom: 1.25rem;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -4155,12 +4719,12 @@ function txDisplayAmount(tx) {
 .quote-text {
   color: #e8eaed;
   font-size: 0.85rem;
-  line-height: 1.5;
+  line-height: 1.6;
 }
 .quote-author {
   color: #93c5fd;
-  font-size: 0.75rem;
-  margin-left: 0.3rem;
+  font-size: 0.78rem;
+  margin-left: 0.4rem;
 }
 .quote-click-hint {
   color: #93c5fd;
@@ -4185,8 +4749,8 @@ function txDisplayAmount(tx) {
 /* Summary Cards */
 .summary-cards {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
-  gap: 0.75rem;
+  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  gap: 0.85rem;
   margin-bottom: 1.5rem;
 }
 
@@ -4194,12 +4758,31 @@ function txDisplayAmount(tx) {
   background: var(--color-bg-card);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-lg);
-  padding: 1rem 1.25rem;
+  padding: 1.1rem 1.4rem;
   transition: all var(--transition-fast);
   overflow: hidden;
+  position: relative;
+}
+.summary-card::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 3px;
+  background: var(--gradient-primary);
+  opacity: 0;
+  transition: opacity var(--transition-fast);
+}
+.summary-card:hover::before {
+  opacity: 1;
 }
 .summary-card-today {
-  border-color: #3b82f6;
+  border-color: var(--color-primary-border);
+}
+.summary-card-today::before {
+  opacity: 1;
+  background: linear-gradient(90deg, #3b82f6, #60a5fa);
 }
 .today-profit-date {
   font-size: 0.6rem;
@@ -4208,27 +4791,31 @@ function txDisplayAmount(tx) {
   margin-left: 2px;
 }
 .today-profit-sub {
-  font-size: 0.68rem;
+  font-size: 0.72rem;
   color: var(--color-text-muted);
-  margin-top: 0.1rem;
+  margin-top: 0.2rem;
 }
 .summary-card-cost .summary-sub {
-  font-size: 0.68rem;
+  font-size: 0.72rem;
   color: var(--color-text-muted);
-  margin-top: 0.1rem;
+  margin-top: 0.2rem;
 }
 .summary-card-pl .summary-sub {
-  font-size: 0.72rem;
-  margin-top: 0.1rem;
+  font-size: 0.75rem;
+  margin-top: 0.2rem;
 }
 
 /* Pending transactions banner */
 .pending-banner {
-  background: #fffbeb;
-  border: 1px solid #fde68a;
+  background: var(--color-warning-bg);
+  border: 1px solid var(--color-warning-border, #fde68a);
   border-radius: var(--radius-lg);
   padding: 1rem 1.25rem;
   margin-bottom: 1.5rem;
+  transition: box-shadow var(--transition-fast);
+}
+.pending-banner:hover {
+  box-shadow: var(--shadow-sm);
 }
 
 .pending-banner-header {
@@ -4242,9 +4829,9 @@ function txDisplayAmount(tx) {
 
 /* 已清仓 */
 .closed-holdings-section {
-  margin-top: 1rem;
+  margin-top: 1.25rem;
   border-top: 1px solid var(--color-border);
-  padding-top: 0.75rem;
+  padding-top: 1rem;
 }
 
 .closed-holdings-header {
@@ -4280,14 +4867,27 @@ function txDisplayAmount(tx) {
   opacity: 1;
 }
 
-/* 零钱卡 */
+/* ── 零钱卡 ── */
 .summary-card-cash {
-  border-color: #f59e0b;
-  background: linear-gradient(135deg, #fffbeb 0%, #fef3c7 100%);
+  border-color: var(--color-warning-border, #f59e0b);
+  background: linear-gradient(135deg, var(--color-warning-bg), transparent);
+}
+.summary-card-cash::before {
+  opacity: 1;
+  background: linear-gradient(90deg, #f59e0b, #fbbf24);
 }
 
 .cash-value {
   color: #d97706 !important;
+}
+
+.dark .cash-value {
+  color: #fbbf24 !important;
+}
+
+.dark .summary-card-cash {
+  border-color: rgba(245, 158, 11, 0.25);
+  background: linear-gradient(135deg, rgba(245, 158, 11, 0.08), transparent);
 }
 
 .cash-interest {
@@ -4328,7 +4928,7 @@ function txDisplayAmount(tx) {
 
 .cash-modal-account {
   flex: 1;
-  padding: 0.6rem 0.75rem;
+  padding: 0.75rem 1rem;
   border: 2px solid var(--color-border);
   border-radius: var(--radius-md);
   cursor: pointer;
@@ -4373,10 +4973,16 @@ function txDisplayAmount(tx) {
   display: flex;
   align-items: center;
   gap: 0.75rem;
-  padding: 0.5rem 0.75rem;
+  padding: 0.55rem 0.8rem;
   background: rgba(255, 255, 255, 0.6);
   border-radius: var(--radius-md);
   font-size: 0.82rem;
+  border: 1px solid var(--color-border-light);
+  transition: all var(--transition-fast);
+}
+.pending-item:hover {
+  border-color: var(--color-warning-border);
+  background: rgba(255, 255, 255, 0.8);
 }
 
 .pending-fund {
@@ -4395,8 +5001,8 @@ function txDisplayAmount(tx) {
 }
 
 .dark .pending-banner {
-  background: #422006;
-  border-color: #92400e;
+  background: rgba(146, 64, 14, 0.15);
+  border-color: rgba(146, 64, 14, 0.3);
 }
 
 .dark .pending-banner-header {
@@ -4409,31 +5015,53 @@ function txDisplayAmount(tx) {
 
 .dark .pending-item {
   background: rgba(0, 0, 0, 0.2);
+  border-color: var(--color-border);
+}
+
+.dark .pending-item:hover {
+  background: rgba(0, 0, 0, 0.3);
 }
 
 .summary-card:hover {
   box-shadow: var(--shadow-md);
+  border-color: var(--color-primary-border-weak);
+  transform: var(--hover-lift);
 }
 
 .summary-label {
-  font-size: 0.75rem;
+  font-size: 0.76rem;
   color: var(--color-text-muted);
-  margin-bottom: 0.375rem;
+  margin-bottom: 0.5rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
 }
 
 .summary-value {
-  font-size: 1.25rem;
-  font-weight: 700;
+  font-size: 1.35rem;
+  font-weight: 800;
   color: var(--color-text-primary);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.02em;
 }
 
 /* Profit colors */
 .profit-positive {
   color: #dc2626 !important;
 }
-
 .profit-negative {
   color: #16a34a !important;
+}
+/* 持仓行盈亏渐变背景 */
+.profit-positive.text-right,
+.profit-positive:not(.tooltip-nav):not(.summary-value):not(.summary-sub) {
+  background: linear-gradient(135deg, rgba(220,38,38,0.06), transparent);
+  border-radius: var(--radius-sm);
+}
+.profit-negative.text-right,
+.profit-negative:not(.tooltip-nav):not(.summary-value):not(.summary-sub) {
+  background: linear-gradient(135deg, rgba(5,150,105,0.06), transparent);
+  border-radius: var(--radius-sm);
 }
 
 .cost-value {
@@ -4446,6 +5074,7 @@ function txDisplayAmount(tx) {
 /* Table */
 .holdings-card {
   overflow-x: auto;
+  border-radius: var(--radius-lg);
 }
 
 .data-table {
@@ -4456,12 +5085,18 @@ function txDisplayAmount(tx) {
 
 .data-table th {
   text-align: left;
-  padding: 0.75rem 1rem;
+  padding: 0.7rem 1rem;
   font-weight: 600;
   color: var(--color-text-secondary);
-  border-bottom: 1px solid var(--color-border);
+  border-bottom: 2px solid var(--color-border);
   white-space: nowrap;
-  font-size: 0.8rem;
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  background: var(--color-bg-secondary);
+  position: sticky;
+  top: 0;
+  z-index: 1;
 }
 
 .data-table td {
@@ -4471,8 +5106,18 @@ function txDisplayAmount(tx) {
   white-space: nowrap;
 }
 
+.data-table tbody tr {
+  transition: background-color var(--transition-fast);
+}
+
 .data-table tbody tr:hover {
-  background: var(--color-bg-hover);
+  background: var(--color-primary-bg-weak);
+}
+.data-table tbody tr:nth-child(even) {
+  background: var(--color-bg-secondary);
+}
+.data-table tbody tr:nth-child(even):hover {
+  background: var(--color-primary-bg-weak);
 }
 
 .text-right {
@@ -4495,7 +5140,7 @@ function txDisplayAmount(tx) {
 
 .actions-cell {
   display: flex;
-  gap: 0.25rem;
+  gap: 0.35rem;
   align-items: center;
   flex-wrap: nowrap;
 }
@@ -4523,7 +5168,7 @@ function txDisplayAmount(tx) {
   display: block;
   width: 100%;
   text-align: left;
-  padding: 0.4rem 0.75rem;
+  padding: 0.5rem 0.85rem;
   font-size: 0.78rem;
   color: var(--color-text-secondary);
   background: none;
@@ -4542,7 +5187,7 @@ function txDisplayAmount(tx) {
 }
 
 .btn-sm {
-  padding: 0.3rem 0.6rem;
+  padding: 0.35rem 0.7rem;
   font-size: 0.75rem;
 }
 
@@ -4588,7 +5233,7 @@ function txDisplayAmount(tx) {
 
 .text-muted {
   color: var(--color-text-muted);
-  font-size: 0.78rem;
+  font-size: 0.8rem;
 }
 
 .preview-note {
@@ -4631,8 +5276,14 @@ function txDisplayAmount(tx) {
   display: flex;
   align-items: center;
   justify-content: center;
-  background: rgba(0, 0, 0, 0.4);
-  backdrop-filter: blur(4px);
+  background: rgba(0, 0, 0, 0.5);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  animation: modal-fade-in 0.2s ease-out;
+}
+@keyframes modal-fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
 }
 
 .modal-box {
@@ -4646,6 +5297,11 @@ function txDisplayAmount(tx) {
   overflow-y: auto;
   margin: 0 1rem;
   padding: 1.5rem;
+  animation: modal-scale-in 0.25s cubic-bezier(0.34, 1.2, 0.64, 1);
+}
+@keyframes modal-scale-in {
+  from { opacity: 0; transform: scale(0.95) translateY(10px); }
+  to { opacity: 1; transform: scale(1) translateY(0); }
 }
 
 .modal-wide {
@@ -4653,10 +5309,11 @@ function txDisplayAmount(tx) {
 }
 
 .modal-title {
-  font-size: 1.1rem;
+  font-size: 1.15rem;
   font-weight: 700;
   color: var(--color-text-primary);
   margin: 0 0 0.5rem 0;
+  letter-spacing: -0.02em;
 }
 
 .modal-subtitle {
@@ -4679,7 +5336,7 @@ function txDisplayAmount(tx) {
 .modal-form {
   display: flex;
   flex-direction: column;
-  gap: 1rem;
+  gap: 1.1rem;
 }
 
 .form-row {
@@ -4691,13 +5348,15 @@ function txDisplayAmount(tx) {
 .form-group {
   display: flex;
   flex-direction: column;
-  gap: 0.375rem;
+  gap: 0.4rem;
 }
 
 .form-group label {
-  font-size: 0.8rem;
+  font-size: 0.78rem;
   font-weight: 600;
   color: var(--color-text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
 }
 
 .field-hint {
@@ -4771,7 +5430,7 @@ select.input-field {
 .detail-section {
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
-  padding: 1rem;
+  padding: 1.25rem;
 }
 .detail-heading {
   font-size: 0.9rem;
@@ -4784,7 +5443,7 @@ select.input-field {
 .alloc-bars, .industry-bars {
   display: flex;
   flex-direction: column;
-  gap: 0.4rem;
+  gap: 0.5rem;
 }
 .alloc-item {
   display: flex;
@@ -4850,11 +5509,11 @@ select.input-field {
   font-size: 0.8rem;
 }
 .mini-table th {
-  padding: 0.5rem 0.75rem;
-  font-size: 0.75rem;
+  padding: 0.55rem 0.85rem;
+  font-size: 0.78rem;
 }
 .mini-table td {
-  padding: 0.45rem 0.75rem;
+  padding: 0.55rem 0.85rem;
 }
 
 /* Toast */
@@ -4863,17 +5522,19 @@ select.input-field {
   top: 5rem;
   left: 50%;
   transform: translateX(-50%);
-  padding: 0.4rem 0.9rem;
-  border-radius: 6px;
-  font-size: 0.75rem;
-  font-weight: 500;
+  padding: 0.5rem 1rem;
+  border-radius: var(--radius-lg);
+  font-size: 0.78rem;
+  font-weight: 600;
   z-index: 9999;
-  box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+  box-shadow: var(--shadow-lg);
   white-space: nowrap;
-  animation: toast-pop 0.2s ease;
+  animation: toast-pop 0.25s cubic-bezier(0.34, 1.2, 0.64, 1);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
 }
 @keyframes toast-pop {
-  from { opacity: 0; transform: translateX(-50%) translateY(-6px); }
+  from { opacity: 0; transform: translateX(-50%) translateY(-8px); }
   to { opacity: 1; transform: translateX(-50%) translateY(0); }
 }
 .btn-refresh-spinner {
@@ -4887,21 +5548,27 @@ select.input-field {
 }
 
 .toast-success {
-  background: #f0fdf4;
+  background: var(--color-success-bg);
   color: #16a34a;
-  border: 1px solid #bbf7d0;
+  border: 1px solid var(--color-success-border);
+}
+.dark .toast-success {
+  color: #34d399;
 }
 
 .toast-error {
-  background: #fef2f2;
+  background: var(--color-danger-bg);
   color: #dc2626;
-  border: 1px solid #fecaca;
+  border: 1px solid var(--color-danger-border);
+}
+.dark .toast-error {
+  color: #f87171;
 }
 
 .toast-info {
-  background: #f9fafb;
-  color: #6b7280;
-  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: var(--color-bg-hover);
+  color: var(--color-text-secondary);
+  border: 1px solid var(--color-border);
 }
 
 /* Responsive */
@@ -4928,18 +5595,23 @@ select.input-field {
 .alert-panel {
   background: var(--color-bg-card);
   border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
+  border-radius: var(--radius-lg);
   margin-bottom: 1rem;
   overflow: hidden;
+  transition: box-shadow var(--transition-fast);
+}
+.alert-panel:hover {
+  box-shadow: var(--shadow-sm);
 }
 .alert-panel-header {
   display: flex;
   align-items: center;
   gap: 0.5rem;
-  padding: 0.6rem 1rem;
+  padding: 0.75rem 1.25rem;
   background: var(--color-bg-hover);
   font-size: 0.85rem;
-  border-bottom: 1px solid var(--color-border-light);
+  font-weight: 600;
+  border-bottom: 1px solid var(--color-border);
 }
 .alert-list {
   display: flex;
@@ -4949,9 +5621,13 @@ select.input-field {
   display: flex;
   align-items: flex-start;
   gap: 0.75rem;
-  padding: 0.65rem 1rem;
-  border-bottom: 1px solid var(--color-border-light);
+  padding: 0.75rem 1.25rem;
+  border-bottom: 1px solid var(--color-border);
   font-size: 0.82rem;
+  transition: background-color var(--transition-fast);
+}
+.alert-item:hover {
+  background: var(--color-bg-hover);
 }
 .alert-item:last-child {
   border-bottom: none;
@@ -4982,14 +5658,15 @@ select.input-field {
 }
 .alert-content {
   color: var(--color-text-secondary);
-  margin-top: 0.2rem;
-  font-size: 0.78rem;
+  margin-top: 0.3rem;
+  font-size: 0.8rem;
+  line-height: 1.5;
 }
 .alert-meta {
   display: flex;
   gap: 0.5rem;
-  margin-top: 0.3rem;
-  font-size: 0.7rem;
+  margin-top: 0.4rem;
+  font-size: 0.72rem;
   color: var(--color-text-muted);
 }
 .alert-type-badge {
@@ -5062,13 +5739,13 @@ select.input-field {
 .perf-item {
   background: var(--color-bg-hover);
   border-radius: var(--radius-sm);
-  padding: 0.6rem 0.8rem;
+  padding: 0.75rem 1rem;
 }
 .perf-label {
   display: block;
-  font-size: 0.75rem;
+  font-size: 0.78rem;
   color: var(--color-text-muted);
-  margin-bottom: 0.2rem;
+  margin-bottom: 0.3rem;
 }
 .perf-value {
   display: block;
@@ -5080,15 +5757,16 @@ select.input-field {
 /* ── Analysis Tabs ─── */
 .analysis-tabs {
   display: flex;
-  gap: 0;
-  margin-bottom: 0.75rem;
-  border-bottom: 2px solid var(--color-border-light);
+  gap: 0.25rem;
+  margin-bottom: 1rem;
+  border-bottom: 2px solid var(--color-border);
+  position: relative;
 }
 .analysis-tab {
   display: inline-flex;
   align-items: center;
   gap: 0.4rem;
-  padding: 0.55rem 1rem;
+  padding: 0.6rem 1.1rem;
   font-size: 0.85rem;
   font-weight: 500;
   color: var(--color-text-secondary);
@@ -5098,15 +5776,27 @@ select.input-field {
   margin-bottom: -2px;
   cursor: pointer;
   transition: all var(--transition-fast);
+  position: relative;
 }
 .analysis-tab:hover {
   color: var(--color-text-primary);
-  background: var(--color-bg-hover);
 }
 .analysis-tab.active {
   color: var(--color-primary-600);
-  border-bottom-color: var(--color-primary-600);
   font-weight: 600;
+}
+.analysis-tab.active::after {
+  content: '';
+  position: absolute;
+  bottom: -2px;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: var(--gradient-primary);
+  border-radius: 2px 2px 0 0;
+}
+.dark .analysis-tab.active {
+  color: var(--color-primary-400);
 }
 .analysis-tab svg {
   flex-shrink: 0;
@@ -5114,8 +5804,13 @@ select.input-field {
 
 /* ── Analysis Panel ─── */
 .analysis-panel {
-  margin-bottom: 1rem;
-  padding: 1rem;
+  margin-bottom: 1.25rem;
+  padding: 1.25rem;
+  border-radius: var(--radius-lg);
+  transition: all var(--transition-fast);
+}
+.analysis-panel:hover {
+  box-shadow: var(--shadow-sm);
 }
 .analysis-panel-header {
   display: flex;
@@ -5136,16 +5831,22 @@ select.input-field {
 .analysis-stats {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
-  gap: 0.75rem;
+  gap: 0.85rem;
 }
 .analysis-stat {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 0.25rem;
-  padding: 0.75rem;
+  gap: 0.3rem;
+  padding: 0.85rem;
   background: var(--color-bg-hover);
   border-radius: var(--radius-md);
+  transition: all var(--transition-fast);
+  border: 1px solid var(--color-border-light);
+}
+.analysis-stat:hover {
+  border-color: var(--color-primary-border-weak);
+  box-shadow: var(--shadow-sm);
 }
 .stat-label {
   font-size: 0.75rem;
@@ -5166,7 +5867,7 @@ select.input-field {
 .distribution-bars {
   display: flex;
   flex-direction: column;
-  gap: 0.4rem;
+  gap: 0.55rem;
 }
 .dist-bar-row {
   display: flex;
@@ -5188,13 +5889,15 @@ select.input-field {
   background: var(--color-border-light);
   border-radius: 6px;
   overflow: hidden;
+  box-shadow: inset 0 1px 2px rgba(0,0,0,0.06);
 }
 .dist-bar-fill {
   height: 100%;
-  background: var(--color-primary);
+  background: var(--gradient-primary);
   border-radius: 6px;
   min-width: 2px;
   transition: width 0.4s ease;
+  box-shadow: 0 0 4px var(--color-primary-glow);
 }
 .dist-bar-index {
   background: #10b981;
@@ -5213,15 +5916,16 @@ select.input-field {
   flex-shrink: 0;
 }
 .analysis-hint {
-  padding: 0.6rem 0.8rem;
+  padding: 0.75rem 1rem;
   background: var(--color-warning-bg);
   border-radius: var(--radius-md);
   font-size: 0.82rem;
   color: #d97706;
+  line-height: 1.6;
 }
 .mcp-raw-output {
-  font-size: 0.78rem;
-  line-height: 1.5;
+  font-size: 0.8rem;
+  line-height: 1.6;
   color: var(--color-text-secondary);
   background: var(--color-bg-hover);
   padding: 0.6rem 0.8rem;
@@ -5267,8 +5971,8 @@ select.input-field {
 .mcp-data-header {
   display: flex;
   align-items: center;
-  gap: 0.4rem;
-  padding: 0.4rem 0.6rem;
+  gap: 0.5rem;
+  padding: 0.5rem 0.75rem;
   background: var(--color-bg-hover);
   font-size: 0.78rem;
 }
@@ -5333,7 +6037,8 @@ select.input-field {
 }
 .diver-ai-result {
   font-size: 0.85rem;
-  line-height: 1.7;
+  line-height: 1.8;
+  padding: 1rem;
   color: var(--color-text-primary);
   white-space: pre-wrap;
   background: var(--color-bg-hover);
@@ -5372,7 +6077,7 @@ select.input-field {
 
 .tx-detail-table th {
   text-align: right;
-  padding: 0.4rem 0.5rem;
+  padding: 0.55rem 0.65rem;
   font-weight: 500;
   color: var(--color-text-muted);
   border-bottom: 1px solid var(--color-border);
@@ -5385,7 +6090,7 @@ select.input-field {
 }
 
 .tx-detail-table td {
-  padding: 0.4rem 0.5rem;
+  padding: 0.55rem 0.65rem;
   border-bottom: 1px solid var(--color-border);
   white-space: nowrap;
 }
@@ -5473,12 +6178,12 @@ select.input-field {
   white-space: nowrap;
 }
 .ai-analysis-result {
-  padding: 1rem;
+  padding: 1.25rem;
   background: var(--color-bg-card);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
   font-size: 0.85rem;
-  line-height: 1.7;
+  line-height: 1.8;
   white-space: pre-wrap;
   max-height: 600px;
   overflow-y: auto;
@@ -5490,8 +6195,8 @@ select.input-field {
   display: flex;
   gap: 0.5rem;
   justify-content: flex-end;
-  margin-top: 1rem;
-  padding-top: 0.75rem;
+  margin-top: 1.1rem;
+  padding-top: 0.85rem;
   border-top: 1px solid var(--color-border-light);
 }
 .ai-mcp-sources {
@@ -5528,10 +6233,10 @@ select.input-field {
   overflow: hidden;
 }
 .ai-history-title {
-  font-size: 0.8rem;
+  font-size: 0.82rem;
   font-weight: 600;
   margin: 0;
-  padding: 0.6rem 0.8rem;
+  padding: 0.75rem 1rem;
   background: var(--color-bg-hover);
   border-bottom: 1px solid var(--color-border-light);
 }
@@ -5539,7 +6244,7 @@ select.input-field {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 0.5rem 0.8rem;
+  padding: 0.6rem 1rem;
   border-bottom: 1px solid var(--color-border-light);
   font-size: 0.8rem;
 }
@@ -5586,8 +6291,8 @@ select.input-field {
 .tag-list {
   display: flex;
   flex-wrap: wrap;
-  gap: 0.4rem;
-  padding: 0.5rem;
+  gap: 0.5rem;
+  padding: 0.6rem;
   min-height: 2rem;
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
@@ -5687,8 +6392,8 @@ select.input-field {
 
 /* ── 指数详情 ── */
 .index-detail-box {
-  margin-top: 0.5rem;
-  padding: 0.6rem 0.75rem;
+  margin-top: 0.75rem;
+  padding: 0.75rem 1rem;
   background: var(--color-bg-hover);
   border-radius: var(--radius-sm);
   border: 1px solid var(--color-border-light);
@@ -5810,27 +6515,29 @@ select.input-field {
 .ai-mode-tabs {
   display: flex;
   gap: 0.25rem;
-  margin-bottom: 0.75rem;
-  border-bottom: 1px solid var(--color-border-light);
-  padding-bottom: 0.5rem;
+  margin-bottom: 1rem;
+  border-bottom: 1px solid var(--color-border);
+  padding-bottom: 0;
   overflow-x: auto;
+  position: relative;
 }
 .ai-mode-tab {
   display: flex;
   align-items: center;
-  gap: 0.3rem;
-  padding: 0.4rem 0.65rem;
+  gap: 0.35rem;
+  padding: 0.55rem 0.85rem;
   border: none;
-  border-radius: var(--radius-sm);
-  font-size: 0.78rem;
+  border-radius: var(--radius-sm) var(--radius-sm) 0 0;
+  font-size: 0.8rem;
+  font-weight: 500;
   cursor: pointer;
   background: transparent;
   color: var(--color-text-secondary);
   white-space: nowrap;
   transition: all 0.15s;
+  position: relative;
 }
 .ai-mode-tab:hover {
-  background: var(--color-bg-hover);
   color: var(--color-text-primary);
 }
 .ai-mode-tab.active {
@@ -5838,18 +6545,28 @@ select.input-field {
   color: var(--color-primary, #a88a3a);
   font-weight: 600;
 }
+.ai-mode-tab.active::after {
+  content: '';
+  position: absolute;
+  bottom: -1px;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: var(--gradient-primary);
+  border-radius: 2px 2px 0 0;
+}
 .ai-mode-icon {
   font-size: 1rem;
 }
 .ai-mode-content {
   display: flex;
   flex-direction: column;
-  gap: 0.5rem;
+  gap: 0.75rem;
 }
 .ai-mode-desc {
-  font-size: 0.8rem;
+  font-size: 0.82rem;
   color: var(--color-text-secondary);
-  line-height: 1.5;
+  line-height: 1.6;
 }
 .ai-mode-form {
   display: flex;
@@ -5864,12 +6581,12 @@ select.input-field {
   white-space: nowrap;
 }
 .ai-mode-result {
-  padding: 0.75rem;
+  padding: 1rem;
   background: var(--color-bg-card);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
   font-size: 0.85rem;
-  line-height: 1.7;
+  line-height: 1.8;
   white-space: pre-wrap;
   max-height: 500px;
   overflow-y: auto;
@@ -5896,7 +6613,7 @@ select.input-field {
   display: flex;
   align-items: center;
   gap: 0.5rem;
-  padding: 0.35rem 0.6rem;
+  padding: 0.5rem 0.75rem;
   border-bottom: 1px solid var(--color-border-light);
   font-size: 0.78rem;
 }
@@ -5920,8 +6637,8 @@ select.input-field {
   display: flex;
   align-items: center;
   gap: 0.5rem;
-  margin-top: 1rem;
-  padding-top: 0.75rem;
+  margin-top: 1.1rem;
+  padding-top: 0.85rem;
   border-top: 1px solid var(--color-border);
   font-size: 0.82rem;
   color: var(--color-text-muted);
@@ -5981,7 +6698,7 @@ select.input-field {
   background: var(--color-bg-card);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
-  padding: 0.75rem 0.5rem 0.25rem 0.5rem;
+  padding: 1rem 0.75rem 0.5rem 0.75rem;
 }
 .nav-chart {
   width: 100%;
@@ -6109,16 +6826,16 @@ select.input-field {
 .chart-5y-stats {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
-  gap: 0.75rem;
+  gap: 0.85rem;
 }
 .stat-card-stat {
   background: var(--color-bg-card);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
-  padding: 0.6rem 0.8rem;
+  padding: 0.75rem 1rem;
   display: flex;
   flex-direction: column;
-  gap: 0.2rem;
+  gap: 0.3rem;
 }
 .stat-label-stat {
   font-size: 0.72rem;
@@ -6171,6 +6888,21 @@ select.input-field {
 .today-change-profit {
   font-size: 0.72rem;
   opacity: 0.8;
+  padding: 0.1rem 0.35rem;
+  border-radius: var(--radius-sm);
+}
+/* 盈亏数字渐变背景 */
+.profit-up {
+  color: var(--color-profit) !important;
+  background: linear-gradient(135deg, rgba(220,38,38,0.08), rgba(239,68,68,0.04));
+  padding: 0.15rem 0.4rem;
+  border-radius: var(--radius-sm);
+}
+.profit-down {
+  color: var(--color-loss) !important;
+  background: linear-gradient(135deg, rgba(5,150,105,0.08), rgba(16,185,129,0.04));
+  padding: 0.15rem 0.4rem;
+  border-radius: var(--radius-sm);
 }
 
 /* ── AI Action Button (与 Dashboard 一致) ── */
@@ -6305,13 +7037,13 @@ select.input-field {
 }
 
 .trade-review-result-inline {
-  margin-top: 0.75rem;
-  padding: 0.75rem;
+  margin-top: 1rem;
+  padding: 1rem;
   background: var(--color-bg-card);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
   font-size: 0.85rem;
-  line-height: 1.7;
+  line-height: 1.8;
 }
 
 .trade-review-result-inline .result-header {
@@ -6366,8 +7098,8 @@ select.input-field {
 .fee-calc-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 0.75rem 1.25rem;
-  margin-bottom: 1rem;
+  gap: 0.85rem 1.5rem;
+  margin-bottom: 1.25rem;
 }
 .fee-slider-group {
   display: flex;
@@ -6415,7 +7147,7 @@ select.input-field {
   margin-bottom: 1rem;
 }
 .fee-result-card {
-  padding: 0.85rem 1rem;
+  padding: 1rem 1.25rem;
   border-radius: 10px;
   text-align: center;
 }
@@ -6470,7 +7202,7 @@ select.input-field {
   color: var(--color-text-muted);
   font-style: italic;
   margin: 0;
-  line-height: 1.4;
+  line-height: 1.5;
 }
 
 /* ── 重叠度热力图 ── */
@@ -6564,7 +7296,7 @@ select.input-field {
   gap: 0.6rem;
 }
 .strategy-preset-card {
-  padding: 0.6rem 0.75rem;
+  padding: 0.75rem 1rem;
   border: 2px solid var(--color-border);
   border-radius: 8px;
   cursor: pointer;
@@ -6632,7 +7364,7 @@ select.input-field {
   display: flex;
   align-items: center;
   gap: 0.6rem;
-  padding: 0.4rem 0.6rem;
+  padding: 0.55rem 0.75rem;
   background: var(--color-bg-secondary);
   border-radius: 6px;
   border-left: 3px solid transparent;
@@ -6709,5 +7441,122 @@ select.input-field {
   .config-input {
     width: 80px;
   }
+
+  /* 大弹窗适配 */
+  .modal-lg {
+    max-width: 95vw;
+  }
+  .modal-sm {
+    max-width: 95vw;
+  }
+
+  /* 5年收益统计网格 */
+  .chart-5y-stats {
+    grid-template-columns: 1fr 1fr;
+    gap: 0.4rem;
+  }
+
+  /* 费用计算网格 */
+  .fee-calc-grid,
+  .fee-result-cards {
+    grid-template-columns: 1fr;
+  }
+
+  /* 策略预设网格 */
+  .strategy-presets-grid {
+    grid-template-columns: 1fr;
+  }
+
+  /* 分析模式 tabs 横向滚动 */
+  .analysis-tabs {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    flex-wrap: nowrap;
+    scrollbar-width: none;
+    -ms-overflow-style: none;
+  }
+  .analysis-tabs::-webkit-scrollbar { display: none; }
+  .analysis-tabs .tab-btn {
+    flex-shrink: 0;
+    white-space: nowrap;
+  }
+
+  /* 相关性热力图横向滚动 */
+  .overlap-heatmap {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    display: block;
+  }
+
+  /* 诊断结果表格 */
+  .analysis-section :deep(table) {
+    display: block;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    white-space: nowrap;
+  }
+
+  /* 全景诊断结果中的表格 */
+  .ai-mode-result :deep(table) {
+    display: block;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    white-space: nowrap;
+    font-size: 0.75rem;
+  }
+}
+
+/* Watchlist Styles */
+.fund-name-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.fund-name-cell .fund-code {
+  font-weight: 600;
+  font-size: 0.85rem;
+}
+.fund-name-cell .fund-name {
+  font-size: 0.75rem;
+  color: var(--color-muted);
+}
+.percentile-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-size: 0.75rem;
+  font-weight: 500;
+}
+.percentile-badge.low {
+  background: rgba(76, 175, 80, 0.15);
+  color: #4caf50;
+}
+.percentile-badge.mid {
+  background: rgba(255, 152, 0, 0.15);
+  color: #ff9800;
+}
+.percentile-badge.high {
+  background: rgba(244, 67, 54, 0.15);
+  color: #f44336;
+}
+.priority-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-size: 0.75rem;
+  font-weight: 500;
+}
+.priority-badge.priority-0 { background: var(--color-bg-tertiary); color: var(--color-muted); }
+.priority-badge.priority-1 { background: rgba(33, 150, 243, 0.15); color: #2196f3; }
+.priority-badge.priority-2 { background: rgba(255, 152, 0, 0.15); color: #ff9800; }
+.priority-badge.priority-3 { background: rgba(244, 67, 54, 0.15); color: #f44336; }
+.notes-cell {
+  max-width: 150px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.actions-cell {
+  white-space: nowrap;
 }
 </style>

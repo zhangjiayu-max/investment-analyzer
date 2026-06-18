@@ -6,7 +6,7 @@ import {
   submitChatFeedback, submitLlmFeedback,
   cancelConversationExecution,
   resumeConversationStream,
-  listTraces,
+  listTraces, listAgents,
   getConversationEvaluation, evaluateConversation, evaluateConversationWithLLM,
 } from '../api'
 import ConfirmDialog from './ConfirmDialog.vue'
@@ -31,6 +31,7 @@ const confirm = ref({ visible: false, title: '', message: '', danger: false, onC
 const selectedConv = ref(null)
 const messages = ref([])
 const inputText = ref('')
+const agents = ref([])
 const messagesContainer = ref(null)
 const showMobileSidebar = ref(false)
 const isRecovering = ref(false)
@@ -58,6 +59,14 @@ onMounted(async () => {
   window.addEventListener('pageshow', handlePageShow)
   if (!(await checkPendingTasks())) {
     await autoSelectLastConversation()
+  }
+  // 加载 Agent 列表供 @mention 使用
+  try {
+    const res = await listAgents()
+    const allAgents = res.data?.agents || res.data || []
+    agents.value = allAgents.filter(a => a.is_specialist)
+  } catch (e) {
+    console.warn('加载 Agent 列表失败:', e)
   }
 })
 
@@ -386,12 +395,32 @@ function handleDeleteConversation(conv) {
 
 // ─── 发送消息 ───
 
+// 从文本中提取 @mention 的 agent_key 列表，并清理文本中的 @标记
+function extractMentions(text) {
+  const targetSpecialists = []
+  // 匹配 @Agent名称 模式（名称中可含中文、字母、数字）
+  let cleanText = text
+  for (const agent of agents.value) {
+    const pattern = new RegExp(`@${agent.name}(?=\\s|$)`, 'g')
+    if (pattern.test(cleanText)) {
+      targetSpecialists.push(agent.agent_key)
+      cleanText = cleanText.replace(pattern, '').trim()
+    }
+  }
+  // 清理多余空格
+  cleanText = cleanText.replace(/\s+/g, ' ').trim()
+  return { targetSpecialists, cleanText }
+}
+
 async function handleSend() {
-  const text = inputText.value.trim()
-  if (!text || !selectedConv.value || sending.value) return
+  const rawText = inputText.value.trim()
+  if (!rawText || !selectedConv.value || sending.value) return
+
+  const { targetSpecialists, cleanText } = extractMentions(rawText)
+  const text = cleanText || rawText
 
   inputText.value = ''
-  messages.value.push({ role: 'user', content: text, created_at: new Date().toISOString() })
+  messages.value.push({ role: 'user', content: rawText, created_at: new Date().toISOString() })
   await nextTick()
   scrollToBottom()
 
@@ -445,7 +474,7 @@ async function handleSend() {
         }
       },
     })
-  })
+  }, targetSpecialists)
   startStream(convId, controller)
   addTask(convId, null, selectedConv.value?.title || `对话 #${convId}`)
 }
@@ -1038,6 +1067,7 @@ function stopPollingProgress() {
           v-model:inputText="inputText"
           :sending="sending"
           :statusMessage="currentStream?.statusMessage"
+          :agents="agents"
           @send="handleSend"
           @cancel="handleCancelStream"
         />
@@ -1098,9 +1128,23 @@ function stopPollingProgress() {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 0.75rem 1.25rem;
+  padding: 0.85rem 1.5rem;
   border-bottom: 1px solid var(--color-border);
-  background: var(--color-bg-card);
+  background: var(--glass-bg);
+  backdrop-filter: blur(var(--glass-blur));
+  -webkit-backdrop-filter: blur(var(--glass-blur));
+  position: relative;
+  z-index: 2;
+}
+/* 底部渐变分割线 */
+.chat-header::after {
+  content: '';
+  position: absolute;
+  bottom: -1px;
+  left: 0;
+  right: 0;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, var(--color-primary-border), transparent);
 }
 
 .chat-header-info {
@@ -1110,7 +1154,7 @@ function stopPollingProgress() {
 }
 
 .chat-agent-icon { font-size: 1.2rem; }
-.chat-agent-name { font-size: 0.85rem; font-weight: 600; color: var(--color-text-primary); }
+.chat-agent-name { font-size: 0.88rem; font-weight: 600; color: var(--color-text-primary); }
 
 .btn-conv-id {
   display: flex;
@@ -1149,10 +1193,10 @@ function stopPollingProgress() {
   min-height: 0;
   overflow-y: auto;
   -webkit-overflow-scrolling: touch;
-  padding: 1.25rem;
+  padding: 1.5rem;
   display: flex;
   flex-direction: column;
-  gap: 1rem;
+  gap: 1.1rem;
 }
 
 /* ── 空状态 ── */
@@ -1163,12 +1207,31 @@ function stopPollingProgress() {
   align-items: center;
   justify-content: center;
   color: var(--color-text-muted);
-  gap: 0.5rem;
+  gap: 0.75rem;
+  padding: 2rem;
 }
-
-.chat-empty-icon { font-size: 3rem; }
-.chat-empty h3 { margin: 0; font-size: 1rem; color: var(--color-text-secondary); }
-.chat-empty p { margin: 0; font-size: 0.8rem; }
+.chat-empty-icon {
+  font-size: 4rem;
+  background: linear-gradient(135deg, var(--color-primary-400), var(--color-accent-400));
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  filter: drop-shadow(0 2px 8px var(--color-primary-glow));
+}
+.chat-empty h3 {
+  margin: 0;
+  font-size: 1.1rem;
+  color: var(--color-text-secondary);
+  font-weight: 600;
+}
+.chat-empty p {
+  margin: 0;
+  font-size: 0.88rem;
+  color: var(--color-text-muted);
+  max-width: 260px;
+  text-align: center;
+  line-height: 1.6;
+}
 
 /* ── Transition ── */
 .fade-enter-active { transition: opacity 0.2s; }
@@ -1203,8 +1266,10 @@ function stopPollingProgress() {
     width: 36px;
     height: 36px;
     border-radius: var(--radius-md);
-    background: var(--color-bg-card);
-    border: 1px solid var(--color-border);
+    background: var(--glass-bg);
+    backdrop-filter: blur(var(--glass-blur));
+    -webkit-backdrop-filter: blur(var(--glass-blur));
+    border: 1px solid var(--glass-border);
     color: var(--color-text-secondary);
     cursor: pointer;
   }
@@ -1214,10 +1279,20 @@ function stopPollingProgress() {
     min-width: 0;
     min-height: 0;
     overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    height: calc(100vh - 120px);
+    height: calc(100dvh - 120px);
   }
 
   .chat-header {
     padding-left: 2.5rem;
+  }
+
+  .messages-container {
+    flex: 1;
+    padding: 0.75rem;
+    gap: 0.6rem;
   }
 }
 </style>

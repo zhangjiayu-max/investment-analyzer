@@ -348,14 +348,14 @@ export function sendMessage(convId, content) {
  * @param {function} onEvent - 事件回调 (event: {type, data}) => void
  * @returns {AbortController} 用于取消请求
  */
-export function sendMessageStream(convId, content, onEvent) {
+export function sendMessageStream(convId, content, onEvent, targetSpecialists = []) {
   const controller = new AbortController()
   const baseURL = api.defaults.baseURL || ''
 
   fetch(`${baseURL}/conversations/${convId}/messages/stream`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ content }),
+    body: JSON.stringify({ content, target_specialists: targetSpecialists }),
     signal: controller.signal,
   }).then(async response => {
     // 检查 HTTP 错误状态（如 409 重复请求）
@@ -952,6 +952,15 @@ export function listPendingTransactions() {
   return api.get('/portfolio/pending-transactions')
 }
 
+/** 获取交易操作审计日志 */
+export function getAuditLog(params = {}) {
+  const query = new URLSearchParams()
+  if (params.fund_code) query.set('fund_code', params.fund_code)
+  if (params.tx_id) query.set('tx_id', params.tx_id)
+  if (params.limit) query.set('limit', params.limit)
+  return api.get(`/portfolio/audit-log?${query.toString()}`)
+}
+
 /** 新增交易记录 */
 export function createPortfolioTransaction(data) {
   return api.post('/portfolio/transactions', data)
@@ -1091,24 +1100,74 @@ export function listBadCases(source = '', limit = 100) {
 
 // ── AI 持仓分析 4 模式 API ──────────────────────────────────
 
-/** 模式1：全景诊断 */
+/** 模式1：全景诊断（异步，立即返回 record_id） */
 export function runPanoramaAnalysis() {
-  return api.post('/portfolio/analysis/panorama', {}, { timeout: 300000 })
+  return api.post('/portfolio/analysis/panorama', {}, { timeout: 30000 })
 }
 
-/** 模式2：单基金深度分析 */
+/** 查询全景诊断执行状态 */
+export function getPanoramaStatus(recordId) {
+  return api.get(`/portfolio/analysis/panorama/${recordId}/status`)
+}
+
+/** 轮询全景诊断直到完成 */
+export function pollPanoramaStatus(recordId, onProgress, interval = 3000) {
+  let cancelled = false
+  const poll = async () => {
+    while (!cancelled) {
+      try {
+        const { data } = await getPanoramaStatus(recordId)
+        onProgress(data)
+        if (data.status === 'done' || data.status === 'error') return data
+      } catch (e) {
+        onProgress({ status: 'error', error: e.message })
+        return null
+      }
+      await new Promise(r => setTimeout(r, interval))
+    }
+  }
+  poll()
+  return () => { cancelled = true }
+}
+
+/** 模式2：单基金深度分析（异步） */
 export function runDeepDiveAnalysis(holdingId) {
-  return api.post(`/portfolio/analysis/deep-dive/${holdingId}`, {}, { timeout: 300000 })
+  return api.post(`/portfolio/analysis/deep-dive/${holdingId}`, {}, { timeout: 30000 })
 }
 
-/** 模式3：交易复盘 */
+/** 模式3：交易复盘（异步） */
 export function runTradeReview(startDate, endDate) {
-  return api.post('/portfolio/analysis/trade-review', { start_date: startDate, end_date: endDate }, { timeout: 300000 })
+  return api.post('/portfolio/analysis/trade-review', { start_date: startDate, end_date: endDate }, { timeout: 30000 })
 }
 
-/** 模式4：指定基金分析 */
+/** 模式4：指定基金分析（异步） */
 export function runFundAnalysis(fundCode) {
-  return api.post('/portfolio/analysis/fund-analysis', { fund_code: fundCode }, { timeout: 300000 })
+  return api.post('/portfolio/analysis/fund-analysis', { fund_code: fundCode }, { timeout: 30000 })
+}
+
+/** 查询任意分析执行状态 */
+export function getAnalysisStatus(recordId) {
+  return api.get(`/portfolio/analysis/${recordId}/status`)
+}
+
+/** 轮询任意分析直到完成 */
+export function pollAnalysisStatus(recordId, onProgress, interval = 3000) {
+  let cancelled = false
+  const poll = async () => {
+    while (!cancelled) {
+      try {
+        const { data } = await getAnalysisStatus(recordId)
+        onProgress(data)
+        if (data.status === 'done' || data.status === 'error') return data
+      } catch (e) {
+        onProgress({ status: 'error', error: e.message })
+        return null
+      }
+      await new Promise(r => setTimeout(r, interval))
+    }
+  }
+  poll()
+  return () => { cancelled = true }
 }
 
 /** 列出全景诊断记录 */
@@ -1420,6 +1479,61 @@ export function updateSystemConfig(key, value) {
 /** 重置所有配置为默认值 */
 export function resetSystemConfigs() {
   return api.post('/system-config/reset')
+}
+
+// ── 关注列表 API ──────────────────────────────────────
+
+/** 获取关注列表 */
+export function listWatchlist(status = '', category = '') {
+  const params = {}
+  if (status) params.status = status
+  if (category) params.category = category
+  return api.get('/watchlist', { params })
+}
+
+/** 获取关注列表统计 */
+export function getWatchlistSummary() {
+  return api.get('/watchlist/summary')
+}
+
+/** 获取单条关注记录 */
+export function getWatchlistItem(id) {
+  return api.get(`/watchlist/${id}`)
+}
+
+/** 添加基金到关注列表 */
+export function addToWatchlist(data) {
+  return api.post('/watchlist', data)
+}
+
+/** 批量添加基金到关注列表 */
+export function batchAddToWatchlist(items) {
+  return api.post('/watchlist/batch', { items })
+}
+
+/** 更新关注记录 */
+export function updateWatchlistItem(id, data) {
+  return api.put(`/watchlist/${id}`, data)
+}
+
+/** 从关注列表移除 */
+export function removeWatchlistItem(id) {
+  return api.delete(`/watchlist/${id}`)
+}
+
+/** 批量刷新关注列表基金净值 */
+export function refreshWatchlistNavs() {
+  return api.post('/watchlist/refresh-navs', {}, { timeout: 60000 })
+}
+
+/** 标记为已买入 */
+export function markWatchlistBought(id) {
+  return api.post(`/watchlist/${id}/mark-bought`)
+}
+
+/** 查询基金信息并自动填充 */
+export function lookupWatchlistFund(id) {
+  return api.post(`/watchlist/${id}/lookup`, {}, { timeout: 30000 })
 }
 
 export default api

@@ -145,6 +145,23 @@ TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "fetch_article",
+            "description": "抓取并解析文章内容。当用户提供链接（微信公众号、财经网站等）时调用此工具获取文章内容。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {
+                        "type": "string",
+                        "description": "文章链接 URL",
+                    },
+                },
+                "required": ["url"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "calculate_metrics",
             "description": "计算投资指标。当用户问到收益率、回撤、定投效果等需要计算的问题时调用。",
             "parameters": {
@@ -516,6 +533,12 @@ TOOLS = [
 # ── Tool 执行器 ──────────────────────────────────────
 
 
+# 特殊工具超时覆盖（Playwright 抓取较慢）
+_TOOL_TIMEOUT_OVERRIDES = {
+    "fetch_article": 60,  # Playwright 渲染微信文章需要更长时间
+}
+
+
 def execute_tool(name: str, arguments: dict, trace_id: str = "",
                  timeout: int = 30) -> str:
     """执行工具调用，返回 JSON 字符串结果。
@@ -530,6 +553,9 @@ def execute_tool(name: str, arguments: dict, trace_id: str = "",
     """
     import time as _time
 
+    # 使用工具特定超时（如有）
+    effective_timeout = _TOOL_TIMEOUT_OVERRIDES.get(name, timeout)
+
     t0 = _time.time()
     error_category = "none"
 
@@ -543,10 +569,10 @@ def execute_tool(name: str, arguments: dict, trace_id: str = "",
     duration_ms = int((_time.time() - t0) * 1000)
 
     # 超时检测
-    if duration_ms > timeout * 1000:
+    if duration_ms > effective_timeout * 1000:
         error_category = "timeout"
-        logger.warning(f"工具 {name} 执行超时 ({duration_ms}ms > {timeout}s)")
-        result = json.dumps({"error": f"工具 {name} 执行超时 ({timeout}s)", "error_category": "timeout"}, ensure_ascii=False)
+        logger.warning(f"工具 {name} 执行超时 ({duration_ms}ms > {effective_timeout}s)")
+        result = json.dumps({"error": f"工具 {name} 执行超时 ({effective_timeout}s)", "error_category": "timeout"}, ensure_ascii=False)
 
     # 审计日志（异步写入，不阻塞主流程）
     try:
@@ -569,6 +595,8 @@ def _execute_tool_impl(name: str, arguments: dict) -> str:
         return _get_valuation_list(arguments)
     elif name == "get_author_opinions":
         return _get_author_opinions(arguments)
+    elif name == "fetch_article":
+        return _fetch_article(arguments)
     elif name == "calculate_metrics":
         return _calculate_metrics(arguments)
     elif name == "web_search":
@@ -659,6 +687,53 @@ def _log_tool_audit(trace_id: str, tool_name: str, arguments: dict,
 # ── 各工具实现 ──────────────────────────────────────
 
 
+def _fetch_article(args: dict) -> str:
+    """抓取并解析文章内容。"""
+    url = args.get("url", "")
+    if not url:
+        return json.dumps({"error": "请提供文章链接"}, ensure_ascii=False)
+
+    try:
+        import asyncio
+        from article_reader import fetch_article
+
+        # 运行异步函数（Playwright 渲染微信文章可能较慢，给 60s）
+        loop = asyncio.new_event_loop()
+        try:
+            article = loop.run_until_complete(fetch_article(url))
+        finally:
+            loop.close()
+
+        if not article:
+            return json.dumps({"error": "文章抓取失败，请检查链接是否有效"}, ensure_ascii=False)
+
+        title = article.get("title", "未知标题")
+        # article_reader 返回 content_text 字段
+        content = article.get("content_text", "") or article.get("content", "")
+        author = article.get("author", "")
+        publish_time = article.get("publish_time", "")
+
+        # 截取前 5000 字符
+        max_chars = 5000
+        if len(content) > max_chars:
+            content = content[:max_chars] + "\n\n... (内容已截断)"
+
+        return json.dumps({
+            "success": True,
+            "title": title,
+            "author": author,
+            "publish_time": publish_time,
+            "content": content,
+            "content_length": len(content),
+        }, ensure_ascii=False)
+
+    except ImportError:
+        return json.dumps({"error": "文章抓取模块未安装"}, ensure_ascii=False)
+    except Exception as e:
+        logger.error(f"文章抓取失败: {e}")
+        return json.dumps({"error": f"文章抓取失败: {str(e)}"}, ensure_ascii=False)
+
+
 def _query_valuation(args: dict) -> str:
     """查询指定指数的估值数据。"""
     index_name = args.get("index_name", "")
@@ -700,6 +775,30 @@ def _query_valuation(args: dict) -> str:
                 matched.append({"code": r["index_code"], "name": r["index_name"]})
 
     if not matched:
+        # 兜底：尝试天天基金 API
+        try:
+            from mcp.ttfund_client import get_ttfund_client
+            client = get_ttfund_client()
+            raw = client._invoke("fund_index", {"index_id": index_name, "query_scope": "valuation"})
+            if isinstance(raw, dict) and raw.get("success"):
+                data = raw.get("data", {})
+                v = data.get("valuation", {})
+                profile = data.get("index_profile", {})
+                if v:
+                    result = {
+                        "index_name": profile.get("index_name", index_name),
+                        "index_code": profile.get("index_code", ""),
+                        "source": "天天基金",
+                        "pe_ttm": v.get("pe_ttm"),
+                        "pe_percentile_10y": v.get("pe_percentile_10y"),
+                        "pb": v.get("pb"),
+                        "pb_percentile_10y": v.get("pb_percentile_10y"),
+                        "roe": v.get("roe"),
+                    }
+                    return json.dumps({"ok": True, "indexes": [result]}, ensure_ascii=False)
+        except Exception as e:
+            logger.warning(f"天天基金估值兜底失败 {index_name}: {e}")
+
         return json.dumps({"error": f"未找到'{index_name}'相关的指数数据"}, ensure_ascii=False)
 
     # 查询每个匹配指数的详细估值

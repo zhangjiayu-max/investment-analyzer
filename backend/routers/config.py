@@ -46,3 +46,36 @@ async def reset_configs_api():
     """重置所有配置为默认值。"""
     count = reset_configs()
     return {"ok": True, "reset_count": count}
+
+
+# ── 天天基金 ttskill CLI 管理 ──────────────────────────────
+
+
+@router.get("/api/config/ttfund/status")
+async def ttfund_status():
+    """检查 ttskill 安装状态和登录状态。"""
+    from mcp.ttfund_client import is_installed, check_login
+    if not is_installed():
+        return {"installed": False, "logged_in": False}
+    return check_login()
+
+
+@router.post("/api/config/ttfund/install")
+async def ttfund_install():
+    """安装 ttskill CLI 并同步业务 Skill 包。"""
+    from mcp.ttfund_client import install
+    try:
+        result = install()
+        return result
+    except Exception as e:
+        raise HTTPException(500, f"安装失败: {e}")
+
+
+@router.post("/api/config/ttfund/login")
+async def ttfund_login():
+    """触发 ttskill 扫码登录。"""
+    from mcp.ttfund_client import login
+    result = login()
+    if not result.get("ok"):
+        raise HTTPException(400, result.get("error", "登录失败"))
+    return result

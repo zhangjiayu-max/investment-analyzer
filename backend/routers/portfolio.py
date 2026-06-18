@@ -894,6 +894,82 @@ def _get_valuation_context_for_fund(fund_code: str, fund_name: str) -> str:
         return f"\n## 目标基金估值\n获取失败: {e}"
 
 
+def _fetch_valuation_fallback(index_name: str = "", fund_code: str = "") -> str | None:
+    """估值数据兜底：本地 DB 没有时，依次尝试盈米 MCP → 天天基金 API。"""
+    # 1) 盈米 MCP GetFundDiagnosis（数据更丰富，含估值百分位、风险等级、胜率）
+    if fund_code:
+        try:
+            from mcp.yingmi_client import get_yingmi_client
+            ym = get_yingmi_client()
+            diag = ym.get_fund_diagnosis(fund_code)
+            if diag and isinstance(diag, str) and len(diag) > 30:
+                # 尝试从 JSON 中提取关键估值信息
+                try:
+                    import json as _json
+                    d = _json.loads(diag)
+                    summary = d.get("diagnoseSummary", {}).get("data", {})
+                    parts = []
+                    # 估值
+                    risk_opp = summary.get("riskOpp", {})
+                    val = risk_opp.get("valuation", "")
+                    if val:
+                        parts.append(f"估值: {val}")
+                    # 胜率
+                    win = summary.get("winProb", {}).get("winRate", "")
+                    if win:
+                        parts.append(f"胜率: {win}")
+                    # 市场温度
+                    thermo = summary.get("thermometer", {})
+                    temp = thermo.get("currentTemperature", "")
+                    if temp:
+                        parts.append(f"市场温度: {temp}°C")
+                    # 风险等级
+                    risk_info = summary.get("riskLevelInfo", {})
+                    risk = risk_info.get("fundRiskLevel", "")
+                    if risk:
+                        parts.append(f"风险等级: {risk}")
+                    if parts:
+                        return f"[盈米] " + ", ".join(parts)
+                except _json.JSONDecodeError:
+                    pass
+                # JSON 解析失败，返回原文摘要
+                return f"[盈米诊断] {diag[:600]}"
+        except Exception as e:
+            logger.warning(f"盈米 MCP 兜底失败 {fund_code}: {e}")
+
+    # 2) 天天基金 API（备选）
+    if index_name:
+        try:
+            from mcp.ttfund_client import get_ttfund_client
+            client = get_ttfund_client()
+            # fund_index 返回 dict（估值+行情等结构化数据）
+            raw = client._invoke("fund_index", {"index_id": index_name, "query_scope": "valuation"})
+            if isinstance(raw, dict) and raw.get("success"):
+                data = raw.get("data", {})
+                v = data.get("valuation", {})
+                profile = data.get("index_profile", {})
+                if v:
+                    parts = []
+                    pe = v.get("pe_ttm")
+                    pe_pct = v.get("pe_percentile_10y")
+                    if pe is not None:
+                        parts.append(f"PE={pe:.2f} (10年{pe_pct:.0f}%分位)" if pe_pct else f"PE={pe:.2f}")
+                    pb = v.get("pb")
+                    pb_pct = v.get("pb_percentile_10y")
+                    if pb is not None:
+                        parts.append(f"PB={pb:.2f} (10年{pb_pct:.0f}%分位)" if pb_pct else f"PB={pb:.2f}")
+                    roe = v.get("roe")
+                    if roe:
+                        parts.append(f"ROE={roe:.1f}%")
+                    idx_name = profile.get("index_name", index_name)
+                    if parts:
+                        return f"[天天基金] {idx_name}: " + ", ".join(parts)
+        except Exception as e:
+            logger.warning(f"天天基金兜底失败 {index_name}: {e}")
+
+    return None
+
+
 def _get_holdings_valuation_context(holdings: list) -> str:
     """按持仓匹配估值数据 — 让 LLM 知道每只基金对应的估值。"""
     from db.valuations import search_indexes_by_keyword, get_latest_valuation
@@ -928,7 +1004,13 @@ def _get_holdings_valuation_context(holdings: list) -> str:
         except Exception:
             pass
         if not found:
-            lines.append(f"- {fund_name}（{idx_name}）: 估值数据未匹配到")
+            # 兜底：尝试天天基金 / 盈米 MCP
+            fallback = _fetch_valuation_fallback(index_name=idx_name, fund_code=h.get("fund_code", ""))
+            if fallback:
+                lines.append(f"- {fund_name}（{idx_name}）: {fallback}")
+                matched += 1
+            else:
+                lines.append(f"- {fund_name}（{idx_name}）: 估值数据未匹配到")
 
     header = f"## 持仓估值匹配（已匹配 {matched}/{len([h for h in holdings if (h.get('shares') or 0) > 0])} 只）"
     if not lines:
@@ -1132,7 +1214,7 @@ def _get_mcp_context(holdings: list[dict]) -> dict:
 
 @router.post("/api/portfolio/analysis/panorama")
 async def panorama_analysis_api(req: PanoramaAnalysisRequest):
-    """模式 1：全景诊断 — 从全局视角诊断投资组合健康状况。"""
+    """模式 1：全景诊断 — 从全局视角诊断投资组合健康状况（异步执行）。"""
     holdings = list_holdings()
     if not holdings:
         raise HTTPException(400, "暂无持仓数据")
@@ -1140,72 +1222,80 @@ async def panorama_analysis_api(req: PanoramaAnalysisRequest):
     agent = get_analysis_agent(3)
     if not agent:
         raise HTTPException(404, "全景诊断分析师未配置")
-    system_prompt = agent["system_prompt"]
 
-    # 收集数据
-    diversification = get_portfolio_diversification()
-    total_value = diversification.get('total_value', 1) or 1
-
-    # 持仓明细
-    holdings_lines = []
-    for h in sorted(holdings, key=lambda x: (x.get('current_value', 0) or 0), reverse=True):
-        pct = (h.get('current_value', 0) or 0) / total_value * 100
-        holdings_lines.append(
-            f"- {h.get('fund_name','')}({h.get('fund_code','')}): "
-            f"账户 {h.get('account') or '花无缺'}, "
-            f"市值 {(h.get('current_value') or 0):.2f}, "
-            f"盈亏 {(h.get('profit_loss') or 0):.2f} ({(h.get('profit_rate') or 0)*100:.1f}%), "
-            f"占比 {pct:.1f}%"
-        )
-
-    # 类型分布
-    type_dist = diversification.get('type_distribution', {})
-    type_lines = [f"  - {k}: {v:.1f}%" for k, v in type_dist.items()]
-
-    # MCP 数据
-    mcp_context = _get_mcp_context(holdings)
-
-    # 估值数据（按持仓匹配，而非通用列表）
-    valuation_context = _get_holdings_valuation_context(holdings)
-
-    # 从 mcp_context 中提取新闻数据，单独格式化
-    news_section = _format_news_section(mcp_context)
-
-    # RAG 知识库检索
-    rag_context = ""
-    try:
-        fund_names = " ".join([h.get("fund_name", "") for h in holdings[:5]])
-        rag_query = f"投资组合 资产配置 风险分析 {fund_names}"
-        rag_result = build_rag_context_with_details(query=rag_query, limit=5)
-        rag_context = rag_result.get("context", "")
-        log_rag_search(
-            conversation_id=0, message_id=0, query=rag_query,
-            keywords=rag_result.get("keywords", []),
-            results=rag_result.get("results", []),
-            fts_count=rag_result.get("fts_count", 0),
-            chroma_count=rag_result.get("chroma_count", 0),
-            freshness_filtered=rag_result.get("freshness_filtered", 0),
-        )
-    except Exception as e:
-        logger.warning(f"RAG 检索失败: {e}")
-
-    user_content = (
-        f"## 持仓明细\n" + "\n".join(holdings_lines) +
-        f"\n\n## 类型分布\n" + "\n".join(type_lines) +
-        f"\n\n## 集中度\n- 前3大持仓占比: {diversification.get('top3_concentration', 0):.1f}%"
-        f"\n- 前5大持仓占比: {diversification.get('top5_concentration', 0):.1f}%\n"
-        f"\n## MCP 专业数据\n{json.dumps(mcp_context, ensure_ascii=False, indent=2)}\n"
-        f"\n{valuation_context}"
-        f"\n\n{news_section}"
-        f"\n\n## 知识库参考\n{rag_context[:1500] if rag_context else '暂无相关知识库内容'}"
+    # 创建记录（status='running'）
+    record_id = create_portfolio_analysis_record(
+        analysis_type="panorama",
+        summary=f"全景诊断 · {len(holdings)}只基金",
+        input_data=json.dumps({"holdings_count": len(holdings)}, ensure_ascii=False),
+        result_data="",
+        status="running",
+        agent_id=3,
     )
 
-    # 调用 LLM（带 10 分钟超时）
-    uid = f"panorama_{int(time.time())}"
-    _track_agent(uid, "全景诊断分析师", "持仓诊断")
+    # 后台执行分析
+    asyncio.create_task(_run_panorama_async(record_id, agent["system_prompt"], holdings))
+
+    return {"ok": True, "id": record_id, "status": "running"}
+
+
+async def _run_panorama_async(record_id: int, system_prompt: str, holdings: list):
+    """后台执行全景诊断分析。"""
+    uid = f"panorama_{record_id}"
     try:
+        diversification = get_portfolio_diversification()
+        total_value = diversification.get('total_value', 1) or 1
+
+        # 持仓明细
+        holdings_lines = []
+        for h in sorted(holdings, key=lambda x: (x.get('current_value', 0) or 0), reverse=True):
+            pct = (h.get('current_value', 0) or 0) / total_value * 100
+            holdings_lines.append(
+                f"- {h.get('fund_name','')}({h.get('fund_code','')}): "
+                f"账户 {h.get('account') or '花无缺'}, "
+                f"市值 {(h.get('current_value') or 0):.2f}, "
+                f"盈亏 {(h.get('profit_loss') or 0):.2f} ({(h.get('profit_rate') or 0)*100:.1f}%), "
+                f"占比 {pct:.1f}%"
+            )
+
+        # 类型分布
+        type_dist = diversification.get('type_distribution', {})
+        type_lines = [f"  - {k}: {v:.1f}%" for k, v in type_dist.items()]
+
+        # MCP 数据
+        mcp_context = _get_mcp_context(holdings)
+
+        # 估值数据
+        valuation_context = _get_holdings_valuation_context(holdings)
+
+        # 新闻数据
+        news_section = _format_news_section(mcp_context)
+
+        # RAG 知识库检索
+        rag_context = ""
+        try:
+            fund_names = " ".join([h.get("fund_name", "") for h in holdings[:5]])
+            rag_query = f"投资组合 资产配置 风险分析 {fund_names}"
+            rag_result = build_rag_context_with_details(query=rag_query, limit=5)
+            rag_context = rag_result.get("context", "")
+        except Exception as e:
+            logger.warning(f"RAG 检索失败: {e}")
+
+        user_content = (
+            f"## 持仓明细\n" + "\n".join(holdings_lines) +
+            f"\n\n## 类型分布\n" + "\n".join(type_lines) +
+            f"\n\n## 集中度\n- 前3大持仓占比: {diversification.get('top3_concentration', 0):.1f}%"
+            f"\n- 前5大持仓占比: {diversification.get('top5_concentration', 0):.1f}%\n"
+            f"\n## MCP 专业数据\n{json.dumps(mcp_context, ensure_ascii=False, indent=2)}\n"
+            f"\n{valuation_context}"
+            f"\n\n{news_section}"
+            f"\n\n## 知识库参考\n{rag_context[:1500] if rag_context else '暂无相关知识库内容'}"
+        )
+
+        # 调用 LLM
+        _track_agent(uid, "全景诊断分析师", "持仓诊断")
         from llm_service import _call_llm, MODEL
-        response = await asyncio.wait_for(asyncio.to_thread(lambda: _call_llm(
+        response = _call_llm(
             caller="portfolio_panorama",
             model=MODEL,
             messages=[
@@ -1214,31 +1304,51 @@ async def panorama_analysis_api(req: PanoramaAnalysisRequest):
             ],
             temperature=0.3,
             max_tokens=8192,
-        )), timeout=600)
+        )
         result_text = response.choices[0].message.content or ""
         tokens = response.usage.total_tokens if response.usage else 0
-    except asyncio.TimeoutError:
-        _untrack_agent(uid)
-        logger.error(f"全景诊断 LLM 调用超时")
-        raise HTTPException(504, "AI 分析超时，请重试")
+
+        # 更新记录
+        update_analysis_record(record_id, result_data=result_text, token_usage=tokens, status="done")
+        logger.info(f"全景诊断完成 record_id={record_id}")
+
     except Exception as e:
-        _untrack_agent(uid)
-        logger.error(f"全景诊断失败: {e}")
-        raise HTTPException(500, f"AI 分析失败: {str(e)}")
+        logger.error(f"全景诊断失败 record_id={record_id}: {e}")
+        update_analysis_record(record_id, status="error", error_msg=str(e))
     finally:
         _untrack_agent(uid)
 
-    # 保存记录
-    record_id = create_portfolio_analysis_record(
-        analysis_type="panorama",
-        summary=f"全景诊断 · {len(holdings)}只基金",
-        input_data=json.dumps({"holdings_count": len(holdings), "total_value": diversification.get('total_value')}, ensure_ascii=False),
-        result_data=result_text,
-        token_usage=tokens,
-        agent_id=3,
-    )
 
-    return {"id": record_id, "result": result_text, "token_usage": tokens}
+@router.get("/api/portfolio/analysis/panorama/{record_id}/status")
+async def panorama_status_api(record_id: int):
+    """查询全景诊断执行状态。"""
+    from db.portfolio import get_analysis_record_status
+    record = get_analysis_record_status(record_id)
+    if not record:
+        raise HTTPException(404, "记录不存在")
+    return {
+        "id": record["id"],
+        "status": record["status"],
+        "result": record.get("result_data"),
+        "token_usage": record.get("token_usage", 0),
+        "error": record.get("error_msg"),
+    }
+
+
+@router.get("/api/portfolio/analysis/{record_id}/status")
+async def analysis_status_api(record_id: int):
+    """查询任意分析记录执行状态（通用端点）。"""
+    from db.portfolio import get_analysis_record_status
+    record = get_analysis_record_status(record_id)
+    if not record:
+        raise HTTPException(404, "记录不存在")
+    return {
+        "id": record["id"],
+        "status": record["status"],
+        "result": record.get("result_data"),
+        "token_usage": record.get("token_usage", 0),
+        "error": record.get("error_msg"),
+    }
 
 
 def _get_fund_mcp_diagnosis(fund_code: str) -> str:
@@ -1319,13 +1429,25 @@ async def fund_deep_dive_api(holding_id: int, req: DeepDiveRequest):
                             if buy_val:
                                 valuation_section += f"首次买入时估值: PE {buy_val.get('current_value','?')} (分位 {buy_val.get('percentile','?')}%)\n"
             else:
-                valuation_section = "暂无估值历史数据\n"
+                # 本地有 index_code 但无估值历史，尝试兜底
+                idx_name = holding.get("index_name", "")
+                fallback = _fetch_valuation_fallback(index_name=idx_name, fund_code=fund_code)
+                if fallback:
+                    valuation_section = f"{fallback}\n"
+                else:
+                    valuation_section = "暂无估值历史数据\n"
         else:
             val = get_latest_valuation(fund_code)
             if val:
                 valuation_section = f"当前PE分位: {val.get('percentile','N/A')}%\n"
             else:
-                valuation_section = "该基金无跟踪指数数据\n"
+                # 兜底：尝试天天基金 / 盈米 MCP
+                idx_name = holding.get("index_name", "")
+                fallback = _fetch_valuation_fallback(index_name=idx_name, fund_code=fund_code)
+                if fallback:
+                    valuation_section = f"{fallback}\n"
+                else:
+                    valuation_section = "该基金无跟踪指数数据\n"
     except Exception as e:
         valuation_section = f"估值获取失败: {e}\n"
 
@@ -1444,34 +1566,42 @@ async def fund_deep_dive_api(holding_id: int, req: DeepDiveRequest):
         f"\n\n## 知识库参考\n{rag_context[:1500] if rag_context else '暂无相关知识库内容'}"
     )
 
-    try:
-        from llm_service import _call_llm, MODEL
-        response = await asyncio.to_thread(lambda: _call_llm(
-            caller="portfolio_deep_dive",
-            model=MODEL,
-            messages=[
-                {"role": "system", "content": agent["system_prompt"]},
-                {"role": "user", "content": user_content},
-            ],
-            temperature=0.3,
-            max_tokens=8192,
-        ))
-        result_text = response.choices[0].message.content or ""
-        tokens = response.usage.total_tokens if response.usage else 0
-    except Exception as e:
-        logger.error(f"深度分析失败: {e}")
-        raise HTTPException(500, f"AI 分析失败: {str(e)}")
-
+    # 创建记录（status='running'）
     record_id = create_portfolio_analysis_record(
         analysis_type="deep_dive",
         summary=f"深度分析 · {fund_name}",
         input_data=json.dumps({"holding_id": holding_id, "fund_code": fund_code}, ensure_ascii=False),
-        result_data=result_text,
-        token_usage=tokens,
+        status="running",
         agent_id=4,
     )
 
-    return {"id": record_id, "result": result_text, "token_usage": tokens}
+    # 后台执行分析
+    asyncio.create_task(_run_deep_dive_async(record_id, agent["system_prompt"], user_content))
+
+    return {"ok": True, "id": record_id, "status": "running"}
+
+
+async def _run_deep_dive_async(record_id: int, system_prompt: str, user_content: str):
+    """后台执行单基金深度分析。"""
+    try:
+        from llm_service import _call_llm, MODEL
+        response = _call_llm(
+            caller="portfolio_deep_dive",
+            model=MODEL,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_content},
+            ],
+            temperature=0.3,
+            max_tokens=8192,
+        )
+        result_text = response.choices[0].message.content or ""
+        tokens = response.usage.total_tokens if response.usage else 0
+        update_analysis_record(record_id, result_data=result_text, token_usage=tokens, status="done")
+        logger.info(f"深度分析完成 record_id={record_id}")
+    except Exception as e:
+        logger.error(f"深度分析失败 record_id={record_id}: {e}")
+        update_analysis_record(record_id, status="error", error_msg=str(e))
 
 
 @router.post("/api/portfolio/analysis/trade-review")
@@ -1564,35 +1694,43 @@ async def trade_review_api(req: TradeReviewRequest):
         f"\n## 交易明细（含交易时点估值）\n" + "\n".join(tx_lines)
     )
 
-    try:
-        from llm_service import _call_llm, MODEL
-        response = await asyncio.to_thread(lambda: _call_llm(
-            caller="portfolio_trade_review",
-            model=MODEL,
-            messages=[
-                {"role": "system", "content": agent["system_prompt"]},
-                {"role": "user", "content": user_content},
-            ],
-            temperature=0.3,
-            max_tokens=8192,
-        ))
-        result_text = response.choices[0].message.content or ""
-        tokens = response.usage.total_tokens if response.usage else 0
-    except Exception as e:
-        logger.error(f"交易复盘失败: {e}")
-        raise HTTPException(500, f"AI 分析失败: {str(e)}")
-
+    # 创建记录（status='running'）
     record_id = create_portfolio_analysis_record(
         analysis_type="trade_review",
         summary=f"交易复盘 · {buy_count}买{sell_count}卖",
         input_data=json.dumps({"start_date": req.start_date, "end_date": req.end_date, "tx_count": len(txs)},
                               ensure_ascii=False),
-        result_data=result_text,
-        token_usage=tokens,
+        status="running",
         agent_id=5,
     )
 
-    return {"id": record_id, "result": result_text, "token_usage": tokens}
+    # 后台执行分析
+    asyncio.create_task(_run_trade_review_async(record_id, agent["system_prompt"], user_content))
+
+    return {"ok": True, "id": record_id, "status": "running"}
+
+
+async def _run_trade_review_async(record_id: int, system_prompt: str, user_content: str):
+    """后台执行交易复盘分析。"""
+    try:
+        from llm_service import _call_llm, MODEL
+        response = _call_llm(
+            caller="portfolio_trade_review",
+            model=MODEL,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_content},
+            ],
+            temperature=0.3,
+            max_tokens=8192,
+        )
+        result_text = response.choices[0].message.content or ""
+        tokens = response.usage.total_tokens if response.usage else 0
+        update_analysis_record(record_id, result_data=result_text, token_usage=tokens, status="done")
+        logger.info(f"交易复盘完成 record_id={record_id}")
+    except Exception as e:
+        logger.error(f"交易复盘失败 record_id={record_id}: {e}")
+        update_analysis_record(record_id, status="error", error_msg=str(e))
 
 
 @router.post("/api/portfolio/analysis/what-if")
@@ -1753,9 +1891,26 @@ async def fund_analysis_api(req: dict):
         f"\n{valuation_context}"
     )
 
+    # 创建记录（status='running'）
+    record_id = create_portfolio_analysis_record(
+        analysis_type="what_if",
+        summary=f"指定基金分析 · {fund_name}({fund_code})",
+        input_data=json.dumps({"fund_code": fund_code, "fund_name": fund_name}, ensure_ascii=False),
+        status="running",
+        agent_id=6,
+    )
+
+    # 后台执行分析
+    asyncio.create_task(_run_fund_analysis_async(record_id, system_prompt, user_content))
+
+    return {"ok": True, "id": record_id, "status": "running"}
+
+
+async def _run_fund_analysis_async(record_id: int, system_prompt: str, user_content: str):
+    """后台执行指定基金分析。"""
     try:
         from llm_service import _call_llm, MODEL
-        response = await asyncio.to_thread(lambda: _call_llm(
+        response = _call_llm(
             caller="portfolio_fund_analysis",
             model=MODEL,
             messages=[
@@ -1764,23 +1919,14 @@ async def fund_analysis_api(req: dict):
             ],
             temperature=0.3,
             max_tokens=8192,
-        ))
+        )
         result_text = response.choices[0].message.content or ""
         tokens = response.usage.total_tokens if response.usage else 0
+        update_analysis_record(record_id, result_data=result_text, token_usage=tokens, status="done")
+        logger.info(f"指定基金分析完成 record_id={record_id}")
     except Exception as e:
-        logger.error(f"指定基金分析失败: {e}")
-        raise HTTPException(500, f"AI 分析失败: {str(e)}")
-
-    record_id = create_portfolio_analysis_record(
-        analysis_type="what_if",
-        summary=f"指定基金分析 · {fund_name}({fund_code})",
-        input_data=json.dumps({"fund_code": fund_code, "fund_name": fund_name}, ensure_ascii=False),
-        result_data=result_text,
-        token_usage=tokens,
-        agent_id=6,
-    )
-
-    return {"id": record_id, "result": result_text, "token_usage": tokens}
+        logger.error(f"指定基金分析失败 record_id={record_id}: {e}")
+        update_analysis_record(record_id, status="error", error_msg=str(e))
 
 
 @router.get("/api/portfolio/analysis/fund-analysis/records")
@@ -1853,6 +1999,7 @@ async def scan_portfolio_alerts():
     concentration_threshold = get_config_int('alert.concentration_pct', 30)  # 集中度(%)
     cash_high_pct = get_config_int('alert.cash_high_pct', 15)    # 现金闲置(%)
     stale_days = get_config_int('alert.stale_days', 5)           # 数据过期(天)
+    buy_drop_threshold = get_config_int('alert.buy_drop_pct', 4)  # 补仓后跌幅(%)
 
     generated = 0
     today = datetime.now().strftime("%Y-%m-%d")
@@ -2005,6 +2152,34 @@ async def scan_portfolio_alerts():
     except Exception as e:
         logger.warning(f"[alert_scan] 数据过期预警异常: {e}")
 
+    # ── 6. 补仓后跌幅预警 ──
+    try:
+        for h in holdings:
+            code = h.get("fund_code", "")
+            name = h.get("fund_name", code)
+            if not code:
+                continue
+            last_buy_price = h.get("last_buy_price")
+            current_price = h.get("current_price")
+            if not last_buy_price or last_buy_price <= 0 or not current_price:
+                continue
+            drop_pct = (last_buy_price - current_price) / last_buy_price * 100
+            if drop_pct >= buy_drop_threshold:
+                last_buy_date = h.get("last_buy_date", "")
+                if should_create("buy_drop_alert", code):
+                    create_alert(
+                        alert_type="buy_drop_alert",
+                        title=f"{name} 补仓后下跌 {drop_pct:.1f}%",
+                        content=f"{name}（{code}）最近一次买入价 {last_buy_price:.4f}（{last_buy_date}），当前净值 {current_price:.4f}，已下跌 {drop_pct:.1f}%（阈值 {buy_drop_threshold}%）。请评估是否继续持有或止损。",
+                        severity="danger" if drop_pct >= buy_drop_threshold * 1.5 else "warning",
+                        related_fund_code=code,
+                        related_fund_name=name,
+                        source="system_scan",
+                    )
+                    generated += 1
+    except Exception as e:
+        logger.warning(f"[alert_scan] 补仓后跌幅预警异常: {e}")
+
     return {"ok": True, "generated": generated}
 
 
@@ -2036,12 +2211,42 @@ async def get_transaction_tags_api(tx_id: int):
 async def list_pending_transactions_api():
     """获取所有待确认交易（包括没有 holding_id 的新建买入）。"""
     txs = list_transactions(status="pending", limit=200, include_system=False)
-    # 为没有 holding_id 的交易补充基金名称
+    # 为交易补充基金名称
     for tx in txs:
-        if not tx.get("holding_id") and not tx.get("_fund_name"):
-            tx["_fund_name"] = tx.get("fund_name") or tx.get("fund_code", "未知基金")
-            tx["_fund_code"] = tx.get("fund_code", "")
+        if not tx.get("fund_name"):
+            # 从持仓表查基金名称
+            fund_code = tx.get("fund_code", "")
+            if fund_code:
+                from db.portfolio import get_holding_by_fund
+                h = get_holding_by_fund(fund_code)
+                if h:
+                    tx["fund_name"] = h.get("fund_name", fund_code)
+                else:
+                    tx["fund_name"] = fund_code
     return {"transactions": txs}
+
+
+@router.get("/api/portfolio/audit-log")
+async def get_audit_log(fund_code: str = None, tx_id: int = None, limit: int = 50):
+    """获取交易操作审计日志。"""
+    from db._conn import _get_conn
+    conn = _get_conn()
+    conn.row_factory = __import__('sqlite3').Row
+    conditions = []
+    params = []
+    if fund_code:
+        conditions.append("fund_code = ?")
+        params.append(fund_code)
+    if tx_id:
+        conditions.append("tx_id = ?")
+        params.append(tx_id)
+    where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+    rows = conn.execute(
+        f"SELECT * FROM portfolio_tx_audit_log {where} ORDER BY id DESC LIMIT ?",
+        params + [limit]
+    ).fetchall()
+    conn.close()
+    return {"logs": [dict(r) for r in rows]}
 
 
 @router.get("/api/portfolio/{holding_id}")

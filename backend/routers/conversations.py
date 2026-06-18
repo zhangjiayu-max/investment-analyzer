@@ -44,6 +44,7 @@ class CreateConversationRequest(BaseModel):
 
 class SendMessageRequest(BaseModel):
     content: str
+    target_specialists: list[str] = []  # @mention 指定的 agent_key 列表
 
 
 class ChatFeedbackRequest(BaseModel):
@@ -929,7 +930,7 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
             def _producer():
                 try:
                     _running_agents[f"prod_{conv_id}"] = {"conv_id": conv_id, "started_at": time.time(), "trace_id": trace_id}
-                    for event in orchestrate_stream(req.content, msg_list, rag_context, cancel_event=cancel_event, conversation_id=conv_id, message_id=stream_msg_id, trace_id=trace_id):
+                    for event in orchestrate_stream(req.content, msg_list, rag_context, cancel_event=cancel_event, conversation_id=conv_id, message_id=stream_msg_id, trace_id=trace_id, target_specialists=req.target_specialists):
                         et = event.get("type")
                         # === 在线程中持久化（独立于 SSE 连接）===
                         if et == "specialist_done":
