@@ -101,7 +101,7 @@ function closeMobileSidebar() {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 1rem;
+  padding: 1.1rem 1.25rem;
   border-bottom: 1px solid var(--color-border);
 }
 
@@ -121,37 +121,50 @@ function closeMobileSidebar() {
   color: var(--color-primary-600);
   background: var(--color-primary-50);
   transition: all var(--transition-fast);
+  box-shadow: 0 0 0 0 var(--color-primary-glow);
 }
-
 .btn-new-conv:hover {
   background: var(--color-primary-100);
+  box-shadow: 0 0 10px var(--color-primary-glow);
+  transform: var(--hover-lift);
 }
 
 .conv-list {
   flex: 1;
   overflow-y: auto;
-  padding: 0.5rem;
+  padding: 0.6rem;
 }
 
 .conv-item {
   display: flex;
   align-items: center;
-  gap: 0.6rem;
-  padding: 0.7rem 0.6rem;
+  gap: 0.65rem;
+  padding: 0.75rem 0.75rem;
   border-radius: var(--radius-md);
   cursor: pointer;
   transition: all var(--transition-fast);
   position: relative;
 }
-
 .conv-item:hover {
   background: var(--color-bg-hover);
+  transform: translateX(2px);
 }
-
 .conv-item.active {
   background: var(--color-primary-50);
+  box-shadow: inset 3px 0 6px -2px var(--color-primary-glow-strong);
 }
-
+/* 左侧发光指示器 */
+.conv-item.active::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 20%;
+  bottom: 20%;
+  width: 3px;
+  background: var(--gradient-primary);
+  border-radius: 0 2px 2px 0;
+  box-shadow: 0 0 6px var(--color-primary-glow-strong);
+}
 .dark .conv-item.active {
   background: var(--color-primary-bg);
 }
@@ -183,7 +196,7 @@ function closeMobileSidebar() {
 }
 
 .conv-title {
-  font-size: 0.8rem;
+  font-size: 0.82rem;
   font-weight: 500;
   color: var(--color-text-primary);
   white-space: nowrap;
@@ -240,8 +253,8 @@ function closeMobileSidebar() {
   color: var(--color-text-muted);
 }
 
-.conv-empty p { margin: 0; font-size: 0.8rem; }
-.conv-empty-hint { font-size: 0.7rem; margin-top: 0.3rem !important; }
+.conv-empty p { margin: 0; font-size: 0.82rem; }
+.conv-empty-hint { font-size: 0.75rem; margin-top: 0.35rem !important; }
 
 .mobile-sidebar-overlay {
   display: block;
@@ -255,7 +268,6 @@ function closeMobileSidebar() {
   .mobile-sidebar-overlay {
     display: block;
   }
-
   .conv-sidebar {
     position: fixed;
     left: 0;
@@ -265,10 +277,12 @@ function closeMobileSidebar() {
     max-width: 80vw;
     z-index: 50;
     transform: translateX(-100%);
-    transition: transform 0.25s ease;
+    transition: transform 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
+    box-shadow: none;
   }
   .conv-sidebar.mobile-open {
     transform: translateX(0);
+    box-shadow: 4px 0 24px rgba(0, 0, 0, 0.2);
   }
 
   .btn-new-conv {

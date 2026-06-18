@@ -171,7 +171,7 @@ function formatElapsed(ms) {
 .specialist-item {
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
-  margin-bottom: 0.4rem;
+  margin-bottom: 0.6rem;
   overflow: hidden;
   background: var(--color-bg-card);
 }
@@ -205,11 +205,11 @@ function formatElapsed(ms) {
 }
 
 /* 工具调用 */
-.tool-calls-container { margin-bottom: 0.4rem; border-left: 3px solid var(--color-primary-300); padding-left: 0.5rem; }
+.tool-calls-container { margin-bottom: 0.6rem; border-left: 3px solid var(--color-primary-300); padding-left: 0.5rem; }
 .tool-calls-container.streaming { border-left-color: var(--color-primary-400); opacity: 0.8; }
 .tool-call-item { margin-bottom: 0.2rem; }
 .tool-call-header { display: flex; align-items: center; gap: 0.4rem; font-size: 0.75rem; color: var(--color-text-secondary); padding: 0.2rem 0; }
-.tool-icon { font-size: 0.7rem; }
+.tool-icon { font-size: 0.72rem; }
 .tool-icon.spinning { animation: spin 1.5s linear infinite; }
 .tool-name { font-weight: 600; color: var(--color-primary-600); }
 .tool-args { font-size: 0.65rem; color: var(--color-text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 200px; }
@@ -219,12 +219,12 @@ function formatElapsed(ms) {
 .plan-header { display: flex; align-items: center; gap: 0.4rem; margin-bottom: 0.3rem; }
 .plan-icon { font-size: 0.9rem; }
 .plan-label { font-weight: 600; color: var(--color-text-primary); }
-.plan-complexity { font-size: 0.7rem; font-weight: 600; padding: 0.1rem 0.4rem; border-radius: var(--radius-sm); margin-left: auto; }
+.plan-complexity { font-size: 0.72rem; font-weight: 600; padding: 0.15rem 0.45rem; border-radius: var(--radius-sm); margin-left: auto; }
 .complexity-simple { background: rgba(16, 185, 129, 0.1); color: #10b981; }
 .complexity-medium { background: rgba(245, 158, 11, 0.1); color: #f59e0b; }
 .complexity-complex { background: rgba(201, 168, 76, 0.1); color: var(--color-primary); }
-.plan-reason { font-size: 0.75rem; color: var(--color-text-muted); margin-bottom: 0.4rem; }
-.plan-steps { display: flex; flex-direction: column; gap: 0.25rem; }
+.plan-reason { font-size: 0.75rem; color: var(--color-text-muted); margin-bottom: 0.6rem; }
+.plan-steps { display: flex; flex-direction: column; gap: 0.35rem; }
 .plan-step { display: flex; align-items: center; gap: 0.4rem; font-size: 0.78rem; }
 .plan-step.done { color: #10b981; }
 .plan-step.running { color: var(--color-primary); }
@@ -233,17 +233,17 @@ function formatElapsed(ms) {
 
 /* 进度条 */
 .stream-progress { padding: 0.5rem 0.75rem; }
-.progress-bar-container { height: 4px; background: var(--color-border); border-radius: 2px; overflow: hidden; margin-bottom: 0.4rem; }
+.progress-bar-container { height: 4px; background: var(--color-border); border-radius: 2px; overflow: hidden; margin-bottom: 0.6rem; }
 .progress-bar-fill { height: 100%; background: linear-gradient(90deg, var(--color-primary), var(--color-primary-light, var(--color-primary))); border-radius: 2px; transition: width 0.3s ease; }
 .substep-text { display: flex; align-items: center; gap: 0.4rem; font-size: 0.75rem; color: var(--color-text-muted); }
 .dot-pulse { display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: var(--color-primary); animation: dot-pulse 1.2s ease-in-out infinite; }
 @keyframes dot-pulse { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: 0.5; transform: scale(0.8); } }
 
 /* 流式状态 */
-.stream-status { display: flex; align-items: center; gap: 0.3rem; padding: 0.4rem 0.75rem; font-size: 0.8rem; color: var(--color-text-muted); }
+.stream-status { display: flex; align-items: center; gap: 0.5rem; padding: 0.4rem 0.75rem; font-size: 0.8rem; color: var(--color-text-muted); }
 .stream-status .status-text { margin-left: 0.3rem; }
 
-.typing { display: flex; align-items: center; gap: 0.3rem; padding: 0.75rem 1.25rem; }
+.typing { display: flex; align-items: center; gap: 0.5rem; padding: 0.75rem 1.25rem; }
 .dot { width: 7px; height: 7px; background: var(--color-text-muted); border-radius: 50%; animation: typingBounce 1.4s infinite ease-in-out; }
 .dot:nth-child(2) { animation-delay: 0.2s; }
 .dot:nth-child(3) { animation-delay: 0.4s; }
@@ -257,7 +257,7 @@ function formatElapsed(ms) {
 
 .markdown-body :deep(h1),
 .markdown-body :deep(h2),
-.markdown-body :deep(h3) { margin-top: 0.75rem; margin-bottom: 0.4rem; font-size: 0.9rem; }
+.markdown-body :deep(h3) { margin-top: 0.75rem; margin-bottom: 0.6rem; font-size: 0.9rem; }
 .markdown-body :deep(p) { margin: 0.3rem 0; }
 .markdown-body :deep(ul),
 .markdown-body :deep(ol) { padding-left: 1.2rem; margin: 0.3rem 0; }

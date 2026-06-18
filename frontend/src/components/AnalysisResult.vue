@@ -138,7 +138,7 @@ const renderedAnalysis = computed(() => {
   align-items: center;
   padding: 0.2rem 0.5rem;
   border-radius: var(--radius-sm);
-  font-size: 0.7rem;
+  font-size: 0.72rem;
   font-weight: 500;
 }
 

@@ -263,7 +263,7 @@ onMounted(load)
   flex-shrink: 0;
 }
 .input-sm {
-  padding: 0.4rem 0.6rem;
+  padding: 0.5rem 0.75rem;
   font-size: 0.82rem;
 }
 .stats-bar {
@@ -279,7 +279,7 @@ onMounted(load)
   padding: 0.6rem 1rem;
   display: flex;
   flex-direction: column;
-  gap: 0.15rem;
+  gap: 0.25rem;
 }
 .stat-value {
   font-size: 1.25rem;
@@ -326,7 +326,7 @@ onMounted(load)
   display: flex;
   align-items: center;
   gap: 0.5rem;
-  margin-bottom: 0.4rem;
+  margin-bottom: 0.6rem;
 }
 .badcase-time {
   font-size: 0.75rem;

@@ -103,17 +103,17 @@ const emit = defineEmits(['confirm', 'cancel'])
 }
 
 .dialog-title {
-  font-size: 0.95rem;
+  font-size: 1rem;
   font-weight: 600;
   color: var(--color-text-primary);
-  margin: 0 0 0.25rem 0;
+  margin: 0 0 0.4rem 0;
 }
 
 .dialog-message {
-  font-size: 0.8rem;
+  font-size: 0.85rem;
   color: var(--color-text-secondary);
   margin: 0;
-  line-height: 1.5;
+  line-height: 1.6;
 }
 
 .dialog-actions {
@@ -124,8 +124,9 @@ const emit = defineEmits(['confirm', 'cancel'])
 
 .dialog-actions button {
   flex: 1;
-  padding: 0.6rem 1rem;
+  padding: 0.65rem 1rem;
   font-size: 0.85rem;
+  min-height: 44px;
 }
 
 /* 移动端适配 */

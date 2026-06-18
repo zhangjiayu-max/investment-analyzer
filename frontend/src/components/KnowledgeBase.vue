@@ -289,7 +289,7 @@ function renderContent(content) {
   background: var(--color-bg-card);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-lg);
-  padding: 1rem;
+  padding: 1.25rem;
   text-align: center;
   cursor: pointer;
   transition: all 0.2s;
@@ -346,8 +346,8 @@ function renderContent(content) {
 }
 
 .filter-btn {
-  padding: 0.4rem 0.8rem;
-  font-size: 0.8rem;
+  padding: 0.45rem 0.9rem;
+  font-size: 0.82rem;
   border: 1px solid var(--color-border);
   border-radius: var(--radius-full);
   background: var(--color-bg-card);
@@ -376,14 +376,14 @@ function renderContent(content) {
   background: var(--color-bg-card);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-lg);
-  padding: 1.25rem;
+  padding: 1.5rem;
 }
 
 .item-header {
   display: flex;
   align-items: center;
-  gap: 0.75rem;
-  margin-bottom: 0.75rem;
+  gap: 0.85rem;
+  margin-bottom: 0.85rem;
 }
 
 .item-category {
@@ -424,14 +424,14 @@ function renderContent(content) {
 .item-title {
   font-size: 1.1rem;
   font-weight: 600;
-  margin: 0 0 0.75rem 0;
+  margin: 0 0 0.85rem 0;
 }
 
 .item-content {
-  font-size: 0.9rem;
-  line-height: 1.6;
+  font-size: 0.92rem;
+  line-height: 1.7;
   color: var(--color-text-secondary);
-  margin-bottom: 0.75rem;
+  margin-bottom: 0.85rem;
 }
 
 .item-content :deep(h3) {
@@ -488,14 +488,14 @@ function renderContent(content) {
 .books-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
-  gap: 0.75rem;
+  gap: 1rem;
 }
 
 .book-card {
   background: var(--color-bg-card);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-lg);
-  padding: 0.85rem 1rem;
+  padding: 1rem 1.25rem;
   cursor: pointer;
   transition: all 0.2s;
 }
@@ -511,9 +511,9 @@ function renderContent(content) {
 }
 
 .book-name {
-  font-size: 0.9rem;
+  font-size: 0.92rem;
   font-weight: 600;
-  margin-bottom: 0.25rem;
+  margin-bottom: 0.35rem;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;

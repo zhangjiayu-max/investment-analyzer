@@ -58,5 +58,6 @@ function handleViewResult(convId) {
   min-height: 100vh;
   min-height: 100dvh;
   transition: margin-left var(--transition-normal);
+  overflow-x: hidden;
 }
 </style>

@@ -242,6 +242,28 @@ function renderChart(plotlyData) {
 .chart-card {
   padding: 0.75rem;
   min-height: 300px;
+  position: relative;
+  transition: transform var(--transition-fast), box-shadow var(--transition-normal), border-color var(--transition-normal);
+}
+/* 渐变顶条 */
+.chart-card::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 3px;
+  background: var(--gradient-accent);
+  opacity: 0.5;
+  border-radius: var(--radius-xl) var(--radius-xl) 0 0;
+  transition: opacity var(--transition-fast);
+}
+.chart-card:hover {
+  transform: var(--hover-lift);
+  box-shadow: var(--shadow-glow);
+}
+.chart-card:hover::before {
+  opacity: 1;
 }
 
 .chart-loading {

@@ -39,6 +39,9 @@ DEFAULT_CONFIGS = [
     ('truncation.rag_context', '4000', 'RAG上下文截断长度', 'llm'),
     ('truncation.history_messages', '20', '历史消息保留条数', 'llm'),
     ('truncation.tool_result', '4000', '工具结果截断长度', 'llm'),
+
+    # 补仓跌幅预警
+    ('alert.buy_drop_pct', '4', '补仓后跌幅预警阈值（%）', 'alert'),
 ]
 
 

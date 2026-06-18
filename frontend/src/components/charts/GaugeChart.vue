@@ -13,10 +13,11 @@ const props = defineProps({
   segments: {
     type: Array,
     default: () => [
-      { from: 0, to: 30, color: '#3b82f6' },
-      { from: 30, to: 50, color: '#60a5fa' },
-      { from: 50, to: 70, color: '#f59e0b' },
-      { from: 70, to: 100, color: '#ef4444' },
+      { from: 0, to: 20, color: '#3b82f6' },
+      { from: 20, to: 40, color: '#60a5fa' },
+      { from: 40, to: 60, color: '#34d399' },
+      { from: 60, to: 80, color: '#f59e0b' },
+      { from: 80, to: 100, color: '#ef4444' },
     ],
   },
   height: { type: String, default: '200px' },

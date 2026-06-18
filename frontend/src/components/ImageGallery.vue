@@ -1158,7 +1158,7 @@ watch(activeTab, (tab) => {
 .gallery-page {
   display: flex;
   flex-direction: column;
-  gap: 1rem;
+  gap: 1.25rem;
   position: relative;
 }
 
@@ -1238,7 +1238,7 @@ watch(activeTab, (tab) => {
   display: flex;
   align-items: center;
   gap: 0.4rem;
-  padding: 0.6rem 1.2rem;
+  padding: 0.7rem 1.35rem;
   font-size: 0.85rem;
   font-weight: 500;
   color: var(--color-text-secondary);
@@ -1302,8 +1302,8 @@ watch(activeTab, (tab) => {
   display: flex;
   align-items: center;
   gap: 0.3rem;
-  padding: 0.4rem 0.75rem;
-  font-size: 0.8rem;
+  padding: 0.45rem 0.85rem;
+  font-size: 0.82rem;
   background: var(--color-bg-card);
   color: var(--color-text-secondary);
   border: none;
@@ -1479,8 +1479,8 @@ watch(activeTab, (tab) => {
   display: flex;
   align-items: center;
   gap: 0.5rem;
-  padding: 0.5rem 0;
-  margin-bottom: 0.5rem;
+  padding: 0.6rem 0;
+  margin-bottom: 0.6rem;
   border-bottom: 1px solid var(--color-border-light);
 }
 
@@ -1502,8 +1502,8 @@ watch(activeTab, (tab) => {
 .gallery-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
-  gap: 0.75rem;
-  margin-bottom: 1rem;
+  gap: 1rem;
+  margin-bottom: 1.25rem;
 }
 
 .gallery-card {
@@ -1698,14 +1698,15 @@ watch(activeTab, (tab) => {
 .parse-data {
   background: var(--color-bg-hover);
   border-radius: var(--radius-md);
-  padding: 0.75rem;
+  padding: 0.85rem 1rem;
 }
 
 .parse-row {
   display: flex;
   justify-content: space-between;
-  padding: 0.3rem 0;
+  padding: 0.4rem 0;
   font-size: 0.85rem;
+  line-height: 1.6;
 }
 
 .parse-row + .parse-row {
@@ -1738,8 +1739,8 @@ watch(activeTab, (tab) => {
   display: flex;
   align-items: center;
   gap: 0.5rem;
-  padding: 0.25rem 0;
-  font-size: 0.8rem;
+  padding: 0.35rem 0;
+  font-size: 0.82rem;
   border-bottom: 1px dashed var(--color-border-light);
 }
 
@@ -1779,14 +1780,14 @@ watch(activeTab, (tab) => {
 }
 
 .gallery-info {
-  padding: 0.6rem 0.75rem;
+  padding: 0.75rem 0.85rem;
   display: flex;
   flex-direction: column;
-  gap: 0.25rem;
+  gap: 0.3rem;
 }
 
 .gallery-index {
-  font-size: 0.8rem;
+  font-size: 0.82rem;
   font-weight: 600;
   color: var(--color-text-primary);
   overflow: hidden;
@@ -1795,7 +1796,7 @@ watch(activeTab, (tab) => {
 }
 
 .gallery-value {
-  font-size: 0.75rem;
+  font-size: 0.78rem;
   color: var(--color-text-secondary);
 }
 

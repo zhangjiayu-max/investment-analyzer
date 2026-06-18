@@ -649,7 +649,7 @@ onMounted(loadAgents)
   font-weight: 600;
   background: var(--color-primary-50);
   color: var(--color-primary-600);
-  padding: 0.1rem 0.35rem;
+  padding: 0.2rem 0.5rem;
   border-radius: 999px;
 }
 
@@ -658,7 +658,7 @@ onMounted(loadAgents)
   font-weight: 600;
   background: rgba(239,68,68,0.1);
   color: #dc2626;
-  padding: 0.1rem 0.35rem;
+  padding: 0.2rem 0.5rem;
   border-radius: 999px;
 }
 
@@ -724,7 +724,7 @@ onMounted(loadAgents)
   color: var(--color-text-muted);
   text-transform: uppercase;
   letter-spacing: 0.05em;
-  margin-bottom: 0.4rem;
+  margin-bottom: 0.6rem;
   display: flex;
   align-items: center;
   gap: 0.4rem;
@@ -780,7 +780,7 @@ onMounted(loadAgents)
   font-size: 0.75rem;
   font-weight: 600;
   color: var(--color-text-muted);
-  margin-bottom: 0.35rem;
+  margin-bottom: 0.5rem;
 }
 
 .prompt-textarea {
@@ -818,7 +818,7 @@ onMounted(loadAgents)
   font-size: 0.65rem;
   background: var(--color-primary-50);
   color: var(--color-primary-600);
-  padding: 0.1rem 0.35rem;
+  padding: 0.2rem 0.5rem;
   border-radius: 999px;
 }
 
@@ -863,11 +863,11 @@ onMounted(loadAgents)
 }
 
 .version-tag {
-  font-size: 0.7rem;
+  font-size: 0.72rem;
   font-weight: 600;
   background: var(--color-bg-input);
   color: var(--color-text-secondary);
-  padding: 0.15rem 0.4rem;
+  padding: 0.2rem 0.5rem;
   border-radius: var(--radius-sm);
   white-space: nowrap;
 }
@@ -1027,7 +1027,7 @@ onMounted(loadAgents)
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 0.15rem;
+  gap: 0.25rem;
   min-width: 60px;
 }
 

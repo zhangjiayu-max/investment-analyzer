@@ -129,6 +129,13 @@ from db.config import (
     list_configs, update_config, reset_configs,
 )
 
+# 关注列表
+from db.watchlist import (
+    add_to_watchlist, get_watchlist_item, get_watchlist_by_fund,
+    list_watchlist, update_watchlist_item, remove_from_watchlist,
+    batch_add_to_watchlist, refresh_watchlist_navs, get_watchlist_summary,
+)
+
 
 def init_db():
     """建表，启动时调用。各子模块的 init_tables(conn) 负责创建自己的表。"""
@@ -401,6 +408,8 @@ def init_db():
     _add_column_if_not_exists(conn, "portfolio_holdings", "today_profit", "REAL DEFAULT 0")
     _add_column_if_not_exists(conn, "portfolio_holdings", "fund_category", "TEXT DEFAULT ''")
     _add_column_if_not_exists(conn, "portfolio_holdings", "has_base_position", "INTEGER DEFAULT 0")
+    _add_column_if_not_exists(conn, "portfolio_holdings", "last_buy_price", "REAL")
+    _add_column_if_not_exists(conn, "portfolio_holdings", "last_buy_date", "TEXT")
     # 回填已有持仓的 fund_category
     rows = conn.execute(
         "SELECT id, fund_name FROM portfolio_holdings WHERE fund_category IS NULL OR fund_category = ''"
@@ -409,6 +418,26 @@ def init_db():
         cat = classify_fund_category(r["fund_name"])
         if cat != "equity":  # 默认就是 equity 类型，只回填非默认的
             conn.execute("UPDATE portfolio_holdings SET fund_category = ? WHERE id = ?", (cat, r["id"]))
+    # 回填 last_buy_price / last_buy_date（从交易记录取最近一次买入价）
+    try:
+        conn.execute("""
+            UPDATE portfolio_holdings SET
+                last_buy_price = (
+                    SELECT price FROM portfolio_transactions
+                    WHERE holding_id = portfolio_holdings.id
+                      AND transaction_type = 'buy' AND status IN ('confirmed','settled') AND price > 0
+                    ORDER BY id DESC LIMIT 1
+                ),
+                last_buy_date = (
+                    SELECT transaction_date FROM portfolio_transactions
+                    WHERE holding_id = portfolio_holdings.id
+                      AND transaction_type = 'buy' AND status IN ('confirmed','settled') AND price > 0
+                    ORDER BY id DESC LIMIT 1
+                )
+            WHERE last_buy_price IS NULL
+        """)
+    except Exception:
+        pass
     _fix_holdings_unique_constraint(conn)
 
     conn.execute("""
@@ -440,6 +469,34 @@ def init_db():
     _add_column_if_not_exists(conn, "portfolio_transactions", "account", "TEXT")
     _add_column_if_not_exists(conn, "portfolio_transactions", "fee", "REAL DEFAULT 0")
     _add_column_if_not_exists(conn, "portfolio_transactions", "valuation_snapshot", "TEXT")
+
+    # ── 交易操作审计日志 ──
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS portfolio_tx_audit_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            tx_id INTEGER,
+            holding_id INTEGER,
+            fund_code TEXT,
+            fund_name TEXT,
+            action TEXT NOT NULL,
+            operator TEXT DEFAULT 'user',
+            before_status TEXT,
+            before_shares REAL,
+            before_amount REAL,
+            before_price REAL,
+            after_status TEXT,
+            after_shares REAL,
+            after_amount REAL,
+            after_price REAL,
+            input_shares REAL,
+            input_amount REAL,
+            input_price REAL,
+            detail TEXT,
+            created_at TEXT DEFAULT (datetime('now','localtime'))
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_tx ON portfolio_tx_audit_log(tx_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_fund ON portfolio_tx_audit_log(fund_code)")
 
     _add_column_if_not_exists(conn, "portfolio_cash", "last_interest_date", "TEXT")
     _add_column_if_not_exists(conn, "portfolio_cash", "today_interest", "REAL DEFAULT 0")
@@ -739,6 +796,32 @@ def init_db():
             INSERT OR IGNORE INTO orchestration_config (key, value, description)
             VALUES (?, ?, ?)
         """, (key, value, desc))
+
+    # ── 关注列表表 ──────────────────────────────────────
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS watchlist (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id TEXT DEFAULT 'default',
+            fund_code TEXT NOT NULL,
+            fund_name TEXT NOT NULL,
+            fund_category TEXT DEFAULT '',
+            index_code TEXT,
+            index_name TEXT,
+            target_price REAL,
+            target_percentile REAL,
+            notes TEXT,
+            priority INTEGER DEFAULT 0,
+            status TEXT DEFAULT 'watching',
+            current_nav REAL,
+            current_percentile REAL,
+            nav_updated_at TEXT,
+            created_at TEXT DEFAULT (datetime('now','localtime')),
+            updated_at TEXT DEFAULT (datetime('now','localtime')),
+            UNIQUE(user_id, fund_code)
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_watchlist_user ON watchlist(user_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_watchlist_status ON watchlist(status)")
 
     conn.commit()
     conn.close()

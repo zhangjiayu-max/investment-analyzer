@@ -210,12 +210,27 @@ function onBack() {
   margin: 0 auto;
 }
 
+/* ── 页面切换过渡 ── */
+.page-section {
+  animation: pageIn 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+@keyframes pageIn {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
 /* ── 全局理财彩蛋栏 ── */
 .global-quote-bar {
   background: linear-gradient(135deg, #1e3a5f 0%, #2d5a87 100%);
   border-radius: var(--radius-md);
-  padding: 0.55rem 1rem;
-  margin-bottom: 1rem;
+  padding: 0.7rem 1.25rem;
+  margin-bottom: 1.25rem;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -237,10 +252,11 @@ function onBack() {
 }
 .quote-main {
   color: #e8eaed;
-  font-size: 0.85rem;
+  font-size: 0.88rem;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  line-height: 1.5;
 }
 .quote-hint {
   color: #d4b65a;
@@ -257,8 +273,8 @@ function onBack() {
 .quote-hot-tag {
   background: rgba(201, 168, 76, 0.15);
   color: #d4b65a;
-  font-size: 0.7rem;
-  padding: 0.15rem 0.5rem;
+  font-size: 0.72rem;
+  padding: 0.2rem 0.55rem;
   border-radius: 999px;
   white-space: nowrap;
 }
@@ -275,11 +291,11 @@ function onBack() {
 }
 
 .page-section {
-  animation: fadeIn 0.2s ease;
+  animation: fadeIn 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
 }
 
 @keyframes fadeIn {
-  from { opacity: 0; transform: translateY(4px); }
+  from { opacity: 0; transform: translateY(6px); }
   to { opacity: 1; transform: translateY(0); }
 }
 
@@ -318,10 +334,11 @@ function onBack() {
 
 .analysis-hint {
   text-align: center;
-  font-size: 0.75rem;
+  font-size: 0.78rem;
   color: var(--color-text-muted);
-  margin: 0.75rem 0 0 0;
+  margin: 0.85rem 0 0 0;
   padding-bottom: 1.5rem;
+  line-height: 1.5;
 }
 
 .task-list-section {

@@ -55,6 +55,8 @@
                 {{ heatLabel(s.heat) }}
               </span>
               <span class="sector-outlook" :class="'outlook-' + (s.outlook || '').replace(/[利好利空中性]/g, m => outlookMap[m])">
+                <span v-if="outlookMap[s.outlook] === 'good'" class="trend-arrow-up">▲</span>
+                <span v-else-if="outlookMap[s.outlook] === 'bad'" class="trend-arrow-down">▼</span>
                 {{ s.outlook || '-' }}
               </span>
             </div>
@@ -282,7 +284,7 @@ function pctColor(pct) {
 .intel-page {
   display: flex;
   flex-direction: column;
-  gap: 1.25rem;
+  gap: 1.5rem;
 }
 
 .page-header {
@@ -299,9 +301,9 @@ function pctColor(pct) {
 }
 
 .page-desc {
-  font-size: 0.85rem;
+  font-size: 0.88rem;
   color: var(--color-text-muted);
-  margin-top: 0.25rem;
+  margin-top: 0.35rem;
 }
 
 .header-actions {
@@ -346,13 +348,19 @@ function pctColor(pct) {
 
 .summary-card {
   padding: 1.25rem;
+  border-left: 3px solid var(--color-primary-500);
+  transition: all var(--transition-fast);
+}
+.summary-card:hover {
+  box-shadow: var(--shadow-glow);
+  transform: var(--hover-lift);
 }
 
 .summary-text {
   font-size: 0.95rem;
-  line-height: 1.7;
+  line-height: 1.8;
   color: var(--color-text-secondary);
-  margin-top: 0.5rem;
+  margin-top: 0.6rem;
 }
 
 /* ── 主体布局 ── */
@@ -360,7 +368,7 @@ function pctColor(pct) {
 .intel-main {
   display: grid;
   grid-template-columns: 320px 1fr;
-  gap: 1rem;
+  gap: 1.25rem;
   align-items: start;
 }
 
@@ -379,16 +387,22 @@ function pctColor(pct) {
   display: flex;
   align-items: center;
   gap: 0.5rem;
-  padding: 0.65rem 0.5rem;
+  padding: 0.75rem 0.6rem;
   border-bottom: 1px solid var(--color-border-light);
   cursor: pointer;
   border-radius: var(--radius-sm);
-  transition: background 0.15s;
+  transition: all var(--transition-fast);
 }
-
 .sector-item:last-child { border-bottom: none; }
-.sector-item:hover { background: var(--color-bg-secondary); }
-.sector-item.active { background: var(--color-primary-50); border-left: 3px solid var(--color-primary-500); }
+.sector-item:hover {
+  background: var(--color-bg-secondary);
+  transform: translateX(2px);
+}
+.sector-item.active {
+  background: var(--color-primary-50);
+  border-left: 3px solid var(--color-primary-500);
+  box-shadow: inset 2px 0 6px -2px var(--color-primary-glow);
+}
 
 .sector-rank {
   width: 22px;
@@ -489,32 +503,33 @@ function pctColor(pct) {
 }
 
 .catalyst-list li {
-  font-size: 0.85rem;
+  font-size: 0.88rem;
   color: var(--color-text-secondary);
-  padding: 0.35rem 0;
+  padding: 0.45rem 0;
   border-bottom: 1px solid var(--color-border-light);
+  line-height: 1.6;
 }
 
 .catalyst-list li:last-child { border-bottom: none; }
 
 .reason-text {
-  font-size: 0.85rem;
-  line-height: 1.6;
+  font-size: 0.88rem;
+  line-height: 1.7;
   color: var(--color-text-secondary);
 }
 
 .catalyst-news {
   display: flex;
   flex-direction: column;
-  gap: 0.35rem;
+  gap: 0.45rem;
 }
 
 .catalyst-item {
   display: flex;
   gap: 0.4rem;
-  font-size: 0.8rem;
+  font-size: 0.82rem;
   color: var(--color-text-secondary);
-  line-height: 1.5;
+  line-height: 1.6;
 }
 
 .catalyst-bullet {
@@ -548,7 +563,13 @@ function pctColor(pct) {
   background: var(--color-bg-secondary);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-sm);
-  padding: 0.65rem 0.75rem;
+  padding: 0.75rem 0.85rem;
+  transition: all var(--transition-fast);
+}
+.index-card:hover {
+  border-color: var(--color-primary-border);
+  box-shadow: var(--shadow-glow);
+  transform: var(--hover-lift);
 }
 
 .index-name {
@@ -586,7 +607,7 @@ function pctColor(pct) {
   display: flex;
   align-items: center;
   gap: 0.5rem;
-  padding: 0.4rem 0;
+  padding: 0.5rem 0;
 }
 
 .fund-name {
@@ -633,9 +654,12 @@ function pctColor(pct) {
 .news-item {
   padding: 0.75rem 0;
   border-bottom: 1px solid var(--color-border-light);
+  transition: background var(--transition-fast);
 }
-
 .news-item:last-child { border-bottom: none; }
+.news-item:hover {
+  background: var(--color-primary-bg-weak);
+}
 
 .news-title {
   font-size: 0.9rem;
@@ -647,10 +671,10 @@ function pctColor(pct) {
 .news-title:hover { text-decoration: underline; }
 
 .news-summary {
-  font-size: 0.8rem;
+  font-size: 0.82rem;
   color: var(--color-text-secondary);
-  margin-top: 0.25rem;
-  line-height: 1.5;
+  margin-top: 0.3rem;
+  line-height: 1.6;
 }
 
 .news-meta {
@@ -671,17 +695,23 @@ function pctColor(pct) {
 
 .macro-item {
   text-align: center;
-  padding: 0.75rem;
+  padding: 0.85rem;
   background: var(--color-bg-secondary);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-sm);
+  transition: all var(--transition-fast);
+}
+.macro-item:hover {
+  border-color: var(--color-primary-border);
+  box-shadow: var(--shadow-glow);
+  transform: var(--hover-lift);
 }
 
 .macro-label {
   display: block;
-  font-size: 0.7rem;
+  font-size: 0.72rem;
   color: var(--color-text-muted);
-  margin-bottom: 0.35rem;
+  margin-bottom: 0.4rem;
 }
 
 .macro-value {
@@ -701,8 +731,8 @@ function pctColor(pct) {
 .topic-item {
   display: flex;
   flex-direction: column;
-  gap: 0.15rem;
-  padding: 0.5rem 0;
+  gap: 0.2rem;
+  padding: 0.6rem 0;
   border-bottom: 1px solid var(--color-border-light);
 }
 

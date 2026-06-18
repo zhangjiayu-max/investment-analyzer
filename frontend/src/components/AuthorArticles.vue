@@ -393,14 +393,14 @@ function imgUrl(url) {
 
 /* Extract bar */
 .extract-bar {
-  margin-bottom: 0.75rem;
-  padding: 0.75rem 1rem;
+  margin-bottom: 1rem;
+  padding: 1rem 1.25rem;
 }
 .extract-form { display: flex; gap: 0.5rem; }
 .extract-input { flex: 1; font-size: 0.85rem; }
 .extract-btn { white-space: nowrap; padding: 0.5rem 1.25rem; font-size: 0.85rem; }
-.extract-preview { margin-top: 0.75rem; padding-top: 0.75rem; border-top: 1px solid var(--color-border); display: flex; gap: 1rem; align-items: flex-start; }
-.extract-info { flex: 1; display: flex; flex-direction: column; gap: 0.25rem; min-width: 0; }
+.extract-preview { margin-top: 0.85rem; padding-top: 0.85rem; border-top: 1px solid var(--color-border); display: flex; gap: 1rem; align-items: flex-start; }
+.extract-info { flex: 1; display: flex; flex-direction: column; gap: 0.35rem; min-width: 0; }
 .extract-field { display: flex; gap: 0.5rem; font-size: 0.8rem; }
 .field-label { color: var(--color-text-muted); flex-shrink: 0; min-width: 2.5rem; }
 .field-value { color: var(--color-text-primary); font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -412,8 +412,8 @@ function imgUrl(url) {
 .toolbar {
   display: flex;
   align-items: center;
-  gap: 0.5rem;
-  margin-bottom: 1rem;
+  gap: 0.6rem;
+  margin-bottom: 1.25rem;
   flex-wrap: wrap;
 }
 
@@ -421,8 +421,8 @@ function imgUrl(url) {
   display: inline-flex;
   align-items: center;
   gap: 0.4rem;
-  padding: 0.5rem 0.85rem;
-  font-size: 0.8rem;
+  padding: 0.55rem 0.95rem;
+  font-size: 0.82rem;
 }
 
 .toolbar-select {
@@ -473,7 +473,7 @@ function imgUrl(url) {
 /* Content Area */
 .content-area {
   display: flex;
-  gap: 1rem;
+  gap: 1.25rem;
   flex: 1;
   min-height: 0;
 }
@@ -508,9 +508,9 @@ function imgUrl(url) {
 
 .list-table th {
   background: var(--color-bg-input);
-  padding: 0.6rem 0.5rem;
+  padding: 0.7rem 0.6rem;
   text-align: left;
-  font-size: 0.7rem;
+  font-size: 0.72rem;
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.05em;
@@ -518,7 +518,7 @@ function imgUrl(url) {
 }
 
 .list-table td {
-  padding: 0.5rem 0.5rem;
+  padding: 0.6rem 0.6rem;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -595,7 +595,7 @@ function imgUrl(url) {
 }
 
 .list-row td {
-  padding: 0.6rem 0.5rem;
+  padding: 0.65rem 0.6rem;
 }
 
 .row-title {
@@ -615,7 +615,7 @@ function imgUrl(url) {
   flex: 1;
   min-width: 0;
   overflow-y: auto;
-  padding: 1.25rem;
+  padding: 1.5rem;
 }
 
 .detail-header {

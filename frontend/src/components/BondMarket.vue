@@ -313,7 +313,7 @@ onUnmounted(() => {
 .bond-market {
   display: flex;
   flex-direction: column;
-  gap: 1rem;
+  gap: 1.25rem;
 }
 
 .bond-header {
@@ -326,15 +326,15 @@ onUnmounted(() => {
 .open-link-btn {
   display: flex;
   align-items: center;
-  gap: 0.375rem;
-  font-size: 0.8rem;
+  gap: 0.4rem;
+  font-size: 0.82rem;
   white-space: nowrap;
-  padding: 0.4rem 0.75rem;
+  padding: 0.45rem 0.85rem;
 }
 
 /* Current info card */
 .current-card {
-  padding: 1rem 1.25rem;
+  padding: 1.25rem 1.5rem;
 }
 
 .current-grid {
@@ -346,11 +346,11 @@ onUnmounted(() => {
 .current-item {
   display: flex;
   flex-direction: column;
-  gap: 0.375rem;
+  gap: 0.5rem;
 }
 
 .current-label {
-  font-size: 0.8rem;
+  font-size: 0.82rem;
   color: var(--color-text-muted);
 }
 
@@ -379,7 +379,7 @@ onUnmounted(() => {
 
 /* Chart card */
 .chart-card {
-  padding: 0.75rem;
+  padding: 1rem;
   min-height: 360px;
   position: relative;
 }
@@ -443,7 +443,7 @@ onUnmounted(() => {
 
 /* Legend guide */
 .legend-guide {
-  padding: 1rem 1.25rem;
+  padding: 1.25rem 1.5rem;
 }
 
 .legend-title {
@@ -455,7 +455,7 @@ onUnmounted(() => {
 .legend-items {
   display: grid;
   grid-template-columns: repeat(2, 1fr);
-  gap: 0.5rem;
+  gap: 0.6rem;
 }
 
 .legend-item {
@@ -478,8 +478,9 @@ onUnmounted(() => {
 }
 
 .legend-hint {
-  font-size: 0.75rem;
+  font-size: 0.78rem;
   color: var(--color-text-muted);
+  line-height: 1.5;
 }
 
 /* Mobile */
@@ -487,6 +488,7 @@ onUnmounted(() => {
   .current-grid {
     grid-template-columns: 1fr;
   }
+  .chart-card { min-height: auto; }
   .chart-container {
     height: 250px;
   }

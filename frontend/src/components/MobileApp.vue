@@ -260,19 +260,24 @@ function onBack() {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 0.75rem 1rem;
-  background: var(--color-bg-card);
+  padding: 0.7rem 1rem;
+  padding-top: calc(0.7rem + env(safe-area-inset-top, 0px));
+  background: var(--glass-bg);
   border-bottom: 1px solid var(--color-border);
   flex-shrink: 0;
   position: sticky;
   top: 0;
   z-index: 40;
+  backdrop-filter: blur(20px) saturate(180%);
+  -webkit-backdrop-filter: blur(20px) saturate(180%);
+  box-shadow: 0 1px 12px rgba(0,0,0,0.04);
 }
 
 .mobile-title {
-  font-size: 1rem;
-  font-weight: 600;
+  font-size: 1.05rem;
+  font-weight: 700;
   color: var(--color-text-primary);
+  letter-spacing: -0.02em;
 }
 
 .mobile-theme-btn {
@@ -286,6 +291,14 @@ function onBack() {
   background: transparent;
   border: none;
   cursor: pointer;
+  transition: all var(--transition-fast);
+}
+.mobile-theme-btn:hover {
+  background: var(--color-bg-hover);
+  color: var(--color-text-primary);
+}
+.mobile-theme-btn:active {
+  transform: var(--press-scale);
 }
 
 /* ── 内容区 ── */
@@ -323,23 +336,48 @@ function onBack() {
   gap: 0.5rem;
 }
 
-/* ── 更多菜单弹层 ── */
+/* ── 更多菜单弹层 — Bottom Sheet ── */
 .mobile-more-overlay {
   position: fixed;
   inset: 0;
-  background: rgba(0,0,0,0.4);
+  background: rgba(0,0,0,0.45);
   z-index: 50;
   display: flex;
   align-items: flex-end;
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  animation: fade-in 0.2s ease;
+}
+@keyframes fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
 }
 
 .mobile-more-sheet {
   width: 100%;
   max-height: 70vh;
   background: var(--color-bg-card);
-  border-radius: var(--radius-xl) var(--radius-xl) 0 0;
-  padding: 1rem;
+  border-radius: var(--radius-2xl) var(--radius-2xl) 0 0;
+  padding: 0.75rem 1rem 1rem;
   overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  padding-bottom: calc(1rem + env(safe-area-inset-bottom, 0px));
+  animation: sheet-up 0.3s cubic-bezier(0.34, 1.2, 0.64, 1);
+  box-shadow: 0 -8px 32px rgba(0,0,0,0.12);
+}
+@keyframes sheet-up {
+  from { transform: translateY(100%); }
+  to { transform: translateY(0); }
+}
+.mobile-more-sheet::before {
+  content: '';
+  display: block;
+  width: 36px;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--color-text-muted);
+  opacity: 0.4;
+  margin: 0 auto 0.75rem;
 }
 
 .mobile-more-header {
@@ -368,45 +406,51 @@ function onBack() {
 .mobile-more-grid {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
-  gap: 0.5rem;
+  gap: 0.6rem;
 }
 
 .mobile-more-item {
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: 0.75rem 0.5rem;
-  border-radius: var(--radius-md);
+  padding: 0.95rem 0.5rem;
+  border-radius: var(--radius-lg);
   background: var(--color-bg-input);
   border: 1px solid var(--color-border-light);
   color: var(--color-text-secondary);
   font-size: 0.85rem;
+  font-weight: 500;
   cursor: pointer;
   transition: all var(--transition-fast);
+  min-height: 52px;
 }
 
 .mobile-more-item.active {
-  background: var(--color-primary-50);
-  border-color: var(--color-primary-300);
+  background: var(--color-primary-bg);
+  border-color: var(--color-primary-border);
   color: var(--color-primary);
-  font-weight: 500;
+  font-weight: 600;
 }
 
 .mobile-more-item:active {
-  transform: scale(0.96);
+  transform: scale(0.95);
+  background: var(--color-bg-hover);
 }
 
 /* ── 底部 Tab 栏 ── */
 .mobile-tabbar {
   display: flex;
   align-items: stretch;
-  background: var(--color-bg-card);
+  background: var(--glass-bg);
   border-top: 1px solid var(--color-border);
   flex-shrink: 0;
   position: sticky;
   bottom: 0;
   z-index: 40;
   padding-bottom: env(safe-area-inset-bottom, 0);
+  backdrop-filter: blur(20px) saturate(180%);
+  -webkit-backdrop-filter: blur(20px) saturate(180%);
+  box-shadow: 0 -1px 12px rgba(0,0,0,0.04);
 }
 
 .mobile-tab {
@@ -415,34 +459,65 @@ function onBack() {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 0.2rem;
-  padding: 0.5rem 0;
+  gap: 0.15rem;
+  padding: 0.45rem 0;
   color: var(--color-text-muted);
   background: transparent;
   border: none;
   cursor: pointer;
-  transition: color var(--transition-fast);
+  transition: color var(--transition-fast), transform var(--transition-fast);
   -webkit-tap-highlight-color: transparent;
+  position: relative;
 }
 
 .mobile-tab.active {
   color: var(--color-primary);
 }
 
+/* Active indicator */
+.mobile-tab.active::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 24px;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--gradient-primary);
+  box-shadow: 0 0 8px var(--color-primary-glow-strong);
+}
+
+/* Tab icon animation */
+.mobile-tab:active .mobile-tab-icon {
+  transform: scale(0.85);
+}
+.mobile-tab.active .mobile-tab-icon {
+  animation: tabBounce 0.3s ease;
+}
+
+@keyframes tabBounce {
+  0% { transform: scale(1); }
+  50% { transform: scale(1.15); }
+  100% { transform: scale(1); }
+}
+
 .mobile-tab-icon {
-  width: 22px;
-  height: 22px;
+  width: 23px;
+  height: 23px;
+  transition: transform var(--transition-fast);
 }
 
 .mobile-tab-label {
-  font-size: 0.65rem;
-  font-weight: 500;
+  font-size: 0.66rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
 }
 
 /* ── 动画 ── */
 .fade-enter-active,
 .fade-leave-active {
-  transition: opacity 0.2s ease;
+  transition: opacity 0.25s ease;
 }
 .fade-enter-from,
 .fade-leave-to {

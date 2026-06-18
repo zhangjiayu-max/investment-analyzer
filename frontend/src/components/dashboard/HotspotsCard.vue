@@ -219,7 +219,7 @@ const allRelatedHoldings = computed(() => {
   border: 1px solid var(--color-border);
   border-radius: var(--radius-xl);
   box-shadow: var(--shadow-sm);
-  transition: box-shadow 0.3s cubic-bezier(0.4, 0, 0.2, 1), border-color 0.3s ease;
+  transition: box-shadow 0.3s cubic-bezier(0.4, 0, 0.2, 1), border-color 0.3s ease, transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
   position: relative;
   overflow: hidden;
   min-height: 420px;
@@ -228,17 +228,39 @@ const allRelatedHoldings = computed(() => {
 .dash-card::before {
   content: '';
   position: absolute;
-  top: 0; left: 0; right: 0;
+  top: 0;
+  left: 0;
+  right: 0;
   height: 3px;
-  background: linear-gradient(90deg, var(--color-primary), var(--color-primary-light));
+  background: var(--gradient-warm);
   opacity: 0;
   transition: opacity 0.3s ease;
 }
-.dash-card:hover {
-  box-shadow: 0 4px 20px rgba(0,0,0,0.4), 0 0 24px rgba(212,168,67,0.06);
-  border-color: rgba(212,168,67,0.2);
+.dash-card::after {
+  content: '';
+  position: absolute;
+  top: -40px;
+  right: -40px;
+  width: 80px;
+  height: 80px;
+  border-radius: 50%;
+  background: var(--color-primary);
+  opacity: 0;
+  filter: blur(40px);
+  transition: opacity 0.4s ease;
+  pointer-events: none;
 }
-.dash-card:hover::before { opacity: 1; }
+.dash-card:hover {
+  box-shadow: var(--shadow-lg), var(--shadow-glow);
+  border-color: var(--color-primary-border);
+  transform: translateY(-1px);
+}
+.dash-card:hover::before {
+  opacity: 1;
+}
+.dash-card:hover::after {
+  opacity: 0.08;
+}
 .card-header {
   display: flex;
   align-items: center;
@@ -322,18 +344,18 @@ const allRelatedHoldings = computed(() => {
   font-size: 0.8rem;
   font-weight: 600;
   color: var(--color-primary);
-  background: linear-gradient(135deg, var(--color-primary-bg), rgba(212,168,67,0.08));
-  border: 1px solid rgba(212,168,67,0.2);
+  background: linear-gradient(135deg, var(--color-primary-bg), var(--color-primary-bg-gradient-end));
+  border: 1px solid var(--color-primary-border);
   border-radius: var(--radius-lg);
   cursor: pointer;
   transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
   white-space: nowrap;
 }
 .btn-ai-action:hover {
-  background: linear-gradient(135deg, rgba(212,168,67,0.15), rgba(212,168,67,0.12));
-  border-color: rgba(212,168,67,0.4);
+  background: linear-gradient(135deg, var(--color-primary-bg-strong), var(--color-primary-bg-hover));
+  border-color: var(--color-primary-border-strong);
   transform: translateY(-1px);
-  box-shadow: 0 4px 12px rgba(212,168,67,0.15);
+  box-shadow: 0 4px 12px var(--color-primary-glow-strong);
 }
 .ai-agent-tooltip {
   position: absolute;
@@ -341,7 +363,7 @@ const allRelatedHoldings = computed(() => {
   left: 50%;
   transform: translateX(-50%);
   padding: 0.4rem 0.7rem;
-  font-size: 0.7rem;
+  font-size: 0.72rem;
   font-weight: 600;
   color: white;
   background: linear-gradient(135deg, #0d1220, #1a1f35);
@@ -370,13 +392,13 @@ const allRelatedHoldings = computed(() => {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 0.3rem;
+  gap: 0.5rem;
   margin-bottom: 0.75rem;
   padding-bottom: 0.5rem;
   border-bottom: 1px dashed var(--color-border);
 }
 .relate-holding-hint {
-  font-size: 0.7rem;
+  font-size: 0.72rem;
   color: var(--color-text-muted);
 }
 .hotspots-body {
@@ -416,14 +438,14 @@ const allRelatedHoldings = computed(() => {
   flex-wrap: wrap;
 }
 .rec-code {
-  font-size: 0.7rem;
+  font-size: 0.72rem;
   color: var(--color-text-muted);
   font-family: monospace;
   flex-shrink: 0;
 }
 .rec-portfolio {
   font-size: 0.65rem;
-  padding: 0.15rem 0.4rem;
+  padding: 0.2rem 0.5rem;
   border-radius: var(--radius-sm);
   white-space: nowrap;
   flex-shrink: 0;
@@ -472,7 +494,7 @@ const allRelatedHoldings = computed(() => {
 }
 .rec-feedback-btn:disabled { cursor: default; }
 .rec-badge {
-  font-size: 0.7rem;
+  font-size: 0.72rem;
   font-weight: 700;
   padding: 0.2rem 0.5rem;
   border-radius: var(--radius-sm);
@@ -510,11 +532,11 @@ const allRelatedHoldings = computed(() => {
   color: var(--color-text-muted);
   flex: 1;
   min-width: 0;
-  line-height: 1.4;
+  line-height: 1.5;
 }
 .rec-conf {
   font-size: 0.65rem;
-  padding: 0.15rem 0.4rem;
+  padding: 0.2rem 0.5rem;
   border-radius: var(--radius-sm);
   white-space: nowrap;
   flex-shrink: 0;
@@ -590,7 +612,7 @@ const allRelatedHoldings = computed(() => {
 .news-meta {
   display: flex;
   gap: 0.6rem;
-  font-size: 0.7rem;
+  font-size: 0.72rem;
   color: var(--color-text-muted);
   margin-top: 0.3rem;
 }
@@ -603,7 +625,7 @@ const allRelatedHoldings = computed(() => {
 .news-sectors {
   display: flex;
   flex-wrap: wrap;
-  gap: 0.3rem;
+  gap: 0.5rem;
   margin-bottom: 0.3rem;
 }
 .sector-tag {
@@ -620,7 +642,7 @@ const allRelatedHoldings = computed(() => {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 0.3rem;
+  gap: 0.5rem;
   margin-top: 0.2rem;
 }
 .relate-label {
@@ -690,14 +712,14 @@ const allRelatedHoldings = computed(() => {
 .verify-hint {
   font-size: 0.72rem;
   color: var(--color-text-muted);
-  margin-bottom: 0.4rem;
+  margin-bottom: 0.6rem;
   line-height: 1.5;
 }
 .verify-watch-stats {
   display: flex;
   gap: 0.8rem;
   font-size: 0.75rem;
-  margin-bottom: 0.4rem;
+  margin-bottom: 0.6rem;
   color: var(--color-text-secondary);
 }
 .verify-watch-stats span { white-space: nowrap; }
@@ -717,11 +739,16 @@ const allRelatedHoldings = computed(() => {
 }
 .verify-item:hover { background: var(--color-bg-hover); }
 .verify-name { flex: 1; color: var(--color-text-primary); font-weight: 500; }
-.verify-status { font-size: 0.7rem; white-space: nowrap; }
+.verify-status { font-size: 0.72rem; white-space: nowrap; }
 .vs-correct { color: #10b981; }
 .vs-wrong { color: #ef4444; }
 .vs-flat { color: #f59e0b; }
 .vs-pending { color: var(--color-text-muted); }
+@media (max-width: 768px) {
+  .card-header-actions { flex-wrap: wrap; gap: 0.25rem; }
+  .verify-bar { flex-wrap: wrap; gap: 0.25rem; }
+  .rec-main { gap: 0.4rem; }
+}
 @keyframes spin {
   from { transform: rotate(0deg); }
   to { transform: rotate(360deg); }

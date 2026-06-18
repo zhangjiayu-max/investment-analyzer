@@ -331,7 +331,7 @@ watch(() => props.taskId, () => {
 .back-btn {
   display: flex;
   align-items: center;
-  gap: 0.25rem;
+  gap: 0.35rem;
   font-size: 0.875rem;
 }
 
@@ -513,7 +513,7 @@ watch(() => props.taskId, () => {
 }
 
 .count-badge {
-  font-size: 0.7rem;
+  font-size: 0.72rem;
   font-weight: 500;
   background: var(--color-bg-input);
   color: var(--color-text-muted);

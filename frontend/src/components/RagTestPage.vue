@@ -349,7 +349,7 @@ function getScorePercent(score) {
 }
 
 .limit-select {
-  padding: 0.2rem 0.4rem;
+  padding: 0.35rem 0.6rem;
   border: 1px solid var(--color-border);
   border-radius: var(--radius-sm);
   background: var(--color-bg-input);
@@ -393,12 +393,12 @@ function getScorePercent(score) {
 }
 
 .diag-unit {
-  font-size: 0.7rem;
+  font-size: 0.72rem;
   color: var(--color-text-muted);
 }
 
 .diag-label {
-  font-size: 0.7rem;
+  font-size: 0.72rem;
   color: var(--color-text-muted);
   margin-top: 0.15rem;
 }
@@ -508,7 +508,7 @@ function getScorePercent(score) {
 }
 
 .result-type {
-  font-size: 0.7rem;
+  font-size: 0.72rem;
   font-weight: 600;
   padding: 0.15rem 0.45rem;
   border-radius: var(--radius-sm);
@@ -668,7 +668,7 @@ function getScorePercent(score) {
   }
 
   .type-chip {
-    padding: 0.35rem 0.65rem;
+    padding: 0.5rem 0.85rem;
     font-size: 0.8rem;
   }
 

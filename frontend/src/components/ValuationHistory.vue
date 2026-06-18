@@ -469,6 +469,14 @@ function ddPercentileClass(pct) {
   return 'badge-danger'
 }
 
+function ddProgressClass(pct) {
+  if (pct < 30) return 'fill-cold'
+  if (pct <= 50) return 'fill-cool'
+  if (pct <= 70) return 'fill-warm'
+  if (pct <= 85) return 'fill-hot'
+  return 'fill-extreme'
+}
+
 function ddStatusClass(status) {
   if (!status) return ''
   if (status === '低估') return 'val-low'
@@ -1203,16 +1211,26 @@ defineExpose({ loadHistory })
                   <td class="td-code">{{ item.index_code || '-' }}</td>
                   <td class="td-val">{{ item.pe ?? '-' }}</td>
                   <td>
-                    <span v-if="item.pe_percentile != null" :class="['badge', ddPercentileClass(item.pe_percentile)]">
-                      {{ item.pe_percentile }}%
-                    </span>
+                    <div v-if="item.pe_percentile != null" class="pe-percentile-cell">
+                      <span :class="['badge', ddPercentileClass(item.pe_percentile)]">
+                        {{ item.pe_percentile }}%
+                      </span>
+                      <div class="progress-bar-gradient" :class="ddProgressClass(item.pe_percentile)">
+                        <div class="fill" :style="{ width: item.pe_percentile + '%' }"></div>
+                      </div>
+                    </div>
                     <span v-else>-</span>
                   </td>
                   <td class="td-val">{{ item.pb ?? '-' }}</td>
                   <td>
-                    <span v-if="item.pb_percentile != null" :class="['badge', ddPercentileClass(item.pb_percentile)]">
-                      {{ item.pb_percentile }}%
-                    </span>
+                    <div v-if="item.pb_percentile != null" class="pe-percentile-cell">
+                      <span :class="['badge', ddPercentileClass(item.pb_percentile)]">
+                        {{ item.pb_percentile }}%
+                      </span>
+                      <div class="progress-bar-gradient" :class="ddProgressClass(item.pb_percentile)">
+                        <div class="fill" :style="{ width: item.pb_percentile + '%' }"></div>
+                      </div>
+                    </div>
                     <span v-else>-</span>
                   </td>
                   <td>{{ item.dividend_yield ?? '-' }}</td>
@@ -1384,7 +1402,7 @@ defineExpose({ loadHistory })
 .valuation-page {
   display: flex;
   flex-direction: column;
-  gap: 1.25rem;
+  gap: 1.5rem;
   font-family: 'SF Pro Display', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
 }
 
@@ -1392,7 +1410,7 @@ defineExpose({ loadHistory })
 .market-temp-card {
   background: linear-gradient(135deg, var(--color-bg-secondary), var(--color-bg-primary));
   border: 1px solid var(--color-border);
-  padding: 1rem 1.25rem;
+  padding: 1.25rem 1.5rem;
 }
 
 .market-temp-header {
@@ -1460,24 +1478,24 @@ defineExpose({ loadHistory })
 }
 
 .market-temp-desc {
-  font-size: 0.8125rem;
+  font-size: 0.85rem;
   color: var(--color-text-secondary);
-  margin-top: 0.5rem;
-  padding-top: 0.5rem;
+  margin-top: 0.75rem;
+  padding-top: 0.75rem;
   border-top: 1px solid var(--color-border-light);
 }
 
 .market-temp-date {
-  font-size: 0.75rem;
+  font-size: 0.78rem;
   color: var(--color-text-tertiary);
-  margin-top: 0.375rem;
+  margin-top: 0.5rem;
 }
 
 .card-title {
   font-size: 1.1rem;
   font-weight: 700;
   color: var(--color-text-primary);
-  margin: 0 0 1.25rem 0;
+  margin: 0 0 1.5rem 0;
   display: flex;
   align-items: center;
   gap: 0.6rem;
@@ -1641,7 +1659,7 @@ defineExpose({ loadHistory })
 .metric-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
-  gap: 1rem;
+  gap: 1.1rem;
 }
 
 .metric-card {
@@ -1658,9 +1676,9 @@ defineExpose({ loadHistory })
 }
 
 .metric-label {
-  font-size: 0.85rem;
+  font-size: 0.88rem;
   color: var(--color-text-muted);
-  margin-bottom: 0.5rem;
+  margin-bottom: 0.6rem;
   font-weight: 500;
 }
 
@@ -1863,7 +1881,7 @@ defineExpose({ loadHistory })
 }
 
 .data-table td {
-  padding: 0.85rem 1.25rem;
+  padding: 0.9rem 1.25rem;
   color: var(--color-text-secondary);
   border-bottom: 1px solid var(--color-border-light);
 }
@@ -1871,10 +1889,13 @@ defineExpose({ loadHistory })
 .data-table tbody tr {
   transition: all 0.15s ease;
 }
-
+.data-table tbody tr:nth-child(even) {
+  background: var(--color-bg-secondary);
+}
 .data-table tbody tr:hover {
   background: var(--color-primary-50);
   transform: scale(1.002);
+  box-shadow: inset 0 0 0 1px var(--color-primary-border-weak);
 }
 
 .data-table tbody tr:last-child td { border-bottom: none; }
@@ -1889,6 +1910,17 @@ defineExpose({ loadHistory })
 .td-val {
   font-weight: 700;
   font-size: 1rem;
+}
+
+/* PE 百分位进度条单元格 */
+.pe-percentile-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  min-width: 80px;
+}
+.pe-percentile-cell .progress-bar-gradient {
+  height: 4px;
 }
 
 /* Source Image */
@@ -2169,7 +2201,7 @@ defineExpose({ loadHistory })
 
 .analysis-content {
   font-size: 1rem;
-  line-height: 1.8;
+  line-height: 1.9;
   color: var(--color-text-secondary);
 }
 
@@ -2198,7 +2230,7 @@ defineExpose({ loadHistory })
 }
 
 .markdown-body :deep(li) {
-  margin: 0.25em 0;
+  margin: 0.35em 0;
 }
 
 .markdown-body :deep(strong) {
@@ -2230,7 +2262,7 @@ defineExpose({ loadHistory })
 .markdown-body :deep(th),
 .markdown-body :deep(td) {
   border: 1px solid var(--color-border);
-  padding: 0.4em 0.6em;
+  padding: 0.5em 0.75em;
   text-align: left;
 }
 
@@ -2312,9 +2344,9 @@ defineExpose({ loadHistory })
 }
 
 .history-item-preview {
-  font-size: 0.9rem;
+  font-size: 0.92rem;
   color: var(--color-text-muted);
-  line-height: 1.6;
+  line-height: 1.7;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -2505,9 +2537,9 @@ defineExpose({ loadHistory })
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
   box-shadow: var(--shadow-lg);
-  padding: 0.85rem 1rem;
-  font-size: 0.8rem;
-  line-height: 1.65;
+  padding: 1rem 1.25rem;
+  font-size: 0.82rem;
+  line-height: 1.7;
   color: var(--color-text-secondary);
   backdrop-filter: blur(8px);
 }
@@ -2685,22 +2717,29 @@ defineExpose({ loadHistory })
 }
 
 .dd-index-table td {
-  padding: 0.5rem 0.6rem;
+  padding: 0.6rem 0.75rem;
   border-bottom: 1px solid var(--color-border-light);
 }
 
 .dd-index-table tr:hover td {
   background: var(--color-bg-hover);
 }
-
-.badge-success-light {
-  background: #dcfce7;
-  color: #166534;
+.dd-index-table tr:nth-child(even) td {
+  background: var(--color-bg-secondary);
+}
+.dd-index-table tr:nth-child(even):hover td {
+  background: var(--color-bg-hover);
 }
 
+.badge-success-light {
+  background: linear-gradient(135deg, rgba(16,185,129,0.15), rgba(5,150,105,0.1));
+  color: #166534;
+  border: 1px solid rgba(16,185,129,0.2);
+}
 .badge-danger-light {
-  background: #fee2e2;
+  background: linear-gradient(135deg, rgba(239,68,68,0.15), rgba(220,38,38,0.1));
   color: #991b1b;
+  border: 1px solid rgba(239,68,68,0.2);
 }
 
 .td-name {
@@ -2721,6 +2760,16 @@ defineExpose({ loadHistory })
 .dd-status {
   font-weight: 600;
   font-size: 0.8rem;
+  padding: 0.15rem 0.5rem;
+  border-radius: var(--radius-sm);
+}
+.dd-status.val-low {
+  color: #059669;
+  background: linear-gradient(135deg, rgba(16,185,129,0.12), rgba(5,150,105,0.08));
+}
+.dd-status.val-high {
+  color: #dc2626;
+  background: linear-gradient(135deg, rgba(239,68,68,0.12), rgba(220,38,38,0.08));
 }
 .dd-diverge-warn {
   margin-left: 0.25rem;
@@ -2848,8 +2897,8 @@ defineExpose({ loadHistory })
 
 .sv-card {
   display: flex;
-  gap: 0.75rem;
-  padding: 1rem;
+  gap: 1rem;
+  padding: 1.25rem;
   background: var(--color-surface);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
@@ -2874,7 +2923,7 @@ defineExpose({ loadHistory })
   flex: 1;
   display: flex;
   flex-direction: column;
-  gap: 0.35rem;
+  gap: 0.45rem;
 }
 
 .sv-top {
@@ -2919,11 +2968,11 @@ defineExpose({ loadHistory })
 .sv-level-适中 { background: #f0fdf4; color: #16a34a; }
 
 .sv-metrics {
-  font-size: 0.8rem;
+  font-size: 0.82rem;
   color: var(--color-text-secondary);
   display: flex;
   flex-wrap: wrap;
-  gap: 0.25rem;
+  gap: 0.35rem;
 }
 
 .sv-metrics b {
@@ -2951,9 +3000,9 @@ defineExpose({ loadHistory })
 }
 
 .sv-summary-text {
-  font-size: 0.8rem;
+  font-size: 0.82rem;
   color: var(--color-text-muted);
-  line-height: 1.5;
+  line-height: 1.6;
 }
 
 /* ── 打分明细 ── */
@@ -3044,10 +3093,10 @@ defineExpose({ loadHistory })
 }
 
 .sv-strategy-summary {
-  font-size: 0.85rem;
-  line-height: 1.6;
+  font-size: 0.88rem;
+  line-height: 1.7;
   color: var(--color-text-secondary);
-  padding: 0.75rem 1rem;
+  padding: 1rem 1.25rem;
   background: var(--color-bg-secondary);
   border-radius: var(--radius-md);
   margin-bottom: 1rem;
@@ -3060,7 +3109,7 @@ defineExpose({ loadHistory })
 }
 
 .sv-strategy-card {
-  padding: 1rem;
+  padding: 1.25rem;
   background: var(--color-surface);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
@@ -3103,9 +3152,9 @@ defineExpose({ loadHistory })
 .sv-warnings {
   display: flex;
   flex-direction: column;
-  gap: 0.35rem;
-  margin: 0.5rem 0;
-  padding: 0.5rem 0.65rem;
+  gap: 0.4rem;
+  margin: 0.6rem 0;
+  padding: 0.6rem 0.75rem;
   background: var(--color-bg-secondary, #f9fafb);
   border-radius: 6px;
   border-left: 3px solid var(--color-border-light);
@@ -3114,8 +3163,8 @@ defineExpose({ loadHistory })
   display: flex;
   align-items: flex-start;
   gap: 0.4rem;
-  font-size: 0.75rem;
-  line-height: 1.4;
+  font-size: 0.78rem;
+  line-height: 1.5;
 }
 .sv-warning-icon { flex-shrink: 0; }
 .sv-warning-danger { color: #dc2626; }
@@ -3142,11 +3191,11 @@ defineExpose({ loadHistory })
 }
 
 .sv-strategy-action {
-  margin-top: 0.35rem;
-  padding-top: 0.35rem;
+  margin-top: 0.5rem;
+  padding-top: 0.5rem;
   border-top: 1px solid var(--color-border-light);
   color: var(--color-text-secondary);
-  line-height: 1.5;
+  line-height: 1.6;
 }
 
 /* ── 移动端响应式 ────────────────────────────────────────── */

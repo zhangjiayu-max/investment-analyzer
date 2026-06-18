@@ -554,7 +554,7 @@ function handlePanorama() {
 .dashboard {
   display: flex;
   flex-direction: column;
-  gap: 1rem;
+  gap: 1.25rem;
   max-width: 1280px;
 }
 
@@ -566,12 +566,13 @@ function handlePanorama() {
 }
 
 .dash-error {
-  padding: 2rem;
+  padding: 2.5rem 2rem;
   display: flex;
   flex-direction: column;
   align-items: center;
   gap: 0.75rem;
   color: var(--color-text-muted);
+  text-align: center;
 }
 
 /* ── 数据新鲜度警告 ── */
@@ -579,11 +580,15 @@ function handlePanorama() {
   display: flex;
   align-items: center;
   gap: 0.75rem;
-  padding: 0.75rem 1rem;
+  padding: 0.85rem 1.25rem;
   background: var(--color-warning-bg);
   border: 1px solid var(--color-warning-border, #fbbf24);
-  border-radius: 8px;
-  margin-bottom: 1rem;
+  border-radius: var(--radius-lg);
+  margin-bottom: 0.5rem;
+  transition: all var(--transition-fast);
+}
+.stale-warning:hover {
+  box-shadow: var(--shadow-sm);
 }
 .stale-warning-body {
   flex: 1;
@@ -597,21 +602,22 @@ function handlePanorama() {
   color: var(--color-warning-text, #92400e);
 }
 .stale-warning-list {
-  font-size: 0.8rem;
+  font-size: 0.82rem;
   color: var(--color-warning-text-secondary, #a16207);
-  line-height: 1.4;
+  line-height: 1.5;
 }
 
 /* ── Grid ── */
 .dash-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 1rem;
+  gap: 1.25rem;
 }
 
 @media (max-width: 768px) {
   .dash-grid {
     grid-template-columns: 1fr;
+    gap: 0.85rem;
   }
 }
 
@@ -619,13 +625,17 @@ function handlePanorama() {
 .temp-gauges-row {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-  gap: 1rem;
-  margin-bottom: 1rem;
+  gap: 1.25rem;
 }
 
 .temp-gauge-card {
   text-align: center;
-  padding: 0.75rem;
+  padding: 1.25rem 1rem;
+  transition: all var(--transition-normal);
+}
+.temp-gauge-card:hover {
+  box-shadow: var(--shadow-md);
+  border-color: var(--color-primary-border-weak);
 }
 
 .temp-gauge-label {
@@ -642,8 +652,9 @@ function handlePanorama() {
 }
 
 .temp-gauge-hint {
-  font-size: 0.75rem;
+  font-size: 0.78rem;
   color: var(--color-text-tertiary);
+  line-height: 1.5;
 }
 
 .dash-loading {
@@ -688,6 +699,14 @@ function handlePanorama() {
   .temp-gauges-row {
     grid-template-columns: 1fr;
     gap: 0.75rem;
+  }
+  .dash-header {
+    flex-direction: column;
+  }
+  .stale-warning {
+    flex-direction: column;
+    text-align: center;
+    gap: 0.5rem;
   }
 }
 </style>

@@ -465,7 +465,7 @@ function scoreColor(score) {
 .index-stat-label {
   font-size: 0.85rem;
   color: var(--color-text-muted);
-  margin-top: 0.25rem;
+  margin-top: 0.35rem;
 }
 
 .index-type-list {
@@ -536,7 +536,7 @@ function scoreColor(score) {
 .stat-label {
   font-size: 0.8rem;
   color: var(--color-text-muted);
-  margin-top: 0.25rem;
+  margin-top: 0.35rem;
 }
 
 .card-title {
@@ -556,8 +556,8 @@ function scoreColor(score) {
 .keyword-tag {
   display: inline-flex;
   align-items: center;
-  gap: 0.3rem;
-  padding: 0.3rem 0.6rem;
+  gap: 0.5rem;
+  padding: 0.5rem 0.85rem;
   background: var(--color-bg-input);
   border-radius: var(--radius-sm);
   font-size: 0.8rem;
@@ -681,7 +681,7 @@ function scoreColor(score) {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  margin-bottom: 0.4rem;
+  margin-bottom: 0.6rem;
   gap: 0.5rem;
 }
 
@@ -690,7 +690,7 @@ function scoreColor(score) {
   font-family: monospace;
   color: var(--color-primary-500);
   background: var(--color-primary-50);
-  padding: 0.1rem 0.4rem;
+  padding: 0.15rem 0.45rem;
   border-radius: var(--radius-sm);
   cursor: pointer;
   transition: all 0.15s;
@@ -709,7 +709,7 @@ function scoreColor(score) {
 }
 
 .log-time {
-  font-size: 0.7rem;
+  font-size: 0.72rem;
   color: var(--color-text-muted);
 }
 
@@ -746,7 +746,7 @@ function scoreColor(score) {
 
 .result-type {
   display: inline-flex;
-  padding: 0.15rem 0.4rem;
+  padding: 0.2rem 0.5rem;
   border-radius: var(--radius-sm);
   font-size: 0.65rem;
   font-weight: 500;
@@ -772,7 +772,7 @@ function scoreColor(score) {
 }
 
 .result-time {
-  font-size: 0.7rem;
+  font-size: 0.72rem;
   color: var(--color-text-muted);
   flex-shrink: 0;
   white-space: nowrap;
@@ -932,7 +932,7 @@ function scoreColor(score) {
   font-weight: 700;
 }
 .metric-label {
-  font-size: 0.7rem;
+  font-size: 0.72rem;
   color: var(--color-text-muted);
   margin-top: 0.2rem;
 }
@@ -946,21 +946,21 @@ function scoreColor(score) {
   display: flex;
   align-items: center;
   gap: 0.5rem;
-  padding: 0.4rem 0.6rem;
+  padding: 0.5rem 0.75rem;
   background: var(--color-bg-secondary);
   border-radius: var(--radius-sm);
   font-size: 0.8rem;
 }
 .relevance-badge {
-  font-size: 0.7rem;
-  padding: 0.1rem 0.4rem;
+  font-size: 0.72rem;
+  padding: 0.15rem 0.45rem;
   border-radius: var(--radius-sm);
   flex-shrink: 0;
 }
 .relevance-badge.relevant { background: #dcfce7; color: #166534; }
 .relevance-badge.partial { background: #fef9c3; color: #854d0e; }
 .relevance-badge.irrelevant { background: #fee2e2; color: #991b1b; }
-.eval-detail-type { color: var(--color-text-muted); font-size: 0.7rem; }
+.eval-detail-type { color: var(--color-text-muted); font-size: 0.72rem; }
 .eval-detail-title { flex: 1; }
 .eval-detail-score { font-family: monospace; color: var(--color-text-muted); }
 .eval-suggestions {
@@ -978,7 +978,7 @@ function scoreColor(score) {
 .category-stats {
   display: flex;
   flex-direction: column;
-  gap: 0.3rem;
+  gap: 0.5rem;
   margin-top: 0.5rem;
 }
 .category-item {

@@ -187,7 +187,7 @@ async function submit() {
 }
 
 .fb-btn {
-  padding: 0.35rem 0.75rem;
+  padding: 0.45rem 0.85rem;
   border: 1px solid var(--color-border);
   border-radius: 6px;
   background: var(--color-bg-primary);
@@ -256,7 +256,7 @@ async function submit() {
 
 .fb-stars {
   display: flex;
-  gap: 0.15rem;
+  gap: 0.25rem;
 }
 
 .fb-star {
@@ -284,7 +284,7 @@ async function submit() {
 }
 
 .fb-comment-row {
-  margin-top: 0.25rem;
+  margin-top: 0.35rem;
 }
 
 .fb-comment-input {
@@ -300,7 +300,7 @@ async function submit() {
 .fb-actions {
   display: flex;
   gap: 0.5rem;
-  margin-top: 0.25rem;
+  margin-top: 0.35rem;
 }
 
 .fb-submit {

@@ -123,7 +123,7 @@ onMounted(loadTasks)
 
 .new-task-btn {
   font-size: 0.75rem;
-  padding: 0.3rem 0.6rem;
+  padding: 0.4rem 0.75rem;
   color: var(--color-primary-600);
 }
 
@@ -188,7 +188,7 @@ onMounted(loadTasks)
 }
 
 .task-time {
-  font-size: 0.7rem;
+  font-size: 0.72rem;
   color: var(--color-text-muted);
   margin-top: 0.15rem;
 }

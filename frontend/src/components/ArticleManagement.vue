@@ -657,8 +657,8 @@ function closePreview() { previewImage.value = null }
 .toolbar {
   display: flex;
   align-items: center;
-  gap: 0.5rem;
-  margin-bottom: 1rem;
+  gap: 0.6rem;
+  margin-bottom: 1.25rem;
   flex-wrap: wrap;
 }
 
@@ -666,8 +666,8 @@ function closePreview() { previewImage.value = null }
   display: inline-flex;
   align-items: center;
   gap: 0.4rem;
-  padding: 0.5rem 0.85rem;
-  font-size: 0.8rem;
+  padding: 0.55rem 0.95rem;
+  font-size: 0.82rem;
 }
 
 .toolbar-select {
@@ -716,7 +716,7 @@ function closePreview() { previewImage.value = null }
 /* Content Area */
 .content-area {
   display: flex;
-  gap: 1rem;
+  gap: 1.25rem;
   flex: 1;
   min-height: 0;
 }
@@ -750,9 +750,9 @@ function closePreview() { previewImage.value = null }
 
 .list-table th {
   background: var(--color-bg-input);
-  padding: 0.6rem 0.75rem;
+  padding: 0.7rem 0.85rem;
   text-align: left;
-  font-size: 0.7rem;
+  font-size: 0.72rem;
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.05em;
@@ -781,7 +781,7 @@ function closePreview() { previewImage.value = null }
 }
 
 .list-row td {
-  padding: 0.6rem 0.75rem;
+  padding: 0.7rem 0.85rem;
 }
 
 .list-row .col-seq {
@@ -800,9 +800,9 @@ function closePreview() { previewImage.value = null }
 }
 
 .row-date {
-  font-size: 0.7rem;
+  font-size: 0.72rem;
   color: var(--color-text-muted);
-  margin-top: 0.15rem;
+  margin-top: 0.2rem;
 }
 
 .list-empty {
@@ -817,7 +817,7 @@ function closePreview() { previewImage.value = null }
   flex: 1;
   min-width: 0;
   overflow-y: auto;
-  padding: 1.25rem;
+  padding: 1.5rem;
 }
 
 .detail-header {
@@ -844,16 +844,16 @@ function closePreview() { previewImage.value = null }
 .detail-meta {
   display: flex;
   align-items: center;
-  gap: 0.75rem;
-  margin-top: 0.5rem;
+  gap: 0.85rem;
+  margin-top: 0.6rem;
   flex-wrap: wrap;
 }
 
 .meta-item {
   display: flex;
   align-items: center;
-  gap: 0.3rem;
-  font-size: 0.75rem;
+  gap: 0.35rem;
+  font-size: 0.78rem;
   color: var(--color-text-muted);
 }
 
@@ -876,8 +876,8 @@ function closePreview() { previewImage.value = null }
   display: inline-flex;
   align-items: center;
   gap: 0.4rem;
-  padding: 0.5rem 0.85rem;
-  font-size: 0.8rem;
+  padding: 0.55rem 0.95rem;
+  font-size: 0.82rem;
 }
 
 .btn-green {
@@ -908,8 +908,8 @@ function closePreview() { previewImage.value = null }
 /* Record Filter Bar */
 .record-filter-bar {
   display: flex;
-  gap: 0.4rem;
-  margin-bottom: 0.75rem;
+  gap: 0.5rem;
+  margin-bottom: 1rem;
   flex-wrap: wrap;
 }
 
@@ -917,7 +917,7 @@ function closePreview() { previewImage.value = null }
   display: inline-flex;
   align-items: center;
   gap: 0.35rem;
-  padding: 0.35rem 0.7rem;
+  padding: 0.4rem 0.8rem;
   border-radius: 999px;
   font-size: 0.75rem;
   font-weight: 500;
@@ -1040,11 +1040,11 @@ function closePreview() { previewImage.value = null }
 }
 
 .record-info {
-  padding: 0.75rem;
+  padding: 0.85rem 1rem;
 }
 
 .record-code {
-  font-size: 0.8rem;
+  font-size: 0.82rem;
   font-weight: 600;
   color: var(--color-text-primary);
   white-space: nowrap;
@@ -1053,9 +1053,9 @@ function closePreview() { previewImage.value = null }
 }
 
 .record-metric {
-  font-size: 0.7rem;
+  font-size: 0.72rem;
   color: var(--color-text-muted);
-  margin-top: 0.15rem;
+  margin-top: 0.2rem;
 }
 
 .record-metric-badge {
@@ -1096,14 +1096,15 @@ function closePreview() { previewImage.value = null }
 .badge-neutral .metric-dot { background: #64748b; }
 
 .record-error {
-  font-size: 0.7rem;
+  font-size: 0.72rem;
   color: var(--color-danger);
-  margin-top: 0.4rem;
+  margin-top: 0.5rem;
   line-clamp: 2;
   -webkit-line-clamp: 2;
   display: -webkit-box;
   -webkit-box-orient: vertical;
   overflow: hidden;
+  line-height: 1.5;
 }
 
 .record-retry {

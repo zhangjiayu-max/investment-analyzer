@@ -167,7 +167,7 @@ function errorCategoryLabel(c) {
 .status-cancelled { background: rgba(156, 163, 175, 0.1); color: #9ca3af; }
 
 .trace-error-cat {
-  font-size: 0.7rem;
+  font-size: 0.72rem;
   color: var(--color-danger, #ef4444);
 }
 
@@ -235,7 +235,7 @@ function errorCategoryLabel(c) {
 
 .timeline-phase {
   width: 80px;
-  font-size: 0.7rem;
+  font-size: 0.72rem;
   color: var(--color-text-muted);
   text-align: right;
 }
@@ -257,7 +257,7 @@ function errorCategoryLabel(c) {
 
 .timeline-time {
   width: 50px;
-  font-size: 0.7rem;
+  font-size: 0.72rem;
   color: var(--color-text-muted);
 }
 
@@ -292,7 +292,7 @@ function errorCategoryLabel(c) {
 
 /* 工具审计日志 */
 .trace-tools {
-  margin-bottom: 0.4rem;
+  margin-bottom: 0.6rem;
 }
 
 .tool-item {
@@ -345,7 +345,7 @@ function errorCategoryLabel(c) {
   .run-item,
   .tool-item {
     flex-wrap: wrap;
-    gap: 0.25rem;
+    gap: 0.35rem;
     padding: 0.4rem 0;
   }
 

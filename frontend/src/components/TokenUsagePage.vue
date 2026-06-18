@@ -459,7 +459,7 @@ const maxCallerTokens = computed(() => {
   background: var(--color-bg-card);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-sm);
-  padding: 0.35rem 0.65rem;
+  padding: 0.5rem 0.85rem;
   font-size: 0.78rem;
 }
 
@@ -511,7 +511,7 @@ const maxCallerTokens = computed(() => {
   color: var(--color-text-muted);
   text-transform: uppercase;
   letter-spacing: 0.04em;
-  margin-bottom: 0.35rem;
+  margin-bottom: 0.5rem;
 }
 
 .summary-value {
@@ -700,7 +700,7 @@ const maxCallerTokens = computed(() => {
 
 .caller-tag {
   display: inline-block;
-  font-size: 0.7rem;
+  font-size: 0.72rem;
   font-weight: 500;
   background: var(--color-primary-50);
   color: var(--color-primary-700);
@@ -758,13 +758,13 @@ const maxCallerTokens = computed(() => {
 
 .perf-tabs {
   display: flex;
-  gap: 0.25rem;
+  gap: 0.35rem;
 }
 
 .perf-tab {
   font-size: 0.75rem;
   font-weight: 500;
-  padding: 0.25rem 0.6rem;
+  padding: 0.35rem 0.7rem;
   background: none;
   border: 1px solid var(--color-border);
   border-radius: var(--radius-sm);
@@ -806,7 +806,7 @@ const maxCallerTokens = computed(() => {
 .perf-stat-label {
   font-size: 0.68rem;
   color: var(--color-text-muted);
-  margin-top: 0.1rem;
+  margin-top: 0.2rem;
 }
 
 .perf-agent-list {
@@ -870,7 +870,7 @@ const maxCallerTokens = computed(() => {
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 0.25rem;
+  gap: 0.35rem;
   padding: 0.75rem 1.25rem;
   border-top: 1px solid var(--color-border-light);
 }

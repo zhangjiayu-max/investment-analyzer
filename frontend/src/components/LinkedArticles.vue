@@ -371,7 +371,7 @@ onMounted(loadDocuments)
   display: flex;
   justify-content: space-between;
   align-items: center;
-  margin-bottom: 1rem;
+  margin-bottom: 1.25rem;
   flex-wrap: wrap;
   gap: 0.75rem;
 }
@@ -447,7 +447,7 @@ onMounted(loadDocuments)
 /* Content area */
 .content-area {
   display: flex;
-  gap: 1rem;
+  gap: 1.25rem;
   flex: 1;
   min-height: 0;
 }
@@ -478,8 +478,8 @@ onMounted(loadDocuments)
 
 .doc-table th {
   text-align: left;
-  padding: 0.6rem 0.75rem;
-  font-size: 0.75rem;
+  padding: 0.7rem 0.85rem;
+  font-size: 0.78rem;
   font-weight: 600;
   color: var(--color-text-muted);
   border-bottom: 1px solid var(--color-border);
@@ -487,7 +487,7 @@ onMounted(loadDocuments)
 }
 
 .doc-table td {
-  padding: 0.6rem 0.75rem;
+  padding: 0.7rem 0.85rem;
   border-bottom: 1px solid var(--color-border-light, var(--color-border));
 }
 
@@ -646,7 +646,7 @@ onMounted(loadDocuments)
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 0.75rem 1rem;
+  padding: 0.85rem 1.25rem;
   border-bottom: 1px solid var(--color-border);
   flex-shrink: 0;
 }
@@ -676,7 +676,7 @@ onMounted(loadDocuments)
 .preview-body {
   flex: 1;
   overflow-y: auto;
-  padding: 1rem;
+  padding: 1.25rem;
 }
 
 .preview-loading {
@@ -686,8 +686,8 @@ onMounted(loadDocuments)
 }
 
 .preview-text {
-  font-size: 0.85rem;
-  line-height: 1.7;
+  font-size: 0.88rem;
+  line-height: 1.8;
   color: var(--color-text-primary);
   white-space: pre-wrap;
   word-break: break-word;
@@ -696,8 +696,8 @@ onMounted(loadDocuments)
 }
 
 .preview-markdown {
-  font-size: 0.85rem;
-  line-height: 1.7;
+  font-size: 0.88rem;
+  line-height: 1.8;
 }
 
 .preview-markdown :deep(h1),
@@ -750,9 +750,9 @@ onMounted(loadDocuments)
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 0.4rem 0.75rem;
+  padding: 0.5rem 0.85rem;
   background: var(--color-bg-hover);
-  font-size: 0.75rem;
+  font-size: 0.78rem;
 }
 
 .chunk-index {
@@ -765,9 +765,9 @@ onMounted(loadDocuments)
 }
 
 .chunk-content {
-  padding: 0.5rem 0.75rem;
-  font-size: 0.8rem;
-  line-height: 1.6;
+  padding: 0.6rem 0.85rem;
+  font-size: 0.82rem;
+  line-height: 1.7;
   white-space: pre-wrap;
   word-break: break-word;
   margin: 0;

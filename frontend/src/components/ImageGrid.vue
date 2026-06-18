@@ -171,11 +171,11 @@ function percentileColor(p) {
   right: 0.5rem;
   display: flex;
   align-items: center;
-  gap: 0.3rem;
-  padding: 0.3rem 0.6rem;
+  gap: 0.5rem;
+  padding: 0.4rem 0.75rem;
   background: var(--color-primary-600);
   color: white;
-  font-size: 0.7rem;
+  font-size: 0.72rem;
   font-weight: 500;
   border-radius: var(--radius-sm);
   opacity: 0;
@@ -250,11 +250,11 @@ function percentileColor(p) {
 .result-item {
   display: flex;
   flex-direction: column;
-  gap: 0.15rem;
+  gap: 0.25rem;
 }
 
 .result-label {
-  font-size: 0.7rem;
+  font-size: 0.72rem;
   color: var(--color-text-muted);
 }
 

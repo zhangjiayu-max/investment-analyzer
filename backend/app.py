@@ -74,6 +74,7 @@ from routers.config import router as config_router
 from routers.rag import router as rag_router
 from routers.market_intelligence import router as market_intelligence_router
 from routers.knowledge import router as knowledge_router
+from routers.watchlist import router as watchlist_router
 
 # 注册新路径路由（优先级高）
 app.include_router(valuation_router)
@@ -103,6 +104,7 @@ app.include_router(config_router)
 app.include_router(rag_router)
 app.include_router(knowledge_router)
 app.include_router(market_intelligence_router)
+app.include_router(watchlist_router)
 
 # 静态文件目录
 for _d in (STATIC_DIR, IMAGES_DIR, OUTPUT_DIR, UPLOADS_DIR, DD_IMAGES_DIR, VALUATION_IMAGES_DIR):
@@ -433,6 +435,14 @@ async def _auto_refresh_nav():
             from db.portfolio import refresh_all_fund_prices
             result = refresh_all_fund_prices()
             logging.info(f"[auto-nav] 净值刷新完成: {result}")
+
+            # 净值刷新后自动触发预警扫描
+            try:
+                from routers.portfolio import scan_portfolio_alerts
+                alert_result = await scan_portfolio_alerts()
+                logging.info(f"[auto-nav] 预警扫描完成: {alert_result}")
+            except Exception as ae:
+                logging.warning(f"[auto-nav] 预警扫描异常: {ae}")
         except Exception as e:
             logging.warning(f"[auto-nav] 自动刷新净值异常: {e}")
             await asyncio.sleep(300)  # 出错后 5 分钟重试

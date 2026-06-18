@@ -647,7 +647,7 @@ function barHeight(score) {
 .page-desc {
   font-size: 0.85rem;
   color: var(--color-text-muted);
-  margin-top: 0.25rem;
+  margin-top: 0.35rem;
 }
 
 /* Summary Grid */
@@ -729,7 +729,7 @@ function barHeight(score) {
 }
 
 .day-select {
-  padding: 0.35rem 0.75rem;
+  padding: 0.45rem 0.85rem;
   border: 1px solid var(--color-border);
   border-radius: 6px;
   font-size: 0.8rem;
@@ -779,7 +779,7 @@ function barHeight(score) {
 .trend-date {
   font-size: 0.65rem;
   color: var(--color-text-muted);
-  margin-top: 0.25rem;
+  margin-top: 0.35rem;
 }
 
 .trend-legend {
@@ -877,7 +877,7 @@ function barHeight(score) {
   display: flex;
   align-items: center;
   gap: 0.75rem;
-  margin-bottom: 0.35rem;
+  margin-bottom: 0.5rem;
 }
 
 .lq-caller {
@@ -904,7 +904,7 @@ function barHeight(score) {
   display: flex;
   gap: 0.75rem;
   font-size: 0.75rem;
-  margin-bottom: 0.35rem;
+  margin-bottom: 0.5rem;
 }
 
 .dim-good { color: #16a34a; }
@@ -922,7 +922,7 @@ function barHeight(score) {
 .lq-comment {
   font-size: 0.8rem;
   color: var(--color-text-muted);
-  margin-top: 0.25rem;
+  margin-top: 0.35rem;
 }
 
 /* ── Agent 运行监控 ── */
@@ -934,7 +934,7 @@ function barHeight(score) {
 }
 
 .day-select {
-  padding: 0.35rem 0.75rem;
+  padding: 0.45rem 0.85rem;
   border: 1px solid var(--color-border);
   border-radius: 6px;
   font-size: 0.8rem;
@@ -965,9 +965,9 @@ function barHeight(score) {
 
 .perf-stat-label {
   display: block;
-  font-size: 0.7rem;
+  font-size: 0.72rem;
   color: var(--color-text-muted);
-  margin-top: 0.25rem;
+  margin-top: 0.35rem;
 }
 
 .perf-agent-table {
@@ -1047,9 +1047,9 @@ function barHeight(score) {
 }
 
 .conv-eval-stat-label {
-  font-size: 0.7rem;
+  font-size: 0.72rem;
   color: var(--color-text-muted);
-  margin-top: 0.25rem;
+  margin-top: 0.35rem;
 }
 
 .conv-eval-complexity h4,
@@ -1103,7 +1103,7 @@ function barHeight(score) {
 .complexity-count {
   width: 40px;
   text-align: right;
-  font-size: 0.7rem;
+  font-size: 0.72rem;
   color: var(--color-text-muted);
 }
 
@@ -1175,7 +1175,7 @@ function barHeight(score) {
 .conv-eval-item-meta {
   display: flex;
   gap: 0.75rem;
-  font-size: 0.7rem;
+  font-size: 0.72rem;
   color: var(--color-text-muted);
 }
 
@@ -1221,9 +1221,9 @@ function barHeight(score) {
 }
 
 .evolution-stat-label {
-  font-size: 0.7rem;
+  font-size: 0.72rem;
   color: var(--color-text-muted);
-  margin-top: 0.25rem;
+  margin-top: 0.35rem;
 }
 
 .evolution-trend h4,
@@ -1307,7 +1307,7 @@ function barHeight(score) {
 .suggestion-meta {
   display: flex;
   gap: 0.75rem;
-  font-size: 0.7rem;
+  font-size: 0.72rem;
   color: var(--color-text-muted);
   margin-bottom: 0.5rem;
 }
@@ -1329,7 +1329,7 @@ function barHeight(score) {
 
 .btn-accept,
 .btn-reject {
-  padding: 0.35rem 0.75rem;
+  padding: 0.45rem 0.85rem;
   border: none;
   border-radius: 4px;
   font-size: 0.75rem;

@@ -64,6 +64,6 @@ const icons = {
 }
 
 .empty-action {
-  margin-top: 0.25rem;
+  margin-top: 0.35rem;
 }
 </style>

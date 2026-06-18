@@ -190,7 +190,7 @@ const categoryLabels = {
   border: 1px solid var(--color-border);
   border-radius: var(--radius-xl);
   box-shadow: var(--shadow-sm);
-  transition: box-shadow 0.3s cubic-bezier(0.4, 0, 0.2, 1), border-color 0.3s ease;
+  transition: box-shadow 0.3s cubic-bezier(0.4, 0, 0.2, 1), border-color 0.3s ease, transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
   position: relative;
   overflow: hidden;
   min-height: 420px;
@@ -203,16 +203,34 @@ const categoryLabels = {
   left: 0;
   right: 0;
   height: 3px;
-  background: linear-gradient(90deg, var(--color-primary), var(--color-primary-light));
+  background: var(--gradient-accent);
   opacity: 0;
   transition: opacity 0.3s ease;
 }
+.dash-card::after {
+  content: '';
+  position: absolute;
+  top: -40px;
+  right: -40px;
+  width: 80px;
+  height: 80px;
+  border-radius: 50%;
+  background: var(--color-primary);
+  opacity: 0;
+  filter: blur(40px);
+  transition: opacity 0.4s ease;
+  pointer-events: none;
+}
 .dash-card:hover {
-  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4), 0 0 24px var(--color-primary-glow);
+  box-shadow: var(--shadow-lg), var(--shadow-glow);
   border-color: var(--color-primary-border);
+  transform: translateY(-1px);
 }
 .dash-card:hover::before {
   opacity: 1;
+}
+.dash-card:hover::after {
+  opacity: 0.08;
 }
 .card-header {
   display: flex;
@@ -318,7 +336,7 @@ const categoryLabels = {
   left: 50%;
   transform: translateX(-50%);
   padding: 0.4rem 0.7rem;
-  font-size: 0.7rem;
+  font-size: 0.72rem;
   font-weight: 600;
   color: white;
   background: linear-gradient(135deg, #0d1220, #1a1f35);
@@ -355,7 +373,7 @@ const categoryLabels = {
 .metric-item {
   display: flex;
   flex-direction: column;
-  gap: 0.25rem;
+  gap: 0.35rem;
 }
 .metric-label {
   font-size: 0.78rem;
@@ -380,11 +398,11 @@ const categoryLabels = {
   background: var(--color-bg-card);
   border-radius: var(--radius-md);
 }
-.concentration-icon { font-size: 1.25rem; line-height: 1.4; }
+.concentration-icon { font-size: 1.25rem; line-height: 1.5; }
 .concentration-text {
   font-size: 0.85rem;
   color: var(--color-text-secondary);
-  margin-bottom: 0.35rem;
+  margin-bottom: 0.5rem;
   font-weight: 500;
 }
 .concentration-bar-bg {
@@ -474,7 +492,7 @@ const categoryLabels = {
   color: var(--color-primary);
 }
 .drift-badge {
-  font-size: 0.7rem;
+  font-size: 0.72rem;
   font-weight: 700;
   padding: 0.15rem 0.5rem;
   border-radius: var(--radius-sm);
@@ -484,7 +502,7 @@ const categoryLabels = {
 .drift-badge.slight { background: rgba(245, 158, 11, 0.12); color: #d97706; }
 .drift-badge.significant { background: rgba(239, 68, 68, 0.12); color: #dc2626; }
 .market-tag {
-  font-size: 0.7rem;
+  font-size: 0.72rem;
   color: var(--color-text-muted);
   margin-left: auto;
 }
@@ -540,13 +558,13 @@ const categoryLabels = {
 .alloc-values {
   display: flex;
   align-items: center;
-  gap: 0.25rem;
+  gap: 0.35rem;
   flex-shrink: 0;
   width: 5.5rem;
   font-size: 0.75rem;
 }
 .alloc-current { font-weight: 700; color: var(--color-primary); }
-.alloc-arrow { color: var(--color-text-muted); font-size: 0.7rem; }
+.alloc-arrow { color: var(--color-text-muted); font-size: 0.72rem; }
 .alloc-target { font-weight: 600; color: var(--color-accent, #10b981); }
 .rebalance-suggestions {
   display: flex;
@@ -564,7 +582,7 @@ const categoryLabels = {
   font-size: 0.82rem;
 }
 .suggestion-action {
-  font-size: 0.7rem;
+  font-size: 0.72rem;
   font-weight: 700;
   padding: 0.1rem 0.4rem;
   border-radius: var(--radius-sm);
@@ -622,7 +640,7 @@ const categoryLabels = {
 }
 .panorama-content :deep(th),
 .panorama-content :deep(td) {
-  padding: 0.4rem 0.6rem;
+  padding: 0.5rem 0.75rem;
   border: 1px solid var(--color-border-light);
   text-align: left;
 }

@@ -199,23 +199,26 @@ const activeGroup = computed(() => {
 .sidebar-logo {
   display: flex;
   align-items: center;
-  gap: 0.75rem;
-  padding: 1.25rem 1rem;
+  gap: 0.7rem;
+  padding: 1.1rem 1rem;
   border-bottom: 1px solid var(--color-border);
+  background: linear-gradient(135deg, var(--color-primary-bg-gradient-start), var(--color-primary-bg-gradient-end));
 }
 
 .logo-icon {
-  width: 36px;
-  height: 36px;
-  background: linear-gradient(135deg, var(--color-primary-500), var(--color-primary-700));
+  width: 34px;
+  height: 34px;
+  background: var(--gradient-primary);
   border-radius: var(--radius-md);
   display: flex;
   align-items: center;
   justify-content: center;
   color: white;
-  font-size: 0.8rem;
-  font-weight: 700;
+  font-size: 0.75rem;
+  font-weight: 800;
   flex-shrink: 0;
+  box-shadow: 0 2px 8px var(--color-primary-shadow);
+  letter-spacing: -0.02em;
 }
 
 .logo-text {
@@ -225,10 +228,11 @@ const activeGroup = computed(() => {
 }
 
 .logo-title {
-  font-size: 0.9rem;
+  font-size: 0.88rem;
   font-weight: 700;
   color: var(--color-text-primary);
   line-height: 1.2;
+  letter-spacing: -0.01em;
 }
 
 .logo-sub {
@@ -239,25 +243,35 @@ const activeGroup = computed(() => {
 
 .sidebar-nav {
   flex: 1;
-  padding: 0.75rem 0.5rem;
+  padding: 0.6rem 0.5rem;
   display: flex;
   flex-direction: column;
-  gap: 0.25rem;
+  gap: 0.15rem;
   overflow-y: auto;
+  position: relative;
+}
+/* nav 和 token-meter 之间的精致分割线 */
+.sidebar-nav::after {
+  content: '';
+  display: block;
+  margin-top: 0.5rem;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, var(--color-primary-border-weak), transparent);
 }
 
 .nav-item {
   display: flex;
   align-items: center;
-  gap: 0.75rem;
-  padding: 0.6rem 0.75rem;
+  gap: 0.65rem;
+  padding: 0.5rem 0.7rem;
   border-radius: var(--radius-md);
   color: var(--color-text-secondary);
-  font-size: 0.875rem;
+  font-size: 0.85rem;
   font-weight: 500;
   transition: all var(--transition-fast);
   text-align: left;
   width: 100%;
+  position: relative;
 }
 
 .nav-item:hover {
@@ -268,15 +282,28 @@ const activeGroup = computed(() => {
 .nav-item.active {
   background: var(--color-primary-50);
   color: var(--color-primary-700);
-  border-left: 2px solid var(--color-primary-500);
-  padding-left: calc(0.75rem - 2px);
+  font-weight: 600;
+  position: relative;
+}
+.nav-item.active::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 20%;
+  bottom: 20%;
+  width: 3px;
+  background: var(--gradient-primary);
+  border-radius: 0 3px 3px 0;
+  box-shadow: 0 0 8px var(--color-primary-glow-strong);
 }
 
 .dark .nav-item.active {
   background: var(--color-primary-bg);
   color: var(--color-primary-300);
-  border-left: 2px solid var(--color-primary-500);
-  box-shadow: 0 0 12px rgba(201, 168, 76, 0.08);
+}
+.dark .nav-item.active::before {
+  background: var(--gradient-primary);
+  box-shadow: 0 0 10px var(--color-primary-glow-strong);
 }
 
 /* Hot items (持仓管理、估值数据) */
@@ -337,31 +364,58 @@ const activeGroup = computed(() => {
 
 /* Children */
 .nav-children {
-  padding-left: 0.5rem;
+  padding-left: 0.75rem;
   display: flex;
   flex-direction: column;
-  gap: 0.125rem;
+  gap: 0.1rem;
+  position: relative;
+}
+.nav-children::before {
+  content: '';
+  position: absolute;
+  left: 0.95rem;
+  top: 0;
+  bottom: 0.3rem;
+  width: 1px;
+  background: var(--color-border);
 }
 
 .nav-child {
-  padding: 0.45rem 0.75rem;
-  font-size: 0.8rem;
-  gap: 0.6rem;
+  padding: 0.4rem 0.7rem;
+  font-size: 0.79rem;
+  gap: 0.55rem;
+  color: var(--color-text-muted);
+}
+
+.nav-child:hover {
+  color: var(--color-text-primary);
 }
 
 .nav-child .nav-icon {
   width: 16px;
   height: 16px;
-  opacity: 0.7;
+  opacity: 0.6;
+}
+
+.nav-child.active {
+  color: var(--color-primary-600);
+  background: var(--color-primary-bg);
+}
+.nav-child.active .nav-icon {
+  opacity: 1;
+}
+.dark .nav-child.active {
+  color: var(--color-primary-300);
 }
 
 /* ── Token 预算指示器 ──────────────────────────── */
 .token-meter {
   margin: 0 0.5rem 0.25rem;
-  padding: 0.6rem 0.75rem;
-  border-radius: var(--radius-md);
+  padding: 0.65rem 0.8rem;
+  border-radius: var(--radius-lg);
   background: var(--color-bg-hover);
   transition: all var(--transition-normal);
+  border: 1px solid var(--color-border-light);
 }
 
 .token-meter-header {
@@ -397,6 +451,7 @@ const activeGroup = computed(() => {
   background: var(--color-border);
   position: relative;
   overflow: hidden;
+  box-shadow: inset 0 1px 2px rgba(0,0,0,0.06);
 }
 
 .token-bar-fill {
@@ -404,6 +459,21 @@ const activeGroup = computed(() => {
   border-radius: 3px;
   transition: width 0.6s cubic-bezier(0.22, 1, 0.36, 1), background-color 0.4s ease;
   position: relative;
+}
+
+.token-bar-fill::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: linear-gradient(90deg, transparent, rgba(255,255,255,0.25), transparent);
+  animation: token-shimmer 2s ease-in-out infinite;
+}
+@keyframes token-shimmer {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(100%); }
 }
 
 .token-bar-marker {
@@ -485,6 +555,16 @@ const activeGroup = computed(() => {
 .sidebar-bottom {
   padding: 0.5rem;
   border-top: 1px solid var(--color-border);
+  position: relative;
+}
+.sidebar-bottom::before {
+  content: '';
+  position: absolute;
+  top: -1px;
+  left: 1rem;
+  right: 1rem;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, var(--color-primary-border-weak), transparent);
 }
 
 .theme-toggle {

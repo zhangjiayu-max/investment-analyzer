@@ -1506,6 +1506,25 @@ def build_rag_context_with_details(query: str, content_types: list[str] = None, 
         if body_len > 0 and body_len < short_content_threshold:
             r["_score"] *= short_content_penalty
 
+    # 书籍内容相关度优化：检查书籍标题/内容与查询的关键词重叠度
+    book_relevance_boost = get_rag_config_float("book_relevance_boost", 1.2)
+    book_relevance_penalty = get_rag_config_float("book_relevance_penalty", 0.7)
+    query_tokens = set(query.replace(" ", ""))
+    for r in all_results:
+        if r.get("content_type") == "book":
+            title = r.get("title", "")
+            body = r.get("body", "")[:200]  # 只检查前 200 字符
+            book_text = title + body
+            # 计算关键词重叠
+            overlap = sum(1 for token in query_tokens if token in book_text)
+            overlap_ratio = overlap / len(query_tokens) if query_tokens else 0
+            if overlap_ratio > 0.3:
+                # 高相关：提升权重
+                r["_score"] *= book_relevance_boost
+            elif overlap_ratio < 0.1:
+                # 低相关：降低权重
+                r["_score"] *= book_relevance_penalty
+
     # 双路命中加分：同时被 FTS5 和 ChromaDB 命中的结果更可靠
     # 必须在阈值过滤之前，避免边界结果被误杀
     dual_hit_boost = get_rag_config_float("dual_hit_boost", 1.15)
@@ -1570,6 +1589,15 @@ def build_rag_context_with_details(query: str, content_types: list[str] = None, 
 
     all_results.sort(key=lambda x: x["_score"], reverse=True)
     logger.info(f"RAG 合并后: {len(all_results)}条, 类型: {[r['content_type'] for r in all_results]}")
+
+    # 结果多样性保证：如果查询涉及行业/指数，确保至少有 1 条估值数据
+    _has_valuation = any(r.get("content_type") == "valuation" for r in all_results)
+    _industry_keywords = ["消费", "白酒", "医药", "科技", "新能源", "金融", "地产", "军工", "周期", "行业"]
+    _needs_valuation = any(kw in query for kw in _industry_keywords)
+    if _needs_valuation and not _has_valuation and direct_valuation_results:
+        # 从直接注入的估值数据中补充 1 条
+        all_results.insert(0, direct_valuation_results[0])
+        logger.info(f"多样性保证: 补充 1 条估值数据")
 
     # 轻量级重排序（基于 token 重叠率，快速提升精度）
     if len(all_results) > 3:

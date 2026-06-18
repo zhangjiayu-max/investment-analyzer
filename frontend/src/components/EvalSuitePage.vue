@@ -548,7 +548,7 @@ onMounted(loadAll)
   padding: 0.6rem 1rem;
   display: flex;
   flex-direction: column;
-  gap: 0.15rem;
+  gap: 0.25rem;
   min-width: 100px;
 }
 
@@ -689,7 +689,7 @@ onMounted(loadAll)
   padding: 0.6rem 0.75rem;
   border-radius: var(--radius-md);
   cursor: pointer;
-  margin-bottom: 0.35rem;
+  margin-bottom: 0.5rem;
   transition: background 0.15s;
 }
 
@@ -726,7 +726,7 @@ onMounted(loadAll)
   display: flex;
   align-items: center;
   gap: 0.5rem;
-  margin-top: 0.25rem;
+  margin-top: 0.35rem;
   padding-left: 1.5rem;
 }
 
@@ -770,7 +770,7 @@ onMounted(loadAll)
 .meta-item {
   display: flex;
   flex-direction: column;
-  gap: 0.15rem;
+  gap: 0.25rem;
 }
 
 .meta-label {
@@ -808,7 +808,7 @@ onMounted(loadAll)
 .score-label {
   font-size: 1rem;
   font-weight: 600;
-  margin-top: 0.25rem;
+  margin-top: 0.35rem;
 }
 
 .score-reason {
@@ -921,7 +921,7 @@ onMounted(loadAll)
 
 .result-content :deep(th),
 .result-content :deep(td) {
-  padding: 0.4rem 0.6rem;
+  padding: 0.5rem 0.75rem;
   border: 1px solid var(--color-border);
   text-align: left;
 }
@@ -972,7 +972,7 @@ onMounted(loadAll)
 
 /* Buttons */
 .btn-xs {
-  padding: 0.3rem 0.6rem;
+  padding: 0.5rem 0.85rem;
   font-size: 0.75rem;
 }
 

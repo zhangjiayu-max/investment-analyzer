@@ -168,7 +168,7 @@ const emit = defineEmits(['bond-recommend'])
   border: 1px solid var(--color-border);
   border-radius: var(--radius-xl);
   box-shadow: var(--shadow-sm);
-  transition: box-shadow 0.3s cubic-bezier(0.4, 0, 0.2, 1), border-color 0.3s ease;
+  transition: box-shadow 0.3s cubic-bezier(0.4, 0, 0.2, 1), border-color 0.3s ease, transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
   position: relative;
   overflow: hidden;
   min-height: 420px;
@@ -177,17 +177,39 @@ const emit = defineEmits(['bond-recommend'])
 .dash-card::before {
   content: '';
   position: absolute;
-  top: 0; left: 0; right: 0;
+  top: 0;
+  left: 0;
+  right: 0;
   height: 3px;
-  background: linear-gradient(90deg, var(--color-primary), var(--color-primary-light));
+  background: var(--gradient-success);
   opacity: 0;
   transition: opacity 0.3s ease;
 }
-.dash-card:hover {
-  box-shadow: 0 4px 20px rgba(0,0,0,0.4), 0 0 24px rgba(212,168,67,0.06);
-  border-color: rgba(212,168,67,0.2);
+.dash-card::after {
+  content: '';
+  position: absolute;
+  top: -40px;
+  right: -40px;
+  width: 80px;
+  height: 80px;
+  border-radius: 50%;
+  background: var(--color-primary);
+  opacity: 0;
+  filter: blur(40px);
+  transition: opacity 0.4s ease;
+  pointer-events: none;
 }
-.dash-card:hover::before { opacity: 1; }
+.dash-card:hover {
+  box-shadow: var(--shadow-lg), var(--shadow-glow);
+  border-color: var(--color-primary-border);
+  transform: translateY(-1px);
+}
+.dash-card:hover::before {
+  opacity: 1;
+}
+.dash-card:hover::after {
+  opacity: 0.08;
+}
 .card-header {
   display: flex;
   align-items: center;
@@ -238,24 +260,24 @@ const emit = defineEmits(['bond-recommend'])
   font-size: 0.8rem;
   font-weight: 600;
   color: var(--color-primary);
-  background: linear-gradient(135deg, var(--color-primary-bg), rgba(212,168,67,0.08));
-  border: 1px solid rgba(212,168,67,0.2);
+  background: linear-gradient(135deg, var(--color-primary-bg), var(--color-primary-bg-gradient-end));
+  border: 1px solid var(--color-primary-border);
   border-radius: var(--radius-lg);
   cursor: pointer;
   transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
   white-space: nowrap;
 }
 .btn-ai-action:hover {
-  background: linear-gradient(135deg, rgba(212,168,67,0.15), rgba(212,168,67,0.12));
-  border-color: rgba(212,168,67,0.4);
+  background: linear-gradient(135deg, var(--color-primary-bg-strong), var(--color-primary-bg-hover));
+  border-color: var(--color-primary-border-strong);
   transform: translateY(-1px);
-  box-shadow: 0 4px 12px rgba(212,168,67,0.15);
+  box-shadow: 0 4px 12px var(--color-primary-glow-strong);
 }
 .btn-ai-action:active { transform: translateY(0); box-shadow: none; }
 .btn-ai-action:disabled { opacity: 0.6; cursor: not-allowed; transform: none; box-shadow: none; }
 .btn-ai-action.btn-loading {
-  background: linear-gradient(135deg, rgba(212,168,67,0.08), rgba(212,168,67,0.05));
-  border-color: rgba(212,168,67,0.15);
+  background: linear-gradient(135deg, var(--color-primary-bg-gradient-end), var(--color-primary-bg-weak));
+  border-color: var(--color-primary-bg-strong);
 }
 .icon-spin {
   transition: transform 0.3s ease;
@@ -267,7 +289,7 @@ const emit = defineEmits(['bond-recommend'])
   left: 50%;
   transform: translateX(-50%);
   padding: 0.4rem 0.7rem;
-  font-size: 0.7rem;
+  font-size: 0.72rem;
   font-weight: 600;
   color: white;
   background: linear-gradient(135deg, #0d1220, #1a1f35);
@@ -306,7 +328,7 @@ const emit = defineEmits(['bond-recommend'])
   letter-spacing: -0.02em;
 }
 .cash-ratio-tag {
-  font-size: 0.7rem;
+  font-size: 0.72rem;
   font-weight: 600;
   padding: 0.1rem 0.45rem;
   border-radius: var(--radius-sm);
@@ -339,7 +361,7 @@ const emit = defineEmits(['bond-recommend'])
   gap: 0.35rem;
   font-size: 0.78rem;
   line-height: 1.5;
-  padding: 0.4rem 0.6rem;
+  padding: 0.5rem 0.75rem;
   border-radius: var(--radius-md);
 }
 .cash-alert.warning { background: rgba(239,68,68,0.06); color: #b91c1c; }
@@ -381,7 +403,7 @@ const emit = defineEmits(['bond-recommend'])
 .bond-trend {
   display: flex;
   flex-direction: column;
-  gap: 0.25rem;
+  gap: 0.35rem;
   margin-top: 0.5rem;
   padding-top: 0.5rem;
   border-top: 1px solid var(--color-border-light);
@@ -458,7 +480,7 @@ const emit = defineEmits(['bond-recommend'])
   background: linear-gradient(90deg, var(--color-primary-400), var(--color-primary));
 }
 .alloc-bar-desc {
-  font-size: 0.7rem;
+  font-size: 0.72rem;
   color: var(--color-text-muted);
 }
 .alloc-money {
@@ -500,7 +522,7 @@ const emit = defineEmits(['bond-recommend'])
 .bond-ai-header {
   display: flex;
   flex-direction: column;
-  gap: 0.3rem;
+  gap: 0.5rem;
   margin-bottom: 0.5rem;
 }
 .bond-ai-summary {
@@ -516,7 +538,7 @@ const emit = defineEmits(['bond-recommend'])
   font-size: 0.8rem;
   color: var(--color-text-secondary);
   margin-bottom: 0.5rem;
-  line-height: 1.4;
+  line-height: 1.5;
 }
 .bond-ai-label {
   font-weight: 600;
@@ -550,7 +572,7 @@ const emit = defineEmits(['bond-recommend'])
   font-family: monospace;
 }
 .bond-rec-type {
-  font-size: 0.7rem;
+  font-size: 0.72rem;
   padding: 1px 6px;
   border-radius: 4px;
   background: var(--color-primary-100);
@@ -574,7 +596,7 @@ const emit = defineEmits(['bond-recommend'])
   color: var(--color-success, #059669);
 }
 .bond-rec-desc {
-  font-size: 0.7rem;
+  font-size: 0.72rem;
   color: var(--color-text-muted);
 }
 .bond-rec-alt {
@@ -582,6 +604,11 @@ const emit = defineEmits(['bond-recommend'])
   font-size: 0.78rem;
   color: var(--color-text-muted);
   font-style: italic;
+}
+@media (max-width: 768px) {
+  .dash-card { min-height: auto; max-height: none; }
+  .card-header-actions { flex-wrap: wrap; gap: 0.25rem; }
+  .bond-temp-row { flex-wrap: wrap; gap: 0.25rem; }
 }
 @keyframes spin {
   from { transform: rotate(0deg); }

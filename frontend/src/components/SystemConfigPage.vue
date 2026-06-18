@@ -205,7 +205,7 @@ onMounted(loadConfigs)
 }
 
 .input-sm {
-  padding: 0.35rem 0.6rem;
+  padding: 0.45rem 0.75rem;
   font-size: 0.82rem;
 }
 
@@ -249,7 +249,7 @@ onMounted(loadConfigs)
 .config-info {
   display: flex;
   flex-direction: column;
-  gap: 0.25rem;
+  gap: 0.35rem;
   flex: 1;
   min-width: 0;
 }
@@ -277,7 +277,7 @@ onMounted(loadConfigs)
   font-size: 0.85rem;
   font-weight: 600;
   color: var(--color-text-primary);
-  padding: 0.25rem 0.5rem;
+  padding: 0.35rem 0.6rem;
   background: var(--color-bg-hover);
   border-radius: var(--radius-sm);
   min-width: 60px;
@@ -288,7 +288,7 @@ onMounted(loadConfigs)
   background: var(--color-primary-500);
   color: white;
   border: none;
-  padding: 0.35rem 0.75rem;
+  padding: 0.45rem 0.85rem;
   border-radius: var(--radius-sm);
   cursor: pointer;
   font-size: 0.82rem;
@@ -303,7 +303,7 @@ onMounted(loadConfigs)
   border: none;
   color: var(--color-text-muted);
   cursor: pointer;
-  padding: 0.35rem 0.5rem;
+  padding: 0.45rem 0.6rem;
   font-size: 0.82rem;
 }
 
@@ -315,7 +315,7 @@ onMounted(loadConfigs)
   background: none;
   border: 1px solid var(--color-border);
   color: var(--color-text-primary);
-  padding: 0.4rem 0.75rem;
+  padding: 0.5rem 0.85rem;
   border-radius: var(--radius-md);
   cursor: pointer;
   font-size: 0.82rem;
@@ -329,7 +329,7 @@ onMounted(loadConfigs)
 }
 
 .btn-sm {
-  padding: 0.35rem 0.6rem;
+  padding: 0.45rem 0.75rem;
   font-size: 0.78rem;
 }
 

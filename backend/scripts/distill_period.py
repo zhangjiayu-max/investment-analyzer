@@ -62,7 +62,7 @@ _DISTILL_MODEL = _primary_cfg[2]
 
 # MIMO 套餐 API — 三个 key 轮询，避免并发限流（蒸馏专用）
 _DISTILL_KEYS = [
-    "tp-czk5aswnmkkomrt2d6oy8p5me8rjnz2bdl70txopb0q8m8qp",
+    "tp-ca65d13uw5f06odkihv9336gb69avpj3hjrx6r38og6e8ejw",
 ]
 _DISTILL_BASE_URL = "https://token-plan-cn.xiaomimimo.com/v1"
 

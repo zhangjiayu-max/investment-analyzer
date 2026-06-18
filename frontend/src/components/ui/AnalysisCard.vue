@@ -132,7 +132,7 @@ function copyRecordId() {
 
 .analysis-actions {
   display: flex;
-  gap: 0.25rem;
+  gap: 0.35rem;
 }
 
 /* ── Report Body ── */
@@ -201,7 +201,7 @@ function copyRecordId() {
 
 .analysis-body :deep(th),
 .analysis-body :deep(td) {
-  padding: 0.25rem 0.5rem;
+  padding: 0.35rem 0.6rem;
   border: 1px solid var(--color-border);
   text-align: left;
 }
@@ -279,4 +279,14 @@ function copyRecordId() {
 .rec-feedback-btn:hover { background: var(--color-surface-hover); }
 .rec-feedback-btn.helpful.active { color: #10b981; border-color: #10b981; background: rgba(16,185,129,0.08); }
 .rec-feedback-btn.unhelpful.active { color: #ef4444; border-color: #ef4444; background: rgba(239,68,68,0.08); }
+
+@media (max-width: 768px) {
+  .analysis-header { flex-wrap: wrap; gap: 0.25rem; padding: 0.4rem 0.625rem; }
+  .analysis-meta { flex-wrap: wrap; gap: 0.3rem; font-size: 0.75rem; }
+  .analysis-body { padding: 0.75rem; font-size: 0.82rem; }
+  .analysis-body :deep(table) { display: block; overflow-x: auto; -webkit-overflow-scrolling: touch; white-space: nowrap; font-size: 0.75rem; }
+  .analysis-body :deep(th),
+  .analysis-body :deep(td) { padding: 0.25rem 0.4rem; }
+  .analysis-body :deep(pre) { font-size: 0.72rem; padding: 0.5rem; overflow-x: auto; }
+}
 </style>

@@ -767,7 +767,7 @@ onMounted(() => {
 .eval-card__suggestion-item {
   font-size: 11px;
   color: var(--text-secondary, #666);
-  line-height: 1.4;
+  line-height: 1.5;
   padding-left: 16px;
   position: relative;
 }
@@ -863,7 +863,7 @@ onMounted(() => {
 .eval-card__feedback-item {
   font-size: 11px;
   color: var(--text-secondary, #666);
-  line-height: 1.4;
+  line-height: 1.5;
   padding-left: 12px;
   position: relative;
 }

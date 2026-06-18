@@ -82,20 +82,20 @@ function close() {
 
 .feedback-textarea {
   width: 100%;
-  padding: 0.6rem 0.75rem;
+  padding: 0.75rem 0.85rem;
   border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
+  border-radius: var(--radius-lg);
   background: var(--color-bg-input);
   color: var(--color-text-primary);
   font-size: 0.85rem;
-  line-height: 1.5;
+  line-height: 1.6;
   resize: vertical;
   outline: none;
-  transition: border-color 0.15s;
+  transition: border-color 0.15s, box-shadow 0.15s;
   box-sizing: border-box;
 }
 
-.feedback-textarea:focus { border-color: var(--color-primary-500, #3b82f6); }
+.feedback-textarea:focus { border-color: var(--color-primary-500); box-shadow: var(--focus-ring); }
 .feedback-textarea::placeholder { color: var(--color-text-tertiary, #9ca3af); }
 
 .feedback-dialog-actions {
@@ -106,32 +106,35 @@ function close() {
 
 .feedback-dialog-actions .btn-secondary {
   flex: 1;
-  padding: 0.55rem 1rem;
+  padding: 0.65rem 1rem;
   font-size: 0.85rem;
   background: var(--color-bg-card);
   color: var(--color-text-secondary);
   border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
+  border-radius: var(--radius-lg);
   font-weight: 500;
   cursor: pointer;
   transition: all 0.15s;
+  min-height: 44px;
 }
 .feedback-dialog-actions .btn-secondary:hover { background: var(--color-bg-hover); }
 
 .feedback-dialog-actions .btn-primary {
   flex: 1;
-  padding: 0.55rem 1rem;
+  padding: 0.65rem 1rem;
   font-size: 0.85rem;
-  background: linear-gradient(135deg, var(--color-primary-600, #2563eb), var(--color-primary-500, #3b82f6));
+  background: var(--gradient-primary);
   color: white;
   border: none;
-  border-radius: var(--radius-md);
+  border-radius: var(--radius-lg);
   font-weight: 500;
   cursor: pointer;
   transition: all 0.15s;
+  min-height: 44px;
 }
 .feedback-dialog-actions .btn-primary:hover {
-  background: linear-gradient(135deg, var(--color-primary-700, #1d4ed8), var(--color-primary-600, #2563eb));
+  box-shadow: 0 4px 12px var(--color-primary-glow-strong);
+  transform: translateY(-1px);
 }
 
 .fade-enter-active { transition: opacity 0.2s; }

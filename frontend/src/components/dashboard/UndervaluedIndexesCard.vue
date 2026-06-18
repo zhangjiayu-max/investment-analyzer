@@ -106,12 +106,13 @@ const emit = defineEmits(['refresh', 'navigate'])
   border: 1px solid var(--color-border);
   border-radius: var(--radius-xl);
   box-shadow: var(--shadow-sm);
-  transition: box-shadow 0.3s cubic-bezier(0.4, 0, 0.2, 1), border-color 0.3s ease;
+  transition: box-shadow 0.3s cubic-bezier(0.4, 0, 0.2, 1), border-color 0.3s ease, transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
   position: relative;
   overflow: hidden;
   min-height: 420px;
   max-height: 540px;
 }
+/* Gradient top accent bar */
 .dash-card::before {
   content: '';
   position: absolute;
@@ -119,16 +120,35 @@ const emit = defineEmits(['refresh', 'navigate'])
   left: 0;
   right: 0;
   height: 3px;
-  background: linear-gradient(90deg, var(--color-primary), var(--color-primary-light));
+  background: var(--gradient-accent);
   opacity: 0;
   transition: opacity 0.3s ease;
 }
+/* Subtle corner glow on hover */
+.dash-card::after {
+  content: '';
+  position: absolute;
+  top: -40px;
+  right: -40px;
+  width: 80px;
+  height: 80px;
+  border-radius: 50%;
+  background: var(--color-primary);
+  opacity: 0;
+  filter: blur(40px);
+  transition: opacity 0.4s ease;
+  pointer-events: none;
+}
 .dash-card:hover {
-  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4), 0 0 24px var(--color-primary-glow);
+  box-shadow: var(--shadow-lg), var(--shadow-glow);
   border-color: var(--color-primary-border);
+  transform: translateY(-1px);
 }
 .dash-card:hover::before {
   opacity: 1;
+}
+.dash-card:hover::after {
+  opacity: 0.08;
 }
 .card-header {
   display: flex;
@@ -248,7 +268,7 @@ const emit = defineEmits(['refresh', 'navigate'])
 .metric-item {
   display: flex;
   flex-direction: column;
-  gap: 0.25rem;
+  gap: 0.35rem;
 }
 .metric-label {
   font-size: 0.78rem;
@@ -348,7 +368,7 @@ const emit = defineEmits(['refresh', 'navigate'])
   flex-shrink: 0;
 }
 .assessment-tag {
-  font-size: 0.7rem;
+  font-size: 0.72rem;
   font-weight: 700;
   padding: 0.2rem 0.55rem;
   border-radius: var(--radius-sm);
