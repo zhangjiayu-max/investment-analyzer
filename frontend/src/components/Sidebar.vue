@@ -8,8 +8,9 @@ import KycWizard from './KycWizard.vue'
 
 const props = defineProps({
   activePage: String,
+  showKyc: { type: Boolean, default: false },
 })
-const emit = defineEmits(['navigate'])
+const emit = defineEmits(['navigate', 'close-kyc'])
 
 // ── Token 预算指示器 ──────────────────────────────
 const tokenUsed = ref(0)
@@ -34,11 +35,12 @@ async function fetchTokenBudget() {
 
 let tokenTimer = null
 // ── KYC 投资画像引导 ──────────────────────────────
-const showKyc = ref(false)
+const localShowKyc = ref(false)
+const kycVisible = computed(() => props.showKyc || localShowKyc.value)
 async function checkKycNeeded() {
   try {
     const { data } = await getKycQuestionnaire()
-    if (!data.profile?.kyc_completed) showKyc.value = true
+    if (!data.profile?.kyc_completed) localShowKyc.value = true
   } catch { /* silent */ }
 }
 function onKycCompleted() {
@@ -151,7 +153,7 @@ const activeGroup = computed(() => {
 
     <!-- Bottom actions -->
     <div class="sidebar-bottom">
-      <button @click="showKyc = true" class="nav-item kyc-entry" title="完善投资画像，让 AI 更懂你">
+      <button @click="localShowKyc = true" class="nav-item kyc-entry" title="完善投资画像，让 AI 更懂你">
         <Icon name="evolution" size="18" class="nav-icon" />
         <span class="nav-label">我的投资画像</span>
       </button>
@@ -163,7 +165,7 @@ const activeGroup = computed(() => {
   </aside>
 
   <!-- KYC 投资画像弹窗 -->
-  <KycWizard :visible="showKyc" @close="showKyc = false" @completed="onKycCompleted" />
+  <KycWizard :visible="kycVisible" @close="localShowKyc = false; emit('close-kyc')" @completed="onKycCompleted" />
 </template>
 
 <style scoped>

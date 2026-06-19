@@ -32,7 +32,7 @@ function handleViewResult(convId) {
 
   <!-- 桌面端：交易终端布局（侧栏 + 行情顶栏 + 主区） -->
   <div v-else class="app-layout">
-    <Sidebar :activePage="activePage" @navigate="activePage = $event" />
+    <Sidebar :activePage="activePage" :showKyc="showKyc" @navigate="activePage = $event" @close-kyc="showKyc = false" />
     <div class="app-content">
       <TickerBar @open-kyc="showKyc = true" />
       <main class="app-main">
