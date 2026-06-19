@@ -168,6 +168,14 @@ const categoryLabels = {
         :error="panoramaResult.error || ''"
         :token-usage="panoramaResult.token_usage || 0"
         :record-id="panoramaResult.id"
+        :target-id="panoramaResult.id || null"
+        target-type="portfolio_panorama"
+        source="持仓健康度"
+        :updated-at="portfolioUpdatedAt || panoramaResult.updated_at || panoramaResult.created_at || ''"
+        feedback-caller="dashboard_portfolio_health"
+        collapsible
+        :default-expanded="true"
+        @retry="emit('panorama')"
       />
 
       <div class="card-actions">
@@ -311,8 +319,8 @@ const categoryLabels = {
   color: var(--color-text-primary);
   letter-spacing: -0.02em;
 }
-.metric-value.profit { color: var(--color-danger); }
-.metric-value.loss { color: var(--color-success); }
+.metric-value.profit { color: var(--color-profit); }
+.metric-value.loss { color: var(--color-loss); }
 .concentration-row {
   display: flex;
   align-items: flex-start;

@@ -2,7 +2,7 @@
 /**
  * StatusBadge — 统一状态徽章
  *
- * 四态：低估(绿)/合理(灰)/偏高(琥珀)/风险(红) + 涨(红)/跌(绿)
+ * 状态：保留估值/涨跌状态，并支持通用任务状态。
  * 替换各页零散 badge，统一视觉语言。
  *
  * 用法：<StatusBadge status="undervalued" /> 或 <StatusBadge status="profit" text="+3.5%" />
@@ -12,7 +12,6 @@ import Icon from '../ui/Icon.vue'
 
 const props = defineProps({
   status: { type: String, required: true },
-  // undervalued | fair | overvalued | risk | profit | loss
   text: { type: String, default: '' },
   size: { type: String, default: 'sm' }, // xs | sm
   icon: { type: String, default: '' }, // 可选图标 name
@@ -25,9 +24,17 @@ const STATUS_CONFIG = {
   risk: { label: '风险', color: 'var(--color-status-risk)', bg: 'var(--color-danger-bg)', border: 'var(--color-danger-border)', icon: 'shield-alert' },
   profit: { label: '涨', color: 'var(--color-profit)', bg: 'var(--color-profit-bg)', border: 'var(--color-danger-border)', icon: 'arrow-up' },
   loss: { label: '跌', color: 'var(--color-loss)', bg: 'var(--color-loss-bg)', border: 'var(--color-success-border)', icon: 'arrow-down' },
+  running: { label: '进行中', color: 'var(--color-info)', bg: 'var(--color-info-bg)', border: 'var(--color-primary-border)', icon: 'spinner' },
+  done: { label: '已完成', color: 'var(--color-success)', bg: 'var(--color-success-bg)', border: 'var(--color-success-border)', icon: 'check' },
+  error: { label: '失败', color: 'var(--color-danger)', bg: 'var(--color-danger-bg)', border: 'var(--color-danger-border)', icon: 'error' },
+  empty: { label: '暂无', color: 'var(--color-text-muted)', bg: 'var(--color-bg-input)', border: 'var(--color-border)', icon: 'inbox' },
+  queued: { label: '排队中', color: 'var(--color-text-secondary)', bg: 'var(--color-bg-input)', border: 'var(--color-border)', icon: 'clock' },
+  warning: { label: '提醒', color: 'var(--color-warning)', bg: 'var(--color-warning-bg)', border: 'var(--color-warning-border)', icon: 'warning' },
+  success: { label: '正常', color: 'var(--color-success)', bg: 'var(--color-success-bg)', border: 'var(--color-success-border)', icon: 'success' },
+  neutral: { label: '未知', color: 'var(--color-text-secondary)', bg: 'var(--color-bg-input)', border: 'var(--color-border)', icon: '' },
 }
 
-const cfg = computed(() => STATUS_CONFIG[props.status] || STATUS_CONFIG.fair)
+const cfg = computed(() => STATUS_CONFIG[props.status] || STATUS_CONFIG.neutral)
 const displayText = computed(() => props.text || cfg.value.label)
 const iconName = computed(() => props.icon || cfg.value.icon)
 </script>

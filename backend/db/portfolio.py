@@ -1533,7 +1533,7 @@ def get_portfolio_diversification(user_id: str = "default") -> dict:
     # 基金类型分布（通过 fund_code 前几位判断）
     # 股票型/混合型/债券型/指数型/货币型
     type_dist = {"股票型": 0, "混合型": 0, "债券型": 0, "指数型": 0, "货币型": 0, "其他": 0}
-    for h in holdings:
+    for h in active:
         code = h.get("fund_code", "")
         val = h.get("current_value", 0) or 0
         # 简单分类：以 fund_name 或 index_name 判断
@@ -1554,11 +1554,11 @@ def get_portfolio_diversification(user_id: str = "default") -> dict:
     # 仓位集中度：最大持仓占比
     max_holding_pct = 0
     if total_value > 0:
-        max_value = max((h.get("current_value", 0) or 0) for h in holdings)
+        max_value = max((h.get("current_value", 0) or 0) for h in active)
         max_holding_pct = round(max_value / total_value * 100, 2)
 
     return {
-        "holding_count": len(holdings),
+        "holding_count": len(active),
         "total_cost": round(total_cost, 2),
         "total_value": round(total_value, 2),
         "max_holding_pct": max_holding_pct,

@@ -93,6 +93,11 @@ const pieColors = computed(() => isDark.value
   : ['#c9a84c', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#06b6d4', '#f97316', '#ec4899', '#14b8a6', '#84cc16']
 )
 
+function pieColorAt(index) {
+  const colors = pieColors.value || []
+  return colors[index % colors.length] || 'var(--color-primary)'
+}
+
 function calcPieSlices(data, total) {
   const slices = []
   let cumulative = 0
@@ -112,7 +117,7 @@ function calcPieSlices(data, total) {
     const path = angle >= 360
       ? `M ${cx},${cy - r} A ${r},${r} 0 1,1 ${cx - 0.01},${cy - r} Z`
       : `M ${cx},${cy} L ${x1},${y1} A ${r},${r} 0 ${largeArc},1 ${x2},${y2} Z`
-    slices.push({ label, value: val, pct: (pct * 100).toFixed(1), path, color: pieColors[i % pieColors.length] })
+    slices.push({ label, value: val, pct: (pct * 100).toFixed(1), path, color: pieColorAt(i) })
   })
   return slices
 }
@@ -2614,7 +2619,7 @@ function txDisplayAmount(tx) {
               <div v-for="(val, key) in diversificationData.type_distribution" :key="key" class="dist-bar-row">
                 <span class="dist-label">{{ key }}</span>
                 <div class="dist-bar-track">
-                  <div class="dist-bar-fill" :style="{ width: (val / diversificationData.total_value * 100) + '%', background: pieColors[Object.keys(diversificationData.type_distribution).indexOf(key) % pieColors.length] }"></div>
+                  <div class="dist-bar-fill" :style="{ width: (val / diversificationData.total_value * 100) + '%', background: pieColorAt(Object.keys(diversificationData.type_distribution).indexOf(key)) }"></div>
                 </div>
                 <span class="dist-value">{{ formatMoney(val) }}</span>
               </div>
@@ -2680,7 +2685,7 @@ function txDisplayAmount(tx) {
                 <div v-for="(h, idx) in holdingWeights" :key="h.id" class="dist-bar-row">
                   <span class="dist-label">{{ h.fund_name }}</span>
                   <div class="dist-bar-track">
-                    <div class="dist-bar-fill" :style="{ width: h.weight + '%', background: pieColors[idx % pieColors.length] }"></div>
+                    <div class="dist-bar-fill" :style="{ width: h.weight + '%', background: pieColorAt(idx) }"></div>
                   </div>
                   <span class="dist-value">{{ h.weightLabel }}</span>
                 </div>
@@ -5086,26 +5091,26 @@ function txDisplayAmount(tx) {
 
 /* Profit colors — 红涨绿跌 */
 .profit-positive {
-  color: var(--color-loss) !important;
-  font-variant-numeric: tabular-nums;
-  font-weight: 600;
-}
-.profit-negative {
   color: var(--color-profit) !important;
   font-variant-numeric: tabular-nums;
   font-weight: 600;
 }
-.dark .profit-positive { color: var(--color-loss) !important; }
-.dark .profit-negative { color: var(--color-profit) !important; }
+.profit-negative {
+  color: var(--color-loss) !important;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
+.dark .profit-positive { color: var(--color-profit) !important; }
+.dark .profit-negative { color: var(--color-loss) !important; }
 /* 持仓行盈亏渐变背景 */
 .profit-positive.text-right,
 .profit-positive:not(.tooltip-nav):not(.summary-value):not(.summary-sub) {
-  background: var(--color-loss-bg);
+  background: var(--color-profit-bg);
   border-radius: var(--radius-sm);
 }
 .profit-negative.text-right,
 .profit-negative:not(.tooltip-nav):not(.summary-value):not(.summary-sub) {
-  background: var(--color-profit-bg);
+  background: var(--color-loss-bg);
   border-radius: var(--radius-sm);
 }
 
@@ -5961,12 +5966,12 @@ select.input-field {
   letter-spacing: -0.02em;
 }
 .text-success {
-  color: var(--color-profit);
+  color: var(--color-success);
   font-variant-numeric: tabular-nums;
   font-weight: 600;
 }
 .text-danger {
-  color: var(--color-loss);
+  color: var(--color-danger);
   font-variant-numeric: tabular-nums;
   font-weight: 600;
 }
@@ -5975,8 +5980,8 @@ select.input-field {
   font-variant-numeric: tabular-nums;
   font-weight: 600;
 }
-.dark .text-success { color: var(--color-profit); }
-.dark .text-danger { color: var(--color-loss); }
+.dark .text-success { color: var(--color-success); }
+.dark .text-danger { color: var(--color-danger); }
 .dark .text-warning { color: var(--color-warning); }
 .analysis-section h4 {
   font-size: 0.85rem;
@@ -7084,14 +7089,6 @@ select.input-field {
 }
 /* 盈亏数字渐变背景 */
 .profit-up {
-  color: var(--color-loss) !important;
-  background: var(--color-loss-bg);
-  padding: 0.15rem 0.45rem;
-  border-radius: var(--radius-sm);
-  font-variant-numeric: tabular-nums;
-  font-weight: 600;
-}
-.profit-down {
   color: var(--color-profit) !important;
   background: var(--color-profit-bg);
   padding: 0.15rem 0.45rem;
@@ -7099,8 +7096,16 @@ select.input-field {
   font-variant-numeric: tabular-nums;
   font-weight: 600;
 }
-.dark .profit-up { color: var(--color-loss) !important; }
-.dark .profit-down { color: var(--color-profit) !important; }
+.profit-down {
+  color: var(--color-loss) !important;
+  background: var(--color-loss-bg);
+  padding: 0.15rem 0.45rem;
+  border-radius: var(--radius-sm);
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
+.dark .profit-up { color: var(--color-profit) !important; }
+.dark .profit-down { color: var(--color-loss) !important; }
 
 .icon-spin {
   transition: transform 0.3s ease;
