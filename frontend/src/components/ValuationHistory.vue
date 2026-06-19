@@ -5,13 +5,14 @@ async function getEcharts() {
   if (!echartsModule) echartsModule = await import('echarts')
   return echartsModule
 }
-import { listValuationIndexes, getValuationHistory, getIndexInfo, runAnalysis, listAnalysisHistory, getAnalysisHistoryDetail, deleteAnalysisHistory, refreshValuationPrices, listDDValuations, getDDValuation, getMarketTemperature, getSuperValue, getEnhancedStrategy } from '../api'
+import { listValuationIndexes, getValuationHistory, getIndexInfo, runAnalysis, pollIndexAnalysisStatus, listAnalysisHistory, getAnalysisHistoryDetail, deleteAnalysisHistory, refreshValuationPrices, listDDValuations, getDDValuation, getMarketTemperature, getSuperValue, getEnhancedStrategy } from '../api'
 import { renderMarkdown } from '../composables/useMarkdown'
 import { isDark } from '../composables/useTheme'
 import { useToast } from '../composables/useToast'
 import ConfirmDialog from './ConfirmDialog.vue'
 import AppToast from './AppToast.vue'
 import EmptyState from './ui/EmptyState.vue'
+import Icon from './ui/Icon.vue'
 
 const { showToast } = useToast()
 
@@ -280,26 +281,45 @@ async function handleRunAnalysis() {
   analysisResultMap.value = newResultMap
   try {
     const { data } = await runAnalysis(code, name)
-    // 写入该指数的结果（即使用户已切换到其他指数，结果也会保留）
+    const historyId = data.id
     analysisResultMap.value = {
       ...analysisResultMap.value,
       [code]: {
-        id: data.id,
-        result: data.result,
+        id: historyId,
+        result: '分析已提交，正在后台生成结果...',
         agent_name: '指数深度分析师',
-        token_usage: data.token_usage || 0,
+        token_usage: 0,
         created_at: new Date().toISOString(),
       }
     }
-    // 刷新历史列表
-    loadAnalysisHistory()
+    pollIndexAnalysisStatus(historyId, (status) => {
+      if (status.status === 'done') {
+        analysisResultMap.value = {
+          ...analysisResultMap.value,
+          [code]: {
+            id: historyId,
+            result: status.result,
+            agent_name: '指数深度分析师',
+            token_usage: status.token_usage || 0,
+            created_at: new Date().toISOString(),
+          }
+        }
+        analysisLoadingMap.value = { ...analysisLoadingMap.value, [code]: false }
+        loadAnalysisHistory()
+      } else if (status.status === 'error') {
+        analysisResultMap.value = {
+          ...analysisResultMap.value,
+          [code]: { result: '分析失败：' + (status.error || '未知错误'), error: true }
+        }
+        analysisLoadingMap.value = { ...analysisLoadingMap.value, [code]: false }
+      }
+    })
   } catch (e) {
     console.error('Analysis failed:', e)
     analysisResultMap.value = {
       ...analysisResultMap.value,
       [code]: { result: '分析失败：' + (e.response?.data?.detail || e.message), error: true }
     }
-  } finally {
     analysisLoadingMap.value = { ...analysisLoadingMap.value, [code]: false }
   }
 }
@@ -523,6 +543,12 @@ async function renderTrendChart() {
 
   const gridColor = isDark.value ? 'rgba(255, 255, 255, 0.06)' : '#f1f5f9'
   const textColor = isDark.value ? '#9aa0a6' : '#64748b'
+  const primaryColor = isDark.value ? '#d4a853' : '#c9a84c'
+  const warningColor = isDark.value ? '#f59e0b' : '#f59e0b'
+  const profitBg = isDark.value ? 'rgba(16,185,129,0.15)' : 'rgba(16,185,129,0.08)'
+  const profitBgLight = isDark.value ? 'rgba(16,185,129,0.08)' : 'rgba(16,185,129,0.04)'
+  const warningBg = isDark.value ? 'rgba(245,158,11,0.08)' : 'rgba(245,158,11,0.04)'
+  const lossBg = isDark.value ? 'rgba(239,68,68,0.12)' : 'rgba(239,68,68,0.06)'
   const metricName = latest.value?.metric_type || '估值'
 
   trendChart.setOption({
@@ -578,13 +604,13 @@ async function renderTrendChart() {
         type: 'line',
         data: valueData,
         smooth: true,
-        lineStyle: { width: 2, color: '#c9a84c' },
-        itemStyle: { color: '#c9a84c' },
+        lineStyle: { width: 2, color: primaryColor },
+        itemStyle: { color: primaryColor },
         symbol: 'circle',
         symbolSize: 5,
         areaStyle: {
           color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
-            { offset: 0, color: 'rgba(99,102,241,0.2)' },
+            { offset: 0, color: isDark.value ? 'rgba(99,102,241,0.3)' : 'rgba(99,102,241,0.2)' },
             { offset: 1, color: 'rgba(99,102,241,0)' },
           ]),
         },
@@ -595,19 +621,19 @@ async function renderTrendChart() {
         yAxisIndex: 1,
         data: percentileData,
         smooth: true,
-        lineStyle: { width: 2, color: '#f59e0b', type: 'dashed' },
-        itemStyle: { color: '#f59e0b' },
+        lineStyle: { width: 2, color: warningColor, type: 'dashed' },
+        itemStyle: { color: warningColor },
         symbol: 'circle',
         symbolSize: 5,
         markArea: {
           silent: true,
           data: [
             [
-              { yAxis: 0, itemStyle: { color: 'rgba(16,185,129,0.08)' } },
+              { yAxis: 0, itemStyle: { color: profitBg } },
               { yAxis: 30 },
             ],
             [
-              { yAxis: 30, itemStyle: { color: 'rgba(16,185,129,0.04)' } },
+              { yAxis: 30, itemStyle: { color: profitBgLight } },
               { yAxis: 50 },
             ],
             [
@@ -615,11 +641,11 @@ async function renderTrendChart() {
               { yAxis: 70 },
             ],
             [
-              { yAxis: 70, itemStyle: { color: 'rgba(245,158,11,0.04)' } },
+              { yAxis: 70, itemStyle: { color: warningBg } },
               { yAxis: 85 },
             ],
             [
-              { yAxis: 85, itemStyle: { color: 'rgba(239,68,68,0.06)' } },
+              { yAxis: 85, itemStyle: { color: lossBg } },
               { yAxis: 100 },
             ],
           ],
@@ -983,9 +1009,9 @@ defineExpose({ loadHistory })
         <h3 class="card-title">估值趋势 <span class="count-badge">{{ history.length }} 条</span></h3>
         <div ref="trendChartRef" class="trend-chart"></div>
         <div class="percentile-legend">
-          <span class="legend-item"><span class="legend-color" style="background:rgba(16,185,129,0.15)"></span>低估区 (&lt;30%)</span>
-          <span class="legend-item"><span class="legend-color" style="background:rgba(156,163,175,0.08)"></span>合理区 (30-70%)</span>
-          <span class="legend-item"><span class="legend-color" style="background:rgba(239,68,68,0.12)"></span>高估区 (&gt;70%)</span>
+          <span class="legend-item"><span class="legend-color" style="background:var(--color-profit-bg)"></span>低估区 (&lt;30%)</span>
+          <span class="legend-item"><span class="legend-color" style="background:var(--color-bg-hover)"></span>合理区 (30-70%)</span>
+          <span class="legend-item"><span class="legend-color" style="background:var(--color-loss-bg)"></span>高估区 (&gt;70%)</span>
         </div>
       </div>
 
@@ -1149,7 +1175,7 @@ defineExpose({ loadHistory })
         <!-- Toolbar: Date Selector + Summary -->
         <div class="dd-toolbar card">
           <div class="dd-toolbar-left">
-            <div class="dd-toolbar-title">🔩 螺丝钉指数估值</div>
+            <div class="dd-toolbar-title">螺丝钉指数估值</div>
             <div class="dd-toolbar-meta">
               <b>{{ ddIndexList.length }}</b> 个指数
               <span v-if="ddSelectedRecord?.market_temperature != null">
@@ -1187,21 +1213,21 @@ defineExpose({ loadHistory })
               <thead>
                 <tr>
                   <th @click="ddSortBy('index_name')" class="sortable">
-                    指数名称 {{ ddSortKey === 'index_name' ? (ddSortAsc ? '↑' : '↓') : '' }}
+                    指数名称 <Icon v-if="ddSortKey === 'index_name'" :name="ddSortAsc ? 'arrow-up' : 'arrow-down'" size="10" class="sort-icon" />
                   </th>
                   <th>代码</th>
                   <th @click="ddSortBy('pe')" class="sortable">
-                    PE {{ ddSortKey === 'pe' ? (ddSortAsc ? '↑' : '↓') : '' }}
+                    PE <Icon v-if="ddSortKey === 'pe'" :name="ddSortAsc ? 'arrow-up' : 'arrow-down'" size="10" class="sort-icon" />
                   </th>
                   <th @click="ddSortBy('pe_percentile')" class="sortable">
-                    PE% {{ ddSortKey === 'pe_percentile' ? (ddSortAsc ? '↑' : '↓') : '' }}
+                    PE% <Icon v-if="ddSortKey === 'pe_percentile'" :name="ddSortAsc ? 'arrow-up' : 'arrow-down'" size="10" class="sort-icon" />
                   </th>
                   <th>PB</th>
                   <th>PB%</th>
                   <th>股息率</th>
                   <th>ROE</th>
                   <th @click="ddSortBy('valuation_status')" class="sortable">
-                    估值 {{ ddSortKey === 'valuation_status' ? (ddSortAsc ? '↑' : '↓') : '' }}
+                    估值 <Icon v-if="ddSortKey === 'valuation_status'" :name="ddSortAsc ? 'arrow-up' : 'arrow-down'" size="10" class="sort-icon" />
                   </th>
                 </tr>
               </thead>
@@ -1243,7 +1269,7 @@ defineExpose({ loadHistory })
                     <span v-if="item.pe_percentile != null && item.pb_percentile != null && Math.abs(item.pe_percentile - item.pb_percentile) > 20"
                           class="dd-diverge-warn"
                           :title="`PE%(${item.pe_percentile})与PB%(${item.pb_percentile})差异${Math.abs(item.pe_percentile - item.pb_percentile).toFixed(0)}%，建议参考${item.pb_percentile < item.pe_percentile ? 'PB' : 'PE'}`">
-                      ⚠️
+                      <Icon name="warning" size="12" class="dd-diverge-warn-icon" />
                     </span>
                   </td>
                 </tr>
@@ -1316,7 +1342,7 @@ defineExpose({ loadHistory })
           <!-- 增强策略分析 -->
           <div class="sv-strategy-section">
             <div class="sv-strategy-header">
-              <h3>🧠 增强策略分析</h3>
+              <h3><Icon name="brain" size="15" class="title-icon" /> 增强策略分析</h3>
               <button
                 v-if="!strategyData && !strategyLoading"
                 class="btn btn-primary btn-sm"
@@ -1352,15 +1378,15 @@ defineExpose({ loadHistory })
                   <!-- 估值风险预警 -->
                   <div v-if="s.valuation_warnings?.length || s.recommended_metric || s.history_years" class="sv-warnings">
                     <div v-for="w in s.valuation_warnings" :key="w.type" :class="['sv-warning-item', 'sv-warning-' + w.level]">
-                      <span class="sv-warning-icon">{{ w.level === 'danger' ? '🔴' : w.level === 'warning' ? '🟡' : '🔵' }}</span>
+                      <span :class="['heat-dot', w.level === 'danger' ? 'heat-dot-high' : w.level === 'warning' ? 'heat-dot-medium' : 'heat-dot-low']"></span>
                       <span>{{ w.message }}</span>
                     </div>
                     <div v-if="s.recommended_metric" class="sv-warning-item sv-warning-tip">
-                      <span class="sv-warning-icon">📊</span>
+                      <Icon name="chart" size="13" class="sv-warning-icon" />
                       <span>建议参考 <strong>{{ s.recommended_metric }}</strong> 百分位判断估值</span>
                     </div>
                     <div v-if="s.history_years && s.history_years < 5" class="sv-warning-item sv-warning-info">
-                      <span class="sv-warning-icon">📅</span>
+                      <Icon name="calendar" size="13" class="sv-warning-icon" />
                       <span>数据仅覆盖 {{ s.history_years }} 年，未经历完整牛熊周期</span>
                     </div>
                   </div>
@@ -1454,27 +1480,45 @@ defineExpose({ loadHistory })
 }
 
 .market-temp-badge.temp-低温 {
-  background: linear-gradient(135deg, #dcfce7, #bbf7d0);
-  color: #166534;
-  border: 1px solid #86efac;
+  background: var(--color-profit-bg);
+  color: var(--color-profit);
+  border: 1px solid var(--color-profit-light);
 }
 
 .market-temp-badge.temp-适中 {
-  background: linear-gradient(135deg, #fef9c3, #fef08a);
-  color: #854d0e;
-  border: 1px solid #fde047;
+  background: var(--color-warning-bg);
+  color: var(--color-warning);
+  border: 1px solid var(--color-warning-light);
 }
 
 .market-temp-badge.temp-高温 {
-  background: linear-gradient(135deg, #fee2e2, #fecaca);
-  color: #991b1b;
-  border: 1px solid #fca5a5;
+  background: var(--color-loss-bg);
+  color: var(--color-loss);
+  border: 1px solid var(--color-loss-light);
 }
 
 .market-temp-badge.temp-未知 {
   background: linear-gradient(135deg, var(--color-bg-secondary), var(--color-bg-primary));
   color: var(--color-text-secondary);
   border: 1px solid var(--color-border);
+}
+
+.dark .market-temp-badge.temp-低温 {
+  background: var(--color-success-bg);
+  color: var(--color-success);
+  border: 1px solid var(--color-success-border);
+}
+
+.dark .market-temp-badge.temp-适中 {
+  background: var(--color-warning-bg);
+  color: var(--color-warning);
+  border: 1px solid var(--color-warning-border);
+}
+
+.dark .market-temp-badge.temp-高温 {
+  background: var(--color-danger-bg);
+  color: var(--color-danger);
+  border: 1px solid var(--color-danger-border);
 }
 
 .market-temp-desc {
@@ -1521,7 +1565,7 @@ defineExpose({ loadHistory })
   background: linear-gradient(135deg, var(--color-bg-card) 0%, var(--color-bg-hover) 100%);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-lg);
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.04);
+  box-shadow: var(--shadow-sm);
   position: relative;
   z-index: 1;
 }
@@ -1563,7 +1607,7 @@ defineExpose({ loadHistory })
   background: var(--color-bg-card);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-lg);
-  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.12), 0 2px 8px rgba(0, 0, 0, 0.08);
+  box-shadow: var(--shadow-xl);
   max-height: 300px;
   overflow-y: auto;
   backdrop-filter: blur(10px);
@@ -1672,7 +1716,7 @@ defineExpose({ loadHistory })
 }
 
 .metric-card:hover {
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.08);
+  box-shadow: var(--shadow-lg);
 }
 
 .metric-label {
@@ -1689,12 +1733,12 @@ defineExpose({ loadHistory })
   letter-spacing: -0.02em;
 }
 
-.metric-success .metric-value { color: #059669; }
-.metric-warning .metric-value { color: #d97706; }
-.metric-danger .metric-value { color: #dc2626; }
+.metric-success .metric-value { color: var(--color-success); }
+.metric-warning .metric-value { color: var(--color-warning); }
+.metric-danger .metric-value { color: var(--color-danger); }
 
-.val-low { color: #059669; font-weight: 700; }
-.val-high { color: #dc2626; font-weight: 700; }
+.val-low { color: var(--color-success); font-weight: 700; }
+.val-high { color: var(--color-danger); font-weight: 700; }
 
 /* Range / Gauge */
 .range-card {
@@ -1748,23 +1792,23 @@ defineExpose({ loadHistory })
 }
 
 .zone-low {
-  background: linear-gradient(90deg, #86efac, #bbf7d0);
+  background: linear-gradient(90deg, var(--color-profit-light), var(--color-profit-bg));
   border-radius: 22px 0 0 22px;
 }
 
 .zone-mid {
-  background: linear-gradient(90deg, #fef08a, #fde68a);
+  background: linear-gradient(90deg, var(--color-warning-light), var(--color-warning-bg));
 }
 
 .zone-high {
-  background: linear-gradient(90deg, #fca5a5, #f87171);
+  background: linear-gradient(90deg, var(--color-loss-light), var(--color-loss-bg));
   border-radius: 0 22px 22px 0;
 }
 
 .zone-label {
   font-size: 0.8rem;
   font-weight: 700;
-  color: rgba(0,0,0,0.5);
+  color: var(--color-text-muted);
   text-transform: uppercase;
   letter-spacing: 0.08em;
 }
@@ -1787,7 +1831,7 @@ defineExpose({ loadHistory })
   padding: 0.35rem 0.75rem;
   border-radius: var(--radius-md);
   white-space: nowrap;
-  box-shadow: 0 4px 12px rgba(201, 168, 76, 0.4);
+  box-shadow: var(--shadow-glow);
 }
 
 .marker-arrow {
@@ -1937,7 +1981,7 @@ defineExpose({ loadHistory })
   border-radius: var(--radius-lg);
   overflow: hidden;
   max-height: 400px;
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.1);
+  box-shadow: var(--shadow-md);
 }
 
 .source-image {
@@ -1959,7 +2003,7 @@ defineExpose({ loadHistory })
   justify-content: center;
   gap: 0.35rem;
   padding: 0.5rem;
-  background: linear-gradient(transparent, rgba(0,0,0,0.6));
+  background: linear-gradient(transparent, var(--color-overlay));
   color: white;
   font-size: 0.75rem;
   font-weight: 500;
@@ -1974,7 +2018,7 @@ defineExpose({ loadHistory })
   position: fixed;
   inset: 0;
   z-index: var(--z-lightbox);
-  background: rgba(0, 0, 0, 0.85);
+  background: var(--color-overlay);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -2012,7 +2056,7 @@ defineExpose({ loadHistory })
   background: linear-gradient(135deg, var(--color-bg-card) 0%, var(--color-bg-hover) 100%);
   border-radius: var(--radius-lg);
   border: 1px solid var(--color-border);
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.04);
+  box-shadow: var(--shadow-sm);
 }
 
 .index-header-left {
@@ -2062,21 +2106,21 @@ defineExpose({ loadHistory })
 }
 
 .status-success {
-  background: linear-gradient(135deg, rgba(16,185,129,0.15), rgba(16,185,129,0.05));
-  color: #059669;
-  border: 1px solid rgba(16,185,129,0.2);
+  background: var(--color-success-bg);
+  color: var(--color-success);
+  border: 1px solid var(--color-success-border);
 }
 
 .status-warning {
-  background: linear-gradient(135deg, rgba(245,158,11,0.15), rgba(245,158,11,0.05));
-  color: #d97706;
-  border: 1px solid rgba(245,158,11,0.2);
+  background: var(--color-warning-bg);
+  color: var(--color-warning);
+  border: 1px solid var(--color-warning-border);
 }
 
 .status-danger {
-  background: linear-gradient(135deg, rgba(239,68,68,0.15), rgba(239,68,68,0.05));
-  color: #dc2626;
-  border: 1px solid rgba(239,68,68,0.2);
+  background: var(--color-danger-bg);
+  color: var(--color-danger);
+  border: 1px solid var(--color-danger-border);
 }
 
 .status-neutral {
@@ -2169,7 +2213,7 @@ defineExpose({ loadHistory })
   background: linear-gradient(135deg, var(--color-bg-card) 0%, var(--color-bg-hover) 100%);
   border-radius: var(--radius-lg);
   border: 1px solid var(--color-border);
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.06);
+  box-shadow: var(--shadow-md);
 }
 
 .analysis-result-header {
@@ -2377,8 +2421,8 @@ defineExpose({ loadHistory })
 }
 
 .btn-icon-danger:hover {
-  color: #dc2626;
-  background: rgba(239,68,68,0.1);
+  color: var(--color-danger);
+  background: var(--color-danger-bg);
   transform: scale(1.1);
 }
 
@@ -2387,7 +2431,7 @@ defineExpose({ loadHistory })
   position: fixed;
   inset: 0;
   z-index: var(--z-modal);
-  background: rgba(0,0,0,0.6);
+  background: var(--color-overlay);
   backdrop-filter: blur(4px);
   display: flex;
   align-items: center;
@@ -2398,7 +2442,7 @@ defineExpose({ loadHistory })
 .modal-dialog {
   background: var(--color-bg-card);
   border-radius: var(--radius-xl);
-  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.2);
+  box-shadow: var(--shadow-xl);
   padding: 2.5rem;
   max-width: 520px;
   width: 100%;
@@ -2454,7 +2498,7 @@ defineExpose({ loadHistory })
 
 .modal-warn {
   font-size: 0.95rem;
-  color: #d97706;
+  color: var(--color-warning);
   margin: 0 0 2rem;
   font-weight: 600;
 }
@@ -2587,14 +2631,14 @@ defineExpose({ loadHistory })
   font-size: 0.7rem;
   font-weight: 600;
   color: white;
-  background: linear-gradient(135deg, #0d1220, #1a1f35);
+  background: var(--color-bg-dark);
   border-radius: var(--radius-md, 8px);
   white-space: nowrap;
   opacity: 0;
   visibility: hidden;
   pointer-events: none;
   z-index: 100;
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+  box-shadow: var(--shadow-md);
 }
 
 .ai-agent-tooltip::after {
@@ -2604,7 +2648,7 @@ defineExpose({ loadHistory })
   left: 50%;
   transform: translateX(-50%);
   border: 5px solid transparent;
-  border-bottom-color: #0d1220;
+  border-bottom-color: var(--color-bg-dark);
 }
 
 .btn-ai-analysis:hover .ai-agent-tooltip {
@@ -2615,7 +2659,7 @@ defineExpose({ loadHistory })
 .running-badge {
   font-size: 0.6rem;
   padding: 0.1rem 0.35rem;
-  background: #f59e0b;
+  background: var(--color-warning);
   color: white;
   border-radius: 8px;
   margin-left: 0.25rem;
@@ -2732,14 +2776,14 @@ defineExpose({ loadHistory })
 }
 
 .badge-success-light {
-  background: linear-gradient(135deg, rgba(16,185,129,0.15), rgba(5,150,105,0.1));
-  color: #166534;
-  border: 1px solid rgba(16,185,129,0.2);
+  background: var(--color-success-bg);
+  color: var(--color-success);
+  border: 1px solid var(--color-success-border);
 }
 .badge-danger-light {
-  background: linear-gradient(135deg, rgba(239,68,68,0.15), rgba(220,38,38,0.1));
-  color: #991b1b;
-  border: 1px solid rgba(239,68,68,0.2);
+  background: var(--color-danger-bg);
+  color: var(--color-danger);
+  border: 1px solid var(--color-danger-border);
 }
 
 .td-name {
@@ -2764,12 +2808,12 @@ defineExpose({ loadHistory })
   border-radius: var(--radius-sm);
 }
 .dd-status.val-low {
-  color: #059669;
-  background: linear-gradient(135deg, rgba(16,185,129,0.12), rgba(5,150,105,0.08));
+  color: var(--color-success);
+  background: var(--color-success-bg);
 }
 .dd-status.val-high {
-  color: #dc2626;
-  background: linear-gradient(135deg, rgba(239,68,68,0.12), rgba(220,38,38,0.08));
+  color: var(--color-danger);
+  background: var(--color-danger-bg);
 }
 .dd-diverge-warn {
   margin-left: 0.25rem;
@@ -2798,7 +2842,7 @@ defineExpose({ loadHistory })
   background: var(--color-bg-card);
   border-radius: var(--radius-lg);
   border: 1px solid var(--color-border);
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.04);
+  box-shadow: var(--shadow-sm);
 }
 
 .outer-tab-btn {
@@ -2947,13 +2991,13 @@ defineExpose({ loadHistory })
 }
 
 .sv-score-high {
-  background: #fef2f2;
-  color: #dc2626;
+  background: var(--color-danger-bg);
+  color: var(--color-danger);
 }
 
 .sv-score-mid {
-  background: #fffbeb;
-  color: #d97706;
+  background: var(--color-warning-bg);
+  color: var(--color-warning);
 }
 
 .sv-level {
@@ -2962,10 +3006,10 @@ defineExpose({ loadHistory })
   border-radius: 4px;
 }
 
-.sv-level-极度低估 { background: #fef2f2; color: #dc2626; }
-.sv-level-低估 { background: #fff7ed; color: #ea580c; }
-.sv-level-偏低 { background: #fefce8; color: #ca8a04; }
-.sv-level-适中 { background: #f0fdf4; color: #16a34a; }
+.sv-level-极度低估 { background: var(--color-danger-bg); color: var(--color-danger); }
+.sv-level-低估 { background: var(--color-warning-bg); color: var(--color-warning); }
+.sv-level-偏低 { background: var(--color-warning-bg); color: var(--color-warning); }
+.sv-level-适中 { background: var(--color-success-bg); color: var(--color-success); }
 
 .sv-metrics {
   font-size: 0.82rem;
@@ -3134,9 +3178,9 @@ defineExpose({ loadHistory })
   font-weight: 600;
 }
 
-.sv-action-buy { background: #dcfce7; color: #16a34a; }
-.sv-action-hold { background: #fef3c7; color: #d97706; }
-.sv-action-avoid { background: #fef2f2; color: #dc2626; }
+.sv-action-buy { background: var(--color-success-bg); color: var(--color-success); }
+.sv-action-hold { background: var(--color-warning-bg); color: var(--color-warning); }
+.sv-action-avoid { background: var(--color-danger-bg); color: var(--color-danger); }
 
 .sv-type-badge {
   font-size: 0.7rem;
@@ -3145,9 +3189,9 @@ defineExpose({ loadHistory })
   margin-left: auto;
 }
 
-.sv-type-good { background: #dcfce7; color: #16a34a; }
-.sv-type-bad { background: #fef2f2; color: #dc2626; }
-.sv-type-neutral { background: #f3f4f6; color: #6b7280; }
+.sv-type-good { background: var(--color-success-bg); color: var(--color-success); }
+.sv-type-bad { background: var(--color-danger-bg); color: var(--color-danger); }
+.sv-type-neutral { background: var(--color-bg-hover); color: var(--color-text-muted); }
 
 .sv-warnings {
   display: flex;
@@ -3167,10 +3211,10 @@ defineExpose({ loadHistory })
   line-height: 1.5;
 }
 .sv-warning-icon { flex-shrink: 0; }
-.sv-warning-danger { color: #dc2626; }
-.sv-warning-warning { color: #d97706; }
-.sv-warning-info { color: #6b7280; }
-.sv-warning-tip { color: #2563eb; }
+.sv-warning-danger { color: var(--color-danger); }
+.sv-warning-warning { color: var(--color-warning); }
+.sv-warning-info { color: var(--color-text-muted); }
+.sv-warning-tip { color: var(--color-info); }
 
 .sv-strategy-detail {
   display: flex;

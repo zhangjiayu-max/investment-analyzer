@@ -11,6 +11,27 @@ logger = logging.getLogger(__name__)
 _regression_results: dict[str, dict] = {}
 
 
+async def _await_portfolio_record_result(record_id: int, timeout: int = 180) -> dict:
+    """等待异步持仓分析完成，供回归测试内部调用。"""
+    from db.portfolio import get_analysis_record_status
+
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        record = get_analysis_record_status(record_id)
+        if not record:
+            raise ValueError("分析记录不存在")
+        if record.get("status") == "done":
+            return {
+                "id": record_id,
+                "result": record.get("result_data", ""),
+                "token_usage": record.get("token_usage", 0),
+            }
+        if record.get("status") == "error":
+            raise RuntimeError(record.get("error_msg") or "分析失败")
+        await asyncio.sleep(1)
+    raise TimeoutError("等待异步分析完成超时")
+
+
 def _result_key(agent_id: int, agent_type: str) -> str:
     return f"{agent_type}:{agent_id}"
 
@@ -203,6 +224,8 @@ async def _execute_analysis(case: dict) -> str:
     elif analysis_type == "diversification_ai":
         from routers.portfolio import portfolio_diversification_ai_summary
         result = await portfolio_diversification_ai_summary()
+        if isinstance(result, dict) and result.get("status") == "running":
+            result = await _await_portfolio_record_result(result["id"])
         return json.dumps(result, ensure_ascii=False)[:5000]
 
     elif analysis_type == "ai":
@@ -210,6 +233,8 @@ async def _execute_analysis(case: dict) -> str:
         from models.portfolio import PortfolioAiAnalysisRequest
         question = input_params.get("question", "")
         result = await portfolio_ai_analysis_api(PortfolioAiAnalysisRequest(question=question))
+        if isinstance(result, dict) and result.get("status") == "running":
+            result = await _await_portfolio_record_result(result["id"])
         return json.dumps(result, ensure_ascii=False)[:5000]
 
     else:

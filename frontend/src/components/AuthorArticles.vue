@@ -454,11 +454,12 @@ function imgUrl(url) {
 }
 
 .btn-green {
-  background: linear-gradient(135deg, #059669, #10b981);
+  background: linear-gradient(135deg, var(--color-success), var(--color-success));
 }
 
 .btn-green:hover:not(:disabled) {
-  background: linear-gradient(135deg, #047857, #059669);
+  background: linear-gradient(135deg, var(--color-success), var(--color-success));
+  opacity: 0.9;
 }
 
 .btn-danger {
@@ -467,7 +468,7 @@ function imgUrl(url) {
 }
 
 .btn-danger:hover {
-  background: rgba(239, 68, 68, 0.08);
+  background: var(--color-danger-bg);
 }
 
 /* Content Area */

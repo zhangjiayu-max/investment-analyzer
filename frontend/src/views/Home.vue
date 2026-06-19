@@ -1,6 +1,7 @@
 <script setup>
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { createTask, getFinanceQuoteBar } from '../api'
+import Icon from '../components/ui/Icon.vue'
 import TaskList from '../components/TaskList.vue'
 import TaskDetail from '../components/TaskDetail.vue'
 import ArticleManagement from '../components/ArticleManagement.vue'
@@ -22,6 +23,7 @@ import Dashboard from '../components/Dashboard.vue'
 import MarketIntelligence from '../components/MarketIntelligence.vue'
 import SystemConfigPage from '../components/SystemConfigPage.vue'
 import KnowledgeBase from '../components/KnowledgeBase.vue'
+import { pageComponentKeys } from '../pageRegistry'
 
 const props = defineProps({
   activePage: String,
@@ -49,6 +51,11 @@ const pageComponents = {
   'eval-suite': EvalSuitePage,
   'system-config': SystemConfigPage,
   knowledge: KnowledgeBase,
+}
+
+if (import.meta.env.DEV) {
+  const missingComponents = pageComponentKeys.filter(key => !pageComponents[key])
+  if (missingComponents.length) console.warn('[navigation] Missing page components:', missingComponents)
 }
 
 const pageComponent = computed(() => pageComponents[props.activePage] || null)
@@ -149,7 +156,7 @@ function onBack() {
     <div class="global-quote-bar" @click="switchQuote">
       <Transition name="qfade" mode="out-in">
         <div v-if="quoteVisible" key="quote" class="quote-content">
-          <span class="quote-icon">💡</span>
+          <Icon name="lightbulb" size="14" class="quote-icon" />
           <span class="quote-main">{{ quoteText }}</span>
           <span class="quote-hint">点击换一条</span>
         </div>
@@ -227,8 +234,8 @@ function onBack() {
 
 /* ── 全局理财彩蛋栏 ── */
 .global-quote-bar {
-  background: linear-gradient(135deg, #1e3a5f 0%, #2d5a87 100%);
-  border-radius: var(--radius-md);
+  background: var(--gradient-quote);
+  border-radius: var(--radius-lg);
   padding: 0.7rem 1.25rem;
   margin-bottom: 1.25rem;
   display: flex;
@@ -236,8 +243,15 @@ function onBack() {
   justify-content: space-between;
   cursor: pointer;
   user-select: none;
-  min-height: 38px;
+  min-height: 40px;
   gap: 0.75rem;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  box-shadow: var(--shadow-elevated);
+  transition: all var(--transition-fast);
+}
+.global-quote-bar:hover {
+  box-shadow: var(--shadow-floating);
+  transform: var(--hover-lift);
 }
 .quote-content {
   display: flex;
@@ -259,10 +273,13 @@ function onBack() {
   line-height: 1.5;
 }
 .quote-hint {
-  color: #d4b65a;
+  color: var(--color-primary-300);
   font-size: 0.65rem;
   opacity: 0.5;
   flex-shrink: 0;
+}
+.dark .quote-hint {
+  color: #d4b65a;
 }
 .quote-hot {
   display: flex;
@@ -271,12 +288,25 @@ function onBack() {
   flex-wrap: wrap;
 }
 .quote-hot-tag {
-  background: rgba(201, 168, 76, 0.15);
-  color: #d4b65a;
+  background: rgba(255, 255, 255, 0.1);
+  color: #93c5fd;
   font-size: 0.72rem;
   padding: 0.2rem 0.55rem;
   border-radius: 999px;
   white-space: nowrap;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  transition: all var(--transition-fast);
+}
+.global-quote-bar:hover .quote-hot-tag {
+  background: rgba(255, 255, 255, 0.15);
+}
+.dark .quote-hot-tag {
+  background: rgba(212, 168, 67, 0.12);
+  color: #d4b65a;
+  border-color: rgba(212, 168, 67, 0.15);
+}
+.dark .global-quote-bar:hover .quote-hot-tag {
+  background: rgba(212, 168, 67, 0.18);
 }
 .qfade-enter-active, .qfade-leave-active {
   transition: opacity 0.3s ease, transform 0.3s ease;

@@ -88,6 +88,62 @@ def _call_llm(caller: str = "", **kwargs):
     return _do_call()
 
 
+def _call_llm_stream(caller: str = "", **kwargs):
+    """流式 LLM 调用，生成器逐 chunk yield。
+
+    每个 chunk yield dict: {"content": str, "reasoning": str}
+    （content/reasoning 可能为空串，表示该 chunk 无此部分）。
+    流式 usage 常为 None，仅在末包有值时记录 token（best-effort）。
+
+    用法:
+        for chunk in _call_llm_stream(caller="orchestrator", model=MODEL, messages=msgs):
+            if chunk["content"]:    # 最终答案增量
+                ...
+            if chunk["reasoning"]:  # 思考过程增量
+                ...
+    """
+    kwargs["stream"] = True
+
+    used_client = client
+    try:
+        stream = used_client.chat.completions.create(**kwargs)
+    except Exception as e:
+        if _fallback_client and _fallback_model:
+            logger.warning(f"主用 LLM 流式失败 ({e.__class__.__name__}: {e})，切换兜底: {_fallback_model}")
+            kwargs["model"] = _fallback_model
+            used_client = _fallback_client
+            stream = used_client.chat.completions.create(**kwargs)
+        else:
+            raise
+
+    last_usage = None
+    last_model = kwargs.get("model", MODEL)
+    for chunk in stream:
+        # 末包可能携带 usage
+        if getattr(chunk, "usage", None):
+            last_usage = chunk.usage
+        if getattr(chunk, "model", None):
+            last_model = chunk.model
+        if not chunk.choices:
+            continue
+        delta = chunk.choices[0].delta
+        content = getattr(delta, "content", None) or ""
+        # reasoning_content 提取（兼容 model_extra，MIMO/DeepSeek thinking mode）
+        reasoning = getattr(delta, "reasoning_content", None)
+        if not reasoning and hasattr(delta, "model_extra") and delta.model_extra:
+            reasoning = delta.model_extra.get("reasoning_content")
+        reasoning = reasoning or ""
+        if content or reasoning:
+            yield {"content": content, "reasoning": reasoning}
+
+    # 末包 token 记录（best-effort，部分 provider 流式不返回 usage）
+    if last_usage:
+        try:
+            _record_token_usage(last_usage, last_model, caller)
+        except Exception:
+            pass
+
+
 def call_arbitration_llm(**kwargs):
     """仲裁 Agent 专用 LLM 调用（高级推理模型，如 DeepSeek R1）。未配置则返回 None。"""
     if not _arbitration_client or not _arbitration_model:

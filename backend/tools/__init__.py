@@ -528,6 +528,96 @@ TOOLS = [
             },
         },
     },
+    # ── 盈米且慢 MCP 工具 ──
+    {
+        "type": "function",
+        "function": {
+            "name": "yingmi_search_news",
+            "description": "搜索财经资讯。当用户想了解某主题的最新财经新闻、市场动态时调用。数据源：盈米且慢。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "keyword": {"type": "string", "description": "搜索关键词，如'白酒'、'新能源'"},
+                    "page_size": {"type": "integer", "description": "返回条数，默认10", "default": 10},
+                },
+                "required": ["keyword"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "yingmi_fund_diagnosis",
+            "description": "获取基金诊断信息（风险评价、估值、业绩指标等）。当用户问某只基金好不好、值不值得买时调用。数据源：盈米且慢。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "fund_name_or_code": {"type": "string", "description": "基金名称或代码，如'易方达蓝筹'、'005827'"},
+                },
+                "required": ["fund_name_or_code"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "yingmi_hot_topics",
+            "description": "分析市场热点。当用户想了解当前市场热点、板块轮动时调用。数据源：盈米且慢。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "keyword": {"type": "string", "description": "热点关键词，为空则返回全部热点", "default": ""},
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "yingmi_latest_quotations",
+            "description": "获取最新市场行情解读。当用户想了解今日市场行情、大盘走势时调用。数据源：盈米且慢。",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "yingmi_diagnose_portfolio",
+            "description": "诊断基金组合（资产配置、相关性、回测表现）。当用户想评估自己的基金组合时调用。数据源：盈米且慢。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "fund_codes": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "基金代码列表，如['005827','110011']",
+                    },
+                },
+                "required": ["fund_codes"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "yingmi_search_funds",
+            "description": "搜索基金。当用户想找某类基金、按关键词筛选基金时调用。数据源：盈米且慢。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "keyword": {"type": "string", "description": "搜索关键词，如'消费'、'科技'"},
+                    "page": {"type": "integer", "description": "页码，默认1", "default": 1},
+                    "page_size": {"type": "integer", "description": "每页条数，默认20", "default": 20},
+                },
+                "required": ["keyword"],
+            },
+        },
+    },
 ]
 
 # ── Tool 执行器 ──────────────────────────────────────
@@ -641,8 +731,70 @@ def _execute_tool_impl(name: str, arguments: dict) -> str:
         return _eastmoney_fund_diagnosis(arguments)
     elif name == "eastmoney_financial_assistant":
         return _eastmoney_financial_assistant(arguments)
+    # 盈米且慢 MCP
+    elif name == "yingmi_search_news":
+        return _yingmi_search_news(arguments)
+    elif name == "yingmi_fund_diagnosis":
+        return _yingmi_fund_diagnosis(arguments)
+    elif name == "yingmi_hot_topics":
+        return _yingmi_hot_topics(arguments)
+    elif name == "yingmi_latest_quotations":
+        return _yingmi_latest_quotations(arguments)
+    elif name == "yingmi_diagnose_portfolio":
+        return _yingmi_diagnose_portfolio(arguments)
+    elif name == "yingmi_search_funds":
+        return _yingmi_search_funds(arguments)
     else:
         return json.dumps({"error": f"未知工具: {name}"}, ensure_ascii=False)
+
+
+# ── 盈米且慢 MCP 工具实现 ──
+
+def _call_yingmi(method_name: str, **kwargs) -> str:
+    """调用盈米 MCP 工具的统一封装，带错误处理。"""
+    try:
+        from mcp.yingmi_client import get_yingmi_client
+        client = get_yingmi_client()
+        method = getattr(client, method_name)
+        result = method(**kwargs)
+        if not result:
+            return json.dumps({"message": "盈米返回空结果"}, ensure_ascii=False)
+        return result
+    except RuntimeError as e:
+        logger.warning(f"盈米工具 {method_name} 调用失败: {e}")
+        return json.dumps({"error": f"盈米服务暂不可用: {e}"}, ensure_ascii=False)
+    except Exception as e:
+        logger.error(f"盈米工具 {method_name} 异常: {e}")
+        return json.dumps({"error": f"盈米工具调用异常: {e}"}, ensure_ascii=False)
+
+
+def _yingmi_search_news(arguments):
+    return _call_yingmi("search_news", keyword=arguments.get("keyword", ""),
+                        page_size=int(arguments.get("page_size", 10)))
+
+
+def _yingmi_fund_diagnosis(arguments):
+    return _call_yingmi("get_fund_diagnosis", fund_name_or_code=arguments.get("fund_name_or_code", ""))
+
+
+def _yingmi_hot_topics(arguments):
+    return _call_yingmi("get_hot_topics", keyword=arguments.get("keyword", ""))
+
+
+def _yingmi_latest_quotations(arguments):
+    return _call_yingmi("get_latest_quotations")
+
+
+def _yingmi_diagnose_portfolio(arguments):
+    fund_codes = arguments.get("fund_codes", [])
+    if isinstance(fund_codes, str):
+        fund_codes = [c.strip() for c in fund_codes.split(",") if c.strip()]
+    return _call_yingmi("diagnose_portfolio", fund_codes=fund_codes)
+
+
+def _yingmi_search_funds(arguments):
+    return _call_yingmi("search_funds", keyword=arguments.get("keyword", ""),
+                        page=int(arguments.get("page", 1)), page_size=int(arguments.get("page_size", 20)))
 
 
 def _log_tool_audit(trace_id: str, tool_name: str, arguments: dict,
@@ -718,6 +870,14 @@ def _fetch_article(args: dict) -> str:
         if len(content) > max_chars:
             content = content[:max_chars] + "\n\n... (内容已截断)"
 
+        # 结构化提取（核心观点/标的/操作建议/时效性/偏见）— 失败不影响主流程
+        structure = {}
+        try:
+            from article_reader import extract_article_structure
+            structure = extract_article_structure(title, content)
+        except Exception as e:
+            logger.warning(f"文章结构化提取失败（不影响主流程）: {e}")
+
         return json.dumps({
             "success": True,
             "title": title,
@@ -725,6 +885,7 @@ def _fetch_article(args: dict) -> str:
             "publish_time": publish_time,
             "content": content,
             "content_length": len(content),
+            "structure": structure,
         }, ensure_ascii=False)
 
     except ImportError:

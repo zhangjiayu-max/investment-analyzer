@@ -1,5 +1,9 @@
 <script setup>
 import { _cmpTemp } from '../../composables/useDashboardHelpers'
+import Icon from '../ui/Icon.vue'
+import AIActionButton from '../ui/AIActionButton.vue'
+
+const ALERT_ICON_MAP = { warning: 'warning', info: 'info', opportunity: 'lightbulb' }
 
 const props = defineProps({
   cashManagement: { type: Object, default: null },
@@ -22,22 +26,16 @@ const emit = defineEmits(['bond-recommend'])
       </div>
       <div class="card-header-actions">
         <span v-if="cashManagement" class="card-data-time">{{ cashUpdatedAt || '' }}</span>
-        <button
+        <AIActionButton
           v-if="cashManagement?.balance > 0"
-          class="btn-ai-action"
-          :class="{ 'btn-loading': bondLoading }"
+          :label="bondResult ? '重新分析' : 'AI 债券推荐'"
+          agent="债券配置顾问"
+          icon="coins"
+          variant="soft"
+          size="sm"
+          :loading="bondLoading"
           @click="emit('bond-recommend')"
-          :disabled="bondLoading"
-        >
-          <svg v-if="bondLoading" class="icon-spin spinning" width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
-          </svg>
-          <svg v-else width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
-          </svg>
-          <span>{{ bondLoading ? '分析中...' : bondResult ? '重新分析' : 'AI 债券推荐' }}</span>
-          <span class="ai-agent-tooltip">债券配置顾问</span>
-        </button>
+        />
       </div>
     </div>
     <div class="card-body">
@@ -50,7 +48,7 @@ const emit = defineEmits(['bond-recommend'])
       </div>
       <div v-if="cashManagement?.cash_details" class="cash-details-row">
         <span v-for="(bal, uid) in cashManagement.cash_details" :key="uid" class="cash-detail-tag">
-          {{ uid === '小鱼儿' ? '🐟' : '🌸' }} {{ uid }} ¥{{ bal.toLocaleString() }}
+          <Icon name="circle-user" size="12" class="cash-detail-icon" /> {{ uid }} ¥{{ bal.toLocaleString() }}
         </span>
       </div>
 
@@ -58,7 +56,7 @@ const emit = defineEmits(['bond-recommend'])
       <div v-if="cashManagement?.suggestion?.alerts?.length" class="cash-alerts">
         <div v-for="(alert, i) in cashManagement.suggestion.alerts" :key="i"
           :class="['cash-alert', alert.level]">
-          <span class="cash-alert-icon">{{ {warning:'⚠️',info:'ℹ️',opportunity:'💡'}[alert.level] || '📌' }}</span>
+          <span class="cash-alert-icon"><Icon :name="ALERT_ICON_MAP[alert.level] || 'info'" size="13" /></span>
           <span>{{ alert.message }}</span>
         </div>
       </div>
@@ -171,8 +169,8 @@ const emit = defineEmits(['bond-recommend'])
   transition: box-shadow 0.3s cubic-bezier(0.4, 0, 0.2, 1), border-color 0.3s ease, transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
   position: relative;
   overflow: hidden;
-  min-height: 420px;
-  max-height: 540px;
+  min-height: auto;
+  max-height: none;
 }
 .dash-card::before {
   content: '';
@@ -246,71 +244,12 @@ const emit = defineEmits(['bond-recommend'])
 .card-body {
   display: flex;
   flex-direction: column;
-  gap: 0.65rem;
+  gap: 0.85rem;
   flex: 1;
   overflow-y: auto;
   min-height: 0;
+  padding: 0.25rem 0;
 }
-.btn-ai-action {
-  position: relative;
-  display: inline-flex;
-  align-items: center;
-  gap: 0.4rem;
-  padding: 0.45rem 0.85rem;
-  font-size: 0.8rem;
-  font-weight: 600;
-  color: var(--color-primary);
-  background: linear-gradient(135deg, var(--color-primary-bg), var(--color-primary-bg-gradient-end));
-  border: 1px solid var(--color-primary-border);
-  border-radius: var(--radius-lg);
-  cursor: pointer;
-  transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
-  white-space: nowrap;
-}
-.btn-ai-action:hover {
-  background: linear-gradient(135deg, var(--color-primary-bg-strong), var(--color-primary-bg-hover));
-  border-color: var(--color-primary-border-strong);
-  transform: translateY(-1px);
-  box-shadow: 0 4px 12px var(--color-primary-glow-strong);
-}
-.btn-ai-action:active { transform: translateY(0); box-shadow: none; }
-.btn-ai-action:disabled { opacity: 0.6; cursor: not-allowed; transform: none; box-shadow: none; }
-.btn-ai-action.btn-loading {
-  background: linear-gradient(135deg, var(--color-primary-bg-gradient-end), var(--color-primary-bg-weak));
-  border-color: var(--color-primary-bg-strong);
-}
-.icon-spin {
-  transition: transform 0.3s ease;
-}
-.icon-spin.spinning { animation: spin 1s linear infinite; }
-.ai-agent-tooltip {
-  position: absolute;
-  top: calc(100% + 8px);
-  left: 50%;
-  transform: translateX(-50%);
-  padding: 0.4rem 0.7rem;
-  font-size: 0.72rem;
-  font-weight: 600;
-  color: white;
-  background: linear-gradient(135deg, #0d1220, #1a1f35);
-  border-radius: var(--radius-md);
-  white-space: nowrap;
-  opacity: 0;
-  visibility: hidden;
-  pointer-events: none;
-  z-index: 100;
-  box-shadow: 0 4px 12px rgba(0,0,0,0.15);
-}
-.ai-agent-tooltip::after {
-  content: '';
-  position: absolute;
-  bottom: 100%;
-  left: 50%;
-  transform: translateX(-50%);
-  border: 5px solid transparent;
-  border-bottom-color: #0d1220;
-}
-.btn-ai-action:hover .ai-agent-tooltip { opacity: 1; visibility: visible; }
 .cash-balance-row {
   display: flex;
   align-items: baseline;
@@ -332,7 +271,7 @@ const emit = defineEmits(['bond-recommend'])
   font-weight: 600;
   padding: 0.1rem 0.45rem;
   border-radius: var(--radius-sm);
-  background: rgba(212,168,67,0.08);
+  background: var(--color-primary-bg);
   color: var(--color-primary);
 }
 .cash-details-row {
@@ -364,9 +303,9 @@ const emit = defineEmits(['bond-recommend'])
   padding: 0.5rem 0.75rem;
   border-radius: var(--radius-md);
 }
-.cash-alert.warning { background: rgba(239,68,68,0.06); color: #b91c1c; }
-.cash-alert.info { background: rgba(59,130,246,0.06); color: #1d4ed8; }
-.cash-alert.opportunity { background: rgba(16,185,129,0.06); color: #047857; }
+.cash-alert.warning { background: var(--color-danger-bg); color: var(--color-danger); }
+.cash-alert.info { background: var(--color-info-bg); color: var(--color-info); }
+.cash-alert.opportunity { background: var(--color-success-bg); color: var(--color-success); }
 .cash-alert-icon { flex-shrink: 0; }
 .bond-info { padding: 0.6rem 0; }
 .bond-temp-row {
@@ -388,12 +327,12 @@ const emit = defineEmits(['bond-recommend'])
 }
 .bond-temp-value:hover { transform: scale(1.05); }
 .bond-temp-value.bond-cold {
-  color: #3b82f6;
-  background: rgba(59,130,246,0.08);
+  color: var(--color-info);
+  background: var(--color-info-bg);
 }
 .bond-temp-value.bond-hot {
-  color: #ef4444;
-  background: rgba(239,68,68,0.08);
+  color: var(--color-danger);
+  background: var(--color-danger-bg);
 }
 .bond-yield {
   font-size: 0.8rem;
@@ -593,7 +532,7 @@ const emit = defineEmits(['bond-recommend'])
 .bond-rec-amount {
   font-size: 0.85rem;
   font-weight: 600;
-  color: var(--color-success, #059669);
+  color: var(--color-success);
 }
 .bond-rec-desc {
   font-size: 0.72rem;

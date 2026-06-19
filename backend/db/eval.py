@@ -126,6 +126,18 @@ def init_eval_tables(conn):
     """)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_user_profiles_uid ON user_profiles(user_id)")
 
+    # ── KYC 理财画像维度（风险偏好/投资期限/资金体量/投资经验/亏损承受度/关注品种）──
+    _add_column_if_not_exists(conn, "user_profiles", "risk_tolerance", "TEXT DEFAULT ''")        # 保守|稳健|平衡|进取|激进
+    _add_column_if_not_exists(conn, "user_profiles", "investment_horizon", "TEXT DEFAULT ''")    # short(<1y)|medium(1-3y)|long(>3y)
+    _add_column_if_not_exists(conn, "user_profiles", "capital_scale", "TEXT DEFAULT ''")         # small(<10w)|medium(10-100w)|large(>100w)
+    _add_column_if_not_exists(conn, "user_profiles", "investment_experience", "TEXT DEFAULT ''") # novice|intermediate|advanced|professional
+    _add_column_if_not_exists(conn, "user_profiles", "loss_tolerance", "TEXT DEFAULT ''")        # low(<5%)|medium(5-15%)|high(>15%)
+    _add_column_if_not_exists(conn, "user_profiles", "focus_assets", "TEXT DEFAULT '[]'")        # JSON: ["index","fund","bond","stock","gold"]
+    _add_column_if_not_exists(conn, "user_profiles", "kyc_completed", "INTEGER DEFAULT 0")
+    _add_column_if_not_exists(conn, "user_profiles", "kyc_completed_at", "TEXT DEFAULT ''")
+    _add_column_if_not_exists(conn, "user_profiles", "kyc_version", "INTEGER DEFAULT 0")
+    _add_column_if_not_exists(conn, "user_profiles", "kyc_source", "TEXT DEFAULT ''")            # questionnaire|conversation|feedback|eval_hint
+
     # ── 对话质量评估表 ──────────────────────────────────
     conn.execute("""
         CREATE TABLE IF NOT EXISTS conversation_evaluations (

@@ -1,5 +1,6 @@
 <script setup>
 import { ref, computed, watch, nextTick } from 'vue'
+import Icon from '../ui/Icon.vue'
 
 const props = defineProps({
   sending: { type: Boolean, default: false },
@@ -8,8 +9,33 @@ const props = defineProps({
   agents: { type: Array, default: () => [] },
 })
 
-const ICON_MAP = { chart: '📊', research: '🔍', shield: '🛡️', pie: '🥧', robot: '🤖', newspaper: '📰', search: '🔍', bull: '🐂' }
-function getIcon(icon) { return ICON_MAP[icon] || icon || '🤖' }
+// 专家 icon 文字 → Icon 语义 name 映射
+const ICON_MAP = {
+  chart: 'chart', research: 'search', shield: 'shield-check', pie: 'pie-chart',
+  robot: 'bot', newspaper: 'newspaper', search: 'search', bull: 'trending-up',
+}
+function getIcon(icon) { return ICON_MAP[icon] || 'bot' }
+
+// ── 快捷指令 ──
+const QUICK_COMMANDS = [
+  { icon: 'chart', label: '估值', text: '帮我分析当前主要指数的估值水平，哪些处于低估区？' },
+  { icon: 'portfolio', label: '持仓', text: '诊断我的持仓，分析分散度和风险敞口' },
+  { icon: 'newspaper', label: '解读', text: '解读这篇文章：' },
+  { icon: 'scale', label: '配置', text: '根据我的风险偏好，给出资产配置建议' },
+  { icon: 'activity', label: '体检', text: '给我的投资组合做一次全面体检' },
+]
+
+function insertCommand(cmd) {
+  emit('update:inputText', cmd.text)
+  nextTick(() => {
+    const ta = textareaRef.value
+    if (ta) {
+      ta.focus()
+      const len = cmd.text.length
+      ta.setSelectionRange(len, len)
+    }
+  })
+}
 
 const emit = defineEmits(['send', 'cancel', 'update:inputText'])
 
@@ -130,6 +156,12 @@ function handleKeydown(e) {
     <div v-if="sending" class="input-progress-bar">
       <div class="input-progress-fill"></div>
     </div>
+    <div v-if="!sending" class="quick-commands">
+      <button v-for="cmd in QUICK_COMMANDS" :key="cmd.label" class="quick-cmd" @click="insertCommand(cmd)" :title="cmd.text">
+        <Icon :name="cmd.icon" size="14" class="quick-cmd-icon" />
+        <span class="quick-cmd-label">{{ cmd.label }}</span>
+      </button>
+    </div>
     <form @submit.prevent="emit('send')" class="chat-form">
       <div class="input-wrapper">
         <textarea
@@ -155,7 +187,7 @@ function handleKeydown(e) {
               @mousedown.prevent="selectAgent(agent)"
               @mouseenter="mentionIndex = idx"
             >
-              <span class="mention-icon">{{ getIcon(agent.icon) }}</span>
+              <Icon :name="getIcon(agent.icon)" size="14" class="mention-icon" />
               <div class="mention-info">
                 <span class="mention-name">{{ agent.name }}</span>
                 <span class="mention-desc">{{ agent.description }}</span>
@@ -221,6 +253,33 @@ function handleKeydown(e) {
   50% { transform: translateX(233%); }
   100% { transform: translateX(-100%); }
 }
+
+.quick-commands {
+  display: flex;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+  margin-bottom: 0.5rem;
+}
+.quick-cmd {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.3rem 0.6rem;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-bg-input);
+  color: var(--color-text-secondary);
+  font-size: 0.72rem;
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+.quick-cmd:hover {
+  border-color: var(--color-primary);
+  color: var(--color-primary);
+  background: var(--color-primary-50);
+}
+.dark .quick-cmd:hover { background: var(--color-primary-bg); }
+.quick-cmd-icon { font-size: 0.85rem; }
 
 .chat-form {
   display: flex;

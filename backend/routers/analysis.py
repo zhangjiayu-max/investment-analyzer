@@ -9,7 +9,8 @@ from fastapi import APIRouter, HTTPException
 from db import (
     get_analysis_agent, list_analysis_agents, update_analysis_agent,
     create_analysis_history, list_analysis_history,
-    get_analysis_history_item, delete_analysis_history,
+    get_analysis_history_item, get_analysis_history_status,
+    update_analysis_history, delete_analysis_history,
     save_prompt_version,
     get_latest_valuation, get_valuation_history,
     list_holdings,
@@ -22,15 +23,37 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["analysis"])
 
+_background_tasks = set()
+
 
 @router.post("/api/analysis/run")
 async def run_analysis(req: AnalysisRunRequest):
-    """触发 AI 指数深度分析（结合估值趋势、知识库 RAG、指数专属新闻）。"""
-    # 1. 获取 agent 配置
+    """触发 AI 指数深度分析（后台异步执行）。"""
     agent = get_analysis_agent(req.agent_id)
     if not agent:
         raise HTTPException(404, "分析 Agent 不存在")
 
+    history_id = create_analysis_history(
+        index_code=req.index_code,
+        index_name=req.index_name,
+        agent_id=agent["id"],
+        agent_name=agent["name"],
+        prompt_used=agent.get("system_prompt", "")[:500],
+        news_context="",
+        valuation_context="",
+        result="",
+        token_usage=0,
+        status="running",
+    )
+    task = asyncio.create_task(_run_index_analysis_async(history_id, req.dict(), agent))
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+    return {"ok": True, "id": history_id, "status": "running"}
+
+
+async def _run_index_analysis_async(history_id: int, req_data: dict, agent: dict):
+    """后台执行指数深度分析。"""
+    req = AnalysisRunRequest(**req_data)
     index_label = req.index_name or req.index_code
 
     # 2. 获取估值数据（当前 + 近60天历史趋势）
@@ -185,7 +208,6 @@ async def run_analysis(req: AnalysisRunRequest):
     if news_context:
         full_prompt += f"\n\n<latest_news>\n{index_label}相关新闻与政策：\n{news_context}\n</latest_news>"
 
-    # 6. 调用 LLM
     try:
         response = await asyncio.to_thread(lambda: _call_llm(
             caller="index_deep_analysis",
@@ -201,22 +223,20 @@ async def run_analysis(req: AnalysisRunRequest):
         token_usage = response.usage.total_tokens if response.usage else 0
     except Exception as e:
         logger.error(f"AI 分析失败: {e}")
-        raise HTTPException(500, f"AI 分析失败: {str(e)}")
+        update_analysis_history(history_id, status="error", error_msg=str(e))
+        return
 
-    # 7. 保存历史
-    history_id = create_analysis_history(
-        index_code=req.index_code,
-        index_name=req.index_name,
-        agent_id=agent["id"],
-        agent_name=agent["name"],
+    update_analysis_history(
+        history_id,
         prompt_used=full_prompt,
         news_context=news_context,
         valuation_context=valuation_context,
         result=result_text,
         token_usage=token_usage,
+        status="done",
+        error_msg="",
     )
 
-    # 8. 后台自动质量评估（不阻塞返回）
     async def _auto_evaluate():
         try:
             from agent.eval_scorer import evaluate_llm_output
@@ -230,8 +250,6 @@ async def run_analysis(req: AnalysisRunRequest):
         except Exception as e:
             logger.warning(f"自动质量评估失败: {e}")
     asyncio.create_task(_auto_evaluate())
-
-    return {"id": history_id, "result": result_text, "token_usage": token_usage}
 
 
 @router.get("/api/analysis/history")
@@ -247,6 +265,21 @@ async def get_analysis_history_detail_api(history_id: int):
     if not item:
         raise HTTPException(404, "记录不存在")
     return item
+
+
+@router.get("/api/analysis/history/{history_id}/status")
+async def get_analysis_history_status_api(history_id: int):
+    """查询指数深度分析执行状态。"""
+    item = get_analysis_history_status(history_id)
+    if not item:
+        raise HTTPException(404, "记录不存在")
+    return {
+        "id": item["id"],
+        "status": item.get("status", "done"),
+        "result": item.get("result", ""),
+        "token_usage": item.get("token_usage", 0),
+        "error": item.get("error_msg", ""),
+    }
 
 
 @router.delete("/api/analysis/history/{history_id}")

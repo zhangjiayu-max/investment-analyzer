@@ -31,6 +31,9 @@ function createStreamState() {
     progressDetail: null,
     totalPhases: 0,
     phaseIndex: 0,
+    // 流式增量累积（阶段二：思考过程 + 答案逐字流）
+    streamingContent: '',
+    streamingReasoning: '',
   }
 }
 
@@ -157,6 +160,24 @@ function handleStreamEvent(convId, event, callbacks = {}) {
         duration_ms: data.duration_ms,
         expanded: false,
       })
+      break
+
+    case 'reasoning_chunk':
+      // 思考过程增量（thinking mode）
+      state.streamStatus = 'thinking'
+      state.streamingReasoning += data.content || ''
+      if (callbacks.onReasoning) {
+        callbacks.onReasoning(convId, data, state)
+      }
+      break
+
+    case 'answer_chunk':
+      // 答案增量（逐字流）
+      state.streamStatus = 'answering'
+      state.streamingContent += data.content || ''
+      if (callbacks.onAnswerChunk) {
+        callbacks.onAnswerChunk(convId, data, state)
+      }
       break
 
     case 'answer':

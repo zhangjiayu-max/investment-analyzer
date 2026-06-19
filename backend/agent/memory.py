@@ -157,6 +157,7 @@ def build_user_memory_context(user_id: str = "default") -> str:
     - user_profiles 表的偏好画像
     - 用户持仓信息
     - 近期对话主题
+    - user_memories 表的跨会话持久记忆（按 token 预算裁剪）
 
     返回约 300 token 的字符串。
     """
@@ -193,6 +194,33 @@ def build_user_memory_context(user_id: str = "default") -> str:
             titles = [r["title"] for r in rows if r["title"] != "新对话"]
             if titles:
                 parts.append(f"<recent_topics>近期讨论: {'、'.join(titles[:3])}</recent_topics>")
+    except Exception:
+        pass
+
+    # 4. 用户记忆（跨对话持久记忆，从 user_memories 表读取）
+    #    修复 F1：此前该表只写不读，记忆完全不生效
+    try:
+        from agent.memory_lifecycle import get_memories
+        memories = get_memories(user_id, limit=10)
+        if memories:
+            mem_lines = []
+            mem_budget = 300  # 记忆段 token 预算
+            used = 0
+            for m in memories:
+                # 跳过已归档 / 已压缩的历史记忆
+                if m.get("is_archived") or m.get("is_compacted"):
+                    continue
+                content = (m.get("content") or "").strip()
+                if not content:
+                    continue
+                line = f"- {content[:120]}"
+                t = estimate_tokens(line)
+                if used + t > mem_budget:
+                    break
+                mem_lines.append(line)
+                used += t
+            if mem_lines:
+                parts.append("<user_memories>\n" + "\n".join(mem_lines) + "\n</user_memories>")
     except Exception:
         pass
 

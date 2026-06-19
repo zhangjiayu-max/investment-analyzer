@@ -1,9 +1,31 @@
 """行情数据获取模块 — 基于 akshare 获取股票、基金、指数数据"""
 
+import logging
+import time
 from datetime import datetime, timedelta
 
 import akshare as ak
 import pandas as pd
+
+logger = logging.getLogger(__name__)
+
+# ── 行情数据 TTL 缓存（akshare 调用慢且不稳定，5 分钟内复用）──
+_market_cache = {}
+_MARKET_CACHE_TTL = 300  # 5 分钟
+
+
+def _get_cached(key):
+    """获取缓存数据，过期或不存在返回 None。"""
+    entry = _market_cache.get(key)
+    if entry and entry[1] > time.time():
+        logger.debug(f"行情缓存命中: {key}")
+        return entry[0]
+    return None
+
+
+def _set_cached(key, data):
+    """写入缓存。"""
+    _market_cache[key] = (data, time.time() + _MARKET_CACHE_TTL)
 
 
 def get_stock_history(symbol: str, days: int = 365) -> pd.DataFrame:
@@ -212,8 +234,14 @@ def get_index_current_price(index_code: str) -> dict:
 
     返回: {"price": float, "date": str} 或 {"price": None}
     """
+    cache_key = f"index_price:{index_code}"
+    cached = _get_cached(cache_key)
+    if cached is not None:
+        return cached
+
     import ssl
     ssl._create_default_https_context = ssl._create_unverified_context
+    result = {"price": None}
     try:
         spot_df = ak.stock_zh_index_spot_sina()
         base = index_code.replace(".SZ", "").replace(".SH", "").replace(".CSI", "")
@@ -221,13 +249,18 @@ def get_index_current_price(index_code: str) -> dict:
             sina_code = f"{prefix}{base}"
             match = spot_df[spot_df["代码"] == sina_code]
             if not match.empty:
-                return {
+                result = {
                     "price": float(match.iloc[0]["最新价"]),
                     "date": datetime.now().strftime("%Y-%m-%d"),
                 }
-        return {"price": None}
-    except Exception:
-        return {"price": None}
+                break
+    except Exception as e:
+        logger.warning(f"获取指数 {index_code} 实时点位失败: {e}")
+
+    # 只缓存有效结果
+    if result.get("price") is not None:
+        _set_cached(cache_key, result)
+    return result
 
 
 def get_market_overview() -> dict:
@@ -242,6 +275,11 @@ def get_market_overview() -> dict:
             "breadth": {"up", "down", "limit_up", "limit_down", "total_volume_yi"},  # 涨跌家数
         }
     """
+    # 缓存命中则直接返回（行情数据 5 分钟内复用）
+    cached = _get_cached("market_overview")
+    if cached is not None:
+        return cached
+
     import ssl
     ssl._create_default_https_context = ssl._create_unverified_context
     result = {
@@ -325,11 +363,13 @@ def get_market_overview() -> dict:
                 "limit_down": 0,
                 "total_volume_yi": total_vol,
             }
-        except Exception:
+        except Exception as e:
+            logger.warning(f"涨跌家数降级估算失败: {e}")
             total_vol = sum(idx.get("volume_yi", 0) for idx in result["indices"])
             result["breadth"] = {
                 "up": 0, "down": 0, "limit_up": 0, "limit_down": 0,
                 "total_volume_yi": total_vol,
             }
 
+    _set_cached("market_overview", result)
     return result

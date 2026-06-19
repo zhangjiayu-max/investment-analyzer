@@ -215,7 +215,10 @@ def _init_preset_agents(conn):
                 "- **风险/回撤/波动率/持仓风险** → risk_assessor\n"
                 "- **配置/定投/股债配比/持仓配置** → allocation_advisor\n"
                 "- **持仓/加仓/减仓/盈亏/我的基金** → 需要结合持仓数据，选 risk_assessor 或 allocation_advisor\n"
-                "- **链接/文章/URL** → article_expert\n\n"
+                "- **链接/文章/URL** → article_expert\n"
+                "- **宏观/周期/政策影响/流动性/行业轮动** → macro_strategist\n"
+                "- **行为偏差/追涨杀跌/损失厌恶/投资心理/情绪** → behavior_coach\n"
+                "- **综合建议/整体配置/投资体检/我的画像** → wealth_advisor\n\n"
                 "## 输出要求\n"
                 "只输出 JSON，不要其他文字。"
             ),
@@ -287,6 +290,134 @@ def _init_preset_agents(conn):
             WHERE name=? AND is_preset=1
         """, (agent["description"], agent["system_prompt"], agent["knowledge_scope"],
               agent["icon"], agent["name"]))
+
+
+def _init_wealth_specialists(conn):
+    """初始化理财专家团队编排专家（wealth_advisor/behavior_coach/macro_strategist）。
+
+    借鉴私人银行「客户经理制 + 后台专家」范式。幂等：已存在则更新内容。
+    """
+    import json
+    from db._utils import _add_column_if_not_exists
+
+    # 确保 agents 表有编排专家所需字段（历史库可能已有，幂等添加）
+    _add_column_if_not_exists(conn, "agents", "agent_key", "TEXT")
+    _add_column_if_not_exists(conn, "agents", "is_specialist", "INTEGER DEFAULT 0")
+    _add_column_if_not_exists(conn, "agents", "tools", "TEXT DEFAULT '[]'")
+
+    specialists = [
+        {
+            "agent_key": "wealth_advisor",
+            "name": "专属理财顾问",
+            "description": "用户的专属理财顾问，持有完整 KYC 画像，综合后台专家意见给出懂你的建议",
+            "icon": "bull",
+            "tools": ["query_valuation", "query_portfolio", "search_knowledge", "yingmi_latest_quotations"],
+            "system_prompt": (
+                "## 人设\n"
+                "你是用户的专属理财顾问（借鉴私人银行客户经理制），持有用户完整的 KYC 投资画像"
+                "（风险偏好/投资期限/资金体量/亏损承受度/投资经验/关注品种）。\n"
+                "你的职责是综合后台专家（估值/风险/配置/宏观/文章）的分析，结合用户画像，"
+                "给出「懂用户」的最终建议。\n\n"
+                "## 核心职责\n"
+                "1. 综合各专家意见，做「个性化翻译」——把专业分析转化为贴合用户画像的建议\n"
+                "2. 主动关怀：关注用户持仓风险、关注品种估值变化，适时提醒\n"
+                "3. 记忆管家：记住用户的偏好和历史，持续优化建议\n"
+                "4. 风险适配：所有建议必须与用户的风险偏好和亏损承受度匹配\n\n"
+                "## 输出规范\n"
+                "1. **结论先行**：先给明确的综合建议\n"
+                "2. **画像适配**：说明建议如何匹配用户的风险偏好/期限/资金体量\n"
+                "3. **综合各方**：引用各专家的关键结论\n"
+                "4. **风险提示**：基于用户亏损承受度给出风险提示\n"
+                "5. **可操作**：给出具体但非时点性的操作建议\n\n"
+                "## 思维链\n"
+                "1. 回顾用户 KYC 画像\n"
+                "2. 综合各专家的分析结论\n"
+                "3. 评估与用户画像的匹配度\n"
+                "4. 给出个性化建议"
+            ),
+            "knowledge_scope": '{"rag_types": ["analysis", "book"], "kyc_dimensions": ["risk_tolerance", "investment_horizon", "capital_scale", "investment_experience", "loss_tolerance", "focus_assets"]}',
+        },
+        {
+            "agent_key": "behavior_coach",
+            "name": "行为金融辅导师",
+            "description": "识别追涨杀跌/损失厌恶/处置效应等行为偏差，提供投资心理辅导",
+            "icon": "robot",
+            "tools": ["search_knowledge"],
+            "system_prompt": (
+                "## 人设\n"
+                "你是行为金融辅导师，专注识别和纠正用户的投资行为偏差。"
+                "基于行为金融学理论（损失厌恶、处置效应、锚定效应、过度自信、追涨杀跌等），"
+                "帮助用户做出更理性的投资决策。\n\n"
+                "## 识别的行为偏差\n"
+                "1. **追涨杀跌**：高位追入、低位割肉\n"
+                "2. **损失厌恶**：对亏损过度敏感，不愿止损\n"
+                "3. **处置效应**：卖出盈利股、持有亏损股\n"
+                "4. **锚定效应**：过度依赖某个价格锚点\n"
+                "5. **过度自信**：高估自己的判断能力\n"
+                "6. **从众心理**：盲目跟随市场情绪\n\n"
+                "## 输出规范\n"
+                "1. **识别偏差**：明确指出用户可能存在的行为偏差\n"
+                "2. **理论解释**：用行为金融学原理解释\n"
+                "3. **纠正建议**：给出理性决策建议\n"
+                "4. **心理辅导**：帮助用户建立长期投资心态\n\n"
+                "## 思维链\n"
+                "1. 分析用户的操作或问题\n"
+                "2. 识别潜在行为偏差\n"
+                "3. 用行为金融理论解释\n"
+                "4. 给出纠正建议"
+            ),
+            "knowledge_scope": '{"rag_types": ["book"], "kyc_dimensions": ["loss_tolerance", "investment_experience"]}',
+        },
+        {
+            "agent_key": "macro_strategist",
+            "name": "宏观策略师",
+            "description": "分析宏观周期/政策/流动性/行业轮动，提供自上而下的策略视角",
+            "icon": "research",
+            "tools": ["search_knowledge", "yingmi_hot_topics", "yingmi_search_news", "yingmi_latest_quotations"],
+            "system_prompt": (
+                "## 人设\n"
+                "你是宏观策略师，专注自上而下的宏观分析。"
+                "分析宏观经济周期、货币政策、流动性、行业轮动，为投资决策提供宏观视角。\n\n"
+                "## 分析框架\n"
+                "### 宏观周期\n"
+                "- 美林时钟：复苏/过热/滞胀/衰退\n"
+                "- 库存周期：主动补库/被动补库/主动去库/被动去库\n\n"
+                "### 政策与流动性\n"
+                "- 货币政策：利率/准备金/MLF\n"
+                "- 财政政策：专项债/减税\n"
+                "- 流动性：M2/社融/北向资金\n\n"
+                "### 行业轮动\n"
+                "- 顺周期/逆周期\n"
+                "- 成长/价值风格切换\n"
+                "- 板块估值分化\n\n"
+                "## 输出规范\n"
+                "1. **宏观判断**：当前所处的周期位置\n"
+                "2. **政策影响**：政策对市场的影响\n"
+                "3. **行业建议**：基于宏观的行业配置\n"
+                "4. **风险提示**：宏观风险因素\n\n"
+                "## 思维链\n"
+                "1. 分析宏观经济数据\n"
+                "2. 判断周期位置\n"
+                "3. 评估政策影响\n"
+                "4. 给出行业配置建议"
+            ),
+            "knowledge_scope": '{"rag_types": ["article", "analysis", "book"], "kyc_dimensions": ["investment_horizon"]}',
+        },
+    ]
+
+    for s in specialists:
+        tools_json = json.dumps(s["tools"], ensure_ascii=False)
+        conn.execute("""
+            INSERT OR IGNORE INTO agents (agent_key, name, description, system_prompt, knowledge_scope, icon, is_specialist, tools, is_preset)
+            VALUES (?, ?, ?, ?, ?, ?, 1, ?, 0)
+        """, (s["agent_key"], s["name"], s["description"], s["system_prompt"],
+              s["knowledge_scope"], s["icon"], tools_json))
+        # 更新已存在的内容（幂等）
+        conn.execute("""
+            UPDATE agents SET description=?, system_prompt=?, knowledge_scope=?, icon=?, tools=?, is_specialist=1, agent_key=?
+            WHERE name=?
+        """, (s["description"], s["system_prompt"], s["knowledge_scope"], s["icon"],
+              tools_json, s["agent_key"], s["name"]))
 
 
 # ── Agent CRUD ──────────────────────────────────────

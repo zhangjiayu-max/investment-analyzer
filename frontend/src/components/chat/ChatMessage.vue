@@ -1,7 +1,9 @@
 <script setup>
 import { computed } from 'vue'
 import { renderMarkdown } from '../../composables/useMarkdown'
+import Icon from '../ui/Icon.vue'
 import TraceDetail from '../TraceDetail.vue'
+import ReasoningPanel from './ReasoningPanel.vue'
 
 const props = defineProps({
   msg: { type: Object, required: true },
@@ -39,11 +41,11 @@ function getEvalStatusClass(messageId) {
 
 function getEvalStatusIcon(messageId) {
   const state = props.messageEvalStates[messageId]
-  if (!state || state.loading) return '📊'
-  if (state.score >= 80) return '✅'
-  if (state.score >= 60) return '⚠️'
-  if (state.score > 0) return '❌'
-  return '📊'
+  if (!state || state.loading) return 'chart'
+  if (state.score >= 80) return 'check'
+  if (state.score >= 60) return 'warning'
+  if (state.score > 0) return 'error'
+  return 'chart'
 }
 
 function getEvalStatusTitle(messageId) {
@@ -66,10 +68,10 @@ function getEvalDimensions(messageId) {
   }
 
   const dimConfig = {
-    execution: { name: '执行效率', icon: '⚡' },
-    data: { name: '数据利用', icon: '📊' },
-    collaboration: { name: '专家协作', icon: '🤝' },
-    response: { name: '响应质量', icon: '📝' },
+    execution: { name: '执行效率', icon: 'zap' },
+    data: { name: '数据利用', icon: 'chart' },
+    collaboration: { name: '专家协作', icon: 'users' },
+    response: { name: '响应质量', icon: 'file-text' },
   }
 
   const result = {}
@@ -106,10 +108,10 @@ function getEvalSuggestions(messageId) {
 }
 
 function scoreColor(score) {
-  if (score >= 80) return '#52c41a'
-  if (score >= 60) return '#faad14'
-  if (score >= 40) return '#fa8c16'
-  return '#ff4d4f'
+  if (score >= 80) return 'var(--color-success)'
+  if (score >= 60) return 'var(--color-warning)'
+  if (score >= 40) return 'var(--color-warning)'
+  return 'var(--color-danger)'
 }
 
 // 工具名称映射
@@ -168,7 +170,7 @@ function formatTime(ts) {
       <!-- 消息 ID 标识 + 评估状态 -->
       <div class="message-id-header" v-if="msg.id">
         <span class="message-id-badge" @click="emit('copy-message-id', msg.id)" :title="'点击复制消息ID: ' + msg.id">
-          #{{ msg.id }} 📋
+          #{{ msg.id }} <Icon name="clipboard-list" size="11" class="inline-icon" />
         </span>
         <!-- 评估状态指示器 -->
         <span
@@ -180,16 +182,16 @@ function formatTime(ts) {
           <span v-if="messageEvalStates[msg.id]?.score > 0" class="eval-score-mini">
             {{ messageEvalStates[msg.id].score.toFixed(0) }}
           </span>
-          <span v-else>{{ getEvalStatusIcon(msg.id) }}</span>
+          <Icon v-else :name="getEvalStatusIcon(msg.id)" size="12" />
         </span>
       </div>
       <!-- 执行状态徽章 -->
       <div v-if="msg.execution_status && msg.execution_status !== 'completed'" class="execution-status-badge" :class="'status-' + msg.execution_status">
-        <template v-if="msg.execution_status === 'streaming'">⏳ 后台执行中 <button class="btn-retry btn-ai-action" @click="emit('resume', convId)" title="恢复">🔄 恢复<span class="ai-agent-tooltip">投资分析助手</span></button></template>
-        <template v-else-if="msg.execution_status === 'failed'">❌ 执行失败{{ msg.error_message ? ': ' + msg.error_message : '（超时或异常）' }}</template>
-        <template v-else-if="msg.execution_status === 'cancelled'">⏹ 已取消</template>
-        <template v-else-if="msg.execution_status === 'timeout'">⏰ 执行超时</template>
-        <button v-if="index > 0" class="btn-retry btn-ai-action" @click="emit('retry', msg)" title="重试">🔄 重试<span class="ai-agent-tooltip">投资分析助手</span></button>
+        <template v-if="msg.execution_status === 'streaming'"><Icon name="hourglass" size="13" class="inline-icon" /> 后台执行中 <button class="btn-retry btn-ai-action" @click="emit('resume', convId)" title="恢复"><Icon name="refresh" size="12" class="inline-icon" /> 恢复<span class="ai-agent-tooltip">投资分析助手</span></button></template>
+        <template v-else-if="msg.execution_status === 'failed'"><Icon name="error" size="13" class="inline-icon" /> 执行失败{{ msg.error_message ? ': ' + msg.error_message : '（超时或异常）' }}</template>
+        <template v-else-if="msg.execution_status === 'cancelled'"><Icon name="square" size="13" class="inline-icon" /> 已取消</template>
+        <template v-else-if="msg.execution_status === 'timeout'"><Icon name="alarm-clock" size="13" class="inline-icon" /> 执行超时</template>
+        <button v-if="index > 0" class="btn-retry btn-ai-action" @click="emit('retry', msg)" title="重试"><Icon name="refresh" size="12" class="inline-icon" /> 重试<span class="ai-agent-tooltip">投资分析助手</span></button>
       </div>
       <!-- 专家分析展示 -->
       <div v-if="msg.specialist_results && msg.specialist_results.length" class="specialists-container">
@@ -201,14 +203,14 @@ function formatTime(ts) {
             <!-- 专家反馈按钮 -->
             <div class="specialist-feedback" @click.stop>
               <template v-if="specialistFeedback[index + '_' + s.agent_key]">
-                <span class="feedback-done">{{ specialistFeedback[index + '_' + s.agent_key] === 'helpful' ? '👍 已赞' : '👎 已踩' }}</span>
+                <span class="feedback-done">{{ specialistFeedback[index + '_' + s.agent_key] === 'helpful' ? '已赞' : '已踩' }} <Icon :name="specialistFeedback[index + '_' + s.agent_key] === 'helpful' ? 'thumbs-up' : 'thumbs-down'" size="12" class="inline-icon" /></span>
               </template>
               <template v-else>
-                <button class="btn-spec-feedback" @click="emit('specialist-feedback', s, index, 'helpful')" title="分析准确">👍</button>
-                <button class="btn-spec-feedback" @click="emit('specialist-feedback', s, index, 'unhelpful')" title="分析不准">👎</button>
+                <button class="btn-spec-feedback" @click="emit('specialist-feedback', s, index, 'helpful')" title="分析准确"><Icon name="thumbs-up" size="14" /></button>
+                <button class="btn-spec-feedback" @click="emit('specialist-feedback', s, index, 'unhelpful')" title="分析不准"><Icon name="thumbs-down" size="14" /></button>
               </template>
             </div>
-            <span class="specialist-toggle">{{ s.expanded ? '▲' : '▼' }}</span>
+            <Icon name="chevron-down" size="12" class="specialist-toggle" :class="{ expanded: s.expanded }" />
           </div>
           <div v-if="s.expanded" class="specialist-analysis markdown-body" v-html="renderMarkdown(s.analysis || '（暂无分析内容）')"></div>
         </div>
@@ -221,7 +223,7 @@ function formatTime(ts) {
             <span class="specialist-icon">{{ s.icon }}</span>
             <span class="specialist-name">{{ s.agent }} 审阅</span>
             <span v-if="s.duration_ms" class="specialist-time">{{ (s.duration_ms / 1000).toFixed(1) }}s</span>
-            <span class="specialist-toggle">{{ s.expanded ? '▲' : '▼' }}</span>
+            <span class="specialist-toggle"><Icon name="chevron-down" size="12" :class="{ expanded: s.expanded }" /></span>
           </div>
           <div v-if="s.expanded" class="specialist-analysis markdown-body" v-html="renderMarkdown(s.analysis || '（暂无审阅内容）')"></div>
         </div>
@@ -229,13 +231,13 @@ function formatTime(ts) {
       <!-- 执行过程面板（可展开） -->
       <div v-if="msg.specialist_results?.length || msg.phase_timings" class="execution-panel">
         <div class="execution-toggle" @click="msg._showExecution = !msg._showExecution">
-          <span class="execution-toggle-icon">⚙️</span>
+          <Icon name="config" size="13" class="execution-toggle-icon" />
           <span>执行过程</span>
           <span v-if="msg.complexity" class="execution-complexity" :class="'complexity-' + msg.complexity">
             {{ msg.complexity === 'complex' ? '复杂' : msg.complexity === 'medium' ? '中等' : '简单' }}
           </span>
           <span v-if="msg.duration_ms" class="execution-total-time">{{ formatDuration(msg.duration_ms) }}</span>
-          <span class="execution-toggle-arrow">{{ msg._showExecution ? '▲' : '▼' }}</span>
+          <span class="execution-toggle-arrow"><Icon name="chevron-down" size="12" :class="{ expanded: msg._showExecution }" /></span>
         </div>
         <Transition name="expand">
           <div v-if="msg._showExecution" class="execution-detail">
@@ -271,7 +273,7 @@ function formatTime(ts) {
             </div>
             <!-- Trace 详情按钮 -->
             <button class="btn-trace-detail" @click.stop="emit('toggle-trace', msg, index)">
-              🔍 查看执行链路详情
+              <Icon name="search" size="13" class="inline-icon" /> 查看执行链路详情
             </button>
             <TraceDetail
               v-if="traceDetailVisible[`${convId}_${index}`]"
@@ -285,22 +287,23 @@ function formatTime(ts) {
       <div v-if="filterToolCalls(msg.tool_calls).length" class="tool-calls-container">
         <div v-for="(tc, j) in filterToolCalls(msg.tool_calls)" :key="j" class="tool-call-item">
           <div class="tool-call-header" @click="tc.expanded = !tc.expanded">
-            <span class="tool-icon">🔧</span>
+            <Icon name="wrench" size="13" class="tool-icon" />
             <span class="tool-name">{{ toolDisplayName(tc.name) }}</span>
             <span class="tool-args">{{ JSON.stringify(tc.arguments || {}).slice(0, 40) }}</span>
-            <span class="tool-toggle">{{ tc.expanded ? '▲' : '▼' }}</span>
+            <Icon name="chevron-down" size="12" class="tool-toggle" :class="{ expanded: tc.expanded }" />
           </div>
           <pre v-if="tc.expanded" class="tool-result">{{ tc.result_preview || '（无数据返回）' }}</pre>
         </div>
       </div>
+      <ReasoningPanel v-if="msg.reasoning" :text="msg.reasoning" />
       <div class="message-bubble markdown-body" v-html="renderMarkdown(msg.content)"></div>
       <!-- 反馈按钮 -->
       <div v-if="msg.role === 'assistant' && !feedbackGiven[index]" class="message-feedback">
         <button class="btn-msg-feedback" @click="emit('feedback', msg, index, 'helpful')" title="有用">
-          <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14 9V5a3 3 0 00-3-3l-4 9v11h11.28a2 2 0 002-1.7l1.38-9a2 2 0 00-2-2.3H14z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 22H4a2 2 0 01-2-2v-7a2 2 0 012-2h3"/></svg>
+          <Icon name="thumbs-up" size="14" />
         </button>
         <button class="btn-msg-feedback" @click="emit('feedback', msg, index, 'unhelpful')" title="没用">
-          <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 15v4a3 3 0 003 3l4-9V2H5.72a2 2 0 00-2 1.7l-1.38 9a2 2 0 002 2.3H10z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 2h3a2 2 0 012 2v7a2 2 0 01-2 2h-3"/></svg>
+          <Icon name="thumbs-down" size="14" />
         </button>
       </div>
       <div v-else-if="feedbackGiven[index]" class="message-feedback-given">
@@ -309,9 +312,7 @@ function formatTime(ts) {
       <!-- RAG 来源标注 -->
       <div v-if="msg.rag && msg.rag.sources && msg.rag.sources.length" class="rag-sources">
         <div class="rag-header">
-          <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253"/>
-          </svg>
+          <Icon name="book-open" size="14" />
           <span>参考来源 ({{ msg.rag.results_count || msg.rag.sources.length }})</span>
         </div>
         <div class="rag-tags">
@@ -343,7 +344,7 @@ function formatTime(ts) {
           <!-- 维度分数 -->
           <div class="eval-dimensions">
             <div v-for="(dim, key) in getEvalDimensions(msg.id)" :key="key" class="eval-dim">
-              <span class="eval-dim-icon">{{ dim.icon }}</span>
+              <Icon :name="dim.icon" size="13" class="eval-dim-icon" />
               <span class="eval-dim-name">{{ dim.name }}</span>
               <div class="eval-dim-bar">
                 <div class="eval-dim-bar-fill" :style="{ width: dim.score + '%', backgroundColor: scoreColor(dim.score) }"></div>
@@ -354,7 +355,7 @@ function formatTime(ts) {
 
           <!-- 优化建议 -->
           <div v-if="getEvalSuggestions(msg.id).length" class="eval-suggestions">
-            <div class="eval-suggestions-title">💡 优化建议</div>
+            <div class="eval-suggestions-title"><Icon name="lightbulb" size="13" class="inline-icon" /> 优化建议</div>
             <div v-for="(s, idx) in getEvalSuggestions(msg.id)" :key="idx" class="eval-suggestion">
               {{ s }}
             </div>
@@ -363,14 +364,14 @@ function formatTime(ts) {
           <!-- 操作按钮 -->
           <div class="eval-actions">
             <button class="btn-eval-llm" @click="emit('trigger-llm-eval', msg.id)">
-              🤖 LLM 深度评估
+              <Icon name="bot" size="13" class="inline-icon" /> LLM 深度评估
             </button>
           </div>
         </div>
         <div v-else class="eval-empty">
           <div class="eval-empty-text">暂无评估数据</div>
           <button class="btn-eval-trigger" @click="emit('trigger-eval', msg.id)">
-            📊 快速评估
+            <Icon name="chart" size="13" class="inline-icon" /> 快速评估
           </button>
         </div>
       </div>
@@ -738,7 +739,8 @@ function formatTime(ts) {
 .specialist-status.running .dot:nth-child(3) { animation-delay: 0.4s; }
 
 .specialist-time { font-size: 0.65rem; color: var(--color-text-muted); }
-.specialist-toggle { font-size: 0.6rem; color: var(--color-text-muted); }
+.specialist-toggle { font-size: 0.6rem; color: var(--color-text-muted); transition: transform var(--transition-fast); }
+.specialist-toggle.expanded { transform: rotate(180deg); }
 
 .specialist-feedback {
   display: flex;
@@ -808,7 +810,8 @@ function formatTime(ts) {
 .complexity-complex { background: #fee2e2; color: #991b1b; }
 
 .execution-total-time { margin-left: auto; font-weight: 600; color: var(--color-text-primary); }
-.execution-toggle-arrow { color: var(--color-text-muted); font-size: 0.75rem; }
+.execution-toggle-arrow { color: var(--color-text-muted); font-size: 0.75rem; transition: transform var(--transition-fast); }
+.execution-toggle-arrow .expanded { transform: rotate(180deg); display: inline-block; }
 
 .execution-detail { padding: 0.75rem; background: var(--color-bg-primary); border-top: 1px solid var(--color-border-light); }
 
@@ -850,7 +853,9 @@ function formatTime(ts) {
 .tool-icon.spinning { animation: spin 1.5s linear infinite; }
 .tool-name { font-weight: 600; color: var(--color-primary-600); }
 .tool-args { font-size: 0.65rem; color: var(--color-text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 200px; }
-.tool-toggle { font-size: 0.6rem; color: var(--color-text-muted); margin-left: auto; }
+.tool-toggle { font-size: 0.6rem; color: var(--color-text-muted); margin-left: auto; transition: transform var(--transition-fast); }
+.tool-toggle.expanded { transform: rotate(180deg); }
+.inline-icon { vertical-align: middle; }
 
 .tool-result {
   background: var(--color-bg-hover);

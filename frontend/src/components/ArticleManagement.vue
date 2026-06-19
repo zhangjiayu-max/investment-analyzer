@@ -881,19 +881,21 @@ function closePreview() { previewImage.value = null }
 }
 
 .btn-green {
-  background: linear-gradient(135deg, #059669, #10b981);
+  background: linear-gradient(135deg, var(--color-success), var(--color-success));
 }
 
 .btn-green:hover {
-  background: linear-gradient(135deg, #047857, #059669);
+  background: linear-gradient(135deg, var(--color-success), var(--color-success));
+  opacity: 0.9;
 }
 
 .btn-cancel {
-  background: linear-gradient(135deg, #dc2626, #ef4444);
+  background: linear-gradient(135deg, var(--color-danger), var(--color-danger));
 }
 
 .btn-cancel:hover {
-  background: linear-gradient(135deg, #b91c1c, #dc2626);
+  background: linear-gradient(135deg, var(--color-danger), var(--color-danger));
+  opacity: 0.9;
 }
 
 .btn-cancel:disabled {
@@ -1010,8 +1012,8 @@ function closePreview() { previewImage.value = null }
 .st-success { background: var(--color-success); }
 .st-error { background: var(--color-danger); }
 .st-pending { background: var(--color-text-muted); }
-.st-cancelled { background: #6b7280; }
-.st-timeout { background: #ea580c; }
+.st-cancelled { background: var(--color-text-muted); }
+.st-timeout { background: var(--color-warning); }
 .st-analyzing {
   background: var(--color-primary-500);
   display: flex;
@@ -1084,16 +1086,16 @@ function closePreview() { previewImage.value = null }
   display: inline-block;
 }
 
-.badge-purple { background: rgba(139, 92, 246, 0.1); color: #7c3aed; }
-.badge-orange { background: rgba(249, 115, 22, 0.1); color: #ea580c; }
-.badge-pink { background: rgba(236, 72, 153, 0.1); color: #db2777; }
-.badge-purple .metric-dot { background: #7c3aed; }
-.badge-orange .metric-dot { background: #ea580c; }
-.badge-pink .metric-dot { background: #db2777; }
-.badge-success .metric-dot { background: #059669; }
-.badge-info .metric-dot { background: #a88a3a; }
-.badge-warning .metric-dot { background: #d97706; }
-.badge-neutral .metric-dot { background: #64748b; }
+.badge-purple { background: var(--color-info-bg); color: var(--color-primary); }
+.badge-orange { background: var(--color-warning-bg); color: var(--color-warning); }
+.badge-pink { background: var(--color-danger-bg); color: var(--color-danger); }
+.badge-purple .metric-dot { background: var(--color-primary); }
+.badge-orange .metric-dot { background: var(--color-warning); }
+.badge-pink .metric-dot { background: var(--color-danger); }
+.badge-success .metric-dot { background: var(--color-success); }
+.badge-info .metric-dot { background: var(--color-primary); }
+.badge-warning .metric-dot { background: var(--color-warning); }
+.badge-neutral .metric-dot { background: var(--color-text-muted); }
 
 .record-error {
   font-size: 0.72rem;
@@ -1127,7 +1129,7 @@ function closePreview() { previewImage.value = null }
 }
 
 .record-retry.retry-error:hover {
-  background: rgba(239, 68, 68, 0.08);
+  background: var(--color-danger-bg);
 }
 
 /* Empty Records */
@@ -1215,8 +1217,8 @@ function closePreview() { previewImage.value = null }
   margin-left: 0.25rem;
   font-size: 0.6rem;
   font-weight: 700;
-  background: rgba(239, 68, 68, 0.15);
-  color: #dc2626;
+  background: var(--color-danger-bg);
+  color: var(--color-danger);
   border-radius: 999px;
 }
 

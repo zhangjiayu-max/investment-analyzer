@@ -31,11 +31,21 @@ def _init_analysis_tables(conn=None):
             prompt_used TEXT,
             news_context TEXT,
             valuation_context TEXT,
-            result TEXT NOT NULL,
+            result TEXT NOT NULL DEFAULT '',
             token_usage INTEGER,
+            status TEXT DEFAULT 'done',
+            error_msg TEXT DEFAULT '',
             created_at TIMESTAMP DEFAULT (datetime('now','localtime'))
         )
     """)
+    try:
+        conn.execute("ALTER TABLE analysis_history ADD COLUMN status TEXT DEFAULT 'done'")
+    except Exception:
+        pass
+    try:
+        conn.execute("ALTER TABLE analysis_history ADD COLUMN error_msg TEXT DEFAULT ''")
+    except Exception:
+        pass
     # 插入默认 agent（如果不存在）
     # 逐个插入默认 agent（如缺失）
     for name, desc, prompt in [
@@ -885,20 +895,52 @@ def update_analysis_agent(agent_id: int, **kwargs) -> bool:
 
 def create_analysis_history(index_code: str, index_name: str, agent_id: int,
                             agent_name: str, prompt_used: str, news_context: str,
-                            valuation_context: str, result: str, token_usage: int = 0) -> int:
+                            valuation_context: str, result: str = "",
+                            token_usage: int = 0, status: str = "done",
+                            error_msg: str = "") -> int:
     """保存分析历史记录。"""
     conn = _get_conn()
     cursor = conn.execute("""
         INSERT INTO analysis_history
         (index_code, index_name, agent_id, agent_name, prompt_used, news_context,
-         valuation_context, result, token_usage, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now','localtime'))
+         valuation_context, result, token_usage, status, error_msg, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now','localtime'))
     """, (index_code, index_name, agent_id, agent_name, prompt_used,
-          news_context, valuation_context, result, token_usage))
+          news_context, valuation_context, result or "", token_usage, status, error_msg))
     conn.commit()
     row_id = cursor.lastrowid
     conn.close()
     return row_id
+
+
+def update_analysis_history(history_id: int, **fields) -> bool:
+    """更新分析历史字段。"""
+    allowed = {
+        "prompt_used", "news_context", "valuation_context", "result",
+        "token_usage", "status", "error_msg",
+    }
+    updates = {k: v for k, v in fields.items() if k in allowed}
+    if not updates:
+        return False
+    conn = _get_conn()
+    set_clause = ", ".join(f"{k} = ?" for k in updates)
+    values = list(updates.values()) + [history_id]
+    cur = conn.execute(f"UPDATE analysis_history SET {set_clause} WHERE id = ?", values)
+    conn.commit()
+    ok = cur.rowcount > 0
+    conn.close()
+    return ok
+
+
+def get_analysis_history_status(history_id: int) -> dict | None:
+    """查询指数分析任务状态。"""
+    conn = _get_conn()
+    row = conn.execute(
+        "SELECT id, status, result, token_usage, error_msg FROM analysis_history WHERE id = ?",
+        (history_id,),
+    ).fetchone()
+    conn.close()
+    return dict(row) if row else None
 
 
 def list_analysis_history(index_code: str = None, limit: int = 50) -> list[dict]:

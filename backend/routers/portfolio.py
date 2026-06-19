@@ -8,6 +8,9 @@
   - 交易标签：添加/移除/获取交易标签
 """
 
+# 后台任务引用集合（防止被垃圾回收）
+_background_tasks = set()
+
 import asyncio
 import json
 import logging
@@ -41,6 +44,7 @@ from db import (
     list_rebalance_configs, get_rebalance_config_by_id, rollback_rebalance_config,
     set_cash_balance, get_portfolio_penetration,
 )
+from db.portfolio import update_analysis_record
 from mcp.trading_calendar import expected_confirm_date
 from rag import build_rag_context_with_details, log_rag_search
 from models.portfolio import (
@@ -318,18 +322,38 @@ def _parse_mcp_correlation(text: str) -> list[dict]:
 
 @router.post("/api/portfolio/analysis/diversification/ai-summary")
 async def portfolio_diversification_ai_summary(agent_id: int = 2):
-    """基于 MCP + 持仓数据，生成 AI 分散度分析解读。"""
-    # 1. 获取 agent 配置
+    """基于 MCP + 持仓数据，后台生成 AI 分散度分析解读。"""
     agent = get_analysis_agent(agent_id)
     if not agent:
         raise HTTPException(404, "分析 Agent 不存在")
+    holdings = list_holdings()
+    if not holdings:
+        raise HTTPException(400, "暂无持仓数据")
+    result = get_portfolio_diversification()
+    record_id = create_portfolio_analysis_record(
+        analysis_type="diversification_ai",
+        summary=f"分散度解读 · {result.get('holding_count', len(holdings))}只基金",
+        input_data=json.dumps({"holdings": result}, ensure_ascii=False),
+        result_data="",
+        token_usage=0,
+        agent_id=agent_id,
+        status="running",
+    )
+    task = asyncio.create_task(_run_diversification_ai_summary_async(record_id, agent_id))
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+    return {"ok": True, "id": record_id, "status": "running"}
+
+
+async def _run_diversification_ai_summary_async(record_id: int, agent_id: int = 2):
+    """后台执行 AI 分散度分析解读。"""
+    # 1. 获取 agent 配置
+    agent = get_analysis_agent(agent_id)
     system_prompt = agent["system_prompt"]
 
     # 2. 获取持仓 + 分散度数据
     result = get_portfolio_diversification()
     holdings = list_holdings()
-    if not holdings:
-        raise HTTPException(400, "暂无持仓数据")
 
     total_value = result.get('total_value', 1) or 1
 
@@ -553,21 +577,20 @@ async def portfolio_diversification_ai_summary(agent_id: int = 2):
         analysis = response.choices[0].message.content or ""
         tokens = response.usage.total_tokens if response.usage else 0
     except Exception as e:
-        raise HTTPException(500, f"AI 分析失败: {e}")
+        logger.error(f"分散度 AI 分析失败 record_id={record_id}: {e}")
+        update_analysis_record(record_id, status="error", error_msg=str(e))
+        return
     finally:
         _untrack_agent(uid)
 
-    # 保存记录
-    record_id = create_portfolio_analysis_record(
-        analysis_type="diversification_ai",
-        summary=f"分散度解读 · {result.get('holding_count',0)}只基金",
-        input_data=json.dumps({"holdings": result}, ensure_ascii=False),
+    update_analysis_record(
+        record_id,
         result_data=analysis,
         token_usage=tokens,
-        agent_id=agent_id,
+        status="done",
+        error_msg="",
     )
-
-    return {"id": record_id, "result": analysis, "token_usage": tokens}
+    logger.info(f"分散度 AI 分析完成 record_id={record_id}")
 
 
 @router.get("/api/portfolio/analysis/ai-summary/today-status")
@@ -626,11 +649,32 @@ async def transactions_summary_api():
 
 @router.post("/api/portfolio/analysis/ai")
 async def portfolio_ai_analysis_api(req: PortfolioAiAnalysisRequest):
-    """AI 持仓分析：调用 MCP 工具获取专业数据 + LLM 生成分析报告。"""
-    # 1. 获取持仓数据
+    """AI 持仓分析：后台调用 MCP 工具 + LLM 生成分析报告。"""
     holdings = list_holdings()
     if not holdings:
         raise HTTPException(400, "暂无持仓数据")
+    user_question = req.question or "请全面分析我的持仓情况，包括资产配置合理性、风险分散度、各基金表现，以及改进建议。"
+    record_id = create_portfolio_analysis_record(
+        analysis_type="ai",
+        summary=f"AI持仓分析 · {len(holdings)}只基金",
+        input_data=json.dumps({
+            "holdings": [{k: h.get(k) for k in ("fund_code", "fund_name", "shares", "cost_price", "current_price", "profit_loss")} for h in holdings],
+            "question": user_question,
+        }, ensure_ascii=False),
+        result_data="",
+        token_usage=0,
+        status="running",
+    )
+    task = asyncio.create_task(_run_portfolio_ai_analysis_async(record_id, user_question))
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+    return {"ok": True, "id": record_id, "status": "running", "holdings_count": len(holdings)}
+
+
+async def _run_portfolio_ai_analysis_async(record_id: int, user_question: str):
+    """后台执行通用 AI 持仓分析。"""
+    # 1. 获取持仓数据
+    holdings = list_holdings()
 
     # 2. 调用 MCP 工具
     mcp_context = {}
@@ -684,8 +728,6 @@ async def portfolio_ai_analysis_api(req: PortfolioAiAnalysisRequest):
             f"当前净值 {h.get('current_price', 'N/A')}, "
             f"盈亏 {(h.get('profit_loss') or 0):.2f}元"
         )
-
-    user_question = req.question or "请全面分析我的持仓情况，包括资产配置合理性、风险分散度、各基金表现，以及改进建议。"
 
     # RAG 知识库检索（搜索与持仓相关的文章、分析）
     rag_context = ""
@@ -750,27 +792,17 @@ async def portfolio_ai_analysis_api(req: PortfolioAiAnalysisRequest):
         tokens = response.usage.total_tokens if response.usage else 0
     except Exception as e:
         logger.error(f"AI 分析失败: {e}")
-        raise HTTPException(500, f"AI 分析失败: {str(e)}")
+        update_analysis_record(record_id, status="error", error_msg=str(e))
+        return
 
-    # 5. 保存记录
-    record_id = create_portfolio_analysis_record(
-        analysis_type="ai",
-        summary=f"AI持仓分析 · {len(holdings)}只基金",
-        input_data=json.dumps({
-            "holdings": [{k: h.get(k) for k in ("fund_code", "fund_name", "shares", "cost_price", "current_price", "profit_loss")} for h in holdings],
-            "question": user_question,
-        }, ensure_ascii=False),
+    update_analysis_record(
+        record_id,
         result_data=result_text,
         token_usage=tokens,
+        status="done",
+        error_msg="",
     )
-
-    return {
-        "id": record_id,
-        "result": result_text,
-        "token_usage": tokens,
-        "holdings_count": len(holdings),
-        "mcp_used": list(mcp_context.keys()),
-    }
+    logger.info(f"AI 持仓分析完成 record_id={record_id}, mcp={list(mcp_context.keys())}")
 
 
 @router.get("/api/portfolio/analysis/ai-records")
@@ -1234,7 +1266,9 @@ async def panorama_analysis_api(req: PanoramaAnalysisRequest):
     )
 
     # 后台执行分析
-    asyncio.create_task(_run_panorama_async(record_id, agent["system_prompt"], holdings))
+    task = asyncio.create_task(_run_panorama_async(record_id, agent["system_prompt"], holdings))
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
 
     return {"ok": True, "id": record_id, "status": "running"}
 
@@ -1295,7 +1329,7 @@ async def _run_panorama_async(record_id: int, system_prompt: str, holdings: list
         # 调用 LLM
         _track_agent(uid, "全景诊断分析师", "持仓诊断")
         from llm_service import _call_llm, MODEL
-        response = _call_llm(
+        response = await asyncio.to_thread(lambda: _call_llm(
             caller="portfolio_panorama",
             model=MODEL,
             messages=[
@@ -1304,7 +1338,7 @@ async def _run_panorama_async(record_id: int, system_prompt: str, holdings: list
             ],
             temperature=0.3,
             max_tokens=8192,
-        )
+        ))
         result_text = response.choices[0].message.content or ""
         tokens = response.usage.total_tokens if response.usage else 0
 
@@ -1576,7 +1610,9 @@ async def fund_deep_dive_api(holding_id: int, req: DeepDiveRequest):
     )
 
     # 后台执行分析
-    asyncio.create_task(_run_deep_dive_async(record_id, agent["system_prompt"], user_content))
+    task = asyncio.create_task(_run_deep_dive_async(record_id, agent["system_prompt"], user_content))
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
 
     return {"ok": True, "id": record_id, "status": "running"}
 
@@ -1585,7 +1621,7 @@ async def _run_deep_dive_async(record_id: int, system_prompt: str, user_content:
     """后台执行单基金深度分析。"""
     try:
         from llm_service import _call_llm, MODEL
-        response = _call_llm(
+        response = await asyncio.to_thread(lambda: _call_llm(
             caller="portfolio_deep_dive",
             model=MODEL,
             messages=[
@@ -1594,7 +1630,7 @@ async def _run_deep_dive_async(record_id: int, system_prompt: str, user_content:
             ],
             temperature=0.3,
             max_tokens=8192,
-        )
+        ))
         result_text = response.choices[0].message.content or ""
         tokens = response.usage.total_tokens if response.usage else 0
         update_analysis_record(record_id, result_data=result_text, token_usage=tokens, status="done")
@@ -1705,7 +1741,9 @@ async def trade_review_api(req: TradeReviewRequest):
     )
 
     # 后台执行分析
-    asyncio.create_task(_run_trade_review_async(record_id, agent["system_prompt"], user_content))
+    task = asyncio.create_task(_run_trade_review_async(record_id, agent["system_prompt"], user_content))
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
 
     return {"ok": True, "id": record_id, "status": "running"}
 
@@ -1714,7 +1752,7 @@ async def _run_trade_review_async(record_id: int, system_prompt: str, user_conte
     """后台执行交易复盘分析。"""
     try:
         from llm_service import _call_llm, MODEL
-        response = _call_llm(
+        response = await asyncio.to_thread(lambda: _call_llm(
             caller="portfolio_trade_review",
             model=MODEL,
             messages=[
@@ -1723,7 +1761,7 @@ async def _run_trade_review_async(record_id: int, system_prompt: str, user_conte
             ],
             temperature=0.3,
             max_tokens=8192,
-        )
+        ))
         result_text = response.choices[0].message.content or ""
         tokens = response.usage.total_tokens if response.usage else 0
         update_analysis_record(record_id, result_data=result_text, token_usage=tokens, status="done")
@@ -1901,7 +1939,9 @@ async def fund_analysis_api(req: dict):
     )
 
     # 后台执行分析
-    asyncio.create_task(_run_fund_analysis_async(record_id, system_prompt, user_content))
+    task = asyncio.create_task(_run_fund_analysis_async(record_id, system_prompt, user_content))
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
 
     return {"ok": True, "id": record_id, "status": "running"}
 
@@ -1910,7 +1950,7 @@ async def _run_fund_analysis_async(record_id: int, system_prompt: str, user_cont
     """后台执行指定基金分析。"""
     try:
         from llm_service import _call_llm, MODEL
-        response = _call_llm(
+        response = await asyncio.to_thread(lambda: _call_llm(
             caller="portfolio_fund_analysis",
             model=MODEL,
             messages=[
@@ -1919,7 +1959,7 @@ async def _run_fund_analysis_async(record_id: int, system_prompt: str, user_cont
             ],
             temperature=0.3,
             max_tokens=8192,
-        )
+        ))
         result_text = response.choices[0].message.content or ""
         tokens = response.usage.total_tokens if response.usage else 0
         update_analysis_record(record_id, result_data=result_text, token_usage=tokens, status="done")

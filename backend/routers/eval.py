@@ -29,6 +29,27 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["eval"])
 
 
+async def _await_portfolio_record_result(record_id: int, timeout: int = 180) -> dict:
+    """等待异步持仓分析完成，供评测内部调用。"""
+    from db.portfolio import get_analysis_record_status
+
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        record = get_analysis_record_status(record_id)
+        if not record:
+            raise HTTPException(404, "分析记录不存在")
+        if record.get("status") == "done":
+            return {
+                "id": record_id,
+                "result": record.get("result_data", ""),
+                "token_usage": record.get("token_usage", 0),
+            }
+        if record.get("status") == "error":
+            raise RuntimeError(record.get("error_msg") or "分析失败")
+        await asyncio.sleep(1)
+    raise TimeoutError("等待异步分析完成超时")
+
+
 @router.get("/api/eval/cases")
 async def list_eval_cases_api(analysis_type: str = "", active_only: bool = True):
     """列出评测用例。"""
@@ -141,11 +162,15 @@ async def run_eval_case_api(case_id: int):
             result_data = json.dumps(result, ensure_ascii=False)[:5000]
         elif analysis_type == "diversification_ai":
             result = await portfolio_diversification_ai_summary()
+            if isinstance(result, dict) and result.get("status") == "running":
+                result = await _await_portfolio_record_result(result["id"])
             result_summary = json.dumps(result, ensure_ascii=False)[:500]
             result_data = json.dumps(result, ensure_ascii=False)[:5000]
         elif analysis_type == "ai":
             question = input_params.get("question", "")
             result = await portfolio_ai_analysis_api(PortfolioAiAnalysisRequest(question=question))
+            if isinstance(result, dict) and result.get("status") == "running":
+                result = await _await_portfolio_record_result(result["id"])
             result_summary = json.dumps(result, ensure_ascii=False)[:500]
             result_data = json.dumps(result, ensure_ascii=False)[:5000]
         else:

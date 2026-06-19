@@ -2,6 +2,7 @@
 import { ref } from 'vue'
 import DOMPurify from 'dompurify'
 import { formatBriefingTime, renderBriefing } from '../../composables/useDashboardHelpers'
+import AIActionButton from '../ui/AIActionButton.vue'
 
 const props = defineProps({
   dailyReport: { type: Object, default: null },
@@ -35,18 +36,15 @@ function submitFeedbackWithComment() {
         </svg>
         <span class="briefing-label">每日市场简报</span>
         <span class="briefing-time">{{ formatBriefingTime(dailyReport.created_at) }}</span>
-        <button
-          class="btn-ai-action btn-briefing-gen"
-          :class="{ 'btn-loading': regenerating }"
-          :disabled="regenerating"
+        <AIActionButton
+          label="重新生成"
+          agent="市场日报分析师"
+          icon="refresh"
+          variant="soft"
+          size="sm"
+          :loading="regenerating"
           @click.stop="emit('regenerate')"
-        >
-          <svg :class="['icon-spin', { 'spinning': regenerating }]" width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
-          </svg>
-          <span>重新生成</span>
-          <span class="ai-agent-tooltip">市场日报分析师</span>
-        </button>
+        />
       </div>
       <svg :class="['briefing-chevron', { 'briefing-chevron-up': showBriefing }]" width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24">
         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/>
@@ -180,10 +178,6 @@ function submitFeedbackWithComment() {
   padding: 0.15rem 0.5rem;
   border-radius: 999px;
   margin-right: 0.5rem;
-}
-.btn-briefing-gen {
-  padding: 0.3rem 0.65rem;
-  font-size: 0.75rem;
 }
 .briefing-chevron {
   color: var(--color-text-muted);

@@ -1,6 +1,6 @@
 <script setup>
 import { ref, computed, onMounted, onActivated } from 'vue'
-import { getDashboard, runAnalysis, runPanoramaAnalysis, getHotTopics, getDailyReport, regenerateDailyReport, submitDailyReportFeedback, listPanoramaRecords, getHotspotsAnalysis, getLatestHotspotsAnalysis, getRecommendations, getRecommendationStats, submitRecommendationFeedback, getBondRecommend, listBondRecommendRecords, autoVerifyRecommendations, fetchRecentValuations, getBondMarketTemperature, getHotspotsRelate, getRebalancingSuggestion } from '../api'
+import { getDashboard, runAnalysis, runPanoramaAnalysis, pollPanoramaStatus, getHotTopics, getDailyReport, regenerateDailyReport, submitDailyReportFeedback, listPanoramaRecords, getHotspotsAnalysis, getLatestHotspotsAnalysis, getRecommendations, getRecommendationStats, submitRecommendationFeedback, getBondRecommend, listBondRecommendRecords, autoVerifyRecommendations, fetchRecentValuations, getBondMarketTemperature, getHotspotsRelate, getRebalancingSuggestion } from '../api'
 import GaugeChart from './charts/GaugeChart.vue'
 import ConfirmDialog from './ConfirmDialog.vue'
 import AppToast from './AppToast.vue'
@@ -15,6 +15,7 @@ import UndervaluedIndexesCard from './dashboard/UndervaluedIndexesCard.vue'
 import PortfolioHealthCard from './dashboard/PortfolioHealthCard.vue'
 import HotspotsCard from './dashboard/HotspotsCard.vue'
 import CashManagementCard from './dashboard/CashManagementCard.vue'
+import Icon from './ui/Icon.vue'
 
 const { showToast } = useToast()
 
@@ -355,15 +356,23 @@ async function generatePanorama() {
   panoramaResult.value = null
   try {
     const { data: res } = await runPanoramaAnalysis()
-    panoramaResult.value = res
-    const { data: dashData } = await getDashboard()
-    if (data.value && dashData.portfolio_health) {
-      data.value.portfolio_health = dashData.portfolio_health
-      data.value.portfolio_updated_at = dashData.portfolio_updated_at
-    }
+    panoramaResult.value = { status: 'running', id: res.id }
+    pollPanoramaStatus(res.id, async (status) => {
+      if (status.status === 'done') {
+        panoramaResult.value = { result: status.result, id: res.id }
+        const { data: dashData } = await getDashboard()
+        if (data.value && dashData.portfolio_health) {
+          data.value.portfolio_health = dashData.portfolio_health
+          data.value.portfolio_updated_at = dashData.portfolio_updated_at
+        }
+        panoramaLoading.value = false
+      } else if (status.status === 'error') {
+        panoramaResult.value = { error: '分析失败: ' + (status.error || '未知错误') }
+        panoramaLoading.value = false
+      }
+    })
   } catch (e) {
     panoramaResult.value = { error: '分析失败: ' + (e.response?.data?.detail || e.message) }
-  } finally {
     panoramaLoading.value = false
   }
 }
@@ -433,14 +442,12 @@ function handlePanorama() {
 
     <!-- 数据新鲜度警告 -->
     <div v-if="data?.data_freshness?.stale_count > 0" class="stale-warning card">
-      <svg width="18" height="18" fill="none" stroke="currentColor" viewBox="0 0 24 24" style="flex-shrink:0; stroke: #f59e0b;">
-        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
-      </svg>
+      <Icon name="warning" size="18" class="stale-warning-icon" />
       <div class="stale-warning-body">
         <span class="stale-warning-title">{{ data.data_freshness.stale_count }} 条指数估值数据超过 10 天未更新</span>
         <span class="stale-warning-list">{{ data.data_freshness.stale_indexes.map(i => i.name + '(' + i.stale_days + '天)').join('、') }}</span>
       </div>
-      <button class="btn-ghost btn-sm" @click="emit('navigate', 'valuation')">查看 →</button>
+      <button class="btn-ghost btn-sm" @click="emit('navigate', 'valuation')">查看 <Icon name="arrow-right" size="12" /></button>
     </div>
 
     <!-- 每日简报 -->
@@ -587,6 +594,7 @@ function handlePanorama() {
   margin-bottom: 0.5rem;
   transition: all var(--transition-fast);
 }
+.stale-warning-icon { color: var(--color-warning); flex-shrink: 0; }
 .stale-warning:hover {
   box-shadow: var(--shadow-sm);
 }
@@ -614,6 +622,33 @@ function handlePanorama() {
   gap: 1.25rem;
 }
 
+.dash-grid > * {
+  transition: all var(--transition-normal);
+}
+.dash-grid > *:hover {
+  transform: var(--hover-lift);
+}
+
+/* ── 日期胶囊 ── */
+.dash-header .page-desc {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+.dash-header .page-desc::after {
+  content: '';
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--color-success);
+  animation: pulse-dot 2s ease-in-out infinite;
+}
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.5; transform: scale(0.8); }
+}
+
 @media (max-width: 768px) {
   .dash-grid {
     grid-template-columns: 1fr;
@@ -630,12 +665,25 @@ function handlePanorama() {
 
 .temp-gauge-card {
   text-align: center;
-  padding: 1.25rem 1rem;
+  padding: 1.5rem 1rem;
   transition: all var(--transition-normal);
+  position: relative;
+  overflow: hidden;
+}
+.temp-gauge-card::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, var(--color-primary-border-weak), transparent);
+  pointer-events: none;
 }
 .temp-gauge-card:hover {
-  box-shadow: var(--shadow-md);
+  box-shadow: var(--shadow-elevated);
   border-color: var(--color-primary-border-weak);
+  transform: var(--hover-lift);
 }
 
 .temp-gauge-label {

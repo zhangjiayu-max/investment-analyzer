@@ -2,7 +2,7 @@
   <div class="intel-page">
     <div class="page-header">
       <div>
-        <h2 class="page-title">🔥 市场热点情报</h2>
+        <h2 class="page-title"><Icon name="fire" size="18" class="title-icon" /> 市场热点情报</h2>
         <p class="page-desc">基于新闻、时事、宏观环境，AI 推断热门板块与投资机会</p>
       </div>
       <div class="header-actions">
@@ -27,7 +27,7 @@
       <!-- 综合研判 -->
       <div v-if="data.summary" class="card summary-card">
         <div class="card-header">
-          <h3>🧠 综合研判</h3>
+          <h3><Icon name="brain" size="15" class="title-icon" /> 综合研判</h3>
         </div>
         <p class="summary-text">{{ data.summary }}</p>
       </div>
@@ -37,7 +37,7 @@
         <!-- 左侧：热门板块排行 -->
         <div class="card sectors-panel">
           <div class="card-header">
-            <h3>🔥 热门板块</h3>
+            <h3><Icon name="fire" size="15" class="title-icon" /> 热门板块</h3>
             <span class="badge">{{ data.sectors?.length || 0 }}</span>
           </div>
           <div v-if="data.sectors?.length" class="sector-list">
@@ -52,11 +52,11 @@
               <span class="sector-name">{{ s.name }}</span>
               <span class="sector-id">#{{ i }}</span>
               <span class="sector-heat-tag" :class="'heat-' + (s.heat || 'low')">
-                {{ heatLabel(s.heat) }}
+                <span :class="heatClass(s.heat)"></span>{{ heatLabel(s.heat) }}
               </span>
               <span class="sector-outlook" :class="'outlook-' + (s.outlook || '').replace(/[利好利空中性]/g, m => outlookMap[m])">
-                <span v-if="outlookMap[s.outlook] === 'good'" class="trend-arrow-up">▲</span>
-                <span v-else-if="outlookMap[s.outlook] === 'bad'" class="trend-arrow-down">▼</span>
+                <span v-if="outlookMap[s.outlook] === 'good'" class="trend-arrow-up"><Icon name="arrow-up" size="12" /></span>
+                <span v-else-if="outlookMap[s.outlook] === 'bad'" class="trend-arrow-down"><Icon name="arrow-down" size="12" /></span>
                 {{ s.outlook || '-' }}
               </span>
             </div>
@@ -69,7 +69,7 @@
         <!-- 右侧：选中板块详情 -->
         <div v-if="activeSector" class="card detail-panel">
           <div class="card-header">
-            <h3>{{ activeSector.name }} <span class="detail-heat" :class="'heat-' + (activeSector.heat || 'low')">{{ heatLabel(activeSector.heat) }}</span></h3>
+            <h3>{{ activeSector.name }} <span class="detail-heat" :class="'heat-' + (activeSector.heat || 'low')"><span :class="heatClass(activeSector.heat)"></span>{{ heatLabel(activeSector.heat) }}</span></h3>
             <span class="detail-outlook" :class="'outlook-' + (activeSector.outlook || '').replace(/[利好利空中性]/g, m => outlookMap[m])">
               {{ activeSector.outlook || '' }}
             </span>
@@ -77,7 +77,7 @@
 
           <!-- 催化剂 -->
           <div v-if="activeSector.catalysts?.length" class="detail-section">
-            <h4>📰 催化剂</h4>
+            <h4><Icon name="newspaper" size="13" class="title-icon" /> 催化剂</h4>
             <ul class="catalyst-list">
               <li v-for="(c, ci) in activeSector.catalysts" :key="ci">{{ c }}</li>
             </ul>
@@ -85,13 +85,13 @@
 
           <!-- 推断逻辑 -->
           <div v-if="activeSector.reason" class="detail-section">
-            <h4>💡 投资逻辑</h4>
+            <h4><Icon name="lightbulb" size="13" class="title-icon" /> 投资逻辑</h4>
             <p class="reason-text">{{ activeSector.reason }}</p>
           </div>
 
           <!-- 关联指数 -->
           <div class="detail-section">
-            <h4>📊 关联指数</h4>
+            <h4><Icon name="chart" size="13" class="title-icon" /> 关联指数</h4>
             <div v-if="activeSector.related_indexes?.length" class="index-grid">
               <div v-for="idx in activeSector.related_indexes" :key="idx.index_code" class="index-card">
                 <div class="index-name">{{ idx.index_name }}</div>
@@ -109,7 +109,7 @@
 
           <!-- 关联基金 -->
           <div class="detail-section">
-            <h4>💰 关联持仓</h4>
+            <h4><Icon name="wallet" size="13" class="title-icon" /> 关联持仓</h4>
             <div v-if="activeSector.related_funds?.length" class="fund-list">
               <div v-for="f in activeSector.related_funds" :key="f.fund_code" class="fund-item">
                 <span class="fund-name">{{ f.fund_name }}</span>
@@ -125,7 +125,7 @@
 
           <!-- 关联新闻 -->
           <div v-if="activeSector.catalysts?.length" class="detail-section">
-            <h4>📰 相关新闻</h4>
+            <h4><Icon name="newspaper" size="13" class="title-icon" /> 相关新闻</h4>
             <div class="catalyst-news">
               <div v-for="(c, ci) in activeSector.catalysts" :key="ci" class="catalyst-item">
                 <span class="catalyst-bullet">•</span>
@@ -136,7 +136,7 @@
 
           <!-- 匹配关键词 -->
           <div v-if="activeSector.keywords?.length" class="detail-section">
-            <h4>🏷️ 匹配关键词</h4>
+            <h4><Icon name="tag" size="13" class="title-icon" /> 匹配关键词</h4>
             <div class="keyword-tags">
               <span v-for="kw in activeSector.keywords" :key="kw" class="kw-tag">{{ kw }}</span>
             </div>
@@ -151,7 +151,7 @@
       <!-- 央视新闻 -->
       <div v-if="data.cctv_news?.length" class="card cctv-card">
         <div class="card-header">
-          <h3>📺 央视新闻联播</h3>
+          <h3><Icon name="tv" size="15" class="title-icon" /> 央视新闻联播</h3>
           <span class="badge badge-cctv">{{ data.cctv_news.length }}条</span>
         </div>
         <div v-if="data.cctv_signal" class="cctv-signal">
@@ -172,7 +172,7 @@
       <!-- 今日要闻 -->
       <div v-if="data.news?.length" class="card">
         <div class="card-header">
-          <h3>📰 今日要闻</h3>
+          <h3><Icon name="newspaper" size="15" class="title-icon" /> 今日要闻</h3>
           <span class="badge">{{ data.news.length }}</span>
         </div>
         <div class="news-list">
@@ -191,7 +191,7 @@
       <!-- 宏观环境 -->
       <div v-if="data.macro" class="card">
         <div class="card-header">
-          <h3>📊 宏观环境</h3>
+          <h3><Icon name="chart" size="15" class="title-icon" /> 宏观环境</h3>
         </div>
         <div class="macro-grid">
           <div v-if="data.macro.bond?.temperature != null" class="macro-item">
@@ -216,7 +216,7 @@
       <!-- 热门话题 -->
       <div v-if="data.hot_topics?.length" class="card">
         <div class="card-header">
-          <h3>💬 热门话题</h3>
+          <h3><Icon name="message-circle" size="15" class="title-icon" /> 热门话题</h3>
           <span class="badge">{{ data.hot_topics.length }}</span>
         </div>
         <div class="topics-list">
@@ -237,6 +237,7 @@
 <script setup>
 import { ref, computed, onMounted } from 'vue'
 import { getMarketIntelligenceOverview } from '../api'
+import Icon from './ui/Icon.vue'
 
 const loading = ref(false)
 const data = ref(null)
@@ -267,16 +268,21 @@ async function loadData(force = false) {
 }
 
 function heatLabel(heat) {
-  if (heat === 'high') return '🔴 高热'
-  if (heat === 'medium') return '🟡 温热'
-  return '🟢 平淡'
+  if (heat === 'high') return '高热'
+  if (heat === 'medium') return '温热'
+  return '平淡'
+}
+function heatClass(heat) {
+  if (heat === 'high') return 'heat-dot heat-dot-high'
+  if (heat === 'medium') return 'heat-dot heat-dot-medium'
+  return 'heat-dot heat-dot-low'
 }
 
 function pctColor(pct) {
   if (pct == null) return 'var(--color-text-muted)'
-  if (pct < 30) return '#16a34a'
+  if (pct < 30) return 'var(--color-loss)'
   if (pct < 70) return 'var(--color-text-secondary)'
-  return '#dc2626'
+  return 'var(--color-profit)'
 }
 </script>
 
@@ -298,7 +304,12 @@ function pctColor(pct) {
   font-size: 1.5rem;
   font-weight: 700;
   color: var(--color-text-primary);
+  display: inline-flex;
+  align-items: center;
 }
+
+.title-icon { margin-right: 0.4rem; vertical-align: middle; }
+h3 .title-icon, h4 .title-icon { margin-right: 0.3rem; vertical-align: middle; }
 
 .page-desc {
   font-size: 0.88rem;
@@ -416,9 +427,9 @@ function pctColor(pct) {
   color: white;
 }
 
-.sector-rank.heat-high { background: #ef4444; }
-.sector-rank.heat-medium { background: #f59e0b; }
-.sector-rank.heat-low { background: #6b7280; }
+.sector-rank.heat-high { background: var(--color-danger); }
+.sector-rank.heat-medium { background: var(--color-warning); }
+.sector-rank.heat-low { background: var(--color-text-muted); }
 
 .sector-name {
   flex: 1;
@@ -439,9 +450,9 @@ function pctColor(pct) {
   border-radius: 4px;
 }
 
-.sector-heat-tag.heat-high { background: #fef2f2; color: #dc2626; }
-.sector-heat-tag.heat-medium { background: #fffbeb; color: #d97706; }
-.sector-heat-tag.heat-low { background: #f3f4f6; color: #6b7280; }
+.sector-heat-tag.heat-high { background: var(--color-danger-bg); color: var(--color-danger); }
+.sector-heat-tag.heat-medium { background: var(--color-warning-bg); color: var(--color-warning); }
+.sector-heat-tag.heat-low { background: var(--color-bg-hover); color: var(--color-text-muted); }
 
 .sector-outlook {
   font-size: 0.7rem;
@@ -450,9 +461,9 @@ function pctColor(pct) {
   border-radius: 4px;
 }
 
-.outlook-good { background: #ecfdf5; color: #059669; }
-.outlook-bad { background: #fef2f2; color: #dc2626; }
-.outlook-neutral { background: #f3f4f6; color: #6b7280; }
+.outlook-good { background: var(--color-success-bg); color: var(--color-success); }
+.outlook-bad { background: var(--color-danger-bg); color: var(--color-danger); }
+.outlook-neutral { background: var(--color-bg-hover); color: var(--color-text-muted); }
 
 /* ── 详情面板 ── */
 
@@ -759,18 +770,18 @@ function pctColor(pct) {
   color: var(--color-text-muted);
 }
 
-.text-success { color: #16a34a; }
-.text-danger { color: #dc2626; }
+.text-success { color: var(--color-success); }
+.text-danger { color: var(--color-danger); }
 .text-muted { color: var(--color-text-muted); font-size: 0.8rem; }
 
 /* ── 央视新闻 ── */
 
 .cctv-card {
-  border-left: 3px solid #c62828;
+  border-left: 3px solid var(--color-danger);
 }
 
 .badge-cctv {
-  background: #c62828;
+  background: var(--color-danger);
   color: white;
   border: none;
 }
@@ -792,23 +803,23 @@ function pctColor(pct) {
   font-size: 0.85rem;
 }
 
-.signal-value.good { color: #2e7d32; }
-.signal-value.bad { color: #c62828; }
-.signal-value.neutral { color: #757575; }
+.signal-value.good { color: var(--color-success); }
+.signal-value.bad { color: var(--color-danger); }
+.signal-value.neutral { color: var(--color-text-muted); }
 
 .cctv-category {
   display: inline-block;
   padding: 2px 8px;
   border-radius: 4px;
-  background: #e3f2fd;
-  color: #1565c0;
+  background: var(--color-info-bg);
+  color: var(--color-info);
   font-size: 12px;
   margin-right: 8px;
   margin-bottom: 4px;
 }
 
 .cctv-item {
-  border-left: 2px solid #c62828;
+  border-left: 2px solid var(--color-danger);
   padding-left: 12px;
 }
 

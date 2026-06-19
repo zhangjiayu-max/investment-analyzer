@@ -725,7 +725,32 @@ export function deleteLinkedArticle(id) {
 
 /** 触发 AI 分析 */
 export function runAnalysis(indexCode, indexName, agentId = 9) {
-  return api.post('/analysis/run', { index_code: indexCode, index_name: indexName, agent_id: agentId }, { timeout: 300000 })
+  return api.post('/analysis/run', { index_code: indexCode, index_name: indexName, agent_id: agentId }, { timeout: 30000 })
+}
+
+/** 查询指数 AI 分析执行状态 */
+export function getIndexAnalysisStatus(historyId) {
+  return api.get(`/analysis/history/${historyId}/status`)
+}
+
+/** 轮询指数 AI 分析直到完成 */
+export function pollIndexAnalysisStatus(historyId, onProgress, interval = 3000) {
+  let cancelled = false
+  const poll = async () => {
+    while (!cancelled) {
+      try {
+        const { data } = await getIndexAnalysisStatus(historyId)
+        onProgress(data)
+        if (data.status === 'done' || data.status === 'error') return data
+      } catch (e) {
+        onProgress({ status: 'error', error: e.message })
+        return null
+      }
+      await new Promise(r => setTimeout(r, interval))
+    }
+  }
+  poll()
+  return () => { cancelled = true }
 }
 
 /** 分析历史列表 */
@@ -1534,6 +1559,28 @@ export function markWatchlistBought(id) {
 /** 查询基金信息并自动填充 */
 export function lookupWatchlistFund(id) {
   return api.post(`/watchlist/${id}/lookup`, {}, { timeout: 30000 })
+}
+
+// ── 用户画像 / KYC API（新路径: /api/profile/*）─────────────────────────────────────
+
+/** 获取 KYC 问卷题库 + 当前画像 */
+export function getKycQuestionnaire() {
+  return api.get('/profile/kyc')
+}
+
+/** 提交 KYC 问卷答案 */
+export function submitKyc(answers, source = 'questionnaire') {
+  return api.post('/profile/kyc/submit', { answers, source })
+}
+
+/** 获取完整用户画像 */
+export function getProfile() {
+  return api.get('/profile')
+}
+
+/** 更新画像字段 */
+export function updateProfile(data) {
+  return api.put('/profile', data)
 }
 
 export default api

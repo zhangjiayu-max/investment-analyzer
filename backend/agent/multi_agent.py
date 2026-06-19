@@ -117,6 +117,30 @@ def _process_text_tool_calls(content_str, llm_messages, tool_calls_log, agent_na
 # SPECIALIST_AGENTS 从数据库加载（db.agents.load_specialist_agents），不再硬编码。
 # 通过 Agent 管理页面修改 prompt 后，编排器自动使用新版本。
 
+def _inject_kyc_profile(system_content: str, agent: dict) -> str:
+    """注入 KYC 理财画像到专家 system prompt。
+
+    按专家配置的 kyc_dimensions 裁剪（从 knowledge_scope JSON 解析）；
+    未配置则注入全部维度。画像为空时原样返回。
+    """
+    try:
+        from agent.kyc import kyc_profile_to_text
+        dims = None
+        ks = agent.get("knowledge_scope")
+        if ks:
+            try:
+                ks_dict = json.loads(ks) if isinstance(ks, str) else ks
+                dims = ks_dict.get("kyc_dimensions")
+            except (json.JSONDecodeError, TypeError):
+                pass
+        kyc_text = kyc_profile_to_text("default", dimensions=dims)
+        if kyc_text:
+            return system_content + f"\n\n{kyc_text}"
+    except Exception as e:
+        logger.debug(f"KYC 画像注入跳过: {e}")
+    return system_content
+
+
 def run_specialist(agent_key: str, query: str, context: str = "",
                    prebuilt_context: str = "") -> dict:
     """
@@ -153,6 +177,9 @@ def run_specialist(agent_key: str, query: str, context: str = "",
             system_content += f"\n\n## 用户当前持仓\n{portfolio_ctx}"
         except Exception:
             pass
+
+    # 注入 KYC 理财画像（按专家职责裁剪维度）
+    system_content = _inject_kyc_profile(system_content, agent)
 
     # 追加主动检索指令（仅当专家有 search_knowledge 工具时）
     if "search_knowledge" in agent.get("tools", []):
@@ -332,6 +359,9 @@ def run_specialist_with_context(agent_key: str, query: str, peer_analyses: dict,
                 system_content += f"\n\n## 用户当前持仓（分析时务必结合）\n{portfolio_ctx}"
         except Exception:
             pass
+
+    # 注入 KYC 理财画像（按专家职责裁剪维度）
+    system_content = _inject_kyc_profile(system_content, agent)
 
     # 追加圆桌审阅指令
     peer_sections = []

@@ -34,7 +34,9 @@ import LineChart from './charts/LineChart.vue'
 import Skeleton from './ui/Skeleton.vue'
 import EmptyState from './ui/EmptyState.vue'
 import AnalysisCard from './ui/AnalysisCard.vue'
+import AIActionButton from './ui/AIActionButton.vue'
 import { renderMarkdown } from '../composables/useMarkdown'
+import { isDark } from '../composables/useTheme'
 
 // ── 持仓占比计算 ──
 const holdingWeights = computed(() => {
@@ -86,7 +88,10 @@ const todayProfitLabel = computed(() => {
 })
 
 // ── 饼图颜色 ──
-const pieColors = ['#c9a84c', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#06b6d4', '#f97316', '#ec4899', '#14b8a6', '#84cc16']
+const pieColors = computed(() => isDark.value
+  ? ['#d4a853', '#34d399', '#fbbf24', '#f87171', '#a78bfa', '#22d3ee', '#fb923c', '#f472b6', '#2dd4bf', '#a3e635']
+  : ['#c9a84c', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#06b6d4', '#f97316', '#ec4899', '#14b8a6', '#84cc16']
+)
 
 function calcPieSlices(data, total) {
   const slices = []
@@ -202,7 +207,7 @@ const navChartData = computed(() => {
     series: [{
       name: '组合净值',
       data: history.map(d => d.nav),
-      color: '#c9a84c',
+      color: isDark.value ? '#d4a853' : '#c9a84c',
     }],
   }
 })
@@ -923,9 +928,9 @@ async function loadPenetration() {
 }
 
 function overlapColor(val) {
-  if (val >= 0.5) return '#ef4444'
-  if (val >= 0.2) return '#f59e0b'
-  return '#10b981'
+  if (val >= 0.5) return isDark.value ? '#f87171' : '#ef4444'
+  if (val >= 0.2) return isDark.value ? '#fbbf24' : '#f59e0b'
+  return isDark.value ? '#34d399' : '#10b981'
 }
 
 function handlePenetration() {
@@ -1577,14 +1582,21 @@ async function loadFundChart(fundCode) {
 async function runDiverAiSummary() {
   if (!holdings.value.length) return
   diverAiLoading.value = true
-  diverAiResult.value = ''
+  diverAiResult.value = '分析已提交，正在后台生成结果...'
   try {
     const { data } = await runDiversificationAiSummary()
-    diverAiResult.value = data.result
     diverAiRecordId.value = data.id
+    pollAnalysisStatus(data.id, (status) => {
+      if (status.status === 'done') {
+        diverAiResult.value = status.result || ''
+        diverAiLoading.value = false
+      } else if (status.status === 'error') {
+        diverAiResult.value = 'AI 解读生成失败：' + (status.error || '未知错误')
+        diverAiLoading.value = false
+      }
+    })
   } catch (e) {
     diverAiResult.value = 'AI 解读生成失败：' + (e.response?.data?.detail || e.message)
-  } finally {
     diverAiLoading.value = false
   }
 }
@@ -1653,15 +1665,21 @@ async function submitAiAnalysis() {
   aiMcpSources.value = []
   try {
     const { data } = await runPortfolioAiAnalysis(aiAnalysisInput.value.trim())
-    aiAnalysisResult.value = data.result
     aiRecordId.value = data.id
-    aiTokenUsage.value = data.token_usage || 0
-    aiMcpSources.value = data.mcp_used || []
-    // 刷新记录列表
-    loadAiAnalysisRecords()
+    aiAnalysisResult.value = '分析已提交，正在后台生成结果...'
+    pollAnalysisStatus(data.id, (status) => {
+      if (status.status === 'done') {
+        aiAnalysisResult.value = status.result || ''
+        aiTokenUsage.value = status.token_usage || 0
+        aiAnalysisLoading.value = false
+        loadAiAnalysisRecords()
+      } else if (status.status === 'error') {
+        aiAnalysisResult.value = '分析失败：' + (status.error || '未知错误')
+        aiAnalysisLoading.value = false
+      }
+    })
   } catch (e) {
     aiAnalysisResult.value = '分析失败：' + (e.response?.data?.detail || e.message)
-  } finally {
     aiAnalysisLoading.value = false
   }
 }
@@ -2581,7 +2599,7 @@ function txDisplayAmount(tx) {
             <div class="pie-chart-row">
               <svg width="120" height="120" viewBox="0 0 120 120">
                 <template v-for="s in calcPieSlices(diversificationData.type_distribution, diversificationData.total_value)" :key="s.label">
-                  <path :d="s.path" :fill="s.color" stroke="#fff" stroke-width="1.5"/>
+                  <path :d="s.path" :fill="s.color" stroke="var(--color-bg-card)" stroke-width="1.5"/>
                 </template>
               </svg>
               <div class="pie-legend">
@@ -2611,7 +2629,7 @@ function txDisplayAmount(tx) {
               <div class="pie-chart-row">
                 <svg width="120" height="120" viewBox="0 0 120 120">
                   <template v-for="s in calcPieSlices(diversificationData.index_distribution, diversificationData.total_value)" :key="s.label">
-                    <path :d="s.path" :fill="s.color" stroke="#fff" stroke-width="1.5" style="cursor:pointer" @click="expandedIndexDist = (expandedIndexDist === s.label ? null : s.label)"/>
+                    <path :d="s.path" :fill="s.color" stroke="var(--color-bg-card)" stroke-width="1.5" style="cursor:pointer" @click="expandedIndexDist = (expandedIndexDist === s.label ? null : s.label)"/>
                   </template>
                 </svg>
                 <div class="pie-legend">
@@ -2679,16 +2697,15 @@ function txDisplayAmount(tx) {
               <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"/></svg>
               <strong>AI 解读</strong>
               <span v-if="diverAiLoading" class="badge badge-neutral badge-sm">分析中...</span>
-              <button v-else-if="!diverAiResult" class="btn-ai-action" @click="confirmDiverAi">
-                <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"/></svg>
-                <span>生成解读</span>
-                <span class="ai-agent-tooltip">分散度分析师</span>
-              </button>
-              <button v-else class="btn-ai-action" @click="confirmDiverAi">
-                <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
-                <span>重新生成</span>
-                <span class="ai-agent-tooltip">分散度分析师</span>
-              </button>
+              <AIActionButton
+                :label="diverAiResult ? '重新生成' : '生成解读'"
+                agent="分散度分析师"
+                :icon="diverAiResult ? 'refresh' : 'brain'"
+                variant="soft"
+                size="sm"
+                :loading="diverAiLoading"
+                @click="confirmDiverAi"
+              />
             </div>
             <div v-if="diverAiLoading" class="diver-ai-loading">
               <div class="spinner"></div><span>正在分析...</span>
@@ -2758,7 +2775,7 @@ function txDisplayAmount(tx) {
                   <div v-for="stock in penetrationData.top_stocks" :key="stock.stock_code" class="dist-bar-row" style="margin-bottom:0.5rem">
                     <span class="dist-label" style="min-width:5rem">{{ stock.stock_name }}</span>
                     <div class="dist-bar-track" style="flex:1">
-                      <div class="dist-bar-fill" :style="{ width: Math.min(stock.total_weight_pct * 5, 100) + '%', background: stock.total_weight_pct > 5 ? '#ef4444' : stock.total_weight_pct > 2 ? '#f59e0b' : '#10b981' }"></div>
+                      <div class="dist-bar-fill" :style="{ width: Math.min(stock.total_weight_pct * 5, 100) + '%', background: stock.total_weight_pct > 5 ? 'var(--color-loss)' : stock.total_weight_pct > 2 ? 'var(--color-warning)' : 'var(--color-profit)' }"></div>
                     </div>
                     <span class="dist-value" style="min-width:3.5rem;text-align:right;font-weight:700">{{ stock.total_weight_pct }}%</span>
                     <div style="width:100%;margin-top:0.15rem;display:flex;flex-wrap:wrap;gap:0.25rem">
@@ -2782,21 +2799,21 @@ function txDisplayAmount(tx) {
                       <div class="overlap-cell overlap-label">{{ penetrationData.overlap_matrix.fund_names[i] }}</div>
                       <div v-for="(val, j) in row" :key="'c'+j"
                         class="overlap-cell"
-                        :style="{ background: overlapColor(val), color: val >= 0.5 ? '#fff' : '#1e293b' }"
+                        :style="{ background: overlapColor(val), color: val >= 0.5 ? 'white' : 'var(--color-text-primary)' }"
                         :title="penetrationData.overlap_matrix.fund_names[i] + ' × ' + penetrationData.overlap_matrix.fund_names[j]">
                         {{ (val * 100).toFixed(0) }}%
                       </div>
                     </div>
                   </div>
                   <div style="display:flex;gap:0.75rem;margin-top:0.4rem;font-size:0.7rem;color:var(--color-text-muted)">
-                    <span><span style="display:inline-block;width:10px;height:10px;background:#10b981;border-radius:2px;vertical-align:middle"></span> 0-20%</span>
-                    <span><span style="display:inline-block;width:10px;height:10px;background:#f59e0b;border-radius:2px;vertical-align:middle"></span> 20-50%</span>
-                    <span><span style="display:inline-block;width:10px;height:10px;background:#ef4444;border-radius:2px;vertical-align:middle"></span> 50%+</span>
+                    <span><span style="display:inline-block;width:10px;height:10px;background:var(--color-profit);border-radius:2px;vertical-align:middle"></span> 0-20%</span>
+                    <span><span style="display:inline-block;width:10px;height:10px;background:var(--color-warning);border-radius:2px;vertical-align:middle"></span> 20-50%</span>
+                    <span><span style="display:inline-block;width:10px;height:10px;background:var(--color-loss);border-radius:2px;vertical-align:middle"></span> 50%+</span>
                   </div>
                 </div>
                 <p style="font-size:0.72rem;color:var(--color-text-muted);margin-top:0.5rem">数据来源: akshare 基金季报 · 持仓 {{ penetrationData.fund_count }} 只基金 · 总市值 ¥{{ (penetrationData.total_portfolio_value / 10000).toFixed(1) }}万</p>
               </div>
-              <div v-else-if="penetrationData?.error" style="color:#dc2626;font-size:0.85rem">加载失败: {{ penetrationData.error }}</div>
+              <div v-else-if="penetrationData?.error" style="color:var(--color-loss);font-size:0.85rem">加载失败: {{ penetrationData.error }}</div>
               <div v-else style="color:var(--color-text-muted);font-size:0.85rem">点击上方按钮加载持仓穿透数据</div>
             </div>
           </div>
@@ -2850,18 +2867,15 @@ function txDisplayAmount(tx) {
 
           <!-- AI 交易复盘 -->
           <div class="tx-ai-review">
-            <button
-              class="btn-ai-action"
-              :class="{ 'btn-loading': modeLoading }"
-              :disabled="modeLoading"
+            <AIActionButton
+              label="AI 交易复盘"
+              agent="交易复盘分析师"
+              icon="clipboard-list"
+              variant="soft"
+              size="sm"
+              :loading="modeLoading && aiMode === 'trade-review'"
               @click="confirmTradeReview()"
-            >
-              <svg :class="['icon-spin', { 'spinning': modeLoading }]" width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
-              </svg>
-              <span>{{ modeLoading ? '复盘中...' : 'AI 交易复盘' }}</span>
-              <span class="ai-agent-tooltip">交易复盘分析师</span>
-            </button>
+            />
           </div>
           <div v-if="modeResult && aiMode === 'trade-review'" class="trade-review-result-inline">
             <div class="result-header">
@@ -2976,13 +2990,15 @@ function txDisplayAmount(tx) {
           <!-- Mode: Panorama -->
           <div v-if="aiMode === 'panorama'" class="ai-mode-content">
             <div class="ai-mode-desc">从全局视角诊断你的投资组合健康状况，包括集中度风险、估值水位、分散化程度和市场适配度，并给出加减仓建议。</div>
-            <button class="btn-ai-action" :class="{ 'btn-loading': modeLoading }" :disabled="modeLoading" @click="confirmPanorama" style="margin:0.5rem 0">
-              <svg :class="['icon-spin', { 'spinning': modeLoading }]" width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"/>
-              </svg>
-              <span>{{ modeLoading ? '诊断中...' : '开始全景诊断' }}</span>
-              <span class="ai-agent-tooltip">全景诊断分析师</span>
-            </button>
+            <AIActionButton
+              class="ai-mode-action"
+              label="开始全景诊断"
+              agent="全景诊断分析师"
+              icon="brain"
+              variant="primary"
+              :loading="modeLoading"
+              @click="confirmPanorama"
+            />
             <div v-if="modeResult && aiMode === 'panorama'" class="ai-mode-result">
               <AnalysisCard
                 :result="modeResult"
@@ -3016,13 +3032,15 @@ function txDisplayAmount(tx) {
                 <option value="">请选择基金</option>
                 <option v-for="h in holdings" :key="h.id" :value="h.id">{{ h.fund_name }} ({{ h.fund_code }})</option>
               </select>
-              <button class="btn-ai-action" :class="{ 'btn-loading': modeLoading }" :disabled="modeLoading || !deepDiveSelectedHolding" @click="confirmDeepDive">
-                <svg :class="['icon-spin', { 'spinning': modeLoading }]" width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/>
-                </svg>
-                <span>{{ modeLoading ? '分析中...' : '深度分析' }}</span>
-                <span class="ai-agent-tooltip">基金深度分析师</span>
-              </button>
+              <AIActionButton
+                label="深度分析"
+                agent="基金深度分析师"
+                icon="scan-search"
+                variant="primary"
+                :loading="modeLoading"
+                :disabled="!deepDiveSelectedHolding"
+                @click="confirmDeepDive"
+              />
             </div>
             <div v-if="modeResult && aiMode === 'deepdive'" class="ai-mode-result">
               <AnalysisCard
@@ -3058,13 +3076,14 @@ function txDisplayAmount(tx) {
               <input v-model="reviewStartDate" type="date" class="input-field" />
               <label class="ai-form-label">结束日期</label>
               <input v-model="reviewEndDate" type="date" class="input-field" />
-              <button class="btn-ai-action" :class="{ 'btn-loading': modeLoading }" :disabled="modeLoading" @click="confirmTradeReview">
-                <svg :class="['icon-spin', { 'spinning': modeLoading }]" width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3m-6-4h.01M9 16h.01"/>
-                </svg>
-                <span>{{ modeLoading ? '复盘中...' : '开始复盘' }}</span>
-                <span class="ai-agent-tooltip">交易复盘分析师</span>
-              </button>
+              <AIActionButton
+                label="开始复盘"
+                agent="交易复盘分析师"
+                icon="clipboard-list"
+                variant="primary"
+                :loading="modeLoading"
+                @click="confirmTradeReview"
+              />
             </div>
             <div v-if="modeResult && aiMode === 'trade-review'" class="ai-mode-result">
               <AnalysisCard
@@ -3097,13 +3116,14 @@ function txDisplayAmount(tx) {
             <div class="ai-mode-desc">输入任意基金代码，AI 将结合您的持仓和当前估值数据，分析是否适合建仓、加仓或减仓。</div>
             <div class="ai-mode-form">
               <input v-model="fundAnalysisCode" type="text" class="input-field" style="flex:1" placeholder="输入基金代码，如 161725" />
-              <button class="btn-ai-action" :class="{ 'btn-loading': modeLoading }" :disabled="modeLoading" @click="confirmFundAnalysis">
-                <svg :class="['icon-spin', { 'spinning': modeLoading }]" width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14.828 14.828a4 4 0 01-5.656 0M9 10h.01M15 10h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
-                </svg>
-                <span>{{ modeLoading ? '分析中...' : '开始分析' }}</span>
-                <span class="ai-agent-tooltip">AI 基金分析师</span>
-              </button>
+              <AIActionButton
+                label="开始分析"
+                agent="AI 基金分析师"
+                icon="bot"
+                variant="primary"
+                :loading="modeLoading"
+                @click="confirmFundAnalysis"
+              />
             </div>
             <div v-if="modeResult && aiMode === 'fund-analysis'" class="ai-mode-result">
               <AnalysisCard
@@ -3132,9 +3152,12 @@ function txDisplayAmount(tx) {
           </div>
 
           <!-- Result loading -->
-          <div v-if="modeLoading" class="loading-state" style="margin-top:1rem">
+          <div v-if="modeLoading" class="ai-background-state">
             <div class="spinner"></div>
-            <span>正在分析...</span>
+            <div>
+              <strong>后台分析中</strong>
+              <span>任务已提交，可以继续浏览其他页面，完成后会自动展示结果。</span>
+            </div>
           </div>
         </div>
       </template>
@@ -3511,8 +3534,8 @@ function txDisplayAmount(tx) {
               <span class="th-filter" @click.stop="todayFilter = todayFilter === 'all' ? 'down' : todayFilter === 'down' ? 'up' : 'all'" :title="todayFilter === 'all' ? '全部' : todayFilter === 'up' ? '仅涨' : '仅跌'">
                 <svg width="12" height="12" fill="currentColor" viewBox="0 0 16 16">
                   <path v-if="todayFilter === 'all'" d="M1.5 1.5A.5.5 0 012 1h12a.5.5 0 01.5.5v2a.5.5 0 01-.128.334L10 8.692V13.5a.5.5 0 01-.223.416l-3 2A.5.5 0 016 15.5V8.692L1.628 3.834A.5.5 0 011.5 3.5v-2z"/>
-                  <path v-else-if="todayFilter === 'up'" d="M8 15a.5.5 0 01-.5-.5V3.707L4.354 6.854a.5.5 0 11-.708-.708l4-4a.5.5 0 01.708 0l4 4a.5.5 0 01-.708.708L8.5 3.707V14.5A.5.5 0 018 15z" fill="#dc2626"/>
-                  <path v-else d="M8 1a.5.5 0 01.5.5v10.793l3.146-3.147a.5.5 0 01.708.708l-4 4a.5.5 0 01-.708 0l-4-4a.5.5 0 01.708-.708L7.5 12.293V1.5A.5.5 0 018 1z" fill="#16a34a"/>
+                  <path v-else-if="todayFilter === 'up'" d="M8 15a.5.5 0 01-.5-.5V3.707L4.354 6.854a.5.5 0 11-.708-.708l4-4a.5.5 0 01.708 0l4 4a.5.5 0 01-.708.708L8.5 3.707V14.5A.5.5 0 018 15z" fill="var(--color-loss)"/>
+                  <path v-else d="M8 1a.5.5 0 01.5.5v10.793l3.146-3.147a.5.5 0 01.708.708l-4 4a.5.5 0 01-.708 0l-4-4a.5.5 0 01.708-.708L7.5 12.293V1.5A.5.5 0 018 1z" fill="var(--color-profit)"/>
                 </svg>
               </span>
             </th>
@@ -3614,7 +3637,7 @@ function txDisplayAmount(tx) {
     <div v-if="refreshProgress" class="refresh-progress-toast">
       <div class="refresh-toast-header">
         <span>刷新净值 {{ refreshProgress.done }}/{{ refreshProgress.total }}</span>
-        <span v-if="refreshProgress.done === refreshProgress.total" style="color:#16a34a">✓</span>
+        <span v-if="refreshProgress.done === refreshProgress.total" style="color:var(--color-profit)">✓</span>
       </div>
       <div class="refresh-toast-track">
         <div class="refresh-toast-bar" :style="{width: (refreshProgress.done / refreshProgress.total * 100) + '%'}"></div>
@@ -4339,29 +4362,29 @@ function txDisplayAmount(tx) {
                 <div class="chart-5y-canvas">
                   <svg class="nav-chart" :viewBox="'0 0 700 300'" preserveAspectRatio="xMidYMid meet" @mousedown="onChart5yMouseDown" @mousemove="onChart5yMouseMove" @mouseup="onChart5yMouseUp" @mouseleave="onChart5yMouseLeave">
                     <!-- 网格线 -->
-                    <line v-for="(y, i) in chart5yGridY" :key="'g'+i" :x1="55" :y1="y" :x2="680" :y2="y" stroke="rgba(255, 255, 255, 0.1)" stroke-width="0.5"/>
+                    <line v-for="(y, i) in chart5yGridY" :key="'g'+i" :x1="55" :y1="y" :x2="680" :y2="y" stroke="var(--color-border-light)" stroke-width="0.5"/>
                     <!-- Y 轴标签 -->
-                    <text v-for="la in chart5yYLabels" :key="'yl'+la.label" :x="50" :y="la.y + 4" text-anchor="end" fill="#9ca3af" font-size="11" font-family="monospace">{{ la.label }}</text>
+                    <text v-for="la in chart5yYLabels" :key="'yl'+la.label" :x="50" :y="la.y + 4" text-anchor="end" fill="var(--color-text-muted)" font-size="11" font-family="monospace">{{ la.label }}</text>
                     <!-- X 轴标签 -->
-                    <text v-for="la in chart5yXLabels" :key="'xl'+la.label" :x="la.x" :y="296" text-anchor="middle" fill="#9ca3af" font-size="10">{{ la.label }}</text>
+                    <text v-for="la in chart5yXLabels" :key="'xl'+la.label" :x="la.x" :y="296" text-anchor="middle" fill="var(--color-text-muted)" font-size="10">{{ la.label }}</text>
                     <!-- 净值线 -->
-                    <polyline :points="chart5yLinePoints" fill="none" stroke="#3b82f6" stroke-width="1.5" stroke-linejoin="round"/>
+                    <polyline :points="chart5yLinePoints" fill="none" stroke="var(--color-primary-500)" stroke-width="1.5" stroke-linejoin="round"/>
                     <!-- 填充 -->
                     <polyline :points="chart5yLinePoints + ' 680,280 55,280'" fill="url(#chart5yGrad)" opacity="0.12"/>
                     <!-- 参考基准线(100%) -->
-                    <line x1="55" y1="chart5yZeroY" x2="680" y2="chart5yZeroY" stroke="#9ca3af" stroke-width="0.8" stroke-dasharray="4,4"/>
+                    <line x1="55" y1="chart5yZeroY" x2="680" y2="chart5yZeroY" stroke="var(--color-text-muted)" stroke-width="0.8" stroke-dasharray="4,4"/>
                     <defs>
                       <linearGradient id="chart5yGrad" x1="0" y1="0" x2="0" y2="1">
-                        <stop offset="0%" stop-color="#3b82f6"/>
-                        <stop offset="100%" stop-color="#3b82f6" stop-opacity="0"/>
+                        <stop offset="0%" stop-color="var(--color-primary-500)"/>
+                        <stop offset="100%" stop-color="var(--color-primary-500)" stop-opacity="0"/>
                       </linearGradient>
                     </defs>
                     <!-- 选择遮罩 -->
-                    <rect v-if="chart5yBrushRect" :x="chart5yBrushRect.x" :y="chart5yBrushRect.y" :width="chart5yBrushRect.w" :height="chart5yBrushRect.h" fill="#3b82f6" opacity="0.15" stroke="#3b82f6" stroke-width="0.8" stroke-dasharray="3,3"/>
+                    <rect v-if="chart5yBrushRect" :x="chart5yBrushRect.x" :y="chart5yBrushRect.y" :width="chart5yBrushRect.w" :height="chart5yBrushRect.h" fill="var(--color-primary-500)" opacity="0.15" stroke="var(--color-primary-500)" stroke-width="0.8" stroke-dasharray="3,3"/>
                     <!-- hover 竖线 -->
-                    <line v-if="chart5yHoverPoint && !chart5yBrush?.active" :x1="chart5yHoverPoint.x" :y1="20" :x2="chart5yHoverPoint.x" :y2="280" stroke="#9ca3af" stroke-width="0.8" stroke-dasharray="3,3"/>
+                    <line v-if="chart5yHoverPoint && !chart5yBrush?.active" :x1="chart5yHoverPoint.x" :y1="20" :x2="chart5yHoverPoint.x" :y2="280" stroke="var(--color-text-muted)" stroke-width="0.8" stroke-dasharray="3,3"/>
                     <!-- hover 圆点 -->
-                    <circle v-if="chart5yHoverPoint && !chart5yBrush?.active" :cx="chart5yHoverPoint.x" :cy="chart5yHoverPoint.y" r="4" fill="#fff" stroke="#3b82f6" stroke-width="2"/>
+                    <circle v-if="chart5yHoverPoint && !chart5yBrush?.active" :cx="chart5yHoverPoint.x" :cy="chart5yHoverPoint.y" r="4" fill="var(--color-bg-card)" stroke="var(--color-primary-500)" stroke-width="2"/>
                   </svg>
                   <div v-if="chart5yHoverPoint" class="chart-tooltip" :style="chart5yTooltipStyle">
                     <div class="tooltip-date">{{ chart5yHoverPoint.date }}</div>
@@ -4683,30 +4706,30 @@ function txDisplayAmount(tx) {
 }
 .fresh-today {
   background: var(--color-success-bg);
-  color: #16a34a;
+  color: var(--color-profit);
 }
 .dark .fresh-today {
-  color: #34d399;
+  color: var(--color-profit);
 }
 .fresh-yesterday {
   background: var(--color-warning-bg);
-  color: #a16207;
+  color: var(--color-warning);
 }
 .dark .fresh-yesterday {
-  color: #fbbf24;
+  color: var(--color-warning);
 }
 .fresh-stale {
   background: var(--color-danger-bg);
-  color: #dc2626;
+  color: var(--color-loss);
 }
 .dark .fresh-stale {
-  color: #f87171;
+  color: var(--color-loss);
 }
 
 /* ── 理财彩蛋 ── */
 .quote-bar {
-  background: linear-gradient(135deg, #1e3a5f 0%, #2d5a87 100%);
-  border-radius: var(--radius-md);
+  background: var(--gradient-quote);
+  border-radius: var(--radius-lg);
   padding: 0.75rem 1.25rem;
   margin-bottom: 1.25rem;
   display: flex;
@@ -4715,23 +4738,36 @@ function txDisplayAmount(tx) {
   cursor: pointer;
   user-select: none;
   min-height: 40px;
+  border: 1px solid var(--color-border-light);
+  box-shadow: var(--shadow-elevated);
+  transition: all var(--transition-fast);
+}
+.quote-bar:hover {
+  box-shadow: var(--shadow-floating);
+  transform: var(--hover-lift);
 }
 .quote-text {
-  color: #e8eaed;
+  color: var(--color-text-primary);
   font-size: 0.85rem;
   line-height: 1.6;
 }
 .quote-author {
-  color: #93c5fd;
+  color: var(--color-primary-300);
   font-size: 0.78rem;
   margin-left: 0.4rem;
 }
+.dark .quote-author {
+  color: var(--color-primary-300);
+}
 .quote-click-hint {
-  color: #93c5fd;
+  color: var(--color-primary-300);
   font-size: 0.68rem;
   opacity: 0.6;
   white-space: nowrap;
   margin-left: 1rem;
+}
+.dark .quote-click-hint {
+  color: var(--color-primary-300);
 }
 .quote-fade-enter-active,
 .quote-fade-leave-active {
@@ -4782,7 +4818,7 @@ function txDisplayAmount(tx) {
 }
 .summary-card-today::before {
   opacity: 1;
-  background: linear-gradient(90deg, #3b82f6, #60a5fa);
+  background: linear-gradient(90deg, var(--color-primary-500), var(--color-primary-400));
 }
 .today-profit-date {
   font-size: 0.6rem;
@@ -4822,7 +4858,7 @@ function txDisplayAmount(tx) {
   display: flex;
   align-items: center;
   gap: 0.5rem;
-  color: #92400e;
+  color: var(--color-warning);
   font-size: 0.9rem;
   margin-bottom: 0.75rem;
 }
@@ -4860,11 +4896,13 @@ function txDisplayAmount(tx) {
 }
 
 .closed-row {
-  opacity: 0.6;
+  opacity: 0.55;
+  transition: opacity 0.2s ease;
 }
 
 .closed-row:hover {
   opacity: 1;
+  background: var(--color-primary-bg-weak);
 }
 
 /* ── 零钱卡 ── */
@@ -4874,25 +4912,25 @@ function txDisplayAmount(tx) {
 }
 .summary-card-cash::before {
   opacity: 1;
-  background: linear-gradient(90deg, #f59e0b, #fbbf24);
+  background: linear-gradient(90deg, var(--color-warning), var(--color-warning-light));
 }
 
 .cash-value {
-  color: #d97706 !important;
+  color: var(--color-warning) !important;
 }
 
 .dark .cash-value {
-  color: #fbbf24 !important;
+  color: var(--color-warning) !important;
 }
 
 .dark .summary-card-cash {
-  border-color: rgba(245, 158, 11, 0.25);
-  background: linear-gradient(135deg, rgba(245, 158, 11, 0.08), transparent);
+  border-color: var(--color-warning-border);
+  background: var(--color-warning-bg);
 }
 
 .cash-interest {
   font-size: 0.72rem;
-  color: #16a34a;
+  color: var(--color-profit);
   margin-top: 0.15rem;
   font-weight: 600;
 }
@@ -4906,8 +4944,8 @@ function txDisplayAmount(tx) {
 
 .cash-account-tag {
   font-size: 0.6rem;
-  color: #92400e;
-  background: rgba(245, 158, 11, 0.12);
+  color: var(--color-warning);
+  background: var(--color-warning-bg);
   padding: 0.12rem 0.35rem;
   border-radius: 4px;
   font-weight: 500;
@@ -4916,8 +4954,8 @@ function txDisplayAmount(tx) {
 }
 
 .dark .cash-account-tag {
-  color: #fbbf24;
-  background: rgba(245, 158, 11, 0.15);
+  color: var(--color-warning);
+  background: var(--color-warning-bg);
 }
 
 .cash-modal-balances {
@@ -4937,12 +4975,12 @@ function txDisplayAmount(tx) {
 }
 
 .cash-modal-account:hover {
-  border-color: #f59e0b;
+  border-color: var(--color-warning);
 }
 
 .cash-modal-account.selected {
-  border-color: #f59e0b;
-  background: rgba(245, 158, 11, 0.08);
+  border-color: var(--color-warning);
+  background: var(--color-warning-bg);
 }
 
 .cash-modal-uid {
@@ -4954,12 +4992,12 @@ function txDisplayAmount(tx) {
 
 .cash-modal-account strong {
   font-size: 1rem;
-  color: #d97706;
+  color: var(--color-warning);
 }
 
 .pending-hint {
   font-size: 0.75rem;
-  color: #a16207;
+  color: var(--color-warning);
   font-weight: 400;
 }
 
@@ -4974,7 +5012,7 @@ function txDisplayAmount(tx) {
   align-items: center;
   gap: 0.75rem;
   padding: 0.55rem 0.8rem;
-  background: rgba(255, 255, 255, 0.6);
+  background: var(--color-bg-hover);
   border-radius: var(--radius-md);
   font-size: 0.82rem;
   border: 1px solid var(--color-border-light);
@@ -4982,7 +5020,7 @@ function txDisplayAmount(tx) {
 }
 .pending-item:hover {
   border-color: var(--color-warning-border);
-  background: rgba(255, 255, 255, 0.8);
+  background: var(--color-bg-hover);
 }
 
 .pending-fund {
@@ -5001,29 +5039,29 @@ function txDisplayAmount(tx) {
 }
 
 .dark .pending-banner {
-  background: rgba(146, 64, 14, 0.15);
-  border-color: rgba(146, 64, 14, 0.3);
+  background: var(--color-warning-bg);
+  border-color: var(--color-warning-border);
 }
 
 .dark .pending-banner-header {
-  color: #fbbf24;
+  color: var(--color-warning);
 }
 
 .dark .pending-hint {
-  color: #d97706;
+  color: var(--color-warning);
 }
 
 .dark .pending-item {
-  background: rgba(0, 0, 0, 0.2);
+  background: var(--color-bg-hover);
   border-color: var(--color-border);
 }
 
 .dark .pending-item:hover {
-  background: rgba(0, 0, 0, 0.3);
+  background: var(--color-bg-hover);
 }
 
 .summary-card:hover {
-  box-shadow: var(--shadow-md);
+  box-shadow: var(--shadow-elevated);
   border-color: var(--color-primary-border-weak);
   transform: var(--hover-lift);
 }
@@ -5043,44 +5081,52 @@ function txDisplayAmount(tx) {
   color: var(--color-text-primary);
   font-variant-numeric: tabular-nums;
   letter-spacing: -0.02em;
+  line-height: 1.2;
 }
 
-/* Profit colors */
+/* Profit colors — 红涨绿跌 */
 .profit-positive {
-  color: #dc2626 !important;
+  color: var(--color-loss) !important;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
 }
 .profit-negative {
-  color: #16a34a !important;
+  color: var(--color-profit) !important;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
 }
+.dark .profit-positive { color: var(--color-loss) !important; }
+.dark .profit-negative { color: var(--color-profit) !important; }
 /* 持仓行盈亏渐变背景 */
 .profit-positive.text-right,
 .profit-positive:not(.tooltip-nav):not(.summary-value):not(.summary-sub) {
-  background: linear-gradient(135deg, rgba(220,38,38,0.06), transparent);
+  background: var(--color-loss-bg);
   border-radius: var(--radius-sm);
 }
 .profit-negative.text-right,
 .profit-negative:not(.tooltip-nav):not(.summary-value):not(.summary-sub) {
-  background: linear-gradient(135deg, rgba(5,150,105,0.06), transparent);
+  background: var(--color-profit-bg);
   border-radius: var(--radius-sm);
 }
 
 .cost-value {
-  color: #6b7280 !important;
+  color: var(--color-text-muted) !important;
 }
 .value-value {
-  color: #2563eb !important;
+  color: var(--color-primary-500) !important;
 }
 
-/* Table */
+/* ── Table — 更专业（条纹、hover、紧凑表头、数字右对齐） ── */
 .holdings-card {
   overflow-x: auto;
   border-radius: var(--radius-lg);
+  border: 1px solid var(--color-border);
 }
 
 .data-table {
   width: 100%;
   border-collapse: collapse;
-  font-size: 0.85rem;
+  font-size: 0.84rem;
 }
 
 .data-table th {
@@ -5090,31 +5136,56 @@ function txDisplayAmount(tx) {
   color: var(--color-text-secondary);
   border-bottom: 2px solid var(--color-border);
   white-space: nowrap;
-  font-size: 0.78rem;
+  font-size: 0.72rem;
   text-transform: uppercase;
-  letter-spacing: 0.03em;
-  background: var(--color-bg-secondary);
+  letter-spacing: 0.04em;
+  background: var(--color-bg-input);
   position: sticky;
   top: 0;
-  z-index: 1;
+  z-index: 2;
+}
+
+.dark .data-table th {
+  background: var(--color-bg-dark);
 }
 
 .data-table td {
-  padding: 0.65rem 1rem;
+  padding: 0.55rem 1rem;
   border-bottom: 1px solid var(--color-border-light, var(--color-border));
   color: var(--color-text-primary);
   white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.data-table td:not(:first-child) {
+  text-align: right;
+}
+
+.data-table th:not(:first-child) {
+  text-align: right;
+}
+
+/* .num class for explicit numeric alignment */
+.data-table .num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
 }
 
 .data-table tbody tr {
-  transition: background-color var(--transition-fast);
+  transition: background-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.data-table tbody tr:nth-child(even) {
+  background: var(--color-bg-hover);
+}
+
+.dark .data-table tbody tr:nth-child(even) {
+  background: var(--color-bg-hover);
 }
 
 .data-table tbody tr:hover {
   background: var(--color-primary-bg-weak);
-}
-.data-table tbody tr:nth-child(even) {
-  background: var(--color-bg-secondary);
+  box-shadow: inset 3px 0 0 var(--color-primary-400, var(--color-primary));
 }
 .data-table tbody tr:nth-child(even):hover {
   background: var(--color-primary-bg-weak);
@@ -5130,13 +5201,13 @@ function txDisplayAmount(tx) {
 .fund-name-text {
   margin-right: 0.4rem;
 }
-.badge-category-bond { background: #0891b2; color: white; }
-.badge-category-bond_index { background: #0891b2; color: white; }
-.badge-category-convertible_bond { background: #7c3aed; color: white; }
-.badge-category-money_market { background: #059669; color: white; }
-.badge-category-hybrid { background: #d97706; color: white; }
-.badge-category-index { background: #c9a84c; color: white; }
-.badge-category-equity { background: #dc2626; color: white; }
+.badge-category-bond { background: var(--color-info); color: white; }
+.badge-category-bond_index { background: var(--color-info); color: white; }
+.badge-category-convertible_bond { background: var(--color-purple); color: white; }
+.badge-category-money_market { background: var(--color-profit); color: white; }
+.badge-category-hybrid { background: var(--color-warning); color: white; }
+.badge-category-index { background: var(--color-primary-500); color: white; }
+.badge-category-equity { background: var(--color-loss); color: white; }
 
 .actions-cell {
   display: flex;
@@ -5157,7 +5228,7 @@ function txDisplayAmount(tx) {
   background: var(--color-bg-card);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
-  box-shadow: var(--shadow-lg);
+  box-shadow: var(--shadow-floating);
   min-width: 100px;
   padding: 0.25rem 0;
   display: flex;
@@ -5208,7 +5279,7 @@ function txDisplayAmount(tx) {
 }
 
 .btn-sell-text {
-  color: #d97706 !important;
+  color: var(--color-warning) !important;
 }
 
 .btn-sell-text:hover {
@@ -5220,11 +5291,11 @@ function txDisplayAmount(tx) {
 }
 
 .btn-analysis-text {
-  color: #7c3aed !important;
+  color: var(--color-purple) !important;
 }
 
 .btn-analysis-text:hover {
-  background: rgba(124, 58, 237, 0.1) !important;
+  background: var(--color-purple-bg) !important;
 }
 
 .btn-info-text:hover {
@@ -5244,8 +5315,8 @@ function txDisplayAmount(tx) {
 }
 
 .sell-preview {
-  background: var(--color-warning-bg, rgba(245, 158, 11, 0.08));
-  color: #d97706;
+  background: var(--color-warning-bg);
+  color: var(--color-warning);
 }
 
 /* Empty & Loading */
@@ -5268,7 +5339,7 @@ function txDisplayAmount(tx) {
   color: var(--color-text-muted);
 }
 
-/* Modal */
+/* ── Modal — 更现代（圆角、阴影、动画） ── */
 .modal-overlay {
   position: fixed;
   inset: 0;
@@ -5276,9 +5347,9 @@ function txDisplayAmount(tx) {
   display: flex;
   align-items: center;
   justify-content: center;
-  background: rgba(0, 0, 0, 0.5);
-  backdrop-filter: blur(6px);
-  -webkit-backdrop-filter: blur(6px);
+  background: var(--color-overlay);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
   animation: modal-fade-in 0.2s ease-out;
 }
 @keyframes modal-fade-in {
@@ -5289,18 +5360,23 @@ function txDisplayAmount(tx) {
 .modal-box {
   background: var(--color-bg-card);
   border: 1px solid var(--color-border);
-  border-radius: var(--radius-xl);
-  box-shadow: var(--shadow-lg);
+  border-radius: 16px;
+  box-shadow: var(--shadow-xl);
   width: 100%;
   max-width: 520px;
   max-height: 90vh;
   overflow-y: auto;
   margin: 0 1rem;
-  padding: 1.5rem;
-  animation: modal-scale-in 0.25s cubic-bezier(0.34, 1.2, 0.64, 1);
+  padding: 1.75rem;
+  animation: modal-scale-in 0.28s cubic-bezier(0.34, 1.2, 0.64, 1);
+}
+.dark .modal-box {
+  background: var(--color-bg-dark);
+  border-color: var(--color-border);
+  box-shadow: var(--shadow-xl);
 }
 @keyframes modal-scale-in {
-  from { opacity: 0; transform: scale(0.95) translateY(10px); }
+  from { opacity: 0; transform: scale(0.92) translateY(12px); }
   to { opacity: 1; transform: scale(1) translateY(0); }
 }
 
@@ -5327,7 +5403,7 @@ function txDisplayAmount(tx) {
   align-items: center;
   gap: 0.5rem;
   padding: 0.6rem 0.8rem;
-  background: var(--color-primary-bg, rgba(201, 168, 76, 0.08));
+  background: var(--color-primary-bg, rgba(37, 99, 235, 0.08));
   border-radius: var(--radius-md);
   font-size: 0.9rem;
   color: var(--color-primary-600);
@@ -5493,16 +5569,16 @@ select.input-field {
   font-weight: 600;
 }
 .bond-利率债 {
-  background: #dbeafe;
-  color: #1d4ed8;
+  background: var(--color-info-bg);
+  color: var(--color-info);
 }
 .bond-信用债 {
-  background: #fef3c7;
-  color: #92400e;
+  background: var(--color-warning-bg);
+  color: var(--color-warning);
 }
 .bond-可转债 {
-  background: #ede9fe;
-  color: #6d28d9;
+  background: var(--color-purple-bg);
+  color: var(--color-purple);
 }
 
 .mini-table {
@@ -5510,10 +5586,27 @@ select.input-field {
 }
 .mini-table th {
   padding: 0.55rem 0.85rem;
-  font-size: 0.78rem;
+  font-size: 0.72rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--color-text-secondary);
+  background: var(--color-bg-input);
+}
+.dark .mini-table th {
+  background: var(--color-bg-dark);
 }
 .mini-table td {
   padding: 0.55rem 0.85rem;
+}
+.mini-table tbody tr:nth-child(even) {
+  background: var(--color-bg-hover);
+}
+.dark .mini-table tbody tr:nth-child(even) {
+  background: var(--color-bg-hover);
+}
+.mini-table tbody tr:hover {
+  background: var(--color-primary-bg-weak);
 }
 
 /* Toast */
@@ -5527,7 +5620,7 @@ select.input-field {
   font-size: 0.78rem;
   font-weight: 600;
   z-index: 9999;
-  box-shadow: var(--shadow-lg);
+  box-shadow: var(--shadow-floating);
   white-space: nowrap;
   animation: toast-pop 0.25s cubic-bezier(0.34, 1.2, 0.64, 1);
   backdrop-filter: blur(8px);
@@ -5542,27 +5635,27 @@ select.input-field {
   width: 12px;
   height: 12px;
   border: 2px solid var(--color-border);
-  border-top-color: #3b82f6;
+  border-top-color: var(--color-primary-500);
   border-radius: 50%;
   animation: spin 0.6s linear infinite;
 }
 
 .toast-success {
   background: var(--color-success-bg);
-  color: #16a34a;
+  color: var(--color-profit);
   border: 1px solid var(--color-success-border);
 }
 .dark .toast-success {
-  color: #34d399;
+  color: var(--color-profit);
 }
 
 .toast-error {
   background: var(--color-danger-bg);
-  color: #dc2626;
+  color: var(--color-loss);
   border: 1px solid var(--color-danger-border);
 }
 .dark .toast-error {
-  color: #f87171;
+  color: var(--color-loss);
 }
 
 .toast-info {
@@ -5601,7 +5694,7 @@ select.input-field {
   transition: box-shadow var(--transition-fast);
 }
 .alert-panel:hover {
-  box-shadow: var(--shadow-sm);
+  box-shadow: var(--shadow-elevated);
 }
 .alert-panel-header {
   display: flex;
@@ -5633,21 +5726,21 @@ select.input-field {
   border-bottom: none;
 }
 .alert-danger {
-  border-left: 3px solid #dc2626;
+  border-left: 3px solid var(--color-loss);
 }
 .alert-warning {
-  border-left: 3px solid #d97706;
+  border-left: 3px solid var(--color-warning);
 }
 .alert-info {
-  border-left: 3px solid #3b82f6;
+  border-left: 3px solid var(--color-info);
 }
 .alert-icon {
   flex-shrink: 0;
   margin-top: 2px;
 }
-.alert-danger .alert-icon { color: #dc2626; }
-.alert-warning .alert-icon { color: #d97706; }
-.alert-info .alert-icon { color: #3b82f6; }
+.alert-danger .alert-icon { color: var(--color-loss); }
+.alert-warning .alert-icon { color: var(--color-warning); }
+.alert-info .alert-icon { color: var(--color-info); }
 .alert-body {
   flex: 1;
   min-width: 0;
@@ -5682,11 +5775,11 @@ select.input-field {
   color: var(--color-text-tertiary);
 }
 .alert-source-badge.scan {
-  background: rgba(99,102,241,0.1);
-  color: #6366f1;
+  background: var(--color-info-bg);
+  color: var(--color-info);
 }
 .alert-source-badge.ai {
-  background: rgba(201,168,76,0.1);
+  background: var(--color-primary-bg);
   color: var(--color-primary);
 }
 .alert-empty {
@@ -5722,8 +5815,8 @@ select.input-field {
   color: var(--color-text-secondary);
 }
 .alert-badge.has-unread {
-  background: #dc2626;
-  color: #fff;
+  background: var(--color-loss);
+  color: white;
 }
 .alert-toggle-icon {
   font-size: 0.6rem;
@@ -5752,13 +5845,14 @@ select.input-field {
   font-size: 0.9rem;
   font-weight: 600;
   color: var(--color-text-primary);
+  font-variant-numeric: tabular-nums;
 }
 
-/* ── Analysis Tabs ─── */
+/* ── Analysis Tabs — underline 风格 ─── */
 .analysis-tabs {
   display: flex;
-  gap: 0.25rem;
-  margin-bottom: 1rem;
+  gap: 0;
+  margin-bottom: 1.25rem;
   border-bottom: 2px solid var(--color-border);
   position: relative;
 }
@@ -5766,8 +5860,8 @@ select.input-field {
   display: inline-flex;
   align-items: center;
   gap: 0.4rem;
-  padding: 0.6rem 1.1rem;
-  font-size: 0.85rem;
+  padding: 0.7rem 1.2rem;
+  font-size: 0.84rem;
   font-weight: 500;
   color: var(--color-text-secondary);
   background: none;
@@ -5775,8 +5869,9 @@ select.input-field {
   border-bottom: 2px solid transparent;
   margin-bottom: -2px;
   cursor: pointer;
-  transition: all var(--transition-fast);
+  transition: color 0.2s ease, border-color 0.2s ease;
   position: relative;
+  letter-spacing: 0.01em;
 }
 .analysis-tab:hover {
   color: var(--color-text-primary);
@@ -5792,11 +5887,14 @@ select.input-field {
   left: 0;
   right: 0;
   height: 2px;
-  background: var(--gradient-primary);
+  background: var(--color-primary-600);
   border-radius: 2px 2px 0 0;
 }
 .dark .analysis-tab.active {
   color: var(--color-primary-400);
+}
+.dark .analysis-tab.active::after {
+  background: var(--color-primary-400);
 }
 .analysis-tab svg {
   flex-shrink: 0;
@@ -5805,18 +5903,18 @@ select.input-field {
 /* ── Analysis Panel ─── */
 .analysis-panel {
   margin-bottom: 1.25rem;
-  padding: 1.25rem;
+  padding: 20px;
   border-radius: var(--radius-lg);
   transition: all var(--transition-fast);
 }
 .analysis-panel:hover {
-  box-shadow: var(--shadow-sm);
+  box-shadow: var(--shadow-elevated);
 }
 .analysis-panel-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin-bottom: 0.75rem;
+  margin-bottom: 0.85rem;
 }
 .analysis-panel-header h3 {
   margin: 0;
@@ -5838,7 +5936,7 @@ select.input-field {
   flex-direction: column;
   align-items: center;
   gap: 0.3rem;
-  padding: 0.85rem;
+  padding: 1rem 0.85rem;
   background: var(--color-bg-hover);
   border-radius: var(--radius-md);
   transition: all var(--transition-fast);
@@ -5847,18 +5945,39 @@ select.input-field {
 .analysis-stat:hover {
   border-color: var(--color-primary-border-weak);
   box-shadow: var(--shadow-sm);
+  transform: translateY(-1px);
 }
 .stat-label {
-  font-size: 0.75rem;
+  font-size: 0.74rem;
   color: var(--color-text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  font-weight: 500;
 }
 .stat-value {
-  font-size: 1.1rem;
+  font-size: 1.25rem;
   font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.02em;
 }
-.text-success { color: #16a34a; }
-.text-danger { color: #dc2626; }
-.text-warning { color: #d97706; }
+.text-success {
+  color: var(--color-profit);
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
+.text-danger {
+  color: var(--color-loss);
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
+.text-warning {
+  color: var(--color-warning);
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
+.dark .text-success { color: var(--color-profit); }
+.dark .text-danger { color: var(--color-loss); }
+.dark .text-warning { color: var(--color-warning); }
 .analysis-section h4 {
   font-size: 0.85rem;
   font-weight: 600;
@@ -5900,13 +6019,13 @@ select.input-field {
   box-shadow: 0 0 4px var(--color-primary-glow);
 }
 .dist-bar-index {
-  background: #10b981;
+  background: var(--color-profit);
 }
 .dist-bar-warn {
-  background: #f59e0b;
+  background: var(--color-warning);
 }
 .dist-bar-danger {
-  background: #ef4444;
+  background: var(--color-loss);
 }
 .dist-value {
   width: 80px;
@@ -5914,13 +6033,14 @@ select.input-field {
   color: var(--color-text-muted);
   font-size: 0.78rem;
   flex-shrink: 0;
+  font-variant-numeric: tabular-nums;
 }
 .analysis-hint {
   padding: 0.75rem 1rem;
   background: var(--color-warning-bg);
   border-radius: var(--radius-md);
   font-size: 0.82rem;
-  color: #d97706;
+  color: var(--color-warning);
   line-height: 1.6;
 }
 .mcp-raw-output {
@@ -5982,8 +6102,8 @@ select.input-field {
   border-radius: 50%;
   flex-shrink: 0;
 }
-.dot-ok { background: #16a34a; }
-.dot-err { background: #dc2626; }
+.dot-ok { background: var(--color-profit); }
+.dot-err { background: var(--color-loss); }
 
 /* Diversification refresh button */
 .btn-diver-refresh {
@@ -5993,15 +6113,15 @@ select.input-field {
   padding: 0.4rem 0.8rem;
   font-size: 0.78rem;
   font-weight: 600;
-  color: #fff;
-  background: #2563eb;
+  color: white;
+  background: var(--color-primary);
   border: none;
   border-radius: var(--radius-sm);
   cursor: pointer;
   white-space: nowrap;
   transition: background 0.15s;
 }
-.btn-diver-refresh:hover { background: #1d4ed8; }
+.btn-diver-refresh:hover { filter: brightness(1.1); }
 .btn-diver-refresh:disabled { opacity: 0.6; cursor: not-allowed; }
 
 /* Diversification AI summary */
@@ -6016,16 +6136,16 @@ select.input-field {
   padding: 0.25rem 0.7rem;
   font-size: 0.75rem;
   font-weight: 600;
-  color: #7c3aed;
-  background: rgba(124, 58, 237, 0.1);
-  border: 1px solid rgba(124, 58, 237, 0.25);
+  color: var(--color-purple);
+  background: var(--color-purple-bg);
+  border: 1px solid var(--color-purple-border);
   border-radius: var(--radius-sm);
   cursor: pointer;
   margin-left: auto;
   transition: all 0.15s;
 }
 .btn-diver-ai:hover {
-  background: rgba(124, 58, 237, 0.2);
+  background: var(--color-purple-bg);
 }
 .diver-ai-loading {
   display: flex;
@@ -6068,6 +6188,8 @@ select.input-field {
 .tx-detail-table-wrap {
   overflow-x: auto;
   font-size: 0.82rem;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--color-border-light, var(--color-border));
 }
 
 .tx-detail-table {
@@ -6077,12 +6199,19 @@ select.input-field {
 
 .tx-detail-table th {
   text-align: right;
-  padding: 0.55rem 0.65rem;
-  font-weight: 500;
-  color: var(--color-text-muted);
-  border-bottom: 1px solid var(--color-border);
-  font-size: 0.75rem;
+  padding: 0.6rem 0.7rem;
+  font-weight: 600;
+  color: var(--color-text-secondary);
+  border-bottom: 2px solid var(--color-border);
+  font-size: 0.72rem;
   white-space: nowrap;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  background: var(--color-bg-input);
+}
+
+.dark .tx-detail-table th {
+  background: var(--color-bg-dark);
 }
 
 .tx-detail-table th:first-child {
@@ -6090,9 +6219,26 @@ select.input-field {
 }
 
 .tx-detail-table td {
-  padding: 0.55rem 0.65rem;
-  border-bottom: 1px solid var(--color-border);
+  padding: 0.5rem 0.7rem;
+  border-bottom: 1px solid var(--color-border-light, var(--color-border));
   white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.tx-detail-table tbody tr {
+  transition: background-color 0.15s ease;
+}
+
+.tx-detail-table tbody tr:nth-child(even) {
+  background: var(--color-bg-hover);
+}
+
+.dark .tx-detail-table tbody tr:nth-child(even) {
+  background: var(--color-bg-hover);
+}
+
+.tx-detail-table tbody tr:hover {
+  background: var(--color-primary-bg-weak);
 }
 
 .tx-fund {
@@ -6123,13 +6269,15 @@ select.input-field {
 }
 
 .tx-buy {
-  background: #dcfce7;
-  color: #166534;
+  background: var(--color-profit-bg);
+  color: var(--color-profit);
+  font-weight: 600;
 }
 
 .tx-sell {
-  background: #fef3c7;
-  color: #92400e;
+  background: var(--color-warning-bg);
+  color: var(--color-warning);
+  font-weight: 600;
 }
 
 .val-badge {
@@ -6141,18 +6289,21 @@ select.input-field {
 }
 
 .val-low {
-  background: #dcfce7;
-  color: #166534;
+  background: var(--color-profit-bg);
+  color: var(--color-profit);
+  font-weight: 600;
 }
 
 .val-mid {
-  background: #fef9c3;
-  color: #854d0e;
+  background: var(--color-warning-bg);
+  color: var(--color-warning);
+  font-weight: 600;
 }
 
 .val-high {
-  background: #fee2e2;
-  color: #991b1b;
+  background: var(--color-loss-bg);
+  color: var(--color-loss);
+  font-weight: 600;
 }
 
 /* ── AI Analysis ─── */
@@ -6252,7 +6403,7 @@ select.input-field {
   border-bottom: none;
 }
 .ai-history-current {
-  background: var(--color-primary-bg, rgba(201, 168, 76, 0.06));
+  background: var(--color-primary-bg, rgba(37, 99, 235, 0.06));
 }
 .ai-history-info {
   display: flex;
@@ -6341,24 +6492,25 @@ select.input-field {
 .pie-chart-row {
   display: flex;
   align-items: center;
-  gap: 1rem;
+  gap: 0.75rem;
   margin-bottom: 0.75rem;
 }
 .pie-legend {
   display: flex;
   flex-direction: column;
-  gap: 0.3rem;
+  gap: 0.2rem;
   flex: 1;
 }
 .legend-item {
   display: flex;
   align-items: center;
-  gap: 0.4rem;
-  font-size: 0.78rem;
+  gap: 0.35rem;
+  font-size: 0.75rem;
+  padding: 0.1rem 0;
 }
 .legend-dot {
-  width: 10px;
-  height: 10px;
+  width: 8px;
+  height: 8px;
   border-radius: 50%;
   flex-shrink: 0;
 }
@@ -6367,11 +6519,14 @@ select.input-field {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  flex: 1;
 }
 .legend-pct {
   margin-left: auto;
   font-weight: 600;
-  font-size: 0.78rem;
+  font-size: 0.74rem;
+  font-variant-numeric: tabular-nums;
+  color: var(--color-text-primary);
 }
 
 /* ── 折叠面板 ── */
@@ -6423,7 +6578,7 @@ select.input-field {
   margin-left: 0.5rem;
 }
 
-/* ── 表格排序 & 搜索 ── */
+/* ── 表格排序 & 搜索 — 更紧凑 ── */
 .th-sortable {
   cursor: pointer;
   user-select: none;
@@ -6436,10 +6591,20 @@ select.input-field {
   gap: 0.5rem;
   align-items: center;
   margin-bottom: 0.75rem;
+  flex-wrap: wrap;
 }
 .table-search-bar .input-field {
   flex: 1;
   max-width: 280px;
+  transition: box-shadow 0.2s ease, border-color 0.2s ease;
+}
+.table-search-bar .input-field:focus {
+  outline: none;
+  border-color: var(--color-primary-400, var(--color-primary));
+  box-shadow: var(--shadow-glow);
+}
+.dark .table-search-bar .input-field:focus {
+  box-shadow: var(--shadow-glow);
 }
 .account-filter-select {
   max-width: 120px !important;
@@ -6454,9 +6619,9 @@ select.input-field {
   z-index: 9999;
   background: var(--color-bg-card);
   border: 1px solid var(--color-border);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   padding: 0.4rem 0.7rem;
-  box-shadow: 0 2px 12px rgba(0,0,0,0.08);
+  box-shadow: var(--shadow-floating);
   min-width: 120px;
   backdrop-filter: blur(8px);
   animation: toast-slide-in 0.2s ease;
@@ -6483,7 +6648,7 @@ select.input-field {
 }
 .refresh-toast-bar {
   height: 100%;
-  background: linear-gradient(90deg, #c9a84c, #3b82f6);
+  background: var(--gradient-primary);
   border-radius: 2px;
   transition: width 0.3s ease;
 }
@@ -6493,7 +6658,7 @@ select.input-field {
 }
 .pending-confirm-hint {
   font-size: 0.72rem;
-  color: var(--color-primary, #a88a3a);
+  color: var(--color-primary);
   margin-left: 0.25rem;
 }
 .tx-confirm-hint {
@@ -6506,18 +6671,19 @@ select.input-field {
   padding: 0.1rem 0.5rem;
   border-radius: 999px;
   font-size: 0.72rem;
-  background: var(--color-primary-bg, rgba(201, 168, 76, 0.06));
-  color: var(--color-primary, #a88a3a);
+  background: var(--color-primary-bg);
+  color: var(--color-primary);
   white-space: nowrap;
 }
 
-/* ── AI 4 模式 UI ─── */
+/* ── AI 4 模式 UI — pill 风格 ─── */
 .ai-mode-tabs {
   display: flex;
-  gap: 0.25rem;
+  gap: 0.3rem;
   margin-bottom: 1rem;
-  border-bottom: 1px solid var(--color-border);
-  padding-bottom: 0;
+  padding: 0.25rem;
+  background: var(--color-bg-input);
+  border-radius: 999px;
   overflow-x: auto;
   position: relative;
 }
@@ -6525,35 +6691,30 @@ select.input-field {
   display: flex;
   align-items: center;
   gap: 0.35rem;
-  padding: 0.55rem 0.85rem;
+  padding: 0.5rem 1rem;
   border: none;
-  border-radius: var(--radius-sm) var(--radius-sm) 0 0;
+  border-radius: 999px;
   font-size: 0.8rem;
   font-weight: 500;
   cursor: pointer;
   background: transparent;
   color: var(--color-text-secondary);
   white-space: nowrap;
-  transition: all 0.15s;
+  transition: all 0.2s;
   position: relative;
 }
 .ai-mode-tab:hover {
   color: var(--color-text-primary);
 }
 .ai-mode-tab.active {
-  background: var(--color-primary-bg, rgba(201, 168, 76, 0.06));
-  color: var(--color-primary, #a88a3a);
+  background: var(--color-bg-card);
+  color: var(--color-primary);
   font-weight: 600;
+  box-shadow: var(--shadow-sm);
 }
-.ai-mode-tab.active::after {
-  content: '';
-  position: absolute;
-  bottom: -1px;
-  left: 0;
-  right: 0;
-  height: 2px;
-  background: var(--gradient-primary);
-  border-radius: 2px 2px 0 0;
+.dark .ai-mode-tab.active {
+  background: var(--color-bg-secondary);
+  color: var(--color-primary-400);
 }
 .ai-mode-icon {
   font-size: 1rem;
@@ -6568,11 +6729,36 @@ select.input-field {
   color: var(--color-text-secondary);
   line-height: 1.6;
 }
+.ai-mode-action {
+  align-self: flex-start;
+  margin: 0.15rem 0 0.35rem;
+}
 .ai-mode-form {
   display: flex;
   flex-wrap: wrap;
   gap: 0.5rem;
   align-items: flex-end;
+}
+.ai-background-state {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-top: 1rem;
+  padding: 0.9rem 1rem;
+  border: 1px solid var(--color-primary-border);
+  border-radius: var(--radius-lg);
+  background: linear-gradient(135deg, var(--color-primary-bg), var(--color-bg-card));
+  color: var(--color-text-secondary);
+}
+.ai-background-state strong {
+  display: block;
+  margin-bottom: 0.15rem;
+  font-size: 0.86rem;
+  color: var(--color-text-primary);
+}
+.ai-background-state span {
+  font-size: 0.78rem;
+  line-height: 1.5;
 }
 .ai-form-label {
   font-size: 0.75rem;
@@ -6665,12 +6851,12 @@ select.input-field {
   border-color: var(--color-primary);
 }
 .btn-feedback-up:hover {
-  background: #dcfce7;
-  border-color: #16a34a;
+  background: var(--color-profit-bg);
+  border-color: var(--color-profit);
 }
 .btn-feedback-down:hover {
-  background: #fee2e2;
-  border-color: #dc2626;
+  background: var(--color-loss-bg);
+  border-color: var(--color-loss);
 }
 .feedback-given-text {
   font-size: 0.85rem;
@@ -6731,7 +6917,7 @@ select.input-field {
   font-size: 0.78rem;
   line-height: 1.6;
   color: var(--color-text-primary);
-  box-shadow: 0 4px 12px rgba(0,0,0,0.12);
+  box-shadow: var(--shadow-floating);
   pointer-events: none;
   z-index: 20;
   white-space: nowrap;
@@ -6744,6 +6930,7 @@ select.input-field {
 }
 .tooltip-nav {
   font-size: 0.85rem;
+  font-variant-numeric: tabular-nums;
 }
 .tooltip-tx-type {
   display: inline-block;
@@ -6773,7 +6960,7 @@ select.input-field {
 }
 .chart-search-error {
   font-size: 0.75rem;
-  color: #ef4444;
+  color: var(--color-loss);
   margin-top: 0.3rem;
 }
 .chart-fund-switcher {
@@ -6802,7 +6989,7 @@ select.input-field {
   color: var(--color-primary);
 }
 .fund-chip.active {
-  background: var(--color-primary-50, var(--color-primary-bg));
+  background: var(--color-primary-bg);
   border-color: var(--color-primary-400);
   color: var(--color-primary);
   font-weight: 500;
@@ -6844,10 +7031,11 @@ select.input-field {
 .stat-value-stat {
   font-size: 1rem;
   font-weight: 700;
-  font-family: monospace;
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
 }
-.stat-up { color: #dc2626; }
-.stat-down { color: #16a34a; }
+.stat-up { color: var(--color-loss); }
+.stat-down { color: var(--color-profit); }
 
 .chart5y-actions {
   display: flex;
@@ -6877,144 +7065,42 @@ select.input-field {
   display: flex;
   flex-direction: column;
   align-items: flex-end;
-  gap: 0.1rem;
+  gap: 0.15rem;
 }
 
 .today-change-pct {
-  font-weight: 600;
-  font-size: 0.85rem;
+  font-weight: 700;
+  font-size: 0.86rem;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.01em;
 }
 
 .today-change-profit {
-  font-size: 0.72rem;
-  opacity: 0.8;
-  padding: 0.1rem 0.35rem;
+  font-size: 0.7rem;
+  font-weight: 600;
+  opacity: 0.85;
+  padding: 0.1rem 0.4rem;
   border-radius: var(--radius-sm);
 }
 /* 盈亏数字渐变背景 */
 .profit-up {
-  color: var(--color-profit) !important;
-  background: linear-gradient(135deg, rgba(220,38,38,0.08), rgba(239,68,68,0.04));
-  padding: 0.15rem 0.4rem;
+  color: var(--color-loss) !important;
+  background: var(--color-loss-bg);
+  padding: 0.15rem 0.45rem;
   border-radius: var(--radius-sm);
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
 }
 .profit-down {
-  color: var(--color-loss) !important;
-  background: linear-gradient(135deg, rgba(5,150,105,0.08), rgba(16,185,129,0.04));
-  padding: 0.15rem 0.4rem;
+  color: var(--color-profit) !important;
+  background: var(--color-profit-bg);
+  padding: 0.15rem 0.45rem;
   border-radius: var(--radius-sm);
-}
-
-/* ── AI Action Button (与 Dashboard 一致) ── */
-.btn-ai-action {
-  position: relative;
-  display: inline-flex;
-  align-items: center;
-  gap: 0.4rem;
-  padding: 0.45rem 0.85rem;
-  font-size: 0.8rem;
+  font-variant-numeric: tabular-nums;
   font-weight: 600;
-  color: var(--color-primary);
-  background: linear-gradient(135deg, var(--color-primary-bg), rgba(201, 168, 76, 0.08));
-  border: 1px solid rgba(201, 168, 76, 0.2);
-  border-radius: var(--radius-lg);
-  cursor: pointer;
-  transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
-  white-space: nowrap;
 }
-
-.btn-ai-action::before {
-  content: '';
-  position: absolute;
-  top: 0;
-  left: -100%;
-  width: 100%;
-  height: 100%;
-  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.4), transparent);
-  transition: left 0.5s ease;
-}
-
-.btn-ai-action:hover {
-  background: linear-gradient(135deg, rgba(201, 168, 76, 0.15), rgba(201, 168, 76, 0.12));
-  border-color: rgba(201, 168, 76, 0.4);
-  transform: translateY(-1px);
-  box-shadow: 0 4px 12px rgba(201, 168, 76, 0.15);
-}
-
-.btn-ai-action:hover::before {
-  left: 100%;
-}
-
-.btn-ai-action:active {
-  transform: translateY(0);
-  box-shadow: none;
-}
-
-.btn-ai-action:disabled {
-  opacity: 0.6;
-  cursor: not-allowed;
-  transform: none;
-  box-shadow: none;
-}
-
-.btn-ai-action.btn-loading {
-  background: linear-gradient(135deg, rgba(201, 168, 76, 0.08), rgba(201, 168, 76, 0.05));
-  border-color: rgba(201, 168, 76, 0.15);
-}
-
-.btn-ai-action.btn-loading::after {
-  content: '';
-  position: absolute;
-  bottom: 0;
-  left: 0;
-  height: 2px;
-  width: 100%;
-  background: linear-gradient(90deg, transparent, var(--color-primary), transparent);
-  animation: loading-bar 1.5s ease-in-out infinite;
-}
-
-@keyframes loading-bar {
-  0% { transform: translateX(-100%); }
-  50% { transform: translateX(0); }
-  100% { transform: translateX(100%); }
-}
-
-/* ── AI Agent Tooltip ── */
-.ai-agent-tooltip {
-  position: absolute;
-  top: calc(100% + 8px);
-  left: 50%;
-  transform: translateX(-50%) scale(0.95);
-  padding: 0.4rem 0.7rem;
-  font-size: 0.7rem;
-  font-weight: 600;
-  color: white;
-  background: linear-gradient(135deg, #1e1b4b, #312e81);
-  border-radius: var(--radius-md);
-  white-space: nowrap;
-  opacity: 0;
-  visibility: hidden;
-  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
-  pointer-events: none;
-  z-index: 100;
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
-}
-
-.ai-agent-tooltip::after {
-  content: '';
-  position: absolute;
-  bottom: 100%;
-  left: 50%;
-  transform: translateX(-50%);
-  border: 5px solid transparent;
-  border-bottom-color: #1e1b4b;
-}
-
-.btn-ai-action:hover .ai-agent-tooltip {
-  opacity: 1;
-  visibility: visible;
-  transform: translateX(-50%) scale(1);
-}
+.dark .profit-up { color: var(--color-loss) !important; }
+.dark .profit-down { color: var(--color-profit) !important; }
 
 .icon-spin {
   transition: transform 0.3s ease;
@@ -7029,7 +7115,7 @@ select.input-field {
   to { transform: rotate(360deg); }
 }
 
-/* ── 交易复盘结果（嵌入 tx tab） ── */
+/* ── 交易复盘结果 ── */
 .tx-ai-review {
   display: flex;
   justify-content: center;
@@ -7133,7 +7219,7 @@ select.input-field {
   height: 18px;
   border-radius: 50%;
   background: var(--color-primary);
-  box-shadow: 0 2px 6px rgba(201, 168, 76, 0.3);
+  box-shadow: 0 2px 6px var(--color-primary-shadow);
   cursor: pointer;
   transition: transform 0.15s;
 }
@@ -7148,16 +7234,16 @@ select.input-field {
 }
 .fee-result-card {
   padding: 1rem 1.25rem;
-  border-radius: 10px;
+  border-radius: var(--radius-md);
   text-align: center;
 }
 .fee-result-erosion {
-  background: linear-gradient(135deg, #fef2f2, #fff5f5);
-  border: 1px solid #fecaca;
+  background: var(--color-loss-bg);
+  border: 1px solid var(--color-loss-light);
 }
 .fee-result-savings {
-  background: linear-gradient(135deg, #f0fdf4, #f0fff4);
-  border: 1px solid #bbf7d0;
+  background: var(--color-profit-bg);
+  border: 1px solid var(--color-profit-light);
 }
 .fee-result-label {
   font-size: 0.78rem;
@@ -7168,10 +7254,10 @@ select.input-field {
   font-size: 1.3rem;
   font-weight: 800;
   font-variant-numeric: tabular-nums;
-  color: #dc2626;
+  color: var(--color-loss);
 }
 .fee-result-savings .fee-result-value {
-  color: #059669;
+  color: var(--color-profit);
 }
 .fee-result-sub {
   font-size: 0.72rem;
@@ -7179,9 +7265,9 @@ select.input-field {
   margin-top: 0.2rem;
 }
 .fee-chart-container {
-  background: #fafbfc;
+  background: var(--color-bg-secondary);
   border: 1px solid var(--color-border);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   padding: 0.75rem;
   margin-bottom: 0.5rem;
 }
@@ -7209,7 +7295,7 @@ select.input-field {
 .overlap-heatmap {
   display: inline-block;
   border: 1px solid var(--color-border);
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   overflow: hidden;
   font-size: 0.72rem;
 }
@@ -7222,18 +7308,18 @@ select.input-field {
   display: flex;
   align-items: center;
   justify-content: center;
-  border: 1px solid rgba(0,0,0,0.06);
+  border: 1px solid var(--color-border-light);
   font-weight: 600;
   font-variant-numeric: tabular-nums;
 }
 .overlap-corner {
   min-width: 60px;
-  background: #f8fafc;
+  background: var(--color-bg-secondary);
 }
 .overlap-label {
   min-width: 60px;
   padding: 0 6px;
-  background: #f8fafc;
+  background: var(--color-bg-secondary);
   font-weight: 500;
   color: var(--color-text-secondary);
   white-space: nowrap;
@@ -7275,7 +7361,7 @@ select.input-field {
   display: inline-block;
   padding: 0.2rem 0.75rem;
   background: var(--color-primary);
-  color: #fff;
+  color: white;
   border-radius: 999px;
   font-size: 0.8rem;
   font-weight: 600;
@@ -7298,7 +7384,7 @@ select.input-field {
 .strategy-preset-card {
   padding: 0.75rem 1rem;
   border: 2px solid var(--color-border);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   cursor: pointer;
   transition: all 0.15s;
 }
@@ -7326,10 +7412,10 @@ select.input-field {
   gap: 0.4rem;
   padding: 0.3rem 0.5rem;
   background: var(--color-bg-secondary);
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
 }
 .config-alloc-label { font-size: 0.78rem; color: var(--color-text-secondary); min-width: 3rem; }
-.config-alloc-value { font-size: 0.82rem; font-weight: 600; color: var(--color-text); }
+.config-alloc-value { font-size: 0.82rem; font-weight: 600; color: var(--color-text); font-variant-numeric: tabular-nums; }
 .config-kv-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
@@ -7341,10 +7427,10 @@ select.input-field {
   gap: 0.4rem;
   padding: 0.3rem 0.5rem;
   background: var(--color-bg-secondary);
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
 }
 .config-kv-key { font-size: 0.78rem; color: var(--color-text-secondary); min-width: 4rem; }
-.config-kv-val { font-size: 0.82rem; font-weight: 600; color: var(--color-text); }
+.config-kv-val { font-size: 0.82rem; font-weight: 600; color: var(--color-text); font-variant-numeric: tabular-nums; }
 .config-input {
   width: 60px;
   padding: 0.15rem 0.3rem;
@@ -7366,27 +7452,25 @@ select.input-field {
   gap: 0.6rem;
   padding: 0.55rem 0.75rem;
   background: var(--color-bg-secondary);
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   border-left: 3px solid transparent;
 }
 .config-history-item.active { border-left-color: var(--color-primary); background: var(--color-primary-bg); }
 .history-meta { display: flex; align-items: center; gap: 0.4rem; flex: 1; min-width: 0; }
-.history-id { font-size: 0.72rem; color: var(--color-text-tertiary); font-family: monospace; }
+.history-id { font-size: 0.72rem; color: var(--color-text-tertiary); font-family: var(--font-mono); }
 .history-strategy { font-size: 0.78rem; font-weight: 600; color: var(--color-text); }
 .history-active-badge {
   font-size: 0.65rem;
   padding: 0.05rem 0.4rem;
   background: var(--color-primary);
-  color: #fff;
+  color: white;
   border-radius: 999px;
 }
 .history-note { font-size: 0.72rem; color: var(--color-text-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .history-time { font-size: 0.7rem; color: var(--color-text-tertiary); white-space: nowrap; }
-.btn-xs { font-size: 0.7rem; padding: 0.15rem 0.4rem; }
 
 /* ── 移动端补充样式 ────────────────────────────────────────── */
 @media (max-width: 768px) {
-  /* 持仓卡片 */
   .summary-cards {
     grid-template-columns: 1fr;
   }
@@ -7395,25 +7479,21 @@ select.input-field {
     grid-column: span 1;
   }
 
-  /* 表格横向滚动 */
   .table-wrap {
     overflow-x: auto;
     -webkit-overflow-scrolling: touch;
   }
 
-  /* 按钮触摸区域 */
   .btn-action {
     min-height: 44px;
     padding: 0.6rem;
   }
 
-  /* 弹窗适配 */
   .modal-dialog {
     max-width: 95vw;
     margin: 0.5rem;
   }
 
-  /* 表单 */
   .form-row {
     grid-template-columns: 1fr;
     gap: 0.75rem;
@@ -7424,10 +7504,9 @@ select.input-field {
   }
 
   .form-input {
-    font-size: 16px; /* 防止 iOS 自动缩放 */
+    font-size: 16px;
   }
 
-  /* 配置项 */
   .config-kv-item {
     flex-wrap: wrap;
     gap: 0.25rem;
@@ -7442,7 +7521,6 @@ select.input-field {
     width: 80px;
   }
 
-  /* 大弹窗适配 */
   .modal-lg {
     max-width: 95vw;
   }
@@ -7450,24 +7528,20 @@ select.input-field {
     max-width: 95vw;
   }
 
-  /* 5年收益统计网格 */
   .chart-5y-stats {
     grid-template-columns: 1fr 1fr;
     gap: 0.4rem;
   }
 
-  /* 费用计算网格 */
   .fee-calc-grid,
   .fee-result-cards {
     grid-template-columns: 1fr;
   }
 
-  /* 策略预设网格 */
   .strategy-presets-grid {
     grid-template-columns: 1fr;
   }
 
-  /* 分析模式 tabs 横向滚动 */
   .analysis-tabs {
     overflow-x: auto;
     -webkit-overflow-scrolling: touch;
@@ -7481,14 +7555,12 @@ select.input-field {
     white-space: nowrap;
   }
 
-  /* 相关性热力图横向滚动 */
   .overlap-heatmap {
     overflow-x: auto;
     -webkit-overflow-scrolling: touch;
     display: block;
   }
 
-  /* 诊断结果表格 */
   .analysis-section :deep(table) {
     display: block;
     overflow-x: auto;
@@ -7496,7 +7568,6 @@ select.input-field {
     white-space: nowrap;
   }
 
-  /* 全景诊断结果中的表格 */
   .ai-mode-result :deep(table) {
     display: block;
     overflow-x: auto;
@@ -7515,41 +7586,49 @@ select.input-field {
 .fund-name-cell .fund-code {
   font-weight: 600;
   font-size: 0.85rem;
+  font-variant-numeric: tabular-nums;
 }
 .fund-name-cell .fund-name {
   font-size: 0.75rem;
-  color: var(--color-muted);
+  color: var(--color-text-muted);
 }
 .percentile-badge {
   display: inline-block;
   padding: 2px 8px;
   border-radius: 10px;
-  font-size: 0.75rem;
-  font-weight: 500;
+  font-size: 0.72rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
 }
 .percentile-badge.low {
-  background: rgba(76, 175, 80, 0.15);
-  color: #4caf50;
+  background: var(--color-profit-bg);
+  color: var(--color-profit);
 }
 .percentile-badge.mid {
-  background: rgba(255, 152, 0, 0.15);
-  color: #ff9800;
+  background: var(--color-warning-bg);
+  color: var(--color-warning);
 }
 .percentile-badge.high {
-  background: rgba(244, 67, 54, 0.15);
-  color: #f44336;
+  background: var(--color-loss-bg);
+  color: var(--color-loss);
 }
+.dark .percentile-badge.low { color: var(--color-profit); }
+.dark .percentile-badge.mid { color: var(--color-warning); }
+.dark .percentile-badge.high { color: var(--color-loss); }
 .priority-badge {
   display: inline-block;
   padding: 2px 8px;
   border-radius: 10px;
-  font-size: 0.75rem;
-  font-weight: 500;
+  font-size: 0.72rem;
+  font-weight: 600;
 }
-.priority-badge.priority-0 { background: var(--color-bg-tertiary); color: var(--color-muted); }
-.priority-badge.priority-1 { background: rgba(33, 150, 243, 0.15); color: #2196f3; }
-.priority-badge.priority-2 { background: rgba(255, 152, 0, 0.15); color: #ff9800; }
-.priority-badge.priority-3 { background: rgba(244, 67, 54, 0.15); color: #f44336; }
+.priority-badge.priority-0 { background: var(--color-bg-tertiary); color: var(--color-text-muted); }
+.priority-badge.priority-1 { background: var(--color-info-bg); color: var(--color-info); }
+.priority-badge.priority-2 { background: var(--color-warning-bg); color: var(--color-warning); }
+.priority-badge.priority-3 { background: var(--color-loss-bg); color: var(--color-loss); }
+.dark .priority-badge.priority-1 { color: var(--color-info); }
+.dark .priority-badge.priority-2 { color: var(--color-warning); }
+.dark .priority-badge.priority-3 { color: var(--color-loss); }
 .notes-cell {
   max-width: 150px;
   overflow: hidden;

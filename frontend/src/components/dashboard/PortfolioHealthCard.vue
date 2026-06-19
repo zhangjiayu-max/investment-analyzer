@@ -1,7 +1,9 @@
 <script setup>
 import EmptyState from '../ui/EmptyState.vue'
+import Icon from '../ui/Icon.vue'
+import AIActionButton from '../ui/AIActionButton.vue'
+import AgentResultCard from '../ui/AgentResultCard.vue'
 import { formatMoney, concentrationColor, concentrationIcon } from '../../composables/useDashboardHelpers'
-import { renderMarkdown } from '../../composables/useMarkdown'
 
 const props = defineProps({
   portfolioHealth: { type: Object, default: null },
@@ -32,32 +34,26 @@ const categoryLabels = {
       </div>
       <div class="card-header-actions">
         <span v-if="portfolioHealth" class="card-data-time">{{ portfolioUpdatedAt || '' }}</span>
-        <button
+        <AIActionButton
           v-if="portfolioHealth"
-          class="btn-ai-action"
-          :class="{ 'btn-loading': rebalanceLoading }"
-          :disabled="rebalanceLoading"
+          :label="rebalanceResult ? '重新生成' : 'AI 再平衡建议'"
+          agent="全景诊断分析师"
+          icon="refresh"
+          variant="soft"
+          size="sm"
+          :loading="rebalanceLoading"
           @click="emit('rebalance')"
-        >
-          <svg :class="['icon-spin', { 'spinning': rebalanceLoading }]" width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
-          </svg>
-          <span>{{ rebalanceResult ? '重新生成' : 'AI 再平衡建议' }}</span>
-          <span class="ai-agent-tooltip">全景诊断分析师</span>
-        </button>
-        <button
+        />
+        <AIActionButton
           v-if="portfolioHealth"
-          class="btn-ai-action"
-          :class="{ 'btn-loading': panoramaLoading }"
-          :disabled="panoramaLoading"
+          label="AI 全景诊断"
+          agent="全景诊断分析师"
+          icon="bot"
+          variant="primary"
+          size="sm"
+          :loading="panoramaLoading"
           @click="emit('panorama')"
-        >
-          <svg :class="['icon-spin', { 'spinning': panoramaLoading }]" width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
-          </svg>
-          <span>{{ panoramaLoading ? '分析中...' : 'AI 全景诊断' }}</span>
-          <span class="ai-agent-tooltip">全景诊断分析师</span>
-        </button>
+        />
       </div>
     </div>
     <div v-if="!portfolioHealth" class="card-empty">
@@ -90,13 +86,13 @@ const categoryLabels = {
 
       <!-- 集中度 -->
       <div class="concentration-row">
-        <span class="concentration-icon">{{ concentrationIcon[portfolioHealth.concentration_level] || '✅' }}</span>
+        <span class="concentration-icon"><Icon :name="concentrationIcon[portfolioHealth.concentration_level] || 'shield-check'" size="14" /></span>
         <div>
           <div class="concentration-text">{{ portfolioHealth.concentration_assessment }}</div>
           <div class="concentration-bar-bg">
             <div
               class="concentration-bar"
-              :style="{ width: Math.min(portfolioHealth.top3_concentration, 100) + '%', background: concentrationColor[portfolioHealth.concentration_level] || '#10b981' }"
+              :style="{ width: Math.min(portfolioHealth.top3_concentration, 100) + '%', background: concentrationColor[portfolioHealth.concentration_level] || 'var(--color-success)' }"
             ></div>
           </div>
         </div>
@@ -138,7 +134,7 @@ const categoryLabels = {
               </div>
               <span class="alloc-values">
                 <span class="alloc-current">{{ ((rebalanceResult.current_allocation[cat]||0)*100).toFixed(0) }}%</span>
-                <span class="alloc-arrow">→</span>
+                <span class="alloc-arrow"><Icon name="arrow-right" size="11" /></span>
                 <span class="alloc-target">{{ ((rebalanceResult.target_allocation[cat]||0)*100).toFixed(0) }}%</span>
               </span>
             </div>
@@ -162,19 +158,20 @@ const categoryLabels = {
       </div>
 
       <!-- AI 全景诊断结果 -->
-      <div v-if="panoramaResult && !panoramaResult.error" class="panorama-section">
-        <div class="panorama-header">
-          <span class="panorama-title">AI 全景诊断</span>
-          <span class="panorama-time">{{ panoramaResult.created_at?.slice(0, 16) }}</span>
-        </div>
-        <div class="panorama-content markdown-body" v-html="renderMarkdown(panoramaResult.result_data || panoramaResult.result)"></div>
-      </div>
-      <div v-else-if="panoramaResult?.error" class="panorama-section">
-        <span class="panorama-error">{{ panoramaResult.error }}</span>
-      </div>
+      <AgentResultCard
+        v-if="panoramaResult"
+        title="AI 全景诊断"
+        agent="全景诊断分析师"
+        class="portfolio-agent-result"
+        :status="panoramaLoading || panoramaResult.status === 'running' ? 'running' : panoramaResult.error ? 'error' : 'done'"
+        :content="panoramaResult.result_data || panoramaResult.result || ''"
+        :error="panoramaResult.error || ''"
+        :token-usage="panoramaResult.token_usage || 0"
+        :record-id="panoramaResult.id"
+      />
 
       <div class="card-actions">
-        <button class="btn-ghost btn-sm" @click="emit('navigate', 'portfolio')">查看全部持仓 →</button>
+        <button class="btn-ghost btn-sm" @click="emit('navigate', 'portfolio')">查看全部持仓 <Icon name="arrow-right" size="12" /></button>
       </div>
     </div>
   </div>
@@ -193,8 +190,8 @@ const categoryLabels = {
   transition: box-shadow 0.3s cubic-bezier(0.4, 0, 0.2, 1), border-color 0.3s ease, transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
   position: relative;
   overflow: hidden;
-  min-height: 420px;
-  max-height: 540px;
+  min-height: auto;
+  max-height: none;
 }
 .dash-card::before {
   content: '';
@@ -256,10 +253,11 @@ const categoryLabels = {
 .card-body {
   display: flex;
   flex-direction: column;
-  gap: 0.65rem;
+  gap: 0.85rem;
   flex: 1;
   overflow-y: auto;
   min-height: 0;
+  padding: 0.25rem 0;
 }
 .card-empty {
   display: flex;
@@ -288,79 +286,6 @@ const categoryLabels = {
   gap: 0.5rem;
   margin-top: 0.5rem;
 }
-.btn-ai-action {
-  position: relative;
-  display: inline-flex;
-  align-items: center;
-  gap: 0.4rem;
-  padding: 0.45rem 0.85rem;
-  font-size: 0.8rem;
-  font-weight: 600;
-  color: var(--color-primary);
-  background: linear-gradient(135deg, var(--color-primary-bg), var(--color-primary-bg-gradient-end));
-  border: 1px solid var(--color-primary-border);
-  border-radius: var(--radius-lg);
-  cursor: pointer;
-  transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
-  white-space: nowrap;
-}
-.btn-ai-action:hover {
-  background: linear-gradient(135deg, var(--color-primary-bg-strong), var(--color-primary-bg-hover));
-  border-color: var(--color-primary-border-strong);
-  transform: translateY(-1px);
-  box-shadow: 0 4px 12px var(--color-primary-bg-strong);
-}
-.btn-ai-action:active {
-  transform: translateY(0);
-  box-shadow: none;
-}
-.btn-ai-action:disabled {
-  opacity: 0.6;
-  cursor: not-allowed;
-  transform: none;
-  box-shadow: none;
-}
-.btn-ai-action.btn-loading {
-  background: linear-gradient(135deg, var(--color-primary-bg-gradient-end), var(--color-primary-bg-weak));
-  border-color: var(--color-primary-bg-strong);
-}
-.icon-spin {
-  transition: transform 0.3s ease;
-}
-.icon-spin.spinning {
-  animation: spin 1s linear infinite;
-}
-.ai-agent-tooltip {
-  position: absolute;
-  top: calc(100% + 8px);
-  left: 50%;
-  transform: translateX(-50%);
-  padding: 0.4rem 0.7rem;
-  font-size: 0.72rem;
-  font-weight: 600;
-  color: white;
-  background: linear-gradient(135deg, #0d1220, #1a1f35);
-  border-radius: var(--radius-md);
-  white-space: nowrap;
-  opacity: 0;
-  visibility: hidden;
-  pointer-events: none;
-  z-index: 100;
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
-}
-.ai-agent-tooltip::after {
-  content: '';
-  position: absolute;
-  bottom: 100%;
-  left: 50%;
-  transform: translateX(-50%);
-  border: 5px solid transparent;
-  border-bottom-color: #0d1220;
-}
-.btn-ai-action:hover .ai-agent-tooltip {
-  opacity: 1;
-  visibility: visible;
-}
 .health-metrics {
   display: grid;
   grid-template-columns: 1fr 1fr 1fr;
@@ -386,8 +311,8 @@ const categoryLabels = {
   color: var(--color-text-primary);
   letter-spacing: -0.02em;
 }
-.metric-value.profit { color: #dc2626; }
-.metric-value.loss { color: #059669; }
+.metric-value.profit { color: var(--color-danger); }
+.metric-value.loss { color: var(--color-success); }
 .concentration-row {
   display: flex;
   align-items: flex-start;
@@ -498,9 +423,9 @@ const categoryLabels = {
   border-radius: var(--radius-sm);
   letter-spacing: 0.03em;
 }
-.drift-badge.balanced { background: rgba(16, 185, 129, 0.12); color: #059669; }
-.drift-badge.slight { background: rgba(245, 158, 11, 0.12); color: #d97706; }
-.drift-badge.significant { background: rgba(239, 68, 68, 0.12); color: #dc2626; }
+.drift-badge.balanced { background: var(--color-success-bg); color: var(--color-success); }
+.drift-badge.slight { background: var(--color-warning-bg); color: var(--color-warning); }
+.drift-badge.significant { background: var(--color-danger-bg); color: var(--color-danger); }
 .market-tag {
   font-size: 0.72rem;
   color: var(--color-text-muted);
@@ -550,7 +475,7 @@ const categoryLabels = {
 }
 .alloc-bar-target {
   height: 7px;
-  background: var(--color-accent, #10b981);
+  background: var(--color-success);
   border-radius: 3px;
   opacity: 0.4;
   transition: width 0.6s cubic-bezier(0.4, 0, 0.2, 1);
@@ -565,7 +490,7 @@ const categoryLabels = {
 }
 .alloc-current { font-weight: 700; color: var(--color-primary); }
 .alloc-arrow { color: var(--color-text-muted); font-size: 0.72rem; }
-.alloc-target { font-weight: 600; color: var(--color-accent, #10b981); }
+.alloc-target { font-weight: 600; color: var(--color-success); }
 .rebalance-suggestions {
   display: flex;
   flex-direction: column;
@@ -589,10 +514,10 @@ const categoryLabels = {
   flex-shrink: 0;
   letter-spacing: 0.02em;
 }
-.suggestion-action.buy, .suggestion-action.buy_index { background: rgba(16, 185, 129, 0.12); color: #059669; }
-.suggestion-action.sell { background: rgba(239, 68, 68, 0.12); color: #dc2626; }
-.suggestion-action.deploy_cash { background: rgba(59, 130, 246, 0.12); color: #2563eb; }
-.suggestion-action.reserve_cash { background: rgba(245, 158, 11, 0.12); color: #d97706; }
+.suggestion-action.buy, .suggestion-action.buy_index { background: var(--color-success-bg); color: var(--color-success); }
+.suggestion-action.sell { background: var(--color-danger-bg); color: var(--color-danger); }
+.suggestion-action.deploy_cash { background: var(--color-info-bg); color: var(--color-info); }
+.suggestion-action.reserve_cash { background: var(--color-warning-bg); color: var(--color-warning); }
 .suggestion-detail { color: var(--color-text-secondary); line-height: 1.5; }
 .suggestion-amount {
   display: inline-block;
@@ -600,55 +525,10 @@ const categoryLabels = {
   font-weight: 600;
   color: var(--color-primary);
 }
-.panorama-section {
-  border-top: 1px solid var(--color-border-light);
-  padding-top: 0.75rem;
+.portfolio-agent-result {
   margin-top: 0.75rem;
 }
-.panorama-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin-bottom: 0.5rem;
-}
-.panorama-title {
-  font-size: 0.95rem;
-  font-weight: 700;
-  color: var(--color-primary);
-}
-.panorama-time {
-  font-size: 0.75rem;
-  color: var(--color-text-muted);
-}
-.panorama-content {
-  font-size: 0.85rem;
-  line-height: 1.7;
-  color: var(--color-text-secondary);
-  max-height: 400px;
-  overflow-y: auto;
-  background: linear-gradient(135deg, var(--color-bg-card), var(--color-bg-card));
-  border-radius: var(--radius-lg);
-  padding: 1rem;
-  border: 1px solid var(--color-border-light);
-}
-.panorama-content :deep(strong) { color: var(--color-text-primary); font-weight: 600; }
-.panorama-content :deep(table) {
-  width: 100%;
-  border-collapse: collapse;
-  margin: 0.5rem 0;
-  font-size: 0.8rem;
-}
-.panorama-content :deep(th),
-.panorama-content :deep(td) {
-  padding: 0.5rem 0.75rem;
-  border: 1px solid var(--color-border-light);
-  text-align: left;
-}
-.panorama-content :deep(th) {
-  background: var(--color-bg-hover);
-  font-weight: 600;
-}
-.panorama-error { color: var(--color-danger); font-size: 0.85rem; }
+
 @keyframes spin {
   from { transform: rotate(0deg); }
   to { transform: rotate(360deg); }

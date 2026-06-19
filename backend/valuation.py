@@ -7,7 +7,7 @@ from plotly.subplots import make_subplots
 from market_data import get_stock_history, get_stock_info, get_fund_nav, get_fund_info
 
 
-def analyze_stock(symbol: str, user_valuation: dict = None) -> dict:
+def analyze_stock(symbol: str, user_valuation: dict = None, enable_fusion: bool = False) -> dict:
     """
     综合分析一只股票。
 
@@ -47,7 +47,7 @@ def analyze_stock(symbol: str, user_valuation: dict = None) -> dict:
         pe, pb, price_stats, user_valuation
     )
 
-    return {
+    result = {
         "name": name,
         "code": symbol,
         "basic_info": info,
@@ -57,6 +57,18 @@ def analyze_stock(symbol: str, user_valuation: dict = None) -> dict:
         "reason": reason,
         "score": score,
     }
+
+    # 估值融合层（可选）：LLM 结合基本面/情绪/画像做二次判断 + 可解释溯源
+    if enable_fusion:
+        try:
+            from valuation_fusion import fusion_score
+            from agent.kyc import get_kyc_profile
+            result["fusion"] = fusion_score(result, get_kyc_profile("default"))
+        except Exception as e:
+            import logging
+            logging.warning(f"估值融合附加失败: {e}")
+
+    return result
 
 
 def analyze_fund(fund_code: str, user_valuation: dict = None) -> dict:

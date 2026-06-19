@@ -1,6 +1,10 @@
 <script setup>
 import { computed } from 'vue'
 import { getPercentileColor } from '../../composables/useDashboardHelpers'
+import Icon from '../ui/Icon.vue'
+import AIActionButton from '../ui/AIActionButton.vue'
+
+const REC_STATUS_ICON = { correct: 'check', wrong: 'error', flat: 'arrow-right', pending: 'hourglass' }
 
 const props = defineProps({
   hotTopics: { type: Array, default: null },
@@ -54,17 +58,15 @@ const allRelatedHoldings = computed(() => {
       </div>
       <div class="card-header-actions">
         <span v-if="hotTopicsFetchedAt" class="card-data-time">{{ hotTopicsFetchedAt }}</span>
-        <button
-          v-if="!hotspotLoading"
-          class="btn-ai-action"
+        <AIActionButton
+          :label="hotspotsAnalysis ? '重新分析' : 'AI 分析'"
+          agent="热点分析专家"
+          icon="lightbulb"
+          variant="soft"
+          size="sm"
+          :loading="hotspotLoading"
           @click="emit('analyze')"
-        >
-          <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z"/>
-          </svg>
-          <span>{{ hotspotsAnalysis ? '重新分析' : 'AI 分析' }}</span>
-          <span class="ai-agent-tooltip">热点分析专家</span>
-        </button>
+        />
       </div>
     </div>
 
@@ -198,7 +200,7 @@ const allRelatedHoldings = computed(() => {
           </span>
           <span class="verify-name">{{ rec.index_name }}</span>
           <span :class="['verify-status', 'vs-' + rec.status]">
-            {{ rec.status === 'correct' ? '✅' : rec.status === 'wrong' ? '❌' : rec.status === 'flat' ? '➡️' : '⏳' }}
+            <Icon :name="REC_STATUS_ICON[rec.status] || 'hourglass'" size="12" class="inline-icon" />
             {{ rec.status === 'correct' ? '正确' : rec.status === 'wrong' ? '错误' : rec.status === 'flat' ? '平局' : '待验证' }}
             <template v-if="rec.change_pct != null">({{ rec.change_pct > 0 ? '+' : '' }}{{ rec.change_pct }}%)</template>
             <template v-if="rec.benchmark_change_pct != null"> vs 基准{{ rec.benchmark_change_pct > 0 ? '+' : '' }}{{ rec.benchmark_change_pct }}%</template>
@@ -210,6 +212,7 @@ const allRelatedHoldings = computed(() => {
 </template>
 
 <style scoped>
+.inline-icon { vertical-align: middle; margin-right: 2px; }
 .dash-card {
   padding: 1.25rem 1.5rem;
   display: flex;
@@ -222,8 +225,8 @@ const allRelatedHoldings = computed(() => {
   transition: box-shadow 0.3s cubic-bezier(0.4, 0, 0.2, 1), border-color 0.3s ease, transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
   position: relative;
   overflow: hidden;
-  min-height: 420px;
-  max-height: 540px;
+  min-height: auto;
+  max-height: none;
 }
 .dash-card::before {
   content: '';
@@ -297,10 +300,11 @@ const allRelatedHoldings = computed(() => {
 .card-body {
   display: flex;
   flex-direction: column;
-  gap: 0.65rem;
+  gap: 0.85rem;
   flex: 1;
   overflow-y: auto;
   min-height: 0;
+  padding: 0.25rem 0;
 }
 .card-empty {
   display: flex;
@@ -335,59 +339,6 @@ const allRelatedHoldings = computed(() => {
   border-radius: 50%;
   animation: spin 0.8s cubic-bezier(0.4, 0, 0.2, 1) infinite;
 }
-.btn-ai-action {
-  position: relative;
-  display: inline-flex;
-  align-items: center;
-  gap: 0.4rem;
-  padding: 0.45rem 0.85rem;
-  font-size: 0.8rem;
-  font-weight: 600;
-  color: var(--color-primary);
-  background: linear-gradient(135deg, var(--color-primary-bg), var(--color-primary-bg-gradient-end));
-  border: 1px solid var(--color-primary-border);
-  border-radius: var(--radius-lg);
-  cursor: pointer;
-  transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
-  white-space: nowrap;
-}
-.btn-ai-action:hover {
-  background: linear-gradient(135deg, var(--color-primary-bg-strong), var(--color-primary-bg-hover));
-  border-color: var(--color-primary-border-strong);
-  transform: translateY(-1px);
-  box-shadow: 0 4px 12px var(--color-primary-glow-strong);
-}
-.ai-agent-tooltip {
-  position: absolute;
-  top: calc(100% + 8px);
-  left: 50%;
-  transform: translateX(-50%);
-  padding: 0.4rem 0.7rem;
-  font-size: 0.72rem;
-  font-weight: 600;
-  color: white;
-  background: linear-gradient(135deg, #0d1220, #1a1f35);
-  border-radius: var(--radius-md);
-  white-space: nowrap;
-  opacity: 0;
-  visibility: hidden;
-  pointer-events: none;
-  z-index: 100;
-  box-shadow: 0 4px 12px rgba(0,0,0,0.15);
-}
-.ai-agent-tooltip::after {
-  content: '';
-  position: absolute;
-  bottom: 100%;
-  left: 50%;
-  transform: translateX(-50%);
-  border: 5px solid transparent;
-  border-bottom-color: #0d1220;
-}
-.btn-ai-action:hover .ai-agent-tooltip {
-  opacity: 1;
-  visibility: visible;
-}
 .hotspots-relate-summary {
   display: flex;
   flex-wrap: wrap;
@@ -402,8 +353,8 @@ const allRelatedHoldings = computed(() => {
   color: var(--color-text-muted);
 }
 .hotspots-body {
-  max-height: 450px;
-  overflow-y: auto;
+  max-height: none;
+  overflow-y: visible;
 }
 .hotspots-summary {
   font-size: 0.95rem;
@@ -426,8 +377,8 @@ const allRelatedHoldings = computed(() => {
   transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
 }
 .rec-card:hover {
-  background: linear-gradient(135deg, rgba(13,18,32,0.95), rgba(255,255,255,0.04));
-  box-shadow: 0 2px 8px rgba(0,0,0,0.05);
+  background: var(--color-bg-hover);
+  box-shadow: var(--shadow-md);
 }
 .rec-main {
   display: flex;
@@ -451,10 +402,10 @@ const allRelatedHoldings = computed(() => {
   flex-shrink: 0;
   font-weight: 600;
 }
-.rp-already_have { background: rgba(212,168,67,0.12); color: #d4b65a; }
-.rp-can_add { background: rgba(16,185,129,0.12); color: #10b981; }
-.rp-reduce { background: rgba(239,68,68,0.12); color: #ef4444; }
-.rp-new { background: rgba(245,158,11,0.12); color: #f59e0b; }
+.rp-already_have { background: var(--color-primary-bg); color: var(--color-primary); }
+.rp-can_add { background: var(--color-success-bg); color: var(--color-success); }
+.rp-reduce { background: var(--color-danger-bg); color: var(--color-danger); }
+.rp-new { background: var(--color-warning-bg); color: var(--color-warning); }
 .rec-actions {
   display: flex;
   gap: 0.2rem;
@@ -482,14 +433,14 @@ const allRelatedHoldings = computed(() => {
 }
 .rec-feedback-btn.helpful:hover,
 .rec-feedback-btn.helpful.active {
-  color: #10b981;
-  background: rgba(16,185,129,0.12);
+  color: var(--color-success);
+  background: var(--color-success-bg);
   opacity: 1;
 }
 .rec-feedback-btn.unhelpful:hover,
 .rec-feedback-btn.unhelpful.active {
-  color: #ef4444;
-  background: rgba(239,68,68,0.12);
+  color: var(--color-danger);
+  background: var(--color-danger-bg);
   opacity: 1;
 }
 .rec-feedback-btn:disabled { cursor: default; }
@@ -502,9 +453,9 @@ const allRelatedHoldings = computed(() => {
   flex-shrink: 0;
   letter-spacing: 0.02em;
 }
-.rec-up { background: rgba(16,185,129,0.12); color: #10b981; }
-.rec-down { background: rgba(239,68,68,0.12); color: #ef4444; }
-.rec-watch { background: rgba(245,158,11,0.12); color: #f59e0b; }
+.rec-up { background: var(--color-success-bg); color: var(--color-success); }
+.rec-down { background: var(--color-danger-bg); color: var(--color-danger); }
+.rec-watch { background: var(--color-warning-bg); color: var(--color-warning); }
 .rec-name {
   font-size: 0.88rem;
   font-weight: 600;
@@ -542,9 +493,9 @@ const allRelatedHoldings = computed(() => {
   flex-shrink: 0;
   font-weight: 600;
 }
-.conf-high { background: rgba(16,185,129,0.12); color: #10b981; }
-.conf-medium { background: rgba(245,158,11,0.12); color: #f59e0b; }
-.conf-low { background: rgba(107,114,128,0.12); color: #6b7280; }
+.conf-high { background: var(--color-success-bg); color: var(--color-success); }
+.conf-medium { background: var(--color-warning-bg); color: var(--color-warning); }
+.conf-low { background: var(--color-bg-hover); color: var(--color-text-muted); }
 .hotspots-details { margin-top: 0.75rem; }
 .hotspots-details-summary {
   font-size: 0.8rem;
@@ -562,16 +513,16 @@ const allRelatedHoldings = computed(() => {
   white-space: pre-wrap;
   margin-top: 0.75rem;
   padding: 0.75rem 1rem;
-  background: linear-gradient(135deg, var(--color-primary-bg), rgba(212,168,67,0.04));
-  border: 1px solid rgba(212,168,67,0.1);
+  background: var(--color-primary-bg);
+  border: 1px solid var(--color-primary-border);
   border-radius: var(--radius-md);
 }
 .news-list {
-  max-height: 360px;
+  max-height: 400px;
   overflow-y: auto;
   display: flex;
   flex-direction: column;
-  gap: 0.6rem;
+  gap: 0.75rem;
 }
 .news-list-compact {
   max-height: 200px;
@@ -581,10 +532,10 @@ const allRelatedHoldings = computed(() => {
   margin-bottom: 0.25rem;
 }
 .news-item {
-  padding: 0.65rem 0.75rem;
+  padding: 0.75rem 0.85rem;
   border-radius: var(--radius-md);
   border-left: 3px solid var(--color-primary-300);
-  background: linear-gradient(135deg, var(--color-bg-input), var(--color-bg-card));
+  background: var(--color-bg-input);
   transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
 }
 .news-item:hover {
@@ -632,8 +583,8 @@ const allRelatedHoldings = computed(() => {
   font-size: 0.65rem;
   padding: 0.1rem 0.4rem;
   border-radius: 4px;
-  background: rgba(99,102,241,0.1);
-  color: #6366f1;
+  background: var(--color-info-bg);
+  color: var(--color-primary);
   font-weight: 600;
 }
 .news-indexes, .news-holdings {
@@ -664,8 +615,8 @@ const allRelatedHoldings = computed(() => {
   font-size: 0.65rem;
   padding: 0.1rem 0.4rem;
   border-radius: 4px;
-  background: rgba(16,185,129,0.1);
-  color: #10b981;
+  background: var(--color-success-bg);
+  color: var(--color-success);
   font-weight: 500;
 }
 .hotspots-hint {
@@ -689,8 +640,8 @@ const allRelatedHoldings = computed(() => {
 .verify-bar:hover { background: var(--color-bg-hover); }
 .verify-label { font-weight: 600; color: var(--color-text-primary); }
 .verify-stat { color: var(--color-text-muted); }
-.verify-stat.correct { color: #10b981; }
-.verify-stat.wrong { color: #ef4444; }
+.verify-stat.correct { color: var(--color-success); }
+.verify-stat.wrong { color: var(--color-danger); }
 .verify-accuracy {
   margin-left: auto;
   font-weight: 700;
@@ -740,9 +691,9 @@ const allRelatedHoldings = computed(() => {
 .verify-item:hover { background: var(--color-bg-hover); }
 .verify-name { flex: 1; color: var(--color-text-primary); font-weight: 500; }
 .verify-status { font-size: 0.72rem; white-space: nowrap; }
-.vs-correct { color: #10b981; }
-.vs-wrong { color: #ef4444; }
-.vs-flat { color: #f59e0b; }
+.vs-correct { color: var(--color-success); }
+.vs-wrong { color: var(--color-danger); }
+.vs-flat { color: var(--color-warning); }
 .vs-pending { color: var(--color-text-muted); }
 @media (max-width: 768px) {
   .card-header-actions { flex-wrap: wrap; gap: 0.25rem; }

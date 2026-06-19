@@ -1856,18 +1856,50 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
     # 超过最大轮次，做最后一次总结
     _check_cancel(cancel_event)
     try:
+        # 注入 KYC 画像，让最终综合答案"懂用户"（轻量主控综合层）
+        try:
+            from agent.kyc import kyc_profile_to_text
+            kyc_text = kyc_profile_to_text("default")
+            if kyc_text:
+                llm_messages.append({"role": "system", "content": f"在综合各专家意见给出最终建议时，请务必结合用户的投资画像：\n{kyc_text}"})
+        except Exception:
+            pass
         llm_messages.append({
             "role": "user",
             "content": "请根据以上各专家的分析结果，给出最终的综合投资建议。",
         })
-        response = _call_llm(
-            caller="orchestrator",
-            model=MODEL,
-            messages=llm_messages,
-            temperature=0.3,
-            max_tokens=8192,
-        )
-        final_answer = response.choices[0].message.content or ""
+        final_answer = ""
+        # 流式生成：逐 chunk 推送思考过程 + 答案增量
+        try:
+            from llm_service import _call_llm_stream
+            for chunk in _call_llm_stream(
+                caller="orchestrator",
+                model=MODEL,
+                messages=llm_messages,
+                temperature=0.3,
+                max_tokens=8192,
+            ):
+                if chunk.get("reasoning"):
+                    yield {"type": "reasoning_chunk", "content": chunk["reasoning"], "agent": "orchestrator"}
+                if chunk.get("content"):
+                    final_answer += chunk["content"]
+                    yield {"type": "answer_chunk", "content": chunk["content"]}
+        except CancelledError:
+            raise
+        except Exception as stream_err:
+            # 流式失败 → 回退非流式（仅当尚未产出内容时）
+            logger.warning(f"流式生成失败，回退非流式: {stream_err}")
+            if not final_answer:
+                response = _call_llm(
+                    caller="orchestrator",
+                    model=MODEL,
+                    messages=llm_messages,
+                    temperature=0.3,
+                    max_tokens=8192,
+                )
+                final_answer = response.choices[0].message.content or ""
+        if not final_answer:
+            final_answer = "分析过程较长，请参考以上各专家的分析结果。"
     except CancelledError:
         raise
     except Exception:

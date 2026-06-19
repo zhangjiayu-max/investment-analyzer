@@ -33,8 +33,8 @@ export function formatPct(v) {
   return (v * 100).toFixed(1) + '%'
 }
 
-export const concentrationColor = { low: '#10b981', moderate: '#f59e0b', high: '#ef4444' }
-export const concentrationIcon = { low: '✅', moderate: '⚡', high: '⚠️' }
+export const concentrationColor = { low: 'var(--color-success)', moderate: 'var(--color-warning)', high: 'var(--color-danger)' }
+export const concentrationIcon = { low: 'shield-check', moderate: 'zap', high: 'shield-alert' }
 
 export function _cmpTemp(prev, current) {
   if (prev == null || current == null) return '--'

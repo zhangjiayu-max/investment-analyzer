@@ -75,6 +75,7 @@ from routers.rag import router as rag_router
 from routers.market_intelligence import router as market_intelligence_router
 from routers.knowledge import router as knowledge_router
 from routers.watchlist import router as watchlist_router
+from routers.profile import router as profile_router                    # /api/profile/*
 
 # 注册新路径路由（优先级高）
 app.include_router(valuation_router)
@@ -105,6 +106,7 @@ app.include_router(rag_router)
 app.include_router(knowledge_router)
 app.include_router(market_intelligence_router)
 app.include_router(watchlist_router)
+app.include_router(profile_router)
 
 # 静态文件目录
 for _d in (STATIC_DIR, IMAGES_DIR, OUTPUT_DIR, UPLOADS_DIR, DD_IMAGES_DIR, VALUATION_IMAGES_DIR):

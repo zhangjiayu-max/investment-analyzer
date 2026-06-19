@@ -72,15 +72,15 @@ def delete_conversation(conv_id: int):
 
 # ── Message CRUD ──────────────────────────────────────
 
-def get_messages(conv_id: int, limit: int = 50) -> list[dict]:
-    """获取对话的消息历史（最近 N 条）。"""
+def get_messages(conv_id: int, limit: int = 50, offset: int = 0) -> list[dict]:
+    """获取对话的消息历史（最近 N 条，支持分页）。"""
     conn = _get_conn()
     rows = conn.execute("""
         SELECT * FROM messages
         WHERE conversation_id = ?
         ORDER BY id DESC
-        LIMIT ?
-    """, (conv_id, limit)).fetchall()
+        LIMIT ? OFFSET ?
+    """, (conv_id, limit, offset)).fetchall()
     conn.close()
     return [dict(r) for r in reversed(rows)]
 

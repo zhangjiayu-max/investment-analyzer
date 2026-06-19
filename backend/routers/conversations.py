@@ -79,12 +79,12 @@ async def delete_conversation_api(conv_id: int):
 
 
 @router.get("/api/conversations/{conv_id}/messages")
-async def get_messages_api(conv_id: int, limit: int = 50):
-    """获取对话消息历史。"""
+async def get_messages_api(conv_id: int, limit: int = 50, offset: int = 0):
+    """获取对话消息历史（支持分页）。"""
     conv = get_conversation(conv_id)
     if not conv:
         raise HTTPException(404, "对话不存在")
-    msgs = get_messages(conv_id, limit)
+    msgs = get_messages(conv_id, limit, offset)
     # 解析 metadata JSON 字符串为 dict
     for msg in msgs:
         if msg.get("metadata") and isinstance(msg["metadata"], str):
@@ -593,8 +593,18 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
         # 1. 存储用户消息（去重：中断重试时不重复保存）
         existing = get_messages(conv_id, limit=1)
         if not existing or existing[-1]["role"] != "user" or existing[-1]["content"] != req.content:
-            create_message(conv_id, "user", req.content)
+            user_msg_id = create_message(conv_id, "user", req.content)
+        else:
+            user_msg_id = existing[-1]["id"]
         yield _sse_event("user_message", {"content": req.content})
+
+        # KYC 画像对话中持续学习（异步后台，不阻塞主流程；仅关键词命中时触发）
+        try:
+            from agent.kyc_learner import should_extract, learn_from_message
+            if should_extract(req.content):
+                asyncio.create_task(asyncio.to_thread(learn_from_message, req.content, "default"))
+        except Exception as e:
+            logger.debug(f"KYC 学习触发跳过: {e}")
 
         # 1.1 首次对话时立即更新标题
         if conv.get("title") == "新对话":
@@ -694,7 +704,6 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
             yield _sse_event("done", {"duration_ms": int((time.time() - request_start) * 1000), "complexity": "chat"})
 
             # 保存消息
-            msg_id = create_message(conv_id, "user", req.content)
             metadata = {"complexity": "chat", "execution_status": "completed"}
             create_message(conv_id, "assistant", answer, metadata=json.dumps(metadata, ensure_ascii=False))
 
@@ -702,7 +711,7 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
             if rag_result and rag_result.get("results"):
                 try:
                     log_rag_search(
-                        conversation_id=conv_id, message_id=msg_id, query=req.content,
+                        conversation_id=conv_id, message_id=user_msg_id, query=req.content,
                         keywords=rag_result.get("keywords", []),
                         results=rag_result.get("results", []),
                         content_types=rag_types if rag_types else None,
@@ -734,6 +743,7 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
                 # 直接运行专家（传递轻量级 RAG 上下文）
                 def _run_expert():
                     try:
+                        expert_query = clarification.get("refined_query") or req.content
                         prebuilt = ""
                         if rag_context:
                             prebuilt += f"## 知识库参考（书籍/文章）\n{rag_context[:800]}\n\n"
@@ -742,7 +752,7 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
                             prebuilt += f"## 用户当前持仓\n{build_portfolio_context()}\n\n"
                         except Exception:
                             pass
-                        return run_specialist(agent_key, req.content, prebuilt_context=prebuilt)
+                        return run_specialist(agent_key, expert_query, prebuilt_context=prebuilt)
                     except Exception as e:
                         return {"error": str(e)}
 
@@ -798,6 +808,8 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
                             for s in specialist_results
                         ],
                         "complexity": complexity,
+                        "execution_status": "completed",
+                        "refined_query": clarification.get("refined_query", req.content),
                     }
                     metadata = json.dumps(metadata_dict, ensure_ascii=False)
                     msg_id = create_message(conv_id, "assistant", answer, metadata=metadata)
@@ -1069,6 +1081,21 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
                         "icon": event.get("icon"),
                         "analysis": event.get("analysis"),
                         "duration_ms": event.get("duration_ms"),
+                    })
+
+            elif event_type == "reasoning_chunk":
+                # 思考过程增量（仅展示，不落库）
+                if not client_disconnected:
+                    yield _sse_event("reasoning_chunk", {
+                        "content": event.get("content", ""),
+                        "agent": event.get("agent", ""),
+                    })
+
+            elif event_type == "answer_chunk":
+                # 答案增量（仅展示，不落库；全文仍由最终 answer 事件持久化）
+                if not client_disconnected:
+                    yield _sse_event("answer_chunk", {
+                        "content": event.get("content", ""),
                     })
 
             elif event_type == "answer":

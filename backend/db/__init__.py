@@ -51,7 +51,7 @@ from db.dashboard import (
 
 # Agent 系统
 from db.agents import (
-    _init_preset_agents, list_agents, get_agent, create_agent, update_agent,
+    _init_preset_agents, _init_wealth_specialists, list_agents, get_agent, create_agent, update_agent,
     delete_agent, save_prompt_version, list_prompt_versions, get_prompt_version,
     create_agent_run, get_agent_runs,
     load_specialist_agents, clear_specialist_cache,
@@ -109,7 +109,8 @@ from db.portfolio import (
 from db.analysis import (
     _init_analysis_tables, list_analysis_agents, get_analysis_agent,
     update_analysis_agent, create_analysis_history, list_analysis_history,
-    get_analysis_history_item, delete_analysis_history,
+    get_analysis_history_item, get_analysis_history_status, update_analysis_history,
+    delete_analysis_history,
     DEFAULT_MARKET_ANALYST_PROMPT, DEFAULT_DIVERSIFICATION_PROMPT,
     DEFAULT_PANORAMA_PROMPT, DEFAULT_FUND_DEEP_DIVE_PROMPT,
     DEFAULT_TRADE_REVIEW_PROMPT, DEFAULT_WHATIF_PROMPT,
@@ -618,6 +619,9 @@ def init_db():
     # 初始化预设 Agent
     _init_preset_agents(conn)
 
+    # 初始化理财专家团队编排专家（wealth_advisor/behavior_coach/macro_strategist）
+    _init_wealth_specialists(conn)
+
     # 初始化评测集表
     init_eval_tables(conn)
 
@@ -761,6 +765,10 @@ def init_db():
     # agent_runs 增加时间追踪字段
     _add_column_if_not_exists(conn, "agent_runs", "started_at", "TEXT")
     _add_column_if_not_exists(conn, "agent_runs", "completed_at", "TEXT")
+
+    # analysis_history 支持异步任务状态
+    _add_column_if_not_exists(conn, "analysis_history", "status", "TEXT DEFAULT 'done'")
+    _add_column_if_not_exists(conn, "analysis_history", "error_msg", "TEXT DEFAULT ''")
 
     # knowledge_base 表：投资知识库
     conn.execute("""

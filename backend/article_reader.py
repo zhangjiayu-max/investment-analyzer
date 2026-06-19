@@ -234,3 +234,82 @@ def extract_stock_codes(text: str) -> list:
         if code.startswith(("6", "0", "1", "3", "5")):
             codes.append(code)
     return sorted(set(codes))
+
+
+def extract_article_structure(title: str, content: str) -> dict:
+    """用 LLM 提取文章的结构化信息（核心观点/标的/操作建议/时效性/偏见）。
+
+    替代纯正则提取，提供更深度的文章解读。供文章解读专家使用。
+
+    返回:
+        {
+            "core_viewpoints": [{"point", "evidence"}],
+            "mentioned_targets": [{"name", "code", "sentiment"}],
+            "action_suggestions": [{"action", "target", "reason"}],
+            "timeliness": str,
+            "bias": str,
+        }
+    """
+    import json as _json
+    import logging
+    from llm_service import _call_llm, MODEL
+
+    prompt = f"""分析以下投资相关文章，提取结构化信息。
+
+文章标题：{title}
+文章正文（前 6000 字）：{content[:6000]}
+
+请提取并输出 JSON（只输出 JSON，不要其他文字）：
+{{
+  "core_viewpoints": [
+    {{"point": "核心观点1", "evidence": "原文支撑片段"}}
+  ],
+  "mentioned_targets": [
+    {{"name": "标的名称", "code": "代码（如有，否则空）", "sentiment": "positive|negative|neutral"}}
+  ],
+  "action_suggestions": [
+    {{"action": "加仓|减仓|观望|买入|卖出|关注", "target": "标的", "reason": "理由"}}
+  ],
+  "timeliness": "时效性评估（如'当前有效'、'已过时'、'长期参考'）",
+  "bias": "潜在偏见分析（如'过度乐观'、'利益相关'、'客观中立'）"
+}}
+
+要求：
+- 核心观点 2-5 个，必须有原文支撑
+- 标的包括股票/基金/指数/行业，标注情感倾向
+- 操作建议只提取作者明确提出的，不臆测
+- 无相应内容则返回空数组"""
+
+    try:
+        response = _call_llm(
+            caller="article_structure",
+            model=MODEL,
+            messages=[
+                {"role": "system", "content": "你是投资文章分析助手。只输出 JSON。"},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.2,
+            max_tokens=1500,
+        )
+        raw = response.choices[0].message.content.strip()
+        if "```" in raw:
+            raw = raw.split("```")[1]
+            if raw.startswith("json"):
+                raw = raw[4:]
+        result = _json.loads(raw)
+        return {
+            "core_viewpoints": result.get("core_viewpoints", []),
+            "mentioned_targets": result.get("mentioned_targets", []),
+            "action_suggestions": result.get("action_suggestions", []),
+            "timeliness": result.get("timeliness", ""),
+            "bias": result.get("bias", ""),
+        }
+    except Exception as e:
+        logging.warning(f"文章结构化提取失败: {e}")
+        return {
+            "core_viewpoints": [],
+            "mentioned_targets": [],
+            "action_suggestions": [],
+            "timeliness": "",
+            "bias": "",
+        }

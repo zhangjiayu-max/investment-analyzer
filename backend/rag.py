@@ -134,13 +134,15 @@ def _get_reranker():
     return _reranker
 
 
-def rerank_results(query: str, results: list[dict], top_k: int = 5) -> list[dict]:
-    """对检索结果进行重排序（使用 cross-encoder）。
+def rerank_results(query: str, results: list[dict], top_k: int = 5,
+                   user_id: str = None) -> list[dict]:
+    """对检索结果进行重排序（cross-encoder 相关性 + 用户画像个性化加权）。
 
     Args:
         query: 用户查询
         results: 检索结果列表
         top_k: 返回前 k 个结果
+        user_id: 用户 ID（传入则启用个性化加权：关注品种 boost + 历史高频主题）
 
     Returns:
         重排序后的结果列表
@@ -150,6 +152,10 @@ def rerank_results(query: str, results: list[dict], top_k: int = 5) -> list[dict
 
     reranker = _get_reranker()
     if not reranker:
+        # 无 reranker 时仍可做画像加权
+        if user_id:
+            _apply_personalization_boost(results, user_id)
+            results.sort(key=lambda x: x.get("personal_boost", 0), reverse=True)
         return results[:top_k]
 
     try:
@@ -163,13 +169,85 @@ def rerank_results(query: str, results: list[dict], top_k: int = 5) -> list[dict
         for i, score in enumerate(scores):
             results[i]["rerank_score"] = float(score)
 
-        # 按 rerank 分数排序
-        results.sort(key=lambda x: x.get("rerank_score", 0), reverse=True)
+        # 个性化加权（在 cross-encoder 分数基础上叠加）
+        if user_id:
+            _apply_personalization_boost(results, user_id)
+
+        # 按总分排序（rerank_score + personal_boost）
+        results.sort(key=lambda x: x.get("rerank_score", 0) + x.get("personal_boost", 0), reverse=True)
 
         return results[:top_k]
     except Exception as e:
         logger.error(f"Rerank 失败: {e}")
         return results[:top_k]
+
+
+# ── 品种关键词映射（用于个性化加权）──
+_ASSET_KEYWORDS = {
+    "index": ["指数", "沪深300", "中证500", "创业板", "科创50", "上证50"],
+    "fund": ["基金", "ETF", "联接基金"],
+    "bond": ["债券", "国债", "债基", "利率债", "信用债"],
+    "stock": ["股票", "A股", "个股", "持仓股"],
+    "gold": ["黄金", "贵金属", "金价"],
+    "cash": ["货币基金", "现金管理", "余额宝"],
+}
+
+
+def _apply_personalization_boost(results: list[dict], user_id: str):
+    """根据用户画像（关注品种）和检索历史（高频主题）对结果加权。
+
+    boost 叠加到 result["personal_boost"]，与 cross-encoder 分数相加排序。
+    """
+    if not user_id or not results:
+        return
+
+    # 1. 关注品种关键词
+    focus_kw = set()
+    try:
+        from agent.kyc import get_kyc_profile
+        profile = get_kyc_profile(user_id)
+        focus = profile.get("focus_assets", [])
+        if isinstance(focus, str):
+            import json as _json
+            try:
+                focus = _json.loads(focus)
+            except Exception:
+                focus = []
+        for asset in (focus or []):
+            for kw in _ASSET_KEYWORDS.get(asset, []):
+                focus_kw.add(kw)
+    except Exception:
+        pass
+
+    # 2. 历史高频检索主题（rag_logs）
+    hot_topics = set()
+    try:
+        from db import _get_conn
+        conn = _get_conn()
+        rows = conn.execute(
+            "SELECT DISTINCT query FROM rag_logs WHERE query IS NOT NULL AND query != '' "
+            "ORDER BY created_at DESC LIMIT 30"
+        ).fetchall()
+        conn.close()
+        for r in rows:
+            q = r["query"] if isinstance(r, dict) else (r[0] if r else "")
+            for w in str(q).replace("，", " ").split():
+                if len(w) >= 2:
+                    hot_topics.add(w)
+    except Exception:
+        pass
+
+    # 应用加权（温和叠加，避免压过相关性）
+    for r in results:
+        body = ((r.get("body", "") or "") + " " + (r.get("title", "") or "")).lower()
+        boost = 0.0
+        if focus_kw:
+            hit_focus = sum(1 for kw in focus_kw if kw.lower() in body)
+            boost += hit_focus * 0.3  # 每命中一个关注品种词 +0.3
+        if hot_topics:
+            hit_hot = sum(1 for w in hot_topics if w.lower() in body)
+            boost += min(hit_hot * 0.1, 0.5)  # 历史主题加权，上限 0.5
+        r["personal_boost"] = boost
 
 
 def rewrite_query(query: str) -> str:
@@ -1608,7 +1686,7 @@ def build_rag_context_with_details(query: str, content_types: list[str] = None, 
     # 默认关闭：RRF + 标题加权 + 时效性加权已能提供合理排序
     # 设置环境变量 RERANK_ENABLED=true 可开启
     if RERANK_ENABLED and len(all_results) > 3:
-        all_results = rerank_results(query, all_results, top_k=limit)
+        all_results = rerank_results(query, all_results, top_k=limit, user_id="default")
         logger.info(f"Rerank 后: {len(all_results)}条")
 
     # 标记来源（fts / chroma / both）

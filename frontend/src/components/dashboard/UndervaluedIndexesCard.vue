@@ -1,5 +1,6 @@
 <script setup>
 import EmptyState from '../ui/EmptyState.vue'
+import Icon from '../ui/Icon.vue'
 import { getPercentileColor, assessmentColors } from '../../composables/useDashboardHelpers'
 
 const props = defineProps({
@@ -91,7 +92,7 @@ const emit = defineEmits(['refresh', 'navigate'])
           {{ idx.assessment }}
         </span>
       </div>
-      <button class="btn-link" @click="emit('navigate', 'valuation')">查看全部估值 →</button>
+      <button class="btn-link" @click="emit('navigate', 'valuation')">查看全部估值 <Icon name="arrow-right" size="12" /></button>
     </div>
   </div>
 </template>
@@ -109,8 +110,8 @@ const emit = defineEmits(['refresh', 'navigate'])
   transition: box-shadow 0.3s cubic-bezier(0.4, 0, 0.2, 1), border-color 0.3s ease, transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
   position: relative;
   overflow: hidden;
-  min-height: 420px;
-  max-height: 540px;
+  min-height: auto;
+  max-height: none;
 }
 /* Gradient top accent bar */
 .dash-card::before {
@@ -183,10 +184,11 @@ const emit = defineEmits(['refresh', 'navigate'])
 .card-body {
   display: flex;
   flex-direction: column;
-  gap: 0.65rem;
+  gap: 0.85rem;
   flex: 1;
   overflow-y: auto;
   min-height: 0;
+  padding: 0.25rem 0;
 }
 .card-empty {
   display: flex;

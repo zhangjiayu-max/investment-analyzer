@@ -12,6 +12,7 @@ import {
 import ConfirmDialog from './ConfirmDialog.vue'
 import AppToast from './AppToast.vue'
 import { ChatSidebar, ChatMessage, ChatInput, StreamIndicator, FeedbackModal } from './chat'
+import Icon from './ui/Icon.vue'
 import { useToast } from '../composables/useToast'
 import { renderMarkdown } from '../composables/useMarkdown'
 import { useStreamingState } from '../composables/useStreamingState'
@@ -274,20 +275,51 @@ function sendMessageAndTrack(convId, text) {
   }
   const controller = sendMessageStream(convId, text, (event) => {
     routeStreamEvent(convId, event, {
+      onAnswerChunk: (cid, data, state) => {
+        if (selectedConv.value?.id !== cid) return
+        const lastMsg = messages.value[messages.value.length - 1]
+        if (lastMsg && lastMsg.role === 'assistant' && lastMsg.streaming) {
+          // 增量追加答案 + 持续更新思考过程
+          lastMsg.content += data.content || ''
+          if (state.streamingReasoning) lastMsg.reasoning = state.streamingReasoning
+        } else {
+          // 首个 chunk：push 占位消息（带已累积的思考过程）
+          messages.value.push({
+            role: 'assistant',
+            content: data.content || '',
+            reasoning: state.streamingReasoning || '',
+            streaming: true,
+            created_at: new Date().toISOString(),
+          })
+        }
+        nextTick(() => scrollToBottom())
+      },
       onAnswer: (cid, data, state) => {
         if (selectedConv.value?.id !== cid) return
         const allSpecResults = data.specialist_results || (state.completedSpecialists.length > 0 ? [...state.completedSpecialists] : [])
         const phaseAResults = allSpecResults.filter(s => !s.is_cross_review)
         const phaseBResults = allSpecResults.filter(s => s.is_cross_review)
-        messages.value.push({
-          role: 'assistant',
-          content: data.content,
-          created_at: new Date().toISOString(),
-          specialist_results: phaseAResults.length > 0 ? phaseAResults : null,
-          cross_review_results: phaseBResults.length > 0 ? phaseBResults : (state.completedCrossReviews.length > 0 ? [...state.completedCrossReviews] : null),
-          tool_calls: state.currentToolCalls.length > 0 ? [...state.currentToolCalls] : null,
-          rag: state.currentToolCalls._ragSources ? { sources: state.currentToolCalls._ragSources } : null,
-        })
+        const lastMsg = messages.value[messages.value.length - 1]
+        if (lastMsg && lastMsg.role === 'assistant' && lastMsg.streaming) {
+          // 流式已产出：用全文兜底覆盖 + 附加专家结果
+          lastMsg.content = data.content || lastMsg.content
+          lastMsg.streaming = false
+          lastMsg.specialist_results = phaseAResults.length > 0 ? phaseAResults : null
+          lastMsg.cross_review_results = phaseBResults.length > 0 ? phaseBResults : (state.completedCrossReviews.length > 0 ? [...state.completedCrossReviews] : null)
+          lastMsg.tool_calls = state.currentToolCalls.length > 0 ? [...state.currentToolCalls] : null
+          lastMsg.rag = state.currentToolCalls._ragSources ? { sources: state.currentToolCalls._ragSources } : null
+        } else {
+          // 未收到 chunk（simple chat / 流式未生效 / 回退）：走原逻辑 push
+          messages.value.push({
+            role: 'assistant',
+            content: data.content,
+            created_at: new Date().toISOString(),
+            specialist_results: phaseAResults.length > 0 ? phaseAResults : null,
+            cross_review_results: phaseBResults.length > 0 ? phaseBResults : (state.completedCrossReviews.length > 0 ? [...state.completedCrossReviews] : null),
+            tool_calls: state.currentToolCalls.length > 0 ? [...state.currentToolCalls] : null,
+            rag: state.currentToolCalls._ragSources ? { sources: state.currentToolCalls._ragSources } : null,
+          })
+        }
         nextTick(() => scrollToBottom())
       },
       onDone: (cid, doneData) => {
@@ -427,20 +459,51 @@ async function handleSend() {
   const convId = selectedConv.value.id
   const controller = sendMessageStream(convId, text, (event) => {
     routeStreamEvent(convId, event, {
+      onAnswerChunk: (cid, data, state) => {
+        if (selectedConv.value?.id !== cid) return
+        const lastMsg = messages.value[messages.value.length - 1]
+        if (lastMsg && lastMsg.role === 'assistant' && lastMsg.streaming) {
+          // 增量追加答案 + 持续更新思考过程
+          lastMsg.content += data.content || ''
+          if (state.streamingReasoning) lastMsg.reasoning = state.streamingReasoning
+        } else {
+          // 首个 chunk：push 占位消息（带已累积的思考过程）
+          messages.value.push({
+            role: 'assistant',
+            content: data.content || '',
+            reasoning: state.streamingReasoning || '',
+            streaming: true,
+            created_at: new Date().toISOString(),
+          })
+        }
+        nextTick(() => scrollToBottom())
+      },
       onAnswer: (cid, data, state) => {
         if (selectedConv.value?.id !== cid) return
         const allSpecResults = data.specialist_results || (state.completedSpecialists.length > 0 ? [...state.completedSpecialists] : [])
         const phaseAResults = allSpecResults.filter(s => !s.is_cross_review)
         const phaseBResults = allSpecResults.filter(s => s.is_cross_review)
-        messages.value.push({
-          role: 'assistant',
-          content: data.content,
-          created_at: new Date().toISOString(),
-          specialist_results: phaseAResults.length > 0 ? phaseAResults : null,
-          cross_review_results: phaseBResults.length > 0 ? phaseBResults : (state.completedCrossReviews.length > 0 ? [...state.completedCrossReviews] : null),
-          tool_calls: state.currentToolCalls.length > 0 ? [...state.currentToolCalls] : null,
-          rag: state.currentToolCalls._ragSources ? { sources: state.currentToolCalls._ragSources } : null,
-        })
+        const lastMsg = messages.value[messages.value.length - 1]
+        if (lastMsg && lastMsg.role === 'assistant' && lastMsg.streaming) {
+          // 流式已产出：用全文兜底覆盖 + 附加专家结果
+          lastMsg.content = data.content || lastMsg.content
+          lastMsg.streaming = false
+          lastMsg.specialist_results = phaseAResults.length > 0 ? phaseAResults : null
+          lastMsg.cross_review_results = phaseBResults.length > 0 ? phaseBResults : (state.completedCrossReviews.length > 0 ? [...state.completedCrossReviews] : null)
+          lastMsg.tool_calls = state.currentToolCalls.length > 0 ? [...state.currentToolCalls] : null
+          lastMsg.rag = state.currentToolCalls._ragSources ? { sources: state.currentToolCalls._ragSources } : null
+        } else {
+          // 未收到 chunk（simple chat / 流式未生效 / 回退）：走原逻辑 push
+          messages.value.push({
+            role: 'assistant',
+            content: data.content,
+            created_at: new Date().toISOString(),
+            specialist_results: phaseAResults.length > 0 ? phaseAResults : null,
+            cross_review_results: phaseBResults.length > 0 ? phaseBResults : (state.completedCrossReviews.length > 0 ? [...state.completedCrossReviews] : null),
+            tool_calls: state.currentToolCalls.length > 0 ? [...state.currentToolCalls] : null,
+            rag: state.currentToolCalls._ragSources ? { sources: state.currentToolCalls._ragSources } : null,
+          })
+        }
         nextTick(() => scrollToBottom())
       },
       onDone: (cid, data) => {
@@ -676,20 +739,51 @@ async function handleResume() {
   sending.value = true
   const controller = resumeConversationStream(convId, (event) => {
     routeStreamEvent(convId, event, {
+      onAnswerChunk: (cid, data, state) => {
+        if (selectedConv.value?.id !== cid) return
+        const lastMsg = messages.value[messages.value.length - 1]
+        if (lastMsg && lastMsg.role === 'assistant' && lastMsg.streaming) {
+          // 增量追加答案 + 持续更新思考过程
+          lastMsg.content += data.content || ''
+          if (state.streamingReasoning) lastMsg.reasoning = state.streamingReasoning
+        } else {
+          // 首个 chunk：push 占位消息（带已累积的思考过程）
+          messages.value.push({
+            role: 'assistant',
+            content: data.content || '',
+            reasoning: state.streamingReasoning || '',
+            streaming: true,
+            created_at: new Date().toISOString(),
+          })
+        }
+        nextTick(() => scrollToBottom())
+      },
       onAnswer: (cid, data, state) => {
         if (selectedConv.value?.id !== cid) return
         const allSpecResults = data.specialist_results || (state.completedSpecialists.length > 0 ? [...state.completedSpecialists] : [])
         const phaseAResults = allSpecResults.filter(s => !s.is_cross_review)
         const phaseBResults = allSpecResults.filter(s => s.is_cross_review)
-        messages.value.push({
-          role: 'assistant',
-          content: data.content,
-          created_at: new Date().toISOString(),
-          specialist_results: phaseAResults.length > 0 ? phaseAResults : null,
-          cross_review_results: phaseBResults.length > 0 ? phaseBResults : (state.completedCrossReviews.length > 0 ? [...state.completedCrossReviews] : null),
-          tool_calls: state.currentToolCalls.length > 0 ? [...state.currentToolCalls] : null,
-          rag: state.currentToolCalls._ragSources ? { sources: state.currentToolCalls._ragSources } : null,
-        })
+        const lastMsg = messages.value[messages.value.length - 1]
+        if (lastMsg && lastMsg.role === 'assistant' && lastMsg.streaming) {
+          // 流式已产出：用全文兜底覆盖 + 附加专家结果
+          lastMsg.content = data.content || lastMsg.content
+          lastMsg.streaming = false
+          lastMsg.specialist_results = phaseAResults.length > 0 ? phaseAResults : null
+          lastMsg.cross_review_results = phaseBResults.length > 0 ? phaseBResults : (state.completedCrossReviews.length > 0 ? [...state.completedCrossReviews] : null)
+          lastMsg.tool_calls = state.currentToolCalls.length > 0 ? [...state.currentToolCalls] : null
+          lastMsg.rag = state.currentToolCalls._ragSources ? { sources: state.currentToolCalls._ragSources } : null
+        } else {
+          // 未收到 chunk（simple chat / 流式未生效 / 回退）：走原逻辑 push
+          messages.value.push({
+            role: 'assistant',
+            content: data.content,
+            created_at: new Date().toISOString(),
+            specialist_results: phaseAResults.length > 0 ? phaseAResults : null,
+            cross_review_results: phaseBResults.length > 0 ? phaseBResults : (state.completedCrossReviews.length > 0 ? [...state.completedCrossReviews] : null),
+            tool_calls: state.currentToolCalls.length > 0 ? [...state.currentToolCalls] : null,
+            rag: state.currentToolCalls._ragSources ? { sources: state.currentToolCalls._ragSources } : null,
+          })
+        }
         nextTick(() => scrollToBottom())
       },
       onDone: (cid, data) => {
@@ -1022,7 +1116,7 @@ function stopPollingProgress() {
         <!-- 聊天头部 -->
         <div class="chat-header">
           <div class="chat-header-info">
-            <span class="chat-agent-icon">🤖</span>
+            <span class="chat-agent-icon"><Icon name="bot" size="16" /></span>
             <span class="chat-agent-name">投资分析助手</span>
           </div>
           <button class="btn-conv-id" @click="copyConvId" :title="'对话 #' + selectedConv.id">
@@ -1075,7 +1169,7 @@ function stopPollingProgress() {
 
       <!-- 空状态 -->
       <div v-else class="chat-empty">
-        <div class="chat-empty-icon">💬</div>
+        <div class="chat-empty-icon"><Icon name="chat" size="48" /></div>
         <h3>选择或创建一个对话</h3>
         <p>选择左侧对话继续，或点击 + 创建新对话</p>
       </div>
@@ -1178,8 +1272,8 @@ function stopPollingProgress() {
 }
 
 .btn-conv-id.copied {
-  color: #10b981;
-  border-color: #10b981;
+  color: var(--color-success);
+  border-color: var(--color-success);
 }
 
 .conv-id-text {

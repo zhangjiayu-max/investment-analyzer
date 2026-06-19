@@ -268,9 +268,9 @@ function onBack() {
   position: sticky;
   top: 0;
   z-index: 40;
-  backdrop-filter: blur(20px) saturate(180%);
-  -webkit-backdrop-filter: blur(20px) saturate(180%);
-  box-shadow: 0 1px 12px rgba(0,0,0,0.04);
+  backdrop-filter: blur(24px) saturate(180%);
+  -webkit-backdrop-filter: blur(24px) saturate(180%);
+  box-shadow: var(--shadow-sm);
 }
 
 .mobile-title {
@@ -340,7 +340,7 @@ function onBack() {
 .mobile-more-overlay {
   position: fixed;
   inset: 0;
-  background: rgba(0,0,0,0.45);
+  background: var(--color-overlay);
   z-index: 50;
   display: flex;
   align-items: flex-end;
@@ -363,7 +363,7 @@ function onBack() {
   -webkit-overflow-scrolling: touch;
   padding-bottom: calc(1rem + env(safe-area-inset-bottom, 0px));
   animation: sheet-up 0.3s cubic-bezier(0.34, 1.2, 0.64, 1);
-  box-shadow: 0 -8px 32px rgba(0,0,0,0.12);
+  box-shadow: var(--shadow-lg);
 }
 @keyframes sheet-up {
   from { transform: translateY(100%); }
@@ -423,6 +423,18 @@ function onBack() {
   cursor: pointer;
   transition: all var(--transition-fast);
   min-height: 52px;
+  position: relative;
+  overflow: hidden;
+}
+.mobile-more-item::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: transparent;
+  transition: background var(--transition-fast);
 }
 
 .mobile-more-item.active {
@@ -430,6 +442,9 @@ function onBack() {
   border-color: var(--color-primary-border);
   color: var(--color-primary);
   font-weight: 600;
+}
+.mobile-more-item.active::before {
+  background: var(--gradient-primary);
 }
 
 .mobile-more-item:active {
@@ -448,9 +463,9 @@ function onBack() {
   bottom: 0;
   z-index: 40;
   padding-bottom: env(safe-area-inset-bottom, 0);
-  backdrop-filter: blur(20px) saturate(180%);
-  -webkit-backdrop-filter: blur(20px) saturate(180%);
-  box-shadow: 0 -1px 12px rgba(0,0,0,0.04);
+  backdrop-filter: blur(24px) saturate(180%);
+  -webkit-backdrop-filter: blur(24px) saturate(180%);
+  box-shadow: var(--shadow-sm);
 }
 
 .mobile-tab {
@@ -481,11 +496,11 @@ function onBack() {
   top: 0;
   left: 50%;
   transform: translateX(-50%);
-  width: 24px;
+  width: 28px;
   height: 3px;
   border-radius: 2px;
   background: var(--gradient-primary);
-  box-shadow: 0 0 8px var(--color-primary-glow-strong);
+  box-shadow: 0 0 12px var(--color-primary-glow-strong);
 }
 
 /* Tab icon animation */
