@@ -1,5 +1,6 @@
 export const navItems = [
   { key: 'dashboard', label: '每日看板', icon: 'dashboard', hot: true },
+  { key: 'family-finance', label: '财务总览', icon: 'wallet' },
   { key: 'market-intelligence', label: '市场热点', icon: 'fire' },
   { key: 'chat', label: 'AI 对话', icon: 'chat' },
   { key: 'articles', label: '文章管理', icon: 'articles' },
@@ -8,6 +9,7 @@ export const navItems = [
   { key: 'portfolio', label: '持仓管理', icon: 'portfolio', hot: true },
   { key: 'goal-buckets', label: '资金桶', icon: 'wallet' },
   { key: 'allocation-dashboard', label: '配置偏离', icon: 'pie-chart' },
+  { key: 'strategy-sandbox', label: '策略沙盒', icon: 'bar-chart' },
   {
     key: 'group-knowledge',
     label: '知识库',

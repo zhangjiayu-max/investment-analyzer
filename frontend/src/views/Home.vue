@@ -16,6 +16,8 @@ import RagTestPage from '../components/RagTestPage.vue'
 import PortfolioManagement from '../components/PortfolioManagement.vue'
 import GoalBucketsPage from '../components/GoalBucketsPage.vue'
 import AllocationDashboard from '../components/AllocationDashboard.vue'
+import StrategySandboxPage from '../components/StrategySandboxPage.vue'
+import FamilyFinanceDashboard from '../components/FamilyFinanceDashboard.vue'
 import AdminAgentsPage from '../components/AdminAgentsPage.vue'
 import TokenUsagePage from '../components/TokenUsagePage.vue'
 import BadCasePage from '../components/BadCasePage.vue'
@@ -37,6 +39,7 @@ const emit = defineEmits(['navigate'])
 // ── KeepAlive 页面（除 analysis 外的所有页面）──
 const pageComponents = {
   dashboard: Dashboard,
+  'family-finance': FamilyFinanceDashboard,
   'market-intelligence': MarketIntelligence,
   chat: ChatView,
   articles: ArticleManagement,
@@ -50,6 +53,7 @@ const pageComponents = {
   portfolio: PortfolioManagement,
   'goal-buckets': GoalBucketsPage,
   'allocation-dashboard': AllocationDashboard,
+  'strategy-sandbox': StrategySandboxPage,
   'admin-agents': AdminAgentsPage,
   'token-usage': TokenUsagePage,
   'quality-dashboard': QualityDashboard,

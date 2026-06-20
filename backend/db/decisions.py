@@ -79,6 +79,21 @@ def init_decision_tables(conn):
         )
     """)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_decision_reviews_decision ON decision_reviews(decision_id)")
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS decision_peer_reviews (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            decision_id INTEGER NOT NULL REFERENCES decision_records(id) ON DELETE CASCADE,
+            reviewer_type TEXT NOT NULL,
+            model_name TEXT DEFAULT '',
+            prompt_version TEXT DEFAULT '',
+            verdict TEXT NOT NULL,
+            score_json TEXT DEFAULT '{}',
+            concerns_json TEXT DEFAULT '[]',
+            suggestions_json TEXT DEFAULT '[]',
+            created_at TEXT DEFAULT (datetime('now','localtime'))
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_peer_reviews_decision ON decision_peer_reviews(decision_id)")
 
 
 def _json_dumps(value) -> str:
@@ -1012,5 +1027,80 @@ def update_decision_action_status(action_id: int, status: str) -> bool:
         )
         conn.commit()
         return cur.rowcount > 0
+    finally:
+        conn.close()
+
+
+# ── 多模型评审 CRUD ──
+
+VALID_VERDICTS = {"approve", "approve_with_concerns", "reject", "defer"}
+
+
+def create_peer_review(
+    decision_id: int,
+    reviewer_type: str,
+    verdict: str,
+    model_name: str = "",
+    prompt_version: str = "",
+    score_json: dict | None = None,
+    concerns_json: list | None = None,
+    suggestions_json: list | None = None,
+) -> int | None:
+    """创建决策评审记录，返回 id。"""
+    if verdict not in VALID_VERDICTS:
+        return None
+    conn = _get_conn()
+    try:
+        cur = conn.execute(
+            """
+            INSERT INTO decision_peer_reviews
+                (decision_id, reviewer_type, model_name, prompt_version,
+                 verdict, score_json, concerns_json, suggestions_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                decision_id, reviewer_type, model_name, prompt_version,
+                verdict, _json_dumps(score_json), _json_dumps(concerns_json),
+                _json_dumps(suggestions_json),
+            ),
+        )
+        conn.commit()
+        return cur.lastrowid
+    finally:
+        conn.close()
+
+
+def list_peer_reviews(decision_id: int) -> list[dict]:
+    """列出某决策的所有评审。"""
+    conn = _get_conn()
+    try:
+        rows = conn.execute(
+            "SELECT * FROM decision_peer_reviews WHERE decision_id = ? ORDER BY created_at",
+            (decision_id,),
+        ).fetchall()
+        results = []
+        for row in rows:
+            item = dict(row)
+            item["score_json"] = _json_loads(item.get("score_json"), {})
+            item["concerns_json"] = _json_loads(item.get("concerns_json"), [])
+            item["suggestions_json"] = _json_loads(item.get("suggestions_json"), [])
+            results.append(item)
+        return results
+    finally:
+        conn.close()
+
+
+def count_high_risk_reviews(decision_id: int) -> int:
+    """统计某决策中高风险评审数量（reject 或 defer）。"""
+    conn = _get_conn()
+    try:
+        row = conn.execute(
+            """
+            SELECT COUNT(*) as cnt FROM decision_peer_reviews
+            WHERE decision_id = ? AND verdict IN ('reject', 'defer')
+            """,
+            (decision_id,),
+        ).fetchone()
+        return row["cnt"] if row else 0
     finally:
         conn.close()

@@ -70,6 +70,7 @@ from db.eval import (
     update_eval_case, delete_eval_case, create_eval_run, update_eval_run,
     list_eval_runs, get_eval_stats, get_eval_run_detail,
     list_eval_cases_by_agent, get_eval_case_avg_score,
+    save_rag_feedback, get_rag_feedback_stats,
 )
 
 # 文章 + 分析记录 + 作者文章 + 链接文章
@@ -159,6 +160,7 @@ from db.decisions import (
     update_decision_status, update_decision_action_status,
     ensure_dashboard_decisions, list_due_decision_reviews,
     record_decision_review, build_decision_precheck,
+    create_peer_review, list_peer_reviews, count_high_risk_reviews,
 )
 
 

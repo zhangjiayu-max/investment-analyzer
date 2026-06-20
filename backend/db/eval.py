@@ -277,6 +277,20 @@ def init_eval_tables(conn):
         )
     """)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_conv_summaries_cid ON conversation_summaries(conversation_id)")
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS rag_feedback (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            knowledge_id INTEGER,
+            content_type TEXT DEFAULT '',
+            query TEXT DEFAULT '',
+            rating INTEGER NOT NULL,
+            reasons TEXT DEFAULT '[]',
+            user_id TEXT DEFAULT 'default',
+            created_at TEXT DEFAULT (datetime('now','localtime'))
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_rag_feedback_user ON rag_feedback(user_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_rag_feedback_kid ON rag_feedback(knowledge_id)")
 
 
 def create_eval_case(name: str, analysis_type: str, input_params: str = "{}",
@@ -876,3 +890,82 @@ def get_failure_patterns(limit: int = 10) -> list:
     """, (limit,)).fetchall()
     conn.close()
     return [dict(r) for r in rows]
+
+
+# ── RAG 反馈 CRUD ──
+
+def save_rag_feedback(
+    knowledge_id: int = None,
+    content_type: str = "",
+    query: str = "",
+    rating: int = 1,
+    reasons: list = None,
+    user_id: str = "default",
+) -> int:
+    """保存 RAG 检索结果反馈。rating: 1=赞, -1=踩。"""
+    import json
+    conn = _get_conn()
+    cur = conn.execute(
+        """
+        INSERT INTO rag_feedback (knowledge_id, content_type, query, rating, reasons, user_id)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (knowledge_id, content_type, query, rating, json.dumps(reasons or [], ensure_ascii=False), user_id),
+    )
+    conn.commit()
+    feedback_id = cur.lastrowid
+    conn.close()
+    return feedback_id
+
+
+def get_rag_feedback_stats(user_id: str = "default", days: int = 30) -> dict:
+    """获取 RAG 反馈统计，用于个性化排序权重回流。
+
+    返回：
+        {
+            "positive_types": {"knowledge": 5, "book": 3, ...},  -- 赞过的内容类型计数
+            "negative_types": {"author_article": 2, ...},        -- 踩过的内容类型计数
+            "positive_ids": [101, 205, ...],                     -- 赞过的知识 ID
+            "negative_ids": [302, ...],                          -- 踩过的知识 ID
+            "total_feedback": 20,
+        }
+    """
+    from datetime import datetime, timedelta
+    conn = _get_conn()
+    cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
+    rows = conn.execute(
+        """
+        SELECT knowledge_id, content_type, rating
+        FROM rag_feedback
+        WHERE user_id = ? AND created_at >= ?
+        """,
+        (user_id, cutoff),
+    ).fetchall()
+    conn.close()
+
+    positive_types: dict[str, int] = {}
+    negative_types: dict[str, int] = {}
+    positive_ids = []
+    negative_ids = []
+
+    for row in rows:
+        ct = row["content_type"] or ""
+        kid = row["knowledge_id"]
+        if row["rating"] > 0:
+            if ct:
+                positive_types[ct] = positive_types.get(ct, 0) + 1
+            if kid:
+                positive_ids.append(kid)
+        elif row["rating"] < 0:
+            if ct:
+                negative_types[ct] = negative_types.get(ct, 0) + 1
+            if kid:
+                negative_ids.append(kid)
+
+    return {
+        "positive_types": positive_types,
+        "negative_types": negative_types,
+        "positive_ids": positive_ids,
+        "negative_ids": negative_ids,
+        "total_feedback": len(rows),
+    }

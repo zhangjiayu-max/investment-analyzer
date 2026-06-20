@@ -546,6 +546,11 @@ export function testRagSearch(query, limit = 5, contentTypes = null, useRewrite 
   return api.post('/rag/test-search', { query, limit, content_types: contentTypes, use_rewrite: useRewrite })
 }
 
+/** 提交 RAG 检索结果反馈 */
+export function submitRagFeedback({ knowledgeId, contentType, query, rating, reasons = [] }) {
+  return api.post('/rag/feedback', { knowledge_id: knowledgeId, content_type: contentType, query, rating, reasons })
+}
+
 /** 测试 Query Rewrite */
 export function testQueryRewrite(query) {
   return api.get('/rag/rewrite', { params: { query } })
@@ -913,6 +918,16 @@ export function submitDecisionReview(decisionId, payload) {
   return api.post(`/decisions/${decisionId}/review`, payload)
 }
 
+/** 触发决策多模型评审 */
+export function triggerPeerReview(decisionId, reviewerTypes = ['suitability', 'evidence', 'counter', 'overconfidence']) {
+  return api.post(`/decisions/${decisionId}/peer-review`, { reviewer_types: reviewerTypes })
+}
+
+/** 获取决策评审列表 */
+export function getPeerReviews(decisionId) {
+  return api.get(`/decisions/${decisionId}/peer-reviews`)
+}
+
 /** 获取质量评分概览 */
 export function getQualitySummary(days = 30) {
   return api.get('/eval/quality-summary', { params: { days } })
@@ -1079,6 +1094,21 @@ export function getAllocationDashboard() {
 /** 运行确定性组合压力测试 */
 export function runPortfolioStressTest(scenario = 'market_drop_20') {
   return api.post('/portfolio/stress-test', { scenario })
+}
+
+/** 获取家庭财务统一仪表盘 */
+export function getFinanceDashboard() {
+  return api.get('/finance-dashboard')
+}
+
+/** 获取策略沙盒预设 */
+export function getBacktestPresets() {
+  return api.get('/strategy-sandbox/presets')
+}
+
+/** 运行策略回测 */
+export function runBacktest(params) {
+  return api.post('/strategy-sandbox/backtest', params)
 }
 
 /** 获取调仓配置和策略预设 */

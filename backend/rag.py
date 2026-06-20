@@ -278,6 +278,19 @@ def _apply_personalization_boost(results: list[dict], user_id: str):
     except Exception:
         pass
 
+    # 3b. RAG 反馈回流：从 rag_feedback 表聚合最近 30 天的赞/踩数据
+    fb_positive_ids = set()
+    fb_negative_types = set()
+    fb_positive_types = set()
+    try:
+        from db.eval import get_rag_feedback_stats
+        fb_stats = get_rag_feedback_stats(user_id, days=30)
+        fb_positive_ids = set(fb_stats.get("positive_ids", []))
+        fb_negative_types = set(fb_stats.get("negative_types", {}).keys())
+        fb_positive_types = set(fb_stats.get("positive_types", {}).keys())
+    except Exception:
+        pass
+
     # 应用加权（温和叠加，避免压过相关性）
     for r in results:
         metadata_text = " ".join([
@@ -319,6 +332,18 @@ def _apply_personalization_boost(results: list[dict], user_id: str):
             boost += min(hit_behavior * 0.16, 0.5)
             if hit_behavior:
                 reasons.append("behavior_bias")
+        # 反馈回流：赞过的知识 ID 正向加权，踩过的内容类型负向加权
+        kid = r.get("reference_id")
+        ct = r.get("content_type") or ""
+        if kid and fb_positive_ids and int(kid) in fb_positive_ids:
+            boost += 0.15
+            reasons.append("feedback_liked")
+        if ct and fb_negative_types and ct in fb_negative_types:
+            boost -= 0.1
+            reasons.append("feedback_disliked")
+        if ct and fb_positive_types and ct in fb_positive_types:
+            boost += 0.05
+            reasons.append("feedback_type_liked")
         atom_type = r.get("atom_type") or ""
         evidence_level = r.get("evidence_level") or ""
         if atom_type in {"rule", "principle", "checklist", "user_lesson"}:

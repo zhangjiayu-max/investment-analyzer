@@ -150,3 +150,63 @@ async def complete_decision_action_api(decision_id: int, action_id: int):
     if not ok:
         raise HTTPException(400, "行动项状态更新失败")
     return {"ok": True, "item": get_decision(decision_id)}
+
+
+# ── 多模型评审 API ──
+
+class PeerReviewRequest(BaseModel):
+    reviewer_types: list[str] = ["suitability", "evidence", "counter", "overconfidence"]
+
+
+@router.post("/api/decisions/{decision_id}/peer-review")
+async def trigger_peer_review_api(decision_id: int, req: PeerReviewRequest):
+    """触发决策多模型评审。"""
+    decision = get_decision(decision_id)
+    if not decision:
+        raise HTTPException(404, "决策不存在")
+
+    from agent.orchestrator import run_peer_review
+    from db import create_peer_review, count_high_risk_reviews, update_decision_status
+
+    results = []
+    for rtype in req.reviewer_types:
+        review_result = run_peer_review(decision, rtype)
+        if review_result:
+            review_id = create_peer_review(
+                decision_id=decision_id,
+                reviewer_type=rtype,
+                verdict=review_result["verdict"],
+                model_name=review_result.get("model_name", ""),
+                prompt_version=review_result.get("prompt_version", ""),
+                score_json=review_result.get("score", {}),
+                concerns_json=review_result.get("concerns", []),
+                suggestions_json=review_result.get("suggestions", []),
+            )
+            results.append({
+                "id": review_id,
+                "reviewer_type": rtype,
+                **review_result,
+            })
+
+    # 如果多个评审都给出高风险结论，自动降级为 deferred
+    high_risk_count = count_high_risk_reviews(decision_id)
+    if high_risk_count >= 2:
+        update_decision_status(decision_id, "deferred", "多模型评审发现高风险，自动降级")
+
+    return {
+        "ok": True,
+        "reviews": results,
+        "high_risk_count": high_risk_count,
+        "auto_deferred": high_risk_count >= 2,
+    }
+
+
+@router.get("/api/decisions/{decision_id}/peer-reviews")
+async def list_peer_reviews_api(decision_id: int):
+    """获取决策的评审列表。"""
+    decision = get_decision(decision_id)
+    if not decision:
+        raise HTTPException(404, "决策不存在")
+
+    from db import list_peer_reviews
+    return {"items": list_peer_reviews(decision_id)}

@@ -1,6 +1,11 @@
 <script setup>
+import { ref } from 'vue'
 import { computed } from 'vue'
+import { triggerPeerReview, getPeerReviews } from '../../api'
+import { useToast } from '../../composables/useToast'
 import Icon from '../ui/Icon.vue'
+
+const { showToast } = useToast()
 
 const props = defineProps({
   decisions: { type: Array, default: () => [] },
@@ -11,6 +16,63 @@ const props = defineProps({
 const emit = defineEmits(['status-change', 'complete-action', 'precheck'])
 
 const visibleDecisions = computed(() => props.decisions || [])
+
+// ── 评审状态 ──
+const peerReviews = ref({})  // {decisionId: [reviews]}
+const reviewLoading = ref({})  // {decisionId: bool}
+
+async function loadPeerReviews(decisionId) {
+  try {
+    const { data } = await getPeerReviews(decisionId)
+    peerReviews.value[decisionId] = data.items || []
+  } catch (e) {
+    console.error('加载评审失败:', e)
+  }
+}
+
+async function startPeerReview(decisionId) {
+  reviewLoading.value[decisionId] = true
+  try {
+    const { data } = await triggerPeerReview(decisionId)
+    peerReviews.value[decisionId] = data.reviews || []
+    if (data.auto_deferred) {
+      showToast('多个评审给出高风险结论，决策已自动降级为暂缓', 'warning')
+    } else {
+      showToast(`评审完成，${data.reviews?.length || 0} 个维度已评审`, 'success')
+    }
+  } catch (e) {
+    showToast('评审失败: ' + (e.response?.data?.detail || e.message), 'error')
+  } finally {
+    reviewLoading.value[decisionId] = false
+  }
+}
+
+function verdictLabel(verdict) {
+  return {
+    approve: '通过',
+    approve_with_concerns: '有条件通过',
+    reject: '拒绝',
+    defer: '建议暂缓',
+  }[verdict] || verdict
+}
+
+function verdictClass(verdict) {
+  return {
+    approve: 'verdict-ok',
+    approve_with_concerns: 'verdict-warn',
+    reject: 'verdict-danger',
+    defer: 'verdict-danger',
+  }[verdict] || ''
+}
+
+function reviewerLabel(type) {
+  return {
+    suitability: '适当性',
+    evidence: '证据质量',
+    counter: '反方观点',
+    overconfidence: '过度自信',
+  }[type] || type
+}
 
 function decisionLabel(type) {
   const map = {
@@ -197,6 +259,15 @@ function precheckState(decisionId) {
           </button>
           <button
             type="button"
+            class="decision-card__btn decision-card__btn--review"
+            :disabled="reviewLoading[decision.id]"
+            @click="startPeerReview(decision.id)"
+          >
+            <Icon :name="reviewLoading[decision.id] ? 'spinner' : 'users'" size="12" />
+            {{ reviewLoading[decision.id] ? '评审中...' : '多模型评审' }}
+          </button>
+          <button
+            type="button"
             data-test="accept-decision"
             class="decision-card__btn decision-card__btn--accept"
             @click="emit('status-change', decision.id, 'accepted')"
@@ -219,6 +290,34 @@ function precheckState(decisionId) {
           >
             拒绝
           </button>
+        </div>
+
+        <!-- 评审结果 -->
+        <div v-if="peerReviews[decision.id]?.length" class="peer-reviews">
+          <div class="peer-reviews__title">
+            <Icon name="users" size="14" />
+            多模型评审结果
+          </div>
+          <div v-for="review in peerReviews[decision.id]" :key="review.id || review.reviewer_type" class="peer-review-item">
+            <div class="peer-review__head">
+              <span class="peer-review__type">{{ reviewerLabel(review.reviewer_type) }}</span>
+              <span :class="['peer-review__verdict', verdictClass(review.verdict)]">
+                {{ verdictLabel(review.verdict) }}
+              </span>
+            </div>
+            <div v-if="review.concerns?.length" class="peer-review__concerns">
+              <div v-for="c in review.concerns" :key="c" class="peer-review__concern">
+                <Icon name="alert-circle" size="11" />
+                {{ c }}
+              </div>
+            </div>
+            <div v-if="review.suggestions?.length" class="peer-review__suggestions">
+              <div v-for="s in review.suggestions" :key="s" class="peer-review__suggestion">
+                <Icon name="lightbulb" size="11" />
+                {{ s }}
+              </div>
+            </div>
+          </div>
         </div>
       </article>
     </div>
@@ -486,6 +585,85 @@ function precheckState(decisionId) {
   border-color: var(--color-success-border);
   color: var(--color-success);
 }
+
+.decision-card__btn--review {
+  background: #f0f9ff;
+  border-color: #93c5fd;
+  color: #2563eb;
+}
+
+/* ── 评审结果 ── */
+.peer-reviews {
+  grid-column: 1 / -1;
+  padding: 0.75rem;
+  background: var(--color-bg-input);
+  border-top: 1px solid var(--color-border-light);
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+.peer-reviews__title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.82rem;
+  font-weight: 700;
+  color: var(--color-text-primary);
+  margin-bottom: 0.25rem;
+}
+.peer-review-item {
+  padding: 0.5rem 0.75rem;
+  background: var(--color-bg-card);
+  border: 1px solid var(--color-border-light);
+  border-radius: var(--radius-md);
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+.peer-review__head {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+.peer-review__type {
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--color-text-muted);
+}
+.peer-review__verdict {
+  font-size: 0.72rem;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: var(--radius-sm);
+}
+.verdict-ok {
+  color: var(--color-success);
+  background: var(--color-success-bg);
+}
+.verdict-warn {
+  color: var(--color-warning-text);
+  background: var(--color-warning-bg);
+}
+.verdict-danger {
+  color: var(--color-danger);
+  background: var(--color-danger-bg);
+}
+.peer-review__concerns,
+.peer-review__suggestions {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.peer-review__concern,
+.peer-review__suggestion {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 0.78rem;
+  color: var(--color-text-secondary);
+}
+.peer-review__concern { color: var(--color-warning-text); }
+.peer-review__suggestion { color: var(--color-primary); }
 
 @media (max-width: 720px) {
   .decision-card {

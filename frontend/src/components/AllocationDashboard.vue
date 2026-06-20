@@ -1,6 +1,6 @@
 <script setup>
 import { computed, onMounted, ref } from 'vue'
-import { getAllocationDashboard } from '../api'
+import { getAllocationDashboard, runPortfolioStressTest } from '../api'
 import { useToast } from '../composables/useToast'
 import Icon from './ui/Icon.vue'
 
@@ -53,6 +53,42 @@ async function load() {
     showToast('加载组合偏离失败: ' + (e.response?.data?.detail || e.message), 'error')
   } finally {
     loading.value = false
+  }
+}
+
+// ── 压力测试 ──
+const stressScenarios = [
+  { key: 'market_drop_20', label: '市场下跌 20%', icon: 'trending-down' },
+  { key: 'rate_up', label: '利率上行', icon: 'percent' },
+  { key: 'liquidity_crunch', label: '流动性冲击', icon: 'droplets' },
+]
+const activeScenario = ref('market_drop_20')
+const stressLoading = ref(false)
+const stressResult = ref(null)
+
+const maxLoss = computed(() => {
+  if (!stressResult.value?.asset_impacts?.length) return 1
+  return Math.max(...stressResult.value.asset_impacts.map(a => Math.abs(a.loss_amount || 0)), 1)
+})
+
+function riskLevelClass(level) {
+  return { high: 'danger', medium: 'warning', low: 'ok' }[level] || 'ok'
+}
+
+function riskLevelText(level) {
+  return { high: '高风险', medium: '中风险', low: '低风险' }[level] || level
+}
+
+async function runStress() {
+  stressLoading.value = true
+  stressResult.value = null
+  try {
+    const { data } = await runPortfolioStressTest(activeScenario.value)
+    stressResult.value = data
+  } catch (e) {
+    showToast('压力测试失败: ' + (e.response?.data?.detail || e.message), 'error')
+  } finally {
+    stressLoading.value = false
   }
 }
 
@@ -164,6 +200,103 @@ onMounted(load)
           </article>
         </aside>
       </main>
+
+      <!-- 压力测试面板 -->
+      <section class="stress-panel">
+        <div class="section-title">
+          <h3>压力测试</h3>
+          <span>无需 LLM，点击场景即时计算</span>
+        </div>
+
+        <div class="scenario-tabs">
+          <button
+            v-for="s in stressScenarios"
+            :key="s.key"
+            :class="['scenario-tab', { active: activeScenario === s.key }]"
+            :disabled="stressLoading"
+            @click="activeScenario = s.key; runStress()"
+          >
+            <Icon :name="s.icon" size="14" />
+            {{ s.label }}
+          </button>
+        </div>
+
+        <div v-if="stressLoading" class="stress-loading">
+          <Icon name="spinner" size="18" />
+          <span>正在计算压力冲击...</span>
+        </div>
+
+        <div v-else-if="stressResult && stressResult.status === 'ok'" class="stress-content">
+          <!-- 核心指标 -->
+          <div class="stress-metrics">
+            <div class="stress-metric">
+              <span>当前总资产</span>
+              <strong>¥{{ money(stressResult.total_assets) }}</strong>
+            </div>
+            <div class="stress-arrow">
+              <Icon name="arrow-right" size="18" />
+            </div>
+            <div class="stress-metric">
+              <span>压力后资产</span>
+              <strong>¥{{ money(stressResult.projected_total_assets) }}</strong>
+            </div>
+            <div class="stress-metric">
+              <span>预计损失</span>
+              <strong class="text-danger">¥{{ money(stressResult.loss_amount) }}</strong>
+            </div>
+            <div class="stress-metric">
+              <span>损失比例</span>
+              <strong class="text-danger">{{ ratio(stressResult.loss_ratio) }}</strong>
+            </div>
+            <div class="stress-metric">
+              <span>风险等级</span>
+              <span :class="['risk-badge', riskLevelClass(stressResult.risk_level)]">
+                {{ riskLevelText(stressResult.risk_level) }}
+              </span>
+            </div>
+          </div>
+
+          <!-- 资产类别损失条形图 -->
+          <div class="impact-bars">
+            <div class="impact-head">
+              <span>资产类别</span>
+              <span>当前金额</span>
+              <span>冲击比例</span>
+              <span>损失金额</span>
+            </div>
+            <div v-for="item in stressResult.asset_impacts" :key="item.category" class="impact-row">
+              <div class="impact-label">{{ item.category }}</div>
+              <div class="impact-amount">¥{{ money(item.current_amount) }}</div>
+              <div class="impact-shock">{{ (item.shock_pct * 100).toFixed(1) }}%</div>
+              <div class="impact-bar-cell">
+                <div
+                  class="impact-bar"
+                  :style="{ width: (Math.abs(item.loss_amount) / maxLoss * 100) + '%' }"
+                />
+                <span class="impact-loss">¥{{ money(item.loss_amount) }}</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- 备用金 / 风险提示 -->
+          <div v-if="stressResult.warnings?.length" class="stress-warnings">
+            <div v-for="w in stressResult.warnings" :key="w" class="stress-warning-item">
+              <Icon name="alert-triangle" size="14" />
+              {{ w }}
+            </div>
+          </div>
+        </div>
+
+        <div v-else-if="stressResult && stressResult.status === 'empty'" class="stress-empty">
+          <Icon name="inbox" size="20" />
+          <span>{{ stressResult.warnings?.[0] || '暂无持仓数据' }}</span>
+        </div>
+
+        <div v-else class="stress-empty">
+          <Icon name="shield" size="20" />
+          <span>选择一个压力场景，查看组合在极端情况下的表现</span>
+        </div>
+      </section>
     </template>
   </div>
 </template>
@@ -383,5 +516,188 @@ onMounted(load)
   .metric-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .metric-cell:nth-child(2) { border-right: 0; }
   .metric-cell:nth-child(-n + 2) { border-bottom: 1px solid var(--color-border-light); }
+}
+
+/* ── 压力测试面板 ── */
+.stress-panel {
+  background: var(--color-bg-card);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  padding: var(--space-4);
+}
+
+.scenario-tabs {
+  display: flex;
+  gap: 8px;
+  margin-bottom: var(--space-4);
+}
+.scenario-tab {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 10px 14px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-bg-input);
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  font-size: 0.85rem;
+  font-weight: 500;
+  transition: all 0.15s;
+}
+.scenario-tab:hover { border-color: var(--color-primary); color: var(--color-primary); }
+.scenario-tab.active {
+  background: var(--color-primary-bg);
+  border-color: var(--color-primary);
+  color: var(--color-primary);
+  font-weight: 700;
+}
+.scenario-tab:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.stress-loading,
+.stress-empty {
+  min-height: 120px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  color: var(--color-text-muted);
+}
+
+.stress-content {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.stress-metrics {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  padding: var(--space-3);
+  background: var(--color-bg-input);
+  border-radius: var(--radius-md);
+  flex-wrap: wrap;
+}
+.stress-metric {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.stress-metric span {
+  color: var(--color-text-muted);
+  font-size: 0.75rem;
+}
+.stress-metric strong {
+  color: var(--color-text-primary);
+  font-size: 1rem;
+}
+.stress-arrow {
+  color: var(--color-text-muted);
+}
+.text-danger { color: var(--color-danger) !important; }
+
+.risk-badge {
+  display: inline-block;
+  padding: 3px 10px;
+  border-radius: var(--radius-sm);
+  font-weight: 700;
+  font-size: 0.82rem;
+}
+.risk-badge.ok {
+  color: var(--color-success);
+  background: var(--color-success-bg);
+}
+.risk-badge.warning {
+  color: var(--color-warning-text);
+  background: var(--color-warning-bg);
+}
+.risk-badge.danger {
+  color: var(--color-danger);
+  background: var(--color-danger-bg);
+}
+
+.impact-bars {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.impact-head {
+  display: grid;
+  grid-template-columns: 100px 120px 80px 1fr;
+  gap: var(--space-3);
+  padding: 8px 12px;
+  color: var(--color-text-muted);
+  font-size: 0.75rem;
+  background: var(--color-bg-input);
+  border-radius: var(--radius-md);
+}
+.impact-row {
+  display: grid;
+  grid-template-columns: 100px 120px 80px 1fr;
+  gap: var(--space-3);
+  align-items: center;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--color-border-light);
+}
+.impact-label {
+  font-weight: 600;
+  color: var(--color-text-primary);
+  font-size: 0.85rem;
+}
+.impact-amount {
+  color: var(--color-text-secondary);
+  font-size: 0.82rem;
+}
+.impact-shock {
+  color: var(--color-danger);
+  font-weight: 600;
+  font-size: 0.82rem;
+}
+.impact-bar-cell {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.impact-bar {
+  height: 8px;
+  border-radius: 4px;
+  background: var(--color-danger);
+  opacity: 0.7;
+  min-width: 4px;
+  transition: width 0.3s;
+}
+.impact-loss {
+  color: var(--color-text-primary);
+  font-size: 0.82rem;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.stress-warnings {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.stress-warning-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  color: var(--color-warning-text);
+  background: var(--color-warning-bg);
+  border: 1px solid var(--color-warning-border);
+  border-radius: var(--radius-md);
+  font-size: 0.85rem;
+}
+
+@media (max-width: 760px) {
+  .scenario-tabs { flex-direction: column; }
+  .stress-metrics { flex-direction: column; align-items: flex-start; }
+  .stress-arrow { transform: rotate(90deg); }
+  .impact-head,
+  .impact-row { grid-template-columns: 80px 1fr 60px 1fr; font-size: 0.78rem; }
 }
 </style>

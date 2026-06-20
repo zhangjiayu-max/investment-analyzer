@@ -45,18 +45,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ── 路由注册（规范化路径: /api/{module}/{resource}）──────────────────────────────────────
+# ── 路由注册 ─────────────────────────────────────
 
-# 新路径路由（规范化）
-from routers.valuation import router as valuation_router          # /api/valuation/*
-from routers.agent import router as agent_router                  # /api/agent/*
-from routers.conversation import router as conversation_router    # /api/conversation/*
-from routers.task import router as task_router                    # /api/task/*
-from routers.article import router as article_router              # /api/article/*
-from routers.portfolio_new import router as portfolio_new_router  # /api/portfolio/*
-
-# 旧路径路由（保持兼容，逐步迁移到新路径）
-from routers.valuations import router as valuations_router, index_info_router
+from routers.valuation import router as valuation_router, index_info_router  # /api/valuation/* + /api/index-info/*
 from routers.agents import router as agents_router
 from routers.conversations import router as conversations_router
 from routers.tasks import router as tasks_router
@@ -79,17 +70,11 @@ from routers.profile import router as profile_router                    # /api/p
 from routers.async_tasks import router as async_tasks_router           # /api/async-tasks/*
 from routers.search import router as search_router                     # /api/search/*
 from routers.decisions import router as decisions_router               # /api/decisions/*
+from routers.finance_dashboard import router as finance_dashboard_router  # /api/finance-dashboard
+from routers.strategy_sandbox import router as strategy_sandbox_router  # /api/strategy-sandbox
 
-# 注册新路径路由（优先级高）
+# 注册路由
 app.include_router(valuation_router)
-app.include_router(agent_router)
-app.include_router(conversation_router)
-app.include_router(task_router)
-app.include_router(article_router)
-app.include_router(portfolio_new_router)
-
-# 注册旧路径路由（保持兼容）
-app.include_router(valuations_router)
 app.include_router(index_info_router)
 app.include_router(agents_router)
 app.include_router(conversations_router)
@@ -113,6 +98,8 @@ app.include_router(profile_router)
 app.include_router(async_tasks_router)
 app.include_router(search_router)
 app.include_router(decisions_router)
+app.include_router(finance_dashboard_router)
+app.include_router(strategy_sandbox_router)
 
 # 静态文件目录
 for _d in (STATIC_DIR, IMAGES_DIR, OUTPUT_DIR, UPLOADS_DIR, DD_IMAGES_DIR, VALUATION_IMAGES_DIR):

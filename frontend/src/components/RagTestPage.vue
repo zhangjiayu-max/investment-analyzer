@@ -1,6 +1,6 @@
 <script setup>
-import { ref } from 'vue'
-import { testRagSearch } from '../api'
+import { ref, computed } from 'vue'
+import { testRagSearch, submitRagFeedback } from '../api'
 import { useToast } from '../composables/useToast'
 
 const { showToast } = useToast()
@@ -21,6 +21,15 @@ const useRewrite = ref(false)
 const testLoading = ref(false)
 const testResults = ref(null)
 const elapsedMs = ref(0)
+
+// 个性化过滤
+const showOnlyPersonalized = ref(false)
+
+const filteredResults = computed(() => {
+  const results = testResults.value?.results || []
+  if (!showOnlyPersonalized.value) return results
+  return results.filter(r => (r.personal_boost || 0) > 0)
+})
 
 async function runTest() {
   const q = testQuery.value.trim()
@@ -55,6 +64,30 @@ function getSourceClass(src) {
 
 function getScorePercent(score) {
   return Math.min(Math.max((score || 0) * 500, 0), 100)
+}
+
+function getBoostPercent(boost) {
+  return Math.min(Math.max((boost || 0) * 500, 0), 100)
+}
+
+// ── RAG 反馈 ──
+const feedbackGiven = ref({})  // { "idx-rating": true }
+
+async function giveFeedback(result, rating) {
+  const key = `${result.reference_id}-${rating}`
+  if (feedbackGiven.value[key]) return
+  try {
+    await submitRagFeedback({
+      knowledgeId: result.reference_id,
+      contentType: result.content_type,
+      query: testQuery.value,
+      rating,
+    })
+    feedbackGiven.value[key] = true
+    showToast(rating > 0 ? '已标记为有帮助 👍' : '已标记为无帮助 👎', 'success')
+  } catch (e) {
+    showToast('反馈失败: ' + (e.response?.data?.detail || e.message), 'error')
+  }
 }
 </script>
 
@@ -98,6 +131,11 @@ function getScorePercent(score) {
           <input type="checkbox" v-model="useRewrite" />
           <span class="toggle-label">Query Rewrite</span>
           <span class="toggle-hint">改写查询词以提高召回率</span>
+        </label>
+        <label class="option-toggle">
+          <input type="checkbox" v-model="showOnlyPersonalized" />
+          <span class="toggle-label">只看个性化加权</span>
+          <span class="toggle-hint">只显示被画像提升的结果</span>
         </label>
         <label class="option-limit">
           <span class="limit-label">返回条数</span>
@@ -156,13 +194,13 @@ function getScorePercent(score) {
       </div>
 
       <!-- 结果列表 -->
-      <div v-if="!testResults.results?.length" class="empty-results">
+      <div v-if="!filteredResults.length" class="empty-results">
         <span class="empty-icon">📭</span>
-        <p>无命中结果，试试换个查询词？</p>
+        <p>{{ showOnlyPersonalized ? '没有被个性化加权的结果' : '无命中结果，试试换个查询词？' }}</p>
       </div>
 
       <div v-else class="result-list">
-        <div v-for="(r, i) in testResults.results" :key="i" class="result-card">
+        <div v-for="(r, i) in filteredResults" :key="i" class="result-card">
           <div class="result-top">
             <span class="result-rank">#{{ i + 1 }}</span>
             <span class="result-type">{{ r.label || r.content_type }}</span>
@@ -175,7 +213,34 @@ function getScorePercent(score) {
               <span class="score-num">{{ getScorePercent(r._score).toFixed(0) }}%</span>
             </div>
           </div>
+          <!-- 个性化加权信息 -->
+          <div v-if="r.personal_boost && r.personal_boost > 0" class="personal-boost-bar">
+            <div class="boost-row">
+              <span class="boost-label">🎯 个性化加成</span>
+              <div class="boost-meter">
+                <div class="boost-fill" :style="{ width: getBoostPercent(r.personal_boost) + '%' }" />
+              </div>
+              <span class="boost-value">+{{ (r.personal_boost * 500).toFixed(0) }}%</span>
+            </div>
+            <div v-if="r.personal_reasons?.length" class="boost-reasons">
+              <span v-for="reason in r.personal_reasons" :key="reason" class="boost-reason-tag">{{ reason }}</span>
+            </div>
+          </div>
           <pre class="result-body">{{ r.body?.slice(0, 400) }}{{ r.body?.length > 400 ? '...' : '' }}</pre>
+          <div class="result-feedback">
+            <button
+              :class="['fb-btn', { active: feedbackGiven[`${r.reference_id}-1`] }]"
+              :disabled="feedbackGiven[`${r.reference_id}-1`]"
+              @click="giveFeedback(r, 1)"
+              title="有帮助"
+            >👍</button>
+            <button
+              :class="['fb-btn fb-btn--down', { active: feedbackGiven[`${r.reference_id}--1`] }]"
+              :disabled="feedbackGiven[`${r.reference_id}--1`]"
+              @click="giveFeedback(r, -1)"
+              title="无帮助"
+            >👎</button>
+          </div>
         </div>
       </div>
     </div>
@@ -611,6 +676,96 @@ function getScorePercent(score) {
   color: var(--color-text-secondary);
   max-height: 200px;
   overflow-y: auto;
+}
+
+/* 个性化加权 */
+.personal-boost-bar {
+  padding: 0.5rem 1rem;
+  background: #f0fdf4;
+  border-top: 1px solid #bbf7d0;
+}
+.dark .personal-boost-bar {
+  background: rgba(22, 163, 74, 0.08);
+  border-top-color: rgba(22, 163, 74, 0.2);
+}
+.boost-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+.boost-label {
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: #16a34a;
+  white-space: nowrap;
+}
+.boost-meter {
+  flex: 1;
+  height: 5px;
+  background: #d1fae5;
+  border-radius: 3px;
+  overflow: hidden;
+}
+.dark .boost-meter {
+  background: rgba(22, 163, 74, 0.2);
+}
+.boost-fill {
+  height: 100%;
+  background: #16a34a;
+  border-radius: 3px;
+  transition: width 0.3s;
+}
+.boost-value {
+  font-size: 0.75rem;
+  font-weight: 700;
+  color: #16a34a;
+  min-width: 40px;
+  text-align: right;
+}
+.boost-reasons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+  margin-top: 0.35rem;
+}
+.boost-reason-tag {
+  font-size: 0.68rem;
+  padding: 0.1rem 0.45rem;
+  background: #dcfce7;
+  color: #166534;
+  border-radius: 999px;
+}
+.dark .boost-reason-tag {
+  background: rgba(22, 163, 74, 0.15);
+  color: #4ade80;
+}
+
+/* 反馈按钮 */
+.result-feedback {
+  display: flex;
+  gap: 6px;
+  padding: 6px 1rem 8px;
+  border-top: 1px solid var(--color-border-light);
+}
+.fb-btn {
+  padding: 4px 10px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-bg-input);
+  cursor: pointer;
+  font-size: 0.85rem;
+  transition: all 0.15s;
+  opacity: 0.6;
+}
+.fb-btn:hover { opacity: 1; border-color: var(--color-primary); }
+.fb-btn.active {
+  opacity: 1;
+  background: #dcfce7;
+  border-color: #16a34a;
+}
+.fb-btn--down.active {
+  background: #fee2e2;
+  border-color: #dc2626;
 }
 
 /* 空状态 */

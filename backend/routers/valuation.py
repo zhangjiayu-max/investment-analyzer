@@ -935,3 +935,56 @@ async def get_enhanced_strategy():
         "agent_name": "增强策略分析师",
         "token_usage": tokens,
     }
+
+
+# ── 指数信息路由（挂在 /api/index-info/ 下）────────────────────
+
+INDEX_INFO_DICT = {
+    "000300": "沪深300指数由沪深A股中规模大、流动性好的最具代表性的300只股票组成，于2005年4月8日正式发布，以综合反映沪深A股市场整体表现。沪深300是A股市场最核心的宽基指数，常被用作业绩基准和指数基金跟踪标的。",
+    "000905": "中证500指数由A股中剔除沪深300指数成份股后，总市值排名靠前的500只股票组成，反映中小市值上市公司的整体表现。与沪深300形成互补，是衡量中小盘股走势的重要指标。",
+    "000016": "上证50指数由沪市A股中规模大、流动性好的最具代表性的50只股票组成，主要覆盖金融、能源等大盘蓝筹股，反映沪市最具影响力的一批龙头企业的整体表现。",
+    "399006": "创业板指由创业板中市值大、流动性好的100只股票组成，代表创业板市场核心资产。创业板以成长型创新企业为主，集中在新能源、医药、TMT等高景气赛道。",
+    "399001": "深证成指从深交所上市股票中选取500只代表性的股票作为样本，覆盖主板、中小板和创业板，是衡量深市整体表现的核心指标。",
+    "000688": "科创50指数由科创板中市值大、流动性好的50只股票组成，集中体现科创板龙头企业的表现，行业以半导体、生物医药、新能源等硬科技为主。",
+    "000852": "中证1000指数由A股中剔除沪深300和中证500成份股后，规模偏小且流动性好的1000只股票组成，是小盘股的代表性指数。",
+    "399303": "国证2000指数由深交所市值排名1001-3000的股票组成，覆盖小盘股，是比中证1000更下沉的小盘股指数。",
+    "000015": "红利指数由沪市A股中现金股息率高、分红稳定、具有一定规模及流动性的50只股票组成，反映高红利股票的整体表现，适合追求稳定分红收益的投资者。",
+    "931009": "中证转债指数选取沪深交易所上市的可转换公司债券作为样本，反映可转债市场的整体表现。可转债兼具债券和股票特性，是攻守兼备的投资品种。",
+    "HSI": "恒生指数由港交所上市的市值最大及成交最活跃的50只股票组成，是香港股市最重要的指标，涵盖金融、地产、科技等核心行业。",
+    "HSTECH": "恒生科技指数由港交所上市的30只最大型科技企业股票组成，涵盖互联网、软件、半导体、消费电子等领域，被称为'港版纳斯达克'。",
+}
+
+index_info_router = APIRouter(prefix="/api/index-info", tags=["index-info"])
+
+
+@index_info_router.get("/{index_code}")
+async def get_index_info_api(index_code: str, index_name: str = ""):
+    """获取指数简介信息。优先查缓存（5天有效），其次查静态字典，最后用 LLM 生成。"""
+    cached = get_index_info(index_code)
+    if cached:
+        try:
+            created = datetime.strptime(cached["created_at"], "%Y-%m-%d %H:%M:%S")
+            if datetime.now() - created < timedelta(days=5):
+                return {"index_code": index_code, "info": cached["info"], "source": "cache"}
+        except (ValueError, KeyError):
+            pass
+
+    clean_code = index_code.split('.')[0] if '.' in index_code else index_code
+    lookup_code = clean_code if clean_code in INDEX_INFO_DICT else index_code
+    if lookup_code in INDEX_INFO_DICT:
+        info = INDEX_INFO_DICT[lookup_code]
+        save_index_info(index_code, index_name, info)
+        return {"index_code": index_code, "info": info, "source": "dict"}
+
+    try:
+        from llm_service import _call_llm, MODEL
+        prompt = f"请用2-3句话简洁介绍「{index_name or index_code}」这个股票指数，包括它由哪些股票组成、覆盖什么行业、适合什么样的投资者。不要使用markdown格式，直接输出纯文本。"
+        resp = _call_llm(messages=[{"role": "user", "content": prompt}], model=MODEL, max_tokens=800)
+        info = resp.choices[0].message.content if resp and resp.choices else ""
+        if info:
+            save_index_info(index_code, index_name, info.strip())
+            return {"index_code": index_code, "info": info.strip(), "source": "llm"}
+    except Exception as e:
+        logging.warning(f"LLM生成指数信息失败: {e}")
+
+    return {"index_code": index_code, "info": "", "source": "none"}

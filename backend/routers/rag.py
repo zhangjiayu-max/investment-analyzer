@@ -296,3 +296,29 @@ async def get_rag_eval_results():
         return {"ok": True, "result": data}
     except Exception as e:
         raise HTTPException(500, f"读取结果失败: {str(e)}")
+
+
+# ── RAG 反馈 API ──
+
+class RagFeedbackRequest(BaseModel):
+    knowledge_id: int | None = None
+    content_type: str = ""
+    query: str = ""
+    rating: int  # 1=赞, -1=踩
+    reasons: list[str] = []
+
+
+@router.post("/feedback")
+async def submit_rag_feedback_api(req: RagFeedbackRequest):
+    """提交 RAG 检索结果反馈（点赞/点踩）。"""
+    if req.rating not in (1, -1):
+        raise HTTPException(400, "rating 必须为 1（赞）或 -1（踩）")
+    from db import save_rag_feedback
+    feedback_id = save_rag_feedback(
+        knowledge_id=req.knowledge_id,
+        content_type=req.content_type,
+        query=req.query,
+        rating=req.rating,
+        reasons=req.reasons,
+    )
+    return {"ok": True, "id": feedback_id}

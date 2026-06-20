@@ -1,5 +1,6 @@
 export const pageComponentKeys = [
   'dashboard',
+  'family-finance',
   'market-intelligence',
   'chat',
   'articles',
@@ -13,6 +14,7 @@ export const pageComponentKeys = [
   'portfolio',
   'goal-buckets',
   'allocation-dashboard',
+  'strategy-sandbox',
   'admin-agents',
   'token-usage',
   'quality-dashboard',

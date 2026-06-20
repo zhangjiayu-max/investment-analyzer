@@ -199,16 +199,24 @@ def sync_vault(vault_path: str, dry_run: bool = False) -> dict:
                     stats["updated" if prev else "added"] += 1
                     continue
 
-                # 写入 knowledge_base
-                kid = add_knowledge(
-                    category=kb_category,
-                    title=title,
-                    content=body[:8000],
-                    subcategory=subcategory,
-                    source=source,
-                    keywords=keywords,
-                    importance=importance,
-                )
+                # 写入 knowledge_base（带重试处理数据库锁）
+                for attempt in range(3):
+                    try:
+                        kid = add_knowledge(
+                            category=kb_category,
+                            title=title,
+                            content=body[:8000],
+                            subcategory=subcategory,
+                            source=source,
+                            keywords=keywords,
+                            importance=importance,
+                        )
+                        break
+                    except Exception as e:
+                        if "locked" in str(e).lower() and attempt < 2:
+                            time.sleep(0.5 * (attempt + 1))
+                            continue
+                        raise
 
                 # 同步到 RAG（FTS + ChromaDB）
                 try:
@@ -222,6 +230,10 @@ def sync_vault(vault_path: str, dry_run: bool = False) -> dict:
                     "INSERT OR REPLACE INTO obsidian_sync_state (file_path, file_hash, knowledge_id) VALUES (?, ?, ?)",
                     (rel_path, current_hash, kid),
                 )
+                conn.commit()
+
+                # 避免数据库锁，小延迟
+                time.sleep(0.05)
 
                 if prev:
                     stats["updated"] += 1
