@@ -1,5 +1,7 @@
 <script setup>
-import { ref } from 'vue'
+import { ref, computed, onMounted } from 'vue'
+import { getProfile } from '../../api'
+import Icon from '../ui/Icon.vue'
 
 const props = defineProps({
   conversations: { type: Array, default: () => [] },
@@ -9,7 +11,41 @@ const props = defineProps({
   showMobileSidebar: { type: Boolean, default: false },
 })
 
-const emit = defineEmits(['select', 'new', 'delete', 'update:showMobileSidebar'])
+const emit = defineEmits(['select', 'new', 'delete', 'update:showMobileSidebar', 'open-kyc'])
+
+// ── 画像面板 ──
+const profileExpanded = ref(false)
+const profile = ref(null)
+
+const RISK_LABELS = { conservative: '保守', steady: '稳健', balanced: '平衡', aggressive: '进取', radical: '激进' }
+const HORIZON_LABELS = { short: '短期(<1年)', medium: '中期(1-3年)', long: '长期(>3年)' }
+const EXP_LABELS = { novice: '新手', intermediate: '中级', advanced: '高级', professional: '专业' }
+const ASSET_LABELS = { index: '指数', fund: '基金', bond: '债券', stock: '股票', gold: '黄金', cash: '现金' }
+
+async function loadProfile() {
+  try {
+    const { data } = await getProfile()
+    profile.value = data
+  } catch { /* silent */ }
+}
+
+onMounted(loadProfile)
+
+const parsedAssets = computed(() => {
+  if (!profile.value?.focus_assets) return []
+  const v = profile.value.focus_assets
+  return Array.isArray(v) ? v : (typeof v === 'string' ? JSON.parse(v) : [])
+})
+const parsedPositive = computed(() => {
+  if (!profile.value?.positive_patterns) return []
+  const v = profile.value.positive_patterns
+  return Array.isArray(v) ? v : (typeof v === 'string' ? JSON.parse(v) : [])
+})
+const parsedNegative = computed(() => {
+  if (!profile.value?.negative_patterns) return []
+  const v = profile.value.negative_patterns
+  return Array.isArray(v) ? v : (typeof v === 'string' ? JSON.parse(v) : [])
+})
 
 function formatTime(ts) {
   if (!ts) return ''
@@ -39,6 +75,10 @@ function handleDelete(conv, e) {
 
 function closeMobileSidebar() {
   emit('update:showMobileSidebar', false)
+}
+
+function openKycWizard() {
+  window.dispatchEvent(new CustomEvent('open-kyc'))
 }
 </script>
 
@@ -82,6 +122,56 @@ function closeMobileSidebar() {
         <p>暂无对话</p>
         <p class="conv-empty-hint">点击右上角 + 创建</p>
       </div>
+    </div>
+
+    <!-- 画像面板 -->
+    <div class="profile-section">
+      <button class="profile-toggle" @click="profileExpanded = !profileExpanded">
+        <Icon name="circle-user" size="14" />
+        <span>我的画像</span>
+        <Icon :name="profileExpanded ? 'chevron-up' : 'chevron-down'" size="12" class="toggle-arrow" />
+      </button>
+      <Transition name="slide">
+        <div v-if="profileExpanded && profile" class="profile-card">
+          <div class="dim-row" v-if="profile.risk_tolerance">
+            <span class="dim-label">风险偏好</span>
+            <span class="dim-value">{{ RISK_LABELS[profile.risk_tolerance] || profile.risk_tolerance }}</span>
+          </div>
+          <div class="dim-row" v-if="profile.investment_horizon">
+            <span class="dim-label">投资期限</span>
+            <span class="dim-value">{{ HORIZON_LABELS[profile.investment_horizon] || profile.investment_horizon }}</span>
+          </div>
+          <div class="dim-row" v-if="profile.investment_experience">
+            <span class="dim-label">投资经验</span>
+            <span class="dim-value">{{ EXP_LABELS[profile.investment_experience] || profile.investment_experience }}</span>
+          </div>
+          <div class="dim-row" v-if="parsedAssets.length">
+            <span class="dim-label">关注资产</span>
+            <div class="asset-tags">
+              <span v-for="a in parsedAssets" :key="a" class="asset-tag">{{ ASSET_LABELS[a] || a }}</span>
+            </div>
+          </div>
+          <div v-if="profile.feedback_summary" class="feedback-summary">
+            <Icon name="lightbulb" size="12" />
+            <span>{{ profile.feedback_summary }}</span>
+          </div>
+          <div v-if="parsedPositive.length" class="pattern-section">
+            <span class="pattern-label positive-label">✓ 偏好</span>
+            <div class="pattern-tags">
+              <span v-for="p in parsedPositive" :key="p" class="pattern-tag positive">{{ p }}</span>
+            </div>
+          </div>
+          <div v-if="parsedNegative.length" class="pattern-section">
+            <span class="pattern-label negative-label">✗ 避免</span>
+            <div class="pattern-tags">
+              <span v-for="p in parsedNegative" :key="p" class="pattern-tag negative">{{ p }}</span>
+            </div>
+          </div>
+          <button class="btn-edit-profile" @click="openKycWizard">
+            <Icon name="edit" size="12" /> 编辑画像
+          </button>
+        </div>
+      </Transition>
     </div>
   </div>
 </template>
@@ -302,5 +392,119 @@ function closeMobileSidebar() {
     padding: 0.8rem 0.6rem;
     min-height: 48px;
   }
+}
+
+/* ── 画像面板 ── */
+.profile-section {
+  border-top: 1px solid var(--color-border);
+}
+
+.profile-toggle {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.7rem 1rem;
+  font-size: 0.8rem;
+  color: var(--color-text-secondary);
+  transition: all var(--transition-fast);
+}
+.profile-toggle:hover {
+  color: var(--color-primary);
+  background: var(--color-primary-50);
+}
+.toggle-arrow { margin-left: auto; }
+
+.profile-card {
+  padding: 0.6rem 1rem 0.8rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  font-size: 0.75rem;
+}
+
+.dim-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+.dim-label { color: var(--color-text-muted); flex-shrink: 0; }
+.dim-value { color: var(--color-text-primary); font-weight: 500; }
+
+.asset-tags { display: flex; gap: 0.3rem; flex-wrap: wrap; justify-content: flex-end; }
+.asset-tag {
+  font-size: 0.65rem;
+  padding: 0.1rem 0.4rem;
+  border-radius: var(--radius-sm);
+  background: var(--color-primary-50);
+  color: var(--color-primary-600);
+}
+
+.feedback-summary {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.4rem;
+  font-size: 0.7rem;
+  color: var(--color-text-secondary);
+  padding: 0.4rem;
+  border-radius: var(--radius-sm);
+  background: var(--color-bg-hover);
+  line-height: 1.4;
+}
+
+.pattern-section {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+.pattern-label { font-size: 0.7rem; font-weight: 500; }
+.positive-label { color: var(--color-success, #10b981); }
+.negative-label { color: var(--color-danger, #ef4444); }
+
+.pattern-tags { display: flex; flex-wrap: wrap; gap: 0.25rem; }
+.pattern-tag {
+  font-size: 0.6rem;
+  padding: 0.1rem 0.35rem;
+  border-radius: var(--radius-sm);
+}
+.pattern-tag.positive {
+  background: rgba(16, 185, 129, 0.1);
+  color: var(--color-success, #10b981);
+}
+.pattern-tag.negative {
+  background: rgba(239, 68, 68, 0.1);
+  color: var(--color-danger, #ef4444);
+}
+
+.btn-edit-profile {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.35rem;
+  padding: 0.4rem;
+  font-size: 0.75rem;
+  color: var(--color-primary-600);
+  background: var(--color-primary-50);
+  border-radius: var(--radius-md);
+  transition: all var(--transition-fast);
+}
+.btn-edit-profile:hover {
+  background: var(--color-primary-100);
+}
+
+.slide-enter-active, .slide-leave-active {
+  transition: all 0.2s ease;
+  overflow: hidden;
+}
+.slide-enter-from, .slide-leave-to {
+  max-height: 0;
+  opacity: 0;
+  padding-top: 0;
+  padding-bottom: 0;
+}
+.slide-enter-to, .slide-leave-from {
+  max-height: 400px;
+  opacity: 1;
 }
 </style>

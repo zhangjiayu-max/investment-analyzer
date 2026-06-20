@@ -63,7 +63,7 @@ describe('API URL 路径正确性', () => {
   it('runPortfolioAiAnalysis 调用 /api/portfolio/analysis/ai', async () => {
     const { runPortfolioAiAnalysis } = await import('../api/index.js')
     await runPortfolioAiAnalysis('test question')
-    expect(mockPost).toHaveBeenCalledWith('/portfolio/analysis/ai', { question: 'test question' }, { timeout: 300000 })
+    expect(mockPost).toHaveBeenCalledWith('/portfolio/analysis/ai', { question: 'test question' })
   })
 
   it('getDashboard 调用 /api/dashboard', async () => {

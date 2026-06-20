@@ -12,6 +12,7 @@ from db import (
     create_eval_case, list_eval_cases, get_eval_case, delete_eval_case,
     create_eval_run, update_eval_run, list_eval_runs, get_eval_run_detail,
     get_eval_stats, list_all_bad_cases,
+    create_async_task, update_async_task, get_async_task,
 )
 from models.eval import CreateEvalCaseRequest, BadCaseToEvalRequest
 from routers.portfolio import (
@@ -27,6 +28,8 @@ from models.portfolio import (
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["eval"])
+
+_background_tasks = set()
 
 
 async def _await_portfolio_record_result(record_id: int, timeout: int = 180) -> dict:
@@ -92,7 +95,30 @@ async def delete_eval_case_api(case_id: int):
 
 @router.post("/api/eval/cases/{case_id}/run")
 async def run_eval_case_api(case_id: int):
-    """运行单个评测用例：调用对应的分析模式，记录结果，自动评分。"""
+    """运行单个评测用例（异步）。立即返回 task_id，后台执行。"""
+    case = get_eval_case(case_id)
+    if not case:
+        raise HTTPException(404, "评测用例不存在")
+
+    task_id = create_async_task("eval_case_run", caller=f"eval_case_{case_id}")
+    task = asyncio.create_task(_run_eval_case_async(task_id, case_id))
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+    return {"task_id": task_id, "status": "running"}
+
+
+async def _run_eval_case_async(task_id: int, case_id: int):
+    """后台执行评测用例运行。"""
+    try:
+        result = await _do_eval_case_run(case_id)
+        update_async_task(task_id, status="done", result=result)
+    except Exception as e:
+        logging.error(f"评测用例运行异步任务失败: {e}")
+        update_async_task(task_id, status="error", error_msg=str(e))
+
+
+async def _do_eval_case_run(case_id: int):
+    """评测用例运行业务逻辑。"""
     case = get_eval_case(case_id)
     if not case:
         raise HTTPException(404, "评测用例不存在")

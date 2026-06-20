@@ -137,6 +137,13 @@ from db.watchlist import (
     batch_add_to_watchlist, refresh_watchlist_navs, get_watchlist_summary,
 )
 
+# 异步分析任务
+from db.async_tasks import (
+    init_async_tasks_table, create_async_task, update_async_task,
+    get_async_task, list_async_tasks, get_latest_async_task,
+    get_latest_done_task,
+)
+
 
 def init_db():
     """建表，启动时调用。各子模块的 init_tables(conn) 负责创建自己的表。"""
@@ -830,6 +837,9 @@ def init_db():
     """)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_watchlist_user ON watchlist(user_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_watchlist_status ON watchlist(status)")
+
+    # ── 异步分析任务表 ──────────────────────────────────────
+    init_async_tasks_table(conn)
 
     conn.commit()
     conn.close()

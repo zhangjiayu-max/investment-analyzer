@@ -23,10 +23,12 @@ import Dashboard from '../components/Dashboard.vue'
 import MarketIntelligence from '../components/MarketIntelligence.vue'
 import SystemConfigPage from '../components/SystemConfigPage.vue'
 import KnowledgeBase from '../components/KnowledgeBase.vue'
+import SearchResults from '../components/SearchResults.vue'
 import { pageComponentKeys } from '../pageRegistry'
 
 const props = defineProps({
   activePage: String,
+  searchQuery: { type: String, default: '' },
 })
 const emit = defineEmits(['navigate'])
 
@@ -51,6 +53,7 @@ const pageComponents = {
   'eval-suite': EvalSuitePage,
   'system-config': SystemConfigPage,
   knowledge: KnowledgeBase,
+  search: SearchResults,
 }
 
 if (import.meta.env.DEV) {
@@ -62,6 +65,9 @@ const pageComponent = computed(() => pageComponents[props.activePage] || null)
 const pageProps = computed(() => {
   if (props.activePage === 'dashboard') {
     return { onNavigate: (page) => emit('navigate', page) }
+  }
+  if (props.activePage === 'search') {
+    return { query: props.searchQuery, onNavigate: (page) => emit('navigate', page) }
   }
   return {}
 })

@@ -43,6 +43,7 @@ from db import (
     get_active_rebalance_config, save_rebalance_config,
     list_rebalance_configs, get_rebalance_config_by_id, rollback_rebalance_config,
     set_cash_balance, get_portfolio_penetration,
+    create_async_task, update_async_task, get_async_task,
 )
 from db.portfolio import update_analysis_record
 from mcp.trading_calendar import expected_confirm_date
@@ -79,14 +80,28 @@ async def portfolio_summary_api(account: str = None):
     return get_portfolio_summary()
 
 
-@router.get("/api/portfolio/rebalancing")
-async def portfolio_rebalancing_api():
-    """获取智能调仓建议：结合持仓分布和市场估值，分析偏离度并给出建议。"""
-    from rebalancer import analyze_rebalancing_need
-    result = analyze_rebalancing_need()
-    if "error" in result:
-        raise HTTPException(status_code=400, detail=result["error"])
-    return result
+@router.post("/api/portfolio/rebalancing/trigger")
+async def trigger_rebalancing_api():
+    """触发智能调仓建议分析（异步）：结合持仓分布和市场估值，分析偏离度并给出建议。"""
+    task_id = create_async_task("rebalancing", caller="rebalancing")
+    task = asyncio.create_task(_run_rebalancing_async(task_id))
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+    return {"task_id": task_id, "status": "running"}
+
+
+async def _run_rebalancing_async(task_id: int):
+    """后台执行智能调仓建议分析。"""
+    try:
+        from rebalancer import analyze_rebalancing_need
+        result = await asyncio.to_thread(analyze_rebalancing_need)
+        if "error" in result:
+            update_async_task(task_id, status="error", error_msg=result["error"])
+            return
+        update_async_task(task_id, status="done", result=result)
+    except Exception as e:
+        logger.error(f"调仓分析失败 task_id={task_id}: {e}")
+        update_async_task(task_id, status="error", error_msg=str(e))
 
 
 @router.get("/api/portfolio/rebalance/config")
@@ -322,7 +337,7 @@ def _parse_mcp_correlation(text: str) -> list[dict]:
 
 @router.post("/api/portfolio/analysis/diversification/ai-summary")
 async def portfolio_diversification_ai_summary(agent_id: int = 2):
-    """基于 MCP + 持仓数据，后台生成 AI 分散度分析解读。"""
+    """基于 MCP + 持仓数据，后台生成 AI 分散度分析解读（异步模式）。"""
     agent = get_analysis_agent(agent_id)
     if not agent:
         raise HTTPException(404, "分析 Agent 不存在")
@@ -339,10 +354,28 @@ async def portfolio_diversification_ai_summary(agent_id: int = 2):
         agent_id=agent_id,
         status="running",
     )
-    task = asyncio.create_task(_run_diversification_ai_summary_async(record_id, agent_id))
+    # 创建 async_task 记录用于通用状态查询
+    task_id = create_async_task("diversification_ai", caller="diversification_ai")
+    task = asyncio.create_task(_run_diversification_ai_async(task_id, record_id, agent_id))
     _background_tasks.add(task)
     task.add_done_callback(_background_tasks.discard)
-    return {"ok": True, "id": record_id, "status": "running"}
+    return {"task_id": task_id, "record_id": record_id, "status": "running"}
+
+
+async def _run_diversification_ai_async(task_id: int, record_id: int, agent_id: int = 2):
+    """后台执行 AI 分散度分析解读（包裹 async_task 状态跟踪）。"""
+    try:
+        await _run_diversification_ai_summary_async(record_id, agent_id)
+        # 读取 record 结果
+        record = get_portfolio_analysis_record(record_id)
+        if record and record.get("status") == "done":
+            update_async_task(task_id, status="done", result={"record_id": record_id, "status": "done"})
+        else:
+            error_msg = record.get("error_msg", "未知错误") if record else "记录不存在"
+            update_async_task(task_id, status="error", error_msg=error_msg)
+    except Exception as e:
+        logger.error(f"分散度 AI 分析失败 task_id={task_id}, record_id={record_id}: {e}")
+        update_async_task(task_id, status="error", error_msg=str(e))
 
 
 async def _run_diversification_ai_summary_async(record_id: int, agent_id: int = 2):
@@ -649,7 +682,7 @@ async def transactions_summary_api():
 
 @router.post("/api/portfolio/analysis/ai")
 async def portfolio_ai_analysis_api(req: PortfolioAiAnalysisRequest):
-    """AI 持仓分析：后台调用 MCP 工具 + LLM 生成分析报告。"""
+    """AI 持仓分析：后台调用 MCP 工具 + LLM 生成分析报告（异步模式）。"""
     holdings = list_holdings()
     if not holdings:
         raise HTTPException(400, "暂无持仓数据")
@@ -665,10 +698,28 @@ async def portfolio_ai_analysis_api(req: PortfolioAiAnalysisRequest):
         token_usage=0,
         status="running",
     )
-    task = asyncio.create_task(_run_portfolio_ai_analysis_async(record_id, user_question))
+    # 创建 async_task 记录用于通用状态查询
+    task_id = create_async_task("portfolio_ai", caller="portfolio_ai")
+    task = asyncio.create_task(_run_portfolio_ai_async(task_id, record_id, user_question))
     _background_tasks.add(task)
     task.add_done_callback(_background_tasks.discard)
-    return {"ok": True, "id": record_id, "status": "running", "holdings_count": len(holdings)}
+    return {"task_id": task_id, "record_id": record_id, "status": "running", "holdings_count": len(holdings)}
+
+
+async def _run_portfolio_ai_async(task_id: int, record_id: int, user_question: str):
+    """后台执行通用 AI 持仓分析（包裹 async_task 状态跟踪）。"""
+    try:
+        await _run_portfolio_ai_analysis_async(record_id, user_question)
+        # 读取 record 结果
+        record = get_portfolio_analysis_record(record_id)
+        if record and record.get("status") == "done":
+            update_async_task(task_id, status="done", result={"record_id": record_id, "status": "done"})
+        else:
+            error_msg = record.get("error_msg", "未知错误") if record else "记录不存在"
+            update_async_task(task_id, status="error", error_msg=error_msg)
+    except Exception as e:
+        logger.error(f"AI 持仓分析失败 task_id={task_id}, record_id={record_id}: {e}")
+        update_async_task(task_id, status="error", error_msg=str(e))
 
 
 async def _run_portfolio_ai_analysis_async(record_id: int, user_question: str):

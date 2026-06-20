@@ -13,7 +13,14 @@ import Sparkline from './Sparkline.vue'
 import { getDashboard, getFinanceQuoteBar } from '../../api'
 import { isDark, toggleDark } from '../../composables/useTheme'
 
-const emit = defineEmits(['open-kyc'])
+const emit = defineEmits(['open-kyc', 'search'])
+
+const searchQuery = ref('')
+
+function handleSearch() {
+  const q = searchQuery.value.trim()
+  if (q) emit('search', q)
+}
 
 const indices = ref([])
 const quoteText = ref('')
@@ -82,11 +89,17 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
       </div>
     </div>
 
-    <!-- 中间：搜索框（占位，后期接全局搜索） -->
+    <!-- 中间：搜索框 -->
     <div class="ticker-center">
       <div class="ticker-search">
         <Icon name="search" size="14" class="search-icon" />
-        <input type="text" placeholder="搜索指数 / 基金 / 文章…" class="search-input" />
+        <input
+          v-model="searchQuery"
+          type="text"
+          placeholder="搜索指数 / 基金 / 文章…"
+          class="search-input"
+          @keydown.enter="handleSearch"
+        />
       </div>
     </div>
 

@@ -237,6 +237,28 @@ def _apply_personalization_boost(results: list[dict], user_id: str):
     except Exception:
         pass
 
+    # 3. 反馈驱动的正向/负向模式
+    positive_kw = set()
+    negative_kw = set()
+    try:
+        from db.dashboard import get_user_profile
+        up = get_user_profile(user_id)
+        if up:
+            for field, target in [("positive_patterns", positive_kw), ("negative_patterns", negative_kw)]:
+                raw = up.get(field, "[]")
+                if isinstance(raw, str):
+                    try:
+                        patterns = json.loads(raw)
+                    except Exception:
+                        patterns = []
+                else:
+                    patterns = raw or []
+                for p in patterns:
+                    if isinstance(p, str) and len(p) >= 2:
+                        target.add(p)
+    except Exception:
+        pass
+
     # 应用加权（温和叠加，避免压过相关性）
     for r in results:
         body = ((r.get("body", "") or "") + " " + (r.get("title", "") or "")).lower()
@@ -247,6 +269,10 @@ def _apply_personalization_boost(results: list[dict], user_id: str):
         if hot_topics:
             hit_hot = sum(1 for w in hot_topics if w.lower() in body)
             boost += min(hit_hot * 0.1, 0.5)  # 历史主题加权，上限 0.5
+        if positive_kw:
+            boost += sum(1 for kw in positive_kw if kw.lower() in body) * 0.2
+        if negative_kw:
+            boost -= sum(1 for kw in negative_kw if kw.lower() in body) * 0.1
         r["personal_boost"] = boost
 
 

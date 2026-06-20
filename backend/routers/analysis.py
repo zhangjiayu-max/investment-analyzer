@@ -14,6 +14,7 @@ from db import (
     save_prompt_version,
     get_latest_valuation, get_valuation_history,
     list_holdings,
+    create_async_task, update_async_task, get_async_task,
 )
 from llm_service import _call_llm, MODEL
 from rag import build_rag_context_with_details, log_rag_search
@@ -45,13 +46,15 @@ async def run_analysis(req: AnalysisRunRequest):
         token_usage=0,
         status="running",
     )
-    task = asyncio.create_task(_run_index_analysis_async(history_id, req.dict(), agent))
+    # 同时创建 async_task 记录（统一异步任务跟踪）
+    async_task_id = create_async_task("index_analysis", caller="index_deep_analysis")
+    task = asyncio.create_task(_run_index_analysis_async(history_id, req.dict(), agent, async_task_id))
     _background_tasks.add(task)
     task.add_done_callback(_background_tasks.discard)
-    return {"ok": True, "id": history_id, "status": "running"}
+    return {"ok": True, "id": history_id, "task_id": async_task_id, "status": "running"}
 
 
-async def _run_index_analysis_async(history_id: int, req_data: dict, agent: dict):
+async def _run_index_analysis_async(history_id: int, req_data: dict, agent: dict, async_task_id: int = None):
     """后台执行指数深度分析。"""
     req = AnalysisRunRequest(**req_data)
     index_label = req.index_name or req.index_code
@@ -224,6 +227,8 @@ async def _run_index_analysis_async(history_id: int, req_data: dict, agent: dict
     except Exception as e:
         logger.error(f"AI 分析失败: {e}")
         update_analysis_history(history_id, status="error", error_msg=str(e))
+        if async_task_id:
+            update_async_task(async_task_id, status="error", error_msg=str(e))
         return
 
     update_analysis_history(
@@ -236,6 +241,8 @@ async def _run_index_analysis_async(history_id: int, req_data: dict, agent: dict
         status="done",
         error_msg="",
     )
+    if async_task_id:
+        update_async_task(async_task_id, status="done", result={"history_id": history_id, "result": result_text, "token_usage": token_usage}, token_usage=token_usage)
 
     async def _auto_evaluate():
         try:

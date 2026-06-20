@@ -1,5 +1,6 @@
 """债市数据路由 — /api/bond/*"""
 
+import asyncio
 import json
 import logging
 import re
@@ -13,10 +14,13 @@ from db import (
     list_holdings, get_cash_balance, get_total_cash_balance, get_analysis_agent,
     create_portfolio_analysis_record, list_portfolio_analysis_records,
     DEFAULT_BOND_PROMPT,
+    create_async_task, update_async_task, get_async_task,
 )
 from state import track_agent, untrack_agent
 
 router = APIRouter(prefix="/api/bond", tags=["bond"])
+
+_background_tasks = set()
 
 
 def _fetch_bond_data():
@@ -104,7 +108,26 @@ async def bond_market_overview_api():
 
 @router.post("/ai-recommend")
 async def bond_ai_recommend():
-    """AI 债券配置推荐。"""
+    """AI 债券配置推荐（异步）。立即返回 task_id，后台执行。"""
+    task_id = create_async_task("bond_recommend", caller="bond_ai_recommend")
+    task = asyncio.create_task(_run_bond_recommend_async(task_id))
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+    return {"task_id": task_id, "status": "running"}
+
+
+async def _run_bond_recommend_async(task_id: int):
+    """后台执行 AI 债券配置推荐。"""
+    try:
+        result = await _do_bond_recommend()
+        update_async_task(task_id, status="done", result=result)
+    except Exception as e:
+        logging.error(f"债券推荐异步任务失败: {e}")
+        update_async_task(task_id, status="error", error_msg=str(e))
+
+
+async def _do_bond_recommend():
+    """AI 债券配置推荐业务逻辑。"""
     import ssl
     ssl._create_default_https_context = ssl._create_unverified_context
     import akshare as ak

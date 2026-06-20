@@ -4,6 +4,7 @@ import {
   listEvalCases, createEvalCase, updateEvalCase, deleteEvalCase, runEvalCase,
   listEvalRuns, getEvalRunDetail, getEvalStats, listAgents,
 } from '../api'
+import { useAsyncTask } from '../composables/useAsyncTask'
 import ConfirmDialog from './ConfirmDialog.vue'
 import AppToast from './AppToast.vue'
 import { useToast } from '../composables/useToast'
@@ -11,6 +12,9 @@ import { renderMarkdown } from '../composables/useMarkdown'
 
 const { showToast } = useToast()
 const confirm = ref({ visible: false, title: '', message: '', danger: false, onConfirm: null })
+
+// 异步任务：评测用例运行
+const { taskState: evalTaskState, taskResult: evalTaskResult, taskError: evalTaskError, start: startEvalTask, restore: restoreEvalTask } = useAsyncTask('eval_case')
 
 const loading = ref(false)
 const runningCases = ref(new Set()) // 正在运行的用例 ID 集合
@@ -148,16 +152,23 @@ async function doRun(c) {
   if (runningCases.value.has(c.id)) return
   runningCases.value.add(c.id)
   try {
-    const { data } = await runEvalCase(c.id)
-    if (data.ok) {
-      showToast(`「${c.name}」运行完成`, 'success')
-      await Promise.all([loadRuns(), loadStats(), loadCases()])
-    } else {
-      showToast(`「${c.name}」失败: ${data.error || '未知错误'}`, 'error')
-    }
+    await start(() => runEvalCase(c.id), {
+      onComplete: (result) => {
+        if (result?.ok) {
+          showToast(`「${c.name}」运行完成`, 'success')
+        } else {
+          showToast(`「${c.name}」失败: ${result?.error || '未知错误'}`, 'error')
+        }
+        runningCases.value.delete(c.id)
+        Promise.all([loadRuns(), loadStats(), loadCases()])
+      },
+      onError: (err) => {
+        showToast(`「${c.name}」出错: ${err}`, 'error')
+        runningCases.value.delete(c.id)
+      }
+    })
   } catch (e) {
     showToast(`「${c.name}」出错: ${e.message}`, 'error')
-  } finally {
     runningCases.value.delete(c.id)
   }
 }
@@ -234,7 +245,10 @@ function isMarkdown(text) {
 
 const latestRuns = computed(() => runs.value.slice(0, 30))
 
-onMounted(loadAll)
+onMounted(() => {
+  restoreEvalTask()
+  loadAll()
+})
 </script>
 
 <template>

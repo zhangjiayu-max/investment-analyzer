@@ -6,6 +6,7 @@ async function getEcharts() {
   return echartsModule
 }
 import { listValuationIndexes, getValuationHistory, getIndexInfo, runAnalysis, pollIndexAnalysisStatus, listAnalysisHistory, getAnalysisHistoryDetail, deleteAnalysisHistory, refreshValuationPrices, listDDValuations, getDDValuation, getMarketTemperature, getSuperValue, getEnhancedStrategy } from '../api'
+import { useAsyncTask } from '../composables/useAsyncTask'
 import { renderMarkdown } from '../composables/useMarkdown'
 import { isDark } from '../composables/useTheme'
 import { useToast } from '../composables/useToast'
@@ -268,6 +269,8 @@ const selectedIndexName = computed(() => {
   return idx?.index_name || selectedCode.value
 })
 
+const { taskState: indexAnalysisTaskState, start: startIndexAnalysisTask, restore: restoreIndexAnalysisTask } = useAsyncTask('index_analysis')
+
 async function handleRunAnalysis() {
   if (!selectedCode.value) return
   const code = selectedCode.value
@@ -282,6 +285,7 @@ async function handleRunAnalysis() {
   try {
     const { data } = await runAnalysis(code, name)
     const historyId = data.id
+    const taskId = data.task_id
     analysisResultMap.value = {
       ...analysisResultMap.value,
       [code]: {
@@ -292,28 +296,59 @@ async function handleRunAnalysis() {
         created_at: new Date().toISOString(),
       }
     }
-    pollIndexAnalysisStatus(historyId, (status) => {
-      if (status.status === 'done') {
-        analysisResultMap.value = {
-          ...analysisResultMap.value,
-          [code]: {
-            id: historyId,
-            result: status.result,
-            agent_name: '指数深度分析师',
-            token_usage: status.token_usage || 0,
-            created_at: new Date().toISOString(),
+    // 如果后端返回了 task_id，使用 useAsyncTask 轮询；否则回退到原有轮询
+    if (taskId) {
+      // 用 useAsyncTask 的轮询机制
+      const { data: triggerData } = { data: { task_id: taskId } }
+      // 手动触发 start 的轮询逻辑
+      await startIndexAnalysisTask(async () => ({ data: { task_id: taskId } }), {
+        onComplete: (result) => {
+          analysisResultMap.value = {
+            ...analysisResultMap.value,
+            [code]: {
+              id: historyId,
+              result: result?.result || result || '',
+              agent_name: '指数深度分析师',
+              token_usage: result?.token_usage || 0,
+              created_at: new Date().toISOString(),
+            }
           }
+          analysisLoadingMap.value = { ...analysisLoadingMap.value, [code]: false }
+          loadAnalysisHistory()
+        },
+        onError: (err) => {
+          analysisResultMap.value = {
+            ...analysisResultMap.value,
+            [code]: { result: '分析失败：' + (err || '未知错误'), error: true }
+          }
+          analysisLoadingMap.value = { ...analysisLoadingMap.value, [code]: false }
         }
-        analysisLoadingMap.value = { ...analysisLoadingMap.value, [code]: false }
-        loadAnalysisHistory()
-      } else if (status.status === 'error') {
-        analysisResultMap.value = {
-          ...analysisResultMap.value,
-          [code]: { result: '分析失败：' + (status.error || '未知错误'), error: true }
+      })
+    } else {
+      // 回退：使用原有轮询
+      pollIndexAnalysisStatus(historyId, (status) => {
+        if (status.status === 'done') {
+          analysisResultMap.value = {
+            ...analysisResultMap.value,
+            [code]: {
+              id: historyId,
+              result: status.result,
+              agent_name: '指数深度分析师',
+              token_usage: status.token_usage || 0,
+              created_at: new Date().toISOString(),
+            }
+          }
+          analysisLoadingMap.value = { ...analysisLoadingMap.value, [code]: false }
+          loadAnalysisHistory()
+        } else if (status.status === 'error') {
+          analysisResultMap.value = {
+            ...analysisResultMap.value,
+            [code]: { result: '分析失败：' + (status.error || '未知错误'), error: true }
+          }
+          analysisLoadingMap.value = { ...analysisLoadingMap.value, [code]: false }
         }
-        analysisLoadingMap.value = { ...analysisLoadingMap.value, [code]: false }
-      }
-    })
+      })
+    }
   } catch (e) {
     console.error('Analysis failed:', e)
     analysisResultMap.value = {
@@ -685,6 +720,7 @@ const sourceImageUrl = computed(() => {
 })
 
 onMounted(() => {
+  restoreIndexAnalysisTask()
   loadIndexes()
   loadMarketTemperature()
   document.addEventListener('click', handleOutsideClick)
@@ -700,6 +736,8 @@ onUnmounted(() => {
 onActivated(() => {
   // 重新加载市场温度
   loadMarketTemperature()
+  // 恢复异步任务状态
+  restoreIndexAnalysisTask()
   // 如果在增强策略 tab，重新加载数据
   if (outerTab.value === 'super-value') {
     loadSuperValue()

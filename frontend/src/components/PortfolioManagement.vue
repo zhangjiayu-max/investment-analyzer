@@ -35,8 +35,10 @@ import Skeleton from './ui/Skeleton.vue'
 import EmptyState from './ui/EmptyState.vue'
 import AnalysisCard from './ui/AnalysisCard.vue'
 import AIActionButton from './ui/AIActionButton.vue'
+import AnalysisComparison from './AnalysisComparison.vue'
 import { renderMarkdown } from '../composables/useMarkdown'
 import { isDark } from '../composables/useTheme'
+import { useAsyncTask } from '../composables/useAsyncTask'
 
 // ── 持仓占比计算 ──
 const holdingWeights = computed(() => {
@@ -1191,6 +1193,7 @@ const aiModes = [
   { key: 'deepdive', icon: '🔎', label: '单基金分析' },
   { key: 'trade-review', icon: '📊', label: '交易复盘' },
   { key: 'fund-analysis', icon: '🔍', label: '指定基金分析' },
+  { key: 'compare', icon: '⚖️', label: '对比分析' },
 ]
 
 function switchAiMode(mode) {
@@ -1584,26 +1587,24 @@ async function loadFundChart(fundCode) {
   }
 }
 
+const { taskState: diverAiTaskState, start: startDiverAiTask, restore: restoreDiverAiTask } = useAsyncTask('diversification_ai')
+
 async function runDiverAiSummary() {
   if (!holdings.value.length) return
   diverAiLoading.value = true
   diverAiResult.value = '分析已提交，正在后台生成结果...'
-  try {
-    const { data } = await runDiversificationAiSummary()
-    diverAiRecordId.value = data.id
-    pollAnalysisStatus(data.id, (status) => {
-      if (status.status === 'done') {
-        diverAiResult.value = status.result || ''
-        diverAiLoading.value = false
-      } else if (status.status === 'error') {
-        diverAiResult.value = 'AI 解读生成失败：' + (status.error || '未知错误')
-        diverAiLoading.value = false
-      }
-    })
-  } catch (e) {
-    diverAiResult.value = 'AI 解读生成失败：' + (e.response?.data?.detail || e.message)
-    diverAiLoading.value = false
-  }
+  await startDiverAiTask(runDiversificationAiSummary, {
+    onComplete: (result) => {
+      // 后端返回 {task_id, record_id, status}，result 是轮询完成后 的结果
+      if (result?.record_id) diverAiRecordId.value = result.record_id
+      diverAiResult.value = result?.result || result?.analysis || ''
+      diverAiLoading.value = false
+    },
+    onError: (err) => {
+      diverAiResult.value = 'AI 解读生成失败：' + err
+      diverAiLoading.value = false
+    }
+  })
 }
 
 // ── 确认弹窗包装 ──
@@ -1662,31 +1663,28 @@ function confirmFundAnalysis() {
   }
 }
 
+const { taskState: portfolioAiTaskState, start: startPortfolioAiTask, restore: restorePortfolioAiTask } = useAsyncTask('portfolio_ai')
+
 async function submitAiAnalysis() {
   aiAnalysisLoading.value = true
   aiAnalysisResult.value = ''
   aiRecordId.value = null
   aiTokenUsage.value = 0
   aiMcpSources.value = []
-  try {
-    const { data } = await runPortfolioAiAnalysis(aiAnalysisInput.value.trim())
-    aiRecordId.value = data.id
-    aiAnalysisResult.value = '分析已提交，正在后台生成结果...'
-    pollAnalysisStatus(data.id, (status) => {
-      if (status.status === 'done') {
-        aiAnalysisResult.value = status.result || ''
-        aiTokenUsage.value = status.token_usage || 0
-        aiAnalysisLoading.value = false
-        loadAiAnalysisRecords()
-      } else if (status.status === 'error') {
-        aiAnalysisResult.value = '分析失败：' + (status.error || '未知错误')
-        aiAnalysisLoading.value = false
-      }
-    })
-  } catch (e) {
-    aiAnalysisResult.value = '分析失败：' + (e.response?.data?.detail || e.message)
-    aiAnalysisLoading.value = false
-  }
+  const question = aiAnalysisInput.value.trim()
+  await startPortfolioAiTask(() => runPortfolioAiAnalysis(question), {
+    onComplete: (result) => {
+      if (result?.record_id) aiRecordId.value = result.record_id
+      aiAnalysisResult.value = result?.result || result?.analysis || ''
+      aiTokenUsage.value = result?.token_usage || 0
+      aiAnalysisLoading.value = false
+      loadAiAnalysisRecords()
+    },
+    onError: (err) => {
+      aiAnalysisResult.value = '分析失败：' + err
+      aiAnalysisLoading.value = false
+    }
+  })
 }
 
 async function loadAiAnalysisRecords() {
@@ -1804,6 +1802,9 @@ onActivated(async () => {
   } else {
     modeLoading.value = false
   }
+  // 恢复异步任务状态
+  restoreDiverAiTask()
+  restorePortfolioAiTask()
   diversificationLoading.value = false
   diverAiLoading.value = false
 
@@ -3154,6 +3155,11 @@ function txDisplayAmount(tx) {
                 </div>
               </div>
             </div>
+          </div>
+
+          <!-- Mode: Compare -->
+          <div v-if="aiMode === 'compare'" class="ai-mode-content">
+            <AnalysisComparison @back="switchAiMode('panorama')" />
           </div>
 
           <!-- Result loading -->

@@ -1,5 +1,5 @@
 <script setup>
-import { ref, watch } from 'vue'
+import { ref, watch, onMounted, onUnmounted } from 'vue'
 import Sidebar from './components/Sidebar.vue'
 import Home from './views/Home.vue'
 import MobileApp from './components/MobileApp.vue'
@@ -13,9 +13,22 @@ const { completedTask, clearCompletedTask } = useTaskTracker()
 
 const activePage = ref(localStorage.getItem('activePage') || 'articles')
 const showKyc = ref(false)
+const searchQuery = ref('')
 
 watch(activePage, (val) => {
   localStorage.setItem('activePage', val)
+})
+
+function handleSearch(q) {
+  searchQuery.value = q
+  activePage.value = 'search'
+}
+
+onMounted(() => {
+  window.addEventListener('open-kyc', () => { showKyc.value = true })
+})
+onUnmounted(() => {
+  window.removeEventListener('open-kyc', () => { showKyc.value = true })
 })
 
 // 任务完成时跳转到对话页面
@@ -34,9 +47,9 @@ function handleViewResult(convId) {
   <div v-else class="app-layout">
     <Sidebar :activePage="activePage" :showKyc="showKyc" @navigate="activePage = $event" @close-kyc="showKyc = false" />
     <div class="app-content">
-      <TickerBar @open-kyc="showKyc = true" />
+      <TickerBar @open-kyc="showKyc = true" @search="handleSearch" />
       <main class="app-main">
-        <Home :activePage="activePage" @navigate="activePage = $event" />
+        <Home :activePage="activePage" :searchQuery="searchQuery" @navigate="activePage = $event" />
       </main>
     </div>
   </div>

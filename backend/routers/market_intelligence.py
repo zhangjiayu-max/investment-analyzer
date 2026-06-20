@@ -19,6 +19,7 @@ from datetime import datetime
 from fastapi import APIRouter
 
 from db import list_valuation_indexes, list_holdings, get_analysis_agent, get_config_float, get_config_int
+from db import create_async_task, update_async_task, get_async_task
 from db.portfolio import save_analysis_cache, get_analysis_cache
 from db.agents import create_agent_run
 from db._conn import _get_conn
@@ -28,6 +29,8 @@ from rag import build_rag_context_with_details, log_rag_search
 router = APIRouter(prefix="/api/market-intelligence", tags=["market-intelligence"])
 
 logger = logging.getLogger(__name__)
+
+_background_tasks = set()
 
 # ── 缓存（使用数据库 analysis_cache 表，每日自动失效） ──────
 
@@ -493,19 +496,56 @@ def _fuzzy_match_sectors_to_data(sectors: list[dict]) -> list[dict]:
 
 @router.get("/overview")
 async def get_market_intelligence_overview(force: bool = False):
-    """市场热点情报概览 — 多源新闻聚合 + LLM 自由推断热点板块。
+    """市场热点情报概览 — 返回当日缓存（如已有）。
 
-    每日首次分析后结果缓存到数据库，后续请求直接返回缓存。
-    传 force=true 可强制重新分析。
+    如果当日无缓存，返回空结果提示前端触发分析。
+    传 force=true 跳过缓存返回空（前端应随即 POST trigger）。
     """
     today = datetime.now().strftime("%Y-%m-%d")
     cache_key = f"market_intelligence_{today}"
 
-    # 非强制模式：先查数据库缓存（当日有效）
-    if not force:
-        cached = get_analysis_cache(cache_key)
-        if cached:
-            return cached
+    cached = get_analysis_cache(cache_key)
+    if cached:
+        return cached
+
+    # 无缓存：返回提示信息，前端应调用 POST /trigger
+    return {
+        "news": [],
+        "cctv_news": [],
+        "cctv_signal": "",
+        "hot_topics": [],
+        "sectors": [],
+        "macro": {},
+        "summary": "暂无今日市场情报，请点击刷新触发分析",
+        "fetched_at": "",
+        "need_trigger": True,
+    }
+
+
+@router.post("/overview/trigger")
+async def trigger_market_intelligence():
+    """触发市场热点情报分析（异步）。立即返回 task_id，后台执行。"""
+    task_id = create_async_task("market_intelligence", caller="market_intelligence")
+    task = asyncio.create_task(_run_market_intelligence_async(task_id))
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+    return {"task_id": task_id, "status": "running"}
+
+
+async def _run_market_intelligence_async(task_id: int):
+    """后台执行市场热点情报分析。"""
+    try:
+        result = await _do_market_intelligence()
+        update_async_task(task_id, status="done", result=result)
+    except Exception as e:
+        logging.error(f"市场情报异步任务失败: {e}")
+        update_async_task(task_id, status="error", error_msg=str(e))
+
+
+async def _do_market_intelligence():
+    """市场热点情报分析业务逻辑。"""
+    today = datetime.now().strftime("%Y-%m-%d")
+    cache_key = f"market_intelligence_{today}"
 
     now = time.time()
 
@@ -715,7 +755,6 @@ async def get_market_intelligence_overview(force: bool = False):
     # 保存到数据库缓存（当日有效）
     save_analysis_cache(cache_key, result)
     return result
-
 
 @router.get("/sector-detail/{sector_name}")
 async def get_sector_detail(sector_name: str):

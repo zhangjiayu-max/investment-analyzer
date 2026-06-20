@@ -237,8 +237,10 @@
 <script setup>
 import { ref, computed, onMounted } from 'vue'
 import { getMarketIntelligenceOverview } from '../api'
+import { useAsyncTask } from '../composables/useAsyncTask'
 import Icon from './ui/Icon.vue'
 
+const { taskState, taskResult, taskError, start, restore, reset } = useAsyncTask('market_intelligence')
 const loading = ref(false)
 const data = ref(null)
 const selectedSector = ref(0)
@@ -251,20 +253,24 @@ const activeSector = computed(() => {
 })
 
 onMounted(() => {
-  loadData()
+  restore()
+  if (taskState.value === 'idle') loadData()
 })
 
 async function loadData(force = false) {
   loading.value = true
-  try {
-    const { data: res } = await getMarketIntelligenceOverview(force)
-    data.value = res
-    selectedSector.value = 0
-  } catch (e) {
-    console.error('市场情报加载失败:', e)
-  } finally {
-    loading.value = false
-  }
+  data.value = null
+  await start(() => getMarketIntelligenceOverview(force), {
+    onComplete: (result) => {
+      data.value = result
+      selectedSector.value = 0
+      loading.value = false
+    },
+    onError: (err) => {
+      console.error('市场情报加载失败:', err)
+      loading.value = false
+    }
+  })
 }
 
 function heatLabel(heat) {

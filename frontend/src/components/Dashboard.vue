@@ -1,6 +1,6 @@
 <script setup>
 import { ref, computed, onMounted, onActivated } from 'vue'
-import { getDashboard, runAnalysis, runPanoramaAnalysis, pollPanoramaStatus, getHotTopics, getDailyReport, regenerateDailyReport, submitDailyReportFeedback, listPanoramaRecords, getHotspotsAnalysis, getLatestHotspotsAnalysis, getRecommendations, getRecommendationStats, submitRecommendationFeedback, getBondRecommend, listBondRecommendRecords, autoVerifyRecommendations, fetchRecentValuations, getBondMarketTemperature, getHotspotsRelate, getRebalancingSuggestion } from '../api'
+import { getDashboard, runAnalysis, runPanoramaAnalysis, pollPanoramaStatus, getHotTopics, getDailyReport, regenerateDailyReport, submitDailyReportFeedback, listPanoramaRecords, triggerHotspotsAnalysis, getLatestHotspotsAnalysis, getRecommendations, getRecommendationStats, submitRecommendationFeedback, getBondRecommend, listBondRecommendRecords, autoVerifyRecommendations, fetchRecentValuations, getBondMarketTemperature, getHotspotsRelate, getRebalancingSuggestion } from '../api'
 import GaugeChart from './charts/GaugeChart.vue'
 import ConfirmDialog from './ConfirmDialog.vue'
 import AppToast from './AppToast.vue'
@@ -8,6 +8,7 @@ import Skeleton from './ui/Skeleton.vue'
 import { useToast } from '../composables/useToast'
 import { renderMarkdown } from '../composables/useMarkdown'
 import { getBondTempLabel } from '../composables/useDashboardHelpers'
+import { useAsyncTask } from '../composables/useAsyncTask'
 
 // Sub-components
 import BriefingCard from './dashboard/BriefingCard.vue'
@@ -18,6 +19,12 @@ import CashManagementCard from './dashboard/CashManagementCard.vue'
 import Icon from './ui/Icon.vue'
 
 const { showToast } = useToast()
+
+// ── 异步任务 composables ──
+const { taskState: hotspotsTaskState, start: startHotspotsTask, restore: restoreHotspotsTask } = useAsyncTask('hotspots_analysis')
+const { taskState: reportTaskState, start: startReportTask, restore: restoreReportTask } = useAsyncTask('daily_report')
+const { taskState: bondTaskState, start: startBondTask, restore: restoreBondTask } = useAsyncTask('bond_recommend')
+const { taskState: rebalanceTaskState, start: startRebalanceTask, restore: restoreRebalanceTask } = useAsyncTask('rebalancing')
 
 const emit = defineEmits(['navigate'])
 
@@ -42,14 +49,12 @@ const data = ref(null)
 const hotTopics = ref(null)
 const hotTopicsFetchedAt = ref('')
 const hotTopicsLoading = ref(true)
-const hotspotLoading = ref(false)
-const hotspotError = ref(false)
 const hotspotsRelate = ref(null)
 
 // ── 每日日报自动加载 ──
 const dailyReport = ref(null)
 const dailyReportLoading = ref(true)
-const dailyReportRegenerating = ref(false)
+const dailyReportRegenerating = computed(() => reportTaskState.value === 'submitting' || reportTaskState.value === 'running')
 const showBriefing = ref(true)
 const briefingFeedback = ref({ rating: null, sending: false, sent: false, showComment: false, comment: '' })
 
@@ -61,18 +66,20 @@ function confirmRegenerateReport() {
     danger: false,
     onConfirm: async () => {
       confirm.value.visible = false
-      dailyReportRegenerating.value = true
-      try {
-        const { data } = await regenerateDailyReport()
-        if (data.ok) {
-          const { data: res } = await getDailyReport()
-          if (res?.has_report) dailyReport.value = res.report
+      await startReportTask(regenerateDailyReport, {
+        onComplete: async () => {
+          // 重新加载日报内容
+          try {
+            const { data: res } = await getDailyReport()
+            if (res?.has_report) dailyReport.value = res.report
+          } catch (e) {
+            console.error('重新加载日报失败:', e)
+          }
+        },
+        onError: (err) => {
+          console.error('重新生成简报失败:', err)
         }
-      } catch (e) {
-        console.error('重新生成简报失败:', e)
-      } finally {
-        dailyReportRegenerating.value = false
-      }
+      })
     }
   }
 }
@@ -124,12 +131,21 @@ function handleBriefingSubmitFeedback(type, rating) {
 // ── 全景诊断 AI 分析 ──
 
 onMounted(async () => {
-  try {
-    const { data: latest } = await getLatestHotspotsAnalysis()
-    if (latest?.recommendations?.length) {
-      hotspotsAnalysis.value = latest
-    }
-  } catch (_) {}
+  // 先恢复异步任务状态（如果页面切换前有运行中任务）
+  const hotspotsRestored = restoreHotspotsTask()
+  const reportRestored = restoreReportTask()
+  restoreBondTask()
+  restoreRebalanceTask()
+
+  if (!hotspotsRestored) {
+    // 没有运行中的任务，尝试加载已有缓存
+    try {
+      const { data: latest } = await getLatestHotspotsAnalysis()
+      if (latest?.recommendations?.length) {
+        hotspotsAnalysis.value = latest
+      }
+    } catch (_) {}
+  }
 
   try { await autoVerifyRecommendations() } catch (_) {}
 
@@ -170,6 +186,8 @@ onMounted(async () => {
 })
 
 onActivated(async () => {
+  restoreBondTask()
+  restoreRebalanceTask()
   await Promise.all([
     loadDashboard(),
     loadHotTopics(),
@@ -285,18 +303,24 @@ const hotspotsAnalysis = ref(null)
 const bondLoading = ref(false)
 const bondResult = ref(null)
 
+// 热点分析 loading/error 状态由异步任务驱动
+const hotspotLoading = computed(() => hotspotsTaskState.value === 'submitting' || hotspotsTaskState.value === 'running')
+const hotspotError = computed(() => hotspotsTaskState.value === 'error')
+
 async function handleBondRecommend() {
   bondLoading.value = true
   bondResult.value = null
-  try {
-    const { data: res } = await getBondRecommend()
-    bondResult.value = res.result
-    await loadDashboard()
-  } catch (e) {
-    showToast('AI 债券推荐失败：' + (e.response?.data?.detail || e.message), 'error')
-  } finally {
-    bondLoading.value = false
-  }
+  await startBondTask(getBondRecommend, {
+    onComplete: (result) => {
+      bondResult.value = result?.result || result
+      bondLoading.value = false
+      loadDashboard()
+    },
+    onError: (err) => {
+      showToast('AI 债券推荐失败：' + err, 'error')
+      bondLoading.value = false
+    }
+  })
 }
 
 function confirmBondRecommend() {
@@ -310,26 +334,24 @@ function confirmBondRecommend() {
 }
 
 async function generateHotspots() {
-  hotspotLoading.value = true
   hotspotsAnalysis.value = null
-  hotspotError.value = false
-  try {
-    const { data } = await getHotspotsAnalysis()
-    hotspotsAnalysis.value = data
-    hotTopicsAnalyzedAt.value = new Date().toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
-    hotTopicsFetchedAt.value = hotTopicsAnalyzedAt.value
-    try { await autoVerifyRecommendations() } catch (_) {}
-    loadRecHistory()
-  } catch (e) {
-    hotspotError.value = true
-    hotspotsAnalysis.value = {
-      summary: '分析失败',
-      recommendations: [],
-      analysis_text: e.response?.data?.detail || e.message,
+  await startHotspotsTask(triggerHotspotsAnalysis, {
+    onComplete: (result) => {
+      hotspotsAnalysis.value = result
+      hotTopicsAnalyzedAt.value = new Date().toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
+      hotTopicsFetchedAt.value = hotTopicsAnalyzedAt.value
+      try { autoVerifyRecommendations() } catch (_) {}
+      loadRecHistory()
+    },
+    onError: (err) => {
+      console.error('热点分析失败:', err)
+      hotspotsAnalysis.value = {
+        summary: '分析失败',
+        recommendations: [],
+        analysis_text: err,
+      }
     }
-  } finally {
-    hotspotLoading.value = false
-  }
+  })
 }
 
 function confirmHotspots() {
@@ -381,14 +403,16 @@ async function generateRebalance() {
   rebalanceLoading.value = true
   rebalanceResult.value = null
   showRebalance.value = true
-  try {
-    const { data: res } = await getRebalancingSuggestion()
-    rebalanceResult.value = res
-  } catch (e) {
-    rebalanceResult.value = { error: '分析失败: ' + (e.response?.data?.detail || e.message) }
-  } finally {
-    rebalanceLoading.value = false
-  }
+  await startRebalanceTask(getRebalancingSuggestion, {
+    onComplete: (result) => {
+      rebalanceResult.value = result
+      rebalanceLoading.value = false
+    },
+    onError: (err) => {
+      rebalanceResult.value = { error: '分析失败: ' + err }
+      rebalanceLoading.value = false
+    }
+  })
 }
 
 function handleRebalance() {

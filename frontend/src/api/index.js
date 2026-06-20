@@ -161,7 +161,7 @@ export function getUnifiedValuation(indexCode = null, metricType = '市盈率', 
 
 /** AI 债券配置推荐 */
 export function getBondRecommend() {
-  return api.post('/bond/ai-recommend', {}, { timeout: 120000 })
+  return api.post('/bond/ai-recommend')
 }
 
 /** 获取指数简介信息 */
@@ -725,7 +725,7 @@ export function deleteLinkedArticle(id) {
 
 /** 触发 AI 分析 */
 export function runAnalysis(indexCode, indexName, agentId = 9) {
-  return api.post('/analysis/run', { index_code: indexCode, index_name: indexName, agent_id: agentId }, { timeout: 30000 })
+  return api.post('/analysis/run', { index_code: indexCode, index_name: indexName, agent_id: agentId })
 }
 
 /** 查询指数 AI 分析执行状态 */
@@ -809,7 +809,7 @@ export function fetchRecentValuations() {
 
 /** 重新生成今日市场简报 */
 export function regenerateDailyReport() {
-  return api.post('/dashboard/daily-report/regenerate', {}, { timeout: 120000 })
+  return api.post('/dashboard/daily-report/regenerate')
 }
 
 /** 提交每日简报反馈 */
@@ -824,9 +824,9 @@ export function submitDailyReportFeedback({ rating, comment = '', reportSummary 
   })
 }
 
-/** 获取结构化热点分析（AI 推荐卡片） */
-export function getHotspotsAnalysis() {
-  return api.get('/dashboard/hotspots-analysis', { timeout: 90000 })
+/** 触发结构化热点分析（异步） */
+export function triggerHotspotsAnalysis() {
+  return api.post('/dashboard/hotspots-analysis')
 }
 
 /** 获取最近一次热点分析缓存（刷新页面后还原） */
@@ -838,7 +838,7 @@ export function getLatestHotspotsAnalysis() {
 
 /** 市场热点情报概览（force=true 强制重新分析） */
 export function getMarketIntelligenceOverview(force = false) {
-  return api.get('/market-intelligence/overview', { params: { force }, timeout: 120000 })
+  return api.post('/market-intelligence/overview', { force })
 }
 
 /** 单个板块深度分析 */
@@ -1033,7 +1033,7 @@ export function getTransactionSummary() {
 
 /** 获取智能调仓建议 */
 export function getRebalancingSuggestion() {
-  return api.get('/portfolio/rebalancing')
+  return api.post('/portfolio/rebalancing/trigger')
 }
 
 /** 获取调仓配置和策略预设 */
@@ -1065,7 +1065,7 @@ export function rollbackRebalanceConfig(configId) {
 
 /** 触发 AI 分散度分析解读 */
 export function runDiversificationAiSummary() {
-  return api.post('/portfolio/analysis/diversification/ai-summary', {}, { timeout: 120000 })
+  return api.post('/portfolio/analysis/diversification/ai-summary')
 }
 
 /** 查询今天是否已有 AI 分散度分析 */
@@ -1082,7 +1082,7 @@ export function getPortfolioPenetration() {
 
 /** 触发 AI 持仓分析 */
 export function runPortfolioAiAnalysis(question = '') {
-  return api.post('/portfolio/analysis/ai', { question }, { timeout: 300000 })
+  return api.post('/portfolio/analysis/ai', { question })
 }
 
 /** 列出 AI 持仓分析记录 */
@@ -1358,7 +1358,7 @@ export function deleteEvalCase(caseId) {
 
 /** 运行评测用例 */
 export function runEvalCase(caseId) {
-  return api.post(`/eval/cases/${caseId}/run`, {}, { timeout: 600000 })
+  return api.post(`/eval/cases/${caseId}/run`)
 }
 
 /** 列出评测运行记录 */
@@ -1561,6 +1561,18 @@ export function lookupWatchlistFund(id) {
   return api.post(`/watchlist/${id}/lookup`, {}, { timeout: 30000 })
 }
 
+// ── 异步任务状态 API ──────────────────────────────────────
+
+/** 查询异步任务状态 */
+export function getAsyncTaskStatus(taskId) {
+  return api.get(`/async-tasks/${taskId}/status`)
+}
+
+/** 列出异步任务 */
+export function listAsyncTasks(taskType = '', status = '', limit = 50) {
+  return api.get('/async-tasks', { params: { task_type: taskType, status, limit } })
+}
+
 // ── 用户画像 / KYC API（新路径: /api/profile/*）─────────────────────────────────────
 
 /** 获取 KYC 问卷题库 + 当前画像 */
@@ -1581,6 +1593,11 @@ export function getProfile() {
 /** 更新画像字段 */
 export function updateProfile(data) {
   return api.put('/profile', data)
+}
+
+/** 全局搜索 */
+export function globalSearch(q, limit = 5) {
+  return api.get('/search/global', { params: { q, limit } })
 }
 
 export default api

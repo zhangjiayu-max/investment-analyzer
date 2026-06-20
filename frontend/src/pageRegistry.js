@@ -18,4 +18,5 @@ export const pageComponentKeys = [
   'eval-suite',
   'system-config',
   'knowledge',
+  'search',
 ]
