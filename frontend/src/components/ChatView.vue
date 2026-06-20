@@ -8,6 +8,7 @@ import {
   resumeConversationStream,
   listTraces, listAgents,
   getConversationEvaluation, evaluateConversation, evaluateConversationWithLLM,
+  createDecisionFromChat,
 } from '../api'
 import ConfirmDialog from './ConfirmDialog.vue'
 import AppToast from './AppToast.vue'
@@ -1025,6 +1026,38 @@ function copyMessageId(msgId) {
   })
 }
 
+async function saveMessageAsDecision(msg, index) {
+  if (!selectedConv.value?.id || !msg?.id) return
+  const previousUser = [...messages.value.slice(0, index)].reverse().find(m => m.role === 'user')
+  confirm.value = {
+    visible: true,
+    title: '保存为决策草案',
+    message: '将把这条 AI 回复保存到理财决策中枢，并自动生成检查清单和复盘日期。此操作不会执行任何交易。',
+    danger: false,
+    onConfirm: async () => {
+      try {
+        const { data } = await createDecisionFromChat({
+          conversation_id: selectedConv.value.id,
+          assistant_message_id: msg.id,
+          user_message_id: previousUser?.id || null,
+          target_type: 'portfolio',
+          target_name: '',
+          review_days: 30,
+        })
+        if (data?.ok) {
+          showToast(`已保存为决策草案 #${data.id}`, 'success')
+        } else {
+          showToast('保存决策草案失败', 'error')
+        }
+      } catch (e) {
+        showToast('保存决策草案失败: ' + (e.response?.data?.detail || e.message), 'error')
+      } finally {
+        confirm.value.visible = false
+      }
+    }
+  }
+}
+
 // ─── Trace 详情 ───
 
 async function toggleTraceDetail(msg, index) {
@@ -1148,6 +1181,7 @@ function stopPollingProgress() {
             @trigger-llm-eval="triggerLLMEval"
             @copy-message-id="copyMessageId"
             @toggle-trace="toggleTraceDetail"
+            @save-decision="saveMessageAsDecision"
             @retry="retryMessage"
             @resume="tryResumeConversation"
           />

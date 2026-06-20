@@ -109,6 +109,12 @@ def _fix_holdings_unique_constraint(conn: sqlite3.Connection):
             last_update TEXT,
             notes TEXT,
             price_updated_at TEXT,
+            today_change_pct REAL DEFAULT 0,
+            today_profit REAL DEFAULT 0,
+            fund_category TEXT DEFAULT '',
+            has_base_position INTEGER DEFAULT 0,
+            last_buy_price REAL,
+            last_buy_date TEXT,
             created_at TEXT DEFAULT (datetime('now','localtime')),
             updated_at TEXT DEFAULT (datetime('now','localtime')),
             UNIQUE(user_id, account, fund_code)
@@ -119,12 +125,20 @@ def _fix_holdings_unique_constraint(conn: sqlite3.Connection):
             id, user_id, fund_code, fund_name, index_code, index_name,
             shares, cost_price, current_price, total_cost, current_value,
             profit_loss, profit_rate, buy_date, last_update, notes,
-            price_updated_at, created_at, updated_at
+            price_updated_at, today_change_pct, today_profit, fund_category,
+            has_base_position, last_buy_price, last_buy_date, created_at, updated_at
         )
         SELECT id, user_id, fund_code, fund_name, index_code, index_name,
             shares, cost_price, current_price, total_cost, current_value,
             profit_loss, profit_rate, buy_date, last_update, notes,
-            price_updated_at, created_at, updated_at
+            price_updated_at,
+            COALESCE(today_change_pct, 0),
+            COALESCE(today_profit, 0),
+            COALESCE(fund_category, ''),
+            COALESCE(has_base_position, 0),
+            last_buy_price,
+            last_buy_date,
+            created_at, updated_at
         FROM portfolio_holdings_backup
     """)
     conn.execute("DROP TABLE portfolio_holdings_backup")

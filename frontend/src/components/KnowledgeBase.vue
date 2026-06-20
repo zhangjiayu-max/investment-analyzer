@@ -23,6 +23,7 @@ const categoryMap = {
   strategy: { label: '策略', icon: '🎯' },
   book: { label: '书籍', icon: '📖' },
   article: { label: '文章', icon: '📰' },
+  note: { label: '个人笔记', icon: '📝' },
 }
 
 const subcategoryMap = {
@@ -34,6 +35,15 @@ const subcategoryMap = {
   timing: '择时',
   concept: '概念',
   principle: '原则',
+  strategy: '策略',
+  industry: '行业',
+  tech: '技术',
+  psychology: '心理学',
+  decision: '决策',
+  book: '读书',
+  article: '文章',
+  course: '课程',
+  general: '通用',
 }
 
 onMounted(async () => {

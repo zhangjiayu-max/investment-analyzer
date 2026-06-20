@@ -885,6 +885,16 @@ export function listTodayDecisions(limit = 20) {
   return api.get('/decisions/today', { params: { limit } })
 }
 
+/** 从 AI 对话回复创建决策草案 */
+export function createDecisionFromChat(payload) {
+  return api.post('/decisions/from-chat', payload)
+}
+
+/** 获取决策执行前检查结果 */
+export function getDecisionPrecheck(decisionId) {
+  return api.get(`/decisions/${decisionId}/precheck`)
+}
+
 /** 更新决策状态 */
 export function updateDecisionStatus(decisionId, status, userNote = '') {
   return api.put(`/decisions/${decisionId}/status`, { status, user_note: userNote })
@@ -1059,6 +1069,16 @@ export function getTransactionSummary() {
 /** 获取智能调仓建议 */
 export function getRebalancingSuggestion() {
   return api.post('/portfolio/rebalancing/trigger')
+}
+
+/** 获取目标配置 / 偏离度驾驶舱 */
+export function getAllocationDashboard() {
+  return api.get('/portfolio/allocation-dashboard')
+}
+
+/** 运行确定性组合压力测试 */
+export function runPortfolioStressTest(scenario = 'market_drop_20') {
+  return api.post('/portfolio/stress-test', { scenario })
 }
 
 /** 获取调仓配置和策略预设 */
@@ -1618,6 +1638,26 @@ export function getProfile() {
 /** 更新画像字段 */
 export function updateProfile(data) {
   return api.put('/profile', data)
+}
+
+/** 获取目标账户 / 资金桶 */
+export function listGoalBuckets() {
+  return api.get('/profile/buckets')
+}
+
+/** 创建目标账户 / 资金桶 */
+export function createGoalBucket(data) {
+  return api.post('/profile/buckets', data)
+}
+
+/** 更新目标账户 / 资金桶 */
+export function updateGoalBucket(id, data) {
+  return api.put(`/profile/buckets/${id}`, data)
+}
+
+/** 删除目标账户 / 资金桶 */
+export function deleteGoalBucket(id) {
+  return api.delete(`/profile/buckets/${id}`)
 }
 
 /** 全局搜索 */

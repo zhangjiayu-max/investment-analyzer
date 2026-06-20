@@ -322,6 +322,24 @@ _clarification_cache: dict[int, dict] = {}
 _CLARIFICATION_CACHE_MAX = 128
 
 
+def detect_scenario_type(query: str) -> str:
+    """确定性识别投资问题场景，用于模板、RAG 和评测分流。"""
+    text = query or ""
+    if detect_urls(text) or any(word in text for word in ["文章", "作者观点", "这篇", "观点是否", "观点靠谱吗"]):
+        return "article_check"
+    if any(word in text for word in ["复盘", "回顾", "上次决策", "这次决策效果"]):
+        return "decision_review"
+    if any(word in text for word in ["什么是", "解释", "怎么算", "概念", "区别", "原理"]):
+        return "knowledge_qa"
+    if any(word in text for word in ["卖出", "减仓", "止盈", "止损", "退出", "要不要卖"]):
+        return "sell_decision"
+    if any(word in text for word in ["买入", "加仓", "建仓", "定投", "可以买吗", "值得买吗", "能不能买"]):
+        return "buy_decision"
+    if any(word in text for word in ["持仓", "组合", "仓位", "集中", "分散", "再平衡", "资产配置"]):
+        return "portfolio_review"
+    return "general_analysis"
+
+
 def clarify_requirement(query: str) -> dict:
     """
     使用 LLM 分析用户问题，返回需求澄清结果。
@@ -433,6 +451,7 @@ def clarify_requirement(query: str) -> dict:
             "reason": result.get("reason", ""),
             "refined_query": result.get("refined_query", query),
             "confidence": confidence,
+            "scenario_type": detect_scenario_type(query),
         }
 
         # 缓存结果
@@ -452,6 +471,8 @@ def clarify_requirement(query: str) -> dict:
             "specialists": specialists,
             "reason": "关键词匹配（LLM澄清失败）",
             "refined_query": query,
+            "confidence": 0.5,
+            "scenario_type": detect_scenario_type(query),
         }
 
 
@@ -572,9 +593,17 @@ def route_to_specialists_by_keywords(query: str) -> list[str]:
         specialists.append("market_analyst")
 
     # 风险相关关键词 → 风险评估师
-    risk_keywords = ["风险", "回撤", "波动", "最大回撤"]
+    risk_keywords = ["风险", "回撤", "波动", "最大回撤", "重仓", "满仓", "清仓"]
     if any(kw in query for kw in risk_keywords):
         specialists.append("risk_assessor")
+
+    # 行为偏差关键词 → 行为金融辅导师
+    behavior_keywords = [
+        "追涨", "杀跌", "恐慌", "很慌", "焦虑", "忍不住", "冲动",
+        "补亏", "回本", "重仓", "满仓", "梭哈", "频繁交易", "踏空",
+    ]
+    if any(kw in query for kw in behavior_keywords):
+        specialists.append("behavior_coach")
 
     # 债券相关关键词 → 市场分析师 + 资产配置师
     bond_keywords = ["债券", "债市", "国债", "利率债", "信用债", "可转债", "收益率",
@@ -597,6 +626,20 @@ def route_to_specialists_by_keywords(query: str) -> list[str]:
             specialists.append("risk_assessor")
         if "allocation_advisor" not in specialists:
             specialists.append("allocation_advisor")
+
+    # 高风险行动建议 → 反方观点审查员，必要时补风险评估和行为教练
+    action_keywords = [
+        "买入", "加仓", "建仓", "卖出", "减仓", "清仓", "追涨", "重仓",
+        "满仓", "梭哈", "可以买吗", "要不要买", "要不要卖",
+    ]
+    if any(kw in query for kw in action_keywords):
+        if "counter_argument" not in specialists:
+            specialists.append("counter_argument")
+        if "risk_assessor" not in specialists:
+            specialists.append("risk_assessor")
+    if any(kw in query for kw in ["追涨", "杀跌", "恐慌", "很慌", "重仓", "满仓", "梭哈", "冲动"]):
+        if "behavior_coach" not in specialists:
+            specialists.append("behavior_coach")
 
     # 基金分析关键词 → 基金分析师
     fund_analysis_keywords = ["操作记录", "交易记录", "基金分析", "基金表现", "复盘",
@@ -639,6 +682,14 @@ SCENARIO_RAG_MAP = {
     "article_expert": {
         "query_suffix": "文章解读 观点分析 投资逻辑 研报",
         "content_types": ["article", "author_article", "book"],
+    },
+    "behavior_coach": {
+        "query_suffix": "行为金融 心理偏差 追涨杀跌 损失厌恶 过度自信 情绪",
+        "content_types": ["book", "analysis"],
+    },
+    "counter_argument": {
+        "query_suffix": "反方观点 反例 失效条件 风险边界 决策清单 安全边际",
+        "content_types": ["book", "analysis", "valuation"],
     },
 }
 
@@ -1476,6 +1527,7 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
     yield {
         "type": "plan",
         "complexity": complexity,
+        "scenario_type": clarification.get("scenario_type", detect_scenario_type(query)),
         "reason": clarification.get("reason", ""),
         "refined_query": refined_query if refined_query != query else "",
     }

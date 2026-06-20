@@ -12,7 +12,16 @@ from pydantic import BaseModel
 from agent.kyc import (
     get_kyc_questionnaire, get_kyc_profile, submit_kyc_answers,
 )
-from db import get_user_profile, update_user_profile
+from db import (
+    create_goal_bucket,
+    delete_goal_bucket,
+    get_goal_bucket,
+    get_goal_bucket_summary,
+    get_user_profile,
+    list_goal_buckets,
+    update_goal_bucket,
+    update_user_profile,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +43,31 @@ class ProfileUpdateRequest(BaseModel):
     # 通用偏好维度（兼容旧字段）
     preferences_json: str | None = None
     feedback_summary: str | None = None
+    # 个人财务画像 2.0
+    monthly_income: float | None = None
+    monthly_expense: float | None = None
+    monthly_surplus: float | None = None
+    emergency_fund_months: float | None = None
+    target_equity_ratio: float | None = None
+    max_single_position_pct: float | None = None
+    primary_goal: str | None = None
+    fund_usage: str | None = None
+    liquidity_needs: str | None = None
+    liabilities_summary: str | None = None
+    behavior_biases: list | None = None
+
+
+class GoalBucketRequest(BaseModel):
+    name: str | None = None
+    bucket_type: str | None = None
+    target_amount: float | None = None
+    current_amount: float | None = None
+    target_ratio: float | None = None
+    risk_level: str | None = None
+    liquidity_days: int | None = None
+    priority: int | None = None
+    notes: str | None = None
+    status: str | None = None
 
 
 def _dump(model) -> dict:
@@ -65,13 +99,15 @@ def api_submit_kyc(req: KycSubmitRequest):
 def api_get_profile():
     """获取完整用户画像（含偏好 + KYC 维度）。"""
     profile = get_user_profile("default") or {}
-    # focus_assets 解析为列表便于前端使用
-    fa = profile.get("focus_assets", "")
-    if fa:
+    # JSON 字段解析为列表便于前端使用
+    for key in ("focus_assets", "behavior_biases", "positive_patterns", "negative_patterns"):
+        value = profile.get(key, "")
+        if not value:
+            continue
         try:
-            profile["focus_assets"] = json.loads(fa) if isinstance(fa, str) else fa
+            profile[key] = json.loads(value) if isinstance(value, str) else value
         except (json.JSONDecodeError, TypeError):
-            profile["focus_assets"] = []
+            profile[key] = []
     return profile
 
 
@@ -81,9 +117,11 @@ def api_update_profile(req: ProfileUpdateRequest):
     fields = {k: v for k, v in _dump(req).items() if v is not None}
     if not fields:
         return {"ok": False, "msg": "无更新字段"}
-    # focus_assets 列表转 JSON
+    # 列表字段转 JSON
     if "focus_assets" in fields and isinstance(fields["focus_assets"], list):
         fields["focus_assets"] = json.dumps(fields["focus_assets"], ensure_ascii=False)
+    if "behavior_biases" in fields and isinstance(fields["behavior_biases"], list):
+        fields["behavior_biases"] = json.dumps(fields["behavior_biases"], ensure_ascii=False)
     try:
         update_user_profile("default", **fields)
         return {"ok": True, "profile": get_user_profile("default")}
@@ -102,3 +140,67 @@ def api_get_alerts():
     except Exception as e:
         logger.error(f"获取预警失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/api/profile/buckets")
+def api_list_goal_buckets():
+    """列出目标账户 / 资金桶。"""
+    return {
+        "items": list_goal_buckets("default"),
+        "summary": get_goal_bucket_summary("default"),
+    }
+
+
+@router.post("/api/profile/buckets")
+def api_create_goal_bucket(req: GoalBucketRequest):
+    """创建资金桶。"""
+    fields = {k: v for k, v in _dump(req).items() if v is not None}
+    if not fields.get("name") or not fields.get("bucket_type"):
+        raise HTTPException(status_code=400, detail="资金桶名称和类型必填")
+    try:
+        bucket_id = create_goal_bucket(
+            name=fields["name"],
+            bucket_type=fields["bucket_type"],
+            target_amount=fields.get("target_amount", 0),
+            current_amount=fields.get("current_amount", 0),
+            target_ratio=fields.get("target_ratio"),
+            risk_level=fields.get("risk_level", ""),
+            liquidity_days=fields.get("liquidity_days"),
+            priority=fields.get("priority", 3),
+            notes=fields.get("notes", ""),
+        )
+        return {"ok": True, "id": bucket_id, "item": get_goal_bucket(bucket_id)}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"创建资金桶失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.put("/api/profile/buckets/{bucket_id}")
+def api_update_goal_bucket(bucket_id: int, req: GoalBucketRequest):
+    """更新资金桶。"""
+    fields = {k: v for k, v in _dump(req).items() if v is not None}
+    if not fields:
+        return {"ok": False, "msg": "无更新字段"}
+    try:
+        ok = update_goal_bucket(bucket_id, **fields)
+        if not ok:
+            raise HTTPException(status_code=404, detail="资金桶不存在")
+        return {"ok": True, "item": get_goal_bucket(bucket_id)}
+    except HTTPException:
+        raise
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"更新资金桶失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.delete("/api/profile/buckets/{bucket_id}")
+def api_delete_goal_bucket(bucket_id: int):
+    """删除资金桶。"""
+    ok = delete_goal_bucket(bucket_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="资金桶不存在")
+    return {"ok": True}

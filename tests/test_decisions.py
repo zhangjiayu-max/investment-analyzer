@@ -298,6 +298,245 @@ class DecisionTests(unittest.TestCase):
         self.assertEqual(review_response.json()["item"]["status"], "reviewed")
         self.assertEqual(review_response.json()["item"]["review"]["outcome"], "neutral")
 
+    def test_create_chat_decision_draft_extracts_checklist_and_review_date(self):
+        from db import init_db
+        from db.conversations import create_conversation, create_message
+        from db.decisions import create_chat_decision_draft, get_decision
+
+        init_db()
+        conv_id = create_conversation("沪深300加仓讨论")
+        user_msg_id = create_message(conv_id, "user", "沪深300现在低估，可以加仓吗？")
+        assistant_msg_id = create_message(
+            conv_id,
+            "assistant",
+            "结论：可以小额分批加仓沪深300，但不要一次性买入。理由是PE百分位约18%，处于低估区。"
+            "风险是短期仍可能继续下跌，执行前要确认备用金和仓位上限。",
+        )
+
+        draft_id = create_chat_decision_draft(
+            conversation_id=conv_id,
+            assistant_message_id=assistant_msg_id,
+            user_message_id=user_msg_id,
+            assistant_content="结论：可以小额分批加仓沪深300，但不要一次性买入。理由是PE百分位约18%，处于低估区。"
+                              "风险是短期仍可能继续下跌，执行前要确认备用金和仓位上限。",
+            user_query="沪深300现在低估，可以加仓吗？",
+            target_name="沪深300",
+            target_type="index",
+        )
+        item = get_decision(draft_id)
+
+        self.assertGreater(draft_id, 0)
+        self.assertEqual(item["source_type"], "chat")
+        self.assertEqual(item["source_id"], assistant_msg_id)
+        self.assertEqual(item["decision_type"], "add")
+        self.assertEqual(item["target_name"], "沪深300")
+        self.assertEqual(item["status"], "proposed")
+        self.assertTrue(item["review_at"])
+        self.assertIn("PE百分位约18%", item["evidence_json"]["data_points"][0]["value"])
+        self.assertEqual(item["evidence_json"]["source"]["conversation_id"], conv_id)
+        self.assertIn("短期仍可能继续下跌", item["risk_json"]["counter_arguments"][0])
+        self.assertIn("确认备用金", item["suitability_json"]["checklist"][0])
+        self.assertEqual(item["actions"][0]["action_type"], "pre_trade_check")
+
+    def test_chat_decision_draft_api_creates_decision_from_message(self):
+        from db import init_db
+        from db.conversations import create_conversation, create_message
+
+        init_db()
+        conv_id = create_conversation("中证500观察")
+        user_msg_id = create_message(conv_id, "user", "中证500可以买吗？")
+        assistant_msg_id = create_message(
+            conv_id,
+            "assistant",
+            "建议先观察中证500，估值有吸引力但需要等待更明确的资金计划。"
+        )
+
+        import app as app_module
+
+        importlib.reload(app_module)
+
+        from fastapi.testclient import TestClient
+
+        client = TestClient(app_module.app)
+        response = client.post(
+            "/api/decisions/from-chat",
+            json={
+                "conversation_id": conv_id,
+                "assistant_message_id": assistant_msg_id,
+                "user_message_id": user_msg_id,
+                "target_name": "中证500",
+                "target_type": "index",
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertTrue(body["ok"])
+        self.assertEqual(body["item"]["source_id"], assistant_msg_id)
+        self.assertEqual(body["item"]["target_name"], "中证500")
+        self.assertEqual(body["item"]["actions"][0]["action_type"], "pre_trade_check")
+
+    def test_review_lesson_is_saved_as_user_lesson_knowledge(self):
+        from db import init_db
+        from db.decisions import create_decision, record_decision_review
+        from db.knowledge import search_knowledge
+
+        init_db()
+        decision_id = create_decision(
+            source_type="chat",
+            decision_type="add",
+            target_type="index",
+            target_name="沪深300",
+            summary="沪深300分批加仓草案",
+        )
+
+        record_decision_review(
+            decision_id,
+            outcome="helpful",
+            result_note="分批执行降低了波动影响",
+            profit_change=120.0,
+            lesson="以后低估加仓前，先确认备用金和单次仓位上限",
+        )
+        lessons = search_knowledge("备用金", category="user_lesson", limit=5)
+
+        self.assertEqual(len(lessons), 1)
+        self.assertIn("沪深300", lessons[0]["title"])
+        self.assertIn("先确认备用金", lessons[0]["content"])
+        self.assertEqual(lessons[0]["source"], f"decision_review:{decision_id}")
+
+    def test_decision_pre_trade_check_api_returns_blockers_from_profile(self):
+        from db import init_db, update_user_profile
+        from db.decisions import create_decision
+
+        init_db()
+        update_user_profile(
+            "default",
+            emergency_fund_months=1,
+            monthly_surplus=3000,
+            target_equity_ratio=0.4,
+            max_single_position_pct=0.1,
+        )
+        decision_id = create_decision(
+            source_type="chat",
+            decision_type="add",
+            target_type="portfolio",
+            summary="加仓权益资产",
+            evidence={"missing_data": ["目标仓位"]},
+            suitability={"checklist": ["确认备用金"]},
+        )
+
+        import app as app_module
+
+        importlib.reload(app_module)
+
+        from fastapi.testclient import TestClient
+
+        client = TestClient(app_module.app)
+        response = client.get(f"/api/decisions/{decision_id}/precheck")
+
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertFalse(body["ok_to_execute"])
+        self.assertIn("备用金不足", body["blockers"][0])
+        self.assertIn("确认备用金", body["checklist"])
+
+    def test_decision_precheck_blocks_buy_from_emergency_bucket(self):
+        from db import init_db, update_user_profile
+        from db.decisions import build_decision_precheck, create_decision
+        from db.goal_buckets import create_goal_bucket
+
+        init_db()
+        update_user_profile("default", emergency_fund_months=6, monthly_surplus=8000)
+        bucket_id = create_goal_bucket(
+            name="家庭备用金",
+            bucket_type="emergency",
+            target_amount=60000,
+            current_amount=60000,
+            risk_level="very_low",
+            liquidity_days=1,
+            priority=1,
+        )
+        decision_id = create_decision(
+            source_type="chat",
+            decision_type="buy",
+            target_type="index",
+            target_code="000300",
+            target_name="沪深300",
+            summary="用备用金买入沪深300",
+            suitability={"source_bucket_id": bucket_id},
+        )
+
+        result = build_decision_precheck(decision_id)
+
+        self.assertFalse(result["ok_to_execute"])
+        self.assertIn("家庭备用金", result["blockers"][0])
+        self.assertIn("备用金桶", result["blockers"][0])
+        self.assertEqual(result["source_bucket"]["bucket_type"], "emergency")
+
+    def test_profile_api_accepts_financial_profile_v2_fields(self):
+        from db import init_db
+
+        init_db()
+
+        import app as app_module
+
+        importlib.reload(app_module)
+
+        from fastapi.testclient import TestClient
+
+        client = TestClient(app_module.app)
+        update_response = client.put(
+            "/api/profile",
+            json={
+                "monthly_income": 30000,
+                "monthly_expense": 12000,
+                "monthly_surplus": 18000,
+                "emergency_fund_months": 6,
+                "target_equity_ratio": 0.55,
+                "max_single_position_pct": 0.12,
+                "primary_goal": "长期增值",
+                "fund_usage": "5年以上不用资金",
+                "liquidity_needs": "低",
+                "liabilities_summary": "房贷每月8000",
+                "behavior_biases": ["追涨", "下跌时焦虑"],
+            },
+        )
+        get_response = client.get("/api/profile")
+
+        self.assertEqual(update_response.status_code, 200)
+        self.assertEqual(get_response.status_code, 200)
+        profile = get_response.json()
+        self.assertEqual(profile["monthly_income"], 30000)
+        self.assertEqual(profile["emergency_fund_months"], 6)
+        self.assertEqual(profile["behavior_biases"], ["追涨", "下跌时焦虑"])
+
+    def test_unhelpful_decision_review_creates_eval_case(self):
+        from db import init_db
+        from db.decisions import create_decision, record_decision_review
+        from db.eval import list_eval_cases
+
+        init_db()
+        decision_id = create_decision(
+            source_type="chat",
+            decision_type="add",
+            target_type="index",
+            target_name="中证500",
+            summary="中证500加仓草案",
+            rationale="低估但缺少备用金检查",
+        )
+
+        record_decision_review(
+            decision_id,
+            outcome="unhelpful",
+            result_note="建议没有考虑我的短期用钱需求",
+            lesson="以后新增仓位前必须先问资金用途",
+        )
+        cases = list_eval_cases(analysis_type="decision_add")
+
+        self.assertEqual(len(cases), 1)
+        self.assertIn("中证500", cases[0]["name"])
+        self.assertIn("资金用途", cases[0]["expected_quality"])
+
 
 if __name__ == "__main__":
     unittest.main()

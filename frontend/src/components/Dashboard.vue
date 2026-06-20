@@ -1,6 +1,6 @@
 <script setup>
 import { ref, computed, onMounted, onActivated } from 'vue'
-import { getDashboard, runAnalysis, runPanoramaAnalysis, pollPanoramaStatus, getHotTopics, getDailyReport, regenerateDailyReport, submitDailyReportFeedback, listPanoramaRecords, triggerHotspotsAnalysis, getLatestHotspotsAnalysis, getRecommendations, getRecommendationStats, submitRecommendationFeedback, getBondRecommend, listBondRecommendRecords, autoVerifyRecommendations, fetchRecentValuations, getBondMarketTemperature, getHotspotsRelate, getRebalancingSuggestion, listTodayDecisions, updateDecisionStatus, completeDecisionAction, listDueDecisionReviews, submitDecisionReview } from '../api'
+import { getDashboard, runAnalysis, runPanoramaAnalysis, pollPanoramaStatus, getHotTopics, getDailyReport, regenerateDailyReport, submitDailyReportFeedback, listPanoramaRecords, triggerHotspotsAnalysis, getLatestHotspotsAnalysis, getRecommendations, getRecommendationStats, submitRecommendationFeedback, getBondRecommend, listBondRecommendRecords, autoVerifyRecommendations, fetchRecentValuations, getBondMarketTemperature, getHotspotsRelate, getRebalancingSuggestion, listTodayDecisions, updateDecisionStatus, completeDecisionAction, listDueDecisionReviews, submitDecisionReview, getDecisionPrecheck } from '../api'
 import GaugeChart from './charts/GaugeChart.vue'
 import ConfirmDialog from './ConfirmDialog.vue'
 import AppToast from './AppToast.vue'
@@ -48,6 +48,7 @@ const error = ref(null)
 const data = ref(null)
 const decisions = ref([])
 const decisionsLoading = ref(false)
+const precheckStates = ref({})
 const decisionReviews = ref([])
 const decisionReviewsLoading = ref(false)
 
@@ -303,6 +304,34 @@ async function handleCompleteDecisionAction(decisionId, actionId) {
     await loadDecisionReviews()
   } catch (e) {
     showToast('完成行动项失败', 'error')
+  }
+}
+
+async function handleDecisionPrecheck(decisionId) {
+  const current = precheckStates.value[decisionId]
+  if (current?.expanded && current?.result) {
+    precheckStates.value = {
+      ...precheckStates.value,
+      [decisionId]: { ...current, expanded: false },
+    }
+    return
+  }
+  precheckStates.value = {
+    ...precheckStates.value,
+    [decisionId]: { loading: true, expanded: true, result: current?.result || null },
+  }
+  try {
+    const { data: result } = await getDecisionPrecheck(decisionId)
+    precheckStates.value = {
+      ...precheckStates.value,
+      [decisionId]: { loading: false, expanded: true, result },
+    }
+  } catch (e) {
+    showToast('执行前检查失败', 'error')
+    precheckStates.value = {
+      ...precheckStates.value,
+      [decisionId]: { loading: false, expanded: false, result: null },
+    }
   }
 }
 
@@ -566,8 +595,10 @@ function handlePanorama() {
     <DecisionActionList
       :decisions="decisions"
       :loading="decisionsLoading"
+      :precheck-states="precheckStates"
       @status-change="handleDecisionStatusChange"
       @complete-action="handleCompleteDecisionAction"
+      @precheck="handleDecisionPrecheck"
     />
 
     <DecisionReviewList

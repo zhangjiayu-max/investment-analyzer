@@ -103,3 +103,8 @@ class WhatIfRequest(BaseModel):
     """情景推演请求。"""
     scenario: str  # 'market_drop' | 'repair_to_median' | 'repair_to_opportunity'
     parameter: float | None = None  # 市场下跌场景的跌幅百分比
+
+
+class StressTestRequest(BaseModel):
+    """确定性压力测试请求。"""
+    scenario: str = "market_drop_20"

@@ -5,9 +5,10 @@ import Icon from '../ui/Icon.vue'
 const props = defineProps({
   decisions: { type: Array, default: () => [] },
   loading: { type: Boolean, default: false },
+  precheckStates: { type: Object, default: () => ({}) },
 })
 
-const emit = defineEmits(['status-change', 'complete-action'])
+const emit = defineEmits(['status-change', 'complete-action', 'precheck'])
 
 const visibleDecisions = computed(() => props.decisions || [])
 
@@ -84,6 +85,10 @@ function hasInsight(decision) {
       || counterArgumentLine(decision)
   )
 }
+
+function precheckState(decisionId) {
+  return props.precheckStates?.[decisionId] || {}
+}
 </script>
 
 <template>
@@ -156,9 +161,40 @@ function hasInsight(decision) {
               {{ action.title }}
             </button>
           </div>
+          <div v-if="precheckState(decision.id).expanded" class="decision-card__precheck">
+            <div v-if="precheckState(decision.id).loading" class="precheck-loading">正在检查执行条件...</div>
+            <template v-else-if="precheckState(decision.id).result">
+              <div
+                class="precheck-status"
+                :class="precheckState(decision.id).result.ok_to_execute ? 'precheck-status--ok' : 'precheck-status--blocked'"
+              >
+                {{ precheckState(decision.id).result.ok_to_execute ? '未发现硬性阻断' : '暂不建议直接执行' }}
+              </div>
+              <div v-if="precheckState(decision.id).result.blockers?.length" class="precheck-group">
+                <strong>阻断项</strong>
+                <span v-for="item in precheckState(decision.id).result.blockers" :key="item">{{ item }}</span>
+              </div>
+              <div v-if="precheckState(decision.id).result.warnings?.length" class="precheck-group">
+                <strong>提醒</strong>
+                <span v-for="item in precheckState(decision.id).result.warnings" :key="item">{{ item }}</span>
+              </div>
+              <div v-if="precheckState(decision.id).result.checklist?.length" class="precheck-group">
+                <strong>检查清单</strong>
+                <span v-for="item in precheckState(decision.id).result.checklist" :key="item">{{ item }}</span>
+              </div>
+            </template>
+          </div>
         </div>
 
         <div class="decision-card__controls">
+          <button
+            type="button"
+            data-test="precheck-decision"
+            class="decision-card__btn"
+            @click="emit('precheck', decision.id)"
+          >
+            检查
+          </button>
           <button
             type="button"
             data-test="accept-decision"
@@ -358,6 +394,52 @@ function hasInsight(decision) {
   flex-wrap: wrap;
   gap: 0.4rem;
   margin-top: 0.5rem;
+}
+
+.decision-card__precheck {
+  display: grid;
+  gap: 0.45rem;
+  margin-top: 0.65rem;
+  padding: 0.65rem;
+  border: 1px solid var(--color-border-light);
+  border-radius: var(--radius-sm);
+  background: var(--color-bg-hover);
+}
+
+.precheck-loading {
+  color: var(--color-text-secondary);
+  font-size: 0.76rem;
+}
+
+.precheck-status {
+  width: fit-content;
+  padding: 0.16rem 0.5rem;
+  border-radius: var(--radius-xs);
+  font-size: 0.7rem;
+  font-weight: 800;
+}
+
+.precheck-status--ok {
+  background: var(--color-success-bg);
+  color: var(--color-success);
+}
+
+.precheck-status--blocked {
+  background: var(--color-danger-bg);
+  color: var(--color-danger);
+}
+
+.precheck-group {
+  display: grid;
+  gap: 0.24rem;
+  color: var(--color-text-secondary);
+  font-size: 0.75rem;
+  line-height: 1.45;
+}
+
+.precheck-group strong {
+  color: var(--color-text-primary);
+  font-size: 0.72rem;
 }
 
 .decision-card__action,

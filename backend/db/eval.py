@@ -137,6 +137,18 @@ def init_eval_tables(conn):
     _add_column_if_not_exists(conn, "user_profiles", "kyc_completed_at", "TEXT DEFAULT ''")
     _add_column_if_not_exists(conn, "user_profiles", "kyc_version", "INTEGER DEFAULT 0")
     _add_column_if_not_exists(conn, "user_profiles", "kyc_source", "TEXT DEFAULT ''")            # questionnaire|conversation|feedback|eval_hint
+    # ── 个人财务画像 2.0（目标、现金流、约束、行为偏差）──────────────────
+    _add_column_if_not_exists(conn, "user_profiles", "monthly_income", "REAL")
+    _add_column_if_not_exists(conn, "user_profiles", "monthly_expense", "REAL")
+    _add_column_if_not_exists(conn, "user_profiles", "monthly_surplus", "REAL")
+    _add_column_if_not_exists(conn, "user_profiles", "emergency_fund_months", "REAL")
+    _add_column_if_not_exists(conn, "user_profiles", "target_equity_ratio", "REAL")
+    _add_column_if_not_exists(conn, "user_profiles", "max_single_position_pct", "REAL")
+    _add_column_if_not_exists(conn, "user_profiles", "primary_goal", "TEXT DEFAULT ''")
+    _add_column_if_not_exists(conn, "user_profiles", "fund_usage", "TEXT DEFAULT ''")
+    _add_column_if_not_exists(conn, "user_profiles", "liquidity_needs", "TEXT DEFAULT ''")
+    _add_column_if_not_exists(conn, "user_profiles", "liabilities_summary", "TEXT DEFAULT ''")
+    _add_column_if_not_exists(conn, "user_profiles", "behavior_biases", "TEXT DEFAULT '[]'")
 
     # ── 对话质量评估表 ──────────────────────────────────
     conn.execute("""
@@ -287,9 +299,9 @@ def list_eval_cases(analysis_type: str = None, active_only: bool = True) -> list
     conditions = []
     params = []
     if active_only:
-        conditions.append("is_active = 1")
+        conditions.append("ec.is_active = 1")
     if analysis_type:
-        conditions.append("analysis_type = ?")
+        conditions.append("ec.analysis_type = ?")
         params.append(analysis_type)
     where = " AND ".join(conditions) if conditions else "1=1"
     rows = conn.execute(f"""

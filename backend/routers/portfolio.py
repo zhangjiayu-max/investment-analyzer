@@ -54,6 +54,7 @@ from models.portfolio import (
     CreateAlertRequest, TagRequest, AdjustCashRequest,
     PortfolioAiAnalysisRequest, FeedbackRequest,
     PanoramaAnalysisRequest, DeepDiveRequest, TradeReviewRequest, WhatIfRequest,
+    StressTestRequest,
 )
 
 logger = logging.getLogger(__name__)
@@ -78,6 +79,23 @@ async def portfolio_summary_api(account: str = None):
     if account:
         return get_portfolio_summary(account=account)
     return get_portfolio_summary()
+
+
+@router.get("/api/portfolio/allocation-dashboard")
+async def allocation_dashboard_api():
+    """获取目标配置、当前配置和偏离度驾驶舱。"""
+    from allocation_dashboard import build_allocation_dashboard
+    return build_allocation_dashboard()
+
+
+@router.post("/api/portfolio/stress-test")
+async def portfolio_stress_test_api(req: StressTestRequest):
+    """确定性组合压力测试：不调用 LLM，按资产类别冲击估算损失。"""
+    from stress_test import run_portfolio_stress_test
+    try:
+        return run_portfolio_stress_test(req.scenario)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
 
 
 @router.post("/api/portfolio/rebalancing/trigger")

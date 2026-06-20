@@ -24,6 +24,7 @@ const emit = defineEmits([
   'trigger-llm-eval',
   'copy-message-id',
   'toggle-trace',
+  'save-decision',
   'retry',
   'resume',
 ])
@@ -299,6 +300,14 @@ function formatTime(ts) {
       <div class="message-bubble markdown-body" v-html="renderMarkdown(msg.content)"></div>
       <!-- 反馈按钮 -->
       <div v-if="msg.role === 'assistant' && !feedbackGiven[index]" class="message-feedback">
+        <button
+          v-if="msg.id && msg.execution_status !== 'streaming'"
+          class="btn-msg-feedback"
+          @click="emit('save-decision', msg, index)"
+          title="保存为决策草案"
+        >
+          <Icon name="clipboard-list" size="14" />
+        </button>
         <button class="btn-msg-feedback" @click="emit('feedback', msg, index, 'helpful')" title="有用">
           <Icon name="thumbs-up" size="14" />
         </button>

@@ -1,5 +1,6 @@
 """推荐验证系统 + LLM 反馈 + 用户画像。"""
 
+import json
 from datetime import datetime, timedelta
 
 from db._conn import _get_conn
@@ -349,6 +350,20 @@ def update_user_profile(user_id: str = "default", **fields) -> bool:
     """更新用户画像字段。"""
     if not fields:
         return False
+    allowed = {
+        "preferences_json", "feedback_summary", "positive_patterns", "negative_patterns",
+        "risk_tolerance", "investment_horizon", "capital_scale", "investment_experience",
+        "loss_tolerance", "focus_assets", "kyc_completed", "kyc_completed_at",
+        "kyc_version", "kyc_source", "monthly_income", "monthly_expense",
+        "monthly_surplus", "emergency_fund_months", "target_equity_ratio",
+        "max_single_position_pct", "primary_goal", "fund_usage", "liquidity_needs",
+        "liabilities_summary", "behavior_biases",
+    }
+    fields = {k: v for k, v in fields.items() if k in allowed}
+    if not fields:
+        return False
+    if isinstance(fields.get("behavior_biases"), list):
+        fields["behavior_biases"] = json.dumps(fields["behavior_biases"], ensure_ascii=False)
     conn = _get_conn()
     # 确保记录存在
     conn.execute("INSERT OR IGNORE INTO user_profiles (user_id) VALUES (?)", (user_id,))

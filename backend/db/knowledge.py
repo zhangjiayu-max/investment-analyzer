@@ -9,20 +9,40 @@ logger = logging.getLogger(__name__)
 
 def add_knowledge(category: str, title: str, content: str,
                   subcategory: str = None, source: str = None,
-                  keywords: list = None, importance: int = 5) -> int:
+                  keywords: list = None, importance: int = 5,
+                  atom_type: str = "", evidence_level: str = "",
+                  as_of_date: str = "", valid_until: str = "",
+                  limitations: list = None, counterpoints: list = None) -> int:
     """添加知识条目，返回 ID。"""
     conn = _get_conn()
     try:
         cur = conn.execute("""
             INSERT OR REPLACE INTO knowledge_base
-            (category, subcategory, title, content, source, keywords, importance)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            (category, subcategory, title, content, source, keywords, importance,
+             atom_type, evidence_level, as_of_date, valid_until, limitations, counterpoints)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (category, subcategory, title, content, source,
-              json.dumps(keywords or [], ensure_ascii=False), importance))
+              json.dumps(keywords or [], ensure_ascii=False), importance,
+              atom_type or "", evidence_level or "", as_of_date or "", valid_until or "",
+              json.dumps(limitations or [], ensure_ascii=False),
+              json.dumps(counterpoints or [], ensure_ascii=False)))
         conn.commit()
         return cur.lastrowid
     finally:
         conn.close()
+
+
+def _parse_knowledge_row(row) -> dict:
+    d = dict(row)
+    for key in ("keywords", "limitations", "counterpoints"):
+        if d.get(key):
+            try:
+                d[key] = json.loads(d[key])
+            except (json.JSONDecodeError, TypeError):
+                d[key] = []
+        else:
+            d[key] = []
+    return d
 
 
 def get_knowledge(knowledge_id: int) -> dict | None:
@@ -31,13 +51,7 @@ def get_knowledge(knowledge_id: int) -> dict | None:
     row = conn.execute("SELECT * FROM knowledge_base WHERE id = ?", (knowledge_id,)).fetchone()
     conn.close()
     if row:
-        d = dict(row)
-        if d.get("keywords"):
-            try:
-                d["keywords"] = json.loads(d["keywords"])
-            except:
-                d["keywords"] = []
-        return d
+        return _parse_knowledge_row(row)
     return None
 
 
@@ -69,13 +83,7 @@ def search_knowledge(query: str, category: str = None, limit: int = 10) -> list[
 
     results = []
     for row in rows:
-        d = dict(row)
-        if d.get("keywords"):
-            try:
-                d["keywords"] = json.loads(d["keywords"])
-            except:
-                d["keywords"] = []
-        results.append(d)
+        results.append(_parse_knowledge_row(row))
     return results
 
 
@@ -111,13 +119,7 @@ def list_knowledge(category: str = None, subcategory: str = None,
 
     results = []
     for row in rows:
-        d = dict(row)
-        if d.get("keywords"):
-            try:
-                d["keywords"] = json.loads(d["keywords"])
-            except:
-                d["keywords"] = []
-        results.append(d)
+        results.append(_parse_knowledge_row(row))
     return results
 
 

@@ -137,6 +137,13 @@ from db.watchlist import (
     batch_add_to_watchlist, refresh_watchlist_navs, get_watchlist_summary,
 )
 
+# 目标账户 / 资金桶
+from db.goal_buckets import (
+    init_goal_bucket_tables, create_goal_bucket, get_goal_bucket,
+    list_goal_buckets, update_goal_bucket, delete_goal_bucket,
+    get_goal_bucket_summary,
+)
+
 # 异步分析任务
 from db.async_tasks import (
     init_async_tasks_table, create_async_task, update_async_task,
@@ -147,10 +154,11 @@ from db.async_tasks import (
 # 理财决策中枢
 from db.decisions import (
     init_decision_tables, create_decision, create_decision_action,
+    create_chat_decision_draft,
     list_decisions, list_today_decisions, get_decision,
     update_decision_status, update_decision_action_status,
     ensure_dashboard_decisions, list_due_decision_reviews,
-    record_decision_review,
+    record_decision_review, build_decision_precheck,
 )
 
 
@@ -515,9 +523,6 @@ def init_db():
     conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_tx ON portfolio_tx_audit_log(tx_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_fund ON portfolio_tx_audit_log(fund_code)")
 
-    _add_column_if_not_exists(conn, "portfolio_cash", "last_interest_date", "TEXT")
-    _add_column_if_not_exists(conn, "portfolio_cash", "today_interest", "REAL DEFAULT 0")
-
     conn.execute("""
         CREATE TABLE IF NOT EXISTS portfolio_alerts (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -541,9 +546,13 @@ def init_db():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id TEXT DEFAULT 'default' UNIQUE,
             balance REAL DEFAULT 0,
+            last_interest_date TEXT,
+            today_interest REAL DEFAULT 0,
             updated_at TEXT DEFAULT (datetime('now','localtime'))
         )
     """)
+    _add_column_if_not_exists(conn, "portfolio_cash", "last_interest_date", "TEXT")
+    _add_column_if_not_exists(conn, "portfolio_cash", "today_interest", "REAL DEFAULT 0")
 
     conn.execute("""
         CREATE TABLE IF NOT EXISTS transaction_tags (
@@ -804,6 +813,12 @@ def init_db():
     conn.execute("CREATE INDEX IF NOT EXISTS idx_kb_category ON knowledge_base(category)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_kb_subcategory ON knowledge_base(subcategory)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_kb_importance ON knowledge_base(importance)")
+    _add_column_if_not_exists(conn, "knowledge_base", "atom_type", "TEXT DEFAULT ''")
+    _add_column_if_not_exists(conn, "knowledge_base", "evidence_level", "TEXT DEFAULT ''")
+    _add_column_if_not_exists(conn, "knowledge_base", "as_of_date", "TEXT DEFAULT ''")
+    _add_column_if_not_exists(conn, "knowledge_base", "valid_until", "TEXT DEFAULT ''")
+    _add_column_if_not_exists(conn, "knowledge_base", "limitations", "TEXT DEFAULT '[]'")
+    _add_column_if_not_exists(conn, "knowledge_base", "counterpoints", "TEXT DEFAULT '[]'")
 
     # 编排配置默认值
     _default_orchestration_config = [
@@ -852,6 +867,9 @@ def init_db():
 
     # ── 理财决策中枢表 ──────────────────────────────────────
     init_decision_tables(conn)
+
+    # ── 目标账户 / 资金桶表 ──────────────────────────────────
+    init_goal_bucket_tables(conn)
 
     conn.commit()
     conn.close()

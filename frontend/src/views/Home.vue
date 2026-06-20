@@ -14,6 +14,8 @@ import BondMarket from '../components/BondMarket.vue'
 import RagAnalysis from '../components/RagAnalysis.vue'
 import RagTestPage from '../components/RagTestPage.vue'
 import PortfolioManagement from '../components/PortfolioManagement.vue'
+import GoalBucketsPage from '../components/GoalBucketsPage.vue'
+import AllocationDashboard from '../components/AllocationDashboard.vue'
 import AdminAgentsPage from '../components/AdminAgentsPage.vue'
 import TokenUsagePage from '../components/TokenUsagePage.vue'
 import BadCasePage from '../components/BadCasePage.vue'
@@ -46,6 +48,8 @@ const pageComponents = {
   'rag-test': RagTestPage,
   bond: BondMarket,
   portfolio: PortfolioManagement,
+  'goal-buckets': GoalBucketsPage,
+  'allocation-dashboard': AllocationDashboard,
   'admin-agents': AdminAgentsPage,
   'token-usage': TokenUsagePage,
   'quality-dashboard': QualityDashboard,

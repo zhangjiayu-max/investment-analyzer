@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import re
+from datetime import datetime, timedelta
 
 from db._conn import _get_conn
 
@@ -123,6 +125,88 @@ def _format_percent(value) -> str:
     return ""
 
 
+def _compact_text(text: str, limit: int = 140) -> str:
+    """压缩展示文本，保留决策卡片可读性。"""
+    text = re.sub(r"\s+", " ", (text or "")).strip()
+    if len(text) <= limit:
+        return text
+    return text[:limit].rstrip() + "..."
+
+
+def _split_cn_sentences(text: str) -> list[str]:
+    parts = re.split(r"[。！？!?；;\n]+", text or "")
+    return [p.strip(" ，,") for p in parts if p.strip(" ，,")]
+
+
+def _infer_decision_type(text: str) -> str:
+    content = text or ""
+    if any(word in content for word in ["卖出", "减仓", "止盈", "止损", "退出"]):
+        return "sell"
+    if any(word in content for word in ["加仓", "买入", "配置", "定投", "建仓"]):
+        return "add"
+    if any(word in content for word in ["持有", "不动", "继续拿"]):
+        return "hold"
+    if any(word in content for word in ["观察", "等待", "跟踪", "暂不"]):
+        return "watch"
+    return "watch"
+
+
+def _extract_data_points(text: str) -> list[dict]:
+    data_points = []
+    patterns = [
+        ("估值/分位", r"(?:PE|PB|估值|百分位|分位)[^。；;\n]*?\d+(?:\.\d+)?%"),
+        ("仓位/比例", r"(?:仓位|占比|比例|回撤|亏损)[^。；;\n]*?\d+(?:\.\d+)?%"),
+    ]
+    seen = set()
+    for name, pattern in patterns:
+        for match in re.findall(pattern, text or "", flags=re.IGNORECASE):
+            value = match.strip(" ，,。；;")
+            if value in seen:
+                continue
+            seen.add(value)
+            data_points.append({
+                "name": name,
+                "value": value,
+                "source": "chat.assistant_message",
+                "freshness": "message_snapshot",
+            })
+            if len(data_points) >= 3:
+                return data_points
+    return data_points
+
+
+def _extract_risk_sentences(text: str) -> list[str]:
+    primary_words = ["风险", "下跌", "回撤", "亏损", "短期", "波动", "失败", "失效"]
+    secondary_words = ["不能", "不要", "不宜"]
+    primary = []
+    secondary = []
+    for sentence in _split_cn_sentences(text):
+        if any(word in sentence for word in primary_words):
+            primary.append(sentence)
+        elif any(word in sentence for word in secondary_words):
+            secondary.append(sentence)
+        if len(primary) + len(secondary) >= 3:
+            break
+    results = (primary + secondary)[:3]
+    if not results:
+        results.append("执行前需补充反方观点，避免只根据单一结论行动")
+    return results
+
+
+def _build_chat_decision_summary(decision_type: str, target_name: str, assistant_content: str) -> str:
+    action_labels = {
+        "add": "制定分批加仓草案",
+        "sell": "制定减仓/卖出草案",
+        "hold": "继续持有并跟踪",
+        "watch": "进入观察清单",
+    }
+    target = target_name or "本次建议"
+    first_sentence = _split_cn_sentences(assistant_content)
+    suffix = _compact_text(first_sentence[0], 48) if first_sentence else ""
+    title = f"{target}：{action_labels.get(decision_type, '进入观察清单')}"
+    return f"{title}（来自对话建议）" if not suffix else f"{title} - {suffix}"
+
+
 def create_decision(
     source_type: str,
     decision_type: str,
@@ -190,6 +274,103 @@ def create_decision(
         return decision_id
     finally:
         conn.close()
+
+
+def create_chat_decision_draft(
+    conversation_id: int,
+    assistant_message_id: int,
+    assistant_content: str,
+    user_message_id: int | None = None,
+    user_query: str = "",
+    target_type: str = "portfolio",
+    target_code: str = "",
+    target_name: str = "",
+    user_id: str = "default",
+    review_days: int = 30,
+) -> int:
+    """把一条 AI 对话建议保存为理财决策草案。
+
+    该函数不做交易执行，只把已经生成的建议结构化沉淀为可检查、可复盘的草案。
+    """
+    content = assistant_content or ""
+    decision_type = _infer_decision_type(content + "\n" + (user_query or ""))
+    summary = _build_chat_decision_summary(decision_type, target_name, content)
+    review_at = (datetime.now() + timedelta(days=max(1, review_days))).strftime("%Y-%m-%d")
+    data_points = _extract_data_points(content)
+    if not data_points:
+        data_points = [{
+            "name": "AI建议摘要",
+            "value": _compact_text(content, 120),
+            "source": "chat.assistant_message",
+            "freshness": "message_snapshot",
+        }]
+
+    risk_sentences = _extract_risk_sentences(content)
+    checklist = [
+        "确认备用金、资金用途和不可动用期限",
+        "确认目标仓位、单次投入上限和是否需要分批执行",
+        "确认估值/价格/持仓数据仍然有效",
+        "补充至少一个反方观点后再决定是否执行",
+    ]
+    target_label = target_name or target_code or "本次建议"
+    action_title = {
+        "add": f"执行前检查 {target_label} 的资金和仓位约束",
+        "sell": f"执行前检查 {target_label} 的卖出理由和替代方案",
+        "hold": f"跟踪 {target_label} 的继续持有条件",
+        "watch": f"跟踪 {target_label} 的观察触发条件",
+    }.get(decision_type, f"复核 {target_label} 的执行条件")
+
+    return create_decision(
+        user_id=user_id,
+        source_type="chat",
+        source_id=assistant_message_id,
+        decision_type=decision_type,
+        target_type=target_type or "portfolio",
+        target_code=target_code or "",
+        target_name=target_name or "",
+        summary=summary,
+        rationale=_compact_text(content, 500),
+        evidence={
+            "source": {
+                "type": "conversation",
+                "conversation_id": conversation_id,
+                "assistant_message_id": assistant_message_id,
+                "user_message_id": user_message_id,
+            },
+            "user_query": _compact_text(user_query, 240),
+            "data_points": data_points,
+            "missing_data": ["资金用途", "目标仓位", "执行期限", "数据更新时间"],
+            "counter_arguments": risk_sentences,
+        },
+        risk={
+            "level": "medium",
+            "counter_arguments": risk_sentences,
+            "notes": ["对话建议只作为决策草案，执行前必须完成检查清单"],
+        },
+        suitability={
+            "checklist": checklist,
+            "notes": ["需结合个人画像、现金流和持仓约束再确认"],
+        },
+        confidence="medium",
+        status="proposed",
+        review_at=review_at,
+        actions=[
+            {
+                "action_type": "pre_trade_check",
+                "title": action_title,
+                "params": {
+                    "conversation_id": conversation_id,
+                    "assistant_message_id": assistant_message_id,
+                    "checklist": checklist,
+                },
+            },
+            {
+                "action_type": "schedule_review",
+                "title": f"{review_at} 复盘这次决策假设是否成立",
+                "scheduled_at": review_at,
+            },
+        ],
+    )
 
 
 def create_decision_action(
@@ -579,6 +760,172 @@ def list_due_decision_reviews(user_id: str = "default", limit: int = 20) -> list
         conn.close()
 
 
+def build_decision_precheck(decision_id: int, user_id: str = "default") -> dict:
+    """生成决策执行前检查结果。"""
+    decision = get_decision(decision_id)
+    if not decision:
+        return {"exists": False, "ok_to_execute": False, "blockers": ["决策不存在"], "warnings": [], "checklist": []}
+
+    try:
+        from db.dashboard import get_user_profile
+        profile = get_user_profile(user_id) or {}
+    except Exception:
+        profile = {}
+
+    blockers = []
+    warnings = []
+    checklist = []
+    checklist.extend(decision.get("suitability_json", {}).get("checklist") or [])
+    checklist.extend(decision.get("evidence_json", {}).get("missing_data") or [])
+
+    decision_type = decision.get("decision_type")
+    source_bucket = None
+    source_bucket_id = decision.get("suitability_json", {}).get("source_bucket_id")
+    if source_bucket_id:
+        try:
+            from db.goal_buckets import get_goal_bucket
+            source_bucket = get_goal_bucket(int(source_bucket_id), user_id=user_id)
+        except Exception:
+            source_bucket = None
+
+    if decision_type in {"add", "buy"}:
+        if source_bucket:
+            bucket_type = source_bucket.get("bucket_type")
+            if bucket_type == "emergency":
+                blockers.append(
+                    f"资金来源为「{source_bucket.get('name')}」备用金桶，禁止用于买入/加仓高波动资产"
+                )
+            elif source_bucket.get("liquidity_days") is not None and source_bucket.get("liquidity_days") < 365:
+                warnings.append(
+                    f"资金来源「{source_bucket.get('name')}」流动性期限较短，需确认是否适合承担波动"
+                )
+
+        emergency_months = profile.get("emergency_fund_months")
+        if isinstance(emergency_months, (int, float)) and emergency_months < 3:
+            blockers.append(f"备用金不足：当前约 {emergency_months:g} 个月，建议至少确认 3-6 个月")
+        elif emergency_months is None:
+            warnings.append("未填写备用金月数，无法判断这笔资金是否可用于风险资产")
+
+        monthly_surplus = profile.get("monthly_surplus")
+        if isinstance(monthly_surplus, (int, float)) and monthly_surplus <= 0:
+            blockers.append("月结余不为正，暂不适合新增风险资产仓位")
+        elif monthly_surplus is None:
+            warnings.append("未填写月结余，建议先确认定投或加仓资金来源")
+
+    if decision.get("target_type") == "portfolio":
+        target_equity_ratio = profile.get("target_equity_ratio")
+        if target_equity_ratio is None:
+            warnings.append("未设置目标权益仓位，执行前建议先确认组合目标比例")
+
+    if not checklist:
+        checklist = ["确认资金用途", "确认仓位上限", "确认数据新鲜度", "确认反方观点"]
+
+    # 去重并保留顺序
+    def unique(items):
+        seen = set()
+        result = []
+        for item in items:
+            if item and item not in seen:
+                seen.add(item)
+                result.append(item)
+        return result
+
+    blockers = unique(blockers)
+    warnings = unique(warnings)
+    checklist = unique(checklist)
+    return {
+        "exists": True,
+        "decision_id": decision_id,
+        "ok_to_execute": not blockers,
+        "blockers": blockers,
+        "warnings": warnings,
+        "checklist": checklist,
+        "profile_snapshot": {
+            "emergency_fund_months": profile.get("emergency_fund_months"),
+            "monthly_surplus": profile.get("monthly_surplus"),
+            "target_equity_ratio": profile.get("target_equity_ratio"),
+            "max_single_position_pct": profile.get("max_single_position_pct"),
+            "primary_goal": profile.get("primary_goal", ""),
+            "fund_usage": profile.get("fund_usage", ""),
+        },
+        "source_bucket": source_bucket,
+    }
+
+
+def _save_review_lesson_knowledge(decision_id: int, outcome: str, result_note: str, lesson: str):
+    """把决策复盘教训沉淀到知识库。"""
+    if not lesson:
+        return
+    decision = get_decision(decision_id)
+    if not decision:
+        return
+    try:
+        from db.knowledge import add_knowledge
+
+        target = decision.get("target_name") or decision.get("target_code") or decision.get("target_type") or "投资决策"
+        title = f"复盘教训：{target} #{decision_id}"
+        content = (
+            f"决策：{decision.get('summary', '')}\n"
+            f"结果：{outcome}\n"
+            f"复盘：{result_note or '未填写'}\n"
+            f"教训：{lesson}"
+        )
+        add_knowledge(
+            category="user_lesson",
+            subcategory=decision.get("decision_type") or "decision_review",
+            title=title,
+            content=content,
+            source=f"decision_review:{decision_id}",
+            keywords=[target, decision.get("decision_type") or "", "复盘", "教训"],
+            importance=8 if outcome == "helpful" else 7,
+            atom_type="user_lesson",
+            evidence_level="user_memory",
+            as_of_date=datetime.now().strftime("%Y-%m-%d"),
+            limitations=["来自用户复盘，适用于相似资金用途和风险约束下的决策"],
+            counterpoints=["若用户目标、现金流或市场环境明显变化，需要重新判断"],
+        )
+    except Exception:
+        # 复盘主流程不能因知识沉淀失败而失败。
+        return
+
+
+def _create_eval_case_from_bad_decision_review(decision_id: int, result_note: str, lesson: str):
+    """把无帮助的决策复盘转成回归评测用例。"""
+    decision = get_decision(decision_id)
+    if not decision:
+        return
+    try:
+        from db.eval import create_eval_case
+
+        target = decision.get("target_name") or decision.get("target_code") or decision.get("target_type") or "投资决策"
+        decision_type = decision.get("decision_type") or "decision"
+        input_params = {
+            "source": "decision_review",
+            "decision_id": decision_id,
+            "decision_type": decision_type,
+            "target_type": decision.get("target_type", ""),
+            "target_name": target,
+            "original_summary": decision.get("summary", ""),
+            "original_rationale": decision.get("rationale", ""),
+            "review_note": result_note or "",
+            "lesson": lesson or "",
+        }
+        expected_quality = (
+            "回答必须先确认用户资金用途、备用金、期限和仓位约束；"
+            "必须给出反方观点、执行前检查清单、复盘条件；"
+            f"历史复盘教训：{lesson or result_note or '这类建议曾被评为无帮助'}"
+        )
+        create_eval_case(
+            name=f"坏例复盘：{target} #{decision_id}",
+            analysis_type=f"decision_{decision_type}",
+            input_params=json.dumps(input_params, ensure_ascii=False),
+            description="由无帮助的决策复盘自动生成，用于防止类似建议再次忽略用户约束。",
+            expected_quality=expected_quality,
+        )
+    except Exception:
+        return
+
+
 def record_decision_review(
     decision_id: int,
     outcome: str,
@@ -617,6 +964,9 @@ def record_decision_review(
             (decision_id,),
         )
         conn.commit()
+        _save_review_lesson_knowledge(decision_id, outcome, result_note or "", lesson or "")
+        if outcome == "unhelpful":
+            _create_eval_case_from_bad_decision_review(decision_id, result_note or "", lesson or "")
         if cur.lastrowid:
             return cur.lastrowid
         row = conn.execute("SELECT id FROM decision_reviews WHERE decision_id = ?", (decision_id,)).fetchone()

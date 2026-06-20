@@ -14,6 +14,7 @@
 import json
 import logging
 import os
+import re
 import sqlite3
 from pathlib import Path
 
@@ -201,6 +202,17 @@ def _apply_personalization_boost(results: list[dict], user_id: str):
     if not user_id or not results:
         return
 
+    def _parse_list(raw):
+        if isinstance(raw, list):
+            return raw
+        if isinstance(raw, str):
+            try:
+                parsed = json.loads(raw)
+                return parsed if isinstance(parsed, list) else []
+            except Exception:
+                return [raw] if raw else []
+        return []
+
     # 1. 关注品种关键词
     focus_kw = set()
     try:
@@ -240,40 +252,88 @@ def _apply_personalization_boost(results: list[dict], user_id: str):
     # 3. 反馈驱动的正向/负向模式
     positive_kw = set()
     negative_kw = set()
+    profile_kw = set()
+    behavior_kw = set()
     try:
         from db.dashboard import get_user_profile
         up = get_user_profile(user_id)
         if up:
             for field, target in [("positive_patterns", positive_kw), ("negative_patterns", negative_kw)]:
-                raw = up.get(field, "[]")
-                if isinstance(raw, str):
-                    try:
-                        patterns = json.loads(raw)
-                    except Exception:
-                        patterns = []
-                else:
-                    patterns = raw or []
-                for p in patterns:
+                for p in _parse_list(up.get(field, "[]")):
                     if isinstance(p, str) and len(p) >= 2:
                         target.add(p)
+            for field in ("fund_usage", "primary_goal", "liquidity_needs", "liabilities_summary"):
+                value = up.get(field)
+                if isinstance(value, str) and value.strip():
+                    profile_kw.add(value.strip())
+                    for token in re.split(r"[\s,，。；;、]+", value.strip()):
+                        if len(token) >= 2:
+                            profile_kw.add(token)
+            for bias in _parse_list(up.get("behavior_biases", "[]")):
+                if isinstance(bias, str) and bias.strip():
+                    behavior_kw.add(bias.strip())
+                    for token in re.split(r"[\s,，。；;、]+", bias.strip()):
+                        if len(token) >= 2:
+                            behavior_kw.add(token)
     except Exception:
         pass
 
     # 应用加权（温和叠加，避免压过相关性）
     for r in results:
-        body = ((r.get("body", "") or "") + " " + (r.get("title", "") or "")).lower()
+        metadata_text = " ".join([
+            " ".join(r.get("limitations") or []) if isinstance(r.get("limitations"), list) else str(r.get("limitations") or ""),
+            " ".join(r.get("counterpoints") or []) if isinstance(r.get("counterpoints"), list) else str(r.get("counterpoints") or ""),
+            str(r.get("atom_type") or ""),
+            str(r.get("evidence_level") or ""),
+        ])
+        body = ((r.get("body", "") or "") + " " + (r.get("title", "") or "") + " " + metadata_text).lower()
         boost = 0.0
+        reasons = []
         if focus_kw:
             hit_focus = sum(1 for kw in focus_kw if kw.lower() in body)
             boost += hit_focus * 0.3  # 每命中一个关注品种词 +0.3
+            if hit_focus:
+                reasons.append("focus_assets")
         if hot_topics:
             hit_hot = sum(1 for w in hot_topics if w.lower() in body)
             boost += min(hit_hot * 0.1, 0.5)  # 历史主题加权，上限 0.5
+            if hit_hot:
+                reasons.append("history_topic")
         if positive_kw:
-            boost += sum(1 for kw in positive_kw if kw.lower() in body) * 0.2
+            hit_positive = sum(1 for kw in positive_kw if kw.lower() in body)
+            boost += hit_positive * 0.2
+            if hit_positive:
+                reasons.append("positive_pattern")
         if negative_kw:
-            boost -= sum(1 for kw in negative_kw if kw.lower() in body) * 0.1
+            hit_negative = sum(1 for kw in negative_kw if kw.lower() in body)
+            boost -= hit_negative * 0.1
+            if hit_negative:
+                reasons.append("negative_pattern")
+        if profile_kw:
+            hit_profile = sum(1 for kw in profile_kw if kw.lower() in body)
+            boost += min(hit_profile * 0.18, 0.6)
+            if hit_profile:
+                reasons.append("fund_usage")
+        if behavior_kw:
+            hit_behavior = sum(1 for kw in behavior_kw if kw.lower() in body)
+            boost += min(hit_behavior * 0.16, 0.5)
+            if hit_behavior:
+                reasons.append("behavior_bias")
+        atom_type = r.get("atom_type") or ""
+        evidence_level = r.get("evidence_level") or ""
+        if atom_type in {"rule", "principle", "checklist", "user_lesson"}:
+            boost += 0.12
+            reasons.append("evidence_atom")
+        if evidence_level in {"principle", "user_memory", "strong", "verified"}:
+            boost += 0.08
+            if "evidence_atom" not in reasons:
+                reasons.append("evidence_atom")
+        if r.get("counterpoints"):
+            boost += 0.06
+            if "evidence_atom" not in reasons:
+                reasons.append("evidence_atom")
         r["personal_boost"] = boost
+        r["personal_reasons"] = sorted(set(reasons))
 
 
 def rewrite_query(query: str) -> str:
@@ -1059,6 +1119,13 @@ def index_book_knowledge(knowledge_id: int, title: str, content: str, source: st
                     extra_metadata={"source": source or ""})
 
 
+def index_note_knowledge(knowledge_id: int, title: str, content: str, source: str):
+    """索引一条个人笔记到 FTS + ChromaDB（来自 Obsidian vault）。"""
+    _index_document("note", title, content, str(knowledge_id))
+    index_to_chroma("note", str(knowledge_id), title, content,
+                    extra_metadata={"source": source or ""})
+
+
 def search_chroma(query: str, content_type: str = None, content_types: list[str] = None, limit: int = 5) -> tuple[list[dict], int]:
     """语义搜索，返回 (结果列表, 0)。支持单类型或多类型过滤。"""
     collection = _get_chroma()
@@ -1708,6 +1775,13 @@ def build_rag_context_with_details(query: str, content_types: list[str] = None, 
         all_results = lightweight_rerank(query, all_results, top_k=limit)
         logger.info(f"轻量级重排序后: {len(all_results)}条")
 
+    # 默认个性化重排：画像 2.0、行为偏差、知识原子元数据提供温和加权。
+    if all_results:
+        _apply_personalization_boost(all_results, "default")
+        for r in all_results:
+            r["_score"] = r.get("_score", 0) + r.get("personal_boost", 0)
+        all_results.sort(key=lambda x: x.get("_score", 0), reverse=True)
+
     # Reranker 重排序（可选，进一步提升精度，但增加 3-15s 延迟）
     # 默认关闭：RRF + 标题加权 + 时效性加权已能提供合理排序
     # 设置环境变量 RERANK_ENABLED=true 可开启
@@ -1986,6 +2060,23 @@ def reindex_all(limit: int = 1000):
         except Exception as e:
             logger.warning(f"书籍索引失败 id={item['id']}: {e}")
     results["books"] = {"total": len(books), "indexed": book_indexed}
+
+    # 6. 重建个人笔记索引（Obsidian vault）
+    logger.info("开始重建个人笔记索引...")
+    notes = list_knowledge(category="note", limit=limit)
+    note_indexed = 0
+    for item in notes:
+        try:
+            index_note_knowledge(
+                knowledge_id=item["id"],
+                title=item["title"],
+                content=item["content"],
+                source=item.get("source", ""),
+            )
+            note_indexed += 1
+        except Exception as e:
+            logger.warning(f"笔记索引失败 id={item['id']}: {e}")
+    results["notes"] = {"total": len(notes), "indexed": note_indexed}
 
     logger.info(f"全部索引完成: {results}")
     return results

@@ -4,7 +4,10 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from db import (
+    build_decision_precheck,
+    create_chat_decision_draft,
     get_decision,
+    get_messages,
     list_due_decision_reviews,
     list_decisions,
     list_today_decisions,
@@ -28,6 +31,16 @@ class DecisionReviewRequest(BaseModel):
     lesson: str = ""
 
 
+class ChatDecisionDraftRequest(BaseModel):
+    conversation_id: int
+    assistant_message_id: int
+    user_message_id: int | None = None
+    target_type: str = "portfolio"
+    target_code: str = ""
+    target_name: str = ""
+    review_days: int = 30
+
+
 @router.get("/api/decisions")
 async def list_decisions_api(status: str = "", limit: int = 50):
     """列出理财决策档案。"""
@@ -46,6 +59,41 @@ async def list_today_decisions_api(limit: int = 20):
     return {"items": list_today_decisions(limit=limit)}
 
 
+@router.post("/api/decisions/from-chat")
+async def create_decision_from_chat_api(req: ChatDecisionDraftRequest):
+    """把 AI 对话回复保存为理财决策草案。"""
+    messages = get_messages(req.conversation_id, limit=200)
+    assistant_msg = next((m for m in messages if m["id"] == req.assistant_message_id), None)
+    if not assistant_msg or assistant_msg.get("role") != "assistant":
+        raise HTTPException(404, "助手消息不存在")
+
+    user_msg = None
+    if req.user_message_id:
+        user_msg = next((m for m in messages if m["id"] == req.user_message_id), None)
+    if not user_msg:
+        assistant_index = next(
+            (i for i, m in enumerate(messages) if m["id"] == req.assistant_message_id),
+            -1,
+        )
+        for msg in reversed(messages[:assistant_index]):
+            if msg.get("role") == "user":
+                user_msg = msg
+                break
+
+    decision_id = create_chat_decision_draft(
+        conversation_id=req.conversation_id,
+        assistant_message_id=req.assistant_message_id,
+        user_message_id=user_msg.get("id") if user_msg else req.user_message_id,
+        assistant_content=assistant_msg.get("content") or "",
+        user_query=user_msg.get("content") if user_msg else "",
+        target_type=req.target_type,
+        target_code=req.target_code,
+        target_name=req.target_name,
+        review_days=req.review_days,
+    )
+    return {"ok": True, "id": decision_id, "item": get_decision(decision_id)}
+
+
 @router.get("/api/decisions/{decision_id}")
 async def get_decision_api(decision_id: int):
     """获取单条决策档案。"""
@@ -53,6 +101,15 @@ async def get_decision_api(decision_id: int):
     if not item:
         raise HTTPException(404, "决策不存在")
     return item
+
+
+@router.get("/api/decisions/{decision_id}/precheck")
+async def get_decision_precheck_api(decision_id: int):
+    """获取决策执行前检查结果。"""
+    result = build_decision_precheck(decision_id)
+    if not result.get("exists"):
+        raise HTTPException(404, "决策不存在")
+    return result
 
 
 @router.put("/api/decisions/{decision_id}/status")
