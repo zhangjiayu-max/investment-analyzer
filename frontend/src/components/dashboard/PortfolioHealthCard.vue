@@ -21,6 +21,10 @@ const categoryLabels = {
   equity: '股票型', bond: '债券型', index: '指数型',
   hybrid: '混合型', money: '货币型', qdii: 'QDII', cash: '现金',
 }
+
+function allocationValue(allocation, category) {
+  return (allocation && allocation[category]) || 0
+}
 </script>
 
 <template>
@@ -126,16 +130,16 @@ const categoryLabels = {
 
           <div class="allocation-compare">
             <div class="alloc-row" v-for="cat in ['equity','bond','index','hybrid','money','qdii','cash']" :key="cat"
-              v-show="(rebalanceResult.current_allocation[cat] || 0) > 0.001 || (rebalanceResult.target_allocation[cat] || 0) > 0.001">
+              v-show="allocationValue(rebalanceResult.current_allocation, cat) > 0.001 || allocationValue(rebalanceResult.target_allocation, cat) > 0.001">
               <span class="alloc-label">{{ categoryLabels[cat] || cat }}</span>
               <div class="alloc-bars">
-                <div class="alloc-bar-current" :style="{ width: Math.min((rebalanceResult.current_allocation[cat]||0)*100, 100) + '%' }"></div>
-                <div class="alloc-bar-target" :style="{ width: Math.min((rebalanceResult.target_allocation[cat]||0)*100, 100) + '%' }"></div>
+                <div class="alloc-bar-current" :style="{ width: Math.min(allocationValue(rebalanceResult.current_allocation, cat)*100, 100) + '%' }"></div>
+                <div class="alloc-bar-target" :style="{ width: Math.min(allocationValue(rebalanceResult.target_allocation, cat)*100, 100) + '%' }"></div>
               </div>
               <span class="alloc-values">
-                <span class="alloc-current">{{ ((rebalanceResult.current_allocation[cat]||0)*100).toFixed(0) }}%</span>
+                <span class="alloc-current">{{ (allocationValue(rebalanceResult.current_allocation, cat)*100).toFixed(0) }}%</span>
                 <span class="alloc-arrow"><Icon name="arrow-right" size="11" /></span>
-                <span class="alloc-target">{{ ((rebalanceResult.target_allocation[cat]||0)*100).toFixed(0) }}%</span>
+                <span class="alloc-target">{{ (allocationValue(rebalanceResult.target_allocation, cat)*100).toFixed(0) }}%</span>
               </span>
             </div>
           </div>

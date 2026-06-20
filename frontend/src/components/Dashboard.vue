@@ -1,6 +1,6 @@
 <script setup>
 import { ref, computed, onMounted, onActivated } from 'vue'
-import { getDashboard, runAnalysis, runPanoramaAnalysis, pollPanoramaStatus, getHotTopics, getDailyReport, regenerateDailyReport, submitDailyReportFeedback, listPanoramaRecords, triggerHotspotsAnalysis, getLatestHotspotsAnalysis, getRecommendations, getRecommendationStats, submitRecommendationFeedback, getBondRecommend, listBondRecommendRecords, autoVerifyRecommendations, fetchRecentValuations, getBondMarketTemperature, getHotspotsRelate, getRebalancingSuggestion } from '../api'
+import { getDashboard, runAnalysis, runPanoramaAnalysis, pollPanoramaStatus, getHotTopics, getDailyReport, regenerateDailyReport, submitDailyReportFeedback, listPanoramaRecords, triggerHotspotsAnalysis, getLatestHotspotsAnalysis, getRecommendations, getRecommendationStats, submitRecommendationFeedback, getBondRecommend, listBondRecommendRecords, autoVerifyRecommendations, fetchRecentValuations, getBondMarketTemperature, getHotspotsRelate, getRebalancingSuggestion, listTodayDecisions, updateDecisionStatus, completeDecisionAction, listDueDecisionReviews, submitDecisionReview } from '../api'
 import GaugeChart from './charts/GaugeChart.vue'
 import ConfirmDialog from './ConfirmDialog.vue'
 import AppToast from './AppToast.vue'
@@ -16,6 +16,8 @@ import UndervaluedIndexesCard from './dashboard/UndervaluedIndexesCard.vue'
 import PortfolioHealthCard from './dashboard/PortfolioHealthCard.vue'
 import HotspotsCard from './dashboard/HotspotsCard.vue'
 import CashManagementCard from './dashboard/CashManagementCard.vue'
+import DecisionActionList from './dashboard/DecisionActionList.vue'
+import DecisionReviewList from './dashboard/DecisionReviewList.vue'
 import Icon from './ui/Icon.vue'
 
 const { showToast } = useToast()
@@ -44,6 +46,10 @@ const loading = ref(true)
 const fetchingValuation = ref(false)
 const error = ref(null)
 const data = ref(null)
+const decisions = ref([])
+const decisionsLoading = ref(false)
+const decisionReviews = ref([])
+const decisionReviewsLoading = ref(false)
 
 // ── 市场热点（自动加载+AI增强） ──
 const hotTopics = ref(null)
@@ -151,6 +157,8 @@ onMounted(async () => {
 
   await Promise.all([
     loadDashboard(),
+    loadTodayDecisions(),
+    loadDecisionReviews(),
     loadHotTopics(),
     loadDailyReport(),
     loadRecHistory(),
@@ -190,6 +198,8 @@ onActivated(async () => {
   restoreRebalanceTask()
   await Promise.all([
     loadDashboard(),
+    loadTodayDecisions(),
+    loadDecisionReviews(),
     loadHotTopics(),
     loadDailyReport(),
     loadRecHistory(),
@@ -246,6 +256,73 @@ async function loadDashboard() {
     error.value = e.response?.data?.detail || e.message || '加载失败'
   } finally {
     loading.value = false
+  }
+}
+
+async function loadTodayDecisions() {
+  decisionsLoading.value = true
+  try {
+    const { data: res } = await listTodayDecisions()
+    decisions.value = res.items || []
+  } catch (e) {
+    console.warn('加载今日行动失败:', e)
+  } finally {
+    decisionsLoading.value = false
+  }
+}
+
+async function loadDecisionReviews() {
+  decisionReviewsLoading.value = true
+  try {
+    const { data: res } = await listDueDecisionReviews()
+    decisionReviews.value = res.items || []
+  } catch (e) {
+    console.warn('加载待复盘失败:', e)
+  } finally {
+    decisionReviewsLoading.value = false
+  }
+}
+
+async function handleDecisionStatusChange(decisionId, status) {
+  try {
+    await updateDecisionStatus(decisionId, status)
+    const labels = { accepted: '已接受', deferred: '已暂缓', rejected: '已拒绝' }
+    showToast(labels[status] || '状态已更新', 'success')
+    await loadTodayDecisions()
+    await loadDecisionReviews()
+  } catch (e) {
+    showToast('更新行动失败', 'error')
+  }
+}
+
+async function handleCompleteDecisionAction(decisionId, actionId) {
+  try {
+    await completeDecisionAction(decisionId, actionId)
+    showToast('行动项已完成', 'success')
+    await loadTodayDecisions()
+    await loadDecisionReviews()
+  } catch (e) {
+    showToast('完成行动项失败', 'error')
+  }
+}
+
+async function handleSubmitDecisionReview(decisionId, outcome) {
+  const outcomeLabels = {
+    helpful: '这条建议有帮助',
+    neutral: '这条建议一般',
+    unhelpful: '这条建议无帮助',
+  }
+  try {
+    await submitDecisionReview(decisionId, {
+      outcome,
+      result_note: outcomeLabels[outcome] || '已完成复盘',
+      lesson: outcome === 'unhelpful' ? '后续需要降低类似建议权重' : '',
+    })
+    showToast('复盘已记录', 'success')
+    await loadDecisionReviews()
+    await loadTodayDecisions()
+  } catch (e) {
+    showToast('提交复盘失败', 'error')
   }
 }
 
@@ -484,6 +561,19 @@ function handlePanorama() {
       @regenerate="confirmRegenerateReport"
       @toggle="showBriefing = !showBriefing"
       @submit-feedback="handleBriefingSubmitFeedback"
+    />
+
+    <DecisionActionList
+      :decisions="decisions"
+      :loading="decisionsLoading"
+      @status-change="handleDecisionStatusChange"
+      @complete-action="handleCompleteDecisionAction"
+    />
+
+    <DecisionReviewList
+      :reviews="decisionReviews"
+      :loading="decisionReviewsLoading"
+      @submit-review="handleSubmitDecisionReview"
     />
 
     <!-- 债市温度仪表盘 -->

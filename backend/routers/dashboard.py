@@ -367,7 +367,7 @@ async def get_dashboard():
     except Exception:
         pass
 
-    return {
+    payload = {
         "date": today,
         "undervalued_indexes": undervalued,
         "undervalued_data_date": undervalued_data_date,
@@ -383,6 +383,12 @@ async def get_dashboard():
         "cash_updated_at": bond_info.get("date", "") if bond_info else "",
         "data_freshness": freshness_info,
     }
+    try:
+        from db import ensure_dashboard_decisions
+        ensure_dashboard_decisions(payload)
+    except Exception as e:
+        logging.warning(f"生成今日行动失败: {e}")
+    return payload
 
 
 # ── 市场热点 API（带缓存，解析JSON结构化输出）────────────

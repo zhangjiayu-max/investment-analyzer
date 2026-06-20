@@ -144,6 +144,15 @@ from db.async_tasks import (
     get_latest_done_task,
 )
 
+# 理财决策中枢
+from db.decisions import (
+    init_decision_tables, create_decision, create_decision_action,
+    list_decisions, list_today_decisions, get_decision,
+    update_decision_status, update_decision_action_status,
+    ensure_dashboard_decisions, list_due_decision_reviews,
+    record_decision_review,
+)
+
 
 def init_db():
     """建表，启动时调用。各子模块的 init_tables(conn) 负责创建自己的表。"""
@@ -840,6 +849,9 @@ def init_db():
 
     # ── 异步分析任务表 ──────────────────────────────────────
     init_async_tasks_table(conn)
+
+    # ── 理财决策中枢表 ──────────────────────────────────────
+    init_decision_tables(conn)
 
     conn.commit()
     conn.close()

@@ -78,6 +78,7 @@ from routers.watchlist import router as watchlist_router
 from routers.profile import router as profile_router                    # /api/profile/*
 from routers.async_tasks import router as async_tasks_router           # /api/async-tasks/*
 from routers.search import router as search_router                     # /api/search/*
+from routers.decisions import router as decisions_router               # /api/decisions/*
 
 # 注册新路径路由（优先级高）
 app.include_router(valuation_router)
@@ -111,6 +112,7 @@ app.include_router(watchlist_router)
 app.include_router(profile_router)
 app.include_router(async_tasks_router)
 app.include_router(search_router)
+app.include_router(decisions_router)
 
 # 静态文件目录
 for _d in (STATIC_DIR, IMAGES_DIR, OUTPUT_DIR, UPLOADS_DIR, DD_IMAGES_DIR, VALUATION_IMAGES_DIR):

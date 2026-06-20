@@ -878,6 +878,31 @@ export function submitLlmFeedback({ caller, input_summary = '', output_summary =
   return api.post('/llm-feedback', { caller, input_summary, output_summary, rating, tags, comment, score_data_accuracy, score_logic, score_actionability, target_type, target_id })
 }
 
+// ── 理财决策中枢 API ──────────────────────────────────────
+
+/** 获取今日行动 */
+export function listTodayDecisions(limit = 20) {
+  return api.get('/decisions/today', { params: { limit } })
+}
+
+/** 更新决策状态 */
+export function updateDecisionStatus(decisionId, status, userNote = '') {
+  return api.put(`/decisions/${decisionId}/status`, { status, user_note: userNote })
+}
+
+/** 完成决策行动项 */
+export function completeDecisionAction(decisionId, actionId) {
+  return api.post(`/decisions/${decisionId}/actions/${actionId}/complete`)
+}
+
+export function listDueDecisionReviews(limit = 20) {
+  return api.get('/decisions/reviews/due', { params: { limit } })
+}
+
+export function submitDecisionReview(decisionId, payload) {
+  return api.post(`/decisions/${decisionId}/review`, payload)
+}
+
 /** 获取质量评分概览 */
 export function getQualitySummary(days = 30) {
   return api.get('/eval/quality-summary', { params: { days } })
