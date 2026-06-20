@@ -5,6 +5,15 @@ import os
 from pathlib import Path
 from dotenv import load_dotenv
 
+# 修复 Python 3.13+ 在 macOS 上 SSL 证书验证失败的问题
+# Python 3.13 的 ssl.create_default_context() 可能找不到系统证书，需显式指定 certifi 证书包
+if not os.environ.get("SSL_CERT_FILE"):
+    try:
+        import certifi
+        os.environ["SSL_CERT_FILE"] = certifi.where()
+    except ImportError:
+        pass
+
 _ROOT = Path(__file__).resolve().parent.parent
 # 优先加载 .env.keys（API Key），再加载 .env（配置项）
 # load_dotenv 不覆盖已存在的环境变量，所以顺序很重要
