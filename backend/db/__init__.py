@@ -104,6 +104,7 @@ from db.portfolio import (
     delete_portfolio_analysis_record, save_analysis_cache, get_analysis_cache,
     get_cached_fund_holdings, get_portfolio_penetration,
     backfill_valuation_snapshots,
+    save_portfolio_snapshot, list_portfolio_snapshots,
 )
 
 # AI 分析 Agent + 历史 + Prompt 常量
@@ -572,6 +573,22 @@ def init_db():
     """)
     _add_column_if_not_exists(conn, "portfolio_cash", "last_interest_date", "TEXT")
     _add_column_if_not_exists(conn, "portfolio_cash", "today_interest", "REAL DEFAULT 0")
+
+    # ── 持仓快照表（每日记录市值） ──
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS portfolio_snapshots (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id TEXT DEFAULT 'default',
+            snapshot_date TEXT NOT NULL,
+            total_value REAL DEFAULT 0,
+            total_cost REAL DEFAULT 0,
+            cash REAL DEFAULT 0,
+            holding_count INTEGER DEFAULT 0,
+            created_at TEXT DEFAULT (datetime('now','localtime')),
+            UNIQUE(user_id, snapshot_date)
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_snapshots_user ON portfolio_snapshots(user_id, snapshot_date)")
 
     conn.execute("""
         CREATE TABLE IF NOT EXISTS transaction_tags (

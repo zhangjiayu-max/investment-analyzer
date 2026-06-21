@@ -1,13 +1,34 @@
-"""行情数据获取模块 — 基于 akshare 获取股票、基金、指数数据"""
+"""行情数据获取模块 — 基于 akshare 获取股票、基金、指数数据
 
+增强特性：
+- akshare 失败时自动降级到东方财富 HTTP API
+- 统一错误处理和日志
+- 5 分钟 TTL 缓存
+"""
+
+import json
 import logging
+import ssl
 import time
 from datetime import datetime, timedelta
+from functools import wraps
 
-import akshare as ak
-import pandas as pd
+import requests
 
 logger = logging.getLogger(__name__)
+
+# ── akshare 可选导入（降级时不依赖） ──
+try:
+    import akshare as ak
+    _HAS_AKSHARE = True
+except ImportError:
+    _HAS_AKSHARE = False
+    logger.warning("akshare 未安装，将仅使用东方财富 HTTP API")
+
+try:
+    import pandas as pd
+except ImportError:
+    pd = None
 
 # ── 行情数据 TTL 缓存（akshare 调用慢且不稳定，5 分钟内复用）──
 _market_cache = {}
@@ -26,6 +47,98 @@ def _get_cached(key):
 def _set_cached(key, data):
     """写入缓存。"""
     _market_cache[key] = (data, time.time() + _MARKET_CACHE_TTL)
+
+
+def _safe_float(val) -> float | None:
+    """安全转换为 float。"""
+    if val is None:
+        return None
+    try:
+        return float(val)
+    except (ValueError, TypeError):
+        return None
+
+
+# ── 东方财富 HTTP 降级 API ──────────────────────────────
+
+def _eastmoney_index_spot() -> list[dict] | None:
+    """东方财富指数实时行情 HTTP API（akshare 降级）。"""
+    try:
+        url = "https://push2.eastmoney.com/api/qt/ulist.np/get"
+        params = {
+            "fltt": 2,
+            "fields": "f2,f3,f4,f12,f14,f6",
+            "secids": "1.000001,0.399001,0.399006,1.000300,1.000905,1.000852,0.899050,1.000016,0.399303",
+        }
+        resp = requests.get(url, params=params, timeout=10)
+        data = resp.json()
+        results = []
+        for item in (data.get("data", {}).get("diff", []) or []):
+            results.append({
+                "name": item.get("f14", ""),
+                "code": item.get("f12", ""),
+                "price": _safe_float(item.get("f2")),
+                "change_pct": _safe_float(item.get("f3")),
+                "volume_yi": round(_safe_float(item.get("f6", 0)) / 1e8, 0) if item.get("f6") else 0,
+            })
+        return results if results else None
+    except Exception as e:
+        logger.warning(f"东方财富指数行情降级失败: {e}")
+        return None
+
+
+def _eastmoney_fund_nav(fund_code: str) -> pd.DataFrame | None:
+    """东方财富基金净值 HTTP API（akshare 降级）。"""
+    try:
+        url = "https://api.fund.eastmoney.com/f10/lsjz"
+        params = {
+            "fundCode": fund_code,
+            "pageIndex": 1,
+            "pageSize": 365,
+            "startDate": "",
+            "endDate": "",
+        }
+        headers = {"Referer": "https://fundf10.eastmoney.com/"}
+        resp = requests.get(url, params=params, headers=headers, timeout=15)
+        data = resp.json()
+        rows = data.get("Data", {}).get("LSJZList", []) or []
+        if not rows or pd is None:
+            return None
+        records = []
+        for r in rows:
+            records.append({
+                "净值日期": r.get("FSRQ", ""),
+                "累计净值": _safe_float(r.get("LJJZ")),
+            })
+        return pd.DataFrame(records)
+    except Exception as e:
+        logger.warning(f"东方财富基金净值降级失败 ({fund_code}): {e}")
+        return None
+
+
+def _eastmoney_stock_info(symbol: str) -> dict:
+    """东方财富个股信息 HTTP API（akshare 降级）。"""
+    result = {"code": symbol, "name": ""}
+    try:
+        # 个股基本面
+        url = f"https://push2.eastmoney.com/api/qt/stock/get"
+        market = "1" if symbol.startswith(("6", "5")) else "0"
+        params = {
+            "secid": f"{market}.{symbol}",
+            "fields": "f57,f58,f9,f23,f116,f117,f127",
+        }
+        resp = requests.get(url, params=params, timeout=10)
+        data = resp.json().get("data", {})
+        if data:
+            result["name"] = data.get("f58", "")
+            result["pe"] = _safe_float(data.get("f9"))
+            result["pb"] = _safe_float(data.get("f23"))
+            result["market_cap"] = round(_safe_float(data.get("f116", 0)) / 1e8, 2) if data.get("f116") else None
+            result["circulating_cap"] = round(_safe_float(data.get("f117", 0)) / 1e8, 2) if data.get("f117") else None
+    except Exception as e:
+        logger.warning(f"东方财富个股信息降级失败 ({symbol}): {e}")
+    return result
+
 
 
 def get_stock_history(symbol: str, days: int = 365) -> pd.DataFrame:
@@ -49,7 +162,7 @@ def get_stock_history(symbol: str, days: int = 365) -> pd.DataFrame:
 
 def get_fund_nav(fund_code: str) -> pd.DataFrame:
     """
-    获取开放式基金净值数据。
+    获取开放式基金净值数据（akshare 优先，东方财富降级）。
 
     参数:
         fund_code: 基金代码，如 "110011"
@@ -57,9 +170,22 @@ def get_fund_nav(fund_code: str) -> pd.DataFrame:
     返回:
         DataFrame，列: 净值日期/单位净值/累计净值/日增长率
     """
-    df = ak.fund_open_fund_info_em(symbol=fund_code, indicator="累计净值走势")
-    df.columns = ["净值日期", "累计净值"]
-    return df
+    if not _HAS_AKSHARE or pd is None:
+        df = _eastmoney_fund_nav(fund_code)
+        if df is not None:
+            return df
+        return pd.DataFrame(columns=["净值日期", "累计净值"]) if pd else pd.DataFrame()
+
+    try:
+        df = ak.fund_open_fund_info_em(symbol=fund_code, indicator="累计净值走势")
+        df.columns = ["净值日期", "累计净值"]
+        return df
+    except Exception as e:
+        logger.warning(f"akshare 基金净值失败 ({fund_code})，降级到东方财富: {e}")
+        df = _eastmoney_fund_nav(fund_code)
+        if df is not None:
+            return df
+        return pd.DataFrame(columns=["净值日期", "累计净值"])
 
 
 def get_stock_info(symbol: str) -> dict:
@@ -99,6 +225,12 @@ def get_stock_info(symbol: str) -> dict:
             })
     except Exception:
         pass
+
+    # akshare 全部失败时降级到东方财富
+    if not info_dict.get("name"):
+        fallback = _eastmoney_stock_info(symbol)
+        if fallback.get("name"):
+            info_dict.update(fallback)
 
     info_dict.setdefault("code", symbol)
     info_dict.setdefault("name", info_dict.get("股票简称", ""))
@@ -289,7 +421,7 @@ def get_market_overview() -> dict:
         "breadth": {},
     }
 
-    # 1. 主要指数行情
+    # 1. 主要指数行情（akshare 优先，东方财富降级）
     try:
         df = ak.stock_zh_index_spot_sina()
         target_names = {
@@ -308,8 +440,10 @@ def get_market_overview() -> dict:
                     "volume_yi": round(float(row.get("成交额", 0)) / 1e8, 0),
                 })
     except Exception as e:
-        import logging
-        logging.warning(f"指数行情获取失败: {e}")
+        logger.warning(f"akshare 指数行情失败，降级到东方财富: {e}")
+        fallback_indices = _eastmoney_index_spot()
+        if fallback_indices:
+            result["indices"] = fallback_indices
 
     # 2. 行业板块涨跌幅（同花顺）
     try:
@@ -330,8 +464,7 @@ def get_market_overview() -> dict:
                 "lead_change": round(float(row.get("领涨股-涨跌幅", 0)), 2),
             })
     except Exception as e:
-        import logging
-        logging.warning(f"行业板块获取失败: {e}")
+        logger.warning(f"行业板块获取失败: {e}")
 
     # 3. 涨跌家数（多接口降级尝试）
     # 优先用东财个股接口，失败则从板块数据估算

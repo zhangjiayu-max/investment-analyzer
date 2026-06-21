@@ -438,6 +438,14 @@ async def _auto_refresh_nav():
             result = refresh_all_fund_prices()
             logging.info(f"[auto-nav] 净值刷新完成: {result}")
 
+            # 净值刷新后自动保存持仓快照
+            try:
+                from db.portfolio import save_portfolio_snapshot
+                save_portfolio_snapshot()
+                logging.info("[auto-nav] 持仓快照已保存")
+            except Exception as se:
+                logging.warning(f"[auto-nav] 持仓快照保存异常: {se}")
+
             # 净值刷新后自动触发预警扫描
             try:
                 from routers.portfolio import scan_portfolio_alerts

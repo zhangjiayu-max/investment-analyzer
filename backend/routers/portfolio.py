@@ -2554,3 +2554,19 @@ async def refresh_single_price_api(holding_id: int):
     if not nav_data:
         raise HTTPException(502, "净值获取失败，请稍后重试")
     return {"ok": True, "fund_code": holding["fund_code"], "nav": nav_data}
+
+
+@router.post("/api/portfolio/snapshot")
+async def save_snapshot_api():
+    """手动保存今日持仓快照（每日自动快照由定时任务触发）。"""
+    from db.portfolio import save_portfolio_snapshot
+    snapshot_id = save_portfolio_snapshot()
+    return {"ok": True, "snapshot_id": snapshot_id}
+
+
+@router.get("/api/portfolio/snapshots")
+async def list_snapshots_api(limit: int = 365):
+    """查询持仓快照历史（用于收益曲线）。"""
+    from db.portfolio import list_portfolio_snapshots
+    snapshots = list_portfolio_snapshots(limit=limit)
+    return {"snapshots": snapshots}

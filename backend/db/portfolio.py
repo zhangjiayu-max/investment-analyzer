@@ -1944,3 +1944,39 @@ def get_portfolio_penetration(user_id: str = "default") -> dict:
     }
     save_analysis_cache(cache_key, result)
     return result
+
+
+# ── 持仓快照（每日记录市值） ──────────────────────────────
+
+def save_portfolio_snapshot(user_id: str = "default") -> int:
+    """保存当前持仓市值快照，返回 snapshot id。"""
+    conn = _get_conn()
+    try:
+        holdings = list_holdings(user_id)
+        total_value = sum(h.get("current_value", 0) or 0 for h in holdings)
+        total_cost = sum((h.get("shares", 0) or 0) * (h.get("cost_price", 0) or 0) for h in holdings)
+        cash = get_cash_balance(user_id).get("balance", 0)
+        from datetime import datetime
+        today = datetime.now().strftime("%Y-%m-%d")
+        cur = conn.execute(
+            "INSERT OR REPLACE INTO portfolio_snapshots (user_id, snapshot_date, total_value, total_cost, cash, holding_count) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (user_id, today, round(total_value, 2), round(total_cost, 2), round(cash, 2), len(holdings))
+        )
+        conn.commit()
+        return cur.lastrowid
+    finally:
+        conn.close()
+
+
+def list_portfolio_snapshots(user_id: str = "default", limit: int = 365) -> list[dict]:
+    """查询持仓快照历史。"""
+    conn = _get_conn()
+    try:
+        rows = conn.execute(
+            "SELECT * FROM portfolio_snapshots WHERE user_id = ? ORDER BY snapshot_date DESC LIMIT ?",
+            (user_id, limit)
+        ).fetchall()
+        return [_row_to_dict(r) for r in rows]
+    finally:
+        conn.close()
