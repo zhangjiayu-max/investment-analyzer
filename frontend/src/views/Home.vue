@@ -18,6 +18,7 @@ import GoalBucketsPage from '../components/GoalBucketsPage.vue'
 import AllocationDashboard from '../components/AllocationDashboard.vue'
 import StrategySandboxPage from '../components/StrategySandboxPage.vue'
 import FamilyFinanceDashboard from '../components/FamilyFinanceDashboard.vue'
+import DecisionRecordsPage from '../components/DecisionRecordsPage.vue'
 import AdminAgentsPage from '../components/AdminAgentsPage.vue'
 import TokenUsagePage from '../components/TokenUsagePage.vue'
 import BadCasePage from '../components/BadCasePage.vue'
@@ -54,6 +55,7 @@ const pageComponents = {
   'goal-buckets': GoalBucketsPage,
   'allocation-dashboard': AllocationDashboard,
   'strategy-sandbox': StrategySandboxPage,
+  'decisions': DecisionRecordsPage,
   'admin-agents': AdminAgentsPage,
   'token-usage': TokenUsagePage,
   'quality-dashboard': QualityDashboard,

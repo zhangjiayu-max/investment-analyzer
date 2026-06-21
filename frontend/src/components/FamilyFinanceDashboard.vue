@@ -1,6 +1,6 @@
 <script setup>
 import { computed, onMounted, ref } from 'vue'
-import { getFinanceDashboard } from '../api'
+import { getFinanceDashboard, getFinanceTrend } from '../api'
 import { useToast } from '../composables/useToast'
 import Icon from './ui/Icon.vue'
 
@@ -8,6 +8,8 @@ const { showToast } = useToast()
 
 const loading = ref(false)
 const data = ref(null)
+const trend = ref(null)
+const trendLoading = ref(false)
 
 const nw = computed(() => data.value?.net_worth || {})
 const cf = computed(() => data.value?.cash_flow || {})
@@ -43,7 +45,44 @@ async function load() {
   } finally {
     loading.value = false
   }
+  // 异步加载趋势
+  loadTrend()
 }
+
+async function loadTrend() {
+  trendLoading.value = true
+  try {
+    const { data: res } = await getFinanceTrend(12)
+    trend.value = res
+  } catch (e) {
+    console.error('加载趋势失败:', e)
+  } finally {
+    trendLoading.value = false
+  }
+}
+
+// ── 趋势图 ──
+const trendChartWidth = 700
+const trendChartHeight = 160
+
+const trendChartPaths = computed(() => {
+  if (!trend.value || !trend.value.trend?.length) return null
+  const items = trend.value.trend
+  const maxVal = Math.max(...items.map(i => i.cumulative_invested), 1) * 1.1
+  const len = items.length
+  if (len < 2) return null
+
+  const path = items.map((item, i) => {
+    const x = (i / (len - 1)) * trendChartWidth
+    const y = trendChartHeight - (item.cumulative_invested / maxVal) * trendChartHeight
+    return `${i === 0 ? 'M' : 'L'}${x.toFixed(1)},${y.toFixed(1)}`
+  }).join(' ')
+
+  // 填充区域路径
+  const areaPath = path + ` L${trendChartWidth},${trendChartHeight} L0,${trendChartHeight} Z`
+
+  return { line: path, area: areaPath, labels: items }
+})
 
 onMounted(load)
 </script>
@@ -263,6 +302,61 @@ onMounted(load)
           </div>
         </section>
       </div>
+
+      <!-- 投资趋势 -->
+      <section class="card trend-card">
+        <div class="card-head">
+          <Icon name="bar-chart" size="18" />
+          <h3>投资趋势</h3>
+          <span class="card-meta">近 12 个月累计投入</span>
+        </div>
+        <div class="card-body">
+          <div v-if="trendLoading && !trend" class="trend-loading">
+            <Icon name="spinner" size="20" />
+            <span>正在加载趋势数据...</span>
+          </div>
+          <div v-else-if="!trend?.trend?.length" class="no-data">
+            暂无交易记录，无法展示趋势
+          </div>
+          <template v-else>
+            <div class="trend-summary">
+              <div class="metric-item">
+                <span>累计投入</span>
+                <strong>¥{{ money(trend.trend[trend.trend.length - 1]?.cumulative_invested || 0) }}</strong>
+              </div>
+              <div class="metric-item">
+                <span>当前净值</span>
+                <strong>¥{{ money(trend.current_value) }}</strong>
+              </div>
+              <div class="metric-item">
+                <span>累计收益</span>
+                <strong :class="pnlClass(trend.current_value - trend.total_cost)">
+                  {{ money(trend.current_value - trend.total_cost) }}
+                  ({{ pct(trend.total_return) }})
+                </strong>
+              </div>
+            </div>
+            <div v-if="trendChartPaths" class="trend-chart-wrap">
+              <svg :viewBox="`0 0 ${trendChartWidth} ${trendChartHeight}`" class="trend-chart" preserveAspectRatio="none">
+                <defs>
+                  <linearGradient :id="'trend-grad'" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="0%" stop-color="#c9a84c" stop-opacity="0.3" />
+                    <stop offset="100%" stop-color="#c9a84c" stop-opacity="0" />
+                  </linearGradient>
+                </defs>
+                <path :d="trendChartPaths.area" :fill="`url(#trend-grad)`" />
+                <path :d="trendChartPaths.line" fill="none" stroke="#c9a84c" stroke-width="2" />
+              </svg>
+              <div class="trend-labels">
+                <span v-for="item in trendChartPaths.labels" :key="item.month" class="trend-label">
+                  {{ item.month.slice(5) }}
+                </span>
+              </div>
+            </div>
+            <div v-else class="no-data">数据不足，至少需要 2 个月记录</div>
+          </template>
+        </div>
+      </section>
     </template>
   </div>
 </template>
@@ -491,6 +585,46 @@ onMounted(load)
 
 @media (max-width: 960px) {
   .dashboard-grid { grid-template-columns: 1fr; }
+}
+
+/* ── 趋势 ── */
+.trend-card {
+  grid-column: 1 / -1;
+}
+.trend-loading {
+  min-height: 120px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  color: var(--color-text-muted);
+  font-size: 0.85rem;
+}
+.trend-summary {
+  display: flex;
+  gap: var(--space-5);
+  padding-bottom: var(--space-3);
+  border-bottom: 1px solid var(--color-border-light);
+  margin-bottom: var(--space-3);
+}
+.trend-chart-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.trend-chart {
+  width: 100%;
+  height: 160px;
+}
+.trend-labels {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.68rem;
+  color: var(--color-text-muted);
+  overflow-x: auto;
+}
+.trend-label {
+  white-space: nowrap;
 }
 
 @media (max-width: 760px) {

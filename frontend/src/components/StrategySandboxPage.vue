@@ -1,6 +1,6 @@
 <script setup>
 import { computed, onMounted, ref, watch } from 'vue'
-import { getBacktestPresets, runBacktest } from '../api'
+import { getBacktestPresets, runBacktest, saveBacktest, listBacktests, deleteBacktest, linkBacktestToDecision, listDecisions } from '../api'
 import { useToast } from '../composables/useToast'
 import Icon from './ui/Icon.vue'
 
@@ -134,6 +134,107 @@ const chartPaths = computed(() => {
 })
 
 onMounted(loadPresets)
+
+// ── 保存回测 ──
+const saveName = ref('')
+const saveNotes = ref('')
+const saving = ref(false)
+
+// ── 历史回测 ──
+const history = ref([])
+const historyLoading = ref(false)
+const showHistory = ref(false)
+
+async function loadHistory() {
+  historyLoading.value = true
+  try {
+    const { data } = await listBacktests(20)
+    history.value = data.items || []
+  } catch (e) {
+    console.error('加载历史回测失败:', e)
+  } finally {
+    historyLoading.value = false
+  }
+}
+
+async function saveResult() {
+  if (!result.value || result.value.status !== 'ok') return
+  if (!saveName.value.trim()) {
+    showToast('请输入回测名称', 'warning')
+    return
+  }
+  saving.value = true
+  try {
+    await saveBacktest({
+      name: saveName.value.trim(),
+      target_code: result.value.target_code,
+      target_type: result.value.target_type,
+      strategy: result.value.strategy,
+      params: result.value.params,
+      result: result.value.result,
+      benchmark: result.value.benchmark,
+      months: result.value.months,
+      notes: saveNotes.value.trim(),
+    })
+    showToast('回测结果已保存', 'success')
+    saveName.value = ''
+    saveNotes.value = ''
+    await loadHistory()
+  } catch (e) {
+    showToast('保存失败: ' + (e.response?.data?.detail || e.message), 'error')
+  } finally {
+    saving.value = false
+  }
+}
+
+async function removeHistory(id) {
+  try {
+    await deleteBacktest(id)
+    history.value = history.value.filter(h => h.id !== id)
+    showToast('已删除', 'success')
+  } catch (e) {
+    showToast('删除失败: ' + (e.response?.data?.detail || e.message), 'error')
+  }
+}
+
+// ── 关联决策 ──
+const decisionsForLink = ref([])
+const linkModal = ref({ visible: false, backtestId: null })
+const selectedDecisionId = ref(null)
+const linking = ref(false)
+
+async function openLinkModal(backtestId) {
+  linkModal.value = { visible: true, backtestId }
+  selectedDecisionId.value = null
+  if (!decisionsForLink.value.length) {
+    try {
+      const { data } = await listDecisions('', 30)
+      decisionsForLink.value = (data.items || []).filter(d =>
+        ['proposed', 'accepted', 'executed'].includes(d.status)
+      )
+    } catch { /* silent */ }
+  }
+}
+
+async function doLinkDecision() {
+  if (!selectedDecisionId.value || !linkModal.value.backtestId) return
+  linking.value = true
+  try {
+    await linkBacktestToDecision(linkModal.value.backtestId, selectedDecisionId.value)
+    showToast('已关联回测到决策', 'success')
+    linkModal.value = { visible: false, backtestId: null }
+    selectedDecisionId.value = null
+  } catch (e) {
+    showToast('关联失败: ' + (e.response?.data?.detail || e.message), 'error')
+  } finally {
+    linking.value = false
+  }
+}
+
+function toggleHistory() {
+  showHistory.value = !showHistory.value
+  if (showHistory.value && !history.value.length) loadHistory()
+}
 </script>
 
 <template>
@@ -143,6 +244,10 @@ onMounted(loadPresets)
         <h2 class="page-title">策略沙盒</h2>
         <p class="page-desc">用历史数据回测投资策略，对比买入持有，避免凭感觉调整。</p>
       </div>
+      <button class="btn-secondary" :class="{ active: showHistory }" @click="toggleHistory">
+        <Icon name="clock" size="16" />
+        历史回测
+      </button>
     </header>
 
     <div class="sandbox-layout">
@@ -331,8 +436,97 @@ onMounted(loadPresets)
             <Icon name="info" size="14" />
             {{ result.disclaimer }}
           </div>
+
+          <!-- 保存回测 -->
+          <div class="save-section">
+            <label class="param-label">保存回测</label>
+            <div class="save-row">
+              <input v-model="saveName" class="param-input save-name-input" placeholder="回测名称，如：医药50估值加权3年" />
+              <input v-model="saveNotes" class="param-input save-notes-input" placeholder="备注（可选）" />
+              <button class="btn-primary save-btn" :disabled="saving" @click="saveResult">
+                <Icon :name="saving ? 'spinner' : 'download'" size="15" />
+                保存
+              </button>
+            </div>
+          </div>
         </template>
+
+        <!-- 历史回测 -->
+        <section v-if="showHistory" class="history-section">
+          <div class="section-title-row">
+            <h3>历史回测</h3>
+            <button class="btn-ghost btn-sm" @click="loadHistory" :disabled="historyLoading">
+              <Icon :name="historyLoading ? 'spinner' : 'refresh'" size="14" />
+              刷新
+            </button>
+          </div>
+          <div v-if="historyLoading && !history.length" class="history-loading">
+            <Icon name="spinner" size="18" />
+          </div>
+          <div v-else-if="!history.length" class="history-empty">
+            暂无保存的回测
+          </div>
+          <div v-else class="history-list">
+            <article v-for="h in history" :key="h.id" class="history-item">
+              <div class="history-main">
+                <strong>{{ h.name }}</strong>
+                <span class="history-meta">
+                  {{ h.strategy }} · {{ h.target_code }} · {{ h.months }}个月
+                  <span v-if="h.decision_id" class="linked-badge">已关联决策 #{{ h.decision_id }}</span>
+                </span>
+              </div>
+              <div class="history-metrics">
+                <span :class="['history-return', h.total_return >= 0 ? 'positive' : 'negative']">
+                  {{ (h.total_return * 100).toFixed(1) }}%
+                </span>
+                <span class="history-date">{{ h.created_at?.slice(0, 10) }}</span>
+              </div>
+              <div class="history-actions">
+                <button v-if="!h.decision_id" class="history-link" @click="openLinkModal(h.id)" title="关联决策">
+                  <Icon name="link" size="14" />
+                </button>
+                <button class="history-del" @click="removeHistory(h.id)">
+                  <Icon name="trash" size="14" />
+                </button>
+              </div>
+            </article>
+          </div>
+        </section>
       </main>
+    </div>
+
+    <!-- 关联决策弹窗 -->
+    <div v-if="linkModal.visible" class="modal-overlay" @click.self="linkModal.visible = false">
+      <div class="modal-card">
+        <header class="modal-head">
+          <h3>关联到决策</h3>
+          <button class="icon-btn" @click="linkModal.visible = false"><Icon name="close" size="18" /></button>
+        </header>
+        <div class="modal-body">
+          <p class="modal-desc">选择一条决策，将此回测结果关联到该决策，作为决策依据。</p>
+          <div v-if="!decisionsForLink.length" class="modal-empty">暂无可关联的决策</div>
+          <div v-else class="decision-options">
+            <label
+              v-for="d in decisionsForLink"
+              :key="d.id"
+              :class="['decision-option', { selected: selectedDecisionId === d.id }]"
+            >
+              <input type="radio" :value="d.id" v-model="selectedDecisionId" />
+              <div class="option-content">
+                <strong>{{ d.summary }}</strong>
+                <span>{{ d.target_name || d.target_code || '组合' }} · {{ d.decision_type }}</span>
+              </div>
+            </label>
+          </div>
+        </div>
+        <footer class="modal-foot">
+          <button class="btn-ghost" @click="linkModal.visible = false">取消</button>
+          <button class="btn-primary" @click="doLinkDecision" :disabled="!selectedDecisionId || linking">
+            <Icon :name="linking ? 'spinner' : 'link'" size="15" />
+            确认关联
+          </button>
+        </footer>
+      </div>
     </div>
   </div>
 </template>
@@ -551,4 +745,256 @@ onMounted(loadPresets)
   .sandbox-layout { grid-template-columns: 1fr; }
   .params-panel { position: static; }
 }
+
+/* ── 保存回测 ── */
+.save-section {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  padding: var(--space-3);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.save-row {
+  display: flex;
+  gap: 8px;
+}
+.save-name-input { flex: 2; }
+.save-notes-input { flex: 3; }
+.save-btn {
+  padding: 6px 14px;
+  white-space: nowrap;
+  font-size: 0.82rem;
+}
+
+/* ── 历史回测 ── */
+.history-section {
+  margin-top: var(--space-4);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  padding: var(--space-4);
+  background: var(--color-bg-card);
+}
+.section-title-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: var(--space-3);
+}
+.section-title-row h3 {
+  margin: 0;
+  font-size: 0.9rem;
+  color: var(--color-text-primary);
+}
+.history-loading, .history-empty {
+  min-height: 80px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--color-text-muted);
+  font-size: 0.82rem;
+}
+.history-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.history-item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 8px 10px;
+  border: 1px solid var(--color-border-light);
+  border-radius: var(--radius-md);
+  background: var(--color-bg-input);
+}
+.history-main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.history-main strong {
+  font-size: 0.84rem;
+  color: var(--color-text-primary);
+}
+.history-meta {
+  font-size: 0.72rem;
+  color: var(--color-text-muted);
+}
+.history-metrics {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+}
+.history-return {
+  font-size: 0.88rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+.history-return.positive { color: #dc2626; }
+.history-return.negative { color: #059669; }
+.history-date {
+  font-size: 0.7rem;
+  color: var(--color-text-muted);
+}
+.history-del {
+  width: 26px;
+  height: 26px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  color: var(--color-text-muted);
+  background: none;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.history-del:hover {
+  color: var(--color-danger);
+  border-color: var(--color-danger);
+}
+
+.history-actions {
+  display: flex;
+  gap: 4px;
+}
+
+.history-link {
+  width: 26px;
+  height: 26px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  color: var(--color-primary);
+  background: none;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.history-link:hover {
+  background: var(--color-primary-bg);
+  border-color: var(--color-primary);
+}
+
+.linked-badge {
+  display: inline-block;
+  padding: 1px 6px;
+  font-size: 0.68rem;
+  font-weight: 600;
+  color: var(--color-primary);
+  background: var(--color-primary-bg);
+  border-radius: var(--radius-sm);
+  margin-left: 4px;
+}
+
+/* ── 弹窗 ── */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-4);
+}
+.modal-card {
+  background: var(--color-bg-card);
+  border-radius: var(--radius-lg);
+  width: 100%;
+  max-width: 480px;
+  max-height: 80vh;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+}
+.modal-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: var(--space-4);
+  border-bottom: 1px solid var(--color-border);
+}
+.modal-head h3 {
+  margin: 0;
+  font-size: 1rem;
+  color: var(--color-text-primary);
+}
+.modal-body {
+  padding: var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+.modal-desc {
+  margin: 0;
+  font-size: 0.82rem;
+  color: var(--color-text-muted);
+}
+.modal-empty {
+  text-align: center;
+  color: var(--color-text-muted);
+  font-size: 0.85rem;
+  padding: var(--space-4);
+}
+.decision-options {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.decision-option {
+  display: flex;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  background: var(--color-bg-input);
+  transition: all var(--transition-fast);
+}
+.decision-option:hover {
+  border-color: var(--color-primary);
+}
+.decision-option.selected {
+  border-color: var(--color-primary);
+  background: var(--color-primary-bg);
+}
+.decision-option input[type="radio"] {
+  margin-top: 2px;
+}
+.option-content {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.option-content strong {
+  font-size: 0.85rem;
+  color: var(--color-text-primary);
+}
+.option-content span {
+  font-size: 0.74rem;
+  color: var(--color-text-muted);
+}
+.modal-foot {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-2);
+  padding: var(--space-4);
+  border-top: 1px solid var(--color-border);
+}
+.icon-btn {
+  width: 30px;
+  height: 30px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  color: var(--color-text-secondary);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  background: none;
+}
+.icon-btn:hover { background: var(--color-bg-hover); color: var(--color-text-primary); }
 </style>

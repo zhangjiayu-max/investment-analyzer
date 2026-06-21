@@ -1,0 +1,838 @@
+<script setup>
+import { ref, computed, onMounted } from 'vue'
+import { listDecisions, updateDecisionStatus, submitDecisionReview, completeDecisionAction, getDecisionPrecheck } from '../api'
+import { useToast } from '../composables/useToast'
+import Icon from './ui/Icon.vue'
+import ConfirmDialog from './ConfirmDialog.vue'
+
+const { showToast } = useToast()
+
+// ── 数据 ──
+const loading = ref(false)
+const decisions = ref([])
+const precheckCache = ref({})  // { decisionId: precheckResult }
+
+// ── 筛选 ──
+const activeFilter = ref('all')  // all | proposed | accepted | executed | reviewed | rejected
+
+// ── 复盘弹窗 ──
+const reviewModal = ref({ visible: false, decision: null })
+const reviewForm = ref({
+  outcome: 'helpful',
+  result_note: '',
+  profit_change: null,
+  lesson: '',
+})
+const reviewSaving = ref(false)
+
+// ── 确认弹窗 ──
+const confirmState = ref({ visible: false, title: '', message: '', onConfirm: null })
+
+// ── 统计 ──
+const stats = computed(() => {
+  const all = decisions.value
+  const proposed = all.filter(d => d.status === 'proposed').length
+  const accepted = all.filter(d => d.status === 'accepted').length
+  const executed = all.filter(d => d.status === 'executed').length
+  const reviewed = all.filter(d => d.status === 'reviewed').length
+  const reviewedItems = all.filter(d => d.status === 'reviewed' && d.review)
+  const winCount = reviewedItems.filter(d => d.review.profit_change > 0).length
+  const winRate = reviewedItems.length > 0 ? Math.round((winCount / reviewedItems.length) * 100) : 0
+  return { proposed, accepted, executed, reviewed, winRate, total: all.length }
+})
+
+// ── 三栏分组 ──
+const pendingDecisions = computed(() =>
+  decisions.value.filter(d => ['proposed', 'accepted', 'deferred'].includes(d.status))
+)
+const reviewingDecisions = computed(() =>
+  decisions.value.filter(d => d.status === 'executed')
+)
+const completedDecisions = computed(() =>
+  decisions.value.filter(d => ['reviewed', 'rejected', 'expired'].includes(d.status))
+)
+
+// ── 加载 ──
+async function load() {
+  loading.value = true
+  try {
+    const { data } = await listDecisions('', 200)
+    decisions.value = data.items || []
+    // 异步加载预检查
+    decisions.value.forEach(d => loadPrecheck(d.id))
+  } catch (e) {
+    showToast('加载决策失败: ' + (e.response?.data?.detail || e.message), 'error')
+  } finally {
+    loading.value = false
+  }
+}
+
+async function loadPrecheck(decisionId) {
+  if (precheckCache.value[decisionId]) return
+  try {
+    const { data } = await getDecisionPrecheck(decisionId)
+    precheckCache.value[decisionId] = data
+  } catch { /* silent */ }
+}
+
+// ── 状态操作 ──
+function confirmAction(title, message, onConfirm) {
+  confirmState.value = { visible: true, title, message, onConfirm }
+}
+
+async function doStatusUpdate(decisionId, status, note = '') {
+  try {
+    await updateDecisionStatus(decisionId, status, note)
+    showToast(`决策已${statusLabel(status)}`, 'success')
+    await load()
+  } catch (e) {
+    showToast('操作失败: ' + (e.response?.data?.detail || e.message), 'error')
+  }
+}
+
+function acceptDecision(decisionId) {
+  confirmAction('接受决策', '确认接受此决策？接受后可执行。', () => doStatusUpdate(decisionId, 'accepted'))
+}
+function rejectDecision(decisionId) {
+  confirmAction('拒绝决策', '确认拒绝此决策？拒绝后不可再执行。', () => doStatusUpdate(decisionId, 'rejected'))
+}
+function deferDecision(decisionId) {
+  confirmAction('暂缓决策', '确认暂缓此决策？后续可重新接受。', () => doStatusUpdate(decisionId, 'deferred'))
+}
+function executeDecision(decisionId) {
+  confirmAction('执行决策', '确认此决策已执行？执行后进入待复盘状态。', () => doStatusUpdate(decisionId, 'executed'))
+}
+
+async function completeAction(decisionId, actionId) {
+  try {
+    await completeDecisionAction(decisionId, actionId)
+    showToast('行动项已完成', 'success')
+    await load()
+  } catch (e) {
+    showToast('操作失败: ' + (e.response?.data?.detail || e.message), 'error')
+  }
+}
+
+// ── 复盘 ──
+function openReview(decision) {
+  reviewModal.value = { visible: true, decision }
+  reviewForm.value = {
+    outcome: 'helpful',
+    result_note: '',
+    profit_change: null,
+    lesson: '',
+  }
+}
+
+async function submitReview() {
+  const decision = reviewModal.value.decision
+  if (!decision) return
+  reviewSaving.value = true
+  try {
+    await submitDecisionReview(decision.id, {
+      outcome: reviewForm.value.outcome,
+      result_note: reviewForm.value.result_note,
+      profit_change: reviewForm.value.profit_change,
+      lesson: reviewForm.value.lesson,
+    })
+    showToast('复盘已提交', 'success')
+    reviewModal.value = { visible: false, decision: null }
+    await load()
+  } catch (e) {
+    showToast('复盘失败: ' + (e.response?.data?.detail || e.message), 'error')
+  } finally {
+    reviewSaving.value = false
+  }
+}
+
+// ── 辅助函数 ──
+function statusLabel(status) {
+  return { proposed: '提案', accepted: '已接受', rejected: '已拒绝', deferred: '已暂缓', executed: '已执行', expired: '已过期', reviewed: '已复盘' }[status] || status
+}
+
+function statusClass(status) {
+  return {
+    proposed: 'status-proposed',
+    accepted: 'status-accepted',
+    rejected: 'status-rejected',
+    deferred: 'status-deferred',
+    executed: 'status-executed',
+    expired: 'status-expired',
+    reviewed: 'status-reviewed',
+  }[status] || 'status-proposed'
+}
+
+function decisionTypeLabel(type) {
+  return { add: '配置', rebalance: '再平衡', watch: '观察', hold: '持有', reduce: '减仓', sell: '卖出' }[type] || type || '决策'
+}
+
+function decisionTypeClass(type) {
+  return { add: 'type-add', rebalance: 'type-rebalance', watch: 'type-watch', hold: 'type-hold', reduce: 'type-reduce', sell: 'type-sell' }[type] || 'type-watch'
+}
+
+function targetText(item) {
+  return item.target_name || item.target_code || item.target_type || '组合'
+}
+
+function formatDate(dateStr) {
+  if (!dateStr) return ''
+  const d = new Date(dateStr)
+  return `${d.getMonth() + 1}/${d.getDate()}`
+}
+
+function money(value) {
+  return Number(value || 0).toLocaleString('zh-CN', { maximumFractionDigits: 0 })
+}
+
+function precheckItems(decisionId) {
+  const precheck = precheckCache.value[decisionId]
+  if (!precheck || !precheck.exists) return []
+  const items = []
+  if (precheck.bucket_check) {
+    const bc = precheck.bucket_check
+    if (bc.blocked) {
+      items.push({ level: 'error', text: `资金桶拦截：${bc.reason || '不允许高风险资产'}` })
+    } else {
+      items.push({ level: 'ok', text: `资金桶：${bc.bucket_name || '匹配'}` })
+    }
+  }
+  if (precheck.allocation_check) {
+    const ac = precheck.allocation_check
+    if (ac.exceeds_limit) {
+      items.push({ level: 'warn', text: `占比超限：加仓后 ${Math.round((ac.after_ratio || 0) * 100)}%` })
+    } else {
+      items.push({ level: 'ok', text: `占比正常` })
+    }
+  }
+  return items
+}
+
+onMounted(load)
+</script>
+
+<template>
+  <div class="decisions-page">
+    <!-- 页头 -->
+    <header class="page-head">
+      <div>
+        <h2 class="page-title">决策档案</h2>
+        <p class="page-desc">记录每一次买卖决策，追踪执行和复盘，形成理财闭环。</p>
+      </div>
+      <button class="btn-secondary" @click="load" :disabled="loading">
+        <Icon :name="loading ? 'spinner' : 'refresh'" size="16" />
+        刷新
+      </button>
+    </header>
+
+    <!-- 统计条 -->
+    <section class="stats-strip">
+      <div class="stat-cell">
+        <span>提案</span>
+        <strong>{{ stats.proposed }}</strong>
+      </div>
+      <div class="stat-cell">
+        <span>已接受</span>
+        <strong>{{ stats.accepted }}</strong>
+      </div>
+      <div class="stat-cell">
+        <span>已执行</span>
+        <strong>{{ stats.executed }}</strong>
+      </div>
+      <div class="stat-cell">
+        <span>已复盘</span>
+        <strong>{{ stats.reviewed }}</strong>
+      </div>
+      <div class="stat-cell" :class="{ win: stats.winRate >= 60 }">
+        <span>胜率</span>
+        <strong>{{ stats.winRate }}%</strong>
+      </div>
+      <div class="stat-cell">
+        <span>总计</span>
+        <strong>{{ stats.total }}</strong>
+      </div>
+    </section>
+
+    <!-- 三栏看板 -->
+    <div class="kanban">
+      <!-- 待执行 -->
+      <section class="kanban-col">
+        <header class="col-head">
+          <h3>待执行</h3>
+          <span class="col-count">{{ pendingDecisions.length }}</span>
+        </header>
+        <div v-if="loading && !pendingDecisions.length" class="col-empty">
+          <Icon name="spinner" size="20" />
+        </div>
+        <div v-else-if="!pendingDecisions.length" class="col-empty">
+          <Icon name="clipboard-list" size="24" />
+          <span>暂无待执行决策</span>
+        </div>
+        <article
+          v-for="d in pendingDecisions"
+          :key="d.id"
+          :class="['decision-card', statusClass(d.status)]"
+        >
+          <div class="card-top">
+            <span :class="['type-badge', decisionTypeClass(d.decision_type)]">{{ decisionTypeLabel(d.decision_type) }}</span>
+            <span :class="['status-tag', statusClass(d.status)]">{{ statusLabel(d.status) }}</span>
+          </div>
+          <h4 class="card-title">{{ targetText(d) }}</h4>
+          <p class="card-summary">{{ d.summary }}</p>
+          <div class="card-meta">
+            <span><Icon name="calendar" size="13" /> {{ formatDate(d.created_at) }}</span>
+            <span><Icon name="file-text" size="13" /> {{ d.source_type === 'chat' ? 'AI对话' : d.source_type === 'dashboard' ? '看板' : d.source_type }}</span>
+          </div>
+          <!-- 预检查 -->
+          <div v-if="precheckItems(d.id).length" class="precheck-list">
+            <div
+              v-for="(pc, i) in precheckItems(d.id)"
+              :key="i"
+              :class="['precheck-item', `pc-${pc.level}`]"
+            >
+              <Icon :name="pc.level === 'ok' ? 'success' : pc.level === 'warn' ? 'warning' : 'error'" size="13" />
+              {{ pc.text }}
+            </div>
+          </div>
+          <!-- 行动项 -->
+          <div v-if="d.actions?.length" class="action-list">
+            <div v-for="a in d.actions" :key="a.id" class="action-item">
+              <Icon :name="a.status === 'done' ? 'success' : 'circle'" size="13" />
+              <span :class="{ done: a.status === 'done' }">{{ a.title }}</span>
+              <button v-if="a.status !== 'done'" class="action-btn" @click="completeAction(d.id, a.id)">完成</button>
+            </div>
+          </div>
+          <!-- 操作按钮 -->
+          <div class="card-actions">
+            <template v-if="d.status === 'proposed'">
+              <button class="btn-sm btn-primary" @click="acceptDecision(d.id)">接受</button>
+              <button class="btn-sm btn-ghost" @click="deferDecision(d.id)">暂缓</button>
+              <button class="btn-sm btn-ghost danger" @click="rejectDecision(d.id)">拒绝</button>
+            </template>
+            <template v-else-if="d.status === 'accepted'">
+              <button class="btn-sm btn-primary" @click="executeDecision(d.id)">已执行</button>
+              <button class="btn-sm btn-ghost" @click="deferDecision(d.id)">暂缓</button>
+            </template>
+            <template v-else-if="d.status === 'deferred'">
+              <button class="btn-sm btn-primary" @click="acceptDecision(d.id)">重新接受</button>
+              <button class="btn-sm btn-ghost danger" @click="rejectDecision(d.id)">拒绝</button>
+            </template>
+          </div>
+        </article>
+      </section>
+
+      <!-- 待复盘 -->
+      <section class="kanban-col">
+        <header class="col-head">
+          <h3>待复盘</h3>
+          <span class="col-count">{{ reviewingDecisions.length }}</span>
+        </header>
+        <div v-if="!reviewingDecisions.length" class="col-empty">
+          <Icon name="clock" size="24" />
+          <span>暂无待复盘决策</span>
+        </div>
+        <article
+          v-for="d in reviewingDecisions"
+          :key="d.id"
+          :class="['decision-card', statusClass(d.status)]"
+        >
+          <div class="card-top">
+            <span :class="['type-badge', decisionTypeClass(d.decision_type)]">{{ decisionTypeLabel(d.decision_type) }}</span>
+            <span :class="['status-tag', statusClass(d.status)]">{{ statusLabel(d.status) }}</span>
+          </div>
+          <h4 class="card-title">{{ targetText(d) }}</h4>
+          <p class="card-summary">{{ d.summary }}</p>
+          <div class="card-meta">
+            <span><Icon name="calendar" size="13" /> {{ formatDate(d.created_at) }}</span>
+            <span v-if="d.review_at"><Icon name="alarm-clock" size="13" /> 复盘到期 {{ formatDate(d.review_at) }}</span>
+          </div>
+          <div class="card-actions">
+            <button class="btn-sm btn-primary" @click="openReview(d)">
+              <Icon name="pencil" size="13" />
+              去复盘
+            </button>
+          </div>
+        </article>
+      </section>
+
+      <!-- 已完成 -->
+      <section class="kanban-col">
+        <header class="col-head">
+          <h3>已完成</h3>
+          <span class="col-count">{{ completedDecisions.length }}</span>
+        </header>
+        <div v-if="!completedDecisions.length" class="col-empty">
+          <Icon name="check" size="24" />
+          <span>暂无已完成决策</span>
+        </div>
+        <article
+          v-for="d in completedDecisions"
+          :key="d.id"
+          :class="['decision-card', 'completed', statusClass(d.status)]"
+        >
+          <div class="card-top">
+            <span :class="['type-badge', decisionTypeClass(d.decision_type)]">{{ decisionTypeLabel(d.decision_type) }}</span>
+            <span :class="['status-tag', statusClass(d.status)]">{{ statusLabel(d.status) }}</span>
+          </div>
+          <h4 class="card-title">{{ targetText(d) }}</h4>
+          <p class="card-summary">{{ d.summary }}</p>
+          <div class="card-meta">
+            <span><Icon name="calendar" size="13" /> {{ formatDate(d.created_at) }}</span>
+          </div>
+          <!-- 复盘结果 -->
+          <div v-if="d.review" class="review-result">
+            <div class="review-outcome" :class="`outcome-${d.review.outcome}`">
+              {{ { helpful: '有帮助', neutral: '一般', unhelpful: '没帮助' }[d.review.outcome] || d.review.outcome }}
+            </div>
+            <div v-if="d.review.profit_change != null" class="review-pnl" :class="d.review.profit_change >= 0 ? 'positive' : 'negative'">
+              {{ d.review.profit_change >= 0 ? '+' : '' }}¥{{ money(d.review.profit_change) }}
+            </div>
+            <p v-if="d.review.lesson" class="review-lesson">{{ d.review.lesson }}</p>
+          </div>
+        </article>
+      </section>
+    </div>
+
+    <!-- 复盘弹窗 -->
+    <div v-if="reviewModal.visible" class="modal-overlay" @click.self="reviewModal.visible = false">
+      <div class="modal-card">
+        <header class="modal-head">
+          <h3>决策复盘</h3>
+          <button class="icon-btn" @click="reviewModal.visible = false"><Icon name="close" size="18" /></button>
+        </header>
+        <div class="modal-body">
+          <div class="modal-info">
+            <strong>{{ targetText(reviewModal.decision) }}</strong>
+            <span>{{ reviewModal.decision?.summary }}</span>
+          </div>
+          <label>
+            复盘结果
+            <select v-model="reviewForm.outcome" class="input-field">
+              <option value="helpful">有帮助</option>
+              <option value="neutral">一般</option>
+              <option value="unhelpful">没帮助</option>
+            </select>
+          </label>
+          <label>
+            盈亏金额（可选）
+            <input v-model.number="reviewForm.profit_change" type="number" step="0.01" class="input-field" placeholder="如 1500 或 -800" />
+          </label>
+          <label>
+            结果说明
+            <textarea v-model="reviewForm.result_note" class="input-field" rows="3" placeholder="实际执行后发生了什么"></textarea>
+          </label>
+          <label>
+            经验教训
+            <textarea v-model="reviewForm.lesson" class="input-field" rows="3" placeholder="下次遇到类似情况应该怎么做"></textarea>
+          </label>
+        </div>
+        <footer class="modal-foot">
+          <button class="btn-ghost" @click="reviewModal.visible = false">取消</button>
+          <button class="btn-primary" @click="submitReview" :disabled="reviewSaving">
+            <Icon :name="reviewSaving ? 'spinner' : 'check'" size="16" />
+            提交复盘
+          </button>
+        </footer>
+      </div>
+    </div>
+
+    <!-- 确认弹窗 -->
+    <ConfirmDialog
+      :visible="confirmState.visible"
+      :title="confirmState.title"
+      :message="confirmState.message"
+      confirm-text="确认"
+      :loading="false"
+      @confirm="() => { confirmState.visible = false; confirmState.onConfirm?.() }"
+      @cancel="confirmState.visible = false"
+    />
+  </div>
+</template>
+
+<style scoped>
+.decisions-page {
+  padding: var(--space-6);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+}
+
+.page-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: var(--space-4);
+}
+.page-title {
+  margin: 0;
+  font-size: 1.25rem;
+  color: var(--color-text-primary);
+}
+.page-desc {
+  margin: 4px 0 0;
+  color: var(--color-text-secondary);
+  font-size: 0.85rem;
+}
+
+/* 统计条 */
+.stats-strip {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  background: var(--color-bg-card);
+  overflow: hidden;
+}
+.stat-cell {
+  padding: var(--space-3) var(--space-4);
+  border-right: 1px solid var(--color-border-light);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  text-align: center;
+}
+.stat-cell:last-child { border-right: 0; }
+.stat-cell span {
+  font-size: 0.74rem;
+  color: var(--color-text-muted);
+}
+.stat-cell strong {
+  font-size: 1.15rem;
+  color: var(--color-text-primary);
+  font-variant-numeric: tabular-nums;
+}
+.stat-cell.win strong { color: var(--color-success); }
+
+/* 看板布局 */
+.kanban {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--space-4);
+  align-items: start;
+}
+.kanban-col {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+.col-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding-bottom: var(--space-2);
+  border-bottom: 2px solid var(--color-border);
+}
+.col-head h3 {
+  margin: 0;
+  font-size: 0.9rem;
+  color: var(--color-text-primary);
+}
+.col-count {
+  background: var(--color-bg-input);
+  border: 1px solid var(--color-border-light);
+  border-radius: 999px;
+  padding: 1px 8px;
+  font-size: 0.72rem;
+  color: var(--color-text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+.col-empty {
+  min-height: 160px;
+  border: 1px dashed var(--color-border);
+  border-radius: var(--radius-lg);
+  color: var(--color-text-muted);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  background: var(--color-bg-card);
+  font-size: 0.82rem;
+}
+
+/* 决策卡片 */
+.decision-card {
+  background: var(--color-bg-card);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  padding: var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  transition: border-color var(--transition-fast), box-shadow var(--transition-fast);
+}
+.decision-card:hover {
+  border-color: var(--color-primary-border-strong);
+  box-shadow: var(--shadow-sm);
+}
+.decision-card.completed {
+  opacity: 0.78;
+}
+
+.card-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+.type-badge {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  padding: 2px 8px;
+  font-size: 0.72rem;
+  font-weight: 600;
+}
+.type-add { color: #dc2626; border-color: rgba(220,38,38,0.2); background: rgba(220,38,38,0.06); }
+.type-reduce, .type-sell { color: #059669; border-color: rgba(5,150,105,0.2); background: rgba(5,150,105,0.06); }
+.type-watch { color: var(--color-text-secondary); }
+.type-rebalance { color: #7c3aed; border-color: rgba(124,58,237,0.2); background: rgba(124,58,237,0.06); }
+.type-hold { color: var(--color-text-muted); }
+
+.status-tag {
+  font-size: 0.7rem;
+  font-weight: 600;
+  padding: 2px 7px;
+  border-radius: var(--radius-sm);
+}
+.status-proposed { color: #d97706; background: rgba(217,119,6,0.1); }
+.status-accepted { color: #2563eb; background: rgba(37,99,235,0.1); }
+.status-executed { color: #7c3aed; background: rgba(124,58,237,0.1); }
+.status-reviewed { color: #059669; background: rgba(5,150,105,0.1); }
+.status-rejected { color: var(--color-text-muted); background: var(--color-bg-input); }
+.status-deferred { color: #d97706; background: rgba(217,119,6,0.08); }
+.status-expired { color: var(--color-text-muted); background: var(--color-bg-input); }
+
+.card-title {
+  margin: 0;
+  font-size: 0.95rem;
+  color: var(--color-text-primary);
+}
+.card-summary {
+  margin: 0;
+  font-size: 0.82rem;
+  color: var(--color-text-secondary);
+  line-height: 1.5;
+}
+.card-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  font-size: 0.74rem;
+  color: var(--color-text-muted);
+}
+.card-meta span {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+/* 预检查 */
+.precheck-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  border-top: 1px solid var(--color-border-light);
+  padding-top: var(--space-2);
+}
+.precheck-item {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 0.76rem;
+}
+.pc-ok { color: var(--color-success); }
+.pc-warn { color: var(--color-warning); }
+.pc-error { color: var(--color-danger); }
+
+/* 行动项 */
+.action-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  border-top: 1px solid var(--color-border-light);
+  padding-top: var(--space-2);
+}
+.action-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.78rem;
+  color: var(--color-text-secondary);
+}
+.action-item .done {
+  text-decoration: line-through;
+  color: var(--color-text-muted);
+}
+.action-btn {
+  margin-left: auto;
+  font-size: 0.7rem;
+  color: var(--color-primary);
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 2px 6px;
+}
+.action-btn:hover { text-decoration: underline; }
+
+/* 操作按钮 */
+.card-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: var(--space-1);
+}
+.btn-sm {
+  padding: 4px 12px;
+  border-radius: var(--radius-sm);
+  font-size: 0.76rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all var(--transition-fast);
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.btn-sm.btn-primary {
+  background: var(--color-primary);
+  color: #fff;
+  border: 1px solid var(--color-primary);
+}
+.btn-sm.btn-primary:hover { background: var(--color-primary-700); }
+.btn-sm.btn-ghost {
+  background: transparent;
+  color: var(--color-text-secondary);
+  border: 1px solid var(--color-border);
+}
+.btn-sm.btn-ghost:hover { background: var(--color-bg-hover); color: var(--color-text-primary); }
+.btn-sm.btn-ghost.danger:hover { background: var(--color-danger-bg); color: var(--color-danger); border-color: var(--color-danger); }
+
+/* 复盘结果 */
+.review-result {
+  border-top: 1px solid var(--color-border-light);
+  padding-top: var(--space-2);
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+}
+.review-outcome {
+  font-size: 0.72rem;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: var(--radius-sm);
+}
+.outcome-helpful { color: var(--color-success); background: rgba(5,150,105,0.1); }
+.outcome-neutral { color: var(--color-text-muted); background: var(--color-bg-input); }
+.outcome-unhelpful { color: var(--color-danger); background: rgba(220,38,38,0.1); }
+.review-pnl {
+  font-size: 0.85rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+.review-pnl.positive { color: #dc2626; }
+.review-pnl.negative { color: #059669; }
+.review-lesson {
+  flex-basis: 100%;
+  margin: 4px 0 0;
+  font-size: 0.78rem;
+  color: var(--color-text-secondary);
+  line-height: 1.5;
+  font-style: italic;
+}
+
+/* 弹窗 */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-4);
+}
+.modal-card {
+  background: var(--color-bg-card);
+  border-radius: var(--radius-lg);
+  width: 100%;
+  max-width: 480px;
+  max-height: 90vh;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+}
+.modal-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: var(--space-4);
+  border-bottom: 1px solid var(--color-border);
+}
+.modal-head h3 {
+  margin: 0;
+  font-size: 1rem;
+  color: var(--color-text-primary);
+}
+.modal-body {
+  padding: var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+.modal-body label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 0.8rem;
+  color: var(--color-text-secondary);
+  font-weight: 600;
+}
+.modal-info {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: var(--space-3);
+  background: var(--color-bg-input);
+  border-radius: var(--radius-md);
+}
+.modal-info strong {
+  font-size: 0.9rem;
+  color: var(--color-text-primary);
+}
+.modal-info span {
+  font-size: 0.78rem;
+  color: var(--color-text-secondary);
+}
+.modal-foot {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-2);
+  padding: var(--space-4);
+  border-top: 1px solid var(--color-border);
+}
+
+.icon-btn {
+  width: 30px;
+  height: 30px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  color: var(--color-text-secondary);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  background: none;
+}
+.icon-btn:hover { background: var(--color-bg-hover); color: var(--color-text-primary); }
+
+/* 响应式 */
+@media (max-width: 1100px) {
+  .kanban { grid-template-columns: 1fr; }
+  .stats-strip { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .stat-cell:nth-child(3) { border-right: 0; }
+  .stat-cell:nth-child(-n + 3) { border-bottom: 1px solid var(--color-border-light); }
+}
+@media (max-width: 640px) {
+  .decisions-page { padding: var(--space-4); }
+  .stats-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .stat-cell:nth-child(2) { border-right: 0; }
+  .stat-cell:nth-child(-n + 4) { border-bottom: 1px solid var(--color-border-light); }
+}
+</style>

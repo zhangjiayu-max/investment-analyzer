@@ -5,6 +5,8 @@ import {
   deleteGoalBucket,
   listGoalBuckets,
   updateGoalBucket,
+  listDecisions,
+  getDecisionPrecheck,
 } from '../api'
 import { useToast } from '../composables/useToast'
 import ConfirmDialog from './ConfirmDialog.vue'
@@ -172,6 +174,34 @@ async function doDelete() {
 }
 
 onMounted(load)
+
+// ── 决策预检查展示 ──
+const recentDecisions = ref([])
+const precheckMap = ref({})  // { decisionId: precheck }
+
+async function loadRecentDecisions() {
+  try {
+    const { data } = await listDecisions('', 10)
+    recentDecisions.value = (data.items || []).filter(d =>
+      ['proposed', 'accepted'].includes(d.status)
+    )
+    // 逐个加载预检查
+    recentDecisions.value.forEach(async d => {
+      try {
+        const { data: pc } = await getDecisionPrecheck(d.id)
+        precheckMap.value[d.id] = pc
+      } catch { /* silent */ }
+    })
+  } catch { /* silent */ }
+}
+
+function bucketCheckFor(decisionId) {
+  const pc = precheckMap.value[decisionId]
+  if (!pc || !pc.bucket_check) return null
+  return pc.bucket_check
+}
+
+onMounted(loadRecentDecisions)
 </script>
 
 <template>
@@ -309,6 +339,32 @@ onMounted(load)
         </button>
       </aside>
     </main>
+
+    <!-- 决策预检查展示 -->
+    <section v-if="recentDecisions.length" class="precheck-section">
+      <h3 class="section-title">
+        <Icon name="shield-check" size="16" />
+        决策预检查（资金桶拦截）
+      </h3>
+      <p class="section-desc">展示待执行决策与资金桶的约束关系。被拦截的决策无法执行加仓。</p>
+      <div class="precheck-list">
+        <article v-for="d in recentDecisions" :key="d.id" class="precheck-card">
+          <div class="precheck-top">
+            <strong>{{ d.summary }}</strong>
+            <span :class="['precheck-status', bucketCheckFor(d.id)?.blocked ? 'blocked' : 'ok']">
+              {{ bucketCheckFor(d.id)?.blocked ? '拦截' : '通过' }}
+            </span>
+          </div>
+          <div v-if="bucketCheckFor(d.id)" class="precheck-detail">
+            <span>资金桶：{{ bucketCheckFor(d.id).bucket_name || '-' }}</span>
+            <span v-if="bucketCheckFor(d.id).reason">原因：{{ bucketCheckFor(d.id).reason }}</span>
+          </div>
+          <div v-else class="precheck-detail">
+            <span class="muted">加载中...</span>
+          </div>
+        </article>
+      </div>
+    </section>
 
     <ConfirmDialog
       :visible="confirmDelete.visible"
@@ -562,5 +618,75 @@ onMounted(load)
   .summary-cell:nth-child(-n + 2) { border-bottom: 1px solid var(--color-border-light); }
   .bucket-top { flex-direction: column; }
   .form-grid { grid-template-columns: 1fr; }
+}
+
+/* ── 决策预检查展示 ── */
+.precheck-section {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  background: var(--color-bg-card);
+  padding: var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+.section-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  font-size: 0.95rem;
+  color: var(--color-text-primary);
+}
+.section-desc {
+  margin: 0;
+  font-size: 0.78rem;
+  color: var(--color-text-muted);
+}
+.precheck-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.precheck-card {
+  border: 1px solid var(--color-border-light);
+  border-radius: var(--radius-md);
+  padding: 10px 12px;
+  background: var(--color-bg-input);
+}
+.precheck-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+}
+.precheck-top strong {
+  font-size: 0.85rem;
+  color: var(--color-text-primary);
+}
+.precheck-status {
+  font-size: 0.72rem;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: var(--radius-sm);
+}
+.precheck-status.ok {
+  color: var(--color-success);
+  background: rgba(5, 150, 105, 0.1);
+}
+.precheck-status.blocked {
+  color: var(--color-danger);
+  background: rgba(220, 38, 38, 0.1);
+}
+.precheck-detail {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 6px;
+  font-size: 0.76rem;
+  color: var(--color-text-secondary);
+}
+.precheck-detail .muted {
+  color: var(--color-text-muted);
 }
 </style>

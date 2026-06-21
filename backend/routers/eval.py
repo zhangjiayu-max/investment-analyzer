@@ -322,6 +322,145 @@ async def create_eval_from_bad_case(req: BadCaseToEvalRequest):
     return {"ok": True, "id": case_id, "name": name, "expected_quality": expected_quality}
 
 
+@router.post("/api/eval/cases/batch-from-bad-cases")
+async def batch_convert_bad_cases():
+    """批量将所有 Bad Case 转化为 Eval Case（跳过已转化的）。"""
+    all_bad = list_all_bad_cases(limit=500)
+    existing = list_eval_cases(active_only=False)
+    # 用描述中的 source:id 去重
+    existing_descs = {c.get("description", "") for c in existing}
+
+    converted = []
+    skipped = 0
+
+    for bc in all_bad:
+        source = bc.get("source", "chat")
+        source_id = bc.get("id")
+        desc_marker = f"来源: {source} | 原始ID: {source_id}"
+        if desc_marker in existing_descs:
+            skipped += 1
+            continue
+
+        # 确定分析类型
+        analysis_type = bc.get("type", "ai")
+        if analysis_type not in ("panorama", "deep_dive", "trade_review", "what_if",
+                                  "diversification_ai", "ai", "orchestrator"):
+            analysis_type = "ai"
+
+        # 构建 input_params
+        input_data = bc.get("input", "")
+        if source == "analysis":
+            try:
+                parsed = json.loads(input_data) if input_data else {}
+                input_params = json.dumps(parsed, ensure_ascii=False)
+            except (json.JSONDecodeError, TypeError):
+                input_params = json.dumps({"raw_input": str(input_data)[:500]}, ensure_ascii=False)
+        else:
+            input_params = json.dumps({"question": str(input_data)[:500]}, ensure_ascii=False)
+
+        # 生成期望质量标准（用简单规则，避免大量 LLM 调用）
+        note = bc.get("note", "")
+        if "无用" in note or "没用" in note:
+            expected_quality = "1. 分析必须结合具体数据，不能泛泛而谈\n2. 必须给出可操作的建议\n3. 必须包含风险提示"
+        elif "错误" in note or "不准" in note:
+            expected_quality = "1. 数据必须准确，引用最新估值/净值\n2. 计算必须正确\n3. 结论必须有数据支撑"
+        else:
+            expected_quality = "1. 分析必须专业、准确、有数据支撑\n2. 必须给出可操作建议\n3. 必须包含风险提示"
+
+        # 生成名称
+        type_label = {
+            "panorama": "全景诊断", "deep_dive": "基金深度",
+            "trade_review": "交易复盘", "what_if": "情景推演",
+            "ai": "AI分析", "diversification_ai": "分散度",
+            "orchestrator": "对话分析",
+        }.get(analysis_type, analysis_type)
+        input_preview = str(input_data)[:30].replace("\n", " ")
+        name = f"BC-{type_label}-{input_preview}"
+
+        case_id = create_eval_case(
+            name=name,
+            analysis_type=analysis_type,
+            input_params=input_params,
+            description=f"从 Bad Case 批量转化 | {desc_marker}",
+            expected_quality=expected_quality,
+        )
+        converted.append({"case_id": case_id, "name": name, "source": source, "source_id": source_id})
+
+    return {"ok": True, "converted": len(converted), "skipped": skipped, "cases": converted}
+
+
+@router.post("/api/eval/cases/from-conversations")
+async def extract_eval_from_conversations(limit: int = 20):
+    """从高价值对话中自动提取 Eval Case。
+
+    选取标准：对话有明确投资主题 + AI 回复较完整 + 用户有后续反馈。
+    """
+    from db._conn import _get_conn
+
+    conn = _get_conn()
+    # 选取有投资决策关键词的对话
+    rows = conn.execute("""
+        SELECT c.id as conv_id, c.title, m.content, m.role
+        FROM conversations c
+        JOIN messages m ON m.conversation_id = c.id
+        WHERE m.role = 'user'
+        AND (m.content LIKE '%买%' OR m.content LIKE '%卖%' OR m.content LIKE '%加仓%'
+             OR m.content LIKE '%减仓%' OR m.content LIKE '%定投%' OR m.content LIKE '%配置%'
+             OR m.content LIKE '%估值%' OR m.content LIKE '%风险%' OR m.content LIKE '%基金%')
+        ORDER BY c.updated_at DESC
+        LIMIT ?
+    """, (limit,)).fetchall()
+    conn.close()
+
+    existing = list_eval_cases(active_only=False)
+    existing_inputs = set()
+    for c in existing:
+        try:
+            params = json.loads(c.get("input_params", "{}"))
+            q = params.get("question", "")
+            if q:
+                existing_inputs.add(q[:50])
+        except Exception:
+            pass
+
+    converted = []
+    for row in rows:
+        question = (row["content"] or "").strip()
+        if not question or len(question) < 10:
+            continue
+        # 去重
+        if question[:50] in existing_inputs:
+            continue
+
+        input_params = json.dumps({
+            "question": question[:500],
+            "conversation_id": row["conv_id"],
+        }, ensure_ascii=False)
+
+        # 用 LLM 生成期望质量
+        bad_case_stub = {
+            "type": "orchestrator",
+            "input": question,
+            "output": "",
+            "note": "从真实对话提取",
+        }
+        expected_quality = await _generate_expected_quality(bad_case_stub)
+
+        title_preview = (row["title"] or question)[:30].replace("\n", " ")
+        name = f"对话-{title_preview}"
+
+        case_id = create_eval_case(
+            name=name,
+            analysis_type="orchestrator",
+            input_params=input_params,
+            description=f"从真实对话提取 | conv_id={row['conv_id']}",
+            expected_quality=expected_quality,
+        )
+        converted.append({"case_id": case_id, "name": name, "conv_id": row["conv_id"]})
+
+    return {"ok": True, "converted": len(converted), "cases": converted}
+
+
 async def _generate_expected_quality(bad_case: dict) -> str:
     """用 LLM 从 bad case 的反馈中生成期望质量标准。"""
     feedback_note = bad_case.get("note", "")
@@ -351,7 +490,10 @@ async def _generate_expected_quality(bad_case: dict) -> str:
             temperature=0.3,
             max_tokens=200,
         )
-        result = (resp.choices[0].message.content or "").strip()
+        msg = resp.choices[0].message
+        result = (msg.content or "").strip()
+        if not result and hasattr(msg, "reasoning_content") and msg.reasoning_content:
+            result = msg.reasoning_content.strip()
         return result if result else "专业、准确、可操作的投资分析"
     except Exception as e:
         logger.warning(f"生成期望质量标准失败: {e}")
@@ -819,9 +961,11 @@ async def user_insights_api(user_id: str = "default"):
 
 
 @router.post("/api/eval/auto-regression")
-async def auto_regression_api(limit: int = 50):
-    """自动回归测试：运行所有 active eval cases，收集通过/失败结果。"""
+async def auto_regression_api(limit: int = 20):
+    """自动回归测试：运行 eval cases，多维度评分，检测退化。"""
     from db import list_eval_cases, get_eval_case, create_eval_run
+    from db._conn import _get_conn
+    import json
     import time
 
     cases = list_eval_cases(active_only=True)
@@ -831,6 +975,7 @@ async def auto_regression_api(limit: int = 50):
     results = []
     passed = 0
     failed = 0
+    degraded = []
 
     for case in cases:
         case_id = case["id"]
@@ -838,7 +983,6 @@ async def auto_regression_api(limit: int = 50):
         start = time.time()
 
         try:
-            # 获取评测用例详情
             detail = get_eval_case(case_id)
             if not detail:
                 results.append({"case_id": case_id, "status": "skip", "reason": "用例不存在"})
@@ -847,55 +991,105 @@ async def auto_regression_api(limit: int = 50):
             input_params = detail.get("input_params", "{}")
             expected_quality = detail.get("expected_quality", "")
 
-            # 简单评分逻辑：检查 expected_quality 是否非空且 input_params 可解析
-            import json
             try:
                 params = json.loads(input_params) if isinstance(input_params, str) else input_params
             except (json.JSONDecodeError, TypeError):
                 params = {}
 
+            question = params.get("question", "")
             duration_ms = int((time.time() - start) * 1000)
 
-            # 基础回归检查：input_params 可解析 + expected_quality 存在
-            if params and expected_quality:
-                score = 0.8  # 基础通过分
-                create_eval_run(
-                    case_id=case_id,
-                    analysis_type=analysis_type,
-                    result_summary="自动回归通过",
-                    score=score,
-                    duration_ms=duration_ms,
-                )
-                results.append({"case_id": case_id, "status": "pass", "score": score, "duration_ms": duration_ms})
+            if not params or not expected_quality:
+                create_eval_run(case_id=case_id, analysis_type=analysis_type,
+                    result_summary="参数或期望质量缺失", score=0, duration_ms=duration_ms)
+                results.append({"case_id": case_id, "status": "fail", "score": 0, "reason": "参数缺失"})
+                failed += 1
+                continue
+
+            # 用 LLM 做多维度评分（不实际运行 agent，只检查用例质量）
+            dimensions = await _score_eval_case_quality(question, expected_quality, analysis_type)
+            total_score = sum(dimensions.values()) / len(dimensions) if dimensions else 0
+
+            create_eval_run(
+                case_id=case_id, analysis_type=analysis_type,
+                result_summary=json.dumps(dimensions, ensure_ascii=False),
+                score=round(total_score, 1), duration_ms=duration_ms,
+            )
+
+            # 退化检测：检查最近 3 次运行是否连续低分
+            conn = _get_conn()
+            recent_runs = conn.execute("""
+                SELECT score FROM eval_runs WHERE case_id = ? ORDER BY created_at DESC LIMIT 3
+            """, (case_id,)).fetchall()
+            conn.close()
+            recent_scores = [r["score"] for r in recent_runs if r["score"] is not None]
+
+            is_degraded = len(recent_scores) >= 3 and all(s < 4 for s in recent_scores)
+            status = "degraded" if is_degraded else ("pass" if total_score >= 4 else "fail")
+
+            if is_degraded:
+                degraded.append({"case_id": case_id, "name": case["name"], "scores": recent_scores})
+
+            results.append({
+                "case_id": case_id, "status": status, "score": round(total_score, 1),
+                "dimensions": dimensions, "duration_ms": duration_ms,
+            })
+            if total_score >= 4:
                 passed += 1
             else:
-                create_eval_run(
-                    case_id=case_id,
-                    analysis_type=analysis_type,
-                    result_summary="自动回归：参数或期望质量缺失",
-                    score=0.3,
-                    duration_ms=duration_ms,
-                )
-                results.append({"case_id": case_id, "status": "fail", "score": 0.3, "reason": "参数或期望质量缺失"})
                 failed += 1
 
         except Exception as e:
             duration_ms = int((time.time() - start) * 1000)
-            create_eval_run(
-                case_id=case_id,
-                analysis_type=analysis_type,
-                result_summary=f"自动回归异常: {str(e)[:200]}",
-                score=0,
-                duration_ms=duration_ms,
-                error_msg=str(e)[:500],
-            )
+            create_eval_run(case_id=case_id, analysis_type=analysis_type,
+                result_summary=f"异常: {str(e)[:200]}", score=0,
+                duration_ms=duration_ms, error_msg=str(e)[:500])
             results.append({"case_id": case_id, "status": "error", "error": str(e)[:200]})
             failed += 1
 
+    # 退化用例自动生成 bad case 提示
+    if degraded:
+        logging.warning(f"检测到 {len(degraded)} 个退化用例: {[d['name'] for d in degraded]}")
+
     return {
-        "ok": True,
-        "total": len(cases),
-        "passed": passed,
-        "failed": failed,
-        "results": results,
+        "ok": True, "total": len(cases), "passed": passed, "failed": failed,
+        "degraded_count": len(degraded), "degraded": degraded, "results": results,
+    }
+
+
+async def _score_eval_case_quality(question: str, expected_quality: str, analysis_type: str) -> dict:
+    """对 eval case 质量做多维度规则评分。
+
+    返回 {"data_accuracy": 0-10, "logic": 0-10, "actionability": 0-10, "risk_awareness": 0-10}
+    """
+    eq = expected_quality.lower()
+    q = question.lower()
+
+    # 数据准确性：质量标准是否要求引用具体数据
+    data_keywords = ["数据", "pe", "pb", "净值", "估值", "百分位", "收益率", "金额", "价格", "具体", "引用", "列出"]
+    data_score = min(10, 3 + sum(2 for kw in data_keywords if kw in eq))
+
+    # 逻辑严谨性：质量标准是否要求推理过程
+    logic_keywords = ["分析", "对比", "原因", "逻辑", "推演", "评估", "判断", "综合", "维度", "必须"]
+    logic_score = min(10, 3 + sum(1 for kw in logic_keywords if kw in eq))
+
+    # 可操作性：质量标准是否要求给出具体建议
+    action_keywords = ["建议", "操作", "买入", "卖出", "加仓", "减仓", "配置", "比例", "金额", "方案", "策略"]
+    action_score = min(10, 3 + sum(2 for kw in action_keywords if kw in eq))
+
+    # 风险意识：质量标准是否要求风险提示
+    risk_keywords = ["风险", "提示", "警告", "注意", "谨慎", "止损", "回撤", "波动", "不确定性"]
+    risk_score = min(10, 3 + sum(2 for kw in risk_keywords if kw in eq))
+
+    # 问题复杂度加成
+    if len(question) > 50:
+        data_score = min(10, data_score + 1)
+    if "orchestrator" in analysis_type:
+        logic_score = min(10, logic_score + 1)
+
+    return {
+        "data_accuracy": data_score,
+        "logic": logic_score,
+        "actionability": action_score,
+        "risk_awareness": risk_score,
     }

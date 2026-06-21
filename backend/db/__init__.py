@@ -145,6 +145,12 @@ from db.goal_buckets import (
     get_goal_bucket_summary,
 )
 
+# 回测结果持久化
+from db.backtest_results import (
+    init_backtest_tables, save_backtest, list_backtests,
+    get_backtest, delete_backtest, link_backtest_to_decision,
+)
+
 # 异步分析任务
 from db.async_tasks import (
     init_async_tasks_table, create_async_task, update_async_task,
@@ -872,6 +878,9 @@ def init_db():
 
     # ── 目标账户 / 资金桶表 ──────────────────────────────────
     init_goal_bucket_tables(conn)
+
+    # ── 回测结果持久化表 ──────────────────────────────────
+    init_backtest_tables(conn)
 
     conn.commit()
     conn.close()

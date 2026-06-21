@@ -3,6 +3,7 @@ import { ref, computed, onMounted, nextTick } from 'vue'
 import {
   listEvalCases, createEvalCase, updateEvalCase, deleteEvalCase, runEvalCase,
   listEvalRuns, getEvalRunDetail, getEvalStats, listAgents,
+  batchConvertBadCases, extractEvalFromConversations, runAutoRegression,
 } from '../api'
 import { useAsyncTask } from '../composables/useAsyncTask'
 import ConfirmDialog from './ConfirmDialog.vue'
@@ -102,6 +103,49 @@ async function loadRuns() {
 async function loadAll() {
   loading.value = true
   try { await Promise.all([loadStats(), loadCases(), loadRuns(), loadAgents()]) } finally { loading.value = false }
+}
+
+// ── 进化操作 ──
+const converting = ref(false)
+const extracting = ref(false)
+const regressing = ref(false)
+const regressionResult = ref(null)
+
+async function doBatchConvert() {
+  converting.value = true
+  try {
+    const { data } = await batchConvertBadCases()
+    showToast(`转化完成：新增 ${data.converted} 条，跳过 ${data.skipped} 条`, 'success')
+    await loadAll()
+  } catch (e) {
+    showToast('转化失败: ' + (e.response?.data?.detail || e.message), 'error')
+  } finally { converting.value = false }
+}
+
+async function doExtractConversations() {
+  extracting.value = true
+  try {
+    const { data } = await extractEvalFromConversations(20)
+    showToast(`从对话提取 ${data.converted} 条用例`, 'success')
+    await loadAll()
+  } catch (e) {
+    showToast('提取失败: ' + (e.response?.data?.detail || e.message), 'error')
+  } finally { extracting.value = false }
+}
+
+async function doAutoRegression() {
+  regressing.value = true
+  regressionResult.value = null
+  try {
+    const { data } = await runAutoRegression(20)
+    regressionResult.value = data
+    const msg = `回归完成：通过 ${data.passed}/${data.total}，失败 ${data.failed}` +
+      (data.degraded_count ? `，退化 ${data.degraded_count}` : '')
+    showToast(msg, data.failed > 0 ? 'warning' : 'success')
+    await loadAll()
+  } catch (e) {
+    showToast('回归失败: ' + (e.response?.data?.detail || e.message), 'error')
+  } finally { regressing.value = false }
 }
 
 function openCreate() {
@@ -262,6 +306,15 @@ onMounted(() => {
         <button class="btn-secondary" @click="loadAll" :disabled="loading">
           {{ loading ? '加载中...' : '🔄 刷新' }}
         </button>
+        <button class="btn-secondary" @click="doBatchConvert" :disabled="converting">
+          {{ converting ? '转化中...' : '🧲 BadCase→用例' }}
+        </button>
+        <button class="btn-secondary" @click="doExtractConversations" :disabled="extracting">
+          {{ extracting ? '提取中...' : '💬 对话→用例' }}
+        </button>
+        <button class="btn-primary" @click="doAutoRegression" :disabled="regressing">
+          {{ regressing ? '回归中...' : '🚀 自动回归' }}
+        </button>
       </div>
     </div>
 
@@ -284,6 +337,32 @@ onMounted(() => {
           {{ stats.avg_score !== null ? Number(stats.avg_score).toFixed(1) : '-' }}
         </span>
         <span class="stat-label">平均分 /10</span>
+      </div>
+    </div>
+
+    <!-- 回归结果 -->
+    <div v-if="regressionResult" class="regression-result">
+      <div class="regression-head">
+        <strong>🚀 回归结果</strong>
+        <span>通过 {{ regressionResult.passed }}/{{ regressionResult.total }}，
+          失败 {{ regressionResult.failed }}
+          <template v-if="regressionResult.degraded_count">，退化 {{ regressionResult.degraded_count }}</template>
+        </span>
+      </div>
+      <div v-if="regressionResult.degraded?.length" class="degraded-list">
+        <div v-for="d in regressionResult.degraded" :key="d.case_id" class="degraded-item">
+          ⚠️ {{ d.name }} — 近3次分数: {{ d.scores?.join(', ') }}
+        </div>
+      </div>
+      <div class="regression-details">
+        <div v-for="r in regressionResult.results" :key="r.case_id" class="regression-row">
+          <span :class="['regression-status', r.status]">{{ r.status }}</span>
+          <span class="regression-score">{{ r.score ?? '-' }}</span>
+          <span v-if="r.dimensions" class="regression-dims">
+            数据{{ r.dimensions.data_accuracy }} / 逻辑{{ r.dimensions.logic }} /
+            操作{{ r.dimensions.actionability }} / 风险{{ r.dimensions.risk_awareness }}
+          </span>
+        </div>
       </div>
     </div>
 
@@ -546,6 +625,64 @@ onMounted(() => {
   gap: 0.5rem;
   flex-shrink: 0;
 }
+
+/* 回归结果 */
+.regression-result {
+  background: var(--color-bg-card);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  padding: 1rem;
+  margin-bottom: 1.25rem;
+}
+.regression-head {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-bottom: 0.75rem;
+  font-size: 0.9rem;
+}
+.regression-head strong { color: var(--color-text-primary); }
+.regression-head span { color: var(--color-text-muted); font-size: 0.82rem; }
+.degraded-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 0.75rem;
+  padding: 0.5rem;
+  background: #fef2f2;
+  border-radius: var(--radius-md);
+}
+.dark .degraded-list { background: rgba(220,38,38,0.1); }
+.degraded-item { font-size: 0.82rem; color: #dc2626; }
+.regression-details {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 200px;
+  overflow-y: auto;
+}
+.regression-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.78rem;
+  padding: 4px 0;
+  border-bottom: 1px solid var(--color-border-light);
+}
+.regression-status {
+  padding: 2px 6px;
+  border-radius: var(--radius-sm);
+  font-weight: 600;
+  font-size: 0.72rem;
+  min-width: 50px;
+  text-align: center;
+}
+.regression-status.pass { background: #dcfce7; color: #16a34a; }
+.regression-status.fail { background: #fee2e2; color: #dc2626; }
+.regression-status.degraded { background: #fef3c7; color: #d97706; }
+.regression-status.error { background: #f3f4f6; color: #6b7280; }
+.regression-score { font-weight: 700; min-width: 30px; }
+.regression-dims { color: var(--color-text-muted); }
 
 /* Stats */
 .stats-bar {

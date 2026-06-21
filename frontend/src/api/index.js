@@ -890,6 +890,16 @@ export function submitLlmFeedback({ caller, input_summary = '', output_summary =
 
 // ── 理财决策中枢 API ──────────────────────────────────────
 
+/** 列出理财决策档案（可按状态过滤） */
+export function listDecisions(status = '', limit = 50) {
+  return api.get('/decisions', { params: { status, limit } })
+}
+
+/** 获取单条决策详情 */
+export function getDecision(decisionId) {
+  return api.get(`/decisions/${decisionId}`)
+}
+
 /** 获取今日行动 */
 export function listTodayDecisions(limit = 20) {
   return api.get('/decisions/today', { params: { limit } })
@@ -931,6 +941,11 @@ export function triggerPeerReview(decisionId, reviewerTypes = ['suitability', 'e
 /** 获取决策评审列表 */
 export function getPeerReviews(decisionId) {
   return api.get(`/decisions/${decisionId}/peer-reviews`)
+}
+
+/** 直接创建决策（不通过对话） */
+export function createDecision(payload) {
+  return api.post('/decisions/create', payload)
 }
 
 /** 获取质量评分概览 */
@@ -1120,6 +1135,11 @@ export function getFinanceDashboard() {
   return api.get('/finance-dashboard')
 }
 
+/** 获取投资趋势 */
+export function getFinanceTrend(months = 12) {
+  return api.get('/finance-dashboard/trend', { params: { months } })
+}
+
 /** 获取策略沙盒预设 */
 export function getBacktestPresets() {
   return api.get('/strategy-sandbox/presets')
@@ -1128,6 +1148,31 @@ export function getBacktestPresets() {
 /** 运行策略回测 */
 export function runBacktest(params) {
   return api.post('/strategy-sandbox/backtest', params)
+}
+
+/** 保存回测结果 */
+export function saveBacktest(payload) {
+  return api.post('/strategy-sandbox/save', payload)
+}
+
+/** 获取历史回测列表 */
+export function listBacktests(limit = 20) {
+  return api.get('/strategy-sandbox/history', { params: { limit } })
+}
+
+/** 获取单条回测详情 */
+export function getBacktestDetail(backtestId) {
+  return api.get(`/strategy-sandbox/${backtestId}`)
+}
+
+/** 删除回测记录 */
+export function deleteBacktest(backtestId) {
+  return api.delete(`/strategy-sandbox/${backtestId}`)
+}
+
+/** 关联回测到决策 */
+export function linkBacktestToDecision(backtestId, decisionId) {
+  return api.post(`/strategy-sandbox/${backtestId}/link-decision`, { decision_id: decisionId })
 }
 
 /** 获取调仓配置和策略预设 */
@@ -1475,6 +1520,21 @@ export function getEvalStats() {
 /** 从 Bad Case 转化为 Eval Case */
 export function createEvalFromBadCase(source, sourceId, name = '') {
   return api.post('/eval/cases/from-bad-case', { source, source_id: sourceId, name })
+}
+
+/** 批量将所有 Bad Case 转为 Eval Case */
+export function batchConvertBadCases() {
+  return api.post('/eval/cases/batch-from-bad-cases')
+}
+
+/** 从高价值对话提取 Eval Case */
+export function extractEvalFromConversations(limit = 20) {
+  return api.post(`/eval/cases/from-conversations?limit=${limit}`)
+}
+
+/** 运行自动回归测试 */
+export function runAutoRegression(limit = 20) {
+  return api.post(`/eval/auto-regression?limit=${limit}`)
 }
 
 // ── 对话质量评估 API ──────────────────────────────────────

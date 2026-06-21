@@ -1,6 +1,6 @@
 <script setup>
 import { computed, onMounted, ref } from 'vue'
-import { getAllocationDashboard, runPortfolioStressTest } from '../api'
+import { getAllocationDashboard, runPortfolioStressTest, createDecision } from '../api'
 import { useToast } from '../composables/useToast'
 import Icon from './ui/Icon.vue'
 
@@ -8,6 +8,7 @@ const { showToast } = useToast()
 
 const loading = ref(false)
 const dashboard = ref(null)
+const creatingDecision = ref(false)
 
 const rows = computed(() => dashboard.value?.allocation_rows || [])
 const suggestions = computed(() => dashboard.value?.suggestions || [])
@@ -16,6 +17,41 @@ const topDrift = computed(() => dashboard.value?.top_drift || null)
 
 function money(value) {
   return Number(value || 0).toLocaleString('zh-CN', { maximumFractionDigits: 0 })
+}
+
+// ── 创建决策 ──
+const actionToDecisionType = {
+  buy: 'add',
+  buy_index: 'add',
+  sell: 'reduce',
+  deploy_cash: 'add',
+  hold_cash: 'hold',
+}
+
+async function createDecisionFromSuggestion(item) {
+  if (creatingDecision.value) return
+  creatingDecision.value = true
+  try {
+    const decisionType = actionToDecisionType[item.action] || 'watch'
+    const targetName = item.fund_name || item.category || ''
+    const targetCode = item.fund_code || ''
+    const summary = `${item.action === 'sell' ? '减仓' : '配置'} ${targetName || item.category}`.trim()
+    const rationale = [item.reason, item.amount_range ? `建议金额: ${item.amount_range}` : ''].filter(Boolean).join('；')
+    await createDecision({
+      decision_type: decisionType,
+      target_type: targetCode ? 'fund' : 'portfolio',
+      target_code: targetCode,
+      target_name: targetName,
+      summary,
+      rationale,
+      source_type: 'allocation',
+    })
+    showToast('决策已创建，可在「理财决策 > 决策档案」中查看', 'success')
+  } catch (e) {
+    showToast('创建决策失败: ' + (e.response?.data?.detail || e.message), 'error')
+  } finally {
+    creatingDecision.value = false
+  }
 }
 
 function ratio(value) {
@@ -196,6 +232,16 @@ onMounted(load)
             <div v-if="item.guardrail_note" class="suggestion-guardrail">
               <Icon name="warning" size="13" />
               {{ item.guardrail_note }}
+            </div>
+            <div class="suggestion-actions">
+              <button
+                class="suggestion-decision-btn"
+                :disabled="creatingDecision"
+                @click="createDecisionFromSuggestion(item)"
+              >
+                <Icon name="clipboard-list" size="13" />
+                创建决策
+              </button>
             </div>
           </article>
         </aside>
@@ -487,6 +533,37 @@ onMounted(load)
   gap: 6px;
   color: var(--color-warning-text);
   font-size: 0.78rem;
+}
+
+.suggestion-actions {
+  margin-top: 10px;
+  display: flex;
+  gap: 6px;
+}
+
+.suggestion-decision-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px;
+  font-size: 0.76rem;
+  font-weight: 600;
+  color: var(--color-primary);
+  background: var(--color-primary-bg);
+  border: 1px solid var(--color-primary-border);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+
+.suggestion-decision-btn:hover:not(:disabled) {
+  background: var(--color-primary);
+  color: #fff;
+}
+
+.suggestion-decision-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 .empty-panel,

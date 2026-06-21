@@ -11,6 +11,7 @@ from db import (
     get_user_profile,
     list_goal_buckets,
     get_goal_bucket_summary,
+    _get_conn,
 )
 from allocation_dashboard import build_allocation_dashboard
 from stress_test import run_portfolio_stress_test
@@ -160,4 +161,55 @@ async def get_finance_dashboard(user_id: str = "default"):
         "allocation": allocation,
         "risk": risk,
         "health_warnings": health_warnings,
+    }
+
+
+@router.get("/api/finance-dashboard/trend")
+async def get_finance_trend(user_id: str = "default", months: int = 12):
+    """返回近期投资趋势（按月汇总投入和盈亏）。"""
+    conn = _get_conn()
+    rows = conn.execute("""
+        SELECT
+            strftime('%Y-%m', transaction_date) as month,
+            transaction_type,
+            SUM(amount) as total_amount
+        FROM portfolio_transactions
+        WHERE user_id = ?
+          AND status IN ('confirmed', 'pending')
+          AND transaction_date IS NOT NULL
+          AND transaction_date >= date('now', ?)
+        GROUP BY month, transaction_type
+        ORDER BY month
+    """, (user_id, f'-{months} months')).fetchall()
+
+    month_map = {}
+    for r in rows:
+        m = r["month"]
+        if m not in month_map:
+            month_map[m] = {"month": m, "buy": 0, "sell": 0, "net_invested": 0}
+        t = r["transaction_type"]
+        if t in ("buy", "subscribe"):
+            month_map[m]["buy"] += r["total_amount"] or 0
+        elif t in ("sell", "redeem"):
+            month_map[m]["sell"] += r["total_amount"] or 0
+
+    trend = []
+    cumulative = 0
+    for m in sorted(month_map.keys()):
+        item = month_map[m]
+        item["net_invested"] = round(item["buy"] - item["sell"], 2)
+        cumulative += item["net_invested"]
+        item["cumulative_invested"] = round(cumulative, 2)
+        trend.append(item)
+
+    # 获取当前净值用于对比
+    summary = get_portfolio_summary(user_id=user_id)
+    current_value = summary.get("total_assets", 0)
+    total_cost = summary.get("total_cost", 0)
+
+    return {
+        "trend": trend,
+        "current_value": round(current_value, 2),
+        "total_cost": round(total_cost, 2),
+        "total_return": round((current_value - total_cost) / total_cost, 4) if total_cost > 0 else 0,
     }

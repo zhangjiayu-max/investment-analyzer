@@ -23,7 +23,6 @@ from agent.orchestrator_optimizer import OrchestratorOptimizer, ParallelExecutor
 # 全局超时限制（秒）
 MAX_ORCHESTRATION_SECONDS = 1800  # 30 分钟
 from agent.feedback_learner import get_preference_context
-from agent.kyc import kyc_profile_to_text
 from agent.memory import (
     compress_history_semantic, build_user_memory_context,
     get_token_budget, compress_rag_token_aware, estimate_tokens,
@@ -997,6 +996,7 @@ def orchestrate(query: str, history: list, rag_context: str = "", cancel_event: 
         system_content += f"\n\n{preference_ctx}"
 
     # 注入 KYC 理财画像（让编排器基于用户画像做路由决策）
+    from agent.kyc import kyc_profile_to_text
     kyc_text = kyc_profile_to_text("default")
     if kyc_text:
         system_content += f"\n\n{kyc_text}"
@@ -1450,6 +1450,7 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
         system_content += f"\n\n{preference_ctx}"
 
     # 注入 KYC 理财画像（让编排器基于用户画像做路由决策）
+    from agent.kyc import kyc_profile_to_text
     kyc_text = kyc_profile_to_text("default")
     if kyc_text:
         system_content += f"\n\n{kyc_text}"

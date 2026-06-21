@@ -6,6 +6,8 @@ from pydantic import BaseModel
 from db import (
     build_decision_precheck,
     create_chat_decision_draft,
+    create_decision,
+    create_decision_action,
     get_decision,
     get_messages,
     list_due_decision_reviews,
@@ -39,6 +41,41 @@ class ChatDecisionDraftRequest(BaseModel):
     target_code: str = ""
     target_name: str = ""
     review_days: int = 30
+
+
+class CreateDecisionRequest(BaseModel):
+    """直接创建决策（不通过对话）。"""
+    decision_type: str = "watch"  # add/reduce/watch/rebalance/hold/sell
+    target_type: str = "fund"
+    target_code: str = ""
+    target_name: str = ""
+    summary: str
+    rationale: str = ""
+    review_days: int = 30
+    source_type: str = "manual"
+
+
+@router.post("/api/decisions/create")
+async def create_decision_api(req: CreateDecisionRequest):
+    """直接创建决策（不通过对话），用于配置偏离等场景一键创建。"""
+    from datetime import datetime, timedelta
+    review_at = (datetime.now() + timedelta(days=req.review_days)).strftime("%Y-%m-%d")
+    decision_id = create_decision(
+        source_type=req.source_type,
+        decision_type=req.decision_type,
+        target_type=req.target_type,
+        target_code=req.target_code,
+        target_name=req.target_name,
+        summary=req.summary,
+        rationale=req.rationale,
+        review_at=review_at,
+    )
+    # 尝试预检查
+    try:
+        precheck = build_decision_precheck(decision_id)
+    except Exception:
+        precheck = {"exists": True, "error": "precheck_failed"}
+    return {"ok": True, "id": decision_id, "item": get_decision(decision_id), "precheck": precheck}
 
 
 @router.get("/api/decisions")
