@@ -45,6 +45,15 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request, exc):
+    """全局异常处理 — 返回 JSON 而非 HTML 500。"""
+    import traceback
+    logger.error(f"Unhandled error: {exc}", exc_info=True)
+    from fastapi.responses import JSONResponse
+    return JSONResponse(status_code=500, content={"detail": str(exc)})
+
 # ── 路由注册 ─────────────────────────────────────
 
 from routers.valuation import router as valuation_router, index_info_router  # /api/valuation/* + /api/index-info/*
@@ -834,6 +843,16 @@ async def _serve_favicon():
 @app.get("/icons.svg", include_in_schema=False)
 async def _serve_icons():
     return FileResponse(str(STATIC_DIR / "icons.svg"))
+
+
+@app.get("/sw.js", include_in_schema=False)
+async def _serve_sw():
+    return FileResponse(str(STATIC_DIR / "sw.js"), media_type="application/javascript")
+
+
+@app.get("/manifest.json", include_in_schema=False)
+async def _serve_manifest():
+    return FileResponse(str(STATIC_DIR / "manifest.json"), media_type="application/manifest+json")
 
 
 @app.get("/api/finance/quote-bar")

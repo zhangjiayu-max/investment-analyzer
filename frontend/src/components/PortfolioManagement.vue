@@ -3776,7 +3776,7 @@ function txDisplayAmount(tx) {
         </div>
       </div>
 
-      <table v-else class="data-table">
+      <table v-if="holdings.length > 0 && !loading" class="data-table">
         <thead>
           <tr>
             <th>基金名称</th>
