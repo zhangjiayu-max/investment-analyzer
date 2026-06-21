@@ -1356,7 +1356,19 @@ async function runDeepDiveMode() {
   modeRecordId.value = null
   aiTokenUsage.value = 0
   try {
-    const { data } = await runDeepDiveAnalysis(deepDiveSelectedHolding.value)
+    const val = deepDiveSelectedHolding.value
+    let data
+    if (val.startsWith('w_')) {
+      // 关注列表基金 — 使用指定基金分析接口
+      const fundCode = val.slice(2)
+      const res = await runFundAnalysis(fundCode)
+      data = res.data
+    } else {
+      // 持仓基金 — 使用深度分析接口
+      const holdingId = parseInt(val.slice(2))
+      const res = await runDeepDiveAnalysis(holdingId)
+      data = res.data
+    }
     const recordId = data.id
     modeRecordId.value = recordId
     pollAnalysisStatus(recordId, (status) => {
@@ -3138,7 +3150,12 @@ function txDisplayAmount(tx) {
             <div class="ai-mode-form">
               <select v-model="deepDiveSelectedHolding" class="input-field" style="flex:1">
                 <option value="">请选择基金</option>
-                <option v-for="h in holdings" :key="h.id" :value="h.id">{{ h.fund_name }} ({{ h.fund_code }})</option>
+                <optgroup label="📦 我的持仓">
+                  <option v-for="h in holdings" :key="h.id" :value="'h_'+h.id">{{ h.fund_name }} ({{ h.fund_code }})</option>
+                </optgroup>
+                <optgroup v-if="watchlistItems.length" label="⭐ 我的关注">
+                  <option v-for="w in watchlistItems" :key="w.id" :value="'w_'+w.fund_code">{{ w.fund_name }} ({{ w.fund_code }})</option>
+                </optgroup>
               </select>
               <AIActionButton
                 label="深度分析"
@@ -3223,6 +3240,10 @@ function txDisplayAmount(tx) {
           <div v-if="aiMode === 'fund-analysis'" class="ai-mode-content">
             <div class="ai-mode-desc">输入任意基金代码，AI 将结合您的持仓和当前估值数据，分析是否适合建仓、加仓或减仓。</div>
             <div class="ai-mode-form">
+              <select v-if="watchlistItems.length" class="input-field" style="flex:1" @change="fundAnalysisCode = $event.target.value">
+                <option value="">⭐ 从关注列表选择</option>
+                <option v-for="w in watchlistItems" :key="w.id" :value="w.fund_code">{{ w.fund_name }} ({{ w.fund_code }})</option>
+              </select>
               <input v-model="fundAnalysisCode" type="text" class="input-field" style="flex:1" placeholder="输入基金代码，如 161725" />
               <AIActionButton
                 label="开始分析"
