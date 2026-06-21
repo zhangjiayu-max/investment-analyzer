@@ -3153,10 +3153,10 @@ function txDisplayAmount(tx) {
               <select v-model="deepDiveSelectedHolding" class="input-field" style="flex:1">
                 <option value="">请选择基金</option>
                 <optgroup label="📦 我的持仓">
-                  <option v-for="h in holdings" :key="h.id" :value="'h_'+h.id">{{ h.fund_name }} ({{ h.fund_code }})</option>
+                  <option v-for="h in holdings.filter(h => (h.shares || 0) > 0)" :key="h.id" :value="'h_'+h.id">{{ h.fund_name }} ({{ h.fund_code }})</option>
                 </optgroup>
-                <optgroup v-if="watchlistItems.length" label="⭐ 我的关注">
-                  <option v-for="w in watchlistItems" :key="w.id" :value="'w_'+w.fund_code">{{ w.fund_name }} ({{ w.fund_code }})</option>
+                <optgroup v-if="watchlistItems.filter(w => w.status !== 'bought').length" label="⭐ 我的关注">
+                  <option v-for="w in watchlistItems.filter(w => w.status !== 'bought')" :key="w.id" :value="'w_'+w.fund_code">{{ w.fund_name }} ({{ w.fund_code }})</option>
                 </optgroup>
               </select>
               <AIActionButton
@@ -3242,9 +3242,9 @@ function txDisplayAmount(tx) {
           <div v-if="aiMode === 'fund-analysis'" class="ai-mode-content">
             <div class="ai-mode-desc">输入任意基金代码，AI 将结合您的持仓和当前估值数据，分析是否适合建仓、加仓或减仓。</div>
             <div class="ai-mode-form">
-              <select v-if="watchlistItems.length" class="input-field" style="flex:1" @change="fundAnalysisCode = $event.target.value">
+              <select v-if="watchlistItems.filter(w => w.status !== 'bought').length" class="input-field" style="flex:1" @change="fundAnalysisCode = $event.target.value">
                 <option value="">⭐ 从关注列表选择</option>
-                <option v-for="w in watchlistItems" :key="w.id" :value="w.fund_code">{{ w.fund_name }} ({{ w.fund_code }})</option>
+                <option v-for="w in watchlistItems.filter(w => w.status !== 'bought')" :key="w.id" :value="w.fund_code">{{ w.fund_name }} ({{ w.fund_code }})</option>
               </select>
               <input v-model="fundAnalysisCode" type="text" class="input-field" style="flex:1" placeholder="输入基金代码，如 161725" />
               <AIActionButton
