@@ -7,22 +7,22 @@ import './interceptors'
 
 /** 创建任务（提交链接） */
 export function createTask(url) {
-  return api.post('/task/create', { url })
+  return api.post('/tasks', { url })
 }
 
 /** 任务列表 */
 export function listTasks(limit = 50) {
-  return api.get('/task/list', { params: { limit } })
+  return api.get('/tasks', { params: { limit } })
 }
 
 /** 任务详情 */
 export function getTask(taskId) {
-  return api.get(`/task/${taskId}`)
+  return api.get(`/tasks/${taskId}`)
 }
 
 /** 删除任务 */
 export function deleteTask(taskId) {
-  return api.delete(`/task/${taskId}`)
+  return api.delete(`/tasks/${taskId}`)
 }
 
 /** 获取任务图片 */
@@ -257,46 +257,46 @@ export function getReanalyzeStatus(recordId) {
   return api.get(`/records/${recordId}/reanalyze-status`)
 }
 
-// ── Agent API（新路径: /api/agent/*）─────────────────────────────────────
+// ── Agent API（/api/agents/*）─────────────────────────────────────
 
 /** 列出所有 Agent */
 export function listAgents() {
-  return api.get('/agent/list')
+  return api.get('/agents')
 }
 
 /** 创建自定义 Agent */
 export function createAgent(data) {
-  return api.post('/agent/create', data)
+  return api.post('/agents', data)
 }
 
 /** 获取单个 Agent 详情 */
 export function getAgent(id) {
-  return api.get(`/agent/${id}`)
+  return api.get(`/agents/${id}`)
 }
 
 /** 更新 Agent */
 export function updateAgent(id, data) {
-  return api.put(`/agent/${id}`, data)
+  return api.put(`/agents/${id}`, data)
 }
 
 /** 删除自定义 Agent */
 export function deleteAgent(id) {
-  return api.delete(`/agent/${id}`)
+  return api.delete(`/agents/${id}`)
 }
 
 /** AI 生成/优化 Agent 提示词 */
 export function generateAgentPrompt(data) {
-  return api.post('/agent/generate-prompt', data, { timeout: 120000 })
+  return api.post('/agents/generate-prompt', data, { timeout: 120000 })
 }
 
 /** 获取 Agent 提示词版本历史 */
 export function listAgentVersions(agentId) {
-  return api.get(`/agent/${agentId}/versions`)
+  return api.get(`/agents/${agentId}/versions`)
 }
 
 /** 回滚 Agent 提示词到指定版本 */
 export function rollbackAgentPrompt(agentId, versionId) {
-  return api.post(`/agent/${agentId}/rollback/${versionId}`)
+  return api.post(`/agents/${agentId}/rollback/${versionId}`)
 }
 
 /** 获取分析 Agent 提示词版本历史 */
@@ -314,31 +314,31 @@ export function getAgentRegressionResult(agentId, agentType = 'conversation') {
   return api.get(`/agent/${agentId}/regression`, { params: { agent_type: agentType } })
 }
 
-// ── 对话 API（新路径: /api/conversation/*）─────────────────────────────────────
+// ── 对话 API（/api/conversations/*）─────────────────────────────────────
 
 /** 对话列表 */
 export function listConversations() {
-  return api.get('/conversation/list')
+  return api.get('/conversations')
 }
 
 /** 创建对话 */
 export function createConversation(data) {
-  return api.post('/conversation/create', data)
+  return api.post('/conversations', data)
 }
 
 /** 删除对话 */
 export function deleteConversation(id) {
-  return api.delete(`/conversation/${id}`)
+  return api.delete(`/conversations/${id}`)
 }
 
 /** 获取对话消息历史 */
 export function getMessages(convId, limit = 50) {
-  return api.get(`/conversation/${convId}/messages`, { params: { limit } })
+  return api.get(`/conversations/${convId}/messages`, { params: { limit } })
 }
 
 /** 发送消息 */
 export function sendMessage(convId, content) {
-  return api.post(`/conversation/${convId}/messages`, { content }, { timeout: 120000 })
+  return api.post(`/conversations/${convId}/messages`, { content }, { timeout: 120000 })
 }
 
 /**
