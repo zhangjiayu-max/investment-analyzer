@@ -650,7 +650,31 @@ _STOPWORDS = {
     "如何", "什么", "多少", "为什么", "怎样", "哪个", "哪些", "是否",
     "看看", "帮忙", "帮我", "请问", "想问", "情况", "那", "个", "一", "人",
     "很", "没有", "点", "想", "入手", "帮", "问", "数据",
+    # 口语虚词 — 长句中常见但无检索价值
+    "很多", "看到", "或者", "一些", "一直", "但是", "而且", "提出",
+    "说什么", "也没有", "发现", "感觉", "觉得", "好像", "可能",
+    "其实", "不过", "然后", "因为", "所以", "如果", "虽然",
+    "已经", "还是", "这样", "那种", "比如",
+    "外", "网", "发",
 }
+
+
+# 投资/财经领域核心术语 — 长查询时优先保留这些词
+_FINANCE_CORE_TERMS = {
+    "消费", "政策", "利好", "振兴", "内需", "零售", "通胀", "通缩",
+    "降息", "加息", "降准", "GDP", "CPI", "PPI", "PMI", "LPR",
+    "股市", "债市", "基金", "股票", "指数", "估值", "PE", "PB",
+    "ROE", "ROA", "ETF", "定投", " rebalance", "再平衡",
+    "医药", "科技", "新能源", "半导体", "军工", "房地产", "银行",
+    "白酒", "食品", "饮料", "家电", "旅游", "教育",
+    "红利", "质量", "价值", "成长", "沪深300", "中证500",
+    "牛市", "熊市", "震荡", "反弹", "回调", "涨停", "跌停",
+    "持仓", "仓位", "止损", "止盈", "加仓", "减仓",
+    "宏观经济", "微观", "行业", "板块", "赛道", "龙头",
+}
+
+# 长查询阈值：超过此数量时启用核心词提取策略
+_LONG_QUERY_TOKEN_THRESHOLD = 8
 
 
 def _build_fts_query(query: str) -> str:
@@ -660,6 +684,7 @@ def _build_fts_query(query: str) -> str:
     1. 对中文多字词使用 NEAR 查询，允许词之间有间隔
     2. 保留核心投资术语的完整性
     3. 对长句提取关键短语
+    4. 长查询（>8 token）时只保留核心术语，避免噪音词淹没匹配
     """
     tokens = _tokenize(query).split()
     # 先过滤停用词，再清洗特殊字符（避免引号影响停用词匹配）
@@ -672,12 +697,24 @@ def _build_fts_query(query: str) -> str:
     if not multi_char and not single_char:
         return ""
 
-    # 优先用 AND 连接多字关键词（精确匹配），单字关键词作为补充用 OR
+    # 长查询策略：当多字词超过阈值时，优先保留投资核心术语
+    # 避免口语长句中 20+ 个词用 AND 连接导致零匹配
+    if len(multi_char) > _LONG_QUERY_TOKEN_THRESHOLD:
+        core_terms = [t for t in multi_char if t.strip('"') in _FINANCE_CORE_TERMS]
+        if core_terms:
+            # 核心术语用 AND，其余多字词用 OR 作为辅助
+            other_multi = [t for t in multi_char if t not in core_terms]
+            core = " AND ".join(core_terms)
+            if other_multi:
+                # 最多取前5个辅助词，避免查询过长
+                aux = " OR ".join(other_multi[:5])
+                return f"({core}) OR ({aux})"
+            return core
+
+    # 短查询：优先用 AND 连接多字关键词（精确匹配），单字关键词作为补充用 OR
     if multi_char:
-        # 改进：使用 AND 连接，允许词之间有间隔
         core = " AND ".join(multi_char)
         if single_char:
-            # 核心词 AND，辅助单字 OR
             return f"({core}) OR ({' OR '.join(single_char)})"
         return core
     return " OR ".join(single_char)

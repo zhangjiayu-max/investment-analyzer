@@ -28,7 +28,9 @@ import {
   refreshWatchlistNavs as refreshWatchlistNavsApi, markWatchlistBought as markWatchlistBoughtApi,
   lookupWatchlistFund as lookupWatchlistFundApi,
   exportPortfolioCsv, importPortfolioCsv,
+  getPortfolioManagerOverview,
 } from '../api'
+import { useToast } from '../composables/useToast'
 import ConfirmDialog from './ConfirmDialog.vue'
 import PieChart from './charts/PieChart.vue'
 import LineChart from './charts/LineChart.vue'
@@ -851,6 +853,11 @@ const diverAiLoading = ref(false)
 const diverAiResult = ref('')
 const diverAiRecordId = ref(null)
 
+// ── 基金经理 ──
+const managerData = ref(null)
+const managerLoading = ref(false)
+const managerChanges = ref([])
+
 // ── 费率侵蚀计算器 ──
 const feeRate = ref(1.5)
 const feeYears = ref(30)
@@ -1186,6 +1193,24 @@ function switchAnalysisTab(tab) {
     loadRebalanceConfig()
   } else if (tab === 'watchlist') {
     loadWatchlist()
+  } else if (tab === 'managers') {
+    loadManagers()
+  }
+}
+
+async function loadManagers() {
+  managerLoading.value = true
+  try {
+    const { data } = await getPortfolioManagerOverview()
+    managerData.value = data.managers || []
+    managerChanges.value = data.changes || []
+    if (data.changes?.length) {
+      showToast(`检测到 ${data.changes.length} 位基金经理变更！`, 'warning')
+    }
+  } catch (e) {
+    console.error('加载经理信息失败:', e)
+  } finally {
+    managerLoading.value = false
   }
 }
 
@@ -2602,6 +2627,12 @@ function txDisplayAmount(tx) {
         <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11.049 2.927c.3-.921 1.603-.921 1.902 0l1.519 4.674a1 1 0 00.95.69h4.915c.969 0 1.371 1.24.588 1.81l-3.976 2.888a1 1 0 00-.363 1.118l1.518 4.674c.3.922-.755 1.688-1.538 1.118l-3.976-2.888a1 1 0 00-1.176 0l-3.976 2.888c-.783.57-1.838-.197-1.538-1.118l1.518-4.674a1 1 0 00-.363-1.118l-3.976-2.888c-.784-.57-.38-1.81.588-1.81h4.914a1 1 0 00.951-.69l1.519-4.674z"/></svg>
         <span class="term-with-tip">关注列表<span class="term-tip">管理看好的基金，设定目标价和估值百分位，择机买入</span></span>
       </button>
+      <button :class="['analysis-tab', { active: activeAnalysisTab === 'managers' }]" @click="switchAnalysisTab('managers')">
+        <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z"/></svg>
+        <span class="term-with-tip">基金经理<span class="term-tip">查看持仓基金的经理信息、从业年限、管理规模，检测经理变更</span>
+          <span v-if="managerChanges.length" class="tab-badge">{{ managerChanges.length }}</span>
+        </span>
+      </button>
     </div>
 
     <!-- Analysis Panel Content -->
@@ -3489,8 +3520,69 @@ function txDisplayAmount(tx) {
           </table>
         </div>
       </template>
+
+      <!-- 基金经理 -->
+      <template v-if="activeAnalysisTab === 'managers'">
+        <div class="analysis-panel-header">
+          <h3>基金经理概览</h3>
+          <div class="analysis-panel-actions">
+            <button class="btn-secondary btn-sm" @click="loadManagers" :disabled="managerLoading">
+              {{ managerLoading ? '加载中...' : '刷新' }}
+            </button>
+          </div>
+        </div>
+
+        <div v-if="managerLoading" class="loading-state"><div class="spinner"></div></div>
+
+        <div v-else-if="managerChanges.length" class="manager-changes">
+          <div class="changes-header">
+            <svg width="16" height="16" fill="none" stroke="#dc2626" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L4.082 16.5c-.77.833.192 2.5 1.732 2.5z"/></svg>
+            <strong>⚠️ 检测到基金经理变更</strong>
+          </div>
+          <div v-for="c in managerChanges" :key="c.fund_code" class="change-item">
+            <span class="change-fund">{{ c.fund_code }}</span>
+            <span class="change-arrow">{{ c.old_manager }} → {{ c.new_manager }}</span>
+            <span class="change-company">{{ c.company }}</span>
+          </div>
+        </div>
+
+        <div v-else-if="managerData?.length" class="analysis-panel-body">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>基金</th>
+                <th>基金经理</th>
+                <th>公司</th>
+                <th>从业年限</th>
+                <th>管理规模</th>
+                <th>最佳回报</th>
+                <th>类型</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="m in managerData" :key="m.fund_code">
+                <td>
+                  <div class="fund-cell">
+                    <span class="fund-code">{{ m.fund_code }}</span>
+                    <span class="fund-name">{{ m.fund_name?.slice(0, 8) }}</span>
+                  </div>
+                </td>
+                <td><strong>{{ m.manager_name || '-' }}</strong></td>
+                <td>{{ m.company || '-' }}</td>
+                <td>{{ m.career_years ? m.career_years + '年' : '-' }}</td>
+                <td>{{ m.total_scale ? (m.total_scale).toFixed(0) + '亿' : '-' }}</td>
+                <td :class="m.best_return > 100 ? 'positive' : ''">{{ m.best_return ? m.best_return + '%' : '-' }}</td>
+                <td><small>{{ m.fund_type || '-' }}</small></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div v-else class="empty-state" style="padding:2rem;text-align:center">
+          <p style="color:var(--color-muted)">暂无持仓或经理信息加载失败</p>
+        </div>
+      </template>
     </div>
-    <!-- Summary Cards -->
     <div v-if="activeAnalysisTab === 'holdings'" class="summary-cards">
       <div class="summary-card">
         <div class="summary-label">持仓数量</div>
@@ -4833,6 +4925,66 @@ function txDisplayAmount(tx) {
 .quote-fade-leave-to {
   opacity: 0;
   transform: translateY(-8px);
+}
+
+/* 基金经理 */
+.manager-changes {
+  padding: 1rem;
+  background: #fef2f2;
+  border: 1px solid #fecaca;
+  border-radius: var(--radius-md);
+  margin-bottom: 1rem;
+}
+.dark .manager-changes {
+  background: rgba(220, 38, 38, 0.08);
+  border-color: rgba(220, 38, 38, 0.2);
+}
+.changes-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 0.75rem;
+  color: #dc2626;
+  font-size: 0.9rem;
+}
+.change-item {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 6px 0;
+  font-size: 0.85rem;
+  border-bottom: 1px solid var(--color-border-light);
+}
+.change-fund {
+  font-weight: 600;
+  color: var(--color-text-primary);
+  min-width: 60px;
+}
+.change-arrow {
+  color: #dc2626;
+  font-weight: 600;
+}
+.change-company {
+  color: var(--color-text-muted);
+  font-size: 0.78rem;
+}
+.fund-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.fund-code { font-weight: 600; font-size: 0.82rem; }
+.fund-name { font-size: 0.72rem; color: var(--color-text-muted); }
+.positive { color: var(--color-success) !important; }
+.tab-badge {
+  display: inline-block;
+  padding: 1px 6px;
+  background: #dc2626;
+  color: #fff;
+  border-radius: 999px;
+  font-size: 0.65rem;
+  font-weight: 700;
+  margin-left: 4px;
 }
 
 /* Summary Cards */

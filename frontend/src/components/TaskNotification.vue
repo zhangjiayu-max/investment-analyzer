@@ -27,14 +27,23 @@
 </template>
 
 <script setup>
-defineProps({
+import { watch } from 'vue'
+
+const props = defineProps({
   task: {
     type: Object,
     default: null,
   },
 })
 
-defineEmits(['view', 'close'])
+const emit = defineEmits(['view', 'close'])
+
+// 任务失败时 5 秒后自动关闭
+watch(() => props.task, (newTask) => {
+  if (newTask && newTask.status === 'failed') {
+    setTimeout(() => emit('close'), 5000)
+  }
+}, { immediate: true })
 </script>
 
 <style scoped>

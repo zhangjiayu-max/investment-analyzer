@@ -72,6 +72,7 @@ from routers.search import router as search_router                     # /api/se
 from routers.decisions import router as decisions_router               # /api/decisions/*
 from routers.finance_dashboard import router as finance_dashboard_router  # /api/finance-dashboard
 from routers.strategy_sandbox import router as strategy_sandbox_router  # /api/strategy-sandbox
+from routers.fund_manager import router as fund_manager_router  # /api/fund-manager
 
 # 注册路由
 app.include_router(valuation_router)
@@ -100,6 +101,7 @@ app.include_router(search_router)
 app.include_router(decisions_router)
 app.include_router(finance_dashboard_router)
 app.include_router(strategy_sandbox_router)
+app.include_router(fund_manager_router)
 
 # 静态文件目录
 for _d in (STATIC_DIR, IMAGES_DIR, OUTPUT_DIR, UPLOADS_DIR, DD_IMAGES_DIR, VALUATION_IMAGES_DIR):

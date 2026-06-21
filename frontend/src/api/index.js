@@ -1116,6 +1116,16 @@ export function runPortfolioStressTest(scenario = 'market_drop_20', customShocks
   return api.post('/portfolio/stress-test', { scenario, custom_shocks: customShocks })
 }
 
+/** 获取持仓基金经理概览 + 变更检测 */
+export function getPortfolioManagerOverview() {
+  return api.get('/fund-manager/portfolio/overview')
+}
+
+/** 获取指定基金的经理信息 */
+export function getFundManager(fundCode) {
+  return api.get(`/fund-manager/${fundCode}`)
+}
+
 /** 导出持仓为 CSV */
 export function exportPortfolioCsv() {
   return api.get('/portfolio/export-csv', { responseType: 'blob' })

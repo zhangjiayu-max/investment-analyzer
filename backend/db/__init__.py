@@ -441,6 +441,8 @@ def init_db():
     _add_column_if_not_exists(conn, "portfolio_holdings", "today_profit", "REAL DEFAULT 0")
     _add_column_if_not_exists(conn, "portfolio_holdings", "fund_category", "TEXT DEFAULT ''")
     _add_column_if_not_exists(conn, "portfolio_holdings", "has_base_position", "INTEGER DEFAULT 0")
+    _add_column_if_not_exists(conn, "portfolio_holdings", "manager_name", "TEXT DEFAULT ''")
+    _add_column_if_not_exists(conn, "portfolio_holdings", "manager_company", "TEXT DEFAULT ''")
     _add_column_if_not_exists(conn, "portfolio_holdings", "last_buy_price", "REAL")
     _add_column_if_not_exists(conn, "portfolio_holdings", "last_buy_date", "TEXT")
     # 回填已有持仓的 fund_category
