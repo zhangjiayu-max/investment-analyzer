@@ -48,8 +48,7 @@ watch(() => props.task, (newTask) => {
     autoCloseTimer = null
   }
   if (newTask) {
-    const delay = newTask.status === 'completed' ? 8000 : 5000
-    autoCloseTimer = setTimeout(() => emit('close'), delay)
+    autoCloseTimer = setTimeout(() => emit('close'), 5000)
   }
 }, { immediate: true })
 </script>
