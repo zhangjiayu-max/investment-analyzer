@@ -17,6 +17,7 @@ from db import (
     update_decision_action_status,
     update_decision_status,
 )
+from db.decisions import match_pending_decisions
 
 router = APIRouter(tags=["decisions"])
 
@@ -76,6 +77,16 @@ async def create_decision_api(req: CreateDecisionRequest):
     except Exception:
         precheck = {"exists": True, "error": "precheck_failed"}
     return {"ok": True, "id": decision_id, "item": get_decision(decision_id), "precheck": precheck}
+
+
+@router.get("/api/decisions/execution-status")
+async def get_execution_status(user_id: str = "default"):
+    """返回待执行决策的执行状态——自动检测持仓变化匹配。"""
+    matches = match_pending_decisions(user_id)
+    return {
+        "matches": matches,
+        "total_pending": len(matches),
+    }
 
 
 @router.get("/api/decisions")
@@ -247,3 +258,83 @@ async def list_peer_reviews_api(decision_id: int):
 
     from db import list_peer_reviews
     return {"items": list_peer_reviews(decision_id)}
+
+
+@router.get("/api/decisions/{decision_id}/timeline")
+async def get_decision_timeline(decision_id: int):
+    """返回决策的完整时间线（创建→状态变更→行动完成→复盘）。"""
+    from db._conn import _get_conn
+
+    decision = get_decision(decision_id)
+    if not decision:
+        raise HTTPException(404, "决策不存在")
+
+    conn = _get_conn()
+    try:
+        timeline = []
+
+        # 1. 决策创建事件
+        timeline.append({
+            "time": decision.get("created_at", ""),
+            "event_type": "created",
+            "label": "决策创建",
+            "detail": decision.get("summary", ""),
+            "icon": "📝",
+        })
+
+        # 2. 状态变更历史
+        status = decision.get("status", "proposed")
+        status_labels = {
+            "accepted": "决策被接受",
+            "rejected": "决策被拒绝",
+            "deferred": "决策被暂缓",
+            "executed": "决策已执行",
+            "expired": "决策已过期",
+            "reviewed": "决策已复盘",
+        }
+        if status in status_labels and status != "proposed":
+            timeline.append({
+                "time": decision.get("updated_at", ""),
+                "event_type": f"status_{status}",
+                "label": status_labels[status],
+                "detail": decision.get("user_note", ""),
+                "icon": "✅" if status in ("accepted", "executed") else "🔄",
+            })
+
+        # 3. 行动项完成事件
+        actions = decision.get("actions", [])
+        for action in actions:
+            if action.get("status") == "done" and action.get("completed_at"):
+                timeline.append({
+                    "time": action["completed_at"],
+                    "event_type": "action_done",
+                    "label": f"行动完成：{action.get('title', '')}",
+                    "detail": action.get("params_json", {}),
+                    "icon": "🚀",
+                })
+
+        # 4. 复盘事件
+        review = decision.get("review", {})
+        if review and review.get("created_at"):
+            outcome_map = {"helpful": "有帮助", "neutral": "一般", "unhelpful": "无帮助"}
+            timeline.append({
+                "time": review["created_at"],
+                "event_type": "reviewed",
+                "label": f"复盘完成 — {outcome_map.get(review.get('outcome', ''), review.get('outcome', ''))}",
+                "detail": review.get("result_note", ""),
+                "lesson": review.get("lesson", ""),
+                "profit_change": review.get("profit_change"),
+                "icon": "📊",
+            })
+
+        # 按时间排序
+        timeline.sort(key=lambda x: x.get("time", ""))
+
+        return {
+            "decision_id": decision_id,
+            "summary": decision.get("summary", ""),
+            "status": status,
+            "timeline": timeline,
+        }
+    finally:
+        conn.close()

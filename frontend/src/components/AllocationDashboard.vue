@@ -187,6 +187,7 @@ onMounted(load)
             <h3>配置偏离</h3>
             <span v-if="topDrift">最大偏离：{{ topDrift.label }}</span>
           </div>
+          <!-- 桌面端表格 -->
           <div class="allocation-table">
             <div class="table-row table-head">
               <span>资产类别</span>
@@ -211,6 +212,32 @@ onMounted(load)
               <div :class="['drift-pill', driftClass(row)]">{{ driftText(row) }}</div>
               <div>
                 <strong>¥{{ money(row.drift_amount) }}</strong>
+              </div>
+            </div>
+          </div>
+
+          <!-- 移动端卡片式布局 -->
+          <div class="allocation-cards">
+            <div v-for="row in rows" :key="row.category + '-card'" class="alloc-card-item">
+              <div class="alloc-card-head">
+                <strong>{{ row.label }}</strong>
+                <span :class="['drift-pill', driftClass(row)]">{{ driftText(row) }}</span>
+              </div>
+              <div class="alloc-card-grid">
+                <div class="alloc-card-metric">
+                  <span>当前</span>
+                  <strong>{{ ratio(row.current_ratio) }}</strong>
+                  <small>¥{{ money(row.current_amount) }}</small>
+                </div>
+                <div class="alloc-card-metric">
+                  <span>目标</span>
+                  <strong>{{ ratio(row.target_ratio) }}</strong>
+                  <small>¥{{ money(row.target_amount) }}</small>
+                </div>
+                <div class="alloc-card-metric">
+                  <span>金额差</span>
+                  <strong>¥{{ money(row.drift_amount) }}</strong>
+                </div>
               </div>
             </div>
           </div>
@@ -587,12 +614,59 @@ onMounted(load)
   .allocation-layout { grid-template-columns: 1fr; }
 }
 
+/* 移动端卡片式配置表 */
+.allocation-cards {
+  display: none;
+  flex-direction: column;
+  gap: 8px;
+}
+.alloc-card-item {
+  border: 1px solid var(--color-border-light);
+  border-radius: var(--radius-md);
+  padding: 12px;
+  background: var(--color-bg-input);
+}
+.alloc-card-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 10px;
+}
+.alloc-card-head strong {
+  color: var(--color-text-primary);
+  font-size: 0.95rem;
+}
+.alloc-card-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+}
+.alloc-card-metric {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.alloc-card-metric span {
+  color: var(--color-text-muted);
+  font-size: 0.72rem;
+}
+.alloc-card-metric strong {
+  color: var(--color-text-primary);
+  font-size: 0.88rem;
+}
+.alloc-card-metric small {
+  color: var(--color-text-muted);
+  font-size: 0.72rem;
+}
+
 @media (max-width: 760px) {
   .allocation-page { padding: var(--space-4); }
   .page-head { flex-direction: column; }
   .metric-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .metric-cell:nth-child(2) { border-right: 0; }
   .metric-cell:nth-child(-n + 2) { border-bottom: 1px solid var(--color-border-light); }
+  .allocation-table { display: none !important; }
+  .allocation-cards { display: flex; }
 }
 
 /* ── 压力测试面板 ── */
@@ -775,6 +849,10 @@ onMounted(load)
   .stress-metrics { flex-direction: column; align-items: flex-start; }
   .stress-arrow { transform: rotate(90deg); }
   .impact-head,
-  .impact-row { grid-template-columns: 80px 1fr 60px 1fr; font-size: 0.78rem; }
+  .impact-row { grid-template-columns: 1fr 1fr; font-size: 0.78rem; gap: 6px; }
+  .impact-head span:nth-child(3),
+  .impact-head span:nth-child(4),
+  .impact-row .impact-shock,
+  .impact-row .impact-bar-cell { display: none; }
 }
 </style>

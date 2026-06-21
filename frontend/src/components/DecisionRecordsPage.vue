@@ -1,6 +1,6 @@
 <script setup>
 import { ref, computed, onMounted } from 'vue'
-import { listDecisions, updateDecisionStatus, submitDecisionReview, completeDecisionAction, getDecisionPrecheck } from '../api'
+import { listDecisions, updateDecisionStatus, submitDecisionReview, completeDecisionAction, getDecisionPrecheck, getExecutionStatus } from '../api'
 import { useToast } from '../composables/useToast'
 import Icon from './ui/Icon.vue'
 import ConfirmDialog from './ConfirmDialog.vue'
@@ -11,9 +11,13 @@ const { showToast } = useToast()
 const loading = ref(false)
 const decisions = ref([])
 const precheckCache = ref({})  // { decisionId: precheckResult }
+const executionMatches = ref({})  // { decisionId: matchInfo }
 
 // ── 筛选 ──
 const activeFilter = ref('all')  // all | proposed | accepted | executed | reviewed | rejected
+
+// ── 移动端 Tab ──
+const mobileTab = ref('pending')  // pending | reviewing | completed
 
 // ── 复盘弹窗 ──
 const reviewModal = ref({ visible: false, decision: null })
@@ -60,11 +64,25 @@ async function load() {
     decisions.value = data.items || []
     // 异步加载预检查
     decisions.value.forEach(d => loadPrecheck(d.id))
+    // 异步加载执行状态匹配
+    loadExecutionStatus()
   } catch (e) {
     showToast('加载决策失败: ' + (e.response?.data?.detail || e.message), 'error')
   } finally {
     loading.value = false
   }
+}
+
+async function loadExecutionStatus() {
+  try {
+    const { data } = await getExecutionStatus()
+    const matches = data.matches || []
+    const map = {}
+    for (const m of matches) {
+      map[m.decision_id] = m
+    }
+    executionMatches.value = map
+  } catch { /* silent */ }
 }
 
 async function loadPrecheck(decisionId) {
@@ -101,6 +119,19 @@ function deferDecision(decisionId) {
 }
 function executeDecision(decisionId) {
   confirmAction('执行决策', '确认此决策已执行？执行后进入待复盘状态。', () => doStatusUpdate(decisionId, 'executed'))
+}
+
+function confirmExecutionFromMatch(decisionId) {
+  const match = executionMatches.value[decisionId]
+  const txInfo = match ? `${match.tx_count}笔交易，买入${match.buy_shares}份/卖出${match.sell_shares}份` : ''
+  confirmAction(
+    '确认执行',
+    `系统检测到持仓变化：${txInfo}。确认将此决策标记为已执行？`,
+    async () => {
+      await doStatusUpdate(decisionId, 'executed')
+      delete executionMatches.value[decisionId]
+    }
+  )
 }
 
 async function completeAction(decisionId, actionId) {
@@ -252,10 +283,23 @@ onMounted(load)
       </div>
     </section>
 
+    <!-- 移动端 Tab 切换 -->
+    <div class="mobile-tabs">
+      <button :class="['mobile-tab', { active: mobileTab === 'pending' }]" @click="mobileTab = 'pending'">
+        待执行 <span class="tab-count">{{ pendingDecisions.length }}</span>
+      </button>
+      <button :class="['mobile-tab', { active: mobileTab === 'reviewing' }]" @click="mobileTab = 'reviewing'">
+        待复盘 <span class="tab-count">{{ reviewingDecisions.length }}</span>
+      </button>
+      <button :class="['mobile-tab', { active: mobileTab === 'completed' }]" @click="mobileTab = 'completed'">
+        已完成 <span class="tab-count">{{ completedDecisions.length }}</span>
+      </button>
+    </div>
+
     <!-- 三栏看板 -->
     <div class="kanban">
       <!-- 待执行 -->
-      <section class="kanban-col">
+      <section :class="['kanban-col', { 'mobile-hidden': mobileTab !== 'pending' }]">
         <header class="col-head">
           <h3>待执行</h3>
           <span class="col-count">{{ pendingDecisions.length }}</span>
@@ -312,16 +356,32 @@ onMounted(load)
               <button class="btn-sm btn-primary" @click="executeDecision(d.id)">已执行</button>
               <button class="btn-sm btn-ghost" @click="deferDecision(d.id)">暂缓</button>
             </template>
+            <template v-else-if="d.status === 'accepted'">
+              <button class="btn-sm btn-primary" @click="executeDecision(d.id)">已执行</button>
+              <button class="btn-sm btn-ghost" @click="deferDecision(d.id)">暂缓</button>
+            </template>
             <template v-else-if="d.status === 'deferred'">
               <button class="btn-sm btn-primary" @click="acceptDecision(d.id)">重新接受</button>
               <button class="btn-sm btn-ghost danger" @click="rejectDecision(d.id)">拒绝</button>
             </template>
           </div>
+          <!-- 执行状态自动匹配提示 -->
+          <div v-if="d.status === 'accepted' && executionMatches[d.id]" class="execution-match-bar">
+            <div class="match-info">
+              <Icon name="check-circle" size="14" />
+              <span>检测到已执行？匹配 {{ executionMatches[d.id].tx_count }} 笔交易</span>
+              <span class="match-detail">
+                <template v-if="executionMatches[d.id].buy_shares > 0">买入 {{ executionMatches[d.id].buy_shares }} 份</template>
+                <template v-if="executionMatches[d.id].sell_shares > 0"> / 卖出 {{ executionMatches[d.id].sell_shares }} 份</template>
+              </span>
+            </div>
+            <button class="btn-sm btn-primary" @click="confirmExecutionFromMatch(d.id)">确认执行</button>
+          </div>
         </article>
       </section>
 
       <!-- 待复盘 -->
-      <section class="kanban-col">
+      <section :class="['kanban-col', { 'mobile-hidden': mobileTab !== 'reviewing' }]">
         <header class="col-head">
           <h3>待复盘</h3>
           <span class="col-count">{{ reviewingDecisions.length }}</span>
@@ -355,7 +415,7 @@ onMounted(load)
       </section>
 
       <!-- 已完成 -->
-      <section class="kanban-col">
+      <section :class="['kanban-col', { 'mobile-hidden': mobileTab !== 'completed' }]">
         <header class="col-head">
           <h3>已完成</h3>
           <span class="col-count">{{ completedDecisions.length }}</span>
@@ -823,8 +883,55 @@ onMounted(load)
 .icon-btn:hover { background: var(--color-bg-hover); color: var(--color-text-primary); }
 
 /* 响应式 */
+/* 移动端 Tab */
+.mobile-tabs {
+  display: none;
+  gap: 4px;
+  background: var(--color-bg-input);
+  border-radius: var(--radius-lg);
+  padding: 4px;
+}
+.mobile-tab {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  padding: 8px 12px;
+  border: none;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--color-text-secondary);
+  font-size: 0.82rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.mobile-tab.active {
+  background: var(--color-bg-card);
+  color: var(--color-primary);
+  box-shadow: var(--shadow-sm);
+}
+.tab-count {
+  font-size: 0.7rem;
+  background: var(--color-bg-card);
+  border: 1px solid var(--color-border-light);
+  border-radius: 999px;
+  padding: 1px 6px;
+  font-variant-numeric: tabular-nums;
+}
+.mobile-tab.active .tab-count {
+  background: var(--color-primary-bg);
+  border-color: var(--color-primary-border);
+  color: var(--color-primary);
+}
+.mobile-hidden {
+  display: none !important;
+}
+
 @media (max-width: 1100px) {
   .kanban { grid-template-columns: 1fr; }
+  .mobile-tabs { display: flex; }
   .stats-strip { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .stat-cell:nth-child(3) { border-right: 0; }
   .stat-cell:nth-child(-n + 3) { border-bottom: 1px solid var(--color-border-light); }
@@ -834,5 +941,65 @@ onMounted(load)
   .stats-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .stat-cell:nth-child(2) { border-right: 0; }
   .stat-cell:nth-child(-n + 4) { border-bottom: 1px solid var(--color-border-light); }
+  .mobile-tabs { flex-wrap: nowrap; }
+}
+
+/* ── 移动端响应式 (<768px) ── */
+@media (max-width: 768px) {
+  .decisions-page {
+    padding: var(--space-3);
+    padding-bottom: 80px; /* 为底部固定栏留空间 */
+  }
+
+  /* 页头 */
+  .page-head {
+    flex-direction: column;
+    gap: var(--space-2);
+  }
+  .page-title { font-size: 1.1rem; }
+  .page-desc { font-size: 0.78rem; }
+
+  /* 统计条: 3列2行 */
+  .stats-strip {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+  .stat-cell:nth-child(3) { border-right: 0; }
+  .stat-cell:nth-child(-n + 3) { border-bottom: 1px solid var(--color-border-light); }
+  .stat-cell {
+    padding: var(--space-2) var(--space-3);
+  }
+  .stat-cell strong { font-size: 1rem; }
+
+  /* 看板：单列全宽 */
+  .kanban {
+    grid-template-columns: 1fr;
+  }
+
+  /* 决策卡片全宽 */
+  .decision-card {
+    width: 100%;
+  }
+
+  /* 卡片操作按钮 */
+  .card-actions {
+    flex-wrap: wrap;
+  }
+  .btn-sm {
+    flex: 1;
+    min-width: 0;
+    justify-content: center;
+    padding: 8px 12px;
+    font-size: 0.8rem;
+  }
+
+  /* 复盘弹窗 */
+  .modal-overlay {
+    padding: var(--space-2);
+    align-items: flex-end;
+  }
+  .modal-card {
+    max-height: 85vh;
+    border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+  }
 }
 </style>

@@ -502,6 +502,25 @@ async def _generate_expected_quality(bad_case: dict) -> str:
 
 # ── 质量评估 API ──────────────────────────────────────
 
+@router.post("/api/eval/run-suite")
+async def run_eval_suite_api(limit_per_category: int = None):
+    """运行分类评测套件（60+ 用例，四大类）。
+
+    参数:
+        limit_per_category: 每个类别最多运行的用例数，None 则全部运行
+    """
+    from scripts.rag_eval_suite import run_eval_suite_by_category
+
+    try:
+        results = await run_eval_suite_by_category(
+            limit=limit_per_category, verbose=False
+        )
+        return {"ok": True, "results": results}
+    except Exception as e:
+        logger.error(f"评测套件运行失败: {e}", exc_info=True)
+        raise HTTPException(500, f"评测套件运行失败: {str(e)}")
+
+
 @router.get("/api/eval/quality-summary")
 async def quality_summary_api(days: int = 30):
     """获取质量评分概览（合并 llm_feedback + eval_runs）。"""

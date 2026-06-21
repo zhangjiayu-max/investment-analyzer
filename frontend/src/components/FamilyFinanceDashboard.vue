@@ -632,5 +632,82 @@ onMounted(load)
   .page-head { flex-direction: column; }
   .metric-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .hero-metric strong { font-size: 1.4rem; }
+  .trend-summary { flex-wrap: wrap; gap: var(--space-3); }
+  .trend-summary .metric-item { min-width: 45%; }
+}
+
+/* ── 移动端响应式 (<768px) ── */
+@media (max-width: 768px) {
+  .finance-page {
+    padding: var(--space-3);
+  }
+
+  /* 页头 */
+  .page-head {
+    flex-direction: column;
+    gap: var(--space-2);
+  }
+  .page-title { font-size: 1.1rem; }
+  .page-desc { font-size: 0.78rem; }
+
+  /* 六宫格 → 单列 */
+  .dashboard-grid {
+    grid-template-columns: 1fr;
+    gap: var(--space-3);
+  }
+
+  /* 关键指标大字体卡片 */
+  .hero-metric strong {
+    font-size: 1.6rem;
+  }
+  .metric-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: var(--space-2);
+  }
+  .metric-grid.three-col {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .metric-item strong {
+    font-size: 1.05rem;
+  }
+  .metric-item span {
+    font-size: 0.8rem;
+  }
+
+  /* 趋势图横向滚动 */
+  .trend-chart-wrap {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: thin;
+  }
+  .trend-chart {
+    min-width: 600px;
+  }
+  .trend-labels {
+    min-width: 600px;
+  }
+  .trend-summary {
+    flex-wrap: wrap;
+    gap: var(--space-3);
+  }
+
+  /* 健康提示 */
+  .warning-item {
+    font-size: 0.82rem;
+    padding: 8px 12px;
+  }
+
+  /* 卡片 */
+  .card-head {
+    padding: var(--space-3);
+  }
+  .card-body {
+    padding: var(--space-3);
+  }
+
+  /* 目标进度 */
+  .goal-bar-bg {
+    height: 8px;
+  }
 }
 </style>

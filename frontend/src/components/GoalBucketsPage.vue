@@ -620,6 +620,66 @@ onMounted(loadRecentDecisions)
   .form-grid { grid-template-columns: 1fr; }
 }
 
+/* ── 移动端响应式 (<768px) ── */
+@media (max-width: 768px) {
+  .goal-page {
+    padding: var(--space-3);
+  }
+
+  /* 页头 */
+  .goal-header {
+    flex-direction: column;
+    gap: var(--space-2);
+  }
+  .page-title { font-size: 1.1rem; }
+  .page-desc { font-size: 0.78rem; }
+
+  /* 汇总条：单行显示 */
+  .summary-strip {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .summary-cell {
+    padding: var(--space-3);
+  }
+  .summary-cell strong {
+    font-size: 1.2rem;
+  }
+
+  /* 布局：单列 */
+  .goal-layout {
+    grid-template-columns: 1fr;
+  }
+  .bucket-form { position: static; }
+
+  /* 进度条放大 */
+  .progress-track {
+    height: 12px;
+  }
+
+  /* 金额字体放大 */
+  .bucket-meta {
+    gap: 6px;
+  }
+  .bucket-meta span {
+    font-size: 0.85rem;
+    padding: 6px 10px;
+  }
+
+  /* 卡片全宽 */
+  .bucket-card {
+    width: 100%;
+  }
+
+  /* 表单 */
+  .form-grid { grid-template-columns: 1fr; }
+  .bucket-form label {
+    font-size: 0.85rem;
+  }
+  .input-field {
+    font-size: 16px; /* 防止iOS缩放 */
+  }
+}
+
 /* ── 决策预检查展示 ── */
 .precheck-section {
   border: 1px solid var(--color-border);

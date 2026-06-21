@@ -11,6 +11,60 @@ from db.agents import load_specialist_agents
 
 logger = logging.getLogger(__name__)
 
+# ── 分析模板约束（按分析类型强制结构化输出） ──
+ANALYSIS_TEMPLATES = {
+    "valuation": {
+        "required_fields": ["当前估值", "历史分位", "估值水平", "数据来源", "风险因素"],
+        "format_hint": "必须包含：当前PE/PB值、历史百分位、估值水平判断（低估/合理/高估）、数据日期、主要风险",
+    },
+    "risk": {
+        "required_fields": ["风险类型", "风险等级", "触发条件", "应对策略"],
+        "format_hint": "必须包含：风险类型（市场/流动性/政策/信用）、风险等级（低/中/高）、什么条件下触发、建议的应对措施",
+    },
+    "allocation": {
+        "required_fields": ["当前配置", "目标配置", "偏离度", "调整建议", "理由"],
+        "format_hint": "必须包含：当前各资产占比、目标比例、偏离幅度、具体调整操作、调整理由",
+    },
+    "market": {
+        "required_fields": ["市场状态", "关键指标", "驱动因素", "展望"],
+        "format_hint": "必须包含：当前市场状态（牛/熊/震荡）、关键估值/资金指标、主要驱动因素、短中期展望",
+    },
+    "strategy": {
+        "required_fields": ["策略名称", "适用场景", "具体操作", "回测数据", "风险提示"],
+        "format_hint": "必须包含：策略名称、什么情况下适用、具体买入/卖出操作、历史回测胜率/收益、最大回撤风险",
+    },
+}
+
+
+def _detect_analysis_type(query: str) -> str:
+    """根据用户问题关键词检测分析类型。"""
+    query_lower = query.lower()
+    if any(kw in query_lower for kw in ["估值", "pe", "pb", "百分位", "低估", "高估"]):
+        return "valuation"
+    if any(kw in query_lower for kw in ["风险", "回撤", "亏损", "止损"]):
+        return "risk"
+    if any(kw in query_lower for kw in ["配置", "比例", "仓位", "股债"]):
+        return "allocation"
+    if any(kw in query_lower for kw in ["市场", "大盘", "行情", "走势"]):
+        return "market"
+    if any(kw in query_lower for kw in ["策略", "定投", "止盈", "择时"]):
+        return "strategy"
+    return "general"
+
+
+def _get_template_constraint(analysis_type: str) -> str:
+    """返回指定分析类型的模板约束 prompt 片段。"""
+    template = ANALYSIS_TEMPLATES.get(analysis_type, {})
+    if not template:
+        return ""
+    fields = "、".join(template.get("required_fields", []))
+    return f"""
+## 📋 分析模板（必须遵守）
+你的分析必须包含以下字段：{fields}
+格式要求：{template.get('format_hint', '')}
+如果缺少上述字段，分析将被视为不合格。
+"""
+
 # ── 通用数据约束（追加到所有 Agent prompt 末尾） ──
 _UNIVERSAL_DATA_CONSTRAINT = """
 ## ⚠️ 数据真实性约束（强制遵守）
@@ -191,6 +245,12 @@ def run_specialist(agent_key: str, query: str, context: str = "",
     # 追加风险与深度分析约束
     system_content += _RISK_AND_DEPTH_CONSTRAINT
 
+    # 追加分析模板约束（根据用户问题自动检测分析类型）
+    analysis_type = _detect_analysis_type(query)
+    template_constraint = _get_template_constraint(analysis_type)
+    if template_constraint:
+        system_content += template_constraint
+
     llm_messages = [
         {"role": "system", "content": system_content},
         {"role": "user", "content": query},
@@ -362,6 +422,12 @@ def run_specialist_with_context(agent_key: str, query: str, peer_analyses: dict,
 
     # 注入 KYC 理财画像（按专家职责裁剪维度）
     system_content = _inject_kyc_profile(system_content, agent)
+
+    # 追加分析模板约束（交叉审阅也需要结构化输出）
+    analysis_type = _detect_analysis_type(query)
+    template_constraint = _get_template_constraint(analysis_type)
+    if template_constraint:
+        system_content += template_constraint
 
     # 追加圆桌审阅指令
     peer_sections = []

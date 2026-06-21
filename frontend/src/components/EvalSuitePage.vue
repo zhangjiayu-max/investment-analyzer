@@ -19,6 +19,7 @@ const { taskState: evalTaskState, taskResult: evalTaskResult, taskError: evalTas
 
 const loading = ref(false)
 const runningCases = ref(new Set()) // 正在运行的用例 ID 集合
+const expandedCases = ref(new Set()) // 展开详情的用例 ID 集合
 const activeTab = ref('cases')
 
 // Stats
@@ -152,6 +153,21 @@ function openCreate() {
   form.value = { name: '', description: '', analysis_type: 'ai', input_params: '{}', expected_quality: '' }
   editingId.value = null
   showForm.value = true
+}
+
+function toggleCaseDetail(caseId) {
+  const s = new Set(expandedCases.value)
+  if (s.has(caseId)) s.delete(caseId)
+  else s.add(caseId)
+  expandedCases.value = s
+}
+
+function formatParams(params) {
+  if (!params || params === '{}') return '无参数'
+  try {
+    const parsed = typeof params === 'string' ? JSON.parse(params) : params
+    return JSON.stringify(parsed, null, 2)
+  } catch { return params }
 }
 
 function openEdit(c) {
@@ -448,12 +464,33 @@ onMounted(() => {
             </div>
             <div v-if="c.description" class="case-desc">{{ c.description }}</div>
             <div class="case-actions">
+              <button class="btn-ghost btn-xs" @click="toggleCaseDetail(c.id)">
+                {{ expandedCases.has(c.id) ? '收起' : '📋 详情' }}
+              </button>
               <button class="btn-primary btn-xs" :disabled="runningCases.has(c.id)" @click="doRun(c)">
                 {{ runningCases.has(c.id) ? '⏳ 运行中' : '▶ 运行' }}
               </button>
               <button class="btn-secondary btn-xs" @click="openEdit(c)">✏️ 编辑</button>
               <button class="btn-danger btn-xs" @click="confirmBeforeDelete(c)">🗑️</button>
             </div>
+
+            <!-- 详情展开 -->
+            <Transition name="expand">
+              <div v-if="expandedCases.has(c.id)" class="case-detail">
+                <div class="detail-block">
+                  <label>输入参数</label>
+                  <pre class="detail-code">{{ formatParams(c.input_params) }}</pre>
+                </div>
+                <div class="detail-block">
+                  <label>期望质量标准</label>
+                  <div class="detail-quality">{{ c.expected_quality || '未设置' }}</div>
+                </div>
+                <div v-if="c.description" class="detail-block">
+                  <label>描述</label>
+                  <div class="detail-desc">{{ c.description }}</div>
+                </div>
+              </div>
+            </Transition>
           </div>
 
           <!-- 编辑表单：展开在用例下方 -->
@@ -825,6 +862,57 @@ onMounted(() => {
   display: flex;
   gap: 0.5rem;
   margin-top: 0.5rem;
+}
+
+.case-detail {
+  margin-top: 0.75rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid var(--color-border-light);
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+.detail-block label {
+  display: block;
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--color-text-muted);
+  margin-bottom: 4px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.detail-code {
+  background: var(--color-bg-input);
+  border: 1px solid var(--color-border-light);
+  border-radius: var(--radius-md);
+  padding: 0.5rem 0.75rem;
+  font-size: 0.78rem;
+  color: var(--color-text-secondary);
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 120px;
+  overflow-y: auto;
+  margin: 0;
+}
+.detail-quality {
+  background: #f0fdf4;
+  border: 1px solid #bbf7d0;
+  border-radius: var(--radius-md);
+  padding: 0.5rem 0.75rem;
+  font-size: 0.82rem;
+  color: #166534;
+  white-space: pre-wrap;
+  line-height: 1.6;
+}
+.dark .detail-quality {
+  background: rgba(22, 163, 74, 0.08);
+  border-color: rgba(22, 163, 74, 0.2);
+  color: #4ade80;
+}
+.detail-desc {
+  font-size: 0.82rem;
+  color: var(--color-text-secondary);
+  line-height: 1.5;
 }
 
 /* Run List */

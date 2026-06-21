@@ -1090,6 +1090,128 @@ def list_peer_reviews(decision_id: int) -> list[dict]:
         conn.close()
 
 
+def match_pending_decisions(user_id: str = "default") -> list[dict]:
+    """检查待执行决策与当前持仓变化的匹配情况。
+
+    扫描 status='accepted' 的决策，对比最近交易记录（7天内），
+    如果决策目标(target_code)在持仓中有变化（新增/增仓/减仓），返回匹配结果。
+    """
+    from datetime import datetime, timedelta
+
+    conn = _get_conn()
+    try:
+        # 1. 获取所有 accepted 的决策
+        rows = conn.execute(
+            """
+            SELECT * FROM decision_records
+            WHERE user_id = ? AND status = 'accepted'
+            ORDER BY created_at DESC
+            """,
+            (user_id,),
+        ).fetchall()
+        if not rows:
+            return []
+
+        decisions = [dict(r) for r in rows]
+
+        # 2. 获取最近 7 天内已确认的交易记录
+        seven_days_ago = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
+        tx_rows = conn.execute(
+            """
+            SELECT t.fund_code, t.fund_name, t.transaction_type, t.shares, t.amount,
+                   t.transaction_date, t.price, h.shares AS current_shares, h.total_cost
+            FROM portfolio_transactions t
+            LEFT JOIN portfolio_holdings h ON t.holding_id = h.id
+            WHERE t.user_id = ?
+              AND t.status IN ('confirmed', 'settled')
+              AND t.transaction_date >= ?
+              AND (t.is_system IS NULL OR t.is_system = 0)
+            ORDER BY t.transaction_date DESC
+            """,
+            (user_id, seven_days_ago),
+        ).fetchall()
+        recent_txs = [dict(r) for r in tx_rows]
+
+        # 3. 按 fund_code 分组交易
+        tx_by_code: dict[str, list[dict]] = {}
+        for tx in recent_txs:
+            code = tx.get("fund_code") or ""
+            if code:
+                tx_by_code.setdefault(code, []).append(tx)
+
+        # 4. 匹配
+        results = []
+        for decision in decisions:
+            target_code = (decision.get("target_code") or "").strip()
+            target_type = decision.get("target_type") or ""
+            decision_type = decision.get("decision_type") or ""
+
+            if not target_code:
+                continue
+
+            matched_txs = []
+
+            # 直接匹配 fund_code
+            if target_code in tx_by_code:
+                matched_txs = tx_by_code[target_code]
+
+            # 如果 target_type 是 index，尝试通过持仓的 index_code 匹配
+            if not matched_txs and target_type == "index":
+                for code, txs in tx_by_code.items():
+                    for tx in txs:
+                        # 检查持仓的 index_code（通过 fund_name 或 index_name 粗匹配）
+                        if target_code in (tx.get("fund_name") or ""):
+                            matched_txs.extend(txs)
+                            break
+
+            if not matched_txs:
+                continue
+
+            # 汇总匹配的交易
+            buy_shares = sum(t.get("shares") or 0 for t in matched_txs if t.get("transaction_type") == "buy")
+            sell_shares = sum(t.get("shares") or 0 for t in matched_txs if t.get("transaction_type") == "sell")
+            buy_amount = sum(t.get("amount") or 0 for t in matched_txs if t.get("transaction_type") == "buy")
+            sell_amount = sum(t.get("amount") or 0 for t in matched_txs if t.get("transaction_type") == "sell")
+            latest_tx_date = max(t.get("transaction_date") or "" for t in matched_txs) if matched_txs else ""
+
+            # 判断执行方向是否匹配决策意图
+            direction_match = False
+            if decision_type in ("add", "buy") and buy_shares > 0:
+                direction_match = True
+            elif decision_type in ("reduce", "sell") and sell_shares > 0:
+                direction_match = True
+            elif decision_type == "rebalance" and (buy_shares > 0 or sell_shares > 0):
+                direction_match = True
+            elif decision_type in ("watch", "hold"):
+                # 观察/持有类决策，任何交易都算匹配
+                direction_match = bool(matched_txs)
+
+            if not direction_match:
+                continue
+
+            results.append({
+                "decision_id": decision["id"],
+                "decision_type": decision_type,
+                "target_code": target_code,
+                "target_name": decision.get("target_name") or "",
+                "target_type": target_type,
+                "summary": decision.get("summary") or "",
+                "matched": True,
+                "direction_match": True,
+                "buy_shares": round(buy_shares, 2),
+                "sell_shares": round(sell_shares, 2),
+                "buy_amount": round(buy_amount, 2),
+                "sell_amount": round(sell_amount, 2),
+                "tx_count": len(matched_txs),
+                "latest_tx_date": latest_tx_date,
+                "suggestion": "检测到持仓变化与此决策方向一致，建议确认执行。",
+            })
+
+        return results
+    finally:
+        conn.close()
+
+
 def count_high_risk_reviews(decision_id: int) -> int:
     """统计某决策中高风险评审数量（reject 或 defer）。"""
     conn = _get_conn()

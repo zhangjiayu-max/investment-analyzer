@@ -316,6 +316,98 @@ Q: 美股大跌，A股明天会怎么走
 A: {{"complexity":"complex","specialists":["market_analyst","valuation_expert","risk_assessor"],"reason":"多市场联动分析，需要多维分析","refined_query":"美股大跌原因、A股走势预判及持仓影响","confidence":0.90}}"""
 
 
+# ── 基于规则的复杂度预判（零 LLM 调用）────────────────────────
+
+def _classify_complexity_by_rules(query: str, has_portfolio: bool = False, has_watchlist: bool = False) -> str:
+    """基于规则预判用户问题的复杂度，避免 LLM 调用。
+
+    返回: "chat" | "simple" | "medium" | "complex"
+
+    设计原则：
+    - simple 和 complex 直接走规则（确定性高）
+    - medium 需要 LLM 确认（边界情况多）
+    """
+    text = (query or "").strip()
+    if not text:
+        return "chat"
+
+    text_lower = text.lower()
+    length = len(text)
+
+    # ── 闲聊检测（短消息 + 闲聊关键词 + 无投资内容）──
+    chat_keywords = ["你好", "谢谢", "好的", "明白了", "知道了", "嗯",
+                     "天气", "笑话", "故事", "晚安", "早上好", "嗨", "hi", "hello", "hey"]
+    # 纯问候/感谢/闲聊
+    if length <= 10 and any(kw in text_lower for kw in chat_keywords):
+        # 确保没有投资关键词
+        invest_markers = ["估值", "PE", "PB", "持仓", "买入", "卖出", "基金",
+                          "股票", "债券", "定投", "配置", "风险", "收益"]
+        if not any(m in text_lower for m in invest_markers):
+            return "chat"
+
+    # 极短消息（<=5字），无投资关键词，无疑问词
+    if length <= 5:
+        has_question = bool(re.search(r'[吗呢？?]', text))
+        invest_markers = ["估值", "pe", "pb", "持仓", "买入", "卖出", "基金",
+                          "股票", "债券", "债市", "定投", "配置"]
+        concept_markers = ["什么是", "解释", "原理", "概念", "定义", "含义"]
+        if not has_question and not any(m in text_lower for m in invest_markers) \
+                and not any(m in text_lower for m in concept_markers):
+            return "chat"
+
+    # ── Simple 检测（短查询 + 简单关键词）──
+    simple_keywords = ["什么是", "解释", "价格", "多少", "是多少", "查一下",
+                       "查询", "最新", "今天", "估值", "百分位", "PE", "PB",
+                       "z-score", "债市温度", "温度"]
+    # 强制 simple 的前缀关键词（解释/定义类问题，即使包含投资术语也是 simple）
+    force_simple_prefixes = ["什么是", "解释", "怎么算", "概念", "原理", "含义"]
+    has_force_simple = any(text_lower.startswith(p) for p in force_simple_prefixes)
+    has_simple = any(kw in text_lower for kw in simple_keywords)
+    if length < 30 and has_simple:
+        # 排除：虽然短但包含复杂意图（但强制 simple 前缀跳过排除）
+        if not has_force_simple:
+            complex_markers = ["分析", "对比", "比较", "建议", "配置", "风险",
+                               "方案", "策略", "计划", "加仓", "减仓", "定投"]
+            if any(m in text_lower for m in complex_markers):
+                # 有疑问词 + 估值关键词 → 可能需要分析，交给 LLM 确认
+                has_question = bool(re.search(r'[吗呢？?]', text))
+                if has_question and any(kw in text_lower for kw in ["估值", "高", "低", "贵", "便宜"]):
+                    return "medium"  # 边界情况，交给 LLM
+                return "medium"  # 有复杂意图，交给 LLM
+        # 有疑问词 + 估值关键词 → 可能需要分析，交给 LLM 确认
+        has_question = bool(re.search(r'[吗呢？?]', text))
+        if has_question and any(kw in text_lower for kw in ["估值", "高", "低", "贵", "便宜"]):
+            return "medium"  # 边界情况，交给 LLM
+        return "simple"
+
+    # ── Complex 检测（长查询 + 多个投资关键词 + 有持仓数据）──
+    complex_keywords = ["分析", "对比", "比较", "建议", "配置", "风险",
+                        "方案", "策略", "计划", "加仓", "减仓", "定投",
+                        "组合", "仓位", "再平衡", "回撤", "波动"]
+    complex_match_count = sum(1 for kw in complex_keywords if kw in text_lower)
+
+    # 长查询 + 多个复杂关键词 → complex
+    if length > 100 and complex_match_count >= 2:
+        return "complex"
+
+    # 有持仓 + 复杂关键词组合 → complex
+    if has_portfolio and complex_match_count >= 2:
+        return "complex"
+
+    # 涉及多维度分析的关键词组合 → complex
+    multi_dim_triggers = [
+        ("分析", ["配置", "风险", "建议"]),  # 分析 + 配置/风险/建议
+        ("建议", ["配置", "风险", "组合"]),  # 建议 + 配置/风险/组合
+        ("定投", ["方案", "策略", "计划"]),  # 定投 + 方案/策略/计划
+    ]
+    for primary, secondaries in multi_dim_triggers:
+        if primary in text_lower and any(s in text_lower for s in secondaries):
+            return "complex"
+
+    # ── 未命中规则 → 返回 medium（需要 LLM 确认）──
+    return "medium"
+
+
 # Clarification 结果缓存（相同查询直接返回缓存结果，节省 2-5s LLM 调用）
 _clarification_cache: dict[int, dict] = {}
 _CLARIFICATION_CACHE_MAX = 128
@@ -341,11 +433,14 @@ def detect_scenario_type(query: str) -> str:
 
 def clarify_requirement(query: str) -> dict:
     """
-    使用 LLM 分析用户问题，返回需求澄清结果。
+    分析用户问题，返回需求澄清结果。
+
+    优化策略：先走规则预判（零 LLM 调用），仅在边界情况（medium）时调用 LLM。
+    预期节省 2-3 秒首响时间（>70% 的查询可跳过 LLM）。
 
     返回:
         {
-            "complexity": "simple|medium|complex",
+            "complexity": "chat|simple|medium|complex",
             "specialists": ["valuation_expert", ...],
             "reason": "...",
             "refined_query": "..."
@@ -357,14 +452,49 @@ def clarify_requirement(query: str) -> dict:
         logger.debug(f"Clarification 缓存命中: {query[:30]}...")
         return _clarification_cache[cache_key]
 
+    # ── Step 1: 规则预判（零 LLM 调用）──
+    has_portfolio = False
+    has_watchlist = False
     try:
-        # 注入持仓摘要，让澄清 Agent 知道用户持有什么
-        try:
-            from portfolio_context import build_portfolio_summary_line
-            portfolio_line = build_portfolio_summary_line()
-        except Exception:
-            portfolio_line = ""
+        from portfolio_context import build_portfolio_summary_line
+        portfolio_line = build_portfolio_summary_line()
+        # 如果持仓摘要不是"无持仓"，说明有持仓数据
+        has_portfolio = bool(portfolio_line and "无持仓" not in portfolio_line)
+    except Exception:
+        portfolio_line = ""
 
+    try:
+        from db.portfolio import get_watchlist
+        watchlist = get_watchlist("default")
+        has_watchlist = bool(watchlist)
+    except Exception:
+        pass
+
+    rule_complexity = _classify_complexity_by_rules(query, has_portfolio, has_watchlist)
+    logger.info(f"规则预判复杂度: {rule_complexity} (query={query[:50]}..., portfolio={has_portfolio}, watchlist={has_watchlist})")
+
+    # ── Step 2: 非 medium 结果直接走规则路径（跳过 LLM）──
+    if rule_complexity in ("chat", "simple", "complex"):
+        specialists = route_to_specialists_by_keywords(query) if rule_complexity != "chat" else []
+        result_out = {
+            "complexity": rule_complexity,
+            "specialists": specialists,
+            "reason": f"规则预判（{rule_complexity}）",
+            "refined_query": query,
+            "confidence": 0.85,  # 规则预判置信度
+            "scenario_type": detect_scenario_type(query),
+            "classification_method": "rules",
+        }
+        # 缓存结果
+        if len(_clarification_cache) >= _CLARIFICATION_CACHE_MAX:
+            _clarification_cache.pop(next(iter(_clarification_cache)))
+        _clarification_cache[cache_key] = result_out
+        return result_out
+
+    # ── Step 3: medium 结果 → 调用 LLM 确认（保留原逻辑）──
+    logger.info(f"规则返回 medium，调用 LLM 确认: {query[:50]}...")
+
+    try:
         user_content = query
         if portfolio_line:
             user_content = f"{portfolio_line}\n\n用户问题: {query}"
@@ -451,6 +581,7 @@ def clarify_requirement(query: str) -> dict:
             "refined_query": result.get("refined_query", query),
             "confidence": confidence,
             "scenario_type": detect_scenario_type(query),
+            "classification_method": "llm",
         }
 
         # 缓存结果
@@ -461,7 +592,7 @@ def clarify_requirement(query: str) -> dict:
         return result_out
 
     except Exception as e:
-        logger.warning(f"需求澄清失败，回退到关键词匹配: {e}")
+        logger.warning(f"LLM 澄清失败，回退到关键词匹配: {e}")
         # 回退到关键词匹配
         complexity = detect_complexity_by_keywords(query)
         specialists = route_to_specialists_by_keywords(query)
@@ -472,6 +603,7 @@ def clarify_requirement(query: str) -> dict:
             "refined_query": query,
             "confidence": 0.5,
             "scenario_type": detect_scenario_type(query),
+            "classification_method": "keywords_fallback",
         }
 
 

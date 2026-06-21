@@ -27,6 +27,7 @@ import QualityDashboard from '../components/QualityDashboard.vue'
 import Dashboard from '../components/Dashboard.vue'
 import MarketIntelligence from '../components/MarketIntelligence.vue'
 import SystemConfigPage from '../components/SystemConfigPage.vue'
+import DataHealthDashboard from '../components/DataHealthDashboard.vue'
 import KnowledgeBase from '../components/KnowledgeBase.vue'
 import SearchResults from '../components/SearchResults.vue'
 import { pageComponentKeys } from '../pageRegistry'
@@ -62,6 +63,7 @@ const pageComponents = {
   'bad-cases': BadCasePage,
   'eval-suite': EvalSuitePage,
   'system-config': SystemConfigPage,
+  'data-health': DataHealthDashboard,
   knowledge: KnowledgeBase,
   search: SearchResults,
 }

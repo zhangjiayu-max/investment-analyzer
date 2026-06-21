@@ -38,6 +38,7 @@ export const navItems = [
       { key: 'bond', label: '债市市场温度', icon: 'bond' },
     ],
   },
+  { key: 'data-health', label: '数据健康', icon: 'shield-check' },
   { key: 'admin-agents', label: 'Agent 管理', icon: 'admin' },
   { key: 'token-usage', label: 'Token 用量', icon: 'token' },
   { key: 'system-config', label: '系统配置', icon: 'config' },

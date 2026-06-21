@@ -33,6 +33,7 @@ import {
 import { useToast } from '../composables/useToast'
 import ConfirmDialog from './ConfirmDialog.vue'
 import PieChart from './charts/PieChart.vue'
+import SimplePieChart from './charts/SimplePieChart.vue'
 import LineChart from './charts/LineChart.vue'
 import Skeleton from './ui/Skeleton.vue'
 import EmptyState from './ui/EmptyState.vue'
@@ -55,6 +56,36 @@ const holdingWeights = computed(() => {
     }))
     .sort((a, b) => b.weight - a.weight)
 })
+
+// ── 资产类别饼图 ──
+const CATEGORY_LABELS = {
+  equity: '股票型', bond: '债券型', money_market: '货币型',
+  hybrid: '混合型', index: '指数型', bond_index: '债指型',
+  convertible_bond: '可转债', qdii: 'QDII', other: '其他',
+}
+const CATEGORY_COLORS = {
+  equity: '#ef4444', bond: '#3b82f6', money_market: '#10b981',
+  hybrid: '#f59e0b', index: '#8b5cf6', bond_index: '#06b6d4',
+  convertible_bond: '#ec4899', qdii: '#f97316', other: '#9ca3af',
+}
+const assetCategoryData = computed(() => {
+  const map = {}
+  for (const h of holdings.value) {
+    const cat = h.fund_category || 'other'
+    if (!map[cat]) map[cat] = 0
+    map[cat] += h.current_value || 0
+  }
+  return Object.entries(map)
+    .filter(([, v]) => v > 0)
+    .sort((a, b) => b[1] - a[1])
+    .map(([key, value]) => ({
+      name: CATEGORY_LABELS[key] || key,
+      value,
+      color: CATEGORY_COLORS[key] || '#9ca3af',
+    }))
+})
+
+const assetCategoryFormatTooltip = (value, pct, name) => `${name}: ¥${value.toLocaleString()} (${pct}%)`
 
 // ECharts 饼图数据格式
 const pieChartData = computed(() => {
@@ -1453,8 +1484,6 @@ const rebalanceCurrentStrategy = ref(null)
 const rebalanceLoading = ref(false)
 const rebalanceEditing = ref(false)
 const rebalanceEditData = ref({})
-
-const CATEGORY_LABELS = { equity: '股票型', bond: '债券型', money: '货币型', hybrid: '混合型', index: '指数型', qdii: 'QDII' }
 
 async function loadRebalanceConfig() {
   rebalanceLoading.value = true
@@ -3667,6 +3696,23 @@ function txDisplayAmount(tx) {
         </div>
       </div>
 
+      <!-- 资产类别分布饼图 -->
+      <div v-if="holdings.length > 0 && !loading" class="asset-category-section">
+        <div class="asset-category-header">
+          <span class="asset-category-title">📊 资产类别分布</span>
+          <span class="asset-category-count">共 {{ assetCategoryData.length }} 类</span>
+        </div>
+        <div class="asset-category-chart">
+          <SimplePieChart
+            :data="assetCategoryData"
+            :size="180"
+            :innerRadius="50"
+            legendPosition="right"
+            :formatTooltip="assetCategoryFormatTooltip"
+          />
+        </div>
+      </div>
+
       <table v-else class="data-table">
         <thead>
           <tr>
@@ -5419,6 +5465,32 @@ function txDisplayAmount(tx) {
 .badge-category-hybrid { background: var(--color-warning); color: white; }
 .badge-category-index { background: var(--color-primary-500); color: white; }
 .badge-category-equity { background: var(--color-loss); color: white; }
+
+/* 资产类别饼图 */
+.asset-category-section {
+  padding: var(--space-4) var(--space-4) var(--space-3);
+  border-bottom: 1px solid var(--color-border-light);
+  margin-bottom: var(--space-3);
+}
+.asset-category-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: var(--space-3);
+}
+.asset-category-title {
+  font-weight: 600;
+  font-size: 0.9rem;
+  color: var(--color-text-primary);
+}
+.asset-category-count {
+  font-size: 0.75rem;
+  color: var(--color-text-muted);
+}
+.asset-category-chart {
+  display: flex;
+  justify-content: center;
+}
 
 .actions-cell {
   display: flex;

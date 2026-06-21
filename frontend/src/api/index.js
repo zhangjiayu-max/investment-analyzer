@@ -948,6 +948,16 @@ export function createDecision(payload) {
   return api.post('/decisions/create', payload)
 }
 
+/** 获取待执行决策的执行状态（自动检测持仓变化匹配） */
+export function getExecutionStatus(userId = 'default') {
+  return api.get('/decisions/execution-status', { params: { user_id: userId } })
+}
+
+/** 获取决策时间线 */
+export function getDecisionTimeline(decisionId) {
+  return api.get(`/decisions/${decisionId}/timeline`)
+}
+
 /** 获取质量评分概览 */
 export function getQualitySummary(days = 30) {
   return api.get('/eval/quality-summary', { params: { days } })
@@ -1782,6 +1792,11 @@ export function deleteGoalBucket(id) {
 /** 全局搜索 */
 export function globalSearch(q, limit = 5) {
   return api.get('/search/global', { params: { q, limit } })
+}
+
+/** 数据健康监控 */
+export function getDataHealth() {
+  return api.get('/data-health')
 }
 
 export default api

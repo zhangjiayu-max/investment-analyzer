@@ -151,6 +151,14 @@ from db.backtest_results import (
     get_backtest, delete_backtest, link_backtest_to_decision,
 )
 
+# 知识图谱
+from db.knowledge_graph import (
+    init_knowledge_graph, add_entity, get_entity, search_entities,
+    add_relationship, get_related_entities,
+    add_entity_mention, get_entities_for_knowledge, get_knowledge_for_entity,
+    bulk_import_entities,
+)
+
 # 异步分析任务
 from db.async_tasks import (
     init_async_tasks_table, create_async_task, update_async_task,
@@ -167,6 +175,7 @@ from db.decisions import (
     ensure_dashboard_decisions, list_due_decision_reviews,
     record_decision_review, build_decision_precheck,
     create_peer_review, list_peer_reviews, count_high_risk_reviews,
+    match_pending_decisions,
 )
 
 
@@ -883,6 +892,9 @@ def init_db():
 
     # ── 回测结果持久化表 ──────────────────────────────────
     init_backtest_tables(conn)
+
+    # ── 知识图谱表 ──────────────────────────────────────
+    init_knowledge_graph(conn)
 
     conn.commit()
     conn.close()
