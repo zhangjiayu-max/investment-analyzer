@@ -221,6 +221,7 @@ function handleKeydown(e) {
 <style scoped>
 .chat-input-area {
   padding: 1rem 1.5rem;
+  padding-bottom: calc(1rem + env(safe-area-inset-bottom, 0px));
   border-top: 1px solid var(--color-border);
   background: var(--color-bg-card);
   position: relative;

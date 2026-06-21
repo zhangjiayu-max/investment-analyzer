@@ -306,7 +306,9 @@ function onBack() {
   flex: 1;
   overflow-y: auto;
   -webkit-overflow-scrolling: touch;
+  overscroll-behavior-y: contain;
   padding: 0.75rem;
+  padding-bottom: calc(0.75rem + env(safe-area-inset-bottom, 0px));
 }
 
 /* ChatView 自行管理滚动，外层不滚动 */
