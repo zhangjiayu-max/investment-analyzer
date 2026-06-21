@@ -3555,8 +3555,8 @@ function txDisplayAmount(tx) {
                 <th>公司</th>
                 <th>从业年限</th>
                 <th>管理规模</th>
-                <th>最佳回报</th>
-                <th>类型</th>
+                <th>持仓盈亏</th>
+                <th>收益率</th>
               </tr>
             </thead>
             <tbody>
@@ -3564,15 +3564,19 @@ function txDisplayAmount(tx) {
                 <td>
                   <div class="fund-cell">
                     <span class="fund-code">{{ m.fund_code }}</span>
-                    <span class="fund-name">{{ m.fund_name?.slice(0, 8) }}</span>
+                    <span class="fund-name">{{ m.fund_name?.slice(0, 10) }}</span>
                   </div>
                 </td>
                 <td><strong>{{ m.manager_name || '-' }}</strong></td>
-                <td>{{ m.company || '-' }}</td>
+                <td><small>{{ m.company?.replace('基金管理有限公司', '基金') || '-' }}</small></td>
                 <td>{{ m.career_years ? m.career_years + '年' : '-' }}</td>
                 <td>{{ m.total_scale ? (m.total_scale).toFixed(0) + '亿' : '-' }}</td>
-                <td :class="m.best_return > 0 ? 'return-positive' : m.best_return < 0 ? 'return-negative' : ''">{{ m.best_return ? m.best_return + '%' : '-' }}</td>
-                <td><small>{{ m.fund_type || '-' }}</small></td>
+                <td :class="m.profit_loss > 0 ? 'return-positive' : m.profit_loss < 0 ? 'return-negative' : ''">
+                  {{ m.profit_loss > 0 ? '+' : '' }}{{ m.profit_loss?.toLocaleString() || '0' }}
+                </td>
+                <td :class="m.profit_rate > 0 ? 'return-positive' : m.profit_rate < 0 ? 'return-negative' : ''">
+                  {{ m.profit_rate > 0 ? '+' : '' }}{{ m.profit_rate || 0 }}%
+                </td>
               </tr>
             </tbody>
           </table>

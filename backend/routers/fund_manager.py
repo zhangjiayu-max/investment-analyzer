@@ -44,6 +44,13 @@ async def portfolio_manager_overview(user_id: str = "default"):
             "total_scale": info.get("total_scale"),
             "best_return": info.get("best_return"),
             "fund_type": info.get("fund_type", ""),
+            # 持仓盈亏（来自持仓数据）
+            "shares": h.get("shares", 0),
+            "cost_price": h.get("cost_price", 0),
+            "current_price": h.get("current_price", 0),
+            "profit_loss": round(h.get("profit_loss", 0), 2),
+            "profit_rate": round((h.get("profit_rate", 0) or 0) * 100, 2),
+            "current_value": round(h.get("current_value", 0), 2),
         }
         result.append(item)
 
