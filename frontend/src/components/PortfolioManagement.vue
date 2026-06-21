@@ -1098,6 +1098,8 @@ async function loadData() {
     await loadPendingTxs()
     // 加载全部基金列表（用于走势图，不受账号筛选影响）
     await loadAllChartFunds()
+    // 加载关注列表（AI 分析下拉需要）
+    await loadWatchlist()
   } catch (e) {
     showToast('加载失败: ' + e.message, 'error')
   } finally {
