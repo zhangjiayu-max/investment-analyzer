@@ -17,7 +17,7 @@ import logging
 import re
 import time
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, UploadFile, File
 from pydantic import BaseModel
 
 from state import (
@@ -25,7 +25,7 @@ from state import (
     untrack_agent as _untrack_agent,
 )
 from db import (
-    create_holding, get_holding, list_holdings, update_holding, delete_holding, get_portfolio_summary,
+    create_holding, get_holding, get_holding_by_fund, list_holdings, update_holding, delete_holding, get_portfolio_summary,
     create_transaction, list_transactions, confirm_transaction, settle_transaction, delete_transaction,
     refresh_holding_price, refresh_all_fund_prices, fetch_fund_nav,
     lookup_fund_info, get_fund_holdings,
@@ -93,7 +93,7 @@ async def portfolio_stress_test_api(req: StressTestRequest):
     """确定性组合压力测试：不调用 LLM，按资产类别冲击估算损失。"""
     from stress_test import run_portfolio_stress_test
     try:
-        return run_portfolio_stress_test(req.scenario)
+        return run_portfolio_stress_test(req.scenario, custom_shocks=req.custom_shocks)
     except ValueError as e:
         raise HTTPException(400, str(e))
 
@@ -212,6 +212,92 @@ async def clear_portfolio_api():
     """清空所有持仓数据。"""
     clear_all_portfolio_data()
     return {"ok": True, "message": "所有持仓数据已清空"}
+
+
+# ── CSV 导入导出 ──
+
+@router.get("/api/portfolio/export-csv")
+async def export_portfolio_csv(account: str = None):
+    """导出持仓为 CSV 文件。"""
+    import csv
+    import io
+    from fastapi.responses import StreamingResponse
+
+    holdings = list_holdings(account=account) if account else list_holdings()
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(["fund_code", "fund_name", "shares", "cost_price", "current_price",
+                      "current_value", "float_pnl", "account", "fund_category"])
+    for h in holdings:
+        writer.writerow([
+            h.get("fund_code", ""),
+            h.get("fund_name", ""),
+            h.get("shares", 0),
+            h.get("cost_price", ""),
+            h.get("current_price", ""),
+            h.get("current_value", 0),
+            h.get("float_pnl", 0),
+            h.get("account", ""),
+            h.get("fund_category", ""),
+        ])
+    output.seek(0)
+    return StreamingResponse(
+        iter([output.getvalue()]),
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=portfolio.csv"},
+    )
+
+
+@router.post("/api/portfolio/import-csv-file")
+async def import_portfolio_csv_file(file: UploadFile = File(...)):
+    """从上传的 CSV 文件导入持仓。"""
+    import csv
+    import io
+
+    if not file.filename.endswith('.csv'):
+        raise HTTPException(400, "请上传 CSV 文件")
+
+    content = await file.read()
+    text = content.decode('utf-8-sig')  # 处理 BOM
+    reader = csv.DictReader(io.StringIO(text))
+
+    imported = 0
+    skipped = 0
+    errors = []
+
+    for i, row in enumerate(reader, start=2):
+        try:
+            fund_code = (row.get("fund_code") or "").strip()
+            fund_name = (row.get("fund_name") or "").strip()
+            if not fund_code:
+                skipped += 1
+                continue
+            # 检查是否已存在
+            existing = get_holding_by_fund(fund_code)
+            if existing:
+                # 更新份额
+                shares = float(row.get("shares") or 0)
+                if shares > 0:
+                    update_holding(existing["id"], shares=shares)
+                skipped += 1
+                continue
+            shares = float(row.get("shares") or 0)
+            cost_price = float(row["cost_price"]) if row.get("cost_price") else None
+            account = (row.get("account") or "花无缺").strip()
+            fund_category = (row.get("fund_category") or "").strip() or None
+            create_holding(
+                fund_code=fund_code,
+                fund_name=fund_name,
+                shares=shares,
+                cost_price=cost_price,
+                account=account,
+                fund_category=fund_category,
+            )
+            imported += 1
+        except Exception as e:
+            errors.append(f"第 {i} 行: {str(e)}")
+
+    return {"ok": True, "imported": imported, "skipped": skipped, "errors": errors}
 
 
 @router.get("/api/portfolio/cash")

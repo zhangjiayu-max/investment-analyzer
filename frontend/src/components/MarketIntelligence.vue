@@ -236,7 +236,7 @@
 
 <script setup>
 import { ref, computed, onMounted } from 'vue'
-import { getMarketIntelligenceOverview } from '../api'
+import { getMarketIntelligenceOverview, triggerMarketIntelligence } from '../api'
 import { useAsyncTask } from '../composables/useAsyncTask'
 import Icon from './ui/Icon.vue'
 
@@ -259,18 +259,34 @@ onMounted(() => {
 
 async function loadData(force = false) {
   loading.value = true
-  data.value = null
-  await start(() => getMarketIntelligenceOverview(force), {
-    onComplete: (result) => {
+  try {
+    // 1. 先获取缓存
+    const { data: result } = await getMarketIntelligenceOverview()
+    if (result && !result.need_trigger && result.news?.length) {
+      // 有缓存数据，直接展示
       data.value = result
       selectedSector.value = 0
       loading.value = false
-    },
-    onError: (err) => {
-      console.error('市场情报加载失败:', err)
-      loading.value = false
+      return
     }
-  })
+    // 2. 无缓存或强制刷新，触发分析
+    await triggerMarketIntelligence()
+    // 3. 轮询等待结果
+    await start(() => getMarketIntelligenceOverview(), {
+      onComplete: (result) => {
+        data.value = result
+        selectedSector.value = 0
+        loading.value = false
+      },
+      onError: (err) => {
+        console.error('市场情报加载失败:', err)
+        loading.value = false
+      }
+    })
+  } catch (err) {
+    console.error('市场情报加载失败:', err)
+    loading.value = false
+  }
 }
 
 function heatLabel(heat) {

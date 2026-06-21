@@ -27,6 +27,7 @@ import {
   listWatchlist, addToWatchlist, updateWatchlistItem, removeWatchlistItem,
   refreshWatchlistNavs as refreshWatchlistNavsApi, markWatchlistBought as markWatchlistBoughtApi,
   lookupWatchlistFund as lookupWatchlistFundApi,
+  exportPortfolioCsv, importPortfolioCsv,
 } from '../api'
 import ConfirmDialog from './ConfirmDialog.vue'
 import PieChart from './charts/PieChart.vue'
@@ -2028,6 +2029,40 @@ function openAddForm() {
   showForm.value = true
 }
 
+// ── CSV 导入导出 ──
+async function handleExportCsv() {
+  try {
+    const { data } = await exportPortfolioCsv()
+    const blob = new Blob([data], { type: 'text/csv' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = 'portfolio.csv'
+    a.click()
+    URL.revokeObjectURL(url)
+  } catch (e) {
+    alert('导出失败: ' + (e.response?.data?.detail || e.message))
+  }
+}
+
+async function handleImportCsv(event) {
+  const file = event.target.files?.[0]
+  if (!file) return
+  try {
+    const { data } = await importPortfolioCsv(file)
+    if (data.ok) {
+      alert(`导入完成：新增 ${data.imported} 条，跳过 ${data.skipped} 条${data.errors?.length ? '，错误 ' + data.errors.length + ' 条' : ''}`)
+      refreshAll()
+    } else {
+      alert('导入失败: ' + (data.error || '未知错误'))
+    }
+  } catch (e) {
+    alert('导入失败: ' + (e.response?.data?.detail || e.message))
+  }
+  // 清空 input 允许重新选同一文件
+  event.target.value = ''
+}
+
 function openEditForm(h) {
   editingId.value = h.id
   form.value = {
@@ -2452,6 +2487,13 @@ function txDisplayAmount(tx) {
         <button class="btn-secondary" @click="openAddForm">
           手动录入
         </button>
+        <button class="btn-secondary" @click="handleExportCsv">
+          导出 CSV
+        </button>
+        <button class="btn-secondary" @click="$refs.csvInput.click()">
+          导入 CSV
+        </button>
+        <input ref="csvInput" type="file" accept=".csv" style="display:none" @change="handleImportCsv" />
       </div>
     </div>
 

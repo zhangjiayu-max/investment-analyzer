@@ -60,12 +60,22 @@ def _risk_level(loss_ratio: float) -> str:
     return "low"
 
 
-def run_portfolio_stress_test(scenario: str = "market_drop_20", user_id: str = "default") -> dict:
-    """按资产类别冲击估算组合压力测试结果。"""
+def run_portfolio_stress_test(scenario: str = "market_drop_20", user_id: str = "default",
+                              custom_shocks: dict = None) -> dict:
+    """按资产类别冲击估算组合压力测试结果。
+
+    Args:
+        scenario: 场景名称，或 "custom" 使用自定义冲击
+        user_id: 用户 ID
+        custom_shocks: 自定义冲击系数 {"cash": 0, "equity": -0.3, ...}
+    """
     from db import get_cash_balance, list_holdings
     from db.goal_buckets import get_goal_bucket_summary
 
-    cfg = SCENARIOS.get(scenario)
+    if scenario == "custom" and custom_shocks:
+        cfg = {"label": "自定义场景", "shocks": custom_shocks}
+    else:
+        cfg = SCENARIOS.get(scenario)
     if not cfg:
         raise ValueError(f"不支持的压力测试场景: {scenario}")
 

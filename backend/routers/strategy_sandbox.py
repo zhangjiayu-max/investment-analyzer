@@ -15,6 +15,10 @@ class BacktestRequest(BaseModel):
     initial_cash: float = 10000
     monthly_amount: float = 1000
     days: int = 1095  # 3 年
+    # 费率参数
+    buy_fee_rate: float = 0.0015   # 申购费率 0.15%
+    sell_fee_rate: float = 0.005   # 赎回费率 0.5%
+    mgmt_fee_annual: float = 0.015 # 年管理费率 1.5%
     # 估值加权定投参数
     low_pct: float = 30
     high_pct: float = 70

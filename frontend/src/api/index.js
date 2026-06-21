@@ -841,9 +841,14 @@ export function getLatestHotspotsAnalysis() {
 
 // ── 市场热点情报 ─────────────────────────────────────────
 
-/** 市场热点情报概览（force=true 强制重新分析） */
-export function getMarketIntelligenceOverview(force = false) {
-  return api.post('/market-intelligence/overview', { force })
+/** 市场热点情报概览（获取缓存） */
+export function getMarketIntelligenceOverview() {
+  return api.get('/market-intelligence/overview')
+}
+
+/** 触发市场热点情报分析 */
+export function triggerMarketIntelligence() {
+  return api.post('/market-intelligence/overview/trigger')
 }
 
 /** 单个板块深度分析 */
@@ -1092,8 +1097,22 @@ export function getAllocationDashboard() {
 }
 
 /** 运行确定性组合压力测试 */
-export function runPortfolioStressTest(scenario = 'market_drop_20') {
-  return api.post('/portfolio/stress-test', { scenario })
+export function runPortfolioStressTest(scenario = 'market_drop_20', customShocks = null) {
+  return api.post('/portfolio/stress-test', { scenario, custom_shocks: customShocks })
+}
+
+/** 导出持仓为 CSV */
+export function exportPortfolioCsv() {
+  return api.get('/portfolio/export-csv', { responseType: 'blob' })
+}
+
+/** 从 CSV 导入持仓 */
+export function importPortfolioCsv(file) {
+  const formData = new FormData()
+  formData.append('file', file)
+  return api.post('/portfolio/import-csv-file', formData, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+  })
 }
 
 /** 获取家庭财务统一仪表盘 */

@@ -108,3 +108,4 @@ class WhatIfRequest(BaseModel):
 class StressTestRequest(BaseModel):
     """确定性压力测试请求。"""
     scenario: str = "market_drop_20"
+    custom_shocks: dict | None = None  # 自定义冲击系数 {"cash": 0, "equity": -0.3}
