@@ -2,6 +2,7 @@
 
 import json
 import logging
+import re
 import sqlite3
 from datetime import datetime
 
@@ -1226,7 +1227,7 @@ def lookup_fund_info(fund_code: str) -> dict | None:
         fund_name = str(row.get("基金简称", ""))
         fund_type_str = str(row.get("基金类型", ""))
         return {
-            "fund_code": str(row.get("基金代码", fund_code)),
+            "fund_code": re.sub(r"（.*?）", "", str(row.get("基金代码", fund_code))).strip(),
             "fund_name": fund_name,
             "fund_full_name": str(row.get("基金全称", "")),
             "fund_type": fund_type_str,
