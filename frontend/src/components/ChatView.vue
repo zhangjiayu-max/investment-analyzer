@@ -81,6 +81,18 @@ onBeforeUnmount(() => {
 
 function handleVisibilityChange() {
   if (document.visibilityState === 'visible') recoverFromDisconnect()
+  else pauseCurrentStream()
+}
+
+// 切走时中断当前 SSE 连接（后端任务继续执行，切回时从 DB 刷新）
+function pauseCurrentStream() {
+  if (!selectedConv.value?.id) return
+  const convId = selectedConv.value.id
+  const state = getStreamState(convId)
+  if (state?.sending) {
+    finishStream(convId)
+    console.log('[ChatView] 页面切走，中断 SSE 连接，任务将在后台继续')
+  }
 }
 
 function handlePageShow(e) {
@@ -93,20 +105,16 @@ async function recoverFromDisconnect() {
   isRecovering.value = true
   try {
     const convId = selectedConv.value.id
-    const state = getStreamState(convId)
-    const hasActiveTask = state?.sending || messages.value.some(m => m.execution_status === 'streaming')
-    if (hasActiveTask) {
-      finishStream(convId)
-      showToast('正在刷新消息...', 'info')
-    }
-    messages.value = messages.value.filter(m =>
-      !(m.role === 'assistant' && m.content?.startsWith('发生错误:'))
-    )
+    // 强制从 DB 刷新消息（DB 有真实的 execution_status）
     await loadMessages(convId)
     const lastAssistant = [...messages.value].reverse().find(m => m.role === 'assistant')
     if (lastAssistant?.execution_status === 'streaming') {
+      // DB 中仍为 streaming，说明后端任务还在跑，恢复 SSE 连接
       showToast('检测到后台执行中的任务，正在恢复连接...', 'info')
       reconnectStream(convId, lastAssistant)
+    } else if (lastAssistant?.execution_status === 'completed') {
+      // DB 已完成，SSE 之前断了没收到 done 事件，静默刷新即可
+      console.log('[ChatView] 页面切回，任务已完成，已刷新消息')
     }
     loadConversations()
   } finally {
