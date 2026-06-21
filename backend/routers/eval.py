@@ -1041,12 +1041,12 @@ async def auto_regression_api(limit: int = 10):
             dimensions = await _score_answer_quality(question, answer[:2000], expected_quality)
             total_score = sum(dimensions.values()) / len(dimensions) if dimensions else 0
 
-            # 保存运行结果（含回答摘要）
-            answer_summary = answer[:200].replace("\n", " ")
+            # 保存运行结果（含完整回答）
+            answer_summary = answer[:300].replace("\n", " ")
             create_eval_run(
                 case_id=case_id, analysis_type=analysis_type,
                 result_summary=answer_summary,
-                result_data=json.dumps({"answer": answer[:1000], "dimensions": dimensions}, ensure_ascii=False),
+                result_data=json.dumps({"answer": answer, "dimensions": dimensions}, ensure_ascii=False),
                 score=round(total_score, 1), duration_ms=duration_ms,
             )
 
