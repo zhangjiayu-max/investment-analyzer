@@ -405,7 +405,7 @@ async def resume_conversation(conv_id: int, request: Request):
                     "execution_status": "completed",
                     "complexity": final_complexity,
                     "specialist_results": [
-                        {"agent_key": s.get("agent_key", ""), "agent": s["agent"], "icon": s["icon"], "analysis": s.get("analysis", "")[:3000]}
+                        {"agent_key": s.get("agent_key", ""), "agent": s.get("agent", ""), "icon": s.get("icon", ""), "analysis": s.get("analysis", "")[:3000]}
                         for s in specialist_results_so_far
                     ],
                     "tool_calls": tool_calls_so_far,
@@ -493,7 +493,7 @@ async def send_message_api(conv_id: int, req: SendMessageRequest):
     specialist_results = llm_result.get("specialist_results", [])
     metadata_dict = {
         "specialist_results": [
-            {"agent_key": s.get("agent_key", ""), "agent": s["agent"], "icon": s["icon"], "analysis": s.get("analysis", "")[:3000]}
+            {"agent_key": s.get("agent_key", ""), "agent": s.get("agent", ""), "icon": s.get("icon", ""), "analysis": s.get("analysis", "")[:3000]}
             for s in specialist_results
         ],
         "tool_calls": llm_result.get("tool_calls", []),
@@ -520,7 +520,7 @@ async def send_message_api(conv_id: int, req: SendMessageRequest):
     return {
         "answer": answer,
         "specialist_results": [
-            {"agent_key": s.get("agent_key", ""), "agent": s["agent"], "icon": s["icon"], "analysis": s.get("analysis", "")}
+            {"agent_key": s.get("agent_key", ""), "agent": s.get("agent", ""), "icon": s.get("icon", ""), "analysis": s.get("analysis", "")}
             for s in specialist_results
         ],
         "rag": {
@@ -804,7 +804,7 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
                     # 存储回复
                     metadata_dict = {
                         "specialist_results": [
-                            {"agent_key": s.get("agent_key", ""), "agent": s["agent"], "icon": s["icon"], "analysis": s.get("analysis", "")[:3000]}
+                            {"agent_key": s.get("agent_key", ""), "agent": s.get("agent", ""), "icon": s.get("icon", ""), "analysis": s.get("analysis", "")[:3000]}
                             for s in specialist_results
                         ],
                         "complexity": complexity,
@@ -879,8 +879,8 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
 
             def _save_progress(status="streaming"):
                 try:
-                    p1 = [{"agent_key": s["agent_key"], "agent": s["agent"], "icon": s.get("icon", ""), "analysis": s.get("analysis", "")[:3000]} for s in _prod_spec_results if not s.get("is_cross_review")]
-                    p2 = [{"agent_key": s["agent_key"], "agent": s["agent"], "icon": s.get("icon", ""), "analysis": s.get("analysis", "")[:3000]} for s in _prod_spec_results if s.get("is_cross_review")]
+                    p1 = [{"agent_key": s["agent_key"], "agent": s.get("agent", ""), "icon": s.get("icon", ""), "analysis": s.get("analysis", "")[:3000]} for s in _prod_spec_results if not s.get("is_cross_review")]
+                    p2 = [{"agent_key": s["agent_key"], "agent": s.get("agent", ""), "icon": s.get("icon", ""), "analysis": s.get("analysis", "")[:3000]} for s in _prod_spec_results if s.get("is_cross_review")]
                     update_message_metadata(stream_msg_id, {
                         "execution_status": status, "complexity": complexity,
                         "specialist_results": p1, "cross_review_results": p2,
@@ -900,8 +900,8 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
                     content = review["content"]
                 except Exception:
                     pass
-                p1 = [{"agent_key": s["agent_key"], "agent": s["agent"], "icon": s.get("icon", ""), "analysis": s.get("analysis", "")[:3000]} for s in _prod_spec_results if not s.get("is_cross_review")]
-                p2 = [{"agent_key": s["agent_key"], "agent": s["agent"], "icon": s.get("icon", ""), "analysis": s.get("analysis", "")[:3000]} for s in _prod_spec_results if s.get("is_cross_review")]
+                p1 = [{"agent_key": s["agent_key"], "agent": s.get("agent", ""), "icon": s.get("icon", ""), "analysis": s.get("analysis", "")[:3000]} for s in _prod_spec_results if not s.get("is_cross_review")]
+                p2 = [{"agent_key": s["agent_key"], "agent": s.get("agent", ""), "icon": s.get("icon", ""), "analysis": s.get("analysis", "")[:3000]} for s in _prod_spec_results if s.get("is_cross_review")]
                 if stream_msg_id > 0:
                     update_message_content_and_metadata(stream_msg_id, content, {
                         "execution_status": "completed", "complexity": complexity,
@@ -932,8 +932,8 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
             def _save_failed(err_msg):
                 if stream_msg_id <= 0:
                     return
-                p1 = [{"agent_key": s["agent_key"], "agent": s["agent"], "icon": s.get("icon", ""), "analysis": s.get("analysis", "")[:3000]} for s in _prod_spec_results if not s.get("is_cross_review")]
-                p2 = [{"agent_key": s["agent_key"], "agent": s["agent"], "icon": s.get("icon", ""), "analysis": s.get("analysis", "")[:3000]} for s in _prod_spec_results if s.get("is_cross_review")]
+                p1 = [{"agent_key": s["agent_key"], "agent": s.get("agent", ""), "icon": s.get("icon", ""), "analysis": s.get("analysis", "")[:3000]} for s in _prod_spec_results if not s.get("is_cross_review")]
+                p2 = [{"agent_key": s["agent_key"], "agent": s.get("agent", ""), "icon": s.get("icon", ""), "analysis": s.get("analysis", "")[:3000]} for s in _prod_spec_results if s.get("is_cross_review")]
                 update_message_content_and_metadata(stream_msg_id, f"❌ 执行失败: {err_msg}", {
                     "execution_status": "failed", "complexity": complexity,
                     "specialist_results": p1, "cross_review_results": p2, "trace_id": trace_id,
