@@ -1548,3 +1548,48 @@ async def get_task_status(conv_id: int):
     from db.conversations import get_conversation_progress
     progress = get_conversation_progress(conv_id)
     return progress
+
+
+@router.get("/api/conversations/{conv_id}/export")
+async def export_conversation(conv_id: int, format: str = "markdown"):
+    """导出对话为 Markdown 文件。"""
+    from fastapi.responses import Response
+    from db.conversations import get_conversation, get_messages
+    conv = get_conversation(conv_id)
+    if not conv:
+        raise HTTPException(404, "对话不存在")
+    messages = get_messages(conv_id)
+    if not messages:
+        raise HTTPException(400, "对话无消息")
+
+    lines = [f"# {conv.get('title', '投资分析对话')}\n"]
+    lines.append(f"导出时间: {__import__('datetime').datetime.now().strftime('%Y-%m-%d %H:%M')}\n")
+    lines.append("---\n")
+    for msg in messages:
+        role = "🧑 用户" if msg.get("role") == "user" else "🤖 助手"
+        lines.append(f"## {role}\n")
+        content = msg.get("content", "")
+        lines.append(f"{content}\n")
+        # 附带专家结果
+        meta = msg.get("metadata")
+        if isinstance(meta, str):
+            try:
+                import json
+                meta = json.loads(meta)
+            except Exception:
+                meta = None
+        if meta and meta.get("specialist_results"):
+            lines.append("### 专家分析\n")
+            for s in meta["specialist_results"]:
+                lines.append(f"**{s.get('agent', '')}**:\n{s.get('analysis', '')[:2000]}\n")
+        if msg.get("created_at"):
+            lines.append(f"_{msg['created_at']}_\n")
+        lines.append("---\n")
+
+    content = "\n".join(lines)
+    filename = f"conversation_{conv_id}_{__import__('datetime').datetime.now().strftime('%Y%m%d')}.md"
+    return Response(
+        content=content.encode("utf-8"),
+        media_type="text/markdown; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
