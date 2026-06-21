@@ -734,6 +734,33 @@ _FRESHNESS_POLICY = {
 }
 
 
+def _build_fts_query_core(query: str) -> str:
+    """中等严格度查询：仅用投资核心术语 AND，去掉口语辅助词。
+    
+    当全词 AND 结果太少时，用这个作为中间降级（比全词 AND 宽松，比全词 OR 严格）。
+    策略：只取最长的 2-3 个核心术语做 AND，避免术语过多导致零匹配。
+    """
+    tokens = _tokenize(query).split()
+    tokens = [t for t in tokens if t and t not in _STOPWORDS]
+    cleaned = [_sanitize_fts_token(t) for t in tokens]
+    cleaned = [t for t in cleaned if t]
+    multi_char = [t for t in cleaned if len(t) >= 2]
+    
+    if not multi_char:
+        return ""
+    
+    # 只保留投资核心术语
+    core = [t for t in multi_char if t.strip('"') in _FINANCE_CORE_TERMS]
+    if core:
+        # 去重后取最长的 2-3 个（术语太多容易 AND 零匹配）
+        unique = list(dict.fromkeys(core))  # 保序去重
+        unique.sort(key=len, reverse=True)
+        return " AND ".join(unique[:3])
+    # 没有命中核心术语时，取前3个最长的词
+    sorted_by_len = sorted(multi_char, key=len, reverse=True)
+    return " AND ".join(sorted_by_len[:3])
+
+
 def _build_fts_query_relaxed(query: str) -> str:
     """生成宽松的 FTS5 查询（OR 连接），作为 AND 无结果时的降级方案。"""
     tokens = _tokenize(query).split()
@@ -776,9 +803,21 @@ def search_knowledge(query: str, content_type: str = None, limit: int = 5) -> tu
     except Exception:
         rows = []
 
-    # AND 结果太少时降级为 OR
+    # 三级降级策略：全词 AND → 核心词 AND → 全词 OR
     and_fallback_threshold = get_rag_config_int("and_fallback_threshold", 3)
     if len(rows) < and_fallback_threshold:
+        # 第二级：核心术语 AND（比全词 AND 宽松，比全词 OR 严格）
+        core_query = _build_fts_query_core(query)
+        if core_query and core_query != fts_query:
+            try:
+                core_rows = _execute(core_query)
+                if len(core_rows) > len(rows):
+                    rows = core_rows
+            except Exception:
+                pass
+    
+    if len(rows) < and_fallback_threshold:
+        # 第三级：全词 OR（最宽松）
         relaxed_query = _build_fts_query_relaxed(query)
         if relaxed_query and relaxed_query != fts_query:
             try:
@@ -1619,6 +1658,42 @@ def build_rag_context_with_details(query: str, content_types: list[str] = None, 
         total_freshness_filtered += dropped
 
     fts_count = len(fts_results)
+
+    # 补充搜索：当查询较长且 FTS 结果中没有新入库的知识条目时，用核心词再搜一次
+    # 解决口语化长查询中 AND 匹配了噪音词但漏掉核心知识的问题
+    if fts_results and len(multi_char) > 4:
+        has_recent_entry = any(
+            r.get('reference_id') and str(r['reference_id']).isdigit() and int(r['reference_id']) >= 12001
+            for r in fts_results
+        )
+        if not has_recent_entry:
+            # 取最长的 2 个核心词做 AND 补充搜索
+            query_core_terms = [t for t in multi_char if t.strip('"') in _FINANCE_CORE_TERMS]
+            if not query_core_terms:
+                query_core_terms = sorted(multi_char, key=len, reverse=True)[:2]
+            core_supplement_q = " AND ".join(query_core_terms[:2])
+            try:
+                conn2 = _get_conn()
+                supplement_rows = conn2.execute("""
+                    SELECT content_type, title, body, reference_id, rank
+                    FROM knowledge_fts WHERE knowledge_fts MATCH ? ORDER BY rank LIMIT ?
+                """, (core_supplement_q, limit * 2)).fetchall()
+                conn2.close()
+                supplement_results = [dict(r) for r in supplement_rows]
+                supplement_results, supp_dropped = _filter_old_results(supplement_results)
+                total_freshness_filtered += supp_dropped
+                existing_keys = {f"{r['content_type']}:{r['reference_id']}" for r in fts_results}
+                added = 0
+                for r in supplement_results:
+                    key = f"{r['content_type']}:{r['reference_id']}"
+                    if key not in existing_keys:
+                        fts_results.append(r)
+                        existing_keys.add(key)
+                        added += 1
+                if added:
+                    logger.info(f"核心词补充搜索: '{core_supplement_q}' 补入 {added} 条")
+            except Exception as e:
+                logger.warning(f"核心词补充搜索失败: {e}")
 
     # 向量搜索（使用扩展查询，补充口语化同义词提升语义匹配）
     # 候选数量放大 2 倍，经 RRF 融合 + 分数阈值后再截取 top limit

@@ -3571,7 +3571,7 @@ function txDisplayAmount(tx) {
                 <td>{{ m.company || '-' }}</td>
                 <td>{{ m.career_years ? m.career_years + '年' : '-' }}</td>
                 <td>{{ m.total_scale ? (m.total_scale).toFixed(0) + '亿' : '-' }}</td>
-                <td :class="m.best_return > 100 ? 'positive' : ''">{{ m.best_return ? m.best_return + '%' : '-' }}</td>
+                <td :class="m.best_return > 0 ? 'return-positive' : m.best_return < 0 ? 'return-negative' : ''">{{ m.best_return ? m.best_return + '%' : '-' }}</td>
                 <td><small>{{ m.fund_type || '-' }}</small></td>
               </tr>
             </tbody>
@@ -4976,6 +4976,8 @@ function txDisplayAmount(tx) {
 .fund-code { font-weight: 600; font-size: 0.82rem; }
 .fund-name { font-size: 0.72rem; color: var(--color-text-muted); }
 .positive { color: var(--color-success) !important; }
+.return-positive { color: #dc2626 !important; font-weight: 700; }
+.return-negative { color: #16a34a !important; font-weight: 700; }
 .tab-badge {
   display: inline-block;
   padding: 1px 6px;
