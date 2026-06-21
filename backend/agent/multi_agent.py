@@ -269,7 +269,7 @@ def run_specialist(agent_key: str, query: str, context: str = "",
                 tools=agent_tools,
                 tool_choice="auto",
                 temperature=0.3,
-                max_tokens=2000,
+                max_tokens=8000,
             )
         except Exception as e:
             err_msg = str(e)
@@ -282,7 +282,7 @@ def run_specialist(agent_key: str, query: str, context: str = "",
                     model=MODEL,
                     messages=llm_messages,
                     temperature=0.3,
-                    max_tokens=2000,
+                    max_tokens=8000,
                 )
                 answer = response.choices[0].message.content or ""
                 break
@@ -358,7 +358,7 @@ def run_specialist(agent_key: str, query: str, context: str = "",
                 model=MODEL,
                 messages=llm_messages,
                 temperature=0.3,
-                max_tokens=2000,
+                max_tokens=8000,
             )
             answer = response.choices[0].message.content or ""
         except Exception:
@@ -469,7 +469,7 @@ def run_specialist_with_context(agent_key: str, query: str, peer_analyses: dict,
                 tools=agent_tools,
                 tool_choice="auto",
                 temperature=0.3,
-                max_tokens=2000,
+                max_tokens=8000,
             )
         except Exception as e:
             err_msg = str(e)
@@ -480,7 +480,7 @@ def run_specialist_with_context(agent_key: str, query: str, peer_analyses: dict,
                     model=MODEL,
                     messages=llm_messages,
                     temperature=0.3,
-                    max_tokens=2000,
+                    max_tokens=8000,
                 )
                 answer = response.choices[0].message.content or ""
                 break
@@ -548,7 +548,7 @@ def run_specialist_with_context(agent_key: str, query: str, peer_analyses: dict,
                 model=MODEL,
                 messages=llm_messages,
                 temperature=0.3,
-                max_tokens=2000,
+                max_tokens=8000,
             )
             answer = response.choices[0].message.content or ""
         except Exception:
@@ -657,7 +657,7 @@ def run_arbitration(query: str, specialist_results: list, rag_context: str = "")
     response = call_arbitration_llm(
         messages=llm_messages,
         temperature=0.2,
-        max_tokens=3000,
+        max_tokens=8000,
     )
 
     if response is None:
@@ -668,7 +668,7 @@ def run_arbitration(query: str, specialist_results: list, rag_context: str = "")
             model=MODEL,
             messages=llm_messages,
             temperature=0.2,
-            max_tokens=3000,
+            max_tokens=8000,
         )
 
     answer = response.choices[0].message.content or ""

@@ -222,7 +222,7 @@ def analyze_article(title: str, content: str, market_data: dict = None) -> str:
             {"role": "user", "content": user_msg},
         ],
         temperature=get_config_float('llm.temperature_default', 0.3),
-        max_tokens=get_config_int('llm.max_tokens_chat', 4000),
+        max_tokens=get_config_int('llm.max_tokens_chat', 8000),
     )
 
     return response.choices[0].message.content
@@ -250,7 +250,7 @@ def analyze_article_stream(title: str, content: str, market_data: dict = None):
                 {"role": "user", "content": user_msg},
             ],
             temperature=get_config_float('llm.temperature_default', 0.3),
-            max_tokens=get_config_int('llm.max_tokens_chat', 4000),
+            max_tokens=get_config_int('llm.max_tokens_chat', 8000),
             stream=True,
         )
 
@@ -296,7 +296,7 @@ def chat_about_investment(question: str, context: str = "", valuation_context: s
         model=MODEL,
         messages=messages,
         temperature=get_config_float('llm.temperature_default', 0.3),
-        max_tokens=get_config_int('llm.max_tokens_analysis', 2000),
+        max_tokens=get_config_int('llm.max_tokens_analysis', 8000),
     )
 
     return response.choices[0].message.content
@@ -392,7 +392,7 @@ def analyze_image(image_path: str) -> dict:
             ],
         }],
         temperature=get_config_float('llm.temperature_vision', 0.1),
-        max_tokens=get_config_int('llm.max_tokens_analysis', 2000),
+        max_tokens=get_config_int('llm.max_tokens_analysis', 8000),
     )
 
     raw = response.choices[0].message.content.strip()
@@ -538,7 +538,7 @@ def chat_with_tools(
                 tools=TOOLS,
                 tool_choice="auto",
                 temperature=get_config_float('llm.temperature_default', 0.3),
-                max_tokens=get_config_int('llm.max_tokens_analysis', 2000),
+                max_tokens=get_config_int('llm.max_tokens_analysis', 8000),
             )
         except Exception as e:
             err_msg = str(e)
@@ -617,7 +617,7 @@ def chat_with_tools(
             model=MODEL,
             messages=llm_messages,
             temperature=get_config_float('llm.temperature_default', 0.3),
-            max_tokens=get_config_int('llm.max_tokens_analysis', 2000),
+            max_tokens=get_config_int('llm.max_tokens_analysis', 8000),
         )
         final_answer = response.choices[0].message.content or ""
     except Exception:

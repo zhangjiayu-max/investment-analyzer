@@ -152,7 +152,7 @@ async def generate_prompt_api(req: GeneratePromptRequest):
                 {"role": "user", "content": user_content},
             ],
             model=MODEL,
-            max_tokens=2000,
+            max_tokens=8000,
         )
         result = resp.choices[0].message.content if resp and resp.choices else ""
         if not result:

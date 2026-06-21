@@ -85,7 +85,7 @@ def fusion_score(stock_result: dict, kyc_profile: dict = None) -> dict:
                 {"role": "user", "content": prompt},
             ],
             temperature=0.2,
-            max_tokens=800,
+            max_tokens=2000,
         )
         raw = response.choices[0].message.content.strip()
         if "```" in raw:

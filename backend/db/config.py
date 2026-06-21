@@ -30,8 +30,8 @@ DEFAULT_CONFIGS = [
     ('llm.temperature_analysis', '0.3', '分析任务温度', 'llm'),
     ('llm.temperature_vision', '0.1', '图片分析温度', 'llm'),
     ('llm.max_tokens_report', '8192', '报告最大token', 'llm'),
-    ('llm.max_tokens_chat', '4000', '对话最大token', 'llm'),
-    ('llm.max_tokens_analysis', '2000', '分析最大token', 'llm'),
+    ('llm.max_tokens_chat', '8000', '对话最大token', 'llm'),
+    ('llm.max_tokens_analysis', '8000', '分析最大token', 'llm'),
 
     # 内容截断限制
     ('truncation.article_content', '8000', '文章内容截断长度', 'llm'),

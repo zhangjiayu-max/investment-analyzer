@@ -689,7 +689,7 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
                 resp = await asyncio.to_thread(lambda: _call_llm(
                     caller="chat", model=MODEL, messages=chat_messages,
                     temperature=get_config_float("llm.temperature_default", 0.3),
-                    max_tokens=get_config_int("llm.max_tokens_report", 4096),
+                    max_tokens=get_config_int("llm.max_tokens_report", 8000),
                 ))
                 answer = resp.choices[0].message.content or "抱歉，我无法回答这个问题。"
                 # 清理 reasoning_content
