@@ -1,6 +1,6 @@
 <script setup>
 import { ref, computed, onMounted } from 'vue'
-import { listDecisions, updateDecisionStatus, submitDecisionReview, completeDecisionAction, getDecisionPrecheck, getExecutionStatus } from '../api'
+import { listDecisions, updateDecisionStatus, submitDecisionReview, completeDecisionAction, getDecisionPrecheck, getExecutionStatus, getDecisionTimeline } from '../api'
 import { useToast } from '../composables/useToast'
 import Icon from './ui/Icon.vue'
 import ConfirmDialog from './ConfirmDialog.vue'
@@ -31,6 +31,30 @@ const reviewSaving = ref(false)
 
 // ── 确认弹窗 ──
 const confirmState = ref({ visible: false, title: '', message: '', onConfirm: null })
+
+// ── 时间线弹窗 ──
+const timelineModal = ref({ visible: false, decision: null, loading: false, data: null })
+
+async function openTimeline(decision) {
+  timelineModal.value = { visible: true, decision, loading: true, data: null }
+  try {
+    const { data } = await getDecisionTimeline(decision.id)
+    timelineModal.value.data = data
+  } catch (e) {
+    showToast('加载时间线失败', 'error')
+    timelineModal.value.visible = false
+  } finally {
+    timelineModal.value.loading = false
+  }
+}
+
+function timelineEventClass(eventType) {
+  if (eventType === 'created') return 'tl-created'
+  if (eventType.startsWith('status_')) return 'tl-status'
+  if (eventType === 'action_done') return 'tl-action'
+  if (eventType === 'reviewed') return 'tl-review'
+  return 'tl-default'
+}
 
 // ── 统计 ──
 const stats = computed(() => {
@@ -325,6 +349,7 @@ onMounted(load)
           <div class="card-meta">
             <span><Icon name="calendar" size="13" /> {{ formatDate(d.created_at) }}</span>
             <span><Icon name="file-text" size="13" /> {{ d.source_type === 'chat' ? 'AI对话' : d.source_type === 'dashboard' ? '看板' : d.source_type }}</span>
+            <button class="timeline-link" @click="openTimeline(d)"><Icon name="clock" size="13" /> 时间线</button>
           </div>
           <!-- 预检查 -->
           <div v-if="precheckItems(d.id).length" class="precheck-list">
@@ -404,6 +429,7 @@ onMounted(load)
           <div class="card-meta">
             <span><Icon name="calendar" size="13" /> {{ formatDate(d.created_at) }}</span>
             <span v-if="d.review_at"><Icon name="alarm-clock" size="13" /> 复盘到期 {{ formatDate(d.review_at) }}</span>
+            <button class="timeline-link" @click="openTimeline(d)"><Icon name="clock" size="13" /> 时间线</button>
           </div>
           <div class="card-actions">
             <button class="btn-sm btn-primary" @click="openReview(d)">
@@ -437,6 +463,7 @@ onMounted(load)
           <p class="card-summary">{{ d.summary }}</p>
           <div class="card-meta">
             <span><Icon name="calendar" size="13" /> {{ formatDate(d.created_at) }}</span>
+            <button class="timeline-link" @click="openTimeline(d)"><Icon name="clock" size="13" /> 时间线</button>
           </div>
           <!-- 复盘结果 -->
           <div v-if="d.review" class="review-result">
@@ -492,6 +519,51 @@ onMounted(load)
             提交复盘
           </button>
         </footer>
+      </div>
+    </div>
+
+    <!-- 时间线弹窗 -->
+    <div v-if="timelineModal.visible" class="modal-overlay" @click.self="timelineModal.visible = false">
+      <div class="modal-card modal-wide">
+        <header class="modal-head">
+          <h3>决策时间线</h3>
+          <button class="icon-btn" @click="timelineModal.visible = false"><Icon name="close" size="18" /></button>
+        </header>
+        <div class="modal-body">
+          <div v-if="timelineModal.loading" class="tl-loading">
+            <Icon name="spinner" size="24" />
+            <span>加载中...</span>
+          </div>
+          <div v-else-if="timelineModal.data" class="tl-container">
+            <div class="tl-header">
+              <strong>{{ timelineModal.data.summary }}</strong>
+              <span :class="['status-tag', statusClass(timelineModal.data.status)]">{{ statusLabel(timelineModal.data.status) }}</span>
+            </div>
+            <div class="tl-list">
+              <div
+                v-for="(ev, i) in timelineModal.data.timeline"
+                :key="i"
+                :class="['tl-item', timelineEventClass(ev.event_type)]"
+              >
+                <div class="tl-dot">{{ ev.icon }}</div>
+                <div class="tl-content">
+                  <div class="tl-label">{{ ev.label }}</div>
+                  <div class="tl-time">{{ ev.time }}</div>
+                  <div v-if="ev.detail && typeof ev.detail === 'string'" class="tl-detail">{{ ev.detail }}</div>
+                  <div v-if="ev.lesson" class="tl-lesson">
+                    <Icon name="lightbulb" size="13" /> {{ ev.lesson }}
+                  </div>
+                  <div v-if="ev.profit_change != null" class="tl-pnl" :class="ev.profit_change >= 0 ? 'positive' : 'negative'">
+                    {{ ev.profit_change >= 0 ? '+' : '' }}¥{{ money(ev.profit_change) }}
+                  </div>
+                </div>
+              </div>
+              <div v-if="!timelineModal.data.timeline?.length" class="tl-empty">
+                暂无时间线数据
+              </div>
+            </div>
+          </div>
+        </div>
       </div>
     </div>
 
@@ -881,6 +953,121 @@ onMounted(load)
   background: none;
 }
 .icon-btn:hover { background: var(--color-bg-hover); color: var(--color-text-primary); }
+
+/* 时间线链接 */
+.timeline-link {
+  background: none;
+  border: none;
+  color: var(--color-text-muted);
+  font-size: 0.75rem;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 0;
+  transition: color 0.15s;
+}
+.timeline-link:hover { color: var(--color-primary); }
+
+/* 时间线弹窗 */
+.modal-wide { max-width: 560px; }
+.tl-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  padding: var(--space-8) 0;
+  color: var(--color-text-muted);
+}
+.tl-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  margin-bottom: var(--space-4);
+}
+.tl-header strong {
+  font-size: 0.95rem;
+  color: var(--color-text-primary);
+}
+.tl-list {
+  position: relative;
+  padding-left: 28px;
+}
+.tl-list::before {
+  content: '';
+  position: absolute;
+  left: 11px;
+  top: 8px;
+  bottom: 8px;
+  width: 2px;
+  background: var(--color-border);
+}
+.tl-item {
+  position: relative;
+  padding-bottom: var(--space-4);
+}
+.tl-item:last-child { padding-bottom: 0; }
+.tl-dot {
+  position: absolute;
+  left: -28px;
+  top: 2px;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  background: var(--color-bg-card);
+  border: 2px solid var(--color-border);
+  z-index: 1;
+}
+.tl-item.tl-created .tl-dot { border-color: var(--color-primary); background: var(--color-primary-light, #eef2ff); }
+.tl-item.tl-status .tl-dot { border-color: var(--color-success); background: #ecfdf5; }
+.tl-item.tl-action .tl-dot { border-color: var(--color-warning, #f59e0b); background: #fffbeb; }
+.tl-item.tl-review .tl-dot { border-color: #8b5cf6; background: #f5f3ff; }
+.tl-content {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.tl-label {
+  font-size: 0.88rem;
+  font-weight: 500;
+  color: var(--color-text-primary);
+}
+.tl-time {
+  font-size: 0.75rem;
+  color: var(--color-text-muted);
+}
+.tl-detail {
+  font-size: 0.8rem;
+  color: var(--color-text-secondary);
+  margin-top: 2px;
+  line-height: 1.5;
+}
+.tl-lesson {
+  font-size: 0.8rem;
+  color: #8b5cf6;
+  margin-top: 2px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.tl-pnl {
+  font-size: 0.82rem;
+  font-weight: 600;
+  margin-top: 2px;
+}
+.tl-pnl.positive { color: var(--color-success); }
+.tl-pnl.negative { color: var(--color-danger, #ef4444); }
+.tl-empty {
+  text-align: center;
+  color: var(--color-text-muted);
+  padding: var(--space-6) 0;
+  font-size: 0.85rem;
+}
 
 /* 响应式 */
 /* 移动端 Tab */

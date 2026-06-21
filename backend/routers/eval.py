@@ -980,8 +980,11 @@ async def user_insights_api(user_id: str = "default"):
 
 
 @router.post("/api/eval/auto-regression")
-async def auto_regression_api(limit: int = 20):
-    """自动回归测试：运行 eval cases，多维度评分，检测退化。"""
+async def auto_regression_api(limit: int = 10):
+    """自动回归测试：对每个用例实际运行 Agent 回答，然后用 LLM 评分。
+
+    每条用例约 10-30 秒（含 Agent 回答 + LLM 评分），limit 默认 10 条控制总耗时。
+    """
     from db import list_eval_cases, get_eval_case, create_eval_run
     from db._conn import _get_conn
     import json
@@ -1016,35 +1019,46 @@ async def auto_regression_api(limit: int = 20):
                 params = {}
 
             question = params.get("question", "")
+            if not question:
+                duration_ms = int((time.time() - start) * 1000)
+                create_eval_run(case_id=case_id, analysis_type=analysis_type,
+                    result_summary="无问题参数", score=0, duration_ms=duration_ms)
+                results.append({"case_id": case_id, "status": "skip", "reason": "无问题"})
+                continue
+
+            # 1. 实际运行 Agent 获取回答
+            answer = await _run_agent_for_eval(question)
             duration_ms = int((time.time() - start) * 1000)
 
-            if not params or not expected_quality:
+            if not answer:
                 create_eval_run(case_id=case_id, analysis_type=analysis_type,
-                    result_summary="参数或期望质量缺失", score=0, duration_ms=duration_ms)
-                results.append({"case_id": case_id, "status": "fail", "score": 0, "reason": "参数缺失"})
+                    result_summary="Agent 无回答", score=0, duration_ms=duration_ms)
+                results.append({"case_id": case_id, "status": "fail", "score": 0, "reason": "Agent 无回答"})
                 failed += 1
                 continue
 
-            # 用 LLM 做多维度评分（不实际运行 agent，只检查用例质量）
-            dimensions = await _score_eval_case_quality(question, expected_quality, analysis_type)
+            # 2. 用 LLM 评分回答质量
+            dimensions = await _score_answer_quality(question, answer[:2000], expected_quality)
             total_score = sum(dimensions.values()) / len(dimensions) if dimensions else 0
 
+            # 保存运行结果（含回答摘要）
+            answer_summary = answer[:200].replace("\n", " ")
             create_eval_run(
                 case_id=case_id, analysis_type=analysis_type,
-                result_summary=json.dumps(dimensions, ensure_ascii=False),
+                result_summary=answer_summary,
+                result_data=json.dumps({"answer": answer[:1000], "dimensions": dimensions}, ensure_ascii=False),
                 score=round(total_score, 1), duration_ms=duration_ms,
             )
 
-            # 退化检测：检查最近 3 次运行是否连续低分
+            # 3. 退化检测
             conn = _get_conn()
             recent_runs = conn.execute("""
                 SELECT score FROM eval_runs WHERE case_id = ? ORDER BY created_at DESC LIMIT 3
             """, (case_id,)).fetchall()
             conn.close()
             recent_scores = [r["score"] for r in recent_runs if r["score"] is not None]
-
             is_degraded = len(recent_scores) >= 3 and all(s < 4 for s in recent_scores)
-            status = "degraded" if is_degraded else ("pass" if total_score >= 4 else "fail")
+            status = "degraded" if is_degraded else ("pass" if total_score >= 5 else "fail")
 
             if is_degraded:
                 degraded.append({"case_id": case_id, "name": case["name"], "scores": recent_scores})
@@ -1052,8 +1066,9 @@ async def auto_regression_api(limit: int = 20):
             results.append({
                 "case_id": case_id, "status": status, "score": round(total_score, 1),
                 "dimensions": dimensions, "duration_ms": duration_ms,
+                "answer_preview": answer[:100],
             })
-            if total_score >= 4:
+            if total_score >= 5:
                 passed += 1
             else:
                 failed += 1
@@ -1066,7 +1081,6 @@ async def auto_regression_api(limit: int = 20):
             results.append({"case_id": case_id, "status": "error", "error": str(e)[:200]})
             failed += 1
 
-    # 退化用例自动生成 bad case 提示
     if degraded:
         logging.warning(f"检测到 {len(degraded)} 个退化用例: {[d['name'] for d in degraded]}")
 
@@ -1076,35 +1090,121 @@ async def auto_regression_api(limit: int = 20):
     }
 
 
-async def _score_eval_case_quality(question: str, expected_quality: str, analysis_type: str) -> dict:
-    """对 eval case 质量做多维度规则评分。
+async def _run_agent_for_eval(question: str) -> str:
+    """运行 Agent 回答评测问题（简化版，直接调 LLM + RAG）。"""
+    try:
+        from llm_service import _call_llm, MODEL
+        from rag import build_rag_context_with_details
 
-    返回 {"data_accuracy": 0-10, "logic": 0-10, "actionability": 0-10, "risk_awareness": 0-10}
-    """
+        # 获取 RAG 上下文
+        rag_result = build_rag_context_with_details(query=question, limit=5)
+        rag_context = rag_result.get("context", "")
+
+        # 构建 prompt
+        system = "你是一位专业的投资分析助手。请根据提供的知识库资料，给出专业、准确、可操作的投资分析。必须引用具体数据，包含风险提示。"
+        user_msg = question
+        if rag_context:
+            user_msg = f"参考资料：\n{rag_context[:2000]}\n\n用户问题：{question}"
+
+        resp = _call_llm(
+            caller="eval_runner", model=MODEL,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user_msg},
+            ],
+            temperature=0.3, max_tokens=2000,
+        )
+
+        msg = resp.choices[0].message
+        content = (msg.content or "").strip()
+        if not content and hasattr(msg, "reasoning_content"):
+            content = (msg.reasoning_content or "").strip()
+        return content
+
+    except Exception as e:
+        logging.error(f"Agent 评测运行失败: {e}")
+        return ""
+
+
+async def _score_answer_quality(question: str, answer: str, expected_quality: str) -> dict:
+    """用 LLM 对 Agent 回答质量做多维度评分。"""
+    try:
+        from llm_service import _call_llm, MODEL
+
+        prompt = f"""请对以下投资分析回答评分，返回JSON格式。
+
+用户问题：{question[:300]}
+AI回答：{answer[:1000]}
+质量标准：{expected_quality[:300]}
+
+评分（0-10整数）：data_accuracy(数据准确性), logic(逻辑性), actionability(可操作性), risk_awareness(风险意识)
+
+直接返回JSON，如 {{"data_accuracy":8,"logic":7,"actionability":6,"risk_awareness":5}}"""
+
+        resp = _call_llm(
+            caller="eval_scorer", model=MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.2, max_tokens=500,
+        )
+
+        msg = resp.choices[0].message
+        text = (msg.content or "").strip()
+        if not text and hasattr(msg, "reasoning_content"):
+            text = (msg.reasoning_content or "").strip()
+
+        import re
+        # 匹配包含实际数字的 JSON（不是"分数"这种模板文字）
+        match = re.search(r'\{[^{}]*\d+[^{}]*\}', text)
+        if match:
+            try:
+                parsed = json.loads(match.group())
+                return {
+                    "data_accuracy": min(10, max(0, int(parsed.get("data_accuracy", 5)))),
+                    "logic": min(10, max(0, int(parsed.get("logic", 5)))),
+                    "actionability": min(10, max(0, int(parsed.get("actionability", 5)))),
+                    "risk_awareness": min(10, max(0, int(parsed.get("risk_awareness", 5)))),
+                }
+            except (json.JSONDecodeError, ValueError):
+                pass
+
+        # Fallback: 从 reasoning 中提取数字模式
+        scores = re.findall(r'(?:data_accuracy|logic|actionability|risk_awareness)[：:]\s*(\d+)', text)
+        if len(scores) >= 4:
+            return {
+                "data_accuracy": min(10, int(scores[0])),
+                "logic": min(10, int(scores[1])),
+                "actionability": min(10, int(scores[2])),
+                "risk_awareness": min(10, int(scores[3])),
+            }
+
+        # Fallback: 从回答内容做规则评分
+        return _rule_score_answer(answer, expected_quality)
+
+    except Exception as e:
+        logging.warning(f"回答质量评分失败: {e}")
+        return _rule_score_answer(answer, expected_quality)
+
+
+def _rule_score_answer(answer: str, expected_quality: str) -> dict:
+    """基于规则的回答质量评分（LLM 失败时的 fallback）。"""
+    a = answer.lower()
     eq = expected_quality.lower()
-    q = question.lower()
 
-    # 数据准确性：质量标准是否要求引用具体数据
-    data_keywords = ["数据", "pe", "pb", "净值", "估值", "百分位", "收益率", "金额", "价格", "具体", "引用", "列出"]
-    data_score = min(10, 3 + sum(2 for kw in data_keywords if kw in eq))
+    # 数据准确性
+    data_hits = sum(1 for kw in ["pe", "pb", "净值", "收益率", "百分位", "亿", "元", "%", "点"] if kw in a)
+    data_score = min(10, 3 + data_hits * 2)
 
-    # 逻辑严谨性：质量标准是否要求推理过程
-    logic_keywords = ["分析", "对比", "原因", "逻辑", "推演", "评估", "判断", "综合", "维度", "必须"]
-    logic_score = min(10, 3 + sum(1 for kw in logic_keywords if kw in eq))
+    # 逻辑性
+    logic_hits = sum(1 for kw in ["因为", "所以", "首先", "其次", "因此", "基于", "分析", "对比"] if kw in a)
+    logic_score = min(10, 3 + logic_hits * 2)
 
-    # 可操作性：质量标准是否要求给出具体建议
-    action_keywords = ["建议", "操作", "买入", "卖出", "加仓", "减仓", "配置", "比例", "金额", "方案", "策略"]
-    action_score = min(10, 3 + sum(2 for kw in action_keywords if kw in eq))
+    # 可操作性
+    action_hits = sum(1 for kw in ["建议", "可以", "买入", "卖出", "持有", "配置", "比例", "仓位", "分批"] if kw in a)
+    action_score = min(10, 3 + action_hits * 2)
 
-    # 风险意识：质量标准是否要求风险提示
-    risk_keywords = ["风险", "提示", "警告", "注意", "谨慎", "止损", "回撤", "波动", "不确定性"]
-    risk_score = min(10, 3 + sum(2 for kw in risk_keywords if kw in eq))
-
-    # 问题复杂度加成
-    if len(question) > 50:
-        data_score = min(10, data_score + 1)
-    if "orchestrator" in analysis_type:
-        logic_score = min(10, logic_score + 1)
+    # 风险意识
+    risk_hits = sum(1 for kw in ["风险", "注意", "谨慎", "回撤", "波动", "不确定", "止损", "控制"] if kw in a)
+    risk_score = min(10, 3 + risk_hits * 2)
 
     return {
         "data_accuracy": data_score,

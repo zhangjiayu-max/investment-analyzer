@@ -314,6 +314,7 @@ async def submit_rag_feedback_api(req: RagFeedbackRequest):
     if req.rating not in (1, -1):
         raise HTTPException(400, "rating 必须为 1（赞）或 -1（踩）")
     from db import save_rag_feedback
+    from db.knowledge import update_knowledge_usefulness
     feedback_id = save_rag_feedback(
         knowledge_id=req.knowledge_id,
         content_type=req.content_type,
@@ -321,4 +322,7 @@ async def submit_rag_feedback_api(req: RagFeedbackRequest):
         rating=req.rating,
         reasons=req.reasons,
     )
+    # 同步更新知识条目的 usefulness_score
+    if req.knowledge_id:
+        update_knowledge_usefulness(req.knowledge_id, helpful=(req.rating == 1))
     return {"ok": True, "id": feedback_id}

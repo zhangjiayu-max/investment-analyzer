@@ -304,3 +304,92 @@ def get_knowledge_stats() -> dict:
             for row in subcategories
         ]
     }
+
+
+def get_lessons_for_target(target_code: str, limit: int = 5) -> list[dict]:
+    """获取某个标的的历史教训（供 Agent 参考）。"""
+    conn = _get_conn()
+    try:
+        rows = conn.execute("""
+            SELECT * FROM knowledge_base
+            WHERE category = 'user_lesson'
+              AND (title LIKE ? OR content LIKE ?)
+            ORDER BY importance DESC, created_at DESC
+            LIMIT ?
+        """, (f'%{target_code}%', f'%{target_code}%', limit)).fetchall()
+        return [_parse_knowledge_row(row) for row in rows]
+    finally:
+        conn.close()
+
+
+def get_knowledge_feedback_stats() -> dict:
+    """知识反馈统计。"""
+    conn = _get_conn()
+    try:
+        total = conn.execute(
+            "SELECT COUNT(*) FROM knowledge_base WHERE category = 'user_lesson'"
+        ).fetchone()[0]
+
+        by_subcategory = conn.execute("""
+            SELECT subcategory, COUNT(*) as count
+            FROM knowledge_base
+            WHERE category = 'user_lesson'
+            GROUP BY subcategory
+            ORDER BY count DESC
+        """).fetchall()
+
+        recent = conn.execute("""
+            SELECT id, title, created_at FROM knowledge_base
+            WHERE category = 'user_lesson'
+            ORDER BY created_at DESC LIMIT 10
+        """).fetchall()
+
+        return {
+            "total_lessons": total,
+            "by_subcategory": {row["subcategory"]: row["count"] for row in by_subcategory},
+            "recent_lessons": [dict(row) for row in recent],
+        }
+    finally:
+        conn.close()
+
+
+def update_knowledge_usefulness(knowledge_id: int, helpful: bool):
+    """更新知识条目的有用性分数。"""
+    conn = _get_conn()
+    try:
+        # 确保字段存在
+        try:
+            conn.execute("ALTER TABLE knowledge_base ADD COLUMN usefulness_score INTEGER DEFAULT 0")
+        except Exception:
+            pass
+
+        if helpful:
+            conn.execute(
+                "UPDATE knowledge_base SET usefulness_score = COALESCE(usefulness_score, 0) + 1 WHERE id = ?",
+                (knowledge_id,),
+            )
+        else:
+            conn.execute(
+                "UPDATE knowledge_base SET usefulness_score = MAX(COALESCE(usefulness_score, 0) - 1, -10) WHERE id = ?",
+                (knowledge_id,),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_knowledge_usefulness(knowledge_id: int) -> int:
+    """获取知识条目的有用性分数。"""
+    conn = _get_conn()
+    try:
+        try:
+            conn.execute("ALTER TABLE knowledge_base ADD COLUMN usefulness_score INTEGER DEFAULT 0")
+            conn.commit()
+        except Exception:
+            pass
+        row = conn.execute(
+            "SELECT usefulness_score FROM knowledge_base WHERE id = ?", (knowledge_id,)
+        ).fetchone()
+        return row[0] if row else 0
+    finally:
+        conn.close()

@@ -74,6 +74,8 @@ from routers.finance_dashboard import router as finance_dashboard_router  # /api
 from routers.strategy_sandbox import router as strategy_sandbox_router  # /api/strategy-sandbox
 from routers.fund_manager import router as fund_manager_router  # /api/fund-manager
 from routers.data_health import router as data_health_router          # /api/data-health
+from routers.portfolio_import import router as portfolio_import_router  # /api/portfolio/import-csv
+from services.data_lineage import track_sources, get_lineage  # data lineage tracking
 
 # 注册路由
 app.include_router(valuation_router)
@@ -104,6 +106,7 @@ app.include_router(finance_dashboard_router)
 app.include_router(strategy_sandbox_router)
 app.include_router(fund_manager_router)
 app.include_router(data_health_router)
+app.include_router(portfolio_import_router)
 
 # 静态文件目录
 for _d in (STATIC_DIR, IMAGES_DIR, OUTPUT_DIR, UPLOADS_DIR, DD_IMAGES_DIR, VALUATION_IMAGES_DIR):

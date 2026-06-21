@@ -1789,6 +1789,18 @@ def build_rag_context_with_details(query: str, content_types: list[str] = None, 
             elif r.get("content_type") == "analysis":
                 r["_score"] *= 1.2  # 分析记录加权 20%
 
+    # 知识反馈加权：用户标记有用/无用的条目加权
+    try:
+        from db.knowledge import get_knowledge_usefulness
+        for r in all_results:
+            ref_id = r.get("reference_id")
+            if ref_id:
+                score = get_knowledge_usefulness(int(ref_id))
+                if score != 0:
+                    r["_score"] += score * 0.05  # 每次+/-1 影响 0.05 分
+    except Exception:
+        pass
+
     all_results.sort(key=lambda x: x["_score"], reverse=True)
 
     # 同书多样性：同一本书的结果超过 2 条后，逐条递减分数

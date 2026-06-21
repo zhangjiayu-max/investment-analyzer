@@ -2,6 +2,7 @@
 
 import logging
 from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel
 from db.knowledge import (search_knowledge, list_knowledge, get_knowledge_stats,
                           delete_knowledge, list_knowledge_books, cleanup_orphan_fts_records)
 
@@ -91,3 +92,64 @@ async def obsidian_status(vault_path: str = None):
         return {"ok": True, "output": result.stdout}
     except Exception as e:
         return {"ok": False, "error": str(e)}
+
+
+# ── 知识反馈回流 API ──
+
+@router.get("/lessons")
+async def get_lessons(target_code: str = None, limit: int = 20):
+    """获取经验教训列表，或按标的代码筛选。"""
+    from db.knowledge import get_lessons_for_target, list_knowledge
+    if target_code:
+        items = get_lessons_for_target(target_code, limit=limit)
+    else:
+        items = list_knowledge(category="user_lesson", limit=limit)
+    return {"items": items, "total": len(items)}
+
+
+@router.get("/feedback-stats")
+async def feedback_stats():
+    """知识反馈统计。"""
+    from db.knowledge import get_knowledge_feedback_stats
+    return get_knowledge_feedback_stats()
+
+
+class FeedbackRequest(BaseModel):
+    feedback_type: str = "user_correction"  # decision_lesson / user_correction / analysis_feedback
+    content: str
+    source_id: int | None = None
+    target_code: str = ""
+    target_name: str = ""
+    metadata: dict = {}
+
+
+@router.post("/feedback")
+async def submit_feedback(req: FeedbackRequest):
+    """手动提交反馈/纠正到知识库。"""
+    from db.knowledge import add_knowledge
+    from datetime import datetime
+
+    if not req.content.strip():
+        raise HTTPException(400, "内容不能为空")
+
+    category_map = {
+        "decision_lesson": "user_lesson",
+        "user_correction": "user_correction",
+        "analysis_feedback": "analysis_feedback",
+    }
+    category = category_map.get(req.feedback_type, "user_feedback")
+    title = f"用户反馈：{req.target_name or req.target_code or req.feedback_type}"
+
+    kid = add_knowledge(
+        category=category,
+        subcategory=req.feedback_type,
+        title=title,
+        content=req.content,
+        source=f"manual_feedback:{req.source_id}" if req.source_id else "manual_feedback",
+        keywords=[req.target_code, req.target_name, "用户反馈"],
+        importance=6,
+        atom_type="user_feedback",
+        evidence_level="user_memory",
+        as_of_date=datetime.now().strftime("%Y-%m-%d"),
+    )
+    return {"ok": True, "id": kid}
