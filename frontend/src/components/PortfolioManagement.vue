@@ -1282,6 +1282,9 @@ async function loadAllModeRecords() {
 let _panoramaCancelPoll = null
 const _panoramaGlobalState = { recordId: null, status: null, result: null }
 
+// 深度分析/指定基金分析全局状态（切页面后恢复结果）
+const _deepDiveGlobalState = { recordId: null, status: null, result: null, tokenUsage: 0, aiMode: null }
+
 async function runPanoramaMode() {
   modeLoading.value = true
   modeResult.value = ''
@@ -1373,10 +1376,17 @@ async function runDeepDiveMode() {
     }
     const recordId = data.id
     modeRecordId.value = recordId
+    // 保存到全局状态（切页面后可恢复）
+    _deepDiveGlobalState.recordId = recordId
+    _deepDiveGlobalState.status = 'running'
+    _deepDiveGlobalState.aiMode = aiMode.value
     pollAnalysisStatus(recordId, (status) => {
       if (status.status === 'done') {
         modeResult.value = status.result || ''
         aiTokenUsage.value = status.token_usage || 0
+        _deepDiveGlobalState.status = 'done'
+        _deepDiveGlobalState.result = status.result || ''
+        _deepDiveGlobalState.tokenUsage = status.token_usage || 0
         modeLoading.value = false
         loadDeepDiveRecords()
       } else if (status.status === 'error') {
@@ -1443,10 +1453,16 @@ async function runFundAnalysisMode() {
     const { data } = await runFundAnalysis(fundAnalysisCode.value.trim())
     const recordId = data.id
     modeRecordId.value = recordId
+    _deepDiveGlobalState.recordId = recordId
+    _deepDiveGlobalState.status = 'running'
+    _deepDiveGlobalState.aiMode = aiMode.value
     pollAnalysisStatus(recordId, (status) => {
       if (status.status === 'done') {
         modeResult.value = status.result || ''
         aiTokenUsage.value = status.token_usage || 0
+        _deepDiveGlobalState.status = 'done'
+        _deepDiveGlobalState.result = status.result || ''
+        _deepDiveGlobalState.tokenUsage = status.token_usage || 0
         modeLoading.value = false
         loadFundAnalysisRecords()
       } else if (status.status === 'error') {
@@ -1868,6 +1884,30 @@ onActivated(async () => {
   if (_panoramaGlobalState.recordId && _panoramaGlobalState.status === 'running') {
     // 恢复轮询，不重置 loading
     resumePanoramaPoll()
+  } else if (_deepDiveGlobalState.recordId && (_deepDiveGlobalState.status === 'running' || _deepDiveGlobalState.status === 'done')) {
+    // 恢复深度分析/指定基金分析结果
+    aiMode.value = _deepDiveGlobalState.aiMode || aiMode.value
+    modeRecordId.value = _deepDiveGlobalState.recordId
+    if (_deepDiveGlobalState.status === 'done' && _deepDiveGlobalState.result) {
+      modeResult.value = _deepDiveGlobalState.result
+      aiTokenUsage.value = _deepDiveGlobalState.tokenUsage || 0
+      modeLoading.value = false
+    } else if (_deepDiveGlobalState.status === 'running') {
+      modeLoading.value = true
+      pollAnalysisStatus(_deepDiveGlobalState.recordId, (status) => {
+        if (status.status === 'done') {
+          modeResult.value = status.result || ''
+          aiTokenUsage.value = status.token_usage || 0
+          _deepDiveGlobalState.status = 'done'
+          _deepDiveGlobalState.result = status.result || ''
+          modeLoading.value = false
+        } else if (status.status === 'error') {
+          modeResult.value = '分析失败：' + (status.error || '未知错误')
+          _deepDiveGlobalState.status = 'error'
+          modeLoading.value = false
+        }
+      })
+    }
   } else {
     modeLoading.value = false
   }
