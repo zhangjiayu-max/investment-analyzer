@@ -38,10 +38,11 @@ const props = defineProps({
 
 const emit = defineEmits(['view', 'close'])
 
-// 任务失败时 5 秒后自动关闭
+// 任务完成 8 秒后自动关闭，失败 5 秒后自动关闭
 watch(() => props.task, (newTask) => {
-  if (newTask && newTask.status === 'failed') {
-    setTimeout(() => emit('close'), 5000)
+  if (newTask) {
+    const delay = newTask.status === 'completed' ? 8000 : 5000
+    setTimeout(() => emit('close'), delay)
   }
 }, { immediate: true })
 </script>
