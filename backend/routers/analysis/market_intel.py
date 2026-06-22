@@ -1,14 +1,4 @@
-"""市场热点情报路由 — /api/market-intelligence/*
-
-数据来源：
-1. YingMi MCP SearchFinancialNews — 多关键词搜索（A股、半导体、AI、CPO光模块、通信、新能源）
-2. YingMi MCP SearchHotTopic — 热门话题
-3. akshare web_search — 东方财富/CCTV 补充资讯
-4. 债券温度 + 宏观政策数据
-5. 指数估值数据库（PE/PB 百分位）
-6. 用户持仓数据
-"""
-
+"""市场情报 — 从 market_intelligence.py 提取所有路由"""
 import asyncio
 import json
 import logging
@@ -27,25 +17,19 @@ from llm_service import _call_llm, MODEL
 from rag import build_rag_context_with_details, log_rag_search
 from market_data import get_market_overview
 
-router = APIRouter(prefix="/api/market-intelligence", tags=["market-intelligence"])
-
 logger = logging.getLogger(__name__)
+router = APIRouter(prefix="/api/market-intelligence", tags=["analysis-market-intel"])
 
 _background_tasks = set()
 
-# ── 缓存（使用数据库 analysis_cache 表，每日自动失效） ──────
+# ── 新闻搜索关键词 ──────────────────────────────────────────
 
-# ── 新闻搜索关键词（多维度覆盖） ──────────────────────────
-
-# 基础关键词（兜底用）
 _BASE_NEWS_KEYWORDS = ["A股 市场", "基金 投资"]
 
 
 async def _get_dynamic_keywords() -> list[str]:
     """从多个来源获取实时热点，动态生成搜索关键词。"""
     keywords = []
-
-    # 来源1: akshare 热门概念
     try:
         import akshare as ak
         df = ak.stock_hot_keyword_em()
@@ -56,7 +40,6 @@ async def _get_dynamic_keywords() -> list[str]:
     except Exception:
         pass
 
-    # 来源2: 盈米 MCP SearchHotTopic
     try:
         from mcp.yingmi_client import get_yingmi_client
         mcp = get_yingmi_client()
@@ -82,7 +65,6 @@ async def _get_dynamic_keywords() -> list[str]:
     except Exception:
         pass
 
-    # 去重并返回
     seen = set()
     unique = []
     for kw in keywords:
@@ -94,16 +76,12 @@ async def _get_dynamic_keywords() -> list[str]:
     return unique[:6]
 
 
-# ── 数据采集 ──────────────────────────────────────────────
-
-
 async def _fetch_news_multi() -> list[dict]:
-    """多关键词并行搜索财经新闻，去重后返回。关键词动态从市场热点获取。"""
+    """多关键词并行搜索财经新闻，去重后返回。"""
     try:
         from mcp.yingmi_client import get_yingmi_client
         mcp = get_yingmi_client()
 
-        # 动态获取热点关键词 + 基础关键词
         dynamic_kw = await _get_dynamic_keywords()
         all_keywords = dynamic_kw + _BASE_NEWS_KEYWORDS
         logger.info(f"[market-intel] 搜索关键词: {all_keywords}")
@@ -132,7 +110,6 @@ async def _fetch_news_multi() -> list[dict]:
                 return []
 
         results = await asyncio.gather(*[_search(kw) for kw in all_keywords])
-        # 去重（按标题）
         seen_titles = set()
         all_news = []
         for items in results:
@@ -141,14 +118,14 @@ async def _fetch_news_multi() -> list[dict]:
                 if title and title not in seen_titles:
                     seen_titles.add(title)
                     all_news.append(n)
-        return all_news[:15]  # 最多 15 条
+        return all_news[:15]
     except Exception as e:
         logger.warning(f"市场情报新闻获取失败: {e}")
     return []
 
 
 async def _fetch_web_news() -> list[dict]:
-    """akshare 补充资讯（东方财富 + CCTV）。"""
+    """akshare 补充资讯。"""
     try:
         from tools import execute_tool
         raw = await asyncio.to_thread(
@@ -156,7 +133,6 @@ async def _fetch_web_news() -> list[dict]:
         )
         if not raw:
             return []
-        # 尝试解析 JSON 格式的新闻结果
         if isinstance(raw, str):
             try:
                 parsed = json.loads(raw)
@@ -173,10 +149,8 @@ async def _fetch_web_news() -> list[dict]:
                     return items
             except (json.JSONDecodeError, KeyError):
                 pass
-            # 如果解析失败，返回原始文本作为单条新闻
             if len(raw) > 20:
                 return [{"title": "市场资讯", "summary": raw[:500], "source": "web_search", "date": "", "url": ""}]
-        # 如果是字典格式，直接解析
         elif isinstance(raw, dict):
             if raw.get("data", {}).get("items"):
                 items = []
@@ -195,10 +169,7 @@ async def _fetch_web_news() -> list[dict]:
 
 
 async def _fetch_cctv_news() -> list[dict]:
-    """获取央视新闻（新闻联播等），返回带分类的新闻列表。
-
-    分类：经济、金融、政策、农业、科技、贸易
-    """
+    """获取央视新闻。"""
     try:
         import akshare as ak
         today = datetime.now().strftime("%Y%m%d")
@@ -207,7 +178,6 @@ async def _fetch_cctv_news() -> list[dict]:
         if df is None or len(df) == 0:
             return []
 
-        # 央视新闻分类关键词
         CCTV_CATEGORIES = {
             "经济": ["经济", "GDP", "增长", "发展", "改革", "开放", "市场", "企业", "产业", "消费", "投资"],
             "金融": ["金融", "银行", "证券", "保险", "基金", "股市", "债券", "利率", "汇率", "央行", "货币政策"],
@@ -222,18 +192,15 @@ async def _fetch_cctv_news() -> list[dict]:
             title = str(row.get("title", ""))
             content = str(row.get("content", ""))[:500]
 
-            # 分类匹配
             category = "其他"
             for cat, keywords in CCTV_CATEGORIES.items():
                 if any(kw in title or kw in content for kw in keywords):
                     category = cat
                     break
 
-            # 只保留与经济金融相关的新闻
             if category == "其他":
                 continue
 
-            # 构建央视网搜索链接
             search_url = f"https://search.cctv.com/search.php?qtext={title}&type=web"
 
             results.append({
@@ -245,14 +212,14 @@ async def _fetch_cctv_news() -> list[dict]:
                 "url": search_url,
             })
 
-        return results[:10]  # 最多10条
+        return results[:10]
     except Exception as e:
         logger.warning(f"央视新闻获取失败: {e}")
         return []
 
 
 async def _fetch_hot_topics() -> list[dict]:
-    """获取热门话题（YingMi MCP SearchHotTopic）。"""
+    """获取热门话题。"""
     try:
         from mcp.yingmi_client import get_yingmi_client
         mcp = get_yingmi_client()
@@ -285,15 +252,9 @@ async def _fetch_hot_topics() -> list[dict]:
 
 
 async def _fetch_market_hotspots() -> list[dict]:
-    """获取市场热点板块和题材。
-
-    数据源：
-    1. 东方财富妙想 API（stockHotspot）— 官方 AI 热点分析
-    2. 东方财富人气排名 — 直接 API
-    """
+    """获取市场热点板块和题材。"""
     hotspots = []
 
-    # 1. 东方财富妙想热点分析
     try:
         from mcp.eastmoney_client import get_eastmoney_client
         from config import EASTMONEY_API_KEY
@@ -311,7 +272,6 @@ async def _fetch_market_hotspots() -> list[dict]:
     except Exception as e:
         logger.warning(f"东方财富妙想热点获取失败: {e}")
 
-    # 2. 东方财富资讯搜索（最新研报、新闻）
     try:
         from mcp.eastmoney_client import get_eastmoney_client
         from config import EASTMONEY_API_KEY
@@ -329,7 +289,6 @@ async def _fetch_market_hotspots() -> list[dict]:
     except Exception as e:
         logger.warning(f"东方财富资讯搜索失败: {e}")
 
-    # 3. 东方财富人气排名（直接 API，不依赖 SDK）
     try:
         import httpx
         async with httpx.AsyncClient(timeout=10) as http_client:
@@ -410,18 +369,14 @@ def _build_holdings_text() -> str:
     return "\n".join(lines)
 
 
-# ── 板块→指数/基金智能匹配 ─────────────────────────────────
-
-# 扩展的板块关键词映射（支持细分领域）
+# 扩展的板块关键词映射
 _SECTOR_ALIAS = {
-    # 细分科技
     "cpo": ["cpo", "光模块", "光通信", "光器件", "硅光"],
     "光模块": ["光模块", "光通信", "cpo", "光器件", "硅光"],
     "通信设备": ["通信", "5g", "6g", "基站", "射频", "天线"],
     "半导体": ["芯片", "半导体", "集成电路", "晶圆", "封测", "soc", "asic"],
     "人工智能": ["ai", "人工智能", "大模型", "算力", "智谱", "gpt", "机器人", "深度学习"],
     "消费电子": ["消费电子", "手机", "vr", "ar", "可穿戴"],
-    # 大类
     "新能源": ["新能源", "光伏", "风电", "储能", "锂电", "电池"],
     "消费": ["消费", "白酒", "食品", "啤酒", "餐饮", "零售", "家电"],
     "医药": ["医药", "医疗", "创新药", "疫苗", "cxo", "中药", "器械"],
@@ -436,11 +391,7 @@ _SECTOR_ALIAS = {
 
 
 def _fuzzy_match_sectors_to_data(sectors: list[dict]) -> list[dict]:
-    """将 LLM 返回的板块列表与指数/持仓做模糊匹配。
-
-    每个 sector dict 可能有 name 和 keywords 字段。
-    用 keywords + name 多维度匹配，比纯 name 子串匹配更准确。
-    """
+    """将 LLM 返回的板块列表与指数/持仓做模糊匹配。"""
     indexes = list_valuation_indexes()
     holdings = list_holdings()
     seen_idx = {}
@@ -452,17 +403,13 @@ def _fuzzy_match_sectors_to_data(sectors: list[dict]) -> list[dict]:
 
     for s in sectors:
         name = s.get("name", "")
-        # 收集所有匹配关键词：板块名 + 别名 + LLM 提供的 keywords
         match_terms = {name.lower()}
-        # 从别名表扩展
         alias_key = name.lower()
         if alias_key in _SECTOR_ALIAS:
             match_terms.update(k.lower() for k in _SECTOR_ALIAS[alias_key])
-        # LLM 可能返回 keywords 字段
         for kw in s.get("keywords", []):
             match_terms.add(kw.lower())
 
-        # 匹配指数
         related_indexes = []
         for idx in all_indexes:
             idx_name = (idx.get("index_name") or "").lower()
@@ -475,7 +422,6 @@ def _fuzzy_match_sectors_to_data(sectors: list[dict]) -> list[dict]:
                     "metric_type": idx.get("metric_type"),
                 })
 
-        # 匹配持仓
         related_funds = []
         for h in holdings:
             fname = (h.get("fund_name") or "").lower()
@@ -494,3 +440,326 @@ def _fuzzy_match_sectors_to_data(sectors: list[dict]) -> list[dict]:
 
 # ── API 端点 ──────────────────────────────────────────────
 
+
+@router.get("/overview")
+async def get_market_intelligence_overview(force: bool = False):
+    """市场热点情报概览 — 返回当日缓存（如已有）。"""
+    today = datetime.now().strftime("%Y-%m-%d")
+    cache_key = f"market_intelligence_{today}"
+
+    cached = get_analysis_cache(cache_key)
+    if cached:
+        return cached
+
+    return {
+        "news": [],
+        "cctv_news": [],
+        "cctv_signal": "",
+        "hot_topics": [],
+        "sectors": [],
+        "macro": {},
+        "summary": "暂无今日市场情报，请点击刷新触发分析",
+        "fetched_at": "",
+        "need_trigger": True,
+    }
+
+
+@router.post("/overview/trigger")
+async def trigger_market_intelligence():
+    """触发市场热点情报分析（异步）。"""
+    task_id = create_async_task("market_intelligence", caller="market_intelligence")
+    task = asyncio.create_task(_run_market_intelligence_async(task_id))
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+    return {"task_id": task_id, "status": "running"}
+
+
+async def _run_market_intelligence_async(task_id: int):
+    """后台执行市场热点情报分析。"""
+    try:
+        result = await _do_market_intelligence()
+        update_async_task(task_id, status="done", result=result)
+    except Exception as e:
+        logging.error(f"市场情报异步任务失败: {e}")
+        update_async_task(task_id, status="error", error_msg=str(e))
+
+
+async def _do_market_intelligence():
+    """市场热点情报分析业务逻辑。"""
+    today = datetime.now().strftime("%Y-%m-%d")
+    cache_key = f"market_intelligence_{today}"
+
+    now = time.time()
+
+    news, hot_topics, macro, cctv_news, market_hotspots, market_overview = await asyncio.gather(
+        _fetch_news_multi(),
+        _fetch_hot_topics(),
+        asyncio.to_thread(_fetch_macro_data),
+        _fetch_cctv_news(),
+        _fetch_market_hotspots(),
+        asyncio.to_thread(get_market_overview),
+    )
+    all_news = news
+
+    news_text = "\n".join(
+        f"- {n['title']}（{n.get('source', '')}）: {n.get('summary', '')[:150]}"
+        for n in all_news if n.get("title")
+    ) if all_news else "暂无新闻"
+
+    cctv_text = "\n".join(
+        f"- 【{n.get('category', '经济')}】{n['title']}: {n.get('summary', '')[:150]}"
+        for n in cctv_news if n.get("title")
+    ) if cctv_news else "暂无央视新闻"
+
+    topics_text = "\n".join(
+        f"- {t['title']}: {t.get('summary', '')[:100]}"
+        for t in hot_topics[:6] if t.get("title")
+    ) if hot_topics else "暂无热门话题"
+
+    hotspots_text = ""
+    if market_hotspots:
+        for h in market_hotspots:
+            source = h.get("source", "")
+            name = h.get("name", "")
+            content = h.get("content", "")
+            if content:
+                hotspots_text += f"【{source} - {name}】\n{content}\n\n"
+            elif name:
+                hotspots_text += f"- [{source}] {name}\n"
+
+    index_catalog = _build_index_catalog()
+    holdings_text = _build_holdings_text()
+
+    rag_context = ""
+    try:
+        rag_query = "市场热点 板块轮动 投资策略 行业分析"
+        rag_result = build_rag_context_with_details(query=rag_query, limit=5)
+        rag_context = rag_result.get("context", "")
+        log_rag_search(
+            conversation_id=0,
+            message_id=0,
+            query=rag_query,
+            keywords=rag_result.get("keywords", []),
+            results=rag_result.get("results", []),
+            fts_count=rag_result.get("fts_count", 0),
+            chroma_count=rag_result.get("chroma_count", 0),
+            freshness_filtered=rag_result.get("freshness_filtered", 0),
+        )
+    except Exception as e:
+        logger.warning(f"RAG 检索失败: {e}")
+
+    bond = macro.get("bond", {})
+    bond_text = f"债券温度{bond.get('temperature', '?')}°，收益率{bond.get('rate', '?')}%" if bond else "暂无"
+    policy = macro.get("policy", {})
+    policy_text = ""
+    if policy.get("lpr"):
+        lpr = policy["lpr"]
+        if isinstance(lpr, dict):
+            policy_text += f"LPR: {lpr.get('1y', '?')}/{lpr.get('5y', '?')} "
+    if policy.get("cpi"):
+        cpi = policy["cpi"]
+        if isinstance(cpi, dict):
+            policy_text += f"CPI: {cpi.get('latest', '?')}% "
+
+    sector_perf_text = ""
+    if market_overview:
+        sectors_top = market_overview.get("sectors_top", [])
+        sectors_bottom = market_overview.get("sectors_bottom", [])
+        breadth = market_overview.get("breadth", {})
+        
+        if sectors_top:
+            sector_perf_text += "领涨板块：\n"
+            for s in sectors_top[:8]:
+                sector_perf_text += f"- {s['name']}: +{s['change_pct']}%  领涨:{s.get('lead_stock', '')}{s.get('lead_change', '')}%\n"
+        
+        if sectors_bottom:
+            sector_perf_text += "领跌板块：\n"
+            for s in sectors_bottom[:5]:
+                sector_perf_text += f"- {s['name']}: {s['change_pct']}%\n"
+        
+        if breadth:
+            sector_perf_text += f"涨跌家数：{breadth.get('up', 0)}↑ {breadth.get('down', 0)}↓ 涨停{breadth.get('limit_up', 0)}家 跌停{breadth.get('limit_down', 0)}家\n"
+
+    base_prompt = ""
+    agent_id = None
+    try:
+        conn = _get_conn()
+        row = conn.execute("SELECT id, system_prompt FROM analysis_agents WHERE name = ?", ("市场情报分析师",)).fetchone()
+        conn.close()
+        if row:
+            agent_id = row["id"]
+            base_prompt = row["system_prompt"] or ""
+    except Exception:
+        pass
+    if not base_prompt:
+        from db.analysis import DEFAULT_MARKET_INTELLIGENCE_PROMPT
+        base_prompt = DEFAULT_MARKET_INTELLIGENCE_PROMPT
+
+    prompt = f"""{base_prompt}
+
+---
+
+【央视新闻联播（政策风向标）】
+{cctv_text}
+
+【今日财经新闻（多源聚合）】
+{news_text}
+
+【热门话题】
+{topics_text}
+
+{f"【实时热点板块/题材】{chr(10)}{hotspots_text}" if hotspots_text else ""}
+
+{f"【今日板块实时涨跌】{chr(10)}{sector_perf_text}" if sector_perf_text else ""}
+
+【指数估值目录】
+{index_catalog}
+
+【用户持仓】
+{holdings_text}
+
+【宏观环境】
+债券市场：{bond_text}
+政策指标：{policy_text or '暂无'}
+
+【知识库参考（历史分析/文章）】
+{rag_context[:1500] if rag_context else '暂无相关知识库内容'}
+
+请从以上新闻中提炼今日真正的市场热点，特别关注央视新闻的政策信号，输出严格JSON。
+
+重要规则：
+1. 只推荐今日板块实时涨跌中涨幅靠前或有明确政策驱动的板块
+2. 如果某板块新闻利好但今日实际下跌，需说明「短期承压但中长期有逻辑」，不要标为"今日热门"
+3. 结合板块涨跌和新闻，区分「已兑现」（已大涨）和「待兑现」（有逻辑但还没涨）的机会"""
+
+    sectors = []
+    summary = ""
+    cctv_signal = ""
+    llm_start = time.time()
+    llm_status = "success"
+    response = None
+    try:
+        response = await asyncio.wait_for(
+            asyncio.to_thread(lambda: _call_llm(
+                caller="market_intelligence",
+                model=MODEL,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=get_config_float("llm.temperature_default", 0.3),
+                max_tokens=get_config_int("llm.max_tokens_report", 8192),
+            )),
+            timeout=120,
+        )
+        content = response.choices[0].message.content or "{}"
+        json_match = re.search(r'\{.*\}', content, re.DOTALL)
+        if json_match:
+            parsed = json.loads(json_match.group())
+        else:
+            parsed = json.loads(content)
+        sectors = parsed.get("sectors", [])
+        summary = parsed.get("summary", "")
+        cctv_signal = parsed.get("cctv_signal", "")
+    except Exception as e:
+        logger.warning(f"市场情报 LLM 推断失败: {e}")
+        summary = f"分析失败: {e}"
+        content = ""
+        llm_status = "error"
+
+    llm_duration = int((time.time() - llm_start) * 1000)
+
+    sectors = _fuzzy_match_sectors_to_data(sectors)
+
+    sector_names = [s.get("name", "") for s in sectors if s.get("name")]
+    try:
+        conn = _get_conn()
+        conn.execute(
+            "INSERT INTO analysis_history (agent_id, agent_name, prompt_used, news_context, result, token_usage) VALUES (?, ?, ?, ?, ?, ?)",
+            (agent_id or 0, "市场情报分析师", base_prompt[:500], news_text[:500],
+             json.dumps({"summary": summary, "sectors": sector_names}, ensure_ascii=False),
+             (response.usage.total_tokens if llm_status == "success" and hasattr(response, 'usage') and response.usage else 0))
+        )
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logger.warning(f"记录市场情报分析历史失败: {e}")
+
+    try:
+        create_agent_run(
+            conversation_id=0, message_id=0,
+            agent_key="market_intelligence", agent_name="市场情报分析师",
+            query=news_text[:500], result=summary[:500],
+            duration_ms=llm_duration, status=llm_status,
+        )
+    except Exception as e:
+        logger.warning(f"记录 agent_run 失败: {e}")
+
+    result = {
+        "news": all_news[:15],
+        "cctv_news": cctv_news,
+        "cctv_signal": cctv_signal,
+        "hot_topics": hot_topics,
+        "sectors": sectors,
+        "macro": {
+            "bond": bond,
+            "policy": policy,
+            "bond_text": bond_text,
+            "policy_text": policy_text,
+        },
+        "summary": summary,
+        "fetched_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
+    }
+
+    save_analysis_cache(cache_key, result)
+    return result
+
+
+@router.get("/sector-detail/{sector_name}")
+async def get_sector_detail(sector_name: str):
+    """单个板块深度分析 — 关联指数、持仓、相关新闻。"""
+    indexes = list_valuation_indexes()
+    holdings = list_holdings()
+
+    match_terms = {sector_name.lower()}
+    alias_key = sector_name.lower()
+    if alias_key in _SECTOR_ALIAS:
+        match_terms.update(k.lower() for k in _SECTOR_ALIAS[alias_key])
+
+    seen = {}
+    for i in indexes:
+        code = i.get("index_code", "")
+        if code and code not in seen:
+            seen[code] = i
+    related_indexes = [
+        {
+            "index_code": i.get("index_code"),
+            "index_name": i.get("index_name"),
+            "percentile": i.get("percentile"),
+            "current_value": i.get("current_value"),
+            "metric_type": i.get("metric_type"),
+        }
+        for i in seen.values()
+        if any(term in (i.get("index_name") or "").lower() for term in match_terms)
+    ]
+
+    related_funds = [
+        {
+            "fund_code": h.get("fund_code"),
+            "fund_name": h.get("fund_name"),
+            "profit_rate": h.get("profit_rate"),
+            "current_value": h.get("current_value"),
+        }
+        for h in holdings
+        if any(term in (h.get("fund_name") or "").lower() for term in match_terms)
+    ]
+
+    news = await _fetch_news_multi()
+    related_news = [
+        n for n in news
+        if any(term in f"{n.get('title', '')} {n.get('summary', '')}".lower() for term in match_terms)
+    ]
+
+    return {
+        "sector": sector_name,
+        "related_indexes": related_indexes,
+        "related_funds": related_funds,
+        "related_news": related_news,
+    }

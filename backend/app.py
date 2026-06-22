@@ -69,11 +69,24 @@ from routers.bond import router as bond_router
 from routers.token_usage import router as token_usage_router
 from routers.images import router as images_router
 from routers.eval import router as eval_router
-from routers.analysis import router as analysis_router
+from routers.analysis import (
+    panorama_router as analysis_panorama_router,
+    deep_dive_router as analysis_deep_dive_router,
+    trade_review_router as analysis_trade_review_router,
+    what_if_router as analysis_what_if_router,
+    diversification_router as analysis_diversification_router,
+    portfolio_ai_router as analysis_portfolio_ai_router,
+    rebalancing_router as analysis_rebalancing_router,
+    hotspots_router as analysis_hotspots_router,
+    daily_report_router as analysis_daily_report_router,
+    market_intel_router as analysis_market_intel_router,
+    bond_recommend_router as analysis_bond_recommend_router,
+    index_analysis_router as analysis_index_analysis_router,
+)
 from routers.dashboard import router as dashboard_router
 from routers.config import router as config_router
 from routers.rag import router as rag_router
-from routers.market_intelligence import router as market_intelligence_router
+# market_intelligence routes moved to routers/analysis/market_intel.py
 from routers.knowledge import router as knowledge_router
 from routers.watchlist import router as watchlist_router
 from routers.profile import router as profile_router                    # /api/profile/*
@@ -102,12 +115,24 @@ app.include_router(bond_router)
 app.include_router(token_usage_router)
 app.include_router(images_router)
 app.include_router(eval_router)
-app.include_router(analysis_router)
+# 注册分析子路由（从 portfolio/dashboard/bond/analysis/market_intelligence 拆出）
+app.include_router(analysis_panorama_router)
+app.include_router(analysis_deep_dive_router)
+app.include_router(analysis_trade_review_router)
+app.include_router(analysis_what_if_router)
+app.include_router(analysis_diversification_router)
+app.include_router(analysis_portfolio_ai_router)
+app.include_router(analysis_rebalancing_router)
+app.include_router(analysis_hotspots_router)
+app.include_router(analysis_daily_report_router)
+app.include_router(analysis_market_intel_router)
+app.include_router(analysis_bond_recommend_router)
+app.include_router(analysis_index_analysis_router)
 app.include_router(dashboard_router)
 app.include_router(config_router)
 app.include_router(rag_router)
 app.include_router(knowledge_router)
-app.include_router(market_intelligence_router)
+# market_intelligence_router removed (routes in analysis/market_intel.py)
 app.include_router(watchlist_router)
 app.include_router(profile_router)
 app.include_router(async_tasks_router)

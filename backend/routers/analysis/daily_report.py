@@ -1,0 +1,266 @@
+"""每日简报 — 从 dashboard.py 提取"""
+import asyncio
+import json
+import logging
+import time
+
+from fastapi import APIRouter, HTTPException
+
+from db import (
+    list_valuation_indexes, list_holdings, get_portfolio_diversification,
+    get_total_cash_balance, get_analysis_agent,
+    create_analysis_history,
+    create_async_task, update_async_task, get_async_task, get_latest_async_task,
+    get_config_int, get_config_float,
+)
+from db._conn import _get_conn
+from llm_service import _call_llm, MODEL
+from state import track_agent as _track_agent, untrack_agent as _untrack_agent
+
+logger = logging.getLogger(__name__)
+router = APIRouter(tags=["analysis-daily-report"])
+
+_background_tasks = set()
+
+
+@router.get("/api/dashboard/daily-report")
+async def get_daily_report():
+    """获取今日自动生成的日报。如果没有今日的，返回最近一条。"""
+    import logging
+    logging.warning("=== get_daily_report called (NEW VERSION) ===")
+    from datetime import datetime
+    today = datetime.now().strftime("%Y-%m-%d")
+    conn = _get_conn()
+    row = conn.execute(
+        "SELECT * FROM analysis_history WHERE agent_id = 1 AND date(created_at) = ? ORDER BY created_at DESC LIMIT 1",
+        (today,)
+    ).fetchone()
+    if not row:
+        row = conn.execute(
+            "SELECT * FROM analysis_history WHERE agent_id = 1 ORDER BY created_at DESC LIMIT 1"
+        ).fetchone()
+    conn.close()
+    if row:
+        r = dict(row)
+        is_today = r.get("created_at", "").startswith(today)
+        return {"has_report": True, "report": r, "is_today": is_today}
+    return {"has_report": False, "report": None, "is_today": False}
+
+
+@router.get("/api/dashboard/daily-report/task")
+async def get_daily_report_task():
+    """查询最近一次每日简报异步任务状态。"""
+    task = get_latest_async_task("daily_report")
+    if not task:
+        return {"has_task": False, "status": None}
+    return {
+        "has_task": True,
+        "task_id": task["id"],
+        "status": task["status"],
+        "error": task.get("error_msg", ""),
+        "created_at": task.get("created_at", ""),
+    }
+
+
+@router.post("/api/dashboard/daily-report/regenerate")
+async def regenerate_daily_report():
+    """重新生成今日市场简报（异步）。立即返回 task_id，后台执行。"""
+    agent = get_analysis_agent(1)
+    if not agent:
+        raise HTTPException(400, "市场日报分析师未配置")
+    task_id = create_async_task("daily_report", caller="daily_report")
+    task = asyncio.create_task(_run_regenerate_daily_report_async(task_id, agent))
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+    return {"task_id": task_id, "status": "running"}
+
+
+async def _run_regenerate_daily_report_async(task_id: int, agent: dict):
+    """后台执行重新生成今日市场简报。"""
+    try:
+        # 删除今日旧报告
+        today = time.strftime("%Y-%m-%d")
+        conn = _get_conn()
+        conn.execute(
+            "DELETE FROM analysis_history WHERE agent_id = 1 AND date(created_at) = ?",
+            (today,)
+        )
+        conn.commit()
+        conn.close()
+
+        # 复用 _auto_daily_report 的数据收集逻辑
+        from routers.dashboard import get_hot_topics
+        news_context = ""
+        try:
+            news_data = await get_hot_topics()
+            news_list = news_data.get("news", [])[:8]
+            news_context = "\n".join(
+                f"- {n.get('title','')}（{n.get('source','')}）"
+                for n in news_list if n.get('title')
+            ) if news_list else "暂无新闻"
+        except Exception as e:
+            logging.warning(f"简报重新生成新闻检索失败: {e}")
+            news_context = "暂无新闻"
+
+        # 盈米 MCP 数据
+        yingmi_context = ""
+        try:
+            from mcp.yingmi_client import get_yingmi_client
+            ym = get_yingmi_client()
+            quotations = ym.call_tool_text("GetLatestQuotations")
+            if quotations:
+                yingmi_context = f"【盈米市场温度计及行情解读】\n{quotations[:2000]}"
+        except Exception as e:
+            logging.warning(f"盈米 MCP 数据获取失败: {e}")
+
+        # 市场全景
+        market_context = "暂无行情数据"
+        try:
+            from market_data import get_market_overview
+            overview = get_market_overview()
+            market_lines = []
+            if overview.get("indices"):
+                market_lines.append("【主要指数】")
+                for idx in overview["indices"]:
+                    sign = "+" if idx["change_pct"] >= 0 else ""
+                    market_lines.append(f"- {idx['name']}: {idx['price']}（{sign}{idx['change_pct']}%）成交{idx.get('volume_yi',0):.0f}亿")
+            b = overview.get("breadth", {})
+            if b.get("up"):
+                market_lines.append(f"\n【涨跌统计】上涨{b['up']} / 下跌{b['down']} / 涨停{b.get('limit_up',0)} / 跌停{b.get('limit_down',0)} / 成交{b.get('total_volume_yi',0):.0f}亿")
+            if overview.get("sectors_top"):
+                market_lines.append("\n【领涨板块】")
+                for s in overview["sectors_top"]:
+                    market_lines.append(f"- {s['name']}: +{s['change_pct']}%  领涨:{s['lead_stock']}{s['lead_change']}%")
+            if overview.get("sectors_bottom"):
+                market_lines.append("\n【领跌板块】")
+                for s in overview["sectors_bottom"]:
+                    market_lines.append(f"- {s['name']}: {s['change_pct']}%  领涨:{s['lead_stock']}{s['lead_change']}%")
+            market_context = "\n".join(market_lines) if market_lines else "暂无行情数据"
+        except Exception as e:
+            logging.warning(f"行情数据获取失败: {e}")
+
+        val_context = "暂无估值数据"
+        try:
+            indexes = list_valuation_indexes()
+            seen = {}
+            for i in indexes:
+                code = i.get("index_code", "")
+                if code and code not in seen:
+                    seen[code] = i
+            all_indexes = list(seen.values())
+            if all_indexes:
+                val_lines = []
+                for i in all_indexes:
+                    pct = i.get("percentile", None)
+                    pct_str = f"{pct:.0f}%" if pct is not None else "N/A"
+                    val_lines.append(
+                        f"- {i['index_name']}（{i['index_code']}）: "
+                        f"{i.get('metric_type','PE')}={i.get('current_value','?')}, 百分位={pct_str}"
+                    )
+                val_context = "\n".join(val_lines)
+        except Exception:
+            pass
+
+        holding_text = "暂无持仓"
+        portfolio_text = "暂无"
+        try:
+            holdings = list_holdings()
+            div = get_portfolio_diversification()
+            cash_balance = get_total_cash_balance()
+            if holdings:
+                sorted_holdings = sorted(holdings, key=lambda x: x.get("profit_rate") or 0, reverse=True)
+                holding_lines = []
+                for h in sorted_holdings[:15]:
+                    pct = h.get("profit_rate")
+                    pct_str = f"{pct:+.1%}" if pct is not None else "N/A"
+                    val = h.get("current_value", 0) or 0
+                    profit = h.get("profit_loss", 0) or 0
+                    holding_lines.append(
+                        f"- {h['fund_name']}（{h.get('fund_code','')}）: "
+                        f"市值{val:.0f}元, 收益率{pct_str}, 盈亏{profit:+.0f}元"
+                    )
+                holding_text = "\n".join(holding_lines)
+            portfolio_text = (
+                f"持仓{div.get('holding_count',0)}只基金，"
+                f"总市值{div.get('total_value',0):.0f}元，"
+                f"累计盈亏{div.get('total_profit',0):+.0f}元，"
+                f"可用零钱{cash_balance:.0f}元"
+            )
+        except Exception:
+            pass
+
+        bond_text = "暂无"
+        try:
+            from tools import _get_bond_temperature
+            bond_raw = json.loads(_get_bond_temperature())
+            bond_text = f"债券温度{bond_raw.get('temperature','?')}°，收益率{bond_raw.get('rate','?')}%"
+        except Exception:
+            pass
+
+        full_prompt = agent["system_prompt"] + f"""
+
+【今日日期】
+{time.strftime("%Y-%m-%d")}（{["周一","周二","周三","周四","周五","周六","周日"][time.localtime().tm_wday]}）
+
+【今日新闻】
+{news_context}
+
+{yingmi_context}
+
+【市场行情】
+{market_context}
+
+【指数估值】
+{val_context}
+
+【持仓明细】（已按收益率从高到低排序）
+{holding_text}
+
+【持仓概况】
+{portfolio_text}
+
+【债券市场】
+{bond_text}
+
+请按照报告结构要求，基于以上真实数据撰写今日市场简报。"""
+
+        response = await asyncio.to_thread(lambda: _call_llm(
+            caller="daily_report",
+            model=MODEL,
+            messages=[
+                {"role": "system", "content": full_prompt},
+                {"role": "user", "content": "请生成今日市场分析报告。"},
+            ],
+            temperature=get_config_float('llm.temperature_default', 0.3),
+            max_tokens=get_config_int('llm.max_tokens_report', 8192),
+        ))
+        result_text = response.choices[0].message.content or ""
+        token_usage = response.usage.total_tokens if response.usage else 0
+
+        new_id = create_analysis_history(
+            index_code="", index_name="",
+            agent_id=1, agent_name=agent["name"],
+            prompt_used=full_prompt[:500], news_context=news_context[:500],
+            valuation_context=val_context[:500], result=result_text,
+            token_usage=token_usage,
+        )
+
+        # 后台自动质量评估
+        async def _auto_eval():
+            try:
+                from agent.eval_scorer import evaluate_llm_output
+                await evaluate_llm_output(
+                    query="生成今日市场简报",
+                    output=result_text,
+                    context=f"新闻: {news_context[:300]}\n估值: {val_context[:300]}",
+                    target_type="daily_report",
+                    target_id=new_id,
+                )
+            except Exception as e:
+                logging.warning(f"简报自动质量评估失败: {e}")
+        asyncio.create_task(_auto_eval())
+
+        update_async_task(task_id, status="done", result={"ok": True, "id": new_id, "token_usage": token_usage}, token_usage=token_usage)
+    except Exception as e:
+        logging.error(f"重新生成日报异步任务失败: {e}")
+        update_async_task(task_id, status="error", error_msg=str(e))

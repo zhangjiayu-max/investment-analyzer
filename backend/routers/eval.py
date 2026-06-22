@@ -16,11 +16,12 @@ from db import (
     get_config_float, get_config_int,
 )
 from models.eval import CreateEvalCaseRequest, BadCaseToEvalRequest
-from routers.portfolio import (
-    panorama_analysis_api, fund_deep_dive_api,
-    trade_review_api, what_if_analysis_api,
-    portfolio_diversification_ai_summary, portfolio_ai_analysis_api,
-)
+from routers.analysis.panorama import panorama_analysis_api
+from routers.analysis.deep_dive import fund_deep_dive_api
+from routers.analysis.trade_review import trade_review_api
+from routers.analysis.what_if import what_if_analysis_api
+from routers.analysis.diversification import portfolio_diversification_ai_summary
+from routers.analysis.portfolio_ai import portfolio_ai_analysis_api
 from models.portfolio import (
     PanoramaAnalysisRequest, DeepDiveRequest,
     TradeReviewRequest, WhatIfRequest, PortfolioAiAnalysisRequest,

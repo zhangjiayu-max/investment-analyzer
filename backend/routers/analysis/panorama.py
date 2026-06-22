@@ -1,0 +1,159 @@
+"""全景诊断 — POST /api/portfolio/analysis/panorama"""
+import asyncio
+import json
+import logging
+
+from fastapi import APIRouter, HTTPException
+
+from state import track_agent as _track_agent, untrack_agent as _untrack_agent
+from db import (
+    list_holdings, get_portfolio_diversification,
+    create_portfolio_analysis_record, list_portfolio_analysis_records,
+    get_analysis_agent,
+)
+from db.portfolio import update_analysis_record, get_analysis_record_status
+from db.config import get_config as _get_config, get_config_int, get_config_float
+from rag import build_rag_context_with_details
+from models.portfolio import PanoramaAnalysisRequest
+from ._shared import (
+    _get_mcp_context, _get_holdings_valuation_context, _format_news_section,
+)
+
+logger = logging.getLogger(__name__)
+router = APIRouter(tags=["analysis-panorama"])
+
+_background_tasks: set = set()
+
+
+@router.post("/api/portfolio/analysis/panorama")
+async def panorama_analysis_api(req: PanoramaAnalysisRequest):
+    """全景诊断 — 从全局视角诊断投资组合健康状况（异步执行）。"""
+    holdings = list_holdings()
+    if not holdings:
+        raise HTTPException(400, "暂无持仓数据")
+
+    agent = get_analysis_agent(3)
+    if not agent:
+        raise HTTPException(404, "全景诊断分析师未配置")
+
+    record_id = create_portfolio_analysis_record(
+        analysis_type="panorama",
+        summary=f"全景诊断 · {len(holdings)}只基金",
+        input_data=json.dumps({"holdings_count": len(holdings)}, ensure_ascii=False),
+        result_data="",
+        status="running",
+        agent_id=3,
+    )
+
+    task = asyncio.create_task(_run_panorama_async(record_id, agent["system_prompt"], holdings))
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+
+    return {"ok": True, "id": record_id, "status": "running"}
+
+
+async def _run_panorama_async(record_id: int, system_prompt: str, holdings: list):
+    """后台执行全景诊断分析。"""
+    uid = f"panorama_{record_id}"
+    try:
+        diversification = get_portfolio_diversification()
+        total_value = diversification.get('total_value', 1) or 1
+
+        holdings_lines = []
+        for h in sorted(holdings, key=lambda x: (x.get('current_value', 0) or 0), reverse=True):
+            pct = (h.get('current_value', 0) or 0) / total_value * 100
+            holdings_lines.append(
+                f"- {h.get('fund_name','')}({h.get('fund_code','')}): "
+                f"账户 {h.get('account') or _get_config('portfolio.default_account', '花无缺')}, "
+                f"市值 {(h.get('current_value') or 0):.2f}, "
+                f"盈亏 {(h.get('profit_loss') or 0):.2f} ({(h.get('profit_rate') or 0)*100:.1f}%), "
+                f"占比 {pct:.1f}%"
+            )
+
+        type_dist = diversification.get('type_distribution', {})
+        type_lines = [f"  - {k}: {v:.1f}%" for k, v in type_dist.items()]
+
+        mcp_context = _get_mcp_context(holdings)
+        valuation_context = _get_holdings_valuation_context(holdings)
+        news_section = _format_news_section(mcp_context)
+
+        rag_context = ""
+        try:
+            fund_names = " ".join([h.get("fund_name", "") for h in holdings[:5]])
+            rag_query = f"投资组合 资产配置 风险分析 {fund_names}"
+            rag_result = build_rag_context_with_details(query=rag_query, limit=5)
+            rag_context = rag_result.get("context", "")
+        except Exception as e:
+            logger.warning(f"RAG 检索失败: {e}")
+
+        user_content = (
+            f"## 持仓明细\n" + "\n".join(holdings_lines) +
+            f"\n\n## 类型分布\n" + "\n".join(type_lines) +
+            f"\n\n## 集中度\n- 前3大持仓占比: {diversification.get('top3_concentration', 0):.1f}%"
+            f"\n- 前5大持仓占比: {diversification.get('top5_concentration', 0):.1f}%\n"
+            f"\n## MCP 专业数据\n{json.dumps(mcp_context, ensure_ascii=False, indent=2)}\n"
+            f"\n{valuation_context}"
+            f"\n\n{news_section}"
+            f"\n\n## 知识库参考\n{rag_context[:1500] if rag_context else '暂无相关知识库内容'}"
+        )
+
+        _track_agent(uid, "全景诊断分析师", "持仓诊断")
+        from llm_service import _call_llm, MODEL
+        response = await asyncio.to_thread(lambda: _call_llm(
+            caller="portfolio_panorama",
+            model=MODEL,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_content},
+            ],
+            temperature=get_config_float('llm.temperature_analysis', 0.3),
+            max_tokens=get_config_int('llm.max_tokens_analysis', 8192),
+        ))
+        result_text = response.choices[0].message.content or ""
+        tokens = response.usage.total_tokens if response.usage else 0
+
+        update_analysis_record(record_id, result_data=result_text, token_usage=tokens, status="done")
+        logger.info(f"全景诊断完成 record_id={record_id}")
+
+    except Exception as e:
+        logger.error(f"全景诊断失败 record_id={record_id}: {e}")
+        update_analysis_record(record_id, status="error", error_msg=str(e))
+    finally:
+        _untrack_agent(uid)
+
+
+@router.get("/api/portfolio/analysis/panorama/{record_id}/status")
+async def panorama_status_api(record_id: int):
+    """查询全景诊断执行状态。"""
+    record = get_analysis_record_status(record_id)
+    if not record:
+        raise HTTPException(404, "记录不存在")
+    return {
+        "id": record["id"],
+        "status": record["status"],
+        "result": record.get("result_data"),
+        "token_usage": record.get("token_usage", 0),
+        "error": record.get("error_msg"),
+    }
+
+
+@router.get("/api/portfolio/analysis/{record_id}/status")
+async def analysis_status_api(record_id: int):
+    """查询任意分析记录执行状态（通用端点）。"""
+    record = get_analysis_record_status(record_id)
+    if not record:
+        raise HTTPException(404, "记录不存在")
+    return {
+        "id": record["id"],
+        "status": record["status"],
+        "result": record.get("result_data"),
+        "token_usage": record.get("token_usage", 0),
+        "error": record.get("error_msg"),
+    }
+
+
+@router.get("/api/portfolio/analysis/panorama/records")
+async def list_panorama_records_api(limit: int = 10):
+    """列出全景诊断历史记录。"""
+    records = list_portfolio_analysis_records(analysis_type="panorama", limit=limit)
+    return {"records": records}
