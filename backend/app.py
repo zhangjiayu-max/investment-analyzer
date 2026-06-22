@@ -421,7 +421,7 @@ async def _auto_daily_report():
 
 
 async def _auto_refresh_nav():
-    """每天 15:30 自动刷新所有持仓基金净值。"""
+    """每天 20:00 自动确认到期交易并刷新所有持仓基金净值。"""
     import time
     while True:
         try:
@@ -442,8 +442,10 @@ async def _auto_refresh_nav():
             await asyncio.sleep(wait)
 
             # 执行刷新
-            logging.info("[auto-nav] 开始自动刷新持仓净值...")
-            from db.portfolio import refresh_all_fund_prices
+            logging.info("[auto-nav] 开始自动确认到期交易并刷新持仓净值...")
+            from db.portfolio import auto_confirm_due_transactions, refresh_all_fund_prices
+            auto_result = auto_confirm_due_transactions()
+            logging.info(f"[auto-nav] 到期交易自动确认完成: {auto_result}")
             result = refresh_all_fund_prices()
             logging.info(f"[auto-nav] 净值刷新完成: {result}")
 

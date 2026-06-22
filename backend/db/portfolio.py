@@ -4,7 +4,7 @@ import json
 import logging
 import re
 import sqlite3
-from datetime import datetime
+from datetime import datetime, date
 
 from db._conn import _get_conn, _row_to_dict
 
@@ -572,7 +572,6 @@ def _recalculate_holding(holding_id: int):
     # 如果持仓有基准数据（直接导入/手动创建的初始持仓），先加入基准
     has_base = holding.get("has_base_position")
     base_shares = holding.get("base_shares") or 0
-    print(f"[DEBUG _recalculate_holding] holding_id={holding_id}, has_base_position={has_base}, base_shares={base_shares}, shares={holding.get('shares')}, total_cost={holding.get('total_cost')}, tx_count={len(txs)}")
     if has_base:
         # 优先使用 base_shares（原始基准），避免被重算覆盖
         total_shares = base_shares if base_shares > 0 else (holding.get("shares") or 0)
@@ -618,7 +617,6 @@ def _recalculate_holding(holding_id: int):
     if total_shares < 0:
         total_shares = 0
 
-    print(f"[DEBUG _recalculate_holding] RESULT: total_shares={total_shares}, total_cost={total_cost}")
     cost_price = total_cost / total_shares if total_shares > 0 else 0
     current_value = total_shares * current_price if current_price > 0 else None
     profit_loss = (current_value - total_cost) if current_value is not None else None
@@ -797,7 +795,7 @@ def confirm_transaction(tx_id: int, confirmed_price: float,
         else:
             holding_id = create_holding(
                 fund_code=fund_code, fund_name=fund_name,
-                shares=actual_shares, cost_price=actual_price,
+                shares=0, cost_price=actual_price,
                 current_price=actual_price, user_id=user_id,
                 account=tx.get("account", "花无缺"),
             )
@@ -897,6 +895,104 @@ def confirm_transaction(tx_id: int, confirmed_price: float,
     )
 
     return True
+
+
+def _effective_trade_date(transaction_date: str, transaction_time: str | None = None) -> str:
+    """按 A 股基金 15:00 截止规则计算实际成交 T 日。"""
+    try:
+        from mcp.trading_calendar import is_trading_day, next_trading_day
+
+        d = datetime.strptime(transaction_date, "%Y-%m-%d").date()
+        if not is_trading_day(d):
+            return next_trading_day(d).isoformat()
+        if transaction_time:
+            hour, minute = map(int, transaction_time.split(":"))
+            if hour > 15 or (hour == 15 and minute > 0):
+                return next_trading_day(d).isoformat()
+        return d.isoformat()
+    except Exception:
+        return transaction_date
+
+
+def fetch_fund_nav_on_or_before(fund_code: str, nav_date: str) -> dict | None:
+    """获取指定日期或之前最近一个交易日的基金单位净值。"""
+    try:
+        import akshare as ak
+
+        df = ak.fund_open_fund_info_em(symbol=fund_code, indicator='单位净值走势')
+        if df is None or len(df) == 0:
+            return None
+        target = str(nav_date)
+        df = df.copy()
+        df["净值日期"] = df["净值日期"].astype(str)
+        matched = df[df["净值日期"] <= target]
+        if matched.empty:
+            return None
+        row = matched.iloc[-1]
+        return {
+            "nav": float(row["单位净值"]),
+            "date": str(row["净值日期"]),
+        }
+    except Exception as e:
+        logging.warning(f"[auto-confirm] 获取 {fund_code} {nav_date} 净值失败: {e}")
+        return None
+
+
+def auto_confirm_due_transactions(as_of_date: str | None = None, user_id: str = "default") -> dict:
+    """自动确认已到确认日的 pending 交易。
+
+    买入/卖出/转换均按提交时间计算实际 T 日，并用 T 日单位净值确认份额或金额。
+    如果某只基金的 T 日净值尚未披露，保留 pending，等待下一次自动任务。
+    """
+    today = as_of_date or date.today().isoformat()
+    conn = _get_conn()
+    rows = conn.execute("""
+        SELECT * FROM portfolio_transactions
+        WHERE user_id = ?
+          AND status = 'pending'
+          AND expected_confirm_date IS NOT NULL
+          AND expected_confirm_date <= ?
+        ORDER BY expected_confirm_date ASC, id ASC
+    """, (user_id, today)).fetchall()
+    conn.close()
+
+    confirmed = 0
+    skipped = []
+    errors = []
+    for row in rows:
+        tx = dict(row)
+        trade_date = _effective_trade_date(tx.get("transaction_date") or today, tx.get("transaction_time"))
+        nav_data = fetch_fund_nav_on_or_before(tx["fund_code"], trade_date)
+        if not nav_data or not nav_data.get("nav"):
+            skipped.append({
+                "id": tx["id"],
+                "fund_code": tx["fund_code"],
+                "reason": f"{trade_date} 净值未披露",
+            })
+            continue
+        if nav_data.get("date") and nav_data["date"] != trade_date:
+            skipped.append({
+                "id": tx["id"],
+                "fund_code": tx["fund_code"],
+                "reason": f"{trade_date} 净值未披露，最近净值为 {nav_data['date']}",
+            })
+            continue
+        try:
+            ok = confirm_transaction(tx["id"], confirmed_price=float(nav_data["nav"]))
+            if ok:
+                confirmed += 1
+            else:
+                errors.append({"id": tx["id"], "fund_code": tx["fund_code"], "error": "confirm failed"})
+        except Exception as e:
+            errors.append({"id": tx["id"], "fund_code": tx["fund_code"], "error": str(e)})
+
+    return {
+        "checked": len(rows),
+        "confirmed": confirmed,
+        "skipped": skipped,
+        "errors": errors,
+        "as_of_date": today,
+    }
 
 
 def settle_transaction(tx_id: int) -> bool:

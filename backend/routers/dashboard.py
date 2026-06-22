@@ -992,6 +992,21 @@ async def _do_hotspots_analysis():
         code_ref_text = "暂无"
         val_text = "暂无"
 
+    policy_keywords = [
+        "政策", "国务院", "发改委", "工信部", "财政部", "央行", "证监会",
+        "刺激", "补贴", "规划", "十五五", "新质生产力", "人工智能", "半导体",
+        "算力", "机器人", "低空经济", "新能源", "储能", "消费", "设备更新",
+        "出海", "自主可控", "并购重组",
+    ]
+    policy_lines = []
+    for n in news_list:
+        text = f"{n.get('title','')} {n.get('summary','')}"
+        if any(k in text for k in policy_keywords):
+            policy_lines.append(
+                f"- {n.get('title','')}（{n.get('source','')}）: {n.get('summary','')[:160]}"
+            )
+    policy_text = "\n".join(policy_lines) if policy_lines else "今日热点新闻中未提取到明确政策线索，需降低政策驱动权重。"
+
     # 持仓明细 + 概况
     try:
         holdings = list_holdings()
@@ -1045,6 +1060,9 @@ async def _do_hotspots_analysis():
 【今日新闻】（重点关注，这是分析的核心线索）
 {news_text}
 
+【政策与未来方向线索】（必须用于机会筛选）
+{policy_text}
+
 【可参考指数代码及估值】
 {code_ref_text}
 
@@ -1059,6 +1077,13 @@ async def _do_hotspots_analysis():
 
 【债券市场】
 {bond_text}
+
+筛选要求：
+1. 不要只按估值低排序。机会评分必须综合：政策/产业方向、新闻催化强度、未来 6-24 个月景气度、估值安全边际、与当前持仓/现金的适配度。
+2. 对纯粹“低估但缺少催化或政策方向不清”的标的，优先给 watch，不要包装成强机会。
+3. 对热门但估值过高、拥挤度高或只有短线消息的标的，必须说明风险，可给 down/watch。
+4. reason 需写出政策或未来方向依据；如果没有依据，要明确写“缺少政策/产业趋势支撑”。
+5. 返回 JSON 中每个 recommendation 尽量包含 opportunity_score(0-100)、policy_signal、future_direction、valuation_role、risk_note。
 
 请严格按照JSON格式输出分析结果。"""
 
@@ -1115,6 +1140,7 @@ async def _do_hotspots_analysis():
             except Exception as e:
                 logging.warning(f"保存推荐记录失败: {e}")
         result = {
+            "analysis_date": time.strftime("%Y-%m-%d"),
             "summary": parsed.get("summary", ""),
             "recommendations": recs,
             "analysis_text": content,
@@ -1139,6 +1165,9 @@ async def get_latest_hotspots_analysis():
     """返回最近一次缓存的热点分析结果（刷新页面后还原用）。"""
     cached = get_analysis_cache("hotspots_latest")
     if cached:
+        today = time.strftime("%Y-%m-%d")
+        if cached.get("analysis_date") != today:
+            return {"summary": "", "recommendations": [], "analysis_text": "", "stale": True}
         # 补充 recommendations 中的 id 字段，供反馈使用
         try:
             conn = _get_conn()
@@ -1177,6 +1206,7 @@ async def get_latest_hotspots_analysis():
                 "summary": f"上次分析结果（共{len(recs)}条推荐）",
                 "recommendations": recs,
                 "analysis_text": "",
+                "stale": True,
             }
     except Exception:
         pass

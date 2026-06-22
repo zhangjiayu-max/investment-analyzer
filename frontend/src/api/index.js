@@ -1076,6 +1076,11 @@ export function confirmTransaction(txId, data) {
   return api.post(`/portfolio/transactions/${txId}/confirm`, data)
 }
 
+/** 自动确认已到确认日的待确认交易 */
+export function autoConfirmPortfolioTransactions() {
+  return api.post('/portfolio/transactions/auto-confirm', {}, { timeout: 120000 })
+}
+
 /** 标记卖出交易已到账 */
 export function settleTransaction(txId) {
   return api.post(`/portfolio/transactions/${txId}/settle`)

@@ -24,6 +24,7 @@ import {
   submitAnalysisFeedback,
   getRebalanceConfig, updateRebalanceConfig, getRebalanceConfigHistory, rollbackRebalanceConfig,
   getAuditLog,
+  autoConfirmPortfolioTransactions,
   listWatchlist, addToWatchlist, updateWatchlistItem, removeWatchlistItem,
   refreshWatchlistNavs as refreshWatchlistNavsApi, markWatchlistBought as markWatchlistBoughtApi,
   lookupWatchlistFund as lookupWatchlistFundApi,
@@ -1082,6 +1083,11 @@ const txForm = ref({
 async function loadData() {
   loading.value = true
   try {
+    try {
+      await autoConfirmPortfolioTransactions()
+    } catch (e) {
+      console.warn('自动确认待确认交易失败:', e)
+    }
     const params = accountFilter.value ? { account: accountFilter.value } : {}
     const { data } = await getPortfolioSummary(params)
     summary.value = data
@@ -2624,7 +2630,7 @@ function txDisplayAmount(tx) {
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/>
         </svg>
         <strong>{{ pendingTxs.length }} 笔交易待确认</strong>
-        <span class="pending-hint">（提交后 T+1 才能确认净值，请在确认后点击「确认」填入实际净值）</span>
+        <span class="pending-hint">（系统会按 A 股交易日和提交时间自动确认；净值暂未披露时可手动处理）</span>
       </div>
       <div class="pending-list">
         <div v-for="tx in pendingTxs" :key="tx.id" class="pending-item">

@@ -93,6 +93,7 @@ from db.portfolio import (
     accrue_cash_interest, save_rebalance_config, get_active_rebalance_config,
     list_rebalance_configs, get_rebalance_config_by_id, rollback_rebalance_config,
     create_transaction, list_transactions, _recalculate_holding, confirm_transaction,
+    auto_confirm_due_transactions,
     settle_transaction, delete_transaction, fetch_fund_nav, get_fund_nav_history,
     refresh_holding_price, refresh_all_fund_prices, lookup_fund_info, classify_bond_type,
     classify_fund_category, get_fund_holdings, create_alert, list_alerts,

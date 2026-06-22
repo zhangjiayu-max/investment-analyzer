@@ -148,7 +148,7 @@ onMounted(async () => {
     // 没有运行中的任务，尝试加载已有缓存
     try {
       const { data: latest } = await getLatestHotspotsAnalysis()
-      if (latest?.recommendations?.length) {
+      if (!latest?.stale && latest?.recommendations?.length) {
         hotspotsAnalysis.value = latest
       }
     } catch (_) {}

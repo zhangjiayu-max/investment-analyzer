@@ -26,7 +26,8 @@ from state import (
 )
 from db import (
     create_holding, get_holding, get_holding_by_fund, list_holdings, update_holding, delete_holding, get_portfolio_summary,
-    create_transaction, list_transactions, confirm_transaction, settle_transaction, delete_transaction,
+    create_transaction, list_transactions, confirm_transaction, auto_confirm_due_transactions,
+    settle_transaction, delete_transaction,
     refresh_holding_price, refresh_all_fund_prices, fetch_fund_nav,
     lookup_fund_info, get_fund_holdings,
     get_portfolio_diversification, get_transaction_summary, clear_all_portfolio_data,
@@ -2417,7 +2418,20 @@ async def list_pending_transactions_api():
                 if h:
                     tx["fund_name"] = h.get("fund_name", fund_code)
                 else:
-                    tx["fund_name"] = fund_code
+                    info = lookup_fund_info(fund_code)
+                    tx["fund_name"] = (info or {}).get("fund_name") or fund_code
+                    if info and info.get("fund_name"):
+                        try:
+                            from db._conn import _get_conn
+                            conn = _get_conn()
+                            conn.execute(
+                                "UPDATE portfolio_transactions SET fund_name = ? WHERE id = ?",
+                                (info["fund_name"], tx["id"]),
+                            )
+                            conn.commit()
+                            conn.close()
+                        except Exception:
+                            pass
     return {"transactions": txs}
 
 
@@ -2501,8 +2515,16 @@ async def create_transaction_api(req: CreateTransactionRequest):
         submitted_amount=req.submitted_amount,
         transaction_time=req.transaction_time,
         expected_confirm_date=expected_confirm,
+        fund_name=req.fund_name,
+        account=req.account,
     )
     return {"ok": True, "transaction_id": tx_id, "expected_confirm_date": expected_confirm}
+
+
+@router.post("/api/portfolio/transactions/auto-confirm")
+async def auto_confirm_transactions_api():
+    """自动确认已到确认日的待确认交易。"""
+    return {"ok": True, "result": auto_confirm_due_transactions()}
 
 
 @router.post("/api/portfolio/transactions/{tx_id}/confirm")
