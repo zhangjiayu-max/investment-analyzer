@@ -177,6 +177,9 @@ function formatTime(ts) {
       <span class="message-id-badge" v-if="msg.id" @click="emit('copy-message-id', msg.id)" :title="'点击复制消息ID: ' + msg.id">
         #{{ msg.id }}
       </span>
+      <span class="user-copy-btn" @click="copyMessageContent(msg)" title="复制内容">
+        <Icon name="clipboard" size="12" />
+      </span>
       {{ msg.content }}
     </div>
     <div v-else>
@@ -439,6 +442,27 @@ function formatTime(ts) {
   color: white;
   border-bottom-right-radius: 4px;
   box-shadow: 0 2px 8px var(--color-primary-shadow);
+  position: relative;
+}
+
+.user-copy-btn {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  padding: 3px 6px;
+  background: rgba(255,255,255,0.2);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.15s;
+  color: rgba(255,255,255,0.8);
+}
+.message.user .message-bubble:hover .user-copy-btn {
+  opacity: 1;
+}
+.user-copy-btn:hover {
+  background: rgba(255,255,255,0.3);
+  color: #fff;
 }
 
 .message.assistant .message-bubble {
