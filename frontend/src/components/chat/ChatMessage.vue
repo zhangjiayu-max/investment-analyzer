@@ -140,14 +140,39 @@ function filterToolCalls(toolCalls) {
 function copyMessageContent(msg) {
   const text = msg.content || ''
   if (!text) return
-  navigator.clipboard.writeText(text).then(() => {
-    const btn = document.activeElement
-    if (btn) {
-      const orig = btn.innerHTML
-      btn.innerHTML = '✓'
-      setTimeout(() => { btn.innerHTML = orig }, 1500)
-    }
-  }).catch(() => {})
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(() => {
+      showCopyFeedback()
+    }).catch(() => fallbackCopy(text))
+  } else {
+    fallbackCopy(text)
+  }
+}
+
+function fallbackCopy(text) {
+  const ta = document.createElement('textarea')
+  ta.value = text
+  ta.style.position = 'fixed'
+  ta.style.opacity = '0'
+  document.body.appendChild(ta)
+  ta.select()
+  try {
+    document.execCommand('copy')
+    showCopyFeedback()
+  } catch (e) {
+    alert('复制失败，请手动选择文本复制')
+  }
+  document.body.removeChild(ta)
+}
+
+function showCopyFeedback() {
+  const el = document.activeElement
+  if (el) {
+    const orig = el.innerHTML
+    el.innerHTML = '✓'
+    el.style.color = '#16a34a'
+    setTimeout(() => { el.innerHTML = orig; el.style.color = '' }, 1500)
+  }
 }
 
 function formatDuration(ms) {
@@ -177,7 +202,7 @@ function formatTime(ts) {
       <span class="message-id-badge" v-if="msg.id" @click="emit('copy-message-id', msg.id)" :title="'点击复制消息ID: ' + msg.id">
         #{{ msg.id }}
       </span>
-      <span class="user-copy-btn" @click="copyMessageContent(msg)" title="复制内容">
+      <span class="user-copy-btn" @click.stop.prevent="copyMessageContent(msg)" title="复制内容">
         <Icon name="clipboard" size="12" />
       </span>
       {{ msg.content }}
