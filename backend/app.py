@@ -84,6 +84,7 @@ from routers.strategy_sandbox import router as strategy_sandbox_router  # /api/s
 from routers.fund_manager import router as fund_manager_router  # /api/fund-manager
 from routers.data_health import router as data_health_router          # /api/data-health
 from routers.portfolio_import import router as portfolio_import_router  # /api/portfolio/import-csv
+from routers.opportunities import router as opportunities_router      # /api/opportunities/*
 from services.data_lineage import track_sources, get_lineage  # data lineage tracking
 
 # 注册路由
@@ -116,6 +117,7 @@ app.include_router(strategy_sandbox_router)
 app.include_router(fund_manager_router)
 app.include_router(data_health_router)
 app.include_router(portfolio_import_router)
+app.include_router(opportunities_router)
 
 # 静态文件目录
 for _d in (STATIC_DIR, IMAGES_DIR, OUTPUT_DIR, UPLOADS_DIR, DD_IMAGES_DIR, VALUATION_IMAGES_DIR):
@@ -444,8 +446,11 @@ async def _auto_refresh_nav():
             # 执行刷新
             logging.info("[auto-nav] 开始自动确认到期交易并刷新持仓净值...")
             from db.portfolio import auto_confirm_due_transactions, refresh_all_fund_prices
-            auto_result = auto_confirm_due_transactions()
-            logging.info(f"[auto-nav] 到期交易自动确认完成: {auto_result}")
+            try:
+                auto_result = auto_confirm_due_transactions()
+                logging.info(f"[auto-nav] 到期交易自动确认完成: {auto_result}")
+            except Exception as ae:
+                logging.warning(f"[auto-nav] 自动确认交易异常: {ae}")
             result = refresh_all_fund_prices()
             logging.info(f"[auto-nav] 净值刷新完成: {result}")
 

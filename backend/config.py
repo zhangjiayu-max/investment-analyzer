@@ -61,6 +61,19 @@ ARBITRATION_API_KEY = os.getenv("ARBITRATION_API_KEY", "")
 ARBITRATION_BASE_URL = os.getenv("ARBITRATION_BASE_URL", "https://api.deepseek.com")
 ARBITRATION_MODEL = os.getenv("ARBITRATION_MODEL", "deepseek-v4-pro")
 
+# ── 热点分析政策关键词（可从环境变量覆盖） ─────────────────
+# 逗号分隔，修改 .env 即可生效，无需改代码
+_POLICY_KEYWORDS_DEFAULT = (
+    "政策,国务院,发改委,工信部,财政部,央行,证监会,"
+    "刺激,补贴,规划,十五五,新质生产力,人工智能,半导体,"
+    "算力,机器人,低空经济,新能源,储能,消费,设备更新,"
+    "出海,自主可控,并购重组"
+)
+POLICY_KEYWORDS = [
+    k.strip() for k in os.getenv("POLICY_KEYWORDS", _POLICY_KEYWORDS_DEFAULT).split(",")
+    if k.strip()
+]
+
 
 def get_llm_config() -> tuple[str, str, str]:
     """返回主用 LLM 配置 (api_key, base_url, model)。优先 MIMO 套餐 API。"""

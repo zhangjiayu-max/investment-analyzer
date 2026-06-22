@@ -13,6 +13,8 @@ const props = defineProps({
   hotspotLoading: { type: Boolean, default: false },
   hotspotError: { type: Boolean, default: false },
   hotspotsAnalysis: { type: Object, default: null },
+  opportunities: { type: Array, default: () => [] },
+  opportunitiesLoading: { type: Boolean, default: false },
   hotspotsRelate: { type: Array, default: () => [] },
   recHistory: { type: Array, default: null },
   recStats: { type: Object, default: null },
@@ -20,7 +22,7 @@ const props = defineProps({
   feedbackSending: { type: Object, default: () => ({}) },
 })
 
-const emit = defineEmits(['analyze', 'feedback', 'navigate', 'update:showVerify'])
+const emit = defineEmits(['analyze', 'feedback', 'navigate', 'update:showVerify', 'create-decision', 'watch-opportunity'])
 
 // 聚合所有关联行业和持仓
 const allSectors = computed(() => {
@@ -45,6 +47,13 @@ const allRelatedHoldings = computed(() => {
   }
   return result
 })
+
+const verdictMeta = {
+  can_buy: { label: '可小仓', className: 'verdict-buy' },
+  watch: { label: '观察', className: 'verdict-watch' },
+  avoid: { label: '回避', className: 'verdict-avoid' },
+  sell_or_reduce: { label: '减仓', className: 'verdict-reduce' },
+}
 </script>
 
 <template>
@@ -120,7 +129,49 @@ const allRelatedHoldings = computed(() => {
       <p>正在分析市场热点...</p>
     </div>
 
-    <!-- AI 结果（结构化推荐卡片） -->
+    <!-- 主题机会卡 -->
+    <div v-if="opportunitiesLoading" class="card-loading">
+      <div class="spinner"></div>
+      <p>正在筛选主题机会...</p>
+    </div>
+
+    <div v-if="opportunities?.length && !opportunitiesLoading && !hotspotLoading" class="card-body opportunities-body">
+      <div class="opportunity-summary-row">
+        <span class="opportunity-summary-title">机会引擎</span>
+        <span class="opportunity-count">{{ opportunities.length }} 个主题</span>
+      </div>
+      <div v-for="item in opportunities.slice(0, 4)" :key="item.id" class="opportunity-card">
+        <div class="opportunity-top">
+          <span :class="['opportunity-verdict', verdictMeta[item.verdict]?.className || 'verdict-watch']">
+            {{ verdictMeta[item.verdict]?.label || item.verdict }}
+          </span>
+          <span class="opportunity-theme">{{ item.theme }}</span>
+          <span class="opportunity-score">{{ Math.round(item.opportunity_score || 0) }}</span>
+        </div>
+        <p class="opportunity-line">{{ item.policy_signal }}</p>
+        <p class="opportunity-risk">{{ item.risk_note }}</p>
+        <div v-if="item.matched_funds?.length" class="opportunity-funds">
+          <span v-for="fund in item.matched_funds.slice(0, 2)" :key="fund.fund_code" class="opportunity-fund">
+            {{ fund.fund_name || fund.fund_code }}
+            <em>{{ fund.vehicle_type === 'etf' ? 'ETF' : '场外' }}</em>
+          </span>
+        </div>
+        <div class="opportunity-plan">
+          <span>金额 {{ item.entry_plan?.amount ? '¥' + Number(item.entry_plan.amount).toLocaleString() : '观察' }}</span>
+          <span>{{ item.exit_plan?.time_stop || '需复盘' }}</span>
+        </div>
+        <div class="opportunity-actions">
+          <button class="btn-ghost btn-sm" @click="emit('watch-opportunity', item)">
+            <Icon name="eye" size="13" /> 观察
+          </button>
+          <button class="btn-ghost btn-sm btn-primary-text" @click="emit('create-decision', item)">
+            <Icon name="check" size="13" /> 存决策
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- AI 结果（结构化推荐卡片，作为完整分析保留） -->
     <div v-if="hotspotsAnalysis && !hotspotLoading" class="card-body hotspots-body">
       <div v-if="hotspotsRelate?.length" class="hotspots-relate-summary">
         <span class="relate-label">涉及行业：</span>

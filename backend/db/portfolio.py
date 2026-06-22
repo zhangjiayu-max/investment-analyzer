@@ -793,17 +793,23 @@ def confirm_transaction(tx_id: int, confirmed_price: float,
             conn2.commit()
             conn2.close()
         else:
-            holding_id = create_holding(
-                fund_code=fund_code, fund_name=fund_name,
-                shares=0, cost_price=actual_price,
-                current_price=actual_price, user_id=user_id,
-                account=tx.get("account", "花无缺"),
-            )
-            # 更新交易记录关联
+            # 在同一事务中创建持仓 + 关联交易 + 重算，避免并发问题
             conn2 = _get_conn()
-            conn2.execute("UPDATE portfolio_transactions SET holding_id = ? WHERE id = ?", (holding_id, tx_id))
-            conn2.commit()
-            conn2.close()
+            try:
+                cursor = conn2.execute("""
+                    INSERT INTO portfolio_holdings
+                    (fund_code, fund_name, shares, cost_price, current_price, user_id, account)
+                    VALUES (?, ?, 0, ?, ?, ?, ?)
+                """, (fund_code, fund_name, actual_price, actual_price, user_id,
+                      tx.get("account", "花无缺")))
+                holding_id = cursor.lastrowid
+                conn2.execute("UPDATE portfolio_transactions SET holding_id = ? WHERE id = ?", (holding_id, tx_id))
+                conn2.commit()
+            except Exception:
+                conn2.rollback()
+                raise
+            finally:
+                conn2.close()
 
     if holding_id:
         _recalculate_holding(holding_id)
@@ -910,7 +916,8 @@ def _effective_trade_date(transaction_date: str, transaction_time: str | None = 
             if hour > 15 or (hour == 15 and minute > 0):
                 return next_trading_day(d).isoformat()
         return d.isoformat()
-    except Exception:
+    except Exception as e:
+        logging.warning(f"_effective_trade_date: trading_calendar 不可用，使用原始日期 {transaction_date} (原因: {e})")
         return transaction_date
 
 

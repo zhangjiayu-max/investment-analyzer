@@ -933,6 +933,28 @@ export function submitDecisionReview(decisionId, payload) {
   return api.post(`/decisions/${decisionId}/review`, payload)
 }
 
+// ── 今日热门机会 2.0 ──────────────────────────────────────
+
+export function getTodayOpportunities(limit = 8) {
+  return api.get('/opportunities/today', { params: { limit } })
+}
+
+export function scanDailyOpportunities(data = {}) {
+  return api.post('/opportunities/daily-scan', data, { timeout: 120000 })
+}
+
+export function createDecisionFromOpportunity(opportunityId) {
+  return api.post(`/opportunities/${opportunityId}/create-decision`)
+}
+
+export function watchOpportunity(opportunityId) {
+  return api.post(`/opportunities/${opportunityId}/watch`)
+}
+
+export function markOpportunityBought(opportunityId, data) {
+  return api.post(`/opportunities/${opportunityId}/mark-bought`, data)
+}
+
 /** 触发决策多模型评审 */
 export function triggerPeerReview(decisionId, reviewerTypes = ['suitability', 'evidence', 'counter', 'overconfidence']) {
   return api.post(`/decisions/${decisionId}/peer-review`, { reviewer_types: reviewerTypes })

@@ -992,12 +992,7 @@ async def _do_hotspots_analysis():
         code_ref_text = "暂无"
         val_text = "暂无"
 
-    policy_keywords = [
-        "政策", "国务院", "发改委", "工信部", "财政部", "央行", "证监会",
-        "刺激", "补贴", "规划", "十五五", "新质生产力", "人工智能", "半导体",
-        "算力", "机器人", "低空经济", "新能源", "储能", "消费", "设备更新",
-        "出海", "自主可控", "并购重组",
-    ]
+    from config import POLICY_KEYWORDS as policy_keywords
     policy_lines = []
     for n in news_list:
         text = f"{n.get('title','')} {n.get('summary','')}"
@@ -1114,6 +1109,12 @@ async def _do_hotspots_analysis():
                 rec["percentile"] = index_lookup[code].get("percentile")
                 rec["current_value"] = index_lookup[code].get("current_value")
                 rec["metric_type"] = index_lookup[code].get("metric_type")
+            # 确保 prompt 要求的新字段有默认值，避免前端 undefined
+            rec.setdefault("opportunity_score", 0)
+            rec.setdefault("policy_signal", "")
+            rec.setdefault("future_direction", "")
+            rec.setdefault("valuation_role", "")
+            rec.setdefault("risk_note", "")
         # 保存到推荐验证库 + 缓存 + 分析历史
         if recs:
             try:

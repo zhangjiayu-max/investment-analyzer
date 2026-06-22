@@ -140,6 +140,13 @@ from db.watchlist import (
     batch_add_to_watchlist, refresh_watchlist_navs, get_watchlist_summary,
 )
 
+# 主题机会
+from db.opportunities import (
+    init_opportunity_tables, save_opportunity, get_opportunity,
+    list_opportunities, update_opportunity_status,
+    create_decision_from_opportunity, mark_opportunity_bought,
+)
+
 # 目标账户 / 资金桶
 from db.goal_buckets import (
     init_goal_bucket_tables, create_goal_bucket, get_goal_bucket,
@@ -904,6 +911,9 @@ def init_db():
 
     # ── 理财决策中枢表 ──────────────────────────────────────
     init_decision_tables(conn)
+
+    # ── 短线主题机会表 ──────────────────────────────────────
+    init_opportunity_tables(conn)
 
     # ── 目标账户 / 资金桶表 ──────────────────────────────────
     init_goal_bucket_tables(conn)

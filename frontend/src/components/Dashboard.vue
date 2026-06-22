@@ -1,6 +1,6 @@
 <script setup>
 import { ref, computed, onMounted, onActivated } from 'vue'
-import { getDashboard, runAnalysis, runPanoramaAnalysis, pollPanoramaStatus, getHotTopics, getDailyReport, regenerateDailyReport, submitDailyReportFeedback, listPanoramaRecords, triggerHotspotsAnalysis, getLatestHotspotsAnalysis, getRecommendations, getRecommendationStats, submitRecommendationFeedback, getBondRecommend, listBondRecommendRecords, autoVerifyRecommendations, fetchRecentValuations, getBondMarketTemperature, getHotspotsRelate, getRebalancingSuggestion, listTodayDecisions, updateDecisionStatus, completeDecisionAction, listDueDecisionReviews, submitDecisionReview, getDecisionPrecheck } from '../api'
+import { getDashboard, runAnalysis, runPanoramaAnalysis, pollPanoramaStatus, getHotTopics, getDailyReport, regenerateDailyReport, submitDailyReportFeedback, listPanoramaRecords, triggerHotspotsAnalysis, getLatestHotspotsAnalysis, getRecommendations, getRecommendationStats, submitRecommendationFeedback, getBondRecommend, listBondRecommendRecords, autoVerifyRecommendations, fetchRecentValuations, getBondMarketTemperature, getHotspotsRelate, getRebalancingSuggestion, listTodayDecisions, updateDecisionStatus, completeDecisionAction, listDueDecisionReviews, submitDecisionReview, getDecisionPrecheck, getTodayOpportunities, scanDailyOpportunities, createDecisionFromOpportunity, watchOpportunity } from '../api'
 import GaugeChart from './charts/GaugeChart.vue'
 import ConfirmDialog from './ConfirmDialog.vue'
 import AppToast from './AppToast.vue'
@@ -57,6 +57,8 @@ const hotTopics = ref(null)
 const hotTopicsFetchedAt = ref('')
 const hotTopicsLoading = ref(true)
 const hotspotsRelate = ref(null)
+const opportunities = ref([])
+const opportunitiesLoading = ref(false)
 
 // ── 每日日报自动加载 ──
 const dailyReport = ref(null)
@@ -161,6 +163,7 @@ onMounted(async () => {
     loadTodayDecisions(),
     loadDecisionReviews(),
     loadHotTopics(),
+    loadOpportunities(),
     loadDailyReport(),
     loadRecHistory(),
     loadBondTemperature(),
@@ -202,6 +205,7 @@ onActivated(async () => {
     loadTodayDecisions(),
     loadDecisionReviews(),
     loadHotTopics(),
+    loadOpportunities(),
     loadDailyReport(),
     loadRecHistory(),
     loadBondTemperature(),
@@ -243,6 +247,18 @@ async function loadHotspotsRelate() {
     const { data } = await getHotspotsRelate()
     hotspotsRelate.value = data.items || []
   } catch (_) {}
+}
+
+async function loadOpportunities() {
+  opportunitiesLoading.value = true
+  try {
+    const { data: res } = await getTodayOpportunities()
+    opportunities.value = res.items || []
+  } catch (e) {
+    opportunities.value = []
+  } finally {
+    opportunitiesLoading.value = false
+  }
 }
 
 const hotTopicsAnalyzedAt = ref('')
@@ -442,10 +458,16 @@ function confirmBondRecommend() {
 async function generateHotspots() {
   hotspotsAnalysis.value = null
   await startHotspotsTask(triggerHotspotsAnalysis, {
-    onComplete: (result) => {
+    onComplete: async (result) => {
       hotspotsAnalysis.value = result
       hotTopicsAnalyzedAt.value = new Date().toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
       hotTopicsFetchedAt.value = hotTopicsAnalyzedAt.value
+      try {
+        const { data: opp } = await scanDailyOpportunities({ force_refresh: true })
+        opportunities.value = opp.items || []
+      } catch (e) {
+        console.warn('机会引擎刷新失败:', e)
+      }
       try { autoVerifyRecommendations() } catch (_) {}
       loadRecHistory()
     },
@@ -467,6 +489,26 @@ function confirmHotspots() {
     message: '将使用「热点分析专家」分析市场热点并生成投资建议，是否继续？',
     danger: false,
     onConfirm: () => { confirm.value.visible = false; generateHotspots() }
+  }
+}
+
+async function handleCreateOpportunityDecision(item) {
+  try {
+    await createDecisionFromOpportunity(item.id)
+    showToast('已存为理财决策草案', 'success')
+    await Promise.all([loadTodayDecisions(), loadDecisionReviews(), loadOpportunities()])
+  } catch (e) {
+    showToast('保存决策失败', 'error')
+  }
+}
+
+async function handleWatchOpportunity(item) {
+  try {
+    await watchOpportunity(item.id)
+    showToast('已加入观察列表', 'success')
+    await loadOpportunities()
+  } catch (e) {
+    showToast('加入观察失败', 'error')
   }
 }
 
@@ -668,6 +710,8 @@ function handlePanorama() {
         :hotspot-loading="hotspotLoading"
         :hotspot-error="hotspotError"
         :hotspots-analysis="hotspotsAnalysis"
+        :opportunities="opportunities"
+        :opportunities-loading="opportunitiesLoading"
         :hotspots-relate="hotspotsRelate || []"
         :rec-history="recHistory"
         :rec-stats="recStats"
@@ -675,6 +719,8 @@ function handlePanorama() {
         :feedback-sending="feedbackSending"
         @analyze="confirmHotspots"
         @feedback="submitFeedback"
+        @create-decision="handleCreateOpportunityDecision"
+        @watch-opportunity="handleWatchOpportunity"
         @navigate="(page) => emit('navigate', page)"
         @update:show-verify="showVerify = $event"
       />
