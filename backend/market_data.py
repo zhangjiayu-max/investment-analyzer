@@ -492,16 +492,17 @@ def get_market_overview() -> dict:
             result["breadth"] = {
                 "up": up_count,
                 "down": down_count,
-                "limit_up": 0,
-                "limit_down": 0,
+                "limit_up": None,  # 涨停数据需专用接口，板块统计无法获取
+                "limit_down": None,
                 "total_volume_yi": total_vol,
             }
         except Exception as e:
             logger.warning(f"涨跌家数降级估算失败: {e}")
             total_vol = sum(idx.get("volume_yi", 0) for idx in result["indices"])
             result["breadth"] = {
-                "up": 0, "down": 0, "limit_up": 0, "limit_down": 0,
+                "up": None, "down": None, "limit_up": None, "limit_down": None,
                 "total_volume_yi": total_vol,
+                "_note": "数据不可用，涨跌家数为空",
             }
 
     _set_cached("market_overview", result)

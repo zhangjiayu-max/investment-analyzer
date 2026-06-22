@@ -189,7 +189,7 @@ async def _execute_analysis(case: dict) -> str:
     analysis_type = case.get("analysis_type", "ai")
 
     if analysis_type == "panorama":
-        from routers.portfolio import panorama_analysis_api
+        from routers.portfolio.analysis import panorama_analysis_api
         from models.portfolio import PanoramaAnalysisRequest
         result = await panorama_analysis_api(PanoramaAnalysisRequest())
         if isinstance(result, StreamingResponse):
@@ -197,14 +197,14 @@ async def _execute_analysis(case: dict) -> str:
         return json.dumps(result, ensure_ascii=False)[:5000]
 
     elif analysis_type == "deep_dive":
-        from routers.portfolio import fund_deep_dive_api
+        from routers.portfolio.analysis import fund_deep_dive_api
         from models.portfolio import DeepDiveRequest
         holding_id = input_params.get("holding_id")
         result = await fund_deep_dive_api(holding_id, DeepDiveRequest())
         return json.dumps(result, ensure_ascii=False)[:5000]
 
     elif analysis_type == "trade_review":
-        from routers.portfolio import trade_review_api
+        from routers.portfolio.analysis import trade_review_api
         from models.portfolio import TradeReviewRequest
         result = await trade_review_api(TradeReviewRequest(
             start_date=input_params.get("start_date", ""),
@@ -213,7 +213,7 @@ async def _execute_analysis(case: dict) -> str:
         return json.dumps(result, ensure_ascii=False)[:5000]
 
     elif analysis_type == "what_if":
-        from routers.portfolio import what_if_analysis_api
+        from routers.portfolio.analysis import what_if_analysis_api
         from models.portfolio import WhatIfRequest
         result = await what_if_analysis_api(WhatIfRequest(
             scenario=input_params.get("scenario", ""),
@@ -222,14 +222,14 @@ async def _execute_analysis(case: dict) -> str:
         return json.dumps(result, ensure_ascii=False)[:5000]
 
     elif analysis_type == "diversification_ai":
-        from routers.portfolio import portfolio_diversification_ai_summary
+        from routers.portfolio.analysis import portfolio_diversification_ai_summary
         result = await portfolio_diversification_ai_summary()
         if isinstance(result, dict) and result.get("status") == "running":
             result = await _await_portfolio_record_result(result["id"])
         return json.dumps(result, ensure_ascii=False)[:5000]
 
     elif analysis_type == "ai":
-        from routers.portfolio import portfolio_ai_analysis_api
+        from routers.portfolio.analysis import portfolio_ai_analysis_api
         from models.portfolio import PortfolioAiAnalysisRequest
         question = input_params.get("question", "")
         result = await portfolio_ai_analysis_api(PortfolioAiAnalysisRequest(question=question))

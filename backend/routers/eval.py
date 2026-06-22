@@ -15,7 +15,7 @@ from db import (
     create_async_task, update_async_task, get_async_task,
 )
 from models.eval import CreateEvalCaseRequest, BadCaseToEvalRequest
-from routers.portfolio import (
+from routers.portfolio.analysis import (
     panorama_analysis_api, fund_deep_dive_api,
     trade_review_api, what_if_analysis_api,
     portfolio_diversification_ai_summary, portfolio_ai_analysis_api,
@@ -146,14 +146,14 @@ async def _do_eval_case_run(case_id: int):
                 from agent.orchestrator import orchestrate
                 result = await asyncio.to_thread(lambda: orchestrate(question, []))
                 result_summary = result.get("answer", "")[:500]
-                result_data = json.dumps(result, ensure_ascii=False)[:5000]
+                result_data = json.dumps(result, ensure_ascii=False)
             elif analysis_type in specialists:
                 # 单个专家 Agent
                 result = await asyncio.to_thread(
                     lambda: run_specialist(analysis_type, question)
                 )
                 result_summary = result.get("analysis", "")[:500]
-                result_data = json.dumps(result, ensure_ascii=False)[:5000]
+                result_data = json.dumps(result, ensure_ascii=False)
             else:
                 raise HTTPException(400, f"未找到专家: {analysis_type}")
 
@@ -164,7 +164,7 @@ async def _do_eval_case_run(case_id: int):
                 result_data = "{}"
             else:
                 result_summary = json.dumps(result, ensure_ascii=False)[:500]
-                result_data = json.dumps(result, ensure_ascii=False)[:5000]
+                result_data = json.dumps(result, ensure_ascii=False)
         elif analysis_type == "deep_dive":
             holding_id = input_params.get("holding_id")
             if not holding_id:
@@ -189,16 +189,20 @@ async def _do_eval_case_run(case_id: int):
         elif analysis_type == "diversification_ai":
             result = await portfolio_diversification_ai_summary()
             if isinstance(result, dict) and result.get("status") == "running":
-                result = await _await_portfolio_record_result(result["id"])
+                record_id = result.get("record_id") or result.get("id")
+                if record_id:
+                    result = await _await_portfolio_record_result(record_id)
             result_summary = json.dumps(result, ensure_ascii=False)[:500]
-            result_data = json.dumps(result, ensure_ascii=False)[:5000]
+            result_data = json.dumps(result, ensure_ascii=False)
         elif analysis_type == "ai":
             question = input_params.get("question", "")
             result = await portfolio_ai_analysis_api(PortfolioAiAnalysisRequest(question=question))
             if isinstance(result, dict) and result.get("status") == "running":
-                result = await _await_portfolio_record_result(result["id"])
+                record_id = result.get("record_id") or result.get("id")
+                if record_id:
+                    result = await _await_portfolio_record_result(record_id)
             result_summary = json.dumps(result, ensure_ascii=False)[:500]
-            result_data = json.dumps(result, ensure_ascii=False)[:5000]
+            result_data = json.dumps(result, ensure_ascii=False)
         else:
             raise HTTPException(400, f"不支持的分析类型: {analysis_type}")
 

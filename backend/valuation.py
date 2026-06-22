@@ -91,14 +91,67 @@ def analyze_fund(fund_code: str, user_valuation: dict = None) -> dict:
     except Exception:
         price_stats = {}
 
-    score, recommendation, reason = _score_fund(price_stats, user_valuation)
+    # ── 估值：通过跟踪指数查找 PE/PB 百分位 ──
+    valuation = {}
+    index_valuation = None
+    try:
+        from db.portfolio import lookup_fund_info
+        from db.valuations import search_indexes_by_keyword, get_best_valuation
+
+        fund_detail = lookup_fund_info(fund_code)
+        tracking_index = (fund_detail or {}).get("tracking_index", "")
+
+        if tracking_index:
+            # 用跟踪标的名称搜索匹配指数
+            search_term = tracking_index.replace("指数", "").replace("中证", "").replace("全指", "")
+            matches = search_indexes_by_keyword(search_term)
+
+            pe_val = pb_val = pe_pct = pb_pct = None
+            index_code = ""
+            index_name = ""
+
+            for m in matches:
+                code = m["index_code"]
+                # 优先查 PE
+                pe_data = get_best_valuation(code, "市盈率")
+                if pe_data and pe_data.get("current_value") is not None:
+                    pe_val = pe_data["current_value"]
+                    pe_pct = pe_data.get("percentile")
+                    index_code = code
+                    index_name = pe_data.get("index_name", m.get("index_name", ""))
+                # 再查 PB
+                pb_data = get_best_valuation(code, "市净率")
+                if pb_data and pb_data.get("current_value") is not None:
+                    pb_val = pb_data["current_value"]
+                    pb_pct = pb_data.get("percentile")
+                    if not index_name:
+                        index_name = pb_data.get("index_name", m.get("index_name", ""))
+                # 拿到一个就够了
+                if pe_val is not None or pb_val is not None:
+                    break
+
+            valuation = {
+                "pe": pe_val,
+                "pb": pb_val,
+                "pe_percentile": pe_pct,
+                "pb_percentile": pb_pct,
+                "index_code": index_code,
+                "index_name": index_name,
+                "tracking_index": tracking_index,
+            }
+            index_valuation = valuation
+    except Exception as e:
+        import logging
+        logging.warning(f"基金估值查询失败 ({fund_code}): {e}")
+
+    score, recommendation, reason = _score_fund(price_stats, user_valuation, index_valuation)
 
     return {
         "name": name,
         "code": fund_code,
         "basic_info": info,
         "price_stats": price_stats,
-        "valuation": {},
+        "valuation": valuation,
         "recommendation": recommendation,
         "reason": reason,
         "score": score,
@@ -406,7 +459,7 @@ def _score_stock(pe, pb, price_stats, user_val) -> tuple:
     return score, rec, "；".join(reasons) if reasons else "数据不足"
 
 
-def _score_fund(price_stats, user_val) -> tuple:
+def _score_fund(price_stats, user_val, index_val=None) -> tuple:
     """基金评分。"""
     score = 50
     reasons = []
@@ -423,6 +476,39 @@ def _score_fund(price_stats, user_val) -> tuple:
             score += 10
             reasons.append("净值接近历史高点")
 
+    # 跟踪指数估值（新增）
+    if index_val:
+        pe_pct = index_val.get("pe_percentile")
+        pb_pct = index_val.get("pb_percentile")
+        idx_name = index_val.get("index_name", "")
+
+        if pe_pct is not None:
+            if pe_pct < 20:
+                score -= 15
+                reasons.append(f"{idx_name} PE百分位 {pe_pct:.0f}%，深度低估")
+            elif pe_pct < 30:
+                score -= 10
+                reasons.append(f"{idx_name} PE百分位 {pe_pct:.0f}%，低估区间")
+            elif pe_pct < 50:
+                score -= 5
+                reasons.append(f"{idx_name} PE百分位 {pe_pct:.0f}%，合理偏低")
+            elif pe_pct > 80:
+                score += 15
+                reasons.append(f"{idx_name} PE百分位 {pe_pct:.0f}%，高估区间")
+            elif pe_pct > 70:
+                score += 10
+                reasons.append(f"{idx_name} PE百分位 {pe_pct:.0f}%，偏高")
+            else:
+                reasons.append(f"{idx_name} PE百分位 {pe_pct:.0f}%")
+
+        if pb_pct is not None and pe_pct is not None:
+            # PE/PB 背离提示
+            diverge = abs(pe_pct - pb_pct)
+            if diverge > 20:
+                better = "PB" if pb_pct < pe_pct else "PE"
+                reasons.append(f"PE/PB百分位背离{diverge:.0f}%，建议参考{better}")
+
+    # 用户提供的指数估值参考（保留兼容）
     if user_val:
         pe_pct = user_val.get("pe_percentile")
         if pe_pct is not None:
