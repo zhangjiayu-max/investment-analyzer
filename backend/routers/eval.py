@@ -146,14 +146,14 @@ async def _do_eval_case_run(case_id: int):
                 from agent.orchestrator import orchestrate
                 result = await asyncio.to_thread(lambda: orchestrate(question, []))
                 result_summary = result.get("answer", "")[:500]
-                result_data = json.dumps(result, ensure_ascii=False)[:5000]
+                result_data = json.dumps(result, ensure_ascii=False)
             elif analysis_type in specialists:
                 # 单个专家 Agent
                 result = await asyncio.to_thread(
                     lambda: run_specialist(analysis_type, question)
                 )
                 result_summary = result.get("analysis", "")[:500]
-                result_data = json.dumps(result, ensure_ascii=False)[:5000]
+                result_data = json.dumps(result, ensure_ascii=False)
             else:
                 raise HTTPException(400, f"未找到专家: {analysis_type}")
 
@@ -164,41 +164,45 @@ async def _do_eval_case_run(case_id: int):
                 result_data = "{}"
             else:
                 result_summary = json.dumps(result, ensure_ascii=False)[:500]
-                result_data = json.dumps(result, ensure_ascii=False)[:5000]
+                result_data = json.dumps(result, ensure_ascii=False)
         elif analysis_type == "deep_dive":
             holding_id = input_params.get("holding_id")
             if not holding_id:
                 raise HTTPException(400, "deep_dive 需要 holding_id 参数")
             result = await fund_deep_dive_api(holding_id, DeepDiveRequest())
             result_summary = json.dumps(result, ensure_ascii=False)[:500]
-            result_data = json.dumps(result, ensure_ascii=False)[:5000]
+            result_data = json.dumps(result, ensure_ascii=False)
         elif analysis_type == "trade_review":
             result = await trade_review_api(TradeReviewRequest(
                 start_date=input_params.get("start_date", ""),
                 end_date=input_params.get("end_date", ""),
             ))
             result_summary = json.dumps(result, ensure_ascii=False)[:500]
-            result_data = json.dumps(result, ensure_ascii=False)[:5000]
+            result_data = json.dumps(result, ensure_ascii=False)
         elif analysis_type == "what_if":
             result = await what_if_analysis_api(WhatIfRequest(
                 scenario=input_params.get("scenario", ""),
                 parameter=input_params.get("parameter", ""),
             ))
             result_summary = json.dumps(result, ensure_ascii=False)[:500]
-            result_data = json.dumps(result, ensure_ascii=False)[:5000]
+            result_data = json.dumps(result, ensure_ascii=False)
         elif analysis_type == "diversification_ai":
             result = await portfolio_diversification_ai_summary()
             if isinstance(result, dict) and result.get("status") == "running":
-                result = await _await_portfolio_record_result(result["id"])
+                record_id = result.get("record_id") or result.get("id")
+                if record_id:
+                    result = await _await_portfolio_record_result(record_id)
             result_summary = json.dumps(result, ensure_ascii=False)[:500]
-            result_data = json.dumps(result, ensure_ascii=False)[:5000]
+            result_data = json.dumps(result, ensure_ascii=False)
         elif analysis_type == "ai":
             question = input_params.get("question", "")
             result = await portfolio_ai_analysis_api(PortfolioAiAnalysisRequest(question=question))
             if isinstance(result, dict) and result.get("status") == "running":
-                result = await _await_portfolio_record_result(result["id"])
+                record_id = result.get("record_id") or result.get("id")
+                if record_id:
+                    result = await _await_portfolio_record_result(record_id)
             result_summary = json.dumps(result, ensure_ascii=False)[:500]
-            result_data = json.dumps(result, ensure_ascii=False)[:5000]
+            result_data = json.dumps(result, ensure_ascii=False)
         else:
             raise HTTPException(400, f"不支持的分析类型: {analysis_type}")
 
