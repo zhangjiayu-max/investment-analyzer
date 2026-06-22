@@ -84,6 +84,7 @@ from routers.analysis import (
     index_analysis_router as analysis_index_analysis_router,
     fee_router as analysis_fee_router,
     correlation_router as analysis_correlation_router,
+    eval_system_router as analysis_eval_system_router,
 )
 from routers.dashboard import router as dashboard_router
 from routers.config import router as config_router
@@ -132,6 +133,7 @@ app.include_router(analysis_bond_recommend_router)
 app.include_router(analysis_index_analysis_router)
 app.include_router(analysis_fee_router)
 app.include_router(analysis_correlation_router)
+app.include_router(analysis_eval_system_router)
 app.include_router(dashboard_router)
 app.include_router(config_router)
 app.include_router(rag_router)

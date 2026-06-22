@@ -30,11 +30,12 @@ from .bond_recommend import router as bond_recommend_router
 from .index_analysis import router as index_analysis_router
 from .fee_analyzer import router as fee_router
 from .correlation import router as correlation_router
+from .eval_system import router as eval_system_router
 
 __all__ = [
     "panorama_router", "deep_dive_router", "trade_review_router",
     "what_if_router", "diversification_router", "portfolio_ai_router",
     "rebalancing_router", "hotspots_router", "daily_report_router",
     "market_intel_router", "bond_recommend_router", "index_analysis_router",
-    "fee_router", "correlation_router",
+    "fee_router", "correlation_router", "eval_system_router",
 ]

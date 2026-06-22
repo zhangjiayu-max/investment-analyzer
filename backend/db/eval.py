@@ -292,6 +292,10 @@ def init_eval_tables(conn):
     conn.execute("CREATE INDEX IF NOT EXISTS idx_rag_feedback_user ON rag_feedback(user_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_rag_feedback_kid ON rag_feedback(knowledge_id)")
 
+    # 新增表
+    _init_prompt_versions_table(conn)
+    _init_eval_daily_reports_table(conn)
+
 
 def create_eval_case(name: str, analysis_type: str, input_params: str = "{}",
                      description: str = "", expected_quality: str = "") -> int:
@@ -969,3 +973,147 @@ def get_rag_feedback_stats(user_id: str = "default", days: int = 30) -> dict:
         "negative_ids": negative_ids,
         "total_feedback": len(rows),
     }
+
+
+# ── 提示词版本管理 ──────────────────────────────
+
+def _init_prompt_versions_table(conn):
+    """提示词版本表。"""
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS prompt_versions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            agent_type TEXT NOT NULL,
+            version TEXT NOT NULL,
+            prompt_content TEXT NOT NULL,
+            changelog TEXT DEFAULT '',
+            is_active INTEGER DEFAULT 0,
+            avg_score REAL DEFAULT 0,
+            eval_count INTEGER DEFAULT 0,
+            created_at TEXT DEFAULT (datetime('now','localtime')),
+            UNIQUE(agent_type, version)
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_pv_type ON prompt_versions(agent_type)")
+
+
+def _init_eval_daily_reports_table(conn):
+    """每日评测日报表。"""
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS eval_daily_reports (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            report_date TEXT NOT NULL UNIQUE,
+            total_cases INTEGER DEFAULT 0,
+            avg_score REAL DEFAULT 0,
+            scores_by_type TEXT DEFAULT '{}',
+            score_trend TEXT DEFAULT 'stable',
+            alerts TEXT DEFAULT '[]',
+            recommendations TEXT DEFAULT '[]',
+            created_at TEXT DEFAULT (datetime('now','localtime'))
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_eval_daily_date ON eval_daily_reports(report_date)")
+
+
+def create_prompt_version(agent_type: str, version: str, prompt_content: str,
+                          changelog: str = "") -> int:
+    conn = _get_conn()
+    cur = conn.execute(
+        "INSERT INTO prompt_versions (agent_type, version, prompt_content, changelog) VALUES (?,?,?,?)",
+        (agent_type, version, prompt_content, changelog)
+    )
+    vid = cur.lastrowid
+    conn.commit()
+    conn.close()
+    return vid
+
+
+def list_prompt_versions(agent_type: str = None) -> list[dict]:
+    conn = _get_conn()
+    if agent_type:
+        rows = conn.execute(
+            "SELECT * FROM prompt_versions WHERE agent_type = ? ORDER BY id DESC", (agent_type,)
+        ).fetchall()
+    else:
+        rows = conn.execute("SELECT * FROM prompt_versions ORDER BY agent_type, id DESC").fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_active_prompt(agent_type: str) -> dict | None:
+    conn = _get_conn()
+    row = conn.execute(
+        "SELECT * FROM prompt_versions WHERE agent_type = ? AND is_active = 1", (agent_type,)
+    ).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def activate_prompt_version(version_id: int, agent_type: str) -> bool:
+    conn = _get_conn()
+    conn.execute("UPDATE prompt_versions SET is_active = 0 WHERE agent_type = ?", (agent_type,))
+    conn.execute("UPDATE prompt_versions SET is_active = 1 WHERE id = ?", (version_id,))
+    conn.commit()
+    conn.close()
+    return True
+
+
+def update_prompt_scores(version_id: int, avg_score: float, eval_count: int) -> bool:
+    conn = _get_conn()
+    conn.execute(
+        "UPDATE prompt_versions SET avg_score = ?, eval_count = ? WHERE id = ?",
+        (avg_score, eval_count, version_id)
+    )
+    conn.commit()
+    conn.close()
+    return True
+
+
+def save_eval_daily_report(report_date: str, total_cases: int, avg_score: float,
+                           scores_by_type: dict, score_trend: str = "stable",
+                           alerts: list = None, recommendations: list = None) -> int:
+    import json
+    conn = _get_conn()
+    conn.execute(
+        "INSERT OR REPLACE INTO eval_daily_reports (report_date, total_cases, avg_score, scores_by_type, score_trend, alerts, recommendations) VALUES (?,?,?,?,?,?,?)",
+        (report_date, total_cases, avg_score,
+         json.dumps(scores_by_type, ensure_ascii=False),
+         score_trend,
+         json.dumps(alerts or [], ensure_ascii=False),
+         json.dumps(recommendations or [], ensure_ascii=False))
+    )
+    conn.commit()
+    conn.close()
+    return 0
+
+
+def get_eval_daily_report(report_date: str) -> dict | None:
+    conn = _get_conn()
+    row = conn.execute("SELECT * FROM eval_daily_reports WHERE report_date = ?", (report_date,)).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def list_eval_daily_reports(limit: int = 30) -> list[dict]:
+    conn = _get_conn()
+    rows = conn.execute("SELECT * FROM eval_daily_reports ORDER BY report_date DESC LIMIT ?", (limit,)).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_eval_trends(days: int = 30) -> list[dict]:
+    conn = _get_conn()
+    rows = conn.execute(
+        "SELECT * FROM eval_daily_reports ORDER BY report_date DESC LIMIT ?", (days,)
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_random_active_cases(count: int = 5) -> list[dict]:
+    """随机抽取活跃评测用例。"""
+    conn = _get_conn()
+    rows = conn.execute(
+        "SELECT * FROM eval_cases WHERE is_active = 1 ORDER BY RANDOM() LIMIT ?", (count,)
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
