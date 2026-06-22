@@ -1621,6 +1621,14 @@ async function loadTxAnalysis() {
   }
 }
 
+function copyModeResult() {
+  const text = modeResult.value || ''
+  if (!text) return
+  navigator.clipboard.writeText(text).then(() => {
+    showToast('已复制到剪贴板', 'success')
+  }).catch(() => {})
+}
+
 async function submitFeedback(feedback) {
   if (!modeRecordId.value) return
   // toggle：再次点击同一按钮取消反馈
@@ -3043,6 +3051,7 @@ function txDisplayAmount(tx) {
             <div class="result-header">
               <span class="result-title">📊 交易复盘结果</span>
               <span class="result-time">{{ new Date().toLocaleString() }}</span>
+              <button class="btn-feedback" @click="copyModeResult" title="复制内容">📋</button>
             </div>
             <div class="result-body" v-html="renderMarkdown(modeResult)"></div>
             <div class="result-feedback">
