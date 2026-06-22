@@ -1,5 +1,5 @@
 <script setup>
-import { ref, computed, onMounted, onActivated, watch } from 'vue'
+import { ref, computed, onMounted, onActivated, watch, nextTick } from 'vue'
 
 const maxIndustryPct = computed(() => {
   if (!detailData.value?.industry_allocation?.length) return 100
@@ -2429,6 +2429,10 @@ function openConfirmTx(tx) {
   confirmTargetFundCode.value = ''
   confirmTargetFundName.value = ''
   showConfirmTx.value = true
+  nextTick(() => {
+    const input = document.querySelector('.modal-overlay .input-field')
+    if (input) input.focus()
+  })
 }
 
 async function submitConfirmTx() {
@@ -4546,16 +4550,16 @@ function txDisplayAmount(tx) {
             <form @submit.prevent="submitConfirmTx" class="modal-form">
               <div class="form-group">
                 <label>T+1 确认净值 *</label>
-                <input v-model.number="confirmTxPrice" type="number" step="0.0001" class="input-field" placeholder="输入确认日的实际净值" required />
+                <input v-model.number="confirmTxPrice" type="text" inputmode="decimal" step="0.0001" class="input-field" placeholder="输入确认日的实际净值" required />
               </div>
               <div v-if="confirmTxData?.transaction_type === 'sell'" class="form-group" style="margin-top:0.75rem">
                 <label>实际卖出份额</label>
-                <input v-model.number="confirmTxShares" type="number" step="0.01" min="0" class="input-field" :placeholder="'提交份额: ' + (confirmTxData?.submitted_shares || 0)" />
+                <input v-model.number="confirmTxShares" type="text" inputmode="decimal" step="0.01" min="0" class="input-field" :placeholder="'提交份额: ' + (confirmTxData?.submitted_shares || 0)" />
                 <span class="field-hint">留空则使用提交的 {{ (confirmTxData?.submitted_shares || 0).toLocaleString() }} 份</span>
               </div>
               <div class="form-group" style="margin-top:0.75rem">
                 <label>手续费 (可选)</label>
-                <input v-model.number="confirmTxFee" type="number" step="0.01" min="0" class="input-field" placeholder="0" />
+                <input v-model.number="confirmTxFee" type="text" inputmode="decimal" step="0.01" min="0" class="input-field" placeholder="0" />
                 <span class="field-hint">申购费/赎回费/转换费，从金额中扣除</span>
               </div>
               <div v-if="confirmTxData?.transaction_type === 'convert'" class="form-group" style="margin-top:0.75rem">
