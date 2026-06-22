@@ -23,6 +23,11 @@ def init_async_tasks_table(conn):
     """)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_async_tasks_type ON async_tasks(task_type)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_async_tasks_status ON async_tasks(status)")
+    # 添加 progress 字段（存储 JSON 格式的进度信息）
+    try:
+        conn.execute("ALTER TABLE async_tasks ADD COLUMN progress TEXT DEFAULT ''")
+    except Exception:
+        pass  # 列已存在
 
 
 def create_async_task(task_type: str, caller: str = "") -> int:
@@ -43,9 +48,10 @@ def update_async_task(task_id: int, **fields) -> bool:
     if not fields:
         return False
     fields["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    # result 字段如果是 dict/list 自动 JSON 序列化
-    if "result" in fields and isinstance(fields["result"], (dict, list)):
-        fields["result"] = json.dumps(fields["result"], ensure_ascii=False)
+    # result / progress 字段如果是 dict/list 自动 JSON 序列化
+    for key in ("result", "progress"):
+        if key in fields and isinstance(fields[key], (dict, list)):
+            fields[key] = json.dumps(fields[key], ensure_ascii=False)
 
     set_clause = ", ".join(f"{k} = ?" for k in fields)
     values = list(fields.values()) + [task_id]

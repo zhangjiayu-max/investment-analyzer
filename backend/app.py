@@ -82,6 +82,8 @@ from routers.analysis import (
     market_intel_router as analysis_market_intel_router,
     bond_recommend_router as analysis_bond_recommend_router,
     index_analysis_router as analysis_index_analysis_router,
+    fee_router as analysis_fee_router,
+    correlation_router as analysis_correlation_router,
 )
 from routers.dashboard import router as dashboard_router
 from routers.config import router as config_router
@@ -128,6 +130,8 @@ app.include_router(analysis_daily_report_router)
 app.include_router(analysis_market_intel_router)
 app.include_router(analysis_bond_recommend_router)
 app.include_router(analysis_index_analysis_router)
+app.include_router(analysis_fee_router)
+app.include_router(analysis_correlation_router)
 app.include_router(dashboard_router)
 app.include_router(config_router)
 app.include_router(rag_router)
