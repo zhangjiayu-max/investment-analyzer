@@ -25,7 +25,7 @@ import {
   CandlestickChart, LineChart, PieChart, Gauge, Percent,
   Wallet, CircleDollarSign, Banknote, Landmark, Scale, Activity, HeartPulse,
   Bot, Brain, Lightbulb, Sparkles, Globe, FlaskConical, Microscope,
-  Library, PenLine, Target, Tv, ClipboardList, MessageSquareDot,
+  Library, PenLine, Target, Tv, ClipboardList, Clipboard, MessageSquareDot,
   CircleUser, User, ThumbsUp, ThumbsDown, FileText, Users,
   Sun, Moon, Circle, CircleAlert,
 } from 'lucide-vue-next'
@@ -73,7 +73,7 @@ const LUCIDE_MAP = {
   globe: Globe, flask: FlaskConical, 'flask-conical': FlaskConical,
   microscope: Microscope, library: Library, 'book-open': BookOpen,
   'pen-line': PenLine, target: Target, tv: Tv,
-  'clipboard-list': ClipboardList, 'message-circle': MessageCircle,
+  'clipboard-list': ClipboardList, 'clipboard': Clipboard, 'message-circle': MessageCircle,
   'message-square-dot': MessageSquareDot,
   'circle-user': CircleUser, user: User,
   'thumbs-up': ThumbsUp, 'thumbs-down': ThumbsDown,
