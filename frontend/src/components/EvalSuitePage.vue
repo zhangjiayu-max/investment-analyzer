@@ -170,6 +170,21 @@ function formatParams(params) {
   } catch { return params }
 }
 
+function copyToClipboard(text, label = '内容') {
+  navigator.clipboard.writeText(text).then(() => {
+    showToast(`${label}已复制到剪贴板`, 'success')
+  }).catch(() => {
+    // fallback
+    const ta = document.createElement('textarea')
+    ta.value = text
+    document.body.appendChild(ta)
+    ta.select()
+    document.execCommand('copy')
+    document.body.removeChild(ta)
+    showToast(`${label}已复制`, 'success')
+  })
+}
+
 function openEdit(c) {
   form.value = {
     name: c.name,
@@ -480,10 +495,12 @@ onMounted(() => {
                 <div class="detail-block">
                   <label>输入参数</label>
                   <pre class="detail-code">{{ formatParams(c.input_params) }}</pre>
+                  <button class="copy-btn" @click="copyToClipboard(formatParams(c.input_params), '输入参数')">📋 复制</button>
                 </div>
                 <div class="detail-block">
                   <label>期望质量标准</label>
                   <div class="detail-quality">{{ c.expected_quality || '未设置' }}</div>
+                  <button class="copy-btn" @click="copyToClipboard(c.expected_quality || '', '质量标准')">📋 复制</button>
                 </div>
                 <div v-if="c.description" class="detail-block">
                   <label>描述</label>
@@ -608,19 +625,28 @@ onMounted(() => {
 
           <!-- Input Params -->
           <div v-if="runDetail.input_params && runDetail.input_params !== '{}'" class="detail-section">
-            <h5>📥 输入参数</h5>
+            <div class="detail-section-head">
+              <h5>📥 输入参数</h5>
+              <button class="copy-btn" @click="copyToClipboard(runDetail.input_params, '输入参数')">📋 复制</button>
+            </div>
             <pre class="code-block">{{ (() => { try { return JSON.stringify(JSON.parse(runDetail.input_params), null, 2) } catch { return runDetail.input_params } })() }}</pre>
           </div>
 
           <!-- Expected Quality -->
           <div v-if="runDetail.expected_quality" class="detail-section">
-            <h5>📋 预期质量标准</h5>
+            <div class="detail-section-head">
+              <h5>📋 预期质量标准</h5>
+              <button class="copy-btn" @click="copyToClipboard(runDetail.expected_quality, '质量标准')">📋 复制</button>
+            </div>
             <pre class="code-block quality-block">{{ runDetail.expected_quality }}</pre>
           </div>
 
           <!-- Full Result -->
           <div v-if="runDetail.result_data" class="detail-section">
-            <h5>📤 完整结果</h5>
+            <div class="detail-section-head">
+              <h5>📤 完整结果</h5>
+              <button class="copy-btn" @click="copyToClipboard(extractResult(runDetail.result_data), '完整结果')">📋 复制</button>
+            </div>
             <div v-if="isMarkdown(extractResult(runDetail.result_data))" class="result-content markdown-body" v-html="renderMarkdown(extractResult(runDetail.result_data))"></div>
             <pre v-else class="code-block result-block">{{ extractResult(runDetail.result_data) }}</pre>
           </div>
@@ -1079,11 +1105,37 @@ onMounted(() => {
   margin-bottom: 1rem;
 }
 
+.detail-section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 0.5rem;
+}
+
+.detail-section-head h5 {
+  margin: 0;
+}
+
 .detail-section h5 {
   font-size: 0.85rem;
   font-weight: 600;
   margin-bottom: 0.5rem;
   color: var(--color-text-secondary);
+}
+
+.copy-btn {
+  padding: 3px 8px;
+  font-size: 0.72rem;
+  background: var(--color-bg-input);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  color: var(--color-text-muted);
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.copy-btn:hover {
+  color: var(--color-primary);
+  border-color: var(--color-primary);
 }
 
 .code-block {
