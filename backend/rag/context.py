@@ -6,7 +6,7 @@ import time
 
 from .config import get_rag_config, get_rag_config_int
 from .fts import search_knowledge, log_rag_search, init_fts
-from .chroma import search_chroma, index_to_chroma, init_chroma
+from .chroma import search_chroma, index_to_chroma, init_chroma, _detect_index_names, _inject_valuation_data, _get_known_index_names
 from .reranker import rerank_results
 
 logger = logging.getLogger(__name__)
