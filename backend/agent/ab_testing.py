@@ -3,6 +3,7 @@
 import json
 import time
 import logging
+from db.config import get_config_int
 
 logger = logging.getLogger(__name__)
 
@@ -96,7 +97,7 @@ async def _default_judge(query: str, result_a: str, result_b: str) -> dict:
 输出JSON: {{"a_score": 1-10, "b_score": 1-10, "reason": "简短理由"}}
 只输出JSON。"""
 
-    response = _call_llm(prompt, max_tokens=200)
+    response = _call_llm(prompt, max_tokens=get_config_int('llm.max_tokens_eval_score', 200))
     try:
         data = json.loads(response.strip().strip("```json").strip("```"))
         return data

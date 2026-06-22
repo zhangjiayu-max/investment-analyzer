@@ -29,6 +29,7 @@ from db import (
     get_cash_balance,
     get_analysis_agent,
     create_analysis_history, list_analysis_history,
+    get_config_int,
 )
 from market_data import get_index_valuation
 from llm_service import chat_about_investment, _call_llm, MODEL
@@ -389,8 +390,8 @@ async def _auto_daily_report():
                 {"role": "system", "content": full_prompt},
                 {"role": "user", "content": "请生成今日市场分析报告。"},
             ],
-            temperature=0.3,
-            max_tokens=8192,
+            temperature=get_config_float('llm.temperature_analysis', 0.3),
+            max_tokens=get_config_int('llm.max_tokens_analysis', 8192),
         ))
         result_text = response.choices[0].message.content or ""
         token_usage = response.usage.total_tokens if response.usage else 0

@@ -13,7 +13,7 @@ class CreateHoldingRequest(BaseModel):
     index_name: str = None
     buy_date: str = None
     notes: str = None
-    account: str = "花无缺"
+    account: str = ""  # 空字符串表示使用配置中的默认账户
 
 
 class UpdateHoldingRequest(BaseModel):

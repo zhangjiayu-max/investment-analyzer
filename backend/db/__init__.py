@@ -129,7 +129,7 @@ from db.bond_knowledge import (
 
 # 系统配置
 from db.config import (
-    init_default_configs, get_config, get_config_int, get_config_float,
+    init_default_configs, get_config, get_config_int, get_config_float, get_config_list,
     list_configs, update_config, reset_configs,
 )
 

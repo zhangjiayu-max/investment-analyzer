@@ -1,3 +1,4 @@
+from db.config import get_config_int, get_config_float
 """估值融合层 — 规则分 + LLM 二次判断
 
 在 valuation._score_stock 的规则分基础上，调用 LLM 结合行业景气度/市场情绪/用户画像
@@ -84,8 +85,8 @@ def fusion_score(stock_result: dict, kyc_profile: dict = None) -> dict:
                 {"role": "system", "content": "你是估值分析融合引擎。只输出 JSON。"},
                 {"role": "user", "content": prompt},
             ],
-            temperature=0.2,
-            max_tokens=2000,
+            temperature=get_config_float('llm.temperature_fusion', 0.2),
+            max_tokens=get_config_int('llm.max_tokens_fusion', 2000),
         )
         raw = response.choices[0].message.content.strip()
         if "```" in raw:

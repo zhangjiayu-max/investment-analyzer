@@ -18,7 +18,7 @@ from db import (
     save_recommendation_feedback, list_recommendation_feedback,
     get_recommendation_feedback_stats,
     save_llm_feedback, list_llm_feedback,
-    get_config_int, get_config_float,
+    get_config_int, get_config_float, get_config, get_config_list,
     create_async_task, update_async_task, get_async_task,
 )
 from db._conn import _get_conn
@@ -283,7 +283,7 @@ async def get_dashboard():
     cash_balance = 0
     cash_details = {}
     try:
-        for uid in ["小鱼儿", "花无缺"]:
+        for uid in get_config_list('portfolio.users', ['小鱼儿', '花无缺']):
             bal = get_cash_balance(uid).get("balance", 0)
             cash_details[uid] = round(bal, 2)
             cash_balance += bal
@@ -840,8 +840,8 @@ async def hotspots_relate_indexes():
                 caller="hotspots_relate",
                 model=MODEL,
                 messages=[{"role": "user", "content": prompt}],
-                temperature=0.1,
-                max_tokens=200,
+                temperature=get_config_float('llm.temperature_vision', 0.1),
+                max_tokens=get_config_int('llm.max_tokens_dashboard_summary', 200),
             ))
             text = response.choices[0].message.content or ""
             # 提取 JSON
@@ -1266,7 +1266,7 @@ async def auto_verify_recommendations():
     benchmark_change = None
     if has_watch:
         try:
-            hs300 = get_index_current_price("000300.SH")
+            hs300 = get_index_current_price(get_config('index.hs300_code', '000300.SH'))
             if hs300.get("price") and hs300.get("baseline"):
                 benchmark_change = (hs300["price"] - hs300["baseline"]) / hs300["baseline"] * 100
         except Exception:

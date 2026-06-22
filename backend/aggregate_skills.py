@@ -1,3 +1,4 @@
+from db.config import get_config_int, get_config_float
 """聚合技能特征 — 将 122 份提取结果合并为 1 份 Skill 文档"""
 
 import json
@@ -70,8 +71,8 @@ def llm_refine(category: str, items: list[str]) -> list[str]:
         response = client.chat.completions.create(
             model=MODEL,
             messages=[{"role": "user", "content": prompt}],
-            temperature=0.2,
-            max_tokens=1000,
+            temperature=get_config_float('llm.temperature_tool', 0.2),
+            max_tokens=get_config_int('llm.max_tokens_tool', 1000),
         )
         text = response.choices[0].message.content.strip()
         if "```" in text:

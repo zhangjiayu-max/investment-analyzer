@@ -13,6 +13,7 @@ import re
 from typing import Optional
 
 from llm_service import _call_llm, MODEL
+from db.config import get_config_int, get_config_float
 
 logger = logging.getLogger(__name__)
 
@@ -154,8 +155,8 @@ class LlmEvaluatorAgent:
                     {"role": "system", "content": EVALUATOR_SYSTEM_PROMPT},
                     {"role": "user", "content": user_prompt},
                 ],
-                temperature=0.2,
-                max_tokens=2000,
+                temperature=get_config_float('llm.temperature_eval', 0.2),
+                max_tokens=get_config_int('llm.max_tokens_eval', 2000),
             )
 
             raw = response.choices[0].message.content

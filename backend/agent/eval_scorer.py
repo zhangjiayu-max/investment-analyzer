@@ -7,6 +7,7 @@ import json
 import logging
 
 from llm_service import _call_llm, MODEL
+from db.config import get_config_int, get_config_float
 
 logger = logging.getLogger(__name__)
 
@@ -239,8 +240,8 @@ async def score_eval_result(expected_quality: str, actual_result: str,
                 {"role": "system", "content": prompt},
                 {"role": "user", "content": "输出评分JSON："},
             ],
-            temperature=0.1,
-            max_tokens=800,
+            temperature=get_config_float('llm.temperature_eval', 0.1),
+            max_tokens=get_config_int('llm.max_tokens_eval_score', 800),
             extra_body={"thinking": {"type": "disabled"}},
         )
         msg = resp.choices[0].message
@@ -350,8 +351,8 @@ async def evaluate_llm_output(query: str, output: str, context: str = "",
                 {"role": "system", "content": prompt},
                 {"role": "user", "content": "请对上述产出进行多维度评估。\n\n直接输出JSON，不要其他文字："},
             ],
-            temperature=0.1,
-            max_tokens=500,
+            temperature=get_config_float('llm.temperature_eval', 0.1),
+            max_tokens=get_config_int('llm.max_tokens_eval_score', 500),
             extra_body={"thinking": {"type": "disabled"}},
         )
         msg = resp.choices[0].message

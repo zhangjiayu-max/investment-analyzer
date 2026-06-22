@@ -7,6 +7,7 @@ import sqlite3
 from datetime import datetime, date
 
 from db._conn import _get_conn, _row_to_dict
+from db.config import get_config
 
 logger = logging.getLogger(__name__)
 
@@ -50,9 +51,13 @@ def create_holding(fund_code: str, fund_name: str, shares: float = 0,
                    cost_price: float = None, current_price: float = None,
                    index_code: str = None,
                    index_name: str = None, buy_date: str = None,
-                   notes: str = None, user_id: str = "default",
-                   account: str = "花无缺", fund_category: str = None) -> int:
+                   notes: str = None, user_id: str = None,
+                   account: str = None, fund_category: str = None) -> int:
     """新增持仓，返回 holding_id。自动分类基金类型（equity/bond/hybrid/money_market/index 等）。"""
+    if user_id is None:
+        user_id = get_config('portfolio.default_user_id', 'default')
+    if account is None:
+        account = get_config('portfolio.default_account', '花无缺')
     if fund_category is None:
         fund_category = classify_fund_category(fund_name)
     if cost_price is None:
@@ -801,7 +806,7 @@ def confirm_transaction(tx_id: int, confirmed_price: float,
                     (fund_code, fund_name, shares, cost_price, current_price, user_id, account)
                     VALUES (?, ?, 0, ?, ?, ?, ?)
                 """, (fund_code, fund_name, actual_price, actual_price, user_id,
-                      tx.get("account", "花无缺")))
+                      tx.get("account") or get_config('portfolio.default_account', '花无缺')))
                 holding_id = cursor.lastrowid
                 conn2.execute("UPDATE portfolio_transactions SET holding_id = ? WHERE id = ?", (holding_id, tx_id))
                 conn2.commit()

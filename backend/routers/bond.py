@@ -10,6 +10,8 @@ import html as html_mod
 import requests as req
 from fastapi import APIRouter, HTTPException
 
+from db.config import get_config_int
+
 from db import (
     list_holdings, get_cash_balance, get_total_cash_balance, get_analysis_agent,
     create_portfolio_analysis_record, list_portfolio_analysis_records,
@@ -265,7 +267,7 @@ async def _do_bond_recommend():
     track_agent(uid, "债券配置顾问", "债券配置推荐")
     try:
         from llm_service import chat_with_agent
-        result = chat_with_agent(system_prompt, [{"role": "user", "content": combined_input}], max_tokens=8000)
+        result = chat_with_agent(system_prompt, [{"role": "user", "content": combined_input}], max_tokens=get_config_int('llm.max_tokens_analysis', 8000))
         logging.info(f"[bond_ai_recommend] LLM result length: {len(result) if result else 0}, type: {type(result)}")
         if not result:
             logging.warning("[bond_ai_recommend] LLM returned empty/None result")

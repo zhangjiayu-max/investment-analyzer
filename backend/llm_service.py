@@ -306,7 +306,7 @@ def chat_with_agent(
     agent_prompt: str,
     messages: list[dict],
     rag_context: str = "",
-    max_tokens: int = 4000,
+    max_tokens: int = None,
 ) -> str:
     """Agent 对话模式，支持多轮历史 + RAG 上下文。
 
@@ -314,18 +314,25 @@ def chat_with_agent(
         agent_prompt: Agent 的 system prompt
         messages: 完整对话历史 [{"role": "user"/"assistant", "content": "..."}]
         rag_context: RAG 检索到的知识上下文
-        max_tokens: 最大输出 token 数
+        max_tokens: 最大输出 token 数（None 则从配置读取）
     """
+    if max_tokens is None:
+        from db.config import get_config_int
+        max_tokens = get_config_int('llm.max_tokens_agent', 4000)
     llm_messages = []
 
     # System prompt + RAG 上下文
     system_content = agent_prompt
     if rag_context:
-        system_content += f"\n\n以下是从知识库中检索到的相关信息，请结合回答：\n{rag_context[:4000]}"
+        from db.config import get_config_int
+        _rag_trunc = get_config_int('truncation.rag_context', 4000)
+        system_content += f"\n\n以下是从知识库中检索到的相关信息，请结合回答：\n{rag_context[:_rag_trunc]}"
     llm_messages.append({"role": "system", "content": system_content})
 
-    # 对话历史（最近 20 条，避免超长）
-    for msg in messages[-20:]:
+    # 对话历史（从配置读取保留条数，避免超长）
+    from db.config import get_config_int
+    _history_n = get_config_int('truncation.history_messages', 20)
+    for msg in messages[-_history_n:]:
         llm_messages.append({"role": msg["role"], "content": msg["content"]})
 
     try:
@@ -522,8 +529,9 @@ def chat_with_tools(
 
     llm_messages = [{"role": "system", "content": system_content}]
 
-    # 对话历史（最近 20 条）
-    for msg in messages[-20:]:
+    # 对话历史（从配置读取保留条数）
+    _history_n = get_config_int('truncation.history_messages', 20)
+    for msg in messages[-_history_n:]:
         llm_messages.append({"role": msg["role"], "content": msg["content"]})
 
     MAX_TURNS = 5

@@ -7,6 +7,7 @@ import time
 from pathlib import Path
 from openai import OpenAI
 from config import get_vision_config
+from db.config import get_config_float, get_config_int
 from collections import Counter
 
 
@@ -210,8 +211,8 @@ class ImageParser:
                             {"type": "image_url", "image_url": {"url": f"data:image/{mime};base64,{img_b64}"}},
                         ],
                     }],
-                    temperature=0.1,
-                    max_tokens=4000,
+                    temperature=get_config_float('llm.temperature_vision', 0.1),
+                    max_tokens=get_config_int('llm.max_tokens_vision', 4000),
                 )
                 content = response.choices[0].message.content
                 if content and content.strip():
@@ -406,9 +407,9 @@ class DDImageParser:
                             {"type": "image_url", "image_url": {"url": f"data:image/{mime};base64,{img_b64}"}},
                         ],
                     }],
-                    temperature=0.1,
-                    max_tokens=8000,
-                    timeout=120,
+                    temperature=get_config_float('llm.temperature_vision', 0.1),
+                    max_tokens=get_config_int('llm.max_tokens_vision', 8000),
+                    timeout=get_config_int('llm.timeout_vision', 120),
                 )
                 content = response.choices[0].message.content
                 if content and content.strip():

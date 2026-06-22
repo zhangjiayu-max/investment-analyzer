@@ -13,6 +13,7 @@ from db import (
     create_eval_run, update_eval_run, list_eval_runs, get_eval_run_detail,
     get_eval_stats, list_all_bad_cases,
     create_async_task, update_async_task, get_async_task,
+    get_config_float, get_config_int,
 )
 from models.eval import CreateEvalCaseRequest, BadCaseToEvalRequest
 from routers.portfolio import (
@@ -491,8 +492,8 @@ async def _generate_expected_quality(bad_case: dict) -> str:
             caller="eval_scorer",
             model=MODEL,
             messages=[{"role": "user", "content": prompt}],
-            temperature=0.3,
-            max_tokens=200,
+            temperature=get_config_float('llm.temperature_eval', 0.3),
+            max_tokens=get_config_int('llm.max_tokens_eval_score', 200),
         )
         msg = resp.choices[0].message
         result = (msg.content or "").strip()
@@ -1116,7 +1117,7 @@ async def _run_agent_for_eval(question: str) -> str:
                 {"role": "system", "content": system},
                 {"role": "user", "content": user_msg},
             ],
-            temperature=0.3, max_tokens=2000,
+            temperature=get_config_float('llm.temperature_eval', 0.3), max_tokens=get_config_int('llm.max_tokens_eval', 2000),
         )
 
         msg = resp.choices[0].message
@@ -1148,7 +1149,7 @@ AI回答：{answer[:1000]}
         resp = _call_llm(
             caller="eval_scorer", model=MODEL,
             messages=[{"role": "user", "content": prompt}],
-            temperature=0.2, max_tokens=500,
+            temperature=get_config_float('llm.temperature_eval', 0.2), max_tokens=get_config_int('llm.max_tokens_eval_score', 500),
         )
 
         msg = resp.choices[0].message

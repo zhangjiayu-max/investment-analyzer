@@ -4,6 +4,7 @@ import json
 import logging
 
 from llm_service import _call_llm, MODEL
+from db.config import get_config_int, get_config_float
 
 logger = logging.getLogger(__name__)
 
@@ -133,8 +134,8 @@ def _generate_summary(messages: list) -> str:
                 {"role": "system", "content": "你是一个精确的对话摘要助手。只输出摘要内容。"},
                 {"role": "user", "content": prompt},
             ],
-            temperature=0.2,
-            max_tokens=500,
+            temperature=get_config_float('llm.temperature_eval', 0.2),
+            max_tokens=get_config_int('llm.max_tokens_eval_score', 500),
         )
         return response.choices[0].message.content or "对话摘要生成失败"
     except Exception as e:

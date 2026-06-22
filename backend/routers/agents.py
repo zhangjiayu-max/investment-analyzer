@@ -9,6 +9,7 @@ from db import (
     list_agents, get_agent, create_agent as db_create_agent, update_agent, delete_agent,
     save_prompt_version, list_prompt_versions, get_prompt_version,
     get_analysis_agent, update_analysis_agent,
+    get_config_int,
 )
 from models.agents import CreateAgentRequest, UpdateAgentRequest, GeneratePromptRequest
 
@@ -152,7 +153,7 @@ async def generate_prompt_api(req: GeneratePromptRequest):
                 {"role": "user", "content": user_content},
             ],
             model=MODEL,
-            max_tokens=8000,
+            max_tokens=get_config_int('llm.max_tokens_analysis', 8000),
         )
         result = resp.choices[0].message.content if resp and resp.choices else ""
         if not result:

@@ -29,9 +29,30 @@ DEFAULT_CONFIGS = [
     ('llm.temperature_default', '0.3', '默认温度', 'llm'),
     ('llm.temperature_analysis', '0.3', '分析任务温度', 'llm'),
     ('llm.temperature_vision', '0.1', '图片分析温度', 'llm'),
+    ('llm.temperature_eval', '0.2', '评测任务温度', 'llm'),
     ('llm.max_tokens_report', '8192', '报告最大token', 'llm'),
     ('llm.max_tokens_chat', '8000', '对话最大token', 'llm'),
     ('llm.max_tokens_analysis', '8000', '分析最大token', 'llm'),
+    ('llm.max_tokens_eval', '2000', '评测最大token', 'llm'),
+    ('llm.max_tokens_eval_score', '500', '评测打分最大token', 'llm'),
+    ('llm.max_tokens_agent', '8000', 'Agent默认最大token', 'llm'),
+    ('llm.max_tokens_orchestrator', '8192', 'Orchestrator最大token', 'llm'),
+    ('llm.max_tokens_orchestrator_summary', '1000', 'Orchestrator摘要最大token', 'llm'),
+    ('llm.max_tokens_rag_compress', '1500', 'RAG压缩最大token', 'llm'),
+    ('llm.max_tokens_vision', '8000', '视觉模型最大token', 'llm'),
+    ('llm.max_tokens_fusion', '2000', '估值融合最大token', 'llm'),
+    ('llm.max_tokens_tool', '1500', '工具调用最大token', 'llm'),
+    ('llm.max_tokens_rewrite', '50', '查询改写最大token', 'llm'),
+    ('llm.max_tokens_dashboard_summary', '200', 'Dashboard摘要最大token', 'llm'),
+    ('llm.max_tokens_valuation_summary', '800', '估值摘要最大token', 'llm'),
+    ('llm.temperature_agent', '0.3', 'Agent任务温度', 'llm'),
+    ('llm.temperature_arbitration', '0.2', '仲裁任务温度', 'llm'),
+    ('llm.temperature_fusion', '0.2', '估值融合温度', 'llm'),
+    ('llm.temperature_tool', '0.2', '工具调用温度', 'llm'),
+    ('llm.temperature_rewrite', '0.1', '查询改写温度', 'llm'),
+    ('llm.timeout_default', '120', 'LLM调用默认超时（秒）', 'llm'),
+    ('llm.timeout_vision', '120', '视觉模型调用超时（秒）', 'llm'),
+    ('llm.timeout_short', '15', '短任务超时（秒，如新闻摘要）', 'llm'),
 
     # 内容截断限制
     ('truncation.article_content', '8000', '文章内容截断长度', 'llm'),
@@ -42,6 +63,15 @@ DEFAULT_CONFIGS = [
 
     # 补仓跌幅预警
     ('alert.buy_drop_pct', '4', '补仓后跌幅预警阈值（%）', 'alert'),
+
+    # 业务常量
+    ('portfolio.default_account', '花无缺', '默认账户名', 'portfolio'),
+    ('portfolio.default_user_id', 'default', '默认用户ID', 'portfolio'),
+    ('portfolio.users', '小鱼儿,花无缺', '用户列表（逗号分隔）', 'portfolio'),
+    ('portfolio.snapshot_max_count', '365', '持仓快照最大保留条数', 'portfolio'),
+
+    # 指数代码
+    ('index.hs300_code', '000300.SH', '沪深300指数代码', 'index'),
 ]
 
 
@@ -86,6 +116,14 @@ def get_config_float(key: str, default: float = 0.0) -> float:
         return float(val)
     except (ValueError, TypeError):
         return default
+
+
+def get_config_list(key: str, default: list[str] | None = None) -> list[str]:
+    """获取逗号分隔的列表配置值。"""
+    val = get_config(key, '')
+    if not val:
+        return default or []
+    return [item.strip() for item in val.split(',') if item.strip()]
 
 
 def list_configs(category: str = None) -> list[dict]:

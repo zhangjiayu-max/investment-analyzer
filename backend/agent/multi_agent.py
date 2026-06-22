@@ -1,3 +1,4 @@
+from db.config import get_config_float
 """多 Agent 协作架构 — 专家 Agent 执行引擎"""
 
 import json
@@ -8,6 +9,7 @@ import time
 from llm_service import client, MODEL, _call_llm, _parse_tool_args
 from tools import TOOLS, execute_tool
 from db.agents import load_specialist_agents
+from db.config import get_config_int
 
 logger = logging.getLogger(__name__)
 
@@ -268,8 +270,8 @@ def run_specialist(agent_key: str, query: str, context: str = "",
                 messages=llm_messages,
                 tools=agent_tools,
                 tool_choice="auto",
-                temperature=0.3,
-                max_tokens=8000,
+                temperature=get_config_float('llm.temperature_agent', 0.3),
+                max_tokens=get_config_int('llm.max_tokens_agent', 8000),
             )
         except Exception as e:
             err_msg = str(e)
@@ -281,8 +283,8 @@ def run_specialist(agent_key: str, query: str, context: str = "",
                     caller=_caller,
                     model=MODEL,
                     messages=llm_messages,
-                    temperature=0.3,
-                    max_tokens=8000,
+                    temperature=get_config_float('llm.temperature_agent', 0.3),
+                    max_tokens=get_config_int('llm.max_tokens_agent', 8000),
                 )
                 answer = response.choices[0].message.content or ""
                 break
@@ -357,8 +359,8 @@ def run_specialist(agent_key: str, query: str, context: str = "",
                 caller=_caller,
                 model=MODEL,
                 messages=llm_messages,
-                temperature=0.3,
-                max_tokens=8000,
+                temperature=get_config_float('llm.temperature_agent', 0.3),
+                max_tokens=get_config_int('llm.max_tokens_agent', 8000),
             )
             answer = response.choices[0].message.content or ""
         except Exception:
@@ -468,8 +470,8 @@ def run_specialist_with_context(agent_key: str, query: str, peer_analyses: dict,
                 messages=llm_messages,
                 tools=agent_tools,
                 tool_choice="auto",
-                temperature=0.3,
-                max_tokens=8000,
+                temperature=get_config_float('llm.temperature_agent', 0.3),
+                max_tokens=get_config_int('llm.max_tokens_agent', 8000),
             )
         except Exception as e:
             err_msg = str(e)
@@ -479,8 +481,8 @@ def run_specialist_with_context(agent_key: str, query: str, peer_analyses: dict,
                     caller=_caller,
                     model=MODEL,
                     messages=llm_messages,
-                    temperature=0.3,
-                    max_tokens=8000,
+                    temperature=get_config_float('llm.temperature_agent', 0.3),
+                    max_tokens=get_config_int('llm.max_tokens_agent', 8000),
                 )
                 answer = response.choices[0].message.content or ""
                 break
@@ -547,8 +549,8 @@ def run_specialist_with_context(agent_key: str, query: str, peer_analyses: dict,
                 caller=_caller,
                 model=MODEL,
                 messages=llm_messages,
-                temperature=0.3,
-                max_tokens=8000,
+                temperature=get_config_float('llm.temperature_agent', 0.3),
+                max_tokens=get_config_int('llm.max_tokens_agent', 8000),
             )
             answer = response.choices[0].message.content or ""
         except Exception:
@@ -656,8 +658,8 @@ def run_arbitration(query: str, specialist_results: list, rag_context: str = "")
     # 调用高级推理模型
     response = call_arbitration_llm(
         messages=llm_messages,
-        temperature=0.2,
-        max_tokens=8000,
+        temperature=get_config_float('llm.temperature_arbitration', 0.2),
+        max_tokens=get_config_int('llm.max_tokens_agent', 8000),
     )
 
     if response is None:
@@ -667,8 +669,8 @@ def run_arbitration(query: str, specialist_results: list, rag_context: str = "")
             caller="arbitration_fallback",
             model=MODEL,
             messages=llm_messages,
-            temperature=0.2,
-            max_tokens=8000,
+            temperature=get_config_float('llm.temperature_arbitration', 0.2),
+            max_tokens=get_config_int('llm.max_tokens_agent', 8000),
         )
 
     answer = response.choices[0].message.content or ""

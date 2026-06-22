@@ -1,3 +1,4 @@
+from db.config import get_config_int, get_config_float
 """公众号文章抓取模块 — 用 Playwright 异步抓取微信公众号文章
 
 优化：
@@ -288,8 +289,8 @@ def extract_article_structure(title: str, content: str) -> dict:
                 {"role": "system", "content": "你是投资文章分析助手。只输出 JSON。"},
                 {"role": "user", "content": prompt},
             ],
-            temperature=0.2,
-            max_tokens=1500,
+            temperature=get_config_float('llm.temperature_tool', 0.2),
+            max_tokens=get_config_int('llm.max_tokens_tool', 1500),
         )
         raw = response.choices[0].message.content.strip()
         if "```" in raw:

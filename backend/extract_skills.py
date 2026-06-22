@@ -1,3 +1,4 @@
+from db.config import get_config_int, get_config_float
 """批量蒸馏作者技能特征 — 从 122 篇文章中提取认知框架、言行模式、知识边界、经典素材"""
 
 import json
@@ -66,8 +67,8 @@ def extract_skill_from_article(title: str, content: str) -> dict:
             messages=[
                 {"role": "user", "content": EXTRACT_PROMPT.format(title=title, content=truncated)},
             ],
-            temperature=0.3,
-            max_tokens=1500,
+            temperature=get_config_float('llm.temperature_tool', 0.3),
+            max_tokens=get_config_int('llm.max_tokens_tool', 1500),
         )
         text = response.choices[0].message.content.strip()
 

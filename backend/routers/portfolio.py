@@ -47,6 +47,7 @@ from db import (
     create_async_task, update_async_task, get_async_task,
 )
 from db.portfolio import update_analysis_record
+from db.config import get_config as _get_config
 from mcp.trading_calendar import expected_confirm_date
 from rag import build_rag_context_with_details, log_rag_search
 from models.portfolio import (
@@ -284,7 +285,7 @@ async def import_portfolio_csv_file(file: UploadFile = File(...)):
                 continue
             shares = float(row.get("shares") or 0)
             cost_price = float(row["cost_price"]) if row.get("cost_price") else None
-            account = (row.get("account") or "花无缺").strip()
+            account = (row.get("account") or _get_config('portfolio.default_account', '花无缺')).strip()
             fund_category = (row.get("fund_category") or "").strip() or None
             create_holding(
                 fund_code=fund_code,
@@ -709,8 +710,8 @@ async def _run_diversification_ai_summary_async(record_id: int, agent_id: int = 
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_content},
             ],
-            temperature=0.3,
-            max_tokens=8192,
+            temperature=get_config_float('llm.temperature_analysis', 0.3),
+            max_tokens=get_config_int('llm.max_tokens_analysis', 8192),
         ))
         analysis = response.choices[0].message.content or ""
         tokens = response.usage.total_tokens if response.usage else 0
@@ -941,8 +942,8 @@ async def _run_portfolio_ai_analysis_async(record_id: int, user_question: str):
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_content},
             ],
-            temperature=0.3,
-            max_tokens=8192,
+            temperature=get_config_float('llm.temperature_analysis', 0.3),
+            max_tokens=get_config_int('llm.max_tokens_analysis', 8192),
         ))
         result_text = response.choices[0].message.content or ""
         tokens = response.usage.total_tokens if response.usage else 0
@@ -1442,7 +1443,7 @@ async def _run_panorama_async(record_id: int, system_prompt: str, holdings: list
             pct = (h.get('current_value', 0) or 0) / total_value * 100
             holdings_lines.append(
                 f"- {h.get('fund_name','')}({h.get('fund_code','')}): "
-                f"账户 {h.get('account') or '花无缺'}, "
+                f"账户 {h.get('account') or _get_config('portfolio.default_account', '花无缺')}, "
                 f"市值 {(h.get('current_value') or 0):.2f}, "
                 f"盈亏 {(h.get('profit_loss') or 0):.2f} ({(h.get('profit_rate') or 0)*100:.1f}%), "
                 f"占比 {pct:.1f}%"
@@ -1492,8 +1493,8 @@ async def _run_panorama_async(record_id: int, system_prompt: str, holdings: list
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_content},
             ],
-            temperature=0.3,
-            max_tokens=8192,
+            temperature=get_config_float('llm.temperature_analysis', 0.3),
+            max_tokens=get_config_int('llm.max_tokens_analysis', 8192),
         ))
         result_text = response.choices[0].message.content or ""
         tokens = response.usage.total_tokens if response.usage else 0
@@ -1740,7 +1741,7 @@ async def fund_deep_dive_api(holding_id: int, req: DeepDiveRequest):
     user_content = (
         f"## 基金持仓信息\n"
         f"- 基金: {fund_name}({fund_code})\n"
-        f"- 账户: {holding.get('account','花无缺')}\n"
+        f"- 账户: {holding.get('account') or _get_config('portfolio.default_account', '花无缺')}\n"
         f"- 持有份额: {holding.get('shares',0):.4f}\n"
         f"- 成本净值: {holding.get('cost_price',0):.4f}\n"
         f"- 当前净值: {holding.get('current_price',0):.4f}\n"
@@ -1784,8 +1785,8 @@ async def _run_deep_dive_async(record_id: int, system_prompt: str, user_content:
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_content},
             ],
-            temperature=0.3,
-            max_tokens=8192,
+            temperature=get_config_float('llm.temperature_analysis', 0.3),
+            max_tokens=get_config_int('llm.max_tokens_analysis', 8192),
         ))
         result_text = response.choices[0].message.content or ""
         tokens = response.usage.total_tokens if response.usage else 0
@@ -1915,8 +1916,8 @@ async def _run_trade_review_async(record_id: int, system_prompt: str, user_conte
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_content},
             ],
-            temperature=0.3,
-            max_tokens=8192,
+            temperature=get_config_float('llm.temperature_analysis', 0.3),
+            max_tokens=get_config_int('llm.max_tokens_analysis', 8192),
         ))
         result_text = response.choices[0].message.content or ""
         tokens = response.usage.total_tokens if response.usage else 0
@@ -1975,8 +1976,8 @@ async def what_if_analysis_api(req: WhatIfRequest):
                 {"role": "system", "content": agent["system_prompt"]},
                 {"role": "user", "content": user_content},
             ],
-            temperature=0.3,
-            max_tokens=8192,
+            temperature=get_config_float('llm.temperature_analysis', 0.3),
+            max_tokens=get_config_int('llm.max_tokens_analysis', 8192),
         ))
         result_text = response.choices[0].message.content or ""
         tokens = response.usage.total_tokens if response.usage else 0
@@ -2113,8 +2114,8 @@ async def _run_fund_analysis_async(record_id: int, system_prompt: str, user_cont
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_content},
             ],
-            temperature=0.3,
-            max_tokens=8192,
+            temperature=get_config_float('llm.temperature_analysis', 0.3),
+            max_tokens=get_config_int('llm.max_tokens_analysis', 8192),
         ))
         result_text = response.choices[0].message.content or ""
         tokens = response.usage.total_tokens if response.usage else 0

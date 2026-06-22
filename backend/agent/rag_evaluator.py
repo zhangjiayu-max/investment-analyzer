@@ -19,6 +19,7 @@ import math
 
 from rag import build_rag_context_with_details
 from llm_service import _call_llm, MODEL
+from db.config import get_config_int, get_config_float
 
 logger = logging.getLogger(__name__)
 
@@ -129,8 +130,8 @@ relevance 取值：
             caller="rag_evaluator",
             model=MODEL,
             messages=[{"role": "user", "content": prompt}],
-            temperature=0.1,
-            max_tokens=2000,
+            temperature=get_config_float('llm.temperature_eval', 0.1),
+            max_tokens=get_config_int('llm.max_tokens_eval', 2000),
         )
         content = response.choices[0].message.content or "[]"
         # 提取 JSON

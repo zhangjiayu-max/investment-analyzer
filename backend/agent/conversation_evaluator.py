@@ -10,6 +10,7 @@ import logging
 import re
 from dataclasses import dataclass, asdict
 from typing import Optional
+from db.config import get_config_int, get_config_float
 
 logger = logging.getLogger(__name__)
 
@@ -605,8 +606,8 @@ async def evaluate_with_llm(conversation_id: int, message_id: int = None) -> dic
                 {"role": "system", "content": "你是专业的投资分析质量评估专家。只输出 JSON，不要其他文字。"},
                 {"role": "user", "content": prompt},
             ],
-            temperature=0.2,
-            max_tokens=1000,
+            temperature=get_config_float('llm.temperature_eval', 0.2),
+            max_tokens=get_config_int('llm.max_tokens_eval', 1000),
         )
 
         raw = response.choices[0].message.content

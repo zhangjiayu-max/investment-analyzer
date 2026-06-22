@@ -15,6 +15,7 @@ from db import (
     get_latest_valuation, get_valuation_history,
     list_holdings,
     create_async_task, update_async_task, get_async_task,
+    get_config_float, get_config_int,
 )
 from llm_service import _call_llm, MODEL
 from rag import build_rag_context_with_details, log_rag_search
@@ -219,8 +220,8 @@ async def _run_index_analysis_async(history_id: int, req_data: dict, agent: dict
                 {"role": "system", "content": full_prompt},
                 {"role": "user", "content": f"请对 {index_label} 进行深度分析。"},
             ],
-            temperature=0.3,
-            max_tokens=8192,
+            temperature=get_config_float('llm.temperature_default', 0.3),
+            max_tokens=get_config_int('llm.max_tokens_report', 8192),
         ))
         result_text = response.choices[0].message.content or ""
         token_usage = response.usage.total_tokens if response.usage else 0

@@ -12,6 +12,7 @@ import json
 import logging
 
 from llm_service import _call_llm, MODEL
+from db.config import get_config_int, get_config_float
 
 logger = logging.getLogger(__name__)
 
@@ -72,8 +73,8 @@ def extract_profile_signals(message: str, user_id: str = "default") -> list:
                 {"role": "system", "content": "你是精确的用户投资画像分析助手。只输出 JSON。"},
                 {"role": "user", "content": _EXTRACT_PROMPT.format(message=message[:500])},
             ],
-            temperature=0.1,
-            max_tokens=400,
+            temperature=get_config_float('llm.temperature_eval', 0.1),
+            max_tokens=get_config_int('llm.max_tokens_eval_score', 400),
         )
         raw = response.choices[0].message.content.strip()
         if "```" in raw:

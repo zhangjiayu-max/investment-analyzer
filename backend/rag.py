@@ -1,3 +1,4 @@
+from db.config import get_config_int
 """RAG 检索服务 — SQLite FTS5 全文检索 + ChromaDB 向量语义搜索
 
 功能特性：
@@ -399,7 +400,7 @@ def rewrite_query(query: str) -> str:
 
 只输出关键词，不要其他文字。"""
 
-        rewritten = _call_llm(prompt, temperature=0.1, max_tokens=50)
+        rewritten = _call_llm(prompt, temperature=get_config_float('llm.temperature_rewrite', 0.1), max_tokens=get_config_int('llm.max_tokens_rewrite', 50))
 
         # 清理输出
         rewritten = rewritten.strip()

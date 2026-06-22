@@ -18,6 +18,7 @@ from db.agents import (
     cancel_running_agents,
 )
 from config import ARBITRATION_API_KEY
+from db.config import get_config_int, get_config_float
 from agent.orchestrator_optimizer import OrchestratorOptimizer, ParallelExecutor
 
 # 全局超时限制（秒）
@@ -506,8 +507,8 @@ def clarify_requirement(query: str) -> dict:
                 {"role": "system", "content": build_clarification_prompt()},
                 {"role": "user", "content": user_content},
             ],
-            temperature=0.1,
-            max_tokens=8192,
+            temperature=get_config_float('llm.temperature_vision', 0.1),
+            max_tokens=get_config_int('llm.max_tokens_orchestrator', 8192),
         )
 
         raw = response.choices[0].message.content.strip()
@@ -1143,7 +1144,7 @@ def orchestrate(query: str, history: list, rag_context: str = "", cancel_event: 
 
     # 注入 RAG 知识库上下文到 prebuilt_context（让专家也能参考书籍/文章知识）
     if rag_context:
-        compressed_rag_for_specialist = compress_rag_token_aware(rag_context, max_tokens=1500)
+        compressed_rag_for_specialist = compress_rag_token_aware(rag_context, max_tokens=get_config_int('llm.max_tokens_rag_compress', 1500))
         prebuilt_context += f"## 知识库参考（书籍/文章/技能）\n{compressed_rag_for_specialist}\n\n"
 
     try:
@@ -1209,8 +1210,8 @@ def orchestrate(query: str, history: list, rag_context: str = "", cancel_event: 
                 messages=llm_messages,
                 tools=build_orchestrator_tools(),
                 tool_choice="auto",
-                temperature=0.3,
-                max_tokens=8192,
+                temperature=get_config_float('llm.temperature_agent', 0.3),
+                max_tokens=get_config_int('llm.max_tokens_orchestrator', 8192),
             )
         except Exception as e:
             err_msg = str(e)
@@ -1260,8 +1261,8 @@ def orchestrate(query: str, history: list, rag_context: str = "", cancel_event: 
                             caller="orchestrator",
                             model=MODEL,
                             messages=llm_messages,
-                            temperature=0.3,
-                            max_tokens=8192,
+                            temperature=get_config_float('llm.temperature_agent', 0.3),
+                            max_tokens=get_config_int('llm.max_tokens_orchestrator', 8192),
                         )
                         answer = response.choices[0].message.content or ""
                     except Exception:
@@ -1416,8 +1417,8 @@ def orchestrate(query: str, history: list, rag_context: str = "", cancel_event: 
             caller="orchestrator",
             model=MODEL,
             messages=llm_messages,
-            temperature=0.3,
-            max_tokens=8192,
+            temperature=get_config_float('llm.temperature_agent', 0.3),
+            max_tokens=get_config_int('llm.max_tokens_orchestrator', 8192),
         )
         final_answer = response.choices[0].message.content or ""
     except Exception:
@@ -1597,7 +1598,7 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
 
     # 注入 RAG 知识库上下文到 prebuilt_context（让专家也能参考书籍/文章知识）
     if rag_context:
-        compressed_rag_for_specialist = compress_rag_token_aware(rag_context, max_tokens=1500)
+        compressed_rag_for_specialist = compress_rag_token_aware(rag_context, max_tokens=get_config_int('llm.max_tokens_rag_compress', 1500))
         prebuilt_context += f"## 知识库参考（书籍/文章/技能）\n{compressed_rag_for_specialist}\n\n"
 
     try:
@@ -1686,8 +1687,8 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
                 messages=llm_messages,
                 tools=build_orchestrator_tools(),
                 tool_choice="auto",
-                temperature=0.3,
-                max_tokens=8192,
+                temperature=get_config_float('llm.temperature_agent', 0.3),
+                max_tokens=get_config_int('llm.max_tokens_orchestrator', 8192),
             )
         except CancelledError:
             raise
@@ -2072,8 +2073,8 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
                 caller="orchestrator",
                 model=MODEL,
                 messages=llm_messages,
-                temperature=0.3,
-                max_tokens=8192,
+                temperature=get_config_float('llm.temperature_agent', 0.3),
+                max_tokens=get_config_int('llm.max_tokens_orchestrator', 8192),
             ):
                 if chunk.get("reasoning"):
                     yield {"type": "reasoning_chunk", "content": chunk["reasoning"], "agent": "orchestrator"}
@@ -2090,8 +2091,8 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
                     caller="orchestrator",
                     model=MODEL,
                     messages=llm_messages,
-                    temperature=0.3,
-                    max_tokens=8192,
+                    temperature=get_config_float('llm.temperature_agent', 0.3),
+                    max_tokens=get_config_int('llm.max_tokens_orchestrator', 8192),
                 )
                 final_answer = response.choices[0].message.content or ""
         if not final_answer:
@@ -2250,8 +2251,8 @@ def run_peer_review(decision: dict, reviewer_type: str) -> dict | None:
     try:
         result = _call_llm(
             messages=[{"role": "user", "content": prompt}],
-            temperature=0.3,
-            max_tokens=1000,
+            temperature=get_config_float('llm.temperature_agent', 0.3),
+            max_tokens=get_config_int('llm.max_tokens_orchestrator_summary', 1000),
         )
         # 解析 JSON
         text = result if isinstance(result, str) else str(result)
