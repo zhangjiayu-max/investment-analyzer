@@ -1,6 +1,6 @@
 <script setup>
 import { ref, computed, onMounted, onActivated } from 'vue'
-import { getDashboard, runAnalysis, runPanoramaAnalysis, pollPanoramaStatus, getHotTopics, getDailyReport, regenerateDailyReport, submitDailyReportFeedback, listPanoramaRecords, triggerHotspotsAnalysis, getLatestHotspotsAnalysis, getRecommendations, getRecommendationStats, submitRecommendationFeedback, getBondRecommend, listBondRecommendRecords, autoVerifyRecommendations, fetchRecentValuations, getBondMarketTemperature, getHotspotsRelate, getRebalancingSuggestion, listTodayDecisions, updateDecisionStatus, completeDecisionAction, listDueDecisionReviews, submitDecisionReview, getDecisionPrecheck, getTodayOpportunities, scanDailyOpportunities, createDecisionFromOpportunity, watchOpportunity } from '../api'
+import { getDashboard, runAnalysis, runPanoramaAnalysis, pollPanoramaStatus, getHotTopics, getDailyReport, getDailyReportTask, regenerateDailyReport, submitDailyReportFeedback, listPanoramaRecords, triggerHotspotsAnalysis, getLatestHotspotsAnalysis, getRecommendations, getRecommendationStats, submitRecommendationFeedback, getBondRecommend, listBondRecommendRecords, autoVerifyRecommendations, fetchRecentValuations, getBondMarketTemperature, getHotspotsRelate, getRebalancingSuggestion, listTodayDecisions, updateDecisionStatus, completeDecisionAction, listDueDecisionReviews, submitDecisionReview, getDecisionPrecheck, getTodayOpportunities, scanDailyOpportunities, createDecisionFromOpportunity, watchOpportunity } from '../api'
 import GaugeChart from './charts/GaugeChart.vue'
 import ConfirmDialog from './ConfirmDialog.vue'
 import AppToast from './AppToast.vue'
@@ -198,8 +198,14 @@ onMounted(async () => {
 })
 
 onActivated(async () => {
+  restoreReportTask()
+  restoreHotspotsTask()
   restoreBondTask()
   restoreRebalanceTask()
+  // 如果简报没有运行中的任务，检查后端是否有自动生成中的任务
+  if (!dailyReportLoading.value) {
+    await checkDailyReportTask()
+  }
   await Promise.all([
     loadDashboard(),
     loadTodayDecisions(),
@@ -210,6 +216,34 @@ onActivated(async () => {
     loadRecHistory(),
     loadBondTemperature(),
   ])
+  // 恢复全景诊断最近一条结果
+  try {
+    const { data: recs } = await listPanoramaRecords(1)
+    if (recs?.records?.length) {
+      const rec = recs.records[0]
+      // 如果最近一条还在 running，恢复轮询
+      if (rec.status === 'running' || rec.execution_status === 'running') {
+        panoramaLoading.value = true
+        panoramaResult.value = { status: 'running', id: rec.id }
+        pollPanoramaStatus(rec.id, async (status) => {
+          if (status.status === 'done') {
+            panoramaResult.value = { result: status.result, id: rec.id }
+            const { data: dashData } = await getDashboard()
+            if (data.value && dashData.portfolio_health) {
+              data.value.portfolio_health = dashData.portfolio_health
+              data.value.portfolio_updated_at = dashData.portfolio_updated_at
+            }
+            panoramaLoading.value = false
+          } else if (status.status === 'error') {
+            panoramaResult.value = { error: '分析失败: ' + (status.error || '未知错误') }
+            panoramaLoading.value = false
+          }
+        })
+      } else {
+        panoramaResult.value = rec
+      }
+    }
+  } catch (_) {}
 })
 
 async function loadDailyReport() {
@@ -218,10 +252,58 @@ async function loadDailyReport() {
     const { data: res } = await getDailyReport()
     if (res?.has_report && res?.report) {
       dailyReport.value = res.report
+      dailyReportLoading.value = false
+      return
     }
+    // 没有今日报告，检查是否有运行中的异步任务
+    await checkDailyReportTask()
   } catch (e) {
   } finally {
-    dailyReportLoading.value = false
+    if (!dailyReport.value) dailyReportLoading.value = false
+  }
+}
+
+// 每日简报异步任务轮询
+let _dailyReportPollTimer = null
+
+async function checkDailyReportTask() {
+  try {
+    const { data: task } = await getDailyReportTask()
+    if (task?.has_task && task.status === 'running') {
+      // 有运行中的任务，显示"生成中"状态并开始轮询
+      dailyReportLoading.value = true
+      startDailyReportPolling()
+      return true
+    }
+  } catch (_) {}
+  return false
+}
+
+function startDailyReportPolling(interval = 3000) {
+  stopDailyReportPolling()
+  _dailyReportPollTimer = setInterval(async () => {
+    try {
+      const { data: task } = await getDailyReportTask()
+      if (!task?.has_task || task.status !== 'running') {
+        // 任务完成或不存在，重新加载报告
+        stopDailyReportPolling()
+        const { data: res } = await getDailyReport()
+        if (res?.has_report && res?.report) {
+          dailyReport.value = res.report
+        }
+        dailyReportLoading.value = false
+      }
+    } catch (e) {
+      stopDailyReportPolling()
+      dailyReportLoading.value = false
+    }
+  }, interval)
+}
+
+function stopDailyReportPolling() {
+  if (_dailyReportPollTimer) {
+    clearInterval(_dailyReportPollTimer)
+    _dailyReportPollTimer = null
   }
 }
 

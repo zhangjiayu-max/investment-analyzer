@@ -234,6 +234,10 @@ async def _auto_daily_report():
             logging.warning("市场日报分析师未配置，跳过自动生成")
             return
 
+        # 创建异步任务记录，前端可轮询感知"正在生成中"
+        from db import create_async_task, update_async_task
+        auto_task_id = create_async_task("daily_report", caller="daily_report_auto")
+
         # ── 收集丰富数据上下文 ──
         # 1. 新闻
         news_context = ""
@@ -403,6 +407,8 @@ async def _auto_daily_report():
             valuation_context=val_context[:500], result=result_text,
             token_usage=token_usage,
         )
+        # 标记异步任务完成
+        update_async_task(auto_task_id, status="done", result={"report_id": report_id, "token_usage": token_usage})
         logging.info(f"今日市场报告后台自动生成完成，token用量: {token_usage}")
 
         # 后台自动质量评估
@@ -421,6 +427,10 @@ async def _auto_daily_report():
         asyncio.create_task(_auto_eval_report())
     except Exception as e:
         logging.warning(f"自动生成市场报告失败: {e}")
+        try:
+            update_async_task(auto_task_id, status="error", error_msg=str(e))
+        except Exception:
+            pass
 
 
 async def _auto_refresh_nav():

@@ -19,7 +19,7 @@ from db import (
     get_recommendation_feedback_stats,
     save_llm_feedback, list_llm_feedback,
     get_config_int, get_config_float, get_config, get_config_list,
-    create_async_task, update_async_task, get_async_task,
+    create_async_task, update_async_task, get_async_task, get_latest_async_task,
 )
 from db._conn import _get_conn
 from llm_service import _call_llm, MODEL
@@ -418,6 +418,22 @@ async def get_daily_report():
         is_today = r.get("created_at", "").startswith(today)
         return {"has_report": True, "report": r, "is_today": is_today}
     return {"has_report": False, "report": None, "is_today": False}
+
+
+@router.get("/api/dashboard/daily-report/task")
+async def get_daily_report_task():
+    """查询最近一次每日简报异步任务状态。
+    前端用这个接口感知"自动生成中"状态，切页面回来也能轮询。"""
+    task = get_latest_async_task("daily_report")
+    if not task:
+        return {"has_task": False, "status": None}
+    return {
+        "has_task": True,
+        "task_id": task["id"],
+        "status": task["status"],
+        "error": task.get("error_msg", ""),
+        "created_at": task.get("created_at", ""),
+    }
 
 
 @router.post("/api/dashboard/daily-report/regenerate")

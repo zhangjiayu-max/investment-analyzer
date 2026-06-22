@@ -807,6 +807,11 @@ export function getDailyReport() {
   return api.get('/dashboard/daily-report')
 }
 
+/** 查询最近一次每日简报异步任务状态 */
+export function getDailyReportTask() {
+  return api.get('/dashboard/daily-report/task')
+}
+
 /** 手动抓取近期估值数据 */
 export function fetchRecentValuations() {
   return api.post('/valuations/fetch-recent', {}, { timeout: 60000 })

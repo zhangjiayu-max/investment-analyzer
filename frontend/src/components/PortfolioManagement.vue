@@ -1290,6 +1290,9 @@ const _panoramaGlobalState = { recordId: null, status: null, result: null }
 
 // 深度分析/指定基金分析全局状态（切页面后恢复结果）
 const _deepDiveGlobalState = { recordId: null, status: null, result: null, tokenUsage: 0, aiMode: null }
+// 交易复盘/情景推演全局状态
+const _tradeReviewGlobalState = { recordId: null, status: null, result: null, tokenUsage: 0, aiMode: null }
+const _whatIfGlobalState = { recordId: null, status: null, result: null, tokenUsage: 0, aiMode: null }
 
 async function runPanoramaMode() {
   modeLoading.value = true
@@ -1422,14 +1425,21 @@ async function runTradeReviewMode() {
     const { data } = await runTradeReview(reviewStartDate.value || null, reviewEndDate.value || null)
     const recordId = data.id
     modeRecordId.value = recordId
+    _tradeReviewGlobalState.recordId = recordId
+    _tradeReviewGlobalState.status = 'running'
+    _tradeReviewGlobalState.aiMode = 'trade-review'
     pollAnalysisStatus(recordId, (status) => {
       if (status.status === 'done') {
         modeResult.value = status.result || ''
         aiTokenUsage.value = status.token_usage || 0
+        _tradeReviewGlobalState.status = 'done'
+        _tradeReviewGlobalState.result = status.result || ''
+        _tradeReviewGlobalState.tokenUsage = status.token_usage || 0
         modeLoading.value = false
         loadTradeReviewRecords()
       } else if (status.status === 'error') {
         modeResult.value = '分析失败：' + (status.error || '未知错误')
+        _tradeReviewGlobalState.status = 'error'
         modeLoading.value = false
       }
     })
@@ -1918,6 +1928,32 @@ onActivated(async () => {
         } else if (status.status === 'error') {
           modeResult.value = '分析失败：' + (status.error || '未知错误')
           _deepDiveGlobalState.status = 'error'
+          modeLoading.value = false
+        }
+      })
+    }
+  } else if (_tradeReviewGlobalState.recordId && (_tradeReviewGlobalState.status === 'running' || _tradeReviewGlobalState.status === 'done')) {
+    // 恢复交易复盘结果
+    aiMode.value = _tradeReviewGlobalState.aiMode || 'trade-review'
+    modeRecordId.value = _tradeReviewGlobalState.recordId
+    if (_tradeReviewGlobalState.status === 'done' && _tradeReviewGlobalState.result) {
+      modeResult.value = _tradeReviewGlobalState.result
+      aiTokenUsage.value = _tradeReviewGlobalState.tokenUsage || 0
+      modeLoading.value = false
+    } else if (_tradeReviewGlobalState.status === 'running') {
+      modeLoading.value = true
+      pollAnalysisStatus(_tradeReviewGlobalState.recordId, (status) => {
+        if (status.status === 'done') {
+          modeResult.value = status.result || ''
+          aiTokenUsage.value = status.token_usage || 0
+          _tradeReviewGlobalState.status = 'done'
+          _tradeReviewGlobalState.result = status.result || ''
+          _tradeReviewGlobalState.tokenUsage = status.token_usage || 0
+          modeLoading.value = false
+          loadTradeReviewRecords()
+        } else if (status.status === 'error') {
+          modeResult.value = '分析失败：' + (status.error || '未知错误')
+          _tradeReviewGlobalState.status = 'error'
           modeLoading.value = false
         }
       })
