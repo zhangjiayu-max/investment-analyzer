@@ -153,7 +153,7 @@ async def get_analyze_status(article_id: int):
     # 防卡死检测：文章显示 analyzing 但无活跃后台任务且所有记录已完成
     if article["status"] == "analyzing" and article_id not in _analyze_progress:
         records = get_analysis_records(article_id)
-        pending = [r for r in records if r["status"] in ("pending", "error", "cancelled", "timeout")]
+        pending = [r for r in records if r["status"] in ("pending", "analyzing", "error", "cancelled", "timeout")]
         if not pending:
             total_success = len([r for r in records if r["status"] == "success"])
             if total_success > 0:
