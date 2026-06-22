@@ -1034,17 +1034,17 @@ export function createPortfolio(data) {
 
 /** 获取单个持仓 */
 export function getPortfolio(id) {
-  return api.get(`/portfolio/holding/${id}`)
+  return api.get(`/portfolio/${id}`)
 }
 
 /** 更新持仓 */
 export function updatePortfolio(id, data) {
-  return api.put(`/portfolio/holding/${id}`, data)
+  return api.put(`/portfolio/${id}`, data)
 }
 
 /** 删除持仓 */
 export function deletePortfolio(id) {
-  return api.delete(`/portfolio/holding/${id}`)
+  return api.delete(`/portfolio/${id}`)
 }
 
 /** 获取持仓交易记录 */

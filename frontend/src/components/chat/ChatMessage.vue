@@ -137,42 +137,65 @@ function filterToolCalls(toolCalls) {
   return (toolCalls || []).filter(tc => tc.tool_name !== '_ragSources')
 }
 
-function copyMessageContent(msg) {
+function copyMessageContent(msg, event) {
   const text = msg.content || ''
+  if (!text) return
+  const btn = event?.currentTarget
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(() => {
+      showCopyFeedback(btn)
+    }).catch(() => fallbackCopy(text, btn))
+  } else {
+    fallbackCopy(text, btn)
+  }
+}
+
+function copySpecialistContent(s, event) {
+  const text = s.analysis || ''
   if (!text) return
   if (navigator.clipboard && navigator.clipboard.writeText) {
     navigator.clipboard.writeText(text).then(() => {
-      showCopyFeedback()
+      showSpecialistCopyFeedback(event)
     }).catch(() => fallbackCopy(text))
   } else {
     fallbackCopy(text)
   }
 }
 
-function fallbackCopy(text) {
+function showSpecialistCopyFeedback(event) {
+  const btn = event?.currentTarget
+  if (!btn) return
+  const orig = btn.innerHTML
+  btn.innerHTML = '✓'
+  btn.style.color = '#16a34a'
+  setTimeout(() => { btn.innerHTML = orig; btn.style.color = '' }, 1500)
+}
+
+function fallbackCopy(text, el) {
   const ta = document.createElement('textarea')
   ta.value = text
+  ta.readOnly = true
   ta.style.position = 'fixed'
+  ta.style.top = '-9999px'
   ta.style.opacity = '0'
   document.body.appendChild(ta)
   ta.select()
+  ta.setSelectionRange(0, text.length)
   try {
     document.execCommand('copy')
-    showCopyFeedback()
+    showCopyFeedback(el)
   } catch (e) {
     alert('复制失败，请手动选择文本复制')
   }
   document.body.removeChild(ta)
 }
 
-function showCopyFeedback() {
-  const el = document.activeElement
-  if (el) {
-    const orig = el.innerHTML
-    el.innerHTML = '✓'
-    el.style.color = '#16a34a'
-    setTimeout(() => { el.innerHTML = orig; el.style.color = '' }, 1500)
-  }
+function showCopyFeedback(el) {
+  if (!el) return
+  const orig = el.innerHTML
+  el.innerHTML = '✓'
+  el.style.color = '#16a34a'
+  setTimeout(() => { el.innerHTML = orig; el.style.color = '' }, 1500)
 }
 
 function formatDuration(ms) {
@@ -202,7 +225,7 @@ function formatTime(ts) {
       <span class="message-id-badge" v-if="msg.id" @click="emit('copy-message-id', msg.id)" :title="'点击复制消息ID: ' + msg.id">
         #{{ msg.id }}
       </span>
-      <span class="user-copy-btn" @click.stop.prevent="copyMessageContent(msg)" title="复制内容">
+      <span class="user-copy-btn" @click.stop.prevent="copyMessageContent(msg, $event)" title="复制内容">
         <Icon name="clipboard" size="12" />
       </span>
       {{ msg.content }}
@@ -253,7 +276,12 @@ function formatTime(ts) {
             </div>
             <Icon name="chevron-down" size="12" class="specialist-toggle" :class="{ expanded: s.expanded }" />
           </div>
-          <div v-if="s.expanded" class="specialist-analysis markdown-body" v-html="renderMarkdown(s.analysis || '（暂无分析内容）')"></div>
+          <div v-if="s.expanded" class="specialist-analysis-wrap">
+            <div class="specialist-analysis markdown-body" v-html="renderMarkdown(s.analysis || '（暂无分析内容）')"></div>
+            <button class="btn-copy-specialist" @click.stop="copySpecialistContent(s, $event)" title="复制分析内容">
+              <Icon name="clipboard" size="12" class="inline-icon" /> 复制
+            </button>
+          </div>
         </div>
       </div>
       <!-- 交叉审阅展示 -->
@@ -266,7 +294,12 @@ function formatTime(ts) {
             <span v-if="s.duration_ms" class="specialist-time">{{ (s.duration_ms / 1000).toFixed(1) }}s</span>
             <span class="specialist-toggle"><Icon name="chevron-down" size="12" :class="{ expanded: s.expanded }" /></span>
           </div>
-          <div v-if="s.expanded" class="specialist-analysis markdown-body" v-html="renderMarkdown(s.analysis || '（暂无审阅内容）')"></div>
+          <div v-if="s.expanded" class="specialist-analysis-wrap">
+            <div class="specialist-analysis markdown-body" v-html="renderMarkdown(s.analysis || '（暂无审阅内容）')"></div>
+            <button class="btn-copy-specialist" @click.stop="copySpecialistContent(s, $event)" title="复制审阅内容">
+              <Icon name="clipboard" size="12" class="inline-icon" /> 复制
+            </button>
+          </div>
         </div>
       </div>
       <!-- 执行过程面板（可展开） -->
@@ -342,25 +375,27 @@ function formatTime(ts) {
       <div v-if="msg.role === 'assistant' && !feedbackGiven[index]" class="message-feedback">
         <button
           v-if="msg.id && msg.execution_status !== 'streaming'"
-          class="btn-msg-feedback"
-          @click="copyMessageContent(msg)"
-          title="复制内容"
+          class="btn-msg-feedback btn-ai-action"
+          @click="copyMessageContent(msg, $event)"
         >
           <Icon name="clipboard" size="14" />
+          <span class="ai-agent-tooltip">复制内容</span>
         </button>
         <button
           v-if="msg.id && msg.execution_status !== 'streaming'"
-          class="btn-msg-feedback"
+          class="btn-msg-feedback btn-ai-action"
           @click="emit('save-decision', msg, index)"
-          title="保存为决策草案"
         >
           <Icon name="clipboard-list" size="14" />
+          <span class="ai-agent-tooltip">保存为决策草案</span>
         </button>
-        <button class="btn-msg-feedback" @click="emit('feedback', msg, index, 'helpful')" title="有用">
+        <button class="btn-msg-feedback btn-ai-action" @click="emit('feedback', msg, index, 'helpful')">
           <Icon name="thumbs-up" size="14" />
+          <span class="ai-agent-tooltip">回答有用</span>
         </button>
-        <button class="btn-msg-feedback" @click="emit('feedback', msg, index, 'unhelpful')" title="没用">
+        <button class="btn-msg-feedback btn-ai-action" @click="emit('feedback', msg, index, 'unhelpful')">
           <Icon name="thumbs-down" size="14" />
+          <span class="ai-agent-tooltip">回答没用</span>
         </button>
       </div>
       <div v-else-if="feedbackGiven[index]" class="message-feedback-given">
@@ -947,6 +982,31 @@ function formatTime(ts) {
   word-break: break-word;
   color: var(--color-text-secondary);
 }
+
+/* 专家分析复制按钮 */
+.specialist-analysis-wrap {
+  position: relative;
+}
+.btn-copy-specialist {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  margin-top: 0.4rem;
+  padding: 0.2rem 0.5rem;
+  font-size: 0.68rem;
+  color: var(--color-text-muted);
+  background: var(--color-bg-card);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+.btn-copy-specialist:hover {
+  color: var(--color-primary);
+  border-color: var(--color-primary-border);
+  background: var(--color-primary-50);
+}
+.dark .btn-copy-specialist:hover { background: var(--color-primary-bg); }
 
 /* 消息反馈按钮 */
 .message-feedback {

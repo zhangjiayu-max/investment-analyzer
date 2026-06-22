@@ -972,11 +972,12 @@ async def _do_hotspots_analysis():
             if code and code not in seen:
                 seen[code] = i
         all_indexes = list(seen.values())
-        # 可参考指数代码表
+        # 可参考指数代码表（按当日涨跌幅排序，让LLM优先看到热门板块）
+        sorted_by_chg = sorted(all_indexes, key=lambda x: x.get('change_pct') if x.get('change_pct') is not None else 0, reverse=True)
         code_ref_text = "\n".join(
-            f"- {i['index_name']}（{i['index_code']}）: {i.get('metric_type','PE')}={i.get('current_value','?')}, "
+            f"- {i['index_name']}（{i['index_code']}）: 当日涨跌={i.get('change_pct',0):+.2f}%, {i.get('metric_type','PE')}={i.get('current_value','?')}, "
             f"百分位={i.get('percentile',100):.0f}%"
-            for i in all_indexes
+            for i in sorted_by_chg
         ) if all_indexes else "暂无指数数据"
 
         # 估值分布概览（供参考，不单独强调低估）

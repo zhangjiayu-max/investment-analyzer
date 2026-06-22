@@ -39,6 +39,46 @@ function insertCommand(cmd) {
 
 const emit = defineEmits(['send', 'cancel', 'update:inputText'])
 
+// ── 复制输入内容 ──
+const copyInputTimer = ref(null)
+const inputCopied = ref(false)
+
+function copyInputText() {
+  const text = props.inputText || ''
+  if (!text.trim()) return
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(() => {
+      flashInputCopied()
+    }).catch(() => {
+      fallbackCopy(text)
+      flashInputCopied()
+    })
+  } else {
+    fallbackCopy(text)
+    flashInputCopied()
+  }
+}
+
+function fallbackCopy(text) {
+  const ta = document.createElement('textarea')
+  ta.value = text
+  ta.readOnly = true
+  ta.style.position = 'fixed'
+  ta.style.top = '-9999px'
+  ta.style.opacity = '0'
+  document.body.appendChild(ta)
+  ta.select()
+  ta.setSelectionRange(0, text.length)
+  try { document.execCommand('copy') } catch (e) {}
+  document.body.removeChild(ta)
+}
+
+function flashInputCopied() {
+  inputCopied.value = true
+  if (copyInputTimer.value) clearTimeout(copyInputTimer.value)
+  copyInputTimer.value = setTimeout(() => { inputCopied.value = false }, 1500)
+}
+
 // ── @mention 状态 ──
 const showMention = ref(false)
 const mentionQuery = ref('')
@@ -176,6 +216,17 @@ function handleKeydown(e) {
           rows="1"
         ></textarea>
 
+        <!-- 复制输入内容按钮 -->
+        <button
+          v-if="inputText.trim() && !sending"
+          type="button"
+          class="btn-copy-input btn-ai-action"
+          @click="copyInputText"
+        >
+          <Icon name="clipboard" size="14" />
+          <span class="ai-agent-tooltip">{{ inputCopied ? '已复制' : '复制输入内容' }}</span>
+        </button>
+
         <!-- @mention 下拉列表 -->
         <Transition name="mention">
           <div v-if="showMention && filteredAgents.length > 0" class="mention-dropdown">
@@ -312,6 +363,31 @@ function handleKeydown(e) {
 .chat-input:focus {
   border-color: var(--color-primary-400);
   box-shadow: var(--focus-ring);
+}
+
+/* 复制输入按钮 */
+.btn-copy-input {
+  position: absolute;
+  right: 10px;
+  top: 10px;
+  width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-bg-card);
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity var(--transition-fast), color var(--transition-fast), border-color var(--transition-fast);
+  z-index: 10;
+}
+.input-wrapper:hover .btn-copy-input { opacity: 1; }
+.btn-copy-input:hover {
+  color: var(--color-primary);
+  border-color: var(--color-primary-border);
 }
 
 .is-sending .chat-input {
