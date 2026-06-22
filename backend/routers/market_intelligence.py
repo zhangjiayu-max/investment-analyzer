@@ -25,6 +25,7 @@ from db.agents import create_agent_run
 from db._conn import _get_conn
 from llm_service import _call_llm, MODEL
 from rag import build_rag_context_with_details, log_rag_search
+from market_data import get_market_overview
 
 router = APIRouter(prefix="/api/market-intelligence", tags=["market-intelligence"])
 
@@ -550,12 +551,13 @@ async def _do_market_intelligence():
     now = time.time()
 
     # 1. 并行获取多源数据
-    news, hot_topics, macro, cctv_news, market_hotspots = await asyncio.gather(
+    news, hot_topics, macro, cctv_news, market_hotspots, market_overview = await asyncio.gather(
         _fetch_news_multi(),
         _fetch_hot_topics(),
         asyncio.to_thread(_fetch_macro_data),
         _fetch_cctv_news(),
         _fetch_market_hotspots(),
+        asyncio.to_thread(get_market_overview),
     )
     all_news = news  # 盈米 MCP 新闻质量足够，不再混入低质量 akshare 泛财经
 
@@ -627,6 +629,26 @@ async def _do_market_intelligence():
         if isinstance(cpi, dict):
             policy_text += f"CPI: {cpi.get('latest', '?')}% "
 
+    # 构建实时板块涨跌数据
+    sector_perf_text = ""
+    if market_overview:
+        sectors_top = market_overview.get("sectors_top", [])
+        sectors_bottom = market_overview.get("sectors_bottom", [])
+        breadth = market_overview.get("breadth", {})
+        
+        if sectors_top:
+            sector_perf_text += "领涨板块：\n"
+            for s in sectors_top[:8]:
+                sector_perf_text += f"- {s['name']}: +{s['change_pct']}%  领涨:{s.get('lead_stock', '')}{s.get('lead_change', '')}%\n"
+        
+        if sectors_bottom:
+            sector_perf_text += "领跌板块：\n"
+            for s in sectors_bottom[:5]:
+                sector_perf_text += f"- {s['name']}: {s['change_pct']}%\n"
+        
+        if breadth:
+            sector_perf_text += f"涨跌家数：{breadth.get('up', 0)}↑ {breadth.get('down', 0)}↓ 涨停{breadth.get('limit_up', 0)}家 跌停{breadth.get('limit_down', 0)}家\n"
+    
     # 3. 加载 prompt（从 analysis_agents 表，按名称查找）
     base_prompt = ""
     agent_id = None
@@ -659,6 +681,8 @@ async def _do_market_intelligence():
 
 {f"【实时热点板块/题材】{chr(10)}{hotspots_text}" if hotspots_text else ""}
 
+{f"【今日板块实时涨跌】{chr(10)}{sector_perf_text}" if sector_perf_text else ""}
+
 【指数估值目录】
 {index_catalog}
 
@@ -672,7 +696,12 @@ async def _do_market_intelligence():
 【知识库参考（历史分析/文章）】
 {rag_context[:1500] if rag_context else '暂无相关知识库内容'}
 
-请从以上新闻中提炼今日真正的市场热点，特别关注央视新闻的政策信号，输出严格JSON。"""
+请从以上新闻中提炼今日真正的市场热点，特别关注央视新闻的政策信号，输出严格JSON。
+
+重要规则：
+1. 只推荐今日板块实时涨跌中涨幅靠前或有明确政策驱动的板块
+2. 如果某板块新闻利好但今日实际下跌，需说明「短期承压但中长期有逻辑」，不要标为“今日热门”
+3. 结合板块涨跌和新闻，区分「已兑现」（已大涨）和「待兑现」（有逻辑但还没涨）的机会"""
 
     # 4. LLM 推断 + 记录
     sectors = []
