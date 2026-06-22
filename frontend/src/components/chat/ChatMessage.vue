@@ -134,8 +134,20 @@ function toolDisplayName(name) {
 }
 
 function filterToolCalls(toolCalls) {
-  if (!toolCalls) return []
-  return toolCalls.filter(tc => !tc.name?.startsWith('consult_'))
+  return (toolCalls || []).filter(tc => tc.tool_name !== '_ragSources')
+}
+
+function copyMessageContent(msg) {
+  const text = msg.content || ''
+  if (!text) return
+  navigator.clipboard.writeText(text).then(() => {
+    const btn = document.activeElement
+    if (btn) {
+      const orig = btn.innerHTML
+      btn.innerHTML = '✓'
+      setTimeout(() => { btn.innerHTML = orig }, 1500)
+    }
+  }).catch(() => {})
 }
 
 function formatDuration(ms) {
@@ -300,6 +312,14 @@ function formatTime(ts) {
       <div class="message-bubble markdown-body" v-html="renderMarkdown(msg.content)"></div>
       <!-- 反馈按钮 -->
       <div v-if="msg.role === 'assistant' && !feedbackGiven[index]" class="message-feedback">
+        <button
+          v-if="msg.id && msg.execution_status !== 'streaming'"
+          class="btn-msg-feedback"
+          @click="copyMessageContent(msg)"
+          title="复制内容"
+        >
+          <Icon name="clipboard" size="14" />
+        </button>
         <button
           v-if="msg.id && msg.execution_status !== 'streaming'"
           class="btn-msg-feedback"

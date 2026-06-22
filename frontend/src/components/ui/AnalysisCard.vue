@@ -28,6 +28,19 @@ function copyRecordId() {
     navigator.clipboard.writeText(String(props.recordId)).catch(() => {})
   }
 }
+
+function copyContent() {
+  const text = props.result || ''
+  if (!text) return
+  navigator.clipboard.writeText(text).then(() => {
+    const btn = document.activeElement
+    if (btn) {
+      const orig = btn.innerHTML
+      btn.innerHTML = '<svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/></svg>'
+      setTimeout(() => { btn.innerHTML = orig }, 1500)
+    }
+  }).catch(() => {})
+}
 </script>
 
 <template>
@@ -44,6 +57,11 @@ function copyRecordId() {
         <span v-if="recordId" class="analysis-record-id" title="点击复制记录 ID" @click="copyRecordId">ID:{{ recordId }}</span>
       </div>
       <div class="analysis-actions">
+        <button class="rec-feedback-btn" @click="copyContent" title="复制内容">
+          <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"/>
+          </svg>
+        </button>
         <button
           class="rec-feedback-btn helpful"
           :class="{ active: feedback === 'helpful' }"
