@@ -356,6 +356,162 @@ const allRelatedHoldings = computed(() => {
   max-height: none;
   overflow-y: visible;
 }
+.opportunities-body {
+  gap: 0.65rem;
+  padding: 0.2rem 0 0.4rem;
+  border-bottom: 1px dashed var(--color-border);
+}
+.opportunity-summary-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  font-size: 0.72rem;
+  color: var(--color-text-muted);
+}
+.opportunity-summary-title {
+  color: var(--color-text-primary);
+  font-weight: 700;
+}
+.opportunity-count {
+  padding: 0.15rem 0.45rem;
+  border-radius: 4px;
+  background: var(--color-bg-input);
+  color: var(--color-text-secondary);
+  font-weight: 600;
+}
+.opportunity-card {
+  display: grid;
+  gap: 0.55rem;
+  padding: 0.8rem 0.9rem;
+  border: 1px solid var(--color-border-light);
+  border-radius: var(--radius-md);
+  background: var(--color-bg-input);
+  transition: border-color 0.2s ease, background 0.2s ease, box-shadow 0.2s ease;
+}
+.opportunity-card:hover {
+  background: var(--color-bg-card);
+  border-color: var(--color-primary-border);
+  box-shadow: var(--shadow-sm);
+}
+.opportunity-top {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.5rem;
+}
+.opportunity-verdict {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 3.2rem;
+  padding: 0.18rem 0.45rem;
+  border-radius: 4px;
+  font-size: 0.68rem;
+  font-weight: 800;
+  line-height: 1.2;
+  white-space: nowrap;
+}
+.verdict-buy { background: var(--color-success-bg); color: var(--color-success); }
+.verdict-watch { background: var(--color-warning-bg); color: var(--color-warning); }
+.verdict-avoid { background: var(--color-danger-bg); color: var(--color-danger); }
+.verdict-reduce { background: var(--color-danger-bg); color: var(--color-danger); }
+.opportunity-theme {
+  color: var(--color-text-primary);
+  font-size: 0.92rem;
+  font-weight: 800;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.opportunity-score {
+  width: 2rem;
+  height: 2rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 6px;
+  background: var(--color-bg-card);
+  border: 1px solid var(--color-border);
+  color: var(--color-text-primary);
+  font-size: 0.82rem;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+}
+.opportunity-line,
+.opportunity-risk {
+  margin: 0;
+  line-height: 1.5;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.opportunity-line {
+  color: var(--color-text-secondary);
+  font-size: 0.78rem;
+  -webkit-line-clamp: 2;
+}
+.opportunity-risk {
+  color: var(--color-danger);
+  font-size: 0.72rem;
+  -webkit-line-clamp: 2;
+}
+.opportunity-funds {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+.opportunity-fund {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  max-width: 100%;
+  padding: 0.18rem 0.45rem;
+  border-radius: 4px;
+  background: var(--color-bg-card);
+  border: 1px solid var(--color-border-light);
+  color: var(--color-text-secondary);
+  font-size: 0.7rem;
+  font-weight: 600;
+}
+.opportunity-fund em {
+  font-style: normal;
+  color: var(--color-text-muted);
+  font-size: 0.62rem;
+  font-weight: 700;
+}
+.opportunity-plan {
+  display: grid;
+  grid-template-columns: minmax(0, auto) minmax(0, 1fr);
+  gap: 0.5rem;
+  color: var(--color-text-muted);
+  font-size: 0.72rem;
+}
+.opportunity-plan span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.opportunity-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.4rem;
+}
+.opportunity-actions .btn-sm {
+  height: 1.75rem;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0 0.55rem;
+  border-radius: 4px;
+  font-size: 0.72rem;
+  font-weight: 700;
+}
+.btn-primary-text {
+  color: var(--color-primary);
+}
 .hotspots-summary {
   font-size: 0.95rem;
   font-weight: 700;
@@ -699,6 +855,9 @@ const allRelatedHoldings = computed(() => {
   .card-header-actions { flex-wrap: wrap; gap: 0.25rem; }
   .verify-bar { flex-wrap: wrap; gap: 0.25rem; }
   .rec-main { gap: 0.4rem; }
+  .opportunity-plan { grid-template-columns: 1fr; gap: 0.25rem; }
+  .opportunity-actions { justify-content: stretch; }
+  .opportunity-actions .btn-sm { flex: 1; justify-content: center; }
 }
 @keyframes spin {
   from { transform: rotate(0deg); }

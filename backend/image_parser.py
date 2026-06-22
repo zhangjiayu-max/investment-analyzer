@@ -393,7 +393,7 @@ class DDImageParser:
         return result
 
     def _call_vision_model(self, img_b64: str, mime: str) -> str:
-        """调用视觉模型，最多重试 2 次。"""
+        """调用视觉模型，最多重试 2 次，每次 120 秒超时。"""
         last_err = None
         for attempt in range(3):
             try:
@@ -408,6 +408,7 @@ class DDImageParser:
                     }],
                     temperature=0.1,
                     max_tokens=8000,
+                    timeout=120,
                 )
                 content = response.choices[0].message.content
                 if content and content.strip():
@@ -415,6 +416,8 @@ class DDImageParser:
                 last_err = RuntimeError("模型返回空响应")
             except Exception as e:
                 last_err = e
+                if "timeout" in str(e).lower() or "timed out" in str(e).lower():
+                    logging.warning(f"视觉模型调用超时 (尝试 {attempt+1}/3)")
             if attempt < 2:
                 time.sleep(2)
         raise last_err or RuntimeError("视觉模型调用失败")
