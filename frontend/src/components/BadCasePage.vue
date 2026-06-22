@@ -1,5 +1,5 @@
 <script setup>
-import { ref, onMounted, computed } from 'vue'
+import { ref, onMounted, computed, nextTick } from 'vue'
 import { listBadCases, createEvalFromBadCase } from '../api'
 import ConfirmDialog from './ConfirmDialog.vue'
 import AppToast from './AppToast.vue'
@@ -79,6 +79,13 @@ async function load() {
 
 function selectCase(c) {
   selectedCase.value = c
+  // 移动端自动滚到详情面板
+  nextTick(() => {
+    const detail = document.querySelector('.badcase-detail')
+    if (detail && window.innerWidth <= 768) {
+      detail.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    }
+  })
 }
 
 function confirmConvertToEval(c) {

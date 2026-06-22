@@ -20,6 +20,9 @@ import {
   getPortfolioAiAnalysisRecord, deletePortfolioAiAnalysisRecord,
   runDiversificationAiSummary, getAiSummaryTodayStatus, getPortfolioPenetration,
   runPanoramaAnalysis, pollPanoramaStatus, pollAnalysisStatus, runDeepDiveAnalysis, runTradeReview, runFundAnalysis,
+  runFeeAnalysis, runCorrelationAnalysis,
+  listFeeRecords, listCorrelationRecords,
+  getAsyncTaskStatus,
   listPanoramaRecords, listDeepDiveRecords, listTradeReviewRecords, listFundAnalysisRecords,
   submitAnalysisFeedback,
   getRebalanceConfig, updateRebalanceConfig, getRebalanceConfigHistory, rollbackRebalanceConfig,
@@ -1040,6 +1043,14 @@ const tradeReviewShowAll = ref(false)
 const fundAnalysisCode = ref('')
 const fundAnalysisRecords = ref([])
 const fundAnalysisShowAll = ref(false)
+
+// 费率分析状态
+const feeRecords = ref([])
+const feeShowAll = ref(false)
+
+// 相关性分析状态
+const correlationRecords = ref([])
+const correlationShowAll = ref(false)
 const aiHistoryLoading = ref(false)
 
 // Transaction tags
@@ -1258,6 +1269,8 @@ const aiModes = [
   { key: 'deepdive', icon: '🔎', label: '单基金分析' },
   { key: 'trade-review', icon: '📊', label: '交易复盘' },
   { key: 'fund-analysis', icon: '🔍', label: '指定基金分析' },
+  { key: 'fee', icon: '💰', label: '费率分析' },
+  { key: 'correlation', icon: '🔗', label: '相关性分析' },
   { key: 'compare', icon: '⚖️', label: '对比分析' },
 ]
 
@@ -1271,16 +1284,20 @@ function switchAiMode(mode) {
 
 async function loadAllModeRecords() {
   try {
-    const [p, d, t, w] = await Promise.allSettled([
+    const [p, d, t, w, f, c] = await Promise.allSettled([
       listPanoramaRecords(10),
       listDeepDiveRecords(10),
       listTradeReviewRecords(10),
       listFundAnalysisRecords(10),
+      listFeeRecords(10),
+      listCorrelationRecords(10),
     ])
     if (p.status === 'fulfilled') panoramaRecords.value = p.value.data.records || []
     if (d.status === 'fulfilled') deepDiveRecords.value = d.value.data.records || []
     if (t.status === 'fulfilled') tradeReviewRecords.value = t.value.data.records || []
     if (w.status === 'fulfilled') fundAnalysisRecords.value = w.value.data.records || []
+    if (f.status === 'fulfilled') feeRecords.value = f.value.data.records || []
+    if (c.status === 'fulfilled') correlationRecords.value = c.value.data.records || []
   } catch (e) { /* ignore */ }
 }
 
@@ -1496,6 +1513,92 @@ async function loadFundAnalysisRecords() {
   try {
     const { data } = await listFundAnalysisRecords(10)
     fundAnalysisRecords.value = data.records || []
+  } catch (e) { /* ignore */ }
+}
+
+// 费率分析
+async function runFeeMode() {
+  modeLoading.value = true
+  modeResult.value = ''
+  modeRecordId.value = null
+  aiTokenUsage.value = 0
+  try {
+    const { data } = await runFeeAnalysis()
+    const taskId = data.task_id
+    modeRecordId.value = taskId
+    const poll = setInterval(async () => {
+      try {
+        const resp = await getAsyncTaskStatus(taskId)
+        if (resp.data.status === 'done') {
+          const result = resp.data.result
+          modeResult.value = result?.text || JSON.stringify(result)
+          modeLoading.value = false
+          clearInterval(poll)
+          loadFeeRecords()
+        } else if (resp.data.status === 'error') {
+          modeResult.value = '分析失败：' + (resp.data.error || '未知错误')
+          modeLoading.value = false
+          clearInterval(poll)
+        }
+      } catch (e) {
+        modeResult.value = '轮询失败：' + e.message
+        modeLoading.value = false
+        clearInterval(poll)
+      }
+    }, 3000)
+  } catch (e) {
+    modeResult.value = '分析失败：' + (e.response?.data?.detail || e.message)
+    modeLoading.value = false
+  }
+}
+
+async function loadFeeRecords() {
+  try {
+    const { data } = await listFeeRecords(10)
+    feeRecords.value = data.records || []
+  } catch (e) { /* ignore */ }
+}
+
+// 相关性分析
+async function runCorrelationMode() {
+  modeLoading.value = true
+  modeResult.value = ''
+  modeRecordId.value = null
+  aiTokenUsage.value = 0
+  try {
+    const { data } = await runCorrelationAnalysis()
+    const taskId = data.task_id
+    modeRecordId.value = taskId
+    const poll = setInterval(async () => {
+      try {
+        const resp = await getAsyncTaskStatus(taskId)
+        if (resp.data.status === 'done') {
+          const result = resp.data.result
+          modeResult.value = result?.text || JSON.stringify(result)
+          modeLoading.value = false
+          clearInterval(poll)
+          loadCorrelationRecords()
+        } else if (resp.data.status === 'error') {
+          modeResult.value = '分析失败：' + (resp.data.error || '未知错误')
+          modeLoading.value = false
+          clearInterval(poll)
+        }
+      } catch (e) {
+        modeResult.value = '轮询失败：' + e.message
+        modeLoading.value = false
+        clearInterval(poll)
+      }
+    }, 3000)
+  } catch (e) {
+    modeResult.value = '分析失败：' + (e.response?.data?.detail || e.message)
+    modeLoading.value = false
+  }
+}
+
+async function loadCorrelationRecords() {
+  try {
+    const { data } = await listCorrelationRecords(10)
+    correlationRecords.value = data.records || []
   } catch (e) { /* ignore */ }
 }
 
@@ -1769,6 +1872,26 @@ function confirmFundAnalysis() {
     message: `将使用 AI 分析基金 ${fundAnalysisCode.value}，结合您的持仓和当前估值数据，是否继续？`,
     danger: false,
     onConfirm: () => { confirm.value.visible = false; runFundAnalysisMode() }
+  }
+}
+
+function confirmFeeAnalysis() {
+  confirm.value = {
+    visible: true,
+    title: '费率拖累分析',
+    message: '将分析持仓基金的真实费率成本，计算10年复利侵蚀，并给出降费建议，是否继续？',
+    danger: false,
+    onConfirm: () => { confirm.value.visible = false; runFeeMode() }
+  }
+}
+
+function confirmCorrelationAnalysis() {
+  confirm.value = {
+    visible: true,
+    title: '持仓相关性分析',
+    message: '将计算持仓基金之间的真实相关性，识别假分散风险，是否继续？',
+    danger: false,
+    onConfirm: () => { confirm.value.visible = false; runCorrelationMode() }
   }
 }
 
@@ -3371,6 +3494,80 @@ function txDisplayAmount(tx) {
                 <div v-for="r in (fundAnalysisShowAll ? fundAnalysisRecords : fundAnalysisRecords.slice(0,3))" :key="r.id" class="ai-history-item">
                   <span class="ai-history-time">{{ formatAiTime(r.created_at) }}</span>
                   <span class="ai-history-summary">{{ r.summary }}</span>
+                  <button class="btn-ghost btn-sm" @click="viewModeRecord(r)">查看</button>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Mode: Fee Analysis -->
+          <div v-if="aiMode === 'fee'" class="ai-mode-content">
+            <div class="ai-mode-desc">分析持仓基金的真实费率成本（管理费+托管费+销售服务费），计算10年复利侵蚀金额，找出高费率基金并给出低费率替代方案。</div>
+            <AIActionButton
+              class="ai-mode-action"
+              label="开始费率分析"
+              agent="费率分析师"
+              icon="brain"
+              variant="primary"
+              :loading="modeLoading"
+              @click="confirmFeeAnalysis"
+            />
+            <div v-if="modeResult && aiMode === 'fee'" class="ai-mode-result">
+              <AnalysisCard
+                :result="modeResult"
+                agent-name="费率分析师"
+                :token-usage="aiTokenUsage"
+                :created-at="new Date().toISOString()"
+                :feedback="feedbackGiven"
+                @feedback="(val) => submitFeedback(val)"
+              />
+            </div>
+            <div v-if="feeRecords.length > 0" class="ai-mode-history">
+              <div class="ai-mode-history-header" @click="feeShowAll = !feeShowAll">
+                <span>📋 历史费率分析 ({{ feeRecords.length }})</span>
+                <span class="ai-mode-history-toggle">{{ feeShowAll ? '收起' : '展开全部' }}</span>
+              </div>
+              <div class="ai-mode-history-list">
+                <div v-for="r in (feeShowAll ? feeRecords : feeRecords.slice(0,3))" :key="r.id" class="ai-history-item">
+                  <span class="ai-history-time">{{ formatAiTime(r.created_at) }}</span>
+                  <span class="ai-history-summary">{{ r.summary || '费率分析' }}</span>
+                  <button class="btn-ghost btn-sm" @click="viewModeRecord(r)">查看</button>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Mode: Correlation Analysis -->
+          <div v-if="aiMode === 'correlation'" class="ai-mode-content">
+            <div class="ai-mode-desc">计算持仓基金之间的真实相关性矩阵，识别"假分散"风险。通过252个交易日净值数据，找出高度相关的基金对，计算有效持仓数（Effective N）。</div>
+            <AIActionButton
+              class="ai-mode-action"
+              label="开始相关性分析"
+              agent="分散度分析师"
+              icon="brain"
+              variant="primary"
+              :loading="modeLoading"
+              @click="confirmCorrelationAnalysis"
+            />
+            <div v-if="modeResult && aiMode === 'correlation'" class="ai-mode-result">
+              <AnalysisCard
+                :result="modeResult"
+                agent-name="分散度分析师"
+                :token-usage="aiTokenUsage"
+                :created-at="new Date().toISOString()"
+                :feedback="feedbackGiven"
+                @feedback="(val) => submitFeedback(val)"
+              />
+            </div>
+            <div v-if="correlationRecords.length > 0" class="ai-mode-history">
+              <div class="ai-mode-history-header" @click="correlationShowAll = !correlationShowAll">
+                <span>📋 历史相关性分析 ({{ correlationRecords.length }})</span>
+                <span class="ai-mode-history-toggle">{{ correlationShowAll ? '收起' : '展开全部' }}</span>
+              </div>
+              <div class="ai-mode-history-list">
+                <div v-for="r in (correlationShowAll ? correlationRecords : correlationRecords.slice(0,3))" :key="r.id" class="ai-history-item">
+                  <span class="ai-history-time">{{ formatAiTime(r.created_at) }}</span>
+                  <span class="ai-history-summary">{{ r.summary || '相关性分析' }}</span>
                   <button class="btn-ghost btn-sm" @click="viewModeRecord(r)">查看</button>
                 </div>
               </div>

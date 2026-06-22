@@ -1361,6 +1361,26 @@ export function runFundAnalysis(fundCode) {
   return api.post('/portfolio/analysis/fund-analysis', { fund_code: fundCode }, { timeout: 30000 })
 }
 
+/** 费率拖累分析 */
+export function runFeeAnalysis() {
+  return api.post('/portfolio/analysis/fee', {}, { timeout: 30000 })
+}
+
+/** 持仓相关性分析 */
+export function runCorrelationAnalysis(lookbackDays = 252) {
+  return api.post('/portfolio/analysis/correlation', { lookback_days: lookbackDays }, { timeout: 30000 })
+}
+
+/** 费率分析历史 */
+export function listFeeRecords(limit = 10) {
+  return api.get('/portfolio/analysis/fee/records', { params: { limit } })
+}
+
+/** 相关性分析历史 */
+export function listCorrelationRecords(limit = 10) {
+  return api.get('/portfolio/analysis/correlation/records', { params: { limit } })
+}
+
 /** 查询任意分析执行状态 */
 export function getAnalysisStatus(recordId) {
   return api.get(`/portfolio/analysis/${recordId}/status`)
