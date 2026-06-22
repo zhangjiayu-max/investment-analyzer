@@ -310,24 +310,26 @@ function formatTime(ts) {
       </div>
       <ReasoningPanel v-if="msg.reasoning" :text="msg.reasoning" />
       <div class="message-bubble markdown-body" v-html="renderMarkdown(msg.content)"></div>
-      <!-- 反馈按钮 -->
-      <div v-if="msg.role === 'assistant' && !feedbackGiven[index]" class="message-feedback">
+      <!-- 操作按钮（复制始终可见） -->
+      <div class="message-actions">
         <button
-          v-if="msg.id && msg.execution_status !== 'streaming'"
-          class="btn-msg-feedback"
+          class="btn-msg-action"
           @click="copyMessageContent(msg)"
           title="复制内容"
         >
-          <Icon name="clipboard" size="14" />
+          <Icon name="clipboard" size="13" />
         </button>
         <button
-          v-if="msg.id && msg.execution_status !== 'streaming'"
-          class="btn-msg-feedback"
+          v-if="msg.role === 'assistant' && msg.id && msg.execution_status !== 'streaming'"
+          class="btn-msg-action"
           @click="emit('save-decision', msg, index)"
           title="保存为决策草案"
         >
-          <Icon name="clipboard-list" size="14" />
+          <Icon name="clipboard-list" size="13" />
         </button>
+      </div>
+      <!-- 反馈按钮（仅assistant且未反馈时显示） -->
+      <div v-if="msg.role === 'assistant' && !feedbackGiven[index]" class="message-feedback">
         <button class="btn-msg-feedback" @click="emit('feedback', msg, index, 'helpful')" title="有用">
           <Icon name="thumbs-up" size="14" />
         </button>
@@ -898,6 +900,24 @@ function formatTime(ts) {
   word-break: break-word;
   color: var(--color-text-secondary);
 }
+
+/* 消息操作按钮（复制始终可见） */
+.message-actions {
+  display: flex;
+  gap: 0.35rem;
+  padding: 0.25rem 0;
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+@media (hover: none) { .message-actions { opacity: 0.7; } }
+@media (hover: hover) { .message:hover .message-actions { opacity: 1; } }
+.btn-msg-action {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 26px; height: 26px; border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm); background: var(--color-bg-card);
+  color: var(--color-text-muted); cursor: pointer; transition: all 0.15s;
+}
+.btn-msg-action:hover { color: var(--color-primary); border-color: var(--color-primary); background: var(--color-primary-50); }
 
 /* 消息反馈按钮 */
 .message-feedback {
