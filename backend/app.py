@@ -190,6 +190,13 @@ async def startup():
     init_db()
     logging.info("数据库初始化完成")
 
+    # Shadow Mode 表初始化
+    try:
+        from shadow_mode import init_shadow_db
+        init_shadow_db()
+    except Exception as e:
+        logging.warning(f"Shadow Mode 初始化失败: {e}")
+
     logging.info("初始化 FTS5...")
     init_fts()
     logging.info("FTS5 初始化完成")
@@ -862,6 +869,60 @@ async def fetch_recent_valuations():
 
     checked_at = datetime.now().strftime("%Y-%m-%d %H:%M")
     return {"ok": True, "fetched": fetched, "errors": errors, "checked_at": checked_at}
+
+
+# ── Shadow Mode API ──────────────────────────────────
+
+
+@app.get("/api/shadow/configs")
+async def list_shadow_configs_api(active_only: bool = True):
+    """列出 Shadow 配置。"""
+    from shadow_mode import list_shadow_configs
+    return {"configs": list_shadow_configs(active_only=active_only)}
+
+
+@app.post("/api/shadow/configs")
+async def create_shadow_config_api(body: dict):
+    """创建 Shadow 配置。"""
+    from shadow_mode import create_shadow_config
+    config_id = create_shadow_config(
+        name=body.get("name", "未命名"),
+        agent_type=body.get("agent_type", "ai"),
+        current_prompt=body.get("current_prompt", ""),
+        candidate_prompt=body.get("candidate_prompt", ""),
+        traffic_pct=body.get("traffic_pct", 0.1),
+    )
+    return {"ok": True, "id": config_id}
+
+
+@app.post("/api/shadow/configs/{config_id}/toggle")
+async def toggle_shadow_config_api(config_id: int, body: dict):
+    """启用/禁用 Shadow 配置。"""
+    from shadow_mode import toggle_shadow_config
+    toggle_shadow_config(config_id, body.get("is_active", True))
+    return {"ok": True}
+
+
+@app.delete("/api/shadow/configs/{config_id}")
+async def delete_shadow_config_api(config_id: int):
+    """删除 Shadow 配置。"""
+    from shadow_mode import delete_shadow_config
+    delete_shadow_config(config_id)
+    return {"ok": True}
+
+
+@app.get("/api/shadow/runs")
+async def list_shadow_runs_api(config_id: int = None, limit: int = 100):
+    """列出 Shadow 执行记录。"""
+    from shadow_mode import list_shadow_runs
+    return {"runs": list_shadow_runs(config_id=config_id, limit=limit)}
+
+
+@app.get("/api/shadow/stats")
+async def get_shadow_stats_api(config_id: int = None):
+    """获取 Shadow Mode 统计信息。"""
+    from shadow_mode import get_shadow_stats
+    return get_shadow_stats(config_id=config_id)
 
 
 # ── 前端页面 ──────────────────────────────────────────

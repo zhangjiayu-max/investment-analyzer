@@ -395,6 +395,18 @@ async def batch_convert_bad_cases():
     return {"ok": True, "converted": len(converted), "skipped": skipped, "cases": converted}
 
 
+@router.post("/api/eval/cases/auto-generate")
+async def auto_generate_eval_cases(min_score: float = 8.0, limit: int = 50):
+    """自动生成 Eval Case（正例 + 负例）。
+
+    正例：高分对话（overall_score >= min_score）
+    负例：Bad Case（rating = unhelpful）
+    """
+    from auto_eval_generator import auto_generate_eval_cases
+    result = auto_generate_eval_cases(min_score=min_score, limit=limit)
+    return result
+
+
 @router.post("/api/eval/cases/from-conversations")
 async def extract_eval_from_conversations(limit: int = 20):
     """从高价值对话中自动提取 Eval Case。
