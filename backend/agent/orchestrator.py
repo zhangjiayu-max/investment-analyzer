@@ -61,16 +61,22 @@ def fetch_article_content(url: str) -> dict | None:
 
     try:
         from article_reader import fetch_article
-        # 在后台线程中创建新的事件循环运行异步函数
-        # （不能用 asyncio.get_event_loop()，后台线程没有默认事件循环）
-        loop = asyncio.new_event_loop()
+        # uvicorn 已有事件循环，用 run_coroutine_threadsafe 避免冲突
         try:
-            result = loop.run_until_complete(fetch_article(url))
-        except Exception as e:
-            logger.warning(f"获取文章失败: {e}")
-            return None
-        finally:
-            loop.close()
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                # 在已有事件循环中，用 run_coroutine_threadsafe
+                future = asyncio.run_coroutine_threadsafe(fetch_article(url), loop)
+                result = future.result(timeout=30)
+            else:
+                result = loop.run_until_complete(fetch_article(url))
+        except RuntimeError:
+            # 没有事件循环时，创建新的
+            loop = asyncio.new_event_loop()
+            try:
+                result = loop.run_until_complete(fetch_article(url))
+            finally:
+                loop.close()
 
         # 缓存成功结果
         if result:
@@ -1491,6 +1497,7 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
     # 0.3 链接检测与文章抓取
     article_context = ""
     article_fetch_failed = False
+    logger.info(f"[文章检测] query前50字: {query[:50]}, detect_urls={detect_urls(query)}")
     if detect_urls(query):
         yield {"type": "status", "message": "检测到链接，正在抓取文章内容..."}
         query, article_context = enrich_query_with_article(query)

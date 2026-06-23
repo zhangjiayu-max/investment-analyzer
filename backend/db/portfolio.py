@@ -68,33 +68,34 @@ def create_holding(fund_code: str, fund_name: str, shares: float = 0,
     profit_rate = (profit_loss / total_cost) if (profit_loss is not None and total_cost > 0) else None
     conn = _get_conn()
     try:
-        cur = conn.execute("""
-            INSERT INTO portfolio_holdings
-                (user_id, fund_code, fund_name, index_code, index_name,
-                 shares, cost_price, total_cost, buy_date, notes,
-                 current_price, current_value, profit_loss, profit_rate, account,
-                 fund_category)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (user_id, fund_code, fund_name, index_code, index_name,
-              shares, cost_price, total_cost, buy_date, notes,
-              current_price, current_value, profit_loss, profit_rate, account,
-              fund_category))
-    except sqlite3.IntegrityError:
+        try:
+            cur = conn.execute("""
+                INSERT INTO portfolio_holdings
+                    (user_id, fund_code, fund_name, index_code, index_name,
+                     shares, cost_price, total_cost, buy_date, notes,
+                     current_price, current_value, profit_loss, profit_rate, account,
+                     fund_category)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (user_id, fund_code, fund_name, index_code, index_name,
+                  shares, cost_price, total_cost, buy_date, notes,
+                  current_price, current_value, profit_loss, profit_rate, account,
+                  fund_category))
+        except sqlite3.IntegrityError:
+            raise ValueError(f"基金 {fund_code} 在账户「{account}」中已存在")
+        holding_id = cur.lastrowid
+
+        # 同步创建一笔系统买入交易（is_system=1），确保 _recalculate_holding 能正确计算
+        tx_date = buy_date or datetime.now().strftime("%Y-%m-%d")
+        conn.execute("""
+            INSERT INTO portfolio_transactions
+                (holding_id, user_id, fund_code, transaction_type, amount, shares, price,
+                 transaction_date, status, notes, is_system)
+            VALUES (?, ?, ?, 'buy', ?, ?, ?, ?, 'confirmed', '初始建仓', 1)
+        """, (holding_id, user_id, fund_code, total_cost, shares, cost_price, tx_date))
+
+        conn.commit()
+    finally:
         conn.close()
-        raise ValueError(f"基金 {fund_code} 在账户「{account}」中已存在")
-    holding_id = cur.lastrowid
-
-    # 同步创建一笔系统买入交易（is_system=1），确保 _recalculate_holding 能正确计算
-    tx_date = buy_date or datetime.now().strftime("%Y-%m-%d")
-    conn.execute("""
-        INSERT INTO portfolio_transactions
-            (holding_id, user_id, fund_code, transaction_type, amount, shares, price,
-             transaction_date, status, notes, is_system)
-        VALUES (?, ?, ?, 'buy', ?, ?, ?, ?, 'confirmed', '初始建仓', 1)
-    """, (holding_id, user_id, fund_code, total_cost, shares, cost_price, tx_date))
-
-    conn.commit()
-    conn.close()
     return holding_id
 
 
@@ -554,94 +555,94 @@ def _recalculate_holding(holding_id: int):
     对于没有交易记录的持仓（直接导入/手动创建），保留原有数据不覆盖。
     """
     conn = _get_conn()
-    holding = conn.execute("SELECT * FROM portfolio_holdings WHERE id = ?", (holding_id,)).fetchone()
-    if not holding:
-        conn.close()
-        return
-    holding = dict(holding)
+    try:
+        holding = conn.execute("SELECT * FROM portfolio_holdings WHERE id = ?", (holding_id,)).fetchone()
+        if not holding:
+            return
+        holding = dict(holding)
 
-    txs = conn.execute("""
-        SELECT * FROM portfolio_transactions
-        WHERE holding_id = ? AND (status IN ('confirmed', 'settled') OR status IS NULL)
-        ORDER BY id ASC
-    """, (holding_id,)).fetchall()
+        txs = conn.execute("""
+            SELECT * FROM portfolio_transactions
+            WHERE holding_id = ? AND (status IN ('confirmed', 'settled') OR status IS NULL)
+            ORDER BY id ASC
+        """, (holding_id,)).fetchall()
 
-    # 如果没有任何已确认的交易，说明持仓是直接创建的，不重新计算
-    if not txs:
-        conn.close()
-        return
+        # 如果没有任何已确认的交易，说明持仓是直接创建的，不重新计算
+        if not txs:
+            return
 
-    total_shares = 0.0
-    total_cost = 0.0
+        total_shares = 0.0
+        total_cost = 0.0
 
-    # 如果持仓有基准数据（直接导入/手动创建的初始持仓），先加入基准
-    has_base = holding.get("has_base_position")
-    base_shares = holding.get("base_shares") or 0
-    if has_base:
-        # 优先使用 base_shares（原始基准），避免被重算覆盖
-        total_shares = base_shares if base_shares > 0 else (holding.get("shares") or 0)
-        total_cost = holding.get("total_cost") or 0
+        # 如果持仓有基准数据（直接导入/手动创建的初始持仓），先加入基准
+        has_base = holding.get("has_base_position")
+        base_shares = holding.get("base_shares") or 0
+        if has_base:
+            # 优先使用 base_shares（原始基准），避免被重算覆盖
+            total_shares = base_shares if base_shares > 0 else (holding.get("shares") or 0)
+            total_cost = holding.get("total_cost") or 0
 
-    current_price = holding.get("current_price") or 0
+        current_price = holding.get("current_price") or 0
 
-    # 先处理所有买入
-    last_buy_price = None
-    last_buy_date = None
-    for tx in txs:
-        tx = dict(tx)
-        shares = tx.get("shares", 0) or 0
-        amount = tx.get("amount", 0) or 0
-        tx_price = tx.get("price") or 0
-        if tx["transaction_type"] == "buy" and (shares > 0 or amount > 0):
-            # 只有金额没有份额时，用净值自动估算份额
-            if shares <= 0 and amount > 0:
-                price = tx_price or current_price
-                if price > 0:
-                    shares = amount / price
-            total_shares += shares
-            total_cost += amount
-            # 跟踪最近一次买入价格和日期
-            if tx_price > 0:
-                last_buy_price = tx_price
-                last_buy_date = tx.get("transaction_date") or ""
-
-    # 再处理所有卖出和转换（按平均成本扣减）
-    for tx in txs:
-        tx = dict(tx)
-        shares = tx.get("shares", 0) or 0
-        if tx["transaction_type"] in ("sell", "convert") and shares > 0:
-            if total_shares > 0:
-                avg_cost = total_cost / total_shares
-                total_cost -= avg_cost * shares
-            total_shares -= shares
-        elif tx["transaction_type"] == "dividend":
+        # 先处理所有买入
+        last_buy_price = None
+        last_buy_date = None
+        for tx in txs:
+            tx = dict(tx)
+            shares = tx.get("shares", 0) or 0
             amount = tx.get("amount", 0) or 0
-            if amount > 0:
-                total_cost -= amount
+            tx_price = tx.get("price") or 0
+            if tx["transaction_type"] == "buy" and (shares > 0 or amount > 0):
+                # 只有金额没有份额时，用净值自动估算份额
+                if shares <= 0 and amount > 0:
+                    price = tx_price or current_price
+                    if price > 0:
+                        shares = amount / price
+                total_shares += shares
+                total_cost += amount
+                # 跟踪最近一次买入价格和日期
+                if tx_price > 0:
+                    last_buy_price = tx_price
+                    last_buy_date = tx.get("transaction_date") or ""
 
-    if total_shares < 0:
-        total_shares = 0
+        # 再处理所有卖出和转换（按平均成本扣减）
+        for tx in txs:
+            tx = dict(tx)
+            shares = tx.get("shares", 0) or 0
+            if tx["transaction_type"] in ("sell", "convert") and shares > 0:
+                if total_shares > 0:
+                    avg_cost = total_cost / total_shares
+                    total_cost -= avg_cost * shares
+                total_shares -= shares
+            elif tx["transaction_type"] == "dividend":
+                amount = tx.get("amount", 0) or 0
+                if amount > 0:
+                    total_cost -= amount
 
-    cost_price = total_cost / total_shares if total_shares > 0 else 0
-    current_value = total_shares * current_price if current_price > 0 else None
-    profit_loss = (current_value - total_cost) if current_value is not None else None
-    profit_rate = (profit_loss / total_cost) if (profit_loss is not None and total_cost > 0) else None
+        if total_shares < 0:
+            total_shares = 0
 
-    conn.execute("""
-        UPDATE portfolio_holdings SET
-            shares = ?, cost_price = ?, total_cost = ?,
-            current_value = ?, profit_loss = ?, profit_rate = ?,
-            last_buy_price = ?, last_buy_date = ?,
-            updated_at = datetime('now','localtime')
-        WHERE id = ?
-    """, (total_shares, round(cost_price, 4), round(total_cost, 2),
-          round(current_value, 2) if current_value is not None else None,
-          round(profit_loss, 2) if profit_loss is not None else None,
-          round(profit_rate, 4) if profit_rate is not None else None,
-          last_buy_price, last_buy_date,
-          holding_id))
-    conn.commit()
-    conn.close()
+        cost_price = total_cost / total_shares if total_shares > 0 else 0
+        current_value = total_shares * current_price if current_price > 0 else None
+        profit_loss = (current_value - total_cost) if current_value is not None else None
+        profit_rate = (profit_loss / total_cost) if (profit_loss is not None and total_cost > 0) else None
+
+        conn.execute("""
+            UPDATE portfolio_holdings SET
+                shares = ?, cost_price = ?, total_cost = ?,
+                current_value = ?, profit_loss = ?, profit_rate = ?,
+                last_buy_price = ?, last_buy_date = ?,
+                updated_at = datetime('now','localtime')
+            WHERE id = ?
+        """, (total_shares, round(cost_price, 4), round(total_cost, 2),
+              round(current_value, 2) if current_value is not None else None,
+              round(profit_loss, 2) if profit_loss is not None else None,
+              round(profit_rate, 4) if profit_rate is not None else None,
+              last_buy_price, last_buy_date,
+              holding_id))
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def _capture_valuation_snapshot(holding_id: int, transaction_date: str) -> str | None:
@@ -1010,21 +1011,21 @@ def auto_confirm_due_transactions(as_of_date: str | None = None, user_id: str = 
 def settle_transaction(tx_id: int) -> bool:
     """标记卖出交易已到账。"""
     conn = _get_conn()
-    tx = conn.execute("SELECT * FROM portfolio_transactions WHERE id = ?", (tx_id,)).fetchone()
-    if not tx:
-        conn.close()
-        return False
-    tx = dict(tx)
-    if tx.get("status") != "confirmed":
-        conn.close()
-        return False
+    try:
+        tx = conn.execute("SELECT * FROM portfolio_transactions WHERE id = ?", (tx_id,)).fetchone()
+        if not tx:
+            return False
+        tx = dict(tx)
+        if tx.get("status") != "confirmed":
+            return False
 
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    conn.execute("""
-        UPDATE portfolio_transactions SET status = 'settled', settled_at = ? WHERE id = ?
-    """, (now, tx_id))
-    conn.commit()
-    conn.close()
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        conn.execute("""
+            UPDATE portfolio_transactions SET status = 'settled', settled_at = ? WHERE id = ?
+        """, (now, tx_id))
+        conn.commit()
+    finally:
+        conn.close()
 
     # 审计日志
     _log_tx_audit(
@@ -1042,18 +1043,19 @@ def settle_transaction(tx_id: int) -> bool:
 def delete_transaction(tx_id: int) -> bool:
     """删除交易记录（仅允许 pending 状态）。"""
     conn = _get_conn()
-    tx = conn.execute("SELECT * FROM portfolio_transactions WHERE id = ?", (tx_id,)).fetchone()
-    if not tx:
+    try:
+        tx = conn.execute("SELECT * FROM portfolio_transactions WHERE id = ?", (tx_id,)).fetchone()
+        if not tx:
+            return False
+        tx = dict(tx)
+        if tx.get("status") not in (None, "pending"):
+            return False
+
+        conn.execute("DELETE FROM transaction_tags WHERE transaction_id = ?", (tx_id,))
+        conn.execute("DELETE FROM portfolio_transactions WHERE id = ?", (tx_id,))
+        conn.commit()
+    finally:
         conn.close()
-        return False
-    tx = dict(tx)
-    if tx.get("status") not in (None, "pending"):
-        conn.close()
-        return False
-    conn.execute("DELETE FROM transaction_tags WHERE transaction_id = ?", (tx_id,))
-    conn.execute("DELETE FROM portfolio_transactions WHERE id = ?", (tx_id,))
-    conn.commit()
-    conn.close()
 
     # 审计日志
     _log_tx_audit(

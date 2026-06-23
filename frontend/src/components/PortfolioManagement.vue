@@ -1,5 +1,5 @@
 <script setup>
-import { ref, computed, onMounted, onActivated, watch, nextTick } from 'vue'
+import { ref, computed, onMounted, onActivated, onDeactivated, watch, nextTick } from 'vue'
 
 const maxIndustryPct = computed(() => {
   if (!detailData.value?.industry_allocation?.length) return 100
@@ -1049,10 +1049,12 @@ const fundAnalysisShowAll = ref(false)
 // 费率分析状态
 const feeRecords = ref([])
 const feeShowAll = ref(false)
+const _feePoll = ref(null)
 
 // 相关性分析状态
 const correlationRecords = ref([])
 const correlationShowAll = ref(false)
+const _corrPoll = ref(null)
 const aiHistoryLoading = ref(false)
 
 // Transaction tags
@@ -1523,6 +1525,8 @@ async function loadFundAnalysisRecords() {
 
 // 费率分析
 async function runFeeMode() {
+  // 清理之前的轮询
+  if (_feePoll.value) { clearInterval(_feePoll.value); _feePoll.value = null }
   modeLoading.value = true
   modeResult.value = ''
   modeRecordId.value = null
@@ -1531,24 +1535,24 @@ async function runFeeMode() {
     const { data } = await runFeeAnalysis()
     const taskId = data.task_id
     modeRecordId.value = taskId
-    const poll = setInterval(async () => {
+    _feePoll.value = setInterval(async () => {
       try {
         const resp = await getAsyncTaskStatus(taskId)
         if (resp.data.status === 'done') {
           const result = resp.data.result
           modeResult.value = result?.text || JSON.stringify(result)
           modeLoading.value = false
-          clearInterval(poll)
+          clearInterval(_feePoll.value); _feePoll.value = null
           loadFeeRecords()
         } else if (resp.data.status === 'error') {
           modeResult.value = '分析失败：' + (resp.data.error || '未知错误')
           modeLoading.value = false
-          clearInterval(poll)
+          clearInterval(_feePoll.value); _feePoll.value = null
         }
       } catch (e) {
         modeResult.value = '轮询失败：' + e.message
         modeLoading.value = false
-        clearInterval(poll)
+        clearInterval(_feePoll.value); _feePoll.value = null
       }
     }, 3000)
   } catch (e) {
@@ -1566,6 +1570,8 @@ async function loadFeeRecords() {
 
 // 相关性分析
 async function runCorrelationMode() {
+  // 清理之前的轮询
+  if (_corrPoll.value) { clearInterval(_corrPoll.value); _corrPoll.value = null }
   modeLoading.value = true
   modeResult.value = ''
   modeRecordId.value = null
@@ -1574,24 +1580,24 @@ async function runCorrelationMode() {
     const { data } = await runCorrelationAnalysis()
     const taskId = data.task_id
     modeRecordId.value = taskId
-    const poll = setInterval(async () => {
+    _corrPoll.value = setInterval(async () => {
       try {
         const resp = await getAsyncTaskStatus(taskId)
         if (resp.data.status === 'done') {
           const result = resp.data.result
           modeResult.value = result?.text || JSON.stringify(result)
           modeLoading.value = false
-          clearInterval(poll)
+          clearInterval(_corrPoll.value); _corrPoll.value = null
           loadCorrelationRecords()
         } else if (resp.data.status === 'error') {
           modeResult.value = '分析失败：' + (resp.data.error || '未知错误')
           modeLoading.value = false
-          clearInterval(poll)
+          clearInterval(_corrPoll.value); _corrPoll.value = null
         }
       } catch (e) {
         modeResult.value = '轮询失败：' + e.message
         modeLoading.value = false
-        clearInterval(poll)
+        clearInterval(_corrPoll.value); _corrPoll.value = null
       }
     }, 3000)
   } catch (e) {
@@ -2221,6 +2227,12 @@ onActivated(async () => {
 
   await loadData()
   loadAlerts()
+})
+
+// 页面离开时清理轮询
+onDeactivated(() => {
+  if (_feePoll.value) { clearInterval(_feePoll.value); _feePoll.value = null }
+  if (_corrPoll.value) { clearInterval(_corrPoll.value); _corrPoll.value = null }
 })
 
 // 账号切换时重新加载数据
