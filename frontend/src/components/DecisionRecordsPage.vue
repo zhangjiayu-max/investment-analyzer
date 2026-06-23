@@ -3,6 +3,8 @@ import { ref, computed, onMounted } from 'vue'
 import {
   listDecisions, updateDecisionStatus, submitDecisionReview, completeDecisionAction,
   getDecisionPrecheck, getExecutionStatus, getDecisionTimeline, createTransactionDraftFromDecision,
+  getDecisionStats, listRecommendationCandidates, ignoreRecommendationCandidate,
+  createDecisionFromCandidate,
 } from '../api'
 import { useToast } from '../composables/useToast'
 import Icon from './ui/Icon.vue'
@@ -16,6 +18,9 @@ const decisions = ref([])
 const precheckCache = ref({})  // { decisionId: precheckResult }
 const executionMatches = ref({})  // { decisionId: matchInfo }
 const draftingDecisionId = ref(null)
+const candidates = ref([])
+const decisionStats = ref(null)
+const candidateActionId = ref(null)
 
 // ── 筛选 ──
 const activeFilter = ref('all')  // all | proposed | accepted | executed | reviewed | rejected
@@ -61,7 +66,7 @@ function timelineEventClass(eventType) {
 }
 
 // ── 统计 ──
-const stats = computed(() => {
+const localStats = computed(() => {
   const all = decisions.value
   const proposed = all.filter(d => d.status === 'proposed').length
   const accepted = all.filter(d => d.status === 'accepted').length
@@ -71,6 +76,30 @@ const stats = computed(() => {
   const winCount = reviewedItems.filter(d => d.review.profit_change > 0).length
   const winRate = reviewedItems.length > 0 ? Math.round((winCount / reviewedItems.length) * 100) : 0
   return { proposed, accepted, executed, reviewed, winRate, total: all.length }
+})
+
+const stats = computed(() => {
+  const remote = decisionStats.value
+  if (!remote) return localStats.value
+  return {
+    proposed: remote.by_status?.proposed || 0,
+    accepted: remote.by_status?.accepted || 0,
+    executed: remote.by_status?.executed || 0,
+    reviewed: remote.reviewed || remote.by_status?.reviewed || 0,
+    winRate: remote.review_helpful_rate || 0,
+    total: remote.total || 0,
+  }
+})
+
+const insightText = computed(() => {
+  const remote = decisionStats.value
+  if (!remote || !remote.reviewed) return '复盘样本还少，先把已执行决策补齐结果和教训。'
+  const profit = Number(remote.total_profit_change || 0)
+  const lesson = remote.recent_lessons?.[0]
+  const profitText = profit === 0 ? '累计盈亏持平' : `累计复盘盈亏 ${profit > 0 ? '+' : ''}¥${money(profit)}`
+  return lesson
+    ? `${profitText}，最近可复用经验：${lesson}`
+    : `${profitText}，继续积累复盘经验。`
 })
 
 // ── 三栏分组 ──
@@ -94,11 +123,27 @@ async function load() {
     decisions.value.forEach(d => loadPrecheck(d.id))
     // 异步加载执行状态匹配
     loadExecutionStatus()
+    loadCandidates()
+    loadDecisionStats()
   } catch (e) {
     showToast('加载决策失败: ' + (e.response?.data?.detail || e.message), 'error')
   } finally {
     loading.value = false
   }
+}
+
+async function loadCandidates() {
+  try {
+    const { data } = await listRecommendationCandidates('new', 20)
+    candidates.value = data.items || []
+  } catch { /* silent */ }
+}
+
+async function loadDecisionStats() {
+  try {
+    const { data } = await getDecisionStats()
+    decisionStats.value = data
+  } catch { /* silent */ }
 }
 
 async function loadExecutionStatus() {
@@ -177,6 +222,47 @@ function createDraftFromDecision(decision) {
   })
 }
 
+function saveCandidateAsDecision(candidate) {
+  confirmAction(
+    '保存为决策',
+    `将「${candidate.summary}」保存为待执行决策草案。保存后仍需执行前检查，不会直接交易。是否继续？`,
+    async () => {
+      candidateActionId.value = candidate.id
+      try {
+        const { data } = await createDecisionFromCandidate(candidate.id, { review_days: 30 })
+        showToast(`已保存为决策 #${data.decision_id}`, 'success')
+        precheckCache.value = {}
+        await load()
+      } catch (e) {
+        const detail = e.response?.data?.detail
+        const msg = typeof detail === 'object' ? (detail.error || JSON.stringify(detail)) : (detail || e.message)
+        showToast('保存候选失败: ' + msg, 'error')
+      } finally {
+        candidateActionId.value = null
+      }
+    }
+  )
+}
+
+function ignoreCandidate(candidate) {
+  confirmAction(
+    '忽略建议',
+    `确认忽略「${candidate.summary}」？忽略后不会生成决策。`,
+    async () => {
+      candidateActionId.value = candidate.id
+      try {
+        await ignoreRecommendationCandidate(candidate.id)
+        showToast('已忽略建议', 'success')
+        await loadCandidates()
+      } catch (e) {
+        showToast('忽略失败: ' + (e.response?.data?.detail || e.message), 'error')
+      } finally {
+        candidateActionId.value = null
+      }
+    }
+  )
+}
+
 function confirmExecutionFromMatch(decisionId) {
   const match = executionMatches.value[decisionId]
   const txInfo = match ? `${match.tx_count}笔交易，买入${match.buy_shares}份/卖出${match.sell_shares}份` : ''
@@ -250,11 +336,22 @@ function statusClass(status) {
 }
 
 function decisionTypeLabel(type) {
-  return { add: '配置', rebalance: '再平衡', watch: '观察', hold: '持有', reduce: '减仓', sell: '卖出' }[type] || type || '决策'
+  return { add: '配置', buy: '买入', rebalance: '再平衡', watch: '观察', hold: '持有', reduce: '减仓', sell: '卖出' }[type] || type || '决策'
+}
+
+function candidateSourceLabel(candidate) {
+  const map = {
+    panorama: '全景诊断',
+    deep_dive: '深度分析',
+    trade_review: '交易复盘',
+    fund_analysis: '基金分析',
+    ai: 'AI持仓分析',
+  }
+  return map[candidate.scenario_type] || candidate.scenario_type || candidate.source_type || 'AI分析'
 }
 
 function decisionTypeClass(type) {
-  return { add: 'type-add', rebalance: 'type-rebalance', watch: 'type-watch', hold: 'type-hold', reduce: 'type-reduce', sell: 'type-sell' }[type] || 'type-watch'
+  return { add: 'type-add', buy: 'type-add', rebalance: 'type-rebalance', watch: 'type-watch', hold: 'type-hold', reduce: 'type-reduce', sell: 'type-sell' }[type] || 'type-watch'
 }
 
 function targetText(item) {
@@ -342,6 +439,53 @@ onMounted(load)
       <div class="stat-cell">
         <span>总计</span>
         <strong>{{ stats.total }}</strong>
+      </div>
+    </section>
+
+    <!-- AI 建议候选 -->
+    <section class="candidate-panel">
+      <div class="candidate-head">
+        <div>
+          <h3>AI 建议候选</h3>
+          <p>{{ insightText }}</p>
+        </div>
+        <span class="candidate-count">{{ candidates.length }} 条待处理</span>
+      </div>
+      <div v-if="candidates.length" class="candidate-list">
+        <article v-for="c in candidates" :key="c.id" class="candidate-item">
+          <div class="candidate-main">
+            <div class="candidate-topline">
+              <span :class="['type-badge', decisionTypeClass(c.action_type)]">{{ decisionTypeLabel(c.action_type) }}</span>
+              <strong>{{ targetText(c) }}</strong>
+            </div>
+            <p>{{ c.summary }}</p>
+            <div class="candidate-meta">
+              <span><Icon name="sparkles" size="13" /> {{ candidateSourceLabel(c) }}</span>
+              <span><Icon name="shield-check" size="13" /> {{ c.confidence || 'medium' }}</span>
+              <span v-if="c.suggested_amount"><Icon name="banknote" size="13" /> ¥{{ money(c.suggested_amount) }}</span>
+            </div>
+          </div>
+          <div class="candidate-actions">
+            <button
+              class="btn-sm btn-primary"
+              :disabled="candidateActionId === c.id"
+              @click="saveCandidateAsDecision(c)"
+            >
+              {{ candidateActionId === c.id ? '处理中...' : '保存为决策' }}
+            </button>
+            <button
+              class="btn-sm btn-ghost"
+              :disabled="candidateActionId === c.id"
+              @click="ignoreCandidate(c)"
+            >
+              忽略
+            </button>
+          </div>
+        </article>
+      </div>
+      <div v-else class="candidate-empty">
+        <Icon name="sparkles" size="18" />
+        <span>暂无新的 AI 建议候选</span>
       </div>
     </section>
 
@@ -683,6 +827,105 @@ onMounted(load)
   font-variant-numeric: tabular-nums;
 }
 .stat-cell.win strong { color: var(--color-success); }
+
+/* AI 建议候选 */
+.candidate-panel {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  background: var(--color-bg-card);
+  padding: var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+.candidate-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-4);
+}
+.candidate-head h3 {
+  margin: 0;
+  font-size: 0.95rem;
+  color: var(--color-text-primary);
+}
+.candidate-head p {
+  margin: 4px 0 0;
+  color: var(--color-text-secondary);
+  font-size: 0.8rem;
+  line-height: 1.45;
+}
+.candidate-count {
+  flex-shrink: 0;
+  border: 1px solid var(--color-border-light);
+  border-radius: var(--radius-sm);
+  padding: 3px 8px;
+  color: var(--color-text-muted);
+  font-size: 0.74rem;
+  background: var(--color-bg-input);
+}
+.candidate-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+.candidate-item {
+  border-top: 1px solid var(--color-border-light);
+  padding-top: var(--space-3);
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: var(--space-3);
+  align-items: center;
+}
+.candidate-main {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+}
+.candidate-topline {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+}
+.candidate-topline strong {
+  font-size: 0.9rem;
+  color: var(--color-text-primary);
+  overflow-wrap: anywhere;
+}
+.candidate-main p {
+  margin: 0;
+  color: var(--color-text-secondary);
+  font-size: 0.8rem;
+  line-height: 1.45;
+}
+.candidate-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  color: var(--color-text-muted);
+  font-size: 0.74rem;
+}
+.candidate-meta span {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.candidate-actions {
+  display: flex;
+  gap: 6px;
+  justify-content: flex-end;
+}
+.candidate-empty {
+  border-top: 1px solid var(--color-border-light);
+  padding-top: var(--space-3);
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--color-text-muted);
+  font-size: 0.8rem;
+}
 
 /* 看板布局 */
 .kanban {
@@ -1179,6 +1422,21 @@ onMounted(load)
   .stat-cell:nth-child(2) { border-right: 0; }
   .stat-cell:nth-child(-n + 4) { border-bottom: 1px solid var(--color-border-light); }
   .mobile-tabs { flex-wrap: nowrap; }
+  .candidate-head {
+    flex-direction: column;
+    gap: var(--space-2);
+  }
+  .candidate-item {
+    grid-template-columns: 1fr;
+    align-items: stretch;
+  }
+  .candidate-actions {
+    justify-content: stretch;
+  }
+  .candidate-actions .btn-sm {
+    flex: 1;
+    justify-content: center;
+  }
 }
 
 /* ── 移动端响应式 (<768px) ── */

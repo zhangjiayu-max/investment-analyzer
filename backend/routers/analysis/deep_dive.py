@@ -26,6 +26,14 @@ router = APIRouter(tags=["analysis-deep-dive"])
 _background_tasks: set = set()
 
 
+def _extract_candidates_safely(record_id: int, analysis_type: str, result_text: str):
+    try:
+        from db.decisions import extract_recommendation_candidates_from_analysis
+        extract_recommendation_candidates_from_analysis(record_id, analysis_type, result_text)
+    except Exception as e:
+        logger.warning(f"建议候选抽取失败 record_id={record_id}: {e}")
+
+
 @router.post("/api/portfolio/analysis/deep-dive/{holding_id}")
 async def fund_deep_dive_api(holding_id: int, req: DeepDiveRequest):
     """模式 2：单基金深度分析 — 分析买入质量、持有收益、操作记录。"""
@@ -260,6 +268,7 @@ async def _run_deep_dive_async(record_id: int, system_prompt: str, user_content:
         result_text = response.choices[0].message.content or ""
         tokens = response.usage.total_tokens if response.usage else 0
         update_analysis_record(record_id, result_data=result_text, token_usage=tokens, status="done")
+        _extract_candidates_safely(record_id, "deep_dive", result_text)
         logger.info(f"深度分析完成 record_id={record_id}")
     except Exception as e:
         logger.error(f"深度分析失败 record_id={record_id}: {e}")

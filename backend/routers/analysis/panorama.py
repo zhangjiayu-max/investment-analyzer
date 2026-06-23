@@ -25,6 +25,14 @@ router = APIRouter(tags=["analysis-panorama"])
 _background_tasks: set = set()
 
 
+def _extract_candidates_safely(record_id: int, analysis_type: str, result_text: str):
+    try:
+        from db.decisions import extract_recommendation_candidates_from_analysis
+        extract_recommendation_candidates_from_analysis(record_id, analysis_type, result_text)
+    except Exception as e:
+        logger.warning(f"建议候选抽取失败 record_id={record_id}: {e}")
+
+
 @router.post("/api/portfolio/analysis/panorama")
 async def panorama_analysis_api(req: PanoramaAnalysisRequest):
     """全景诊断 — 从全局视角诊断投资组合健康状况（异步执行）。"""
@@ -113,6 +121,7 @@ async def _run_panorama_async(record_id: int, system_prompt: str, holdings: list
         tokens = response.usage.total_tokens if response.usage else 0
 
         update_analysis_record(record_id, result_data=result_text, token_usage=tokens, status="done")
+        _extract_candidates_safely(record_id, "panorama", result_text)
         logger.info(f"全景诊断完成 record_id={record_id}")
 
     except Exception as e:

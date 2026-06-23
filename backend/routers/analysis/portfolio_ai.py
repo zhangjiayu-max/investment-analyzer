@@ -23,6 +23,14 @@ router = APIRouter(tags=["analysis-portfolio-ai"])
 _background_tasks: set = set()
 
 
+def _extract_candidates_safely(record_id: int, analysis_type: str, result_text: str):
+    try:
+        from db.decisions import extract_recommendation_candidates_from_analysis
+        extract_recommendation_candidates_from_analysis(record_id, analysis_type, result_text)
+    except Exception as e:
+        logger.warning(f"建议候选抽取失败 record_id={record_id}: {e}")
+
+
 @router.post("/api/portfolio/analysis/ai")
 async def portfolio_ai_analysis_api(req: PortfolioAiAnalysisRequest):
     """AI 持仓分析：后台调用 MCP 工具 + LLM 生成分析报告（异步模式）。"""
@@ -196,6 +204,7 @@ async def _run_portfolio_ai_analysis_async(record_id: int, user_question: str):
         status="done",
         error_msg="",
     )
+    _extract_candidates_safely(record_id, "ai", result_text)
     logger.info(f"AI 持仓分析完成 record_id={record_id}, mcp={list(mcp_context.keys())}")
 
 

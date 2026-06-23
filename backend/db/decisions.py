@@ -19,6 +19,7 @@ VALID_DECISION_STATUSES = {
 }
 VALID_ACTION_STATUSES = {"todo", "doing", "done", "skipped"}
 VALID_REVIEW_OUTCOMES = {"helpful", "neutral", "unhelpful"}
+VALID_CANDIDATE_STATUSES = {"new", "saved", "ignored", "expired"}
 
 
 def init_decision_tables(conn):
@@ -94,6 +95,33 @@ def init_decision_tables(conn):
         )
     """)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_peer_reviews_decision ON decision_peer_reviews(decision_id)")
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS recommendation_candidates (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id TEXT DEFAULT 'default',
+            source_type TEXT NOT NULL,
+            source_id INTEGER,
+            scenario_type TEXT DEFAULT '',
+            action_type TEXT NOT NULL,
+            target_type TEXT NOT NULL,
+            target_code TEXT DEFAULT '',
+            target_name TEXT DEFAULT '',
+            summary TEXT NOT NULL,
+            rationale TEXT DEFAULT '',
+            suggested_amount REAL,
+            confidence TEXT DEFAULT 'medium',
+            evidence_json TEXT DEFAULT '{}',
+            risk_json TEXT DEFAULT '{}',
+            status TEXT DEFAULT 'new',
+            decision_id INTEGER,
+            created_at TEXT DEFAULT (datetime('now','localtime')),
+            updated_at TEXT DEFAULT (datetime('now','localtime'))
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_candidates_user ON recommendation_candidates(user_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_candidates_status ON recommendation_candidates(status)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_candidates_source ON recommendation_candidates(source_type, source_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_candidates_target ON recommendation_candidates(target_type, target_code)")
 
 
 def _json_dumps(value) -> str:
@@ -126,6 +154,13 @@ def _row_to_action(row) -> dict:
 
 def _row_to_review(row) -> dict:
     return dict(row) if row else {}
+
+
+def _row_to_candidate(row) -> dict:
+    item = dict(row)
+    item["evidence_json"] = _json_loads(item.get("evidence_json"), {})
+    item["risk_json"] = _json_loads(item.get("risk_json"), {})
+    return item
 
 
 def _format_ratio(value) -> str:
@@ -220,6 +255,369 @@ def _build_chat_decision_summary(decision_type: str, target_name: str, assistant
     suffix = _compact_text(first_sentence[0], 48) if first_sentence else ""
     title = f"{target}：{action_labels.get(decision_type, '进入观察清单')}"
     return f"{title}（来自对话建议）" if not suffix else f"{title} - {suffix}"
+
+
+def create_recommendation_candidate(
+    source_type: str,
+    action_type: str,
+    target_type: str,
+    summary: str,
+    user_id: str = "default",
+    source_id: int | None = None,
+    scenario_type: str = "",
+    target_code: str = "",
+    target_name: str = "",
+    rationale: str = "",
+    suggested_amount: float | None = None,
+    confidence: str = "medium",
+    evidence: dict | None = None,
+    risk: dict | None = None,
+    status: str = "new",
+) -> int:
+    """创建一条待用户确认的 AI 建议候选。"""
+    if status not in VALID_CANDIDATE_STATUSES:
+        status = "new"
+    action_type = action_type if action_type in {"add", "buy", "reduce", "sell", "hold", "watch", "rebalance"} else "watch"
+    conn = _get_conn()
+    try:
+        cur = conn.execute(
+            """
+            INSERT INTO recommendation_candidates
+                (user_id, source_type, source_id, scenario_type, action_type,
+                 target_type, target_code, target_name, summary, rationale,
+                 suggested_amount, confidence, evidence_json, risk_json, status)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                user_id,
+                source_type,
+                source_id,
+                scenario_type or "",
+                action_type,
+                target_type or "portfolio",
+                target_code or "",
+                target_name or "",
+                summary,
+                rationale or "",
+                suggested_amount,
+                confidence or "medium",
+                _json_dumps(evidence),
+                _json_dumps(risk),
+                status,
+            ),
+        )
+        conn.commit()
+        return cur.lastrowid
+    finally:
+        conn.close()
+
+
+def get_recommendation_candidate(candidate_id: int) -> dict | None:
+    """获取单条建议候选。"""
+    conn = _get_conn()
+    try:
+        row = conn.execute(
+            "SELECT * FROM recommendation_candidates WHERE id = ?",
+            (candidate_id,),
+        ).fetchone()
+        return _row_to_candidate(row) if row else None
+    finally:
+        conn.close()
+
+
+def list_recommendation_candidates(
+    user_id: str = "default",
+    status: str | None = None,
+    limit: int = 50,
+) -> list[dict]:
+    """列出建议候选，默认按创建时间倒序。"""
+    conn = _get_conn()
+    try:
+        if status:
+            rows = conn.execute(
+                """
+                SELECT * FROM recommendation_candidates
+                WHERE user_id = ? AND status = ?
+                ORDER BY created_at DESC, id DESC
+                LIMIT ?
+                """,
+                (user_id, status, limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT * FROM recommendation_candidates
+                WHERE user_id = ?
+                ORDER BY created_at DESC, id DESC
+                LIMIT ?
+                """,
+                (user_id, limit),
+            ).fetchall()
+        return [_row_to_candidate(row) for row in rows]
+    finally:
+        conn.close()
+
+
+def update_recommendation_candidate_status(
+    candidate_id: int,
+    status: str,
+    decision_id: int | None = None,
+) -> bool:
+    """更新建议候选状态。"""
+    if status not in VALID_CANDIDATE_STATUSES:
+        return False
+    conn = _get_conn()
+    try:
+        cur = conn.execute(
+            """
+            UPDATE recommendation_candidates
+            SET status = ?, decision_id = COALESCE(?, decision_id), updated_at = datetime('now','localtime')
+            WHERE id = ?
+            """,
+            (status, decision_id, candidate_id),
+        )
+        conn.commit()
+        return cur.rowcount > 0
+    finally:
+        conn.close()
+
+
+def _extract_amount_hint(text: str) -> float | None:
+    patterns = [
+        r"(?:不超过|约|投入|买入|加仓|单次)[^\d]{0,8}(\d+(?:\.\d+)?)\s*(?:元|块|人民币)",
+        r"(\d+(?:\.\d+)?)\s*(?:元|块|人民币)",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, text or "")
+        if match:
+            try:
+                return float(match.group(1))
+            except (TypeError, ValueError):
+                return None
+    return None
+
+
+def _candidate_action_from_sentence(sentence: str) -> str:
+    if any(word in sentence for word in ["减仓", "卖出", "止盈", "止损", "清仓", "降低仓位"]):
+        return "reduce"
+    if any(word in sentence for word in ["加仓", "买入", "定投", "建仓", "分批配置", "增加仓位"]):
+        return "add"
+    if any(word in sentence for word in ["再平衡", "调仓", "调整配置"]):
+        return "rebalance"
+    if any(word in sentence for word in ["持有", "不动", "继续拿"]):
+        return "hold"
+    if any(word in sentence for word in ["观察", "等待", "跟踪", "暂不"]):
+        return "watch"
+    return ""
+
+
+def _candidate_summary(target_name: str, action_type: str, sentence: str) -> str:
+    label = {
+        "add": "可分批加仓",
+        "buy": "可买入",
+        "reduce": "可减仓",
+        "sell": "可卖出",
+        "rebalance": "需再平衡",
+        "hold": "继续持有",
+        "watch": "进入观察",
+    }.get(action_type, "进入观察")
+    snippet = _compact_text(sentence, 72)
+    return f"{target_name or '组合'}{label}：{snippet}"
+
+
+def _candidate_exists(
+    conn,
+    user_id: str,
+    source_type: str,
+    source_id: int | None,
+    action_type: str,
+    target_type: str,
+    target_code: str,
+) -> bool:
+    row = conn.execute(
+        """
+        SELECT id FROM recommendation_candidates
+        WHERE user_id = ?
+          AND source_type = ?
+          AND COALESCE(source_id, 0) = COALESCE(?, 0)
+          AND action_type = ?
+          AND target_type = ?
+          AND target_code = ?
+          AND status IN ('new', 'saved')
+        LIMIT 1
+        """,
+        (user_id, source_type, source_id, action_type, target_type, target_code or ""),
+    ).fetchone()
+    return row is not None
+
+
+def extract_recommendation_candidates_from_analysis(
+    record_id: int,
+    analysis_type: str,
+    result_text: str,
+    user_id: str = "default",
+) -> int:
+    """从持仓 AI 分析文本中抽取可处理建议候选。
+
+    这是确定性抽取器：只匹配当前持仓名称/代码与明确动作词，不让 AI 直接创建交易。
+    """
+    text = result_text or ""
+    if not text.strip():
+        return 0
+    try:
+        from db.portfolio import list_holdings
+        holdings = list_holdings(user_id=user_id)
+    except Exception:
+        holdings = []
+    holdings = [h for h in holdings if h.get("fund_code") or h.get("fund_name")]
+    if not holdings:
+        return 0
+
+    created = 0
+    seen: set[tuple[str, str]] = set()
+    conn = _get_conn()
+    try:
+        for sentence in _split_cn_sentences(text):
+            action_type = _candidate_action_from_sentence(sentence)
+            if not action_type:
+                continue
+            for holding in holdings:
+                fund_code = holding.get("fund_code") or ""
+                fund_name = holding.get("fund_name") or fund_code
+                if not fund_code and not fund_name:
+                    continue
+                if fund_code not in sentence and fund_name not in sentence:
+                    continue
+                dedupe_key = (fund_code or fund_name, action_type)
+                if dedupe_key in seen:
+                    continue
+                seen.add(dedupe_key)
+                if _candidate_exists(conn, user_id, "analysis", record_id, action_type, "fund", fund_code):
+                    continue
+                summary = _candidate_summary(fund_name, action_type, sentence)
+                risk_sentences = _extract_risk_sentences(text)
+                cur = conn.execute(
+                    """
+                    INSERT INTO recommendation_candidates
+                        (user_id, source_type, source_id, scenario_type, action_type,
+                         target_type, target_code, target_name, summary, rationale,
+                         suggested_amount, confidence, evidence_json, risk_json, status)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'new')
+                    """,
+                    (
+                        user_id,
+                        "analysis",
+                        record_id,
+                        analysis_type or "",
+                        action_type,
+                        "fund",
+                        fund_code,
+                        fund_name,
+                        summary,
+                        _compact_text(sentence, 500),
+                        _extract_amount_hint(sentence),
+                        "medium",
+                        _json_dumps({
+                            "source": {
+                                "type": "portfolio_analysis_record",
+                                "record_id": record_id,
+                                "analysis_type": analysis_type or "",
+                            },
+                            "snippet": sentence,
+                            "data_points": _extract_data_points(sentence),
+                        }),
+                        _json_dumps({
+                            "level": "medium",
+                            "notes": risk_sentences,
+                        }),
+                    ),
+                )
+                if cur.lastrowid:
+                    created += 1
+                break
+        conn.commit()
+        return created
+    finally:
+        conn.close()
+
+
+def create_decision_from_candidate(
+    candidate_id: int,
+    user_id: str = "default",
+    review_days: int = 30,
+) -> dict:
+    """把建议候选保存为正式决策草案。"""
+    candidate = get_recommendation_candidate(candidate_id)
+    if not candidate:
+        return {"ok": False, "error": "建议候选不存在"}
+    if candidate.get("user_id") != user_id:
+        return {"ok": False, "error": "建议候选不存在"}
+    if candidate.get("status") == "saved" and candidate.get("decision_id"):
+        decision = get_decision(candidate["decision_id"])
+        return {"ok": True, "decision_id": candidate["decision_id"], "decision": decision, "candidate": candidate}
+    if candidate.get("status") not in {"new", "ignored"}:
+        return {"ok": False, "error": f"建议候选状态 {candidate.get('status')} 不可保存为决策"}
+
+    review_at = (datetime.now() + timedelta(days=max(1, review_days))).strftime("%Y-%m-%d")
+    action_type = candidate.get("action_type") or "watch"
+    decision_type = "sell" if action_type == "sell" else "add" if action_type == "buy" else action_type
+    decision_id = create_decision(
+        user_id=user_id,
+        source_type="recommendation_candidate",
+        source_id=candidate_id,
+        decision_type=decision_type,
+        target_type=candidate.get("target_type") or "portfolio",
+        target_code=candidate.get("target_code") or "",
+        target_name=candidate.get("target_name") or "",
+        summary=candidate.get("summary") or "AI 建议候选",
+        rationale=candidate.get("rationale") or "",
+        evidence={
+            "source": {
+                "type": candidate.get("source_type"),
+                "source_id": candidate.get("source_id"),
+                "scenario_type": candidate.get("scenario_type"),
+                "candidate_id": candidate_id,
+            },
+            **(candidate.get("evidence_json") or {}),
+        },
+        risk=candidate.get("risk_json") or {},
+        suitability={
+            "checklist": [
+                "确认建议来源数据仍然有效",
+                "确认资金用途、现金流和仓位上限",
+                "补充至少一个反方观点",
+            ],
+            "suggested_amount": candidate.get("suggested_amount"),
+        },
+        confidence=candidate.get("confidence") or "medium",
+        status="proposed",
+        review_at=review_at,
+        actions=[
+            {
+                "action_type": "pre_trade_check" if decision_type in {"add", "buy", "reduce", "sell"} else "review",
+                "title": f"复核 {candidate.get('target_name') or candidate.get('target_code') or '建议'} 的执行条件",
+                "params": {
+                    "candidate_id": candidate_id,
+                    "transaction_type": "buy" if decision_type in {"add", "buy"} else "sell" if decision_type in {"reduce", "sell"} else "",
+                    "fund_code": candidate.get("target_code") or "",
+                    "fund_name": candidate.get("target_name") or "",
+                    "amount": candidate.get("suggested_amount"),
+                },
+            },
+            {
+                "action_type": "schedule_review",
+                "title": f"{review_at} 复盘这条建议是否有效",
+                "scheduled_at": review_at,
+            },
+        ],
+    )
+    update_recommendation_candidate_status(candidate_id, "saved", decision_id=decision_id)
+    return {
+        "ok": True,
+        "decision_id": decision_id,
+        "decision": get_decision(decision_id),
+        "candidate": get_recommendation_candidate(candidate_id),
+    }
 
 
 def create_decision(
@@ -1177,6 +1575,86 @@ def record_decision_review(
             return cur.lastrowid
         row = conn.execute("SELECT id FROM decision_reviews WHERE decision_id = ?", (decision_id,)).fetchone()
         return row["id"] if row else 0
+    finally:
+        conn.close()
+
+
+def get_decision_stats(user_id: str = "default") -> dict:
+    """汇总个人决策质量与复盘反馈。"""
+    conn = _get_conn()
+    try:
+        rows = conn.execute(
+            """
+            SELECT status, decision_type, COUNT(*) as cnt
+            FROM decision_records
+            WHERE user_id = ?
+            GROUP BY status, decision_type
+            """,
+            (user_id,),
+        ).fetchall()
+        by_status: dict[str, int] = {}
+        by_decision_type: dict[str, int] = {}
+        total = 0
+        for row in rows:
+            count = row["cnt"] or 0
+            total += count
+            status = row["status"] or "unknown"
+            decision_type = row["decision_type"] or "unknown"
+            by_status[status] = by_status.get(status, 0) + count
+            by_decision_type[decision_type] = by_decision_type.get(decision_type, 0) + count
+
+        review_row = conn.execute(
+            """
+            SELECT
+                COUNT(*) as reviewed,
+                SUM(CASE WHEN outcome = 'helpful' THEN 1 ELSE 0 END) as helpful_reviews,
+                SUM(CASE WHEN outcome = 'unhelpful' THEN 1 ELSE 0 END) as unhelpful_reviews,
+                SUM(CASE WHEN profit_change IS NOT NULL THEN profit_change ELSE 0 END) as total_profit_change,
+                AVG(CASE WHEN profit_change IS NOT NULL THEN profit_change END) as avg_profit_change
+            FROM decision_reviews r
+            JOIN decision_records d ON d.id = r.decision_id
+            WHERE d.user_id = ?
+            """,
+            (user_id,),
+        ).fetchone()
+        reviewed = review_row["reviewed"] or 0 if review_row else 0
+        helpful_reviews = review_row["helpful_reviews"] or 0 if review_row else 0
+        unhelpful_reviews = review_row["unhelpful_reviews"] or 0 if review_row else 0
+        total_profit_change = review_row["total_profit_change"] or 0 if review_row else 0
+        avg_profit_change = review_row["avg_profit_change"] or 0 if review_row else 0
+
+        lesson_rows = conn.execute(
+            """
+            SELECT r.lesson
+            FROM decision_reviews r
+            JOIN decision_records d ON d.id = r.decision_id
+            WHERE d.user_id = ? AND r.lesson != ''
+            ORDER BY
+              CASE r.outcome
+                WHEN 'helpful' THEN 0
+                WHEN 'neutral' THEN 1
+                ELSE 2
+              END,
+              r.updated_at DESC,
+              r.id DESC
+            LIMIT 5
+            """,
+            (user_id,),
+        ).fetchall()
+        recent_lessons = [row["lesson"] for row in lesson_rows if row["lesson"]]
+
+        return {
+            "total": total,
+            "by_status": by_status,
+            "by_decision_type": by_decision_type,
+            "reviewed": reviewed,
+            "helpful_reviews": helpful_reviews,
+            "unhelpful_reviews": unhelpful_reviews,
+            "review_helpful_rate": round(helpful_reviews / reviewed * 100) if reviewed else 0,
+            "total_profit_change": round(total_profit_change, 2),
+            "avg_profit_change": round(avg_profit_change, 2),
+            "recent_lessons": recent_lessons,
+        }
     finally:
         conn.close()
 

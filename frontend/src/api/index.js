@@ -900,6 +900,11 @@ export function listDecisions(status = '', limit = 50) {
   return api.get('/decisions', { params: { status, limit } })
 }
 
+/** 获取决策复盘统计 */
+export function getDecisionStats(userId = 'default') {
+  return api.get('/decisions/stats', { params: { user_id: userId } })
+}
+
 /** 获取单条决策详情 */
 export function getDecision(decisionId) {
   return api.get(`/decisions/${decisionId}`)
@@ -933,6 +938,21 @@ export function completeDecisionAction(decisionId, actionId) {
 /** 从决策生成待确认交易草稿 */
 export function createTransactionDraftFromDecision(decisionId, payload = {}) {
   return api.post(`/decisions/${decisionId}/transaction-draft`, payload)
+}
+
+/** 列出 AI 建议候选 */
+export function listRecommendationCandidates(status = 'new', limit = 20) {
+  return api.get('/recommendation-candidates', { params: { status, limit } })
+}
+
+/** 忽略 AI 建议候选 */
+export function ignoreRecommendationCandidate(candidateId) {
+  return api.post(`/recommendation-candidates/${candidateId}/ignore`)
+}
+
+/** 从 AI 建议候选创建决策草案 */
+export function createDecisionFromCandidate(candidateId, payload = {}) {
+  return api.post(`/recommendation-candidates/${candidateId}/create-decision`, payload)
 }
 
 export function listDueDecisionReviews(limit = 20) {

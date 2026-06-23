@@ -20,6 +20,14 @@ router = APIRouter(tags=["analysis-fund-analysis"])
 _background_tasks: set = set()
 
 
+def _extract_candidates_safely(record_id: int, analysis_type: str, result_text: str):
+    try:
+        from db.decisions import extract_recommendation_candidates_from_analysis
+        extract_recommendation_candidates_from_analysis(record_id, analysis_type, result_text)
+    except Exception as e:
+        logger.warning(f"建议候选抽取失败 record_id={record_id}: {e}")
+
+
 @router.post("/api/portfolio/analysis/fund-analysis")
 async def fund_analysis_api(req: dict):
     """模式4：指定基金分析 — 输入任意基金代码，结合持仓和估值分析是否建仓。"""
@@ -107,6 +115,7 @@ async def _run_fund_analysis_async(record_id: int, system_prompt: str, user_cont
         result_text = response.choices[0].message.content or ""
         tokens = response.usage.total_tokens if response.usage else 0
         update_analysis_record(record_id, result_data=result_text, token_usage=tokens, status="done")
+        _extract_candidates_safely(record_id, "fund_analysis", result_text)
         logger.info(f"指定基金分析完成 record_id={record_id}")
     except Exception as e:
         logger.error(f"指定基金分析失败 record_id={record_id}: {e}")

@@ -6,15 +6,20 @@ from pydantic import BaseModel
 from db import (
     build_decision_precheck,
     create_chat_decision_draft,
+    create_decision_from_candidate,
     create_decision,
     create_decision_action,
     create_transaction_draft_from_decision,
+    get_decision_stats,
+    get_recommendation_candidate,
     get_decision,
     get_messages,
+    list_recommendation_candidates,
     list_due_decision_reviews,
     list_decisions,
     list_today_decisions,
     record_decision_review,
+    update_recommendation_candidate_status,
     update_decision_action_status,
     update_decision_status,
 )
@@ -37,6 +42,11 @@ class DecisionReviewRequest(BaseModel):
 
 class TransactionDraftRequest(BaseModel):
     force: bool = False
+    user_id: str = "default"
+
+
+class CandidateDecisionRequest(BaseModel):
+    review_days: int = 30
     user_id: str = "default"
 
 
@@ -99,6 +109,53 @@ async def get_execution_status(user_id: str = "default"):
 async def list_decisions_api(status: str = "", limit: int = 50):
     """列出理财决策档案。"""
     return {"items": list_decisions(status=status or None, limit=limit)}
+
+
+@router.get("/api/decisions/stats")
+async def get_decision_stats_api(user_id: str = "default"):
+    """返回决策复盘与质量统计。"""
+    return get_decision_stats(user_id=user_id or "default")
+
+
+@router.get("/api/recommendation-candidates")
+async def list_recommendation_candidates_api(
+    status: str = "new",
+    limit: int = 50,
+    user_id: str = "default",
+):
+    """列出 AI 分析生成的建议候选。"""
+    return {
+        "items": list_recommendation_candidates(
+            user_id=user_id or "default",
+            status=status or None,
+            limit=limit,
+        )
+    }
+
+
+@router.post("/api/recommendation-candidates/{candidate_id}/ignore")
+async def ignore_recommendation_candidate_api(candidate_id: int):
+    """忽略一条建议候选。"""
+    item = get_recommendation_candidate(candidate_id)
+    if not item:
+        raise HTTPException(404, "建议候选不存在")
+    ok = update_recommendation_candidate_status(candidate_id, "ignored")
+    if not ok:
+        raise HTTPException(400, "建议候选状态更新失败")
+    return {"ok": True, "item": get_recommendation_candidate(candidate_id)}
+
+
+@router.post("/api/recommendation-candidates/{candidate_id}/create-decision")
+async def create_decision_from_candidate_api(candidate_id: int, req: CandidateDecisionRequest):
+    """把建议候选保存为正式决策草案。"""
+    result = create_decision_from_candidate(
+        candidate_id,
+        user_id=req.user_id or "default",
+        review_days=req.review_days,
+    )
+    if not result.get("ok"):
+        raise HTTPException(400, result.get("error") or "保存决策失败")
+    return result
 
 
 @router.get("/api/decisions/reviews/due")

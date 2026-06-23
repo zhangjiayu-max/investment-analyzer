@@ -19,6 +19,14 @@ router = APIRouter(tags=["analysis-trade-review"])
 _background_tasks: set = set()
 
 
+def _extract_candidates_safely(record_id: int, analysis_type: str, result_text: str):
+    try:
+        from db.decisions import extract_recommendation_candidates_from_analysis
+        extract_recommendation_candidates_from_analysis(record_id, analysis_type, result_text)
+    except Exception as e:
+        logger.warning(f"建议候选抽取失败 record_id={record_id}: {e}")
+
+
 @router.post("/api/portfolio/analysis/trade-review")
 async def trade_review_api(req: TradeReviewRequest):
     """模式 3：交易复盘 — 分析交易行为模式和操作质量。"""
@@ -144,6 +152,7 @@ async def _run_trade_review_async(record_id: int, system_prompt: str, user_conte
         result_text = response.choices[0].message.content or ""
         tokens = response.usage.total_tokens if response.usage else 0
         update_analysis_record(record_id, result_data=result_text, token_usage=tokens, status="done")
+        _extract_candidates_safely(record_id, "trade_review", result_text)
         logger.info(f"交易复盘完成 record_id={record_id}")
     except Exception as e:
         logger.error(f"交易复盘失败 record_id={record_id}: {e}")
