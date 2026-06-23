@@ -570,3 +570,18 @@ async def create_recommendation_feedback(rec_id: int, body: dict):
 async def list_feedback_api():
     """列出所有推荐反馈。"""
     return {"feedback": list_recommendation_feedback()}
+
+
+@router.post("/api/recommendations/verify")
+async def trigger_recommendation_verify():
+    """手动触发推荐验证。"""
+    from analysis.recommendation_verifier import verify_all_pending
+    result = verify_all_pending(days_ago=7)
+    return result
+
+
+@router.get("/api/recommendations/stats")
+async def get_recommendation_stats_api(days: int = 30):
+    """获取推荐准确率统计。"""
+    from analysis.recommendation_verifier import get_recommendation_stats
+    return get_recommendation_stats(days)
