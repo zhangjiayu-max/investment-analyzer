@@ -4,6 +4,28 @@ from datetime import datetime
 
 from db._conn import _get_conn
 
+VALID_EXECUTION_STATUSES = {"queued", "streaming", "resuming", "completed", "failed", "cancelled", "timeout"}
+RECOVERABLE_EXECUTION_STATUSES = {"queued", "streaming", "resuming", "failed", "cancelled", "timeout"}
+
+
+def _load_metadata(value) -> dict:
+    """解析消息 metadata，兼容空值和历史脏数据。"""
+    if isinstance(value, dict):
+        return dict(value)
+    if not value:
+        return {}
+    try:
+        import json
+        parsed = json.loads(value)
+        return parsed if isinstance(parsed, dict) else {}
+    except Exception:
+        return {}
+
+
+def _dump_metadata(value: dict) -> str:
+    import json
+    return json.dumps(value or {}, ensure_ascii=False)
+
 
 # ── Conversation CRUD ──────────────────────────────────────
 
@@ -117,6 +139,103 @@ def update_message_content_and_metadata(msg_id: int, content: str, metadata_dict
                  (content, _json.dumps(metadata_dict, ensure_ascii=False), msg_id))
     conn.commit()
     conn.close()
+
+
+def create_assistant_placeholder(
+    conv_id: int,
+    user_message_id: int | None = None,
+    content: str = "⏳ 分析排队中...",
+    execution_status: str = "queued",
+    metadata: dict | None = None,
+) -> int:
+    """创建 assistant 占位消息，统一用于异步执行状态机。"""
+    if execution_status not in VALID_EXECUTION_STATUSES:
+        execution_status = "queued"
+    meta = dict(metadata or {})
+    meta["execution_status"] = execution_status
+    if user_message_id is not None:
+        meta["user_message_id"] = user_message_id
+    return create_message(conv_id, "assistant", content, metadata=_dump_metadata(meta))
+
+
+def mark_message_execution_status(
+    msg_id: int,
+    status: str,
+    **metadata_updates,
+) -> bool:
+    """更新 assistant 消息执行状态，并保留原 metadata。"""
+    if status not in VALID_EXECUTION_STATUSES:
+        return False
+    conn = _get_conn()
+    try:
+        row = conn.execute("SELECT metadata FROM messages WHERE id = ?", (msg_id,)).fetchone()
+        if not row:
+            return False
+        meta = _load_metadata(row["metadata"])
+        meta["execution_status"] = status
+        for key, value in metadata_updates.items():
+            if value is not None:
+                meta[key] = value
+        conn.execute("UPDATE messages SET metadata = ? WHERE id = ?", (_dump_metadata(meta), msg_id))
+        conn.commit()
+        return True
+    finally:
+        conn.close()
+
+
+def get_latest_recoverable_assistant(conv_id: int) -> dict | None:
+    """获取最近一条可恢复/继续/重试的 assistant 消息。"""
+    conn = _get_conn()
+    try:
+        rows = conn.execute(
+            """
+            SELECT * FROM messages
+            WHERE conversation_id = ? AND role = 'assistant'
+            ORDER BY id DESC
+            LIMIT 20
+            """,
+            (conv_id,),
+        ).fetchall()
+        for row in rows:
+            item = dict(row)
+            meta = _load_metadata(item.get("metadata"))
+            status = meta.get("execution_status")
+            if status in RECOVERABLE_EXECUTION_STATUSES:
+                item["metadata"] = meta
+                item["execution_status"] = status
+                return item
+        return None
+    finally:
+        conn.close()
+
+
+def retry_assistant_message(message_id: int) -> int:
+    """基于失败/取消的 assistant 消息创建新的 queued 占位消息。"""
+    conn = _get_conn()
+    try:
+        row = conn.execute("SELECT * FROM messages WHERE id = ?", (message_id,)).fetchone()
+        if not row:
+            return 0
+        item = dict(row)
+        meta = _load_metadata(item.get("metadata"))
+        user_message_id = meta.get("user_message_id")
+        retry_meta = {
+            "retry_of_message_id": message_id,
+            "previous_status": meta.get("execution_status", ""),
+        }
+        conn.close()
+        return create_assistant_placeholder(
+            item["conversation_id"],
+            user_message_id=user_message_id,
+            content="⏳ 重新生成排队中...",
+            execution_status="queued",
+            metadata=retry_meta,
+        )
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
 
 
 # ── 对话摘要缓存 ──────────────────────────────────

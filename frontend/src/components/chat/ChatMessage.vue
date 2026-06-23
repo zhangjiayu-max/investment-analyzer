@@ -27,6 +27,8 @@ const emit = defineEmits([
   'save-decision',
   'retry',
   'resume',
+  'continue-analysis',
+  'regenerate',
 ])
 
 // 评估状态相关
@@ -251,11 +253,18 @@ function formatTime(ts) {
       </div>
       <!-- 执行状态徽章 -->
       <div v-if="msg.execution_status && msg.execution_status !== 'completed'" class="execution-status-badge" :class="'status-' + msg.execution_status">
-        <template v-if="msg.execution_status === 'streaming'"><Icon name="hourglass" size="13" class="inline-icon" /> 后台执行中 <button class="btn-retry btn-ai-action" @click="emit('resume', convId)" title="恢复"><Icon name="refresh" size="12" class="inline-icon" /> 恢复<span class="ai-agent-tooltip">投资分析助手</span></button></template>
+        <template v-if="['queued', 'streaming', 'resuming'].includes(msg.execution_status)">
+          <Icon name="hourglass" size="13" class="inline-icon" /> 后台执行中
+          <button class="btn-retry btn-ai-action" @click="emit('resume', convId)" title="恢复连接"><Icon name="refresh" size="12" class="inline-icon" /> 恢复连接<span class="ai-agent-tooltip">投资分析助手</span></button>
+        </template>
         <template v-else-if="msg.execution_status === 'failed'"><Icon name="error" size="13" class="inline-icon" /> 执行失败{{ msg.error_message ? ': ' + msg.error_message : '（超时或异常）' }}</template>
-        <template v-else-if="msg.execution_status === 'cancelled'"><Icon name="square" size="13" class="inline-icon" /> 已取消</template>
+        <template v-else-if="msg.execution_status === 'cancelled'">
+          <Icon name="square" size="13" class="inline-icon" /> 已取消
+          <button class="btn-retry btn-ai-action" @click="emit('continue-analysis', msg)" title="继续分析"><Icon name="arrow-right" size="12" class="inline-icon" /> 继续分析<span class="ai-agent-tooltip">投资分析助手</span></button>
+        </template>
         <template v-else-if="msg.execution_status === 'timeout'"><Icon name="alarm-clock" size="13" class="inline-icon" /> 执行超时</template>
-        <button v-if="index > 0" class="btn-retry btn-ai-action" @click="emit('retry', msg)" title="重试"><Icon name="refresh" size="12" class="inline-icon" /> 重试<span class="ai-agent-tooltip">投资分析助手</span></button>
+        <button v-if="['failed', 'cancelled', 'timeout'].includes(msg.execution_status)" class="btn-retry btn-ai-action" @click="emit('regenerate', msg)" title="重新生成"><Icon name="refresh" size="12" class="inline-icon" /> 重新生成<span class="ai-agent-tooltip">投资分析助手</span></button>
+        <button v-else-if="index > 0" class="btn-retry btn-ai-action" @click="emit('retry', msg)" title="重试"><Icon name="refresh" size="12" class="inline-icon" /> 重试<span class="ai-agent-tooltip">投资分析助手</span></button>
       </div>
       <!-- 专家分析展示 -->
       <div v-if="msg.specialist_results && msg.specialist_results.length" class="specialists-container">

@@ -5,6 +5,8 @@ import {
   getMessages, sendMessage, sendMessageStream,
   submitChatFeedback, submitLlmFeedback,
   cancelConversationExecution,
+  continueConversation,
+  retryConversationMessage,
   resumeConversationStream,
   listTraces, listAgents,
   getConversationEvaluation, evaluateConversation, evaluateConversationWithLLM,
@@ -742,6 +744,31 @@ function retryMessage(userMsg) {
   handleSend()
 }
 
+async function continueAssistantMessage(msg) {
+  const convId = selectedConv.value?.id
+  if (!convId || sending.value) return
+  try {
+    await continueConversation(convId)
+  } catch (e) {
+    console.warn('continue api failed, fallback to resume:', e)
+  }
+  tryResumeConversation(convId)
+}
+
+async function regenerateAssistantMessage(msg) {
+  const convId = selectedConv.value?.id
+  if (!convId || !msg?.id || sending.value) return
+  try {
+    const { data } = await retryConversationMessage(convId, msg.id)
+    await loadMessages(convId)
+    if (data.original_query) {
+      sendMessageAndTrack(convId, data.original_query)
+    }
+  } catch (e) {
+    showToast('重新生成失败: ' + (e.response?.data?.detail || e.message), 'error')
+  }
+}
+
 async function handleResume() {
   const convId = selectedConv.value?.id
   if (!convId || sending.value) return
@@ -1192,6 +1219,8 @@ function stopPollingProgress() {
             @save-decision="saveMessageAsDecision"
             @retry="retryMessage"
             @resume="tryResumeConversation"
+            @continue-analysis="continueAssistantMessage"
+            @regenerate="regenerateAssistantMessage"
           />
 
           <!-- 流式状态指示器 -->

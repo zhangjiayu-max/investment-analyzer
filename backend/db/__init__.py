@@ -62,6 +62,8 @@ from db.conversations import (
     list_conversations, get_conversation, create_conversation, update_conversation,
     delete_conversation, get_messages, create_message, update_message_metadata,
     update_message_content_and_metadata, get_conversation_summary, save_conversation_summary,
+    create_assistant_placeholder, mark_message_execution_status,
+    get_latest_recoverable_assistant, retry_assistant_message,
 )
 
 # 评测集
@@ -192,6 +194,8 @@ from db.decisions import (
     create_recommendation_candidate, get_recommendation_candidate,
     list_recommendation_candidates, update_recommendation_candidate_status,
     extract_recommendation_candidates_from_analysis, create_decision_from_candidate,
+    defer_recommendation_candidate, expire_recommendation_candidates,
+    create_candidate_from_structured_recommendation,
     get_decision_stats,
 )
 

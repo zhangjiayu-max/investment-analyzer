@@ -19,7 +19,15 @@ VALID_DECISION_STATUSES = {
 }
 VALID_ACTION_STATUSES = {"todo", "doing", "done", "skipped"}
 VALID_REVIEW_OUTCOMES = {"helpful", "neutral", "unhelpful"}
-VALID_CANDIDATE_STATUSES = {"new", "saved", "ignored", "expired"}
+VALID_CANDIDATE_STATUSES = {"new", "saved", "ignored", "deferred", "expired"}
+VALID_CANDIDATE_ACTIONS = {"add", "buy", "reduce", "sell", "hold", "watch", "rebalance", "dca", "cash_reserve"}
+
+
+def _add_candidate_column_if_missing(conn, column: str, definition: str):
+    try:
+        conn.execute(f"ALTER TABLE recommendation_candidates ADD COLUMN {column} {definition}")
+    except Exception:
+        pass
 
 
 def init_decision_tables(conn):
@@ -109,19 +117,34 @@ def init_decision_tables(conn):
             summary TEXT NOT NULL,
             rationale TEXT DEFAULT '',
             suggested_amount REAL,
+            suggested_ratio REAL,
             confidence TEXT DEFAULT 'medium',
             evidence_json TEXT DEFAULT '{}',
             risk_json TEXT DEFAULT '{}',
+            source_snapshot_json TEXT DEFAULT '{}',
             status TEXT DEFAULT 'new',
             decision_id INTEGER,
+            review_at TEXT,
+            deferred_until TEXT,
+            expires_at TEXT,
+            dedupe_key TEXT DEFAULT '',
+            priority INTEGER DEFAULT 3,
             created_at TEXT DEFAULT (datetime('now','localtime')),
             updated_at TEXT DEFAULT (datetime('now','localtime'))
         )
     """)
+    _add_candidate_column_if_missing(conn, "suggested_ratio", "REAL")
+    _add_candidate_column_if_missing(conn, "source_snapshot_json", "TEXT DEFAULT '{}'")
+    _add_candidate_column_if_missing(conn, "review_at", "TEXT")
+    _add_candidate_column_if_missing(conn, "deferred_until", "TEXT")
+    _add_candidate_column_if_missing(conn, "expires_at", "TEXT")
+    _add_candidate_column_if_missing(conn, "dedupe_key", "TEXT DEFAULT ''")
+    _add_candidate_column_if_missing(conn, "priority", "INTEGER DEFAULT 3")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_candidates_user ON recommendation_candidates(user_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_candidates_status ON recommendation_candidates(status)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_candidates_source ON recommendation_candidates(source_type, source_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_candidates_target ON recommendation_candidates(target_type, target_code)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_candidates_dedupe ON recommendation_candidates(user_id, dedupe_key)")
 
 
 def _json_dumps(value) -> str:
@@ -160,6 +183,7 @@ def _row_to_candidate(row) -> dict:
     item = dict(row)
     item["evidence_json"] = _json_loads(item.get("evidence_json"), {})
     item["risk_json"] = _json_loads(item.get("risk_json"), {})
+    item["source_snapshot_json"] = _json_loads(item.get("source_snapshot_json"), {})
     return item
 
 
@@ -269,24 +293,44 @@ def create_recommendation_candidate(
     target_name: str = "",
     rationale: str = "",
     suggested_amount: float | None = None,
+    suggested_ratio: float | None = None,
     confidence: str = "medium",
     evidence: dict | None = None,
     risk: dict | None = None,
+    source_snapshot: dict | None = None,
+    review_at: str | None = None,
+    deferred_until: str | None = None,
+    expires_at: str | None = None,
+    dedupe_key: str = "",
+    priority: int = 3,
     status: str = "new",
 ) -> int:
     """创建一条待用户确认的 AI 建议候选。"""
     if status not in VALID_CANDIDATE_STATUSES:
         status = "new"
-    action_type = action_type if action_type in {"add", "buy", "reduce", "sell", "hold", "watch", "rebalance"} else "watch"
+    action_type = action_type if action_type in VALID_CANDIDATE_ACTIONS else "watch"
     conn = _get_conn()
     try:
+        if dedupe_key:
+            existing = conn.execute(
+                """
+                SELECT id FROM recommendation_candidates
+                WHERE user_id = ? AND dedupe_key = ? AND status IN ('new', 'saved', 'deferred')
+                ORDER BY id DESC LIMIT 1
+                """,
+                (user_id, dedupe_key),
+            ).fetchone()
+            if existing:
+                return existing["id"]
         cur = conn.execute(
             """
             INSERT INTO recommendation_candidates
                 (user_id, source_type, source_id, scenario_type, action_type,
                  target_type, target_code, target_name, summary, rationale,
-                 suggested_amount, confidence, evidence_json, risk_json, status)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 suggested_amount, suggested_ratio, confidence, evidence_json, risk_json,
+                 source_snapshot_json, status, review_at, deferred_until, expires_at,
+                 dedupe_key, priority)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 user_id,
@@ -300,10 +344,17 @@ def create_recommendation_candidate(
                 summary,
                 rationale or "",
                 suggested_amount,
+                suggested_ratio,
                 confidence or "medium",
                 _json_dumps(evidence),
                 _json_dumps(risk),
+                _json_dumps(source_snapshot),
                 status,
+                review_at,
+                deferred_until,
+                expires_at,
+                dedupe_key or "",
+                priority,
             ),
         )
         conn.commit()
@@ -382,6 +433,74 @@ def update_recommendation_candidate_status(
         conn.close()
 
 
+def defer_recommendation_candidate(candidate_id: int, deferred_until: str) -> bool:
+    """延期处理建议候选。"""
+    conn = _get_conn()
+    try:
+        cur = conn.execute(
+            """
+            UPDATE recommendation_candidates
+            SET status = 'deferred', deferred_until = ?, updated_at = datetime('now','localtime')
+            WHERE id = ?
+            """,
+            (deferred_until, candidate_id),
+        )
+        conn.commit()
+        return cur.rowcount > 0
+    finally:
+        conn.close()
+
+
+def expire_recommendation_candidates(user_id: str = "default") -> int:
+    """把超过 expires_at 的建议候选标记为过期。"""
+    conn = _get_conn()
+    try:
+        cur = conn.execute(
+            """
+            UPDATE recommendation_candidates
+            SET status = 'expired', updated_at = datetime('now','localtime')
+            WHERE user_id = ?
+              AND status IN ('new', 'deferred')
+              AND expires_at IS NOT NULL
+              AND date(expires_at) < date('now','localtime')
+            """,
+            (user_id,),
+        )
+        conn.commit()
+        return cur.rowcount
+    finally:
+        conn.close()
+
+
+def create_candidate_from_structured_recommendation(payload: dict, user_id: str = "default") -> int:
+    """从工具或结构化 AI 输出创建建议候选。"""
+    payload = payload or {}
+    return create_recommendation_candidate(
+        user_id=user_id,
+        source_type=payload.get("source_type") or "tool",
+        source_id=payload.get("source_id"),
+        scenario_type=payload.get("scenario_type") or "",
+        action_type=payload.get("action_type") or "watch",
+        target_type=payload.get("target_type") or "portfolio",
+        target_code=payload.get("target_code") or "",
+        target_name=payload.get("target_name") or "",
+        summary=payload.get("summary") or "结构化理财建议",
+        rationale=payload.get("rationale") or payload.get("reason") or "",
+        suggested_amount=payload.get("suggested_amount"),
+        suggested_ratio=payload.get("suggested_ratio"),
+        confidence=payload.get("confidence") or "medium",
+        evidence=payload.get("evidence") or {},
+        risk=payload.get("risk") or payload.get("risks") or {},
+        source_snapshot=payload.get("source_snapshot") or {},
+        review_at=payload.get("review_at"),
+        deferred_until=payload.get("deferred_until"),
+        expires_at=payload.get("expires_at"),
+        dedupe_key=payload.get("dedupe_key") or "",
+        priority=payload.get("priority", 3),
+        status=payload.get("status") or "new",
+    )
+
+
 def _extract_amount_hint(text: str) -> float | None:
     patterns = [
         r"(?:不超过|约|投入|买入|加仓|单次)[^\d]{0,8}(\d+(?:\.\d+)?)\s*(?:元|块|人民币)",
@@ -400,7 +519,11 @@ def _extract_amount_hint(text: str) -> float | None:
 def _candidate_action_from_sentence(sentence: str) -> str:
     if any(word in sentence for word in ["减仓", "卖出", "止盈", "止损", "清仓", "降低仓位"]):
         return "reduce"
-    if any(word in sentence for word in ["加仓", "买入", "定投", "建仓", "分批配置", "增加仓位"]):
+    if any(word in sentence for word in ["定投", "月投"]):
+        return "dca"
+    if any(word in sentence for word in ["备用金", "活钱", "现金储备"]):
+        return "cash_reserve"
+    if any(word in sentence for word in ["加仓", "买入", "建仓", "分批配置", "增加仓位"]):
         return "add"
     if any(word in sentence for word in ["再平衡", "调仓", "调整配置"]):
         return "rebalance"
@@ -418,6 +541,8 @@ def _candidate_summary(target_name: str, action_type: str, sentence: str) -> str
         "reduce": "可减仓",
         "sell": "可卖出",
         "rebalance": "需再平衡",
+        "dca": "可优化定投",
+        "cash_reserve": "需调整备用金",
         "hold": "继续持有",
         "watch": "进入观察",
     }.get(action_type, "进入观察")
@@ -443,7 +568,7 @@ def _candidate_exists(
           AND action_type = ?
           AND target_type = ?
           AND target_code = ?
-          AND status IN ('new', 'saved')
+          AND status IN ('new', 'saved', 'deferred')
         LIMIT 1
         """,
         (user_id, source_type, source_id, action_type, target_type, target_code or ""),
@@ -555,10 +680,10 @@ def create_decision_from_candidate(
     if candidate.get("status") == "saved" and candidate.get("decision_id"):
         decision = get_decision(candidate["decision_id"])
         return {"ok": True, "decision_id": candidate["decision_id"], "decision": decision, "candidate": candidate}
-    if candidate.get("status") not in {"new", "ignored"}:
+    if candidate.get("status") not in {"new", "ignored", "deferred"}:
         return {"ok": False, "error": f"建议候选状态 {candidate.get('status')} 不可保存为决策"}
 
-    review_at = (datetime.now() + timedelta(days=max(1, review_days))).strftime("%Y-%m-%d")
+    review_at = candidate.get("review_at") or (datetime.now() + timedelta(days=max(1, review_days))).strftime("%Y-%m-%d")
     action_type = candidate.get("action_type") or "watch"
     decision_type = "sell" if action_type == "sell" else "add" if action_type == "buy" else action_type
     decision_id = create_decision(
@@ -579,6 +704,7 @@ def create_decision_from_candidate(
                 "candidate_id": candidate_id,
             },
             **(candidate.get("evidence_json") or {}),
+            "source_snapshot": candidate.get("source_snapshot_json") or {},
         },
         risk=candidate.get("risk_json") or {},
         suitability={
@@ -588,6 +714,8 @@ def create_decision_from_candidate(
                 "补充至少一个反方观点",
             ],
             "suggested_amount": candidate.get("suggested_amount"),
+            "suggested_ratio": candidate.get("suggested_ratio"),
+            "candidate_priority": candidate.get("priority"),
         },
         confidence=candidate.get("confidence") or "medium",
         status="proposed",
@@ -598,10 +726,11 @@ def create_decision_from_candidate(
                 "title": f"复核 {candidate.get('target_name') or candidate.get('target_code') or '建议'} 的执行条件",
                 "params": {
                     "candidate_id": candidate_id,
-                    "transaction_type": "buy" if decision_type in {"add", "buy"} else "sell" if decision_type in {"reduce", "sell"} else "",
+                    "transaction_type": "buy" if decision_type in {"add", "buy", "dca"} else "sell" if decision_type in {"reduce", "sell"} else "",
                     "fund_code": candidate.get("target_code") or "",
                     "fund_name": candidate.get("target_name") or "",
                     "amount": candidate.get("suggested_amount"),
+                    "ratio": candidate.get("suggested_ratio"),
                 },
             },
             {
@@ -1205,6 +1334,52 @@ def build_decision_precheck(decision_id: int, user_id: str = "default") -> dict:
     checklist.extend(decision.get("suitability_json", {}).get("checklist") or [])
     checklist.extend(decision.get("evidence_json", {}).get("missing_data") or [])
 
+    evidence_json = decision.get("evidence_json") or {}
+    risk_json = decision.get("risk_json") or {}
+    counter_arguments = []
+    counter_arguments.extend(evidence_json.get("counter_arguments") or [])
+    counter_arguments.extend(risk_json.get("counter_arguments") or [])
+    counter_arguments.extend(risk_json.get("notes") or [])
+    if not [item for item in counter_arguments if item]:
+        warnings.append("缺少反方观点或风险说明，执行前需补充至少一个不行动理由")
+
+    stale_points = []
+    for point in evidence_json.get("data_points") or []:
+        as_of = point.get("as_of") or point.get("as_of_date") or point.get("latest_date")
+        if not as_of:
+            continue
+        try:
+            parsed = datetime.strptime(str(as_of)[:10], "%Y-%m-%d")
+            if (datetime.now() - parsed).days > 10:
+                stale_points.append(point.get("name") or as_of)
+        except Exception:
+            continue
+    if stale_points:
+        warnings.append(f"证据数据较旧/可能过期：{', '.join(stale_points[:3])}，执行前需刷新估值或净值")
+
+    target_code = decision.get("target_code") or ""
+    target_type = decision.get("target_type") or ""
+    if target_code:
+        conn = _get_conn()
+        try:
+            row = conn.execute(
+                """
+                SELECT id FROM decision_records
+                WHERE user_id = ?
+                  AND id != ?
+                  AND target_type = ?
+                  AND target_code = ?
+                  AND status IN ('proposed', 'accepted', 'executed', 'deferred')
+                  AND id NOT IN (SELECT decision_id FROM decision_reviews)
+                ORDER BY id DESC LIMIT 1
+                """,
+                (user_id, decision_id, target_type, target_code),
+            ).fetchone()
+            if row:
+                warnings.append(f"同标的存在未复盘/未完成决策 #{row['id']}，建议先处理后再新增行动")
+        finally:
+            conn.close()
+
     trade_plan = _extract_trade_plan_from_decision(decision)
 
     decision_type = decision.get("decision_type")
@@ -1530,6 +1705,58 @@ def _create_eval_case_from_bad_decision_review(decision_id: int, result_note: st
         return
 
 
+def _append_profile_text(existing: str, addition: str, limit: int = 1200) -> str:
+    existing = (existing or "").strip()
+    addition = (addition or "").strip()
+    if not addition:
+        return existing
+    if addition in existing:
+        return existing
+    combined = f"{existing}\n{addition}".strip() if existing else addition
+    return combined[-limit:]
+
+
+def _update_profile_from_decision_review(decision_id: int, outcome: str, result_note: str, lesson: str):
+    """把复盘经验反哺用户画像。"""
+    text = f"{result_note or ''}\n{lesson or ''}"
+    if not text.strip():
+        return
+    try:
+        from db.dashboard import get_user_profile, update_user_profile
+
+        profile = get_user_profile("default") or {}
+        updates = {}
+        decision = get_decision(decision_id) or {}
+        target = decision.get("target_name") or decision.get("target_code") or "投资决策"
+        line = f"{target}：{_compact_text(text, 160)}"
+        if outcome == "helpful":
+            updates["positive_patterns"] = _append_profile_text(profile.get("positive_patterns") or "", line)
+        elif outcome == "unhelpful":
+            updates["negative_patterns"] = _append_profile_text(profile.get("negative_patterns") or "", line)
+
+        biases_raw = profile.get("behavior_biases") or "[]"
+        try:
+            biases = json.loads(biases_raw) if isinstance(biases_raw, str) else biases_raw
+        except Exception:
+            biases = []
+        if not isinstance(biases, list):
+            biases = []
+        bias_text = text
+        bias_map = {
+            "panic_sell": ["情绪化止损", "恐慌", "杀跌", "下跌时卖出"],
+            "chasing_high": ["追涨", "高位买入", "踏空焦虑"],
+            "overtrading": ["频繁交易", "操作过多"],
+        }
+        for bias, words in bias_map.items():
+            if any(word in bias_text for word in words) and bias not in biases:
+                biases.append(bias)
+        updates["behavior_biases"] = biases
+        if updates:
+            update_user_profile("default", **updates)
+    except Exception:
+        return
+
+
 def record_decision_review(
     decision_id: int,
     outcome: str,
@@ -1569,6 +1796,7 @@ def record_decision_review(
         )
         conn.commit()
         _save_review_lesson_knowledge(decision_id, outcome, result_note or "", lesson or "")
+        _update_profile_from_decision_review(decision_id, outcome, result_note or "", lesson or "")
         if outcome == "unhelpful":
             _create_eval_case_from_bad_decision_review(decision_id, result_note or "", lesson or "")
         if cur.lastrowid:

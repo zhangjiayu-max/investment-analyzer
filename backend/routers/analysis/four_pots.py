@@ -27,6 +27,70 @@ router = APIRouter(prefix="/api/four-pots", tags=["four-pots"])
 _background_tasks: set = set()
 
 
+def save_four_pots_candidates(result: dict, user_id: str = "default") -> int:
+    """把四笔钱建议沉淀为建议候选。"""
+    from db.decisions import create_candidate_from_structured_recommendation
+
+    created = 0
+    for idx, advice in enumerate(result.get("advice") or []):
+        text = str(advice)
+        action_type = "cash_reserve" if any(w in text for w in ["活钱", "备用金", "生活费"]) else "rebalance"
+        candidate_id = create_candidate_from_structured_recommendation({
+            "source_type": "tool",
+            "source_id": idx,
+            "scenario_type": "four_pots",
+            "action_type": action_type,
+            "target_type": "portfolio",
+            "target_code": "four_pots",
+            "target_name": "四笔钱配置",
+            "summary": text,
+            "reason": text,
+            "confidence": "medium",
+            "evidence": {"tool": "four_pots", "advice": text},
+            "source_snapshot": result,
+            "dedupe_key": f"four_pots:{action_type}:{text[:40]}",
+            "priority": 7 if action_type == "cash_reserve" else 5,
+        }, user_id=user_id)
+        if candidate_id:
+            created += 1
+    return created
+
+
+def save_dca_candidates(result: dict, user_id: str = "default") -> int:
+    """把定投优化建议沉淀为建议候选。"""
+    from db.decisions import create_candidate_from_structured_recommendation
+
+    created = 0
+    for item in result.get("suggestions") or []:
+        fund_code = item.get("fund_code") or ""
+        fund_name = item.get("fund_name") or fund_code or "定投标的"
+        amount = item.get("suggested_amount")
+        if amount is None:
+            amount = item.get("final_amount")
+        candidate_id = create_candidate_from_structured_recommendation({
+            "source_type": "tool",
+            "scenario_type": "dca_optimization",
+            "action_type": "dca",
+            "target_type": "fund",
+            "target_code": fund_code,
+            "target_name": fund_name,
+            "summary": f"{fund_name}：{item.get('action') or item.get('decision') or '优化定投'}",
+            "reason": item.get("reason") or "",
+            "suggested_amount": amount,
+            "confidence": "medium",
+            "evidence": {
+                "pe_percentile": item.get("pe_percentile"),
+                "fear_greed_score": result.get("fear_greed_score") or (result.get("fear_greed") or {}).get("score"),
+            },
+            "source_snapshot": item,
+            "dedupe_key": f"dca_optimization:{fund_code}",
+            "priority": 6,
+        }, user_id=user_id)
+        if candidate_id:
+            created += 1
+    return created
+
+
 def _safe_float(v, default=0.0) -> float:
     try:
         return float(v) if v else default
@@ -289,6 +353,10 @@ async def calc_dca_optimization() -> dict:
 async def classify_api():
     """获取四笔钱归类结果。"""
     result = classify_pots()
+    try:
+        save_four_pots_candidates(result)
+    except Exception as e:
+        logger.warning(f"[four_pots] 保存建议候选失败: {e}")
     return {"status": "ok", "result": result}
 
 
@@ -296,4 +364,8 @@ async def classify_api():
 async def dca_api():
     """获取定投优化建议。"""
     result = await calc_dca_optimization()
+    try:
+        save_dca_candidates(result)
+    except Exception as e:
+        logger.warning(f"[dca] 保存建议候选失败: {e}")
     return {"status": "ok", "result": result}

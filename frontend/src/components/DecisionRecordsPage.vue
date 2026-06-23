@@ -4,7 +4,7 @@ import {
   listDecisions, updateDecisionStatus, submitDecisionReview, completeDecisionAction,
   getDecisionPrecheck, getExecutionStatus, getDecisionTimeline, createTransactionDraftFromDecision,
   getDecisionStats, listRecommendationCandidates, ignoreRecommendationCandidate,
-  createDecisionFromCandidate,
+  createDecisionFromCandidate, deferRecommendationCandidate,
 } from '../api'
 import { useToast } from '../composables/useToast'
 import Icon from './ui/Icon.vue'
@@ -263,6 +263,28 @@ function ignoreCandidate(candidate) {
   )
 }
 
+function deferCandidate(candidate) {
+  const d = new Date()
+  d.setDate(d.getDate() + 7)
+  const deferredUntil = d.toISOString().slice(0, 10)
+  confirmAction(
+    '稍后处理',
+    `将「${candidate.summary}」延期到 ${deferredUntil} 再处理。`,
+    async () => {
+      candidateActionId.value = candidate.id
+      try {
+        await deferRecommendationCandidate(candidate.id, deferredUntil)
+        showToast('已延期处理建议', 'success')
+        await loadCandidates()
+      } catch (e) {
+        showToast('延期失败: ' + (e.response?.data?.detail || e.message), 'error')
+      } finally {
+        candidateActionId.value = null
+      }
+    }
+  )
+}
+
 function confirmExecutionFromMatch(decisionId) {
   const match = executionMatches.value[decisionId]
   const txInfo = match ? `${match.tx_count}笔交易，买入${match.buy_shares}份/卖出${match.sell_shares}份` : ''
@@ -472,6 +494,13 @@ onMounted(load)
               @click="saveCandidateAsDecision(c)"
             >
               {{ candidateActionId === c.id ? '处理中...' : '保存为决策' }}
+            </button>
+            <button
+              class="btn-sm btn-ghost"
+              :disabled="candidateActionId === c.id"
+              @click="deferCandidate(c)"
+            >
+              稍后
             </button>
             <button
               class="btn-sm btn-ghost"

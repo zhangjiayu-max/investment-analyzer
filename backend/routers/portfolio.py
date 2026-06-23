@@ -64,6 +64,33 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["portfolio"])
 
 
+def save_rebalance_drift_candidate(drift: dict, user_id: str = "default") -> int:
+    """把调仓偏离结果保存为再平衡建议候选。"""
+    from db.decisions import create_candidate_from_structured_recommendation
+
+    drift = drift or {}
+    target_name = drift.get("target_name") or "整体组合"
+    summary = drift.get("summary") or f"{target_name} 出现配置偏离，建议复核再平衡"
+    drift_pct = drift.get("drift_pct")
+    return create_candidate_from_structured_recommendation({
+        "source_type": "rebalance",
+        "scenario_type": "rebalance_drift",
+        "action_type": "rebalance",
+        "target_type": "portfolio",
+        "target_code": "portfolio",
+        "target_name": target_name,
+        "summary": summary,
+        "reason": drift.get("reason") or summary,
+        "suggested_ratio": (float(drift_pct) / 100) if isinstance(drift_pct, (int, float)) else None,
+        "confidence": "medium",
+        "evidence": {"drift_pct": drift_pct},
+        "risk": {"notes": ["再平衡前需确认交易成本、持有期和税费影响"]},
+        "source_snapshot": drift,
+        "dedupe_key": "rebalance_drift:portfolio",
+        "priority": 6,
+    }, user_id=user_id)
+
+
 # ══════════════════════════════════════════════════════
 # 持仓管理 API
 # ══════════════════════════════════════════════════════

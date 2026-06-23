@@ -16,6 +16,7 @@ from pydantic import BaseModel
 from db import (
     list_conversations, get_conversation, create_conversation, update_conversation, delete_conversation,
     get_messages, create_message, update_message_metadata, update_message_content_and_metadata,
+    get_latest_recoverable_assistant, mark_message_execution_status, retry_assistant_message,
     get_agent, create_agent_run,
     list_holdings, create_alert, save_llm_feedback,
     _get_conn,
@@ -466,6 +467,51 @@ async def resume_conversation(conv_id: int, request: Request):
                 yield _sse_event("error", event)
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
+@router.get("/api/conversations/{conv_id}/execution-state")
+async def get_conversation_execution_state_api(conv_id: int):
+    """获取当前对话最近可恢复的 assistant 执行状态。"""
+    conv = get_conversation(conv_id)
+    if not conv:
+        raise HTTPException(404, "对话不存在")
+    item = get_latest_recoverable_assistant(conv_id)
+    return {"item": item, "has_recoverable": bool(item)}
+
+
+@router.post("/api/conversations/{conv_id}/continue")
+async def continue_conversation_api(conv_id: int, request: Request):
+    """继续分析：复用现有 assistant 消息并跳过已完成专家。"""
+    item = get_latest_recoverable_assistant(conv_id)
+    if not item:
+        raise HTTPException(400, "没有可继续的对话任务")
+    mark_message_execution_status(item["id"], "resuming")
+    return await resume_conversation(conv_id, request)
+
+
+@router.post("/api/conversations/{conv_id}/retry-message/{message_id}")
+async def retry_conversation_message_api(conv_id: int, message_id: int):
+    """重新生成：创建新的 assistant 占位消息，保留原失败/取消记录。"""
+    conv = get_conversation(conv_id)
+    if not conv:
+        raise HTTPException(404, "对话不存在")
+    messages = get_messages(conv_id, limit=200)
+    target = next((m for m in messages if m["id"] == message_id and m["role"] == "assistant"), None)
+    if not target:
+        raise HTTPException(404, "助手消息不存在")
+    retry_id = retry_assistant_message(message_id)
+    if not retry_id:
+        raise HTTPException(400, "无法创建重试消息")
+
+    original_query = ""
+    target_index = next((i for i, m in enumerate(messages) if m["id"] == message_id), -1)
+    for msg in reversed(messages[:target_index]):
+        if msg.get("role") == "user":
+            original_query = msg.get("content") or ""
+            break
+    if not original_query:
+        raise HTTPException(400, "找不到原始用户消息")
+    return {"ok": True, "message_id": retry_id, "original_query": original_query}
 
 
 @router.post("/api/conversations/{conv_id}/messages")

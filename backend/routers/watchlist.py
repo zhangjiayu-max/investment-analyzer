@@ -21,6 +21,38 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["watchlist"])
 
 
+def save_watchlist_trigger_candidate(item: dict, user_id: str = "default") -> int:
+    """把关注列表触发项保存为建议候选。"""
+    from db.decisions import create_candidate_from_structured_recommendation
+
+    fund_code = item.get("fund_code") or ""
+    fund_name = item.get("fund_name") or fund_code or "关注标的"
+    current_pct = item.get("current_percentile")
+    target_pct = item.get("target_percentile")
+    summary = item.get("reason") or f"{fund_name} 触发关注条件，可进入分批买入决策"
+    return create_candidate_from_structured_recommendation({
+        "source_type": "watchlist",
+        "source_id": item.get("id"),
+        "scenario_type": "watchlist_trigger",
+        "action_type": "add",
+        "target_type": "fund",
+        "target_code": fund_code,
+        "target_name": fund_name,
+        "summary": summary,
+        "reason": item.get("notes") or summary,
+        "confidence": "medium",
+        "evidence": {
+            "current_percentile": current_pct,
+            "target_percentile": target_pct,
+            "source": item.get("source") or "watchlist",
+        },
+        "risk": {"notes": ["关注条件触发不等于必须买入，仍需确认资金和仓位"]},
+        "source_snapshot": item,
+        "dedupe_key": f"watchlist_trigger:{fund_code}",
+        "priority": item.get("priority", 0) or 5,
+    }, user_id=user_id)
+
+
 class AddWatchlistRequest(BaseModel):
     fund_code: str
     fund_name: str = ""
@@ -136,7 +168,7 @@ async def watchlist_patrol_api():
                 alert_reason = f"当前百分位 {current_pct:.0f}% 处于低估区域（≤20%）"
 
         if is_alert:
-            alerts.append({
+            alert_item = {
                 "id": item["id"],
                 "fund_code": fund_code,
                 "fund_name": fund_name,
@@ -148,7 +180,12 @@ async def watchlist_patrol_api():
                 "source": source,
                 "reason": alert_reason,
                 "notes": item.get("notes", ""),
-            })
+            }
+            try:
+                alert_item["candidate_id"] = save_watchlist_trigger_candidate(alert_item)
+            except Exception as e:
+                logger.warning(f"[watchlist] 保存建议候选失败: {e}")
+            alerts.append(alert_item)
 
     return {
         "checked": checked,
@@ -305,5 +342,4 @@ async def lookup_and_fill_api(item_id: int):
         update_watchlist_item(item_id, **updates)
 
     return {"ok": True, "info": info, "updates": updates}
-
 

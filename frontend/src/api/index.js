@@ -417,6 +417,18 @@ export function cancelConversationExecution(convId) {
   return api.post(`/conversation/${convId}/cancel`)
 }
 
+export function getConversationExecutionState(convId) {
+  return api.get(`/conversations/${convId}/execution-state`)
+}
+
+export function continueConversation(convId) {
+  return api.post(`/conversations/${convId}/continue`)
+}
+
+export function retryConversationMessage(convId, messageId) {
+  return api.post(`/conversations/${convId}/retry-message/${messageId}`)
+}
+
 /** 恢复中断的对话执行（跳过已完成的专家） */
 export function resumeConversationStream(convId, onEvent) {
   const controller = new AbortController()
@@ -948,6 +960,21 @@ export function listRecommendationCandidates(status = 'new', limit = 20) {
 /** 忽略 AI 建议候选 */
 export function ignoreRecommendationCandidate(candidateId) {
   return api.post(`/recommendation-candidates/${candidateId}/ignore`)
+}
+
+/** 延期 AI 建议候选 */
+export function deferRecommendationCandidate(candidateId, deferredUntil) {
+  return api.post(`/recommendation-candidates/${candidateId}/defer`, { deferred_until: deferredUntil })
+}
+
+/** 过期 AI 建议候选 */
+export function expireRecommendationCandidates(userId = 'default') {
+  return api.post('/recommendation-candidates/expire', {}, { params: { user_id: userId } })
+}
+
+/** 从结构化工具输出创建 AI 建议候选 */
+export function createRecommendationCandidateFromTool(payload) {
+  return api.post('/recommendation-candidates/from-tool', payload)
 }
 
 /** 从 AI 建议候选创建决策草案 */

@@ -35,6 +35,7 @@ import {
   getPortfolioManagerOverview,
   analyzeRollingPortfolio, analyzeRollingIndex, analyzeRollingFund,
   classifyFourPots, getDcaOptimization,
+  listRecommendationCandidates, listDecisions, listDueDecisionReviews,
 } from '../api'
 import { useToast } from '../composables/useToast'
 import ConfirmDialog from './ConfirmDialog.vue'
@@ -49,6 +50,8 @@ import AnalysisComparison from './AnalysisComparison.vue'
 import { renderMarkdown } from '../composables/useMarkdown'
 import { isDark } from '../composables/useTheme'
 import { useAsyncTask } from '../composables/useAsyncTask'
+
+const emit = defineEmits(['navigate'])
 
 // ── 持仓占比计算 ──
 const holdingWeights = computed(() => {
@@ -854,6 +857,18 @@ const confirmTxShares = ref(0)
 
 // Pending transactions reminder
 const pendingTxs = ref([])
+const actionCandidates = ref([])
+const actionDecisions = ref([])
+const dueReviews = ref([])
+
+const workbenchStats = computed(() => ({
+  candidateCount: actionCandidates.value.length,
+  pendingDecisionCount: actionDecisions.value.filter(d => ['proposed', 'accepted', 'deferred'].includes(d.status)).length,
+  pendingTxCount: pendingTxs.value.length,
+  dueReviewCount: dueReviews.value.length,
+  alertCount: unreadAlertCount.value,
+  watchCount: watchlistItems.value.filter(w => w.status !== 'bought').length,
+}))
 
 // Alerts
 const alerts = ref([])
@@ -1121,11 +1136,31 @@ async function loadData() {
     await loadAllChartFunds()
     // 加载关注列表（AI 分析下拉需要）
     await loadWatchlist()
+    await loadActionCenterData()
   } catch (e) {
     showToast('加载失败: ' + e.message, 'error')
   } finally {
     loading.value = false
   }
+}
+
+async function loadActionCenterData() {
+  try {
+    const [candidateRes, decisionRes, reviewRes] = await Promise.all([
+      listRecommendationCandidates('new', 20),
+      listDecisions('', 100),
+      listDueDecisionReviews(20),
+    ])
+    actionCandidates.value = candidateRes.data.items || []
+    actionDecisions.value = decisionRes.data.items || []
+    dueReviews.value = reviewRes.data.items || []
+  } catch (e) {
+    console.warn('加载行动中心数据失败:', e)
+  }
+}
+
+function goDecisionCenter() {
+  emit('navigate', 'decisions')
 }
 
 async function loadAllChartFunds() {
@@ -2922,6 +2957,29 @@ function txDisplayAmount(tx) {
         <input ref="csvInput" type="file" accept=".csv" style="display:none" @change="handleImportCsv" />
       </div>
     </div>
+
+    <section class="portfolio-workbench">
+      <article class="workbench-cell overview" @click="switchAnalysisTab('holdings')">
+        <div class="workbench-label">今日概览</div>
+        <strong>{{ formatMoney((summary.total_value || 0) + totalCash) }}</strong>
+        <span>{{ holdings.length }} 只持仓 · 现金 {{ formatMoney(totalCash) }}</span>
+      </article>
+      <article class="workbench-cell diagnosis" @click="switchAnalysisTab('ai')">
+        <div class="workbench-label">组合诊断</div>
+        <strong>{{ alerts.length }} 条预警</strong>
+        <span>全景诊断、分散度、费率、相关性</span>
+      </article>
+      <article class="workbench-cell actions" @click="goDecisionCenter">
+        <div class="workbench-label">行动中心</div>
+        <strong>{{ workbenchStats.candidateCount + workbenchStats.pendingDecisionCount + workbenchStats.pendingTxCount + workbenchStats.dueReviewCount }}</strong>
+        <span>{{ workbenchStats.candidateCount }} 建议 · {{ workbenchStats.pendingDecisionCount }} 决策 · {{ workbenchStats.pendingTxCount }} 交易 · {{ workbenchStats.dueReviewCount }} 复盘</span>
+      </article>
+      <article class="workbench-cell planning" @click="switchAnalysisTab('config')">
+        <div class="workbench-label">规划工具</div>
+        <strong>{{ workbenchStats.watchCount }}</strong>
+        <span>四笔钱、定投优化、滚动收益、关注列表</span>
+      </article>
+    </section>
 
     <!-- Pending Transactions Reminder -->
     <div v-if="pendingTxs.length > 0" class="pending-banner">
@@ -5386,6 +5444,45 @@ function txDisplayAmount(tx) {
   white-space: nowrap;
 }
 
+.portfolio-workbench {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0.75rem;
+  margin-bottom: 1rem;
+}
+.workbench-cell {
+  min-height: 92px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  background: var(--color-bg-card);
+  padding: 0.85rem 1rem;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  cursor: pointer;
+  transition: border-color 0.15s, box-shadow 0.15s, transform 0.15s;
+}
+.workbench-cell:hover {
+  border-color: var(--color-primary-border-strong);
+  box-shadow: var(--shadow-sm);
+  transform: translateY(-1px);
+}
+.workbench-label {
+  color: var(--color-text-muted);
+  font-size: 0.76rem;
+  font-weight: 600;
+}
+.workbench-cell strong {
+  color: var(--color-text-primary);
+  font-size: 1.08rem;
+  font-variant-numeric: tabular-nums;
+}
+.workbench-cell span {
+  color: var(--color-text-secondary);
+  font-size: 0.78rem;
+  line-height: 1.35;
+}
+
 .icon-spin {
   transition: transform 0.3s;
 }
@@ -6471,6 +6568,15 @@ select.input-field {
   .page-header {
     flex-direction: column;
     align-items: flex-start;
+  }
+  .portfolio-workbench {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 520px) {
+  .portfolio-workbench {
+    grid-template-columns: 1fr;
   }
 }
 

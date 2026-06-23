@@ -6,10 +6,13 @@ from pydantic import BaseModel
 from db import (
     build_decision_precheck,
     create_chat_decision_draft,
+    create_candidate_from_structured_recommendation,
     create_decision_from_candidate,
     create_decision,
     create_decision_action,
     create_transaction_draft_from_decision,
+    defer_recommendation_candidate,
+    expire_recommendation_candidates,
     get_decision_stats,
     get_recommendation_candidate,
     get_decision,
@@ -47,6 +50,33 @@ class TransactionDraftRequest(BaseModel):
 
 class CandidateDecisionRequest(BaseModel):
     review_days: int = 30
+    user_id: str = "default"
+
+
+class CandidateDeferRequest(BaseModel):
+    deferred_until: str
+
+
+class StructuredCandidateRequest(BaseModel):
+    source_type: str = "tool"
+    source_id: int | None = None
+    scenario_type: str = ""
+    action_type: str = "watch"
+    target_type: str = "portfolio"
+    target_code: str = ""
+    target_name: str = ""
+    summary: str
+    reason: str = ""
+    suggested_amount: float | None = None
+    suggested_ratio: float | None = None
+    confidence: str = "medium"
+    evidence: dict = {}
+    risks: dict = {}
+    source_snapshot: dict = {}
+    review_at: str | None = None
+    expires_at: str | None = None
+    dedupe_key: str = ""
+    priority: int = 3
     user_id: str = "default"
 
 
@@ -143,6 +173,33 @@ async def ignore_recommendation_candidate_api(candidate_id: int):
     if not ok:
         raise HTTPException(400, "建议候选状态更新失败")
     return {"ok": True, "item": get_recommendation_candidate(candidate_id)}
+
+
+@router.post("/api/recommendation-candidates/{candidate_id}/defer")
+async def defer_recommendation_candidate_api(candidate_id: int, req: CandidateDeferRequest):
+    """延期处理一条建议候选。"""
+    item = get_recommendation_candidate(candidate_id)
+    if not item:
+        raise HTTPException(404, "建议候选不存在")
+    ok = defer_recommendation_candidate(candidate_id, req.deferred_until)
+    if not ok:
+        raise HTTPException(400, "建议候选延期失败")
+    return {"ok": True, "item": get_recommendation_candidate(candidate_id)}
+
+
+@router.post("/api/recommendation-candidates/expire")
+async def expire_recommendation_candidates_api(user_id: str = "default"):
+    """把到期候选统一标记为过期。"""
+    return {"ok": True, "expired": expire_recommendation_candidates(user_id=user_id or "default")}
+
+
+@router.post("/api/recommendation-candidates/from-tool")
+async def create_recommendation_candidate_from_tool_api(req: StructuredCandidateRequest):
+    """从四笔钱、定投、关注列表、调仓等工具创建结构化建议候选。"""
+    payload = req.model_dump()
+    user_id = payload.pop("user_id", "default") or "default"
+    candidate_id = create_candidate_from_structured_recommendation(payload, user_id=user_id)
+    return {"ok": True, "id": candidate_id, "item": get_recommendation_candidate(candidate_id)}
 
 
 @router.post("/api/recommendation-candidates/{candidate_id}/create-decision")
