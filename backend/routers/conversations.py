@@ -33,6 +33,32 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["conversations"])
 
 
+def _build_unified_context_safe(
+    conv_id: int,
+    query: str,
+    scenario_type: str = "general_analysis",
+    agent_id: int | None = None,
+    rag_context: str = "",
+    token_budget: int = 6000,
+) -> str:
+    """构建统一上下文，失败时返回空字符串，避免阻断对话主流程。"""
+    try:
+        from conversation_context import build_conversation_context
+
+        bundle = build_conversation_context(
+            conversation_id=conv_id,
+            current_user_message=query,
+            scenario_type=scenario_type,
+            agent_id=agent_id,
+            rag_context=rag_context,
+            token_budget=token_budget,
+        )
+        return bundle.get("prompt_context", "")
+    except Exception as e:
+        logger.warning(f"统一对话上下文构建失败 conv_id={conv_id}: {e}")
+        return ""
+
+
 # ── 请求模型 ─────────────────────────────────────────────
 
 
@@ -636,6 +662,15 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
         phase_timings["clarification_rag_ms"] = int((time.time() - t0) * 1000)
         complexity = clarification["complexity"]
         rag_context = rag_result["context"]
+        scenario_type = clarification.get("scenario_type", "general_analysis")
+        unified_context = _build_unified_context_safe(
+            conv_id=conv_id,
+            query=req.content,
+            scenario_type=scenario_type,
+            agent_id=conv.get("agent_id"),
+            rag_context=rag_context,
+            token_budget=get_config_int("llm.max_tokens_orchestrator", 6000),
+        )
 
         yield _sse_event("status", {"message": f"问题类型: {complexity} ({clarification.get('reason', '')})"})
 
@@ -680,6 +715,8 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
             })
             # 构建上下文
             chat_messages = [{"role": "system", "content": ORCHESTRATOR_PROMPT}]
+            if unified_context:
+                chat_messages.append({"role": "system", "content": f"统一个人理财上下文：\n{unified_context}"})
             for m in msg_list[-10:]:
                 chat_messages.append({"role": m["role"], "content": m["content"][:500]})
             if rag_context:
@@ -745,13 +782,16 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
                     try:
                         expert_query = clarification.get("refined_query") or req.content
                         prebuilt = ""
-                        if rag_context:
+                        if unified_context:
+                            prebuilt += f"## 统一个人理财上下文\n{unified_context[:3500]}\n\n"
+                        elif rag_context:
                             prebuilt += f"## 知识库参考（书籍/文章）\n{rag_context[:800]}\n\n"
-                        try:
-                            from portfolio_context import build_portfolio_context
-                            prebuilt += f"## 用户当前持仓\n{build_portfolio_context()}\n\n"
-                        except Exception:
-                            pass
+                        if not unified_context:
+                            try:
+                                from portfolio_context import build_portfolio_context
+                                prebuilt += f"## 用户当前持仓\n{build_portfolio_context()}\n\n"
+                            except Exception:
+                                pass
                         return run_specialist(agent_key, expert_query, prebuilt_context=prebuilt)
                     except Exception as e:
                         return {"error": str(e)}
@@ -856,6 +896,9 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
         # 4. 获取对话历史
         history = get_messages(conv_id, limit=20)
         msg_list = [{"role": m["role"], "content": m["content"]} for m in history]
+        orchestrator_context = rag_context
+        if unified_context:
+            orchestrator_context = f"{unified_context}\n\n## 原始 RAG 检索上下文\n{rag_context}" if rag_context else unified_context
 
         # 5. 调用 Orchestrator（多 Agent 协作）
         # 不检查断开连接，让后端任务继续执行
@@ -942,7 +985,7 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
             def _producer():
                 try:
                     _running_agents[f"prod_{conv_id}"] = {"conv_id": conv_id, "started_at": time.time(), "trace_id": trace_id}
-                    for event in orchestrate_stream(req.content, msg_list, rag_context, cancel_event=cancel_event, conversation_id=conv_id, message_id=stream_msg_id, trace_id=trace_id, target_specialists=req.target_specialists):
+                    for event in orchestrate_stream(req.content, msg_list, orchestrator_context, cancel_event=cancel_event, conversation_id=conv_id, message_id=stream_msg_id, trace_id=trace_id, target_specialists=req.target_specialists):
                         et = event.get("type")
                         # === 在线程中持久化（独立于 SSE 连接）===
                         if et == "specialist_done":

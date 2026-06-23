@@ -1,6 +1,9 @@
 <script setup>
 import { ref, computed, onMounted } from 'vue'
-import { listDecisions, updateDecisionStatus, submitDecisionReview, completeDecisionAction, getDecisionPrecheck, getExecutionStatus, getDecisionTimeline } from '../api'
+import {
+  listDecisions, updateDecisionStatus, submitDecisionReview, completeDecisionAction,
+  getDecisionPrecheck, getExecutionStatus, getDecisionTimeline, createTransactionDraftFromDecision,
+} from '../api'
 import { useToast } from '../composables/useToast'
 import Icon from './ui/Icon.vue'
 import ConfirmDialog from './ConfirmDialog.vue'
@@ -12,6 +15,7 @@ const loading = ref(false)
 const decisions = ref([])
 const precheckCache = ref({})  // { decisionId: precheckResult }
 const executionMatches = ref({})  // { decisionId: matchInfo }
+const draftingDecisionId = ref(null)
 
 // ── 筛选 ──
 const activeFilter = ref('all')  // all | proposed | accepted | executed | reviewed | rejected
@@ -145,6 +149,34 @@ function executeDecision(decisionId) {
   confirmAction('执行决策', '确认此决策已执行？执行后进入待复盘状态。', () => doStatusUpdate(decisionId, 'executed'))
 }
 
+function canCreateTransactionDraft(decision) {
+  return ['add', 'buy', 'reduce', 'sell'].includes(decision.decision_type)
+}
+
+function createDraftFromDecision(decision) {
+  const precheck = precheckCache.value[decision.id]
+  const blockers = precheck?.blockers || []
+  const message = blockers.length
+    ? `执行前检查发现阻断项：${blockers.join('；')}。请先处理后再生成交易草稿。`
+    : '将根据该决策生成一笔待确认交易草稿。此操作不会确认交易，也不会直接修改真实持仓。是否继续？'
+  confirmAction('生成交易草稿', message, async () => {
+    if (blockers.length) return
+    draftingDecisionId.value = decision.id
+    try {
+      const { data } = await createTransactionDraftFromDecision(decision.id)
+      showToast(`已生成交易草稿 #${data.transaction_id}`, 'success')
+      precheckCache.value = {}
+      await load()
+    } catch (e) {
+      const detail = e.response?.data?.detail
+      const msg = typeof detail === 'object' ? (detail.error || JSON.stringify(detail)) : (detail || e.message)
+      showToast('生成交易草稿失败: ' + msg, 'error')
+    } finally {
+      draftingDecisionId.value = null
+    }
+  })
+}
+
 function confirmExecutionFromMatch(decisionId) {
   const match = executionMatches.value[decisionId]
   const txInfo = match ? `${match.tx_count}笔交易，买入${match.buy_shares}份/卖出${match.sell_shares}份` : ''
@@ -243,6 +275,12 @@ function precheckItems(decisionId) {
   const precheck = precheckCache.value[decisionId]
   if (!precheck || !precheck.exists) return []
   const items = []
+  for (const blocker of precheck.blockers || []) {
+    items.push({ level: 'error', text: blocker })
+  }
+  for (const warning of precheck.warnings || []) {
+    items.push({ level: 'warn', text: warning })
+  }
   if (precheck.bucket_check) {
     const bc = precheck.bucket_check
     if (bc.blocked) {
@@ -374,14 +412,26 @@ onMounted(load)
           <div class="card-actions">
             <template v-if="d.status === 'proposed'">
               <button class="btn-sm btn-primary" @click="acceptDecision(d.id)">接受</button>
+              <button
+                v-if="canCreateTransactionDraft(d)"
+                class="btn-sm btn-secondary"
+                :disabled="draftingDecisionId === d.id"
+                @click="createDraftFromDecision(d)"
+              >
+                {{ draftingDecisionId === d.id ? '生成中...' : '生成交易草稿' }}
+              </button>
               <button class="btn-sm btn-ghost" @click="deferDecision(d.id)">暂缓</button>
               <button class="btn-sm btn-ghost danger" @click="rejectDecision(d.id)">拒绝</button>
             </template>
             <template v-else-if="d.status === 'accepted'">
-              <button class="btn-sm btn-primary" @click="executeDecision(d.id)">已执行</button>
-              <button class="btn-sm btn-ghost" @click="deferDecision(d.id)">暂缓</button>
-            </template>
-            <template v-else-if="d.status === 'accepted'">
+              <button
+                v-if="canCreateTransactionDraft(d)"
+                class="btn-sm btn-secondary"
+                :disabled="draftingDecisionId === d.id"
+                @click="createDraftFromDecision(d)"
+              >
+                {{ draftingDecisionId === d.id ? '生成中...' : '生成交易草稿' }}
+              </button>
               <button class="btn-sm btn-primary" @click="executeDecision(d.id)">已执行</button>
               <button class="btn-sm btn-ghost" @click="deferDecision(d.id)">暂缓</button>
             </template>

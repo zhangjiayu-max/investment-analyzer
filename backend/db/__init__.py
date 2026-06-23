@@ -188,7 +188,7 @@ from db.decisions import (
     ensure_dashboard_decisions, list_due_decision_reviews,
     record_decision_review, build_decision_precheck,
     create_peer_review, list_peer_reviews, count_high_risk_reviews,
-    match_pending_decisions,
+    match_pending_decisions, create_transaction_draft_from_decision,
 )
 
 

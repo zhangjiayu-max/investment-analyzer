@@ -71,6 +71,12 @@ describe('API URL 路径正确性', () => {
     await getDashboard()
     expect(mockGet).toHaveBeenCalledWith('/dashboard')
   })
+
+  it('createTransactionDraftFromDecision 调用 /api/decisions/{id}/transaction-draft', async () => {
+    const { createTransactionDraftFromDecision } = await import('../api/index.js')
+    await createTransactionDraftFromDecision(42)
+    expect(mockPost).toHaveBeenCalledWith('/decisions/42/transaction-draft', {})
+  })
 })
 
 describe('stream URL 路径正确性', () => {

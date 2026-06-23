@@ -8,6 +8,7 @@ from db import (
     create_chat_decision_draft,
     create_decision,
     create_decision_action,
+    create_transaction_draft_from_decision,
     get_decision,
     get_messages,
     list_due_decision_reviews,
@@ -32,6 +33,11 @@ class DecisionReviewRequest(BaseModel):
     result_note: str = ""
     profit_change: float | None = None
     lesson: str = ""
+
+
+class TransactionDraftRequest(BaseModel):
+    force: bool = False
+    user_id: str = "default"
 
 
 class ChatDecisionDraftRequest(BaseModel):
@@ -198,6 +204,19 @@ async def complete_decision_action_api(decision_id: int, action_id: int):
     if not ok:
         raise HTTPException(400, "行动项状态更新失败")
     return {"ok": True, "item": get_decision(decision_id)}
+
+
+@router.post("/api/decisions/{decision_id}/transaction-draft")
+async def create_transaction_draft_api(decision_id: int, req: TransactionDraftRequest):
+    """从决策生成待确认交易草稿。不会确认交易或直接修改真实持仓。"""
+    result = create_transaction_draft_from_decision(
+        decision_id,
+        user_id=req.user_id or "default",
+        force=req.force,
+    )
+    if not result.get("ok"):
+        raise HTTPException(400, result)
+    return result
 
 
 # ── 多模型评审 API ──

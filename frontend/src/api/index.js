@@ -930,6 +930,11 @@ export function completeDecisionAction(decisionId, actionId) {
   return api.post(`/decisions/${decisionId}/actions/${actionId}/complete`)
 }
 
+/** 从决策生成待确认交易草稿 */
+export function createTransactionDraftFromDecision(decisionId, payload = {}) {
+  return api.post(`/decisions/${decisionId}/transaction-draft`, payload)
+}
+
 export function listDueDecisionReviews(limit = 20) {
   return api.get('/decisions/reviews/due', { params: { limit } })
 }

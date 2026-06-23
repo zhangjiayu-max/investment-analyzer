@@ -807,6 +807,8 @@ def build_decision_precheck(decision_id: int, user_id: str = "default") -> dict:
     checklist.extend(decision.get("suitability_json", {}).get("checklist") or [])
     checklist.extend(decision.get("evidence_json", {}).get("missing_data") or [])
 
+    trade_plan = _extract_trade_plan_from_decision(decision)
+
     decision_type = decision.get("decision_type")
     source_bucket = None
     source_bucket_id = decision.get("suitability_json", {}).get("source_bucket_id")
@@ -840,6 +842,50 @@ def build_decision_precheck(decision_id: int, user_id: str = "default") -> dict:
             blockers.append("月结余不为正，暂不适合新增风险资产仓位")
         elif monthly_surplus is None:
             warnings.append("未填写月结余，建议先确认定投或加仓资金来源")
+
+        amount = trade_plan.get("amount") or 0
+        if amount > 0:
+            try:
+                from db.portfolio import get_cash_balance
+
+                cash_info = get_cash_balance(user_id)
+                cash_balance = cash_info.get("balance", 0) if cash_info else 0
+                if cash_balance < amount:
+                    blockers.append(f"现金余额不足：计划买入 ¥{amount:,.0f}，当前现金约 ¥{cash_balance:,.0f}")
+            except Exception:
+                warnings.append("无法读取现金余额，执行前需手动确认资金来源")
+
+        fund_code = trade_plan.get("fund_code") or decision.get("target_code") or ""
+        if fund_code:
+            try:
+                from db.portfolio import list_transactions, list_holdings, get_cash_balance
+
+                pending = list_transactions(fund_code=fund_code, user_id=user_id, status="pending")
+                if pending:
+                    warnings.append(f"{fund_code} 已有待确认交易 {len(pending)} 笔，避免重复下单")
+
+                holdings = [h for h in list_holdings(user_id=user_id) if (h.get("shares") or 0) > 0]
+                cash_info = get_cash_balance(user_id)
+                cash_balance = cash_info.get("balance", 0) if cash_info else 0
+                total_value = sum(h.get("current_value", 0) or 0 for h in holdings)
+                total_assets = total_value + cash_balance
+                target_holding = next((h for h in holdings if h.get("fund_code") == fund_code), None)
+                if total_assets > 0 and target_holding:
+                    current_value = target_holding.get("current_value", 0) or 0
+                    projected_value = current_value + max(amount, 0)
+                    projected_assets = total_assets + max(amount - cash_balance, 0)
+                    projected_ratio = projected_value / projected_assets if projected_assets > 0 else 0
+                    max_single = profile.get("max_single_position_pct")
+                    if not isinstance(max_single, (int, float)):
+                        max_single = 0.30
+                    if max_single > 1:
+                        max_single = max_single / 100
+                    if projected_ratio > max_single:
+                        warnings.append(
+                            f"单基金占比将达到 {projected_ratio:.0%}，超过上限 {max_single:.0%}，建议降低单次金额或分批执行"
+                        )
+            except Exception:
+                warnings.append("无法完成持仓/待确认交易检查，执行前需手动确认")
 
     if decision.get("target_type") == "portfolio":
         target_equity_ratio = profile.get("target_equity_ratio")
@@ -878,6 +924,137 @@ def build_decision_precheck(decision_id: int, user_id: str = "default") -> dict:
             "fund_usage": profile.get("fund_usage", ""),
         },
         "source_bucket": source_bucket,
+        "trade_plan": trade_plan,
+    }
+
+
+def _extract_trade_plan_from_decision(decision: dict) -> dict:
+    """从决策行动参数中提取交易草稿意图。"""
+    plan = {
+        "transaction_type": "",
+        "fund_code": decision.get("target_code") or "",
+        "fund_name": decision.get("target_name") or "",
+        "amount": None,
+        "shares": None,
+    }
+    for action in decision.get("actions") or []:
+        params = action.get("params_json") or {}
+        if not isinstance(params, dict):
+            continue
+        if params.get("fund_code"):
+            plan["fund_code"] = params.get("fund_code") or ""
+        if params.get("fund_name"):
+            plan["fund_name"] = params.get("fund_name") or ""
+        if params.get("transaction_type"):
+            plan["transaction_type"] = params.get("transaction_type") or ""
+        if params.get("amount") is not None:
+            try:
+                plan["amount"] = float(params.get("amount") or 0)
+            except (TypeError, ValueError):
+                pass
+        if params.get("shares") is not None:
+            try:
+                plan["shares"] = float(params.get("shares") or 0)
+            except (TypeError, ValueError):
+                pass
+    if not plan["transaction_type"]:
+        decision_type = decision.get("decision_type")
+        if decision_type in ("add", "buy"):
+            plan["transaction_type"] = "buy"
+        elif decision_type in ("reduce", "sell"):
+            plan["transaction_type"] = "sell"
+    return plan
+
+
+def create_transaction_draft_from_decision(
+    decision_id: int,
+    user_id: str = "default",
+    force: bool = False,
+) -> dict:
+    """从决策生成待确认交易草稿。
+
+    只创建 `portfolio_transactions.status='pending'`，不确认交易、不更新真实持仓。
+    """
+    decision = get_decision(decision_id)
+    if not decision:
+        return {"ok": False, "error": "决策不存在"}
+
+    decision_type = decision.get("decision_type")
+    if decision_type not in ("add", "buy", "reduce", "sell"):
+        return {"ok": False, "error": f"决策类型 {decision_type} 不支持生成交易草稿"}
+
+    precheck = build_decision_precheck(decision_id, user_id=user_id)
+    if precheck.get("blockers") and not force:
+        return {"ok": False, "error": "；".join(precheck.get("blockers") or []), "precheck": precheck}
+
+    plan = precheck.get("trade_plan") or _extract_trade_plan_from_decision(decision)
+    tx_type = plan.get("transaction_type")
+    fund_code = plan.get("fund_code") or decision.get("target_code") or ""
+    fund_name = plan.get("fund_name") or decision.get("target_name") or fund_code
+    amount = plan.get("amount") or 0
+    shares = plan.get("shares")
+
+    if tx_type not in ("buy", "sell"):
+        return {"ok": False, "error": "交易草稿仅支持买入或卖出"}
+    if not fund_code:
+        return {"ok": False, "error": "缺少基金代码，无法生成交易草稿"}
+    if tx_type == "buy" and amount <= 0:
+        return {"ok": False, "error": "买入交易缺少有效金额"}
+    if tx_type == "sell" and (shares is None or shares <= 0):
+        return {"ok": False, "error": "卖出交易缺少有效份额"}
+
+    from datetime import datetime
+    from db.portfolio import create_transaction, get_holding_by_fund, list_transactions
+
+    existing_pending = list_transactions(fund_code=fund_code, user_id=user_id, status="pending")
+    if existing_pending and not force:
+        return {"ok": False, "error": f"{fund_code} 已有待确认交易，请先处理后再生成草稿", "precheck": precheck}
+
+    holding = get_holding_by_fund(fund_code, user_id=user_id)
+    holding_id = holding.get("id") if holding else None
+    today = datetime.now().strftime("%Y-%m-%d")
+
+    tx_id = create_transaction(
+        fund_code=fund_code,
+        fund_name=fund_name,
+        transaction_type=tx_type,
+        amount=0,
+        shares=None,
+        price=None,
+        transaction_date=today,
+        holding_id=holding_id,
+        notes=f"由决策 #{decision_id} 生成的交易草稿",
+        user_id=user_id,
+        status="pending",
+        submitted_amount=amount if tx_type == "buy" else None,
+        submitted_shares=shares if tx_type == "sell" else None,
+    )
+
+    action_id = create_decision_action(
+        decision_id=decision_id,
+        action_type="transaction_draft",
+        title=f"已生成{fund_name}的{'买入' if tx_type == 'buy' else '卖出'}交易草稿",
+        params={
+            "transaction_id": tx_id,
+            "transaction_type": tx_type,
+            "fund_code": fund_code,
+            "fund_name": fund_name,
+            "submitted_amount": amount if tx_type == "buy" else None,
+            "submitted_shares": shares if tx_type == "sell" else None,
+        },
+        status="todo",
+    )
+    update_decision_status(decision_id, "accepted", "已生成待确认交易草稿")
+
+    tx = list_transactions(fund_code=fund_code, user_id=user_id, status="pending", limit=10)
+    tx_item = next((item for item in tx if item.get("id") == tx_id), None)
+    return {
+        "ok": True,
+        "transaction_id": tx_id,
+        "action_id": action_id,
+        "transaction": tx_item or {"id": tx_id, "status": "pending", "fund_code": fund_code, "transaction_type": tx_type},
+        "decision": get_decision(decision_id),
+        "precheck": precheck,
     }
 
 
