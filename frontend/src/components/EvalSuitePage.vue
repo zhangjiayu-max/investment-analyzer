@@ -110,6 +110,7 @@ async function loadAll() {
 const converting = ref(false)
 const extracting = ref(false)
 const regressing = ref(false)
+const autoGenerating = ref(false)
 const regressionResult = ref(null)
 
 // Prompt 版本管理状态
@@ -219,6 +220,20 @@ async function doExtractConversations() {
   } catch (e) {
     showToast('提取失败: ' + (e.response?.data?.detail || e.message), 'error')
   } finally { extracting.value = false }
+}
+
+async function doAutoGenerate() {
+  autoGenerating.value = true
+  try {
+    const resp = await fetch('/api/eval/cases/auto-generate', { method: 'POST' })
+    const data = await resp.json()
+    const pos = data.positive || {}
+    const neg = data.negative || {}
+    showToast(`正例 ${pos.created} 条 + 负例 ${neg.created} 条，跳过 ${pos.skipped + neg.skipped}`, 'success')
+    await loadAll()
+  } catch (e) {
+    showToast('自动生成失败: ' + e.message, 'error')
+  } finally { autoGenerating.value = false }
 }
 
 async function doAutoRegression() {
@@ -424,6 +439,9 @@ onMounted(() => {
       <div class="header-actions">
         <button class="btn-secondary" @click="loadAll" :disabled="loading">
           {{ loading ? '加载中...' : '🔄 刷新' }}
+        </button>
+        <button class="btn-primary" @click="doAutoGenerate" :disabled="autoGenerating">
+          {{ autoGenerating ? '生成中...' : '✨ 自动生成用例' }}
         </button>
         <button class="btn-secondary" @click="doBatchConvert" :disabled="converting">
           {{ converting ? '转化中...' : '🧲 BadCase→用例' }}
