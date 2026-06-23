@@ -112,6 +112,93 @@ const extracting = ref(false)
 const regressing = ref(false)
 const regressionResult = ref(null)
 
+// Prompt 版本管理状态
+const prompts = ref([])
+const promptFilterType = ref('')
+const showPromptForm = ref(false)
+const promptForm = ref({ agent_type: 'panorama', version: '', prompt_content: '', changelog: '' })
+const abResult = ref(null)
+
+// 每日评测状态
+const dailyReports = ref([])
+const dailyRunning = ref(false)
+
+async function loadPrompts() {
+  try {
+    const params = promptFilterType.value ? { agent_type: promptFilterType.value } : {}
+    const resp = await fetch(`/api/eval-system/prompts?${new URLSearchParams(params)}`)
+    const data = await resp.json()
+    prompts.value = data.versions || []
+  } catch (e) { /* ignore */ }
+}
+
+async function savePrompt() {
+  try {
+    await fetch('/api/eval-system/prompts', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(promptForm.value),
+    })
+    showToast('版本已保存', 'success')
+    showPromptForm.value = false
+    promptForm.value = { agent_type: 'panorama', version: '', prompt_content: '', changelog: '' }
+    await loadPrompts()
+  } catch (e) {
+    showToast('保存失败: ' + e.message, 'error')
+  }
+}
+
+async function activatePrompt(p) {
+  try {
+    await fetch(`/api/eval-system/prompts/${p.id}/activate`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ agent_type: p.agent_type }),
+    })
+    showToast(`${p.agent_type} ${p.version} 已激活`, 'success')
+    await loadPrompts()
+  } catch (e) {
+    showToast('激活失败', 'error')
+  }
+}
+
+async function comparePrompt(p) {
+  try {
+    showToast('A/B 对比中...', 'info')
+    const resp = await fetch(`/api/eval-system/prompts/${p.id}/compare?case_type=${p.agent_type}`)
+    const data = await resp.json()
+    abResult.value = data
+    showToast('对比完成', 'success')
+  } catch (e) {
+    showToast('对比失败: ' + (e.response?.data?.detail || e.message), 'error')
+  }
+}
+
+async function loadDailyReports() {
+  try {
+    const resp = await fetch('/api/eval-system/daily-reports?limit=30')
+    const data = await resp.json()
+    dailyReports.value = (data.reports || []).map(r => ({
+      ...r,
+      alerts_parsed: typeof r.alerts === 'string' ? JSON.parse(r.alerts || '[]') : (r.alerts || []),
+      recommendations_parsed: typeof r.recommendations === 'string' ? JSON.parse(r.recommendations || '[]') : (r.recommendations || []),
+      scores_parsed: typeof r.scores_by_type === 'string' ? JSON.parse(r.scores_by_type || '{}') : (r.scores_by_type || {}),
+    }))
+  } catch (e) { /* ignore */ }
+}
+
+async function triggerDailyEval() {
+  dailyRunning.value = true
+  try {
+    const resp = await fetch('/api/eval-system/daily', { method: 'POST' })
+    const data = await resp.json()
+    showToast(`评测完成：${data.report?.total_cases || 0} 条，均分 ${data.report?.avg_score || 0}/25`, 'success')
+    await loadDailyReports()
+  } catch (e) {
+    showToast('评测失败: ' + e.message, 'error')
+  } finally {
+    dailyRunning.value = false
+  }
+}
+
 async function doBatchConvert() {
   converting.value = true
   try {
@@ -323,6 +410,7 @@ const latestRuns = computed(() => runs.value.slice(0, 30))
 onMounted(() => {
   restoreEvalTask()
   loadAll()
+  loadPrompts()
 })
 </script>
 
@@ -404,6 +492,12 @@ onMounted(() => {
       </button>
       <button :class="['tab-btn', { active: activeTab === 'runs' }]" @click="activeTab = 'runs'">
         运行记录 ({{ runs.length }})
+      </button>
+      <button :class="['tab-btn', { active: activeTab === 'prompts' }]" @click="activeTab = 'prompts'">
+        Prompt 版本
+      </button>
+      <button :class="['tab-btn', { active: activeTab === 'daily' }]" @click="activeTab = 'daily'; loadDailyReports()">
+        质量趋势
       </button>
     </div>
 
@@ -657,6 +751,118 @@ onMounted(() => {
         </div>
       </div>
     </div>
+
+    <!-- Prompt Versions Tab -->
+    <div v-if="activeTab === 'prompts'" class="tab-content">
+      <div class="section-header">
+        <div class="section-actions">
+          <select v-model="promptFilterType" class="input-field" style="width:auto" @change="loadPrompts">
+            <option value="">全部类型</option>
+            <option v-for="t in analysisTypeOptions" :key="t.value" :value="t.value">{{ t.label }}</option>
+          </select>
+        </div>
+        <button class="btn-primary btn-sm" @click="showPromptForm = !showPromptForm">+ 新建版本</button>
+      </div>
+      <Transition name="expand">
+        <div v-if="showPromptForm" class="form-card card">
+          <h4>新建 Prompt 版本</h4>
+          <div class="form-grid">
+            <div class="form-row">
+              <label>Agent 类型 *</label>
+              <select v-model="promptForm.agent_type" class="input-field">
+                <option v-for="t in analysisTypeOptions" :key="t.value" :value="t.value">{{ t.label }}</option>
+              </select>
+            </div>
+            <div class="form-row">
+              <label>版本号 *</label>
+              <input v-model="promptForm.version" class="input-field" placeholder="如 v2" />
+            </div>
+            <div class="form-row">
+              <label>变更说明</label>
+              <input v-model="promptForm.changelog" class="input-field" placeholder="本次修改说明" />
+            </div>
+          </div>
+          <div class="form-row">
+            <label>Prompt 内容 *</label>
+            <textarea v-model="promptForm.prompt_content" class="input-field" rows="6" placeholder="提示词全文"></textarea>
+          </div>
+          <div class="form-actions">
+            <button class="btn-primary btn-sm" @click="savePrompt">保存</button>
+            <button class="btn-ghost btn-sm" @click="showPromptForm = false">取消</button>
+          </div>
+        </div>
+      </Transition>
+      <div v-if="prompts.length === 0" class="empty-state">
+        <p class="text-muted">暂无 Prompt 版本记录</p>
+      </div>
+      <div v-else class="prompts-list">
+        <div v-for="p in prompts" :key="p.id" class="prompt-item card">
+          <div class="prompt-header">
+            <span class="prompt-type">{{ p.agent_type }}</span>
+            <span class="prompt-version">{{ p.version }}</span>
+            <span v-if="p.is_active" class="badge-active">当前版本</span>
+            <span class="prompt-score" v-if="p.eval_count > 0">均分: {{ p.avg_score?.toFixed(1) }}/25</span>
+          </div>
+          <p class="prompt-changelog" v-if="p.changelog">{{ p.changelog }}</p>
+          <div class="prompt-actions">
+            <button v-if="!p.is_active" class="btn-primary btn-sm" @click="activatePrompt(p)">激活</button>
+            <button v-if="!p.is_active" class="btn-secondary btn-sm" @click="comparePrompt(p)">A/B 对比</button>
+          </div>
+        </div>
+      </div>
+      <!-- A/B 对比结果 -->
+      <div v-if="abResult" class="ab-result card">
+        <h4>A/B 对比结果</h4>
+        <div class="ab-scores">
+          <div class="ab-side">
+            <span class="ab-label">当前版本 ({{ abResult.active_version }})</span>
+            <span class="ab-score">{{ abResult.avg_active }}/25</span>
+          </div>
+          <span class="ab-vs">VS</span>
+          <div class="ab-side">
+            <span class="ab-label">新版本 ({{ abResult.target_version }})</span>
+            <span class="ab-score" :class="{ win: abResult.avg_target > abResult.avg_active }">{{ abResult.avg_target }}/25</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Daily Reports Tab -->
+    <div v-if="activeTab === 'daily'" class="tab-content">
+      <div class="section-header">
+        <div class="section-actions">
+          <button class="btn-secondary btn-sm" @click="triggerDailyEval" :disabled="dailyRunning">
+            {{ dailyRunning ? '评测中...' : '▶ 手动触发每日评测' }}
+          </button>
+        </div>
+      </div>
+      <div v-if="dailyReports.length === 0" class="empty-state">
+        <p class="text-muted">暂无质量日报</p>
+      </div>
+      <div v-else class="daily-list">
+        <div v-for="r in dailyReports" :key="r.id" class="daily-item card">
+          <div class="daily-header">
+            <span class="daily-date">{{ r.report_date }}</span>
+            <span class="daily-score" :class="{ up: r.score_trend === 'up', down: r.score_trend === 'down' }">
+              {{ r.avg_score }}/25
+              <span v-if="r.score_trend === 'up'">↑</span>
+              <span v-else-if="r.score_trend === 'down'">↓</span>
+            </span>
+            <span class="daily-cases">{{ r.total_cases }} 条用例</span>
+          </div>
+          <div v-if="r.alerts_parsed.length" class="daily-alerts">
+            <p v-for="a in r.alerts_parsed" :key="a" class="alert-item">{{ a }}</p>
+          </div>
+          <div v-if="r.recommendations_parsed.length" class="daily-recs">
+            <p class="recs-title">改进建议：</p>
+            <ul>
+              <li v-for="rec in r.recommendations_parsed.slice(0,5)" :key="rec">{{ rec }}</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+    </div>
+
   </div>
   <ConfirmDialog
     :visible="confirm.visible"
@@ -1310,4 +1516,36 @@ onMounted(() => {
     grid-template-columns: repeat(2, 1fr);
   }
 }
+
+/* Prompt & Daily Report styles */
+.prompts-list { display: flex; flex-direction: column; gap: 8px; }
+.prompt-item { padding: 12px; }
+.prompt-header { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.prompt-type { font-weight: 600; color: var(--color-primary); }
+.prompt-version { font-weight: 700; }
+.prompt-score { color: var(--color-text-muted); font-size: 0.85em; margin-left: auto; }
+.prompt-changelog { color: var(--color-text-muted); font-size: 0.85em; margin: 4px 0; }
+.prompt-actions { display: flex; gap: 8px; margin-top: 8px; }
+.badge-active { background: #10b981; color: #fff; padding: 2px 8px; border-radius: 4px; font-size: 0.75em; }
+
+.ab-result { margin-top: 16px; }
+.ab-scores { display: flex; align-items: center; gap: 16px; justify-content: center; padding: 16px; }
+.ab-side { text-align: center; }
+.ab-label { display: block; font-size: 0.85em; color: var(--color-text-muted); }
+.ab-score { font-size: 1.5em; font-weight: 700; }
+.ab-score.win { color: #10b981; }
+.ab-vs { font-weight: 700; color: var(--color-text-muted); }
+
+.daily-list { display: flex; flex-direction: column; gap: 8px; }
+.daily-item { padding: 12px; }
+.daily-header { display: flex; align-items: center; gap: 12px; }
+.daily-date { font-weight: 600; }
+.daily-score { font-weight: 700; font-size: 1.1em; }
+.daily-score.up { color: #10b981; }
+.daily-score.down { color: #ef4444; }
+.daily-cases { color: var(--color-text-muted); font-size: 0.85em; }
+.daily-alerts { margin-top: 8px; }
+.alert-item { color: #f59e0b; font-size: 0.9em; }
+.daily-recs { margin-top: 8px; font-size: 0.85em; }
+.recs-title { font-weight: 600; margin-bottom: 4px; }
 </style>

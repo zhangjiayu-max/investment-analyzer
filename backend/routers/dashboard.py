@@ -191,10 +191,18 @@ async def get_dashboard():
         ).fetchone()[0]
         conn.close()
         if today_count == 0:
-            logging.info("今日无估值数据，自动抓取中...")
-            # 延迟导入避免循环依赖（fetch_recent_valuations 定义在 app.py）
-            from app import fetch_recent_valuations
-            await fetch_recent_valuations()
+            logging.info("今日无估值数据，后台异步抓取中...")
+            # 异步后台执行，不阻塞 dashboard 响应
+            import asyncio as _aio
+            async def _bg_fetch():
+                try:
+                    from app import fetch_recent_valuations
+                    await _aio.wait_for(fetch_recent_valuations(), timeout=30)
+                except _aio.TimeoutError:
+                    logging.warning("估值抓取超时(30s)，跳过")
+                except Exception as e:
+                    logging.warning(f"后台估值抓取失败: {e}")
+            _aio.create_task(_bg_fetch())
     except Exception as e:
         logging.warning(f"自动抓取估值失败: {e}")
 

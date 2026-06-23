@@ -72,13 +72,14 @@ async def run_llm_judge(case_type: str, expected_behavior: str,
         agent_output=agent_output[:6000],
     )
     try:
-        result = await _call_llm(
+        response = await asyncio.to_thread(lambda: _call_llm(
+            caller="eval_judge",
             model=MODEL,
             messages=[{"role": "user", "content": prompt}],
             temperature=0.1,
             max_tokens=get_config_int("llm.max_tokens_eval", 2000),
-        )
-        content = result.get("content", "") if isinstance(result, dict) else str(result)
+        ))
+        content = response.choices[0].message.content or ""
         json_match = re.search(r'```json\s*(.*?)\s*```', content, re.DOTALL)
         if json_match:
             parsed = json.loads(json_match.group(1))
@@ -126,13 +127,14 @@ async def _generate_agent_output(case: dict) -> str:
 
 请按照标准分析格式输出。"""
     try:
-        result = await _call_llm(
+        response = await asyncio.to_thread(lambda: _call_llm(
+            caller="eval_agent_gen",
             model=MODEL,
             messages=[{"role": "user", "content": full_prompt}],
             temperature=0.3,
             max_tokens=get_config_int("llm.max_tokens_analysis", 8000),
-        )
-        return result.get("content", "") if isinstance(result, dict) else str(result)
+        ))
+        return response.choices[0].message.content or ""
     except Exception as e:
         logger.error(f"[eval] 生成 Agent 输出失败: {e}")
         return f"生成失败: {e}"
