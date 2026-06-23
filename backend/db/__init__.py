@@ -634,6 +634,14 @@ def init_db():
         conn.execute("ALTER TABLE portfolio_analysis_records ADD COLUMN feedback_note TEXT DEFAULT NULL")
     except Exception:
         pass
+    try:
+        conn.execute("ALTER TABLE portfolio_analysis_records ADD COLUMN root_cause TEXT DEFAULT ''")
+    except Exception:
+        pass
+    try:
+        conn.execute("ALTER TABLE portfolio_analysis_records ADD COLUMN root_cause_detail TEXT DEFAULT ''")
+    except Exception:
+        pass
 
     conn.execute("""
         CREATE TABLE IF NOT EXISTS rebalance_config (

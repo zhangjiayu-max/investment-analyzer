@@ -244,3 +244,42 @@ async def list_bad_cases_api(source: str = None, limit: int = 100):
     """列出所有 Bad Case（分析记录 + LLM 反馈）。"""
     cases = list_all_bad_cases(source=source, limit=limit)
     return {"cases": cases, "count": len(cases)}
+
+
+@router.post("/api/portfolio/analysis/root-cause/batch")
+async def batch_analyze_root_cause(limit: int = 50, force: bool = False):
+    """批量分析 Bad Case 根因。"""
+    from root_cause_analyzer import batch_analyze
+    result = batch_analyze(limit=limit, force=force)
+    return result
+
+
+@router.get("/api/portfolio/analysis/root-cause/stats")
+async def get_root_cause_stats_api():
+    """获取根因统计信息。"""
+    from root_cause_analyzer import get_root_cause_stats
+    return get_root_cause_stats()
+
+
+@router.post("/api/portfolio/analysis/root-cause/{source}/{case_id}")
+async def analyze_single_root_cause(source: str, case_id: int):
+    """分析单个 Bad Case 的根因。"""
+    from root_cause_analyzer import analyze_root_cause, _save_root_cause
+    from db.portfolio import list_all_bad_cases
+
+    cases = list_all_bad_cases(limit=500)
+    target = None
+    for c in cases:
+        if c["source"] == source and c["id"] == case_id:
+            target = c
+            break
+
+    if not target:
+        raise HTTPException(status_code=404, detail="Bad Case 未找到")
+
+    result = analyze_root_cause(target)
+    if not result:
+        raise HTTPException(status_code=500, detail="根因分析失败")
+
+    _save_root_cause(source, case_id, result)
+    return {"ok": True, "result": result}

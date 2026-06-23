@@ -102,6 +102,9 @@ def init_eval_tables(conn):
     _add_column_if_not_exists(conn, "llm_feedback", "overall_score", "REAL")
     _add_column_if_not_exists(conn, "llm_feedback", "target_type", "TEXT DEFAULT ''")
     _add_column_if_not_exists(conn, "llm_feedback", "target_id", "INTEGER")
+    # Bad Case 根因分析
+    _add_column_if_not_exists(conn, "llm_feedback", "root_cause", "TEXT DEFAULT ''")
+    _add_column_if_not_exists(conn, "llm_feedback", "root_cause_detail", "TEXT DEFAULT ''")
 
     conn.execute("""
         CREATE TABLE IF NOT EXISTS analysis_cache (

@@ -11,9 +11,78 @@ const confirm = ref({ visible: false, title: '', message: '', danger: false, onC
 const cases = ref([])
 const loading = ref(false)
 const converting = ref(false)
+const analyzing = ref(false)
 const filterSource = ref('')
 const filterType = ref('')
 const selectedCase = ref(null)
+const rootCauseStats = ref(null)
+const showStatsPanel = ref(false)
+
+// API 基础路径
+const API_BASE = '/api/portfolio/analysis'
+// 根因标签样式映射
+const rootCauseStyles = {
+  data_missing: { label: '数据缺失', color: '#f59e0b', bg: '#fef3c7' },
+  reasoning_error: { label: '推理错误', color: '#ef4444', bg: '#fecaca' },
+  knowledge_gap: { label: '知识不足', color: '#8b5cf6', bg: '#ede9fe' },
+  format_issue: { label: '格式问题', color: '#6b7280', bg: '#f3f4f6' },
+  hallucination: { label: '幻觉编造', color: '#dc2626', bg: '#fee2e2' },
+  irrelevant: { label: '答非所问', color: '#f97316', bg: '#ffedd5' },
+  outdated_info: { label: '信息过时', color: '#0891b2', bg: '#cffafe' },
+  tone_issue: { label: '语气问题', color: '#84cc16', bg: '#ecfccb' },
+  other: { label: '其他', color: '#6b7280', bg: '#f3f4f6' },
+}
+
+// 加载根因统计
+async function loadRootCauseStats() {
+  try {
+    const resp = await fetch(`${API_BASE}/root-cause/stats`)
+    rootCauseStats.value = await resp.json()
+  } catch (e) {
+    console.error('加载根因统计失败:', e)
+  }
+}
+
+// 批量分析根因
+async function batchAnalyze() {
+  analyzing.value = true
+  try {
+    const resp = await fetch(`${API_BASE}/root-cause/batch?limit=50`, { method: 'POST' })
+    const data = await resp.json()
+    showToast(`分析完成: ${data.analyzed} 条成功，${data.failed} 条失败`, 'success')
+    await load()
+    await loadRootCauseStats()
+  } catch (e) {
+    showToast('分析失败: ' + e.message, 'error')
+  } finally {
+    analyzing.value = false
+  }
+}
+
+// 分析单条根因
+async function analyzeSingle(c) {
+  try {
+    const resp = await fetch(`${API_BASE}/root-cause/${c.source}/${c.id}`, { method: 'POST' })
+    const data = await resp.json()
+    if (data.ok) {
+      c.root_cause = data.result.root_cause
+      c.root_cause_detail = JSON.stringify(data.result)
+      showToast(`根因: ${rootCauseStyles[data.result.root_cause]?.label || data.result.root_cause}`, 'success')
+    }
+  } catch (e) {
+    showToast('分析失败', 'error')
+  }
+}
+
+// 解析根因详情 JSON
+function parseRcDetail(detail) {
+  if (!detail) return null
+  try {
+    return typeof detail === 'string' ? JSON.parse(detail) : detail
+  } catch {
+    return null
+  }
+}
 
 const sourceLabels = {
   analysis: '分析记录',
@@ -116,7 +185,7 @@ async function doConvertToEval(c) {
   }
 }
 
-onMounted(load)
+onMounted(() => { load(); loadRootCauseStats() })
 </script>
 
 <template>
@@ -136,6 +205,12 @@ onMounted(load)
           <option value="">全部类型</option>
           <option v-for="t in analysisTypes" :key="t" :value="t">{{ analysisTypeLabels[t] || t }}</option>
         </select>
+        <button class="btn-secondary btn-sm" @click="showStatsPanel = !showStatsPanel">
+          {{ showStatsPanel ? '隐藏根因' : '📊 根因统计' }}
+        </button>
+        <button class="btn-primary btn-sm" @click="batchAnalyze" :disabled="analyzing">
+          {{ analyzing ? '分析中...' : '🔍 批量分析根因' }}
+        </button>
         <button class="btn-secondary" @click="load" :disabled="loading">
           {{ loading ? '加载中...' : '刷新' }}
         </button>
@@ -156,7 +231,43 @@ onMounted(load)
         <span class="stat-value">{{ stats.chat }}</span>
         <span class="stat-label">对话反馈</span>
       </div>
+      <div v-if="rootCauseStats" class="stat-card">
+        <span class="stat-value">{{ rootCauseStats.total_analyzed }}</span>
+        <span class="stat-label">已分析根因</span>
+      </div>
     </div>
+
+    <!-- Root Cause Stats Panel -->
+    <Transition name="fade">
+      <div v-if="showStatsPanel && rootCauseStats" class="root-cause-panel">
+        <div class="rc-section">
+          <h4 class="rc-title">根因分布</h4>
+          <div class="rc-bars">
+            <div v-for="item in rootCauseStats.by_cause" :key="item.root_cause" class="rc-bar-item">
+              <div class="rc-bar-label">
+                <span class="rc-dot" :style="{ background: rootCauseStyles[item.root_cause]?.color || '#999' }"></span>
+                {{ item.label }}
+                <span class="rc-bar-count">{{ item.count }} ({{ item.pct }}%)</span>
+              </div>
+              <div class="rc-bar-track">
+                <div class="rc-bar-fill" :style="{ width: item.pct + '%', background: rootCauseStyles[item.root_cause]?.color || '#999' }"></div>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div v-if="rootCauseStats.recent?.length" class="rc-section">
+          <h4 class="rc-title">最近分析</h4>
+          <div class="rc-recent">
+            <div v-for="r in rootCauseStats.recent" :key="r.source + r.id" class="rc-recent-item">
+              <span class="rc-tag" :style="{ color: rootCauseStyles[r.root_cause]?.color, background: rootCauseStyles[r.root_cause]?.bg }">
+                {{ r.label }}
+              </span>
+              <span class="rc-recent-detail">{{ r.detail }}</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </Transition>
 
     <!-- Bad Case list -->
     <div class="badcase-content">
@@ -170,10 +281,16 @@ onMounted(load)
           <div class="badcase-header">
             <span class="badge badge-sm" :class="'badge-' + c.source">{{ sourceLabels[c.source] || c.source }}</span>
             <span class="badge badge-sm badge-type">{{ typeLabel(c) }}</span>
+            <span v-if="c.root_cause" class="rc-tag rc-tag-sm" :style="{ color: rootCauseStyles[c.root_cause]?.color, background: rootCauseStyles[c.root_cause]?.bg }">
+              {{ rootCauseStyles[c.root_cause]?.label || c.root_cause }}
+            </span>
             <span class="badcase-time">{{ c.created_at?.slice(0, 16) }}</span>
           </div>
           <div class="badcase-summary">{{ c.summary || '无摘要' }}</div>
           <div v-if="c.note" class="badcase-note">📝 {{ c.note }}</div>
+          <div v-if="!c.root_cause" class="badcase-actions-inline">
+            <button class="btn-link" @click.stop="analyzeSingle(c)">🔍 分析根因</button>
+          </div>
         </div>
         <div v-if="!loading && filteredCases.length === 0" class="empty-state">
           <p>暂无 Bad Case</p>
@@ -200,6 +317,24 @@ onMounted(load)
         <div class="detail-section">
           <h4>反馈原因</h4>
           <p>{{ selectedCase.note || '用户未填写原因' }}</p>
+        </div>
+
+        <div v-if="selectedCase.root_cause" class="detail-section">
+          <h4>根因分析</h4>
+          <div class="rc-detail">
+            <span class="rc-tag" :style="{ color: rootCauseStyles[selectedCase.root_cause]?.color, background: rootCauseStyles[selectedCase.root_cause]?.bg }">
+              {{ rootCauseStyles[selectedCase.root_cause]?.label || selectedCase.root_cause }}
+            </span>
+            <template v-if="selectedCase.root_cause_detail">
+              <p v-if="parseRcDetail(selectedCase.root_cause_detail)?.detail" class="rc-detail-text">{{ parseRcDetail(selectedCase.root_cause_detail).detail }}</p>
+              <p v-if="parseRcDetail(selectedCase.root_cause_detail)?.evidence" class="rc-evidence">证据: {{ parseRcDetail(selectedCase.root_cause_detail).evidence }}</p>
+              <p v-if="parseRcDetail(selectedCase.root_cause_detail)?.suggestion" class="rc-suggestion">建议: {{ parseRcDetail(selectedCase.root_cause_detail).suggestion }}</p>
+            </template>
+          </div>
+        </div>
+        <div v-else class="detail-section">
+          <h4>根因分析</h4>
+          <button class="btn-primary btn-sm" @click="analyzeSingle(selectedCase)">🔍 分析根因</button>
         </div>
 
         <div class="detail-section">
@@ -356,6 +491,141 @@ onMounted(load)
 .badge-analysis { background: #c9a84c; color: white; }
 .badge-chat { background: #06b6d4; color: white; }
 .badge-type { background: var(--color-bg); color: var(--color-text-secondary); border: 1px solid var(--color-border); }
+
+/* Root Cause Tags */
+.rc-tag {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.15rem 0.5rem;
+  border-radius: var(--radius-sm);
+  font-size: 0.72rem;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.rc-tag-sm {
+  padding: 0.1rem 0.4rem;
+  font-size: 0.68rem;
+}
+.badcase-actions-inline {
+  margin-top: 0.3rem;
+}
+.btn-link {
+  background: none;
+  border: none;
+  color: var(--color-primary);
+  font-size: 0.75rem;
+  cursor: pointer;
+  padding: 0;
+}
+.btn-link:hover {
+  text-decoration: underline;
+}
+
+/* Root Cause Stats Panel */
+.root-cause-panel {
+  background: var(--color-bg-card);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  padding: 1rem 1.25rem;
+  margin-bottom: 1rem;
+}
+.rc-section {
+  margin-bottom: 1rem;
+}
+.rc-section:last-child {
+  margin-bottom: 0;
+}
+.rc-title {
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: var(--color-text-primary);
+  margin: 0 0 0.6rem 0;
+}
+.rc-bars {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+.rc-bar-item {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+.rc-bar-label {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.78rem;
+  color: var(--color-text-secondary);
+}
+.rc-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.rc-bar-count {
+  margin-left: auto;
+  font-weight: 600;
+  color: var(--color-text-primary);
+}
+.rc-bar-track {
+  height: 6px;
+  background: var(--color-bg);
+  border-radius: 3px;
+  overflow: hidden;
+}
+.rc-bar-fill {
+  height: 100%;
+  border-radius: 3px;
+  transition: width 0.3s ease;
+}
+.rc-recent {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+.rc-recent-item {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.78rem;
+}
+.rc-recent-detail {
+  color: var(--color-text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+  min-width: 0;
+}
+.btn-sm {
+  padding: 0.4rem 0.75rem;
+  font-size: 0.8rem;
+}
+
+/* Root Cause Detail */
+.rc-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+.rc-detail-text {
+  font-size: 0.85rem;
+  color: var(--color-text-primary);
+  margin: 0;
+}
+.rc-evidence {
+  font-size: 0.78rem;
+  color: var(--color-text-muted);
+  margin: 0;
+  font-style: italic;
+}
+.rc-suggestion {
+  font-size: 0.78rem;
+  color: var(--color-primary);
+  margin: 0;
+}
 
 .badcase-detail {
   background: var(--color-bg-card);

@@ -1880,7 +1880,7 @@ def list_all_bad_cases(source: str = None, limit: int = 100) -> list[dict]:
         # 来源 A: portfolio_analysis_records
         rows = conn.execute("""
             SELECT id, analysis_type, summary, input_data, result_data, feedback_note,
-                   token_usage, agent_id, created_at
+                   token_usage, agent_id, root_cause, root_cause_detail, created_at
             FROM portfolio_analysis_records
             WHERE feedback = 'unhelpful'
             ORDER BY created_at DESC LIMIT ?
@@ -1895,6 +1895,8 @@ def list_all_bad_cases(source: str = None, limit: int = 100) -> list[dict]:
                 'input': d.get('input_data', ''),
                 'output': d.get('result_data', ''),
                 'note': d.get('feedback_note', ''),
+                'root_cause': d.get('root_cause', ''),
+                'root_cause_detail': d.get('root_cause_detail', ''),
                 'metadata': {'token_usage': d.get('token_usage'), 'agent_id': d.get('agent_id')},
                 'created_at': d.get('created_at', ''),
             })
@@ -1902,7 +1904,8 @@ def list_all_bad_cases(source: str = None, limit: int = 100) -> list[dict]:
     if source != 'analysis':
         # 来源 B: llm_feedback (chat / specialist 等)
         rows = conn.execute("""
-            SELECT id, caller, input_summary, output_summary, rating, tags, comment, created_at
+            SELECT id, caller, input_summary, output_summary, rating, tags, comment,
+                   root_cause, root_cause_detail, created_at
             FROM llm_feedback
             WHERE rating = 'unhelpful'
             ORDER BY created_at DESC LIMIT ?
@@ -1917,6 +1920,8 @@ def list_all_bad_cases(source: str = None, limit: int = 100) -> list[dict]:
                 'input': d.get('input_summary', ''),
                 'output': d.get('output_summary', ''),
                 'note': d.get('comment', ''),
+                'root_cause': d.get('root_cause', ''),
+                'root_cause_detail': d.get('root_cause_detail', ''),
                 'metadata': {'tags': d.get('tags', ''), 'caller': d.get('caller', '')},
                 'created_at': d.get('created_at', ''),
             })
