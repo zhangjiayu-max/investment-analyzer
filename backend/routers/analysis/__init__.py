@@ -32,6 +32,8 @@ from .fee_analyzer import router as fee_router
 from .correlation import router as correlation_router
 from .eval_system import router as eval_system_router
 from .health_score import router as health_score_router
+from .rolling_return import router as rolling_return_router
+from .four_pots import router as four_pots_router
 
 __all__ = [
     "panorama_router", "deep_dive_router", "trade_review_router",
@@ -39,4 +41,5 @@ __all__ = [
     "rebalancing_router", "hotspots_router", "daily_report_router",
     "market_intel_router", "bond_recommend_router", "index_analysis_router",
     "fee_router", "correlation_router", "eval_system_router", "health_score_router",
+    "rolling_return_router", "four_pots_router",
 ]

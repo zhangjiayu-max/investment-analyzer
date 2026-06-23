@@ -33,6 +33,8 @@ import {
   lookupWatchlistFund as lookupWatchlistFundApi,
   exportPortfolioCsv, importPortfolioCsv,
   getPortfolioManagerOverview,
+  analyzeRollingPortfolio, analyzeRollingIndex, analyzeRollingFund,
+  classifyFourPots, getDcaOptimization,
 } from '../api'
 import { useToast } from '../composables/useToast'
 import ConfirmDialog from './ConfirmDialog.vue'
@@ -1272,6 +1274,9 @@ const aiModes = [
   { key: 'fee', icon: '💰', label: '费率分析' },
   { key: 'correlation', icon: '🔗', label: '相关性分析' },
   { key: 'compare', icon: '⚖️', label: '对比分析' },
+  { key: 'rolling', icon: '📈', label: '滚动收益' },
+  { key: 'four-pots', icon: '🪣', label: '四笔钱' },
+  { key: 'dca', icon: '🔄', label: '定投优化' },
 ]
 
 function switchAiMode(mode) {
@@ -1602,6 +1607,100 @@ async function loadCorrelationRecords() {
   } catch (e) { /* ignore */ }
 }
 
+// 滚动收益
+const rollingResult = ref(null)
+const rollingLoading = ref(false)
+
+async function runRollingMode() {
+  rollingLoading.value = true
+  modeResult.value = ''
+  try {
+    const { data } = await analyzeRollingPortfolio(5)
+    rollingResult.value = data.result
+    modeResult.value = formatRollingResult(data.result)
+  } catch (e) {
+    modeResult.value = '分析失败：' + (e.response?.data?.detail || e.message)
+  } finally {
+    rollingLoading.value = false
+  }
+}
+
+function formatRollingResult(r) {
+  if (!r || r.error) return r?.error || '分析失败'
+  let text = `📈 ${r.name} 滚动收益分析\n`
+  text += `数据区间：${r.data_range}（${r.total_years}年）\n`
+  text += `总收益：${r.total_return}% | 年化：${r.cagr}%\n`
+  text += `最大回撤：${r.max_drawdown?.max_drawdown || '-'}%\n\n`
+  for (const p of (r.rolling_periods || [])) {
+    text += `持有${p.label}：胜率${p.win_rate}% | 中位${p.median_return}% | 最差${p.min_return}% | 最好${p.max_return}%\n`
+  }
+  if (r.summary) text += `\n💡 ${r.summary}`
+  return text
+}
+
+// 四笔钱
+const fourPotsResult = ref(null)
+const fourPotsLoading = ref(false)
+
+async function runFourPotsMode() {
+  fourPotsLoading.value = true
+  modeResult.value = ''
+  try {
+    const { data } = await classifyFourPots()
+    fourPotsResult.value = data.result
+    modeResult.value = formatFourPots(data.result)
+  } catch (e) {
+    modeResult.value = '分析失败：' + (e.response?.data?.detail || e.message)
+  } finally {
+    fourPotsLoading.value = false
+  }
+}
+
+function formatFourPots(r) {
+  if (!r) return '分析失败'
+  const pots = r.pots || {}
+  let text = `🪣 四笔钱归类（总市值：${r.total_value?.toLocaleString()}元）\n\n`
+  for (const [name, data] of Object.entries(pots)) {
+    text += `${name}：${data.total?.toLocaleString()}元（${data.percentage}%）${data.count}只\n`
+  }
+  text += `\n📋 建议：\n`
+  for (const a of (r.advice || [])) {
+    text += `• ${a}\n`
+  }
+  return text
+}
+
+// 定投优化
+const dcaResult = ref(null)
+const dcaLoading = ref(false)
+
+async function runDcaMode() {
+  dcaLoading.value = true
+  modeResult.value = ''
+  try {
+    const { data } = await getDcaOptimization()
+    dcaResult.value = data.result
+    modeResult.value = formatDcaResult(data.result)
+  } catch (e) {
+    modeResult.value = '分析失败：' + (e.response?.data?.detail || e.message)
+  } finally {
+    dcaLoading.value = false
+  }
+}
+
+function formatDcaResult(r) {
+  if (!r) return '分析失败'
+  let text = `🔄 定投优化建议\n`
+  text += `恐贪指数：${r.fear_greed_score}（${r.fear_greed_zone}）\n\n`
+  for (const s of (r.suggestions || [])) {
+    text += `${s.fund_name}：${s.action} ${s.suggested_amount}元/月\n`
+    text += `  PE百分位：${s.pe_percentile}% | 情绪调整：×${s.emotion_multiplier}\n`
+    text += `  原因：${s.reason}\n\n`
+  }
+  if (r.summary) text += `💡 ${r.summary}`
+  return text
+}
+
 async function viewModeRecord(record) {
   try {
     const resp = await getPortfolioAiAnalysisRecord(record.id)
@@ -1892,6 +1991,36 @@ function confirmCorrelationAnalysis() {
     message: '将计算持仓基金之间的真实相关性，识别假分散风险，是否继续？',
     danger: false,
     onConfirm: () => { confirm.value.visible = false; runCorrelationMode() }
+  }
+}
+
+function confirmRollingAnalysis() {
+  confirm.value = {
+    visible: true,
+    title: '滚动收益分析',
+    message: '将计算任意时点买入持有1-5年的收益分布和胜率，是否继续？',
+    danger: false,
+    onConfirm: () => { confirm.value.visible = false; runRollingMode() }
+  }
+}
+
+function confirmFourPotsAnalysis() {
+  confirm.value = {
+    visible: true,
+    title: '四笔钱归类',
+    message: '将持仓自动归类到活钱管理/稳健理财/长期投资/保险保障四个桶，是否继续？',
+    danger: false,
+    onConfirm: () => { confirm.value.visible = false; runFourPotsMode() }
+  }
+}
+
+function confirmDcaOptimization() {
+  confirm.value = {
+    visible: true,
+    title: '定投优化建议',
+    message: '将根据估值和恐贪指数，动态调整每只基金的定投金额，是否继续？',
+    danger: false,
+    onConfirm: () => { confirm.value.visible = false; runDcaMode() }
   }
 }
 
@@ -3577,6 +3706,57 @@ function txDisplayAmount(tx) {
           <!-- Mode: Compare -->
           <div v-if="aiMode === 'compare'" class="ai-mode-content">
             <AnalysisComparison @back="switchAiMode('panorama')" />
+          </div>
+
+          <!-- Mode: Rolling Return -->
+          <div v-if="aiMode === 'rolling'" class="ai-mode-content">
+            <div class="ai-mode-header">
+              <span class="mode-icon">📈</span>
+              <div>
+                <h4>滚动收益分析</h4>
+                <p class="mode-desc">计算任意时点买入持有1-5年的收益分布和胜率</p>
+              </div>
+            </div>
+            <button class="btn-primary" @click="confirmRollingAnalysis" :disabled="rollingLoading">
+              {{ rollingLoading ? '分析中...' : '▶ 开始分析' }}
+            </button>
+            <div v-if="modeResult && aiMode === 'rolling'" class="ai-mode-result">
+              <pre>{{ modeResult }}</pre>
+            </div>
+          </div>
+
+          <!-- Mode: Four Pots -->
+          <div v-if="aiMode === 'four-pots'" class="ai-mode-content">
+            <div class="ai-mode-header">
+              <span class="mode-icon">🪣</span>
+              <div>
+                <h4>四笔钱归类</h4>
+                <p class="mode-desc">将持仓自动归类到活钱管理/稳健理财/长期投资/保险保障</p>
+              </div>
+            </div>
+            <button class="btn-primary" @click="confirmFourPotsAnalysis" :disabled="fourPotsLoading">
+              {{ fourPotsLoading ? '分析中...' : '▶ 开始归类' }}
+            </button>
+            <div v-if="modeResult && aiMode === 'four-pots'" class="ai-mode-result">
+              <pre>{{ modeResult }}</pre>
+            </div>
+          </div>
+
+          <!-- Mode: DCA Optimization -->
+          <div v-if="aiMode === 'dca'" class="ai-mode-content">
+            <div class="ai-mode-header">
+              <span class="mode-icon">🔄</span>
+              <div>
+                <h4>定投优化建议</h4>
+                <p class="mode-desc">根据估值和恐贪指数，动态调整每只基金的定投金额</p>
+              </div>
+            </div>
+            <button class="btn-primary" @click="confirmDcaOptimization" :disabled="dcaLoading">
+              {{ dcaLoading ? '计算中...' : '▶ 开始优化' }}
+            </button>
+            <div v-if="modeResult && aiMode === 'dca'" class="ai-mode-result">
+              <pre>{{ modeResult }}</pre>
+            </div>
           </div>
 
           <!-- Result loading -->

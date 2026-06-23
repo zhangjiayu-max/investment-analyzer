@@ -1869,3 +1869,25 @@ export function getStockBondRatio() {
 export function getFearGreedIndex() {
   return http.get('/api/health/fear-greed')
 }
+
+// ========== 滚动收益分析 ==========
+export function analyzeRollingReturn(data) {
+  return http.post('/api/rolling/analyze', data)
+}
+export function analyzeRollingPortfolio(lookbackYears = 5) {
+  return http.post('/api/rolling/portfolio', { lookback_years: lookbackYears })
+}
+export function analyzeRollingIndex(code, lookbackYears = 5) {
+  return http.post('/api/rolling/index', { code, lookback_years: lookbackYears })
+}
+export function analyzeRollingFund(code, lookbackYears = 5) {
+  return http.post('/api/rolling/fund', { code, lookback_years: lookbackYears })
+}
+
+// ========== 四笔钱归类 + 定投优化 ==========
+export function classifyFourPots() {
+  return http.get('/api/four-pots/classify')
+}
+export function getDcaOptimization() {
+  return http.post('/api/four-pots/dca-optimization')
+}
