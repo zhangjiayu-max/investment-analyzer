@@ -483,16 +483,16 @@ async def calc_health_score() -> dict:
 
 async def calc_stock_bond_ratio() -> dict:
     """FED模型：股票盈利收益率 vs 国债收益率。"""
-    # 获取沪深300估值
-    hs300 = get_index_valuation("沪深300")
+    # 获取沪深300估值（用 index_code 而非 index_name）
+    hs300 = get_latest_valuation("399300.SZ")
     if not hs300:
         # 尝试其他名称
-        for name in ["沪深300", "沪深300指数", "HS300"]:
-            hs300 = get_index_valuation(name)
+        for code in ["399300.SZ", "000300.SH", "399300"]:
+            hs300 = get_latest_valuation(code)
             if hs300:
                 break
 
-    pe = _safe_float(hs300.get("pe_ttm") or hs300.get("pe") or hs300.get("metric_value")) if hs300 else 0
+    pe = _safe_float(hs300.get("current_value") or hs300.get("pe_ttm") or hs300.get("pe") or hs300.get("metric_value")) if hs300 else 0
     if pe <= 0:
         return {"error": "无法获取沪深300 PE数据"}
 

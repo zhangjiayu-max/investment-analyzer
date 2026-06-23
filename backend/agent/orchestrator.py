@@ -1567,6 +1567,12 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
         refined_query = clarification.get("refined_query", query)
         specialists = clarification.get("specialists", [])
 
+    # 限制专家数量（避免过度分析）
+    max_spec = context_config.get("max_specialists", 3)
+    if len(specialists) > max_spec:
+        logger.info(f"专家数量限制: {len(specialists)} → {max_spec}，丢弃: {specialists[max_spec:]}")
+        specialists = specialists[:max_spec]
+
     # 性能监控：需求澄清耗时
     perf_metrics["phases"]["clarification"] = int((time.time() - start_time) * 1000)
 

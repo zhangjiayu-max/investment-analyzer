@@ -3,6 +3,8 @@
 import asyncio
 import json
 import logging
+
+logger = logging.getLogger(__name__)
 import os
 import queue
 import re
