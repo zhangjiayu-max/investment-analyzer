@@ -61,33 +61,20 @@ def fetch_article_content(url: str) -> dict | None:
 
     try:
         from article_reader import fetch_article
-        import threading
+        from concurrent.futures import ThreadPoolExecutor
 
-        # 用独立线程运行异步函数，避免与 uvicorn 事件循环冲突
-        result_holder = [None]
-        error_holder = [None]
-
-        def _run_in_thread():
+        # 用线程池运行，每个线程创建独立事件循环
+        def _fetch_sync():
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
             try:
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                try:
-                    result_holder[0] = loop.run_until_complete(fetch_article(url))
-                finally:
-                    loop.close()
-            except Exception as e:
-                error_holder[0] = e
+                return loop.run_until_complete(fetch_article(url))
+            finally:
+                loop.close()
 
-        thread = threading.Thread(target=_run_in_thread, daemon=True)
-        thread.start()
-        thread.join(timeout=30)
-
-        if error_holder[0]:
-            logger.warning(f"获取文章失败: {error_holder[0]}")
-            return None
-        if thread.is_alive():
-            logger.warning(f"获取文章超时 (30s)")
-            return None
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(_fetch_sync)
+            result = future.result(timeout=30)
 
         # 缓存成功结果
         if result:
