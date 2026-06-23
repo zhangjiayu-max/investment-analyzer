@@ -1355,6 +1355,7 @@ const aiModes = [
   { key: 'rolling', icon: '📈', label: '滚动收益' },
   { key: 'four-pots', icon: '🪣', label: '四笔钱' },
   { key: 'dca', icon: '🔄', label: '定投优化' },
+  { key: 'what-if', icon: '🎯', label: '情景推演' },
 ]
 
 function switchAiMode(mode) {
@@ -1781,6 +1782,37 @@ function formatDcaResult(r) {
   }
   if (r.summary) text += `💡 ${r.summary}`
   return text
+}
+
+// 情景推演
+const whatIfScenario = ref('market_crash')
+const whatIfCustomPrompt = ref('')
+const whatIfLoading = ref(false)
+const whatIfScenarios = [
+  { key: 'market_crash', icon: '📉', label: '大盘跌20%' },
+  { key: 'rate_hike', icon: '📈', label: '利率上升2%' },
+  { key: 'sector_rotation', icon: '🔄', label: '行业轮动' },
+  { key: 'custom', icon: '✏️', label: '自定义' },
+]
+
+async function runWhatIfMode() {
+  whatIfLoading.value = true
+  modeResult.value = null
+  try {
+    let prompt = ''
+    const scenario = whatIfScenarios.find(s => s.key === whatIfScenario.value)
+    if (whatIfScenario.value === 'custom') {
+      prompt = whatIfCustomPrompt.value
+    } else {
+      prompt = scenario?.label || whatIfScenario.value
+    }
+    const { data } = await runWhatIf(prompt)
+    modeResult.value = data
+  } catch (e) {
+    modeResult.value = `推演失败: ${e.message || e}`
+  } finally {
+    whatIfLoading.value = false
+  }
 }
 
 async function viewModeRecord(record) {
@@ -3866,6 +3898,35 @@ function txDisplayAmount(tx) {
               {{ dcaLoading ? '计算中...' : '▶ 开始优化' }}
             </button>
             <div v-if="modeResult && aiMode === 'dca'" class="ai-mode-result">
+              <pre>{{ modeResult }}</pre>
+            </div>
+          </div>
+
+          <!-- Mode: What-If -->
+          <div v-if="aiMode === 'what-if'" class="ai-mode-content">
+            <div class="ai-mode-header">
+              <span class="mode-icon">🎯</span>
+              <div>
+                <h4>情景推演</h4>
+                <p class="mode-desc">模拟不同市场情景下你的持仓表现</p>
+              </div>
+            </div>
+            <div class="what-if-input">
+              <div class="scenario-options">
+                <button v-for="s in whatIfScenarios" :key="s.key"
+                  :class="['scenario-btn', { active: whatIfScenario === s.key }]"
+                  @click="whatIfScenario = s.key">
+                  {{ s.icon }} {{ s.label }}
+                </button>
+              </div>
+              <div v-if="whatIfScenario === 'custom'" class="custom-scenario">
+                <input v-model="whatIfCustomPrompt" placeholder="例如：如果美联储加息2%会怎样？" />
+              </div>
+              <button class="btn-primary" @click="runWhatIfMode" :disabled="whatIfLoading">
+                {{ whatIfLoading ? '推演中...' : '▶ 开始推演' }}
+              </button>
+            </div>
+            <div v-if="modeResult && aiMode === 'what-if'" class="ai-mode-result">
               <pre>{{ modeResult }}</pre>
             </div>
           </div>
