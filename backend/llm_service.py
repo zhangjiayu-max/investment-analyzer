@@ -88,6 +88,12 @@ def _call_llm(caller: str = "", **kwargs):
     return _do_call()
 
 
+async def call_llm_async(caller: str = "", **kwargs):
+    """异步版本的 _call_llm，可直接 await。"""
+    import asyncio
+    return await asyncio.to_thread(lambda: _call_llm(caller=caller, **kwargs))
+
+
 def _call_llm_stream(caller: str = "", **kwargs):
     """流式 LLM 调用，生成器逐 chunk yield。
 

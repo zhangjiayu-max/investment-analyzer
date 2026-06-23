@@ -321,6 +321,7 @@ async def analyze_rolling_return(target: str = "portfolio", code: str = "",
     }
 
     # 存入analysis_cache
+    conn = None
     try:
         conn = _get_conn()
         conn.execute("""
@@ -328,9 +329,11 @@ async def analyze_rolling_return(target: str = "portfolio", code: str = "",
             VALUES (?, ?, datetime('now','localtime'))
         """, (cache_key, json.dumps(result, ensure_ascii=False)))
         conn.commit()
-        conn.close()
     except Exception as e:
         logger.warning(f"[rolling] 缓存保存失败: {e}")
+    finally:
+        if conn:
+            conn.close()
 
     return result
 

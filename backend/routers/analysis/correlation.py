@@ -7,7 +7,7 @@ from fastapi import APIRouter
 
 from db import list_holdings, get_config_int, create_async_task, update_async_task
 from db.portfolio import save_analysis_cache, get_analysis_cache
-from llm_service import _call_llm, MODEL
+from llm_service import _call_llm, call_llm_async, MODEL
 
 logger = logging.getLogger(__name__)
 
@@ -216,12 +216,12 @@ async def _run_correlation_async(task_id: int, holdings: list, lookback_days: in
 报告：
 {text[:6000]}"""
 
-            llm_result = await _call_llm(
+            llm_result = await asyncio.to_thread(lambda: _call_llm(
                 model=MODEL,
                 messages=[{"role": "user", "content": llm_prompt}],
                 temperature=0.3,
                 max_tokens=get_config_int("llm.max_tokens_analysis", 8000),
-            )
+            ))
             llm_text = llm_result.get("content", "") if isinstance(llm_result, dict) else str(llm_result)
         except Exception as e:
             logger.warning(f"[corr] LLM总结失败: {e}")

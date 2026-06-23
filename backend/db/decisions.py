@@ -286,6 +286,20 @@ def create_decision(
                 conn=conn,
             )
         conn.commit()
+
+        # 记录数据血缘
+        try:
+            from services.data_lineage import track_sources
+            sources = []
+            if evidence:
+                for e in (evidence if isinstance(evidence, list) else [evidence]):
+                    if isinstance(e, dict) and e.get("source"):
+                        sources.append({"type": e.get("type", "rag"), "source": e["source"]})
+            if sources:
+                track_sources(f"decision:{decision_id}", sources)
+        except Exception:
+            pass  # 血缘记录不应阻断决策创建
+
         return decision_id
     finally:
         conn.close()
