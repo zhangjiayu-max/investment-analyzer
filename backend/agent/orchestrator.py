@@ -61,22 +61,33 @@ def fetch_article_content(url: str) -> dict | None:
 
     try:
         from article_reader import fetch_article
-        # uvicorn 已有事件循环，用 run_coroutine_threadsafe 避免冲突
-        try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                # 在已有事件循环中，用 run_coroutine_threadsafe
-                future = asyncio.run_coroutine_threadsafe(fetch_article(url), loop)
-                result = future.result(timeout=30)
-            else:
-                result = loop.run_until_complete(fetch_article(url))
-        except RuntimeError:
-            # 没有事件循环时，创建新的
-            loop = asyncio.new_event_loop()
+        import threading
+
+        # 用独立线程运行异步函数，避免与 uvicorn 事件循环冲突
+        result_holder = [None]
+        error_holder = [None]
+
+        def _run_in_thread():
             try:
-                result = loop.run_until_complete(fetch_article(url))
-            finally:
-                loop.close()
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                try:
+                    result_holder[0] = loop.run_until_complete(fetch_article(url))
+                finally:
+                    loop.close()
+            except Exception as e:
+                error_holder[0] = e
+
+        thread = threading.Thread(target=_run_in_thread, daemon=True)
+        thread.start()
+        thread.join(timeout=30)
+
+        if error_holder[0]:
+            logger.warning(f"获取文章失败: {error_holder[0]}")
+            return None
+        if thread.is_alive():
+            logger.warning(f"获取文章超时 (30s)")
+            return None
 
         # 缓存成功结果
         if result:
