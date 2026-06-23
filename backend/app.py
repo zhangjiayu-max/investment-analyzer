@@ -90,6 +90,7 @@ from routers.analysis import (
     health_score_router as analysis_health_score_router,
     rolling_return_router as analysis_rolling_return_router,
     four_pots_router as analysis_four_pots_router,
+    fund_analysis_router as analysis_fund_analysis_router,
 )
 from routers.dashboard import router as dashboard_router
 from routers.config import router as config_router
@@ -142,6 +143,7 @@ app.include_router(analysis_eval_system_router)
 app.include_router(analysis_health_score_router)
 app.include_router(analysis_rolling_return_router)
 app.include_router(analysis_four_pots_router)
+app.include_router(analysis_fund_analysis_router)
 app.include_router(dashboard_router)
 app.include_router(config_router)
 app.include_router(rag_router)
