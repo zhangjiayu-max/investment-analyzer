@@ -315,5 +315,22 @@ onMounted(loadData)
 @media (max-width: 768px) {
   .sb-grid { grid-template-columns: repeat(2, 1fr); }
   .score-hero { flex-direction: column; text-align: center; }
+  .score-circle { width: 80px; height: 80px; }
+  .score-number { font-size: 1.6em; }
+  .page-header { flex-direction: column; gap: 8px; }
+  .page-header .btn-primary { width: 100%; }
+  .dim-header { font-size: 0.85em; }
+  .fg-labels { font-size: 0.6em; }
+  .fg-number { font-size: 1.5em; }
+  .history-item { font-size: 0.8em; }
+}
+
+@media (max-width: 480px) {
+  .score-circle { width: 70px; height: 70px; }
+  .score-number { font-size: 1.4em; }
+  .sb-grid { grid-template-columns: 1fr 1fr; gap: 8px; }
+  .sb-value { font-size: 1em; }
+  .dim-grid { gap: 8px; }
+  .advice li { font-size: 0.85em; }
 }
 </style>
