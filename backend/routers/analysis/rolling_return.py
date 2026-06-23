@@ -347,6 +347,16 @@ async def analyze_api(data: dict):
     code = data.get("code", "")
     lookback_years = int(data.get("lookback_years", 5))
     result = await analyze_rolling_return(target, code, lookback_years)
+    # 提取可执行行动
+    try:
+        from analysis.action_extractor import extract_actions, format_actions_for_response
+        # 从 windows 中提取 stats
+        windows = result.get("windows", [])
+        avg_win_rate = sum(w.get("win_rate", 50) for w in windows) / len(windows) if windows else 50
+        result["actions"] = format_actions_for_response(extract_actions("rolling", {"stats": {"win_rate": avg_win_rate}}))
+    except Exception as e:
+        logger.warning(f"[rolling] 行动提取失败: {e}")
+        result["actions"] = []
     return {"status": "ok", "result": result}
 
 

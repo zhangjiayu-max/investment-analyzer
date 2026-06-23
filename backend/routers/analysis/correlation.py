@@ -231,10 +231,22 @@ async def _run_correlation_async(task_id: int, holdings: list, lookback_days: in
         if llm_text:
             final_text += f"\n\n---\n## 🤖 AI 分散度优化建议\n\n{llm_text}"
 
+        # 提取可执行行动
+        actions = []
+        try:
+            from analysis.action_extractor import extract_actions, format_actions_for_response
+            actions = format_actions_for_response(extract_actions("correlation", {"high_correlation_pairs": [
+                {"fund_a": p.get("fund_a", ""), "fund_b": p.get("fund_b", ""), "correlation": p.get("correlation", 0)}
+                for p in result.get("high_corr_pairs", [])
+            ]}))
+        except Exception as e:
+            logger.warning(f"[corr] 行动提取失败: {e}")
+
         save_analysis_cache("correlation_analysis_default", {
             "text": final_text,
             "effective_n": result.get("effective_n"),
             "high_corr_count": len(result.get("high_corr_pairs", [])),
+            "actions": actions,
             "generated_at": datetime.now().isoformat(),
         })
 

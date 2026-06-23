@@ -215,9 +215,22 @@ async def _run_fee_analysis_async(task_id: int, holdings: list):
         if llm_text:
             final_text += f"\n\n---\n## 🤖 AI 费率优化建议\n\n{llm_text}"
 
+        # 提取可执行行动
+        actions = []
+        try:
+            from analysis.action_extractor import extract_actions, format_actions_for_response
+            actions = format_actions_for_response(extract_actions("fee", {"funds": [
+                {"fund_code": code, "fund_name": h.get("fund_name", ""), "total_fee_rate": fee_data.get(code, {}).get("total_rate", 0),
+                 "category_avg_fee": 0, "current_value": h.get("current_value", 0)}
+                for h in holdings for code in [h.get("fund_code", "")] if code
+            ]}))
+        except Exception as e:
+            logger.warning(f"[fee] 行动提取失败: {e}")
+
         save_analysis_cache("fee_analysis_default", {
             "text": final_text,
             "fee_data": fee_data,
+            "actions": actions,
             "generated_at": datetime.now().isoformat(),
         })
 

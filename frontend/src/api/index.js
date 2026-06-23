@@ -1027,6 +1027,20 @@ export function createDecision(payload) {
   return api.post('/decisions/create', payload)
 }
 
+/** 从行动卡片创建决策 */
+export function createDecisionFromAction(action) {
+  return api.post('/decisions/create', {
+    decision_type: action.action_type === 'buy' ? 'buy' :
+                   action.action_type === 'sell' ? 'sell' :
+                   action.action_type === 'reduce' ? 'reduce' : 'rebalance',
+    target_name: action.target_name,
+    target_code: action.target_code,
+    summary: action.reason,
+    source: action.source || 'analysis',
+    priority: action.priority,
+  })
+}
+
 /** 获取待执行决策的执行状态（自动检测持仓变化匹配） */
 export function getExecutionStatus(userId = 'default') {
   return api.get('/decisions/execution-status', { params: { user_id: userId } })
@@ -1942,4 +1956,14 @@ export function classifyFourPots() {
 }
 export function getDcaOptimization() {
   return http.post('/api/four-pots/dca-optimization')
+}
+
+// ========== 情景推演 ==========
+export function runWhatIf(scenario) {
+  return http.post('/api/portfolio/analysis/what-if', { scenario })
+}
+
+// ========== 对比分析 AI 差异 ==========
+export function runCompareDiff(recordA, recordB, type) {
+  return http.post('/api/portfolio/analysis/compare-diff', { record_a: recordA, record_b: recordB, type })
 }

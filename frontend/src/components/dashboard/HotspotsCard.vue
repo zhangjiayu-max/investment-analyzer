@@ -3,6 +3,7 @@ import { computed } from 'vue'
 import { getPercentileColor } from '../../composables/useDashboardHelpers'
 import Icon from '../ui/Icon.vue'
 import AIActionButton from '../ui/AIActionButton.vue'
+import ActionCard from '../ActionCard.vue'
 
 const REC_STATUS_ICON = { correct: 'check', wrong: 'error', flat: 'arrow-right', pending: 'hourglass' }
 
@@ -222,6 +223,16 @@ const verdictMeta = {
         <div class="hotspots-content">{{ hotspotsAnalysis.analysis_text }}</div>
       </details>
     </div>
+
+    <!-- 热点分析行动卡片 -->
+    <ActionCard
+      v-if="hotspotsAnalysis?.actions?.length > 0"
+      :actions="hotspotsAnalysis.actions"
+      source="hotspots"
+      @watch="(action) => emit('watch-opportunity', action)"
+      @decision="(action) => emit('create-decision', action)"
+      @dismiss="(idx) => hotspotsAnalysis.actions.splice(idx, 1)"
+    />
 
     <!-- 推荐验证历史 -->
     <div v-if="recStats" class="verify-bar" @click="emit('update:showVerify', !showVerify)">

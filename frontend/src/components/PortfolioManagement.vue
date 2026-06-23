@@ -36,6 +36,7 @@ import {
   analyzeRollingPortfolio, analyzeRollingIndex, analyzeRollingFund,
   classifyFourPots, getDcaOptimization,
   listRecommendationCandidates, listDecisions, listDueDecisionReviews,
+  createDecisionFromAction, runWhatIf,
 } from '../api'
 import { useToast } from '../composables/useToast'
 import ConfirmDialog from './ConfirmDialog.vue'
@@ -47,6 +48,7 @@ import EmptyState from './ui/EmptyState.vue'
 import AnalysisCard from './ui/AnalysisCard.vue'
 import AIActionButton from './ui/AIActionButton.vue'
 import AnalysisComparison from './AnalysisComparison.vue'
+import ActionCard from './ActionCard.vue'
 import { renderMarkdown } from '../composables/useMarkdown'
 import { isDark } from '../composables/useTheme'
 import { useAsyncTask } from '../composables/useAsyncTask'
@@ -1040,6 +1042,45 @@ const feedbackGiven = ref(null)  // null | 'helpful' | 'unhelpful'
 const showFeedbackDialog = ref(false)
 const feedbackNoteInput = ref('')
 let feedbackDialogResolve = null
+
+// ── 行动卡片 ──
+const currentActions = computed(() => {
+  if (!modeResult.value) return []
+  let data = modeResult.value
+  if (typeof data === 'string') {
+    try { data = JSON.parse(data) } catch { return [] }
+  }
+  return data.actions || []
+})
+
+async function handleActionWatch(action) {
+  try {
+    await addToWatchlist({
+      fund_code: action.target_code,
+      fund_name: action.target_name,
+      reason: action.reason,
+      source: action.source || 'analysis',
+    })
+    showToast('success', `已将 ${action.target_name} 加入关注列表`)
+  } catch (e) {
+    showToast('error', '加入关注失败: ' + (e.message || e))
+  }
+}
+
+async function handleActionDecision(action) {
+  try {
+    await createDecisionFromAction(action)
+    showToast('success', `已创建决策: ${action.target_name}`)
+  } catch (e) {
+    showToast('error', '创建决策失败: ' + (e.message || e))
+  }
+}
+
+function handleActionDismiss(idx) {
+  if (modeResult.value && modeResult.value.actions) {
+    modeResult.value.actions.splice(idx, 1)
+  }
+}
 
 // 全景诊断
 const panoramaRecords = ref([])
@@ -3828,6 +3869,16 @@ function txDisplayAmount(tx) {
               <pre>{{ modeResult }}</pre>
             </div>
           </div>
+
+          <!-- Action Card (统一行动卡片) -->
+          <ActionCard
+            v-if="currentActions.length > 0"
+            :actions="currentActions"
+            :source="aiMode"
+            @watch="handleActionWatch"
+            @decision="handleActionDecision"
+            @dismiss="handleActionDismiss"
+          />
 
           <!-- Result loading -->
           <div v-if="modeLoading" class="ai-background-state">

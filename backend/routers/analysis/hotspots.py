@@ -21,6 +21,7 @@ from db._conn import _get_conn
 from llm_service import _call_llm, MODEL
 from market_data import get_index_current_price
 from state import track_agent as _track_agent, untrack_agent as _untrack_agent, hot_topics_cache as _hot_topics_cache
+from analysis.action_extractor import extract_actions, format_actions_for_response
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["analysis-hotspots"])
@@ -231,6 +232,14 @@ async def _do_hotspots_analysis():
             "recommendations": recs,
             "analysis_text": content,
         }
+        # 提取可执行行动
+        try:
+            holdings = list_holdings() or []
+            actions = extract_actions("hotspots", result, holdings)
+            result["actions"] = format_actions_for_response(actions)
+        except Exception as e:
+            logger.warning(f"热点行动提取失败: {e}")
+            result["actions"] = []
         if recs:
             try:
                 save_analysis_cache("hotspots_latest", result)
@@ -253,7 +262,7 @@ async def get_latest_hotspots_analysis():
     if cached:
         today = time.strftime("%Y-%m-%d")
         if cached.get("analysis_date") != today:
-            return {"summary": "", "recommendations": [], "analysis_text": "", "stale": True}
+            return {"summary": "", "recommendations": [], "analysis_text": "", "actions": [], "stale": True}
         try:
             conn = _get_conn()
             rows = conn.execute(
@@ -289,11 +298,12 @@ async def get_latest_hotspots_analysis():
                 "summary": f"上次分析结果（共{len(recs)}条推荐）",
                 "recommendations": recs,
                 "analysis_text": "",
+                "actions": [],
                 "stale": True,
             }
     except Exception:
         pass
-    return {"summary": "", "recommendations": [], "analysis_text": ""}
+    return {"summary": "", "recommendations": [], "analysis_text": "", "actions": []}
 
 
 @router.post("/api/dashboard/hotspots-relate")

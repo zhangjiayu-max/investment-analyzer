@@ -357,6 +357,13 @@ async def classify_api():
         save_four_pots_candidates(result)
     except Exception as e:
         logger.warning(f"[four_pots] 保存建议候选失败: {e}")
+    # 提取可执行行动
+    try:
+        from analysis.action_extractor import extract_actions, format_actions_for_response
+        result["actions"] = format_actions_for_response(extract_actions("four_pots", result))
+    except Exception as e:
+        logger.warning(f"[four_pots] 行动提取失败: {e}")
+        result["actions"] = []
     return {"status": "ok", "result": result}
 
 

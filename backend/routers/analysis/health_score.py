@@ -476,6 +476,14 @@ async def calc_health_score() -> dict:
         detail=result["details"],
     )
 
+    # 提取可执行行动
+    try:
+        from analysis.action_extractor import extract_actions, format_actions_for_response
+        result["actions"] = format_actions_for_response(extract_actions("health_score", result))
+    except Exception as e:
+        logger.warning(f"[health] 行动提取失败: {e}")
+        result["actions"] = []
+
     return result
 
 
@@ -541,7 +549,7 @@ async def calc_stock_bond_ratio() -> dict:
         signal = "看好债券"
         advice = "债券吸引力超过股票，建议增配固收"
 
-    return {
+    result = {
         "hs300_pe": round(pe, 2),
         "earnings_yield": round(earnings_yield * 100, 2),
         "bond_yield_10y": round(bond_yield, 2) if bond_yield > 1 else round(bond_yield * 100, 2),
@@ -549,6 +557,63 @@ async def calc_stock_bond_ratio() -> dict:
         "signal": signal,
         "advice": advice,
     }
+
+    # === 股债配比增强：结合估值给调仓建议 ===
+    try:
+        # 计算当前股债比例
+        holdings = list_holdings() or []
+        active = [h for h in holdings if (h.get("shares") or 0) > 0]
+        equity_types = ["股票型", "混合型", "指数型", "ETF", "QDII"]
+        bond_types = ["债券型", "货币型"]
+        equity_value = sum(
+            (h.get("current_value") or 0) for h in active
+            if any(t in (h.get("fund_type") or h.get("fund_category") or "") for t in equity_types)
+        )
+        bond_value = sum(
+            (h.get("current_value") or 0) for h in active
+            if any(t in (h.get("fund_type") or h.get("fund_category") or "") for t in bond_types)
+        )
+        total_v = equity_value + bond_value
+        stock_pct = equity_value / total_v * 100 if total_v > 0 else 50
+        bond_pct = 100 - stock_pct
+
+        # 用沪深300估值判断建议股债比
+        val = get_latest_valuation("399300.SZ")
+        percentile = val.get("percentile", 50) if val else 50
+
+        if percentile < 20:
+            suggested_stock = 70
+            reason = "估值极低，建议超配股票"
+        elif percentile < 40:
+            suggested_stock = 60
+            reason = "估值偏低，建议略超配股票"
+        elif percentile > 80:
+            suggested_stock = 40
+            reason = "估值极高，建议超配债券"
+        elif percentile > 60:
+            suggested_stock = 50
+            reason = "估值偏高，建议股债均衡"
+        else:
+            suggested_stock = 50
+            reason = "估值中性，建议股债均衡"
+
+        suggested_bond = 100 - suggested_stock
+        deviation = stock_pct - suggested_stock
+
+        result["stock_pct"] = round(stock_pct, 1)
+        result["bond_pct"] = round(bond_pct, 1)
+        result["suggestion"] = {
+            "suggested_stock_pct": suggested_stock,
+            "suggested_bond_pct": suggested_bond,
+            "deviation": round(deviation, 1),
+            "reason": reason,
+            "action": f"股票{stock_pct:.0f}%→建议{suggested_stock}%，偏差{deviation:+.0f}%",
+        }
+    except Exception as e:
+        logger.warning(f"[stock_bond] 生成调仓建议失败: {e}")
+        result["suggestion"] = None
+
+    return result
 
 
 # ============ 恐贪指数 ============
@@ -637,12 +702,107 @@ async def calc_fear_greed_index() -> dict:
         zone = "极度贪婪"
         advice = "市场极度贪婪，考虑分批止盈"
 
-    return {
+    result = {
         "score": total_score,
         "zone": zone,
         "advice": advice,
         "factors": {k: round(v, 1) for k, v in factors.items()},
     }
+
+    # === 恐贪指数增强：结合持仓给建议 ===
+    try:
+        holdings = list_holdings()
+        score = total_score
+
+        advice_actions = []
+        for h in (holdings or [])[:10]:
+            if (h.get("shares") or 0) <= 0:
+                continue
+            fund_name = h.get("fund_name", "")
+            index_code = h.get("index_code", "")
+
+            val = None
+            if index_code:
+                val = get_latest_valuation(index_code)
+
+            percentile = val.get("percentile") if val else None
+
+            if score < 30:  # 极度恐惧
+                if percentile is not None and percentile < 30:
+                    action = "可加仓"
+                    reason = f"极度恐惧+低估值({percentile:.0f}%)，逆向买入机会"
+                elif percentile is not None and percentile > 70:
+                    action = "观望"
+                    reason = f"虽恐惧但估值偏高({percentile:.0f}%)，不建议追"
+                else:
+                    action = "可小幅加仓"
+                    reason = "极度恐惧时可逆向操作"
+            elif score > 70:  # 极度贪婪
+                if percentile is not None and percentile > 70:
+                    action = "考虑减仓"
+                    reason = f"极度贪婪+高估值({percentile:.0f}%)，风险较高"
+                elif percentile is not None and percentile < 30:
+                    action = "持有"
+                    reason = "虽贪婪但估值低，安全边际足"
+                else:
+                    action = "谨慎持有"
+                    reason = "极度贪婪时注意风险"
+            else:  # 中性
+                if percentile is not None and percentile < 30:
+                    action = "可定投"
+                    reason = f"估值低({percentile:.0f}%)，适合定投"
+                elif percentile is not None and percentile > 70:
+                    action = "观望"
+                    reason = f"估值偏高({percentile:.0f}%)，等待回调"
+                else:
+                    action = "持有"
+                    reason = "情绪中性+估值正常，保持配置"
+
+            advice_actions.append({
+                "fund_name": fund_name,
+                "action": action,
+                "reason": reason,
+            })
+
+        # 现金建议
+        total_value = sum((h.get("current_value") or 0) for h in (holdings or []))
+        cash_balance = 0
+        try:
+            cash_balance = get_total_cash_balance()
+        except Exception:
+            pass
+        cash_pct = cash_balance / total_value * 100 if total_value > 0 else 0
+
+        if score < 30:
+            cash_advice = f"现金{cash_pct:.0f}%，恐惧时可用部分现金逆向布局"
+        elif score > 70:
+            cash_advice = f"现金{cash_pct:.0f}%，贪婪时保持充足现金应对回调"
+        else:
+            cash_advice = f"现金{cash_pct:.0f}%，配置适中"
+
+        suggestion_map = {
+            (0, 20): "极度恐惧！历史最佳买入窗口，建议分批加仓",
+            (20, 40): "市场偏恐惧，可小幅定投优质标的",
+            (40, 60): "情绪中性，保持现有配置，观察等待",
+            (60, 80): "市场偏贪婪，注意控制仓位",
+            (80, 100): "极度贪婪！建议逐步减仓锁定利润",
+        }
+        suggestion = ""
+        for (low, high), text in suggestion_map.items():
+            if low <= score < high:
+                suggestion = text
+                break
+
+        result["portfolio_advice"] = {
+            "suggestion": suggestion,
+            "actions": advice_actions[:5],
+            "cash_advice": cash_advice,
+        }
+    except Exception as e:
+        logger.warning(f"[fear_greed] 生成持仓建议失败: {e}")
+        result["portfolio_advice"] = None
+
+    return result
 
 
 # ============ API 端点 ============
