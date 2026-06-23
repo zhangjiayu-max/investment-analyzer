@@ -17,6 +17,7 @@ import AdminAgentsPage from './AdminAgentsPage.vue'
 import TokenUsagePage from './TokenUsagePage.vue'
 import BadCasePage from './BadCasePage.vue'
 import EvalSuitePage from './EvalSuitePage.vue'
+import HealthScore from './HealthScore.vue'
 import ShadowModePage from './ShadowModePage.vue'
 import QualityDashboard from './QualityDashboard.vue'
 import Dashboard from './Dashboard.vue'
@@ -58,6 +59,7 @@ const moreItems = [
   { key: 'quality-dashboard', label: '质量仪表盘', icon: 'chart' },
   { key: 'bad-cases', label: 'Bad Case', icon: 'bug' },
   { key: 'eval-suite', label: '评测集', icon: 'check' },
+  { key: 'health', label: '健康分', icon: 'health' },
   { key: 'shadow', label: 'Shadow Mode', icon: 'shadow' },
 ]
 
@@ -90,6 +92,7 @@ const pageComponents = {
   'quality-dashboard': QualityDashboard,
   'bad-cases': BadCasePage,
   'eval-suite': EvalSuitePage,
+  'health': HealthScore,
   'shadow': ShadowModePage,
   'system-config': SystemConfigPage,
 }

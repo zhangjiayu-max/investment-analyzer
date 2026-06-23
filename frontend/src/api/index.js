@@ -1852,3 +1852,20 @@ export function getDataHealth() {
 }
 
 export default api
+
+// ========== 综合理财健康分 ==========
+export function calculateHealthScore() {
+  return http.post('/api/health/calculate')
+}
+export function getTodayHealthScore() {
+  return http.get('/api/health/today')
+}
+export function getHealthHistory(limit = 30) {
+  return http.get(`/api/health/history?limit=${limit}`)
+}
+export function getStockBondRatio() {
+  return http.get('/api/health/stock-bond-ratio')
+}
+export function getFearGreedIndex() {
+  return http.get('/api/health/fear-greed')
+}

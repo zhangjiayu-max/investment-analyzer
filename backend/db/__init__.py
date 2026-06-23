@@ -167,6 +167,10 @@ from db.knowledge_graph import (
     add_entity_mention, get_entities_for_knowledge, get_knowledge_for_entity,
     bulk_import_entities,
 )
+from db.health_score import (
+    save_health_score, get_health_score, list_health_scores,
+    save_bond_yield, get_latest_bond_yield, get_bond_yield_history,
+)
 
 # 异步分析任务
 from db.async_tasks import (
@@ -701,6 +705,10 @@ def init_db():
 
     # 初始化评测集表
     init_eval_tables(conn)
+
+    # 初始化健康分表
+    from db.health_score import init_health_score_tables
+    init_health_score_tables(conn)
 
     # 初始化记忆表（记忆生命周期管理）
     conn.execute("""
