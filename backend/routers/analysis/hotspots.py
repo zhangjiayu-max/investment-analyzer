@@ -137,7 +137,7 @@ async def _do_hotspots_analysis():
 
     # 从 analysis_agents 加载热点分析 prompt
     try:
-        agent = get_analysis_agent(7)
+        agent = get_analysis_agent(13)
         base_prompt = agent["system_prompt"] if agent else ""
     except Exception:
         base_prompt = ""
@@ -219,7 +219,7 @@ async def _do_hotspots_analysis():
                 _conn = _get_conn()
                 _conn.execute(
                     "INSERT INTO analysis_history (agent_id, agent_name, prompt_used, news_context, result, token_usage) VALUES (?, ?, ?, ?, ?, ?)",
-                    (7, "热点分析专家", base_prompt[:500] if base_prompt else "", news_text[:500], content, 0)
+                    (13, "热点分析专家", base_prompt[:500] if base_prompt else "", news_text[:500], content, 0)
                 )
                 _conn.commit()
                 _conn.close()
