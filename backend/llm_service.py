@@ -12,6 +12,16 @@ from db.config import get_config_float, get_config_int
 logger = logging.getLogger(__name__)
 
 
+# ── SSE 活跃连接计数 ──────────────────────────────────────
+
+_sse_active = 0
+
+
+def _active_sse_count() -> int:
+    """返回当前活跃的 SSE 连接数。"""
+    return _sse_active
+
+
 # ── LLM 调用重试装饰器 ──────────────────────────────────
 
 def _is_retryable(e):

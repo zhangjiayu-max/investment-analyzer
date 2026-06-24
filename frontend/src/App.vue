@@ -1,5 +1,5 @@
 <script setup>
-import { ref, watch, onMounted, onUnmounted } from 'vue'
+import { ref, watch, onMounted, onUnmounted, defineAsyncComponent } from 'vue'
 import Sidebar from './components/Sidebar.vue'
 import Home from './views/Home.vue'
 import MobileApp from './components/MobileApp.vue'

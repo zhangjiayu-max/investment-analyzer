@@ -264,6 +264,44 @@ async def startup():
     logging.info("=== 启动初始化完成 ===")
 
 
+@app.on_event("shutdown")
+async def shutdown():
+    """优雅关闭：等待活跃请求完成，清理资源。"""
+    logging.info("=== 开始优雅关闭 ===")
+
+    # 1. 停止接受新请求（FastAPI 自动处理）
+    # 2. 等待活跃的 SSE 连接完成（最多 10 秒）
+    try:
+        from llm_service import _active_sse_count
+        import time
+        deadline = time.time() + 10
+        while _active_sse_count() > 0 and time.time() < deadline:
+            logging.info(f"等待 {_active_sse_count()} 个 SSE 连接完成...")
+            await asyncio.sleep(1)
+    except Exception:
+        pass
+
+    # 3. 关闭数据库连接池
+    try:
+        from db import _get_conn
+        conn = _get_conn()
+        conn.close()
+        logging.info("数据库连接已关闭")
+    except Exception:
+        pass
+
+    # 4. 取消后台任务
+    try:
+        tasks = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+        for task in tasks:
+            task.cancel()
+        logging.info(f"已取消 {len(tasks)} 个后台任务")
+    except Exception:
+        pass
+
+    logging.info("=== 优雅关闭完成 ===")
+
+
 async def _auto_daily_report():
     """启动时自动检查并生成今日市场分析报告。"""
     import time

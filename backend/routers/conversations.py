@@ -1016,7 +1016,48 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
                     freshness_filtered=rag_result.get("freshness_filtered", 0), trace_id=trace_id)
                 qm = _calculate_quality_metrics(_prod_spec_results, rag_result, tool_calls)
                 _save_execution_trace(trace_id, conv_id, req.content, complexity, "completed", total_ms, pt, "none", qm)
+
+                # 自动检测可执行建议 → 创建决策候选
+                try:
+                    _auto_create_decision_candidate(content, conv_id, stream_msg_id)
+                except Exception:
+                    pass
+
                 return content
+
+            def _auto_create_decision_candidate(content: str, conversation_id: int, message_id: int):
+                """自动检测 AI 回复中的可执行建议，创建决策候选。"""
+                actionable_keywords = ["买入", "加仓", "卖出", "减仓", "清仓", "止盈", "止损", "定投", "调仓", "再平衡", "转换"]
+                if not any(kw in content for kw in actionable_keywords):
+                    return
+                from db.decisions import create_candidate_from_structured_recommendation
+                import re
+                action_type = "watch"
+                if any(kw in content for kw in ["买入", "加仓", "建仓", "定投"]):
+                    action_type = "buy"
+                elif any(kw in content for kw in ["卖出", "减仓", "清仓", "止盈"]):
+                    action_type = "sell"
+                elif any(kw in content for kw in ["调仓", "再平衡", "转换"]):
+                    action_type = "convert"
+                fund_code = ""
+                code_match = re.search(r"\d{6}(?:\.\w+)?", content)
+                if code_match:
+                    fund_code = code_match.group(0)
+                candidate_id = create_candidate_from_structured_recommendation({
+                    "source_type": "ai_chat",
+                    "source_id": str(conversation_id),
+                    "scenario_type": "auto_detect",
+                    "action_type": action_type,
+                    "target_type": "fund" if fund_code else "portfolio",
+                    "target_code": fund_code,
+                    "summary": content[:200],
+                    "rationale": content,
+                    "confidence": "low",
+                    "evidence": {"auto_detected": True, "conversation_id": conversation_id, "message_id": message_id},
+                    "priority": 4,
+                    "status": "new",
+                })
+                logger.info(f"自动创建决策候选: {candidate_id} (action={action_type}, fund={fund_code})")
 
             def _save_failed(err_msg):
                 if stream_msg_id <= 0:
