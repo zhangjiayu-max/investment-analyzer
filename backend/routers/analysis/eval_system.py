@@ -258,15 +258,37 @@ async def run_daily_eval() -> dict:
 
 # ============ API 端点 ============
 
+from pydantic import BaseModel, Field
+from typing import Optional
+
+
+class EvalCaseCreate(BaseModel):
+    case_name: str = Field(..., min_length=1, max_length=200)
+    case_type: str = Field(..., max_length=50)
+    portfolio_context: Optional[dict] = Field(None)
+    input_params: Optional[dict] = Field(None)
+    expected_behavior: Optional[str] = Field(None, max_length=2000)
+    expected_quality: Optional[str] = Field(None, max_length=2000)
+
+
+class EvalRunRequest(BaseModel):
+    case_id: int = Field(..., gt=0)
+
+
+class EvalBatchRequest(BaseModel):
+    case_type: Optional[str] = Field(None, max_length=50)
+    version_a: Optional[int] = Field(None, gt=0)
+    version_b: Optional[int] = Field(None, gt=0)
+
+
 @router.post("/cases")
-async def create_case_api(data: dict):
+async def create_case_api(data: EvalCaseCreate):
+    ctx = data.portfolio_context or data.input_params or {}
     cid = create_eval_case(
-        name=data["case_name"],
-        analysis_type=data["case_type"],
-        input_params=json.dumps(data.get("portfolio_context", data.get("input_params", {})), ensure_ascii=False)
-            if isinstance(data.get("portfolio_context", data.get("input_params")), dict)
-            else str(data.get("portfolio_context", data.get("input_params", "{}"))),
-        expected_quality=data.get("expected_behavior", data.get("expected_quality", "")),
+        name=data.case_name,
+        analysis_type=data.case_type,
+        input_params=json.dumps(ctx, ensure_ascii=False) if isinstance(ctx, dict) else str(ctx),
+        expected_quality=data.expected_behavior or data.expected_quality or "",
     )
     return {"status": "ok", "id": cid}
 
@@ -284,16 +306,13 @@ async def delete_case_api(case_id: int):
 
 
 @router.post("/run")
-async def run_eval_api(data: dict):
-    case_id = data.get("case_id")
-    if not case_id:
-        raise HTTPException(400, "缺少 case_id")
-    result = await _execute_single_eval(case_id, run_mode="manual")
+async def run_eval_api(data: EvalRunRequest):
+    result = await _execute_single_eval(data.case_id, run_mode="manual")
     return {"status": "ok", "result": result}
 
 
 @router.post("/run-batch")
-async def run_batch_eval_api(data: dict):
+async def run_batch_eval_api(data: EvalBatchRequest):
     case_type = data.get("case_type")
     version_a = data.get("version_a")
     version_b = data.get("version_b")
@@ -367,13 +386,21 @@ async def get_stats_api():
 
 # --- 提示词版本管理 ---
 
+
+class PromptVersionCreate(BaseModel):
+    agent_type: str = Field(..., max_length=50)
+    version: str = Field(..., max_length=20)
+    prompt_content: str = Field(..., min_length=10, max_length=50000)
+    changelog: str = Field("", max_length=1000)
+
+
 @router.post("/prompts")
-async def create_prompt_api(data: dict):
+async def create_prompt_api(data: PromptVersionCreate):
     vid = create_prompt_version(
-        agent_type=data["agent_type"],
-        version=data["version"],
-        prompt_content=data["prompt_content"],
-        changelog=data.get("changelog", ""),
+        agent_type=data.agent_type,
+        version=data.version,
+        prompt_content=data.prompt_content,
+        changelog=data.changelog,
     )
     return {"status": "ok", "id": vid}
 

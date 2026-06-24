@@ -3,6 +3,8 @@ import asyncio
 import logging
 
 from fastapi import APIRouter
+from pydantic import BaseModel, Field
+from typing import Optional
 
 from db.config import get_config_int, get_config_float
 from llm_service import _call_llm
@@ -11,12 +13,18 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["analysis-compare"])
 
 
+class CompareDiffRequest(BaseModel):
+    record_a: dict = Field(default_factory=dict)
+    record_b: dict = Field(default_factory=dict)
+    type: str = Field("panorama", pattern=r"^(panorama|health|fund|trade)$")
+
+
 @router.post("/api/portfolio/analysis/compare-diff")
-async def compare_diff_api(data: dict):
+async def compare_diff_api(data: CompareDiffRequest):
     """AI 分析两次诊断结果的差异。"""
-    record_a = data.get("record_a", {})
-    record_b = data.get("record_b", {})
-    analysis_type = data.get("type", "panorama")
+    record_a = data.record_a
+    record_b = data.record_b
+    analysis_type = data.type
 
     result_a = record_a.get("result", "")
     result_b = record_b.get("result", "")

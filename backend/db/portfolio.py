@@ -488,20 +488,25 @@ def create_transaction(fund_code: str, transaction_type: str, amount: float,
         actual_price = price
 
     conn = _get_conn()
-    cur = conn.execute("""
-        INSERT INTO portfolio_transactions
-            (holding_id, user_id, fund_code, fund_name, transaction_type, amount, shares, price,
-             transaction_date, notes, status, submitted_shares, submitted_amount,
-             transaction_time, expected_confirm_date, account)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """, (holding_id, user_id, fund_code, fund_name, transaction_type, actual_amount, actual_shares,
-          actual_price, transaction_date, notes, status, submitted_shares, submitted_amount,
-          transaction_time, expected_confirm_date, account))
-    tx_id = cur.lastrowid
-    conn.commit()
-    conn.close()
+    try:
+        cur = conn.execute("""
+            INSERT INTO portfolio_transactions
+                (holding_id, user_id, fund_code, fund_name, transaction_type, amount, shares, price,
+                 transaction_date, notes, status, submitted_shares, submitted_amount,
+                 transaction_time, expected_confirm_date, account)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (holding_id, user_id, fund_code, fund_name, transaction_type, actual_amount, actual_shares,
+              actual_price, transaction_date, notes, status, submitted_shares, submitted_amount,
+              transaction_time, expected_confirm_date, account))
+        tx_id = cur.lastrowid
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
-    # 只有 confirmed 状态才更新持仓数据
+    # 只有 confirmed 状态才更新持仓数据（事务外执行，可重试恢复）
     if holding_id and status in ('confirmed', 'settled'):
         _recalculate_holding(holding_id)
 
@@ -787,6 +792,9 @@ def confirm_transaction(tx_id: int, confirmed_price: float,
             WHERE id = ?
         """, (actual_amount, actual_shares, actual_price, fee, now, tx_id))
         conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
     finally:
         conn.close()
 

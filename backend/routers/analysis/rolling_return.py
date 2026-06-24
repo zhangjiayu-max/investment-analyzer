@@ -384,12 +384,31 @@ async def analyze_rolling_return(target: str = "portfolio", code: str = "",
 
 # ============ API 端点 ============
 
+from pydantic import BaseModel, Field
+from typing import Optional
+
+
+class RollingAnalyzeRequest(BaseModel):
+    target: str = Field("portfolio", pattern=r"^(portfolio|index|fund)$")
+    code: str = Field("", max_length=20)
+    lookback_years: int = Field(5, ge=1, le=20)
+
+
+class RollingPortfolioRequest(BaseModel):
+    lookback_years: int = Field(5, ge=1, le=20)
+
+
+class RollingCodeRequest(BaseModel):
+    code: str = Field(..., min_length=1, max_length=20)
+    lookback_years: int = Field(5, ge=1, le=20)
+
+
 @router.post("/analyze")
-async def analyze_api(data: dict):
+async def analyze_api(data: RollingAnalyzeRequest):
     """执行滚动收益分析。"""
-    target = data.get("target", "portfolio")
-    code = data.get("code", "")
-    lookback_years = int(data.get("lookback_years", 5))
+    target = data.target
+    code = data.code
+    lookback_years = data.lookback_years
     result = await analyze_rolling_return(target, code, lookback_years)
     # 提取可执行行动
     try:
@@ -405,30 +424,26 @@ async def analyze_api(data: dict):
 
 
 @router.post("/portfolio")
-async def portfolio_api(data: dict):
+async def portfolio_api(data: RollingPortfolioRequest):
     """分析持仓组合的滚动收益。"""
-    lookback_years = int(data.get("lookback_years", 5))
+    lookback_years = data.lookback_years
     result = await analyze_rolling_return("portfolio", "", lookback_years)
     return {"status": "ok", "result": result}
 
 
 @router.post("/index")
-async def index_api(data: dict):
+async def index_api(data: RollingCodeRequest):
     """分析指数的滚动收益。"""
-    code = data.get("code", "")
-    if not code:
-        raise HTTPException(400, "缺少指数代码")
-    lookback_years = int(data.get("lookback_years", 5))
+    code = data.code
+    lookback_years = data.lookback_years
     result = await analyze_rolling_return("index", code, lookback_years)
     return {"status": "ok", "result": result}
 
 
 @router.post("/fund")
-async def fund_api(data: dict):
+async def fund_api(data: RollingCodeRequest):
     """分析基金的滚动收益。"""
-    code = data.get("code", "")
-    if not code:
-        raise HTTPException(400, "缺少基金代码")
-    lookback_years = int(data.get("lookback_years", 5))
+    code = data.code
+    lookback_years = data.lookback_years
     result = await analyze_rolling_return("fund", code, lookback_years)
     return {"status": "ok", "result": result}
