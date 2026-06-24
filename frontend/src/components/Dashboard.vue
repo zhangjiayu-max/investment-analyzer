@@ -1,6 +1,6 @@
 <script setup>
 import { ref, computed, onMounted, onActivated } from 'vue'
-import { getDashboard, runAnalysis, runPanoramaAnalysis, pollPanoramaStatus, getHotTopics, getDailyReport, getDailyReportTask, regenerateDailyReport, submitDailyReportFeedback, listPanoramaRecords, triggerHotspotsAnalysis, getLatestHotspotsAnalysis, getRecommendations, getRecommendationStats, submitRecommendationFeedback, getBondRecommend, listBondRecommendRecords, autoVerifyRecommendations, fetchRecentValuations, getBondMarketTemperature, getHotspotsRelate, getRebalancingSuggestion, listTodayDecisions, updateDecisionStatus, completeDecisionAction, listDueDecisionReviews, submitDecisionReview, getDecisionPrecheck, getTodayOpportunities, scanDailyOpportunities, createDecisionFromOpportunity, watchOpportunity } from '../api'
+import { getDashboard, runAnalysis, runPanoramaAnalysis, pollPanoramaStatus, getHotTopics, getDailyReport, getDailyReportTask, regenerateDailyReport, submitDailyReportFeedback, listPanoramaRecords, triggerHotspotsAnalysis, getLatestHotspotsAnalysis, getRecommendations, getRecommendationStats, submitRecommendationFeedback, getBondRecommend, listBondRecommendRecords, autoVerifyRecommendations, fetchRecentValuations, getBondMarketTemperature, getHotspotsRelate, getRebalancingSuggestion, listTodayDecisions, updateDecisionStatus, completeDecisionAction, listDueDecisionReviews, submitDecisionReview, getDecisionPrecheck, getTodayOpportunities, scanDailyOpportunities, createDecisionFromOpportunity, watchOpportunity, dailyAdviceAPI } from '../api'
 import GaugeChart from './charts/GaugeChart.vue'
 import ConfirmDialog from './ConfirmDialog.vue'
 import AppToast from './AppToast.vue'
@@ -59,6 +59,28 @@ const hotTopicsLoading = ref(true)
 const hotspotsRelate = ref(null)
 const opportunities = ref([])
 const opportunitiesLoading = ref(false)
+
+// ── 每日持仓提示 ──
+const dailyAdvice = ref(null)
+const dailyAdviceLoading = ref(true)
+const adviceTopSignals = computed(() => {
+  if (!dailyAdvice.value?.signals) return []
+  return dailyAdvice.value.signals
+    .filter(s => s.severity === 'actionable' || s.severity === 'watch')
+    .slice(0, 3)
+})
+
+async function loadDailyAdvice() {
+  dailyAdviceLoading.value = true
+  try {
+    const { data } = await dailyAdviceAPI.getToday()
+    dailyAdvice.value = data
+  } catch (e) {
+    console.error('loadDailyAdvice error:', e)
+  } finally {
+    dailyAdviceLoading.value = false
+  }
+}
 
 // ── 每日日报自动加载 ──
 const dailyReport = ref(null)
@@ -167,6 +189,7 @@ onMounted(async () => {
     loadDailyReport(),
     loadRecHistory(),
     loadBondTemperature(),
+    loadDailyAdvice(),
   ])
 
   try {
@@ -215,6 +238,7 @@ onActivated(async () => {
     loadDailyReport(),
     loadRecHistory(),
     loadBondTemperature(),
+    loadDailyAdvice(),
   ])
   // 恢复全景诊断最近一条结果
   try {
@@ -716,6 +740,30 @@ function handlePanorama() {
       @submit-feedback="handleBriefingSubmitFeedback"
     />
 
+    <!-- 今日持仓提示 Top 3 摘要 -->
+    <div v-if="dailyAdvice || dailyAdviceLoading" class="advice-summary-card card">
+      <div class="advice-summary-header">
+        <h3 class="advice-summary-title">📋 今日持仓提示</h3>
+        <span v-if="dailyAdvice?.summary?.headline" class="advice-summary-headline">{{ dailyAdvice.summary.headline }}</span>
+        <span v-if="dailyAdvice?.generated_at" class="advice-summary-time">{{ dailyAdvice.generated_at.slice(11, 16) }}</span>
+      </div>
+      <div v-if="dailyAdviceLoading" class="advice-summary-loading">
+        <Skeleton variant="text" :count="2" />
+      </div>
+      <div v-else-if="adviceTopSignals.length > 0" class="advice-summary-list">
+        <div v-for="signal in adviceTopSignals" :key="signal.id" class="advice-summary-item">
+          <span :class="['advice-summary-dot', `dot-${signal.severity}`]"></span>
+          <span class="advice-summary-fund">{{ signal.fund_name || signal.target_name || '未知' }}</span>
+          <span class="advice-summary-tag" v-if="signal.action_tag">{{ signal.action_tag }}</span>
+          <span class="advice-summary-suggestion" v-if="signal.suggestion">{{ signal.suggestion }}</span>
+        </div>
+      </div>
+      <div v-else class="advice-summary-empty">✅ 今日暂无需行动的提示</div>
+      <button class="btn-secondary btn-sm advice-summary-btn" @click="emit('navigate', 'portfolio')">
+        查看持仓行动工作台 →
+      </button>
+    </div>
+
     <DecisionActionList
       :decisions="decisions"
       :loading="decisionsLoading"
@@ -1029,5 +1077,86 @@ function handlePanorama() {
     text-align: center;
     gap: 0.5rem;
   }
+}
+
+/* ── 今日持仓提示摘要 ── */
+.advice-summary-card {
+  margin-bottom: 1rem;
+}
+.advice-summary-header {
+  display: flex;
+  align-items: center;
+  gap: 0.625rem;
+  flex-wrap: wrap;
+  margin-bottom: 0.75rem;
+}
+.advice-summary-title {
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 600;
+  color: var(--color-text-primary);
+}
+.advice-summary-headline {
+  font-size: 0.8rem;
+  padding: 2px 10px;
+  border-radius: 20px;
+  background: var(--color-primary-50);
+  color: var(--color-primary-800);
+  font-weight: 500;
+}
+.advice-summary-time {
+  font-size: 0.75rem;
+  color: var(--color-text-muted);
+  margin-left: auto;
+}
+.advice-summary-loading {
+  padding: 0.5rem 0;
+}
+.advice-summary-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin-bottom: 0.75rem;
+}
+.advice-summary-item {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.82rem;
+  color: var(--color-text-secondary);
+  flex-wrap: wrap;
+}
+.advice-summary-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.dot-actionable { background: var(--color-profit); }
+.dot-watch { background: var(--color-warning); }
+.dot-blocked { background: #991b1b; }
+.dot-info { background: var(--color-text-muted); }
+.advice-summary-fund {
+  font-weight: 500;
+  color: var(--color-text-primary);
+}
+.advice-summary-tag {
+  font-size: 0.7rem;
+  padding: 1px 6px;
+  border-radius: 6px;
+  background: var(--color-primary-50);
+  color: var(--color-primary-800);
+}
+.advice-summary-suggestion {
+  color: var(--color-text-muted);
+  font-size: 0.78rem;
+}
+.advice-summary-empty {
+  font-size: 0.85rem;
+  color: var(--color-text-secondary);
+  margin-bottom: 0.75rem;
+}
+.advice-summary-btn {
+  width: 100%;
 }
 </style>

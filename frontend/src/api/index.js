@@ -1967,3 +1967,23 @@ export function runWhatIf(scenario) {
 export function runCompareDiff(recordA, recordB, type) {
   return http.post('/api/portfolio/analysis/compare-diff', { record_a: recordA, record_b: recordB, type })
 }
+
+// ── 每日持仓提示 API ──────────────────────────────────────
+
+/** 每日持仓提示 */
+export const dailyAdviceAPI = {
+  /** 手动触发今日提示生成 */
+  run: () => api.post('/daily-advice/run', { user_id: 'default', trigger_type: 'manual', force: true }),
+  /** 获取今日提示概览 */
+  getToday: () => api.get('/daily-advice/today', { params: { user_id: 'default' } }),
+  /** 获取今日信号列表 */
+  getSignals: () => api.get('/daily-advice/signals', { params: { user_id: 'default' } }),
+  /** 标记信号为已读 */
+  markRead: (signalId) => api.post(`/daily-advice/signals/${signalId}/read`),
+  /** 忽略信号 */
+  ignore: (signalId) => api.post(`/daily-advice/signals/${signalId}/ignore`),
+  /** 从信号创建决策候选 */
+  createCandidate: (signalId) => api.post(`/daily-advice/signals/${signalId}/create-candidate`),
+  /** 问 AI 解读信号 */
+  askAI: (signalId) => api.post(`/daily-advice/signals/${signalId}/ask-ai`, {}, { timeout: 120000 }),
+}

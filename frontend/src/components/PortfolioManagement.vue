@@ -37,6 +37,7 @@ import {
   classifyFourPots, getDcaOptimization,
   listRecommendationCandidates, listDecisions, listDueDecisionReviews,
   createDecisionFromAction, runWhatIf,
+  dailyAdviceAPI,
 } from '../api'
 import { useToast } from '../composables/useToast'
 import ConfirmDialog from './ConfirmDialog.vue'
@@ -54,6 +55,86 @@ import { isDark } from '../composables/useTheme'
 import { useAsyncTask } from '../composables/useAsyncTask'
 
 const emit = defineEmits(['navigate'])
+
+// ── 每日持仓提示 ──
+const dailyAdvice = ref(null)
+const dailyAdviceLoading = ref(false)
+const dailyAdviceError = ref(null)
+const aiResponseMap = ref({})  // signalId -> { loading, text, error }
+const adviceActionLoading = ref({})  // signalId -> action type
+
+async function loadDailyAdvice() {
+  dailyAdviceLoading.value = true
+  dailyAdviceError.value = null
+  try {
+    const { data } = await dailyAdviceAPI.getToday()
+    dailyAdvice.value = data
+  } catch (e) {
+    dailyAdviceError.value = e?.response?.data?.detail || e?.message || '加载失败'
+    console.error('loadDailyAdvice error:', e)
+  } finally {
+    dailyAdviceLoading.value = false
+  }
+}
+
+async function handleAdviceAction(signalId, action) {
+  adviceActionLoading.value[signalId] = action
+  try {
+    if (action === 'create-candidate') {
+      await dailyAdviceAPI.createCandidate(signalId)
+      useToast().showToast('已保存为决策候选', 'success')
+    } else if (action === 'ignore') {
+      await dailyAdviceAPI.ignore(signalId)
+      useToast().showToast('已忽略', 'info')
+      await loadDailyAdvice()
+    } else if (action === 'ask-ai') {
+      aiResponseMap.value[signalId] = { loading: true, text: '', error: null }
+      const { data } = await dailyAdviceAPI.askAI(signalId)
+      aiResponseMap.value[signalId] = { loading: false, text: data?.ai_response || data?.message || '暂无回复', error: null }
+    } else if (action === 'refresh') {
+      await dailyAdviceAPI.run()
+      useToast().showToast('提示已刷新', 'success')
+      await loadDailyAdvice()
+    }
+  } catch (e) {
+    const msg = e?.response?.data?.detail || e?.message || '操作失败'
+    if (action === 'ask-ai') {
+      aiResponseMap.value[signalId] = { loading: false, text: '', error: msg }
+    } else {
+      useToast().showToast(msg, 'error')
+    }
+  } finally {
+    adviceActionLoading.value[signalId] = null
+  }
+}
+
+function formatAdviceAmount(amount) {
+  if (!amount && amount !== 0) return ''
+  if (amount >= 10000) return `¥${(amount / 10000).toFixed(1)}万`
+  return `¥${amount.toLocaleString()}`
+}
+
+function severityLabel(level) {
+  return { actionable: '可行动', watch: '观察', blocked: '风险拦截', info: '信息' }[level] || level
+}
+
+function severityClass(level) {
+  return `advice-severity-${level || 'info'}`
+}
+
+function tagLabel(tag) {
+  const map = { 'dca_tier1': '一档定投', 'dca_tier2': '二档定投', 'dca_tier3': '三档定投', 'pause_buy': '暂缓加仓', 'reduce_review': '减仓复核', 'hold': '继续持有', 'rebalance': '再平衡' }
+  return map[tag] || tag
+}
+
+function adviceSummaryClass(headline) {
+  if (!headline) return ''
+  if (headline.includes('加仓') || headline.includes('定投')) return 'advice-headline-buy'
+  if (headline.includes('减仓') || headline.includes('降低')) return 'advice-headline-sell'
+  if (headline.includes('观望') || headline.includes('持有')) return 'advice-headline-hold'
+  if (headline.includes('刷新') || headline.includes('数据')) return 'advice-headline-data'
+  return ''
+}
 
 // ── 持仓占比计算 ──
 const holdingWeights = computed(() => {
@@ -2248,6 +2329,7 @@ const TAG_PRESETS = ['追涨', '抄底', '定投', '止盈', '止损', '调仓',
 onMounted(async () => {
   await loadData()
   loadAlerts()
+  loadDailyAdvice()
   // 如果今天还未分析过，自动触发分散度分析；已分析则加载最新结果
   if (holdings.value.length > 0) {
     try {
@@ -2270,6 +2352,7 @@ onMounted(async () => {
 
 // KeepAlive 组件激活时重新加载数据（切换页面回来时触发）
 onActivated(async () => {
+  loadDailyAdvice()
   // 检查是否有正在运行的全景诊断
   if (_panoramaGlobalState.recordId && _panoramaGlobalState.status === 'running') {
     // 恢复轮询，不重置 loading
@@ -3030,6 +3113,116 @@ function txDisplayAmount(tx) {
         <input ref="csvInput" type="file" accept=".csv" style="display:none" @change="handleImportCsv" />
       </div>
     </div>
+
+    <!-- 今日持仓提示 -->
+    <section class="daily-advice-section" v-if="dailyAdvice || dailyAdviceLoading || dailyAdviceError">
+      <div class="advice-header">
+        <div class="advice-header-left">
+          <h3 class="advice-title">📋 今日持仓提示</h3>
+          <span v-if="dailyAdvice?.generated_at" class="advice-time">更新于 {{ dailyAdvice.generated_at.slice(11, 16) }}</span>
+        </div>
+        <div class="advice-header-right">
+          <span v-if="dailyAdvice?.summary" class="advice-headline-badge" :class="adviceSummaryClass(dailyAdvice.summary.headline)">
+            {{ dailyAdvice.summary.headline }}
+          </span>
+          <span v-if="dailyAdvice?.signals" class="advice-count-badge">
+            {{ dailyAdvice.signals.filter(s => s.severity === 'actionable').length }} 可行动 · {{ dailyAdvice.signals.filter(s => s.severity === 'watch').length }} 观察
+          </span>
+          <button class="btn-ghost btn-sm" :class="{ 'btn-loading': dailyAdviceLoading }" :disabled="dailyAdviceLoading" @click="loadDailyAdvice" title="刷新提示">
+            <svg :class="['icon-spin', { 'spinning': dailyAdviceLoading }]" width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h5M20 20v-5h-5M4.93 9a8 8 0 0113.14 0M19.07 15a8 8 0 01-13.14 0"/>
+            </svg>
+            刷新
+          </button>
+        </div>
+      </div>
+
+      <div v-if="dailyAdviceLoading" class="advice-loading">
+        <Skeleton variant="text" :count="2" />
+      </div>
+
+      <div v-else-if="dailyAdviceError" class="advice-error">
+        <span>{{ dailyAdviceError }}</span>
+        <button class="btn-ghost btn-sm" @click="loadDailyAdvice">重试</button>
+      </div>
+
+      <div v-else-if="dailyAdvice && dailyAdvice.signals && dailyAdvice.signals.length > 0" class="advice-cards-grid">
+        <div
+          v-for="signal in dailyAdvice.signals"
+          :key="signal.id"
+          :class="['advice-card', severityClass(signal.severity)]"
+        >
+          <div class="advice-card-header">
+            <div class="advice-card-title">
+              <span class="advice-fund-name">{{ signal.fund_name || signal.target_name || '未知' }}</span>
+              <span class="advice-fund-code" v-if="signal.fund_code || signal.target_code">{{ signal.fund_code || signal.target_code }}</span>
+            </div>
+            <span class="advice-severity-tag" :class="severityClass(signal.severity)">{{ severityLabel(signal.severity) }}</span>
+          </div>
+
+          <div class="advice-card-body">
+            <div class="advice-tags-row" v-if="signal.action_tag || signal.suggestion">
+              <span class="advice-tag-chip" v-if="signal.action_tag">{{ tagLabel(signal.action_tag) }}</span>
+              <span class="advice-suggestion" v-if="signal.suggestion">{{ signal.suggestion }}</span>
+            </div>
+
+            <div class="advice-amount" v-if="signal.suggested_amount">
+              建议金额: <strong>{{ formatAdviceAmount(signal.suggested_amount) }}</strong>
+            </div>
+
+            <div class="advice-evidence" v-if="signal.evidence && signal.evidence.length">
+              <span class="advice-evidence-label">证据:</span>
+              <div class="advice-chips">
+                <span v-for="(ev, idx) in signal.evidence" :key="idx" class="advice-chip">{{ ev }}</span>
+              </div>
+            </div>
+
+            <div class="advice-counter-risk" v-if="signal.counter_risk">
+              <span class="advice-counter-label">⚠ 反方风险:</span>
+              <span class="advice-counter-text">{{ signal.counter_risk }}</span>
+            </div>
+
+            <div class="advice-blocked-reason" v-if="signal.severity === 'blocked' && signal.blocked_reason">
+              🚫 {{ signal.blocked_reason }}
+            </div>
+          </div>
+
+          <!-- AI 回复区域 -->
+          <div class="advice-ai-response" v-if="aiResponseMap[signal.id]">
+            <div v-if="aiResponseMap[signal.id].loading" class="advice-ai-loading">
+              <svg class="icon-spin spinning" width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h5M20 20v-5h-5M4.93 9a8 8 0 0113.14 0M19.07 15a8 8 0 01-13.14 0"/>
+              </svg>
+              AI 分析中...
+            </div>
+            <div v-else-if="aiResponseMap[signal.id].error" class="advice-ai-error">{{ aiResponseMap[signal.id].error }}</div>
+            <div v-else class="advice-ai-text" v-html="renderMarkdown(aiResponseMap[signal.id].text)"></div>
+          </div>
+
+          <div class="advice-card-actions" v-if="signal.severity !== 'blocked'">
+            <button class="btn-primary btn-sm" :disabled="adviceActionLoading[signal.id]" @click="handleAdviceAction(signal.id, 'create-candidate')">
+              💾 保存为决策
+            </button>
+            <button class="btn-secondary btn-sm" :disabled="aiResponseMap[signal.id]?.loading || adviceActionLoading[signal.id]" @click="handleAdviceAction(signal.id, 'ask-ai')">
+              🤖 问 AI
+            </button>
+            <button class="btn-ghost btn-sm" :disabled="adviceActionLoading[signal.id]" @click="handleAdviceAction(signal.id, 'ignore')">
+              忽略
+            </button>
+          </div>
+          <div class="advice-card-actions" v-else>
+            <button class="btn-secondary btn-sm" :disabled="adviceActionLoading[signal.id]" @click="handleAdviceAction(signal.id, 'ask-ai')">
+              🤖 问 AI
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <div v-else-if="dailyAdvice" class="advice-empty">
+        <span>✅ 今日暂无需行动的持仓提示</span>
+        <button class="btn-ghost btn-sm" @click="handleAdviceAction(null, 'refresh')">手动生成</button>
+      </div>
+    </section>
 
     <section class="portfolio-workbench">
       <article class="workbench-cell overview" @click="switchAnalysisTab('holdings')">
@@ -8645,5 +8838,276 @@ select.input-field {
 }
 .actions-cell {
   white-space: nowrap;
+}
+
+/* ── 今日持仓提示 ── */
+.daily-advice-section {
+  margin-bottom: 1.25rem;
+  background: var(--color-bg-card);
+  border-radius: 12px;
+  padding: 1.25rem;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.06);
+  border: 1px solid var(--color-border-light);
+}
+.advice-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-bottom: 1rem;
+  flex-wrap: wrap;
+}
+.advice-header-left {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+.advice-title {
+  margin: 0;
+  font-size: 1.05rem;
+  font-weight: 600;
+  color: var(--color-text-primary);
+}
+.advice-time {
+  font-size: 0.78rem;
+  color: var(--color-text-muted);
+}
+.advice-header-right {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+.advice-headline-badge {
+  font-size: 0.78rem;
+  padding: 2px 10px;
+  border-radius: 20px;
+  font-weight: 500;
+}
+.advice-headline-buy {
+  background: var(--color-profit-bg);
+  color: var(--color-profit);
+}
+.advice-headline-sell {
+  background: var(--color-loss-bg);
+  color: var(--color-loss);
+}
+.advice-headline-hold {
+  background: var(--color-warning-bg);
+  color: var(--color-warning);
+}
+.advice-headline-data {
+  background: rgba(156, 163, 175, 0.12);
+  color: var(--color-text-muted);
+}
+.advice-count-badge {
+  font-size: 0.75rem;
+  color: var(--color-text-secondary);
+  background: var(--color-border-light);
+  padding: 2px 8px;
+  border-radius: 12px;
+}
+.advice-loading {
+  padding: 1rem 0;
+}
+.advice-error {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  color: var(--color-danger);
+  font-size: 0.85rem;
+}
+.advice-cards-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+  gap: 0.875rem;
+}
+@media (max-width: 768px) {
+  .advice-cards-grid {
+    grid-template-columns: 1fr;
+  }
+}
+.advice-card {
+  border-radius: 10px;
+  padding: 0.875rem;
+  border: 1px solid var(--color-border-light);
+  background: var(--color-bg-card);
+  transition: box-shadow 0.2s;
+}
+.advice-card:hover {
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+}
+.advice-severity-actionable {
+  border-left: 3px solid var(--color-profit);
+  background: linear-gradient(90deg, var(--color-profit-bg) 0%, var(--color-bg-card) 40%);
+}
+.advice-severity-watch {
+  border-left: 3px solid var(--color-warning);
+  background: linear-gradient(90deg, var(--color-warning-bg) 0%, var(--color-bg-card) 40%);
+}
+.advice-severity-blocked {
+  border-left: 3px solid #991b1b;
+  background: linear-gradient(90deg, rgba(220, 38, 38, 0.12) 0%, var(--color-bg-card) 40%);
+}
+.advice-severity-info {
+  border-left: 3px solid var(--color-text-muted);
+}
+.advice-card-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin-bottom: 0.625rem;
+}
+.advice-card-title {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.advice-fund-name {
+  font-weight: 600;
+  font-size: 0.92rem;
+  color: var(--color-text-primary);
+}
+.advice-fund-code {
+  font-size: 0.72rem;
+  color: var(--color-text-muted);
+}
+.advice-severity-tag {
+  font-size: 0.7rem;
+  padding: 1px 8px;
+  border-radius: 10px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+.advice-severity-tag.advice-severity-actionable {
+  background: var(--color-profit-bg);
+  color: var(--color-profit);
+}
+.advice-severity-tag.advice-severity-watch {
+  background: var(--color-warning-bg);
+  color: var(--color-warning);
+}
+.advice-severity-tag.advice-severity-blocked {
+  background: rgba(220, 38, 38, 0.15);
+  color: #991b1b;
+}
+.advice-severity-tag.advice-severity-info {
+  background: rgba(156, 163, 175, 0.12);
+  color: var(--color-text-muted);
+}
+.advice-card-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+.advice-tags-row {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+}
+.advice-tag-chip {
+  font-size: 0.72rem;
+  padding: 1px 8px;
+  border-radius: 8px;
+  background: var(--color-primary-50);
+  color: var(--color-primary-800);
+  font-weight: 500;
+}
+.advice-suggestion {
+  font-size: 0.82rem;
+  color: var(--color-text-secondary);
+}
+.advice-amount {
+  font-size: 0.82rem;
+  color: var(--color-text-secondary);
+}
+.advice-amount strong {
+  color: var(--color-profit);
+  font-size: 0.92rem;
+}
+.advice-evidence {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+.advice-evidence-label {
+  font-size: 0.72rem;
+  color: var(--color-text-muted);
+}
+.advice-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+}
+.advice-chip {
+  font-size: 0.68rem;
+  padding: 1px 7px;
+  border-radius: 6px;
+  background: var(--color-border-light);
+  color: var(--color-text-secondary);
+}
+.advice-counter-risk {
+  font-size: 0.75rem;
+  display: flex;
+  gap: 0.3rem;
+  align-items: flex-start;
+}
+.advice-counter-label {
+  color: var(--color-warning);
+  font-weight: 500;
+  white-space: nowrap;
+}
+.advice-counter-text {
+  color: var(--color-text-secondary);
+}
+.advice-blocked-reason {
+  font-size: 0.78rem;
+  color: #991b1b;
+  background: rgba(220, 38, 38, 0.08);
+  padding: 0.4rem 0.6rem;
+  border-radius: 6px;
+}
+.advice-ai-response {
+  margin-top: 0.5rem;
+  padding: 0.625rem;
+  background: var(--color-primary-50);
+  border-radius: 8px;
+  font-size: 0.82rem;
+}
+.advice-ai-loading {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  color: var(--color-text-muted);
+}
+.advice-ai-error {
+  color: var(--color-danger);
+}
+.advice-ai-text {
+  color: var(--color-text-primary);
+  line-height: 1.6;
+}
+.advice-ai-text :deep(p) {
+  margin: 0.3rem 0;
+}
+.advice-card-actions {
+  display: flex;
+  gap: 0.4rem;
+  margin-top: 0.625rem;
+  flex-wrap: wrap;
+}
+.advice-card-actions .btn-sm {
+  font-size: 0.75rem;
+  padding: 3px 10px;
+}
+.advice-empty {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.5rem 0;
+  color: var(--color-text-secondary);
+  font-size: 0.85rem;
 }
 </style>
