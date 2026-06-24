@@ -243,3 +243,55 @@ def expire_old_signals(user_id: str, signal_date: str, signal_type: str, target_
         conn.commit()
     finally:
         conn.close()
+
+
+# ── 决策标签管理 ────────────────────────────────────────────
+
+def add_decision_tag(decision_id: int, tag: str):
+    conn = _get_conn()
+    try:
+        # Check if tags column exists, add if not
+        cols = [c[1] for c in conn.execute("PRAGMA table_info(decision_records)").fetchall()]
+        if "tags" not in cols:
+            conn.execute("ALTER TABLE decision_records ADD COLUMN tags TEXT DEFAULT '[]'")
+            conn.commit()
+
+        # Get current tags
+        row = conn.execute("SELECT tags FROM decision_records WHERE id=?", (decision_id,)).fetchone()
+        if not row:
+            return False
+        current_tags = json.loads(row["tags"] or "[]")
+        if tag not in current_tags:
+            current_tags.append(tag)
+            conn.execute("UPDATE decision_records SET tags=? WHERE id=?", (json.dumps(current_tags), decision_id))
+            conn.commit()
+        return True
+    finally:
+        conn.close()
+
+
+def remove_decision_tag(decision_id: int, tag: str):
+    conn = _get_conn()
+    try:
+        row = conn.execute("SELECT tags FROM decision_records WHERE id=?", (decision_id,)).fetchone()
+        if not row:
+            return False
+        current_tags = json.loads(row["tags"] or "[]")
+        if tag in current_tags:
+            current_tags.remove(tag)
+            conn.execute("UPDATE decision_records SET tags=? WHERE id=?", (json.dumps(current_tags), decision_id))
+            conn.commit()
+        return True
+    finally:
+        conn.close()
+
+
+def list_decision_tags(decision_id: int):
+    conn = _get_conn()
+    try:
+        row = conn.execute("SELECT tags FROM decision_records WHERE id=?", (decision_id,)).fetchone()
+        if not row:
+            return []
+        return json.loads(row["tags"] or "[]")
+    finally:
+        conn.close()

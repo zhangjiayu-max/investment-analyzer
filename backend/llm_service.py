@@ -161,10 +161,22 @@ def _call_llm_stream(caller: str = "", **kwargs):
 
 
 def call_arbitration_llm(**kwargs):
-    """仲裁 Agent 专用 LLM 调用（高级推理模型，如 DeepSeek R1）。未配置则返回 None。"""
+    """仲裁 Agent 专用 LLM 调用（高级推理模型，如 DeepSeek R1）。未配置则返回 None。
+
+    支持通过 system_config 'arbitration.model' 覆盖默认模型名。
+    """
     if not _arbitration_client or not _arbitration_model:
         return None
-    kwargs.setdefault("model", _arbitration_model)
+
+    # 从数据库配置读取差异化仲裁模型
+    try:
+        from db.config import get_config
+        config_model = get_config('arbitration.model', '')
+        effective_model = config_model.strip() if config_model.strip() else _arbitration_model
+    except Exception:
+        effective_model = _arbitration_model
+
+    kwargs.setdefault("model", effective_model)
     try:
         resp = _arbitration_client.chat.completions.create(**kwargs)
         if resp.usage:

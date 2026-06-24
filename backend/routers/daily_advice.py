@@ -229,3 +229,118 @@ async def ask_ai_about_signal(signal_id: int):
     except Exception as e:
         logger.error(f"ask-ai 失败: {e}", exc_info=True)
         raise HTTPException(500, f"AI 解释生成失败: {e}")
+
+
+# ── 周报生成器 ──────────────────────────────────────────
+
+@router.post("/api/daily-advice/weekly-report")
+async def generate_weekly_report(user_id: str = "default"):
+    """Generate weekly investment report from signals, decisions, and thread summaries."""
+    from datetime import datetime, timedelta
+    from db.thread_summaries import list_thread_summaries
+    from db._conn import _get_conn
+
+    week_ago = (datetime.now() - timedelta(days=7)).isoformat()
+
+    conn = _get_conn()
+    try:
+        # Get signals from past 7 days
+        signals = conn.execute(
+            "SELECT * FROM daily_position_signals WHERE user_id=? AND created_at >= ? ORDER BY created_at DESC",
+            (user_id, week_ago)
+        ).fetchall()
+        signals_list = [dict(s) for s in signals]
+
+        # Get decisions from past 7 days
+        decisions = conn.execute(
+            "SELECT * FROM decision_records WHERE user_id=? AND created_at >= ? ORDER BY created_at DESC",
+            (user_id, week_ago)
+        ).fetchall()
+        decisions_list = [dict(d) for d in decisions]
+    finally:
+        conn.close()
+
+    # Get thread summaries
+    summaries = list_thread_summaries(user_id, limit=50)
+    summaries_week = [s for s in summaries if s.get("created_at", "") >= week_ago]
+
+    # Count signal types
+    actionable_count = len([s for s in signals_list if s.get("severity") == "actionable"])
+    watch_count = len([s for s in signals_list if s.get("severity") == "watch"])
+
+    # Build LLM prompt
+    prompt = f"""基于以下投资数据，生成一份简洁的周报：
+
+信号统计：{len(signals_list)}条信号（{actionable_count}条可行动，{watch_count}条观察）
+关键信号：{json.dumps([s.get('summary','') for s in signals_list[:5]], ensure_ascii=False)}
+决策记录：{json.dumps([d.get('title','') for d in decisions_list[:5]], ensure_ascii=False)}
+对话摘要：{json.dumps([s.get('summary','') for s in summaries_week[:3]], ensure_ascii=False)}
+
+请生成一份200-400字的周报，包含：
+1. 本周市场/持仓概况
+2. 主要操作与决策
+3. 下周关注点
+"""
+
+    try:
+        from llm_service import _call_llm, MODEL
+        from db.config import get_config_float, get_config_int
+
+        response = _call_llm(
+            caller="weekly_report",
+            model=MODEL,
+            messages=[
+                {"role": "system", "content": "你是一个专业的投资周报撰写助手。"},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=get_config_float("llm.temperature_analysis", 0.3),
+            max_tokens=get_config_int("llm.max_tokens_analysis", 4096),
+        )
+        report_text = response.choices[0].message.content or ""
+
+        return {
+            "period": {"from": week_ago, "to": datetime.now().isoformat()},
+            "stats": {
+                "total_signals": len(signals_list),
+                "actionable": actionable_count,
+                "watch": watch_count,
+                "decisions": len(decisions_list),
+                "conversations": len(summaries_week)
+            },
+            "report": report_text,
+            "signals": signals_list[:10],
+            "decisions": decisions_list[:5]
+        }
+    except Exception as e:
+        logger.error(f"周报生成失败: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ── 决策标签管理 ──────────────────────────────────────────
+
+class TagRequest(BaseModel):
+    tag: str
+
+
+@router.post("/api/daily-advice/decisions/{decision_id}/tags")
+async def add_tag(decision_id: int, req: TagRequest):
+    from db.daily_advice import add_decision_tag
+    ok = add_decision_tag(decision_id, req.tag)
+    if not ok:
+        raise HTTPException(404, "Decision not found")
+    return {"status": "ok", "tag": req.tag}
+
+
+@router.delete("/api/daily-advice/decisions/{decision_id}/tags/{tag}")
+async def delete_tag(decision_id: int, tag: str):
+    from db.daily_advice import remove_decision_tag
+    ok = remove_decision_tag(decision_id, tag)
+    if not ok:
+        raise HTTPException(404, "Decision not found")
+    return {"status": "ok", "tag": tag}
+
+
+@router.get("/api/daily-advice/decisions/{decision_id}/tags")
+async def get_tags(decision_id: int):
+    from db.daily_advice import list_decision_tags
+    return {"tags": list_decision_tags(decision_id)}

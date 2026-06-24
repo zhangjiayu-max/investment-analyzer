@@ -32,7 +32,7 @@ from db import (
     get_cash_balance,
     get_analysis_agent,
     create_analysis_history, list_analysis_history,
-    get_config_int,
+    get_config_int, get_config_float,
 )
 from market_data import get_index_valuation
 from llm_service import chat_about_investment, _call_llm, MODEL
@@ -116,6 +116,7 @@ from routers.data_health import router as data_health_router          # /api/dat
 from routers.portfolio_import import router as portfolio_import_router  # /api/portfolio/import-csv
 from routers.opportunities import router as opportunities_router      # /api/opportunities/*
 from routers.daily_advice import router as daily_advice_router        # /api/daily-advice/*
+from routers.thread_review import router as thread_review_router  # /api/thread-review/*
 from services.data_lineage import track_sources, get_lineage  # data lineage tracking
 
 # 注册路由
@@ -170,12 +171,15 @@ app.include_router(data_health_router)
 app.include_router(portfolio_import_router)
 app.include_router(opportunities_router)
 app.include_router(daily_advice_router)
+app.include_router(thread_review_router)
 
 # ── 启动初始化 ──
 @app.on_event("startup")
 async def _init_daily_advice():
     from db.daily_advice import init_daily_advice_tables
     init_daily_advice_tables()
+    from db.thread_summaries import init_thread_summaries_table
+    init_thread_summaries_table()
 
 # 静态文件目录
 for _d in (STATIC_DIR, IMAGES_DIR, OUTPUT_DIR, UPLOADS_DIR, DD_IMAGES_DIR, VALUATION_IMAGES_DIR):

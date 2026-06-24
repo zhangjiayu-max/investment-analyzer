@@ -20,25 +20,20 @@ from db.agents import (
 from config import ARBITRATION_API_KEY
 from db.config import get_config_int, get_config_float
 from agent.orchestrator_optimizer import OrchestratorOptimizer, ParallelExecutor
-
-# 专家结果缓存（追问场景 5 分钟复用）
-_expert_cache: dict[str, tuple[dict, float]] = {}
-_EXPERT_CACHE_TTL = 300  # 5 分钟
+from agent.cache import expert_cache
 
 
 def _execute_specialist_cached(tool_name: str, query: str,
                                 cancel_event=None, prebuilt_context: str = "") -> str:
     """带缓存的专家执行。同一专家+同一上下文 5 分钟内复用。"""
-    import hashlib
-    ctx_hash = hashlib.md5((prebuilt_context or "")[:500].encode()).hexdigest()
-    cache_key = f"{tool_name}:{hash(query)}:{ctx_hash}"
+    # 从 tool_name 提取 agent_key（去掉 consult_ 前缀）
+    agent_key = tool_name.replace("consult_", "") if tool_name.startswith("consult_") else tool_name
 
-    if cache_key in _expert_cache:
-        result, ts = _expert_cache[cache_key]
-        if time.time() - ts < _EXPERT_CACHE_TTL:
-            logger.info(f"专家缓存命中: {tool_name}")
-            result["_cached"] = True
-            return json.dumps(result, ensure_ascii=False)
+    cached = expert_cache.get(query, agent_key)
+    if cached is not None:
+        logger.info(f"专家缓存命中: {tool_name}")
+        cached["_cached"] = True
+        return json.dumps(cached, ensure_ascii=False)
 
     result_str = _execute_specialist(tool_name, query,
                                      cancel_event=cancel_event,
@@ -46,11 +41,7 @@ def _execute_specialist_cached(tool_name: str, query: str,
     try:
         obj = json.loads(result_str)
         if "error" not in obj:
-            _expert_cache[cache_key] = (obj, time.time())
-            # 控制缓存大小
-            if len(_expert_cache) > 32:
-                oldest = min(_expert_cache, key=lambda k: _expert_cache[k][1])
-                del _expert_cache[oldest]
+            expert_cache.put(query, agent_key, obj)
     except Exception:
         pass
     return result_str
@@ -252,6 +243,96 @@ def should_arbitrate(complexity: str, specialist_results: list) -> bool:
     if len([sr for sr in specialist_results if not sr.get("is_cross_review")]) < 2:
         return False
     return True
+
+
+# ── 冲突检测：专家评级方向冲突 ──────────────────────────────────
+
+_RATING_KEYWORDS = {
+    "买入": ["买入", "加仓", "建仓", "推荐买入", "建议买入", "可以买", "值得买"],
+    "卖出": ["卖出", "减仓", "清仓", "止损", "建议卖出", "应该卖", "不建议持有"],
+    "持有": ["持有", "观望", "持有观望", "继续持有", "暂不操作"],
+}
+
+_OPPOSITE_PAIRS = [
+    ("买入", "卖出"),
+    ("卖出", "买入"),
+]
+
+
+def _extract_ratings(specialist_results: list) -> list[dict]:
+    """从专家结果中提取评级信息。
+
+    返回: [{"agent_key": "...", "agent": "...", "rating": "买入/卖出/持有/未知", "fund": "..."}]
+    """
+    ratings = []
+    for sr in specialist_results:
+        if sr.get("is_cross_review"):
+            continue
+        analysis = sr.get("analysis", "")
+        agent_key = sr.get("agent_key", "")
+        agent_name = sr.get("agent", agent_key)
+
+        # 检测评级关键词（优先级：买入 > 卖出 > 持有）
+        detected_rating = "未知"
+        for rating_type in ["买入", "卖出", "持有"]:
+            keywords = _RATING_KEYWORDS[rating_type]
+            if any(kw in analysis for kw in keywords):
+                detected_rating = rating_type
+                break
+
+        # 尝试提取基金名称（常见模式：XXX基金、XXX指数）
+        import re
+        fund_match = re.search(r'[（(]([^）)]+)[）)]|([一-龥]{2,}(?:指数|ETF|基金|LOF))', analysis)
+        fund = ""
+        if fund_match:
+            fund = fund_match.group(1) or fund_match.group(2) or ""
+
+        ratings.append({
+            "agent_key": agent_key,
+            "agent": agent_name,
+            "rating": detected_rating,
+            "fund": fund,
+        })
+    return ratings
+
+
+def detect_conflicts(specialist_results: list) -> dict:
+    """检测专家之间的评级方向冲突。
+
+    返回:
+        {"detected": bool, "items": [{"expert1": ..., "rating1": ..., "expert2": ..., "rating2": ..., "fund": ...}]}
+    """
+    ratings = _extract_ratings(specialist_results)
+    conflicts = []
+
+    # 两两比较
+    for i in range(len(ratings)):
+        for j in range(i + 1, len(ratings)):
+            r1 = ratings[i]
+            r2 = ratings[j]
+            if r1["rating"] == "未知" or r2["rating"] == "未知":
+                continue
+            if r1["rating"] == r2["rating"]:
+                continue
+            # 检查是否构成方向冲突
+            is_conflict = False
+            for a, b in _OPPOSITE_PAIRS:
+                if (r1["rating"] == a and r2["rating"] == b) or (r1["rating"] == b and r2["rating"] == a):
+                    is_conflict = True
+                    break
+            if is_conflict:
+                conflicts.append({
+                    "expert1": r1["agent"],
+                    "rating1": r1["rating"],
+                    "expert2": r2["agent"],
+                    "rating2": r2["rating"],
+                    "fund": r1["fund"] or r2["fund"] or "",
+                })
+
+    return {
+        "detected": len(conflicts) > 0,
+        "items": conflicts,
+    }
 
 
 # ── Token 预算检查 ──────────────────────────────────────────
@@ -1324,6 +1405,7 @@ def orchestrate(query: str, history: list, rag_context: str = "", cancel_event: 
                         arbitration_done = True
 
                     duration_ms = int((time.time() - start_time) * 1000)
+                    conflicts = detect_conflicts(specialist_results)
                     return {
                         "answer": answer,
                         "specialist_results": specialist_results,
@@ -1333,6 +1415,7 @@ def orchestrate(query: str, history: list, rag_context: str = "", cancel_event: 
                         "complexity": complexity,
                         "cross_review": True,
                         "arbitration": arbitration_done,
+                        "conflicts": conflicts,
                     }
 
             answer = msg.content or ""
@@ -1347,6 +1430,7 @@ def orchestrate(query: str, history: list, rag_context: str = "", cancel_event: 
                                        "result_preview": arb_result["analysis"][:300]})
 
             duration_ms = int((time.time() - start_time) * 1000)
+            conflicts = detect_conflicts(specialist_results)
             return {
                 "answer": answer,
                 "specialist_results": specialist_results,
@@ -1355,6 +1439,7 @@ def orchestrate(query: str, history: list, rag_context: str = "", cancel_event: 
                 "duration_ms": duration_ms,
                 "complexity": complexity,
                 "arbitration": arbitration_done,
+                "conflicts": conflicts,
             }
 
         # 有工具调用 → 执行专家
@@ -1482,6 +1567,7 @@ def orchestrate(query: str, history: list, rag_context: str = "", cancel_event: 
     except Exception:
         total_tokens = 0
 
+    conflicts = detect_conflicts(specialist_results)
     return {
         "answer": final_answer,
         "specialist_results": specialist_results,
@@ -1490,6 +1576,7 @@ def orchestrate(query: str, history: list, rag_context: str = "", cancel_event: 
         "duration_ms": duration_ms,
         "complexity": complexity,
         "token_usage": total_tokens,
+        "conflicts": conflicts,
     }
 
 
@@ -1867,6 +1954,7 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
                         }
 
                     duration_ms = int((time.time() - start_time) * 1000)
+                    conflicts = detect_conflicts(specialist_results)
                     yield {
                         "type": "answer",
                         "content": answer,
@@ -1876,6 +1964,7 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
                         "complexity": complexity,
                         "cross_review": True,
                         "arbitration": arbitration_done,
+                        "conflicts": conflicts,
                     }
                     return
 
@@ -1908,6 +1997,7 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
                 }
 
             duration_ms = int((time.time() - start_time) * 1000)
+            conflicts = detect_conflicts(specialist_results)
             yield {
                 "type": "answer",
                 "content": answer,
@@ -1915,6 +2005,7 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
                 "tool_calls": all_tool_calls,
                 "duration_ms": duration_ms,
                 "arbitration": arbitration_done,
+                "conflicts": conflicts,
             }
             return
 
@@ -2184,6 +2275,7 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
     except Exception as e:
         logger.warning(f"记录性能指标失败: {e}")
 
+    conflicts = detect_conflicts(specialist_results)
     yield {
         "type": "answer",
         "content": final_answer,
@@ -2192,6 +2284,7 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
         "duration_ms": duration_ms,
         "complexity": complexity,
         "perf_metrics": perf_metrics,  # 添加性能指标到返回结果
+        "conflicts": conflicts,
     }
 
 

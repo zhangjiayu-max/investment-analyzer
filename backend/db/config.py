@@ -27,6 +27,8 @@ DEFAULT_CONFIGS = [
 
     # LLM 参数
     ('llm.temperature_default', '0.3', '默认温度', 'llm'),
+    # 仲裁模型配置
+    ('arbitration.model', '', '仲裁模型名（空则使用默认ARBITRATION_MODEL）', 'arbitration'),
     ('llm.temperature_analysis', '0.3', '分析任务温度', 'llm'),
     ('llm.temperature_vision', '0.1', '图片分析温度', 'llm'),
     ('llm.temperature_eval', '0.2', '评测任务温度', 'llm'),
