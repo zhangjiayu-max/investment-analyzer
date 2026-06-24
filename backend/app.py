@@ -276,6 +276,19 @@ async def startup():
 
     # 每日数据库备份（启动时 + 每天凌晨 2 点）
     asyncio.create_task(_auto_daily_backup())
+    # 清理上次异常退出遗留的僵尸 agent_runs
+    try:
+        from db.agents import _get_conn
+        _conn = _get_conn()
+        _cur = _conn.execute("UPDATE agent_runs SET status='failed', result='server restart cleanup' WHERE status IN ('pending','running')")
+        _cleaned = _cur.rowcount
+        _conn.commit()
+        _conn.close()
+        if _cleaned > 0:
+            logging.info(f"清理 {_cleaned} 个僵尸 agent_runs")
+    except Exception as e:
+        logging.warning(f"清理僵尸任务失败: {e}")
+
     logging.info("=== 启动初始化完成 ===")
 
 
