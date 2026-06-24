@@ -261,6 +261,9 @@ async def startup():
 
     # 后台每日净值自动刷新（15:30 收盘后）
     asyncio.create_task(_auto_refresh_nav())
+
+    # 每日数据库备份（启动时 + 每天凌晨 2 点）
+    asyncio.create_task(_auto_daily_backup())
     logging.info("=== 启动初始化完成 ===")
 
 
@@ -300,6 +303,27 @@ async def shutdown():
         pass
 
     logging.info("=== 优雅关闭完成 ===")
+
+
+async def _auto_daily_backup():
+    """每日凌晨 2 点自动备份数据库。"""
+    import time
+    try:
+        from db.backup import backup_database
+        # 启动时先备份一次
+        backup_database()
+        while True:
+            now = time.localtime()
+            # 计算到下一个凌晨 2 点的秒数
+            target_hour = 2
+            if now.tm_hour >= target_hour:
+                wait_seconds = (24 - now.tm_hour + target_hour) * 3600 - now.tm_min * 60 - now.tm_sec
+            else:
+                wait_seconds = (target_hour - now.tm_hour) * 3600 - now.tm_min * 60 - now.tm_sec
+            await asyncio.sleep(max(wait_seconds, 60))
+            backup_database()
+    except Exception as e:
+        logging.warning(f"自动备份任务异常: {e}")
 
 
 async def _auto_daily_report():
@@ -1072,6 +1096,23 @@ async def finance_quote_bar():
         pass
 
     return {"date": today, "quote": daily_quote, "hot_keywords": hot_keywords}
+
+
+@app.post("/api/admin/backup")
+async def trigger_backup():
+    """手动触发数据库备份。"""
+    from db.backup import backup_database, list_backups
+    path = backup_database()
+    if path:
+        return {"ok": True, "path": path, "backups": list_backups()}
+    return {"ok": False, "error": "备份失败"}
+
+
+@app.get("/api/admin/backups")
+async def list_backups_api():
+    """查看备份列表。"""
+    from db.backup import list_backups
+    return {"backups": list_backups()}
 
 
 if __name__ == "__main__":
