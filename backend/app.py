@@ -648,7 +648,7 @@ def _build_valuation_context(question: str) -> str:
                     stale_days = (dt_date.today() - d).days
                     if stale_days >= 10:
                         line += f" [数据已过期{stale_days}天]"
-                except:
+                except Exception:
                     pass
             lines.append(line)
 

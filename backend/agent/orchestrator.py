@@ -65,12 +65,7 @@ def fetch_article_content(url: str) -> dict | None:
 
         # 用线程池运行，每个线程创建独立事件循环
         def _fetch_sync():
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            try:
-                return loop.run_until_complete(fetch_article(url))
-            finally:
-                loop.close()
+            return asyncio.run(fetch_article(url))
 
         with ThreadPoolExecutor(max_workers=1) as pool:
             future = pool.submit(_fetch_sync)

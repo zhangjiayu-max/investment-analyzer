@@ -37,7 +37,7 @@ def _get_valuation_context() -> str:
                         sd = (dt_date.today() - d).days
                         if sd >= 10:
                             stale_mark = f" [数据过期{sd}天]"
-                    except:
+                    except Exception:
                         pass
                 lines.append(f"- {idx.get('index_name','')}({idx.get('index_code','')}): PE分位 {pe_percentile}, PB分位 {pb_percentile} [{date_str}]{stale_mark}")
         if lines:
@@ -70,7 +70,7 @@ def _get_valuation_context_for_fund(fund_code: str, fund_name: str) -> str:
                 try:
                     pct = float(pe_percentile)
                     level = "🔥高估" if pct > 80 else ("⚠️偏高" if pct > 50 else ("✅低估" if pct < 20 else "⚡适中"))
-                except:
+                except Exception:
                     pass
             return f"\n## 目标基金估值\n- {index_name}({index_code}): PE分位 {pe_percentile}, PB分位 {pb_percentile} [{date_str}] {level}"
         else:

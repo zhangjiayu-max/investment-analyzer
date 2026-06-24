@@ -1,3 +1,4 @@
+from utils import _safe_float
 """滚动收益分析 — 计算任意时点买入持有N年的收益分布
 
 参考韭圈儿"组合回测"功能：
@@ -24,12 +25,6 @@ router = APIRouter(prefix="/api/rolling", tags=["rolling-return"])
 
 _background_tasks: set = set()
 
-
-def _safe_float(v, default=0.0) -> float:
-    try:
-        return float(v) if v else default
-    except (ValueError, TypeError):
-        return default
 
 
 # ============ 核心计算 ============

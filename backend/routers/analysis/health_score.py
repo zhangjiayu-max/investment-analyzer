@@ -22,6 +22,7 @@ from db.portfolio import list_holdings
 from db.valuations import get_latest_valuation, list_valuation_indexes, get_index_info
 from db.config import get_config_float
 from llm_service import _call_llm, MODEL
+from utils import _safe_float
 
 logger = logging.getLogger(__name__)
 
@@ -30,12 +31,6 @@ router = APIRouter(prefix="/api/health", tags=["health-score"])
 _background_tasks: set = set()
 
 # ============ 辅助函数 ============
-
-def _safe_float(v, default=0.0) -> float:
-    try:
-        return float(v) if v else default
-    except (ValueError, TypeError):
-        return default
 
 
 def _get_holding_valuations(holdings: list) -> list[dict]:
@@ -150,7 +145,7 @@ def calc_quality_score(holdings_with_val: list) -> tuple[int, dict]:
                                 fee_str = str(row.iloc[idx + 1]).replace("%", "").strip()
                                 try:
                                     mgmt_fee = float(fee_str)
-                                except:
+                                except Exception:
                                     pass
                 if mgmt_fee > 0:
                     if mgmt_fee <= 0.5:

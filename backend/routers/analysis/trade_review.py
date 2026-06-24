@@ -66,7 +66,7 @@ async def trade_review_api(req: TradeReviewRequest):
                     if pb_pct is not None:
                         valuation_str += f", PB分位:{pb_pct:.1f}%"
                     valuation_str += "]"
-            except:
+            except Exception:
                 pass
 
         # 手续费

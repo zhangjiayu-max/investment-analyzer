@@ -289,7 +289,7 @@ def get_running_conversations() -> list[dict]:
         try:
             import json
             metadata = json.loads(row['metadata']) if row['metadata'] else {}
-        except:
+        except Exception:
             pass
 
         results.append({
@@ -323,7 +323,7 @@ def get_conversation_progress(conv_id: int) -> dict:
     try:
         import json
         metadata = json.loads(msg['metadata']) if msg['metadata'] else {}
-    except:
+    except Exception:
         pass
 
     status = metadata.get('execution_status', 'unknown')

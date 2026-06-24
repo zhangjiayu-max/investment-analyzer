@@ -85,7 +85,7 @@ class ConversationQualityEvaluator:
         if assistant_msg and assistant_msg.get("metadata"):
             try:
                 metadata = json.loads(assistant_msg["metadata"])
-            except:
+            except Exception:
                 pass
 
         # 评估各维度

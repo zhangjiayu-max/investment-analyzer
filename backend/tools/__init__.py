@@ -850,11 +850,7 @@ def _fetch_article(args: dict) -> str:
         from article_reader import fetch_article
 
         # 运行异步函数（Playwright 渲染微信文章可能较慢，给 60s）
-        loop = asyncio.new_event_loop()
-        try:
-            article = loop.run_until_complete(fetch_article(url))
-        finally:
-            loop.close()
+        article = asyncio.run(fetch_article(url))
 
         if not article:
             return json.dumps({"error": "文章抓取失败，请检查链接是否有效"}, ensure_ascii=False)

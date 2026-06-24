@@ -1,3 +1,4 @@
+from utils import _safe_float
 """四笔钱归类 + 定投优化器
 
 四笔钱框架（参考有知有行）：
@@ -90,12 +91,6 @@ def save_dca_candidates(result: dict, user_id: str = "default") -> int:
             created += 1
     return created
 
-
-def _safe_float(v, default=0.0) -> float:
-    try:
-        return float(v) if v else default
-    except (ValueError, TypeError):
-        return default
 
 
 # ============ 基金类型归类 ============
