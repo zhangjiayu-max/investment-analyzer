@@ -731,3 +731,72 @@ async def list_snapshots_api(limit: int = 365):
     from db.portfolio import list_portfolio_snapshots
     snapshots = list_portfolio_snapshots(limit=limit)
     return {"snapshots": snapshots}
+
+
+@router.post("/api/portfolio/quick-entry")
+async def quick_entry_api(data: dict):
+    """快速录入：只输基金代码+金额，自动查基金名称和当前净值。"""
+    fund_code = (data.get("fund_code") or "").strip()
+    amount = data.get("amount", 0)
+    tx_type = data.get("transaction_type", "buy")
+    from datetime import datetime as _dt
+    tx_date = data.get("transaction_date", _dt.now().strftime("%Y-%m-%d"))
+    account = data.get("account")
+    notes = data.get("notes")
+
+    if not fund_code:
+        raise HTTPException(400, "基金代码不能为空")
+    if amount <= 0:
+        raise HTTPException(400, "金额必须大于 0")
+
+    # 自动查基金名称
+    fund_name = fund_code
+    try:
+        import akshare as ak
+        info = ak.fund_individual_basic_info_xq(symbol=fund_code)
+        if info is not None and not info.empty:
+            name_row = info[info["item"] == "基金简称"]
+            if not name_row.empty:
+                fund_name = str(name_row.iloc[0]["value"])
+    except Exception:
+        pass
+
+    # 自动查当前净值
+    current_price = None
+    try:
+        import akshare as ak
+        nav = ak.fund_open_fund_info_em(symbol=fund_code, indicator="单位净值")
+        if nav is not None and not nav.empty:
+            current_price = float(nav.iloc[-1]["单位净值"])
+    except Exception:
+        pass
+
+    # 计算份额（如果有净值）
+    shares = None
+    price = current_price
+    if price and price > 0:
+        shares = round(amount / price, 2)
+
+    # 创建交易记录
+    from db.portfolio import create_transaction
+    tx_id = create_transaction(
+        fund_code=fund_code,
+        transaction_type=tx_type,
+        amount=amount,
+        transaction_date=tx_date,
+        shares=shares,
+        price=price,
+        fund_name=fund_name,
+        account=account,
+        notes=notes or "快速录入",
+    )
+
+    return {
+        "ok": True,
+        "transaction_id": tx_id,
+        "fund_code": fund_code,
+        "fund_name": fund_name,
+        "current_price": current_price,
+        "shares": shares,
+        "amount": amount,
+    }
