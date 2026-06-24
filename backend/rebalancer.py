@@ -204,18 +204,28 @@ def analyze_rebalancing_need(user_id: str = "default") -> dict:
                 continue
             label = category_labels.get(cat, cat)
             if delta > 0:
-                # 超配 → 建议减仓
+                # 超配 → 建议减仓（优先减高估的，而非最大的）
                 excess_val = delta * total_assets
-                # 找该类别下最大的持仓
                 cat_holdings = [h for h in active if (h.get("fund_category") or "equity") == cat]
                 if cat_holdings:
-                    top = max(cat_holdings, key=lambda h: h.get("current_value", 0) or 0)
+                    # 按估值百分位排序，优先减仓高估的
+                    from db.valuations import get_latest_valuation
+                    def _get_pe_pct(h):
+                        idx = h.get("index_code", "")
+                        if idx:
+                            val = get_latest_valuation(idx)
+                            if val:
+                                return val.get("percentile", 50) or 50
+                        return 50
+                    cat_holdings_sorted = sorted(cat_holdings, key=lambda h: _get_pe_pct(h), reverse=True)
+                    top = cat_holdings_sorted[0]
+                    pe_pct = _get_pe_pct(top)
                     suggestions.append({
                         "action": "sell",
                         "category": cat,
                         "fund_code": top.get("fund_code", ""),
                         "fund_name": top.get("fund_name", ""),
-                        "reason": f"{label}超配{delta:+.0%}，建议减仓",
+                        "reason": f"{label}超配{delta:+.0%}，{top.get('fund_name','')}估值{pe_pct:.0f}%偏高，建议减仓",
                         "amount_range": f"¥{excess_val * 0.3:,.0f} - ¥{excess_val * 0.7:,.0f}",
                     })
             else:

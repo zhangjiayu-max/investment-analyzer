@@ -69,9 +69,18 @@ def _get_trade_records() -> list[dict]:
     conn = _get_conn()
     try:
         rows = conn.execute("""
-            SELECT * FROM trade_records ORDER BY trade_date DESC LIMIT 200
+            SELECT * FROM portfolio_transactions
+            WHERE (is_system IS NULL OR is_system = 0)
+            ORDER BY transaction_date DESC LIMIT 200
         """).fetchall()
-        return [dict(r) for r in rows]
+        result = []
+        for r in rows:
+            d = dict(r)
+            # 统一字段名：transaction_type -> trade_type, transaction_date -> trade_date
+            d["trade_type"] = d.get("transaction_type", "")
+            d["trade_date"] = d.get("transaction_date", "")
+            result.append(d)
+        return result
     except Exception:
         return []
     finally:
@@ -81,42 +90,122 @@ def _get_trade_records() -> list[dict]:
 # ============ 五维度评分 ============
 
 def calc_quality_score(holdings_with_val: list) -> tuple[int, dict]:
-    """选品质量（200分）：基金排名、估值质量。"""
+    """选品质量（200分）：同类排名、费率水平、估值合理性。"""
     if not holdings_with_val:
         return 100, {"reason": "无持仓数据，给予中性分"}
 
+    import akshare as ak
     total = 0
     count = 0
     good_count = 0
     bad_count = 0
+    details = []
 
     for h in holdings_with_val:
+        fund_code = h.get("fund_code", "")
+        fund_name = h.get("fund_name", "")
+        fund_score = 0
+        fund_reasons = []
+
+        # 1. 同类排名（80分）
+        try:
+            # 获取同类基金排名
+            rank_data = ak.fund_open_fund_info_em(symbol=fund_code, indicator="同类排名")
+            if rank_data is not None and len(rank_data) > 0:
+                # 取最近一期排名百分位
+                latest = rank_data.iloc[-1]
+                rank_pct = _safe_float(latest.iloc[1]) if len(latest) > 1 else 50
+                if rank_pct <= 10:
+                    fund_score += 80
+                    fund_reasons.append(f"排名前10%")
+                elif rank_pct <= 25:
+                    fund_score += 65
+                    fund_reasons.append(f"排名前25%")
+                elif rank_pct <= 50:
+                    fund_score += 50
+                    fund_reasons.append(f"排名中等")
+                elif rank_pct <= 75:
+                    fund_score += 30
+                    fund_reasons.append(f"排名后25%")
+                else:
+                    fund_score += 15
+                    fund_reasons.append(f"排名后10%")
+            else:
+                fund_score += 40  # 无数据给中性分
+        except Exception:
+            fund_score += 40
+
+        # 2. 费率水平（60分）
+        try:
+            fee_data = ak.fund_open_fund_info_em(symbol=fund_code, indicator="费率")
+            if fee_data is not None and len(fee_data) > 0:
+                # 找管理费率
+                mgmt_fee = 0
+                for _, row in fee_data.iterrows():
+                    for val in row:
+                        if "管理" in str(val):
+                            # 下一个值是费率
+                            idx = list(row).index(val)
+                            if idx + 1 < len(row):
+                                fee_str = str(row.iloc[idx + 1]).replace("%", "").strip()
+                                try:
+                                    mgmt_fee = float(fee_str)
+                                except:
+                                    pass
+                if mgmt_fee > 0:
+                    if mgmt_fee <= 0.5:
+                        fund_score += 60
+                        fund_reasons.append(f"低费率{mgmt_fee}%")
+                    elif mgmt_fee <= 1.0:
+                        fund_score += 45
+                        fund_reasons.append(f"费率适中{mgmt_fee}%")
+                    elif mgmt_fee <= 1.5:
+                        fund_score += 30
+                        fund_reasons.append(f"费率偏高{mgmt_fee}%")
+                    else:
+                        fund_score += 15
+                        fund_reasons.append(f"高费率{mgmt_fee}%")
+                else:
+                    fund_score += 35
+            else:
+                fund_score += 35
+        except Exception:
+            fund_score += 35
+
+        # 3. 估值合理性（60分）— 保留原逻辑但降低权重
         val = h.get("valuation")
-        if not val:
-            continue
-        count += 1
-
-        pe_pct = _safe_float(val.get("pe_percentile"))
-        pb_pct = _safe_float(val.get("pb_percentile"))
-        avg_pct = (pe_pct + pb_pct) / 2 if pe_pct and pb_pct else pe_pct or pb_pct or 50
-
-        # 低估=好选品（在合理估值买入）
-        if avg_pct < 30:
-            good_count += 1
-            total += 180
-        elif avg_pct < 50:
-            total += 150
-        elif avg_pct < 70:
-            total += 120
-        elif avg_pct < 90:
-            bad_count += 1
-            total += 80
+        if val:
+            pe_pct = _safe_float(val.get("pe_percentile"))
+            pb_pct = _safe_float(val.get("pb_percentile"))
+            avg_pct = (pe_pct + pb_pct) / 2 if pe_pct and pb_pct else pe_pct or pb_pct or 50
+            if avg_pct < 30:
+                fund_score += 60
+                fund_reasons.append(f"估值低{avg_pct:.0f}%")
+            elif avg_pct < 50:
+                fund_score += 50
+                fund_reasons.append(f"估值偏低{avg_pct:.0f}%")
+            elif avg_pct < 70:
+                fund_score += 35
+            elif avg_pct < 90:
+                fund_score += 20
+                fund_reasons.append(f"估值偏高{avg_pct:.0f}%")
+            else:
+                fund_score += 10
+                fund_reasons.append(f"估值过高{avg_pct:.0f}%")
         else:
+            fund_score += 30
+
+        fund_score = min(200, fund_score)
+        total += fund_score
+        count += 1
+        if fund_score >= 140:
+            good_count += 1
+        elif fund_score <= 80:
             bad_count += 1
-            total += 50
+        details.append({"fund_name": fund_name, "score": fund_score, "reasons": fund_reasons})
 
     if count == 0:
-        return 100, {"reason": "无估值匹配"}
+        return 100, {"reason": "无持仓数据"}
 
     avg_score = total // count
     avg_score = max(0, min(200, avg_score))
@@ -126,6 +215,7 @@ def calc_quality_score(holdings_with_val: list) -> tuple[int, dict]:
         "good_count": good_count,
         "bad_count": bad_count,
         "avg_score": avg_score,
+        "top_holdings": details[:5],
     }
     return avg_score, detail
 
@@ -241,7 +331,7 @@ def calc_valuation_score(holdings_with_val: list) -> tuple[int, dict]:
 
 
 def calc_behavior_score(trades: list) -> tuple[int, dict]:
-    """持有行为（200分）：交易频率、追涨杀跌。"""
+    """持有行为（200分）：交易频率、追涨杀跌、持有时长。"""
     if not trades:
         return 140, {"reason": "无交易记录，给予偏高分"}
 
@@ -264,10 +354,34 @@ def calc_behavior_score(trades: list) -> tuple[int, dict]:
         score += 5
 
     # 2. 追涨杀跌检测（60分）
-    # 简化：检查买入时市场是否处于高位（估值>70%）
+    # 用买入日期反查当时的指数估值百分位
+    from db.valuations import get_valuation_history
     buy_trades = [t for t in trades if t.get("trade_type") == "buy"]
+    chase_ratio = 0.0
     if buy_trades:
-        chases = sum(1 for t in buy_trades if _safe_float(t.get("market_percentile", 50)) > 70)
+        chases = 0
+        for t in buy_trades:
+            trade_date = t.get("trade_date", "")
+            fund_code = t.get("fund_code", "")
+            # 查该基金对应的指数估值
+            holding = _find_holding_by_code(fund_code)
+            index_code = holding.get("index_code", "") if holding else ""
+            if index_code and trade_date:
+                # 取交易日期前后的估值
+                try:
+                    val_hist = get_valuation_history(index_code, days=5)
+                    # 找最接近交易日的估值
+                    closest_pct = None
+                    for v in val_hist:
+                        if v.get("snapshot_date", "") <= trade_date:
+                            closest_pct = _safe_float(v.get("percentile"))
+                            break
+                    if closest_pct is None and val_hist:
+                        closest_pct = _safe_float(val_hist[0].get("percentile"))
+                    if closest_pct and closest_pct > 70:
+                        chases += 1
+                except Exception:
+                    pass
         chase_ratio = chases / len(buy_trades)
         if chase_ratio <= 0.1:
             score += 60
@@ -281,8 +395,27 @@ def calc_behavior_score(trades: list) -> tuple[int, dict]:
         score += 40
 
     # 3. 平均持有时长（60分）
-    # 从持仓快照推算
-    avg_days = 180  # 默认假设半年
+    # 从持仓的 buy_date 推算真实持有时长
+    avg_days = 180  # 默认值
+    try:
+        holdings = list_holdings() or []
+        active = [h for h in holdings if _safe_float(h.get("shares")) > 0]
+        holding_days_list = []
+        for h in active:
+            buy_date_str = h.get("buy_date", "")
+            if buy_date_str:
+                try:
+                    bd = datetime.strptime(buy_date_str[:10], "%Y-%m-%d")
+                    days_held = (now - bd).days
+                    if days_held > 0:
+                        holding_days_list.append(days_held)
+                except Exception:
+                    pass
+        if holding_days_list:
+            avg_days = int(sum(holding_days_list) / len(holding_days_list))
+    except Exception:
+        pass
+
     if avg_days >= 365:
         score += 60
     elif avg_days >= 180:
@@ -301,6 +434,18 @@ def calc_behavior_score(trades: list) -> tuple[int, dict]:
         "avg_holding_days": avg_days,
     }
     return score, detail
+
+
+def _find_holding_by_code(fund_code: str) -> dict | None:
+    """根据基金代码查找持仓记录。"""
+    try:
+        holdings = list_holdings() or []
+        for h in holdings:
+            if h.get("fund_code") == fund_code:
+                return h
+    except Exception:
+        pass
+    return None
 
 
 def calc_risk_score(holdings: list, holdings_with_val: list) -> tuple[int, dict]:
@@ -658,21 +803,81 @@ async def calc_fear_greed_index() -> dict:
     # 3. 北向资金（权重15%）
     try:
         df = ak.stock_hsgt_north_net_flow_in_em(symbol="北上")
-        if df is not None and len(df) >= 5:
-            recent = df.tail(5)
-            net_flow = sum(_safe_float(r.get("净流入", 0)) for _, r in recent.iterrows())
-            # 正流入→贪婪，负流入→恐惧
-            factors["north_flow"] = max(0, min(100, (net_flow / 100 + 50)))
+        if df is not None and len(df) >= 20:
+            # 用标准差归一化，比简单除以100更敏感
+            flows = [_safe_float(r.get("净流入", 0)) for _, r in df.iterrows()]
+            recent_60 = flows[-60:] if len(flows) >= 60 else flows
+            mean_flow = sum(recent_60) / len(recent_60)
+            std_flow = (sum((f - mean_flow) ** 2 for f in recent_60) / len(recent_60)) ** 0.5
+            recent_5 = sum(flows[-5:])
+            # z-score: 近5日总量 vs 60日均值
+            if std_flow > 0:
+                z_score = (recent_5 - mean_flow * 5) / (std_flow * 5 ** 0.5)
+            else:
+                z_score = 0
+            # z-score 映射到 0-100: -2→0, 0→50, +2→100
+            factors["north_flow"] = max(0, min(100, (z_score / 4 + 0.5) * 100))
         else:
             factors["north_flow"] = 50
     except Exception:
         factors["north_flow"] = 50
 
     # 4. 换手率（权重15%）
-    factors["turnover"] = 50  # 需要更多数据源
+    try:
+        df = ak.stock_zh_a_spot_em()
+        if df is not None and len(df) > 0:
+            # 用换手率列计算市场平均换手率
+            turnover_col = None
+            for col in df.columns:
+                if "换手" in str(col):
+                    turnover_col = col
+                    break
+            if turnover_col:
+                avg_turnover = df[turnover_col].apply(lambda x: _safe_float(x)).mean()
+                # 映射：换手率 < 1% → 恐惧(20), 1-3% → 中性(50), >5% → 贪婪(80)
+                if avg_turnover < 0.5:
+                    factors["turnover"] = 10
+                elif avg_turnover < 1.0:
+                    factors["turnover"] = 30
+                elif avg_turnover < 3.0:
+                    factors["turnover"] = 50
+                elif avg_turnover < 5.0:
+                    factors["turnover"] = 70
+                else:
+                    factors["turnover"] = 90
+            else:
+                factors["turnover"] = 50
+        else:
+            factors["turnover"] = 50
+    except Exception:
+        factors["turnover"] = 50
 
     # 5. 融资余额变化（权重10%）
-    factors["margin"] = 50  # 需要更多数据源
+    try:
+        df = ak.stock_margin_sz()
+        if df is not None and len(df) >= 5:
+            recent = df.tail(5)
+            # 找融资余额列
+            margin_col = None
+            for col in df.columns:
+                if "融资余额" in str(col):
+                    margin_col = col
+                    break
+            if margin_col:
+                margin_now = _safe_float(recent.iloc[-1][margin_col])
+                margin_5d = _safe_float(recent.iloc[0][margin_col])
+                if margin_5d > 0:
+                    change_pct = (margin_now - margin_5d) / margin_5d * 100
+                    # 融资增加→贪婪，减少→恐惧
+                    factors["margin"] = max(0, min(100, 50 + change_pct * 10))
+                else:
+                    factors["margin"] = 50
+            else:
+                factors["margin"] = 50
+        else:
+            factors["margin"] = 50
+    except Exception:
+        factors["margin"] = 50
 
     # 加权计算
     weights = {

@@ -66,7 +66,7 @@ def _pearson_correlation(x: list[float], y: list[float]) -> float:
 
 
 def _build_correlation_matrix(holdings: list, lookback_days: int = 252) -> dict:
-    """构建相关性矩阵"""
+    """构建相关性矩阵（日期对齐版本）"""
     nav_data = {}
     fund_info = {}
     for h in holdings:
@@ -82,9 +82,33 @@ def _build_correlation_matrix(holdings: list, lookback_days: int = 252) -> dict:
     if len(nav_data) < 2:
         return {"error": "有效基金不足2只，无法计算相关性"}
 
-    returns = {}
+    # 日期对齐：构建 date->nav 映射
+    date_nav_maps = {}
     for code, series in nav_data.items():
-        returns[code] = _calc_daily_returns(series)
+        date_nav_maps[code] = {d[0]: d[1] for d in series}
+
+    # 取所有基金日期的交集
+    all_date_sets = [set(m.keys()) for m in date_nav_maps.values()]
+    common_dates = sorted(set.intersection(*all_date_sets))
+
+    if len(common_dates) < 30:
+        # 交集太少，放宽到 80% 覆盖
+        all_dates = sorted(set.union(*all_date_sets))
+        min_coverage = max(1, len(nav_data) * 0.8)
+        common_dates = []
+        for d in all_dates:
+            covered = sum(1 for m in date_nav_maps.values() if d in m)
+            if covered >= min_coverage:
+                common_dates.append(d)
+
+    if len(common_dates) < 30:
+        return {"error": "日期重叠不足，无法计算相关性"}
+
+    # 按对齐日期计算收益率
+    returns = {}
+    for code, m in date_nav_maps.items():
+        aligned_navs = [m[d] for d in common_dates if d in m]
+        returns[code] = _calc_daily_returns([(common_dates[i], aligned_navs[i]) for i in range(len(aligned_navs))])
 
     codes = sorted(nav_data.keys())
     matrix = {}

@@ -196,19 +196,68 @@ def _get_fund_nav_from_akshare(fund_code: str, days: int = 3650) -> list[tuple]:
 
 
 def _get_portfolio_nav_simulated(holdings: list, days: int = 1825) -> list[tuple]:
-    """模拟组合净值（按持仓加权）。简化版：用第一个持仓基金的净值。"""
+    """按持仓权重加权计算组合净值。"""
     if not holdings:
         return []
 
-    # 取持仓中第一个有代码的
+    # 1. 获取每只基金的净值序列
+    fund_navs = {}
     for h in holdings:
         code = h.get("fund_code", "")
-        if code:
+        if code and (h.get("shares", 0) or 0) > 0:
             nav = _get_fund_nav_from_akshare(code, days)
-            if nav:
-                return nav
+            if nav and len(nav) > 10:
+                fund_navs[code] = nav
 
-    return []
+    if not fund_navs:
+        return []
+
+    # 只有一只基金，直接返回
+    if len(fund_navs) == 1:
+        return list(fund_navs.values())[0]
+
+    # 2. 按 current_value 计算权重
+    total_value = sum((h.get("current_value", 0) or 0) for h in holdings if h.get("fund_code") in fund_navs)
+    if total_value <= 0:
+        # fallback: 等权
+        weights = {code: 1.0 / len(fund_navs) for code in fund_navs}
+    else:
+        weights = {}
+        for h in holdings:
+            code = h.get("fund_code", "")
+            if code in fund_navs:
+                weights[code] = (h.get("current_value", 0) or 0) / total_value
+
+    # 3. 构建日期->净值映射
+    date_nav_maps = {}
+    for code, series in fund_navs.items():
+        date_nav_maps[code] = {d[0]: d[1] for d in series}
+
+    # 4. 取所有基金日期的交集（至少 80% 基金有数据的日期）
+    all_dates = sorted(set().union(*[set(m.keys()) for m in date_nav_maps.values()]))
+    min_coverage = max(1, len(fund_navs) * 0.8)
+
+    # 5. 归一化：每只基金以第一天净值为基准
+    base_navs = {}
+    for code, m in date_nav_maps.items():
+        first_date = min(m.keys())
+        base_navs[code] = m[first_date]
+
+    portfolio_nav = []
+    for date in all_dates:
+        weighted_nav = 0
+        covered = 0
+        for code, m in date_nav_maps.items():
+            if date in m:
+                # 归一化后加权
+                normalized = m[date] / base_navs[code] if base_navs[code] > 0 else 1.0
+                weighted_nav += normalized * weights.get(code, 0)
+                covered += 1
+
+        if covered >= min_coverage and weighted_nav > 0:
+            portfolio_nav.append((date, weighted_nav))
+
+    return portfolio_nav
 
 
 # ============ 分析执行 ============

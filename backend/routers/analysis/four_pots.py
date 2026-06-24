@@ -83,7 +83,7 @@ def save_dca_candidates(result: dict, user_id: str = "default") -> int:
                 "fear_greed_score": result.get("fear_greed_score") or (result.get("fear_greed") or {}).get("score"),
             },
             "source_snapshot": item,
-            "dedupe_key": f"dca_optimization:{fund_code}",
+            "dedupe_key": f"dca_optimization:{fund_code}:pe{(item.get('pe_percentile', 50) or 50) // 10 * 10}",
             "priority": 6,
         }, user_id=user_id)
         if candidate_id:

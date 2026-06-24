@@ -142,12 +142,31 @@ def analyze_fund(fund_code: str, user_valuation: dict = None) -> dict:
 
     score, recommendation, reason = _score_fund(price_stats, user_valuation, index_valuation)
 
+    # 增强：估值水平摘要
+    valuation_level = "未知"
+    if valuation:
+        pe_pct = valuation.get("pe_percentile")
+        if pe_pct is not None:
+            if pe_pct < 20:
+                valuation_level = "深度低估"
+            elif pe_pct < 30:
+                valuation_level = "低估"
+            elif pe_pct < 50:
+                valuation_level = "合理偏低"
+            elif pe_pct < 70:
+                valuation_level = "合理"
+            elif pe_pct < 80:
+                valuation_level = "偏高"
+            else:
+                valuation_level = "高估"
+
     return {
         "name": name,
         "code": fund_code,
         "basic_info": info,
         "price_stats": price_stats,
         "valuation": valuation,
+        "valuation_level": valuation_level,
         "recommendation": recommendation,
         "reason": reason,
         "score": score,

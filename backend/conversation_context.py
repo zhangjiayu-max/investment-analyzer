@@ -14,10 +14,10 @@ def estimate_text_tokens(text: str) -> int:
     """粗略估算 token，避免上下文无限膨胀。"""
     if not text:
         return 0
-    # 中文按字符近似，英文按词近似，取更保守的值。
-    ascii_words = len(re.findall(r"[A-Za-z0-9_]+", text))
-    non_space_chars = len(re.sub(r"\s+", "", text))
-    return max(ascii_words, non_space_chars // 2)
+    # 中文约1.5字符/token，英文约4字符/token
+    cn_chars = sum(1 for c in text if '\u4e00' <= c <= '\u9fff')
+    en_chars = len(text) - cn_chars
+    return int(cn_chars / 1.5 + en_chars / 4)
 
 
 def _clip(text: str, max_chars: int) -> str:
@@ -140,6 +140,45 @@ def _build_missing_context(scenario_type: str, sections: dict[str, str]) -> str:
     return "、".join(dict.fromkeys(missing))
 
 
+def _build_change_context(user_id: str = "default") -> str:
+    """构建近期变化上下文：对比最近两次持仓快照。"""
+    try:
+        from db import list_portfolio_snapshots
+        snapshots = list_portfolio_snapshots(user_id=user_id, limit=2)
+        if len(snapshots) < 2:
+            return "暂无历史快照对比。"
+
+        latest = snapshots[0]
+        prev = snapshots[1]
+
+        changes = []
+        # 总资产变化
+        val_diff = (latest.get("total_value", 0) or 0) - (prev.get("total_value", 0) or 0)
+        if abs(val_diff) > 100:
+            pct = val_diff / (prev.get("total_value", 1) or 1) * 100
+            changes.append(f"总资产变化：{val_diff:+,.0f}元（{pct:+.1f}%）")
+
+        # 持仓数量变化
+        cnt_diff = (latest.get("holding_count", 0) or 0) - (prev.get("holding_count", 0) or 0)
+        if cnt_diff != 0:
+            changes.append(f"持仓数量变化：{cnt_diff:+d}只")
+
+        # 现金变化
+        cash_diff = (latest.get("cash", 0) or 0) - (prev.get("cash", 0) or 0)
+        if abs(cash_diff) > 100:
+            changes.append(f"现金变化：{cash_diff:+,.0f}元")
+
+        if not changes:
+            return "近期持仓无显著变化。"
+
+        date_a = prev.get("snapshot_date", "")[:10]
+        date_b = latest.get("snapshot_date", "")[:10]
+        header = f"{date_a} → {date_b} 变化："
+        return header + "；".join(changes)
+    except Exception:
+        return "暂无变化追踪数据。"
+
+
 def _compose_prompt_context(sections: dict[str, str], current_user_message: str, token_budget: int) -> str:
     ordered = [
         ("系统原则", "你是谨慎的个人理财助手。AI 只提供建议，不直接执行交易；涉及买卖必须提醒用户确认。"),
@@ -199,6 +238,7 @@ def build_conversation_context(
         "watchlist_context": _build_watchlist_context(user_id=user_id),
         "user_profile_context": _build_user_profile_context(user_id=user_id),
         "rag_context": rag_context or "暂无额外知识库证据。",
+        "change_context": _build_change_context(user_id=user_id),
     }
     sections["missing_context"] = _build_missing_context(scenario_type, sections)
 

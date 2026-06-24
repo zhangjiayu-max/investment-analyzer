@@ -56,6 +56,35 @@ def _get_fund_fees(fund_code: str) -> dict:
     except Exception as e:
         logger.warning(f"[fee] 获取{fund_code}费率失败: {e}")
 
+    # 兜底：如果获取失败，用基金类型估算费率
+    if result["management_fee"] == 0:
+        fund_name = ""
+        try:
+            from db import list_holdings
+            holdings = list_holdings() or []
+            for h in holdings:
+                if h.get("fund_code") == fund_code:
+                    fund_name = h.get("fund_name", "")
+                    break
+        except Exception:
+            pass
+        # 按基金类型估算
+        name_lower = fund_name.lower()
+        if "债" in fund_name:
+            result["management_fee"] = 0.6
+            result["custody_fee"] = 0.1
+        elif "指数" in fund_name or "etf" in name_lower:
+            result["management_fee"] = 0.5
+            result["custody_fee"] = 0.1
+        elif "货币" in fund_name:
+            result["management_fee"] = 0.33
+            result["custody_fee"] = 0.08
+        else:
+            result["management_fee"] = 1.5
+            result["custody_fee"] = 0.25
+        result["total_annual"] = result["management_fee"] + result["custody_fee"] + result["sales_service_fee"]
+        result["source"] = "估算值"
+
     try:
         import akshare as ak
         df2 = ak.fund_fee_em(symbol=fund_code, indicator="赎回费率")
