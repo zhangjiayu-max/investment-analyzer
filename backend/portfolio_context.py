@@ -95,6 +95,11 @@ def build_portfolio_context(user_id: str = "default") -> str:
             top5_pct = top5_value / total_assets if total_assets > 0 else 0
             lines.append(f"前5集中度: {top5_pct:.1%}")
 
+        # 新鲜度标注
+        from datetime import datetime as _dt
+        lines.append("")
+        lines.append(f"> 📅 持仓数据最后更新: {_dt.now().strftime('%Y-%m-%d %H:%M')}。净值可能有延迟，以基金公司公布为准。")
+
         return "\n".join(lines)
 
     except Exception as e:
@@ -201,6 +206,10 @@ def build_valuation_summary() -> str:
 
         if len(lines) <= 3:
             return ""
+
+        # 新鲜度标注
+        lines.append("")
+        lines.append("> 📅 以上估值数据基于最近一次入库快照。如需最新数据，请使用「估值更新」工具。")
 
         return "\n".join(lines)
 

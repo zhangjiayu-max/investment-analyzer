@@ -50,6 +50,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# 请求追踪中间件
+from request_tracing import RequestTracingMiddleware
+app.add_middleware(RequestTracingMiddleware)
+
 
 @app.exception_handler(Exception)
 async def global_exception_handler(request, exc):

@@ -800,3 +800,84 @@ async def quick_entry_api(data: dict):
         "shares": shares,
         "amount": amount,
     }
+
+
+@router.post("/api/portfolio/ai-suggestion-to-decision")
+async def ai_suggestion_to_decision_api(data: dict):
+    """AI建议→一键生成决策卡片。
+
+    接收 AI 对话中的建议文本，解析后创建决策候选。
+    前端可在 AI 分析完成后展示「保存为决策」按钮，用户点击后调用此接口。
+    """
+    from db.decisions import create_candidate_from_structured_recommendation
+
+    # 从 AI 建议中提取结构化信息
+    suggestion_text = data.get("suggestion", "") or data.get("analysis", "")
+    if not suggestion_text:
+        raise HTTPException(400, "建议内容不能为空")
+
+    # 自动检测行动类型
+    action_type = "watch"
+    suggestion_lower = suggestion_text.lower()
+    if any(kw in suggestion_lower for kw in ["买入", "加仓", "建仓", "定投"]):
+        action_type = "buy"
+    elif any(kw in suggestion_lower for kw in ["卖出", "减仓", "清仓", "止盈"]):
+        action_type = "sell"
+    elif any(kw in suggestion_lower for kw in ["调仓", "再平衡", "转换"]):
+        action_type = "convert"
+
+    # 提取基金代码（如果有的话）
+    import re
+    fund_code = ""
+    fund_name = ""
+    code_match = re.search(r"\d{6}(?:\.\w+)?", suggestion_text)
+    if code_match:
+        fund_code = code_match.group(0)
+
+    # 提取金额提示
+    amount_hint = None
+    amount_patterns = [
+        r"(?:不超过|约|投入|买入|加仓|单次)[^\d]{0,8}(\d+(?:\.\d+)?)\s*(?:元|块)",
+        r"(\d+(?:\.\d+)?)\s*(?:元|块)",
+    ]
+    for pat in amount_patterns:
+        m = re.search(pat, suggestion_text)
+        if m:
+            try:
+                amount_hint = float(m.group(1))
+            except (TypeError, ValueError):
+                pass
+            break
+
+    # 提取置信度
+    confidence = "medium"
+    if any(kw in suggestion_text for kw in ["强烈", "非常确定", "高置信"]):
+        confidence = "high"
+    elif any(kw in suggestion_text for kw in ["谨慎", "不确定", "低置信"]):
+        confidence = "low"
+
+    candidate_id = create_candidate_from_structured_recommendation({
+        "source_type": "ai_chat",
+        "source_id": data.get("conversation_id"),
+        "scenario_type": data.get("scenario_type", "ai_analysis"),
+        "action_type": action_type,
+        "target_type": "fund" if fund_code else "portfolio",
+        "target_code": fund_code,
+        "target_name": fund_name,
+        "summary": suggestion_text[:200],
+        "rationale": suggestion_text,
+        "suggested_amount": amount_hint,
+        "confidence": confidence,
+        "evidence": {"source": "ai_chat", "agent_id": data.get("agent_id")},
+        "priority": 2 if action_type in ("buy", "sell") else 3,
+    })
+
+    return {
+        "ok": True,
+        "candidate_id": candidate_id,
+        "action_type": action_type,
+        "fund_code": fund_code,
+        "amount_hint": amount_hint,
+        "confidence": confidence,
+        "message": "决策卡片已创建，可在决策中心查看",
+    }
