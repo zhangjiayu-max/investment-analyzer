@@ -1880,8 +1880,6 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
                     }
 
                 # 并行执行交叉审阅（最多 3 并发）
-                import concurrent.futures
-
                 def _review_single(sr):
                     _check_cancel(cancel_event)
                     _check_timeout(start_time)
