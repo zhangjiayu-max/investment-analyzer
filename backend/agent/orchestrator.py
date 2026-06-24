@@ -21,6 +21,41 @@ from config import ARBITRATION_API_KEY
 from db.config import get_config_int, get_config_float
 from agent.orchestrator_optimizer import OrchestratorOptimizer, ParallelExecutor
 
+# 专家结果缓存（追问场景 5 分钟复用）
+_expert_cache: dict[str, tuple[dict, float]] = {}
+_EXPERT_CACHE_TTL = 300  # 5 分钟
+
+
+def _execute_specialist_cached(tool_name: str, query: str,
+                                cancel_event=None, prebuilt_context: str = "") -> str:
+    """带缓存的专家执行。同一专家+同一上下文 5 分钟内复用。"""
+    import hashlib
+    ctx_hash = hashlib.md5((prebuilt_context or "")[:500].encode()).hexdigest()
+    cache_key = f"{tool_name}:{hash(query)}:{ctx_hash}"
+
+    if cache_key in _expert_cache:
+        result, ts = _expert_cache[cache_key]
+        if time.time() - ts < _EXPERT_CACHE_TTL:
+            logger.info(f"专家缓存命中: {tool_name}")
+            result["_cached"] = True
+            return json.dumps(result, ensure_ascii=False)
+
+    result_str = _execute_specialist(tool_name, query,
+                                     cancel_event=cancel_event,
+                                     prebuilt_context=prebuilt_context)
+    try:
+        obj = json.loads(result_str)
+        if "error" not in obj:
+            _expert_cache[cache_key] = (obj, time.time())
+            # 控制缓存大小
+            if len(_expert_cache) > 32:
+                oldest = min(_expert_cache, key=lambda k: _expert_cache[k][1])
+                del _expert_cache[oldest]
+    except Exception:
+        pass
+    return result_str
+
+
 # 全局超时限制（秒）
 MAX_ORCHESTRATION_SECONDS = 1800  # 30 分钟
 from agent.feedback_learner import get_preference_context
@@ -1351,7 +1386,7 @@ def orchestrate(query: str, history: list, rag_context: str = "", cancel_event: 
         if len(tool_tasks) == 1:
             # 单个专家，直接执行（避免线程池开销）
             tc, args, expert_query = tool_tasks[0]
-            result_str = _execute_specialist(tc.function.name, expert_query,
+            result_str = _execute_specialist_cached(tc.function.name, expert_query,
                                               prebuilt_context=prebuilt_context)
             ordered_results = [result_str]
         else:
@@ -1551,7 +1586,7 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
 
     if not target_specialists:
         if not resume_from:
-            yield {"type": "status", "message": "正在理解您的问题..."}
+            yield {"type": "phase", "phase": "clarify", "message": "🔍 正在理解您的问题..."}
         clarification = clarify_requirement(query)
         complexity = clarification["complexity"]
         context_config = get_context_config(complexity)
@@ -1656,12 +1691,13 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
     llm_messages.append({"role": "user", "content": refined_query})
 
     # 根据复杂度显示不同的状态消息
+    # 根据复杂度显示不同的状态消息
     if complexity == "simple":
-        yield {"type": "status", "message": f"正在分析问题... ({clarification.get('reason', '')})"}
+        yield {"type": "phase", "phase": "analyze", "message": f"📊 正在分析问题... ({clarification.get('reason', '')})"}
     elif complexity == "medium":
-        yield {"type": "status", "message": f"正在咨询专家... ({clarification.get('reason', '')})"}
+        yield {"type": "phase", "phase": "consult", "message": f"🤝 正在咨询专家... ({clarification.get('reason', '')})"}
     else:
-        yield {"type": "status", "message": f"正在协调多个专家... ({clarification.get('reason', '')})"}
+        yield {"type": "phase", "phase": "coordinate", "message": f"⚡ 正在协调多个专家... ({clarification.get('reason', '')})"}
 
     # 发送执行计划给前端
     yield {
@@ -1732,46 +1768,61 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
                 )
             )
             if should_cross_review:
-                yield {"type": "status", "message": f"正在进行交叉审阅（{len(specialist_results)} 个专家互相验证）..."}
+                yield {"type": "status", "message": f"正在进行交叉审阅（{len(specialist_results)} 个专家并行互相验证）..."}
                 peer_analyses = {sr["agent_key"]: sr["analysis"] for sr in specialist_results}
                 cross_review_results = []
-                # 快照原始专家列表，避免迭代时 append 导致无限循环
                 original_specialists = list(specialist_results)
+
+                # 发出所有交叉审阅开始事件
                 for sr in original_specialists:
-                    _check_cancel(cancel_event)
-                    _check_timeout(start_time)
                     yield {
                         "type": "cross_review_start",
                         "agent_key": sr["agent_key"],
                         "agent": sr["agent"],
                         "icon": sr["icon"],
                     }
-                    try:
-                        cr_result = run_specialist_with_context(
-                            sr["agent_key"], refined_query, peer_analyses, max_turns=2,
-                            prebuilt_context=prebuilt_context
-                        )
-                        cross_review_results.append(cr_result)
-                        specialist_results.append(cr_result)
-                        all_tool_calls.extend(cr_result.get("tool_calls", []))
-                        yield {
-                            "type": "cross_review_done",
-                            "agent_key": sr["agent_key"],
-                            "agent": sr["agent"],
-                            "icon": sr["icon"],
-                            "analysis": cr_result["analysis"],
-                            "duration_ms": cr_result["duration_ms"],
-                        }
-                    except Exception as e:
-                        logger.error(f"交叉审阅 {sr['agent_key']} 失败: {e}")
-                        yield {
-                            "type": "cross_review_done",
-                            "agent_key": sr["agent_key"],
-                            "agent": sr["agent"],
-                            "icon": sr["icon"],
-                            "analysis": f"交叉审阅失败: {e}",
-                            "duration_ms": 0,
-                        }
+
+                # 并行执行交叉审阅（最多 3 并发）
+                import concurrent.futures
+
+                def _review_single(sr):
+                    _check_cancel(cancel_event)
+                    _check_timeout(start_time)
+                    peer = {k: v for k, v in peer_analyses.items() if k != sr["agent_key"]}
+                    return sr, run_specialist_with_context(
+                        sr["agent_key"], refined_query, peer, max_turns=2,
+                        prebuilt_context=prebuilt_context
+                    )
+
+                with concurrent.futures.ThreadPoolExecutor(
+                    max_workers=min(len(original_specialists), 3)
+                ) as executor:
+                    futures = {executor.submit(_review_single, sr): sr for sr in original_specialists}
+                    for future in concurrent.futures.as_completed(futures):
+                        sr = futures[future]
+                        try:
+                            _, cr_result = future.result(timeout=300)
+                            cross_review_results.append(cr_result)
+                            specialist_results.append(cr_result)
+                            all_tool_calls.extend(cr_result.get("tool_calls", []))
+                            yield {
+                                "type": "cross_review_done",
+                                "agent_key": sr["agent_key"],
+                                "agent": sr["agent"],
+                                "icon": sr["icon"],
+                                "analysis": cr_result["analysis"],
+                                "duration_ms": cr_result["duration_ms"],
+                            }
+                        except Exception as e:
+                            logger.error(f"交叉审阅 {sr['agent_key']} 失败: {e}")
+                            yield {
+                                "type": "cross_review_done",
+                                "agent_key": sr["agent_key"],
+                                "agent": sr["agent"],
+                                "icon": sr["icon"],
+                                "analysis": f"交叉审阅失败: {e}",
+                                "duration_ms": 0,
+                            }
 
                 # 优化：跳过中间的综合 LLM 调用，直接进入仲裁
                 if cross_review_results:
@@ -1782,7 +1833,7 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
                     # Phase C: 仲裁（高级模型最终裁决）
                     if should_arbitrate(complexity, specialist_results):
                         _check_cancel(cancel_event)
-                        yield {"type": "status", "message": "正在由仲裁法官做最终裁决..."}
+                        yield {"type": "phase", "phase": "arbitrate", "message": "⚖️ 正在由仲裁法官做最终裁决..."}
                         yield {
                             "type": "specialist_start",
                             "agent_key": "arbitrator",
@@ -1823,7 +1874,7 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
             # Phase C: 仲裁（高级模型最终裁决，无交叉审阅时也可触发）
             if not arbitration_done and should_arbitrate(complexity, specialist_results):
                 _check_cancel(cancel_event)
-                yield {"type": "status", "message": "正在由仲裁法官做最终裁决..."}
+                yield {"type": "phase", "phase": "arbitrate", "message": "⚖️ 正在由仲裁法官做最终裁决..."}
                 yield {
                     "type": "specialist_start",
                     "agent_key": "arbitrator",
@@ -1968,7 +2019,7 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
         if len(tool_tasks) == 1:
             # 单个专家，直接执行
             tc, args, expert_query, agent_key, agent_info = tool_tasks[0]
-            result_str = _execute_specialist(tc.function.name, expert_query, cancel_event,
+            result_str = _execute_specialist_cached(tc.function.name, expert_query, cancel_event,
                                               prebuilt_context=prebuilt_context)
             result_queue.put((0, tc, args, agent_key, agent_info, result_str))
         else:

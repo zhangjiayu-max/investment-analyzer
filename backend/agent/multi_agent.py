@@ -37,6 +37,26 @@ ANALYSIS_TEMPLATES = {
     },
 }
 
+# 通用可执行性约束 — 强制每条建议都有具体操作
+_ACTIONABILITY_CONSTRAINT = """
+## 🎯 可执行性要求（强制遵守）
+
+你的分析结尾必须包含「具体操作建议」段落，格式：
+
+### 💡 具体操作建议
+1. **操作**：买/卖/持有/定投（选一）
+   - **标的**：基金名称+代码
+   - **金额或比例**：具体数字，如"2000元"或"现有仓位的10%"
+   - **触发条件**：什么情况下执行，如"当PE分位降到20%时"
+   - **理由**：一句话说明为什么
+
+禁止出现：
+- ❌ "建议根据自身情况决定"（等于没说）
+- ❌ "可以考虑"（模棱两可）
+- ❌ "适当调整"（没有具体比例）
+- ❌ "仅供参考"（推卸责任）
+"""
+
 
 def _detect_analysis_type(query: str) -> str:
     """根据用户问题关键词检测分析类型。"""
@@ -253,6 +273,9 @@ def run_specialist(agent_key: str, query: str, context: str = "",
     if template_constraint:
         system_content += template_constraint
 
+    # 追加通用可执行性约束
+    system_content += _ACTIONABILITY_CONSTRAINT
+
     llm_messages = [
         {"role": "system", "content": system_content},
         {"role": "user", "content": query},
@@ -430,6 +453,9 @@ def run_specialist_with_context(agent_key: str, query: str, peer_analyses: dict,
     template_constraint = _get_template_constraint(analysis_type)
     if template_constraint:
         system_content += template_constraint
+
+    # 追加通用可执行性约束
+    system_content += _ACTIONABILITY_CONSTRAINT
 
     # 追加圆桌审阅指令
     peer_sections = []

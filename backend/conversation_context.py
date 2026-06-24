@@ -140,6 +140,24 @@ def _build_missing_context(scenario_type: str, sections: dict[str, str]) -> str:
     return "、".join(dict.fromkeys(missing))
 
 
+def _detect_context_conflicts(sections: dict[str, str]) -> list[str]:
+    """检测上下文中的矛盾指令，按优先级排序解决。"""
+    conflicts = []
+    prefs = sections.get("user_profile_context", "")
+    kyc = sections.get("kyc", "")
+    strategy = sections.get("strategy", "")
+    decision = sections.get("decision_context", "")
+
+    # 优先级：KYC > 策略 > 偏好
+    if "详细数据支撑" in prefs and ("新手" in kyc or "保守" in kyc):
+        conflicts.append("[KYC覆盖] 新手用户偏好详细数据 → 提供数据但用通俗语言解释")
+    if "激进" in kyc and "保守" in strategy:
+        conflicts.append("[策略冲突] 激进画像 vs 保守策略 → 提醒风险，让用户选择")
+    if "长期" in kyc and "短期" in decision:
+        conflicts.append("[期限冲突] 长期目标 vs 短期操作 → 标记为需确认")
+    return conflicts
+
+
 def _build_change_context(user_id: str = "default") -> str:
     """构建近期变化上下文：对比最近两次持仓快照。"""
     try:
@@ -191,6 +209,7 @@ def _compose_prompt_context(sections: dict[str, str], current_user_message: str,
         ("关注列表", sections.get("watchlist_context", "")),
         ("知识库证据", sections.get("rag_context", "")),
         ("缺失信息", sections.get("missing_context", "")),
+        ("上下文冲突", sections.get("conflicts", "")),
         ("当前问题", current_user_message or ""),
     ]
 
@@ -241,6 +260,11 @@ def build_conversation_context(
         "change_context": _build_change_context(user_id=user_id),
     }
     sections["missing_context"] = _build_missing_context(scenario_type, sections)
+
+    # 冲突检测：发现上下文中的矛盾指令
+    conflicts = _detect_context_conflicts(sections)
+    if conflicts:
+        sections["conflicts"] = "⚠️ 检测到上下文冲突：\n" + "\n".join(f"- {c}" for c in conflicts)
 
     prompt_context = _compose_prompt_context(sections, current_user_message, token_budget)
     return {
