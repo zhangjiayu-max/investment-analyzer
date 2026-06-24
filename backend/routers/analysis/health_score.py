@@ -403,6 +403,23 @@ def calc_behavior_score(trades: list) -> tuple[int, dict]:
         holding_days_list = []
         for h in active:
             buy_date_str = h.get("buy_date", "")
+            if not buy_date_str:
+                # 从交易记录推算最早买入日期
+                fund_code = h.get("fund_code", "")
+                if fund_code:
+                    try:
+                        conn = _get_conn()
+                        try:
+                            earliest = conn.execute(
+                                "SELECT MIN(transaction_date) FROM portfolio_transactions WHERE fund_code = ? AND transaction_type = 'buy'",
+                                (fund_code,)
+                            ).fetchone()
+                            if earliest and earliest[0]:
+                                buy_date_str = earliest[0]
+                        finally:
+                            conn.close()
+                    except Exception:
+                        pass
             if buy_date_str:
                 try:
                     bd = datetime.strptime(buy_date_str[:10], "%Y-%m-%d")
