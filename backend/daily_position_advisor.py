@@ -47,14 +47,12 @@ def run_daily_position_advice(user_id: str = "default", trigger_type: str = "man
 
     run_id = create_run(user_id, today, trigger_type)
 
-    # force 模式下先把今天的旧信号标为 expired
+    # force 模式下先删除今天的旧信号（包括 expired），以便重新生成
     if force:
-        from db.daily_advice import expire_old_signals
-        # 通用过期：今天所有 status='new' 的信号
         conn = _get_conn()
         try:
             conn.execute(
-                "UPDATE daily_position_signals SET status='expired' WHERE user_id=? AND signal_date=? AND status='new'",
+                "DELETE FROM daily_position_signals WHERE user_id=? AND signal_date=?",
                 (user_id, today)
             )
             conn.commit()
@@ -163,6 +161,11 @@ def run_daily_position_advice(user_id: str = "default", trigger_type: str = "man
                 # dedupe 命中，仍加入返回列表
                 saved_signals.append(s)
 
+        # watch 信号写入 portfolio_alerts 轻量提醒
+        for s in saved_signals:
+            if s.get("severity") == "watch" and s.get("id"):
+                _create_portfolio_alert_from_signal(s, user_id)
+
         # 强建议写入 recommendation_candidates
         for s in saved_signals:
             if s.get("severity") == "actionable" and s.get("next_step") == "create_candidate":
@@ -207,9 +210,17 @@ def _generate_signals(**kw) -> list[dict]:
     signals = []
 
     # 主题基金更严格的阈值
-    add_val_max = cfg["add_valuation_max_percentile"] * (0.7 if is_theme else 1.0)
-    single_pos_max = cfg["default_single_position_pct"] * (0.55 if is_theme else 1.0)
-    max_dca_amount = cfg["base_dca_amount"] * (0.5 if is_theme else 1.0)
+    # 设计稿：单标的上限 15%→8%，加仓金额为宽基 50%，加仓估值 35%→25%，减仓估值 80%→70%
+    if is_theme:
+        add_val_max = min(cfg["add_valuation_max_percentile"] * 0.714, 25)  # 35*0.714≈25
+        single_pos_max = min(cfg["default_single_position_pct"] * 0.533, 8)  # 15*0.533≈8
+        max_dca_amount = cfg["base_dca_amount"] * 0.5
+        reduce_val_min = min(cfg["reduce_valuation_min_percentile"] * 0.875, 70)  # 80*0.875=70
+    else:
+        add_val_max = cfg["add_valuation_max_percentile"]
+        single_pos_max = cfg["default_single_position_pct"]
+        max_dca_amount = cfg["base_dca_amount"]
+        reduce_val_min = cfg["reduce_valuation_min_percentile"]
 
     val_percentile = val_info.get("percentile") if val_info else None
     val_name = val_info.get("index_name", "") if val_info else ""
@@ -270,7 +281,7 @@ def _generate_signals(**kw) -> list[dict]:
         risk_notes = []
 
         # 估值过高 → 降级
-        if val_percentile is not None and val_percentile > (cfg["reduce_valuation_min_percentile"] * 0.875):
+        if val_percentile is not None and val_percentile > (reduce_val_min * 0.875):
             severity = "watch"
             risk_notes.append("估值偏高，价格跌但估值不便宜")
 
@@ -329,8 +340,8 @@ def _generate_signals(**kw) -> list[dict]:
         return signals
 
     # ── 减仓信号：估值高 + 盈利 ──
-    if val_percentile is not None and val_percentile >= cfg["reduce_valuation_min_percentile"] and kw["profit_rate"] > 0:
-        score = 50 + min((val_percentile - 80) / 20 * 30, 30)
+    if val_percentile is not None and val_percentile >= reduce_val_min and kw["profit_rate"] > 0:
+        score = 50 + min((val_percentile - reduce_val_min) / (100 - reduce_val_min) * 30, 30)
         severity = "actionable" if score >= 60 else "watch"
 
         # 仓位超限加大减仓力度
@@ -361,7 +372,7 @@ def _generate_signals(**kw) -> list[dict]:
         return signals
 
     # ── 估值低估但未触发4%（观察）──
-    if val_percentile is not None and val_percentile <= cfg["add_valuation_max_percentile"] and drop_pct < cfg["dca_drop_step_pct"] / 100:
+    if val_percentile is not None and val_percentile <= add_val_max and drop_pct < cfg["dca_drop_step_pct"] / 100:
         signals.append(_make_signal(
             run_id=run_id, user_id=user_id, signal_date=today,
             signal_type="valuation_watch", action_type="watch",
@@ -414,6 +425,8 @@ def _load_config() -> dict:
         "reduce_valuation_min_percentile": get_config_float("daily_advice.reduce_valuation_min_percentile", 80),
         "recent_buy_cooldown_days": get_config_int("daily_advice.recent_buy_cooldown_days", 10),
         "recent_buy_max_count": get_config_int("daily_advice.recent_buy_max_count", 2),
+        "down_days_watch": get_config_int("daily_advice.down_days_watch", 3),
+        "down_days_action": get_config_int("daily_advice.down_days_action", 5),
         "stale_days": get_config_int("daily_advice.stale_days", 3),
     }
 
@@ -546,14 +559,29 @@ def _get_fund_valuation(holding: dict) -> dict | None:
 
 
 def _is_theme_fund(fund_name: str, category: str) -> bool:
-    """判断是否为主题/行业基金。"""
-    theme_keywords = ["医疗", "医药", "白酒", "消费", "军工", "新能源", "半导体", "芯片",
-                      "畜牧", "养殖", "生物", "科技", "互联网", "银行", "证券", "煤炭",
-                      "有色", "钢铁", "新能源车", "光伏", "风电", "机器人", "人工智能"]
+    """判断是否为主题/行业基金。
+    
+    判断条件：基金名称包含"主题"/"行业"/"赛道"/"医药"/"白酒"/"新能源"/"半导体"/"军工"/"消费"等关键词，
+    或 QDII/商品类。
+    """
+    theme_keywords = [
+        # 设计稿关键词
+        "主题", "行业", "赛道", "医药", "白酒", "新能源", "半导体", "军工", "消费",
+        # 扩展关键词
+        "医疗", "芯片", "畜牧", "养殖", "生物", "科技", "互联网", "银行", "证券",
+        "煤炭", "有色", "钢铁", "新能源车", "光伏", "风电", "机器人", "人工智能",
+        "房地产", "红利", "游戏", "传媒", "旅游", "食品",
+    ]
     for kw in theme_keywords:
         if kw in fund_name:
             return True
-    if category in ("qdii", "commodity"):
+    # QDII / 商品类
+    if category:
+        cat_lower = category.lower() if isinstance(category, str) else ""
+        if cat_lower in ("qdii", "commodity", "qdii_commodity"):
+            return True
+    # 名称中直接包含 QDII 或商品
+    if "QDII" in fund_name or "商品" in fund_name:
         return True
     return False
 
@@ -634,6 +662,38 @@ def _create_candidate_from_signal(signal: dict, user_id: str):
         return candidate_id
     except Exception as e:
         logger.warning(f"创建建议候选失败: {e}")
+        return None
+
+
+def _create_portfolio_alert_from_signal(signal: dict, user_id: str):
+    """将 watch 信号写入 portfolio_alerts 轻量提醒。"""
+    try:
+        from db.portfolio import create_alert
+        alert_id = create_alert(
+            alert_type="daily_advice_signal",
+            title=signal.get("summary", "每日持仓提示"),
+            content=signal.get("rationale", ""),
+            severity="info",
+            related_fund_code=signal.get("target_code", ""),
+            related_fund_name=signal.get("target_name", ""),
+            source="daily_advice",
+            user_id=user_id,
+        )
+        # 回写 alert_id 到信号记录
+        if alert_id and signal.get("id"):
+            conn = _get_conn()
+            try:
+                conn.execute(
+                    "UPDATE daily_position_signals SET alert_id=? WHERE id=?",
+                    (alert_id, signal["id"])
+                )
+                conn.commit()
+            finally:
+                conn.close()
+        logger.info(f"已为信号 {signal.get('id')} 创建 portfolio_alert {alert_id}")
+        return alert_id
+    except Exception as e:
+        logger.warning(f"创建 portfolio_alert 失败: {e}")
         return None
 
 

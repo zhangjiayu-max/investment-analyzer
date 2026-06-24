@@ -70,6 +70,21 @@ DEFAULT_CONFIGS = [
     ('portfolio.users', '小鱼儿,花无缺', '用户列表（逗号分隔）', 'portfolio'),
     ('portfolio.snapshot_max_count', '365', '持仓快照最大保留条数', 'portfolio'),
 
+    # 每日持仓提示
+    ('daily_advice.enabled', 'true', '是否启用每日持仓提示', 'daily_advice'),
+    ('daily_advice.base_dca_amount', '500', '基础定投金额', 'daily_advice'),
+    ('daily_advice.dca_drop_step_pct', '4', '4%定投法跌幅档位', 'daily_advice'),
+    ('daily_advice.max_dca_steps', '3', '最大加仓档位', 'daily_advice'),
+    ('daily_advice.min_cash_pct', '5', '现金最低保留比例（%）', 'daily_advice'),
+    ('daily_advice.max_cash_use_pct_per_signal', '10', '单条建议最多使用现金比例（%）', 'daily_advice'),
+    ('daily_advice.default_single_position_pct', '15', '未设置画像时的单标的默认上限（%）', 'daily_advice'),
+    ('daily_advice.add_valuation_max_percentile', '35', '加仓建议最高估值百分位', 'daily_advice'),
+    ('daily_advice.reduce_valuation_min_percentile', '80', '减仓复核最低估值百分位', 'daily_advice'),
+    ('daily_advice.down_days_watch', '3', '连续下跌观察阈值', 'daily_advice'),
+    ('daily_advice.down_days_action', '5', '连续下跌行动阈值', 'daily_advice'),
+    ('daily_advice.recent_buy_cooldown_days', '10', '补仓冷静期（天）', 'daily_advice'),
+    ('daily_advice.recent_buy_max_count', '2', '冷静期内最多买入次数', 'daily_advice'),
+
     # 指数代码
     ('index.hs300_code', '000300.SH', '沪深300指数代码', 'index'),
 ]

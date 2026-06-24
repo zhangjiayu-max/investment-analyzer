@@ -115,6 +115,7 @@ from routers.fund_manager import router as fund_manager_router  # /api/fund-mana
 from routers.data_health import router as data_health_router          # /api/data-health
 from routers.portfolio_import import router as portfolio_import_router  # /api/portfolio/import-csv
 from routers.opportunities import router as opportunities_router      # /api/opportunities/*
+from routers.daily_advice import router as daily_advice_router        # /api/daily-advice/*
 from services.data_lineage import track_sources, get_lineage  # data lineage tracking
 
 # 注册路由
@@ -168,6 +169,13 @@ app.include_router(fund_manager_router)
 app.include_router(data_health_router)
 app.include_router(portfolio_import_router)
 app.include_router(opportunities_router)
+app.include_router(daily_advice_router)
+
+# ── 启动初始化 ──
+@app.on_event("startup")
+async def _init_daily_advice():
+    from db.daily_advice import init_daily_advice_tables
+    init_daily_advice_tables()
 
 # 静态文件目录
 for _d in (STATIC_DIR, IMAGES_DIR, OUTPUT_DIR, UPLOADS_DIR, DD_IMAGES_DIR, VALUATION_IMAGES_DIR):
@@ -598,6 +606,18 @@ async def _auto_refresh_nav():
                 logging.info(f"[auto-nav] 预警扫描完成: {alert_result}")
             except Exception as ae:
                 logging.warning(f"[auto-nav] 预警扫描异常: {ae}")
+
+            # 预警扫描后自动运行每日持仓提示引擎
+            try:
+                from daily_position_advisor import run_daily_position_advice
+                advice_result = run_daily_position_advice(
+                    user_id="default",
+                    trigger_type="auto_nav_refresh",
+                    force=False,
+                )
+                logging.info(f"[auto-nav] 每日持仓提示完成: run_id={advice_result.get('run_id')}, summary={advice_result.get('summary', '')}")
+            except Exception as de:
+                logging.warning(f"[auto-nav] 每日持仓提示异常: {de}")
         except Exception as e:
             logging.warning(f"[auto-nav] 自动刷新净值异常: {e}")
             await asyncio.sleep(300)  # 出错后 5 分钟重试
