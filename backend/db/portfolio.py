@@ -1550,20 +1550,22 @@ def create_alert(alert_type: str, title: str, content: str = None,
 
 def list_alerts(user_id: str = "default", limit: int = 50,
                 unread_only: bool = False) -> list[dict]:
-    """获取预警列表，按时间倒序。"""
+    """获取预警列表（按标题+severity聚合），显示个数和最新时间。"""
     conn = _get_conn()
-    if unread_only:
-        rows = conn.execute("""
-            SELECT * FROM portfolio_alerts
-            WHERE user_id = ? AND is_read = 0
-            ORDER BY created_at DESC LIMIT ?
-        """, (user_id, limit)).fetchall()
-    else:
-        rows = conn.execute("""
-            SELECT * FROM portfolio_alerts
-            WHERE user_id = ?
-            ORDER BY created_at DESC LIMIT ?
-        """, (user_id, limit)).fetchall()
+    where = "WHERE user_id = ? AND is_read = 0" if unread_only else "WHERE user_id = ?"
+    params = [user_id] if not unread_only else [user_id]
+    rows = conn.execute(f"""
+        SELECT title, severity, source, alert_type,
+               content,
+               COUNT(*) as cnt,
+               MAX(created_at) as latest_at,
+               MAX(id) as latest_id
+        FROM portfolio_alerts
+        {where}
+        GROUP BY title, severity
+        ORDER BY latest_at DESC
+        LIMIT ?
+    """, (*params, limit)).fetchall()
     conn.close()
     return [dict(r) for r in rows]
 
@@ -1580,10 +1582,19 @@ def get_unread_alert_count(user_id: str = "default") -> int:
 
 
 def mark_alert_read(alert_id: int) -> bool:
-    """标记预警为已读。"""
+    """标记预警为已读（同时标记同标题+severity的所有未读预警）。"""
     conn = _get_conn()
+    # 先获取该 alert 的 title+severity
+    row = conn.execute(
+        "SELECT title, severity, user_id FROM portfolio_alerts WHERE id = ?",
+        (alert_id,)
+    ).fetchone()
+    if not row:
+        conn.close()
+        return False
     cur = conn.execute(
-        "UPDATE portfolio_alerts SET is_read = 1 WHERE id = ?", (alert_id,)
+        "UPDATE portfolio_alerts SET is_read = 1 WHERE title = ? AND severity = ? AND user_id = ? AND is_read = 0",
+        (row["title"], row["severity"], row["user_id"])
     )
     conn.commit()
     ok = cur.rowcount > 0
@@ -1592,9 +1603,19 @@ def mark_alert_read(alert_id: int) -> bool:
 
 
 def delete_alert(alert_id: int) -> bool:
-    """删除预警。"""
+    """删除预警（同时删除同标题+severity的所有预警）。"""
     conn = _get_conn()
-    cur = conn.execute("DELETE FROM portfolio_alerts WHERE id = ?", (alert_id,))
+    row = conn.execute(
+        "SELECT title, severity, user_id FROM portfolio_alerts WHERE id = ?",
+        (alert_id,)
+    ).fetchone()
+    if not row:
+        conn.close()
+        return False
+    cur = conn.execute(
+        "DELETE FROM portfolio_alerts WHERE title = ? AND severity = ? AND user_id = ?",
+        (row["title"], row["severity"], row["user_id"])
+    )
     conn.commit()
     ok = cur.rowcount > 0
     conn.close()

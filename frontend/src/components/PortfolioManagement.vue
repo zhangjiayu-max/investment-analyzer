@@ -1342,28 +1342,38 @@ async function loadPendingTxs() {
 // Load alerts
 async function loadAlerts() {
   try {
-    const { data } = await listAlerts(true, 10)
+    const { data } = await listAlerts(true, 50)
     alerts.value = data.alerts || []
     const { data: cnt } = await getUnreadAlertCount()
     unreadAlertCount.value = cnt.count
   } catch (e) { /* silently ignore */ }
 }
 
-async function handleMarkAlertRead(alertId) {
+async function handleMarkAlertRead(alertId, title, severity) {
   try {
-    await markAlertRead(alertId)
-    alerts.value = alerts.value.filter(a => a.id !== alertId)
-    unreadAlertCount.value = Math.max(0, unreadAlertCount.value - 1)
+    // 标记同标题+severity的所有未读预警为已读
+    const sameGroup = alerts.value.filter(a => a.title === title && a.severity === severity)
+    for (const a of sameGroup) {
+      await markAlertRead(a.latest_id)
+    }
+    alerts.value = alerts.value.filter(a => !(a.title === title && a.severity === severity))
+    const cnt = sameGroup.reduce((s, a) => s + (a.cnt || 1), 0)
+    unreadAlertCount.value = Math.max(0, unreadAlertCount.value - cnt)
   } catch (e) {
     showToast('操作失败', 'error')
   }
 }
 
-async function handleDeleteAlert(alertId) {
+async function handleDeleteAlert(alertId, title, severity) {
   try {
-    await deleteAlert(alertId)
-    alerts.value = alerts.value.filter(a => a.id !== alertId)
-    unreadAlertCount.value = Math.max(0, unreadAlertCount.value - 1)
+    // 删除同标题+severity的所有预警
+    const sameGroup = alerts.value.filter(a => a.title === title && a.severity === severity)
+    for (const a of sameGroup) {
+      await deleteAlert(a.latest_id)
+    }
+    alerts.value = alerts.value.filter(a => !(a.title === title && a.severity === severity))
+    const cnt = sameGroup.reduce((s, a) => s + (a.cnt || 1), 0)
+    unreadAlertCount.value = Math.max(0, unreadAlertCount.value - cnt)
   } catch (e) {
     showToast('操作失败', 'error')
   }
@@ -3295,7 +3305,7 @@ function txDisplayAmount(tx) {
           <span>暂无预警</span>
           <span class="alert-empty-hint">点击「巡检」主动扫描持仓风险</span>
         </div>
-        <div v-for="a in alerts" :key="a.id" :class="['alert-item', 'alert-' + a.severity]">
+        <div v-for="a in alerts" :key="a.latest_id" :class="['alert-item', 'alert-' + a.severity]">
           <div class="alert-icon">
             <svg v-if="a.severity === 'danger'" width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
@@ -3308,19 +3318,22 @@ function txDisplayAmount(tx) {
             </svg>
           </div>
           <div class="alert-body">
-            <div class="alert-title">{{ a.title }}</div>
+            <div class="alert-title">
+              {{ a.title }}
+              <span v-if="a.cnt > 1" class="alert-count-badge">×{{ a.cnt }}</span>
+            </div>
             <div v-if="a.content" class="alert-content">{{ a.content }}</div>
             <div class="alert-meta">
               <span class="alert-type-badge">{{ a.alert_type }}</span>
               <span v-if="a.source === 'system_scan'" class="alert-source-badge scan">系统巡检</span>
               <span v-else-if="a.source === 'ai_analysis'" class="alert-source-badge ai">AI 对话</span>
               <span v-else class="alert-source-badge">{{ a.source }}</span>
-              <span class="alert-time">{{ a.created_at }}</span>
+              <span class="alert-time">{{ a.latest_at }}</span>
             </div>
           </div>
           <div class="alert-actions">
-            <button class="btn-ghost btn-sm" @click="handleMarkAlertRead(a.id)" title="标记已读">✔</button>
-            <button class="btn-ghost btn-sm btn-danger-text" @click="handleDeleteAlert(a.id)" title="删除">✕</button>
+            <button class="btn-ghost btn-sm" @click="handleMarkAlertRead(a.latest_id, a.title, a.severity)" title="标记已读">✔</button>
+            <button class="btn-ghost btn-sm btn-danger-text" @click="handleDeleteAlert(a.latest_id, a.title, a.severity)" title="删除">✕</button>
           </div>
         </div>
       </div>
@@ -7018,6 +7031,17 @@ select.input-field {
 .alert-badge.has-unread {
   background: var(--color-loss);
   color: white;
+}
+.alert-count-badge {
+  display: inline-block;
+  background: var(--color-primary);
+  color: white;
+  font-size: 0.65rem;
+  font-weight: 700;
+  padding: 1px 6px;
+  border-radius: 10px;
+  margin-left: 6px;
+  vertical-align: middle;
 }
 .alert-toggle-icon {
   font-size: 0.6rem;
