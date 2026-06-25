@@ -56,7 +56,17 @@ async def process_conversation_evaluation(conversation_id: int, evaluation: dict
         except Exception as e:
             logger.error(f"生成 Eval 建议失败: {e}")
 
-    # 4. 专家表现分析
+    # 4. 低分自动触发根因→修复→Shadow 链路
+    if auto_score < LOW_SCORE_THRESHOLD:
+        try:
+            fix_results = await _auto_root_cause_to_fix(conversation_id, evaluation)
+            if fix_results:
+                results["auto_fixes"] = fix_results
+                logger.info(f"自动修复链路: {len(fix_results)} 个根因已创建 Shadow")
+        except Exception as e:
+            logger.error(f"自动根因修复链路失败: {e}")
+
+    # 5. 专家表现分析
     try:
         alerts = await _analyze_expert_performance(conversation_id, evaluation)
         results["expert_alerts"] = alerts
@@ -340,6 +350,184 @@ async def _analyze_expert_performance(conversation_id: int, evaluation: dict) ->
         conn.close()
 
     return alerts
+
+
+# ═══════════════════════════════════════════════════════════════
+# 胶水3: 自动根因→修复→Shadow
+# ═══════════════════════════════════════════════════════════════
+
+
+async def _auto_root_cause_to_fix(conversation_id: int, evaluation: dict):
+    """低分 → 根因 → 自动生成 prompt 修复 → 进入 Shadow。"""
+    from root_cause_analyzer import batch_analyze
+    from db.eval import create_prompt_version, get_active_prompt
+    from shadow_mode import create_shadow_config
+    from db.portfolio import list_all_bad_cases
+
+    # 1. 收集最近的 Bad Case
+    bad_cases = list_all_bad_cases(limit=20)
+    if not bad_cases:
+        return None
+
+    # 2. 批量根因分析
+    try:
+        analysis = batch_analyze(limit=20, force=False)
+    except Exception as e:
+        logger.error(f"批量根因分析失败: {e}")
+        return None
+
+    # 3. 找出最频繁的根因（至少出现 3 次）
+    freq = {}
+    for item in analysis.get("results", []):
+        rc = item.get("root_cause", "")
+        if rc and rc != "other":
+            freq.setdefault(rc, []).append(item)
+
+    top_causes = sorted(freq.items(), key=lambda x: -len(x[1]))
+    fixes_applied = []
+
+    for root_cause, results in top_causes:
+        if len(results) < 3:
+            continue  # 至少 3 个 case 指向同一根因才自动修复
+
+        # 4. 推断受影响的 agent_type
+        agent_type = _infer_agent_type_from_bad_cases(results)
+        if not agent_type:
+            continue
+
+        # 5. 获取当前 active prompt
+        active = get_active_prompt(agent_type)
+        if not active:
+            continue
+
+        # 6. 合并多个 case 的建议，生成改进 prompt
+        suggestions = list(set(
+            r.get("suggestion", "") or r.get("detail", "")
+            for r in results
+            if r.get("suggestion") or r.get("detail")
+        ))
+        try:
+            improved_prompt = _generate_improved_prompt(
+                active["prompt_content"],
+                root_cause,
+                suggestions,
+                results,
+            )
+        except Exception as e:
+            logger.error(f"生成改进 prompt 失败: {e}")
+            continue
+
+        # 7. 创建新 prompt 版本（draft，不激活）
+        from datetime import datetime as _dt
+        version_id = create_prompt_version(
+            agent_type=agent_type,
+            version=f"auto-fix-{_dt.now():%Y%m%d%H%M%S}",
+            prompt_content=improved_prompt,
+            changelog=f"自动修复: {root_cause} ({len(results)}个Bad Case) — "
+                      f"{'; '.join(s[:50] for s in suggestions[:3])}",
+        )
+
+        # 8. 创建 Shadow config（自动对比新旧版本）
+        shadow_id = create_shadow_config(
+            name=f"auto-fix: {agent_type} {root_cause}",
+            agent_type=agent_type,
+            current_prompt=active["prompt_content"],
+            candidate_prompt=improved_prompt,
+            traffic_pct=0.1,
+            prompt_version_id=version_id,
+        )
+
+        fixes_applied.append({
+            "root_cause": root_cause,
+            "case_count": len(results),
+            "version_id": version_id,
+            "shadow_id": shadow_id,
+        })
+
+        logger.info(
+            f"自动修复: {agent_type} {root_cause} → "
+            f"v{version_id} → shadow#{shadow_id}"
+        )
+
+    return fixes_applied
+
+
+def _generate_improved_prompt(
+    current_prompt: str,
+    root_cause: str,
+    suggestions: list,
+    bad_cases: list,
+) -> str:
+    """让 LLM 基于根因和建议，生成改进版的 prompt。"""
+    from llm_service import _call_llm, MODEL
+
+    cases_text = "\n\n".join(
+        f"Bad Case #{i+1}: {c.get('detail', '') or c.get('summary', '')}\n"
+        f"证据: {c.get('root_cause_detail', '') or c.get('note', '')}"
+        for i, c in enumerate(bad_cases[:5])
+    )
+
+    prompt = f"""你是一个 Prompt 工程专家。以下是当前 Agent prompt 和它的 Bad Cases。
+请基于根因分析结果，改进 prompt 以避免同类问题。
+
+## 当前 Prompt
+{current_prompt[:3000]}
+
+## 根因
+{root_cause}
+
+## 改进建议
+{chr(10).join(f'- {s}' for s in suggestions[:5])}
+
+## Bad Cases
+{cases_text[:2000]}
+
+## 要求
+1. 保持原有 prompt 的结构和角色定义
+2. 在关键位置增加约束或示例，针对性解决上述问题
+3. 不要删除原有内容，只增加和修改
+4. 直接输出改进后的完整 prompt
+"""
+
+    response = _call_llm(
+        caller="prompt_improver",
+        model=MODEL,
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.3,
+        max_tokens=8000,
+    )
+
+    return response.choices[0].message.content or current_prompt
+
+
+def _infer_agent_type_from_bad_cases(results: list) -> str | None:
+    """从 Bad Case 中推断哪个 agent 受此根因影响最大。"""
+    # 统计各 agent_type 的 Bad Case 数量
+    agent_counts = {}
+    for r in results:
+        agent_type = r.get("agent_type", "") or ""
+        if not agent_type:
+            # 尝试从 detail/summary 推断
+            detail = r.get("detail", "") or r.get("summary", "") or ""
+            if "估值" in detail:
+                agent_type = "valuation_expert"
+            elif "风险" in detail:
+                agent_type = "risk_assessor"
+            elif "配置" in detail:
+                agent_type = "allocation_advisor"
+            elif "市场" in detail:
+                agent_type = "market_analyst"
+            elif "行为" in detail or "情绪" in detail:
+                agent_type = "behavioral_coach"
+            else:
+                agent_type = "general"
+
+        agent_counts[agent_type] = agent_counts.get(agent_type, 0) + 1
+
+    if not agent_counts:
+        return None
+
+    return max(agent_counts, key=agent_counts.get)
 
 
 def get_evolution_stats(days: int = 30) -> dict:

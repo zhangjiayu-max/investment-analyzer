@@ -35,10 +35,16 @@ def init_shadow_db():
             candidate_prompt TEXT NOT NULL,
             is_active INTEGER DEFAULT 1,
             traffic_pct REAL DEFAULT 0.1,
+            prompt_version_id INTEGER,
             created_at TEXT DEFAULT (datetime('now','localtime')),
             updated_at TEXT DEFAULT (datetime('now','localtime'))
         )
     """)
+    # 兼容已有数据库：如果列不存在则添加
+    try:
+        conn.execute("ALTER TABLE shadow_configs ADD COLUMN prompt_version_id INTEGER")
+    except Exception:
+        pass  # 列已存在
 
     conn.execute("""
         CREATE TABLE IF NOT EXISTS shadow_runs (
@@ -64,15 +70,16 @@ def init_shadow_db():
 
 
 def create_shadow_config(name: str, agent_type: str, current_prompt: str,
-                         candidate_prompt: str, traffic_pct: float = 0.1) -> int:
+                         candidate_prompt: str, traffic_pct: float = 0.1,
+                         prompt_version_id: int = None) -> int:
     """创建 Shadow 配置。"""
     from db._conn import _get_conn
 
     conn = _get_conn()
     cur = conn.execute("""
-        INSERT INTO shadow_configs (name, agent_type, current_prompt, candidate_prompt, traffic_pct)
-        VALUES (?, ?, ?, ?, ?)
-    """, (name, agent_type, current_prompt, candidate_prompt, traffic_pct))
+        INSERT INTO shadow_configs (name, agent_type, current_prompt, candidate_prompt, traffic_pct, prompt_version_id)
+        VALUES (?, ?, ?, ?, ?, ?)
+    """, (name, agent_type, current_prompt, candidate_prompt, traffic_pct, prompt_version_id))
     config_id = cur.lastrowid
     conn.commit()
     conn.close()
@@ -317,3 +324,70 @@ def delete_shadow_config(config_id: int) -> bool:
     conn.commit()
     conn.close()
     return True
+
+
+# ═══════════════════════════════════════════════════════════════
+# 胶水4: Shadow 自动晋升
+# ═══════════════════════════════════════════════════════════════
+
+
+async def auto_promote_shadows() -> list[dict]:
+    """自动检查所有活跃 shadow config，符合条件的自动晋升。
+
+    晋升条件：
+    - 至少 30 次对比（足够样本量）
+    - shadow 胜率 > 60%
+    - shadow 平均分 > production 平均分 + 0.5
+    """
+    from db.eval import activate_prompt_version
+
+    configs = list_shadow_configs(active_only=True)
+    promoted = []
+
+    for cfg in configs:
+        stats = get_shadow_stats(cfg["id"])
+
+        total_runs = stats.get("total_runs", 0)
+        if total_runs < 30:
+            continue
+
+        win_rate = stats.get("shadow_win_rate", 0) or 0
+        avg_prod = stats.get("avg_prod_score", 0) or 0
+        avg_shadow = stats.get("avg_shadow_score", 0) or 0
+
+        # 检查晋升条件
+        if win_rate > 0.6 and (avg_shadow - avg_prod) > 0.5:
+            prompt_version_id = cfg.get("prompt_version_id")
+            if not prompt_version_id:
+                logger.warning(
+                    f"Shadow #{cfg['id']} 符合晋升条件但无 prompt_version_id，跳过"
+                )
+                continue
+
+            # 激活对应的 prompt 版本
+            try:
+                activate_prompt_version(prompt_version_id, cfg["agent_type"])
+            except Exception as e:
+                logger.error(f"激活 prompt 版本失败: {e}")
+                continue
+
+            # 停用 shadow config
+            toggle_shadow_config(cfg["id"], is_active=False)
+
+            logger.info(
+                f"Shadow 自动晋升: {cfg['agent_type']} #{cfg['id']} "
+                f"({total_runs} runs, win_rate={win_rate:.1%}, "
+                f"shadow={avg_shadow:.1f} > prod={avg_prod:.1f})"
+            )
+
+            promoted.append({
+                "config_id": cfg["id"],
+                "agent_type": cfg["agent_type"],
+                "runs": total_runs,
+                "win_rate": round(win_rate, 3),
+                "shadow_score": round(avg_shadow, 2),
+                "prod_score": round(avg_prod, 2),
+                "action": "promoted",
+            })
+
+    return promoted

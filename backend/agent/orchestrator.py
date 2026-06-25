@@ -1501,7 +1501,7 @@ def _execute_specialist(tool_name: str, query: str, cancel_event: threading.Even
         return json.dumps({"error": f"专家执行失败: {e}"}, ensure_ascii=False)
 
 
-def orchestrate(query: str, history: list, rag_context: str = "", cancel_event: threading.Event | None = None, target_specialists: list[str] = None) -> dict:
+def orchestrate(query: str, history: list, rag_context: str = "", cancel_event: threading.Event | None = None, target_specialists: list[str] = None, conversation_id: int = 0, message_id: int = 0) -> dict:
     """
     Orchestrator 主循环。
 
@@ -1758,7 +1758,7 @@ def orchestrate(query: str, history: list, rag_context: str = "", cancel_event: 
 
                     duration_ms = int((time.time() - start_time) * 1000)
                     conflicts = detect_conflicts(specialist_results)
-                    return {
+                    _result = {
                         "answer": answer,
                         "specialist_results": specialist_results,
                         "tool_calls": all_tool_calls,
@@ -1769,6 +1769,9 @@ def orchestrate(query: str, history: list, rag_context: str = "", cancel_event: 
                         "arbitration": arbitration_done,
                         "conflicts": conflicts,
                     }
+                    if conversation_id:
+                        _schedule_auto_evaluation(conversation_id, message_id, _result)
+                    return _result
 
             answer = msg.content or ""
 
@@ -1783,7 +1786,7 @@ def orchestrate(query: str, history: list, rag_context: str = "", cancel_event: 
 
             duration_ms = int((time.time() - start_time) * 1000)
             conflicts = detect_conflicts(specialist_results)
-            return {
+            _result = {
                 "answer": answer,
                 "specialist_results": specialist_results,
                 "tool_calls": all_tool_calls,
@@ -1793,6 +1796,9 @@ def orchestrate(query: str, history: list, rag_context: str = "", cancel_event: 
                 "arbitration": arbitration_done,
                 "conflicts": conflicts,
             }
+            if conversation_id:
+                _schedule_auto_evaluation(conversation_id, message_id, _result)
+            return _result
 
         # 有工具调用 → 执行专家
         assistant_msg = {
@@ -2829,6 +2835,17 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
         if user_choice == "save":
             yield {"type": "status", "message": "已保存为决策草案"}
 
+    if conversation_id:
+        _schedule_auto_evaluation(conversation_id, message_id, {
+            "answer": final_answer,
+            "specialist_results": specialist_results,
+            "tool_calls": all_tool_calls,
+            "duration_ms": duration_ms,
+            "complexity": complexity,
+            "perf_metrics": perf_metrics,
+            "conflicts": conflicts,
+        })
+
     yield {
         "type": "answer",
         "content": final_answer,
@@ -2839,6 +2856,92 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
         "perf_metrics": perf_metrics,
         "conflicts": conflicts,
     }
+
+
+# ═══════════════════════════════════════════════════════════════
+# 胶水1: 对话结束自动评测
+# ═══════════════════════════════════════════════════════════════
+
+_eval_executor = concurrent.futures.ThreadPoolExecutor(
+    max_workers=1, thread_name_prefix="auto_eval"
+)
+
+LOW_SCORE_THRESHOLD = 60
+
+
+def _schedule_auto_evaluation(conv_id: int, msg_id: int, result: dict):
+    """异步调度对话质量评测（不阻塞主流程）。"""
+    if not conv_id:
+        return
+    _eval_executor.submit(_run_auto_evaluation_sync, conv_id, msg_id, result)
+
+
+def _run_auto_evaluation_sync(conv_id: int, msg_id: int, result: dict):
+    """在独立线程中运行评测，避免阻塞 orchestrator 线程池。"""
+    try:
+        loop = asyncio.new_event_loop()
+        loop.run_until_complete(_do_auto_evaluation(conv_id, msg_id, result))
+    except Exception as e:
+        logger.error(f"自动评测失败: conv={conv_id} msg={msg_id} — {e}")
+    finally:
+        loop.close()
+
+
+async def _do_auto_evaluation(conv_id: int, msg_id: int, result: dict):
+    """执行自动评测：规则评估 → 低分走进化流程。"""
+    from db.conversations import has_evaluation
+    from agent.conversation_evaluator import ConversationQualityEvaluator
+    from agent.conversation_evolution import process_conversation_evaluation
+
+    # 去重：同一消息只评测一次
+    if has_evaluation(conv_id, msg_id):
+        logger.debug(f"跳过重复评测: conv={conv_id} msg={msg_id}")
+        return
+
+    evaluator = ConversationQualityEvaluator()
+    try:
+        evaluation = evaluator.evaluate(
+            conv_id, msg_id,
+            trigger_evolution=False,
+            use_llm=False,  # 先规则评估，快
+        )
+    except Exception as e:
+        logger.error(f"规则评估失败: conv={conv_id} — {e}")
+        return
+
+    ev = {
+        "auto_score": evaluation.auto_score,
+        "auto_score_breakdown": {
+            dim.name: {"score": dim.score, "details": dim.details}
+            for dim in evaluation.dimensions
+        },
+        "suggestions": evaluation.suggestions,
+    }
+
+    # 触发进化流程（Bad Case 标记、反馈学习等）
+    try:
+        await process_conversation_evaluation(conv_id, ev)
+    except Exception as e:
+        logger.error(f"进化流程失败: conv={conv_id} — {e}")
+
+    # 低分追加 LLM 评估（更深分析）
+    if evaluation.auto_score < LOW_SCORE_THRESHOLD:
+        try:
+            llm_eval = evaluator.evaluate(
+                conv_id, msg_id,
+                trigger_evolution=False,
+                use_llm=True,
+            )
+            await process_conversation_evaluation(conv_id, {
+                "auto_score": llm_eval.auto_score,
+                "auto_score_breakdown": {
+                    dim.name: dim.score for dim in llm_eval.dimensions
+                },
+                "suggestions": llm_eval.suggestions,
+            })
+        except Exception as e:
+            logger.error(f"LLM 评估失败: conv={conv_id} — {e}")
+
 
 
 def _fallback_orchestrate(query: str, history: list, rag_context: str = "") -> dict:

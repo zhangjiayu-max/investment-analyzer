@@ -555,7 +555,7 @@ async def send_message_api(conv_id: int, req: SendMessageRequest):
 
     # 4. 调用 Orchestrator（多 Agent 协作）
     try:
-        llm_result = orchestrate(req.content, msg_list, rag_context)
+        llm_result = orchestrate(req.content, msg_list, rag_context, conversation_id=conv_id)
         answer = llm_result["answer"]
     except Exception as e:
         answer = f"AI 回复失败: {str(e)}"

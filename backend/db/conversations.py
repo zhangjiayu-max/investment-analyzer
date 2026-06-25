@@ -304,6 +304,25 @@ def get_running_conversations() -> list[dict]:
     return results
 
 
+def has_evaluation(conv_id: int, msg_id: int = None) -> bool:
+    """检查该消息是否已有评估记录（去重用）。"""
+    conn = _get_conn()
+    try:
+        if msg_id:
+            row = conn.execute(
+                "SELECT 1 FROM llm_feedback WHERE target_type='conversation' "
+                "AND target_id=? LIMIT 1", (msg_id,)
+            ).fetchone()
+        else:
+            row = conn.execute(
+                "SELECT 1 FROM conversation_evaluations "
+                "WHERE conversation_id=? LIMIT 1", (conv_id,)
+            ).fetchone()
+        return row is not None
+    finally:
+        conn.close()
+
+
 def get_conversation_progress(conv_id: int) -> dict:
     """获取对话执行进度。"""
     conn = _get_conn()

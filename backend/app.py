@@ -274,8 +274,11 @@ async def startup():
     # 后台每日净值自动刷新（15:30 收盘后）
     asyncio.create_task(_auto_refresh_nav())
 
-    # 每日数据库备份（启动时 + 每天凌晨 2 点）
+    # 后台每日备份（启动时 + 每天凌晨 2 点）
     asyncio.create_task(_auto_daily_backup())
+
+    # 后台每日评测 Pipeline（凌晨 4:00）
+    asyncio.create_task(_auto_daily_eval())
     # 清理上次异常退出遗留的僵尸 agent_runs
     try:
         from db.agents import _get_conn
@@ -349,6 +352,61 @@ async def _auto_daily_backup():
             backup_database()
     except Exception as e:
         logging.warning(f"自动备份任务异常: {e}")
+
+
+async def _auto_daily_eval():
+    """每日凌晨 4:00 自动执行评测 Pipeline。"""
+    import time
+    try:
+        await asyncio.sleep(15)  # 等启动完成
+
+        # 启动时如果今天还没跑过，立刻跑一次
+        today = datetime.now().strftime("%Y-%m-%d") if 'datetime' in dir() else time.strftime("%Y-%m-%d")
+        from datetime import datetime as _dt
+        today = _dt.now().strftime("%Y-%m-%d")
+        try:
+            from db.eval import get_eval_daily_report
+            existing = get_eval_daily_report(today)
+            if not existing:
+                logging.info("今日评测未执行，立即运行...")
+                from routers.analysis.eval_system import run_daily_eval
+                await run_daily_eval()
+        except Exception as e:
+            logging.warning(f"启动时评测检查失败: {e}")
+
+        while True:
+            now = _dt.now()
+            target = now.replace(hour=4, minute=0, second=0, microsecond=0)
+            if now >= target:
+                from datetime import timedelta
+                target += timedelta(days=1)
+            wait_seconds = (target - now).total_seconds()
+            logging.info(f"[auto-eval] 下次每日评测: {wait_seconds/3600:.1f} 小时后")
+            await asyncio.sleep(wait_seconds)
+
+            try:
+                logging.info("=== 每日自动评测开始 ===")
+
+                # Step 1: 跑每日评测
+                from routers.analysis.eval_system import run_daily_eval
+                eval_result = await run_daily_eval()
+                logging.info(f"每日评测完成: avg={eval_result.get('avg_score')}")
+
+                # Step 2: 检查并晋升 Shadow
+                from shadow_mode import auto_promote_shadows
+                promoted = await auto_promote_shadows()
+                logging.info(f"Shadow 晋升: {len(promoted)} 个")
+
+                # Step 3: 自动生成 Eval 用例
+                from auto_eval_generator import auto_generate_eval_cases
+                gen_result = auto_generate_eval_cases()
+                logging.info(f"Eval 用例生成: {gen_result}")
+
+                logging.info("=== 每日自动评测完成 ===")
+            except Exception as e:
+                logging.error(f"每日评测失败: {e}")
+    except Exception as e:
+        logging.warning(f"自动评测任务异常: {e}")
 
 
 async def _auto_daily_report():
