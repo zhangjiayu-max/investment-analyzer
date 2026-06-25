@@ -403,11 +403,34 @@ async function loadMessageEvalStatus(messageId) {
 
 async function handleNewConversation() {
   try {
+    // 去重：如果已有未发消息的空会话，直接选中
+    const emptyConv = conversations.value.find(c =>
+      !c.title || c.title === '新对话' || c.title === '新对话'
+    )
+    // 通过API查找最近的空会话
+    const { data: recentConvs } = await listConversations({ page: 1, page_size: 5 })
+    const recentEmpty = (recentConvs?.conversations || []).find(c =>
+      c.title === '新对话' && (!c.last_message_at || c.last_message_at === c.created_at)
+    )
+    if (recentEmpty) {
+      selectConversation(recentEmpty)
+      showToast('已切换到未开始的对话', 'info')
+      return
+    }
+
     const { data } = await createConversation({ title: '新对话' })
     showToast('新对话已创建', 'success')
     await loadConversations()
-    const conv = conversations.value.find(c => c.id === data.conversation_id)
-    if (conv) selectConversation(conv)
+    // 等待列表更新后再选中
+    nextTick(() => {
+      const conv = conversations.value.find(c => c.id === data.conversation_id)
+      if (conv) {
+        selectConversation(conv)
+      } else {
+        // fallback: 选第一个
+        if (conversations.value.length > 0) selectConversation(conversations.value[0])
+      }
+    })
   } catch (e) {
     console.error('Failed to create conversation:', e)
     showToast('创建对话失败', 'error')
