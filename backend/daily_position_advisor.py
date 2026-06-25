@@ -161,6 +161,18 @@ def run_daily_position_advice(user_id: str = "default", trigger_type: str = "man
                 # dedupe 命中，仍加入返回列表
                 saved_signals.append(s)
 
+        # ── 行业轮动扫描（独立于持仓，扫描全市场板块）──
+        rotation_signals = _scan_sector_rotation(user_id, run_id, today, cfg)
+        for s in rotation_signals:
+            signal_id = create_signal(s)
+            if signal_id:
+                s["id"] = signal_id
+                saved_signals.append(s)
+                stats["total"] += 1
+                sev = s.get("severity", "info")
+                if sev in stats:
+                    stats[sev] += 1
+
         # watch 信号写入 portfolio_alerts 轻量提醒
         for s in saved_signals:
             if s.get("severity") == "watch" and s.get("id"):
@@ -719,6 +731,118 @@ def _make_signal(**kw) -> dict:
         "dedupe_key": kw["dedupe_key"],
         "next_step": kw.get("next_step", "none"),
     }
+
+
+def _scan_sector_rotation(user_id: str, run_id: int, today: str, cfg: dict) -> list[dict]:
+    """行业轮动扫描：基于估值数据库扫描板块机会，不依赖 akshare 实时接口。
+
+    触发条件：
+    1. 板块估值处于极度低估（<=10%分位）且不在用户持仓中 → "低估机会提醒"
+    2. 板块估值处于低估（<=20%分位）且不在用户持仓中 → "关注提醒"
+    """
+    signals = []
+    try:
+        conn = _get_conn()
+        try:
+            # 查询所有最新的估值数据
+            # current_value = 分位数, percentile = 估值指标值
+            rows = conn.execute("""
+                SELECT index_code, index_name, current_value, percentile,
+                       metric_type, snapshot_date
+                FROM index_valuations
+                WHERE id IN (
+                    SELECT MAX(id) FROM index_valuations GROUP BY index_code
+                )
+                AND current_value IS NOT NULL
+                ORDER BY current_value ASC
+            """).fetchall()
+        finally:
+            conn.close()
+
+        if not rows:
+            logger.warning("行业轮动扫描：index_valuations 表无数据")
+            return signals
+
+        # 获取用户持仓的行业关键词
+        holdings = list_holdings(user_id)
+        held_keywords = set()
+        for h in holdings:
+            name = h.get("fund_name", "") or ""
+            if (h.get("shares") or 0) <= 0:
+                continue
+            for kw in ["医药", "消费", "科技", "半导体", "新能源", "军工", "金融", "地产", "白酒", "光伏", "锂电", "芯片", "AI", "人工智能", "机器人", "汽车", "电力", "煤炭", "有色", "银行", "证券", "保险", "食品", "家电", "建材", "钢铁", "化工", "农业", "养殖", "医疗器械", "中药", "互联网", "传媒", "红利", "恒生", "港股"]:
+                if kw in name:
+                    held_keywords.add(kw)
+
+        logger.info(f"行业轮动扫描：{len(rows)} 个板块，持仓关键词: {held_keywords}")
+
+        for row in rows:
+            index_code = row[0] or ""
+            index_name = row[1] or ""
+            val_percentile = float(row[2] or 50)  # current_value = 分位数
+            val_metric = float(row[3] or 0)       # percentile = 估值指标值
+            metric_type = row[4] or ""
+            snapshot_date = row[5] or ""
+
+            # 检查用户是否已持有该行业
+            already_held = any(kw in index_name for kw in held_keywords)
+            if already_held:
+                continue
+
+            # 信号1：极度低估（<=10%分位）且不在持仓
+            if val_percentile <= 10:
+                signals.append(_make_signal(
+                    run_id=run_id, user_id=user_id, signal_date=today,
+                    signal_type="sector_rotation", action_type="watch",
+                    target_code=index_code, target_name=index_name,
+                    severity="watch", score=min(85, 60 + int((10 - val_percentile) * 2)),
+                    confidence="medium",
+                    score_detail={"估值分位": val_percentile, "指标值": val_metric, "指标类型": metric_type},
+                    summary=f"{index_name} 估值仅 {val_percentile:.1f}% 分位（极度低估），你未持有该行业，可关注相关基金",
+                    rationale=f"低估机会：{index_name} 估值 {metric_type}={val_metric:.2f}，处于历史 {val_percentile:.1f}% 分位。数据日期 {snapshot_date}。",
+                    evidence={"index_code": index_code, "percentile": val_percentile, "metric": val_metric, "metric_type": metric_type},
+                    dedupe_key=f"daily:{today}:sector_rotation:{index_code}",
+                ))
+
+            # 信号2：低估（<=20%分位）且有估值数据
+            elif val_percentile <= 20:
+                signals.append(_make_signal(
+                    run_id=run_id, user_id=user_id, signal_date=today,
+                    signal_type="sector_rotation", action_type="watch",
+                    target_code=index_code, target_name=index_name,
+                    severity="watch", score=min(70, 45 + int((20 - val_percentile) * 1.5)),
+                    confidence="low",
+                    score_detail={"估值分位": val_percentile, "指标值": val_metric, "指标类型": metric_type},
+                    summary=f"{index_name} 估值 {val_percentile:.1f}% 分位（低估），你未持有，可适当关注",
+                    rationale=f"低估信号：{index_name} 估值 {metric_type}={val_metric:.2f}，处于历史 {val_percentile:.1f}% 分位。",
+                    evidence={"index_code": index_code, "percentile": val_percentile, "metric": val_metric},
+                    dedupe_key=f"daily:{today}:sector_rotation:{index_code}",
+                ))
+
+        # 限制数量
+        signals.sort(key=lambda s: s.get("score", 0), reverse=True)
+        signals = signals[:5]
+        logger.info(f"行业轮动扫描完成：{len(signals)} 条信号")
+
+    except Exception as e:
+        logger.warning(f"行业轮动扫描失败: {e}", exc_info=True)
+
+    return signals
+
+
+def _get_board_valuation(board_name: str) -> dict | None:
+    """查询板块估值数据。"""
+    try:
+        val = get_latest_valuation("", board_name)
+        if val:
+            return {
+                "percentile": val.get("current_value", 0),
+                "pe": val.get("pe", 0),
+                "pb": val.get("pb", 0),
+            }
+    except Exception:
+        pass
+    return None
 
 
 def _query_industry_outlook(index_name: str, fund_name: str) -> tuple[float, str]:
