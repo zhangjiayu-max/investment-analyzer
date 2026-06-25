@@ -739,6 +739,8 @@ def _scan_sector_rotation(user_id: str, run_id: int, today: str, cfg: dict) -> l
     触发条件：
     1. 板块估值处于极度低估（<=10%分位）且不在用户持仓中 → "低估机会提醒"
     2. 板块估值处于低估（<=20%分位）且不在用户持仓中 → "关注提醒"
+
+    对于用户已持有的行业，在 summary 和 rationale 中追加"已持有"标注。
     """
     signals = []
     try:
@@ -763,16 +765,20 @@ def _scan_sector_rotation(user_id: str, run_id: int, today: str, cfg: dict) -> l
             logger.warning("行业轮动扫描：index_valuations 表无数据")
             return signals
 
-        # 获取用户持仓的行业关键词
+        # 获取用户持仓的行业关键词及盈亏信息
         holdings = list_holdings(user_id)
         held_keywords = set()
+        # 构建 {关键词: [(fund_name, profit_rate)]} 映射，用于标注已持有和盈亏
+        held_fund_map: dict[str, list[tuple[str, float]]] = {}
         for h in holdings:
             name = h.get("fund_name", "") or ""
             if (h.get("shares") or 0) <= 0:
                 continue
+            profit_rate = h.get("profit_rate", 0) or 0
             for kw in ["医药", "消费", "科技", "半导体", "新能源", "军工", "金融", "地产", "白酒", "光伏", "锂电", "芯片", "AI", "人工智能", "机器人", "汽车", "电力", "煤炭", "有色", "银行", "证券", "保险", "食品", "家电", "建材", "钢铁", "化工", "农业", "养殖", "医疗器械", "中药", "互联网", "传媒", "红利", "恒生", "港股"]:
                 if kw in name:
                     held_keywords.add(kw)
+                    held_fund_map.setdefault(kw, []).append((name, profit_rate))
 
         logger.info(f"行业轮动扫描：{len(rows)} 个板块，持仓关键词: {held_keywords}")
 
@@ -818,6 +824,24 @@ def _scan_sector_rotation(user_id: str, run_id: int, today: str, cfg: dict) -> l
                     evidence={"index_code": index_code, "percentile": val_percentile, "metric": val_metric},
                     dedupe_key=f"daily:{today}:sector_rotation:{index_code}",
                 ))
+
+        # ── 为生成的信号追加"已持有"标注 ──
+        # 即使信号未被 already_held 跳过，用户可能通过其他关键词持有相关行业基金
+        # 例如：信号行业为"中证医药"，用户持有"医疗健康"基金，关键词不完全匹配
+        # 因此对每条信号再次检查更广泛的关联
+        for sig in signals:
+            sig_index_name = sig.get("target_name", "") or ""
+            held_annotations = []
+            for kw, fund_list in held_fund_map.items():
+                # 检查持仓关键词是否出现在信号的行业名称中
+                if kw in sig_index_name:
+                    for fund_name, profit_rate in fund_list:
+                        profit_pct = profit_rate * 100 if profit_rate else 0
+                        held_annotations.append(f"你已持有{fund_name}，当前盈亏{profit_pct:+.1f}%")
+            if held_annotations:
+                annotation = "（" + "；".join(held_annotations) + "）"
+                sig["summary"] = sig["summary"] + annotation
+                sig["rationale"] = sig["rationale"] + annotation
 
         # 限制数量
         signals.sort(key=lambda s: s.get("score", 0), reverse=True)
