@@ -1350,8 +1350,8 @@ def orchestrate(query: str, history: list, rag_context: str = "", cancel_event: 
 
         # 没有工具调用 → 检查是否需要交叉审阅，然后给出最终回答
         if not msg.tool_calls:
-            # Phase B: 交叉审阅（仅 complex 且 >=2 个专家且存在分歧时触发）
-            if complexity == "complex" and len(specialist_results) >= 2 and not force_skip_cross_review and _detect_specialist_disagreement(specialist_results):
+            # Phase B: 交叉审阅（>=2 个专家时触发，不再要求 complexity==complex）
+            if len(specialist_results) >= 2 and not force_skip_cross_review and _detect_specialist_disagreement(specialist_results):
                 logger.info(f"进入交叉审阅阶段，{len(specialist_results)} 个专家参与")
                 peer_analyses = {sr["agent_key"]: sr["analysis"] for sr in specialist_results}
                 cross_review_results = []

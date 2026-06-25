@@ -371,31 +371,46 @@ def run_specialist(agent_key: str, query: str, context: str = "",
                 "content": result,
             })
 
-    # 如果循环结束还没拿到 answer，做最后一次总结
+    # 如果循环结束还没拿到 answer，用最后一次 LLM 回复的文本内容
     if not answer:
-        try:
-            llm_messages.append({
-                "role": "user",
-                "content": "请根据以上工具调用结果，给出你的专业分析。",
-            })
-            response = _call_llm(
-                caller=_caller,
-                model=MODEL,
-                messages=llm_messages,
-                temperature=get_config_float('llm.temperature_agent', 0.3),
-                max_tokens=get_config_int('llm.max_tokens_agent', 8000),
-            )
-            answer = response.choices[0].message.content or ""
-        except Exception:
-            answer = "分析过程较长，请参考以上工具调用结果。"
+        # 先检查最后一条 assistant 消息是否有文本内容
+        for m in reversed(llm_messages):
+            if m.get("role") == "assistant" and m.get("content") and not m.get("tool_calls"):
+                answer = m["content"]
+                break
+        if not answer:
+            # 强制要求 LLM 总结
+            try:
+                llm_messages.append({
+                    "role": "user",
+                    "content": "请根据以上工具调用结果，给出你的专业分析。",
+                })
+                response = _call_llm(
+                    caller=_caller,
+                    model=MODEL,
+                    messages=llm_messages,
+                    temperature=get_config_float('llm.temperature_agent', 0.3),
+                    max_tokens=get_config_int('llm.max_tokens_agent', 8000),
+                )
+                answer = response.choices[0].message.content or ""
+            except Exception:
+                # 最后兜底：拼接工具结果摘要
+                tool_summaries = []
+                for tc in tool_calls_log:
+                    preview = tc.get("result_preview", "")
+                    if preview and preview != "（无数据返回）":
+                        tool_summaries.append(preview[:500])
+                answer = "\n\n".join(tool_summaries) if tool_summaries else "分析过程遇到问题，请重试。"
 
     duration_ms = int((time.time() - start_time) * 1000)
 
     # 清理：如果 answer 中仍包含文本格式 tool_call，去除之
     if answer and '<tool_call>' in answer:
-        answer = re.sub(r'<tool_call>.*?</tool_call>', '', answer, flags=re.DOTALL).strip()
-        if not answer:
-            answer = "分析完成，请参考以上工具调用结果。"
+        cleaned = re.sub(r'<tool_call>.*?</tool_call>', '', answer, flags=re.DOTALL).strip()
+        # 只在清理后内容明显变短时才替换（避免误删有效内容）
+        if cleaned and len(cleaned) > len(answer) * 0.3:
+            answer = cleaned
+        # 如果清理后为空，保留原文（不替换为废话）
 
     return {
         "agent_key": agent_key,

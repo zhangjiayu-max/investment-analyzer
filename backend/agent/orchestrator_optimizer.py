@@ -27,8 +27,8 @@ class OrchestratorOptimizer:
 
         跳过条件：
         1. 专家数量 < 2
-        2. 所有专家方向一致
-        3. 简单任务
+        2. 简单任务
+        注意：方向一致不再跳过，因为多角度分析仍有价值
         """
         # 条件1：专家数量不足
         if len(specialist_results) < 2:
@@ -38,23 +38,8 @@ class OrchestratorOptimizer:
         if complexity in ("simple", "chat"):
             return True
 
-        # 条件3：快速检查专家方向是否一致
-        directions = set()
-        for sr in specialist_results:
-            analysis = sr.get("analysis", "").lower()
-            # 快速关键词检测
-            bullish_count = sum(1 for kw in ["低估", "机会", "建议买", "加仓", "看好"] if kw in analysis)
-            bearish_count = sum(1 for kw in ["高估", "风险高", "减仓", "回避", "谨慎"] if kw in analysis)
-
-            if bullish_count > bearish_count + 1:
-                directions.add("bullish")
-            elif bearish_count > bullish_count + 1:
-                directions.add("bearish")
-            else:
-                directions.add("neutral")
-
-        # 如果只有一种方向，跳过交叉审阅
-        return len(directions) == 1
+        # 只要有 >=2 个专家，都做交叉审阅
+        return False
 
     @staticmethod
     def should_skip_arbitration(specialist_results: list, complexity: str) -> bool:
