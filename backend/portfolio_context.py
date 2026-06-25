@@ -100,6 +100,36 @@ def build_portfolio_context(user_id: str = "default") -> str:
         lines.append("")
         lines.append(f"> 📅 持仓数据最后更新: {_dt.now().strftime('%Y-%m-%d %H:%M')}。净值可能有延迟，以基金公司公布为准。")
 
+        # ── 最近交易记录（10条）──
+        try:
+            from db._conn import _get_conn as _get_conn_inner
+            _conn = _get_conn_inner()
+            _trades = _conn.execute("""
+                SELECT transaction_date, fund_code, fund_name, transaction_type, amount, shares, status
+                FROM portfolio_transactions
+                WHERE user_id = ? AND status IN ('confirmed', 'pending')
+                ORDER BY transaction_date DESC, created_at DESC
+                LIMIT 10
+            """, (user_id,)).fetchall()
+            _conn.close()
+            if _trades:
+                lines.append("")
+                lines.append("### 最近交易记录")
+                lines.append("| 日期 | 基金 | 操作 | 金额 | 份额 | 状态 |")
+                lines.append("|------|------|------|------|------|------|")
+                for _t in _trades:
+                    _td = dict(_t) if not isinstance(_t, dict) else _t
+                    _type_label = {"buy": "买入", "sell": "卖出", "dividend": "分红"}.get(_td.get("transaction_type", ""), _td.get("transaction_type", ""))
+                    _status_label = {"confirmed": "已确认", "pending": "待确认"}.get(_td.get("status", ""), _td.get("status", ""))
+                    _name = _td.get("fund_name") or _td.get("fund_code", "未知")
+                    _amt = _td.get("amount", 0) or 0
+                    _shares = _td.get("shares", 0) or 0
+                    lines.append(f"| {_td.get('transaction_date', '')} | {_name} | {_type_label} | ¥{_amt:,.0f} | {_shares:,.0f} | {_status_label} |")
+                lines.append("")
+                lines.append("> ⚠️ 请务必结合上述交易记录分析。用户近期已执行的操作（尤其是已卖出的基金）不应再建议卖出。")
+        except Exception as _te:
+            logger.debug(f"交易记录注入失败: {_te}")
+
         return "\n".join(lines)
 
     except Exception as e:
