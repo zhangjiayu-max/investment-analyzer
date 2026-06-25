@@ -218,7 +218,7 @@ def _inject_kyc_profile(system_content: str, agent: dict) -> str:
 
 
 def run_specialist(agent_key: str, query: str, context: str = "",
-                   prebuilt_context: str = "") -> dict:
+                   prebuilt_context: str = "", model: str = None) -> dict:
     """
     运行单个专家 Agent。
 
@@ -234,6 +234,7 @@ def run_specialist(agent_key: str, query: str, context: str = "",
     agent = load_specialist_agents()[agent_key]
     start_time = time.time()
     _caller = f"specialist:{agent_key}"
+    _model = model or MODEL  # 增强6: 成本路由 — 支持外部传入模型
 
     # 只给该专家分配它的专属工具
     agent_tools = [t for t in TOOLS if t["function"]["name"] in agent["tools"]]
@@ -289,7 +290,7 @@ def run_specialist(agent_key: str, query: str, context: str = "",
         try:
             response = _call_llm(
                 caller=_caller,
-                model=MODEL,
+                model=_model,
                 messages=llm_messages,
                 tools=agent_tools,
                 tool_choice="auto",
@@ -304,7 +305,7 @@ def run_specialist(agent_key: str, query: str, context: str = "",
                 # 回退：不带 tools 调用
                 response = _call_llm(
                     caller=_caller,
-                    model=MODEL,
+                    model=_model,
                     messages=llm_messages,
                     temperature=get_config_float('llm.temperature_agent', 0.3),
                     max_tokens=get_config_int('llm.max_tokens_agent', 8000),
@@ -387,7 +388,7 @@ def run_specialist(agent_key: str, query: str, context: str = "",
                 })
                 response = _call_llm(
                     caller=_caller,
-                    model=MODEL,
+                    model=_model,
                     messages=llm_messages,
                     temperature=get_config_float('llm.temperature_agent', 0.3),
                     max_tokens=get_config_int('llm.max_tokens_agent', 8000),
@@ -423,7 +424,8 @@ def run_specialist(agent_key: str, query: str, context: str = "",
 
 
 def run_specialist_with_context(agent_key: str, query: str, peer_analyses: dict,
-                                max_turns: int = 2, prebuilt_context: str = "") -> dict:
+                                max_turns: int = 2, prebuilt_context: str = "",
+                                model: str = None) -> dict:
     """
     交叉审阅模式：专家拿到其他专家的分析结果后进行二次审阅。
 
@@ -442,6 +444,7 @@ def run_specialist_with_context(agent_key: str, query: str, peer_analyses: dict,
     agent = load_specialist_agents()[agent_key]
     start_time = time.time()
     _caller = f"specialist:{agent_key}:cross_review"
+    _model = model or MODEL
 
     agent_tools = [t for t in TOOLS if t["function"]["name"] in agent["tools"]]
 
@@ -507,7 +510,7 @@ def run_specialist_with_context(agent_key: str, query: str, peer_analyses: dict,
         try:
             response = _call_llm(
                 caller=_caller,
-                model=MODEL,
+                model=_model,
                 messages=llm_messages,
                 tools=agent_tools,
                 tool_choice="auto",
@@ -520,7 +523,7 @@ def run_specialist_with_context(agent_key: str, query: str, peer_analyses: dict,
             if any(kw in err_msg.lower() for kw in ["tool", "function", "reasoning", "thinking"]):
                 response = _call_llm(
                     caller=_caller,
-                    model=MODEL,
+                    model=_model,
                     messages=llm_messages,
                     temperature=get_config_float('llm.temperature_agent', 0.3),
                     max_tokens=get_config_int('llm.max_tokens_agent', 8000),
@@ -588,7 +591,7 @@ def run_specialist_with_context(agent_key: str, query: str, peer_analyses: dict,
             })
             response = _call_llm(
                 caller=_caller,
-                model=MODEL,
+                model=_model,
                 messages=llm_messages,
                 temperature=get_config_float('llm.temperature_agent', 0.3),
                 max_tokens=get_config_int('llm.max_tokens_agent', 8000),

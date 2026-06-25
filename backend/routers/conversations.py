@@ -1723,3 +1723,21 @@ async def export_conversation(conv_id: int, format: str = "markdown"):
         media_type="text/markdown; charset=utf-8",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
+
+
+# ── 增强5: 人在回路 — 确认端点 ──────────────────────────────
+
+@router.post("/api/conversations/{conv_id}/confirm")
+async def handle_confirm(conv_id: int, request: Request):
+    """处理用户在 Human-in-the-Loop 确认节点的选择。
+
+    请求体：{"confirm_id": "confirm_xxx", "choice": "continue"}
+    """
+    from agent.orchestrator import resolve_confirm
+    body = await request.json()
+    confirm_id = body.get("confirm_id", "")
+    choice = body.get("choice", "continue")
+    if not confirm_id:
+        raise HTTPException(400, "缺少 confirm_id")
+    resolve_confirm(confirm_id, choice)
+    return {"ok": True, "confirm_id": confirm_id, "choice": choice}

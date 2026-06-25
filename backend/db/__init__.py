@@ -881,6 +881,39 @@ def init_db():
     conn.execute("CREATE INDEX IF NOT EXISTS idx_kb_category ON knowledge_base(category)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_kb_subcategory ON knowledge_base(subcategory)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_kb_importance ON knowledge_base(importance)")
+
+    # ── 编排检查点表（增强1：状态机检查点）──
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS orchestration_checkpoints (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            conv_id INTEGER NOT NULL,
+            message_id INTEGER,
+            phase TEXT NOT NULL,
+            state_json TEXT NOT NULL,
+            created_at TEXT DEFAULT (datetime('now','localtime')),
+            UNIQUE(conv_id, message_id, phase)
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_checkpoint_conv ON orchestration_checkpoints(conv_id, message_id)")
+
+    # ── 实体记忆表（增强4：实体记忆）──
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS entity_memory (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            entity_name TEXT NOT NULL,
+            entity_type TEXT NOT NULL,
+            entity_code TEXT DEFAULT '',
+            attribute TEXT NOT NULL,
+            old_value TEXT DEFAULT '',
+            new_value TEXT NOT NULL,
+            source TEXT DEFAULT 'analysis',
+            source_id INTEGER,
+            snapshot_date TEXT NOT NULL,
+            created_at TEXT DEFAULT (datetime('now','localtime'))
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_entity_memory_name ON entity_memory(entity_name)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_entity_memory_date ON entity_memory(snapshot_date)")
     _add_column_if_not_exists(conn, "knowledge_base", "atom_type", "TEXT DEFAULT ''")
     _add_column_if_not_exists(conn, "knowledge_base", "evidence_level", "TEXT DEFAULT ''")
     _add_column_if_not_exists(conn, "knowledge_base", "as_of_date", "TEXT DEFAULT ''")
@@ -897,6 +930,10 @@ def init_db():
         ("arbitration_complexity", "complex", "仲裁触发的最低复杂度"),
         ("max_turns", "6", "orchestrator 最大轮次"),
         ("max_tool_timeout", "30", "工具调用超时秒数"),
+        ("checkpoint_enabled", "true", "是否启用检查点存档"),
+        ("dynamic_spawn_enabled", "true", "是否启用动态Agent选择"),
+        ("human_in_loop_enabled", "true", "是否启用人在回路确认"),
+        ("human_in_loop_timeout", "30", "人在回路确认超时秒数"),
     ]
     for key, value, desc in _default_orchestration_config:
         conn.execute("""

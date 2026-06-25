@@ -197,6 +197,96 @@ def _build_change_context(user_id: str = "default") -> str:
         return "暂无变化追踪数据。"
 
 
+def _build_entity_memory_context(limit: int = 10) -> str:
+    """增强4: 获取近期实体属性变化，注入到上下文中。"""
+    try:
+        from db._conn import _get_conn
+        conn = _get_conn()
+        rows = conn.execute("""
+            SELECT entity_name, entity_type, attribute, old_value, new_value, snapshot_date
+            FROM entity_memory
+            ORDER BY created_at DESC
+            LIMIT ?
+        """, (limit,)).fetchall()
+        conn.close()
+        if not rows:
+            return ""
+
+        # 按实体聚合
+        entities = {}
+        for r in rows:
+            name = r["entity_name"]
+            entities.setdefault(name, []).append(dict(r))
+
+        lines = ["### 近期标的属性变化"]
+        for name, attr_changes in entities.items():
+            latest = attr_changes[0]
+            old_val = latest.get("old_value", "")
+            new_val = latest.get("new_value", "")
+            if old_val and old_val != new_val:
+                lines.append(f"- **{name}**：{latest['attribute']} {old_val} → {new_val}（{latest['snapshot_date']}）")
+            else:
+                lines.append(f"- **{name}**：{latest['attribute']} = {new_val}（{latest['snapshot_date']}）")
+
+        return "\n".join(lines)
+    except Exception:
+        return ""
+
+
+def record_entity_snapshots(analysis_text: str, source: str = "analysis", source_id: int = 0):
+    """增强4: 从分析文本中提取实体属性变化并记录（仅在值变化时记录）。"""
+    try:
+        from db._conn import _get_conn
+        from datetime import datetime
+
+        # 提取实体属性（关键词匹配模式）
+        entity_patterns = [
+            # 指数估值
+            (r'(沪深300|中证500|创业板|恒生科技|纳斯达克|标普500|中证红利|红利指数)\s*(?:PE|pe|市盈率)\s*(?:分位|百分位)?\s*[：:为是]?\s*(\d+\.?\d*%?)', 'index', 'pe_percentile'),
+            (r'(沪深300|中证500|创业板|恒生科技|纳斯达克|标普500|中证红利|红利指数)\s*(?:PB|pb|市净率)\s*(?:分位|百分位)?\s*[：:为是]?\s*(\d+\.?\d*%?)', 'index', 'pb_percentile'),
+            # 估值水平
+            (r'(沪深300|中证500|创业板|恒生科技|纳斯达克|标普500)\s*(?:估值|水平)\s*[：:为是]?\s*(低估|合理|高估|极度低估|极度高估)', 'index', 'valuation_level'),
+            # 债市温度
+            (r'债市温度\s*[：:为是]?\s*(\d+\.?\d*)', 'market', 'bond_temperature'),
+        ]
+
+        conn = _get_conn()
+        snapshot_date = datetime.now().strftime("%Y-%m-%d")
+
+        for pattern, entity_type, attribute in entity_patterns:
+            matches = re.findall(pattern, analysis_text)
+            for match in matches:
+                if isinstance(match, tuple):
+                    entity_name = match[0]
+                    new_value = match[1]
+                else:
+                    entity_name = "债市"
+                    new_value = match
+
+                # 查询上次记录
+                last = conn.execute("""
+                    SELECT new_value FROM entity_memory
+                    WHERE entity_name = ? AND attribute = ?
+                    ORDER BY id DESC LIMIT 1
+                """, (entity_name, attribute)).fetchone()
+
+                old_value = last["new_value"] if last else ""
+
+                # 属性变化了才记录
+                if new_value != old_value:
+                    conn.execute("""
+                        INSERT INTO entity_memory
+                        (entity_name, entity_type, attribute, old_value, new_value, source, source_id, snapshot_date)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """, (entity_name, entity_type, attribute, old_value, new_value, source, source_id, snapshot_date))
+
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning(f"记录实体记忆失败: {e}")
+
+
 def _compose_prompt_context(sections: dict[str, str], current_user_message: str, token_budget: int) -> str:
     ordered = [
         ("系统原则", "你是谨慎的个人理财助手。AI 只提供建议，不直接执行交易；涉及买卖必须提醒用户确认。"),
@@ -207,6 +297,7 @@ def _compose_prompt_context(sections: dict[str, str], current_user_message: str,
         ("最近对话", sections.get("recent_messages", "")),
         ("近期决策", sections.get("decision_context", "")),
         ("关注列表", sections.get("watchlist_context", "")),
+        ("近期标的变化", sections.get("entity_memory", "")),  # 增强4: 实体记忆
         ("知识库证据", sections.get("rag_context", "")),
         ("缺失信息", sections.get("missing_context", "")),
         ("上下文冲突", sections.get("conflicts", "")),
@@ -258,6 +349,7 @@ def build_conversation_context(
         "user_profile_context": _build_user_profile_context(user_id=user_id),
         "rag_context": rag_context or "暂无额外知识库证据。",
         "change_context": _build_change_context(user_id=user_id),
+        "entity_memory": _build_entity_memory_context(),  # 增强4: 实体记忆
     }
     sections["missing_context"] = _build_missing_context(scenario_type, sections)
 
