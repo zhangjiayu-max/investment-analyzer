@@ -273,8 +273,13 @@ def _generate_signals(**kw) -> list[dict]:
         if suggested_amount > max_cash_use:
             suggested_amount = max_cash_use
 
-        # 评分
-        score = _calc_signal_score(drop_pct * 100, val_percentile, position_pct, cash_pct)
+        # 评分（新6维度）
+        profit_rate = kw.get("profit_rate", 0) or 0
+        industry_score, industry_summary = _query_industry_outlook(val_name, fund_name)
+        score, confidence, score_detail = _calc_signal_score(
+            drop_pct * 100, val_percentile, position_pct, cash_pct,
+            profit_rate=profit_rate, industry_score=industry_score,
+        )
 
         # 风险降级
         severity = "actionable" if score >= 60 else "watch"
@@ -312,7 +317,8 @@ def _generate_signals(**kw) -> list[dict]:
             run_id=run_id, user_id=user_id, signal_date=today,
             signal_type="dca_add", action_type="dca",
             target_code=fund_code, target_name=fund_name,
-            severity=severity, score=score,
+            severity=severity, score=score, confidence=confidence,
+            score_detail=score_detail,
             suggested_amount=round(suggested_amount, 2) if suggested_amount else None,
             suggested_ratio=None,
             summary=_dca_summary(fund_name, drop_pct * 100, step, suggested_amount, val_percentile),
@@ -327,6 +333,9 @@ def _generate_signals(**kw) -> list[dict]:
                 "cash_pct": round(cash_pct, 1),
                 "recent_buy_count": recent_buy_count,
                 "is_theme": is_theme,
+                "profit_rate": round(profit_rate * 100, 2),
+                "industry_score": round(industry_score, 1),
+                "industry_summary": industry_summary,
             },
             risks={"notes": risk_notes} if risk_notes else {},
             source_snapshot={
@@ -341,7 +350,14 @@ def _generate_signals(**kw) -> list[dict]:
 
     # ── 减仓信号：估值高 + 盈利 ──
     if val_percentile is not None and val_percentile >= reduce_val_min and kw["profit_rate"] > 0:
-        score = 50 + min((val_percentile - reduce_val_min) / (100 - reduce_val_min) * 30, 30)
+        industry_score, industry_summary = _query_industry_outlook(val_name, fund_name)
+        profit_rate = kw.get("profit_rate", 0) or 0
+        score, confidence, score_detail = _calc_signal_score(
+            0, val_percentile, position_pct, cash_pct,
+            profit_rate=profit_rate, industry_score=industry_score,
+        )
+        # 减仓基准分至少50
+        score = max(score, 50 + min((val_percentile - reduce_val_min) / (100 - reduce_val_min) * 30, 30))
         severity = "actionable" if score >= 60 else "watch"
 
         # 仓位超限加大减仓力度
@@ -355,7 +371,8 @@ def _generate_signals(**kw) -> list[dict]:
             run_id=run_id, user_id=user_id, signal_date=today,
             signal_type="reduce_watch", action_type="reduce",
             target_code=fund_code, target_name=fund_name,
-            severity=severity, score=score,
+            severity=severity, score=score, confidence=confidence,
+            score_detail=score_detail,
             suggested_amount=None,
             suggested_ratio=0.1,
             summary=f"{fund_name} 估值偏高（{val_percentile:.0f}%分位），盈利 {kw['profit_rate']*100:.1f}%，建议复核减仓 {reduce_pct}",
@@ -586,19 +603,84 @@ def _is_theme_fund(fund_name: str, category: str) -> bool:
     return False
 
 
-def _calc_signal_score(drop_pct: float, val_percentile: float | None, position_pct: float, cash_pct: float) -> int:
-    """信号评分 0-100。"""
+def _calc_signal_score(
+    drop_pct: float,
+    val_percentile: float | None,
+    position_pct: float,
+    cash_pct: float,
+    profit_rate: float = 0,
+    industry_score: float = 0,
+) -> tuple[int, str, dict]:
+    """信号评分 0-100 + 置信度 + 评分明细。
+
+    维度:
+      1. 跌幅 (0-35)
+      2. 估值优势 (0-25)
+      3. 仓位空间 (0-15)
+      4. 流动性 (0-10)
+      5. 持仓盈亏修正 (-15 ~ +10)
+      6. 行业前景+政策 (0-15)
+    """
+    detail = {}
     score = 0
-    # 跌幅（0-40分）
-    score += min(drop_pct / 12 * 40, 40) if drop_pct else 0
-    # 估值优势（0-30分）
+
+    # 1. 跌幅（0-35分）
+    s1 = min(drop_pct / 12 * 35, 35) if drop_pct else 0
+    detail["跌幅"] = round(s1, 1)
+    score += s1
+
+    # 2. 估值优势（0-25分）
+    s2 = 0
     if val_percentile is not None and val_percentile <= 35:
-        score += max(0, (35 - val_percentile) / 35 * 30)
-    # 仓位空间（0-20分）
-    score += max(0, (15 - position_pct) / 15 * 20) if position_pct else 10
-    # 流动性（0-10分）
-    score += min(cash_pct / 15 * 10, 10)
-    return min(100, round(score))
+        s2 = max(0, (35 - val_percentile) / 35 * 25)
+    detail["估值"] = round(s2, 1)
+    score += s2
+
+    # 3. 仓位空间（0-15分）
+    s3 = max(0, (15 - position_pct) / 15 * 15) if position_pct else 8
+    detail["仓位"] = round(s3, 1)
+    score += s3
+
+    # 4. 流动性（0-10分）
+    s4 = min(cash_pct / 15 * 10, 10)
+    detail["现金"] = round(s4, 1)
+    score += s4
+
+    # 5. 持仓盈亏修正（-15 ~ +10）
+    #    亏损大 → 谨慎加仓（-分），盈利好 → 适度加分
+    s5 = 0
+    if profit_rate < -0.20:
+        s5 = -15  # 亏20%以上，极度谨慎
+    elif profit_rate < -0.10:
+        s5 = -10  # 亏10-20%
+    elif profit_rate < -0.05:
+        s5 = -5   # 亏5-10%
+    elif profit_rate > 0.15:
+        s5 = 10   # 盈利15%+，趋势确认
+    elif profit_rate > 0.05:
+        s5 = 5    # 盈利5-15%
+    detail["盈亏修正"] = s5
+    score += s5
+
+    # 6. 行业前景+政策（0-15分）
+    #    industry_score 由 _query_industry_outlook 返回 0-100
+    s6 = industry_score / 100 * 15
+    detail["行业前景"] = round(s6, 1)
+    score += s6
+
+    final = min(100, max(0, round(score)))
+
+    # 置信度判定
+    if final >= 70 and s5 >= 0 and s6 >= 8:
+        confidence = "high"
+    elif final >= 55 and s5 >= -10:
+        confidence = "medium"
+    elif final >= 65:
+        confidence = "medium"  # 高分但有风险因素，仍给 medium
+    else:
+        confidence = "low"
+
+    return final, confidence, detail
 
 
 def total_assets_ratio(kw: dict) -> float:
@@ -625,6 +707,8 @@ def _make_signal(**kw) -> dict:
         "target_name": kw["target_name"],
         "severity": kw["severity"],
         "score": kw["score"],
+        "confidence": kw.get("confidence", "low"),
+        "score_detail": kw.get("score_detail", {}),
         "suggested_amount": kw.get("suggested_amount"),
         "suggested_ratio": kw.get("suggested_ratio"),
         "summary": kw["summary"],
@@ -635,6 +719,80 @@ def _make_signal(**kw) -> dict:
         "dedupe_key": kw["dedupe_key"],
         "next_step": kw.get("next_step", "none"),
     }
+
+
+def _query_industry_outlook(index_name: str, fund_name: str) -> tuple[float, str]:
+    """查询行业前景评分（0-100）+ 摘要。
+
+    策略：优先用 akshare 查行业板块涨跌，再用 LLM 补充政策判断。
+    降级：akshare 超时则用估值分位近似。
+    """
+    score = 50  # 默认中性
+    summary = ""
+
+    # 1. 尝试 akshare 行业板块数据
+    try:
+        import akshare as ak
+        # 行业板块涨跌幅（近5日）
+        df = ak.stock_board_industry_name_em()
+        if df is not None and not df.empty:
+            # 匹配行业
+            keywords = [index_name, fund_name]
+            matched = None
+            for kw in keywords:
+                if not kw:
+                    continue
+                for _, row in df.iterrows():
+                    board = str(row.get("板块名称", ""))
+                    if kw in board or board in kw:
+                        matched = row
+                        break
+                if matched is not None:
+                    break
+
+            if matched is not None:
+                change_pct = float(matched.get("涨跌幅", 0) or 0)
+                # 涨跌幅映射到 0-100
+                if change_pct > 3:
+                    score = 85
+                elif change_pct > 1:
+                    score = 70
+                elif change_pct > 0:
+                    score = 60
+                elif change_pct > -1:
+                    score = 45
+                elif change_pct > -3:
+                    score = 30
+                else:
+                    score = 15
+                summary = f"行业板块近{'日' if True else '期'}涨跌幅 {change_pct:+.2f}%"
+    except Exception as e:
+        logger.debug(f"akshare 行业板块查询失败: {e}")
+
+    # 2. 用 LLM 补充政策判断（仅当有 index_name 时）
+    if index_name:
+        try:
+            from llm_service import _call_llm
+            resp = _call_llm(
+                caller="daily_advisor_industry",
+                model=None,
+                messages=[{"role": "user", "content": f"用一句话评价{index_name}行业当前前景（政策利好/中性/利空），并给出0-100评分。格式：评分|说明"}],
+                temperature=0.3,
+                max_tokens=200,
+            )
+            text = resp.choices[0].message.content or ""
+            if "|" in text:
+                parts = text.split("|", 1)
+                try:
+                    llm_score = float(parts[0].strip())
+                    score = (score + llm_score) / 2  # 取均值
+                except ValueError:
+                    pass
+                summary = f"{summary}; {parts[1].strip()}" if summary else parts[1].strip()
+        except Exception as e:
+            logger.debug(f"LLM 行业前景查询失败: {e}")
+
+    return min(100, max(0, score)), summary
 
 
 def _create_candidate_from_signal(signal: dict, user_id: str):
@@ -651,7 +809,7 @@ def _create_candidate_from_signal(signal: dict, user_id: str):
             "summary": signal["summary"],
             "rationale": signal["rationale"],
             "suggested_amount": signal.get("suggested_amount"),
-            "confidence": "medium" if signal["score"] >= 70 else "low",
+            "confidence": signal.get("confidence", "medium" if signal["score"] >= 70 else "low"),
             "evidence": signal.get("evidence", {}),
             "risk": signal.get("risks", {}),
             "source_snapshot": signal.get("source_snapshot", {}),

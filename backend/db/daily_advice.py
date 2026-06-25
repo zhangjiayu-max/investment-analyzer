@@ -148,10 +148,11 @@ def create_signal(signal: dict) -> int | None:
             """INSERT OR IGNORE INTO daily_position_signals
                (run_id, user_id, signal_date, signal_type, action_type,
                 target_type, target_code, target_name, severity, score,
+                confidence, score_detail_json,
                 suggested_amount, suggested_ratio, summary, rationale,
                 evidence_json, risk_json, source_snapshot_json,
                 dedupe_key, status)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 signal["run_id"],
                 signal.get("user_id", "default"),
@@ -163,6 +164,8 @@ def create_signal(signal: dict) -> int | None:
                 signal.get("target_name", ""),
                 signal.get("severity", "info"),
                 signal.get("score", 0),
+                signal.get("confidence", "low"),
+                json.dumps(signal.get("score_detail", {}), ensure_ascii=False),
                 signal.get("suggested_amount"),
                 signal.get("suggested_ratio"),
                 signal["summary"],
