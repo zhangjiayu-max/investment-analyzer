@@ -402,6 +402,16 @@ async def _auto_daily_eval():
                 gen_result = auto_generate_eval_cases()
                 logging.info(f"Eval 用例生成: {gen_result}")
 
+                # Step 4: 决策回顾自动生成（每周一）
+                try:
+                    from datetime import datetime as _dt
+                    if _dt.now().weekday() == 0:  # 周一
+                        from db.decisions import generate_weekly_decision_review
+                        review_result = generate_weekly_decision_review()
+                        logging.info(f"决策周回顾: {review_result}")
+                except Exception as de:
+                    logging.warning(f"决策回顾生成失败: {de}")
+
                 logging.info("=== 每日自动评测完成 ===")
             except Exception as e:
                 logging.error(f"每日评测失败: {e}")

@@ -2123,3 +2123,64 @@ def count_high_risk_reviews(decision_id: int) -> int:
         return row["cnt"] if row else 0
     finally:
         conn.close()
+
+
+def generate_weekly_decision_review() -> dict:
+    """生成每周决策回顾报告，返回统计数据。"""
+    conn = _get_conn()
+    try:
+        from datetime import datetime, timedelta
+        import json as _json
+        week_ago = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d %H:%M:%S")
+        two_weeks_ago = (datetime.now() - timedelta(days=14)).strftime("%Y-%m-%d %H:%M:%S")
+
+        stats = conn.execute("""
+            SELECT status, COUNT(*) as cnt FROM decision_records
+            WHERE created_at >= ? GROUP BY status
+        """, (week_ago,)).fetchall()
+        stat_map = {r["status"]: r["cnt"] for r in stats}
+
+        executed = conn.execute("""
+            SELECT d.id, d.target_name, d.summary, d.status,
+                   t.transaction_type, t.amount, t.confirmed_at
+            FROM decision_records d
+            LEFT JOIN portfolio_transactions t
+              ON t.fund_code = d.target_code
+              AND t.confirmed_at >= d.created_at
+              AND t.status = 'confirmed'
+            WHERE d.created_at >= ? AND d.status = 'executed'
+            ORDER BY d.created_at DESC LIMIT 20
+        """, (week_ago,)).fetchall()
+
+        expired = conn.execute("""
+            SELECT id, target_name, summary, created_at FROM decision_records
+            WHERE status = 'proposed' AND created_at < ?
+            ORDER BY created_at DESC LIMIT 10
+        """, (two_weeks_ago,)).fetchall()
+
+        total = sum(stat_map.values())
+        executed_count = stat_map.get("executed", 0)
+
+        report = {
+            "week_total": total,
+            "proposed": stat_map.get("proposed", 0),
+            "executed": executed_count,
+            "rejected": stat_map.get("rejected", 0),
+            "deferred": stat_map.get("deferred", 0),
+            "executed_details": [dict(r) for r in executed],
+            "expired_proposals": [dict(r) for r in expired],
+            "execution_rate": round(executed_count / total * 100, 1) if total > 0 else 0,
+        }
+
+        try:
+            conn.execute("""
+                INSERT INTO weekly_reports (report_type, report_date, content_json, created_at)
+                VALUES ('decision_review', date('now','localtime'), ?, datetime('now','localtime'))
+            """, (_json.dumps(report, ensure_ascii=False),))
+            conn.commit()
+        except Exception:
+            pass
+
+        return report
+    finally:
+        conn.close()
