@@ -554,8 +554,10 @@ async def send_message_api(conv_id: int, req: SendMessageRequest):
     msg_list = [{"role": m["role"], "content": m["content"]} for m in history]
 
     # 4. 调用 Orchestrator（多 Agent 协作）
+    trace_id = str(uuid.uuid4())[:12]
+    logger.info(f"[trace:{trace_id}] 非流式对话 {conv_id}: {req.content[:50]}...")
     try:
-        llm_result = orchestrate(req.content, msg_list, rag_context, conversation_id=conv_id)
+        llm_result = orchestrate(req.content, msg_list, rag_context, conversation_id=conv_id, trace_id=trace_id)
         answer = llm_result["answer"]
     except Exception as e:
         answer = f"AI 回复失败: {str(e)}"

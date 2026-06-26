@@ -65,6 +65,12 @@ DEFAULT_CONFIGS = [
     ('llm_cost.llm_judge_eval', 'false', 'LLM-as-Judge 评分', 'llm_cost'),
     ('llm_cost.root_cause_analyzer', 'false', '自动根因分析', 'llm_cost'),
     ('llm_cost.auto_shadow_mode', 'false', 'Shadow Mode 静默运行', 'llm_cost'),
+    # 第二轮降本新增开关（默认关闭，主链路已有规则兜底）
+    ('llm_cost.rag_query_rewrite', 'false', 'RAG 查询 LLM 重写（关闭走 jieba）', 'llm_cost'),
+    ('llm_cost.kyc_learning', 'false', 'KYC 画像自动学习', 'llm_cost'),
+    ('llm_cost.feedback_learning', 'false', '反馈画像自动学习', 'llm_cost'),
+    ('llm_cost.memory_summarize', 'false', '对话历史 LLM 压缩（关闭走截取回退）', 'llm_cost'),
+    ('llm_cost.daily_advisor_llm', 'false', '持仓信号 LLM 行业评分', 'llm_cost'),
 
     # 内容截断限制
     ('truncation.article_content', '8000', '文章内容截断长度', 'llm'),

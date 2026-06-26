@@ -4,7 +4,7 @@ import json
 import logging
 
 from llm_service import _call_llm, MODEL
-from db.config import get_config_int, get_config_float
+from db.config import get_config_int, get_config_float, get_config
 
 logger = logging.getLogger(__name__)
 
@@ -94,7 +94,11 @@ def update_user_profile_from_feedback(user_id: str, feedback_type: str,
     策略：
     - 每 5 次反馈或每次 negative 反馈时，调用 LLM 更新画像
     - 正面反馈积累到一定量后也触发更新
+
+    受 `llm_cost.feedback_learning` 开关控制，默认关闭。
     """
+    if get_config("llm_cost.feedback_learning", "false") != "true":
+        return
     from db import increment_feedback_count, get_user_profile, update_user_profile
 
     count = increment_feedback_count(user_id)

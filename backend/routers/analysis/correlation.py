@@ -249,7 +249,7 @@ async def _run_correlation_async(task_id: int, holdings: list, lookback_days: in
                 temperature=0.3,
                 max_tokens=get_config_int("llm.max_tokens_analysis", 8000),
             ))
-            llm_text = llm_result.get("content", "") if isinstance(llm_result, dict) else str(llm_result)
+            llm_text = llm_result.choices[0].message.content or ""
         except Exception as e:
             logger.warning(f"[corr] LLM总结失败: {e}")
             llm_text = ""

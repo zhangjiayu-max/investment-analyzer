@@ -207,10 +207,11 @@ async function searchTrace() {
   traceResult.value = null
   try {
     const { data } = await getTokenUsageTrace(traceInput.value.trim())
-    traceResult.value = data.items || []
+    // 后端返回聚合结构：{ trace_id, token_usage, tool_audit_logs, agent_runs, rag_logs }
+    traceResult.value = data || null
   } catch (e) {
     console.error('Failed to load trace:', e)
-    traceResult.value = []
+    traceResult.value = null
   } finally {
     traceLoading.value = false
   }
@@ -299,30 +300,69 @@ const weekCost = computed(() => costData.value.total_cost || 0)
 // 本月费用估算（按周费用 * 4.3）
 const monthCost = computed(() => (costData.value.total_cost || 0) * 4.3)
 
-// Trace 汇总
+// Trace 汇总（聚合 token_usage + tool_audit_logs + agent_runs + rag_logs）
 const traceSummary = computed(() => {
-  if (!traceResult.value || traceResult.value.length === 0) return null
+  if (!traceResult.value) return null
+  const t = traceResult.value
+  const tokenList = t.token_usage || []
   let totalTokens = 0
   let totalCost = 0
-  for (const r of traceResult.value) {
+  for (const r of tokenList) {
     totalTokens += r.total_tokens || 0
     totalCost += calcCost(r.model, r.prompt_tokens || 0, r.completion_tokens || 0)
   }
-  const first = traceResult.value[0]
-  const last = traceResult.value[traceResult.value.length - 1]
+  // 耗时：取所有事件的首末时间戳
+  const allTimes = []
+  for (const r of tokenList) if (r.created_at) allTimes.push(r.created_at)
+  for (const r of t.tool_audit_logs || []) if (r.created_at) allTimes.push(r.created_at)
+  for (const r of t.agent_runs || []) if (r.created_at) allTimes.push(r.created_at)
+  for (const r of t.rag_logs || []) if (r.created_at) allTimes.push(r.created_at)
   let duration = 0
-  if (first && last && first.created_at && last.created_at) {
-    const t1 = new Date(first.created_at.replace(' ', 'T'))
-    const t2 = new Date(last.created_at.replace(' ', 'T'))
-    duration = t2 - t1
+  if (allTimes.length >= 2) {
+    const ts = allTimes.map(s => new Date(s.replace(' ', 'T')).getTime()).sort((a, b) => a - b)
+    duration = ts[ts.length - 1] - ts[0]
   }
   return {
-    calls: traceResult.value.length,
+    token_calls: tokenList.length,
+    tool_calls: (t.tool_audit_logs || []).length,
+    agent_runs: (t.agent_runs || []).length,
+    rag_calls: (t.rag_logs || []).length,
     tokens: totalTokens,
     cost: totalCost,
     duration,
   }
 })
+
+// 统一事件流：把 4 类记录合并成按时间排序的时间线
+const traceEvents = computed(() => {
+  if (!traceResult.value) return []
+  const t = traceResult.value
+  const events = []
+  for (const r of t.token_usage || []) {
+    events.push({ kind: 'llm', time: r.created_at, data: r })
+  }
+  for (const r of t.tool_audit_logs || []) {
+    events.push({ kind: 'tool', time: r.created_at, data: r })
+  }
+  for (const r of t.agent_runs || []) {
+    events.push({ kind: 'agent', time: r.created_at, data: r })
+  }
+  for (const r of t.rag_logs || []) {
+    events.push({ kind: 'rag', time: r.created_at, data: r })
+  }
+  return events.sort((a, b) => {
+    const ta = a.time ? new Date(a.time.replace(' ', 'T')).getTime() : 0
+    const tb = b.time ? new Date(b.time.replace(' ', 'T')).getTime() : 0
+    return ta - tb
+  })
+})
+
+const EVENT_LABELS = {
+  llm: '🧠 LLM',
+  tool: '🔧 工具',
+  agent: '🎯 Agent',
+  rag: '📚 RAG',
+}
 
 // ── 分页 ──
 function pages() {
@@ -807,48 +847,78 @@ watch([detailDays], () => {
         </div>
 
         <!-- 空结果 -->
-        <div v-else-if="traceResult !== null && traceResult.length === 0" class="chart-empty">
+        <div v-else-if="traceResult === null" class="chart-empty">
+          输入 Trace ID 查询完整调用链路
+        </div>
+        <div v-else-if="traceEvents.length === 0" class="chart-empty">
           未找到该 Trace ID 对应的记录
         </div>
 
-        <!-- Trace 时间线 -->
-        <div v-else-if="traceResult && traceResult.length > 0" class="trace-timeline">
+        <!-- Trace 完整链路 -->
+        <div v-else class="trace-timeline">
           <div class="trace-header-info">
             <span class="trace-id-label">Trace ID:</span>
             <span class="trace-id-value">{{ traceInput }}</span>
           </div>
 
-          <div class="timeline-container">
-            <div v-for="(r, idx) in traceResult" :key="r.id" class="timeline-node">
-              <div class="timeline-dot" :style="{ background: modelColor(idx % MODEL_COLORS.length) }"></div>
-              <div v-if="idx < traceResult.length - 1" class="timeline-line"></div>
-              <div class="timeline-content">
-                <div class="timeline-time">{{ formatDateTime(r.created_at) }}</div>
-                <div class="timeline-body">
-                  <span class="timeline-caller">{{ callerLabel(r.caller || '') }}</span>
-                  <span class="timeline-model">{{ r.model }}</span>
-                  <span class="timeline-tokens">{{ (r.total_tokens || 0).toLocaleString() }} tokens</span>
-                  <span class="timeline-cost">{{ formatCost(calcCost(r.model, r.prompt_tokens || 0, r.completion_tokens || 0)) }}</span>
-                </div>
-                <div class="timeline-detail">
-                  Prompt: {{ (r.prompt_tokens || 0).toLocaleString() }} · Completion: {{ (r.completion_tokens || 0).toLocaleString() }}
-                </div>
-              </div>
-            </div>
-          </div>
-
-          <!-- 合计 -->
+          <!-- 汇总卡片 -->
           <div v-if="traceSummary" class="trace-summary">
-            <span class="trace-sum-item">合计: <strong>{{ traceSummary.calls }}</strong> 次调用</span>
+            <span class="trace-sum-item">🧠 LLM <strong>{{ traceSummary.token_calls }}</strong></span>
+            <span class="trace-sum-item">🔧 工具 <strong>{{ traceSummary.tool_calls }}</strong></span>
+            <span class="trace-sum-item">🎯 Agent <strong>{{ traceSummary.agent_runs }}</strong></span>
+            <span class="trace-sum-item">📚 RAG <strong>{{ traceSummary.rag_calls }}</strong></span>
             <span class="trace-sum-item"><strong>{{ traceSummary.tokens.toLocaleString() }}</strong> tokens</span>
             <span class="trace-sum-item">{{ formatCost(traceSummary.cost) }}</span>
             <span class="trace-sum-item" v-if="traceSummary.duration > 0">耗时 {{ formatDuration(traceSummary.duration) }}</span>
           </div>
-        </div>
 
-        <!-- 初始状态 -->
-        <div v-else class="chart-empty">
-          输入 Trace ID 查询完整调用链路
+          <div class="timeline-container">
+            <div v-for="(ev, idx) in traceEvents" :key="idx" class="timeline-node">
+              <div class="timeline-dot" :class="'dot-' + ev.kind"></div>
+              <div v-if="idx < traceEvents.length - 1" class="timeline-line"></div>
+              <div class="timeline-content">
+                <div class="timeline-time">{{ formatDateTime(ev.data.created_at) }}</div>
+                <!-- LLM 调用 -->
+                <div v-if="ev.kind === 'llm'" class="timeline-body">
+                  <span class="timeline-caller">{{ callerLabel(ev.data.caller || '') }}</span>
+                  <span class="timeline-model">{{ ev.data.model }}</span>
+                  <span class="timeline-tokens">{{ (ev.data.total_tokens || 0).toLocaleString() }} tokens</span>
+                  <span class="timeline-cost">{{ formatCost(calcCost(ev.data.model, ev.data.prompt_tokens || 0, ev.data.completion_tokens || 0)) }}</span>
+                </div>
+                <div v-if="ev.kind === 'llm'" class="timeline-detail">
+                  Prompt: {{ (ev.data.prompt_tokens || 0).toLocaleString() }} · Completion: {{ (ev.data.completion_tokens || 0).toLocaleString() }}
+                </div>
+                <!-- 工具调用 -->
+                <div v-else-if="ev.kind === 'tool'" class="timeline-body">
+                  <span class="timeline-caller">{{ EVENT_LABELS.tool }} {{ ev.data.tool_name }}</span>
+                  <span :class="['timeline-status', ev.data.success ? 'ok' : 'err']">{{ ev.data.success ? '✓ 成功' : '✗ 失败' }}</span>
+                  <span class="timeline-tokens" v-if="ev.data.duration_ms">{{ formatDuration(ev.data.duration_ms) }}</span>
+                </div>
+                <div v-else-if="ev.kind === 'tool'" class="timeline-detail">
+                  <span v-if="ev.data.error_category && ev.data.error_category !== 'none'" class="timeline-error">错误: {{ ev.data.error_category }}</span>
+                </div>
+                <!-- Agent 执行 -->
+                <div v-else-if="ev.kind === 'agent'" class="timeline-body">
+                  <span class="timeline-caller">{{ EVENT_LABELS.agent }} {{ ev.data.agent_name }}</span>
+                  <span class="timeline-key">{{ ev.data.agent_key }}</span>
+                  <span :class="['timeline-status', ev.data.status === 'success' || !ev.data.status ? 'ok' : 'err']">{{ ev.data.status || 'success' }}</span>
+                  <span class="timeline-tokens" v-if="ev.data.duration_ms">{{ formatDuration(ev.data.duration_ms) }}</span>
+                </div>
+                <div v-else-if="ev.kind === 'agent' && ev.data.query" class="timeline-detail">
+                  Query: {{ ev.data.query.slice(0, 100) }}{{ ev.data.query.length > 100 ? '...' : '' }}
+                </div>
+                <!-- RAG 检索 -->
+                <div v-else-if="ev.kind === 'rag'" class="timeline-body">
+                  <span class="timeline-caller">{{ EVENT_LABELS.rag }} 检索</span>
+                  <span class="timeline-tokens">{{ ev.data.results_count || 0 }} 条结果</span>
+                  <span class="timeline-detail-inline">FTS: {{ ev.data.fts_count || 0 }} · Chroma: {{ ev.data.chroma_count || 0 }}</span>
+                </div>
+                <div v-else-if="ev.kind === 'rag' && ev.data.query" class="timeline-detail">
+                  Query: {{ ev.data.query.slice(0, 100) }}{{ ev.data.query.length > 100 ? '...' : '' }}
+                </div>
+              </div>
+            </div>
+          </div>
         </div>
       </div>
     </template>
@@ -1708,6 +1778,46 @@ watch([detailDays], () => {
   flex-shrink: 0;
   margin-top: 4px;
   z-index: 1;
+  background: var(--color-primary);
+}
+
+/* 4 类事件圆点配色 */
+.dot-llm { background: var(--color-primary, #3b82f6); }
+.dot-tool { background: #f59e0b; }
+.dot-agent { background: #8b5cf6; }
+.dot-rag { background: #10b981; }
+
+.timeline-key {
+  font-size: 0.68rem;
+  color: var(--color-text-muted);
+  font-family: 'SF Mono', 'Menlo', monospace;
+}
+
+.timeline-status {
+  font-size: 0.72rem;
+  font-weight: 600;
+  padding: 0.05rem 0.35rem;
+  border-radius: var(--radius-sm, 4px);
+}
+
+.timeline-status.ok {
+  color: var(--color-success, #22c55e);
+  background: rgba(34, 197, 94, 0.1);
+}
+
+.timeline-status.err {
+  color: var(--color-danger, #ef4444);
+  background: rgba(239, 68, 68, 0.1);
+}
+
+.timeline-error {
+  color: var(--color-danger, #ef4444);
+  font-size: 0.72rem;
+}
+
+.timeline-detail-inline {
+  font-size: 0.7rem;
+  color: var(--color-text-muted);
 }
 
 .timeline-line {

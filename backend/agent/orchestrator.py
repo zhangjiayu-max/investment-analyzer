@@ -346,7 +346,7 @@ def resolve_confirm(confirm_id: str, user_choice: str):
 
 def _execute_specialist_cached(tool_name: str, query: str,
                                 cancel_event=None, prebuilt_context: str = "",
-                                budget_mode: str = "normal") -> str:
+                                budget_mode: str = "normal", trace_id: str = "") -> str:
     """带缓存的专家执行。同一专家+同一上下文 5 分钟内复用。"""
     # 从 tool_name 提取 agent_key(去掉 consult_ 前缀)
     agent_key = tool_name.replace("consult_", "") if tool_name.startswith("consult_") else tool_name
@@ -360,7 +360,8 @@ def _execute_specialist_cached(tool_name: str, query: str,
     result_str = _execute_specialist(tool_name, query,
                                      cancel_event=cancel_event,
                                      prebuilt_context=prebuilt_context,
-                                     budget_mode=budget_mode)
+                                     budget_mode=budget_mode,
+                                     trace_id=trace_id)
     try:
         obj = json.loads(result_str)
         if "error" not in obj:
@@ -966,6 +967,7 @@ def clarify_requirement(query: str) -> dict:
 
         response = _call_llm(
             caller="clarify",
+            trace_id=trace_id,
             model=MODEL,
             messages=[
                 {"role": "system", "content": build_clarification_prompt()},
@@ -1482,7 +1484,7 @@ def build_orchestrator_system_prompt() -> str:
 
 
 def _execute_specialist(tool_name: str, query: str, cancel_event: threading.Event | None = None,
-                        prebuilt_context: str = "", budget_mode: str = "normal") -> str:
+                        prebuilt_context: str = "", budget_mode: str = "normal", trace_id: str = "") -> str:
     """执行专家 Agent 调用,返回 JSON 字符串结果。"""
     agent_key = build_expert_map().get(tool_name)
     if not agent_key:
@@ -1492,7 +1494,7 @@ def _execute_specialist(tool_name: str, query: str, cancel_event: threading.Even
         _check_cancel(cancel_event)
         # 增强6: 成本路由 - 根据 agent_key 选择模型
         model = _get_model_for_agent(agent_key, budget_mode) if _is_cost_routing_enabled() else MODEL
-        result = run_specialist(agent_key, query, prebuilt_context=prebuilt_context, model=model)
+        result = run_specialist(agent_key, query, prebuilt_context=prebuilt_context, model=model, trace_id=trace_id)
         return json.dumps(result, ensure_ascii=False)
     except CancelledError:
         raise
@@ -1501,7 +1503,7 @@ def _execute_specialist(tool_name: str, query: str, cancel_event: threading.Even
         return json.dumps({"error": f"专家执行失败: {e}"}, ensure_ascii=False)
 
 
-def orchestrate(query: str, history: list, rag_context: str = "", cancel_event: threading.Event | None = None, target_specialists: list[str] = None, conversation_id: int = 0, message_id: int = 0) -> dict:
+def orchestrate(query: str, history: list, rag_context: str = "", cancel_event: threading.Event | None = None, target_specialists: list[str] = None, conversation_id: int = 0, message_id: int = 0, trace_id: str = "") -> dict:
     """
     Orchestrator 主循环。
 
@@ -1682,6 +1684,7 @@ def orchestrate(query: str, history: list, rag_context: str = "", cancel_event: 
         try:
             response = _call_llm(
                 caller="orchestrator",
+                trace_id=trace_id,
                 model=MODEL,
                 messages=llm_messages,
                 tools=build_orchestrator_tools(),
@@ -1736,6 +1739,7 @@ def orchestrate(query: str, history: list, rag_context: str = "", cancel_event: 
                     try:
                         response = _call_llm(
                             caller="orchestrator",
+                            trace_id=trace_id,
                             model=MODEL,
                             messages=llm_messages,
                             temperature=get_config_float('llm.temperature_agent', 0.3),
@@ -1840,7 +1844,8 @@ def orchestrate(query: str, history: list, rag_context: str = "", cancel_event: 
             # 单个专家,直接执行(避免线程池开销)
             tc, args, expert_query = tool_tasks[0]
             result_str = _execute_specialist_cached(tc.function.name, expert_query,
-                                              prebuilt_context=prebuilt_context)
+                                              prebuilt_context=prebuilt_context,
+                                              trace_id=trace_id)
             ordered_results = [result_str]
         else:
             # 多个专家,并行执行
@@ -1850,7 +1855,8 @@ def orchestrate(query: str, history: list, rag_context: str = "", cancel_event: 
                 for idx, (tc, args, expert_query) in enumerate(tool_tasks):
                     future = executor.submit(
                         _execute_specialist, tc.function.name, expert_query,
-                        cancel_event=None, prebuilt_context=prebuilt_context
+                        cancel_event=None, prebuilt_context=prebuilt_context,
+                        trace_id=trace_id
                     )
                     future_to_idx[future] = idx
 
@@ -1902,6 +1908,7 @@ def orchestrate(query: str, history: list, rag_context: str = "", cancel_event: 
         })
         response = _call_llm(
             caller="orchestrator",
+            trace_id=trace_id,
             model=MODEL,
             messages=llm_messages,
             temperature=get_config_float('llm.temperature_agent', 0.3),
@@ -2219,6 +2226,7 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
         try:
             response = _call_llm(
                 caller="orchestrator",
+                trace_id=trace_id,
                 model=MODEL,
                 messages=llm_messages,
                 tools=build_orchestrator_tools(),
@@ -2587,7 +2595,8 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
             # 单个专家,直接执行
             tc, args, expert_query, agent_key, agent_info = tool_tasks[0]
             result_str = _execute_specialist_cached(tc.function.name, expert_query, cancel_event,
-                                              prebuilt_context=prebuilt_context)
+                                              prebuilt_context=prebuilt_context,
+                                              trace_id=trace_id)
             result_queue.put((0, tc, args, agent_key, agent_info, result_str))
         else:
             # 多个专家,并行执行
@@ -2595,7 +2604,8 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
                 for idx, (tc, args, expert_query, agent_key, agent_info) in enumerate(tool_tasks):
                     future = executor.submit(
                         _execute_specialist, tc.function.name, expert_query,
-                        cancel_event=cancel_event, prebuilt_context=prebuilt_context
+                        cancel_event=cancel_event, prebuilt_context=prebuilt_context,
+                        trace_id=trace_id
                     )
                     future.add_done_callback(
                         lambda f, idx=idx, tc=tc, args=args, ak=agent_key, ai=agent_info:
@@ -2742,6 +2752,7 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
             from llm_service import _call_llm_stream
             for chunk in _call_llm_stream(
                 caller="orchestrator",
+                trace_id=trace_id,
                 model=MODEL,
                 messages=llm_messages,
                 temperature=get_config_float('llm.temperature_agent', 0.3),
@@ -2760,6 +2771,7 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
             if not final_answer:
                 response = _call_llm(
                     caller="orchestrator",
+                    trace_id=trace_id,
                     model=MODEL,
                     messages=llm_messages,
                     temperature=get_config_float('llm.temperature_agent', 0.3),

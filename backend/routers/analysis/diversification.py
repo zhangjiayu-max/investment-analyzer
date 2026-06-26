@@ -4,6 +4,7 @@ import json
 import logging
 import re
 import time
+import uuid
 
 from fastapi import APIRouter, HTTPException
 
@@ -353,11 +354,14 @@ async def _run_diversification_ai_summary_async(record_id: int, agent_id: int = 
 请对以上持仓分散度进行专业解读。"""
 
     uid = f"diversification_{int(time.time())}"
+    trace_id = f"divr_{uuid.uuid4().hex[:12]}"
     _track_agent(uid, "分散度分析师", "持仓分散度解读")
+    logger.info(f"[trace:{trace_id}] 分散度分析师开始 record_id={record_id}")
     try:
         from llm_service import _call_llm, MODEL
         response = await asyncio.to_thread(lambda: _call_llm(
             caller="diversification_analysis",
+            trace_id=trace_id,
             model=MODEL,
             messages=[
                 {"role": "system", "content": system_prompt},
@@ -368,8 +372,9 @@ async def _run_diversification_ai_summary_async(record_id: int, agent_id: int = 
         ))
         analysis = response.choices[0].message.content or ""
         tokens = response.usage.total_tokens if response.usage else 0
+        logger.info(f"[trace:{trace_id}] 分散度分析师完成 record_id={record_id} tokens={tokens}")
     except Exception as e:
-        logger.error(f"分散度 AI 分析失败 record_id={record_id}: {e}")
+        logger.error(f"[trace:{trace_id}] 分散度 AI 分析失败 record_id={record_id}: {e}")
         update_analysis_record(record_id, status="error", error_msg=str(e))
         return
     finally:

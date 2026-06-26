@@ -73,7 +73,7 @@ SYSTEM_PROMPT = """<role>你是一位专业的投资分析师。请根据提供�
 </constraints>"""
 
 
-def _call_llm(caller: str = "", **kwargs):
+def _call_llm(caller: str = "", trace_id: str = "", **kwargs):
     """统一的 LLM 调用入口，带指数退避重试、token 记录和兜底切换。"""
     @_llm_retry
     def _do_call():
@@ -91,9 +91,9 @@ def _call_llm(caller: str = "", **kwargs):
             logger.info(
                 f"LLM tokens — prompt: {resp.usage.prompt_tokens}, "
                 f"completion: {resp.usage.completion_tokens}, "
-                f"total: {resp.usage.total_tokens}, model: {resp.model}, caller: {caller}"
+                f"total: {resp.usage.total_tokens}, model: {resp.model}, caller: {caller}, trace: {trace_id}"
             )
-            _record_token_usage(resp.usage, resp.model, caller)
+            _record_token_usage(resp.usage, resp.model, caller, trace_id=trace_id)
         return resp
     return _do_call()
 
@@ -104,7 +104,7 @@ async def call_llm_async(caller: str = "", **kwargs):
     return await asyncio.to_thread(lambda: _call_llm(caller=caller, **kwargs))
 
 
-def _call_llm_stream(caller: str = "", **kwargs):
+def _call_llm_stream(caller: str = "", trace_id: str = "", **kwargs):
     """流式 LLM 调用，生成器逐 chunk yield。
 
     每个 chunk yield dict: {"content": str, "reasoning": str}
@@ -158,7 +158,7 @@ def _call_llm_stream(caller: str = "", **kwargs):
     # 末包 token 记录（best-effort，部分 provider 流式不返回 usage）
     if last_usage:
         try:
-            _record_token_usage(last_usage, last_model, caller)
+            _record_token_usage(last_usage, last_model, caller, trace_id=trace_id)
         except Exception:
             pass
     else:
@@ -176,12 +176,12 @@ def _call_llm_stream(caller: str = "", **kwargs):
                         self.completion_tokens = c
                         self.total_tokens = p + c
                 last_usage = _EstUsage(prompt_tokens, completion_tokens)
-                _record_token_usage(last_usage, last_model, caller)
+                _record_token_usage(last_usage, last_model, caller, trace_id=trace_id)
         except Exception:
             pass
 
 
-def call_arbitration_llm(**kwargs):
+def call_arbitration_llm(trace_id: str = "", **kwargs):
     """仲裁 Agent 专用 LLM 调用（高级推理模型，如 DeepSeek R1）。未配置则返回 None。
 
     支持通过 system_config 'arbitration.model' 覆盖默认模型名。
@@ -206,7 +206,7 @@ def call_arbitration_llm(**kwargs):
                 f"completion: {resp.usage.completion_tokens}, "
                 f"total: {resp.usage.total_tokens}, model: {resp.model}"
             )
-            _record_token_usage(resp.usage, resp.model, "arbitration")
+            _record_token_usage(resp.usage, resp.model, "arbitration", trace_id=trace_id)
         return resp
     except Exception as e:
         logger.error(f"仲裁 LLM 调用异常: {e}")
@@ -215,7 +215,7 @@ def call_arbitration_llm(**kwargs):
 
 _token_log_conn = None
 
-def _record_token_usage(usage, model: str, caller: str = ""):
+def _record_token_usage(usage, model: str, caller: str = "", trace_id: str = ""):
     """将 token 用量写入数据库。"""
     try:
         from db import _get_conn
@@ -232,13 +232,14 @@ def _record_token_usage(usage, model: str, caller: str = ""):
             )
         """)
         # 兼容已有表
-        try:
-            conn.execute("ALTER TABLE token_usage ADD COLUMN caller TEXT DEFAULT ''")
-        except Exception:
-            pass
+        for col in ['caller', 'trace_id']:
+            try:
+                conn.execute(f"ALTER TABLE token_usage ADD COLUMN {col} TEXT DEFAULT ''")
+            except Exception:
+                pass
         conn.execute(
-            "INSERT INTO token_usage (model, caller, prompt_tokens, completion_tokens, total_tokens, created_at) VALUES (?, ?, ?, ?, ?, datetime('now','localtime'))",
-            (model, caller, usage.prompt_tokens, usage.completion_tokens, usage.total_tokens)
+            "INSERT INTO token_usage (model, caller, prompt_tokens, completion_tokens, total_tokens, created_at, trace_id) VALUES (?, ?, ?, ?, ?, datetime('now','localtime'), ?)",
+            (model, caller, usage.prompt_tokens, usage.completion_tokens, usage.total_tokens, trace_id)
         )
         conn.commit()
         conn.close()

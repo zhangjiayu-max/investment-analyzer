@@ -12,7 +12,7 @@ import json
 import logging
 
 from llm_service import _call_llm, MODEL
-from db.config import get_config_int, get_config_float
+from db.config import get_config_int, get_config_float, get_config
 
 logger = logging.getLogger(__name__)
 
@@ -94,7 +94,10 @@ def learn_from_message(message: str, user_id: str = "default") -> int:
     """完整学习流程：检测 → 提取 → 更新画像。返回回写的维度数。
 
     设计为可在后台线程执行（调用方用 asyncio.to_thread 包装）。
+    受 `llm_cost.kyc_learning` 开关控制，默认关闭。
     """
+    if get_config("llm_cost.kyc_learning", "false") != "true":
+        return 0
     signals = extract_profile_signals(message, user_id)
     if not signals:
         return 0

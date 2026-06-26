@@ -1,4 +1,4 @@
-from db.config import get_config_int
+from db.config import get_config_int, get_config_float, get_config
 """RAG 检索服务 — SQLite FTS5 全文检索 + ChromaDB 向量语义搜索
 
 功能特性：
@@ -366,6 +366,7 @@ def rewrite_query(query: str) -> str:
     """将用户口语化问题转换为更适合检索的查询。
 
     使用 LLM 将自然语言查询转换为关键词查询，提升检索效果。
+    受 `llm_cost.rag_query_rewrite` 开关控制，默认关闭（返回原 query，由后续流程 jieba 分词）。
 
     Args:
         query: 用户原始查询
@@ -373,8 +374,12 @@ def rewrite_query(query: str) -> str:
     Returns:
         优化后的查询字符串
     """
+    # 降本开关：默认关闭，主链路已用 jieba 分词兜底
+    if get_config("llm_cost.rag_query_rewrite", "false") != "true":
+        return query
+
     try:
-        from llm_service import _call_llm
+        from llm_service import _call_llm, MODEL
 
         prompt = f"""将以下用户问题转换为适合知识库检索的关键词查询。
 
@@ -400,10 +405,16 @@ def rewrite_query(query: str) -> str:
 
 只输出关键词，不要其他文字。"""
 
-        rewritten = _call_llm(prompt, temperature=get_config_float('llm.temperature_rewrite', 0.1), max_tokens=get_config_int('llm.max_tokens_rewrite', 50))
+        response = _call_llm(
+            caller="rag_rewrite",
+            model=MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=get_config_float('llm.temperature_rewrite', 0.1),
+            max_tokens=get_config_int('llm.max_tokens_rewrite', 50),
+        )
 
         # 清理输出
-        rewritten = rewritten.strip()
+        rewritten = (response.choices[0].message.content or "").strip()
         if rewritten and len(rewritten) < len(query) * 2:
             logger.info(f"Query Rewrite: '{query}' -> '{rewritten}'")
             return rewritten

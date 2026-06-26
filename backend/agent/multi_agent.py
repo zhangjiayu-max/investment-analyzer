@@ -218,7 +218,7 @@ def _inject_kyc_profile(system_content: str, agent: dict) -> str:
 
 
 def run_specialist(agent_key: str, query: str, context: str = "",
-                   prebuilt_context: str = "", model: str = None) -> dict:
+                   prebuilt_context: str = "", model: str = None, trace_id: str = "") -> dict:
     """
     运行单个专家 Agent。
 
@@ -290,6 +290,7 @@ def run_specialist(agent_key: str, query: str, context: str = "",
         try:
             response = _call_llm(
                 caller=_caller,
+                trace_id=trace_id,
                 model=_model,
                 messages=llm_messages,
                 tools=agent_tools,
@@ -305,6 +306,7 @@ def run_specialist(agent_key: str, query: str, context: str = "",
                 # 回退：不带 tools 调用
                 response = _call_llm(
                     caller=_caller,
+                    trace_id=trace_id,
                     model=_model,
                     messages=llm_messages,
                     temperature=get_config_float('llm.temperature_agent', 0.3),
@@ -388,6 +390,7 @@ def run_specialist(agent_key: str, query: str, context: str = "",
                 })
                 response = _call_llm(
                     caller=_caller,
+                    trace_id=trace_id,
                     model=_model,
                     messages=llm_messages,
                     temperature=get_config_float('llm.temperature_agent', 0.3),
@@ -423,7 +426,7 @@ def run_specialist(agent_key: str, query: str, context: str = "",
     }
 
 
-def run_specialist_with_context(agent_key: str, query: str, peer_analyses: dict,
+def run_specialist_with_context(agent_key: str, query: str, peer_analyses: dict, trace_id: str = "",
                                 max_turns: int = 2, prebuilt_context: str = "",
                                 model: str = None) -> dict:
     """
@@ -510,6 +513,7 @@ def run_specialist_with_context(agent_key: str, query: str, peer_analyses: dict,
         try:
             response = _call_llm(
                 caller=_caller,
+                trace_id=trace_id,
                 model=_model,
                 messages=llm_messages,
                 tools=agent_tools,
@@ -523,6 +527,7 @@ def run_specialist_with_context(agent_key: str, query: str, peer_analyses: dict,
             if any(kw in err_msg.lower() for kw in ["tool", "function", "reasoning", "thinking"]):
                 response = _call_llm(
                     caller=_caller,
+                    trace_id=trace_id,
                     model=_model,
                     messages=llm_messages,
                     temperature=get_config_float('llm.temperature_agent', 0.3),
@@ -591,6 +596,7 @@ def run_specialist_with_context(agent_key: str, query: str, peer_analyses: dict,
             })
             response = _call_llm(
                 caller=_caller,
+                trace_id=trace_id,
                 model=_model,
                 messages=llm_messages,
                 temperature=get_config_float('llm.temperature_agent', 0.3),
@@ -716,6 +722,7 @@ def run_arbitration(query: str, specialist_results: list, rag_context: str = "")
         logger.warning("仲裁模型不可用，回退到主模型")
         response = _call_llm(
             caller="arbitration_fallback",
+            trace_id=trace_id,
             model=MODEL,
             messages=llm_messages,
             temperature=get_config_float('llm.temperature_arbitration', 0.2),

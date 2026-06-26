@@ -917,8 +917,8 @@ def _query_industry_outlook(index_name: str, fund_name: str) -> tuple[float, str
     except Exception as e:
         logger.debug(f"akshare 行业板块查询失败: {e}")
 
-    # 2. 用 LLM 补充政策判断（仅当有 index_name 时）
-    if index_name:
+    # 2. 用 LLM 补充政策判断（仅当有 index_name 时，受开关控制）
+    if index_name and get_config("llm_cost.daily_advisor_llm", "false") == "true":
         try:
             from llm_service import _call_llm
             resp = _call_llm(

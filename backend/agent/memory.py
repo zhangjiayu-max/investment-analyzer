@@ -4,7 +4,7 @@ import json
 import logging
 
 from llm_service import _call_llm, MODEL
-from db.config import get_config_int, get_config_float
+from db.config import get_config_int, get_config_float, get_config
 
 logger = logging.getLogger(__name__)
 
@@ -101,8 +101,24 @@ def compress_history_semantic(history: list, max_tokens: int = 3000, conversatio
     return [summary_msg] + recent_messages
 
 
+def _fallback_summary(messages: list) -> str:
+    """不调 LLM 的回退摘要：简单截取最近 5 条，保留最小上下文。"""
+    parts = []
+    for msg in messages[-5:]:
+        if msg["role"] == "user":
+            parts.append(f"用户问: {msg['content'][:50]}")
+        elif msg["role"] == "assistant":
+            parts.append(f"助手答: {msg['content'][:30]}")
+    return "\n".join(parts) if parts else "对话摘要不可用"
+
+
 def _generate_summary(messages: list) -> str:
-    """调用 LLM 将消息列表压缩为摘要。"""
+    """调用 LLM 将消息列表压缩为摘要。
+    受 `llm_cost.memory_summarize` 开关控制，默认关闭走回退。
+    """
+    if get_config("llm_cost.memory_summarize", "false") != "true":
+        return _fallback_summary(messages)
+
     # 格式化消息
     formatted = []
     for msg in messages:
@@ -140,14 +156,7 @@ def _generate_summary(messages: list) -> str:
         return response.choices[0].message.content or "对话摘要生成失败"
     except Exception as e:
         logger.error(f"生成对话摘要失败: {e}")
-        # 回退：简单截取
-        parts = []
-        for msg in messages[-5:]:
-            if msg["role"] == "user":
-                parts.append(f"用户问: {msg['content'][:50]}")
-            elif msg["role"] == "assistant":
-                parts.append(f"助手答: {msg['content'][:30]}")
-        return "\n".join(parts) if parts else "对话摘要不可用"
+        return _fallback_summary(messages)
 
 
 def build_user_memory_context(user_id: str = "default") -> str:

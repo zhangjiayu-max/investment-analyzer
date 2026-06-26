@@ -276,17 +276,58 @@ def get_token_usage_hourly(date: str = None) -> list[dict]:
     return [dict(r) for r in rows]
 
 
-def get_trace_tokens(trace_id: str) -> list[dict]:
-    """查询一次对话链路的完整 token 消耗。"""
+def get_trace_tokens(trace_id: str) -> dict:
+    """查询一次链路的完整调用明细：token_usage + tool_audit_logs + agent_runs + rag_logs。
+
+    覆盖对话链路与分散度/相关性等页面分析两类场景。任一表缺失不阻断查询。
+    """
+    if not trace_id:
+        return {"trace_id": "", "token_usage": [], "tool_audit_logs": [], "agent_runs": [], "rag_logs": []}
     conn = _get_conn()
-    rows = conn.execute("""
+
+    # 1. token_usage：LLM 调用消耗
+    token_rows = conn.execute("""
         SELECT id, model, caller, prompt_tokens, completion_tokens, total_tokens, created_at
         FROM token_usage
         WHERE trace_id = ?
         ORDER BY id ASC
     """, (trace_id,)).fetchall()
+
+    # 2. tool_audit_logs：工具调用审计
+    tool_rows = conn.execute("""
+        SELECT id, tool_name, arguments, result_preview, success, error_category, duration_ms, created_at
+        FROM tool_audit_logs
+        WHERE trace_id = ?
+        ORDER BY id ASC
+    """, (trace_id,)).fetchall()
+
+    # 3. agent_runs：Agent 执行记录
+    agent_rows = conn.execute("""
+        SELECT id, conversation_id, message_id, agent_key, agent_name, query,
+               result, tool_calls, duration_ms, status, created_at
+        FROM agent_runs
+        WHERE trace_id = ?
+        ORDER BY id ASC
+    """, (trace_id,)).fetchall()
+
+    # 4. rag_logs：RAG 检索日志
+    rag_rows = conn.execute("""
+        SELECT id, conversation_id, message_id, query, keywords, content_types,
+               results_count, fts_count, chroma_count, freshness_filtered,
+               result_sources, result_times, created_at
+        FROM rag_logs
+        WHERE trace_id = ?
+        ORDER BY id ASC
+    """, (trace_id,)).fetchall()
+
     conn.close()
-    return [dict(r) for r in rows]
+    return {
+        "trace_id": trace_id,
+        "token_usage": [dict(r) for r in token_rows],
+        "tool_audit_logs": [dict(r) for r in tool_rows],
+        "agent_runs": [dict(r) for r in agent_rows],
+        "rag_logs": [dict(r) for r in rag_rows],
+    }
 
 
 def get_token_usage_by_model(days: int = 7) -> list[dict]:
