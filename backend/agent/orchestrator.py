@@ -391,8 +391,10 @@ from agent.memory import (
     get_token_budget, compress_rag_token_aware, estimate_tokens,
 )
 from agent.router import SmartRouter
+from agent.validator import LightValidator
 
 _router = SmartRouter()
+_validator = LightValidator()
 
 
 def _build_portfolio_summary(prebuilt_context: str) -> str:
@@ -411,6 +413,49 @@ def _build_history_summary(history: list) -> str:
         content = msg.get("content", "")[:200]
         parts.append(f"{role}: {content}")
     return "\n".join(parts)
+
+
+def _validate_and_repair(query: str, answer: str, specialist_results: list,
+                         prebuilt_context: str, llm_messages: list,
+                         trace_id: str = "") -> tuple[str, dict]:
+    """轻量验证并尝试修复一次。返回 (answer, validator_result)。"""
+    max_attempts = get_config_int("validator.max_repair_attempts", 1)
+    if max_attempts <= 0 or get_config("validator.enabled", "true") != "true":
+        return answer, {"enabled": False, "passed": True, "issues": []}
+
+    result = _validator.validate(query, answer, specialist_results, prebuilt_context)
+    if result["passed"] or result["severity"] != "high":
+        return answer, result
+
+    for attempt in range(max_attempts):
+        logger.info(f"Validator 发现问题，尝试修复 (attempt {attempt + 1}): {result['issues']}")
+        repair_prompt = (
+            "请根据以下质检问题修复最终答案，确保建议具体、可执行、数据真实：\n"
+            + "\n".join(f"- {issue}" for issue in result["issues"])
+        )
+        try:
+            response = _call_llm(
+                caller="orchestrator_repair",
+                trace_id=trace_id,
+                model=MODEL,
+                messages=llm_messages + [
+                    {"role": "assistant", "content": answer},
+                    {"role": "user", "content": repair_prompt},
+                ],
+                temperature=get_config_float('llm.temperature_agent', 0.3),
+                max_tokens=get_config_int('llm.max_tokens_orchestrator', 8192),
+            )
+            answer = response.choices[0].message.content or answer
+        except Exception as e:
+            logger.error(f"修复调用失败: {e}")
+            break
+        # 修复后再次验证
+        result = _validator.validate(query, answer, specialist_results, prebuilt_context)
+        if result["passed"]:
+            break
+
+    return answer, result
+
 
 logger = logging.getLogger(__name__)
 
@@ -1868,6 +1913,11 @@ def orchestrate(query: str, history: list, rag_context: str = "", cancel_event: 
                                                "result_preview": arb_result["analysis"][:300]})
                         arbitration_done = True
 
+                    # Light Validator: 输出前质检与修复
+                    answer, validator_result = _validate_and_repair(
+                        query, answer, specialist_results, prebuilt_context, llm_messages, trace_id=trace_id
+                    )
+
                     duration_ms = int((time.time() - start_time) * 1000)
                     conflicts = detect_conflicts(specialist_results)
                     _result = {
@@ -1880,6 +1930,7 @@ def orchestrate(query: str, history: list, rag_context: str = "", cancel_event: 
                         "cross_review": True,
                         "arbitration": arbitration_done,
                         "conflicts": conflicts,
+                        "validator": validator_result,
                     }
                     if conversation_id:
                         _schedule_auto_evaluation(conversation_id, message_id, _result)
@@ -1899,6 +1950,11 @@ def orchestrate(query: str, history: list, rag_context: str = "", cancel_event: 
                 all_tool_calls.append({"name": "arbitration", "arguments": {"query": refined_query},
                                        "result_preview": arb_result["analysis"][:300]})
 
+            # Light Validator: 输出前质检与修复
+            answer, validator_result = _validate_and_repair(
+                query, answer, specialist_results, prebuilt_context, llm_messages, trace_id=trace_id
+            )
+
             duration_ms = int((time.time() - start_time) * 1000)
             conflicts = detect_conflicts(specialist_results)
             _result = {
@@ -1910,6 +1966,7 @@ def orchestrate(query: str, history: list, rag_context: str = "", cancel_event: 
                 "complexity": complexity,
                 "arbitration": arbitration_done,
                 "conflicts": conflicts,
+                "validator": validator_result,
             }
             if conversation_id:
                 _schedule_auto_evaluation(conversation_id, message_id, _result)
@@ -2915,6 +2972,17 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
         raise
     except Exception:
         final_answer = "分析过程较长,请参考以上各专家的分析结果。"
+
+    # Light Validator: 输出前质检与修复(流式场景)
+    try:
+        final_answer, validator_result = _validate_and_repair(
+            query, final_answer, specialist_results, prebuilt_context, llm_messages, trace_id=trace_id
+        )
+        if validator_result.get("issues") and not validator_result.get("passed"):
+            logger.info(f"流式输出前 Validator 发现 {len(validator_result['issues'])} 个问题，已尝试修复")
+    except Exception as e:
+        logger.warning(f"流式 Validator 调用失败: {e}")
+        validator_result = {"enabled": True, "passed": True, "issues": []}
 
     duration_ms = int((time.time() - start_time) * 1000)
 

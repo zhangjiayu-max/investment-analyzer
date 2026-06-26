@@ -97,7 +97,14 @@ def test_router_cache_does_not_duplicate():
     assert r1 == r2
 
 
-def test_validator_passes_executable_answer():
+@pytest.fixture
+def validator_no_llm(monkeypatch):
+    """禁用 LLM 质检，避免测试受外部模型影响。"""
+    from db.config import update_config
+    update_config("validator.llm_check_enabled", "false")
+
+
+def test_validator_passes_executable_answer(validator_no_llm):
     from agent.validator import LightValidator
     v = LightValidator()
     result = v.validate(
@@ -109,7 +116,7 @@ def test_validator_passes_executable_answer():
     assert result["passed"] is True
 
 
-def test_validator_catches_missing_action():
+def test_validator_catches_missing_action(validator_no_llm):
     from agent.validator import LightValidator
     v = LightValidator()
     result = v.validate(
@@ -122,7 +129,7 @@ def test_validator_catches_missing_action():
     assert any("可执行" in issue for issue in result["issues"])
 
 
-def test_validator_catches_hallucinated_fund():
+def test_validator_catches_hallucinated_fund(validator_no_llm):
     from agent.validator import LightValidator
     v = LightValidator()
     result = v.validate(
