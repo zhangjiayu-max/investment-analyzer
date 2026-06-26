@@ -176,6 +176,12 @@ async def run_shadow(config_id: int, input_data: dict, production_output: str,
 
     在后台静默执行候选 Prompt，不阻塞主流程。
     """
+    from db.config import get_config
+
+    if get_config("llm_cost.auto_shadow_mode", "false") != "true":
+        logger.debug("Shadow Mode 已关闭（llm_cost.auto_shadow_mode=false）")
+        return None
+
     from db._conn import _get_conn
 
     conn = _get_conn()

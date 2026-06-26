@@ -16,7 +16,7 @@ from fastapi import APIRouter, HTTPException
 
 from db._conn import _get_conn
 from db.health_score import save_bond_yield
-from db.config import get_config_int
+from db.config import get_config, get_config_int
 from llm_service import _call_llm, MODEL
 
 logger = logging.getLogger(__name__)
@@ -323,6 +323,8 @@ async def analyze_rolling_return(target: str = "portfolio", code: str = "",
     # LLM 总结
     summary = ""
     try:
+        if get_config("llm_cost.page_llm_summary", "false") != "true":
+            raise RuntimeError("页面 LLM 总结已关闭")
         rolling_text = "\n".join(
             f"- 持有{r['label']}: 胜率{r['win_rate']}%, 中位收益{r['median_return']}%, "
             f"最差{r['min_return']}%, 最好{r['max_return']}%"
@@ -340,7 +342,7 @@ async def analyze_rolling_return(target: str = "portfolio", code: str = "",
 
 请给出持有建议和风险提示。不超过200字。"""
         resp = await asyncio.to_thread(lambda: _call_llm(
-            caller="rolling_return", model=MODEL,
+            caller="page_summary_rolling_return", model=MODEL,
             messages=[{"role": "user", "content": prompt}],
             temperature=0.3, max_tokens=500,
         ))

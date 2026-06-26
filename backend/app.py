@@ -44,7 +44,7 @@ from db import (
     get_cash_balance,
     get_analysis_agent,
     create_analysis_history, list_analysis_history,
-    get_config_int, get_config_float,
+    get_config_int, get_config_float, get_config,
 )
 from market_data import get_index_valuation
 from llm_service import chat_about_investment, _call_llm, MODEL
@@ -280,8 +280,11 @@ async def startup():
     asyncio.create_task(_async_init())
     logging.info("后台初始化任务已启动")
 
-    # 后台每日报告
-    asyncio.create_task(_auto_daily_report())
+    # 后台每日报告（LLM 调用，默认关闭）
+    if get_config("llm_cost.auto_daily_report", "false") == "true":
+        asyncio.create_task(_auto_daily_report())
+    else:
+        logging.info("自动市场日报已关闭（llm_cost.auto_daily_report=false）")
 
     # 后台每日净值自动刷新（15:30 收盘后）
     asyncio.create_task(_auto_refresh_nav())
@@ -289,8 +292,11 @@ async def startup():
     # 后台每日备份（启动时 + 每天凌晨 2 点）
     asyncio.create_task(_auto_daily_backup())
 
-    # 后台每日评测 Pipeline（凌晨 4:00）
-    asyncio.create_task(_auto_daily_eval())
+    # 后台每日评测 Pipeline（LLM 调用，默认关闭）
+    if get_config("llm_cost.auto_daily_eval", "false") == "true":
+        asyncio.create_task(_auto_daily_eval())
+    else:
+        logging.info("每日评测 Pipeline 已关闭（llm_cost.auto_daily_eval=false）")
     # 清理上次异常退出遗留的僵尸 agent_runs
     try:
         from db.agents import _get_conn
@@ -634,20 +640,23 @@ async def _auto_daily_report():
         update_async_task(auto_task_id, status="done", result={"report_id": report_id, "token_usage": token_usage})
         logging.info(f"今日市场报告后台自动生成完成，token用量: {token_usage}")
 
-        # 后台自动质量评估
-        async def _auto_eval_report():
-            try:
-                from agent.eval_scorer import evaluate_llm_output
-                await evaluate_llm_output(
-                    query="生成今日市场简报",
-                    output=result_text,
-                    context=f"新闻: {news_context[:300]}\n估值: {val_context[:300]}",
-                    target_type="daily_report",
-                    target_id=report_id,
-                )
-            except Exception as e:
-                logging.warning(f"简报自动质量评估失败: {e}")
-        asyncio.create_task(_auto_eval_report())
+        # 后台自动质量评估（LLM-as-Judge，默认关闭）
+        if get_config("llm_cost.llm_judge_eval", "false") == "true":
+            async def _auto_eval_report():
+                try:
+                    from agent.eval_scorer import evaluate_llm_output
+                    await evaluate_llm_output(
+                        query="生成今日市场简报",
+                        output=result_text,
+                        context=f"新闻: {news_context[:300]}\n估值: {val_context[:300]}",
+                        target_type="daily_report",
+                        target_id=report_id,
+                    )
+                except Exception as e:
+                    logging.warning(f"简报自动质量评估失败: {e}")
+            asyncio.create_task(_auto_eval_report())
+        else:
+            logging.info("简报自动质量评估已关闭（llm_cost.llm_judge_eval=false）")
     except Exception as e:
         logging.warning(f"自动生成市场报告失败: {e}")
         try:

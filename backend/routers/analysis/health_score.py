@@ -20,7 +20,7 @@ from db._conn import _get_conn
 from db.health_score import save_health_score, get_health_score, list_health_scores
 from db.portfolio import list_holdings
 from db.valuations import get_latest_valuation, list_valuation_indexes, get_index_info
-from db.config import get_config_float
+from db.config import get_config, get_config_float
 from llm_service import _call_llm, MODEL
 from utils import _safe_float
 
@@ -580,6 +580,8 @@ async def calc_health_score() -> dict:
     # LLM 总结
     summary = ""
     try:
+        if get_config("llm_cost.page_llm_summary", "false") != "true":
+            raise RuntimeError("页面 LLM 总结已关闭")
         prompt = f"""你是理财顾问。根据以下健康分数据，用3-5句话给出通俗易懂的总结和建议。
 
 总分：{total}/1000

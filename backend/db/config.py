@@ -56,6 +56,16 @@ DEFAULT_CONFIGS = [
     ('llm.timeout_vision', '120', '视觉模型调用超时（秒）', 'llm'),
     ('llm.timeout_short', '15', '短任务超时（秒，如新闻摘要）', 'llm'),
 
+    # LLM 成本控制开关：默认关闭自动触发类调用
+    ('llm_cost.auto_daily_report', 'false', '自动市场日报', 'llm_cost'),
+    ('llm_cost.auto_daily_eval', 'false', '每日评测 Pipeline', 'llm_cost'),
+    ('llm_cost.auto_conversation_eval', 'false', '对话结束自动评测', 'llm_cost'),
+    ('llm_cost.auto_conversation_summary', 'false', '对话摘要自动生成', 'llm_cost'),
+    ('llm_cost.page_llm_summary', 'false', '页面分析 LLM 总结', 'llm_cost'),
+    ('llm_cost.llm_judge_eval', 'false', 'LLM-as-Judge 评分', 'llm_cost'),
+    ('llm_cost.root_cause_analyzer', 'false', '自动根因分析', 'llm_cost'),
+    ('llm_cost.auto_shadow_mode', 'false', 'Shadow Mode 静默运行', 'llm_cost'),
+
     # 内容截断限制
     ('truncation.article_content', '8000', '文章内容截断长度', 'llm'),
     ('truncation.context', '3000', '上下文截断长度', 'llm'),

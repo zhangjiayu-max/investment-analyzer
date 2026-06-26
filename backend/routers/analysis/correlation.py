@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 
 from fastapi import APIRouter
 
-from db import list_holdings, get_config_int, create_async_task, update_async_task
+from db import list_holdings, get_config, get_config_int, create_async_task, update_async_task
 from db.portfolio import save_analysis_cache, get_analysis_cache
 from llm_service import _call_llm, call_llm_async, MODEL
 
@@ -232,6 +232,8 @@ async def _run_correlation_async(task_id: int, holdings: list, lookback_days: in
         text = _format_correlation_text(result)
 
         try:
+            if get_config("llm_cost.page_llm_summary", "false") != "true":
+                raise RuntimeError("页面 LLM 总结已关闭")
             llm_prompt = f"""你是基金投资顾问。基于以下持仓相关性分析报告，给出：
 1. 最需要合并的2-3对基金（具体名称和原因）
 2. 建议新增哪类低相关基金来提升分散度
@@ -241,6 +243,7 @@ async def _run_correlation_async(task_id: int, holdings: list, lookback_days: in
 {text[:6000]}"""
 
             llm_result = await asyncio.to_thread(lambda: _call_llm(
+                caller="page_summary_correlation",
                 model=MODEL,
                 messages=[{"role": "user", "content": llm_prompt}],
                 temperature=0.3,

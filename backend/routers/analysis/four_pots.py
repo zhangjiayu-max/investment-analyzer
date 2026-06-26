@@ -18,7 +18,7 @@ from fastapi import APIRouter
 
 from db._conn import _get_conn
 from db.portfolio import list_holdings
-from db.config import get_config_float
+from db.config import get_config, get_config_float
 from llm_service import _call_llm, MODEL
 
 logger = logging.getLogger(__name__)
@@ -315,6 +315,8 @@ async def calc_dca_optimization() -> dict:
     # LLM 总结
     summary = ""
     try:
+        if get_config("llm_cost.page_llm_summary", "false") != "true":
+            raise RuntimeError("页面 LLM 总结已关闭")
         if suggestions:
             lines = [f"- {s['fund_name']}: {s['action']} {s['suggested_amount']}元（{s['reason']}）" for s in suggestions[:5]]
             prompt = f"""你是定投顾问。根据以下定投优化建议，用3-5句话总结。
@@ -326,7 +328,7 @@ async def calc_dca_optimization() -> dict:
 
 请用通俗语言解释为什么这样建议。不超过150字。"""
             resp = await asyncio.to_thread(lambda: _call_llm(
-                caller="dca_optimizer", model=MODEL,
+                caller="page_summary_four_pots", model=MODEL,
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.3, max_tokens=500,
             ))

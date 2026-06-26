@@ -5,7 +5,7 @@ from datetime import datetime
 
 from fastapi import APIRouter
 
-from db import list_holdings, get_config_int, create_async_task, update_async_task
+from db import list_holdings, get_config, get_config_int, create_async_task, update_async_task
 from db.portfolio import save_analysis_cache, get_analysis_cache
 from llm_service import _call_llm, call_llm_async, MODEL
 
@@ -221,6 +221,8 @@ async def _run_fee_analysis_async(task_id: int, holdings: list):
         text = _format_fee_analysis_text(holdings, fee_data)
 
         try:
+            if get_config("llm_cost.page_llm_summary", "false") != "true":
+                raise RuntimeError("页面 LLM 总结已关闭")
             llm_prompt = f"""你是基金费率专家。基于以下费率分析报告，给出：
 1. 3条最优先的降费建议（具体到基金名称和建议操作）
 2. 费率优化后的预期年节省金额
@@ -230,6 +232,7 @@ async def _run_fee_analysis_async(task_id: int, holdings: list):
 {text[:6000]}"""
 
             llm_result = await asyncio.to_thread(lambda: _call_llm(
+                caller="page_summary_fee",
                 model=MODEL,
                 messages=[{"role": "user", "content": llm_prompt}],
                 temperature=0.3,

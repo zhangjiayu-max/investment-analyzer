@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 
 from fastapi import APIRouter, HTTPException
 
-from db import get_config_int
+from db import get_config, get_config_int
 from db.eval import (
     create_eval_case, list_eval_cases, get_eval_case, update_eval_case, delete_eval_case,
     create_eval_run, list_eval_runs, get_eval_run_detail, update_eval_run,
@@ -65,6 +65,19 @@ JUDGE_PROMPT = """你是投资分析质量评审专家。请严格按以下维�
 async def run_llm_judge(case_type: str, expected_behavior: str,
                         input_params: str, agent_output: str) -> dict:
     """调用 LLM-as-Judge 对 Agent 输出打分。"""
+    if get_config("llm_cost.llm_judge_eval", "false") != "true":
+        return {
+            "score_data_accuracy": 0,
+            "score_actionability": 0,
+            "score_risk_warning": 0,
+            "score_hallucination": 0,
+            "score_format": 0,
+            "score_total": 0,
+            "judge_comments": "LLM Judge 已关闭",
+            "issues_found": [],
+            "improvement_suggestions": [],
+        }
+
     prompt = JUDGE_PROMPT.format(
         case_type=case_type,
         expected_behavior=expected_behavior or "无特殊要求",

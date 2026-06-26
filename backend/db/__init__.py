@@ -739,6 +739,17 @@ def init_db():
     conn.execute("CREATE INDEX IF NOT EXISTS idx_user_memories_user ON user_memories(user_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_user_memories_type ON user_memories(memory_type)")
 
+    # ── 系统配置表 ──────────────────────────────────────
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS system_config (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL,
+            description TEXT DEFAULT '',
+            category TEXT DEFAULT 'general',
+            updated_at TEXT DEFAULT (datetime('now','localtime'))
+        )
+    """)
+
     # 初始化默认配置（传入连接避免死锁）
     init_default_configs(conn)
 
@@ -758,17 +769,6 @@ def init_db():
             content TEXT NOT NULL,
             snapshot_date TEXT,
             created_at TEXT DEFAULT (datetime('now','localtime'))
-        )
-    """)
-
-    # ── 系统配置表 ──────────────────────────────────────
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS system_config (
-            key TEXT PRIMARY KEY,
-            value TEXT NOT NULL,
-            description TEXT DEFAULT '',
-            category TEXT DEFAULT 'general',
-            updated_at TEXT DEFAULT (datetime('now','localtime'))
         )
     """)
 

@@ -18,7 +18,7 @@ from db.agents import (
     cancel_running_agents,
 )
 from config import ARBITRATION_API_KEY
-from db.config import get_config_int, get_config_float
+from db.config import get_config, get_config_int, get_config_float
 from agent.orchestrator_optimizer import OrchestratorOptimizer, ParallelExecutor
 from agent.cache import expert_cache
 from conversation_context import record_entity_snapshots
@@ -2872,6 +2872,9 @@ LOW_SCORE_THRESHOLD = 60
 def _schedule_auto_evaluation(conv_id: int, msg_id: int, result: dict):
     """异步调度对话质量评测（不阻塞主流程）。"""
     if not conv_id:
+        return
+    if get_config("llm_cost.auto_conversation_eval", "false") != "true":
+        logger.debug("对话结束自动评测已关闭（llm_cost.auto_conversation_eval=false）")
         return
     _eval_executor.submit(_run_auto_evaluation_sync, conv_id, msg_id, result)
 

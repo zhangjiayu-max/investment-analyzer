@@ -179,9 +179,10 @@ def analyze_root_cause(bad_case: dict) -> dict | None:
             max_tokens=500,
         )
 
-        result = _parse_response(response)
+        text = response.choices[0].message.content if hasattr(response, "choices") else str(response)
+        result = _parse_response(text or "")
         if not result:
-            logger.warning(f"根因分析返回非 JSON: {response[:200]}")
+            logger.warning(f"根因分析返回非 JSON: {(text or '')[:200]}")
             return None
 
         # 验证 root_cause 是否在分类体系内
@@ -213,6 +214,18 @@ def batch_analyze(limit: int = 50, force: bool = False) -> dict:
             "results": list,
         }
     """
+    from db.config import get_config
+
+    if get_config("llm_cost.root_cause_analyzer", "false") != "true":
+        return {
+            "total": 0,
+            "analyzed": 0,
+            "failed": 0,
+            "skipped": 0,
+            "results": [],
+            "message": "自动根因分析已关闭",
+        }
+
     from db.portfolio import list_all_bad_cases
     from db._conn import _get_conn
 
