@@ -731,6 +731,29 @@ def backfill_valuation_snapshots() -> int:
     return updated
 
 
+def _auto_update_decision_on_confirm(tx_id: int, user_id: str = "default"):
+    """交易确认后，自动将匹配的 proposed/accepted 决策标记为 executed。"""
+    from db.decisions import update_decision_status
+    conn = _get_conn()
+    try:
+        tx = conn.execute(
+            "SELECT fund_code, fund_name, transaction_type FROM portfolio_transactions WHERE id = ?",
+            (tx_id,)
+        ).fetchone()
+        if not tx:
+            return
+        fund_code = tx["fund_code"]
+        pending = conn.execute("""
+            SELECT id FROM decision_records
+            WHERE user_id = ? AND target_code = ? AND status IN ('proposed', 'accepted')
+            ORDER BY created_at DESC LIMIT 5
+        """, (user_id, fund_code)).fetchall()
+        for row in pending:
+            update_decision_status(row["id"], "executed", f"交易 #{tx_id} 已确认")
+    finally:
+        conn.close()
+
+
 def confirm_transaction(tx_id: int, confirmed_price: float,
                         confirmed_shares: float = None,
                         confirmed_amount: float = None,
@@ -874,6 +897,12 @@ def confirm_transaction(tx_id: int, confirmed_price: float,
     # 卖出确认后，自动将金额计入零钱
     if tx_type == "sell" and actual_amount > 0:
         add_cash(user_id, actual_amount)
+
+    # ── 交易确认后，自动更新关联决策状态为 executed ──
+    try:
+        _auto_update_decision_on_confirm(tx_id, user_id)
+    except Exception as e:
+        logging.warning(f"[confirm_tx] 决策状态自动更新异常: {e}")
 
     # ── 基金转换：减少源基金份额，创建/增加目标基金 ──
     if tx_type == "convert" and target_fund_code and actual_shares and actual_shares > 0:

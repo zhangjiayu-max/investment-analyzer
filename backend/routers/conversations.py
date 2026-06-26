@@ -1269,6 +1269,21 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
         except Exception as e:
             logger.warning(f"after_response hooks 失败: {e}")
 
+        # 对话摘要自动生成（消息≥8条时触发）
+        try:
+            from db.conversations import get_messages, get_conversation_summary, save_conversation_summary
+            from agent.memory import _generate_summary
+            msgs = get_messages(conv_id, limit=100)
+            if len(msgs) >= 8 and not get_conversation_summary(conv_id):
+                recent = msgs[-12:]
+                text = "\n".join(f"[{m.get('role','')}] {(m.get('content','') or '')[:200]}" for m in recent)
+                summary_text = _generate_summary(text, context="对话摘要")
+                if summary_text and "生成失败" not in summary_text:
+                    save_conversation_summary(conv_id, msgs[-1]["id"], summary_text)
+                    logger.info(f"对话摘要已生成: conv={conv_id} msgs={len(msgs)}")
+        except Exception as e:
+            logger.warning(f"对话摘要生成失败: {e}")
+
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
