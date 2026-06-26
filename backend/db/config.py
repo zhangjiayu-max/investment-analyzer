@@ -118,6 +118,19 @@ DEFAULT_CONFIGS = [
     ('cost_routing.market_analyst_model', 'deepseek-v4-pro', '市场分析模型', 'cost_routing'),
     ('cost_routing.behavioral_coach_model', 'deepseek-v4-pro', '行为辅导模型', 'cost_routing'),
     ('cost_routing.cross_review_model', 'deepseek-v4-flash', '交叉审阅模型', 'cost_routing'),
+
+    # 多智能体对话降本增效开关
+    ('router.enabled', 'true', '是否启用智能路由', 'router'),
+    ('router.use_llm_fallback', 'true', '规则未命中时是否用 LLM 兜底', 'router'),
+    ('router.default_complexity', 'medium', '默认复杂度', 'router'),
+    ('cache.semantic.enabled', 'true', '是否启用语义缓存', 'cache'),
+    ('cache.ttl_minutes', '30', '专家结果缓存 TTL（分钟）', 'cache'),
+    ('cache.similarity_threshold', '0.92', '语义缓存相似度阈值', 'cache'),
+    ('early_stop.enabled', 'true', '是否启用早停机制', 'early_stop'),
+    ('early_stop.min_specialists', '2', '早停检查的最少专家数', 'early_stop'),
+    ('validator.enabled', 'true', '是否启用轻量反思', 'validator'),
+    ('validator.max_repair_attempts', '1', 'Validator 最大修复次数', 'validator'),
+    ('validator.llm_check_enabled', 'false', '是否启用 LLM 质检（默认关闭以节约成本）', 'validator'),
 ]
 
 

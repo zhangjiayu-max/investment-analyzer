@@ -1822,6 +1822,7 @@ def orchestrate(query: str, history: list, rag_context: str = "", cancel_event: 
     specialist_results = []
     all_tool_calls = []
     arbitration_done = False  # 标记仲裁是否已完成,避免重复调用
+    route_result = None  # 路由结果，用于最终返回监控
 
     for turn in range(MAX_TURNS):
         _check_timeout(start_time)
@@ -1931,6 +1932,8 @@ def orchestrate(query: str, history: list, rag_context: str = "", cancel_event: 
                         "arbitration": arbitration_done,
                         "conflicts": conflicts,
                         "validator": validator_result,
+                        "route_info": route_result,
+                        "cache_stats": expert_cache.stats,
                     }
                     if conversation_id:
                         _schedule_auto_evaluation(conversation_id, message_id, _result)
@@ -1967,6 +1970,8 @@ def orchestrate(query: str, history: list, rag_context: str = "", cancel_event: 
                 "arbitration": arbitration_done,
                 "conflicts": conflicts,
                 "validator": validator_result,
+                "route_info": route_result,
+                "cache_stats": expert_cache.stats,
             }
             if conversation_id:
                 _schedule_auto_evaluation(conversation_id, message_id, _result)
@@ -2172,6 +2177,7 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
     completed_specialists = set()
     resumed_results = []
     resume_message_id = resume_from.get("message_id") if resume_from else None
+    route_result = None  # 路由结果，用于最终返回监控
     if resume_message_id:
         completed_runs = get_completed_agents_for_message(resume_message_id)
         for run in completed_runs:
@@ -2196,14 +2202,15 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
         if valid_specialists:
             specialist_names = [all_agents[s]["name"] for s in valid_specialists]
             yield {"type": "status", "message": f"已指定专家:{'、'.join(specialist_names)}"}
-            clarification = {
-                "complexity": "simple" if len(valid_specialists) == 1 else "medium",
+            complexity = "simple" if len(valid_specialists) == 1 else "medium"
+            route_result = {
+                "complexity": complexity,
                 "specialists": valid_specialists,
                 "reason": f"用户通过 @mention 指定了专家: {', '.join(valid_specialists)}",
+                "needs_arbitration": len(valid_specialists) >= 2,
+                "route_by": "mention",
                 "refined_query": query,
-                "confidence": 1.0,
             }
-            complexity = clarification["complexity"]
             context_config = get_context_config(complexity)
             token_budget = get_token_budget(complexity)
             refined_query = query
@@ -3055,6 +3062,9 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
             "complexity": complexity,
             "perf_metrics": perf_metrics,
             "conflicts": conflicts,
+            "route_info": route_result,
+            "cache_stats": expert_cache.stats,
+            "validator": validator_result if 'validator_result' in locals() else {"enabled": False},
         })
 
     yield {
