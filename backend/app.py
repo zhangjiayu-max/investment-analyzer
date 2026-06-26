@@ -10,8 +10,20 @@ import queue
 import re
 import time
 from pathlib import Path
+from logging.handlers import TimedRotatingFileHandler
+import os
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(message)s")
+# 日志持久化：按天轮转，保留7天
+LOG_DIR = Path(__file__).parent / "logs"
+LOG_DIR.mkdir(exist_ok=True)
+log_fmt = "%(asctime)s [%(name)s] %(message)s"
+logging.basicConfig(level=logging.INFO, format=log_fmt)
+_file_handler = TimedRotatingFileHandler(
+    str(LOG_DIR / "backend.log"), when="midnight", interval=1, backupCount=7, encoding="utf-8"
+)
+_file_handler.setFormatter(logging.Formatter(log_fmt))
+logging.getLogger().addHandler(_file_handler)
+
 from fastapi import FastAPI, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware

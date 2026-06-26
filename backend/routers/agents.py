@@ -146,8 +146,9 @@ async def generate_prompt_api(req: GeneratePromptRequest):
 请直接输出完整的提示词，不要加任何解释说明。"""
 
     try:
-        from llm_service import _call_llm, MODEL
-        resp = _call_llm(
+        from llm_service import _call_llm, call_llm_async, MODEL
+        resp = await call_llm_async(
+            caller="agent_generator",
             messages=[
                 {"role": "system", "content": PROMPT_GENERATOR_META},
                 {"role": "user", "content": user_content},

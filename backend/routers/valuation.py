@@ -977,9 +977,9 @@ async def get_index_info_api(index_code: str, index_name: str = ""):
         return {"index_code": index_code, "info": info, "source": "dict"}
 
     try:
-        from llm_service import _call_llm, MODEL
+        from llm_service import _call_llm, call_llm_async, MODEL
         prompt = f"请用2-3句话简洁介绍「{index_name or index_code}」这个股票指数，包括它由哪些股票组成、覆盖什么行业、适合什么样的投资者。不要使用markdown格式，直接输出纯文本。"
-        resp = _call_llm(messages=[{"role": "user", "content": prompt}], model=MODEL, max_tokens=get_config_int('llm.max_tokens_valuation_summary', 800))
+        resp = await call_llm_async(caller="valuation", messages=[{"role": "user", "content": prompt}], model=MODEL, max_tokens=get_config_int('llm.max_tokens_valuation_summary', 800))
         info = resp.choices[0].message.content if resp and resp.choices else ""
         if info:
             save_index_info(index_code, index_name, info.strip())
