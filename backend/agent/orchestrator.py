@@ -347,11 +347,23 @@ def resolve_confirm(confirm_id: str, user_choice: str):
 def _execute_specialist_cached(tool_name: str, query: str,
                                 cancel_event=None, prebuilt_context: str = "",
                                 budget_mode: str = "normal", trace_id: str = "") -> str:
-    """带缓存的专家执行。同一专家+同一上下文 5 分钟内复用。"""
+    """带缓存的专家执行。同一专家+同一上下文 5 分钟内复用，支持语义缓存。"""
+    from db.config import get_config_int, get_config_float
+
     # 从 tool_name 提取 agent_key(去掉 consult_ 前缀)
     agent_key = tool_name.replace("consult_", "") if tool_name.startswith("consult_") else tool_name
+    context_hash = hashlib.md5(prebuilt_context.encode("utf-8")).hexdigest()[:16] if prebuilt_context else ""
 
-    cached = expert_cache.get(query, agent_key)
+    # 应用配置覆盖默认缓存参数
+    try:
+        ttl = get_config_int("cache.ttl_minutes", 5) * 60
+        threshold = get_config_float("cache.similarity_threshold", 0.92)
+        expert_cache._ttl = ttl
+        expert_cache._semantic_threshold = threshold
+    except Exception:
+        pass
+
+    cached = expert_cache.get(query, agent_key, context_hash=context_hash)
     if cached is not None:
         logger.info(f"专家缓存命中: {tool_name}")
         cached["_cached"] = True
@@ -365,7 +377,7 @@ def _execute_specialist_cached(tool_name: str, query: str,
     try:
         obj = json.loads(result_str)
         if "error" not in obj:
-            expert_cache.put(query, agent_key, obj)
+            expert_cache.put(query, agent_key, obj, context_hash=context_hash)
     except Exception:
         pass
     return result_str
