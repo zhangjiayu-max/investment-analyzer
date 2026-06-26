@@ -165,6 +165,7 @@ def update_holding(holding_id: int, **fields):
     try:
         current = conn.execute("SELECT * FROM portfolio_holdings WHERE id = ?", (holding_id,)).fetchone()
         if not current:
+            conn.close()
             return
         current = dict(current)
 
@@ -566,6 +567,7 @@ def _recalculate_holding(holding_id: int):
     try:
         holding = conn.execute("SELECT * FROM portfolio_holdings WHERE id = ?", (holding_id,)).fetchone()
         if not holding:
+            conn.close()
             return
         holding = dict(holding)
 
@@ -577,6 +579,7 @@ def _recalculate_holding(holding_id: int):
 
         # 如果没有任何已确认的交易，说明持仓是直接创建的，不重新计算
         if not txs:
+            conn.close()
             return
 
         total_shares = 0.0
@@ -656,6 +659,7 @@ def _recalculate_holding(holding_id: int):
 def _capture_valuation_snapshot(holding_id: int, transaction_date: str) -> str | None:
     """根据持仓的 index_code 查询交易日期附近的估值数据，返回 JSON 快照。"""
     if not holding_id or not transaction_date:
+        conn.close()
         return None
     conn = _get_conn()
     holding = conn.execute(
@@ -741,6 +745,7 @@ def _auto_update_decision_on_confirm(tx_id: int, user_id: str = "default"):
             (tx_id,)
         ).fetchone()
         if not tx:
+            conn.close()
             return
         fund_code = tx["fund_code"]
         pending = conn.execute("""
@@ -770,6 +775,7 @@ def confirm_transaction(tx_id: int, confirmed_price: float,
     try:
         tx = conn.execute("SELECT * FROM portfolio_transactions WHERE id = ?", (tx_id,)).fetchone()
         if not tx:
+            conn.close()
             return False
         tx = dict(tx)
 
@@ -1061,9 +1067,11 @@ def settle_transaction(tx_id: int) -> bool:
     try:
         tx = conn.execute("SELECT * FROM portfolio_transactions WHERE id = ?", (tx_id,)).fetchone()
         if not tx:
+            conn.close()
             return False
         tx = dict(tx)
         if tx.get("status") != "confirmed":
+            conn.close()
             return False
 
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -1093,9 +1101,11 @@ def delete_transaction(tx_id: int) -> bool:
     try:
         tx = conn.execute("SELECT * FROM portfolio_transactions WHERE id = ?", (tx_id,)).fetchone()
         if not tx:
+            conn.close()
             return False
         tx = dict(tx)
         if tx.get("status") not in (None, "pending"):
+            conn.close()
             return False
 
         conn.execute("DELETE FROM transaction_tags WHERE transaction_id = ?", (tx_id,))
@@ -1210,6 +1220,7 @@ def get_fund_nav_history(fund_code: str, user_id: str = "default", days: int = 3
         import akshare as ak
         df = ak.fund_open_fund_info_em(symbol=fund_code, indicator='单位净值走势')
         if df is None or len(df) == 0:
+            conn.close()
             return None
 
         nav_history = []
@@ -1573,6 +1584,7 @@ def create_alert(alert_type: str, title: str, content: str = None,
             LIMIT 1
         """, (user_id, title, severity)).fetchone()
         if existing:
+            conn.close()
             return existing['id']
 
         cur = conn.execute("""
@@ -1853,6 +1865,7 @@ def create_portfolio_analysis_record(analysis_type: str, summary: str,
 def update_analysis_record(record_id: int, **fields) -> bool:
     """更新分析记录字段（result_data, status, token_usage 等）。"""
     if not fields:
+        conn.close()
         return False
     conn = _get_conn()
     sets = ", ".join(f"{k} = ?" for k in fields)
