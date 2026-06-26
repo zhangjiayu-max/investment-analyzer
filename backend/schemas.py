@@ -112,3 +112,37 @@ class PromptVersionCreate(BaseModel):
     agent_id: int = Field(..., gt=0)
     system_prompt: str = Field(..., min_length=10, max_length=50000)
     version_notes: Optional[str] = Field(None, max_length=500)
+
+
+class QuickEntryRequest(BaseModel):
+    """快速录入请求"""
+    fund_code: str = Field(..., min_length=6, max_length=20, description="基金代码")
+    amount: float = Field(..., gt=0, description="金额")
+    transaction_type: str = Field("buy", pattern=r"^(buy|sell|convert|dividend)$", description="交易类型")
+    transaction_date: Optional[str] = Field(None, pattern=r"^\d{4}-\d{2}-\d{2}$", description="交易日期")
+    account: Optional[str] = Field(None, max_length=50, description="账户")
+    notes: Optional[str] = Field(None, max_length=500, description="备注")
+
+    @field_validator("fund_code")
+    @classmethod
+    def validate_fund_code(cls, v: str) -> str:
+        if not v.replace(".", "").replace("-", "").isalnum():
+            raise ValueError("基金代码格式错误")
+        return v.strip()
+
+
+class AiSuggestionToDecisionRequest(BaseModel):
+    """AI建议转决策请求"""
+    suggestion: Optional[str] = Field(None, max_length=5000, description="AI建议文本")
+    analysis: Optional[str] = Field(None, max_length=5000, description="分析文本（备用字段）")
+
+    @field_validator("suggestion")
+    @classmethod
+    def check_not_empty(cls, v: str, info) -> str:
+        """suggestion 和 analysis 至少有一个非空"""
+        return v
+
+
+class PromptActivateRequest(BaseModel):
+    """Prompt激活请求"""
+    agent_type: str = Field(..., min_length=1, max_length=50, description="Agent类型")

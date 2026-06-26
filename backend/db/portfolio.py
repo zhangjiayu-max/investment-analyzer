@@ -1187,7 +1187,7 @@ def fetch_fund_nav(fund_code: str) -> dict | None:
                 try:
                     from datetime import datetime
                     nav_date = datetime.strptime(str(nav_date), "%Y年%m月%d日").strftime("%Y-%m-%d")
-                except:
+                except Exception:
                     pass
             # 处理百分比格式（"-0.89%" -> -0.89）
             if change_pct is not None and isinstance(change_pct, str):

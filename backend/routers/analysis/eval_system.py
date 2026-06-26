@@ -9,6 +9,7 @@ from datetime import datetime, timedelta
 from fastapi import APIRouter, HTTPException
 
 from db import get_config, get_config_int
+from schemas import PromptActivateRequest
 from db.eval import (
     create_eval_case, list_eval_cases, get_eval_case, update_eval_case, delete_eval_case,
     create_eval_run, list_eval_runs, get_eval_run_detail, update_eval_run,
@@ -425,8 +426,8 @@ async def list_prompts_api(agent_type: str = None):
 
 
 @router.put("/prompts/{version_id}/activate")
-async def activate_prompt_api(version_id: int, data: dict):
-    agent_type = data.get("agent_type", "")
+async def activate_prompt_api(version_id: int, data: PromptActivateRequest):
+    agent_type = data.agent_type
     if not agent_type:
         raise HTTPException(400, "缺少 agent_type")
     activate_prompt_version(version_id, agent_type)

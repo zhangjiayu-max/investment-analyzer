@@ -19,6 +19,7 @@ import time
 
 from fastapi import APIRouter, HTTPException, UploadFile, File
 from pydantic import BaseModel
+from schemas import QuickEntryRequest, AiSuggestionToDecisionRequest
 
 from state import (
     track_agent as _track_agent,
@@ -751,15 +752,15 @@ async def list_snapshots_api(limit: int = 365):
 
 
 @router.post("/api/portfolio/quick-entry")
-async def quick_entry_api(data: dict):
+async def quick_entry_api(data: QuickEntryRequest):
     """快速录入：只输基金代码+金额，自动查基金名称和当前净值。"""
-    fund_code = (data.get("fund_code") or "").strip()
-    amount = data.get("amount", 0)
-    tx_type = data.get("transaction_type", "buy")
+    fund_code = data.fund_code.strip()
+    amount = data.amount
+    tx_type = data.transaction_type
     from datetime import datetime as _dt
-    tx_date = data.get("transaction_date", _dt.now().strftime("%Y-%m-%d"))
-    account = data.get("account")
-    notes = data.get("notes")
+    tx_date = data.transaction_date or _dt.now().strftime("%Y-%m-%d")
+    account = data.account
+    notes = data.notes
 
     if not fund_code:
         raise HTTPException(400, "基金代码不能为空")
@@ -820,7 +821,7 @@ async def quick_entry_api(data: dict):
 
 
 @router.post("/api/portfolio/ai-suggestion-to-decision")
-async def ai_suggestion_to_decision_api(data: dict):
+async def ai_suggestion_to_decision_api(data: AiSuggestionToDecisionRequest):
     """AI建议→一键生成决策卡片。
 
     接收 AI 对话中的建议文本，解析后创建决策候选。
@@ -829,7 +830,7 @@ async def ai_suggestion_to_decision_api(data: dict):
     from db.decisions import create_candidate_from_structured_recommendation
 
     # 从 AI 建议中提取结构化信息
-    suggestion_text = data.get("suggestion", "") or data.get("analysis", "")
+    suggestion_text = data.suggestion or data.analysis or ""
     if not suggestion_text:
         raise HTTPException(400, "建议内容不能为空")
 

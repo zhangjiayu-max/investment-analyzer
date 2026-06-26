@@ -21,6 +21,7 @@ _KEYWORD_ROUTES = [
     (["配置", "仓位", "股债", "比例", "再平衡"], ["allocation_advisor"]),
     (["持仓", "分散", "穿透", "集中度"], ["allocation_advisor", "wealth_advisor"]),
     (["市场", "大盘", "行情", "走势", "牛市", "熊市"], ["market_analyst"]),
+    (["诊断", "体检", "检查", "全面"], ["valuation_expert", "risk_assessor", "allocation_advisor"]),
     (["买", "卖", "操作", "定投", "止盈", "加仓", "减仓"], ["allocation_advisor", "risk_assessor", "valuation_expert"]),
     (["文章", "公众号", "解读", "新闻"], ["article_expert"]),
     (["基金", "选基", "基金分析"], ["fund_analyst"]),
@@ -128,6 +129,12 @@ class SmartRouter:
             "route_by": "llm_fallback",
         }
 
+    def _cleanup_expired_cache(self, now: float):
+        """清理过期缓存条目，防止无限增长。"""
+        expired = [k for k, (_, ts) in self._cache.items() if now - ts > self._cache_ttl * 2]
+        for k in expired:
+            del self._cache[k]
+
     def route(self, query: str, history_summary: str = "", portfolio_summary: str = "",
               target_specialists: Optional[list] = None) -> dict:
         """路由入口。"""
@@ -156,6 +163,7 @@ class SmartRouter:
             rule_result = self._rule_route(query)
             if rule_result:
                 with self._lock:
+                    self._cleanup_expired_cache(now)
                     self._cache[cache_key] = (rule_result, now)
                 return rule_result
 
@@ -163,6 +171,7 @@ class SmartRouter:
         if get_config("router.use_llm_fallback", "true") == "true":
             llm_result = self._llm_fallback_route(query, history_summary, portfolio_summary)
             with self._lock:
+                self._cleanup_expired_cache(now)
                 self._cache[cache_key] = (llm_result, now)
             return llm_result
 
@@ -175,5 +184,6 @@ class SmartRouter:
             "route_by": "default",
         }
         with self._lock:
+            self._cleanup_expired_cache(now)
             self._cache[cache_key] = (fallback, now)
         return fallback

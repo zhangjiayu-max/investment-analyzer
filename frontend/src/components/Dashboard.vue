@@ -183,14 +183,26 @@ onMounted(async () => {
   await Promise.all([
     loadDashboard(),
     loadTodayDecisions(),
-    loadDecisionReviews(),
-    loadHotTopics(),
-    loadOpportunities(),
-    loadDailyReport(),
-    loadRecHistory(),
-    loadBondTemperature(),
     loadDailyAdvice(),
   ])
+
+  // 第二批：延迟 500ms 发送，避免 SQLite 单写锁竞争
+  setTimeout(() => {
+    Promise.all([
+      loadDecisionReviews(),
+      loadHotTopics(),
+      loadOpportunities(),
+    ]).catch(() => {})
+  }, 500)
+
+  // 第三批：延迟 1000ms 发送
+  setTimeout(() => {
+    Promise.all([
+      loadDailyReport(),
+      loadRecHistory(),
+      loadBondTemperature(),
+    ]).catch(() => {})
+  }, 1000)
 
   try {
     const { data: recs } = await listPanoramaRecords(1)
@@ -232,14 +244,22 @@ onActivated(async () => {
   await Promise.all([
     loadDashboard(),
     loadTodayDecisions(),
-    loadDecisionReviews(),
-    loadHotTopics(),
-    loadOpportunities(),
-    loadDailyReport(),
-    loadRecHistory(),
-    loadBondTemperature(),
     loadDailyAdvice(),
   ])
+  setTimeout(() => {
+    Promise.all([
+      loadDecisionReviews(),
+      loadHotTopics(),
+      loadOpportunities(),
+    ]).catch(() => {})
+  }, 500)
+  setTimeout(() => {
+    Promise.all([
+      loadDailyReport(),
+      loadRecHistory(),
+      loadBondTemperature(),
+    ]).catch(() => {})
+  }, 1000)
   // 恢复全景诊断最近一条结果
   try {
     const { data: recs } = await listPanoramaRecords(1)
