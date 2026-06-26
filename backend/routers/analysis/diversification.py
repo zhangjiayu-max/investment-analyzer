@@ -29,12 +29,34 @@ router = APIRouter(tags=["analysis-diversification"])
 _background_tasks: set = set()
 
 
-@router.get("/api/portfolio/analysis/diversification")
-async def portfolio_diversification_api():
-    """分析持仓分散度：基金数量、指数分布、类型分布、仓位集中度。"""
-    result = get_portfolio_diversification()
+_DIVERSIFICATION_CACHE_KEY = "diversification_api_default"
+_DIVERSIFICATION_CACHE_TTL_SECONDS = 3600  # 1 小时
 
-    # 补充 MCP 分析数据（每个 MCP 调用独立 try/except，返回状态信息）
+
+@router.get("/api/portfolio/analysis/diversification")
+async def portfolio_diversification_api(force_refresh: bool = False):
+    """分析持仓分散度：基金数量、指数分布、类型分布、仓位集中度。
+
+    默认使用 1 小时本地缓存，避免重复调用 MCP/akshare；force_refresh=true 可强制刷新。
+    MCP 调用失败时返回缓存/本地数据 + 友好 warning，不阻塞主流程。
+    """
+    from db.portfolio import save_analysis_cache, get_analysis_cache
+
+    # 尝试读取缓存
+    if not force_refresh:
+        cached = get_analysis_cache(_DIVERSIFICATION_CACHE_KEY)
+        if cached:
+            cached_at = cached.get("cached_at")
+            try:
+                if cached_at and (time.time() - cached_at) < _DIVERSIFICATION_CACHE_TTL_SECONDS:
+                    return cached
+            except Exception:
+                pass
+
+    result = get_portfolio_diversification()
+    warning = None
+
+    # 补充 MCP 分析数据（每个 MCP 调用独立 try/except，失败时记录 warning）
     mcp_data = {}
     try:
         from mcp.yingmi_client import get_yingmi_client
@@ -55,7 +77,8 @@ async def portfolio_diversification_api():
                 })
                 mcp_data["asset_class"] = {"status": "ok", "data": raw}
             except Exception as e:
-                mcp_data["asset_class"] = {"status": "error", "message": str(e)}
+                logger.warning(f"[diversification] MCP 资产大类分析失败: {e}")
+                mcp_data["asset_class"] = {"status": "degraded", "message": "资产大类分析暂不可用"}
 
             # 基金相关性分析（需 fundList: [{fundCode}]）
             try:
@@ -64,7 +87,8 @@ async def portfolio_diversification_api():
                 })
                 mcp_data["correlation"] = {"status": "ok", "data": raw}
             except Exception as e:
-                mcp_data["correlation"] = {"status": "error", "message": str(e)}
+                logger.warning(f"[diversification] MCP 相关性分析失败: {e}")
+                mcp_data["correlation"] = {"status": "degraded", "message": "相关性分析暂不可用"}
 
             # 持仓最大基金的行业配置
             try:
@@ -79,18 +103,25 @@ async def portfolio_diversification_api():
                     "data": raw,
                 }
             except Exception as e:
-                mcp_data["top_holding_industry"] = {"status": "error", "message": str(e)}
+                logger.warning(f"[diversification] MCP 行业配置分析失败: {e}")
+                mcp_data["top_holding_industry"] = {"status": "degraded", "message": "行业配置分析暂不可用"}
 
             # 市场行情
             try:
                 raw = mcp.get_latest_quotations()
                 mcp_data["market"] = {"status": "ok", "data": raw}
             except Exception as e:
-                mcp_data["market"] = {"status": "error", "message": str(e)}
+                logger.warning(f"[diversification] MCP 市场行情获取失败: {e}")
+                mcp_data["market"] = {"status": "degraded", "message": "市场行情暂不可用"}
     except Exception as e:
-        mcp_data["error"] = f"MCP 客户端异常: {e}"
+        logger.warning(f"[diversification] MCP 客户端异常: {e}")
+        mcp_data["error"] = "MCP 服务暂不可用，已返回本地持仓数据"
+        warning = "MCP 服务暂不可用，部分分析基于本地缓存数据"
 
     result["mcp"] = mcp_data
+    result["warning"] = warning
+    result["cached_at"] = time.time()
+    save_analysis_cache(_DIVERSIFICATION_CACHE_KEY, result)
     return result
 
 

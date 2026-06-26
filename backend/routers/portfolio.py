@@ -45,6 +45,7 @@ from db import (
     list_rebalance_configs, get_rebalance_config_by_id, rollback_rebalance_config,
     set_cash_balance, get_portfolio_penetration,
     create_async_task, update_async_task, get_async_task,
+    get_analysis_cache,
 )
 from db.portfolio import update_analysis_record
 from db.config import get_config as _get_config
@@ -700,9 +701,25 @@ async def delete_transaction_api(tx_id: int):
 
 @router.post("/api/portfolio/refresh")
 async def refresh_all_prices_api():
-    """批量刷新所有持仓的最新净值。"""
+    """批量刷新所有持仓的最新净值，并缓存到 fund_nav_history。"""
     results = refresh_all_fund_prices()
-    return {"ok": True, "results": results, "total": len(results)}
+    failed = [r for r in results if "error" in r]
+    return {
+        "ok": True,
+        "results": results,
+        "total": len(results),
+        "success": len(results) - len(failed),
+        "failed_count": len(failed),
+    }
+
+
+@router.get("/api/portfolio/refresh-status")
+async def refresh_status_api():
+    """查询最近一次批量刷新净值的状态。"""
+    status = get_analysis_cache("portfolio_last_refresh_status")
+    if not status:
+        return {"status": "unknown", "message": "暂无刷新记录"}
+    return {"status": "ok", "data": status}
 
 
 @router.post("/api/portfolio/{holding_id}/refresh")

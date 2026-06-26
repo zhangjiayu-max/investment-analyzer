@@ -17,7 +17,16 @@ _background_tasks: set = set()
 
 
 def _get_fund_nav_series(fund_code: str, lookback_days: int = 252) -> list[tuple]:
-    """获取基金净值序列，返回 [(date, nav), ...]"""
+    """获取基金净值序列，优先使用本地缓存，失败时降级到 akshare。返回 [(date, nav), ...]"""
+    try:
+        from fund_data_service import get_or_refresh_fund_nav_history
+        records = get_or_refresh_fund_nav_history(fund_code, days=lookback_days)
+        if records:
+            return [(r["nav_date"], r["nav"]) for r in records if r.get("nav")]
+    except Exception as e:
+        logger.warning(f"[corr] 本地缓存获取{fund_code}净值失败: {e}")
+
+    # 降级到 akshare
     try:
         import akshare as ak
         df = ak.fund_open_fund_info_em(symbol=fund_code, indicator="单位净值走势")
@@ -32,7 +41,7 @@ def _get_fund_nav_series(fund_code: str, lookback_days: int = 252) -> list[tuple
                 result.append((date_str, nav))
         return result
     except Exception as e:
-        logger.warning(f"[corr] 获取{fund_code}净值失败: {e}")
+        logger.warning(f"[corr] akshare 获取{fund_code}净值失败: {e}")
         return []
 
 

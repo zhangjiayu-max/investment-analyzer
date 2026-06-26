@@ -17,7 +17,7 @@ def add_to_watchlist(fund_code: str, fund_name: str,
     """添加基金到关注列表。返回 id。"""
     if fund_category is None:
         from db.portfolio import classify_fund_category
-        fund_category = classify_fund_category(fund_name)
+        fund_category = classify_fund_category(fund_name, fund_code=fund_code)
 
     conn = _get_conn()
     try:
@@ -150,7 +150,7 @@ def batch_add_to_watchlist(items: list[dict], user_id: str = "default") -> dict:
             continue
 
         try:
-            cat = item.get("fund_category") or classify_fund_category(fund_name)
+            cat = item.get("fund_category") or classify_fund_category(fund_name, fund_code=fund_code)
             conn.execute("""
                 INSERT INTO watchlist
                     (user_id, fund_code, fund_name, fund_category, index_code, index_name,

@@ -479,10 +479,10 @@ def init_db():
     _add_column_if_not_exists(conn, "portfolio_holdings", "last_buy_date", "TEXT")
     # 回填已有持仓的 fund_category
     rows = conn.execute(
-        "SELECT id, fund_name FROM portfolio_holdings WHERE fund_category IS NULL OR fund_category = ''"
+        "SELECT id, fund_code, fund_name FROM portfolio_holdings WHERE fund_category IS NULL OR fund_category = ''"
     ).fetchall()
     for r in rows:
-        cat = classify_fund_category(r["fund_name"])
+        cat = classify_fund_category(r["fund_name"], fund_code=r["fund_code"] or "")
         if cat != "equity":  # 默认就是 equity 类型，只回填非默认的
             conn.execute("UPDATE portfolio_holdings SET fund_category = ? WHERE id = ?", (cat, r["id"]))
     # 回填 last_buy_price / last_buy_date（从交易记录取最近一次买入价）
@@ -670,6 +670,42 @@ def init_db():
     """)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_rc_user ON rebalance_config(user_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_rc_active ON rebalance_config(is_active)")
+
+    # ── 基金元信息本地缓存 ──────────────────────────────────────
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS fund_metadata (
+            fund_code TEXT PRIMARY KEY,
+            fund_name TEXT,
+            fund_type TEXT,
+            fund_category TEXT,
+            benchmark TEXT,
+            establish_date TEXT,
+            management_company TEXT,
+            management_fee REAL,
+            custody_fee REAL,
+            subscription_fee REAL,
+            source TEXT DEFAULT 'akshare',
+            updated_at TEXT DEFAULT (datetime('now','localtime'))
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_fund_meta_type ON fund_metadata(fund_type)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_fund_meta_category ON fund_metadata(fund_category)")
+
+    # ── 基金净值历史本地缓存 ──────────────────────────────────────
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS fund_nav_history (
+            fund_code TEXT NOT NULL,
+            nav_date TEXT NOT NULL,
+            nav REAL,
+            acc_nav REAL,
+            change_pct REAL,
+            source TEXT DEFAULT 'akshare',
+            updated_at TEXT DEFAULT (datetime('now','localtime')),
+            PRIMARY KEY (fund_code, nav_date)
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_fund_nav_code_date ON fund_nav_history(fund_code, nav_date)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_fund_nav_date ON fund_nav_history(nav_date)")
 
     conn.execute("""
         CREATE TABLE IF NOT EXISTS index_info (

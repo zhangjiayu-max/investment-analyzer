@@ -59,7 +59,7 @@ def create_holding(fund_code: str, fund_name: str, shares: float = 0,
     if account is None:
         account = get_config('portfolio.default_account', '花无缺')
     if fund_category is None:
-        fund_category = classify_fund_category(fund_name)
+        fund_category = classify_fund_category(fund_name, fund_code=fund_code)
     if cost_price is None:
         cost_price = current_price or 0
     total_cost = shares * cost_price
@@ -158,7 +158,16 @@ def update_holding(holding_id: int, **fields):
 
     # 如果更新了 fund_name 且未指定 fund_category，自动分类
     if "fund_name" in fields and "fund_category" not in fields:
-        fields["fund_category"] = classify_fund_category(fields["fund_name"])
+        # 先拿到当前 fund_code（可能被同时更新），优先用新值
+        _fc_for_cat = fields.get("fund_code")
+        if not _fc_for_cat:
+            conn_tmp = _get_conn()
+            try:
+                r = conn_tmp.execute("SELECT fund_code FROM portfolio_holdings WHERE id = ?", (holding_id,)).fetchone()
+                _fc_for_cat = r["fund_code"] if r else None
+            finally:
+                conn_tmp.close()
+        fields["fund_category"] = classify_fund_category(fields["fund_name"], fund_code=_fc_for_cat or "")
 
     # 如果更新了 shares 或 cost_price，重算 total_cost
     conn = _get_conn()
@@ -1215,33 +1224,31 @@ def fetch_fund_nav(fund_code: str) -> dict | None:
 
 
 def get_fund_nav_history(fund_code: str, user_id: str = "default", days: int = 365) -> dict | None:
-    """获取基金净值历史 + 交易点标记（用于交易行为图表）。"""
+    """获取基金净值历史 + 交易点标记（用于交易行为图表）。优先使用本地缓存。"""
     try:
-        import akshare as ak
-        df = ak.fund_open_fund_info_em(symbol=fund_code, indicator='单位净值走势')
-        if df is None or len(df) == 0:
-            conn.close()
+        from fund_data_service import get_or_refresh_fund_nav_history
+        records = get_or_refresh_fund_nav_history(fund_code, days=days)
+        if not records:
             return None
 
-        nav_history = []
-        for _, row in df.iterrows():
-            nav_history.append({
-                "date": str(row["净值日期"]),
-                "nav": float(row["单位净值"]),
-            })
-        if days > 0 and len(nav_history) > days:
-            nav_history = nav_history[-days:]
+        nav_history = [
+            {"date": r["nav_date"], "nav": r["nav"]}
+            for r in records
+            if r.get("nav") is not None
+        ]
 
         conn = _get_conn()
-        txs = conn.execute("""
-            SELECT t.transaction_type, t.shares, t.price, t.amount, t.transaction_date
-            FROM portfolio_transactions t
-            WHERE t.fund_code = ? AND t.user_id = ?
-                AND (t.is_system IS NULL OR t.is_system = 0)
-                AND t.status IN ('confirmed', 'settled')
-            ORDER BY t.transaction_date ASC
-        """, (fund_code, user_id)).fetchall()
-        conn.close()
+        try:
+            txs = conn.execute("""
+                SELECT t.transaction_type, t.shares, t.price, t.amount, t.transaction_date
+                FROM portfolio_transactions t
+                WHERE t.fund_code = ? AND t.user_id = ?
+                    AND (t.is_system IS NULL OR t.is_system = 0)
+                    AND t.status IN ('confirmed', 'settled')
+                ORDER BY t.transaction_date ASC
+            """, (fund_code, user_id)).fetchall()
+        finally:
+            conn.close()
 
         return {
             "nav_history": nav_history,
@@ -1254,11 +1261,13 @@ def get_fund_nav_history(fund_code: str, user_id: str = "default", days: int = 3
 
 def refresh_holding_price(holding_id: int) -> dict | None:
     """
-    刷新单个持仓的最新净值并更新数据库。
+    刷新单个持仓的最新净值并更新数据库，同时缓存到 fund_nav_history。
 
     返回: {"nav": 0.57, "date": "2026-05-22", "change_pct": -2.1,
            "today_profit": -12.34, "today_change_pct": -2.1} 或 None
     """
+    from fund_data_service import save_latest_nav
+
     conn = _get_conn()
     holding = conn.execute("SELECT * FROM portfolio_holdings WHERE id = ?", (holding_id,)).fetchone()
     if not holding:
@@ -1305,6 +1314,13 @@ def refresh_holding_price(holding_id: int) -> dict | None:
     conn.commit()
     conn.close()
 
+    # 缓存最新净值到本地
+    if nav_date:
+        try:
+            save_latest_nav(fund_code, nav, nav_date, change_pct)
+        except Exception as e:
+            logger.warning(f"缓存最新净值失败 {fund_code}: {e}")
+
     nav_data["today_profit"] = today_profit
     nav_data["today_change_pct"] = change_pct
     return nav_data
@@ -1312,12 +1328,15 @@ def refresh_holding_price(holding_id: int) -> dict | None:
 
 def refresh_all_fund_prices(user_id: str = "default") -> list[dict]:
     """
-    批量刷新用户所有持仓的最新净值。
+    批量刷新用户所有持仓的最新净值，并缓存到 fund_nav_history。
 
     返回: [{"fund_code": "161725", "fund_name": "...", "nav": 0.57, "date": "2026-05-22"}, ...]
     """
+    from fund_data_service import save_latest_nav
+
     holdings = list_holdings(user_id)
     results = []
+    failed_codes = []
     for h in holdings:
         # 跳过已清仓持仓
         if (h.get("shares") or 0) <= 0:
@@ -1330,6 +1349,7 @@ def refresh_all_fund_prices(user_id: str = "default") -> list[dict]:
             continue
         nav_data = fetch_fund_nav(h["fund_code"])
         if not nav_data:
+            failed_codes.append(h["fund_code"])
             results.append({
                 "fund_code": h["fund_code"],
                 "fund_name": h["fund_name"],
@@ -1369,6 +1389,13 @@ def refresh_all_fund_prices(user_id: str = "default") -> list[dict]:
         conn.commit()
         conn.close()
 
+        # 缓存最新净值到本地
+        if nav_date:
+            try:
+                save_latest_nav(h["fund_code"], nav, nav_date, change_pct)
+            except Exception as e:
+                logger.warning(f"缓存最新净值失败 {h['fund_code']}: {e}")
+
         results.append({
             "fund_code": h["fund_code"],
             "fund_name": h["fund_name"],
@@ -1377,6 +1404,23 @@ def refresh_all_fund_prices(user_id: str = "default") -> list[dict]:
             "change_pct": change_pct,
             "today_profit": today_profit,
         })
+
+    if failed_codes:
+        logger.warning(f"批量刷新净值失败基金: {failed_codes}")
+
+    # 保存刷新状态，便于 /api/portfolio/refresh-status 查询
+    try:
+        save_analysis_cache("portfolio_last_refresh_status", {
+            "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "total": len(results),
+            "success": sum(1 for r in results if "nav" in r),
+            "failed": len(failed_codes),
+            "failed_codes": failed_codes,
+            "skipped": sum(1 for r in results if r.get("skipped")),
+            "details": results,
+        })
+    except Exception as e:
+        logger.warning(f"保存刷新状态失败: {e}")
 
     return results
 
@@ -1394,12 +1438,13 @@ def lookup_fund_info(fund_code: str) -> dict | None:
         row = df.iloc[0]
         fund_name = str(row.get("基金简称", ""))
         fund_type_str = str(row.get("基金类型", ""))
+        fund_code_clean = re.sub(r"（.*?）", "", str(row.get("基金代码", fund_code))).strip()
         return {
-            "fund_code": re.sub(r"（.*?）", "", str(row.get("基金代码", fund_code))).strip(),
+            "fund_code": fund_code_clean,
             "fund_name": fund_name,
             "fund_full_name": str(row.get("基金全称", "")),
             "fund_type": fund_type_str,
-            "fund_category": classify_fund_category(fund_name, fund_type_str),
+            "fund_category": classify_fund_category(fund_name, fund_type_str, fund_code_clean),
             "tracking_index": str(row.get("跟踪标的", "")),
             "fund_manager": str(row.get("基金经理人", "")),
             "scale": str(row.get("净资产规模", "")),
@@ -1426,17 +1471,45 @@ def classify_bond_type(bond_name: str) -> str:
     return "信用债"
 
 
-def classify_fund_category(fund_name: str, fund_type: str = "") -> str:
-    """根据基金名称和类型分类：equity / bond / hybrid / money_market / index / other。"""
-    name = fund_name.strip()
+def classify_fund_category(fund_name: str, fund_type: str = "", fund_code: str = "") -> str:
+    """根据基金名称、类型和本地缓存分类：equity / bond / hybrid / money_market / index 等。
 
-    # 货币基金
+    优先读取 fund_metadata 缓存的 fund_category，其次用 fund_type，最后退回到名称启发式。
+    """
+    name = fund_name.strip()
+    ft = fund_type.strip()
+
+    # 1) 优先读取本地 fund_metadata 缓存
+    if fund_code:
+        try:
+            conn = _get_conn()
+            row = conn.execute(
+                "SELECT fund_category, fund_type FROM fund_metadata WHERE fund_code = ?",
+                (fund_code,),
+            ).fetchone()
+            conn.close()
+            if row:
+                cached_category = (row["fund_category"] or "").strip()
+                cached_type = (row["fund_type"] or "").strip()
+                if cached_category:
+                    return cached_category
+                # 如果只有 fund_type，用它补充
+                if cached_type and not ft:
+                    ft = cached_type
+        except Exception as e:
+            logger.warning(f"读取 fund_metadata 分类失败 {fund_code}: {e}")
+
+    # 2) 货币基金
     if any(kw in name for kw in ("货币", "货基", "现金", "流动性", "添利", "增利宝")):
         return "money_market"
     if "同业存单" in name:
         return "money_market"
 
-    # 债券基金 — 纯债
+    # 3) 可转债基金要优先于普通债券判断，避免"可转债"被"债券"关键词提前捕获
+    if "可转债" in name or "转债" in name:
+        return "convertible_bond"
+
+    # 4) 债券基金 — 纯债
     if any(kw in name for kw in ("纯债", "短债", "长债", "中短债", "中长债", "利率债", "信用债")):
         return "bond"
     if any(kw in name for kw in ("债券", "债基", "国债", "政金")):
@@ -1444,34 +1517,36 @@ def classify_fund_category(fund_name: str, fund_type: str = "") -> str:
     if "中债" in name and "指数" in name:
         return "bond_index"
 
-    # 可转债基金
-    if "可转债" in name or "转债" in name:
-        return "convertible_bond"
-
-    # 指数基金
+    # 5) 指数基金
     if any(kw in name for kw in ("指数", "ETF", "ETF联接", "联接")):
         # 排除债券指数已在上面判断
         if any(kw in name for kw in ("债", "国债", "政金")):
             return "bond_index"
         return "index"
 
-    # 混合型 — 名字含"混合"但未被债券规则捕获的
+    # 6) 混合型
     if "混合" in name or "平衡" in name or "灵活" in name:
-        if any(kw in fund_type for kw in ("债券", "债")):
+        if any(kw in ft for kw in ("债券", "债")):
             return "bond"
         return "hybrid"
 
-    # 根据 fund_type 补充判断
-    if "债券型" in fund_type:
+    # 7) 根据 fund_type 判断
+    if "债券型" in ft:
         return "bond"
-    if "货币型" in fund_type:
+    if "货币型" in ft:
         return "money_market"
-    if "混合型" in fund_type:
+    if "混合型" in ft:
         return "hybrid"
-    if "股票型" in fund_type:
+    if "股票型" in ft:
         return "equity"
+    if "指数型" in ft:
+        return "index"
+    if "QDII" in ft:
+        return "qdii"
+    if "FOF" in ft:
+        return "fof"
 
-    # 默认归为 equity
+    # 8) 默认归为 equity
     return "equity"
 
 
