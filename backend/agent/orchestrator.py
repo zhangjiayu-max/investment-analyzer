@@ -555,7 +555,7 @@ def _detect_specialist_disagreement(specialist_results: list) -> bool:
     return not OrchestratorOptimizer.should_skip_cross_review(specialist_results, "complex")
 
 
-def should_arbitrate(complexity: str, specialist_results: list) -> bool:
+def should_arbitrate(complexity: str, specialist_results: list, conflicts: dict = None) -> bool:
     """判断是否需要仲裁 Agent 介入。
 
     条件(从 orchestration_config 读取):
@@ -563,9 +563,14 @@ def should_arbitrate(complexity: str, specialist_results: list) -> bool:
     - ARBITRATION_API_KEY 已配置
     - complexity >= arbitration_complexity
     - ≥2 个专家参与分析
+    - 存在实质性冲突（当 conflicts 传入时）
     """
     # 使用优化器的快速检测
     if OrchestratorOptimizer.should_skip_arbitration(specialist_results, complexity):
+        return False
+
+    # 早停：无冲突时不仲裁
+    if conflicts is not None and not conflicts.get("detected"):
         return False
 
     if get_orchestration_config("arbitration_enabled", "true") != "true":
@@ -633,15 +638,15 @@ def _extract_ratings(specialist_results: list) -> list[dict]:
 
 
 def detect_conflicts(specialist_results: list) -> dict:
-    """检测专家之间的评级方向冲突。
+    """检测专家之间的评级方向冲突和操作建议冲突。
 
     返回:
-        {"detected": bool, "items": [{"expert1": ..., "rating1": ..., "expert2": ..., "rating2": ..., "fund": ...}]}
+        {"detected": bool, "items": [{"type": "rating|action", "expert1": ..., "rating1": ..., "expert2": ..., "rating2": ..., "fund": ...}]}
     """
     ratings = _extract_ratings(specialist_results)
     conflicts = []
 
-    # 两两比较
+    # 1. 评级方向冲突
     for i in range(len(ratings)):
         for j in range(i + 1, len(ratings)):
             r1 = ratings[i]
@@ -658,11 +663,54 @@ def detect_conflicts(specialist_results: list) -> dict:
                     break
             if is_conflict:
                 conflicts.append({
+                    "type": "rating",
                     "expert1": r1["agent"],
                     "rating1": r1["rating"],
                     "expert2": r2["agent"],
                     "rating2": r2["rating"],
                     "fund": r1["fund"] or r2["fund"] or "",
+                })
+
+    # 2. 操作建议冲突：同一标的被给出相反操作
+    action_patterns = {
+        "buy": ["买入", "加仓", "定投", "增持", "建仓"],
+        "sell": ["卖出", "减仓", "止盈", "清仓", "减持", "止损"],
+    }
+    fund_code_pattern = r"\b(\d{6}|\d{5,6})\b"
+
+    actions = []
+    for sr in specialist_results:
+        if sr.get("is_cross_review"):
+            continue
+        text = sr.get("analysis", "")
+        found_codes = re.findall(fund_code_pattern, text)
+        if not found_codes:
+            continue
+        action_type = None
+        for act, keywords in action_patterns.items():
+            if any(kw in text for kw in keywords):
+                action_type = act
+                break
+        if action_type:
+            for code in found_codes:
+                actions.append({
+                    "agent": sr.get("agent", sr.get("agent_key", "未知")),
+                    "action": action_type,
+                    "fund": code,
+                })
+
+    for i in range(len(actions)):
+        for j in range(i + 1, len(actions)):
+            a1 = actions[i]
+            a2 = actions[j]
+            if a1["fund"] == a2["fund"] and a1["action"] != a2["action"]:
+                conflicts.append({
+                    "type": "action",
+                    "expert1": a1["agent"],
+                    "rating1": a1["action"],
+                    "expert2": a2["agent"],
+                    "rating2": a2["action"],
+                    "fund": a1["fund"],
                 })
 
     return {
@@ -1716,8 +1764,17 @@ def orchestrate(query: str, history: list, rag_context: str = "", cancel_event: 
 
         # 没有工具调用 → 检查是否需要交叉审阅,然后给出最终回答
         if not msg.tool_calls:
-            # Phase B: 交叉审阅(>=2 个专家时触发,不再要求 complexity==complex)
-            if len(specialist_results) >= 2 and not force_skip_cross_review and _detect_specialist_disagreement(specialist_results):
+            conflicts = detect_conflicts(specialist_results)
+
+            # Phase B: 交叉审阅(>=2 个专家且存在实质性冲突时触发)
+            needs_cross_review = (
+                len(specialist_results) >= 2
+                and not force_skip_cross_review
+                and conflicts["detected"]
+                and get_config("early_stop.enabled", "true") == "true"
+            )
+
+            if needs_cross_review:
                 logger.info(f"进入交叉审阅阶段,{len(specialist_results)} 个专家参与")
                 peer_analyses = {sr["agent_key"]: sr["analysis"] for sr in specialist_results}
                 cross_review_results = []
@@ -1763,7 +1820,7 @@ def orchestrate(query: str, history: list, rag_context: str = "", cancel_event: 
 
                     # Phase C: 仲裁(高级模型最终裁决)
                     arbitration_done = False
-                    if should_arbitrate(complexity, specialist_results):
+                    if should_arbitrate(complexity, specialist_results, conflicts):
                         logger.info("进入仲裁阶段(Phase C)")
                         arb_result = run_arbitration(refined_query, specialist_results, rag_context)
                         specialist_results.append(arb_result)
@@ -1788,11 +1845,14 @@ def orchestrate(query: str, history: list, rag_context: str = "", cancel_event: 
                     if conversation_id:
                         _schedule_auto_evaluation(conversation_id, message_id, _result)
                     return _result
+            else:
+                if len(specialist_results) >= 2:
+                    logger.info("专家结论一致或早停关闭，跳过交叉审阅")
 
             answer = msg.content or ""
 
             # Phase C: 仲裁(高级模型最终裁决,无交叉审阅时也可触发)
-            if not arbitration_done and should_arbitrate(complexity, specialist_results):
+            if not arbitration_done and should_arbitrate(complexity, specialist_results, conflicts):
                 logger.info("进入仲裁阶段(Phase C)")
                 arb_result = run_arbitration(refined_query, specialist_results, rag_context)
                 specialist_results.append(arb_result)
