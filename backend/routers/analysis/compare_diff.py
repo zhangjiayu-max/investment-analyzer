@@ -7,7 +7,7 @@ from pydantic import BaseModel, Field
 from typing import Optional
 
 from db.config import get_config_int, get_config_float
-from llm_service import _call_llm
+from llm_service import _call_llm, MODEL
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["analysis-compare"])
@@ -52,7 +52,7 @@ async def compare_diff_api(data: CompareDiffRequest):
         response = await asyncio.wait_for(
             asyncio.to_thread(lambda: _call_llm(
                 caller="compare_diff",
-                model="mimo-v2.5-pro",
+                model=MODEL,
                 messages=[{"role": "user", "content": prompt}],
                 temperature=get_config_float('llm.temperature_default', 0.3),
                 max_tokens=get_config_int('llm.max_tokens_report', 8192),

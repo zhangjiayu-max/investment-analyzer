@@ -141,6 +141,6 @@ async def analyze_single_image(body: dict):
     path = body.get("path")
     if not path or not Path(path).exists():
         raise HTTPException(400, "图片路径无效")
-    parser = ImageParser(model_type="mimo")
+    parser = ImageParser()
     result = parser.parse(path)
     return result

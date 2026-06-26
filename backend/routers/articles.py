@@ -651,7 +651,7 @@ async def _background_add_article(article_id: int, url: str):
         update_article(article_id, status="analyzing")
         records = get_analysis_records(article_id)
         pending = [r for r in records if r["status"] in ("pending", "error", "cancelled", "timeout")]
-        parser = ImageParser(model_type="mimo")
+        parser = ImageParser()
         success = 0
         failed = 0
 
@@ -766,7 +766,7 @@ async def _background_analyze(article_id: int):
         records = get_analysis_records(article_id)
         pending = [r for r in records if r["status"] in ("pending", "error", "cancelled", "timeout")]
 
-        parser = ImageParser(model_type="mimo")
+        parser = ImageParser()
         success = 0
         failed = 0
 
@@ -898,7 +898,7 @@ async def _background_reanalyze(record_id: int):
             return
 
         article = get_article(record["article_id"])
-        parser = ImageParser(model_type="mimo")
+        parser = ImageParser()
 
         # 异步执行 parser.parse，不阻塞 event loop（信号量限制并发）
         async with _vision_semaphore:

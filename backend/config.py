@@ -76,7 +76,15 @@ POLICY_KEYWORDS = [
 
 
 def get_llm_config() -> tuple[str, str, str]:
-    """返回主用 LLM 配置 (api_key, base_url, model)。优先 MIMO 套餐 API。"""
+    """返回主用 LLM 配置 (api_key, base_url, model)。
+
+    优先级：
+    1. LLM_PROVIDER=deepseek → 直接走 DeepSeek（MIMO key 即使存在也不抢占）
+    2. LLM_PROVIDER=mimo → 优先 MIMO 套餐 API，再 MIMO 普通 API
+    """
+    if LLM_PROVIDER == "deepseek":
+        return DEEPSEEK_API_KEY, DEEPSEEK_BASE_URL, DEEPSEEK_MODEL
+    # MIMO 模式（保留代码路径，后续 MIMO 恢复时可切回）
     if MIMO_PLAN_API_KEY:
         return MIMO_PLAN_API_KEY, MIMO_PLAN_BASE_URL, MIMO_PLAN_MODEL
     if LLM_PROVIDER == "mimo":
@@ -85,10 +93,15 @@ def get_llm_config() -> tuple[str, str, str]:
 
 
 def get_llm_fallback_config() -> tuple[str, str, str] | None:
-    """返回兜底 LLM 配置，主用失败时使用。"""
-    if MIMO_PLAN_API_KEY and DEEPSEEK_API_KEY:
-        return DEEPSEEK_API_KEY, DEEPSEEK_BASE_URL, DEEPSEEK_MODEL
-    if MIMO_API_KEY and DEEPSEEK_API_KEY:
+    """返回兜底 LLM 配置，主用失败时使用。
+
+    - LLM_PROVIDER=deepseek 时无 fallback（MIMO 已停用，避免无效重试）
+    - LLM_PROVIDER=mimo 时 fallback 到 DeepSeek
+    """
+    if LLM_PROVIDER == "deepseek":
+        return None
+    # MIMO 模式下，DeepSeek 作为 fallback
+    if (MIMO_PLAN_API_KEY or MIMO_API_KEY) and DEEPSEEK_API_KEY:
         return DEEPSEEK_API_KEY, DEEPSEEK_BASE_URL, DEEPSEEK_MODEL
     return None
 
@@ -96,6 +109,9 @@ def get_llm_fallback_config() -> tuple[str, str, str] | None:
 def get_vision_config() -> tuple[str, str, str]:
     """返回视觉模型配置 (api_key, base_url, model)。"""
     return VISION_API_KEY, VISION_BASE_URL, VISION_MODEL
+
+# 图片解析模型类型标签（仅用于日志/审计区分，实际模型由 get_vision_config 决定）
+IMAGE_PARSER_MODEL_TYPE = os.getenv("IMAGE_PARSER_MODEL_TYPE", "deepseek")
 
 
 # ── Token 预算配置 ─────────────────────────────────────────

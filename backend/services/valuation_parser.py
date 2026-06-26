@@ -5,7 +5,7 @@ import re
 from datetime import date
 from pathlib import Path
 
-from config import IMAGES_DIR, VALUATION_IMAGES_DIR, DD_IMAGES_DIR
+from config import IMAGES_DIR, VALUATION_IMAGES_DIR, DD_IMAGES_DIR, IMAGE_PARSER_MODEL_TYPE
 
 logger = logging.getLogger(__name__)
 from db._conn import _get_conn
@@ -13,8 +13,9 @@ from db.valuations import save_valuation, save_dd_valuation
 from image_parser import ImageParser, DDImageParser
 
 
-def parse_single_valuation(path: str, model_type: str = "mimo", source_url: str | None = None, snapshot_date: str | None = None) -> dict:
+def parse_single_valuation(path: str, model_type: str = "", source_url: str | None = None, snapshot_date: str | None = None) -> dict:
     """解析单张估值图片并存储结果（同步函数，供并发调用）。自动识别图片类型。"""
+    model_type = model_type or IMAGE_PARSER_MODEL_TYPE
     img_path = Path(path)
     if not img_path.is_absolute():
         for base in [IMAGES_DIR, VALUATION_IMAGES_DIR, DD_IMAGES_DIR]:
