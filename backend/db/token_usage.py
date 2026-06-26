@@ -6,27 +6,44 @@ from db._conn import _get_conn
 # ── Token 用量查询 ──────────────────────────────────────
 
 
-def list_token_usage(days: int = 7, limit: int = 50, offset: int = 0) -> list[dict]:
-    """最近 LLM 调用记录明细（支持分页）。"""
+def list_token_usage(days: int = 7, limit: int = 50, offset: int = 0, caller: str = None, model: str = None) -> list[dict]:
+    """最近 LLM 调用记录明细（支持分页 + 筛选）。"""
     conn = _get_conn()
-    rows = conn.execute("""
-        SELECT id, model, caller, prompt_tokens, completion_tokens, total_tokens, created_at
+    query = """
+        SELECT id, model, caller, prompt_tokens, completion_tokens, total_tokens, created_at, trace_id
         FROM token_usage
         WHERE created_at >= datetime('now', ?)
-        ORDER BY id DESC LIMIT ? OFFSET ?
-    """, (f"-{days} days", limit, offset)).fetchall()
+    """
+    params = [f"-{days} days"]
+    if caller:
+        query += " AND caller = ?"
+        params.append(caller)
+    if model:
+        query += " AND model = ?"
+        params.append(model)
+    query += " ORDER BY id DESC LIMIT ? OFFSET ?"
+    params.extend([limit, offset])
+    rows = conn.execute(query, params).fetchall()
     conn.close()
     return [dict(r) for r in rows]
 
 
-def count_token_usage(days: int = 7) -> int:
-    """统计记录总数（用于分页）。"""
+def count_token_usage(days: int = 7, caller: str = None, model: str = None) -> int:
+    """统计记录总数（用于分页 + 筛选）。"""
     conn = _get_conn()
-    row = conn.execute("""
+    query = """
         SELECT COUNT(*) as cnt
         FROM token_usage
         WHERE created_at >= datetime('now', ?)
-    """, (f"-{days} days",)).fetchone()
+    """
+    params = [f"-{days} days"]
+    if caller:
+        query += " AND caller = ?"
+        params.append(caller)
+    if model:
+        query += " AND model = ?"
+        params.append(model)
+    row = conn.execute(query, params).fetchone()
     conn.close()
     return row[0] if row else 0
 
@@ -185,3 +202,104 @@ def get_performance_by_agent(days: int = 7) -> list[dict]:
         result.append(d)
     conn.close()
     return result
+
+
+# ── 数据库索引优化 ──────────────────────────────────────
+
+
+def ensure_indexes():
+    """创建必要的数据库索引（幂等操作）。"""
+    conn = _get_conn()
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_token_usage_created ON token_usage(created_at)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_token_usage_caller ON token_usage(caller)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_token_usage_trace ON token_usage(trace_id)")
+    conn.commit()
+    conn.close()
+
+
+# ── 费用估算 + 高级查询 ──────────────────────────────────────
+
+# 模型定价表（元/百万token）
+MODEL_PRICING = {
+    "mimo-v2.5-pro": {"prompt": 0.5, "completion": 1.5},
+    "deepseek-v4-pro": {"prompt": 2.0, "completion": 8.0},
+    "mimo-v2-omni": {"prompt": 1.0, "completion": 3.0},
+    "moka-ai/m3e-base": {"prompt": 0.1, "completion": 0},
+}
+
+
+def get_cost_estimate(days: int = 7) -> dict:
+    """估算近 N 天的 API 费用。"""
+    conn = _get_conn()
+    rows = conn.execute("""
+        SELECT model,
+               SUM(prompt_tokens) as prompt,
+               SUM(completion_tokens) as completion
+        FROM token_usage
+        WHERE created_at >= datetime('now', ?)
+        GROUP BY model
+    """, (f"-{days} days",)).fetchall()
+    conn.close()
+    total_cost = 0.0
+    by_model = []
+    for r in rows:
+        d = dict(r)
+        pricing = MODEL_PRICING.get(d["model"], {"prompt": 1.0, "completion": 3.0})
+        cost = (d["prompt"] / 1_000_000 * pricing["prompt"]) + (d["completion"] / 1_000_000 * pricing["completion"])
+        total_cost += cost
+        by_model.append({
+            "model": d["model"],
+            "prompt_tokens": d["prompt"],
+            "completion_tokens": d["completion"],
+            "cost": round(cost, 4)
+        })
+    return {"total_cost": round(total_cost, 2), "by_model": by_model}
+
+
+def get_token_usage_hourly(date: str = None) -> list[dict]:
+    """按小时统计 token 用量。"""
+    conn = _get_conn()
+    if date:
+        target = f"date(created_at) = '{date}'"
+    else:
+        target = "date(created_at) = date('now', 'localtime')"
+    rows = conn.execute(f"""
+        SELECT
+            strftime('%H', created_at) as hour,
+            COUNT(*) as calls,
+            SUM(total_tokens) as tokens
+        FROM token_usage
+        WHERE {target}
+        GROUP BY hour ORDER BY hour ASC
+    """).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_trace_tokens(trace_id: str) -> list[dict]:
+    """查询一次对话链路的完整 token 消耗。"""
+    conn = _get_conn()
+    rows = conn.execute("""
+        SELECT id, model, caller, prompt_tokens, completion_tokens, total_tokens, created_at
+        FROM token_usage
+        WHERE trace_id = ?
+        ORDER BY id ASC
+    """, (trace_id,)).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_token_usage_by_model(days: int = 7) -> list[dict]:
+    """按模型分组统计。"""
+    conn = _get_conn()
+    rows = conn.execute("""
+        SELECT model, COUNT(*) as calls,
+               SUM(prompt_tokens) as prompt_tokens,
+               SUM(completion_tokens) as completion_tokens,
+               SUM(total_tokens) as total_tokens
+        FROM token_usage
+        WHERE created_at >= datetime('now', ?)
+        GROUP BY model ORDER BY total_tokens DESC
+    """, (f"-{days} days",)).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]

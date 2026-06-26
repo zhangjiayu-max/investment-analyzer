@@ -1170,6 +1170,21 @@ def index_to_chroma(content_type: str, reference_id: str, title: str, body: str,
     # 批量 embed
     embeddings = model.encode(chunks, normalize_embeddings=True).tolist()
 
+    # 记录 embedding token 用量（估算）
+    try:
+        from llm_service import _record_token_usage
+        est_tokens = sum(len(c) // 4 for c in chunks)  # 粗略估算: 4 字符 ≈ 1 token
+        if est_tokens > 0:
+            class _EstUsage:
+                def __init__(self, p, c):
+                    self.prompt_tokens = p
+                    self.completion_tokens = c
+                    self.total_tokens = p + c
+            _est = _EstUsage(est_tokens, 0)
+            _record_token_usage(_est, "moka-ai/m3e-base", "embedding_index")
+    except Exception:
+        pass
+
     ids = [f"{content_type}:{reference_id}:chunk{i}" for i in range(len(chunks))]
     base_meta = {"content_type": content_type, "reference_id": reference_id,
                  "title": title or "", "chunk_index": 0}
@@ -1237,6 +1252,21 @@ def search_chroma(query: str, content_type: str = None, content_types: list[str]
         return [], 0
 
     query_embedding = model.encode([query], normalize_embeddings=True).tolist()
+
+    # 记录 embedding token 用量（估算）
+    try:
+        from llm_service import _record_token_usage
+        est_tokens = len(query) // 4  # 粗略估算: 4 字符 ≈ 1 token
+        if est_tokens > 0:
+            class _EstUsage:
+                def __init__(self, p, c):
+                    self.prompt_tokens = p
+                    self.completion_tokens = c
+                    self.total_tokens = p + c
+            _est = _EstUsage(est_tokens, 0)
+            _record_token_usage(_est, "moka-ai/m3e-base", "embedding_query")
+    except Exception:
+        pass
 
     # 构建过滤条件：支持多类型过滤
     where = None

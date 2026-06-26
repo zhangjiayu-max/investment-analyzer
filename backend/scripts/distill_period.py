@@ -97,7 +97,12 @@ def _call_llm(caller: str = "", model: str = None, **kwargs):
     # 主力 MIMO 轮询重试
     for attempt in range(4):
         try:
-            return client.chat.completions.create(model=use_model, **kwargs)
+            resp = client.chat.completions.create(model=use_model, **kwargs)
+            # 记录 token 用量
+            if resp.usage:
+                from llm_service import _record_token_usage
+                _record_token_usage(resp.usage, resp.model or use_model, "distill_period")
+            return resp
         except Exception as e:
             if attempt < 3:
                 wait = 2 ** attempt
@@ -111,7 +116,12 @@ def _call_llm(caller: str = "", model: str = None, **kwargs):
     if _fallback_client and _fallback_model:
         try:
             print(f"  [{caller}] Fallback 到 {_fallback_model}...")
-            return _fallback_client.chat.completions.create(model=_fallback_model, **kwargs)
+            resp = _fallback_client.chat.completions.create(model=_fallback_model, **kwargs)
+            # 记录 token 用量
+            if resp.usage:
+                from llm_service import _record_token_usage
+                _record_token_usage(resp.usage, resp.model or _fallback_model, "distill_period")
+            return resp
         except Exception as e:
             print(f"  [{caller}] Fallback 也失败: {e}")
             raise
@@ -306,6 +316,10 @@ def ocr_scanned_pdf(pdf_path: str, book_title: str,
                 )
                 text = resp.choices[0].message.content or ""
                 if len(text) > 20:
+                    # 记录 token 用量
+                    if resp.usage:
+                        from llm_service import _record_token_usage
+                        _record_token_usage(resp.usage, resp.model or model, "distill_period_ocr")
                     break
             except Exception as e:
                 if attempt < 2:
@@ -370,6 +384,10 @@ def _merge_pages(pages_text: list[str], book_title: str, client, model: str) -> 
             temperature=0.1,
             max_tokens=8000,
         )
+        # 记录 token 用量
+        if resp.usage:
+            from llm_service import _record_token_usage
+            _record_token_usage(resp.usage, resp.model or model, "distill_period_merge")
         return resp.choices[0].message.content.strip()
     except Exception as e:
         print(f"  合并失败: {e}")

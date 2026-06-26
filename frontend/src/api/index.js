@@ -1597,6 +1597,26 @@ export function clearTokenUsage() {
   return api.post('/token-usage/clear')
 }
 
+/** 获取费用估算 */
+export function getTokenUsageCost(days = 7) {
+  return api.get('/token-usage/cost', { params: { days } })
+}
+
+/** 按模型分组统计 */
+export function getTokenUsageByModel(days = 7) {
+  return api.get('/token-usage/by-model', { params: { days } })
+}
+
+/** 按小时统计 */
+export function getTokenUsageHourly(date = null) {
+  return api.get('/token-usage/hourly', { params: { date } })
+}
+
+/** Trace 链路查询 */
+export function getTokenUsageTrace(traceId) {
+  return api.get(`/token-usage/trace/${traceId}`)
+}
+
 // ── 性能监控 API ──────────────────────────────────────
 
 /** 获取 Agent 调用性能统计 */

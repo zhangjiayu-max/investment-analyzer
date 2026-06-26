@@ -57,11 +57,11 @@ async def get_token_usage_api(days: int = 7):
 
 
 @router.get("/api/token-usage/recent")
-async def get_token_usage_recent(page: int = 1, page_size: int = 20, days: int = 7):
-    """获取最近 LLM 调用记录（分页）。"""
+async def get_token_usage_recent(page: int = 1, page_size: int = 20, days: int = 7, caller: str = None, model: str = None):
+    """获取最近 LLM 调用记录（分页 + 筛选）。"""
     offset = (page - 1) * page_size
-    records = list_token_usage(days=days, limit=page_size, offset=offset)
-    total = count_token_usage(days=days)
+    records = list_token_usage(days=days, limit=page_size, offset=offset, caller=caller, model=model)
+    total = count_token_usage(days=days, caller=caller, model=model)
     return {"records": records, "total": total, "page": page, "page_size": page_size}
 
 
@@ -127,3 +127,27 @@ async def clear_token_usage():
         return {"ok": True, "message": "Token 用量数据已清空"}
     except Exception as e:
         return {"ok": False, "message": str(e)}
+
+
+@router.get("/api/token-usage/cost")
+async def get_token_cost_api(days: int = 7):
+    from db import get_cost_estimate
+    return get_cost_estimate(days=days)
+
+
+@router.get("/api/token-usage/hourly")
+async def get_token_usage_hourly_api(date: str = None):
+    from db import get_token_usage_hourly
+    return {"items": get_token_usage_hourly(date)}
+
+
+@router.get("/api/token-usage/by-model")
+async def get_token_usage_by_model_api(days: int = 7):
+    from db import get_token_usage_by_model
+    return {"items": get_token_usage_by_model(days=days)}
+
+
+@router.get("/api/token-usage/trace/{trace_id}")
+async def get_trace_token_api(trace_id: str):
+    from db import get_trace_tokens
+    return {"items": get_trace_tokens(trace_id)}

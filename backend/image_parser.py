@@ -214,7 +214,14 @@ class ImageParser:
                     temperature=get_config_float('llm.temperature_vision', 0.1),
                     max_tokens=get_config_int('llm.max_tokens_vision', 4000),
                 )
+                # 记录 token 用量
+                if response.usage:
+                    from llm_service import _record_token_usage
+                    _record_token_usage(response.usage, response.model or self._model, "image_parse")
                 content = response.choices[0].message.content
+                # 兼容 Qwen3-VL thinking mode：内容可能在 thinking 字段
+                if not content or not content.strip():
+                    content = getattr(response.choices[0].message, 'thinking', '')
                 if content and content.strip():
                     return content.strip()
                 last_err = RuntimeError("模型返回空响应")
@@ -411,7 +418,14 @@ class DDImageParser:
                     max_tokens=get_config_int('llm.max_tokens_vision', 8000),
                     timeout=get_config_int('llm.timeout_vision', 120),
                 )
+                # 记录 token 用量
+                if response.usage:
+                    from llm_service import _record_token_usage
+                    _record_token_usage(response.usage, response.model or self._model, "dd_image_parse")
                 content = response.choices[0].message.content
+                # 兼容 Qwen3-VL thinking mode
+                if not content or not content.strip():
+                    content = getattr(response.choices[0].message, 'thinking', '')
                 if content and content.strip():
                     return content.strip()
                 last_err = RuntimeError("模型返回空响应")

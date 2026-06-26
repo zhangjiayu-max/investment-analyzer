@@ -4,12 +4,11 @@ from db.config import get_config_int, get_config_float
 import json
 import sys
 import time
-from openai import OpenAI
 from config import get_llm_config
 from db import _get_conn
+from llm_service import _call_llm
 
 _api_key, _base_url, _model = get_llm_config()
-client = OpenAI(api_key=_api_key, base_url=_base_url)
 MODEL = _model
 
 EXTRACT_PROMPT = """你是一位专业的投资分析师和文本分析专家。请分析以下公众号文章，提取作者的技能特征。
@@ -62,7 +61,8 @@ def extract_skill_from_article(title: str, content: str) -> dict:
     truncated = content[:6000]
 
     try:
-        response = client.chat.completions.create(
+        response = _call_llm(
+            caller="skill_extract",
             model=MODEL,
             messages=[
                 {"role": "user", "content": EXTRACT_PROMPT.format(title=title, content=truncated)},

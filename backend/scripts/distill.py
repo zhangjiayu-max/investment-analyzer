@@ -89,12 +89,17 @@ def _call_distill_llm(messages: list, temperature: float = 0.2, max_tokens: int 
     client = _get_next_client()
     for attempt in range(3):
         try:
-            return client.chat.completions.create(
+            resp = client.chat.completions.create(
                 model=MODEL,
                 messages=messages,
                 temperature=temperature,
                 max_tokens=max_tokens,
             )
+            # 记录 token 用量
+            if resp.usage:
+                from llm_service import _record_token_usage
+                _record_token_usage(resp.usage, resp.model or MODEL, "distill")
+            return resp
         except Exception as e:
             if attempt < 2:
                 time.sleep(1 + attempt)
@@ -271,6 +276,10 @@ def ocr_scanned_pdf(pdf_path: str, book_title: str,
                     }],
                     max_tokens=4000,
                 )
+                # 记录 token 用量
+                if resp.usage:
+                    from llm_service import _record_token_usage
+                    _record_token_usage(resp.usage, resp.model or model, "distill_ocr")
                 text = resp.choices[0].message.content or ""
                 if len(text) > 20:
                     return page_num, text
@@ -348,6 +357,10 @@ def _merge_pages(pages_text: list[str], book_title: str, client, model: str) -> 
             temperature=0.1,
             max_tokens=8000,
         )
+        # 记录 token 用量
+        if resp.usage:
+            from llm_service import _record_token_usage
+            _record_token_usage(resp.usage, resp.model or model, "distill_merge")
         return resp.choices[0].message.content.strip()
     except Exception as e:
         print(f"  合并失败: {e}")

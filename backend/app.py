@@ -230,6 +230,14 @@ async def startup():
     init_db()
     logging.info("数据库初始化完成")
 
+    # 创建 token_usage 索引
+    try:
+        from db.token_usage import ensure_indexes
+        ensure_indexes()
+        logging.info("token_usage 索引已创建")
+    except Exception as e:
+        logging.warning(f"创建 token_usage 索引失败: {e}")
+
     # Shadow Mode 表初始化
     try:
         from shadow_mode import init_shadow_db

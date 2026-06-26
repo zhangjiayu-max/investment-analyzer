@@ -4,11 +4,10 @@ from db.config import get_config_int, get_config_float
 import json
 from collections import Counter
 from db import _get_conn
-from openai import OpenAI
 from config import get_llm_config
+from llm_service import _call_llm
 
 _api_key, _base_url, _model = get_llm_config()
-client = OpenAI(api_key=_api_key, base_url=_base_url)
 MODEL = _model
 
 
@@ -68,7 +67,8 @@ def llm_refine(category: str, items: list[str]) -> list[str]:
 只输出 JSON 数组，不要输出其他内容。"""
 
     try:
-        response = client.chat.completions.create(
+        response = _call_llm(
+            caller="skill_aggregate",
             model=MODEL,
             messages=[{"role": "user", "content": prompt}],
             temperature=get_config_float('llm.temperature_tool', 0.2),

@@ -36,6 +36,8 @@ from db.token_usage import (
     list_token_usage, count_token_usage, get_today_token_total,
     get_token_usage_summary, get_token_budget_info, get_token_usage_by_caller,
     get_token_usage_daily, get_performance_stats, get_performance_by_agent,
+    get_cost_estimate, get_token_usage_hourly, get_trace_tokens, get_token_usage_by_model,
+    ensure_indexes,
 )
 
 # 推荐 + 反馈 + 用户画像

@@ -134,6 +134,7 @@ def _call_llm_stream(caller: str = "", **kwargs):
 
     last_usage = None
     last_model = kwargs.get("model", MODEL)
+    collected_content = []  # 收集所有 content 用于估算
     for chunk in stream:
         # 末包可能携带 usage
         if getattr(chunk, "usage", None):
@@ -149,6 +150,8 @@ def _call_llm_stream(caller: str = "", **kwargs):
         if not reasoning and hasattr(delta, "model_extra") and delta.model_extra:
             reasoning = delta.model_extra.get("reasoning_content")
         reasoning = reasoning or ""
+        if content:
+            collected_content.append(content)
         if content or reasoning:
             yield {"content": content, "reasoning": reasoning}
 
@@ -156,6 +159,24 @@ def _call_llm_stream(caller: str = "", **kwargs):
     if last_usage:
         try:
             _record_token_usage(last_usage, last_model, caller)
+        except Exception:
+            pass
+    else:
+        # 流式 usage 为 None 时，用 tiktoken 估算
+        try:
+            import tiktoken
+            enc = tiktoken.encoding_for_model("gpt-4")
+            msgs = kwargs.get("messages", [])
+            prompt_tokens = sum(len(enc.encode(m.get("content", ""))) for m in msgs if m.get("content"))
+            completion_tokens = sum(len(enc.encode(c)) for c in collected_content)
+            if prompt_tokens or completion_tokens:
+                class _EstUsage:
+                    def __init__(self, p, c):
+                        self.prompt_tokens = p
+                        self.completion_tokens = c
+                        self.total_tokens = p + c
+                last_usage = _EstUsage(prompt_tokens, completion_tokens)
+                _record_token_usage(last_usage, last_model, caller)
         except Exception:
             pass
 
@@ -430,7 +451,11 @@ def analyze_image(image_path: str) -> dict:
         max_tokens=get_config_int('llm.max_tokens_analysis', 8000),
     )
 
-    raw = response.choices[0].message.content.strip()
+    raw = response.choices[0].message.content or ''
+    # 兼容 Qwen3-VL thinking mode
+    if not raw.strip():
+        raw = getattr(response.choices[0].message, 'thinking', '') or ''
+    raw = raw.strip()
     if raw.startswith("```"):
         raw = raw.split("```")[1]
         if raw.startswith("json"):
