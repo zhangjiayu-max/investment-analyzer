@@ -308,10 +308,11 @@ def has_evaluation(conv_id: int, msg_id: int = None) -> bool:
     """检查该消息是否已有评估记录（去重用）。"""
     conn = _get_conn()
     try:
+        # 优先查 conversation_evaluations 表（自动评测写入的目标表）
         if msg_id:
             row = conn.execute(
-                "SELECT 1 FROM llm_feedback WHERE target_type='conversation' "
-                "AND target_id=? LIMIT 1", (msg_id,)
+                "SELECT 1 FROM conversation_evaluations "
+                "WHERE conversation_id=? AND message_id=? LIMIT 1", (conv_id, msg_id)
             ).fetchone()
         else:
             row = conn.execute(

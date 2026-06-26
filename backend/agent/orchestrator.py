@@ -2888,10 +2888,12 @@ def _run_auto_evaluation_sync(conv_id: int, msg_id: int, result: dict):
 
 
 async def _do_auto_evaluation(conv_id: int, msg_id: int, result: dict):
-    """执行自动评测：规则评估 → 低分走进化流程。"""
+    """执行自动评测：规则评估 → 写入DB → 低分走进化流程。"""
+    import json as _json
     from db.conversations import has_evaluation
     from agent.conversation_evaluator import ConversationQualityEvaluator
     from agent.conversation_evolution import process_conversation_evaluation
+    from db.eval import create_conversation_evaluation
 
     # 去重：同一消息只评测一次
     if has_evaluation(conv_id, msg_id):
@@ -2909,12 +2911,35 @@ async def _do_auto_evaluation(conv_id: int, msg_id: int, result: dict):
         logger.error(f"规则评估失败: conv={conv_id} — {e}")
         return
 
+    # ── 写入评测结果到 DB ──
+    try:
+        dims_breakdown = {}
+        for dim in evaluation.dimensions:
+            if isinstance(dim, dict):
+                dims_breakdown[dim["name"]] = {"score": dim.get("score", 0), "details": dim.get("metrics", {})}
+            elif hasattr(dim, "name"):
+                dims_breakdown[dim.name] = {"score": dim.score, "details": dim.details}
+
+        create_conversation_evaluation(
+            conversation_id=conv_id,
+            message_id=msg_id,
+            auto_score=evaluation.auto_score,
+            auto_score_breakdown=_json.dumps(dims_breakdown, ensure_ascii=False),
+            complexity=getattr(evaluation, "metadata", {}).get("complexity", "medium"),
+            specialist_count=getattr(evaluation, "metadata", {}).get("specialist_count", 0),
+            duration_ms=getattr(evaluation, "metadata", {}).get("duration_ms", 0),
+            has_cross_review=getattr(evaluation, "metadata", {}).get("has_cross_review", False),
+            has_arbitration=getattr(evaluation, "metadata", {}).get("has_arbitration", False),
+            duplicate_calls=getattr(evaluation, "metadata", {}).get("duplicate_calls", 0),
+            suggestions=_json.dumps(evaluation.suggestions, ensure_ascii=False),
+        )
+        logger.info(f"自动评测写入DB: conv={conv_id} score={evaluation.auto_score:.1f}")
+    except Exception as e:
+        logger.error(f"评测结果写入DB失败: conv={conv_id} — {e}")
+
     ev = {
         "auto_score": evaluation.auto_score,
-        "auto_score_breakdown": {
-            dim.name: {"score": dim.score, "details": dim.details}
-            for dim in evaluation.dimensions
-        },
+        "auto_score_breakdown": dims_breakdown,
         "suggestions": evaluation.suggestions,
     }
 

@@ -1533,19 +1533,31 @@ def create_alert(alert_type: str, title: str, content: str = None,
                  severity: str = "info", related_fund_code: str = None,
                  related_fund_name: str = None, source: str = None,
                  user_id: str = "default") -> int:
-    """新增风险预警，返回 alert_id。"""
+    """新增风险预警，返回 alert_id。24小时内同标题+severity不重复生成。"""
     conn = _get_conn()
-    cur = conn.execute("""
-        INSERT INTO portfolio_alerts
-            (user_id, alert_type, severity, title, content,
-             related_fund_code, related_fund_name, source)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    """, (user_id, alert_type, severity, title, content,
-          related_fund_code, related_fund_name, source))
-    alert_id = cur.lastrowid
-    conn.commit()
-    conn.close()
-    return alert_id
+    try:
+        # 去重：24小时内同 title + severity 不重复
+        existing = conn.execute("""
+            SELECT id FROM portfolio_alerts
+            WHERE user_id = ? AND title = ? AND severity = ?
+              AND created_at > datetime('now', '-1 day')
+            LIMIT 1
+        """, (user_id, title, severity)).fetchone()
+        if existing:
+            return existing['id']
+
+        cur = conn.execute("""
+            INSERT INTO portfolio_alerts
+                (user_id, alert_type, severity, title, content,
+                 related_fund_code, related_fund_name, source)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """, (user_id, alert_type, severity, title, content,
+              related_fund_code, related_fund_name, source))
+        alert_id = cur.lastrowid
+        conn.commit()
+        return alert_id
+    finally:
+        conn.close()
 
 
 def list_alerts(user_id: str = "default", limit: int = 50,
