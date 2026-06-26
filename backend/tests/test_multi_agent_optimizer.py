@@ -70,7 +70,7 @@ def test_router_rule_match_valuation():
     from agent.router import SmartRouter
     router = SmartRouter()
     result = router.route("白酒估值怎么样？")
-    assert "valuation" in result["specialists"]
+    assert "valuation_expert" in result["specialists"]
     assert result["route_by"] == "rule"
 
 
@@ -78,14 +78,14 @@ def test_router_rule_match_portfolio():
     from agent.router import SmartRouter
     router = SmartRouter()
     result = router.route("我的持仓分散吗？")
-    assert "diversification" in result["specialists"] or "allocation" in result["specialists"]
+    assert "allocation_advisor" in result["specialists"] or "wealth_advisor" in result["specialists"]
 
 
 def test_router_mention_override():
     from agent.router import SmartRouter
     router = SmartRouter()
-    result = router.route("随便问", target_specialists=["valuation"])
-    assert result["specialists"] == ["valuation"]
+    result = router.route("随便问", target_specialists=["valuation_expert"])
+    assert result["specialists"] == ["valuation_expert"]
     assert result["route_by"] == "mention"
 
 

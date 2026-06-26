@@ -390,6 +390,27 @@ from agent.memory import (
     compress_history_semantic, build_user_memory_context,
     get_token_budget, compress_rag_token_aware, estimate_tokens,
 )
+from agent.router import SmartRouter
+
+_router = SmartRouter()
+
+
+def _build_portfolio_summary(prebuilt_context: str) -> str:
+    """从预构建上下文提取前 500 字摘要。"""
+    return prebuilt_context[:500] if prebuilt_context else ""
+
+
+def _build_history_summary(history: list) -> str:
+    """压缩历史为摘要。"""
+    if not history:
+        return ""
+    recent = history[-3:]
+    parts = []
+    for msg in recent:
+        role = msg.get("role", "")
+        content = msg.get("content", "")[:200]
+        parts.append(f"{role}: {content}")
+    return "\n".join(parts)
 
 logger = logging.getLogger(__name__)
 
@@ -1639,15 +1660,33 @@ def orchestrate(query: str, history: list, rag_context: str = "", cancel_event: 
             target_specialists = None
 
     if not target_specialists:
-        clarification = clarify_requirement(query)
-        complexity = clarification["complexity"]
+        # 使用 Smart Router 选择专家和复杂度(规则优先,LLM 兜底)
+        history_summary = _build_history_summary(history)
+        portfolio_summary = ""  # 后续阶段才构建 prebuilt_context,先用空摘要
+        route_result = _router.route(
+            query,
+            history_summary=history_summary,
+            portfolio_summary=portfolio_summary,
+            target_specialists=None,
+        )
+        complexity = route_result["complexity"]
         context_config = get_context_config(complexity)
         token_budget = get_token_budget(complexity)
-        logger.info(f"需求澄清: {clarification}")
+        logger.info(f"路由结果: {route_result}")
 
-        # 使用澄清后的问题(如果有优化)
-        refined_query = clarification.get("refined_query", query)
-        specialists = clarification.get("specialists", [])
+        # 使用 LLM 兜底时可能返回优化后的问题;规则路由时保持原问题
+        refined_query = route_result.get("refined_query", query) or query
+        specialists = route_result.get("specialists", [])
+
+        # 若未命中任何专家,回退到原 clarify_requirement
+        if not specialists:
+            clarification = clarify_requirement(query)
+            complexity = clarification["complexity"]
+            context_config = get_context_config(complexity)
+            token_budget = get_token_budget(complexity)
+            logger.info(f"Smart Router 未命中,回退到需求澄清: {clarification}")
+            refined_query = clarification.get("refined_query", query)
+            specialists = clarification.get("specialists", [])
 
     # 1.5 场景化 RAG 增强:根据命中的专家类型补充相关书籍知识
     rag_context = build_scenario_rag_context(refined_query, specialists, rag_context)
@@ -2120,16 +2159,36 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
 
     if not target_specialists:
         if not resume_from:
-            yield {"type": "phase", "phase": "clarify", "message": "🔍 正在理解您的问题..."}
-        clarification = clarify_requirement(query)
-        complexity = clarification["complexity"]
+            yield {"type": "phase", "phase": "route", "message": "🔍 正在理解您的问题..."}
+        # 使用 Smart Router 选择专家和复杂度(规则优先,LLM 兜底)
+        history_summary = _build_history_summary(history)
+        portfolio_summary = ""  # 后续阶段才构建 prebuilt_context,先用空摘要
+        route_result = _router.route(
+            query,
+            history_summary=history_summary,
+            portfolio_summary=portfolio_summary,
+            target_specialists=None,
+        )
+        complexity = route_result["complexity"]
         context_config = get_context_config(complexity)
         token_budget = get_token_budget(complexity)
-        logger.info(f"需求澄清: {clarification}")
+        logger.info(f"路由结果: {route_result}")
 
-        # 使用澄清后的问题(如果有优化)
-        refined_query = clarification.get("refined_query", query)
-        specialists = clarification.get("specialists", [])
+        # 使用 LLM 兜底时可能返回优化后的问题;规则路由时保持原问题
+        refined_query = route_result.get("refined_query", query) or query
+        specialists = route_result.get("specialists", [])
+
+        # 若未命中任何专家,回退到原 clarify_requirement
+        if not specialists:
+            if not resume_from:
+                yield {"type": "phase", "phase": "clarify", "message": "🔍 正在理解您的问题..."}
+            clarification = clarify_requirement(query)
+            complexity = clarification["complexity"]
+            context_config = get_context_config(complexity)
+            token_budget = get_token_budget(complexity)
+            logger.info(f"Smart Router 未命中,回退到需求澄清: {clarification}")
+            refined_query = clarification.get("refined_query", query)
+            specialists = clarification.get("specialists", [])
 
     # 限制专家数量(避免过度分析)
     max_spec = context_config.get("max_specialists", 3)
@@ -2137,8 +2196,8 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
         logger.info(f"专家数量限制: {len(specialists)} → {max_spec},丢弃: {specialists[max_spec:]}")
         specialists = specialists[:max_spec]
 
-    # 性能监控:需求澄清耗时
-    perf_metrics["phases"]["clarification"] = int((time.time() - start_time) * 1000)
+    # 性能监控:需求澄清/路由耗时
+    perf_metrics["phases"]["routing"] = int((time.time() - start_time) * 1000)
 
     # 1.5 场景化 RAG 增强:根据命中的专家类型补充相关书籍知识
     rag_context = build_scenario_rag_context(refined_query, specialists, rag_context)
