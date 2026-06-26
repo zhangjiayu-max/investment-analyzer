@@ -80,14 +80,32 @@ def _now_str() -> str:
 
 
 def _fetch_fund_metadata_from_akshare(fund_code: str) -> dict | None:
-    """通过 akshare.fund_overview_em 获取基金元信息。"""
+    """通过 akshare.fund_overview_em 获取基金元信息，并验证 fund_code 匹配。"""
     if not _HAS_AKSHARE or ak is None:
         return None
     try:
         df = ak.fund_overview_em(symbol=fund_code)
         if df is None or len(df) == 0:
             return None
-        row = df.iloc[0]
+
+        # 优先在返回结果中查找与 fund_code 完全匹配的行
+        row = None
+        code_col = "基金代码" if "基金代码" in df.columns else None
+        if code_col:
+            for _, r in df.iterrows():
+                code_raw = _safe_str(r.get(code_col, ""))
+                code_clean = re.sub(r"（.*?）", "", code_raw).strip()
+                if code_clean == fund_code:
+                    row = r
+                    break
+        # 找不到匹配行再回退到第一行
+        if row is None:
+            row = df.iloc[0]
+            code_raw = _safe_str(row.get(code_col, fund_code)) if code_col else fund_code
+            code_clean = re.sub(r"（.*?）", "", code_raw).strip()
+            if code_clean != fund_code:
+                logger.warning(f"akshare 返回基金代码 {code_clean} 与查询 {fund_code} 不一致，使用第一行")
+
         return {
             "fund_code": re.sub(r"（.*?）", "", _safe_str(row.get("基金代码", fund_code))).strip(),
             "fund_name": _safe_str(row.get("基金简称", "")),
@@ -104,59 +122,19 @@ def _fetch_fund_metadata_from_akshare(fund_code: str) -> dict | None:
         return None
 
 
-def _classify_fund_category(fund_name: str, fund_type: str) -> str:
-    """与 db.portfolio.classify_fund_category 保持一致的本地兜底分类。"""
-    name = fund_name.strip()
-    ft = fund_type.strip()
-
-    if any(kw in name for kw in ("货币", "货基", "现金", "流动性", "添利", "增利宝")):
-        return "money_market"
-    if "同业存单" in name:
-        return "money_market"
-
-    # 可转债基金要优先于普通债券判断，避免"可转债"被"债券"关键词提前捕获
-    if "可转债" in name or "转债" in name:
-        return "convertible_bond"
-
-    if any(kw in name for kw in ("纯债", "短债", "长债", "中短债", "中长债", "利率债", "信用债")):
-        return "bond"
-    if any(kw in name for kw in ("债券", "债基", "国债", "政金")):
-        return "bond"
-    if "中债" in name and "指数" in name:
-        return "bond_index"
-
-    if any(kw in name for kw in ("指数", "ETF", "ETF联接", "联接")):
-        if any(kw in name for kw in ("债", "国债", "政金")):
-            return "bond_index"
-        return "index"
-
-    if "混合" in name or "平衡" in name or "灵活" in name:
-        if any(kw in ft for kw in ("债券", "债")):
-            return "bond"
-        return "hybrid"
-
-    if "债券型" in ft:
-        return "bond"
-    if "货币型" in ft:
-        return "money_market"
-    if "混合型" in ft:
-        return "hybrid"
-    if "股票型" in ft:
-        return "equity"
-
-    return "equity"
-
-
 def _metadata_from_akshare_dict(raw: dict) -> dict:
     """把 akshare 原始字典规整为 fund_metadata 表字段。"""
     fund_code = _safe_str(raw.get("fund_code", ""))
     fund_name = _safe_str(raw.get("fund_name", ""))
     fund_type = _safe_str(raw.get("fund_type", ""))
+    # 复用 db.portfolio 的统一分类逻辑，避免两份实现漂移
+    from db.portfolio import classify_fund_category
+
     return {
         "fund_code": fund_code,
         "fund_name": fund_name,
         "fund_type": fund_type,
-        "fund_category": _classify_fund_category(fund_name, fund_type),
+        "fund_category": classify_fund_category(fund_name, fund_type, fund_code),
         "benchmark": _safe_str(raw.get("benchmark", "")),
         "establish_date": _safe_str(raw.get("established", "")),
         "management_company": "",

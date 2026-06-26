@@ -30,24 +30,24 @@ class FundDataServiceTests(unittest.TestCase):
         init_db()
 
     def test_classify_fund_category_local(self):
-        """本地分类逻辑应能正确识别常见基金类型。"""
-        from fund_data_service import _classify_fund_category
+        """统一分类逻辑应能正确识别常见基金类型。"""
+        from db.portfolio import classify_fund_category
 
-        self.assertEqual(_classify_fund_category("某某货币基金", ""), "money_market")
-        self.assertEqual(_classify_fund_category("某某纯债债券", ""), "bond")
-        self.assertEqual(_classify_fund_category("某某沪深300指数", ""), "index")
-        self.assertEqual(_classify_fund_category("某某混合基金", ""), "hybrid")
-        self.assertEqual(_classify_fund_category("某某股票基金", ""), "equity")
-        self.assertEqual(_classify_fund_category("某某可转债基金", ""), "convertible_bond")
+        self.assertEqual(classify_fund_category("某某货币基金", ""), "money_market")
+        self.assertEqual(classify_fund_category("某某纯债债券", ""), "bond")
+        self.assertEqual(classify_fund_category("某某沪深300指数", ""), "index")
+        self.assertEqual(classify_fund_category("某某混合基金", ""), "hybrid")
+        self.assertEqual(classify_fund_category("某某股票基金", ""), "equity")
+        self.assertEqual(classify_fund_category("某某可转债基金", ""), "convertible_bond")
 
     def test_classify_uses_fund_type(self):
         """真实 fund_type 应覆盖名称启发式。"""
-        from fund_data_service import _classify_fund_category
+        from db.portfolio import classify_fund_category
 
         # 名称像指数但类型是债券型 → 应判为 bond
-        self.assertEqual(_classify_fund_category("某某中证债券指数", "债券型"), "bond")
+        self.assertEqual(classify_fund_category("某某中证债券指数", "债券型"), "bond")
         # 名称无特征但类型是混合型 → 应判为 hybrid
-        self.assertEqual(_classify_fund_category("某某优选", "混合型"), "hybrid")
+        self.assertEqual(classify_fund_category("某某优选", "混合型"), "hybrid")
 
     def test_save_and_get_latest_nav(self):
         """保存并读取净值历史缓存。"""

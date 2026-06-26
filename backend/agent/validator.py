@@ -30,19 +30,26 @@ class LightValidator:
     def _rule_checks(self, query: str, final_answer: str, context: str) -> list[str]:
         issues = []
 
-        # 1. 可执行性检查
+        # 判断用户问题是否期待操作建议（持仓、买卖、操作类）
+        action_intent_keywords = ["买", "卖", "持有", "操作", "定投", "加仓", "减仓", "止盈", "止损", "清仓", "我的", "持仓"]
+        expects_action = any(kw in query for kw in action_intent_keywords)
+
+        # 1. 可执行性检查（仅对明显需要操作建议的提问做严格检查）
         has_action = any(kw in final_answer for kw in self._ACTION_KEYWORDS)
         has_fund_code = bool(re.search(r"\b(\d{6}|\d{5,6})\b", final_answer))
         has_amount = bool(re.search(r"\d+元|\d+%|百分之\d+|仓位\d+", final_answer))
         has_trigger = any(kw in final_answer for kw in ["当", "如果", "跌至", "涨到", "分位", "阈值"])
 
-        if not has_action:
+        if expects_action and not has_action:
             issues.append("可执行性：缺少明确的操作（买/卖/持有/定投等）")
-        if has_action and not has_fund_code:
+        if expects_action and has_action and not has_fund_code:
             issues.append("可执行性：操作建议缺少具体基金代码")
-        if has_action and not has_amount:
+        if expects_action and has_action and not has_amount:
             issues.append("可执行性：缺少金额或比例")
-        if has_action and not has_trigger:
+        # 触发条件仅对买入/卖出/加仓/减仓等主动调仓动作强制要求；"持有"不要求
+        active_action_keywords = ["买入", "卖出", "加仓", "减仓", "定投", "止盈", "止损", "清仓"]
+        has_active_action = any(kw in final_answer for kw in active_action_keywords)
+        if expects_action and has_active_action and not has_trigger:
             issues.append("可执行性：缺少触发条件")
 
         # 2. 模糊表述检查

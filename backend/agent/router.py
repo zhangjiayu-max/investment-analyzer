@@ -4,6 +4,7 @@ import hashlib
 import json
 import logging
 import re
+import threading
 import time
 from typing import Optional
 
@@ -46,6 +47,7 @@ class SmartRouter:
     def __init__(self):
         self._cache = {}
         self._cache_ttl = 60  # 路由结果缓存 60 秒
+        self._lock = threading.Lock()
 
     def _cache_key(self, query: str, history_summary: str, context_hash: str) -> str:
         raw = f"{query}|{history_summary}|{context_hash}"
@@ -114,10 +116,13 @@ class SmartRouter:
         except Exception as e:
             logger.warning(f"LLM 路由兜底失败: {e}")
 
-        # 回退：返回通用配置
+        # 回退：返回通用配置（使用真实专家 key）
+        default_keys = [k for k in _load_specialist_keys() if k in ("valuation_expert", "risk_assessor")]
+        if not default_keys:
+            default_keys = ["valuation_expert", "risk_assessor"]
         return {
             "complexity": "medium",
-            "specialists": ["valuation", "risk"],
+            "specialists": default_keys,
             "reason": "LLM 路由失败，回退到默认专家",
             "needs_arbitration": True,
             "route_by": "llm_fallback",
@@ -136,35 +141,39 @@ class SmartRouter:
                 "route_by": "mention",
             }
 
-        # 2. 检查缓存
+        # 2. 检查缓存（线程安全）
         ctx_hash = hashlib.md5((history_summary + portfolio_summary).encode("utf-8")).hexdigest()[:16]
         cache_key = self._cache_key(query, history_summary, ctx_hash)
         now = time.time()
-        if cache_key in self._cache:
-            cached, ts = self._cache[cache_key]
-            if now - ts < self._cache_ttl:
-                return cached
+        with self._lock:
+            if cache_key in self._cache:
+                cached, ts = self._cache[cache_key]
+                if now - ts < self._cache_ttl:
+                    return cached
 
         # 3. 规则路由
         if get_config("router.enabled", "true") == "true":
             rule_result = self._rule_route(query)
             if rule_result:
-                self._cache[cache_key] = (rule_result, now)
+                with self._lock:
+                    self._cache[cache_key] = (rule_result, now)
                 return rule_result
 
         # 4. LLM 兜底
         if get_config("router.use_llm_fallback", "true") == "true":
             llm_result = self._llm_fallback_route(query, history_summary, portfolio_summary)
-            self._cache[cache_key] = (llm_result, now)
+            with self._lock:
+                self._cache[cache_key] = (llm_result, now)
             return llm_result
 
         # 5. 最终回退
         fallback = {
             "complexity": get_config("router.default_complexity", "medium"),
-            "specialists": ["valuation", "risk"],
+            "specialists": ["valuation_expert", "risk_assessor"],
             "reason": "路由关闭且未指定专家，使用默认配置",
             "needs_arbitration": True,
             "route_by": "default",
         }
-        self._cache[cache_key] = (fallback, now)
+        with self._lock:
+            self._cache[cache_key] = (fallback, now)
         return fallback

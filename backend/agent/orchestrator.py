@@ -354,12 +354,11 @@ def _execute_specialist_cached(tool_name: str, query: str,
     agent_key = tool_name.replace("consult_", "") if tool_name.startswith("consult_") else tool_name
     context_hash = hashlib.md5(prebuilt_context.encode("utf-8")).hexdigest()[:16] if prebuilt_context else ""
 
-    # 应用配置覆盖默认缓存参数
+    # 应用配置覆盖默认缓存参数（线程安全）
     try:
         ttl = get_config_int("cache.ttl_minutes", 5) * 60
         threshold = get_config_float("cache.similarity_threshold", 0.92)
-        expert_cache._ttl = ttl
-        expert_cache._semantic_threshold = threshold
+        expert_cache.update_config(ttl_seconds=ttl, semantic_threshold=threshold)
     except Exception:
         pass
 
@@ -1655,7 +1654,6 @@ def orchestrate(query: str, history: list, rag_context: str = "", cancel_event: 
         }
     """
     start_time = time.time()
-    total_tokens = 0  # 累计 token 用量
 
     # 0. Token 预算检查
     budget = check_token_budget()
@@ -1687,14 +1685,15 @@ def orchestrate(query: str, history: list, rag_context: str = "", cancel_event: 
         all_agents = load_specialist_agents()
         valid_specialists = [s for s in target_specialists if s in all_agents]
         if valid_specialists:
-            clarification = {
-                "complexity": "simple" if len(valid_specialists) == 1 else "medium",
+            complexity = "simple" if len(valid_specialists) == 1 else "medium"
+            route_result = {
+                "complexity": complexity,
                 "specialists": valid_specialists,
                 "reason": f"用户通过 @mention 指定了专家: {', '.join(valid_specialists)}",
+                "needs_arbitration": len(valid_specialists) >= 2,
+                "route_by": "mention",
                 "refined_query": query,
-                "confidence": 1.0,
             }
-            complexity = clarification["complexity"]
             context_config = get_context_config(complexity)
             token_budget = get_token_budget(complexity)
             refined_query = query

@@ -57,6 +57,14 @@ class ExpertCache:
         b_arr = np.array(b)
         return float(np.dot(a_arr, b_arr) / (np.linalg.norm(a_arr) * np.linalg.norm(b_arr)))
 
+    def update_config(self, ttl_seconds: int | None = None, semantic_threshold: float | None = None):
+        """线程安全地更新缓存配置。"""
+        with self._lock:
+            if ttl_seconds is not None:
+                self._ttl = ttl_seconds
+            if semantic_threshold is not None:
+                self._semantic_threshold = semantic_threshold
+
     def _cleanup_expired(self):
         now = time.time()
         expired_keys = [k for k, (_, ts) in self._cache.items() if now - ts >= self._ttl]
