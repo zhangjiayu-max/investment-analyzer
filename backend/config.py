@@ -110,6 +110,24 @@ def get_vision_config() -> tuple[str, str, str]:
     """返回视觉模型配置 (api_key, base_url, model)。"""
     return VISION_API_KEY, VISION_BASE_URL, VISION_MODEL
 
+
+def get_vision_config_db() -> tuple[str, str, str]:
+    """视觉模型配置 — 每次调用从 DB 读取，支持运行时切换。
+
+    优先级：DB system_config > 环境变量 > 默认值
+    切换 vision.provider 后下一次图片解析即生效，无需重启。
+    """
+    try:
+        from db.config import get_config
+        provider = get_config('vision.provider', 'ollama')
+        prefix = 'vision.mimo' if provider == 'mimo' else 'vision.ollama'
+        api_key = get_config(f'{prefix}.api_key', '') or VISION_API_KEY
+        base_url = get_config(f'{prefix}.base_url', '') or VISION_BASE_URL
+        model = get_config(f'{prefix}.model', '') or VISION_MODEL
+        return api_key, base_url, model
+    except Exception:
+        return get_vision_config()
+
 # 图片解析模型类型标签（仅用于日志/审计区分，实际模型由 get_vision_config 决定）
 IMAGE_PARSER_MODEL_TYPE = os.getenv("IMAGE_PARSER_MODEL_TYPE", "deepseek")
 

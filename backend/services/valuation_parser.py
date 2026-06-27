@@ -2,6 +2,7 @@
 
 import logging
 import re
+import uuid
 from datetime import date
 from pathlib import Path
 
@@ -16,7 +17,16 @@ from image_parser import ImageParser, DDImageParser
 def parse_single_valuation(path: str, model_type: str = "", source_url: str | None = None, snapshot_date: str | None = None) -> dict:
     """解析单张估值图片并存储结果（同步函数，供并发调用）。自动识别图片类型。"""
     model_type = model_type or IMAGE_PARSER_MODEL_TYPE
+    trace_id = uuid.uuid4().hex[:12]
     img_path = Path(path)
+    # 规范化：去掉 DB 中可能已存储的 data/images/ data/dd_images/ 等前缀
+    # 避免与下面 IMAGES_DIR 等 base 路径重复拼接
+    path_str = str(img_path)
+    for prefix in ['data/images/', 'data/dd_images/', 'data/']:
+        if path_str.startswith(prefix):
+            path_str = path_str[len(prefix):]
+            break
+    img_path = Path(path_str)
     if not img_path.is_absolute():
         for base in [IMAGES_DIR, VALUATION_IMAGES_DIR, DD_IMAGES_DIR]:
             candidate = base / img_path
@@ -24,7 +34,7 @@ def parse_single_valuation(path: str, model_type: str = "", source_url: str | No
                 img_path = candidate
                 break
         else:
-            img_path = IMAGES_DIR / path
+            img_path = IMAGES_DIR / path_str
     if not path or not img_path.exists():
         return {"ok": False, "error": f"图片路径无效: {img_path}", "path": path}
 
@@ -33,7 +43,7 @@ def parse_single_valuation(path: str, model_type: str = "", source_url: str | No
 
     if is_dd_image:
         # 螺丝钉估值表解析
-        dd_parser = DDImageParser(model_type=model_type)
+        dd_parser = DDImageParser(model_type=model_type, trace_id=trace_id)
         result = dd_parser.parse(str(img_path))
         result["source_path"] = str(img_path)
 
@@ -59,10 +69,10 @@ def parse_single_valuation(path: str, model_type: str = "", source_url: str | No
             conn.commit()
             conn.close()
 
-        return {"ok": result.get("ok", False), "data": result, "path": path}
+        return {"ok": result.get("ok", False), "data": result, "path": path, "trace_id": trace_id}
     else:
         # 普通估值图片解析
-        parser = ImageParser(model_type=model_type)
+        parser = ImageParser(model_type=model_type, trace_id=trace_id)
         result = parser.parse(str(img_path))
 
         # 先重命名为指数名_指标类型，再存 DB（确保 source_image 指向最终路径）
@@ -121,4 +131,4 @@ def parse_single_valuation(path: str, model_type: str = "", source_url: str | No
 
         result["new_path"] = new_rel_path
         result["new_name"] = img_path.name if new_rel_path else None
-        return {"ok": True, "data": result, "path": path}
+        return {"ok": True, "data": result, "path": path, "trace_id": trace_id}

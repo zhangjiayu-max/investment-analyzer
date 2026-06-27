@@ -1,6 +1,6 @@
 <script setup>
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
-import { listGalleryRecords, uploadDdImage, listDdImages, listDdImageDates, deleteDdImage, parseAndSaveValuation, parseValuationBatch, parseDDImage, parseDDImageAsync, parseDDBatchAsync, getDDParseTask, pollDDParseTask, uploadValuationImage, listValuationImages, listValuationImageDates, deleteValuationImage } from '../api'
+import { listGalleryRecords, uploadDdImage, listDdImages, listDdImageDates, deleteDdImage, parseAndSaveValuation, parseValuationBatch, parseDDImage, parseDDImageAsync, parseDDBatchAsync, getDDParseTask, pollDDParseTask, uploadValuationImage, listValuationImages, listValuationImageDates, deleteValuationImage, getSystemConfig, updateSystemConfig } from '../api'
 import ConfirmDialog from './ConfirmDialog.vue'
 
 // ── 并发限制工具函数 ──
@@ -280,6 +280,29 @@ function confirmViBatchParse(date, items) {
     }
   }
 }
+
+function confirmReParse(r) {
+  confirm.value = {
+    visible: true,
+    title: '重新识别估值',
+    message: `将重新使用 AI 识别「${r.index_name || r.image_path}」的估值数据，新结果会覆盖已有数据。`,
+    danger: false,
+    onConfirm: async () => {
+      confirm.value.visible = false
+      r._reparsing = true
+      try {
+        await parseAndSaveValuation(r.image_path)
+        showToast('重新识别完成', 'success')
+      } catch (e) {
+        showToast('重新识别失败: ' + (e.response?.data?.detail || e.message), 'error')
+      } finally {
+        r._reparsing = false
+      }
+      await loadRecords()
+    }
+  }
+}
+
 
 const viGroupedImages = computed(() => {
   const groups = {}
@@ -692,6 +715,32 @@ function showToast(message, type = 'info') {
   }, 3000)
 }
 
+// ── 视觉模型切换 ──
+const visionProvider = ref('ollama')
+const visionSwitching = ref(false)
+
+async function loadVisionProvider() {
+  try {
+    const { data } = await getSystemConfig('vision.provider')
+    visionProvider.value = data.value || 'ollama'
+  } catch (e) {
+    console.error('Failed to load vision provider:', e)
+  }
+}
+
+async function switchVisionProvider(provider) {
+  if (provider === visionProvider.value || visionSwitching.value) return
+  visionSwitching.value = true
+  try {
+    await updateSystemConfig('vision.provider', provider)
+    visionProvider.value = provider
+  } catch (e) {
+    console.error('Failed to switch vision provider:', e)
+  } finally {
+    visionSwitching.value = false
+  }
+}
+
 // ── 生命周期 ──
 onMounted(() => {
   loadRecords()
@@ -699,6 +748,7 @@ onMounted(() => {
   loadViImages()
   loadDdDates()
   loadDdImages()
+  loadVisionProvider()
   document.addEventListener('paste', handlePaste)
 })
 
@@ -766,6 +816,19 @@ watch(activeTab, (tab) => {
         <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"/></svg>
         螺丝钉估值
       </button>
+      <div class="vision-switch">
+        <span class="vision-label">视觉模型</span>
+        <button
+          :class="['vision-btn', { active: visionProvider === 'ollama' }]"
+          :disabled="visionSwitching"
+          @click="switchVisionProvider('ollama')"
+        >Ollama</button>
+        <button
+          :class="['vision-btn', { active: visionProvider === 'mimo' }]"
+          :disabled="visionSwitching"
+          @click="switchVisionProvider('mimo')"
+        >MiMo</button>
+      </div>
     </div>
 
     <!-- ═══ 估值图片 Tab ═══ -->
@@ -904,6 +967,11 @@ watch(activeTab, (tab) => {
                     <span v-if="r.percentile != null" class="gallery-pct">({{ r.percentile }}%)</span>
                   </div>
                 </div>
+                <button class="btn-reparse" @click.stop="confirmReParse(r)" :disabled="r._reparsing" title="重新识别">
+                  <span v-if="r._reparsing" class="spinner-xs"></span>
+                  <svg v-else width="12" height="12" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
+                  {{ r._reparsing ? '识别中...' : '重新识别' }}
+                </button>
               </div>
             </div>
           </div>
@@ -926,6 +994,11 @@ watch(activeTab, (tab) => {
                   <span v-if="r.percentile != null" class="gallery-pct">({{ r.percentile }}%)</span>
                 </div>
                 <div class="gallery-date">{{ (r.publish_time || '').slice(0, 10) }}</div>
+                <button class="btn-reparse" @click.stop="confirmReParse(r)" :disabled="r._reparsing" title="重新识别">
+                  <span v-if="r._reparsing" class="spinner-xs"></span>
+                  <svg v-else width="12" height="12" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
+                  {{ r._reparsing ? '识别中...' : '重新识别' }}
+                </button>
               </div>
             </div>
           </div>
@@ -1232,6 +1305,45 @@ watch(activeTab, (tab) => {
   display: flex;
   gap: 0;
   border-bottom: 2px solid var(--color-border);
+  align-items: center;
+}
+
+.vision-switch {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding-right: 0.25rem;
+}
+
+.vision-label {
+  font-size: 0.7rem;
+  color: var(--color-text-muted);
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.vision-btn {
+  padding: 0.25rem 0.55rem;
+  font-size: 0.68rem;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-bg-card);
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  transition: all 0.15s ease;
+  white-space: nowrap;
+}
+
+.vision-btn.active {
+  background: var(--color-primary-50);
+  color: var(--color-primary-600);
+  border-color: var(--color-primary-300);
+}
+
+.vision-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 .tab-btn {
@@ -1649,6 +1761,40 @@ watch(activeTab, (tab) => {
 .btn-parse-img .spinner-sm {
   width: 12px;
   height: 12px;
+  border-width: 1.5px;
+}
+
+.btn-reparse {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.25rem 0.5rem;
+  font-size: 0.7rem;
+  font-weight: 500;
+  color: var(--color-primary);
+  background: var(--color-primary-bg);
+  border: 1px solid var(--color-primary-200);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  margin-top: 0.25rem;
+  width: fit-content;
+}
+
+.btn-reparse:hover:not(:disabled) {
+  background: var(--color-primary-100);
+  transform: translateY(-1px);
+  box-shadow: 0 2px 6px rgba(99, 102, 241, 0.15);
+}
+
+.btn-reparse:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.btn-reparse .spinner-xs {
+  width: 10px;
+  height: 10px;
   border-width: 1.5px;
 }
 

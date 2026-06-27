@@ -3,6 +3,7 @@
 import asyncio
 import json
 import logging
+import uuid
 from pathlib import Path
 
 from config import DD_IMAGES_DIR, IMAGES_DIR, VALUATION_IMAGES_DIR
@@ -32,12 +33,13 @@ async def run_dd_parse(task_id: int, image_path: str, parse_type: str = "dd"):
 
     try:
         loop = asyncio.get_event_loop()
+        trace_id = uuid.uuid4().hex[:12]
 
         if parse_type == "dd":
-            parser = DDImageParser()
+            parser = DDImageParser(trace_id=trace_id)
             result = await loop.run_in_executor(None, parser.parse, image_path)
         else:
-            parser = ImageParser()
+            parser = ImageParser(trace_id=trace_id)
             result = await loop.run_in_executor(None, parser.parse, image_path)
 
         if parse_type == "dd" and result.get("ok"):

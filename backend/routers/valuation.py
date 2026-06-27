@@ -34,10 +34,13 @@ router = APIRouter(prefix="/api/valuation", tags=["valuation"])
 @router.post("/parse")
 async def parse_and_save(req: ParseAndSaveRequest):
     """解析图片并存储估值数据。"""
-    result = parse_single_valuation(req.path, req.model_type, req.source_url, req.snapshot_date)
+    loop = asyncio.get_event_loop()
+    result = await loop.run_in_executor(None, parse_single_valuation, req.path, req.model_type, req.source_url, req.snapshot_date)
     if not result["ok"]:
         raise HTTPException(400, result["error"])
-    return result["data"]
+    data = result["data"]
+    data["trace_id"] = result.get("trace_id", "")
+    return data
 
 
 @router.post("/parse-batch")

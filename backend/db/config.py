@@ -131,6 +131,15 @@ DEFAULT_CONFIGS = [
     ('validator.enabled', 'true', '是否启用轻量反思', 'validator'),
     ('validator.max_repair_attempts', '1', 'Validator 最大修复次数', 'validator'),
     ('validator.llm_check_enabled', 'false', '是否启用 LLM 质检（默认关闭以节约成本）', 'validator'),
+
+    # 视觉模型切换（运行时可切换，无需重启）
+    ('vision.provider', 'ollama', '视觉模型提供商（ollama / mimo）', 'vision'),
+    ('vision.ollama.api_key', 'ollama', 'Ollama API Key', 'vision'),
+    ('vision.ollama.base_url', 'http://localhost:11434/v1', 'Ollama Base URL', 'vision'),
+    ('vision.ollama.model', 'qwen3-vl:8b', 'Ollama 视觉模型名', 'vision'),
+    ('vision.mimo.api_key', 'sk-c2p99y8w5ldb1d3qp74zpit6pyzdri6fcy2qk5sr5syrvezy', 'MiMo API Key', 'vision'),
+    ('vision.mimo.base_url', 'https://api.xiaomimimo.com/v1', 'MiMo Base URL', 'vision'),
+    ('vision.mimo.model', 'mimo-v2.5', 'MiMo 视觉模型名', 'vision'),
 ]
 
 

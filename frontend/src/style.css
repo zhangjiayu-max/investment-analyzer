@@ -117,6 +117,7 @@
   --z-toast: 100;
 
   /* Spinner */
+  --spinner-xs: 10px;
   --spinner-sm: 14px;
   --spinner-md: 20px;
   --spinner-lg: 32px;
@@ -739,14 +740,8 @@ select.input-field {
 /* ══════════════════════════════════════════════════════
    Spinner
    ══════════════════════════════════════════════════════ */
-.spinner {
-  width: var(--spinner-md);
-  height: var(--spinner-md);
-  border: 2px solid var(--color-border);
-  border-top-color: var(--color-primary);
-  border-radius: 50%;
-  animation: spin 0.8s linear infinite;
-}
+.spinner { width: var(--spinner-md); height: var(--spinner-md); border: 2px solid var(--color-border); border-top-color: var(--color-primary); border-radius: 50%; animation: spin 0.8s linear infinite; }
+.spinner-xs { width: var(--spinner-xs); height: var(--spinner-xs); border-width: 1.5px; }
 .spinner-sm { width: var(--spinner-sm); height: var(--spinner-sm); border-width: 2px; }
 .spinner-lg { width: var(--spinner-lg); height: var(--spinner-lg); border-width: 3px; }
 @keyframes spin { to { transform: rotate(360deg); } }
