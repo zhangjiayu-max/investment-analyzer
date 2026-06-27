@@ -119,8 +119,11 @@ async function load() {
   try {
     const { data } = await listDecisions('', 200)
     decisions.value = data.items || []
-    // 异步加载预检查
-    decisions.value.forEach(d => loadPrecheck(d.id))
+    // 仅对待执行决策按需加载预检查（分批避免并发风暴）
+    const pendingIds = decisions.value
+      .filter(d => ['proposed', 'accepted', 'deferred'].includes(d.status))
+      .map(d => d.id)
+    loadPrechecksBatched(pendingIds)
     // 异步加载执行状态匹配
     loadExecutionStatus()
     loadCandidates()
@@ -164,6 +167,14 @@ async function loadPrecheck(decisionId) {
     const { data } = await getDecisionPrecheck(decisionId)
     precheckCache.value[decisionId] = data
   } catch { /* silent */ }
+}
+
+/** 分批加载预检查，每批 5 个并发，避免 N+1 请求风暴 */
+async function loadPrechecksBatched(decisionIds, batchSize = 5) {
+  for (let i = 0; i < decisionIds.length; i += batchSize) {
+    const batch = decisionIds.slice(i, i + batchSize)
+    await Promise.all(batch.map(id => loadPrecheck(id)))
+  }
 }
 
 // ── 状态操作 ──

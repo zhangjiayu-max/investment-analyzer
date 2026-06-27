@@ -329,7 +329,7 @@ async def create_transaction_draft_api(decision_id: int, req: TransactionDraftRe
         force=req.force,
     )
     if not result.get("ok"):
-        raise HTTPException(400, result)
+        raise HTTPException(400, result.get("error", "交易草稿创建失败"))
     return result
 
 
@@ -342,6 +342,8 @@ class PeerReviewRequest(BaseModel):
 @router.post("/api/decisions/{decision_id}/peer-review")
 async def trigger_peer_review_api(decision_id: int, req: PeerReviewRequest):
     """触发决策多模型评审。"""
+    import asyncio
+
     decision = get_decision(decision_id)
     if not decision:
         raise HTTPException(404, "决策不存在")
@@ -349,9 +351,14 @@ async def trigger_peer_review_api(decision_id: int, req: PeerReviewRequest):
     from agent.orchestrator import run_peer_review
     from db import create_peer_review, count_high_risk_reviews, update_decision_status
 
+    # 并发执行各评审类型，避免串行阻塞事件循环
+    async def _run_one(rtype):
+        return rtype, await asyncio.to_thread(run_peer_review, decision, rtype)
+
+    pairs = await asyncio.gather(*[_run_one(rt) for rt in req.reviewer_types])
+
     results = []
-    for rtype in req.reviewer_types:
-        review_result = run_peer_review(decision, rtype)
+    for rtype, review_result in pairs:
         if review_result:
             review_id = create_peer_review(
                 decision_id=decision_id,

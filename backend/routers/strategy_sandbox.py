@@ -48,8 +48,9 @@ async def get_presets():
 @router.post("/api/strategy-sandbox/backtest")
 async def run_backtest_api(req: BacktestRequest):
     """运行策略回测。"""
+    import asyncio
     try:
-        result = run_backtest(req.model_dump())
+        result = await asyncio.to_thread(run_backtest, req.model_dump())
         return result
     except Exception as e:
         raise HTTPException(500, f"回测失败: {str(e)}")

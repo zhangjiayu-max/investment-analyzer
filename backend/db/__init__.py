@@ -155,7 +155,7 @@ from db.opportunities import (
 from db.goal_buckets import (
     init_goal_bucket_tables, create_goal_bucket, get_goal_bucket,
     list_goal_buckets, update_goal_bucket, delete_goal_bucket,
-    get_goal_bucket_summary,
+    get_goal_bucket_summary, sync_bucket_from_portfolio,
 )
 
 # 回测结果持久化

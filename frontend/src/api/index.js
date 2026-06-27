@@ -1927,6 +1927,11 @@ export function deleteGoalBucket(id) {
   return api.delete(`/profile/buckets/${id}`)
 }
 
+/** 根据持仓自动同步资金桶 current_amount */
+export function syncGoalBuckets() {
+  return api.post('/profile/buckets/sync')
+}
+
 /** 全局搜索 */
 export function globalSearch(q, limit = 5) {
   return api.get('/search/global', { params: { q, limit } })

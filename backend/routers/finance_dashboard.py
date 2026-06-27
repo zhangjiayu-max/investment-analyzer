@@ -3,6 +3,8 @@
 聚合用户画像、目标桶、持仓、配置偏离、压力测试，提供单一 API 返回完整家庭财务视图。
 """
 
+import logging
+
 from fastapi import APIRouter
 
 from db import (
@@ -13,6 +15,8 @@ from db import (
     get_goal_bucket_summary,
     _get_conn,
 )
+
+logger = logging.getLogger(__name__)
 from allocation_dashboard import build_allocation_dashboard
 from stress_test import run_portfolio_stress_test
 
@@ -101,6 +105,7 @@ async def get_finance_dashboard(user_id: str = "default"):
     }
 
     # ── 5. 投资状态（配置偏离缩略） ──
+    _errors = []
     try:
         alloc = build_allocation_dashboard(user_id)
         allocation = {
@@ -109,7 +114,9 @@ async def get_finance_dashboard(user_id: str = "default"):
             "market_level": alloc.get("market_level", ""),
             "guardrails_count": len(alloc.get("guardrails", [])),
         }
-    except Exception:
+    except Exception as e:
+        logger.warning(f"配置偏离计算失败: {e}", exc_info=True)
+        _errors.append(f"配置偏离: {e}")
         allocation = {"max_drift": 0, "top_drift": None, "market_level": "", "guardrails_count": 0}
 
     # ── 6. 风险视图（取 market_drop_20 作为默认压力测试） ──
@@ -122,13 +129,15 @@ async def get_finance_dashboard(user_id: str = "default"):
             "emergency_bucket": stress.get("emergency_bucket"),
             "warnings": stress.get("warnings", []),
         }
-    except Exception:
+    except Exception as e:
+        logger.warning(f"压力测试计算失败: {e}", exc_info=True)
+        _errors.append(f"压力测试: {e}")
         risk = {
             "stress_loss_amount": 0,
             "stress_loss_ratio": 0,
             "risk_level": "low",
             "emergency_bucket": None,
-            "warnings": ["暂无持仓数据，无法计算压力测试"],
+            "warnings": ["压力测试计算失败，请检查持仓数据"],
         }
 
     # ── 健康状态提示 ──
@@ -161,6 +170,7 @@ async def get_finance_dashboard(user_id: str = "default"):
         "allocation": allocation,
         "risk": risk,
         "health_warnings": health_warnings,
+        "errors": _errors,
     }
 
 

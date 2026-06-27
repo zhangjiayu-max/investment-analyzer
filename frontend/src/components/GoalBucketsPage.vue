@@ -5,6 +5,7 @@ import {
   deleteGoalBucket,
   listGoalBuckets,
   updateGoalBucket,
+  syncGoalBuckets,
   listDecisions,
   getDecisionPrecheck,
 } from '../api'
@@ -100,6 +101,20 @@ async function load() {
     showToast('加载资金桶失败: ' + (e.response?.data?.detail || e.message), 'error')
   } finally {
     loading.value = false
+  }
+}
+
+const syncing = ref(false)
+async function syncFromPortfolio() {
+  syncing.value = true
+  try {
+    const { data } = await syncGoalBuckets()
+    items.value = data.buckets || items.value
+    showToast(`已同步 ${data.synced || 0} 个资金桶`, 'success')
+  } catch (e) {
+    showToast('同步失败: ' + (e.response?.data?.detail || e.message), 'error')
+  } finally {
+    syncing.value = false
   }
 }
 
@@ -211,10 +226,16 @@ onMounted(loadRecentDecisions)
         <h2 class="page-title">目标账户 / 资金桶</h2>
         <p class="page-desc">按资金用途、期限和风险边界分层，后续决策检查会读取这里的约束。</p>
       </div>
-      <button class="btn-secondary" @click="load" :disabled="loading">
-        <Icon :name="loading ? 'spinner' : 'refresh'" size="16" />
-        刷新
-      </button>
+      <div class="header-actions">
+        <button class="btn-secondary" @click="syncFromPortfolio" :disabled="syncing">
+          <Icon :name="syncing ? 'spinner' : 'download'" size="16" />
+          从持仓同步
+        </button>
+        <button class="btn-secondary" @click="load" :disabled="loading">
+          <Icon :name="loading ? 'spinner' : 'refresh'" size="16" />
+          刷新
+        </button>
+      </div>
     </header>
 
     <section class="summary-strip">
@@ -392,6 +413,12 @@ onMounted(loadRecentDecisions)
   justify-content: space-between;
   align-items: flex-start;
   gap: var(--space-4);
+}
+
+.header-actions {
+  display: flex;
+  gap: var(--space-2);
+  flex-shrink: 0;
 }
 
 .summary-strip {

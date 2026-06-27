@@ -61,7 +61,7 @@ def _row_to_bucket(row) -> dict:
 def _calc_progress_pct(current_amount, target_amount) -> float:
     if not target_amount or target_amount <= 0:
         return 0.0
-    return round(min((current_amount or 0) / target_amount * 100, 999.0), 2)
+    return round(min((current_amount or 0) / target_amount * 100, 100.0), 2)
 
 
 def create_goal_bucket(
@@ -218,3 +218,61 @@ def get_goal_bucket_summary(user_id: str = "default") -> dict:
         "type_counts": type_counts,
         "emergency_bucket": emergency_bucket,
     }
+
+
+def sync_bucket_from_portfolio(user_id: str = "default", total_assets: float = 0, cash_balance: float = 0) -> dict:
+    """根据实际持仓自动同步资金桶 current_amount。
+
+    策略：
+    - emergency 桶: current = min(target, cash_balance)
+    - stable 桶: current = min(target, max(0, cash_balance - emergency_filled))
+    - long_term/opportunity 桶: current = min(target, max(0, total_assets - cash_allocated))
+    - learning 桶: 不自动同步
+
+    返回更新后的桶列表。
+    """
+    buckets = list_goal_buckets(user_id=user_id, status="active")
+    if not buckets:
+        return {"synced": 0, "buckets": []}
+
+    updates = []
+    cash_remaining = cash_balance
+
+    # 先处理现金类桶（emergency → stable）
+    for b in buckets:
+        if b["bucket_type"] == "emergency":
+            new_amount = min(b.get("target_amount") or 0, cash_remaining)
+            if abs(new_amount - (b.get("current_amount") or 0)) > 0.01:
+                updates.append((b["id"], new_amount))
+            cash_remaining -= new_amount
+
+    for b in buckets:
+        if b["bucket_type"] == "stable":
+            new_amount = min(b.get("target_amount") or 0, cash_remaining)
+            if abs(new_amount - (b.get("current_amount") or 0)) > 0.01:
+                updates.append((b["id"], new_amount))
+            cash_remaining -= new_amount
+
+    # 再处理权益类桶（long_term → opportunity）
+    equity_remaining = max(0, total_assets - (cash_balance - cash_remaining))
+    for b in buckets:
+        if b["bucket_type"] in ("long_term", "opportunity"):
+            new_amount = min(b.get("target_amount") or 0, equity_remaining)
+            if abs(new_amount - (b.get("current_amount") or 0)) > 0.01:
+                updates.append((b["id"], new_amount))
+            equity_remaining -= new_amount
+
+    # 批量更新
+    if updates:
+        conn = _get_conn()
+        try:
+            for bucket_id, amount in updates:
+                conn.execute(
+                    "UPDATE goal_buckets SET current_amount = ?, updated_at = ? WHERE id = ? AND user_id = ?",
+                    (amount, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), bucket_id, user_id),
+                )
+            conn.commit()
+        finally:
+            conn.close()
+
+    return {"synced": len(updates), "buckets": list_goal_buckets(user_id=user_id, status="active")}

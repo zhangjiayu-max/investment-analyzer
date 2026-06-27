@@ -318,6 +318,13 @@ async def startup():
     except Exception as e:
         logging.warning(f"清理僵尸任务失败: {e}")
 
+    # 自动过期清理：过期的 proposed 决策和超时的建议候选
+    try:
+        from db.decisions import auto_expire_cleanup
+        auto_expire_cleanup()
+    except Exception as e:
+        logging.warning(f"决策过期清理失败: {e}")
+
     logging.info("=== 启动初始化完成 ===")
 
 

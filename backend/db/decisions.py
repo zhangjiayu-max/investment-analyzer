@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 from datetime import datetime, timedelta
 
@@ -470,6 +471,34 @@ def expire_recommendation_candidates(user_id: str = "default") -> int:
         return cur.rowcount
     finally:
         conn.close()
+
+
+def expire_stale_decisions(days: int = 14) -> int:
+    """把超过 N 天仍为 proposed 的决策标记为 expired，防止无限累积。"""
+    conn = _get_conn()
+    try:
+        cur = conn.execute(
+            """
+            UPDATE decision_records
+            SET status = 'expired', updated_at = datetime('now','localtime')
+            WHERE status = 'proposed'
+              AND date(created_at) < date('now', ?)
+            """,
+            (f"-{days} days",),
+        )
+        conn.commit()
+        return cur.rowcount
+    finally:
+        conn.close()
+
+
+def auto_expire_cleanup() -> dict:
+    """启动时自动清理过期的决策和候选，返回清理计数。"""
+    candidates_expired = expire_recommendation_candidates()
+    decisions_expired = expire_stale_decisions()
+    if candidates_expired or decisions_expired:
+        logging.info(f"自动过期清理: {decisions_expired} 条决策, {candidates_expired} 条候选")
+    return {"decisions": decisions_expired, "candidates": candidates_expired}
 
 
 def create_candidate_from_structured_recommendation(payload: dict, user_id: str = "default") -> int:

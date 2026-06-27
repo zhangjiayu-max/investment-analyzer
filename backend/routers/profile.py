@@ -21,6 +21,7 @@ from db import (
     list_goal_buckets,
     update_goal_bucket,
     update_user_profile,
+    sync_bucket_from_portfolio,
 )
 
 logger = logging.getLogger(__name__)
@@ -204,3 +205,14 @@ def api_delete_goal_bucket(bucket_id: int):
     if not ok:
         raise HTTPException(status_code=404, detail="资金桶不存在")
     return {"ok": True}
+
+
+@router.post("/api/profile/buckets/sync")
+def api_sync_buckets():
+    """根据实际持仓自动同步资金桶 current_amount。"""
+    from db.portfolio import get_portfolio_summary, get_cash_balance
+    summary = get_portfolio_summary()
+    total_assets = summary.get("total_assets", 0)
+    cash = get_cash_balance()
+    result = sync_bucket_from_portfolio("default", total_assets, cash)
+    return result

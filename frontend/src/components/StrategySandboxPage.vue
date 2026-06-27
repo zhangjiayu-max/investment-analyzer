@@ -24,6 +24,9 @@ const buyThreshold = ref(30)
 const sellThreshold = ref(70)
 const buyAmount = ref(2000)
 const sellRatio = ref(0.3)
+const equityTarget = ref(0.6)
+const frequencyMonths = ref(3)
+const driftThreshold = ref(0.05)
 
 // ── 结果 ──
 const loading = ref(false)
@@ -33,6 +36,8 @@ const strategies = [
   { key: 'dca', label: '普通定投', desc: '每月固定金额买入' },
   { key: 'valuation_dca', label: '估值加权定投', desc: '低估多投、高估少投' },
   { key: 'percentile_trade', label: '估值分位买卖', desc: '低分位买入，高分位止盈' },
+  { key: 'periodic_rebalance', label: '定期再平衡', desc: '每N个月恢复目标配比' },
+  { key: 'threshold_rebalance', label: '偏离阈值再平衡', desc: '偏离超阈值时触发' },
 ]
 
 async function loadPresets() {
@@ -58,6 +63,9 @@ function applyPreset(preset) {
   if (p.sell_threshold) sellThreshold.value = p.sell_threshold
   if (p.buy_amount) buyAmount.value = p.buy_amount
   if (p.sell_ratio) sellRatio.value = p.sell_ratio
+  if (p.equity_target) equityTarget.value = p.equity_target
+  if (p.frequency_months) frequencyMonths.value = p.frequency_months
+  if (p.drift_threshold) driftThreshold.value = p.drift_threshold
 }
 
 async function doBacktest() {
@@ -82,6 +90,9 @@ async function doBacktest() {
       sell_threshold: sellThreshold.value,
       buy_amount: buyAmount.value,
       sell_ratio: sellRatio.value,
+      equity_target: equityTarget.value,
+      frequency_months: frequencyMonths.value,
+      drift_threshold: driftThreshold.value,
     })
     result.value = data
     if (data.status === 'error') {
@@ -342,6 +353,21 @@ function toggleHistory() {
           <div class="param-section">
             <label class="param-label">止盈卖出比例</label>
             <input v-model.number="sellRatio" type="number" class="param-input" min="0" max="1" step="0.05" />
+          </div>
+        </template>
+
+        <template v-if="strategy === 'periodic_rebalance' || strategy === 'threshold_rebalance'">
+          <div class="param-section">
+            <label class="param-label">权益目标比例</label>
+            <input v-model.number="equityTarget" type="number" class="param-input" min="0" max="1" step="0.05" />
+          </div>
+          <div class="param-section" v-if="strategy === 'periodic_rebalance'">
+            <label class="param-label">再平衡频率（月）</label>
+            <input v-model.number="frequencyMonths" type="number" class="param-input" min="1" max="12" />
+          </div>
+          <div class="param-section" v-if="strategy === 'threshold_rebalance'">
+            <label class="param-label">偏离阈值</label>
+            <input v-model.number="driftThreshold" type="number" class="param-input" min="0.01" max="0.2" step="0.01" />
           </div>
         </template>
 

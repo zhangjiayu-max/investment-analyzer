@@ -395,6 +395,157 @@ def _run_buy_and_hold(series: list[dict], initial_cash: float) -> dict:
     }
 
 
+def _run_periodic_rebalance(
+    series: list[dict], initial_cash: float,
+    equity_target: float = 0.6, frequency_months: int = 3,
+    buy_fee: float = 0.0015, sell_fee: float = 0.005, mgmt_fee_annual: float = 0.015,
+) -> dict:
+    """定期再平衡：每 N 个月将组合恢复到目标股债配比。"""
+    if not series:
+        return {"total_invested": initial_cash, "final_value": initial_cash, "total_return": 0,
+                "ann_return": 0, "max_drawdown": 0, "volatility": 0, "trades": 0, "cash_idle_ratio": 0,
+                "total_fees": 0, "equity_curve": [initial_cash], "months": 0}
+
+    first_nav = series[0]["nav"]
+    equity_value = initial_cash * equity_target
+    cash = initial_cash * (1 - equity_target)
+    shares = equity_value / first_nav
+    total_invested = initial_cash
+    total_fees = equity_value * buy_fee
+    trades = 1
+    equity_curve = [round(equity_value + cash, 2)]
+
+    mgmt_fee_monthly = mgmt_fee_annual / 12
+
+    for i, point in enumerate(series[1:], 1):
+        nav = point["nav"]
+        # 扣除月度管理费（从权益部分）
+        fee = (shares * nav) * mgmt_fee_monthly
+        shares -= fee / nav
+        total_fees += fee
+        equity_value = shares * nav
+
+        # 定期再平衡
+        if i % frequency_months == 0:
+            total_value = equity_value + cash
+            if total_value > 0:
+                diff = total_value * equity_target - equity_value
+                if abs(diff) > 1:
+                    if diff > 0:
+                        buy_fee_cost = diff * buy_fee
+                        cash -= diff
+                        shares += (diff - buy_fee_cost) / nav
+                        total_fees += buy_fee_cost
+                    else:
+                        sell_amount = -diff
+                        sell_fee_cost = sell_amount * sell_fee
+                        cash += sell_amount - sell_fee_cost
+                        shares -= sell_amount / nav
+                        total_fees += sell_fee_cost
+                    trades += 1
+                    equity_value = shares * nav
+
+        equity_curve.append(round(equity_value + cash, 2))
+
+    final_value = equity_curve[-1]
+    total_return = (final_value - total_invested) / total_invested if total_invested > 0 else 0
+    months = len(series)
+    cash_idle = cash / final_value if final_value > 0 else 0
+
+    return {
+        "total_invested": round(total_invested, 2),
+        "final_value": round(final_value, 2),
+        "total_return": round(total_return, 4),
+        "ann_return": round(_ann_return(total_return, months), 4),
+        "max_drawdown": round(_max_drawdown(equity_curve), 4),
+        "volatility": round(_volatility([
+            (equity_curve[i] - equity_curve[i - 1]) / equity_curve[i - 1]
+            for i in range(1, len(equity_curve))
+        ]) if len(equity_curve) > 1 else 0, 4),
+        "trades": trades,
+        "cash_idle_ratio": round(cash_idle, 4),
+        "total_fees": round(total_fees, 2),
+        "equity_curve": [round(v, 2) for v in equity_curve],
+        "months": months,
+    }
+
+
+def _run_threshold_rebalance(
+    series: list[dict], initial_cash: float,
+    equity_target: float = 0.6, drift_threshold: float = 0.05,
+    buy_fee: float = 0.0015, sell_fee: float = 0.005, mgmt_fee_annual: float = 0.015,
+) -> dict:
+    """偏离阈值再平衡：当权益仓位偏离目标超过阈值时触发再平衡。"""
+    if not series:
+        return {"total_invested": initial_cash, "final_value": initial_cash, "total_return": 0,
+                "ann_return": 0, "max_drawdown": 0, "volatility": 0, "trades": 0, "cash_idle_ratio": 0,
+                "total_fees": 0, "equity_curve": [initial_cash], "months": 0}
+
+    first_nav = series[0]["nav"]
+    equity_value = initial_cash * equity_target
+    cash = initial_cash * (1 - equity_target)
+    shares = equity_value / first_nav
+    total_invested = initial_cash
+    total_fees = equity_value * buy_fee
+    trades = 1
+    equity_curve = [round(equity_value + cash, 2)]
+
+    mgmt_fee_monthly = mgmt_fee_annual / 12
+
+    for point in series[1:]:
+        nav = point["nav"]
+        # 扣除月度管理费
+        fee = (shares * nav) * mgmt_fee_monthly
+        shares -= fee / nav
+        total_fees += fee
+        equity_value = shares * nav
+
+        # 检查偏离阈值
+        total_value = equity_value + cash
+        if total_value > 0:
+            actual_ratio = equity_value / total_value
+            if abs(actual_ratio - equity_target) > drift_threshold:
+                diff = total_value * equity_target - equity_value
+                if abs(diff) > 1:
+                    if diff > 0:
+                        buy_fee_cost = diff * buy_fee
+                        cash -= diff
+                        shares += (diff - buy_fee_cost) / nav
+                        total_fees += buy_fee_cost
+                    else:
+                        sell_amount = -diff
+                        sell_fee_cost = sell_amount * sell_fee
+                        cash += sell_amount - sell_fee_cost
+                        shares -= sell_amount / nav
+                        total_fees += sell_fee_cost
+                    trades += 1
+                    equity_value = shares * nav
+
+        equity_curve.append(round(equity_value + cash, 2))
+
+    final_value = equity_curve[-1]
+    total_return = (final_value - total_invested) / total_invested if total_invested > 0 else 0
+    months = len(series)
+    cash_idle = cash / final_value if final_value > 0 else 0
+
+    return {
+        "total_invested": round(total_invested, 2),
+        "final_value": round(final_value, 2),
+        "total_return": round(total_return, 4),
+        "ann_return": round(_ann_return(total_return, months), 4),
+        "max_drawdown": round(_max_drawdown(equity_curve), 4),
+        "volatility": round(_volatility([
+            (equity_curve[i] - equity_curve[i - 1]) / equity_curve[i - 1]
+            for i in range(1, len(equity_curve))
+        ]) if len(equity_curve) > 1 else 0, 4),
+        "trades": trades,
+        "cash_idle_ratio": round(cash_idle, 4),
+        "total_fees": round(total_fees, 2),
+        "equity_curve": [round(v, 2) for v in equity_curve],
+        "months": months,
+    }
+
+
 def run_backtest(params: dict) -> dict:
     """运行回测。
 
@@ -414,13 +565,9 @@ def run_backtest(params: dict) -> dict:
     monthly_amount = float(params.get("monthly_amount", 1000))
     days = int(params.get("days", 365 * 3))
 
-    # 获取数据
-    if target_type == "fund":
-        nav_series = _get_nav_series(target_code, days=days)
-        valuation_series = _get_valuation_series(target_code, days=days)
-    else:
-        nav_series = _get_nav_series(target_code, days=days)
-        valuation_series = _get_valuation_series(target_code, days=days)
+    # 获取数据（fund 和 index 走相同数据源）
+    nav_series = _get_nav_series(target_code, days=days)
+    valuation_series = _get_valuation_series(target_code, days=days)
 
     if not nav_series:
         return {
@@ -461,8 +608,25 @@ def run_backtest(params: dict) -> dict:
             sell_ratio=float(params.get("sell_ratio", 0.3)),
             buy_fee=buy_fee, sell_fee=sell_fee, mgmt_fee_annual=mgmt_fee,
         )
+    elif strategy == "periodic_rebalance":
+        result = _run_periodic_rebalance(
+            series, initial_cash,
+            equity_target=float(params.get("equity_target", 0.6)),
+            frequency_months=int(params.get("frequency_months", 3)),
+            buy_fee=buy_fee, sell_fee=sell_fee, mgmt_fee_annual=mgmt_fee,
+        )
+    elif strategy == "threshold_rebalance":
+        result = _run_threshold_rebalance(
+            series, initial_cash,
+            equity_target=float(params.get("equity_target", 0.6)),
+            drift_threshold=float(params.get("drift_threshold", 0.05)),
+            buy_fee=buy_fee, sell_fee=sell_fee, mgmt_fee_annual=mgmt_fee,
+        )
     else:
-        result = _run_dca(series, initial_cash, monthly_amount, buy_fee, sell_fee, mgmt_fee)
+        return {
+            "status": "error",
+            "error": f"未知策略: {strategy}",
+        }
 
     # 基准对比：买入持有
     benchmark = _run_buy_and_hold(series, initial_cash)
