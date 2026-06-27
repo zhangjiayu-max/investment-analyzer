@@ -106,9 +106,12 @@ async def _run_panorama_async(record_id: int, system_prompt: str, holdings: list
         )
 
         _track_agent(uid, "全景诊断分析师", "持仓诊断")
+        import uuid
+        trace_id = f"pano_{uuid.uuid4().hex[:12]}"
         from llm_service import _call_llm, MODEL
         response = await asyncio.to_thread(lambda: _call_llm(
             caller="portfolio_panorama",
+            trace_id=trace_id,
             model=MODEL,
             messages=[
                 {"role": "system", "content": system_prompt},

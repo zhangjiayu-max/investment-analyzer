@@ -100,10 +100,13 @@ async def fund_analysis_api(req: dict):
 
 async def _run_fund_analysis_async(record_id: int, system_prompt: str, user_content: str):
     """后台执行指定基金分析。"""
+    import uuid
+    trace_id = f"fund_{uuid.uuid4().hex[:12]}"
     try:
         from llm_service import _call_llm, MODEL
         response = await asyncio.to_thread(lambda: _call_llm(
             caller="portfolio_fund_analysis",
+            trace_id=trace_id,
             model=MODEL,
             messages=[
                 {"role": "system", "content": system_prompt},

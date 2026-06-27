@@ -253,10 +253,13 @@ async def fund_deep_dive_api(holding_id: int, req: DeepDiveRequest):
 
 async def _run_deep_dive_async(record_id: int, system_prompt: str, user_content: str):
     """后台执行单基金深度分析。"""
+    import uuid
+    trace_id = f"deep_{uuid.uuid4().hex[:12]}"
     try:
         from llm_service import _call_llm, MODEL
         response = await asyncio.to_thread(lambda: _call_llm(
             caller="portfolio_deep_dive",
+            trace_id=trace_id,
             model=MODEL,
             messages=[
                 {"role": "system", "content": system_prompt},

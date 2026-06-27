@@ -173,10 +173,8 @@ def run_daily_position_advice(user_id: str = "default", trigger_type: str = "man
                 if sev in stats:
                     stats[sev] += 1
 
-        # watch 信号写入 portfolio_alerts 轻量提醒
-        for s in saved_signals:
-            if s.get("severity") == "watch" and s.get("id"):
-                _create_portfolio_alert_from_signal(s, user_id)
+        # watch 信号不再写入 portfolio_alerts（避免与 daily_position_signals 双写）
+        # 前端统一从 /api/daily-advice/signals 获取所有信号
 
         # 强建议写入 recommendation_candidates
         for s in saved_signals:

@@ -591,8 +591,10 @@ async def calc_health_score() -> dict:
 建议：{'; '.join(advice[:5])}
 
 请用温和专业的语气，不超过150字。"""
+        import uuid
+        trace_id = f"hlth_{uuid.uuid4().hex[:12]}"
         resp = await asyncio.to_thread(lambda: _call_llm(
-            caller="health_score", model=MODEL,
+            caller="health_score", trace_id=trace_id, model=MODEL,
             messages=[{"role": "user", "content": prompt}],
             temperature=0.3, max_tokens=500,
         ))

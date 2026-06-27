@@ -70,11 +70,14 @@ async def get_today(user_id: str = "default"):
     # 候选 ID
     candidate_ids = [s.get("candidate_id") for s in signals if s.get("candidate_id")]
 
+    # 过滤掉 hold 类型的 info 信号（无行动价值，减少噪音）
+    display_signals = [s for s in signals if s.get("signal_type") != "hold"]
+
     return {
         "run": run,
         "headline": headline,
         "stats": stats,
-        "signals": signals,
+        "signals": display_signals,
         "candidate_ids": candidate_ids,
     }
 
@@ -91,7 +94,9 @@ async def list_signals_api(user_id: str = "default", signal_date: Optional[str] 
     from datetime import datetime
     if not signal_date:
         signal_date = datetime.now().strftime("%Y-%m-%d")
-    return {"signals": list_today_signals(user_id, signal_date)}
+    signals = list_today_signals(user_id, signal_date)
+    # 过滤掉 hold 类型的 info 信号（无行动价值，减少噪音）
+    return {"signals": [s for s in signals if s.get("signal_type") != "hold"]}
 
 
 @router.post("/api/daily-advice/signals/{signal_id}/read")

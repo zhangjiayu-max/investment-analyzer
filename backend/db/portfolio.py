@@ -1709,6 +1709,21 @@ def get_unread_alert_count(user_id: str = "default") -> int:
     return row["cnt"] if row else 0
 
 
+def cleanup_old_alerts(user_id: str = "default", days: int = 30) -> int:
+    """清理已读预警中超过 N 天的记录，返回删除条数。"""
+    conn = _get_conn()
+    try:
+        cur = conn.execute("""
+            DELETE FROM portfolio_alerts
+            WHERE user_id = ? AND is_read = 1 AND created_at < datetime('now', ? || ' days')
+        """, (user_id, f"-{days}"))
+        deleted = cur.rowcount
+        conn.commit()
+        return deleted
+    finally:
+        conn.close()
+
+
 def mark_alert_read(alert_id: int) -> bool:
     """标记预警为已读（同时标记同标题+severity的所有未读预警）。"""
     conn = _get_conn()
