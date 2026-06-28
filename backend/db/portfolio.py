@@ -1456,6 +1456,341 @@ def lookup_fund_info(fund_code: str) -> dict | None:
         return None
 
 
+def compare_funds(fund_a: str, fund_b: str) -> dict:
+    """两只基金六维对比：收益/回撤/波动/费率/规模/经理。
+
+    返回结构化对比结果，含 overall_winner 和 verdict。
+    """
+    import time as _time
+
+    def _safe_float(val, default=None):
+        try:
+            if val is None or val == "":
+                return default
+            v = float(val)
+            return v if v == v else default  # NaN check
+        except (ValueError, TypeError):
+            return default
+
+    def _parse_scale(scale_str: str) -> float | None:
+        """解析规模字符串，返回亿元数值。'50亿' -> 50.0"""
+        if not scale_str:
+            return None
+        s = str(scale_str).strip()
+        # 匹配 "50亿" / "50.3亿" / "50亿元"
+        import re as _re
+        m = _re.search(r'([\d.]+)\s*亿', s)
+        if m:
+            return float(m.group(1))
+        # 匹配纯数字（假设单位为亿）
+        try:
+            return float(s)
+        except ValueError:
+            return None
+
+    def _get_fund_metrics(fund_code: str) -> dict:
+        """获取单只基金的六维指标。"""
+        info = lookup_fund_info(fund_code) or {}
+        metrics = {
+            "code": fund_code,
+            "name": info.get("fund_name", fund_code),
+            "type": info.get("fund_type", ""),
+            "fund_manager": info.get("fund_manager", ""),
+            "fee_rate": None,
+            "scale": info.get("scale", ""),
+            "scale_value": _parse_scale(info.get("scale", "")),
+            "return_1y": None,
+            "return_3y": None,
+            "max_drawdown": None,
+            "volatility": None,
+        }
+
+        # 尝试从费率字段解析
+        # lookup_fund_info 没有直接的费率字段，尝试 akshare 获取
+        try:
+            import akshare as ak
+            # 获取基金费率信息
+            fee_df = ak.fund_fee_fund_ratio_em(symbol=fund_code)
+            if fee_df is not None and len(fee_df) > 0:
+                # 取管理费率或申购费率
+                for _, row in fee_df.iterrows():
+                    fee_type = str(row.get("费用类型", ""))
+                    if "管理" in fee_type:
+                        metrics["fee_rate"] = _safe_float(row.get("费率"))
+                        break
+                if metrics["fee_rate"] is None:
+                    # 取第一行作为近似
+                    metrics["fee_rate"] = _safe_float(fee_df.iloc[0].get("费率"))
+        except Exception:
+            pass
+
+        # 尝试用 akshare 获取历史净值计算收益/回撤/波动
+        nav_series = []  # [(date_str, nav_float), ...]
+        try:
+            import akshare as ak
+            df = ak.fund_open_fund_info_em(symbol=fund_code, indicator="累计净值走势")
+            if df is not None and len(df) > 0:
+                for _, row in df.iterrows():
+                    d = str(row.get("净值日期", ""))
+                    v = _safe_float(row.get("累计净值"))
+                    if d and v is not None:
+                        nav_series.append((d, v))
+        except Exception:
+            pass
+
+        # akshare 失败，降级用本地净值历史
+        if not nav_series:
+            try:
+                local_data = get_fund_nav_history(fund_code, days=1095)
+                if local_data and local_data.get("nav_history"):
+                    for item in local_data["nav_history"]:
+                        d = item.get("date", "")
+                        v = _safe_float(item.get("nav"))
+                        if d and v is not None:
+                            nav_series.append((d, v))
+            except Exception:
+                pass
+
+        # 也尝试用 fetch_fund_nav_on_or_before 获取最新净值
+        if not nav_series:
+            try:
+                from datetime import date as _date
+                nav_data = fetch_fund_nav_on_or_before(fund_code, _date.today().isoformat())
+                if nav_data and nav_data.get("nav"):
+                    nav_series.append((nav_data.get("date", ""), float(nav_data["nav"])))
+            except Exception:
+                pass
+
+        if len(nav_series) >= 2:
+            nav_series.sort(key=lambda x: x[0])
+            latest_nav = nav_series[-1][1]
+            latest_date = nav_series[-1][0]
+
+            from datetime import datetime as _dt, timedelta as _td
+            try:
+                latest_dt = _dt.strptime(latest_date, "%Y-%m-%d")
+            except ValueError:
+                latest_dt = _dt.now()
+
+            # 1年收益率
+            one_year_ago = (latest_dt - _td(days=365)).strftime("%Y-%m-%d")
+            nav_1y = None
+            for d, v in nav_series:
+                if d <= one_year_ago:
+                    nav_1y = v
+                else:
+                    break
+            if nav_1y and nav_1y > 0:
+                metrics["return_1y"] = round((latest_nav / nav_1y - 1) * 100, 2)
+
+            # 3年收益率
+            three_years_ago = (latest_dt - _td(days=1095)).strftime("%Y-%m-%d")
+            nav_3y = None
+            for d, v in nav_series:
+                if d <= three_years_ago:
+                    nav_3y = v
+                else:
+                    break
+            if nav_3y and nav_3y > 0:
+                metrics["return_3y"] = round((latest_nav / nav_3y - 1) * 100, 2)
+
+            # 最大回撤（近3年）
+            max_nav = nav_series[0][1]
+            max_dd = 0.0
+            for _, v in nav_series:
+                if v > max_nav:
+                    max_nav = v
+                dd = (v - max_nav) / max_nav if max_nav > 0 else 0
+                if dd < max_dd:
+                    max_dd = dd
+            metrics["max_drawdown"] = round(max_dd * 100, 2)
+
+            # 波动率（近1年日收益率标准差年化）
+            if len(nav_series) >= 30:
+                # 取近1年数据
+                one_year_data = [(d, v) for d, v in nav_series if d >= one_year_ago]
+                if len(one_year_data) >= 10:
+                    returns = []
+                    for i in range(1, len(one_year_data)):
+                        prev = one_year_data[i - 1][1]
+                        curr = one_year_data[i][1]
+                        if prev > 0:
+                            returns.append((curr / prev - 1))
+                    if returns:
+                        import statistics
+                        vol = statistics.pstdev(returns) * (252 ** 0.5) * 100
+                        metrics["volatility"] = round(vol, 2)
+
+        return metrics
+
+    # 获取两只基金指标（各自最多10秒）
+    # akshare 调用本身有超时，这里不做额外限制，依赖 akshare 内部超时
+    metrics_a = _get_fund_metrics(fund_a)
+    metrics_b = _get_fund_metrics(fund_b)
+
+    # 构建对比维度
+    comparison = {}
+    a_wins = 0
+    b_wins = 0
+
+    # 1. 近1年收益率（高的赢）
+    ra, rb = metrics_a["return_1y"], metrics_b["return_1y"]
+    if ra is not None and rb is not None:
+        winner = "a" if ra > rb else ("b" if rb > ra else None)
+        if winner == "a": a_wins += 1
+        elif winner == "b": b_wins += 1
+        comparison["return_1y"] = {"a": ra, "b": rb, "winner": winner}
+    elif ra is not None:
+        comparison["return_1y"] = {"a": ra, "b": None, "winner": "a"}
+        a_wins += 1
+    elif rb is not None:
+        comparison["return_1y"] = {"a": None, "b": rb, "winner": "b"}
+        b_wins += 1
+    else:
+        comparison["return_1y"] = {"a": None, "b": None, "winner": None}
+
+    # 2. 近3年收益率（高的赢）
+    ra, rb = metrics_a["return_3y"], metrics_b["return_3y"]
+    if ra is not None and rb is not None:
+        winner = "a" if ra > rb else ("b" if rb > ra else None)
+        if winner == "a": a_wins += 1
+        elif winner == "b": b_wins += 1
+        comparison["return_3y"] = {"a": ra, "b": rb, "winner": winner}
+    elif ra is not None:
+        comparison["return_3y"] = {"a": ra, "b": None, "winner": "a"}
+        a_wins += 1
+    elif rb is not None:
+        comparison["return_3y"] = {"a": None, "b": rb, "winner": "b"}
+        b_wins += 1
+    else:
+        comparison["return_3y"] = {"a": None, "b": None, "winner": None}
+
+    # 3. 最大回撤（小的赢）
+    da, db = metrics_a["max_drawdown"], metrics_b["max_drawdown"]
+    if da is not None and db is not None:
+        winner = "a" if da > db else ("b" if db > da else None)  # 回撤值更大=更小回撤
+        if winner == "a": a_wins += 1
+        elif winner == "b": b_wins += 1
+        comparison["max_drawdown"] = {"a": da, "b": db, "winner": winner}
+    elif da is not None:
+        comparison["max_drawdown"] = {"a": da, "b": None, "winner": "a"}
+        a_wins += 1
+    elif db is not None:
+        comparison["max_drawdown"] = {"a": None, "b": db, "winner": "b"}
+        b_wins += 1
+    else:
+        comparison["max_drawdown"] = {"a": None, "b": None, "winner": None}
+
+    # 4. 波动率（小的赢）
+    va, vb = metrics_a["volatility"], metrics_b["volatility"]
+    if va is not None and vb is not None:
+        winner = "a" if va < vb else ("b" if vb < va else None)
+        if winner == "a": a_wins += 1
+        elif winner == "b": b_wins += 1
+        comparison["volatility"] = {"a": va, "b": vb, "winner": winner}
+    elif va is not None:
+        comparison["volatility"] = {"a": va, "b": None, "winner": "a"}
+        a_wins += 1
+    elif vb is not None:
+        comparison["volatility"] = {"a": None, "b": vb, "winner": "b"}
+        b_wins += 1
+    else:
+        comparison["volatility"] = {"a": None, "b": None, "winner": None}
+
+    # 5. 费率（低的赢）
+    fa, fb = metrics_a["fee_rate"], metrics_b["fee_rate"]
+    if fa is not None and fb is not None:
+        winner = "a" if fa < fb else ("b" if fb < fa else None)
+        if winner == "a": a_wins += 1
+        elif winner == "b": b_wins += 1
+        comparison["fee_rate"] = {"a": fa, "b": fb, "winner": winner}
+    elif fa is not None:
+        comparison["fee_rate"] = {"a": fa, "b": None, "winner": "a"}
+        a_wins += 1
+    elif fb is not None:
+        comparison["fee_rate"] = {"a": None, "b": fb, "winner": "b"}
+        b_wins += 1
+    else:
+        comparison["fee_rate"] = {"a": None, "b": None, "winner": None}
+
+    # 6. 规模（大的赢）
+    sa, sb = metrics_a["scale_value"], metrics_b["scale_value"]
+    if sa is not None and sb is not None:
+        winner = "a" if sa > sb else ("b" if sb > sa else None)
+        if winner == "a": a_wins += 1
+        elif winner == "b": b_wins += 1
+        comparison["scale"] = {"a": metrics_a["scale"], "b": metrics_b["scale"], "winner": winner}
+    elif sa is not None:
+        comparison["scale"] = {"a": metrics_a["scale"], "b": None, "winner": "a"}
+        a_wins += 1
+    elif sb is not None:
+        comparison["scale"] = {"a": None, "b": metrics_b["scale"], "winner": "b"}
+        b_wins += 1
+    else:
+        comparison["scale"] = {"a": metrics_a["scale"], "b": metrics_b["scale"], "winner": None}
+
+    # 综合胜出
+    if a_wins > b_wins:
+        overall_winner = "a"
+    elif b_wins > a_wins:
+        overall_winner = "b"
+    else:
+        overall_winner = "tie"
+
+    # 生成评语
+    name_a = metrics_a["name"]
+    name_b = metrics_b["name"]
+    if overall_winner == "a":
+        # 分析A的优势维度
+        a_advantages = []
+        b_advantages = []
+        for dim, label in [("return_1y", "近1年收益"), ("return_3y", "近3年收益"),
+                           ("max_drawdown", "回撤控制"), ("volatility", "波动率"),
+                           ("fee_rate", "费率"), ("scale", "规模")]:
+            w = comparison.get(dim, {}).get("winner")
+            if w == "a":
+                a_advantages.append(label)
+            elif w == "b":
+                b_advantages.append(label)
+        a_str = "、".join(a_advantages) if a_advantages else "综合指标"
+        b_str = "、".join(b_advantages) if b_advantages else "部分维度"
+        verdict = f"综合来看，{name_a}更适合追求收益与性价比的投资者。"
+        if b_advantages:
+            verdict += f"虽然{name_b}在{b_str}上占优，但{name_a}在{a_str}方面表现更突出。"
+        else:
+            verdict += f"{name_a}在{a_str}方面全面领先。"
+    elif overall_winner == "b":
+        a_advantages = []
+        b_advantages = []
+        for dim, label in [("return_1y", "近1年收益"), ("return_3y", "近3年收益"),
+                           ("max_drawdown", "回撤控制"), ("volatility", "波动率"),
+                           ("fee_rate", "费率"), ("scale", "规模")]:
+            w = comparison.get(dim, {}).get("winner")
+            if w == "a":
+                a_advantages.append(label)
+            elif w == "b":
+                b_advantages.append(label)
+        a_str = "、".join(a_advantages) if a_advantages else "部分维度"
+        b_str = "、".join(b_advantages) if b_advantages else "综合指标"
+        verdict = f"综合来看，{name_b}更适合追求稳健与性价比的投资者。"
+        if a_advantages:
+            verdict += f"虽然{name_a}在{a_str}上占优，但{name_b}在{b_str}方面表现更突出。"
+        else:
+            verdict += f"{name_b}在{b_str}方面全面领先。"
+    else:
+        verdict = f"两只基金各项指标势均力敌。{name_a}和{name_b}在不同维度各有优势，建议根据个人风险偏好和投资目标选择。"
+
+    return {
+        "fund_a": {"code": fund_a, "name": name_a, "type": metrics_a["type"],
+                    "fund_manager": metrics_a["fund_manager"]},
+        "fund_b": {"code": fund_b, "name": name_b, "type": metrics_b["type"],
+                    "fund_manager": metrics_b["fund_manager"]},
+        "comparison": comparison,
+        "overall_winner": overall_winner,
+        "verdict": verdict,
+    }
+
+
 def classify_bond_type(bond_name: str) -> str:
     """根据债券名称推断类型：利率债/信用债/可转债。"""
     name = bond_name.strip()
@@ -1907,6 +2242,217 @@ def get_transaction_summary(user_id: str = "default") -> dict:
         "total_tx_count": buy_count + sell_count,
         "net_investment": round(buy_total - sell_total, 2),
         "recent_transactions": [dict(r) for r in recent],
+    }
+
+
+def analyze_trade_patterns(user_id: str = "default") -> dict:
+    """分析用户真实交易行为模式（排除系统交易）。
+
+    返回追涨倾向、杀跌倾向、持有耐心、频繁交易度、胜率、最大单笔亏损、交易风格判定。
+    """
+    conn = _get_conn()
+
+    # 获取所有非系统交易（含 fund_name 从 holdings 关联）
+    rows = conn.execute("""
+        SELECT t.id, t.holding_id, t.fund_code, t.fund_name, t.transaction_type,
+               t.shares, t.price, t.amount, t.transaction_date, t.status, t.is_system,
+               h.index_code, h.fund_name as holding_fund_name
+        FROM portfolio_transactions t
+        LEFT JOIN portfolio_holdings h ON t.holding_id = h.id
+        WHERE t.user_id = ?
+          AND (t.is_system IS NULL OR t.is_system = 0)
+          AND (t.status IN ('confirmed', 'settled') OR t.status IS NULL)
+        ORDER BY t.transaction_date ASC, t.id ASC
+    """, (user_id,)).fetchall()
+
+    if not rows or len(rows) < 3:
+        conn.close()
+        return {"error": "交易记录不足", "count": len(rows) if rows else 0}
+
+    txs = [dict(r) for r in rows]
+
+    # ── 按基金代码分组，计算买入均价（份额加权）──
+    fund_buys = {}  # {fund_code: [{shares, price, amount, date}, ...]}
+    fund_sells = []  # [{fund_code, shares, price, amount, date, buy_avg_price}, ...]
+
+    for tx in txs:
+        fc = tx["fund_code"]
+        if tx["transaction_type"] == "buy":
+            fund_buys.setdefault(fc, []).append({
+                "shares": tx.get("shares") or 0,
+                "price": tx.get("price") or 0,
+                "amount": tx.get("amount") or 0,
+                "date": tx.get("transaction_date", ""),
+            })
+        elif tx["transaction_type"] == "sell":
+            fund_sells.append({
+                "fund_code": fc,
+                "shares": tx.get("shares") or 0,
+                "price": tx.get("price") or 0,
+                "amount": tx.get("amount") or 0,
+                "date": tx.get("transaction_date", ""),
+            })
+
+    # 计算每只基金的加权平均买入价（卖出时扣减份额）
+    def _calc_buy_avg(buy_list, sell_shares_so_far=0):
+        """计算当前买入均价（考虑已卖出份额扣减）。"""
+        total_cost = 0.0
+        total_shares = 0.0
+        remaining_sells = sell_shares_so_far
+        for b in buy_list:
+            shares = b["shares"]
+            if remaining_sells > 0:
+                if remaining_sells >= shares:
+                    remaining_sells -= shares
+                    continue
+                else:
+                    shares -= remaining_sells
+                    remaining_sells = 0
+            total_cost += b["price"] * shares
+            total_shares += shares
+        return total_cost / total_shares if total_shares > 0 else 0
+
+    # ── 追涨倾向：买入时的PE分位中位数 ──
+    buy_pe_percentiles = []
+    for tx in txs:
+        if tx["transaction_type"] != "buy":
+            continue
+        index_code = tx.get("index_code")
+        if not index_code:
+            continue
+        tx_date = tx.get("transaction_date", "")
+        val_row = conn.execute("""
+            SELECT percentile FROM index_valuations
+            WHERE index_code = ? AND metric_type = '市盈率'
+              AND snapshot_date BETWEEN date(?, '-7 days') AND date(?, '+7 days')
+            ORDER BY ABS(julianday(snapshot_date) - julianday(?))
+            LIMIT 1
+        """, (index_code, tx_date, tx_date, tx_date)).fetchone()
+        if val_row and val_row["percentile"] is not None:
+            buy_pe_percentiles.append(float(val_row["percentile"]))
+
+    # ── 杀跌倾向 + 胜率 + 最大单笔亏损 ──
+    sell_loss_pcts = []  # 亏损幅度列表（负数=亏损）
+    win_count = 0
+    max_loss = 0.0  # 最大单笔亏损金额（正数）
+    holding_days_list = []  # 持有天数
+
+    # 按基金代码，模拟先进先出计算卖出时的盈亏
+    fund_buy_queue = {}  # {fund_code: [{shares, price, date}, ...]}
+    for tx in txs:
+        fc = tx["fund_code"]
+        if tx["transaction_type"] == "buy":
+            fund_buy_queue.setdefault(fc, []).append({
+                "shares": tx.get("shares") or 0,
+                "price": tx.get("price") or 0,
+                "date": tx.get("transaction_date", ""),
+            })
+        elif tx["transaction_type"] == "sell":
+            queue = fund_buy_queue.get(fc, [])
+            sell_shares = tx.get("shares") or 0
+            sell_price = tx.get("price") or 0
+            sell_date = tx.get("transaction_date", "")
+
+            remaining = sell_shares
+            total_cost = 0.0
+            buy_dates_for_this_sell = []
+            while remaining > 0 and queue:
+                lot = queue[0]
+                if lot["shares"] <= remaining:
+                    total_cost += lot["shares"] * lot["price"]
+                    buy_dates_for_this_sell.append(lot["date"])
+                    remaining -= lot["shares"]
+                    queue.pop(0)
+                else:
+                    total_cost += remaining * lot["price"]
+                    buy_dates_for_this_sell.append(lot["date"])
+                    lot["shares"] -= remaining
+                    remaining = 0
+
+            actual_sell_amount = sell_shares * sell_price
+            profit = actual_sell_amount - total_cost
+            loss_pct = (profit / total_cost * 100) if total_cost > 0 else 0
+            sell_loss_pcts.append(loss_pct)
+
+            if profit > 0:
+                win_count += 1
+            if profit < 0 and abs(profit) > max_loss:
+                max_loss = abs(profit)
+
+            # 持有天数：用最早买入日期到卖出日期
+            if buy_dates_for_this_sell:
+                try:
+                    from datetime import datetime as _dt
+                    earliest_buy = min(buy_dates_for_this_sell)
+                    d_buy = _dt.strptime(earliest_buy[:10], "%Y-%m-%d")
+                    d_sell = _dt.strptime(sell_date[:10], "%Y-%m-%d")
+                    holding_days_list.append((d_sell - d_buy).days)
+                except Exception:
+                    pass
+
+    # ── 频繁交易度：月均交易次数 ──
+    try:
+        from datetime import datetime as _dt2
+        dates = [t["transaction_date"] for t in txs if t.get("transaction_date")]
+        if dates:
+            first_date = _dt2.strptime(min(dates)[:10], "%Y-%m-%d")
+            last_date = _dt2.strptime(max(dates)[:10], "%Y-%m-%d")
+            months_span = max((last_date - first_date).days / 30.0, 0.5)
+            monthly_avg = len(txs) / months_span
+        else:
+            months_span = 0
+            monthly_avg = 0
+    except Exception:
+        months_span = 0
+        monthly_avg = 0
+
+    conn.close()
+
+    # ── 计算统计值 ──
+    import statistics
+
+    # 追涨倾向：买入PE分位中位数
+    chase_pe_median = round(statistics.median(buy_pe_percentiles), 2) if buy_pe_percentiles else None
+
+    # 杀跌倾向：亏损卖出的亏损幅度中位数
+    loss_sells = [p for p in sell_loss_pcts if p < 0]
+    panic_sell_median = round(statistics.median(loss_sells), 2) if loss_sells else None
+
+    # 持有耐心：平均持仓天数
+    avg_holding_days = round(statistics.mean(holding_days_list), 1) if holding_days_list else None
+
+    # 胜率
+    total_sells = len(sell_loss_pcts)
+    win_rate = round(win_count / total_sells * 100, 2) if total_sells > 0 else None
+
+    # 最大单笔亏损
+    max_single_loss = round(max_loss, 2) if max_loss > 0 else 0.0
+
+    # ── 交易风格判定 ──
+    style_tags = []
+    if chase_pe_median is not None and chase_pe_median > 60:
+        style_tags.append("追涨杀跌型")
+    if monthly_avg > 6:
+        style_tags.append("频繁交易型")
+    if avg_holding_days is not None and avg_holding_days > 180:
+        style_tags.append("长期持有型")
+    if monthly_avg > 0 and monthly_avg <= 3 and chase_pe_median is not None and chase_pe_median < 50:
+        style_tags.append("纪律定投型")
+    if not style_tags:
+        style_tags.append("均衡型")
+    trade_style = "/".join(style_tags)
+
+    return {
+        "total_transactions": len(txs),
+        "chase_pe_median": chase_pe_median,          # 追涨倾向：买入PE分位中位数
+        "panic_sell_median": panic_sell_median,       # 杀跌倾向：亏损卖出幅度中位数(%)
+        "avg_holding_days": avg_holding_days,          # 持有耐心：平均持仓天数
+        "monthly_avg_trades": round(monthly_avg, 2),    # 频繁交易度：月均交易次数
+        "win_rate": win_rate,                          # 胜率(%)
+        "max_single_loss": max_single_loss,             # 最大单笔亏损金额
+        "total_sells": total_sells,
+        "loss_sells_count": len(loss_sells),
+        "trade_style": trade_style,                     # 交易风格判定
     }
 
 

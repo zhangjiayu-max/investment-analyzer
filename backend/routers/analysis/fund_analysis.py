@@ -10,7 +10,7 @@ from db import (
     lookup_fund_info, fetch_fund_nav,
     create_portfolio_analysis_record, list_portfolio_analysis_records,
 )
-from db.portfolio import update_analysis_record
+from db.portfolio import update_analysis_record, compare_funds
 from db.config import get_config_int, get_config_float
 from ._shared import _get_valuation_context, _get_valuation_context_for_fund
 
@@ -130,3 +130,18 @@ async def list_fund_analysis_records_api(limit: int = 10):
     """列出指定基金分析历史记录。"""
     records = list_portfolio_analysis_records(analysis_type="what_if", limit=limit)
     return {"records": records}
+
+
+@router.get("/api/analysis/compare-funds")
+async def compare_funds_api(fund_a: str, fund_b: str):
+    """基金六维对比 — 收益/回撤/波动/费率/规模/经理。"""
+    if not fund_a or not fund_b:
+        raise HTTPException(400, "请提供两只基金代码")
+    if fund_a == fund_b:
+        raise HTTPException(400, "请提供两只不同的基金代码")
+    try:
+        result = compare_funds(fund_a.strip(), fund_b.strip())
+        return result
+    except Exception as e:
+        logger.error(f"基金对比失败 {fund_a} vs {fund_b}: {e}", exc_info=True)
+        raise HTTPException(500, f"基金对比失败: {str(e)}")

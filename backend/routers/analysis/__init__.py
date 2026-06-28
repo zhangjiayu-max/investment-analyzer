@@ -13,6 +13,7 @@
   - market_intel   市场情报
   - bond_recommend 债券 AI 推荐
   - index_analysis 指数深度分析
+  - trade_pattern  交易行为模式分析
 
 注：eval.py 保持原位，仅修改 import 路径。
 """
@@ -36,6 +37,7 @@ from .rolling_return import router as rolling_return_router
 from .four_pots import router as four_pots_router
 from .fund_analysis import router as fund_analysis_router
 from .compare_diff import router as compare_diff_router
+from .trade_pattern import router as trade_pattern_router
 from analysis.action_extractor import extract_actions, format_actions_for_response
 
 __all__ = [
@@ -46,5 +48,6 @@ __all__ = [
     "fee_router", "correlation_router", "eval_system_router", "health_score_router",
     "rolling_return_router", "four_pots_router",
     "fund_analysis_router", "compare_diff_router",
+    "trade_pattern_router",
     "extract_actions", "format_actions_for_response",
 ]
