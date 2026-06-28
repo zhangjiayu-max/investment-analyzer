@@ -51,3 +51,4 @@ logs/
 .doc/
 # ttskill CLI binary
 backend/bin/
+backend/backups/

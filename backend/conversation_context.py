@@ -233,6 +233,18 @@ def _build_entity_memory_context(limit: int = 10) -> str:
         return ""
 
 
+def _build_conversation_state_text(
+    conversation_id: int, current_msg: str, messages: list[dict]
+) -> str:
+    """构建对话态追踪文本，注入到上下文。"""
+    try:
+        from conversation_state import build_conversation_state, format_conversation_state
+        state = build_conversation_state(conversation_id, current_msg, messages)
+        return format_conversation_state(state)
+    except Exception:
+        return ""
+
+
 def _build_trade_pattern_context(user_id: str = "default") -> str:
     """构建交易行为模式上下文，注入到对话中供行为教练引用。"""
     try:
@@ -327,6 +339,7 @@ def _compose_prompt_context(sections: dict[str, str], current_user_message: str,
         ("关注列表", sections.get("watchlist_context", "")),
         ("近期标的变化", sections.get("entity_memory", "")),  # 增强4: 实体记忆
         ("交易行为数据", sections.get("trade_pattern_context", "")),
+        ("对话上下文", sections.get("conversation_state", "")),
         ("知识库证据", sections.get("rag_context", "")),
         ("缺失信息", sections.get("missing_context", "")),
         ("上下文冲突", sections.get("conflicts", "")),
@@ -380,6 +393,7 @@ def build_conversation_context(
         "change_context": _build_change_context(user_id=user_id),
         "entity_memory": _build_entity_memory_context(),  # 增强4: 实体记忆
         "trade_pattern_context": _build_trade_pattern_context(user_id=user_id),
+        "conversation_state": _build_conversation_state_text(conversation_id, current_user_message, messages),
     }
     sections["missing_context"] = _build_missing_context(scenario_type, sections)
 
