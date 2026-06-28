@@ -2242,6 +2242,7 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
         specialists = route_result.get("specialists", [])
 
         # 若未命中任何专家,回退到原 clarify_requirement
+        clarification = route_result  # 默认使用路由结果
         if not specialists:
             if not resume_from:
                 yield {"type": "phase", "phase": "clarify", "message": "🔍 正在理解您的问题..."}
