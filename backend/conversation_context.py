@@ -233,6 +233,34 @@ def _build_entity_memory_context(limit: int = 10) -> str:
         return ""
 
 
+def _build_trade_pattern_context(user_id: str = "default") -> str:
+    """构建交易行为模式上下文，注入到对话中供行为教练引用。"""
+    try:
+        from db.portfolio import analyze_trade_patterns
+        data = analyze_trade_patterns(user_id)
+        if data.get("error"):
+            return ""
+        lines = ["### 交易行为数据"]
+        if data.get("chase_pe_median") is not None:
+            lines.append(f"- 追涨倾向：买入时PE分位中位数 {data['chase_pe_median']}%" +
+                         ("（偏高）" if data['chase_pe_median'] > 60 else "（合理）"))
+        if data.get("panic_sell_median") is not None:
+            lines.append(f"- 杀跌倾向：亏损卖出幅度中位数 {data['panic_sell_median']}%")
+        if data.get("avg_holding_days") is not None:
+            lines.append(f"- 持有耐心：平均持仓 {data['avg_holding_days']} 天")
+        if data.get("monthly_avg_trades") is not None:
+            lines.append(f"- 频繁交易度：月均交易 {data['monthly_avg_trades']} 次")
+        if data.get("win_rate") is not None:
+            lines.append(f"- 胜率：{data['win_rate']}%（{data.get('total_sells', 0)}次卖出）")
+        if data.get("max_single_loss"):
+            lines.append(f"- 最大单笔亏损：{data['max_single_loss']} 元")
+        if data.get("trade_style"):
+            lines.append(f"- 交易风格：{data['trade_style']}")
+        return "\n".join(lines) if len(lines) > 1 else ""
+    except Exception:
+        return ""
+
+
 def record_entity_snapshots(analysis_text: str, source: str = "analysis", source_id: int = 0):
     """增强4: 从分析文本中提取实体属性变化并记录（仅在值变化时记录）。"""
     try:
@@ -298,6 +326,7 @@ def _compose_prompt_context(sections: dict[str, str], current_user_message: str,
         ("近期决策", sections.get("decision_context", "")),
         ("关注列表", sections.get("watchlist_context", "")),
         ("近期标的变化", sections.get("entity_memory", "")),  # 增强4: 实体记忆
+        ("交易行为数据", sections.get("trade_pattern_context", "")),
         ("知识库证据", sections.get("rag_context", "")),
         ("缺失信息", sections.get("missing_context", "")),
         ("上下文冲突", sections.get("conflicts", "")),
@@ -350,6 +379,7 @@ def build_conversation_context(
         "rag_context": rag_context or "暂无额外知识库证据。",
         "change_context": _build_change_context(user_id=user_id),
         "entity_memory": _build_entity_memory_context(),  # 增强4: 实体记忆
+        "trade_pattern_context": _build_trade_pattern_context(user_id=user_id),
     }
     sections["missing_context"] = _build_missing_context(scenario_type, sections)
 
