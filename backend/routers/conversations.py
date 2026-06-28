@@ -19,6 +19,7 @@ from db import (
     get_latest_recoverable_assistant, mark_message_execution_status, retry_assistant_message,
     get_agent, create_agent_run,
     list_holdings, create_alert, save_llm_feedback,
+    get_conversation_summary, save_conversation_summary,
     _get_conn,
 )
 from db.config import get_config, get_config_float, get_config_int
@@ -1274,7 +1275,6 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
         # 对话摘要自动生成（LLM 调用，默认关闭）
         if get_config("llm_cost.auto_conversation_summary", "false") == "true":
             try:
-                from db.conversations import get_messages, get_conversation_summary, save_conversation_summary
                 from agent.memory import _generate_summary
                 msgs = get_messages(conv_id, limit=100)
                 if len(msgs) >= 8 and not get_conversation_summary(conv_id):
@@ -1702,7 +1702,6 @@ async def get_task_status(conv_id: int):
 async def export_conversation(conv_id: int, format: str = "markdown"):
     """导出对话为 Markdown 文件。"""
     from fastapi.responses import Response
-    from db.conversations import get_conversation, get_messages
     conv = get_conversation(conv_id)
     if not conv:
         raise HTTPException(404, "对话不存在")
