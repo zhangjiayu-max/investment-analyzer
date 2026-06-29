@@ -133,13 +133,13 @@ DEFAULT_CONFIGS = [
     ('validator.llm_check_enabled', 'false', '是否启用 LLM 质检（默认关闭以节约成本）', 'validator'),
 
     # 视觉模型切换（运行时可切换，无需重启）
-    ('vision.provider', 'ollama', '视觉模型提供商（ollama / mimo）', 'vision'),
+    ('vision.provider', 'mimo', '视觉模型提供商（ollama / mimo）', 'vision'),
     ('vision.ollama.api_key', 'ollama', 'Ollama API Key', 'vision'),
     ('vision.ollama.base_url', 'http://localhost:11434/v1', 'Ollama Base URL', 'vision'),
     ('vision.ollama.model', 'qwen3-vl:8b', 'Ollama 视觉模型名', 'vision'),
-    ('vision.mimo.api_key', 'sk-c2p99y8w5ldb1d3qp74zpit6pyzdri6fcy2qk5sr5syrvezy', 'MiMo API Key', 'vision'),
-    ('vision.mimo.base_url', 'https://api.xiaomimimo.com/v1', 'MiMo Base URL', 'vision'),
-    ('vision.mimo.model', 'mimo-v2.5', 'MiMo 视觉模型名', 'vision'),
+    ('vision.mimo.api_key', 'tp-cztoehx9kc6uqpwm53adzok8agg84zfokfje362cqmfjzprg', 'MiMo API Key', 'vision'),
+    ('vision.mimo.base_url', 'https://token-plan-cn.xiaomimimo.com/v1', 'MiMo Base URL', 'vision'),
+    ('vision.mimo.model', 'mimo-v2-omni', 'MiMo 视觉模型名', 'vision'),
 ]
 
 
