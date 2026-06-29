@@ -173,6 +173,77 @@ function showSpecialistCopyFeedback(event) {
   setTimeout(() => { btn.innerHTML = orig; btn.style.color = '' }, 1500)
 }
 
+function exportSpecialistMd(s, msg, event) {
+  const avatar = s.icon || '🤖'
+  const agentName = s.agent || '专家分析'
+  const timestamp = new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })
+  const question = msg?.originalContent || msg?.userMessage || ''
+  const content = s.analysis || ''
+
+  const frontMatter = `---
+title: ${agentName} - 投资分析报告
+agent: ${agentName}
+icon: ${avatar}
+created_at: ${timestamp}
+---
+
+`
+  const body = question
+    ? `> **用户问题**：${question}\n\n---\n\n${content}`
+    : content
+
+  const mdContent = frontMatter + body
+  const filename = `${agentName}-分析报告.md`.replace(/[\\/:*?"<>|]/g, '')
+
+  const blob = new Blob([mdContent], { type: 'text/markdown;charset=utf-8' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  document.body.appendChild(a)
+  a.click()
+  document.body.removeChild(a)
+  URL.revokeObjectURL(url)
+
+  // 反馈提示
+  const btn = event?.currentTarget
+  if (btn) {
+    const orig = btn.innerHTML
+    btn.innerHTML = '✓ 已导出'
+    setTimeout(() => { btn.innerHTML = orig }, 1500)
+  }
+}
+
+function exportAnswerMd(msg, event) {
+  const timestamp = new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })
+  const content = msg.content || ''
+
+  const mdContent = `---
+title: 投资分析报告
+created_at: ${timestamp}
+---
+
+${content}`
+  const filename = `投资分析报告.md`.replace(/[\\/:*?"<>|]/g, '')
+
+  const blob = new Blob([mdContent], { type: 'text/markdown;charset=utf-8' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  document.body.appendChild(a)
+  a.click()
+  document.body.removeChild(a)
+  URL.revokeObjectURL(url)
+
+  const btn = event?.currentTarget
+  if (btn) {
+    const orig = btn.innerHTML
+    btn.innerHTML = '✓ 已导出'
+    setTimeout(() => { btn.innerHTML = orig }, 1500)
+  }
+}
+
 function fallbackCopy(text, el) {
   const ta = document.createElement('textarea')
   ta.value = text
@@ -287,9 +358,14 @@ function formatTime(ts) {
           </div>
           <div v-if="s.expanded" class="specialist-analysis-wrap">
             <div class="specialist-analysis markdown-body" v-html="renderMarkdown(s.analysis || '（暂无分析内容）')"></div>
-            <button class="btn-copy-specialist" @click.stop="copySpecialistContent(s, $event)" title="复制分析内容">
-              <Icon name="clipboard" size="12" class="inline-icon" /> 复制
-            </button>
+            <div class="specialist-actions">
+              <button class="btn-copy-specialist" @click.stop="copySpecialistContent(s, $event)" title="复制分析内容">
+                <Icon name="clipboard" size="12" class="inline-icon" /> 复制
+              </button>
+              <button class="btn-export-specialist" @click.stop="exportSpecialistMd(s, msg, $event)" title="导出为 Markdown 文件">
+                <Icon name="download" size="12" class="inline-icon" /> 导出 MD
+              </button>
+            </div>
           </div>
         </div>
       </div>
@@ -305,9 +381,14 @@ function formatTime(ts) {
           </div>
           <div v-if="s.expanded" class="specialist-analysis-wrap">
             <div class="specialist-analysis markdown-body" v-html="renderMarkdown(s.analysis || '（暂无审阅内容）')"></div>
-            <button class="btn-copy-specialist" @click.stop="copySpecialistContent(s, $event)" title="复制审阅内容">
-              <Icon name="clipboard" size="12" class="inline-icon" /> 复制
-            </button>
+            <div class="specialist-actions">
+              <button class="btn-copy-specialist" @click.stop="copySpecialistContent(s, $event)" title="复制审阅内容">
+                <Icon name="clipboard" size="12" class="inline-icon" /> 复制
+              </button>
+              <button class="btn-export-specialist" @click.stop="exportSpecialistMd(s, msg, $event)" title="导出为 Markdown 文件">
+                <Icon name="download" size="12" class="inline-icon" /> 导出 MD
+              </button>
+            </div>
           </div>
         </div>
       </div>
@@ -389,6 +470,14 @@ function formatTime(ts) {
         >
           <Icon name="clipboard" size="14" />
           <span class="ai-agent-tooltip">复制内容</span>
+        </button>
+        <button
+          v-if="msg.id && msg.execution_status !== 'streaming'"
+          class="btn-msg-feedback btn-ai-action"
+          @click="exportAnswerMd(msg, $event)"
+        >
+          <Icon name="download" size="14" />
+          <span class="ai-agent-tooltip">导出 MD</span>
         </button>
         <button
           v-if="msg.id && msg.execution_status !== 'streaming'"
@@ -1016,6 +1105,35 @@ function formatTime(ts) {
   background: var(--color-primary-50);
 }
 .dark .btn-copy-specialist:hover { background: var(--color-primary-bg); }
+
+/* 专家操作按钮组 */
+.specialist-actions {
+  display: flex;
+  gap: 0.4rem;
+  margin-top: 0.4rem;
+}
+.btn-copy-specialist,
+.btn-export-specialist {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.2rem 0.5rem;
+  font-size: 0.68rem;
+  color: var(--color-text-muted);
+  background: var(--color-bg-card);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+.btn-copy-specialist:hover,
+.btn-export-specialist:hover {
+  color: var(--color-primary);
+  border-color: var(--color-primary-border);
+  background: var(--color-primary-50);
+}
+.dark .btn-copy-specialist:hover,
+.dark .btn-export-specialist:hover { background: var(--color-primary-bg); }
 
 /* 消息反馈按钮 */
 .message-feedback {

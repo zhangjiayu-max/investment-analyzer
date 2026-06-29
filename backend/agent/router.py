@@ -30,6 +30,14 @@ _KEYWORD_ROUTES = [
     (["反方", "质疑", "风险另一面"], ["counter_argument"]),
 ]
 
+_HIGH_RISK_ACTION_KEYWORDS = [
+    "清仓", "满仓", "梭哈", "追涨", "杀跌", "恐慌", "很慌", "冲动", "重仓买入",
+]
+
+
+def _is_high_risk_action(query: str) -> bool:
+    return any(kw in query for kw in _HIGH_RISK_ACTION_KEYWORDS)
+
 
 def _load_specialist_keys() -> dict:
     """加载专家 key 映射，避免循环导入。"""
@@ -59,13 +67,38 @@ class SmartRouter:
         for keywords, agents in _KEYWORD_ROUTES:
             if any(kw in query for kw in keywords):
                 specialists.update(agents)
+        if _is_high_risk_action(query):
+            specialists.update(["risk_assessor", "behavior_coach", "counter_argument"])
         if not specialists:
             return None
+
+        # 限制最大专家数为 3；高风险行动优先保留风控/行为/反方三角。
+        specialists_list = list(specialists)
+        if len(specialists_list) > 3:
+            if _is_high_risk_action(query):
+                priority_order = [
+                    "risk_assessor", "behavior_coach", "counter_argument",
+                    "valuation_expert", "allocation_advisor", "market_analyst",
+                    "macro_strategist", "wealth_advisor", "fund_analyst",
+                    "article_expert",
+                ]
+                priority = {agent_key: i for i, agent_key in enumerate(priority_order)}
+            else:
+                # 按 _KEYWORD_ROUTES 中出现的顺序排序(靠前的高优先级)
+                priority = {}
+                for i, (_, agents) in enumerate(_KEYWORD_ROUTES):
+                    for a in agents:
+                        if a not in priority:
+                            priority[a] = i
+            specialists_list.sort(key=lambda x: priority.get(x, 999))
+            specialists_list = specialists_list[:3]
+            logger.info(f"专家数超过 3 个,按优先级截断为: {specialists_list}")
+
         return {
-            "complexity": "simple" if len(specialists) == 1 else "medium",
-            "specialists": list(specialists),
-            "reason": f"关键词路由命中: {', '.join(specialists)}",
-            "needs_arbitration": len(specialists) >= 2,
+            "complexity": "simple" if len(specialists_list) == 1 else "medium",
+            "specialists": specialists_list,
+            "reason": f"关键词路由命中: {', '.join(specialists_list)}",
+            "needs_arbitration": len(specialists_list) >= 2,
             "route_by": "rule",
         }
 

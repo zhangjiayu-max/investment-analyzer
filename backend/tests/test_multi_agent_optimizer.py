@@ -81,6 +81,17 @@ def test_router_rule_match_portfolio():
     assert "allocation_advisor" in result["specialists"] or "wealth_advisor" in result["specialists"]
 
 
+def test_router_high_risk_action_keeps_behavior_and_counter_agents():
+    from agent.router import SmartRouter
+    router = SmartRouter()
+
+    result = router.route("今天大跌我很慌，要不要清仓卖出")
+
+    assert "risk_assessor" in result["specialists"]
+    assert "behavior_coach" in result["specialists"]
+    assert "counter_argument" in result["specialists"]
+
+
 def test_router_mention_override():
     from agent.router import SmartRouter
     router = SmartRouter()
@@ -139,3 +150,48 @@ def test_validator_catches_hallucinated_fund(validator_no_llm):
         context="持仓：易方达蓝筹 2000 元",
     )
     assert result["passed"] is False
+
+
+def test_dynamic_spawn_uses_existing_behavior_coach_key():
+    from agent.orchestrator import _check_dynamic_spawn
+
+    suggestions = _check_dynamic_spawn({"analysis": "", "confidence": 0.4}, already_called=set())
+
+    assert any(s["agent_key"] == "behavior_coach" for s in suggestions)
+    assert all(s["agent_key"] != "behavioral_coach" for s in suggestions)
+
+
+def test_append_specialist_context_includes_dynamic_spawn_results():
+    from agent.orchestrator import _append_specialist_synthesis_context
+
+    llm_messages = []
+    specialist_results = [
+        {
+            "agent_key": "valuation_expert",
+            "agent": "估值分析师",
+            "analysis": "估值处于低位，可以小额分批。",
+        },
+        {
+            "agent_key": "counter_argument",
+            "agent": "反方观点审查员",
+            "analysis": "低估不等于马上反转，需要警惕继续下跌。",
+            "spawned_by": "dynamic_spawn",
+        },
+    ]
+
+    _append_specialist_synthesis_context(llm_messages, specialist_results)
+
+    assert len(llm_messages) == 1
+    assert llm_messages[0]["role"] == "user"
+    assert "估值分析师" in llm_messages[0]["content"]
+    assert "反方观点审查员" in llm_messages[0]["content"]
+    assert "低估不等于马上反转" in llm_messages[0]["content"]
+
+
+def test_sop_templates_use_existing_behavior_coach_key():
+    from agent.orchestrator import SOP_TEMPLATES
+
+    for template in SOP_TEMPLATES.values():
+        agents = [step["agent"] for step in template.get("steps", [])]
+        assert "behavioral_coach" not in agents
+        assert template.get("final_agent") != "behavioral_coach"

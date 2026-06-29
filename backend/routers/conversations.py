@@ -170,7 +170,7 @@ async def resume_conversation(conv_id: int, request: Request):
                     meta = json.loads(meta)
                 except Exception:
                     meta = {}
-            if isinstance(meta, dict) and meta.get("execution_status") in ("streaming", "cancelled"):
+            if isinstance(meta, dict) and meta.get("execution_status") in ("streaming", "cancelled", "failed"):
                 last_assistant = msg
                 last_assistant["_parsed_metadata"] = meta
         elif msg["role"] == "user" and last_assistant:
@@ -194,6 +194,20 @@ async def resume_conversation(conv_id: int, request: Request):
     # 从 agent_runs 表查询已完成的专家
     message_id = last_assistant["id"]
     completed_runs = get_completed_agents_for_message(message_id)
+
+    # ★ 如果是失败消息（failed）且本消息没有 agent_runs，
+    # 回退到查询该消息的 retry_of_message_id 的已完成专家
+    if not completed_runs:
+        meta = last_assistant.get("_parsed_metadata", {})
+        retry_of = meta.get("retry_of_message_id")
+        if retry_of:
+            completed_runs = get_completed_agents_for_message(retry_of)
+            if completed_runs:
+                logger.info(f"恢复对话 {conv_id}：从 retry_of_message_id={retry_of} 找到 {len(completed_runs)} 个已完成专家")
+    elif last_assistant.get("_parsed_metadata", {}).get("execution_status") == "failed":
+        logger.info(f"恢复对话 {conv_id}：消息 {message_id} 为失败状态，找到 {len(completed_runs)} 个已完成专家")
+    else:
+        logger.info(f"恢复对话 {conv_id}：找到 {len(completed_runs)} 个已完成的专家")
 
     logger.info(f"恢复对话 {conv_id}：找到 {len(completed_runs)} 个已完成的专家")
 
