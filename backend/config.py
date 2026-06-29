@@ -101,8 +101,10 @@ def get_llm_fallback_config() -> tuple[str, str, str] | None:
     if LLM_PROVIDER == "deepseek":
         return None
     # MIMO 模式下，DeepSeek 作为 fallback
-    if (MIMO_PLAN_API_KEY or MIMO_API_KEY) and DEEPSEEK_API_KEY:
-        return DEEPSEEK_API_KEY, DEEPSEEK_BASE_URL, DEEPSEEK_MODEL
+    # 优先用 DEEPSEEK_API_KEY，其次复用 ARBITRATION_API_KEY（同一个 DeepSeek 账号）
+    _ds_key = DEEPSEEK_API_KEY or ARBITRATION_API_KEY
+    if (MIMO_PLAN_API_KEY or MIMO_API_KEY) and _ds_key:
+        return _ds_key, DEEPSEEK_BASE_URL, DEEPSEEK_MODEL
     return None
 
 
