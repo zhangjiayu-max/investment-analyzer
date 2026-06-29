@@ -7,6 +7,7 @@ import time
 import threading
 import concurrent.futures
 import asyncio
+import hashlib
 
 from llm_service import client, MODEL, _call_llm, _parse_tool_args
 from agent.multi_agent import run_specialist, run_specialist_with_context, run_arbitration
@@ -632,10 +633,6 @@ def should_arbitrate(complexity: str, specialist_results: list, conflicts: dict 
     """
     # 使用优化器的快速检测
     if OrchestratorOptimizer.should_skip_arbitration(specialist_results, complexity):
-        return False
-
-    # 早停：无冲突时不仲裁
-    if conflicts is not None and not conflicts.get("detected"):
         return False
 
     if get_orchestration_config("arbitration_enabled", "true") != "true":
@@ -1722,6 +1719,15 @@ def orchestrate(query: str, history: list, rag_context: str = "", cancel_event: 
         refined_query = route_result.get("refined_query", query) or query
         specialists = route_result.get("specialists", [])
 
+        # 恢复模式：排除已完成的专家，避免重复执行
+        if resume_message_id and specialists and completed_specialists:
+            specialists = [s for s in specialists if s not in completed_specialists]
+            if not specialists:
+                specialists = list(completed_specialists)[:3]
+                logger.info(f"恢复模式:所有路由专家已完成,复用已有结果: {specialists}")
+            else:
+                logger.info(f"恢复模式:排除已完成专家后剩余: {specialists}")
+
         # 若未命中任何专家,回退到原 clarify_requirement
         if not specialists:
             clarification = clarify_requirement(query)
@@ -1842,6 +1848,11 @@ def orchestrate(query: str, history: list, rag_context: str = "", cancel_event: 
             if any(kw in err_msg.lower() for kw in ["tool", "function", "reasoning", "thinking"]):
                 logger.warning("模型不兼容,回退到普通模式")
                 return _fallback_orchestrate(query, history, rag_context)
+            # 网络抖动时，已有专家结果则拼接返回
+            if specialist_results:
+                logger.warning(f"LLM 汇总失败但已有 {len(specialist_results)} 个专家结果,拼接回退")
+                return _build_fallback_from_specialists(
+                    query, refined_query, specialist_results, trace_id, budget)
             raise
 
         msg = response.choices[0].message
@@ -1850,11 +1861,10 @@ def orchestrate(query: str, history: list, rag_context: str = "", cancel_event: 
         if not msg.tool_calls:
             conflicts = detect_conflicts(specialist_results)
 
-            # Phase B: 交叉审阅(>=2 个专家且存在实质性冲突时触发)
+            # Phase B: 交叉审阅(>=3 个专家时强制触发，不再依赖冲突检测)
             needs_cross_review = (
-                len(specialist_results) >= 2
+                len(specialist_results) >= 3
                 and not force_skip_cross_review
-                and conflicts["detected"]
                 and get_config("early_stop.enabled", "true") == "true"
             )
 
@@ -2011,6 +2021,36 @@ def orchestrate(query: str, history: list, rag_context: str = "", cancel_event: 
             expert_query = args.get("query", query)
             logger.info(f"Orchestrator → {tc.function.name}: {expert_query[:100]}")
             tool_tasks.append((tc, args, expert_query))
+
+        # 去重：跳过已执行过的专家
+        seen_keys = {sr.get("agent_key") for sr in specialist_results}
+        deduped_tasks = []
+        for tc, args, expert_query in tool_tasks:
+            agent_name = tc.function.name
+            # 查 agent_key
+            expert_map = build_expert_map()
+            agent_key = expert_map.get(agent_name, agent_name)
+            if agent_key in seen_keys:
+                logger.info(f"跳过重复调用: {agent_name} ({agent_key})")
+                # 用已有结果填充
+                existing = next((sr for sr in specialist_results if sr.get("agent_key") == agent_key), None)
+                if existing:
+                    llm_messages.append({
+                        "role": "tool",
+                        "tool_call_id": tc.id,
+                        "content": json.dumps({"analysis": existing["analysis"], "agent_key": agent_key, "agent": existing.get("agent", agent_name), "icon": existing.get("icon", "🤖")}, ensure_ascii=False)[:4000],
+                    })
+                continue
+            deduped_tasks.append((tc, args, expert_query))
+        tool_tasks = deduped_tasks
+        if not tool_tasks:
+            # 所有专家都已执行完，强制进入总结阶段
+            llm_messages.append({
+                "role": "user",
+                "content": "所有专家已完成分析，请根据以上结果给出最终综合建议。",
+            })
+            # 跳过本轮工具执行，进入下一轮（LLM会看到没有工具调用，触发总结）
+            continue
 
         if len(tool_tasks) == 1:
             # 单个专家,直接执行(避免线程池开销)
@@ -2179,6 +2219,19 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
     route_result = None  # 路由结果，用于最终返回监控
     if resume_message_id:
         completed_runs = get_completed_agents_for_message(resume_message_id)
+        # 如果当前消息没有 completed agent_runs，尝试查 retry_of_message_id
+        if not completed_runs:
+            from db.conversations import _load_metadata
+            conn = _get_conn()
+            msg_row = conn.execute("SELECT metadata FROM messages WHERE id = ?", (resume_message_id,)).fetchone()
+            conn.close()
+            if msg_row:
+                meta = json.loads(msg_row["metadata"])
+                retry_of = meta.get("retry_of_message_id")
+                if retry_of:
+                    completed_runs = get_completed_agents_for_message(retry_of)
+                    if completed_runs:
+                        logger.info(f"恢复模式:从 retry_of_message_id={retry_of} 找到 {len(completed_runs)} 个已完成专家")
         for run in completed_runs:
             completed_specialists.add(run["agent_key"])
             resumed_results.append({
@@ -2240,6 +2293,15 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
         # 使用 LLM 兜底时可能返回优化后的问题;规则路由时保持原问题
         refined_query = route_result.get("refined_query", query) or query
         specialists = route_result.get("specialists", [])
+
+        # 恢复模式：排除已完成的专家，避免重复执行
+        if resume_message_id and specialists and completed_specialists:
+            specialists = [s for s in specialists if s not in completed_specialists]
+            if not specialists:
+                specialists = list(completed_specialists)[:3]
+                logger.info(f"恢复模式:所有路由专家已完成,复用已有结果: {specialists}")
+            else:
+                logger.info(f"恢复模式:排除已完成专家后剩余: {specialists}")
 
         # 若未命中任何专家,回退到原 clarify_requirement
         clarification = route_result  # 默认使用路由结果
@@ -2443,6 +2505,19 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
                     "content": result["answer"],
                     "specialist_results": [],
                     "tool_calls": [],
+                }
+                return
+            # 网络抖动时，已有专家结果则拼接返回
+            if specialist_results:
+                logger.warning(f"LLM 汇总失败但已有 {len(specialist_results)} 个专家结果(stream),拼接回退")
+                yield {
+                    "type": "answer",
+                    "content": _build_fallback_from_specialists(
+                        query, refined_query, specialist_results, trace_id, budget
+                    )["answer"],
+                    "specialist_results": specialist_results,
+                    "tool_calls": [tc for sr in specialist_results for tc in sr.get("tool_calls", [])],
+                    "partial": True,
                 }
                 return
             raise
@@ -2834,6 +2909,17 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
                     "tool_calls": result_data.get("tool_calls", []),
                     "duration_ms": result_data.get("duration_ms", 0),
                 }
+                # 清理 analysis 中的 tool_calls 原始标签，保证前端只看到 md 内容
+                if "analysis" in specialist_result:
+                    analysis = specialist_result["analysis"]
+                    analysis = re.sub(r"<tool_calls>.*?</tool_calls>", "", analysis, flags=re.DOTALL)
+                    analysis = re.sub(r"<tool_call>.*?</tool_call>", "", analysis, flags=re.DOTALL)
+                    analysis = re.sub(r"<invoke name=.*?</invoke>", "", analysis, flags=re.DOTALL)
+                    analysis = re.sub(r"<function=.*?</function>", "", analysis, flags=re.DOTALL)
+                    analysis = re.sub(r"<parameter=.*?</parameter>", "", analysis, flags=re.DOTALL)
+                    analysis = re.sub(r"[\{].*?requestId.*?[\}]", "", analysis, flags=re.DOTALL)
+                    analysis = re.sub(r"\n{3,}", "\n\n", analysis).strip()
+                    specialist_result["analysis"] = analysis
                 specialist_results.append(specialist_result)
 
                 # 更新 agent 执行记录为 completed
@@ -3192,6 +3278,34 @@ async def _do_auto_evaluation(conv_id: int, msg_id: int, result: dict):
             logger.error(f"LLM 评估失败: conv={conv_id} — {e}")
 
 
+
+
+
+def _build_fallback_from_specialists(query, refined_query, specialist_results, trace_id, budget):
+    """当 LLM 汇总失败（如网络抖动）时，用已有专家结果拼接答案。"""
+    sections = []
+    for sr in specialist_results:
+        agent_key = sr.get("agent_key", "unknown")
+        agent_name = sr.get("agent", agent_key)
+        icon = sr.get("icon", "\U0001f916")
+        analysis = sr.get("analysis", "")
+        sections.append(f"## {icon} {agent_name}\n\n{analysis}\n\n")
+    answer = "由于服务暂时拥堵，未能自动汇总各方分析。以下是各专家独立观点：\n\n" + "\n---\n".join(sections)
+    answer += "\n\n---\n> \u26a0\ufe0f 由于网络波动，综合汇总未能完成，以上是各专家的独立分析。建议重新发送问题获取完整汇总。"
+    answer = re.sub(r"<tool_calls>.*?</tool_calls>", "", answer, flags=re.DOTALL)
+    answer = re.sub(r"<tool_call>.*?</tool_call>", "", answer, flags=re.DOTALL)
+    answer = re.sub(r"<invoke name=.*?</invoke>", "", answer, flags=re.DOTALL)
+    answer = re.sub(r"<function=.*?</function>", "", answer, flags=re.DOTALL)
+    answer = re.sub(r"<parameter=.*?</parameter>", "", answer, flags=re.DOTALL)
+    answer = re.sub(r"\n{3,}", "\n\n", answer).strip()
+    return {
+        "answer": answer,
+        "specialist_results": specialist_results,
+        "tool_calls": [tc for sr in specialist_results for tc in sr.get("tool_calls", [])],
+        "turns": 1,
+        "fallback": True,
+        "partial": True,
+    }
 
 def _fallback_orchestrate(query: str, history: list, rag_context: str = "") -> dict:
     """当模型不支持 function calling 时,回退到普通对话模式。"""
