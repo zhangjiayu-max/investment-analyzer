@@ -87,9 +87,13 @@ class ChatFeedbackRequest(BaseModel):
 
 
 @router.get("/api/conversations")
-async def list_conversations_api():
+async def list_conversations_api(page: int = 1, page_size: int = 50):
     """对话列表。"""
-    return {"conversations": list_conversations()}
+    all_convs = list_conversations()
+    if page and page_size:
+        start = (page - 1) * page_size
+        return {"conversations": all_convs[start:start+page_size]}
+    return {"conversations": all_convs}
 
 
 @router.post("/api/conversations")
@@ -635,6 +639,25 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
     if running_count > 0:
         logger.warning(f"对话 {conv_id} 有 {running_count} 个进行中的任务，拒绝重复请求")
         raise HTTPException(409, f"该对话有 {running_count} 个进行中的任务，请等待完成后再试")
+
+    # 防重复编排：如果最后一条 user 消息内容相同且已有 completed agent_runs，说明编排已跑过
+    existing_msgs = get_messages(conv_id, limit=10)
+    if existing_msgs:
+        # 找最后一条 user 消息
+        last_user_msg = None
+        for m in reversed(existing_msgs):
+            if m["role"] == "user":
+                last_user_msg = m
+                break
+        if last_user_msg and last_user_msg["content"] == req.content:
+            # 查该 user 消息之后是否有 assistant 消息带 completed agent_runs
+            from db.agents import get_completed_agent_count_for_message
+            for m in existing_msgs:
+                if m["role"] == "assistant" and m["id"] > last_user_msg["id"]:
+                    completed = get_completed_agent_count_for_message(conv_id, m["id"])
+                    if completed > 0:
+                        logger.info(f"对话 {conv_id} user消息 {last_user_msg['id']} 已有 {completed} 个完成的 agent_runs（assistant msg={m['id']}），跳过重复编排")
+                        raise HTTPException(409, "该问题已处理完成，请勿重复发送。如需重新分析，请点击「重新生成」按钮")
 
     # 解析 knowledge_scope
     rag_types = []

@@ -186,6 +186,8 @@ async function autoRecoverIfNeeded(convId) {
       tryResumeConversation(convId)
       return
     }
+    // 只有最后一条是 user 消息且后面没有 assistant 时才恢复
+    // 如果最后一条是 assistant 且不是 streaming/queued，不恢复
     if (lastMsg.role === 'user') {
       const state = getStreamState(convId)
       if (state?.sending) return
@@ -349,11 +351,18 @@ function sendMessageAndTrack(convId, text) {
       },
       onError: (cid, errorData) => {
         if (selectedConv.value?.id === cid) {
-          messages.value.push({
-            role: 'assistant',
-            content: '执行失败: ' + (errorData.message || '未知错误'),
-            created_at: new Date().toISOString(),
-          })
+          // 409 表示重复请求，不显示错误，直接重新加载消息
+          if (errorData.status === 409) {
+            loadMessages(cid).then(() => {
+              showToast(errorData.message || '该问题已处理完成', 'info')
+            })
+          } else {
+            messages.value.push({
+              role: 'assistant',
+              content: '执行失败: ' + (errorData.message || '未知错误'),
+              created_at: new Date().toISOString(),
+            })
+          }
         }
         finishStream(cid)
         removeTask(cid)
@@ -405,12 +414,12 @@ async function handleNewConversation() {
   try {
     // 去重：如果已有未发消息的空会话，直接选中
     const emptyConv = conversations.value.find(c =>
-      !c.title || c.title === '新对话' || c.title === '新对话'
+      (!c.title || c.title === '新对话') && c.message_count === 0
     )
     // 通过API查找最近的空会话
     const { data: recentConvs } = await listConversations({ page: 1, page_size: 5 })
     const recentEmpty = (recentConvs?.conversations || []).find(c =>
-      c.title === '新对话' && (!c.last_message_at || c.last_message_at === c.created_at)
+      c.title === '新对话' && c.message_count === 0
     )
     if (recentEmpty) {
       selectConversation(recentEmpty)

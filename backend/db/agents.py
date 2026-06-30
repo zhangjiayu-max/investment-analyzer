@@ -716,11 +716,27 @@ def get_agent_runs(conversation_id: int, limit: int = 50) -> list[dict]:
 
 
 def get_running_agent_count(conversation_id: int) -> int:
-    """获取对话中正在运行的 agent 数量（用于防重复发送）。"""
+    """获取对话中正在运行的 agent 数量（用于防重复发送）。
+    实际状态值: pending / running / completed / failed / success / error / cancelled
+    """
     conn = _get_conn()
     row = conn.execute("""
         SELECT COUNT(*) as cnt FROM agent_runs
         WHERE conversation_id = ? AND status IN ('pending', 'running')
     """, (conversation_id,)).fetchone()
+    conn.close()
+    return row["cnt"] if row else 0
+
+
+def get_completed_agent_count_for_message(conversation_id: int, message_id: int) -> int:
+    """检查某条消息（assistant）是否已有完成的 agent_runs（防重复编排）。
+    message_id 传入 assistant 消息的 id。
+    """
+    conn = _get_conn()
+    row = conn.execute("""
+        SELECT COUNT(*) as cnt FROM agent_runs
+        WHERE conversation_id = ? AND message_id = ? 
+        AND status IN ('completed', 'success')
+    """, (conversation_id, message_id)).fetchone()
     conn.close()
     return row["cnt"] if row else 0
