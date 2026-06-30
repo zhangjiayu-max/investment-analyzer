@@ -14,6 +14,30 @@ from functools import lru_cache
 logger = logging.getLogger(__name__)
 
 
+def _has_disagreement(specialist_results: list) -> bool:
+    """检测专家之间是否存在方向性分歧。
+
+    分析前 300 字判断专家倾向（买入/加仓 vs 卖出/减仓/不建议）。
+    只存在同方向（都买或都观望）时返回 False。
+    注意：sell 优先检测，避免 '不建议买入' 误判为 buy。
+    """
+    buy_kw = ["加仓", "建仓", "推荐买入", "可以买", "值得买", "可以加"]
+    sell_kw = ["不建议", "卖出", "减仓", "清仓", "等待", "观望"]
+    holds = set()
+    for sr in specialist_results:
+        text = (sr.get("analysis", "") or "")[:300]
+        # sell 优先（含"不"否定前缀）
+        is_sell = any(kw in text for kw in sell_kw)
+        # buy 排除 "不买" 误匹配
+        is_buy = any(kw in text for kw in buy_kw) and "不买" not in text
+        if is_buy and not is_sell:
+            holds.add("buy")
+        elif is_sell and not is_buy:
+            holds.add("sell")
+        # 两者同时命中 → 中立（不贡献分歧）
+    return "buy" in holds and "sell" in holds
+
+
 class OrchestratorOptimizer:
     """Orchestrator 优化器"""
 
@@ -27,8 +51,8 @@ class OrchestratorOptimizer:
 
         跳过条件：
         1. 专家数量 < 2
-        2. 简单任务
-        注意：方向一致不再跳过，因为多角度分析仍有价值
+        2. 简单/闲聊任务
+        3. 专家方向一致（无实质性分歧）— 新增
         """
         # 条件1：专家数量不足
         if len(specialist_results) < 2:
@@ -38,7 +62,11 @@ class OrchestratorOptimizer:
         if complexity in ("simple", "chat"):
             return True
 
-        # 只要有 >=2 个专家，都做交叉审阅
+        # 条件3：方向一致时跳过交叉审阅
+        if not _has_disagreement(specialist_results):
+            logger.info(f"专家方向一致，跳过交叉审阅 ({len(specialist_results)}人)")
+            return True
+
         return False
 
     @staticmethod

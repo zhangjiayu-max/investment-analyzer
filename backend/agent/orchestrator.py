@@ -632,6 +632,7 @@ def should_arbitrate(complexity: str, specialist_results: list, conflicts: dict 
     - 存在实质性冲突（当 conflicts 传入时）
     """
     # 使用优化器的快速检测
+    # 使用优化器的快速检测
     if OrchestratorOptimizer.should_skip_arbitration(specialist_results, complexity):
         return False
 
@@ -644,6 +645,10 @@ def should_arbitrate(complexity: str, specialist_results: list, conflicts: dict 
     if complexity_order.get(complexity, 0) < complexity_order.get(min_complexity, 2):
         return False
     if len([sr for sr in specialist_results if not sr.get("is_cross_review")]) < 2:
+        return False
+    # 新增：无方向冲突时不仲裁，节省成本
+    if conflicts and not conflicts.get("detected"):
+        logger.info("专家无方向冲突，跳过仲裁")
         return False
     return True
 
@@ -1063,7 +1068,7 @@ def clarify_requirement(query: str) -> dict:
 
     # ── Step 2: 非 medium 结果直接走规则路径(跳过 LLM)──
     if rule_complexity in ("chat", "simple", "complex"):
-        specialists = route_to_specialists_by_keywords(query) if rule_complexity != "chat" else []
+        specialists = route_to_specialists_by_keywords(query, rule_complexity) if rule_complexity != "chat" else []
         result_out = {
             "complexity": rule_complexity,
             "specialists": specialists,
@@ -1184,7 +1189,7 @@ def clarify_requirement(query: str) -> dict:
         logger.warning(f"LLM 澄清失败,回退到关键词匹配: {e}")
         # 回退到关键词匹配
         complexity = detect_complexity_by_keywords(query)
-        specialists = route_to_specialists_by_keywords(query)
+        specialists = route_to_specialists_by_keywords(query, complexity)
         return {
             "complexity": complexity,
             "specialists": specialists,
@@ -1289,7 +1294,7 @@ def detect_complexity_by_keywords(query: str) -> str:
         return "simple"
 
 
-def route_to_specialists_by_keywords(query: str) -> list[str]:
+def route_to_specialists_by_keywords(query: str, complexity: str = "complex") -> list[str]:
     """根据关键词路由到合适的专家。返回 agent_key 列表。"""
     query = query.strip()
     specialists = []
@@ -1373,6 +1378,23 @@ def route_to_specialists_by_keywords(query: str) -> list[str]:
     if not specialists:
         specialists.append("valuation_expert")
 
+    # ── 根据复杂度上限截断，防止过度调度 ──
+    MAX_SPECIALISTS = {
+        "simple": 1,
+        "medium": 2,
+        "complex": 4,
+    }
+    max_allowed = MAX_SPECIALISTS.get(complexity, 4)
+    if len(specialists) > max_allowed:
+        # 核心优先级排序：估值/配置/风控/市场在最前面
+        priority = ["valuation_expert", "allocation_advisor", "risk_assessor", "market_analyst"]
+        prioritized = sorted(specialists, key=lambda s: (0 if s in priority else 1))
+        # 宏策略师和理财顾问优先级最低
+        low_priority = ["macro_strategist", "wealth_advisor"]
+        prioritized = sorted(prioritized, key=lambda s: (1 if s in low_priority else 0))
+        specialists = prioritized[:max_allowed]
+        logger.info(f"关键词路由截断: {len(specialists)}/{max_allowed} (所有: {prioritized[:max_allowed]})")
+
     return specialists
 
 
@@ -1452,27 +1474,37 @@ def build_scenario_rag_context(query: str, specialists: list[str],
 
 
 def get_context_config(complexity: str) -> dict:
-    """根据复杂度返回上下文配置。"""
+    """根据复杂度返回上下文配置，max_specialists 从 DB 读取。"""
+    try:
+        max_key = f"max_specialists.{complexity}"
+        from db.config import get_config_int
+        db_max = get_config_int(max_key, 0)
+    except Exception:
+        db_max = 0
+
     if complexity == "simple":
+        max_spec = db_max if db_max > 0 else 1
         return {
-            "history_limit": 3,      # 只保留最近3条历史
-            "rag_enabled": True,     # 简单查询也启用 RAG(轻量级)
-            "max_specialists": 1,    # 只调用1个专家
-            "rag_max_chars": 800,    # 轻量级 RAG 上下文
+            "history_limit": 3,
+            "rag_enabled": True,
+            "max_specialists": max_spec,
+            "rag_max_chars": 800,
         }
     elif complexity == "medium":
+        max_spec = db_max if db_max > 0 else 2
         return {
             "history_limit": 5,
             "rag_enabled": True,
-            "max_specialists": 2,
-            "rag_max_chars": 1500,   # RAG上下文压缩到1500字符
+            "max_specialists": max_spec,
+            "rag_max_chars": 1500,
         }
     else:  # complex
+        max_spec = db_max if db_max > 0 else 4
         return {
             "history_limit": 10,
             "rag_enabled": True,
-            "max_specialists": 5,
-            "rag_max_chars": 2500,   # RAG上下文压缩到2500字符
+            "max_specialists": max_spec,
+            "rag_max_chars": 2500,
         }
 
 
@@ -1719,6 +1751,12 @@ def orchestrate(query: str, history: list, rag_context: str = "", cancel_event: 
         refined_query = route_result.get("refined_query", query) or query
         specialists = route_result.get("specialists", [])
 
+        # 按复杂度上限截断 specialist 数量
+        max_spec = context_config.get("max_specialists", 4)
+        if len(specialists) > max_spec:
+            logger.info(f"specialists 超出上限({len(specialists)} > {max_spec})，截断")
+            specialists = specialists[:max_spec]
+
         # 恢复模式：排除已完成的专家，避免重复执行
         if resume_message_id and specialists and completed_specialists:
             specialists = [s for s in specialists if s not in completed_specialists]
@@ -1861,11 +1899,12 @@ def orchestrate(query: str, history: list, rag_context: str = "", cancel_event: 
         if not msg.tool_calls:
             conflicts = detect_conflicts(specialist_results)
 
-            # Phase B: 交叉审阅(>=3 个专家时强制触发，不再依赖冲突检测)
+            # Phase B: 交叉审阅 — 使用优化器的分歧检测
             needs_cross_review = (
-                len(specialist_results) >= 3
+                len(specialist_results) >= 2
                 and not force_skip_cross_review
                 and get_config("early_stop.enabled", "true") == "true"
+                and not OrchestratorOptimizer.should_skip_cross_review(specialist_results, complexity)
             )
 
             if needs_cross_review:
@@ -2015,6 +2054,17 @@ def orchestrate(query: str, history: list, rag_context: str = "", cancel_event: 
         llm_messages.append(assistant_msg)
 
         # 并行执行所有专家 Agent
+        #
+        # 限制单轮工具调用的数量，防止 Orchestrator 一次调过多专家
+        MAX_TOOLS_PER_TURN = {"simple": 1, "medium": 1, "complex": 3}
+        max_tools = MAX_TOOLS_PER_TURN.get(complexity, 3)
+        if len(msg.tool_calls) > max_tools:
+            logger.warning(
+                f"Orchestrator 请求 {len(msg.tool_calls)} 个工具(上限 {max_tools})，"
+                f"截断取前 {max_tools} 个"
+            )
+            msg.tool_calls = msg.tool_calls[:max_tools]
+
         tool_tasks = []
         for tc in msg.tool_calls:
             args = _parse_tool_args(tc.function.arguments, tc.function.name)
@@ -2294,6 +2344,12 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
         refined_query = route_result.get("refined_query", query) or query
         specialists = route_result.get("specialists", [])
 
+        # 按复杂度上限截断 specialist 数量
+        max_spec = context_config.get("max_specialists", 4)
+        if len(specialists) > max_spec:
+            logger.info(f"specialists 超出上限({len(specialists)} > {max_spec})，截断")
+            specialists = specialists[:max_spec]
+
         # 恢复模式：排除已完成的专家，避免重复执行
         if resume_message_id and specialists and completed_specialists:
             specialists = [s for s in specialists if s not in completed_specialists]
@@ -2526,7 +2582,7 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
 
         # 没有工具调用 → 检查是否需要交叉审阅,然后给出最终回答
         if not msg.tool_calls:
-            # Phase B: 交叉审阅(从 orchestration_config 读取配置)
+            # Phase B: 交叉审阅(从 orchestration_config 读取配置 + 优化器分歧检测)
             cross_review_enabled = get_orchestration_config("cross_review_enabled", "true") == "true"
             cross_review_min = int(get_orchestration_config("cross_review_min_specialists", "2"))
             cross_review_trigger = get_orchestration_config("cross_review_trigger", "disagreement")
@@ -2534,6 +2590,7 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
                 cross_review_enabled
                 and not force_skip_cross_review
                 and len(specialist_results) >= cross_review_min
+                and not OrchestratorOptimizer.should_skip_cross_review(specialist_results, complexity)
                 and (
                     cross_review_trigger == "always"
                     or (cross_review_trigger == "disagreement" and _detect_specialist_disagreement(specialist_results))
@@ -2602,7 +2659,7 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
                     answer = msg.content or ""
 
                     # Phase C: 仲裁(高级模型最终裁决)
-                    if should_arbitrate(complexity, specialist_results):
+                    if should_arbitrate(complexity, specialist_results, conflicts):
                         _check_cancel(cancel_event)
                         yield {"type": "phase", "phase": "arbitrate", "message": "⚖️ 正在由仲裁法官做最终裁决..."}
                         yield {

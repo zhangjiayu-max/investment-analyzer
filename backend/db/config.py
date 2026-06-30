@@ -139,7 +139,12 @@ DEFAULT_CONFIGS = [
     ('vision.ollama.model', 'qwen3-vl:8b', 'Ollama 视觉模型名', 'vision'),
     ('vision.mimo.api_key', 'tp-cztoehx9kc6uqpwm53adzok8agg84zfokfje362cqmfjzprg', 'MiMo API Key', 'vision'),
     ('vision.mimo.base_url', 'https://token-plan-cn.xiaomimimo.com/v1', 'MiMo Base URL', 'vision'),
-    ('vision.mimo.model', 'mimo-v2-omni', 'MiMo 视觉模型名', 'vision'),
+    ('vision.mimo.model', 'mimo-v2.5', 'MiMo 视觉模型名', 'vision'),
+
+    # 专家调度上限
+    ('max_specialists.simple', '1', '简单任务最大专家数', 'orchestrator'),
+    ('max_specialists.medium', '2', '中等任务最大专家数', 'orchestrator'),
+    ('max_specialists.complex', '4', '复杂任务最大专家数', 'orchestrator'),
 ]
 
 

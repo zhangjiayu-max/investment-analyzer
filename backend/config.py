@@ -41,7 +41,7 @@ MIMO_PLAN_MODEL = os.getenv("MIMO_PLAN_MODEL", "mimo-v2.5-pro")
 # 视觉模型配置（用于图片解析）
 VISION_API_KEY = os.getenv("VISION_API_KEY", MIMO_API_KEY)
 VISION_BASE_URL = os.getenv("VISION_BASE_URL", MIMO_BASE_URL)
-VISION_MODEL = os.getenv("VISION_MODEL", "mimo-v2-omni")
+VISION_MODEL = os.getenv("VISION_MODEL", "mimo-v2.5")
 
 # Embedding 模型配置（用于 ChromaDB 向量检索）
 # 可选: "BAAI/bge-small-zh-v1.5" (512维, 92MB) / "moka-ai/m3e-base" (768维, 400MB) / "BAAI/bge-large-zh-v1.5" (1024维, 1.2GB)
