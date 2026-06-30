@@ -97,7 +97,7 @@ DYNAMIC_SPAWN_RULES = [
     },
     {
         "detect": lambda result: result.get("confidence", 1.0) < 0.6,
-        "suggest": "behavioral_coach",
+        "suggest": "behavior_coach",
         "reason": "分析置信度较低,建议从行为金融角度补充",
         "priority": "medium",
     },
@@ -144,7 +144,7 @@ SOP_TEMPLATES = {
             {"agent": "valuation_expert", "task": "逐只评估持仓估值水位", "order": 1, "group": 0},
             {"agent": "risk_assessor", "task": "基于估值识别主要风险暴露", "order": 1, "group": 0},
             {"agent": "allocation_advisor", "task": "综合估值和风险评估配置合理性", "order": 2, "group": 1},
-            {"agent": "behavioral_coach", "task": "从行为金融角度审视操作偏差", "order": 2, "group": 1},
+            {"agent": "behavior_coach", "task": "从行为金融角度审视操作偏差", "order": 2, "group": 1},
         ],
         "cross_review": True,
         "arbitration": True,
@@ -168,11 +168,11 @@ SOP_TEMPLATES = {
         "steps": [
             {"agent": "valuation_expert", "task": "判断当前估值是否过高", "order": 1, "group": 0},
             {"agent": "risk_assessor", "task": "评估持有风险vs卖出机会成本", "order": 1, "group": 0},
-            {"agent": "behavioral_coach", "task": "检查是否情绪化决策", "order": 2, "group": 1},
+            {"agent": "behavior_coach", "task": "检查是否情绪化决策", "order": 2, "group": 1},
         ],
         "cross_review": True,
         "arbitration": True,
-        "final_agent": "behavioral_coach",
+        "final_agent": "behavior_coach",
     },
     "dca_plan": {
         "name": "定投方案设计",
@@ -219,7 +219,7 @@ AGENT_MODEL_MAP = {
     "fund_analyst": "deepseek-v4-flash",
     "risk_assessor": "deepseek-v4-pro",
     "market_analyst": "deepseek-v4-pro",
-    "behavioral_coach": "deepseek-v4-pro",
+    "behavior_coach": "deepseek-v4-pro",
     "orchestrator": "deepseek-v4-pro",
     "arbitrator": "deepseek-v4-pro",
     "cross_review": "deepseek-v4-flash",
@@ -621,6 +621,60 @@ def _detect_specialist_disagreement(specialist_results: list) -> bool:
     return not OrchestratorOptimizer.should_skip_cross_review(specialist_results, "complex")
 
 
+def get_max_tools_per_turn(complexity: str) -> int:
+    """根据复杂度获取单轮工具调用上限，从 DB 配置读取。"""
+    try:
+        from db.config import get_config_int
+        db_val = get_config_int(f"dispatch.max_tool_calls.{complexity}", 0)
+        if db_val > 0:
+            return db_val
+    except Exception:
+        pass
+    limits = {"simple": 1, "medium": 1, "complex": 3}
+    return limits.get(complexity, 3)
+
+
+def trim_tool_calls(tool_calls: list, allowed_specialists: list[str] | None, max_tools: int) -> list:
+    """按白名单和数量上限裁剪 tool calls。"""
+    expert_map = build_expert_map()
+    allowset = set(allowed_specialists or [])
+    trimmed = []
+    for tc in tool_calls or []:
+        agent_key = expert_map.get(getattr(getattr(tc, "function", None), "name", ""))
+        if allowset and agent_key not in allowset:
+            logger.info(f"跳过非白名单专家调用: {getattr(getattr(tc, 'function', None), 'name', '')} ({agent_key})")
+            continue
+        trimmed.append(tc)
+        if len(trimmed) >= max_tools:
+            break
+    return trimmed
+
+
+def should_run_cross_review(
+    specialist_results: list,
+    complexity: str,
+    conflicts: dict,
+    force_skip: bool = False,
+    enabled: bool = True,
+    min_specialists: int = 2,
+    min_severity: str = "medium",
+) -> bool:
+    """统一判断是否进入交叉审阅。"""
+    if not enabled or force_skip:
+        return False
+    if len(specialist_results) < min_specialists:
+        return False
+    if not conflicts or not conflicts.get("detected"):
+        return False
+    # severity 分级检查
+    severity_order = {"low": 0, "medium": 1, "high": 2}
+    actual = severity_order.get(conflicts.get("severity", "low"), 0)
+    required = severity_order.get(min_severity, 1)
+    if actual < required:
+        return False
+    return not OrchestratorOptimizer.should_skip_cross_review(specialist_results, complexity)
+
+
 def should_arbitrate(complexity: str, specialist_results: list, conflicts: dict = None) -> bool:
     """判断是否需要仲裁 Agent 介入。
 
@@ -631,8 +685,6 @@ def should_arbitrate(complexity: str, specialist_results: list, conflicts: dict 
     - ≥2 个专家参与分析
     - 存在实质性冲突（当 conflicts 传入时）
     """
-    # 使用优化器的快速检测
-    # 使用优化器的快速检测
     if OrchestratorOptimizer.should_skip_arbitration(specialist_results, complexity):
         return False
 
@@ -650,6 +702,12 @@ def should_arbitrate(complexity: str, specialist_results: list, conflicts: dict 
     if conflicts and not conflicts.get("detected"):
         logger.info("专家无方向冲突，跳过仲裁")
         return False
+    # severity 分级：仲裁只在高冲突时触发
+    if conflicts:
+        severity = conflicts.get("severity", "low")
+        if severity != "high":
+            logger.info(f"冲突 severity={severity}，未达 high，跳过仲裁")
+            return False
     return True
 
 
@@ -780,8 +838,19 @@ def detect_conflicts(specialist_results: list) -> dict:
                     "fund": a1["fund"],
                 })
 
+    # 计算 severity: action 冲突比 rating 冲突更严重
+    action_conflicts = [c for c in conflicts if c["type"] == "action"]
+    rating_conflicts = [c for c in conflicts if c["type"] == "rating"]
+    if len(action_conflicts) >= 2 or len(conflicts) >= 3:
+        severity = "high"
+    elif action_conflicts or rating_conflicts:
+        severity = "medium"
+    else:
+        severity = "low"
+
     return {
         "detected": len(conflicts) > 0,
+        "severity": severity,
         "items": conflicts,
     }
 
@@ -1386,14 +1455,17 @@ def route_to_specialists_by_keywords(query: str, complexity: str = "complex") ->
     }
     max_allowed = MAX_SPECIALISTS.get(complexity, 4)
     if len(specialists) > max_allowed:
-        # 核心优先级排序：估值/配置/风控/市场在最前面
-        priority = ["valuation_expert", "allocation_advisor", "risk_assessor", "market_analyst"]
-        prioritized = sorted(specialists, key=lambda s: (0 if s in priority else 1))
-        # 宏策略师和理财顾问优先级最低
-        low_priority = ["macro_strategist", "wealth_advisor"]
-        prioritized = sorted(prioritized, key=lambda s: (1 if s in low_priority else 0))
-        specialists = prioritized[:max_allowed]
-        logger.info(f"关键词路由截断: {len(specialists)}/{max_allowed} (所有: {prioritized[:max_allowed]})")
+        # 统一优先级排序：高优先级在前，低优先级在后，其余中间
+        HIGH_PRIORITY = ["valuation_expert", "allocation_advisor", "risk_assessor", "market_analyst"]
+        LOW_PRIORITY = ["macro_strategist", "wealth_advisor"]
+        def _priority_key(s):
+            if s in HIGH_PRIORITY:
+                return 0
+            if s in LOW_PRIORITY:
+                return 2
+            return 1
+        specialists = sorted(specialists, key=_priority_key)[:max_allowed]
+        logger.info(f"关键词路由截断: {len(specialists)}/{max_allowed} (保留: {specialists})")
 
     return specialists
 
@@ -1562,11 +1634,14 @@ def compress_rag_context(rag_context: str, max_chars: int = 2000) -> str:
 
 # ── Orchestrator 的工具 = 调用各个专家 Agent ──────────────
 
-def build_orchestrator_tools() -> list:
+def build_orchestrator_tools(allowed_specialists: list[str] | None = None) -> list:
     """从数据库动态生成 Orchestrator 可调用的 consult_* 工具定义。"""
     specialists = load_specialist_agents()
     tools = []
+    allowset = set(allowed_specialists or [])
     for key, info in specialists.items():
+        if allowset and key not in allowset:
+            continue
         tools.append({
             "type": "function",
             "function": {
@@ -1591,6 +1666,23 @@ def build_expert_map() -> dict:
     """从数据库动态生成 consult_* 工具名到 agent_key 的映射。"""
     specialists = load_specialist_agents()
     return {f"consult_{key}": key for key in specialists}
+
+
+def _append_specialist_synthesis_context(llm_messages: list, specialist_results: list) -> None:
+    """将专家结论汇总为一条 user 消息，供最终综合阶段使用。"""
+    if not specialist_results:
+        return
+    summary = "\n\n---\n\n".join(
+        f"【{sr.get('agent', sr.get('agent_key', '专家'))}】\n{sr.get('analysis', '')}"
+        for sr in specialist_results
+        if sr.get("analysis")
+    )
+    if not summary.strip():
+        return
+    llm_messages.append({
+        "role": "user",
+        "content": f"以下是各专家的分析结果，请据此给出最终综合建议：\n\n{summary}",
+    })
 
 def build_orchestrator_system_prompt() -> str:
     """从数据库动态生成 Orchestrator 的 system prompt。"""
@@ -1683,6 +1775,9 @@ def orchestrate(query: str, history: list, rag_context: str = "", cancel_event: 
         }
     """
     start_time = time.time()
+    resume_message_id = None
+    completed_specialists = set()
+    clarification = {}
 
     # 0. Token 预算检查
     budget = check_token_budget()
@@ -1723,6 +1818,7 @@ def orchestrate(query: str, history: list, rag_context: str = "", cancel_event: 
                 "route_by": "mention",
                 "refined_query": query,
             }
+            clarification = route_result
             context_config = get_context_config(complexity)
             token_budget = get_token_budget(complexity)
             refined_query = query
@@ -1743,6 +1839,7 @@ def orchestrate(query: str, history: list, rag_context: str = "", cancel_event: 
             target_specialists=None,
         )
         complexity = route_result["complexity"]
+        clarification = route_result
         context_config = get_context_config(complexity)
         token_budget = get_token_budget(complexity)
         logger.info(f"路由结果: {route_result}")
@@ -1859,6 +1956,7 @@ def orchestrate(query: str, history: list, rag_context: str = "", cancel_event: 
 
     # 当前用户问题(使用优化后的问题)
     llm_messages.append({"role": "user", "content": refined_query})
+    clarification = clarification if clarification else route_result or {}
 
     MAX_TURNS = 3 if budget["mode"] == "conservative" else 6
     force_skip_cross_review = budget["mode"] == "conservative"
@@ -1875,7 +1973,7 @@ def orchestrate(query: str, history: list, rag_context: str = "", cancel_event: 
                 trace_id=trace_id,
                 model=MODEL,
                 messages=llm_messages,
-                tools=build_orchestrator_tools(),
+                tools=build_orchestrator_tools(specialists),
                 tool_choice="auto",
                 temperature=get_config_float('llm.temperature_agent', 0.3),
                 max_tokens=get_config_int('llm.max_tokens_orchestrator', 8192),
@@ -1899,12 +1997,17 @@ def orchestrate(query: str, history: list, rag_context: str = "", cancel_event: 
         if not msg.tool_calls:
             conflicts = detect_conflicts(specialist_results)
 
-            # Phase B: 交叉审阅 — 使用优化器的分歧检测
-            needs_cross_review = (
-                len(specialist_results) >= 2
-                and not force_skip_cross_review
-                and get_config("early_stop.enabled", "true") == "true"
-                and not OrchestratorOptimizer.should_skip_cross_review(specialist_results, complexity)
+            cross_review_enabled = get_orchestration_config("cross_review_enabled", "true") == "true"
+            cross_review_min = int(get_orchestration_config("cross_review_min_specialists", "2"))
+            cross_review_min_sev = get_orchestration_config("cross_review_min_severity", "medium")
+            needs_cross_review = should_run_cross_review(
+                specialist_results=specialist_results,
+                complexity=complexity,
+                conflicts=conflicts,
+                force_skip=force_skip_cross_review,
+                enabled=cross_review_enabled,
+                min_specialists=cross_review_min,
+                min_severity=cross_review_min_sev,
             )
 
             if needs_cross_review:
@@ -2055,15 +2158,14 @@ def orchestrate(query: str, history: list, rag_context: str = "", cancel_event: 
 
         # 并行执行所有专家 Agent
         #
-        # 限制单轮工具调用的数量，防止 Orchestrator 一次调过多专家
-        MAX_TOOLS_PER_TURN = {"simple": 1, "medium": 1, "complex": 3}
-        max_tools = MAX_TOOLS_PER_TURN.get(complexity, 3)
-        if len(msg.tool_calls) > max_tools:
+        max_tools = get_max_tools_per_turn(complexity)
+        original_tool_count = len(msg.tool_calls or [])
+        msg.tool_calls = trim_tool_calls(msg.tool_calls, specialists, max_tools)
+        if original_tool_count != len(msg.tool_calls):
             logger.warning(
-                f"Orchestrator 请求 {len(msg.tool_calls)} 个工具(上限 {max_tools})，"
-                f"截断取前 {max_tools} 个"
+                f"Orchestrator 工具调用已裁剪: {original_tool_count} -> {len(msg.tool_calls)} "
+                f"(allowed={specialists}, max={max_tools})"
             )
-            msg.tool_calls = msg.tool_calls[:max_tools]
 
         tool_tasks = []
         for tc in msg.tool_calls:
@@ -2542,7 +2644,7 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
                 trace_id=trace_id,
                 model=MODEL,
                 messages=llm_messages,
-                tools=build_orchestrator_tools(),
+                tools=build_orchestrator_tools(specialists),
                 tool_choice="auto",
                 temperature=get_config_float('llm.temperature_agent', 0.3),
                 max_tokens=get_config_int('llm.max_tokens_orchestrator', 8192),
@@ -2582,19 +2684,18 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
 
         # 没有工具调用 → 检查是否需要交叉审阅,然后给出最终回答
         if not msg.tool_calls:
-            # Phase B: 交叉审阅(从 orchestration_config 读取配置 + 优化器分歧检测)
+            conflicts = detect_conflicts(specialist_results)
             cross_review_enabled = get_orchestration_config("cross_review_enabled", "true") == "true"
             cross_review_min = int(get_orchestration_config("cross_review_min_specialists", "2"))
-            cross_review_trigger = get_orchestration_config("cross_review_trigger", "disagreement")
-            should_cross_review = (
-                cross_review_enabled
-                and not force_skip_cross_review
-                and len(specialist_results) >= cross_review_min
-                and not OrchestratorOptimizer.should_skip_cross_review(specialist_results, complexity)
-                and (
-                    cross_review_trigger == "always"
-                    or (cross_review_trigger == "disagreement" and _detect_specialist_disagreement(specialist_results))
-                )
+            cross_review_min_sev = get_orchestration_config("cross_review_min_severity", "medium")
+            should_cross_review = should_run_cross_review(
+                specialist_results=specialist_results,
+                complexity=complexity,
+                conflicts=conflicts,
+                force_skip=force_skip_cross_review,
+                enabled=cross_review_enabled,
+                min_specialists=cross_review_min,
+                min_severity=cross_review_min_sev,
             )
             if should_cross_review:
                 yield {"type": "status", "message": f"正在进行交叉审阅({len(specialist_results)} 个专家并行互相验证)..."}
@@ -2737,7 +2838,7 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
             answer = msg.content or ""
 
             # Phase C: 仲裁(高级模型最终裁决,无交叉审阅时也可触发)
-            if not arbitration_done and should_arbitrate(complexity, specialist_results):
+            if not arbitration_done and should_arbitrate(complexity, specialist_results, conflicts):
                 _check_cancel(cancel_event)
                 yield {"type": "phase", "phase": "arbitrate", "message": "⚖️ 正在由仲裁法官做最终裁决..."}
                 yield {
@@ -2837,6 +2938,15 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
             assistant_msg["reasoning_content"] = reasoning
 
         llm_messages.append(assistant_msg)
+
+        max_tools = get_max_tools_per_turn(complexity)
+        original_tool_count = len(msg.tool_calls or [])
+        msg.tool_calls = trim_tool_calls(msg.tool_calls, specialists, max_tools)
+        if original_tool_count != len(msg.tool_calls):
+            logger.warning(
+                f"Orchestrator(stream) 工具调用已裁剪: {original_tool_count} -> {len(msg.tool_calls)} "
+                f"(allowed={specialists}, max={max_tools})"
+            )
 
         # 解析所有 tool call 参数
         tool_tasks = []
@@ -3022,13 +3132,26 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
 
         yield {"type": "status", "message": "正在综合各专家意见..."}
 
-        # 增强2: 动态 Agent 选择 — 检测是否需要追加专家
+        # 增强2: 动态 Agent 选择 — 检测是否需要追加专家（预算门控）
         _check_cancel(cancel_event)
+        max_total = context_config.get("max_specialists", 4)
+        dynamic_spawn_enabled = get_orchestration_config("dynamic_spawn_enabled", "false") == "true"
+        spawn_proposals = []  # 记录提案，即使不执行也写入日志
         for sr in list(specialist_results):
             suggestions = _check_dynamic_spawn(sr, already_called)
             for s in suggestions:
                 agent_key = s["agent_key"]
                 if agent_key in already_called:
+                    continue
+                # 预算检查：总专家数是否超限
+                if len(already_called) >= max_total:
+                    spawn_proposals.append({**s, "executed": False, "reason_skipped": "over_budget"})
+                    logger.info(f"动态追加提案被拒(预算已满 {max_total}): {agent_key} — {s['reason']}")
+                    continue
+                # 配置开关：默认不自动执行
+                if not dynamic_spawn_enabled:
+                    spawn_proposals.append({**s, "executed": False, "reason_skipped": "disabled"})
+                    logger.info(f"动态追加提案被拒(功能未开启): {agent_key} — {s['reason']}")
                     continue
                 already_called.add(agent_key)
                 agent_info = load_specialist_agents().get(agent_key, {})
