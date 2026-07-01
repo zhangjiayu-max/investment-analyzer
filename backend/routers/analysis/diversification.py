@@ -17,6 +17,7 @@ from db import (
     create_portfolio_analysis_record, list_portfolio_analysis_records,
     create_async_task, update_async_task,
     search_indexes_by_keyword, get_latest_valuation,
+    save_analysis_conclusion,
 )
 from db.portfolio import update_analysis_record
 from db.config import get_config as _get_config, get_config_int, get_config_float
@@ -440,6 +441,46 @@ async def _run_diversification_ai_summary_async(record_id: int, agent_id: int = 
         status="done",
         error_msg="",
     )
+
+    # ── 桥接 B：保存分析结论 ──
+    try:
+        summary = analysis[:100].replace("\n", " ").strip() if analysis else ""
+        action = "hold"
+        for candidate, act in [("减仓", "decrease"), ("加仓", "increase"),
+                                ("买入", "buy"), ("卖出", "sell"),
+                                ("调仓", "rebalance"), ("分散", "rebalance"),
+                                ("持有", "hold"), ("观望", "hold")]:
+            if candidate in (analysis or ""):
+                action = act
+                break
+
+        # 检查是否有超配基金
+        target = "整体组合"
+        for h in holdings:
+            pct = (h.get('current_value', 0) or 0) / total_value * 100
+            if pct > 25:
+                target = f"{h.get('fund_code','')} (超配{pct:.0f}%)"
+                break
+
+        key_vars = []
+        for var in ["集中度", "相关性", "行业", "穿透", "分散",
+                    "估值", "仓位", "资产大类"]:
+            if var in (analysis or ""):
+                key_vars.append(var)
+
+        save_analysis_conclusion(
+            source_system="independent_analysis",
+            source_type="diversification",
+            source_id=record_id,
+            target_subject=target,
+            action=action,
+            summary=summary,
+            reasoning=analysis[100:250].replace("\n", " ").strip() if len(analysis or "") > 100 else "",
+            key_variables=key_vars[:5] if key_vars else None,
+        )
+    except Exception as e:
+        logger.warning(f"分散度分析结论保存失败 record_id={record_id}: {e}")
+
     logger.info(f"分散度 AI 分析完成 record_id={record_id}")
 
 

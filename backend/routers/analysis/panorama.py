@@ -10,6 +10,7 @@ from db import (
     list_holdings, get_portfolio_diversification,
     create_portfolio_analysis_record, list_portfolio_analysis_records,
     get_analysis_agent,
+    save_analysis_conclusion,
 )
 from db.portfolio import update_analysis_record, get_analysis_record_status
 from db.config import get_config as _get_config, get_config_int, get_config_float
@@ -135,6 +136,38 @@ async def _run_panorama_async(record_id: int, system_prompt: str, holdings: list
 
         update_analysis_record(record_id, result_data=result_text, token_usage=tokens, status="done")
         _extract_candidates_safely(record_id, "panorama", result_text)
+
+        # ── 桥接 B：保存分析结论 ──
+        try:
+            summary = result_text[:100].replace("\n", " ").strip() if result_text else ""
+            action = "hold"
+            for candidate, act in [("减仓", "decrease"), ("加仓", "increase"),
+                                    ("买入", "buy"), ("卖出", "sell"),
+                                    ("调仓", "rebalance"), ("持有", "hold"),
+                                    ("观望", "hold")]:
+                if candidate in (result_text or ""):
+                    action = act
+                    break
+
+            key_vars = []
+            for var in ["集中度", "分散", "估值", "仓位", "风险",
+                        "收益", "波动", "回撤", "费率", "行业"]:
+                if var in (result_text or ""):
+                    key_vars.append(var)
+
+            save_analysis_conclusion(
+                source_system="independent_analysis",
+                source_type="panorama",
+                source_id=record_id,
+                target_subject="整体组合",
+                action=action,
+                summary=summary,
+                reasoning=result_text[100:250].replace("\n", " ").strip() if len(result_text or "") > 100 else "",
+                key_variables=key_vars[:5] if key_vars else None,
+            )
+        except Exception as e:
+            logger.warning(f"全景诊断结论保存失败 record_id={record_id}: {e}")
+
         logger.info(f"全景诊断完成 record_id={record_id}")
 
     except Exception as e:

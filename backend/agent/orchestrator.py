@@ -2335,6 +2335,58 @@ def orchestrate(query: str, history: list, rag_context: str = "", cancel_event: 
     }
 
 
+# ── Bridge A: 分析结论 → AI对话注入 ──────────────────────
+
+def _inject_analysis_context(query: str) -> tuple:
+    """从 analysis_conclusions 获取24h内结论，注入到查询和专家上下文中。
+
+    Returns: (enhanced_query, injected_context)
+    - enhanced_query: 在原 query 基础上追加结论摘要提示
+    - injected_context: 结构化的分析结论上下文，供 orchestrator 和 specialist 参考
+
+    任何失败都不阻塞主流程，返回原 query 和空字符串。
+    """
+    try:
+        from db.analysis_conclusions import get_latest_analysis_conclusions
+        conclusions = get_latest_analysis_conclusions(hours=24, limit=5)
+        if not conclusions:
+            return query, ""
+
+        # 格式化结论为上下文块
+        lines = ["## 最近分析结论（24h内，仅供专家参考，非强制采纳）"]
+        action_icons = {
+            "buy": "📈", "increase": "📈",
+            "sell": "📉", "decrease": "📉", "clear": "📉",
+            "hold": "⏸️",
+        }
+        for i, c in enumerate(conclusions, 1):
+            icon = action_icons.get((c.get("action") or "").lower(), "📌")
+            target = c.get("target_subject", "未知标的")
+            summary = c.get("summary", "")
+            action = c.get("action", "")
+            confidence = c.get("confidence", 0)
+            source = c.get("source_type", "")
+            action_str = f" [建议: {action}]" if action else ""
+            conf_str = f" (置信度: {confidence:.0%})" if confidence else ""
+            source_str = f" | 来源: {source}" if source else ""
+            lines.append(f"{icon} **{target}**{action_str}{conf_str}{source_str}: {summary}")
+
+        injected_context = "\n".join(lines) + "\n\n"
+
+        # 增强 query：追加简要结论提示
+        brief = "；".join(
+            f"[{c.get('action', '无操作')}] {c.get('target_subject', '')}: {c.get('summary', '')[:60]}"
+            for c in conclusions[:3]
+        )
+        enhanced_query = f"{query}\n\n[系统提示：以下是最近24h内的分析结论，请参考但不强制采纳] {brief}"
+
+        logger.info(f"[Bridge A] 分析结论注入: {len(conclusions)} 条 → query + prebuilt_context")
+        return enhanced_query, injected_context
+    except Exception as e:
+        logger.warning(f"[Bridge A] 分析结论注入失败（不阻塞主流程）: {e}")
+        return query, ""
+
+
 def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_event: threading.Event | None = None, resume_from: dict | None = None, conversation_id: int = 0, message_id: int = 0, trace_id: str = "", target_specialists: list[str] = None):
     """
     Orchestrator 的流式版本,通过生成器逐步返回事件。

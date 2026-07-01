@@ -256,6 +256,65 @@ def get_conclusions_by_target(
         return []
 
 
+def get_related_orchestrator_decisions(
+    keywords: list[str],
+    hours: int = 48,
+    limit: int = 3,
+) -> list[dict]:
+    """
+    根据关键词查找 source_system='ai_dialogue' 的相关分析结论。
+
+    用于独立分析报告末尾关联最近AI对话内容（桥接B）。
+
+    Args:
+        keywords: 关键词列表（基金代码、名称、话题标签等）
+        hours:    时间窗口（小时）
+        limit:    最大返回条数
+
+    Returns:
+        [{id, source_type, target_subject, action, summary, reasoning, created_at}, ...]
+        失败返回空列表
+    """
+    if not keywords:
+        return []
+    try:
+        conn = _get_conn()
+        # 用 LIKE 做关键词匹配
+        conditions = []
+        params = []
+        for kw in keywords:
+            kw_clean = kw.strip()
+            if not kw_clean:
+                continue
+            pattern = f"%{kw_clean}%"
+            conditions.append(
+                "(target_subject LIKE ? OR summary LIKE ? OR reasoning LIKE ?)"
+            )
+            params.extend([pattern, pattern, pattern])
+
+        if not conditions:
+            conn.close()
+            return []
+
+        where_clause = " OR ".join(conditions)
+        sql = f"""SELECT id, source_system, source_type, target_subject,
+                         action, summary, reasoning, confidence, created_at
+                  FROM analysis_conclusions
+                  WHERE source_system = 'ai_dialogue'
+                    AND ({where_clause})
+                    AND created_at >= datetime('now', 'localtime', ?)
+                  ORDER BY created_at DESC
+                  LIMIT ?"""
+        params.extend([f"-{hours} hours", limit])
+
+        rows = conn.execute(sql, params).fetchall()
+        conn.close()
+        return [dict(r) for r in rows]
+    except Exception as e:
+        logger.warning(f"get_related_orchestrator_decisions 失败: {e}")
+        return []
+
+
 def get_conflicting_conclusions(
     target_subject: str,
     hours: int = 24,

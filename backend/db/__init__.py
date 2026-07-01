@@ -201,6 +201,13 @@ from db.decisions import (
     get_decision_stats,
 )
 
+# 跨系统桥接层 — 分析结论数据层
+from db.analysis_conclusions import (
+    init_conclusions_tables, save_analysis_conclusion,
+    get_latest_analysis_conclusions, get_conclusions_by_target,
+    get_conflicting_conclusions, get_related_orchestrator_decisions,
+)
+
 
 def init_db():
     """建表，启动时调用。各子模块的 init_tables(conn) 负责创建自己的表。"""
@@ -1022,6 +1029,9 @@ def init_db():
 
     # ── 知识图谱表 ──────────────────────────────────────
     init_knowledge_graph(conn)
+
+    # ── 跨系统桥接层 ──────────────────────────────────────
+    init_conclusions_tables(conn)
 
     conn.commit()
     conn.close()

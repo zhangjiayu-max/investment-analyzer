@@ -2,6 +2,7 @@
 import asyncio
 import json
 import logging
+import re
 import time
 
 from fastapi import APIRouter, HTTPException
@@ -12,6 +13,8 @@ from db import (
     create_analysis_history,
     create_async_task, update_async_task, get_async_task, get_latest_async_task,
     get_config_int, get_config_float,
+    save_analysis_conclusion,
+    get_related_orchestrator_decisions,
 )
 from db._conn import _get_conn
 from llm_service import _call_llm, MODEL
@@ -21,6 +24,75 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["analysis-daily-report"])
 
 _background_tasks = set()
+
+
+# ── 桥接 B：对话→分析关联 ──
+
+
+def _extract_report_keywords(report_text: str) -> list[str]:
+    """从分析报告文本中提取关键词，用于匹配对话。"""
+    keywords = set()
+
+    # 基金代码模式（6位数字）
+    for m in re.finditer(r'\b(\d{6})\b', report_text or ""):
+        keywords.add(m.group(1))
+
+    # 话题标签
+    for kw in ["债市", "股市", "定投", "减仓", "加仓", "止盈", "止损", "调仓",
+               "利率", "估值", "分散", "集中", "现金", "备用金",
+               "债券", "股票", "指数", "基金", "组合"]:
+        if kw in (report_text or ""):
+            keywords.add(kw)
+
+    return list(keywords)[:10]
+
+
+def _attach_chat_context(report: dict | str, hours: int = 48) -> dict:
+    """
+    分析报告生成完后，检查最近对话中有没有相关的结论，
+    如果有，在 report 末尾加一个"💬 AI对话相关内容"区域。
+
+    Returns:
+        如果有关联，在 report dict 中添加 chat_context 字段
+    """
+    if isinstance(report, str):
+        report_text = report
+        report = {"result": report_text}
+    else:
+        report_text = report.get("result", "") or ""
+
+    if not report_text:
+        return report
+
+    try:
+        topics = _extract_report_keywords(report_text)
+        if not topics:
+            return report
+
+        decisions = get_related_orchestrator_decisions(
+            keywords=topics,
+            hours=hours,
+            limit=3,
+        )
+
+        if not decisions:
+            return report
+
+        report["chat_context"] = {
+            "title": "💬 AI对话相关内容",
+            "note": "以下观点来自近期AI对话，供交叉参考：",
+            "items": [
+                {
+                    "time": d.get("created_at", ""),
+                    "content": (d.get("summary", "") or "")[:200],
+                }
+                for d in decisions
+            ],
+        }
+    except Exception as e:
+        logger.warning(f"_attach_chat_context 失败: {e}")
+
+    return report
 
 
 @router.get("/api/dashboard/daily-report")
@@ -273,6 +345,42 @@ async def _run_regenerate_daily_report_async(task_id: int, agent: dict):
             valuation_context=val_context[:500], result=result_text,
             token_usage=token_usage,
         )
+
+        # ── 桥接 B：保存分析结论 + 关联对话上下文 ──
+        try:
+            # 提取摘要为前100字
+            summary = result_text[:100].replace("\n", " ").strip() if result_text else ""
+            # 提取核心操作建议
+            action = "hold"
+            for candidate, act in [("减仓", "decrease"), ("加仓", "increase"),
+                                    ("买入", "buy"), ("卖出", "sell"),
+                                    ("止盈", "decrease"), ("止损", "sell"),
+                                    ("持有", "hold"), ("定投", "increase"),
+                                    ("观望", "hold")]:
+                if candidate in (result_text or ""):
+                    action = act
+                    break
+            # 提取关键变量
+            key_vars = []
+            for var in ["债市温度", "利率", "估值", "百分位", "PE", "PB",
+                        "收益率", "集中度", "仓位", "成交量"]:
+                if var in (result_text or ""):
+                    key_vars.append(var)
+
+            save_analysis_conclusion(
+                source_system="independent_analysis",
+                source_type="daily_report",
+                source_id=new_id,
+                target_subject="整体组合",
+                action=action,
+                summary=summary,
+                reasoning=result_text[100:250].replace("\n", " ").strip() if len(result_text or "") > 100 else "",
+                key_variables=key_vars[:5] if key_vars else None,
+            )
+            # 关联对话上下文
+            _attach_chat_context(result_text)
+        except Exception as e:
+            logger.warning(f"日报结论保存/关联对话失败: {e}")
 
         # 后台自动质量评估
         async def _auto_eval():

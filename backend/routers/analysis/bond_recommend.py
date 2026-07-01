@@ -13,6 +13,7 @@ from db import (
     create_portfolio_analysis_record, list_portfolio_analysis_records,
     DEFAULT_BOND_PROMPT,
     create_async_task, update_async_task,
+    save_analysis_conclusion,
 )
 from state import track_agent, untrack_agent
 
@@ -259,9 +260,10 @@ async def _do_bond_recommend():
             parsed = {"summary": "AI分析完成", "raw": result}
 
     # 持久化到数据库
+    record_id = None
     try:
         summary_text = parsed.get("summary", "债券配置推荐") if isinstance(parsed, dict) else "债券配置推荐"
-        create_portfolio_analysis_record(
+        record_id = create_portfolio_analysis_record(
             analysis_type="bond_recommend",
             summary=summary_text[:100],
             input_data=combined_input[:2000],
@@ -269,6 +271,38 @@ async def _do_bond_recommend():
         )
     except Exception as e:
         logging.error(f"[bond_ai_recommend] 保存记录失败: {e}")
+
+    # ── 桥接 B：保存分析结论 ──
+    try:
+        raw_text = result if result else ""
+        summary = raw_text[:100].replace("\n", " ").strip()
+        action = "hold"
+        for candidate, act in [("减仓", "decrease"), ("加仓", "increase"),
+                                ("买入", "buy"), ("卖出", "sell"),
+                                ("配置", "increase"), ("定投", "increase"),
+                                ("持有", "hold"), ("观望", "hold")]:
+            if candidate in raw_text:
+                action = act
+                break
+
+        key_vars = []
+        for var in ["债市温度", "利率", "收益率", "曲线", "利差",
+                    "信用", "久期", "仓位", "货币", "宏观"]:
+            if var in raw_text:
+                key_vars.append(var)
+
+        save_analysis_conclusion(
+            source_system="independent_analysis",
+            source_type="bond_recommend",
+            source_id=record_id,
+            target_subject="债券型基金",
+            action=action,
+            summary=summary,
+            reasoning=raw_text[100:250].replace("\n", " ").strip() if len(raw_text) > 100 else "",
+            key_variables=key_vars[:5] if key_vars else None,
+        )
+    except Exception as e:
+        logging.warning(f"[bond_ai_recommend] 结论保存失败: {e}")
 
     return {"ok": True, "result": parsed}
 

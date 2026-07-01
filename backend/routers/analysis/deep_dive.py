@@ -11,6 +11,8 @@ from db import (
     lookup_fund_info, get_fund_holdings, fetch_fund_nav,
     get_valuation_history, get_latest_valuation,
     create_portfolio_analysis_record,
+    save_analysis_conclusion,
+    get_related_orchestrator_decisions,
 )
 from db.portfolio import update_analysis_record
 from db.config import get_config as _get_config, get_config_int, get_config_float
@@ -265,6 +267,53 @@ async def _run_deep_dive_async(record_id: int, system_prompt: str, user_content:
         tokens = response.usage.total_tokens if response.usage else 0
         update_analysis_record(record_id, result_data=result_text, token_usage=tokens, status="done")
         _extract_candidates_safely(record_id, "deep_dive", result_text)
+
+        # ── 桥接 B：保存分析结论 ──
+        try:
+            # 从 input 中解析基金代码（user_content 在外部作用域不可直接访问）
+            from db import get_portfolio_analysis_record
+            rec = get_portfolio_analysis_record(record_id)
+            input_data = rec.get("input_data", "{}") if rec else "{}"
+            try:
+                inp = json.loads(input_data) if isinstance(input_data, str) else input_data
+                fund_code = inp.get("fund_code", "")
+            except Exception:
+                fund_code = ""
+
+            summary = result_text[:100].replace("\n", " ").strip() if result_text else ""
+            action = "hold"
+            for candidate, act in [("减仓", "decrease"), ("加仓", "increase"),
+                                    ("买入", "buy"), ("卖出", "sell"),
+                                    ("持有", "hold"), ("观望", "hold")]:
+                if candidate in (result_text or ""):
+                    action = act
+                    break
+
+            key_vars = []
+            for var in ["估值", "PE", "PB", "百分位", "收益率", "持仓",
+                        "回撤", "波动", "规模", "费率", "行业"]:
+                if var in (result_text or ""):
+                    key_vars.append(var)
+
+            save_analysis_conclusion(
+                source_system="independent_analysis",
+                source_type="deep_dive",
+                source_id=record_id,
+                target_subject=fund_code or "未知基金",
+                action=action,
+                summary=summary,
+                reasoning=result_text[100:250].replace("\n", " ").strip() if len(result_text or "") > 100 else "",
+                key_variables=key_vars[:5] if key_vars else None,
+            )
+            # 关联对话上下文（调用 daily_report 的函数）
+            try:
+                from routers.analysis.daily_report import _attach_chat_context
+                _attach_chat_context(result_text)
+            except Exception:
+                pass
+        except Exception as e:
+            logger.warning(f"深度分析结论保存失败 record_id={record_id}: {e}")
+
         logger.info(f"深度分析完成 record_id={record_id}")
     except Exception as e:
         logger.error(f"深度分析失败 record_id={record_id}: {e}")
