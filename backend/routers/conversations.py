@@ -25,6 +25,7 @@ from db import (
 from db.config import get_config, get_config_float, get_config_int
 from state import running_agents as _running_agents
 from agent.orchestrator import orchestrate, orchestrate_stream, clarify_requirement, CancelledError
+from portfolio_fact_layer import build_portfolio_facts
 from agent.multi_agent import run_specialist
 from rag import build_rag_context_with_details, log_rag_search
 from llm_service import _call_llm, MODEL, ORCHESTRATOR_PROMPT
@@ -572,6 +573,31 @@ async def send_message_api(conv_id: int, req: SendMessageRequest):
     history = get_messages(conv_id, limit=20)
     msg_list = [{"role": m["role"], "content": m["content"]} for m in history]
 
+    # 3.5 注入组合约束（Portfolio Fact Layer）
+    try:
+        from portfolio_fact_layer import build_portfolio_facts as _bpf
+        _pf = _bpf()
+        _cs = _pf.get("constraints", {})
+        _sn = _pf.get("snapshot", {})
+        _ras = _pf.get("recent_analyses", [])
+        _constraint_block = f"""## ⚠️ 组合约束（多智能体协同统一规则，最高优先级）
+
+1. **集中度红线**：以下基金已超25%集中度，禁止建议加仓：
+{chr(10).join(f'   - {t}' for t in _cs.get('no_add_targets', []))}
+
+2. **债市温度**：{_cs.get('bond_temperature', '?')}°，{'偏贵，不建议加仓债基' if _cs.get('bond_expensive') else '正常'}
+
+3. **组合概况**：总市值 {_sn.get('total_value', '?')}元，债基占比 {_sn.get('bond_pct', '?')}%
+
+4. **最近分析**：
+{chr(10).join(f'   - [{a.get("type","")}] {a.get("conclusion","")[:200]}...' for a in _ras)}
+
+---
+"""
+        rag_context = _constraint_block + "\n" + (rag_context or "")
+    except Exception as _e:
+        logger.warning(f"注入组合约束失败: {_e}")
+
     # 4. 调用 Orchestrator（多 Agent 协作）
     trace_id = str(uuid.uuid4())[:12]
     logger.info(f"[trace:{trace_id}] 非流式对话 {conv_id}: {req.content[:50]}...")
@@ -982,9 +1008,39 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
         # 4. 获取对话历史
         history = get_messages(conv_id, limit=20)
         msg_list = [{"role": m["role"], "content": m["content"]} for m in history]
+        # 构建组合约束上下文（Portfolio Fact Layer）
+        portfolio_facts = None
+        try:
+            portfolio_facts = build_portfolio_facts()
+            facts_text = json.dumps(portfolio_facts, ensure_ascii=False, indent=2, default=str)
+        except Exception as e:
+            logger.warning(f"构建组合约束失败: {e}")
+            facts_text = None
+
         orchestrator_context = rag_context
         if unified_context:
             orchestrator_context = f"{unified_context}\n\n## 原始 RAG 检索上下文\n{rag_context}" if rag_context else unified_context
+
+        # 注入组合约束到多智能体协作上下文
+        if facts_text and portfolio_facts:
+            constraints = portfolio_facts.get("constraints", {})
+            constraint_summary = f"""## ⚠️ 组合约束（多智能体协同统一规则，最高优先级）
+
+请所有参与协作的专家注意以下硬约束：
+
+1. **集中度红线**：以下基金已超过25%持仓集中度阈值，任何专家**禁止建议加仓或转入**这些基金：
+{chr(10).join(f'   - {t}' for t in constraints.get('no_add_targets', []))}
+
+2. **债市温度**：当前债市温度 {constraints.get('bond_temperature', '?')}°，{'偏贵，不建议加仓债券型基金' if constraints.get('bond_expensive') else '正常'}
+
+3. **组合概况**：总市值 {portfolio_facts.get('snapshot', {}).get('total_value', '?')}元，债基占比 {portfolio_facts.get('snapshot', {}).get('bond_pct', '?')}%
+
+4. **最近分析结论**：请参考以下24h内其他分析的结论，不要给出矛盾建议：
+{chr(10).join(f'   - [{a.get("type","")}] {a.get("conclusion","")[:200]}...' for a in portfolio_facts.get('recent_analyses', []))}
+
+---
+"""
+            orchestrator_context = constraint_summary + "\n" + (orchestrator_context or "")
 
         # 5. 调用 Orchestrator（多 Agent 协作）
         # 不检查断开连接，让后端任务继续执行
