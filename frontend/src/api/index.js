@@ -2012,3 +2012,10 @@ export const dailyAdviceAPI = {
   /** 问 AI 解读信号 */
   askAI: (signalId) => api.post(`/daily-advice/signals/${signalId}/ask-ai`, {}, { timeout: 120000 }),
 }
+
+// ── 决策画布 API ──────────────────────────────────────
+
+/** 获取决策画布四区数据 */
+export function getDecisionCanvas(hours = 24) {
+  return api.get('/decision/canvas', { params: { hours } })
+}

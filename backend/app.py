@@ -111,6 +111,7 @@ from routers.analysis import (
     fund_analysis_router as analysis_fund_analysis_router,
     compare_diff_router as analysis_compare_diff_router,
     trade_pattern_router as analysis_trade_pattern_router,
+    decision_canvas_router as analysis_decision_canvas_router,
 )
 from routers.dashboard import router as dashboard_router
 from routers.config import router as config_router
@@ -168,6 +169,7 @@ app.include_router(analysis_four_pots_router)
 app.include_router(analysis_fund_analysis_router)
 app.include_router(analysis_compare_diff_router)
 app.include_router(analysis_trade_pattern_router)
+app.include_router(analysis_decision_canvas_router)
 app.include_router(dashboard_router)
 app.include_router(config_router)
 app.include_router(rag_router)

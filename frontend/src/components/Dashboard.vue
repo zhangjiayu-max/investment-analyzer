@@ -18,6 +18,7 @@ import HotspotsCard from './dashboard/HotspotsCard.vue'
 import CashManagementCard from './dashboard/CashManagementCard.vue'
 import DecisionActionList from './dashboard/DecisionActionList.vue'
 import DecisionReviewList from './dashboard/DecisionReviewList.vue'
+import DecisionCanvas from './DecisionCanvas.vue'
 import Icon from './ui/Icon.vue'
 
 const { showToast } = useToast()
@@ -59,6 +60,9 @@ const hotTopicsLoading = ref(true)
 const hotspotsRelate = ref(null)
 const opportunities = ref([])
 const opportunitiesLoading = ref(false)
+
+// ── 决策画布开关 ──
+const showDecisionCanvas = ref(false)
 
 // ── 每日持仓提示 ──
 const dailyAdvice = ref(null)
@@ -748,6 +752,13 @@ function handlePanorama() {
         <h2 class="page-title">每日投资决策看板</h2>
         <p class="page-desc">{{ data?.date || '加载中...' }} · 整合估值、持仓、零钱，辅助决策</p>
       </div>
+      <button
+        :class="['btn-canvas-toggle', { active: showDecisionCanvas }]"
+        @click="showDecisionCanvas = !showDecisionCanvas"
+      >
+        <span class="toggle-icon">{{ showDecisionCanvas ? '📋' : '📋' }}</span>
+        <span class="toggle-text">决策画布</span>
+      </button>
     </div>
 
     <!-- Global error -->
@@ -904,6 +915,11 @@ function handlePanorama() {
         :bond-result="bondResult"
         @bond-recommend="confirmBondRecommend"
       />
+    </div>
+
+    <!-- ── 决策画布 ── -->
+    <div v-if="showDecisionCanvas && !loading" class="canvas-section">
+      <DecisionCanvas @navigate="(page) => emit('navigate', page)" />
     </div>
   </div>
 
@@ -1199,5 +1215,41 @@ function handlePanorama() {
 }
 .advice-summary-btn {
   width: 100%;
+}
+
+/* ── 决策画布切换按钮 ── */
+.btn-canvas-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.5rem 1rem;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--color-text-secondary);
+  background: var(--color-bg-card);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  cursor: pointer;
+  transition: all 0.2s ease;
+  white-space: nowrap;
+}
+.btn-canvas-toggle:hover {
+  border-color: var(--color-primary-300);
+  color: var(--color-primary);
+  background: var(--color-primary-50);
+}
+.btn-canvas-toggle.active {
+  border-color: var(--color-primary-500);
+  color: var(--color-primary);
+  background: var(--color-primary-50);
+  box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.12);
+}
+.toggle-icon { font-size: 1rem; }
+
+/* ── 决策画布区域 ── */
+.canvas-section {
+  margin-top: 0.5rem;
+  padding-top: 1rem;
+  border-top: 2px solid var(--color-border-light);
 }
 </style>
