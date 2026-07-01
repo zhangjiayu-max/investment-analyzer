@@ -355,6 +355,9 @@ async def _run_diversification_ai_summary_async(record_id: int, agent_id: int = 
 
     mcp_raw_block = "\n\n".join(mcp_raw_sections) if mcp_raw_sections else "（无 MCP 数据）"
 
+    asset_class_section = f"### 资产大类穿透\n{asset_class_block}" if asset_class_block else ""
+    valuation_section = f"### 估值参考（跟踪指数）\n{valuation_block}" if valuation_block else ""
+
     user_content = f"""## 持仓概览
 持有基金 {result.get('holding_count',0)} 只 | 总投资 {result.get('total_cost',0):.0f}元 | 总市值 {result.get('total_value',0):.0f}元
 
@@ -375,9 +378,9 @@ async def _run_diversification_ai_summary_async(record_id: int, agent_id: int = 
 ### 行业集中度（基于 MCP 行业配置数据）
 {industry_block}
 
-{f"### 资产大类穿透\n{asset_class_block}" if asset_class_block else ""}
+{asset_class_section}
 
-{f"### 估值参考（跟踪指数）\n{valuation_block}" if valuation_block else ""}
+{valuation_section}
 
 ## 📄 MCP 原始数据（供验证和深度参考）
 {mcp_raw_block}

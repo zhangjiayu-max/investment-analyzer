@@ -139,28 +139,49 @@ _RISK_AND_DEPTH_CONSTRAINT = """
 
 
 def _extract_text_tool_calls(content_str):
-    """从 LLM 文本中提取 XML 格式的 tool_call。"""
-    if not content_str or '<tool_call>' not in content_str:
+    """从 LLM 文本中提取 XML 或 DSML 格式的 tool_call。
+
+    支持两种格式：
+    1. XML 格式: <tool_call><function=name>...<parameter=name>value</parameter></function></tool_call>
+    2. DSML 格式 (DeepSeek): <｜｜DSML｜｜invoke name="func">...<｜｜DSML｜｜parameter name="arg">value</｜｜DSML｜｜/parameter></｜｜DSML｜｜/invoke>
+    """
+    if not content_str:
         return None
     import re as _re
-    # Build pattern with chr() to avoid XML interpretation
-    tc_open = chr(60) + 'tool' + '_call' + chr(62)
-    tc_close = chr(60) + '/tool' + '_call' + chr(62)
-    fn_open = chr(60) + 'function='
-    fn_close = chr(60) + '/function' + chr(62)
-    param_open = chr(60) + 'parameter='
-    param_close = chr(60) + '/parameter' + chr(62)
-    
-    pattern = tc_open + r'\s*' + fn_open + r'(\w+)>' + r'(.*?)' + fn_close + r'\s*' + tc_close
-    matches = _re.findall(pattern, content_str, _re.DOTALL)
-    if not matches:
-        return None
+
     results = []
-    for func_name, params_block in matches:
-        pp = param_open + r'(\w+)>' + r'(.*?)' + param_close
-        param_matches = _re.findall(pp, params_block, _re.DOTALL)
-        args = {pname: pval.strip() for pname, pval in param_matches}
-        results.append({'name': func_name, 'arguments': args})
+
+    # ── 格式1: XML <tool_call> ──
+    if '<tool_call>' in content_str:
+        tc_open = chr(60) + 'tool' + '_call' + chr(62)
+        tc_close = chr(60) + '/tool' + '_call' + chr(62)
+        fn_open = chr(60) + 'function='
+        fn_close = chr(60) + '/function' + chr(62)
+        param_open = chr(60) + 'parameter='
+        param_close = chr(60) + '/parameter' + chr(62)
+
+        pattern = tc_open + r'\s*' + fn_open + r'(\w+)>' + r'(.*?)' + fn_close + r'\s*' + tc_close
+        matches = _re.findall(pattern, content_str, _re.DOTALL)
+        for func_name, params_block in matches:
+            pp = param_open + r'(\w+)>' + r'(.*?)' + param_close
+            param_matches = _re.findall(pp, params_block, _re.DOTALL)
+            args = {pname: pval.strip() for pname, pval in param_matches}
+            results.append({'name': func_name, 'arguments': args})
+
+    # ── 格式2: DSML <｜｜DSML｜｜invoke> ──
+    _sep = '\uff5c\uff5c'  # ｜｜ (fullwidth)
+    if _sep + 'DSML' + _sep + 'invoke' in content_str:
+        dsml = _sep + 'DSML' + _sep
+        close_param = '</' + dsml + 'parameter>'   # </｜｜DSML｜｜parameter>
+        close_invoke = '</' + dsml + 'invoke>'       # </｜｜DSML｜｜invoke>
+        invoke_pat = dsml + r'invoke name="(\w+)">(.*?)' + _re.escape(close_invoke)
+        invoke_matches = _re.findall(invoke_pat, content_str, _re.DOTALL)
+        for func_name, params_block in invoke_matches:
+            param_pat = dsml + r'parameter name="(\w+)"[^>]*>(.*?)' + _re.escape(close_param)
+            param_matches = _re.findall(param_pat, params_block, _re.DOTALL)
+            args = {pname: pval.strip() for pname, pval in param_matches}
+            results.append({'name': func_name, 'arguments': args})
+
     return results if results else None
 
 
@@ -186,6 +207,28 @@ def _process_text_tool_calls(content_str, llm_messages, tool_calls_log, agent_na
             'content': f'工具 {tc["name"]} 的执行结果：' + chr(10) + result,
         })
     return True
+
+
+def _clean_dsml_from_content(content: str) -> str:
+    """清理 DSML 标记，防止泄露到最终回答。"""
+    if not content:
+        return content
+    _sep = '\uff5c\uff5c'
+    dsml = _sep + 'DSML' + _sep
+    if dsml not in content:
+        return content
+    import re as _re
+    # 删除整个 DSML 块: <｜｜DSML｜｜tool_calls>...</｜｜DSML｜｜tool_calls>
+    tc_open = '<' + dsml + 'tool_calls>'
+    tc_close = '</' + dsml + 'tool_calls>'
+    if tc_open in content and tc_close in content:
+        pattern = _re.escape(tc_open) + r'.*?' + _re.escape(tc_close)
+        content = _re.sub(pattern, '', content, flags=_re.DOTALL)
+    else:
+        # 删除散落的 DSML 标签
+        content = _re.sub(r'<' + _re.escape(dsml) + r'[^>]*>', '', content)
+        content = _re.sub(r'</' + _re.escape(dsml) + r'[^>]*>', '', content)
+    return content.strip()
 
 
 # ── 专家 Agent 加载 ──────────────────────────────────────
@@ -408,13 +451,13 @@ def run_specialist(agent_key: str, query: str, context: str = "",
 
     duration_ms = int((time.time() - start_time) * 1000)
 
-    # 清理：如果 answer 中仍包含文本格式 tool_call，去除之
-    if answer and '<tool_call>' in answer:
-        cleaned = re.sub(r'<tool_call>.*?</tool_call>', '', answer, flags=re.DOTALL).strip()
-        # 只在清理后内容明显变短时才替换（避免误删有效内容）
-        if cleaned and len(cleaned) > len(answer) * 0.3:
-            answer = cleaned
-        # 如果清理后为空，保留原文（不替换为废话）
+    # 清理：如果 answer 中仍包含文本格式 tool_call 或 DSML 标记，去除之
+    if answer:
+        if '<tool_call>' in answer:
+            cleaned = re.sub(r'<tool_call>.*?</tool_call>', '', answer, flags=re.DOTALL).strip()
+            if cleaned and len(cleaned) > len(answer) * 0.3:
+                answer = cleaned
+        answer = _clean_dsml_from_content(answer)
 
     return {
         "agent_key": agent_key,

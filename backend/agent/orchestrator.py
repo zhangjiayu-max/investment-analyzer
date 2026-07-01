@@ -415,6 +415,32 @@ def _build_history_summary(history: list) -> str:
     return "\n".join(parts)
 
 
+def _build_final_synthesis_prompt(specialist_results: list, routed_specialists: list) -> str:
+    """构建最终综合提示，强制 LLM 只引用实际执行了的专家。"""
+    executed_keys = {sr.get("agent_key", "") for sr in specialist_results}
+    executed_names = {sr.get("agent", "") for sr in specialist_results}
+    routed_but_not_executed = [s for s in routed_specialists if s not in executed_keys]
+
+    prompt = "请根据以上各专家的分析结果，给出最终的综合投资建议。"
+
+    if routed_but_not_executed:
+        from db.agents import load_specialist_agents
+        all_agents = load_specialist_agents()
+        missing_names = []
+        for key in routed_but_not_executed:
+            agent_info = all_agents.get(key, {})
+            missing_names.append(agent_info.get("name", key))
+        prompt += (
+            f"\n\n⚠️ 重要约束：以下专家未被实际调用，禁止在回答中编造其观点或引用其分析："
+            f"{', '.join(missing_names)}。"
+            f"\n你只能基于上方实际提供了分析结果的专家来综合回答。"
+            f"\n如果某些维度（如风险、配置）缺少专家分析，请明确告知用户'该维度暂缺专家分析'，"
+            f"不要自行补充。"
+        )
+
+    return prompt
+
+
 def _validate_and_repair(query: str, answer: str, specialist_results: list,
                          prebuilt_context: str, llm_messages: list,
                          trace_id: str = "") -> tuple[str, dict]:
@@ -2268,7 +2294,7 @@ def orchestrate(query: str, history: list, rag_context: str = "", cancel_event: 
     try:
         llm_messages.append({
             "role": "user",
-            "content": "请根据以上各专家的分析结果,给出最终的综合投资建议。",
+            "content": _build_final_synthesis_prompt(specialist_results, specialists),
         })
         response = _call_llm(
             caller="orchestrator",
@@ -3205,7 +3231,7 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
             pass
         llm_messages.append({
             "role": "user",
-            "content": "请根据以上各专家的分析结果,给出最终的综合投资建议。",
+            "content": _build_final_synthesis_prompt(specialist_results, specialists),
         })
         final_answer = ""
         # 流式生成:逐 chunk 推送思考过程 + 答案增量
