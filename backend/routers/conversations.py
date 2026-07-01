@@ -598,6 +598,15 @@ async def send_message_api(conv_id: int, req: SendMessageRequest):
     except Exception as _e:
         logger.warning(f"注入组合约束失败: {_e}")
 
+    # Bridge A: 注入24h分析结论上下文
+    try:
+        from agent.orchestrator import _inject_analysis_context
+        _, _analysis_ctx = _inject_analysis_context(req.content)
+        if _analysis_ctx:
+            rag_context = _analysis_ctx + "\n" + (rag_context or "")
+    except Exception as _e:
+        logger.warning(f"注入分析结论上下文失败: {_e}")
+
     # 4. 调用 Orchestrator（多 Agent 协作）
     trace_id = str(uuid.uuid4())[:12]
     logger.info(f"[trace:{trace_id}] 非流式对话 {conv_id}: {req.content[:50]}...")
@@ -1041,6 +1050,15 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
 ---
 """
             orchestrator_context = constraint_summary + "\n" + (orchestrator_context or "")
+
+        # Bridge A: 注入24h分析结论上下文
+        try:
+            from agent.orchestrator import _inject_analysis_context
+            _, _analysis_ctx = _inject_analysis_context(req.content)
+            if _analysis_ctx:
+                orchestrator_context = _analysis_ctx + "\n" + (orchestrator_context or "")
+        except Exception as _e:
+            logger.warning(f"注入分析结论上下文失败: {_e}")
 
         # 5. 调用 Orchestrator（多 Agent 协作）
         # 不检查断开连接，让后端任务继续执行

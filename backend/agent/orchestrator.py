@@ -1930,6 +1930,15 @@ def orchestrate(query: str, history: list, rag_context: str = "", cancel_event: 
     # 注入持仓上下文 + 估值上下文(同时构建 prebuilt_context 供 specialist 复用)
     prebuilt_context = ""
 
+    # Bridge A: 注入24h分析结论上下文
+    _, analysis_ctx = _inject_analysis_context(refined_query)
+    if analysis_ctx:
+        prebuilt_context += analysis_ctx
+        try:
+            system_content += f"\n\n{analysis_ctx}"
+        except Exception:
+            pass
+
     # 注入 RAG 知识库上下文到 prebuilt_context(让专家也能参考书籍/文章知识)
     if rag_context:
         compressed_rag_for_specialist = compress_rag_token_aware(rag_context, max_tokens=get_config_int('llm.max_tokens_rag_compress', 1500))
@@ -2591,6 +2600,15 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
 
     # 注入持仓上下文 + 估值上下文(同时构建 prebuilt_context 供 specialist 复用)
     prebuilt_context = ""
+
+    # Bridge A: 注入24h分析结论上下文
+    _, analysis_ctx = _inject_analysis_context(refined_query)
+    if analysis_ctx:
+        prebuilt_context += analysis_ctx
+        try:
+            system_content += f"\n\n{analysis_ctx}"
+        except Exception:
+            pass
 
     # 注入 RAG 知识库上下文到 prebuilt_context(让专家也能参考书籍/文章知识)
     if rag_context:
