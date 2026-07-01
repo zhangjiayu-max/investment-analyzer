@@ -14,13 +14,16 @@ def build_portfolio_facts(conn=None) -> dict:
     所有分析入口调用此函数获取统一的组合事实快照。
 
     Returns:
-        dict with keys: snapshot, constraints, market, recent_analyses
+        dict with keys: snapshot, constraints, market, recent_analyses,
+                        market_state, recent_decisions
     """
     facts = {
         "snapshot": _build_snapshot(conn),
         "constraints": _build_constraints(),
         "market": _build_market_summary(),
         "recent_analyses": _build_recent_analyses(),
+        "market_state": _build_market_state(),
+        "recent_decisions": _build_recent_decisions(),
     }
     return facts
 
@@ -204,3 +207,177 @@ def _build_recent_analyses() -> list:
     except Exception as e:
         logger.warning(f"获取最近分析记录失败: {e}")
         return []
+
+
+def _build_market_state() -> dict:
+    """
+    推断当前市场状态（regime + sentiment）。
+
+    regime 规则：
+        沪深300 PE 百分位 < 30  → bear
+        沪深300 PE 百分位 > 70  → bull
+        30 ≤ PE 百分位 ≤ 70     → sideways
+
+    sentiment 规则：
+        优先从 system_config 读恐贪指数，
+        若无则用债市温度推断：温度>70→fear, 温度<30→greed, 否则neutral
+
+    Returns:
+        {"regime": "bull"|"bear"|"sideways", "sentiment": "greed"|"fear"|"neutral"}
+        失败返回默认值
+    """
+    result = {
+        "regime": "unknown",
+        "sentiment": "neutral",
+    }
+
+    # ── regime: 从 index_valuations 取沪深300 PE 百分位 ──
+    try:
+        c, own = _get_conn_once(None)
+        if c is not None:
+            row = c.execute(
+                """SELECT percentile
+                   FROM index_valuations
+                   WHERE (index_code = '399300.SZ' OR index_code = '000300.SH')
+                     AND metric_type = '市盈率'
+                   ORDER BY snapshot_date DESC
+                   LIMIT 1"""
+            ).fetchone()
+            if own and c:
+                c.close()
+
+            if row and row["percentile"] is not None:
+                pct = float(row["percentile"])
+                if pct < 30:
+                    result["regime"] = "bear"
+                elif pct > 70:
+                    result["regime"] = "bull"
+                else:
+                    result["regime"] = "sideways"
+            elif own:
+                c.close()
+    except Exception as e:
+        logger.warning(f"推断 market_state.regime 失败: {e}")
+
+    # ── sentiment: 尝试从 system_config 读恐贪指数，否则用债市温度 ──
+    try:
+        # 尝试读取恐贪指数
+        c, own = _get_conn_once(None)
+        if c is not None:
+            row = c.execute(
+                "SELECT value FROM system_config WHERE key = ?",
+                ("market.fear_greed_index",),
+            ).fetchone()
+            if own and c:
+                c.close()
+
+            if row:
+                try:
+                    fgi = float(row["value"])
+                    if fgi > 60:
+                        result["sentiment"] = "greed"
+                    elif fgi < 40:
+                        result["sentiment"] = "fear"
+                    else:
+                        result["sentiment"] = "neutral"
+                    return result
+                except (ValueError, TypeError):
+                    pass
+            elif own:
+                c.close()
+    except Exception:
+        pass
+
+    # 回退：用债市温度推断
+    try:
+        from tools import _get_bond_temperature
+
+        bond_raw = json.loads(_get_bond_temperature())
+        temperature = bond_raw.get("temperature")
+        if temperature is not None:
+            if temperature > 70:
+                result["sentiment"] = "fear"  # 债市偏热 → 恐
+            elif temperature < 30:
+                result["sentiment"] = "greed"  # 债市偏冷 → 贪
+            else:
+                result["sentiment"] = "neutral"
+    except Exception as e:
+        logger.warning(f"推断 market_state.sentiment 失败: {e}")
+
+    return result
+
+
+def _build_recent_decisions() -> dict:
+    """
+    获取近期决策记录（最近3天）和待执行行动。
+
+    Returns:
+        {
+            "last_3_days": [{source_type, target_subject, action, summary, created_at}, ...],
+            "pending_actions": [{transaction_type, fund_code, fund_name, amount, notes, ...}, ...],
+        }
+        失败返回空结构
+    """
+    result = {
+        "last_3_days": [],
+        "pending_actions": [],
+    }
+
+    # ── 从 analysis_conclusions 获取最近3天结论 ──
+    try:
+        c, own = _get_conn_once(None)
+        if c is not None:
+            # 确保表存在
+            cur = c.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='analysis_conclusions'"
+            )
+            if cur.fetchone():
+                rows = c.execute(
+                    """SELECT source_type, target_subject, action, summary, created_at
+                       FROM analysis_conclusions
+                       WHERE created_at >= datetime('now', 'localtime', '-3 days')
+                       ORDER BY created_at DESC
+                       LIMIT 20"""
+                ).fetchall()
+                for r in rows:
+                    result["last_3_days"].append({
+                        "source_type": r["source_type"],
+                        "target_subject": r["target_subject"],
+                        "action": r["action"],
+                        "summary": r["summary"],
+                        "created_at": r["created_at"],
+                    })
+            if own and c:
+                c.close()
+    except Exception as e:
+        logger.warning(f"获取最近决策失败: {e}")
+
+    # ── 从 portfolio_transactions 获取已记录但未执行的 pending 交易 ──
+    try:
+        c, own = _get_conn_once(None)
+        if c is not None:
+            # 交易状态：pending / submitted 表示未执行或待确认
+            rows = c.execute(
+                """SELECT transaction_type, fund_code, fund_name,
+                          amount, notes, status, created_at
+                   FROM portfolio_transactions
+                   WHERE status IN ('pending', 'submitted')
+                   ORDER BY created_at DESC
+                   LIMIT 10"""
+            ).fetchall()
+            for r in rows:
+                result["pending_actions"].append({
+                    "transaction_type": r["transaction_type"],
+                    "fund_code": r["fund_code"],
+                    "fund_name": r["fund_name"],
+                    "amount": r["amount"],
+                    "notes": r["notes"],
+                    "status": r["status"],
+                    "created_at": r["created_at"],
+                })
+            if own and c:
+                c.close()
+    except Exception as e:
+        logger.warning(f"获取待执行交易失败: {e}")
+
+    return result
