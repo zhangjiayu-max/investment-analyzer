@@ -94,7 +94,17 @@ async def _run_panorama_async(record_id: int, system_prompt: str, holdings: list
         except Exception as e:
             logger.warning(f"RAG 检索失败: {e}")
 
+        # 组合约束注入
+        facts_block = ""
+        try:
+            from portfolio_fact_layer import build_portfolio_facts
+            facts = build_portfolio_facts()
+            facts_block = json.dumps(facts, ensure_ascii=False, indent=2, default=str)
+        except Exception:
+            pass
+
         user_content = (
+            f"## 组合约束（系统注入，优先级最高）\n```json\n{facts_block}\n```\n\n---\n\n"
             f"## 持仓明细\n" + "\n".join(holdings_lines) +
             f"\n\n## 类型分布\n" + "\n".join(type_lines) +
             f"\n\n## 集中度\n- 前3大持仓占比: {diversification.get('top3_concentration', 0):.1f}%"

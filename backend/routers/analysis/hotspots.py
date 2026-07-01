@@ -146,6 +146,26 @@ async def _do_hotspots_analysis():
         base_prompt = "你是一位专业的A股市场分析专家。请基于以下市场数据分析今日投资机会，输出结构化JSON。\n\n## 输出格式\n返回严格JSON：{\"summary\":\"...\", \"recommendations\":[{\"direction\":\"up|down|watch\",\"index_name\":\"...\",\"index_code\":\"...\",\"reason\":\"...\",\"confidence\":\"high|medium|low\"}]}\n\n## 今日数据："
 
     prompt = base_prompt + f"""
+
+## 组合约束（系统注入，优先级最高）
+"""
+
+    # 注入组合约束
+    try:
+        from portfolio_fact_layer import build_portfolio_facts
+        facts = build_portfolio_facts()
+        facts_json = json.dumps(facts, ensure_ascii=False, indent=2, default=str)
+        prompt += f"""```json
+{facts_json}
+```
+
+---
+
+"""
+    except Exception:
+        pass
+
+    prompt += f"""
 【今日新闻】（重点关注，这是分析的核心线索）
 {news_text}
 

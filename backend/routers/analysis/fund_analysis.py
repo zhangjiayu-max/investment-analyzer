@@ -70,7 +70,17 @@ async def fund_analysis_api(req: dict):
     # 获取整体估值上下文
     valuation_context = _get_valuation_context()
 
+    # 组合约束注入
+    facts_block = ""
+    try:
+        from portfolio_fact_layer import build_portfolio_facts
+        facts = build_portfolio_facts()
+        facts_block = json.dumps(facts, ensure_ascii=False, indent=2, default=str)
+    except Exception:
+        pass
+
     user_content = (
+        f"## 组合约束（系统注入，优先级最高）\n```json\n{facts_block}\n```\n\n---\n\n"
         f"## 待分析基金\n"
         f"- 基金代码: {fund_code}\n"
         f"- 基金名称: {fund_name}\n"

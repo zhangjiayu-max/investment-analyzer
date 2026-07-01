@@ -214,6 +214,23 @@ async def _run_regenerate_daily_report_async(task_id: int, agent: dict):
 【今日日期】
 {time.strftime("%Y-%m-%d")}（{["周一","周二","周三","周四","周五","周六","周日"][time.localtime().tm_wday]}）
 
+"""
+
+        # 注入组合约束
+        try:
+            from portfolio_fact_layer import build_portfolio_facts
+            facts = build_portfolio_facts()
+            facts_json = json.dumps(facts, ensure_ascii=False, indent=2, default=str)
+            full_prompt += f"""【组合约束】
+```json
+{facts_json}
+```
+
+"""
+        except Exception:
+            pass
+
+        full_prompt += f"""
 【今日新闻】
 {news_context}
 

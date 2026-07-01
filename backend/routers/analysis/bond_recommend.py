@@ -199,6 +199,15 @@ async def _do_bond_recommend():
         pass
 
     # 8. 构建 LLM 上下文
+    # 组合约束注入
+    facts_block = ""
+    try:
+        from portfolio_fact_layer import build_portfolio_facts
+        facts = build_portfolio_facts()
+        facts_block = json_mod.dumps(facts, ensure_ascii=False, indent=2, default=str)
+    except Exception:
+        pass
+
     agent = get_analysis_agent(8)
     system_prompt = agent["system_prompt"] if agent else DEFAULT_BOND_PROMPT
 
@@ -212,7 +221,13 @@ async def _do_bond_recommend():
         f"## 货币基金排行榜（备选）\n" + json_mod.dumps(money_funds, ensure_ascii=False, indent=2),
     ]
 
-    combined_input = "请基于以下数据给出债券配置建议：\n\n" + "\n\n".join(context_lines)
+    combined_input = "请基于以下数据给出债券配置建议：\n\n"
+
+    # 注入组合约束
+    if facts_block:
+        combined_input += f"## 组合约束（系统注入，优先级最高）\n```json\n{facts_block}\n```\n\n---\n\n"
+
+    combined_input += "\n\n".join(context_lines)
 
     # 9. 调用 LLM
     uid = f"bond_{int(time.time())}"

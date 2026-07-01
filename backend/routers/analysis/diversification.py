@@ -345,6 +345,15 @@ async def _run_diversification_ai_summary_async(record_id: int, agent_id: int = 
         valuation_block = "跟踪指数估值参考:\n" + "\n".join(valuation_ref_lines)
         valuation_block += "\n\n💡 估值分位<20%为低估区域，可适度容忍集中；>80%为高估区域，宜警惕集中风险。"
 
+    # 9. 组合约束注入
+    facts_block = ""
+    try:
+        from portfolio_fact_layer import build_portfolio_facts
+        facts = build_portfolio_facts()
+        facts_block = json.dumps(facts, ensure_ascii=False, indent=2, default=str)
+    except Exception:
+        pass
+
     # 8. 拼装 LLM prompt（预计算分析 + 原始 MCP 数据）
     holdings_text = "\n".join(
         f"- {h.get('fund_name','')}({h.get('fund_code','')}): "
@@ -386,6 +395,16 @@ async def _run_diversification_ai_summary_async(record_id: int, agent_id: int = 
 {mcp_raw_block}
 
 请对以上持仓分散度进行专业解读。"""
+
+    # 追加组合约束
+    if facts_block:
+        user_content += f"""
+
+## 组合约束（系统注入，优先级最高）
+```json
+{facts_block}
+```
+"""
 
     uid = f"diversification_{int(time.time())}"
     trace_id = f"divr_{uuid.uuid4().hex[:12]}"

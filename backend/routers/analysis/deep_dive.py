@@ -153,39 +153,14 @@ async def fund_deep_dive_api(holding_id: int, req: DeepDiveRequest):
     except Exception as e:
         fundamentals_section = f"基本面获取失败: {e}\n"
 
-    # 4) 组合上下文 — 该基金在整体组合中的位置
-    portfolio_context = ""
+    # 4) 组合事实层 — 统一的组合上下文（替代 portfolio_context + bond_context）
+    facts_context = ""
     try:
-        all_holdings = list_holdings()
-        total_value = sum((h.get("current_value", 0) or 0) for h in all_holdings)
-        this_value = holding.get("current_value", 0) or 0
-        this_pct = this_value / total_value * 100 if total_value > 0 else 0
-        # 相关性数据（从 MCP 获取）
-        portfolio_context += f"该基金在组合中占比: {this_pct:.1f}%\n"
-        # 与其他基金的对比
-        if len(all_holdings) > 1:
-            others = [(h.get("fund_name",""), h.get("current_value",0) or 0) for h in all_holdings if h["id"] != holding_id]
-            others.sort(key=lambda x: x[1], reverse=True)
-            portfolio_context += "组合中其他主要持仓: " + ", ".join(f"{n}(市值{v:.0f}，占比{v/total_value*100:.1f}%)" for n, v in others[:5]) + "\n"
-            # ⚠️ 集中度约束：不建议转投已超标的基金
-            overconcentrated = [(n, v/total_value*100) for n, v in others[:5] if v/total_value*100 > 25]
-            if overconcentrated:
-                names = ", ".join(f"{n}({pct:.0f}%)" for n, pct in overconcentrated)
-                portfolio_context += f"\n⚠️ 集中度警告：以下基金已超过25%集中度阈值，**不建议推荐将资金转入这些基金**：{names}\n"
+        from portfolio_fact_layer import build_portfolio_facts
+        facts = build_portfolio_facts()
+        facts_context = json.dumps(facts, ensure_ascii=False, indent=2, default=str)
     except Exception as e:
-        portfolio_context = f"组合上下文获取失败: {e}\n"
-
-    # 4.5) 债市温度 — 债券基金必须参考
-    bond_context = ""
-    try:
-        from tools import _get_bond_temperature
-        bond_raw = json.loads(_get_bond_temperature())
-        temp = bond_raw.get('temperature', '?')
-        rate = bond_raw.get('rate', 0)
-        rate_pct = rate * 100 if isinstance(rate, (int, float)) else rate
-        bond_context = f"当前债市温度: {temp}°（>70偏热谨慎配置，<30偏冷可配置），10年国债收益率: {rate_pct:.2f}%"
-    except Exception:
-        pass
+        facts_context = f"组合事实获取失败: {e}"
 
     # 5) 新闻/市场上下文（简版，基于指数名或基金名搜索）
     news_context = ""
@@ -245,8 +220,8 @@ async def fund_deep_dive_api(holding_id: int, req: DeepDiveRequest):
         f"\n## 交易记录\n" + ("\n".join(tx_lines) if tx_lines else "无交易记录") +
         f"\n\n## 估值数据\n{valuation_section}"
         f"\n\n{fundamentals_section}"
-        f"\n\n## 组合角色上下文\n{portfolio_context}"
-        f"\n\n## 债市环境\n{bond_context if bond_context else '暂无债市数据'}"
+        f"\n\n## 组合约束（系统注入，优先级最高）\n"
+        f"```json\n{facts_context}\n```"
         f"\n\n## MCP 诊断\n{_get_fund_mcp_diagnosis(fund_code)}"
         f"\n\n{news_context}"
         f"\n\n## 知识库参考\n{rag_context[:1500] if rag_context else '暂无相关知识库内容'}"

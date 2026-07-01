@@ -107,7 +107,17 @@ async def trade_review_api(req: TradeReviewRequest):
                            if json.loads(t["valuation_snapshot"]).get("pe_percentile", 50) > 70])
             valuation_summary += f"\n卖出时估值分析: 平均PE分位 {avg_sell_pe:.1f}%, 高估卖出(PE>70%) {high_sell}/{len(sell_with_val)} 笔"
 
+    # 组合约束注入
+    facts_block = ""
+    try:
+        from portfolio_fact_layer import build_portfolio_facts
+        facts = build_portfolio_facts()
+        facts_block = json.dumps(facts, ensure_ascii=False, indent=2, default=str)
+    except Exception:
+        pass
+
     user_content = (
+        f"## 组合约束（系统注入，优先级最高）\n```json\n{facts_block}\n```\n\n---\n\n"
         f"## 操作总览\n"
         f"- 买入 {buy_count} 笔, 共 {buy_total:.2f} 元\n"
         f"- 卖出 {sell_count} 笔, 共 {sell_total:.2f} 元\n"

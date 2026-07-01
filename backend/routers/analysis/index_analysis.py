@@ -93,6 +93,14 @@ async def _run_index_analysis_async(history_id: int, req_data: dict, agent: dict
 
     # 4. 用户持仓数据
     portfolio_context = ""
+    facts_block = ""
+    try:
+        from portfolio_fact_layer import build_portfolio_facts
+        facts = build_portfolio_facts()
+        facts_block = json.dumps(facts, ensure_ascii=False, indent=2, default=str)
+    except Exception:
+        pass
+
     try:
         all_holdings = list_holdings()
         if all_holdings and (req.index_code or req.index_name):
@@ -184,6 +192,11 @@ async def _run_index_analysis_async(history_id: int, req_data: dict, agent: dict
 
     # 6. 拼装 prompt
     full_prompt = agent["system_prompt"]
+
+    # 注入组合约束
+    if facts_block:
+        full_prompt += f"\n\n## 组合约束（系统注入，优先级最高）\n```json\n{facts_block}\n```"
+
     full_prompt += """
 
 ## 重要提示：关联性分析
