@@ -95,7 +95,7 @@ class SmartRouter:
             logger.info(f"专家数超过 3 个,按优先级截断为: {specialists_list}")
 
         return {
-            "complexity": "simple" if len(specialists_list) == 1 else "medium",
+            "complexity": "simple" if len(specialists_list) == 1 else ("complex" if len(specialists_list) >= 3 else "medium"),
             "specialists": specialists_list,
             "reason": f"关键词路由命中: {', '.join(specialists_list)}",
             "needs_arbitration": len(specialists_list) >= 2,
