@@ -357,7 +357,11 @@ async def resume_conversation(conv_id: int, request: Request):
 
         # RAG 检索（不检查断开连接，让后端任务继续执行）
         def _run_rag():
-            return build_rag_context_with_details(original_query, content_types=rag_types if rag_types else None)
+            try:
+                return build_rag_context_with_details(original_query, content_types=rag_types if rag_types else None)
+            except Exception as e:
+                logger.warning(f"RAG 检索失败，跳过: {e}")
+                return {"context": "", "results": [], "keywords": [], "query": original_query, "fts_count": 0, "chroma_count": 0, "freshness_filtered": 0}
 
         rag_result = await asyncio.to_thread(_run_rag)
         rag_context = rag_result["context"]
@@ -566,7 +570,11 @@ async def send_message_api(conv_id: int, req: SendMessageRequest):
         except (json.JSONDecodeError, TypeError):
             pass
 
-    rag_result = build_rag_context_with_details(req.content, content_types=rag_types if rag_types else None)
+    try:
+        rag_result = build_rag_context_with_details(req.content, content_types=rag_types if rag_types else None)
+    except Exception as e:
+        logger.warning(f"RAG 检索失败，跳过: {e}")
+        rag_result = {"context": "", "results": [], "keywords": [], "query": req.content, "fts_count": 0, "chroma_count": 0, "freshness_filtered": 0}
     rag_context = rag_result["context"]
 
     # 3. 获取对话历史
@@ -772,7 +780,11 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
             return clarify_requirement(req.content)
 
         def _run_rag():
-            return build_rag_context_with_details(req.content, content_types=rag_types if rag_types else None)
+            try:
+                return build_rag_context_with_details(req.content, content_types=rag_types if rag_types else None)
+            except Exception as e:
+                logger.warning(f"RAG 检索失败，跳过: {e}")
+                return {"context": "", "results": [], "keywords": [], "query": req.content, "fts_count": 0, "chroma_count": 0, "freshness_filtered": 0}
 
         t0 = time.time()
         clarification_task = asyncio.to_thread(_run_clarification)

@@ -1093,7 +1093,7 @@ def detect_scenario_type(query: str) -> str:
     return "general_analysis"
 
 
-def clarify_requirement(query: str) -> dict:
+def clarify_requirement(query: str, trace_id: str = "") -> dict:
     """
     分析用户问题,返回需求澄清结果。
 

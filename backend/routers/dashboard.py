@@ -217,6 +217,10 @@ async def get_dashboard():
             p = idx.get("percentile")
             if p is None:
                 continue
+            try:
+                p = float(p)
+            except (TypeError, ValueError):
+                continue
             if code not in best_per_code or p < best_per_code[code]["percentile"]:
                 assess = _assess_valuation(p)
                 best_per_code[code] = {

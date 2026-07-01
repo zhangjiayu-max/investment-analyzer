@@ -996,7 +996,12 @@ def _ensure_embed_model():
         pass
 
     from config import EMBED_MODEL_NAME
-    from sentence_transformers import SentenceTransformer
+    try:
+        from sentence_transformers import SentenceTransformer
+    except ImportError:
+        logger.warning("sentence_transformers 未安装，跳过 Embedding 模型加载")
+        _embed_model = None
+        return _embed_model
 
     logger.info(f"加载 Embedding 模型: {EMBED_MODEL_NAME}")
     try:
@@ -1005,22 +1010,26 @@ def _ensure_embed_model():
         logger.info(f"Embedding 模型从本地加载成功 (维度: {dim})")
     except Exception as e:
         logger.warning(f"本地加载失败，尝试在线下载: {e}")
-        import httpx
-        old_client = httpx.Client
-        class NoVerifyClient(old_client):
-            def __init__(self, *args, **kwargs):
-                kwargs["verify"] = False
-                super().__init__(*args, **kwargs)
-        httpx.Client = NoVerifyClient
         try:
-            _embed_model = SentenceTransformer(EMBED_MODEL_NAME)
-            dim = _embed_model.get_embedding_dimension()
-            logger.info(f"Embedding 模型在线下载成功 (维度: {dim})")
-        except Exception as e2:
-            logger.error(f"Embedding 模型加载失败: {e2}")
+            import httpx
+            old_client = httpx.Client
+            class NoVerifyClient(old_client):
+                def __init__(self, *args, **kwargs):
+                    kwargs["verify"] = False
+                    super().__init__(*args, **kwargs)
+            httpx.Client = NoVerifyClient
+            try:
+                _embed_model = SentenceTransformer(EMBED_MODEL_NAME)
+                dim = _embed_model.get_embedding_dimension()
+                logger.info(f"Embedding 模型在线下载成功 (维度: {dim})")
+            except Exception as e2:
+                logger.error(f"Embedding 模型加载失败: {e2}")
+                _embed_model = None
+            finally:
+                httpx.Client = old_client
+        except ImportError:
+            logger.error("httpx 未安装，无法在线下载 Embedding 模型")
             _embed_model = None
-        finally:
-            httpx.Client = old_client
     return _embed_model
 
 
