@@ -152,6 +152,13 @@ async def _run_regenerate_daily_report_async(task_id: int, agent: dict):
                 val_lines = []
                 for i in all_indexes:
                     pct = i.get("percentile", None)
+                    # 规范化：字符串如 "57.53%" → float 57.53
+                    if isinstance(pct, str):
+                        pct = pct.strip().rstrip('%')
+                        try:
+                            pct = float(pct)
+                        except ValueError:
+                            pct = None
                     pct_str = f"{pct:.0f}%" if pct is not None else "N/A"
                     val_lines.append(
                         f"- {i['index_name']}（{i['index_code']}）: "
@@ -193,7 +200,12 @@ async def _run_regenerate_daily_report_async(task_id: int, agent: dict):
         try:
             from tools import _get_bond_temperature
             bond_raw = json.loads(_get_bond_temperature())
-            bond_text = f"债券温度{bond_raw.get('temperature','?')}°，收益率{bond_raw.get('rate','?')}%"
+            rate_val = bond_raw.get('rate', None)
+            if rate_val is not None and isinstance(rate_val, (int, float)):
+                rate_pct = rate_val * 100  # 0.017448 → 1.7448
+                bond_text = f"债券温度{bond_raw.get('temperature','?')}°，10年国债收益率{rate_pct:.2f}%"
+            else:
+                bond_text = f"债券温度{bond_raw.get('temperature','?')}°，收益率{bond_raw.get('rate','?')}%"
         except Exception:
             pass
 
