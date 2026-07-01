@@ -126,15 +126,15 @@ async def _run_regenerate_daily_report_async(task_id: int, agent: dict):
                     market_lines.append(f"- {idx['name']}: {idx['price']}（{sign}{idx['change_pct']}%）成交{idx.get('volume_yi',0):.0f}亿")
             b = overview.get("breadth", {})
             if b.get("up"):
-                market_lines.append(f"\n【涨跌统计】上涨{b['up']} / 下跌{b['down']} / 涨停{b.get('limit_up',0)} / 跌停{b.get('limit_down',0)} / 成交{b.get('total_volume_yi',0):.0f}亿")
+                market_lines.append(f"\n【涨跌统计】上涨{b['up']} / 下跌{b['down']} / 成交{b.get('total_volume_yi',0):.0f}亿")
             if overview.get("sectors_top"):
                 market_lines.append("\n【领涨板块】")
                 for s in overview["sectors_top"]:
-                    market_lines.append(f"- {s['name']}: +{s['change_pct']}%  领涨:{s['lead_stock']}{s['lead_change']}%")
+                    market_lines.append(f"- {s['name']}: +{s['change_pct']}%")
             if overview.get("sectors_bottom"):
                 market_lines.append("\n【领跌板块】")
                 for s in overview["sectors_bottom"]:
-                    market_lines.append(f"- {s['name']}: {s['change_pct']}%  领涨:{s['lead_stock']}{s['lead_change']}%")
+                    market_lines.append(f"- {s['name']}: {s['change_pct']}%")
             market_context = "\n".join(market_lines) if market_lines else "暂无行情数据"
         except Exception as e:
             logging.warning(f"行情数据获取失败: {e}")

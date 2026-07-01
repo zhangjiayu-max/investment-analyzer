@@ -1,5 +1,5 @@
 <script setup>
-import { ref, computed, onMounted, onActivated } from 'vue'
+import { ref, computed, onMounted, onActivated, onDeactivated } from 'vue'
 import { getDashboard, runAnalysis, runPanoramaAnalysis, pollPanoramaStatus, getHotTopics, getDailyReport, getDailyReportTask, regenerateDailyReport, submitDailyReportFeedback, listPanoramaRecords, triggerHotspotsAnalysis, getLatestHotspotsAnalysis, getRecommendations, getRecommendationStats, submitRecommendationFeedback, getBondRecommend, listBondRecommendRecords, autoVerifyRecommendations, fetchRecentValuations, getBondMarketTemperature, getHotspotsRelate, getRebalancingSuggestion, listTodayDecisions, updateDecisionStatus, completeDecisionAction, listDueDecisionReviews, submitDecisionReview, getDecisionPrecheck, getTodayOpportunities, scanDailyOpportunities, createDecisionFromOpportunity, watchOpportunity, dailyAdviceAPI } from '../api'
 import GaugeChart from './charts/GaugeChart.vue'
 import ConfirmDialog from './ConfirmDialog.vue'
@@ -159,6 +159,23 @@ function handleBriefingSubmitFeedback(type, rating) {
   }
 }
 
+// ── 定时器收集器（在 deactivated 时统一清除，避免 KeepAlive 泄漏）──
+const _timers = []
+
+function _safeTimeout(fn, delay) {
+  const id = setTimeout(fn, delay)
+  _timers.push(id)
+  return id
+}
+
+function _clearAllTimers() {
+  for (const id of _timers) {
+    clearTimeout(id)
+  }
+  _timers.length = 0
+  stopDailyReportPolling()
+}
+
 // ── 全景诊断 AI 分析 ──
 
 onMounted(async () => {
@@ -187,7 +204,7 @@ onMounted(async () => {
   ])
 
   // 第二批：延迟 500ms 发送，避免 SQLite 单写锁竞争
-  setTimeout(() => {
+  _safeTimeout(() => {
     Promise.all([
       loadDecisionReviews(),
       loadHotTopics(),
@@ -196,7 +213,7 @@ onMounted(async () => {
   }, 500)
 
   // 第三批：延迟 1000ms 发送
-  setTimeout(() => {
+  _safeTimeout(() => {
     Promise.all([
       loadDailyReport(),
       loadRecHistory(),
@@ -246,14 +263,14 @@ onActivated(async () => {
     loadTodayDecisions(),
     loadDailyAdvice(),
   ])
-  setTimeout(() => {
+  _safeTimeout(() => {
     Promise.all([
       loadDecisionReviews(),
       loadHotTopics(),
       loadOpportunities(),
     ]).catch(() => {})
   }, 500)
-  setTimeout(() => {
+  _safeTimeout(() => {
     Promise.all([
       loadDailyReport(),
       loadRecHistory(),
@@ -288,6 +305,10 @@ onActivated(async () => {
       }
     }
   } catch (_) {}
+})
+
+onDeactivated(() => {
+  _clearAllTimers()
 })
 
 async function loadDailyReport() {
@@ -542,7 +563,7 @@ async function submitFeedback(rec, rating) {
   } catch (e) {
     showToast('提交失败', 'error')
   } finally {
-    setTimeout(() => { feedbackSending.value[rec.id] = false }, 2000)
+    _safeTimeout(() => { feedbackSending.value[rec.id] = false }, 2000)
   }
 }
 
