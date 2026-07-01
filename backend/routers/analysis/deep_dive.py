@@ -166,9 +166,26 @@ async def fund_deep_dive_api(holding_id: int, req: DeepDiveRequest):
         if len(all_holdings) > 1:
             others = [(h.get("fund_name",""), h.get("current_value",0) or 0) for h in all_holdings if h["id"] != holding_id]
             others.sort(key=lambda x: x[1], reverse=True)
-            portfolio_context += "组合中其他主要持仓: " + ", ".join(f"{n}(市值{v:.0f})" for n, v in others[:3]) + "\n"
+            portfolio_context += "组合中其他主要持仓: " + ", ".join(f"{n}(市值{v:.0f}，占比{v/total_value*100:.1f}%)" for n, v in others[:5]) + "\n"
+            # ⚠️ 集中度约束：不建议转投已超标的基金
+            overconcentrated = [(n, v/total_value*100) for n, v in others[:5] if v/total_value*100 > 25]
+            if overconcentrated:
+                names = ", ".join(f"{n}({pct:.0f}%)" for n, pct in overconcentrated)
+                portfolio_context += f"\n⚠️ 集中度警告：以下基金已超过25%集中度阈值，**不建议推荐将资金转入这些基金**：{names}\n"
     except Exception as e:
         portfolio_context = f"组合上下文获取失败: {e}\n"
+
+    # 4.5) 债市温度 — 债券基金必须参考
+    bond_context = ""
+    try:
+        from tools import _get_bond_temperature
+        bond_raw = json.loads(_get_bond_temperature())
+        temp = bond_raw.get('temperature', '?')
+        rate = bond_raw.get('rate', 0)
+        rate_pct = rate * 100 if isinstance(rate, (int, float)) else rate
+        bond_context = f"当前债市温度: {temp}°（>70偏热谨慎配置，<30偏冷可配置），10年国债收益率: {rate_pct:.2f}%"
+    except Exception:
+        pass
 
     # 5) 新闻/市场上下文（简版，基于指数名或基金名搜索）
     news_context = ""
@@ -229,6 +246,7 @@ async def fund_deep_dive_api(holding_id: int, req: DeepDiveRequest):
         f"\n\n## 估值数据\n{valuation_section}"
         f"\n\n{fundamentals_section}"
         f"\n\n## 组合角色上下文\n{portfolio_context}"
+        f"\n\n## 债市环境\n{bond_context if bond_context else '暂无债市数据'}"
         f"\n\n## MCP 诊断\n{_get_fund_mcp_diagnosis(fund_code)}"
         f"\n\n{news_context}"
         f"\n\n## 知识库参考\n{rag_context[:1500] if rag_context else '暂无相关知识库内容'}"
