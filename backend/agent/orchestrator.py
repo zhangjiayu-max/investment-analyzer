@@ -955,21 +955,19 @@ def detect_conflicts_llm(specialist_results: list, query: str, trace_id: str = "
 - consensus 是所有专家都认同的观点
 - severity: high=方向完全相反(买入vs卖出), medium=部分分歧(买入vs持有), low=措辞差异"""
 
-    # 使用 cross_review_model 配置的模型（默认 deepseek-chat，便宜快速）
-    from db.config import get_config
-    conflict_model = get_config("cost_routing.cross_review_model", "deepseek-chat")
-
+    # 使用 cross_review_model 配置的模型；同时用 MODEL 作为主用模型（确保不触发 fallback 延迟）
+    # cross_review_model 仅作为提示，实际用主用 MODEL 避免模型名不匹配导致 fallback
     try:
         response = _call_llm(
             caller="conflict_detect",
             trace_id=trace_id,
-            model=conflict_model,
+            model=MODEL,
             messages=[
                 {"role": "system", "content": "你是投资分析冲突检测专家。请分析多位专家的分析结论，提取结构化信息。只输出JSON，不要其他文字。"},
                 {"role": "user", "content": prompt},
             ],
             temperature=0.1,
-            max_tokens=2000,
+            max_tokens=4000,
         )
 
         raw = response.choices[0].message.content.strip()
