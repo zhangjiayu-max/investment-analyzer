@@ -684,12 +684,34 @@ def should_run_cross_review(
     enabled: bool = True,
     min_specialists: int = 2,
     min_severity: str = "medium",
+    predicted_need_cross_review: bool = False,
 ) -> bool:
-    """统一判断是否进入交叉审阅。"""
+    """统一判断是否进入交叉审阅。
+
+    Args:
+        predicted_need_cross_review: 来自 clarify_requirement 的 LLM 预判。
+            - True + conflicts.detected=True → 执行（预判+实际都同意）
+            - True + conflicts.detected=False → 跳过但log（LLM提取可能更准确）
+            - False → 跳过
+    """
     if not enabled or force_skip:
         return False
     if len(specialist_results) < min_specialists:
         return False
+
+    # 预判逻辑
+    if predicted_need_cross_review and conflicts and conflicts.get("detected"):
+        # 预判需要 + 实际检测到冲突 → 执行
+        logger.info("交叉审阅: 预判=True + 实际冲突=True → 执行")
+    elif predicted_need_cross_review and (not conflicts or not conflicts.get("detected")):
+        # 预判需要 + 实际未检测到冲突 → 跳过但log（LLM冲突检测可能更准确）
+        logger.info("交叉审阅: 预判=True 但实际未检测到冲突 → 跳过（LLM提取可能更准确）")
+        return False
+    elif not predicted_need_cross_review:
+        # 预判不需要 → 跳过
+        logger.info("交叉审阅: 预判=False → 跳过")
+        return False
+
     if not conflicts or not conflicts.get("detected"):
         return False
     # severity 分级检查
@@ -881,6 +903,156 @@ def detect_conflicts(specialist_results: list) -> dict:
     }
 
 
+# ── LLM 冲突检测(语义级)──────────────────────────────────────
+
+def detect_conflicts_llm(specialist_results: list, query: str, trace_id: str = "") -> dict:
+    """用 LLM 提取专家结论和冲突（语义级，非关键词匹配）。
+
+    当 specialist_results >= 2 时调用。把每个专家的 analysis（截断到2000字）拼成 prompt，
+    让 LLM 返回结构化 JSON：每个专家的 rating/targets/actions，以及 conflicts 和 consensus。
+
+    Returns:
+        {"detected": bool, "severity": "low|medium|high", "items": [...], "consensus": [...]}
+    """
+    # 过滤掉交叉审阅结果，只分析原始专家
+    original_results = [sr for sr in specialist_results if not sr.get("is_cross_review")]
+    if len(original_results) < 2:
+        return detect_conflicts(specialist_results)
+
+    # 构建专家分析摘要
+    expert_sections = []
+    for sr in original_results:
+        agent_key = sr.get("agent_key", sr.get("agent", "unknown"))
+        agent_name = sr.get("agent", agent_key)
+        analysis = sr.get("analysis", "")[:2000]  # 截断到2000字
+        expert_sections.append(f"### 专家: {agent_name} (agent_key: {agent_key})\n{analysis}")
+    experts_text = "\n\n---\n\n".join(expert_sections)
+
+    prompt = f"""分析以下多位专家的分析结论，提取结构化信息。注意：要理解语义，不要只看关键词。
+例如"此时割肉是经典错误"应识别为"持有"，"可以适度加仓到2万"应识别为"买入"。
+
+专家列表：
+{experts_text}
+
+用户问题：{query}
+
+请返回JSON：
+{{
+  "experts": [
+    {{"agent": "agent_key", "rating": "买入|卖出|持有|未知", "targets": ["基金代码或名称"], "actions": [{{"fund": "xxx", "action": "买入|卖出|持有", "description": "具体描述"}}]}}
+  ],
+  "conflicts": [
+    {{"type": "rating|action", "expert1": "xxx", "expert2": "xxx", "fund": "xxx", "description": "冲突描述", "severity": "low|medium|high"}}
+  ],
+  "consensus": ["共识点1", "共识点2"]
+}}
+
+注意：
+- rating 是专家对用户问题的整体方向性建议（买入/卖出/持有/未知）
+- targets 是专家分析中涉及的具体基金代码或名称
+- actions 是专家建议的具体操作
+- conflicts 是不同专家之间的方向性分歧（如一个说买入一个说卖出）
+- consensus 是所有专家都认同的观点
+- severity: high=方向完全相反(买入vs卖出), medium=部分分歧(买入vs持有), low=措辞差异"""
+
+    # 使用 cross_review_model 配置的模型（默认 deepseek-chat，便宜快速）
+    from db.config import get_config
+    conflict_model = get_config("cost_routing.cross_review_model", "deepseek-chat")
+
+    try:
+        response = _call_llm(
+            caller="conflict_detect",
+            trace_id=trace_id,
+            model=conflict_model,
+            messages=[
+                {"role": "system", "content": "你是投资分析冲突检测专家。请分析多位专家的分析结论，提取结构化信息。只输出JSON，不要其他文字。"},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.1,
+            max_tokens=2000,
+        )
+
+        raw = response.choices[0].message.content.strip()
+
+        # 去除 markdown 代码块
+        if "```" in raw:
+            parts = raw.split("```")
+            raw = parts[1] if len(parts) > 1 else parts[0]
+            if raw.startswith("json"):
+                raw = raw[4:]
+            raw = raw.strip()
+
+        # 解析 JSON
+        import re
+        try:
+            result = json.loads(raw)
+        except json.JSONDecodeError:
+            match = re.search(r'\{[\s\S]*\}', raw)
+            if match:
+                result = json.loads(match.group())
+            else:
+                raise ValueError(f"无法解析LLM冲突检测输出: {raw[:200]}")
+
+        # 转换为兼容格式
+        conflicts = result.get("conflicts", [])
+        consensus = result.get("consensus", [])
+
+        # 计算 severity
+        if not conflicts:
+            severity = "low"
+        else:
+            severities = [c.get("severity", "medium") for c in conflicts]
+            if "high" in severities:
+                severity = "high"
+            elif "medium" in severities:
+                severity = "medium"
+            else:
+                severity = "low"
+
+        # 转换 conflicts 为兼容格式
+        items = []
+        for c in conflicts:
+            items.append({
+                "type": c.get("type", "rating"),
+                "expert1": c.get("expert1", ""),
+                "expert2": c.get("expert2", ""),
+                "fund": c.get("fund", ""),
+                "description": c.get("description", ""),
+                "severity": c.get("severity", "medium"),
+            })
+
+        return {
+            "detected": len(items) > 0,
+            "severity": severity,
+            "items": items,
+            "consensus": consensus,
+        }
+
+    except Exception as e:
+        logger.warning(f"LLM冲突检测失败: {e}")
+        raise
+
+
+# ── 统一冲突检测入口(优先LLM，降级关键词)──────────────────────
+
+def detect_conflicts_smart(specialist_results: list, query: str = "", trace_id: str = "") -> dict:
+    """统一冲突检测入口：优先使用 LLM 语义检测，失败时降级到关键词匹配。"""
+    if len(specialist_results) >= 2:
+        try:
+            conflicts = detect_conflicts_llm(specialist_results, query, trace_id)
+            logger.info(f"LLM冲突检测完成: detected={conflicts.get('detected', False)}, severity={conflicts.get('severity', 'low')}")
+            return conflicts
+        except Exception as e:
+            logger.warning(f"LLM冲突检测失败，降级到关键词: {e}")
+            conflicts = detect_conflicts(specialist_results)
+            conflicts["consensus"] = conflicts.get("consensus", [])
+            return conflicts
+    else:
+        conflicts = detect_conflicts(specialist_results)
+        conflicts["consensus"] = conflicts.get("consensus", [])
+        return conflicts
+
+
 # ── Token 预算检查 ──────────────────────────────────────────
 
 def check_token_budget() -> dict:
@@ -909,14 +1081,20 @@ def check_token_budget() -> dict:
 
 # ── 需求澄清 Agent(LLM 版)──────────────────────────────────
 
-def build_clarification_prompt() -> str:
-    """从数据库动态生成需求路由提示词。"""
+def build_clarification_prompt(available_specialists: list[dict] | None = None) -> str:
+    """从数据库动态生成需求路由提示词。
+
+    Args:
+        available_specialists: 可用专家列表，格式 [{"key": "...", "name": "...", "description": "..."}]
+                              如果为 None，则从数据库加载。
+    """
     specialists = load_specialist_agents()
     expert_lines = []
     for key, info in specialists.items():
         expert_lines.append(f"- {key}: {info['description']}")
     expert_list = "\n".join(expert_lines)
     keys_json = json.dumps(list(specialists.keys()), ensure_ascii=False)
+    specialist_keys = list(specialists.keys())
 
     return f"""你是投资分析需求路由专家。分析用户问题,返回 JSON。
 
@@ -953,6 +1131,30 @@ def build_clarification_prompt() -> str:
 
 ## 输出格式(只输出JSON)
 {{"complexity":"chat|simple|medium|complex","specialists":["expert1"],"reason":"判断原因","refined_query":"优化后的查询","confidence":0.95}}
+
+当 complexity >= medium 时，还需要输出以下字段：
+{{"complexity":"medium|complex","specialists":["expert1","expert2"],"specialist_tasks":{{"expert1":"该专家需要解决的具体子问题","expert2":"该专家需要解决的具体子问题"}},"need_cross_review":false,"reason":"判断原因","refined_query":"优化后的查询","confidence":0.95}}
+
+- specialists: 推荐的专家列表，必须从 {specialist_keys} 中选择
+- specialist_tasks: 每个专家的具体任务描述（会注入到专家的query中作为上下文），描述该专家需要解决什么子问题
+- need_cross_review: 是否需要交叉审阅（≥2个专家且可能产生分歧时为true，如估值专家说买入但风控专家说风险过高）
+- reason: 包含专家选择理由和交叉审阅预判理由
+
+示例(simple时不需要这些字段):
+Q: 沪深300估值多少
+A: {{"complexity":"simple","specialists":["valuation_expert"],"reason":"单一指数估值查询","refined_query":"沪深300当前PE/PB估值和百分位","confidence":0.95}}
+
+示例(complex时需要 specialist_tasks):
+Q: 帮我做个定投方案
+A: {{"complexity":"complex","specialists":["valuation_expert","allocation_advisor"],"specialist_tasks":{{"valuation_expert":"筛选当前低估的定投标的，给出PE/PB百分位数据","allocation_advisor":"基于估值结果制定定投金额分配方案，考虑仓位和现金比例"}},"need_cross_review":false,"reason":"定投需要估值判断+配置策略，两专家互补不易冲突","refined_query":"基于当前估值的定投方案","confidence":0.92}}
+
+示例(medium时也需要 specialist_tasks):
+Q: 白酒估值高吗，可以买吗
+A: {{"complexity":"medium","specialists":["valuation_expert"],"specialist_tasks":{{"valuation_expert":"评估白酒指数当前PE/PB百分位，判断是否高估，给出买入/持有/卖出建议"}},"need_cross_review":false,"reason":"单一估值判断，无需交叉审阅","refined_query":"白酒指数估值水平和投资建议","confidence":0.90}}
+
+示例(需要交叉审阅):
+Q: 持仓太集中了，帮我看看要不要调整
+A: {{"complexity":"complex","specialists":["risk_assessor","allocation_advisor","valuation_expert"],"specialist_tasks":{{"risk_assessor":"评估当前持仓集中度风险和最大回撤","allocation_advisor":"给出分散配置建议和再平衡方案","valuation_expert":"评估重仓标的的估值水平，判断是否高估"}},"need_cross_review":true,"reason":"涉及风险评估vs配置调整，可能产生分歧（如减仓vs加仓），需要交叉审阅","refined_query":"持仓集中度风险评估和配置调整建议","confidence":0.88}}
 
 - specialists 中的值必须是:{keys_json},chat 时为空数组
 - confidence 低于 0.7 时系统会降级处理
@@ -1132,6 +1334,14 @@ def clarify_requirement(query: str, trace_id: str = "") -> dict:
 
     sop = match_sop_template(query, has_portfolio)
     if sop:
+        # SOP 模板：构建 specialist_tasks（从模板 steps 中提取 task）
+        sop_specialist_tasks = {}
+        for s in sop["steps"]:
+            agent_key = s.get("agent", "")
+            task_desc = s.get("task", "")
+            if agent_key and task_desc:
+                sop_specialist_tasks[agent_key] = task_desc
+
         result_out = {
             "complexity": "complex",
             "specialists": [s["agent"] for s in sop["steps"]],
@@ -1141,6 +1351,8 @@ def clarify_requirement(query: str, trace_id: str = "") -> dict:
             "scenario_type": detect_scenario_type(query),
             "classification_method": "sop",
             "sop_template": sop,
+            "specialist_tasks": sop_specialist_tasks,
+            "need_cross_review": sop.get("cross_review", False),
         }
         if len(_clarification_cache) >= _CLARIFICATION_CACHE_MAX:
             _clarification_cache.pop(next(iter(_clarification_cache)))
@@ -1172,6 +1384,8 @@ def clarify_requirement(query: str, trace_id: str = "") -> dict:
             "confidence": 0.85,  # 规则预判置信度
             "scenario_type": detect_scenario_type(query),
             "classification_method": "rules",
+            "specialist_tasks": {},
+            "need_cross_review": False,
         }
         # 缓存结果
         if len(_clarification_cache) >= _CLARIFICATION_CACHE_MAX:
@@ -1263,6 +1477,10 @@ def clarify_requirement(query: str, trace_id: str = "") -> dict:
             complexity = "simple"
             specialists = ["valuation_expert"]
 
+        # 提取 LLM 规划的专家任务和交叉审阅预判
+        specialist_tasks = result.get("specialist_tasks", {})
+        need_cross_review = result.get("need_cross_review", False)
+
         result_out = {
             "complexity": complexity,
             "specialists": specialists,
@@ -1271,6 +1489,8 @@ def clarify_requirement(query: str, trace_id: str = "") -> dict:
             "confidence": confidence,
             "scenario_type": detect_scenario_type(query),
             "classification_method": "llm",
+            "specialist_tasks": specialist_tasks,
+            "need_cross_review": need_cross_review,
         }
 
         # 缓存结果
@@ -1293,6 +1513,8 @@ def clarify_requirement(query: str, trace_id: str = "") -> dict:
             "confidence": 0.5,
             "scenario_type": detect_scenario_type(query),
             "classification_method": "keywords_fallback",
+            "specialist_tasks": {},
+            "need_cross_review": False,
         }
 
 
@@ -1891,7 +2113,7 @@ def orchestrate(query: str, history: list, rag_context: str = "", cancel_event: 
 
         # 若未命中任何专家,回退到原 clarify_requirement
         if not specialists:
-            clarification = clarify_requirement(query)
+            clarification = clarify_requirement(query, trace_id=trace_id)
             complexity = clarification["complexity"]
             context_config = get_context_config(complexity)
             token_budget = get_token_budget(complexity)
@@ -2030,11 +2252,15 @@ def orchestrate(query: str, history: list, rag_context: str = "", cancel_event: 
 
         # 没有工具调用 → 检查是否需要交叉审阅,然后给出最终回答
         if not msg.tool_calls:
-            conflicts = detect_conflicts(specialist_results)
+            conflicts = detect_conflicts_smart(specialist_results, refined_query, trace_id)
 
             cross_review_enabled = get_orchestration_config("cross_review_enabled", "true") == "true"
             cross_review_min = int(get_orchestration_config("cross_review_min_specialists", "2"))
             cross_review_min_sev = get_orchestration_config("cross_review_min_severity", "medium")
+            # 从 clarification 中获取 LLM 预判的 need_cross_review
+            predicted_need_cr = False
+            if isinstance(clarification, dict):
+                predicted_need_cr = clarification.get("need_cross_review", False)
             needs_cross_review = should_run_cross_review(
                 specialist_results=specialist_results,
                 complexity=complexity,
@@ -2043,6 +2269,7 @@ def orchestrate(query: str, history: list, rag_context: str = "", cancel_event: 
                 enabled=cross_review_enabled,
                 min_specialists=cross_review_min,
                 min_severity=cross_review_min_sev,
+                predicted_need_cross_review=predicted_need_cr,
             )
 
             if needs_cross_review:
@@ -2106,7 +2333,7 @@ def orchestrate(query: str, history: list, rag_context: str = "", cancel_event: 
                     )
 
                     duration_ms = int((time.time() - start_time) * 1000)
-                    conflicts = detect_conflicts(specialist_results)
+                    conflicts = detect_conflicts_smart(specialist_results, refined_query, trace_id)
                     _result = {
                         "answer": answer,
                         "specialist_results": specialist_results,
@@ -2145,7 +2372,7 @@ def orchestrate(query: str, history: list, rag_context: str = "", cancel_event: 
             )
 
             duration_ms = int((time.time() - start_time) * 1000)
-            conflicts = detect_conflicts(specialist_results)
+            conflicts = detect_conflicts_smart(specialist_results, refined_query, trace_id)
             _result = {
                 "answer": answer,
                 "specialist_results": specialist_results,
@@ -2202,10 +2429,21 @@ def orchestrate(query: str, history: list, rag_context: str = "", cancel_event: 
                 f"(allowed={specialists}, max={max_tools})"
             )
 
+        # 从 clarification 中提取 specialist_tasks（LLM 规划的专家任务）
+        specialist_tasks_map = {}
+        if isinstance(clarification, dict):
+            specialist_tasks_map = clarification.get("specialist_tasks", {})
+
         tool_tasks = []
         for tc in msg.tool_calls:
             args = _parse_tool_args(tc.function.arguments, tc.function.name)
             expert_query = args.get("query", query)
+            # 注入 specialist_tasks：把 LLM 规划的专家任务拼接到 query 前面作为上下文
+            agent_key_nonstream = build_expert_map().get(tc.function.name, "")
+            if agent_key_nonstream in specialist_tasks_map and specialist_tasks_map[agent_key_nonstream]:
+                task_desc = specialist_tasks_map[agent_key_nonstream]
+                expert_query = f"[专家任务] {task_desc}\n[用户问题] {expert_query}"
+                logger.info(f"注入专家任务到 {agent_key_nonstream}: {task_desc[:80]}...")
             logger.info(f"Orchestrator → {tc.function.name}: {expert_query[:100]}")
             tool_tasks.append((tc, args, expert_query))
 
@@ -2331,7 +2569,7 @@ def orchestrate(query: str, history: list, rag_context: str = "", cancel_event: 
     except Exception:
         total_tokens = 0
 
-    conflicts = detect_conflicts(specialist_results)
+    conflicts = detect_conflicts_smart(specialist_results, refined_query, trace_id)
     return {
         "answer": final_answer,
         "specialist_results": specialist_results,
@@ -2553,7 +2791,7 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
         if not specialists:
             if not resume_from:
                 yield {"type": "phase", "phase": "clarify", "message": "🔍 正在理解您的问题..."}
-            clarification = clarify_requirement(query)
+            clarification = clarify_requirement(query, trace_id=trace_id)
             complexity = clarification["complexity"]
             context_config = get_context_config(complexity)
             token_budget = get_token_budget(complexity)
@@ -2780,10 +3018,14 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
 
         # 没有工具调用 → 检查是否需要交叉审阅,然后给出最终回答
         if not msg.tool_calls:
-            conflicts = detect_conflicts(specialist_results)
+            conflicts = detect_conflicts_smart(specialist_results, refined_query, trace_id)
             cross_review_enabled = get_orchestration_config("cross_review_enabled", "true") == "true"
             cross_review_min = int(get_orchestration_config("cross_review_min_specialists", "2"))
             cross_review_min_sev = get_orchestration_config("cross_review_min_severity", "medium")
+            # 从 clarification 中获取 LLM 预判的 need_cross_review
+            predicted_need_cr = False
+            if isinstance(clarification, dict):
+                predicted_need_cr = clarification.get("need_cross_review", False)
             should_cross_review = should_run_cross_review(
                 specialist_results=specialist_results,
                 complexity=complexity,
@@ -2792,6 +3034,7 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
                 enabled=cross_review_enabled,
                 min_specialists=cross_review_min,
                 min_severity=cross_review_min_sev,
+                predicted_need_cross_review=predicted_need_cr,
             )
             if should_cross_review:
                 yield {"type": "status", "message": f"正在进行交叉审阅({len(specialist_results)} 个专家并行互相验证)..."}
@@ -2882,7 +3125,7 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
                         }
 
                     duration_ms = int((time.time() - start_time) * 1000)
-                    conflicts = detect_conflicts(specialist_results)
+                    conflicts = detect_conflicts_smart(specialist_results, refined_query, trace_id)
 
                     # 增强1: 检查点存档 — Phase B 交叉审阅完成
                     if conversation_id and message_id:
@@ -2960,7 +3203,7 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
                 }
 
             duration_ms = int((time.time() - start_time) * 1000)
-            conflicts = detect_conflicts(specialist_results)
+            conflicts = detect_conflicts_smart(specialist_results, refined_query, trace_id)
 
             # 增强1: 检查点存档
             if conversation_id and message_id and specialist_results:
@@ -3045,6 +3288,13 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
             )
 
         # 解析所有 tool call 参数
+        # 从 clarification 中提取 specialist_tasks（LLM 规划的专家任务）
+        specialist_tasks_map = {}
+        need_cross_review_flag = False
+        if isinstance(clarification, dict):
+            specialist_tasks_map = clarification.get("specialist_tasks", {})
+            need_cross_review_flag = clarification.get("need_cross_review", False)
+
         tool_tasks = []
         skipped_tasks = []
         for tc in msg.tool_calls:
@@ -3052,6 +3302,12 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
             expert_query = args.get("query", query)
             agent_key = build_expert_map().get(tc.function.name, "")
             agent_info = load_specialist_agents().get(agent_key, {})
+
+            # 注入 specialist_tasks：把 LLM 规划的专家任务拼接到 query 前面作为上下文
+            if agent_key in specialist_tasks_map and specialist_tasks_map[agent_key]:
+                task_desc = specialist_tasks_map[agent_key]
+                expert_query = f"[专家任务] {task_desc}\n[用户问题] {expert_query}"
+                logger.info(f"注入专家任务到 {agent_key}: {task_desc[:80]}...")
 
             # 恢复模式:跳过已完成的专家
             if agent_key in completed_specialists:
@@ -3379,7 +3635,7 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
     except Exception as e:
         logger.warning(f"记录实体记忆失败: {e}")
 
-    conflicts = detect_conflicts(specialist_results)
+    conflicts = detect_conflicts_smart(specialist_results, refined_query, trace_id)
 
     # 增强1: 检查点存档 — 最终完成
     if conversation_id and message_id and specialist_results:
