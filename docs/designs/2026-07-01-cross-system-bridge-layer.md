@@ -1,8 +1,22 @@
 # 跨系统桥接层（Cross-System Bridge Layer）设计稿
 
 **日期**: 2026-07-01  
-**版本**: v2.0  
+**版本**: v2.1  
 **前置条件**: Portfolio Fact Layer 已落地（commit `d16970f` ~ `d664fad`）
+
+## 实现状态总览
+
+| 模块 | 状态 | commit |
+|------|------|--------|
+| `analysis_conclusions` 表 + 数据层 | ✅ 已实现 | `3fbdfa7` |
+| `decision_canvas.py` 四区聚合 API | ✅ 已实现 | `3fbdfa7` |
+| `DecisionCanvas.vue` 前端组件 | ✅ 已实现 | `3fbdfa7` |
+| 桥接A: orchestrator 注入分析结论 | ✅ 已实现 | `3fbdfa7` |
+| 桥接B: 日报/深度/全景接入结论收集 | ✅ 已实现 | `3fbdfa7` |
+| `portfolio_fact_layer.py` 增强 | ✅ 已实现 | `3fbdfa7` |
+| 桥接C: 共同标尺扩展（情绪/状态） | ⬜ 待实现 | — |
+| 学习区内容自动生成 | ⬜ 待实现 | — |
+| 告警规则（分数/幻觉/反馈阈值） | ⬜ 待实现 | — |
 
 ---
 
@@ -431,59 +445,60 @@ CREATE TABLE cross_system_references (
 
 ---
 
-## 6. 实现计划
+## 6. 实现状态追踪
 
-### Phase 1：数据基础设施（1天）
+### Phase 1：数据基础设施 ✅ 已完成
 
-| 任务 | 产出 |
-|------|------|
-| 创建 `analysis_conclusions` 表 + DDL | DB schema |
-| 创建 `get_latest_analysis_conclusions()` 查询函数 | DB 查询 |
-| 扩展 `portfolio_fact_layer.py`（增加市场状态、近期决策） | 升级版事实层 |
+| 任务 | 文件 | 状态 |
+|------|------|------|
+| 创建 `analysis_conclusions` 表 + DDL | `db/analysis_conclusions.py` | ✅ `init_conclusions_tables()` |
+| 查询函数（含冲突检测） | `db/analysis_conclusions.py` | ✅ `get_conflicting_conclusions()` |
+| 扩展 `portfolio_fact_layer.py` | `portfolio_fact_layer.py` | ✅ +179 行 |
 
-### Phase 2：桥接 A — 分析→对话注入（半天）
+### Phase 2：桥接 A — 分析→对话注入 ✅ 已完成
 
-| 任务 | 产出 |
-|------|------|
-| 实现 `_inject_analysis_context()` | 对话注入函数 |
-| 在 orchestrator 流程中接入 | orchestrator 增强 |
-| 修改 `build_clarification_prompt()` 注入渠道 | 需求路由增强 |
+| 任务 | 文件 | 状态 |
+|------|------|------|
+| orchestrator 中拉取结论注入上下文 | `agent/orchestrator.py` | ✅ +352 行 |
+| 对话路由中注入结论 | `routers/conversations.py` | ✅ +36 行 |
 
-### Phase 3：桥接 B — 对话→分析关联（半天）
+### Phase 3：桥接 B — 对话→分析关联 ✅ 已完成
 
-| 任务 | 产出 |
-|------|------|
-| 实现 `_attach_chat_context()` | 分析关联函数 |
-| 在日报/深度/全景/分散度/调仓 等路由接入 | 各分析路由末尾 +3 行 |
-| 实现 `_extract_report_keywords()` | 关键词提取 |
+| 任务 | 文件 | 状态 |
+|------|------|------|
+| 日报分析接入结论收集 | `routers/analysis/daily_report.py` | ✅ +108 行 |
+| 深度分析接入 | `routers/analysis/deep_dive.py` | ✅ +49 行 |
+| 分散度分析接入 | `routers/analysis/diversification.py` | ✅ +41 行 |
+| 全景诊断接入 | `routers/analysis/panorama.py` | ✅ +33 行 |
+| 债券推荐接入 | `routers/analysis/bond_recommend.py` | ✅ +36 行 |
 
-### Phase 4：前端决策画布（1天）
+### Phase 4：前端决策画布 ✅ 已完成
 
-| 任务 | 产出 |
-|------|------|
-| 设计共识区/关注区/建议区/学习区组件 | `DecisionCanvas.vue` |
-| 集成到 Dashboard 和 PortfolioManagement | 前端改动 |
-| 决策画布与已有分析页面的联动 | 交互设计 |
+| 任务 | 文件 | 状态 |
+|------|------|------|
+| 四区聚合 API | `routers/analysis/decision_canvas.py` | ✅ 407 行 |
+| 前端决策画布组件 | `frontend/src/components/DecisionCanvas.vue` | ✅ 634 行 |
+| Dashboard 集成 | `frontend/src/components/Dashboard.vue` | ✅ +52 行 |
 
-### Phase 5：学习区内容生成（后续迭代）
+### Phase 5：后续待实现 ⬜
 
-| 任务 | 产出 |
-|------|------|
-| 每次决策画布生成时，LLM 总结一条"今天学到的框架" | 学习区内容 |
-| 累积到"投资框架库"，用户可回顾 | 学习日志 |
+| 任务 | 说明 | 优先级 |
+|------|------|--------|
+| 学习区内容自动生成 | 每次画布生成时 LLM 总结一条框架 | 中 |
+| 告警规则引擎 | 分数下降/幻觉率上升时主动告警 | 低 |
 
 ---
 
 ## 7. 成功指标
 
-| 指标 | 当前 | 目标 |
-|------|------|------|
-| AI对话是否知晓今日独立分析 | ❌ 完全不知 | ✅ 自动注入前5条 |
-| 独立分析是否引用对话结论 | ❌ 从不 | ✅ 匹配关键词后显示关联 |
-| 两大系统共用的客观数据 | 仅持仓快照 | ✅ 估值+情绪+状态 |
-| 用户看到冲突时是否知道原因 | ❌ "谁对谁错" | ✅ "分歧来自XX变量" |
-| 决策是否带条件 | ❌ 无条件建议 | ✅ "如果XX则YY" |
-| 用户每次决策是否学到东西 | ❌ 没有 | ✅ 学习区一句话总结 |
+| 指标 | v2.0 目标 | 当前状态 |
+|------|----------|----------|
+| AI对话是否知晓今日独立分析 | ✅ 自动注入前5条 | ✅ 已实现 |
+| 独立分析是否引用对话结论 | ✅ 匹配关键词后显示关联 | ✅ 已实现 |
+| 两大系统共用的客观数据 | ✅ 估值+情绪+状态 | ✅ 估值+持仓 (情绪待加) |
+| 用户看到冲突时是否知道原因 | ✅ "分歧来自XX变量" | ✅ 已实现 |
+| 决策是否带条件 | ✅ "如果XX则YY" | ✅ 已实现 |
+| 用户每次决策是否学到东西 | ✅ 学习区一句话总结 | ⬜ 待实现 |
 
 ---
 
