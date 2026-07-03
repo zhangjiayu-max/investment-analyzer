@@ -33,6 +33,24 @@ from output_reviewer import review_output
 
 logger = logging.getLogger(__name__)
 
+
+def _build_effective_query(content: str, images: list[dict]) -> str:
+    """如果有图片且 parse_result 无 error，将图片上下文拼入查询。"""
+    if not images:
+        return content
+    image_context_parts = []
+    for img in images:
+        parse_result = img.get("parse_result") or {}
+        if not parse_result.get("error"):
+            img_type = parse_result.get("type", "未知")
+            img_summary = parse_result.get("summary", parse_result.get("description", ""))
+            if isinstance(img_summary, (dict, list)):
+                img_summary = json.dumps(img_summary, ensure_ascii=False)
+            image_context_parts.append(f"[用户上传图片 {img.get('url', '')}] 类型: {img_type}, 摘要: {img_summary}")
+    if image_context_parts:
+        return content + "\n\n[图片上下文]\n" + "\n".join(image_context_parts)
+    return content
+
 router = APIRouter(tags=["conversations"])
 
 
@@ -74,6 +92,7 @@ class CreateConversationRequest(BaseModel):
 class SendMessageRequest(BaseModel):
     content: str
     target_specialists: list[str] = []  # @mention 指定的 agent_key 列表
+    images: list[dict] = []  # 上传的图片信息 [{image_id, url, parse_status, parse_result}]
 
 
 class ChatFeedbackRequest(BaseModel):
@@ -548,7 +567,11 @@ async def send_message_api(conv_id: int, req: SendMessageRequest):
     # 1. 存储用户消息（去重：中断重试时不重复保存）
     existing = get_messages(conv_id, limit=1)
     if not existing or existing[-1]["role"] != "user" or existing[-1]["content"] != req.content:
-        create_message(conv_id, "user", req.content)
+        user_metadata = json.dumps({"images": req.images}, ensure_ascii=False) if req.images else None
+        create_message(conv_id, "user", req.content, metadata=user_metadata)
+
+    # 构造 effective_query（包含图片上下文）
+    effective_query = _build_effective_query(req.content, req.images)
 
     # 1.1 首次对话时立即更新标题（异步，不阻塞）
     if conv.get("title") == "新对话":
@@ -571,10 +594,10 @@ async def send_message_api(conv_id: int, req: SendMessageRequest):
             pass
 
     try:
-        rag_result = build_rag_context_with_details(req.content, content_types=rag_types if rag_types else None)
+        rag_result = build_rag_context_with_details(effective_query, content_types=rag_types if rag_types else None)
     except Exception as e:
         logger.warning(f"RAG 检索失败，跳过: {e}")
-        rag_result = {"context": "", "results": [], "keywords": [], "query": req.content, "fts_count": 0, "chroma_count": 0, "freshness_filtered": 0}
+        rag_result = {"context": "", "results": [], "keywords": [], "query": effective_query, "fts_count": 0, "chroma_count": 0, "freshness_filtered": 0}
     rag_context = rag_result["context"]
 
     # 3. 获取对话历史
@@ -609,7 +632,7 @@ async def send_message_api(conv_id: int, req: SendMessageRequest):
     # Bridge A: 注入24h分析结论上下文
     try:
         from agent.orchestrator import _inject_analysis_context
-        _, _analysis_ctx = _inject_analysis_context(req.content)
+        _, _analysis_ctx = _inject_analysis_context(effective_query)
         if _analysis_ctx:
             rag_context = _analysis_ctx + "\n" + (rag_context or "")
     except Exception as _e:
@@ -617,9 +640,9 @@ async def send_message_api(conv_id: int, req: SendMessageRequest):
 
     # 4. 调用 Orchestrator（多 Agent 协作）
     trace_id = str(uuid.uuid4())[:12]
-    logger.info(f"[trace:{trace_id}] 非流式对话 {conv_id}: {req.content[:50]}...")
+    logger.info(f"[trace:{trace_id}] 非流式对话 {conv_id}: {effective_query[:50]}...")
     try:
-        llm_result = orchestrate(req.content, msg_list, rag_context, conversation_id=conv_id, trace_id=trace_id)
+        llm_result = orchestrate(effective_query, msg_list, rag_context, conversation_id=conv_id, trace_id=trace_id)
         answer = llm_result["answer"]
     except Exception as e:
         answer = f"AI 回复失败: {str(e)}"
@@ -642,7 +665,7 @@ async def send_message_api(conv_id: int, req: SendMessageRequest):
     log_rag_search(
         conversation_id=conv_id,
         message_id=msg_id,
-        query=req.content,
+        query=effective_query,
         keywords=rag_result.get("keywords", []),
         results=rag_result.get("results", []),
         content_types=rag_types if rag_types else None,
@@ -724,7 +747,11 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
 
         # 生成 trace_id，关联本次对话的所有事件
         trace_id = str(uuid.uuid4())[:12]
-        logger.info(f"[trace:{trace_id}] 对话 {conv_id} 开始: {req.content[:50]}...")
+
+        # 构造 effective_query（包含图片上下文）
+        effective_query = _build_effective_query(req.content, req.images)
+
+        logger.info(f"[trace:{trace_id}] 对话 {conv_id} 开始: {effective_query[:50]}...")
 
         # 执行 before_prompt hooks
         try:
@@ -732,13 +759,13 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
             from agent.session_signals import detect_signals, get_adaptive_behavior
             hook_context = {
                 "conversation_id": conv_id,
-                "query": req.content,
+                "query": effective_query,
                 "user_id": "default",
             }
             hook_context = run_hooks("before_prompt", hook_context)
 
             # 检测会话信号
-            detect_signals(conv_id, "user_message", {"content": req.content})
+            detect_signals(conv_id, "user_message", {"content": effective_query})
             adaptive = get_adaptive_behavior(conv_id)
             if adaptive.get("should_inject_context"):
                 hook_context["system_prompt"] = (hook_context.get("system_prompt", "") +
@@ -749,7 +776,8 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
         # 1. 存储用户消息（去重：中断重试时不重复保存）
         existing = get_messages(conv_id, limit=1)
         if not existing or existing[-1]["role"] != "user" or existing[-1]["content"] != req.content:
-            user_msg_id = create_message(conv_id, "user", req.content)
+            user_metadata = json.dumps({"images": req.images}, ensure_ascii=False) if req.images else None
+            user_msg_id = create_message(conv_id, "user", req.content, metadata=user_metadata)
         else:
             user_msg_id = existing[-1]["id"]
         yield _sse_event("user_message", {"content": req.content})
@@ -757,8 +785,8 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
         # KYC 画像对话中持续学习（异步后台，不阻塞主流程；仅关键词命中时触发）
         try:
             from agent.kyc_learner import should_extract, learn_from_message
-            if should_extract(req.content):
-                asyncio.create_task(asyncio.to_thread(learn_from_message, req.content, "default"))
+            if should_extract(effective_query):
+                asyncio.create_task(asyncio.to_thread(learn_from_message, effective_query, "default"))
         except Exception as e:
             logger.debug(f"KYC 学习触发跳过: {e}")
 
@@ -778,14 +806,14 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
         yield _sse_event("status", {"message": "正在理解问题并检索知识库..."})
 
         def _run_clarification():
-            return clarify_requirement(req.content)
+            return clarify_requirement(effective_query)
 
         def _run_rag():
             try:
-                return build_rag_context_with_details(req.content, content_types=rag_types if rag_types else None)
+                return build_rag_context_with_details(effective_query, content_types=rag_types if rag_types else None)
             except Exception as e:
                 logger.warning(f"RAG 检索失败，跳过: {e}")
-                return {"context": "", "results": [], "keywords": [], "query": req.content, "fts_count": 0, "chroma_count": 0, "freshness_filtered": 0}
+                return {"context": "", "results": [], "keywords": [], "query": effective_query, "fts_count": 0, "chroma_count": 0, "freshness_filtered": 0}
 
         t0 = time.time()
         clarification_task = asyncio.to_thread(_run_clarification)
@@ -809,7 +837,7 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
             def _mh_portfolio_fn():
                 return list_holdings()
 
-            mh = await asyncio.to_thread(multi_hop_search, req.content, _mh_rag_fn, _mh_portfolio_fn)
+            mh = await asyncio.to_thread(multi_hop_search, effective_query, _mh_rag_fn, _mh_portfolio_fn)
             if mh and mh.get("context"):
                 rag_context = (rag_context + "\n\n" + mh["context"]) if rag_context else mh["context"]
                 logger.info(f"[multi_hop] 增强上下文 {len(mh['hops'])} 跳，模板={mh['template']}")
@@ -819,7 +847,7 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
         scenario_type = clarification.get("scenario_type", "general_analysis")
         unified_context = _build_unified_context_safe(
             conv_id=conv_id,
-            query=req.content,
+            query=effective_query,
             scenario_type=scenario_type,
             agent_id=conv.get("agent_id"),
             rag_context=rag_context,
@@ -875,7 +903,7 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
                 chat_messages.append({"role": m["role"], "content": m["content"][:500]})
             if rag_context:
                 chat_messages.append({"role": "system", "content": f"相关知识库参考：\n{rag_context[:1000]}"})
-            chat_messages.append({"role": "user", "content": req.content})
+            chat_messages.append({"role": "user", "content": effective_query})
             try:
                 resp = await asyncio.to_thread(lambda: _call_llm(
                     caller="chat", model=MODEL, messages=chat_messages,
@@ -902,7 +930,7 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
             if rag_result and rag_result.get("results"):
                 try:
                     log_rag_search(
-                        conversation_id=conv_id, message_id=user_msg_id, query=req.content,
+                        conversation_id=conv_id, message_id=user_msg_id, query=effective_query,
                         keywords=rag_result.get("keywords", []),
                         results=rag_result.get("results", []),
                         content_types=rag_types if rag_types else None,
@@ -934,7 +962,7 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
                 # 直接运行专家（传递轻量级 RAG 上下文）
                 def _run_expert():
                     try:
-                        expert_query = clarification.get("refined_query") or req.content
+                        expert_query = clarification.get("refined_query") or effective_query
                         prebuilt = ""
                         if unified_context:
                             prebuilt += f"## 统一个人理财上下文\n{unified_context[:3500]}\n\n"
@@ -967,7 +995,7 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
                         conversation_id=conv_id, message_id=0,
                         agent_key=result.get("agent_key", agent_key),
                         agent_name=result.get("agent", ""),
-                        query=req.content[:500],
+                        query=effective_query[:500],
                         result=(result.get("analysis", "") or "")[:3000],
                         duration_ms=result.get("duration_ms", 0),
                         trace_id=trace_id,
@@ -1003,7 +1031,7 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
                         ],
                         "complexity": complexity,
                         "execution_status": "completed",
-                        "refined_query": clarification.get("refined_query", req.content),
+                        "refined_query": clarification.get("refined_query", effective_query),
                         "reasoning_trail": result.get("reasoning_trail"),
                     }
                     metadata = json.dumps(metadata_dict, ensure_ascii=False)
@@ -1025,7 +1053,7 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
                         create_agent_run(
                             conversation_id=conv_id, message_id=msg_id,
                             agent_key="chat_turn", agent_name="对话整体",
-                            query=req.content[:500], result=answer[:3000],
+                            query=effective_query[:500], result=answer[:3000],
                             tool_calls=json.dumps(phase_timings, ensure_ascii=False),
                             duration_ms=total_ms,
                             trace_id=trace_id,
@@ -1035,7 +1063,7 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
                         logger.warning(f"记录 agent_runs 失败: {_e}")
 
                     # 写入 execution_traces
-                    _save_execution_trace(trace_id, conv_id, req.content, "simple", "completed",
+                    _save_execution_trace(trace_id, conv_id, effective_query, "simple", "completed",
                                           total_ms, phase_timings, error_category)
 
                     yield _sse_event("done", {
@@ -1088,7 +1116,7 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
         # Bridge A: 注入24h分析结论上下文
         try:
             from agent.orchestrator import _inject_analysis_context
-            _, _analysis_ctx = _inject_analysis_context(req.content)
+            _, _analysis_ctx = _inject_analysis_context(effective_query)
             if _analysis_ctx:
                 orchestrator_context = _analysis_ctx + "\n" + (orchestrator_context or "")
         except Exception as _e:
@@ -1152,18 +1180,18 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
                     conn.close()
                     create_agent_run(conversation_id=conv_id, message_id=stream_msg_id,
                         agent_key="chat_turn", agent_name="对话整体",
-                        query=req.content[:500], result=content[:3000],
+                        query=effective_query[:500], result=content[:3000],
                         tool_calls=json.dumps(pt, ensure_ascii=False), duration_ms=total_ms,
                         trace_id=trace_id, status="success")
                 except Exception as e:
                     logger.warning(f"记录 agent_runs 失败: {e}")
-                log_rag_search(conversation_id=conv_id, message_id=stream_msg_id, query=req.content,
+                log_rag_search(conversation_id=conv_id, message_id=stream_msg_id, query=effective_query,
                     keywords=rag_result.get("keywords", []), results=rag_result.get("results", []),
                     content_types=rag_types if rag_types else None,
                     fts_count=rag_result.get("fts_count", 0), chroma_count=rag_result.get("chroma_count", 0),
                     freshness_filtered=rag_result.get("freshness_filtered", 0), trace_id=trace_id)
                 qm = _calculate_quality_metrics(_prod_spec_results, rag_result, tool_calls)
-                _save_execution_trace(trace_id, conv_id, req.content, complexity, "completed", total_ms, pt, "none", qm)
+                _save_execution_trace(trace_id, conv_id, effective_query, complexity, "completed", total_ms, pt, "none", qm)
 
                 # 自动检测可执行建议 → 创建决策候选
                 try:
@@ -1220,7 +1248,7 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
             def _producer():
                 try:
                     _running_agents[f"prod_{conv_id}"] = {"conv_id": conv_id, "started_at": time.time(), "trace_id": trace_id}
-                    for event in orchestrate_stream(req.content, msg_list, orchestrator_context, cancel_event=cancel_event, conversation_id=conv_id, message_id=stream_msg_id, trace_id=trace_id, target_specialists=req.target_specialists):
+                    for event in orchestrate_stream(effective_query, msg_list, orchestrator_context, cancel_event=cancel_event, conversation_id=conv_id, message_id=stream_msg_id, trace_id=trace_id, target_specialists=req.target_specialists):
                         et = event.get("type")
                         # === 在线程中持久化（独立于 SSE 连接）===
                         if et == "specialist_done":
@@ -1406,7 +1434,7 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
         # 主动预警检查
         content = done_data.get("content", "")
         if content:
-            asyncio.create_task(_proactive_alert_check(req.content, content, done_data.get("specialist_results", [])))
+            asyncio.create_task(_proactive_alert_check(effective_query, content, done_data.get("specialist_results", [])))
 
         # after_response hooks（后台异步）
         try:
