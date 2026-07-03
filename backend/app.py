@@ -31,7 +31,7 @@ from fastapi.responses import StreamingResponse, FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from config import STATIC_DIR, IMAGES_DIR, OUTPUT_DIR, UPLOADS_DIR, DD_IMAGES_DIR, VALUATION_IMAGES_DIR
+from config import STATIC_DIR, IMAGES_DIR, OUTPUT_DIR, UPLOADS_DIR, DD_IMAGES_DIR, VALUATION_IMAGES_DIR, ROOT
 
 from db import (
     init_db,
@@ -131,7 +131,8 @@ from routers.portfolio_import import router as portfolio_import_router  # /api/p
 from routers.opportunities import router as opportunities_router      # /api/opportunities/*
 from routers.daily_advice import router as daily_advice_router        # /api/daily-advice/*
 from routers.cost_governance import router as cost_governance_router  # /api/cost-governance/*
-from routers.thread_review import router as thread_review_router  # /api/thread-review/*
+from routers.thread_review import router as thread_review_router
+from routers.chat_images import router as chat_images_router, CHAT_IMAGES_DIR  # /api/thread-review/*
 from services.data_lineage import track_sources, get_lineage  # data lineage tracking
 
 # 注册路由
@@ -190,6 +191,7 @@ app.include_router(opportunities_router)
 app.include_router(daily_advice_router)
 app.include_router(cost_governance_router)
 app.include_router(thread_review_router)
+app.include_router(chat_images_router)
 
 # ── 启动初始化 ──
 @app.on_event("startup")
@@ -200,13 +202,14 @@ async def _init_daily_advice():
     init_thread_summaries_table()
 
 # 静态文件目录
-for _d in (STATIC_DIR, IMAGES_DIR, OUTPUT_DIR, UPLOADS_DIR, DD_IMAGES_DIR, VALUATION_IMAGES_DIR):
+for _d in (STATIC_DIR, IMAGES_DIR, OUTPUT_DIR, UPLOADS_DIR, DD_IMAGES_DIR, VALUATION_IMAGES_DIR, CHAT_IMAGES_DIR):
     _d.mkdir(parents=True, exist_ok=True)
 app.mount("/static/images", StaticFiles(directory=str(IMAGES_DIR)), name="article_images")
 app.mount("/static/tasks", StaticFiles(directory=str(OUTPUT_DIR)), name="task_images")
 app.mount("/assets", StaticFiles(directory=str(STATIC_DIR / "assets")), name="frontend_assets")
 app.mount("/static/dd_images", StaticFiles(directory=str(DD_IMAGES_DIR)), name="dd_images")
 app.mount("/static/valuation_images", StaticFiles(directory=str(VALUATION_IMAGES_DIR)), name="valuation_images")
+app.mount("/static/chat_images", StaticFiles(directory=str(CHAT_IMAGES_DIR)), name="chat_images")
 
 
 def _index_skill_doc_by_type(doc_type: str, title: str):
