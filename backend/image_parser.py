@@ -204,6 +204,13 @@ PARSE_PROMPT = """从图片读取指数估值数据，输出 JSON：
 "股息率统计指标":{"当前值":null}}
 背景颜色：绿色=低估、黄色=适中、红色=高估。只看图片实际数据，不编造。只输出 JSON。"""
 
+# 兜底裁剪 Prompt：只关注底部数据表区域（用于整图解析失败时的二次提取）
+STATS_CROP_PROMPT = """从这张估值数据表区域读取数据，输出 JSON：
+{"指数名称":"","背景颜色":"(绿色/黄色/红色)",
+"市盈率TTM统计指标":{"当前值":null,"分位点":null,"危险值":null,"中位数":null,"机会值":null,"最大值":null,"最小值":null,"平均值":null,"z分数":null},
+"市净率统计指标":{"当前值":null,"分位点":null,"危险值":null,"中位数":null,"机会值":null,"最大值":null,"最小值":null,"平均值":null,"z分数":null}}
+请仔细读取表格中的数字，包括小数点和百分号。不要编造数据，只输出 JSON。"""
+
 
 # ── ImageParser（普通估值图）─────────────────────────
 
@@ -220,6 +227,59 @@ class ImageParser:
         raw = _call_vision(PARSE_PROMPT, img_b64, mime, trace_id=self._trace_id)
         data = _extract_json(raw)
         result = self._normalize(data)
+
+        # 兜底：整图解析无 current_value 时，裁剪底部数据表区域单独提取数值
+        if not result.get("current_value"):
+            logger.info(f"[ImageParser] 整图解析无 current_value，尝试裁剪底部数据表: {image_path}")
+            try:
+                from PIL import Image
+                import io as _io
+                img = Image.open(image_path)
+                w, h = img.size
+                # 裁剪下半部分（估值数据表区域）
+                crop_box = (0, int(h * 0.58), w, h)
+                crop = img.crop(crop_box)
+                buf = _io.BytesIO()
+                crop_fmt = "PNG" if mime == "png" else "JPEG"
+                crop.save(buf, format=crop_fmt)
+                crop_b64 = base64.b64encode(buf.getvalue()).decode()
+                crop_raw = _call_vision(STATS_CROP_PROMPT, crop_b64, mime, trace_id=self._trace_id)
+                stats_data = _extract_json(crop_raw)
+                # 合并：stats_data 优先填充 current_value / percentile 等字段
+                stats = stats_data.get("市盈率TTM统计指标") or stats_data.get("市净率统计指标") or {}
+                # 裁剪仍为空时，放大裁剪区域再试一次
+                if stats.get("当前值") is None:
+                    logger.info(f"[ImageParser] 裁剪标准尺寸仍失败，尝试放大裁剪区域: {image_path}")
+                    crop_big = crop.resize((crop.width * 2, crop.height * 2), Image.LANCZOS)
+                    buf2 = _io.BytesIO()
+                    crop_big.save(buf2, format=crop_fmt)
+                    crop2_b64 = base64.b64encode(buf2.getvalue()).decode()
+                    crop2_raw = _call_vision(STATS_CROP_PROMPT, crop2_b64, mime, trace_id=self._trace_id)
+                    stats_data2 = _extract_json(crop2_raw)
+                    stats = stats_data2.get("市盈率TTM统计指标") or stats_data2.get("市净率统计指标") or {}
+                    if stats.get("当前值") is not None:
+                        stats_data = stats_data2  # 使用放大后的结果
+                if stats.get("当前值") is not None:
+                    logger.info(f"[ImageParser] 裁剪兜底成功: current_value={stats.get('当前值')}")
+                    result["current_value"] = stats.get("当前值")
+                    result["percentile"] = stats.get("分位点")
+                    result["danger_value"] = stats.get("危险值")
+                    result["median"] = stats.get("中位数")
+                    result["opportunity_value"] = stats.get("机会值")
+                    result["max_value"] = stats.get("最大值")
+                    result["min_value"] = stats.get("最小值")
+                    result["avg_value"] = stats.get("平均值")
+                    result["zscore"] = stats.get("z分数")
+                    # 根据实际返回的指标类型更新 metric_type
+                    if stats_data.get("市净率统计指标", {}).get("当前值") is not None:
+                        result["metric_type"] = "市净率"
+                    if not result.get("background_color"):
+                        result["background_color"] = stats_data.get("背景颜色")
+                    # 合并 raw_json
+                    result["raw_json"] = json.dumps(stats_data, ensure_ascii=False)
+            except Exception as e:
+                logger.warning(f"[ImageParser] 裁剪兜底失败: {e}")
+
         if not result.get("background_color"):
             bg = extract_dominant_color(image_path)
             if bg:

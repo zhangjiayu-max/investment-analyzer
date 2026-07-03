@@ -130,6 +130,7 @@ from routers.data_health import router as data_health_router          # /api/dat
 from routers.portfolio_import import router as portfolio_import_router  # /api/portfolio/import-csv
 from routers.opportunities import router as opportunities_router      # /api/opportunities/*
 from routers.daily_advice import router as daily_advice_router        # /api/daily-advice/*
+from routers.cost_governance import router as cost_governance_router  # /api/cost-governance/*
 from routers.thread_review import router as thread_review_router  # /api/thread-review/*
 from services.data_lineage import track_sources, get_lineage  # data lineage tracking
 
@@ -187,6 +188,7 @@ app.include_router(data_health_router)
 app.include_router(portfolio_import_router)
 app.include_router(opportunities_router)
 app.include_router(daily_advice_router)
+app.include_router(cost_governance_router)
 app.include_router(thread_review_router)
 
 # ── 启动初始化 ──

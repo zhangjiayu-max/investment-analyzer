@@ -51,12 +51,28 @@ def _load_specialist_keys() -> dict:
 
 
 class SmartRouter:
-    """智能路由。规则命中零 LLM 成本；未命中时用 LLM 兜底。"""
+    """智能路由。规则命中零 LLM 成本；未命中时用 LLM 兜底。
+
+    MoE 增强：
+    - 专家容量追踪（每位专家在时间窗口内的调用次数）
+    - 共享专家（高优先级专家始终启用，提供通用上下文）
+    - 动态负载均衡（避免单一专家过载）
+    """
+
+    # 共享专家：所有复杂查询都会附带，提供通用投资框架
+    SHARED_EXPERTS = ["risk_assessor"]  # 风险评估始终参与复杂分析
+
+    # 专家容量上限（滑动窗口 5 分钟内最大调用次数）
+    EXPERT_CAPACITY = 10
 
     def __init__(self):
         self._cache = {}
         self._cache_ttl = 60  # 路由结果缓存 60 秒
         self._lock = threading.Lock()
+        # 专家负载追踪：{agent_key: [timestamp1, timestamp2, ...]}
+        self._expert_load: dict[str, list[float]] = {}
+        # 专家性能追踪：{agent_key: {"avg_duration": float, "success_rate": float, "count": int}}
+        self._expert_perf: dict[str, dict] = {}
 
     def _cache_key(self, query: str, history_summary: str, context_hash: str) -> str:
         raw = f"{query}|{history_summary}|{context_hash}"
@@ -220,3 +236,67 @@ class SmartRouter:
             self._cleanup_expired_cache(now)
             self._cache[cache_key] = (fallback, now)
         return fallback
+
+    # ── MoE 增强：专家容量追踪与负载均衡 ──────────────────
+
+    def _prune_load_window(self, agent_key: str, now: float) -> list[float]:
+        """修剪负载滑动窗口（保留最近 5 分钟）。"""
+        if agent_key not in self._expert_load:
+            return []
+        window = [t for t in self._expert_load[agent_key] if now - t < 300]
+        self._expert_load[agent_key] = window
+        return window
+
+    def record_expert_call(self, agent_key: str, duration: float = 0, success: bool = True):
+        """记录一次专家调用，用于容量与性能追踪。"""
+        now = time.time()
+        with self._lock:
+            self._prune_load_window(agent_key, now)
+            self._expert_load.setdefault(agent_key, []).append(now)
+            # 性能统计
+            perf = self._expert_perf.setdefault(agent_key, {
+                "avg_duration": 0, "success_rate": 1.0, "count": 0
+            })
+            n = perf["count"]
+            # 增量平均
+            perf["avg_duration"] = (perf["avg_duration"] * n + duration) / (n + 1) if n > 0 else duration
+            perf["success_rate"] = (perf["success_rate"] * n + (1.0 if success else 0.0)) / (n + 1)
+            perf["count"] = n + 1
+
+    def get_expert_capacity(self, agent_key: str) -> dict:
+        """查询专家当前负载。"""
+        now = time.time()
+        with self._lock:
+            window = self._prune_load_window(agent_key, now)
+            perf = self._expert_perf.get(agent_key, {})
+        return {
+            "agent_key": agent_key,
+            "current_load": len(window),
+            "capacity": self.EXPERT_CAPACITY,
+            "load_pct": round(len(window) / self.EXPERT_CAPACITY * 100, 1) if self.EXPERT_CAPACITY > 0 else 0,
+            "avg_duration": round(perf.get("avg_duration", 0), 2),
+            "success_rate": round(perf.get("success_rate", 1.0), 3),
+            "call_count": perf.get("count", 0),
+        }
+
+    def apply_capacity_limit(self, specialists: list[str]) -> list[str]:
+        """按容量上限过滤专家（超载专家降级处理）。"""
+        now = time.time()
+        result = []
+        with self._lock:
+            for s in specialists:
+                window = self._prune_load_window(s, now)
+                if len(window) < self.EXPERT_CAPACITY:
+                    result.append(s)
+                else:
+                    logger.warning(f"专家 {s} 容量已满 ({len(window)}/{self.EXPERT_CAPACITY})，跳过")
+        return result if result else specialists  # 保底：全部满载时仍返回原列表
+
+    def attach_shared_experts(self, specialists: list[str], complexity: str) -> list[str]:
+        """复杂查询附带共享专家（风险评估）。"""
+        if complexity == "complex":
+            for expert in self.SHARED_EXPERTS:
+                if expert not in specialists:
+                    specialists.append(expert)
+                    logger.info(f"附加共享专家: {expert}")
+        return specialists

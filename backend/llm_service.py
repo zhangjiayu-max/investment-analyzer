@@ -246,6 +246,14 @@ def _record_token_usage(usage, model: str, caller: str = "", trace_id: str = "")
     except Exception as e:
         logger.warning(f"Failed to record token usage: {e}")
 
+    # 成本治理：同步记录到 cost_logs 表
+    try:
+        from cost_tracker import cost_tracker
+        cost_tracker.record(caller or "unknown", model,
+                            usage.prompt_tokens or 0, usage.completion_tokens or 0)
+    except Exception:
+        pass
+
 
 def analyze_article(title: str, content: str, market_data: dict = None) -> str:
     """

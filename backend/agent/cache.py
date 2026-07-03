@@ -1,6 +1,8 @@
 import hashlib
 import time
 import threading
+import json
+from datetime import datetime, timedelta
 from typing import Optional, Any
 
 
@@ -9,6 +11,18 @@ def _compute_context_hash(context: str) -> str:
     if not context:
         return ""
     return hashlib.md5(context.encode("utf-8")).hexdigest()[:16]
+
+
+def make_cache_key(analysis_type: str, **params) -> str:
+    """统一缓存键生成。
+
+    例: make_cache_key("daily_report", user_id="default", date="2026-07-02")
+    → "daily_report:default:2026-07-02"
+    """
+    parts = [analysis_type]
+    for key, value in sorted(params.items()):
+        parts.append(str(value))
+    return ":".join(parts)
 
 
 class ExpertCache:
@@ -147,3 +161,88 @@ class ExpertCache:
 
 # Global singleton
 expert_cache = ExpertCache()
+
+
+# ═══════════════════════════════════════════════════════════════
+# L3 分析级缓存（数据库持久化）— 日报/周报等固定输出
+# ═══════════════════════════════════════════════════════════════
+
+class L3ReportCache:
+    """分析级缓存（数据库持久化），支持历史回顾。
+
+    复用已有的 analysis_cache 表（db/portfolio.py 中定义）。
+    """
+
+    def get_report(self, analysis_type: str, date_str: str) -> dict | None:
+        """获取之前生成的分析报告。"""
+        cache_key = make_cache_key("report", type=analysis_type, date=date_str)
+        try:
+            from db._conn import _get_conn
+            conn = _get_conn()
+            row = conn.execute(
+                "SELECT data FROM analysis_cache WHERE cache_key = ?",
+                (cache_key,)
+            ).fetchone()
+            conn.close()
+            if row:
+                return json.loads(row["data"])
+        except Exception:
+            pass
+        return None
+
+    def save_report(self, analysis_type: str, date_str: str, content: dict) -> bool:
+        """保存分析报告。"""
+        cache_key = make_cache_key("report", type=analysis_type, date=date_str)
+        try:
+            from db._conn import _get_conn
+            conn = _get_conn()
+            conn.execute(
+                "INSERT OR REPLACE INTO analysis_cache (cache_key, data, created_at) "
+                "VALUES (?, ?, datetime('now','localtime'))",
+                (cache_key, json.dumps(content, ensure_ascii=False))
+            )
+            conn.commit()
+            conn.close()
+            return True
+        except Exception:
+            return False
+
+    def invalidate(self, analysis_type: str = None):
+        """按类型批量失效。"""
+        try:
+            from db._conn import _get_conn
+            conn = _get_conn()
+            if analysis_type:
+                prefix = make_cache_key("report", type=analysis_type) + "%"
+                conn.execute("DELETE FROM analysis_cache WHERE cache_key LIKE ?", (prefix,))
+            else:
+                conn.execute("DELETE FROM analysis_cache WHERE cache_key LIKE 'report:%'")
+            conn.commit()
+            conn.close()
+        except Exception:
+            pass
+
+
+# 全局单例
+l3_cache = L3ReportCache()
+
+
+# ═══════════════════════════════════════════════════════════════
+# 统一缓存入口 — 三级缓存编排
+# ═══════════════════════════════════════════════════════════════
+
+def invalidate_related_caches(event_type: str):
+    """缓存失效策略。
+
+    触发事件 → 失效相关缓存：
+    - position_change: 失效 L3 持仓分析类报告
+    - new_day: 失效所有 L3 当日报（由日期 key 自然过期）
+    - force: 清空所有 L3
+    """
+    if event_type == "position_change":
+        l3_cache.invalidate("diversification")
+        l3_cache.invalidate("health_score")
+        l3_cache.invalidate("panorama")
+    elif event_type == "force":
+        l3_cache.invalidate()
+

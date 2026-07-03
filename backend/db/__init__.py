@@ -1033,5 +1033,12 @@ def init_db():
     # ── 跨系统桥接层 ──────────────────────────────────────
     init_conclusions_tables(conn)
 
+    # ── 成本追踪表 ──────────────────────────────────────
+    try:
+        from cost_tracker import init_cost_tables
+        init_cost_tables(conn)
+    except Exception:
+        pass
+
     conn.commit()
     conn.close()

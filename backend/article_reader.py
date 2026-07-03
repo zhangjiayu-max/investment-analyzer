@@ -10,7 +10,10 @@ from db.config import get_config_int, get_config_float
 import os
 import re
 import time
+import logging
 from urllib.parse import urlparse
+
+logger = logging.getLogger(__name__)
 
 import requests
 from playwright.async_api import async_playwright
@@ -22,6 +25,7 @@ HEADERS = {
         "AppleWebKit/537.36 (KHTML, like Gecko) "
         "Chrome/120.0.0.0 Safari/537.36"
     ),
+    "Referer": "https://mp.weixin.qq.com/",
 }
 
 
@@ -57,7 +61,12 @@ async def fetch_article(url: str) -> dict:
         }
     """
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
+        # 使用系统已安装的 Chrome，避免 playwright 下载浏览器失败
+        chrome_path = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+        browser = await p.chromium.launch(
+            headless=True,
+            executable_path=chrome_path,
+        )
         context = await browser.new_context(
             viewport={"width": 390, "height": 844},
             user_agent=(
@@ -198,11 +207,15 @@ async def download_images(image_urls: list, save_dir: str) -> list:
     conn = aiohttp.TCPConnector(ssl=ssl_ctx)
 
     async with aiohttp.ClientSession(headers=HEADERS, connector=conn) as session:
-        for i, url in enumerate(image_urls):
+        # 并发下载图片提升速度
+        import asyncio
+
+        async def _download_one(i: int, url: str) -> str | None:
             try:
-                async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                async with session.get(url, timeout=aiohttp.ClientTimeout(total=30)) as resp:
                     if resp.status != 200:
-                        continue
+                        logger.warning(f"图片 {i} HTTP {resp.status}: {url[:60]}")
+                        return None
                     ct = resp.headers.get("Content-Type", "image/jpeg")
                     ext = ".jpg"
                     if "png" in ct:
@@ -217,11 +230,17 @@ async def download_images(image_urls: list, save_dir: str) -> list:
                     data = await resp.read()
                     with open(filepath, "wb") as f:
                         f.write(data)
-                    local_paths.append(filepath)
+                    return filepath
             except Exception as e:
-                print(f"  下载失败 [{i}]: {e}")
+                logger.warning(f"下载失败 [{i}]: {e} ({url[:60]})")
+                return None
 
-    return local_paths
+        tasks = [_download_one(i, url) for i, url in enumerate(image_urls)]
+        results = await asyncio.gather(*tasks)
+        local_paths = [p for p in results if p is not None]
+
+        logger.info(f"图片下载完成: {len(local_paths)}/{len(image_urls)}")
+        return local_paths
 
 
 def extract_stock_codes(text: str) -> list:

@@ -480,6 +480,17 @@ def _validate_and_repair(query: str, answer: str, specialist_results: list,
         if result["passed"]:
             break
 
+    # 幻觉防御：金融数据校验 + Bad case 自动捕获（不阻塞主流程）
+    try:
+        from agent.prompt_defense import validate_financial_data, auto_capture_bad_case
+        fin_check = validate_financial_data(answer)
+        if not fin_check["passed"]:
+            result.setdefault("issues", []).extend(fin_check["issues"])
+            result["severity"] = "high"
+            auto_capture_bad_case(answer, fin_check)
+    except Exception:
+        pass
+
     return answer, result
 
 
@@ -2050,6 +2061,14 @@ def orchestrate(query: str, history: list, rag_context: str = "", cancel_event: 
             else:
                 logger.info(f"已注入文章内容到查询中")
 
+    # 0.6 查询改写（多轮对话代词/省略补全，规则优先 LLM 兜底）
+    rewrite_meta = {"rewritten": False}
+    try:
+        from agent.query_rewriter import rewrite_query
+        query, rewrite_meta = rewrite_query(query, history)
+    except Exception as e:
+        logger.warning(f"查询改写失败(不影响主流程): {e}")
+
     # 1. 需求澄清(使用 LLM 分析问题)
     if target_specialists:
         all_agents = load_specialist_agents()
@@ -2686,6 +2705,15 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
             else:
                 logger.info(f"已注入文章内容到查询中")
                 yield {"type": "status", "message": "文章内容已获取,正在分析..."}
+
+    # 0.4 查询改写（多轮对话代词/省略补全）
+    try:
+        from agent.query_rewriter import rewrite_query
+        query, rewrite_meta = rewrite_query(query, history)
+        if rewrite_meta.get("rewritten"):
+            yield {"type": "status", "message": f"已补全问题上下文（{rewrite_meta.get('method', '')}）"}
+    except Exception as e:
+        logger.warning(f"查询改写失败(不影响主流程): {e}")
 
     # 0.5 恢复模式:从 agent_runs 表查询已完成的专家
     completed_specialists = set()

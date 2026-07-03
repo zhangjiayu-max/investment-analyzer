@@ -1,4 +1,7 @@
-"""轻量反思：最终答案输出前的低成本质检。"""
+"""轻量反思：最终答案输出前的低成本质检。
+
+增强：金融数据校验 + Self-Consistency 验证（借鉴企业级防幻觉分层防御）。
+"""
 
 import json
 import logging
@@ -7,6 +10,7 @@ from typing import Optional
 
 from db.config import get_config, get_config_float
 from llm_service import _call_llm, MODEL
+from agent.prompt_defense import validate_financial_data
 
 logger = logging.getLogger(__name__)
 
@@ -138,3 +142,81 @@ class LightValidator:
             "issues": issues,
             "severity": severity,
         }
+
+    # ── 金融数据校验（纯规则，零 LLM 成本）──────────────────────
+
+    def validate_financial(self, final_answer: str) -> dict:
+        """检查答案中的金融数据是否合理（收益率/费率/净值范围）。"""
+        return validate_financial_data(final_answer)
+
+    # ── Self-Consistency 验证（仅关键决策场景）──────────────────
+
+    # 触发 Self-Consistency 的分析类型（关键决策才跑，省 token）
+    _KEY_DECISION_TYPES = {"portfolio_trade", "asset_allocation", "deep_dive", "buy_decision", "sell_decision"}
+
+    def verify_self_consistency(self, output: str, analysis_type: str = "",
+                                 n_samples: int = 3) -> dict:
+        """Self-Consistency 检查：对关键结论多次采样验证一致性。
+
+        仅对关键决策场景（买卖/调仓/深度分析）触发，日常简报跳过。
+        """
+        if analysis_type not in self._KEY_DECISION_TYPES:
+            return {"consistent": True, "score": 1.0, "skipped": True}
+
+        if get_config("validator.self_consistency_enabled", "false") != "true":
+            return {"consistent": True, "score": 1.0, "skipped": True}
+
+        # 提取关键结论
+        key_claims = self._extract_key_claims(output)
+        if not key_claims:
+            return {"consistent": True, "score": 1.0, "skipped": True}
+
+        agreement_scores: list[float] = []
+        for claim in key_claims[:3]:  # 最多检查 3 个关键结论
+            verify_prompt = (
+                f"判断以下投资陈述是否准确合理（0-1 打分，只输出数字）：\n"
+                f"陈述：{claim['text']}\n上下文：{claim.get('context', '')[:200]}"
+            )
+            scores: list[float] = []
+            for _ in range(n_samples):
+                try:
+                    resp = _call_llm(
+                        caller="self_consistency",
+                        model=MODEL,
+                        messages=[{"role": "user", "content": verify_prompt}],
+                        temperature=0.5,
+                        max_tokens=10,
+                    )
+                    val = float((resp.choices[0].message.content or "").strip())
+                    scores.append(max(0.0, min(1.0, val)))
+                except (ValueError, TypeError):
+                    pass
+                except Exception as e:
+                    logger.warning(f"Self-Consistency 采样失败: {e}")
+
+            if scores:
+                agreement_scores.append(sum(scores) / len(scores))
+
+        if not agreement_scores:
+            return {"consistent": True, "score": 1.0, "skipped": True}
+
+        final_score = sum(agreement_scores) / len(agreement_scores)
+        return {
+            "consistent": final_score > 0.7,
+            "score": round(final_score, 3),
+            "checked_claims": len(key_claims[:3]),
+            "samples": n_samples,
+        }
+
+    @staticmethod
+    def _extract_key_claims(output: str) -> list[dict]:
+        """提取输出中的关键事实性结论（含操作建议的句子）。"""
+        claims: list[dict] = []
+        sentences = re.split(r"[。！；]", output)
+        for sent in sentences:
+            sent = sent.strip()
+            if not sent:
+                continue
+            if any(kw in sent for kw in ["建议", "推荐", "应该", "不推荐", "买入", "卖出", "增配", "减配", "止盈", "止损"]):
+                claims.append({"text": sent, "context": output[:100]})
+        return claims

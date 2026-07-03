@@ -968,6 +968,13 @@ def confirm_transaction(tx_id: int, confirmed_price: float,
                           ensure_ascii=False),
     )
 
+    # ── 持仓变更后失效相关缓存 ──
+    try:
+        from agent.cache import invalidate_related_caches
+        invalidate_related_caches("position_change")
+    except Exception:
+        pass
+
     return True
 
 

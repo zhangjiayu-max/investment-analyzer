@@ -320,6 +320,13 @@ def run_specialist(agent_key: str, query: str, context: str = "",
     # 追加通用可执行性约束
     system_content += _ACTIONABILITY_CONSTRAINT
 
+    # 注入幻觉防御 Prompt（事实约束 + 类型专用约束）
+    try:
+        from agent.prompt_defense import attach_defense_prompt
+        system_content = attach_defense_prompt(system_content, analysis_type)
+    except Exception:
+        pass
+
     llm_messages = [
         {"role": "system", "content": system_content},
         {"role": "user", "content": query},
