@@ -24,12 +24,12 @@ INJECTION_PATTERNS = [
     (r"forget (all )?(previous |system )?(instructions|prompts|rules)", "指令覆盖尝试"),
     
     # 角色扮演逃逸
-    (r"你现在是(不是|不再(是))", "角色扮演逃逸"),
+    (r"你现在(是|不是|不再是)", "角色扮演逃逸"),
     (r"你是一个(新|不同|别的|其他)角色", "角色扮演逃逸"),
     (r"you are (not |no longer )?(an? |the )?(ai|assistant|bot)", "角色扮演逃逸"),
     
     # 输出提取
-    (r"输出(你的|系统)(指令|提示|prompt|system prompt)", "Prompt 提取尝试"),
+    (r"输出(你的|系统)?(指令|提示|系统提示|prompt|system prompt)", "Prompt 提取尝试"),
     (r"repeat (the |your )?(system )?(prompt|instructions)", "Prompt 提取尝试"),
     (r"print (the |your )?(system )?(prompt|instructions)", "Prompt 提取尝试"),
     
@@ -73,8 +73,11 @@ def check_injection(query: str) -> dict:
         return {"blocked": False, "reason": "", "confidence": 0, "matched_patterns": []}
     
     # 计算置信度
+    # 高危模式单个即拦截，低危模式需2个以上
+    HIGH_RISK = {'指令覆盖尝试', 'Prompt 提取尝试', '越狱尝试', 'XSS 尝试', '代码注入尝试'}
     unique_reasons = list(set(matched))
-    confidence = min(1.0, len(unique_reasons) * 0.3)
+    has_high = any(r in HIGH_RISK for r in unique_reasons)
+    confidence = 1.0 if has_high else min(1.0, len(unique_reasons) * 0.3)
     
     if confidence >= 0.6:
         return {
