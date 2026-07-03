@@ -302,6 +302,18 @@ function formatTime(ts) {
         <Icon name="clipboard" size="12" />
       </span>
       {{ msg.content }}
+      <!-- 用户上传的图片 -->
+      <div v-if="msg.metadata?.images?.length" class="message-images">
+        <a
+          v-for="(img, idx) in msg.metadata.images"
+          :key="idx"
+          :href="img.url"
+          target="_blank"
+          class="message-image-thumb"
+        >
+          <img :src="img.url" :alt="img.image_id" loading="lazy" />
+        </a>
+      </div>
     </div>
     <div v-else>
       <!-- 消息 ID 标识 + 评估状态 -->
@@ -661,6 +673,31 @@ function formatTime(ts) {
   margin-top: 0.35rem;
   padding: 0 0.3rem;
   opacity: 0.8;
+}
+
+/* 用户消息图片 */
+.message-images {
+  display: flex;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+  margin-top: 0.5rem;
+}
+.message-image-thumb {
+  display: block;
+  width: 80px;
+  height: 80px;
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  border: 2px solid rgba(255, 255, 255, 0.3);
+}
+.message-image-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  transition: transform 0.2s;
+}
+.message-image-thumb:hover img {
+  transform: scale(1.05);
 }
 
 .message.user .message-time {

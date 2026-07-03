@@ -314,6 +314,18 @@ export function getAgentRegressionResult(agentId, agentType = 'conversation') {
   return api.get(`/agent/${agentId}/regression`, { params: { agent_type: agentType } })
 }
 
+// ── 对话图片上传 API ──────────────────────────────────────
+
+/** 上传对话图片 */
+export function uploadChatImage(file) {
+  const form = new FormData()
+  form.append('file', file)
+  return api.post('/chat-images/upload', form, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+    timeout: 60000,
+  })
+}
+
 // ── 对话 API（/api/conversations/*）─────────────────────────────────────
 
 /** 对话列表 */
@@ -337,8 +349,8 @@ export function getMessages(convId, limit = 50) {
 }
 
 /** 发送消息 */
-export function sendMessage(convId, content) {
-  return api.post(`/conversations/${convId}/messages`, { content }, { timeout: 120000 })
+export function sendMessage(convId, content, images = []) {
+  return api.post(`/conversations/${convId}/messages`, { content, images }, { timeout: 120000 })
 }
 
 /**
@@ -346,16 +358,18 @@ export function sendMessage(convId, content) {
  * @param {number} convId - 对话 ID
  * @param {string} content - 消息内容
  * @param {function} onEvent - 事件回调 (event: {type, data}) => void
+ * @param {Array} targetSpecialists - @mention 指定的 agent_key 列表
+ * @param {Array} images - 上传的图片信息数组
  * @returns {AbortController} 用于取消请求
  */
-export function sendMessageStream(convId, content, onEvent, targetSpecialists = []) {
+export function sendMessageStream(convId, content, onEvent, targetSpecialists = [], images = []) {
   const controller = new AbortController()
   const baseURL = api.defaults.baseURL || ''
 
   fetch(`${baseURL}/conversations/${convId}/messages/stream`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ content, target_specialists: targetSpecialists }),
+    body: JSON.stringify({ content, target_specialists: targetSpecialists, images }),
     signal: controller.signal,
   }).then(async response => {
     // 检查 HTTP 错误状态（如 409 重复请求）

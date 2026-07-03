@@ -39,6 +39,7 @@ const agents = ref([])
 const messagesContainer = ref(null)
 const showMobileSidebar = ref(false)
 const isRecovering = ref(false)
+const pendingImages = ref([])
 
 const currentStream = computed(() => getStreamState(selectedConv.value?.id))
 const sending = computed(() => currentStream.value?.sending || false)
@@ -488,6 +489,10 @@ function extractMentions(text) {
   return { targetSpecialists, cleanText }
 }
 
+function handleImagesReady(images) {
+  pendingImages.value = images
+}
+
 async function handleSend() {
   const rawText = inputText.value.trim()
   if (!rawText || !selectedConv.value || sending.value) return
@@ -496,11 +501,18 @@ async function handleSend() {
   const text = cleanText || rawText
 
   inputText.value = ''
-  messages.value.push({ role: 'user', content: rawText, created_at: new Date().toISOString() })
+  // 用户消息附带 images metadata
+  const userMsg = { role: 'user', content: rawText, created_at: new Date().toISOString() }
+  if (pendingImages.value.length > 0) {
+    userMsg.metadata = { images: pendingImages.value }
+  }
+  messages.value.push(userMsg)
   await nextTick()
   scrollToBottom()
 
   const convId = selectedConv.value.id
+  const imagesToSend = [...pendingImages.value]
+  pendingImages.value = []
   const controller = sendMessageStream(convId, text, (event) => {
     routeStreamEvent(convId, event, {
       onAnswerChunk: (cid, data, state) => {
@@ -581,7 +593,7 @@ async function handleSend() {
         }
       },
     })
-  }, targetSpecialists)
+  }, targetSpecialists, imagesToSend)
   startStream(convId, controller)
   addTask(convId, null, selectedConv.value?.title || `对话 #${convId}`)
 }
@@ -1268,6 +1280,7 @@ function stopPollingProgress() {
           :agents="agents"
           @send="handleSend"
           @cancel="handleCancelStream"
+          @images-ready="handleImagesReady"
         />
       </template>
 

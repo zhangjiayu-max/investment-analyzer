@@ -1,6 +1,7 @@
 <script setup>
 import { ref, computed, watch, nextTick } from 'vue'
 import Icon from '../ui/Icon.vue'
+import { uploadChatImage } from '../../api'
 
 const props = defineProps({
   sending: { type: Boolean, default: false },
@@ -37,7 +38,58 @@ function insertCommand(cmd) {
   })
 }
 
-const emit = defineEmits(['send', 'cancel', 'update:inputText'])
+const emit = defineEmits(['send', 'cancel', 'update:inputText', 'images-ready'])
+
+// ── 图片上传状态 ──
+const attachedImages = ref([])
+const uploadingImage = ref(false)
+const fileInputRef = ref(null)
+
+function triggerFileInput() {
+  if (fileInputRef.value) {
+    fileInputRef.value.click()
+  }
+}
+
+async function handleFileSelect(e) {
+  const files = Array.from(e.target.files || [])
+  if (!files.length) return
+  await uploadImages(files)
+  // 清空 input 以便重复选择同一文件
+  e.target.value = ''
+}
+
+async function uploadImages(files) {
+  uploadingImage.value = true
+  for (const file of files) {
+    try {
+      const { data } = await uploadChatImage(file)
+      attachedImages.value.push(data)
+    } catch (err) {
+      console.error('图片上传失败:', err)
+    }
+  }
+  uploadingImage.value = false
+}
+
+function removeImage(index) {
+  attachedImages.value.splice(index, 1)
+}
+
+function handlePaste(e) {
+  const items = e.clipboardData?.items || []
+  const imageFiles = []
+  for (const item of items) {
+    if (item.type.startsWith('image/')) {
+      const file = item.getAsFile()
+      if (file) imageFiles.push(file)
+    }
+  }
+  if (imageFiles.length > 0) {
+    e.preventDefault()
+    uploadImages(imageFiles)
+  }
+}
 
 // ── 复制输入内容 ──
 const copyInputTimer = ref(null)
@@ -186,8 +238,18 @@ function handleKeydown(e) {
   // 原有 Enter 发送逻辑
   if (e.key === 'Enter' && !e.shiftKey) {
     e.preventDefault()
-    emit('send')
+    emitSend()
   }
+}
+
+function emitSend() {
+  // 如果有图片，先触发 images-ready 事件
+  if (attachedImages.value.length > 0) {
+    emit('images-ready', [...attachedImages.value])
+  }
+  emit('send')
+  // 发送后清空图片
+  attachedImages.value = []
 }
 </script>
 
@@ -202,8 +264,41 @@ function handleKeydown(e) {
         <span class="quick-cmd-label">{{ cmd.label }}</span>
       </button>
     </div>
-    <form @submit.prevent="emit('send')" class="chat-form">
+    <!-- 图片缩略图列表 -->
+    <div v-if="attachedImages.length > 0" class="attached-images">
+      <div v-for="(img, idx) in attachedImages" :key="img.image_id" class="attached-image-item">
+        <img :src="img.url" :alt="img.image_id" class="attached-image-thumb" />
+        <button type="button" class="attached-image-remove" @click="removeImage(idx)">×</button>
+      </div>
+    </div>
+    <!-- 上传中提示 -->
+    <div v-if="uploadingImage" class="uploading-hint">
+      <span class="uploading-spinner"></span>
+      <span>图片上传中...</span>
+    </div>
+    <form @submit.prevent="emitSend" class="chat-form">
+      <!-- 隐藏的文件输入 -->
+      <input
+        ref="fileInputRef"
+        type="file"
+        accept="image/*"
+        multiple
+        style="display:none"
+        @change="handleFileSelect"
+      />
       <div class="input-wrapper">
+        <!-- 图片上传按钮 -->
+        <button
+          v-if="!sending"
+          type="button"
+          class="btn-upload-image"
+          @click="triggerFileInput"
+          title="上传图片"
+        >
+          <svg width="18" height="18" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13"/>
+          </svg>
+        </button>
         <textarea
           ref="textareaRef"
           :value="inputText"
@@ -213,6 +308,7 @@ function handleKeydown(e) {
           @keydown="handleKeydown"
           @input="handleInput"
           @blur="() => setTimeout(closeMention, 200)"
+          @paste="handlePaste"
           rows="1"
         ></textarea>
 
@@ -342,12 +438,14 @@ function handleKeydown(e) {
 .input-wrapper {
   flex: 1;
   position: relative;
+  display: flex;
+  align-items: flex-end;
 }
 
 .chat-input {
   width: 100%;
   resize: none;
-  padding: 0.75rem 1rem;
+  padding: 0.75rem 1rem 0.75rem 2.6rem;
   font-size: 0.88rem;
   line-height: 1.6;
   max-height: 120px;
@@ -567,6 +665,85 @@ function handleKeydown(e) {
 @keyframes spin {
   to { transform: rotate(360deg); }
 }
+
+/* ── 图片上传 ── */
+.attached-images {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  margin-bottom: 0.5rem;
+}
+.attached-image-item {
+  position: relative;
+  width: 56px;
+  height: 56px;
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  border: 1px solid var(--color-border);
+}
+.attached-image-thumb {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.attached-image-remove {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  width: 18px;
+  height: 18px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.5);
+  color: white;
+  font-size: 14px;
+  cursor: pointer;
+  padding: 0;
+  line-height: 1;
+}
+.attached-image-remove:hover {
+  background: rgba(0, 0, 0, 0.7);
+}
+.uploading-hint {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin-bottom: 0.5rem;
+  font-size: 0.72rem;
+  color: var(--color-text-muted);
+}
+.uploading-spinner {
+  width: 12px;
+  height: 12px;
+  border: 2px solid var(--color-border);
+  border-top-color: var(--color-primary-500);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+.btn-upload-image {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-bg-input);
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+  flex-shrink: 0;
+  margin-right: 0.4rem;
+}
+.btn-upload-image:hover {
+  border-color: var(--color-primary-400);
+  color: var(--color-primary);
+  background: var(--color-primary-50);
+}
+.dark .btn-upload-image:hover { background: var(--color-primary-bg); }
 
 @media (max-width: 768px) {
   .chat-input-area { padding: 0.6rem 0.75rem; }
