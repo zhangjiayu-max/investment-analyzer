@@ -2364,6 +2364,9 @@ def orchestrate(query: str, history: list, rag_context: str = "", cancel_event: 
                         "validator": validator_result,
                         "route_info": route_result,
                         "cache_stats": expert_cache.stats,
+                        "condition_framework": next((sr.get("condition_framework", []) for sr in specialist_results if sr.get("is_arbitration")), []),
+                        "diverggence_analysis": next((sr.get("diverggence_analysis", "") for sr in specialist_results if sr.get("is_arbitration")), ""),
+                        "key_variables": next((sr.get("key_variables", "") for sr in specialist_results if sr.get("is_arbitration")), ""),
                     }
                     if conversation_id:
                         _schedule_auto_evaluation(conversation_id, message_id, _result)
@@ -2402,6 +2405,9 @@ def orchestrate(query: str, history: list, rag_context: str = "", cancel_event: 
                 "validator": validator_result,
                 "route_info": route_result,
                 "cache_stats": expert_cache.stats,
+                "condition_framework": next((sr.get("condition_framework", []) for sr in specialist_results if sr.get("is_arbitration")), []),
+                "diverggence_analysis": next((sr.get("diverggence_analysis", "") for sr in specialist_results if sr.get("is_arbitration")), ""),
+                "key_variables": next((sr.get("key_variables", "") for sr in specialist_results if sr.get("is_arbitration")), ""),
             }
             if conversation_id:
                 _schedule_auto_evaluation(conversation_id, message_id, _result)
@@ -2676,6 +2682,22 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
         "start_time": start_time,
         "phases": {},
     }
+
+    # 0. Prompt 注入防护检查
+    from agent.input_sanitizer import check_injection, HIGH_CONFIDENCE_REJECT
+    safety = check_injection(query)
+    if safety["blocked"]:
+        logger.warning(f"注入检测拦截: {query[:100]} | 原因: {safety['reason']}")
+        yield {
+            "type": "answer",
+            "content": HIGH_CONFIDENCE_REJECT,
+            "specialist_results": [],
+            "tool_calls": [],
+            "error": "injection_blocked",
+        }
+        return
+    if safety["confidence"] > 0:
+        logger.info(f"注入低置信度告警: {query[:100]} | 模式: {safety['reason']}")
 
     # 0. Token 预算检查
     budget = check_token_budget()
@@ -3148,6 +3170,9 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
                             "analysis": arb_result["analysis"],
                             "duration_ms": arb_result["duration_ms"],
                             "is_arbitration": True,
+                            "condition_framework": arb_result.get("condition_framework", []),
+                            "diverggence_analysis": arb_result.get("diverggence_analysis", ""),
+                            "key_variables": arb_result.get("key_variables", ""),
                         }
 
                     duration_ms = int((time.time() - start_time) * 1000)
@@ -3197,6 +3222,9 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
                         "cross_review": True,
                         "arbitration": arbitration_done,
                         "conflicts": conflicts,
+                        "condition_framework": next((sr.get("condition_framework", []) for sr in specialist_results if sr.get("is_arbitration")), []),
+                        "diverggence_analysis": next((sr.get("diverggence_analysis", "") for sr in specialist_results if sr.get("is_arbitration")), ""),
+                        "key_variables": next((sr.get("key_variables", "") for sr in specialist_results if sr.get("is_arbitration")), ""),
                     }
                     return
 
@@ -3226,6 +3254,9 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
                     "analysis": arb_result["analysis"],
                     "duration_ms": arb_result["duration_ms"],
                     "is_arbitration": True,
+                    "condition_framework": arb_result.get("condition_framework", []),
+                    "diverggence_analysis": arb_result.get("diverggence_analysis", ""),
+                    "key_variables": arb_result.get("key_variables", ""),
                 }
 
             duration_ms = int((time.time() - start_time) * 1000)
@@ -3273,6 +3304,9 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
                 "duration_ms": duration_ms,
                 "arbitration": arbitration_done,
                 "conflicts": conflicts,
+                "condition_framework": next((sr.get("condition_framework", []) for sr in specialist_results if sr.get("is_arbitration")), []),
+                "diverggence_analysis": next((sr.get("diverggence_analysis", "") for sr in specialist_results if sr.get("is_arbitration")), ""),
+                "key_variables": next((sr.get("key_variables", "") for sr in specialist_results if sr.get("is_arbitration")), ""),
             }
             return
 

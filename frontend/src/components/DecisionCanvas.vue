@@ -36,6 +36,41 @@ const actionable = computed(() => data.value?.actionable || [])
 const learning = computed(() => data.value?.learning)
 const summary = computed(() => data.value?.summary)
 
+// ── 条件判断框架 (从最近一次仲裁结果中提取) ──
+const conditionFramework = computed(() => {
+  // 从 conflicts 中提取 condition_framework 数据
+  // 后端会在 specialist_results 的仲裁结果中返回 condition_framework
+  const cf = data.value?.condition_framework
+  if (Array.isArray(cf) && cf.length > 0) return cf
+  // 也可能嵌套在 specialist_results 中
+  const specialists = data.value?.specialist_results || []
+  for (const sr of specialists) {
+    if (sr.is_arbitration && Array.isArray(sr.condition_framework) && sr.condition_framework.length > 0) {
+      return sr.condition_framework
+    }
+  }
+  return []
+})
+const diverggenceAnalysis = computed(() => {
+  const da = data.value?.diverggence_analysis
+  if (da) return da
+  const specialists = data.value?.specialist_results || []
+  for (const sr of specialists) {
+    if (sr.is_arbitration && sr.diverggence_analysis) return sr.diverggence_analysis
+  }
+  return ''
+})
+const keyVariables = computed(() => {
+  const kv = data.value?.key_variables
+  if (kv) return kv
+  const specialists = data.value?.specialist_results || []
+  for (const sr of specialists) {
+    if (sr.is_arbitration && sr.key_variables) return sr.key_variables
+  }
+  return ''
+})
+const hasConditionFramework = computed(() => conditionFramework.value.length > 0)
+
 const hasConsensus = computed(() => consensus.value.length > 0)
 const hasConflicts = computed(() => conflicts.value.length > 0)
 const hasActionable = computed(() => actionable.value.length > 0)
@@ -52,6 +87,14 @@ function priorityLabel(index, item) {
 
 function confidencePct(c) {
   return `${Math.round((c || 0) * 100)}%`
+}
+
+function confidenceClass(conf) {
+  // conf is a string like "75%" or a number
+  const num = typeof conf === 'string' ? parseInt(conf) : conf
+  if (num >= 80) return 'conf-high'
+  if (num >= 60) return 'conf-mid'
+  return 'conf-low'
 }
 </script>
 
@@ -176,6 +219,52 @@ function confidencePct(c) {
                 <span class="path path-b">👉 {{ item.conditional_advice.path_b }}</span>
               </div>
             </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ══════════════════════════ 条件判断框架区 — 橙色 ══════════════════════════ -->
+      <div v-if="hasConditionFramework" class="canvas-zone zone-condition card">
+        <div class="zone-header">
+          <span class="zone-icon">⚠️</span>
+          <h3 class="zone-title">条件判断框架</h3>
+          <span class="zone-count">{{ conditionFramework.length }} 种情景</span>
+        </div>
+        <div class="zone-body">
+          <!-- 分歧根源 -->
+          <div v-if="diverggenceAnalysis" class="condition-divergence">
+            <div class="divergence-label">🔀 分歧根源</div>
+            <p class="divergence-text">{{ diverggenceAnalysis }}</p>
+          </div>
+
+          <!-- 条件判断表格 -->
+          <div class="condition-table-wrap">
+            <table class="condition-table">
+              <thead>
+                <tr>
+                  <th>你的判断</th>
+                  <th>对应行动</th>
+                  <th class="th-confidence">置信度</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="(row, idx) in conditionFramework" :key="'cf-' + idx">
+                  <td class="td-condition">{{ row.condition }}</td>
+                  <td class="td-action">{{ row.action }}</td>
+                  <td class="td-confidence">
+                    <span class="confidence-badge" :class="confidenceClass(row.confidence)">
+                      {{ row.confidence }}
+                    </span>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <!-- 核心权衡 -->
+          <div v-if="keyVariables" class="condition-tradeoff">
+            <div class="tradeoff-label">⚖️ 核心权衡</div>
+            <p class="tradeoff-text">最终判断取决于你更看重哪个变量：{{ keyVariables }}</p>
           </div>
         </div>
       </div>
@@ -352,6 +441,119 @@ function confidencePct(c) {
   background: rgba(37, 99, 235, 0.06);
 }
 .zone-actionable .zone-title { color: #1e40af; }
+
+/* ── 条件判断框架区（橙色） ── */
+.zone-condition {
+  border-left: 4px solid #ea580c;
+  background: linear-gradient(135deg, #fff7ed 0%, #ffffff 100%);
+}
+.zone-condition .zone-header {
+  background: rgba(234, 88, 12, 0.06);
+}
+.zone-condition .zone-title { color: #9a3412; }
+
+.condition-divergence {
+  padding: 0.75rem 1rem;
+  background: #fff7ed;
+  border: 1px solid #fed7aa;
+  border-radius: var(--radius-sm);
+}
+.divergence-label {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: #9a3412;
+  margin-bottom: 0.35rem;
+}
+.divergence-text {
+  margin: 0;
+  font-size: 0.85rem;
+  line-height: 1.6;
+  color: var(--color-text-primary);
+}
+
+.condition-table-wrap {
+  overflow-x: auto;
+  border: 1px solid var(--color-border-light);
+  border-radius: var(--radius-sm);
+}
+.condition-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.85rem;
+}
+.condition-table th {
+  padding: 0.6rem 0.85rem;
+  text-align: left;
+  font-weight: 600;
+  font-size: 0.78rem;
+  color: var(--color-text-muted);
+  background: var(--color-bg-secondary);
+  border-bottom: 1px solid var(--color-border-light);
+}
+.condition-table th.th-confidence {
+  text-align: center;
+  width: 100px;
+}
+.condition-table td {
+  padding: 0.6rem 0.85rem;
+  border-bottom: 1px solid var(--color-border-light);
+  color: var(--color-text-primary);
+  line-height: 1.5;
+}
+.condition-table tr:last-child td {
+  border-bottom: none;
+}
+.td-condition {
+  font-weight: 500;
+}
+.td-action {
+  color: var(--color-text-secondary);
+}
+.td-confidence {
+  text-align: center;
+}
+.confidence-badge {
+  display: inline-block;
+  font-size: 0.75rem;
+  padding: 2px 10px;
+  border-radius: 10px;
+  font-weight: 600;
+}
+.conf-high {
+  background: #ecfdf5;
+  color: #047857;
+  border: 1px solid #a7f3d0;
+}
+.conf-mid {
+  background: #fffbeb;
+  color: #92400e;
+  border: 1px solid #fde68a;
+}
+.conf-low {
+  background: var(--color-bg-secondary);
+  color: var(--color-text-muted);
+  border: 1px solid var(--color-border-light);
+}
+
+.condition-tradeoff {
+  padding: 0.75rem 1rem;
+  background: #fffbeb;
+  border: 1px solid #fde68a;
+  border-radius: var(--radius-sm);
+}
+.tradeoff-label {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: #92400e;
+  margin-bottom: 0.35rem;
+}
+.tradeoff-text {
+  margin: 0;
+  font-size: 0.85rem;
+  line-height: 1.6;
+  color: var(--color-text-primary);
+  font-style: italic;
+}
 
 /* ── 学习区（紫色） ── */
 .zone-learning {
@@ -629,6 +831,11 @@ function confidencePct(c) {
   }
   .zone-body {
     padding: 0.5rem 1rem;
+  }
+  .condition-table th,
+  .condition-table td {
+    padding: 0.4rem 0.5rem;
+    font-size: 0.78rem;
   }
 }
 </style>
