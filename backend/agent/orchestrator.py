@@ -2049,6 +2049,91 @@ def _execute_specialist(tool_name: str, query: str, cancel_event: threading.Even
         return json.dumps({"error": f"专家执行失败: {e}"}, ensure_ascii=False)
 
 
+# ── 升级二：推理过程可视化（零 LLM 成本，仅格式化已有数据）──
+
+
+def _extract_conclusion(text: str) -> str:
+    """从分析文本中提取结论（关键词后的前 200 字）。"""
+    if not text:
+        return ""
+    for kw in ["最终建议", "结论", "综合建议", "操作建议", "建议"]:
+        idx = text.find(kw)
+        if idx != -1:
+            return text[idx:idx + 200].strip()
+    return text[:200].strip()
+
+
+def _extract_key_points(text: str) -> list[str]:
+    """从分析文本中提取关键点（以编号/符号开头的行）。"""
+    if not text:
+        return []
+    points = []
+    for line in text.split('\n'):
+        stripped = line.strip()
+        if stripped.startswith(("1.", "2.", "3.", "4.", "5.", "→", "▶", "●", "•", "- ", "•")):
+            if 10 < len(stripped) < 200:
+                points.append(stripped)
+    return points[:5]
+
+
+def build_reasoning_trail(
+    query: str,
+    query_rewritten: str,
+    complexity: str,
+    specialist_results: list[dict],
+    arbitration_result: dict | None,
+    rag_context: str,
+    duration_ms: int = 0,
+) -> dict:
+    """构建推理过程追踪数据（不新增 LLM 调用，仅结构化已有数据）。"""
+    trail = {
+        "query": query[:200],
+        "query_rewritten": query_rewritten if query_rewritten and query_rewritten != query else None,
+        "complexity": complexity,
+        "rag": {
+            "used": bool(rag_context),
+            "context_length": len(rag_context or ""),
+        },
+        "specialists": [],
+        "arbitration": None,
+        "timeline": [],
+        "total_duration_ms": duration_ms,
+    }
+
+    # 专家分析步骤
+    for sr in specialist_results or []:
+        if sr.get("is_cross_review"):
+            continue
+        analysis = sr.get("analysis", "")
+        step = {
+            "agent": sr.get("agent", "unknown"),
+            "agent_key": sr.get("agent_key", ""),
+            "icon": sr.get("icon", "🤖"),
+            "duration_ms": sr.get("duration_ms", 0),
+            "conclusion": _extract_conclusion(analysis),
+            "key_points": _extract_key_points(analysis),
+            "is_arbitration": bool(sr.get("is_arbitration")),
+        }
+        trail["specialists"].append(step)
+        trail["timeline"].append({
+            "type": "arbitration" if step["is_arbitration"] else "specialist",
+            "agent": step["agent"],
+            "icon": step["icon"],
+            "duration_ms": step["duration_ms"],
+            "conclusion": step["conclusion"][:120] if step["conclusion"] else "",
+        })
+
+    # 仲裁步骤（单独标记）
+    if arbitration_result:
+        trail["arbitration"] = {
+            "duration_ms": arbitration_result.get("duration_ms", 0),
+            "conclusion": _extract_conclusion(arbitration_result.get("analysis", "")),
+            "has_condition_framework": bool(arbitration_result.get("condition_framework")),
+        }
+
+    return trail
+
+
 def orchestrate(query: str, history: list, rag_context: str = "", cancel_event: threading.Event | None = None, target_specialists: list[str] = None, conversation_id: int = 0, message_id: int = 0, trace_id: str = "") -> dict:
     """
     Orchestrator 主循环。
@@ -2410,9 +2495,11 @@ def orchestrate(query: str, history: list, rag_context: str = "", cancel_event: 
                         "condition_framework": next((sr.get("condition_framework", []) for sr in specialist_results if sr.get("is_arbitration")), []),
                         "diverggence_analysis": next((sr.get("diverggence_analysis", "") for sr in specialist_results if sr.get("is_arbitration")), ""),
                         "key_variables": next((sr.get("key_variables", "") for sr in specialist_results if sr.get("is_arbitration")), ""),
+                        "reasoning_trail": build_reasoning_trail(query, refined_query, complexity, specialist_results, next((sr for sr in specialist_results if sr.get("is_arbitration")), None), prebuilt_context, duration_ms),
                     }
                     if conversation_id:
                         _schedule_auto_evaluation(conversation_id, message_id, _result)
+                    _schedule_tool_eval(query, specialist_results)
                     return _result
             else:
                 if len(specialist_results) >= 2:
@@ -2451,9 +2538,11 @@ def orchestrate(query: str, history: list, rag_context: str = "", cancel_event: 
                 "condition_framework": next((sr.get("condition_framework", []) for sr in specialist_results if sr.get("is_arbitration")), []),
                 "diverggence_analysis": next((sr.get("diverggence_analysis", "") for sr in specialist_results if sr.get("is_arbitration")), ""),
                 "key_variables": next((sr.get("key_variables", "") for sr in specialist_results if sr.get("is_arbitration")), ""),
+                "reasoning_trail": build_reasoning_trail(query, refined_query, complexity, specialist_results, next((sr for sr in specialist_results if sr.get("is_arbitration")), None), prebuilt_context, duration_ms),
             }
             if conversation_id:
                 _schedule_auto_evaluation(conversation_id, message_id, _result)
+            _schedule_tool_eval(query, specialist_results)
             return _result
 
         # 有工具调用 → 执行专家
@@ -3268,6 +3357,7 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
                         "condition_framework": next((sr.get("condition_framework", []) for sr in specialist_results if sr.get("is_arbitration")), []),
                         "diverggence_analysis": next((sr.get("diverggence_analysis", "") for sr in specialist_results if sr.get("is_arbitration")), ""),
                         "key_variables": next((sr.get("key_variables", "") for sr in specialist_results if sr.get("is_arbitration")), ""),
+                        "reasoning_trail": build_reasoning_trail(query, refined_query, complexity, specialist_results, next((sr for sr in specialist_results if sr.get("is_arbitration")), None), prebuilt_context, duration_ms),
                     }
                     return
 
@@ -3350,6 +3440,7 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
                 "condition_framework": next((sr.get("condition_framework", []) for sr in specialist_results if sr.get("is_arbitration")), []),
                 "diverggence_analysis": next((sr.get("diverggence_analysis", "") for sr in specialist_results if sr.get("is_arbitration")), ""),
                 "key_variables": next((sr.get("key_variables", "") for sr in specialist_results if sr.get("is_arbitration")), ""),
+                "reasoning_trail": build_reasoning_trail(query, refined_query, complexity, specialist_results, next((sr for sr in specialist_results if sr.get("is_arbitration")), None), prebuilt_context, duration_ms),
             }
             return
 
@@ -3819,6 +3910,15 @@ def _schedule_auto_evaluation(conv_id: int, msg_id: int, result: dict):
         logger.debug("对话结束自动评测已关闭（llm_cost.auto_conversation_eval=false）")
         return
     _eval_executor.submit(_run_auto_evaluation_sync, conv_id, msg_id, result)
+
+
+def _schedule_tool_eval(query: str, specialist_results: list[dict]):
+    """异步调度工具调用质量评估（升级三，不阻塞主流程）。"""
+    try:
+        from agent.tool_tracker import evaluate_tool_calls_async
+        _eval_executor.submit(evaluate_tool_calls_async, query, specialist_results)
+    except Exception as e:
+        logger.debug(f"工具调用评估调度失败（不影响主流程）: {e}")
 
 
 def _run_auto_evaluation_sync(conv_id: int, msg_id: int, result: dict):

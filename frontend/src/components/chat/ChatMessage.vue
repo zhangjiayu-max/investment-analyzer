@@ -423,6 +423,26 @@ function formatTime(ts) {
                 <span class="timeline-time">{{ formatDuration(msg.phase_timings.orchestrator_ms) }}</span>
               </div>
             </div>
+            <!-- 推理链（升级二：推理过程可视化） -->
+            <div v-if="msg.reasoning_trail" class="reasoning-trail">
+              <div class="trail-header">🧠 推理过程 {{ msg.reasoning_trail.timeline?.length || 0 }} 步</div>
+              <div v-if="msg.reasoning_trail.query_rewritten" class="trail-rewrite">
+                <span class="trail-label">查询改写：</span>
+                <span class="trail-rewrite-text">{{ msg.reasoning_trail.query_rewritten }}</span>
+              </div>
+              <div v-if="msg.reasoning_trail.rag?.used" class="trail-rag">
+                <span class="trail-label">知识检索：</span>
+                <span>{{ msg.reasoning_trail.rag.context_length }} 字符</span>
+              </div>
+              <div class="trail-timeline">
+                <div v-for="(step, i) in msg.reasoning_trail.timeline" :key="i" class="trail-step" :class="step.type">
+                  <span class="trail-step-icon">{{ step.icon || (step.type === 'arbitration' ? '⚖️' : '🤖') }}</span>
+                  <span class="trail-step-name">{{ step.agent }}</span>
+                  <span v-if="step.duration_ms" class="trail-step-time">{{ (step.duration_ms / 1000).toFixed(1) }}s</span>
+                  <div v-if="step.conclusion" class="trail-step-conclusion">{{ step.conclusion }}</div>
+                </div>
+              </div>
+            </div>
             <!-- 专家列表 -->
             <div v-if="msg.specialist_results?.length" class="execution-agents">
               <span class="execution-agents-label">参与专家：</span>
@@ -1037,6 +1057,21 @@ function formatTime(ts) {
 .execution-agent-tag { display: inline-flex; align-items: center; gap: 0.35rem; padding: 0.2rem 0.5rem; background: var(--color-bg-secondary); border-radius: 4px; font-size: 0.75rem; }
 .execution-agent-time { color: var(--color-text-muted); font-size: 0.72rem; }
 .execution-tools { font-size: 0.75rem; color: var(--color-text-muted); }
+
+/* 推理链样式（升级二） */
+.reasoning-trail { margin-bottom: 0.75rem; padding: 0.6rem; background: var(--color-bg-secondary); border-radius: 6px; border: 1px solid var(--color-border-light); }
+.trail-header { font-size: 0.78rem; font-weight: 600; color: var(--color-text-primary); margin-bottom: 0.4rem; }
+.trail-rewrite, .trail-rag { font-size: 0.72rem; color: var(--color-text-secondary); margin-bottom: 0.25rem; }
+.trail-label { color: var(--color-text-muted); }
+.trail-rewrite-text { color: var(--color-text-primary); }
+.trail-timeline { display: flex; flex-direction: column; gap: 0.35rem; margin-top: 0.4rem; }
+.trail-step { display: flex; align-items: center; gap: 0.35rem; font-size: 0.74rem; flex-wrap: wrap; }
+.trail-step.arbitration { background: rgba(99, 102, 241, 0.08); padding: 0.2rem 0.4rem; border-radius: 4px; }
+.trail-step-icon { font-size: 0.85rem; }
+.trail-step-name { font-weight: 500; color: var(--color-text-primary); }
+.trail-step-time { color: var(--color-text-muted); font-size: 0.7rem; }
+.trail-step-conclusion { width: 100%; color: var(--color-text-secondary); font-size: 0.72rem; line-height: 1.4; margin-top: 0.15rem; padding-left: 1.2rem; }
+
 
 .btn-trace-detail {
   display: inline-flex;

@@ -1120,3 +1120,92 @@ def get_random_active_cases(count: int = 5) -> list[dict]:
     ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
+
+
+# ── 升级三：工具调用质量评估 ──────────────────────────────
+
+
+def _ensure_tool_eval_tables():
+    """建表（幂等）。"""
+    conn = _get_conn()
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS tool_eval_metrics (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            query TEXT,
+            total_calls INTEGER DEFAULT 0,
+            unique_tools INTEGER DEFAULT 0,
+            unique_agents INTEGER DEFAULT 0,
+            redundant_calls INTEGER DEFAULT 0,
+            empty_result_calls INTEGER DEFAULT 0,
+            efficiency_score REAL DEFAULT 1.0,
+            tool_distribution TEXT,
+            created_at TEXT DEFAULT (datetime('now','localtime'))
+        );
+
+        CREATE TABLE IF NOT EXISTS tool_bad_cases (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            type TEXT,
+            query TEXT,
+            metrics TEXT,
+            created_at TEXT DEFAULT (datetime('now','localtime'))
+        );
+    """)
+    conn.commit()
+    conn.close()
+
+
+def save_tool_eval_metrics(metrics: dict) -> int:
+    """保存工具调用评估指标，返回 id。"""
+    import json as _json
+    _ensure_tool_eval_tables()
+    conn = _get_conn()
+    cur = conn.execute(
+        """INSERT INTO tool_eval_metrics
+           (query, total_calls, unique_tools, unique_agents, redundant_calls,
+            empty_result_calls, efficiency_score, tool_distribution)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+        (
+            (metrics.get("query") or "")[:200],
+            metrics.get("total_calls", 0),
+            metrics.get("unique_tools", 0),
+            metrics.get("unique_agents", 0),
+            metrics.get("redundant_calls", 0),
+            metrics.get("empty_result_calls", 0),
+            metrics.get("efficiency_score", 1.0),
+            _json.dumps(metrics.get("tool_distribution", {}), ensure_ascii=False),
+        ),
+    )
+    conn.commit()
+    rid = cur.lastrowid
+    conn.close()
+    return rid
+
+
+def add_bad_case(case: dict) -> int:
+    """记录 bad case（工具效率低/其他问题）。"""
+    import json as _json
+    _ensure_tool_eval_tables()
+    conn = _get_conn()
+    cur = conn.execute(
+        "INSERT INTO tool_bad_cases (type, query, metrics) VALUES (?, ?, ?)",
+        (
+            case.get("type", "unknown"),
+            (case.get("query") or "")[:200],
+            _json.dumps(case.get("metrics", {}), ensure_ascii=False),
+        ),
+    )
+    conn.commit()
+    rid = cur.lastrowid
+    conn.close()
+    return rid
+
+
+def list_tool_eval_metrics(limit: int = 50) -> list[dict]:
+    """查询最近的工具调用评估记录。"""
+    _ensure_tool_eval_tables()
+    conn = _get_conn()
+    rows = conn.execute(
+        "SELECT * FROM tool_eval_metrics ORDER BY created_at DESC LIMIT ?", (limit,)
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]

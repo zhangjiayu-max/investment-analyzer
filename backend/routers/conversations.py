@@ -633,6 +633,7 @@ async def send_message_api(conv_id: int, req: SendMessageRequest):
             for s in specialist_results
         ],
         "tool_calls": llm_result.get("tool_calls", []),
+        "reasoning_trail": llm_result.get("reasoning_trail"),
     }
     metadata = json.dumps(metadata_dict, ensure_ascii=False) if specialist_results else None
     msg_id = create_message(conv_id, "assistant", answer, metadata=metadata)
@@ -795,6 +796,26 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
         phase_timings["clarification_rag_ms"] = int((time.time() - t0) * 1000)
         complexity = clarification["complexity"]
         rag_context = rag_result["context"]
+
+        # 升级五：多跳检索增强（检测到多跳意图时，追加多跳上下文）
+        try:
+            from agent.multi_hop_rag import multi_hop_search
+            from db.portfolio import list_holdings
+            from rag import search_knowledge
+
+            def _mh_rag_fn(q, limit):
+                return search_knowledge(q, limit=limit)
+
+            def _mh_portfolio_fn():
+                return list_holdings()
+
+            mh = await asyncio.to_thread(multi_hop_search, req.content, _mh_rag_fn, _mh_portfolio_fn)
+            if mh and mh.get("context"):
+                rag_context = (rag_context + "\n\n" + mh["context"]) if rag_context else mh["context"]
+                logger.info(f"[multi_hop] 增强上下文 {len(mh['hops'])} 跳，模板={mh['template']}")
+        except Exception as _mh_e:
+            logger.debug(f"多跳检索跳过: {_mh_e}")
+
         scenario_type = clarification.get("scenario_type", "general_analysis")
         unified_context = _build_unified_context_safe(
             conv_id=conv_id,
@@ -983,6 +1004,7 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
                         "complexity": complexity,
                         "execution_status": "completed",
                         "refined_query": clarification.get("refined_query", req.content),
+                        "reasoning_trail": result.get("reasoning_trail"),
                     }
                     metadata = json.dumps(metadata_dict, ensure_ascii=False)
                     msg_id = create_message(conv_id, "assistant", answer, metadata=metadata)

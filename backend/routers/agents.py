@@ -217,3 +217,51 @@ async def rollback_analysis_agent_prompt_api(agent_id: int, version_id: int):
     save_prompt_version(agent_id, 'analysis', current['system_prompt'])
     update_analysis_agent(agent_id, system_prompt=version['system_prompt'])
     return {"ok": True, "system_prompt": version['system_prompt']}
+
+
+# ── 升级六：ReAct 循环推理 ──────────────────────────────
+
+@router.post("/api/agents/react")
+async def react_reasoning_api(body: dict):
+    """
+    ReAct 循环推理接口（思考→行动→观察→再思考）。
+
+    用于复杂多步问题的深度推理，带死循环检测。
+
+    Body: {"query": str, "max_iterations"?: int}
+    """
+    from agent.react_loop import run_react_loop, MAX_ITERATIONS
+    from llm_service import call_llm_async
+    from tools import execute_tool
+
+    query = (body.get("query") or "").strip()
+    if not query:
+        raise HTTPException(400, "query 不能为空")
+
+    max_iter = body.get("max_iterations") or MAX_ITERATIONS
+    trace_id = f"react-{id(query) & 0xffff:x}"
+
+    def _llm_call(messages):
+        # 同步包装：react_loop 为同步设计，这里用 asyncio 跑
+        import asyncio as _aio
+        from llm_service import MODEL
+        try:
+            loop = _aio.get_event_loop()
+        except RuntimeError:
+            loop = _aio.new_event_loop()
+        resp = loop.run_until_complete(
+            call_llm_async(caller="react_loop", model=MODEL, messages=messages)
+        )
+        return resp.choices[0].message.content or ""
+
+    def _tool_call(name, arguments, tid):
+        return execute_tool(name, arguments or {}, trace_id=tid)
+
+    result = run_react_loop(
+        query=query,
+        llm_call_fn=_llm_call,
+        execute_tool_fn=_tool_call,
+        max_iterations=max_iter,
+        trace_id=trace_id,
+    )
+    return result

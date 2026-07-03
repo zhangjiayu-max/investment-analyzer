@@ -270,6 +270,7 @@ function parseMessageMeta(msg) {
     msg.complexity = msg.metadata.complexity
     msg.phase_timings = msg.metadata.phase_timings
     msg.error_message = msg.metadata.error_message
+    msg.reasoning_trail = msg.metadata.reasoning_trail
     if (msg.phase_timings?.total_ms && !msg.duration_ms) {
       msg.duration_ms = msg.phase_timings.total_ms
     }
