@@ -623,6 +623,86 @@ TOOLS = [
 # ── Tool 执行器 ──────────────────────────────────────
 
 
+# 缺口 16：工具参数校验 — 构建 name → schema 索引
+_TOOL_SCHEMAS: dict[str, dict] = {
+    t["function"]["name"]: t["function"].get("parameters", {})
+    for t in TOOLS
+    if t.get("type") == "function" and t.get("function", {}).get("name")
+}
+
+
+def _validate_tool_arguments(name: str, arguments: dict) -> tuple[bool, str, dict]:
+    """
+    缺口 16：校验工具参数（required 检查 + 类型修正 + 空值兜底）。
+
+    返回 (ok, error_msg, fixed_arguments)。
+    - ok=False 时 arguments 仍返回（带默认值填充），调用方可选择是否继续
+    - 自动修正：缺失字符串参数填空串、缺失数值参数填 0、缺失 bool 填 False
+    """
+    if not isinstance(arguments, dict):
+        arguments = {}
+    schema = _TOOL_SCHEMAS.get(name)
+    if not schema:
+        # 无 schema 的工具不校验
+        return True, "", arguments
+
+    properties = schema.get("properties", {}) or {}
+    required = schema.get("required", []) or []
+    fixed = dict(arguments)
+    errors: list[str] = []
+
+    # 1. required 参数缺失检测 + 类型修正
+    for prop_name, prop_schema in properties.items():
+        expected_type = prop_schema.get("type", "string")
+        if prop_name not in fixed or fixed[prop_name] is None:
+            if prop_name in required:
+                # required 缺失：按类型填默认值并标记（宽松策略，让工具自行处理）
+                if expected_type == "string":
+                    fixed[prop_name] = ""
+                elif expected_type in ("number", "integer"):
+                    fixed[prop_name] = 0
+                elif expected_type == "boolean":
+                    fixed[prop_name] = False
+                elif expected_type == "array":
+                    fixed[prop_name] = []
+                elif expected_type == "object":
+                    fixed[prop_name] = {}
+                else:
+                    fixed[prop_name] = ""
+                errors.append(f"缺少必填参数: {prop_name}(已填默认值)")
+            # 非必填缺失：跳过
+            continue
+
+        # 2. 类型修正（宽松：尽量 coerce 而非拒绝）
+        val = fixed[prop_name]
+        try:
+            if expected_type == "string" and not isinstance(val, str):
+                fixed[prop_name] = str(val)
+            elif expected_type == "integer" and not isinstance(val, int):
+                fixed[prop_name] = int(float(val)) if val != "" else 0
+            elif expected_type == "number" and not isinstance(val, (int, float)):
+                fixed[prop_name] = float(val) if val != "" else 0.0
+            elif expected_type == "boolean" and not isinstance(val, bool):
+                fixed[prop_name] = bool(val)
+            elif expected_type == "array" and not isinstance(val, list):
+                fixed[prop_name] = [val] if val else []
+            elif expected_type == "object" and not isinstance(val, dict):
+                # 无法 coerce，保留原值
+                pass
+        except (ValueError, TypeError):
+            errors.append(f"参数 {prop_name} 类型转换失败(期望{expected_type})")
+
+    # 3. 空字符串 required 参数 → 标记（工具可自行决定是否报错）
+    for prop_name in required:
+        v = fixed.get(prop_name)
+        if isinstance(v, str) and v.strip() == "":
+            # 不强制 error（某些工具如 search_knowledge 允许空 query 时返回提示）
+            pass
+
+    ok = len(errors) == 0
+    return ok, "; ".join(errors) if errors else "", fixed
+
+
 # 特殊工具超时覆盖（Playwright 抓取较慢）
 _TOOL_TIMEOUT_OVERRIDES = {
     "fetch_article": 60,  # Playwright 渲染微信文章需要更长时间
@@ -648,6 +728,14 @@ def execute_tool(name: str, arguments: dict, trace_id: str = "",
 
     t0 = _time.time()
     error_category = "none"
+
+    # 缺口 16：工具参数校验（required 检查 + 类型修正 + 空值兜底）
+    try:
+        _ok, _err, arguments = _validate_tool_arguments(name, arguments or {})
+        if _err:
+            logger.warning(f"工具 {name} 参数校验: {_err}")
+    except Exception as _ve:
+        logger.debug(f"工具 {name} 参数校验异常: {_ve}")
 
     try:
         result = _execute_tool_impl(name, arguments)

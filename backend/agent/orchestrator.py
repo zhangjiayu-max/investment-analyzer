@@ -396,6 +396,14 @@ def _execute_specialist_cached(tool_name: str, query: str,
 
     # 从 tool_name 提取 agent_key(去掉 consult_ 前缀)
     agent_key = tool_name.replace("consult_", "") if tool_name.startswith("consult_") else tool_name
+
+    # 缺口 4：上下文隔离 — 按 agent_key 过滤上下文（白名单+优先级+预算填充）
+    try:
+        from conversation_context import filter_context_for_agent
+        prebuilt_context = filter_context_for_agent(prebuilt_context, agent_key)
+    except Exception as _e:
+        logger.debug(f"上下文过滤跳过: {_e}")
+
     context_hash = hashlib.md5(prebuilt_context.encode("utf-8")).hexdigest()[:16] if prebuilt_context else ""
 
     # 应用配置覆盖默认缓存参数（线程安全）
@@ -2045,8 +2053,25 @@ def _execute_specialist(tool_name: str, query: str, cancel_event: threading.Even
     except CancelledError:
         raise
     except Exception as e:
+        # 缺口 11：部分失败处理 — 返回 status=unavailable 占位结果（而非裸 error）
+        # 消费侧（仲裁 prompt）可识别该标记并降权，避免单点失败拖垮整体流程
         logger.error(f"专家 {tool_name} 执行异常: {e}")
-        return json.dumps({"error": f"专家执行失败: {e}"}, ensure_ascii=False)
+        agent_name = agent_key
+        try:
+            from db.agents import load_specialist_agents
+            agent_name = load_specialist_agents().get(agent_key, {}).get("name", agent_key)
+        except Exception:
+            pass
+        return json.dumps({
+            "agent_key": agent_key,
+            "agent": agent_name,
+            "icon": "⚠️",
+            "analysis": f"[该专家分析暂时不可用：{type(e).__name__}]",
+            "tool_calls": [],
+            "duration_ms": 0,
+            "status": "unavailable",
+            "error": f"{type(e).__name__}: {e}",
+        }, ensure_ascii=False)
 
 
 # ── 升级二：推理过程可视化（零 LLM 成本，仅格式化已有数据）──

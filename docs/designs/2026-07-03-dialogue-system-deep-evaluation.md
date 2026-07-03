@@ -895,3 +895,84 @@ def track_suggestion_fulfillment(condition_id, user_action):
 3. **工具调用审计**：跟踪每次工具调用，评估效率和质量
 4. **参数校验**：工具调用前检查参数格式，无效参数自动修复
 5. **结果验证**：Self-Consistency 对关键决策多次采样验证"
+
+---
+
+## 六、可行性复审结论（2026-07-03 补充）
+
+对全文 18 个缺口复审后，5 项结论与调整建议如下：
+
+### 结论 1：缺口 15「工具缓存」低估现状，需明确为"补充而非新建"
+
+设计稿原文称"当前每次工具调用都重新执行"，但实测：
+
+- `orchestrator.py:391` `_execute_specialist_cached()` 已通过 `expert_cache`（语义相似度缓存）对**专家整体执行**做了缓存
+- `orchestrator.py:544` 还有 `_article_cache`、`_clarification_cache` 等多级缓存
+
+**调整**：缺口 15 实施时改为"**工具级缓存**（区别于已有的专家级缓存）"，明确这是补充层而非从零新建，避免重复造轮子。改动量估计 ~40 行不变。
+
+### 结论 2：缺口 11「部分失败处理」需同步改仲裁 prompt
+
+`orchestrator.py:2047` 当前异常处理只返回 `{"error": ...}` JSON 字符串，未产出 `status=unavailable` 的占位结果。设计稿方案正确，但消费侧需兼容——仲裁逻辑 `multi_agent.py:run_arbitration` 会把所有 specialist_results 拼成 prompt，遇到 `analysis="[该专家分析暂时不可用]"` 时仲裁 prompt 必须能识别并降权。
+
+**调整**：实施缺口 11 时**同步修改仲裁 prompt 模板**，增加对 `status=unavailable` 的处理说明（仲裁者应标注"缺少 XX 分析，建议仅供参考"）。
+
+### 结论 3：缺口 9「任务队列」降级到 P3，不进主对话流
+
+设计稿打分 ⭐⭐⭐，但实测收益有限：
+
+- 当前 `orchestrate_stream` 是同步 generator + ThreadPoolExecutor，多用户请求由 FastAPI 异步线程池隔离，未出现"Agent 阻塞其他用户"的实测问题
+- 引入异步任务队列（`create_task` + 轮询）会**破坏 SSE 流式语义**——前端拿不到中间进度事件，只能轮询最终结果
+
+**调整**：缺口 9 降级到 P3，仅适用于"**离线批量分析场景**"，不替换主对话流。
+
+### 结论 4：缺口 4「上下文隔离」需升级为"白名单+优先级+预算填充"
+
+设计稿原方案是简单白名单过滤，但 `conversation_context.py:330` `_compose_prompt_context` 是按 token 预算**整体裁剪**的。简单白名单后单个 Agent 上下文可能过短（3 个 section 不到 2000 token）或过长（portfolio_context 本身 3000 字）。
+
+**调整**：实施方案升级为三层组合：
+
+```python
+def filter_context(sections: dict, agent_key: str, token_budget: int = 2000) -> str:
+    allowed = CONTEXT_FILTERS.get(agent_key, list(sections.keys()))
+    # 1. 按优先级排序 allowed sections
+    priority = CONTEXT_PRIORITY.get(agent_key, allowed)
+    # 2. 动态填充直到 token 预算用满（而非硬截断）
+    filtered, used = {}, 0
+    for section_key in priority:
+        if used >= token_budget:
+            break
+        content = sections.get(section_key, "")
+        filtered[section_key] = content
+        used += estimate_text_tokens(content)
+    # 3. 预算没用完 70% → 兜底补充通用上下文
+    if used < token_budget * 0.7:
+        for k in ["conversation_summary", "rag_context"]:
+            if k not in filtered and k in sections:
+                filtered[k] = sections[k]
+    return _compose_prompt_context(filtered, ..., token_budget=token_budget)
+```
+
+### 结论 5：补一章「可观测性」维度（第 8 维度）
+
+7 个评估维度未覆盖**可观测性/trace**。当前系统已有：
+
+- `_showExecution` 执行详情面板（`ChatMessage.vue:407`）
+- `reasoning_trail` 推理链（升级二）
+- `tool_calls` 工具调用统计、`phase_timings` 阶段耗时
+
+但缺**分布式 trace_id 贯穿**（LLM 调用 ↔ 工具调用 ↔ DB 写入的关联）。建议作为第 8 个维度补一章，价值 ⭐⭐⭐⭐，改动 ~50 行（统一在日志中输出 trace_id 前缀）。
+
+---
+
+### 调整后的实施优先级
+
+| 优先级 | 缺口 | 调整说明 |
+|--------|------|---------|
+| **P0 立即做** | 4 上下文隔离、6 结构化上下文、10 指数退避、11 部分失败、16 参数校验 | 零成本高价值，方案正确 |
+| **P0 需补充方案** | 15 工具缓存 | 明确为"补充已有 expert_cache，非新增" |
+| **P1 谨慎做** | 1 DAG、3 消息总线、13 状态机、18 建议追踪 | 价值高但需先验证场景，避免过度设计 |
+| **P2 选做** | 7 Agent 级超时、8 优先级、12 节点恢复、17 执行确认 | 场景边缘 |
+| **P3 不建议做** | 9 任务队列 | 破坏 SSE 流式语义，收益有限，仅适合离线场景 |
+
+**本次实施范围**：P0 的 5 个缺口（4/6/10/11/16），均为 20-80 行小改动，零 LLM 成本。

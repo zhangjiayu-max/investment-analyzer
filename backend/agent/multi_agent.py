@@ -886,13 +886,28 @@ def run_arbitration(query: str, specialist_results: list, rag_context: str = "",
 
     # 构建专家分析摘要
     expert_sections = []
+    unavailable_count = 0
     for sr in specialist_results:
         sr_name = sr.get("agent", sr.get("agent_key", "未知"))
         icon = sr.get("icon", "🤖")
         analysis = sr.get("analysis", "")
-        expert_sections.append(f"### {icon} {sr_name}\n{analysis[:2000]}")
+        # 缺口 11：标记不可用的专家，提示仲裁者降权处理
+        if sr.get("status") == "unavailable":
+            unavailable_count += 1
+            expert_sections.append(
+                f"### {icon} {sr_name} [⚠️ 本项分析不可用]\n"
+                f"{analysis}\n"
+                f"_(该专家执行失败，请在综合判断时标注\"缺少 {sr_name} 视角\"，相关结论仅供参考)_"
+            )
+        else:
+            expert_sections.append(f"### {icon} {sr_name}\n{analysis[:2000]}")
 
     experts_text = "\n\n---\n\n".join(expert_sections)
+    if unavailable_count > 0:
+        experts_text = (
+            f"> ⚠️ 本次共有 {unavailable_count} 位专家分析不可用，仲裁时请特别标注信息缺口，"
+            f"避免在该方向给出确定性结论。\n\n" + experts_text
+        )
 
     # 构建用户消息
     user_content = f"""## 用户问题

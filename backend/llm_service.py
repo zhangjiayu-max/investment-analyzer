@@ -5,7 +5,7 @@ import json
 import logging
 from functools import wraps
 from openai import OpenAI, RateLimitError, APIStatusError, APITimeoutError, APIConnectionError
-from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type, before_sleep_log
+from tenacity import retry, stop_after_attempt, wait_exponential_jitter, retry_if_exception, before_sleep_log
 from config import get_llm_config, get_llm_fallback_config, ARBITRATION_API_KEY, ARBITRATION_BASE_URL, ARBITRATION_MODEL
 from db.config import get_config_float, get_config_int
 
@@ -33,10 +33,13 @@ def _is_retryable(e):
     return False
 
 
+# 缺口 10：指数退避重试（修正 + 抖动）
+# - 用 retry_if_exception(predicate) 替代 exception_type，避免误重试 4xx（400/404/422）
+# - wait_exponential_jitter 加随机抖动，避免多并发请求同步重试造成惊群
 _llm_retry = retry(
-    retry=retry_if_exception_type((RateLimitError, APITimeoutError, APIConnectionError, APIStatusError)),
+    retry=retry_if_exception(_is_retryable),
     stop=stop_after_attempt(4),
-    wait=wait_exponential(multiplier=1, min=2, max=30),
+    wait=wait_exponential_jitter(initial=2, max=30, jitter=2),
     before_sleep=before_sleep_log(logger, logging.WARNING),
     reraise=True,
 )

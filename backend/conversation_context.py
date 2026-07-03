@@ -403,6 +403,15 @@ def build_conversation_context(
         sections["conflicts"] = "⚠️ 检测到上下文冲突：\n" + "\n".join(f"- {c}" for c in conflicts)
 
     prompt_context = _compose_prompt_context(sections, current_user_message, token_budget)
+
+    # 缺口 6：追加结构化数据块（JSON），供 Agent 精确引用持仓/估值数据
+    try:
+        structured_block = build_structured_data_block(sections)
+        if structured_block:
+            prompt_context = prompt_context + "\n\n" + structured_block
+    except Exception:
+        pass
+
     return {
         "conversation_id": conversation_id,
         "scenario_type": scenario_type,
@@ -412,3 +421,169 @@ def build_conversation_context(
         "sections": sections,
         "prompt_context": prompt_context,
     }
+
+
+# ═══════════════════════════════════════════════════════════════
+# 缺口 4：上下文隔离（白名单 + 优先级 + 预算填充）
+# ═══════════════════════════════════════════════════════════════
+
+# 每个 Agent 允许接收的上下文 section 关键词（按 ## 标题匹配）
+# 未列出的 agent_key 不过滤（保留全部上下文，如 arbitrator）
+CONTEXT_FILTERS: dict[str, list[str]] = {
+    "risk_assessor":        ["持仓", "估值", "债市", "结构化数据"],
+    "behavior_coach":       ["持仓", "热点", "结构化数据"],
+    "valuation_expert":     ["持仓", "估值", "结构化数据"],
+    "allocation_advisor":   ["持仓", "估值", "知识库", "结构化数据"],
+    "market_analyst":       ["估值", "热点", "知识库", "结构化数据"],
+    "fund_analyst":         ["持仓", "知识库", "结构化数据"],
+    "macro_strategist":     ["估值", "热点", "知识库", "债市"],
+    "article_expert":       ["知识库", "结构化数据"],
+    "wealth_advisor":       ["持仓", "估值", "知识库", "结构化数据"],
+}
+
+# section 优先级（同列表内越靠前越重要，预算紧张时先保留）
+CONTEXT_PRIORITY: dict[str, list[str]] = {
+    "risk_assessor":        ["持仓", "估值", "债市", "结构化数据"],
+    "valuation_expert":     ["估值", "持仓", "结构化数据"],
+    "allocation_advisor":   ["持仓", "估值", "知识库", "结构化数据"],
+    "market_analyst":       ["热点", "估值", "知识库", "结构化数据"],
+}
+
+# 通用兜底 section（预算没用完 70% 时补充）
+_FALLBACK_SECTIONS = ["知识库", "结构化数据"]
+
+
+def _split_sections_by_header(context_str: str) -> list[tuple[str, str]]:
+    """按 ## 标题切分上下文字符串，返回 [(title, body), ...]。"""
+    if not context_str:
+        return []
+    parts: list[tuple[str, str]] = []
+    current_title = ""
+    current_lines: list[str] = []
+    for line in context_str.split("\n"):
+        if line.startswith("## "):
+            if current_title or current_lines:
+                parts.append((current_title, "\n".join(current_lines)))
+            current_title = line[3:].strip()
+            current_lines = []
+        else:
+            current_lines.append(line)
+    if current_title or current_lines:
+        parts.append((current_title, "\n".join(current_lines)))
+    return parts
+
+
+def filter_context_for_agent(context_str: str, agent_key: str, token_budget: int = 2000) -> str:
+    """
+    缺口 4：按 agent_key 过滤上下文（白名单 + 优先级 + 预算填充）。
+
+    - 未配置过滤规则的 agent（如 arbitrator）→ 原样返回
+    - 按 CONTEXT_FILTERS 白名单保留相关 section
+    - 按 CONTEXT_PRIORITY 优先级排序，token 预算用满即止
+    - 预算未用 70% → 兜底补充通用 section
+    """
+    if not context_str:
+        return context_str
+
+    allowed_keywords = CONTEXT_FILTERS.get(agent_key)
+    if not allowed_keywords:
+        # 未配置过滤规则 → 不过滤（仲裁等需要全量上下文）
+        return context_str
+
+    sections = _split_sections_by_header(context_str)
+    if not sections:
+        return context_str
+
+    def _match(title: str, keywords: list[str]) -> bool:
+        return any(kw in title for kw in keywords)
+
+    # 1. 白名单过滤
+    kept = [(t, b) for t, b in sections if _match(t, allowed_keywords)]
+
+    # 2. 按优先级排序（优先级表里靠前的排前；不在优先级表的按原顺序排后）
+    priority = CONTEXT_PRIORITY.get(agent_key, allowed_keywords)
+    def _priority_idx(title: str) -> int:
+        for i, kw in enumerate(priority):
+            if kw in title:
+                return i
+        return len(priority)
+    kept.sort(key=lambda tb: _priority_idx(tb[0]))
+
+    # 3. 预算填充
+    filtered: list[tuple[str, str]] = []
+    used = 0
+    for title, body in kept:
+        if used >= token_budget:
+            break
+        filtered.append((title, body))
+        used += estimate_text_tokens(body)
+
+    # 4. 预算未用 70% → 兜底补充通用 section（知识库/结构化数据）
+    if used < token_budget * 0.7:
+        existing_titles = {t for t, _ in filtered}
+        for title, body in sections:
+            if used >= token_budget:
+                break
+            if title in existing_titles:
+                continue
+            if _match(title, _FALLBACK_SECTIONS):
+                filtered.append((title, body))
+                used += estimate_text_tokens(body)
+
+    # 重组为字符串
+    return "\n\n".join(f"## {t}\n{b}" for t, b in filtered).strip()
+
+
+# ═══════════════════════════════════════════════════════════════
+# 缺口 6：结构化上下文（JSON 数据块）
+# ═══════════════════════════════════════════════════════════════
+
+import re as _re
+import json as _json
+
+
+def _extract_holdings_from_context(portfolio_text: str) -> list[dict]:
+    """从持仓上下文文本中提取结构化持仓列表。"""
+    if not portfolio_text:
+        return []
+    holdings: list[dict] = []
+    # 匹配 "基金名称：xxx 占比：xx%" 等常见模式
+    for m in _re.finditer(r"([^\s,，:：]+?)[：:]\s*([^\s,，%]+).*?(\d+(?:\.\d+)?)\s*%", portfolio_text):
+        holdings.append({
+            "name": m.group(1).strip(),
+            "code": m.group(2).strip(),
+            "pct": float(m.group(3)),
+        })
+    return holdings[:15]  # 最多 15 条
+
+
+def _extract_valuations_from_context(valuation_text: str) -> list[dict]:
+    """从估值上下文文本中提取结构化估值列表。"""
+    if not valuation_text:
+        return []
+    valuations: list[dict] = []
+    # 匹配 "指数名 PE:xx PB:xx 百分位:xx%"
+    for m in _re.finditer(r"([^\s,，:：]+?)[：:].*?PE[：:]?\s*(\d+(?:\.\d+)?).*?百分位[：:]?\s*(\d+(?:\.\d+)?)\s*%", valuation_text):
+        valuations.append({
+            "index": m.group(1).strip(),
+            "pe": float(m.group(2)),
+            "percentile": float(m.group(3)),
+        })
+    return valuations[:10]
+
+
+def build_structured_data_block(sections: dict[str, str]) -> str:
+    """
+    缺口 6：构建结构化数据块（JSON），追加到上下文末尾供 Agent 精确引用。
+
+    输入 sections 来自 build_conversation_context 的 sections 字典。
+    """
+    data = {
+        "holdings": _extract_holdings_from_context(sections.get("portfolio_context", "")),
+        "valuations": _extract_valuations_from_context(sections.get("valuation_context", "")),
+    }
+    # 只在有数据时追加，避免空块
+    if not data["holdings"] and not data["valuations"]:
+        return ""
+    return f"## 结构化数据\n```json\n{_json.dumps(data, ensure_ascii=False, indent=2)}\n```"
+
