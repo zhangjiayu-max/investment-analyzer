@@ -213,7 +213,8 @@ def _is_complex_query(query: str) -> bool:
 # ═══════════════════════════════════════════════════════════════
 
 # 默认模型映射(可被 system_config 覆盖)
-AGENT_MODEL_MAP = {
+# DeepSeek 模型映射
+_AGENT_MODEL_MAP_DEEPSEEK = {
     "valuation_expert": "deepseek-v4-flash",
     "allocation_advisor": "deepseek-v4-flash",
     "fund_analyst": "deepseek-v4-flash",
@@ -225,21 +226,63 @@ AGENT_MODEL_MAP = {
     "cross_review": "deepseek-v4-flash",
 }
 
+# MIMO 模型映射 — MIMO 只有一个模型，所有 Agent 统一使用
+_AGENT_MODEL_MAP_MIMO = {
+    "valuation_expert": "mimo-v2.5-pro",
+    "allocation_advisor": "mimo-v2.5-pro",
+    "fund_analyst": "mimo-v2.5-pro",
+    "risk_assessor": "mimo-v2.5-pro",
+    "market_analyst": "mimo-v2.5-pro",
+    "behavior_coach": "mimo-v2.5-pro",
+    "orchestrator": "mimo-v2.5-pro",
+    "arbitrator": "mimo-v2.5-pro",
+    "cross_review": "mimo-v2.5-pro",
+}
+
+# 兼容别名
+AGENT_MODEL_MAP = _AGENT_MODEL_MAP_DEEPSEEK
+
 
 def _get_model_for_agent(agent_key: str, budget_mode: str = "normal") -> str:
-    """根据 agent_key 和预算模式选择模型。优先读 system_config。"""
+    """根据 agent_key 和预算模式选择模型。优先读 system_config。
+
+    自动感知当前 LLM provider：
+    - LLM_PROVIDER=deepseek → 使用 DeepSeek 模型映射
+    - LLM_PROVIDER=mimo → 使用 MIMO 模型映射（避免模型名不匹配导致 404）
+    """
+    from db.config import get_config
+    from config import LLM_PROVIDER
+
+    model_map = _AGENT_MODEL_MAP_MIMO if LLM_PROVIDER == "mimo" else _AGENT_MODEL_MAP_DEEPSEEK
+    default_model = model_map.get(agent_key, MODEL)
+
+    # conservative 模式：所有 Agent 用同一个省钱模型
     if budget_mode == "conservative":
-        from db.config import get_config
-        return get_config("cost_routing.conservative_model", "deepseek-v4-flash")
+        default_conservative = "mimo-v2.5-pro" if LLM_PROVIDER == "mimo" else "deepseek-v4-flash"
+        configured = get_config("cost_routing.conservative_model", "")
+        # 验证配置的模型是否兼容当前 provider
+        if configured and _is_model_compatible(configured, LLM_PROVIDER):
+            return configured
+        return default_conservative
 
     # 从 system_config 读取(可运行时覆盖)
-    from db.config import get_config
     config_key = f"cost_routing.{agent_key}_model"
     configured = get_config(config_key, "")
-    if configured:
+    if configured and _is_model_compatible(configured, LLM_PROVIDER):
         return configured
 
-    return AGENT_MODEL_MAP.get(agent_key, MODEL)
+    return default_model
+
+
+def _is_model_compatible(model_name: str, provider: str) -> bool:
+    """检查模型名是否与当前 provider 兼容。"""
+    if not model_name:
+        return False
+    if provider == "mimo":
+        # MIMO 模式下不接受 deepseek 模型名
+        return not model_name.startswith("deepseek")
+    # DeepSeek 模式下不接受 mimo 模型名
+    return not model_name.startswith("mimo")
 
 
 def _is_cost_routing_enabled() -> bool:

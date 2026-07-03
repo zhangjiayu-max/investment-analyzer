@@ -26,8 +26,10 @@ MODEL_PRICES = {
     "deepseek-reasoner": {"input": 1.0, "output": 4.0},
     "deepseek-v4-flash": {"input": 0.5, "output": 2.0},
     "deepseek-v4-pro": {"input": 1.0, "output": 4.0},
-    # MIMO（如还在用）
+    # MIMO 系列
     "mimo": {"input": 0.3, "output": 1.2},
+    "mimo-v2.5-pro": {"input": 0.3, "output": 1.2},
+    "mimo-v2.5": {"input": 0.3, "output": 1.2},
     # Ollama 本地模型（零成本）
     "ollama": {"input": 0.0, "output": 0.0},
     "qwen3-vl": {"input": 0.0, "output": 0.0},
