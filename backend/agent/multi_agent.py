@@ -95,6 +95,12 @@ _UNIVERSAL_DATA_CONSTRAINT = """
 3. 如果上下文中没有持仓数据或显示"无持仓"，**必须明确告知用户**"未获取到持仓信息"，不得自行补充
 4. 如果某个数据在上下文中缺失，直接说明"暂无该数据"，不要猜测或杜撰
 5. 所有数字必须来自上下文或工具返回结果，不得凭记忆或推测给出具体数值
+
+## ✍️ 输出格式约束（强制遵守）
+1. **禁止使用 emoji**（如 📊🛡️🤖⚖️🔍🔴 等）作为标题、列表标记或装饰
+2. 使用 Markdown 标题（## ###）、表格、加粗、引用块来组织结构
+3. 数据用表格呈现，关键结论用加粗，风险提示用引用块（> ）
+4. 保持专业严谨的金融分析文风，不要用口语化或情绪化表达
 """
 
 # ── 专家主动检索指令（追加到有 search_knowledge 工具的 Agent） ──
@@ -317,8 +323,9 @@ def run_specialist(agent_key: str, query: str, context: str = "",
     if template_constraint:
         system_content += template_constraint
 
-    # 追加通用可执行性约束
+    # 追加通用可执行性约束 + 数据约束（含emoji禁令）
     system_content += _ACTIONABILITY_CONSTRAINT
+    system_content += _UNIVERSAL_DATA_CONSTRAINT
 
     # 注入幻觉防御 Prompt（事实约束 + 类型专用约束）
     try:
@@ -525,8 +532,9 @@ def run_specialist_with_context(agent_key: str, query: str, peer_analyses: dict,
     if template_constraint:
         system_content += template_constraint
 
-    # 追加通用可执行性约束
+    # 追加通用可执行性约束 + 数据约束（含emoji禁令）
     system_content += _ACTIONABILITY_CONSTRAINT
+    system_content += _UNIVERSAL_DATA_CONSTRAINT
 
     # 追加圆桌审阅指令
     peer_sections = []

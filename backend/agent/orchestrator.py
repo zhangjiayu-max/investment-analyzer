@@ -752,11 +752,9 @@ def should_run_cross_review(
     """统一判断是否进入交叉审阅。
 
     决策逻辑（优先级从高到低）：
-    1. complex + needs_arbitration + 实际检测到冲突 → 执行（不被预判否决）
-    2. 预判 True + 实际冲突 True → 执行
-    3. 预判 True + 无冲突 → 跳过
-    4. 预判 False + 非 complex → 跳过
-    5. 预判 False + complex + 无冲突 → 跳过（无冲突可审阅）
+    1. 实际检测到冲突（已过 severity 分级检查）→ 执行（不被预判否决）
+    2. 预判 True + 无实际冲突 → 跳过
+    3. 预判 False + 无实际冲突 → 跳过
 
     Args:
         predicted_need_cross_review: 来自 clarify_requirement 的 LLM 预判。
@@ -778,26 +776,26 @@ def should_run_cross_review(
             logger.info(f"交叉审阅: 冲突 severity={conflicts.get('severity')} < {min_severity} → 跳过")
             return False
 
-    # 核心修复：complex + needs_arbitration 场景，实际检测到冲突就执行
-    # 不被 predicted_need_cross_review=False 一票否决
-    if complexity == "complex" and needs_arbitration and has_conflicts:
-        logger.info("交叉审阅: complex+needs_arbitration+实际冲突 → 执行（不被预判否决）")
-    elif predicted_need_cross_review and has_conflicts:
-        logger.info("交叉审阅: 预判=True + 实际冲突=True → 执行")
-    elif predicted_need_cross_review and not has_conflicts:
+    # 核心修复：实际检测到冲突就执行交叉审阅，不被预判一票否决
+    # 优先级：实际冲突检测结果 > LLM 预判 > complexity 分级
+    if has_conflicts:
+        # 实际检测到冲突（已通过 severity 分级检查），执行交叉审阅
+        if complexity == "complex" and needs_arbitration:
+            logger.info("交叉审阅: complex+needs_arbitration+实际冲突 → 执行（不被预判否决）")
+        elif predicted_need_cross_review:
+            logger.info("交叉审阅: 预判=True + 实际冲突=True → 执行")
+        else:
+            logger.info(f"交叉审阅: 预判=False 但实际检测到冲突(severity={conflicts.get('severity')}) → 执行")
+    elif predicted_need_cross_review:
         logger.info("交叉审阅: 预判=True 但实际未检测到冲突 → 跳过")
         return False
-    elif not predicted_need_cross_review:
-        if complexity == "complex" and needs_arbitration:
-            logger.info("交叉审阅: 预判=False 但 complex+needs_arbitration，无实际冲突 → 跳过")
-        else:
-            logger.info("交叉审阅: 预判=False → 跳过")
-        return False
     else:
+        if complexity == "complex" and needs_arbitration:
+            logger.info("交叉审阅: 预判=False，complex+needs_arbitration 但无实际冲突 → 跳过")
+        else:
+            logger.info("交叉审阅: 预判=False 且无实际冲突 → 跳过")
         return False
 
-    if not has_conflicts:
-        return False
     return not OrchestratorOptimizer.should_skip_cross_review(specialist_results, complexity)
 
 
@@ -807,7 +805,7 @@ def should_arbitrate(complexity: str, specialist_results: list, conflicts: dict 
     条件(从 orchestration_config 读取):
     - arbitration_enabled == "true"
     - ARBITRATION_API_KEY 已配置
-    - complexity >= arbitration_complexity
+    - complexity >= arbitration_complexity（但实际检测到 medium+ 冲突时不受此限制）
     - ≥2 个专家参与分析
     - 存在实质性冲突（当 conflicts 传入时）
     """
@@ -821,14 +819,19 @@ def should_arbitrate(complexity: str, specialist_results: list, conflicts: dict 
     min_complexity = get_orchestration_config("arbitration_complexity", "complex")
     complexity_order = {"simple": 0, "medium": 1, "complex": 2}
     if complexity_order.get(complexity, 0) < complexity_order.get(min_complexity, 2):
-        return False
+        # complexity 不够，但如果有实际冲突，仍然可以仲裁
+        if not (conflicts and conflicts.get("detected") and conflicts.get("severity") in ("medium", "high")):
+            return False
+        logger.info(f"仲裁: complexity={complexity}<{min_complexity}，但检测到 {conflicts.get('severity')} 冲突 → 仍执行仲裁")
     if len([sr for sr in specialist_results if not sr.get("is_cross_review")]) < 2:
         return False
-    # 新增：无方向冲突时不仲裁，节省成本
+    # 无方向冲突时不仲裁，节省成本
     if conflicts and not conflicts.get("detected"):
         logger.info("专家无方向冲突，跳过仲裁")
         return False
     # severity 分级：complex 场景 medium+ 即仲裁，其余只 high 仲裁
+    # 但如果已经突破了上面的 complexity 门槛检查（即有实际 medium+ 冲突），
+    # 这里也放行，确保三阶段流程完整
     if conflicts:
         severity = conflicts.get("severity", "low")
         min_sev_for_complex = get_orchestration_config("arbitration_min_severity_complex", "medium")
@@ -836,8 +839,13 @@ def should_arbitrate(complexity: str, specialist_results: list, conflicts: dict 
         required_sev = min_sev_for_complex if complexity == "complex" else min_sev_default
         severity_order = {"low": 0, "medium": 1, "high": 2}
         if severity_order.get(severity, 0) < severity_order.get(required_sev, 2):
-            logger.info(f"冲突 severity={severity} < {required_sev}（complexity={complexity}），跳过仲裁")
-            return False
+            # 如果冲突 severity 达到 medium，且上面已经因实际冲突突破了 complexity 门槛，
+            # 则使用 medium 作为最低要求
+            if severity == "medium" and complexity not in ("simple", "chat"):
+                logger.info(f"仲裁: severity=medium 达到仲裁门槛（complexity={complexity}），执行仲裁")
+            else:
+                logger.info(f"冲突 severity={severity} < {required_sev}（complexity={complexity}），跳过仲裁")
+                return False
     return True
 
 
@@ -2771,6 +2779,12 @@ def orchestrate(query: str, history: list, rag_context: str = "", cancel_event: 
         total_tokens = 0
 
     conflicts = detect_conflicts_smart(specialist_results, refined_query, trace_id)
+    if conversation_id:
+        _schedule_auto_evaluation(conversation_id, message_id, {
+            "answer": final_answer, "specialist_results": specialist_results,
+            "tool_calls": all_tool_calls, "duration_ms": duration_ms,
+            "complexity": complexity, "conflicts": conflicts,
+        })
     return {
         "answer": final_answer,
         "specialist_results": specialist_results,
@@ -3218,6 +3232,12 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
                 logger.warning("模型不兼容,回退到普通模式")
                 yield {"type": "status", "message": "模型不支持工具调用,切换到普通模式..."}
                 result = _fallback_orchestrate(query, history, rag_context)
+                if conversation_id:
+                    _schedule_auto_evaluation(conversation_id, message_id, {
+                        "answer": result["answer"], "specialist_results": [],
+                        "tool_calls": [], "duration_ms": duration_ms,
+                        "complexity": complexity, "conflicts": {},
+                    })
                 yield {
                     "type": "answer",
                     "content": result["answer"],
@@ -3228,11 +3248,18 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
             # 网络抖动时，已有专家结果则拼接返回
             if specialist_results:
                 logger.warning(f"LLM 汇总失败但已有 {len(specialist_results)} 个专家结果(stream),拼接回退")
+                fb_result = _build_fallback_from_specialists(
+                    query, refined_query, specialist_results, trace_id, budget
+                )
+                if conversation_id:
+                    _schedule_auto_evaluation(conversation_id, message_id, {
+                        "answer": fb_result["answer"], "specialist_results": specialist_results,
+                        "tool_calls": [tc for sr in specialist_results for tc in sr.get("tool_calls", [])],
+                        "duration_ms": duration_ms, "complexity": complexity, "conflicts": conflicts,
+                    })
                 yield {
                     "type": "answer",
-                    "content": _build_fallback_from_specialists(
-                        query, refined_query, specialist_results, trace_id, budget
-                    )["answer"],
+                    "content": fb_result["answer"],
                     "specialist_results": specialist_results,
                     "tool_calls": [tc for sr in specialist_results for tc in sr.get("tool_calls", [])],
                     "partial": True,
@@ -3406,6 +3433,13 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
                         "key_variables": next((sr.get("key_variables", "") for sr in specialist_results if sr.get("is_arbitration")), ""),
                         "reasoning_trail": build_reasoning_trail(query, refined_query, complexity, specialist_results, next((sr for sr in specialist_results if sr.get("is_arbitration")), None), prebuilt_context, duration_ms),
                     }
+                    if conversation_id:
+                        _schedule_auto_evaluation(conversation_id, message_id, {
+                            "answer": answer, "specialist_results": specialist_results,
+                            "tool_calls": all_tool_calls, "duration_ms": duration_ms,
+                            "complexity": complexity, "conflicts": conflicts,
+                            "route_info": route_result, "cache_stats": expert_cache.stats,
+                        })
                     return
 
             answer = msg.content or ""
@@ -3489,6 +3523,13 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
                 "key_variables": next((sr.get("key_variables", "") for sr in specialist_results if sr.get("is_arbitration")), ""),
                 "reasoning_trail": build_reasoning_trail(query, refined_query, complexity, specialist_results, next((sr for sr in specialist_results if sr.get("is_arbitration")), None), prebuilt_context, duration_ms),
             }
+            if conversation_id:
+                _schedule_auto_evaluation(conversation_id, message_id, {
+                    "answer": answer, "specialist_results": specialist_results,
+                    "tool_calls": all_tool_calls, "duration_ms": duration_ms,
+                    "complexity": complexity, "conflicts": conflicts,
+                    "route_info": route_result, "cache_stats": expert_cache.stats,
+                })
             return
 
         # 有工具调用 → 执行专家
@@ -3952,7 +3993,7 @@ LOW_SCORE_THRESHOLD = 60
 # ── 自动评测成本控制 ──
 _auto_eval_daily_count = 0
 _auto_eval_daily_date = ""
-_AUTO_EVAL_DAILY_LIMIT = 10  # 每天最多自动评测 10 条（成本可控）
+_AUTO_EVAL_DAILY_LIMIT = 5  # 每天最多自动评测 5 条（成本可控）
 _AUTO_EVAL_MIN_COMPLEXITY = "medium"  # 只评测 medium/complex，跳过 simple
 
 

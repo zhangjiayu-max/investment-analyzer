@@ -99,11 +99,17 @@ def analyze_metadata(meta):
         info["has_tool_calls"] = True
         info["tool_call_count"] = len(tc)
         info["tool_names"] = list(set([x.get("name", "?") for x in tc if isinstance(x, dict)]))
-    # rag
+    # rag: 优先从 metadata 提取，回退到 tool_calls 中检测 search_knowledge
     rag = meta.get("rag_sources") or meta.get("rag") or []
     if rag:
         info["has_rag"] = True
         info["rag_count"] = len(rag) if isinstance(rag, list) else 0
+    elif tc:
+        # 从 tool_calls 中检测 search_knowledge 调用
+        rag_tools = [x for x in tc if isinstance(x, dict) and x.get("name") == "search_knowledge"]
+        if rag_tools:
+            info["has_rag"] = True
+            info["rag_count"] = len(rag_tools)
     # timings
     pt = meta.get("phase_timings") or {}
     if pt:

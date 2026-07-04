@@ -75,8 +75,11 @@ class OrchestratorOptimizer:
 
         跳过条件：
         1. 简单任务
-        2. 专家意见高度一致
+        2. 专家数量不足
         3. 只有1个专家
+        
+        注意：不再做关键词分歧检测，避免与 detect_conflicts_smart 结果冲突。
+        分歧检测由 should_arbitrate 中的 conflicts 参数统一处理。
         """
         # 条件1：简单任务
         if complexity in ("simple", "chat"):
@@ -85,33 +88,6 @@ class OrchestratorOptimizer:
         # 条件2：专家数量不足
         if len(specialist_results) < 2:
             return True
-
-        # 条件3：快速检查专家是否高度一致
-        # 如果所有专家的结论关键词相似，跳过仲裁
-        conclusions = []
-        for sr in specialist_results:
-            analysis = sr.get("analysis", "")
-            # 提取结论部分（前200字）
-            conclusions.append(analysis[:200].lower())
-
-        # 简单的一致性检查
-        if len(conclusions) >= 2:
-            # 检查是否有明显的分歧关键词
-            has_disagreement = False
-            for c1 in conclusions:
-                for c2 in conclusions:
-                    if c1 == c2:
-                        continue
-                    # 检查是否有相反的观点
-                    if ("建议买" in c1 and "不建议买" in c2) or \
-                       ("高估" in c1 and "低估" in c2):
-                        has_disagreement = True
-                        break
-                if has_disagreement:
-                    break
-
-            if not has_disagreement:
-                return True
 
         return False
 
