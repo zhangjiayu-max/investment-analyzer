@@ -141,18 +141,20 @@ async def _do_eval_case_run(case_id: int):
 
             from agent.multi_agent import run_specialist
             from db.agents import load_specialist_agents
+            import uuid as _uuid
+            _eval_trace_id = f"eval-{_uuid.uuid4().hex[:8]}"
 
             specialists = load_specialist_agents()
             if analysis_type == "orchestrator":
                 # orchestrator 模式：调用完整编排流程
                 from agent.orchestrator import orchestrate
-                result = await asyncio.to_thread(lambda: orchestrate(question, []))
+                result = await asyncio.to_thread(lambda: orchestrate(question, [], trace_id=_eval_trace_id))
                 result_summary = result.get("answer", "")[:500]
                 result_data = json.dumps(result, ensure_ascii=False)
             elif analysis_type in specialists:
                 # 单个专家 Agent
                 result = await asyncio.to_thread(
-                    lambda: run_specialist(analysis_type, question)
+                    lambda: run_specialist(analysis_type, question, trace_id=_eval_trace_id)
                 )
                 result_summary = result.get("analysis", "")[:500]
                 result_data = json.dumps(result, ensure_ascii=False)

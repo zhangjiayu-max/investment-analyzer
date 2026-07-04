@@ -1045,7 +1045,7 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
                                 prebuilt += f"## 用户当前持仓\n{build_portfolio_context()}\n\n"
                             except Exception:
                                 pass
-                        return run_specialist(agent_key, expert_query, prebuilt_context=prebuilt)
+                        return run_specialist(agent_key, expert_query, prebuilt_context=prebuilt, trace_id=trace_id)
                     except Exception as e:
                         return {"error": str(e)}
 

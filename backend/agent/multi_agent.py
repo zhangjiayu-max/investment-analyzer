@@ -197,7 +197,7 @@ def _extract_text_tool_calls(content_str):
     return results if results else None
 
 
-def _process_text_tool_calls(content_str, llm_messages, tool_calls_log, agent_name):
+def _process_text_tool_calls(content_str, llm_messages, tool_calls_log, agent_name, trace_id=""):
     """处理文本格式的 tool_call：解析、执行、将结果追加到消息列表。"""
     text_calls = _extract_text_tool_calls(content_str)
     if not text_calls:
@@ -206,7 +206,7 @@ def _process_text_tool_calls(content_str, llm_messages, tool_calls_log, agent_na
     for tc in text_calls:
         args = tc['arguments']
         logger.info(f'[{agent_name}] 文本 Tool: {tc["name"]}({json.dumps(args, ensure_ascii=False)[:100]})')
-        result = execute_tool(tc['name'], args)
+        result = execute_tool(tc['name'], args, trace_id=trace_id)
         if len(result) > 3000:
             result = result[:3000] + chr(10) + '... (结果过长，已截断)'
         tool_calls_log.append({
@@ -286,6 +286,10 @@ def run_specialist(agent_key: str, query: str, context: str = "",
     返回:
         {"agent": "估值专家", "icon": "📊", "analysis": "...", "tool_calls": [...], "duration_ms": 1234}
     """
+    # 兜底：trace_id 为空时自动生成，确保 token_usage/agent_runs/tool_audit_logs 可关联
+    if not trace_id:
+        import uuid as _uuid
+        trace_id = f"spec-{_uuid.uuid4().hex[:8]}"
     agent = load_specialist_agents()[agent_key]
     start_time = time.time()
     _caller = f"specialist:{agent_key}"
@@ -383,7 +387,7 @@ def run_specialist(agent_key: str, query: str, context: str = "",
 
         # 没有工具调用 → 检查文本格式 tool_call，否则为最终回答
         if not msg.tool_calls:
-            if _process_text_tool_calls(msg.content or "", llm_messages, tool_calls_log, agent["name"]):
+            if _process_text_tool_calls(msg.content or "", llm_messages, tool_calls_log, agent["name"], trace_id=trace_id):
                 continue
             answer = msg.content or ""
             break
@@ -420,7 +424,7 @@ def run_specialist(agent_key: str, query: str, context: str = "",
             args = _parse_tool_args(tc.function.arguments, tc.function.name)
 
             logger.info(f"[{agent['name']}] Tool: {tc.function.name}({json.dumps(args, ensure_ascii=False)[:100]})")
-            result = execute_tool(tc.function.name, args)
+            result = execute_tool(tc.function.name, args, trace_id=trace_id)
 
             if len(result) > 3000:
                 result = result[:3000] + "\n... (结果过长，已截断)"
@@ -511,6 +515,10 @@ def run_specialist_with_context(agent_key: str, query: str, peer_analyses: dict,
     start_time = time.time()
     _caller = f"specialist:{agent_key}:cross_review"
     _model = model or MODEL
+    # 兜底：trace_id 为空时自动生成
+    if not trace_id:
+        import uuid as _uuid
+        trace_id = f"cross-{_uuid.uuid4().hex[:8]}"
 
     agent_tools = [t for t in TOOLS if t["function"]["name"] in agent["tools"]]
 
@@ -604,7 +612,7 @@ def run_specialist_with_context(agent_key: str, query: str, peer_analyses: dict,
         msg = response.choices[0].message
 
         if not msg.tool_calls:
-            if _process_text_tool_calls(msg.content or "", llm_messages, tool_calls_log, agent["name"]):
+            if _process_text_tool_calls(msg.content or "", llm_messages, tool_calls_log, agent["name"], trace_id=trace_id):
                 continue
             answer = msg.content or ""
             break
@@ -638,7 +646,7 @@ def run_specialist_with_context(agent_key: str, query: str, peer_analyses: dict,
         for tc in msg.tool_calls:
             args = _parse_tool_args(tc.function.arguments, tc.function.name)
             logger.info(f"[{agent['name']}] 交叉审阅 Tool: {tc.function.name}({json.dumps(args, ensure_ascii=False)[:100]})")
-            result = execute_tool(tc.function.name, args)
+            result = execute_tool(tc.function.name, args, trace_id=trace_id)
             if len(result) > 3000:
                 result = result[:3000] + "\n... (结果过长，已截断)"
             tool_calls_log.append({

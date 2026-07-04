@@ -723,6 +723,11 @@ def execute_tool(name: str, arguments: dict, trace_id: str = "",
     """
     import time as _time
 
+    # 兜底：trace_id 为空时自动生成，确保 tool_audit_logs 可关联
+    if not trace_id:
+        import uuid as _uuid
+        trace_id = f"tool-{_uuid.uuid4().hex[:8]}"
+
     # 使用工具特定超时（如有）
     effective_timeout = _TOOL_TIMEOUT_OVERRIDES.get(name, timeout)
 

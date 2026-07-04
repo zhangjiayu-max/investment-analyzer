@@ -3801,7 +3801,8 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
                 try:
                     model = _get_model_for_agent(agent_key) if _is_cost_routing_enabled() else MODEL
                     spawn_result = run_specialist(agent_key, refined_query,
-                                                  prebuilt_context=prebuilt_context, model=model)
+                                                  prebuilt_context=prebuilt_context, model=model,
+                                                  trace_id=trace_id)
                     specialist_results.append(spawn_result)
                     all_tool_calls.append({"name": f"consult_{agent_key}",
                                            "arguments": {"query": refined_query},
