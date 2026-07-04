@@ -464,11 +464,23 @@ class DDImageParser:
                 "dividend_yield": self._parse_number(item.get("股息率")), "roe": self._parse_number(item.get("ROE")),
                 "valuation_status": item.get("估值状态"), "background_color": item.get("背景颜色"),
             })
+        # 有效性检查：过滤掉全空占位项（模型间歇性回吐 prompt 模板的情况）
+        # 一条有效数据需 index_name 非空，或至少一个数值字段非空
+        _num_keys = ("pe", "pb", "dividend_yield", "roe")
+        valid = [
+            it for it in normalized
+            if (it.get("index_name") and str(it["index_name"]).strip())
+            or any(it.get(k) is not None for k in _num_keys)
+        ]
+        if not valid:
+            # 模型回吐了空模板/占位符，标记失败以触发 _parse_cropped_regions 裁剪兜底
+            return {"ok": False, "error": "模型返回空数据(疑似回吐prompt模板)",
+                    "data": normalized, "count": 0, "raw_json": json.dumps(data, ensure_ascii=False)}
         raw_date = str(data.get("更新日期") or "").strip()
         nd = self._normalize_date(raw_date)
         nt = self._parse_temperature(data.get("市场温度"))
         return {"ok": True, "update_date": nd, "market_temperature": nt,
-                "data": normalized, "count": len(normalized), "raw_json": json.dumps(data, ensure_ascii=False)}
+                "data": valid, "count": len(valid), "raw_json": json.dumps(data, ensure_ascii=False)}
 
     @staticmethod
     def _extract_key_value_text(raw_text: str) -> dict | None:
