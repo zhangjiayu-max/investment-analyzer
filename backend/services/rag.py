@@ -440,6 +440,16 @@ def _get_jieba():
     return _jieba
 
 
+def _reset_jieba_cache():
+    """复位 jieba 缓存，允许重新 import。
+
+    场景：jieba 安装前 _get_jieba 已将 _jieba 置为 False（永久失败），
+    安装后调用此函数复位，让下次 _get_jieba 重新尝试 import。
+    """
+    global _jieba
+    _jieba = None
+
+
 def _tokenize(text: str) -> str:
     """用 jieba 分词，返回空格分隔的词语。"""
     jb = _get_jieba()
@@ -475,6 +485,145 @@ def init_fts():
     """)
     conn.commit()
     conn.close()
+
+
+def rebuild_fts_index() -> dict:
+    """重建 FTS5 索引：清空 knowledge_fts 后从各源表重新索引。
+
+    场景：jieba 安装前的历史索引是按单字分割存储的，jieba 分词后的 query
+    无法匹配（query 是 "白酒 估值"，索引里是 "白 酒 估 值"）。本函数清空
+    FTS5 表，遍历各源表用当前 _tokenize（jieba 已可用）重新索引。
+
+    Returns:
+        {"article": N, "author_article": N, "valuation": N,
+         "analysis": N, "skill": N, "book": N}
+    """
+    # 复位 jieba 缓存，确保使用新安装的 jieba
+    _reset_jieba_cache()
+    # 确认 jieba 可用
+    if not _get_jieba():
+        return {"error": "jieba 仍未安装，无法重建索引"}
+
+    init_fts()
+    conn = _get_conn()
+    # 清空 FTS5
+    conn.execute("DELETE FROM knowledge_fts")
+    conn.commit()
+    conn.close()
+
+    stats = {
+        "article": 0, "author_article": 0, "valuation": 0,
+        "analysis": 0, "skill": 0, "book": 0,
+    }
+
+    # 1. articles 表（文章正文可能在 articles 表的 summary/content_text 字段，
+    #    或通过 article_id 关联；本表只索引 title + summary 作为摘要）
+    try:
+        conn = _get_conn()
+        rows = conn.execute(
+            "SELECT id, title, summary FROM articles WHERE status = 'done'"
+        ).fetchall()
+        conn.close()
+        for r in rows:
+            title = r["title"] or ""
+            body = r["summary"] or ""
+            if title or body:
+                _index_document("article", title, body[:5000], str(r["id"]))
+                stats["article"] += 1
+    except Exception as e:
+        logger.warning(f"重建 articles FTS 失败: {e}")
+
+    # 2. author_articles 表
+    try:
+        conn = _get_conn()
+        rows = conn.execute(
+            "SELECT id, title, summary, content_text, publish_time FROM author_articles WHERE status = 'done'"
+        ).fetchall()
+        conn.close()
+        for r in rows:
+            title = r["title"] or ""
+            content = r["content_text"] or r["summary"] or ""
+            if content:
+                index_author_article(r["id"], title, content[:5000], r["publish_time"] or "")
+                stats["author_article"] += 1
+    except Exception as e:
+        logger.warning(f"重建 author_articles FTS 失败: {e}")
+
+    # 3. index_valuations 表（估值数据）
+    try:
+        conn = _get_conn()
+        rows = conn.execute(
+            "SELECT index_code, index_name, metric_type, snapshot_date, "
+            "current_value, percentile, zscore, danger_value, opportunity_value, median "
+            "FROM index_valuations ORDER BY snapshot_date DESC"
+        ).fetchall()
+        conn.close()
+        seen_valuation = set()
+        for r in rows:
+            # 同一 index_code + metric_type 只保留最新一条
+            key = f"{r['index_code']}:{r['metric_type']}"
+            if key in seen_valuation:
+                continue
+            seen_valuation.add(key)
+            index_valuation(r["index_code"], r["index_name"], {
+                "snapshot_date": r["snapshot_date"],
+                "metric_type": r["metric_type"],
+                "current_value": r["current_value"],
+                "percentile": r["percentile"],
+                "zscore": r["zscore"],
+                "danger_value": r["danger_value"],
+                "opportunity_value": r["opportunity_value"],
+                "median": r["median"],
+            })
+            stats["valuation"] += 1
+    except Exception as e:
+        logger.warning(f"重建 valuation FTS 失败: {e}")
+
+    # 4. analysis_records 表
+    try:
+        conn = _get_conn()
+        rows = conn.execute(
+            "SELECT id, index_name, raw_response FROM analysis_records WHERE raw_response IS NOT NULL"
+        ).fetchall()
+        conn.close()
+        for r in rows:
+            if r["raw_response"]:
+                index_analysis_record(r["id"], r["index_name"] or "", r["raw_response"])
+                stats["analysis"] += 1
+    except Exception as e:
+        logger.warning(f"重建 analysis FTS 失败: {e}")
+
+    # 5. skill_documents 表
+    try:
+        conn = _get_conn()
+        rows = conn.execute(
+            "SELECT id, doc_type, content FROM skill_documents"
+        ).fetchall()
+        conn.close()
+        for r in rows:
+            title = r["doc_type"] or ""
+            content = r["content"] or ""
+            if content:
+                index_skill_document(r["id"], title, content)
+                stats["skill"] += 1
+    except Exception as e:
+        logger.warning(f"重建 skill FTS 失败: {e}")
+
+    # 6. knowledge_base 表（书籍知识 + 个人笔记，content_type 按 category 区分）
+    try:
+        from db.knowledge import list_knowledge
+        # book 类别
+        books = list_knowledge(category="book", limit=10000)
+        for item in books:
+            index_book_knowledge(
+                item["id"], item["title"], item["content"], item.get("source", "")
+            )
+            stats["book"] += 1
+    except Exception as e:
+        logger.warning(f"重建 book FTS 失败: {e}")
+
+    logger.info(f"FTS5 索引重建完成: {stats}")
+    return stats
 
 
 def _index_document(content_type: str, title: str, body: str, reference_id: str):
@@ -1661,6 +1810,79 @@ def _inject_valuation_data(query: str, detected_indexes: list[str]) -> tuple[str
         return "", []
 
 
+# ── 相关性评分：注入前用词重叠率过滤不相关结果 ──────────────────
+
+# URL / 纯英文 query 跳过相关性过滤（交由 FTS5 自身处理）
+_URL_RE = re.compile(r"https?://|www\.", re.IGNORECASE)
+# 纯 ASCII（英文/数字/符号）占比超过此阈值视为非中文 query
+_ASCII_RATIO_THRESHOLD = 0.7
+
+
+def _is_non_chinese_query(q: str) -> bool:
+    """判断 query 是否为 URL 或纯英文（不适用中文分词相关性过滤）。"""
+    if not q:
+        return True
+    if _URL_RE.search(q):
+        return True
+    ascii_count = sum(1 for c in q if ord(c) < 128)
+    if ascii_count / len(q) >= _ASCII_RATIO_THRESHOLD:
+        return True
+    return False
+
+
+def _relevance_score(query: str, result: dict) -> tuple[float, dict]:
+    """计算 query 与检索结果的词重叠相关性分数。
+
+    策略：
+    1. jieba 分词 query，提取多字核心词（≥2 字），过滤停用词
+    2. 在 result 的 title + body 中匹配
+    3. 命中率 = 命中词数 / 核心 query 词数
+    4. 标题命中加权 1.5x，正文命中加权 1.0x
+
+    Args:
+        query: 用户原始查询
+        result: 检索结果 dict（需含 title, body 字段）
+
+    Returns:
+        (score, debug_info)
+        score: 0.0 ~ 1.0+（标题全命中可达 1.5）
+        debug_info: {"query_tokens": [...], "title_hits": [...], "body_hits": [...]}
+    """
+    if not query or not result:
+        return 1.0, {"reason": "空 query 或 result，默认通过"}
+
+    # 分词并提取多字核心词
+    tokens = _tokenize(query).split()
+    core_tokens = [t for t in tokens if len(t) >= 2 and t not in _STOPWORDS]
+
+    if not core_tokens:
+        # 核心词数 ≤ 1 时无法计算重叠率，默认通过（避免误杀）
+        return 1.0, {"reason": "核心词不足，默认通过"}
+
+    title_text = (result.get("title") or "").lower()
+    body_text = (result.get("body") or "").lower()
+
+    title_hits = []
+    body_hits = []
+    for tok in core_tokens:
+        tok_lower = tok.lower()
+        if tok_lower in title_text:
+            title_hits.append(tok)
+        elif tok_lower in body_text:
+            body_hits.append(tok)
+
+    # 命中率：标题命中 * 1.5 + 正文命中 * 1.0，除以核心词数
+    hit_score = (len(title_hits) * 1.5 + len(body_hits) * 1.0) / len(core_tokens)
+
+    debug_info = {
+        "query_tokens": core_tokens,
+        "title_hits": title_hits,
+        "body_hits": body_hits,
+        "hit_ratio": hit_score,
+    }
+    return hit_score, debug_info
+
+
 def build_rag_context_with_details(query: str, content_types: list[str] = None, limit: int = 8) -> dict:
     """检索知识库（FTS5 + 向量混合），返回上下文文本和详细检索结果。
 
@@ -1913,6 +2135,34 @@ def build_rag_context_with_details(query: str, content_types: list[str] = None, 
         all_results = [r for r in all_results if r["_score"] >= SCORE_THRESHOLD]
         if len(all_results) < before_count:
             logger.info(f"分数阈值过滤: {before_count} → {len(all_results)}条 (阈值={SCORE_THRESHOLD})")
+
+    # 相关性硬过滤：剔除 query 词重叠率过低的结果（P1）
+    # 策略：jieba 分词 query 提取核心词，在 title+body 中匹配，命中率低于阈值则过滤
+    # 跳过条件：URL/纯英文 query、直接注入的估值数据、核心词不足
+    RELEVANCE_MIN = get_rag_config_float("relevance_min_score", 0.15)
+    if all_results and not _is_non_chinese_query(query):
+        before_rel = len(all_results)
+        kept = []
+        for r in all_results:
+            # 直接注入的估值数据已通过指数名严格匹配，跳过
+            if r.get("_direct_inject"):
+                r["_relevance"] = 1.0
+                kept.append(r)
+                continue
+            score, _ = _relevance_score(query, r)
+            r["_relevance"] = score
+            if score >= RELEVANCE_MIN:
+                kept.append(r)
+            else:
+                logger.info(
+                    f"相关性过滤: 移除 '{(r.get('title') or '')[:30]}' "
+                    f"(score={score:.2f}, ct={r.get('content_type')})"
+                )
+        # 防退化：过滤后为空则保留原结果（避免空上下文）
+        if kept:
+            all_results = kept
+        if len(all_results) < before_rel:
+            logger.info(f"相关性过滤: {before_rel} → {len(all_results)}条 (阈值={RELEVANCE_MIN})")
 
     # 同指数 analysis 去重：同一指数最多保留 2 条（最新 + 最高分），避免重复记录占满结果
     _analysis_dedup = {}
