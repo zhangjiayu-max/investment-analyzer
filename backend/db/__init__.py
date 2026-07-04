@@ -965,6 +965,13 @@ def init_db():
     _add_column_if_not_exists(conn, "knowledge_base", "valid_until", "TEXT DEFAULT ''")
     _add_column_if_not_exists(conn, "knowledge_base", "limitations", "TEXT DEFAULT '[]'")
     _add_column_if_not_exists(conn, "knowledge_base", "counterpoints", "TEXT DEFAULT '[]'")
+    # P0-3.2：决策↔知识库 FK 强关联（替代 source 字符串解析）
+    _add_column_if_not_exists(conn, "knowledge_base", "source_decision_id", "INTEGER")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_kb_source_decision ON knowledge_base(source_decision_id)")
+
+    # P0-3.1：持仓↔预警 FK 强关联（替代 related_fund_code 字符串匹配）
+    _add_column_if_not_exists(conn, "portfolio_alerts", "holding_id", "INTEGER")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_alerts_holding ON portfolio_alerts(holding_id)")
 
     # 编排配置默认值
     _default_orchestration_config = [

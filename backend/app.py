@@ -309,6 +309,9 @@ async def startup():
     # 后台每日备份（启动时 + 每天凌晨 2 点）
     asyncio.create_task(_auto_daily_backup())
 
+    # 后台每日清理（启动回填 + 每天凌晨 3 点：决策过期 + 结论清理，P0-4.1/3.3）
+    asyncio.create_task(_auto_daily_cleanup())
+
     # 后台每日评测 Pipeline（LLM 调用，默认关闭）
     if get_config("llm_cost.auto_daily_eval", "false") == "true":
         asyncio.create_task(_auto_daily_eval())
@@ -394,6 +397,56 @@ async def _auto_daily_backup():
             backup_database()
     except Exception as e:
         logging.warning(f"自动备份任务异常: {e}")
+
+
+async def _auto_daily_cleanup():
+    """每日凌晨 3 点执行数据清理任务。
+
+    设计稿 P0-4.1 + P0-3.3：
+    - 决策过期：accepted 状态超 7 天自动转 deferred
+    - 结论清理：analysis_conclusions 表过期记录清理
+    - 启动时执行一次回填（holding_id / source_decision_id）
+    """
+    import time
+    try:
+        await asyncio.sleep(30)  # 等启动完成
+
+        # 启动时回填一次（幂等）
+        try:
+            from db.portfolio import backfill_alert_holding_id
+            from db.decisions import backfill_kb_decision_id
+            alert_n = backfill_alert_holding_id()
+            kb_n = backfill_kb_decision_id()
+            if alert_n or kb_n:
+                logging.info(f"[auto-cleanup] 启动回填: alerts={alert_n}, kb_lessons={kb_n}")
+        except Exception as e:
+            logging.warning(f"[auto-cleanup] 启动回填异常: {e}")
+
+        while True:
+            now = time.localtime()
+            target_hour = 3
+            if now.tm_hour >= target_hour:
+                wait_seconds = (24 - now.tm_hour + target_hour) * 3600 - now.tm_min * 60 - now.tm_sec
+            else:
+                wait_seconds = (target_hour - now.tm_hour) * 3600 - now.tm_min * 60 - now.tm_sec
+            await asyncio.sleep(max(wait_seconds, 60))
+
+            try:
+                # P0-4.1：决策过期
+                from db.decisions import expire_stale_decisions
+                expired = expire_stale_decisions(days=7)
+                if expired > 0:
+                    logging.info(f"[auto-cleanup] 决策过期: {expired} 条 accepted 转 deferred")
+
+                # P0-3.3：过期结论清理
+                from db.analysis_conclusions import cleanup_expired_conclusions
+                cleaned = cleanup_expired_conclusions()
+                if cleaned > 0:
+                    logging.info(f"[auto-cleanup] 清理过期分析结论: {cleaned} 条")
+            except Exception as e:
+                logging.warning(f"[auto-cleanup] 清理任务异常: {e}")
+    except Exception as e:
+        logging.warning(f"自动清理任务异常: {e}")
 
 
 async def _auto_daily_eval():

@@ -2129,6 +2129,78 @@ def _extract_key_points(text: str) -> list[str]:
     return points[:5]
 
 
+# ── P0-2.1：共享黑板架构 — 专家协同 ──
+
+# 评级关键词（按优先级排序，越具体越先匹配）
+_RATING_KEYWORDS = [
+    "建议买入", "建议加仓", "建议持有", "建议减仓", "建议卖出", "建议观望",
+    "买入", "加仓", "持有", "减仓", "卖出", "观望", "逢低买入", "逢高减仓",
+]
+
+
+def _extract_structured_conclusion(result_dict: dict) -> dict | None:
+    """从专家结果中提取结构化结论摘要（rating/key_evidence）。
+
+    用于共享黑板：后续专家可看到前序专家的结论摘要，实现协同而非割裂。
+    三级解析：结构化字段 → 关键词提取 → 纯文本降级。
+    """
+    if not result_dict or not isinstance(result_dict, dict):
+        return None
+    analysis = result_dict.get("analysis", "") or ""
+    if not analysis:
+        return None
+
+    # 1. 评级提取（关键词匹配）
+    rating = ""
+    for kw in _RATING_KEYWORDS:
+        if kw in analysis:
+            rating = kw.replace("建议", "")
+            break
+
+    # 2. 关键证据（取前3条编号/符号项）
+    key_evidence = _extract_key_points(analysis)[:3]
+    if not key_evidence:
+        # 降级：取结论段前120字
+        conclusion = _extract_conclusion(analysis)
+        if conclusion:
+            key_evidence = [conclusion[:120]]
+
+    return {
+        "rating": rating,
+        "key_evidence": key_evidence,
+        "analysis_preview": analysis[:200],
+    }
+
+
+def _format_blackboard_summary(blackboard: dict) -> str:
+    """格式化黑板中已完成专家的结论摘要，供后续专家参考。
+
+    黑板只读：后续专家可引用或质疑，但不能修改前序结论。
+    """
+    if not blackboard:
+        return ""
+    lines = []
+    for agent_key, conclusion in blackboard.items():
+        if not conclusion:
+            continue
+        rating = conclusion.get("rating", "")
+        evidence_list = conclusion.get("key_evidence", [])
+        evidence = "；".join(evidence_list)[:120] if evidence_list else ""
+        parts = [f"- {agent_key}"]
+        if rating:
+            parts.append(f"评级={rating}")
+        if evidence:
+            parts.append(f"关键证据: {evidence}")
+        lines.append(" | ".join(parts))
+    if not lines:
+        return ""
+    return (
+        "\n\n## 同批次专家结论（供参考，可质疑）\n"
+        + "\n".join(lines)
+        + "\n（注：以上为同批次已执行专家的中间结论，你可在其基础上补充、修正或质疑，但不应盲从。）"
+    )
+
+
 def build_reasoning_trail(
     query: str,
     query_rewritten: str,
@@ -3191,6 +3263,8 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
 
     MAX_TURNS = 3 if budget["mode"] == "conservative" else 6
     force_skip_cross_review = budget["mode"] == "conservative"
+    # P0-2.1：共享黑板架构 — 2-3 专家串行执行，后执行者能看到前序结论（默认开启）
+    shared_blackboard_enabled = get_orchestration_config("shared_blackboard_enabled", "true") == "true"
     specialist_results = []
     all_tool_calls = []
     arbitration_done = False  # 标记仲裁是否已完成,避免重复调用
@@ -3669,8 +3743,35 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
                                               prebuilt_context=prebuilt_context,
                                               trace_id=trace_id)
             result_queue.put((0, tc, args, agent_key, agent_info, result_str))
+        elif shared_blackboard_enabled and 2 <= len(tool_tasks) <= 3:
+            # P0-2.1：共享黑板架构 — 2-3 专家串行执行，后执行者能看到前序结论摘要
+            # 牺牲并行速度换取专家协同，减少 Phase B 交叉审阅轮次
+            shared_blackboard: dict[str, dict] = {}
+            for idx, (tc, args, expert_query, agent_key, agent_info) in enumerate(tool_tasks):
+                _check_cancel(cancel_event)
+                _check_timeout(start_time)
+                # 注入黑板中已完成专家的结论摘要
+                bb_summary = _format_blackboard_summary(shared_blackboard)
+                ctx = prebuilt_context + bb_summary if bb_summary else prebuilt_context
+                result_str = _execute_specialist_cached(
+                    tc.function.name, expert_query, cancel_event,
+                    prebuilt_context=ctx, trace_id=trace_id,
+                )
+                result_queue.put((idx, tc, args, agent_key, agent_info, result_str))
+                # 提取结论写入黑板，供后续专家参考
+                try:
+                    result_dict = json.loads(result_str)
+                    if "error" not in result_dict:
+                        conclusion = _extract_structured_conclusion(result_dict)
+                        if conclusion:
+                            shared_blackboard[agent_key] = conclusion
+                            logger.info(f"[blackboard] {agent_key} 写入黑板"
+                                        f" (rating={conclusion.get('rating','')}, "
+                                        f"已有 {len(shared_blackboard)} 条)")
+                except Exception as _e:
+                    logger.debug(f"[blackboard] 提取 {agent_key} 结论失败: {_e}")
         else:
-            # 多个专家,并行执行
+            # 多个专家,并行执行（4+ 专家保持并行，黑板未启用时也走此路）
             with concurrent.futures.ThreadPoolExecutor(max_workers=len(tool_tasks)) as executor:
                 for idx, (tc, args, expert_query, agent_key, agent_info) in enumerate(tool_tasks):
                     future = executor.submit(

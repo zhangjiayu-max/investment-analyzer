@@ -12,20 +12,23 @@ def add_knowledge(category: str, title: str, content: str,
                   keywords: list = None, importance: int = 5,
                   atom_type: str = "", evidence_level: str = "",
                   as_of_date: str = "", valid_until: str = "",
-                  limitations: list = None, counterpoints: list = None) -> int:
+                  limitations: list = None, counterpoints: list = None,
+                  source_decision_id: int = None) -> int:
     """添加知识条目，返回 ID。"""
     conn = _get_conn()
     try:
         cur = conn.execute("""
             INSERT OR REPLACE INTO knowledge_base
             (category, subcategory, title, content, source, keywords, importance,
-             atom_type, evidence_level, as_of_date, valid_until, limitations, counterpoints)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             atom_type, evidence_level, as_of_date, valid_until, limitations, counterpoints,
+             source_decision_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (category, subcategory, title, content, source,
               json.dumps(keywords or [], ensure_ascii=False), importance,
               atom_type or "", evidence_level or "", as_of_date or "", valid_until or "",
               json.dumps(limitations or [], ensure_ascii=False),
-              json.dumps(counterpoints or [], ensure_ascii=False)))
+              json.dumps(counterpoints or [], ensure_ascii=False),
+              source_decision_id))
         conn.commit()
         return cur.lastrowid
     finally:

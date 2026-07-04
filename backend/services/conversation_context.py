@@ -500,6 +500,10 @@ def filter_context_for_agent(context_str: str, agent_key: str, token_budget: int
     # 1. 白名单过滤
     kept = [(t, b) for t, b in sections if _match(t, allowed_keywords)]
 
+    # P0-2.1：共享黑板 — 始终保留"同批次专家结论"段，实现跨专家信息共享
+    kept += [(t, b) for t, b in sections
+             if "同批次专家" in t and (t, b) not in kept]
+
     # 2. 按优先级排序（优先级表里靠前的排前；不在优先级表的按原顺序排后）
     priority = CONTEXT_PRIORITY.get(agent_key, allowed_keywords)
     def _priority_idx(title: str) -> int:

@@ -1989,8 +1989,12 @@ def get_fund_holdings(fund_code: str, year: str = None) -> dict:
 def create_alert(alert_type: str, title: str, content: str = None,
                  severity: str = "info", related_fund_code: str = None,
                  related_fund_name: str = None, source: str = None,
-                 user_id: str = "default") -> int:
-    """新增风险预警，返回 alert_id。24小时内同标题+severity不重复生成。"""
+                 user_id: str = "default", holding_id: int = None) -> int:
+    """新增风险预警，返回 alert_id。24小时内同标题+severity不重复生成。
+
+    Args:
+        holding_id: 关联持仓ID（P0-3.1 FK 强关联，可选）
+    """
     conn = _get_conn()
     try:
         # 去重：24小时内同 title + severity 不重复
@@ -2004,16 +2008,62 @@ def create_alert(alert_type: str, title: str, content: str = None,
             conn.close()
             return existing['id']
 
+        # 自动推断 holding_id：若未传入但有 related_fund_code，尝试匹配持仓
+        if holding_id is None and related_fund_code:
+            try:
+                h = conn.execute(
+                    "SELECT id FROM portfolio_holdings WHERE fund_code = ? AND user_id = ? LIMIT 1",
+                    (related_fund_code, user_id),
+                ).fetchone()
+                if h:
+                    holding_id = h["id"]
+            except Exception:
+                pass
+
         cur = conn.execute("""
             INSERT INTO portfolio_alerts
                 (user_id, alert_type, severity, title, content,
-                 related_fund_code, related_fund_name, source)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                 related_fund_code, related_fund_name, source, holding_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (user_id, alert_type, severity, title, content,
-              related_fund_code, related_fund_name, source))
+              related_fund_code, related_fund_name, source, holding_id))
         alert_id = cur.lastrowid
         conn.commit()
         return alert_id
+    finally:
+        conn.close()
+
+
+def backfill_alert_holding_id() -> int:
+    """回填 portfolio_alerts.holding_id（用 related_fund_code 匹配持仓）。
+
+    设计稿 P0-3.1：建立持仓↔预警 FK 强关联。
+    历史预警只有 related_fund_code 字符串，本函数回填 holding_id。
+
+    Returns:
+        回填条数
+    """
+    conn = _get_conn()
+    try:
+        rows = conn.execute(
+            "SELECT id, related_fund_code FROM portfolio_alerts "
+            "WHERE holding_id IS NULL AND related_fund_code IS NOT NULL "
+            "AND related_fund_code != ''"
+        ).fetchall()
+        updated = 0
+        for r in rows:
+            h = conn.execute(
+                "SELECT id FROM portfolio_holdings WHERE fund_code = ? LIMIT 1",
+                (r["related_fund_code"],),
+            ).fetchone()
+            if h:
+                conn.execute(
+                    "UPDATE portfolio_alerts SET holding_id = ? WHERE id = ?",
+                    (h["id"], r["id"]),
+                )
+                updated += 1
+        conn.commit()
+        return updated
     finally:
         conn.close()
 

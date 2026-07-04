@@ -1388,6 +1388,7 @@ def build_decision_precheck(decision_id: int, user_id: str = "default") -> dict:
 
     target_code = decision.get("target_code") or ""
     target_type = decision.get("target_type") or ""
+    target_name = decision.get("target_name") or ""
     if target_code:
         conn = _get_conn()
         try:
@@ -1408,6 +1409,74 @@ def build_decision_precheck(decision_id: int, user_id: str = "default") -> dict:
                 warnings.append(f"同标的存在未复盘/未完成决策 #{row['id']}，建议先处理后再新增行动")
         finally:
             conn.close()
+
+    # P0-3.2：检索同标的历史教训（来自决策复盘沉淀到 knowledge_base）
+    # 教训以 source_decision_id 关联历史决策，按 target_code+target_type 匹配
+    if target_code:
+        try:
+            conn = _get_conn()
+            lesson_rows = conn.execute(
+                """
+                SELECT kb.title, kb.content, kb.importance, kb.source_decision_id
+                FROM knowledge_base kb
+                WHERE kb.category = 'user_lesson'
+                  AND kb.source_decision_id IN (
+                      SELECT id FROM decision_records
+                      WHERE target_code = ? AND target_type = ? AND status = 'reviewed'
+                  )
+                ORDER BY kb.importance DESC
+                LIMIT 3
+                """,
+                (target_code, target_type),
+            ).fetchall()
+            conn.close()
+            if lesson_rows:
+                lesson_titles = [r["title"] for r in lesson_rows]
+                warnings.append(
+                    f"该标的已有 {len(lesson_rows)} 条历史复盘教训："
+                    + "；".join(lesson_titles)
+                )
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).warning(f"precheck 检索历史教训失败: {e}")
+
+    # P0-3.3：历史结论桥接激活 — 检测 24h 内同标的的冲突结论
+    if target_code:
+        try:
+            from db.analysis_conclusions import get_conflicting_conclusions
+            conflicts = get_conflicting_conclusions(target_code, hours=24)
+            if conflicts:
+                warnings.append(
+                    f"24h 内有 {len(conflicts)} 条相反分析结论 "
+                    f"(如 {conflicts[0].get('conclusion_a_action','')} vs "
+                    f"{conflicts[0].get('conclusion_b_action','')})，建议先核对分析差异"
+                )
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).warning(f"precheck 检测历史结论冲突失败: {e}")
+
+    # P0-4.2：多模型评审反哺 precheck — 高拒率阻断执行
+    try:
+        conn = _get_conn()
+        peer_rows = conn.execute(
+            "SELECT verdict FROM decision_peer_reviews WHERE decision_id = ?",
+            (decision_id,),
+        ).fetchall()
+        conn.close()
+        if peer_rows:
+            reject_count = sum(1 for r in peer_rows if r["verdict"] in ("reject", "defer"))
+            total = len(peer_rows)
+            if reject_count >= 2:
+                blockers.append(
+                    f"多模型评审 {reject_count}/{total} 个建议拒绝/延后，需先解决评审关切"
+                )
+            elif reject_count == 1 and total >= 3:
+                warnings.append(
+                    f"多模型评审 {reject_count}/{total} 个建议拒绝，执行前请复核评审关切"
+                )
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning(f"precheck 查询多模型评审失败: {e}")
 
     trade_plan = _extract_trade_plan_from_decision(decision)
 
@@ -1691,10 +1760,73 @@ def _save_review_lesson_knowledge(decision_id: int, outcome: str, result_note: s
             as_of_date=datetime.now().strftime("%Y-%m-%d"),
             limitations=["来自用户复盘，适用于相似资金用途和风险约束下的决策"],
             counterpoints=["若用户目标、现金流或市场环境明显变化，需要重新判断"],
+            source_decision_id=decision_id,
         )
     except Exception:
         # 复盘主流程不能因知识沉淀失败而失败。
         return
+
+
+def backfill_kb_decision_id() -> int:
+    """回填 knowledge_base.source_decision_id（从 source 字符串解析）。
+
+    历史 user_lesson 知识的 source 字段格式为 "decision_review:{id}"，
+    本函数解析后填入 source_decision_id 字段，建立 FK 关联。
+
+    Returns:
+        回填条数
+    """
+    conn = _get_conn()
+    try:
+        rows = conn.execute(
+            "SELECT id, source FROM knowledge_base "
+            "WHERE source_decision_id IS NULL AND source LIKE 'decision_review:%'"
+        ).fetchall()
+        updated = 0
+        for r in rows:
+            try:
+                decision_id = int(r["source"].split(":", 1)[1])
+                conn.execute(
+                    "UPDATE knowledge_base SET source_decision_id = ? WHERE id = ?",
+                    (decision_id, r["id"]),
+                )
+                updated += 1
+            except (ValueError, IndexError):
+                continue
+        conn.commit()
+        return updated
+    finally:
+        conn.close()
+
+
+def expire_stale_decisions(days: int = 7) -> int:
+    """accepted 状态超 N 天未确认交易的决策自动转 deferred。
+
+    设计稿 P0-4.1：避免 accepted 状态永久堆积。
+
+    Args:
+        days: 过期天数，默认 7 天
+
+    Returns:
+        转换条数
+    """
+    conn = _get_conn()
+    try:
+        cur = conn.execute(
+            f"""
+            UPDATE decision_records
+            SET status = 'deferred',
+                notes = COALESCE(notes, '') || CHAR(10) || '[系统] {days}天未执行交易自动转延后',
+                updated_at = datetime('now','localtime')
+            WHERE status = 'accepted'
+              AND updated_at < datetime('now','localtime', ?)
+            """,
+            (f"-{days} days",),
+        )
+        conn.commit()
+        return cur.rowcount or 0
+    finally:
+        conn.close()
 
 
 def _create_eval_case_from_bad_decision_review(decision_id: int, result_note: str, lesson: str):

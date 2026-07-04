@@ -380,3 +380,34 @@ def get_conflicting_conclusions(
     except Exception as e:
         logger.warning(f"get_conflicting_conclusions 失败: {e}")
         return []
+
+
+def cleanup_expired_conclusions() -> int:
+    """清理 analysis_conclusions 表中已过期的记录。
+
+    设计稿 P0-3.3：桥接层激活后的定期清理任务。
+    表默认 expires_at = created_at + 24h，本函数删除 expires_at < now 的记录。
+
+    Returns:
+        删除条数
+    """
+    try:
+        conn = _get_conn()
+        cur = conn.execute(
+            "DELETE FROM analysis_conclusions WHERE expires_at < datetime('now','localtime')"
+        )
+        # 同时清理孤立的 cross_system_references（引用的 conclusion 已删除）
+        conn.execute(
+            "DELETE FROM cross_system_references "
+            "WHERE source_conclusion_id NOT IN (SELECT id FROM analysis_conclusions) "
+            "OR target_conclusion_id NOT IN (SELECT id FROM analysis_conclusions)"
+        )
+        conn.commit()
+        deleted = cur.rowcount or 0
+        conn.close()
+        if deleted > 0:
+            logger.info(f"清理过期分析结论 {deleted} 条")
+        return deleted
+    except Exception as e:
+        logger.warning(f"cleanup_expired_conclusions 失败: {e}")
+        return 0
