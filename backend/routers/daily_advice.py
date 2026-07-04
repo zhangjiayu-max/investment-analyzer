@@ -236,6 +236,124 @@ async def ask_ai_about_signal(signal_id: int):
         raise HTTPException(500, f"AI 解释生成失败: {e}")
 
 
+# ── P1-3.3：AI 综合解读（LLM 默认关闭，用户主动触发） ──
+
+@router.post("/api/daily-advice/comprehensive-interpretation")
+async def comprehensive_interpretation(user_id: str = "default"):
+    """AI 综合解读今日全部信号（LLM 调用，默认关闭）。
+
+    成本管控：
+    - 开关 llm_cost.daily_advice_ai_interpretation 默认 false
+    - 用户主动点击触发，非自动
+    - 同日同时段同信号集缓存 30 分钟
+    - Prompt 限制 500 token 输出
+    """
+    from db.config import get_config
+    from services.llm_service import _call_llm, MODEL
+    from services.rag import build_rag_context_with_details
+    import time
+
+    # 1. 开关检查
+    if get_config("llm_cost.daily_advice_ai_interpretation", "false") != "true":
+        raise HTTPException(403, "AI 综合解读已关闭（llm_cost.daily_advice_ai_interpretation=false）")
+
+    # 2. 获取今日全部信号
+    signals = list_today_signals(user_id)
+    if not signals:
+        raise HTTPException(400, "今日无信号，无需解读")
+
+    # 3. 缓存检查（同日同时段同信号集缓存 30 分钟）
+    import hashlib
+    signal_sig = hashlib.md5(
+        json.dumps([{"id": s.get("id"), "status": s.get("status")} for s in signals],
+                   ensure_ascii=False, sort_keys=True).encode()
+    ).hexdigest()[:12]
+    cache_key = f"daily_advice_interpretation:{user_id}:{signal_sig}"
+    try:
+        from db._conn import _get_conn
+        conn = _get_conn()
+        row = conn.execute(
+            "SELECT content, created_at FROM daily_advice_cache WHERE cache_key = ? AND created_at >= datetime('now','-30 minutes')",
+            (cache_key,)
+        ).fetchone()
+        conn.close()
+        if row:
+            logger.info(f"[comprehensive_interpretation] 缓存命中: {cache_key}")
+            return {"ok": True, "interpretation": row["content"], "cached": True, "signal_count": len(signals)}
+    except Exception:
+        pass  # 缓存表可能不存在，跳过
+
+    # 4. 构建 prompt
+    signal_lines = []
+    for s in signals[:15]:  # 最多 15 条
+        signal_lines.append(
+            f"- [{s.get('severity','')}] {s.get('signal_type','')}: {s.get('title','')} "
+            f"(score={s.get('score','?')}, action={s.get('action_type','')}, "
+            f"amount={s.get('suggested_amount','?')})"
+        )
+    signals_text = "\n".join(signal_lines)
+
+    # 注入 RAG 知识库参考（限 2000 字）
+    try:
+        rag_ctx, _ = build_rag_context_with_details("今日持仓信号综合解读操作建议", top_k=3)
+        rag_text = rag_ctx[:2000] if rag_ctx else ""
+    except Exception:
+        rag_text = ""
+
+    system_prompt = (
+        "你是理财决策助手。请根据今日全部持仓信号，给出综合操作建议。\n"
+        "要求：\n"
+        "1. 输出'操作优先级 Top3'（按紧急程度排序）\n"
+        "2. 输出'风险提示'（1-2 条）\n"
+        "3. 限制 500 token 内\n"
+        "4. 用中文，简洁直接，不啰嗦"
+    )
+    user_prompt = f"## 今日信号（{len(signals)} 条）\n{signals_text}\n"
+    if rag_text:
+        user_prompt += f"\n## 知识库参考\n{rag_text}\n"
+    user_prompt += "\n请给出综合操作建议。"
+
+    # 5. LLM 调用
+    try:
+        response = _call_llm(
+            caller="daily_advice_interpretation",
+            trace_id=f"dai-{int(time.time())}",
+            model=MODEL,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=0.3,
+            max_tokens=800,
+        )
+        ai_text = response.choices[0].message.content or ""
+    except Exception as e:
+        logger.error(f"[comprehensive_interpretation] LLM 调用失败: {e}")
+        raise HTTPException(500, f"AI 综合解读失败: {e}")
+
+    # 6. 写缓存
+    try:
+        from db._conn import _get_conn
+        conn = _get_conn()
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS daily_advice_cache (
+                cache_key TEXT PRIMARY KEY,
+                content TEXT,
+                created_at TEXT DEFAULT (datetime('now','localtime'))
+            )
+        """)
+        conn.execute(
+            "INSERT OR REPLACE INTO daily_advice_cache (cache_key, content, created_at) VALUES (?, ?, datetime('now','localtime'))",
+            (cache_key, ai_text)
+        )
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logger.debug(f"[comprehensive_interpretation] 缓存写入失败: {e}")
+
+    return {"ok": True, "interpretation": ai_text, "cached": False, "signal_count": len(signals)}
+
+
 # ── 周报生成器 ──────────────────────────────────────────
 
 @router.post("/api/daily-advice/weekly-report")

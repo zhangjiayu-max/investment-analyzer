@@ -304,6 +304,14 @@ async def delete_alert_api(alert_id: int):
     return {"ok": True}
 
 
+@router.get("/api/portfolio/alerts/{alert_id}/history")
+async def get_alert_history_api(alert_id: int, days: int = 30):
+    """P1-3.1：查询同持仓同类型预警的历史记录。"""
+    from db.portfolio import get_alert_history
+    history = get_alert_history(alert_id, days)
+    return {"history": history, "count": len(history)}
+
+
 @router.post("/api/portfolio/alerts/generate")
 async def generate_alert_api(req: CreateAlertRequest):
     """AI 主动生成预警。"""
@@ -522,6 +530,63 @@ async def scan_portfolio_alerts():
                     generated += 1
     except Exception as e:
         logger.warning(f"[alert_scan] 补仓后跌幅预警异常: {e}")
+
+    # ── P0-2.3：预警→候选自动转化 — danger/warning 预警自动入 recommendation_candidates ──
+    # 纯数据库操作，0 LLM；dedupe_key 防止同日重复转化
+    try:
+        from db.decisions import create_recommendation_candidate
+        from db._conn import _get_conn
+        conn = _get_conn()
+        today_start = datetime.now().strftime("%Y-%m-%d 00:00:00")
+        new_alerts = conn.execute(
+            """SELECT id, alert_type, severity, title, content, related_fund_code, related_fund_name
+               FROM portfolio_alerts
+               WHERE severity IN ('warning', 'danger')
+                 AND created_at >= ?
+                 AND source = 'system_scan'
+               ORDER BY created_at DESC""",
+            (today_start,),
+        ).fetchall()
+        conn.close()
+
+        # alert_type → action_type 映射
+        _ALERT_ACTION_MAP = {
+            "drawdown_alert": "reduce",          # 回撤→减仓
+            "buy_drop_alert": "watch",           # 补仓后跌幅→观察
+            "concentration_alert": "rebalance",  # 集中度→调仓
+            "valuation_alert": "reduce",         # 高估→减仓
+            "valuation_opportunity": "add",      # 低估→加仓
+            "cash_idle": "cash_reserve",         # 现金闲置→备用金
+            "stale_data": "watch",               # 数据过期→观察
+        }
+        converted = 0
+        for a in new_alerts:
+            a = dict(a)
+            fund_code = a.get("related_fund_code") or ""
+            action_type = _ALERT_ACTION_MAP.get(a["alert_type"], "watch")
+            dedupe_key = f"alert:{a['alert_type']}:{fund_code}:{today_prefix}"
+            try:
+                create_recommendation_candidate(
+                    source_type="alert",
+                    source_id=a["id"],
+                    action_type=action_type,
+                    target_type="fund",
+                    target_code=fund_code,
+                    target_name=a.get("related_fund_name") or "",
+                    summary=a["title"],
+                    rationale=a.get("content", "")[:500],
+                    confidence="high" if a["severity"] == "danger" else "medium",
+                    evidence={"alert_type": a["alert_type"], "severity": a["severity"], "alert_id": a["id"]},
+                    dedupe_key=dedupe_key,
+                    priority=5 if a["severity"] == "danger" else 3,
+                )
+                converted += 1
+            except Exception as ce:
+                logger.debug(f"[alert_to_candidate] 转化失败 alert_id={a['id']}: {ce}")
+        if converted:
+            logger.info(f"[alert_to_candidate] 转化 {converted} 条预警为决策候选")
+    except Exception as e:
+        logger.warning(f"[alert_to_candidate] 预警转候选批量异常: {e}")
 
     return {"ok": True, "generated": generated}
 

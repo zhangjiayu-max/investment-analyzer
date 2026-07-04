@@ -2116,6 +2116,33 @@ def cleanup_old_alerts(user_id: str = "default", days: int = 30) -> int:
         conn.close()
 
 
+def get_alert_history(alert_id: int, days: int = 30) -> list[dict]:
+    """P1-3.1：查询同持仓同类型预警的历史记录。
+
+    用于预警卡片"历史对比"展示，判断是否反复发生。
+    """
+    conn = _get_conn()
+    try:
+        cur = conn.execute(
+            "SELECT * FROM portfolio_alerts WHERE id = ?", (alert_id,)
+        ).fetchone()
+        if not cur:
+            return []
+        cur = dict(cur)
+        if not cur.get("related_fund_code"):
+            return []
+        rows = conn.execute("""
+            SELECT id, alert_type, severity, title, content, created_at, is_read, source
+            FROM portfolio_alerts
+            WHERE alert_type = ? AND related_fund_code = ?
+              AND created_at >= datetime('now','localtime', ?)
+            ORDER BY created_at DESC LIMIT 20
+        """, (cur["alert_type"], cur["related_fund_code"], f"-{days} days")).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
 def mark_alert_read(alert_id: int) -> bool:
     """标记预警为已读（同时标记同标题+severity的所有未读预警）。"""
     conn = _get_conn()

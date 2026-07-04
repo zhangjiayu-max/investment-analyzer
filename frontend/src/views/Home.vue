@@ -14,6 +14,7 @@ import BondMarket from '../components/BondMarket.vue'
 import RagAnalysis from '../components/RagAnalysis.vue'
 import RagTestPage from '../components/RagTestPage.vue'
 import PortfolioManagement from '../components/PortfolioManagement.vue'
+import AlertCenter from '../components/AlertCenter.vue'
 import GoalBucketsPage from '../components/GoalBucketsPage.vue'
 import AllocationDashboard from '../components/AllocationDashboard.vue'
 import StrategySandboxPage from '../components/StrategySandboxPage.vue'
@@ -53,6 +54,7 @@ const pageComponents = {
   'rag-test': RagTestPage,
   bond: BondMarket,
   portfolio: PortfolioManagement,
+  'alert-center': AlertCenter,
   'goal-buckets': GoalBucketsPage,
   'allocation-dashboard': AllocationDashboard,
   'strategy-sandbox': StrategySandboxPage,
@@ -80,6 +82,9 @@ const pageProps = computed(() => {
   }
   if (props.activePage === 'search') {
     return { query: props.searchQuery, onNavigate: (page) => emit('navigate', page) }
+  }
+  if (props.activePage === 'alert-center') {
+    return { onNavigate: (page) => emit('navigate', page) }
   }
   return {}
 })

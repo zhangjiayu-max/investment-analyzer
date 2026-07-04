@@ -1543,6 +1543,16 @@ export function scanPortfolioAlerts() {
   return api.post('/portfolio/alerts/scan')
 }
 
+/** P1-3.1：查询同持仓同类型预警的历史记录 */
+export function getAlertHistory(alertId, days = 30) {
+  return api.get(`/portfolio/alerts/${alertId}/history`, { params: { days } })
+}
+
+/** P1-3.3：AI 综合解读今日全部信号（LLM 默认关闭，用户主动触发） */
+export function comprehensiveInterpretation() {
+  return api.post('/daily-advice/comprehensive-interpretation', {}, { timeout: 120000 })
+}
+
 // ── 交易标签 API ──────────────────────────────────────
 
 /** 添加交易标签 */
@@ -1885,6 +1895,16 @@ export function markWatchlistBought(id) {
 /** 查询基金信息并自动填充 */
 export function lookupWatchlistFund(id) {
   return api.post(`/watchlist/${id}/lookup`, {}, { timeout: 30000 })
+}
+
+/** P0-2.2：关注列表巡检（patrol）— 返回信号灯状态 + 触发预警 */
+export function patrolWatchlist() {
+  return api.post('/watchlist/patrol', {}, { timeout: 60000 })
+}
+
+/** P2-4.1：获取关注基金买入时机综合评分（纯规则计算，无 LLM） */
+export function getBuyScore(itemId) {
+  return api.get(`/watchlist/${itemId}/buy-score`)
 }
 
 // ── 异步任务状态 API ──────────────────────────────────────

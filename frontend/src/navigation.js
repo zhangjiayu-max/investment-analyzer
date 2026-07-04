@@ -18,6 +18,7 @@ export const navItems = [
   { key: 'valuation', label: '估值数据', icon: 'valuation', hot: true },
   { key: 'gallery', label: '估值图片', icon: 'gallery' },
   { key: 'portfolio', label: '持仓管理', icon: 'portfolio', hot: true },
+  { key: 'alert-center', label: '风险与提示', icon: 'warning', hot: true },
   {
     key: 'group-knowledge',
     label: '知识库',

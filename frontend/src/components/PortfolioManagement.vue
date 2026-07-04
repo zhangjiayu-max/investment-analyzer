@@ -82,7 +82,7 @@ import {
   getCashBalance, adjustCashBalance,
   getFundNavHistory,
   getPortfolioDiversification, getHoldingPerformance, getTransactionSummary,
-  listAlerts, getUnreadAlertCount, markAlertRead, deleteAlert, generateAlert, scanPortfolioAlerts,
+  getUnreadAlertCount,
   addTransactionTag, removeTransactionTag, getTransactionTags, clearAllPortfolio, chat,
   runPortfolioAiAnalysis, listPortfolioAiAnalysisRecords,
   getPortfolioAiAnalysisRecord, deletePortfolioAiAnalysisRecord,
@@ -105,7 +105,7 @@ import {
   classifyFourPots, getDcaOptimization,
   listRecommendationCandidates, listDecisions, listDueDecisionReviews,
   createDecisionFromAction, runWhatIf,
-  dailyAdviceAPI,
+  patrolWatchlist, getBuyScore,
 } from '../api'
 import { useToast } from '../composables/useToast'
 import ConfirmDialog from './ConfirmDialog.vue'
@@ -123,86 +123,6 @@ import { isDark } from '../composables/useTheme'
 import { useAsyncTask } from '../composables/useAsyncTask'
 
 const emit = defineEmits(['navigate'])
-
-// ── 每日持仓提示 ──
-const dailyAdvice = ref(null)
-const dailyAdviceLoading = ref(false)
-const dailyAdviceError = ref(null)
-const aiResponseMap = ref({})  // signalId -> { loading, text, error }
-const adviceActionLoading = ref({})  // signalId -> action type
-
-async function loadDailyAdvice() {
-  dailyAdviceLoading.value = true
-  dailyAdviceError.value = null
-  try {
-    const { data } = await dailyAdviceAPI.getToday()
-    dailyAdvice.value = data
-  } catch (e) {
-    dailyAdviceError.value = e?.response?.data?.detail || e?.message || '加载失败'
-    console.error('loadDailyAdvice error:', e)
-  } finally {
-    dailyAdviceLoading.value = false
-  }
-}
-
-async function handleAdviceAction(signalId, action) {
-  adviceActionLoading.value[signalId] = action
-  try {
-    if (action === 'create-candidate') {
-      await dailyAdviceAPI.createCandidate(signalId)
-      useToast().showToast('已保存为决策候选', 'success')
-    } else if (action === 'ignore') {
-      await dailyAdviceAPI.ignore(signalId)
-      useToast().showToast('已忽略', 'info')
-      await loadDailyAdvice()
-    } else if (action === 'ask-ai') {
-      aiResponseMap.value[signalId] = { loading: true, text: '', error: null }
-      const { data } = await dailyAdviceAPI.askAI(signalId)
-      aiResponseMap.value[signalId] = { loading: false, text: data?.ai_response || data?.message || '暂无回复', error: null }
-    } else if (action === 'refresh') {
-      await dailyAdviceAPI.run()
-      useToast().showToast('提示已刷新', 'success')
-      await loadDailyAdvice()
-    }
-  } catch (e) {
-    const msg = e?.response?.data?.detail || e?.message || '操作失败'
-    if (action === 'ask-ai') {
-      aiResponseMap.value[signalId] = { loading: false, text: '', error: msg }
-    } else {
-      useToast().showToast(msg, 'error')
-    }
-  } finally {
-    adviceActionLoading.value[signalId] = null
-  }
-}
-
-function formatAdviceAmount(amount) {
-  if (!amount && amount !== 0) return ''
-  if (amount >= 10000) return `¥${(amount / 10000).toFixed(1)}万`
-  return `¥${amount.toLocaleString()}`
-}
-
-function severityLabel(level) {
-  return { actionable: '可行动', watch: '观察', blocked: '风险拦截', info: '信息' }[level] || level
-}
-
-function severityClass(level) {
-  return `advice-severity-${level || 'info'}`
-}
-
-function tagLabel(tag) {
-  const map = { 'dca_tier1': '一档定投', 'dca_tier2': '二档定投', 'dca_tier3': '三档定投', 'pause_buy': '暂缓加仓', 'reduce_review': '减仓复核', 'hold': '继续持有', 'rebalance': '再平衡' }
-  return map[tag] || tag
-}
-
-function adviceSummaryClass(headline) {
-  if (!headline) return ''
-  if (headline.includes('加仓') || headline.includes('定投')) return 'advice-headline-buy'
-  if (headline.includes('减仓') || headline.includes('降低')) return 'advice-headline-sell'
-  if (headline.includes('观望') || headline.includes('持有')) return 'advice-headline-hold'
-  if (headline.includes('刷新') || headline.includes('数据')) return 'advice-headline-data'
-  return ''
-}
 
 // ── 持仓占比计算 ──
 const holdingWeights = computed(() => {
@@ -845,6 +765,111 @@ async function refreshWatchlistNavs() {
   }
 }
 
+// ── P0-2.2 关注列表巡检（patrol）+ 信号灯 ──
+const watchlistPatrolling = ref(false)
+const patrolResults = ref(null)  // patrol 返回的 all_items，含 signal_status
+const lastPatrolAt = ref(0)       // 上次巡检时间戳，60s 防抖
+
+// 信号灯映射：以 patrol 结果为准，缺失则按本地数据计算
+function signalStatusOf(item) {
+  const p = patrolResults.value?.all_items?.find(x => x.fund_code === item.fund_code)
+  if (p?.signal_status) {
+    return {
+      status: p.signal_status,
+      reason: p.signal_reason || '',
+      distance: p.distance_to_target,
+    }
+  }
+  // 本地兜底计算
+  const cur = item.current_percentile
+  const tgt = item.target_percentile
+  if (cur == null) return { status: 'gray', reason: '估值数据缺失，请巡检刷新', distance: null }
+  if (tgt != null) {
+    const distance = Math.round((cur - tgt) * 10) / 10
+    if (cur <= tgt) return { status: 'green', reason: `估值已进入目标区间（${cur.toFixed(0)}% ≤ ${tgt.toFixed(0)}%）`, distance }
+    if (Math.abs(distance) <= 5) return { status: 'yellow', reason: `接近目标（差 ${distance > 0 ? '+' : ''}${distance}%）`, distance }
+    return { status: 'red', reason: `估值仍高（差 +${distance}%）`, distance }
+  }
+  if (cur <= 20) return { status: 'green', reason: `低估区域（${cur.toFixed(0)}%）`, distance: null }
+  if (cur <= 25) return { status: 'yellow', reason: `接近低估（${cur.toFixed(0)}%）`, distance: null }
+  return { status: 'red', reason: `估值未达低估（${cur.toFixed(0)}%）`, distance: null }
+}
+
+const SIGNAL_LIGHT = {
+  green: { icon: '🟢', label: '可买入', cls: 'sig-green' },
+  yellow: { icon: '🟡', label: '接近', cls: 'sig-yellow' },
+  red: { icon: '🔴', label: '等待', cls: 'sig-red' },
+  gray: { icon: '⚪', label: '缺数据', cls: 'sig-gray' },
+}
+
+async function patrolWatchlistItems() {
+  // 60s 防抖
+  const now = Date.now()
+  if (now - lastPatrolAt.value < 60000) {
+    showToast('刚巡检过，请稍后再试（60s 防抖）', 'info')
+    return
+  }
+  watchlistPatrolling.value = true
+  try {
+    const { data } = await patrolWatchlist()
+    patrolResults.value = data
+    lastPatrolAt.value = now
+    const triggered = data.triggered_count || data.triggered?.length || 0
+    const all = data.all_items?.length || 0
+    const greenCnt = (data.all_items || []).filter(x => x.signal_status === 'green').length
+    if (triggered > 0) {
+      showToast(`巡检完成：${triggered} 只触发买入信号，${greenCnt} 只绿灯`, 'success')
+    } else {
+      showToast(`巡检完成：${greenCnt}/${all} 只绿灯，暂无触发`, 'success')
+    }
+    // 刷新本地列表（patrol 可能更新了 current_percentile）
+    loadWatchlist()
+  } catch (e) {
+    showToast('巡检失败：' + (e?.response?.data?.detail || e?.message || ''), 'error')
+  } finally {
+    watchlistPatrolling.value = false
+  }
+}
+
+// ── P2-4.1 买入时机评分卡 ──
+const buyScoreMap = ref({})  // itemId -> { loading, score, rating, dimensions, error }
+const expandedScoreId = ref(null)
+
+async function loadBuyScore(item) {
+  if (buyScoreMap.value[item.id]?.score != null) {
+    expandedScoreId.value = expandedScoreId.value === item.id ? null : item.id
+    return
+  }
+  buyScoreMap.value[item.id] = { loading: true }
+  try {
+    const { data } = await getBuyScore(item.id)
+    buyScoreMap.value[item.id] = { loading: false, ...data }
+    expandedScoreId.value = item.id
+  } catch (e) {
+    buyScoreMap.value[item.id] = {
+      loading: false,
+      error: e?.response?.data?.detail || e?.message || '评分失败',
+    }
+  }
+}
+
+function scoreRatingInfo(rating) {
+  return {
+    buy: { icon: '🟢', label: '建议买入', cls: 'score-buy' },
+    watch: { icon: '🟡', label: '观察', cls: 'score-watch' },
+    wait: { icon: '🔴', label: '等待', cls: 'score-wait' },
+  }[rating] || { icon: '⚪', label: rating || '-', cls: '' }
+}
+
+// P2-4.3 估值历史图叠加
+function openValuationChart(item) {
+  if (item.index_code) {
+    emit('navigate', 'valuation')
+  } else {
+    showToast('该基金未关联跟踪指数，无法查看估值图', 'info')
+  }
+}
+
 function resetWatchlistForm() {
   watchlistForm.value = {
     id: null,
@@ -1021,10 +1046,8 @@ const workbenchStats = computed(() => ({
   watchCount: watchlistItems.value.filter(w => w.status !== 'bought').length,
 }))
 
-// Alerts
-const alerts = ref([])
+// Alerts（仅保留未读计数，详情迁移至 AlertCenter.vue）
 const unreadAlertCount = ref(0)
-const showAlerts = ref(true)
 
 async function clearAllData() {
   confirm.value = {
@@ -1038,7 +1061,6 @@ async function clearAllData() {
         await clearAllPortfolio()
         showToast('所有持仓数据已清空')
         loadData()
-        alerts.value = []
         unreadAlertCount.value = 0
       } catch (e) {
         showToast('清空失败: ' + e.message, 'error')
@@ -1407,62 +1429,12 @@ async function loadPendingTxs() {
   }
 }
 
-// Load alerts
+// Load alerts（仅获取未读计数，详情见 AlertCenter.vue）
 async function loadAlerts() {
   try {
-    const { data } = await listAlerts(true, 50)
-    alerts.value = data.alerts || []
     const { data: cnt } = await getUnreadAlertCount()
     unreadAlertCount.value = cnt.count
   } catch (e) { /* silently ignore */ }
-}
-
-async function handleMarkAlertRead(alertId, title, severity) {
-  try {
-    // 标记同标题+severity的所有未读预警为已读
-    const sameGroup = alerts.value.filter(a => a.title === title && a.severity === severity)
-    for (const a of sameGroup) {
-      await markAlertRead(a.latest_id)
-    }
-    alerts.value = alerts.value.filter(a => !(a.title === title && a.severity === severity))
-    const cnt = sameGroup.reduce((s, a) => s + (a.cnt || 1), 0)
-    unreadAlertCount.value = Math.max(0, unreadAlertCount.value - cnt)
-  } catch (e) {
-    showToast('操作失败', 'error')
-  }
-}
-
-async function handleDeleteAlert(alertId, title, severity) {
-  try {
-    // 删除同标题+severity的所有预警
-    const sameGroup = alerts.value.filter(a => a.title === title && a.severity === severity)
-    for (const a of sameGroup) {
-      await deleteAlert(a.latest_id)
-    }
-    alerts.value = alerts.value.filter(a => !(a.title === title && a.severity === severity))
-    const cnt = sameGroup.reduce((s, a) => s + (a.cnt || 1), 0)
-    unreadAlertCount.value = Math.max(0, unreadAlertCount.value - cnt)
-  } catch (e) {
-    showToast('操作失败', 'error')
-  }
-}
-
-const alertScanning = ref(false)
-async function handleScanAlerts() {
-  alertScanning.value = true
-  try {
-    const { data } = await scanPortfolioAlerts()
-    if (data.generated > 0) {
-      showToast(`巡检完成，发现 ${data.generated} 条新预警`, 'success')
-      await loadAlerts()
-    } else {
-      showToast('巡检完成，未发现新的风险', 'success')
-    }
-  } catch (e) {
-    showToast('巡检失败：' + (e.response?.data?.detail || e.message), 'error')
-  } finally {
-    alertScanning.value = false
-  }
 }
 
 // Analysis panels (tabbed)
@@ -2407,7 +2379,6 @@ const TAG_PRESETS = ['追涨', '抄底', '定投', '止盈', '止损', '调仓',
 onMounted(async () => {
   await loadData()
   loadAlerts()
-  loadDailyAdvice()
   // 如果今天还未分析过，自动触发分散度分析；已分析则加载最新结果
   if (holdings.value.length > 0) {
     try {
@@ -2430,7 +2401,6 @@ onMounted(async () => {
 
 // KeepAlive 组件激活时重新加载数据（切换页面回来时触发）
 onActivated(async () => {
-  loadDailyAdvice()
   // 检查是否有正在运行的全景诊断
   if (_panoramaGlobalState.recordId && _panoramaGlobalState.status === 'running') {
     // 恢复轮询，不重置 loading
@@ -3192,115 +3162,14 @@ function txDisplayAmount(tx) {
       </div>
     </div>
 
-    <!-- 今日持仓提示 -->
-    <section class="daily-advice-section" v-if="dailyAdvice || dailyAdviceLoading || dailyAdviceError">
-      <div class="advice-header">
-        <div class="advice-header-left">
-          <h3 class="advice-title">📋 今日持仓提示</h3>
-          <span v-if="dailyAdvice?.generated_at" class="advice-time">更新于 {{ dailyAdvice.generated_at.slice(11, 16) }}</span>
-        </div>
-        <div class="advice-header-right">
-          <span v-if="dailyAdvice?.summary" class="advice-headline-badge" :class="adviceSummaryClass(dailyAdvice.summary.headline)">
-            {{ dailyAdvice.summary.headline }}
-          </span>
-          <span v-if="dailyAdvice?.signals" class="advice-count-badge">
-            {{ dailyAdvice.signals.filter(s => s.severity === 'actionable').length }} 可行动 · {{ dailyAdvice.signals.filter(s => s.severity === 'watch').length }} 观察
-          </span>
-          <button class="btn-ghost btn-sm" :class="{ 'btn-loading': dailyAdviceLoading }" :disabled="dailyAdviceLoading" @click="loadDailyAdvice" title="刷新提示">
-            <svg :class="['icon-spin', { 'spinning': dailyAdviceLoading }]" width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h5M20 20v-5h-5M4.93 9a8 8 0 0113.14 0M19.07 15a8 8 0 01-13.14 0"/>
-            </svg>
-            刷新
-          </button>
-        </div>
-      </div>
-
-      <div v-if="dailyAdviceLoading" class="advice-loading">
-        <Skeleton variant="text" :count="2" />
-      </div>
-
-      <div v-else-if="dailyAdviceError" class="advice-error">
-        <span>{{ dailyAdviceError }}</span>
-        <button class="btn-ghost btn-sm" @click="loadDailyAdvice">重试</button>
-      </div>
-
-      <div v-else-if="dailyAdvice && dailyAdvice.signals && dailyAdvice.signals.length > 0" class="advice-cards-grid">
-        <div
-          v-for="signal in dailyAdvice.signals"
-          :key="signal.id"
-          :class="['advice-card', severityClass(signal.severity)]"
-        >
-          <div class="advice-card-header">
-            <div class="advice-card-title">
-              <span class="advice-fund-name">{{ signal.fund_name || signal.target_name || '未知' }}</span>
-              <span class="advice-fund-code" v-if="signal.fund_code || signal.target_code">{{ signal.fund_code || signal.target_code }}</span>
-            </div>
-            <span class="advice-severity-tag" :class="severityClass(signal.severity)">{{ severityLabel(signal.severity) }}</span>
-          </div>
-
-          <div class="advice-card-body">
-            <div class="advice-tags-row" v-if="signal.action_tag || signal.suggestion">
-              <span class="advice-tag-chip" v-if="signal.action_tag">{{ tagLabel(signal.action_tag) }}</span>
-              <span class="advice-suggestion" v-if="signal.suggestion">{{ signal.suggestion }}</span>
-            </div>
-
-            <div class="advice-amount" v-if="signal.suggested_amount">
-              建议金额: <strong>{{ formatAdviceAmount(signal.suggested_amount) }}</strong>
-            </div>
-
-            <div class="advice-evidence" v-if="signal.evidence && signal.evidence.length">
-              <span class="advice-evidence-label">证据:</span>
-              <div class="advice-chips">
-                <span v-for="(ev, idx) in signal.evidence" :key="idx" class="advice-chip">{{ ev }}</span>
-              </div>
-            </div>
-
-            <div class="advice-counter-risk" v-if="signal.counter_risk">
-              <span class="advice-counter-label">⚠ 反方风险:</span>
-              <span class="advice-counter-text">{{ signal.counter_risk }}</span>
-            </div>
-
-            <div class="advice-blocked-reason" v-if="signal.severity === 'blocked' && signal.blocked_reason">
-              🚫 {{ signal.blocked_reason }}
-            </div>
-          </div>
-
-          <!-- AI 回复区域 -->
-          <div class="advice-ai-response" v-if="aiResponseMap[signal.id]">
-            <div v-if="aiResponseMap[signal.id].loading" class="advice-ai-loading">
-              <svg class="icon-spin spinning" width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h5M20 20v-5h-5M4.93 9a8 8 0 0113.14 0M19.07 15a8 8 0 01-13.14 0"/>
-              </svg>
-              AI 分析中...
-            </div>
-            <div v-else-if="aiResponseMap[signal.id].error" class="advice-ai-error">{{ aiResponseMap[signal.id].error }}</div>
-            <div v-else class="advice-ai-text" v-html="renderMarkdown(aiResponseMap[signal.id].text)"></div>
-          </div>
-
-          <div class="advice-card-actions" v-if="signal.severity !== 'blocked'">
-            <button class="btn-primary btn-sm" :disabled="adviceActionLoading[signal.id]" @click="handleAdviceAction(signal.id, 'create-candidate')">
-              💾 保存为决策
-            </button>
-            <button class="btn-secondary btn-sm" :disabled="aiResponseMap[signal.id]?.loading || adviceActionLoading[signal.id]" @click="handleAdviceAction(signal.id, 'ask-ai')">
-              🤖 问 AI
-            </button>
-            <button class="btn-ghost btn-sm" :disabled="adviceActionLoading[signal.id]" @click="handleAdviceAction(signal.id, 'ignore')">
-              忽略
-            </button>
-          </div>
-          <div class="advice-card-actions" v-else>
-            <button class="btn-secondary btn-sm" :disabled="adviceActionLoading[signal.id]" @click="handleAdviceAction(signal.id, 'ask-ai')">
-              🤖 问 AI
-            </button>
-          </div>
-        </div>
-      </div>
-
-      <div v-else-if="dailyAdvice" class="advice-empty">
-        <span>✅ 今日暂无需行动的持仓提示</span>
-        <button class="btn-ghost btn-sm" @click="handleAdviceAction(null, 'refresh')">手动生成</button>
-      </div>
-    </section>
+    <!-- 风险与提示入口角标（详情见 AlertCenter.vue） -->
+    <div v-if="unreadAlertCount > 0" class="alert-entry-badge" @click="emit('navigate', 'alert-center')" title="前往风险与提示中心">
+      <svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
+      </svg>
+      <span><strong>{{ unreadAlertCount }}</strong> 条未读预警</span>
+      <span class="entry-arrow">›</span>
+    </div>
 
     <section class="portfolio-workbench">
       <article class="workbench-cell overview" @click="switchAnalysisTab('holdings')">
@@ -3308,10 +3177,10 @@ function txDisplayAmount(tx) {
         <strong>{{ formatMoney((summary.total_value || 0) + totalCash) }}</strong>
         <span>{{ holdings.length }} 只持仓 · 现金 {{ formatMoney(totalCash) }}</span>
       </article>
-      <article class="workbench-cell diagnosis" @click="switchAnalysisTab('ai')">
-        <div class="workbench-label">组合诊断</div>
-        <strong>{{ alerts.length }} 条预警</strong>
-        <span>全景诊断、分散度、费率、相关性</span>
+      <article class="workbench-cell diagnosis" @click="emit('navigate', 'alert-center')" title="前往风险与提示中心">
+        <div class="workbench-label">风险与提示</div>
+        <strong>{{ unreadAlertCount }} 条未读</strong>
+        <span>预警、持仓提示、AI 综合解读</span>
       </article>
       <article class="workbench-cell actions" @click="goDecisionCenter">
         <div class="workbench-label">行动中心</div>
@@ -3346,63 +3215,6 @@ function txDisplayAmount(tx) {
           <span v-if="tx.expected_confirm_date" class="pending-confirm-hint">→ {{ tx.expected_confirm_date }} 确认</span>
           <button class="btn-ghost btn-sm btn-primary-text" @click="openConfirmTx(tx)">确认</button>
           <button class="btn-ghost btn-sm btn-danger-text" @click="handleCancelPendingTx(tx)">撤销</button>
-        </div>
-      </div>
-    </div>
-
-    <!-- Alert Panel -->
-    <div class="alert-panel">
-      <div class="alert-panel-header" @click="showAlerts = !showAlerts" style="cursor: pointer">
-        <svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
-        </svg>
-        <strong>风险预警</strong>
-        <span v-if="unreadAlertCount > 0" class="alert-badge has-unread">{{ unreadAlertCount }}</span>
-        <span class="alert-toggle-icon" v-html="showAlerts ? '&#9660;' : '&#9654;'"></span>
-        <span style="flex:1"></span>
-        <button class="btn-ghost btn-sm" :class="{ 'btn-loading': alertScanning }" :disabled="alertScanning" @click.stop="handleScanAlerts" title="持仓巡检">
-          <svg :class="['icon-spin', { 'spinning': alertScanning }]" width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/>
-          </svg>
-          <span>{{ alertScanning ? '巡检中...' : '巡检' }}</span>
-        </button>
-        <button class="btn-ghost btn-sm" @click.stop="loadAlerts" title="刷新">刷新</button>
-      </div>
-      <div v-if="showAlerts" class="alert-list">
-        <div v-if="alerts.length === 0" class="alert-empty">
-          <span>暂无预警</span>
-          <span class="alert-empty-hint">点击「巡检」主动扫描持仓风险</span>
-        </div>
-        <div v-for="a in alerts" :key="a.latest_id" :class="['alert-item', 'alert-' + a.severity]">
-          <div class="alert-icon">
-            <svg v-if="a.severity === 'danger'" width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
-            </svg>
-            <svg v-else-if="a.severity === 'warning'" width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
-            </svg>
-            <svg v-else width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
-            </svg>
-          </div>
-          <div class="alert-body">
-            <div class="alert-title">
-              {{ a.title }}
-              <span v-if="a.cnt > 1" class="alert-count-badge">×{{ a.cnt }}</span>
-            </div>
-            <div v-if="a.content" class="alert-content">{{ a.content }}</div>
-            <div class="alert-meta">
-              <span class="alert-type-badge">{{ a.alert_type }}</span>
-              <span v-if="a.source === 'system_scan'" class="alert-source-badge scan">系统巡检</span>
-              <span v-else-if="a.source === 'ai_analysis'" class="alert-source-badge ai">AI 对话</span>
-              <span v-else class="alert-source-badge">{{ a.source }}</span>
-              <span class="alert-time">{{ a.latest_at }}</span>
-            </div>
-          </div>
-          <div class="alert-actions">
-            <button class="btn-ghost btn-sm" @click="handleMarkAlertRead(a.latest_id, a.title, a.severity)" title="标记已读">✔</button>
-            <button class="btn-ghost btn-sm btn-danger-text" @click="handleDeleteAlert(a.latest_id, a.title, a.severity)" title="删除">✕</button>
-          </div>
         </div>
       </div>
     </div>
@@ -4435,14 +4247,27 @@ function txDisplayAmount(tx) {
       <!-- Watchlist Panel -->
       <template v-if="activeAnalysisTab === 'watchlist'">
         <div class="analysis-panel-header">
-          <h3>关注列表</h3>
+          <h3>关注列表 <span class="watchlist-subtitle">买入信号灯 + 目标进度 + 评分卡</span></h3>
           <div class="analysis-panel-actions">
             <button class="btn-primary btn-sm" @click="showAddWatchlist = true" style="margin-right:0.5rem">+ 添加关注</button>
+            <!-- P0-2.2 一键巡检按钮（60s 防抖） -->
+            <button class="btn-secondary btn-sm" @click="patrolWatchlistItems" :disabled="watchlistPatrolling" style="margin-right:0.5rem" title="巡检估值并更新信号灯（60s 防抖）">
+              {{ watchlistPatrolling ? '巡检中...' : '🔍 一键巡检' }}
+            </button>
             <button class="btn-secondary btn-sm" @click="refreshWatchlistNavs" :disabled="watchlistRefreshing" style="margin-right:0.5rem">
               {{ watchlistRefreshing ? '刷新中...' : '刷新净值' }}
             </button>
             <button class="btn-ghost btn-sm" @click="switchAnalysisTab('watchlist')">✕</button>
           </div>
+        </div>
+
+        <!-- 巡检结果摘要 -->
+        <div v-if="patrolResults" class="patrol-summary">
+          <span class="patrol-summary-title">🚦 信号灯统计：</span>
+          <span class="sig-stat sig-green">🟢 {{ patrolResults.all_items?.filter(x => x.signal_status === 'green').length || 0 }} 可买入</span>
+          <span class="sig-stat sig-yellow">🟡 {{ patrolResults.all_items?.filter(x => x.signal_status === 'yellow').length || 0 }} 接近</span>
+          <span class="sig-stat sig-red">🔴 {{ patrolResults.all_items?.filter(x => x.signal_status === 'red').length || 0 }} 等待</span>
+          <span class="sig-stat sig-gray">⚪ {{ patrolResults.all_items?.filter(x => x.signal_status === 'gray').length || 0 }} 缺数据</span>
         </div>
 
         <div v-if="watchlistLoading" class="loading-state"><div class="spinner"></div></div>
@@ -4451,15 +4276,14 @@ function txDisplayAmount(tx) {
           <button class="btn-primary btn-sm" @click="showAddWatchlist = true">添加第一个关注</button>
         </div>
         <div v-else class="analysis-panel-body">
-          <table class="data-table" style="margin-bottom:1rem">
+          <table class="data-table watchlist-table" style="margin-bottom:1rem">
             <thead>
               <tr>
                 <th>基金</th>
-                <th>类型</th>
-                <th>跟踪指数</th>
+                <th>信号灯</th>
                 <th>当前净值</th>
-                <th>目标价</th>
-                <th>估值百分位</th>
+                <th>估值百分位 / 目标</th>
+                <th>买入评分</th>
                 <th>优先级</th>
                 <th>备注</th>
                 <th>操作</th>
@@ -4471,17 +4295,78 @@ function txDisplayAmount(tx) {
                   <div class="fund-name-cell">
                     <span class="fund-code">{{ item.fund_code }}</span>
                     <span class="fund-name">{{ item.fund_name || '-' }}</span>
+                    <span v-if="item.fund_category" class="fund-cat-tag">{{ item.fund_category }}</span>
                   </div>
+                  <div v-if="item.index_name || item.index_code" class="fund-index">跟踪: {{ item.index_name || item.index_code }}</div>
                 </td>
-                <td>{{ item.fund_category || '-' }}</td>
-                <td>{{ item.index_name || item.index_code || '-' }}</td>
-                <td>{{ item.current_nav ? item.current_nav.toFixed(4) : '-' }}</td>
-                <td>{{ item.target_price ? item.target_price.toFixed(4) : '-' }}</td>
                 <td>
-                  <span v-if="item.target_percentile" :class="['percentile-badge', item.target_percentile <= 30 ? 'low' : item.target_percentile <= 70 ? 'mid' : 'high']">
-                    ≤{{ item.target_percentile }}%
-                  </span>
-                  <span v-else>-</span>
+                  <div :class="['signal-light', SIGNAL_LIGHT[signalStatusOf(item).status]?.cls]" :title="signalStatusOf(item).reason">
+                    <span class="signal-icon">{{ SIGNAL_LIGHT[signalStatusOf(item).status]?.icon }}</span>
+                    <span class="signal-label">{{ SIGNAL_LIGHT[signalStatusOf(item).status]?.label }}</span>
+                  </div>
+                  <div class="signal-reason">{{ signalStatusOf(item).reason }}</div>
+                </td>
+                <td>
+                  <div>{{ item.current_nav ? item.current_nav.toFixed(4) : '-' }}</div>
+                  <div v-if="item.target_price" class="target-price">目标: {{ item.target_price.toFixed(4) }}</div>
+                </td>
+                <td>
+                  <!-- P1-3.4 目标进度条 + 距离提示 -->
+                  <div v-if="item.current_percentile != null || signalStatusOf(item).distance != null" class="target-progress">
+                    <div class="progress-bar-track">
+                      <div
+                        class="progress-bar-fill"
+                        :class="signalStatusOf(item).status"
+                        :style="{
+                          width: Math.min(100, Math.max(0, ((item.current_percentile || 0) / Math.max(item.target_percentile || 100, 1)) * 100)) + '%'
+                        }"
+                      ></div>
+                      <div v-if="item.target_percentile" class="progress-target-mark" :style="{ left: '100%' }"></div>
+                    </div>
+                    <div class="progress-text">
+                      <span class="cur-pct">{{ item.current_percentile != null ? item.current_percentile.toFixed(0) + '%' : '?' }}</span>
+                      <span class="sep">/</span>
+                      <span class="tgt-pct">目标 {{ item.target_percentile != null ? item.target_percentile + '%' : '?' }}</span>
+                      <span v-if="signalStatusOf(item).distance != null" class="distance-tag" :class="signalStatusOf(item).status">
+                        {{ signalStatusOf(item).distance <= 0 ? '已达标' : `差 +${signalStatusOf(item).distance}%` }}
+                      </span>
+                    </div>
+                  </div>
+                  <span v-else class="text-muted">未刷新</span>
+                </td>
+                <td>
+                  <!-- P2-4.1 买入评分卡 -->
+                  <button
+                    v-if="!buyScoreMap[item.id] || buyScoreMap[item.id].error"
+                    class="btn-ghost btn-xs"
+                    :disabled="buyScoreMap[item.id]?.loading"
+                    @click="loadBuyScore(item)"
+                    title="计算买入时机评分（纯规则，无 LLM）"
+                  >
+                    {{ buyScoreMap[item.id]?.loading ? '...' : '📊 评分' }}
+                  </button>
+                  <div v-if="buyScoreMap[item.id]?.error" class="score-error">{{ buyScoreMap[item.id].error }}</div>
+                  <div v-if="buyScoreMap[item.id]?.score != null" class="score-display" @click="loadBuyScore(item)" style="cursor:pointer">
+                    <span :class="['score-total', scoreRatingInfo(buyScoreMap[item.id].rating).cls]">
+                      {{ scoreRatingInfo(buyScoreMap[item.id].rating).icon }} {{ buyScoreMap[item.id].score }}
+                    </span>
+                    <span class="score-rating-label">{{ scoreRatingInfo(buyScoreMap[item.id].rating).label }}</span>
+                  </div>
+                  <!-- 展开的评分详情 -->
+                  <div v-if="expandedScoreId === item.id && buyScoreMap[item.id]?.dimensions" class="score-detail">
+                    <div class="score-detail-header">
+                      <strong>4 维度评分明细</strong>
+                      <button class="btn-ghost btn-xs" @click="expandedScoreId = null">✕</button>
+                    </div>
+                    <div v-for="(d, key) in buyScoreMap[item.id].dimensions" :key="key" class="score-dim-row">
+                      <span class="dim-name">{{ { valuation: '估值 50%', price: '净值 25%', correlation: '相关 15%', concentration: '集中 10%' }[key] || key }}</span>
+                      <span :class="['dim-score', d.score >= 75 ? 'dim-high' : d.score >= 50 ? 'dim-mid' : 'dim-low']">{{ d.score }}</span>
+                      <span class="dim-reason">{{ d.reason }}</span>
+                    </div>
+                    <div class="score-calculated-at" v-if="buyScoreMap[item.id].calculated_at">
+                      计算时间: {{ buyScoreMap[item.id].calculated_at.slice(11, 19) }}
+                    </div>
+                  </div>
                 </td>
                 <td>
                   <span :class="['priority-badge', `priority-${item.priority || 0}`]">
@@ -4490,8 +4375,11 @@ function txDisplayAmount(tx) {
                 </td>
                 <td class="notes-cell" :title="item.notes">{{ item.notes || '-' }}</td>
                 <td class="actions-cell">
+                  <button v-if="signalStatusOf(item).status === 'green'" class="btn-primary btn-xs" @click="markWatchlistBought(item)" title="绿灯：一键标记已买入">✓ 买入</button>
                   <button class="btn-ghost btn-xs" @click="editWatchlistItem(item)" title="编辑">✎</button>
-                  <button class="btn-ghost btn-xs" @click="openWatchlistChart(item)" title="查看走势">📈</button>
+                  <!-- P2-4.3 估值历史图叠加 -->
+                  <button class="btn-ghost btn-xs" @click="openValuationChart(item)" title="查看估值历史图">📈</button>
+                  <button class="btn-ghost btn-xs" @click="openWatchlistChart(item)" title="查看净值走势">📊</button>
                   <button class="btn-ghost btn-xs" @click="lookupWatchlistFund(item)" title="查询基金信息">🔍</button>
                   <button class="btn-ghost btn-xs" style="color:var(--color-danger)" @click="deleteWatchlistItem(item)" title="移除">✕</button>
                 </td>
@@ -6977,6 +6865,34 @@ select.input-field {
 }
 
 /* ── Alert Panel ─── */
+.alert-entry-badge {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.6rem 1rem;
+  background: linear-gradient(90deg, var(--color-loss-bg) 0%, var(--color-bg-card) 100%);
+  border: 1px solid var(--color-loss);
+  border-radius: var(--radius-md);
+  margin-bottom: 1rem;
+  cursor: pointer;
+  color: var(--color-loss);
+  font-size: 0.85rem;
+  font-weight: 500;
+  transition: all var(--transition-fast);
+}
+.alert-entry-badge:hover {
+  box-shadow: 0 2px 8px rgba(220, 38, 38, 0.15);
+  transform: translateY(-1px);
+}
+.alert-entry-badge strong {
+  font-size: 1rem;
+  font-weight: 700;
+}
+.alert-entry-badge .entry-arrow {
+  margin-left: auto;
+  font-size: 1.2rem;
+  opacity: 0.6;
+}
 .alert-panel {
   background: var(--color-bg-card);
   border: 1px solid var(--color-border);
@@ -8940,6 +8856,181 @@ select.input-field {
 }
 .actions-cell {
   white-space: nowrap;
+}
+
+/* ── P0-2.2 / P1-3.4 / P2-4.1 关注列表增强 ── */
+.watchlist-subtitle {
+  font-size: 0.72rem;
+  font-weight: 400;
+  color: var(--color-text-muted);
+  margin-left: 0.5rem;
+}
+.watchlist-table .fund-name-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.watchlist-table .fund-cat-tag {
+  font-size: 0.62rem;
+  padding: 0 5px;
+  border-radius: 4px;
+  background: var(--color-bg-hover);
+  color: var(--color-text-muted);
+  align-self: flex-start;
+}
+.watchlist-table .fund-index {
+  font-size: 0.68rem;
+  color: var(--color-text-muted);
+  margin-top: 2px;
+}
+.watchlist-table .target-price {
+  font-size: 0.68rem;
+  color: var(--color-text-muted);
+  margin-top: 2px;
+}
+.text-muted { color: var(--color-text-muted); font-size: 0.78rem; }
+
+/* 巡检摘要 */
+.patrol-summary {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  padding: 0.5rem 0.875rem;
+  background: var(--color-bg-hover);
+  border-radius: var(--radius-sm);
+  font-size: 0.78rem;
+  margin-bottom: 0.75rem;
+  flex-wrap: wrap;
+}
+.patrol-summary-title { font-weight: 600; color: var(--color-text-primary); }
+.sig-stat { font-size: 0.75rem; color: var(--color-text-secondary); }
+.sig-stat.sig-green { color: var(--color-profit); }
+.sig-stat.sig-yellow { color: var(--color-warning); }
+.sig-stat.sig-red { color: var(--color-loss); }
+.sig-stat.sig-gray { color: var(--color-text-muted); }
+
+/* 信号灯 */
+.signal-light {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 2px 8px;
+  border-radius: 12px;
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+.signal-light.sig-green { background: var(--color-profit-bg); color: var(--color-profit); }
+.signal-light.sig-yellow { background: var(--color-warning-bg); color: var(--color-warning); }
+.signal-light.sig-red { background: var(--color-loss-bg); color: var(--color-loss); }
+.signal-light.sig-gray { background: var(--color-bg-hover); color: var(--color-text-muted); }
+.signal-icon { font-size: 0.8rem; }
+.signal-label { font-size: 0.72rem; }
+.signal-reason {
+  font-size: 0.68rem;
+  color: var(--color-text-muted);
+  margin-top: 3px;
+  line-height: 1.4;
+  max-width: 140px;
+}
+
+/* 目标进度条 */
+.target-progress {
+  min-width: 140px;
+}
+.progress-bar-track {
+  position: relative;
+  height: 6px;
+  background: var(--color-border);
+  border-radius: 3px;
+  overflow: visible;
+}
+.progress-bar-fill {
+  height: 100%;
+  border-radius: 3px;
+  transition: width 0.4s ease;
+}
+.progress-bar-fill.green { background: var(--color-profit); }
+.progress-bar-fill.yellow { background: var(--color-warning); }
+.progress-bar-fill.red { background: var(--color-loss); }
+.progress-bar-fill.gray { background: var(--color-text-muted); }
+.progress-target-mark {
+  position: absolute;
+  top: -2px;
+  bottom: -2px;
+  width: 2px;
+  background: var(--color-text-primary);
+  opacity: 0.5;
+}
+.progress-text {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  margin-top: 4px;
+  font-size: 0.7rem;
+  flex-wrap: wrap;
+}
+.cur-pct { font-weight: 600; color: var(--color-text-primary); }
+.sep, .tgt-pct { color: var(--color-text-muted); }
+.distance-tag {
+  font-size: 0.65rem;
+  padding: 0 5px;
+  border-radius: 4px;
+  font-weight: 600;
+}
+.distance-tag.green { background: var(--color-profit-bg); color: var(--color-profit); }
+.distance-tag.yellow { background: var(--color-warning-bg); color: var(--color-warning); }
+.distance-tag.red { background: var(--color-loss-bg); color: var(--color-loss); }
+
+/* 买入评分卡 */
+.score-display {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 2px 8px;
+  border-radius: 8px;
+  font-size: 0.78rem;
+}
+.score-total { font-weight: 700; font-size: 0.9rem; }
+.score-total.score-buy { color: var(--color-profit); }
+.score-total.score-watch { color: var(--color-warning); }
+.score-total.score-wait { color: var(--color-loss); }
+.score-rating-label { font-size: 0.7rem; color: var(--color-text-muted); }
+.score-error { font-size: 0.68rem; color: var(--color-danger); margin-top: 2px; }
+.score-detail {
+  margin-top: 0.5rem;
+  padding: 0.625rem;
+  background: var(--color-bg-hover);
+  border-radius: 8px;
+  font-size: 0.72rem;
+  border: 1px solid var(--color-border-light);
+}
+.score-detail-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 0.5rem;
+}
+.score-detail-header strong { font-size: 0.78rem; color: var(--color-text-primary); }
+.score-dim-row {
+  display: grid;
+  grid-template-columns: 70px 32px 1fr;
+  gap: 0.5rem;
+  padding: 0.3rem 0;
+  border-top: 1px solid var(--color-border-light);
+  align-items: center;
+}
+.score-dim-row:first-of-type { border-top: none; }
+.dim-name { color: var(--color-text-secondary); font-weight: 500; }
+.dim-score { font-weight: 700; text-align: center; }
+.dim-score.dim-high { color: var(--color-profit); }
+.dim-score.dim-mid { color: var(--color-warning); }
+.dim-score.dim-low { color: var(--color-loss); }
+.dim-reason { color: var(--color-text-muted); font-size: 0.68rem; }
+.score-calculated-at {
+  margin-top: 0.4rem;
+  font-size: 0.65rem;
+  color: var(--color-text-muted);
+  text-align: right;
 }
 
 /* ── 今日持仓提示 ── */
