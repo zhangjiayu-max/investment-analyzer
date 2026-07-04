@@ -1,6 +1,74 @@
 <script setup>
 import { ref, computed, onMounted, onActivated, onDeactivated, watch, nextTick } from 'vue'
 
+// ── 持仓表格列拖拽排序 ──
+const HOLDING_COLUMNS = [
+  { key: 'fund_name', label: '基金名称', draggable: false },
+  { key: 'fund_code', label: '基金代码' },
+  { key: 'account', label: '账户' },
+  { key: 'index_name', label: '关联指数' },
+  { key: 'shares', label: '持有份额', align: 'right' },
+  { key: 'cost_price', label: '成本价', align: 'right' },
+  { key: 'total_cost', label: '总成本', align: 'right', sortable: true },
+  { key: 'current_price', label: '当前净值', align: 'right' },
+  { key: 'today_profit', label: '今日涨跌 / 收益', align: 'right', sortable: true, hasFilter: true },
+  { key: 'current_value', label: '当前市值', align: 'right', sortable: true },
+  { key: 'profit_loss', label: '盈亏', align: 'right', sortable: true },
+  { key: 'profit_rate', label: '收益率', align: 'right', sortable: true },
+  { key: 'price_updated_at', label: '净值更新' },
+  { key: 'actions', label: '操作', draggable: false },
+]
+const COLUMN_ORDER_KEY = 'portfolio_holding_column_order'
+const columnOrder = ref([])
+function initColumnOrder() {
+  try {
+    const saved = localStorage.getItem(COLUMN_ORDER_KEY)
+    if (saved) {
+      const parsed = JSON.parse(saved)
+      if (Array.isArray(parsed) && parsed.length === HOLDING_COLUMNS.length) {
+        columnOrder.value = parsed
+        return
+      }
+    }
+  } catch {}
+  columnOrder.value = HOLDING_COLUMNS.map(c => c.key)
+}
+initColumnOrder()
+const orderedColumns = computed(() => {
+  return columnOrder.value.map(k => HOLDING_COLUMNS.find(c => c.key === k)).filter(Boolean)
+})
+let dragColKey = null
+function onColDragStart(e, key) {
+  dragColKey = key
+  e.dataTransfer.effectAllowed = 'move'
+  e.dataTransfer.setData('text/plain', key)
+  e.target.style.opacity = '0.4'
+}
+function onColDragEnd(e) {
+  e.target.style.opacity = ''
+  dragColKey = null
+}
+function onColDragOver(e, key) {
+  e.preventDefault()
+  e.dataTransfer.dropEffect = 'move'
+}
+function onColDrop(e, targetKey) {
+  e.preventDefault()
+  if (!dragColKey || dragColKey === targetKey) return
+  const from = columnOrder.value.indexOf(dragColKey)
+  const to = columnOrder.value.indexOf(targetKey)
+  if (from === -1 || to === -1) return
+  const arr = [...columnOrder.value]
+  arr.splice(from, 1)
+  arr.splice(to, 0, dragColKey)
+  columnOrder.value = arr
+  try { localStorage.setItem(COLUMN_ORDER_KEY, JSON.stringify(arr)) } catch {}
+}
+function resetColumnOrder() {
+  columnOrder.value = HOLDING_COLUMNS.map(c => c.key)
+  try { localStorage.removeItem(COLUMN_ORDER_KEY) } catch {}
+}
+
 const maxIndustryPct = computed(() => {
   if (!detailData.value?.industry_allocation?.length) return 100
   return Math.max(...detailData.value.industry_allocation.map(i => i.pct_nav), 1)
@@ -4559,6 +4627,7 @@ function txDisplayAmount(tx) {
         <span style="font-size:0.75rem;color:var(--color-text-muted);white-space:nowrap">
           {{ activeHoldings.length }} / {{ holdings.length }}
         </span>
+        <button class="col-reset-btn" @click="resetColumnOrder" title="重置列顺序">↺ 列重置</button>
       </div>
       <div v-if="loading" class="portfolio-loading">
         <Skeleton variant="title" width="30%" />
@@ -4596,50 +4665,58 @@ function txDisplayAmount(tx) {
         </div>
       </div>
 
-      <table v-if="holdings.length > 0 && !loading" class="data-table">
+      <table v-if="holdings.length > 0 && !loading" class="data-table holding-table-drag">
         <thead>
           <tr>
-            <th>基金名称</th>
-            <th>基金代码</th>
-            <th>账户</th>
-            <th>关联指数</th>
-            <th class="text-right">持有份额</th>
-            <th class="text-right">成本价</th>
-            <th class="text-right th-sortable" @click="toggleSort('total_cost')">总成本{{ sortIndicator('total_cost') }}</th>
-            <th class="text-right">当前净值</th>
-            <th class="text-right th-sortable" style="position:relative">
-              <span @click="toggleSort('today_profit')">今日涨跌 / 收益{{ sortIndicator('today_profit') }}</span>
-              <span class="th-filter" @click.stop="todayFilter = todayFilter === 'all' ? 'down' : todayFilter === 'down' ? 'up' : 'all'" :title="todayFilter === 'all' ? '全部' : todayFilter === 'up' ? '仅涨' : '仅跌'">
-                <svg width="12" height="12" fill="currentColor" viewBox="0 0 16 16">
-                  <path v-if="todayFilter === 'all'" d="M1.5 1.5A.5.5 0 012 1h12a.5.5 0 01.5.5v2a.5.5 0 01-.128.334L10 8.692V13.5a.5.5 0 01-.223.416l-3 2A.5.5 0 016 15.5V8.692L1.628 3.834A.5.5 0 011.5 3.5v-2z"/>
-                  <path v-else-if="todayFilter === 'up'" d="M8 15a.5.5 0 01-.5-.5V3.707L4.354 6.854a.5.5 0 11-.708-.708l4-4a.5.5 0 01.708 0l4 4a.5.5 0 01-.708.708L8.5 3.707V14.5A.5.5 0 018 15z" fill="var(--color-loss)"/>
-                  <path v-else d="M8 1a.5.5 0 01.5.5v10.793l3.146-3.147a.5.5 0 01.708.708l-4 4a.5.5 0 01-.708 0l-4-4a.5.5 0 01.708-.708L7.5 12.293V1.5A.5.5 0 018 1z" fill="var(--color-profit)"/>
-                </svg>
-              </span>
+            <th
+              v-for="col in orderedColumns"
+              :key="col.key"
+              :class="[
+                col.align === 'right' ? 'text-right' : '',
+                col.sortable ? 'th-sortable' : '',
+                col.key === 'today_profit' ? 'th-today-profit' : '',
+                col.draggable !== false ? 'th-draggable' : ''
+              ]"
+              :draggable="col.draggable !== false"
+              @dragstart="onColDragStart($event, col.key)"
+              @dragend="onColDragEnd($event)"
+              @dragover="onColDragOver($event, col.key)"
+              @drop="onColDrop($event, col.key)"
+              @click="col.sortable ? toggleSort(col.key) : null"
+            >
+              <template v-if="col.key === 'today_profit'">
+                <span @click="toggleSort('today_profit')">今日涨跌 / 收益{{ sortIndicator('today_profit') }}</span>
+                <span class="th-filter" @click.stop="todayFilter = todayFilter === 'all' ? 'down' : todayFilter === 'down' ? 'up' : 'all'" :title="todayFilter === 'all' ? '全部' : todayFilter === 'up' ? '仅涨' : '仅跌'">
+                  <svg width="12" height="12" fill="currentColor" viewBox="0 0 16 16">
+                    <path v-if="todayFilter === 'all'" d="M1.5 1.5A.5.5 0 012 1h12a.5.5 0 01.5.5v2a.5.5 0 01-.128.334L10 8.692V13.5a.5.5 0 01-.223.416l-3 2A.5.5 0 016 15.5V8.692L1.628 3.834A.5.5 0 011.5 3.5v-2z"/>
+                    <path v-else-if="todayFilter === 'up'" d="M8 15a.5.5 0 01-.5-.5V3.707L4.354 6.854a.5.5 0 11-.708-.708l4-4a.5.5 0 01.708 0l4 4a.5.5 0 01-.708.708L8.5 3.707V14.5A.5.5 0 018 15z" fill="var(--color-loss)"/>
+                    <path v-else d="M8 1a.5.5 0 01.5.5v10.793l3.146-3.147a.5.5 0 01.708.708l-4 4a.5.5 0 01-.708 0l-4-4a.5.5 0 01.708-.708L7.5 12.293V1.5A.5.5 0 018 1z" fill="var(--color-profit)"/>
+                  </svg>
+                </span>
+              </template>
+              <template v-else>
+                {{ col.label }}{{ col.sortable ? sortIndicator(col.key) : '' }}
+              </template>
             </th>
-            <th class="text-right th-sortable" @click="toggleSort('current_value')">当前市值{{ sortIndicator('current_value') }}</th>
-            <th class="text-right th-sortable" @click="toggleSort('profit_loss')">盈亏{{ sortIndicator('profit_loss') }}</th>
-            <th class="text-right th-sortable" @click="toggleSort('profit_rate')">收益率{{ sortIndicator('profit_rate') }}</th>
-            <th>净值更新</th>
-            <th>操作</th>
           </tr>
         </thead>
         <tbody>
           <tr v-for="h in activeHoldings" :key="h.id">
-            <td class="fund-name">
+            <template v-for="col in orderedColumns" :key="col.key">
+            <td v-if="col.key === 'fund_name'" class="fund-name">
               <span class="fund-name-text">{{ h.fund_name }}</span>
               <span v-if="h.fund_category" :class="['badge', 'badge-sm', 'badge-category-' + h.fund_category]">
                 {{ {bond: '债券', equity: '股票', hybrid: '混合', index: '指数', money_market: '货币', bond_index: '债指', convertible_bond: '可转债'}[h.fund_category] || h.fund_category }}
               </span>
             </td>
-            <td><code>{{ h.fund_code }}</code></td>
-            <td><span class="account-badge">{{ h.account || '默认账户' }}</span></td>
-            <td>{{ h.index_name || '--' }}</td>
-            <td class="text-right">{{ h.shares?.toLocaleString() }}</td>
-            <td class="text-right">{{ h.cost_price?.toFixed(4) }}</td>
-            <td class="text-right">{{ formatMoney(h.total_cost) }}</td>
-            <td class="text-right">{{ h.current_price?.toFixed(4) || '--' }}</td>
-            <td :class="['text-right', profitClass(h.today_change_pct)]">
+            <td v-else-if="col.key === 'fund_code'"><code>{{ h.fund_code }}</code></td>
+            <td v-else-if="col.key === 'account'"><span class="account-badge">{{ h.account || '默认账户' }}</span></td>
+            <td v-else-if="col.key === 'index_name'">{{ h.index_name || '--' }}</td>
+            <td v-else-if="col.key === 'shares'" class="text-right">{{ h.shares?.toLocaleString() }}</td>
+            <td v-else-if="col.key === 'cost_price'" class="text-right">{{ h.cost_price?.toFixed(4) }}</td>
+            <td v-else-if="col.key === 'total_cost'" class="text-right">{{ formatMoney(h.total_cost) }}</td>
+            <td v-else-if="col.key === 'current_price'" class="text-right">{{ h.current_price?.toFixed(4) || '--' }}</td>
+            <td v-else-if="col.key === 'today_profit'" :class="['text-right', profitClass(h.today_change_pct)]">
               <template v-if="h.today_change_pct !== undefined && h.today_change_pct !== null">
                 <div class="today-change-cell">
                   <span class="today-change-pct">{{ h.today_change_pct > 0 ? '+' : '' }}{{ h.today_change_pct.toFixed(2) }}%</span>
@@ -4650,15 +4727,15 @@ function txDisplayAmount(tx) {
               </template>
               <span v-else class="text-muted">--</span>
             </td>
-            <td class="text-right">{{ formatMoney(h.current_value) }}</td>
-            <td :class="['text-right', profitClass(h.profit_loss)]">{{ formatMoney(h.profit_loss) }}</td>
-            <td :class="['text-right', profitClass(h.profit_rate)]">{{ formatRate(h.profit_rate) }}</td>
-            <td>
+            <td v-else-if="col.key === 'current_value'" class="text-right">{{ formatMoney(h.current_value) }}</td>
+            <td v-else-if="col.key === 'profit_loss'" :class="['text-right', profitClass(h.profit_loss)]">{{ formatMoney(h.profit_loss) }}</td>
+            <td v-else-if="col.key === 'profit_rate'" :class="['text-right', profitClass(h.profit_rate)]">{{ formatRate(h.profit_rate) }}</td>
+            <td v-else-if="col.key === 'price_updated_at'">
               <span :class="['freshness-tag', freshnessHint(h.price_updated_at).cls]">
                 {{ freshnessHint(h.price_updated_at).text }}
               </span>
             </td>
-            <td class="actions-cell">
+            <td v-else-if="col.key === 'actions'" class="actions-cell">
               <button class="btn-ghost btn-sm btn-primary-text" @click="openAddPurchase(h)" title="买入">↑买</button>
               <button class="btn-ghost btn-sm btn-sell-text" @click="openSell(h)" title="卖出">↓卖</button>
               <button class="btn-ghost btn-sm btn-analysis-text" @click="openFundAnalysis(h)" title="基金分析">📊</button>
@@ -4675,6 +4752,7 @@ function txDisplayAmount(tx) {
                 </div>
               </div>
             </td>
+            </template>
           </tr>
         </tbody>
       </table>
@@ -9133,5 +9211,36 @@ select.input-field {
   padding: 0.5rem 0;
   color: var(--color-text-secondary);
   font-size: 0.85rem;
+}
+
+/* ── 列拖拽排序 ── */
+.holding-table-drag thead th.th-draggable {
+  cursor: grab;
+  user-select: none;
+  position: relative;
+}
+.holding-table-drag thead th.th-draggable:hover {
+  background: var(--color-bg-hover, rgba(0,0,0,0.04));
+}
+.holding-table-drag thead th.th-draggable:active {
+  cursor: grabbing;
+}
+.holding-table-drag thead th.th-draggable.drag-over {
+  border-left: 2px solid var(--color-primary, #2563eb);
+}
+.col-reset-btn {
+  font-size: 0.75rem;
+  padding: 2px 8px;
+  border: 1px solid var(--color-border, #e5e7eb);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--color-text-secondary, #6b7280);
+  cursor: pointer;
+  margin-left: 0.5rem;
+  transition: all 0.15s;
+}
+.col-reset-btn:hover {
+  border-color: var(--color-primary, #2563eb);
+  color: var(--color-primary, #2563eb);
 }
 </style>
