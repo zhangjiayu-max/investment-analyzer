@@ -13,7 +13,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from db._conn import _get_conn
 from db.knowledge import list_knowledge
-from rag import index_to_chroma
+from services.rag import index_to_chroma
 
 
 def sync_to_fts():

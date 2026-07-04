@@ -146,7 +146,7 @@ async def generate_prompt_api(req: GeneratePromptRequest):
 请直接输出完整的提示词，不要加任何解释说明。"""
 
     try:
-        from llm_service import _call_llm, call_llm_async, MODEL
+        from services.llm_service import _call_llm, call_llm_async, MODEL
         resp = await call_llm_async(
             caller="agent_generator",
             messages=[
@@ -231,7 +231,7 @@ async def react_reasoning_api(body: dict):
     Body: {"query": str, "max_iterations"?: int}
     """
     from agent.react_loop import run_react_loop, MAX_ITERATIONS
-    from llm_service import call_llm_async
+    from services.llm_service import call_llm_async
     from tools import execute_tool
 
     query = (body.get("query") or "").strip()
@@ -244,7 +244,7 @@ async def react_reasoning_api(body: dict):
     def _llm_call(messages):
         # 同步包装：react_loop 为同步设计，这里用 asyncio 跑
         import asyncio as _aio
-        from llm_service import MODEL
+        from services.llm_service import MODEL
         try:
             loop = _aio.get_event_loop()
         except RuntimeError:

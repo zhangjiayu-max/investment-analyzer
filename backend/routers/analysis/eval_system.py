@@ -9,7 +9,7 @@ from datetime import datetime, timedelta
 from fastapi import APIRouter, HTTPException
 
 from db import get_config, get_config_int
-from schemas import PromptActivateRequest
+from infra.schemas import PromptActivateRequest
 from db.eval import (
     create_eval_case, list_eval_cases, get_eval_case, update_eval_case, delete_eval_case,
     create_eval_run, list_eval_runs, get_eval_run_detail, update_eval_run,
@@ -18,7 +18,7 @@ from db.eval import (
     activate_prompt_version, update_prompt_scores,
     save_eval_daily_report, get_eval_daily_report, list_eval_daily_reports, get_eval_trends,
 )
-from llm_service import _call_llm, MODEL
+from services.llm_service import _call_llm, MODEL
 
 logger = logging.getLogger(__name__)
 

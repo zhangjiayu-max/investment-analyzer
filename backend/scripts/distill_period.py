@@ -49,7 +49,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from PyPDF2 import PdfReader
 from db.knowledge import add_knowledge, delete_knowledge_by_source, list_knowledge_books
-from rag import index_book_knowledge, delete_chroma_by_filter
+from services.rag import index_book_knowledge, delete_chroma_by_filter
 from config import get_llm_config, get_llm_fallback_config
 
 # ── 多 Key 轮询 LLM 服务（兼容多模型，支持 fallback）──
@@ -100,7 +100,7 @@ def _call_llm(caller: str = "", model: str = None, **kwargs):
             resp = client.chat.completions.create(model=use_model, **kwargs)
             # 记录 token 用量
             if resp.usage:
-                from llm_service import _record_token_usage
+                from services.llm_service import _record_token_usage
                 _record_token_usage(resp.usage, resp.model or use_model, "distill_period")
             return resp
         except Exception as e:
@@ -119,7 +119,7 @@ def _call_llm(caller: str = "", model: str = None, **kwargs):
             resp = _fallback_client.chat.completions.create(model=_fallback_model, **kwargs)
             # 记录 token 用量
             if resp.usage:
-                from llm_service import _record_token_usage
+                from services.llm_service import _record_token_usage
                 _record_token_usage(resp.usage, resp.model or _fallback_model, "distill_period")
             return resp
         except Exception as e:
@@ -318,7 +318,7 @@ def ocr_scanned_pdf(pdf_path: str, book_title: str,
                 if len(text) > 20:
                     # 记录 token 用量
                     if resp.usage:
-                        from llm_service import _record_token_usage
+                        from services.llm_service import _record_token_usage
                         _record_token_usage(resp.usage, resp.model or model, "distill_period_ocr")
                     break
             except Exception as e:
@@ -386,7 +386,7 @@ def _merge_pages(pages_text: list[str], book_title: str, client, model: str) -> 
         )
         # 记录 token 用量
         if resp.usage:
-            from llm_service import _record_token_usage
+            from services.llm_service import _record_token_usage
             _record_token_usage(resp.usage, resp.model or model, "distill_period_merge")
         return resp.choices[0].message.content.strip()
     except Exception as e:
@@ -1603,7 +1603,7 @@ def main():
     args = parser.parse_args()
 
     # 初始化 RAG 索引（FTS5 + ChromaDB）
-    from rag import init_fts, init_chroma
+    from services.rag import init_fts, init_chroma
     init_fts()
     init_chroma()
 

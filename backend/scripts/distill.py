@@ -51,9 +51,9 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from PyPDF2 import PdfReader
 from openai import OpenAI
 from db.knowledge import add_knowledge, delete_knowledge_by_source, list_knowledge_books
-from llm_service import MODEL
+from services.llm_service import MODEL
 from config import get_llm_config
-from rag import index_book_knowledge, delete_chroma_by_filter
+from services.rag import index_book_knowledge, delete_chroma_by_filter
 
 # 输出目录：data/books/
 BOOKS_DIR = Path(__file__).parent.parent.parent / "data" / "books"
@@ -97,7 +97,7 @@ def _call_distill_llm(messages: list, temperature: float = 0.2, max_tokens: int 
             )
             # 记录 token 用量
             if resp.usage:
-                from llm_service import _record_token_usage
+                from services.llm_service import _record_token_usage
                 _record_token_usage(resp.usage, resp.model or MODEL, "distill")
             return resp
         except Exception as e:
@@ -278,7 +278,7 @@ def ocr_scanned_pdf(pdf_path: str, book_title: str,
                 )
                 # 记录 token 用量
                 if resp.usage:
-                    from llm_service import _record_token_usage
+                    from services.llm_service import _record_token_usage
                     _record_token_usage(resp.usage, resp.model or model, "distill_ocr")
                 text = resp.choices[0].message.content or ""
                 if len(text) > 20:
@@ -359,7 +359,7 @@ def _merge_pages(pages_text: list[str], book_title: str, client, model: str) -> 
         )
         # 记录 token 用量
         if resp.usage:
-            from llm_service import _record_token_usage
+            from services.llm_service import _record_token_usage
             _record_token_usage(resp.usage, resp.model or model, "distill_merge")
         return resp.choices[0].message.content.strip()
     except Exception as e:
@@ -1299,7 +1299,7 @@ def main():
     args = parser.parse_args()
 
     # 初始化 RAG 索引（FTS5 + ChromaDB）
-    from rag import init_fts, init_chroma
+    from services.rag import init_fts, init_chroma
     init_fts()
     init_chroma()
 

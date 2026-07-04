@@ -22,9 +22,9 @@ from db import (
     create_async_task, update_async_task, get_async_task, get_latest_async_task,
 )
 from db._conn import _get_conn
-from llm_service import _call_llm, MODEL
-from market_data import get_index_current_price
-from state import track_agent as _track_agent, untrack_agent as _untrack_agent, hot_topics_cache as _hot_topics_cache
+from services.llm_service import _call_llm, MODEL
+from services.market_data import get_index_current_price
+from infra.state import track_agent as _track_agent, untrack_agent as _untrack_agent, hot_topics_cache as _hot_topics_cache
 
 router = APIRouter(tags=["dashboard"])
 

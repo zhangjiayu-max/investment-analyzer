@@ -1,4 +1,4 @@
-from utils import _safe_float
+from infra.utils import _safe_float
 """滚动收益分析 — 计算任意时点买入持有N年的收益分布
 
 参考韭圈儿"组合回测"功能：
@@ -17,7 +17,7 @@ from fastapi import APIRouter, HTTPException
 from db._conn import _get_conn
 from db.health_score import save_bond_yield
 from db.config import get_config, get_config_int
-from llm_service import _call_llm, MODEL
+from services.llm_service import _call_llm, MODEL
 
 logger = logging.getLogger(__name__)
 

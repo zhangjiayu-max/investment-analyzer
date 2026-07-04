@@ -20,7 +20,7 @@ import sqlite3
 from pathlib import Path
 
 from db._conn import DB_PATH
-from rag_enhanced import expand_query, lightweight_rerank, get_rrf_params
+from services.rag_enhanced import expand_query, lightweight_rerank, get_rrf_params
 
 logger = logging.getLogger(__name__)
 
@@ -379,7 +379,7 @@ def rewrite_query(query: str) -> str:
         return query
 
     try:
-        from llm_service import _call_llm, MODEL
+        from services.llm_service import _call_llm, MODEL
 
         prompt = f"""将以下用户问题转换为适合知识库检索的关键词查询。
 
@@ -1192,7 +1192,7 @@ def index_to_chroma(content_type: str, reference_id: str, title: str, body: str,
 
     # 记录 embedding token 用量（估算）
     try:
-        from llm_service import _record_token_usage
+        from services.llm_service import _record_token_usage
         est_tokens = sum(len(c) // 4 for c in chunks)  # 粗略估算: 4 字符 ≈ 1 token
         if est_tokens > 0:
             class _EstUsage:
@@ -1275,7 +1275,7 @@ def search_chroma(query: str, content_type: str = None, content_types: list[str]
 
     # 记录 embedding token 用量（估算）
     try:
-        from llm_service import _record_token_usage
+        from services.llm_service import _record_token_usage
         est_tokens = len(query) // 4  # 粗略估算: 4 字符 ≈ 1 token
         if est_tokens > 0:
             class _EstUsage:

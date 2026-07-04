@@ -220,7 +220,7 @@ def sync_vault(vault_path: str, dry_run: bool = False) -> dict:
 
                 # 同步到 RAG（FTS + ChromaDB）
                 try:
-                    from rag import index_note_knowledge
+                    from services.rag import index_note_knowledge
                     index_note_knowledge(kid, title, body[:8000], source)
                 except Exception as e:
                     stats["errors"].append(f"RAG 索引失败 {title}: {e}")

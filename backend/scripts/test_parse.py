@@ -8,7 +8,7 @@ from pathlib import Path
 # 添加 backend 到 path
 sys.path.insert(0, str(Path(__file__).parent))
 
-from image_parser import ImageParser, DDImageParser
+from services.image_parser import ImageParser, DDImageParser
 
 
 def test_single_parse(image_path: str):

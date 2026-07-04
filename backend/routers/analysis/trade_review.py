@@ -110,7 +110,7 @@ async def trade_review_api(req: TradeReviewRequest):
     # 组合约束注入
     facts_block = ""
     try:
-        from portfolio_fact_layer import build_portfolio_facts
+        from services.portfolio_fact_layer import build_portfolio_facts
         facts = build_portfolio_facts()
         facts_block = json.dumps(facts, ensure_ascii=False, indent=2, default=str)
     except Exception:
@@ -150,7 +150,7 @@ async def _run_trade_review_async(record_id: int, system_prompt: str, user_conte
     import uuid
     trace_id = f"trd_{uuid.uuid4().hex[:12]}"
     try:
-        from llm_service import _call_llm, MODEL
+        from services.llm_service import _call_llm, MODEL
         response = await asyncio.to_thread(lambda: _call_llm(
             caller="portfolio_trade_review",
             trace_id=trace_id,

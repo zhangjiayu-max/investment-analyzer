@@ -1035,7 +1035,7 @@ def init_db():
 
     # ── 成本追踪表 ──────────────────────────────────────
     try:
-        from cost_tracker import init_cost_tables
+        from infra.cost_tracker import init_cost_tables
         init_cost_tables(conn)
     except Exception:
         pass

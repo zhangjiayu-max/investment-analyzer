@@ -81,7 +81,7 @@ async def run_ab_test(
 
 async def _default_judge(query: str, result_a: str, result_b: str) -> dict:
     """默认 LLM-as-Judge 评分。"""
-    from llm_service import _call_llm
+    from services.llm_service import _call_llm
 
     prompt = f"""对比以下两个投资分析结果的质量。
 

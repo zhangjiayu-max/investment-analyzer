@@ -359,9 +359,9 @@ async def _analyze_expert_performance(conversation_id: int, evaluation: dict) ->
 
 async def _auto_root_cause_to_fix(conversation_id: int, evaluation: dict):
     """低分 → 根因 → 自动生成 prompt 修复 → 进入 Shadow。"""
-    from root_cause_analyzer import batch_analyze
+    from infra.root_cause_analyzer import batch_analyze
     from db.eval import create_prompt_version, get_active_prompt
-    from shadow_mode import create_shadow_config
+    from infra.shadow_mode import create_shadow_config
     from db.portfolio import list_all_bad_cases
 
     # 1. 收集最近的 Bad Case
@@ -459,7 +459,7 @@ def _generate_improved_prompt(
     bad_cases: list,
 ) -> str:
     """让 LLM 基于根因和建议，生成改进版的 prompt。"""
-    from llm_service import _call_llm, MODEL
+    from services.llm_service import _call_llm, MODEL
 
     cases_text = "\n\n".join(
         f"Bad Case #{i+1}: {c.get('detail', '') or c.get('summary', '')}\n"

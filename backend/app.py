@@ -46,9 +46,9 @@ from db import (
     create_analysis_history, list_analysis_history,
     get_config_int, get_config_float, get_config,
 )
-from market_data import get_index_valuation
-from llm_service import chat_about_investment, _call_llm, MODEL
-from rag import init_fts, init_chroma, index_article, index_valuation, build_rag_context_with_details, index_author_article, index_skill_document, index_skill_extraction, index_to_chroma, _get_chroma, _get_embed_model
+from services.market_data import get_index_valuation
+from services.llm_service import chat_about_investment, _call_llm, MODEL
+from services.rag import init_fts, init_chroma, index_article, index_valuation, build_rag_context_with_details, index_author_article, index_skill_document, index_skill_extraction, index_to_chroma, _get_chroma, _get_embed_model
 
 app = FastAPI(title="投资分析助手", version="0.4.0")
 
@@ -63,7 +63,7 @@ app.add_middleware(
 )
 
 # 请求追踪中间件
-from request_tracing import RequestTracingMiddleware
+from infra.request_tracing import RequestTracingMiddleware
 app.add_middleware(RequestTracingMiddleware)
 
 
@@ -249,7 +249,7 @@ async def startup():
 
     # Shadow Mode 表初始化
     try:
-        from shadow_mode import init_shadow_db
+        from infra.shadow_mode import init_shadow_db
         init_shadow_db()
     except Exception as e:
         logging.warning(f"Shadow Mode 初始化失败: {e}")
@@ -271,7 +271,7 @@ async def startup():
         # 预加载 Embedding 模型（消除首次查询的 2-5s 延迟）
         try:
             logging.info("预加载 Embedding 模型...")
-            from rag import _ensure_embed_model
+            from services.rag import _ensure_embed_model
             _ensure_embed_model()
             logging.info("Embedding 模型预加载完成")
         except Exception as e:
@@ -345,7 +345,7 @@ async def shutdown():
     # 1. 停止接受新请求（FastAPI 自动处理）
     # 2. 等待活跃的 SSE 连接完成（最多 10 秒）
     try:
-        from llm_service import _active_sse_count
+        from services.llm_service import _active_sse_count
         import time
         deadline = time.time() + 10
         while _active_sse_count() > 0 and time.time() < deadline:
@@ -435,12 +435,12 @@ async def _auto_daily_eval():
                 logging.info(f"每日评测完成: avg={eval_result.get('avg_score')}")
 
                 # Step 2: 检查并晋升 Shadow
-                from shadow_mode import auto_promote_shadows
+                from infra.shadow_mode import auto_promote_shadows
                 promoted = await auto_promote_shadows()
                 logging.info(f"Shadow 晋升: {len(promoted)} 个")
 
                 # Step 3: 自动生成 Eval 用例
-                from auto_eval_generator import auto_generate_eval_cases
+                from infra.auto_eval_generator import auto_generate_eval_cases
                 gen_result = auto_generate_eval_cases()
                 logging.info(f"Eval 用例生成: {gen_result}")
 
@@ -521,7 +521,7 @@ async def _auto_daily_report():
         # 2. 市场全景（指数行情 + 板块涨跌 + 涨跌家数）
         market_context = "暂无行情数据"
         try:
-            from market_data import get_market_overview
+            from services.market_data import get_market_overview
             overview = get_market_overview()
             market_lines = []
             # 主要指数
@@ -739,7 +739,7 @@ async def _auto_refresh_nav():
 
             # 预警扫描后自动运行每日持仓提示引擎
             try:
-                from daily_position_advisor import run_daily_position_advice
+                from services.daily_position_advisor import run_daily_position_advice
                 advice_result = run_daily_position_advice(
                     user_id="default",
                     trigger_type="auto_nav_refresh",
@@ -1054,7 +1054,7 @@ async def fund_holdings_api(code: str, year: str = None):
 @app.post("/api/valuations/fetch-recent")
 async def fetch_recent_valuations():
     """自动抓取近期估值数据（从乐咕乐股）。"""
-    from market_data import get_index_valuation
+    from services.market_data import get_index_valuation
     from db import save_valuation
     from datetime import datetime
 
@@ -1105,14 +1105,14 @@ async def fetch_recent_valuations():
 @app.get("/api/shadow/configs")
 async def list_shadow_configs_api(active_only: bool = True):
     """列出 Shadow 配置。"""
-    from shadow_mode import list_shadow_configs
+    from infra.shadow_mode import list_shadow_configs
     return {"configs": list_shadow_configs(active_only=active_only)}
 
 
 @app.post("/api/shadow/configs")
 async def create_shadow_config_api(body: dict):
     """创建 Shadow 配置。"""
-    from shadow_mode import create_shadow_config
+    from infra.shadow_mode import create_shadow_config
     config_id = create_shadow_config(
         name=body.get("name", "未命名"),
         agent_type=body.get("agent_type", "ai"),
@@ -1126,7 +1126,7 @@ async def create_shadow_config_api(body: dict):
 @app.post("/api/shadow/configs/{config_id}/toggle")
 async def toggle_shadow_config_api(config_id: int, body: dict):
     """启用/禁用 Shadow 配置。"""
-    from shadow_mode import toggle_shadow_config
+    from infra.shadow_mode import toggle_shadow_config
     toggle_shadow_config(config_id, body.get("is_active", True))
     return {"ok": True}
 
@@ -1134,7 +1134,7 @@ async def toggle_shadow_config_api(config_id: int, body: dict):
 @app.delete("/api/shadow/configs/{config_id}")
 async def delete_shadow_config_api(config_id: int):
     """删除 Shadow 配置。"""
-    from shadow_mode import delete_shadow_config
+    from infra.shadow_mode import delete_shadow_config
     delete_shadow_config(config_id)
     return {"ok": True}
 
@@ -1142,14 +1142,14 @@ async def delete_shadow_config_api(config_id: int):
 @app.get("/api/shadow/runs")
 async def list_shadow_runs_api(config_id: int = None, limit: int = 100):
     """列出 Shadow 执行记录。"""
-    from shadow_mode import list_shadow_runs
+    from infra.shadow_mode import list_shadow_runs
     return {"runs": list_shadow_runs(config_id=config_id, limit=limit)}
 
 
 @app.get("/api/shadow/stats")
 async def get_shadow_stats_api(config_id: int = None):
     """获取 Shadow Mode 统计信息。"""
-    from shadow_mode import get_shadow_stats
+    from infra.shadow_mode import get_shadow_stats
     return get_shadow_stats(config_id=config_id)
 
 

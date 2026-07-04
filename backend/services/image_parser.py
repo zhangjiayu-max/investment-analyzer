@@ -80,7 +80,7 @@ def _ollama_chat(prompt: str, img_b64: str, model: str, base_url: str, trace_id:
     eval_count = data.get('eval_count', 0) or 0
     if prompt_eval or eval_count:
         try:
-            from llm_service import _record_token_usage
+            from services.llm_service import _record_token_usage
             _UsageStub = type('_UsageStub', (), {
                 'prompt_tokens': prompt_eval,
                 'completion_tokens': eval_count,
@@ -113,7 +113,7 @@ def _openai_chat(prompt: str, img_b64: str, mime: str, model: str,
     )
     if resp.usage:
         try:
-            from llm_service import _record_token_usage
+            from services.llm_service import _record_token_usage
             _record_token_usage(resp.usage, resp.model or model, "image_parse", trace_id=trace_id)
         except Exception:
             pass

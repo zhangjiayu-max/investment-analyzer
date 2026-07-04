@@ -2,7 +2,7 @@
 
 from fastapi import APIRouter, HTTPException
 
-from fund_manager import get_fund_manager, check_manager_change, batch_get_managers
+from services.fund_manager import get_fund_manager, check_manager_change, batch_get_managers
 from db import list_holdings, _get_conn
 
 router = APIRouter(tags=["fund-manager"])

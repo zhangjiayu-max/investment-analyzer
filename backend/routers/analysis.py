@@ -17,8 +17,8 @@ from db import (
     create_async_task, update_async_task, get_async_task,
     get_config_float, get_config_int,
 )
-from llm_service import _call_llm, MODEL
-from rag import build_rag_context_with_details, log_rag_search
+from services.llm_service import _call_llm, MODEL
+from services.rag import build_rag_context_with_details, log_rag_search
 from models.analysis import AnalysisRunRequest, AnalysisAgentUpdateRequest
 
 logger = logging.getLogger(__name__)

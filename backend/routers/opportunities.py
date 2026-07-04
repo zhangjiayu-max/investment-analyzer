@@ -13,7 +13,7 @@ from db import (
     mark_opportunity_bought,
     update_opportunity_status,
 )
-from opportunity_engine import scan_daily_opportunities
+from services.opportunity_engine import scan_daily_opportunities
 
 router = APIRouter(tags=["opportunities"])
 

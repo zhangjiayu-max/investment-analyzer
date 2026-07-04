@@ -14,7 +14,7 @@ from db import (
 )
 from db.portfolio import update_analysis_record
 from db.config import get_config_int, get_config_float
-from rag import build_rag_context_with_details, log_rag_search
+from services.rag import build_rag_context_with_details, log_rag_search
 from models.portfolio import PortfolioAiAnalysisRequest, FeedbackRequest
 
 logger = logging.getLogger(__name__)
@@ -179,7 +179,7 @@ async def _run_portfolio_ai_analysis_async(record_id: int, user_question: str):
 
     # 4. 调用 LLM
     try:
-        from llm_service import _call_llm, MODEL
+        from services.llm_service import _call_llm, MODEL
         response = await asyncio.to_thread(lambda: _call_llm(
             caller="portfolio_analysis",
             model=MODEL,
@@ -258,7 +258,7 @@ async def list_bad_cases_api(source: str = None, limit: int = 100):
 @router.post("/api/portfolio/analysis/root-cause/batch")
 async def batch_analyze_root_cause(limit: int = 50, force: bool = False):
     """批量分析 Bad Case 根因。"""
-    from root_cause_analyzer import batch_analyze
+    from infra.root_cause_analyzer import batch_analyze
     result = batch_analyze(limit=limit, force=force)
     return result
 
@@ -266,14 +266,14 @@ async def batch_analyze_root_cause(limit: int = 50, force: bool = False):
 @router.get("/api/portfolio/analysis/root-cause/stats")
 async def get_root_cause_stats_api():
     """获取根因统计信息。"""
-    from root_cause_analyzer import get_root_cause_stats
+    from infra.root_cause_analyzer import get_root_cause_stats
     return get_root_cause_stats()
 
 
 @router.post("/api/portfolio/analysis/root-cause/{source}/{case_id}")
 async def analyze_single_root_cause(source: str, case_id: int):
     """分析单个 Bad Case 的根因。"""
-    from root_cause_analyzer import analyze_root_cause, _save_root_cause
+    from infra.root_cause_analyzer import analyze_root_cause, _save_root_cause
     from db.portfolio import list_all_bad_cases
 
     cases = list_all_bad_cases(limit=500)

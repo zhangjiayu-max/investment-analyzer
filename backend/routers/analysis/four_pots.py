@@ -1,4 +1,4 @@
-from utils import _safe_float
+from infra.utils import _safe_float
 """四笔钱归类 + 定投优化器
 
 四笔钱框架（参考有知有行）：
@@ -19,7 +19,7 @@ from fastapi import APIRouter
 from db._conn import _get_conn
 from db.portfolio import list_holdings
 from db.config import get_config, get_config_float
-from llm_service import _call_llm, MODEL
+from services.llm_service import _call_llm, MODEL
 
 logger = logging.getLogger(__name__)
 

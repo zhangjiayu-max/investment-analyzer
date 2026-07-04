@@ -6,7 +6,7 @@
 import json
 import logging
 
-from llm_service import _call_llm, MODEL
+from services.llm_service import _call_llm, MODEL
 from db.config import get_config_int, get_config_float
 
 logger = logging.getLogger(__name__)

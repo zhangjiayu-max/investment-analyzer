@@ -17,8 +17,8 @@ from db import (
 )
 
 logger = logging.getLogger(__name__)
-from allocation_dashboard import build_allocation_dashboard
-from stress_test import run_portfolio_stress_test
+from services.allocation_dashboard import build_allocation_dashboard
+from services.stress_test import run_portfolio_stress_test
 
 router = APIRouter(tags=["finance-dashboard"])
 

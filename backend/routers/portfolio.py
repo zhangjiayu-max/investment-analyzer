@@ -19,9 +19,9 @@ import time
 
 from fastapi import APIRouter, HTTPException, UploadFile, File
 from pydantic import BaseModel
-from schemas import QuickEntryRequest, AiSuggestionToDecisionRequest
+from infra.schemas import QuickEntryRequest, AiSuggestionToDecisionRequest
 
-from state import (
+from infra.state import (
     track_agent as _track_agent,
     untrack_agent as _untrack_agent,
 )
@@ -51,7 +51,7 @@ from db import (
 from db.portfolio import update_analysis_record
 from db.config import get_config as _get_config
 from mcp.trading_calendar import expected_confirm_date
-from rag import build_rag_context_with_details, log_rag_search
+from services.rag import build_rag_context_with_details, log_rag_search
 from models.portfolio import (
     CreateHoldingRequest, UpdateHoldingRequest,
     CreateTransactionRequest, ConfirmTransactionRequest,
@@ -115,14 +115,14 @@ async def portfolio_summary_api(account: str = None):
 @router.get("/api/portfolio/allocation-dashboard")
 async def allocation_dashboard_api():
     """获取目标配置、当前配置和偏离度驾驶舱。"""
-    from allocation_dashboard import build_allocation_dashboard
+    from services.allocation_dashboard import build_allocation_dashboard
     return build_allocation_dashboard()
 
 
 @router.post("/api/portfolio/stress-test")
 async def portfolio_stress_test_api(req: StressTestRequest):
     """确定性组合压力测试：不调用 LLM，按资产类别冲击估算损失。"""
-    from stress_test import run_portfolio_stress_test
+    from services.stress_test import run_portfolio_stress_test
     try:
         return run_portfolio_stress_test(req.scenario, custom_shocks=req.custom_shocks)
     except ValueError as e:

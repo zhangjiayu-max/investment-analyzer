@@ -198,7 +198,7 @@ async def run_shadow(config_id: int, input_data: dict, production_output: str,
         start_time = time.time()
 
         # 用候选 prompt 执行
-        from llm_service import _call_llm
+        from services.llm_service import _call_llm
         candidate_output = _call_llm(
             caller=f"shadow_{config['agent_type']}",
             model=None,
@@ -252,7 +252,7 @@ async def run_shadow(config_id: int, input_data: dict, production_output: str,
 async def _compare_outputs(input_data: dict, prod_output: str, shadow_output: str,
                            agent_type: str) -> dict:
     """用 LLM-as-Judge 对比两个输出的质量。"""
-    from llm_service import _call_llm
+    from services.llm_service import _call_llm
 
     prompt = f"""你是投资分析质量评审专家。请对比以下两个分析输出的质量。
 

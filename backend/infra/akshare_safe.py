@@ -1,7 +1,7 @@
 """akshare 安全封装 — 带熔断器和超时保护。"""
 
 import logging
-from circuit_breaker import with_circuit_breaker, get_breaker, CircuitOpenError
+from infra.circuit_breaker import with_circuit_breaker, get_breaker, CircuitOpenError
 
 logger = logging.getLogger(__name__)
 
@@ -13,7 +13,7 @@ def safe_call(fn, *args, default=None, timeout=30, **kwargs):
     """安全调用 akshare 函数，超时或熔断时返回默认值。
 
     用法:
-        from akshare_safe import safe_call
+        from infra.akshare_safe import safe_call
         import akshare as ak
         df = safe_call(ak.stock_zh_a_spot_em, default=[])
     """

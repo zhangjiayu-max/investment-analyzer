@@ -59,7 +59,7 @@ async def what_if_analysis_api(req: WhatIfRequest):
     )
 
     try:
-        from llm_service import _call_llm, MODEL
+        from services.llm_service import _call_llm, MODEL
         response = await asyncio.to_thread(lambda: _call_llm(
             caller="portfolio_whatif",
             model=MODEL,

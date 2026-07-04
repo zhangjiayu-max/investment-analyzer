@@ -23,13 +23,13 @@ from db import (
     _get_conn,
 )
 from db.config import get_config, get_config_float, get_config_int
-from state import running_agents as _running_agents
+from infra.state import running_agents as _running_agents
 from agent.orchestrator import orchestrate, orchestrate_stream, clarify_requirement, CancelledError
-from portfolio_fact_layer import build_portfolio_facts
+from services.portfolio_fact_layer import build_portfolio_facts
 from agent.multi_agent import run_specialist
-from rag import build_rag_context_with_details, log_rag_search
-from llm_service import _call_llm, MODEL, ORCHESTRATOR_PROMPT
-from output_reviewer import review_output
+from services.rag import build_rag_context_with_details, log_rag_search
+from services.llm_service import _call_llm, MODEL, ORCHESTRATOR_PROMPT
+from infra.output_reviewer import review_output
 
 logger = logging.getLogger(__name__)
 
@@ -64,7 +64,7 @@ def _build_unified_context_safe(
 ) -> str:
     """构建统一上下文，失败时返回空字符串，避免阻断对话主流程。"""
     try:
-        from conversation_context import build_conversation_context
+        from services.conversation_context import build_conversation_context
 
         bundle = build_conversation_context(
             conversation_id=conv_id,
@@ -385,6 +385,21 @@ async def resume_conversation(conv_id: int, request: Request):
         rag_result = await asyncio.to_thread(_run_rag)
         rag_context = rag_result["context"]
 
+        # RAG 空结果兜底（同上）
+        if not rag_context:
+            _rag_trigger_keywords = ["政策", "原因", "为什么", "分析", "新闻", "暴跌", "暴涨",
+                                      "利好", "利空", "行情", "走势", "趋势", "预测", "影响"]
+            if any(kw in original_query for kw in _rag_trigger_keywords):
+                def _run_rag2():
+                    try:
+                        return build_rag_context_with_details(original_query, content_types=None, limit=5)
+                    except Exception:
+                        return {"context": ""}
+                rag_result2 = await asyncio.to_thread(_run_rag2)
+                if rag_result2.get("context"):
+                    rag_context = rag_result2["context"]
+                    rag_result = rag_result2
+
         # 获取历史
         history = get_messages(conv_id, limit=20)
         msg_list = [{"role": m["role"], "content": m["content"]} for m in history if m["id"] != stream_msg_id]
@@ -600,13 +615,29 @@ async def send_message_api(conv_id: int, req: SendMessageRequest):
         rag_result = {"context": "", "results": [], "keywords": [], "query": effective_query, "fts_count": 0, "chroma_count": 0, "freshness_filtered": 0}
     rag_context = rag_result["context"]
 
+    # RAG 空结果兜底：政策/原因/新闻/分析类问题强制二次检索（全类型）
+    if not rag_context:
+        _rag_trigger_keywords = ["政策", "原因", "为什么", "分析", "新闻", "暴跌", "暴涨",
+                                  "利好", "利空", "行情", "走势", "趋势", "预测", "影响",
+                                  "金价", "降息", "加息", "设备更新", "新能源", "AI"]
+        if any(kw in effective_query for kw in _rag_trigger_keywords):
+            try:
+                logger.info(f"RAG 空结果兜底：查询含政策/新闻关键词，全类型二次检索")
+                rag_result2 = build_rag_context_with_details(effective_query, content_types=None, limit=5)
+                if rag_result2.get("context"):
+                    rag_context = rag_result2["context"]
+                    rag_result = rag_result2
+                    logger.info(f"RAG 兜底命中：{rag_result2.get('fts_count',0)} FTS + {rag_result2.get('chroma_count',0)} Chroma")
+            except Exception as e:
+                logger.warning(f"RAG 兜底检索失败: {e}")
+
     # 3. 获取对话历史
     history = get_messages(conv_id, limit=20)
     msg_list = [{"role": m["role"], "content": m["content"]} for m in history]
 
     # 3.5 注入组合约束（Portfolio Fact Layer）
     try:
-        from portfolio_fact_layer import build_portfolio_facts as _bpf
+        from services.portfolio_fact_layer import build_portfolio_facts as _bpf
         _pf = _bpf()
         _cs = _pf.get("constraints", {})
         _sn = _pf.get("snapshot", {})
@@ -829,7 +860,7 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
         try:
             from agent.multi_hop_rag import multi_hop_search
             from db.portfolio import list_holdings
-            from rag import search_knowledge
+            from services.rag import search_knowledge
 
             def _mh_rag_fn(q, limit):
                 return search_knowledge(q, limit=limit)
@@ -970,7 +1001,7 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
                             prebuilt += f"## 知识库参考（书籍/文章）\n{rag_context[:800]}\n\n"
                         if not unified_context:
                             try:
-                                from portfolio_context import build_portfolio_context
+                                from services.portfolio_context import build_portfolio_context
                                 prebuilt += f"## 用户当前持仓\n{build_portfolio_context()}\n\n"
                             except Exception:
                                 pass

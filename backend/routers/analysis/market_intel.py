@@ -13,9 +13,9 @@ from db import create_async_task, update_async_task, get_async_task
 from db.portfolio import save_analysis_cache, get_analysis_cache
 from db.agents import create_agent_run
 from db._conn import _get_conn
-from llm_service import _call_llm, MODEL
-from rag import build_rag_context_with_details, log_rag_search
-from market_data import get_market_overview
+from services.llm_service import _call_llm, MODEL
+from services.rag import build_rag_context_with_details, log_rag_search
+from services.market_data import get_market_overview
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/market-intelligence", tags=["analysis-market-intel"])

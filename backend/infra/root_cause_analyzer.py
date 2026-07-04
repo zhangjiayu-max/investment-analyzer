@@ -166,7 +166,7 @@ def analyze_root_cause(bad_case: dict) -> dict | None:
         }
         或 None（分析失败时）
     """
-    from llm_service import _call_llm
+    from services.llm_service import _call_llm
 
     prompt = _build_prompt(bad_case)
 

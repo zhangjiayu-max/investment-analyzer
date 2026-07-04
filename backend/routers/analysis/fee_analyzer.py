@@ -7,7 +7,7 @@ from fastapi import APIRouter
 
 from db import list_holdings, get_config, get_config_int, create_async_task, update_async_task
 from db.portfolio import save_analysis_cache, get_analysis_cache
-from llm_service import _call_llm, call_llm_async, MODEL
+from services.llm_service import _call_llm, call_llm_async, MODEL
 
 logger = logging.getLogger(__name__)
 

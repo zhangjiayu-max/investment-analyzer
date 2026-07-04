@@ -8,7 +8,7 @@ import uuid
 
 from fastapi import APIRouter, HTTPException
 
-from state import track_agent as _track_agent, untrack_agent as _untrack_agent
+from infra.state import track_agent as _track_agent, untrack_agent as _untrack_agent
 from db import (
     list_holdings, get_holding, list_transactions,
     get_portfolio_diversification, get_portfolio_penetration,
@@ -21,7 +21,7 @@ from db import (
 )
 from db.portfolio import update_analysis_record
 from db.config import get_config as _get_config, get_config_int, get_config_float
-from rag import build_rag_context_with_details
+from services.rag import build_rag_context_with_details
 from ._shared import _parse_mcp_pct_pairs, _parse_mcp_correlation
 
 logger = logging.getLogger(__name__)
@@ -349,7 +349,7 @@ async def _run_diversification_ai_summary_async(record_id: int, agent_id: int = 
     # 9. 组合约束注入
     facts_block = ""
     try:
-        from portfolio_fact_layer import build_portfolio_facts
+        from services.portfolio_fact_layer import build_portfolio_facts
         facts = build_portfolio_facts()
         facts_block = json.dumps(facts, ensure_ascii=False, indent=2, default=str)
     except Exception:
@@ -412,7 +412,7 @@ async def _run_diversification_ai_summary_async(record_id: int, agent_id: int = 
     _track_agent(uid, "分散度分析师", "持仓分散度解读")
     logger.info(f"[trace:{trace_id}] 分散度分析师开始 record_id={record_id}")
     try:
-        from llm_service import _call_llm, MODEL
+        from services.llm_service import _call_llm, MODEL
         response = await asyncio.to_thread(lambda: _call_llm(
             caller="diversification_analysis",
             trace_id=trace_id,

@@ -58,7 +58,7 @@ async def upload_chat_image(file: UploadFile = File(...)):
     parse_status = "success"
     parse_result = None
     try:
-        from llm_service import analyze_image
+        from services.llm_service import analyze_image
         parse_result = analyze_image(str(saved_path))
         if parse_result and parse_result.get("error"):
             parse_status = "failed"

@@ -32,7 +32,7 @@ def fusion_score(stock_result: dict, kyc_profile: dict = None) -> dict:
             "adjustment": int,             # 融合分 - 规则分（正=上调，负=下调）
         }
     """
-    from llm_service import _call_llm, MODEL
+    from services.llm_service import _call_llm, MODEL
 
     rule_score = stock_result.get("score", 50)
     rule_rec = stock_result.get("recommendation", "")

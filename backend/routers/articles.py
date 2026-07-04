@@ -20,7 +20,7 @@ from fastapi import APIRouter, HTTPException, UploadFile, BackgroundTasks
 from fastapi.responses import FileResponse
 
 from config import ROOT, IMAGES_DIR, UPLOADS_DIR
-from state import (
+from infra.state import (
     analyze_progress as _analyze_progress,
     analyze_cancel as _analyze_cancel,
     analyze_tasks as _analyze_tasks,
@@ -40,9 +40,9 @@ from db import (
     save_document_chunks, get_document_chunks,
     save_valuation,
 )
-from article_reader import fetch_article, download_images
-from image_parser import ImageParser
-from rag import index_to_chroma, index_author_article
+from services.article_reader import fetch_article, download_images
+from services.image_parser import ImageParser
+from services.rag import index_to_chroma, index_author_article
 from models.articles import ExtractUrlRequest
 from routers.tasks import CreateTaskRequest
 
@@ -245,7 +245,7 @@ async def get_reanalyze_status(record_id: int):
 @router.post("/api/author-articles/import")
 async def import_author_articles():
     """从 Excel 导入作者文章（幂等，跳过已存在）。"""
-    from import_articles import import_from_excel
+    from scripts.import_articles import import_from_excel
     result = import_from_excel()
     return {"ok": True, **result}
 
@@ -547,7 +547,7 @@ async def embed_document(article_id: int):
         chunks_count = index_to_chroma("linked_doc", str(article_id), article.get("title", ""), content)
 
         # 保存分块到 SQLite（用于展示）
-        from rag import _chunk_text
+        from services.rag import _chunk_text
         chunks = _chunk_text(content)
         save_document_chunks(article_id, chunks)
 
@@ -1006,7 +1006,7 @@ async def _embed_linked_doc(article_id: int, file_type: str, raw_content: bytes,
             text = "\n\n".join(p.text for p in doc.paragraphs if p.text.strip())
         if text.strip():
             chunks_count = index_to_chroma("linked_doc", str(article_id), title, text)
-            from rag import _chunk_text
+            from services.rag import _chunk_text
             chunks = _chunk_text(text)
             save_document_chunks(article_id, chunks)
             update_linked_article_embed_status(article_id, "done", chunks_count)

@@ -163,7 +163,7 @@ def _rewrite_by_llm(query: str, history: list[dict]) -> str:
 4. 只输出改写后的结果，不要解释，不要加引号"""
 
     try:
-        from llm_service import _call_llm, MODEL
+        from services.llm_service import _call_llm, MODEL
         from db.config import get_config_float
         resp = _call_llm(
             caller="query_rewriter",

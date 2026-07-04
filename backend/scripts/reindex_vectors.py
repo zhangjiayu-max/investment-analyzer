@@ -11,7 +11,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from rag import (
+from services.rag import (
     init_fts, init_chroma, reset_chroma_collection,
     index_book_knowledge, index_to_chroma, _get_embed_model,
 )
@@ -74,7 +74,7 @@ def main():
     print(f"  完成: {ok2} 成功, {fail2} 失败")
 
     # 验证
-    from rag import _get_chroma
+    from services.rag import _get_chroma
     collection = _get_chroma()
     total = collection.count()
     print(f"\n{'='*50}")

@@ -11,7 +11,7 @@ from config import IMAGES_DIR, VALUATION_IMAGES_DIR, DD_IMAGES_DIR, IMAGE_PARSER
 logger = logging.getLogger(__name__)
 from db._conn import _get_conn
 from db.valuations import save_valuation, save_dd_valuation
-from image_parser import ImageParser, DDImageParser
+from services.image_parser import ImageParser, DDImageParser
 
 
 def parse_single_valuation(path: str, model_type: str = "", source_url: str | None = None, snapshot_date: str | None = None) -> dict:
@@ -99,7 +99,7 @@ def parse_single_valuation(path: str, model_type: str = "", source_url: str | No
 
         # 自动触发 RAG 索引（增量索引）
         try:
-            from rag import index_valuation
+            from services.rag import index_valuation
             index_valuation(
                 result.get("index_code", ""),
                 result.get("index_name", ""),

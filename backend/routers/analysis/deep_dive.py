@@ -5,7 +5,7 @@ import logging
 
 from fastapi import APIRouter, HTTPException
 
-from state import track_agent as _track_agent, untrack_agent as _untrack_agent
+from infra.state import track_agent as _track_agent, untrack_agent as _untrack_agent
 from db import (
     list_holdings, get_holding, list_transactions, get_analysis_agent,
     lookup_fund_info, get_fund_holdings, fetch_fund_nav,
@@ -16,7 +16,7 @@ from db import (
 )
 from db.portfolio import update_analysis_record
 from db.config import get_config as _get_config, get_config_int, get_config_float
-from rag import build_rag_context_with_details, log_rag_search
+from services.rag import build_rag_context_with_details, log_rag_search
 from models.portfolio import DeepDiveRequest
 from ._shared import (
     _get_fund_mcp_diagnosis, _fetch_valuation_fallback,
@@ -158,7 +158,7 @@ async def fund_deep_dive_api(holding_id: int, req: DeepDiveRequest):
     # 4) 组合事实层 — 统一的组合上下文（替代 portfolio_context + bond_context）
     facts_context = ""
     try:
-        from portfolio_fact_layer import build_portfolio_facts
+        from services.portfolio_fact_layer import build_portfolio_facts
         facts = build_portfolio_facts()
         facts_context = json.dumps(facts, ensure_ascii=False, indent=2, default=str)
     except Exception as e:
@@ -251,7 +251,7 @@ async def _run_deep_dive_async(record_id: int, system_prompt: str, user_content:
     import uuid
     trace_id = f"deep_{uuid.uuid4().hex[:12]}"
     try:
-        from llm_service import _call_llm, MODEL
+        from services.llm_service import _call_llm, MODEL
         response = await asyncio.to_thread(lambda: _call_llm(
             caller="portfolio_deep_dive",
             trace_id=trace_id,

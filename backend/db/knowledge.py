@@ -143,7 +143,7 @@ def delete_knowledge(knowledge_id: int) -> bool:
     if deleted:
         # 同步删除 FTS 索引
         try:
-            from rag import _get_conn as _get_rag_conn
+            from services.rag import _get_conn as _get_rag_conn
             rag_conn = _get_rag_conn()
             rag_conn.execute(
                 "DELETE FROM knowledge_fts WHERE content_type = ? AND reference_id = ?",
@@ -156,7 +156,7 @@ def delete_knowledge(knowledge_id: int) -> bool:
 
         # 同步删除 ChromaDB
         try:
-            from rag import delete_chroma_by_filter
+            from services.rag import delete_chroma_by_filter
             delete_chroma_by_filter(category, reference_id=str(knowledge_id))
         except Exception as e:
             logger.warning(f"删除 ChromaDB 失败 (id={knowledge_id}): {e}")
@@ -189,7 +189,7 @@ def delete_knowledge_by_source(source: str) -> int:
     if count > 0:
         # 同步删除 FTS 索引
         try:
-            from rag import _get_conn as _get_rag_conn
+            from services.rag import _get_conn as _get_rag_conn
             rag_conn = _get_rag_conn()
             for kid, category in ids_to_delete:
                 rag_conn.execute(
@@ -203,7 +203,7 @@ def delete_knowledge_by_source(source: str) -> int:
 
         # 同步删除 ChromaDB
         try:
-            from rag import delete_chroma_by_filter
+            from services.rag import delete_chroma_by_filter
             for kid, category in ids_to_delete:
                 delete_chroma_by_filter(category, reference_id=str(kid))
         except Exception as e:
@@ -219,7 +219,7 @@ def cleanup_orphan_fts_records() -> dict:
         {"cleaned": int, "details": str}
     """
     try:
-        from rag import _get_conn as _get_rag_conn
+        from services.rag import _get_conn as _get_rag_conn
 
         rag_conn = _get_rag_conn()
         conn = _get_conn()

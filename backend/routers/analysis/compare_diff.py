@@ -7,7 +7,7 @@ from pydantic import BaseModel, Field
 from typing import Optional
 
 from db.config import get_config_int, get_config_float
-from llm_service import _call_llm, MODEL
+from services.llm_service import _call_llm, MODEL
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["analysis-compare"])

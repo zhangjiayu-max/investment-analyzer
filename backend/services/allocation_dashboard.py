@@ -96,7 +96,7 @@ def _prioritize_suggestions(suggestions: list[dict], guardrails: list[str]) -> l
 
 def build_allocation_dashboard(user_id: str = "default") -> dict:
     """构建组合偏离驾驶舱数据。"""
-    from rebalancer import analyze_rebalancing_need
+    from services.rebalancer import analyze_rebalancing_need
 
     raw = analyze_rebalancing_need(user_id=user_id)
     if raw.get("error"):

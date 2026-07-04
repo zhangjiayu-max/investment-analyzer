@@ -9,7 +9,7 @@ import time
 from typing import Optional
 
 from db.config import get_config, get_config_float
-from llm_service import _call_llm, MODEL
+from services.llm_service import _call_llm, MODEL
 
 logger = logging.getLogger(__name__)
 

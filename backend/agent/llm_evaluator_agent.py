@@ -12,7 +12,7 @@ import logging
 import re
 from typing import Optional
 
-from llm_service import _call_llm, MODEL
+from services.llm_service import _call_llm, MODEL
 from db.config import get_config_int, get_config_float
 
 logger = logging.getLogger(__name__)
@@ -383,7 +383,7 @@ def _get_user_context() -> dict:
 
     # 获取持仓信息
     try:
-        from portfolio_context import build_portfolio_summary_line
+        from services.portfolio_context import build_portfolio_summary_line
         context["portfolio"] = build_portfolio_summary_line()
     except Exception:
         pass

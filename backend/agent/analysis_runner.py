@@ -21,7 +21,7 @@ import json
 import logging
 import time
 
-from llm_service import _call_llm, MODEL
+from services.llm_service import _call_llm, MODEL
 
 logger = logging.getLogger(__name__)
 
@@ -79,7 +79,7 @@ async def run_agent_analysis(
     rag_context = ""
     if rag_query:
         try:
-            from rag import build_rag_context_with_details, log_rag_search
+            from services.rag import build_rag_context_with_details, log_rag_search
             rag_result = build_rag_context_with_details(query=rag_query, limit=5)
             rag_context = rag_result.get("context", "")
             # 记录 RAG 日志

@@ -552,7 +552,7 @@ async def evaluate_with_llm(conversation_id: int, message_id: int = None) -> dic
     }
     """
     from db.conversations import get_messages
-    from llm_service import _call_llm, MODEL
+    from services.llm_service import _call_llm, MODEL
 
     messages = get_messages(conversation_id)
     if not messages:

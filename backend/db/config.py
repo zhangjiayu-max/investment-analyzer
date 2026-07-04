@@ -59,7 +59,7 @@ DEFAULT_CONFIGS = [
     # LLM 成本控制开关：默认关闭自动触发类调用
     ('llm_cost.auto_daily_report', 'false', '自动市场日报', 'llm_cost'),
     ('llm_cost.auto_daily_eval', 'false', '每日评测 Pipeline', 'llm_cost'),
-    ('llm_cost.auto_conversation_eval', 'false', '对话结束自动评测', 'llm_cost'),
+    ('llm_cost.auto_conversation_eval', 'true', '对话结束自动评测（medium/complex，每日限10条，规则优先LLM兜底）', 'llm_cost'),
     ('llm_cost.auto_conversation_summary', 'false', '对话摘要自动生成', 'llm_cost'),
     ('llm_cost.page_llm_summary', 'false', '页面分析 LLM 总结', 'llm_cost'),
     ('llm_cost.llm_judge_eval', 'false', 'LLM-as-Judge 评分', 'llm_cost'),

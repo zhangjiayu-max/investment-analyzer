@@ -5,7 +5,7 @@ import json
 from collections import Counter
 from db import _get_conn
 from config import get_llm_config
-from llm_service import _call_llm
+from services.llm_service import _call_llm
 
 _api_key, _base_url, _model = get_llm_config()
 MODEL = _model

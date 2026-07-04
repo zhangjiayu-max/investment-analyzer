@@ -153,7 +153,7 @@ def seed_investment_strategy_knowledge():
 
     # 索引到 RAG
     try:
-        from rag import index_skill_document
+        from services.rag import index_skill_document
         conn2 = _get_conn()
         doc_row = conn2.execute("SELECT id FROM skill_documents WHERE doc_type = 'investment_strategy'").fetchone()
         conn2.close()

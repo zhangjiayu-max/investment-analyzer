@@ -20,7 +20,7 @@ class ThreadReviewRequest(BaseModel):
 @router.post("/api/thread-review/generate")
 async def generate_thread_review(req: ThreadReviewRequest):
     """Generate AI summary of a conversation thread."""
-    from llm_service import _call_llm, MODEL
+    from services.llm_service import _call_llm, MODEL
     from db.config import get_config_float, get_config_int
 
     # Build prompt from messages

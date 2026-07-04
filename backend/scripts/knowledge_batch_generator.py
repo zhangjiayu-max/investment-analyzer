@@ -18,8 +18,8 @@ from pathlib import Path
 # 添加项目路径
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from llm_service import _call_llm
-from rag import index_to_chroma, _index_document
+from services.llm_service import _call_llm
+from services.rag import index_to_chroma, _index_document
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)

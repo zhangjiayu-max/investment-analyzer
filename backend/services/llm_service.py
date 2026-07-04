@@ -251,7 +251,7 @@ def _record_token_usage(usage, model: str, caller: str = "", trace_id: str = "")
 
     # 成本治理：同步记录到 cost_logs 表
     try:
-        from cost_tracker import cost_tracker
+        from infra.cost_tracker import cost_tracker
         cost_tracker.record(caller or "unknown", model,
                             usage.prompt_tokens or 0, usage.completion_tokens or 0)
     except Exception:
@@ -443,7 +443,7 @@ def analyze_image(image_path: str) -> dict:
     支持 Ollama / MiMo 等多 provider 切换，无需重启。
     """
     import json as _json
-    from image_parser import _call_vision
+    from services.image_parser import _call_vision
 
     with open(image_path, "rb") as f:
         img_b64 = base64.b64encode(f.read()).decode()

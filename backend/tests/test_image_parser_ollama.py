@@ -1,7 +1,7 @@
 import json
 from pathlib import Path
 
-from image_parser import DDImageParser, ImageParser, _extract_json
+from services.image_parser import DDImageParser, ImageParser, _extract_json
 
 
 class _FakeResponse:
@@ -33,7 +33,7 @@ def test_call_vision_ollama_bypasses_proxy_and_reads_thinking(monkeypatch):
     )
     monkeypatch.setattr("httpx.post", fake_post)
 
-    from image_parser import _call_vision
+    from services.image_parser import _call_vision
     raw = _call_vision("test prompt", "abc123", "png")
 
     assert json.loads(raw)["指数名称"] == "CS计算机"
@@ -60,7 +60,7 @@ def test_call_vision_ollama_dd_parser(monkeypatch):
     )
     monkeypatch.setattr("httpx.post", fake_post)
 
-    from image_parser import _call_vision
+    from services.image_parser import _call_vision
     raw = _call_vision("test prompt", "abc123", "png")
 
     assert json.loads(raw)["更新日期"] == "2026-06-26"
@@ -110,7 +110,7 @@ def test_call_vision_mimo_uses_openai_client(monkeypatch):
     )
     monkeypatch.setattr("image_parser.OpenAI", lambda **kw: FakeClient())
 
-    from image_parser import _call_vision
+    from services.image_parser import _call_vision
     raw = _call_vision("test prompt", "abc123", "png")
 
     result = json.loads(raw)

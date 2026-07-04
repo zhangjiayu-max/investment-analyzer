@@ -10,7 +10,7 @@ from config import DD_IMAGES_DIR, IMAGES_DIR, VALUATION_IMAGES_DIR
 from db.dd_tasks import update_dd_parse_task, get_dd_parse_task
 from db.valuations import save_dd_valuation
 from db._conn import _get_conn
-from image_parser import DDImageParser, ImageParser
+from services.image_parser import DDImageParser, ImageParser
 
 logger = logging.getLogger(__name__)
 

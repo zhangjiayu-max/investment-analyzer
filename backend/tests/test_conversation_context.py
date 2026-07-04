@@ -13,7 +13,7 @@ from db import (
 
 
 def test_build_context_includes_portfolio_summary_decisions_and_recent_messages(tmp_db):
-    from conversation_context import build_conversation_context
+    from services.conversation_context import build_conversation_context
 
     conv_id = create_conversation(title="测试对话")
     create_message(conv_id, "user", "之前我问过医疗基金要不要加仓")
@@ -69,7 +69,7 @@ def test_build_context_includes_portfolio_summary_decisions_and_recent_messages(
 
 
 def test_build_context_marks_missing_context_for_trade_decision(tmp_db):
-    from conversation_context import build_conversation_context
+    from services.conversation_context import build_conversation_context
 
     conv_id = create_conversation(title="测试对话")
     create_message(conv_id, "user", "可以买这个基金吗？")

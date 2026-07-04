@@ -21,8 +21,8 @@ from db.health_score import save_health_score, get_health_score, list_health_sco
 from db.portfolio import list_holdings
 from db.valuations import get_latest_valuation, list_valuation_indexes, get_index_info
 from db.config import get_config, get_config_float
-from llm_service import _call_llm, MODEL
-from utils import _safe_float
+from services.llm_service import _call_llm, MODEL
+from infra.utils import _safe_float
 
 logger = logging.getLogger(__name__)
 

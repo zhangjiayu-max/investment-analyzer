@@ -8,7 +8,7 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
-from cost_tracker import cost_tracker, budget_controller
+from infra.cost_tracker import cost_tracker, budget_controller
 from db._conn import _get_conn
 
 logger = logging.getLogger(__name__)

@@ -6,7 +6,7 @@ import logging
 import re
 import time
 
-from llm_service import client, MODEL, _call_llm, _parse_tool_args
+from services.llm_service import client, MODEL, _call_llm, _parse_tool_args
 from tools import TOOLS, execute_tool
 from db.agents import load_specialist_agents
 from db.config import get_config_int
@@ -292,7 +292,7 @@ def run_specialist(agent_key: str, query: str, context: str = "",
         system_content += f"\n\n{prebuilt_context}"
     else:
         try:
-            from portfolio_context import build_portfolio_context
+            from services.portfolio_context import build_portfolio_context
             portfolio_ctx = build_portfolio_context()
             system_content += f"\n\n## 用户当前持仓\n{portfolio_ctx}"
         except Exception:
@@ -509,7 +509,7 @@ def run_specialist_with_context(agent_key: str, query: str, peer_analyses: dict,
         system_content += f"\n\n{prebuilt_context}"
     else:
         try:
-            from portfolio_context import build_portfolio_context
+            from services.portfolio_context import build_portfolio_context
             portfolio_ctx = build_portfolio_context()
             if portfolio_ctx:
                 system_content += f"\n\n## 用户当前持仓（分析时务必结合）\n{portfolio_ctx}"
@@ -867,7 +867,7 @@ def run_arbitration(query: str, specialist_results: list, rag_context: str = "",
         {"agent_key": "arbitrator", "agent": "仲裁法官", "icon": "⚖️",
          "analysis": "...", "duration_ms": ..., "is_arbitration": True}
     """
-    from llm_service import call_arbitration_llm
+    from services.llm_service import call_arbitration_llm
 
     start_time = time.time()
 

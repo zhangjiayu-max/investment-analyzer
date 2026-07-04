@@ -102,7 +102,7 @@ async def run_ab_test():
     sys.path.insert(0, backend_dir)
 
     from db._conn import _get_conn
-    from llm_service import _call_llm, MODEL
+    from services.llm_service import _call_llm, MODEL
 
     # 新版 prompt（已更新到 db）
     conn = _get_conn()

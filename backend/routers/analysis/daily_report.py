@@ -17,8 +17,8 @@ from db import (
     get_related_orchestrator_decisions,
 )
 from db._conn import _get_conn
-from llm_service import _call_llm, MODEL
-from state import track_agent as _track_agent, untrack_agent as _untrack_agent
+from services.llm_service import _call_llm, MODEL
+from infra.state import track_agent as _track_agent, untrack_agent as _untrack_agent
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["analysis-daily-report"])
@@ -188,7 +188,7 @@ async def _run_regenerate_daily_report_async(task_id: int, agent: dict):
         # 市场全景
         market_context = "暂无行情数据"
         try:
-            from market_data import get_market_overview
+            from services.market_data import get_market_overview
             overview = get_market_overview()
             market_lines = []
             if overview.get("indices"):
@@ -290,7 +290,7 @@ async def _run_regenerate_daily_report_async(task_id: int, agent: dict):
 
         # 注入组合约束
         try:
-            from portfolio_fact_layer import build_portfolio_facts
+            from services.portfolio_fact_layer import build_portfolio_facts
             facts = build_portfolio_facts()
             facts_json = json.dumps(facts, ensure_ascii=False, indent=2, default=str)
             full_prompt += f"""【组合约束】

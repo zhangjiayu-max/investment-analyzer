@@ -18,7 +18,7 @@ from db import (
     DEFAULT_BOND_PROMPT,
     create_async_task, update_async_task, get_async_task,
 )
-from state import track_agent, untrack_agent
+from infra.state import track_agent, untrack_agent
 
 router = APIRouter(prefix="/api/bond", tags=["bond"])
 

@@ -30,7 +30,7 @@ async def trigger_rebalancing_api():
 async def _run_rebalancing_async(task_id: int):
     """后台执行智能调仓建议分析。"""
     try:
-        from rebalancer import analyze_rebalancing_need
+        from services.rebalancer import analyze_rebalancing_need
         result = await asyncio.to_thread(analyze_rebalancing_need)
         if "error" in result:
             update_async_task(task_id, status="error", error_msg=result["error"])

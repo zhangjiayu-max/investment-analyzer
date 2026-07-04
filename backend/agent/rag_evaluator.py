@@ -17,8 +17,8 @@ import json
 import logging
 import math
 
-from rag import build_rag_context_with_details
-from llm_service import _call_llm, MODEL
+from services.rag import build_rag_context_with_details
+from services.llm_service import _call_llm, MODEL
 from db.config import get_config_int, get_config_float
 
 logger = logging.getLogger(__name__)

@@ -5,7 +5,7 @@ import logging
 
 from fastapi import APIRouter, HTTPException
 
-from state import track_agent as _track_agent, untrack_agent as _untrack_agent
+from infra.state import track_agent as _track_agent, untrack_agent as _untrack_agent
 from db import (
     list_holdings, get_portfolio_diversification,
     create_portfolio_analysis_record, list_portfolio_analysis_records,
@@ -14,7 +14,7 @@ from db import (
 )
 from db.portfolio import update_analysis_record, get_analysis_record_status
 from db.config import get_config as _get_config, get_config_int, get_config_float
-from rag import build_rag_context_with_details
+from services.rag import build_rag_context_with_details
 from models.portfolio import PanoramaAnalysisRequest
 from ._shared import (
     _get_mcp_context, _get_holdings_valuation_context, _format_news_section,
@@ -98,7 +98,7 @@ async def _run_panorama_async(record_id: int, system_prompt: str, holdings: list
         # 组合约束注入
         facts_block = ""
         try:
-            from portfolio_fact_layer import build_portfolio_facts
+            from services.portfolio_fact_layer import build_portfolio_facts
             facts = build_portfolio_facts()
             facts_block = json.dumps(facts, ensure_ascii=False, indent=2, default=str)
         except Exception:
@@ -119,7 +119,7 @@ async def _run_panorama_async(record_id: int, system_prompt: str, holdings: list
         _track_agent(uid, "全景诊断分析师", "持仓诊断")
         import uuid
         trace_id = f"pano_{uuid.uuid4().hex[:12]}"
-        from llm_service import _call_llm, MODEL
+        from services.llm_service import _call_llm, MODEL
         response = await asyncio.to_thread(lambda: _call_llm(
             caller="portfolio_panorama",
             trace_id=trace_id,

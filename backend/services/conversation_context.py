@@ -238,7 +238,7 @@ def _build_conversation_state_text(
 ) -> str:
     """构建对话态追踪文本，注入到上下文。"""
     try:
-        from conversation_state import build_conversation_state, format_conversation_state
+        from services.conversation_state import build_conversation_state, format_conversation_state
         state = build_conversation_state(conversation_id, current_msg, messages)
         return format_conversation_state(state)
     except Exception:
@@ -371,7 +371,7 @@ def build_conversation_context(
 ) -> dict[str, Any]:
     """构建统一对话上下文包。"""
     from db import get_conversation_summary, get_messages
-    from portfolio_context import build_portfolio_context, build_valuation_summary
+    from services.portfolio_context import build_portfolio_context, build_valuation_summary
 
     summary = get_conversation_summary(conversation_id)
     summary_text = summary.get("summary", "") if summary else ""

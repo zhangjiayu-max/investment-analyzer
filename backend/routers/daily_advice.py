@@ -10,7 +10,7 @@ from db.daily_advice import (
     get_signal, update_signal_status, list_today_signals,
     list_runs, get_today_run,
 )
-from daily_position_advisor import run_daily_position_advice
+from services.daily_position_advisor import run_daily_position_advice
 from db.decisions import create_candidate_from_structured_recommendation
 
 logger = logging.getLogger(__name__)
@@ -211,7 +211,7 @@ async def ask_ai_about_signal(signal_id: int):
 请给出你的解释和建议："""
 
     try:
-        from llm_service import _call_llm, MODEL
+        from services.llm_service import _call_llm, MODEL
         from db.config import get_config_float, get_config_int
 
         response = _call_llm(
@@ -288,7 +288,7 @@ async def generate_weekly_report(user_id: str = "default"):
 """
 
     try:
-        from llm_service import _call_llm, MODEL
+        from services.llm_service import _call_llm, MODEL
         from db.config import get_config_float, get_config_int
 
         response = _call_llm(

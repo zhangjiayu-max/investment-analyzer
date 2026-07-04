@@ -15,7 +15,7 @@ from db import (
     create_async_task, update_async_task,
     save_analysis_conclusion,
 )
-from state import track_agent, untrack_agent
+from infra.state import track_agent, untrack_agent
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["analysis-bond-recommend"])
@@ -203,7 +203,7 @@ async def _do_bond_recommend():
     # 组合约束注入
     facts_block = ""
     try:
-        from portfolio_fact_layer import build_portfolio_facts
+        from services.portfolio_fact_layer import build_portfolio_facts
         facts = build_portfolio_facts()
         facts_block = json_mod.dumps(facts, ensure_ascii=False, indent=2, default=str)
     except Exception:
@@ -234,7 +234,7 @@ async def _do_bond_recommend():
     uid = f"bond_{int(time.time())}"
     track_agent(uid, "债券配置顾问", "债券配置推荐")
     try:
-        from llm_service import chat_with_agent
+        from services.llm_service import chat_with_agent
         result = chat_with_agent(system_prompt, [{"role": "user", "content": combined_input}], max_tokens=get_config_int('llm.max_tokens_analysis', 8000))
         logging.info(f"[bond_ai_recommend] LLM result length: {len(result) if result else 0}, type: {type(result)}")
         if not result:

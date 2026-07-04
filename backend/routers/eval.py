@@ -402,7 +402,7 @@ async def auto_generate_eval_cases(min_score: float = 8.0, limit: int = 50):
     正例：高分对话（overall_score >= min_score）
     负例：Bad Case（rating = unhelpful）
     """
-    from auto_eval_generator import auto_generate_eval_cases
+    from infra.auto_eval_generator import auto_generate_eval_cases
     result = auto_generate_eval_cases(min_score=min_score, limit=limit)
     return result
 
@@ -489,7 +489,7 @@ async def _generate_expected_quality(bad_case: dict) -> str:
         return "专业、准确、可操作的投资分析"
 
     try:
-        from llm_service import _call_llm, call_llm_async, MODEL
+        from services.llm_service import _call_llm, call_llm_async, MODEL
         prompt = f"""你是投资分析质量标准制定专家。根据以下 Bad Case 信息，生成一条期望质量标准（1-2句话）。
 
 分析类型：{analysis_type}
@@ -1111,8 +1111,8 @@ async def auto_regression_api(limit: int = 10):
 async def _run_agent_for_eval(question: str) -> str:
     """运行 Agent 回答评测问题（简化版，直接调 LLM + RAG）。"""
     try:
-        from llm_service import _call_llm, call_llm_async, MODEL
-        from rag import build_rag_context_with_details
+        from services.llm_service import _call_llm, call_llm_async, MODEL
+        from services.rag import build_rag_context_with_details
 
         # 获取 RAG 上下文
         rag_result = build_rag_context_with_details(query=question, limit=5)
@@ -1147,7 +1147,7 @@ async def _run_agent_for_eval(question: str) -> str:
 async def _score_answer_quality(question: str, answer: str, expected_quality: str) -> dict:
     """用 LLM 对 Agent 回答质量做多维度评分。"""
     try:
-        from llm_service import _call_llm, call_llm_async, MODEL
+        from services.llm_service import _call_llm, call_llm_async, MODEL
 
         prompt = f"""请对以下投资分析回答评分，返回JSON格式。
 

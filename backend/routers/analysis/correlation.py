@@ -7,7 +7,7 @@ from fastapi import APIRouter
 
 from db import list_holdings, get_config, get_config_int, create_async_task, update_async_task
 from db.portfolio import save_analysis_cache, get_analysis_cache
-from llm_service import _call_llm, call_llm_async, MODEL
+from services.llm_service import _call_llm, call_llm_async, MODEL
 
 logger = logging.getLogger(__name__)
 
@@ -19,7 +19,7 @@ _background_tasks: set = set()
 def _get_fund_nav_series(fund_code: str, lookback_days: int = 252) -> list[tuple]:
     """获取基金净值序列，优先使用本地缓存，失败时降级到 akshare。返回 [(date, nav), ...]"""
     try:
-        from fund_data_service import get_or_refresh_fund_nav_history
+        from services.fund_data_service import get_or_refresh_fund_nav_history
         records = get_or_refresh_fund_nav_history(fund_code, days=lookback_days)
         if records:
             return [(r["nav_date"], r["nav"]) for r in records if r.get("nav")]

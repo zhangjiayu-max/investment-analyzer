@@ -935,7 +935,7 @@ def _fetch_article(args: dict) -> str:
 
     try:
         import asyncio
-        from article_reader import fetch_article
+        from services.article_reader import fetch_article
 
         # 运行异步函数（Playwright 渲染微信文章可能较慢，给 60s）
         article = asyncio.run(fetch_article(url))
@@ -957,7 +957,7 @@ def _fetch_article(args: dict) -> str:
         # 结构化提取（核心观点/标的/操作建议/时效性/偏见）— 失败不影响主流程
         structure = {}
         try:
-            from article_reader import extract_article_structure
+            from services.article_reader import extract_article_structure
             structure = extract_article_structure(title, content)
         except Exception as e:
             logger.warning(f"文章结构化提取失败（不影响主流程）: {e}")
@@ -1093,7 +1093,7 @@ def _query_valuation(args: dict) -> str:
 
 def _search_knowledge(args: dict) -> str:
     """从知识库中检索相关内容。"""
-    from rag import build_rag_context_with_details
+    from services.rag import build_rag_context_with_details
 
     query = args.get("query", "")
     content_types = args.get("content_types")
@@ -1240,7 +1240,7 @@ def _get_author_opinions(args: dict) -> str:
     if topic:
         # FTS 搜索（如果 author_articles 已建 FTS 索引）
         try:
-            from rag import _tokenize
+            from services.rag import _tokenize
             tokenized_topic = _tokenize(topic)
             rows = conn.execute("""
                 SELECT aa.id, aa.title, aa.author, aa.publish_time, aa.summary, aa.content_text

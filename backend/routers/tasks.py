@@ -9,11 +9,11 @@ from pydantic import BaseModel
 
 from config import OUTPUT_DIR
 from db import create_task, update_task, get_task, list_tasks, delete_task
-from article_reader import fetch_article, download_images, extract_stock_codes
-from market_data import get_stock_info
-from valuation import analyze_stock
-from llm_service import analyze_article, analyze_images_batch
-from image_parser import ImageParser
+from services.article_reader import fetch_article, download_images, extract_stock_codes
+from services.market_data import get_stock_info
+from services.valuation import analyze_stock
+from services.llm_service import analyze_article, analyze_images_batch
+from services.image_parser import ImageParser
 
 router = APIRouter(tags=["tasks"])
 

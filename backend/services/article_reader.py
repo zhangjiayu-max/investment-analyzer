@@ -272,7 +272,7 @@ def extract_article_structure(title: str, content: str) -> dict:
     """
     import json as _json
     import logging
-    from llm_service import _call_llm, MODEL
+    from services.llm_service import _call_llm, MODEL
 
     prompt = f"""分析以下投资相关文章，提取结构化信息。
 

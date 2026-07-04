@@ -43,7 +43,7 @@ class ExpertCache:
     def _get_embed_model(self):
         if self._embed_model is None:
             try:
-                from rag import _get_embed_model
+                from services.rag import _get_embed_model
                 self._embed_model = _get_embed_model()
             except Exception:
                 self._embed_model = None

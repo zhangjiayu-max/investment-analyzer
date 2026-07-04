@@ -9,7 +9,7 @@ import concurrent.futures
 import asyncio
 import hashlib
 
-from llm_service import client, MODEL, _call_llm, _parse_tool_args
+from services.llm_service import client, MODEL, _call_llm, _parse_tool_args
 from agent.multi_agent import run_specialist, run_specialist_with_context, run_arbitration
 from db.agents import (
     load_specialist_agents,
@@ -22,7 +22,7 @@ from config import ARBITRATION_API_KEY
 from db.config import get_config, get_config_int, get_config_float
 from agent.orchestrator_optimizer import OrchestratorOptimizer, ParallelExecutor
 from agent.cache import expert_cache
-from conversation_context import record_entity_snapshots
+from services.conversation_context import record_entity_snapshots
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -399,7 +399,7 @@ def _execute_specialist_cached(tool_name: str, query: str,
 
     # 缺口 4：上下文隔离 — 按 agent_key 过滤上下文（白名单+优先级+预算填充）
     try:
-        from conversation_context import filter_context_for_agent
+        from services.conversation_context import filter_context_for_agent
         prebuilt_context = filter_context_for_agent(prebuilt_context, agent_key)
     except Exception as _e:
         logger.debug(f"上下文过滤跳过: {_e}")
@@ -576,7 +576,7 @@ def fetch_article_content(url: str) -> dict | None:
         return _article_cache[url]
 
     try:
-        from article_reader import fetch_article
+        from services.article_reader import fetch_article
         from concurrent.futures import ThreadPoolExecutor
 
         # 用线程池运行,每个线程创建独立事件循环
@@ -747,40 +747,56 @@ def should_run_cross_review(
     min_specialists: int = 2,
     min_severity: str = "medium",
     predicted_need_cross_review: bool = False,
+    needs_arbitration: bool = False,
 ) -> bool:
     """统一判断是否进入交叉审阅。
 
+    决策逻辑（优先级从高到低）：
+    1. complex + needs_arbitration + 实际检测到冲突 → 执行（不被预判否决）
+    2. 预判 True + 实际冲突 True → 执行
+    3. 预判 True + 无冲突 → 跳过
+    4. 预判 False + 非 complex → 跳过
+    5. 预判 False + complex + 无冲突 → 跳过（无冲突可审阅）
+
     Args:
         predicted_need_cross_review: 来自 clarify_requirement 的 LLM 预判。
-            - True + conflicts.detected=True → 执行（预判+实际都同意）
-            - True + conflicts.detected=False → 跳过但log（LLM提取可能更准确）
-            - False → 跳过
+        needs_arbitration: 来自路由结果，complex 场景通常为 True。
     """
     if not enabled or force_skip:
         return False
     if len(specialist_results) < min_specialists:
         return False
 
-    # 预判逻辑
-    if predicted_need_cross_review and conflicts and conflicts.get("detected"):
-        # 预判需要 + 实际检测到冲突 → 执行
+    has_conflicts = conflicts and conflicts.get("detected")
+
+    # severity 分级检查（提前过滤低级别冲突）
+    if has_conflicts:
+        severity_order = {"low": 0, "medium": 1, "high": 2}
+        actual = severity_order.get(conflicts.get("severity", "low"), 0)
+        required = severity_order.get(min_severity, 1)
+        if actual < required:
+            logger.info(f"交叉审阅: 冲突 severity={conflicts.get('severity')} < {min_severity} → 跳过")
+            return False
+
+    # 核心修复：complex + needs_arbitration 场景，实际检测到冲突就执行
+    # 不被 predicted_need_cross_review=False 一票否决
+    if complexity == "complex" and needs_arbitration and has_conflicts:
+        logger.info("交叉审阅: complex+needs_arbitration+实际冲突 → 执行（不被预判否决）")
+    elif predicted_need_cross_review and has_conflicts:
         logger.info("交叉审阅: 预判=True + 实际冲突=True → 执行")
-    elif predicted_need_cross_review and (not conflicts or not conflicts.get("detected")):
-        # 预判需要 + 实际未检测到冲突 → 跳过但log（LLM冲突检测可能更准确）
-        logger.info("交叉审阅: 预判=True 但实际未检测到冲突 → 跳过（LLM提取可能更准确）")
+    elif predicted_need_cross_review and not has_conflicts:
+        logger.info("交叉审阅: 预判=True 但实际未检测到冲突 → 跳过")
         return False
     elif not predicted_need_cross_review:
-        # 预判不需要 → 跳过
-        logger.info("交叉审阅: 预判=False → 跳过")
+        if complexity == "complex" and needs_arbitration:
+            logger.info("交叉审阅: 预判=False 但 complex+needs_arbitration，无实际冲突 → 跳过")
+        else:
+            logger.info("交叉审阅: 预判=False → 跳过")
+        return False
+    else:
         return False
 
-    if not conflicts or not conflicts.get("detected"):
-        return False
-    # severity 分级检查
-    severity_order = {"low": 0, "medium": 1, "high": 2}
-    actual = severity_order.get(conflicts.get("severity", "low"), 0)
-    required = severity_order.get(min_severity, 1)
-    if actual < required:
+    if not has_conflicts:
         return False
     return not OrchestratorOptimizer.should_skip_cross_review(specialist_results, complexity)
 
@@ -812,11 +828,15 @@ def should_arbitrate(complexity: str, specialist_results: list, conflicts: dict 
     if conflicts and not conflicts.get("detected"):
         logger.info("专家无方向冲突，跳过仲裁")
         return False
-    # severity 分级：仲裁只在高冲突时触发
+    # severity 分级：complex 场景 medium+ 即仲裁，其余只 high 仲裁
     if conflicts:
         severity = conflicts.get("severity", "low")
-        if severity != "high":
-            logger.info(f"冲突 severity={severity}，未达 high，跳过仲裁")
+        min_sev_for_complex = get_orchestration_config("arbitration_min_severity_complex", "medium")
+        min_sev_default = get_orchestration_config("arbitration_min_severity", "high")
+        required_sev = min_sev_for_complex if complexity == "complex" else min_sev_default
+        severity_order = {"low": 0, "medium": 1, "high": 2}
+        if severity_order.get(severity, 0) < severity_order.get(required_sev, 2):
+            logger.info(f"冲突 severity={severity} < {required_sev}（complexity={complexity}），跳过仲裁")
             return False
     return True
 
@@ -1380,7 +1400,7 @@ def clarify_requirement(query: str, trace_id: str = "") -> dict:
     has_portfolio = False
     has_watchlist = False
     try:
-        from portfolio_context import build_portfolio_summary_line
+        from services.portfolio_context import build_portfolio_summary_line
         portfolio_line = build_portfolio_summary_line()
         has_portfolio = bool(portfolio_line and "无持仓" not in portfolio_line)
     except Exception:
@@ -1822,7 +1842,7 @@ def build_scenario_rag_context(query: str, specialists: list[str],
     根据命中的专家类型,对原始 RAG 上下文做场景化增强。
     如果原始 RAG 已有内容,补充场景化检索结果;否则全新构建。
     """
-    from rag import build_rag_context_with_details
+    from services.rag import build_rag_context_with_details
 
     # 收集所有命中专家的场景配置
     scenario_queries = []
@@ -2337,7 +2357,7 @@ def orchestrate(query: str, history: list, rag_context: str = "", cancel_event: 
         prebuilt_context += f"## 知识库参考(书籍/文章/技能)\n{compressed_rag_for_specialist}\n\n"
 
     try:
-        from portfolio_context import build_portfolio_context, build_valuation_summary
+        from services.portfolio_context import build_portfolio_context, build_valuation_summary
         portfolio_ctx = build_portfolio_context()
         # 始终注入持仓上下文(空持仓时也会明确告知"无持仓",防止 AI 编造)
         system_content += f"\n\n## 用户当前持仓\n{portfolio_ctx}"
@@ -2440,6 +2460,7 @@ def orchestrate(query: str, history: list, rag_context: str = "", cancel_event: 
                 min_specialists=cross_review_min,
                 min_severity=cross_review_min_sev,
                 predicted_need_cross_review=predicted_need_cr,
+                needs_arbitration=route_result.get("needs_arbitration", False) if isinstance(route_result, dict) else False,
             )
 
             if needs_cross_review:
@@ -3059,7 +3080,7 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
         prebuilt_context += f"## 知识库参考(书籍/文章/技能)\n{compressed_rag_for_specialist}\n\n"
 
     try:
-        from portfolio_context import build_portfolio_context, build_valuation_summary
+        from services.portfolio_context import build_portfolio_context, build_valuation_summary
         portfolio_ctx = build_portfolio_context()
         # 始终注入持仓上下文(空持仓时也会明确告知"无持仓",防止 AI 编造)
         system_content += f"\n\n## 用户当前持仓\n{portfolio_ctx}"
@@ -3240,6 +3261,7 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
                 min_specialists=cross_review_min,
                 min_severity=cross_review_min_sev,
                 predicted_need_cross_review=predicted_need_cr,
+                needs_arbitration=route_result.get("needs_arbitration", False) if isinstance(route_result, dict) else False,
             )
             if should_cross_review:
                 yield {"type": "status", "message": f"正在进行交叉审阅({len(specialist_results)} 个专家并行互相验证)..."}
@@ -3781,7 +3803,7 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
         final_answer = ""
         # 流式生成:逐 chunk 推送思考过程 + 答案增量
         try:
-            from llm_service import _call_llm_stream
+            from services.llm_service import _call_llm_stream
             for chunk in _call_llm_stream(
                 caller="orchestrator",
                 trace_id=trace_id,
@@ -3927,13 +3949,55 @@ _eval_executor = concurrent.futures.ThreadPoolExecutor(
 LOW_SCORE_THRESHOLD = 60
 
 
+# ── 自动评测成本控制 ──
+_auto_eval_daily_count = 0
+_auto_eval_daily_date = ""
+_AUTO_EVAL_DAILY_LIMIT = 10  # 每天最多自动评测 10 条（成本可控）
+_AUTO_EVAL_MIN_COMPLEXITY = "medium"  # 只评测 medium/complex，跳过 simple
+
+
+def _reset_daily_eval_count_if_needed():
+    """每天重置自动评测计数。"""
+    global _auto_eval_daily_count, _auto_eval_daily_date
+    today = datetime.now().strftime("%Y-%m-%d")
+    if _auto_eval_daily_date != today:
+        _auto_eval_daily_count = 0
+        _auto_eval_daily_date = today
+
+
 def _schedule_auto_evaluation(conv_id: int, msg_id: int, result: dict):
-    """异步调度对话质量评测（不阻塞主流程）。"""
+    """异步调度对话质量评测（不阻塞主流程）。
+
+    成本控制策略：
+    1. 配置开关 llm_cost.auto_conversation_eval
+    2. 只评测 medium/complex（跳过 simple 省成本）
+    3. 每日上限 10 条（防死循环/防严重消耗 token）
+    4. 去重：同一消息只评测一次（has_evaluation）
+    5. 先规则评估（无 LLM 调用），仅低分才追加 LLM 评估
+    """
     if not conv_id:
         return
     if get_config("llm_cost.auto_conversation_eval", "false") != "true":
         logger.debug("对话结束自动评测已关闭（llm_cost.auto_conversation_eval=false）")
         return
+
+    # 每日上限
+    _reset_daily_eval_count_if_needed()
+    if _auto_eval_daily_count >= _AUTO_EVAL_DAILY_LIMIT:
+        logger.debug(f"自动评测已达每日上限({_AUTO_EVAL_DAILY_LIMIT})，跳过")
+        return
+
+    # 只评测 medium/complex
+    complexity = "medium"
+    if isinstance(result, dict):
+        complexity = result.get("complexity", "medium")
+    complexity_order = {"simple": 0, "medium": 1, "complex": 2}
+    if complexity_order.get(complexity, 1) < complexity_order.get(_AUTO_EVAL_MIN_COMPLEXITY, 1):
+        logger.debug(f"复杂度={complexity}<{_AUTO_EVAL_MIN_COMPLEXITY}，跳过自动评测")
+        return
+
+    _auto_eval_daily_count += 1
+    logger.info(f"调度自动评测: conv={conv_id} msg={msg_id} complexity={complexity} (今日第{_auto_eval_daily_count}条)")
     _eval_executor.submit(_run_auto_evaluation_sync, conv_id, msg_id, result)
 
 
@@ -4069,7 +4133,7 @@ def _build_fallback_from_specialists(query, refined_query, specialist_results, t
 
 def _fallback_orchestrate(query: str, history: list, rag_context: str = "") -> dict:
     """当模型不支持 function calling 时,回退到普通对话模式。"""
-    from llm_service import chat_with_agent
+    from services.llm_service import chat_with_agent
 
     answer = chat_with_agent(build_orchestrator_system_prompt(), history + [{"role": "user", "content": query}], rag_context)
     return {

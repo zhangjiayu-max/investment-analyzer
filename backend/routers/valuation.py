@@ -20,7 +20,7 @@ from db.valuations import (
     list_index_code_mappings, save_index_code_mapping,
 )
 from db._conn import _get_conn
-from image_parser import DDImageParser
+from services.image_parser import DDImageParser
 
 logger = logging.getLogger(__name__)
 from models.valuations import ParseAndSaveRequest, ParseBatchRequest, ParseDDRequest, ParseDDBatchRequest
@@ -122,7 +122,7 @@ async def parse_dd_image_async(req: ParseDDRequest):
     task_id = create_dd_parse_task(str_path, Path(req.path).name, parse_type="dd")
 
     # 后台启动解析
-    from dd_parse_worker import run_dd_parse
+    from scripts.dd_parse_worker import run_dd_parse
     asyncio.create_task(run_dd_parse(task_id, str_path, "dd"))
 
     return {"task_id": task_id, "status": "pending"}
@@ -142,7 +142,7 @@ async def get_dd_parse_task_status(task_id: int):
 async def parse_dd_batch_async(req: ParseDDBatchRequest):
     """批量异步解析螺丝钉估值表图片。"""
     from db.dd_tasks import find_running_task, create_dd_parse_task
-    from dd_parse_worker import run_dd_parse
+    from scripts.dd_parse_worker import run_dd_parse
 
     tasks = []
     for path in req.paths:
@@ -640,7 +640,7 @@ async def get_enhanced_strategy():
     - 催化剂（政策/业绩/资金轮动）
     - 建议操作（立即买入/分批建仓/观望/回避）
     """
-    from llm_service import _call_llm, MODEL
+    from services.llm_service import _call_llm, MODEL
     from db import get_config_float, get_config_int
 
     conn = _get_conn()
@@ -709,7 +709,7 @@ async def get_enhanced_strategy():
         })
 
     # 2.5 为每个候选指数附加 PE/PB 背离预警和数据覆盖年限
-    from valuation import check_pe_pb_divergence, get_index_history_years, get_history_years_warning
+    from services.valuation import check_pe_pb_divergence, get_index_history_years, get_history_years_warning
     for c in candidates:
         # PE/PB 背离检查
         divergence = check_pe_pb_divergence(c["code"])
@@ -980,7 +980,7 @@ async def get_index_info_api(index_code: str, index_name: str = ""):
         return {"index_code": index_code, "info": info, "source": "dict"}
 
     try:
-        from llm_service import _call_llm, call_llm_async, MODEL
+        from services.llm_service import _call_llm, call_llm_async, MODEL
         prompt = f"请用2-3句话简洁介绍「{index_name or index_code}」这个股票指数，包括它由哪些股票组成、覆盖什么行业、适合什么样的投资者。不要使用markdown格式，直接输出纯文本。"
         resp = await call_llm_async(caller="valuation", messages=[{"role": "user", "content": prompt}], model=MODEL, max_tokens=get_config_int('llm.max_tokens_valuation_summary', 800))
         info = resp.choices[0].message.content if resp and resp.choices else ""

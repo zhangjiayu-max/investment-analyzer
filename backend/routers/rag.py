@@ -15,7 +15,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from typing import Optional
 
-from rag import (
+from services.rag import (
     reindex_all, reindex_all_articles, reindex_all_analysis_records,
     get_rag_stats_summary, build_rag_context_with_details, rewrite_query,
     _RAG_CONFIG_DEFAULTS, _invalidate_rag_config_cache,

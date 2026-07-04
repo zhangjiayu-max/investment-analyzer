@@ -1233,7 +1233,7 @@ def fetch_fund_nav(fund_code: str) -> dict | None:
 def get_fund_nav_history(fund_code: str, user_id: str = "default", days: int = 365) -> dict | None:
     """获取基金净值历史 + 交易点标记（用于交易行为图表）。优先使用本地缓存。"""
     try:
-        from fund_data_service import get_or_refresh_fund_nav_history
+        from services.fund_data_service import get_or_refresh_fund_nav_history
         records = get_or_refresh_fund_nav_history(fund_code, days=days)
         if not records:
             return None
@@ -1273,7 +1273,7 @@ def refresh_holding_price(holding_id: int) -> dict | None:
     返回: {"nav": 0.57, "date": "2026-05-22", "change_pct": -2.1,
            "today_profit": -12.34, "today_change_pct": -2.1} 或 None
     """
-    from fund_data_service import save_latest_nav
+    from services.fund_data_service import save_latest_nav
 
     conn = _get_conn()
     holding = conn.execute("SELECT * FROM portfolio_holdings WHERE id = ?", (holding_id,)).fetchone()
@@ -1339,7 +1339,7 @@ def refresh_all_fund_prices(user_id: str = "default") -> list[dict]:
 
     返回: [{"fund_code": "161725", "fund_name": "...", "nav": 0.57, "date": "2026-05-22"}, ...]
     """
-    from fund_data_service import save_latest_nav
+    from services.fund_data_service import save_latest_nav
 
     holdings = list_holdings(user_id)
     results = []

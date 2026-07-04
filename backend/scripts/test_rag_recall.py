@@ -20,8 +20,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from rag import init_fts, init_chroma, build_rag_context_with_details
-from rag_enhanced import expand_query
+from services.rag import init_fts, init_chroma, build_rag_context_with_details
+from services.rag_enhanced import expand_query
 
 
 # ══════════════════════════════════════════════════════════════
