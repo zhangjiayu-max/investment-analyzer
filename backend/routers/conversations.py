@@ -34,6 +34,23 @@ from infra.output_reviewer import review_output
 logger = logging.getLogger(__name__)
 
 
+async def _async_verify_and_log(conv_id: int, msg_id: int, answer: str):
+    """异步基金代码幻觉校验（不阻塞主回复流）。"""
+    try:
+        from agent.hallucination_guard import verify_fund_codes_in_response
+        result = await verify_fund_codes_in_response(answer, conv_id, msg_id)
+        if result.get("hallucinations"):
+            logger.warning(
+                f"幻觉检测 msg={msg_id}: {len(result['hallucinations'])}个代码名称不匹配 "
+                + "; ".join(
+                    f"{h['code']}={h['claimed']} vs {h['actual']}"
+                    for h in result["hallucinations"][:5]
+                )
+            )
+    except Exception as e:
+        logger.debug(f"异步幻觉校验失败: {e}")
+
+
 def _build_effective_query(content: str, images: list[dict]) -> str:
     """如果有图片且 parse_result 无 error，将图片上下文拼入查询。"""
     if not images:
@@ -692,6 +709,19 @@ async def send_message_api(conv_id: int, req: SendMessageRequest):
     metadata = json.dumps(metadata_dict, ensure_ascii=False) if specialist_results else None
     msg_id = create_message(conv_id, "assistant", answer, metadata=metadata)
 
+    # 5.5. 基金代码幻觉验证（事后异步校验，不阻塞回复）
+    try:
+        from agent.hallucination_guard import quick_check_fund_codes
+        codes = quick_check_fund_codes(answer)
+        if codes:
+            logger.info(f"回复含 {len(codes)} 个基金代码，触发幻觉校验: {codes[:10]}")
+            import asyncio
+            asyncio.create_task(
+                _async_verify_and_log(conv_id, msg_id, answer)
+            )
+    except Exception as e:
+        logger.debug(f"幻觉校验钩子失败（不影响主流程）: {e}")
+
     # 6. 记录 RAG 日志
     log_rag_search(
         conversation_id=conv_id,
@@ -955,7 +985,17 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
 
             # 保存消息
             metadata = {"complexity": "chat", "execution_status": "completed"}
-            create_message(conv_id, "assistant", answer, metadata=json.dumps(metadata, ensure_ascii=False))
+            msg_id = create_message(conv_id, "assistant", answer, metadata=json.dumps(metadata, ensure_ascii=False))
+
+            # 基金代码幻觉验证（异步）
+            try:
+                from agent.hallucination_guard import quick_check_fund_codes
+                codes = quick_check_fund_codes(answer)
+                if codes:
+                    import asyncio
+                    asyncio.create_task(_async_verify_and_log(conv_id, msg_id, answer))
+            except Exception:
+                pass
 
             # 记录 RAG 日志
             if rag_result and rag_result.get("results"):
@@ -1067,6 +1107,16 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
                     }
                     metadata = json.dumps(metadata_dict, ensure_ascii=False)
                     msg_id = create_message(conv_id, "assistant", answer, metadata=metadata)
+
+                    # 基金代码幻觉验证（异步）
+                    try:
+                        from agent.hallucination_guard import quick_check_fund_codes
+                        codes = quick_check_fund_codes(answer)
+                        if codes:
+                            import asyncio
+                            asyncio.create_task(_async_verify_and_log(conv_id, msg_id, answer))
+                    except Exception:
+                        pass
 
                     total_ms = int((time.time() - request_start) * 1000)
                     phase_timings["specialist_ms"] = result.get("duration_ms", 0)
