@@ -85,16 +85,16 @@ def _call_llm(caller: str = "", trace_id: str = "", **kwargs):
         except Exception as e:
             # 主用失败，尝试兜底
             if _fallback_client and _fallback_model:
-                logger.warning(f"主用 LLM 失败 ({e.__class__.__name__}: {e})，切换到兜底: {_fallback_model}")
+                logger.warning(f"[trace:{trace_id}] 主用 LLM 失败 ({e.__class__.__name__}: {e})，切换到兜底: {_fallback_model}")
                 kwargs["model"] = _fallback_model
                 resp = _fallback_client.chat.completions.create(**kwargs)
             else:
                 raise
         if resp.usage:
             logger.info(
-                f"LLM tokens — prompt: {resp.usage.prompt_tokens}, "
+                f"[trace:{trace_id}] LLM tokens — prompt: {resp.usage.prompt_tokens}, "
                 f"completion: {resp.usage.completion_tokens}, "
-                f"total: {resp.usage.total_tokens}, model: {resp.model}, caller: {caller}, trace: {trace_id}"
+                f"total: {resp.usage.total_tokens}, model: {resp.model}, caller: {caller}"
             )
             _record_token_usage(resp.usage, resp.model, caller, trace_id=trace_id)
         return resp
@@ -128,7 +128,7 @@ def _call_llm_stream(caller: str = "", trace_id: str = "", **kwargs):
         stream = used_client.chat.completions.create(**kwargs)
     except Exception as e:
         if _fallback_client and _fallback_model:
-            logger.warning(f"主用 LLM 流式失败 ({e.__class__.__name__}: {e})，切换兜底: {_fallback_model}")
+            logger.warning(f"[trace:{trace_id}] 主用 LLM 流式失败 ({e.__class__.__name__}: {e})，切换兜底: {_fallback_model}")
             kwargs["model"] = _fallback_model
             used_client = _fallback_client
             stream = used_client.chat.completions.create(**kwargs)
@@ -205,14 +205,14 @@ def call_arbitration_llm(trace_id: str = "", **kwargs):
         resp = _arbitration_client.chat.completions.create(**kwargs)
         if resp.usage:
             logger.info(
-                f"Arbitration LLM tokens — prompt: {resp.usage.prompt_tokens}, "
+                f"[trace:{trace_id}] Arbitration LLM tokens — prompt: {resp.usage.prompt_tokens}, "
                 f"completion: {resp.usage.completion_tokens}, "
                 f"total: {resp.usage.total_tokens}, model: {resp.model}"
             )
             _record_token_usage(resp.usage, resp.model, "arbitration", trace_id=trace_id)
         return resp
     except Exception as e:
-        logger.error(f"仲裁 LLM 调用异常: {e}")
+        logger.error(f"[trace:{trace_id}] 仲裁 LLM 调用异常: {e}")
         return None
 
 
@@ -247,7 +247,7 @@ def _record_token_usage(usage, model: str, caller: str = "", trace_id: str = "")
         conn.commit()
         conn.close()
     except Exception as e:
-        logger.warning(f"Failed to record token usage: {e}")
+        logger.warning(f"[trace:{trace_id}] Failed to record token usage: {e}")
 
     # 成本治理：同步记录到 cost_logs 表
     try:

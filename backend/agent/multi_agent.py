@@ -294,6 +294,7 @@ def run_specialist(agent_key: str, query: str, context: str = "",
     start_time = time.time()
     _caller = f"specialist:{agent_key}"
     _model = model or MODEL  # 增强6: 成本路由 — 支持外部传入模型
+    logger.info(f"[trace:{trace_id}] 专家开始: {agent['name']} ({agent_key}) query={query[:50]}...")
 
     # 只给该专家分配它的专属工具
     agent_tools = [t for t in TOOLS if t["function"]["name"] in agent["tools"]]
@@ -367,9 +368,9 @@ def run_specialist(agent_key: str, query: str, context: str = "",
             )
         except Exception as e:
             err_msg = str(e)
-            logger.error(f"[{agent['name']}] LLM 调用异常 (turn {turn}): {err_msg}")
+            logger.error(f"[trace:{trace_id}] [{agent['name']}] LLM 调用异常 (turn {turn}): {err_msg}")
             if any(kw in err_msg.lower() for kw in ["tool", "function", "reasoning", "thinking"]):
-                logger.warning(f"[{agent['name']}] 模型不兼容，回退到普通模式")
+                logger.warning(f"[trace:{trace_id}] [{agent['name']}] 模型不兼容，回退到普通模式")
                 # 回退：不带 tools 调用
                 response = _call_llm(
                     caller=_caller,
@@ -423,7 +424,7 @@ def run_specialist(agent_key: str, query: str, context: str = "",
         for tc in msg.tool_calls:
             args = _parse_tool_args(tc.function.arguments, tc.function.name)
 
-            logger.info(f"[{agent['name']}] Tool: {tc.function.name}({json.dumps(args, ensure_ascii=False)[:100]})")
+            logger.info(f"[trace:{trace_id}] [{agent['name']}] Tool: {tc.function.name}({json.dumps(args, ensure_ascii=False)[:100]})")
             result = execute_tool(tc.function.name, args, trace_id=trace_id)
 
             if len(result) > 3000:
@@ -485,7 +486,7 @@ def run_specialist(agent_key: str, query: str, context: str = "",
             if len(cleaned) >= 200:
                 answer = cleaned
             else:
-                logger.warning(f'[{agent["name"]}] answer 清理后仅 {len(cleaned)} 字，重新生成结论')
+                logger.warning(f'[trace:{trace_id}] [{agent["name"]}] answer 清理后仅 {len(cleaned)} 字，重新生成结论')
                 try:
                     llm_messages.append({
                         "role": "user",
@@ -505,7 +506,7 @@ def run_specialist(agent_key: str, query: str, context: str = "",
                     else:
                         answer = "分析过程遇到问题，请重试。"
                 except Exception as _e:
-                    logger.error(f'[{agent["name"]}] 重新生成失败: {_e}')
+                    logger.error(f'[trace:{trace_id}] [{agent["name"]}] 重新生成失败: {_e}')
                     answer = "分析过程遇到问题，请重试。"
         answer = _clean_dsml_from_content(answer)
 
@@ -621,7 +622,7 @@ def run_specialist_with_context(agent_key: str, query: str, peer_analyses: dict,
             )
         except Exception as e:
             err_msg = str(e)
-            logger.error(f"[{agent['name']}] 交叉审阅 LLM 调用异常 (turn {turn}): {err_msg}")
+            logger.error(f"[trace:{trace_id}] [{agent['name']}] 交叉审阅 LLM 调用异常 (turn {turn}): {err_msg}")
             if any(kw in err_msg.lower() for kw in ["tool", "function", "reasoning", "thinking"]):
                 response = _call_llm(
                     caller=_caller,
@@ -671,7 +672,7 @@ def run_specialist_with_context(agent_key: str, query: str, peer_analyses: dict,
 
         for tc in msg.tool_calls:
             args = _parse_tool_args(tc.function.arguments, tc.function.name)
-            logger.info(f"[{agent['name']}] 交叉审阅 Tool: {tc.function.name}({json.dumps(args, ensure_ascii=False)[:100]})")
+            logger.info(f"[trace:{trace_id}] [{agent['name']}] 交叉审阅 Tool: {tc.function.name}({json.dumps(args, ensure_ascii=False)[:100]})")
             result = execute_tool(tc.function.name, args, trace_id=trace_id)
             if len(result) > 3000:
                 result = result[:3000] + "\n... (结果过长，已截断)"
@@ -711,7 +712,7 @@ def run_specialist_with_context(agent_key: str, query: str, peer_analyses: dict,
         answer = re.sub(r'<tool_call>.*?</tool_call>', '', answer, flags=re.DOTALL).strip()
         if not answer or len(answer) < 200:
             # P0-2 修复：清理后内容过短 → 重新生成结论
-            logger.warning(f'[{agent["name"]}] cross_review answer 清理后仅 {len(answer)} 字，重新生成')
+            logger.warning(f'[trace:{trace_id}] [{agent["name"]}] cross_review answer 清理后仅 {len(answer)} 字，重新生成')
             try:
                 llm_messages.append({
                     "role": "user",
@@ -731,7 +732,7 @@ def run_specialist_with_context(agent_key: str, query: str, peer_analyses: dict,
                 else:
                     answer = "交叉审阅完成，请参考其他专家分析。"
             except Exception as _e:
-                logger.error(f'[{agent["name"]}] cross_review 重新生成失败: {_e}')
+                logger.error(f'[trace:{trace_id}] [{agent["name"]}] cross_review 重新生成失败: {_e}')
                 answer = "交叉审阅完成，请参考其他专家分析。"
 
     return {
@@ -1012,6 +1013,7 @@ def run_arbitration(query: str, specialist_results: list, rag_context: str = "",
     from services.llm_service import call_arbitration_llm
 
     start_time = time.time()
+    logger.info(f"[trace:{trace_id}] 仲裁开始: {len(specialist_results)} 个专家结果待裁决")
 
     # 从数据库加载仲裁 Agent 配置（支持通过 Agent 管理界面优化 prompt）
     agents = load_specialist_agents()
@@ -1080,7 +1082,7 @@ def run_arbitration(query: str, specialist_results: list, rag_context: str = "",
 
     if response is None:
         # 仲裁模型未配置或调用失败，回退到主模型
-        logger.warning("仲裁模型不可用，回退到主模型")
+        logger.warning(f"[trace:{trace_id}] 仲裁模型不可用，回退到主模型")
         response = _call_llm(
             caller="arbitration_fallback",
             trace_id=trace_id,

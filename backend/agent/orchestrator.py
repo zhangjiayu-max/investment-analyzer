@@ -2084,7 +2084,7 @@ def _execute_specialist(tool_name: str, query: str, cancel_event: threading.Even
     except Exception as e:
         # 缺口 11：部分失败处理 — 返回 status=unavailable 占位结果（而非裸 error）
         # 消费侧（仲裁 prompt）可识别该标记并降权，避免单点失败拖垮整体流程
-        logger.error(f"专家 {tool_name} 执行异常: {e}")
+        logger.error(f"[trace:{trace_id}] 专家 {tool_name} 执行异常: {e}")
         agent_name = agent_key
         try:
             from db.agents import load_specialist_agents
@@ -2367,7 +2367,7 @@ def _persist_agent_conclusions(
             )
             return 0
     except Exception as e:
-        logger.warning(f"[P1-1] 幂等检查失败（继续写入）: {e}")
+        logger.warning(f"[trace:{trace_id}] [P1-1] 幂等检查失败（继续写入）: {e}")
 
     written = 0
 
@@ -2420,7 +2420,7 @@ def _persist_agent_conclusions(
                 except Exception:
                     pass
         except Exception as e:
-            logger.warning(f"[P1-1] 写入专家 {agent_key} 结论失败: {e}")
+            logger.warning(f"[trace:{trace_id}] [P1-1] 写入专家 {agent_key} 结论失败: {e}")
             continue
 
     # 4. 写入仲裁结论（高置信度、标记 urgent）
@@ -2462,7 +2462,7 @@ def _persist_agent_conclusions(
                     except Exception:
                         pass
             except Exception as e:
-                logger.warning(f"[P1-1] 写入仲裁结论失败: {e}")
+                logger.warning(f"[trace:{trace_id}] [P1-1] 写入仲裁结论失败: {e}")
 
     if written == 0:
         logger.info(f"[P1-1] conv={conversation_id} msg={message_id} 无可写入结论")
@@ -2501,7 +2501,7 @@ def orchestrate(query: str, history: list, rag_context: str = "", cancel_event: 
 
     # 0. Token 预算检查
     budget = check_token_budget()
-    logger.info(f"Token 预算: {budget['used']}/{budget['limit']} ({budget['pct']:.0%}) mode={budget['mode']}")
+    logger.info(f"[trace:{trace_id}] orchestrate 入口 query={query[:50]}... budget={budget['mode']}")
     if budget["mode"] == "exceeded":
         return {
             "answer": f"今日分析额度已用完({budget['used']:,}/{budget['limit']:,} tokens),请明天再来。",
@@ -2730,13 +2730,13 @@ def orchestrate(query: str, history: list, rag_context: str = "", cancel_event: 
             )
         except Exception as e:
             err_msg = str(e)
-            logger.error(f"Orchestrator LLM 调用异常 (turn {turn}): {err_msg}")
+            logger.error(f"[trace:{trace_id}] Orchestrator LLM 调用异常 (turn {turn}): {err_msg}")
             if any(kw in err_msg.lower() for kw in ["tool", "function", "reasoning", "thinking"]):
-                logger.warning("模型不兼容,回退到普通模式")
+                logger.warning(f"[trace:{trace_id}] 模型不兼容,回退到普通模式")
                 return _fallback_orchestrate(query, history, rag_context)
             # 网络抖动时，已有专家结果则拼接返回
             if specialist_results:
-                logger.warning(f"LLM 汇总失败但已有 {len(specialist_results)} 个专家结果,拼接回退")
+                logger.warning(f"[trace:{trace_id}] LLM 汇总失败但已有 {len(specialist_results)} 个专家结果,拼接回退")
                 return _build_fallback_from_specialists(
                     query, refined_query, specialist_results, trace_id, budget)
             raise
@@ -2767,7 +2767,7 @@ def orchestrate(query: str, history: list, rag_context: str = "", cancel_event: 
             )
 
             if needs_cross_review:
-                logger.info(f"进入交叉审阅阶段,{len(specialist_results)} 个专家参与")
+                logger.info(f"[trace:{trace_id}] 进入交叉审阅阶段,{len(specialist_results)} 个专家参与")
                 peer_analyses = {sr["agent_key"]: sr["analysis"] for sr in specialist_results}
                 cross_review_results = []
                 # 快照原始专家列表,避免迭代时 append 导致无限循环
@@ -2785,7 +2785,7 @@ def orchestrate(query: str, history: list, rag_context: str = "", cancel_event: 
                         specialist_results.append(cr_result)
                         all_tool_calls.extend(cr_result.get("tool_calls", []))
                     except Exception as e:
-                        logger.error(f"交叉审阅 {sr['agent_key']} 失败: {e}")
+                        logger.error(f"[trace:{trace_id}] 交叉审阅 {sr['agent_key']} 失败: {e}")
 
                 # 将交叉审阅结果追加到消息中,让 Orchestrator 做最终综合
                 if cross_review_results:
@@ -2813,7 +2813,7 @@ def orchestrate(query: str, history: list, rag_context: str = "", cancel_event: 
                     # Phase C: 仲裁(高级模型最终裁决)
                     arbitration_done = False
                     if should_arbitrate(complexity, specialist_results, conflicts):
-                        logger.info("进入仲裁阶段(Phase C)")
+                        logger.info(f"[trace:{trace_id}] 进入仲裁阶段(Phase C)")
                         arb_result = run_arbitration(refined_query, specialist_results, rag_context)
                         specialist_results.append(arb_result)
                         answer = arb_result["analysis"]
@@ -2856,18 +2856,18 @@ def orchestrate(query: str, history: list, rag_context: str = "", cancel_event: 
                                 specialist_results, _arb, trace_id=trace_id,
                             )
                         except Exception as _e:
-                            logger.warning(f"[P1-1] 结论持久化失败(早返回路径): {_e}")
+                            logger.warning(f"[trace:{trace_id}] [P1-1] 结论持久化失败(早返回路径): {_e}")
                     _schedule_tool_eval(query, specialist_results)
                     return _result
             else:
                 if len(specialist_results) >= 2:
-                    logger.info("专家结论一致或早停关闭，跳过交叉审阅")
+                    logger.info(f"[trace:{trace_id}] 专家结论一致或早停关闭，跳过交叉审阅")
 
             answer = msg.content or ""
 
             # Phase C: 仲裁(高级模型最终裁决,无交叉审阅时也可触发)
             if not arbitration_done and should_arbitrate(complexity, specialist_results, conflicts):
-                logger.info("进入仲裁阶段(Phase C)")
+                logger.info(f"[trace:{trace_id}] 进入仲裁阶段(Phase C)")
                 arb_result = run_arbitration(refined_query, specialist_results, rag_context)
                 specialist_results.append(arb_result)
                 answer = arb_result["analysis"]
@@ -3097,7 +3097,7 @@ def orchestrate(query: str, history: list, rag_context: str = "", cancel_event: 
                 specialist_results, _arb_final, trace_id=trace_id,
             )
         except Exception as _e:
-            logger.warning(f"[P1-1] 结论持久化失败(终返回路径): {_e}")
+            logger.warning(f"[trace:{trace_id}] [P1-1] 结论持久化失败(终返回路径): {_e}")
     return {
         "answer": final_answer,
         "specialist_results": specialist_results,
@@ -3239,7 +3239,7 @@ def _load_recent_conclusions(
         return ""
 
 
-def _stream_precheck(query: str, history: list, rag_context: str, cancel_event: threading.Event | None, resume_from: dict | None):
+def _stream_precheck(query: str, history: list, rag_context: str, cancel_event: threading.Event | None, resume_from: dict | None, trace_id: str = ""):
     """阶段0-0.5: prompt注入检查、token预算、链接抓取、查询改写、恢复模式。
 
     生成器：yield 状态/错误事件。调用方需检查返回值是否为 None（表示已 yield 终止事件）。
@@ -3252,7 +3252,7 @@ def _stream_precheck(query: str, history: list, rag_context: str, cancel_event: 
     from agent.input_sanitizer import check_injection, HIGH_CONFIDENCE_REJECT
     safety = check_injection(query)
     if safety["blocked"]:
-        logger.warning(f"注入检测拦截: {query[:100]} | 原因: {safety['reason']}")
+        logger.warning(f"[trace:{trace_id}] 注入检测拦截: {query[:100]} | 原因: {safety['reason']}")
         yield {
             "type": "answer",
             "content": HIGH_CONFIDENCE_REJECT,
@@ -3266,7 +3266,7 @@ def _stream_precheck(query: str, history: list, rag_context: str, cancel_event: 
 
     # 0. Token 预算检查
     budget = check_token_budget()
-    logger.info(f"Token 预算: {budget['used']}/{budget['limit']} ({budget['pct']:.0%}) mode={budget['mode']}")
+    logger.info(f"[trace:{trace_id}] orchestrate_stream 入口 query={query[:50]}... budget={budget['mode']}")
     if budget["mode"] == "exceeded":
         yield {
             "type": "answer",
@@ -3287,10 +3287,10 @@ def _stream_precheck(query: str, history: list, rag_context: str, cancel_event: 
         if article_context:
             if article_context.startswith("[抓取失败]"):
                 article_fetch_failed = True
-                logger.warning(f"文章抓取失败: {article_context}")
+                logger.warning(f"[trace:{trace_id}] 文章抓取失败: {article_context}")
                 yield {"type": "status", "message": "文章链接无法访问,将尝试分析,请稍候..."}
             else:
-                logger.info(f"已注入文章内容到查询中")
+                logger.info(f"[trace:{trace_id}] 已注入文章内容到查询中")
                 yield {"type": "status", "message": "文章内容已获取,正在分析..."}
 
     # 0.4 查询改写（多轮对话代词/省略补全）
@@ -3301,7 +3301,7 @@ def _stream_precheck(query: str, history: list, rag_context: str, cancel_event: 
         if rewrite_meta.get("rewritten"):
             yield {"type": "status", "message": f"已补全问题上下文（{rewrite_meta.get('method', '')}）"}
     except Exception as e:
-        logger.warning(f"查询改写失败(不影响主流程): {e}")
+        logger.warning(f"[trace:{trace_id}] 查询改写失败(不影响主流程): {e}")
 
     # 0.5 恢复模式:从 agent_runs 表查询已完成的专家
     completed_specialists = set()
@@ -3312,6 +3312,7 @@ def _stream_precheck(query: str, history: list, rag_context: str, cancel_event: 
         # 如果当前消息没有 completed agent_runs，尝试查 retry_of_message_id
         if not completed_runs:
             from db.conversations import _load_metadata
+            from db._conn import _get_conn
             conn = _get_conn()
             msg_row = conn.execute("SELECT metadata FROM messages WHERE id = ?", (resume_message_id,)).fetchone()
             conn.close()
@@ -3883,7 +3884,7 @@ def _stream_final_synthesis(query: str, refined_query: str, specialists: list,
         except CancelledError:
             raise
         except Exception as stream_err:
-            logger.warning(f"流式生成失败,回退非流式: {stream_err}")
+            logger.warning(f"[trace:{trace_id}] 流式生成失败,回退非流式: {stream_err}")
             if not final_answer:
                 response = _call_llm(
                     caller="orchestrator",
@@ -3975,7 +3976,7 @@ def _stream_final_synthesis(query: str, refined_query: str, specialists: list,
                 specialist_results, _arb_stream, trace_id=trace_id,
             )
         except Exception as _e:
-            logger.warning(f"[P1-1] 流式结论持久化失败: {_e}")
+            logger.warning(f"[trace:{trace_id}] [P1-1] 流式结论持久化失败: {_e}")
 
     yield {
         "type": "answer",
@@ -4016,7 +4017,7 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
     }
 
     # ── 阶段0-0.5: 预处理（注入检查、token预算、链接抓取、查询改写、恢复模式）──
-    precheck_gen = _stream_precheck(query, history, rag_context, cancel_event, resume_from)
+    precheck_gen = _stream_precheck(query, history, rag_context, cancel_event, resume_from, trace_id=trace_id)
     precheck_result = None
     while True:
         try:

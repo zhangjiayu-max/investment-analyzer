@@ -54,6 +54,11 @@ app = FastAPI(title="投资分析助手", version="0.4.0")
 
 # 全局状态
 
+# P2-1：quote-bar 缓存（避免高频刷新重复调用 akshare）
+# TTL 30s，hot_keywords 为 None 表示未缓存
+_quote_bar_cache = {"hot_keywords": None, "expires_at": None}
+
+
 app.add_middleware(GZipMiddleware, minimum_size=500)
 app.add_middleware(
     CORSMiddleware,
@@ -1299,9 +1304,16 @@ async def _serve_manifest():
 
 @app.get("/api/finance/quote-bar")
 async def finance_quote_bar():
-    """每日理财箴言 + 市场热点。"""
-    from datetime import date
+    """每日理财箴言 + 市场热点。
+
+    P2-1 修复：akshare 调用用 asyncio.to_thread 包装 + 30s 缓存 + 3s 超时降级。
+    根因：原实现把同步的 ak.stock_hot_keyword_em() 直接放在 async def 中，
+    阻塞 FastAPI 事件循环 1-5 秒，导致刷新页面时所有请求排队卡顿。
+    """
+    import asyncio
     import random
+    from datetime import date, datetime, timedelta
+
     quotes = [
         "别人贪婪时恐惧，别人恐惧时贪婪。—— 巴菲特",
         "投资中最重要的是：不要亏损。—— 巴菲特",
@@ -1333,19 +1345,44 @@ async def finance_quote_bar():
     daily_quote = random.choice(quotes)
     today = date.today().isoformat()
 
-    # 市场热点（akshare）
+    # P2-1：市场热点（akshare）— 异步化 + 缓存 + 超时降级
+    # 用模块级缓存避免高频刷新时重复调用 akshare
+    global _quote_bar_cache
+    now = datetime.now()
+    if _quote_bar_cache["hot_keywords"] is not None and _quote_bar_cache["expires_at"] > now:
+        return {"date": today, "quote": daily_quote, "hot_keywords": _quote_bar_cache["hot_keywords"]}
+
     hot_keywords = []
     try:
         import akshare as ak
-        df = ak.stock_hot_keyword_em()
-        seen = set()
-        for _, row in df.iterrows():
-            kw = row.get("概念名称", "")
-            if kw and kw not in seen and len(seen) < 8:
-                seen.add(kw)
-                hot_keywords.append(kw)
-    except Exception:
-        pass
+
+        def _fetch_hot_keywords():
+            """同步函数：调用 akshare 获取热点关键词。"""
+            df = ak.stock_hot_keyword_em()
+            seen = set()
+            result = []
+            if df is not None and len(df) > 0:
+                for _, row in df.iterrows():
+                    kw = row.get("概念名称", "")
+                    if kw and kw not in seen and len(seen) < 8:
+                        seen.add(kw)
+                        result.append(kw)
+            return result
+
+        # 用 asyncio.to_thread 包装同步调用 + 3s 超时
+        # 这是不阻塞事件循环的关键
+        hot_keywords = await asyncio.wait_for(
+            asyncio.to_thread(_fetch_hot_keywords),
+            timeout=3.0,
+        )
+    except asyncio.TimeoutError:
+        logger.warning("[quote-bar] akshare 超时 3s，降级返回空 hot_keywords")
+    except Exception as e:
+        logger.warning(f"[quote-bar] akshare 失败: {e}")
+
+    # 写缓存（30s TTL，避免高频刷新重复调用 akshare）
+    _quote_bar_cache["hot_keywords"] = hot_keywords
+    _quote_bar_cache["expires_at"] = now + timedelta(seconds=30)
 
     return {"date": today, "quote": daily_quote, "hot_keywords": hot_keywords}
 

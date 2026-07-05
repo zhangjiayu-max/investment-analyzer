@@ -406,7 +406,7 @@ async def resume_conversation(conv_id: int, request: Request):
             try:
                 return build_rag_context_with_details(original_query, content_types=rag_types if rag_types else None)
             except Exception as e:
-                logger.warning(f"RAG 检索失败，跳过: {e}")
+                logger.warning(f"[trace:{trace_id}] RAG 检索失败，跳过: {e}")
                 return {"context": "", "results": [], "keywords": [], "query": original_query, "fts_count": 0, "chroma_count": 0, "freshness_filtered": 0}
 
         rag_result = await asyncio.to_thread(_run_rag)
@@ -445,7 +445,7 @@ async def resume_conversation(conv_id: int, request: Request):
             except CancelledError:
                 yield {"type": "cancelled", "message": "执行已取消"}
             except Exception as e:
-                logger.error(f"恢复执行异常: {e}", exc_info=True)
+                logger.error(f"[trace:{trace_id}] 恢复执行异常: {e}", exc_info=True)
                 yield {"type": "error", "message": str(e)}
             finally:
                 _running_agents.pop(trace_id, None)
@@ -606,6 +606,9 @@ async def send_message_api(conv_id: int, req: SendMessageRequest):
     if not conv:
         raise HTTPException(404, "对话不存在")
 
+    # 生成 trace_id（提前生成，便于 RAG/标题更新等早期阶段也能关联日志）
+    trace_id = str(uuid.uuid4())[:12]
+
     # 1. 存储用户消息（去重：中断重试时不重复保存）
     existing = get_messages(conv_id, limit=1)
     if not existing or existing[-1]["role"] != "user" or existing[-1]["content"] != req.content:
@@ -638,7 +641,7 @@ async def send_message_api(conv_id: int, req: SendMessageRequest):
     try:
         rag_result = build_rag_context_with_details(effective_query, content_types=rag_types if rag_types else None)
     except Exception as e:
-        logger.warning(f"RAG 检索失败，跳过: {e}")
+        logger.warning(f"[trace:{trace_id}] RAG 检索失败，跳过: {e}")
         rag_result = {"context": "", "results": [], "keywords": [], "query": effective_query, "fts_count": 0, "chroma_count": 0, "freshness_filtered": 0}
     rag_context = rag_result["context"]
 
@@ -697,7 +700,6 @@ async def send_message_api(conv_id: int, req: SendMessageRequest):
         logger.warning(f"注入分析结论上下文失败: {_e}")
 
     # 4. 调用 Orchestrator（多 Agent 协作）
-    trace_id = str(uuid.uuid4())[:12]
     logger.info(f"[trace:{trace_id}] 非流式对话 {conv_id}: {effective_query[:50]}...")
     try:
         llm_result = orchestrate(effective_query, msg_list, rag_context, conversation_id=conv_id, trace_id=trace_id)
@@ -882,7 +884,7 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
             try:
                 return build_rag_context_with_details(effective_query, content_types=rag_types if rag_types else None)
             except Exception as e:
-                logger.warning(f"RAG 检索失败，跳过: {e}")
+                logger.warning(f"[trace:{trace_id}] RAG 检索失败，跳过: {e}")
                 return {"context": "", "results": [], "keywords": [], "query": effective_query, "fts_count": 0, "chroma_count": 0, "freshness_filtered": 0}
 
         t0 = time.time()
@@ -985,7 +987,7 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
                 if hasattr(resp.choices[0].message, 'reasoning_content') and resp.choices[0].message.reasoning_content:
                     answer = resp.choices[0].message.content or answer
             except Exception as e:
-                logger.warning(f"Chat LLM 调用失败: {e}")
+                logger.warning(f"[trace:{trace_id}] Chat LLM 调用失败: {e}")
                 answer = "抱歉，处理您的问题时出现了错误，请重试。"
 
             # 输出结果
@@ -1391,7 +1393,7 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
                     _save_failed(err)
                     q.put({"type": "error", "message": err})
                 except Exception as e:
-                    logger.error(f"后台执行异常: {e}", exc_info=True)
+                    logger.error(f"[trace:{trace_id}] 后台执行异常: {e}", exc_info=True)
                     err = str(e)
                     _save_failed(err)
                     q.put({"type": "error", "message": err})
