@@ -1,5 +1,5 @@
 <script setup>
-import { ref, watch, computed } from 'vue'
+import { ref, watch, computed, onBeforeUnmount } from 'vue'
 import { marked } from 'marked'
 import { getTask, getTaskImages, pollTask, chat, analyzeTaskImages } from '../api'
 import ImageGrid from './ImageGrid.vue'
@@ -8,6 +8,9 @@ import ValuationHistory from './ValuationHistory.vue'
 
 const props = defineProps({ taskId: Number })
 const emit = defineEmits(['back'])
+
+// 保存 pollTask 返回的停止函数，组件卸载或重新加载任务时调用以避免内存泄漏与重复请求
+let stopPollFn = null
 
 const task = ref(null)
 const images = ref([])
@@ -42,12 +45,14 @@ const statusStep = computed(() => {
 })
 
 async function loadTask() {
+  // 切换任务前先停掉上一次的轮询，避免并发 pollTask 累积
+  if (stopPollFn) { stopPollFn(); stopPollFn = null }
   loading.value = true
   try {
     const { data } = await getTask(props.taskId)
     task.value = data
     if (data.status === 'pending' || data.status === 'fetching' || data.status === 'analyzing') {
-      pollTask(props.taskId, (updated) => {
+      stopPollFn = pollTask(props.taskId, (updated) => {
         task.value = updated
         if (updated.status === 'done') loadImages()
       })
@@ -60,6 +65,11 @@ async function loadTask() {
     loading.value = false
   }
 }
+
+// 组件卸载时停止轮询，避免切走后继续打后端 + 闭包持有已卸载组件的 ref
+onBeforeUnmount(() => {
+  if (stopPollFn) { stopPollFn(); stopPollFn = null }
+})
 
 async function loadImages() {
   try {

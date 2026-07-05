@@ -278,8 +278,18 @@ async def backfill_snapshots_api():
 
 @router.get("/api/portfolio/alerts")
 async def list_alerts_api(unread_only: bool = False, limit: int = 50):
-    """获取预警列表。"""
-    return {"alerts": list_alerts(limit=limit, unread_only=unread_only)}
+    """获取预警列表（含可靠性标注 + 相关新闻）。
+
+    P0-1: 跨日合并 — 同基金同类型同 severity 合并为一条。
+    P0-2: reliability 字段 — 基于 alert_accuracy_stats 回测数据。
+    P1-3: related_news 字段 — MCP 财经新闻（受 alert.news_integration 开关控制）。
+    """
+    alerts = list_alerts(limit=limit, unread_only=unread_only)
+    # 附加新闻（受开关控制，关闭时直接返回空列表）；MCP 调用是同步阻塞，放到线程池
+    if alerts:
+        from services.alert_news_service import enrich_alerts_with_news
+        alerts = await asyncio.to_thread(enrich_alerts_with_news, alerts)
+    return {"alerts": alerts}
 
 
 @router.get("/api/portfolio/alerts/unread-count")
@@ -357,14 +367,24 @@ async def scan_portfolio_alerts():
     today_prefix = datetime.now().strftime("%Y-%m-%d")
 
     # ── 去重：同一天同一类型+同一基金不重复生成 ──
-    existing = list_alerts(limit=200)
-    existing_keys = set()
-    for a in existing:
-        if a.get("created_at", "").startswith(today_prefix):
-            existing_keys.add(f"{a.get('alert_type')}:{a.get('related_fund_code', '')}")
+    # P0-1 修复：原代码用 list_alerts 聚合行的 created_at（实际字段是 latest_at），永远拿不到今日记录
+    # 改为直接从原始表查今日已生成的 (alert_type, fund_code) 对
+    from db._conn import _get_conn as _get_alert_conn
+    _alert_conn = _get_alert_conn()
+    try:
+        _today_start = f"{today} 00:00:00"
+        _existing_rows = _alert_conn.execute(
+            """SELECT DISTINCT alert_type, COALESCE(related_fund_code, '') as fund_code
+               FROM portfolio_alerts
+               WHERE created_at >= ? AND user_id = 'default'""",
+            (_today_start,),
+        ).fetchall()
+        existing_keys = {(r["alert_type"], r["fund_code"]) for r in _existing_rows}
+    finally:
+        _alert_conn.close()
 
     def should_create(alert_type, fund_code=""):
-        key = f"{alert_type}:{fund_code}"
+        key = (alert_type, fund_code)
         if key in existing_keys:
             return False
         existing_keys.add(key)

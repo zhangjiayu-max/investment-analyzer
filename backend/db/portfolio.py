@@ -2090,24 +2090,134 @@ def backfill_alert_holding_id() -> int:
 
 def list_alerts(user_id: str = "default", limit: int = 50,
                 unread_only: bool = False) -> list[dict]:
-    """获取预警列表（按标题+severity聚合），显示个数和最新时间。"""
+    """获取预警列表（按 alert_type+fund_code+severity 跨日合并），含可靠性标注。
+
+    P0-1: 跨日合并 — 同基金同类型同 severity 的预警合并为一条，cnt 标注次数。
+          title/content/source/related_fund_name 取最新一条记录。
+    P0-2: 可靠性标注 — 基于 alert_accuracy_stats 回测数据附加 reliability 字段。
+    """
     conn = _get_conn()
-    where = "WHERE user_id = ? AND is_read = 0" if unread_only else "WHERE user_id = ?"
-    params = [user_id] if not unread_only else [user_id]
-    rows = conn.execute(f"""
-        SELECT title, severity, source, alert_type,
-               content,
-               COUNT(*) as cnt,
-               MAX(created_at) as latest_at,
-               MAX(id) as latest_id
-        FROM portfolio_alerts
-        {where}
-        GROUP BY title, severity
-        ORDER BY latest_at DESC
-        LIMIT ?
-    """, (*params, limit)).fetchall()
-    conn.close()
-    return [dict(r) for r in rows]
+    try:
+        if unread_only:
+            where = "WHERE user_id = ? AND is_read = 0"
+            params: list = [user_id]
+        else:
+            where = "WHERE user_id = ?"
+            params = [user_id]
+
+        rows = conn.execute(f"""
+            SELECT alert_type, related_fund_code, severity,
+                   COUNT(*) as cnt,
+                   MAX(created_at) as latest_at,
+                   MAX(id) as latest_id,
+                   MIN(created_at) as first_at
+            FROM portfolio_alerts
+            {where}
+            GROUP BY alert_type, COALESCE(related_fund_code, ''), severity
+            ORDER BY latest_at DESC
+            LIMIT ?
+        """, (*params, limit)).fetchall()
+
+        if not rows:
+            return []
+
+        # 批量查最新一条的 title/content/source/related_fund_name
+        latest_ids = [r["latest_id"] for r in rows]
+        placeholders = ",".join(["?"] * len(latest_ids))
+        detail_rows = conn.execute(
+            f"SELECT id, title, content, source, related_fund_name "
+            f"FROM portfolio_alerts WHERE id IN ({placeholders})",
+            latest_ids,
+        ).fetchall()
+        detail_map = {r["id"]: dict(r) for r in detail_rows}
+
+        result = []
+        for r in rows:
+            r = dict(r)
+            d = detail_map.get(r["latest_id"], {})
+            r["title"] = d.get("title", "")
+            r["content"] = d.get("content", "")
+            r["source"] = d.get("source", "")
+            r["related_fund_name"] = d.get("related_fund_name")
+            result.append(r)
+    finally:
+        conn.close()
+
+    # P0-2: 附加可靠性（数据量小，Python 层 join）
+    _enrich_reliability(result)
+    return result
+
+
+def _enrich_reliability(alerts: list[dict]) -> None:
+    """P0-2: 给预警列表附加 reliability 字段（基于 alert_accuracy_stats 回测数据）。
+
+    原地修改 alerts，无返回值。取最近 4 周回测的聚合数据。
+    """
+    if not alerts:
+        return
+    conn = _get_conn()
+    try:
+        stats_rows = conn.execute("""
+            SELECT alert_type, severity,
+                   AVG(win_rate) as avg_win_rate,
+                   SUM(sample_count) as total_samples,
+                   AVG(avg_followup_change) as avg_change
+            FROM alert_accuracy_stats
+            WHERE week_start >= date('now','localtime','-28 days')
+            GROUP BY alert_type, severity
+        """).fetchall()
+    finally:
+        conn.close()
+
+    stats_map = {(r["alert_type"], r["severity"]): dict(r) for r in stats_rows}
+    for a in alerts:
+        key = (a.get("alert_type"), a.get("severity"))
+        a["reliability"] = _calc_reliability(
+            a.get("alert_type", ""), a.get("severity", ""), stats_map.get(key)
+        )
+
+
+def _calc_reliability(alert_type: str, severity: str, stats: dict | None) -> dict:
+    """根据回测数据计算可靠性等级。
+
+    规则：
+      - 高：胜率 ≥ 80% 且样本 ≥ 3
+      - 中：胜率 ≥ 60% 或样本 < 3（数据不足）
+      - 低：胜率 < 60%
+      - 无数据：unknown（前端显示灰色"未回测"）
+    特殊：valuation_opportunity 一律标"低"（低估值不等于买点，需结合趋势）
+    """
+    if alert_type == "valuation_opportunity":
+        return {
+            "level": "low", "label": "低",
+            "reason": "低估值不等于买点，可能继续下跌",
+            "win_rate": None, "samples": None, "avg_change": None,
+        }
+    if not stats or not stats.get("total_samples"):
+        return {
+            "level": "unknown", "label": "未回测",
+            "reason": "暂无历史回测数据",
+            "win_rate": None, "samples": 0, "avg_change": None,
+        }
+    win_rate = stats["avg_win_rate"] or 0
+    samples = stats["total_samples"] or 0
+    avg_change = stats["avg_change"]
+    if win_rate >= 80 and samples >= 3:
+        level, label = "high", "高"
+    elif win_rate >= 60 or samples < 3:
+        level, label = "medium", "中"
+    else:
+        level, label = "low", "低"
+    if avg_change is not None:
+        reason = f"近4周回测：胜率{win_rate:.0f}% / 样本{samples} / 平均{avg_change:+.2f}%"
+    else:
+        reason = f"近4周回测：胜率{win_rate:.0f}% / 样本{samples}"
+    return {
+        "level": level, "label": label, "reason": reason,
+        "win_rate": round(win_rate, 1),
+        "samples": samples,
+        "avg_change": round(avg_change, 2) if avg_change is not None else None,
+    }
 
 
 def get_unread_alert_count(user_id: str = "default") -> int:

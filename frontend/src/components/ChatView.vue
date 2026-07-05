@@ -1,5 +1,5 @@
 <script setup>
-import { ref, computed, onMounted, onBeforeUnmount, nextTick, watch } from 'vue'
+import { ref, computed, onMounted, onBeforeUnmount, onActivated, onDeactivated, nextTick, watch } from 'vue'
 import {
   listConversations, createConversation, deleteConversation,
   getMessages, sendMessage, sendMessageStream,
@@ -78,6 +78,18 @@ onMounted(async () => {
 onBeforeUnmount(() => {
   document.removeEventListener('visibilitychange', handleVisibilityChange)
   window.removeEventListener('pageshow', handlePageShow)
+})
+
+// ─── KeepAlive 页面切换钩子（SPA 内部 activePage 切换）───
+// 首次挂载时 onActivated 也会触发，但此时 selectedConv 尚未就绪，recoverFromDisconnect 会自动跳过
+onActivated(() => {
+  if (!selectedConv.value?.id) return
+  recoverFromDisconnect()
+})
+
+onDeactivated(() => {
+  // 切到其他页面：中断当前 SSE 连接（后端任务继续执行，切回时由 onActivated 恢复）
+  pauseCurrentStream()
 })
 
 // ─── 移动端恢复 ───

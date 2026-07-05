@@ -189,8 +189,8 @@ function onBack() {
         <span v-for="kw in hotKeywords" :key="kw" class="quote-hot-tag">{{ kw }}</span>
       </div>
     </div>
-    <!-- AI 分析页（特殊处理，不使用 KeepAlive） -->
-    <div v-if="activePage === 'analysis'" class="page-section">
+    <!-- AI 分析页（持续挂载，用 v-show 切换可见性，避免 TaskDetail 被卸载丢状态） -->
+    <div v-show="activePage === 'analysis'" class="page-section">
       <div v-if="!currentTaskId" class="card analysis-card">
         <div class="analysis-header">
           <h2 class="page-title">AI 投资分析</h2>
@@ -228,8 +228,8 @@ function onBack() {
     </div>
 
     <!-- 其他页面使用 KeepAlive 缓存（ChatView 的流式状态由 useStreamingState composable 管理，不受 KeepAlive 影响） -->
-    <KeepAlive v-else>
-      <component :is="pageComponent" v-bind="pageProps" />
+    <KeepAlive>
+      <component v-if="activePage !== 'analysis' && pageComponent" :is="pageComponent" v-bind="pageProps" />
     </KeepAlive>
   </div>
 </template>

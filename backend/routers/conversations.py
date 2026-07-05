@@ -166,7 +166,17 @@ async def get_messages_api(conv_id: int, limit: int = 50, offset: int = 0):
 
 @router.post("/api/conversations/{conv_id}/cancel")
 async def cancel_conversation_execution(conv_id: int):
-    """客户端通知取消执行，将 streaming 状态的消息标记为 cancelled。"""
+    """客户端通知取消执行：
+    1. 设置 cancel_event 让后台生产者线程在下一个检查点真正停止（_check_cancel 抛 CancelledError）
+    2. 同时把 streaming 状态的消息标记为 cancelled（前端可见）
+    """
+    # 1. 通过 cancel_event 真正中断后台任务（之前的版本只标记 DB 状态，后台任务仍会跑完）
+    agent_info = _running_agents.get(f"prod_{conv_id}")
+    if agent_info and agent_info.get("cancel_event"):
+        agent_info["cancel_event"].set()
+        logger.info(f"取消对话 {conv_id}：已设置 cancel_event，后台任务将在下一个检查点停止")
+
+    # 2. 标记 DB 状态为 cancelled
     msgs = get_messages(conv_id, limit=5)
     updated = 0
     for msg in reversed(msgs):
@@ -715,7 +725,6 @@ async def send_message_api(conv_id: int, req: SendMessageRequest):
         codes = quick_check_fund_codes(answer)
         if codes:
             logger.info(f"回复含 {len(codes)} 个基金代码，触发幻觉校验: {codes[:10]}")
-            import asyncio
             asyncio.create_task(
                 _async_verify_and_log(conv_id, msg_id, answer)
             )
@@ -992,7 +1001,6 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
                 from agent.hallucination_guard import quick_check_fund_codes
                 codes = quick_check_fund_codes(answer)
                 if codes:
-                    import asyncio
                     asyncio.create_task(_async_verify_and_log(conv_id, msg_id, answer))
             except Exception:
                 pass
@@ -1113,7 +1121,6 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
                         from agent.hallucination_guard import quick_check_fund_codes
                         codes = quick_check_fund_codes(answer)
                         if codes:
-                            import asyncio
                             asyncio.create_task(_async_verify_and_log(conv_id, msg_id, answer))
                     except Exception:
                         pass
@@ -1328,7 +1335,8 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
 
             def _producer():
                 try:
-                    _running_agents[f"prod_{conv_id}"] = {"conv_id": conv_id, "started_at": time.time(), "trace_id": trace_id}
+                    # 将 cancel_event 存入 _running_agents，供 /cancel 端点真正中断后台任务
+                    _running_agents[f"prod_{conv_id}"] = {"conv_id": conv_id, "started_at": time.time(), "trace_id": trace_id, "cancel_event": cancel_event}
                     for event in orchestrate_stream(effective_query, msg_list, orchestrator_context, cancel_event=cancel_event, conversation_id=conv_id, message_id=stream_msg_id, trace_id=trace_id, target_specialists=req.target_specialists):
                         et = event.get("type")
                         # === 在线程中持久化（独立于 SSE 连接）===

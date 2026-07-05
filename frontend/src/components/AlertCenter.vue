@@ -158,11 +158,22 @@ async function loadAlerts() {
 
 async function handleMarkAlertRead(alertId, title, severity) {
   try {
-    const sameGroup = alerts.value.filter(a => a.title === title && a.severity === severity)
+    // P0-1: 改为按 alert_type + related_fund_code + severity 分组（跨日合并后用 fund_code 而非 title）
+    const target = alerts.value.find(a => a.latest_id === alertId)
+    if (!target) return
+    const sameGroup = alerts.value.filter(a =>
+      a.alert_type === target.alert_type
+      && (a.related_fund_code || '') === (target.related_fund_code || '')
+      && a.severity === target.severity
+    )
     for (const a of sameGroup) {
       await markAlertRead(a.latest_id)
     }
-    alerts.value = alerts.value.filter(a => !(a.title === title && a.severity === severity))
+    alerts.value = alerts.value.filter(a =>
+      !(a.alert_type === target.alert_type
+        && (a.related_fund_code || '') === (target.related_fund_code || '')
+        && a.severity === target.severity)
+    )
     const cnt = sameGroup.reduce((s, a) => s + (a.cnt || 1), 0)
     unreadAlertCount.value = Math.max(0, unreadAlertCount.value - cnt)
   } catch (e) {
@@ -171,19 +182,29 @@ async function handleMarkAlertRead(alertId, title, severity) {
 }
 
 function handleDeleteAlert(alertId, title, severity) {
+  const target = alerts.value.find(a => a.latest_id === alertId)
+  if (!target) return
   confirmState.value = {
     visible: true,
     title: '删除预警',
-    message: `确定删除「${title}」？该操作不可恢复。`,
+    message: `确定删除「${title}」${target.cnt > 1 ? `（共 ${target.cnt} 条）` : ''}？该操作不可恢复。`,
     danger: true,
     onConfirm: async () => {
       confirmState.value.visible = false
       try {
-        const sameGroup = alerts.value.filter(a => a.title === title && a.severity === severity)
+        const sameGroup = alerts.value.filter(a =>
+          a.alert_type === target.alert_type
+          && (a.related_fund_code || '') === (target.related_fund_code || '')
+          && a.severity === target.severity
+        )
         for (const a of sameGroup) {
           await deleteAlert(a.latest_id)
         }
-        alerts.value = alerts.value.filter(a => !(a.title === title && a.severity === severity))
+        alerts.value = alerts.value.filter(a =>
+          !(a.alert_type === target.alert_type
+            && (a.related_fund_code || '') === (target.related_fund_code || '')
+            && a.severity === target.severity)
+        )
         const cnt = sameGroup.reduce((s, a) => s + (a.cnt || 1), 0)
         unreadAlertCount.value = Math.max(0, unreadAlertCount.value - cnt)
         useToast().showToast('已删除', 'success')
@@ -268,7 +289,8 @@ function handleAlertAction(alert, actionLabel) {
 
 // P1-3.1 info 级预警折叠
 function alertKey(a) {
-  return `${a.alert_type}:${a.title}:${a.severity}`
+  // P0-1: 改用 alert_type + fund_code + severity 作为唯一键（与后端分组一致）
+  return `${a.alert_type}:${a.related_fund_code || ''}:${a.severity}`
 }
 function toggleInfoAlert(a) {
   const k = alertKey(a)
@@ -527,7 +549,22 @@ onActivated(() => {
               <span v-else-if="a.source === 'ai_analysis'" class="alert-source-badge ai">AI 对话</span>
               <span v-else-if="a.source === 'watchlist_patrol'" class="alert-source-badge ai">关注巡检</span>
               <span v-else class="alert-source-badge">{{ a.source }}</span>
-              <span class="alert-time">{{ a.latest_at }}</span>
+              <!-- P0-2: 可靠性徽章 -->
+              <span
+                v-if="a.reliability"
+                :class="['reliability-badge', `rel-${a.reliability.level}`]"
+                :title="a.reliability.reason"
+              >
+                可靠性: {{ a.reliability.label }}
+                <template v-if="a.reliability.win_rate !== null && a.reliability.win_rate !== undefined">
+                  ({{ a.reliability.win_rate }}% / {{ a.reliability.samples }}样本)
+                </template>
+              </span>
+              <!-- P0-1: 首次时间 + 最新时间 -->
+              <span v-if="a.cnt > 1 && a.first_at" class="alert-time" :title="`首次：${a.first_at}`">
+                {{ a.first_at?.slice(5, 10) }} ~ {{ a.latest_at?.slice(5, 10) }}
+              </span>
+              <span v-else class="alert-time">{{ a.latest_at }}</span>
             </div>
 
             <!-- P1-3.1 历史对比 -->
@@ -562,6 +599,23 @@ onActivated(() => {
               >
                 {{ label }}
               </button>
+            </div>
+
+            <!-- P1-3: 相关财经新闻（MCP 检索，受 alert.news_integration 开关控制） -->
+            <div v-if="a.related_news && a.related_news.length" class="alert-news-section">
+              <div class="alert-news-label">📰 相关财经新闻</div>
+              <div v-for="(n, idx) in a.related_news" :key="idx" class="alert-news-item">
+                <div class="alert-news-title-row">
+                  <a v-if="n.news_url" :href="n.news_url" target="_blank" rel="noopener" class="alert-news-title">
+                    {{ n.news_title }}
+                  </a>
+                  <span v-else class="alert-news-title">{{ n.news_title }}</span>
+                  <span class="alert-news-source" v-if="n.news_source">
+                    {{ n.news_source }}<template v-if="n.published_at"> · {{ n.published_at?.slice(5, 10) }}</template>
+                  </span>
+                </div>
+                <div v-if="n.news_summary" class="alert-news-summary">{{ n.news_summary }}</div>
+              </div>
             </div>
           </div>
 
@@ -1161,6 +1215,85 @@ onActivated(() => {
   font-size: 0.68rem;
   color: var(--color-text-muted);
   margin-top: 0.2rem;
+}
+
+/* ── P0-2 可靠性徽章 ── */
+.reliability-badge {
+  font-size: 0.68rem;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-weight: 500;
+  cursor: help;
+  white-space: nowrap;
+}
+.reliability-badge.rel-high {
+  background: var(--color-profit-bg);
+  color: var(--color-profit);
+}
+.reliability-badge.rel-medium {
+  background: var(--color-warning-bg);
+  color: var(--color-warning);
+}
+.reliability-badge.rel-low {
+  background: var(--color-loss-bg);
+  color: var(--color-loss);
+}
+.reliability-badge.rel-unknown {
+  background: var(--color-bg-hover);
+  color: var(--color-text-muted);
+}
+
+/* ── P1-3 相关财经新闻 ── */
+.alert-news-section {
+  margin-top: 0.5rem;
+  padding: 0.5rem 0.625rem;
+  background: var(--color-primary-50);
+  border-radius: 6px;
+  border-left: 2px solid var(--color-primary);
+}
+.alert-news-label {
+  font-size: 0.7rem;
+  font-weight: 600;
+  color: var(--color-primary);
+  margin-bottom: 0.3rem;
+}
+.alert-news-item {
+  padding: 0.25rem 0;
+  border-top: 1px solid var(--color-border-light);
+}
+.alert-news-item:first-of-type {
+  border-top: none;
+}
+.alert-news-title-row {
+  display: flex;
+  align-items: baseline;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+}
+.alert-news-title {
+  font-size: 0.78rem;
+  color: var(--color-text-primary);
+  font-weight: 500;
+  text-decoration: none;
+}
+a.alert-news-title:hover {
+  color: var(--color-primary);
+  text-decoration: underline;
+}
+.alert-news-source {
+  font-size: 0.68rem;
+  color: var(--color-text-muted);
+  white-space: nowrap;
+}
+.alert-news-summary {
+  font-size: 0.72rem;
+  color: var(--color-text-secondary);
+  margin-top: 0.15rem;
+  line-height: 1.4;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
 }
 
 /* ── 通用 ── */

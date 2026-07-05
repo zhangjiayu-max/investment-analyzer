@@ -246,14 +246,21 @@ function _finishStream(convId, state, data) {
 /**
  * 完成并移除流式状态（消息已保存到 DB 后调用）
  * @param {number} convId
+ * @param {boolean} abort - 是否真正中止 SSE 连接（默认 true）
+ *   - true: 切走页面/页面不可见时，中止前端 SSE fetch（后端任务不受影响，仍会跑完并落库）
+ *   - false: 流自然结束（done/error 事件已收到），仅清理本地状态
  */
-function finishStream(convId) {
+function finishStream(convId, abort = true) {
   const state = streamStates.get(convId)
   if (state) {
     if (state.elapsedTimer) {
       clearInterval(state.elapsedTimer)
+      state.elapsedTimer = null
     }
     if (state.streamAbort) {
+      // 真正中止 SSE fetch，避免切走后旧连接残留 + 切回时新旧 SSE 并发
+      // sendMessageStream 内部已捕获 AbortError，不会报错
+      if (abort) state.streamAbort.abort()
       state.streamAbort = null
     }
     streamStates.delete(convId)

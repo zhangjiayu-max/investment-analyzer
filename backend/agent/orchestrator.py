@@ -8,6 +8,7 @@ import threading
 import concurrent.futures
 import asyncio
 import hashlib
+from datetime import datetime
 
 from services.llm_service import client, MODEL, _call_llm, _parse_tool_args
 from agent.multi_agent import run_specialist, run_specialist_with_context, run_arbitration
@@ -1057,7 +1058,7 @@ def detect_conflicts_llm(specialist_results: list, query: str, trace_id: str = "
                 {"role": "user", "content": prompt},
             ],
             temperature=0.1,
-            max_tokens=4000,
+            max_tokens=8000,
         )
 
         raw = response.choices[0].message.content.strip()
@@ -2132,7 +2133,7 @@ def _extract_key_points(text: str) -> list[str]:
 # ── P0-2.1：共享黑板架构 — 专家协同 ──
 
 # 评级关键词（按优先级排序，越具体越先匹配）
-_RATING_KEYWORDS = [
+_RATING_KEYWORDS_LIST = [
     "建议买入", "建议加仓", "建议持有", "建议减仓", "建议卖出", "建议观望",
     "买入", "加仓", "持有", "减仓", "卖出", "观望", "逢低买入", "逢高减仓",
 ]
@@ -2152,7 +2153,7 @@ def _extract_structured_conclusion(result_dict: dict) -> dict | None:
 
     # 1. 评级提取（关键词匹配）
     rating = ""
-    for kw in _RATING_KEYWORDS:
+    for kw in _RATING_KEYWORDS_LIST:
         if kw in analysis:
             rating = kw.replace("建议", "")
             break
@@ -3783,6 +3784,7 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
     specialist_results = []
     all_tool_calls = []
     arbitration_done = False  # 标记仲裁是否已完成,避免重复调用
+    conflicts = {}  # 初始化冲突检测结果，后续在无工具调用分支中更新
     already_called = set()  # 增强2: 动态选角防循环
 
     # 恢复模式:添加已有结果
@@ -4248,6 +4250,7 @@ def _schedule_auto_evaluation(conv_id: int, msg_id: int, result: dict):
     4. 去重：同一消息只评测一次（has_evaluation）
     5. 先规则评估（无 LLM 调用），仅低分才追加 LLM 评估
     """
+    global _auto_eval_daily_count
     if not conv_id:
         return
     if get_config("llm_cost.auto_conversation_eval", "false") != "true":

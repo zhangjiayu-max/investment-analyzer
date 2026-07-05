@@ -589,6 +589,29 @@ def init_db():
     """)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_alerts_user ON portfolio_alerts(user_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_alerts_read ON portfolio_alerts(is_read)")
+    # P0-1: 跨日合并查询优化 — list_alerts GROUP BY alert_type+fund_code+severity
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_alerts_group "
+        "ON portfolio_alerts(alert_type, related_fund_code, severity, user_id)"
+    )
+
+    # P1-3: 预警相关财经新闻缓存表（MCP SearchFinancialNews 结果，30 min TTL）
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS alert_news_cache (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            fund_code TEXT NOT NULL,
+            keyword TEXT,
+            news_title TEXT NOT NULL,
+            news_summary TEXT,
+            news_source TEXT,
+            news_url TEXT,
+            published_at TEXT,
+            fetched_at TEXT DEFAULT (datetime('now','localtime')),
+            relevance_score REAL DEFAULT 0
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_alert_news_fund ON alert_news_cache(fund_code)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_alert_news_fetched ON alert_news_cache(fetched_at)")
 
     # P2-4.3: 预警准确性回测统计表（每周一回测上周预警的实际走势）
     conn.execute("""

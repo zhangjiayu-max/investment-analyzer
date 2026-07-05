@@ -81,6 +81,10 @@ DEFAULT_CONFIGS = [
 
     # 补仓跌幅预警
     ('alert.buy_drop_pct', '4', '补仓后跌幅预警阈值（%）', 'alert'),
+    # P1-3: 预警财经新闻结合（默认关闭，开启后调用 MCP SearchFinancialNews）
+    ('alert.news_integration', 'false', '是否启用预警财经新闻结合（MCP 调用，默认关闭）', 'alert'),
+    ('alert.news_cache_ttl', '30', '新闻缓存分钟数', 'alert'),
+    ('alert.news_per_fund', '3', '单基金新闻条数上限', 'alert'),
 
     # 业务常量
     ('portfolio.default_account', '花无缺', '默认账户名', 'portfolio'),
