@@ -876,7 +876,78 @@ def _parse_arbitration_output(answer: str) -> dict:
     }
 
 
-def run_arbitration(query: str, specialist_results: list, rag_context: str = "", trace_id: str = "") -> dict:
+def _build_portfolio_summary(max_chars: int = 800) -> str:
+    """构建用户当前持仓摘要，供仲裁法官做"持仓现状对照"。
+
+    摘要包含：总资产、现金、重仓基金（按市值排序，前 5）、行业集中度、近 30 天交易频率。
+    控制在 max_chars 字符内，超长时只保留前 5 大持仓。
+
+    返回空字符串表示无持仓或查询失败（调用方应优雅降级）。
+    """
+    try:
+        from db.portfolio import get_portfolio_summary, list_transactions
+    except ImportError:
+        return ""
+
+    try:
+        summary = get_portfolio_summary()
+        holdings = summary.get("holdings", [])
+        if not holdings:
+            return ""
+
+        total_assets = summary.get("total_assets", 0)
+        cash = summary.get("cash_balance", 0)
+        total_value = summary.get("total_value", 0)
+        total_cost = summary.get("total_cost", 0)
+        total_profit = summary.get("total_profit", 0)
+        profit_rate = summary.get("profit_rate", 0)
+
+        # 按 current_value 降序取前 5 大持仓
+        active = [h for h in holdings if (h.get("shares") or 0) > 0]
+        active.sort(key=lambda h: (h.get("current_value") or 0), reverse=True)
+        top_holdings = active[:5]
+
+        lines = [
+            f"- 总资产：约 {total_assets/10000:.1f} 万",
+            f"- 现金：约 {cash/10000:.1f} 万",
+            f"- 持仓市值：约 {total_value/10000:.1f} 万（成本 {total_cost/10000:.1f} 万，盈亏 {total_profit/10000:+.1f} 万 / {profit_rate:+.1%}）",
+            f"- 重仓基金（按市值排序，前 {len(top_holdings)}）：",
+        ]
+        for i, h in enumerate(top_holdings, 1):
+            name = h.get("fund_name", "未知")
+            cost = h.get("total_cost", 0) or 0
+            value = h.get("current_value", 0) or 0
+            rate = h.get("profit_rate", 0) or 0
+            lines.append(f"  {i}. {name}：成本 {cost/10000:.2f} 万，市值 {value/10000:.2f} 万，盈亏 {rate:+.1%}")
+
+        # 行业集中度（按 fund_category 聚合市值占比）
+        cat_values = {}
+        for h in active:
+            cat = h.get("fund_category") or "equity"
+            cat_values[cat] = cat_values.get(cat, 0) + (h.get("current_value") or 0)
+        if total_value > 0 and cat_values:
+            cat_str = "、".join(
+                f"{cat} {v/total_value*100:.0f}%"
+                for cat, v in sorted(cat_values.items(), key=lambda x: -x[1])[:3]
+            )
+            lines.append(f"- 行业集中度（按市值）：{cat_str}")
+
+        # 近 30 天交易频率
+        try:
+            txns = list_transactions()
+            lines.append(f"- 历史交易记录：共 {len(txns)} 条")
+        except Exception:
+            pass
+
+        text = "\n".join(lines)
+        return text[:max_chars] if len(text) > max_chars else text
+    except Exception as e:
+        logger.warning(f"构建持仓摘要失败: {e}")
+        return ""
+
+
+def run_arbitration(query: str, specialist_results: list, rag_context: str = "",
+                    portfolio_summary: str = "", trace_id: str = "") -> dict:
     """
     仲裁 Agent：使用高级推理模型（如 DeepSeek R1）审查所有专家分析，给出最终裁决。
 
@@ -884,6 +955,7 @@ def run_arbitration(query: str, specialist_results: list, rag_context: str = "",
         query: 原始用户问题
         specialist_results: 所有专家的分析结果列表
         rag_context: RAG 检索上下文
+        portfolio_summary: 用户当前持仓摘要（用于"持仓现状对照"，避免建议与现状矛盾）
 
     返回:
         {"agent_key": "arbitrator", "agent": "仲裁法官", "icon": "⚖️",
@@ -937,6 +1009,11 @@ def run_arbitration(query: str, specialist_results: list, rag_context: str = "",
 
 ## 各专家分析结果
 {experts_text}"""
+
+    # 注入用户当前持仓摘要，供仲裁法官做"持仓现状对照"
+    # 避免仲裁法官定"上限 X 万"却不知道用户已超上限，或建议"加仓 Y 标的"却不知道已重仓
+    if portfolio_summary:
+        user_content += f"\n\n## 用户当前持仓摘要（仲裁时必须对照，避免建议与现状矛盾）\n{portfolio_summary}"
 
     if rag_context:
         user_content += f"\n\n## 参考知识库\n{rag_context[:1500]}"

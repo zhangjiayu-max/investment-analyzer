@@ -11,7 +11,7 @@ import hashlib
 from datetime import datetime
 
 from services.llm_service import client, MODEL, _call_llm, _parse_tool_args
-from agent.multi_agent import run_specialist, run_specialist_with_context, run_arbitration
+from agent.multi_agent import run_specialist, run_specialist_with_context, run_arbitration, _build_portfolio_summary
 from db.agents import (
     load_specialist_agents,
     create_pending_agent_run,
@@ -3287,7 +3287,11 @@ def _run_arbitration_stream(refined_query: str, specialist_results: list, rag_co
         "agent": "仲裁法官",
         "icon": "⚖️",
     }
-    arb_result = run_arbitration(refined_query, specialist_results, rag_context)
+    # 构建用户当前持仓摘要，让仲裁法官能做"持仓现状对照"
+    # 避免仲裁法官定"上限 X 万"却不知道用户已超上限，或建议"加仓 Y 标的"却不知道已重仓
+    portfolio_summary = _build_portfolio_summary()
+    arb_result = run_arbitration(refined_query, specialist_results, rag_context,
+                                 portfolio_summary=portfolio_summary, trace_id="")
     specialist_results.append(arb_result)
     all_tool_calls.append({"name": "arbitration", "arguments": {"query": refined_query},
                            "result_preview": arb_result["analysis"][:300]})
