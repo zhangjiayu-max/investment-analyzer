@@ -13,6 +13,23 @@ from db import create_async_task, update_async_task, get_async_task
 from db.portfolio import save_analysis_cache, get_analysis_cache
 from db.agents import create_agent_run
 from db._conn import _get_conn
+
+
+def _safe_percentile(v, default=None):
+    """percentile 防御性 float 转换（兼容 "97.25%" 文本型历史数据）。
+
+    Bug A 防御：即便 DB 迁移后仍有未覆盖路径，这里兜底。
+    """
+    if v is None or v == "":
+        return default
+    if isinstance(v, (int, float)):
+        return float(v)
+    try:
+        return float(str(v).replace('%', '').strip())
+    except (ValueError, TypeError):
+        return default
+
+
 from services.llm_service import _call_llm, MODEL
 from services.rag import build_rag_context_with_details, log_rag_search
 from services.market_data import get_market_overview
@@ -347,7 +364,7 @@ def _build_index_catalog() -> str:
         return "暂无指数数据"
     lines = []
     for i in all_indexes:
-        pct = i.get("percentile")
+        pct = _safe_percentile(i.get("percentile"))
         pct_str = f"{pct:.0f}%" if pct is not None else "N/A"
         lines.append(
             f"- {i['index_name']}（{i.get('index_code','')}）: "
@@ -417,7 +434,7 @@ def _fuzzy_match_sectors_to_data(sectors: list[dict]) -> list[dict]:
                 related_indexes.append({
                     "index_code": idx.get("index_code"),
                     "index_name": idx.get("index_name"),
-                    "percentile": idx.get("percentile"),
+                    "percentile": _safe_percentile(idx.get("percentile")),
                     "current_value": idx.get("current_value"),
                     "metric_type": idx.get("metric_type"),
                 })
@@ -732,7 +749,7 @@ async def get_sector_detail(sector_name: str):
         {
             "index_code": i.get("index_code"),
             "index_name": i.get("index_name"),
-            "percentile": i.get("percentile"),
+            "percentile": _safe_percentile(i.get("percentile")),
             "current_value": i.get("current_value"),
             "metric_type": i.get("metric_type"),
         }

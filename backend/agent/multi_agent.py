@@ -478,9 +478,35 @@ def run_specialist(agent_key: str, query: str, context: str = "",
     # 清理：如果 answer 中仍包含文本格式 tool_call 或 DSML 标记，去除之
     if answer:
         if '<tool_call>' in answer:
-            cleaned = re.sub(r'<tool_call>.*?</tool_call>', '', answer, flags=re.DOTALL).strip()
-            if cleaned and len(cleaned) > len(answer) * 0.3:
+            cleaned = re.sub(r'<tool_call>.*?</function>', '', answer, flags=re.DOTALL).strip()
+            # P0-2 修复：旧逻辑 cleaned 过短时保留原 answer（含 tool_call 文本），
+            # 导致 cross_review 返回仅含函数调用标签的无效结果。
+            # 新逻辑：cleaned 必须 ≥200 字才采纳，否则重新调用 LLM 生成结论。
+            if len(cleaned) >= 200:
                 answer = cleaned
+            else:
+                logger.warning(f'[{agent["name"]}] answer 清理后仅 {len(cleaned)} 字，重新生成结论')
+                try:
+                    llm_messages.append({
+                        "role": "user",
+                        "content": "请基于以上信息和工具结果，给出你的专业分析结论（不要调用工具，直接输出分析）。",
+                    })
+                    _regen_resp = _call_llm(
+                        caller=_caller,
+                        trace_id=trace_id,
+                        model=_model,
+                        messages=llm_messages,
+                        temperature=get_config_float('llm.temperature_agent', 0.3),
+                        max_tokens=get_config_int('llm.max_tokens_agent', 8000),
+                    )
+                    _regenerated = _regen_resp.choices[0].message.content or ""
+                    if _regenerated and len(_regenerated) >= 200:
+                        answer = _regenerated
+                    else:
+                        answer = "分析过程遇到问题，请重试。"
+                except Exception as _e:
+                    logger.error(f'[{agent["name"]}] 重新生成失败: {_e}')
+                    answer = "分析过程遇到问题，请重试。"
         answer = _clean_dsml_from_content(answer)
 
     return {
@@ -683,8 +709,30 @@ def run_specialist_with_context(agent_key: str, query: str, peer_analyses: dict,
     # 清理：如果 answer 中仍包含文本格式 tool_call，去除之
     if answer and '<tool_call>' in answer:
         answer = re.sub(r'<tool_call>.*?</tool_call>', '', answer, flags=re.DOTALL).strip()
-        if not answer:
-            answer = "交叉审阅完成。"
+        if not answer or len(answer) < 200:
+            # P0-2 修复：清理后内容过短 → 重新生成结论
+            logger.warning(f'[{agent["name"]}] cross_review answer 清理后仅 {len(answer)} 字，重新生成')
+            try:
+                llm_messages.append({
+                    "role": "user",
+                    "content": "请基于以上信息和其他专家的分析结果，给出你的交叉审阅结论（不要调用工具，直接输出分析）。",
+                })
+                _regen_resp = _call_llm(
+                    caller=_caller,
+                    trace_id=trace_id,
+                    model=_model,
+                    messages=llm_messages,
+                    temperature=get_config_float('llm.temperature_agent', 0.3),
+                    max_tokens=get_config_int('llm.max_tokens_agent', 8000),
+                )
+                _regenerated = _regen_resp.choices[0].message.content or ""
+                if _regenerated and len(_regenerated) >= 200:
+                    answer = _regenerated
+                else:
+                    answer = "交叉审阅完成，请参考其他专家分析。"
+            except Exception as _e:
+                logger.error(f'[{agent["name"]}] cross_review 重新生成失败: {_e}')
+                answer = "交叉审阅完成，请参考其他专家分析。"
 
     return {
         "agent_key": agent_key,

@@ -88,6 +88,20 @@ def init_conclusions_tables(conn=None):
             "ON cross_system_references(target_conclusion_id)"
         )
 
+        # P1-1：扩展字段（幂等 ALTER） — 关联 AI 对话的 conversation_id / message_id
+        try:
+            from db._utils import _add_column_if_not_exists
+            _add_column_if_not_exists(conn, "analysis_conclusions", "conversation_id", "INTEGER")
+            _add_column_if_not_exists(conn, "analysis_conclusions", "message_id", "INTEGER")
+        except Exception as e:
+            logger.debug(f"add_column conversation_id/message_id 跳过: {e}")
+
+        # 幂等检查索引 — 用于同 conversation_id+message_id 已有记录的快速判断
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_ac_conv_msg "
+            "ON analysis_conclusions(conversation_id, message_id)"
+        )
+
         conn.commit()
     except Exception as e:
         logger.warning(f"init_conclusions_tables 失败: {e}")
@@ -114,6 +128,8 @@ def save_analysis_conclusion(
     data_basis: list | None = None,
     confidence: float = 0.5,
     urgent: int = 0,
+    conversation_id: int | None = None,
+    message_id: int | None = None,
 ) -> int | None:
     """
     插入一条分析结论。
@@ -130,6 +146,8 @@ def save_analysis_conclusion(
         data_basis:     所引用的数据源列表
         confidence:     置信度 0-1
         urgent:         是否紧急 0/1
+        conversation_id: P1-1 关联 AI 对话 ID（ai_dialogue 路径专用）
+        message_id:      P1-1 关联 AI 对话消息 ID
 
     Returns:
         插入记录的 id，失败返回 None
@@ -143,8 +161,9 @@ def save_analysis_conclusion(
         cur = conn.execute(
             """INSERT INTO analysis_conclusions
                (source_system, source_type, source_id, target_subject, action,
-                summary, reasoning, key_variables, data_basis, confidence, urgent)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                summary, reasoning, key_variables, data_basis, confidence, urgent,
+                conversation_id, message_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 source_system,
                 source_type,
@@ -157,6 +176,8 @@ def save_analysis_conclusion(
                 data_basis_json,
                 confidence,
                 urgent,
+                conversation_id,
+                message_id,
             ),
         )
         conn.commit()
@@ -190,7 +211,8 @@ def get_latest_analysis_conclusions(
         rows = conn.execute(
             """SELECT id, source_system, source_type, source_id, target_subject,
                       action, summary, reasoning, key_variables, data_basis,
-                      confidence, urgent, created_at, expires_at
+                      confidence, urgent, created_at, expires_at,
+                      conversation_id, message_id
                FROM analysis_conclusions
                WHERE created_at >= datetime('now', 'localtime', ?)
                ORDER BY created_at DESC
@@ -231,7 +253,8 @@ def get_conclusions_by_target(
         rows = conn.execute(
             """SELECT id, source_system, source_type, source_id, target_subject,
                       action, summary, reasoning, key_variables, data_basis,
-                      confidence, urgent, created_at, expires_at
+                      confidence, urgent, created_at, expires_at,
+                      conversation_id, message_id
                FROM analysis_conclusions
                WHERE target_subject = ?
                  AND created_at >= datetime('now', 'localtime', ?)
@@ -410,4 +433,94 @@ def cleanup_expired_conclusions() -> int:
         return deleted
     except Exception as e:
         logger.warning(f"cleanup_expired_conclusions 失败: {e}")
+        return 0
+
+
+# ── P1-1：幂等检查 — 同 conversation_id+message_id 已有记录则跳过 ──
+
+
+def has_conclusions_for_message(conversation_id: int, message_id: int) -> bool:
+    """检查指定的 (conversation_id, message_id) 是否已持久化过结论。
+
+    用于 orchestrator 收尾时避免重复写入。
+    """
+    if not conversation_id or not message_id:
+        return False
+    try:
+        conn = _get_conn()
+        row = conn.execute(
+            "SELECT COUNT(*) AS cnt FROM analysis_conclusions "
+            "WHERE conversation_id = ? AND message_id = ?",
+            (conversation_id, message_id),
+        ).fetchone()
+        conn.close()
+        return bool(row and row["cnt"] and row["cnt"] > 0)
+    except Exception as e:
+        logger.warning(f"has_conclusions_for_message 失败: {e}")
+        return False  # 查询失败时返回 False（保守写入，宁可重复也不丢）
+
+
+# ── P1-3：跨系统桥接 — 把 conclusion 链接到相关 decision_records ──
+
+
+def link_conclusion_to_decisions(conclusion_id: int, target_subject: str) -> int:
+    """把一条 analysis_conclusion 链接到所有匹配的已接受 decision_records。
+
+    匹配规则：decision_records.target_code LIKE target_subject AND status='accepted'。
+    对每条匹配的决策，INSERT OR IGNORE 到 cross_system_references。
+
+    Args:
+        conclusion_id: analysis_conclusions.id
+        target_subject: 结论标的（基金代码或板块名）
+
+    Returns:
+        新建链接条数
+    """
+    if not conclusion_id or not target_subject:
+        return 0
+    try:
+        conn = _get_conn()
+        # 查找匹配的已接受决策（target_code 含目标标的）
+        # 注：decision_records 表在 db/portfolio.py 创建
+        rows = conn.execute(
+            "SELECT id FROM decision_records "
+            "WHERE target_code LIKE ? AND status = 'accepted'",
+            (f"%{target_subject}%",),
+        ).fetchall()
+        if not rows:
+            conn.close()
+            return 0
+        inserted = 0
+        for r in rows:
+            try:
+                # cross_system_references 无 UNIQUE 约束，用 NOT EXISTS 子查询去重
+                conn.execute(
+                    """INSERT INTO cross_system_references
+                       (source_conclusion_id, target_conclusion_id, relationship, reason)
+                       SELECT ?, ?, ?, ?
+                       WHERE NOT EXISTS (
+                           SELECT 1 FROM cross_system_references
+                           WHERE source_conclusion_id = ?
+                             AND target_conclusion_id = ?
+                             AND relationship = 'informs_decision'
+                       )""",
+                    (
+                        conclusion_id,
+                        r["id"],
+                        "informs_decision",
+                        f"自动桥接：结论标的 {target_subject} 关联到已接受决策",
+                        conclusion_id,
+                        r["id"],
+                    ),
+                )
+                inserted += 1
+            except Exception:
+                continue
+        conn.commit()
+        conn.close()
+        if inserted > 0:
+            logger.info(f"[P1-3] 链接 conclusion#{conclusion_id} → {inserted} 条决策")
+        return inserted
+    except Exception as e:
+        logger.warning(f"link_conclusion_to_decisions 失败: {e}")
         return 0

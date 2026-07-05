@@ -1087,5 +1087,36 @@ def init_db():
     except Exception:
         pass
 
+    # ── P0-1 数据迁移：把 index_valuations.percentile 文本型转为 REAL（幂等）──
+    try:
+        _migrate_text_percentile_to_real(conn)
+    except Exception as e:
+        print(f"[db] percentile 迁移失败（不阻塞启动）: {e}")
+
     conn.commit()
     conn.close()
+
+
+def _migrate_text_percentile_to_real(conn):
+    """把 index_valuations.percentile 历史文本型数据转为 REAL（幂等）。
+
+    修复 Bug A：rebalancing/market_intelligence 任务因 percentile 是 "97.25%" 字符串而失败。
+    """
+    rows = conn.execute(
+        "SELECT id, percentile FROM index_valuations WHERE typeof(percentile)='text'"
+    ).fetchall()
+    if not rows:
+        return
+    migrated = 0
+    for r in rows:
+        raw = r["percentile"]
+        try:
+            val = float(str(raw).replace('%', '').strip())
+        except (ValueError, TypeError):
+            val = None
+        conn.execute(
+            "UPDATE index_valuations SET percentile=? WHERE id=?",
+            (val, r["id"])
+        )
+        migrated += 1
+    print(f"[db] 已把 {migrated} 条文本型 percentile 转为 REAL")

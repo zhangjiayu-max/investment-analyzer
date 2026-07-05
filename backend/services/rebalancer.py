@@ -5,6 +5,21 @@ import logging
 logger = logging.getLogger(__name__)
 
 
+def _safe_percentile(v, default=None):
+    """percentile 防御性 float 转换（兼容 "97.25%" 文本型历史数据）。
+
+    Bug A 防御：即便 DB 迁移后仍有未覆盖路径，这里兜底。
+    """
+    if v is None or v == "":
+        return default
+    if isinstance(v, (int, float)):
+        return float(v)
+    try:
+        return float(str(v).replace('%', '').strip())
+    except (ValueError, TypeError):
+        return default
+
+
 def _get_valuation_level(percentile: float, percentiles_config: dict) -> str:
     """根据百分位和配置的分界线返回估值水平标签。"""
     if percentile <= percentiles_config["极度低估"]:
@@ -96,7 +111,7 @@ def analyze_rebalancing_need(user_id: str = "default") -> dict:
         for v in valuations:
             code = v.get("index_code", "")
             metric = v.get("metric_type", "")
-            percentile = v.get("percentile")
+            percentile = _safe_percentile(v.get("percentile"))
             if code and percentile is not None:
                 if code not in index_valuation:
                     index_valuation[code] = {
@@ -215,7 +230,7 @@ def analyze_rebalancing_need(user_id: str = "default") -> dict:
                         if idx:
                             val = get_latest_valuation(idx)
                             if val:
-                                return val.get("percentile", 50) or 50
+                                return _safe_percentile(val.get("percentile"), 50) or 50
                         return 50
                     cat_holdings_sorted = sorted(cat_holdings, key=lambda h: _get_pe_pct(h), reverse=True)
                     top = cat_holdings_sorted[0]

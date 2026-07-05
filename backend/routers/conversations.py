@@ -1337,7 +1337,34 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
                 try:
                     # 将 cancel_event 存入 _running_agents，供 /cancel 端点真正中断后台任务
                     _running_agents[f"prod_{conv_id}"] = {"conv_id": conv_id, "started_at": time.time(), "trace_id": trace_id, "cancel_event": cancel_event}
+                    # P2-1：长对话超时保护（5min 警告 / 8min 硬收尾）
+                    producer_started = time.time()
+                    warn_at_sec = get_config_int("conversation.warn_at_minutes", 5) * 60
+                    abort_at_sec = get_config_int("conversation.abort_at_minutes", 8) * 60
+                    timeout_warned = False
                     for event in orchestrate_stream(effective_query, msg_list, orchestrator_context, cancel_event=cancel_event, conversation_id=conv_id, message_id=stream_msg_id, trace_id=trace_id, target_specialists=req.target_specialists):
+                        # P2-1：在每个事件前检查总耗时
+                        elapsed = time.time() - producer_started
+                        if elapsed >= abort_at_sec:
+                            logger.warning(
+                                f"[P2-1] 对话 #{conv_id} 已运行 {elapsed:.0f}s 超过 {abort_at_sec}s 阈值，强制收尾"
+                            )
+                            q.put({"type": "status", "subtype": "timeout_abort",
+                                   "message": f"分析已超过 {abort_at_sec // 60} 分钟，正在强制收尾。已完成的专家分析将保留。"})
+                            # 设置 cancel_event 让 orchestrator 内部循环也尽快退出
+                            try:
+                                cancel_event.set()
+                            except Exception:
+                                pass
+                            break
+                        elif elapsed >= warn_at_sec and not timeout_warned:
+                            timeout_warned = True
+                            logger.info(
+                                f"[P2-1] 对话 #{conv_id} 已运行 {elapsed:.0f}s 达 {warn_at_sec}s 警告阈值"
+                            )
+                            q.put({"type": "status", "subtype": "timeout_warn",
+                                   "message": f"分析已进行 {warn_at_sec // 60} 分钟，正在收尾中，请稍候。"})
+
                         et = event.get("type")
                         # === 在线程中持久化（独立于 SSE 连接）===
                         if et == "specialist_done":

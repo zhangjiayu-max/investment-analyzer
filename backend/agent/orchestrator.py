@@ -2260,6 +2260,215 @@ def build_reasoning_trail(
     return trail
 
 
+# ── P1-1：多智能体结论持久化（Bug C 修复）──────────────────────
+
+# 板块关键词（用于在没有明确基金代码时识别分析标的）
+_SECTOR_KEYWORDS = [
+    "白酒", "医药", "医疗", "新能源", "半导体", "芯片", "消费", "科技",
+    "金融", "银行", "券商", "房地产", "军工", "周期", "创业板", "科创板",
+    "港股", "美股", "债券", "黄金", "原油", "消费电子", "光伏", "锂电",
+    "军工", "人工智能", "机器人", "5G", "通信", "计算机",
+]
+
+
+def _extract_target_subject(query: str, analysis: str = "") -> str:
+    """从 query 或分析文本中提取结论标的。
+
+    三级提取：
+    1. 6 位数字基金代码（最优先）
+    2. 中文板块关键词
+    3. 兜底 "整体组合"
+    """
+    import re as _re
+    text = f"{query} {analysis}"
+
+    # 1. 6 位数字基金/股票代码（兼容前后有 1-2 位前缀如 0、1、5、6、11、15、16）
+    code_match = _re.search(r'(?<!\d)(\d{6})(?!\d)', text)
+    if code_match:
+        return code_match.group(1)
+
+    # 2. 板块关键词
+    for kw in _SECTOR_KEYWORDS:
+        if kw in query:
+            return kw
+
+    # 3. 兜底
+    return "整体组合"
+
+
+def _extract_rating(analysis: str) -> str:
+    """从分析文本中提取评级关键词。"""
+    if not analysis:
+        return ""
+    for kw in _RATING_KEYWORDS_LIST:
+        if kw in analysis:
+            return kw.replace("建议", "")
+    return ""
+
+
+def _infer_action_from_rating(rating: str) -> str:
+    """把评级关键词映射为标准化 action 字段。"""
+    if not rating:
+        return ""
+    rating_lower = rating.strip()
+    if rating_lower in ("买入", "加仓", "逢低买入"):
+        return "buy" if rating_lower == "买入" else "increase"
+    if rating_lower in ("卖出", "减仓", "逢高减仓"):
+        return "sell" if rating_lower == "卖出" else "decrease"
+    if rating_lower in ("持有", "观望"):
+        return "hold"
+    return ""
+
+
+def _persist_agent_conclusions(
+    conversation_id: int,
+    message_id: int,
+    query: str,
+    specialist_results: list[dict],
+    arbitration_result: dict | None,
+    trace_id: str = "",
+) -> int:
+    """把多智能体分析的结论持久化到 analysis_conclusions 表。
+
+    设计稿 P1-1：解决 Bug C — ai_dialogue 路径从不持久化结论，token 被消耗但无沉淀。
+
+    Args:
+        conversation_id: 对话 ID
+        message_id: 消息 ID
+        query: 用户原始问题
+        specialist_results: 专家分析结果列表
+        arbitration_result: 仲裁结论（可为 None）
+        trace_id: 追踪 ID
+
+    Returns:
+        成功写入的结论条数
+    """
+    # 1. 开关检查（默认 true）
+    try:
+        from db.config import get_config_bool
+        if not get_config_bool("agent.persist_conclusions", True):
+            return 0
+    except Exception:
+        pass  # 配置读取失败 → 继续执行（默认开启）
+
+    if not conversation_id or not message_id:
+        return 0
+
+    # 2. 幂等检查：同 (conversation_id, message_id) 已写过则跳过
+    try:
+        from db.analysis_conclusions import (
+            has_conclusions_for_message,
+            save_analysis_conclusion,
+            link_conclusion_to_decisions,
+        )
+        if has_conclusions_for_message(conversation_id, message_id):
+            logger.info(
+                f"[P1-1] conv={conversation_id} msg={message_id} 已有结论记录，跳过持久化"
+            )
+            return 0
+    except Exception as e:
+        logger.warning(f"[P1-1] 幂等检查失败（继续写入）: {e}")
+
+    written = 0
+
+    # 3. 写入每个非 cross_review 的专家结论
+    for sr in specialist_results or []:
+        if sr.get("is_cross_review"):
+            continue
+        if sr.get("is_arbitration"):
+            continue  # 仲裁单独处理
+
+        analysis = sr.get("analysis", "") or ""
+        if not analysis or len(analysis) < 50:
+            continue  # 内容过短，无沉淀价值
+
+        agent_key = sr.get("agent_key", "unknown")
+        agent_name = sr.get("agent", agent_key)
+
+        try:
+            target_subject = _extract_target_subject(query, analysis)
+            rating = _extract_rating(analysis)
+            action = _infer_action_from_rating(rating)
+            summary = _extract_conclusion(analysis)[:200]
+
+            # 跳过无信息量的兜底
+            if "分析过程遇到问题" in summary:
+                continue
+
+            conclusion_id = save_analysis_conclusion(
+                source_system="ai_dialogue",
+                source_type=f"specialist:{agent_key}",
+                source_id=None,
+                target_subject=target_subject,
+                action=action,
+                summary=f"[{agent_name}] {summary}",
+                reasoning=analysis[:600],
+                key_variables=_extract_key_points(analysis)[:5] or None,
+                data_basis=None,
+                confidence=0.7,  # 单专家结论默认 0.7
+                urgent=0,
+                conversation_id=conversation_id,
+                message_id=message_id,
+            )
+            if conclusion_id:
+                written += 1
+                # P1-3：尝试桥接到相关决策记录
+                try:
+                    from db.config import get_config_bool as _gcb
+                    if _gcb("agent.link_cross_system_refs", True):
+                        link_conclusion_to_decisions(conclusion_id, target_subject)
+                except Exception:
+                    pass
+        except Exception as e:
+            logger.warning(f"[P1-1] 写入专家 {agent_key} 结论失败: {e}")
+            continue
+
+    # 4. 写入仲裁结论（高置信度、标记 urgent）
+    if arbitration_result:
+        arb_analysis = arbitration_result.get("analysis", "") or ""
+        if arb_analysis and len(arb_analysis) >= 50:
+            try:
+                target_subject = _extract_target_subject(query, arb_analysis)
+                rating = _extract_rating(arb_analysis)
+                action = _infer_action_from_rating(rating)
+                summary = _extract_conclusion(arb_analysis)[:200]
+
+                conclusion_id = save_analysis_conclusion(
+                    source_system="ai_dialogue",
+                    source_type="arbitrator",
+                    source_id=None,
+                    target_subject=target_subject,
+                    action=action,
+                    summary=f"[仲裁结论] {summary}",
+                    reasoning=arb_analysis[:800],
+                    key_variables=_extract_key_points(arb_analysis)[:5] or None,
+                    data_basis=None,
+                    confidence=0.9,  # 仲裁结论高置信度
+                    urgent=1,  # 仲裁结论应被高优关注
+                    conversation_id=conversation_id,
+                    message_id=message_id,
+                )
+                if conclusion_id:
+                    written += 1
+                    logger.info(
+                        f"[P1-1] conv={conversation_id} msg={message_id} "
+                        f"写入 {written} 条结论 (含仲裁)"
+                    )
+                    # P1-3：仲裁结论桥接
+                    try:
+                        from db.config import get_config_bool as _gcb
+                        if _gcb("agent.link_cross_system_refs", True):
+                            link_conclusion_to_decisions(conclusion_id, target_subject)
+                    except Exception:
+                        pass
+            except Exception as e:
+                logger.warning(f"[P1-1] 写入仲裁结论失败: {e}")
+
+    if written == 0:
+        logger.info(f"[P1-1] conv={conversation_id} msg={message_id} 无可写入结论")
+    return written
+
+
 def orchestrate(query: str, history: list, rag_context: str = "", cancel_event: threading.Event | None = None, target_specialists: list[str] = None, conversation_id: int = 0, message_id: int = 0, trace_id: str = "") -> dict:
     """
     Orchestrator 主循环。
@@ -2431,6 +2640,19 @@ def orchestrate(query: str, history: list, rag_context: str = "", cancel_event: 
             system_content += f"\n\n{analysis_ctx}"
         except Exception:
             pass
+
+    # P1-2：跨对话结论定向复用（同标的命中时注入更强参考，默认关闭）
+    try:
+        from db.config import get_config_bool, get_config_int
+        if get_config_bool("agent.reuse_recent_conclusions", False):
+            _target = _extract_target_subject(refined_query or query, "")
+            _hours = get_config_int("agent.reuse_conclusions_hours", 24)
+            _reuse_ctx = _load_recent_conclusions(_target, hours=_hours, limit=3)
+            if _reuse_ctx:
+                prebuilt_context += _reuse_ctx
+                logger.info(f"[P1-2] 注入同标的历史结论: target={_target}")
+    except Exception as _e:
+        logger.warning(f"[P1-2] 跨对话复用注入失败（不阻塞主流程）: {_e}")
 
     # 注入 RAG 知识库上下文到 prebuilt_context(让专家也能参考书籍/文章知识)
     if rag_context:
@@ -2626,6 +2848,15 @@ def orchestrate(query: str, history: list, rag_context: str = "", cancel_event: 
                     }
                     if conversation_id:
                         _schedule_auto_evaluation(conversation_id, message_id, _result)
+                        # P1-1：多智能体结论持久化（不阻塞主流程，失败仅 warning）
+                        try:
+                            _arb = next((sr for sr in specialist_results if sr.get("is_arbitration")), None)
+                            _persist_agent_conclusions(
+                                conversation_id, message_id, query,
+                                specialist_results, _arb, trace_id=trace_id,
+                            )
+                        except Exception as _e:
+                            logger.warning(f"[P1-1] 结论持久化失败(早返回路径): {_e}")
                     _schedule_tool_eval(query, specialist_results)
                     return _result
             else:
@@ -2858,6 +3089,15 @@ def orchestrate(query: str, history: list, rag_context: str = "", cancel_event: 
             "tool_calls": all_tool_calls, "duration_ms": duration_ms,
             "complexity": complexity, "conflicts": conflicts,
         })
+        # P1-1：多智能体结论持久化（不阻塞主流程，失败仅 warning）
+        try:
+            _arb_final = next((sr for sr in specialist_results if sr.get("is_arbitration")), None)
+            _persist_agent_conclusions(
+                conversation_id, message_id, query,
+                specialist_results, _arb_final, trace_id=trace_id,
+            )
+        except Exception as _e:
+            logger.warning(f"[P1-1] 结论持久化失败(终返回路径): {_e}")
     return {
         "answer": final_answer,
         "specialist_results": specialist_results,
@@ -2920,6 +3160,83 @@ def _inject_analysis_context(query: str) -> tuple:
     except Exception as e:
         logger.warning(f"[Bridge A] 分析结论注入失败（不阻塞主流程）: {e}")
         return query, ""
+
+
+# ── P1-2：跨对话结论定向复用（同标的命中后注入更强参考）──
+
+
+def _load_recent_conclusions(
+    target_subject: str,
+    hours: int = 24,
+    limit: int = 3,
+) -> str:
+    """加载指定标的在 N 小时内的历史分析结论，格式化为 markdown 上下文。
+
+    设计稿 P1-2：解决跨对话结论复用 — 同一基金/板块 24h 内二次提问时，
+    把历史结论作为强参考注入到 specialist 的 prebuilt_context，避免重复分析。
+
+    Args:
+        target_subject: 结论标的（基金代码或板块名）
+        hours: 时间窗口（小时）
+        limit: 最大返回条数
+
+    Returns:
+        markdown 格式的历史结论上下文，无匹配则返回空字符串
+    """
+    if not target_subject or target_subject == "整体组合":
+        return ""  # 整体组合太泛，不定向复用
+
+    try:
+        from db._conn import _get_conn
+        conn = _get_conn()
+        # LIKE 匹配 target_subject（双向：历史结论可能是 "161725" 或 "白酒"）
+        rows = conn.execute(
+            """SELECT id, source_type, target_subject, action, summary, reasoning,
+                      confidence, urgent, created_at
+               FROM analysis_conclusions
+               WHERE source_system = 'ai_dialogue'
+                 AND (target_subject = ? OR target_subject LIKE ? OR ? LIKE '%' || target_subject || '%')
+                 AND created_at >= datetime('now', 'localtime', ?)
+               ORDER BY urgent DESC, confidence DESC, created_at DESC
+               LIMIT ?""",
+            (target_subject, f"%{target_subject}%", target_subject, f"-{hours} hours", limit),
+        ).fetchall()
+        conn.close()
+
+        if not rows:
+            return ""
+
+        action_label = {
+            "buy": "买入", "increase": "加仓", "sell": "卖出",
+            "decrease": "减仓", "hold": "持有", "": "-",
+        }
+        lines = [
+            f"\n## 历史分析结论（{hours}h 内同标的，强参考）",
+            f"目标标的: **{target_subject}**",
+            "",
+        ]
+        for r in rows:
+            action = action_label.get((r["action"] or "").lower(), r["action"] or "-")
+            conf = r["confidence"] or 0
+            urgent_tag = " ⚠️高优" if r["urgent"] else ""
+            source = r["source_type"] or ""
+            summary = (r["summary"] or "")[:120]
+            created = (r["created_at"] or "")[:16]
+            lines.append(
+                f"- [{action}] (置信度 {conf:.0%}{urgent_tag}) {summary}"
+            )
+            lines.append(f"  - 来源: {source} | 时间: {created}")
+            if r["reasoning"]:
+                lines.append(f"  - 理由: {r['reasoning'][:100]}")
+
+        lines.append(
+            "\n（注：以上为对该标的的历史分析结论。如市场环境未显著变化，"
+            "可在其基础上深化；如已发生变化，应明确指出变化点。）"
+        )
+        return "\n".join(lines) + "\n\n"
+    except Exception as e:
+        logger.warning(f"[P1-2] _load_recent_conclusions 失败: {e}")
+        return ""
 
 
 def _stream_precheck(query: str, history: list, rag_context: str, cancel_event: threading.Event | None, resume_from: dict | None):
@@ -3180,6 +3497,19 @@ def _stream_build_context(refined_query: str, rag_context: str, complexity: str,
             system_content += f"\n\n{analysis_ctx}"
         except Exception:
             pass
+
+    # P1-2：跨对话结论定向复用（同标的命中时注入更强参考，默认关闭）
+    try:
+        from db.config import get_config_bool, get_config_int
+        if get_config_bool("agent.reuse_recent_conclusions", False):
+            _target = _extract_target_subject(refined_query or query, "")
+            _hours = get_config_int("agent.reuse_conclusions_hours", 24)
+            _reuse_ctx = _load_recent_conclusions(_target, hours=_hours, limit=3)
+            if _reuse_ctx:
+                prebuilt_context += _reuse_ctx
+                logger.info(f"[P1-2] 注入同标的历史结论: target={_target}")
+    except Exception as _e:
+        logger.warning(f"[P1-2] 跨对话复用注入失败（不阻塞主流程）: {_e}")
 
     # 注入 RAG 知识库上下文到 prebuilt_context
     if rag_context:
@@ -3637,6 +3967,15 @@ def _stream_final_synthesis(query: str, refined_query: str, specialists: list,
             "cache_stats": expert_cache.stats,
             "validator": validator_result if 'validator_result' in locals() else {"enabled": False},
         })
+        # P1-1：多智能体结论持久化（不阻塞主流程，失败仅 warning）
+        try:
+            _arb_stream = next((sr for sr in specialist_results if sr.get("is_arbitration")), None)
+            _persist_agent_conclusions(
+                conversation_id, message_id, query,
+                specialist_results, _arb_stream, trace_id=trace_id,
+            )
+        except Exception as _e:
+            logger.warning(f"[P1-1] 流式结论持久化失败: {_e}")
 
     yield {
         "type": "answer",

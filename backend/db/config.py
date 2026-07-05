@@ -149,6 +149,16 @@ DEFAULT_CONFIGS = [
     ('max_specialists.simple', '1', '简单任务最大专家数', 'orchestrator'),
     ('max_specialists.medium', '2', '中等任务最大专家数', 'orchestrator'),
     ('max_specialists.complex', '4', '复杂任务最大专家数', 'orchestrator'),
+
+    # P1-1/P1-2/P1-3：多智能体结论价值最大化
+    ('agent.persist_conclusions', 'true', '是否持久化多智能体结论到 analysis_conclusions', 'agent'),
+    ('agent.reuse_recent_conclusions', 'false', '是否跨对话复用 24h 内同标的结论（默认关闭，会改变专家 prompt）', 'agent'),
+    ('agent.reuse_conclusions_hours', '24', '结论复用时间窗口（小时）', 'agent'),
+    ('agent.link_cross_system_refs', 'true', '是否激活 cross_system_references 桥接（链接结论到已接受决策）', 'agent'),
+
+    # P2-1：长对话超时保护
+    ('conversation.warn_at_minutes', '5', '长对话警告阈值（分钟）', 'conversation'),
+    ('conversation.abort_at_minutes', '8', '长对话硬收尾阈值（分钟）', 'conversation'),
 ]
 
 
@@ -193,6 +203,17 @@ def get_config_float(key: str, default: float = 0.0) -> float:
         return float(val)
     except (ValueError, TypeError):
         return default
+
+
+def get_config_bool(key: str, default: bool = False) -> bool:
+    """获取布尔配置值。
+
+    接受字符串：'true'/'1'/'yes'/'on'（不区分大小写）→ True，其余 → False。
+    """
+    val = get_config(key, str(default).lower())
+    if not val:
+        return default
+    return str(val).strip().lower() in ("true", "1", "yes", "on")
 
 
 def get_config_list(key: str, default: list[str] | None = None) -> list[str]:
