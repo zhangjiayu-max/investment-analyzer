@@ -316,6 +316,13 @@ async def startup():
     # 后台每日清理（启动回填 + 每天凌晨 3 点：决策过期 + 结论清理，P0-4.1/3.3）
     asyncio.create_task(_auto_daily_cleanup())
 
+    # 后台每周预警准确性回测（每周一 02:00，纯本地计算，P2-4.3）
+    if get_config("alert.auto_weekly_backtest", "true") == "true":
+        asyncio.create_task(_auto_weekly_alert_backtest())
+        logging.info("每周预警准确性回测任务已启动（alert.auto_weekly_backtest=true）")
+    else:
+        logging.info("每周预警准确性回测已关闭（alert.auto_weekly_backtest=false）")
+
     # 后台每日评测 Pipeline（LLM 调用，默认关闭）
     if get_config("llm_cost.auto_daily_eval", "false") == "true":
         asyncio.create_task(_auto_daily_eval())
@@ -451,6 +458,44 @@ async def _auto_daily_cleanup():
                 logging.warning(f"[auto-cleanup] 清理任务异常: {e}")
     except Exception as e:
         logging.warning(f"自动清理任务异常: {e}")
+
+
+async def _auto_weekly_alert_backtest():
+    """P2-4.3: 每周一 02:00 回测上周预警准确性。
+
+    纯本地 SQLite 计算（0 LLM、0 MCP、0 akshare），为预警阈值调整提供数据支撑。
+    配置开关：alert.auto_weekly_backtest（默认 true）。
+    """
+    import time
+    try:
+        await asyncio.sleep(60)  # 等启动完成
+
+        while True:
+            now = time.localtime()
+            # 计算到下一个周一 02:00 的等待秒数
+            days_until_mon = (7 - now.tm_wday) % 7  # tm_wday: 0=周一
+            if days_until_mon == 0 and now.tm_hour >= 2:
+                days_until_mon = 7
+            target_ts = time.mktime((
+                now.tm_year, now.tm_mon, now.tm_mday + days_until_mon,
+                2, 0, 0, 0, 0, -1,
+            ))
+            wait_seconds = target_ts - time.time()
+            await asyncio.sleep(max(wait_seconds, 60))
+
+            try:
+                from services.alert_accuracy_backtest import backtest_alert_accuracy
+                # 回测上周（自动取上周一）
+                result = backtest_alert_accuracy()
+                logging.info(
+                    f"[auto-backtest] 预警准确性回测完成: "
+                    f"week={result.get('week_start')} alerts={result.get('alert_count')} "
+                    f"groups={len(result.get('stat_groups', []))}"
+                )
+            except Exception as e:
+                logging.warning(f"[auto-backtest] 预警准确性回测异常: {e}")
+    except Exception as e:
+        logging.warning(f"每周预警回测任务异常: {e}")
 
 
 async def _auto_daily_eval():

@@ -667,6 +667,37 @@ async def scan_portfolio_alerts():
     return {"ok": True, "generated": generated}
 
 
+# ── P2-4.3: 预警准确性回测 API ──────────────────────────────
+
+
+@router.get("/api/portfolio/alerts/accuracy-stats")
+async def get_alert_accuracy_stats_api(weeks: int = 4):
+    """查询预警准确性回测统计。
+
+    参数:
+        weeks: 查询最近 N 周（默认 4）
+    """
+    from services.alert_accuracy_backtest import get_alert_accuracy_stats
+    stats = get_alert_accuracy_stats(weeks=weeks)
+    return {"stats": stats}
+
+
+@router.post("/api/portfolio/alerts/backtest")
+async def backtest_alert_accuracy_api(week_start: str = None):
+    """手动触发预警准确性回测。
+
+    参数:
+        week_start: 周一日期（YYYY-MM-DD），不传则回测上周
+    """
+    from services.alert_accuracy_backtest import backtest_alert_accuracy
+    try:
+        result = backtest_alert_accuracy(week_start=week_start)
+        return {"ok": True, **result}
+    except Exception as e:
+        logger.error(f"预警准确性回测失败: {e}", exc_info=True)
+        raise HTTPException(500, f"回测失败: {e}")
+
+
 # ── 交易标签 API ──────────────────────────────────────────
 
 

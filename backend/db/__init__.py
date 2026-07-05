@@ -590,6 +590,23 @@ def init_db():
     conn.execute("CREATE INDEX IF NOT EXISTS idx_alerts_user ON portfolio_alerts(user_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_alerts_read ON portfolio_alerts(is_read)")
 
+    # P2-4.3: 预警准确性回测统计表（每周一回测上周预警的实际走势）
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS alert_accuracy_stats (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            alert_type TEXT NOT NULL,
+            severity TEXT NOT NULL,
+            week_start TEXT NOT NULL,
+            sample_count INTEGER DEFAULT 0,
+            avg_followup_change REAL DEFAULT 0,
+            win_rate REAL DEFAULT 0,
+            median_change REAL DEFAULT 0,
+            created_at TEXT DEFAULT (datetime('now','localtime'))
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_alert_stats_week ON alert_accuracy_stats(week_start)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_alert_stats_type ON alert_accuracy_stats(alert_type, severity)")
+
     conn.execute("""
         CREATE TABLE IF NOT EXISTS portfolio_cash (
             id INTEGER PRIMARY KEY AUTOINCREMENT,

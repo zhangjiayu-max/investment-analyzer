@@ -106,6 +106,7 @@ import {
   listRecommendationCandidates, listDecisions, listDueDecisionReviews,
   createDecisionFromAction, runWhatIf,
   patrolWatchlist, getBuyScore,
+  dailyAdviceAPI,
 } from '../api'
 import { useToast } from '../composables/useToast'
 import ConfirmDialog from './ConfirmDialog.vue'
@@ -918,6 +919,9 @@ async function submitNewBuy() {
   const f = newBuyForm.value
   if (!f.fund_code.trim()) { showToast('请输入基金代码', 'error'); return }
   if (f.amount <= 0) { showToast('买入金额必须大于 0', 'error'); return }
+  // P2-4.2: 检查 pending_tx blocked 状态
+  const allowed = await checkBlockedBeforeBuy(f.fund_code.trim(), f.fund_name || f.fund_code.trim())
+  if (!allowed) { showToast('已取消买入', 'info'); return }
   try {
     await createPortfolioTransaction({
       fund_code: f.fund_code.trim(),
@@ -1295,7 +1299,49 @@ function showToast(message, type = 'success') {
 }
 
 // Confirm dialog
-const confirm = ref({ visible: false, title: '', message: '', danger: false, onConfirm: null })
+const confirm = ref({ visible: false, title: '', message: '', danger: false, onConfirm: null, onCancel: null })
+
+// P2-4.2: 买入前检查 pending_tx blocked 状态
+// 如果该基金有未确认交易（blocked 状态），弹窗二次确认
+async function checkBlockedBeforeBuy(fundCode, fundName) {
+  try {
+    const { data } = await dailyAdviceAPI.getSignals()
+    const signals = data?.signals || []
+    const blockedSig = signals.find(s =>
+      s.target_code === fundCode &&
+      s.severity === 'blocked' &&
+      s.signal_type === 'pending_tx'
+    )
+    if (!blockedSig) return true  // 无 blocked 信号，放行
+
+    // 有 blocked 信号，弹窗二次确认
+    return new Promise((resolve) => {
+      confirm.value = {
+        visible: true,
+        title: '⚠️ 系统建议暂不操作',
+        message: `${fundName || fundCode} 有未确认交易（${blockedSig.summary || '系统建议等待确认后再操作'}）\n\n确认要继续买入吗？`,
+        danger: true,
+        onConfirm: () => resolve(true),
+        onCancel: () => resolve(false),
+      }
+    })
+  } catch (e) {
+    console.warn('检查 blocked 状态失败:', e)
+    return true  // 查询失败不阻塞操作
+  }
+}
+
+// 统一处理 confirm dialog 的确认/取消
+function handleConfirm() {
+  const cb = confirm.value.onConfirm
+  confirm.value.visible = false
+  if (cb) cb()
+}
+function handleCancel() {
+  const cb = confirm.value.onCancel
+  confirm.value.visible = false
+  if (cb) cb()
+}
 
 // Form
 const form = ref({
@@ -2896,6 +2942,9 @@ async function submitAddPurchase() {
     return
   }
   const h = addPurchaseHolding.value
+  // P2-4.2: 检查 pending_tx blocked 状态
+  const allowed = await checkBlockedBeforeBuy(h.fund_code, h.fund_name || h.fund_code)
+  if (!allowed) { showToast('已取消买入', 'info'); return }
   try {
     const { data: txResult } = await createPortfolioTransaction({
       fund_code: h.fund_code,
@@ -5611,8 +5660,8 @@ function txDisplayAmount(tx) {
       :title="confirm.title"
       :message="confirm.message"
       :danger="confirm.danger"
-      @confirm="confirm.onConfirm"
-      @cancel="confirm.visible = false"
+      @confirm="handleConfirm"
+      @cancel="handleCancel"
     />
 
     <!-- Feedback Note Dialog -->
