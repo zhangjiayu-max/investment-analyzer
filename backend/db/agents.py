@@ -469,68 +469,53 @@ def _init_wealth_specialists(conn):
 # ── Agent CRUD ──────────────────────────────────────
 
 def list_agents() -> list[dict]:
-    try:
-        """列出所有 Agent。"""
-        conn = _get_conn()
-        rows = conn.execute("SELECT * FROM agents ORDER BY is_preset DESC, id").fetchall()
-        conn.close()
-        return [dict(r) for r in rows]
-    finally:
-        conn.close()
+    """列出所有 Agent。"""
+    conn = _get_conn()
+    rows = conn.execute("SELECT * FROM agents ORDER BY is_preset DESC, id").fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
 
 
 def get_agent(agent_id: int) -> dict | None:
-    try:
-        """获取单个 Agent。"""
-        conn = _get_conn()
-        row = conn.execute("SELECT * FROM agents WHERE id = ?", (agent_id,)).fetchone()
-        conn.close()
-        return dict(row) if row else None
-    finally:
-        conn.close()
+    """获取单个 Agent。"""
+    conn = _get_conn()
+    row = conn.execute("SELECT * FROM agents WHERE id = ?", (agent_id,)).fetchone()
+    conn.close()
+    return dict(row) if row else None
 
 
 def create_agent(name: str, system_prompt: str, description: str = "",
                  knowledge_scope: str = "", icon: str = "robot") -> int:
-    try:
-        """创建自定义 Agent。"""
-        conn = _get_conn()
-        cur = conn.execute(
-            "INSERT INTO agents (name, description, system_prompt, knowledge_scope, icon) VALUES (?, ?, ?, ?, ?)",
-            (name, description, system_prompt, knowledge_scope, icon),
-        )
-        agent_id = cur.lastrowid
-        conn.commit()
-        conn.close()
-        return agent_id
-    finally:
-        conn.close()
+    """创建自定义 Agent。"""
+    conn = _get_conn()
+    cur = conn.execute(
+        "INSERT INTO agents (name, description, system_prompt, knowledge_scope, icon) VALUES (?, ?, ?, ?, ?)",
+        (name, description, system_prompt, knowledge_scope, icon),
+    )
+    agent_id = cur.lastrowid
+    conn.commit()
+    conn.close()
+    return agent_id
 
 
 def update_agent(agent_id: int, **fields):
-    try:
-        """更新 Agent 字段。"""
-        if not fields:
-            return
-        conn = _get_conn()
-        set_clause = ", ".join(f"{k} = ?" for k in fields)
-        values = list(fields.values()) + [agent_id]
-        conn.execute(f"UPDATE agents SET {set_clause} WHERE id = ?", values)
-        conn.commit()
-        conn.close()
-    finally:
-        conn.close()
+    """更新 Agent 字段。"""
+    if not fields:
+        return
+    conn = _get_conn()
+    set_clause = ", ".join(f"{k} = ?" for k in fields)
+    values = list(fields.values()) + [agent_id]
+    conn.execute(f"UPDATE agents SET {set_clause} WHERE id = ?", values)
+    conn.commit()
+    conn.close()
 
 
 def delete_agent(agent_id: int):
-    try:
-        """删除 Agent（仅限非预设）。"""
-        conn = _get_conn()
-        conn.execute("DELETE FROM agents WHERE id = ? AND is_preset = 0", (agent_id,))
-        conn.commit()
-        conn.close()
-    finally:
-        conn.close()
+    """删除 Agent（仅限非预设）。"""
+    conn = _get_conn()
+    conn.execute("DELETE FROM agents WHERE id = ? AND is_preset = 0", (agent_id,))
+    conn.commit()
+    conn.close()
 
 
 # ── 编排专家 Agent 加载（带缓存） ──────────────────────────────
@@ -544,46 +529,43 @@ _SPECIALIST_CACHE_TTL = 60  # 秒
 
 
 def load_specialist_agents() -> dict:
-    try:
-        """从数据库加载所有编排专家 Agent，返回 {agent_key: {name, icon, description, tools, system_prompt}}。
+    """从数据库加载所有编排专家 Agent，返回 {agent_key: {name, icon, description, tools, system_prompt}}。
 
-        带 60 秒内存缓存，避免每次请求都查库。
-        """
-        global _specialist_cache, _specialist_cache_ts
-        if _specialist_cache is not None and (_time.time() - _specialist_cache_ts) < _SPECIALIST_CACHE_TTL:
-            return _specialist_cache
+    带 60 秒内存缓存，避免每次请求都查库。
+    """
+    global _specialist_cache, _specialist_cache_ts
+    if _specialist_cache is not None and (_time.time() - _specialist_cache_ts) < _SPECIALIST_CACHE_TTL:
+        return _specialist_cache
 
-        conn = _get_conn()
-        rows = conn.execute(
-            "SELECT agent_key, name, icon, description, tools, system_prompt FROM agents WHERE is_specialist = 1"
-        ).fetchall()
-        conn.close()
+    conn = _get_conn()
+    rows = conn.execute(
+        "SELECT agent_key, name, icon, description, tools, system_prompt FROM agents WHERE is_specialist = 1"
+    ).fetchall()
+    conn.close()
 
-        # 文字 icon → emoji 映射（与前端 getAgentIcon 保持一致）
-        _icon_map = {
-            "chart": "📊", "research": "🔍", "shield": "🛡️", "pie": "🥧",
-            "robot": "🤖", "newspaper": "📰", "search": "🔍", "bull": "🐂",
+    # 文字 icon → emoji 映射（与前端 getAgentIcon 保持一致）
+    _icon_map = {
+        "chart": "📊", "research": "🔍", "shield": "🛡️", "pie": "🥧",
+        "robot": "🤖", "newspaper": "📰", "search": "🔍", "bull": "🐂",
+    }
+
+    result = {}
+    for r in rows:
+        tools = _json.loads(r["tools"]) if r["tools"] else []
+        raw_icon = r["icon"] or "robot"
+        emoji_icon = _icon_map.get(raw_icon, raw_icon)
+        # 如果已经是 emoji（不在 map 中），直接使用
+        result[r["agent_key"]] = {
+            "name": r["name"],
+            "icon": emoji_icon,
+            "description": r["description"] or "",
+            "tools": tools,
+            "system_prompt": r["system_prompt"],
         }
 
-        result = {}
-        for r in rows:
-            tools = _json.loads(r["tools"]) if r["tools"] else []
-            raw_icon = r["icon"] or "robot"
-            emoji_icon = _icon_map.get(raw_icon, raw_icon)
-            # 如果已经是 emoji（不在 map 中），直接使用
-            result[r["agent_key"]] = {
-                "name": r["name"],
-                "icon": emoji_icon,
-                "description": r["description"] or "",
-                "tools": tools,
-                "system_prompt": r["system_prompt"],
-            }
-
-        _specialist_cache = result
-        _specialist_cache_ts = _time.time()
-        return result
-    finally:
-        conn.close()
+    _specialist_cache = result
+    _specialist_cache_ts = _time.time()
+    return result
 
 
 def clear_specialist_cache():
@@ -597,52 +579,43 @@ def clear_specialist_cache():
 
 
 def save_prompt_version(agent_id: int, agent_type: str, system_prompt: str, conn=None):
-    try:
-        """保存当前提示词到版本历史（在更新 agent 前调用）。"""
-        own_conn = conn is None
-        if own_conn:
-            conn = _get_conn()
-        row = conn.execute(
-            "SELECT MAX(version) as max_ver FROM agent_prompt_versions WHERE agent_id = ? AND agent_type = ?",
-            (agent_id, agent_type)
-        ).fetchone()
-        next_ver = (row["max_ver"] or 0) + 1
-        conn.execute(
-            "INSERT INTO agent_prompt_versions (agent_id, agent_type, system_prompt, version) VALUES (?, ?, ?, ?)",
-            (agent_id, agent_type, system_prompt, next_ver)
-        )
-        if own_conn:
-            conn.commit()
-            conn.close()
-    finally:
+    """保存当前提示词到版本历史（在更新 agent 前调用）。"""
+    own_conn = conn is None
+    if own_conn:
+        conn = _get_conn()
+    row = conn.execute(
+        "SELECT MAX(version) as max_ver FROM agent_prompt_versions WHERE agent_id = ? AND agent_type = ?",
+        (agent_id, agent_type)
+    ).fetchone()
+    next_ver = (row["max_ver"] or 0) + 1
+    conn.execute(
+        "INSERT INTO agent_prompt_versions (agent_id, agent_type, system_prompt, version) VALUES (?, ?, ?, ?)",
+        (agent_id, agent_type, system_prompt, next_ver)
+    )
+    if own_conn:
+        conn.commit()
         conn.close()
 
 
 def list_prompt_versions(agent_id: int, agent_type: str = 'conversation') -> list[dict]:
-    try:
-        """列出某 Agent 的所有提示词版本，最新在前。"""
-        conn = _get_conn()
-        rows = conn.execute(
-            "SELECT * FROM agent_prompt_versions WHERE agent_id = ? AND agent_type = ? ORDER BY version DESC",
-            (agent_id, agent_type)
-        ).fetchall()
-        conn.close()
-        return [dict(r) for r in rows]
-    finally:
-        conn.close()
+    """列出某 Agent 的所有提示词版本，最新在前。"""
+    conn = _get_conn()
+    rows = conn.execute(
+        "SELECT * FROM agent_prompt_versions WHERE agent_id = ? AND agent_type = ? ORDER BY version DESC",
+        (agent_id, agent_type)
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
 
 
 def get_prompt_version(version_id: int) -> dict | None:
-    try:
-        """获取单个版本详情。"""
-        conn = _get_conn()
-        row = conn.execute(
-            "SELECT * FROM agent_prompt_versions WHERE id = ?", (version_id,)
-        ).fetchone()
-        conn.close()
-        return dict(row) if row else None
-    finally:
-        conn.close()
+    """获取单个版本详情。"""
+    conn = _get_conn()
+    row = conn.execute(
+        "SELECT * FROM agent_prompt_versions WHERE id = ?", (version_id,)
+    ).fetchone()
+    conn.close()
+    return dict(row) if row else None
 
 
 # ── Agent Runs ──────────────────────────────────────────
@@ -652,143 +625,118 @@ def create_agent_run(conversation_id: int, message_id: int, agent_key: str,
                      agent_name: str, query: str, result: str = "",
                      tool_calls: str = "", duration_ms: int = 0,
                      trace_id: str = "", status: str = "success") -> int:
-    try:
-        """记录一次专家 Agent 调用，返回 run_id。status: success / error / timeout。"""
-        conn = _get_conn()
-        cur = conn.execute("""
-            INSERT INTO agent_runs (conversation_id, message_id, agent_key, agent_name,
-                                    query, result, tool_calls, duration_ms, trace_id, status)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (conversation_id, message_id, agent_key, agent_name,
-              query, result, tool_calls, duration_ms, trace_id, status))
-        run_id = cur.lastrowid
-        conn.commit()
-        conn.close()
-        return run_id
-    finally:
-        conn.close()
+    """记录一次专家 Agent 调用，返回 run_id。status: success / error / timeout。"""
+    conn = _get_conn()
+    cur = conn.execute("""
+        INSERT INTO agent_runs (conversation_id, message_id, agent_key, agent_name,
+                                query, result, tool_calls, duration_ms, trace_id, status)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (conversation_id, message_id, agent_key, agent_name,
+          query, result, tool_calls, duration_ms, trace_id, status))
+    run_id = cur.lastrowid
+    conn.commit()
+    conn.close()
+    return run_id
 
 
 def create_pending_agent_run(conversation_id: int, message_id: int, agent_key: str,
                               agent_name: str, query: str = "", trace_id: str = "") -> int:
-    try:
-        """创建 pending 状态的 agent 执行记录，返回 run_id。"""
-        conn = _get_conn()
-        cur = conn.execute("""
-            INSERT INTO agent_runs (conversation_id, message_id, agent_key, agent_name,
-                                    query, trace_id, status)
-            VALUES (?, ?, ?, ?, ?, ?, 'pending')
-        """, (conversation_id, message_id, agent_key, agent_name, query, trace_id))
-        run_id = cur.lastrowid
-        conn.commit()
-        conn.close()
-        return run_id
-    finally:
-        conn.close()
+    """创建 pending 状态的 agent 执行记录，返回 run_id。"""
+    conn = _get_conn()
+    cur = conn.execute("""
+        INSERT INTO agent_runs (conversation_id, message_id, agent_key, agent_name,
+                                query, trace_id, status)
+        VALUES (?, ?, ?, ?, ?, ?, 'pending')
+    """, (conversation_id, message_id, agent_key, agent_name, query, trace_id))
+    run_id = cur.lastrowid
+    conn.commit()
+    conn.close()
+    return run_id
 
 
 def update_agent_run_status(run_id: int, status: str, result: str = None,
                              duration_ms: int = None, error_message: str = None):
-    try:
-        """更新 agent 执行记录状态。status: running / completed / failed / cancelled。"""
-        conn = _get_conn()
-        updates = ["status = ?"]
-        params = [status]
+    """更新 agent 执行记录状态。status: running / completed / failed / cancelled。"""
+    conn = _get_conn()
+    updates = ["status = ?"]
+    params = [status]
 
-        if result is not None:
-            updates.append("result = ?")
-            params.append(result)
-        if duration_ms is not None:
-            updates.append("duration_ms = ?")
-            params.append(duration_ms)
-        if status == "completed":
-            updates.append("completed_at = datetime('now','localtime')")
-        elif status == "running":
-            updates.append("started_at = datetime('now','localtime')")
+    if result is not None:
+        updates.append("result = ?")
+        params.append(result)
+    if duration_ms is not None:
+        updates.append("duration_ms = ?")
+        params.append(duration_ms)
+    if status == "completed":
+        updates.append("completed_at = datetime('now','localtime')")
+    elif status == "running":
+        updates.append("started_at = datetime('now','localtime')")
 
-        params.append(run_id)
-        conn.execute(f"UPDATE agent_runs SET {', '.join(updates)} WHERE id = ?", params)
-        conn.commit()
-        conn.close()
-    finally:
-        conn.close()
+    params.append(run_id)
+    conn.execute(f"UPDATE agent_runs SET {', '.join(updates)} WHERE id = ?", params)
+    conn.commit()
+    conn.close()
 
 
 def get_completed_agents_for_message(message_id: int) -> list[dict]:
-    try:
-        """获取某条消息下已完成的 agent 执行记录。"""
-        conn = _get_conn()
-        rows = conn.execute("""
-            SELECT agent_key, agent_name, result, duration_ms, tool_calls
-            FROM agent_runs
-            WHERE message_id = ? AND status IN ('completed', 'success')
-            ORDER BY id ASC
-        """, (message_id,)).fetchall()
-        conn.close()
-        return [dict(r) for r in rows]
-    finally:
-        conn.close()
+    """获取某条消息下已完成的 agent 执行记录。"""
+    conn = _get_conn()
+    rows = conn.execute("""
+        SELECT agent_key, agent_name, result, duration_ms, tool_calls
+        FROM agent_runs
+        WHERE message_id = ? AND status IN ('completed', 'success')
+        ORDER BY id ASC
+    """, (message_id,)).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
 
 
 def cancel_running_agents(message_id: int):
-    try:
-        """取消某条消息下所有 running/pending 状态的 agent。"""
-        conn = _get_conn()
-        conn.execute("""
-            UPDATE agent_runs SET status = 'cancelled'
-            WHERE message_id = ? AND status IN ('pending', 'running')
-        """, (message_id,))
-        conn.commit()
-        conn.close()
-    finally:
-        conn.close()
+    """取消某条消息下所有 running/pending 状态的 agent。"""
+    conn = _get_conn()
+    conn.execute("""
+        UPDATE agent_runs SET status = 'cancelled'
+        WHERE message_id = ? AND status IN ('pending', 'running')
+    """, (message_id,))
+    conn.commit()
+    conn.close()
 
 
 def get_agent_runs(conversation_id: int, limit: int = 50) -> list[dict]:
-    try:
-        """获取对话的专家 Agent 调用记录。"""
-        conn = _get_conn()
-        rows = conn.execute("""
-            SELECT * FROM agent_runs
-            WHERE conversation_id = ?
-            ORDER BY id DESC
-            LIMIT ?
-        """, (conversation_id, limit)).fetchall()
-        conn.close()
-        return [dict(r) for r in rows]
-    finally:
-        conn.close()
+    """获取对话的专家 Agent 调用记录。"""
+    conn = _get_conn()
+    rows = conn.execute("""
+        SELECT * FROM agent_runs
+        WHERE conversation_id = ?
+        ORDER BY id DESC
+        LIMIT ?
+    """, (conversation_id, limit)).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
 
 
 def get_running_agent_count(conversation_id: int) -> int:
-    try:
-        """获取对话中正在运行的 agent 数量（用于防重复发送）。
-        实际状态值: pending / running / completed / failed / success / error / cancelled
-        """
-        conn = _get_conn()
-        row = conn.execute("""
-            SELECT COUNT(*) as cnt FROM agent_runs
-            WHERE conversation_id = ? AND status IN ('pending', 'running')
-        """, (conversation_id,)).fetchone()
-        conn.close()
-        return row["cnt"] if row else 0
-    finally:
-        conn.close()
+    """获取对话中正在运行的 agent 数量（用于防重复发送）。
+    实际状态值: pending / running / completed / failed / success / error / cancelled
+    """
+    conn = _get_conn()
+    row = conn.execute("""
+        SELECT COUNT(*) as cnt FROM agent_runs
+        WHERE conversation_id = ? AND status IN ('pending', 'running')
+    """, (conversation_id,)).fetchone()
+    conn.close()
+    return row["cnt"] if row else 0
 
 
 def get_completed_agent_count_for_message(conversation_id: int, message_id: int) -> int:
-    try:
-        """检查某条消息（assistant）是否已有完成的 agent_runs（防重复编排）。
-        message_id 传入 assistant 消息的 id。
-        """
-        conn = _get_conn()
-        row = conn.execute("""
-            SELECT COUNT(*) as cnt FROM agent_runs
-            WHERE conversation_id = ? AND message_id = ? 
-            AND status IN ('completed', 'success')
-        """, (conversation_id, message_id)).fetchone()
-        conn.close()
-        return row["cnt"] if row else 0
-    finally:
-        conn.close()
-
+    """检查某条消息（assistant）是否已有完成的 agent_runs（防重复编排）。
+    message_id 传入 assistant 消息的 id。
+    """
+    conn = _get_conn()
+    row = conn.execute("""
+        SELECT COUNT(*) as cnt FROM agent_runs
+        WHERE conversation_id = ? AND message_id = ? 
+        AND status IN ('completed', 'success')
+    """, (conversation_id, message_id)).fetchone()
+    conn.close()
+    return row["cnt"] if row else 0

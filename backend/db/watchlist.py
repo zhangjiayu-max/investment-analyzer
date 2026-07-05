@@ -40,153 +40,135 @@ def add_to_watchlist(fund_code: str, fund_name: str,
 
 
 def get_watchlist_item(item_id: int) -> dict | None:
-    try:
-        """获取单条关注记录。"""
-        conn = _get_conn()
-        row = conn.execute("SELECT * FROM watchlist WHERE id = ?", (item_id,)).fetchone()
-        conn.close()
-        return dict(row) if row else None
-    finally:
-        conn.close()
+    """获取单条关注记录。"""
+    conn = _get_conn()
+    row = conn.execute("SELECT * FROM watchlist WHERE id = ?", (item_id,)).fetchone()
+    conn.close()
+    return dict(row) if row else None
 
 
 def get_watchlist_by_fund(fund_code: str, user_id: str = "default") -> dict | None:
-    try:
-        """根据基金代码查询关注记录。"""
-        conn = _get_conn()
-        row = conn.execute(
-            "SELECT * FROM watchlist WHERE fund_code = ? AND user_id = ?",
-            (fund_code, user_id),
-        ).fetchone()
-        conn.close()
-        return dict(row) if row else None
-    finally:
-        conn.close()
+    """根据基金代码查询关注记录。"""
+    conn = _get_conn()
+    row = conn.execute(
+        "SELECT * FROM watchlist WHERE fund_code = ? AND user_id = ?",
+        (fund_code, user_id),
+    ).fetchone()
+    conn.close()
+    return dict(row) if row else None
 
 
 def list_watchlist(user_id: str = "default", status: str = None,
                    category: str = None) -> list[dict]:
-    try:
-        """获取关注列表。可选按 status/category 筛选。"""
-        conn = _get_conn()
-        conditions = ["user_id = ?"]
-        params: list = [user_id]
-        if status:
-            conditions.append("status = ?")
-            params.append(status)
-        if category:
-            conditions.append("fund_category = ?")
-            params.append(category)
+    """获取关注列表。可选按 status/category 筛选。"""
+    conn = _get_conn()
+    conditions = ["user_id = ?"]
+    params: list = [user_id]
+    if status:
+        conditions.append("status = ?")
+        params.append(status)
+    if category:
+        conditions.append("fund_category = ?")
+        params.append(category)
 
-        where = " AND ".join(conditions)
-        rows = conn.execute(
-            f"SELECT * FROM watchlist WHERE {where} ORDER BY priority DESC, created_at DESC",
-            params,
-        ).fetchall()
-        conn.close()
-        return [dict(r) for r in rows]
-    finally:
-        conn.close()
+    where = " AND ".join(conditions)
+    rows = conn.execute(
+        f"SELECT * FROM watchlist WHERE {where} ORDER BY priority DESC, created_at DESC",
+        params,
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
 
 
 def update_watchlist_item(item_id: int, **fields) -> bool:
-    try:
-        """更新关注记录字段。"""
-        allowed = {
-            'fund_name', 'fund_category', 'index_code', 'index_name',
-            'target_price', 'target_percentile', 'notes', 'priority', 'status',
-            'current_nav', 'current_percentile', 'nav_updated_at',
-        }
-        invalid = set(fields.keys()) - allowed
-        if invalid:
-            raise ValueError(f"非法字段名: {invalid}")
-        if not fields:
-            return False
+    """更新关注记录字段。"""
+    allowed = {
+        'fund_name', 'fund_category', 'index_code', 'index_name',
+        'target_price', 'target_percentile', 'notes', 'priority', 'status',
+        'current_nav', 'current_percentile', 'nav_updated_at',
+    }
+    invalid = set(fields.keys()) - allowed
+    if invalid:
+        raise ValueError(f"非法字段名: {invalid}")
+    if not fields:
+        return False
 
-        fields["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        set_clause = ", ".join(f"{k} = ?" for k in fields)
-        values = list(fields.values()) + [item_id]
+    fields["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    set_clause = ", ".join(f"{k} = ?" for k in fields)
+    values = list(fields.values()) + [item_id]
 
-        conn = _get_conn()
-        cur = conn.execute(f"UPDATE watchlist SET {set_clause} WHERE id = ?", values)
-        conn.commit()
-        ok = cur.rowcount > 0
-        conn.close()
-        return ok
-    finally:
-        conn.close()
+    conn = _get_conn()
+    cur = conn.execute(f"UPDATE watchlist SET {set_clause} WHERE id = ?", values)
+    conn.commit()
+    ok = cur.rowcount > 0
+    conn.close()
+    return ok
 
 
 def remove_from_watchlist(item_id: int) -> bool:
-    try:
-        """从关注列表移除。"""
-        conn = _get_conn()
-        cur = conn.execute("DELETE FROM watchlist WHERE id = ?", (item_id,))
-        conn.commit()
-        ok = cur.rowcount > 0
-        conn.close()
-        return ok
-    finally:
-        conn.close()
+    """从关注列表移除。"""
+    conn = _get_conn()
+    cur = conn.execute("DELETE FROM watchlist WHERE id = ?", (item_id,))
+    conn.commit()
+    ok = cur.rowcount > 0
+    conn.close()
+    return ok
 
 
 def batch_add_to_watchlist(items: list[dict], user_id: str = "default") -> dict:
-    try:
-        """批量添加基金到关注列表。返回成功/失败统计。"""
-        from db.portfolio import classify_fund_category
-        conn = _get_conn()
-        added = 0
-        skipped = 0
-        errors = []
+    """批量添加基金到关注列表。返回成功/失败统计。"""
+    from db.portfolio import classify_fund_category
+    conn = _get_conn()
+    added = 0
+    skipped = 0
+    errors = []
 
-        for item in items:
-            fund_code = item.get("fund_code", "").strip()
-            fund_name = item.get("fund_name", "").strip()
-            if not fund_code or not fund_name:
-                errors.append(f"缺少基金代码或名称: {item}")
-                continue
+    for item in items:
+        fund_code = item.get("fund_code", "").strip()
+        fund_name = item.get("fund_name", "").strip()
+        if not fund_code or not fund_name:
+            errors.append(f"缺少基金代码或名称: {item}")
+            continue
 
-            # 查重：已在关注列表或已持仓
-            existing = conn.execute(
-                "SELECT id FROM watchlist WHERE user_id = ? AND fund_code = ?",
-                (user_id, fund_code),
-            ).fetchone()
-            if existing:
-                skipped += 1
-                continue
+        # 查重：已在关注列表或已持仓
+        existing = conn.execute(
+            "SELECT id FROM watchlist WHERE user_id = ? AND fund_code = ?",
+            (user_id, fund_code),
+        ).fetchone()
+        if existing:
+            skipped += 1
+            continue
 
-            # 查重：已在持仓中
-            held = conn.execute(
-                "SELECT id FROM portfolio_holdings WHERE user_id = ? AND fund_code = ?",
-                (user_id, fund_code),
-            ).fetchone()
-            if held:
-                skipped += 1
-                errors.append(f"{fund_name}({fund_code}) 已在持仓中")
-                continue
+        # 查重：已在持仓中
+        held = conn.execute(
+            "SELECT id FROM portfolio_holdings WHERE user_id = ? AND fund_code = ?",
+            (user_id, fund_code),
+        ).fetchone()
+        if held:
+            skipped += 1
+            errors.append(f"{fund_name}({fund_code}) 已在持仓中")
+            continue
 
-            try:
-                cat = item.get("fund_category") or classify_fund_category(fund_name, fund_code=fund_code)
-                conn.execute("""
-                    INSERT INTO watchlist
-                        (user_id, fund_code, fund_name, fund_category, index_code, index_name,
-                         target_price, target_percentile, notes, priority)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """, (
-                    user_id, fund_code, fund_name, cat,
-                    item.get("index_code"), item.get("index_name"),
-                    item.get("target_price"), item.get("target_percentile"),
-                    item.get("notes"), item.get("priority", 0),
-                ))
-                added += 1
-            except Exception as e:
-                errors.append(f"{fund_name}({fund_code}): {e}")
+        try:
+            cat = item.get("fund_category") or classify_fund_category(fund_name, fund_code=fund_code)
+            conn.execute("""
+                INSERT INTO watchlist
+                    (user_id, fund_code, fund_name, fund_category, index_code, index_name,
+                     target_price, target_percentile, notes, priority)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                user_id, fund_code, fund_name, cat,
+                item.get("index_code"), item.get("index_name"),
+                item.get("target_price"), item.get("target_percentile"),
+                item.get("notes"), item.get("priority", 0),
+            ))
+            added += 1
+        except Exception as e:
+            errors.append(f"{fund_name}({fund_code}): {e}")
 
-        conn.commit()
-        conn.close()
-        return {"added": added, "skipped": skipped, "errors": errors}
-    finally:
-        conn.close()
+    conn.commit()
+    conn.close()
+    return {"added": added, "skipped": skipped, "errors": errors}
 
 
 def refresh_watchlist_navs(user_id: str = "default") -> list[dict]:

@@ -34,6 +34,7 @@ def add_knowledge(category: str, title: str, content: str,
     finally:
         conn.close()
 
+
 def _parse_knowledge_row(row) -> dict:
     d = dict(row)
     for key in ("keywords", "limitations", "counterpoints"):
@@ -48,185 +49,170 @@ def _parse_knowledge_row(row) -> dict:
 
 
 def get_knowledge(knowledge_id: int) -> dict | None:
-    try:
-        """获取单条知识。"""
-        conn = _get_conn()
-        row = conn.execute("SELECT * FROM knowledge_base WHERE id = ?", (knowledge_id,)).fetchone()
-        conn.close()
-        if row:
-            return _parse_knowledge_row(row)
-        return None
-    finally:
-        conn.close()
+    """获取单条知识。"""
+    conn = _get_conn()
+    row = conn.execute("SELECT * FROM knowledge_base WHERE id = ?", (knowledge_id,)).fetchone()
+    conn.close()
+    if row:
+        return _parse_knowledge_row(row)
+    return None
 
 
 def search_knowledge(query: str, category: str = None, limit: int = 10) -> list[dict]:
+    """搜索知识库（FTS5 + 关键词匹配）。"""
+    conn = _get_conn()
+
+    # 先尝试 FTS5 搜索
     try:
-        """搜索知识库（FTS5 + 关键词匹配）。"""
-        conn = _get_conn()
+        if category:
+            rows = conn.execute("""
+                SELECT kb.* FROM knowledge_base kb
+                WHERE kb.category = ?
+                AND (kb.title LIKE ? OR kb.content LIKE ? OR kb.keywords LIKE ?)
+                ORDER BY kb.importance DESC
+                LIMIT ?
+            """, (category, f"%{query}%", f"%{query}%", f"%{query}%", limit)).fetchall()
+        else:
+            rows = conn.execute("""
+                SELECT * FROM knowledge_base
+                WHERE title LIKE ? OR content LIKE ? OR keywords LIKE ?
+                ORDER BY importance DESC
+                LIMIT ?
+            """, (f"%{query}%", f"%{query}%", f"%{query}%", limit)).fetchall()
+    except Exception:
+        rows = []
 
-        # 先尝试 FTS5 搜索
-        try:
-            if category:
-                rows = conn.execute("""
-                    SELECT kb.* FROM knowledge_base kb
-                    WHERE kb.category = ?
-                    AND (kb.title LIKE ? OR kb.content LIKE ? OR kb.keywords LIKE ?)
-                    ORDER BY kb.importance DESC
-                    LIMIT ?
-                """, (category, f"%{query}%", f"%{query}%", f"%{query}%", limit)).fetchall()
-            else:
-                rows = conn.execute("""
-                    SELECT * FROM knowledge_base
-                    WHERE title LIKE ? OR content LIKE ? OR keywords LIKE ?
-                    ORDER BY importance DESC
-                    LIMIT ?
-                """, (f"%{query}%", f"%{query}%", f"%{query}%", limit)).fetchall()
-        except Exception:
-            rows = []
+    conn.close()
 
-        conn.close()
-
-        results = []
-        for row in rows:
-            results.append(_parse_knowledge_row(row))
-        return results
-    finally:
-        conn.close()
+    results = []
+    for row in rows:
+        results.append(_parse_knowledge_row(row))
+    return results
 
 
 def list_knowledge(category: str = None, subcategory: str = None,
                    source: str = None, limit: int = 100) -> list[dict]:
-    try:
-        """列出知识条目。"""
-        conn = _get_conn()
+    """列出知识条目。"""
+    conn = _get_conn()
 
-        conditions = []
-        params = []
+    conditions = []
+    params = []
 
-        if category:
-            conditions.append("category = ?")
-            params.append(category)
-        if subcategory:
-            conditions.append("subcategory = ?")
-            params.append(subcategory)
-        if source:
-            conditions.append("source = ?")
-            params.append(source)
+    if category:
+        conditions.append("category = ?")
+        params.append(category)
+    if subcategory:
+        conditions.append("subcategory = ?")
+        params.append(subcategory)
+    if source:
+        conditions.append("source = ?")
+        params.append(source)
 
-        where = " AND ".join(conditions) if conditions else "1=1"
-        params.append(limit)
+    where = " AND ".join(conditions) if conditions else "1=1"
+    params.append(limit)
 
-        rows = conn.execute(f"""
-            SELECT * FROM knowledge_base
-            WHERE {where}
-            ORDER BY importance DESC, id ASC
-            LIMIT ?
-        """, params).fetchall()
+    rows = conn.execute(f"""
+        SELECT * FROM knowledge_base
+        WHERE {where}
+        ORDER BY importance DESC, id ASC
+        LIMIT ?
+    """, params).fetchall()
 
-        conn.close()
+    conn.close()
 
-        results = []
-        for row in rows:
-            results.append(_parse_knowledge_row(row))
-        return results
-    finally:
-        conn.close()
+    results = []
+    for row in rows:
+        results.append(_parse_knowledge_row(row))
+    return results
 
 
 def delete_knowledge(knowledge_id: int) -> bool:
-    try:
-        """删除知识条目，同步清理 FTS 索引和 ChromaDB。"""
-        conn = _get_conn()
-        # 先查询记录获取 category，用于清理索引
-        row = conn.execute("SELECT category FROM knowledge_base WHERE id = ?", (knowledge_id,)).fetchone()
-        if not row:
-            conn.close()
-            return False
-
-        category = row["category"]
-
-        # 删除 knowledge_base 记录
-        cur = conn.execute("DELETE FROM knowledge_base WHERE id = ?", (knowledge_id,))
-        conn.commit()
-        deleted = cur.rowcount > 0
+    """删除知识条目，同步清理 FTS 索引和 ChromaDB。"""
+    conn = _get_conn()
+    # 先查询记录获取 category，用于清理索引
+    row = conn.execute("SELECT category FROM knowledge_base WHERE id = ?", (knowledge_id,)).fetchone()
+    if not row:
         conn.close()
+        return False
 
-        if deleted:
-            # 同步删除 FTS 索引
-            try:
-                from services.rag import _get_conn as _get_rag_conn
-                rag_conn = _get_rag_conn()
-                rag_conn.execute(
-                    "DELETE FROM knowledge_fts WHERE content_type = ? AND reference_id = ?",
-                    (category, str(knowledge_id))
-                )
-                rag_conn.commit()
-                rag_conn.close()
-            except Exception as e:
-                logger.warning(f"删除 FTS 索引失败 (id={knowledge_id}): {e}")
+    category = row["category"]
 
-            # 同步删除 ChromaDB
-            try:
-                from services.rag import delete_chroma_by_filter
-                delete_chroma_by_filter(category, reference_id=str(knowledge_id))
-            except Exception as e:
-                logger.warning(f"删除 ChromaDB 失败 (id={knowledge_id}): {e}")
+    # 删除 knowledge_base 记录
+    cur = conn.execute("DELETE FROM knowledge_base WHERE id = ?", (knowledge_id,))
+    conn.commit()
+    deleted = cur.rowcount > 0
+    conn.close()
 
-        return deleted
-    finally:
-        conn.close()
+    if deleted:
+        # 同步删除 FTS 索引
+        try:
+            from services.rag import _get_conn as _get_rag_conn
+            rag_conn = _get_rag_conn()
+            rag_conn.execute(
+                "DELETE FROM knowledge_fts WHERE content_type = ? AND reference_id = ?",
+                (category, str(knowledge_id))
+            )
+            rag_conn.commit()
+            rag_conn.close()
+        except Exception as e:
+            logger.warning(f"删除 FTS 索引失败 (id={knowledge_id}): {e}")
+
+        # 同步删除 ChromaDB
+        try:
+            from services.rag import delete_chroma_by_filter
+            delete_chroma_by_filter(category, reference_id=str(knowledge_id))
+        except Exception as e:
+            logger.warning(f"删除 ChromaDB 失败 (id={knowledge_id}): {e}")
+
+    return deleted
 
 
 def delete_knowledge_by_source(source: str) -> int:
-    try:
-        """按来源（书名）批量删除知识条目，同步清理 FTS 索引和 ChromaDB。返回删除数量。"""
-        conn = _get_conn()
+    """按来源（书名）批量删除知识条目，同步清理 FTS 索引和 ChromaDB。返回删除数量。"""
+    conn = _get_conn()
 
-        # 先查询所有要删除的 ID
-        rows = conn.execute(
-            "SELECT id, category FROM knowledge_base WHERE source = ?", (source,)
-        ).fetchall()
+    # 先查询所有要删除的 ID
+    rows = conn.execute(
+        "SELECT id, category FROM knowledge_base WHERE source = ?", (source,)
+    ).fetchall()
 
-        if not rows:
-            conn.close()
-            return 0
-
-        # 收集要删除的 ID 和类型
-        ids_to_delete = [(row["id"], row["category"]) for row in rows]
-
-        # 删除 knowledge_base 记录
-        cur = conn.execute("DELETE FROM knowledge_base WHERE source = ?", (source,))
-        conn.commit()
-        count = cur.rowcount
+    if not rows:
         conn.close()
+        return 0
 
-        if count > 0:
-            # 同步删除 FTS 索引
-            try:
-                from services.rag import _get_conn as _get_rag_conn
-                rag_conn = _get_rag_conn()
-                for kid, category in ids_to_delete:
-                    rag_conn.execute(
-                        "DELETE FROM knowledge_fts WHERE content_type = ? AND reference_id = ?",
-                        (category, str(kid))
-                    )
-                rag_conn.commit()
-                rag_conn.close()
-            except Exception as e:
-                logger.warning(f"批量删除 FTS 索引失败 (source={source}): {e}")
+    # 收集要删除的 ID 和类型
+    ids_to_delete = [(row["id"], row["category"]) for row in rows]
 
-            # 同步删除 ChromaDB
-            try:
-                from services.rag import delete_chroma_by_filter
-                for kid, category in ids_to_delete:
-                    delete_chroma_by_filter(category, reference_id=str(kid))
-            except Exception as e:
-                logger.warning(f"批量删除 ChromaDB 失败 (source={source}): {e}")
+    # 删除 knowledge_base 记录
+    cur = conn.execute("DELETE FROM knowledge_base WHERE source = ?", (source,))
+    conn.commit()
+    count = cur.rowcount
+    conn.close()
 
-        return count
-    finally:
-        conn.close()
+    if count > 0:
+        # 同步删除 FTS 索引
+        try:
+            from services.rag import _get_conn as _get_rag_conn
+            rag_conn = _get_rag_conn()
+            for kid, category in ids_to_delete:
+                rag_conn.execute(
+                    "DELETE FROM knowledge_fts WHERE content_type = ? AND reference_id = ?",
+                    (category, str(kid))
+                )
+            rag_conn.commit()
+            rag_conn.close()
+        except Exception as e:
+            logger.warning(f"批量删除 FTS 索引失败 (source={source}): {e}")
+
+        # 同步删除 ChromaDB
+        try:
+            from services.rag import delete_chroma_by_filter
+            for kid, category in ids_to_delete:
+                delete_chroma_by_filter(category, reference_id=str(kid))
+        except Exception as e:
+            logger.warning(f"批量删除 ChromaDB 失败 (source={source}): {e}")
+
+    return count
 
 
 def cleanup_orphan_fts_records() -> dict:
@@ -275,58 +261,52 @@ def cleanup_orphan_fts_records() -> dict:
 
 
 def list_knowledge_books() -> list[dict]:
-    try:
-        """列出已蒸馏的书籍及其知识点数量。"""
-        conn = _get_conn()
-        rows = conn.execute("""
-            SELECT source, COUNT(*) as count,
-                   MIN(created_at) as first_created,
-                   MAX(created_at) as last_created
-            FROM knowledge_base
-            WHERE category = 'book' AND source IS NOT NULL AND source != ''
-            GROUP BY source
-            ORDER BY count DESC
-        """).fetchall()
-        conn.close()
-        return [dict(row) for row in rows]
-    finally:
-        conn.close()
+    """列出已蒸馏的书籍及其知识点数量。"""
+    conn = _get_conn()
+    rows = conn.execute("""
+        SELECT source, COUNT(*) as count,
+               MIN(created_at) as first_created,
+               MAX(created_at) as last_created
+        FROM knowledge_base
+        WHERE category = 'book' AND source IS NOT NULL AND source != ''
+        GROUP BY source
+        ORDER BY count DESC
+    """).fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
 
 
 def get_knowledge_stats() -> dict:
-    try:
-        """获取知识库统计信息。"""
-        conn = _get_conn()
+    """获取知识库统计信息。"""
+    conn = _get_conn()
 
-        total = conn.execute("SELECT COUNT(*) FROM knowledge_base").fetchone()[0]
+    total = conn.execute("SELECT COUNT(*) FROM knowledge_base").fetchone()[0]
 
-        categories = conn.execute("""
-            SELECT category, COUNT(*) as count
-            FROM knowledge_base
-            GROUP BY category
-            ORDER BY count DESC
-        """).fetchall()
+    categories = conn.execute("""
+        SELECT category, COUNT(*) as count
+        FROM knowledge_base
+        GROUP BY category
+        ORDER BY count DESC
+    """).fetchall()
 
-        subcategories = conn.execute("""
-            SELECT category, subcategory, COUNT(*) as count
-            FROM knowledge_base
-            WHERE subcategory IS NOT NULL
-            GROUP BY category, subcategory
-            ORDER BY count DESC
-        """).fetchall()
+    subcategories = conn.execute("""
+        SELECT category, subcategory, COUNT(*) as count
+        FROM knowledge_base
+        WHERE subcategory IS NOT NULL
+        GROUP BY category, subcategory
+        ORDER BY count DESC
+    """).fetchall()
 
-        conn.close()
+    conn.close()
 
-        return {
-            "total": total,
-            "categories": {row["category"]: row["count"] for row in categories},
-            "subcategories": [
-                {"category": row["category"], "subcategory": row["subcategory"], "count": row["count"]}
-                for row in subcategories
-            ]
-        }
-    finally:
-        conn.close()
+    return {
+        "total": total,
+        "categories": {row["category"]: row["count"] for row in categories},
+        "subcategories": [
+            {"category": row["category"], "subcategory": row["subcategory"], "count": row["count"]}
+            for row in subcategories
+        ]
+    }
 
 
 def get_lessons_for_target(target_code: str, limit: int = 5) -> list[dict]:
@@ -343,6 +323,7 @@ def get_lessons_for_target(target_code: str, limit: int = 5) -> list[dict]:
         return [_parse_knowledge_row(row) for row in rows]
     finally:
         conn.close()
+
 
 def get_knowledge_feedback_stats() -> dict:
     """知识反馈统计。"""
@@ -374,6 +355,7 @@ def get_knowledge_feedback_stats() -> dict:
     finally:
         conn.close()
 
+
 def update_knowledge_usefulness(knowledge_id: int, helpful: bool):
     """更新知识条目的有用性分数。"""
     conn = _get_conn()
@@ -397,6 +379,7 @@ def update_knowledge_usefulness(knowledge_id: int, helpful: bool):
         conn.commit()
     finally:
         conn.close()
+
 
 def get_knowledge_usefulness(knowledge_id: int) -> int:
     """获取知识条目的有用性分数。"""

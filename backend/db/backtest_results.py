@@ -46,9 +46,9 @@ def save_backtest(
     notes: str = "",
     user_id: str = "default",
 ) -> int:
+    """保存回测结果，返回 id。"""
+    conn = _get_conn()
     try:
-        """保存回测结果，返回 id。"""
-        conn = _get_conn()
         cursor = conn.execute("""
             INSERT INTO backtest_results
                 (user_id, name, target_code, target_type, strategy, params_json,
@@ -77,9 +77,9 @@ def save_backtest(
 
 
 def list_backtests(limit: int = 20, user_id: str = "default") -> list[dict]:
+    """列出历史回测。"""
+    conn = _get_conn()
     try:
-        """列出历史回测。"""
-        conn = _get_conn()
         rows = conn.execute("""
             SELECT id, name, target_code, target_type, strategy,
                    initial_cash, final_value, total_return, annual_return,
@@ -96,9 +96,9 @@ def list_backtests(limit: int = 20, user_id: str = "default") -> list[dict]:
 
 
 def get_backtest(backtest_id: int) -> dict | None:
+    """获取单条回测结果（含净值曲线）。"""
+    conn = _get_conn()
     try:
-        """获取单条回测结果（含净值曲线）。"""
-        conn = _get_conn()
         row = conn.execute("""
             SELECT * FROM backtest_results WHERE id = ?
         """, (backtest_id,)).fetchone()
@@ -113,9 +113,9 @@ def get_backtest(backtest_id: int) -> dict | None:
 
 
 def delete_backtest(backtest_id: int) -> bool:
+    """删除回测记录。"""
+    conn = _get_conn()
     try:
-        """删除回测记录。"""
-        conn = _get_conn()
         cursor = conn.execute("DELETE FROM backtest_results WHERE id = ?", (backtest_id,))
         conn.commit()
         return cursor.rowcount > 0
@@ -124,9 +124,9 @@ def delete_backtest(backtest_id: int) -> bool:
 
 
 def link_backtest_to_decision(backtest_id: int, decision_id: int) -> bool:
+    """关联回测到决策。"""
+    conn = _get_conn()
     try:
-        """关联回测到决策。"""
-        conn = _get_conn()
         cursor = conn.execute("""
             UPDATE backtest_results SET decision_id = ? WHERE id = ?
         """, (decision_id, backtest_id))
@@ -134,4 +134,3 @@ def link_backtest_to_decision(backtest_id: int, decision_id: int) -> bool:
         return cursor.rowcount > 0
     finally:
         conn.close()
-

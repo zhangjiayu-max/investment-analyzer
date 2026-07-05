@@ -41,84 +41,65 @@ def save_health_score(score_date: str, total_score: int,
                       score_valuation: int, score_behavior: int,
                       score_risk: int, advice: list = None,
                       detail: dict = None) -> int:
-    try:
-        conn = _get_conn()
-        conn.execute("""
-            INSERT OR REPLACE INTO health_scores
-            (score_date, total_score, score_quality, score_diversification,
-             score_valuation, score_behavior, score_risk, advice_json, detail_json)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            score_date, total_score, score_quality, score_diversification,
-            score_valuation, score_behavior, score_risk,
-            json.dumps(advice or [], ensure_ascii=False),
-            json.dumps(detail or {}, ensure_ascii=False),
-        ))
-        conn.commit()
-        conn.close()
-        return 0
-    finally:
-        conn.close()
+    conn = _get_conn()
+    conn.execute("""
+        INSERT OR REPLACE INTO health_scores
+        (score_date, total_score, score_quality, score_diversification,
+         score_valuation, score_behavior, score_risk, advice_json, detail_json)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (
+        score_date, total_score, score_quality, score_diversification,
+        score_valuation, score_behavior, score_risk,
+        json.dumps(advice or [], ensure_ascii=False),
+        json.dumps(detail or {}, ensure_ascii=False),
+    ))
+    conn.commit()
+    conn.close()
+    return 0
 
 
 def get_health_score(score_date: str) -> dict | None:
-    try:
-        conn = _get_conn()
-        row = conn.execute(
-            "SELECT * FROM health_scores WHERE score_date = ?", (score_date,)
-        ).fetchone()
-        conn.close()
-        return dict(row) if row else None
-    finally:
-        conn.close()
+    conn = _get_conn()
+    row = conn.execute(
+        "SELECT * FROM health_scores WHERE score_date = ?", (score_date,)
+    ).fetchone()
+    conn.close()
+    return dict(row) if row else None
 
 
 def list_health_scores(limit: int = 30) -> list[dict]:
-    try:
-        conn = _get_conn()
-        rows = conn.execute(
-            "SELECT * FROM health_scores ORDER BY score_date DESC LIMIT ?", (limit,)
-        ).fetchall()
-        conn.close()
-        return [dict(r) for r in rows]
-    finally:
-        conn.close()
+    conn = _get_conn()
+    rows = conn.execute(
+        "SELECT * FROM health_scores ORDER BY score_date DESC LIMIT ?", (limit,)
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
 
 
 def save_bond_yield(trade_date: str, yield_10y: float, yield_3y: float = None) -> int:
-    try:
-        conn = _get_conn()
-        conn.execute("""
-            INSERT OR REPLACE INTO bond_yield_history (trade_date, yield_10y, yield_3y)
-            VALUES (?, ?, ?)
-        """, (trade_date, yield_10y, yield_3y))
-        conn.commit()
-        conn.close()
-        return 0
-    finally:
-        conn.close()
+    conn = _get_conn()
+    conn.execute("""
+        INSERT OR REPLACE INTO bond_yield_history (trade_date, yield_10y, yield_3y)
+        VALUES (?, ?, ?)
+    """, (trade_date, yield_10y, yield_3y))
+    conn.commit()
+    conn.close()
+    return 0
 
 
 def get_latest_bond_yield() -> dict | None:
-    try:
-        conn = _get_conn()
-        row = conn.execute(
-            "SELECT * FROM bond_yield_history ORDER BY trade_date DESC LIMIT 1"
-        ).fetchone()
-        conn.close()
-        return dict(row) if row else None
-    finally:
-        conn.close()
+    conn = _get_conn()
+    row = conn.execute(
+        "SELECT * FROM bond_yield_history ORDER BY trade_date DESC LIMIT 1"
+    ).fetchone()
+    conn.close()
+    return dict(row) if row else None
 
 
 def get_bond_yield_history(days: int = 365) -> list[dict]:
-    try:
-        conn = _get_conn()
-        rows = conn.execute(
-            "SELECT * FROM bond_yield_history ORDER BY trade_date DESC LIMIT ?", (days,)
-        ).fetchall()
-        conn.close()
-        return [dict(r) for r in rows]
-    finally:
-        conn.close()
-
+    conn = _get_conn()
+    rows = conn.execute(
+        "SELECT * FROM bond_yield_history ORDER BY trade_date DESC LIMIT ?", (days,)
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]

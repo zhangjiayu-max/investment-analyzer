@@ -15,64 +15,61 @@ VALID_REL_TYPES = {"belongs_to", "correlates_with", "competes_with", "supplies",
 # ── 建表 ──────────────────────────────────────────────
 
 def init_knowledge_graph(conn=None):
-    try:
-        """创建知识图谱相关表。传入 conn 避免死锁（与 init_db 一致）。"""
-        should_close = False
-        if conn is None:
-            conn = _get_conn()
-            should_close = True
+    """创建知识图谱相关表。传入 conn 避免死锁（与 init_db 一致）。"""
+    should_close = False
+    if conn is None:
+        conn = _get_conn()
+        should_close = True
 
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS kg_entities (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                entity_type TEXT NOT NULL,
-                name TEXT NOT NULL,
-                aliases_json TEXT DEFAULT '[]',
-                attributes_json TEXT DEFAULT '{}',
-                created_at TEXT DEFAULT (datetime('now','localtime')),
-                updated_at TEXT DEFAULT (datetime('now','localtime')),
-                UNIQUE(entity_type, name)
-            )
-        """)
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_kg_entities_type ON kg_entities(entity_type)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_kg_entities_name ON kg_entities(name)")
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS kg_entities (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            entity_type TEXT NOT NULL,
+            name TEXT NOT NULL,
+            aliases_json TEXT DEFAULT '[]',
+            attributes_json TEXT DEFAULT '{}',
+            created_at TEXT DEFAULT (datetime('now','localtime')),
+            updated_at TEXT DEFAULT (datetime('now','localtime')),
+            UNIQUE(entity_type, name)
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_kg_entities_type ON kg_entities(entity_type)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_kg_entities_name ON kg_entities(name)")
 
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS kg_relationships (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                source_id INTEGER NOT NULL REFERENCES kg_entities(id) ON DELETE CASCADE,
-                target_id INTEGER NOT NULL REFERENCES kg_entities(id) ON DELETE CASCADE,
-                rel_type TEXT NOT NULL,
-                weight REAL DEFAULT 1.0,
-                evidence_json TEXT DEFAULT '[]',
-                created_at TEXT DEFAULT (datetime('now','localtime')),
-                updated_at TEXT DEFAULT (datetime('now','localtime')),
-                UNIQUE(source_id, target_id, rel_type)
-            )
-        """)
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_kg_rel_source ON kg_relationships(source_id)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_kg_rel_target ON kg_relationships(target_id)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_kg_rel_type ON kg_relationships(rel_type)")
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS kg_relationships (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            source_id INTEGER NOT NULL REFERENCES kg_entities(id) ON DELETE CASCADE,
+            target_id INTEGER NOT NULL REFERENCES kg_entities(id) ON DELETE CASCADE,
+            rel_type TEXT NOT NULL,
+            weight REAL DEFAULT 1.0,
+            evidence_json TEXT DEFAULT '[]',
+            created_at TEXT DEFAULT (datetime('now','localtime')),
+            updated_at TEXT DEFAULT (datetime('now','localtime')),
+            UNIQUE(source_id, target_id, rel_type)
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_kg_rel_source ON kg_relationships(source_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_kg_rel_target ON kg_relationships(target_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_kg_rel_type ON kg_relationships(rel_type)")
 
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS kg_entity_mentions (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                entity_id INTEGER NOT NULL REFERENCES kg_entities(id) ON DELETE CASCADE,
-                knowledge_id INTEGER NOT NULL,
-                mention_context TEXT DEFAULT '',
-                created_at TEXT DEFAULT (datetime('now','localtime')),
-                UNIQUE(entity_id, knowledge_id)
-            )
-        """)
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_kg_mention_entity ON kg_entity_mentions(entity_id)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_kg_mention_knowledge ON kg_entity_mentions(knowledge_id)")
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS kg_entity_mentions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            entity_id INTEGER NOT NULL REFERENCES kg_entities(id) ON DELETE CASCADE,
+            knowledge_id INTEGER NOT NULL,
+            mention_context TEXT DEFAULT '',
+            created_at TEXT DEFAULT (datetime('now','localtime')),
+            UNIQUE(entity_id, knowledge_id)
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_kg_mention_entity ON kg_entity_mentions(entity_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_kg_mention_knowledge ON kg_entity_mentions(knowledge_id)")
 
-        if should_close:
-            conn.commit()
-            conn.close()
-        logger.info("知识图谱表初始化完成")
-    finally:
+    if should_close:
+        conn.commit()
         conn.close()
+    logger.info("知识图谱表初始化完成")
 
 
 # ── 工具函数 ──────────────────────────────────────────
@@ -153,40 +150,35 @@ def add_entity(entity_type: str, name: str, aliases: list = None,
     finally:
         conn.close()
 
+
 def get_entity(entity_id: int) -> dict | None:
-    try:
-        """获取单个实体。"""
-        conn = _get_conn()
-        row = conn.execute("SELECT * FROM kg_entities WHERE id = ?", (entity_id,)).fetchone()
-        conn.close()
-        return _parse_entity_row(row)
-    finally:
-        conn.close()
+    """获取单个实体。"""
+    conn = _get_conn()
+    row = conn.execute("SELECT * FROM kg_entities WHERE id = ?", (entity_id,)).fetchone()
+    conn.close()
+    return _parse_entity_row(row)
 
 
 def search_entities(query: str, entity_type: str = None, limit: int = 10) -> list[dict]:
-    try:
-        """搜索实体（名称 + 别名模糊匹配）。"""
-        conn = _get_conn()
-        like = f"%{query}%"
-        if entity_type:
-            rows = conn.execute("""
-                SELECT * FROM kg_entities
-                WHERE entity_type = ? AND (name LIKE ? OR aliases_json LIKE ?)
-                ORDER BY name ASC
-                LIMIT ?
-            """, (entity_type, like, like, limit)).fetchall()
-        else:
-            rows = conn.execute("""
-                SELECT * FROM kg_entities
-                WHERE name LIKE ? OR aliases_json LIKE ?
-                ORDER BY name ASC
-                LIMIT ?
-            """, (like, like, limit)).fetchall()
-        conn.close()
-        return [_parse_entity_row(row) for row in rows]
-    finally:
-        conn.close()
+    """搜索实体（名称 + 别名模糊匹配）。"""
+    conn = _get_conn()
+    like = f"%{query}%"
+    if entity_type:
+        rows = conn.execute("""
+            SELECT * FROM kg_entities
+            WHERE entity_type = ? AND (name LIKE ? OR aliases_json LIKE ?)
+            ORDER BY name ASC
+            LIMIT ?
+        """, (entity_type, like, like, limit)).fetchall()
+    else:
+        rows = conn.execute("""
+            SELECT * FROM kg_entities
+            WHERE name LIKE ? OR aliases_json LIKE ?
+            ORDER BY name ASC
+            LIMIT ?
+        """, (like, like, limit)).fetchall()
+    conn.close()
+    return [_parse_entity_row(row) for row in rows]
 
 
 # ── Relationship CRUD ─────────────────────────────────
@@ -230,112 +222,110 @@ def add_relationship(source_id: int, target_id: int, rel_type: str,
     finally:
         conn.close()
 
+
 def get_related_entities(entity_id: int, rel_type: str = None, depth: int = 1) -> list[dict]:
-    try:
-        """获取关联实体，支持多跳查询。
+    """获取关联实体，支持多跳查询。
 
-        返回格式: [{"entity": {...}, "relationship": {...}, "depth": int}]
-        """
-        conn = _get_conn()
-        visited = set()
-        results = []
-        frontier = [entity_id]
+    返回格式: [{"entity": {...}, "relationship": {...}, "depth": int}]
+    """
+    conn = _get_conn()
+    visited = set()
+    results = []
+    frontier = [entity_id]
 
-        for current_depth in range(1, depth + 1):
-            next_frontier = []
-            for eid in frontier:
-                if eid in visited:
-                    continue
-                visited.add(eid)
+    for current_depth in range(1, depth + 1):
+        next_frontier = []
+        for eid in frontier:
+            if eid in visited:
+                continue
+            visited.add(eid)
 
-                # 查询出边（entity_id 作为 source）
-                if rel_type:
-                    rows = conn.execute("""
-                        SELECT r.*, e.entity_type, e.name, e.aliases_json, e.attributes_json
-                        FROM kg_relationships r
-                        JOIN kg_entities e ON e.id = r.target_id
-                        WHERE r.source_id = ? AND r.rel_type = ?
-                    """, (eid, rel_type)).fetchall()
-                else:
-                    rows = conn.execute("""
-                        SELECT r.*, e.entity_type, e.name, e.aliases_json, e.attributes_json
-                        FROM kg_relationships r
-                        JOIN kg_entities e ON e.id = r.target_id
-                        WHERE r.source_id = ?
-                    """, (eid,)).fetchall()
+            # 查询出边（entity_id 作为 source）
+            if rel_type:
+                rows = conn.execute("""
+                    SELECT r.*, e.entity_type, e.name, e.aliases_json, e.attributes_json
+                    FROM kg_relationships r
+                    JOIN kg_entities e ON e.id = r.target_id
+                    WHERE r.source_id = ? AND r.rel_type = ?
+                """, (eid, rel_type)).fetchall()
+            else:
+                rows = conn.execute("""
+                    SELECT r.*, e.entity_type, e.name, e.aliases_json, e.attributes_json
+                    FROM kg_relationships r
+                    JOIN kg_entities e ON e.id = r.target_id
+                    WHERE r.source_id = ?
+                """, (eid,)).fetchall()
 
-                for row in rows:
-                    r = _parse_relationship_row(row)
-                    target_id = r["target_id"]
-                    entity_info = {
-                        "id": r["entity_type"],
-                        "entity_type": r["entity_type"],
-                        "name": r["name"],
-                        "aliases_json": _try_parse_json(r.get("aliases_json", "[]"), []),
-                        "attributes_json": _try_parse_json(r.get("attributes_json", "{}"), {}),
-                    }
-                    results.append({
-                        "entity": entity_info,
-                        "relationship": {
-                            "id": r["id"],
-                            "source_id": r["source_id"],
-                            "target_id": r["target_id"],
-                            "rel_type": r["rel_type"],
-                            "weight": r["weight"],
-                            "evidence_json": r["evidence_json"],
-                        },
-                        "depth": current_depth,
-                    })
-                    if target_id not in visited:
-                        next_frontier.append(target_id)
+            for row in rows:
+                r = _parse_relationship_row(row)
+                target_id = r["target_id"]
+                entity_info = {
+                    "id": r["entity_type"],
+                    "entity_type": r["entity_type"],
+                    "name": r["name"],
+                    "aliases_json": _try_parse_json(r.get("aliases_json", "[]"), []),
+                    "attributes_json": _try_parse_json(r.get("attributes_json", "{}"), {}),
+                }
+                results.append({
+                    "entity": entity_info,
+                    "relationship": {
+                        "id": r["id"],
+                        "source_id": r["source_id"],
+                        "target_id": r["target_id"],
+                        "rel_type": r["rel_type"],
+                        "weight": r["weight"],
+                        "evidence_json": r["evidence_json"],
+                    },
+                    "depth": current_depth,
+                })
+                if target_id not in visited:
+                    next_frontier.append(target_id)
 
-                # 查询入边（entity_id 作为 target）
-                if rel_type:
-                    rows = conn.execute("""
-                        SELECT r.*, e.entity_type, e.name, e.aliases_json, e.attributes_json
-                        FROM kg_relationships r
-                        JOIN kg_entities e ON e.id = r.source_id
-                        WHERE r.target_id = ? AND r.rel_type = ?
-                    """, (eid, rel_type)).fetchall()
-                else:
-                    rows = conn.execute("""
-                        SELECT r.*, e.entity_type, e.name, e.aliases_json, e.attributes_json
-                        FROM kg_relationships r
-                        JOIN kg_entities e ON e.id = r.source_id
-                        WHERE r.target_id = ?
-                    """, (eid,)).fetchall()
+            # 查询入边（entity_id 作为 target）
+            if rel_type:
+                rows = conn.execute("""
+                    SELECT r.*, e.entity_type, e.name, e.aliases_json, e.attributes_json
+                    FROM kg_relationships r
+                    JOIN kg_entities e ON e.id = r.source_id
+                    WHERE r.target_id = ? AND r.rel_type = ?
+                """, (eid, rel_type)).fetchall()
+            else:
+                rows = conn.execute("""
+                    SELECT r.*, e.entity_type, e.name, e.aliases_json, e.attributes_json
+                    FROM kg_relationships r
+                    JOIN kg_entities e ON e.id = r.source_id
+                    WHERE r.target_id = ?
+                """, (eid,)).fetchall()
 
-                for row in rows:
-                    r = _parse_relationship_row(row)
-                    source_id = r["source_id"]
-                    entity_info = {
-                        "id": source_id,
-                        "entity_type": r["entity_type"],
-                        "name": r["name"],
-                        "aliases_json": _try_parse_json(r.get("aliases_json", "[]"), []),
-                        "attributes_json": _try_parse_json(r.get("attributes_json", "{}"), {}),
-                    }
-                    results.append({
-                        "entity": entity_info,
-                        "relationship": {
-                            "id": r["id"],
-                            "source_id": r["source_id"],
-                            "target_id": r["target_id"],
-                            "rel_type": r["rel_type"],
-                            "weight": r["weight"],
-                            "evidence_json": r["evidence_json"],
-                        },
-                        "depth": current_depth,
-                    })
-                    if source_id not in visited:
-                        next_frontier.append(source_id)
+            for row in rows:
+                r = _parse_relationship_row(row)
+                source_id = r["source_id"]
+                entity_info = {
+                    "id": source_id,
+                    "entity_type": r["entity_type"],
+                    "name": r["name"],
+                    "aliases_json": _try_parse_json(r.get("aliases_json", "[]"), []),
+                    "attributes_json": _try_parse_json(r.get("attributes_json", "{}"), {}),
+                }
+                results.append({
+                    "entity": entity_info,
+                    "relationship": {
+                        "id": r["id"],
+                        "source_id": r["source_id"],
+                        "target_id": r["target_id"],
+                        "rel_type": r["rel_type"],
+                        "weight": r["weight"],
+                        "evidence_json": r["evidence_json"],
+                    },
+                    "depth": current_depth,
+                })
+                if source_id not in visited:
+                    next_frontier.append(source_id)
 
-            frontier = next_frontier
+        frontier = next_frontier
 
-        conn.close()
-        return results
-    finally:
-        conn.close()
+    conn.close()
+    return results
 
 
 def _try_parse_json(text, default):
@@ -378,60 +368,55 @@ def add_entity_mention(entity_id: int, knowledge_id: int, context: str = "") -> 
     finally:
         conn.close()
 
-def get_entities_for_knowledge(knowledge_id: int) -> list[dict]:
-    try:
-        """获取某条知识关联的所有实体。"""
-        conn = _get_conn()
-        rows = conn.execute("""
-            SELECT e.*, m.mention_context, m.id as mention_id
-            FROM kg_entity_mentions m
-            JOIN kg_entities e ON e.id = m.entity_id
-            WHERE m.knowledge_id = ?
-            ORDER BY e.name ASC
-        """, (knowledge_id,)).fetchall()
-        conn.close()
 
-        results = []
-        for row in rows:
-            d = _parse_entity_row(row)
-            d["mention_context"] = row["mention_context"]
-            d["mention_id"] = row["mention_id"]
-            results.append(d)
-        return results
-    finally:
-        conn.close()
+def get_entities_for_knowledge(knowledge_id: int) -> list[dict]:
+    """获取某条知识关联的所有实体。"""
+    conn = _get_conn()
+    rows = conn.execute("""
+        SELECT e.*, m.mention_context, m.id as mention_id
+        FROM kg_entity_mentions m
+        JOIN kg_entities e ON e.id = m.entity_id
+        WHERE m.knowledge_id = ?
+        ORDER BY e.name ASC
+    """, (knowledge_id,)).fetchall()
+    conn.close()
+
+    results = []
+    for row in rows:
+        d = _parse_entity_row(row)
+        d["mention_context"] = row["mention_context"]
+        d["mention_id"] = row["mention_id"]
+        results.append(d)
+    return results
 
 
 def get_knowledge_for_entity(entity_id: int, limit: int = 20) -> list[dict]:
-    try:
-        """获取某实体关联的所有知识条目。"""
-        conn = _get_conn()
-        rows = conn.execute("""
-            SELECT kb.*, m.mention_context, m.id as mention_id
-            FROM kg_entity_mentions m
-            JOIN knowledge_base kb ON kb.id = m.knowledge_id
-            WHERE m.entity_id = ?
-            ORDER BY kb.importance DESC, kb.id DESC
-            LIMIT ?
-        """, (entity_id, limit)).fetchall()
-        conn.close()
+    """获取某实体关联的所有知识条目。"""
+    conn = _get_conn()
+    rows = conn.execute("""
+        SELECT kb.*, m.mention_context, m.id as mention_id
+        FROM kg_entity_mentions m
+        JOIN knowledge_base kb ON kb.id = m.knowledge_id
+        WHERE m.entity_id = ?
+        ORDER BY kb.importance DESC, kb.id DESC
+        LIMIT ?
+    """, (entity_id, limit)).fetchall()
+    conn.close()
 
-        results = []
-        for row in rows:
-            d = dict(row)
-            # 反序列化 knowledge_base 的 JSON 字段
-            for key in ("keywords", "limitations", "counterpoints"):
-                if d.get(key):
-                    try:
-                        d[key] = json.loads(d[key])
-                    except (json.JSONDecodeError, TypeError):
-                        d[key] = []
-                else:
+    results = []
+    for row in rows:
+        d = dict(row)
+        # 反序列化 knowledge_base 的 JSON 字段
+        for key in ("keywords", "limitations", "counterpoints"):
+            if d.get(key):
+                try:
+                    d[key] = json.loads(d[key])
+                except (json.JSONDecodeError, TypeError):
                     d[key] = []
-            results.append(d)
-        return results
-    finally:
-        conn.close()
+            else:
+                d[key] = []
+        results.append(d)
+    return results
 
 
 # ── 批量导入 ──────────────────────────────────────────
