@@ -6,73 +6,76 @@ from db._conn import _get_conn
 # ── 分析表初始化 ──────────────────────────────────────
 
 def _init_analysis_tables(conn=None):
-    """初始化 AI 分析相关的表。"""
-    own_conn = conn is None
-    if own_conn:
-        conn = _get_conn()
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS analysis_agents (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL,
-            description TEXT,
-            system_prompt TEXT NOT NULL,
-            is_active INTEGER DEFAULT 1,
-            created_at TIMESTAMP DEFAULT (datetime('now','localtime')),
-            updated_at TIMESTAMP DEFAULT (datetime('now','localtime'))
-        )
-    """)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS analysis_history (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            index_code TEXT,
-            index_name TEXT,
-            agent_id INTEGER,
-            agent_name TEXT,
-            prompt_used TEXT,
-            news_context TEXT,
-            valuation_context TEXT,
-            result TEXT NOT NULL DEFAULT '',
-            token_usage INTEGER,
-            status TEXT DEFAULT 'done',
-            error_msg TEXT DEFAULT '',
-            created_at TIMESTAMP DEFAULT (datetime('now','localtime'))
-        )
-    """)
     try:
-        conn.execute("ALTER TABLE analysis_history ADD COLUMN status TEXT DEFAULT 'done'")
-    except Exception:
-        pass
-    try:
-        conn.execute("ALTER TABLE analysis_history ADD COLUMN error_msg TEXT DEFAULT ''")
-    except Exception:
-        pass
-    # 插入默认 agent（如果不存在）
-    # 逐个插入默认 agent（如缺失）
-    for name, desc, prompt in [
-        ('市场日报分析师', '基于最新财经新闻生成 A 股市场快报，服务于基金配置决策', DEFAULT_MARKET_ANALYST_PROMPT),
-        ('分散度分析师', '基于持仓数据和 MCP 数据，分析持仓分散度、集中度风险并给出改进建议', DEFAULT_DIVERSIFICATION_PROMPT),
-        ('全景诊断分析师', '从全局视角诊断投资组合健康状况，给出评分和加减仓建议', DEFAULT_PANORAMA_PROMPT),
-        ('基金深度分析师', '对单只基金进行深度投资分析，评估买入质量并给出建议', DEFAULT_FUND_DEEP_DIVE_PROMPT),
-        ('交易复盘分析师', '分析交易行为模式，识别情绪化偏差，建立投资纪律', DEFAULT_TRADE_REVIEW_PROMPT),
-        ('情景推演分析师', '模拟不同市场情景下的组合变化，帮助提前做好准备', DEFAULT_WHATIF_PROMPT),
-        ('热点分析专家', '基于新闻、估值、持仓数据，分析今日投资机会并输出结构化推荐', DEFAULT_HOTSPOTS_PROMPT),
-        ('债券配置顾问', '结合债市温度、宏观政策、现有持仓和基金排行榜，推荐具体债券基金配置方案', DEFAULT_BOND_PROMPT),
-        ('指数深度分析师', '针对单个指数进行深度分析，结合估值趋势、知识库、政策新闻给出投资建议', DEFAULT_INDEX_DEEP_ANALYSIS_PROMPT),
-        ('市场情报分析师', '聚合多源新闻和市场数据，推断当日热门板块和投资机会', DEFAULT_MARKET_INTELLIGENCE_PROMPT),
-        ('增强策略分析师', '结合估值趋势、宏观政策、行业周期，判断低估指数是真机会还是价值陷阱', DEFAULT_ENHANCED_STRATEGY_PROMPT),
-    ]:
-        row = conn.execute("SELECT id FROM analysis_agents WHERE name = ?", (name,)).fetchone()
-        if not row:
-            conn.execute("INSERT INTO analysis_agents (name, description, system_prompt) VALUES (?, ?, ?)", (name, desc, prompt))
-        elif name in ('债券配置顾问', '指数深度分析师', '全景诊断分析师', '基金深度分析师'):
-            # 这些 agent 的 prompt 需要保持最新，更新前先保存旧版本
-            old = conn.execute("SELECT id, system_prompt FROM analysis_agents WHERE name = ?", (name,)).fetchone()
-            if old and old["system_prompt"] != prompt:
-                from db.agents import save_prompt_version
-                save_prompt_version(old["id"], 'analysis', old["system_prompt"], conn=conn)
-            conn.execute("UPDATE analysis_agents SET system_prompt = ?, description = ? WHERE name = ?", (prompt, desc, name))
-    if own_conn:
-        conn.commit()
+        """初始化 AI 分析相关的表。"""
+        own_conn = conn is None
+        if own_conn:
+            conn = _get_conn()
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS analysis_agents (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                description TEXT,
+                system_prompt TEXT NOT NULL,
+                is_active INTEGER DEFAULT 1,
+                created_at TIMESTAMP DEFAULT (datetime('now','localtime')),
+                updated_at TIMESTAMP DEFAULT (datetime('now','localtime'))
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS analysis_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                index_code TEXT,
+                index_name TEXT,
+                agent_id INTEGER,
+                agent_name TEXT,
+                prompt_used TEXT,
+                news_context TEXT,
+                valuation_context TEXT,
+                result TEXT NOT NULL DEFAULT '',
+                token_usage INTEGER,
+                status TEXT DEFAULT 'done',
+                error_msg TEXT DEFAULT '',
+                created_at TIMESTAMP DEFAULT (datetime('now','localtime'))
+            )
+        """)
+        try:
+            conn.execute("ALTER TABLE analysis_history ADD COLUMN status TEXT DEFAULT 'done'")
+        except Exception:
+            pass
+        try:
+            conn.execute("ALTER TABLE analysis_history ADD COLUMN error_msg TEXT DEFAULT ''")
+        except Exception:
+            pass
+        # 插入默认 agent（如果不存在）
+        # 逐个插入默认 agent（如缺失）
+        for name, desc, prompt in [
+            ('市场日报分析师', '基于最新财经新闻生成 A 股市场快报，服务于基金配置决策', DEFAULT_MARKET_ANALYST_PROMPT),
+            ('分散度分析师', '基于持仓数据和 MCP 数据，分析持仓分散度、集中度风险并给出改进建议', DEFAULT_DIVERSIFICATION_PROMPT),
+            ('全景诊断分析师', '从全局视角诊断投资组合健康状况，给出评分和加减仓建议', DEFAULT_PANORAMA_PROMPT),
+            ('基金深度分析师', '对单只基金进行深度投资分析，评估买入质量并给出建议', DEFAULT_FUND_DEEP_DIVE_PROMPT),
+            ('交易复盘分析师', '分析交易行为模式，识别情绪化偏差，建立投资纪律', DEFAULT_TRADE_REVIEW_PROMPT),
+            ('情景推演分析师', '模拟不同市场情景下的组合变化，帮助提前做好准备', DEFAULT_WHATIF_PROMPT),
+            ('热点分析专家', '基于新闻、估值、持仓数据，分析今日投资机会并输出结构化推荐', DEFAULT_HOTSPOTS_PROMPT),
+            ('债券配置顾问', '结合债市温度、宏观政策、现有持仓和基金排行榜，推荐具体债券基金配置方案', DEFAULT_BOND_PROMPT),
+            ('指数深度分析师', '针对单个指数进行深度分析，结合估值趋势、知识库、政策新闻给出投资建议', DEFAULT_INDEX_DEEP_ANALYSIS_PROMPT),
+            ('市场情报分析师', '聚合多源新闻和市场数据，推断当日热门板块和投资机会', DEFAULT_MARKET_INTELLIGENCE_PROMPT),
+            ('增强策略分析师', '结合估值趋势、宏观政策、行业周期，判断低估指数是真机会还是价值陷阱', DEFAULT_ENHANCED_STRATEGY_PROMPT),
+        ]:
+            row = conn.execute("SELECT id FROM analysis_agents WHERE name = ?", (name,)).fetchone()
+            if not row:
+                conn.execute("INSERT INTO analysis_agents (name, description, system_prompt) VALUES (?, ?, ?)", (name, desc, prompt))
+            elif name in ('债券配置顾问', '指数深度分析师', '全景诊断分析师', '基金深度分析师'):
+                # 这些 agent 的 prompt 需要保持最新，更新前先保存旧版本
+                old = conn.execute("SELECT id, system_prompt FROM analysis_agents WHERE name = ?", (name,)).fetchone()
+                if old and old["system_prompt"] != prompt:
+                    from db.agents import save_prompt_version
+                    save_prompt_version(old["id"], 'analysis', old["system_prompt"], conn=conn)
+                conn.execute("UPDATE analysis_agents SET system_prompt = ?, description = ? WHERE name = ?", (prompt, desc, name))
+        if own_conn:
+            conn.commit()
+            conn.close()
+    finally:
         conn.close()
 
 
@@ -863,38 +866,47 @@ DEFAULT_ENHANCED_STRATEGY_PROMPT = """# 角色
 
 
 def list_analysis_agents() -> list[dict]:
-    """列出所有分析 Agent。"""
-    conn = _get_conn()
-    rows = conn.execute("SELECT * FROM analysis_agents ORDER BY id").fetchall()
-    conn.close()
-    return [dict(r) for r in rows]
+    try:
+        """列出所有分析 Agent。"""
+        conn = _get_conn()
+        rows = conn.execute("SELECT * FROM analysis_agents ORDER BY id").fetchall()
+        conn.close()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
 
 
 def get_analysis_agent(agent_id: int) -> dict | None:
-    """获取单个分析 Agent。"""
-    conn = _get_conn()
-    row = conn.execute("SELECT * FROM analysis_agents WHERE id = ?", (agent_id,)).fetchone()
-    conn.close()
-    return dict(row) if row else None
+    try:
+        """获取单个分析 Agent。"""
+        conn = _get_conn()
+        row = conn.execute("SELECT * FROM analysis_agents WHERE id = ?", (agent_id,)).fetchone()
+        conn.close()
+        return dict(row) if row else None
+    finally:
+        conn.close()
 
 
 def update_analysis_agent(agent_id: int, **kwargs) -> bool:
-    """更新分析 Agent 配置。"""
-    fields = []
-    values = []
-    for k in ("name", "description", "system_prompt", "is_active"):
-        if k in kwargs:
-            fields.append(f"{k} = ?")
-            values.append(kwargs[k])
-    if not fields:
-        return False
-    fields.append("updated_at = datetime('now','localtime')")
-    values.append(agent_id)
-    conn = _get_conn()
-    conn.execute(f"UPDATE analysis_agents SET {', '.join(fields)} WHERE id = ?", values)
-    conn.commit()
-    conn.close()
-    return True
+    try:
+        """更新分析 Agent 配置。"""
+        fields = []
+        values = []
+        for k in ("name", "description", "system_prompt", "is_active"):
+            if k in kwargs:
+                fields.append(f"{k} = ?")
+                values.append(kwargs[k])
+        if not fields:
+            return False
+        fields.append("updated_at = datetime('now','localtime')")
+        values.append(agent_id)
+        conn = _get_conn()
+        conn.execute(f"UPDATE analysis_agents SET {', '.join(fields)} WHERE id = ?", values)
+        conn.commit()
+        conn.close()
+        return True
+    finally:
+        conn.close()
 
 
 def create_analysis_history(index_code: str, index_name: str, agent_id: int,
@@ -902,80 +914,99 @@ def create_analysis_history(index_code: str, index_name: str, agent_id: int,
                             valuation_context: str, result: str = "",
                             token_usage: int = 0, status: str = "done",
                             error_msg: str = "") -> int:
-    """保存分析历史记录。"""
-    conn = _get_conn()
-    cursor = conn.execute("""
-        INSERT INTO analysis_history
-        (index_code, index_name, agent_id, agent_name, prompt_used, news_context,
-         valuation_context, result, token_usage, status, error_msg, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now','localtime'))
-    """, (index_code, index_name, agent_id, agent_name, prompt_used,
-          news_context, valuation_context, result or "", token_usage, status, error_msg))
-    conn.commit()
-    row_id = cursor.lastrowid
-    conn.close()
-    return row_id
+    try:
+        """保存分析历史记录。"""
+        conn = _get_conn()
+        cursor = conn.execute("""
+            INSERT INTO analysis_history
+            (index_code, index_name, agent_id, agent_name, prompt_used, news_context,
+             valuation_context, result, token_usage, status, error_msg, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now','localtime'))
+        """, (index_code, index_name, agent_id, agent_name, prompt_used,
+              news_context, valuation_context, result or "", token_usage, status, error_msg))
+        conn.commit()
+        row_id = cursor.lastrowid
+        conn.close()
+        return row_id
+    finally:
+        conn.close()
 
 
 def update_analysis_history(history_id: int, **fields) -> bool:
-    """更新分析历史字段。"""
-    allowed = {
-        "prompt_used", "news_context", "valuation_context", "result",
-        "token_usage", "status", "error_msg",
-    }
-    updates = {k: v for k, v in fields.items() if k in allowed}
-    if not updates:
-        return False
-    conn = _get_conn()
-    set_clause = ", ".join(f"{k} = ?" for k in updates)
-    values = list(updates.values()) + [history_id]
-    cur = conn.execute(f"UPDATE analysis_history SET {set_clause} WHERE id = ?", values)
-    conn.commit()
-    ok = cur.rowcount > 0
-    conn.close()
-    return ok
+    try:
+        """更新分析历史字段。"""
+        allowed = {
+            "prompt_used", "news_context", "valuation_context", "result",
+            "token_usage", "status", "error_msg",
+        }
+        updates = {k: v for k, v in fields.items() if k in allowed}
+        if not updates:
+            return False
+        conn = _get_conn()
+        set_clause = ", ".join(f"{k} = ?" for k in updates)
+        values = list(updates.values()) + [history_id]
+        cur = conn.execute(f"UPDATE analysis_history SET {set_clause} WHERE id = ?", values)
+        conn.commit()
+        ok = cur.rowcount > 0
+        conn.close()
+        return ok
+    finally:
+        conn.close()
 
 
 def get_analysis_history_status(history_id: int) -> dict | None:
-    """查询指数分析任务状态。"""
-    conn = _get_conn()
-    row = conn.execute(
-        "SELECT id, status, result, token_usage, error_msg FROM analysis_history WHERE id = ?",
-        (history_id,),
-    ).fetchone()
-    conn.close()
-    return dict(row) if row else None
+    try:
+        """查询指数分析任务状态。"""
+        conn = _get_conn()
+        row = conn.execute(
+            "SELECT id, status, result, token_usage, error_msg FROM analysis_history WHERE id = ?",
+            (history_id,),
+        ).fetchone()
+        conn.close()
+        return dict(row) if row else None
+    finally:
+        conn.close()
 
 
 def list_analysis_history(index_code: str = None, limit: int = 50) -> list[dict]:
-    """列出分析历史。"""
-    conn = _get_conn()
-    if index_code:
-        rows = conn.execute(
-            "SELECT * FROM analysis_history WHERE index_code = ? ORDER BY created_at DESC LIMIT ?",
-            (index_code, limit)
-        ).fetchall()
-    else:
-        rows = conn.execute(
-            "SELECT * FROM analysis_history ORDER BY created_at DESC LIMIT ?",
-            (limit,)
-        ).fetchall()
-    conn.close()
-    return [dict(r) for r in rows]
+    try:
+        """列出分析历史。"""
+        conn = _get_conn()
+        if index_code:
+            rows = conn.execute(
+                "SELECT * FROM analysis_history WHERE index_code = ? ORDER BY created_at DESC LIMIT ?",
+                (index_code, limit)
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM analysis_history ORDER BY created_at DESC LIMIT ?",
+                (limit,)
+            ).fetchall()
+        conn.close()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
 
 
 def get_analysis_history_item(history_id: int) -> dict | None:
-    """获取单条分析历史。"""
-    conn = _get_conn()
-    row = conn.execute("SELECT * FROM analysis_history WHERE id = ?", (history_id,)).fetchone()
-    conn.close()
-    return dict(row) if row else None
+    try:
+        """获取单条分析历史。"""
+        conn = _get_conn()
+        row = conn.execute("SELECT * FROM analysis_history WHERE id = ?", (history_id,)).fetchone()
+        conn.close()
+        return dict(row) if row else None
+    finally:
+        conn.close()
 
 
 def delete_analysis_history(history_id: int) -> bool:
-    """删除分析历史。"""
-    conn = _get_conn()
-    conn.execute("DELETE FROM analysis_history WHERE id = ?", (history_id,))
-    conn.commit()
-    conn.close()
-    return True
+    try:
+        """删除分析历史。"""
+        conn = _get_conn()
+        conn.execute("DELETE FROM analysis_history WHERE id = ?", (history_id,))
+        conn.commit()
+        conn.close()
+        return True
+    finally:
+        conn.close()
+

@@ -100,41 +100,50 @@ def create_holding(fund_code: str, fund_name: str, shares: float = 0,
 
 
 def get_holding(holding_id: int) -> dict | None:
-    """获取单个持仓。"""
-    conn = _get_conn()
-    row = conn.execute("SELECT * FROM portfolio_holdings WHERE id = ?", (holding_id,)).fetchone()
-    conn.close()
-    return dict(row) if row else None
+    try:
+        """获取单个持仓。"""
+        conn = _get_conn()
+        row = conn.execute("SELECT * FROM portfolio_holdings WHERE id = ?", (holding_id,)).fetchone()
+        conn.close()
+        return dict(row) if row else None
+    finally:
+        conn.close()
 
 
 def get_holding_by_fund(fund_code: str, user_id: str = "default") -> dict | None:
-    """根据基金代码获取持仓。"""
-    conn = _get_conn()
-    row = conn.execute(
-        "SELECT * FROM portfolio_holdings WHERE fund_code = ? AND user_id = ?",
-        (fund_code, user_id)
-    ).fetchone()
-    conn.close()
-    return dict(row) if row else None
+    try:
+        """根据基金代码获取持仓。"""
+        conn = _get_conn()
+        row = conn.execute(
+            "SELECT * FROM portfolio_holdings WHERE fund_code = ? AND user_id = ?",
+            (fund_code, user_id)
+        ).fetchone()
+        conn.close()
+        return dict(row) if row else None
+    finally:
+        conn.close()
 
 
 def list_holdings(user_id: str = "default", account: str = None) -> list[dict]:
-    """获取用户所有持仓，可选按账号筛选。"""
-    conn = _get_conn()
-    if account:
-        rows = conn.execute("""
-            SELECT * FROM portfolio_holdings
-            WHERE user_id = ? AND account = ?
-            ORDER BY updated_at DESC
-        """, (user_id, account)).fetchall()
-    else:
-        rows = conn.execute("""
-            SELECT * FROM portfolio_holdings
-            WHERE user_id = ?
-            ORDER BY updated_at DESC
-        """, (user_id,)).fetchall()
-    conn.close()
-    return [dict(r) for r in rows]
+    try:
+        """获取用户所有持仓，可选按账号筛选。"""
+        conn = _get_conn()
+        if account:
+            rows = conn.execute("""
+                SELECT * FROM portfolio_holdings
+                WHERE user_id = ? AND account = ?
+                ORDER BY updated_at DESC
+            """, (user_id, account)).fetchall()
+        else:
+            rows = conn.execute("""
+                SELECT * FROM portfolio_holdings
+                WHERE user_id = ?
+                ORDER BY updated_at DESC
+            """, (user_id,)).fetchall()
+        conn.close()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
 
 
 # 持仓表允许更新的字段白名单
@@ -194,7 +203,6 @@ def update_holding(holding_id: int, **fields):
         conn.commit()
     finally:
         conn.close()
-
 
 def delete_holding(holding_id: int) -> bool:
     """删除持仓及其交易记录。"""
@@ -264,201 +272,231 @@ def get_portfolio_summary(user_id: str = "default", account: str = None) -> dict
 
 
 def get_cash_balance(user_id: str = "default") -> dict:
-    """获取零钱余额（自动触发每日收益结算）。"""
-    # 先触发每日收益
-    interest_info = accrue_cash_interest(user_id)
-    conn = _get_conn()
-    row = conn.execute("SELECT * FROM portfolio_cash WHERE user_id = ?", (user_id,)).fetchone()
-    if not row:
-        conn.execute("INSERT INTO portfolio_cash (user_id, balance) VALUES (?, 0)", (user_id,))
-        conn.commit()
-        result = {"user_id": user_id, "balance": 0, "updated_at": None, "today_interest": 0, "last_interest_date": None}
-    else:
-        result = dict(row)
-    conn.close()
-    result["accrued"] = interest_info
-    return result
+    try:
+        """获取零钱余额（自动触发每日收益结算）。"""
+        # 先触发每日收益
+        interest_info = accrue_cash_interest(user_id)
+        conn = _get_conn()
+        row = conn.execute("SELECT * FROM portfolio_cash WHERE user_id = ?", (user_id,)).fetchone()
+        if not row:
+            conn.execute("INSERT INTO portfolio_cash (user_id, balance) VALUES (?, 0)", (user_id,))
+            conn.commit()
+            result = {"user_id": user_id, "balance": 0, "updated_at": None, "today_interest": 0, "last_interest_date": None}
+        else:
+            result = dict(row)
+        conn.close()
+        result["accrued"] = interest_info
+        return result
+    finally:
+        conn.close()
 
 
 def get_total_cash_balance() -> float:
-    """汇总所有账户的零钱余额。"""
-    conn = _get_conn()
-    row = conn.execute("SELECT COALESCE(SUM(balance), 0) as total FROM portfolio_cash").fetchone()
-    conn.close()
-    return row["total"] if row else 0
+    try:
+        """汇总所有账户的零钱余额。"""
+        conn = _get_conn()
+        row = conn.execute("SELECT COALESCE(SUM(balance), 0) as total FROM portfolio_cash").fetchone()
+        conn.close()
+        return row["total"] if row else 0
+    finally:
+        conn.close()
 
 
 def add_cash(user_id: str, amount: float) -> float:
-    """增加（或减少）零钱余额。amount 可为负数（支出）。返回新余额。"""
-    conn = _get_conn()
-    conn.execute("""
-        INSERT INTO portfolio_cash (user_id, balance, updated_at)
-        VALUES (?, ?, datetime('now','localtime'))
-        ON CONFLICT(user_id) DO UPDATE SET
-            balance = balance + ?,
-            updated_at = datetime('now','localtime')
-    """, (user_id, amount, amount))
-    conn.commit()
-    row = conn.execute("SELECT balance FROM portfolio_cash WHERE user_id = ?", (user_id,)).fetchone()
-    conn.close()
-    return row["balance"] if row else 0
+    try:
+        """增加（或减少）零钱余额。amount 可为负数（支出）。返回新余额。"""
+        conn = _get_conn()
+        conn.execute("""
+            INSERT INTO portfolio_cash (user_id, balance, updated_at)
+            VALUES (?, ?, datetime('now','localtime'))
+            ON CONFLICT(user_id) DO UPDATE SET
+                balance = balance + ?,
+                updated_at = datetime('now','localtime')
+        """, (user_id, amount, amount))
+        conn.commit()
+        row = conn.execute("SELECT balance FROM portfolio_cash WHERE user_id = ?", (user_id,)).fetchone()
+        conn.close()
+        return row["balance"] if row else 0
+    finally:
+        conn.close()
 
 
 def set_cash_balance(user_id: str, balance: float) -> float:
-    """直接设置零钱余额（覆盖写入）。返回新余额。"""
-    conn = _get_conn()
-    conn.execute("""
-        INSERT INTO portfolio_cash (user_id, balance, updated_at)
-        VALUES (?, ?, datetime('now','localtime'))
-        ON CONFLICT(user_id) DO UPDATE SET
-            balance = ?,
-            updated_at = datetime('now','localtime')
-    """, (user_id, balance, balance))
-    conn.commit()
-    row = conn.execute("SELECT balance FROM portfolio_cash WHERE user_id = ?", (user_id,)).fetchone()
-    conn.close()
-    return row["balance"] if row else 0
+    try:
+        """直接设置零钱余额（覆盖写入）。返回新余额。"""
+        conn = _get_conn()
+        conn.execute("""
+            INSERT INTO portfolio_cash (user_id, balance, updated_at)
+            VALUES (?, ?, datetime('now','localtime'))
+            ON CONFLICT(user_id) DO UPDATE SET
+                balance = ?,
+                updated_at = datetime('now','localtime')
+        """, (user_id, balance, balance))
+        conn.commit()
+        row = conn.execute("SELECT balance FROM portfolio_cash WHERE user_id = ?", (user_id,)).fetchone()
+        conn.close()
+        return row["balance"] if row else 0
+    finally:
+        conn.close()
 
 
 # ── 零钱每日收益 ──────────────────────────────────────
 
 
 def accrue_cash_interest(user_id: str = "default") -> dict:
-    """计算并发放零钱每日收益。每天只会执行一次。返回今日收益信息。"""
-    conn = _get_conn()
-    row = conn.execute("SELECT * FROM portfolio_cash WHERE user_id = ?", (user_id,)).fetchone()
-    if not row:
-        conn.execute("INSERT INTO portfolio_cash (user_id, balance) VALUES (?, 0)", (user_id,))
+    try:
+        """计算并发放零钱每日收益。每天只会执行一次。返回今日收益信息。"""
+        conn = _get_conn()
+        row = conn.execute("SELECT * FROM portfolio_cash WHERE user_id = ?", (user_id,)).fetchone()
+        if not row:
+            conn.execute("INSERT INTO portfolio_cash (user_id, balance) VALUES (?, 0)", (user_id,))
+            conn.commit()
+            conn.close()
+            return {"interest": 0, "balance": 0, "date": None}
+
+        cash = dict(row)
+        today = datetime.now().strftime("%Y-%m-%d")
+        last_date = cash.get("last_interest_date")
+
+        if last_date == today:
+            conn.close()
+            return {
+                "interest": cash.get("today_interest", 0) or 0,
+                "balance": cash["balance"],
+                "date": today,
+                "already_accrued": True,
+            }
+
+        balance = cash["balance"]
+        if balance <= 0:
+            # 余额为0，只更新日期标记，不产生收益
+            conn.execute(
+                "UPDATE portfolio_cash SET last_interest_date = ?, today_interest = 0 WHERE user_id = ?",
+                (today, user_id),
+            )
+            conn.commit()
+            conn.close()
+            return {"interest": 0, "balance": 0, "date": today}
+
+        # 每日收益 = 余额 × 年化 / 365
+        from config import CASH_ANNUAL_YIELD_7D
+        daily_rate = CASH_ANNUAL_YIELD_7D / 365
+        interest = round(balance * daily_rate, 2)
+        new_balance = round(balance + interest, 2)
+
+        conn.execute("""
+            UPDATE portfolio_cash SET
+                balance = ?,
+                today_interest = ?,
+                last_interest_date = ?,
+                updated_at = datetime('now','localtime')
+            WHERE user_id = ?
+        """, (new_balance, interest, today, user_id))
         conn.commit()
         conn.close()
-        return {"interest": 0, "balance": 0, "date": None}
-
-    cash = dict(row)
-    today = datetime.now().strftime("%Y-%m-%d")
-    last_date = cash.get("last_interest_date")
-
-    if last_date == today:
+        return {"interest": interest, "balance": new_balance, "date": today, "already_accrued": False}
+    finally:
         conn.close()
-        return {
-            "interest": cash.get("today_interest", 0) or 0,
-            "balance": cash["balance"],
-            "date": today,
-            "already_accrued": True,
-        }
-
-    balance = cash["balance"]
-    if balance <= 0:
-        # 余额为0，只更新日期标记，不产生收益
-        conn.execute(
-            "UPDATE portfolio_cash SET last_interest_date = ?, today_interest = 0 WHERE user_id = ?",
-            (today, user_id),
-        )
-        conn.commit()
-        conn.close()
-        return {"interest": 0, "balance": 0, "date": today}
-
-    # 每日收益 = 余额 × 年化 / 365
-    from config import CASH_ANNUAL_YIELD_7D
-    daily_rate = CASH_ANNUAL_YIELD_7D / 365
-    interest = round(balance * daily_rate, 2)
-    new_balance = round(balance + interest, 2)
-
-    conn.execute("""
-        UPDATE portfolio_cash SET
-            balance = ?,
-            today_interest = ?,
-            last_interest_date = ?,
-            updated_at = datetime('now','localtime')
-        WHERE user_id = ?
-    """, (new_balance, interest, today, user_id))
-    conn.commit()
-    conn.close()
-    return {"interest": interest, "balance": new_balance, "date": today, "already_accrued": False}
 
 
 # ── 调仓策略配置 CRUD ──────────────────────────────────────
 
 
 def save_rebalance_config(strategy: str, config_json: str, user_id: str = "default", note: str = None) -> int:
-    """保存调仓配置（新建版本），返回 id。旧版本自动标记为非活跃。"""
-    conn = _get_conn()
-    # 将当前活跃配置标记为非活跃
-    conn.execute(
-        "UPDATE rebalance_config SET is_active = 0 WHERE user_id = ? AND is_active = 1",
-        (user_id,),
-    )
-    cursor = conn.execute(
-        "INSERT INTO rebalance_config (user_id, strategy, config_json, is_active, note) VALUES (?, ?, ?, 1, ?)",
-        (user_id, strategy, config_json, note),
-    )
-    config_id = cursor.lastrowid
-    conn.commit()
-    conn.close()
-    return config_id
+    try:
+        """保存调仓配置（新建版本），返回 id。旧版本自动标记为非活跃。"""
+        conn = _get_conn()
+        # 将当前活跃配置标记为非活跃
+        conn.execute(
+            "UPDATE rebalance_config SET is_active = 0 WHERE user_id = ? AND is_active = 1",
+            (user_id,),
+        )
+        cursor = conn.execute(
+            "INSERT INTO rebalance_config (user_id, strategy, config_json, is_active, note) VALUES (?, ?, ?, 1, ?)",
+            (user_id, strategy, config_json, note),
+        )
+        config_id = cursor.lastrowid
+        conn.commit()
+        conn.close()
+        return config_id
+    finally:
+        conn.close()
 
 
 def get_active_rebalance_config(user_id: str = "default") -> dict | None:
-    """获取当前活跃的调仓配置。"""
-    conn = _get_conn()
-    row = conn.execute(
-        "SELECT * FROM rebalance_config WHERE user_id = ? AND is_active = 1 ORDER BY id DESC LIMIT 1",
-        (user_id,),
-    ).fetchone()
-    conn.close()
-    if not row:
-        return None
-    r = dict(row)
-    r["config"] = json.loads(r["config_json"])
-    return r
+    try:
+        """获取当前活跃的调仓配置。"""
+        conn = _get_conn()
+        row = conn.execute(
+            "SELECT * FROM rebalance_config WHERE user_id = ? AND is_active = 1 ORDER BY id DESC LIMIT 1",
+            (user_id,),
+        ).fetchone()
+        conn.close()
+        if not row:
+            return None
+        r = dict(row)
+        r["config"] = json.loads(r["config_json"])
+        return r
+    finally:
+        conn.close()
 
 
 def list_rebalance_configs(user_id: str = "default", limit: int = 20) -> list[dict]:
-    """列出调仓配置变更历史。"""
-    conn = _get_conn()
-    rows = conn.execute(
-        "SELECT id, strategy, is_active, note, created_at FROM rebalance_config WHERE user_id = ? ORDER BY id DESC LIMIT ?",
-        (user_id, limit),
-    ).fetchall()
-    conn.close()
-    return [dict(r) for r in rows]
+    try:
+        """列出调仓配置变更历史。"""
+        conn = _get_conn()
+        rows = conn.execute(
+            "SELECT id, strategy, is_active, note, created_at FROM rebalance_config WHERE user_id = ? ORDER BY id DESC LIMIT ?",
+            (user_id, limit),
+        ).fetchall()
+        conn.close()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
 
 
 def get_rebalance_config_by_id(config_id: int) -> dict | None:
-    """按 id 获取配置详情。"""
-    conn = _get_conn()
-    row = conn.execute("SELECT * FROM rebalance_config WHERE id = ?", (config_id,)).fetchone()
-    conn.close()
-    if not row:
-        return None
-    r = dict(row)
-    r["config"] = json.loads(r["config_json"])
-    return r
+    try:
+        """按 id 获取配置详情。"""
+        conn = _get_conn()
+        row = conn.execute("SELECT * FROM rebalance_config WHERE id = ?", (config_id,)).fetchone()
+        conn.close()
+        if not row:
+            return None
+        r = dict(row)
+        r["config"] = json.loads(r["config_json"])
+        return r
+    finally:
+        conn.close()
 
 
 def rollback_rebalance_config(config_id: int, user_id: str = "default") -> bool:
-    """回滚到指定配置版本（复制为新活跃版本）。"""
-    conn = _get_conn()
-    row = conn.execute(
-        "SELECT * FROM rebalance_config WHERE id = ? AND user_id = ?",
-        (config_id, user_id),
-    ).fetchone()
-    if not row:
+    try:
+        """回滚到指定配置版本（复制为新活跃版本）。"""
+        conn = _get_conn()
+        row = conn.execute(
+            "SELECT * FROM rebalance_config WHERE id = ? AND user_id = ?",
+            (config_id, user_id),
+        ).fetchone()
+        if not row:
+            conn.close()
+            return False
+        r = dict(row)
+        # 标记旧活跃为非活跃
+        conn.execute(
+            "UPDATE rebalance_config SET is_active = 0 WHERE user_id = ? AND is_active = 1",
+            (user_id,),
+        )
+        # 创建新版本（复制旧配置）
+        conn.execute(
+            "INSERT INTO rebalance_config (user_id, strategy, config_json, is_active, note) VALUES (?, ?, ?, 1, ?)",
+            (user_id, r["strategy"], r["config_json"], f"回滚到版本 #{config_id}"),
+        )
+        conn.commit()
         conn.close()
-        return False
-    r = dict(row)
-    # 标记旧活跃为非活跃
-    conn.execute(
-        "UPDATE rebalance_config SET is_active = 0 WHERE user_id = ? AND is_active = 1",
-        (user_id,),
-    )
-    # 创建新版本（复制旧配置）
-    conn.execute(
-        "INSERT INTO rebalance_config (user_id, strategy, config_json, is_active, note) VALUES (?, ?, ?, 1, ?)",
-        (user_id, r["strategy"], r["config_json"], f"回滚到版本 #{config_id}"),
-    )
-    conn.commit()
-    conn.close()
-    return True
+        return True
+    finally:
+        conn.close()
 
 
 # ── 交易记录 CRUD ──────────────────────────────────────
@@ -539,32 +577,35 @@ def create_transaction(fund_code: str, transaction_type: str, amount: float,
 def list_transactions(fund_code: str = None, holding_id: int = None,
                       user_id: str = "default", limit: int = 100,
                       include_system: bool = False, status: str = None) -> list[dict]:
-    """获取交易记录列表。默认不包含系统自动生成的（is_system=1）交易。"""
-    conn = _get_conn()
-    conditions = ["user_id = ?"]
-    params = [user_id]
-    if fund_code:
-        conditions.append("fund_code = ?")
-        params.append(fund_code)
-    if holding_id:
-        conditions.append("holding_id = ?")
-        params.append(holding_id)
-    if status:
-        conditions.append("status = ?")
-        params.append(status)
-    if not include_system:
-        conditions.append("(is_system IS NULL OR is_system = 0)")
+    try:
+        """获取交易记录列表。默认不包含系统自动生成的（is_system=1）交易。"""
+        conn = _get_conn()
+        conditions = ["user_id = ?"]
+        params = [user_id]
+        if fund_code:
+            conditions.append("fund_code = ?")
+            params.append(fund_code)
+        if holding_id:
+            conditions.append("holding_id = ?")
+            params.append(holding_id)
+        if status:
+            conditions.append("status = ?")
+            params.append(status)
+        if not include_system:
+            conditions.append("(is_system IS NULL OR is_system = 0)")
 
-    where = " AND ".join(conditions)
-    params.append(limit)
-    rows = conn.execute(f"""
-        SELECT * FROM portfolio_transactions
-        WHERE {where}
-        ORDER BY transaction_date DESC, id DESC
-        LIMIT ?
-    """, params).fetchall()
-    conn.close()
-    return [dict(r) for r in rows]
+        where = " AND ".join(conditions)
+        params.append(limit)
+        rows = conn.execute(f"""
+            SELECT * FROM portfolio_transactions
+            WHERE {where}
+            ORDER BY transaction_date DESC, id DESC
+            LIMIT ?
+        """, params).fetchall()
+        conn.close()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
 
 
 def _recalculate_holding(holding_id: int):
@@ -664,84 +705,89 @@ def _recalculate_holding(holding_id: int):
     finally:
         conn.close()
 
-
 def _capture_valuation_snapshot(holding_id: int, transaction_date: str) -> str | None:
-    """根据持仓的 index_code 查询交易日期附近的估值数据，返回 JSON 快照。"""
-    if not holding_id or not transaction_date:
+    try:
+        """根据持仓的 index_code 查询交易日期附近的估值数据，返回 JSON 快照。"""
+        if not holding_id or not transaction_date:
+            conn.close()
+            return None
+        conn = _get_conn()
+        holding = conn.execute(
+            "SELECT index_code, index_name FROM portfolio_holdings WHERE id = ?",
+            (holding_id,)
+        ).fetchone()
+        if not holding or not holding["index_code"]:
+            conn.close()
+            return None
+
+        index_code = holding["index_code"]
+        index_name = holding["index_name"] or ""
+
+        # 查找交易日期附近 7 天内的 PE 估值
+        row = conn.execute("""
+            SELECT percentile, snapshot_date FROM index_valuations
+            WHERE index_code = ? AND metric_type = '市盈率'
+            AND snapshot_date BETWEEN date(?, '-7 days') AND date(?, '+7 days')
+            ORDER BY ABS(julianday(snapshot_date) - julianday(?))
+            LIMIT 1
+        """, (index_code, transaction_date, transaction_date, transaction_date)).fetchone()
+
+        pe_percentile = row["percentile"] if row else None
+        pe_date = row["snapshot_date"] if row else None
+
+        # 查找交易日期附近 7 天内的 PB 估值
+        row_pb = conn.execute("""
+            SELECT percentile FROM index_valuations
+            WHERE index_code = ? AND metric_type = '市净率'
+            AND snapshot_date BETWEEN date(?, '-7 days') AND date(?, '+7 days')
+            ORDER BY ABS(julianday(snapshot_date) - julianday(?))
+            LIMIT 1
+        """, (index_code, transaction_date, transaction_date, transaction_date)).fetchone()
+
+        pb_percentile = row_pb["percentile"] if row_pb else None
         conn.close()
-        return None
-    conn = _get_conn()
-    holding = conn.execute(
-        "SELECT index_code, index_name FROM portfolio_holdings WHERE id = ?",
-        (holding_id,)
-    ).fetchone()
-    if not holding or not holding["index_code"]:
+
+        if pe_percentile is None and pb_percentile is None:
+            return None
+
+        import json
+        return json.dumps({
+            "index_code": index_code,
+            "index_name": index_name,
+            "pe_percentile": pe_percentile,
+            "pb_percentile": pb_percentile,
+            "snapshot_date": pe_date or transaction_date
+        }, ensure_ascii=False)
+    finally:
         conn.close()
-        return None
-
-    index_code = holding["index_code"]
-    index_name = holding["index_name"] or ""
-
-    # 查找交易日期附近 7 天内的 PE 估值
-    row = conn.execute("""
-        SELECT percentile, snapshot_date FROM index_valuations
-        WHERE index_code = ? AND metric_type = '市盈率'
-        AND snapshot_date BETWEEN date(?, '-7 days') AND date(?, '+7 days')
-        ORDER BY ABS(julianday(snapshot_date) - julianday(?))
-        LIMIT 1
-    """, (index_code, transaction_date, transaction_date, transaction_date)).fetchone()
-
-    pe_percentile = row["percentile"] if row else None
-    pe_date = row["snapshot_date"] if row else None
-
-    # 查找交易日期附近 7 天内的 PB 估值
-    row_pb = conn.execute("""
-        SELECT percentile FROM index_valuations
-        WHERE index_code = ? AND metric_type = '市净率'
-        AND snapshot_date BETWEEN date(?, '-7 days') AND date(?, '+7 days')
-        ORDER BY ABS(julianday(snapshot_date) - julianday(?))
-        LIMIT 1
-    """, (index_code, transaction_date, transaction_date, transaction_date)).fetchone()
-
-    pb_percentile = row_pb["percentile"] if row_pb else None
-    conn.close()
-
-    if pe_percentile is None and pb_percentile is None:
-        return None
-
-    import json
-    return json.dumps({
-        "index_code": index_code,
-        "index_name": index_name,
-        "pe_percentile": pe_percentile,
-        "pb_percentile": pb_percentile,
-        "snapshot_date": pe_date or transaction_date
-    }, ensure_ascii=False)
 
 
 def backfill_valuation_snapshots() -> int:
-    """为历史交易回填估值快照。返回更新的记录数。"""
-    conn = _get_conn()
-    txs = conn.execute("""
-        SELECT t.id, t.holding_id, t.transaction_date
-        FROM portfolio_transactions t
-        JOIN portfolio_holdings h ON t.holding_id = h.id
-        WHERE t.status IN ('confirmed', 'settled')
-        AND t.valuation_snapshot IS NULL
-        AND h.index_code IS NOT NULL AND h.index_code != ''
-    """).fetchall()
+    try:
+        """为历史交易回填估值快照。返回更新的记录数。"""
+        conn = _get_conn()
+        txs = conn.execute("""
+            SELECT t.id, t.holding_id, t.transaction_date
+            FROM portfolio_transactions t
+            JOIN portfolio_holdings h ON t.holding_id = h.id
+            WHERE t.status IN ('confirmed', 'settled')
+            AND t.valuation_snapshot IS NULL
+            AND h.index_code IS NOT NULL AND h.index_code != ''
+        """).fetchall()
 
-    updated = 0
-    for tx in txs:
-        snapshot = _capture_valuation_snapshot(tx["holding_id"], tx["transaction_date"])
-        if snapshot:
-            conn.execute("UPDATE portfolio_transactions SET valuation_snapshot = ? WHERE id = ?",
-                        (snapshot, tx["id"]))
-            updated += 1
+        updated = 0
+        for tx in txs:
+            snapshot = _capture_valuation_snapshot(tx["holding_id"], tx["transaction_date"])
+            if snapshot:
+                conn.execute("UPDATE portfolio_transactions SET valuation_snapshot = ? WHERE id = ?",
+                            (snapshot, tx["id"]))
+                updated += 1
 
-    conn.commit()
-    conn.close()
-    return updated
+        conn.commit()
+        conn.close()
+        return updated
+    finally:
+        conn.close()
 
 
 def _auto_update_decision_on_confirm(tx_id: int, user_id: str = "default"):
@@ -766,7 +812,6 @@ def _auto_update_decision_on_confirm(tx_id: int, user_id: str = "default"):
             update_decision_status(row["id"], "executed", f"交易 #{tx_id} 已确认")
     finally:
         conn.close()
-
 
 def confirm_transaction(tx_id: int, confirmed_price: float,
                         confirmed_shares: float = None,
@@ -1021,60 +1066,63 @@ def fetch_fund_nav_on_or_before(fund_code: str, nav_date: str) -> dict | None:
 
 
 def auto_confirm_due_transactions(as_of_date: str | None = None, user_id: str = "default") -> dict:
-    """自动确认已到确认日的 pending 交易。
+    try:
+        """自动确认已到确认日的 pending 交易。
 
-    买入/卖出/转换均按提交时间计算实际 T 日，并用 T 日单位净值确认份额或金额。
-    如果某只基金的 T 日净值尚未披露，保留 pending，等待下一次自动任务。
-    """
-    today = as_of_date or date.today().isoformat()
-    conn = _get_conn()
-    rows = conn.execute("""
-        SELECT * FROM portfolio_transactions
-        WHERE user_id = ?
-          AND status = 'pending'
-          AND expected_confirm_date IS NOT NULL
-          AND expected_confirm_date <= ?
-        ORDER BY expected_confirm_date ASC, id ASC
-    """, (user_id, today)).fetchall()
-    conn.close()
+        买入/卖出/转换均按提交时间计算实际 T 日，并用 T 日单位净值确认份额或金额。
+        如果某只基金的 T 日净值尚未披露，保留 pending，等待下一次自动任务。
+        """
+        today = as_of_date or date.today().isoformat()
+        conn = _get_conn()
+        rows = conn.execute("""
+            SELECT * FROM portfolio_transactions
+            WHERE user_id = ?
+              AND status = 'pending'
+              AND expected_confirm_date IS NOT NULL
+              AND expected_confirm_date <= ?
+            ORDER BY expected_confirm_date ASC, id ASC
+        """, (user_id, today)).fetchall()
+        conn.close()
 
-    confirmed = 0
-    skipped = []
-    errors = []
-    for row in rows:
-        tx = dict(row)
-        trade_date = _effective_trade_date(tx.get("transaction_date") or today, tx.get("transaction_time"))
-        nav_data = fetch_fund_nav_on_or_before(tx["fund_code"], trade_date)
-        if not nav_data or not nav_data.get("nav"):
-            skipped.append({
-                "id": tx["id"],
-                "fund_code": tx["fund_code"],
-                "reason": f"{trade_date} 净值未披露",
-            })
-            continue
-        if nav_data.get("date") and nav_data["date"] != trade_date:
-            skipped.append({
-                "id": tx["id"],
-                "fund_code": tx["fund_code"],
-                "reason": f"{trade_date} 净值未披露，最近净值为 {nav_data['date']}",
-            })
-            continue
-        try:
-            ok = confirm_transaction(tx["id"], confirmed_price=float(nav_data["nav"]))
-            if ok:
-                confirmed += 1
-            else:
-                errors.append({"id": tx["id"], "fund_code": tx["fund_code"], "error": "confirm failed"})
-        except Exception as e:
-            errors.append({"id": tx["id"], "fund_code": tx["fund_code"], "error": str(e)})
+        confirmed = 0
+        skipped = []
+        errors = []
+        for row in rows:
+            tx = dict(row)
+            trade_date = _effective_trade_date(tx.get("transaction_date") or today, tx.get("transaction_time"))
+            nav_data = fetch_fund_nav_on_or_before(tx["fund_code"], trade_date)
+            if not nav_data or not nav_data.get("nav"):
+                skipped.append({
+                    "id": tx["id"],
+                    "fund_code": tx["fund_code"],
+                    "reason": f"{trade_date} 净值未披露",
+                })
+                continue
+            if nav_data.get("date") and nav_data["date"] != trade_date:
+                skipped.append({
+                    "id": tx["id"],
+                    "fund_code": tx["fund_code"],
+                    "reason": f"{trade_date} 净值未披露，最近净值为 {nav_data['date']}",
+                })
+                continue
+            try:
+                ok = confirm_transaction(tx["id"], confirmed_price=float(nav_data["nav"]))
+                if ok:
+                    confirmed += 1
+                else:
+                    errors.append({"id": tx["id"], "fund_code": tx["fund_code"], "error": "confirm failed"})
+            except Exception as e:
+                errors.append({"id": tx["id"], "fund_code": tx["fund_code"], "error": str(e)})
 
-    return {
-        "checked": len(rows),
-        "confirmed": confirmed,
-        "skipped": skipped,
-        "errors": errors,
-        "as_of_date": today,
-    }
+        return {
+            "checked": len(rows),
+            "confirmed": confirmed,
+            "skipped": skipped,
+            "errors": errors,
+            "as_of_date": today,
+        }
+    finally:
+        conn.close()
 
 
 def settle_transaction(tx_id: int) -> bool:
@@ -1267,114 +1315,40 @@ def get_fund_nav_history(fund_code: str, user_id: str = "default", days: int = 3
 
 
 def refresh_holding_price(holding_id: int) -> dict | None:
-    """
-    刷新单个持仓的最新净值并更新数据库，同时缓存到 fund_nav_history。
+    try:
+        """
+        刷新单个持仓的最新净值并更新数据库，同时缓存到 fund_nav_history。
 
-    返回: {"nav": 0.57, "date": "2026-05-22", "change_pct": -2.1,
-           "today_profit": -12.34, "today_change_pct": -2.1} 或 None
-    """
-    from services.fund_data_service import save_latest_nav
+        返回: {"nav": 0.57, "date": "2026-05-22", "change_pct": -2.1,
+               "today_profit": -12.34, "today_change_pct": -2.1} 或 None
+        """
+        from services.fund_data_service import save_latest_nav
 
-    conn = _get_conn()
-    holding = conn.execute("SELECT * FROM portfolio_holdings WHERE id = ?", (holding_id,)).fetchone()
-    if not holding:
-        conn.close()
-        return None
-    holding = dict(holding)
-    fund_code = holding["fund_code"]
+        conn = _get_conn()
+        holding = conn.execute("SELECT * FROM portfolio_holdings WHERE id = ?", (holding_id,)).fetchone()
+        if not holding:
+            conn.close()
+            return None
+        holding = dict(holding)
+        fund_code = holding["fund_code"]
 
-    nav_data = fetch_fund_nav(fund_code)
-    if not nav_data:
-        conn.close()
-        return None
-
-    nav = nav_data["nav"]
-    nav_date = nav_data["date"]
-    change_pct = nav_data.get("change_pct")
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-    shares = holding.get("shares", 0) or 0
-    total_cost = holding.get("total_cost", 0) or 0
-    current_value = shares * nav
-    profit_loss = current_value - total_cost
-    profit_rate = profit_loss / total_cost if total_cost > 0 else 0
-
-    # 今日盈亏 = 份额 × (当前净值 - 昨日净值)，通过涨跌幅反算昨日净值
-    if change_pct is not None and (100 + change_pct) != 0:
-        today_profit = round(current_value * change_pct / (100 + change_pct), 2)
-    else:
-        today_profit = 0
-
-    conn.execute("""
-        UPDATE portfolio_holdings SET
-            current_price = ?,
-            current_value = ?,
-            profit_loss = ?,
-            profit_rate = ?,
-            today_change_pct = ?,
-            today_profit = ?,
-            price_updated_at = ?,
-            updated_at = ?
-        WHERE id = ?
-    """, (round(nav, 4), round(current_value, 2), round(profit_loss, 2),
-          round(profit_rate, 4), change_pct, today_profit, nav_date, now, holding_id))
-    conn.commit()
-    conn.close()
-
-    # 缓存最新净值到本地
-    if nav_date:
-        try:
-            save_latest_nav(fund_code, nav, nav_date, change_pct)
-        except Exception as e:
-            logger.warning(f"缓存最新净值失败 {fund_code}: {e}")
-
-    nav_data["today_profit"] = today_profit
-    nav_data["today_change_pct"] = change_pct
-    return nav_data
-
-
-def refresh_all_fund_prices(user_id: str = "default") -> list[dict]:
-    """
-    批量刷新用户所有持仓的最新净值，并缓存到 fund_nav_history。
-
-    返回: [{"fund_code": "161725", "fund_name": "...", "nav": 0.57, "date": "2026-05-22"}, ...]
-    """
-    from services.fund_data_service import save_latest_nav
-
-    holdings = list_holdings(user_id)
-    results = []
-    failed_codes = []
-    for h in holdings:
-        # 跳过已清仓持仓
-        if (h.get("shares") or 0) <= 0:
-            results.append({
-                "fund_code": h["fund_code"],
-                "fund_name": h["fund_name"],
-                "skipped": True,
-                "reason": "已清仓",
-            })
-            continue
-        nav_data = fetch_fund_nav(h["fund_code"])
+        nav_data = fetch_fund_nav(fund_code)
         if not nav_data:
-            failed_codes.append(h["fund_code"])
-            results.append({
-                "fund_code": h["fund_code"],
-                "fund_name": h["fund_name"],
-                "error": "净值获取失败",
-            })
-            continue
+            conn.close()
+            return None
 
         nav = nav_data["nav"]
         nav_date = nav_data["date"]
+        change_pct = nav_data.get("change_pct")
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        shares = h.get("shares", 0) or 0
-        total_cost = h.get("total_cost", 0) or 0
+
+        shares = holding.get("shares", 0) or 0
+        total_cost = holding.get("total_cost", 0) or 0
         current_value = shares * nav
         profit_loss = current_value - total_cost
         profit_rate = profit_loss / total_cost if total_cost > 0 else 0
 
-        conn = _get_conn()
-        change_pct = nav_data.get("change_pct")
+        # 今日盈亏 = 份额 × (当前净值 - 昨日净值)，通过涨跌幅反算昨日净值
         if change_pct is not None and (100 + change_pct) != 0:
             today_profit = round(current_value * change_pct / (100 + change_pct), 2)
         else:
@@ -1392,44 +1366,124 @@ def refresh_all_fund_prices(user_id: str = "default") -> list[dict]:
                 updated_at = ?
             WHERE id = ?
         """, (round(nav, 4), round(current_value, 2), round(profit_loss, 2),
-              round(profit_rate, 4), change_pct, today_profit, nav_date, now, h["id"]))
+              round(profit_rate, 4), change_pct, today_profit, nav_date, now, holding_id))
         conn.commit()
         conn.close()
 
         # 缓存最新净值到本地
         if nav_date:
             try:
-                save_latest_nav(h["fund_code"], nav, nav_date, change_pct)
+                save_latest_nav(fund_code, nav, nav_date, change_pct)
             except Exception as e:
-                logger.warning(f"缓存最新净值失败 {h['fund_code']}: {e}")
+                logger.warning(f"缓存最新净值失败 {fund_code}: {e}")
 
-        results.append({
-            "fund_code": h["fund_code"],
-            "fund_name": h["fund_name"],
-            "nav": nav,
-            "date": nav_date,
-            "change_pct": change_pct,
-            "today_profit": today_profit,
-        })
+        nav_data["today_profit"] = today_profit
+        nav_data["today_change_pct"] = change_pct
+        return nav_data
+    finally:
+        conn.close()
 
-    if failed_codes:
-        logger.warning(f"批量刷新净值失败基金: {failed_codes}")
 
-    # 保存刷新状态，便于 /api/portfolio/refresh-status 查询
+def refresh_all_fund_prices(user_id: str = "default") -> list[dict]:
     try:
-        save_analysis_cache("portfolio_last_refresh_status", {
-            "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "total": len(results),
-            "success": sum(1 for r in results if "nav" in r),
-            "failed": len(failed_codes),
-            "failed_codes": failed_codes,
-            "skipped": sum(1 for r in results if r.get("skipped")),
-            "details": results,
-        })
-    except Exception as e:
-        logger.warning(f"保存刷新状态失败: {e}")
+        """
+        批量刷新用户所有持仓的最新净值，并缓存到 fund_nav_history。
 
-    return results
+        返回: [{"fund_code": "161725", "fund_name": "...", "nav": 0.57, "date": "2026-05-22"}, ...]
+        """
+        from services.fund_data_service import save_latest_nav
+
+        holdings = list_holdings(user_id)
+        results = []
+        failed_codes = []
+        for h in holdings:
+            # 跳过已清仓持仓
+            if (h.get("shares") or 0) <= 0:
+                results.append({
+                    "fund_code": h["fund_code"],
+                    "fund_name": h["fund_name"],
+                    "skipped": True,
+                    "reason": "已清仓",
+                })
+                continue
+            nav_data = fetch_fund_nav(h["fund_code"])
+            if not nav_data:
+                failed_codes.append(h["fund_code"])
+                results.append({
+                    "fund_code": h["fund_code"],
+                    "fund_name": h["fund_name"],
+                    "error": "净值获取失败",
+                })
+                continue
+
+            nav = nav_data["nav"]
+            nav_date = nav_data["date"]
+            now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            shares = h.get("shares", 0) or 0
+            total_cost = h.get("total_cost", 0) or 0
+            current_value = shares * nav
+            profit_loss = current_value - total_cost
+            profit_rate = profit_loss / total_cost if total_cost > 0 else 0
+
+            conn = _get_conn()
+            change_pct = nav_data.get("change_pct")
+            if change_pct is not None and (100 + change_pct) != 0:
+                today_profit = round(current_value * change_pct / (100 + change_pct), 2)
+            else:
+                today_profit = 0
+
+            conn.execute("""
+                UPDATE portfolio_holdings SET
+                    current_price = ?,
+                    current_value = ?,
+                    profit_loss = ?,
+                    profit_rate = ?,
+                    today_change_pct = ?,
+                    today_profit = ?,
+                    price_updated_at = ?,
+                    updated_at = ?
+                WHERE id = ?
+            """, (round(nav, 4), round(current_value, 2), round(profit_loss, 2),
+                  round(profit_rate, 4), change_pct, today_profit, nav_date, now, h["id"]))
+            conn.commit()
+            conn.close()
+
+            # 缓存最新净值到本地
+            if nav_date:
+                try:
+                    save_latest_nav(h["fund_code"], nav, nav_date, change_pct)
+                except Exception as e:
+                    logger.warning(f"缓存最新净值失败 {h['fund_code']}: {e}")
+
+            results.append({
+                "fund_code": h["fund_code"],
+                "fund_name": h["fund_name"],
+                "nav": nav,
+                "date": nav_date,
+                "change_pct": change_pct,
+                "today_profit": today_profit,
+            })
+
+        if failed_codes:
+            logger.warning(f"批量刷新净值失败基金: {failed_codes}")
+
+        # 保存刷新状态，便于 /api/portfolio/refresh-status 查询
+        try:
+            save_analysis_cache("portfolio_last_refresh_status", {
+                "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "total": len(results),
+                "success": sum(1 for r in results if "nav" in r),
+                "failed": len(failed_codes),
+                "failed_codes": failed_codes,
+                "skipped": sum(1 for r in results if r.get("skipped")),
+                "details": results,
+            })
+        except Exception as e:
+            logger.warning(f"保存刷新状态失败: {e}")
+
+        return results
+    finally:
+        conn.close()
 
 
 # ── 基金信息查询 ──────────────────────────────────────
@@ -2053,7 +2107,6 @@ def create_alert(alert_type: str, title: str, content: str = None,
     finally:
         conn.close()
 
-
 def backfill_alert_holding_id() -> int:
     """回填 portfolio_alerts.holding_id（用 related_fund_code 匹配持仓）。
 
@@ -2086,7 +2139,6 @@ def backfill_alert_holding_id() -> int:
         return updated
     finally:
         conn.close()
-
 
 def list_alerts(user_id: str = "default", limit: int = 50,
                 unread_only: bool = False) -> list[dict]:
@@ -2221,14 +2273,17 @@ def _calc_reliability(alert_type: str, severity: str, stats: dict | None) -> dic
 
 
 def get_unread_alert_count(user_id: str = "default") -> int:
-    """获取未读预警数量。"""
-    conn = _get_conn()
-    row = conn.execute(
-        "SELECT COUNT(*) as cnt FROM portfolio_alerts WHERE user_id = ? AND is_read = 0",
-        (user_id,)
-    ).fetchone()
-    conn.close()
-    return row["cnt"] if row else 0
+    try:
+        """获取未读预警数量。"""
+        conn = _get_conn()
+        row = conn.execute(
+            "SELECT COUNT(*) as cnt FROM portfolio_alerts WHERE user_id = ? AND is_read = 0",
+            (user_id,)
+        ).fetchone()
+        conn.close()
+        return row["cnt"] if row else 0
+    finally:
+        conn.close()
 
 
 def cleanup_old_alerts(user_id: str = "default", days: int = 30) -> int:
@@ -2244,7 +2299,6 @@ def cleanup_old_alerts(user_id: str = "default", days: int = 30) -> int:
         return deleted
     finally:
         conn.close()
-
 
 def get_alert_history(alert_id: int, days: int = 30) -> list[dict]:
     """P1-3.1：查询同持仓同类型预警的历史记录。
@@ -2272,86 +2326,100 @@ def get_alert_history(alert_id: int, days: int = 30) -> list[dict]:
     finally:
         conn.close()
 
-
 def mark_alert_read(alert_id: int) -> bool:
-    """标记预警为已读（同时标记同标题+severity的所有未读预警）。"""
-    conn = _get_conn()
-    # 先获取该 alert 的 title+severity
-    row = conn.execute(
-        "SELECT title, severity, user_id FROM portfolio_alerts WHERE id = ?",
-        (alert_id,)
-    ).fetchone()
-    if not row:
+    try:
+        """标记预警为已读（同时标记同标题+severity的所有未读预警）。"""
+        conn = _get_conn()
+        # 先获取该 alert 的 title+severity
+        row = conn.execute(
+            "SELECT title, severity, user_id FROM portfolio_alerts WHERE id = ?",
+            (alert_id,)
+        ).fetchone()
+        if not row:
+            conn.close()
+            return False
+        cur = conn.execute(
+            "UPDATE portfolio_alerts SET is_read = 1 WHERE title = ? AND severity = ? AND user_id = ? AND is_read = 0",
+            (row["title"], row["severity"], row["user_id"])
+        )
+        conn.commit()
+        ok = cur.rowcount > 0
         conn.close()
-        return False
-    cur = conn.execute(
-        "UPDATE portfolio_alerts SET is_read = 1 WHERE title = ? AND severity = ? AND user_id = ? AND is_read = 0",
-        (row["title"], row["severity"], row["user_id"])
-    )
-    conn.commit()
-    ok = cur.rowcount > 0
-    conn.close()
-    return ok
+        return ok
+    finally:
+        conn.close()
 
 
 def delete_alert(alert_id: int) -> bool:
-    """删除预警（同时删除同标题+severity的所有预警）。"""
-    conn = _get_conn()
-    row = conn.execute(
-        "SELECT title, severity, user_id FROM portfolio_alerts WHERE id = ?",
-        (alert_id,)
-    ).fetchone()
-    if not row:
+    try:
+        """删除预警（同时删除同标题+severity的所有预警）。"""
+        conn = _get_conn()
+        row = conn.execute(
+            "SELECT title, severity, user_id FROM portfolio_alerts WHERE id = ?",
+            (alert_id,)
+        ).fetchone()
+        if not row:
+            conn.close()
+            return False
+        cur = conn.execute(
+            "DELETE FROM portfolio_alerts WHERE title = ? AND severity = ? AND user_id = ?",
+            (row["title"], row["severity"], row["user_id"])
+        )
+        conn.commit()
+        ok = cur.rowcount > 0
         conn.close()
-        return False
-    cur = conn.execute(
-        "DELETE FROM portfolio_alerts WHERE title = ? AND severity = ? AND user_id = ?",
-        (row["title"], row["severity"], row["user_id"])
-    )
-    conn.commit()
-    ok = cur.rowcount > 0
-    conn.close()
-    return ok
+        return ok
+    finally:
+        conn.close()
 
 
 # ── 交易标签 CRUD ──────────────────────────────────────
 
 
 def add_transaction_tag(transaction_id: int, tag: str) -> int:
-    """给交易记录添加标签，返回 tag_id。"""
-    conn = _get_conn()
-    cur = conn.execute(
-        "INSERT INTO transaction_tags (transaction_id, tag) VALUES (?, ?)",
-        (transaction_id, tag)
-    )
-    conn.commit()
-    tag_id = cur.lastrowid
-    conn.close()
-    return tag_id
+    try:
+        """给交易记录添加标签，返回 tag_id。"""
+        conn = _get_conn()
+        cur = conn.execute(
+            "INSERT INTO transaction_tags (transaction_id, tag) VALUES (?, ?)",
+            (transaction_id, tag)
+        )
+        conn.commit()
+        tag_id = cur.lastrowid
+        conn.close()
+        return tag_id
+    finally:
+        conn.close()
 
 
 def remove_transaction_tag(transaction_id: int, tag: str) -> bool:
-    """移除交易记录的指定标签。"""
-    conn = _get_conn()
-    cur = conn.execute(
-        "DELETE FROM transaction_tags WHERE transaction_id = ? AND tag = ?",
-        (transaction_id, tag)
-    )
-    conn.commit()
-    ok = cur.rowcount > 0
-    conn.close()
-    return ok
+    try:
+        """移除交易记录的指定标签。"""
+        conn = _get_conn()
+        cur = conn.execute(
+            "DELETE FROM transaction_tags WHERE transaction_id = ? AND tag = ?",
+            (transaction_id, tag)
+        )
+        conn.commit()
+        ok = cur.rowcount > 0
+        conn.close()
+        return ok
+    finally:
+        conn.close()
 
 
 def get_transaction_tags(transaction_id: int) -> list[str]:
-    """获取交易记录的所有标签。"""
-    conn = _get_conn()
-    rows = conn.execute(
-        "SELECT tag FROM transaction_tags WHERE transaction_id = ?",
-        (transaction_id,)
-    ).fetchall()
-    conn.close()
-    return [r["tag"] for r in rows]
+    try:
+        """获取交易记录的所有标签。"""
+        conn = _get_conn()
+        rows = conn.execute(
+            "SELECT tag FROM transaction_tags WHERE transaction_id = ?",
+            (transaction_id,)
+        ).fetchall()
+        conn.close()
+        return [r["tag"] for r in rows]
+    finally:
+        conn.close()
 
 
 # ── 持仓分析辅助函数 ──────────────────────────────────
@@ -2410,287 +2478,296 @@ def get_portfolio_diversification(user_id: str = "default") -> dict:
 
 
 def get_transaction_summary(user_id: str = "default") -> dict:
-    """分析交易行为汇总，含最近 50 笔交易明细。不包含系统交易的统计数据。"""
-    conn = _get_conn()
+    try:
+        """分析交易行为汇总，含最近 50 笔交易明细。不包含系统交易的统计数据。"""
+        conn = _get_conn()
 
-    # 买入统计（排除系统交易）
-    buy_rows = conn.execute("""
-        SELECT COUNT(*) as tx_count, SUM(amount) as total_amount
-        FROM portfolio_transactions
-        WHERE user_id = ? AND transaction_type = 'buy' AND (status IN ('confirmed', 'settled') OR status IS NULL)
-            AND (is_system IS NULL OR is_system = 0)
-    """, (user_id,)).fetchall()
-    buy_count = buy_rows[0]["tx_count"] if buy_rows else 0
-    buy_total = buy_rows[0]["total_amount"] or 0 if buy_rows else 0
+        # 买入统计（排除系统交易）
+        buy_rows = conn.execute("""
+            SELECT COUNT(*) as tx_count, SUM(amount) as total_amount
+            FROM portfolio_transactions
+            WHERE user_id = ? AND transaction_type = 'buy' AND (status IN ('confirmed', 'settled') OR status IS NULL)
+                AND (is_system IS NULL OR is_system = 0)
+        """, (user_id,)).fetchall()
+        buy_count = buy_rows[0]["tx_count"] if buy_rows else 0
+        buy_total = buy_rows[0]["total_amount"] or 0 if buy_rows else 0
 
-    # 卖出统计（排除系统交易）
-    sell_rows = conn.execute("""
-        SELECT COUNT(*) as tx_count, SUM(amount) as total_amount
-        FROM portfolio_transactions
-        WHERE user_id = ? AND transaction_type = 'sell' AND (status IN ('confirmed', 'settled') OR status IS NULL)
-            AND (is_system IS NULL OR is_system = 0)
-    """, (user_id,)).fetchall()
-    sell_count = sell_rows[0]["tx_count"] if sell_rows else 0
-    sell_total = sell_rows[0]["total_amount"] or 0 if sell_rows else 0
+        # 卖出统计（排除系统交易）
+        sell_rows = conn.execute("""
+            SELECT COUNT(*) as tx_count, SUM(amount) as total_amount
+            FROM portfolio_transactions
+            WHERE user_id = ? AND transaction_type = 'sell' AND (status IN ('confirmed', 'settled') OR status IS NULL)
+                AND (is_system IS NULL OR is_system = 0)
+        """, (user_id,)).fetchall()
+        sell_count = sell_rows[0]["tx_count"] if sell_rows else 0
+        sell_total = sell_rows[0]["total_amount"] or 0 if sell_rows else 0
 
-    # 最近交易明细（含基金名称）
-    recent = conn.execute("""
-        SELECT t.id, t.fund_code, t.transaction_type, t.shares, t.price, t.amount,
-               t.transaction_date, t.status, t.is_system,
-               COALESCE(h.fund_name, '') as fund_name,
-               COALESCE(h.index_name, '') as index_name
-        FROM portfolio_transactions t
-        LEFT JOIN portfolio_holdings h ON t.holding_id = h.id
-        WHERE t.user_id = ? AND (t.is_system IS NULL OR t.is_system = 0)
-        ORDER BY t.id DESC
-        LIMIT 50
-    """, (user_id,)).fetchall()
+        # 最近交易明细（含基金名称）
+        recent = conn.execute("""
+            SELECT t.id, t.fund_code, t.transaction_type, t.shares, t.price, t.amount,
+                   t.transaction_date, t.status, t.is_system,
+                   COALESCE(h.fund_name, '') as fund_name,
+                   COALESCE(h.index_name, '') as index_name
+            FROM portfolio_transactions t
+            LEFT JOIN portfolio_holdings h ON t.holding_id = h.id
+            WHERE t.user_id = ? AND (t.is_system IS NULL OR t.is_system = 0)
+            ORDER BY t.id DESC
+            LIMIT 50
+        """, (user_id,)).fetchall()
 
-    conn.close()
+        conn.close()
 
-    return {
-        "buy_count": buy_count,
-        "buy_total": round(buy_total, 2),
-        "sell_count": sell_count,
-        "sell_total": round(sell_total, 2),
-        "total_tx_count": buy_count + sell_count,
-        "net_investment": round(buy_total - sell_total, 2),
-        "recent_transactions": [dict(r) for r in recent],
-    }
+        return {
+            "buy_count": buy_count,
+            "buy_total": round(buy_total, 2),
+            "sell_count": sell_count,
+            "sell_total": round(sell_total, 2),
+            "total_tx_count": buy_count + sell_count,
+            "net_investment": round(buy_total - sell_total, 2),
+            "recent_transactions": [dict(r) for r in recent],
+        }
+    finally:
+        conn.close()
 
 
 def analyze_trade_patterns(user_id: str = "default") -> dict:
-    """分析用户真实交易行为模式（排除系统交易）。
-
-    返回追涨倾向、杀跌倾向、持有耐心、频繁交易度、胜率、最大单笔亏损、交易风格判定。
-    """
-    conn = _get_conn()
-
-    # 获取所有非系统交易（含 fund_name 从 holdings 关联）
-    rows = conn.execute("""
-        SELECT t.id, t.holding_id, t.fund_code, t.fund_name, t.transaction_type,
-               t.shares, t.price, t.amount, t.transaction_date, t.status, t.is_system,
-               h.index_code, h.fund_name as holding_fund_name
-        FROM portfolio_transactions t
-        LEFT JOIN portfolio_holdings h ON t.holding_id = h.id
-        WHERE t.user_id = ?
-          AND (t.is_system IS NULL OR t.is_system = 0)
-          AND (t.status IN ('confirmed', 'settled') OR t.status IS NULL)
-        ORDER BY t.transaction_date ASC, t.id ASC
-    """, (user_id,)).fetchall()
-
-    if not rows or len(rows) < 3:
-        conn.close()
-        return {"error": "交易记录不足", "count": len(rows) if rows else 0}
-
-    txs = [dict(r) for r in rows]
-
-    # ── 按基金代码分组，计算买入均价（份额加权）──
-    fund_buys = {}  # {fund_code: [{shares, price, amount, date}, ...]}
-    fund_sells = []  # [{fund_code, shares, price, amount, date, buy_avg_price}, ...]
-
-    for tx in txs:
-        fc = tx["fund_code"]
-        if tx["transaction_type"] == "buy":
-            fund_buys.setdefault(fc, []).append({
-                "shares": tx.get("shares") or 0,
-                "price": tx.get("price") or 0,
-                "amount": tx.get("amount") or 0,
-                "date": tx.get("transaction_date", ""),
-            })
-        elif tx["transaction_type"] == "sell":
-            fund_sells.append({
-                "fund_code": fc,
-                "shares": tx.get("shares") or 0,
-                "price": tx.get("price") or 0,
-                "amount": tx.get("amount") or 0,
-                "date": tx.get("transaction_date", ""),
-            })
-
-    # 计算每只基金的加权平均买入价（卖出时扣减份额）
-    def _calc_buy_avg(buy_list, sell_shares_so_far=0):
-        """计算当前买入均价（考虑已卖出份额扣减）。"""
-        total_cost = 0.0
-        total_shares = 0.0
-        remaining_sells = sell_shares_so_far
-        for b in buy_list:
-            shares = b["shares"]
-            if remaining_sells > 0:
-                if remaining_sells >= shares:
-                    remaining_sells -= shares
-                    continue
-                else:
-                    shares -= remaining_sells
-                    remaining_sells = 0
-            total_cost += b["price"] * shares
-            total_shares += shares
-        return total_cost / total_shares if total_shares > 0 else 0
-
-    # ── 追涨倾向：买入时的PE分位中位数 ──
-    buy_pe_percentiles = []
-    for tx in txs:
-        if tx["transaction_type"] != "buy":
-            continue
-        index_code = tx.get("index_code")
-        if not index_code:
-            continue
-        tx_date = tx.get("transaction_date", "")
-        val_row = conn.execute("""
-            SELECT percentile FROM index_valuations
-            WHERE index_code = ? AND metric_type = '市盈率'
-              AND snapshot_date BETWEEN date(?, '-7 days') AND date(?, '+7 days')
-            ORDER BY ABS(julianday(snapshot_date) - julianday(?))
-            LIMIT 1
-        """, (index_code, tx_date, tx_date, tx_date)).fetchone()
-        if val_row and val_row["percentile"] is not None:
-            buy_pe_percentiles.append(float(val_row["percentile"]))
-
-    # ── 杀跌倾向 + 胜率 + 最大单笔亏损 ──
-    sell_loss_pcts = []  # 亏损幅度列表（负数=亏损）
-    win_count = 0
-    max_loss = 0.0  # 最大单笔亏损金额（正数）
-    holding_days_list = []  # 持有天数
-
-    # 按基金代码，模拟先进先出计算卖出时的盈亏
-    fund_buy_queue = {}  # {fund_code: [{shares, price, date}, ...]}
-    for tx in txs:
-        fc = tx["fund_code"]
-        if tx["transaction_type"] == "buy":
-            fund_buy_queue.setdefault(fc, []).append({
-                "shares": tx.get("shares") or 0,
-                "price": tx.get("price") or 0,
-                "date": tx.get("transaction_date", ""),
-            })
-        elif tx["transaction_type"] == "sell":
-            queue = fund_buy_queue.get(fc, [])
-            sell_shares = tx.get("shares") or 0
-            sell_price = tx.get("price") or 0
-            sell_date = tx.get("transaction_date", "")
-
-            remaining = sell_shares
-            total_cost = 0.0
-            buy_dates_for_this_sell = []
-            while remaining > 0 and queue:
-                lot = queue[0]
-                if lot["shares"] <= remaining:
-                    total_cost += lot["shares"] * lot["price"]
-                    buy_dates_for_this_sell.append(lot["date"])
-                    remaining -= lot["shares"]
-                    queue.pop(0)
-                else:
-                    total_cost += remaining * lot["price"]
-                    buy_dates_for_this_sell.append(lot["date"])
-                    lot["shares"] -= remaining
-                    remaining = 0
-
-            actual_sell_amount = sell_shares * sell_price
-            profit = actual_sell_amount - total_cost
-            loss_pct = (profit / total_cost * 100) if total_cost > 0 else 0
-            sell_loss_pcts.append(loss_pct)
-
-            if profit > 0:
-                win_count += 1
-            if profit < 0 and abs(profit) > max_loss:
-                max_loss = abs(profit)
-
-            # 持有天数：用最早买入日期到卖出日期
-            if buy_dates_for_this_sell:
-                try:
-                    from datetime import datetime as _dt
-                    earliest_buy = min(buy_dates_for_this_sell)
-                    d_buy = _dt.strptime(earliest_buy[:10], "%Y-%m-%d")
-                    d_sell = _dt.strptime(sell_date[:10], "%Y-%m-%d")
-                    holding_days_list.append((d_sell - d_buy).days)
-                except Exception:
-                    pass
-
-    # ── 频繁交易度：月均交易次数 ──
     try:
-        from datetime import datetime as _dt2
-        dates = [t["transaction_date"] for t in txs if t.get("transaction_date")]
-        if dates:
-            first_date = _dt2.strptime(min(dates)[:10], "%Y-%m-%d")
-            last_date = _dt2.strptime(max(dates)[:10], "%Y-%m-%d")
-            months_span = max((last_date - first_date).days / 30.0, 0.5)
-            monthly_avg = len(txs) / months_span
-        else:
+        """分析用户真实交易行为模式（排除系统交易）。
+
+        返回追涨倾向、杀跌倾向、持有耐心、频繁交易度、胜率、最大单笔亏损、交易风格判定。
+        """
+        conn = _get_conn()
+
+        # 获取所有非系统交易（含 fund_name 从 holdings 关联）
+        rows = conn.execute("""
+            SELECT t.id, t.holding_id, t.fund_code, t.fund_name, t.transaction_type,
+                   t.shares, t.price, t.amount, t.transaction_date, t.status, t.is_system,
+                   h.index_code, h.fund_name as holding_fund_name
+            FROM portfolio_transactions t
+            LEFT JOIN portfolio_holdings h ON t.holding_id = h.id
+            WHERE t.user_id = ?
+              AND (t.is_system IS NULL OR t.is_system = 0)
+              AND (t.status IN ('confirmed', 'settled') OR t.status IS NULL)
+            ORDER BY t.transaction_date ASC, t.id ASC
+        """, (user_id,)).fetchall()
+
+        if not rows or len(rows) < 3:
+            conn.close()
+            return {"error": "交易记录不足", "count": len(rows) if rows else 0}
+
+        txs = [dict(r) for r in rows]
+
+        # ── 按基金代码分组，计算买入均价（份额加权）──
+        fund_buys = {}  # {fund_code: [{shares, price, amount, date}, ...]}
+        fund_sells = []  # [{fund_code, shares, price, amount, date, buy_avg_price}, ...]
+
+        for tx in txs:
+            fc = tx["fund_code"]
+            if tx["transaction_type"] == "buy":
+                fund_buys.setdefault(fc, []).append({
+                    "shares": tx.get("shares") or 0,
+                    "price": tx.get("price") or 0,
+                    "amount": tx.get("amount") or 0,
+                    "date": tx.get("transaction_date", ""),
+                })
+            elif tx["transaction_type"] == "sell":
+                fund_sells.append({
+                    "fund_code": fc,
+                    "shares": tx.get("shares") or 0,
+                    "price": tx.get("price") or 0,
+                    "amount": tx.get("amount") or 0,
+                    "date": tx.get("transaction_date", ""),
+                })
+
+        # 计算每只基金的加权平均买入价（卖出时扣减份额）
+        def _calc_buy_avg(buy_list, sell_shares_so_far=0):
+            """计算当前买入均价（考虑已卖出份额扣减）。"""
+            total_cost = 0.0
+            total_shares = 0.0
+            remaining_sells = sell_shares_so_far
+            for b in buy_list:
+                shares = b["shares"]
+                if remaining_sells > 0:
+                    if remaining_sells >= shares:
+                        remaining_sells -= shares
+                        continue
+                    else:
+                        shares -= remaining_sells
+                        remaining_sells = 0
+                total_cost += b["price"] * shares
+                total_shares += shares
+            return total_cost / total_shares if total_shares > 0 else 0
+
+        # ── 追涨倾向：买入时的PE分位中位数 ──
+        buy_pe_percentiles = []
+        for tx in txs:
+            if tx["transaction_type"] != "buy":
+                continue
+            index_code = tx.get("index_code")
+            if not index_code:
+                continue
+            tx_date = tx.get("transaction_date", "")
+            val_row = conn.execute("""
+                SELECT percentile FROM index_valuations
+                WHERE index_code = ? AND metric_type = '市盈率'
+                  AND snapshot_date BETWEEN date(?, '-7 days') AND date(?, '+7 days')
+                ORDER BY ABS(julianday(snapshot_date) - julianday(?))
+                LIMIT 1
+            """, (index_code, tx_date, tx_date, tx_date)).fetchone()
+            if val_row and val_row["percentile"] is not None:
+                buy_pe_percentiles.append(float(val_row["percentile"]))
+
+        # ── 杀跌倾向 + 胜率 + 最大单笔亏损 ──
+        sell_loss_pcts = []  # 亏损幅度列表（负数=亏损）
+        win_count = 0
+        max_loss = 0.0  # 最大单笔亏损金额（正数）
+        holding_days_list = []  # 持有天数
+
+        # 按基金代码，模拟先进先出计算卖出时的盈亏
+        fund_buy_queue = {}  # {fund_code: [{shares, price, date}, ...]}
+        for tx in txs:
+            fc = tx["fund_code"]
+            if tx["transaction_type"] == "buy":
+                fund_buy_queue.setdefault(fc, []).append({
+                    "shares": tx.get("shares") or 0,
+                    "price": tx.get("price") or 0,
+                    "date": tx.get("transaction_date", ""),
+                })
+            elif tx["transaction_type"] == "sell":
+                queue = fund_buy_queue.get(fc, [])
+                sell_shares = tx.get("shares") or 0
+                sell_price = tx.get("price") or 0
+                sell_date = tx.get("transaction_date", "")
+
+                remaining = sell_shares
+                total_cost = 0.0
+                buy_dates_for_this_sell = []
+                while remaining > 0 and queue:
+                    lot = queue[0]
+                    if lot["shares"] <= remaining:
+                        total_cost += lot["shares"] * lot["price"]
+                        buy_dates_for_this_sell.append(lot["date"])
+                        remaining -= lot["shares"]
+                        queue.pop(0)
+                    else:
+                        total_cost += remaining * lot["price"]
+                        buy_dates_for_this_sell.append(lot["date"])
+                        lot["shares"] -= remaining
+                        remaining = 0
+
+                actual_sell_amount = sell_shares * sell_price
+                profit = actual_sell_amount - total_cost
+                loss_pct = (profit / total_cost * 100) if total_cost > 0 else 0
+                sell_loss_pcts.append(loss_pct)
+
+                if profit > 0:
+                    win_count += 1
+                if profit < 0 and abs(profit) > max_loss:
+                    max_loss = abs(profit)
+
+                # 持有天数：用最早买入日期到卖出日期
+                if buy_dates_for_this_sell:
+                    try:
+                        from datetime import datetime as _dt
+                        earliest_buy = min(buy_dates_for_this_sell)
+                        d_buy = _dt.strptime(earliest_buy[:10], "%Y-%m-%d")
+                        d_sell = _dt.strptime(sell_date[:10], "%Y-%m-%d")
+                        holding_days_list.append((d_sell - d_buy).days)
+                    except Exception:
+                        pass
+
+        # ── 频繁交易度：月均交易次数 ──
+        try:
+            from datetime import datetime as _dt2
+            dates = [t["transaction_date"] for t in txs if t.get("transaction_date")]
+            if dates:
+                first_date = _dt2.strptime(min(dates)[:10], "%Y-%m-%d")
+                last_date = _dt2.strptime(max(dates)[:10], "%Y-%m-%d")
+                months_span = max((last_date - first_date).days / 30.0, 0.5)
+                monthly_avg = len(txs) / months_span
+            else:
+                months_span = 0
+                monthly_avg = 0
+        except Exception:
             months_span = 0
             monthly_avg = 0
-    except Exception:
-        months_span = 0
-        monthly_avg = 0
 
-    conn.close()
+        conn.close()
 
-    # ── 计算统计值 ──
-    import statistics
+        # ── 计算统计值 ──
+        import statistics
 
-    # 追涨倾向：买入PE分位中位数
-    chase_pe_median = round(statistics.median(buy_pe_percentiles), 2) if buy_pe_percentiles else None
+        # 追涨倾向：买入PE分位中位数
+        chase_pe_median = round(statistics.median(buy_pe_percentiles), 2) if buy_pe_percentiles else None
 
-    # 杀跌倾向：亏损卖出的亏损幅度中位数
-    loss_sells = [p for p in sell_loss_pcts if p < 0]
-    panic_sell_median = round(statistics.median(loss_sells), 2) if loss_sells else None
+        # 杀跌倾向：亏损卖出的亏损幅度中位数
+        loss_sells = [p for p in sell_loss_pcts if p < 0]
+        panic_sell_median = round(statistics.median(loss_sells), 2) if loss_sells else None
 
-    # 持有耐心：平均持仓天数
-    avg_holding_days = round(statistics.mean(holding_days_list), 1) if holding_days_list else None
+        # 持有耐心：平均持仓天数
+        avg_holding_days = round(statistics.mean(holding_days_list), 1) if holding_days_list else None
 
-    # 胜率
-    total_sells = len(sell_loss_pcts)
-    win_rate = round(win_count / total_sells * 100, 2) if total_sells > 0 else None
+        # 胜率
+        total_sells = len(sell_loss_pcts)
+        win_rate = round(win_count / total_sells * 100, 2) if total_sells > 0 else None
 
-    # 最大单笔亏损
-    max_single_loss = round(max_loss, 2) if max_loss > 0 else 0.0
+        # 最大单笔亏损
+        max_single_loss = round(max_loss, 2) if max_loss > 0 else 0.0
 
-    # ── 交易风格判定 ──
-    style_tags = []
-    if chase_pe_median is not None and chase_pe_median > 60:
-        style_tags.append("追涨杀跌型")
-    if monthly_avg > 6:
-        style_tags.append("频繁交易型")
-    if avg_holding_days is not None and avg_holding_days > 180:
-        style_tags.append("长期持有型")
-    if monthly_avg > 0 and monthly_avg <= 3 and chase_pe_median is not None and chase_pe_median < 50:
-        style_tags.append("纪律定投型")
-    if not style_tags:
-        style_tags.append("均衡型")
-    trade_style = "/".join(style_tags)
+        # ── 交易风格判定 ──
+        style_tags = []
+        if chase_pe_median is not None and chase_pe_median > 60:
+            style_tags.append("追涨杀跌型")
+        if monthly_avg > 6:
+            style_tags.append("频繁交易型")
+        if avg_holding_days is not None and avg_holding_days > 180:
+            style_tags.append("长期持有型")
+        if monthly_avg > 0 and monthly_avg <= 3 and chase_pe_median is not None and chase_pe_median < 50:
+            style_tags.append("纪律定投型")
+        if not style_tags:
+            style_tags.append("均衡型")
+        trade_style = "/".join(style_tags)
 
-    return {
-        "total_transactions": len(txs),
-        "chase_pe_median": chase_pe_median,          # 追涨倾向：买入PE分位中位数
-        "panic_sell_median": panic_sell_median,       # 杀跌倾向：亏损卖出幅度中位数(%)
-        "avg_holding_days": avg_holding_days,          # 持有耐心：平均持仓天数
-        "monthly_avg_trades": round(monthly_avg, 2),    # 频繁交易度：月均交易次数
-        "win_rate": win_rate,                          # 胜率(%)
-        "max_single_loss": max_single_loss,             # 最大单笔亏损金额
-        "total_sells": total_sells,
-        "loss_sells_count": len(loss_sells),
-        "trade_style": trade_style,                     # 交易风格判定
-    }
+        return {
+            "total_transactions": len(txs),
+            "chase_pe_median": chase_pe_median,          # 追涨倾向：买入PE分位中位数
+            "panic_sell_median": panic_sell_median,       # 杀跌倾向：亏损卖出幅度中位数(%)
+            "avg_holding_days": avg_holding_days,          # 持有耐心：平均持仓天数
+            "monthly_avg_trades": round(monthly_avg, 2),    # 频繁交易度：月均交易次数
+            "win_rate": win_rate,                          # 胜率(%)
+            "max_single_loss": max_single_loss,             # 最大单笔亏损金额
+            "total_sells": total_sells,
+            "loss_sells_count": len(loss_sells),
+            "trade_style": trade_style,                     # 交易风格判定
+        }
+    finally:
+        conn.close()
 
 
 def clear_all_portfolio_data(user_id: str = "default"):
-    """删除用户的所有持仓、交易记录、预警和标签。"""
-    # 审计日志（在删除前写入）
-    _log_tx_audit(
-        action="clear_all", operator="user",
-        detail=json.dumps({"user_id": user_id, "scope": "持仓/交易/预警/标签/分析记录/现金"},
-                          ensure_ascii=False),
-    )
+    try:
+        """删除用户的所有持仓、交易记录、预警和标签。"""
+        # 审计日志（在删除前写入）
+        _log_tx_audit(
+            action="clear_all", operator="user",
+            detail=json.dumps({"user_id": user_id, "scope": "持仓/交易/预警/标签/分析记录/现金"},
+                              ensure_ascii=False),
+        )
 
-    conn = _get_conn()
-    conn.execute("DELETE FROM portfolio_alerts WHERE user_id = ?", (user_id,))
-    conn.execute("""
-        DELETE FROM transaction_tags WHERE transaction_id IN
-        (SELECT id FROM portfolio_transactions WHERE user_id = ?)
-    """, (user_id,))
-    conn.execute("DELETE FROM portfolio_transactions WHERE user_id = ?", (user_id,))
-    conn.execute("DELETE FROM portfolio_holdings WHERE user_id = ?", (user_id,))
-    conn.execute("DELETE FROM portfolio_analysis_records WHERE user_id = ?", (user_id,))
-    conn.execute("DELETE FROM portfolio_cash WHERE user_id = ?", (user_id,))
-    conn.commit()
-    conn.close()
+        conn = _get_conn()
+        conn.execute("DELETE FROM portfolio_alerts WHERE user_id = ?", (user_id,))
+        conn.execute("""
+            DELETE FROM transaction_tags WHERE transaction_id IN
+            (SELECT id FROM portfolio_transactions WHERE user_id = ?)
+        """, (user_id,))
+        conn.execute("DELETE FROM portfolio_transactions WHERE user_id = ?", (user_id,))
+        conn.execute("DELETE FROM portfolio_holdings WHERE user_id = ?", (user_id,))
+        conn.execute("DELETE FROM portfolio_analysis_records WHERE user_id = ?", (user_id,))
+        conn.execute("DELETE FROM portfolio_cash WHERE user_id = ?", (user_id,))
+        conn.commit()
+        conn.close()
+    finally:
+        conn.close()
 
 
 def create_portfolio_analysis_record(analysis_type: str, summary: str,
@@ -2699,224 +2776,257 @@ def create_portfolio_analysis_record(analysis_type: str, summary: str,
                                      user_id: str = "default",
                                      agent_id: int = None,
                                      status: str = "done") -> int:
-    """保存持仓分析记录。status: running / done / error"""
-    conn = _get_conn()
-    cur = conn.execute("""
-        INSERT INTO portfolio_analysis_records
-            (user_id, analysis_type, summary, input_data, result_data, token_usage, agent_id, status)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    """, (user_id, analysis_type, summary, input_data, result_data, token_usage, agent_id, status))
-    conn.commit()
-    row_id = cur.lastrowid
-    conn.close()
-    return row_id
+    try:
+        """保存持仓分析记录。status: running / done / error"""
+        conn = _get_conn()
+        cur = conn.execute("""
+            INSERT INTO portfolio_analysis_records
+                (user_id, analysis_type, summary, input_data, result_data, token_usage, agent_id, status)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """, (user_id, analysis_type, summary, input_data, result_data, token_usage, agent_id, status))
+        conn.commit()
+        row_id = cur.lastrowid
+        conn.close()
+        return row_id
+    finally:
+        conn.close()
 
 
 def update_analysis_record(record_id: int, **fields) -> bool:
-    """更新分析记录字段（result_data, status, token_usage 等）。"""
-    if not fields:
+    try:
+        """更新分析记录字段（result_data, status, token_usage 等）。"""
+        if not fields:
+            conn.close()
+            return False
+        conn = _get_conn()
+        sets = ", ".join(f"{k} = ?" for k in fields)
+        vals = list(fields.values()) + [record_id]
+        conn.execute(f"UPDATE portfolio_analysis_records SET {sets} WHERE id = ?", vals)
+        conn.commit()
         conn.close()
-        return False
-    conn = _get_conn()
-    sets = ", ".join(f"{k} = ?" for k in fields)
-    vals = list(fields.values()) + [record_id]
-    conn.execute(f"UPDATE portfolio_analysis_records SET {sets} WHERE id = ?", vals)
-    conn.commit()
-    conn.close()
-    return True
+        return True
+    finally:
+        conn.close()
 
 
 def get_analysis_record_status(record_id: int) -> dict | None:
-    """查询分析记录状态。"""
-    conn = _get_conn()
-    row = conn.execute(
-        "SELECT id, status, result_data, token_usage, error_msg FROM portfolio_analysis_records WHERE id = ?",
-        (record_id,)
-    ).fetchone()
-    conn.close()
-    if not row:
-        return None
-    return dict(row)
+    try:
+        """查询分析记录状态。"""
+        conn = _get_conn()
+        row = conn.execute(
+            "SELECT id, status, result_data, token_usage, error_msg FROM portfolio_analysis_records WHERE id = ?",
+            (record_id,)
+        ).fetchone()
+        conn.close()
+        if not row:
+            return None
+        return dict(row)
+    finally:
+        conn.close()
 
 
 def list_portfolio_analysis_records(analysis_type: str = None,
                                     limit: int = 20,
                                     user_id: str = "default") -> list[dict]:
-    """列出持仓分析记录。"""
-    conn = _get_conn()
-    if analysis_type:
-        rows = conn.execute("""
-            SELECT id, user_id, analysis_type, summary, result_data, token_usage, created_at
-            FROM portfolio_analysis_records
-            WHERE user_id = ? AND analysis_type = ?
-            ORDER BY created_at DESC LIMIT ?
-        """, (user_id, analysis_type, limit)).fetchall()
-    else:
-        rows = conn.execute("""
-            SELECT id, user_id, analysis_type, summary, result_data, token_usage, created_at
-            FROM portfolio_analysis_records
-            WHERE user_id = ?
-            ORDER BY created_at DESC LIMIT ?
-        """, (user_id, limit)).fetchall()
-    conn.close()
-    return [dict(r) for r in rows]
+    try:
+        """列出持仓分析记录。"""
+        conn = _get_conn()
+        if analysis_type:
+            rows = conn.execute("""
+                SELECT id, user_id, analysis_type, summary, result_data, token_usage, created_at
+                FROM portfolio_analysis_records
+                WHERE user_id = ? AND analysis_type = ?
+                ORDER BY created_at DESC LIMIT ?
+            """, (user_id, analysis_type, limit)).fetchall()
+        else:
+            rows = conn.execute("""
+                SELECT id, user_id, analysis_type, summary, result_data, token_usage, created_at
+                FROM portfolio_analysis_records
+                WHERE user_id = ?
+                ORDER BY created_at DESC LIMIT ?
+            """, (user_id, limit)).fetchall()
+        conn.close()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
 
 
 def get_portfolio_analysis_record(record_id: int) -> dict | None:
-    """获取单条持仓分析记录详情。"""
-    conn = _get_conn()
-    row = conn.execute(
-        "SELECT * FROM portfolio_analysis_records WHERE id = ?",
-        (record_id,)
-    ).fetchone()
-    conn.close()
-    return dict(row) if row else None
+    try:
+        """获取单条持仓分析记录详情。"""
+        conn = _get_conn()
+        row = conn.execute(
+            "SELECT * FROM portfolio_analysis_records WHERE id = ?",
+            (record_id,)
+        ).fetchone()
+        conn.close()
+        return dict(row) if row else None
+    finally:
+        conn.close()
 
 
 def update_analysis_feedback(record_id: int, feedback: str, note: str = "") -> bool:
-    """提交用户对分析结果的反馈（helpful/unhelpful）。"""
-    conn = _get_conn()
-    cursor = conn.execute(
-        "UPDATE portfolio_analysis_records SET feedback = ?, feedback_note = ? WHERE id = ?",
-        (feedback, note, record_id)
-    )
-    conn.commit()
-    affected = cursor.rowcount
-    conn.close()
-    return affected > 0
+    try:
+        """提交用户对分析结果的反馈（helpful/unhelpful）。"""
+        conn = _get_conn()
+        cursor = conn.execute(
+            "UPDATE portfolio_analysis_records SET feedback = ?, feedback_note = ? WHERE id = ?",
+            (feedback, note, record_id)
+        )
+        conn.commit()
+        affected = cursor.rowcount
+        conn.close()
+        return affected > 0
+    finally:
+        conn.close()
 
 
 def list_bad_cases(analysis_type: str = None, limit: int = 50) -> list[dict]:
-    """列出被标记为 unhelpful 的分析记录（Bad Cases）。"""
-    conn = _get_conn()
-    if analysis_type:
-        rows = conn.execute("""
-            SELECT id, analysis_type, summary, input_data, result_data, feedback_note,
-                   token_usage, agent_id, created_at
-            FROM portfolio_analysis_records
-            WHERE feedback = 'unhelpful' AND analysis_type = ?
-            ORDER BY created_at DESC LIMIT ?
-        """, (analysis_type, limit)).fetchall()
-    else:
-        rows = conn.execute("""
-            SELECT id, analysis_type, summary, input_data, result_data, feedback_note,
-                   token_usage, agent_id, created_at
-            FROM portfolio_analysis_records
-            WHERE feedback = 'unhelpful'
-            ORDER BY created_at DESC LIMIT ?
-        """, (limit,)).fetchall()
-    conn.close()
-    return [dict(r) for r in rows]
+    try:
+        """列出被标记为 unhelpful 的分析记录（Bad Cases）。"""
+        conn = _get_conn()
+        if analysis_type:
+            rows = conn.execute("""
+                SELECT id, analysis_type, summary, input_data, result_data, feedback_note,
+                       token_usage, agent_id, created_at
+                FROM portfolio_analysis_records
+                WHERE feedback = 'unhelpful' AND analysis_type = ?
+                ORDER BY created_at DESC LIMIT ?
+            """, (analysis_type, limit)).fetchall()
+        else:
+            rows = conn.execute("""
+                SELECT id, analysis_type, summary, input_data, result_data, feedback_note,
+                       token_usage, agent_id, created_at
+                FROM portfolio_analysis_records
+                WHERE feedback = 'unhelpful'
+                ORDER BY created_at DESC LIMIT ?
+            """, (limit,)).fetchall()
+        conn.close()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
 
 
 def list_all_bad_cases(source: str = None, limit: int = 100) -> list[dict]:
-    """统一查询所有 Bad Case（分析记录 + LLM 反馈）。
+    try:
+        """统一查询所有 Bad Case（分析记录 + LLM 反馈）。
 
-    参数:
-        source: 'analysis' 只查分析记录, 'chat' 只查 LLM 反馈, None 查全部
-        limit: 每个来源的最大条数
-    返回:
-        统一结构的 bad case 列表，每条包含 source, id, type, summary, input, output, note, metadata, created_at
-    """
-    conn = _get_conn()
-    results = []
+        参数:
+            source: 'analysis' 只查分析记录, 'chat' 只查 LLM 反馈, None 查全部
+            limit: 每个来源的最大条数
+        返回:
+            统一结构的 bad case 列表，每条包含 source, id, type, summary, input, output, note, metadata, created_at
+        """
+        conn = _get_conn()
+        results = []
 
-    if source != 'chat':
-        # 来源 A: portfolio_analysis_records
-        rows = conn.execute("""
-            SELECT id, analysis_type, summary, input_data, result_data, feedback_note,
-                   token_usage, agent_id, root_cause, root_cause_detail, created_at
-            FROM portfolio_analysis_records
-            WHERE feedback = 'unhelpful'
-            ORDER BY created_at DESC LIMIT ?
-        """, (limit,)).fetchall()
-        for r in rows:
-            d = dict(r)
-            results.append({
-                'source': 'analysis',
-                'id': d['id'],
-                'type': d.get('analysis_type', ''),
-                'summary': d.get('summary', ''),
-                'input': d.get('input_data', ''),
-                'output': d.get('result_data', ''),
-                'note': d.get('feedback_note', ''),
-                'root_cause': d.get('root_cause', ''),
-                'root_cause_detail': d.get('root_cause_detail', ''),
-                'metadata': {'token_usage': d.get('token_usage'), 'agent_id': d.get('agent_id')},
-                'created_at': d.get('created_at', ''),
-            })
+        if source != 'chat':
+            # 来源 A: portfolio_analysis_records
+            rows = conn.execute("""
+                SELECT id, analysis_type, summary, input_data, result_data, feedback_note,
+                       token_usage, agent_id, root_cause, root_cause_detail, created_at
+                FROM portfolio_analysis_records
+                WHERE feedback = 'unhelpful'
+                ORDER BY created_at DESC LIMIT ?
+            """, (limit,)).fetchall()
+            for r in rows:
+                d = dict(r)
+                results.append({
+                    'source': 'analysis',
+                    'id': d['id'],
+                    'type': d.get('analysis_type', ''),
+                    'summary': d.get('summary', ''),
+                    'input': d.get('input_data', ''),
+                    'output': d.get('result_data', ''),
+                    'note': d.get('feedback_note', ''),
+                    'root_cause': d.get('root_cause', ''),
+                    'root_cause_detail': d.get('root_cause_detail', ''),
+                    'metadata': {'token_usage': d.get('token_usage'), 'agent_id': d.get('agent_id')},
+                    'created_at': d.get('created_at', ''),
+                })
 
-    if source != 'analysis':
-        # 来源 B: llm_feedback (chat / specialist 等)
-        rows = conn.execute("""
-            SELECT id, caller, input_summary, output_summary, rating, tags, comment,
-                   root_cause, root_cause_detail, created_at
-            FROM llm_feedback
-            WHERE rating = 'unhelpful'
-            ORDER BY created_at DESC LIMIT ?
-        """, (limit,)).fetchall()
-        for r in rows:
-            d = dict(r)
-            results.append({
-                'source': 'chat',
-                'id': d['id'],
-                'type': d.get('caller', ''),
-                'summary': d.get('output_summary', ''),
-                'input': d.get('input_summary', ''),
-                'output': d.get('output_summary', ''),
-                'note': d.get('comment', ''),
-                'root_cause': d.get('root_cause', ''),
-                'root_cause_detail': d.get('root_cause_detail', ''),
-                'metadata': {'tags': d.get('tags', ''), 'caller': d.get('caller', '')},
-                'created_at': d.get('created_at', ''),
-            })
+        if source != 'analysis':
+            # 来源 B: llm_feedback (chat / specialist 等)
+            rows = conn.execute("""
+                SELECT id, caller, input_summary, output_summary, rating, tags, comment,
+                       root_cause, root_cause_detail, created_at
+                FROM llm_feedback
+                WHERE rating = 'unhelpful'
+                ORDER BY created_at DESC LIMIT ?
+            """, (limit,)).fetchall()
+            for r in rows:
+                d = dict(r)
+                results.append({
+                    'source': 'chat',
+                    'id': d['id'],
+                    'type': d.get('caller', ''),
+                    'summary': d.get('output_summary', ''),
+                    'input': d.get('input_summary', ''),
+                    'output': d.get('output_summary', ''),
+                    'note': d.get('comment', ''),
+                    'root_cause': d.get('root_cause', ''),
+                    'root_cause_detail': d.get('root_cause_detail', ''),
+                    'metadata': {'tags': d.get('tags', ''), 'caller': d.get('caller', '')},
+                    'created_at': d.get('created_at', ''),
+                })
 
-    conn.close()
-    # 按时间倒序排列
-    results.sort(key=lambda x: x.get('created_at', ''), reverse=True)
-    return results[:limit]
+        conn.close()
+        # 按时间倒序排列
+        results.sort(key=lambda x: x.get('created_at', ''), reverse=True)
+        return results[:limit]
+    finally:
+        conn.close()
 
 
 def delete_portfolio_analysis_record(record_id: int) -> bool:
-    """删除持仓分析记录。"""
-    conn = _get_conn()
-    cur = conn.execute(
-        "DELETE FROM portfolio_analysis_records WHERE id = ?", (record_id,)
-    )
-    conn.commit()
-    ok = cur.rowcount > 0
-    conn.close()
-    return ok
+    try:
+        """删除持仓分析记录。"""
+        conn = _get_conn()
+        cur = conn.execute(
+            "DELETE FROM portfolio_analysis_records WHERE id = ?", (record_id,)
+        )
+        conn.commit()
+        ok = cur.rowcount > 0
+        conn.close()
+        return ok
+    finally:
+        conn.close()
 
 
 # ── 分析结果缓存 ──────────────────────────────────────
 
 
 def save_analysis_cache(cache_key: str, data: dict) -> bool:
-    """保存分析结果缓存（幂等 upsert）。"""
-    conn = _get_conn()
-    conn.execute(
-        "INSERT OR REPLACE INTO analysis_cache (cache_key, data, created_at) VALUES (?, ?, datetime('now','localtime'))",
-        (cache_key, json.dumps(data, ensure_ascii=False))
-    )
-    conn.commit()
-    conn.close()
-    return True
+    try:
+        """保存分析结果缓存（幂等 upsert）。"""
+        conn = _get_conn()
+        conn.execute(
+            "INSERT OR REPLACE INTO analysis_cache (cache_key, data, created_at) VALUES (?, ?, datetime('now','localtime'))",
+            (cache_key, json.dumps(data, ensure_ascii=False))
+        )
+        conn.commit()
+        conn.close()
+        return True
+    finally:
+        conn.close()
 
 
 def get_analysis_cache(cache_key: str) -> dict | None:
-    """读取分析结果缓存。"""
-    conn = _get_conn()
-    row = conn.execute(
-        "SELECT data FROM analysis_cache WHERE cache_key = ?", (cache_key,)
-    ).fetchone()
-    conn.close()
-    if row:
-        try:
-            return json.loads(row["data"])
-        except Exception:
-            return None
-    return None
+    try:
+        """读取分析结果缓存。"""
+        conn = _get_conn()
+        row = conn.execute(
+            "SELECT data FROM analysis_cache WHERE cache_key = ?", (cache_key,)
+        ).fetchone()
+        conn.close()
+        if row:
+            try:
+                return json.loads(row["data"])
+            except Exception:
+                return None
+        return None
+    finally:
+        conn.close()
 
 
 def get_cached_fund_holdings(fund_code: str) -> dict:
@@ -3026,7 +3136,6 @@ def save_portfolio_snapshot(user_id: str = "default") -> int:
         return cur.lastrowid
     finally:
         conn.close()
-
 
 def list_portfolio_snapshots(user_id: str = "default", limit: int = 365) -> list[dict]:
     """查询持仓快照历史。"""

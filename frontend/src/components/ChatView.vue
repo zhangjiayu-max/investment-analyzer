@@ -78,6 +78,7 @@ onMounted(async () => {
 onBeforeUnmount(() => {
   document.removeEventListener('visibilitychange', handleVisibilityChange)
   window.removeEventListener('pageshow', handlePageShow)
+  stopPollingProgress()
 })
 
 // ─── KeepAlive 页面切换钩子（SPA 内部 activePage 切换）───
@@ -90,6 +91,7 @@ onActivated(() => {
 onDeactivated(() => {
   // 切到其他页面：中断当前 SSE 连接（后端任务继续执行，切回时由 onActivated 恢复）
   pauseCurrentStream()
+  stopPollingProgress()
 })
 
 // ─── 移动端恢复 ───

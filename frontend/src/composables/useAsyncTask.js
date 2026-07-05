@@ -1,4 +1,4 @@
-import { ref } from 'vue'
+import { ref, onUnmounted } from 'vue'
 import { getAsyncTaskStatus } from '../api'
 import { useTaskStore } from './useTaskStore'
 
@@ -104,6 +104,11 @@ export function useAsyncTask(taskType) {
     taskId.value = null
     clearTask(taskType)
   }
+
+  // 组件卸载时自动清理轮询定时器
+  onUnmounted(() => {
+    stopPolling()
+  })
 
   return { taskState, taskResult, taskError, taskId, start, stopPolling, reset, restore, hasRunningTask }
 }

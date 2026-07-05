@@ -5,7 +5,7 @@
  * 用 reactive(new Map()) 存储，Vue 自动追踪变化。
  */
 
-import { reactive, computed } from 'vue'
+import { reactive, computed, onUnmounted } from 'vue'
 
 // 每个对话的流式状态结构
 function createStreamState() {
@@ -319,6 +319,21 @@ const streamingConvIds = computed(() => {
 })
 
 export function useStreamingState() {
+  onUnmounted(() => {
+    // 清理所有未完成的流计时器
+    for (const [convId, state] of streamStates) {
+      if (state.elapsedTimer) {
+        clearInterval(state.elapsedTimer)
+        state.elapsedTimer = null
+      }
+      if (state.streamAbort) {
+        state.streamAbort.abort()
+        state.streamAbort = null
+      }
+    }
+    streamStates.clear()
+  })
+
   return {
     streamStates,
     getStreamState,

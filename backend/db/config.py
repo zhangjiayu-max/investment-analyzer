@@ -163,28 +163,34 @@ DEFAULT_CONFIGS = [
 
 
 def init_default_configs(conn=None):
-    """初始化默认配置（仅写入不存在的 key）。"""
-    own_conn = conn is None
-    if own_conn:
-        conn = _get_conn()
-    for key, value, description, category in DEFAULT_CONFIGS:
-        try:
-            conn.execute(
-                "INSERT OR IGNORE INTO system_config (key, value, description, category) VALUES (?, ?, ?, ?)",
-                (key, value, description, category)
-            )
-        except Exception:
-            pass
-    if own_conn:
-        conn.commit()
+    try:
+        """初始化默认配置（仅写入不存在的 key）。"""
+        own_conn = conn is None
+        if own_conn:
+            conn = _get_conn()
+        for key, value, description, category in DEFAULT_CONFIGS:
+            try:
+                conn.execute(
+                    "INSERT OR IGNORE INTO system_config (key, value, description, category) VALUES (?, ?, ?, ?)",
+                    (key, value, description, category)
+                )
+            except Exception:
+                pass
+        if own_conn:
+            conn.commit()
+            conn.close()
+    finally:
         conn.close()
 
 
 def get_config(key: str, default: str = '') -> str:
-    """获取单个配置值。"""
-    conn = _get_conn()
-    row = conn.execute("SELECT value FROM system_config WHERE key = ?", (key,)).fetchone()
-    return row[0] if row else default
+    try:
+        """获取单个配置值。"""
+        conn = _get_conn()
+        row = conn.execute("SELECT value FROM system_config WHERE key = ?", (key,)).fetchone()
+        return row[0] if row else default
+    finally:
+        conn.close()
 
 
 def get_config_int(key: str, default: int = 0) -> int:
@@ -225,32 +231,38 @@ def get_config_list(key: str, default: list[str] | None = None) -> list[str]:
 
 
 def list_configs(category: str = None) -> list[dict]:
-    """列出所有配置（可按 category 过滤）。"""
-    conn = _get_conn()
-    if category:
-        rows = conn.execute(
-            "SELECT key, value, description, category, updated_at FROM system_config WHERE category = ? ORDER BY key",
-            (category,)
-        ).fetchall()
-    else:
-        rows = conn.execute(
-            "SELECT key, value, description, category, updated_at FROM system_config ORDER BY category, key"
-        ).fetchall()
-    return [
-        {"key": r[0], "value": r[1], "description": r[2], "category": r[3], "updated_at": r[4]}
-        for r in rows
-    ]
+    try:
+        """列出所有配置（可按 category 过滤）。"""
+        conn = _get_conn()
+        if category:
+            rows = conn.execute(
+                "SELECT key, value, description, category, updated_at FROM system_config WHERE category = ? ORDER BY key",
+                (category,)
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT key, value, description, category, updated_at FROM system_config ORDER BY category, key"
+            ).fetchall()
+        return [
+            {"key": r[0], "value": r[1], "description": r[2], "category": r[3], "updated_at": r[4]}
+            for r in rows
+        ]
+    finally:
+        conn.close()
 
 
 def update_config(key: str, value: str) -> bool:
-    """更新配置值。返回是否成功。"""
-    conn = _get_conn()
-    cursor = conn.execute(
-        "UPDATE system_config SET value = ?, updated_at = datetime('now','localtime') WHERE key = ?",
-        (value, key)
-    )
-    conn.commit()
-    return cursor.rowcount > 0
+    try:
+        """更新配置值。返回是否成功。"""
+        conn = _get_conn()
+        cursor = conn.execute(
+            "UPDATE system_config SET value = ?, updated_at = datetime('now','localtime') WHERE key = ?",
+            (value, key)
+        )
+        conn.commit()
+        return cursor.rowcount > 0
+    finally:
+        conn.close()
 
 
 def reset_configs() -> int:

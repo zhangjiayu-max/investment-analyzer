@@ -46,76 +46,92 @@ def save_backtest(
     notes: str = "",
     user_id: str = "default",
 ) -> int:
-    """保存回测结果，返回 id。"""
-    conn = _get_conn()
-    cursor = conn.execute("""
-        INSERT INTO backtest_results
-            (user_id, name, target_code, target_type, strategy, params_json,
-             initial_cash, final_value, total_return, annual_return,
-             max_drawdown, sharpe_ratio, nav_curve_json,
-             benchmark_return, months, notes)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """, (
-        user_id, name, target_code, target_type, strategy,
-        json.dumps(params, ensure_ascii=False),
-        result.get("total_invested", 0),
-        result.get("final_value", 0),
-        result.get("total_return", 0),
-        result.get("annual_return", 0),
-        result.get("max_drawdown", 0),
-        result.get("sharpe_ratio", 0),
-        json.dumps(result.get("nav_curve", []), ensure_ascii=False),
-        benchmark.get("total_return", 0) if benchmark else 0,
-        months,
-        notes,
-    ))
-    conn.commit()
-    return cursor.lastrowid
+    try:
+        """保存回测结果，返回 id。"""
+        conn = _get_conn()
+        cursor = conn.execute("""
+            INSERT INTO backtest_results
+                (user_id, name, target_code, target_type, strategy, params_json,
+                 initial_cash, final_value, total_return, annual_return,
+                 max_drawdown, sharpe_ratio, nav_curve_json,
+                 benchmark_return, months, notes)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            user_id, name, target_code, target_type, strategy,
+            json.dumps(params, ensure_ascii=False),
+            result.get("total_invested", 0),
+            result.get("final_value", 0),
+            result.get("total_return", 0),
+            result.get("annual_return", 0),
+            result.get("max_drawdown", 0),
+            result.get("sharpe_ratio", 0),
+            json.dumps(result.get("nav_curve", []), ensure_ascii=False),
+            benchmark.get("total_return", 0) if benchmark else 0,
+            months,
+            notes,
+        ))
+        conn.commit()
+        return cursor.lastrowid
+    finally:
+        conn.close()
 
 
 def list_backtests(limit: int = 20, user_id: str = "default") -> list[dict]:
-    """列出历史回测。"""
-    conn = _get_conn()
-    rows = conn.execute("""
-        SELECT id, name, target_code, target_type, strategy,
-               initial_cash, final_value, total_return, annual_return,
-               max_drawdown, sharpe_ratio, benchmark_return, months,
-               decision_id, notes, created_at
-        FROM backtest_results
-        WHERE user_id = ?
-        ORDER BY created_at DESC
-        LIMIT ?
-    """, (user_id, limit)).fetchall()
-    return [_row_to_dict(r) for r in rows]
+    try:
+        """列出历史回测。"""
+        conn = _get_conn()
+        rows = conn.execute("""
+            SELECT id, name, target_code, target_type, strategy,
+                   initial_cash, final_value, total_return, annual_return,
+                   max_drawdown, sharpe_ratio, benchmark_return, months,
+                   decision_id, notes, created_at
+            FROM backtest_results
+            WHERE user_id = ?
+            ORDER BY created_at DESC
+            LIMIT ?
+        """, (user_id, limit)).fetchall()
+        return [_row_to_dict(r) for r in rows]
+    finally:
+        conn.close()
 
 
 def get_backtest(backtest_id: int) -> dict | None:
-    """获取单条回测结果（含净值曲线）。"""
-    conn = _get_conn()
-    row = conn.execute("""
-        SELECT * FROM backtest_results WHERE id = ?
-    """, (backtest_id,)).fetchone()
-    if not row:
-        return None
-    item = _row_to_dict(row)
-    item["params_json"] = json.loads(item.get("params_json") or "{}")
-    item["nav_curve_json"] = json.loads(item.get("nav_curve_json") or "[]")
-    return item
+    try:
+        """获取单条回测结果（含净值曲线）。"""
+        conn = _get_conn()
+        row = conn.execute("""
+            SELECT * FROM backtest_results WHERE id = ?
+        """, (backtest_id,)).fetchone()
+        if not row:
+            return None
+        item = _row_to_dict(row)
+        item["params_json"] = json.loads(item.get("params_json") or "{}")
+        item["nav_curve_json"] = json.loads(item.get("nav_curve_json") or "[]")
+        return item
+    finally:
+        conn.close()
 
 
 def delete_backtest(backtest_id: int) -> bool:
-    """删除回测记录。"""
-    conn = _get_conn()
-    cursor = conn.execute("DELETE FROM backtest_results WHERE id = ?", (backtest_id,))
-    conn.commit()
-    return cursor.rowcount > 0
+    try:
+        """删除回测记录。"""
+        conn = _get_conn()
+        cursor = conn.execute("DELETE FROM backtest_results WHERE id = ?", (backtest_id,))
+        conn.commit()
+        return cursor.rowcount > 0
+    finally:
+        conn.close()
 
 
 def link_backtest_to_decision(backtest_id: int, decision_id: int) -> bool:
-    """关联回测到决策。"""
-    conn = _get_conn()
-    cursor = conn.execute("""
-        UPDATE backtest_results SET decision_id = ? WHERE id = ?
-    """, (decision_id, backtest_id))
-    conn.commit()
-    return cursor.rowcount > 0
+    try:
+        """关联回测到决策。"""
+        conn = _get_conn()
+        cursor = conn.execute("""
+            UPDATE backtest_results SET decision_id = ? WHERE id = ?
+        """, (decision_id, backtest_id))
+        conn.commit()
+        return cursor.rowcount > 0
+    finally:
+        conn.close()
+
