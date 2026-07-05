@@ -1,0 +1,1605 @@
+{
+  "generated_at": "2026-07-05T11:25:31.735833",
+  "project": "investment-analyzer/backend",
+  "summary": {
+    "total_python_files": 24,
+    "total_lines": 35036,
+    "functions_above_C": 327,
+    "f_rank_functions": 31,
+    "e_rank_functions": 25,
+    "files_with_mi_below_10": 16,
+    "dead_code_items": 87,
+    "dead_code_non_test": 24
+  },
+  "high_risk_files": [
+    {
+      "file": "backend/agent/orchestrator.py",
+      "lines": 4419,
+      "worst_complexity_rank": "F",
+      "mi": 0.0,
+      "mi_rank": "C",
+      "total_complex_functions": 13,
+      "top_functions": [
+        {
+          "function": "orchestrate_stream",
+          "line": 2924,
+          "rank": "F",
+          "complexity": 219
+        },
+        {
+          "function": "orchestrate",
+          "line": 2262,
+          "rank": "F",
+          "complexity": 116
+        },
+        {
+          "function": "_classify_complexity_by_rules",
+          "line": 1273,
+          "rank": "E",
+          "complexity": 37
+        },
+        {
+          "function": "clarify_requirement",
+          "line": 1386,
+          "rank": "E",
+          "complexity": 36
+        },
+        {
+          "function": "detect_conflicts",
+          "line": 903,
+          "rank": "E",
+          "complexity": 34
+        }
+      ]
+    },
+    {
+      "file": "backend/db/portfolio.py",
+      "lines": 2911,
+      "worst_complexity_rank": "F",
+      "mi": 0.0,
+      "mi_rank": "C",
+      "total_complex_functions": 15,
+      "top_functions": [
+        {
+          "function": "compare_funds",
+          "line": 1466,
+          "rank": "F",
+          "complexity": 65
+        },
+        {
+          "function": "analyze_trade_patterns",
+          "line": 2332,
+          "rank": "F",
+          "complexity": 56
+        },
+        {
+          "function": "confirm_transaction",
+          "line": 771,
+          "rank": "F",
+          "complexity": 48
+        },
+        {
+          "function": "_recalculate_holding",
+          "line": 570,
+          "rank": "E",
+          "complexity": 39
+        },
+        {
+          "function": "classify_fund_category",
+          "line": 1816,
+          "rank": "E",
+          "complexity": 36
+        }
+      ]
+    },
+    {
+      "file": "backend/services/rag.py",
+      "lines": 2570,
+      "worst_complexity_rank": "F",
+      "mi": 0.0,
+      "mi_rank": "C",
+      "total_complex_functions": 14,
+      "top_functions": [
+        {
+          "function": "build_rag_context_with_details",
+          "line": 1886,
+          "rank": "F",
+          "complexity": 148
+        },
+        {
+          "function": "_apply_personalization_boost",
+          "line": 198,
+          "rank": "F",
+          "complexity": 84
+        },
+        {
+          "function": "_enrich_results_with_time",
+          "line": 1606,
+          "rank": "D",
+          "complexity": 30
+        },
+        {
+          "function": "rebuild_fts_index",
+          "line": 490,
+          "rank": "D",
+          "complexity": 29
+        },
+        {
+          "function": "_filter_old_results",
+          "line": 1485,
+          "rank": "D",
+          "complexity": 29
+        }
+      ]
+    },
+    {
+      "file": "backend/db/decisions.py",
+      "lines": 2347,
+      "worst_complexity_rank": "F",
+      "mi": 0.0,
+      "mi_rank": "C",
+      "total_complex_functions": 16,
+      "top_functions": [
+        {
+          "function": "build_decision_precheck",
+          "line": 1348,
+          "rank": "F",
+          "complexity": 83
+        },
+        {
+          "function": "match_pending_decisions",
+          "line": 2151,
+          "rank": "F",
+          "complexity": 46
+        },
+        {
+          "function": "ensure_dashboard_decisions",
+          "line": 1108,
+          "rank": "E",
+          "complexity": 34
+        },
+        {
+          "function": "create_transaction_draft_from_decision",
+          "line": 1640,
+          "rank": "D",
+          "complexity": 30
+        },
+        {
+          "function": "create_decision_from_candidate",
+          "line": 698,
+          "rank": "D",
+          "complexity": 26
+        }
+      ]
+    },
+    {
+      "file": "backend/tools/__init__.py",
+      "lines": 2193,
+      "worst_complexity_rank": "F",
+      "mi": 0.0,
+      "mi_rank": "C",
+      "total_complex_functions": 14,
+      "top_functions": [
+        {
+          "function": "_calculate_metrics",
+          "line": 1299,
+          "rank": "F",
+          "complexity": 41
+        },
+        {
+          "function": "_validate_tool_arguments",
+          "line": 634,
+          "rank": "E",
+          "complexity": 34
+        },
+        {
+          "function": "_execute_tool_impl",
+          "line": 769,
+          "rank": "E",
+          "complexity": 34
+        },
+        {
+          "function": "_get_macro_policy_data",
+          "line": 1943,
+          "rank": "E",
+          "complexity": 33
+        },
+        {
+          "function": "_query_valuation",
+          "line": 987,
+          "rank": "D",
+          "complexity": 29
+        }
+      ]
+    }
+  ],
+  "extra_risk_files": [
+    {
+      "file": "backend/routers/analysis/diversification.py",
+      "lines": 0,
+      "max_complexity": 87,
+      "mi": 21.26,
+      "mi_rank": "A",
+      "top_functions": [
+        {
+          "function": "_run_diversification_ai_summary_async",
+          "line": 173,
+          "rank": "F",
+          "complexity": 87
+        },
+        {
+          "function": "portfolio_diversification_api",
+          "line": 38,
+          "rank": "D",
+          "complexity": 21
+        },
+        {
+          "function": "holding_performance_api",
+          "line": 507,
+          "rank": "C",
+          "complexity": 12
+        }
+      ]
+    },
+    {
+      "file": "backend/routers/analysis/health_score.py",
+      "lines": 1067,
+      "max_complexity": 72,
+      "mi": 0.0,
+      "mi_rank": "C",
+      "top_functions": [
+        {
+          "function": "calc_fear_greed_index",
+          "line": 782,
+          "rank": "F",
+          "complexity": 72
+        },
+        {
+          "function": "calc_stock_bond_ratio",
+          "line": 653,
+          "rank": "F",
+          "complexity": 44
+        },
+        {
+          "function": "calc_behavior_score",
+          "line": 328,
+          "rank": "F",
+          "complexity": 43
+        }
+      ]
+    },
+    {
+      "file": "backend/scripts/analyze_chat_quality.py",
+      "lines": 0,
+      "max_complexity": 70,
+      "mi": 27.64,
+      "mi_rank": "A",
+      "top_functions": [
+        {
+          "function": "main",
+          "line": 122,
+          "rank": "F",
+          "complexity": 70
+        },
+        {
+          "function": "analyze_metadata",
+          "line": 61,
+          "rank": "D",
+          "complexity": 29
+        }
+      ]
+    },
+    {
+      "file": "backend/routers/analysis/index_analysis.py",
+      "lines": 0,
+      "max_complexity": 69,
+      "mi": 26.14,
+      "mi_rank": "A",
+      "top_functions": [
+        {
+          "function": "_run_index_analysis_async",
+          "line": 55,
+          "rank": "F",
+          "complexity": 69
+        }
+      ]
+    },
+    {
+      "file": "backend/routers/valuation.py",
+      "lines": 993,
+      "max_complexity": 66,
+      "mi": 8.92,
+      "mi_rank": "C",
+      "top_functions": [
+        {
+          "function": "get_super_value_indexes",
+          "line": 392,
+          "rank": "F",
+          "complexity": 66
+        },
+        {
+          "function": "get_enhanced_strategy",
+          "line": 634,
+          "rank": "F",
+          "complexity": 55
+        },
+        {
+          "function": "unified_valuation_query",
+          "line": 291,
+          "rank": "C",
+          "complexity": 16
+        }
+      ]
+    },
+    {
+      "file": "backend/routers/portfolio.py",
+      "lines": 972,
+      "max_complexity": 65,
+      "mi": 9.86,
+      "mi_rank": "B",
+      "top_functions": [
+        {
+          "function": "scan_portfolio_alerts",
+          "line": 331,
+          "rank": "F",
+          "complexity": 65
+        },
+        {
+          "function": "ai_suggestion_to_decision_api",
+          "line": 895,
+          "rank": "C",
+          "complexity": 20
+        },
+        {
+          "function": "import_portfolio_csv_file",
+          "line": 174,
+          "rank": "C",
+          "complexity": 15
+        }
+      ]
+    },
+    {
+      "file": "backend/routers/analysis/deep_dive.py",
+      "lines": 0,
+      "max_complexity": 60,
+      "mi": 33.16,
+      "mi_rank": "A",
+      "top_functions": [
+        {
+          "function": "fund_deep_dive_api",
+          "line": 40,
+          "rank": "F",
+          "complexity": 60
+        },
+        {
+          "function": "_run_deep_dive_async",
+          "line": 249,
+          "rank": "C",
+          "complexity": 20
+        }
+      ]
+    },
+    {
+      "file": "backend/routers/dashboard.py",
+      "lines": 0,
+      "max_complexity": 54,
+      "mi": 20.15,
+      "mi_rank": "A",
+      "top_functions": [
+        {
+          "function": "get_dashboard",
+          "line": 181,
+          "rank": "F",
+          "complexity": 54
+        },
+        {
+          "function": "get_hot_topics",
+          "line": 410,
+          "rank": "F",
+          "complexity": 48
+        },
+        {
+          "function": "_get_cash_advice",
+          "line": 64,
+          "rank": "C",
+          "complexity": 15
+        }
+      ]
+    },
+    {
+      "file": "backend/routers/analysis/bond_recommend.py",
+      "lines": 0,
+      "max_complexity": 52,
+      "mi": 33.96,
+      "mi_rank": "A",
+      "top_functions": [
+        {
+          "function": "_do_bond_recommend",
+          "line": 84,
+          "rank": "F",
+          "complexity": 52
+        }
+      ]
+    },
+    {
+      "file": "backend/scripts/test_rag_recall.py",
+      "lines": 0,
+      "max_complexity": 52,
+      "mi": 40.01,
+      "mi_rank": "A",
+      "top_functions": [
+        {
+          "function": "run_all_tests",
+          "line": 284,
+          "rank": "F",
+          "complexity": 52
+        },
+        {
+          "function": "run_single_test",
+          "line": 204,
+          "rank": "C",
+          "complexity": 16
+        }
+      ]
+    }
+  ],
+  "top_complex_functions": [
+    {
+      "file": "backend/agent/orchestrator.py",
+      "function": "orchestrate_stream",
+      "line": 2924,
+      "rank": "F",
+      "complexity": 219
+    },
+    {
+      "file": "backend/services/rag.py",
+      "function": "build_rag_context_with_details",
+      "line": 1886,
+      "rank": "F",
+      "complexity": 148
+    },
+    {
+      "file": "backend/agent/orchestrator.py",
+      "function": "orchestrate",
+      "line": 2262,
+      "rank": "F",
+      "complexity": 116
+    },
+    {
+      "file": "backend/routers/analysis/diversification.py",
+      "function": "_run_diversification_ai_summary_async",
+      "line": 173,
+      "rank": "F",
+      "complexity": 87
+    },
+    {
+      "file": "backend/services/rag.py",
+      "function": "_apply_personalization_boost",
+      "line": 198,
+      "rank": "F",
+      "complexity": 84
+    },
+    {
+      "file": "backend/db/decisions.py",
+      "function": "build_decision_precheck",
+      "line": 1348,
+      "rank": "F",
+      "complexity": 83
+    },
+    {
+      "file": "backend/routers/analysis/health_score.py",
+      "function": "calc_fear_greed_index",
+      "line": 782,
+      "rank": "F",
+      "complexity": 72
+    },
+    {
+      "file": "backend/scripts/analyze_chat_quality.py",
+      "function": "main",
+      "line": 122,
+      "rank": "F",
+      "complexity": 70
+    },
+    {
+      "file": "backend/routers/analysis/index_analysis.py",
+      "function": "_run_index_analysis_async",
+      "line": 55,
+      "rank": "F",
+      "complexity": 69
+    },
+    {
+      "file": "backend/routers/valuation.py",
+      "function": "get_super_value_indexes",
+      "line": 392,
+      "rank": "F",
+      "complexity": 66
+    },
+    {
+      "file": "backend/routers/portfolio.py",
+      "function": "scan_portfolio_alerts",
+      "line": 331,
+      "rank": "F",
+      "complexity": 65
+    },
+    {
+      "file": "backend/db/portfolio.py",
+      "function": "compare_funds",
+      "line": 1466,
+      "rank": "F",
+      "complexity": 65
+    },
+    {
+      "file": "backend/routers/analysis/deep_dive.py",
+      "function": "fund_deep_dive_api",
+      "line": 40,
+      "rank": "F",
+      "complexity": 60
+    },
+    {
+      "file": "backend/db/portfolio.py",
+      "function": "analyze_trade_patterns",
+      "line": 2332,
+      "rank": "F",
+      "complexity": 56
+    },
+    {
+      "file": "backend/routers/valuation.py",
+      "function": "get_enhanced_strategy",
+      "line": 634,
+      "rank": "F",
+      "complexity": 55
+    },
+    {
+      "file": "backend/routers/dashboard.py",
+      "function": "get_dashboard",
+      "line": 181,
+      "rank": "F",
+      "complexity": 54
+    },
+    {
+      "file": "backend/routers/analysis/bond_recommend.py",
+      "function": "_do_bond_recommend",
+      "line": 84,
+      "rank": "F",
+      "complexity": 52
+    },
+    {
+      "file": "backend/scripts/test_rag_recall.py",
+      "function": "run_all_tests",
+      "line": 284,
+      "rank": "F",
+      "complexity": 52
+    },
+    {
+      "file": "backend/routers/analysis/daily_report.py",
+      "function": "_run_regenerate_daily_report_async",
+      "line": 150,
+      "rank": "F",
+      "complexity": 51
+    },
+    {
+      "file": "backend/scripts/complexity_report.py",
+      "function": "analyze",
+      "line": 113,
+      "rank": "F",
+      "complexity": 51
+    },
+    {
+      "file": "backend/routers/analysis/hotspots.py",
+      "function": "_do_hotspots_analysis",
+      "line": 52,
+      "rank": "F",
+      "complexity": 49
+    },
+    {
+      "file": "backend/services/rebalancer.py",
+      "function": "analyze_rebalancing_need",
+      "line": 43,
+      "rank": "F",
+      "complexity": 49
+    },
+    {
+      "file": "backend/routers/dashboard.py",
+      "function": "get_hot_topics",
+      "line": 410,
+      "rank": "F",
+      "complexity": 48
+    },
+    {
+      "file": "backend/db/portfolio.py",
+      "function": "confirm_transaction",
+      "line": 771,
+      "rank": "F",
+      "complexity": 48
+    },
+    {
+      "file": "backend/routers/analysis/trade_review.py",
+      "function": "trade_review_api",
+      "line": 31,
+      "rank": "F",
+      "complexity": 47
+    },
+    {
+      "file": "backend/db/decisions.py",
+      "function": "match_pending_decisions",
+      "line": 2151,
+      "rank": "F",
+      "complexity": 46
+    },
+    {
+      "file": "backend/routers/analysis/market_intel.py",
+      "function": "_do_market_intelligence",
+      "line": 487,
+      "rank": "F",
+      "complexity": 45
+    },
+    {
+      "file": "backend/routers/analysis/health_score.py",
+      "function": "calc_stock_bond_ratio",
+      "line": 653,
+      "rank": "F",
+      "complexity": 44
+    },
+    {
+      "file": "backend/agent/multi_agent.py",
+      "function": "run_specialist",
+      "line": 275,
+      "rank": "F",
+      "complexity": 44
+    },
+    {
+      "file": "backend/routers/analysis/health_score.py",
+      "function": "calc_behavior_score",
+      "line": 328,
+      "rank": "F",
+      "complexity": 43
+    }
+  ],
+  "f_rank_functions": [
+    {
+      "file": "backend/agent/orchestrator.py",
+      "function": "orchestrate_stream",
+      "line": 2924,
+      "complexity": 219
+    },
+    {
+      "file": "backend/services/rag.py",
+      "function": "build_rag_context_with_details",
+      "line": 1886,
+      "complexity": 148
+    },
+    {
+      "file": "backend/agent/orchestrator.py",
+      "function": "orchestrate",
+      "line": 2262,
+      "complexity": 116
+    },
+    {
+      "file": "backend/routers/analysis/diversification.py",
+      "function": "_run_diversification_ai_summary_async",
+      "line": 173,
+      "complexity": 87
+    },
+    {
+      "file": "backend/services/rag.py",
+      "function": "_apply_personalization_boost",
+      "line": 198,
+      "complexity": 84
+    },
+    {
+      "file": "backend/db/decisions.py",
+      "function": "build_decision_precheck",
+      "line": 1348,
+      "complexity": 83
+    },
+    {
+      "file": "backend/routers/analysis/health_score.py",
+      "function": "calc_fear_greed_index",
+      "line": 782,
+      "complexity": 72
+    },
+    {
+      "file": "backend/scripts/analyze_chat_quality.py",
+      "function": "main",
+      "line": 122,
+      "complexity": 70
+    },
+    {
+      "file": "backend/routers/analysis/index_analysis.py",
+      "function": "_run_index_analysis_async",
+      "line": 55,
+      "complexity": 69
+    },
+    {
+      "file": "backend/routers/valuation.py",
+      "function": "get_super_value_indexes",
+      "line": 392,
+      "complexity": 66
+    },
+    {
+      "file": "backend/routers/portfolio.py",
+      "function": "scan_portfolio_alerts",
+      "line": 331,
+      "complexity": 65
+    },
+    {
+      "file": "backend/db/portfolio.py",
+      "function": "compare_funds",
+      "line": 1466,
+      "complexity": 65
+    },
+    {
+      "file": "backend/routers/analysis/deep_dive.py",
+      "function": "fund_deep_dive_api",
+      "line": 40,
+      "complexity": 60
+    },
+    {
+      "file": "backend/db/portfolio.py",
+      "function": "analyze_trade_patterns",
+      "line": 2332,
+      "complexity": 56
+    },
+    {
+      "file": "backend/routers/valuation.py",
+      "function": "get_enhanced_strategy",
+      "line": 634,
+      "complexity": 55
+    },
+    {
+      "file": "backend/routers/dashboard.py",
+      "function": "get_dashboard",
+      "line": 181,
+      "complexity": 54
+    },
+    {
+      "file": "backend/routers/analysis/bond_recommend.py",
+      "function": "_do_bond_recommend",
+      "line": 84,
+      "complexity": 52
+    },
+    {
+      "file": "backend/scripts/test_rag_recall.py",
+      "function": "run_all_tests",
+      "line": 284,
+      "complexity": 52
+    },
+    {
+      "file": "backend/routers/analysis/daily_report.py",
+      "function": "_run_regenerate_daily_report_async",
+      "line": 150,
+      "complexity": 51
+    },
+    {
+      "file": "backend/scripts/complexity_report.py",
+      "function": "analyze",
+      "line": 113,
+      "complexity": 51
+    },
+    {
+      "file": "backend/routers/analysis/hotspots.py",
+      "function": "_do_hotspots_analysis",
+      "line": 52,
+      "complexity": 49
+    },
+    {
+      "file": "backend/services/rebalancer.py",
+      "function": "analyze_rebalancing_need",
+      "line": 43,
+      "complexity": 49
+    },
+    {
+      "file": "backend/routers/dashboard.py",
+      "function": "get_hot_topics",
+      "line": 410,
+      "complexity": 48
+    },
+    {
+      "file": "backend/db/portfolio.py",
+      "function": "confirm_transaction",
+      "line": 771,
+      "complexity": 48
+    },
+    {
+      "file": "backend/routers/analysis/trade_review.py",
+      "function": "trade_review_api",
+      "line": 31,
+      "complexity": 47
+    },
+    {
+      "file": "backend/db/decisions.py",
+      "function": "match_pending_decisions",
+      "line": 2151,
+      "complexity": 46
+    },
+    {
+      "file": "backend/routers/analysis/market_intel.py",
+      "function": "_do_market_intelligence",
+      "line": 487,
+      "complexity": 45
+    },
+    {
+      "file": "backend/routers/analysis/health_score.py",
+      "function": "calc_stock_bond_ratio",
+      "line": 653,
+      "complexity": 44
+    },
+    {
+      "file": "backend/agent/multi_agent.py",
+      "function": "run_specialist",
+      "line": 275,
+      "complexity": 44
+    },
+    {
+      "file": "backend/routers/analysis/health_score.py",
+      "function": "calc_behavior_score",
+      "line": 328,
+      "complexity": 43
+    },
+    {
+      "file": "backend/tools/__init__.py",
+      "function": "_calculate_metrics",
+      "line": 1299,
+      "complexity": 41
+    }
+  ],
+  "e_rank_functions": [
+    {
+      "file": "backend/services/portfolio_context.py",
+      "function": "build_portfolio_context",
+      "line": 9,
+      "complexity": 40
+    },
+    {
+      "file": "backend/app.py",
+      "function": "_auto_daily_report",
+      "line": 517,
+      "complexity": 39
+    },
+    {
+      "file": "backend/routers/conversations.py",
+      "function": "send_message_api",
+      "line": 593,
+      "complexity": 39
+    },
+    {
+      "file": "backend/db/portfolio.py",
+      "function": "_recalculate_holding",
+      "line": 570,
+      "complexity": 39
+    },
+    {
+      "file": "backend/app.py",
+      "function": "_build_valuation_context",
+      "line": 817,
+      "complexity": 38
+    },
+    {
+      "file": "backend/routers/analysis/correlation.py",
+      "function": "_build_correlation_matrix",
+      "line": 77,
+      "complexity": 38
+    },
+    {
+      "file": "backend/agent/orchestrator.py",
+      "function": "_classify_complexity_by_rules",
+      "line": 1273,
+      "complexity": 37
+    },
+    {
+      "file": "backend/services/article_reader.py",
+      "function": "fetch_article",
+      "line": 48,
+      "complexity": 37
+    },
+    {
+      "file": "backend/agent/multi_agent.py",
+      "function": "run_specialist_with_context",
+      "line": 496,
+      "complexity": 36
+    },
+    {
+      "file": "backend/agent/orchestrator.py",
+      "function": "clarify_requirement",
+      "line": 1386,
+      "complexity": 36
+    },
+    {
+      "file": "backend/db/portfolio.py",
+      "function": "classify_fund_category",
+      "line": 1816,
+      "complexity": 36
+    },
+    {
+      "file": "backend/services/daily_position_advisor.py",
+      "function": "run_daily_position_advice",
+      "line": 30,
+      "complexity": 36
+    },
+    {
+      "file": "backend/routers/analysis/health_score.py",
+      "function": "calc_quality_score",
+      "line": 87,
+      "complexity": 35
+    },
+    {
+      "file": "backend/tools/__init__.py",
+      "function": "_validate_tool_arguments",
+      "line": 634,
+      "complexity": 34
+    },
+    {
+      "file": "backend/tools/__init__.py",
+      "function": "_execute_tool_impl",
+      "line": 769,
+      "complexity": 34
+    },
+    {
+      "file": "backend/agent/orchestrator.py",
+      "function": "detect_conflicts",
+      "line": 903,
+      "complexity": 34
+    },
+    {
+      "file": "backend/db/decisions.py",
+      "function": "ensure_dashboard_decisions",
+      "line": 1108,
+      "complexity": 34
+    },
+    {
+      "file": "backend/tools/__init__.py",
+      "function": "_get_macro_policy_data",
+      "line": 1943,
+      "complexity": 33
+    },
+    {
+      "file": "backend/db/portfolio.py",
+      "function": "get_portfolio_diversification",
+      "line": 2230,
+      "complexity": 33
+    },
+    {
+      "file": "backend/routers/analysis/four_pots.py",
+      "function": "calc_dca_optimization",
+      "line": 213,
+      "complexity": 32
+    },
+    {
+      "file": "backend/agent/orchestrator.py",
+      "function": "route_to_specialists_by_keywords",
+      "line": 1702,
+      "complexity": 32
+    },
+    {
+      "file": "backend/scripts/sync_obsidian.py",
+      "function": "sync_vault",
+      "line": 134,
+      "complexity": 32
+    },
+    {
+      "file": "backend/services/daily_position_advisor.py",
+      "function": "_generate_signals",
+      "line": 203,
+      "complexity": 32
+    },
+    {
+      "file": "backend/routers/conversations.py",
+      "function": "resume_conversation",
+      "line": 190,
+      "complexity": 31
+    },
+    {
+      "file": "backend/agent/orchestrator.py",
+      "function": "detect_complexity_by_keywords",
+      "line": 1611,
+      "complexity": 31
+    }
+  ],
+  "maintainability_index_worst": [
+    {
+      "file": "backend/routers/conversations.py",
+      "mi": 0.0,
+      "rank": "C"
+    },
+    {
+      "file": "backend/routers/analysis/health_score.py",
+      "mi": 0.0,
+      "rank": "C"
+    },
+    {
+      "file": "backend/tools/__init__.py",
+      "mi": 0.0,
+      "rank": "C"
+    },
+    {
+      "file": "backend/agent/orchestrator.py",
+      "mi": 0.0,
+      "rank": "C"
+    },
+    {
+      "file": "backend/scripts/distill_period.py",
+      "mi": 0.0,
+      "rank": "C"
+    },
+    {
+      "file": "backend/db/decisions.py",
+      "mi": 0.0,
+      "rank": "C"
+    },
+    {
+      "file": "backend/db/portfolio.py",
+      "mi": 0.0,
+      "rank": "C"
+    },
+    {
+      "file": "backend/services/rag.py",
+      "mi": 0.0,
+      "rank": "C"
+    },
+    {
+      "file": "backend/routers/analysis/market_intel.py",
+      "mi": 3.51,
+      "rank": "C"
+    },
+    {
+      "file": "backend/routers/articles.py",
+      "mi": 4.83,
+      "rank": "C"
+    },
+    {
+      "file": "backend/scripts/distill.py",
+      "mi": 5.28,
+      "rank": "C"
+    },
+    {
+      "file": "backend/app.py",
+      "mi": 7.2,
+      "rank": "C"
+    },
+    {
+      "file": "backend/services/image_parser.py",
+      "mi": 7.77,
+      "rank": "C"
+    },
+    {
+      "file": "backend/routers/eval.py",
+      "mi": 7.89,
+      "rank": "C"
+    },
+    {
+      "file": "backend/routers/valuation.py",
+      "mi": 8.92,
+      "rank": "C"
+    }
+  ],
+  "dead_code": {
+    "total": 87,
+    "non_test": 24,
+    "by_file": {
+      "backend/tests/test_db_portfolio.py": [
+        {
+          "line": 11,
+          "issue": "unused variable 'tmp_db'",
+          "confidence": 100
+        },
+        {
+          "line": 16,
+          "issue": "unused variable 'tmp_db'",
+          "confidence": 100
+        },
+        {
+          "line": 24,
+          "issue": "unused variable 'tmp_db'",
+          "confidence": 100
+        },
+        {
+          "line": 31,
+          "issue": "unused variable 'tmp_db'",
+          "confidence": 100
+        },
+        {
+          "line": 34,
+          "issue": "unused variable 'tmp_db'",
+          "confidence": 100
+        },
+        {
+          "line": 42,
+          "issue": "unused variable 'tmp_db'",
+          "confidence": 100
+        },
+        {
+          "line": 45,
+          "issue": "unused variable 'tmp_db'",
+          "confidence": 100
+        },
+        {
+          "line": 51,
+          "issue": "unused variable 'tmp_db'",
+          "confidence": 100
+        },
+        {
+          "line": 69,
+          "issue": "unused variable 'tmp_db'",
+          "confidence": 100
+        },
+        {
+          "line": 74,
+          "issue": "unused variable 'tmp_db'",
+          "confidence": 100
+        },
+        {
+          "line": 79,
+          "issue": "unused variable 'tmp_db'",
+          "confidence": 100
+        },
+        {
+          "line": 87,
+          "issue": "unused variable 'tmp_db'",
+          "confidence": 100
+        },
+        {
+          "line": 92,
+          "issue": "unused variable 'tmp_db'",
+          "confidence": 100
+        },
+        {
+          "line": 100,
+          "issue": "unused variable 'tmp_db'",
+          "confidence": 100
+        },
+        {
+          "line": 107,
+          "issue": "unused variable 'tmp_db'",
+          "confidence": 100
+        }
+      ],
+      "backend/tests/test_db_watchlist.py": [
+        {
+          "line": 11,
+          "issue": "unused variable 'tmp_db'",
+          "confidence": 100
+        },
+        {
+          "line": 15,
+          "issue": "unused variable 'tmp_db'",
+          "confidence": 100
+        },
+        {
+          "line": 22,
+          "issue": "unused variable 'tmp_db'",
+          "confidence": 100
+        },
+        {
+          "line": 28,
+          "issue": "unused variable 'tmp_db'",
+          "confidence": 100
+        },
+        {
+          "line": 31,
+          "issue": "unused variable 'tmp_db'",
+          "confidence": 100
+        },
+        {
+          "line": 39,
+          "issue": "unused variable 'tmp_db'",
+          "confidence": 100
+        },
+        {
+          "line": 42,
+          "issue": "unused variable 'tmp_db'",
+          "confidence": 100
+        },
+        {
+          "line": 48,
+          "issue": "unused variable 'tmp_db'",
+          "confidence": 100
+        },
+        {
+          "line": 58,
+          "issue": "unused variable 'tmp_db'",
+          "confidence": 100
+        },
+        {
+          "line": 66,
+          "issue": "unused variable 'tmp_db'",
+          "confidence": 100
+        },
+        {
+          "line": 71,
+          "issue": "unused variable 'tmp_db'",
+          "confidence": 100
+        },
+        {
+          "line": 76,
+          "issue": "unused variable 'tmp_db'",
+          "confidence": 100
+        },
+        {
+          "line": 80,
+          "issue": "unused variable 'tmp_db'",
+          "confidence": 100
+        }
+      ],
+      "backend/tests/test_db_health_score.py": [
+        {
+          "line": 7,
+          "issue": "unused variable 'tmp_db'",
+          "confidence": 100
+        },
+        {
+          "line": 20,
+          "issue": "unused variable 'tmp_db'",
+          "confidence": 100
+        },
+        {
+          "line": 30,
+          "issue": "unused variable 'tmp_db'",
+          "confidence": 100
+        },
+        {
+          "line": 36,
+          "issue": "unused variable 'tmp_db'",
+          "confidence": 100
+        },
+        {
+          "line": 41,
+          "issue": "unused variable 'tmp_db'",
+          "confidence": 100
+        },
+        {
+          "line": 44,
+          "issue": "unused variable 'tmp_db'",
+          "confidence": 100
+        },
+        {
+          "line": 53,
+          "issue": "unused variable 'tmp_db'",
+          "confidence": 100
+        }
+      ],
+      "backend/tests/test_db_decisions_phase1.py": [
+        {
+          "line": 38,
+          "issue": "unused variable 'tmp_db'",
+          "confidence": 100
+        },
+        {
+          "line": 48,
+          "issue": "unused variable 'tmp_db'",
+          "confidence": 100
+        },
+        {
+          "line": 71,
+          "issue": "unused variable 'tmp_db'",
+          "confidence": 100
+        },
+        {
+          "line": 82,
+          "issue": "unused variable 'tmp_db'",
+          "confidence": 100
+        },
+        {
+          "line": 103,
+          "issue": "unused variable 'tmp_db'",
+          "confidence": 100
+        }
+      ],
+      "backend/agent/orchestrator.py": [
+        {
+          "line": 14,
+          "issue": "unused import 'cancel_running_agents'",
+          "confidence": 90
+        },
+        {
+          "line": 23,
+          "issue": "unused import 'ParallelExecutor'",
+          "confidence": 90
+        },
+        {
+          "line": 1172,
+          "issue": "unused variable 'available_specialists'",
+          "confidence": 100
+        },
+        {
+          "line": 1452,
+          "issue": "unreachable code after 'return'",
+          "confidence": 100
+        }
+      ],
+      "backend/tests/test_conversation_execution_state.py": [
+        {
+          "line": 16,
+          "issue": "unused variable 'tmp_db'",
+          "confidence": 100
+        },
+        {
+          "line": 28,
+          "issue": "unused variable 'tmp_db'",
+          "confidence": 100
+        },
+        {
+          "line": 43,
+          "issue": "unused variable 'tmp_db'",
+          "confidence": 100
+        },
+        {
+          "line": 57,
+          "issue": "unused variable 'tmp_db'",
+          "confidence": 100
+        }
+      ],
+      "backend/tests/test_decision_full_loop.py": [
+        {
+          "line": 18,
+          "issue": "unused variable 'tmp_db'",
+          "confidence": 100
+        },
+        {
+          "line": 66,
+          "issue": "unused variable 'tmp_db'",
+          "confidence": 100
+        },
+        {
+          "line": 93,
+          "issue": "unused variable 'tmp_db'",
+          "confidence": 100
+        },
+        {
+          "line": 125,
+          "issue": "unused variable 'tmp_db'",
+          "confidence": 100
+        }
+      ],
+      "backend/tests/test_recommendation_candidates.py": [
+        {
+          "line": 14,
+          "issue": "unused variable 'tmp_db'",
+          "confidence": 100
+        },
+        {
+          "line": 39,
+          "issue": "unused variable 'tmp_db'",
+          "confidence": 100
+        },
+        {
+          "line": 55,
+          "issue": "unused variable 'tmp_db'",
+          "confidence": 100
+        },
+        {
+          "line": 73,
+          "issue": "unused variable 'tmp_db'",
+          "confidence": 100
+        }
+      ],
+      "backend/tests/test_tool_candidates.py": [
+        {
+          "line": 7,
+          "issue": "unused variable 'tmp_db'",
+          "confidence": 100
+        },
+        {
+          "line": 24,
+          "issue": "unused variable 'tmp_db'",
+          "confidence": 100
+        },
+        {
+          "line": 43,
+          "issue": "unused variable 'tmp_db'",
+          "confidence": 100
+        },
+        {
+          "line": 63,
+          "issue": "unused variable 'tmp_db'",
+          "confidence": 100
+        }
+      ],
+      "backend/infra/schemas.py": [
+        {
+          "line": 22,
+          "issue": "unused variable 'cls'",
+          "confidence": 100
+        },
+        {
+          "line": 128,
+          "issue": "unused variable 'cls'",
+          "confidence": 100
+        },
+        {
+          "line": 141,
+          "issue": "unused variable 'cls'",
+          "confidence": 100
+        }
+      ],
+      "backend/tests/test_multi_agent_optimizer.py": [
+        {
+          "line": 118,
+          "issue": "unused variable 'validator_no_llm'",
+          "confidence": 100
+        },
+        {
+          "line": 130,
+          "issue": "unused variable 'validator_no_llm'",
+          "confidence": 100
+        },
+        {
+          "line": 143,
+          "issue": "unused variable 'validator_no_llm'",
+          "confidence": 100
+        }
+      ],
+      "backend/agent/analysis_runner.py": [
+        {
+          "line": 42,
+          "issue": "unused variable 'record_summary'",
+          "confidence": 100
+        },
+        {
+          "line": 43,
+          "issue": "unused variable 'record_input'",
+          "confidence": 100
+        }
+      ],
+      "backend/app.py": [
+        {
+          "line": 73,
+          "issue": "unused import 'traceback'",
+          "confidence": 90
+        },
+        {
+          "line": 136,
+          "issue": "unused import 'get_lineage'",
+          "confidence": 90
+        }
+      ],
+      "backend/services/daily_position_advisor.py": [
+        {
+          "line": 19,
+          "issue": "unused import 'expire_old_signals'",
+          "confidence": 90
+        },
+        {
+          "line": 914,
+          "issue": "unreachable 'else' expression",
+          "confidence": 100
+        }
+      ],
+      "backend/tests/test_conversation_context.py": [
+        {
+          "line": 15,
+          "issue": "unused variable 'tmp_db'",
+          "confidence": 100
+        },
+        {
+          "line": 71,
+          "issue": "unused variable 'tmp_db'",
+          "confidence": 100
+        }
+      ],
+      "backend/agent/conversation_evaluator.py": [
+        {
+          "line": 52,
+          "issue": "unused variable 'use_llm'",
+          "confidence": 100
+        }
+      ],
+      "backend/agent/orchestrator_optimizer.py": [
+        {
+          "line": 12,
+          "issue": "unused import 'lru_cache'",
+          "confidence": 90
+        }
+      ],
+      "backend/db/agents.py": [
+        {
+          "line": 658,
+          "issue": "unused variable 'error_message'",
+          "confidence": 100
+        }
+      ],
+      "backend/infra/akshare_safe.py": [
+        {
+          "line": 4,
+          "issue": "unused import 'with_circuit_breaker'",
+          "confidence": 90
+        }
+      ],
+      "backend/mcp/trading_calendar.py": [
+        {
+          "line": 8,
+          "issue": "unused import 'lru_cache'",
+          "confidence": 90
+        }
+      ],
+      "backend/routers/analysis/eval_system.py": [
+        {
+          "line": 13,
+          "issue": "unused import 'update_prompt_scores'",
+          "confidence": 90
+        }
+      ],
+      "backend/routers/analysis/rolling_return.py": [
+        {
+          "line": 18,
+          "issue": "unused import 'save_bond_yield'",
+          "confidence": 90
+        }
+      ],
+      "backend/routers/dashboard.py": [
+        {
+          "line": 11,
+          "issue": "unused import 'get_recommendation_feedback_stats'",
+          "confidence": 90
+        }
+      ],
+      "backend/routers/eval.py": [
+        {
+          "line": 763,
+          "issue": "unreachable code after 'try'",
+          "confidence": 100
+        }
+      ],
+      "backend/routers/portfolio.py": [
+        {
+          "line": 28,
+          "issue": "unused import 'list_bad_cases'",
+          "confidence": 90
+        }
+      ],
+      "backend/services/valuation.py": [
+        {
+          "line": 179,
+          "issue": "unused variable 'index_pb_pct'",
+          "confidence": 100
+        }
+      ],
+      "backend/tests/conftest.py": [
+        {
+          "line": 5,
+          "issue": "unused import 'tempfile'",
+          "confidence": 90
+        }
+      ],
+      "backend/tests/test_db_decisions_phase3.py": [
+        {
+          "line": 6,
+          "issue": "unused variable 'tmp_db'",
+          "confidence": 100
+        }
+      ]
+    }
+  },
+  "recommendations": [
+    "🔴 [backend/agent/orchestrator.py:2924] orchestrate_stream() 复杂度 F(219)，必须立即拆分",
+    "🔴 [backend/services/rag.py:1886] build_rag_context_with_details() 复杂度 F(148)，必须立即拆分",
+    "🔴 [backend/agent/orchestrator.py:2262] orchestrate() 复杂度 F(116)，必须立即拆分",
+    "🔴 [backend/routers/analysis/diversification.py:173] _run_diversification_ai_summary_async() 复杂度 F(87)，必须立即拆分",
+    "🔴 [backend/services/rag.py:198] _apply_personalization_boost() 复杂度 F(84)，必须立即拆分",
+    "🔴 [backend/db/decisions.py:1348] build_decision_precheck() 复杂度 F(83)，必须立即拆分",
+    "🔴 [backend/routers/analysis/health_score.py:782] calc_fear_greed_index() 复杂度 F(72)，必须立即拆分",
+    "🔴 [backend/scripts/analyze_chat_quality.py:122] main() 复杂度 F(70)，必须立即拆分",
+    "🔴 [backend/routers/analysis/index_analysis.py:55] _run_index_analysis_async() 复杂度 F(69)，必须立即拆分",
+    "🔴 [backend/routers/valuation.py:392] get_super_value_indexes() 复杂度 F(66)，必须立即拆分",
+    "🟠 [backend/services/portfolio_context.py:9] build_portfolio_context() 复杂度 E(40)，应优先拆分",
+    "🟠 [backend/app.py:517] _auto_daily_report() 复杂度 E(39)，应优先拆分",
+    "🟠 [backend/routers/conversations.py:593] send_message_api() 复杂度 E(39)，应优先拆分",
+    "🟠 [backend/db/portfolio.py:570] _recalculate_holding() 复杂度 E(39)，应优先拆分",
+    "🟠 [backend/app.py:817] _build_valuation_context() 复杂度 E(38)，应优先拆分",
+    "🟠 [backend/routers/analysis/correlation.py:77] _build_correlation_matrix() 复杂度 E(38)，应优先拆分",
+    "🟠 [backend/agent/orchestrator.py:1273] _classify_complexity_by_rules() 复杂度 E(37)，应优先拆分",
+    "🟠 [backend/services/article_reader.py:48] fetch_article() 复杂度 E(37)，应优先拆分",
+    "🟠 [backend/agent/multi_agent.py:496] run_specialist_with_context() 复杂度 E(36)，应优先拆分",
+    "🟠 [backend/agent/orchestrator.py:1386] clarify_requirement() 复杂度 E(36)，应优先拆分",
+    "🟡 [backend/routers/conversations.py] 可维护性指数 0.0 (等级 C)，文件过大或过于复杂，建议拆分模块",
+    "🟡 [backend/routers/analysis/health_score.py] 可维护性指数 0.0 (等级 C)，文件过大或过于复杂，建议拆分模块",
+    "🟡 [backend/tools/__init__.py] 可维护性指数 0.0 (等级 C)，文件过大或过于复杂，建议拆分模块",
+    "🟡 [backend/agent/orchestrator.py] 可维护性指数 0.0 (等级 C)，文件过大或过于复杂，建议拆分模块",
+    "🟡 [backend/scripts/distill_period.py] 可维护性指数 0.0 (等级 C)，文件过大或过于复杂，建议拆分模块",
+    "🔵 [backend/agent/orchestrator.py] 4419 行，建议按功能域拆分为多个子模块",
+    "🔵 [backend/db/portfolio.py] 2911 行，建议按功能域拆分为多个子模块",
+    "🔵 [backend/services/rag.py] 2570 行，建议按功能域拆分为多个子模块",
+    "🔵 [backend/db/decisions.py] 2347 行，建议按功能域拆分为多个子模块",
+    "🔵 [backend/tools/__init__.py] 2193 行，建议按功能域拆分为多个子模块",
+    "🟣 检测到 24 处死代码（非测试），涉及 16 个文件，建议清理"
+  ]
+}

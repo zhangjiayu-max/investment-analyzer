@@ -2921,6 +2921,323 @@ def _inject_analysis_context(query: str) -> tuple:
         return query, ""
 
 
+def _stream_precheck(query: str, history: list, rag_context: str, cancel_event: threading.Event | None, resume_from: dict | None):
+    """阶段0-0.5: prompt注入检查、token预算、链接抓取、查询改写、恢复模式。
+
+    生成器：yield 状态/错误事件。调用方需检查返回值是否为 None（表示已 yield 终止事件）。
+    返回 dict 或 None:
+      - None 表示已 yield 终止性 answer 事件，调用方应直接 return
+      - dict 包含: query, refined_query, rewrite_meta, budget, article_context,
+        completed_specialists, resumed_results, resume_message_id
+    """
+    # 0. Prompt 注入防护检查
+    from agent.input_sanitizer import check_injection, HIGH_CONFIDENCE_REJECT
+    safety = check_injection(query)
+    if safety["blocked"]:
+        logger.warning(f"注入检测拦截: {query[:100]} | 原因: {safety['reason']}")
+        yield {
+            "type": "answer",
+            "content": HIGH_CONFIDENCE_REJECT,
+            "specialist_results": [],
+            "tool_calls": [],
+            "error": "injection_blocked",
+        }
+        return
+    if safety["confidence"] > 0:
+        logger.info(f"注入低置信度告警: {query[:100]} | 模式: {safety['reason']}")
+
+    # 0. Token 预算检查
+    budget = check_token_budget()
+    logger.info(f"Token 预算: {budget['used']}/{budget['limit']} ({budget['pct']:.0%}) mode={budget['mode']}")
+    if budget["mode"] == "exceeded":
+        yield {
+            "type": "answer",
+            "content": f"今日分析额度已用完({budget['used']:,}/{budget['limit']:,} tokens),请明天再来。",
+            "specialist_results": [],
+            "tool_calls": [],
+            "error": "token_budget_exceeded",
+        }
+        return
+
+    # 0.3 链接检测与文章抓取
+    article_context = ""
+    article_fetch_failed = False
+    logger.info(f"[文章检测] query前50字: {query[:50]}, detect_urls={detect_urls(query)}")
+    if detect_urls(query):
+        yield {"type": "status", "message": "检测到链接,正在抓取文章内容..."}
+        query, article_context = enrich_query_with_article(query)
+        if article_context:
+            if article_context.startswith("[抓取失败]"):
+                article_fetch_failed = True
+                logger.warning(f"文章抓取失败: {article_context}")
+                yield {"type": "status", "message": "文章链接无法访问,将尝试分析,请稍候..."}
+            else:
+                logger.info(f"已注入文章内容到查询中")
+                yield {"type": "status", "message": "文章内容已获取,正在分析..."}
+
+    # 0.4 查询改写（多轮对话代词/省略补全）
+    rewrite_meta = {}
+    try:
+        from agent.query_rewriter import rewrite_query
+        query, rewrite_meta = rewrite_query(query, history)
+        if rewrite_meta.get("rewritten"):
+            yield {"type": "status", "message": f"已补全问题上下文（{rewrite_meta.get('method', '')}）"}
+    except Exception as e:
+        logger.warning(f"查询改写失败(不影响主流程): {e}")
+
+    # 0.5 恢复模式:从 agent_runs 表查询已完成的专家
+    completed_specialists = set()
+    resumed_results = []
+    resume_message_id = resume_from.get("message_id") if resume_from else None
+    if resume_message_id:
+        completed_runs = get_completed_agents_for_message(resume_message_id)
+        # 如果当前消息没有 completed agent_runs，尝试查 retry_of_message_id
+        if not completed_runs:
+            from db.conversations import _load_metadata
+            conn = _get_conn()
+            msg_row = conn.execute("SELECT metadata FROM messages WHERE id = ?", (resume_message_id,)).fetchone()
+            conn.close()
+            if msg_row:
+                meta = json.loads(msg_row["metadata"])
+                retry_of = meta.get("retry_of_message_id")
+                if retry_of:
+                    completed_runs = get_completed_agents_for_message(retry_of)
+                    if completed_runs:
+                        logger.info(f"恢复模式:从 retry_of_message_id={retry_of} 找到 {len(completed_runs)} 个已完成专家")
+        for run in completed_runs:
+            completed_specialists.add(run["agent_key"])
+            resumed_results.append({
+                "agent_key": run["agent_key"],
+                "agent": run["agent_name"],
+                "analysis": run["result"] or "",
+                "duration_ms": run["duration_ms"] or 0,
+            })
+        logger.info(f"恢复模式:已完成的专家 {completed_specialists}")
+        if completed_specialists:
+            yield {"type": "status", "message": f"正在恢复执行({len(completed_specialists)} 个专家已完成)..."}
+
+    return {
+        "query": query,
+        "refined_query": query,  # 路由阶段可能进一步改写
+        "rewrite_meta": rewrite_meta,
+        "budget": budget,
+        "article_context": article_context,
+        "completed_specialists": completed_specialists,
+        "resumed_results": resumed_results,
+        "resume_message_id": resume_message_id,
+    }
+
+
+def _stream_route(query: str, history: list, rag_context: str, cancel_event: threading.Event | None,
+                  resume_from: dict | None, target_specialists: list[str] | None,
+                  completed_specialists: set, resume_message_id: int | None, trace_id: str, start_time: float):
+    """阶段1-1.5: 专家路由、复杂度分类、RAG增强。
+
+    生成器：yield 状态/阶段事件。
+    返回 dict 或 None:
+      - None 表示内部错误（不应发生，但调用方应防御性检查）
+      - dict 包含: specialists, complexity, clarification, route_result,
+        refined_query, context_config, token_budget, rag_context
+    """
+    _check_cancel(cancel_event)
+    route_result = None
+    clarification = {}
+
+    # 如果用户通过 @mention 指定了专家,跳过自动路由
+    if target_specialists:
+        all_agents = load_specialist_agents()
+        valid_specialists = [s for s in target_specialists if s in all_agents]
+        if valid_specialists:
+            specialist_names = [all_agents[s]["name"] for s in valid_specialists]
+            yield {"type": "status", "message": f"已指定专家:{'、'.join(specialist_names)}"}
+            complexity = "simple" if len(valid_specialists) == 1 else "medium"
+            route_result = {
+                "complexity": complexity,
+                "specialists": valid_specialists,
+                "reason": f"用户通过 @mention 指定了专家: {', '.join(valid_specialists)}",
+                "needs_arbitration": len(valid_specialists) >= 2,
+                "route_by": "mention",
+                "refined_query": query,
+            }
+            context_config = get_context_config(complexity)
+            token_budget = get_token_budget(complexity)
+            refined_query = query
+            specialists = valid_specialists
+            clarification = route_result
+            logger.info(f"@mention 指定专家: {valid_specialists}")
+        else:
+            logger.warning(f"@mention 指定了无效的 agent_key: {target_specialists},回退到自动路由")
+            target_specialists = None
+
+    if not target_specialists:
+        if not resume_from:
+            yield {"type": "phase", "phase": "route", "message": "🔍 正在理解您的问题..."}
+        history_summary = _build_history_summary(history)
+        portfolio_summary = ""
+        route_result = _router.route(
+            query,
+            history_summary=history_summary,
+            portfolio_summary=portfolio_summary,
+            target_specialists=None,
+        )
+        complexity = route_result["complexity"]
+        context_config = get_context_config(complexity)
+        token_budget = get_token_budget(complexity)
+        logger.info(f"路由结果: {route_result}")
+
+        refined_query = route_result.get("refined_query", query) or query
+        specialists = route_result.get("specialists", [])
+
+        max_spec = context_config.get("max_specialists", 4)
+        if len(specialists) > max_spec:
+            logger.info(f"specialists 超出上限({len(specialists)} > {max_spec})，截断")
+            specialists = specialists[:max_spec]
+
+        # 恢复模式：排除已完成的专家
+        if resume_message_id and specialists and completed_specialists:
+            specialists = [s for s in specialists if s not in completed_specialists]
+            if not specialists:
+                specialists = list(completed_specialists)[:3]
+                logger.info(f"恢复模式:所有路由专家已完成,复用已有结果: {specialists}")
+            else:
+                logger.info(f"恢复模式:排除已完成专家后剩余: {specialists}")
+
+        clarification = route_result
+        if not specialists:
+            if not resume_from:
+                yield {"type": "phase", "phase": "clarify", "message": "🔍 正在理解您的问题..."}
+            clarification = clarify_requirement(query, trace_id=trace_id)
+            complexity = clarification["complexity"]
+            context_config = get_context_config(complexity)
+            token_budget = get_token_budget(complexity)
+            logger.info(f"Smart Router 未命中,回退到需求澄清: {clarification}")
+            refined_query = clarification.get("refined_query", query)
+            specialists = clarification.get("specialists", [])
+
+    # 限制专家数量
+    max_spec = context_config.get("max_specialists", 3)
+    if len(specialists) > max_spec:
+        logger.info(f"专家数量限制: {len(specialists)} → {max_spec},丢弃: {specialists[max_spec:]}")
+        specialists = specialists[:max_spec]
+
+    # 1.5 场景化 RAG 增强
+    rag_context = build_scenario_rag_context(refined_query, specialists, rag_context)
+
+    return {
+        "specialists": specialists,
+        "complexity": complexity,
+        "clarification": clarification,
+        "route_result": route_result,
+        "refined_query": refined_query,
+        "context_config": context_config,
+        "token_budget": token_budget,
+        "rag_context": rag_context,
+    }
+
+
+def _stream_build_context(refined_query: str, rag_context: str, complexity: str,
+                           context_config: dict, token_budget: dict, history: list):
+    """阶段2: 构建上下文（token预算、RAG、用户画像、持仓上下文、估值上下文等）。
+
+    纯函数，无 yield。返回 dict:
+      - llm_messages: list[dict] — 构建好的消息列表
+      - prebuilt_context: str — 供 specialist 复用的上下文
+      - system_content: str — 完整的系统提示
+    """
+    system_content = build_orchestrator_system_prompt()
+
+    # RAG 上下文(token 感知截断)
+    rag_budget = int(token_budget["total_context"] * token_budget["rag_pct"])
+    if rag_context and context_config["rag_enabled"]:
+        compressed_rag = compress_rag_token_aware(rag_context, max_tokens=rag_budget)
+        system_content += f"\n\n参考信息:\n{compressed_rag}"
+
+    # 注入用户偏好画像
+    preference_ctx = get_preference_context("default")
+    if preference_ctx:
+        system_content += f"\n\n{preference_ctx}"
+
+    # 注入 KYC 理财画像
+    from agent.kyc import kyc_profile_to_text
+    kyc_text = kyc_profile_to_text("default")
+    if kyc_text:
+        system_content += f"\n\n{kyc_text}"
+
+    # 注入跨对话用户记忆
+    user_memory = build_user_memory_context("default")
+    if user_memory:
+        system_content += f"\n\n<user_memory>\n{user_memory}\n</user_memory>"
+
+    # 注入持仓上下文 + 估值上下文(同时构建 prebuilt_context 供 specialist 复用)
+    prebuilt_context = ""
+
+    # Bridge A: 注入24h分析结论上下文
+    _, analysis_ctx = _inject_analysis_context(refined_query)
+    if analysis_ctx:
+        prebuilt_context += analysis_ctx
+        try:
+            system_content += f"\n\n{analysis_ctx}"
+        except Exception:
+            pass
+
+    # 注入 RAG 知识库上下文到 prebuilt_context
+    if rag_context:
+        compressed_rag_for_specialist = compress_rag_token_aware(rag_context, max_tokens=get_config_int('llm.max_tokens_rag_compress', 1500))
+        prebuilt_context += f"## 知识库参考(书籍/文章/技能)\n{compressed_rag_for_specialist}\n\n"
+
+    try:
+        from services.portfolio_context import build_portfolio_context, build_valuation_summary
+        portfolio_ctx = build_portfolio_context()
+        system_content += f"\n\n## 用户当前持仓\n{portfolio_ctx}"
+        prebuilt_context += f"## 用户当前持仓\n{portfolio_ctx}\n\n"
+        valuation_ctx = build_valuation_summary()
+        if valuation_ctx:
+            system_content += f"\n\n## 当前市场估值\n{valuation_ctx}"
+            prebuilt_context += f"## 当前市场估值数据\n{valuation_ctx}\n\n"
+    except Exception as e:
+        logger.warning(f"注入持仓/估值上下文失败: {e}")
+
+    # 注入债市数据到 prebuilt_context
+    try:
+        from routers.bond import _fetch_bond_data
+        bond_raw = _fetch_bond_data()
+        if bond_raw and len(bond_raw) > 1:
+            last = bond_raw[-1]
+            temp = last.get("degree", "?")
+            rate = float(last["yield"]) * 100 if last.get("yield") else "?"
+            prebuilt_context += f"## 债市数据\n- 债市温度: {temp}°\n- 10年期国债收益率: {rate}%\n\n"
+    except Exception as e:
+        logger.warning(f"注入债市数据失败: {e}")
+
+    # 注入近期热点新闻到 prebuilt_context
+    try:
+        from routers.dashboard import _hot_topics_cache
+        hot_cache = _hot_topics_cache.get("data")
+        if hot_cache:
+            news_list = hot_cache.get("news", [])[:3]
+            if news_list:
+                news_lines = "\n".join(f"- {n.get('title', '')}" for n in news_list if n.get("title"))
+                prebuilt_context += f"## 今日市场热点\n{news_lines}\n\n"
+    except Exception as e:
+        logger.warning(f"注入热点新闻失败: {e}")
+
+    llm_messages = [{"role": "system", "content": system_content}]
+
+    # 语义化压缩历史消息
+    history_budget = int(token_budget["total_context"] * token_budget["history_pct"])
+    compressed_history = compress_history_semantic(history, max_tokens=history_budget)
+    for msg in compressed_history:
+        llm_messages.append({"role": msg["role"], "content": msg["content"]})
+
+    llm_messages.append({"role": "user", "content": refined_query})
+
+    return {
+        "llm_messages": llm_messages,
+        "prebuilt_context": prebuilt_context,
+        "system_content": system_content,
+    }
+
+
 def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_event: threading.Event | None = None, resume_from: dict | None = None, conversation_id: int = 0, message_id: int = 0, trace_id: str = "", target_specialists: list[str] = None):
     """
     Orchestrator 的流式版本,通过生成器逐步返回事件。
