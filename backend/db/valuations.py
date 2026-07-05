@@ -5,6 +5,30 @@ from datetime import date, datetime
 from db._conn import _get_conn
 
 
+def _normalize_percentile(val) -> float | None:
+    """P2-4.1: 统一百分位字段为 float 类型。
+
+    历史数据存在三种格式：float（13.89）、字符串（"99.22%"）、None，
+    影响评分逻辑（如 dca_add 的估值维度比较）。
+
+    规则：
+      - None / 空字符串 → None
+      - int / float → float(val)
+      - 字符串 "13.89%" / "13.89" → 13.89
+      - 无法解析 → None
+    """
+    if val is None or val == "":
+        return None
+    if isinstance(val, (int, float)):
+        return float(val)
+    if isinstance(val, str):
+        try:
+            return float(val.replace('%', '').strip())
+        except ValueError:
+            return None
+    return None
+
+
 def save_valuation(data: dict, source_image: str = None, source_url: str = None, snapshot_date: str = None) -> int:
     """保存估值数据，返回 id。同指数同日期同类型会更新。"""
     if not snapshot_date:
@@ -14,6 +38,9 @@ def save_valuation(data: dict, source_image: str = None, source_url: str = None,
     if not data.get("index_name"):
         data["index_name"] = "未知指数"
     metric_type = data.get("metric_type", "市盈率")
+
+    # P2-4.1: 写入时统一 percentile 为 float
+    percentile = _normalize_percentile(data.get("percentile"))
 
     conn = _get_conn()
     cur = conn.execute("""
@@ -45,7 +72,7 @@ def save_valuation(data: dict, source_image: str = None, source_url: str = None,
     """, (
         data.get("index_code"), data.get("index_name"), snapshot_date,
         data.get("current_point"), data.get("change_pct"), metric_type,
-        data.get("current_value"), data.get("percentile"),
+        data.get("current_value"), percentile,
         data.get("danger_value"), data.get("median"),
         data.get("opportunity_value"), data.get("max_value"),
         data.get("min_value"), data.get("avg_value"), data.get("zscore"),
@@ -64,6 +91,15 @@ def save_valuation(data: dict, source_image: str = None, source_url: str = None,
     return valuation_id
 
 
+def _apply_percentile_normalize(row: dict) -> dict:
+    """P2-4.1: 读取容错——把 row['percentile'] 统一为 float 或 None。"""
+    if row is None:
+        return None
+    if "percentile" in row:
+        row["percentile"] = _normalize_percentile(row.get("percentile"))
+    return row
+
+
 def get_valuation_history(index_code: str, days: int = 30, metric_type: str = None) -> list[dict]:
     """查询某指数最近 N 天的估值历史。"""
     conn = _get_conn()
@@ -80,7 +116,8 @@ def get_valuation_history(index_code: str, days: int = 30, metric_type: str = No
             ORDER BY snapshot_date DESC LIMIT ?
         """, (index_code, days)).fetchall()
     conn.close()
-    return [dict(r) for r in rows]
+    # P2-4.1: 读取容错，percentile 统一为 float
+    return [_apply_percentile_normalize(dict(r)) for r in rows]
 
 
 def get_latest_valuation(index_code: str, metric_type: str = None, max_days: int = None) -> dict | None:
@@ -104,7 +141,8 @@ def get_latest_valuation(index_code: str, metric_type: str = None, max_days: int
             ORDER BY snapshot_date DESC LIMIT 1
         """, (index_code,)).fetchone()
     conn.close()
-    return dict(row) if row else None
+    # P2-4.1: 读取容错
+    return _apply_percentile_normalize(dict(row)) if row else None
 
 
 def list_valuation_indexes() -> list[dict]:
@@ -131,7 +169,8 @@ def list_valuation_indexes() -> list[dict]:
         ORDER BY iv.index_code, iv.metric_type
     """).fetchall()
     conn.close()
-    return [dict(r) for r in rows]
+    # P2-4.1: 读取容错
+    return [_apply_percentile_normalize(dict(r)) for r in rows]
 
 
 def list_index_freshness() -> list[dict]:

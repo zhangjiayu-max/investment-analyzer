@@ -1997,6 +1997,26 @@ def create_alert(alert_type: str, title: str, content: str = None,
     """
     conn = _get_conn()
     try:
+        # P1-3.2：daily_advice_signal 同日同基金去重（更新而非新建）
+        # 原有 24h title+severity 去重对 daily_advice_signal 无效（title 是动态摘要文本）
+        if alert_type == "daily_advice_signal" and related_fund_code:
+            today = datetime.now().strftime("%Y-%m-%d")
+            existing_da = conn.execute("""
+                SELECT id FROM portfolio_alerts
+                WHERE user_id = ? AND alert_type = 'daily_advice_signal'
+                  AND related_fund_code = ?
+                  AND date(created_at) = ?
+                ORDER BY id DESC LIMIT 1
+            """, (user_id, related_fund_code, today)).fetchone()
+            if existing_da:
+                conn.execute("""
+                    UPDATE portfolio_alerts
+                    SET title = ?, content = ?, severity = ?, source = ?
+                    WHERE id = ?
+                """, (title, content, severity, source, existing_da['id']))
+                conn.commit()
+                return existing_da['id']
+
         # 去重：24小时内同 title + severity 不重复
         existing = conn.execute("""
             SELECT id FROM portfolio_alerts

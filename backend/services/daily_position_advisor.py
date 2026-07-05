@@ -283,17 +283,30 @@ def _generate_signals(**kw) -> list[dict]:
         if suggested_amount > max_cash_use:
             suggested_amount = max_cash_use
 
-        # 评分（新6维度）
+        # 评分（新7维度，P0-2.1 新增"近5日趋势"维度）
         profit_rate = kw.get("profit_rate", 0) or 0
         industry_score, industry_summary = _query_industry_outlook(val_name, fund_name)
+
+        # P0-2.1: 计算近5日趋势分（0-10分）
+        trend_lookback = cfg.get("trend_lookback_days", 5)
+        trend_score, trend_reason = _calc_trend_score(fund_code, trend_lookback)
+
         score, confidence, score_detail = _calc_signal_score(
             drop_pct * 100, val_percentile, position_pct, cash_pct,
             profit_rate=profit_rate, industry_score=industry_score,
+            trend_score=trend_score, trend_reason=trend_reason,
         )
 
         # 风险降级
         severity = "actionable" if score >= 60 else "watch"
         risk_notes = []
+
+        # P0-2.1: 趋势分过低 → 降级提示（持续下跌的基金即使跌幅大也不宜重仓）
+        trend_danger_threshold = cfg.get("trend_danger_threshold", 3)
+        if trend_score <= trend_danger_threshold:
+            if severity == "actionable":
+                severity = "watch"
+            risk_notes.append(f"近{trend_lookback}日趋势偏弱：{trend_reason}")
 
         # 估值过高 → 降级
         if val_percentile is not None and val_percentile > (reduce_val_min * 0.875):
@@ -332,7 +345,7 @@ def _generate_signals(**kw) -> list[dict]:
             suggested_amount=round(suggested_amount, 2) if suggested_amount else None,
             suggested_ratio=None,
             summary=_dca_summary(fund_name, drop_pct * 100, step, suggested_amount, val_percentile),
-            rationale=f"累计跌幅 {drop_pct*100:.1f}%，触发{step}档定投。参考价 {kw['ref_price']:.4f}，当前 {kw['current_price']:.4f}。",
+            rationale=f"累计跌幅 {drop_pct*100:.1f}%，触发{step}档定投。参考价 {kw['ref_price']:.4f}，当前 {kw['current_price']:.4f}。趋势：{trend_reason}。",
             evidence={
                 "drop_pct": round(drop_pct * 100, 2),
                 "ref_price": kw["ref_price"],
@@ -346,6 +359,8 @@ def _generate_signals(**kw) -> list[dict]:
                 "profit_rate": round(profit_rate * 100, 2),
                 "industry_score": round(industry_score, 1),
                 "industry_summary": industry_summary,
+                "trend_score": trend_score,
+                "trend_reason": trend_reason,
             },
             risks={"notes": risk_notes} if risk_notes else {},
             source_snapshot={
@@ -455,6 +470,11 @@ def _load_config() -> dict:
         "down_days_watch": get_config_int("daily_advice.down_days_watch", 3),
         "down_days_action": get_config_int("daily_advice.down_days_action", 5),
         "stale_days": get_config_int("daily_advice.stale_days", 3),
+        # P1-3.3：板块估值数据有效期（天），超过则降级为 info
+        "sector_fresh_days": get_config_int("daily_advice.sector_fresh_days", 7),
+        # P0-2.1：趋势维度配置
+        "trend_lookback_days": get_config_int("daily_advice.trend_lookback_days", 5),
+        "trend_danger_threshold": get_config_int("daily_advice.trend_danger_threshold", 3),
     }
 
 
@@ -613,6 +633,74 @@ def _is_theme_fund(fund_name: str, category: str) -> bool:
     return False
 
 
+def _calc_trend_score(fund_code: str, lookback_days: int = 5) -> tuple[int, str]:
+    """P0-2.1: 计算近 N 日净值趋势得分（0-10分）。
+
+    解决问题：白酒 161725 评分 72（高分组）但反弹仅 0.27%，
+    远低于同分组医药 +11~16%。缺失"近5日趋势"维度。
+
+    返回 (score, reason)
+      - 止跌回升 → 10分
+      - 平稳震荡 → 5-7分
+      - 持续下跌 → 0-3分
+
+    成本：0 LLM、0 MCP、0 akshare，仅读 fund_nav_history 本地缓存。
+    """
+    try:
+        from services.fund_data_service import get_fund_nav_history_from_cache
+        navs = get_fund_nav_history_from_cache(fund_code, days=lookback_days)
+        if not navs or len(navs) < 3:
+            return 5, f"近{lookback_days}日数据不足({len(navs) if navs else 0}条)，给中位分"
+
+        # 过滤无效净值
+        valid_navs = [n for n in navs if n.get("nav") and n["nav"] > 0]
+        if len(valid_navs) < 3:
+            return 5, "有效净值不足，给中位分"
+
+        first_nav = valid_navs[0]["nav"]
+        last_nav = valid_navs[-1]["nav"]
+        if first_nav <= 0:
+            return 5, "首日净值异常，给中位分"
+        recent_ch = (last_nav - first_nav) / first_nav * 100
+
+        # 计算近3日斜率（判断是否止跌）
+        if len(valid_navs) >= 4:
+            mid_nav = valid_navs[-3]["nav"]
+            if mid_nav > 0:
+                recent_3d_ch = (last_nav - mid_nav) / mid_nav * 100
+            else:
+                recent_3d_ch = recent_ch
+        else:
+            recent_3d_ch = recent_ch
+
+        # 评分规则
+        if recent_ch > 1.0:
+            score = 10
+            reason = f"近{lookback_days}日 +{recent_ch:.2f}%，止跌回升"
+        elif recent_ch > 0:
+            score = 7
+            reason = f"近{lookback_days}日 +{recent_ch:.2f}%，小幅反弹"
+        elif recent_ch > -1.0:
+            score = 5
+            reason = f"近{lookback_days}日 {recent_ch:.2f}%，横盘震荡"
+        elif recent_ch > -2.0:
+            score = 3
+            reason = f"近{lookback_days}日 {recent_ch:.2f}%，仍在下跌"
+        else:
+            score = 0
+            reason = f"近{lookback_days}日 {recent_ch:.2f}%，持续大跌"
+
+        # 近3日加速下跌 → 再扣2分
+        if recent_3d_ch < -1.5:
+            score = max(0, score - 2)
+            reason += f"（近3日 {recent_3d_ch:.2f}%，加速下跌）"
+
+        return score, reason
+    except Exception as e:
+        logger.warning(f"趋势分计算异常 {fund_code}: {e}")
+        return 5, "趋势计算异常，给中位分"
+
+
 def _calc_signal_score(
     drop_pct: float,
     val_percentile: float | None,
@@ -620,22 +708,27 @@ def _calc_signal_score(
     cash_pct: float,
     profit_rate: float = 0,
     industry_score: float = 0,
+    trend_score: int = 5,
+    trend_reason: str = "",
 ) -> tuple[int, str, dict]:
     """信号评分 0-100 + 置信度 + 评分明细。
 
+    P0-2.1 改造：新增"近5日趋势"维度（0-10分），跌幅权重从 35 降为 25。
+
     维度:
-      1. 跌幅 (0-35)
+      1. 跌幅 (0-25)          ← 原 35，腾出 10 分给趋势维度
       2. 估值优势 (0-25)
       3. 仓位空间 (0-15)
       4. 流动性 (0-10)
       5. 持仓盈亏修正 (-15 ~ +10)
       6. 行业前景+政策 (0-15)
+      7. 近5日趋势 (0-10)     ← P0-2.1 新增
     """
     detail = {}
     score = 0
 
-    # 1. 跌幅（0-35分）
-    s1 = min(drop_pct / 12 * 35, 35) if drop_pct else 0
+    # 1. 跌幅（0-25分，原35分）
+    s1 = min(drop_pct / 12 * 25, 25) if drop_pct else 0
     detail["跌幅"] = round(s1, 1)
     score += s1
 
@@ -678,10 +771,17 @@ def _calc_signal_score(
     detail["行业前景"] = round(s6, 1)
     score += s6
 
+    # 7. 近5日趋势（0-10分，P0-2.1 新增）
+    s7 = max(0, min(10, trend_score))
+    detail["趋势"] = round(s7, 1)
+    if trend_reason:
+        detail["趋势说明"] = trend_reason
+    score += s7
+
     final = min(100, max(0, round(score)))
 
-    # 置信度判定
-    if final >= 70 and s5 >= 0 and s6 >= 8:
+    # 置信度判定（新增趋势分参与）
+    if final >= 70 and s5 >= 0 and s6 >= 8 and s7 >= 5:
         confidence = "high"
     elif final >= 55 and s5 >= -10:
         confidence = "medium"
@@ -788,6 +888,20 @@ def _scan_sector_rotation(user_id: str, run_id: int, today: str, cfg: dict) -> l
             metric_type = row[4] or ""
             snapshot_date = row[5] or ""
 
+            # P1-3.3：数据新鲜度检查
+            fresh_days = cfg.get("sector_fresh_days", 7)
+            is_stale = False
+            days_old = 0
+            if snapshot_date:
+                try:
+                    snap_dt = datetime.strptime(snapshot_date[:10], "%Y-%m-%d")
+                    days_old = (datetime.now() - snap_dt).days
+                    if days_old > fresh_days:
+                        is_stale = True
+                except ValueError:
+                    is_stale = True
+                    days_old = 999
+
             # 检查用户是否已持有该行业
             already_held = any(kw in index_name for kw in held_keywords)
             if already_held:
@@ -795,33 +909,63 @@ def _scan_sector_rotation(user_id: str, run_id: int, today: str, cfg: dict) -> l
 
             # 信号1：极度低估（<=10%分位）且不在持仓
             if val_percentile <= 10:
-                signals.append(_make_signal(
-                    run_id=run_id, user_id=user_id, signal_date=today,
-                    signal_type="sector_rotation", action_type="watch",
-                    target_code=index_code, target_name=index_name,
-                    severity="watch", score=min(85, 60 + int((10 - val_percentile) * 2)),
-                    confidence="medium",
-                    score_detail={"估值分位": val_percentile, "指标值": val_metric, "指标类型": metric_type},
-                    summary=f"{index_name} 估值仅 {val_percentile:.1f}% 分位（极度低估），你未持有该行业，可关注相关基金",
-                    rationale=f"低估机会：{index_name} 估值 {metric_type}={val_metric:.2f}，处于历史 {val_percentile:.1f}% 分位。数据日期 {snapshot_date}。",
-                    evidence={"index_code": index_code, "percentile": val_percentile, "metric": val_metric, "metric_type": metric_type},
-                    dedupe_key=f"daily:{today}:sector_rotation:{index_code}",
-                ))
+                if is_stale:
+                    # P1-3.3：数据陈旧 → 降级为 info，降低评分
+                    signals.append(_make_signal(
+                        run_id=run_id, user_id=user_id, signal_date=today,
+                        signal_type="sector_rotation", action_type="watch",
+                        target_code=index_code, target_name=index_name,
+                        severity="info", score=min(50, 30 + int((10 - val_percentile) * 2)),
+                        confidence="low",
+                        score_detail={"估值分位": val_percentile, "指标值": val_metric, "指标类型": metric_type, "数据陈旧天数": days_old},
+                        summary=f"{index_name} 估值 {val_percentile:.1f}% 分位（数据 {days_old} 天前，仅供参考）",
+                        rationale=f"低估但数据陈旧：{index_name} 估值 {metric_type}={val_metric:.2f}，{snapshot_date}（{days_old}天前）。建议刷新后再决策。",
+                        evidence={"index_code": index_code, "percentile": val_percentile, "metric": val_metric, "metric_type": metric_type, "is_stale": True, "days_old": days_old},
+                        dedupe_key=f"daily:{today}:sector_rotation_stale:{index_code}",
+                    ))
+                else:
+                    signals.append(_make_signal(
+                        run_id=run_id, user_id=user_id, signal_date=today,
+                        signal_type="sector_rotation", action_type="watch",
+                        target_code=index_code, target_name=index_name,
+                        severity="watch", score=min(85, 60 + int((10 - val_percentile) * 2)),
+                        confidence="medium",
+                        score_detail={"估值分位": val_percentile, "指标值": val_metric, "指标类型": metric_type},
+                        summary=f"{index_name} 估值仅 {val_percentile:.1f}% 分位（极度低估），你未持有该行业，可关注相关基金",
+                        rationale=f"低估机会：{index_name} 估值 {metric_type}={val_metric:.2f}，处于历史 {val_percentile:.1f}% 分位。数据日期 {snapshot_date}。",
+                        evidence={"index_code": index_code, "percentile": val_percentile, "metric": val_metric, "metric_type": metric_type, "is_stale": False},
+                        dedupe_key=f"daily:{today}:sector_rotation:{index_code}",
+                    ))
 
             # 信号2：低估（<=20%分位）且有估值数据
             elif val_percentile <= 20:
-                signals.append(_make_signal(
-                    run_id=run_id, user_id=user_id, signal_date=today,
-                    signal_type="sector_rotation", action_type="watch",
-                    target_code=index_code, target_name=index_name,
-                    severity="watch", score=min(70, 45 + int((20 - val_percentile) * 1.5)),
-                    confidence="low",
-                    score_detail={"估值分位": val_percentile, "指标值": val_metric, "指标类型": metric_type},
-                    summary=f"{index_name} 估值 {val_percentile:.1f}% 分位（低估），你未持有，可适当关注",
-                    rationale=f"低估信号：{index_name} 估值 {metric_type}={val_metric:.2f}，处于历史 {val_percentile:.1f}% 分位。",
-                    evidence={"index_code": index_code, "percentile": val_percentile, "metric": val_metric},
-                    dedupe_key=f"daily:{today}:sector_rotation:{index_code}",
-                ))
+                if is_stale:
+                    # P1-3.3：数据陈旧 → 降级为 info
+                    signals.append(_make_signal(
+                        run_id=run_id, user_id=user_id, signal_date=today,
+                        signal_type="sector_rotation", action_type="watch",
+                        target_code=index_code, target_name=index_name,
+                        severity="info", score=min(40, 25 + int((20 - val_percentile) * 1.5)),
+                        confidence="low",
+                        score_detail={"估值分位": val_percentile, "指标值": val_metric, "指标类型": metric_type, "数据陈旧天数": days_old},
+                        summary=f"{index_name} 估值 {val_percentile:.1f}% 分位（数据 {days_old} 天前，仅供参考）",
+                        rationale=f"低估但数据陈旧：{index_name} 估值 {metric_type}={val_metric:.2f}，{snapshot_date}（{days_old}天前）。",
+                        evidence={"index_code": index_code, "percentile": val_percentile, "metric": val_metric, "is_stale": True, "days_old": days_old},
+                        dedupe_key=f"daily:{today}:sector_rotation_stale:{index_code}",
+                    ))
+                else:
+                    signals.append(_make_signal(
+                        run_id=run_id, user_id=user_id, signal_date=today,
+                        signal_type="sector_rotation", action_type="watch",
+                        target_code=index_code, target_name=index_name,
+                        severity="watch", score=min(70, 45 + int((20 - val_percentile) * 1.5)),
+                        confidence="low",
+                        score_detail={"估值分位": val_percentile, "指标值": val_metric, "指标类型": metric_type},
+                        summary=f"{index_name} 估值 {val_percentile:.1f}% 分位（低估），你未持有，可适当关注",
+                        rationale=f"低估信号：{index_name} 估值 {metric_type}={val_metric:.2f}，处于历史 {val_percentile:.1f}% 分位。",
+                        evidence={"index_code": index_code, "percentile": val_percentile, "metric": val_metric, "is_stale": False},
+                        dedupe_key=f"daily:{today}:sector_rotation:{index_code}",
+                    ))
 
         # ── 为生成的信号追加"已持有"标注 ──
         # 即使信号未被 already_held 跳过，用户可能通过其他关键词持有相关行业基金
@@ -966,38 +1110,6 @@ def _create_candidate_from_signal(signal: dict, user_id: str):
         return candidate_id
     except Exception as e:
         logger.warning(f"创建建议候选失败: {e}")
-        return None
-
-
-def _create_portfolio_alert_from_signal(signal: dict, user_id: str):
-    """将 watch 信号写入 portfolio_alerts 轻量提醒。"""
-    try:
-        from db.portfolio import create_alert
-        alert_id = create_alert(
-            alert_type="daily_advice_signal",
-            title=signal.get("summary", "每日持仓提示"),
-            content=signal.get("rationale", ""),
-            severity="info",
-            related_fund_code=signal.get("target_code", ""),
-            related_fund_name=signal.get("target_name", ""),
-            source="daily_advice",
-            user_id=user_id,
-        )
-        # 回写 alert_id 到信号记录
-        if alert_id and signal.get("id"):
-            conn = _get_conn()
-            try:
-                conn.execute(
-                    "UPDATE daily_position_signals SET alert_id=? WHERE id=?",
-                    (alert_id, signal["id"])
-                )
-                conn.commit()
-            finally:
-                conn.close()
-        logger.info(f"已为信号 {signal.get('id')} 创建 portfolio_alert {alert_id}")
-        return alert_id
-    except Exception as e:
-        logger.warning(f"创建 portfolio_alert 失败: {e}")
         return None
 
 

@@ -441,7 +441,7 @@ async def scan_portfolio_alerts():
     except Exception as e:
         logger.warning(f"[alert_scan] 回撤预警异常: {e}")
 
-    # ── 3. 集中度预警 ──
+    # ── 3. 集中度预警（P1-3.1: 集中度+趋势双因子）──
     try:
         total_value = sum(h.get("current_value", 0) or 0 for h in holdings)
         if total_value > 0:
@@ -451,11 +451,37 @@ async def scan_portfolio_alerts():
                 value = h.get("current_value", 0) or 0
                 pct = value / total_value * 100
                 if pct >= concentration_threshold and should_create("concentration_alert", code):
+                    # P1-3.1: 计算近5日趋势（双因子判定）
+                    trend_ch = 0.0
+                    try:
+                        from services.fund_data_service import get_fund_nav_history_from_cache
+                        navs = get_fund_nav_history_from_cache(code, days=5)
+                        if navs and len(navs) >= 2:
+                            valid = [n for n in navs if n.get("nav") and n["nav"] > 0]
+                            if len(valid) >= 2 and valid[0]["nav"] > 0:
+                                trend_ch = (valid[-1]["nav"] - valid[0]["nav"]) / valid[0]["nav"] * 100
+                    except Exception as te:
+                        logger.debug(f"[alert_scan] 集中度趋势计算跳过 {code}: {te}")
+
+                    # 双因子判定 severity
+                    if pct >= concentration_threshold * 1.5:  # ≥45% 严重超限 → danger
+                        severity = "danger"
+                        advice = f"占比 {pct:.1f}% 严重超限，建议立即减仓 10-15%"
+                    elif trend_ch < -1.0:  # 集中度高 + 持续下跌 → danger
+                        severity = "danger"
+                        advice = f"占比 {pct:.1f}% 且近5日下跌 {trend_ch:.2f}%，建议减仓 5-10%"
+                    elif trend_ch < 0:  # 集中度高 + 微跌 → warning
+                        severity = "warning"
+                        advice = f"占比 {pct:.1f}%，近5日 {trend_ch:.2f}%，建议关注走势"
+                    else:  # 集中度高 + 上涨/平稳 → warning
+                        severity = "warning"
+                        advice = f"占比 {pct:.1f}%，建议适当分散配置"
+
                     create_alert(
                         alert_type="concentration_alert",
                         title=f"{name} 占比过高（{pct:.1f}%）",
-                        content=f"{name}（{code}）占组合总市值 {pct:.1f}%，超过集中度阈值 {concentration_threshold}%。建议适当分散配置。",
-                        severity="warning",
+                        content=f"{name}（{code}）占组合总市值 {pct:.1f}%，超过集中度阈值 {concentration_threshold}%。近5日走势 {trend_ch:+.2f}%。{advice}。",
+                        severity=severity,
                         related_fund_code=code,
                         related_fund_name=name,
                         source="system_scan",
@@ -518,16 +544,66 @@ async def scan_portfolio_alerts():
             if drop_pct >= buy_drop_threshold:
                 last_buy_date = h.get("last_buy_date", "")
                 if should_create("buy_drop_alert", code):
+                    is_danger = drop_pct >= buy_drop_threshold * 1.5
                     create_alert(
                         alert_type="buy_drop_alert",
                         title=f"{name} 补仓后下跌 {drop_pct:.1f}%",
                         content=f"{name}（{code}）最近一次买入价 {last_buy_price:.4f}（{last_buy_date}），当前净值 {current_price:.4f}，已下跌 {drop_pct:.1f}%（阈值 {buy_drop_threshold}%）。请评估是否继续持有或止损。",
-                        severity="danger" if drop_pct >= buy_drop_threshold * 1.5 else "warning",
+                        severity="danger" if is_danger else "warning",
                         related_fund_code=code,
                         related_fund_name=name,
                         source="system_scan",
                     )
                     generated += 1
+
+                    # P0-2.2: danger 级预警联动 dca_add 信号
+                    # 历史回测：buy_drop_alert danger 级后续 100% 反弹，平均涨幅 3-7%
+                    if is_danger:
+                        try:
+                            from db.daily_advice import create_signal
+                            today = datetime.now().strftime("%Y-%m-%d")
+                            base_amount = 500
+                            if drop_pct >= 8:
+                                suggested_amount = base_amount * 2.0   # 2倍
+                            elif drop_pct >= 6:
+                                suggested_amount = base_amount * 1.5   # 1.5倍
+                            else:
+                                suggested_amount = base_amount
+                            create_signal({
+                                "run_id": 0,  # 0 表示预警联动生成，非每日建议运行
+                                "user_id": "default",
+                                "signal_date": today,
+                                "signal_type": "dca_add",
+                                "action_type": "dca",
+                                "target_type": "fund",
+                                "target_code": code,
+                                "target_name": name,
+                                "severity": "actionable",  # danger 级预警直接 actionable
+                                "score": 75,               # 基础分 75（高分组）
+                                "confidence": "high",
+                                "score_detail": {
+                                    "来源": "buy_drop_alert danger 联动",
+                                    "补仓后跌幅": round(drop_pct, 2),
+                                    "历史胜率": "100%",
+                                    "平均反弹": "3-7%",
+                                },
+                                "suggested_amount": suggested_amount,
+                                "suggested_ratio": None,
+                                "summary": f"{name} 补仓后跌 {drop_pct:.1f}%，短期超跌反弹概率高，建议加仓 ¥{suggested_amount:.0f}",
+                                "rationale": f"历史回测：buy_drop_alert danger 级预警后续 100% 反弹，平均涨幅 3-7%。最近买入价 {last_buy_price:.4f}，当前 {current_price:.4f}。",
+                                "evidence": {
+                                    "alert_type": "buy_drop_alert",
+                                    "drop_pct": round(drop_pct, 2),
+                                    "last_buy_price": last_buy_price,
+                                    "current_price": current_price,
+                                    "last_buy_date": last_buy_date,
+                                },
+                                "risks": {"notes": ["短期超跌反弹信号，非长期投资判断"]},
+                                "dedupe_key": f"alert_link:{today}:buy_drop_danger:{code}",
+                            })
+                            logger.info(f"buy_drop_alert danger 联动生成 dca_add 信号: {code}")
+                        except Exception as e:
+                            logger.warning(f"buy_drop_alert 联动 dca_add 失败: {e}")
     except Exception as e:
         logger.warning(f"[alert_scan] 补仓后跌幅预警异常: {e}")
 
