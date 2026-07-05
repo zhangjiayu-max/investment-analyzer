@@ -3238,6 +3238,413 @@ def _stream_build_context(refined_query: str, rag_context: str, complexity: str,
     }
 
 
+def _human_in_loop_checks(specialist_results: list, answer: str, conversation_id: int):
+    """人在回路检查：冲突检测 + 买卖建议确认。
+
+    生成器：yield 确认事件/状态事件。
+    返回修改后的 answer（可能添加用户倾向前缀）。
+    """
+    conflict_confirm = _check_human_in_loop_conflict(specialist_results)
+    if conflict_confirm:
+        confirm_id = f"confirm_{conversation_id}_{int(time.time())}"
+        conflict_confirm["confirm_id"] = confirm_id
+        _confirm_store[confirm_id] = {"event": threading.Event(), "result": ""}
+        yield conflict_confirm
+        user_choice = wait_for_confirm(confirm_id, timeout=conflict_confirm.get("timeout", 30))
+        del _confirm_store[confirm_id]
+        if user_choice == "lean_buy":
+            answer = "用户倾向买入，综合分析如下：\n" + answer
+        elif user_choice == "lean_skip":
+            answer = "用户倾向不买，综合分析如下：\n" + answer
+
+    trade_confirm = _check_human_in_loop_trade(answer)
+    if trade_confirm:
+        confirm_id = f"confirm_{conversation_id}_{int(time.time())}"
+        trade_confirm["confirm_id"] = confirm_id
+        _confirm_store[confirm_id] = {"event": threading.Event(), "result": ""}
+        yield trade_confirm
+        user_choice = wait_for_confirm(confirm_id, timeout=trade_confirm.get("timeout", 30))
+        del _confirm_store[confirm_id]
+        if user_choice == "save":
+            yield {"type": "status", "message": "已保存为决策草案"}
+
+    return answer
+
+
+def _run_arbitration_stream(refined_query: str, specialist_results: list, rag_context: str,
+                            cancel_event: threading.Event | None, all_tool_calls: list):
+    """执行仲裁流程并返回结果。
+
+    生成器：yield phase/specialist_start/specialist_done 事件。
+    返回 arb_result dict。
+    """
+    _check_cancel(cancel_event)
+    yield {"type": "phase", "phase": "arbitrate", "message": "⚖️ 正在由仲裁法官做最终裁决..."}
+    yield {
+        "type": "specialist_start",
+        "agent_key": "arbitrator",
+        "agent": "仲裁法官",
+        "icon": "⚖️",
+    }
+    arb_result = run_arbitration(refined_query, specialist_results, rag_context)
+    specialist_results.append(arb_result)
+    all_tool_calls.append({"name": "arbitration", "arguments": {"query": refined_query},
+                           "result_preview": arb_result["analysis"][:300]})
+    yield {
+        "type": "specialist_done",
+        "agent_key": "arbitrator",
+        "agent": "仲裁法官",
+        "icon": "⚖️",
+        "analysis": arb_result["analysis"],
+        "duration_ms": arb_result["duration_ms"],
+        "is_arbitration": True,
+        "condition_framework": arb_result.get("condition_framework", []),
+        "diverggence_analysis": arb_result.get("diverggence_analysis", ""),
+        "key_variables": arb_result.get("key_variables", ""),
+    }
+    return arb_result
+
+
+def _stream_handle_no_tool_calls(msg, specialist_results: list, all_tool_calls: list,
+                                  refined_query: str, query: str, rag_context: str,
+                                  complexity: str, clarification, route_result,
+                                  conflicts, force_skip_cross_review: bool,
+                                  arbitration_done: bool, prebuilt_context: str,
+                                  cancel_event, start_time: float,
+                                  conversation_id: int, message_id: int, trace_id: str):
+    """处理 LLM 无工具调用时的交叉审阅 + 仲裁 + 最终回答。
+
+    生成器：yield 各类事件。
+    返回 True 表示已产出最终 answer 事件（调用方应 return），False 表示继续。
+    """
+    conflicts = detect_conflicts_smart(specialist_results, refined_query, trace_id)
+    cross_review_enabled = get_orchestration_config("cross_review_enabled", "true") == "true"
+    cross_review_min = int(get_orchestration_config("cross_review_min_specialists", "2"))
+    cross_review_min_sev = get_orchestration_config("cross_review_min_severity", "medium")
+    predicted_need_cr = False
+    if isinstance(clarification, dict):
+        predicted_need_cr = clarification.get("need_cross_review", False)
+    should_cross_review = should_run_cross_review(
+        specialist_results=specialist_results,
+        complexity=complexity,
+        conflicts=conflicts,
+        force_skip=force_skip_cross_review,
+        enabled=cross_review_enabled,
+        min_specialists=cross_review_min,
+        min_severity=cross_review_min_sev,
+        predicted_need_cross_review=predicted_need_cr,
+        needs_arbitration=route_result.get("needs_arbitration", False) if isinstance(route_result, dict) else False,
+    )
+
+    if should_cross_review:
+        yield {"type": "status", "message": f"正在进行交叉审阅({len(specialist_results)} 个专家并行互相验证)..."}
+        peer_analyses = {sr["agent_key"]: sr["analysis"] for sr in specialist_results}
+        cross_review_results = []
+        original_specialists = list(specialist_results)
+
+        for sr in original_specialists:
+            yield {
+                "type": "cross_review_start",
+                "agent_key": sr["agent_key"],
+                "agent": sr["agent"],
+                "icon": sr["icon"],
+            }
+
+        def _review_single(sr):
+            _check_cancel(cancel_event)
+            _check_timeout(start_time)
+            peer = {k: v for k, v in peer_analyses.items() if k != sr["agent_key"]}
+            return sr, run_specialist_with_context(
+                sr["agent_key"], refined_query, peer, max_turns=2,
+                prebuilt_context=prebuilt_context,
+                model=_get_model_for_agent("cross_review") if _is_cost_routing_enabled() else None
+            )
+
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=min(len(original_specialists), 3)
+        ) as executor:
+            futures = {executor.submit(_review_single, sr): sr for sr in original_specialists}
+            for future in concurrent.futures.as_completed(futures):
+                sr = futures[future]
+                try:
+                    _, cr_result = future.result(timeout=300)
+                    cross_review_results.append(cr_result)
+                    specialist_results.append(cr_result)
+                    all_tool_calls.extend(cr_result.get("tool_calls", []))
+                    yield {
+                        "type": "cross_review_done",
+                        "agent_key": sr["agent_key"],
+                        "agent": sr["agent"],
+                        "icon": sr["icon"],
+                        "analysis": cr_result["analysis"],
+                        "duration_ms": cr_result["duration_ms"],
+                    }
+                except Exception as e:
+                    logger.error(f"交叉审阅 {sr['agent_key']} 失败: {e}")
+                    yield {
+                        "type": "cross_review_done",
+                        "agent_key": sr["agent_key"],
+                        "agent": sr["agent"],
+                        "icon": sr["icon"],
+                        "analysis": f"交叉审阅失败: {e}",
+                        "duration_ms": 0,
+                    }
+
+        if cross_review_results:
+            _check_cancel(cancel_event)
+            answer = msg.content or ""
+
+            if should_arbitrate(complexity, specialist_results, conflicts):
+                arb_gen = _run_arbitration_stream(refined_query, specialist_results, rag_context, cancel_event, all_tool_calls)
+                while True:
+                    try:
+                        yield next(arb_gen)
+                    except StopIteration as si:
+                        arb_result = si.value
+                        break
+                answer = arb_result["analysis"]
+                arbitration_done = True
+
+            duration_ms = int((time.time() - start_time) * 1000)
+            conflicts = detect_conflicts_smart(specialist_results, refined_query, trace_id)
+
+            if conversation_id and message_id:
+                _save_checkpoint(conversation_id, message_id, "cross_review", {
+                    "specialist_results": specialist_results,
+                    "all_tool_calls": all_tool_calls,
+                    "arbitration_done": arbitration_done,
+                    "complexity": complexity,
+                })
+
+            hil_gen = _human_in_loop_checks(specialist_results, answer, conversation_id)
+            while True:
+                try:
+                    yield next(hil_gen)
+                except StopIteration as si:
+                    answer = si.value
+                    break
+
+            yield {
+                "type": "answer",
+                "content": answer,
+                "specialist_results": specialist_results,
+                "tool_calls": all_tool_calls,
+                "duration_ms": duration_ms,
+                "complexity": complexity,
+                "cross_review": True,
+                "arbitration": arbitration_done,
+                "conflicts": conflicts,
+                "condition_framework": next((sr.get("condition_framework", []) for sr in specialist_results if sr.get("is_arbitration")), []),
+                "diverggence_analysis": next((sr.get("diverggence_analysis", "") for sr in specialist_results if sr.get("is_arbitration")), ""),
+                "key_variables": next((sr.get("key_variables", "") for sr in specialist_results if sr.get("is_arbitration")), ""),
+                "reasoning_trail": build_reasoning_trail(query, refined_query, complexity, specialist_results, next((sr for sr in specialist_results if sr.get("is_arbitration")), None), prebuilt_context, duration_ms),
+            }
+            if conversation_id:
+                _schedule_auto_evaluation(conversation_id, message_id, {
+                    "answer": answer, "specialist_results": specialist_results,
+                    "tool_calls": all_tool_calls, "duration_ms": duration_ms,
+                    "complexity": complexity, "conflicts": conflicts,
+                    "route_info": route_result, "cache_stats": expert_cache.stats,
+                })
+            return True
+
+    # 无交叉审阅路径
+    answer = msg.content or ""
+
+    if not arbitration_done and should_arbitrate(complexity, specialist_results, conflicts):
+        arb_gen = _run_arbitration_stream(refined_query, specialist_results, rag_context, cancel_event, all_tool_calls)
+        while True:
+            try:
+                yield next(arb_gen)
+            except StopIteration as si:
+                arb_result = si.value
+                break
+        answer = arb_result["analysis"]
+        arbitration_done = True
+
+    duration_ms = int((time.time() - start_time) * 1000)
+    conflicts = detect_conflicts_smart(specialist_results, refined_query, trace_id)
+
+    if conversation_id and message_id and specialist_results:
+        _save_checkpoint(conversation_id, message_id, "experts", {
+            "specialist_results": specialist_results,
+            "all_tool_calls": all_tool_calls,
+            "arbitration_done": arbitration_done,
+            "complexity": complexity,
+        })
+
+    hil_gen = _human_in_loop_checks(specialist_results, answer, conversation_id)
+    while True:
+        try:
+            yield next(hil_gen)
+        except StopIteration as si:
+            answer = si.value
+            break
+
+    yield {
+        "type": "answer",
+        "content": answer,
+        "specialist_results": specialist_results,
+        "tool_calls": all_tool_calls,
+        "duration_ms": duration_ms,
+        "arbitration": arbitration_done,
+        "conflicts": conflicts,
+        "condition_framework": next((sr.get("condition_framework", []) for sr in specialist_results if sr.get("is_arbitration")), []),
+        "diverggence_analysis": next((sr.get("diverggence_analysis", "") for sr in specialist_results if sr.get("is_arbitration")), ""),
+        "key_variables": next((sr.get("key_variables", "") for sr in specialist_results if sr.get("is_arbitration")), ""),
+        "reasoning_trail": build_reasoning_trail(query, refined_query, complexity, specialist_results, next((sr for sr in specialist_results if sr.get("is_arbitration")), None), prebuilt_context, duration_ms),
+    }
+    if conversation_id:
+        _schedule_auto_evaluation(conversation_id, message_id, {
+            "answer": answer, "specialist_results": specialist_results,
+            "tool_calls": all_tool_calls, "duration_ms": duration_ms,
+            "complexity": complexity, "conflicts": conflicts,
+            "route_info": route_result, "cache_stats": expert_cache.stats,
+        })
+    return True
+
+
+def _stream_final_synthesis(query: str, refined_query: str, specialists: list,
+                             specialist_results: list, all_tool_calls: list,
+                             llm_messages: list, prebuilt_context: str,
+                             complexity: str, arbitration_done: bool,
+                             route_result, conflicts, perf_metrics: dict,
+                             cancel_event, start_time: float,
+                             conversation_id: int, message_id: int, trace_id: str):
+    """阶段4-5: 最终综合（流式生成）、Validator、后处理、人在回路、答案输出。
+
+    生成器：yield reasoning_chunk/answer_chunk/status/answer 事件。
+    """
+    _check_cancel(cancel_event)
+    try:
+        # 注入 KYC 画像
+        try:
+            from agent.kyc import kyc_profile_to_text
+            kyc_text = kyc_profile_to_text("default")
+            if kyc_text:
+                llm_messages.append({"role": "system", "content": f"在综合各专家意见给出最终建议时,请务必结合用户的投资画像:\n{kyc_text}"})
+        except Exception:
+            pass
+        llm_messages.append({
+            "role": "user",
+            "content": _build_final_synthesis_prompt(specialist_results, specialists),
+        })
+        final_answer = ""
+        try:
+            from services.llm_service import _call_llm_stream
+            for chunk in _call_llm_stream(
+                caller="orchestrator",
+                trace_id=trace_id,
+                model=MODEL,
+                messages=llm_messages,
+                temperature=get_config_float('llm.temperature_agent', 0.3),
+                max_tokens=get_config_int('llm.max_tokens_orchestrator', 8192),
+            ):
+                if chunk.get("reasoning"):
+                    yield {"type": "reasoning_chunk", "content": chunk["reasoning"], "agent": "orchestrator"}
+                if chunk.get("content"):
+                    final_answer += chunk["content"]
+                    yield {"type": "answer_chunk", "content": chunk["content"]}
+        except CancelledError:
+            raise
+        except Exception as stream_err:
+            logger.warning(f"流式生成失败,回退非流式: {stream_err}")
+            if not final_answer:
+                response = _call_llm(
+                    caller="orchestrator",
+                    trace_id=trace_id,
+                    model=MODEL,
+                    messages=llm_messages,
+                    temperature=get_config_float('llm.temperature_agent', 0.3),
+                    max_tokens=get_config_int('llm.max_tokens_orchestrator', 8192),
+                )
+                final_answer = response.choices[0].message.content or ""
+        if not final_answer:
+            final_answer = "分析过程较长,请参考以上各专家的分析结果。"
+    except CancelledError:
+        raise
+    except Exception:
+        final_answer = "分析过程较长,请参考以上各专家的分析结果。"
+
+    # Light Validator
+    try:
+        final_answer, validator_result = _validate_and_repair(
+            query, final_answer, specialist_results, prebuilt_context, llm_messages, trace_id=trace_id
+        )
+        if validator_result.get("issues") and not validator_result.get("passed"):
+            logger.info(f"流式输出前 Validator 发现 {len(validator_result['issues'])} 个问题，已尝试修复")
+    except Exception as e:
+        logger.warning(f"流式 Validator 调用失败: {e}")
+        validator_result = {"enabled": True, "passed": True, "issues": []}
+
+    duration_ms = int((time.time() - start_time) * 1000)
+    perf_metrics["phases"]["total"] = duration_ms
+    perf_metrics["complexity"] = complexity
+    perf_metrics["specialist_count"] = len([s for s in specialist_results if not s.get("is_cross_review")])
+
+    try:
+        if conversation_id > 0 and message_id > 0:
+            from agent.orchestrator_optimizer import log_performance_metrics
+            log_performance_metrics(conversation_id, message_id, perf_metrics)
+    except Exception as e:
+        logger.warning(f"记录性能指标失败: {e}")
+
+    # 增强4: 实体记忆
+    try:
+        for sr in specialist_results:
+            analysis = sr.get("analysis", "")
+            if analysis and not sr.get("is_cross_review"):
+                record_entity_snapshots(analysis, source="analysis", source_id=conversation_id or 0)
+        if final_answer:
+            record_entity_snapshots(final_answer, source="analysis", source_id=conversation_id or 0)
+    except Exception as e:
+        logger.warning(f"记录实体记忆失败: {e}")
+
+    conflicts = detect_conflicts_smart(specialist_results, refined_query, trace_id)
+
+    if conversation_id and message_id and specialist_results:
+        _save_checkpoint(conversation_id, message_id, "final", {
+            "specialist_results": specialist_results,
+            "all_tool_calls": all_tool_calls,
+            "arbitration_done": arbitration_done,
+            "complexity": complexity,
+        })
+
+    # 人在回路
+    hil_gen = _human_in_loop_checks(specialist_results, final_answer, conversation_id)
+    while True:
+        try:
+            yield next(hil_gen)
+        except StopIteration as si:
+            final_answer = si.value
+            break
+
+    if conversation_id:
+        _schedule_auto_evaluation(conversation_id, message_id, {
+            "answer": final_answer,
+            "specialist_results": specialist_results,
+            "tool_calls": all_tool_calls,
+            "duration_ms": duration_ms,
+            "complexity": complexity,
+            "perf_metrics": perf_metrics,
+            "conflicts": conflicts,
+            "route_info": route_result,
+            "cache_stats": expert_cache.stats,
+            "validator": validator_result if 'validator_result' in locals() else {"enabled": False},
+        })
+
+    yield {
+        "type": "answer",
+        "content": final_answer,
+        "specialist_results": specialist_results,
+        "tool_calls": all_tool_calls,
+        "duration_ms": duration_ms,
+        "complexity": complexity,
+        "perf_metrics": perf_metrics,
+        "conflicts": conflicts,
+    }
+
+
 def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_event: threading.Event | None = None, resume_from: dict | None = None, conversation_id: int = 0, message_id: int = 0, trace_id: str = "", target_specialists: list[str] = None):
     """
     Orchestrator 的流式版本,通过生成器逐步返回事件。
@@ -3264,273 +3671,64 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
         "phases": {},
     }
 
-    # 0. Prompt 注入防护检查
-    from agent.input_sanitizer import check_injection, HIGH_CONFIDENCE_REJECT
-    safety = check_injection(query)
-    if safety["blocked"]:
-        logger.warning(f"注入检测拦截: {query[:100]} | 原因: {safety['reason']}")
-        yield {
-            "type": "answer",
-            "content": HIGH_CONFIDENCE_REJECT,
-            "specialist_results": [],
-            "tool_calls": [],
-            "error": "injection_blocked",
-        }
-        return
-    if safety["confidence"] > 0:
-        logger.info(f"注入低置信度告警: {query[:100]} | 模式: {safety['reason']}")
+    # ── 阶段0-0.5: 预处理（注入检查、token预算、链接抓取、查询改写、恢复模式）──
+    precheck_gen = _stream_precheck(query, history, rag_context, cancel_event, resume_from)
+    precheck_result = None
+    while True:
+        try:
+            evt = next(precheck_gen)
+            if evt.get("type") == "answer":
+                yield evt  # 终止性事件（注入拦截 / token超限）
+                return
+            yield evt
+        except StopIteration as si:
+            precheck_result = si.value
+            break
 
-    # 0. Token 预算检查
-    budget = check_token_budget()
-    logger.info(f"Token 预算: {budget['used']}/{budget['limit']} ({budget['pct']:.0%}) mode={budget['mode']}")
-    if budget["mode"] == "exceeded":
-        yield {
-            "type": "answer",
-            "content": f"今日分析额度已用完({budget['used']:,}/{budget['limit']:,} tokens),请明天再来。",
-            "specialist_results": [],
-            "tool_calls": [],
-            "error": "token_budget_exceeded",
-        }
+    if precheck_result is None:
         return
 
-    # 0.3 链接检测与文章抓取
-    article_context = ""
-    article_fetch_failed = False
-    logger.info(f"[文章检测] query前50字: {query[:50]}, detect_urls={detect_urls(query)}")
-    if detect_urls(query):
-        yield {"type": "status", "message": "检测到链接,正在抓取文章内容..."}
-        query, article_context = enrich_query_with_article(query)
-        if article_context:
-            if article_context.startswith("[抓取失败]"):
-                article_fetch_failed = True
-                logger.warning(f"文章抓取失败: {article_context}")
-                yield {"type": "status", "message": "文章链接无法访问,将尝试分析,请稍候..."}
-            else:
-                logger.info(f"已注入文章内容到查询中")
-                yield {"type": "status", "message": "文章内容已获取,正在分析..."}
+    query = precheck_result["query"]
+    refined_query = precheck_result["refined_query"]
+    budget = precheck_result["budget"]
+    completed_specialists = precheck_result["completed_specialists"]
+    resumed_results = precheck_result["resumed_results"]
+    resume_message_id = precheck_result["resume_message_id"]
 
-    # 0.4 查询改写（多轮对话代词/省略补全）
-    try:
-        from agent.query_rewriter import rewrite_query
-        query, rewrite_meta = rewrite_query(query, history)
-        if rewrite_meta.get("rewritten"):
-            yield {"type": "status", "message": f"已补全问题上下文（{rewrite_meta.get('method', '')}）"}
-    except Exception as e:
-        logger.warning(f"查询改写失败(不影响主流程): {e}")
+    # ── 阶段1-1.5: 专家路由、复杂度分类、RAG增强 ──
+    route_gen = _stream_route(query, history, rag_context, cancel_event, resume_from,
+                             target_specialists, completed_specialists, resume_message_id,
+                             trace_id, start_time)
+    route_result_data = None
+    while True:
+        try:
+            evt = next(route_gen)
+            yield evt
+        except StopIteration as si:
+            route_result_data = si.value
+            break
 
-    # 0.5 恢复模式:从 agent_runs 表查询已完成的专家
-    completed_specialists = set()
-    resumed_results = []
-    resume_message_id = resume_from.get("message_id") if resume_from else None
-    route_result = None  # 路由结果，用于最终返回监控
-    if resume_message_id:
-        completed_runs = get_completed_agents_for_message(resume_message_id)
-        # 如果当前消息没有 completed agent_runs，尝试查 retry_of_message_id
-        if not completed_runs:
-            from db.conversations import _load_metadata
-            conn = _get_conn()
-            msg_row = conn.execute("SELECT metadata FROM messages WHERE id = ?", (resume_message_id,)).fetchone()
-            conn.close()
-            if msg_row:
-                meta = json.loads(msg_row["metadata"])
-                retry_of = meta.get("retry_of_message_id")
-                if retry_of:
-                    completed_runs = get_completed_agents_for_message(retry_of)
-                    if completed_runs:
-                        logger.info(f"恢复模式:从 retry_of_message_id={retry_of} 找到 {len(completed_runs)} 个已完成专家")
-        for run in completed_runs:
-            completed_specialists.add(run["agent_key"])
-            resumed_results.append({
-                "agent_key": run["agent_key"],
-                "agent": run["agent_name"],
-                "analysis": run["result"] or "",
-                "duration_ms": run["duration_ms"] or 0,
-            })
-        logger.info(f"恢复模式:已完成的专家 {completed_specialists}")
-        if completed_specialists:
-            yield {"type": "status", "message": f"正在恢复执行({len(completed_specialists)} 个专家已完成)..."}
+    if route_result_data is None:
+        return
 
-    # 1. 需求澄清(使用 LLM 分析问题)
-    _check_cancel(cancel_event)
+    specialists = route_result_data["specialists"]
+    complexity = route_result_data["complexity"]
+    clarification = route_result_data["clarification"]
+    route_result = route_result_data["route_result"]
+    refined_query = route_result_data["refined_query"]
+    context_config = route_result_data["context_config"]
+    token_budget = route_result_data["token_budget"]
+    rag_context = route_result_data["rag_context"]
 
-    # 如果用户通过 @mention 指定了专家,跳过自动路由
-    if target_specialists:
-        all_agents = load_specialist_agents()
-        valid_specialists = [s for s in target_specialists if s in all_agents]
-        if valid_specialists:
-            specialist_names = [all_agents[s]["name"] for s in valid_specialists]
-            yield {"type": "status", "message": f"已指定专家:{'、'.join(specialist_names)}"}
-            complexity = "simple" if len(valid_specialists) == 1 else "medium"
-            route_result = {
-                "complexity": complexity,
-                "specialists": valid_specialists,
-                "reason": f"用户通过 @mention 指定了专家: {', '.join(valid_specialists)}",
-                "needs_arbitration": len(valid_specialists) >= 2,
-                "route_by": "mention",
-                "refined_query": query,
-            }
-            context_config = get_context_config(complexity)
-            token_budget = get_token_budget(complexity)
-            refined_query = query
-            specialists = valid_specialists
-            logger.info(f"@mention 指定专家: {valid_specialists}")
-        else:
-            # 指定的 agent_key 无效,回退到自动路由
-            logger.warning(f"@mention 指定了无效的 agent_key: {target_specialists},回退到自动路由")
-            target_specialists = None
-
-    if not target_specialists:
-        if not resume_from:
-            yield {"type": "phase", "phase": "route", "message": "🔍 正在理解您的问题..."}
-        # 使用 Smart Router 选择专家和复杂度(规则优先,LLM 兜底)
-        history_summary = _build_history_summary(history)
-        portfolio_summary = ""  # 后续阶段才构建 prebuilt_context,先用空摘要
-        route_result = _router.route(
-            query,
-            history_summary=history_summary,
-            portfolio_summary=portfolio_summary,
-            target_specialists=None,
-        )
-        complexity = route_result["complexity"]
-        context_config = get_context_config(complexity)
-        token_budget = get_token_budget(complexity)
-        logger.info(f"路由结果: {route_result}")
-
-        # 使用 LLM 兜底时可能返回优化后的问题;规则路由时保持原问题
-        refined_query = route_result.get("refined_query", query) or query
-        specialists = route_result.get("specialists", [])
-
-        # 按复杂度上限截断 specialist 数量
-        max_spec = context_config.get("max_specialists", 4)
-        if len(specialists) > max_spec:
-            logger.info(f"specialists 超出上限({len(specialists)} > {max_spec})，截断")
-            specialists = specialists[:max_spec]
-
-        # 恢复模式：排除已完成的专家，避免重复执行
-        if resume_message_id and specialists and completed_specialists:
-            specialists = [s for s in specialists if s not in completed_specialists]
-            if not specialists:
-                specialists = list(completed_specialists)[:3]
-                logger.info(f"恢复模式:所有路由专家已完成,复用已有结果: {specialists}")
-            else:
-                logger.info(f"恢复模式:排除已完成专家后剩余: {specialists}")
-
-        # 若未命中任何专家,回退到原 clarify_requirement
-        clarification = route_result  # 默认使用路由结果
-        if not specialists:
-            if not resume_from:
-                yield {"type": "phase", "phase": "clarify", "message": "🔍 正在理解您的问题..."}
-            clarification = clarify_requirement(query, trace_id=trace_id)
-            complexity = clarification["complexity"]
-            context_config = get_context_config(complexity)
-            token_budget = get_token_budget(complexity)
-            logger.info(f"Smart Router 未命中,回退到需求澄清: {clarification}")
-            refined_query = clarification.get("refined_query", query)
-            specialists = clarification.get("specialists", [])
-
-    # 限制专家数量(避免过度分析)
-    max_spec = context_config.get("max_specialists", 3)
-    if len(specialists) > max_spec:
-        logger.info(f"专家数量限制: {len(specialists)} → {max_spec},丢弃: {specialists[max_spec:]}")
-        specialists = specialists[:max_spec]
-
-    # 性能监控:需求澄清/路由耗时
     perf_metrics["phases"]["routing"] = int((time.time() - start_time) * 1000)
 
-    # 1.5 场景化 RAG 增强:根据命中的专家类型补充相关书籍知识
-    rag_context = build_scenario_rag_context(refined_query, specialists, rag_context)
+    # ── 阶段2: 构建上下文 ──
+    ctx_data = _stream_build_context(refined_query, rag_context, complexity,
+                                     context_config, token_budget, history)
+    llm_messages = ctx_data["llm_messages"]
+    prebuilt_context = ctx_data["prebuilt_context"]
+    system_content = ctx_data["system_content"]
 
-    # 2. 根据复杂度优化上下文(Token 预算管理)
-    system_content = build_orchestrator_system_prompt()
-
-    # RAG 上下文(token 感知截断)
-    rag_budget = int(token_budget["total_context"] * token_budget["rag_pct"])
-    if rag_context and context_config["rag_enabled"]:
-        compressed_rag = compress_rag_token_aware(rag_context, max_tokens=rag_budget)
-        system_content += f"\n\n参考信息:\n{compressed_rag}"
-
-    # 注入用户偏好画像(从反馈学习中积累)
-    preference_ctx = get_preference_context("default")
-    if preference_ctx:
-        system_content += f"\n\n{preference_ctx}"
-
-    # 注入 KYC 理财画像(让编排器基于用户画像做路由决策)
-    from agent.kyc import kyc_profile_to_text
-    kyc_text = kyc_profile_to_text("default")
-    if kyc_text:
-        system_content += f"\n\n{kyc_text}"
-
-    # 注入跨对话用户记忆
-    user_memory = build_user_memory_context("default")
-    if user_memory:
-        system_content += f"\n\n<user_memory>\n{user_memory}\n</user_memory>"
-
-    # 注入持仓上下文 + 估值上下文(同时构建 prebuilt_context 供 specialist 复用)
-    prebuilt_context = ""
-
-    # Bridge A: 注入24h分析结论上下文
-    _, analysis_ctx = _inject_analysis_context(refined_query)
-    if analysis_ctx:
-        prebuilt_context += analysis_ctx
-        try:
-            system_content += f"\n\n{analysis_ctx}"
-        except Exception:
-            pass
-
-    # 注入 RAG 知识库上下文到 prebuilt_context(让专家也能参考书籍/文章知识)
-    if rag_context:
-        compressed_rag_for_specialist = compress_rag_token_aware(rag_context, max_tokens=get_config_int('llm.max_tokens_rag_compress', 1500))
-        prebuilt_context += f"## 知识库参考(书籍/文章/技能)\n{compressed_rag_for_specialist}\n\n"
-
-    try:
-        from services.portfolio_context import build_portfolio_context, build_valuation_summary
-        portfolio_ctx = build_portfolio_context()
-        # 始终注入持仓上下文(空持仓时也会明确告知"无持仓",防止 AI 编造)
-        system_content += f"\n\n## 用户当前持仓\n{portfolio_ctx}"
-        prebuilt_context += f"## 用户当前持仓\n{portfolio_ctx}\n\n"
-        valuation_ctx = build_valuation_summary()
-        if valuation_ctx:
-            system_content += f"\n\n## 当前市场估值\n{valuation_ctx}"
-            prebuilt_context += f"## 当前市场估值数据\n{valuation_ctx}\n\n"
-    except Exception as e:
-        logger.warning(f"注入持仓/估值上下文失败: {e}")
-
-    # 注入债市数据到 prebuilt_context
-    try:
-        from routers.bond import _fetch_bond_data
-        bond_raw = _fetch_bond_data()
-        if bond_raw and len(bond_raw) > 1:
-            last = bond_raw[-1]
-            temp = last.get("degree", "?")
-            rate = float(last["yield"]) * 100 if last.get("yield") else "?"
-            prebuilt_context += f"## 债市数据\n- 债市温度: {temp}°\n- 10年期国债收益率: {rate}%\n\n"
-    except Exception as e:
-        logger.warning(f"注入债市数据失败: {e}")
-
-    # 注入近期热点新闻到 prebuilt_context(同步调用,从缓存读取)
-    try:
-        from routers.dashboard import _hot_topics_cache
-        hot_cache = _hot_topics_cache.get("data")
-        if hot_cache:
-            news_list = hot_cache.get("news", [])[:3]
-            if news_list:
-                news_lines = "\n".join(f"- {n.get('title', '')}" for n in news_list if n.get("title"))
-                prebuilt_context += f"## 今日市场热点\n{news_lines}\n\n"
-    except Exception as e:
-        logger.warning(f"注入热点新闻失败: {e}")
-
-    llm_messages = [{"role": "system", "content": system_content}]
-
-    # 语义化压缩历史消息(LLM 摘要 + 近期原文)
-    history_budget = int(token_budget["total_context"] * token_budget["history_pct"])
-    compressed_history = compress_history_semantic(history, max_tokens=history_budget)
-    for msg in compressed_history:
-        llm_messages.append({"role": msg["role"], "content": msg["content"]})
-
-    # 使用优化后的问题
-    llm_messages.append({"role": "user", "content": refined_query})
-
-    # 根据复杂度显示不同的状态消息
     # 根据复杂度显示不同的状态消息
     if complexity == "simple":
         yield {"type": "phase", "phase": "analyze", "message": f"📊 正在分析问题... ({clarification.get('reason', '')})"}
@@ -3662,266 +3860,24 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
 
         # 没有工具调用 → 检查是否需要交叉审阅,然后给出最终回答
         if not msg.tool_calls:
-            conflicts = detect_conflicts_smart(specialist_results, refined_query, trace_id)
-            cross_review_enabled = get_orchestration_config("cross_review_enabled", "true") == "true"
-            cross_review_min = int(get_orchestration_config("cross_review_min_specialists", "2"))
-            cross_review_min_sev = get_orchestration_config("cross_review_min_severity", "medium")
-            # 从 clarification 中获取 LLM 预判的 need_cross_review
-            predicted_need_cr = False
-            if isinstance(clarification, dict):
-                predicted_need_cr = clarification.get("need_cross_review", False)
-            should_cross_review = should_run_cross_review(
-                specialist_results=specialist_results,
-                complexity=complexity,
-                conflicts=conflicts,
-                force_skip=force_skip_cross_review,
-                enabled=cross_review_enabled,
-                min_specialists=cross_review_min,
-                min_severity=cross_review_min_sev,
-                predicted_need_cross_review=predicted_need_cr,
-                needs_arbitration=route_result.get("needs_arbitration", False) if isinstance(route_result, dict) else False,
-            )
-            if should_cross_review:
-                yield {"type": "status", "message": f"正在进行交叉审阅({len(specialist_results)} 个专家并行互相验证)..."}
-                peer_analyses = {sr["agent_key"]: sr["analysis"] for sr in specialist_results}
-                cross_review_results = []
-                original_specialists = list(specialist_results)
-
-                # 发出所有交叉审阅开始事件
-                for sr in original_specialists:
-                    yield {
-                        "type": "cross_review_start",
-                        "agent_key": sr["agent_key"],
-                        "agent": sr["agent"],
-                        "icon": sr["icon"],
-                    }
-
-                # 并行执行交叉审阅(最多 3 并发)
-                def _review_single(sr):
-                    _check_cancel(cancel_event)
-                    _check_timeout(start_time)
-                    peer = {k: v for k, v in peer_analyses.items() if k != sr["agent_key"]}
-                    return sr, run_specialist_with_context(
-                        sr["agent_key"], refined_query, peer, max_turns=2,
-                        prebuilt_context=prebuilt_context,
-                        model=_get_model_for_agent("cross_review") if _is_cost_routing_enabled() else None
-                    )
-
-                with concurrent.futures.ThreadPoolExecutor(
-                    max_workers=min(len(original_specialists), 3)
-                ) as executor:
-                    futures = {executor.submit(_review_single, sr): sr for sr in original_specialists}
-                    for future in concurrent.futures.as_completed(futures):
-                        sr = futures[future]
-                        try:
-                            _, cr_result = future.result(timeout=300)
-                            cross_review_results.append(cr_result)
-                            specialist_results.append(cr_result)
-                            all_tool_calls.extend(cr_result.get("tool_calls", []))
-                            yield {
-                                "type": "cross_review_done",
-                                "agent_key": sr["agent_key"],
-                                "agent": sr["agent"],
-                                "icon": sr["icon"],
-                                "analysis": cr_result["analysis"],
-                                "duration_ms": cr_result["duration_ms"],
-                            }
-                        except Exception as e:
-                            logger.error(f"交叉审阅 {sr['agent_key']} 失败: {e}")
-                            yield {
-                                "type": "cross_review_done",
-                                "agent_key": sr["agent_key"],
-                                "agent": sr["agent"],
-                                "icon": sr["icon"],
-                                "analysis": f"交叉审阅失败: {e}",
-                                "duration_ms": 0,
-                            }
-
-                # 优化:跳过中间的综合 LLM 调用,直接进入仲裁
-                if cross_review_results:
-                    _check_cancel(cancel_event)
-                    # 直接使用交叉审阅结果,不进行额外的 LLM 调用
-                    answer = msg.content or ""
-
-                    # Phase C: 仲裁(高级模型最终裁决)
-                    if should_arbitrate(complexity, specialist_results, conflicts):
-                        _check_cancel(cancel_event)
-                        yield {"type": "phase", "phase": "arbitrate", "message": "⚖️ 正在由仲裁法官做最终裁决..."}
-                        yield {
-                            "type": "specialist_start",
-                            "agent_key": "arbitrator",
-                            "agent": "仲裁法官",
-                            "icon": "⚖️",
-                        }
-                        arb_result = run_arbitration(refined_query, specialist_results, rag_context)
-                        specialist_results.append(arb_result)
-                        all_tool_calls.append({"name": "arbitration", "arguments": {"query": refined_query},
-                                               "result_preview": arb_result["analysis"][:300]})
-                        answer = arb_result["analysis"]
-                        arbitration_done = True
-                        yield {
-                            "type": "specialist_done",
-                            "agent_key": "arbitrator",
-                            "agent": "仲裁法官",
-                            "icon": "⚖️",
-                            "analysis": arb_result["analysis"],
-                            "duration_ms": arb_result["duration_ms"],
-                            "is_arbitration": True,
-                            "condition_framework": arb_result.get("condition_framework", []),
-                            "diverggence_analysis": arb_result.get("diverggence_analysis", ""),
-                            "key_variables": arb_result.get("key_variables", ""),
-                        }
-
-                    duration_ms = int((time.time() - start_time) * 1000)
-                    conflicts = detect_conflicts_smart(specialist_results, refined_query, trace_id)
-
-                    # 增强1: 检查点存档 — Phase B 交叉审阅完成
-                    if conversation_id and message_id:
-                        _save_checkpoint(conversation_id, message_id, "cross_review", {
-                            "specialist_results": specialist_results,
-                            "all_tool_calls": all_tool_calls,
-                            "arbitration_done": arbitration_done,
-                            "complexity": complexity,
-                        })
-
-                    # 增强5: 人在回路 — 冲突检测 + 买卖建议确认
-                    conflict_confirm = _check_human_in_loop_conflict(specialist_results)
-                    if conflict_confirm:
-                        confirm_id = f"confirm_{conversation_id}_{int(time.time())}"
-                        conflict_confirm["confirm_id"] = confirm_id
-                        _confirm_store[confirm_id] = {"event": threading.Event(), "result": ""}
-                        yield conflict_confirm
-                        user_choice = wait_for_confirm(confirm_id, timeout=conflict_confirm.get("timeout", 30))
-                        del _confirm_store[confirm_id]
-                        if user_choice == "lean_buy":
-                            answer = "用户倾向买入，综合分析如下：\n" + answer
-                        elif user_choice == "lean_skip":
-                            answer = "用户倾向不买，综合分析如下：\n" + answer
-
-                    trade_confirm = _check_human_in_loop_trade(answer)
-                    if trade_confirm:
-                        confirm_id = f"confirm_{conversation_id}_{int(time.time())}"
-                        trade_confirm["confirm_id"] = confirm_id
-                        _confirm_store[confirm_id] = {"event": threading.Event(), "result": ""}
-                        yield trade_confirm
-                        user_choice = wait_for_confirm(confirm_id, timeout=trade_confirm.get("timeout", 30))
-                        del _confirm_store[confirm_id]
-                        if user_choice == "save":
-                            yield {"type": "status", "message": "已保存为决策草案"}
-
-                    yield {
-                        "type": "answer",
-                        "content": answer,
-                        "specialist_results": specialist_results,
-                        "tool_calls": all_tool_calls,
-                        "duration_ms": duration_ms,
-                        "complexity": complexity,
-                        "cross_review": True,
-                        "arbitration": arbitration_done,
-                        "conflicts": conflicts,
-                        "condition_framework": next((sr.get("condition_framework", []) for sr in specialist_results if sr.get("is_arbitration")), []),
-                        "diverggence_analysis": next((sr.get("diverggence_analysis", "") for sr in specialist_results if sr.get("is_arbitration")), ""),
-                        "key_variables": next((sr.get("key_variables", "") for sr in specialist_results if sr.get("is_arbitration")), ""),
-                        "reasoning_trail": build_reasoning_trail(query, refined_query, complexity, specialist_results, next((sr for sr in specialist_results if sr.get("is_arbitration")), None), prebuilt_context, duration_ms),
-                    }
-                    if conversation_id:
-                        _schedule_auto_evaluation(conversation_id, message_id, {
-                            "answer": answer, "specialist_results": specialist_results,
-                            "tool_calls": all_tool_calls, "duration_ms": duration_ms,
-                            "complexity": complexity, "conflicts": conflicts,
-                            "route_info": route_result, "cache_stats": expert_cache.stats,
-                        })
-                    return
-
-            answer = msg.content or ""
-
-            # Phase C: 仲裁(高级模型最终裁决,无交叉审阅时也可触发)
-            if not arbitration_done and should_arbitrate(complexity, specialist_results, conflicts):
-                _check_cancel(cancel_event)
-                yield {"type": "phase", "phase": "arbitrate", "message": "⚖️ 正在由仲裁法官做最终裁决..."}
-                yield {
-                    "type": "specialist_start",
-                    "agent_key": "arbitrator",
-                    "agent": "仲裁法官",
-                    "icon": "⚖️",
-                }
-                arb_result = run_arbitration(refined_query, specialist_results, rag_context)
-                specialist_results.append(arb_result)
-                all_tool_calls.append({"name": "arbitration", "arguments": {"query": refined_query},
-                                       "result_preview": arb_result["analysis"][:300]})
-                answer = arb_result["analysis"]
-                arbitration_done = True
-                yield {
-                    "type": "specialist_done",
-                    "agent_key": "arbitrator",
-                    "agent": "仲裁法官",
-                    "icon": "⚖️",
-                    "analysis": arb_result["analysis"],
-                    "duration_ms": arb_result["duration_ms"],
-                    "is_arbitration": True,
-                    "condition_framework": arb_result.get("condition_framework", []),
-                    "diverggence_analysis": arb_result.get("diverggence_analysis", ""),
-                    "key_variables": arb_result.get("key_variables", ""),
-                }
-
-            duration_ms = int((time.time() - start_time) * 1000)
-            conflicts = detect_conflicts_smart(specialist_results, refined_query, trace_id)
-
-            # 增强1: 检查点存档
-            if conversation_id and message_id and specialist_results:
-                _save_checkpoint(conversation_id, message_id, "experts", {
-                    "specialist_results": specialist_results,
-                    "all_tool_calls": all_tool_calls,
-                    "arbitration_done": arbitration_done,
-                    "complexity": complexity,
-                })
-
-            # 增强5: 人在回路 — 冲突检测 + 买卖建议确认
-            conflict_confirm = _check_human_in_loop_conflict(specialist_results)
-            if conflict_confirm:
-                confirm_id = f"confirm_{conversation_id}_{int(time.time())}"
-                conflict_confirm["confirm_id"] = confirm_id
-                _confirm_store[confirm_id] = {"event": threading.Event(), "result": ""}
-                yield conflict_confirm
-                user_choice = wait_for_confirm(confirm_id, timeout=conflict_confirm.get("timeout", 30))
-                del _confirm_store[confirm_id]
-                if user_choice == "lean_buy":
-                    answer = "用户倾向买入，综合分析如下：\n" + answer
-                elif user_choice == "lean_skip":
-                    answer = "用户倾向不买，综合分析如下：\n" + answer
-
-            trade_confirm = _check_human_in_loop_trade(answer)
-            if trade_confirm:
-                confirm_id = f"confirm_{conversation_id}_{int(time.time())}"
-                trade_confirm["confirm_id"] = confirm_id
-                _confirm_store[confirm_id] = {"event": threading.Event(), "result": ""}
-                yield trade_confirm
-                user_choice = wait_for_confirm(confirm_id, timeout=trade_confirm.get("timeout", 30))
-                del _confirm_store[confirm_id]
-                if user_choice == "save":
-                    yield {"type": "status", "message": "已保存为决策草案"}
-
-            yield {
-                "type": "answer",
-                "content": answer,
-                "specialist_results": specialist_results,
-                "tool_calls": all_tool_calls,
-                "duration_ms": duration_ms,
-                "arbitration": arbitration_done,
-                "conflicts": conflicts,
-                "condition_framework": next((sr.get("condition_framework", []) for sr in specialist_results if sr.get("is_arbitration")), []),
-                "diverggence_analysis": next((sr.get("diverggence_analysis", "") for sr in specialist_results if sr.get("is_arbitration")), ""),
-                "key_variables": next((sr.get("key_variables", "") for sr in specialist_results if sr.get("is_arbitration")), ""),
-                "reasoning_trail": build_reasoning_trail(query, refined_query, complexity, specialist_results, next((sr for sr in specialist_results if sr.get("is_arbitration")), None), prebuilt_context, duration_ms),
-            }
-            if conversation_id:
-                _schedule_auto_evaluation(conversation_id, message_id, {
-                    "answer": answer, "specialist_results": specialist_results,
-                    "tool_calls": all_tool_calls, "duration_ms": duration_ms,
-                    "complexity": complexity, "conflicts": conflicts,
-                    "route_info": route_result, "cache_stats": expert_cache.stats,
-                })
-            return
+            ntc_gen = _stream_handle_no_tool_calls(
+                msg, specialist_results, all_tool_calls,
+                refined_query, query, rag_context,
+                complexity, clarification, route_result,
+                conflicts, force_skip_cross_review, arbitration_done,
+                prebuilt_context, cancel_event, start_time,
+                conversation_id, message_id, trace_id)
+            ntc_done = False
+            while True:
+                try:
+                    yield next(ntc_gen)
+                except StopIteration as si:
+                    ntc_done = si.value
+                    break
+            if ntc_done:
+                return
+            # ntc_done == False 不会发生（函数总是返回 True），但防御性处理
+            arbitration_done = True  # 函数内部已处理仲裁
 
         # 有工具调用 → 执行专家
         assistant_msg = {
@@ -4246,156 +4202,13 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
             })
 
     # 超过最大轮次,做最后一次总结
-    _check_cancel(cancel_event)
-    try:
-        # 注入 KYC 画像,让最终综合答案"懂用户"(轻量主控综合层)
-        try:
-            from agent.kyc import kyc_profile_to_text
-            kyc_text = kyc_profile_to_text("default")
-            if kyc_text:
-                llm_messages.append({"role": "system", "content": f"在综合各专家意见给出最终建议时,请务必结合用户的投资画像:\n{kyc_text}"})
-        except Exception:
-            pass
-        llm_messages.append({
-            "role": "user",
-            "content": _build_final_synthesis_prompt(specialist_results, specialists),
-        })
-        final_answer = ""
-        # 流式生成:逐 chunk 推送思考过程 + 答案增量
-        try:
-            from services.llm_service import _call_llm_stream
-            for chunk in _call_llm_stream(
-                caller="orchestrator",
-                trace_id=trace_id,
-                model=MODEL,
-                messages=llm_messages,
-                temperature=get_config_float('llm.temperature_agent', 0.3),
-                max_tokens=get_config_int('llm.max_tokens_orchestrator', 8192),
-            ):
-                if chunk.get("reasoning"):
-                    yield {"type": "reasoning_chunk", "content": chunk["reasoning"], "agent": "orchestrator"}
-                if chunk.get("content"):
-                    final_answer += chunk["content"]
-                    yield {"type": "answer_chunk", "content": chunk["content"]}
-        except CancelledError:
-            raise
-        except Exception as stream_err:
-            # 流式失败 → 回退非流式(仅当尚未产出内容时)
-            logger.warning(f"流式生成失败,回退非流式: {stream_err}")
-            if not final_answer:
-                response = _call_llm(
-                    caller="orchestrator",
-                    trace_id=trace_id,
-                    model=MODEL,
-                    messages=llm_messages,
-                    temperature=get_config_float('llm.temperature_agent', 0.3),
-                    max_tokens=get_config_int('llm.max_tokens_orchestrator', 8192),
-                )
-                final_answer = response.choices[0].message.content or ""
-        if not final_answer:
-            final_answer = "分析过程较长,请参考以上各专家的分析结果。"
-    except CancelledError:
-        raise
-    except Exception:
-        final_answer = "分析过程较长,请参考以上各专家的分析结果。"
-
-    # Light Validator: 输出前质检与修复(流式场景)
-    try:
-        final_answer, validator_result = _validate_and_repair(
-            query, final_answer, specialist_results, prebuilt_context, llm_messages, trace_id=trace_id
-        )
-        if validator_result.get("issues") and not validator_result.get("passed"):
-            logger.info(f"流式输出前 Validator 发现 {len(validator_result['issues'])} 个问题，已尝试修复")
-    except Exception as e:
-        logger.warning(f"流式 Validator 调用失败: {e}")
-        validator_result = {"enabled": True, "passed": True, "issues": []}
-
-    duration_ms = int((time.time() - start_time) * 1000)
-
-    # 性能监控:记录总耗时
-    perf_metrics["phases"]["total"] = duration_ms
-    perf_metrics["complexity"] = complexity
-    perf_metrics["specialist_count"] = len([s for s in specialist_results if not s.get("is_cross_review")])
-
-    # 记录性能指标(异步,不阻塞)
-    try:
-        if conversation_id > 0 and message_id > 0:
-            from agent.orchestrator_optimizer import log_performance_metrics
-            log_performance_metrics(conversation_id, message_id, perf_metrics)
-    except Exception as e:
-        logger.warning(f"记录性能指标失败: {e}")
-
-    # 增强4: 实体记忆 — 从专家分析中提取实体属性变化
-    try:
-        for sr in specialist_results:
-            analysis = sr.get("analysis", "")
-            if analysis and not sr.get("is_cross_review"):
-                record_entity_snapshots(analysis, source="analysis", source_id=conversation_id or 0)
-        if final_answer:
-            record_entity_snapshots(final_answer, source="analysis", source_id=conversation_id or 0)
-    except Exception as e:
-        logger.warning(f"记录实体记忆失败: {e}")
-
-    conflicts = detect_conflicts_smart(specialist_results, refined_query, trace_id)
-
-    # 增强1: 检查点存档 — 最终完成
-    if conversation_id and message_id and specialist_results:
-        _save_checkpoint(conversation_id, message_id, "final", {
-            "specialist_results": specialist_results,
-            "all_tool_calls": all_tool_calls,
-            "arbitration_done": arbitration_done,
-            "complexity": complexity,
-        })
-
-    # 增强5: 人在回路 — 冲突检测 + 买卖建议确认
-    conflict_confirm = _check_human_in_loop_conflict(specialist_results)
-    if conflict_confirm:
-        confirm_id = f"confirm_{conversation_id}_{int(time.time())}"
-        conflict_confirm["confirm_id"] = confirm_id
-        _confirm_store[confirm_id] = {"event": threading.Event(), "result": ""}
-        yield conflict_confirm
-        user_choice = wait_for_confirm(confirm_id, timeout=conflict_confirm.get("timeout", 30))
-        del _confirm_store[confirm_id]
-        if user_choice == "lean_buy":
-            final_answer = "用户倾向买入，综合分析如下：\n" + final_answer
-        elif user_choice == "lean_skip":
-            final_answer = "用户倾向不买，综合分析如下：\n" + final_answer
-
-    trade_confirm = _check_human_in_loop_trade(final_answer)
-    if trade_confirm:
-        confirm_id = f"confirm_{conversation_id}_{int(time.time())}"
-        trade_confirm["confirm_id"] = confirm_id
-        _confirm_store[confirm_id] = {"event": threading.Event(), "result": ""}
-        yield trade_confirm
-        user_choice = wait_for_confirm(confirm_id, timeout=trade_confirm.get("timeout", 30))
-        del _confirm_store[confirm_id]
-        if user_choice == "save":
-            yield {"type": "status", "message": "已保存为决策草案"}
-
-    if conversation_id:
-        _schedule_auto_evaluation(conversation_id, message_id, {
-            "answer": final_answer,
-            "specialist_results": specialist_results,
-            "tool_calls": all_tool_calls,
-            "duration_ms": duration_ms,
-            "complexity": complexity,
-            "perf_metrics": perf_metrics,
-            "conflicts": conflicts,
-            "route_info": route_result,
-            "cache_stats": expert_cache.stats,
-            "validator": validator_result if 'validator_result' in locals() else {"enabled": False},
-        })
-
-    yield {
-        "type": "answer",
-        "content": final_answer,
-        "specialist_results": specialist_results,
-        "tool_calls": all_tool_calls,
-        "duration_ms": duration_ms,
-        "complexity": complexity,
-        "perf_metrics": perf_metrics,
-        "conflicts": conflicts,
-    }
+    yield from _stream_final_synthesis(
+        query, refined_query, specialists, specialist_results, all_tool_calls,
+        llm_messages, prebuilt_context, complexity, arbitration_done,
+        route_result, conflicts, perf_metrics,
+        cancel_event, start_time,
+        conversation_id, message_id, trace_id)
+    return
 
 
 # ═══════════════════════════════════════════════════════════════
