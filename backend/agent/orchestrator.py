@@ -512,6 +512,42 @@ def _build_portfolio_context() -> str:
         return ""
 
 
+def _build_dca_rules() -> str:
+    """构建 4% 定投法规则和减仓约束，注入估值分析师和资产配置师的 prompt。
+
+    规则来源：daily_advice.base_dca_amount、daily_advice.dca_drop_step_pct、daily_advice.max_dca_steps
+    """
+    try:
+        from db.config import get_config
+        base_amount = get_config("daily_advice.base_dca_amount", "500")
+        drop_step = get_config("daily_advice.dca_drop_step_pct", "4")
+        max_steps = get_config("daily_advice.max_dca_steps", "3")
+
+        return f"""【加减仓规则约束（必须遵守）】
+
+## 4% 定投法（加仓规则）
+- 基础定投金额：¥{base_amount}/档
+- 跌幅档位：每跌 {drop_step}% 加一档
+- 最大档数：{max_steps} 档（即最大加仓 ¥{int(base_amount) * int(max_steps)}）
+- 加仓前提：估值百分位 ≤ 35% 且不在补仓冷静期（10 天内）
+- 加仓金额计算：¥{base_amount} × 档数（跌幅/{drop_step}%，向下取整，上限 {max_steps} 档）
+
+## 减仓约束（必须遵守）
+- 单次减仓不超过该基金持仓的 20%
+- 单次建议总减仓金额不超过总资产的 10%
+- 禁止同时减仓 2 个以上基金
+- 禁止一次性减仓超过 ¥50,000
+- 减仓前提：估值百分位 ≥ 80% 且有明确止盈信号
+
+## 禁止事项
+- 禁止在未查看用户持仓盈亏的情况下建议加仓
+- 禁止建议加仓已超持仓上限（25%）的基金
+- 禁止建议减仓亏损基金（除非风险止损场景）"""
+    except Exception as e:
+        logger.warning(f"构建定投规则失败: {e}")
+        return ""
+
+
 def _build_final_synthesis_prompt(specialist_results: list, routed_specialists: list) -> str:
     """构建最终综合提示，强制 LLM 只引用实际执行了的专家。"""
     executed_keys = {sr.get("agent_key", "") for sr in specialist_results}
@@ -3901,6 +3937,11 @@ def _stream_build_context(refined_query: str, rag_context: str, complexity: str,
     portfolio_ctx = _build_portfolio_context()
     if portfolio_ctx:
         prebuilt_context = (prebuilt_context or "") + "\n\n" + portfolio_ctx
+
+    # 注入 4% 定投法规则和减仓约束，避免专家给出随意的加减仓金额
+    dca_rules = _build_dca_rules()
+    if dca_rules:
+        prebuilt_context = (prebuilt_context or "") + "\n\n" + dca_rules
 
     return {
         "llm_messages": llm_messages,
