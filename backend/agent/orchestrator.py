@@ -467,6 +467,51 @@ def _build_history_summary(history: list) -> str:
     return "\n".join(parts)
 
 
+def _build_portfolio_context() -> str:
+    """构建用户持仓上下文，注入每个专家的 system_prompt。
+
+    包含：基金名、持仓占比、盈亏率、成本价、当前价。
+    让专家在推荐加减仓时能看到用户实际持仓，避免"估值低就加仓但不看已亏损"。
+    """
+    try:
+        from db.portfolio import get_portfolio_summary
+        summary = get_portfolio_summary()
+        if not summary or not summary.get("holdings"):
+            return "【当前持仓】无持仓数据"
+
+        # 只展示活跃持仓（份额 > 0），summary["holdings"] 包含已清仓记录
+        active = [h for h in summary["holdings"] if (h.get("shares") or 0) > 0]
+        if not active:
+            return "【当前持仓】无持仓数据"
+
+        lines = ["【当前持仓】"]
+        total_cost = summary.get("total_cost", 0)
+        total_value = summary.get("total_value", 0)
+        total_pnl = total_value - total_cost
+        total_pnl_pct = (total_pnl / total_cost * 100) if total_cost > 0 else 0
+        lines.append(f"总成本: ¥{total_cost:,.0f} | 总市值: ¥{total_value:,.0f} | 总盈亏: ¥{total_pnl:,.0f} ({total_pnl_pct:+.1f}%)")
+        lines.append("")
+
+        for h in active[:10]:  # 最多 10 条
+            name = h.get("fund_name", h.get("fund_code", ""))
+            code = h.get("fund_code", "")
+            shares = h.get("shares", 0)
+            cost = h.get("cost_price", 0)
+            current = h.get("current_price", 0)
+            value = h.get("current_value", shares * current)
+            pnl = (current - cost) * shares if cost > 0 else 0
+            pnl_pct = ((current - cost) / cost * 100) if cost > 0 else 0
+            weight = (value / total_value * 100) if total_value > 0 else 0
+            lines.append(
+                f"- {name}({code}): 持仓{shares:,.0f}份 | 成本{cost:.4f} | 现价{current:.4f} | "
+                f"市值¥{value:,.0f} | 占比{weight:.1f}% | 盈亏¥{pnl:,.0f}({pnl_pct:+.1f}%)"
+            )
+        return "\n".join(lines)
+    except Exception as e:
+        logger.warning(f"构建持仓上下文失败: {e}")
+        return ""
+
+
 def _build_final_synthesis_prompt(specialist_results: list, routed_specialists: list) -> str:
     """构建最终综合提示，强制 LLM 只引用实际执行了的专家。"""
     executed_keys = {sr.get("agent_key", "") for sr in specialist_results}
@@ -3851,6 +3896,11 @@ def _stream_build_context(refined_query: str, rag_context: str, complexity: str,
         llm_messages.append({"role": msg["role"], "content": msg["content"]})
 
     llm_messages.append({"role": "user", "content": refined_query})
+
+    # 注入持仓上下文（基金名、占比、盈亏率、成本），避免专家不看盈亏就建议加仓
+    portfolio_ctx = _build_portfolio_context()
+    if portfolio_ctx:
+        prebuilt_context = (prebuilt_context or "") + "\n\n" + portfolio_ctx
 
     return {
         "llm_messages": llm_messages,
