@@ -368,6 +368,8 @@ def init_db():
             updated_at TEXT DEFAULT (datetime('now','localtime'))
         )
     """)
+    # 迁移：conversations 增加 cancel_requested 字段（取消语义重设计）
+    _add_column_if_not_exists(conn, "conversations", "cancel_requested", "INTEGER DEFAULT 0")
 
     conn.execute("""
         CREATE TABLE IF NOT EXISTS messages (
@@ -449,6 +451,8 @@ def init_db():
         )
     """)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_agent_runs_conv ON agent_runs(conversation_id)")
+    # 迁移：agent_runs 增加 run_phase 字段（防重复执行）
+    _add_column_if_not_exists(conn, "agent_runs", "run_phase", "TEXT DEFAULT 'primary'")
 
     # ── 持仓管理表 ──────────────────────────────────────
     conn.execute("""
