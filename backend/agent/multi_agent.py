@@ -9,9 +9,74 @@ import time
 from services.llm_service import client, MODEL, _call_llm, _parse_tool_args
 from tools import TOOLS, execute_tool
 from db.agents import load_specialist_agents
-from db.config import get_config_int
+from db.config import get_config_int, get_config_bool
 
 logger = logging.getLogger(__name__)
+
+
+def _get_tool_result_max_chars() -> int:
+    """工具结果截断阈值（可配置，默认 1500）。"""
+    try:
+        from db.config import get_config_int
+        return get_config_int("agent.react_tool_result_max_chars", 1500)
+    except Exception:
+        return 1500
+
+
+def _compress_prior_tool_messages(llm_messages: list):
+    """把已累积的历史 tool 消息合并为一条摘要，保留最新一条原文。
+
+    当 llm_messages 中有 >=2 个 tool 消息时触发：
+    - 保留最后一个 tool 消息原文（最新数据最重要）
+    - 前面的 tool 消息合并为一条摘要消息（每条取前 200 字）
+    - 对应的 assistant tool_calls 消息保留（结构需要）
+    """
+    tool_indices = [i for i, m in enumerate(llm_messages) if m.get("role") == "tool"]
+    if len(tool_indices) < 2:
+        return
+
+    # 收集前面所有 tool 消息的摘要（保留最后一个原文）
+    keep_idx = tool_indices[-1]
+    summaries = []
+    for i in tool_indices[:-1]:
+        msg = llm_messages[i]
+        content = msg.get("content", "") or ""
+        # 尝试从对应的 assistant tool_calls 拿工具名
+        tool_name = "unknown"
+        # 找前一条 assistant 消息中的 tool_call_id 匹配
+        for j in range(i - 1, -1, -1):
+            prev = llm_messages[j]
+            if prev.get("role") == "assistant" and prev.get("tool_calls"):
+                for tc in prev["tool_calls"]:
+                    if tc.get("id") == msg.get("tool_call_id"):
+                        tool_name = tc.get("function", {}).get("name", "unknown")
+                        break
+                break
+        summaries.append(f"[{tool_name}] {content[:200]}...")
+
+    if not summaries:
+        return
+
+    # 用摘要替换最早的那条 tool 消息，删除中间的 tool 消息
+    summary_msg = {
+        "role": "tool",
+        "tool_call_id": llm_messages[tool_indices[0]]["tool_call_id"],
+        "content": f"（历史工具结果摘要，共{len(summaries)}条）\n" + "\n".join(summaries),
+    }
+    llm_messages[tool_indices[0]] = summary_msg
+    # 从后往前删除中间的 tool 消息（不影响索引）
+    for i in reversed(tool_indices[1:-1]):
+        del llm_messages[i]
+    logger.info(f"ReAct 历史压缩：合并 {len(tool_indices) - 1} 条 tool 消息为 1 条摘要")
+
+
+def _maybe_compress_tool_history(llm_messages: list):
+    """按配置开关调用历史压缩。"""
+    try:
+        if get_config_bool("agent.react_compress_history", True):
+            _compress_prior_tool_messages(llm_messages)
+    except Exception as e:
+        logger.debug(f"历史压缩跳过: {e}")
 
 # ── 分析模板约束（按分析类型强制结构化输出） ──
 ANALYSIS_TEMPLATES = {
@@ -381,6 +446,8 @@ def run_specialist(agent_key: str, query: str, context: str = "",
     answer = ""
 
     for turn in range(MAX_TURNS):
+        # P3 优化：历史 tool 消息压缩，避免 context 膨胀
+        _maybe_compress_tool_history(llm_messages)
         try:
             response = _call_llm(
                 caller=_caller,
@@ -453,8 +520,10 @@ def run_specialist(agent_key: str, query: str, context: str = "",
             logger.info(f"[trace:{trace_id}] [{agent['name']}] Tool: {tc.function.name}({json.dumps(args, ensure_ascii=False)[:100]})")
             result = execute_tool(tc.function.name, args, trace_id=trace_id)
 
-            if len(result) > 3000:
-                result = result[:3000] + "\n... (结果过长，已截断)"
+            # P3 优化：截断阈值可配置（默认 1500，原 3000）
+            _max_chars = _get_tool_result_max_chars()
+            if len(result) > _max_chars:
+                result = result[:_max_chars] + "\n... (结果过长，已截断)"
 
             tool_calls_log.append({
                 "name": tc.function.name,
@@ -635,6 +704,8 @@ def run_specialist_with_context(agent_key: str, query: str, peer_analyses: dict,
     answer = ""
 
     for turn in range(max_turns):
+        # P3 优化：历史 tool 消息压缩
+        _maybe_compress_tool_history(llm_messages)
         try:
             response = _call_llm(
                 caller=_caller,
@@ -700,8 +771,10 @@ def run_specialist_with_context(agent_key: str, query: str, peer_analyses: dict,
             args = _parse_tool_args(tc.function.arguments, tc.function.name)
             logger.info(f"[trace:{trace_id}] [{agent['name']}] 交叉审阅 Tool: {tc.function.name}({json.dumps(args, ensure_ascii=False)[:100]})")
             result = execute_tool(tc.function.name, args, trace_id=trace_id)
-            if len(result) > 3000:
-                result = result[:3000] + "\n... (结果过长，已截断)"
+            # P3 优化：截断阈值可配置（默认 1500，原 3000）
+            _max_chars = _get_tool_result_max_chars()
+            if len(result) > _max_chars:
+                result = result[:_max_chars] + "\n... (结果过长，已截断)"
             tool_calls_log.append({
                 "name": tc.function.name,
                 "arguments": args,
@@ -767,6 +840,149 @@ def run_specialist_with_context(agent_key: str, query: str, peer_analyses: dict,
         "icon": agent["icon"],
         "analysis": answer,
         "tool_calls": tool_calls_log,
+        "duration_ms": duration_ms,
+        "is_cross_review": True,
+    }
+
+
+def run_cross_review_opinion(agent_key: str, query: str, self_analysis: str,
+                              peer_analyses: dict, trace_id: str = "",
+                              model: str = None) -> dict:
+    """交叉审阅单轮意见模式（不调用工具，仅 1 次 LLM 调用）。
+
+    与 run_specialist_with_context 的区别：
+    - 无 ReAct 工具循环（Phase A 已查过数据，cross_review 只对比观点）
+    - 单次 LLM 调用，输出认同/质疑/补充意见
+    - 节省 2-3 次 LLM 调用 per 专家
+
+    Args:
+        agent_key: 专家 key
+        query: 原始用户问题
+        self_analysis: 自己 Phase A 的分析文本
+        peer_analyses: {agent_key: analysis_text} 其他专家的分析
+        trace_id: 追踪 ID
+        model: 可选模型覆盖
+
+    Returns:
+        兼容 run_specialist_with_context 的返回结构：
+        {
+            "agent_key", "agent", "icon", "analysis",
+            "opinion": {"agreements", "disagreements", "additions"},
+            "tool_calls": [], "duration_ms", "is_cross_review": True
+        }
+    """
+    agent = load_specialist_agents()[agent_key]
+    start_time = time.time()
+    _caller = f"specialist:{agent_key}:cross_review"
+    _model = model or MODEL
+    if not trace_id:
+        import uuid as _uuid
+        trace_id = f"cross-{_uuid.uuid4().hex[:8]}"
+
+    # 构建 peer 分析摘要（每个 peer 截断到 1000 字）
+    peer_sections = []
+    for peer_key, peer_analysis in peer_analyses.items():
+        if peer_key == agent_key:
+            continue
+        peer_agent = load_specialist_agents().get(peer_key)
+        peer_name = peer_agent["name"] if peer_agent else peer_key
+        peer_sections.append(f"【{peer_name}】的分析：\n{peer_analysis[:1000]}")
+    peer_text = "\n\n---\n\n".join(peer_sections) if peer_sections else "（无其他专家分析）"
+
+    system_content = (
+        f"你是{agent['name']}。以下是其他专家的分析结果，请从你的专业视角进行交叉审阅。\n\n"
+        "要求：\n"
+        "1. 指出你认同的其他专家观点（引用具体内容）\n"
+        "2. 指出你认为有疑问或需要补充的地方（用数据或逻辑反驳）\n"
+        "3. 从你的专业角度提供其他专家未覆盖的独特见解\n"
+        "4. 如果你改变了之前的判断，说明原因\n\n"
+        "输出 JSON 格式：\n"
+        "{\n"
+        '  "agreements": ["认同点1", "认同点2"],\n'
+        '  "disagreements": [{"peer": "专家名", "point": "质疑的观点", "reason": "反驳理由"}],\n'
+        '  "additions": ["补充见解1", "补充见解2"],\n'
+        '  "summary": "审阅总结（一段话）"\n'
+        "}\n"
+        "只输出 JSON，不要其他文字。"
+    )
+
+    user_content = (
+        f"原始问题：{query}\n\n"
+        f"我的 Phase A 分析：\n{self_analysis[:1500]}\n\n"
+        f"其他专家分析：\n{peer_text}"
+    )
+
+    try:
+        response = _call_llm(
+            caller=_caller,
+            trace_id=trace_id,
+            model=_model,
+            messages=[
+                {"role": "system", "content": system_content},
+                {"role": "user", "content": user_content},
+            ],
+            temperature=get_config_float('llm.temperature_agent', 0.3),
+            max_tokens=get_config_int('llm.max_tokens_agent', 8000),
+        )
+        raw = response.choices[0].message.content.strip()
+    except Exception as e:
+        logger.error(f"[trace:{trace_id}] [{agent['name']}] cross_review_opinion LLM 调用失败: {e}")
+        raw = ""
+
+    # 解析 JSON
+    opinion = {"agreements": [], "disagreements": [], "additions": [], "summary": ""}
+    analysis_text = ""
+    if raw:
+        # 去除 markdown 代码块
+        cleaned = raw
+        if "```" in cleaned:
+            parts = cleaned.split("```")
+            cleaned = parts[1] if len(parts) > 1 else parts[0]
+            if cleaned.startswith("json"):
+                cleaned = cleaned[4:]
+            cleaned = cleaned.strip()
+        try:
+            parsed = json.loads(cleaned)
+            if isinstance(parsed, dict):
+                opinion = {
+                    "agreements": parsed.get("agreements", []) or [],
+                    "disagreements": parsed.get("disagreements", []) or [],
+                    "additions": parsed.get("additions", []) or [],
+                    "summary": parsed.get("summary", "") or "",
+                }
+        except (json.JSONDecodeError, ValueError) as e:
+            logger.warning(f"[trace:{trace_id}] [{agent['name']}] cross_review_opinion JSON 解析失败: {e}")
+
+        # 构造兼容的 analysis 文本
+        parts = []
+        if opinion["summary"]:
+            parts.append(opinion["summary"])
+        if opinion["agreements"]:
+            parts.append("认同：" + "；".join(opinion["agreements"]))
+        if opinion["disagreements"]:
+            dis_lines = []
+            for d in opinion["disagreements"]:
+                if isinstance(d, dict):
+                    dis_lines.append(f"对{d.get('peer','')}的{d.get('point','')}有疑问（{d.get('reason','')}）")
+                else:
+                    dis_lines.append(str(d))
+            parts.append("质疑：" + "；".join(dis_lines))
+        if opinion["additions"]:
+            parts.append("补充：" + "；".join(opinion["additions"]))
+        analysis_text = "\n".join(parts) if parts else raw[:500]
+
+    if not analysis_text:
+        analysis_text = "交叉审阅完成，请参考其他专家分析。"
+
+    duration_ms = int((time.time() - start_time) * 1000)
+
+    return {
+        "agent_key": agent_key,
+        "agent": agent["name"],
+        "icon": agent["icon"],
+        "analysis": analysis_text,
+        "opinion": opinion,
+        "tool_calls": [],  # 空数组，保持字段兼容
         "duration_ms": duration_ms,
         "is_cross_review": True,
     }

@@ -489,6 +489,30 @@ def get_best_valuation(index_code: str, metric_type: str = "市盈率") -> dict 
                 detailed["days_old"] = days_old
             except Exception:
                 detailed["days_old"] = 0
+
+        # R4: PE过期超过14天时，尝试PB替代
+        if metric_type == "市盈率" and detailed.get("days_old", 0) > 14:
+            try:
+                pb_data = get_latest_valuation(index_code, "市净率", max_days=7)
+                if pb_data and pb_data.get("percentile") is not None:
+                    pb_days_old = 0
+                    if pb_data.get("snapshot_date"):
+                        try:
+                            pb_days_old = (datetime.now() - datetime.fromisoformat(pb_data["snapshot_date"])).days
+                        except Exception:
+                            pass
+                    if pb_days_old <= 7:
+                        detailed["percentile"] = pb_data["percentile"]
+                        detailed["percentile_source"] = f"PB替代(PE过期{detailed['days_old']}天)"
+                        detailed["fallback_pb_value"] = pb_data.get("current_value")
+                        detailed["fallback_pb_percentile"] = pb_data.get("percentile")
+                        logger.info(
+                            f"R4 PB替代: {index_code} PE过期{detailed['days_old']}天, "
+                            f"使用PB百分位{pb_data['percentile']:.1f}%"
+                        )
+            except Exception as e:
+                logger.debug(f"R4 PB替代检查失败: {e}")
+
         return detailed
 
     # 2. 降级到螺丝钉数据（最近 30 天内）

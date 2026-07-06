@@ -49,15 +49,28 @@ def build_portfolio_context(user_id: str = "default") -> str:
         sorted_holdings = sorted(active, key=lambda h: h.get("current_value", 0) or 0, reverse=True)
 
         lines.append("### 持仓明细")
-        lines.append("| 基金名称 | 市值 | 占比 | 盈亏率 |")
-        lines.append("|---------|------|------|--------|")
+        lines.append("| 基金名称 | 市值 | 占比 | 盈亏率 | 成本价 | 份额 | 上次买入 | 盈亏 |")
+        lines.append("|---------|------|------|--------|--------|------|----------|------|")
         for h in sorted_holdings:
             name = h.get("fund_name", h.get("fund_code", "未知"))
             value = h.get("current_value", 0) or 0
             pct = value / total_assets if total_assets > 0 else 0
             pr = h.get("profit_rate", 0) or 0
             pr_pct = f"{pr:+.2%}" if isinstance(pr, (int, float)) else "N/A"
-            lines.append(f"| {name} | ¥{value:,.0f} | {pct:.1%} | {pr_pct} |")
+            # 成本价
+            cp = h.get("cost_price")
+            cp_str = f"¥{cp:,.4f}" if cp and cp > 0 else "-"
+            # 持有份额
+            shares = h.get("shares")
+            shares_str = f"{shares:,.0f}" if shares and shares > 0 else "-"
+            # 上次买入（日期/价格）
+            lbd = h.get("last_buy_date", "")
+            lbp = h.get("last_buy_price")
+            lb_str = f"{lbd} / ¥{lbp:,.4f}" if lbd and lbp and lbp > 0 else (lbd or "-")
+            # 盈亏金额
+            pl = h.get("profit_loss", 0) or 0
+            pl_str = f"¥{pl:+,.0f}" if isinstance(pl, (int, float)) else "-"
+            lines.append(f"| {name} | ¥{value:,.0f} | {pct:.1%} | {pr_pct} | {cp_str} | {shares_str} | {lb_str} | {pl_str} |")
 
         # ── 资产分布 ──
         lines.append("")
@@ -129,6 +142,31 @@ def build_portfolio_context(user_id: str = "default") -> str:
                 lines.append("> ⚠️ 请务必结合上述交易记录分析。用户近期已执行的操作（尤其是已卖出的基金）不应再建议卖出。")
         except Exception as _te:
             logger.debug(f"交易记录注入失败: {_te}")
+
+        # ── 持仓上限与减仓约束 ──
+        lines.append("")
+        lines.append("### 持仓上限")
+        try:
+            from db.config import get_config_int
+            single_pct = get_config_int("daily_advice.default_single_position_pct", 15)
+        except Exception:
+            single_pct = 15
+        lines.append(f"- 单只基金/标的持仓上限: {single_pct}%（系统配置）")
+        lines.append("- 加仓前必须检查目标基金当前占比是否已达上限，如已超限禁止加仓")
+
+        lines.append("")
+        lines.append("### 减仓约束（必须遵守）")
+        lines.append("- 单基金单次减仓金额 ≤ 该基金持仓市值的 20%")
+        lines.append("- 单次建议总减仓金额 ≤ 总资产的 10%")
+        lines.append("- 单基金单次减仓上限: ¥50,000")
+        lines.append("- 单次建议最多减仓 2 只基金")
+        lines.append("- 近期（10天内）已卖出基金不得再建议卖出")
+        lines.append("- 减仓仅在估值百分位 ≥ 80% 时考虑")
+
+        # 新鲜度标注
+        from datetime import datetime as _dt2
+        lines.append("")
+        lines.append(f"> 📅 持仓数据最后更新: {_dt2.now().strftime('%Y-%m-%d %H:%M')}。净值可能有延迟，以基金公司公布为准。")
 
         return "\n".join(lines)
 
@@ -213,6 +251,28 @@ def build_valuation_summary() -> str:
                     index_map[code]["percentile"] = percentile
 
         lines = ["### 当前市场估值"]
+
+        # R5: 检测过期估值数据
+        expired_warnings = []
+        for code, info in index_map.items():
+            try:
+                from db.valuations import get_best_valuation
+                best = get_best_valuation(code, "市盈率")
+                if best and best.get("days_old", 0) > 7:
+                    expired_warnings.append(f"{info['name']} PE: {best['days_old']}天前 ({best.get('snapshot_date','?')})")
+                elif best and best.get("days_old", 0) > 3:
+                    expired_warnings.append(f"{info['name']} PE: {best['days_old']}天前")
+            except Exception:
+                pass
+
+        if expired_warnings:
+            lines.append("")
+            lines.append("### ⚠️ 数据时效性警告")
+            lines.append("以下指数估值数据超过7天，分析时请明确标注数据时效性风险：")
+            for w in expired_warnings:
+                lines.append(f"- {w}")
+
+        lines.append("")
         lines.append("| 指数 | PE | PB | 百分位 | 水平 |")
         lines.append("|------|-----|-----|--------|------|")
 

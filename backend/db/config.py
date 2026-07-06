@@ -119,7 +119,7 @@ DEFAULT_CONFIGS = [
     ('cost_routing.allocation_advisor_model', 'mimo-v2.5-pro', '配置专家模型', 'cost_routing'),
     ('cost_routing.fund_analyst_model', 'mimo-v2.5-pro', '基金分析模型', 'cost_routing'),
     ('cost_routing.risk_assessor_model', 'mimo-v2.5-pro', '风控专家模型', 'cost_routing'),
-    ('cost_routing.market_analyst_model', 'mimo-v2.5-pro', '市场分析模型', 'cost_routing'),
+    ('cost_routing.market_analyst_model', 'deepseek-v4-flash', '市场分析模型', 'cost_routing'),
     ('cost_routing.behavioral_coach_model', 'mimo-v2.5-pro', '行为辅导模型', 'cost_routing'),
     ('cost_routing.cross_review_model', 'mimo-v2.5-pro', '交叉审阅模型', 'cost_routing'),
 
@@ -159,6 +159,12 @@ DEFAULT_CONFIGS = [
     # P2-1：长对话超时保护
     ('conversation.warn_at_minutes', '5', '长对话警告阈值（分钟）', 'conversation'),
     ('conversation.abort_at_minutes', '8', '长对话硬收尾阈值（分钟）', 'conversation'),
+
+    # LLM 调用优化：冲突检测缓存 + cross_review 单轮意见 + ReAct 压缩
+    ('agent.conflict_detect_cache', 'true', '冲突检测结果缓存（cross_review 前后原始专家列表相同时复用，省 1 次 LLM 调用）', 'agent'),
+    ('agent.cross_review_opinion_mode', 'true', 'cross_review 单轮意见模式（不调用工具，仅 1 次 LLM）；false 回退到旧 ReAct 模式', 'agent'),
+    ('agent.react_tool_result_max_chars', '1500', 'ReAct 工具结果截断阈值（字符数，原 3000）', 'agent'),
+    ('agent.react_compress_history', 'true', '是否压缩历史 tool 消息为摘要（避免 ReAct context 膨胀）', 'agent'),
 ]
 
 

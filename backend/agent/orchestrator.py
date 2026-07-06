@@ -11,7 +11,7 @@ import hashlib
 from datetime import datetime
 
 from services.llm_service import client, MODEL, _call_llm, _parse_tool_args
-from agent.multi_agent import run_specialist, run_specialist_with_context, run_arbitration, _build_portfolio_summary
+from agent.multi_agent import run_specialist, run_specialist_with_context, run_cross_review_opinion, run_arbitration, _build_portfolio_summary
 from db.agents import (
     load_specialist_agents,
     create_pending_agent_run,
@@ -220,7 +220,7 @@ _AGENT_MODEL_MAP_DEEPSEEK = {
     "allocation_advisor": "deepseek-v4-flash",
     "fund_analyst": "deepseek-v4-flash",
     "risk_assessor": "deepseek-v4-pro",
-    "market_analyst": "deepseek-v4-pro",
+    "market_analyst": "deepseek-v4-flash",
     "behavior_coach": "deepseek-v4-pro",
     "orchestrator": "deepseek-v4-pro",
     "arbitrator": "deepseek-v4-pro",
@@ -233,7 +233,7 @@ _AGENT_MODEL_MAP_MIMO = {
     "allocation_advisor": "mimo-v2.5-pro",
     "fund_analyst": "mimo-v2.5-pro",
     "risk_assessor": "mimo-v2.5-pro",
-    "market_analyst": "mimo-v2.5-pro",
+    "market_analyst": "deepseek-v4-flash",
     "behavior_coach": "mimo-v2.5-pro",
     "orchestrator": "mimo-v2.5-pro",
     "arbitrator": "mimo-v2.5-pro",
@@ -280,8 +280,8 @@ def _is_model_compatible(model_name: str, provider: str) -> bool:
     if not model_name:
         return False
     if provider == "mimo":
-        # MIMO 模式下不接受 deepseek 模型名
-        return not model_name.startswith("deepseek")
+        # MIMO 模式下允许 deepseek-v4-flash 用于 market_analyst（跨provider回退）
+        return not model_name.startswith("deepseek") or model_name == "deepseek-v4-flash"
     # DeepSeek 模式下不接受 mimo 模型名
     return not model_name.startswith("mimo")
 
@@ -473,7 +473,33 @@ def _build_final_synthesis_prompt(specialist_results: list, routed_specialists: 
     executed_names = {sr.get("agent", "") for sr in specialist_results}
     routed_but_not_executed = [s for s in routed_specialists if s not in executed_keys]
 
-    prompt = "请根据以上各专家的分析结果，给出最终的综合投资建议。"
+    prompt = (
+        "请根据以上各专家的分析结果，给出最终的综合投资建议，"
+        "以用户的私人投资顾问视角呈现。\n\n"
+        "## 综合要求\n\n"
+        "### 1. 用户视角\n"
+        "- 使用「我的持仓」「我的方案」「我该怎么做」的结构组织回答\n"
+        "- 每条建议都要说明「为什么对你的持仓有意义」，基于用户的成本、盈亏、占比\n"
+        "- 开头第一句话直接回应用户的具体问题\n\n"
+        "### 2. 操作方案\n"
+        "- 明确买入/卖出/持有/定投决策，含具体标的名、金额、占比\n"
+        "- 说明每项操作的前提条件（如「当 PE 百分位降至 X 时执行」）\n"
+        "- 如涉及减仓，必须遵守减仓约束（单基金≤持仓20%、总减仓≤总资产10%、最多2只基金、单次≤5万元）\n\n"
+        "### 3. 数据时效性\n"
+        "- 涉及估值/行情数据时必须说明数据日期\n"
+        "- 若数据超过7天，必须明确提醒用户「该数据基于约X日前快照，可能滞后」\n\n"
+        "### 4. 未持有基金推荐\n"
+        "- 若用户询问「还有什么可以买的」，可推荐关注列表中未持有但估值合理的基金\n"
+        "- 推荐前必须验证基金代码，明确标注为「未持仓参考推荐」\n\n"
+        "### 5. 风险提示\n"
+        "- 每个操作建议必须附带该操作的风险说明\n"
+        "- 说明什么条件下该建议会失效或导致亏损\n"
+        "- 结尾给出总体风险判断（高/中/低）\n\n"
+        "### 6. 格式要求\n"
+        "- 结论先行：先给总体判断（加仓/减仓/持有/观望）\n"
+        "- 具体操作表格：基金 | 操作 | 金额 | 理由 | 前提条件\n"
+        "- 风险提示：单独一节说明主要风险点"
+    )
 
     if routed_but_not_executed:
         from db.agents import load_specialist_agents
@@ -3661,6 +3687,43 @@ def _stream_build_context(refined_query: str, rag_context: str, complexity: str,
     except Exception as e:
         logger.warning(f"注入持仓/估值上下文失败: {e}")
 
+    # R2: 注入 DCA 定投规则（从 system_config 读取）
+    try:
+        from db.config import get_config_int
+        base_dca = get_config_int("daily_advice.base_dca_amount", 500)
+        step_pct = get_config_int("daily_advice.dca_drop_step_pct", 4)
+        max_steps = get_config_int("daily_advice.max_dca_steps", 3)
+        add_max_pct = get_config_int("daily_advice.add_valuation_max_percentile", 35)
+        reduce_min_pct = get_config_int("daily_advice.reduce_valuation_min_percentile", 80)
+        cooldown_days = get_config_int("daily_advice.recent_buy_cooldown_days", 10)
+        cooldown_max = get_config_int("daily_advice.recent_buy_max_count", 2)
+        max_cash_pct = get_config_int("daily_advice.max_cash_use_pct_per_signal", 10)
+        single_pct = get_config_int("daily_advice.default_single_position_pct", 15)
+
+        prebuilt_context += (
+            "## 定投与加减仓规则（必须遵守）\n\n"
+            "### 4% 定投法\n"
+            f"- 基础定投金额: ¥{base_dca}\n"
+            f"- 每下跌 {step_pct}% 加一档，每档加 ¥{base_dca}\n"
+            f"- 最多加 {max_steps} 档（即最大单次加仓 ¥{base_dca * max_steps}）\n\n"
+            "### 加仓条件\n"
+            f"- 估值百分位必须 ≤ {add_max_pct}% 才建议加仓\n"
+            f"- 加仓前检查冷静期: {cooldown_days} 天内最多买入 {cooldown_max} 次\n"
+            f"- 单标的占比达 {single_pct}% 禁止加仓\n"
+            f"- 单次建议使用现金上限: 总现金的 {max_cash_pct}%\n\n"
+            "### 减仓条件\n"
+            f"- 估值百分位 ≥ {reduce_min_pct}% 才建议减仓\n"
+            "- 单次减仓幅度不超过该基金持仓的 20%\n"
+            "- 单次建议总减仓金额不超过总资产的 10%\n\n"
+            "### 禁止行为\n"
+            "- 一次性减仓超过 ¥50,000\n"
+            "- 单条建议同时减仓 2 个以上基金\n"
+            "- 加仓金额超出 4% 定投法计算结果\n"
+            "- 对已超仓位上限的基金建议加仓\n\n"
+        )
+    except Exception as e:
+        logger.warning(f"注入 DCA 规则失败: {e}")
+
     # 注入债市数据到 prebuilt_context
     try:
         from routers.bond import _fetch_bond_data
@@ -3773,6 +3836,40 @@ def _run_arbitration_stream(refined_query: str, specialist_results: list, rag_co
     return arb_result
 
 
+def _specialists_signature(specialist_results: list) -> tuple:
+    """计算原始（非 cross_review/非仲裁）专家列表的签名，用于冲突检测缓存判断。
+
+    detect_conflicts_llm 内部会过滤 is_cross_review 结果，所以只要原始专家集合不变，
+    冲突检测的输入就完全相同，输出必然相同 → 可复用缓存。
+    """
+    original = [sr for sr in specialist_results
+                if not sr.get("is_cross_review") and not sr.get("is_arbitration")]
+    return tuple(sorted(sr.get("agent_key", "") for sr in original))
+
+
+def _detect_conflicts_cached(specialist_results: list, query: str, trace_id: str,
+                              cache_state: dict) -> dict:
+    """带缓存的冲突检测：若原始专家签名未变则复用上次结果，避免重复 LLM 调用。
+
+    cache_state: {"signature": tuple, "result": dict} 在调用方维护
+    """
+    try:
+        from db.config import get_config_bool
+        cache_enabled = get_config_bool("agent.conflict_detect_cache", True)
+    except Exception:
+        cache_enabled = True
+
+    sig = _specialists_signature(specialist_results)
+    if cache_enabled and cache_state.get("signature") == sig and cache_state.get("result"):
+        logger.info(f"[trace:{trace_id}] conflict_detect 缓存命中（签名={sig}），复用上次结果")
+        return cache_state["result"]
+
+    result = detect_conflicts_smart(specialist_results, query, trace_id)
+    cache_state["signature"] = sig
+    cache_state["result"] = result
+    return result
+
+
 def _stream_handle_no_tool_calls(msg, specialist_results: list, all_tool_calls: list,
                                   refined_query: str, query: str, rag_context: str,
                                   complexity: str, clarification, route_result,
@@ -3785,7 +3882,9 @@ def _stream_handle_no_tool_calls(msg, specialist_results: list, all_tool_calls: 
     生成器：yield 各类事件。
     返回 True 表示已产出最终 answer 事件（调用方应 return），False 表示继续。
     """
-    conflicts = detect_conflicts_smart(specialist_results, refined_query, trace_id)
+    # 冲突检测缓存：cross_review 前后两次调用的原始专家列表相同，可复用结果
+    _conflicts_cache: dict = {}
+    conflicts = _detect_conflicts_cached(specialist_results, refined_query, trace_id, _conflicts_cache)
     cross_review_enabled = get_orchestration_config("cross_review_enabled", "true") == "true"
     cross_review_min = int(get_orchestration_config("cross_review_min_specialists", "2"))
     cross_review_min_sev = get_orchestration_config("cross_review_min_severity", "medium")
@@ -3822,6 +3921,20 @@ def _stream_handle_no_tool_calls(msg, specialist_results: list, all_tool_calls: 
             _check_cancel(cancel_event)
             _check_timeout(start_time)
             peer = {k: v for k, v in peer_analyses.items() if k != sr["agent_key"]}
+            # P2-2 优化：cross_review 单轮意见模式（无工具调用，省 2-3 次 LLM per 专家）
+            try:
+                from db.config import get_config_bool
+                opinion_mode = get_config_bool("agent.cross_review_opinion_mode", True)
+            except Exception:
+                opinion_mode = True
+
+            if opinion_mode:
+                return sr, run_cross_review_opinion(
+                    sr["agent_key"], refined_query, sr.get("analysis", ""), peer,
+                    trace_id=trace_id,
+                    model=_get_model_for_agent("cross_review") if _is_cost_routing_enabled() else None,
+                )
+            # 回退：旧 ReAct 模式
             return sr, run_specialist_with_context(
                 sr["agent_key"], refined_query, peer, max_turns=2,
                 prebuilt_context=prebuilt_context,
@@ -3874,7 +3987,8 @@ def _stream_handle_no_tool_calls(msg, specialist_results: list, all_tool_calls: 
                 arbitration_done = True
 
             duration_ms = int((time.time() - start_time) * 1000)
-            conflicts = detect_conflicts_smart(specialist_results, refined_query, trace_id)
+            # 复用缓存：cross_review 只追加了 is_cross_review 结果，原始专家列表未变
+            conflicts = _detect_conflicts_cached(specialist_results, refined_query, trace_id, _conflicts_cache)
 
             if conversation_id and message_id:
                 _save_checkpoint(conversation_id, message_id, "cross_review", {
@@ -3931,7 +4045,8 @@ def _stream_handle_no_tool_calls(msg, specialist_results: list, all_tool_calls: 
         arbitration_done = True
 
     duration_ms = int((time.time() - start_time) * 1000)
-    conflicts = detect_conflicts_smart(specialist_results, refined_query, trace_id)
+    # 复用缓存：若仲裁追加了 is_arbitration 结果，签名也只看原始专家，仍可命中
+    conflicts = _detect_conflicts_cached(specialist_results, refined_query, trace_id, _conflicts_cache)
 
     if conversation_id and message_id and specialist_results:
         _save_checkpoint(conversation_id, message_id, "experts", {
