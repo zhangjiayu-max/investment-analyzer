@@ -2202,6 +2202,122 @@ def _format_blackboard_summary(blackboard: dict) -> str:
     )
 
 
+# ── P0 全景扫描：在 specialist 执行前提供全局数据 ──
+
+def _run_portfolio_panorama_scan(conn=None) -> str:
+    """
+    在 specialist 执行前，对用户持仓做全景扫描。
+    纯 SQL 查询，零 LLM 成本。
+
+    产出一个统一的「全景上下文」块，注入到 specialist 的 prebuilt_context：
+    持仓概况/盈亏/近30天交易/风险信号。
+
+    Returns: markdown 格式，无数据时返回空字符串
+    """
+    try:
+        from db._conn import _get_conn
+        from services.portfolio_context import build_portfolio_context
+        from db.portfolio import list_transactions, get_portfolio_summary
+    except Exception:
+        return ""
+
+    close_conn = False
+    if conn is None:
+        conn = _get_conn()
+        close_conn = True
+
+    try:
+        import datetime as _dt
+        lines = []
+
+        # 1. 持仓概况
+        portfolio_ctx = build_portfolio_context()
+        if portfolio_ctx and "无持仓" not in portfolio_ctx:
+            lines.append("## 当前持仓概况")
+            lines.append(portfolio_ctx[:800])
+
+        # 2. 近30天交易摘要
+        try:
+            txns = list_transactions()
+            active_txns = []
+            cutoff = _dt.datetime.now() - _dt.timedelta(days=30)
+            cutoff_str = cutoff.strftime("%Y-%m-%d")
+
+            for t in txns:
+                txn_date = (t.get("transaction_date") or "")[:10]
+                if txn_date >= cutoff_str:
+                    active_txns.append(t)
+
+            if active_txns:
+                acts = {"buy": 0, "sell": 0, "dca": 0}
+                fund_names = []
+                for t in active_txns:
+                    action = (t.get("action") or t.get("type") or "").lower()
+                    if action in ("buy", "买入"):
+                        acts["buy"] += 1
+                    elif action in ("sell", "卖出"):
+                        acts["sell"] += 1
+                    elif action in ("dca", "定投"):
+                        acts["dca"] += 1
+                    fname = t.get("fund_name") or t.get("fund_code", "")
+                    if fname and fname not in fund_names:
+                        fund_names.append(fname)
+
+                parts = []
+                if acts["buy"]:
+                    parts.append(f"买入{acts['buy']}次")
+                if acts["dca"]:
+                    parts.append(f"定投{acts['dca']}次")
+                if acts["sell"]:
+                    parts.append(f"卖出{acts['sell']}次")
+                if fund_names:
+                    parts.append(f"涉及基金:{','.join(fund_names[:3])}")
+
+                lines.append("## 近30天操作记录")
+                lines.append("- 近30天有操作: " + "；".join(parts))
+        except Exception:
+            pass
+
+        # 3. 风险信号
+        try:
+            summary = get_portfolio_summary()
+            holdings = summary.get("holdings", []) if summary else []
+            warnings = []
+
+            for h in holdings:
+                shares = h.get("shares", 0) or 0
+                if shares <= 0:
+                    continue
+                pct = h.get("ratio", 0) or 0
+                profit_rate = h.get("profit_rate", 0) or 0
+                fname = h.get("fund_name", "") or h.get("fund_code", "")
+
+                if profit_rate < -0.15:
+                    warnings.append(f"【亏损>15%】{fname} 亏损率{profit_rate:.1%}")
+                if pct > 25:
+                    warnings.append(f"【集中度>25%】{fname} 占比{pct:.0f}%")
+
+            if warnings:
+                lines.append("## ⚠️ 持仓风险信号")
+                for w in warnings[:3]:
+                    lines.append(f"- {w}")
+        except Exception:
+            pass
+
+        text = "\n".join(lines)
+        return text if len(text) > 50 else ""
+
+    except Exception as e:
+        logger.warning(f"全景扫描失败（不阻塞主流程）: {e}")
+        return ""
+    finally:
+        if close_conn:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
 def build_reasoning_trail(
     query: str,
     query_rewritten: str,
@@ -2632,6 +2748,14 @@ def orchestrate(query: str, history: list, rag_context: str = "", cancel_event: 
     # 注入持仓上下文 + 估值上下文(同时构建 prebuilt_context 供 specialist 复用)
     prebuilt_context = ""
 
+    # P0 全景扫描：注入持仓概况+交易记录+风险信号
+    try:
+        panorama_ctx = _run_portfolio_panorama_scan()
+        if panorama_ctx:
+            prebuilt_context += panorama_ctx + "\n\n"
+    except Exception as e:
+        logger.warning(f"全景扫描注入失败（不阻塞主流程）: {e}")
+
     # Bridge A: 注入24h分析结论上下文
     _, analysis_ctx = _inject_analysis_context(refined_query)
     if analysis_ctx:
@@ -2646,7 +2770,7 @@ def orchestrate(query: str, history: list, rag_context: str = "", cancel_event: 
         from db.config import get_config_bool, get_config_int
         if get_config_bool("agent.reuse_recent_conclusions", False):
             _target = _extract_target_subject(refined_query or query, "")
-            _hours = get_config_int("agent.reuse_conclusions_hours", 24)
+            _hours = get_config_int("agent.reuse_conclusions_hours", 48)
             _reuse_ctx = _load_recent_conclusions(_target, hours=_hours, limit=3)
             if _reuse_ctx:
                 prebuilt_context += _reuse_ctx
@@ -3489,6 +3613,14 @@ def _stream_build_context(refined_query: str, rag_context: str, complexity: str,
 
     # 注入持仓上下文 + 估值上下文(同时构建 prebuilt_context 供 specialist 复用)
     prebuilt_context = ""
+
+    # P0 全景扫描：注入持仓概况+交易记录+风险信号
+    try:
+        panorama_ctx = _run_portfolio_panorama_scan()
+        if panorama_ctx:
+            prebuilt_context += panorama_ctx + "\n\n"
+    except Exception as e:
+        logger.warning(f"全景扫描注入失败（不阻塞主流程）: {e}")
 
     # Bridge A: 注入24h分析结论上下文
     _, analysis_ctx = _inject_analysis_context(refined_query)

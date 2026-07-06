@@ -152,8 +152,8 @@ DEFAULT_CONFIGS = [
 
     # P1-1/P1-2/P1-3：多智能体结论价值最大化
     ('agent.persist_conclusions', 'true', '是否持久化多智能体结论到 analysis_conclusions', 'agent'),
-    ('agent.reuse_recent_conclusions', 'false', '是否跨对话复用 24h 内同标的结论（默认关闭，会改变专家 prompt）', 'agent'),
-    ('agent.reuse_conclusions_hours', '24', '结论复用时间窗口（小时）', 'agent'),
+    ('agent.reuse_recent_conclusions', 'true', '是否跨对话复用 48h 内同标的结论（开启后专家能看到同支基金近期的历史分析结论）', 'agent'),
+    ('agent.reuse_conclusions_hours', '48', '结论复用时间窗口（小时）', 'agent'),
     ('agent.link_cross_system_refs', 'true', '是否激活 cross_system_references 桥接（链接结论到已接受决策）', 'agent'),
 
     # P2-1：长对话超时保护
