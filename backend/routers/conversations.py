@@ -204,6 +204,18 @@ async def cancel_conversation_execution(conv_id: int):
     return {"ok": True, "updated": updated}
 
 
+@router.post("/api/conversations/{conv_id}/clear-cancel")
+async def clear_cancel_flag(conv_id: int):
+    """清除取消标记（用户点击重试/继续分析时调用）。
+
+    resume 接口对 cancel_requested=true 的对话返回 409，用户主动重试时需先清除标记。
+    """
+    from db.conversations import clear_conversation_cancel_flag
+    clear_conversation_cancel_flag(conv_id)
+    logger.info(f"清除对话 {conv_id} 的取消标记（用户主动重试）")
+    return {"ok": True}
+
+
 @router.post("/api/conversations/{conv_id}/resume")
 async def resume_conversation(conv_id: int, request: Request):
     """恢复中断的对话执行，跳过已完成的专家。"""

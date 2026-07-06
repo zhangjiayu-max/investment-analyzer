@@ -431,6 +431,11 @@ export function cancelConversationExecution(convId) {
   return api.post(`/conversations/${convId}/cancel`)
 }
 
+/** 清除取消标记（用户点击重试/继续分析时调用，resume 接口对 cancelled 对话返回 409） */
+export function clearCancelFlag(convId) {
+  return api.post(`/conversations/${convId}/clear-cancel`)
+}
+
 export function getConversationExecutionState(convId) {
   return api.get(`/conversations/${convId}/execution-state`)
 }

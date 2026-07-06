@@ -5,6 +5,7 @@ import {
   getMessages, sendMessage, sendMessageStream,
   submitChatFeedback, submitLlmFeedback,
   cancelConversationExecution,
+  clearCancelFlag,
   continueConversation,
   retryConversationMessage,
   resumeConversationStream,
@@ -205,6 +206,10 @@ async function autoRecoverIfNeeded(convId) {
     if (lastAssistant?.execution_status === 'cancelled') {
       return
     }
+    // failed 状态不自动恢复 — 需用户显式点击「重新生成」或「继续分析」
+    if (lastAssistant?.execution_status === 'failed') {
+      return
+    }
     // 只有最后一条是 user 消息且后面没有 assistant 时才恢复
     // 如果最后一条是 assistant 且不是 streaming/queued，不恢复
     if (lastMsg.role === 'user') {
@@ -251,16 +256,18 @@ function tryResumeConversation(convId) {
         if (errorData.code === 'RESUME_FAILED') {
           finishStream(cid)
           removeTask(cid)
+          // 409 表示对话已取消/失败/重复请求，刷新消息显示真实状态，不自动重发
           loadMessages(cid).then(() => {
             const lastAssistant = [...messages.value].reverse().find(m => m.role === 'assistant')
-            if (lastAssistant && lastAssistant.execution_status !== 'streaming') {
+            const status = lastAssistant?.execution_status
+            if (status === 'cancelled') {
+              showToast('对话已取消，可点击「继续分析」重新执行', 'info')
+            } else if (status === 'failed') {
+              showToast('对话执行失败，可点击「重新生成」重试', 'info')
+            } else if (status === 'completed') {
               showToast('任务已完成', 'success')
-              return
-            }
-            const lastUserMsg = [...messages.value].reverse().find(m => m.role === 'user')
-            if (lastUserMsg) {
-              showToast('正在重新执行...', 'info')
-              sendMessageAndTrack(cid, lastUserMsg.content)
+            } else {
+              console.log('[ChatView] 恢复对话返回 409，当前状态:', status)
             }
           })
           return
@@ -749,18 +756,21 @@ async function reconnectStream(convId, existingMsg) {
           if (errorData.code === 'RESUME_FAILED') {
             finishStream(cid)
             removeTask(cid)
-            const lastUserMsg = [...messages.value].reverse().find(m => m.role === 'user')
-            if (lastUserMsg) {
-              showToast('恢复执行失败，正在重新发送消息...', 'info')
-              inputText.value = lastUserMsg.content
-              handleSend()
-            } else {
-              messages.value.push({
-                role: 'assistant',
-                content: '恢复执行失败，请重新输入您的提问',
-                created_at: new Date().toISOString(),
-              })
-            }
+            // 409 表示对话已取消/失败/重复请求，刷新消息显示真实状态，不自动重发
+            // 用户会在消息气泡上看到「已取消」或「执行失败」状态及对应的重试按钮
+            loadMessages(cid).then(() => {
+              const lastAssistant = [...messages.value].reverse().find(m => m.role === 'assistant')
+              const status = lastAssistant?.execution_status
+              if (status === 'cancelled') {
+                showToast('对话已取消，可点击「继续分析」重新执行', 'info')
+              } else if (status === 'failed') {
+                showToast('对话执行失败，可点击「重新生成」重试', 'info')
+              } else if (status === 'completed') {
+                showToast('任务已完成', 'success')
+              } else {
+                console.log('[ChatView] 恢复连接返回 409，当前状态:', status)
+              }
+            })
             return
           }
           const msgIndex = messages.value.findIndex(m =>
@@ -810,10 +820,16 @@ function retryMessage(userMsg) {
 async function continueAssistantMessage(msg) {
   const convId = selectedConv.value?.id
   if (!convId || sending.value) return
+  // 清除取消标记（resume 接口对 cancel_requested=true 的对话返回 409）
   try {
-    await continueConversation(convId)
+    await clearCancelFlag(convId)
   } catch (e) {
-    console.warn('continue api failed, fallback to resume:', e)
+    console.warn('清除取消标记失败:', e)
+  }
+  // 乐观更新本地消息状态为 streaming，让 tryResumeConversation 的 onAnswer 能定位到这条消息
+  if (msg) {
+    msg.execution_status = 'streaming'
+    messages.value = [...messages.value]
   }
   tryResumeConversation(convId)
 }
