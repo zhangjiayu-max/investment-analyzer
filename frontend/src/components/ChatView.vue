@@ -201,6 +201,10 @@ async function autoRecoverIfNeeded(convId) {
       tryResumeConversation(convId)
       return
     }
+    // cancelled 状态不自动恢复 — 用户主动取消的不应自动重新执行
+    if (lastAssistant?.execution_status === 'cancelled') {
+      return
+    }
     // 只有最后一条是 user 消息且后面没有 assistant 时才恢复
     // 如果最后一条是 assistant 且不是 streaming/queued，不恢复
     if (lastMsg.role === 'user') {
@@ -792,7 +796,7 @@ function retryMessage(userMsg) {
   )
   if (assistantMsg) {
     const executionStatus = assistantMsg.execution_status || (assistantMsg.metadata?.execution_status)
-    if (executionStatus === 'streaming' || executionStatus === 'cancelled') {
+    if (executionStatus === 'streaming') {
       if (confirm(`检测到上次执行中断，是否从断点继续？\n\n点击"确定"恢复执行，点击"取消"重新执行。`)) {
         handleResume()
         return

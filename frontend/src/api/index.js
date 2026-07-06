@@ -426,9 +426,9 @@ export function sendMessageStream(convId, content, onEvent, targetSpecialists = 
   return controller
 }
 
-/** 取消对话执行（切页面时通知后端更新 streaming 状态） */
+/** 取消对话执行（通知后端停止后台任务 + 更新 DB streaming 状态为 cancelled） */
 export function cancelConversationExecution(convId) {
-  return api.post(`/conversation/${convId}/cancel`)
+  return api.post(`/conversations/${convId}/cancel`)
 }
 
 export function getConversationExecutionState(convId) {
