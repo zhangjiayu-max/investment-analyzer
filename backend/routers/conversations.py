@@ -176,6 +176,14 @@ async def cancel_conversation_execution(conv_id: int):
         agent_info["cancel_event"].set()
         logger.info(f"取消对话 {conv_id}：已设置 cancel_event，后台任务将在下一个检查点停止")
 
+    # 1.5 持久化取消标记（刷新页面后仍能识别，防止自动 resume）
+    try:
+        from db.conversations import mark_conversation_cancelled
+        mark_conversation_cancelled(conv_id)
+        logger.info(f"取消对话 {conv_id}：已持久化 cancel_requested 标记")
+    except Exception as e:
+        logger.warning(f"持久化取消标记失败: {e}")
+
     # 2. 标记 DB 状态为 cancelled
     msgs = get_messages(conv_id, limit=5)
     updated = 0

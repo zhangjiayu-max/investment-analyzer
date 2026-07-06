@@ -92,6 +92,36 @@ def delete_conversation(conv_id: int):
     conn.close()
 
 
+def mark_conversation_cancelled(conv_id: int):
+    """持久化取消标记到 DB（不依赖内存 cancel_event，刷新页面后仍生效）。"""
+    conn = _get_conn()
+    try:
+        conn.execute("UPDATE conversations SET cancel_requested = 1 WHERE id = ?", (conv_id,))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_conversation_cancel_status(conv_id: int) -> bool:
+    """查询对话是否被用户主动取消。"""
+    conn = _get_conn()
+    try:
+        row = conn.execute("SELECT cancel_requested FROM conversations WHERE id = ?", (conv_id,)).fetchone()
+        return bool(row and row["cancel_requested"])
+    finally:
+        conn.close()
+
+
+def clear_conversation_cancel_flag(conv_id: int):
+    """清除取消标记（用户主动重试时调用）。"""
+    conn = _get_conn()
+    try:
+        conn.execute("UPDATE conversations SET cancel_requested = 0 WHERE id = ?", (conv_id,))
+        conn.commit()
+    finally:
+        conn.close()
+
+
 # ── Message CRUD ──────────────────────────────────────
 
 def get_messages(conv_id: int, limit: int = 50, offset: int = 0) -> list[dict]:
