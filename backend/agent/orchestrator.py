@@ -449,9 +449,13 @@ _router = SmartRouter()
 _validator = LightValidator()
 
 
-def _build_portfolio_summary(prebuilt_context: str) -> str:
-    """从预构建上下文提取前 1500 字摘要。"""
-    return prebuilt_context[:4000] if prebuilt_context else ""
+def _build_portfolio_summary(prebuilt_context: str = "") -> str:
+    """从预构建上下文提取前 4000 字摘要；无参数时回退到 multi_agent 版本。"""
+    if prebuilt_context:
+        return prebuilt_context[:4000]
+    # 回退到 multi_agent.py 的实现（从 DB 读取持仓）
+    from agent.multi_agent import _build_portfolio_summary as _build_ps_db
+    return _build_ps_db()
 
 
 def _build_history_summary(history: list) -> str:
