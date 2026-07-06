@@ -229,7 +229,7 @@ function onBack() {
 
     <!-- 其他页面使用 KeepAlive 缓存（ChatView 的流式状态由 useStreamingState composable 管理，不受 KeepAlive 影响） -->
     <KeepAlive>
-      <component v-if="activePage !== 'analysis' && pageComponent" :is="pageComponent" v-bind="pageProps" />
+      <component v-if="activePage !== 'analysis' && pageComponent" :is="pageComponent" :key="activePage" v-bind="pageProps" />
     </KeepAlive>
   </div>
 </template>
