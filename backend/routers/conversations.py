@@ -213,6 +213,29 @@ async def resume_conversation(conv_id: int, request: Request):
     if not conv:
         raise HTTPException(404, "对话不存在")
 
+    # 守卫1：已取消的对话不自动恢复（用户主动取消后刷新页面，应看到取消状态而非自动重试）
+    from db.conversations import get_conversation_cancel_status
+    if get_conversation_cancel_status(conv_id):
+        logger.info(f"恢复对话 {conv_id}：检测到 cancel_requested=true，拒绝自动恢复")
+        raise HTTPException(409, "对话已取消，不会自动恢复。如需重试请点击重试按钮。")
+
+    # 守卫2：失败状态的对话不自动恢复（需要用户显式点击重试）
+    # 检查最后一条 assistant 消息是否为 failed 状态
+    msgs_check = get_messages(conv_id, limit=5)
+    for msg in reversed(msgs_check):
+        if msg["role"] == "assistant":
+            meta = msg.get("metadata")
+            if isinstance(meta, str):
+                try:
+                    import json as _json
+                    meta = _json.loads(meta)
+                except Exception:
+                    meta = {}
+            if isinstance(meta, dict) and meta.get("execution_status") == "failed":
+                logger.info(f"恢复对话 {conv_id}：最后一条 assistant 消息为 failed，拒绝自动恢复")
+                raise HTTPException(409, "对话上次执行失败，不会自动恢复。如需重试请点击重试按钮。")
+            break  # 只检查最后一条 assistant 消息
+
     # 获取消息
     msgs = get_messages(conv_id)
     if not msgs:
