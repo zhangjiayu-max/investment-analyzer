@@ -3552,7 +3552,7 @@ def _stream_precheck(query: str, history: list, rag_context: str, cancel_event: 
     resumed_results = []
     resume_message_id = resume_from.get("message_id") if resume_from else None
     if resume_message_id:
-        completed_runs = get_completed_agents_for_message(resume_message_id)
+        completed_runs = get_completed_agents_for_message(resume_message_id, run_phase='primary')
         # 如果当前消息没有 completed agent_runs，尝试查 retry_of_message_id
         if not completed_runs:
             from db.conversations import _load_metadata
@@ -3564,7 +3564,7 @@ def _stream_precheck(query: str, history: list, rag_context: str, cancel_event: 
                 meta = json.loads(msg_row["metadata"])
                 retry_of = meta.get("retry_of_message_id")
                 if retry_of:
-                    completed_runs = get_completed_agents_for_message(retry_of)
+                    completed_runs = get_completed_agents_for_message(retry_of, run_phase='primary')
                     if completed_runs:
                         logger.info(f"恢复模式:从 retry_of_message_id={retry_of} 找到 {len(completed_runs)} 个已完成专家")
         for run in completed_runs:

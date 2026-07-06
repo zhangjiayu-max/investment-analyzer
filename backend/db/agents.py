@@ -699,14 +699,15 @@ def create_agent_run(conversation_id: int, message_id: int, agent_key: str,
 
 
 def create_pending_agent_run(conversation_id: int, message_id: int, agent_key: str,
-                              agent_name: str, query: str = "", trace_id: str = "") -> int:
-    """创建 pending 状态的 agent 执行记录，返回 run_id。"""
+                              agent_name: str, query: str = "", trace_id: str = "",
+                              run_phase: str = "primary") -> int:
+    """创建 pending 状态的 agent 执行记录，返回 run_id。run_phase: primary/cross_review/arbitration。"""
     conn = _get_conn()
     cur = conn.execute("""
         INSERT INTO agent_runs (conversation_id, message_id, agent_key, agent_name,
-                                query, trace_id, status)
-        VALUES (?, ?, ?, ?, ?, ?, 'pending')
-    """, (conversation_id, message_id, agent_key, agent_name, query, trace_id))
+                                query, trace_id, status, run_phase)
+        VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)
+    """, (conversation_id, message_id, agent_key, agent_name, query, trace_id, run_phase))
     run_id = cur.lastrowid
     conn.commit()
     conn.close()
@@ -714,7 +715,8 @@ def create_pending_agent_run(conversation_id: int, message_id: int, agent_key: s
 
 
 def update_agent_run_status(run_id: int, status: str, result: str = None,
-                             duration_ms: int = None, error_message: str = None):
+                             duration_ms: int = None, error_message: str = None,
+                             run_phase: str = None):
     """更新 agent 执行记录状态。status: running / completed / failed / cancelled。"""
     conn = _get_conn()
     updates = ["status = ?"]
@@ -726,6 +728,9 @@ def update_agent_run_status(run_id: int, status: str, result: str = None,
     if duration_ms is not None:
         updates.append("duration_ms = ?")
         params.append(duration_ms)
+    if run_phase is not None:
+        updates.append("run_phase = ?")
+        params.append(run_phase)
     if status == "completed":
         updates.append("completed_at = datetime('now','localtime')")
     elif status == "running":
@@ -737,15 +742,23 @@ def update_agent_run_status(run_id: int, status: str, result: str = None,
     conn.close()
 
 
-def get_completed_agents_for_message(message_id: int) -> list[dict]:
-    """获取某条消息下已完成的 agent 执行记录。"""
+def get_completed_agents_for_message(message_id: int, run_phase: str = None) -> list[dict]:
+    """获取某条消息下已完成的 agent 执行记录。run_phase 为 None 时返回所有阶段。"""
     conn = _get_conn()
-    rows = conn.execute("""
-        SELECT agent_key, agent_name, result, duration_ms, tool_calls
-        FROM agent_runs
-        WHERE message_id = ? AND status IN ('completed', 'success')
-        ORDER BY id ASC
-    """, (message_id,)).fetchall()
+    if run_phase:
+        rows = conn.execute("""
+            SELECT agent_key, agent_name, result, duration_ms, tool_calls
+            FROM agent_runs
+            WHERE message_id = ? AND status IN ('completed', 'success') AND run_phase = ?
+            ORDER BY id ASC
+        """, (message_id, run_phase)).fetchall()
+    else:
+        rows = conn.execute("""
+            SELECT agent_key, agent_name, result, duration_ms, tool_calls
+            FROM agent_runs
+            WHERE message_id = ? AND status IN ('completed', 'success')
+            ORDER BY id ASC
+        """, (message_id,)).fetchall()
     conn.close()
     return [dict(r) for r in rows]
 

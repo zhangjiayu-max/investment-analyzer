@@ -275,7 +275,7 @@ async def resume_conversation(conv_id: int, request: Request):
 
     # 从 agent_runs 表查询已完成的专家
     message_id = last_assistant["id"]
-    completed_runs = get_completed_agents_for_message(message_id)
+    completed_runs = get_completed_agents_for_message(message_id, run_phase='primary')
 
     # ★ 如果是失败消息（failed）且本消息没有 agent_runs，
     # 回退到查询该消息的 retry_of_message_id 的已完成专家
@@ -283,7 +283,7 @@ async def resume_conversation(conv_id: int, request: Request):
         meta = last_assistant.get("_parsed_metadata", {})
         retry_of = meta.get("retry_of_message_id")
         if retry_of:
-            completed_runs = get_completed_agents_for_message(retry_of)
+            completed_runs = get_completed_agents_for_message(retry_of, run_phase='primary')
             if completed_runs:
                 logger.info(f"恢复对话 {conv_id}：从 retry_of_message_id={retry_of} 找到 {len(completed_runs)} 个已完成专家")
     elif last_assistant.get("_parsed_metadata", {}).get("execution_status") == "failed":
