@@ -22,6 +22,12 @@ def _init_preset_agents(conn):
                 "- 分位点 40-60%：合理区间，持有观望\n"
                 "- 分位点 60-80%：相对高估，考虑减仓\n"
                 "- 分位点 >80%：深度高估，建议止盈\n\n"
+                "### 多维度交叉验证（必须遵守）\n"
+                "- PE（市盈率）分位 + PB（市净率）分位 + PS（市销率）分位\n"
+                "- 股息率水平及历史对比\n"
+                "- 风险溢价（ERP）分析\n"
+                "- 不能只报一个指标，必须多维度交叉验证后给出综合估值判断\n"
+                "- 如果各指标信号不一致，需明确说明并给出倾向性判断\n\n"
                 "### 趋势分析\n"
                 "- 观察近 3-6 个月估值走势\n"
                 "- 结合宏观经济环境判断趋势持续性\n"
@@ -111,6 +117,12 @@ def _init_preset_agents(conn):
                 "- 波动率：近期波动率水平\n"
                 "- z-score：当前估值偏离程度\n"
                 "- 夏普比率：风险调整后收益\n\n"
+                "### 压力测试场景（必须执行）\n"
+                "- 极端熊市场景：模拟 2008/2015/2018 级别下跌时组合表现\n"
+                "- 行业黑天鹅场景：重仓行业突发利空时的损失估算\n"
+                "- 流动性危机场景：市场流动性枯竭时的退出成本\n"
+                "- 利率冲击场景：利率大幅变动对债券和股票的影响\n"
+                "- 极端回撤分析：计算组合在 99% 置信度下的最大回撤\n\n"
                 "### 风险控制\n"
                 "- 仓位管理：单一标的不超过总仓位的 20%\n"
                 "- 止损策略：根据波动率设定动态止损线\n"
@@ -120,13 +132,15 @@ def _init_preset_agents(conn):
                 "1. **风险等级**：明确标注风险等级（低/中/高/极高）\n"
                 "2. **风险来源**：列出主要风险因素\n"
                 "3. **量化指标**：引用具体的风险指标\n"
-                "4. **控制建议**：给出具体的风险控制措施\n\n"
+                "4. **压力测试结果**：给出极端场景下的预期损失\n"
+                "5. **控制建议**：给出具体的风险控制措施\n\n"
                 "## 思维链\n"
                 "收到问题后，请按以下步骤思考：\n"
                 "1. 识别用户问题中的风险点\n"
                 "2. 量化相关风险指标\n"
-                "3. 评估风险等级\n"
-                "4. 给出风险控制建议\n\n"
+                "3. 执行压力测试场景分析\n"
+                "4. 评估风险等级\n"
+                "5. 给出风险控制建议\n\n"
                 "## 知识边界\n"
                 "- 擅长：风险评估、回撤分析、止损策略、仓位管理\n"
                 "- 不擅长：收益预测、个股推荐、宏观政策\n"
@@ -149,6 +163,14 @@ def _init_preset_agents(conn):
                 "- 再平衡：定期调整至目标配比\n"
                 "- 风险匹配：配置与风险承受能力匹配\n"
                 "- 长期视角：避免频繁交易\n\n"
+                "### 效率前沿分析（必须执行）\n"
+                "- 基于用户持仓计算当前组合在效率前沿上的位置\n"
+                "- 给出优化方向：如何向效率前沿移动\n"
+                "- 对比不同配置方案的风险收益比\n"
+                "### 蒙特卡洛模拟思路\n"
+                "- 基于历史波动率和相关性，模拟未来 1 年/3 年/5 年的收益分布\n"
+                "- 给出乐观/中性/悲观三种情景下的预期收益\n"
+                "- 计算组合破产概率（亏损超过 30% 的概率）\n\n"
                 "### 配置策略\n"
                 "- 股债配比：根据年龄和风险偏好确定\n"
                 "- 行业轮动：根据估值和趋势调整\n"
@@ -449,6 +471,43 @@ def _init_wealth_specialists(conn):
             ),
             "knowledge_scope": '{"rag_types": ["article", "analysis", "book"], "kyc_dimensions": ["investment_horizon"]}',
         },
+        {
+            "agent_key": "fund_analyst",
+            "name": "基金分析师",
+            "description": "持仓穿透 + 业绩归因 + 同类对比 + 规模影响分析",
+            "icon": "chart",
+            "tools": ["search_knowledge", "query_valuation", "query_portfolio", "yingmi_latest_quotations"],
+            "system_prompt": (
+                "## 人设\n"
+                "你是专业的基金分析师，擅长通过持仓穿透、业绩归因、同类对比和规模影响分析，"
+                "为用户提供基金层面的深度分析。\n\n"
+                "## 分析框架（必须全面执行）\n"
+                "### 持仓穿透分析\n"
+                "- 查看基金重仓股/持仓结构，判断风格漂移\n"
+                "- 分析持仓集中度、行业分布\n"
+                "- 评估持仓与基金主题的匹配度\n\n"
+                "### 业绩归因分析\n"
+                "- 分解超额收益来源：选股 alpha vs 行业 beta\n"
+                "- 对比基准指数，计算跟踪误差\n"
+                "- 分析不同市场环境下的表现差异\n\n"
+                "### 同类对比分析\n"
+                "- 同类型基金排名对比（1年/3年/5年）\n"
+                "- 费用率、规模、流动性对比\n"
+                "- 基金经理任职年限和历史业绩\n\n"
+                "### 规模影响分析\n"
+                "- 基金规模对策略容量和流动性的影响\n"
+                "- 大规模基金的风格漂移风险\n"
+                "- 小规模基金的清盘风险\n\n"
+                "## 输出规范\n"
+                "1. **结论先行**：先给出基金的综合评价\n"
+                "2. **持仓穿透**：重仓股、行业分布、风格判断\n"
+                "3. **业绩归因**：alpha/beta 分解、基准对比\n"
+                "4. **同类对比**：排名、费用、规模对比\n"
+                "5. **风险提示**：规模风险、风格漂移风险\n"
+                "6. **置信度标注**：在结论后标注[高置信度/中置信度/低置信度]\n"
+            ),
+            "knowledge_scope": '{"rag_types": ["article", "analysis", "book"]}',
+        },
     ]
 
     for s in specialists:
@@ -740,3 +799,211 @@ def get_completed_agent_count_for_message(conversation_id: int, message_id: int)
     """, (conversation_id, message_id)).fetchone()
     conn.close()
     return row["cnt"] if row else 0
+
+
+# ── 建议生命周期管理 ──────────────────────────────────
+
+# 扩展状态：pending → adopted/rejected → right/wrong/expired
+VALID_RECOMMENDATION_STATUSES = {
+    "pending",    # 待验证
+    "adopted",    # 用户采纳了建议
+    "rejected",   # 用户拒绝了建议
+    "right",      # 验证正确
+    "wrong",      # 验证错误
+    "expired",    # 过期未验证
+    "flat",       # 涨跌幅太小，无意义
+    "correct",    # 验证正确（兼容旧数据）
+}
+
+
+def update_recommendation_status(rec_id: int, status: str, note: str = None) -> bool:
+    """
+    更新建议状态，支持完整生命周期：
+    pending → adopted/rejected → right/wrong/expired
+
+    Args:
+        rec_id: 建议记录 ID
+        status: 新状态（pending/adopted/rejected/right/wrong/expired/flat/correct）
+        note: 可选备注
+
+    Returns: True if updated successfully
+    """
+    if status not in VALID_RECOMMENDATION_STATUSES:
+        return False
+
+    conn = _get_conn()
+    try:
+        cur = conn.execute(
+            """
+            UPDATE recommendations
+            SET status = ?, verified_at = datetime('now','localtime')
+            WHERE id = ?
+            """,
+            (status, rec_id),
+        )
+        if note:
+            conn.execute(
+                """
+                UPDATE recommendations
+                SET reason = COALESCE(reason, '') || ' | 备注: ' || ?
+                WHERE id = ?
+                """,
+                (note, rec_id),
+            )
+        conn.commit()
+        return cur.rowcount > 0
+    finally:
+        conn.close()
+
+
+def get_pending_recommendations(days: int = 30) -> list[dict]:
+    """
+    获取待验证的建议列表。
+
+    筛选条件：
+    - status = 'pending'
+    - 创建时间在最近 N 天内
+    - 已过验证窗口期（verify_after_date <= 今天）
+
+    Args:
+        days: 查看最近多少天的建议
+
+    Returns: 建议记录列表
+    """
+    conn = _get_conn()
+    try:
+        rows = conn.execute(
+            """
+            SELECT * FROM recommendations
+            WHERE status = 'pending'
+              AND date(created_at) >= date('now','localtime', ?)
+              AND (verify_after_date IS NULL OR verify_after_date <= date('now','localtime'))
+            ORDER BY created_at DESC
+            """,
+            (f"-{days} days",),
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+def auto_validate_recommendations() -> list[dict]:
+    """
+    自动验证 T+30 的建议（对比当前价格和建议时价格）。
+
+    流程：
+    1. 获取所有 pending 且已过 verify_after_date 的建议
+    2. 获取当前价格（通过 index_code 查询最新估值）
+    3. 对比 baseline_value 和 current_value
+    4. 根据 direction 判断 right/wrong/expired
+
+    Returns: 验证结果列表
+    """
+    from datetime import datetime, timedelta
+
+    conn = _get_conn()
+    results = []
+
+    try:
+        # 获取需要验证的建议
+        rows = conn.execute(
+            """
+            SELECT * FROM recommendations
+            WHERE status = 'pending'
+              AND baseline_value IS NOT NULL
+              AND (verify_after_date IS NULL OR verify_after_date <= date('now','localtime'))
+            ORDER BY created_at ASC
+            """,
+        ).fetchall()
+
+        if not rows:
+            return []
+
+        # 获取最新估值作为当前价格
+        for rec in rows:
+            rec = dict(rec)
+            rec_id = rec["id"]
+            code = rec.get("index_code") or ""
+            baseline = rec.get("baseline_value")
+            direction = rec.get("direction") or ""
+
+            if not baseline or not code:
+                # 无法验证，标记为 expired
+                conn.execute(
+                    """
+                    UPDATE recommendations
+                    SET status = 'expired', verified_at = datetime('now','localtime')
+                    WHERE id = ?
+                    """,
+                    (rec_id,),
+                )
+                results.append({"id": rec_id, "status": "expired", "reason": "缺少基线数据或代码"})
+                continue
+
+            # 尝试从 valuations 表获取最新价格
+            try:
+                val_row = conn.execute(
+                    """
+                    SELECT close FROM valuations
+                    WHERE index_code = ?
+                    ORDER BY date DESC LIMIT 1
+                    """,
+                    (code,),
+                ).fetchone()
+
+                if val_row and val_row["close"]:
+                    current_price = val_row["close"]
+                    change_pct = (current_price - baseline) / baseline * 100 if baseline else 0
+
+                    # 判断方向
+                    if direction == "up":
+                        status = "right" if change_pct > 0 else "wrong"
+                    elif direction == "down":
+                        status = "right" if change_pct < 0 else "wrong"
+                    elif direction == "watch":
+                        status = "right" if change_pct > 0 else "wrong"
+                    else:
+                        status = "flat" if abs(change_pct) < 2.0 else ("right" if change_pct > 0 else "wrong")
+
+                    conn.execute(
+                        """
+                        UPDATE recommendations
+                        SET current_value = ?, current_date = date('now','localtime'),
+                            change_pct = ?, status = ?, verified_at = datetime('now','localtime')
+                        WHERE id = ?
+                        """,
+                        (current_price, round(change_pct, 2), status, rec_id),
+                    )
+                    results.append({
+                        "id": rec_id,
+                        "index_name": rec.get("index_name", ""),
+                        "status": status,
+                        "change_pct": round(change_pct, 2),
+                        "baseline": baseline,
+                        "current": current_price,
+                    })
+                else:
+                    # 无法获取当前价格，检查是否超过 60 天
+                    created = rec.get("created_at", "")
+                    if created:
+                        try:
+                            created_date = datetime.strptime(created[:10], "%Y-%m-%d")
+                            if (datetime.now() - created_date).days > 60:
+                                conn.execute(
+                                    """
+                                    UPDATE recommendations
+                                    SET status = 'expired', verified_at = datetime('now','localtime')
+                                    WHERE id = ?
+                                    """,
+                                    (rec_id,),
+                                )
+                                results.append({"id": rec_id, "status": "expired", "reason": "超过60天无法获取价格"})
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+
+        conn.commit()
+        return results
+    finally:
+        conn.close()

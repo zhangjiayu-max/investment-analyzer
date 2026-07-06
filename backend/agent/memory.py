@@ -257,6 +257,61 @@ def get_token_budget(complexity: str) -> dict:
         return {"total_context": 8000, "history_pct": 0.5, "memory_pct": 0.2, "rag_pct": 0.3}
 
 
+def get_conversation_summary(conversation_id: int) -> str:
+    """
+    获取对话摘要文本，用于跨轮次上下文连续性。
+
+    优先从 conversation_summaries 表读取最近摘要；
+    如果没有摘要，从最近5条消息生成简要摘要。
+
+    返回摘要文本字符串（非 dict）。
+    """
+    if not conversation_id:
+        return ""
+
+    # 1. 尝试从数据库读取已有摘要
+    try:
+        from db.conversations import get_conversation_summary as _get_summary
+        cached = _get_summary(conversation_id)
+        if cached and cached.get("summary"):
+            return cached["summary"]
+    except Exception:
+        pass
+
+    # 2. 没有摘要，从最近5条消息生成简要摘要
+    try:
+        from db.conversations import get_messages
+        messages = get_messages(conversation_id, limit=5)
+        if not messages:
+            return ""
+
+        parts = []
+        for msg in messages[-5:]:
+            role = msg.get("role", "")
+            content = (msg.get("content") or "")[:120]
+            if not content:
+                continue
+            if role == "user":
+                parts.append(f"用户问: {content}")
+            elif role == "assistant":
+                parts.append(f"助手答: {content[:80]}")
+
+        if not parts:
+            return ""
+
+        summary = "\n".join(parts)
+        # 尝试保存摘要供后续使用
+        try:
+            from db.conversations import save_conversation_summary
+            save_conversation_summary(conversation_id, len(messages), summary)
+        except Exception:
+            pass
+
+        return summary
+    except Exception:
+        return ""
+
+
 def compress_rag_token_aware(rag_context: str, max_tokens: int = 1000) -> str:
     """
     Token 感知的 RAG 上下文截断。

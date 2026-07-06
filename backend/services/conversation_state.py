@@ -99,3 +99,67 @@ def format_conversation_state(state: dict) -> str:
     if state.get("mentioned_actions"):
         lines.append(f"提及的操作: {', '.join(state['mentioned_actions'])}")
     return "\n".join(lines)
+
+
+def get_user_focus_topics(conversation_id: int) -> list[str]:
+    """
+    从最近对话中提取用户关注的标的/主题。
+
+    分析最近10条消息，提取出现过的指数名称、基金代码、行业主题等关键词，
+    返回去重后的关注列表。
+
+    返回: ["沪深300", "白酒", "债券", ...]
+    """
+    if not conversation_id:
+        return []
+
+    try:
+        from db.conversations import get_messages
+        messages = get_messages(conversation_id, limit=10)
+    except Exception:
+        return []
+
+    if not messages:
+        return []
+
+    # 合并所有消息内容
+    combined_text = " ".join(
+        (m.get("content") or "") for m in messages if m.get("content")
+    )
+    if not combined_text.strip():
+        return []
+
+    # 关注标的/主题关键词库
+    topic_keywords = [
+        # 指数
+        "沪深300", "中证500", "中证1000", "创业板", "科创50",
+        "中证红利", "红利低波", "红利质量",
+        # 行业/主题
+        "白酒", "医药", "消费", "科技", "新能源", "半导体",
+        "军工", "煤炭", "银行", "券商", "房地产", "计算机",
+        "传媒", "食品饮料", "有色金属", "电力", "中药",
+        # 市场
+        "恒生", "恒生科技", "纳斯达克", "标普", "纳指", "德指",
+        # 资产类型
+        "债券", "债基", "国债", "信用债", "可转债", "短债", "长债",
+        "货币基金", "黄金", "原油",
+        # 操作意图
+        "定投", "加仓", "减仓", "止盈", "止损",
+    ]
+
+    focus_list = []
+    seen = set()
+    for kw in topic_keywords:
+        if kw in combined_text and kw not in seen:
+            focus_list.append(kw)
+            seen.add(kw)
+
+    # 提取基金代码模式（6位数字）
+    import re
+    fund_codes = re.findall(r'\b(\d{6})\b', combined_text)
+    for code in fund_codes:
+        if code not in seen:
+            focus_list.append(code)
+            seen.add(code)
+
+    return focus_list[:20]  # 最多返回20个关注点

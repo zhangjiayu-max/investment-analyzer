@@ -40,12 +40,18 @@ class ConversationEvaluation:
 class ConversationQualityEvaluator:
     """对话质量评估器"""
 
-    # 维度权重
+    # 维度权重（5维度增强版）
     WEIGHTS = {
-        "execution": 0.30,    # 执行效率
-        "data": 0.25,         # 数据利用
-        "collaboration": 0.25, # 专家协作
-        "response": 0.20,     # 响应质量
+        "execution": 0.15,    # 执行效率
+        "data": 0.20,         # 数据利用
+        "collaboration": 0.15, # 专家协作
+        "response": 0.15,     # 响应质量
+        # 新增 5 个评测维度
+        "accuracy": 0.10,     # 准确性：数据是否正确
+        "completeness": 0.10, # 完整性：是否覆盖了用户问题的各个方面
+        "practicality": 0.05, # 实用性：是否有可操作的建议
+        "timeliness": 0.05,   # 时效性：数据是否最新
+        "risk_warning": 0.05, # 风险提示：是否标注了风险
     }
 
     def evaluate(self, conversation_id: int, message_id: int = None,
@@ -93,8 +99,16 @@ class ConversationQualityEvaluator:
         data_dim = self._evaluate_data_utilization(metadata, agent_runs)
         collaboration_dim = self._evaluate_collaboration(metadata, agent_runs)
         response_dim = self._evaluate_response_quality(assistant_msg, metadata)
+        # 新增 5 个评测维度
+        accuracy_dim = self._evaluate_accuracy(assistant_msg, metadata)
+        completeness_dim = self._evaluate_completeness(assistant_msg, metadata)
+        practicality_dim = self._evaluate_practicality(assistant_msg, metadata)
+        timeliness_dim = self._evaluate_timeliness(assistant_msg, metadata)
+        risk_warning_dim = self._evaluate_risk_warning(assistant_msg, metadata)
 
-        dimensions = [execution_dim, data_dim, collaboration_dim, response_dim]
+        dimensions = [execution_dim, data_dim, collaboration_dim, response_dim,
+                      accuracy_dim, completeness_dim, practicality_dim,
+                      timeliness_dim, risk_warning_dim]
 
         # 计算总分
         auto_score = sum(d.score * d.weight for d in dimensions)
@@ -481,6 +495,312 @@ class ConversationQualityEvaluator:
 
         return duplicate_count
 
+    # ── 新增 5 个评测维度 ──
+
+    def _evaluate_accuracy(self, message: dict, metadata: dict) -> EvalDimension:
+        """评估准确性：数据是否正确（交叉验证 + 数据来源检查）"""
+        metrics = {}
+        details = []
+
+        if not message:
+            return EvalDimension(
+                name="accuracy", score=0, weight=self.WEIGHTS["accuracy"],
+                metrics=metrics, details=["无响应消息"],
+            )
+
+        content = message.get("content", "")
+        specialist_results = metadata.get("specialist_results", [])
+
+        # 使用仲裁结果或最终响应
+        if specialist_results:
+            for sr in reversed(specialist_results):
+                if sr.get("is_arbitration"):
+                    content = sr.get("analysis", content)
+                    break
+
+        # 1. 数据交叉验证：检查多个专家是否引用了相同数据
+        data_points = []
+        for sr in specialist_results:
+            analysis = sr.get("analysis", "")
+            # 提取数字+百分号
+            import re as _re
+            numbers = _re.findall(r'\d+\.?\d*%', analysis)
+            data_points.extend(numbers)
+
+        # 去重统计
+        unique_data = set(data_points)
+        cross_validated = len(data_points) - len(unique_data)
+        metrics["total_data_points"] = len(data_points)
+        metrics["cross_validated_count"] = cross_validated
+        metrics["unique_data_points"] = len(unique_data)
+        if cross_validated > 0:
+            details.append(f"✓ {cross_validated} 个数据点被多专家交叉引用")
+
+        # 2. 数据来源标注
+        has_source = bool(re.search(r'(根据|来源|数据源|来自|《.*?》)', content))
+        metrics["has_source_attribution"] = has_source
+        if has_source:
+            details.append("✓ 标注了数据来源")
+        else:
+            details.append("⚠ 未标注数据来源")
+
+        # 3. 数据一致性：检查是否存在矛盾数据
+        # 简化实现：检查是否有同一指标的不同值
+        has_contradiction = False
+        if len(specialist_results) >= 2:
+            # 检查 PE/PB 值是否一致
+            pe_values = set()
+            for sr in specialist_results:
+                analysis = sr.get("analysis", "")
+                pe_match = re.findall(r'PE[：:]\s*(\d+\.?\d*)', analysis)
+                if pe_match:
+                    pe_values.add(pe_match[0])
+            if len(pe_values) > 1:
+                has_contradiction = True
+                details.append("⚠ 检测到 PE 数据不一致")
+
+        metrics["has_data_contradiction"] = has_contradiction
+
+        # 综合分数
+        score = 70  # 基础分
+        if has_source:
+            score += 15
+        if cross_validated > 0:
+            score += 10
+        if has_contradiction:
+            score -= 20
+
+        return EvalDimension(
+            name="accuracy",
+            score=min(100, max(0, score)),
+            weight=self.WEIGHTS["accuracy"],
+            metrics=metrics,
+            details=details,
+        )
+
+    def _evaluate_completeness(self, message: dict, metadata: dict) -> EvalDimension:
+        """评估完整性：是否覆盖了用户问题的各个方面"""
+        metrics = {}
+        details = []
+
+        if not message:
+            return EvalDimension(
+                name="completeness", score=0, weight=self.WEIGHTS["completeness"],
+                metrics=metrics, details=["无响应消息"],
+            )
+
+        content = message.get("content", "")
+
+        # 检查是否覆盖了投资分析的关键方面
+        aspects = {
+            "估值分析": [r'PE', r'PB', r'估值', r'百分位', r'分位'],
+            "风险评估": [r'风险', r'回撤', r'波动', r'止损'],
+            "市场环境": [r'市场', r'行情', r'趋势', r'大盘'],
+            "操作建议": [r'建议', r'买入', r'卖出', r'持有', r'加仓', r'减仓'],
+            "配置建议": [r'配置', r'仓位', r'比例', r'分散'],
+        }
+
+        covered = 0
+        total = len(aspects)
+        for aspect, patterns in aspects.items():
+            if any(re.search(p, content) for p in patterns):
+                covered += 1
+                details.append(f"✓ 覆盖：{aspect}")
+            else:
+                details.append(f"✗ 未覆盖：{aspect}")
+
+        coverage_rate = covered / total if total > 0 else 0
+        metrics["coverage_rate"] = coverage_rate
+        metrics["covered_aspects"] = covered
+        metrics["total_aspects"] = total
+
+        # 内容长度也作为完整性的一个指标
+        content_length = len(content)
+        metrics["content_length"] = content_length
+        if content_length < 500:
+            details.append(f"⚠ 内容过短（{content_length}字），可能不够完整")
+        elif content_length > 3000:
+            details.append(f"✓ 内容详尽（{content_length}字）")
+
+        return EvalDimension(
+            name="completeness",
+            score=min(100, coverage_rate * 100),
+            weight=self.WEIGHTS["completeness"],
+            metrics=metrics,
+            details=details,
+        )
+
+    def _evaluate_practicality(self, message: dict, metadata: dict) -> EvalDimension:
+        """评估实用性：是否有可操作的建议"""
+        metrics = {}
+        details = []
+
+        if not message:
+            return EvalDimension(
+                name="practicality", score=0, weight=self.WEIGHTS["practicality"],
+                metrics=metrics, details=["无响应消息"],
+            )
+
+        content = message.get("content", "")
+        specialist_results = metadata.get("specialist_results", [])
+
+        if specialist_results:
+            for sr in reversed(specialist_results):
+                if sr.get("is_arbitration"):
+                    content = sr.get("analysis", content)
+                    break
+
+        # 检查可操作性指标
+        actionable_patterns = {
+            "具体操作": [r'买入', r'卖出', r'持有', r'加仓', r'减仓', r'定投', r'止盈', r'止损'],
+            "具体金额/比例": [r'\d+%?', r'\d+元', r'\d+万', r'仓位.*?\d'],
+            "触发条件": [r'当.*?时', r'如果.*?则', r'触发', r'条件', r'信号'],
+            "时间框架": [r'短期', r'中期', r'长期', r'\\d+个月', r'\\d+周'],
+        }
+
+        practicality_score = 0
+        for aspect, patterns in actionable_patterns.items():
+            if any(re.search(p, content) for p in patterns):
+                practicality_score += 25
+                details.append(f"✓ 包含：{aspect}")
+
+        # 检查是否有模糊表达（扣分）
+        vague_patterns = [r'根据自身情况', r'可以考虑', r'适当调整', r'仅供参考', r'建议关注']
+        vague_count = sum(1 for p in vague_patterns if re.search(p, content))
+        metrics["vague_expressions"] = vague_count
+        if vague_count > 0:
+            details.append(f"⚠ 包含 {vague_count} 个模糊表达")
+            practicality_score -= vague_count * 10
+
+        metrics["practicality_score"] = practicality_score
+
+        return EvalDimension(
+            name="practicality",
+            score=min(100, max(0, practicality_score)),
+            weight=self.WEIGHTS["practicality"],
+            metrics=metrics,
+            details=details,
+        )
+
+    def _evaluate_timeliness(self, message: dict, metadata: dict) -> EvalDimension:
+        """评估时效性：数据是否最新"""
+        metrics = {}
+        details = []
+
+        if not message:
+            return EvalDimension(
+                name="timeliness", score=0, weight=self.WEIGHTS["timeliness"],
+                metrics=metrics, details=["无响应消息"],
+            )
+
+        content = message.get("content", "")
+
+        # 检查是否包含近期日期引用
+        from datetime import datetime, timedelta
+        now = datetime.now()
+
+        # 查找日期模式
+        date_patterns = [
+            (r'(\d{4})[-年](\d{1,2})[-月](\d{1,2})', 'absolute'),  # 2025-07-06 或 2025年7月6日
+            (r'今天|今日', 'relative'),
+            (r'昨天|昨日', 'relative'),
+            (r'本周|这周', 'relative'),
+            (r'本月|这月', 'relative'),
+            (r'近期|最近|最新', 'relative'),
+            (r'(\d+)天前', 'days_ago'),
+        ]
+
+        has_recent_date = False
+        for pattern, ptype in date_patterns:
+            matches = re.findall(pattern, content)
+            if matches:
+                if ptype == 'relative':
+                    has_recent_date = True
+                    details.append(f"✓ 引用了相对时间：{pattern}")
+                elif ptype == 'absolute':
+                    # 检查日期是否在 30 天内
+                    for m in matches:
+                        try:
+                            year, month, day = int(m[0]), int(m[1]), int(m[2])
+                            date = datetime(year, month, day)
+                            diff = (now - date).days
+                            if diff <= 30:
+                                has_recent_date = True
+                                details.append(f"✓ 引用了近期日期：{year}-{month}-{day}")
+                        except (ValueError, IndexError):
+                            pass
+
+        metrics["has_recent_date"] = has_recent_date
+        if not has_recent_date:
+            details.append("⚠ 未引用近期日期，数据时效性存疑")
+
+        # 检查是否有过时数据警告
+        has_stale_warning = bool(re.search(r'(历史|过去|曾经|截至)', content))
+        metrics["has_stale_data_marker"] = has_stale_warning
+
+        score = 60  # 基础分
+        if has_recent_date:
+            score += 30
+        if has_stale_warning:
+            score += 10  # 标注了历史数据反而说明有时效意识
+
+        return EvalDimension(
+            name="timeliness",
+            score=min(100, score),
+            weight=self.WEIGHTS["timeliness"],
+            metrics=metrics,
+            details=details,
+        )
+
+    def _evaluate_risk_warning(self, message: dict, metadata: dict) -> EvalDimension:
+        """评估风险提示：是否标注了风险"""
+        metrics = {}
+        details = []
+
+        if not message:
+            return EvalDimension(
+                name="risk_warning", score=0, weight=self.WEIGHTS["risk_warning"],
+                metrics=metrics, details=["无响应消息"],
+            )
+
+        content = message.get("content", "")
+        specialist_results = metadata.get("specialist_results", [])
+
+        if specialist_results:
+            for sr in reversed(specialist_results):
+                if sr.get("is_arbitration"):
+                    content = sr.get("analysis", content)
+                    break
+
+        # 风险关键词检查
+        risk_keywords = {
+            "直接风险提示": [r'风险提示', r'风险警示', r'风险因素', r'投资有风险', r'风险自负'],
+            "风险类型": [r'市场风险', r'流动性风险', r'信用风险', r'政策风险', r'操作风险'],
+            "风险量化": [r'最大回撤', r'波动率', r'夏普比率', r'VaR', r'\\d+%.*?风险'],
+            "风险应对": [r'止损', r'对冲', r'分散', r'减仓', r'降低仓位'],
+            "免责声明": [r'不构成投资建议', r'仅供参考', r'据此操作.*?后果自负'],
+        }
+
+        risk_score = 0
+        for category, patterns in risk_keywords.items():
+            if any(re.search(p, content) for p in patterns):
+                risk_score += 20
+                details.append(f"✓ 包含：{category}")
+
+        metrics["risk_score"] = risk_score
+        metrics["has_risk_warning"] = risk_score > 0
+
+        if risk_score == 0:
+            details.append("⚠ 缺少任何风险提示")
+
+        return EvalDimension(
+            name="risk_warning",
+            score=min(100, risk_score),
+            weight=self.WEIGHTS["risk_warning"],
+            metrics=metrics,
+            details=details,
+        )
+
     def _generate_suggestions(self, dimensions: list[EvalDimension], metadata: dict) -> list[str]:
         """生成改进建议（按优先级排序）"""
         suggestions = []
@@ -591,12 +911,15 @@ async def evaluate_with_llm(conversation_id: int, message_id: int = None) -> dic
 分析：{content[:1500]}
 
 评估维度（0-100分）：
-1. data_accuracy：数据准确性
-2. logic：逻辑一致性
-3. actionability：可执行性
+1. data_accuracy：数据准确性——引用的数据是否正确、是否有来源
+2. logic：逻辑一致性——分析逻辑是否自洽
+3. actionability：可执行性——是否有具体可操作的建议
+4. completeness：完整性——是否覆盖了用户问题的各个方面
+5. timeliness：时效性——数据是否最新、是否标注了数据日期
+6. risk_warning：风险提示——是否充分标注了投资风险
 
 输出格式：
-{{"total_score":80,"dimensions":{{"data_accuracy":{{"score":85,"comment":"数据清晰"}},"logic":{{"score":75,"comment":"逻辑合理"}},"actionability":{{"score":80,"comment":"建议具体"}}}},"suggestions":["建议1"],"summary":"总结"}}"""
+{{"total_score":80,"dimensions":{{"data_accuracy":{{"score":85,"comment":"数据清晰"}},"logic":{{"score":75,"comment":"逻辑合理"}},"actionability":{{"score":80,"comment":"建议具体"}},"completeness":{{"score":80,"comment":"覆盖全面"}},"timeliness":{{"score":75,"comment":"数据较新"}},"risk_warning":{{"score":85,"comment":"风险提示充分"}}}},"suggestions":["建议1"],"summary":"总结"}}"""
 
     try:
         response = _call_llm(
@@ -625,7 +948,10 @@ async def evaluate_with_llm(conversation_id: int, message_id: int = None) -> dic
                 "dimensions": {
                     "data_accuracy": {"score": 60, "comment": "无法评估"},
                     "logic": {"score": 60, "comment": "无法评估"},
-                    "actionability": {"score": 60, "comment": "无法评估"}
+                    "actionability": {"score": 60, "comment": "无法评估"},
+                    "completeness": {"score": 60, "comment": "无法评估"},
+                    "timeliness": {"score": 60, "comment": "无法评估"},
+                    "risk_warning": {"score": 60, "comment": "无法评估"}
                 },
                 "suggestions": ["LLM 评估失败，请使用快速评估"],
                 "summary": "LLM 评估返回空内容"
@@ -679,3 +1005,82 @@ def get_evaluator() -> ConversationQualityEvaluator:
     if _evaluator is None:
         _evaluator = ConversationQualityEvaluator()
     return _evaluator
+
+
+def get_low_score_conversations(limit: int = 10, days: int = 30,
+                                 score_threshold: float = 60) -> list[dict]:
+    """获取低分对话列表。
+
+    Args:
+        limit: 最多返回条数
+        days: 查询天数范围
+        score_threshold: 低分阈值（低于此分视为低分）
+
+    Returns:
+        [
+            {
+                "conversation_id": 123,
+                "title": "对话标题",
+                "auto_score": 45.5,
+                "score_breakdown": {"accuracy": 40, "completeness": 50, ...},
+                "created_at": "2026-07-01 10:30:00",
+                "suggestions": ["建议1", "建议2"],
+            }
+        ]
+    """
+    from db._conn import _get_conn
+
+    conn = _get_conn()
+
+    try:
+        rows = conn.execute("""
+            SELECT
+                ce.conversation_id,
+                ce.auto_score,
+                ce.auto_score_breakdown,
+                ce.suggestions,
+                ce.created_at,
+                c.title
+            FROM conversation_evaluations ce
+            LEFT JOIN conversations c ON ce.conversation_id = c.id
+            WHERE ce.auto_score < ?
+              AND ce.created_at >= datetime('now', ?)
+            ORDER BY ce.auto_score ASC
+            LIMIT ?
+        """, (score_threshold, f"-{days} days", limit)).fetchall()
+    except Exception as e:
+        logger.warning(f"查询低分对话失败: {e}")
+        conn.close()
+        return []
+
+    conn.close()
+
+    results = []
+    for row in rows:
+        row = dict(row)
+        # 解析 score_breakdown JSON
+        breakdown = {}
+        try:
+            if row.get("auto_score_breakdown"):
+                breakdown = json.loads(row["auto_score_breakdown"])
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+        # 解析 suggestions JSON
+        suggestions = []
+        try:
+            if row.get("suggestions"):
+                suggestions = json.loads(row["suggestions"])
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+        results.append({
+            "conversation_id": row.get("conversation_id"),
+            "title": row.get("title", "未命名"),
+            "auto_score": row.get("auto_score", 0),
+            "score_breakdown": breakdown,
+            "created_at": row.get("created_at", ""),
+            "suggestions": suggestions if isinstance(suggestions, list) else [],
+        })
+
+    return results

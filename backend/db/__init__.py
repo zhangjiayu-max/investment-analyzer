@@ -57,6 +57,7 @@ from db.agents import (
     delete_agent, save_prompt_version, list_prompt_versions, get_prompt_version,
     create_agent_run, get_agent_runs,
     load_specialist_agents, clear_specialist_cache,
+    update_recommendation_status, get_pending_recommendations, auto_validate_recommendations,
 )
 
 # 对话 + 消息 + 摘要
@@ -199,6 +200,7 @@ from db.decisions import (
     defer_recommendation_candidate, expire_recommendation_candidates,
     create_candidate_from_structured_recommendation,
     get_decision_stats,
+    update_decision_backtest, get_decisions_for_backtest, auto_backtest_decisions,
 )
 
 # 跨系统桥接层 — 分析结论数据层

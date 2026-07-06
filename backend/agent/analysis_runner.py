@@ -102,7 +102,7 @@ async def run_agent_analysis(
         if content:
             sections.append(f"## {title}\n{content}")
     if rag_context:
-        sections.append(f"## 知识库参考（历史分析/文章）\n{rag_context[:1500]}")
+        sections.append(f"## 知识库参考（历史分析/文章）\n{rag_context[:4000]}")
     sections.append(f"## 用户问题\n{user_question}")
 
     user_message = "\n\n".join(sections)
@@ -142,7 +142,7 @@ async def run_agent_analysis(
                 agent_name=agent.get("name", ""),
                 prompt_used=system_prompt[:500],
                 news_context=list(context_parts.values())[0][:500] if context_parts else "",
-                result=result_text[:2000],
+                result=result_text[:8000],
                 token_usage=tokens,
             )
         except Exception as e:
@@ -156,8 +156,8 @@ async def run_agent_analysis(
             message_id=message_id,
             agent_key=caller,
             agent_name=agent.get("name", ""),
-            query=user_question[:500],
-            result=result_text[:500],
+            query=user_question[:2000],
+            result=result_text[:8000],
             duration_ms=duration_ms,
             status="success",
         )

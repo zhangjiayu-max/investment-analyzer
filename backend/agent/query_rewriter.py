@@ -5,6 +5,9 @@
 策略：
 - 80% 情况：规则改写（代词替换、主题补充），零 LLM 成本
 - 20% 情况：规则搞不定的复杂场景用 LLM 改写，成本 < 100 tokens/次
+
+增强功能：
+- expand_query(): 隐含意图识别 + 多角度子查询展开，提升 RAG 召回率
 """
 
 import logging
@@ -12,6 +15,141 @@ import re
 from typing import Optional
 
 logger = logging.getLogger(__name__)
+
+
+# ── 隐含意图识别规则 ──────────────────────────────────────────
+# 用户口语化问题 → 隐含的检索维度
+_IMPLICIT_INTENT_RULES: list[dict] = [
+    {
+        "patterns": [r"要不要加仓", r"加不加仓", r"现在能加仓", r"可以加仓"],
+        "intent": "加仓时机判断",
+        "sub_queries": [
+            "当前估值水平 PE PB 百分位",
+            "风险评估 最大回撤 波动率",
+            "加仓时机判断 买入信号",
+        ],
+    },
+    {
+        "patterns": [r"要不要减仓", r"减不减仓", r"现在该减", r"可以减仓"],
+        "intent": "减仓时机判断",
+        "sub_queries": [
+            "当前估值水平 是否高估",
+            "风险信号 止盈信号 卖出时机",
+            "减仓策略 仓位管理",
+        ],
+    },
+    {
+        "patterns": [r"要不要买", r"现在能买", r"可以买吗", r"入手"],
+        "intent": "买入时机判断",
+        "sub_queries": [
+            "当前估值水平 PE PB 百分位",
+            "风险评估 最大回撤",
+            "买入时机 投资策略",
+        ],
+    },
+    {
+        "patterns": [r"要不要卖", r"现在该卖", r"可以卖吗", r"出手"],
+        "intent": "卖出时机判断",
+        "sub_queries": [
+            "当前估值水平 是否高估",
+            "止盈策略 卖出信号",
+            "风险提示 市场情绪",
+        ],
+    },
+    {
+        "patterns": [r"怎么看", r"怎么样", r"如何看", r"分析一下"],
+        "intent": "综合分析",
+        "sub_queries": [
+            "当前估值水平 PE PB 百分位",
+            "风险评估 回撤 波动",
+            "投资策略 建议",
+        ],
+    },
+    {
+        "patterns": [r"定投", r"定额"],
+        "intent": "定投策略",
+        "sub_queries": [
+            "定投策略 定期定额 DCA",
+            "估值定投 微笑曲线",
+            "定投止盈 退出策略",
+        ],
+    },
+    {
+        "patterns": [r"配置", r"仓位", r"比例"],
+        "intent": "资产配置",
+        "sub_queries": [
+            "资产配置 股债比例 分散投资",
+            "仓位管理 风险控制",
+            "再平衡策略",
+        ],
+    },
+]
+
+
+def _detect_implicit_intent(query: str) -> Optional[dict]:
+    """检测用户查询中的隐含意图。
+
+    Returns:
+        匹配到的意图 dict（含 intent 和 sub_queries），未匹配返回 None。
+    """
+    for rule in _IMPLICIT_INTENT_RULES:
+        for pat in rule["patterns"]:
+            if re.search(pat, query):
+                return rule
+    return None
+
+
+def expand_query(user_query: str) -> list[str]:
+    """将用户查询展开为多个子查询，提升 RAG 召回率。
+
+    策略：
+    1. 隐含意图识别：检测口语化表达背后的真实检索需求
+    2. 多角度展开：一个查询改写为 2-3 个子查询
+    3. 保留原始查询作为第一个子查询（兜底）
+
+    Args:
+        user_query: 用户原始查询
+
+    Returns:
+        子查询列表（含原始查询），长度 1-4
+    """
+    if not user_query or not user_query.strip():
+        return []
+
+    sub_queries = [user_query.strip()]
+
+    # 1. 隐含意图识别
+    intent = _detect_implicit_intent(user_query)
+    if intent:
+        for sq in intent.get("sub_queries", []):
+            if sq not in sub_queries:
+                sub_queries.append(sq)
+        logger.info(
+            f"expand_query: 检测到隐含意图 '{intent['intent']}', "
+            f"展开为 {len(sub_queries)} 个子查询"
+        )
+        return sub_queries
+
+    # 2. 通用多角度展开（无隐含意图时）
+    # 提取核心名词，生成不同检索角度
+    core_nouns = _extract_core_nouns(user_query)
+    if core_nouns:
+        primary = core_nouns[0]
+        # 角度1：估值视角
+        val_q = f"{primary} 估值 PE PB 百分位"
+        if val_q not in sub_queries:
+            sub_queries.append(val_q)
+        # 角度2：风险视角
+        risk_q = f"{primary} 风险 回撤 波动"
+        if risk_q not in sub_queries:
+            sub_queries.append(risk_q)
+        # 角度3：策略视角（仅当查询较长时）
+        if len(user_query) > 8:
+            strategy_q = f"{primary} 投资策略 买卖时机"
+            if strategy_q not in sub_queries and len(sub_queries) < 4:
+                sub_queries.append(strategy_q)
+
+    return sub_queries
 
 
 # ── 改写触发器 ──────────────────────────────────────────────

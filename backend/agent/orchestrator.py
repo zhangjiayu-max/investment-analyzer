@@ -450,8 +450,8 @@ _validator = LightValidator()
 
 
 def _build_portfolio_summary(prebuilt_context: str) -> str:
-    """从预构建上下文提取前 500 字摘要。"""
-    return prebuilt_context[:500] if prebuilt_context else ""
+    """从预构建上下文提取前 1500 字摘要。"""
+    return prebuilt_context[:4000] if prebuilt_context else ""
 
 
 def _build_history_summary(history: list) -> str:
@@ -476,11 +476,18 @@ def _build_final_synthesis_prompt(specialist_results: list, routed_specialists: 
     prompt = (
         "请根据以上各专家的分析结果，给出最终的综合投资建议，"
         "以用户的私人投资顾问视角呈现。\n\n"
+        "## 回复结构要求\n"
+        "1. 结论先行：第一段直接给出核心判断和操作建议\n"
+        "2. 数据支撑：关键数据用表格呈现，必须标注来源\n"
+        "3. 操作建议：具体的加减仓建议（金额/比例/时机）\n"
+        "4. 风险提示：可能的风险场景和应对措施\n"
+        "5. 置信度标注：在结论后标注[高置信度/中置信度/低置信度]\n\n"
         "## 综合要求\n\n"
         "### 1. 用户视角\n"
         "- 使用「我的持仓」「我的方案」「我该怎么做」的结构组织回答\n"
         "- 每条建议都要说明「为什么对你的持仓有意义」，基于用户的成本、盈亏、占比\n"
-        "- 开头第一句话直接回应用户的具体问题\n\n"
+        "- 开头第一句话直接回应用户的具体问题\n"
+        "- 在结论段末尾标注置信度，如：[中置信度]\n\n"
         "### 2. 操作方案\n"
         "- 明确买入/卖出/持有/定投决策，含具体标的名、金额、占比\n"
         "- 说明每项操作的前提条件（如「当 PE 百分位降至 X 时执行」）\n"
@@ -496,9 +503,10 @@ def _build_final_synthesis_prompt(specialist_results: list, routed_specialists: 
         "- 说明什么条件下该建议会失效或导致亏损\n"
         "- 结尾给出总体风险判断（高/中/低）\n\n"
         "### 6. 格式要求\n"
-        "- 结论先行：先给总体判断（加仓/减仓/持有/观望）\n"
+        "- 结论先行：先给总体判断（加仓/减仓/持有/观望），并标注[高置信度/中置信度/低置信度]\n"
         "- 具体操作表格：基金 | 操作 | 金额 | 理由 | 前提条件\n"
-        "- 风险提示：单独一节说明主要风险点"
+        "- 风险提示：单独一节说明主要风险点\n"
+        "- 数据表格必须标注数据来源和日期"
     )
 
     if routed_but_not_executed:
@@ -663,11 +671,11 @@ def enrich_query_with_article(query: str) -> tuple[str, str]:
         enriched_query = f"{query}\n\n{fail_hint}"
         return enriched_query, fail_hint
 
-    # 截取策略:前 2000 + 后 1500,保留开头背景和结尾结论
-    max_chars = 3500
+    # 截取策略:前 4000 + 后 3000,保留开头背景和结尾结论
+    max_chars = 7000
     if len(content) > max_chars:
-        head = content[:2000]
-        tail = content[-1500:]
+        head = content[:4000]
+        tail = content[-3000:]
         content = f"{head}\n\n...(中间内容省略)...\n\n{tail}"
 
     # 构建文章上下文
@@ -1041,7 +1049,7 @@ def detect_conflicts_llm(specialist_results: list, query: str, trace_id: str = "
     for sr in original_results:
         agent_key = sr.get("agent_key", sr.get("agent", "unknown"))
         agent_name = sr.get("agent", agent_key)
-        analysis = sr.get("analysis", "")[:2000]  # 截断到2000字
+        analysis = sr.get("analysis", "")[:8000]  # 截断到8000字
         expert_sections.append(f"### 专家: {agent_name} (agent_key: {agent_key})\n{analysis}")
     experts_text = "\n\n---\n\n".join(expert_sections)
 
@@ -2082,6 +2090,13 @@ def build_orchestrator_system_prompt() -> str:
 - 引用专家的具体数据和分析
 - 给出 actionable 的投资建议
 
+## 回复结构要求（必须遵循）
+1. **结论先行**：第一段直接给出核心判断和操作建议，不要铺垫
+2. **数据支撑**：关键数据用表格呈现，每个数字必须标注来源（估值数据库/知识库/持仓数据）
+3. **操作建议**：具体的加减仓建议（金额/比例/时机），不要模糊的"建议关注"
+4. **风险提示**：可能的风险场景和应对措施
+5. **置信度标注**：在核心结论后标注 [高置信度/中置信度/低置信度]，让用户知道你有多确定
+
 ## 持仓亏损处理原则
 当用户持仓出现亏损或连续下跌时,必须参考知识库中的「4%定投法(强化版)」策略:
 - 不要简单建议割肉止损,先评估估值水平和基本面
@@ -2089,44 +2104,123 @@ def build_orchestrator_system_prompt() -> str:
 - 计算平均成本和回盈价位,给用户具体的数字参考
 - 强调纪律性:按计划执行,不因恐慌改变策略
 - 如果基本面恶化(非单纯下跌),才建议止损
-- 使用 Markdown 格式,层次清晰"""
+- 使用 Markdown 格式,层次清晰
+
+## 专家分析深度要求
+- 估值分析师：多维度交叉验证（PE/PB/PS/股息率/风险溢价），不能只报一个指标
+- 基金分析师：持仓穿透 + 业绩归因 + 同类对比 + 规模影响
+- 风险管理师：压力测试场景 + 极端回撤分析
+- 资产配置师：效率前沿分析 + 相关性矩阵 + 再平衡建议"""
 
 
 def _execute_specialist(tool_name: str, query: str, cancel_event: threading.Event | None = None,
-                        prebuilt_context: str = "", budget_mode: str = "normal", trace_id: str = "") -> str:
-    """执行专家 Agent 调用,返回 JSON 字符串结果。"""
+                        prebuilt_context: str = "", budget_mode: str = "normal", trace_id: str = "",
+                        timeout_seconds: int = 120) -> str:
+    """执行专家 Agent 调用,返回 JSON 字符串结果。
+
+    支持超时、自动重试和降级机制：
+    1. 首次调用超时 → 标记 timeout，自动重试 1 次
+    2. 重试仍失败 → 降级为简化模式（不调用工具，直接用已有数据生成分析）
+    3. 降级仍失败 → 返回 unavailable 占位结果
+    """
     agent_key = build_expert_map().get(tool_name)
     if not agent_key:
         return json.dumps({"error": f"未知专家: {tool_name}"}, ensure_ascii=False)
 
+    agent_name = agent_key
     try:
-        _check_cancel(cancel_event)
-        # 增强6: 成本路由 - 根据 agent_key 选择模型
-        model = _get_model_for_agent(agent_key, budget_mode) if _is_cost_routing_enabled() else MODEL
-        result = run_specialist(agent_key, query, prebuilt_context=prebuilt_context, model=model, trace_id=trace_id)
-        return json.dumps(result, ensure_ascii=False)
-    except CancelledError:
-        raise
-    except Exception as e:
-        # 缺口 11：部分失败处理 — 返回 status=unavailable 占位结果（而非裸 error）
-        # 消费侧（仲裁 prompt）可识别该标记并降权，避免单点失败拖垮整体流程
-        logger.error(f"[trace:{trace_id}] 专家 {tool_name} 执行异常: {e}")
-        agent_name = agent_key
+        from db.agents import load_specialist_agents
+        agent_name = load_specialist_agents().get(agent_key, {}).get("name", agent_key)
+    except Exception:
+        pass
+
+    # ── 超时+重试逻辑 ──
+    max_retries = 1  # 失败后自动重试 1 次
+    last_error = None
+
+    for attempt in range(max_retries + 1):
         try:
-            from db.agents import load_specialist_agents
-            agent_name = load_specialist_agents().get(agent_key, {}).get("name", agent_key)
-        except Exception:
-            pass
+            _check_cancel(cancel_event)
+            # 增强6: 成本路由 - 根据 agent_key 选择模型
+            model = _get_model_for_agent(agent_key, budget_mode) if _is_cost_routing_enabled() else MODEL
+
+            # 超时控制：用线程池 + future 实现超时
+            import concurrent.futures as _cf
+            with _cf.ThreadPoolExecutor(max_workers=1) as _pool:
+                future = _pool.submit(
+                    run_specialist, agent_key, query,
+                    prebuilt_context=prebuilt_context, model=model, trace_id=trace_id
+                )
+                try:
+                    result = future.result(timeout=timeout_seconds)
+                    return json.dumps(result, ensure_ascii=False)
+                except _cf.TimeoutError:
+                    future.cancel()
+                    last_error = TimeoutError(f"专家 {agent_name} 执行超时（{timeout_seconds}秒）")
+                    logger.warning(f"[trace:{trace_id}] 专家 {tool_name} 第{attempt+1}次调用超时（{timeout_seconds}s）")
+                    if attempt < max_retries:
+                        logger.info(f"[trace:{trace_id}] 专家 {tool_name} 准备重试...")
+                        continue
+                    # 超时后不再重试，直接进入降级
+                    break
+        except CancelledError:
+            raise
+        except Exception as e:
+            last_error = e
+            logger.error(f"[trace:{trace_id}] 专家 {tool_name} 第{attempt+1}次执行异常: {e}")
+            if attempt < max_retries:
+                logger.info(f"[trace:{trace_id}] 专家 {tool_name} 准备重试...")
+                continue
+            break
+
+    # ── 降级：简化模式（不调用工具，直接用 system_prompt + query 生成分析）──
+    logger.info(f"[trace:{trace_id}] 专家 {tool_name} 进入降级模式（简化分析，不调用工具）")
+    try:
+        from services.llm_service import _call_llm, MODEL as _MODEL
+        from db.agents import load_specialist_agents as _lsa
+        _agent = _lsa().get(agent_key, {})
+        _sys_prompt = _agent.get("system_prompt", "")
+        if not _sys_prompt:
+            raise ValueError(f"专家 {agent_key} 无 system_prompt")
+
+        _degraded_response = _call_llm(
+            caller=f"specialist_degraded:{agent_key}",
+            trace_id=trace_id,
+            model=_MODEL,
+            messages=[
+                {"role": "system", "content": _sys_prompt + "\n\n注意：本次为降级模式，工具不可用，请基于已有数据和专业知识直接给出分析。"},
+                {"role": "user", "content": query},
+            ],
+            temperature=0.3,
+            max_tokens=4096,
+        )
+        _degraded_text = _degraded_response.choices[0].message.content or ""
+        _degraded_tokens = _degraded_response.usage.total_tokens if _degraded_response.usage else 0
+        logger.info(f"[trace:{trace_id}] 专家 {tool_name} 降级分析完成，tokens={_degraded_tokens}")
         return json.dumps({
             "agent_key": agent_key,
             "agent": agent_name,
-            "icon": "⚠️",
-            "analysis": f"[该专家分析暂时不可用：{type(e).__name__}]",
+            "icon": _agent.get("icon", "⚠️"),
+            "analysis": _degraded_text,
             "tool_calls": [],
             "duration_ms": 0,
-            "status": "unavailable",
-            "error": f"{type(e).__name__}: {e}",
+            "status": "degraded",
         }, ensure_ascii=False)
+    except Exception as degraded_e:
+        logger.error(f"[trace:{trace_id}] 专家 {tool_name} 降级模式也失败: {degraded_e}")
+
+    # ── 最终兜底：unavailable 占位结果 ──
+    _err_msg = f"{type(last_error).__name__}: {last_error}" if last_error else "未知错误"
+    return json.dumps({
+        "agent_key": agent_key,
+        "agent": agent_name,
+        "icon": "⚠️",
+        "analysis": f"[该专家分析暂时不可用：{type(last_error).__name__ if last_error else '未知错误'}]",
+        "tool_calls": [],
+        "duration_ms": 0,
+        "status": "unavailable",
+        "error": _err_msg,
+    }, ensure_ascii=False)
 
 
 # ── 升级二：推理过程可视化（零 LLM 成本，仅格式化已有数据）──
@@ -4572,7 +4666,7 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
                 message_id=message_id,
                 agent_key=agent_key,
                 agent_name=agent_info.get("name", tc.function.name),
-                query=expert_query[:500],
+                query=expert_query[:8000],
                 trace_id=trace_id,
             )
             agent_run_ids[agent_key] = run_id
@@ -4690,11 +4784,15 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
                     specialist_result["analysis"] = analysis
                 specialist_results.append(specialist_result)
 
-                # 更新 agent 执行记录为 completed
+                # 更新 agent 执行记录：正常完成记 completed，降级记 completed+degraded 标记
+                _run_status = "completed"
+                if result_data.get("status") == "degraded":
+                    _run_status = "completed"  # 降级也算完成，结果可用
+                    logger.info(f"[trace:{trace_id}] 专家 {agent_key} 以降级模式完成")
                 update_agent_run_status(
                     agent_run_ids.get(agent_key),
-                    "completed",
-                    result=result_data.get("analysis", "")[:2000],
+                    _run_status,
+                    result=result_data.get("analysis", "")[:8000],
                     duration_ms=result_data.get("duration_ms", 0),
                 )
 
@@ -4708,9 +4806,12 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
                 }
             else:
                 # 更新 agent 执行记录为 failed
+                _fail_status = "failed"
+                if "timeout" in str(result_data.get("error", "")).lower():
+                    _fail_status = "timeout"
                 update_agent_run_status(
                     agent_run_ids.get(agent_key),
-                    "failed",
+                    _fail_status,
                     error_message=result_data.get("error", "未知错误"),
                 )
 

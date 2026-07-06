@@ -347,7 +347,7 @@ def chat_about_investment(question: str, context: str = "", valuation_context: s
         messages.append({"role": "assistant", "content": "好的，我已了解相关指数的估值数据，请提问。"})
 
     if context:
-        messages.append({"role": "user", "content": f"文章分析背景：\n{context[:3000]}"})
+        messages.append({"role": "user", "content": f"文章分析背景：\n{context[:6000]}"})
         messages.append({"role": "assistant", "content": "好的，我已了解文章分析背景。"})
 
     messages.append({"role": "user", "content": question})
@@ -576,7 +576,7 @@ def chat_with_tools(
     # 构建 system message
     system_content = agent_prompt or ORCHESTRATOR_PROMPT
     if rag_context:
-        system_content += f"\n\n以下是从知识库中预先检索到的参考信息：\n{rag_context[:3000]}"
+        system_content += f"\n\n以下是从知识库中预先检索到的参考信息：\n{rag_context[:6000]}"
 
     llm_messages = [{"role": "system", "content": system_content}]
 

@@ -295,8 +295,8 @@ def _process_text_tool_calls(content_str, llm_messages, tool_calls_log, agent_na
         args = tc['arguments']
         logger.info(f'[{agent_name}] 文本 Tool: {tc["name"]}({json.dumps(args, ensure_ascii=False)[:100]})')
         result = execute_tool(tc['name'], args, trace_id=trace_id)
-        if len(result) > 3000:
-            result = result[:3000] + chr(10) + '... (结果过长，已截断)'
+        if len(result) > 8000:
+            result = result[:8000] + chr(10) + '... (结果过长，已截断)'
         tool_calls_log.append({
             'name': tc['name'],
             'arguments': args,
@@ -390,7 +390,7 @@ def run_specialist(agent_key: str, query: str, context: str = "",
     # 构建消息
     system_content = agent["system_prompt"]
     if context:
-        system_content += f"\n\n以下是相关上下文信息，请结合分析：\n{context[:3000]}"
+        system_content += f"\n\n以下是相关上下文信息，请结合分析：\n{context[:6000]}"
 
     # 注入持仓上下文（优先使用预构建的，避免重复 DB 查询）
     if prebuilt_context:
@@ -679,7 +679,7 @@ def run_specialist_with_context(agent_key: str, query: str, peer_analyses: dict,
             continue
         peer_agent = load_specialist_agents().get(peer_key)
         peer_name = peer_agent["name"] if peer_agent else peer_key
-        peer_sections.append(f"【{peer_name}】的分析：\n{peer_analysis[:2000]}")
+        peer_sections.append(f"【{peer_name}】的分析：\n{peer_analysis[:6000]}")
 
     if peer_sections:
         round_table = (
@@ -886,7 +886,7 @@ def run_cross_review_opinion(agent_key: str, query: str, self_analysis: str,
             continue
         peer_agent = load_specialist_agents().get(peer_key)
         peer_name = peer_agent["name"] if peer_agent else peer_key
-        peer_sections.append(f"【{peer_name}】的分析：\n{peer_analysis[:1000]}")
+        peer_sections.append(f"【{peer_name}】的分析：\n{peer_analysis[:6000]}")
     peer_text = "\n\n---\n\n".join(peer_sections) if peer_sections else "（无其他专家分析）"
 
     system_content = (
@@ -908,7 +908,7 @@ def run_cross_review_opinion(agent_key: str, query: str, self_analysis: str,
 
     user_content = (
         f"原始问题：{query}\n\n"
-        f"我的 Phase A 分析：\n{self_analysis[:1500]}\n\n"
+        f"我的 Phase A 分析：\n{self_analysis[:4000]}\n\n"
         f"其他专家分析：\n{peer_text}"
     )
 
@@ -969,7 +969,7 @@ def run_cross_review_opinion(agent_key: str, query: str, self_analysis: str,
             parts.append("质疑：" + "；".join(dis_lines))
         if opinion["additions"]:
             parts.append("补充：" + "；".join(opinion["additions"]))
-        analysis_text = "\n".join(parts) if parts else raw[:500]
+        analysis_text = "\n".join(parts) if parts else raw[:8000]
 
     if not analysis_text:
         analysis_text = "交叉审阅完成，请参考其他专家分析。"
@@ -1154,7 +1154,7 @@ def _parse_arbitration_output(answer: str) -> dict:
             "diverggence_analysis": "",
             "condition_framework": [],
             "key_variables": "",
-            "final_recommendation": answer[:500] if answer else "",
+            "final_recommendation": answer[:8000] if answer else "",
             "has_structured_sections": False,
         }
 
@@ -1286,7 +1286,7 @@ def run_arbitration(query: str, specialist_results: list, rag_context: str = "",
                 f"_(该专家执行失败，请在综合判断时标注\"缺少 {sr_name} 视角\"，相关结论仅供参考)_"
             )
         else:
-            expert_sections.append(f"### {icon} {sr_name}\n{analysis[:2000]}")
+            expert_sections.append(f"### {icon} {sr_name}\n{analysis[:8000]}")
 
     experts_text = "\n\n---\n\n".join(expert_sections)
     if unavailable_count > 0:
@@ -1308,7 +1308,7 @@ def run_arbitration(query: str, specialist_results: list, rag_context: str = "",
         user_content += f"\n\n## 用户当前持仓摘要（仲裁时必须对照，避免建议与现状矛盾）\n{portfolio_summary}"
 
     if rag_context:
-        user_content += f"\n\n## 参考知识库\n{rag_context[:1500]}"
+        user_content += f"\n\n## 参考知识库\n{rag_context[:6000]}"
 
     llm_messages = [
         {"role": "system", "content": system_prompt},
@@ -1362,3 +1362,145 @@ def run_arbitration(query: str, specialist_results: list, rag_context: str = "",
         "key_variables": parsed.get("key_variables", ""),
         "has_structured_sections": parsed.get("has_structured_sections", False),
     }
+
+
+# ── 三轮圆桌讨论：Phase A (独立分析) → Phase B (交叉质询) → Phase C (修正结论) ──
+
+def run_round_table_discussion(query: str, specialist_results: list,
+                                trace_id: str = "", model: str = None,
+                                prebuilt_context: str = "") -> list:
+    """三轮圆桌讨论增强：交叉质询 + 修正结论。
+
+    流程：
+    - Phase A（已完成）：专家各自独立分析（specialist_results 传入）
+    - Phase B（第二轮）：每个专家看到其他专家的完整分析，提出 1-2 个关键质疑点
+    - Phase C（第三轮）：各专家根据质疑简短修正自己的结论
+
+    Args:
+        query: 原始用户问题
+        specialist_results: Phase A 的专家分析结果列表
+        trace_id: 追踪 ID
+        model: 可选模型覆盖
+        prebuilt_context: 预构建的持仓+估值上下文
+
+    Returns:
+        更新后的 specialist_results 列表（包含 Phase B/C 结果）
+    """
+    if not trace_id:
+        import uuid as _uuid
+        trace_id = f"roundtable-{_uuid.uuid4().hex[:8]}"
+
+    if len(specialist_results) < 2:
+        logger.info(f"[trace:{trace_id}] 圆桌讨论跳过：专家数 < 2")
+        return specialist_results
+
+    # 过滤出 Phase A 的原始结果（非 cross_review、非 arbitration）
+    phase_a_results = [
+        sr for sr in specialist_results
+        if not sr.get("is_cross_review") and not sr.get("is_arbitration")
+    ]
+    if len(phase_a_results) < 2:
+        return specialist_results
+
+    peer_analyses = {sr["agent_key"]: sr["analysis"] for sr in phase_a_results}
+
+    # ── Phase B: 交叉质询 ──
+    # 每个专家收到其他专家的完整分析（截断到 6000 字），提出 1-2 个关键质疑点
+    logger.info(f"[trace:{trace_id}] 圆桌讨论 Phase B: 交叉质询，{len(phase_a_results)} 个专家")
+    phase_b_results = []
+    for sr in phase_a_results:
+        agent_key = sr["agent_key"]
+        try:
+            # 使用 run_specialist_with_context 进行交叉质询
+            # 它已经会将 peer_analyses 截断到 6000 字
+            cr_result = run_specialist_with_context(
+                agent_key, query, peer_analyses, max_turns=2,
+                prebuilt_context=prebuilt_context,
+                model=model,
+                trace_id=trace_id,
+            )
+            phase_b_results.append(cr_result)
+            specialist_results.append(cr_result)
+        except Exception as e:
+            logger.error(f"[trace:{trace_id}] Phase B 交叉质询 {agent_key} 失败: {e}")
+
+    # ── Phase C: 修正结论 ──
+    # 每个专家根据 Phase B 的质疑，简短修正自己的结论（单次 LLM 调用，无工具）
+    if phase_b_results:
+        logger.info(f"[trace:{trace_id}] 圆桌讨论 Phase C: 修正结论")
+
+        for sr in phase_a_results:
+            agent_key = sr["agent_key"]
+            agent = load_specialist_agents().get(agent_key)
+            if not agent:
+                continue
+
+            # 收集其他专家对该专家的质疑
+            challenges_to_me = []
+            for cr in phase_b_results:
+                if cr["agent_key"] == agent_key:
+                    continue
+                # 提取质疑点
+                opinion = cr.get("opinion", {})
+                disagreements = opinion.get("disagreements", [])
+                for d in disagreements:
+                    if isinstance(d, dict):
+                        target_peer = d.get("peer", "")
+                        # 检查是否针对当前专家
+                        if agent["name"] in target_peer or target_peer in agent["name"]:
+                            challenges_to_me.append({
+                                "from": cr.get("agent", ""),
+                                "point": d.get("point", ""),
+                                "reason": d.get("reason", ""),
+                            })
+
+            if not challenges_to_me:
+                continue
+
+            # 构建修正 prompt
+            challenge_text = "\n".join(
+                f"- {c['from']}质疑: {c['point']}（理由: {c['reason']}）"
+                for c in challenges_to_me[:3]  # 最多 3 个质疑
+            )
+
+            _caller = f"specialist:{agent_key}:phase_c"
+            _model = model or MODEL
+            system_content = (
+                f"你是{agent['name']}。在圆桌讨论中，其他专家对你的分析提出了以下质疑：\n\n"
+                f"{challenge_text}\n\n"
+                f"请根据这些质疑，简短修正你的结论（200-500字）。要求：\n"
+                f"1. 如果质疑合理，承认并修正\n"
+                f"2. 如果质疑不合理，用数据或逻辑反驳\n"
+                f"3. 给出修正后的最终结论\n"
+            )
+
+            try:
+                response = _call_llm(
+                    caller=_caller,
+                    trace_id=trace_id,
+                    model=_model,
+                    messages=[
+                        {"role": "system", "content": system_content},
+                        {"role": "user", "content": f"原始问题：{query}\n\n你的原始分析：\n{sr['analysis'][:8000]}\n\n请给出修正后的结论。"},
+                    ],
+                    temperature=get_config_float('llm.temperature_agent', 0.3),
+                    max_tokens=get_config_int('llm.max_tokens_agent', 8000),
+                )
+                revised = response.choices[0].message.content or ""
+                if revised and len(revised) > 50:
+                    revision_result = {
+                        "agent_key": agent_key,
+                        "agent": agent["name"],
+                        "icon": agent["icon"],
+                        "analysis": revised,
+                        "tool_calls": [],
+                        "duration_ms": 0,
+                        "is_cross_review": True,
+                        "is_phase_c_revision": True,
+                    }
+                    specialist_results.append(revision_result)
+                    logger.info(f"[trace:{trace_id}] Phase C: {agent['name']} 修正结论完成")
+            except Exception as e:
+                logger.error(f"[trace:{trace_id}] Phase C 修正 {agent_key} 失败: {e}")
+
+    return specialist_results

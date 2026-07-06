@@ -658,3 +658,242 @@ def get_expert_alerts(days: int = 7, limit: int = 50) -> list:
     conn.close()
 
     return [dict(r) for r in rows]
+
+
+# ═══════════════════════════════════════════════════════════════
+# Agent 性能监控 Dashboard
+# ═══════════════════════════════════════════════════════════════
+
+def get_agent_performance_dashboard(days: int = 30) -> dict:
+    """获取所有 Agent 的性能仪表盘数据。
+
+    返回每个 Agent 的：
+    - 成功率（按状态分组）
+    - 平均耗时
+    - 平均输出长度
+    - Token 效率（输出 token / 总 token）
+    - 最近 7 天趋势
+
+    Returns:
+        {
+            "agents": [
+                {
+                    "agent_key": "valuation_expert",
+                    "agent_name": "估值专家",
+                    "total_runs": 100,
+                    "success_rate": 0.85,
+                    "status_breakdown": {"completed": 85, "failed": 15},
+                    "avg_duration_ms": 12000,
+                    "avg_output_length": 2500,
+                    "token_efficiency": 0.65,
+                    "trend_7d": [{"date": "2026-07-01", "runs": 5, "avg_score": 75}, ...]
+                }
+            ],
+            "summary": {
+                "total_agents": 5,
+                "total_runs": 500,
+                "overall_success_rate": 0.82,
+                "overall_avg_duration_ms": 15000
+            }
+        }
+    """
+    from db._conn import _get_conn
+    from datetime import datetime, timedelta
+
+    conn = _get_conn()
+
+    # 查询指定天数内的 agent_runs 数据
+    rows = conn.execute("""
+        SELECT
+            agent_key,
+            agent_name,
+            status,
+            duration_ms,
+            output_length,
+            token_usage_input,
+            token_usage_output,
+            created_at
+        FROM agent_runs
+        WHERE created_at >= datetime('now', ?)
+        ORDER BY created_at DESC
+    """, (f"-{days} days",)).fetchall()
+
+    if not rows:
+        conn.close()
+        return {"agents": [], "summary": {"total_agents": 0, "total_runs": 0,
+                                           "overall_success_rate": 0, "overall_avg_duration_ms": 0}}
+
+    # 按 agent_key 聚合
+    agent_stats: dict[str, dict] = {}
+    for row in rows:
+        row = dict(row)
+        key = row.get("agent_key", "unknown")
+        if key not in agent_stats:
+            agent_stats[key] = {
+                "agent_key": key,
+                "agent_name": row.get("agent_name", key),
+                "total_runs": 0,
+                "status_counts": {},
+                "total_duration_ms": 0,
+                "total_output_length": 0,
+                "total_input_tokens": 0,
+                "total_output_tokens": 0,
+                "daily_stats": {},  # date -> {runs, scores}
+            }
+
+        stats = agent_stats[key]
+        stats["total_runs"] += 1
+
+        status = row.get("status", "unknown") or "unknown"
+        stats["status_counts"][status] = stats["status_counts"].get(status, 0) + 1
+
+        stats["total_duration_ms"] += row.get("duration_ms", 0) or 0
+        stats["total_output_length"] += row.get("output_length", 0) or 0
+        stats["total_input_tokens"] += row.get("token_usage_input", 0) or 0
+        stats["total_output_tokens"] += row.get("token_usage_output", 0) or 0
+
+        # 按天统计趋势
+        created = row.get("created_at", "")
+        if created:
+            date_str = created[:10]  # YYYY-MM-DD
+            if date_str not in stats["daily_stats"]:
+                stats["daily_stats"][date_str] = {"runs": 0, "total_duration": 0}
+            stats["daily_stats"][date_str]["runs"] += 1
+            stats["daily_stats"][date_str]["total_duration"] += row.get("duration_ms", 0) or 0
+
+    # 计算最终指标
+    agents_list = []
+    total_runs_all = 0
+    total_success_all = 0
+    total_duration_all = 0
+
+    for key, stats in agent_stats.items():
+        total = stats["total_runs"]
+        success = stats["status_counts"].get("completed", 0) + stats["status_counts"].get("success", 0)
+        success_rate = success / total if total > 0 else 0
+
+        avg_duration = stats["total_duration_ms"] / total if total > 0 else 0
+        avg_output = stats["total_output_length"] / total if total > 0 else 0
+
+        total_tokens = stats["total_input_tokens"] + stats["total_output_tokens"]
+        token_efficiency = stats["total_output_tokens"] / total_tokens if total_tokens > 0 else 0
+
+        # 7 天趋势
+        trend_7d = []
+        now = datetime.now()
+        for i in range(6, -1, -1):
+            date = (now - timedelta(days=i)).strftime("%Y-%m-%d")
+            day_data = stats["daily_stats"].get(date, {"runs": 0, "total_duration": 0})
+            avg_dur = day_data["total_duration"] / day_data["runs"] if day_data["runs"] > 0 else 0
+            trend_7d.append({"date": date, "runs": day_data["runs"], "avg_duration_ms": avg_dur})
+
+        agents_list.append({
+            "agent_key": key,
+            "agent_name": stats["agent_name"],
+            "total_runs": total,
+            "success_rate": round(success_rate, 4),
+            "status_breakdown": stats["status_counts"],
+            "avg_duration_ms": round(avg_duration),
+            "avg_output_length": round(avg_output),
+            "token_efficiency": round(token_efficiency, 4),
+            "trend_7d": trend_7d,
+        })
+
+        total_runs_all += total
+        total_success_all += success
+        total_duration_all += stats["total_duration_ms"]
+
+    conn.close()
+
+    overall_success = total_success_all / total_runs_all if total_runs_all > 0 else 0
+    overall_duration = total_duration_all / total_runs_all if total_runs_all > 0 else 0
+
+    return {
+        "agents": agents_list,
+        "summary": {
+            "total_agents": len(agents_list),
+            "total_runs": total_runs_all,
+            "overall_success_rate": round(overall_success, 4),
+            "overall_avg_duration_ms": round(overall_duration),
+        },
+    }
+
+
+def check_agent_health(days: int = 7) -> list[dict]:
+    """检查所有 Agent 的健康状态。
+
+    判定规则：
+    - 成功率 < 50% → critical
+    - 成功率 50-80% → warning
+    - 成功率 > 80% → healthy
+
+    Returns:
+        [
+            {
+                "agent_key": "valuation_expert",
+                "agent_name": "估值专家",
+                "status": "healthy" | "warning" | "critical",
+                "success_rate": 0.85,
+                "total_runs": 50,
+                "message": "运行正常"
+            }
+        ]
+    """
+    dashboard = get_agent_performance_dashboard(days=days)
+
+    health_list = []
+    for agent in dashboard.get("agents", []):
+        success_rate = agent.get("success_rate", 0)
+        total_runs = agent.get("total_runs", 0)
+
+        if total_runs == 0:
+            status = "healthy"
+            message = "无运行记录"
+        elif success_rate < 0.5:
+            status = "critical"
+            message = f"成功率仅 {success_rate:.0%}，需要立即排查"
+        elif success_rate < 0.8:
+            status = "warning"
+            message = f"成功率 {success_rate:.0%}，低于预期"
+        else:
+            status = "healthy"
+            message = f"运行正常（成功率 {success_rate:.0%}）"
+
+        health_list.append({
+            "agent_key": agent["agent_key"],
+            "agent_name": agent["agent_name"],
+            "status": status,
+            "success_rate": success_rate,
+            "total_runs": total_runs,
+            "message": message,
+        })
+
+    return health_list
+
+
+def get_low_performing_agents(limit: int = 3) -> list[dict]:
+    """获取成功率最低的 N 个 Agent。
+
+    Args:
+        limit: 返回数量
+
+    Returns:
+        [{"agent_key", "agent_name", "success_rate", "total_runs"}]
+    """
+    dashboard = get_agent_performance_dashboard(days=30)
+
+    agents = dashboard.get("agents", [])
+    # 过滤掉无运行记录的
+    agents_with_runs = [a for a in agents if a.get("total_runs", 0) > 0]
+    # 按成功率升序排序
+    agents_sorted = sorted(agents_with_runs, key=lambda x: x.get("success_rate", 1.0))
+
+    return [
+        {
+            "agent_key": a["agent_key"],
+            "agent_name": a["agent_name"],
+            "success_rate": a["success_rate"],
+            "total_runs": a["total_runs"],
+        }
+        for a in agents_sorted[:limit]
+    ]

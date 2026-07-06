@@ -591,3 +591,87 @@ def build_structured_data_block(sections: dict[str, str]) -> str:
         return ""
     return f"## 结构化数据\n```json\n{_json.dumps(data, ensure_ascii=False, indent=2)}\n```"
 
+
+
+# ═══════════════════════════════════════════════════════════════
+# 对话上下文连续性增强：跨轮次摘要 + 持仓快照 + 风险偏好
+# ═══════════════════════════════════════════════════════════════
+
+
+def build_conversation_context_summary(conversation_id: int, user_id: int | str = 1) -> str:
+    """
+    构建对话上下文摘要文本，增强跨轮次连续性。
+
+    聚合以下信息：
+    1. 最近3轮对话摘要（从 conversation_summaries 表或最近消息生成）
+    2. 当前持仓快照（从 portfolio_holdings 表）
+    3. 用户风险偏好（从 user_profiles 表）
+
+    返回组装后的上下文文本。
+    """
+    parts = []
+
+    # 1. 获取最近对话摘要
+    try:
+        from agent.memory import get_conversation_summary
+        summary_text = get_conversation_summary(conversation_id)
+        if summary_text:
+            parts.append(f"## 近期对话摘要\n{summary_text}")
+    except Exception:
+        pass
+
+    # 2. 获取当前持仓快照
+    try:
+        from db._conn import _get_conn
+        conn = _get_conn()
+        rows = conn.execute(
+            "SELECT fund_code, fund_name, shares, cost_price, current_price, "
+            "current_value, profit_loss, profit_loss_pct "
+            "FROM portfolio_holdings WHERE shares > 0 ORDER BY current_value DESC LIMIT 10"
+        ).fetchall()
+        conn.close()
+        if rows:
+            holding_lines = ["## 当前持仓快照"]
+            holding_lines.append("| 基金 | 代码 | 持仓金额 | 盈亏 | 盈亏% |")
+            holding_lines.append("|------|------|----------|------|-------|")
+            for r in rows:
+                name = r["fund_name"] or r["fund_code"] or "-"
+                code = r["fund_code"] or "-"
+                value = f"{r['current_value']:,.0f}" if r["current_value"] else "-"
+                pnl = f"{r['profit_loss']:,.0f}" if r["profit_loss"] else "-"
+                pnl_pct = f"{r['profit_loss_pct']:.1f}%" if r["profit_loss_pct"] is not None else "-"
+                holding_lines.append(f"| {name} | {code} | {value} | {pnl} | {pnl_pct} |")
+            parts.append("\n".join(holding_lines))
+    except Exception:
+        pass
+
+    # 3. 获取用户风险偏好
+    try:
+        from db._conn import _get_conn
+        conn = _get_conn()
+        row = conn.execute(
+            "SELECT risk_preference, target_equity_ratio, max_single_position_pct, "
+            "primary_goal, emergency_fund_months, monthly_surplus "
+            "FROM user_profiles LIMIT 1"
+        ).fetchone()
+        conn.close()
+        if row:
+            profile_lines = ["## 用户风险偏好"]
+            if row["risk_preference"]:
+                profile_lines.append(f"- 风险偏好: {row['risk_preference']}")
+            if row["target_equity_ratio"] is not None:
+                profile_lines.append(f"- 目标权益仓位: {row['target_equity_ratio']}")
+            if row["max_single_position_pct"] is not None:
+                profile_lines.append(f"- 单标的上限: {row['max_single_position_pct']}")
+            if row["primary_goal"]:
+                profile_lines.append(f"- 主要目标: {row['primary_goal']}")
+            if row["emergency_fund_months"] is not None:
+                profile_lines.append(f"- 备用金月数: {row['emergency_fund_months']}")
+            if row["monthly_surplus"] is not None:
+                profile_lines.append(f"- 月结余: {row['monthly_surplus']}")
+            if len(profile_lines) > 1:
+                parts.append("\n".join(profile_lines))
+    except Exception:
+        pass
+
+    return "\n\n".join(parts) if parts else ""

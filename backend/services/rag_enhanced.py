@@ -572,3 +572,245 @@ def get_rrf_params(query: str) -> int:
     }
 
     return params.get(intent, 60)
+
+
+# ══════════════════════════════════════════════════════════════
+# 分层检索（Hierarchical Retrieval）
+# ══════════════════════════════════════════════════════════════
+
+def hierarchical_retrieve(query: str, top_k: int = 10,
+                           search_fts_func=None, search_chroma_func=None) -> List[Dict]:
+    """分层检索：先检索知识分类，再在相关分类中检索具体知识，最后补充案例经验。
+
+    三层检索策略：
+    - 第一层：检索知识分类（content_type 分布），确定相关分类
+    - 第二层：在相关分类中检索具体知识（FTS + ChromaDB）
+    - 第三层：检索相关案例和实战经验（analysis/author_article 类型）
+
+    Args:
+        query: 用户查询
+        top_k: 最终返回结果数
+        search_fts_func: FTS5 搜索函数 (query, content_type, limit) -> (results, dropped)
+        search_chroma_func: ChromaDB 搜索函数 (query, content_type, limit) -> (results, dropped)
+
+    Returns:
+        融合后的检索结果列表
+    """
+    if search_fts_func is None or search_chroma_func is None:
+        # 默认使用 rag.py 中的函数
+        try:
+            from services.rag import search_knowledge, search_chroma
+            search_fts_func = search_knowledge
+            search_chroma_func = search_chroma
+        except ImportError:
+            logger.warning("hierarchical_retrieve: 无法导入搜索函数")
+            return []
+
+    all_results: List[Dict] = []
+
+    # ── 第一层：知识分类检索 ──
+    # 用宽松查询获取各 content_type 的分布
+    fts_broad, _ = search_fts_func(query, None, limit=20)
+    chroma_broad, _ = search_chroma_func(query, None, limit=20)
+
+    # 统计各分类命中数
+    type_counts: Dict[str, int] = {}
+    for r in fts_broad + chroma_broad:
+        ct = r.get("content_type", "")
+        type_counts[ct] = type_counts.get(ct, 0) + 1
+
+    # 按命中数排序，取前 3 个最相关分类
+    relevant_types = sorted(type_counts.items(), key=lambda x: x[1], reverse=True)[:3]
+    relevant_type_names = [ct for ct, _ in relevant_types if ct]
+
+    logger.info(
+        f"hierarchical_retrieve L1: 分类分布={type_counts}, "
+        f"相关分类={relevant_type_names}"
+    )
+
+    # ── 第二层：在相关分类中检索具体知识 ──
+    per_type_limit = max(top_k // max(len(relevant_type_names), 1), 3)
+    for ct in relevant_type_names:
+        fts_results, _ = search_fts_func(query, ct, per_type_limit)
+        chroma_results, _ = search_chroma_func(query, ct, per_type_limit)
+        all_results.extend(fts_results)
+        all_results.extend(chroma_results)
+
+    # ── 第三层：检索相关案例和实战经验 ──
+    # analysis 和 author_article 类型通常包含实战经验
+    case_types = [ct for ct in ["analysis", "author_article", "article"] if ct not in relevant_type_names]
+    for ct in case_types:
+        fts_case, _ = search_fts_func(query, ct, 3)
+        if fts_case:
+            all_results.extend(fts_case)
+            logger.info(f"hierarchical_retrieve L3: {ct} 补充 {len(fts_case)} 条")
+
+    # 去重（按 content_type + reference_id）
+    seen = set()
+    deduped = []
+    for r in all_results:
+        key = f"{r.get('content_type', '')}:{r.get('reference_id', '')}"
+        if key not in seen:
+            seen.add(key)
+            deduped.append(r)
+
+    # RRF 融合 + 轻量级重排序
+    routes = [
+        ("hierarchical_fts", [r for r in deduped if r.get("content_type", "") in relevant_type_names], 1.0),
+        ("hierarchical_case", [r for r in deduped if r.get("content_type", "") in case_types], 0.7),
+    ]
+    fused = rrf_fusion(routes, k=60)
+    reranked = lightweight_rerank(query, fused, top_k=top_k)
+
+    logger.info(
+        f"hierarchical_retrieve 完成: 去重后 {len(deduped)} 条, "
+        f"融合重排序后返回 {len(reranked)} 条"
+    )
+    return reranked
+
+
+# ══════════════════════════════════════════════════════════════
+# 混合召回升级（BM25 + 向量 + 语义重排序）
+# ══════════════════════════════════════════════════════════════
+
+# 混合召回权重配置
+_HYBRID_WEIGHTS = {
+    "bm25": 0.3,       # BM25/FTS5 关键词匹配
+    "vector": 0.5,     # 向量语义搜索
+    "rerank": 0.2,     # 语义重排序
+}
+
+
+def hybrid_search_enhanced(query: str, top_k: int = 10,
+                            search_fts_func=None, search_chroma_func=None,
+                            user_id: str = None) -> List[Dict]:
+    """增强版混合召回：BM25(0.3) + 向量(0.5) + 语义重排序(0.2)。
+
+    Args:
+        query: 用户查询
+        top_k: 返回结果数
+        search_fts_func: FTS5 搜索函数
+        search_chroma_func: ChromaDB 搜索函数
+        user_id: 用户 ID（用于个性化加权）
+
+    Returns:
+        融合重排序后的结果列表
+    """
+    if search_fts_func is None or search_chroma_func is None:
+        try:
+            from services.rag import search_knowledge, search_chroma
+            search_fts_func = search_knowledge
+            search_chroma_func = search_chroma
+        except ImportError:
+            logger.warning("hybrid_search_enhanced: 无法导入搜索函数")
+            return []
+
+    # 1. BM25/FTS5 检索（权重 0.3）
+    fts_results, _ = search_fts_func(query, None, top_k * 2)
+    # 2. 向量语义检索（权重 0.5）
+    chroma_results, _ = search_chroma_func(query, None, top_k * 2)
+
+    # 3. RRF 融合（加权）
+    routes = [
+        ("bm25", fts_results, _HYBRID_WEIGHTS["bm25"]),
+        ("vector", chroma_results, _HYBRID_WEIGHTS["vector"]),
+    ]
+    fused = rrf_fusion(routes, k=60)
+
+    # 4. 语义重排序（权重 0.2）
+    # 使用轻量级重排序作为语义重排序的代理
+    reranked = lightweight_rerank(query, fused, top_k=top_k * 2)
+
+    # 应用 rerank 权重：将 rerank_score 归一化后乘以 0.2，叠加到最终分数
+    if reranked:
+        max_rerank = max(r.get("_rerank_score", 0) for r in reranked) or 1.0
+        for r in reranked:
+            normalized_rerank = r.get("_rerank_score", 0) / max_rerank
+            r["_final_score"] = r.get("_score", 0) + _HYBRID_WEIGHTS["rerank"] * normalized_rerank
+        reranked.sort(key=lambda x: x.get("_final_score", 0), reverse=True)
+
+    # 5. 个性化加权（可选）
+    if user_id:
+        try:
+            from services.rag import _apply_personalization_boost
+            _apply_personalization_boost(reranked, user_id)
+        except Exception:
+            pass
+
+    logger.info(
+        f"hybrid_search_enhanced: FTS={len(fts_results)}, Chroma={len(chroma_results)}, "
+        f"融合后={len(fused)}, 最终返回={len(reranked[:top_k])}"
+    )
+    return reranked[:top_k]
+
+
+def rerank_results(query: str, results: list[dict], top_k: int = 5,
+                   use_llm: bool = False) -> list[dict]:
+    """对检索结果进行 LLM 轻量重排序。
+
+    使用 LLM 对检索结果打分排序，适用于结果较多时精选最相关的。
+    默认不使用 LLM（use_llm=False），使用轻量级规则重排序。
+
+    Args:
+        query: 用户查询
+        results: 检索结果列表
+        top_k: 返回前 k 个
+        use_llm: 是否使用 LLM 重排序（增加延迟但更准确）
+
+    Returns:
+        重排序后的结果列表
+    """
+    if not results or len(results) <= 1:
+        return results[:top_k]
+
+    if use_llm:
+        try:
+            from services.llm_service import _call_llm, MODEL
+
+            # 构建重排序 prompt
+            doc_summaries = []
+            for i, r in enumerate(results[:15]):  # 最多取 15 条
+                title = r.get("title", "")[:50]
+                body = r.get("body", "")[:200]
+                doc_summaries.append(f"[{i}] {title}: {body}")
+
+            prompt = f"""对以下检索结果按与查询的相关性排序，返回最相关的结果编号（从0开始）。
+
+查询：{query}
+
+检索结果：
+{chr(10).join(doc_summaries)}
+
+请返回最相关的前 {top_k} 个结果的编号，用逗号分隔，如：0,3,1,5
+只输出编号，不要其他文字。"""
+
+            response = _call_llm(
+                caller="rag_rerank",
+                model=MODEL,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0,
+                max_tokens=100,
+            )
+
+            raw = (response.choices[0].message.content or "").strip()
+            # 解析编号
+            indices = []
+            for part in raw.split(","):
+                part = part.strip()
+                if part.isdigit():
+                    idx = int(part)
+                    if 0 <= idx < len(results):
+                        indices.append(idx)
+
+            if indices:
+                reranked = [results[i] for i in indices]
+                # 补充未选中的结果
+                remaining = [r for i, r in enumerate(results) if i not in indices]
+                reranked.extend(remaining)
+                return reranked[:top_k]
+
+        except Exception as e:
+            logger.warning(f"rerank_results LLM 重排序失败，回退到规则重排序: {e}")
+
+    # 默认：使用轻量级规则重排序
+    return lightweight_rerank(query, results, top_k=top_k)

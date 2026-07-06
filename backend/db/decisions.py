@@ -2345,3 +2345,261 @@ def generate_weekly_decision_review() -> dict:
         return report
     finally:
         conn.close()
+
+
+# ── 决策回测 ──────────────────────────────────────────
+
+def update_decision_backtest(decision_id: int, days: int, result_pct: float,
+                              benchmark_pct: float = None) -> bool:
+    """
+    更新决策回测结果。
+
+    Args:
+        decision_id: 决策记录 ID
+        days: 回测周期（7=T+7, 30=T+30）
+        result_pct: 决策后 N 天的实际收益率（%）
+        benchmark_pct: 基准收益率（%），如沪深300同期涨幅
+
+    Returns: True if updated successfully
+    """
+    conn = _get_conn()
+    try:
+        # 检查是否已有回测记录
+        existing = conn.execute(
+            """
+            SELECT id FROM decision_reviews
+            WHERE decision_id = ? AND outcome = 'backtest'
+            """,
+            (decision_id,),
+        ).fetchone()
+
+        excess_return = None
+        if benchmark_pct is not None and result_pct is not None:
+            excess_return = round(result_pct - benchmark_pct, 2)
+
+        review_note = (
+            f"T+{days}回测: 收益率 {result_pct:.2f}%"
+            + (f"，基准 {benchmark_pct:.2f}%" if benchmark_pct is not None else "")
+            + (f"，超额 {excess_return:.2f}%" if excess_return is not None else "")
+        )
+
+        if existing:
+            # 更新已有回测记录
+            conn.execute(
+                """
+                UPDATE decision_reviews
+                SET result_note = ?, profit_change = ?, updated_at = datetime('now','localtime')
+                WHERE id = ?
+                """,
+                (review_note, result_pct, existing["id"]),
+            )
+        else:
+            # 创建回测记录
+            conn.execute(
+                """
+                INSERT INTO decision_reviews
+                    (decision_id, outcome, result_note, profit_change, created_at, updated_at)
+                VALUES (?, 'backtest', ?, ?, datetime('now','localtime'), datetime('now','localtime'))
+                """,
+                (decision_id, review_note, result_pct),
+            )
+
+        # 更新决策状态为 reviewed
+        conn.execute(
+            """
+            UPDATE decision_records
+            SET status = 'reviewed', updated_at = datetime('now','localtime')
+            WHERE id = ? AND status IN ('accepted', 'executed', 'deferred')
+            """,
+            (decision_id,),
+        )
+
+        conn.commit()
+        return True
+    except Exception as e:
+        logging.getLogger(__name__).error(f"更新决策回测失败: {e}")
+        return False
+    finally:
+        conn.close()
+
+
+def get_decisions_for_backtest(days: int = 7) -> list[dict]:
+    """
+    获取需要回测的决策列表。
+
+    筛选条件：
+    - status 为 accepted 或 executed
+    - 创建时间距今正好 N 天（或超过 N 天但尚未回测）
+    - 尚未有 backtest 类型的 review 记录
+
+    Args:
+        days: 回测周期（7=T+7, 30=T+30）
+
+    Returns: 待回测决策列表
+    """
+    conn = _get_conn()
+    try:
+        rows = conn.execute(
+            """
+            SELECT d.* FROM decision_records d
+            WHERE d.status IN ('accepted', 'executed')
+              AND date(d.created_at) <= date('now','localtime', ?)
+              AND date(d.created_at) >= date('now','localtime', ?)
+              AND d.id NOT IN (
+                  SELECT decision_id FROM decision_reviews
+                  WHERE outcome = 'backtest'
+              )
+            ORDER BY d.created_at ASC
+            """,
+            (f"-{days} days", f"-{days * 2} days"),
+        ).fetchall()
+
+        results = []
+        for row in rows:
+            item = dict(row)
+            # 解析 JSON 字段
+            item["evidence_json"] = _json_loads(item.get("evidence_json"), {})
+            item["risk_json"] = _json_loads(item.get("risk_json"), {})
+            item["suitability_json"] = _json_loads(item.get("suitability_json"), {})
+            results.append(item)
+
+        return results
+    finally:
+        conn.close()
+
+
+def auto_backtest_decisions() -> list[dict]:
+    """
+    自动回测 T+7 和 T+30 的决策。
+
+    流程：
+    1. 获取 T+7 和 T+30 待回测的决策
+    2. 对每个决策，查找其 target_code 对应的指数/基金在决策创建后 N 天的价格变化
+    3. 计算决策收益率和基准收益率
+    4. 调用 update_decision_backtest 更新结果
+
+    Returns: 回测结果列表
+    """
+    from datetime import datetime, timedelta
+
+    results = []
+
+    # 分别处理 T+7 和 T+30
+    for days in [7, 30]:
+        pending = get_decisions_for_backtest(days=days)
+        if not pending:
+            continue
+
+        conn = _get_conn()
+        try:
+            for decision in pending:
+                decision_id = decision["id"]
+                target_code = decision.get("target_code") or ""
+                created_at = decision.get("created_at") or ""
+                decision_type = decision.get("decision_type") or ""
+
+                if not target_code or not created_at:
+                    continue
+
+                # 解析创建日期
+                try:
+                    created_date = datetime.strptime(created_at[:10], "%Y-%m-%d")
+                except Exception:
+                    continue
+
+                # 查询决策创建时的价格（基线）
+                try:
+                    baseline_row = conn.execute(
+                        """
+                        SELECT close FROM valuations
+                        WHERE index_code = ?
+                          AND date <= ?
+                        ORDER BY date DESC LIMIT 1
+                        """,
+                        (target_code, created_at[:10]),
+                    ).fetchone()
+
+                    if not baseline_row or not baseline_row["close"]:
+                        continue
+
+                    baseline_price = baseline_row["close"]
+
+                    # 查询 N 天后的价格
+                    target_date = (created_date + timedelta(days=days)).strftime("%Y-%m-%d")
+                    end_row = conn.execute(
+                        """
+                        SELECT close FROM valuations
+                        WHERE index_code = ?
+                          AND date <= ?
+                        ORDER BY date DESC LIMIT 1
+                        """,
+                        (target_code, target_date),
+                    ).fetchone()
+
+                    if not end_row or not end_row["close"]:
+                        continue
+
+                    end_price = end_row["close"]
+
+                    # 计算收益率
+                    result_pct = (end_price - baseline_price) / baseline_price * 100
+
+                    # 获取基准收益率（沪深300）
+                    benchmark_pct = None
+                    try:
+                        bench_base = conn.execute(
+                            """
+                            SELECT close FROM valuations
+                            WHERE index_code IN ('000300', 'hs300', '沪深300')
+                              AND date <= ?
+                            ORDER BY date DESC LIMIT 1
+                            """,
+                            (created_at[:10],),
+                        ).fetchone()
+                        bench_end = conn.execute(
+                            """
+                            SELECT close FROM valuations
+                            WHERE index_code IN ('000300', 'hs300', '沪深300')
+                              AND date <= ?
+                            ORDER BY date DESC LIMIT 1
+                            """,
+                            (target_date,),
+                        ).fetchone()
+
+                        if bench_base and bench_end and bench_base["close"]:
+                            benchmark_pct = (bench_end["close"] - bench_base["close"]) / bench_base["close"] * 100
+                    except Exception:
+                        pass
+
+                    # 对于 sell 类型决策，收益需要取反
+                    if decision_type == "sell":
+                        result_pct = -result_pct
+
+                    # 更新回测结果
+                    success = update_decision_backtest(
+                        decision_id, days, round(result_pct, 2),
+                        round(benchmark_pct, 2) if benchmark_pct is not None else None,
+                    )
+
+                    if success:
+                        results.append({
+                            "decision_id": decision_id,
+                            "target_code": target_code,
+                            "days": days,
+                            "result_pct": round(result_pct, 2),
+                            "benchmark_pct": round(benchmark_pct, 2) if benchmark_pct is not None else None,
+                            "decision_type": decision_type,
+                        })
+
+                except Exception as e:
+                    logging.getLogger(__name__).warning(
+                        f"决策 #{decision_id} 回测失败: {e}"
+                    )
+                    continue
+        finally:
+            conn.close()
+
+    if results:
+        logging.info(f"自动回测完成: {len(results)} 条决策已回测")
+
+    return results
