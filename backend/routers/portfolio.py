@@ -58,7 +58,7 @@ from models.portfolio import (
     CreateAlertRequest, TagRequest, AdjustCashRequest,
     PortfolioAiAnalysisRequest, FeedbackRequest,
     PanoramaAnalysisRequest, DeepDiveRequest, TradeReviewRequest, WhatIfRequest,
-    StressTestRequest,
+    StressTestRequest, SellPreviewRequest,
 )
 
 logger = logging.getLogger(__name__)
@@ -940,6 +940,16 @@ async def get_dca_suggestion_api(holding_id: int):
     result = get_dca_suggestion(holding_id)
     if "error" in result:
         raise HTTPException(404, result["error"])
+    return result
+
+
+@router.post("/api/portfolio/{holding_id}/sell-preview")
+async def preview_sell_api(holding_id: int, req: SellPreviewRequest):
+    """减仓预览：预计盈亏和约束警告。"""
+    from db.portfolio import preview_sell
+    result = preview_sell(holding_id, req.shares)
+    if "error" in result:
+        raise HTTPException(400, result["error"])
     return result
 
 

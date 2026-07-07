@@ -204,6 +204,91 @@ def get_dca_suggestion(holding_id: int) -> dict:
     }
 
 
+def preview_sell(holding_id: int, shares_to_sell: float) -> dict:
+    """减仓预览：计算预计盈亏和约束警告（软提示，不拦截）。
+
+    约束检测：
+    - profit_warning: 亏损状态下减仓
+    - single_amount: 单次减仓 >¥50,000
+    - total_reduction: 本次减仓 >总资产10%
+    - concentration: 减仓后该基金占比仍 >20%
+    """
+    holding = get_holding(holding_id)
+    if not holding:
+        return {"error": "持仓不存在"}
+
+    current_shares = holding.get("shares", 0) or 0
+    if shares_to_sell > current_shares:
+        return {"error": f"卖出份额 {shares_to_sell} 超过持有份额 {current_shares}"}
+
+    current_price = holding.get("current_price") or 0
+    cost_price = holding.get("cost_price") or 0
+    fund_code = holding["fund_code"]
+    fund_name = holding.get("fund_name", fund_code)
+
+    expected_proceeds = shares_to_sell * current_price
+    cost_basis = cost_price
+    expected_profit_loss = (current_price - cost_price) * shares_to_sell
+    expected_profit_rate = (expected_profit_loss / (cost_price * shares_to_sell)) if (cost_price > 0 and shares_to_sell > 0) else 0
+    remaining_shares = current_shares - shares_to_sell
+    remaining_value = remaining_shares * current_price
+
+    summary = get_portfolio_summary()
+    total_assets = summary.get("total_assets", 0) or 0
+    total_value_before = summary.get("total_value", 0) or 0
+    total_value_after = total_value_before - expected_proceeds
+    concentration_after = (remaining_value / total_value_after) if total_value_after > 0 else 0
+
+    warnings = []
+
+    if expected_profit_loss < 0:
+        loss_pct = abs(expected_profit_rate) * 100
+        warnings.append({
+            "type": "profit_warning",
+            "level": "info",
+            "message": f"当前亏损 {loss_pct:.1f}%，确认是否止损",
+        })
+
+    if expected_proceeds > 50000:
+        warnings.append({
+            "type": "single_amount",
+            "level": "warning",
+            "message": f"本次减仓金额 ¥{expected_proceeds:,.0f} 较大（>¥50,000），建议分批减仓",
+        })
+
+    if total_assets > 0 and expected_proceeds / total_assets > 0.10:
+        pct = expected_proceeds / total_assets * 100
+        warnings.append({
+            "type": "total_reduction",
+            "level": "warning",
+            "message": f"本次减仓占总资产 {pct:.1f}%（>10%），建议分批减仓",
+        })
+
+    if concentration_after > 0.20:
+        pct = concentration_after * 100
+        warnings.append({
+            "type": "concentration",
+            "level": "warning",
+            "message": f"减仓后该基金仍占总资产 {pct:.1f}%（>20%），集中度偏高",
+        })
+
+    return {
+        "fund_code": fund_code,
+        "fund_name": fund_name,
+        "shares_to_sell": shares_to_sell,
+        "current_price": current_price,
+        "expected_proceeds": round(expected_proceeds, 2),
+        "cost_basis": cost_basis,
+        "expected_profit_loss": round(expected_profit_loss, 2),
+        "expected_profit_rate": round(expected_profit_rate, 4),
+        "remaining_shares": remaining_shares,
+        "remaining_value": round(remaining_value, 2),
+        "total_assets_after": round(total_assets - expected_proceeds, 2),
+        "concentration_after": round(concentration_after, 4),
+        "warnings": warnings,
+    }
+
+
 def list_holdings(user_id: str = "default", account: str = None) -> list[dict]:
     """获取用户所有持仓，可选按账号筛选。"""
     conn = _get_conn()

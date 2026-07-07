@@ -54,6 +54,10 @@ class ConfirmTransactionRequest(BaseModel):
     fee: float = 0                          # 手续费（申购费/赎回费）
 
 
+class SellPreviewRequest(BaseModel):
+    shares: float  # 拟卖出份额
+
+
 class CreateAlertRequest(BaseModel):
     alert_type: str  # risk_warning | add_position | reduce_position | news_impact | valuation_alert
     title: str
