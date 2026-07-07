@@ -21,6 +21,10 @@ from db import (
     list_holdings, create_alert, save_llm_feedback,
     get_conversation_summary, save_conversation_summary,
     _get_conn,
+    create_stream_channel, append_stream_event, update_stream_heartbeat,
+    complete_stream_channel, fail_stream_channel, cancel_stream_channel,
+    get_latest_channel_for_message, mark_stream_channel_aborted,
+    is_stream_heartbeat_stale, list_stream_events, get_stream_channel,
 )
 from db.config import get_config, get_config_float, get_config_int
 from infra.state import running_agents as _running_agents
@@ -857,8 +861,14 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
                 if m["role"] == "assistant" and m["id"] > last_user_msg["id"]:
                     completed = get_completed_agent_count_for_message(conv_id, m["id"])
                     if completed > 0:
-                        logger.info(f"对话 {conv_id} user消息 {last_user_msg['id']} 已有 {completed} 个完成的 agent_runs（assistant msg={m['id']}），跳过重复编排")
-                        raise HTTPException(409, "该问题已处理完成，请勿重复发送。如需重新分析，请点击「重新生成」按钮")
+                        # 例外：如果 assistant 回答是错误占位文本，允许重发
+                        # （Pipeline 失败但未正确降级时可能出现）
+                        _error_placeholders = {"无法生成分析", "分析失败", "", None}
+                        if m.get("content") in _error_placeholders:
+                            logger.info(f"对话 {conv_id} assistant msg={m['id']} 内容为错误占位，允许重发")
+                        else:
+                            logger.info(f"对话 {conv_id} user消息 {last_user_msg['id']} 已有 {completed} 个完成的 agent_runs（assistant msg={m['id']}），跳过重复编排")
+                            raise HTTPException(409, "该问题已处理完成，请勿重复发送。如需重新分析，请点击「重新生成」按钮")
 
     # 解析 knowledge_scope
     rag_types = []
@@ -1017,18 +1027,31 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
 
         # 3. 普通聊天：直接调用 LLM 回答，不走专家流程
         if complexity == "chat" and not clarification.get("specialists"):
+            # chat 路径也走 channel 事件流持久化（支持断线续接）
+            stream_msg_id = create_message(conv_id, "assistant", "⏳ 分析进行中...", metadata=json.dumps({"execution_status": "streaming"}, ensure_ascii=False))
+            channel_id = create_stream_channel(
+                conversation_id=conv_id, message_id=stream_msg_id,
+                user_message_id=user_msg_id, trace_id=trace_id, complexity="chat",
+            )
+            logger.info(f"[trace:{trace_id}] chat 路径创建 channel {channel_id} for msg={stream_msg_id}")
+            if not client_disconnected:
+                yield _sse_event("channel_started", {"channel_id": channel_id, "message_id": stream_msg_id})
+
+            append_stream_event(channel_id, "status", {"message": "思考中..."})
             yield _sse_event("status", {"message": "思考中..."})
             # 获取对话历史（chat 类型需要）
             history = get_messages(conv_id, limit=20)
             msg_list = [{"role": m["role"], "content": m["content"]} for m in history]
-            yield _sse_event("progress", {
+            _progress_data = {
                 "phase": "chat",
                 "phase_index": 2,
                 "total_phases": 3,
                 "phase_label": "回答",
                 "substep": None,
                 "pct": 50,
-            })
+            }
+            append_stream_event(channel_id, "progress", _progress_data)
+            yield _sse_event("progress", _progress_data)
             # 构建上下文
             chat_messages = [{"role": "system", "content": ORCHESTRATOR_PROMPT}]
             if unified_context:
@@ -1053,19 +1076,28 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
                 answer = "抱歉，处理您的问题时出现了错误，请重试。"
 
             # 输出结果
-            yield _sse_event("answer", {"content": answer, "specialist_results": []})
-            yield _sse_event("done", {"duration_ms": int((time.time() - request_start) * 1000), "complexity": "chat"})
+            _answer_data = {"content": answer, "specialist_results": []}
+            append_stream_event(channel_id, "answer", _answer_data)
+            yield _sse_event("answer", _answer_data)
+            _done_data = {"duration_ms": int((time.time() - request_start) * 1000), "complexity": "chat"}
+            append_stream_event(channel_id, "done", _done_data)
+            yield _sse_event("done", _done_data)
+            # 标记 channel 完成
+            try:
+                complete_stream_channel(channel_id)
+            except Exception as _e:
+                logger.warning(f"[trace:{trace_id}] 标记 chat channel 完成失败: {_e}")
 
-            # 保存消息
+            # 保存消息（更新占位消息内容）
             metadata = {"complexity": "chat", "execution_status": "completed"}
-            msg_id = create_message(conv_id, "assistant", answer, metadata=json.dumps(metadata, ensure_ascii=False))
+            update_message_content_and_metadata(stream_msg_id, answer, metadata)
 
             # 基金代码幻觉验证（异步）
             try:
                 from agent.hallucination_guard import quick_check_fund_codes
                 codes = quick_check_fund_codes(answer)
                 if codes:
-                    asyncio.create_task(_async_verify_and_log(conv_id, msg_id, answer))
+                    asyncio.create_task(_async_verify_and_log(conv_id, stream_msg_id, answer))
             except Exception:
                 pass
 
@@ -1090,17 +1122,30 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
             # 只需要1个专家，直接调用
             agent_key = clarification["specialists"][0]
             if agent_key:
-                # 不检查断开连接，让后端任务继续执行
-                yield _sse_event("status", {"message": f"正在咨询{_get_specialist_name(agent_key)}..."})
+                # simple 路径也走 channel 事件流持久化（支持断线续接）
+                stream_msg_id = create_message(conv_id, "assistant", "⏳ 分析进行中...", metadata=json.dumps({"execution_status": "streaming"}, ensure_ascii=False))
+                channel_id = create_stream_channel(
+                    conversation_id=conv_id, message_id=stream_msg_id,
+                    user_message_id=user_msg_id, trace_id=trace_id, complexity="simple",
+                )
+                logger.info(f"[trace:{trace_id}] simple 路径创建 channel {channel_id} for msg={stream_msg_id}")
+                if not client_disconnected:
+                    yield _sse_event("channel_started", {"channel_id": channel_id, "message_id": stream_msg_id})
+
+                _status_data = {"message": f"正在咨询{_get_specialist_name(agent_key)}..."}
+                append_stream_event(channel_id, "status", _status_data)
+                yield _sse_event("status", _status_data)
                 # 进度：开始专家分析
-                yield _sse_event("progress", {
+                _progress_data = {
                     "phase": "specialist",
                     "phase_index": 2,
                     "total_phases": 3,
                     "phase_label": "专家分析",
                     "substep": f"{_get_specialist_name(agent_key)} 分析中",
                     "pct": 50,
-                })
+                }
+                append_stream_event(channel_id, "progress", _progress_data)
+                yield _sse_event("progress", _progress_data)
 
                 # 直接运行专家（传递轻量级 RAG 上下文）
                 def _run_expert():
@@ -1125,13 +1170,15 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
 
                 if "error" not in result:
                     # 发送专家完成事件
-                    yield _sse_event("specialist_done", {
+                    _spec_done_data = {
                         "agent_key": result.get("agent_key", agent_key),
                         "agent": result.get("agent", ""),
                         "icon": result.get("icon", ""),
                         "analysis": result.get("analysis", ""),
                         "duration_ms": result.get("duration_ms", 0),
-                    })
+                    }
+                    append_stream_event(channel_id, "specialist_done", _spec_done_data)
+                    yield _sse_event("specialist_done", _spec_done_data)
 
                     # 记录专家执行到 agent_runs
                     create_agent_run(
@@ -1161,12 +1208,14 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
                     answer = review["content"]
                     specialist_results[0]["analysis"] = answer
 
-                    yield _sse_event("answer", {
+                    _answer_data = {
                         "content": answer,
                         "specialist_results": specialist_results,
-                    })
+                    }
+                    append_stream_event(channel_id, "answer", _answer_data)
+                    yield _sse_event("answer", _answer_data)
 
-                    # 存储回复
+                    # 存储回复（更新占位消息）
                     metadata_dict = {
                         "specialist_results": [
                             {"agent_key": s.get("agent_key", ""), "agent": s.get("agent", ""), "icon": s.get("icon", ""), "analysis": s.get("analysis", "")[:3000]}
@@ -1177,8 +1226,8 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
                         "refined_query": clarification.get("refined_query", effective_query),
                         "reasoning_trail": result.get("reasoning_trail"),
                     }
-                    metadata = json.dumps(metadata_dict, ensure_ascii=False)
-                    msg_id = create_message(conv_id, "assistant", answer, metadata=metadata)
+                    update_message_content_and_metadata(stream_msg_id, answer, metadata_dict)
+                    msg_id = stream_msg_id
 
                     # 基金代码幻觉验证（异步）
                     try:
@@ -1218,15 +1267,29 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
                     _save_execution_trace(trace_id, conv_id, effective_query, "simple", "completed",
                                           total_ms, phase_timings, error_category)
 
-                    yield _sse_event("done", {
+                    _done_data = {
                         "message_id": msg_id,
                         "duration_ms": total_ms,
                         "phase_timings": phase_timings,
-                    })
+                    }
+                    append_stream_event(channel_id, "done", _done_data)
+                    yield _sse_event("done", _done_data)
+                    # 标记 channel 完成
+                    try:
+                        complete_stream_channel(channel_id)
+                    except Exception as _e:
+                        logger.warning(f"[trace:{trace_id}] 标记 simple channel 完成失败: {_e}")
                     return
                 else:
                     # 专家执行失败，回退到 Orchestrator
-                    yield _sse_event("status", {"message": "专家执行失败，切换到完整分析模式..."})
+                    _fail_status = {"message": "专家执行失败，切换到完整分析模式..."}
+                    append_stream_event(channel_id, "status", _fail_status)
+                    yield _sse_event("status", _fail_status)
+                    # 标记当前 channel 失败，后续走完整路径会创建新 channel
+                    try:
+                        fail_stream_channel(channel_id, result.get("error", "专家执行失败"))
+                    except Exception:
+                        pass
 
         # 4. 获取对话历史
         history = get_messages(conv_id, limit=20)
@@ -1430,6 +1493,14 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
                                    "message": f"分析已进行 {warn_at_sec // 60} 分钟，正在收尾中，请稍候。"})
 
                         et = event.get("type")
+                        # === 持久化事件到 stream_events（支持断线续接）===
+                        # 跳过增量块（answer_chunk/reasoning_chunk），最终全文在 answer 事件里
+                        if et and et not in ("answer_chunk", "reasoning_chunk"):
+                            try:
+                                event_seq = append_stream_event(channel_id, et, event)
+                                event["seq"] = event_seq
+                            except Exception as _e:
+                                logger.warning(f"[trace:{trace_id}] 持久化事件失败: {_e}")
                         # === 在线程中持久化（独立于 SSE 连接）===
                         if et == "specialist_done":
                             _prod_spec_results.append({"agent_key": event["agent_key"], "agent": event["agent"], "icon": event.get("icon", "🤖"), "analysis": event.get("analysis", ""), "duration_ms": event.get("duration_ms", 0)})
@@ -1442,22 +1513,47 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
                             reviewed = _save_final(event.get("content", ""), event.get("specialist_results", []), event.get("tool_calls", []), int((time.time() - _prod_start) * 1000))
                             event = dict(event)
                             event["content"] = reviewed
+                            # 标记 channel 完成
+                            try:
+                                complete_stream_channel(channel_id)
+                            except Exception as _e:
+                                logger.warning(f"[trace:{trace_id}] 标记 channel 完成失败: {_e}")
                         elif et == "cancelled":
                             _save_progress("cancelled")
+                            try:
+                                cancel_stream_channel(channel_id)
+                            except Exception as _e:
+                                logger.warning(f"[trace:{trace_id}] 标记 channel 取消失败: {_e}")
                         elif et == "error":
                             _save_failed(event.get("message", "未知错误"))
+                            try:
+                                fail_stream_channel(channel_id, event.get("message", "未知错误"))
+                            except Exception as _e:
+                                logger.warning(f"[trace:{trace_id}] 标记 channel 失败: {_e}")
                         q.put(event)
                 except CancelledError:
                     q.put({"type": "cancelled", "message": "用户取消了执行"})
                     _save_progress("cancelled")
+                    try:
+                        cancel_stream_channel(channel_id)
+                    except Exception:
+                        pass
                 except TimeoutError as e:
                     err = f"执行超时: {e}"
                     _save_failed(err)
+                    try:
+                        fail_stream_channel(channel_id, err)
+                    except Exception:
+                        pass
                     q.put({"type": "error", "message": err})
                 except Exception as e:
                     logger.error(f"[trace:{trace_id}] 后台执行异常: {e}", exc_info=True)
                     err = str(e)
                     _save_failed(err)
+                    try:
+                        fail_stream_channel(channel_id, err)
+                    except Exception:
+                        pass
                     q.put({"type": "error", "message": err})
                 finally:
                     _running_agents.pop(f"prod_{conv_id}", None)
@@ -1470,11 +1566,25 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
         # 提前创建 assistant 消息，获取 message_id 传给 orchestrator
         stream_msg_id = create_message(conv_id, "assistant", "⏳ 分析进行中...", metadata=json.dumps({"execution_status": "streaming"}, ensure_ascii=False))
 
+        # 创建 stream channel（事件流持久化，支持断线续接）
+        channel_id = create_stream_channel(
+            conversation_id=conv_id,
+            message_id=stream_msg_id,
+            user_message_id=user_msg_id,
+            trace_id=trace_id,
+            complexity=complexity,
+        )
+        logger.info(f"[trace:{trace_id}] 创建 channel {channel_id} for msg={stream_msg_id}")
+
         q = await asyncio.to_thread(_run_orchestrator_stream)
 
         client_disconnected = False
         done_data = {}
         _spec_done_count = 0
+
+        # 首事件：通知前端 channel_id（前端缓存用于切回时 replay）
+        if not client_disconnected:
+            yield _sse_event("channel_started", {"channel_id": channel_id, "message_id": stream_msg_id})
 
         # 简化的事件中继循环 — 持久化已在生产者线程完成
         while True:
