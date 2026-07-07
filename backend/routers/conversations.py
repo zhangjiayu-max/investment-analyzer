@@ -184,7 +184,7 @@ async def cancel_conversation_execution(conv_id: int):
     except Exception as e:
         logger.warning(f"持久化取消标记失败: {e}")
 
-    # 2. 标记 DB 状态为 cancelled
+    # 2. 标记消息 DB 状态为 cancelled
     msgs = get_messages(conv_id, limit=5)
     updated = 0
     for msg in reversed(msgs):
@@ -201,6 +201,25 @@ async def cancel_conversation_execution(conv_id: int):
                 updated += 1
             except Exception as e:
                 logger.warning(f"标记取消状态失败: {e}")
+
+    # 3. 标记 agent_runs 表中 running/pending 的记录为 cancelled
+    #    （之前漏了这步，导致取消后前端仍显示"运行中"的 agent）
+    try:
+        from db._conn import _get_conn
+        conn = _get_conn()
+        cur = conn.execute('''
+            UPDATE agent_runs
+            SET status = 'cancelled', completed_at = datetime('now','localtime')
+            WHERE conversation_id = ? AND status IN ('running', 'pending')
+        ''', (conv_id,))
+        agent_runs_updated = cur.rowcount
+        conn.commit()
+        conn.close()
+        if agent_runs_updated:
+            logger.info(f"取消对话 {conv_id}：已标记 {agent_runs_updated} 条 agent_runs 为 cancelled")
+    except Exception as e:
+        logger.warning(f"标记 agent_runs 取消状态失败: {e}")
+
     return {"ok": True, "updated": updated}
 
 
