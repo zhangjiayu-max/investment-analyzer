@@ -1193,6 +1193,20 @@ def init_db():
     except Exception as e:
         print(f"[db] 僵尸 channel 清理失败（不阻塞启动）: {e}")
 
+    # ── 迁移：更新 macro_strategist 的 system_prompt（增加搜索策略）──
+    # 种子数据用 INSERT OR IGNORE，已存在的记录不会被覆盖，需单独 UPDATE
+    try:
+        _cur = conn.execute("""
+            UPDATE agents SET system_prompt = system_prompt ||
+            '\n\n## 搜索策略（重要）\n调用 yingmi_search_news 时：\n1. 关键词用【板块/行业名】而非事件本身。如"自然灾害"→搜"基建/水利/农产品/水泥"\n2. 单次关键词不超过 6 个字，避免长句\n3. 一次分析最多搜 3 个不同板块关键词\n4. 搜不到结果时换板块名重试，不要重复搜同一关键词'
+            WHERE agent_key = 'macro_strategist'
+            AND system_prompt NOT LIKE '%搜索策略%'
+        """)
+        if _cur.rowcount > 0:
+            print(f"[db] 迁移 macro_strategist system_prompt（增加搜索策略）")
+    except Exception as e:
+        print(f"[db] macro_strategist prompt 迁移失败（不阻塞启动）: {e}")
+
     conn.commit()
     conn.close()
 

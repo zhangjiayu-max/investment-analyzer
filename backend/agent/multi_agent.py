@@ -497,13 +497,22 @@ def run_specialist(agent_key: str, query: str, context: str = "",
     MAX_TURNS = 3
     tool_calls_log = []
     answer = ""
+    # 收口提示：末轮强制要求输出文本结论，不再调工具，避免进入强制总结+重新生成链路
+    _CLOSURE_PROMPT = (
+        "你已收集到足够信息。请不要再调用工具，直接基于以上数据给出你的专业分析结论（至少 200 字）。"
+    )
 
     for turn in range(MAX_TURNS):
+        # 方案1：末轮收口 — 注入提示让 LLM 输出文本结论，而非继续调工具
+        if turn == MAX_TURNS - 1:
+            llm_messages.append({"role": "user", "content": _CLOSURE_PROMPT})
         # P3 优化：历史 tool 消息压缩，避免 context 膨胀
         _maybe_compress_tool_history(llm_messages)
+        # 方案3：caller 增加 turn 后缀，便于 token_usage 排查
+        _caller_turn = f"{_caller}#turn{turn}"
         try:
             response = _call_llm(
-                caller=_caller,
+                caller=_caller_turn,
                 trace_id=trace_id,
                 model=_model,
                 messages=llm_messages,
@@ -519,7 +528,7 @@ def run_specialist(agent_key: str, query: str, context: str = "",
                 logger.warning(f"[trace:{trace_id}] [{agent['name']}] 模型不兼容，回退到普通模式")
                 # 回退：不带 tools 调用
                 response = _call_llm(
-                    caller=_caller,
+                    caller=_caller_turn,
                     trace_id=trace_id,
                     model=_model,
                     messages=llm_messages,
@@ -612,80 +621,79 @@ def run_specialist(agent_key: str, query: str, context: str = "",
             if m.get("role") == "assistant" and m.get("content") and not m.get("tool_calls"):
                 answer = m["content"]
                 break
-        if not answer:
-            # 强制要求 LLM 总结
+
+    # 方案2：合并"强制总结 + 重新生成"为单次收口调用
+    # 原逻辑：answer 为空 → 强制总结（1次LLM）→ <200字 → 重新生成（1次LLM）= 最多2次
+    # 新逻辑：answer 为空或 <200 字 → 单次收口调用（1次LLM），prompt 直接要求 ≥200 字
+    _needs_closure = (not answer) or (len(answer) < 200) or ('<tool_call>' in answer)
+    if _needs_closure:
+        # 清理含 tool_call 标签的 answer
+        if answer and '<tool_call>' in answer:
+            answer = re.sub(r'<tool_call>.*?</function>', '', answer, flags=re.DOTALL).strip()
+        if len(answer) < 200:
+            logger.info(f'[trace:{trace_id}] [{agent["name"]}] answer 为空或过短({len(answer)}字)，触发单次收口')
             try:
                 llm_messages.append({
                     "role": "user",
-                    "content": "请根据以上工具调用结果，给出你的专业分析。",
+                    "content": "请基于以上工具调用结果，给出你的专业分析结论。要求：不调用工具，直接输出分析，至少 200 字。",
                 })
-                response = _call_llm(
-                    caller=_caller,
+                _closure_resp = _call_llm(
+                    caller=f"{_caller}#summary",
                     trace_id=trace_id,
                     model=_model,
                     messages=llm_messages,
                     temperature=get_config_float('llm.temperature_agent', 0.3),
                     max_tokens=get_config_int('llm.max_tokens_agent', 8000),
                 )
-                answer = response.choices[0].message.content or ""
-            except Exception:
-                # 最后兜底：拼接工具结果摘要
-                tool_summaries = []
-                for tc in tool_calls_log:
-                    preview = tc.get("result_preview", "")
-                    if preview and preview != "（无数据返回）":
-                        tool_summaries.append(preview[:500])
-                answer = "\n\n".join(tool_summaries) if tool_summaries else "分析过程遇到问题，请重试。"
+                _closure_answer = _closure_resp.choices[0].message.content or ""
+                if len(_closure_answer) >= 200:
+                    answer = _closure_answer
+                else:
+                    # 兜底：收口仍 <200 字 → 用工具结果拼接，不再二次调 LLM
+                    logger.warning(f'[trace:{trace_id}] [{agent["name"]}] 收口仍 {len(_closure_answer)} 字，用工具结果兜底')
+                    answer = _fallback_from_tool_results(tool_calls_log) or _closure_answer or "分析过程遇到问题，请重试。"
+            except Exception as _e:
+                logger.error(f'[trace:{trace_id}] [{agent["name"]}] 收口调用失败: {_e}')
+                answer = _fallback_from_tool_results(tool_calls_log) or "分析过程遇到问题，请重试。"
 
     duration_ms = int((time.time() - start_time) * 1000)
 
-    # 清理：如果 answer 中仍包含文本格式 tool_call 或 DSML 标记，去除之
+    # 清理 DSML 标记
     if answer:
-        if '<tool_call>' in answer:
-            cleaned = re.sub(r'<tool_call>.*?</function>', '', answer, flags=re.DOTALL).strip()
-            # P0-2 修复：旧逻辑 cleaned 过短时保留原 answer（含 tool_call 文本），
-            # 导致 cross_review 返回仅含函数调用标签的无效结果。
-            # 新逻辑：cleaned 必须 ≥200 字才采纳，否则重新调用 LLM 生成结论。
-            if len(cleaned) >= 200:
-                answer = cleaned
-            else:
-                logger.warning(f'[trace:{trace_id}] [{agent["name"]}] answer 清理后仅 {len(cleaned)} 字，重新生成结论')
-                try:
-                    llm_messages.append({
-                        "role": "user",
-                        "content": "请基于以上信息和工具结果，给出你的专业分析结论（不要调用工具，直接输出分析）。",
-                    })
-                    _regen_resp = _call_llm(
-                        caller=_caller,
-                        trace_id=trace_id,
-                        model=_model,
-                        messages=llm_messages,
-                        temperature=get_config_float('llm.temperature_agent', 0.3),
-                        max_tokens=get_config_int('llm.max_tokens_agent', 8000),
-                    )
-                    _regenerated = _regen_resp.choices[0].message.content or ""
-                    if _regenerated and len(_regenerated) >= 200:
-                        answer = _regenerated
-                    else:
-                        answer = "分析过程遇到问题，请重试。"
-                except Exception as _e:
-                    logger.error(f'[trace:{trace_id}] [{agent["name"]}] 重新生成失败: {_e}')
-                    answer = "分析过程遇到问题，请重试。"
         answer = _clean_dsml_from_content(answer)
 
     # Pipeline Phase C：估算 token 消耗（用于预算追踪）
     tokens_used = _estimate_specialist_tokens(llm_messages, answer, tool_calls_log)
+
+    # 失败检测：兜底文本或过短内容标记为 failed
+    _FALLBACK_ANSWERS = {"分析过程遇到问题，请重试。", "交叉审阅完成，请参考其他专家分析。"}
+    is_fallback = answer in _FALLBACK_ANSWERS or answer.startswith("（执行失败：") or len(answer.strip()) < 50
+    status = "failed" if is_fallback else "success"
 
     return {
         "agent_key": agent_key,
         "agent": agent["name"],
         "icon": agent["icon"],
         "analysis": answer,
+        "status": status,
         "structured": _parse_structured_output(answer, agent_key, agent["name"], trace_id, tool_calls_log, duration_ms),
         "tool_calls": tool_calls_log,
         "duration_ms": duration_ms,
         "tokens_used": tokens_used,
     }
+
+
+def _fallback_from_tool_results(tool_calls_log: list) -> str:
+    """收口失败兜底：用工具结果摘要拼接成 answer，避免二次调 LLM。
+
+    只在收口调用仍 <200 字或异常时使用，保证专家至少返回有数据支撑的文本。
+    """
+    tool_summaries = []
+    for tc in tool_calls_log:
+        preview = tc.get("result_preview", "")
+        if preview and preview != "（无数据返回）":
+            tool_summaries.append(preview[:500])
+    return "\n\n".join(tool_summaries) if tool_summaries else ""
 
 
 def _estimate_specialist_tokens(llm_messages: list, answer: str, tool_calls_log: list) -> int:

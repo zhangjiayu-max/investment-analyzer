@@ -173,14 +173,38 @@ def run_pipeline(
         # ── Phase 4: 综合 ──────────────────
         state.transition_to(PipelinePhase.SYNTHESIS)
         yield {"type": EVENT_PHASE_START, "phase": PipelinePhase.SYNTHESIS.value}
+
+        # 关键防护：专家执行结果为空 → 主动降级到 ReAct，不返回占位文本
+        # 这样 orchestrator 会走 ReAct 路径，前端能看到"重新生成"按钮
+        phase3_specialists = phase3_result.get("specialists", [])
+        if not phase3_specialists:
+            logger.warning(f"[pipeline] Phase 3 无专家结果，降级到 ReAct")
+            yield {"type": EVENT_DEGRADE,
+                   "reason": "no_specialist_results",
+                   "message": "Pipeline 未产出专家分析，降级到标准模式"}
+            state.transition_to(PipelinePhase.FAILED)
+            state.error = "no_specialist_results"
+            return
+
         phase4_result = _phase_synthesis(
             state, query, phase3_result, blackboard, trace_id
         )
         state.set_phase_result(PipelinePhase.SYNTHESIS.value, phase4_result)
         state.answer = phase4_result.get("answer", "")
+
+        # 二次防护：综合结果为空或为占位文本 → 降级
+        if not state.answer or state.answer == "无法生成分析":
+            logger.warning(f"[pipeline] Phase 4 综合结果为空/占位，降级到 ReAct")
+            yield {"type": EVENT_DEGRADE,
+                   "reason": "empty_synthesis",
+                   "message": "Pipeline 综合失败，降级到标准模式"}
+            state.transition_to(PipelinePhase.FAILED)
+            state.error = "empty_synthesis"
+            return
+
         yield {"type": EVENT_PHASE_END, "phase": PipelinePhase.SYNTHESIS.value}
         yield {"type": EVENT_ANSWER, "content": state.answer,
-               "specialist_results": phase3_result.get("specialists", []),
+               "specialist_results": phase3_specialists,
                "tool_calls": phase3_result.get("tool_calls", [])}
 
         # ── Phase 5: 记忆持久化 ──────────────────
@@ -366,10 +390,16 @@ def _phase_planning(
         from agent.plan_executor import generate_plan
         from db.agents import load_specialist_agents
 
-        # 加载可用专家
-        specialists = load_specialist_agents()
-        if not specialists:
+        # 加载可用专家（load_specialist_agents 返回 dict，需转为 list）
+        specialists_dict = load_specialist_agents()
+        if not specialists_dict:
             return {"plan": None, "specialists": [], "fallback": True}
+
+        # 转为 generate_plan 期望的 list 格式
+        specialists = [
+            {"agent_key": k, **v}
+            for k, v in specialists_dict.items()
+        ]
 
         # 调用 Plan 生成
         plan = generate_plan(
@@ -386,8 +416,16 @@ def _phase_planning(
         }
     except Exception as e:
         logger.warning(f"[pipeline] Plan 生成失败，降级全量执行: {e}")
-        # 降级：返回空 plan，Phase 3 会走 fallback
-        return {"plan": None, "specialists": [], "fallback": True, "error": str(e)}
+        # 降级：仍尝试加载专家，供 Phase 3 fallback 使用
+        try:
+            specialists_dict = load_specialist_agents()
+            specialists = [
+                {"agent_key": k, **v}
+                for k, v in (specialists_dict or {}).items()
+            ]
+        except Exception:
+            specialists = []
+        return {"plan": None, "specialists": specialists, "fallback": True, "error": str(e)}
 
 
 # ── Phase 3: 专家执行 ──────────────────────────
@@ -527,6 +565,8 @@ def _phase_execution(
                 "agent": agent_name,
                 "icon": agent_icon,
                 "analysis": result.get("analysis", ""),
+                "status": result.get("status", "success"),
+                "error": result.get("status") == "failed",
                 "duration_ms": duration_ms,
             }
 
@@ -541,8 +581,9 @@ def _phase_execution(
                 "agent": agent_name,
                 "icon": agent_icon,
                 "analysis": f"（执行失败：{e}）",
-                "duration_ms": duration_ms,
+                "status": "failed",
                 "error": True,
+                "duration_ms": duration_ms,
             }
             continue
 
@@ -635,6 +676,8 @@ def _fallback_execution(
                 "agent": agent_name,
                 "icon": agent_icon,
                 "analysis": result.get("analysis", ""),
+                "status": result.get("status", "success"),
+                "error": result.get("status") == "failed",
                 "duration_ms": duration_ms,
             }
         except Exception as e:
@@ -646,8 +689,9 @@ def _fallback_execution(
                 "agent": agent_name,
                 "icon": agent_icon,
                 "analysis": f"（执行失败：{e}）",
-                "duration_ms": duration_ms,
+                "status": "failed",
                 "error": True,
+                "duration_ms": duration_ms,
             }
 
     return {"specialists": results, "tool_calls": tool_calls}
@@ -788,7 +832,7 @@ def _phase_memory(
 
     # 1. 保存分析结论
     try:
-        from db.agents import save_analysis_conclusion
+        from db.analysis_conclusions import save_analysis_conclusion
         conclusion_id = save_analysis_conclusion(
             conversation_id=state.conversation_id,
             message_id=state.message_id,

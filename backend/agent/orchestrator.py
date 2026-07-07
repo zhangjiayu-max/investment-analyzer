@@ -1336,6 +1336,8 @@ def build_clarification_prompt(available_specialists: list[dict] | None = None) 
 1. **对比类问题只用 1 个专家**,不要触发多 agent
 2. **"可以买吗"是 medium**,不是 complex
 3. **简单建议类是 medium**,只需 1 个专家
+4. **涉及持仓操作（补仓/加仓/减仓/调仓/加减仓）必选 allocation_advisor**，即使用户没明确说"我的持仓"，只要提到"补仓""加仓"等操作词就要选
+5. **灾害/事件利好问题**：用户问某事件对什么有利好，必选 macro_strategist，且 specialist_tasks 中注明"搜索受益板块新闻，关键词用板块名而非事件本身"
 
 ## 输出格式(只输出JSON)
 {{"complexity":"chat|simple|medium|complex","specialists":["expert1"],"reason":"判断原因","refined_query":"优化后的查询","confidence":0.95}}

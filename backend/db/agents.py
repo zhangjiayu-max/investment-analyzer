@@ -467,7 +467,13 @@ def _init_wealth_specialists(conn):
                 "1. 分析宏观经济数据\n"
                 "2. 判断周期位置\n"
                 "3. 评估政策影响\n"
-                "4. 给出行业配置建议"
+                "4. 给出行业配置建议\n\n"
+                "## 搜索策略（重要）\n"
+                "调用 yingmi_search_news 时：\n"
+                "1. 关键词用【板块/行业名】而非事件本身。如\"自然灾害\"→搜\"基建/水利/农产品/水泥\"\n"
+                "2. 单次关键词不超过 6 个字，避免长句\n"
+                "3. 一次分析最多搜 3 个不同板块关键词\n"
+                "4. 搜不到结果时换板块名重试，不要重复搜同一关键词"
             ),
             "knowledge_scope": '{"rag_types": ["article", "analysis", "book"], "kyc_dimensions": ["investment_horizon"]}',
         },

@@ -2153,10 +2153,14 @@ def _calculate_quality_metrics(specialist_results: list, rag_result: dict,
     else:
         tool_success_rate = 1.0
 
-    # 专家完成度：有分析内容就算完成（不限制长度）
+    # 专家完成度：status=success 且非兜底文本 且 ≥200 字才算完成
+    _FALLBACK_BLACKLIST = {"分析过程遇到问题，请重试。", "交叉审阅完成，请参考其他专家分析。"}
     if specialist_results:
         completed = len([s for s in specialist_results
-                        if s.get("analysis") and len(s["analysis"].strip()) > 0])
+                        if s.get("analysis")
+                        and s.get("status", "success") == "success"
+                        and s["analysis"].strip() not in _FALLBACK_BLACKLIST
+                        and len(s["analysis"].strip()) >= 200])
         specialist_completion = completed / len(specialist_results)
     else:
         specialist_completion = 0.0
