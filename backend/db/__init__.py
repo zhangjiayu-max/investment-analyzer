@@ -185,6 +185,21 @@ from db.async_tasks import (
     get_latest_done_task,
 )
 
+# SSE 对话事件流持久化
+from db.stream_channels import (
+    init_stream_channel_tables, create_channel as create_stream_channel,
+    get_channel as get_stream_channel,
+    get_latest_channel_for_message, update_heartbeat as update_stream_heartbeat,
+    complete_channel as complete_stream_channel,
+    fail_channel as fail_stream_channel,
+    cancel_channel as cancel_stream_channel,
+    mark_aborted as mark_stream_channel_aborted,
+    is_heartbeat_stale as is_stream_heartbeat_stale,
+    cleanup_stale_channels as cleanup_stale_stream_channels,
+    append_event as append_stream_event,
+    list_events as list_stream_events,
+)
+
 # 理财决策中枢
 from db.decisions import (
     init_decision_tables, create_decision, create_decision_action,
@@ -1077,6 +1092,9 @@ def init_db():
     # ── 异步分析任务表 ──────────────────────────────────────
     init_async_tasks_table(conn)
 
+    # ── SSE 对话事件流持久化表 ──────────────────────────────────────
+    init_stream_channel_tables(conn)
+
     # ── 理财决策中枢表 ──────────────────────────────────────
     init_decision_tables(conn)
 
@@ -1125,6 +1143,55 @@ def init_db():
         _migrate_text_percentile_to_real(conn)
     except Exception as e:
         print(f"[db] percentile 迁移失败（不阻塞启动）: {e}")
+
+    # ── 清理僵尸 agent_run：启动时把所有 status='running' 的记录标记为 failed ──
+    # 根因：后端进程被杀/崩溃时，running 状态的 agent_run 不会被清理，前端永远显示"执行中"
+    try:
+        cur = conn.execute(
+            "UPDATE agent_runs SET status='failed', completed_at=datetime('now','localtime'), "
+            "duration_ms=COALESCE(duration_ms, 0) WHERE status='running'"
+        )
+        if cur.rowcount > 0:
+            print(f"[db] 清理 {cur.rowcount} 个僵尸 agent_run（running → failed）")
+        # 同步清理 messages.metadata 中 execution_status='streaming' 的记录
+        import json as _json
+        rows = conn.execute(
+            "SELECT id, metadata FROM messages WHERE metadata LIKE '%streaming%'"
+        ).fetchall()
+        cleaned = 0
+        for r in rows:
+            try:
+                meta = _json.loads(r["metadata"]) if r["metadata"] else {}
+                if meta.get("execution_status") == "streaming":
+                    meta["execution_status"] = "failed"
+                    meta["error_message"] = "后端进程重启，执行中断"
+                    conn.execute(
+                        "UPDATE messages SET metadata=? WHERE id=?",
+                        [_json.dumps(meta, ensure_ascii=False), r["id"]],
+                    )
+                    cleaned += 1
+            except Exception:
+                pass
+        if cleaned > 0:
+            print(f"[db] 清理 {cleaned} 个 streaming 状态的 message")
+    except Exception as e:
+        print(f"[db] 僵尸清理失败（不阻塞启动）: {e}")
+
+    # ── 清理僵尸 stream_channels：进程重启后所有 running 标记 aborted ──
+    # 根因：producer 线程在进程重启后已死，running channel 不可能再产事件
+    # 若不清理，前端切回来误判"任务还在跑"会触发自动重跑
+    # 注意：直接用 init_db 已有的 conn 执行，避免获取新连接导致 "database is locked"
+    try:
+        _cur = conn.execute("""
+            UPDATE stream_channels
+            SET status = 'aborted', abort_reason = 'process restart',
+                finished_at = datetime('now','localtime')
+            WHERE status = 'running'
+        """)
+        if _cur.rowcount > 0:
+            print(f"[db] 清理 {_cur.rowcount} 个僵尸 stream_channel（running → aborted）")
+    except Exception as e:
+        print(f"[db] 僵尸 channel 清理失败（不阻塞启动）: {e}")
 
     conn.commit()
     conn.close()
