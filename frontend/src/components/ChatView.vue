@@ -9,6 +9,8 @@ import {
   continueConversation,
   retryConversationMessage,
   resumeConversationStream,
+  replayConversationStream,
+  getConversationExecutionState,
   listTraces, listAgents,
   getConversationEvaluation, evaluateConversation, evaluateConversationWithLLM,
   createDecisionFromChat,
@@ -251,6 +253,55 @@ async function autoRecoverIfNeeded(convId) {
 }
 
 function tryResumeConversation(convId) {
+  // 新流程：先查 execution-state，按 channel 状态分流
+  getConversationExecutionState(convId).then(({ data }) => {
+    const item = data?.item
+    if (!item) {
+      // 无可恢复消息 → 不做任何操作
+      return
+    }
+    const channelId = item.channel_id
+    const channelStatus = item.channel_status
+
+    if (!channelId) {
+      // 旧对话无 channel → 走旧 resume 逻辑兼容
+      _legacyResumeConversation(convId)
+      return
+    }
+
+    if (channelStatus === 'running') {
+      // 任务还活着 → 调 replay 从头回放（前端尚未渲染任何事件）
+      showToast('正在续接任务...', 'info')
+      _reconnectReplay(convId, channelId, 0)
+    } else if (channelStatus === 'completed') {
+      // 已完成 → 直接刷新消息
+      loadMessages(convId).then(() => {
+        showToast('任务已完成', 'success')
+        loadConversations()
+        nextTick(() => scrollToBottom())
+      })
+    } else {
+      // failed / aborted / cancelled → 刷新消息显示真实状态 + 重试按钮
+      finishStream(convId)
+      removeTask(convId)
+      loadMessages(convId).then(() => {
+        if (channelStatus === 'aborted') {
+          showToast('任务中断，可点击「重新生成」重试', 'info')
+        } else if (channelStatus === 'failed') {
+          showToast('对话执行失败，可点击「重新生成」重试', 'info')
+        } else if (channelStatus === 'cancelled') {
+          showToast('对话已取消，可点击「继续分析」重新执行', 'info')
+        }
+      })
+    }
+  }).catch(err => {
+    console.warn('[ChatView] 查询 execution-state 失败，回退到旧 resume:', err)
+    _legacyResumeConversation(convId)
+  })
+}
+
+// 旧 resume 逻辑（兼容无 channel 的旧对话）
+function _legacyResumeConversation(convId) {
   const controller = resumeConversationStream(convId, (event) => {
     routeStreamEvent(convId, event, {
       onAnswer: (cid, data, state) => {
@@ -280,7 +331,6 @@ function tryResumeConversation(convId) {
         if (errorData.code === 'RESUME_FAILED') {
           finishStream(cid)
           removeTask(cid)
-          // 409 表示对话已取消/失败/重复请求，刷新消息显示真实状态，不自动重发
           loadMessages(cid).then(() => {
             const lastAssistant = [...messages.value].reverse().find(m => m.role === 'assistant')
             const status = lastAssistant?.execution_status
@@ -290,8 +340,6 @@ function tryResumeConversation(convId) {
               showToast('对话执行失败，可点击「重新生成」重试', 'info')
             } else if (status === 'completed') {
               showToast('任务已完成', 'success')
-            } else {
-              console.log('[ChatView] 恢复对话返回 409，当前状态:', status)
             }
           })
           return
@@ -300,6 +348,71 @@ function tryResumeConversation(convId) {
         removeTask(cid)
         loadMessages(cid).then(() => {
           showToast('任务状态已更新', 'info')
+        })
+      },
+    })
+  })
+  startStream(convId, controller)
+  addTask(convId, null, selectedConv.value?.title || '')
+}
+
+// replay 续接：切回页面时续接 channel 事件流
+function _reconnectReplay(convId, channelId, lastSeq) {
+  const controller = replayConversationStream(convId, channelId, lastSeq, (event) => {
+    // replay_end 事件：回放结束，清理状态
+    if (event.type === 'replay_end') {
+      const status = event.data?.status
+      finishStream(convId)
+      removeTask(convId)
+      if (status === 'completed') {
+        loadMessages(convId).then(() => {
+          showToast('任务已完成', 'success')
+          loadConversations()
+          nextTick(() => scrollToBottom())
+        })
+      } else if (status === 'aborted' || status === 'failed') {
+        loadMessages(convId).then(() => {
+          showToast('任务中断，可点击「重新生成」重试', 'info')
+        })
+      } else if (status === 'cancelled') {
+        loadMessages(convId).then(() => {
+          showToast('对话已取消', 'info')
+        })
+      }
+      return
+    }
+    // channel_started 事件：replay 不需要再次缓存 channel_id
+    if (event.type === 'channel_started') return
+    // 其他事件复用 routeStreamEvent 处理
+    routeStreamEvent(convId, event, {
+      onAnswer: (cid, data, state) => {
+        if (selectedConv.value?.id !== cid) return
+        const msgIndex = messages.value.findIndex(m =>
+          m.role === 'assistant' && (m.execution_status === 'streaming' || m.streaming)
+        )
+        if (msgIndex >= 0) {
+          messages.value[msgIndex].content = data.content
+          messages.value[msgIndex].specialist_results = state.completedSpecialists.filter(s => !s.is_cross_review)
+          messages.value[msgIndex].cross_review_results = state.completedCrossReviews
+          messages.value[msgIndex].tool_calls = state.currentToolCalls
+          messages.value = [...messages.value]
+        }
+        nextTick(() => scrollToBottom())
+      },
+      onDone: (cid) => {
+        finishStream(cid)
+        removeTask(cid)
+        loadMessages(cid).then(() => {
+          showToast('任务已完成', 'success')
+          loadConversations()
+          nextTick(() => scrollToBottom())
+        })
+      },
+      onError: (cid, errorData) => {
+        finishStream(cid)
+        removeTask(cid)
+        loadMessages(cid).then(() => {
+          showToast('任务中断，可点击「重新生成」重试', 'info')
         })
       },
     })
