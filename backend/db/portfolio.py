@@ -118,6 +118,92 @@ def get_holding_by_fund(fund_code: str, user_id: str = "default") -> dict | None
     return dict(row) if row else None
 
 
+def get_dca_suggestion(holding_id: int) -> dict:
+    """根据4%定投法返回加仓建议。
+
+    规则：基础¥500/档，每跌4%加一档，最多3档。
+    - 盈利：建议观望（recommended_amount=0, advice=watch）
+    - 亏损 0~4%：第1档 ¥500
+    - 亏损 4~8%：第2档 ¥1000
+    - 亏损 8~12%：第3档 ¥1500
+    - 亏损 >12%：封顶¥1500 + 提示超过覆盖范围
+    """
+    holding = get_holding(holding_id)
+    if not holding:
+        return {"error": "持仓不存在"}
+
+    profit_rate = holding.get("profit_rate")
+    fund_code = holding["fund_code"]
+    fund_name = holding.get("fund_name", fund_code)
+
+    # 查询近30天加仓次数（用户手动买入，排除系统交易）
+    conn = _get_conn()
+    try:
+        from datetime import datetime, timedelta
+        cutoff = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
+        recent_count = conn.execute("""
+            SELECT COUNT(*) as cnt FROM portfolio_transactions
+            WHERE holding_id = ? AND transaction_type = 'buy'
+              AND (is_system IS NULL OR is_system = 0)
+              AND transaction_date >= ?
+        """, (holding_id, cutoff)).fetchone()["cnt"]
+        today = datetime.now().strftime("%Y-%m-%d")
+        today_count = conn.execute("""
+            SELECT COUNT(*) as cnt FROM portfolio_transactions
+            WHERE holding_id = ? AND transaction_type = 'buy'
+              AND (is_system IS NULL OR is_system = 0)
+              AND transaction_date = ?
+        """, (holding_id, today)).fetchone()["cnt"]
+    finally:
+        conn.close()
+
+    BASE_AMOUNT = 500
+    TIER_STEP = 500
+    MAX_TIERS = 3
+
+    if profit_rate is None:
+        advice = "watch"
+        recommended = 0
+        tier = 0
+        rule = "无法计算盈亏率，建议观望"
+    elif profit_rate > 0:
+        advice = "watch"
+        recommended = 0
+        tier = 0
+        rule = f"当前盈利 {profit_rate*100:.1f}%，建议观望"
+    else:
+        loss_pct = -profit_rate * 100
+        tier = min(int(loss_pct / 4) + 1, MAX_TIERS)
+        recommended = BASE_AMOUNT + (tier - 1) * TIER_STEP
+        if tier >= MAX_TIERS and loss_pct > 12:
+            advice = "continue"
+            rule = f"基础¥500/档，每跌4%加一档，当前亏损{loss_pct:.1f}%对应第{tier}档（已超过定投法覆盖范围，建议结合基本面分析）"
+        else:
+            advice = "continue"
+            rule = f"基础¥500/档，每跌4%加一档，当前亏损{loss_pct:.1f}%对应第{tier}档"
+
+    if recent_count >= 3:
+        advice = "pause"
+        rule += f"；近30天已加仓{recent_count}次，建议放缓节奏"
+
+    return {
+        "fund_code": fund_code,
+        "fund_name": fund_name,
+        "current_profit_rate": profit_rate,
+        "current_shares": holding.get("shares", 0),
+        "current_value": holding.get("current_value"),
+        "suggestion": {
+            "recommended_amount": recommended,
+            "tier": tier,
+            "max_tiers": MAX_TIERS,
+            "rule": rule,
+            "already_added_today": today_count > 0,
+            "recent_add_count_30d": recent_count,
+        },
+        "advice": advice,
+    }
+
+
 def list_holdings(user_id: str = "default", account: str = None) -> list[dict]:
     """获取用户所有持仓，可选按账号筛选。"""
     conn = _get_conn()

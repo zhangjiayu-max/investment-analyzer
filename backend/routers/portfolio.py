@@ -933,6 +933,16 @@ async def refresh_single_price_api(holding_id: int):
     return {"ok": True, "fund_code": holding["fund_code"], "nav": nav_data}
 
 
+@router.get("/api/portfolio/{holding_id}/dca-suggestion")
+async def get_dca_suggestion_api(holding_id: int):
+    """获取加仓建议（4%定投法）。"""
+    from db.portfolio import get_dca_suggestion
+    result = get_dca_suggestion(holding_id)
+    if "error" in result:
+        raise HTTPException(404, result["error"])
+    return result
+
+
 @router.post("/api/portfolio/snapshot")
 async def save_snapshot_api():
     """手动保存今日持仓快照（每日自动快照由定时任务触发）。"""
