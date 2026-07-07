@@ -80,6 +80,7 @@ import {
   refreshPortfolioPrice,
   getDcaSuggestion,
   previewSell,
+  autoConfirmTransaction,
   lookupFundInfo, getFundHoldings,
   getCashBalance, adjustCashBalance,
   getFundNavHistory,
@@ -1062,6 +1063,8 @@ const confirmTxData = ref(null)
 const confirmTxPrice = ref(0)
 const confirmTxFee = ref(0)
 const confirmTxShares = ref(0)
+const autoConfirmLoading = ref(false)
+const batchConfirmLoading = ref(false)
 
 // Pending transactions reminder
 const pendingTxs = ref([])
@@ -3071,6 +3074,38 @@ function openConfirmTx(tx) {
   })
 }
 
+async function fetchAutoNav() {
+  const tx = confirmTxData.value
+  if (!tx?.id) return
+  autoConfirmLoading.value = true
+  try {
+    const { data } = await autoConfirmTransaction(tx.id)
+    confirmTxPrice.value = data.confirmed_price
+    if (data.nav_source === 'latest') {
+      showToast(data.message, 'warning')
+    } else {
+      showToast(`已获取净值 ${data.confirmed_price}`)
+    }
+  } catch (e) {
+    showToast('自动获取净值失败: ' + (e.response?.data?.detail || e.message), 'error')
+  } finally {
+    autoConfirmLoading.value = false
+  }
+}
+
+async function batchAutoConfirm() {
+  batchConfirmLoading.value = true
+  try {
+    const { data } = await autoConfirmPortfolioTransactions()
+    showToast(`批量确认完成：${data.result?.confirmed || 0} 笔成功`, data.result?.failed ? 'warning' : 'success')
+    loadData()
+  } catch (e) {
+    showToast('批量确认失败: ' + (e.response?.data?.detail || e.message), 'error')
+  } finally {
+    batchConfirmLoading.value = false
+  }
+}
+
 async function submitConfirmTx() {
   if (confirmTxPrice.value <= 0) {
     showToast('确认净值必须大于 0', 'error')
@@ -3293,6 +3328,9 @@ function txDisplayAmount(tx) {
         </svg>
         <strong>{{ pendingTxs.length }} 笔交易待确认</strong>
         <span class="pending-hint">（系统会按 A 股交易日和提交时间自动确认；净值暂未披露时可手动处理）</span>
+        <button class="btn-sm btn-primary" @click="batchAutoConfirm" :disabled="batchConfirmLoading">
+          {{ batchConfirmLoading ? '确认中...' : '一键确认所有到期交易' }}
+        </button>
       </div>
       <div class="pending-list">
         <div v-for="tx in pendingTxs" :key="tx.id" class="pending-item">
@@ -5458,6 +5496,9 @@ function txDisplayAmount(tx) {
                 <label>T+1 确认净值 *</label>
                 <input v-model.number="confirmTxPrice" type="text" inputmode="decimal" step="0.0001" class="input-field" placeholder="输入确认日的实际净值" required />
               </div>
+              <button type="button" class="btn-sm btn-secondary" @click="fetchAutoNav" :disabled="autoConfirmLoading">
+                {{ autoConfirmLoading ? '获取中...' : '自动获取净值' }}
+              </button>
               <div v-if="confirmTxData?.transaction_type === 'sell'" class="form-group" style="margin-top:0.75rem">
                 <label>实际卖出份额</label>
                 <input v-model.number="confirmTxShares" type="text" inputmode="decimal" step="0.01" min="0" class="input-field" :placeholder="'提交份额: ' + (confirmTxData?.submitted_shares || 0)" />

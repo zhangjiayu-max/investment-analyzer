@@ -1223,6 +1223,11 @@ export function previewSell(holdingId, shares) {
   return api.post(`/portfolio/${holdingId}/sell-preview`, { shares })
 }
 
+/** 自动获取净值确认交易 */
+export function autoConfirmTransaction(txId) {
+  return api.post(`/portfolio/transactions/${txId}/auto-confirm`, {}, { timeout: 30000 })
+}
+
 /** 获取持仓分散度分析 */
 export function getPortfolioDiversification() {
   return api.get('/portfolio/analysis/diversification')
