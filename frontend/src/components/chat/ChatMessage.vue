@@ -52,6 +52,14 @@ function getEvalStatusIcon(messageId) {
   return 'chart'
 }
 
+// 检测消息是否为错误占位响应（Pipeline 失败但未正确降级时可能出现）
+const ERROR_PLACEHOLDERS = ['无法生成分析', '分析失败', '生成失败', '处理失败']
+function isErrorResponse(msg) {
+  const content = (msg?.content || '').trim()
+  if (!content) return true
+  return ERROR_PLACEHOLDERS.some(p => content === p || content.startsWith(p))
+}
+
 function getEvalStatusTitle(messageId) {
   const state = props.messageEvalStates[messageId]
   if (!state) return '点击进行质量评估'
@@ -138,6 +146,27 @@ function toolDisplayName(name) {
 
 function filterToolCalls(toolCalls) {
   return (toolCalls || []).filter(tc => tc.tool_name !== '_ragSources')
+}
+
+// 检测专家是否失败（status=failed 或 analysis 是兜底文本）
+const FALLBACK_TEXTS = ['分析过程遇到问题，请重试。', '交叉审阅完成，请参考其他专家分析。']
+function isSpecialistFailed(s) {
+  if (s.status === 'failed' || s.error) return true
+  const text = (s.analysis || '').trim()
+  if (FALLBACK_TEXTS.includes(text)) return true
+  if (text.startsWith('（执行失败：')) return true
+  return false
+}
+
+// 检测工具是否无结果（total=0 / items=[] / 空字符串）
+function isToolEmpty(tc) {
+  const preview = (tc.result_preview || '').trim()
+  if (!preview) return true
+  // 检测 JSON 结构中的空结果
+  if (preview.includes('"total": 0') || preview.includes('"total":0')) return true
+  if (preview.includes('"items": []') || preview.includes('"items":[]')) return true
+  if (preview === '（无数据返回）') return true
+  return false
 }
 
 function copyMessageContent(msg, event) {
@@ -388,7 +417,7 @@ const tradeSuggestions = computed(() => {
         </span>
       </div>
       <!-- 执行状态徽章 -->
-      <div v-if="msg.execution_status && msg.execution_status !== 'completed'" class="execution-status-badge" :class="'status-' + msg.execution_status">
+      <div v-if="msg.execution_status && (msg.execution_status !== 'completed' || isErrorResponse(msg))" class="execution-status-badge" :class="'status-' + msg.execution_status">
         <template v-if="['queued', 'streaming', 'resuming'].includes(msg.execution_status)">
           <Icon name="hourglass" size="13" class="inline-icon" /> 后台执行中
           <button class="btn-retry btn-ai-action" @click="emit('resume', convId)" title="恢复连接"><Icon name="refresh" size="12" class="inline-icon" /> 恢复连接<span class="ai-agent-tooltip">投资分析助手</span></button>
@@ -399,18 +428,20 @@ const tradeSuggestions = computed(() => {
           <button class="btn-retry btn-ai-action" @click="emit('continue-analysis', msg)" title="继续分析"><Icon name="arrow-right" size="12" class="inline-icon" /> 继续分析<span class="ai-agent-tooltip">投资分析助手</span></button>
         </template>
         <template v-else-if="msg.execution_status === 'timeout'"><Icon name="alarm-clock" size="13" class="inline-icon" /> 执行超时</template>
-        <button v-if="['failed', 'cancelled', 'timeout'].includes(msg.execution_status)" class="btn-retry btn-ai-action" @click="emit('regenerate', msg)" title="重新生成"><Icon name="refresh" size="12" class="inline-icon" /> 重新生成<span class="ai-agent-tooltip">投资分析助手</span></button>
+        <template v-else-if="msg.execution_status === 'completed' && isErrorResponse(msg)"><Icon name="error" size="13" class="inline-icon" /> 分析失败（未产出有效内容）</template>
+        <button v-if="['failed', 'cancelled', 'timeout'].includes(msg.execution_status) || (msg.execution_status === 'completed' && isErrorResponse(msg))" class="btn-retry btn-ai-action" @click="emit('regenerate', msg)" title="重新生成"><Icon name="refresh" size="12" class="inline-icon" /> 重新生成<span class="ai-agent-tooltip">投资分析助手</span></button>
         <button v-else-if="index > 0" class="btn-retry btn-ai-action" @click="emit('retry', msg)" title="重试"><Icon name="refresh" size="12" class="inline-icon" /> 重试<span class="ai-agent-tooltip">投资分析助手</span></button>
       </div>
       <!-- 专家分析展示 -->
       <div v-if="msg.specialist_results && msg.specialist_results.length" class="specialists-container">
-        <div v-for="(s, j) in msg.specialist_results" :key="j" class="specialist-item">
+        <div v-for="(s, j) in msg.specialist_results" :key="j" class="specialist-item" :class="{ 'specialist-failed': isSpecialistFailed(s) }">
           <div class="specialist-header" @click="s.expanded = !s.expanded">
-            <span class="specialist-icon">{{ s.icon }}</span>
+            <span class="specialist-icon">{{ isSpecialistFailed(s) ? '⚠️' : s.icon }}</span>
             <span class="specialist-name">{{ s.agent }}</span>
+            <span v-if="isSpecialistFailed(s)" class="specialist-failed-badge">失败</span>
             <span v-if="s.duration_ms" class="specialist-time">{{ (s.duration_ms / 1000).toFixed(1) }}s</span>
-            <!-- 专家反馈按钮 -->
-            <div class="specialist-feedback" @click.stop>
+            <!-- 专家反馈按钮（失败态隐藏） -->
+            <div v-if="!isSpecialistFailed(s)" class="specialist-feedback" @click.stop>
               <template v-if="specialistFeedback[index + '_' + s.agent_key]">
                 <span class="feedback-done">{{ specialistFeedback[index + '_' + s.agent_key] === 'helpful' ? '已赞' : '已踩' }} <Icon :name="specialistFeedback[index + '_' + s.agent_key] === 'helpful' ? 'thumbs-up' : 'thumbs-down'" size="12" class="inline-icon" /></span>
               </template>
@@ -422,8 +453,15 @@ const tradeSuggestions = computed(() => {
             <Icon name="chevron-down" size="12" class="specialist-toggle" :class="{ expanded: s.expanded }" />
           </div>
           <div v-if="s.expanded" class="specialist-analysis-wrap">
+            <div v-if="isSpecialistFailed(s)" class="specialist-failed-notice">
+              <Icon name="alert-triangle" size="14" class="inline-icon" />
+              <span>该专家分析失败，请点击"重新生成"重试</span>
+            </div>
             <div class="specialist-analysis markdown-body" v-html="renderMarkdown(s.analysis || '（暂无分析内容）')"></div>
             <div class="specialist-actions">
+              <button v-if="isSpecialistFailed(s)" class="btn-retry-specialist" @click.stop="emit('retry', msg)" title="重新生成此专家">
+                <Icon name="refresh" size="12" class="inline-icon" /> 重新生成
+              </button>
               <button class="btn-copy-specialist" @click.stop="copySpecialistContent(s, $event)" title="复制分析内容">
                 <Icon name="clipboard" size="12" class="inline-icon" /> 复制
               </button>
@@ -534,14 +572,21 @@ const tradeSuggestions = computed(() => {
       </div>
       <!-- 工具调用展示 -->
       <div v-if="filterToolCalls(msg.tool_calls).length" class="tool-calls-container">
-        <div v-for="(tc, j) in filterToolCalls(msg.tool_calls)" :key="j" class="tool-call-item">
+        <div v-for="(tc, j) in filterToolCalls(msg.tool_calls)" :key="j" class="tool-call-item" :class="{ 'tool-call-empty': isToolEmpty(tc) }">
           <div class="tool-call-header" @click="tc.expanded = !tc.expanded">
             <Icon name="wrench" size="13" class="tool-icon" />
             <span class="tool-name">{{ toolDisplayName(tc.name) }}</span>
             <span class="tool-args">{{ JSON.stringify(tc.arguments || {}).slice(0, 40) }}</span>
+            <span v-if="isToolEmpty(tc)" class="tool-empty-badge">无结果</span>
             <Icon name="chevron-down" size="12" class="tool-toggle" :class="{ expanded: tc.expanded }" />
           </div>
-          <pre v-if="tc.expanded" class="tool-result">{{ tc.result_preview || '（无数据返回）' }}</pre>
+          <div v-if="tc.expanded" class="tool-result-wrap">
+            <pre v-if="tc.result_preview && !isToolEmpty(tc)" class="tool-result">{{ tc.result_preview }}</pre>
+            <div v-else class="tool-empty-notice">
+              <Icon name="search-off" size="13" class="inline-icon" />
+              <span>未找到相关数据</span>
+            </div>
+          </div>
         </div>
       </div>
       <ReasoningPanel v-if="msg.reasoning" :text="msg.reasoning" />
@@ -1053,6 +1098,50 @@ const tradeSuggestions = computed(() => {
 .dark .specialist-item.running { background: var(--color-primary-bg); }
 .specialist-item.completed { border-color: var(--color-success-border, #10b981); }
 
+/* 专家失败态 */
+.specialist-item.specialist-failed {
+  border-color: var(--color-danger, #dc2626);
+  background: rgba(220, 38, 38, 0.04);
+}
+.specialist-item.specialist-failed:hover {
+  border-color: var(--color-danger, #dc2626);
+  box-shadow: 0 2px 8px rgba(220, 38, 38, 0.15);
+}
+.dark .specialist-item.specialist-failed { background: rgba(220, 38, 38, 0.08); }
+.specialist-failed-badge {
+  font-size: 0.6rem;
+  font-weight: 700;
+  color: #fff;
+  background: var(--color-danger, #dc2626);
+  padding: 0.1rem 0.35rem;
+  border-radius: var(--radius-xs);
+  margin-left: 0.2rem;
+}
+.specialist-failed-notice {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.5rem 1rem;
+  font-size: 0.75rem;
+  color: var(--color-danger, #dc2626);
+  background: rgba(220, 38, 38, 0.06);
+  border-bottom: 1px solid rgba(220, 38, 38, 0.15);
+}
+.btn-retry-specialist {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  font-size: 0.68rem;
+  padding: 0.2rem 0.5rem;
+  border: 1px solid var(--color-danger, #dc2626);
+  border-radius: var(--radius-sm);
+  background: var(--color-danger, #dc2626);
+  color: #fff;
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+.btn-retry-specialist:hover { opacity: 0.85; transform: scale(1.03); }
+
 .specialist-header {
   display: flex;
   align-items: center;
@@ -1221,6 +1310,29 @@ const tradeSuggestions = computed(() => {
   color: var(--color-text-secondary);
 }
 
+/* 工具空结果态 */
+.tool-call-empty .tool-call-header { opacity: 0.7; }
+.tool-empty-badge {
+  font-size: 0.58rem;
+  font-weight: 600;
+  color: var(--color-text-muted);
+  background: var(--color-bg-hover);
+  padding: 0.05rem 0.3rem;
+  border-radius: var(--radius-xs);
+  margin-left: 0.2rem;
+}
+.tool-empty-notice {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.4rem 0.75rem;
+  font-size: 0.7rem;
+  color: var(--color-text-muted);
+  background: var(--color-bg-hover);
+  border-radius: var(--radius-sm);
+  margin: 0.2rem 0 0.3rem;
+}
+
 /* 专家分析复制按钮 */
 .specialist-analysis-wrap {
   position: relative;
@@ -1360,6 +1472,28 @@ const tradeSuggestions = computed(() => {
   .specialist-analysis { max-width: 100%; overflow-x: hidden; }
   .specialist-analysis :deep(table) { display: block; overflow-x: auto; -webkit-overflow-scrolling: touch; white-space: nowrap; }
   .tool-result { font-size: 0.68rem; max-width: 100%; overflow-x: auto; }
+  /* 移动端专家卡和工具卡优化 */
+  .specialist-header { padding: 0.5rem 0.65rem; gap: 0.35rem; }
+  .specialist-icon { font-size: 1rem; }
+  .specialist-name { font-size: 0.78rem; }
+  .specialist-time { font-size: 0.6rem; }
+  .specialist-analysis { padding: 0.6rem 0.75rem; font-size: 0.78rem; }
+  .tool-call-header { gap: 0.3rem; font-size: 0.72rem; }
+  .tool-name { font-size: 0.72rem; }
+  .tool-args { max-width: 120px; font-size: 0.62rem; }
+  .tool-calls-container { padding-left: 0.35rem; }
+  .specialist-failed-notice { padding: 0.4rem 0.75rem; font-size: 0.7rem; }
+  .tool-empty-notice { padding: 0.35rem 0.6rem; font-size: 0.65rem; }
+}
+
+@media (max-width: 480px) {
+  .specialist-header { padding: 0.4rem 0.5rem; }
+  .specialist-feedback { opacity: 0.8; }
+  .specialist-analysis { padding: 0.5rem 0.6rem; font-size: 0.75rem; }
+  .tool-call-header { flex-wrap: wrap; }
+  .tool-args { max-width: 100%; white-space: normal; word-break: break-all; }
+  .specialist-failed-badge { font-size: 0.55rem; padding: 0.05rem 0.25rem; }
+  .btn-retry-specialist { font-size: 0.62rem; padding: 0.15rem 0.4rem; }
 }
 
 /* ── P2: 执行交易按钮 ── */

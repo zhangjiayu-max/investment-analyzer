@@ -27,6 +27,16 @@ function filterToolCalls(toolCalls) {
   return toolCalls.filter(tc => !tc.name?.startsWith('consult_'))
 }
 
+// 检测专家是否失败
+const FALLBACK_TEXTS = ['分析过程遇到问题，请重试。', '交叉审阅完成，请参考其他专家分析。']
+function isSpecialistFailed(s) {
+  if (s.status === 'failed' || s.error) return true
+  const text = (s.analysis || '').trim()
+  if (FALLBACK_TEXTS.includes(text)) return true
+  if (text.startsWith('（执行失败：')) return true
+  return false
+}
+
 function formatElapsed(ms) {
   if (!ms) return '0s'
   const s = Math.floor(ms / 1000)
@@ -39,11 +49,12 @@ function formatElapsed(ms) {
   <div class="message assistant">
     <!-- 已完成的专家分析 -->
     <div v-if="currentStream.completedSpecialists.length > 0" class="specialists-container streaming">
-      <div v-for="(s, j) in currentStream.completedSpecialists" :key="j" class="specialist-item completed">
+      <div v-for="(s, j) in currentStream.completedSpecialists" :key="j" class="specialist-item" :class="isSpecialistFailed(s) ? 'failed-specialist' : 'completed'">
         <div class="specialist-header" @click="s.expanded = !s.expanded">
-          <span class="specialist-icon">{{ s.icon }}</span>
+          <span class="specialist-icon">{{ isSpecialistFailed(s) ? '⚠️' : s.icon }}</span>
           <span class="specialist-name">{{ s.agent }}</span>
-          <span class="specialist-status done">✓</span>
+          <span v-if="isSpecialistFailed(s)" class="specialist-failed-badge">失败</span>
+          <span v-else class="specialist-status done">✓</span>
           <span v-if="s.duration_ms" class="specialist-time">{{ (s.duration_ms / 1000).toFixed(1) }}s</span>
           <span class="specialist-toggle">{{ s.expanded ? '▲' : '▼' }}</span>
         </div>
@@ -178,6 +189,18 @@ function formatElapsed(ms) {
 .specialist-item.running { border-color: var(--color-primary-300); background: var(--color-primary-50); }
 .dark .specialist-item.running { background: var(--color-primary-bg); }
 .specialist-item.completed { border-color: var(--color-success-border, #10b981); }
+.specialist-item.failed-specialist {
+  border-color: var(--color-danger, #dc2626);
+  background: rgba(220, 38, 38, 0.04);
+}
+.specialist-failed-badge {
+  font-size: 0.6rem;
+  font-weight: 700;
+  color: #fff;
+  background: var(--color-danger, #dc2626);
+  padding: 0.1rem 0.35rem;
+  border-radius: var(--radius-xs);
+}
 .specialist-item.cross-review-item { border-color: var(--color-primary-200); background: var(--color-primary-50, rgba(201, 168, 76, 0.04)); }
 .dark .specialist-item.cross-review-item { background: var(--color-primary-bg, rgba(201, 168, 76, 0.08)); }
 

@@ -135,6 +135,8 @@ function handleStreamEvent(convId, event, callbacks = {}) {
         agent: data.agent,
         icon: data.icon,
         analysis: data.analysis,
+        status: data.status || 'success',
+        error: data.error || false,
         duration_ms: data.duration_ms,
         expanded: false,
       })
