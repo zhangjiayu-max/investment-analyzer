@@ -591,6 +591,7 @@ def load_specialist_agents() -> dict:
     """从数据库加载所有编排专家 Agent，返回 {agent_key: {name, icon, description, tools, system_prompt}}。
 
     带 60 秒内存缓存，避免每次请求都查库。
+    降级：DB 无数据时回退到硬编码的 SPECIALIST_AGENTS。
     """
     global _specialist_cache, _specialist_cache_ts
     if _specialist_cache is not None and (_time.time() - _specialist_cache_ts) < _SPECIALIST_CACHE_TTL:
@@ -602,36 +603,65 @@ def load_specialist_agents() -> dict:
     ).fetchall()
     conn.close()
 
-    # 文字 icon → emoji 映射（与前端 getAgentIcon 保持一致）
-    _icon_map = {
-        "chart": "📊", "research": "🔍", "shield": "🛡️", "pie": "🥧",
-        "robot": "🤖", "newspaper": "📰", "search": "🔍", "bull": "🐂",
-    }
-
-    result = {}
-    for r in rows:
-        tools = _json.loads(r["tools"]) if r["tools"] else []
-        raw_icon = r["icon"] or "robot"
-        emoji_icon = _icon_map.get(raw_icon, raw_icon)
-        # 如果已经是 emoji（不在 map 中），直接使用
-        result[r["agent_key"]] = {
-            "name": r["name"],
-            "icon": emoji_icon,
-            "description": r["description"] or "",
-            "tools": tools,
-            "system_prompt": r["system_prompt"],
+    if rows:
+        # 文字 icon → emoji 映射（与前端 getAgentIcon 保持一致）
+        _icon_map = {
+            "chart": "📊", "research": "🔍", "shield": "🛡️", "pie": "🥧",
+            "robot": "🤖", "newspaper": "📰", "search": "🔍", "bull": "🐂",
         }
+        result = {}
+        for r in rows:
+            tools = _json.loads(r["tools"]) if r["tools"] else []
+            raw_icon = r["icon"] or "robot"
+            emoji_icon = _icon_map.get(raw_icon, raw_icon)
+            result[r["agent_key"]] = {
+                "name": r["name"],
+                "icon": emoji_icon,
+                "description": r["description"] or "",
+                "tools": tools,
+                "system_prompt": r["system_prompt"],
+            }
+    else:
+        # 降级：DB 无数据，从硬编码加载
+        from agent.multi_agent import SPECIALIST_AGENTS
+        result = dict(SPECIALIST_AGENTS)
 
     _specialist_cache = result
     _specialist_cache_ts = _time.time()
     return result
 
 
-def clear_specialist_cache():
-    """清除专家 Agent 缓存（更新 Agent 后调用）。"""
+def clear_specialist_cache() -> None:
+    """清除专家 Agent 内存缓存（在更新 agent 配置后调用）。"""
     global _specialist_cache, _specialist_cache_ts
     _specialist_cache = None
     _specialist_cache_ts = 0
+
+
+def get_agent_tools(agent_key: str) -> list[str]:
+    """获取指定 agent 的工具列表。"""
+    conn = _get_conn()
+    row = conn.execute(
+        "SELECT tools FROM agents WHERE agent_key = ? AND is_specialist = 1",
+        (agent_key,)
+    ).fetchone()
+    conn.close()
+    if row and row["tools"]:
+        return _json.loads(row["tools"])
+    return []
+
+
+def update_agent_tools(agent_key: str, tools: list[str]) -> bool:
+    """更新 agent 的工具配置。"""
+    conn = _get_conn()
+    conn.execute(
+        "UPDATE agents SET tools = ?, updated_at = datetime('now','localtime') WHERE agent_key = ?",
+        (_json.dumps(tools, ensure_ascii=False), agent_key)
+    )
+    conn.commit()
+    conn.close()
+    clear_specialist_cache()
+    return True
 
 
 # ── Agent 提示词版本 CRUD ──────────────────────────────
