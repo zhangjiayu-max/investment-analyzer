@@ -57,6 +57,7 @@ from db.agents import (
     delete_agent, save_prompt_version, list_prompt_versions, get_prompt_version,
     create_agent_run, get_agent_runs,
     load_specialist_agents, clear_specialist_cache,
+    get_agent_tools, update_agent_tools,
     update_recommendation_status, get_pending_recommendations, auto_validate_recommendations,
 )
 
@@ -1098,6 +1099,24 @@ def init_db():
         init_cost_tables(conn)
     except Exception:
         pass
+
+    # ── 工具注册表（升级1：工具注册中心）──
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS tool_registry (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL UNIQUE,
+            category TEXT NOT NULL DEFAULT 'general',
+            enabled INTEGER NOT NULL DEFAULT 1,
+            description TEXT,
+            registered_at TEXT DEFAULT (datetime('now','localtime'))
+        )
+    """)
+
+    # ── analysis_agents 表迁移（升级1：agent_key / tools / icon / model_type）──
+    _add_column_if_not_exists(conn, "analysis_agents", "agent_key", "TEXT")
+    _add_column_if_not_exists(conn, "analysis_agents", "tools", "TEXT")
+    _add_column_if_not_exists(conn, "analysis_agents", "icon", "TEXT")
+    _add_column_if_not_exists(conn, "analysis_agents", "model_type", "TEXT")
 
     # ── P0-1 数据迁移：把 index_valuations.percentile 文本型转为 REAL（幂等）──
     try:

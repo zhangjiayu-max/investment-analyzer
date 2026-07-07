@@ -422,7 +422,13 @@ def run_specialist(agent_key: str, query: str, context: str = "",
     logger.info(f"[trace:{trace_id}] 专家开始: {agent['name']} ({agent_key}) query={query[:50]}...")
 
     # 只给该专家分配它的专属工具
-    agent_tools = [t for t in TOOLS if t["function"]["name"] in agent["tools"]]
+    try:
+        from tools.tool_registry import ToolRegistry
+        registry = ToolRegistry.get_instance()
+        agent_tools = registry.get_tools_for_agent(agent["tools"])
+    except Exception:
+        # 降级：ToolRegistry 未初始化时用硬编码 TOOLS
+        agent_tools = [t for t in TOOLS if t["function"]["name"] in agent["tools"]]
 
     # 构建消息
     system_content = agent["system_prompt"]
@@ -473,6 +479,13 @@ def run_specialist(agent_key: str, query: str, context: str = "",
     try:
         from agent.prompt_defense import attach_defense_prompt
         system_content = attach_defense_prompt(system_content, analysis_type)
+    except Exception:
+        pass
+
+    # 注入 A2A 结构化输出指令
+    try:
+        from agent.message_protocol import get_a2a_output_instruction
+        system_content += get_a2a_output_instruction()
     except Exception:
         pass
 
@@ -665,9 +678,32 @@ def run_specialist(agent_key: str, query: str, context: str = "",
         "agent": agent["name"],
         "icon": agent["icon"],
         "analysis": answer,
+        "structured": _parse_structured_output(answer, agent_key, agent["name"], trace_id, tool_calls_log, duration_ms),
         "tool_calls": tool_calls_log,
         "duration_ms": duration_ms,
     }
+
+
+def _parse_structured_output(raw_text: str, agent_key: str, agent_name: str,
+                              trace_id: str, tool_calls: list, duration_ms: int) -> dict:
+    """解析 agent 的 LLM 输出，提取结构化数据。降级时返回空结构。"""
+    try:
+        from agent.message_protocol import parse_agent_output, ROLE_MAP
+        output = parse_agent_output(
+            raw_text=raw_text,
+            agent_key=agent_key,
+            agent_name=agent_name,
+            agent_role=ROLE_MAP.get(agent_key, "analyst"),
+            trace_id=trace_id,
+            tool_calls=tool_calls,
+            duration_ms=duration_ms,
+        )
+        return {
+            "structured": output.to_dict(),
+            "a2a": output.to_a2a_message(),
+        }
+    except Exception:
+        return {"structured": {}, "a2a": {}}
 
 
 def run_specialist_with_context(agent_key: str, query: str, peer_analyses: dict, trace_id: str = "",

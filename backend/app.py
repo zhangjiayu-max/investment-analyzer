@@ -24,7 +24,7 @@ _file_handler = TimedRotatingFileHandler(
 _file_handler.setFormatter(logging.Formatter(log_fmt))
 logging.getLogger().addHandler(_file_handler)
 
-from fastapi import FastAPI, HTTPException, Request, UploadFile
+from fastapi import FastAPI, HTTPException, Request, UploadFile, Body
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import StreamingResponse, FileResponse, HTMLResponse
@@ -247,6 +247,15 @@ async def startup():
     logging.info("初始化数据库...")
     init_db()
     logging.info("数据库初始化完成")
+
+    # 升级1: 初始化全局工具注册中心
+    try:
+        from tools.tool_registry import ToolRegistry
+        from db._conn import DB_PATH
+        ToolRegistry.initialize(db_path=DB_PATH)
+        logging.info("ToolRegistry 初始化完成")
+    except Exception as e:
+        logging.warning(f"ToolRegistry 初始化失败: {e}")
 
     # 创建 token_usage 索引
     try:
@@ -1402,6 +1411,50 @@ async def list_backups_api():
     """查看备份列表。"""
     from db.backup import list_backups
     return {"backups": list_backups()}
+
+
+# 升级1: 工具管理 API
+@app.get("/api/admin/tools")
+async def list_tools_api():
+    """列出所有可用工具。"""
+    try:
+        from tools.tool_registry import ToolRegistry
+        registry = ToolRegistry.get_instance()
+        tools = registry.list_tool_names()
+        return {"tools": tools, "total": len(tools)}
+    except Exception as e:
+        return {"tools": [], "total": 0, "error": str(e)}
+
+
+@app.get("/api/admin/agents/{agent_key}/tools")
+async def get_agent_tools_api(agent_key: str):
+    """获取指定 agent 的工具配置。"""
+    from db.agents import get_agent_tools
+    try:
+        from tools.tool_registry import ToolRegistry
+        registry = ToolRegistry.get_instance()
+        all_tools = registry.list_tool_names()
+    except Exception:
+        all_tools = []
+    tools = get_agent_tools(agent_key)
+    return {"agent_key": agent_key, "tools": tools, "available_tools": all_tools}
+
+
+@app.put("/api/admin/agents/{agent_key}/tools")
+async def update_agent_tools_api(agent_key: str, tools: list[str] = Body(...)):
+    """更新 agent 的工具配置。"""
+    from db.agents import update_agent_tools
+    try:
+        from tools.tool_registry import ToolRegistry
+        registry = ToolRegistry.get_instance()
+        valid_tools = set(registry.list_tool_names())
+        invalid = [t for t in tools if t not in valid_tools]
+        if invalid:
+            raise HTTPException(400, f"无效工具名: {invalid}")
+    except RuntimeError:
+        pass  # ToolRegistry 未初始化，跳过校验
+    update_agent_tools(agent_key, tools)
+    return {"ok": True, "agent_key": agent_key, "tools": tools}
 
 
 if __name__ == "__main__":

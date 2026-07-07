@@ -3044,342 +3044,372 @@ def orchestrate(query: str, history: list, rag_context: str = "", cancel_event: 
     arbitration_done = False  # 标记仲裁是否已完成,避免重复调用
     route_result = None  # 路由结果，用于最终返回监控
 
-    for turn in range(MAX_TURNS):
-        _check_timeout(start_time)
+    # 升级3: Plan & Execute 模式（通过 orchestration_config 启停，默认关闭）
+    _plan_done = False
+    _plan_execute_enabled = get_orchestration_config("plan_execute_enabled", "false") == "true"
+    if _plan_execute_enabled:
         try:
-            response = _call_llm(
-                caller="orchestrator",
-                trace_id=trace_id,
-                model=MODEL,
-                messages=llm_messages,
-                tools=build_orchestrator_tools(specialists),
-                tool_choice="auto",
-                temperature=get_config_float('llm.temperature_agent', 0.3),
-                max_tokens=get_config_int('llm.max_tokens_orchestrator', 8192),
+            from agent.plan_executor import generate_plan, execute_plan
+            available = [
+                {"agent_key": k, "name": v["name"], "description": v.get("description", "")}
+                for k, v in specialists.items()
+            ]
+            _plan = generate_plan(
+                user_query=query, refined_query=refined_query,
+                complexity=complexity, available_specialists=available, trace_id=trace_id,
             )
+            logger.info(f"[trace:{trace_id}] Plan & Execute: {len(_plan.steps)} 步计划")
+            yield {"type": "plan", "plan": _plan.to_dict()}
+
+            specialist_results, all_tool_calls = execute_plan(
+                plan=_plan, prebuilt_context=prebuilt_context, cancel_event=cancel_event,
+            )
+            _plan_done = True
+            logger.info(f"[trace:{trace_id}] Plan & Execute 完成: {len(specialist_results)} 个专家")
         except Exception as e:
-            err_msg = str(e)
-            logger.error(f"[trace:{trace_id}] Orchestrator LLM 调用异常 (turn {turn}): {err_msg}")
-            if any(kw in err_msg.lower() for kw in ["tool", "function", "reasoning", "thinking"]):
-                logger.warning(f"[trace:{trace_id}] 模型不兼容,回退到普通模式")
-                return _fallback_orchestrate(query, history, rag_context)
-            # 网络抖动时，已有专家结果则拼接返回
-            if specialist_results:
-                logger.warning(f"[trace:{trace_id}] LLM 汇总失败但已有 {len(specialist_results)} 个专家结果,拼接回退")
-                return _build_fallback_from_specialists(
-                    query, refined_query, specialist_results, trace_id, budget)
-            raise
+            logger.warning(f"[trace:{trace_id}] Plan & Execute 失败，回退 ReAct: {e}")
+            specialist_results = []
+            all_tool_calls = []
 
-        msg = response.choices[0].message
+    if not _plan_done:
+        # 原有 ReAct Loop（降级路径）
 
-        # 没有工具调用 → 检查是否需要交叉审阅,然后给出最终回答
-        if not msg.tool_calls:
-            conflicts = detect_conflicts_smart(specialist_results, refined_query, trace_id)
-
-            cross_review_enabled = get_orchestration_config("cross_review_enabled", "true") == "true"
-            cross_review_min = int(get_orchestration_config("cross_review_min_specialists", "2"))
-            cross_review_min_sev = get_orchestration_config("cross_review_min_severity", "medium")
-            # 从 clarification 中获取 LLM 预判的 need_cross_review
-            predicted_need_cr = False
-            if isinstance(clarification, dict):
-                predicted_need_cr = clarification.get("need_cross_review", False)
-            needs_cross_review = should_run_cross_review(
-                specialist_results=specialist_results,
-                complexity=complexity,
-                conflicts=conflicts,
-                force_skip=force_skip_cross_review,
-                enabled=cross_review_enabled,
-                min_specialists=cross_review_min,
-                min_severity=cross_review_min_sev,
-                predicted_need_cross_review=predicted_need_cr,
-                needs_arbitration=route_result.get("needs_arbitration", False) if isinstance(route_result, dict) else False,
-            )
-
-            if needs_cross_review:
-                logger.info(f"[trace:{trace_id}] 进入交叉审阅阶段,{len(specialist_results)} 个专家参与")
-                peer_analyses = {sr["agent_key"]: sr["analysis"] for sr in specialist_results}
-                cross_review_results = []
-                # 快照原始专家列表,避免迭代时 append 导致无限循环
-                original_specialists = list(specialist_results)
-                for sr in original_specialists:
-                    _check_cancel(cancel_event)
-                    _check_timeout(start_time)
-                    try:
-                        cr_result = run_specialist_with_context(
-                            sr["agent_key"], refined_query, peer_analyses, max_turns=2,
-                            prebuilt_context=prebuilt_context,
-                            model=_get_model_for_agent("cross_review") if _is_cost_routing_enabled() else None
-                        )
-                        cross_review_results.append(cr_result)
-                        specialist_results.append(cr_result)
-                        all_tool_calls.extend(cr_result.get("tool_calls", []))
-                    except Exception as e:
-                        logger.error(f"[trace:{trace_id}] 交叉审阅 {sr['agent_key']} 失败: {e}")
-
-                # 将交叉审阅结果追加到消息中,让 Orchestrator 做最终综合
-                if cross_review_results:
-                    cr_summary = "\n\n---\n\n".join(
-                        f"【{cr['agent']}交叉审阅】\n{cr['analysis']}"
-                        for cr in cross_review_results
-                    )
-                    llm_messages.append({
-                        "role": "user",
-                        "content": f"以下是各专家的交叉审阅结果,请结合 Phase A 和 Phase B 的分析,给出最终综合建议:\n\n{cr_summary}",
-                    })
-                    try:
-                        response = _call_llm(
-                            caller="orchestrator",
-                            trace_id=trace_id,
-                            model=MODEL,
-                            messages=llm_messages,
-                            temperature=get_config_float('llm.temperature_agent', 0.3),
-                            max_tokens=get_config_int('llm.max_tokens_orchestrator', 8192),
-                        )
-                        answer = response.choices[0].message.content or ""
-                    except Exception:
-                        answer = msg.content or ""
-
-                    # Phase C: 仲裁(高级模型最终裁决)
-                    arbitration_done = False
-                    if should_arbitrate(complexity, specialist_results, conflicts):
-                        logger.info(f"[trace:{trace_id}] 进入仲裁阶段(Phase C)")
-                        arb_result = run_arbitration(refined_query, specialist_results, rag_context)
-                        specialist_results.append(arb_result)
-                        answer = arb_result["analysis"]
-                        all_tool_calls.append({"name": "arbitration", "arguments": {"query": refined_query},
-                                               "result_preview": arb_result["analysis"][:300]})
-                        arbitration_done = True
-
-                    # Light Validator: 输出前质检与修复
-                    answer, validator_result = _validate_and_repair(
-                        query, answer, specialist_results, prebuilt_context, llm_messages, trace_id=trace_id
-                    )
-
-                    duration_ms = int((time.time() - start_time) * 1000)
-                    conflicts = detect_conflicts_smart(specialist_results, refined_query, trace_id)
-                    _result = {
-                        "answer": answer,
-                        "specialist_results": specialist_results,
-                        "tool_calls": all_tool_calls,
-                        "turns": turn + 1,
-                        "duration_ms": duration_ms,
-                        "complexity": complexity,
-                        "cross_review": True,
-                        "arbitration": arbitration_done,
-                        "conflicts": conflicts,
-                        "validator": validator_result,
-                        "route_info": route_result,
-                        "cache_stats": expert_cache.stats,
-                        "condition_framework": next((sr.get("condition_framework", []) for sr in specialist_results if sr.get("is_arbitration")), []),
-                        "diverggence_analysis": next((sr.get("diverggence_analysis", "") for sr in specialist_results if sr.get("is_arbitration")), ""),
-                        "key_variables": next((sr.get("key_variables", "") for sr in specialist_results if sr.get("is_arbitration")), ""),
-                        "reasoning_trail": build_reasoning_trail(query, refined_query, complexity, specialist_results, next((sr for sr in specialist_results if sr.get("is_arbitration")), None), prebuilt_context, duration_ms),
-                    }
-                    if conversation_id:
-                        _schedule_auto_evaluation(conversation_id, message_id, _result)
-                        # P1-1：多智能体结论持久化（不阻塞主流程，失败仅 warning）
-                        try:
-                            _arb = next((sr for sr in specialist_results if sr.get("is_arbitration")), None)
-                            _persist_agent_conclusions(
-                                conversation_id, message_id, query,
-                                specialist_results, _arb, trace_id=trace_id,
-                            )
-                        except Exception as _e:
-                            logger.warning(f"[trace:{trace_id}] [P1-1] 结论持久化失败(早返回路径): {_e}")
-                    _schedule_tool_eval(query, specialist_results)
-                    return _result
-            else:
-                if len(specialist_results) >= 2:
-                    logger.info(f"[trace:{trace_id}] 专家结论一致或早停关闭，跳过交叉审阅")
-
-            answer = msg.content or ""
-
-            # Phase C: 仲裁(高级模型最终裁决,无交叉审阅时也可触发)
-            if not arbitration_done and should_arbitrate(complexity, specialist_results, conflicts):
-                logger.info(f"[trace:{trace_id}] 进入仲裁阶段(Phase C)")
-                arb_result = run_arbitration(refined_query, specialist_results, rag_context)
-                specialist_results.append(arb_result)
-                answer = arb_result["analysis"]
-                all_tool_calls.append({"name": "arbitration", "arguments": {"query": refined_query},
-                                       "result_preview": arb_result["analysis"][:300]})
-
-            # Light Validator: 输出前质检与修复
-            answer, validator_result = _validate_and_repair(
-                query, answer, specialist_results, prebuilt_context, llm_messages, trace_id=trace_id
-            )
-
-            duration_ms = int((time.time() - start_time) * 1000)
-            conflicts = detect_conflicts_smart(specialist_results, refined_query, trace_id)
-            _result = {
-                "answer": answer,
-                "specialist_results": specialist_results,
-                "tool_calls": all_tool_calls,
-                "turns": turn + 1,
-                "duration_ms": duration_ms,
-                "complexity": complexity,
-                "arbitration": arbitration_done,
-                "conflicts": conflicts,
-                "validator": validator_result,
-                "route_info": route_result,
-                "cache_stats": expert_cache.stats,
-                "condition_framework": next((sr.get("condition_framework", []) for sr in specialist_results if sr.get("is_arbitration")), []),
-                "diverggence_analysis": next((sr.get("diverggence_analysis", "") for sr in specialist_results if sr.get("is_arbitration")), ""),
-                "key_variables": next((sr.get("key_variables", "") for sr in specialist_results if sr.get("is_arbitration")), ""),
-                "reasoning_trail": build_reasoning_trail(query, refined_query, complexity, specialist_results, next((sr for sr in specialist_results if sr.get("is_arbitration")), None), prebuilt_context, duration_ms),
-            }
-            if conversation_id:
-                _schedule_auto_evaluation(conversation_id, message_id, _result)
-            _schedule_tool_eval(query, specialist_results)
-            return _result
-
-        # 有工具调用 → 执行专家
-        assistant_msg = {
-            "role": "assistant",
-            "content": msg.content,
-            "tool_calls": [
-                {
-                    "id": tc.id,
-                    "type": "function",
-                    "function": {
-                        "name": tc.function.name,
-                        "arguments": tc.function.arguments,
-                    },
-                }
-                for tc in msg.tool_calls
-            ],
-        }
-
-        # MIMO thinking mode: 传递 reasoning_content
-        reasoning = None
-        if hasattr(msg, "model_extra") and msg.model_extra:
-            reasoning = msg.model_extra.get("reasoning_content")
-        if not reasoning:
-            reasoning = getattr(msg, "reasoning_content", None)
-        if reasoning:
-            assistant_msg["reasoning_content"] = reasoning
-
-        llm_messages.append(assistant_msg)
-
-        # 并行执行所有专家 Agent
-        #
-        max_tools = get_max_tools_per_turn(complexity)
-        original_tool_count = len(msg.tool_calls or [])
-        msg.tool_calls = trim_tool_calls(msg.tool_calls, specialists, max_tools)
-        if original_tool_count != len(msg.tool_calls):
-            logger.warning(
-                f"Orchestrator 工具调用已裁剪: {original_tool_count} -> {len(msg.tool_calls)} "
-                f"(allowed={specialists}, max={max_tools})"
-            )
-
-        # 从 clarification 中提取 specialist_tasks（LLM 规划的专家任务）
-        specialist_tasks_map = {}
-        if isinstance(clarification, dict):
-            specialist_tasks_map = clarification.get("specialist_tasks", {})
-
-        tool_tasks = []
-        for tc in msg.tool_calls:
-            args = _parse_tool_args(tc.function.arguments, tc.function.name)
-            expert_query = args.get("query", query)
-            # 注入 specialist_tasks：把 LLM 规划的专家任务拼接到 query 前面作为上下文
-            agent_key_nonstream = build_expert_map().get(tc.function.name, "")
-            if agent_key_nonstream in specialist_tasks_map and specialist_tasks_map[agent_key_nonstream]:
-                task_desc = specialist_tasks_map[agent_key_nonstream]
-                expert_query = f"[专家任务] {task_desc}\n[用户问题] {expert_query}"
-                logger.info(f"注入专家任务到 {agent_key_nonstream}: {task_desc[:80]}...")
-            logger.info(f"Orchestrator → {tc.function.name}: {expert_query[:100]}")
-            tool_tasks.append((tc, args, expert_query))
-
-        # 去重：跳过已执行过的专家
-        seen_keys = {sr.get("agent_key") for sr in specialist_results}
-        deduped_tasks = []
-        for tc, args, expert_query in tool_tasks:
-            agent_name = tc.function.name
-            # 查 agent_key
-            expert_map = build_expert_map()
-            agent_key = expert_map.get(agent_name, agent_name)
-            if agent_key in seen_keys:
-                logger.info(f"跳过重复调用: {agent_name} ({agent_key})")
-                # 用已有结果填充
-                existing = next((sr for sr in specialist_results if sr.get("agent_key") == agent_key), None)
-                if existing:
-                    llm_messages.append({
-                        "role": "tool",
-                        "tool_call_id": tc.id,
-                        "content": json.dumps({"analysis": existing["analysis"], "agent_key": agent_key, "agent": existing.get("agent", agent_name), "icon": existing.get("icon", "🤖")}, ensure_ascii=False)[:4000],
-                    })
-                continue
-            deduped_tasks.append((tc, args, expert_query))
-        tool_tasks = deduped_tasks
-        if not tool_tasks:
-            # 所有专家都已执行完，强制进入总结阶段
-            llm_messages.append({
-                "role": "user",
-                "content": "所有专家已完成分析，请根据以上结果给出最终综合建议。",
-            })
-            # 跳过本轮工具执行，进入下一轮（LLM会看到没有工具调用，触发总结）
-            continue
-
-        if len(tool_tasks) == 1:
-            # 单个专家,直接执行(避免线程池开销)
-            tc, args, expert_query = tool_tasks[0]
-            result_str = _execute_specialist_cached(tc.function.name, expert_query,
-                                              prebuilt_context=prebuilt_context,
-                                              trace_id=trace_id)
-            ordered_results = [result_str]
-        else:
-            # 多个专家,并行执行
-            ordered_results = [None] * len(tool_tasks)
-            with concurrent.futures.ThreadPoolExecutor(max_workers=len(tool_tasks)) as executor:
-                future_to_idx = {}
-                for idx, (tc, args, expert_query) in enumerate(tool_tasks):
-                    future = executor.submit(
-                        _execute_specialist, tc.function.name, expert_query,
-                        cancel_event=None, prebuilt_context=prebuilt_context,
-                        trace_id=trace_id
-                    )
-                    future_to_idx[future] = idx
-
-                for future in concurrent.futures.as_completed(future_to_idx):
-                    idx = future_to_idx[future]
-                    try:
-                        ordered_results[idx] = future.result()
-                    except CancelledError:
-                        raise
-                    except Exception as e:
-                        ordered_results[idx] = json.dumps({"error": str(e)}, ensure_ascii=False)
-
-        # 按原始顺序处理结果
-        for idx, (tc, args, expert_query) in enumerate(tool_tasks):
-            result_str = ordered_results[idx]
-
+        for turn in range(MAX_TURNS):
+            _check_timeout(start_time)
             try:
-                result_data = json.loads(result_str)
-            except json.JSONDecodeError:
-                result_data = {"raw": result_str}
+                response = _call_llm(
+                    caller="orchestrator",
+                    trace_id=trace_id,
+                    model=MODEL,
+                    messages=llm_messages,
+                    tools=build_orchestrator_tools(specialists),
+                    tool_choice="auto",
+                    temperature=get_config_float('llm.temperature_agent', 0.3),
+                    max_tokens=get_config_int('llm.max_tokens_orchestrator', 8192),
+                )
+            except Exception as e:
+                err_msg = str(e)
+                logger.error(f"[trace:{trace_id}] Orchestrator LLM 调用异常 (turn {turn}): {err_msg}")
+                if any(kw in err_msg.lower() for kw in ["tool", "function", "reasoning", "thinking"]):
+                    logger.warning(f"[trace:{trace_id}] 模型不兼容,回退到普通模式")
+                    return _fallback_orchestrate(query, history, rag_context)
+                # 网络抖动时，已有专家结果则拼接返回
+                if specialist_results:
+                    logger.warning(f"[trace:{trace_id}] LLM 汇总失败但已有 {len(specialist_results)} 个专家结果,拼接回退")
+                    return _build_fallback_from_specialists(
+                        query, refined_query, specialist_results, trace_id, budget)
+                raise
 
-            if "error" not in result_data:
-                specialist_results.append({
-                    "agent_key": result_data.get("agent_key", build_expert_map().get(tc.function.name, "")),
-                    "agent": result_data.get("agent", tc.function.name),
-                    "icon": result_data.get("icon", "🤖"),
-                    "analysis": result_data.get("analysis", ""),
-                    "tool_calls": result_data.get("tool_calls", []),
-                    "duration_ms": result_data.get("duration_ms", 0),
+            msg = response.choices[0].message
+
+            # 没有工具调用 → 检查是否需要交叉审阅,然后给出最终回答
+            if not msg.tool_calls:
+                conflicts = detect_conflicts_smart(specialist_results, refined_query, trace_id)
+
+                cross_review_enabled = get_orchestration_config("cross_review_enabled", "true") == "true"
+                cross_review_min = int(get_orchestration_config("cross_review_min_specialists", "2"))
+                cross_review_min_sev = get_orchestration_config("cross_review_min_severity", "medium")
+                # 从 clarification 中获取 LLM 预判的 need_cross_review
+                predicted_need_cr = False
+                if isinstance(clarification, dict):
+                    predicted_need_cr = clarification.get("need_cross_review", False)
+                needs_cross_review = should_run_cross_review(
+                    specialist_results=specialist_results,
+                    complexity=complexity,
+                    conflicts=conflicts,
+                    force_skip=force_skip_cross_review,
+                    enabled=cross_review_enabled,
+                    min_specialists=cross_review_min,
+                    min_severity=cross_review_min_sev,
+                    predicted_need_cross_review=predicted_need_cr,
+                    needs_arbitration=route_result.get("needs_arbitration", False) if isinstance(route_result, dict) else False,
+                )
+
+                if needs_cross_review:
+                    logger.info(f"[trace:{trace_id}] 进入交叉审阅阶段,{len(specialist_results)} 个专家参与")
+                    peer_analyses = {sr["agent_key"]: sr["analysis"] for sr in specialist_results}
+                    cross_review_results = []
+                    # 快照原始专家列表,避免迭代时 append 导致无限循环
+                    original_specialists = list(specialist_results)
+                    for sr in original_specialists:
+                        _check_cancel(cancel_event)
+                        _check_timeout(start_time)
+                        try:
+                            cr_result = run_specialist_with_context(
+                                sr["agent_key"], refined_query, peer_analyses, max_turns=2,
+                                prebuilt_context=prebuilt_context,
+                                model=_get_model_for_agent("cross_review") if _is_cost_routing_enabled() else None
+                            )
+                            cross_review_results.append(cr_result)
+                            specialist_results.append(cr_result)
+                            all_tool_calls.extend(cr_result.get("tool_calls", []))
+                        except Exception as e:
+                            logger.error(f"[trace:{trace_id}] 交叉审阅 {sr['agent_key']} 失败: {e}")
+
+                    # 将交叉审阅结果追加到消息中,让 Orchestrator 做最终综合
+                    if cross_review_results:
+                        cr_summary = "\n\n---\n\n".join(
+                            f"【{cr['agent']}交叉审阅】\n{cr['analysis']}"
+                            for cr in cross_review_results
+                        )
+                        llm_messages.append({
+                            "role": "user",
+                            "content": f"以下是各专家的交叉审阅结果,请结合 Phase A 和 Phase B 的分析,给出最终综合建议:\n\n{cr_summary}",
+                        })
+                        try:
+                            response = _call_llm(
+                                caller="orchestrator",
+                                trace_id=trace_id,
+                                model=MODEL,
+                                messages=llm_messages,
+                                temperature=get_config_float('llm.temperature_agent', 0.3),
+                                max_tokens=get_config_int('llm.max_tokens_orchestrator', 8192),
+                            )
+                            answer = response.choices[0].message.content or ""
+                        except Exception:
+                            answer = msg.content or ""
+
+                        # Phase C: 仲裁(高级模型最终裁决)
+                        arbitration_done = False
+                        if should_arbitrate(complexity, specialist_results, conflicts):
+                            logger.info(f"[trace:{trace_id}] 进入仲裁阶段(Phase C)")
+                            arb_result = run_arbitration(refined_query, specialist_results, rag_context)
+                            specialist_results.append(arb_result)
+                            answer = arb_result["analysis"]
+                            all_tool_calls.append({"name": "arbitration", "arguments": {"query": refined_query},
+                                                   "result_preview": arb_result["analysis"][:300]})
+                            arbitration_done = True
+
+                        # Light Validator: 输出前质检与修复
+                        answer, validator_result = _validate_and_repair(
+                            query, answer, specialist_results, prebuilt_context, llm_messages, trace_id=trace_id
+                        )
+
+                        duration_ms = int((time.time() - start_time) * 1000)
+                        conflicts = detect_conflicts_smart(specialist_results, refined_query, trace_id)
+                        _result = {
+                            "answer": answer,
+                            "specialist_results": specialist_results,
+                            "tool_calls": all_tool_calls,
+                            "turns": turn + 1,
+                            "duration_ms": duration_ms,
+                            "complexity": complexity,
+                            "cross_review": True,
+                            "arbitration": arbitration_done,
+                            "conflicts": conflicts,
+                            "validator": validator_result,
+                            "route_info": route_result,
+                            "cache_stats": expert_cache.stats,
+                            "condition_framework": next((sr.get("condition_framework", []) for sr in specialist_results if sr.get("is_arbitration")), []),
+                            "diverggence_analysis": next((sr.get("diverggence_analysis", "") for sr in specialist_results if sr.get("is_arbitration")), ""),
+                            "key_variables": next((sr.get("key_variables", "") for sr in specialist_results if sr.get("is_arbitration")), ""),
+                            "reasoning_trail": build_reasoning_trail(query, refined_query, complexity, specialist_results, next((sr for sr in specialist_results if sr.get("is_arbitration")), None), prebuilt_context, duration_ms),
+                        }
+                        if conversation_id:
+                            _schedule_auto_evaluation(conversation_id, message_id, _result)
+                            # P1-1：多智能体结论持久化（不阻塞主流程，失败仅 warning）
+                            try:
+                                _arb = next((sr for sr in specialist_results if sr.get("is_arbitration")), None)
+                                _persist_agent_conclusions(
+                                    conversation_id, message_id, query,
+                                    specialist_results, _arb, trace_id=trace_id,
+                                )
+                            except Exception as _e:
+                                logger.warning(f"[trace:{trace_id}] [P1-1] 结论持久化失败(早返回路径): {_e}")
+                        _schedule_tool_eval(query, specialist_results)
+                        return _result
+                else:
+                    if len(specialist_results) >= 2:
+                        logger.info(f"[trace:{trace_id}] 专家结论一致或早停关闭，跳过交叉审阅")
+
+                answer = msg.content or ""
+
+                # Phase C: 仲裁(高级模型最终裁决,无交叉审阅时也可触发)
+                if not arbitration_done and should_arbitrate(complexity, specialist_results, conflicts):
+                    logger.info(f"[trace:{trace_id}] 进入仲裁阶段(Phase C)")
+                    arb_result = run_arbitration(refined_query, specialist_results, rag_context)
+                    specialist_results.append(arb_result)
+                    answer = arb_result["analysis"]
+                    all_tool_calls.append({"name": "arbitration", "arguments": {"query": refined_query},
+                                           "result_preview": arb_result["analysis"][:300]})
+
+                # Light Validator: 输出前质检与修复
+                answer, validator_result = _validate_and_repair(
+                    query, answer, specialist_results, prebuilt_context, llm_messages, trace_id=trace_id
+                )
+
+                duration_ms = int((time.time() - start_time) * 1000)
+                conflicts = detect_conflicts_smart(specialist_results, refined_query, trace_id)
+                _result = {
+                    "answer": answer,
+                    "specialist_results": specialist_results,
+                    "tool_calls": all_tool_calls,
+                    "turns": turn + 1,
+                    "duration_ms": duration_ms,
+                    "complexity": complexity,
+                    "arbitration": arbitration_done,
+                    "conflicts": conflicts,
+                    "validator": validator_result,
+                    "route_info": route_result,
+                    "cache_stats": expert_cache.stats,
+                    "condition_framework": next((sr.get("condition_framework", []) for sr in specialist_results if sr.get("is_arbitration")), []),
+                    "diverggence_analysis": next((sr.get("diverggence_analysis", "") for sr in specialist_results if sr.get("is_arbitration")), ""),
+                    "key_variables": next((sr.get("key_variables", "") for sr in specialist_results if sr.get("is_arbitration")), ""),
+                    "reasoning_trail": build_reasoning_trail(query, refined_query, complexity, specialist_results, next((sr for sr in specialist_results if sr.get("is_arbitration")), None), prebuilt_context, duration_ms),
+                }
+                if conversation_id:
+                    _schedule_auto_evaluation(conversation_id, message_id, _result)
+                _schedule_tool_eval(query, specialist_results)
+                return _result
+
+            # 有工具调用 → 执行专家
+            assistant_msg = {
+                "role": "assistant",
+                "content": msg.content,
+                "tool_calls": [
+                    {
+                        "id": tc.id,
+                        "type": "function",
+                        "function": {
+                            "name": tc.function.name,
+                            "arguments": tc.function.arguments,
+                        },
+                    }
+                    for tc in msg.tool_calls
+                ],
+            }
+
+            # MIMO thinking mode: 传递 reasoning_content
+            reasoning = None
+            if hasattr(msg, "model_extra") and msg.model_extra:
+                reasoning = msg.model_extra.get("reasoning_content")
+            if not reasoning:
+                reasoning = getattr(msg, "reasoning_content", None)
+            if reasoning:
+                assistant_msg["reasoning_content"] = reasoning
+
+            llm_messages.append(assistant_msg)
+
+            # 并行执行所有专家 Agent
+            #
+            max_tools = get_max_tools_per_turn(complexity)
+            original_tool_count = len(msg.tool_calls or [])
+            msg.tool_calls = trim_tool_calls(msg.tool_calls, specialists, max_tools)
+            if original_tool_count != len(msg.tool_calls):
+                logger.warning(
+                    f"Orchestrator 工具调用已裁剪: {original_tool_count} -> {len(msg.tool_calls)} "
+                    f"(allowed={specialists}, max={max_tools})"
+                )
+
+            # 从 clarification 中提取 specialist_tasks（LLM 规划的专家任务）
+            specialist_tasks_map = {}
+            if isinstance(clarification, dict):
+                specialist_tasks_map = clarification.get("specialist_tasks", {})
+
+            tool_tasks = []
+            for tc in msg.tool_calls:
+                args = _parse_tool_args(tc.function.arguments, tc.function.name)
+                expert_query = args.get("query", query)
+                # 注入 specialist_tasks：把 LLM 规划的专家任务拼接到 query 前面作为上下文
+                agent_key_nonstream = build_expert_map().get(tc.function.name, "")
+                if agent_key_nonstream in specialist_tasks_map and specialist_tasks_map[agent_key_nonstream]:
+                    task_desc = specialist_tasks_map[agent_key_nonstream]
+                    expert_query = f"[专家任务] {task_desc}\n[用户问题] {expert_query}"
+                    logger.info(f"注入专家任务到 {agent_key_nonstream}: {task_desc[:80]}...")
+                logger.info(f"Orchestrator → {tc.function.name}: {expert_query[:100]}")
+                tool_tasks.append((tc, args, expert_query))
+
+            # 去重：跳过已执行过的专家
+            seen_keys = {sr.get("agent_key") for sr in specialist_results}
+            deduped_tasks = []
+            for tc, args, expert_query in tool_tasks:
+                agent_name = tc.function.name
+                # 查 agent_key
+                expert_map = build_expert_map()
+                agent_key = expert_map.get(agent_name, agent_name)
+                if agent_key in seen_keys:
+                    logger.info(f"跳过重复调用: {agent_name} ({agent_key})")
+                    # 用已有结果填充
+                    existing = next((sr for sr in specialist_results if sr.get("agent_key") == agent_key), None)
+                    if existing:
+                        llm_messages.append({
+                            "role": "tool",
+                            "tool_call_id": tc.id,
+                            "content": json.dumps({"analysis": existing["analysis"], "agent_key": agent_key, "agent": existing.get("agent", agent_name), "icon": existing.get("icon", "🤖")}, ensure_ascii=False)[:4000],
+                        })
+                    continue
+                deduped_tasks.append((tc, args, expert_query))
+            tool_tasks = deduped_tasks
+            if not tool_tasks:
+                # 所有专家都已执行完，强制进入总结阶段
+                llm_messages.append({
+                    "role": "user",
+                    "content": "所有专家已完成分析，请根据以上结果给出最终综合建议。",
+                })
+                # 跳过本轮工具执行，进入下一轮（LLM会看到没有工具调用，触发总结）
+                continue
+
+            if len(tool_tasks) == 1:
+                # 单个专家,直接执行(避免线程池开销)
+                tc, args, expert_query = tool_tasks[0]
+                result_str = _execute_specialist_cached(tc.function.name, expert_query,
+                                                  prebuilt_context=prebuilt_context,
+                                                  trace_id=trace_id)
+                ordered_results = [result_str]
+            else:
+                # 多个专家,并行执行
+                ordered_results = [None] * len(tool_tasks)
+                with concurrent.futures.ThreadPoolExecutor(max_workers=len(tool_tasks)) as executor:
+                    future_to_idx = {}
+                    for idx, (tc, args, expert_query) in enumerate(tool_tasks):
+                        future = executor.submit(
+                            _execute_specialist, tc.function.name, expert_query,
+                            cancel_event=None, prebuilt_context=prebuilt_context,
+                            trace_id=trace_id
+                        )
+                        future_to_idx[future] = idx
+
+                    for future in concurrent.futures.as_completed(future_to_idx):
+                        idx = future_to_idx[future]
+                        try:
+                            ordered_results[idx] = future.result()
+                        except CancelledError:
+                            raise
+                        except Exception as e:
+                            ordered_results[idx] = json.dumps({"error": str(e)}, ensure_ascii=False)
+
+            # 按原始顺序处理结果
+            for idx, (tc, args, expert_query) in enumerate(tool_tasks):
+                result_str = ordered_results[idx]
+
+                try:
+                    result_data = json.loads(result_str)
+                except json.JSONDecodeError:
+                    result_data = {"raw": result_str}
+
+                if "error" not in result_data:
+                    specialist_results.append({
+                        "agent_key": result_data.get("agent_key", build_expert_map().get(tc.function.name, "")),
+                        "agent": result_data.get("agent", tc.function.name),
+                        "icon": result_data.get("icon", "🤖"),
+                        "analysis": result_data.get("analysis", ""),
+                        "tool_calls": result_data.get("tool_calls", []),
+                        "duration_ms": result_data.get("duration_ms", 0),
+                    })
+
+                all_tool_calls.append({
+                    "name": tc.function.name,
+                    "arguments": args,
+                    "result_preview": result_str[:300],
                 })
 
-            all_tool_calls.append({
-                "name": tc.function.name,
-                "arguments": args,
-                "result_preview": result_str[:300],
-            })
+                llm_messages.append({
+                    "role": "tool",
+                    "tool_call_id": tc.id,
+                    "content": result_str[:4000],
+                })
 
-            llm_messages.append({
-                "role": "tool",
-                "tool_call_id": tc.id,
-                "content": result_str[:4000],
-            })
-
-    # 超过最大轮次,做最后一次总结
+        # 超过最大轮次,做最后一次总结
     try:
         llm_messages.append({
             "role": "user",
