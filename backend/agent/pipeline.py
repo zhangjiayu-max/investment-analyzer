@@ -888,13 +888,14 @@ class _PipelineCancelled(Exception):
 def is_pipeline_enabled() -> bool:
     """检查 Pipeline 模式是否启用。
 
-    默认 False（先灰度），通过 orchestration_config.pipeline_enabled 开启。
+    默认 True，通过 orchestration_config.pipeline_enabled 控制。
+    异常时自动降级到 ReAct，可放心开启。
     """
     try:
         from agent.orchestrator import get_orchestration_config
-        return get_orchestration_config("pipeline_enabled", "false") == "true"
+        return get_orchestration_config("pipeline_enabled", "true") == "true"
     except Exception:
-        return False
+        return True
 
 
 def should_use_pipeline(query: str, history: list) -> bool:

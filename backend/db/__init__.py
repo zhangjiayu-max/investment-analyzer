@@ -1039,6 +1039,8 @@ def init_db():
         ("dynamic_spawn_enabled", "true", "是否启用动态Agent选择"),
         ("human_in_loop_enabled", "true", "是否启用人在回路确认"),
         ("human_in_loop_timeout", "30", "人在回路确认超时秒数"),
+        ("pipeline_enabled", "true", "是否启用Pipeline模式（6阶段确定性流水线，失败自动降级ReAct）"),
+        ("pipeline_degrade_on_error", "true", "Pipeline异常时是否自动降级到ReAct模式"),
     ]
     for key, value, desc in _default_orchestration_config:
         conn.execute("""
