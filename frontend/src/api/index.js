@@ -1238,6 +1238,26 @@ export function getPortfolioDiversification() {
   return api.get('/portfolio/analysis/diversification')
 }
 
+/** 配置分布分析（按账户/类别聚合市值占比） */
+export function getDistributionAnalysis() {
+  return api.get('/portfolio/analysis/distribution')
+}
+
+/** 分基金盈亏分析（按盈亏额倒序） */
+export function getProfitByFund() {
+  return api.get('/portfolio/analysis/profit-by-fund')
+}
+
+/** 集中度分析（单基金/Top3 占比 + 预警） */
+export function getConcentrationAnalysis() {
+  return api.get('/portfolio/analysis/concentration')
+}
+
+/** 盈亏趋势（基于持仓快照） */
+export function getProfitTrend(days = 30) {
+  return api.get('/portfolio/analysis/profit-trend', { params: { days } })
+}
+
 /** 获取单只基金收益表现分析 */
 export function getHoldingPerformance(holdingId) {
   return api.get(`/portfolio/analysis/${holdingId}/performance`)

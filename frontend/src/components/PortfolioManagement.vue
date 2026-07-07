@@ -86,6 +86,7 @@ import {
   getCashBalance, adjustCashBalance,
   getFundNavHistory,
   getPortfolioDiversification, getHoldingPerformance, getTransactionSummary,
+  getDistributionAnalysis, getProfitByFund, getConcentrationAnalysis, getProfitTrend,
   getUnreadAlertCount,
   addTransactionTag, removeTransactionTag, getTransactionTags, clearAllPortfolio, chat,
   runPortfolioAiAnalysis, listPortfolioAiAnalysisRecords,
@@ -1124,6 +1125,15 @@ const managerData = ref(null)
 const managerLoading = ref(false)
 const managerChanges = ref([])
 
+// 持仓分析（P1 可视化）
+const analyticsLoading = ref(false)
+const analyticsError = ref('')
+const distributionData = ref(null)        // 配置分布
+const profitByFundData = ref([])          // 分基金盈亏
+const concentrationData = ref(null)       // 集中度
+const profitTrendData = ref([])           // 盈亏趋势
+const profitTrendDays = ref(30)           // 趋势天数
+
 // ── 费率侵蚀计算器 ──
 const feeRate = ref(1.5)
 const feeYears = ref(30)
@@ -1539,6 +1549,8 @@ function switchAnalysisTab(tab) {
     loadWatchlist()
   } else if (tab === 'managers') {
     loadManagers()
+  } else if (tab === 'analytics') {
+    loadAnalytics()
   }
 }
 
@@ -1557,6 +1569,42 @@ async function loadManagers() {
     managerLoading.value = false
   }
 }
+
+async function loadAnalytics() {
+  analyticsLoading.value = true
+  analyticsError.value = ''
+  try {
+    const [dist, profit, conc, trend] = await Promise.all([
+      getDistributionAnalysis(),
+      getProfitByFund(),
+      getConcentrationAnalysis(),
+      getProfitTrend(profitTrendDays.value),
+    ])
+    distributionData.value = dist.data
+    profitByFundData.value = profit.data.holdings || []
+    concentrationData.value = conc.data
+    profitTrendData.value = trend.data || []
+  } catch (e) {
+    console.error('加载持仓分析失败:', e)
+    analyticsError.value = e.message || '加载失败'
+  } finally {
+    analyticsLoading.value = false
+  }
+}
+
+async function refreshProfitTrend() {
+  try {
+    const { data } = await getProfitTrend(profitTrendDays.value)
+    profitTrendData.value = data || []
+  } catch (e) {
+    console.error('刷新盈亏趋势失败:', e)
+  }
+}
+
+const maxAbsProfit = computed(() => {
+  if (!profitByFundData.value.length) return 1
+  return Math.max(...profitByFundData.value.map(h => Math.abs(h.profit_loss || 0)), 1)
+})
 
 const aiModes = [
   { key: 'panorama', icon: '🔍', label: '全景诊断' },
@@ -3405,6 +3453,10 @@ function txDisplayAmount(tx) {
           <span v-if="managerChanges.length" class="tab-badge">{{ managerChanges.length }}</span>
         </span>
       </button>
+      <button :class="['analysis-tab', { active: activeAnalysisTab === 'analytics' }]" @click="switchAnalysisTab('analytics')">
+        <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"/></svg>
+        <span class="term-with-tip">持仓分析<span class="term-tip">持仓配置分布、分基金盈亏、集中度预警和盈亏趋势可视化</span></span>
+      </button>
     </div>
 
     <!-- Analysis Panel Content -->
@@ -4606,6 +4658,143 @@ function txDisplayAmount(tx) {
 
         <div v-else class="empty-state" style="padding:2rem;text-align:center">
           <p style="color:var(--color-muted)">暂无持仓或经理信息加载失败</p>
+        </div>
+      </template>
+
+      <!-- 持仓分析（P1 可视化） -->
+      <template v-if="activeAnalysisTab === 'analytics'">
+        <div class="analysis-panel-header">
+          <h3>持仓分析</h3>
+          <div class="analysis-panel-actions">
+            <button class="btn-diver-refresh" @click="loadAnalytics" :disabled="analyticsLoading">
+              <svg :class="['icon-spin', { 'spinning': analyticsLoading }]" width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h5M20 20v-5h-5M4.93 9a8 8 0 0113.14 0M19.07 15a8 8 0 01-13.14 0"/>
+              </svg>
+              {{ analyticsLoading ? '分析中...' : '刷新分析' }}
+            </button>
+            <button class="btn-ghost btn-sm" @click="switchAnalysisTab('analytics')">✕</button>
+          </div>
+        </div>
+
+        <div v-if="analyticsLoading" class="loading-state"><div class="spinner"></div></div>
+        <div v-else-if="analyticsError" class="error-state">{{ analyticsError }}</div>
+        <div v-else class="analysis-panel-body">
+
+          <!-- 配置分布：账户分布 + 类别分布 -->
+          <div v-if="distributionData" class="analysis-section">
+            <h4>配置分布</h4>
+            <div class="analytics-grid-2">
+              <div class="analytics-chart-card">
+                <h5>按账户</h5>
+                <PieChart
+                  v-if="distributionData.by_account && distributionData.by_account.length"
+                  :data="distributionData.by_account.map(d => ({ name: d.account || '未分类', value: d.market_value }))"
+                  :height="'260px'"
+                  :legendPosition="'right'"
+                />
+                <p v-else class="empty-hint">暂无数据</p>
+              </div>
+              <div class="analytics-chart-card">
+                <h5>按基金类别</h5>
+                <PieChart
+                  v-if="distributionData.by_category && distributionData.by_category.length"
+                  :data="distributionData.by_category.map(d => ({ name: d.fund_category || '未分类', value: d.market_value }))"
+                  :height="'260px'"
+                  :legendPosition="'right'"
+                />
+                <p v-else class="empty-hint">暂无数据</p>
+              </div>
+            </div>
+          </div>
+
+          <!-- 分基金盈亏 -->
+          <div v-if="profitByFundData.length" class="analysis-section">
+            <h4>分基金盈亏</h4>
+            <div class="profit-fund-list">
+              <div v-for="h in profitByFundData" :key="h.fund_code" class="profit-fund-row">
+                <div class="profit-fund-name">
+                  <span class="fund-code">{{ h.fund_code }}</span>
+                  <span class="fund-name">{{ h.fund_name }}</span>
+                </div>
+                <div class="profit-fund-bar">
+                  <div class="profit-bar-track">
+                    <div
+                      :class="['profit-bar-fill', h.profit_loss >= 0 ? 'positive' : 'negative']"
+                      :style="{ width: Math.min(Math.abs(h.profit_loss) / maxAbsProfit * 100, 100) + '%' }"
+                    ></div>
+                  </div>
+                </div>
+                <div :class="['profit-fund-value', h.profit_loss >= 0 ? 'text-success' : 'text-danger']">
+                  {{ h.profit_loss >= 0 ? '+' : '' }}{{ formatMoney(h.profit_loss) }}
+                  <span class="profit-rate">({{ (h.profit_rate * 100).toFixed(2) }}%)</span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- 集中度分析 -->
+          <div v-if="concentrationData" class="analysis-section">
+            <h4>集中度分析</h4>
+            <div class="analytics-stats">
+              <div class="analytics-stat">
+                <span class="stat-label">单基金最大占比</span>
+                <span :class="['stat-value', concentrationData.max_single_pct > 20 ? 'text-danger' : 'text-success']">
+                  {{ (concentrationData.max_single_pct || 0).toFixed(2) }}%
+                </span>
+              </div>
+              <div class="analytics-stat">
+                <span class="stat-label">Top3 占比</span>
+                <span :class="['stat-value', concentrationData.top3_pct > 50 ? 'text-danger' : 'text-success']">
+                  {{ (concentrationData.top3_pct || 0).toFixed(2) }}%
+                </span>
+              </div>
+              <div class="analytics-stat">
+                <span class="stat-label">持仓基金数</span>
+                <span class="stat-value">{{ concentrationData.holding_count || 0 }} 只</span>
+              </div>
+            </div>
+            <div v-if="concentrationData.warnings && concentrationData.warnings.length" class="concentration-warnings">
+              <div v-for="(w, i) in concentrationData.warnings" :key="i" class="warning-item">
+                <span class="warning-icon">⚠</span>
+                <span>{{ w }}</span>
+              </div>
+            </div>
+            <!-- Top 持仓列表 -->
+            <div v-if="concentrationData.top_holdings && concentrationData.top_holdings.length" class="top-holdings-list">
+              <div v-for="(h, i) in concentrationData.top_holdings" :key="h.fund_code" class="top-holding-row">
+                <span class="rank">{{ i + 1 }}</span>
+                <span class="fund-name">{{ h.fund_name }}</span>
+                <span class="pct">{{ (h.weight || 0).toFixed(2) }}%</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- 盈亏趋势 -->
+          <div class="analysis-section">
+            <div class="analytics-trend-header">
+              <h4>盈亏趋势</h4>
+              <div class="trend-days-switch">
+                <button
+                  v-for="d in [30, 90, 180]"
+                  :key="d"
+                  :class="['btn-days', { active: profitTrendDays === d }]"
+                  @click="profitTrendDays = d; refreshProfitTrend()"
+                >{{ d }}天</button>
+              </div>
+            </div>
+            <LineChart
+              v-if="profitTrendData.length"
+              :dates="profitTrendData.map(d => d.date)"
+              :series="[
+                { name: '总市值', data: profitTrendData.map(d => d.total_value) },
+                { name: '总成本', data: profitTrendData.map(d => d.total_cost) },
+              ]"
+              :yNames="['金额 (¥)']"
+              :height="'320px'"
+            />
+            <p v-else class="empty-hint">暂无快照数据，请先在持仓管理中点击"生成快照"</p>
+          </div>
+
         </div>
       </template>
     </div>
@@ -9594,5 +9783,182 @@ select.input-field {
 .col-reset-btn:hover {
   border-color: var(--color-primary, #2563eb);
   color: var(--color-primary, #2563eb);
+}
+
+/* ── 持仓分析（P1 可视化） ── */
+.analytics-grid-2 {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  margin-top: 12px;
+}
+.analytics-chart-card {
+  background: var(--color-bg-secondary, #f8f9fa);
+  border-radius: 8px;
+  padding: 12px;
+}
+.analytics-chart-card h5 {
+  margin: 0 0 8px;
+  font-size: 13px;
+  color: var(--color-text-secondary, #666);
+}
+.analytics-stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 12px;
+  margin: 12px 0;
+}
+.analytics-stat {
+  background: var(--color-bg-secondary, #f8f9fa);
+  padding: 12px;
+  border-radius: 8px;
+  text-align: center;
+}
+.analytics-stat .stat-label {
+  display: block;
+  font-size: 12px;
+  color: var(--color-text-secondary, #666);
+  margin-bottom: 4px;
+}
+.analytics-stat .stat-value {
+  display: block;
+  font-size: 18px;
+  font-weight: 600;
+}
+
+.profit-fund-list {
+  margin-top: 12px;
+}
+.profit-fund-row {
+  display: grid;
+  grid-template-columns: 200px 1fr 160px;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--color-border, #eee);
+}
+.profit-fund-name {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.profit-fund-name .fund-code {
+  font-size: 11px;
+  color: var(--color-text-secondary, #999);
+}
+.profit-fund-name .fund-name {
+  font-size: 13px;
+}
+.profit-bar-track {
+  height: 8px;
+  background: var(--color-bg-secondary, #f0f0f0);
+  border-radius: 4px;
+  overflow: hidden;
+}
+.profit-bar-fill {
+  height: 100%;
+  border-radius: 4px;
+}
+.profit-bar-fill.positive {
+  background: var(--color-success, #18a058);
+}
+.profit-bar-fill.negative {
+  background: var(--color-danger, #d03050);
+}
+.profit-fund-value {
+  text-align: right;
+  font-size: 13px;
+  font-weight: 600;
+}
+.profit-fund-value .profit-rate {
+  font-weight: normal;
+  font-size: 11px;
+  color: var(--color-text-secondary, #999);
+  margin-left: 4px;
+}
+
+.concentration-warnings {
+  margin: 12px 0;
+}
+.warning-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  background: rgba(240, 160, 30, 0.1);
+  border-left: 3px solid var(--color-warning, #f0a020);
+  border-radius: 4px;
+  margin-bottom: 6px;
+  font-size: 13px;
+}
+.warning-icon {
+  color: var(--color-warning, #f0a020);
+}
+
+.top-holdings-list {
+  margin-top: 12px;
+}
+.top-holding-row {
+  display: grid;
+  grid-template-columns: 30px 1fr 80px;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--color-border, #eee);
+  font-size: 13px;
+}
+.top-holding-row .rank {
+  text-align: center;
+  font-weight: 600;
+  color: var(--color-text-secondary, #999);
+}
+.top-holding-row .pct {
+  text-align: right;
+  font-weight: 600;
+}
+
+.analytics-trend-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-top: 16px;
+}
+.trend-days-switch {
+  display: flex;
+  gap: 4px;
+}
+.btn-days {
+  padding: 4px 12px;
+  border: 1px solid var(--color-border, #ddd);
+  background: transparent;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--color-text-secondary, #666);
+}
+.btn-days.active {
+  background: var(--color-primary, #2080f0);
+  color: white;
+  border-color: var(--color-primary, #2080f0);
+}
+
+.empty-hint {
+  text-align: center;
+  color: var(--color-text-secondary, #999);
+  padding: 24px;
+  font-size: 13px;
+}
+
+.text-success { color: var(--color-success, #18a058); }
+.text-danger { color: var(--color-danger, #d03050); }
+
+@media (max-width: 768px) {
+  .analytics-grid-2 {
+    grid-template-columns: 1fr;
+  }
+  .profit-fund-row {
+    grid-template-columns: 1fr;
+    gap: 4px;
+  }
 }
 </style>
