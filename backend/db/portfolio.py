@@ -732,7 +732,8 @@ def get_transaction(tx_id: int) -> dict | None:
 
 def list_transactions(fund_code: str = None, holding_id: int = None,
                       user_id: str = "default", limit: int = 100,
-                      include_system: bool = False, status: str = None) -> list[dict]:
+                      include_system: bool = False, status: str = None,
+                      start_date: str = None, end_date: str = None) -> list[dict]:
     """获取交易记录列表。默认不包含系统自动生成的（is_system=1）交易。"""
     conn = _get_conn()
     conditions = ["user_id = ?"]
@@ -746,6 +747,12 @@ def list_transactions(fund_code: str = None, holding_id: int = None,
     if status:
         conditions.append("status = ?")
         params.append(status)
+    if start_date:
+        conditions.append("transaction_date >= ?")
+        params.append(start_date)
+    if end_date:
+        conditions.append("transaction_date <= ?")
+        params.append(end_date)
     if not include_system:
         conditions.append("(is_system IS NULL OR is_system = 0)")
 
