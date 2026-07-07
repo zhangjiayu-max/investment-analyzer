@@ -250,24 +250,32 @@ def _parse_markdown_table_fund_map(text: str) -> dict[str, str]:
 def _record_hallucination(
     conversation_id: int, message_id: int, hallucinations: list[dict]
 ):
-    """将幻觉检测结果持久化到数据库，供后续归因分析。"""
+    """将幻觉检测结果持久化到独立表，不污染 token_usage 统计。"""
     try:
         from db._conn import _get_conn
 
         conn = _get_conn()
+        # A2 修复：改用独立表，避免 token=0 记录污染 token_usage 的 avg/sum 统计
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS hallucination_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                conversation_id INTEGER,
+                message_id INTEGER,
+                fund_code TEXT,
+                claimed_name TEXT,
+                detected_at TEXT DEFAULT (datetime('now','localtime'))
+            )
+        """)
         for h in hallucinations:
             conn.execute(
-                """INSERT INTO token_usage
-                   (model, prompt_tokens, completion_tokens, total_tokens, caller, trace_id)
-                   VALUES ('hallucination_detect', 0, 0, 0, ?, ?)""",
-                (
-                    f"fund_code:{h['code']}:claimed={h['claimed'][:30]}",
-                    f"conv={conversation_id}|msg={message_id}",
-                ),
+                """INSERT INTO hallucination_events
+                   (conversation_id, message_id, fund_code, claimed_name)
+                   VALUES (?, ?, ?, ?)""",
+                (conversation_id, message_id, h.get('code', ''), h.get('claimed', '')[:200]),
             )
         conn.commit()
         conn.close()
-        logger.info(f"幻觉记录已写入: {len(hallucinations)}条")
+        logger.info(f"幻觉记录已写入 hallucination_events: {len(hallucinations)}条")
     except Exception as e:
         logger.debug(f"幻觉记录写入失败（不影响主流程）: {e}")
 

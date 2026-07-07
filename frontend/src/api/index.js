@@ -1696,8 +1696,11 @@ export function getTokenUsage(days = 7) {
 }
 
 /** 获取最近 LLM 调用记录（分页） */
-export function getTokenUsageRecent(page = 1, pageSize = 20, days = 7) {
-  return api.get('/token-usage/recent', { params: { page, page_size: pageSize, days } })
+export function getTokenUsageRecent(page = 1, pageSize = 20, days = 7, caller = '', model = '') {
+  const params = { page, page_size: pageSize, days }
+  if (caller) params.caller = caller
+  if (model) params.model = model
+  return api.get('/token-usage/recent', { params })
 }
 
 /** 获取 Token 用量汇总（今日/累计） */

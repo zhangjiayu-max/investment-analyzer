@@ -1382,7 +1382,7 @@ function stopPollingProgress() {
 </script>
 
 <template>
-  <div class="chat-page">
+  <div class="chat-page bg-grid">
     <!-- 移动端：对话列表切换按钮 -->
     <button class="mobile-sidebar-toggle" @click="showMobileSidebar = !showMobileSidebar" title="对话列表">
       <svg width="20" height="20" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -1410,10 +1410,10 @@ function stopPollingProgress() {
         <div class="chat-header">
           <div class="chat-header-info">
             <span class="chat-agent-icon"><Icon name="bot" size="16" /></span>
-            <span class="chat-agent-name">投资分析助手</span>
+            <span class="chat-agent-name editorial-title">投资分析助手</span>
           </div>
           <button class="btn-conv-id" @click="copyConvId" :title="'对话 #' + selectedConv.id">
-            <span class="conv-id-text">#{{ selectedConv.id }}</span>
+            <span class="conv-id-text font-jet">#{{ selectedConv.id }}</span>
             <svg width="12" height="12" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <rect x="9" y="9" width="13" height="13" rx="2" stroke-width="2"/>
               <path stroke-width="2" d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/>
@@ -1466,9 +1466,9 @@ function stopPollingProgress() {
       </template>
 
       <!-- 空状态 -->
-      <div v-else class="chat-empty">
+      <div v-else class="chat-empty bg-mesh">
         <div class="chat-empty-icon"><Icon name="chat" size="48" /></div>
-        <h3>选择或创建一个对话</h3>
+        <h3 class="editorial-title-lg">选择或创建一个对话</h3>
         <p>选择左侧对话继续，或点击 + 创建新对话</p>
       </div>
     </div>

@@ -8,15 +8,30 @@ import {
 } from '../api'
 import ConfirmDialog from './ConfirmDialog.vue'
 
-// ── 费用计算 ──
+// ── 费用计算（A3 修复：与后端 infra/cost_tracker.py 统一定价） ──
 const MODEL_PRICING = {
-  'mimo-v2.5-pro': { prompt: 0.5, completion: 1.5 },
-  'deepseek-v4-pro': { prompt: 2.0, completion: 8.0 },
-  'mimo-v2-omni': { prompt: 1.0, completion: 3.0 },
+  'deepseek-chat': { prompt: 0.5, completion: 2.0 },
+  'deepseek-reasoner': { prompt: 1.0, completion: 4.0 },
+  'deepseek-v4-flash': { prompt: 0.5, completion: 2.0 },
+  'deepseek-v4-pro': { prompt: 1.0, completion: 4.0 },
+  'mimo': { prompt: 0.3, completion: 1.2 },
+  'mimo-v2.5-pro': { prompt: 0.3, completion: 1.2 },
+  'mimo-v2.5': { prompt: 0.3, completion: 1.2 },
+  'ollama': { prompt: 0.0, completion: 0.0 },
+  'qwen3-vl': { prompt: 0.0, completion: 0.0 },
 }
 
 function calcCost(model, promptTokens, completionTokens) {
-  const p = MODEL_PRICING[model] || { prompt: 1.0, completion: 3.0 }
+  // A3 修复：模糊匹配模型名，与后端 get_cost_estimate 逻辑一致
+  const modelLower = (model || '').toLowerCase()
+  let p = null
+  for (const key in MODEL_PRICING) {
+    if (modelLower.includes(key)) {
+      p = MODEL_PRICING[key]
+      break
+    }
+  }
+  if (!p) p = { prompt: 0.5, completion: 2.0 }
   return (promptTokens / 1000000 * p.prompt) + (completionTokens / 1000000 * p.completion)
 }
 
@@ -51,6 +66,9 @@ const confirm = ref({ visible: false, title: '', message: '', danger: false, onC
 const detailDays = ref(7)
 const detailCaller = ref('')
 const detailModel = ref('')
+
+// ── B2：全局时间范围选择器 ──
+const globalDays = ref(7)
 
 // ── Trace 查询 ──
 const traceInput = ref('')
@@ -132,15 +150,17 @@ function stopPolling() {
 async function loadOverviewData() {
   loading.value = true
   try {
+    // B2 修复：各板块统一使用 globalDays 时间窗口
+    const d = globalDays.value
     const [r1, r2, r3, r4, r5, r6, r7, r8] = await Promise.all([
-      getTokenUsageSummary(30),
-      getTokenUsageDaily(30),
-      getTokenUsageByCaller(7),
-      getTokenUsageByModel(7),
-      getTokenUsageCost(7),
+      getTokenUsageSummary(d),
+      getTokenUsageDaily(d),
+      getTokenUsageByCaller(d),
+      getTokenUsageByModel(d),
+      getTokenUsageCost(d),
       getTokenUsageHourly(),
       getTokenUsageBudget(),
-      getPerformanceStats(7),
+      getPerformanceStats(d),
     ])
     summary.value = r1.data
     daily.value = r2.data.items || []
@@ -157,9 +177,21 @@ async function loadOverviewData() {
   }
 }
 
+// B2：全局时间范围切换时重新加载所有数据
+function loadAllData() {
+  loadOverviewData()
+  if (tabLoaded.value.details) {
+    detailDays.value = globalDays.value
+    page.value = 1
+    loadRecords()
+  }
+  if (tabLoaded.value.perf) loadPerfData()
+}
+
 async function loadRecords() {
   try {
-    const { data } = await getTokenUsageRecent(page.value, pageSize, detailDays.value)
+    // B1 修复：传入 caller/model 筛选参数，让下拉框真正生效
+    const { data } = await getTokenUsageRecent(page.value, pageSize, detailDays.value, detailCaller.value, detailModel.value)
     records.value = data.records || []
     total.value = data.total || 0
   } catch (e) {
@@ -446,11 +478,57 @@ onMounted(() => {
 
 onUnmounted(stopPolling)
 
-// 监听明细筛选变化
-watch([detailDays], () => {
+// 监听明细筛选变化（B1 修复：增加 caller/model 监听）
+watch([detailDays, detailCaller, detailModel], () => {
   page.value = 1
   loadRecords()
 })
+
+// ── B3：specialist 调用归组展示 ──
+// 同一 trace_id + 同一专家（去掉 #turnN/#summary 后缀）的多轮调用归组为一行
+const groupedRecords = computed(() => {
+  const groups = new Map()
+  for (const r of records.value) {
+    const isMultiTurn = /#turn\d+|#summary/.test(r.caller || '')
+    if (!isMultiTurn) {
+      groups.set(`single-${r.id}`, { ...r, is_group: false })
+      continue
+    }
+    const baseCaller = (r.caller || '').replace(/#turn\d+/, '').replace(/#summary/, '')
+    const traceKey = r.trace_id || 'no-trace'
+    const key = `${traceKey}|${baseCaller}`
+    if (!groups.has(key)) {
+      groups.set(key, {
+        ...r,
+        caller: baseCaller,
+        is_group: true,
+        turn_count: 0,
+        total_tokens_sum: 0,
+        prompt_tokens_sum: 0,
+        completion_tokens_sum: 0,
+        turns: [],
+        first_time: r.created_at,
+      })
+    }
+    const g = groups.get(key)
+    g.turn_count += 1
+    g.total_tokens_sum += r.total_tokens || 0
+    g.prompt_tokens_sum += r.prompt_tokens || 0
+    g.completion_tokens_sum += r.completion_tokens || 0
+    g.turns.push({
+      turn: (r.caller || '').match(/#turn(\d+)/)?.[1] || 's',
+      tokens: r.total_tokens || 0,
+      time: r.created_at,
+    })
+  }
+  return Array.from(groups.values())
+})
+
+function expandGroup(group) {
+  if (!group.is_group) return
+  // 切换展开状态（用 _expanded 标记）
+  group._expanded = !group._expanded
+}
 </script>
 
 <template>
@@ -459,6 +537,16 @@ watch([detailDays], () => {
     <div class="page-header">
       <h2 class="page-title">Token 用量</h2>
       <span class="page-desc">LLM 调用消耗统计</span>
+      <!-- B2：全局时间范围选择器，所有板块统一引用 -->
+      <div class="global-range">
+        <span class="global-range-label">统计范围</span>
+        <select v-model="globalDays" @change="loadAllData" class="global-range-select">
+          <option :value="1">今日</option>
+          <option :value="7">近 7 天</option>
+          <option :value="30">近 30 天</option>
+          <option :value="90">近 90 天</option>
+        </select>
+      </div>
       <div style="display: flex; gap: 0.5rem; margin-left: auto;">
         <button class="btn-outline btn-sm" @click="loadOverviewData" :disabled="loading">
           <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
@@ -718,7 +806,7 @@ watch([detailDays], () => {
 
         <div class="table-header">
           <h4 class="chart-title" style="margin:0;">调用记录</h4>
-          <span class="table-total">共 {{ total }} 条</span>
+          <span class="table-total">共 {{ total }} 条{{ groupedRecords.length !== records.length ? `（归组展示 ${groupedRecords.length} 行）` : '' }}</span>
         </div>
 
         <div v-if="records.length === 0" class="chart-empty">暂无数据</div>
@@ -737,19 +825,53 @@ watch([detailDays], () => {
               </tr>
             </thead>
             <tbody>
-              <tr v-for="r in records" :key="r.id">
-                <td class="time-cell">{{ formatDateTime(r.created_at) }}</td>
-                <td><span class="caller-tag">{{ callerLabel(r.caller || '') }}</span></td>
-                <td class="model-cell">{{ r.model }}</td>
-                <td class="num">{{ (r.prompt_tokens || 0).toLocaleString() }}</td>
-                <td class="num">{{ (r.completion_tokens || 0).toLocaleString() }}</td>
-                <td class="num bold">{{ (r.total_tokens || 0).toLocaleString() }}</td>
-                <td class="num">{{ formatCost(calcCost(r.model, r.prompt_tokens || 0, r.completion_tokens || 0)) }}</td>
-                <td>
-                  <a v-if="r.trace_id" class="trace-link" @click="jumpToTrace(r.trace_id)">{{ shortTrace(r.trace_id) }}</a>
-                  <span v-else class="trace-none">-</span>
-                </td>
-              </tr>
+              <template v-for="(r, idx) in groupedRecords" :key="r.id || idx">
+                <!-- B3：归组行（specialist 多轮 ReAct） -->
+                <tr v-if="r.is_group" class="group-row" @click="expandGroup(r)">
+                  <td class="time-cell">{{ formatDateTime(r.first_time) }}</td>
+                  <td>
+                    <span class="caller-tag">{{ callerLabel(r.caller || '') }}</span>
+                    <span class="turn-badge">{{ r.turn_count }} 轮</span>
+                    <span class="expand-hint">{{ r._expanded ? '▾' : '▸' }}</span>
+                  </td>
+                  <td class="model-cell">{{ r.model }}</td>
+                  <td class="num">{{ r.prompt_tokens_sum.toLocaleString() }}</td>
+                  <td class="num">{{ r.completion_tokens_sum.toLocaleString() }}</td>
+                  <td class="num bold">{{ r.total_tokens_sum.toLocaleString() }}</td>
+                  <td class="num">{{ formatCost(calcCost(r.model, r.prompt_tokens_sum, r.completion_tokens_sum)) }}</td>
+                  <td>
+                    <a v-if="r.trace_id" class="trace-link" @click.stop="jumpToTrace(r.trace_id)">{{ shortTrace(r.trace_id) }}</a>
+                    <span v-else class="trace-none">-</span>
+                  </td>
+                </tr>
+                <!-- 归组展开后的子行 -->
+                <template v-if="r.is_group && r._expanded">
+                  <tr v-for="(t, tIdx) in r.turns" :key="`${r.id}-${tIdx}`" class="sub-row">
+                    <td class="time-cell sub-time">{{ formatDateTime(t.time) }}</td>
+                    <td class="sub-caller">└ turn {{ t.turn }}</td>
+                    <td class="model-cell sub-cell">{{ r.model }}</td>
+                    <td class="num sub-cell">—</td>
+                    <td class="num sub-cell">—</td>
+                    <td class="num sub-cell">{{ t.tokens.toLocaleString() }}</td>
+                    <td class="num sub-cell">{{ formatCost(calcCost(r.model, 0, t.tokens)) }}</td>
+                    <td class="sub-cell">—</td>
+                  </tr>
+                </template>
+                <!-- 普通行（非归组） -->
+                <tr v-else>
+                  <td class="time-cell">{{ formatDateTime(r.created_at) }}</td>
+                  <td><span class="caller-tag">{{ callerLabel(r.caller || '') }}</span></td>
+                  <td class="model-cell">{{ r.model }}</td>
+                  <td class="num">{{ (r.prompt_tokens || 0).toLocaleString() }}</td>
+                  <td class="num">{{ (r.completion_tokens || 0).toLocaleString() }}</td>
+                  <td class="num bold">{{ (r.total_tokens || 0).toLocaleString() }}</td>
+                  <td class="num">{{ formatCost(calcCost(r.model, r.prompt_tokens || 0, r.completion_tokens || 0)) }}</td>
+                  <td>
+                    <a v-if="r.trace_id" class="trace-link" @click="jumpToTrace(r.trace_id)">{{ shortTrace(r.trace_id) }}</a>
+                    <span v-else class="trace-none">-</span>
+                  </td>
+                </tr>
+              </template>
             </tbody>
           </table>
         </div>
@@ -950,6 +1072,83 @@ watch([detailDays], () => {
   color: var(--color-text-muted);
 }
 
+/* ── B2：全局时间范围选择器 ── */
+.global-range {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin-left: 0.5rem;
+}
+
+.global-range-label {
+  font-size: 0.75rem;
+  color: var(--color-text-muted);
+}
+
+.global-range-select {
+  padding: 0.25rem 0.5rem;
+  font-size: 0.8rem;
+  border: 1px solid var(--color-border, #d1d5db);
+  border-radius: var(--radius-sm, 4px);
+  background: var(--color-bg-input, #f9fafb);
+  color: var(--color-text-primary);
+  cursor: pointer;
+}
+
+.global-range-select:focus {
+  outline: none;
+  border-color: var(--color-primary, #3b82f6);
+}
+
+/* ── B3：归组行 + 展开子行 ── */
+.group-row {
+  cursor: pointer;
+  background: var(--color-bg-hover, #f9fafb);
+  transition: background 0.15s;
+}
+
+.group-row:hover {
+  background: var(--color-primary-50, #eff6ff);
+}
+
+.turn-badge {
+  display: inline-block;
+  margin-left: 0.4rem;
+  padding: 0.1rem 0.4rem;
+  font-size: 0.65rem;
+  font-weight: 600;
+  color: var(--color-primary, #3b82f6);
+  background: var(--color-primary-50, #eff6ff);
+  border-radius: 8px;
+}
+
+.expand-hint {
+  margin-left: 0.3rem;
+  font-size: 0.7rem;
+  color: var(--color-text-muted);
+}
+
+.sub-row {
+  background: var(--color-bg-secondary, #f3f4f6);
+}
+
+.sub-time {
+  padding-left: 1.5rem !important;
+  font-size: 0.72rem;
+  color: var(--color-text-muted);
+}
+
+.sub-caller {
+  padding-left: 1.5rem !important;
+  font-size: 0.72rem;
+  color: var(--color-text-muted);
+}
+
+.sub-cell {
+  font-size: 0.72rem;
+  color: var(--color-text-muted);
+}
+
 /* ── 运行中的 Agent ── */
 .running-agents-bar {
   background: linear-gradient(135deg, rgba(201, 168, 76, 0.05), rgba(201, 168, 76, 0.02));
@@ -974,7 +1173,7 @@ watch([detailDays], () => {
   width: 8px;
   height: 8px;
   border-radius: 50%;
-  background: #10b981;
+  background: var(--color-success);
   animation: pulse 1.5s ease-in-out infinite;
 }
 
@@ -1287,7 +1486,7 @@ watch([detailDays], () => {
 }
 
 .bar-label {
-  font-size: 0.55rem;
+  font-size: 0.7rem;
   color: var(--color-text-muted);
   white-space: nowrap;
 }
@@ -1434,7 +1633,7 @@ watch([detailDays], () => {
 }
 
 .heatmap-val {
-  font-size: 0.55rem;
+  font-size: 0.7rem;
   color: var(--color-text-muted);
 }
 
@@ -1618,7 +1817,7 @@ watch([detailDays], () => {
 }
 
 .perf-stat-value.warn {
-  color: #e53e3e;
+  color: var(--color-danger);
 }
 
 .perf-stat-label {
@@ -1679,7 +1878,7 @@ watch([detailDays], () => {
 }
 
 .warn-text {
-  color: #e53e3e;
+  color: var(--color-danger);
   font-weight: 500;
 }
 
@@ -1781,11 +1980,11 @@ watch([detailDays], () => {
   background: var(--color-primary);
 }
 
-/* 4 类事件圆点配色 */
+/* 4 类事件圆点配色（C1：改用 CSS 变量） */
 .dot-llm { background: var(--color-primary, #3b82f6); }
-.dot-tool { background: #f59e0b; }
-.dot-agent { background: #8b5cf6; }
-.dot-rag { background: #10b981; }
+.dot-tool { background: var(--color-warning); }
+.dot-agent { background: var(--color-info); }
+.dot-rag { background: var(--color-success); }
 
 .timeline-key {
   font-size: 0.68rem;
@@ -1999,8 +2198,8 @@ watch([detailDays], () => {
 }
 
 .btn-danger-text {
-  color: #ef4444;
-  border-color: #ef4444;
+  color: var(--color-danger);
+  border-color: var(--color-danger);
 }
 
 .btn-danger-text:hover {

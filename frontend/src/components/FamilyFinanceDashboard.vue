@@ -89,9 +89,9 @@ onMounted(load)
 
 <template>
   <div class="finance-page">
-    <header class="page-head">
+    <header class="page-head bg-mesh">
       <div>
-        <h2 class="page-title">财务总览</h2>
+        <h2 class="page-title editorial-title-lg">财务总览</h2>
         <p class="page-desc">家庭资产负债全景，一眼看清财务健康状态。</p>
       </div>
       <button class="btn-secondary" :disabled="loading" @click="load">
@@ -117,101 +117,101 @@ onMounted(load)
       <!-- 六大模块 -->
       <div class="dashboard-grid">
         <!-- 1. 净值总览 -->
-        <section class="card net-worth-card">
-          <div class="card-head">
+        <section class="card net-worth-card reveal-stagger editorial-card">
+          <div class="card-head editorial-card-header">
             <Icon name="wallet" size="18" />
-            <h3>净值总览</h3>
+            <h3 class="title">净值总览</h3>
           </div>
           <div class="card-body">
             <div class="hero-metric">
-              <span>总资产</span>
-              <strong>¥{{ money(nw.total_assets) }}</strong>
+              <span class="terminal-label">总资产</span>
+              <strong class="font-jet-lg">¥{{ money(nw.total_assets) }}</strong>
             </div>
             <div class="metric-grid">
               <div class="metric-item">
-                <span>现金</span>
-                <strong>¥{{ money(nw.cash_balance) }}</strong>
+                <span class="terminal-label">现金</span>
+                <strong class="font-jet">¥{{ money(nw.cash_balance) }}</strong>
               </div>
               <div class="metric-item">
-                <span>持仓市值</span>
-                <strong>¥{{ money(nw.holding_value) }}</strong>
+                <span class="terminal-label">持仓市值</span>
+                <strong class="font-jet">¥{{ money(nw.holding_value) }}</strong>
               </div>
               <div class="metric-item">
-                <span>总成本</span>
-                <strong>¥{{ money(nw.total_cost) }}</strong>
+                <span class="terminal-label">总成本</span>
+                <strong class="font-jet">¥{{ money(nw.total_cost) }}</strong>
               </div>
               <div class="metric-item">
-                <span>浮盈亏</span>
-                <strong :class="pnlClass(nw.float_pnl)">¥{{ money(nw.float_pnl) }}</strong>
+                <span class="terminal-label">浮盈亏</span>
+                <strong class="font-jet-lg" :class="pnlClass(nw.float_pnl)">¥{{ money(nw.float_pnl) }}</strong>
               </div>
               <div class="metric-item">
-                <span>总收益率</span>
-                <strong :class="pnlClass(nw.total_return_pct)">{{ pct(nw.total_return_pct) }}</strong>
+                <span class="terminal-label">总收益率</span>
+                <strong class="font-jet-lg" :class="pnlClass(nw.total_return_pct)">{{ pct(nw.total_return_pct) }}</strong>
               </div>
             </div>
           </div>
         </section>
 
         <!-- 2. 现金流 -->
-        <section class="card cashflow-card">
-          <div class="card-head">
+        <section class="card cashflow-card reveal-stagger editorial-card">
+          <div class="card-head editorial-card-header">
             <Icon name="trending-up" size="18" />
-            <h3>现金流</h3>
+            <h3 class="title">现金流</h3>
           </div>
           <div class="card-body">
             <div class="metric-grid three-col">
               <div class="metric-item">
-                <span>月收入</span>
-                <strong>¥{{ money(cf.monthly_income) }}</strong>
+                <span class="terminal-label">月收入</span>
+                <strong class="font-jet">¥{{ money(cf.monthly_income) }}</strong>
               </div>
               <div class="metric-item">
-                <span>月支出</span>
-                <strong>¥{{ money(cf.monthly_expense) }}</strong>
+                <span class="terminal-label">月支出</span>
+                <strong class="font-jet">¥{{ money(cf.monthly_expense) }}</strong>
               </div>
               <div class="metric-item">
-                <span>月结余</span>
-                <strong :class="pnlClass(cf.monthly_surplus)">¥{{ money(cf.monthly_surplus) }}</strong>
+                <span class="terminal-label">月结余</span>
+                <strong class="font-jet" :class="pnlClass(cf.monthly_surplus)">¥{{ money(cf.monthly_surplus) }}</strong>
               </div>
               <div class="metric-item">
-                <span>结余率</span>
-                <strong>{{ pct(cf.surplus_rate) }}</strong>
+                <span class="terminal-label">结余率</span>
+                <strong class="font-jet">{{ pct(cf.surplus_rate) }}</strong>
               </div>
               <div class="metric-item">
-                <span>备用金覆盖</span>
-                <strong>{{ cf.emergency_fund_months || '-' }} 个月</strong>
+                <span class="terminal-label">备用金覆盖</span>
+                <strong class="font-jet">{{ cf.emergency_fund_months || '-' }} 个月</strong>
               </div>
             </div>
           </div>
         </section>
 
         <!-- 3. 负债 -->
-        <section class="card debt-card">
-          <div class="card-head">
+        <section class="card debt-card reveal-stagger editorial-card">
+          <div class="card-head editorial-card-header">
             <Icon name="credit-card" size="18" />
-            <h3>负债</h3>
+            <h3 class="title">负债</h3>
           </div>
           <div class="card-body">
             <div v-if="debt.debt_summary" class="debt-summary">{{ debt.debt_summary }}</div>
             <div v-else class="no-data">暂无负债信息</div>
             <div class="metric-grid two-col">
               <div class="metric-item">
-                <span>月供</span>
-                <strong>¥{{ money(debt.monthly_debt_payment) }}</strong>
+                <span class="terminal-label">月供</span>
+                <strong class="font-jet">¥{{ money(debt.monthly_debt_payment) }}</strong>
               </div>
               <div class="metric-item">
-                <span>负债收入比</span>
-                <strong>{{ pct(debt.debt_to_income) }}</strong>
+                <span class="terminal-label">负债收入比</span>
+                <strong class="font-jet">{{ pct(debt.debt_to_income) }}</strong>
               </div>
             </div>
           </div>
         </section>
 
         <!-- 4. 目标进度 -->
-        <section class="card goals-card">
-          <div class="card-head">
+        <section class="card goals-card reveal-stagger editorial-card">
+          <div class="card-head editorial-card-header">
             <Icon name="target" size="18" />
-            <h3>目标进度</h3>
-            <span class="card-meta">
+            <h3 class="title">目标进度</h3>
+            <span class="card-meta meta">
               共 {{ goals.buckets?.length || 0 }} 个目标，
               目标 ¥{{ money(goals.total_target) }}
             </span>
@@ -222,7 +222,7 @@ onMounted(load)
               <div v-for="b in goals.buckets" :key="b.id" class="goal-item">
                 <div class="goal-top">
                   <span class="goal-name">{{ b.name }}</span>
-                  <span class="goal-pct" :style="{ color: progressColor(b.progress_pct) }">
+                  <span class="goal-pct font-jet" :style="{ color: progressColor(b.progress_pct) }">
                     {{ b.progress_pct.toFixed(1) }}%
                   </span>
                 </div>
@@ -235,7 +235,7 @@ onMounted(load)
                     }"
                   />
                 </div>
-                <div class="goal-detail">
+                <div class="goal-detail font-jet">
                   ¥{{ money(b.current_amount) }} / ¥{{ money(b.target_amount) }}
                 </div>
               </div>
@@ -244,50 +244,50 @@ onMounted(load)
         </section>
 
         <!-- 5. 投资状态 -->
-        <section class="card alloc-card">
-          <div class="card-head">
+        <section class="card alloc-card reveal-stagger editorial-card">
+          <div class="card-head editorial-card-header">
             <Icon name="pie-chart" size="18" />
-            <h3>投资配置</h3>
+            <h3 class="title">投资配置</h3>
           </div>
           <div class="card-body">
             <div class="metric-grid three-col">
               <div class="metric-item">
-                <span>最大偏离</span>
-                <strong>{{ pct(alloc.max_drift) }}</strong>
+                <span class="terminal-label">最大偏离</span>
+                <strong class="font-jet">{{ pct(alloc.max_drift) }}</strong>
               </div>
               <div class="metric-item">
-                <span>市场估值</span>
-                <strong>{{ alloc.market_level || '-' }}</strong>
+                <span class="terminal-label">市场估值</span>
+                <strong class="font-jet">{{ alloc.market_level || '-' }}</strong>
               </div>
               <div class="metric-item">
-                <span>护栏提示</span>
-                <strong>{{ alloc.guardrails_count || 0 }} 条</strong>
+                <span class="terminal-label">护栏提示</span>
+                <strong class="font-jet">{{ alloc.guardrails_count || 0 }} 条</strong>
               </div>
             </div>
             <div v-if="alloc.top_drift" class="top-drift">
-              最大偏离资产：<strong>{{ alloc.top_drift.label }}</strong>
+              最大偏离资产：<strong class="font-jet">{{ alloc.top_drift.label }}</strong>
             </div>
           </div>
         </section>
 
         <!-- 6. 风险视图 -->
-        <section class="card risk-card">
-          <div class="card-head">
+        <section class="card risk-card reveal-stagger editorial-card">
+          <div class="card-head editorial-card-header">
             <Icon name="shield" size="18" />
-            <h3>风险视图</h3>
+            <h3 class="title">风险视图</h3>
           </div>
           <div class="card-body">
             <div class="metric-grid three-col">
               <div class="metric-item">
-                <span>压力测试损失</span>
-                <strong class="negative">¥{{ money(risk.stress_loss_amount) }}</strong>
+                <span class="terminal-label">压力测试损失</span>
+                <strong class="font-jet negative">¥{{ money(risk.stress_loss_amount) }}</strong>
               </div>
               <div class="metric-item">
-                <span>损失比例</span>
-                <strong class="negative">{{ pct(risk.stress_loss_ratio) }}</strong>
+                <span class="terminal-label">损失比例</span>
+                <strong class="font-jet negative">{{ pct(risk.stress_loss_ratio) }}</strong>
               </div>
               <div class="metric-item">
-                <span>风险等级</span>
+                <span class="terminal-label">风险等级</span>
                 <span :class="['risk-badge', risk.risk_level]">
                   {{ { high: '高', medium: '中', low: '低' }[risk.risk_level] || risk.risk_level }}
                 </span>
@@ -304,11 +304,11 @@ onMounted(load)
       </div>
 
       <!-- 投资趋势 -->
-      <section class="card trend-card">
-        <div class="card-head">
+      <section class="card trend-card reveal-stagger editorial-card">
+        <div class="card-head editorial-card-header">
           <Icon name="bar-chart" size="18" />
-          <h3>投资趋势</h3>
-          <span class="card-meta">近 12 个月累计投入</span>
+          <h3 class="title">投资趋势</h3>
+          <span class="card-meta meta">近 12 个月累计投入</span>
         </div>
         <div class="card-body">
           <div v-if="trendLoading && !trend" class="trend-loading">
@@ -321,16 +321,16 @@ onMounted(load)
           <template v-else>
             <div class="trend-summary">
               <div class="metric-item">
-                <span>累计投入</span>
-                <strong>¥{{ money(trend.trend[trend.trend.length - 1]?.cumulative_invested || 0) }}</strong>
+                <span class="terminal-label">累计投入</span>
+                <strong class="font-jet">¥{{ money(trend.trend[trend.trend.length - 1]?.cumulative_invested || 0) }}</strong>
               </div>
               <div class="metric-item">
-                <span>当前净值</span>
-                <strong>¥{{ money(trend.current_value) }}</strong>
+                <span class="terminal-label">当前净值</span>
+                <strong class="font-jet">¥{{ money(trend.current_value) }}</strong>
               </div>
               <div class="metric-item">
-                <span>累计收益</span>
-                <strong :class="pnlClass(trend.current_value - trend.total_cost)">
+                <span class="terminal-label">累计收益</span>
+                <strong class="font-jet" :class="pnlClass(trend.current_value - trend.total_cost)">
                   {{ money(trend.current_value - trend.total_cost) }}
                   ({{ pct(trend.total_return) }})
                 </strong>

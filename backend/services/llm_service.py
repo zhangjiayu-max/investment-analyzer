@@ -316,9 +316,34 @@ def analyze_article_stream(title: str, content: str, market_data: dict = None):
         )
 
     stream = _stream()
+    _collected = []
+    _usage = None
     for chunk in stream:
-        if chunk.choices[0].delta.content:
+        if chunk.choices and chunk.choices[0].delta.content:
+            _collected.append(chunk.choices[0].delta.content)
             yield chunk.choices[0].delta.content
+        # 取末包 usage（部分模型流式会返回）
+        if hasattr(chunk, "usage") and chunk.usage:
+            _usage = chunk.usage
+
+    # A1 修复：流式结束后记录 token，优先用 API 返回 usage，否则 tiktoken 估算
+    if not _usage:
+        try:
+            import tiktoken
+            enc = tiktoken.encoding_for_model("gpt-4")
+            prompt_tokens = len(enc.encode(SYSTEM_PROMPT + user_msg))
+            completion_tokens = len(enc.encode("".join(_collected)))
+            if prompt_tokens or completion_tokens:
+                class _EstUsage:
+                    def __init__(self, p, c):
+                        self.prompt_tokens = p
+                        self.completion_tokens = c
+                        self.total_tokens = p + c
+                _usage = _EstUsage(prompt_tokens, completion_tokens)
+        except Exception:
+            pass
+    if _usage:
+        _record_token_usage(_usage, MODEL, caller="article_analysis_stream")
 
 
 def chat_about_investment(question: str, context: str = "", valuation_context: str = "") -> str:

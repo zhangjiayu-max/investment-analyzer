@@ -3381,7 +3381,7 @@ function txDisplayAmount(tx) {
   <div class="portfolio-page">
     <div class="page-header">
       <div>
-        <h2 class="page-title">持仓管理</h2>
+        <h2 class="page-title editorial-title-lg">持仓管理</h2>
         <p class="page-desc">管理基金持仓，AI 对话时可结合持仓数据给出加减仓建议</p>
       </div>
       <div class="header-actions">
@@ -3423,25 +3423,25 @@ function txDisplayAmount(tx) {
     </div>
 
     <section class="portfolio-workbench">
-      <article class="workbench-cell overview" @click="switchAnalysisTab('holdings')">
-        <div class="workbench-label">今日概览</div>
-        <strong>{{ formatMoney((summary.total_value || 0) + totalCash) }}</strong>
-        <span>{{ holdings.length }} 只持仓 · 现金 {{ formatMoney(totalCash) }}</span>
+      <article class="workbench-cell overview editorial-metric reveal-stagger" @click="switchAnalysisTab('holdings')">
+        <div class="workbench-label label">今日概览</div>
+        <strong class="value font-jet-lg">{{ formatMoney((summary.total_value || 0) + totalCash) }}</strong>
+        <span class="delta">{{ holdings.length }} 只持仓 · 现金 {{ formatMoney(totalCash) }}</span>
       </article>
-      <article class="workbench-cell diagnosis" @click="emit('navigate', 'alert-center')" title="前往风险与提示中心">
-        <div class="workbench-label">风险与提示</div>
-        <strong>{{ unreadAlertCount }} 条未读</strong>
-        <span>预警、持仓提示、AI 综合解读</span>
+      <article class="workbench-cell diagnosis editorial-metric reveal-stagger" @click="emit('navigate', 'alert-center')" title="前往风险与提示中心">
+        <div class="workbench-label label">风险与提示</div>
+        <strong class="value font-jet-lg">{{ unreadAlertCount }} 条未读</strong>
+        <span class="delta">预警、持仓提示、AI 综合解读</span>
       </article>
-      <article class="workbench-cell actions" @click="goDecisionCenter">
-        <div class="workbench-label">行动中心</div>
-        <strong>{{ workbenchStats.candidateCount + workbenchStats.pendingDecisionCount + workbenchStats.pendingTxCount + workbenchStats.dueReviewCount }}</strong>
-        <span>{{ workbenchStats.candidateCount }} 建议 · {{ workbenchStats.pendingDecisionCount }} 决策 · {{ workbenchStats.pendingTxCount }} 交易 · {{ workbenchStats.dueReviewCount }} 复盘</span>
+      <article class="workbench-cell actions editorial-metric reveal-stagger" @click="goDecisionCenter">
+        <div class="workbench-label label">行动中心</div>
+        <strong class="value font-jet-lg">{{ workbenchStats.candidateCount + workbenchStats.pendingDecisionCount + workbenchStats.pendingTxCount + workbenchStats.dueReviewCount }}</strong>
+        <span class="delta">{{ workbenchStats.candidateCount }} 建议 · {{ workbenchStats.pendingDecisionCount }} 决策 · {{ workbenchStats.pendingTxCount }} 交易 · {{ workbenchStats.dueReviewCount }} 复盘</span>
       </article>
-      <article class="workbench-cell planning" @click="switchAnalysisTab('config')">
-        <div class="workbench-label">规划工具</div>
-        <strong>{{ workbenchStats.watchCount }}</strong>
-        <span>四笔钱、定投优化、滚动收益、关注列表</span>
+      <article class="workbench-cell planning editorial-metric reveal-stagger" @click="switchAnalysisTab('config')">
+        <div class="workbench-label label">规划工具</div>
+        <strong class="value font-jet-lg">{{ workbenchStats.watchCount }}</strong>
+        <span class="delta">四笔钱、定投优化、滚动收益、关注列表</span>
       </article>
     </section>
 
@@ -3477,23 +3477,23 @@ function txDisplayAmount(tx) {
     <div class="analysis-tabs" v-if="holdings.length > 0 || activeAnalysisTab === 'watchlist'">
       <button :class="['analysis-tab', { active: activeAnalysisTab === 'holdings' }]" @click="switchAnalysisTab('holdings')">
         <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4"/></svg>
-        <span>持仓列表</span>
+        <span class="terminal-label">持仓列表</span>
       </button>
       <button :class="['analysis-tab', { active: activeAnalysisTab === 'diversification' }]" @click="switchAnalysisTab('diversification')">
         <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 3.055A9.001 9.001 0 1020.945 13H11V3.055z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20.488 9H15V3.512A9.025 9.025 0 0120.488 9z"/></svg>
-        <span class="term-with-tip">分散度分析<span class="term-tip">分析持仓的基金类型分布、指数分布和个股集中度，评估分散化程度</span></span>
+        <span class="term-with-tip terminal-label">分散度分析<span class="term-tip">分析持仓的基金类型分布、指数分布和个股集中度，评估分散化程度</span></span>
       </button>
       <button :class="['analysis-tab', { active: activeAnalysisTab === 'tx' }]" @click="switchAnalysisTab('tx')">
         <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"/></svg>
-        <span class="term-with-tip">交易行为分析<span class="term-tip">统计买卖频率、净投入和持仓变化，复盘交易行为</span></span>
+        <span class="term-with-tip terminal-label">交易行为分析<span class="term-tip">统计买卖频率、净投入和持仓变化，复盘交易行为</span></span>
       </button>
       <button :class="['analysis-tab', { active: activeAnalysisTab === 'ai' }]" @click="switchAnalysisTab('ai')">
         <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"/></svg>
-        <span class="term-with-tip">AI 分析<span class="term-tip">AI 结合估值数据、新闻热点和盈米 MCP 数据源，综合分析你的持仓情况。可以问：我的持仓有什么风险？当前估值下是否该调仓？某某基金表现如何？</span></span>
+        <span class="term-with-tip terminal-label">AI 分析<span class="term-tip">AI 结合估值数据、新闻热点和盈米 MCP 数据源，综合分析你的持仓情况。可以问：我的持仓有什么风险？当前估值下是否该调仓？某某基金表现如何？</span></span>
       </button>
       <button :class="['analysis-tab', { active: activeAnalysisTab === 'config' }]" @click="switchAnalysisTab('config')">
         <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.066 2.573c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.573 1.066c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.066-2.573c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/></svg>
-        <span class="term-with-tip">策略配置<span class="term-tip">管理调仓分析的资产配比策略、估值阈值和偏离度参数</span></span>
+        <span class="term-with-tip terminal-label">策略配置<span class="term-tip">管理调仓分析的资产配比策略、估值阈值和偏离度参数</span></span>
       </button>
       <button :class="['analysis-tab', { active: activeAnalysisTab === 'watchlist' }]" @click="switchAnalysisTab('watchlist')">
         <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11.049 2.927c.3-.921 1.603-.921 1.902 0l1.519 4.674a1 1 0 00.95.69h4.915c.969 0 1.371 1.24.588 1.81l-3.976 2.888a1 1 0 00-.363 1.118l1.518 4.674c.3.922-.755 1.688-1.538 1.118l-3.976-2.888a1 1 0 00-1.176 0l-3.976 2.888c-.783.57-1.838-.197-1.538-1.118l1.518-4.674a1 1 0 00-.363-1.118l-3.976-2.888c-.784-.57-.38-1.81.588-1.81h4.914a1 1 0 00.951-.69l1.519-4.674z"/></svg>

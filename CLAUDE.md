@@ -29,7 +29,8 @@ investment-analyzer/
 │   ├── market_data.py      # 行情数据（akshare）
 │   ├── valuation.py        # PE/PB 百分位估值分析
 │   ├── image_parser.py     # 图片估值解析
-│   └── data/               # SQLite + 图片
+│   └── data/chroma_db/     # ChromaDB 向量库（业务主库在根目录 data/valuations.db，见下「数据库使用目录」）
+├── data/                   # 业务主库 valuations.db + 图片/上传目录
 ├── frontend/
 │   └── src/
 │       ├── api/index.js    # 所有 API 调用（axios）
@@ -39,6 +40,32 @@ investment-analyzer/
 ├── doc/plans/              # 设计文档（日期前缀命名）
 └── static/                 # 构建产物
 ```
+
+## 数据库使用目录（强制）
+
+本项目仅使用以下三个数据库位置，**禁止在其他任何目录创建 `.db` / `.sqlite` / `.sqlite3` 文件**：
+
+| 用途 | 路径 | 管理代码 | 说明 |
+|------|------|----------|------|
+| 业务主库（SQLite） | `data/valuations.db` | `backend/db/_conn.py:7` 的 `DB_PATH` | 99 张业务表，所有 CRUD 通过 `_get_conn()` 访问 |
+| 向量库（ChromaDB） | `backend/data/chroma_db/` | `backend/services/rag.py:27` 的 `CHROMA_DIR` | RAG 向量检索，`chromadb.PersistentClient` |
+| 自动备份 | `backend/backups/` | `backend/db/backup.py:12` 的 `BACKUP_DIR` | 滚动保留最近 30 天，每日自动备份 |
+
+### 路径解析逻辑（易错点）
+- `DB_PATH = Path(__file__).parent.parent.parent / "data" / "valuations.db"` —— `_conn.py` 位于 `backend/db/`，三层 `parent` 回到**项目根目录**，所以业务主库在**项目根的 `data/`**，不是 `backend/data/`
+- `CHROMA_DIR = Path(__file__).parent.parent / "data" / "chroma_db"` —— `rag.py` 位于 `backend/services/`，两层 `parent` 是 `backend/`，所以 ChromaDB 在 `backend/data/chroma_db/`
+- 两个路径的 `parent` 层数不同，导致业务主库和向量库分属不同 `data/` 目录，这是历史遗留，**新增数据库必须遵循上表**
+
+### 禁止行为
+- ❌ 在 `backend/data/` 下创建 `valuations.db`（曾存在 78MB 孤儿副本，2026-07-08 已清理）
+- ❌ 在项目根目录创建 `investment.db`（曾存在空文件，已清理）
+- ❌ 在 `data/` 下创建 `tasks.db` / `investment-analyzer/` / `chroma_db/`（曾存在孤儿，已清理）—— `tasks` / `async_tasks` / `dd_parse_tasks` 表均在主库内，无独立 db
+- ❌ 在 `backend/chroma_db/` 创建 chroma（曾存在 188KB 孤儿，已清理）—— 正确路径是 `backend/data/chroma_db/`
+- ❌ 业务代码硬编码绝对路径访问数据库，必须 `from db._conn import _get_conn` 统一走 `DB_PATH`
+- `.codegraph/codegraph.db` 是 Trae IDE 代码索引，非业务库，不要手动操作
+
+### 历史背景
+2026-07-08 排查发现 9 个数据库文件分散在 5 个目录（根 `data/`、`backend/data/`、`backend/chroma_db/`、`data/chroma_db/`、`data/investment-analyzer/`），清理了 7 个孤儿副本（移入 `~/.Trash/investment-analyzer-db-cleanup-20260708/`），统一为上述三个位置。清理前主库 83MB / 99 表 / `integrity_check=ok`，清理后保持完好。
 
 ## 编码规范
 
@@ -122,7 +149,7 @@ investment-analyzer/
 | 改动类型 | 重启操作 |
 |---------|---------|
 | 后端 Python 文件 | 后端有 `--reload` 自动重载，无需手动重启；但修改 `config.py` 环境变量需重启进程 |
-| 前端 Vue/JS 文件 | 必须手动构建：`cd frontend && npm run build:deploy`（会自动清理旧文件再复制） |
+| 前端 Vue/JS 文件 | 必须手动构建：`cd frontend && npm run build`（直接输出到 `static/`，无需手动复制） |
 | 前后端都改了 | 先构建前端，后端自动重载 |
 
 **强制重启后端（杀掉重复进程）**：
@@ -135,18 +162,27 @@ cd /Users/xiaoyuer/projects/investment-analyzer/backend && pkill -f "uvicorn app
 ```
 
 **⚠️ 易错提醒**：uvicorn 必须在 `backend/` 目录下启动，否则会报 `Could not import module "app"` 错误！
-| 前端 Vue/JS 文件 | 必须手动构建：`cd frontend && npm run build:deploy`（会自动清理旧文件再复制） |
-| 前后端都改了 | 先构建前端，后端自动重载 |
 
-**强制重启后端（杀掉重复进程）**：
+## 前端构建说明
+
+- **构建工具**：Vite，配置在 `frontend/vite.config.js`
+- **构建输出目录**：`../static`（直接输出到根目录的 `static/`，无中间产物）
+- **`emptyOutDir: true`**：每次构建自动清空 `static/` 目录，避免旧文件残留
+- **`static/` 目录不提交 git**：已加入 `.gitignore`，是纯构建产物
+- **静态文件源**：`frontend/public/` 下的文件（favicon、icons、manifest、sw.js）会被 vite 复制到 `static/` 根目录
+- **后端服务**：FastAPI 在 `app.py` 中 mount `static/` 目录，前端通过 http://localhost:8000/app 访问
+
+**前端开发命令**：
 ```bash
-# 杀掉所有相关进程
-pkill -f "uvicorn app:app" 2>/dev/null; sleep 1
-# 重新启动
-cd /Users/xiaoyuer/projects/investment-analyzer/backend && nohup python3 -m uvicorn app:app --host 0.0.0.0 --port 8000 --reload > /tmp/app.log 2>&1 &
-```
+# 开发模式（Vite dev server，支持热更新，需配合后端代理）
+cd frontend && npm run dev
 
-**注意**：前端是从 `static/` 目录提供的静态文件，不是 Vite dev server。修改前端代码后必须 `npm run build:deploy`（会清理旧打包文件再复制到 `static/`）才能生效。
+# 生产构建（直接输出到 static/，后端立即生效）
+cd frontend && npm run build
+
+# 运行前端测试
+cd frontend && npm test
+```
 
 ## 金融严谨性（最高优先级）
 

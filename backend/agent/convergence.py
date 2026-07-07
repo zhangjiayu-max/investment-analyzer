@@ -21,8 +21,17 @@ def _normalize_query(query: str) -> str:
     """归一化 query：去标点、去多余空白、转小写。"""
     if not query:
         return ""
-    # 去除标点
-    cleaned = re.sub(r"[]，。！？,.!?;:；：""''\"'()【][]", " ", query)
+    # 去除中英文标点（用字符串 translate 更安全，避免正则字符类转义问题）
+    import unicodedata
+    # 保留字母数字和空格，其他标点（中英文）都替换为空格
+    cleaned_chars = []
+    for ch in query:
+        cat = unicodedata.category(ch)
+        if cat.startswith("P") or cat.startswith("S"):
+            cleaned_chars.append(" ")
+        else:
+            cleaned_chars.append(ch)
+    cleaned = "".join(cleaned_chars)
     # 折叠空白
     cleaned = re.sub(r"\s+", " ", cleaned).strip().lower()
     return cleaned

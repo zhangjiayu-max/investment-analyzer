@@ -24,7 +24,9 @@ build/
 
 # Node
 node_modules/
-frontend/dist/
+
+# 前端构建产物（vite 直接输出到 static/，不提交）
+static/
 
 # IDE
 .vscode/

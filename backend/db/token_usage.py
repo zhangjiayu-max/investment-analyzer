@@ -219,13 +219,28 @@ def ensure_indexes():
 
 # ── 费用估算 + 高级查询 ──────────────────────────────────────
 
-# 模型定价表（元/百万token）
-MODEL_PRICING = {
-    "mimo-v2.5-pro": {"prompt": 0.5, "completion": 1.5},
-    "deepseek-v4-pro": {"prompt": 2.0, "completion": 8.0},
-    "mimo-v2-omni": {"prompt": 1.0, "completion": 3.0},
-    "moka-ai/m3e-base": {"prompt": 0.1, "completion": 0},
-}
+# A3 修复：统一定价表，以 infra/cost_tracker.py:MODEL_PRICES 为权威源
+# 避免两套价格表不一致导致 /token-usage/cost 与 /cost-governance/dashboard 金额冲突
+try:
+    from infra.cost_tracker import MODEL_PRICES as _RAW_PRICES
+    # 适配字段名：cost_tracker 用 input/output，本模块用 prompt/completion
+    MODEL_PRICING = {
+        k: {"prompt": v["input"], "completion": v["output"]}
+        for k, v in _RAW_PRICES.items()
+    }
+except ImportError:
+    # 兜底（与 infra/cost_tracker.py 保持一致）
+    MODEL_PRICING = {
+        "deepseek-chat": {"prompt": 0.5, "completion": 2.0},
+        "deepseek-reasoner": {"prompt": 1.0, "completion": 4.0},
+        "deepseek-v4-flash": {"prompt": 0.5, "completion": 2.0},
+        "deepseek-v4-pro": {"prompt": 1.0, "completion": 4.0},
+        "mimo": {"prompt": 0.3, "completion": 1.2},
+        "mimo-v2.5-pro": {"prompt": 0.3, "completion": 1.2},
+        "mimo-v2.5": {"prompt": 0.3, "completion": 1.2},
+        "ollama": {"prompt": 0.0, "completion": 0.0},
+        "qwen3-vl": {"prompt": 0.0, "completion": 0.0},
+    }
 
 
 def get_cost_estimate(days: int = 7) -> dict:
@@ -244,7 +259,15 @@ def get_cost_estimate(days: int = 7) -> dict:
     by_model = []
     for r in rows:
         d = dict(r)
-        pricing = MODEL_PRICING.get(d["model"], {"prompt": 1.0, "completion": 3.0})
+        # A3 修复：模糊匹配模型名，与 cost_tracker 逻辑一致
+        model_lower = (d["model"] or "").lower()
+        pricing = None
+        for key, val in MODEL_PRICING.items():
+            if key in model_lower:
+                pricing = val
+                break
+        if not pricing:
+            pricing = {"prompt": 0.5, "completion": 2.0}  # 默认兜底，与 cost_tracker 一致
         cost = (d["prompt"] / 1_000_000 * pricing["prompt"]) + (d["completion"] / 1_000_000 * pricing["completion"])
         total_cost += cost
         by_model.append({

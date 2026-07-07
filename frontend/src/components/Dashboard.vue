@@ -747,10 +747,10 @@ function handlePanorama() {
   <div class="dashboard">
 
     <!-- Header -->
-    <div class="dash-header">
+    <div class="dash-header bg-mesh">
       <div>
-        <h2 class="page-title">每日投资决策看板</h2>
-        <p class="page-desc">{{ data?.date || '加载中...' }} · 整合估值、持仓、零钱，辅助决策</p>
+        <h2 class="page-title editorial-title-lg">每日投资决策看板</h2>
+        <p class="page-desc terminal-label">{{ data?.date || '加载中...' }} · 整合估值、持仓、零钱，辅助决策</p>
       </div>
       <button
         :class="['btn-canvas-toggle', { active: showDecisionCanvas }]"
@@ -793,11 +793,11 @@ function handlePanorama() {
     />
 
     <!-- 今日持仓提示 Top 3 摘要 -->
-    <div v-if="dailyAdvice || dailyAdviceLoading" class="advice-summary-card card">
-      <div class="advice-summary-header">
-        <h3 class="advice-summary-title">📋 今日持仓提示</h3>
+    <div v-if="dailyAdvice || dailyAdviceLoading" class="advice-summary-card card editorial-card">
+      <div class="advice-summary-header editorial-card-header">
+        <h3 class="advice-summary-title title">📋 今日持仓提示</h3>
         <span v-if="dailyAdvice?.summary?.headline" class="advice-summary-headline">{{ dailyAdvice.summary.headline }}</span>
-        <span v-if="dailyAdvice?.generated_at" class="advice-summary-time">{{ dailyAdvice.generated_at.slice(11, 16) }}</span>
+        <span v-if="dailyAdvice?.generated_at" class="advice-summary-time meta font-jet">{{ dailyAdvice.generated_at.slice(11, 16) }}</span>
       </div>
       <div v-if="dailyAdviceLoading" class="advice-summary-loading">
         <Skeleton variant="text" :count="2" />
@@ -833,14 +833,14 @@ function handlePanorama() {
 
     <!-- 债市温度仪表盘 -->
     <div v-if="!loading && bondTemperature" class="temp-gauges-row">
-      <div class="temp-gauge-card card">
+      <div class="temp-gauge-card card editorial-card">
         <GaugeChart
           :value="bondTemperature.temperature ?? 0"
           title="债市温度"
           height="180px"
         />
         <div class="temp-gauge-label">
-          <span class="temp-gauge-desc">{{ getBondTempLabel(bondTemperature.temperature) }}</span>
+          <span class="temp-gauge-desc font-jet">{{ getBondTempLabel(bondTemperature.temperature) }}</span>
         </div>
       </div>
     </div>
@@ -861,6 +861,7 @@ function handlePanorama() {
     <div v-if="!loading" class="dash-grid">
       <!-- Card 1: 低估指数 -->
       <UndervaluedIndexesCard
+        class="reveal-stagger"
         :undervalued-indexes="data?.undervalued_indexes || []"
         :undervalued-updated-at="data?.undervalued_updated_at || ''"
         :data-date="data?.undervalued_data_date || ''"
@@ -872,6 +873,7 @@ function handlePanorama() {
 
       <!-- Card 2: 持仓健康度 -->
       <PortfolioHealthCard
+        class="reveal-stagger"
         :portfolio-health="data?.portfolio_health || null"
         :portfolio-updated-at="data?.portfolio_updated_at || ''"
         :rebalance-loading="rebalanceLoading"
@@ -886,6 +888,7 @@ function handlePanorama() {
 
       <!-- Card 3: 今日热门机会 -->
       <HotspotsCard
+        class="reveal-stagger"
         :hot-topics="hotTopics"
         :hot-topics-fetched-at="hotTopicsFetchedAt"
         :hot-topics-loading="hotTopicsLoading"
@@ -909,6 +912,7 @@ function handlePanorama() {
 
       <!-- Card 4: 零钱配置 -->
       <CashManagementCard
+        class="reveal-stagger"
         :cash-management="data?.cash_management || null"
         :cash-updated-at="data?.cash_updated_at || ''"
         :bond-loading="bondLoading"
