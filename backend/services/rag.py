@@ -450,12 +450,22 @@ def _reset_jieba_cache():
     _jieba = None
 
 
+_JIEBA_WARNED = False  # 全局标记，避免重复告警
+
+
 def _tokenize(text: str) -> str:
     """用 jieba 分词，返回空格分隔的词语。"""
     jb = _get_jieba()
     if jb:
         return " ".join(jb.cut(text))
     # jieba 不可用时，按字符分割（效果较差但不报错）
+    global _JIEBA_WARNED
+    if not _JIEBA_WARNED:
+        logger.warning(
+            "⚠️ jieba 分词器不可用，RAG 检索退化为单字分词，"
+            "检索质量将严重下降。请执行: pip install jieba"
+        )
+        _JIEBA_WARNED = True
     return " ".join(text)
 
 
@@ -516,17 +526,24 @@ def rebuild_fts_index() -> dict:
         "analysis": 0, "skill": 0, "book": 0,
     }
 
-    # 1. articles 表（文章正文可能在 articles 表的 summary/content_text 字段，
-    #    或通过 article_id 关联；本表只索引 title + summary 作为摘要）
+    # 1. articles 表（图片格式文章无 content_text，只索引 title）
     try:
         conn = _get_conn()
-        rows = conn.execute(
-            "SELECT id, title, summary FROM articles WHERE status = 'done'"
-        ).fetchall()
+        # 尝试 content_text 列，不存在则只用 title
+        try:
+            rows = conn.execute(
+                "SELECT id, title, content_text FROM articles WHERE status = 'done'"
+            ).fetchall()
+            has_content = True
+        except Exception:
+            rows = conn.execute(
+                "SELECT id, title FROM articles WHERE status = 'done'"
+            ).fetchall()
+            has_content = False
         conn.close()
         for r in rows:
             title = r["title"] or ""
-            body = r["summary"] or ""
+            body = (r["content_text"] or "") if has_content else ""
             if title or body:
                 _index_document("article", title, body[:5000], str(r["id"]))
                 stats["article"] += 1
@@ -825,13 +842,35 @@ _FINANCE_CORE_TERMS = {
     "消费", "政策", "利好", "振兴", "内需", "零售", "通胀", "通缩",
     "降息", "加息", "降准", "GDP", "CPI", "PPI", "PMI", "LPR",
     "股市", "债市", "基金", "股票", "指数", "估值", "PE", "PB",
-    "ROE", "ROA", "ETF", "定投", " rebalance", "再平衡",
+    "ROE", "ROA", "ETF", "定投", "rebalance", "再平衡",
     "医药", "科技", "新能源", "半导体", "军工", "房地产", "银行",
     "白酒", "食品", "饮料", "家电", "旅游", "教育",
     "红利", "质量", "价值", "成长", "沪深300", "中证500",
     "牛市", "熊市", "震荡", "反弹", "回调", "涨停", "跌停",
     "持仓", "仓位", "止损", "止盈", "加仓", "减仓",
     "宏观经济", "微观", "行业", "板块", "赛道", "龙头",
+    # 制造业/基建
+    "高端", "装备", "制造", "制造业", "高端装备", "基建", "工程",
+    "机械", "工业", "自动化", "机器人", "智能制造",
+    # 行业指数/基金
+    "中证", "推荐", "优秀", "基金推荐", "关注", "ETF基金",
+    "指数基金", "行业基金", "主题基金", "联接基金",
+    # 环保/新能源细分
+    "环保", "碳中和", "新能源车", "光伏", "锂电池", "风电", "储能",
+    "液冷", "降温", "水资源", "净化", "绿色", "低碳",
+    # AI/科技细分
+    "AI", "人工智能", "芯片", "算力", "大模型", "机器人",
+    # 金融/周期
+    "金融", "保险", "券商", "证券", "周期", "钢铁", "煤炭", "有色",
+    "化工", "建材", "黄金", "原油", "大宗商品",
+    # 其他重要术语
+    "纳斯达克", "标普500", "恒生", "港股", "美股", "A股",
+    "美联储", "利率", "央行", "汇率", "人民币", "美元",
+    "收益", "风险", "波动", "回撤", "夏普", "最大回撤",
+    "定投", "分批", "分散", "配置", "组合", "仓位",
+    "利好", "利空", "业绩", "财报", "营收", "利润",
+    "分红", "股息", "年报", "季报", "公告",
+    "资金", "流向", "北向", "南向", "主力", "机构",
 }
 
 # 长查询阈值：超过此数量时启用核心词提取策略
@@ -863,12 +902,19 @@ def _build_fts_query(query: str) -> str:
     if len(multi_char) > _LONG_QUERY_TOKEN_THRESHOLD:
         core_terms = [t for t in multi_char if t.strip('"') in _FINANCE_CORE_TERMS]
         if core_terms:
-            # 核心术语用 AND，其余多字词用 OR 作为辅助
+            # 核心术语去重后按长度降序，取最长的 5 个用 AND（精确匹配）
+            unique_core = list(dict.fromkeys(core_terms))  # 保序去重
+            unique_core.sort(key=len, reverse=True)
+            top_core = unique_core[:5]
+            # 其余核心术语和非核心词用 OR 作为辅助召回
+            rest_core = unique_core[5:]
             other_multi = [t for t in multi_char if t not in core_terms]
-            core = " AND ".join(core_terms)
-            if other_multi:
-                # 最多取前5个辅助词，避免查询过长
-                aux = " OR ".join(other_multi[:5])
+            aux_terms = rest_core + other_multi
+            core = " AND ".join(top_core)
+            if aux_terms:
+                # 辅助词去重，最多取 5 个
+                aux_unique = list(dict.fromkeys(aux_terms))[:5]
+                aux = " OR ".join(aux_unique)
                 return f"({core}) OR ({aux})"
             return core
 
