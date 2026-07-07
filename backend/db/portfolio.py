@@ -3240,3 +3240,106 @@ def list_portfolio_snapshots(user_id: str = "default", limit: int = 365) -> list
         return [_row_to_dict(r) for r in rows]
     finally:
         conn.close()
+
+
+# ── 持仓快照（P1 优化：含盈亏率/总资产/持仓明细 JSON） ──────────────────────────────
+
+
+def create_snapshot(snapshot_date: str = None, user_id: str = "default") -> dict | None:
+    """记录当日持仓快照（幂等：同一天覆盖）。返回快照 dict。
+
+    与 save_portfolio_snapshot 的区别：本函数额外记录 total_profit_loss /
+    total_profit_rate / cash_balance / total_assets / holdings_json，
+    供 P1 分析 API（盈亏趋势、配置分布回溯）使用。
+    """
+    if snapshot_date is None:
+        snapshot_date = datetime.now().strftime("%Y-%m-%d")
+
+    summary = get_portfolio_summary(user_id)
+    holdings = list_holdings(user_id)
+    holdings_data = [
+        {
+            "fund_code": h.get("fund_code"),
+            "fund_name": h.get("fund_name"),
+            "shares": h.get("shares", 0),
+            "current_price": h.get("current_price"),
+            "current_value": h.get("current_value"),
+            "profit_loss": h.get("profit_loss"),
+            "profit_rate": h.get("profit_rate"),
+            "account": h.get("account"),
+            "fund_category": h.get("fund_category"),
+        }
+        for h in holdings
+        if (h.get("shares") or 0) > 0
+    ]
+
+    total_cost = summary.get("total_cost", 0) or 0
+    total_value = summary.get("total_value", 0) or 0
+    total_profit_loss = summary.get("total_profit_loss", 0) or summary.get("total_profit", 0) or 0
+    total_profit_rate = (total_profit_loss / total_cost) if total_cost > 0 else 0
+    cash_balance = summary.get("cash_balance", 0) or 0
+    total_assets = summary.get("total_assets", 0) or 0
+    holdings_json = json.dumps(holdings_data, ensure_ascii=False)
+
+    conn = _get_conn()
+    try:
+        conn.execute("""
+            INSERT OR REPLACE INTO portfolio_snapshots
+                (user_id, snapshot_date, total_cost, total_value, total_profit_loss,
+                 total_profit_rate, cash_balance, total_assets, holdings_json,
+                 cash, holding_count)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (user_id, snapshot_date, total_cost, total_value, total_profit_loss,
+              total_profit_rate, cash_balance, total_assets, holdings_json,
+              cash_balance, len(holdings_data)))
+        conn.commit()
+    finally:
+        conn.close()
+
+    return {
+        "snapshot_date": snapshot_date,
+        "total_cost": total_cost,
+        "total_value": total_value,
+        "total_profit_loss": total_profit_loss,
+        "total_profit_rate": total_profit_rate,
+        "cash_balance": cash_balance,
+        "total_assets": total_assets,
+        "holdings_json": holdings_json,
+    }
+
+
+def list_snapshots(start_date: str = None, end_date: str = None,
+                   limit: int = 90, user_id: str = "default") -> list[dict]:
+    """查询快照列表（默认最近 90 天）。按日期倒序。"""
+    conn = _get_conn()
+    try:
+        conditions = ["user_id = ?"]
+        params: list = [user_id]
+        if start_date:
+            conditions.append("snapshot_date >= ?")
+            params.append(start_date)
+        if end_date:
+            conditions.append("snapshot_date <= ?")
+            params.append(end_date)
+        where = " WHERE " + " AND ".join(conditions)
+        params.append(limit)
+        rows = conn.execute(f"""
+            SELECT * FROM portfolio_snapshots{where}
+            ORDER BY snapshot_date DESC LIMIT ?
+        """, params).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+def get_latest_snapshot(user_id: str = "default") -> dict | None:
+    """获取最新快照。"""
+    conn = _get_conn()
+    try:
+        row = conn.execute(
+            "SELECT * FROM portfolio_snapshots WHERE user_id = ? ORDER BY snapshot_date DESC LIMIT 1",
+            (user_id,),
+        ).fetchone()
+        return dict(row) if row else None
+    finally:
+        conn.close()

@@ -664,6 +664,12 @@ def init_db():
         )
     """)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_snapshots_user ON portfolio_snapshots(user_id, snapshot_date)")
+    # P1 优化：快照表扩展字段（盈亏率/总资产/持仓明细 JSON）
+    _add_column_if_not_exists(conn, "portfolio_snapshots", "total_profit_loss", "REAL")
+    _add_column_if_not_exists(conn, "portfolio_snapshots", "total_profit_rate", "REAL")
+    _add_column_if_not_exists(conn, "portfolio_snapshots", "cash_balance", "REAL")
+    _add_column_if_not_exists(conn, "portfolio_snapshots", "total_assets", "REAL")
+    _add_column_if_not_exists(conn, "portfolio_snapshots", "holdings_json", "TEXT")
 
     conn.execute("""
         CREATE TABLE IF NOT EXISTS transaction_tags (
