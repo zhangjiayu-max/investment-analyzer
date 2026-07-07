@@ -3343,3 +3343,108 @@ def get_latest_snapshot(user_id: str = "default") -> dict | None:
         return dict(row) if row else None
     finally:
         conn.close()
+
+
+# ── 持仓分析（P1 优化：配置分布 / 分基金盈亏 / 集中度） ──────────────────────────────
+
+
+def get_distribution_analysis(user_id: str = "default") -> dict:
+    """配置分布分析：按账户、按基金类别聚合市值占比。
+
+    返回:
+        {
+            "by_account": [{"name": "花无缺", "value": 1200.0, "pct": 0.6}, ...],
+            "by_category": [{"name": "equity", "value": 2000.0, "pct": 1.0}, ...],
+            "total_value": 2000.0,
+        }
+    """
+    holdings = list_holdings(user_id)
+    active = [h for h in holdings if (h.get("shares") or 0) > 0]
+    total_value = sum((h.get("current_value") or 0) for h in active)
+
+    by_account: dict[str, float] = {}
+    by_category: dict[str, float] = {}
+    for h in active:
+        value = h.get("current_value") or 0
+        account = h.get("account") or "未分类"
+        category = h.get("fund_category") or "未分类"
+        by_account[account] = by_account.get(account, 0) + value
+        by_category[category] = by_category.get(category, 0) + value
+
+    by_account_pct = [
+        {"name": k, "value": round(v, 2), "pct": round(v / total_value, 4) if total_value > 0 else 0}
+        for k, v in sorted(by_account.items(), key=lambda x: -x[1])
+    ]
+    by_category_pct = [
+        {"name": k, "value": round(v, 2), "pct": round(v / total_value, 4) if total_value > 0 else 0}
+        for k, v in sorted(by_category.items(), key=lambda x: -x[1])
+    ]
+
+    return {
+        "by_account": by_account_pct,
+        "by_category": by_category_pct,
+        "total_value": round(total_value, 2),
+    }
+
+
+def get_profit_by_fund(user_id: str = "default") -> list[dict]:
+    """分基金盈亏分析，按盈亏额倒序排列。排除已清仓记录。
+
+    返回每只基金的: fund_code / fund_name / current_value / total_cost /
+    profit_loss / profit_rate / account。
+    """
+    holdings = list_holdings(user_id)
+    result = []
+    for h in holdings:
+        if (h.get("shares") or 0) <= 0:
+            continue
+        result.append({
+            "fund_code": h.get("fund_code"),
+            "fund_name": h.get("fund_name"),
+            "current_value": h.get("current_value"),
+            "total_cost": h.get("total_cost"),
+            "profit_loss": h.get("profit_loss"),
+            "profit_rate": h.get("profit_rate"),
+            "account": h.get("account"),
+        })
+    result.sort(key=lambda x: x.get("profit_loss") or 0, reverse=True)
+    return result
+
+
+def get_concentration_analysis(user_id: str = "default") -> dict:
+    """集中度分析：单基金占比、Top3 占比、超限预警（>20%）。
+
+    返回:
+        {
+            "holdings": [{"fund_code","fund_name","value","pct"}, ...],  # 按占比倒序
+            "max_concentration": 0.35,        # 最大单基金占比
+            "max_fund": {...},                 # 最大占比基金（无持仓时 None）
+            "top3_concentration": 0.75,        # Top3 合计占比
+            "warning": True,                   # max_concentration > 0.20
+        }
+    """
+    holdings = list_holdings(user_id)
+    active = [h for h in holdings if (h.get("shares") or 0) > 0]
+    total_value = sum((h.get("current_value") or 0) for h in active)
+
+    items = []
+    for h in active:
+        value = h.get("current_value") or 0
+        items.append({
+            "fund_code": h.get("fund_code"),
+            "fund_name": h.get("fund_name"),
+            "value": round(value, 2),
+            "pct": round(value / total_value, 4) if total_value > 0 else 0,
+        })
+    items.sort(key=lambda x: x["pct"], reverse=True)
+
+    max_conc = items[0]["pct"] if items else 0
+    top3_conc = sum(i["pct"] for i in items[:3])
+
+    return {
+        "holdings": items,
+        "max_concentration": max_conc,
+        "max_fund": items[0] if items else None,
+        "top3_concentration": round(top3_conc, 4),
+        "warning": max_conc > 0.20,
+    }

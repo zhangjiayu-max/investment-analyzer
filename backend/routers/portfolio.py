@@ -1000,18 +1000,65 @@ async def preview_sell_api(holding_id: int, req: SellPreviewRequest):
 
 @router.post("/api/portfolio/snapshot")
 async def save_snapshot_api():
-    """手动保存今日持仓快照（每日自动快照由定时任务触发）。"""
-    from db.portfolio import save_portfolio_snapshot
-    snapshot_id = save_portfolio_snapshot()
-    return {"ok": True, "snapshot_id": snapshot_id}
+    """手动触发持仓快照（每日记录市值/盈亏/持仓明细，同日幂等覆盖）。"""
+    from db.portfolio import create_snapshot
+    result = create_snapshot()
+    return {"ok": True, "data": result}
 
 
 @router.get("/api/portfolio/snapshots")
-async def list_snapshots_api(limit: int = 365):
-    """查询持仓快照历史（用于收益曲线）。"""
-    from db.portfolio import list_portfolio_snapshots
-    snapshots = list_portfolio_snapshots(limit=limit)
+async def list_snapshots_api(start_date: str = None, end_date: str = None, limit: int = 90):
+    """查询持仓快照列表（用于收益曲线/盈亏趋势）。
+
+    可选 ?start_date=2026-01-01&end_date=2026-06-30&limit=90 做日期范围筛选。
+    """
+    from db.portfolio import list_snapshots
+    snapshots = list_snapshots(start_date=start_date, end_date=end_date, limit=limit)
     return {"snapshots": snapshots}
+
+
+# ── 持仓分析 API（P1 优化：配置分布 / 分基金盈亏 / 集中度 / 盈亏趋势） ──────────────
+
+
+@router.get("/api/portfolio/analysis/distribution")
+async def distribution_analysis_api():
+    """配置分布分析：按账户、按基金类别聚合市值占比。"""
+    from db.portfolio import get_distribution_analysis
+    return get_distribution_analysis()
+
+
+@router.get("/api/portfolio/analysis/profit-by-fund")
+async def profit_by_fund_api():
+    """分基金盈亏分析，按盈亏额倒序。"""
+    from db.portfolio import get_profit_by_fund
+    return {"holdings": get_profit_by_fund()}
+
+
+@router.get("/api/portfolio/analysis/concentration")
+async def concentration_analysis_api():
+    """集中度分析：单基金占比、Top3 占比、超限预警。"""
+    from db.portfolio import get_concentration_analysis
+    return get_concentration_analysis()
+
+
+@router.get("/api/portfolio/analysis/profit-trend")
+async def profit_trend_api(days: int = 30):
+    """盈亏趋势（基于持仓快照，按日期正序返回）。"""
+    from db.portfolio import list_snapshots
+    from datetime import datetime, timedelta
+    start = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+    snaps = list_snapshots(start_date=start, limit=days)
+    return [
+        {
+            "date": s["snapshot_date"],
+            "total_value": s.get("total_value"),
+            "total_cost": s.get("total_cost"),
+            "profit_loss": s.get("total_profit_loss"),
+            "profit_rate": s.get("total_profit_rate"),
+            "total_assets": s.get("total_assets"),
+        }
+        for s in reversed(snaps)
+    ]
 
 
 @router.post("/api/portfolio/quick-entry")
