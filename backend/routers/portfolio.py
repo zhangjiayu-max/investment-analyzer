@@ -880,6 +880,47 @@ async def confirm_transaction_api(tx_id: int, req: ConfirmTransactionRequest):
     return {"ok": True}
 
 
+@router.post("/api/portfolio/transactions/{tx_id}/auto-confirm")
+async def auto_confirm_transaction_api(tx_id: int):
+    """自动获取确认日净值并确认交易。"""
+    from db.portfolio import get_transaction, get_nav_by_date, confirm_transaction, refresh_holding_price
+
+    tx = get_transaction(tx_id)
+    if not tx:
+        raise HTTPException(404, "交易记录不存在")
+    if tx.get("status") != "pending":
+        raise HTTPException(400, "只能自动确认 pending 状态的交易")
+
+    fund_code = tx["fund_code"]
+    expected_date = tx.get("expected_confirm_date") or tx.get("transaction_date")
+
+    # 优先查询历史净值
+    confirmed_price = get_nav_by_date(fund_code, expected_date)
+
+    # 没有历史净值则获取最新净值（并提示）
+    used_latest = False
+    if not confirmed_price:
+        holding_id = tx.get("holding_id")
+        if holding_id:
+            nav_data = refresh_holding_price(holding_id)
+            if nav_data:
+                confirmed_price = nav_data.get("nav")
+                used_latest = True
+        if not confirmed_price:
+            raise HTTPException(502, "无法获取基金净值，请稍后重试或手动填入")
+
+    ok = confirm_transaction(tx_id, confirmed_price)
+    if not ok:
+        raise HTTPException(500, "确认失败")
+
+    return {
+        "ok": True,
+        "confirmed_price": confirmed_price,
+        "nav_source": "history" if not used_latest else "latest",
+        "message": "已使用历史净值确认" if not used_latest else f"未找到 {expected_date} 历史净值，已使用最新净值确认，请核实",
+    }
+
+
 @router.post("/api/portfolio/transactions/{tx_id}/settle")
 async def settle_transaction_api(tx_id: int):
     """标记卖出交易已到账。"""

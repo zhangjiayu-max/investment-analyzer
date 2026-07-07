@@ -289,6 +289,19 @@ def preview_sell(holding_id: int, shares_to_sell: float) -> dict:
     }
 
 
+def get_nav_by_date(fund_code: str, nav_date: str) -> float | None:
+    """从 fund_nav_history 表查询指定日期的净值。无则返回None。"""
+    conn = _get_conn()
+    try:
+        row = conn.execute("""
+            SELECT nav FROM fund_nav_history
+            WHERE fund_code = ? AND nav_date = ?
+        """, (fund_code, nav_date)).fetchone()
+        return row["nav"] if row else None
+    finally:
+        conn.close()
+
+
 def list_holdings(user_id: str = "default", account: str = None) -> list[dict]:
     """获取用户所有持仓，可选按账号筛选。"""
     conn = _get_conn()
@@ -705,6 +718,16 @@ def create_transaction(fund_code: str, transaction_type: str, amount: float,
     )
 
     return tx_id
+
+
+def get_transaction(tx_id: int) -> dict | None:
+    """获取单条交易记录。"""
+    conn = _get_conn()
+    try:
+        row = conn.execute("SELECT * FROM portfolio_transactions WHERE id = ?", (tx_id,)).fetchone()
+        return dict(row) if row else None
+    finally:
+        conn.close()
 
 
 def list_transactions(fund_code: str = None, holding_id: int = None,
