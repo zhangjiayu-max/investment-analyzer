@@ -622,12 +622,97 @@ async def resume_conversation(conv_id: int, request: Request):
 
 @router.get("/api/conversations/{conv_id}/execution-state")
 async def get_conversation_execution_state_api(conv_id: int):
-    """获取当前对话最近可恢复的 assistant 执行状态。"""
+    """获取当前对话最近可恢复的 assistant 执行状态 + 关联 channel 信息。"""
     conv = get_conversation(conv_id)
     if not conv:
         raise HTTPException(404, "对话不存在")
     item = get_latest_recoverable_assistant(conv_id)
+    # 扩展：关联 channel 信息（支持前端 replay 续接）
+    if item:
+        channel = get_latest_channel_for_message(item["id"])
+        if channel:
+            item["channel_id"] = channel["channel_id"]
+            item["channel_status"] = channel["status"]
+            item["last_seq"] = channel["last_seq"]
+        else:
+            item["channel_id"] = None
+            item["channel_status"] = None
+            item["last_seq"] = 0
     return {"item": item, "has_recoverable": bool(item)}
+
+
+@router.get("/api/conversations/{conv_id}/replay")
+async def replay_conversation(conv_id: int, channel_id: str, last_seq: int = 0, request: Request = None):
+    """回放续接 SSE 流——切回页面时续接 channel 事件流。
+
+    - channel 已结束（completed/failed/aborted/cancelled）→ 回放 last_seq 之后事件 + replay_end，关闭流
+    - channel running 且心跳超时 → 标记 aborted + 推 error，关闭流
+    - channel running 且心跳正常 → 回放 last_seq 之后事件 → 长连接订阅新事件
+    """
+    channel = get_stream_channel(channel_id)
+    if not channel or channel["conversation_id"] != conv_id:
+        raise HTTPException(404, "channel 不存在")
+
+    async def event_stream():
+        # 1. 回放历史事件（seq > last_seq）
+        events = list_stream_events(channel_id, after_seq=last_seq)
+        for ev in events:
+            yield _sse_event_with_seq(ev["event_type"], ev["data"], ev["seq"])
+
+        # 2. 重新查 channel 状态
+        channel = get_stream_channel(channel_id)
+        if not channel:
+            yield _sse_event("error", {"message": "channel 不存在"})
+            return
+
+        status = channel["status"]
+
+        # 3. 已结束 → 推 replay_end 关闭
+        if status != "running":
+            yield _sse_event("replay_end", {"status": status})
+            return
+
+        # 4. running 但心跳超时 → 标记 aborted
+        if is_stream_heartbeat_stale(channel_id, threshold_sec=15):
+            mark_stream_channel_aborted(channel_id, "heartbeat timeout")
+            yield _sse_event("error", {"message": "任务中断，请点击重试"})
+            yield _sse_event("replay_end", {"status": "aborted"})
+            return
+
+        # 5. running 且心跳正常 → 长连接订阅新事件
+        current_seq = events[-1]["seq"] if events else last_seq
+        max_polls = 1500  # 最多等待 50 分钟（2s × 1500）
+        for _ in range(max_polls):
+            await asyncio.sleep(2)
+            # 检测客户端断开
+            if await request.is_disconnected():
+                return
+            # 拉新事件
+            new_events = list_stream_events(channel_id, after_seq=current_seq)
+            for ev in new_events:
+                yield _sse_event_with_seq(ev["event_type"], ev["data"], ev["seq"])
+                current_seq = ev["seq"]
+            # 检查 channel 状态
+            channel = get_stream_channel(channel_id)
+            if not channel or channel["status"] != "running":
+                status = channel["status"] if channel else "unknown"
+                yield _sse_event("replay_end", {"status": status})
+                return
+            # 心跳超时检测
+            if is_stream_heartbeat_stale(channel_id, threshold_sec=15):
+                mark_stream_channel_aborted(channel_id, "heartbeat timeout")
+                yield _sse_event("error", {"message": "任务中断，请点击重试"})
+                yield _sse_event("replay_end", {"status": "aborted"})
+                return
+
+        yield _sse_event("error", {"message": "等待任务完成超时"})
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
+def _sse_event_with_seq(event_type: str, data: dict, seq: int) -> str:
+    """格式化带 seq 的 SSE 事件（replay 专用）。"""
+    return f"data: {json.dumps({'type': event_type, 'data': data, 'seq': seq}, ensure_ascii=False)}\n\n"
 
 
 @router.post("/api/conversations/{conv_id}/continue")
