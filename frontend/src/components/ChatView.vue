@@ -1612,9 +1612,9 @@ function stopPollingProgress() {
 }
 .chat-empty h3 {
   margin: 0;
-  font-size: 1.1rem;
+  font-size: inherit;
   color: var(--color-text-secondary);
-  font-weight: 600;
+  font-weight: inherit;
 }
 .chat-empty p {
   margin: 0;

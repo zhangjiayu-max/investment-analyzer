@@ -109,7 +109,7 @@ function openKycWizard() {
           <div class="conv-title">{{ conv.title }}</div>
           <div class="conv-meta">
             <span v-if="isTaskRunning(conv.id)" class="conv-task-status">后台执行中...</span>
-            <span class="conv-time">{{ formatTime(conv.updated_at) }}</span>
+            <span class="conv-time font-jet">{{ formatTime(conv.updated_at) }}</span>
           </div>
         </div>
         <button @click="handleDelete(conv, $event)" class="btn-delete-conv" title="删除">

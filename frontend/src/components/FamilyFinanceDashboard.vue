@@ -710,4 +710,46 @@ onMounted(load)
     height: 8px;
   }
 }
+
+/* ══ 编辑式金融终端叠加适配 ══ */
+/* page-head 氛围背景面板 */
+.page-head.bg-mesh {
+  padding: var(--space-5) var(--space-6);
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--color-border-light);
+}
+/* editorial-card-header 叠加到 card-head：消除重复下外边距，避免与 card-body 内边距叠加 */
+.card-head.editorial-card-header {
+  margin-bottom: 0;
+}
+/* 趋势卡汇总数字字号 */
+.trend-card .trend-summary .metric-item strong {
+  font-size: 1.05rem;
+}
+
+/* ── 移动端 ≤480px 字号适配 ── */
+@media (max-width: 480px) {
+  .page-head.bg-mesh {
+    padding: var(--space-4);
+  }
+  .hero-metric strong.font-jet-lg {
+    font-size: 1.3rem;
+  }
+  .metric-item strong.font-jet,
+  .metric-item strong.font-jet-lg {
+    font-size: 0.88rem;
+  }
+  .trend-card .trend-summary .metric-item strong {
+    font-size: 0.95rem;
+  }
+  .terminal-label {
+    font-size: 0.58rem;
+  }
+  .editorial-card-header .title {
+    font-size: 0.92rem;
+  }
+  .goal-pct.font-jet {
+    font-size: 0.8rem;
+  }
+}
 </style>

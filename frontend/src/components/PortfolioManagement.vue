@@ -3497,17 +3497,17 @@ function txDisplayAmount(tx) {
       </button>
       <button :class="['analysis-tab', { active: activeAnalysisTab === 'watchlist' }]" @click="switchAnalysisTab('watchlist')">
         <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11.049 2.927c.3-.921 1.603-.921 1.902 0l1.519 4.674a1 1 0 00.95.69h4.915c.969 0 1.371 1.24.588 1.81l-3.976 2.888a1 1 0 00-.363 1.118l1.518 4.674c.3.922-.755 1.688-1.538 1.118l-3.976-2.888a1 1 0 00-1.176 0l-3.976 2.888c-.783.57-1.838-.197-1.538-1.118l1.518-4.674a1 1 0 00-.363-1.118l-3.976-2.888c-.784-.57-.38-1.81.588-1.81h4.914a1 1 0 00.951-.69l1.519-4.674z"/></svg>
-        <span class="term-with-tip">关注列表<span class="term-tip">管理看好的基金，设定目标价和估值百分位，择机买入</span></span>
+        <span class="term-with-tip terminal-label">关注列表<span class="term-tip">管理看好的基金，设定目标价和估值百分位，择机买入</span></span>
       </button>
       <button :class="['analysis-tab', { active: activeAnalysisTab === 'managers' }]" @click="switchAnalysisTab('managers')">
         <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z"/></svg>
-        <span class="term-with-tip">基金经理<span class="term-tip">查看持仓基金的经理信息、从业年限、管理规模，检测经理变更</span>
+        <span class="term-with-tip terminal-label">基金经理<span class="term-tip">查看持仓基金的经理信息、从业年限、管理规模，检测经理变更</span>
           <span v-if="managerChanges.length" class="tab-badge">{{ managerChanges.length }}</span>
         </span>
       </button>
       <button :class="['analysis-tab', { active: activeAnalysisTab === 'analytics' }]" @click="switchAnalysisTab('analytics')">
         <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"/></svg>
-        <span class="term-with-tip">持仓分析<span class="term-tip">持仓配置分布、分基金盈亏、集中度预警和盈亏趋势可视化</span></span>
+        <span class="term-with-tip terminal-label">持仓分析<span class="term-tip">持仓配置分布、分基金盈亏、集中度预警和盈亏趋势可视化</span></span>
       </button>
     </div>
 
@@ -3542,7 +3542,7 @@ function txDisplayAmount(tx) {
             </div>
             <div class="analysis-stat">
               <span class="stat-label">总投资</span>
-              <span class="stat-value">{{ formatMoney(diversificationData.total_cost) }}</span>
+              <span class="stat-value font-jet">{{ formatMoney(diversificationData.total_cost) }}</span>
             </div>
             <div class="analysis-stat">
               <span class="stat-label">总市值</span>
@@ -4857,7 +4857,7 @@ function txDisplayAmount(tx) {
       </div>
       <div class="summary-card summary-card-cost">
         <div class="summary-label">总成本</div>
-        <div class="summary-value cost-value">{{ formatMoney(summary.total_cost) }}</div>
+        <div class="summary-value cost-value font-jet-lg">{{ formatMoney(summary.total_cost) }}</div>
         <div class="summary-sub">总资产 {{ formatMoney((summary.total_value || 0) + totalCash) }}</div>
       </div>
       <div class="summary-card">
@@ -4878,7 +4878,7 @@ function txDisplayAmount(tx) {
       </div>
       <div class="summary-card summary-card-pl">
         <div class="summary-label">总盈亏</div>
-        <div :class="['summary-value', profitClass(summary.total_profit)]" style="font-size:0.9rem">
+        <div :class="['summary-value', 'font-jet-lg', profitClass(summary.total_profit)]" style="font-size:0.9rem">
           {{ formatMoney(summary.total_profit) }}
         </div>
         <div :class="['summary-sub', profitClass(summary.profit_rate)]">
@@ -4890,7 +4890,7 @@ function txDisplayAmount(tx) {
           零钱合计
           <span style="font-size:0.65rem;opacity:0.6;margin-left:4px">✎</span>
         </div>
-        <div class="summary-value cash-value">{{ formatMoney(totalCash) }}</div>
+        <div class="summary-value cash-value font-jet-lg">{{ formatMoney(totalCash) }}</div>
         <div class="cash-accounts">
           <span class="cash-account-tag">🐟 {{ formatMoney(cashBalances['小鱼儿']) }}</span>
           <span class="cash-account-tag">🌸 {{ formatMoney(cashBalances['花无缺']) }}</span>
@@ -4948,7 +4948,7 @@ function txDisplayAmount(tx) {
         </div>
       </div>
 
-      <table v-if="holdings.length > 0 && !loading" class="data-table holding-table-drag">
+      <table v-if="holdings.length > 0 && !loading" class="data-table fin-table holding-table-drag">
         <thead>
           <tr>
             <th
@@ -4995,11 +4995,11 @@ function txDisplayAmount(tx) {
             <td v-else-if="col.key === 'fund_code'"><code>{{ h.fund_code }}</code></td>
             <td v-else-if="col.key === 'account'"><span class="account-badge">{{ h.account || '默认账户' }}</span></td>
             <td v-else-if="col.key === 'index_name'">{{ h.index_name || '--' }}</td>
-            <td v-else-if="col.key === 'shares'" class="text-right">{{ h.shares?.toLocaleString() }}</td>
-            <td v-else-if="col.key === 'cost_price'" class="text-right">{{ h.cost_price?.toFixed(4) }}</td>
-            <td v-else-if="col.key === 'total_cost'" class="text-right">{{ formatMoney(h.total_cost) }}</td>
-            <td v-else-if="col.key === 'current_price'" class="text-right">{{ h.current_price?.toFixed(4) || '--' }}</td>
-            <td v-else-if="col.key === 'today_profit'" :class="['text-right', profitClass(h.today_change_pct)]">
+            <td v-else-if="col.key === 'shares'" class="text-right font-jet">{{ h.shares?.toLocaleString() }}</td>
+            <td v-else-if="col.key === 'cost_price'" class="text-right font-jet">{{ h.cost_price?.toFixed(4) }}</td>
+            <td v-else-if="col.key === 'total_cost'" class="text-right font-jet">{{ formatMoney(h.total_cost) }}</td>
+            <td v-else-if="col.key === 'current_price'" class="text-right font-jet">{{ h.current_price?.toFixed(4) || '--' }}</td>
+            <td v-else-if="col.key === 'today_profit'" :class="['text-right', 'font-jet', profitClass(h.today_change_pct)]">
               <template v-if="h.today_change_pct !== undefined && h.today_change_pct !== null">
                 <div class="today-change-cell">
                   <span class="today-change-pct">{{ h.today_change_pct > 0 ? '+' : '' }}{{ h.today_change_pct.toFixed(2) }}%</span>
@@ -5010,9 +5010,9 @@ function txDisplayAmount(tx) {
               </template>
               <span v-else class="text-muted">--</span>
             </td>
-            <td v-else-if="col.key === 'current_value'" class="text-right">{{ formatMoney(h.current_value) }}</td>
-            <td v-else-if="col.key === 'profit_loss'" :class="['text-right', profitClass(h.profit_loss)]">{{ formatMoney(h.profit_loss) }}</td>
-            <td v-else-if="col.key === 'profit_rate'" :class="['text-right', profitClass(h.profit_rate)]">{{ formatRate(h.profit_rate) }}</td>
+            <td v-else-if="col.key === 'current_value'" class="text-right font-jet">{{ formatMoney(h.current_value) }}</td>
+            <td v-else-if="col.key === 'profit_loss'" :class="['text-right', 'font-jet', profitClass(h.profit_loss)]">{{ formatMoney(h.profit_loss) }}</td>
+            <td v-else-if="col.key === 'profit_rate'" :class="['text-right', 'font-jet', profitClass(h.profit_rate)]">{{ formatRate(h.profit_rate) }}</td>
             <td v-else-if="col.key === 'price_updated_at'">
               <span :class="['freshness-tag', freshnessHint(h.price_updated_at).cls]">
                 {{ freshnessHint(h.price_updated_at).text }}
@@ -7611,6 +7611,16 @@ select.input-field {
 }
 .analysis-tab svg {
   flex-shrink: 0;
+}
+/* 编辑式金融终端：Tab 标签 terminal-label 风格（等宽 + 字间距，保持中文可读尺寸） */
+.analysis-tab .terminal-label {
+  font-size: 0.8rem;
+  text-transform: none;
+  letter-spacing: 0.04em;
+  font-weight: 500;
+}
+.analysis-tab.active .terminal-label {
+  font-weight: 600;
 }
 
 /* ── Analysis Panel ─── */
