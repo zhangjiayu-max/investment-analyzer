@@ -505,6 +505,65 @@ export function resumeConversationStream(convId, onEvent) {
   return controller
 }
 
+/**
+ * 回放续接 SSE 流——切回页面时续接 channel 事件流。
+ * 返回 AbortController，调用 .abort() 可中断（不影响后台任务）。
+ */
+export function replayConversationStream(convId, channelId, lastSeq, onEvent) {
+  const controller = new AbortController()
+  const baseURL = api.defaults.baseURL || ''
+
+  fetch(`${baseURL}/conversations/${convId}/replay?channel_id=${channelId}&last_seq=${lastSeq}`, {
+    method: 'GET',
+    signal: controller.signal,
+    headers: { 'Accept': 'text/event-stream' },
+  }).then(async response => {
+    if (!response.ok) {
+      const body = await response.text().catch(() => '')
+      let msg = 'replay 请求失败'
+      try {
+        const err = JSON.parse(body)
+        msg = err.detail || msg
+      } catch {}
+      onEvent({ type: 'error', data: { message: msg, status: response.status } })
+      return
+    }
+    const reader = response.body.getReader()
+    const decoder = new TextDecoder()
+    let buffer = ''
+
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      buffer += decoder.decode(value, { stream: true })
+
+      const lines = buffer.split('\n')
+      buffer = lines.pop()
+
+      for (const line of lines) {
+        if (line.startsWith('data: ')) {
+          try {
+            const event = JSON.parse(line.slice(6))
+            onEvent(event)
+          } catch (e) {}
+        }
+      }
+    }
+    if (buffer.startsWith('data: ')) {
+      try {
+        const event = JSON.parse(buffer.slice(6))
+        onEvent(event)
+      } catch (e) {}
+    }
+  }).catch(err => {
+    if (err.name !== 'AbortError') {
+      onEvent({ type: 'error', data: { message: err.message } })
+    }
+  })
+
+  return controller
+}
+
 // ── Trace 执行链路 API ──────────────────────────────────────
 
 /** 获取对话的执行链路列表 */
