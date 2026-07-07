@@ -701,7 +701,13 @@ def create_agent_run(conversation_id: int, message_id: int, agent_key: str,
 def create_pending_agent_run(conversation_id: int, message_id: int, agent_key: str,
                               agent_name: str, query: str = "", trace_id: str = "",
                               run_phase: str = "primary") -> int:
-    """创建 pending 状态的 agent 执行记录，返回 run_id。run_phase: primary/cross_review/arbitration。"""
+    """创建 pending 状态的 agent 执行记录，返回 run_id。
+
+    run_phase: primary/cross_review/arbitration。
+    注：当前所有生产调用方均使用默认值 'primary'（cross_review/arbitration 阶段不创建
+    agent_runs）。该字段为预留扩展点，便于未来需要区分执行阶段时无需再次迁移 schema。
+    get_completed_agents_for_message(run_phase='primary') 过滤等价于查询所有 run。
+    """
     conn = _get_conn()
     cur = conn.execute("""
         INSERT INTO agent_runs (conversation_id, message_id, agent_key, agent_name,

@@ -23,3 +23,23 @@ def test_cancelled_conversation_not_auto_resumed():
     finally:
         from db.conversations import delete_conversation
         delete_conversation(conv_id)
+
+
+def test_failed_conversation_not_auto_resumed():
+    """上次执行失败的对话不应自动 resume，应返回 409 Conflict。"""
+    from app import app
+    from fastapi.testclient import TestClient
+    client = TestClient(app)
+    conv_id = create_conversation("test resume guard failed")
+    try:
+        create_message(conv_id, "user", "测试问题")
+        create_message(conv_id, "assistant", "❌ 分析失败",
+                       metadata=json.dumps({"execution_status": "failed"}))
+        # 刷新页面触发 resume
+        resp = client.post(f"/api/conversations/{conv_id}/resume")
+        assert resp.status_code == 409, f"失败的对话不应自动恢复: {resp.status_code} {resp.text}"
+        detail = resp.json()["detail"]
+        assert "失败" in detail, f"返回 detail 应包含'失败': {detail}"
+    finally:
+        from db.conversations import delete_conversation
+        delete_conversation(conv_id)

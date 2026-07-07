@@ -798,7 +798,7 @@ async function reconnectStream(convId, existingMsg) {
   }
 }
 
-function retryMessage(userMsg) {
+async function retryMessage(userMsg) {
   if (!userMsg || userMsg.role !== 'user' || sending.value) return
   const userMsgIndex = messages.value.indexOf(userMsg)
   const assistantMsg = messages.value.find(
@@ -811,6 +811,15 @@ function retryMessage(userMsg) {
         handleResume()
         return
       }
+    }
+  }
+  // 清除取消标记，避免新消息 streaming 期间刷新页面导致 resume 返回 409 孤立连接
+  const convId = selectedConv.value?.id
+  if (convId) {
+    try {
+      await clearCancelFlag(convId)
+    } catch (e) {
+      console.warn('清除取消标记失败:', e)
     }
   }
   inputText.value = userMsg.content
