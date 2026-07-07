@@ -213,6 +213,15 @@ _RISK_AND_DEPTH_CONSTRAINT = """
 - 如果数据获取失败，明确告知用户
 - 不要编造数据或使用过时数据
 """
+_NO_RAW_TOOLCALL_CONSTRAINT = """
+## 🚫 工具调用禁止文本输出格式（强制遵守）
+1. 禁止在分析文本中输出任何形式的 tool_call 标签或 XML
+2. 包括但不限于：<tool_call>、<invoke>、<function=>、<parameter=> 等原始标签
+3. 工具调用通过 function calling 机制自动执行，你只需要正常输出分析文本
+4. 如果你需要调用工具，系统会自动识别和处理，不要在文本中手写工具调用代码
+5. 违反此条的分析将被完全丢弃，视为失败
+"""
+
 _UNIVERSAL_CONTEXT_INSTRUCTION = """
 ## ⚠️ 全局视角要求（必须遵守）
 
@@ -236,6 +245,34 @@ _UNIVERSAL_CONTEXT_INSTRUCTION = """
 
 你的分析结尾必须包含「对当前持仓的影响」一段，指明你的建议会如何改变用户的持仓状况。
 """
+
+
+def _has_raw_toolcall_tags(text: str) -> bool:
+    """检测文本中是否包含未解析的工具调用标签。"""
+    if not text:
+        return False
+    # XML 格式
+    if '<tool_call>' in text or '<invoke name=' in text or '<function=>' in text:
+        return True
+    # DSML 格式
+    if '｜｜DSML｜｜invoke' in text:
+        return True
+    return False
+
+
+def _clear_raw_toolcall_tags(text: str) -> str:
+    """清理文本中的原始工具调用标签。"""
+    if not text:
+        return text
+    import re as _re
+    # 删除 <tool_call>...</tool_call> 块
+    text = _re.sub(r'<tool_call>.*?</tool_call>', '', text, flags=_re.DOTALL)
+    # 删除 <invoke name="...">...</invoke> 块
+    text = _re.sub(r'<invoke name="[^"]*"[^>]*>.*?</invoke>', '', text, flags=_re.DOTALL)
+    # 删除 DSML 块
+    dsml = '｜｜DSML｜｜'
+    text = _re.sub(r'<' + _re.escape(dsml) + r'(?:invoke|tool_calls)[^>]*>.*?</' + _re.escape(dsml) + r'(?:invoke|tool_calls)>', '', text, flags=_re.DOTALL)
+    return text.strip()
 
 
 def _extract_text_tool_calls(content_str):
@@ -413,6 +450,9 @@ def run_specialist(agent_key: str, query: str, context: str = "",
     # 追加通用数据约束
     system_content += _UNIVERSAL_DATA_CONSTRAINT
 
+    # 追加禁止原始 tool_call 文本约束
+    system_content += _NO_RAW_TOOLCALL_CONSTRAINT
+
     # 追加风险与深度分析约束
     system_content += _RISK_AND_DEPTH_CONSTRAINT
 
@@ -483,7 +523,22 @@ def run_specialist(agent_key: str, query: str, context: str = "",
         if not msg.tool_calls:
             if _process_text_tool_calls(msg.content or "", llm_messages, tool_calls_log, agent["name"], trace_id=trace_id):
                 continue
-            answer = msg.content or ""
+            # 兜底：如果文本中仍有未解析的 tool_call 标签，清理后追加恢复消息
+            raw = msg.content or ""
+            if _has_raw_toolcall_tags(raw):
+                logger.warning(f"[{agent['name']}] 输出含未解析 tool_call 标签，触发兜底清理")
+                import re as _re
+                cleaned = _clear_raw_toolcall_tags(raw)
+                # 追加恢复提示，让 LLM 下一轮重新分析
+                recovery_msg = (
+                    "[系统提示] 你在分析文本中输出了工具调用标签（如 <tool_call> 或 <invoke>），"
+                    "但格式未能被解析。请重新分析，将工具调用通过 function calling 机制使用，"
+                    "或在文本中直接给出分析结论。\n\n"
+                    "你上一轮的分析内容：\n```\n" + cleaned[:2000] + "\n```"
+                )
+                llm_messages.append({"role": "user", "content": recovery_msg})
+                continue
+            answer = raw
             break
 
         # 有工具调用 → 执行工具
@@ -671,6 +726,9 @@ def run_specialist_with_context(agent_key: str, query: str, peer_analyses: dict,
     # 追加通用可执行性约束 + 数据约束（含emoji禁令）
     system_content += _ACTIONABILITY_CONSTRAINT
     system_content += _UNIVERSAL_DATA_CONSTRAINT
+
+    # 追加禁止原始 tool_call 文本约束
+    system_content += _NO_RAW_TOOLCALL_CONSTRAINT
 
     # 追加圆桌审阅指令
     peer_sections = []
