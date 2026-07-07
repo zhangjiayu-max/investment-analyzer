@@ -21,8 +21,14 @@ import { useToast } from '../composables/useToast'
 import { renderMarkdown } from '../composables/useMarkdown'
 import { useStreamingState } from '../composables/useStreamingState'
 import { useTaskTracker } from '../composables/useTaskTracker'
+import { usePendingAction } from '../composables/usePendingAction'
+
+const props = defineProps({
+  onNavigate: { type: Function, default: null },
+})
 
 const { showToast } = useToast()
+const { pendingChatPrefill, clearChatPrefill, setTradeAction } = usePendingAction()
 const {
   streamStates, getStreamState, startStream,
   handleStreamEvent: routeStreamEvent,
@@ -56,6 +62,24 @@ const feedbackModal = ref({ visible: false, type: '', feedbackType: '', msgIndex
 // Trace 详情
 const traceDetailVisible = ref({})
 const traceDetailData = ref({})
+
+// ─── P2: 持仓 ↔ 对话双向联动 ───
+// 监听预填问题（来自持仓操作"咨询AI"）
+watch(pendingChatPrefill, (text) => {
+  if (!text) return
+  inputText.value = text
+  clearChatPrefill()
+  nextTick(() => {
+    const textarea = document.querySelector('.chat-input textarea, .chat-input input')
+    if (textarea) textarea.focus()
+  })
+})
+
+// 对话决策落地为交易：跳转到持仓管理并预填
+function executeTradeFromChat(action) {
+  setTradeAction(action)
+  if (props.onNavigate) props.onNavigate('portfolio')
+}
 
 // ─── 生命周期 ───
 
@@ -1305,6 +1329,7 @@ function stopPollingProgress() {
             @copy-message-id="copyMessageId"
             @toggle-trace="toggleTraceDetail"
             @save-decision="saveMessageAsDecision"
+            @execute-trade="executeTradeFromChat"
             @retry="retryMessage"
             @resume="tryResumeConversation"
             @continue-analysis="continueAssistantMessage"

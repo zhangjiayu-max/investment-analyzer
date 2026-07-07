@@ -25,6 +25,7 @@ const emit = defineEmits([
   'copy-message-id',
   'toggle-trace',
   'save-decision',
+  'execute-trade',
   'retry',
   'resume',
   'continue-analysis',
@@ -290,6 +291,58 @@ function formatTime(ts) {
   if (isToday) return time
   return `${d.getMonth() + 1}/${d.getDate()} ${time}`
 }
+
+// ── P2: 解析 AI 消息中的交易建议 ──
+const tradeSuggestions = computed(() => {
+  if (!props.msg || props.msg.role !== 'assistant') return []
+  const content = props.msg.content || ''
+  if (!content) return []
+  const suggestions = []
+
+  // 方式1: 解析结构化标记 <!-- trade: {...} -->
+  const structuredRegex = /<!--\s*trade\s*[:：]\s*(\{[^}]+\})\s*-->/gi
+  let match
+  while ((match = structuredRegex.exec(content)) !== null) {
+    try {
+      const data = JSON.parse(match[1])
+      if (data.action && data.fund_code) {
+        suggestions.push({
+          type: data.action === 'sell' ? 'sell' : 'buy',
+          fund_code: String(data.fund_code),
+          fund_name: data.fund_name || data.fund_code,
+          amount: data.amount ? Number(data.amount) : undefined,
+          shares: data.shares ? Number(data.shares) : undefined,
+        })
+      }
+    } catch (e) { /* 忽略解析错误 */ }
+  }
+
+  // 方式2: 解析代码块 ```trade-suggestion {...} ```
+  const codeBlockRegex = /```trade-suggestion\s*([\s\S]*?)```/gi
+  while ((match = codeBlockRegex.exec(content)) !== null) {
+    try {
+      const data = JSON.parse(match[1].trim())
+      if (data.action && data.fund_code) {
+        suggestions.push({
+          type: data.action === 'sell' ? 'sell' : 'buy',
+          fund_code: String(data.fund_code),
+          fund_name: data.fund_name || data.fund_code,
+          amount: data.amount ? Number(data.amount) : undefined,
+          shares: data.shares ? Number(data.shares) : undefined,
+        })
+      }
+    } catch (e) { /* 忽略解析错误 */ }
+  }
+
+  // 去重（按 fund_code + type）
+  const seen = new Set()
+  return suggestions.filter(s => {
+    const key = `${s.fund_code}_${s.type}`
+    if (seen.has(key)) return false
+    seen.add(key)
+    return true
+  })
+})
 </script>
 
 <template>
@@ -493,6 +546,21 @@ function formatTime(ts) {
       </div>
       <ReasoningPanel v-if="msg.reasoning" :text="msg.reasoning" />
       <div class="message-bubble markdown-body" v-html="renderMarkdown(msg.content)"></div>
+      <!-- P2: 执行交易按钮（解析 AI 回复中的交易建议） -->
+      <div v-if="tradeSuggestions.length" class="message-trade-actions">
+        <button
+          v-for="(s, idx) in tradeSuggestions"
+          :key="`trade-${idx}`"
+          class="btn-execute-trade"
+          @click="emit('execute-trade', s)"
+          :title="`一键${s.type === 'buy' ? '加仓' : '减仓'} ${s.fund_name}`"
+        >
+          <Icon :name="s.type === 'buy' ? 'trending-up' : 'trending-down'" size="14" />
+          执行{{ s.type === 'buy' ? '加仓' : '减仓' }} {{ s.fund_name }}
+          <span v-if="s.amount" class="trade-amount-hint">¥{{ s.amount }}</span>
+          <span v-else-if="s.shares" class="trade-amount-hint">{{ s.shares }}份</span>
+        </button>
+      </div>
       <!-- 反馈按钮 -->
       <div v-if="msg.role === 'assistant' && !feedbackGiven[index]" class="message-feedback">
         <button
@@ -1292,5 +1360,36 @@ function formatTime(ts) {
   .specialist-analysis { max-width: 100%; overflow-x: hidden; }
   .specialist-analysis :deep(table) { display: block; overflow-x: auto; -webkit-overflow-scrolling: touch; white-space: nowrap; }
   .tool-result { font-size: 0.68rem; max-width: 100%; overflow-x: auto; }
+}
+
+/* ── P2: 执行交易按钮 ── */
+.message-trade-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+.btn-execute-trade {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 5px 10px;
+  border: 1px solid var(--color-success, #18a058);
+  background: rgba(24, 160, 88, 0.1);
+  color: var(--color-success, #18a058);
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 12px;
+  transition: all 0.2s;
+  line-height: 1.4;
+}
+.btn-execute-trade:hover {
+  background: var(--color-success, #18a058);
+  color: white;
+}
+.trade-amount-hint {
+  font-size: 11px;
+  opacity: 0.85;
+  margin-left: 2px;
 }
 </style>

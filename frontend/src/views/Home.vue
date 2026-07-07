@@ -86,6 +86,12 @@ const pageProps = computed(() => {
   if (props.activePage === 'alert-center') {
     return { onNavigate: (page) => emit('navigate', page) }
   }
+  if (props.activePage === 'portfolio') {
+    return { onNavigate: (page) => emit('navigate', page) }
+  }
+  if (props.activePage === 'chat') {
+    return { onNavigate: (page) => emit('navigate', page) }
+  }
   return {}
 })
 

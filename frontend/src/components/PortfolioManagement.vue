@@ -127,8 +127,14 @@ import ActionCard from './ActionCard.vue'
 import { renderMarkdown } from '../composables/useMarkdown'
 import { isDark } from '../composables/useTheme'
 import { useAsyncTask } from '../composables/useAsyncTask'
+import { usePendingAction } from '../composables/usePendingAction'
 
+const props = defineProps({
+  onNavigate: { type: Function, default: null },
+})
 const emit = defineEmits(['navigate'])
+
+const { pendingTradeAction, clearTradeAction, setChatPrefill } = usePendingAction()
 
 // ── 持仓占比计算 ──
 const holdingWeights = computed(() => {
@@ -3098,6 +3104,52 @@ function openSell(h) {
   showSell.value = true
 }
 
+// ── P2: 咨询 AI（持仓操作 → 对话）──
+function formatProfitRate(holding) {
+  if (holding?.profit_rate == null) return '未知'
+  return (holding.profit_rate * 100).toFixed(2) + '%'
+}
+
+function consultAiForAdd(holding) {
+  const amount = addPurchaseForm.value?.amount || ''
+  const question = `我持有${holding.fund_name}(${holding.fund_code})，当前盈亏${formatProfitRate(holding)}，计划加仓¥${amount || '未定'}，请分析合理性并给出建议。`
+  setChatPrefill(question)
+  if (props.onNavigate) props.onNavigate('chat')
+}
+
+function consultAiForSell(holding) {
+  const shares = sellForm.value?.shares || ''
+  const question = `我持有${holding.fund_name}(${holding.fund_code})，当前盈亏${formatProfitRate(holding)}，计划减仓${shares || '未定'}份，请分析合理性并给出建议。`
+  setChatPrefill(question)
+  if (props.onNavigate) props.onNavigate('chat')
+}
+
+// ── P2: 接收对话决策落地为交易（对话 → 持仓操作）──
+watch(pendingTradeAction, (action) => {
+  if (!action) return
+  const holding = holdings.value.find(h => h.fund_code === action.fund_code)
+  if (holding) {
+    if (action.type === 'buy') {
+      openAddPurchase(holding)
+      nextTick(() => {
+        if (addPurchaseForm.value && action.amount) {
+          addPurchaseForm.value.amount = action.amount
+        }
+      })
+    } else if (action.type === 'sell') {
+      openSell(holding)
+      nextTick(() => {
+        if (sellForm.value && action.shares) {
+          sellForm.value.shares = action.shares
+        }
+      })
+    }
+  } else {
+    showToast(`未找到基金 ${action.fund_code}，请先添加该基金持仓`, 'warning')
+  }
+  clearTradeAction()
+})
+
 async function submitSell() {
   const f = sellForm.value
   if (f.shares <= 0) {
@@ -5629,6 +5681,10 @@ function txDisplayAmount(tx) {
                 <input v-model="addPurchaseForm.notes" class="input-field" placeholder="可选" />
               </div>
               <div class="modal-actions">
+                <button type="button" class="btn-consult-ai" @click="consultAiForAdd(addPurchaseHolding)" title="咨询 AI 分析加仓合理性">
+                  <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"/></svg>
+                  咨询AI
+                </button>
                 <button type="button" class="btn-secondary" @click="showAddPurchase = false">取消</button>
                 <button type="submit" class="btn-primary">提交买入</button>
               </div>
@@ -5694,6 +5750,10 @@ function txDisplayAmount(tx) {
                 <input v-model="sellForm.notes" class="input-field" placeholder="可选" />
               </div>
               <div class="modal-actions">
+                <button type="button" class="btn-consult-ai" @click="consultAiForSell(sellHolding)" title="咨询 AI 分析减仓合理性">
+                  <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"/></svg>
+                  咨询AI
+                </button>
                 <button type="button" class="btn-secondary" @click="showSell = false">取消</button>
                 <button type="submit" class="btn-primary">提交卖出</button>
               </div>
@@ -9960,5 +10020,26 @@ select.input-field {
     grid-template-columns: 1fr;
     gap: 4px;
   }
+}
+
+/* ── P2: 咨询 AI 按钮 ── */
+.btn-consult-ai {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 12px;
+  border: 1px dashed var(--color-primary, #2080f0);
+  background: var(--color-primary-bg-weak, rgba(32, 128, 240, 0.08));
+  color: var(--color-primary, #2080f0);
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 12px;
+  transition: all 0.2s;
+  margin-right: auto;
+}
+.btn-consult-ai:hover {
+  background: var(--color-primary, #2080f0);
+  color: white;
+  border-style: solid;
 }
 </style>
