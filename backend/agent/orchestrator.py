@@ -4456,6 +4456,22 @@ def _stream_final_synthesis(query: str, refined_query: str, specialists: list,
     }
 
 
+def _pipeline_phase_message(phase: str) -> str:
+    """将 Pipeline 阶段名转换为前端可读消息。"""
+    messages = {
+        "preprocess": "理解问题中...",
+        "info_gather": "收集信息中...",
+        "planning": "制定分析计划...",
+        "execution": "专家分析中...",
+        "synthesis": "综合结论中...",
+        "memory": "保存记忆...",
+        "completed": "已完成",
+        "failed": "执行失败",
+        "cancelled": "已取消",
+    }
+    return messages.get(phase, f"阶段: {phase}")
+
+
 def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_event: threading.Event | None = None, resume_from: dict | None = None, conversation_id: int = 0, message_id: int = 0, trace_id: str = "", target_specialists: list[str] = None):
     """
     Orchestrator 的流式版本,通过生成器逐步返回事件。
@@ -4481,6 +4497,73 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
         "start_time": start_time,
         "phases": {},
     }
+
+    # ── Pipeline 主路径（config 控制，默认关闭）──
+    # 启用后走 6 阶段确定性流水线，失败自动降级到下方 ReAct 逻辑
+    try:
+        from agent.pipeline import is_pipeline_enabled, should_use_pipeline, run_pipeline
+        if is_pipeline_enabled() and should_use_pipeline(query, history):
+            pipeline_completed = False
+            pipeline_degrade = False
+            try:
+                for evt in run_pipeline(
+                    query=query,
+                    history=history,
+                    conversation_id=conversation_id,
+                    message_id=message_id,
+                    trace_id=trace_id,
+                    cancel_event=cancel_event,
+                ):
+                    evt_type = evt.get("type", "")
+                    # 事件映射：pipeline → orchestrator 兼容格式
+                    if evt_type == "phase_start":
+                        phase_name = evt.get("phase", "")
+                        yield {"type": "phase", "phase": phase_name,
+                               "message": _pipeline_phase_message(phase_name)}
+                    elif evt_type == "phase_end":
+                        pass  # 阶段结束事件不转发，减少前端噪音
+                    elif evt_type == "simple_chat":
+                        yield {"type": "status", "message": "快速回复中..."}
+                    elif evt_type == "clarification":
+                        yield {"type": "status", "message": f"需要澄清: {evt.get('question', '')}"}
+                    elif evt_type == "plan_generated":
+                        yield {"type": "plan", "complexity": evt.get("plan", {}).get("complexity", "medium"),
+                               "scenario_type": "", "reason": "Pipeline 计划",
+                               "refined_query": evt.get("plan", {}).get("refined_query", "")}
+                    elif evt_type == "specialist_start":
+                        yield evt  # 直接转发
+                    elif evt_type == "specialist_done":
+                        yield evt  # 直接转发
+                    elif evt_type == "answer":
+                        pipeline_completed = True
+                        yield evt  # 直接转发最终回答
+                    elif evt_type == "terminated":
+                        pipeline_completed = True
+                        yield {"type": "status", "message": f"已终止: {evt.get('reason', '')}"}
+                        return
+                    elif evt_type == "error":
+                        logger.warning(f"[orchestrator] Pipeline 失败，降级到 ReAct: {evt.get('error', '')}")
+                        pipeline_degrade = True
+                        yield {"type": "status", "message": "Pipeline 异常，切换到标准模式..."}
+                        break
+                    elif evt_type == "degrade":
+                        logger.info("[orchestrator] Pipeline 主动降级到 ReAct")
+                        pipeline_degrade = True
+                        yield {"type": "status", "message": "切换到标准模式..."}
+                        break
+                    else:
+                        yield evt  # 未知事件直接转发
+            except Exception as e:
+                logger.exception(f"[orchestrator] Pipeline 异常，降级到 ReAct: {e}")
+                pipeline_degrade = True
+                yield {"type": "status", "message": "Pipeline 异常，切换到标准模式..."}
+
+            if pipeline_completed:
+                return  # Pipeline 成功完成，不再走 ReAct
+            # pipeline_degrade=True 或 Pipeline 未完成 → 继续走下方 ReAct 逻辑
+            logger.info("[orchestrator] Pipeline 降级，继续 ReAct 流程")
+    except ImportError:
+        pass  # pipeline 模块不可用，走 ReAct
 
     # ── 阶段0-0.5: 预处理（注入检查、token预算、链接抓取、查询改写、恢复模式）──
     precheck_gen = _stream_precheck(query, history, rag_context, cancel_event, resume_from, trace_id=trace_id)

@@ -673,6 +673,9 @@ def run_specialist(agent_key: str, query: str, context: str = "",
                     answer = "分析过程遇到问题，请重试。"
         answer = _clean_dsml_from_content(answer)
 
+    # Pipeline Phase C：估算 token 消耗（用于预算追踪）
+    tokens_used = _estimate_specialist_tokens(llm_messages, answer, tool_calls_log)
+
     return {
         "agent_key": agent_key,
         "agent": agent["name"],
@@ -681,7 +684,36 @@ def run_specialist(agent_key: str, query: str, context: str = "",
         "structured": _parse_structured_output(answer, agent_key, agent["name"], trace_id, tool_calls_log, duration_ms),
         "tool_calls": tool_calls_log,
         "duration_ms": duration_ms,
+        "tokens_used": tokens_used,
     }
+
+
+def _estimate_specialist_tokens(llm_messages: list, answer: str, tool_calls_log: list) -> int:
+    """估算专家调用的总 token 消耗（prompt + completion）。
+
+    用于 Pipeline 的 token 预算追踪，不追求精确，只用于预算控制。
+    """
+    try:
+        from agent.memory import estimate_tokens
+    except ImportError:
+        estimate_tokens = lambda x: len(x) // 3
+
+    # prompt tokens：所有输入消息
+    prompt_tokens = 0
+    for msg in llm_messages:
+        content = msg.get("content", "") or ""
+        prompt_tokens += estimate_tokens(content)
+        # tool_calls 的 arguments 也算
+        for tc in msg.get("tool_calls", []) or []:
+            fn = tc.get("function", {}) if isinstance(tc, dict) else {}
+            prompt_tokens += estimate_tokens(fn.get("arguments", ""))
+
+    # completion tokens：最终回答 + 工具结果摘要
+    completion_tokens = estimate_tokens(answer)
+    for tc in tool_calls_log:
+        completion_tokens += estimate_tokens(tc.get("result_preview", ""))
+
+    return prompt_tokens + completion_tokens
 
 
 def _parse_structured_output(raw_text: str, agent_key: str, agent_name: str,

@@ -48,6 +48,10 @@ class PlanStep:
     result: Optional[dict] = None
     error: str = ""
     duration_ms: int = 0
+    # Pipeline Phase C 扩展字段
+    token_budget: int = 0        # 该步骤的 token 预算
+    tokens_used: int = 0         # 实际消耗
+    blackboard_entry: Optional[dict] = None  # 写入黑板的条目
 
 
 @dataclass
@@ -104,6 +108,8 @@ class AnalysisPlan:
                     "depends_on": s.depends_on,
                     "status": s.status.value,
                     "duration_ms": s.duration_ms,
+                    "token_budget": s.token_budget,
+                    "tokens_used": s.tokens_used,
                 }
                 for s in self.steps
             ],
@@ -254,6 +260,9 @@ def execute_plan(
     prebuilt_context: str,
     cancel_event=None,
     progress_callback: Optional[Callable] = None,
+    blackboard=None,
+    convergence_detector=None,
+    termination_checker=None,
 ) -> tuple[list[dict], list[dict]]:
     """按计划执行，返回 (specialist_results, all_tool_calls)。
 
@@ -262,6 +271,11 @@ def execute_plan(
     - 有依赖的步骤等待依赖完成后执行
     - 步骤失败不阻塞（标记为 FAILED，继续执行其他步骤）
     - 单个 Specialist 内部仍是 ReAct（max 3 turns）
+
+    Pipeline Phase C 扩展参数：
+    - blackboard: Blackboard 实例，写入专家结论供后续专家参考
+    - convergence_detector: ConvergenceDetector 实例，跳过已调用的相似 query
+    - termination_checker: TerminationChecker 实例，多维度终止检查
     """
     from agent.multi_agent import run_specialist
 
@@ -280,6 +294,19 @@ def execute_plan(
             logger.info(f"[trace:{plan.trace_id}] Plan 执行被取消")
             break
 
+        # 终止条件检查（Pipeline 扩展）
+        if termination_checker:
+            try:
+                should_stop, reason = termination_checker.check(
+                    called_agent_count=len({s.agent_key for s in plan.steps if s.status == StepStatus.DONE}),
+                    current_phase="execution",
+                )
+                if should_stop:
+                    logger.info(f"[trace:{plan.trace_id}] Plan 执行终止: {reason}")
+                    break
+            except Exception as e:
+                logger.debug(f"[trace:{plan.trace_id}] 终止检查异常: {e}")
+
         # 收集所有可并行执行的步骤（同依赖级别）
         next_step = plan.next_step
         if next_step is None:
@@ -292,30 +319,77 @@ def execute_plan(
             if s.depends_on == next_step.depends_on:
                 parallel_steps.append(s)
 
+        # 收敛检测：过滤掉已调用的相似 query（Pipeline 扩展）
+        if convergence_detector:
+            filtered = []
+            for s in parallel_steps:
+                if not convergence_detector.should_skip_agent(s.agent_key, s.query):
+                    filtered.append(s)
+                else:
+                    s.status = StepStatus.SKIPPED
+                    logger.info(f"[trace:{plan.trace_id}] 跳过 {s.agent_name}：已调用过相似 query")
+            parallel_steps = filtered
+
+        if not parallel_steps:
+            continue
+
         # 执行
         if len(parallel_steps) == 1:
             step = parallel_steps[0]
             step.status = StepStatus.RUNNING
             if progress_callback:
                 progress_callback(step.step_id, step.agent_name, "running")
+            # 收敛检测：记录调用
+            if convergence_detector:
+                convergence_detector.record_call(step.agent_key, step.query)
             try:
+                # 注入黑板摘要到上下文（Pipeline 扩展）
+                ctx = prebuilt_context
+                if blackboard and blackboard.entry_count > 0:
+                    bb_summary = blackboard.to_context_text(exclude_agent=step.agent_key)
+                    if bb_summary:
+                        ctx = prebuilt_context + "\n\n" + bb_summary
+
                 result = run_specialist(
                     agent_key=step.agent_key,
                     query=step.query,
-                    prebuilt_context=prebuilt_context,
+                    prebuilt_context=ctx,
                     trace_id=plan.trace_id,
                 )
                 step.result = result
                 step.status = StepStatus.DONE
                 step.duration_ms = result.get("duration_ms", 0)
+                step.tokens_used = result.get("tokens_used", 0)
                 specialist_results.append(result)
                 all_tool_calls.extend(result.get("tool_calls", []))
+
+                # 写入黑板（Pipeline 扩展）
+                if blackboard:
+                    try:
+                        from agent.blackboard import extract_entry_from_result
+                        entry = extract_entry_from_result(
+                            agent_key=step.agent_key,
+                            agent_name=step.agent_name,
+                            result=result,
+                            tokens_used=step.tokens_used,
+                        )
+                        blackboard.write(entry)
+                        step.blackboard_entry = entry.to_dict()
+                    except Exception as e:
+                        logger.debug(f"[trace:{plan.trace_id}] 黑板写入失败: {e}")
+
+                # 终止检查器：记录成功
+                if termination_checker:
+                    termination_checker.record_success()
+
                 if progress_callback:
                     progress_callback(step.step_id, step.agent_name, "done")
             except Exception as e:
                 step.status = StepStatus.FAILED
                 step.error = str(e)
                 logger.error(f"[trace:{plan.trace_id}] Step {step.step_id} ({step.agent_name}) 失败: {e}")
+                if termination_checker:
+                    termination_checker.record_failure(str(e))
                 if progress_callback:
                     progress_callback(step.step_id, step.agent_name, "failed")
         else:
@@ -326,6 +400,8 @@ def execute_plan(
                     step.status = StepStatus.RUNNING
                     if progress_callback:
                         progress_callback(step.step_id, step.agent_name, "running")
+                    if convergence_detector:
+                        convergence_detector.record_call(step.agent_key, step.query)
                     future = executor.submit(
                         run_specialist,
                         agent_key=step.agent_key,
@@ -342,14 +418,36 @@ def execute_plan(
                         step.result = result
                         step.status = StepStatus.DONE
                         step.duration_ms = result.get("duration_ms", 0)
+                        step.tokens_used = result.get("tokens_used", 0)
                         specialist_results.append(result)
                         all_tool_calls.extend(result.get("tool_calls", []))
+
+                        # 写入黑板（Pipeline 扩展）
+                        if blackboard:
+                            try:
+                                from agent.blackboard import extract_entry_from_result
+                                entry = extract_entry_from_result(
+                                    agent_key=step.agent_key,
+                                    agent_name=step.agent_name,
+                                    result=result,
+                                    tokens_used=step.tokens_used,
+                                )
+                                blackboard.write(entry)
+                                step.blackboard_entry = entry.to_dict()
+                            except Exception as e:
+                                logger.debug(f"[trace:{plan.trace_id}] 黑板写入失败（并行）: {e}")
+
+                        if termination_checker:
+                            termination_checker.record_success()
+
                         if progress_callback:
                             progress_callback(step.step_id, step.agent_name, "done")
                     except Exception as e:
                         step.status = StepStatus.FAILED
                         step.error = str(e)
                         logger.error(f"[trace:{plan.trace_id}] Step {step.step_id} ({step.agent_name}) 并行失败: {e}")
+                        if termination_checker:
+                            termination_checker.record_failure(str(e))
                         if progress_callback:
                             progress_callback(step.step_id, step.agent_name, "failed")
 

@@ -332,3 +332,210 @@ def compress_rag_token_aware(rag_context: str, max_tokens: int = 1000) -> str:
         truncated = truncated[:last_break]
 
     return truncated + "\n...(已截断)"
+
+
+# ── 三层压缩策略（Pipeline Phase C 增强） ──────────
+
+
+def build_conversation_context(
+    history: list,
+    conversation_id: int,
+    max_tokens: int = 3000,
+    complexity: str = "medium",
+) -> list:
+    """三层压缩策略：最近原文 + 次近结构化摘要 + 最早一句话总结。
+
+    替代 compress_history_semantic 的增强版，支持三层压缩：
+    1. recent（占预算60%）：最近 K 轮保留原文
+    2. mid（占预算30%）：次近消息合并为结构化摘要（含意图+结论+关键数据）
+    3. early（占预算10%）：最早消息用一句话总结
+
+    Args:
+        history: 历史消息列表
+        conversation_id: 对话 ID
+        max_tokens: 总 token 预算
+        complexity: 复杂度，影响滑动窗口大小
+
+    Returns:
+        压缩后的消息列表
+    """
+    if not history:
+        return []
+
+    # 策略1：不超限直接返回
+    total_tokens = sum(estimate_tokens(msg.get("content", "")) for msg in history)
+    if total_tokens <= max_tokens:
+        return history
+
+    # 策略2：三层压缩
+    recent_budget = int(max_tokens * 0.6)
+    mid_budget = int(max_tokens * 0.3)
+    early_budget = max(max_tokens - recent_budget - mid_budget, 100)
+
+    # 滑动窗口大小（按复杂度）
+    sliding_window = {"simple": 5, "medium": 8, "complex": 12}.get(complexity, 8)
+
+    # 从后往前切分
+    recent_msgs = []
+    recent_used = 0
+    split_recent = len(history)
+    for i in range(len(history) - 1, -1, -1):
+        msg_tokens = estimate_tokens(history[i].get("content", ""))
+        if recent_used + msg_tokens > recent_budget or len(recent_msgs) >= sliding_window * 2:
+            split_recent = i + 1
+            break
+        recent_used += msg_tokens
+        recent_msgs.insert(0, history[i])
+
+    # 至少保留最近 2 条
+    split_recent = min(split_recent, len(history) - 2) if len(history) > 2 else len(history)
+
+    early_and_mid = history[:split_recent]
+    if not early_and_mid:
+        return recent_msgs
+
+    # 切分 early 和 mid
+    mid_tokens = 0
+    split_mid = len(early_and_mid)
+    for i in range(len(early_and_mid) - 1, -1, -1):
+        msg_tokens = estimate_tokens(early_and_mid[i].get("content", ""))
+        if mid_tokens + msg_tokens > mid_budget:
+            split_mid = i + 1
+            break
+        mid_tokens += msg_tokens
+
+    mid_msgs = early_and_mid[split_mid:] if split_mid < len(early_and_mid) else []
+    early_msgs = early_and_mid[:split_mid] if split_mid > 0 else []
+
+    result = []
+
+    # 最早消息：一句话总结
+    if early_msgs:
+        early_summary = _build_early_summary(early_msgs, conversation_id)
+        if early_summary:
+            result.append({
+                "role": "system",
+                "content": f"## 早期对话概要（{len(early_msgs)}条消息）\n{early_summary}",
+            })
+
+    # 次近消息：结构化摘要
+    if mid_msgs:
+        mid_summary = _build_structured_summary(mid_msgs, conversation_id)
+        if mid_summary:
+            result.append({
+                "role": "system",
+                "content": f"## 中期对话摘要（{len(mid_msgs)}条消息）\n{mid_summary}",
+            })
+
+    # 最近消息：原文
+    result.extend(recent_msgs)
+
+    return result
+
+
+def _build_early_summary(messages: list, conversation_id: int) -> str:
+    """最早消息的一句话总结（极简，节省 token）。"""
+    if not messages:
+        return ""
+
+    # 取第一条用户消息的核心内容
+    first_user = ""
+    for msg in messages:
+        if msg.get("role") == "user":
+            content = (msg.get("content", "") or "").strip()
+            if content:
+                first_user = content[:60]
+                break
+
+    # 取最后一条助手消息的核心结论
+    last_assistant = ""
+    for msg in reversed(messages):
+        if msg.get("role") == "assistant":
+            content = (msg.get("content", "") or "").strip()
+            if content:
+                # 提取第一句作为结论
+                last_assistant = content.split("。")[0][:60]
+                break
+
+    parts = []
+    if first_user:
+        parts.append(f"用户最初问：{first_user}")
+    if last_assistant:
+        parts.append(f"结论：{last_assistant}")
+    return "；".join(parts) if parts else f"共{len(messages)}条早期对话"
+
+
+def _build_structured_summary(messages: list, conversation_id: int) -> str:
+    """次近消息的结构化摘要（含意图+结论+关键数据）。
+
+    优先复用缓存的 conversation_summaries；缓存不可用时降级为规则提取。
+    """
+    if not messages:
+        return ""
+
+    # 1. 尝试从缓存读取
+    if conversation_id:
+        try:
+            from db.conversations import get_conversation_summary as _get_summary
+            cached = _get_summary(conversation_id)
+            if cached and cached.get("summary"):
+                return cached["summary"][:500]
+        except Exception:
+            pass
+
+    # 2. 规则提取（不调 LLM，零成本）
+    parts = []
+    for msg in messages:
+        role = msg.get("role", "")
+        content = (msg.get("content", "") or "").strip()
+        if not content:
+            continue
+        if role == "user":
+            # 用户问题：保留前 80 字
+            parts.append(f"用户问：{content[:80]}")
+        elif role == "assistant":
+            # 助手回答：提取第一段或第一句
+            first_para = content.split("\n\n")[0][:100]
+            parts.append(f"助手答：{first_para}")
+
+    if not parts:
+        return ""
+
+    # 限制总长度
+    result = "\n".join(parts[:8])  # 最多 8 条
+    if len(result) > 500:
+        result = result[:497] + "..."
+    return result
+
+
+def update_conversation_summary(conversation_id: int) -> bool:
+    """更新对话摘要（Phase 5 记忆持久化调用）。
+
+    复用 compress_history_semantic 的摘要生成逻辑，写入 conversation_summaries 表。
+
+    Args:
+        conversation_id: 对话 ID
+
+    Returns:
+        是否更新成功
+    """
+    if not conversation_id:
+        return False
+
+    try:
+        from db.conversations import get_messages, save_conversation_summary
+        messages = get_messages(conversation_id, limit=20)
+        if not messages or len(messages) < 4:
+            return False  # 消息太少不需要摘要
+
+        # 使用结构化摘要生成
+        summary = _build_structured_summary(messages, conversation_id)
+        if not summary:
+            return False
+
+        save_conversation_summary(conversation_id, len(messages), summary)
+        logger.info(f"[memory] 对话 {conversation_id} 摘要已更新")
+        return True
+    except Exception as e:
+        logger.debug(f"[memory] 摘要更新跳过: {e}")
+        return False
