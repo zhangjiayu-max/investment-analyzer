@@ -78,6 +78,7 @@ import {
   listPortfolioTransactions, listPendingTransactions, createPortfolioTransaction,
   confirmTransaction, settleTransaction, deletePortfolioTransaction,
   refreshPortfolioPrice,
+  getDcaSuggestion,
   lookupFundInfo, getFundHoldings,
   getCashBalance, adjustCashBalance,
   getFundNavHistory,
@@ -612,6 +613,8 @@ const chart5yHoverPoint = computed(() => {
 // Add purchase (追加买入) panel — amount-based
 const showAddPurchase = ref(false)
 const addPurchaseHolding = ref(null)
+const dcaSuggestion = ref(null)
+const dcaSuggestionLoading = ref(false)
 const addPurchaseForm = ref({
   amount: 0,
   transaction_date: new Date().toISOString().slice(0, 10),
@@ -2932,7 +2935,20 @@ function openAddPurchase(h) {
     transaction_time: now.toTimeString().slice(0, 5),
     notes: '',
   }
+  dcaSuggestion.value = null
+  dcaSuggestionLoading.value = true
   showAddPurchase.value = true
+  getDcaSuggestion(h.id).then(({ data }) => {
+    dcaSuggestion.value = data
+  }).catch(() => {}).finally(() => {
+    dcaSuggestionLoading.value = false
+  })
+}
+
+function applyDcaSuggestion() {
+  if (dcaSuggestion.value?.suggestion?.recommended_amount > 0) {
+    addPurchaseForm.value.amount = dcaSuggestion.value.suggestion.recommended_amount
+  }
 }
 
 async function submitAddPurchase() {
@@ -5280,6 +5296,24 @@ function txDisplayAmount(tx) {
           <div class="modal-box">
             <h3 class="modal-title">买入 — {{ addPurchaseHolding?.fund_name }}</h3>
             <p class="modal-subtitle">{{ addPurchaseHolding?.fund_code }} · 当前持有 {{ addPurchaseHolding?.shares?.toLocaleString() }} 份 · 净值 {{ addPurchaseHolding?.current_price || '--' }}</p>
+            <!-- 加仓建议（软提示） -->
+            <div v-if="dcaSuggestionLoading" class="dca-suggestion-card loading">
+              <span>正在计算加仓建议...</span>
+            </div>
+            <div v-else-if="dcaSuggestion" class="dca-suggestion-card" :class="dcaSuggestion.advice">
+              <div class="dca-header">
+                <span class="dca-label">加仓建议</span>
+                <span v-if="dcaSuggestion.current_profit_rate !== null" class="dca-profit" :class="{ loss: dcaSuggestion.current_profit_rate < 0 }">
+                  当前盈亏 {{ (dcaSuggestion.current_profit_rate * 100).toFixed(1) }}%
+                </span>
+              </div>
+              <p class="dca-rule">{{ dcaSuggestion.suggestion.rule }}</p>
+              <div v-if="dcaSuggestion.suggestion.recommended_amount > 0" class="dca-action">
+                <span class="dca-amount">建议金额 ¥{{ dcaSuggestion.suggestion.recommended_amount }}</span>
+                <button type="button" class="btn-sm btn-primary" @click="applyDcaSuggestion">填入建议</button>
+              </div>
+              <p v-if="dcaSuggestion.suggestion.already_added_today" class="dca-warning">今日已加仓，请谨慎操作</p>
+            </div>
             <form @submit.prevent="submitAddPurchase" class="modal-form">
               <div class="form-group">
                 <label>买入金额（元）*</label>
@@ -6628,6 +6662,25 @@ function txDisplayAmount(tx) {
   font-size: 0.9rem;
   color: var(--color-primary-600);
 }
+
+.dca-suggestion-card {
+  margin: 8px 0 16px;
+  padding: 12px;
+  border-radius: 8px;
+  background: #f0f9ff;
+  border: 1px solid #bae6fd;
+}
+.dca-suggestion-card.loading { color: #888; }
+.dca-suggestion-card.watch { background: #fefce8; border-color: #fef08a; }
+.dca-suggestion-card.pause { background: #fef2f2; border-color: #fecaca; }
+.dca-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
+.dca-label { font-weight: 600; font-size: 13px; }
+.dca-profit { font-size: 13px; color: #16a34a; }
+.dca-profit.loss { color: #dc2626; }
+.dca-rule { font-size: 12px; color: #666; margin: 4px 0; line-height: 1.5; }
+.dca-action { display: flex; justify-content: space-between; align-items: center; margin-top: 8px; }
+.dca-amount { font-weight: 600; color: #2563eb; }
+.dca-warning { font-size: 12px; color: #dc2626; margin-top: 6px; }
 
 .modal-form {
   display: flex;

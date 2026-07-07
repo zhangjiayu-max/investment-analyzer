@@ -1213,6 +1213,11 @@ export function refreshPortfolioPrice(holdingId) {
   return api.post(`/portfolio/${holdingId}/refresh`, {}, { timeout: 30000 })
 }
 
+/** 获取加仓建议（4%定投法） */
+export function getDcaSuggestion(holdingId) {
+  return api.get(`/portfolio/${holdingId}/dca-suggestion`)
+}
+
 /** 获取持仓分散度分析 */
 export function getPortfolioDiversification() {
   return api.get('/portfolio/analysis/diversification')
