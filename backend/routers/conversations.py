@@ -241,7 +241,11 @@ async def clear_cancel_flag(conv_id: int):
 
 @router.post("/api/conversations/{conv_id}/resume")
 async def resume_conversation(conv_id: int, request: Request):
-    """恢复中断的对话执行，跳过已完成的专家。"""
+    """[DEPRECATED] 恢复中断的对话执行，跳过已完成的专家。
+
+    已被 GET /api/conversations/{conv_id}/replay 替代。
+    保留一段时间兼容旧前端缓存，新前端不应调用此接口。
+    """
     from db.agents import get_completed_agents_for_message
 
     conv = get_conversation(conv_id)
