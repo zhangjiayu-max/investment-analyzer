@@ -1218,6 +1218,11 @@ export function getDcaSuggestion(holdingId) {
   return api.get(`/portfolio/${holdingId}/dca-suggestion`)
 }
 
+/** 减仓预览（预计盈亏+约束警告） */
+export function previewSell(holdingId, shares) {
+  return api.post(`/portfolio/${holdingId}/sell-preview`, { shares })
+}
+
 /** 获取持仓分散度分析 */
 export function getPortfolioDiversification() {
   return api.get('/portfolio/analysis/diversification')

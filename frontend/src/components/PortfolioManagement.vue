@@ -79,6 +79,7 @@ import {
   confirmTransaction, settleTransaction, deletePortfolioTransaction,
   refreshPortfolioPrice,
   getDcaSuggestion,
+  previewSell,
   lookupFundInfo, getFundHoldings,
   getCashBalance, adjustCashBalance,
   getFundNavHistory,
@@ -1030,6 +1031,30 @@ const sellEstAmount = computed(() => {
   if (!price || price <= 0) return 0
   return (sellForm.value.shares * price).toFixed(2)
 })
+
+const sellPreview = ref(null)
+const sellPreviewLoading = ref(false)
+
+let sellPreviewTimer = null
+function onSellSharesInput() {
+  if (sellPreviewTimer) clearTimeout(sellPreviewTimer)
+  const shares = sellForm.value.shares
+  if (!shares || shares <= 0) {
+    sellPreview.value = null
+    return
+  }
+  sellPreviewTimer = setTimeout(async () => {
+    sellPreviewLoading.value = true
+    try {
+      const { data } = await previewSell(sellHolding.value.id, shares)
+      sellPreview.value = data
+    } catch (e) {
+      sellPreview.value = null
+    } finally {
+      sellPreviewLoading.value = false
+    }
+  }, 300)
+}
 
 // Confirm transaction modal
 const showConfirmTx = ref(false)
@@ -2992,6 +3017,7 @@ function openSell(h) {
     transaction_time: now.toTimeString().slice(0, 5),
     notes: '',
   }
+  sellPreview.value = null
   showSell.value = true
 }
 
@@ -5358,11 +5384,35 @@ function txDisplayAmount(tx) {
             <form @submit.prevent="submitSell" class="modal-form">
               <div class="form-group">
                 <label>卖出份额 *</label>
-                <input v-model.number="sellForm.shares" type="number" step="0.01" class="input-field" placeholder="如 5000" required />
+                <input v-model.number="sellForm.shares" type="number" step="0.01" class="input-field" placeholder="如 5000" required @input="onSellSharesInput" />
               </div>
               <div v-if="sellForm.shares > 0 && sellHolding?.current_price" class="add-purchase-preview sell-preview">
                 <span>预估可赎回约 <strong>¥{{ Number(sellEstAmount).toLocaleString() }}</strong></span>
                 <span class="preview-note">（按当前净值 {{ sellHolding.current_price }} 估算，实际以 T+1 确认为准）</span>
+              </div>
+              <!-- 减仓预览（软提示） -->
+              <div v-if="sellPreviewLoading" class="sell-preview-card loading">
+                <span>正在计算减仓预览...</span>
+              </div>
+              <div v-else-if="sellPreview" class="sell-preview-card">
+                <div class="preview-row">
+                  <span>预计到账</span>
+                  <strong>¥{{ Number(sellPreview.expected_proceeds).toLocaleString() }}</strong>
+                </div>
+                <div class="preview-row">
+                  <span>预计盈亏</span>
+                  <span :class="{ profit: sellPreview.expected_profit_loss >= 0, loss: sellPreview.expected_profit_loss < 0 }">
+                    {{ sellPreview.expected_profit_loss >= 0 ? '+' : '' }}¥{{ Number(sellPreview.expected_profit_loss).toLocaleString() }}
+                    ({{ (sellPreview.expected_profit_rate * 100).toFixed(1) }}%)
+                  </span>
+                </div>
+                <div class="preview-row">
+                  <span>减仓后剩余</span>
+                  <span>{{ sellPreview.remaining_shares.toLocaleString() }} 份 · ¥{{ Number(sellPreview.remaining_value).toLocaleString() }}</span>
+                </div>
+                <div v-for="w in sellPreview.warnings" :key="w.type" class="preview-warning" :class="w.level">
+                  ⚠ {{ w.message }}
+                </div>
               </div>
               <div class="form-row">
                 <div class="form-group">
@@ -6572,6 +6622,21 @@ function txDisplayAmount(tx) {
   background: var(--color-warning-bg);
   color: var(--color-warning);
 }
+
+.sell-preview-card {
+  margin: 8px 0 16px;
+  padding: 12px;
+  border-radius: 8px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+}
+.sell-preview-card.loading { color: #888; }
+.preview-row { display: flex; justify-content: space-between; align-items: center; padding: 4px 0; font-size: 13px; }
+.preview-row .profit { color: #16a34a; }
+.preview-row .loss { color: #dc2626; }
+.preview-warning { margin-top: 8px; padding: 6px 10px; border-radius: 4px; font-size: 12px; }
+.preview-warning.warning { background: #fef3c7; color: #92400e; }
+.preview-warning.info { background: #dbeafe; color: #1e40af; }
 
 /* Empty & Loading */
 .empty-state {
