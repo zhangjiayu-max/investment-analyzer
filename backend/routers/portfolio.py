@@ -828,10 +828,12 @@ async def delete_holding_api(holding_id: int):
 
 @router.get("/api/portfolio/{holding_id}/transactions")
 async def list_transactions_api(holding_id: int, limit: int = 100,
-                                 start_date: str = None, end_date: str = None):
+                                 start_date: str = None, end_date: str = None,
+                                 status: str = None):
     """获取持仓的交易记录。"""
     return {"transactions": list_transactions(holding_id=holding_id, limit=limit,
-                                              start_date=start_date, end_date=end_date)}
+                                              start_date=start_date, end_date=end_date,
+                                              status=status)}
 
 
 @router.post("/api/portfolio/transactions")

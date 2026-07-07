@@ -1228,6 +1228,11 @@ export function autoConfirmTransaction(txId) {
   return api.post(`/portfolio/transactions/${txId}/auto-confirm`, {}, { timeout: 30000 })
 }
 
+/** 获取交易记录（支持筛选） */
+export function listTransactionsWithFilter(holdingId, params = {}) {
+  return api.get(`/portfolio/${holdingId}/transactions`, { params })
+}
+
 /** 获取持仓分散度分析 */
 export function getPortfolioDiversification() {
   return api.get('/portfolio/analysis/diversification')

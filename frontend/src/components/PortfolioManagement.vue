@@ -81,6 +81,7 @@ import {
   getDcaSuggestion,
   previewSell,
   autoConfirmTransaction,
+  listTransactionsWithFilter,
   lookupFundInfo, getFundHoldings,
   getCashBalance, adjustCashBalance,
   getFundNavHistory,
@@ -343,6 +344,11 @@ const showTxForm = ref(false)
 const txHoldingId = ref(null)
 const txFundCode = ref('')
 const transactions = ref([])
+const txFilter = ref({
+  start_date: '',
+  end_date: '',
+  status: '',
+})
 const showTxHistory = ref(false)
 const showAuditLog = ref(false)
 const auditLogs = ref([])
@@ -2923,13 +2929,33 @@ async function submitTx() {
 async function viewTransactions(h) {
   txHoldingId.value = h.id
   txFundCode.value = h.fund_code
+  txFilter.value = { start_date: '', end_date: '', status: '' }
   try {
-    const { data } = await listPortfolioTransactions(h.id)
+    const { data } = await listTransactionsWithFilter(h.id, { limit: 100 })
     transactions.value = data.transactions || []
     showTxHistory.value = true
   } catch (e) {
     showToast('加载交易记录失败', 'error')
   }
+}
+
+async function applyTxFilter() {
+  if (!txHoldingId.value) return
+  try {
+    const params = { limit: 100 }
+    if (txFilter.value.start_date) params.start_date = txFilter.value.start_date
+    if (txFilter.value.end_date) params.end_date = txFilter.value.end_date
+    if (txFilter.value.status) params.status = txFilter.value.status
+    const { data } = await listTransactionsWithFilter(txHoldingId.value, params)
+    transactions.value = data.transactions || []
+  } catch (e) {
+    showToast('筛选失败: ' + (e.response?.data?.detail || e.message), 'error')
+  }
+}
+
+function clearTxFilter() {
+  txFilter.value = { start_date: '', end_date: '', status: '' }
+  applyTxFilter()
 }
 
 async function loadAuditLog() {
@@ -3176,8 +3202,7 @@ async function handleCancelPendingTx(tx) {
         showToast('已撤销')
         loadData()
         if (txHoldingId.value) {
-          const { data } = await listPortfolioTransactions(txHoldingId.value)
-          transactions.value = data.transactions || []
+          await applyTxFilter()
         }
       } catch (e) {
         showToast('操作失败: ' + (e.response?.data?.detail || e.message), 'error')
@@ -5042,6 +5067,18 @@ function txDisplayAmount(tx) {
 
             <!-- 交易记录视图 -->
             <template v-else>
+              <div class="tx-filter-bar">
+                <input v-model="txFilter.start_date" type="date" class="input-field sm" @change="applyTxFilter" />
+                <span class="tx-filter-sep">至</span>
+                <input v-model="txFilter.end_date" type="date" class="input-field sm" @change="applyTxFilter" />
+                <select v-model="txFilter.status" class="input-field sm" @change="applyTxFilter">
+                  <option value="">全部状态</option>
+                  <option value="pending">待确认</option>
+                  <option value="confirmed">已确认</option>
+                  <option value="settled">已到账</option>
+                </select>
+                <button class="btn-sm btn-secondary" @click="clearTxFilter">清除</button>
+              </div>
               <div v-if="transactions.length === 0" class="empty-state" style="padding: 2rem">
                 <p>暂无交易记录</p>
               </div>
@@ -8032,6 +8069,22 @@ select.input-field {
 }
 .dark .table-search-bar .input-field:focus {
   box-shadow: var(--shadow-glow);
+}
+
+.tx-filter-bar {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 12px;
+  flex-wrap: wrap;
+}
+.tx-filter-bar .input-field.sm {
+  width: auto;
+  min-width: 120px;
+}
+.tx-filter-sep {
+  color: var(--color-text-muted);
+  font-size: 0.85rem;
 }
 .account-filter-select {
   max-width: 120px !important;
