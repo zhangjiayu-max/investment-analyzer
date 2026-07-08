@@ -810,6 +810,9 @@ def _recalculate_holding(holding_id: int):
         last_buy_date = None
         for tx in txs:
             tx = dict(tx)
+            # 有基准持仓时跳过系统自动创建的交易（避免与基准数据双重计算）
+            if has_base and tx.get("is_system"):
+                continue
             shares = tx.get("shares", 0) or 0
             amount = tx.get("amount", 0) or 0
             tx_price = tx.get("price") or 0
@@ -829,6 +832,9 @@ def _recalculate_holding(holding_id: int):
         # 再处理所有卖出和转换（按平均成本扣减）
         for tx in txs:
             tx = dict(tx)
+            # 有基准持仓时跳过系统自动创建的交易
+            if has_base and tx.get("is_system"):
+                continue
             shares = tx.get("shares", 0) or 0
             if tx["transaction_type"] in ("sell", "convert") and shares > 0:
                 if total_shares > 0:
@@ -869,7 +875,6 @@ def _recalculate_holding(holding_id: int):
 def _capture_valuation_snapshot(holding_id: int, transaction_date: str) -> str | None:
     """根据持仓的 index_code 查询交易日期附近的估值数据，返回 JSON 快照。"""
     if not holding_id or not transaction_date:
-        conn.close()
         return None
     conn = _get_conn()
     holding = conn.execute(
@@ -993,6 +998,21 @@ def confirm_transaction(tx_id: int, confirmed_price: float,
         tx_type = tx["transaction_type"]
         user_id = tx.get("user_id", "default")
         holding_id = tx.get("holding_id")
+
+        # 状态守卫：只允许确认 pending 状态的交易，防止重复确认导致现金重复入账
+        if tx.get("status") != "pending":
+            logger.warning(f"交易 {tx_id} 状态为 {tx.get('status')}，非 pending，拒绝确认")
+            conn.close()
+            return False
+
+        # 卖出/转换份额校验：不允许超过持有份额
+        if tx_type in ("sell", "convert") and holding_id:
+            sub_shares_check = confirmed_shares or tx.get("submitted_shares") or tx.get("shares") or 0
+            holding_check = conn.execute("SELECT shares FROM portfolio_holdings WHERE id = ?", (holding_id,)).fetchone()
+            if holding_check and sub_shares_check > (holding_check["shares"] or 0):
+                logger.warning(f"交易 {tx_id} 卖出份额 {sub_shares_check} 超过持有 {holding_check['shares']}")
+                conn.close()
+                return False
 
         if tx_type == "buy":
             # 买入确认：(金额 - 手续费) / 净值 = 份额
@@ -1483,6 +1503,11 @@ def refresh_holding_price(holding_id: int) -> dict | None:
         return None
     holding = dict(holding)
     fund_code = holding["fund_code"]
+
+    # 跳过已清仓持仓（份额为0），避免无意义的 API 调用
+    if (holding.get("shares") or 0) <= 0:
+        conn.close()
+        return None
 
     nav_data = fetch_fund_nav(fund_code)
     if not nav_data:
