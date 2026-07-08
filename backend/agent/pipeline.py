@@ -16,11 +16,13 @@
   Phase 5: 记忆持久化（结论 + 摘要 + 偏好）
 """
 
+import json
 import logging
 import time
 from typing import Optional, Any, Generator
 
 from db.config import get_config_bool, get_config_int
+from db.agents import create_agent_run
 
 from agent.pipeline_state import PipelineState, PipelinePhase, create_initial_state
 from agent.query_understander import (
@@ -45,6 +47,7 @@ EVENT_SIMPLE_CHAT = "simple_chat"
 EVENT_PLAN_GENERATED = "plan_generated"
 EVENT_SPECIALIST_START = "specialist_start"
 EVENT_SPECIALIST_DONE = "specialist_done"
+EVENT_REFLECTION_DONE = "reflection_done"
 EVENT_ANSWER = "answer"
 EVENT_ERROR = "error"
 EVENT_DEGRADE = "degrade"
@@ -170,6 +173,28 @@ def run_pipeline(
         yield {"type": EVENT_PHASE_END, "phase": PipelinePhase.EXECUTION.value,
                "result": {"specialist_count": len(phase3_result.get("specialists", []))}}
 
+        # ── Phase 3.5: 反思（可选，默认关闭）──────────────
+        # P3: Reflection 节点 — 自评质量问题 + 冲突识别，结果注入综合阶段
+        reflection_result = None
+        try:
+            reflection_enabled = get_config_bool("pipeline.reflection_enabled", False)
+        except Exception:
+            reflection_enabled = False
+
+        if reflection_enabled and phase3_result.get("specialists"):
+            state.transition_to(PipelinePhase.REFLECTION)
+            yield {"type": EVENT_PHASE_START, "phase": PipelinePhase.REFLECTION.value}
+            try:
+                reflection_result = _phase_reflection(
+                    state, query, phase3_result, blackboard, trace_id
+                )
+                state.set_phase_result(PipelinePhase.REFLECTION.value, reflection_result)
+                yield {"type": EVENT_REFLECTION_DONE, "result": reflection_result}
+            except Exception as refl_err:
+                logger.warning(f"[pipeline] Reflection 失败，跳过: {refl_err}")
+                reflection_result = None
+            yield {"type": EVENT_PHASE_END, "phase": PipelinePhase.REFLECTION.value}
+
         # ── Phase 4: 综合 ──────────────────
         state.transition_to(PipelinePhase.SYNTHESIS)
         yield {"type": EVENT_PHASE_START, "phase": PipelinePhase.SYNTHESIS.value}
@@ -187,7 +212,8 @@ def run_pipeline(
             return
 
         phase4_result = _phase_synthesis(
-            state, query, phase3_result, blackboard, trace_id
+            state, query, phase3_result, blackboard, trace_id,
+            reflection_result=reflection_result,
         )
         state.set_phase_result(PipelinePhase.SYNTHESIS.value, phase4_result)
         state.answer = phase4_result.get("answer", "")
@@ -469,7 +495,23 @@ def _phase_execution(
     portfolio = info_gather_result.get("portfolio", "")
     valuations = info_gather_result.get("valuations", {})
 
-    # 按 depends_on 分组执行
+    # P2: 并行执行路径 — 无 depends_on 且步骤 >= 2 时启用
+    # 配置开关 pipeline.parallel_execution 默认 false，验证通过后再启用
+    try:
+        parallel_enabled = get_config_bool("pipeline.parallel_execution", False)
+    except Exception:
+        parallel_enabled = False
+
+    if (parallel_enabled
+            and len(steps) >= 2
+            and not any(s.get("depends_on") for s in steps)):
+        result = yield from _execute_steps_parallel(
+            state, steps, plan_result, info_gather_result, query_info,
+            detector, blackboard, checker, cancel_event, trace_id,
+        )
+        return result
+
+    # 按 depends_on 分组执行（原顺序路径）
     completed_step_ids = set()
     for step in steps:
         # 检查取消
@@ -557,6 +599,24 @@ def _phase_execution(
             tokens = result.get("tokens_used", 0)
             state.record_phase_tokens(PipelinePhase.EXECUTION.value, tokens)
 
+            # P0: 写入 agent_runs（可观测性修复）— 失败不影响主流程
+            duration_ms_for_log = int((time.time() - step_start) * 1000)
+            try:
+                create_agent_run(
+                    conversation_id=state.conversation_id,
+                    message_id=state.message_id,
+                    agent_key=agent_key,
+                    agent_name=agent_name,
+                    query=step_query,
+                    result=result.get("analysis", "")[:4000],
+                    tool_calls=str(result.get("tool_calls", []))[:2000],
+                    duration_ms=duration_ms_for_log,
+                    trace_id=trace_id,
+                    status="success",
+                )
+            except Exception as log_err:
+                logger.warning(f"[pipeline] agent_runs 写入失败 ({agent_key}): {log_err}")
+
             # 发送 specialist_done 事件
             duration_ms = int((time.time() - step_start) * 1000)
             yield {
@@ -573,6 +633,22 @@ def _phase_execution(
         except Exception as e:
             logger.error(f"[pipeline] 专家 {agent_name} 执行失败: {e}")
             checker.record_failure(str(e))
+            # P0: 失败也写入 agent_runs
+            duration_ms_for_log = int((time.time() - step_start) * 1000)
+            try:
+                create_agent_run(
+                    conversation_id=state.conversation_id,
+                    message_id=state.message_id,
+                    agent_key=agent_key,
+                    agent_name=agent_name,
+                    query=step_query,
+                    result=f"（执行失败：{e}）",
+                    duration_ms=duration_ms_for_log,
+                    trace_id=trace_id,
+                    status="error",
+                )
+            except Exception as log_err:
+                logger.warning(f"[pipeline] agent_runs 写入失败 ({agent_key}): {log_err}")
             # 发送失败的 specialist_done 事件
             duration_ms = int((time.time() - step_start) * 1000)
             yield {
@@ -588,6 +664,198 @@ def _phase_execution(
             continue
 
         completed_step_ids.add(step.get("step_id"))
+
+    return {
+        "specialists": specialists_result,
+        "tool_calls": all_tool_calls,
+    }
+
+
+def _execute_steps_parallel(
+    state: PipelineState,
+    steps: list,
+    plan_result: dict,
+    info_gather_result: dict,
+    query_info: dict,
+    detector,
+    blackboard: Blackboard,
+    checker,
+    cancel_event,
+    trace_id: str,
+):
+    """P2: 并行执行所有步骤（无 depends_on 时）。
+
+    Generator：yield specialist_start/done 事件，return 结果 dict。
+    策略：先批量 yield specialist_start，再用 ThreadPoolExecutor 并行执行，
+    最后按完成顺序 yield specialist_done + 写黑板 + agent_runs。
+    """
+    import concurrent.futures
+    from agent.multi_agent import run_specialist
+    from agent.context_builder import build_specialist_context
+
+    rag_context = info_gather_result.get("rag_context", "")
+    portfolio = info_gather_result.get("portfolio", "")
+    valuations = info_gather_result.get("valuations", {})
+
+    # 过滤可执行的步骤（收敛检测 + 终止检查）
+    executable_steps = []
+    for step in steps:
+        if cancel_event and cancel_event.is_set():
+            raise _PipelineCancelled()
+        agent_key = step.get("agent_key")
+        agent_name = step.get("agent_name", agent_key)
+        step_query = step.get("query", state.refined_query)
+        if detector.should_skip_agent(agent_key, step_query):
+            logger.info(f"[pipeline-parallel] 跳过 {agent_name}：已调用过相似 query")
+            continue
+        executable_steps.append(step)
+
+    if not executable_steps:
+        return {"specialists": [], "tool_calls": []}
+
+    # 批量构建上下文 + yield specialist_start
+    step_ctxs = []
+    for step in executable_steps:
+        agent_key = step.get("agent_key")
+        agent_name = step.get("agent_name", agent_key)
+        step_query = step.get("query", state.refined_query)
+        agent_config = _find_agent_config(agent_key, plan_result.get("specialists", []))
+        if not agent_config:
+            logger.warning(f"[pipeline-parallel] 找不到专家配置: {agent_key}")
+            continue
+        agent_icon = agent_config.get("icon", "🤖")
+
+        ctx = build_specialist_context(
+            agent=agent_config,
+            history=[],
+            conversation_id=state.conversation_id,
+            rag_context=rag_context,
+            portfolio_summary=portfolio,
+            valuation_data=valuations,
+            blackboard=blackboard,
+            complexity=query_info.get("complexity", "medium"),
+        )
+
+        detector.record_call(agent_key, step_query)
+        state.called_agents.add(agent_key)
+
+        # 先 yield specialist_start（顺序发出，表示"开始排队"）
+        yield {
+            "type": EVENT_SPECIALIST_START,
+            "agent_key": agent_key,
+            "agent": agent_name,
+            "icon": agent_icon,
+        }
+        step_ctxs.append((step, agent_config, agent_icon, ctx))
+
+    if not step_ctxs:
+        return {"specialists": [], "tool_calls": []}
+
+    # 并行执行（最多 3 个并发，避免 token 突刺）
+    max_workers = min(len(step_ctxs), 3)
+    specialists_result = []
+    all_tool_calls = []
+
+    def _run_one(step, ctx, agent_key):
+        step_query = step.get("query", state.refined_query)
+        return run_specialist(
+            agent_key=agent_key,
+            query=step_query,
+            prebuilt_context=ctx,
+            trace_id=trace_id,
+        )
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_to_meta = {
+            executor.submit(_run_one, step, ctx, step.get("agent_key")): (step, agent_config, agent_icon, ctx)
+            for step, agent_config, agent_icon, ctx in step_ctxs
+        }
+        # 按完成顺序处理结果
+        for future in concurrent.futures.as_completed(future_to_meta):
+            if cancel_event and cancel_event.is_set():
+                executor.shutdown(wait=False, cancel_futures=True)
+                raise _PipelineCancelled()
+
+            step, agent_config, agent_icon, _ = future_to_meta[future]
+            agent_key = step.get("agent_key")
+            agent_name = step.get("agent_name", agent_key)
+            step_query = step.get("query", state.refined_query)
+            step_start = time.time()
+
+            try:
+                result = future.result(timeout=300)
+                specialists_result.append(result)
+                all_tool_calls.extend(result.get("tool_calls", []))
+
+                # 写黑板（Blackboard.write 已加锁，线程安全）
+                entry = extract_entry_from_result(
+                    agent_key=agent_key,
+                    agent_name=agent_name,
+                    result=result,
+                    tokens_used=result.get("tokens_used", 0),
+                )
+                blackboard.write(entry)
+
+                checker.record_success()
+                tokens = result.get("tokens_used", 0)
+                state.record_phase_tokens(PipelinePhase.EXECUTION.value, tokens)
+
+                # P0: 写 agent_runs
+                duration_ms = int((time.time() - step_start) * 1000)
+                try:
+                    create_agent_run(
+                        conversation_id=state.conversation_id,
+                        message_id=state.message_id,
+                        agent_key=agent_key,
+                        agent_name=agent_name,
+                        query=step_query,
+                        result=result.get("analysis", "")[:4000],
+                        tool_calls=str(result.get("tool_calls", []))[:2000],
+                        duration_ms=duration_ms,
+                        trace_id=trace_id,
+                        status="success",
+                    )
+                except Exception as log_err:
+                    logger.warning(f"[pipeline-parallel] agent_runs 写入失败 ({agent_key}): {log_err}")
+
+                yield {
+                    "type": EVENT_SPECIALIST_DONE,
+                    "agent_key": agent_key,
+                    "agent": agent_name,
+                    "icon": agent_icon,
+                    "analysis": result.get("analysis", ""),
+                    "status": result.get("status", "success"),
+                    "error": result.get("status") == "failed",
+                    "duration_ms": duration_ms,
+                }
+            except Exception as e:
+                logger.error(f"[pipeline-parallel] 专家 {agent_name} 执行失败: {e}")
+                checker.record_failure(str(e))
+                duration_ms = int((time.time() - step_start) * 1000)
+                try:
+                    create_agent_run(
+                        conversation_id=state.conversation_id,
+                        message_id=state.message_id,
+                        agent_key=agent_key,
+                        agent_name=agent_name,
+                        query=step_query,
+                        result=f"（并行执行失败：{e}）",
+                        duration_ms=duration_ms,
+                        trace_id=trace_id,
+                        status="error",
+                    )
+                except Exception as log_err:
+                    logger.warning(f"[pipeline-parallel] agent_runs 写入失败 ({agent_key}): {log_err}")
+                yield {
+                    "type": EVENT_SPECIALIST_DONE,
+                    "agent_key": agent_key,
+                    "agent": agent_name,
+                    "icon": agent_icon,
+                    "analysis": f"（执行失败：{e}）",
+                    "status": "failed",
+                    "error": True,
+                    "duration_ms": duration_ms,
+                }
 
     return {
         "specialists": specialists_result,
@@ -669,6 +937,24 @@ def _fallback_execution(
             )
             blackboard.write(entry)
 
+            # P0: 写入 agent_runs（降级路径同样补齐）
+            duration_ms_for_log = int((time.time() - step_start) * 1000)
+            try:
+                create_agent_run(
+                    conversation_id=state.conversation_id,
+                    message_id=state.message_id,
+                    agent_key=agent_key,
+                    agent_name=agent_name,
+                    query=query,
+                    result=result.get("analysis", "")[:4000],
+                    tool_calls=str(result.get("tool_calls", []))[:2000],
+                    duration_ms=duration_ms_for_log,
+                    trace_id=trace_id,
+                    status="success",
+                )
+            except Exception as log_err:
+                logger.warning(f"[pipeline] agent_runs 写入失败 ({agent_key}): {log_err}")
+
             duration_ms = int((time.time() - step_start) * 1000)
             yield {
                 "type": EVENT_SPECIALIST_DONE,
@@ -682,6 +968,21 @@ def _fallback_execution(
             }
         except Exception as e:
             logger.error(f"[pipeline] 降级执行 {agent_name} 失败: {e}")
+            duration_ms_for_log = int((time.time() - step_start) * 1000)
+            try:
+                create_agent_run(
+                    conversation_id=state.conversation_id,
+                    message_id=state.message_id,
+                    agent_key=agent_key,
+                    agent_name=agent_name,
+                    query=query,
+                    result=f"（降级执行失败：{e}）",
+                    duration_ms=duration_ms_for_log,
+                    trace_id=trace_id,
+                    status="error",
+                )
+            except Exception as log_err:
+                logger.warning(f"[pipeline] agent_runs 写入失败 ({agent_key}): {log_err}")
             duration_ms = int((time.time() - step_start) * 1000)
             yield {
                 "type": EVENT_SPECIALIST_DONE,
@@ -713,8 +1014,13 @@ def _phase_synthesis(
     execution_result: dict,
     blackboard: Blackboard,
     trace_id: str,
+    reflection_result: dict = None,
 ) -> dict:
-    """Phase 4: 交叉审阅 + 仲裁 + 生成最终回答。"""
+    """Phase 4: 交叉审阅 + 仲裁 + 生成最终回答。
+
+    Args:
+        reflection_result: P3 Reflection 阶段的产出（可选），包含 quality_issues 等
+    """
     specialists = execution_result.get("specialists", [])
     tool_calls = execution_result.get("tool_calls", [])
 
@@ -731,7 +1037,8 @@ def _phase_synthesis(
     # 多专家：调用 LLM 综合
     try:
         answer = _synthesize_multiple_specialists(
-            query, specialists, blackboard, trace_id
+            query, specialists, blackboard, trace_id,
+            reflection_result=reflection_result,
         )
     except Exception as e:
         logger.error(f"[pipeline] 综合失败，降级拼接: {e}")
@@ -745,6 +1052,7 @@ def _phase_synthesis(
         "cross_review": {"conflicts": conflicts},
         "arbitration": None,
         "specialist_count": len(specialists),
+        "reflection": reflection_result,
     }
 
 
@@ -753,6 +1061,7 @@ def _synthesize_multiple_specialists(
     specialists: list,
     blackboard: Blackboard,
     trace_id: str,
+    reflection_result: dict = None,
 ) -> str:
     """调用 LLM 综合多个专家的分析。"""
     from services.llm_service import _call_llm, MODEL
@@ -783,6 +1092,19 @@ def _synthesize_multiple_specialists(
                 f"- {c['target']}: 买入方={c['buy_agents']}, 卖出方={c['sell_agents']}"
             )
 
+    # P3: 注入 Reflection 结果（质量问题 + 缺失视角）
+    if reflection_result:
+        quality_issues = reflection_result.get("quality_issues", [])
+        missing = reflection_result.get("missing_perspectives", [])
+        if quality_issues:
+            parts.append("\n## 反思发现的质量问题（请在综合时修正）")
+            for issue in quality_issues:
+                parts.append(f"- {issue}")
+        if missing:
+            parts.append("\n## 反思发现的缺失视角（请补充）")
+            for m in missing:
+                parts.append(f"- {m}")
+
     parts.append(
         "\n## 任务\n"
         "基于以上专家分析，生成综合回答：\n"
@@ -803,6 +1125,118 @@ def _synthesize_multiple_specialists(
         max_tokens=3000,
     )
     return response.choices[0].message.content or ""
+
+
+# ── Phase 3.5: 反思 ──────────────────────────
+
+def _phase_reflection(
+    state: PipelineState,
+    query: str,
+    execution_result: dict,
+    blackboard: Blackboard,
+    trace_id: str,
+) -> dict:
+    """Phase 3.5: Reflection 节点 — 自评质量问题 + 冲突识别。
+
+    单次 LLM 调用，输出：
+    - quality_issues: 分析中的质量问题（数据缺失、逻辑跳跃等）
+    - missing_perspectives: 未覆盖的视角
+    - conflict_resolutions: 冲突解决建议
+    - confidence_adjustment: 置信度调整（负值表示需降级）
+
+    成本：约 500 token（单次调用，max_tokens=800）
+    """
+    from services.llm_service import _call_llm, MODEL
+
+    specialists = execution_result.get("specialists", [])
+    if not specialists:
+        return {"quality_issues": [], "missing_perspectives": [], "conflict_resolutions": [], "confidence_adjustment": 0.0}
+
+    # 黑板摘要（结论 + 冲突）
+    bb_summary = blackboard.to_context_text(max_chars=1500) if blackboard else ""
+    conflicts = blackboard.find_conflicts() if blackboard else []
+
+    parts = [
+        "你是质量审查员。请审查以下多专家分析的质量，识别问题。",
+        f"\n## 用户问题\n{query}",
+        f"\n## 专家分析摘要\n{bb_summary or '（无黑板数据）'}",
+    ]
+
+    if conflicts:
+        parts.append("\n## 检测到的冲突")
+        for c in conflicts:
+            parts.append(f"- {c['target']}: 买入方={c['buy_agents']}, 卖出方={c['sell_agents']}")
+
+    # 各专家分析预览（每个截断到 500 字）
+    parts.append("\n## 各专家分析预览")
+    for s in specialists[:5]:
+        agent_name = s.get("agent", "")
+        analysis = s.get("analysis", "")[:500]
+        parts.append(f"\n### {agent_name}\n{analysis}")
+
+    parts.append(
+        "\n## 任务\n"
+        "审查以上分析，输出 JSON：\n"
+        "{\n"
+        '  "quality_issues": ["质量问题1（如数据缺失/逻辑跳跃/证据不足）", "..."],\n'
+        '  "missing_perspectives": ["未覆盖的视角1", "..."],\n'
+        '  "conflict_resolutions": [{"target": "冲突标的", "resolution": "解决建议"}],\n'
+        '  "confidence_adjustment": -0.1\n'
+        "}\n"
+        "只输出 JSON，不要其他文字。confidence_adjustment 范围 [-0.3, 0.2]，负值表示需降级。"
+    )
+
+    prompt = "\n".join(parts)
+
+    try:
+        response = _call_llm(
+            caller="reflection",
+            trace_id=trace_id,
+            model=MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.2,
+            max_tokens=800,
+        )
+        raw = response.choices[0].message.content.strip()
+    except Exception as e:
+        logger.warning(f"[pipeline] Reflection LLM 调用失败: {e}")
+        return {"quality_issues": [], "missing_perspectives": [], "conflict_resolutions": [], "confidence_adjustment": 0.0}
+
+    # 解析 JSON
+    result = {
+        "quality_issues": [],
+        "missing_perspectives": [],
+        "conflict_resolutions": [],
+        "confidence_adjustment": 0.0,
+    }
+    if raw:
+        cleaned = raw
+        if "```" in cleaned:
+            parts_split = cleaned.split("```")
+            cleaned = parts_split[1] if len(parts_split) > 1 else parts_split[0]
+            if cleaned.startswith("json"):
+                cleaned = cleaned[4:]
+            cleaned = cleaned.strip()
+        try:
+            parsed = json.loads(cleaned)
+            if isinstance(parsed, dict):
+                result["quality_issues"] = parsed.get("quality_issues", []) or []
+                result["missing_perspectives"] = parsed.get("missing_perspectives", []) or []
+                result["conflict_resolutions"] = parsed.get("conflict_resolutions", []) or []
+                try:
+                    result["confidence_adjustment"] = float(parsed.get("confidence_adjustment", 0.0))
+                except (TypeError, ValueError):
+                    result["confidence_adjustment"] = 0.0
+        except (json.JSONDecodeError, ValueError) as e:
+            logger.warning(f"[pipeline] Reflection JSON 解析失败: {e}")
+
+    logger.info(
+        f"[pipeline] Reflection 完成: "
+        f"{len(result['quality_issues'])} 质量问题, "
+        f"{len(result['missing_perspectives'])} 缺失视角, "
+        f"置信度调整={result['confidence_adjustment']}"
+    )
+    return result
 
 
 def _fallback_synthesize(query: str, specialists: list) -> str:

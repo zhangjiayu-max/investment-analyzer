@@ -1,8 +1,9 @@
-"""智能路由：规则优先 + LLM 兜底，决定调用哪些专家。"""
+"""智能路由：规则优先 + 声明式 fallback + LLM 兜底，决定调用哪些专家。"""
 
 import hashlib
 import json
 import logging
+import os
 import re
 import threading
 import time
@@ -12,6 +13,44 @@ from db.config import get_config, get_config_float
 from services.llm_service import _call_llm, MODEL
 
 logger = logging.getLogger(__name__)
+
+
+# ── P4: 声明式路由配置加载 ──────────────────────
+
+_ROUTER_CONFIG_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    "router_config.yaml",
+)
+_router_config_cache: Optional[dict] = None
+_router_config_mtime: float = 0.0
+
+
+def _load_router_config() -> dict:
+    """加载 router_config.yaml（带 mtime 缓存，支持热更新）。"""
+    global _router_config_cache, _router_config_mtime
+    try:
+        mtime = os.path.getmtime(_ROUTER_CONFIG_PATH)
+    except OSError:
+        return {}
+
+    if _router_config_cache is not None and mtime == _router_config_mtime:
+        return _router_config_cache
+
+    try:
+        import yaml
+        with open(_ROUTER_CONFIG_PATH, "r", encoding="utf-8") as f:
+            config = yaml.safe_load(f) or {}
+        _router_config_cache = config
+        _router_config_mtime = mtime
+        logger.debug(f"[router] 加载声明式配置: {len(config.get('routes', []))} 主规则, "
+                     f"{len(config.get('declarative_fallback', []))} fallback 规则")
+        return config
+    except ImportError:
+        logger.warning("[router] PyYAML 未安装，声明式 fallback 不可用")
+        return {}
+    except Exception as e:
+        logger.warning(f"[router] 加载 router_config.yaml 失败: {e}")
+        return {}
 
 # 关键词 → 专家 key 列表（按优先级排序）
 # 注意：专家 key 来自 db.agents.load_specialist_agents() 的返回值
@@ -116,6 +155,38 @@ class SmartRouter:
             "route_by": "rule",
         }
 
+    def _declarative_fallback_route(self, query: str) -> Optional[dict]:
+        """P4: 声明式 fallback 路由 — 用 YAML 配置匹配模糊查询，零 LLM 成本。
+
+        主路由（_rule_route）未命中时调用，命中则返回，未命中返回 None。
+        """
+        config = _load_router_config()
+        if not config:
+            return None
+
+        fallback_rules = config.get("declarative_fallback", [])
+        for rule in fallback_rules:
+            patterns = rule.get("patterns", [])
+            if any(p in query for p in patterns):
+                experts = rule.get("experts", [])
+                if experts:
+                    return {
+                        "complexity": "simple" if len(experts) == 1 else "medium",
+                        "specialists": list(experts),
+                        "reason": f"声明式 fallback 命中: {rule.get('name', '')}",
+                        "needs_arbitration": len(experts) >= 2,
+                        "route_by": "declarative",
+                    }
+        return None
+
+    def _get_default_experts(self) -> list:
+        """P4: 从 YAML 获取默认专家列表。"""
+        config = _load_router_config()
+        defaults = config.get("default_experts", [])
+        if defaults:
+            return list(defaults)
+        return ["valuation_expert", "risk_assessor"]
+
     def _llm_fallback_route(self, query: str, history_summary: str, portfolio_summary: str) -> dict:
         specialists = _load_specialist_keys()
         expert_lines = []
@@ -214,7 +285,15 @@ class SmartRouter:
                     self._cache[cache_key] = (rule_result, now)
                 return rule_result
 
-        # 4. LLM 兜底
+        # 3.5 P4: 声明式 fallback（零 LLM 成本，YAML 配置可热更新）
+        declarative_result = self._declarative_fallback_route(query)
+        if declarative_result:
+            with self._lock:
+                self._cleanup_expired_cache(now)
+                self._cache[cache_key] = (declarative_result, now)
+            return declarative_result
+
+        # 4. LLM 兜底（声明式未命中时才调用，频率极低）
         if get_config("router.use_llm_fallback", "true") == "true":
             llm_result = self._llm_fallback_route(query, history_summary, portfolio_summary)
             with self._lock:
@@ -222,12 +301,13 @@ class SmartRouter:
                 self._cache[cache_key] = (llm_result, now)
             return llm_result
 
-        # 5. 最终回退
+        # 5. 最终回退（使用 YAML 配置的默认专家）
+        default_experts = self._get_default_experts()
         fallback = {
             "complexity": get_config("router.default_complexity", "medium"),
-            "specialists": ["valuation_expert", "risk_assessor"],
+            "specialists": default_experts,
             "reason": "路由关闭且未指定专家，使用默认配置",
-            "needs_arbitration": True,
+            "needs_arbitration": len(default_experts) >= 2,
             "route_by": "default",
         }
         with self._lock:

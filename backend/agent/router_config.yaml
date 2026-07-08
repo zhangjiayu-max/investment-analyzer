@@ -1,0 +1,81 @@
+# 声明式路由配置 — 替代 LLM fallback 的规则层
+# P4: 路由命中时零 LLM 成本，未命中再走 LLM fallback
+# 配置可热更新（无需重启）
+
+# 主路由规则（与 _KEYWORD_ROUTES 对齐，按优先级排序）
+routes:
+  - name: valuation
+    patterns: ["估值", "PE", "PB", "百分位", "低估", "高估"]
+    experts: [valuation_expert]
+
+  - name: risk
+    patterns: ["风险", "回撤", "止损", "亏损", "最大回撤"]
+    experts: [risk_assessor]
+
+  - name: allocation
+    patterns: ["配置", "仓位", "股债", "比例", "再平衡"]
+    experts: [allocation_advisor]
+
+  - name: portfolio
+    patterns: ["持仓", "分散", "穿透", "集中度"]
+    experts: [allocation_advisor]
+
+  - name: market
+    patterns: ["市场", "大盘", "行情", "走势", "牛市", "熊市"]
+    experts: [market_analyst]
+
+  - name: diagnosis
+    patterns: ["诊断", "体检", "检查", "全面"]
+    experts: [valuation_expert, risk_assessor, allocation_advisor]
+
+  - name: action
+    patterns: ["买", "卖", "操作", "定投", "止盈", "加仓", "减仓"]
+    experts: [allocation_advisor, risk_assessor, valuation_expert]
+
+  - name: article
+    patterns: ["文章", "公众号", "解读", "新闻"]
+    experts: [article_expert]
+
+  - name: fund
+    patterns: ["基金", "选基", "基金分析"]
+    experts: [fund_analyst]
+
+  - name: macro
+    patterns: ["宏观", "经济", "利率", "政策"]
+    experts: [macro_strategist]
+
+# 声明式 fallback 规则（主路由未命中时按顺序匹配）
+# 替代 LLM fallback，覆盖常见模糊查询
+declarative_fallback:
+  # 操作类查询
+  - name: action_generic
+    patterns: ["怎么操作", "如何操作", "该怎么办", "建议", "推荐"]
+    experts: [allocation_advisor, valuation_expert]
+
+  # 持仓类查询
+  - name: portfolio_generic
+    patterns: ["我的持仓", "当前持仓", "持仓分析", "我的基金"]
+    experts: [allocation_advisor, risk_assessor]
+
+  # 市场类查询
+  - name: market_generic
+    patterns: ["今天市场", "近期市场", "市场怎么样", "行情怎么样"]
+    experts: [market_analyst]
+
+  # 基金选择类
+  - name: fund_selection
+    patterns: ["选什么", "买什么", "推荐基金", "哪只基金", "哪个基金"]
+    experts: [fund_analyst, allocation_advisor]
+
+  # 学习/知识类
+  - name: knowledge
+    patterns: ["什么是", "什么意思", "如何理解", "解释一下", "科普"]
+    experts: [valuation_expert]
+
+  # 通用投资咨询
+  - name: investment_generic
+    patterns: ["投资", "理财", "分析", "看看", "帮我看"]
+    experts: [allocation_advisor, valuation_expert]
+
+# 最终默认专家（所有规则均未命中时）
+default_experts: [allocation_advisor, valuation_expert]

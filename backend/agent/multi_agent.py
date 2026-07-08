@@ -8,7 +8,7 @@ import time
 
 from services.llm_service import client, MODEL, _call_llm, _parse_tool_args
 from tools import TOOLS, execute_tool
-from db.agents import load_specialist_agents
+from db.agents import load_specialist_agents, create_agent_run
 from db.config import get_config_int, get_config_bool
 
 logger = logging.getLogger(__name__)
@@ -748,7 +748,8 @@ def _parse_structured_output(raw_text: str, agent_key: str, agent_name: str,
 
 def run_specialist_with_context(agent_key: str, query: str, peer_analyses: dict, trace_id: str = "",
                                 max_turns: int = 2, prebuilt_context: str = "",
-                                model: str = None) -> dict:
+                                model: str = None,
+                                conversation_id: int = 0, message_id: int = 0) -> dict:
     """
     交叉审阅模式：专家拿到其他专家的分析结果后进行二次审阅。
 
@@ -968,6 +969,24 @@ def run_specialist_with_context(agent_key: str, query: str, peer_analyses: dict,
                 logger.error(f'[trace:{trace_id}] [{agent["name"]}] cross_review 重新生成失败: {_e}')
                 answer = "交叉审阅完成，请参考其他专家分析。"
 
+    # P0: 写入 agent_runs（cross_review ReAct 路径补齐）— 失败不影响主流程
+    if conversation_id and message_id:
+        try:
+            create_agent_run(
+                conversation_id=conversation_id,
+                message_id=message_id,
+                agent_key=agent_key,
+                agent_name=agent["name"],
+                query=query,
+                result=answer[:4000],
+                tool_calls=str(tool_calls_log)[:2000],
+                duration_ms=duration_ms,
+                trace_id=trace_id,
+                status="success",
+            )
+        except Exception as log_err:
+            logger.warning(f"[cross_review] agent_runs 写入失败 ({agent_key}): {log_err}")
+
     return {
         "agent_key": agent_key,
         "agent": agent["name"],
@@ -981,7 +1000,8 @@ def run_specialist_with_context(agent_key: str, query: str, peer_analyses: dict,
 
 def run_cross_review_opinion(agent_key: str, query: str, self_analysis: str,
                               peer_analyses: dict, trace_id: str = "",
-                              model: str = None) -> dict:
+                              model: str = None,
+                              conversation_id: int = 0, message_id: int = 0) -> dict:
     """交叉审阅单轮意见模式（不调用工具，仅 1 次 LLM 调用）。
 
     与 run_specialist_with_context 的区别：
@@ -1109,6 +1129,24 @@ def run_cross_review_opinion(agent_key: str, query: str, self_analysis: str,
         analysis_text = "交叉审阅完成，请参考其他专家分析。"
 
     duration_ms = int((time.time() - start_time) * 1000)
+
+    # P0: 写入 agent_runs（cross_review 路径补齐）— 失败不影响主流程
+    if conversation_id and message_id:
+        try:
+            create_agent_run(
+                conversation_id=conversation_id,
+                message_id=message_id,
+                agent_key=agent_key,
+                agent_name=agent["name"],
+                query=query,
+                result=analysis_text[:4000],
+                tool_calls="",
+                duration_ms=duration_ms,
+                trace_id=trace_id,
+                status="success",
+            )
+        except Exception as log_err:
+            logger.warning(f"[cross_review] agent_runs 写入失败 ({agent_key}): {log_err}")
 
     return {
         "agent_key": agent_key,

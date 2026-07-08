@@ -15,6 +15,7 @@
 
 import logging
 import re
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import Optional, Any
@@ -83,28 +84,31 @@ class Blackboard:
         self.max_entries = max_entries
         # token 追踪：每个 agent 消耗
         self.tokens_used_by_agent: dict[str, int] = {}
+        # P2: 并行写入时的线程安全锁
+        self._lock = threading.Lock()
 
     def write(self, entry: BlackboardEntry) -> None:
-        """写入一条专家结论。"""
-        if not entry.timestamp:
-            entry.timestamp = time.time()
-        self.entries.append(entry)
-        # 容量保护：超出上限淘汰最早条目
-        if len(self.entries) > self.max_entries:
-            removed = self.entries.pop(0)
-            logger.debug(
-                f"[blackboard] 淘汰最早条目: {removed.agent_name} "
-                f"(当前 {len(self.entries)}/{self.max_entries})"
+        """写入一条专家结论（线程安全）。"""
+        with self._lock:
+            if not entry.timestamp:
+                entry.timestamp = time.time()
+            self.entries.append(entry)
+            # 容量保护：超出上限淘汰最早条目
+            if len(self.entries) > self.max_entries:
+                removed = self.entries.pop(0)
+                logger.debug(
+                    f"[blackboard] 淘汰最早条目: {removed.agent_name} "
+                    f"(当前 {len(self.entries)}/{self.max_entries})"
+                )
+            # 记录 token
+            if entry.tokens_used > 0:
+                self.tokens_used_by_agent[entry.agent_key] = (
+                    self.tokens_used_by_agent.get(entry.agent_key, 0) + entry.tokens_used
+                )
+            logger.info(
+                f"[blackboard] {entry.agent_name} 写入黑板 "
+                f"(置信度={entry.confidence:.0%}, 当前 {len(self.entries)}/{self.max_entries})"
             )
-        # 记录 token
-        if entry.tokens_used > 0:
-            self.tokens_used_by_agent[entry.agent_key] = (
-                self.tokens_used_by_agent.get(entry.agent_key, 0) + entry.tokens_used
-            )
-        logger.info(
-            f"[blackboard] {entry.agent_name} 写入黑板 "
-            f"(置信度={entry.confidence:.0%}, 当前 {len(self.entries)}/{self.max_entries})"
-        )
 
     def to_context_text(self, max_chars: int = 800, exclude_agent: Optional[str] = None) -> str:
         """生成注入专家上下文的黑板摘要。

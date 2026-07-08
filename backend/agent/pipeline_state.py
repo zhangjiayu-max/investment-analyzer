@@ -28,6 +28,7 @@ class PipelinePhase(str, Enum):
     INFO_GATHER = "info_gather"     # Phase 1: 信息收集（RAG + 预取 + 记忆加载）
     PLANNING = "planning"           # Phase 2: 计划生成（选专家 + 排序 + 预算分配）
     EXECUTION = "execution"         # Phase 3: 专家执行（并行 + 黑板 + 收敛检测）
+    REFLECTION = "reflection"       # Phase 3.5: 反思（自评 + 冲突识别 + 质量问题）
     SYNTHESIS = "synthesis"         # Phase 4: 综合（交叉审阅 + 仲裁 + 最终回答）
     MEMORY = "memory"               # Phase 5: 记忆持久化（结论 + 摘要 + 偏好）
     # 终态
@@ -42,7 +43,8 @@ _VALID_TRANSITIONS: dict[PipelinePhase, set[PipelinePhase]] = {
     PipelinePhase.PREPROCESS: {PipelinePhase.INFO_GATHER, PipelinePhase.FAILED, PipelinePhase.CANCELLED},
     PipelinePhase.INFO_GATHER: {PipelinePhase.PLANNING, PipelinePhase.FAILED, PipelinePhase.CANCELLED},
     PipelinePhase.PLANNING: {PipelinePhase.EXECUTION, PipelinePhase.FAILED, PipelinePhase.CANCELLED},
-    PipelinePhase.EXECUTION: {PipelinePhase.SYNTHESIS, PipelinePhase.FAILED, PipelinePhase.CANCELLED},
+    PipelinePhase.EXECUTION: {PipelinePhase.REFLECTION, PipelinePhase.SYNTHESIS, PipelinePhase.FAILED, PipelinePhase.CANCELLED},
+    PipelinePhase.REFLECTION: {PipelinePhase.SYNTHESIS, PipelinePhase.FAILED, PipelinePhase.CANCELLED},
     PipelinePhase.SYNTHESIS: {PipelinePhase.MEMORY, PipelinePhase.FAILED, PipelinePhase.CANCELLED},
     PipelinePhase.MEMORY: {PipelinePhase.COMPLETED, PipelinePhase.FAILED},
     # 终态不可转换
