@@ -42,6 +42,17 @@ def init_eval_tables(conn):
     # Agent 关联（用于回归测试）
     _add_column_if_not_exists(conn, "eval_cases", "agent_id", "INTEGER")
     _add_column_if_not_exists(conn, "eval_cases", "agent_type", "TEXT DEFAULT ''")
+    # 统一评分尺度：4 维度评分（0-10）+ 归一化总分（0-100）
+    _add_column_if_not_exists(conn, "eval_runs", "score_data_accuracy", "REAL")
+    _add_column_if_not_exists(conn, "eval_runs", "score_logic", "REAL")
+    _add_column_if_not_exists(conn, "eval_runs", "score_actionability", "REAL")
+    _add_column_if_not_exists(conn, "eval_runs", "score_risk_awareness", "REAL")
+    _add_column_if_not_exists(conn, "eval_runs", "score_normalized", "REAL")
+    # 一次性回填旧数据：原 score 为 0-24 分制，乘 4.17 归一化到 0-100
+    conn.execute(
+        "UPDATE eval_runs SET score_normalized = score * 4.17 "
+        "WHERE score_normalized IS NULL AND score IS NOT NULL"
+    )
 
     conn.execute("""
         CREATE TABLE IF NOT EXISTS recommendations (
@@ -298,6 +309,8 @@ def init_eval_tables(conn):
     # 新增表
     _init_prompt_versions_table(conn)
     _init_eval_daily_reports_table(conn)
+    _init_eval_suites_tables(conn)
+    _init_improvement_tasks_table(conn)
 
 
 def create_eval_case(name: str, analysis_type: str, input_params: str = "{}",
@@ -314,8 +327,12 @@ def create_eval_case(name: str, analysis_type: str, input_params: str = "{}",
     return case_id
 
 
-def list_eval_cases(analysis_type: str = None, active_only: bool = True) -> list[dict]:
-    """列出评测用例。"""
+def list_eval_cases(analysis_type: str = None, active_only: bool = True,
+                    page: int = None, page_size: int = 20) -> list[dict] | dict:
+    """列出评测用例。
+
+    传入 page 时返回分页结构 {items, total, page, page_size}，否则返回列表（向后兼容）。
+    """
     conn = _get_conn()
     conditions = []
     params = []
@@ -325,6 +342,27 @@ def list_eval_cases(analysis_type: str = None, active_only: bool = True) -> list
         conditions.append("ec.analysis_type = ?")
         params.append(analysis_type)
     where = " AND ".join(conditions) if conditions else "1=1"
+
+    if page is not None:
+        total_row = conn.execute(
+            f"SELECT COUNT(*) as cnt FROM eval_cases ec WHERE {where}", params
+        ).fetchone()
+        total = total_row["cnt"] if total_row else 0
+        offset = max(0, (page - 1) * page_size)
+        rows = conn.execute(f"""
+            SELECT ec.*, COUNT(er.id) as run_count,
+                   AVG(er.score) as avg_score
+            FROM eval_cases ec
+            LEFT JOIN eval_runs er ON ec.id = er.case_id
+            WHERE {where}
+            GROUP BY ec.id
+            ORDER BY ec.id DESC
+            LIMIT ? OFFSET ?
+        """, params + [page_size, offset]).fetchall()
+        conn.close()
+        return {"items": [dict(r) for r in rows], "total": total,
+                "page": page, "page_size": page_size}
+
     rows = conn.execute(f"""
         SELECT ec.*, COUNT(er.id) as run_count,
                AVG(er.score) as avg_score
@@ -374,24 +412,83 @@ def delete_eval_case(case_id: int) -> bool:
 def create_eval_run(case_id: int, analysis_type: str, result_summary: str,
                     result_data: str = "", score: float = None,
                     duration_ms: int = 0, token_usage: int = 0,
-                    error_msg: str = "") -> int:
-    """创建评测运行记录。"""
+                    error_msg: str = "",
+                    score_data_accuracy: float = None,
+                    score_logic: float = None,
+                    score_actionability: float = None,
+                    score_risk_awareness: float = None,
+                    score_normalized: float = None) -> int:
+    """创建评测运行记录。
+
+    支持多维度评分（0-10）：data_accuracy / logic / actionability / risk_awareness，
+    以及归一化总分 score_normalized（0-100）。
+    若传入 4 维度但未传 score_normalized，则自动计算 (a+b+c+d)/4*10。
+    """
+    # 自动归一化：4 维度均值 * 10 → 0-100
+    if (score_normalized is None and None not in (
+            score_data_accuracy, score_logic, score_actionability, score_risk_awareness)):
+        try:
+            score_normalized = (
+                float(score_data_accuracy) + float(score_logic)
+                + float(score_actionability) + float(score_risk_awareness)
+            ) / 4 * 10
+        except (TypeError, ValueError):
+            pass
+
     conn = _get_conn()
     cur = conn.execute("""
         INSERT INTO eval_runs (case_id, analysis_type, result_summary, result_data,
-                               score, duration_ms, token_usage, error_msg)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                               score, duration_ms, token_usage, error_msg,
+                               score_data_accuracy, score_logic,
+                               score_actionability, score_risk_awareness,
+                               score_normalized)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (case_id, analysis_type, result_summary, result_data,
-          score, duration_ms, token_usage, error_msg))
+          score, duration_ms, token_usage, error_msg,
+          score_data_accuracy, score_logic,
+          score_actionability, score_risk_awareness,
+          score_normalized))
     run_id = cur.lastrowid
     conn.commit()
     conn.close()
     return run_id
 
 
-def list_eval_runs(case_id: int = None, limit: int = 50) -> list[dict]:
-    """列出评测运行记录。"""
+def list_eval_runs(case_id: int = None, limit: int = 50,
+                   page: int = None, page_size: int = 20) -> list[dict] | dict:
+    """列出评测运行记录。
+
+    传入 page 时返回分页结构 {items, total, page, page_size}，否则返回列表（向后兼容）。
+    """
     conn = _get_conn()
+    if page is not None:
+        if case_id:
+            total_row = conn.execute(
+                "SELECT COUNT(*) as cnt FROM eval_runs WHERE case_id = ?", (case_id,)
+            ).fetchone()
+        else:
+            total_row = conn.execute("SELECT COUNT(*) as cnt FROM eval_runs").fetchone()
+        total = total_row["cnt"] if total_row else 0
+        offset = max(0, (page - 1) * page_size)
+        if case_id:
+            rows = conn.execute("""
+                SELECT er.*, ec.name as case_name, ec.analysis_type
+                FROM eval_runs er
+                LEFT JOIN eval_cases ec ON er.case_id = ec.id
+                WHERE er.case_id = ?
+                ORDER BY er.id DESC LIMIT ? OFFSET ?
+            """, (case_id, page_size, offset)).fetchall()
+        else:
+            rows = conn.execute("""
+                SELECT er.*, ec.name as case_name, ec.analysis_type
+                FROM eval_runs er
+                LEFT JOIN eval_cases ec ON er.case_id = ec.id
+                ORDER BY er.id DESC LIMIT ? OFFSET ?
+            """, (page_size, offset)).fetchall()
+        conn.close()
+        return {"items": [dict(r) for r in rows], "total": total,
+                "page": page, "page_size": page_size}
+
     if case_id:
         rows = conn.execute("""
             SELECT er.*, ec.name as case_name, ec.analysis_type
@@ -592,8 +689,12 @@ def get_conversation_evaluation(conversation_id: int, message_id: int = None) ->
     return result
 
 
-def list_conversation_evaluations(limit: int = 50, min_score: float = None) -> list[dict]:
-    """列出对话评估记录"""
+def list_conversation_evaluations(limit: int = 50, min_score: float = None,
+                                  page: int = None, page_size: int = 20) -> list[dict] | dict:
+    """列出对话评估记录。
+
+    传入 page 时返回分页结构 {items, total, page, page_size}，否则返回列表（向后兼容）。
+    """
     conn = _get_conn()
 
     conditions = []
@@ -604,6 +705,24 @@ def list_conversation_evaluations(limit: int = 50, min_score: float = None) -> l
         params.append(min_score)
 
     where = " AND ".join(conditions) if conditions else "1=1"
+
+    if page is not None:
+        total_row = conn.execute(
+            f"SELECT COUNT(*) as cnt FROM conversation_evaluations WHERE {where}", params
+        ).fetchone()
+        total = total_row["cnt"] if total_row else 0
+        offset = max(0, (page - 1) * page_size)
+        rows = conn.execute(f"""
+            SELECT ce.*, c.title as conversation_title
+            FROM conversation_evaluations ce
+            LEFT JOIN conversations c ON ce.conversation_id = c.id
+            WHERE {where}
+            ORDER BY ce.id DESC
+            LIMIT ? OFFSET ?
+        """, params + [page_size, offset]).fetchall()
+        conn.close()
+        return {"items": [dict(r) for r in rows], "total": total,
+                "page": page, "page_size": page_size}
 
     rows = conn.execute(f"""
         SELECT ce.*, c.title as conversation_title
@@ -1017,6 +1136,49 @@ def _init_eval_daily_reports_table(conn):
     conn.execute("CREATE INDEX IF NOT EXISTS idx_eval_daily_date ON eval_daily_reports(report_date)")
 
 
+def _init_eval_suites_tables(conn):
+    """测试套件表：eval_suites + eval_suite_cases。"""
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS eval_suites (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            description TEXT,
+            suite_type TEXT DEFAULT 'regression',
+            is_active INTEGER DEFAULT 1,
+            created_at TEXT DEFAULT (datetime('now','localtime')),
+            updated_at TEXT DEFAULT (datetime('now','localtime'))
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS eval_suite_cases (
+            suite_id INTEGER REFERENCES eval_suites(id) ON DELETE CASCADE,
+            case_id INTEGER REFERENCES eval_cases(id) ON DELETE CASCADE,
+            sort_order INTEGER DEFAULT 0,
+            PRIMARY KEY (suite_id, case_id)
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_eval_suite_cases_suite ON eval_suite_cases(suite_id)")
+
+
+def _init_improvement_tasks_table(conn):
+    """改进任务表：根因分析结果 → 可应用的改进项。"""
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS improvement_tasks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            source_type TEXT NOT NULL,
+            source_id INTEGER,
+            agent_type TEXT,
+            root_cause TEXT,
+            suggestion TEXT,
+            prompt_diff TEXT,
+            status TEXT DEFAULT 'pending',
+            created_at TEXT DEFAULT (datetime('now','localtime')),
+            applied_at TEXT
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_improvement_tasks_status ON improvement_tasks(status)")
+
+
 def create_prompt_version(agent_type: str, version: str, prompt_content: str,
                           changelog: str = "") -> int:
     conn = _get_conn()
@@ -1209,3 +1371,197 @@ def list_tool_eval_metrics(limit: int = 50) -> list[dict]:
     ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
+
+
+# ── 测试套件 (Eval Suite) CRUD ──────────────────────────────
+
+
+def create_eval_suite(name: str, description: str = "", suite_type: str = "regression",
+                      is_active: bool = True) -> int:
+    """创建测试套件。"""
+    conn = _get_conn()
+    cur = conn.execute(
+        "INSERT INTO eval_suites (name, description, suite_type, is_active) VALUES (?, ?, ?, ?)",
+        (name, description, suite_type, 1 if is_active else 0),
+    )
+    suite_id = cur.lastrowid
+    conn.commit()
+    conn.close()
+    return suite_id
+
+
+def list_eval_suites(suite_type: str = None, active_only: bool = False) -> list[dict]:
+    """列出测试套件（含用例数）。"""
+    conn = _get_conn()
+    conditions = []
+    params = []
+    if active_only:
+        conditions.append("s.is_active = 1")
+    if suite_type:
+        conditions.append("s.suite_type = ?")
+        params.append(suite_type)
+    where = " AND ".join(conditions) if conditions else "1=1"
+    rows = conn.execute(f"""
+        SELECT s.*, COUNT(sc.case_id) as case_count
+        FROM eval_suites s
+        LEFT JOIN eval_suite_cases sc ON s.id = sc.suite_id
+        WHERE {where}
+        GROUP BY s.id
+        ORDER BY s.id DESC
+    """, params).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_eval_suite(suite_id: int) -> dict | None:
+    """获取单个测试套件（含用例列表）。"""
+    conn = _get_conn()
+    row = conn.execute(
+        "SELECT * FROM eval_suites WHERE id = ?", (suite_id,)
+    ).fetchone()
+    if not row:
+        conn.close()
+        return None
+    suite = dict(row)
+    cases = conn.execute("""
+        SELECT sc.case_id, sc.sort_order, ec.name, ec.analysis_type, ec.is_active
+        FROM eval_suite_cases sc
+        JOIN eval_cases ec ON sc.case_id = ec.id
+        WHERE sc.suite_id = ?
+        ORDER BY sc.sort_order, sc.case_id
+    """, (suite_id,)).fetchall()
+    suite["cases"] = [dict(c) for c in cases]
+    conn.close()
+    return suite
+
+
+def update_eval_suite(suite_id: int, **fields) -> bool:
+    """更新测试套件。"""
+    if not fields:
+        return False
+    fields["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    set_clause = ", ".join(f"{k} = ?" for k in fields)
+    values = list(fields.values()) + [suite_id]
+    conn = _get_conn()
+    conn.execute(f"UPDATE eval_suites SET {set_clause} WHERE id = ?", values)
+    conn.commit()
+    conn.close()
+    return True
+
+
+def delete_eval_suite(suite_id: int) -> bool:
+    """删除测试套件（关联表通过 ON DELETE CASCADE 自动清理）。"""
+    conn = _get_conn()
+    # SQLite 默认未开启外键级联，显式清理关联表
+    conn.execute("DELETE FROM eval_suite_cases WHERE suite_id = ?", (suite_id,))
+    cur = conn.execute("DELETE FROM eval_suites WHERE id = ?", (suite_id,))
+    conn.commit()
+    ok = cur.rowcount > 0
+    conn.close()
+    return ok
+
+
+def add_case_to_suite(suite_id: int, case_id: int, sort_order: int = 0) -> bool:
+    """添加用例到套件（已存在则更新 sort_order）。"""
+    conn = _get_conn()
+    conn.execute("""
+        INSERT INTO eval_suite_cases (suite_id, case_id, sort_order)
+        VALUES (?, ?, ?)
+        ON CONFLICT(suite_id, case_id) DO UPDATE SET sort_order = excluded.sort_order
+    """, (suite_id, case_id, sort_order))
+    conn.commit()
+    conn.close()
+    return True
+
+
+def remove_case_from_suite(suite_id: int, case_id: int) -> bool:
+    """从套件移除用例。"""
+    conn = _get_conn()
+    cur = conn.execute(
+        "DELETE FROM eval_suite_cases WHERE suite_id = ? AND case_id = ?",
+        (suite_id, case_id),
+    )
+    conn.commit()
+    ok = cur.rowcount > 0
+    conn.close()
+    return ok
+
+
+def list_suite_cases(suite_id: int) -> list[dict]:
+    """列出套件内的用例（含完整用例信息）。"""
+    conn = _get_conn()
+    rows = conn.execute("""
+        SELECT sc.sort_order, ec.*
+        FROM eval_suite_cases sc
+        JOIN eval_cases ec ON sc.case_id = ec.id
+        WHERE sc.suite_id = ?
+        ORDER BY sc.sort_order, sc.case_id
+    """, (suite_id,)).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+# ── 改进任务 (Improvement Task) CRUD ──────────────────────────────
+
+
+def create_improvement_task(source_type: str, source_id: int = None,
+                            agent_type: str = "", root_cause: str = "",
+                            suggestion: str = "", prompt_diff: str = "",
+                            status: str = "pending") -> int:
+    """创建改进任务（根因分析结果 → 可应用的改进项）。"""
+    conn = _get_conn()
+    cur = conn.execute("""
+        INSERT INTO improvement_tasks
+            (source_type, source_id, agent_type, root_cause, suggestion, prompt_diff, status)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+    """, (source_type, source_id, agent_type, root_cause, suggestion, prompt_diff, status))
+    task_id = cur.lastrowid
+    conn.commit()
+    conn.close()
+    return task_id
+
+
+def list_improvement_tasks(status: str = None, limit: int = 100) -> list[dict]:
+    """列出改进任务（支持 status 过滤）。"""
+    conn = _get_conn()
+    if status:
+        rows = conn.execute(
+            "SELECT * FROM improvement_tasks WHERE status = ? ORDER BY id DESC LIMIT ?",
+            (status, limit),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT * FROM improvement_tasks ORDER BY id DESC LIMIT ?", (limit,)
+        ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def update_improvement_task_status(task_id: int, status: str,
+                                   prompt_diff: str = None) -> bool:
+    """更新改进任务状态（applied / rejected）。
+
+    status=applied 时写入 applied_at 时间戳。
+    """
+    conn = _get_conn()
+    if status == "applied":
+        if prompt_diff is not None:
+            conn.execute(
+                "UPDATE improvement_tasks SET status = ?, prompt_diff = ?, "
+                "applied_at = datetime('now','localtime') WHERE id = ?",
+                (status, prompt_diff, task_id),
+            )
+        else:
+            conn.execute(
+                "UPDATE improvement_tasks SET status = ?, "
+                "applied_at = datetime('now','localtime') WHERE id = ?",
+                (status, task_id),
+            )
+    else:
+        conn.execute(
+            "UPDATE improvement_tasks SET status = ? WHERE id = ?",
+            (status, task_id),
+        )
+    conn.commit()
+    conn.close()
+    return True

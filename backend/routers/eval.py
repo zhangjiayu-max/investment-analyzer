@@ -56,9 +56,21 @@ async def _await_portfolio_record_result(record_id: int, timeout: int = 180) -> 
 
 
 @router.get("/api/eval/cases")
-async def list_eval_cases_api(analysis_type: str = "", active_only: bool = True):
-    """列出评测用例。"""
-    return {"cases": list_eval_cases(analysis_type=analysis_type or None, active_only=active_only)}
+async def list_eval_cases_api(analysis_type: str = "", active_only: bool = True,
+                              page: int = None, page_size: int = 20):
+    """列出评测用例。传入 page 时返回分页结构，否则返回原格式（向后兼容）。"""
+    result = list_eval_cases(
+        analysis_type=analysis_type or None, active_only=active_only,
+        page=page, page_size=page_size,
+    )
+    if page is not None:
+        return {
+            "cases": result["items"],
+            "total": result["total"],
+            "page": result["page"],
+            "page_size": result["page_size"],
+        }
+    return {"cases": result}
 
 
 @router.post("/api/eval/cases")
@@ -251,9 +263,21 @@ async def _score_run_async(run_id: int, case: dict, result_data: str, analysis_t
 
 
 @router.get("/api/eval/runs")
-async def list_eval_runs_api(case_id: int = 0, limit: int = 50):
-    """列出评测运行记录。"""
-    return {"runs": list_eval_runs(case_id=case_id or None, limit=limit)}
+async def list_eval_runs_api(case_id: int = 0, limit: int = 50,
+                             page: int = None, page_size: int = 20):
+    """列出评测运行记录。传入 page 时返回分页结构，否则返回原格式（向后兼容）。"""
+    result = list_eval_runs(
+        case_id=case_id or None, limit=limit,
+        page=page, page_size=page_size,
+    )
+    if page is not None:
+        return {
+            "runs": result["items"],
+            "total": result["total"],
+            "page": result["page"],
+            "page_size": result["page_size"],
+        }
+    return {"runs": result}
 
 
 @router.get("/api/eval/runs/{run_id}")
@@ -803,11 +827,22 @@ async def conversation_eval_stats_api():
 
 
 @router.get("/api/eval/conversation-list")
-async def conversation_eval_list_api(limit: int = 50, min_score: float = None):
-    """列出对话评估记录"""
+async def conversation_eval_list_api(limit: int = 50, min_score: float = None,
+                                     page: int = None, page_size: int = 20):
+    """列出对话评估记录。传入 page 时返回分页结构，否则返回原格式（向后兼容）。"""
     from db.eval import list_conversation_evaluations
-    evaluations = list_conversation_evaluations(limit=limit, min_score=min_score)
-    return {"ok": True, "evaluations": evaluations}
+    result = list_conversation_evaluations(
+        limit=limit, min_score=min_score, page=page, page_size=page_size,
+    )
+    if page is not None:
+        return {
+            "ok": True,
+            "items": result["items"],
+            "total": result["total"],
+            "page": result["page"],
+            "page_size": result["page_size"],
+        }
+    return {"ok": True, "evaluations": result}
 
 
 # ── 进化系统 API ──────────────────────────────────────
@@ -1061,13 +1096,17 @@ async def auto_regression_api(limit: int = 10):
             dimensions = await _score_answer_quality(question, answer[:2000], expected_quality)
             total_score = sum(dimensions.values()) / len(dimensions) if dimensions else 0
 
-            # 保存运行结果（含完整回答）
+            # 保存运行结果（含完整回答 + 多维度评分）
             answer_summary = answer[:300].replace("\n", " ")
             create_eval_run(
                 case_id=case_id, analysis_type=analysis_type,
                 result_summary=answer_summary,
                 result_data=json.dumps({"answer": answer, "dimensions": dimensions}, ensure_ascii=False),
                 score=round(total_score, 1), duration_ms=duration_ms,
+                score_data_accuracy=dimensions.get("data_accuracy"),
+                score_logic=dimensions.get("logic"),
+                score_actionability=dimensions.get("actionability"),
+                score_risk_awareness=dimensions.get("risk_awareness"),
             )
 
             # 3. 退化检测
@@ -1232,3 +1271,158 @@ def _rule_score_answer(answer: str, expected_quality: str) -> dict:
         "actionability": action_score,
         "risk_awareness": risk_score,
     }
+
+
+# ── 测试套件 (Eval Suite) API ──────────────────────────────────────
+
+
+@router.post("/api/eval/suites")
+async def create_eval_suite_api(body: dict):
+    """创建测试套件。"""
+    from db.eval import create_eval_suite
+    name = (body.get("name") or "").strip()
+    if not name:
+        raise HTTPException(400, "name 必填")
+    suite_id = create_eval_suite(
+        name=name,
+        description=body.get("description", ""),
+        suite_type=body.get("suite_type", "regression"),
+        is_active=body.get("is_active", True),
+    )
+    return {"ok": True, "id": suite_id}
+
+
+@router.get("/api/eval/suites")
+async def list_eval_suites_api(suite_type: str = "", active_only: bool = False):
+    """列出测试套件。"""
+    from db.eval import list_eval_suites
+    return {"suites": list_eval_suites(suite_type=suite_type or None, active_only=active_only)}
+
+
+@router.get("/api/eval/suites/{suite_id}")
+async def get_eval_suite_api(suite_id: int):
+    """获取测试套件详情（含用例列表）。"""
+    from db.eval import get_eval_suite
+    suite = get_eval_suite(suite_id)
+    if not suite:
+        raise HTTPException(404, "测试套件不存在")
+    return suite
+
+
+@router.put("/api/eval/suites/{suite_id}")
+async def update_eval_suite_api(suite_id: int, body: dict):
+    """更新测试套件。"""
+    from db.eval import update_eval_suite
+    allowed = {"name", "description", "suite_type", "is_active"}
+    fields = {k: v for k, v in body.items() if k in allowed and v is not None}
+    if not fields:
+        raise HTTPException(400, "无有效字段")
+    ok = update_eval_suite(suite_id, **fields)
+    if not ok:
+        raise HTTPException(404, "测试套件不存在")
+    return {"ok": True}
+
+
+@router.delete("/api/eval/suites/{suite_id}")
+async def delete_eval_suite_api(suite_id: int):
+    """删除测试套件。"""
+    from db.eval import delete_eval_suite
+    ok = delete_eval_suite(suite_id)
+    if not ok:
+        raise HTTPException(404, "测试套件不存在")
+    return {"ok": True}
+
+
+@router.post("/api/eval/suites/{suite_id}/cases")
+async def add_case_to_suite_api(suite_id: int, body: dict):
+    """添加用例到套件。body: {case_id, sort_order?}"""
+    from db.eval import add_case_to_suite, get_eval_suite
+    if not get_eval_suite(suite_id):
+        raise HTTPException(404, "测试套件不存在")
+    case_id = body.get("case_id")
+    if not case_id:
+        raise HTTPException(400, "case_id 必填")
+    sort_order = body.get("sort_order", 0) or 0
+    add_case_to_suite(suite_id, case_id, sort_order=sort_order)
+    return {"ok": True}
+
+
+@router.delete("/api/eval/suites/{suite_id}/cases/{case_id}")
+async def remove_case_from_suite_api(suite_id: int, case_id: int):
+    """从套件移除用例。"""
+    from db.eval import remove_case_from_suite
+    ok = remove_case_from_suite(suite_id, case_id)
+    if not ok:
+        raise HTTPException(404, "用例不在套件中")
+    return {"ok": True}
+
+
+@router.post("/api/eval/suites/{suite_id}/run")
+async def run_eval_suite_api(suite_id: int):
+    """运行测试套件：遍历套件内用例，逐个调用现有 run 逻辑。"""
+    from db.eval import get_eval_suite, list_suite_cases
+    suite = get_eval_suite(suite_id)
+    if not suite:
+        raise HTTPException(404, "测试套件不存在")
+
+    cases = list_suite_cases(suite_id)
+    if not cases:
+        raise HTTPException(400, "套件内无用例")
+
+    results = []
+    for case in cases:
+        try:
+            result = await _do_eval_case_run(case["id"])
+            results.append({
+                "case_id": case["id"],
+                "case_name": case.get("name", ""),
+                "ok": result.get("ok", False),
+                "run_id": result.get("run_id"),
+                "duration_ms": result.get("duration_ms", 0),
+                "error": result.get("error"),
+            })
+        except Exception as e:
+            results.append({
+                "case_id": case["id"],
+                "case_name": case.get("name", ""),
+                "ok": False,
+                "error": str(e)[:200],
+            })
+
+    ok_count = sum(1 for r in results if r["ok"])
+    return {
+        "ok": True,
+        "suite_id": suite_id,
+        "suite_name": suite.get("name", ""),
+        "total": len(results),
+        "passed": ok_count,
+        "failed": len(results) - ok_count,
+        "results": results,
+    }
+
+
+# ── 改进任务 (Improvement Task) API ──────────────────────────────────────
+
+
+@router.get("/api/eval/improvement-tasks")
+async def list_improvement_tasks_api(status: str = "", limit: int = 100):
+    """列出改进任务（支持 status 过滤）。"""
+    from db.eval import list_improvement_tasks
+    return {"tasks": list_improvement_tasks(status=status or None, limit=limit)}
+
+
+@router.post("/api/eval/improvement-tasks/{task_id}/apply")
+async def apply_improvement_task_api(task_id: int, body: dict = None):
+    """应用改进任务（状态改 applied）。可选 body: {prompt_diff}"""
+    from db.eval import update_improvement_task_status
+    prompt_diff = (body or {}).get("prompt_diff") if body else None
+    update_improvement_task_status(task_id, "applied", prompt_diff=prompt_diff)
+    return {"ok": True}
+
+
+@router.post("/api/eval/improvement-tasks/{task_id}/reject")
+async def reject_improvement_task_api(task_id: int):
+    """拒绝改进任务（状态改 rejected）。"""
+    from db.eval import update_improvement_task_status
+    update_improvement_task_status(task_id, "rejected")
+    return {"ok": True}

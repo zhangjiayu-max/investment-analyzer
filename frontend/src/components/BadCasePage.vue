@@ -1,6 +1,9 @@
 <script setup>
 import { ref, onMounted, computed, nextTick } from 'vue'
-import { listBadCases, createEvalFromBadCase } from '../api'
+import {
+  listBadCases, createEvalFromBadCase,
+  getRootCauseStats, batchAnalyzeRootCause, analyzeSingleRootCause,
+} from '../api'
 import ConfirmDialog from './ConfirmDialog.vue'
 import AppToast from './AppToast.vue'
 import { useToast } from '../composables/useToast'
@@ -17,9 +20,9 @@ const filterType = ref('')
 const selectedCase = ref(null)
 const rootCauseStats = ref(null)
 const showStatsPanel = ref(false)
+const statsLoading = ref(false)
+const mobileView = ref('list')  // 移动端视图: 'list' | 'detail'
 
-// API 基础路径
-const API_BASE = '/api/portfolio/analysis'
 // 根因标签样式映射
 const rootCauseStyles = {
   data_missing: { label: '数据缺失', color: '#f59e0b', bg: '#fef3c7' },
@@ -35,11 +38,14 @@ const rootCauseStyles = {
 
 // 加载根因统计
 async function loadRootCauseStats() {
+  statsLoading.value = true
   try {
-    const resp = await fetch(`${API_BASE}/root-cause/stats`)
-    rootCauseStats.value = await resp.json()
+    const { data } = await getRootCauseStats()
+    rootCauseStats.value = data
   } catch (e) {
     console.error('加载根因统计失败:', e)
+  } finally {
+    statsLoading.value = false
   }
 }
 
@@ -47,13 +53,12 @@ async function loadRootCauseStats() {
 async function batchAnalyze() {
   analyzing.value = true
   try {
-    const resp = await fetch(`${API_BASE}/root-cause/batch?limit=50`, { method: 'POST' })
-    const data = await resp.json()
+    const { data } = await batchAnalyzeRootCause(50)
     showToast(`分析完成: ${data.analyzed} 条成功，${data.failed} 条失败`, 'success')
     await load()
     await loadRootCauseStats()
   } catch (e) {
-    showToast('分析失败: ' + e.message, 'error')
+    showToast('分析失败: ' + (e.response?.data?.detail || e.message), 'error')
   } finally {
     analyzing.value = false
   }
@@ -62,15 +67,14 @@ async function batchAnalyze() {
 // 分析单条根因
 async function analyzeSingle(c) {
   try {
-    const resp = await fetch(`${API_BASE}/root-cause/${c.source}/${c.id}`, { method: 'POST' })
-    const data = await resp.json()
+    const { data } = await analyzeSingleRootCause(c.source, c.id)
     if (data.ok) {
       c.root_cause = data.result.root_cause
       c.root_cause_detail = JSON.stringify(data.result)
       showToast(`根因: ${rootCauseStyles[data.result.root_cause]?.label || data.result.root_cause}`, 'success')
     }
   } catch (e) {
-    showToast('分析失败', 'error')
+    showToast('分析失败: ' + (e.response?.data?.detail || e.message), 'error')
   }
 }
 
@@ -148,6 +152,7 @@ async function load() {
 
 function selectCase(c) {
   selectedCase.value = c
+  mobileView.value = 'detail'
   // 移动端自动滚到详情面板
   nextTick(() => {
     const detail = document.querySelector('.badcase-detail')
@@ -239,45 +244,55 @@ onMounted(() => { load(); loadRootCauseStats() })
 
     <!-- Root Cause Stats Panel -->
     <Transition name="fade">
-      <div v-if="showStatsPanel && rootCauseStats" class="root-cause-panel editorial-card">
-        <div class="rc-section">
-          <div class="editorial-card-header">
-            <span class="title">根因分布</span>
-            <span class="meta">DISTRIBUTION</span>
-          </div>
-          <div class="rc-bars">
-            <div v-for="item in rootCauseStats.by_cause" :key="item.root_cause" class="rc-bar-item reveal-stagger">
-              <div class="rc-bar-label">
-                <span class="rc-dot" :style="{ background: rootCauseStyles[item.root_cause]?.color || '#999' }"></span>
-                {{ item.label }}
-                <span class="rc-bar-count font-jet">{{ item.count }} ({{ item.pct }}%)</span>
-              </div>
-              <div class="rc-bar-track">
-                <div class="rc-bar-fill" :style="{ width: item.pct + '%', background: rootCauseStyles[item.root_cause]?.color || '#999' }"></div>
+      <div v-if="showStatsPanel && (rootCauseStats || statsLoading)" class="root-cause-panel editorial-card">
+        <div v-if="statsLoading" class="rc-loading">
+          <span class="rc-spinner"></span>
+          <span>加载根因统计...</span>
+        </div>
+        <template v-else>
+          <div class="rc-section">
+            <div class="editorial-card-header">
+              <span class="title">根因分布</span>
+              <span class="meta">DISTRIBUTION</span>
+            </div>
+            <div class="rc-bars">
+              <div v-for="item in rootCauseStats.by_cause" :key="item.root_cause" class="rc-bar-item reveal-stagger">
+                <div class="rc-bar-label">
+                  <span class="rc-dot" :style="{ background: rootCauseStyles[item.root_cause]?.color || '#999' }"></span>
+                  {{ item.label }}
+                  <span class="rc-bar-count font-jet">{{ item.count }} ({{ item.pct }}%)</span>
+                </div>
+                <div class="rc-bar-track">
+                  <div class="rc-bar-fill" :style="{ width: item.pct + '%', background: rootCauseStyles[item.root_cause]?.color || '#999' }"></div>
+                </div>
               </div>
             </div>
           </div>
-        </div>
-        <div v-if="rootCauseStats.recent?.length" class="rc-section">
-          <div class="editorial-card-header">
-            <span class="title">最近分析</span>
-            <span class="meta">RECENT</span>
-          </div>
-          <div class="rc-recent">
-            <div v-for="r in rootCauseStats.recent" :key="r.source + r.id" class="rc-recent-item reveal-stagger">
-              <span class="rc-tag" :style="{ color: rootCauseStyles[r.root_cause]?.color, background: rootCauseStyles[r.root_cause]?.bg }">
-                {{ r.label }}
-              </span>
-              <span class="rc-recent-detail">{{ r.detail }}</span>
+          <div v-if="rootCauseStats.recent?.length" class="rc-section">
+            <div class="editorial-card-header">
+              <span class="title">最近分析</span>
+              <span class="meta">RECENT</span>
+            </div>
+            <div class="rc-recent">
+              <div v-for="r in rootCauseStats.recent" :key="r.source + r.id" class="rc-recent-item reveal-stagger">
+                <span class="rc-tag" :style="{ color: rootCauseStyles[r.root_cause]?.color, background: rootCauseStyles[r.root_cause]?.bg }">
+                  {{ r.label }}
+                </span>
+                <span class="rc-recent-detail">{{ r.detail }}</span>
+              </div>
             </div>
           </div>
-        </div>
+        </template>
       </div>
     </Transition>
 
     <!-- Bad Case list -->
     <div class="badcase-content">
-      <div class="badcase-list">
+      <div class="mobile-tab-switch">
+        <button :class="['mobile-tab-btn', { active: mobileView === 'list' }]" @click="mobileView = 'list'">列表</button>
+        <button :class="['mobile-tab-btn', { active: mobileView === 'detail' }]" @click="mobileView = 'detail'">详情</button>
+      </div>
+      <div class="badcase-list" :class="{ 'mobile-hidden': mobileView !== 'list' }">
         <div
           v-for="c in filteredCases"
           :key="c.source + '-' + c.id"
@@ -295,7 +310,7 @@ onMounted(() => { load(); loadRootCauseStats() })
           <div class="badcase-summary">{{ c.summary || '无摘要' }}</div>
           <div v-if="c.note" class="badcase-note">{{ c.note }}</div>
           <div v-if="!c.root_cause" class="badcase-actions-inline">
-            <button class="btn-link" @click.stop="analyzeSingle(c)">分析根因</button>
+            <button class="btn-ghost btn-sm" @click.stop="analyzeSingle(c)">分析根因</button>
           </div>
         </div>
         <div v-if="!loading && filteredCases.length === 0" class="empty-state">
@@ -306,7 +321,7 @@ onMounted(() => { load(); loadRootCauseStats() })
       </div>
 
       <!-- Detail panel -->
-      <div class="badcase-detail editorial-card" v-if="selectedCase">
+      <div class="badcase-detail editorial-card" :class="{ 'mobile-hidden': mobileView !== 'detail' }" v-if="selectedCase">
         <div class="detail-header">
           <div class="detail-header-tags">
             <span class="badge badge-sm" :class="'badge-' + selectedCase.source">{{ sourceLabels[selectedCase.source] || selectedCase.source }}</span>
@@ -346,6 +361,9 @@ onMounted(() => { load(); loadRootCauseStats() })
         <div class="detail-section">
           <h4 class="terminal-label">元数据</h4>
           <table class="meta-table">
+            <thead>
+              <tr><th>字段</th><th>值</th></tr>
+            </thead>
             <tbody>
               <template v-if="selectedCase.source === 'analysis'">
                 <tr><td>类型</td><td>{{ typeLabel(selectedCase) }}</td></tr>
@@ -377,7 +395,7 @@ onMounted(() => { load(); loadRootCauseStats() })
           </button>
         </div>
       </div>
-      <div v-else class="badcase-detail empty-detail editorial-card">
+      <div v-else class="badcase-detail empty-detail editorial-card" :class="{ 'mobile-hidden': mobileView !== 'detail' }">
         <p class="text-muted">选择一条记录查看详情</p>
       </div>
     </div>
@@ -515,17 +533,6 @@ onMounted(() => { load(); loadRootCauseStats() })
 .badcase-actions-inline {
   margin-top: 0.3rem;
 }
-.btn-link {
-  background: none;
-  border: none;
-  color: var(--color-primary);
-  font-size: 0.75rem;
-  cursor: pointer;
-  padding: 0;
-}
-.btn-link:hover {
-  text-decoration: underline;
-}
 
 /* Root Cause Stats Panel */
 .root-cause-panel {
@@ -605,9 +612,25 @@ onMounted(() => { load(); loadRootCauseStats() })
   flex: 1;
   min-width: 0;
 }
-.btn-sm {
-  padding: 0.4rem 0.75rem;
-  font-size: 0.8rem;
+.rc-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  padding: 1.5rem 1rem;
+  color: var(--color-text-muted);
+  font-size: 0.82rem;
+}
+.rc-spinner {
+  width: 14px;
+  height: 14px;
+  border: 2px solid var(--color-border);
+  border-top-color: var(--color-primary);
+  border-radius: 50%;
+  animation: rc-spin 0.8s linear infinite;
+}
+@keyframes rc-spin {
+  to { transform: rotate(360deg); }
 }
 
 /* Root Cause Detail */
@@ -679,10 +702,35 @@ onMounted(() => { load(); loadRootCauseStats() })
 .meta-table {
   width: 100%;
   font-size: 0.82rem;
+  border-collapse: collapse;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
 }
-.meta-table td {
-  padding: 0.2rem 0;
+.meta-table thead th {
+  background: var(--color-bg-hover);
+  color: var(--color-text-muted);
+  font-size: 0.72rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  padding: 0.4rem 0.6rem;
+  text-align: left;
+  border-bottom: 1px solid var(--color-border);
+}
+.meta-table tbody td {
+  padding: 0.35rem 0.6rem;
   color: var(--color-text-secondary);
+  border-bottom: 1px solid var(--color-border-light);
+}
+.meta-table tbody tr:last-child td {
+  border-bottom: none;
+}
+.meta-table tbody tr:nth-child(even) {
+  background: var(--color-bg-hover);
+}
+.meta-table tbody tr:hover {
+  background: var(--color-primary-50);
 }
 .meta-table td:first-child {
   color: var(--color-text-muted);
@@ -724,9 +772,63 @@ onMounted(() => { load(); loadRootCauseStats() })
   gap: 0.5rem;
 }
 
+/* 移动端 tab 切换（仅移动端可见） */
+.mobile-tab-switch {
+  display: none;
+}
+
 @media (max-width: 768px) {
+  .header-actions {
+    flex-wrap: wrap;
+  }
+  .header-actions .input-field {
+    flex: 1 1 100%;
+  }
+  .header-actions .btn-sm,
+  .header-actions .btn-secondary {
+    flex: 1 1 auto;
+  }
   .badcase-content {
     grid-template-columns: 1fr;
+  }
+  .badcase-list {
+    max-height: none;
+  }
+  .badcase-header {
+    flex-wrap: wrap;
+    gap: 0.35rem;
+  }
+  .badcase-time {
+    margin-left: 0;
+    flex-basis: 100%;
+  }
+  /* tab 切换显示 */
+  .mobile-tab-switch {
+    display: flex;
+    gap: 0.25rem;
+    padding: 2px;
+    background: var(--color-bg-input);
+    border-radius: var(--radius-sm);
+    margin-bottom: 0.5rem;
+  }
+  .mobile-tab-btn {
+    flex: 1;
+    padding: 0.4rem 0.5rem;
+    border: none;
+    border-radius: calc(var(--radius-sm) - 1px);
+    background: transparent;
+    color: var(--color-text-secondary);
+    font-size: 0.8rem;
+    cursor: pointer;
+    transition: all 0.15s;
+  }
+  .mobile-tab-btn.active {
+    background: var(--color-bg-card);
+    color: var(--color-text-primary);
+    box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+  }
+  .mobile-hidden {
+    display: none;
   }
 }
 </style>

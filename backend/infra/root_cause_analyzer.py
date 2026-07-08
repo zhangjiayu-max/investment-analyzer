@@ -283,7 +283,7 @@ def batch_analyze(limit: int = 50, force: bool = False) -> dict:
 
 
 def _save_root_cause(source: str, case_id: int, result: dict):
-    """将根因分析结果写入数据库。"""
+    """将根因分析结果写入数据库，并自动写入 improvement_tasks 形成根因闭环。"""
     from db._conn import _get_conn
 
     conn = _get_conn()
@@ -302,6 +302,21 @@ def _save_root_cause(source: str, case_id: int, result: dict):
         )
     conn.commit()
     conn.close()
+
+    # 自动写入 improvement_tasks（根因闭环：分析结果 → 可应用的改进项）
+    suggestion = result.get("suggestion") or ""
+    if suggestion:
+        try:
+            from db.eval import create_improvement_task
+            create_improvement_task(
+                source_type="bad_case",
+                source_id=case_id,
+                root_cause=root_cause,
+                suggestion=suggestion,
+                status="pending",
+            )
+        except Exception as e:
+            logger.warning(f"写入 improvement_task 失败: {e}")
 
 
 def get_root_cause_stats() -> dict:

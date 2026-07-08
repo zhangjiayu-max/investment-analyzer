@@ -1917,6 +1917,128 @@ export function getExpertAlerts(days = 7, limit = 50) {
   return api.get('/eval/expert-alerts', { params: { days, limit } })
 }
 
+// ── 测试套件 (Eval Suite) API ──────────────────────────
+
+/** 列出测试套件 */
+export function listEvalSuites(suiteType = '', activeOnly = false) {
+  const params = { active_only: activeOnly }
+  if (suiteType) params.suite_type = suiteType
+  return api.get('/eval/suites', { params })
+}
+
+/** 创建测试套件 */
+export function createEvalSuite(data) {
+  return api.post('/eval/suites', data)
+}
+
+/** 获取测试套件详情（含用例列表） */
+export function getEvalSuite(suiteId) {
+  return api.get(`/eval/suites/${suiteId}`)
+}
+
+/** 更新测试套件 */
+export function updateEvalSuite(suiteId, data) {
+  return api.put(`/eval/suites/${suiteId}`, data)
+}
+
+/** 删除测试套件 */
+export function deleteEvalSuite(suiteId) {
+  return api.delete(`/eval/suites/${suiteId}`)
+}
+
+/** 添加用例到套件 */
+export function addCaseToSuite(suiteId, caseId, sortOrder = 0) {
+  return api.post(`/eval/suites/${suiteId}/cases`, { case_id: caseId, sort_order: sortOrder })
+}
+
+/** 从套件移除用例 */
+export function removeCaseFromSuite(suiteId, caseId) {
+  return api.delete(`/eval/suites/${suiteId}/cases/${caseId}`)
+}
+
+/** 运行测试套件 */
+export function runEvalSuite(suiteId) {
+  return api.post(`/eval/suites/${suiteId}/run`, {}, { timeout: 600000 })
+}
+
+// ── 改进任务 (Improvement Task) API ──────────────────────────
+
+/** 列出改进任务（支持 status 过滤） */
+export function listImprovementTasks(status = '', limit = 100) {
+  const params = { limit }
+  if (status) params.status = status
+  return api.get('/eval/improvement-tasks', { params })
+}
+
+/** 应用改进任务 */
+export function applyImprovementTask(taskId, promptDiff = null) {
+  const data = promptDiff !== null ? { prompt_diff: promptDiff } : {}
+  return api.post(`/eval/improvement-tasks/${taskId}/apply`, data)
+}
+
+/** 拒绝改进任务 */
+export function rejectImprovementTask(taskId) {
+  return api.post(`/eval/improvement-tasks/${taskId}/reject`)
+}
+
+// ── Prompt 版本 + 每日评测 API（收敛 EvalSuitePage 裸 fetch）──────────
+
+/** 列出 Prompt 版本 */
+export function listPromptVersions(agentType = '') {
+  const params = {}
+  if (agentType) params.agent_type = agentType
+  return api.get('/eval-system/prompts', { params })
+}
+
+/** 保存 Prompt 版本 */
+export function savePromptVersion(data) {
+  return api.post('/eval-system/prompts', data)
+}
+
+/** 激活 Prompt 版本 */
+export function activatePromptVersion(versionId, agentType) {
+  return api.put(`/eval-system/prompts/${versionId}/activate`, { agent_type: agentType })
+}
+
+/** A/B 对比 Prompt 版本 */
+export function comparePrompt(versionId, caseType = '') {
+  const params = {}
+  if (caseType) params.case_type = caseType
+  return api.get(`/eval-system/prompts/${versionId}/compare`, { params })
+}
+
+/** 列出每日评测日报 */
+export function listDailyReports(limit = 30) {
+  return api.get('/eval-system/daily-reports', { params: { limit } })
+}
+
+/** 触发每日评测 */
+export function triggerDailyEval() {
+  return api.post('/eval-system/daily', {}, { timeout: 300000 })
+}
+
+/** 自动生成 Eval Case（正例 + 负例） */
+export function autoGenerateEvalCases() {
+  return api.post('/eval/cases/auto-generate')
+}
+
+// ── Bad Case 根因分析 API（收敛 BadCasePage 裸 fetch）──────────
+
+/** 获取根因统计 */
+export function getRootCauseStats() {
+  return api.get('/portfolio/analysis/root-cause/stats')
+}
+
+/** 批量分析根因 */
+export function batchAnalyzeRootCause(limit = 50, force = false) {
+  return api.post('/portfolio/analysis/root-cause/batch', {}, { params: { limit, force }, timeout: 300000 })
+}
+
+/** 分析单条根因 */
+export function analyzeSingleRootCause(source, caseId) {
+  return api.post(`/portfolio/analysis/root-cause/${source}/${caseId}`, {}, { timeout: 120000 })
+}
+
 export function getFinanceQuoteBar() {
   return api.get('/finance/quote-bar')
 }

@@ -1,9 +1,11 @@
 <script setup>
-import { ref, computed, onMounted, nextTick } from 'vue'
+import { ref, computed, onMounted, onUnmounted, nextTick } from 'vue'
 import {
   listEvalCases, createEvalCase, updateEvalCase, deleteEvalCase, runEvalCase,
   listEvalRuns, getEvalRunDetail, getEvalStats, listAgents,
   batchConvertBadCases, extractEvalFromConversations, runAutoRegression,
+  listPromptVersions, savePromptVersion, activatePromptVersion, comparePrompt,
+  listDailyReports, triggerDailyEval, autoGenerateEvalCases,
 } from '../api'
 import { useAsyncTask } from '../composables/useAsyncTask'
 import ConfirmDialog from './ConfirmDialog.vue'
@@ -21,6 +23,20 @@ const loading = ref(false)
 const runningCases = ref(new Set()) // 正在运行的用例 ID 集合
 const expandedCases = ref(new Set()) // 展开详情的用例 ID 集合
 const activeTab = ref('cases')
+
+// 移动端布局状态
+const isMobile = ref(false)
+const showMoreMenu = ref(false)        // header「更多操作」下拉
+const mobileRunView = ref('list')      // 运行记录移动端视图：list | detail
+let mobileMq = null
+
+function updateMobile() {
+  isMobile.value = mobileMq?.matches ?? false
+  if (!isMobile.value) {
+    showMoreMenu.value = false
+    mobileRunView.value = 'list'
+  }
+}
 
 // Stats
 const stats = ref({ total_cases: 0, active_cases: 0, total_runs: 0, avg_score: null })
@@ -126,19 +142,14 @@ const dailyRunning = ref(false)
 
 async function loadPrompts() {
   try {
-    const params = promptFilterType.value ? { agent_type: promptFilterType.value } : {}
-    const resp = await fetch(`/api/eval-system/prompts?${new URLSearchParams(params)}`)
-    const data = await resp.json()
+    const { data } = await listPromptVersions(promptFilterType.value)
     prompts.value = data.versions || []
   } catch (e) { /* ignore */ }
 }
 
 async function savePrompt() {
   try {
-    await fetch('/api/eval-system/prompts', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(promptForm.value),
-    })
+    await savePromptVersion(promptForm.value)
     showToast('版本已保存', 'success')
     showPromptForm.value = false
     promptForm.value = { agent_type: 'panorama', version: '', prompt_content: '', changelog: '' }
@@ -150,10 +161,7 @@ async function savePrompt() {
 
 async function activatePrompt(p) {
   try {
-    await fetch(`/api/eval-system/prompts/${p.id}/activate`, {
-      method: 'PUT', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ agent_type: p.agent_type }),
-    })
+    await activatePromptVersion(p.id, p.agent_type)
     showToast(`${p.agent_type} ${p.version} 已激活`, 'success')
     await loadPrompts()
   } catch (e) {
@@ -161,11 +169,10 @@ async function activatePrompt(p) {
   }
 }
 
-async function comparePrompt(p) {
+async function doComparePrompt(p) {
   try {
     showToast('A/B 对比中...', 'info')
-    const resp = await fetch(`/api/eval-system/prompts/${p.id}/compare?case_type=${p.agent_type}`)
-    const data = await resp.json()
+    const { data } = await comparePrompt(p.id, p.agent_type)
     abResult.value = data
     showToast('对比完成', 'success')
   } catch (e) {
@@ -175,8 +182,7 @@ async function comparePrompt(p) {
 
 async function loadDailyReports() {
   try {
-    const resp = await fetch('/api/eval-system/daily-reports?limit=30')
-    const data = await resp.json()
+    const { data } = await listDailyReports(30)
     dailyReports.value = (data.reports || []).map(r => ({
       ...r,
       alerts_parsed: typeof r.alerts === 'string' ? JSON.parse(r.alerts || '[]') : (r.alerts || []),
@@ -186,15 +192,14 @@ async function loadDailyReports() {
   } catch (e) { /* ignore */ }
 }
 
-async function triggerDailyEval() {
+async function doTriggerDailyEval() {
   dailyRunning.value = true
   try {
-    const resp = await fetch('/api/eval-system/daily', { method: 'POST' })
-    const data = await resp.json()
+    const { data } = await triggerDailyEval()
     showToast(`评测完成：${data.report?.total_cases || 0} 条，均分 ${data.report?.avg_score || 0}/25`, 'success')
     await loadDailyReports()
   } catch (e) {
-    showToast('评测失败: ' + e.message, 'error')
+    showToast('评测失败: ' + (e.response?.data?.detail || e.message), 'error')
   } finally {
     dailyRunning.value = false
   }
@@ -225,14 +230,13 @@ async function doExtractConversations() {
 async function doAutoGenerate() {
   autoGenerating.value = true
   try {
-    const resp = await fetch('/api/eval/cases/auto-generate', { method: 'POST' })
-    const data = await resp.json()
+    const { data } = await autoGenerateEvalCases()
     const pos = data.positive || {}
     const neg = data.negative || {}
     showToast(`正例 ${pos.created} 条 + 负例 ${neg.created} 条，跳过 ${pos.skipped + neg.skipped}`, 'success')
     await loadAll()
   } catch (e) {
-    showToast('自动生成失败: ' + e.message, 'error')
+    showToast('自动生成失败: ' + (e.response?.data?.detail || e.message), 'error')
   } finally { autoGenerating.value = false }
 }
 
@@ -426,6 +430,13 @@ onMounted(() => {
   restoreEvalTask()
   loadAll()
   loadPrompts()
+  mobileMq = window.matchMedia('(max-width: 768px)')
+  updateMobile()
+  mobileMq.addEventListener('change', updateMobile)
+})
+
+onUnmounted(() => {
+  if (mobileMq) mobileMq.removeEventListener('change', updateMobile)
 })
 </script>
 
@@ -437,21 +448,46 @@ onMounted(() => {
         <p class="page-desc editorial-subtitle">运行测试用例，评估 Agent 分析质量</p>
       </div>
       <div class="header-actions">
-        <button class="btn-secondary" @click="loadAll" :disabled="loading">
+        <button class="btn-primary btn-sm" @click="loadAll" :disabled="loading">
           {{ loading ? '加载中...' : '🔄 刷新' }}
         </button>
-        <button class="btn-primary" @click="doAutoGenerate" :disabled="autoGenerating">
-          {{ autoGenerating ? '生成中...' : '✨ 自动生成用例' }}
-        </button>
-        <button class="btn-secondary" @click="doBatchConvert" :disabled="converting">
-          {{ converting ? '转化中...' : '🧲 BadCase→用例' }}
-        </button>
-        <button class="btn-secondary" @click="doExtractConversations" :disabled="extracting">
-          {{ extracting ? '提取中...' : '💬 对话→用例' }}
-        </button>
-        <button class="btn-primary" @click="doAutoRegression" :disabled="regressing">
-          {{ regressing ? '回归中...' : '🚀 自动回归' }}
-        </button>
+        <!-- 桌面端：4 个次级操作按钮 -->
+        <template v-if="!isMobile">
+          <button class="btn-secondary btn-sm" @click="doAutoGenerate" :disabled="autoGenerating">
+            {{ autoGenerating ? '生成中...' : '✨ 自动生成用例' }}
+          </button>
+          <button class="btn-secondary btn-sm" @click="doBatchConvert" :disabled="converting">
+            {{ converting ? '转化中...' : '🧲 BadCase→用例' }}
+          </button>
+          <button class="btn-secondary btn-sm" @click="doExtractConversations" :disabled="extracting">
+            {{ extracting ? '提取中...' : '💬 对话→用例' }}
+          </button>
+          <button class="btn-secondary btn-sm" @click="doAutoRegression" :disabled="regressing">
+            {{ regressing ? '回归中...' : '🚀 自动回归' }}
+          </button>
+        </template>
+        <!-- 移动端：「更多操作」下拉 -->
+        <div v-else class="more-menu">
+          <button class="btn-secondary btn-sm" @click="showMoreMenu = !showMoreMenu">
+            更多 ▾
+          </button>
+          <Transition name="fade">
+            <div v-if="showMoreMenu" class="more-dropdown" @click="showMoreMenu = false">
+              <button class="more-item" @click="doAutoGenerate" :disabled="autoGenerating">
+                {{ autoGenerating ? '生成中...' : '✨ 自动生成用例' }}
+              </button>
+              <button class="more-item" @click="doBatchConvert" :disabled="converting">
+                {{ converting ? '转化中...' : '🧲 BadCase→用例' }}
+              </button>
+              <button class="more-item" @click="doExtractConversations" :disabled="extracting">
+                {{ extracting ? '提取中...' : '💬 对话→用例' }}
+              </button>
+              <button class="more-item" @click="doAutoRegression" :disabled="regressing">
+                {{ regressing ? '回归中...' : '🚀 自动回归' }}
+              </button>
+            </div>
+          </Transition>
+        </div>
       </div>
     </div>
 
@@ -565,7 +601,16 @@ onMounted(() => {
       </Transition>
 
       <!-- Case List -->
-      <div v-if="!loading && cases.length === 0" class="empty-state">
+      <!-- 加载骨架 -->
+      <div v-if="loading" class="case-list">
+        <div v-for="i in 3" :key="'sk-'+i" class="case-card card skeleton-card">
+          <div class="skeleton-line w-50"></div>
+          <div class="skeleton-line w-80"></div>
+          <div class="skeleton-line w-30"></div>
+        </div>
+      </div>
+
+      <div v-else-if="cases.length === 0" class="empty-state">
         <p>暂无评测用例</p>
         <p class="text-muted">点击「新建用例」创建第一个评测</p>
       </div>
@@ -588,10 +633,10 @@ onMounted(() => {
             </div>
             <div v-if="c.description" class="case-desc">{{ c.description }}</div>
             <div class="case-actions">
-              <button class="btn-ghost btn-xs" @click="toggleCaseDetail(c.id)">
+              <button class="btn-secondary btn-xs" @click="toggleCaseDetail(c.id)">
                 {{ expandedCases.has(c.id) ? '收起' : '📋 详情' }}
               </button>
-              <button class="btn-primary btn-xs" :disabled="runningCases.has(c.id)" @click="doRun(c)">
+              <button class="btn-secondary btn-xs" :disabled="runningCases.has(c.id)" @click="doRun(c)">
                 {{ runningCases.has(c.id) ? '⏳ 运行中' : '▶ 运行' }}
               </button>
               <button class="btn-secondary btn-xs" @click="openEdit(c)">✏️ 编辑</button>
@@ -659,16 +704,21 @@ onMounted(() => {
 
     <!-- Runs Tab -->
     <div v-if="activeTab === 'runs'" class="tab-content">
+      <!-- 移动端：列表/详情切换 -->
+      <div class="mobile-runs-tabs">
+        <button :class="['mrt-btn', { active: mobileRunView === 'list' }]" @click="mobileRunView = 'list'">列表</button>
+        <button :class="['mrt-btn', { active: mobileRunView === 'detail' }]" @click="mobileRunView = 'detail'">详情</button>
+      </div>
       <div class="runs-layout">
         <!-- Run List -->
-        <div class="run-list">
+        <div class="run-list" :class="{ 'mobile-hide': isMobile && mobileRunView !== 'list' }">
           <h4 class="section-title terminal-label">运行记录</h4>
           <div v-if="runs.length === 0" class="empty-state">
             <p>暂无运行记录</p>
           </div>
           <div v-for="r in latestRuns" :key="r.id"
             :class="['run-item reveal-stagger', { selected: selectedRun?.id === r.id }]"
-            @click="viewRunDetail(r)">
+            @click="viewRunDetail(r); mobileRunView = 'detail'">
             <div class="run-header">
               <span>{{ runStatusIcon(r) }}</span>
               <span class="run-case-name">{{ r.case_name || '-' }}</span>
@@ -686,10 +736,10 @@ onMounted(() => {
         </div>
 
         <!-- Run Detail -->
-        <div class="run-detail" v-if="runDetail">
+        <div class="run-detail" :class="{ 'mobile-hide': isMobile && mobileRunView !== 'detail' }" v-if="runDetail">
           <div class="detail-header">
             <h4 class="section-title terminal-label">运行详情</h4>
-            <button class="btn-secondary btn-xs" @click="runDetail = null; selectedRun = null">✕ 关闭</button>
+            <button class="btn-secondary btn-xs" @click="runDetail = null; selectedRun = null; mobileRunView = 'list'">✕ 关闭</button>
           </div>
 
           <!-- Meta Grid -->
@@ -761,7 +811,7 @@ onMounted(() => {
           </div>
         </div>
 
-        <div v-else class="run-detail empty-detail">
+        <div v-else class="run-detail empty-detail" :class="{ 'mobile-hide': isMobile && mobileRunView !== 'detail' }">
           <p class="text-muted">← 选择一条运行记录查看详情</p>
         </div>
       </div>
@@ -821,7 +871,7 @@ onMounted(() => {
           <p class="prompt-changelog" v-if="p.changelog">{{ p.changelog }}</p>
           <div class="prompt-actions">
             <button v-if="!p.is_active" class="btn-primary btn-sm" @click="activatePrompt(p)">激活</button>
-            <button v-if="!p.is_active" class="btn-secondary btn-sm" @click="comparePrompt(p)">A/B 对比</button>
+            <button v-if="!p.is_active" class="btn-secondary btn-sm" @click="doComparePrompt(p)">A/B 对比</button>
           </div>
         </div>
       </div>
@@ -846,7 +896,7 @@ onMounted(() => {
     <div v-if="activeTab === 'daily'" class="tab-content">
       <div class="section-header">
         <div class="section-actions">
-          <button class="btn-secondary btn-sm" @click="triggerDailyEval" :disabled="dailyRunning">
+          <button class="btn-secondary btn-sm" @click="doTriggerDailyEval" :disabled="dailyRunning">
             {{ dailyRunning ? '评测中...' : '▶ 手动触发每日评测' }}
           </button>
         </div>
@@ -1482,6 +1532,119 @@ onMounted(() => {
   gap: 1rem;
 }
 
+/* Header「更多操作」下拉 */
+.more-menu {
+  position: relative;
+}
+.more-dropdown {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 50;
+  min-width: 180px;
+  display: flex;
+  flex-direction: column;
+  background: var(--color-bg-card);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
+  padding: 4px;
+  overflow: hidden;
+}
+.more-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 0.55rem 0.75rem;
+  font-size: 0.82rem;
+  color: var(--color-text-primary);
+  background: none;
+  border: none;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: background var(--transition-fast);
+}
+.more-item:hover:not(:disabled) {
+  background: var(--color-bg-hover);
+}
+.more-item:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* 移动端：运行记录列表/详情切换 tab（桌面隐藏） */
+.mobile-runs-tabs {
+  display: none;
+}
+.mrt-btn {
+  flex: 1;
+  padding: 0.5rem 0.75rem;
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: var(--color-text-secondary);
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  cursor: pointer;
+  transition: color var(--transition-fast);
+}
+.mrt-btn.active {
+  color: var(--color-primary);
+  border-bottom-color: var(--color-primary);
+}
+.dark .mrt-btn.active {
+  color: var(--color-primary-400);
+  border-bottom-color: var(--color-primary-400);
+}
+
+/* 仅移动端生效的隐藏类 */
+.mobile-hide {
+  display: none !important;
+}
+
+/* Tab 栏横向滚动（窄屏适配） */
+.tab-bar {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
+}
+.tab-bar::-webkit-scrollbar {
+  display: none;
+}
+.tab-bar .tab-btn {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+/* 用例操作按钮换行（窄屏避免溢出） */
+.case-actions {
+  flex-wrap: wrap;
+}
+
+/* 加载骨架 */
+.skeleton-card {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+.skeleton-line {
+  height: 0.8rem;
+  border-radius: var(--radius-sm);
+  background: linear-gradient(90deg,
+    var(--color-bg-hover) 25%,
+    var(--color-border-light) 50%,
+    var(--color-bg-hover) 75%);
+  background-size: 200% 100%;
+  animation: skeleton-shimmer 1.4s ease-in-out infinite;
+}
+.skeleton-line.w-30 { width: 30%; }
+.skeleton-line.w-50 { width: 50%; }
+.skeleton-line.w-80 { width: 80%; }
+@keyframes skeleton-shimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
 /* Buttons */
 .btn-xs {
   padding: 0.5rem 0.85rem;
@@ -1514,15 +1677,43 @@ onMounted(() => {
 
 /* Responsive */
 @media (max-width: 768px) {
+  .page-header {
+    flex-wrap: wrap;
+  }
+  .header-actions {
+    flex-wrap: wrap;
+    flex-shrink: 0;
+  }
+  /* Stats: 2x2 网格 */
+  .stats-bar {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 0.5rem;
+  }
+  .stat-card {
+    min-width: 0;
+  }
+  /* 移动端：显示运行记录列表/详情切换 */
+  .mobile-runs-tabs {
+    display: flex;
+    border-bottom: 1px solid var(--color-border);
+    margin-bottom: 0.75rem;
+  }
   .runs-layout {
     flex-direction: column;
   }
   .run-list {
     width: 100%;
+    max-height: 65vh;
+    overflow-y: auto;
     border-right: none;
     border-bottom: 1px solid var(--color-border);
     padding-right: 0;
     padding-bottom: 1rem;
+    -webkit-overflow-scrolling: touch;
+  }
+  .run-detail {
+    padding-left: 0;
   }
   .form-grid {
     grid-template-columns: 1fr;

@@ -21,14 +21,14 @@
       <div class="eval-card__header-right">
         <button
           v-if="!evaluation && !loading"
-          class="eval-card__btn-eval"
+          class="btn-primary btn-sm"
           @click.stop="runEvaluation"
         >
           评估
         </button>
         <button
           v-if="evaluation"
-          class="eval-card__btn-refresh"
+          class="btn-ghost btn-sm"
           @click.stop="runEvaluation"
           title="重新评估"
         >
@@ -99,7 +99,7 @@
 
         <!-- LLM 评估按钮 -->
         <div class="eval-card__actions">
-          <button class="eval-card__btn-llm" @click.stop="runLLMEvaluation" :disabled="llmLoading">
+          <button class="btn-primary btn-sm eval-card__btn-llm" @click.stop="runLLMEvaluation" :disabled="llmLoading">
             {{ llmLoading ? '评估中...' : 'LLM 深度评估' }}
           </button>
         </div>
@@ -147,7 +147,7 @@
           </div>
         </div>
         <div v-else class="eval-card__empty">
-          <button class="eval-card__btn-llm" @click.stop="runLLMEvaluation">
+          <button class="btn-primary btn-sm eval-card__btn-llm" @click.stop="runLLMEvaluation">
             开始 LLM 评估
           </button>
         </div>
@@ -174,7 +174,7 @@
           </button>
           <button
             v-if="userScore > 0"
-            class="eval-card__btn-submit"
+            class="btn-primary btn-sm"
             @click.stop="submitUserScore"
           >
             提交
@@ -523,8 +523,8 @@ onMounted(() => {
 
 <style scoped>
 .eval-card {
-  background: var(--bg-primary, #fff);
-  border: 1px solid var(--border-color, #e8e8e8);
+  background: var(--color-bg-card);
+  border: 1px solid var(--color-border);
   border-radius: 8px;
   margin-top: 12px;
   overflow: hidden;
@@ -546,7 +546,7 @@ onMounted(() => {
 }
 
 .eval-card__header:hover {
-  background: var(--bg-secondary, #f5f5f5);
+  background: var(--color-bg-hover);
 }
 
 .eval-card__header-left {
@@ -568,7 +568,7 @@ onMounted(() => {
 .eval-card__title {
   font-size: 13px;
   font-weight: inherit;
-  color: var(--text-primary, #333);
+  color: var(--color-text-primary);
 }
 
 .eval-card__score-badge {
@@ -583,51 +583,25 @@ onMounted(() => {
 
 .eval-card__msg-id {
   font-size: 11px;
-  color: var(--text-secondary, #999);
-  background: var(--bg-secondary, #f0f0f0);
+  color: var(--color-text-muted);
+  background: var(--color-bg-input);
   padding: 1px 6px;
   border-radius: 4px;
   cursor: pointer;
   transition: background 0.2s;
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .eval-card__msg-id:hover {
-  background: var(--border-color, #e0e0e0);
-}
-
-.eval-card__btn-eval,
-.eval-card__btn-refresh {
-  padding: 4px 10px;
-  border: none;
-  border-radius: 4px;
-  font-size: 12px;
-  cursor: pointer;
-  transition: all 0.2s;
-}
-
-.eval-card__btn-eval {
-  background: var(--primary-color, #1890ff);
-  color: white;
-}
-
-.eval-card__btn-eval:hover {
-  background: var(--primary-hover, #40a9ff);
-}
-
-.eval-card__btn-refresh {
-  background: transparent;
-  color: var(--text-secondary, #666);
-  font-size: 14px;
-  padding: 2px 6px;
-}
-
-.eval-card__btn-refresh:hover {
-  background: var(--bg-secondary, #f5f5f5);
+  background: var(--color-border);
 }
 
 .eval-card__toggle {
   font-size: 10px;
-  color: var(--text-secondary, #666);
+  color: var(--color-text-muted);
 }
 
 /* 加载状态 */
@@ -637,15 +611,15 @@ onMounted(() => {
   justify-content: center;
   gap: 8px;
   padding: 16px;
-  color: var(--text-secondary, #666);
+  color: var(--color-text-muted);
   font-size: 12px;
 }
 
 .eval-card__spinner {
   width: 14px;
   height: 14px;
-  border: 2px solid var(--border-color, #e8e8e8);
-  border-top-color: var(--primary-color, #1890ff);
+  border: 2px solid var(--color-border);
+  border-top-color: var(--color-primary);
   border-radius: 50%;
   animation: spin 1s linear infinite;
 }
@@ -679,7 +653,7 @@ onMounted(() => {
 }
 
 .eval-card__dim-name {
-  color: var(--text-secondary, #666);
+  color: var(--color-text-secondary);
   min-width: 24px;
 }
 
@@ -693,7 +667,7 @@ onMounted(() => {
 .eval-card__dim-bar {
   flex: 1;
   height: 4px;
-  background: var(--bg-secondary, #f5f5f5);
+  background: var(--color-bg-hover);
   border-radius: 2px;
   overflow: hidden;
 }
@@ -716,24 +690,24 @@ onMounted(() => {
   padding: 2px 6px;
   border-radius: 4px;
   font-size: 11px;
-  background: var(--bg-secondary, #f5f5f5);
-  color: var(--text-secondary, #666);
+  background: var(--color-bg-input);
+  color: var(--color-text-secondary);
 }
 
 .eval-card__meta-tag--success {
-  background: #f6ffed;
-  color: #52c41a;
+  background: var(--color-success-bg);
+  color: var(--color-success);
 }
 
 .eval-card__meta-tag--warning {
-  background: #fffbe6;
-  color: #faad14;
+  background: var(--color-warning-bg);
+  color: var(--color-warning);
 }
 
 /* 改进建议 */
 .eval-card__suggestions {
   padding: 8px;
-  background: var(--bg-secondary, #f5f5f5);
+  background: var(--color-bg-input);
   border-radius: 6px;
   margin-bottom: 10px;
 }
@@ -752,7 +726,7 @@ onMounted(() => {
 .eval-card__suggestions-title {
   font-size: 11px;
   font-weight: 600;
-  color: var(--text-primary, #333);
+  color: var(--color-text-primary);
 }
 
 .eval-card__suggestions-list {
@@ -763,7 +737,7 @@ onMounted(() => {
 
 .eval-card__suggestion-item {
   font-size: 11px;
-  color: var(--text-secondary, #666);
+  color: var(--color-text-secondary);
   line-height: 1.5;
   padding-left: 16px;
   position: relative;
@@ -773,7 +747,7 @@ onMounted(() => {
   content: '•';
   position: absolute;
   left: 4px;
-  color: var(--primary-color, #1890ff);
+  color: var(--color-primary);
 }
 
 /* 评估模式切换 */
@@ -782,7 +756,7 @@ onMounted(() => {
   gap: 4px;
   margin-bottom: 10px;
   padding: 2px;
-  background: var(--bg-secondary, #f0f0f0);
+  background: var(--color-bg-input);
   border-radius: 6px;
 }
 
@@ -795,71 +769,54 @@ onMounted(() => {
   cursor: pointer;
   transition: all 0.2s;
   background: transparent;
-  color: var(--text-secondary, #666);
+  color: var(--color-text-secondary);
 }
 
 .eval-card__mode-btn.active {
-  background: white;
-  color: var(--text-primary, #333);
+  background: var(--color-bg-card);
+  color: var(--color-text-primary);
   box-shadow: 0 1px 3px rgba(0,0,0,0.1);
 }
 
 .eval-card__mode-btn:hover:not(.active) {
-  background: var(--bg-secondary, #e8e8e8);
+  background: var(--color-bg-hover);
 }
 
-/* LLM 评估按钮 */
+/* LLM 评估按钮（保留 width:100% 布局，颜色交由全局 btn-primary） */
 .eval-card__actions {
   margin-top: 10px;
   padding-top: 10px;
-  border-top: 1px solid var(--border-color, #e8e8e8);
+  border-top: 1px solid var(--color-border);
 }
 
 .eval-card__btn-llm {
   width: 100%;
-  padding: 8px 12px;
-  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-  color: white;
-  border: none;
-  border-radius: 6px;
-  font-size: 12px;
-  cursor: pointer;
-  transition: opacity 0.2s;
-}
-
-.eval-card__btn-llm:hover:not(:disabled) {
-  opacity: 0.9;
-}
-
-.eval-card__btn-llm:disabled {
-  opacity: 0.6;
-  cursor: not-allowed;
 }
 
 /* LLM 评估反馈 */
 .eval-card__feedback {
   margin-bottom: 10px;
   padding: 8px;
-  background: #f6ffed;
+  background: var(--color-success-bg);
   border-radius: 6px;
-  border-left: 3px solid #52c41a;
+  border-left: 3px solid var(--color-success);
 }
 
 .eval-card__feedback--warning {
-  background: #fffbe6;
-  border-left-color: #faad14;
+  background: var(--color-warning-bg);
+  border-left-color: var(--color-warning);
 }
 
 .eval-card__feedback-title {
   font-size: 12px;
   font-weight: 600;
   margin-bottom: 6px;
-  color: var(--text-primary, #333);
+  color: var(--color-text-primary);
 }
 
 .eval-card__feedback-item {
   font-size: 11px;
-  color: var(--text-secondary, #666);
+  color: var(--color-text-secondary);
   line-height: 1.5;
   padding-left: 12px;
   position: relative;
@@ -886,13 +843,13 @@ onMounted(() => {
 }
 
 .eval-card__evolution-tag--success {
-  background: #f6ffed;
-  color: #52c41a;
+  background: var(--color-success-bg);
+  color: var(--color-success);
 }
 
 .eval-card__evolution-tag--warning {
-  background: #fffbe6;
-  color: #faad14;
+  background: var(--color-warning-bg);
+  color: var(--color-warning);
 }
 
 /* 用户评分 */
@@ -901,7 +858,7 @@ onMounted(() => {
   align-items: center;
   gap: 8px;
   padding-top: 10px;
-  border-top: 1px solid var(--border-color, #e8e8e8);
+  border-top: 1px solid var(--color-border);
 }
 
 .eval-card__stars {
@@ -914,33 +871,18 @@ onMounted(() => {
   border: none;
   font-size: 16px;
   cursor: pointer;
-  color: var(--border-color, #d9d9d9);
+  color: var(--color-border);
   transition: color 0.2s;
   padding: 0;
   line-height: 1;
 }
 
 .eval-card__star--active {
-  color: #faad14;
+  color: var(--color-warning);
 }
 
 .eval-card__star:hover {
-  color: #faad14;
-}
-
-.eval-card__btn-submit {
-  padding: 4px 10px;
-  background: var(--primary-color, #1890ff);
-  color: white;
-  border: none;
-  border-radius: 4px;
-  font-size: 11px;
-  cursor: pointer;
-  transition: background 0.2s;
-}
-
-.eval-card__btn-submit:hover {
-  background: var(--primary-hover, #40a9ff);
+  color: var(--color-warning);
 }
 
 /* 已评价状态 */
@@ -949,7 +891,7 @@ onMounted(() => {
   align-items: center;
   gap: 8px;
   font-size: 12px;
-  color: var(--text-secondary, #666);
+  color: var(--color-text-secondary);
 }
 
 .eval-card__user-score-label {
@@ -962,13 +904,13 @@ onMounted(() => {
 }
 
 .eval-card__star-display {
-  color: #faad14;
+  color: var(--color-warning);
   font-size: 14px;
 }
 
 .eval-card__user-score-value {
   font-weight: 600;
-  color: var(--primary-color, #1890ff);
+  color: var(--color-primary);
 }
 
 /* 空状态 */
@@ -979,7 +921,7 @@ onMounted(() => {
 
 .eval-card__empty-text {
   font-size: 12px;
-  color: var(--text-secondary, #666);
+  color: var(--color-text-muted);
 }
 
 /* 折叠状态 */
@@ -1024,6 +966,13 @@ onMounted(() => {
     padding: 1px 6px;
   }
 
+  /* 移动端缩短 msg-id，避免长 ID 撑挤标题栏 */
+  .eval-card__msg-id {
+    max-width: 56px;
+    font-size: 10px;
+    padding: 1px 4px;
+  }
+
   .eval-card__meta {
     flex-wrap: wrap;
     gap: 4px;
@@ -1049,11 +998,6 @@ onMounted(() => {
 
   .eval-card__star {
     font-size: 14px;
-  }
-
-  .eval-card__btn-submit {
-    font-size: 10px;
-    padding: 3px 8px;
   }
 }
 </style>
