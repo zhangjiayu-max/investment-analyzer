@@ -12,7 +12,7 @@ from datetime import datetime
 
 from services.llm_service import client, MODEL, _call_llm, _parse_tool_args
 from agent.multi_agent import run_specialist, run_specialist_with_context, run_cross_review_opinion, _build_portfolio_summary
-from agent.blackboard import Blackboard, extract_entry_from_result
+from agent.blackboard import Blackboard, extract_entry_from_result, reset_global_blackboard
 from db.agents import (
     load_specialist_agents,
     create_pending_agent_run,
@@ -4346,6 +4346,9 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
     """
     start_time = time.time()
 
+    # 重置全局黑板（防止上一轮对话残留数据混入）
+    reset_global_blackboard()
+
     # 性能监控
     perf_metrics = {
         "start_time": start_time,
@@ -4767,15 +4770,15 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
                                               prebuilt_context=prebuilt_context,
                                               trace_id=trace_id)
             result_queue.put((0, tc, args, agent_key, agent_info, result_str))
+            _bb_written_during_execution = False
         elif shared_blackboard_enabled and 2 <= len(tool_tasks) <= 3:
-            # P1：统一黑板 — 使用 Blackboard 类（与 Pipeline 路径一致）
-            # 2-3 专家串行执行，后执行者能看到前序结构化结论
-            bb = Blackboard(max_entries=6)
+            # P1：统一黑板 — 2-3 专家串行执行，后执行者能看到前序结构化结论
+            _bb_written_during_execution = True
             for idx, (tc, args, expert_query, agent_key, agent_info) in enumerate(tool_tasks):
                 _check_cancel(cancel_event)
                 _check_timeout(start_time)
                 # 注入黑板中已完成专家的结论摘要（排除自己）
-                bb_summary = bb.to_context_text(exclude_agent=agent_key)
+                bb_summary = blackboard.to_context_text(exclude_agent=agent_key)
                 ctx = prebuilt_context + bb_summary if bb_summary else prebuilt_context
                 result_str = _execute_specialist_cached(
                     tc.function.name, expert_query, cancel_event,
@@ -4793,11 +4796,12 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
                             result=result_dict,
                             tokens_used=result_dict.get("tokens_used", 0),
                         )
-                        bb.write(entry)
+                        blackboard.write(entry)
                 except Exception as _e:
                     logger.debug(f"[blackboard] 提取 {agent_key} 结论失败: {_e}")
         else:
             # 多个专家,并行执行（4+ 专家保持并行，黑板未启用时也走此路）
+            _bb_written_during_execution = False
             with concurrent.futures.ThreadPoolExecutor(max_workers=len(tool_tasks)) as executor:
                 for idx, (tc, args, expert_query, agent_key, agent_info) in enumerate(tool_tasks):
                     future = executor.submit(
@@ -4849,6 +4853,20 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
                     analysis = re.sub(r"\n{3,}", "\n\n", analysis).strip()
                     specialist_result["analysis"] = analysis
                 specialist_results.append(specialist_result)
+
+                # 单专家/4+并行路径：在收集阶段统一写入黑板（2-3串行路径已在执行时写入）
+                if not _bb_written_during_execution:
+                    try:
+                        agent_name = agent_info.get("name", agent_key) if isinstance(agent_info, dict) else agent_key
+                        entry = extract_entry_from_result(
+                            agent_key=agent_key,
+                            agent_name=agent_name,
+                            result=result_data,
+                            tokens_used=result_data.get("tokens_used", 0),
+                        )
+                        blackboard.write(entry)
+                    except Exception as _e:
+                        logger.debug(f"[blackboard] 提取 {agent_key} 结论失败: {_e}")
 
                 # 更新 agent 执行记录：正常完成记 completed，降级记 completed+degraded 标记
                 _run_status = "completed"
