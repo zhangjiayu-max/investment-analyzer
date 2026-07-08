@@ -100,8 +100,22 @@ function handleStreamEvent(convId, event, callbacks = {}) {
       state.statusMessage = data.message
       break
 
+    case 'phase':
+      // 澄清/路由/分析阶段 — 实时显示阶段信息（含澄清原因）
+      state.streamStatus = 'thinking'
+      state.statusMessage = data.message
+      break
+
     case 'plan':
       state.executionPlan = data
+      // 显示澄清原因和改写后的问题（如果有的话）
+      if (data.reason) {
+        const parts = [data.reason]
+        if (data.refined_query) {
+          parts.push(`理解为：${data.refined_query}`)
+        }
+        state.statusMessage = parts.join(' | ')
+      }
       break
 
     case 'rag_sources':
