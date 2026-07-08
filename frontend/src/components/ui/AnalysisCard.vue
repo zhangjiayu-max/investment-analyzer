@@ -44,17 +44,17 @@ function copyContent() {
 </script>
 
 <template>
-  <div class="analysis-card">
+  <div class="analysis-card editorial-card reveal-stagger">
     <div class="analysis-header">
       <div class="analysis-meta">
         <svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24" class="analysis-icon">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"
             d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z"/>
         </svg>
-        <span class="analysis-agent">{{ agentName || 'AI 分析' }}</span>
-        <span v-if="formattedTime" class="analysis-time">{{ formattedTime }}</span>
-        <span v-if="tokenUsage" class="analysis-tokens">{{ tokenUsage }} tokens</span>
-        <span v-if="recordId" class="analysis-record-id" title="点击复制记录 ID" @click="copyRecordId">ID:{{ recordId }}</span>
+        <span class="analysis-agent editorial-title">{{ agentName || 'AI 分析' }}</span>
+        <span v-if="formattedTime" class="analysis-time font-jet">{{ formattedTime }}</span>
+        <span v-if="tokenUsage" class="analysis-tokens font-jet">{{ tokenUsage }} tokens</span>
+        <span v-if="recordId" class="analysis-record-id font-jet" title="点击复制记录 ID" @click="copyRecordId">ID:{{ recordId }}</span>
       </div>
       <div class="analysis-actions">
         <button class="rec-feedback-btn" @click="copyContent" title="复制内容">
@@ -136,7 +136,6 @@ function copyContent() {
 .analysis-record-id {
   opacity: 0.5;
   font-size: 0.75rem;
-  font-family: monospace;
   cursor: pointer;
   padding: 0.1rem 0.3rem;
   border-radius: 3px;

@@ -83,8 +83,9 @@ function renderChart(plotlyData) {
       text: `${props.name} (${props.symbol})`,
       left: 'center',
       textStyle: {
-        fontSize: 13,
-        fontWeight: 600,
+        fontSize: 14,
+        fontWeight: 700,
+        fontFamily: "'Songti SC', 'STSong', 'SimSun', 'Noto Serif SC', serif",
         color: isDark.value ? '#e8eaed' : '#0f172a',
       },
     },
@@ -230,7 +231,7 @@ function renderChart(plotlyData) {
 </script>
 
 <template>
-  <div class="chart-card card">
+  <div class="chart-card card editorial-card">
     <div v-if="loading" class="chart-loading">
       <div class="spinner-lg"></div>
     </div>
@@ -245,25 +246,9 @@ function renderChart(plotlyData) {
   position: relative;
   transition: transform var(--transition-fast), box-shadow var(--transition-normal), border-color var(--transition-normal);
 }
-/* 渐变顶条 */
-.chart-card::before {
-  content: '';
-  position: absolute;
-  top: 0;
-  left: 0;
-  right: 0;
-  height: 3px;
-  background: var(--gradient-accent);
-  opacity: 0.5;
-  border-radius: var(--radius-xl) var(--radius-xl) 0 0;
-  transition: opacity var(--transition-fast);
-}
 .chart-card:hover {
   transform: var(--hover-lift);
   box-shadow: var(--shadow-glow);
-}
-.chart-card:hover::before {
-  opacity: 1;
 }
 
 .chart-loading {

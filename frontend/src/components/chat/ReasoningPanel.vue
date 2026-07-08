@@ -11,10 +11,10 @@ const expanded = ref(false)
 </script>
 
 <template>
-  <div v-if="text" class="reasoning-panel">
+  <div v-if="text" class="reasoning-panel editorial-card">
     <button class="reasoning-toggle" @click="expanded = !expanded">
       <Icon name="message-square-dot" size="14" class="reasoning-icon" />
-      <span class="reasoning-label">思考过程<span v-if="agent" class="reasoning-agent"> · {{ agent }}</span></span>
+      <span class="reasoning-label editorial-title">思考过程<span v-if="agent" class="reasoning-agent terminal-label"> · {{ agent }}</span></span>
       <Icon name="chevron-down" size="14" class="reasoning-chevron" :class="{ expanded }" />
     </button>
     <div v-show="expanded" class="reasoning-content">
@@ -56,7 +56,6 @@ const expanded = ref(false)
 
 .reasoning-label {
   flex: 1;
-  font-weight: 500;
 }
 
 .reasoning-agent {

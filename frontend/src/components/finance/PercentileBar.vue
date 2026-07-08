@@ -50,8 +50,9 @@ const statusColor = computed(() => {
         :style="{ left: b.from + '%', width: (b.to - b.from) + '%', background: b.color }" />
       <div class="pct-marker" :style="{ left: pct + '%' }" />
     </div>
-    <span v-if="showLabel" class="pct-label" :style="{ color: statusColor }">
-      {{ pct.toFixed(0) }}% · {{ statusLabel }}
+    <span v-if="showLabel" class="pct-label">
+      <span class="font-jet" :style="{ color: statusColor }">{{ pct.toFixed(0) }}%</span>
+      <span class="terminal-label" :style="{ color: statusColor }">{{ statusLabel }}</span>
     </span>
   </div>
 </template>
@@ -66,5 +67,5 @@ const statusColor = computed(() => {
   border-radius: 1px;
   box-shadow: 0 0 0 1px var(--color-bg-card);
 }
-.pct-label { font-size: 0.72rem; font-weight: 600; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.pct-label { display: inline-flex; align-items: baseline; gap: 0.3rem; font-size: 0.72rem; white-space: nowrap; }
 </style>

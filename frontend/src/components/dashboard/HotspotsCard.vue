@@ -58,16 +58,16 @@ const verdictMeta = {
 </script>
 
 <template>
-  <div class="dash-card card">
-    <div class="card-header">
+  <div class="dash-card card editorial-card">
+    <div class="card-header editorial-card-header">
       <div class="card-title-row">
         <svg width="18" height="18" fill="none" stroke="currentColor" viewBox="0 0 24 24" class="card-icon">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M13 10V3L4 14h7v7l9-11h-7z"/>
         </svg>
-        <span>今日热门机会</span>
+        <span class="title editorial-title">今日热门机会</span>
       </div>
       <div class="card-header-actions">
-        <span v-if="hotTopicsFetchedAt" class="card-data-time">{{ hotTopicsFetchedAt }}</span>
+        <span v-if="hotTopicsFetchedAt" class="card-data-time meta terminal-label">{{ hotTopicsFetchedAt }}</span>
         <AIActionButton
           :label="hotspotsAnalysis ? '重新分析' : 'AI 分析'"
           agent="热点分析专家"
@@ -82,7 +82,7 @@ const verdictMeta = {
 
     <!-- 自动加载的新闻列表（始终显示） -->
     <div v-if="hotTopics?.length && !hotspotLoading" class="card-body news-list" :class="{ 'news-list-compact': hotspotsAnalysis }">
-      <div v-for="(item, i) in hotTopics.slice(0, hotspotsAnalysis ? 3 : 4)" :key="i" class="news-item">
+      <div v-for="(item, i) in hotTopics.slice(0, hotspotsAnalysis ? 3 : 4)" :key="i" class="news-item reveal-stagger">
         <a v-if="item.url" :href="item.url" target="_blank" rel="noopener" class="news-title">{{ item.title }}</a>
         <span v-else class="news-title">{{ item.title }}</span>
         <p v-if="!hotspotsAnalysis" class="news-summary">{{ item.summary?.slice(0, 120) }}{{ item.summary?.length > 120 ? '...' : '' }}</p>
@@ -91,22 +91,22 @@ const verdictMeta = {
             <span v-for="s in hotspotsRelate[i].sectors" :key="s" class="sector-tag">{{ s }}</span>
           </div>
           <div v-if="hotspotsRelate[i].related_indexes?.length" class="news-indexes">
-            <span class="relate-label">相关指数：</span>
+            <span class="relate-label terminal-label">相关指数：</span>
             <span v-for="idx in hotspotsRelate[i].related_indexes.slice(0, 3)" :key="idx.index_code" class="index-link" @click="emit('navigate', 'valuation')">
               {{ idx.index_name }}
-              <em v-if="idx.percentile != null" :style="{ color: getPercentileColor(idx.percentile) }">{{ idx.percentile }}%</em>
+              <em v-if="idx.percentile != null" class="font-jet" :style="{ color: getPercentileColor(idx.percentile) }">{{ idx.percentile }}%</em>
             </span>
           </div>
           <div v-if="hotspotsRelate[i].related_holdings?.length" class="news-holdings">
-            <span class="relate-label">持仓关联：</span>
+            <span class="relate-label terminal-label">持仓关联：</span>
             <span v-for="h in hotspotsRelate[i].related_holdings" :key="h.fund_code" class="holding-tag">
               {{ h.fund_name }}
             </span>
           </div>
         </div>
         <div class="news-meta">
-          <span class="news-source">{{ item.source }}</span>
-          <span v-if="item.date" class="news-date">{{ item.date?.slice(0, 10) }}</span>
+          <span class="news-source terminal-label">{{ item.source }}</span>
+          <span v-if="item.date" class="news-date terminal-label font-jet">{{ item.date?.slice(0, 10) }}</span>
         </div>
       </div>
       <p v-if="!hotspotsAnalysis" class="hotspots-hint">点击「AI 分析」获取结构化投资机会推荐</p>
@@ -138,26 +138,26 @@ const verdictMeta = {
 
     <div v-if="opportunities?.length && !opportunitiesLoading && !hotspotLoading" class="card-body opportunities-body">
       <div class="opportunity-summary-row">
-        <span class="opportunity-summary-title">机会引擎</span>
-        <span class="opportunity-count">{{ opportunities.length }} 个主题</span>
+        <span class="opportunity-summary-title terminal-label">机会引擎</span>
+        <span class="opportunity-count font-jet">{{ opportunities.length }} 个主题</span>
       </div>
-      <div v-for="item in opportunities.slice(0, 4)" :key="item.id" class="opportunity-card">
+      <div v-for="item in opportunities.slice(0, 4)" :key="item.id" class="opportunity-card reveal-stagger">
         <div class="opportunity-top">
-          <span :class="['opportunity-verdict', verdictMeta[item.verdict]?.className || 'verdict-watch']">
+          <span :class="['opportunity-verdict', 'terminal-label', verdictMeta[item.verdict]?.className || 'verdict-watch']">
             {{ verdictMeta[item.verdict]?.label || item.verdict }}
           </span>
           <span class="opportunity-theme">{{ item.theme }}</span>
-          <span class="opportunity-score">{{ Math.round(item.opportunity_score || 0) }}</span>
+          <span class="opportunity-score font-jet">{{ Math.round(item.opportunity_score || 0) }}</span>
         </div>
         <p class="opportunity-line">{{ item.policy_signal }}</p>
         <p class="opportunity-risk">{{ item.risk_note }}</p>
         <div v-if="item.matched_funds?.length" class="opportunity-funds">
           <span v-for="fund in item.matched_funds.slice(0, 2)" :key="fund.fund_code" class="opportunity-fund">
             {{ fund.fund_name || fund.fund_code }}
-            <em>{{ fund.vehicle_type === 'etf' ? 'ETF' : '场外' }}</em>
+            <em class="terminal-label">{{ fund.vehicle_type === 'etf' ? 'ETF' : '场外' }}</em>
           </span>
         </div>
-        <div class="opportunity-plan">
+        <div class="opportunity-plan font-jet">
           <span>金额 {{ item.entry_plan?.amount ? '¥' + Number(item.entry_plan.amount).toLocaleString() : '观察' }}</span>
           <span>{{ item.exit_plan?.time_stop || '需复盘' }}</span>
         </div>
@@ -175,26 +175,26 @@ const verdictMeta = {
     <!-- AI 结果（结构化推荐卡片，作为完整分析保留） -->
     <div v-if="hotspotsAnalysis && !hotspotLoading" class="card-body hotspots-body">
       <div v-if="hotspotsRelate?.length" class="hotspots-relate-summary">
-        <span class="relate-label">涉及行业：</span>
+        <span class="relate-label terminal-label">涉及行业：</span>
         <span v-for="s in allSectors" :key="s" class="sector-tag">{{ s }}</span>
-        <span v-if="allRelatedHoldings.length" class="relate-holding-hint">· 持仓关联 {{ allRelatedHoldings.length }} 只</span>
+        <span v-if="allRelatedHoldings.length" class="relate-holding-hint font-jet">· 持仓关联 {{ allRelatedHoldings.length }} 只</span>
       </div>
       <p class="hotspots-summary">{{ hotspotsAnalysis.summary }}</p>
-      <div v-for="(rec, i) in hotspotsAnalysis.recommendations" :key="i" class="rec-card">
+      <div v-for="(rec, i) in hotspotsAnalysis.recommendations" :key="i" class="rec-card reveal-stagger">
         <div class="rec-main">
-          <span :class="['rec-badge', 'rec-' + rec.direction]">
+          <span :class="['rec-badge', 'terminal-label', 'rec-' + rec.direction]">
             {{ rec.direction === 'up' ? '关注' : rec.direction === 'down' ? '回避' : '观察' }}
           </span>
           <span class="rec-name rec-name-link" @click="emit('navigate', 'valuation')">{{ rec.index_name }}</span>
-          <span v-if="rec.index_code" class="rec-code">{{ rec.index_code }}</span>
-          <span v-if="rec.percentile != null" class="rec-pct" :style="{ color: getPercentileColor(rec.percentile) }">
+          <span v-if="rec.index_code" class="rec-code font-jet">{{ rec.index_code }}</span>
+          <span v-if="rec.percentile != null" class="rec-pct font-jet" :style="{ color: getPercentileColor(rec.percentile) }">
             {{ rec.percentile }}%
           </span>
-          <span v-if="rec.user_portfolio" :class="['rec-portfolio', 'rp-' + rec.user_portfolio]">
+          <span v-if="rec.user_portfolio" :class="['rec-portfolio', 'terminal-label', 'rp-' + rec.user_portfolio]">
             {{ rec.user_portfolio === 'already_have' ? '已持有' : rec.user_portfolio === 'can_add' ? '可加仓' : rec.user_portfolio === 'reduce' ? '应减仓' : '新机会' }}
           </span>
           <span class="rec-reason">{{ rec.reason }}</span>
-          <span :class="['rec-conf', 'conf-' + rec.confidence]">
+          <span :class="['rec-conf', 'terminal-label', 'conf-' + rec.confidence]">
             {{ rec.confidence === 'high' ? '高置信度' : rec.confidence === 'medium' ? '中置信度' : '低置信度' }}
           </span>
         </div>
@@ -236,13 +236,13 @@ const verdictMeta = {
 
     <!-- 推荐验证历史 -->
     <div v-if="recStats" class="verify-bar" @click="emit('update:showVerify', !showVerify)">
-      <span class="verify-label">推荐验证</span>
-      <span class="verify-stat">总计 {{ recStats.total }} 条</span>
-      <span v-if="recStats.verified > 0" class="verify-stat correct">正确 {{ recStats.correct }}</span>
-      <span v-if="recStats.verified > 0" class="verify-stat wrong">错误 {{ recStats.wrong }}</span>
-      <span v-if="recStats.flat > 0" class="verify-stat flat">平局 {{ recStats.flat }}</span>
-      <span v-if="recStats.pending_not_due > 0" class="verify-stat pending">待到期 {{ recStats.pending_not_due }}</span>
-      <span v-if="recStats.accuracy != null" class="verify-accuracy">命中率 {{ recStats.accuracy }}%</span>
+      <span class="verify-label terminal-label">推荐验证</span>
+      <span class="verify-stat font-jet">总计 {{ recStats.total }} 条</span>
+      <span v-if="recStats.verified > 0" class="verify-stat correct font-jet">正确 {{ recStats.correct }}</span>
+      <span v-if="recStats.verified > 0" class="verify-stat wrong font-jet">错误 {{ recStats.wrong }}</span>
+      <span v-if="recStats.flat > 0" class="verify-stat flat font-jet">平局 {{ recStats.flat }}</span>
+      <span v-if="recStats.pending_not_due > 0" class="verify-stat pending font-jet">待到期 {{ recStats.pending_not_due }}</span>
+      <span v-if="recStats.accuracy != null" class="verify-accuracy font-jet">命中率 {{ recStats.accuracy }}%</span>
       <span v-else class="verify-accuracy pending">暂无验证数据</span>
       <svg width="12" height="12" fill="none" stroke="currentColor" viewBox="0 0 24 24" :class="{ rotated: showVerify }">
         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/>
@@ -250,18 +250,18 @@ const verdictMeta = {
     </div>
     <div v-if="showVerify" class="verify-detail">
       <div class="verify-hint">验证规则：T+5 交易日后自动对比行情，涨跌 <2% 为平局；观察方向对比沪深300</div>
-      <div v-if="recStats.watch_total > 0" class="verify-watch-stats">
+      <div v-if="recStats.watch_total > 0" class="verify-watch-stats font-jet">
         <span>观察方向：{{ recStats.watch_total }} 条</span>
         <span v-if="recStats.watch_correct > 0" class="correct">跑赢基准 {{ recStats.watch_correct }}</span>
         <span v-if="recStats.watch_wrong > 0" class="wrong">跑输基准 {{ recStats.watch_wrong }}</span>
       </div>
       <div v-if="recHistory?.length" class="verify-list">
-        <div v-for="rec in recHistory.slice(0, 10)" :key="rec.id" class="verify-item">
-          <span :class="['rec-badge', 'rec-' + rec.direction]">
+        <div v-for="rec in recHistory.slice(0, 10)" :key="rec.id" class="verify-item reveal-stagger">
+          <span :class="['rec-badge', 'terminal-label', 'rec-' + rec.direction]">
             {{ rec.direction === 'up' ? '关注' : rec.direction === 'down' ? '回避' : '观察' }}
           </span>
           <span class="verify-name">{{ rec.index_name }}</span>
-          <span :class="['verify-status', 'vs-' + rec.status]">
+          <span :class="['verify-status', 'font-jet', 'vs-' + rec.status]">
             <Icon :name="REC_STATUS_ICON[rec.status] || 'hourglass'" size="12" class="inline-icon" />
             {{ rec.status === 'correct' ? '正确' : rec.status === 'wrong' ? '错误' : rec.status === 'flat' ? '平局' : '待验证' }}
             <template v-if="rec.change_pct != null">({{ rec.change_pct > 0 ? '+' : '' }}{{ rec.change_pct }}%)</template>
@@ -290,17 +290,7 @@ const verdictMeta = {
   min-height: auto;
   max-height: none;
 }
-.dash-card::before {
-  content: '';
-  position: absolute;
-  top: 0;
-  left: 0;
-  right: 0;
-  height: 3px;
-  background: var(--gradient-warm);
-  opacity: 0;
-  transition: opacity 0.3s ease;
-}
+/* 金色竖线由全局 .editorial-card::before 提供，此处不再覆盖 */
 .dash-card::after {
   content: '';
   position: absolute;
@@ -319,9 +309,6 @@ const verdictMeta = {
   box-shadow: var(--shadow-lg), var(--shadow-glow);
   border-color: var(--color-primary-border);
   transform: translateY(-1px);
-}
-.dash-card:hover::before {
-  opacity: 1;
 }
 .dash-card:hover::after {
   opacity: 0.08;
@@ -609,7 +596,6 @@ const verdictMeta = {
 .rec-code {
   font-size: 0.72rem;
   color: var(--color-text-muted);
-  font-family: monospace;
   flex-shrink: 0;
 }
 .rec-portfolio {

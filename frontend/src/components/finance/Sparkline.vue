@@ -60,7 +60,7 @@ const gradId = computed(() => 'spark-' + Math.random().toString(36).slice(2, 9))
 </script>
 
 <template>
-  <svg :width="w" :height="h" :viewBox="`0 0 ${w} ${h}`" class="sparkline" v-if="points.length">
+  <svg :width="w" :height="h" :viewBox="`0 0 ${w} ${h}`" class="sparkline" shape-rendering="geometricPrecision" v-if="points.length">
     <defs>
       <linearGradient :id="gradId" x1="0" y1="0" x2="0" y2="1">
         <stop offset="0%" :stop-color="colorVar" stop-opacity="0.25" />

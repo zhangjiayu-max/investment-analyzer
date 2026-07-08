@@ -72,9 +72,9 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
       <template v-if="indices.length">
         <div v-for="idx in indices" :key="idx.name" class="ticker-item"
           :class="idx.changePct > 0 ? 'up' : idx.changePct < 0 ? 'down' : ''">
-          <span class="ticker-name">{{ idx.name }}</span>
-          <span class="ticker-price num-mono">{{ idx.price?.toFixed(2) ?? '--' }}</span>
-          <span class="ticker-change num-mono">
+          <span class="ticker-name font-jet">{{ idx.name }}</span>
+          <span class="ticker-price font-jet">{{ idx.price?.toFixed(2) ?? '--' }}</span>
+          <span class="ticker-change font-jet">
             {{ idx.changePct > 0 ? '+' : '' }}{{ idx.changePct?.toFixed(2) }}%
           </span>
           <Sparkline v-if="idx.spark" :data="idx.spark" :width="40" :height="16" :fill="false" class="ticker-spark" />

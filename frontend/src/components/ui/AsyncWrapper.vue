@@ -30,7 +30,7 @@ function getErrorMessage(err) {
   <!-- Loading 状态 -->
   <div v-if="loading" class="async-wrapper async-wrapper--loading">
     <div class="spinner-lg"></div>
-    <p class="async-loading-text">加载中...</p>
+    <p class="async-loading-text font-jet">加载中...</p>
   </div>
 
   <!-- 错误状态 -->
@@ -38,7 +38,7 @@ function getErrorMessage(err) {
     <svg width="24" height="24" fill="none" stroke="currentColor" viewBox="0 0 24 24">
       <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-.833-2.694-.833-3.464 0L3.34 16c-.77.833.192 2.5 1.732 3z"/>
     </svg>
-    <p class="async-error-title">{{ errorTitle }}</p>
+    <p class="async-error-title editorial-title">{{ errorTitle }}</p>
     <p class="async-error-message">{{ getErrorMessage(error) }}</p>
     <button v-if="showRetry" class="btn-secondary btn-sm" @click="$emit('retry')">
       重试
@@ -51,7 +51,7 @@ function getErrorMessage(err) {
       <circle cx="12" cy="12" r="9"/>
       <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M12 8v8"/>
     </svg>
-    <p class="async-empty-title">{{ emptyTitle }}</p>
+    <p class="async-empty-title editorial-title">{{ emptyTitle }}</p>
     <p v-if="emptyDescription" class="async-empty-desc">{{ emptyDescription }}</p>
   </div>
 
@@ -90,7 +90,7 @@ function getErrorMessage(err) {
 }
 
 .async-empty-title {
-  font-weight: 500;
+  font-weight: inherit;
   color: var(--color-text-muted);
   margin-bottom: 0.25rem;
 }

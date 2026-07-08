@@ -18,8 +18,7 @@ function close() {
       <div v-if="visible" class="dialog-backdrop" @click.self="close">
         <div class="feedback-dialog">
           <div class="feedback-dialog-header">
-            <span class="feedback-dialog-icon">{{ feedbackType === 'helpful' ? '👍' : '👎' }}</span>
-            <span class="feedback-dialog-title">{{ feedbackType === 'helpful' ? '标记为有用' : '标记为需改进' }}</span>
+            <span class="feedback-dialog-title editorial-title-lg">{{ feedbackType === 'helpful' ? '标记为有用' : '标记为需改进' }}</span>
           </div>
           <div class="feedback-dialog-body">
             <textarea
@@ -73,8 +72,6 @@ function close() {
 .feedback-dialog-icon { font-size: 1.25rem; }
 
 .feedback-dialog-title {
-  font-size: 0.95rem;
-  font-weight: 600;
   color: var(--color-text-primary);
 }
 

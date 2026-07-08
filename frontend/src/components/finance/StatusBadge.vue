@@ -43,7 +43,7 @@ const iconName = computed(() => props.icon || cfg.value.icon)
   <span class="status-badge" :class="`sb-${size}`"
     :style="{ color: cfg.color, background: cfg.bg, borderColor: cfg.border }">
     <Icon v-if="iconName" :name="iconName" :size="size === 'xs' ? 11 : 12" />
-    <span>{{ displayText }}</span>
+    <span class="terminal-label" :style="{ color: cfg.color }">{{ displayText }}</span>
   </span>
 </template>
 

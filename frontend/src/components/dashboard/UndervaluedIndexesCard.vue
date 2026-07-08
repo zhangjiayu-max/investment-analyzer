@@ -15,17 +15,17 @@ const emit = defineEmits(['refresh', 'navigate'])
 </script>
 
 <template>
-  <div class="dash-card card">
-    <div class="card-header">
+  <div class="dash-card card editorial-card">
+    <div class="card-header editorial-card-header">
       <div class="card-title-row">
         <svg width="18" height="18" fill="none" stroke="currentColor" viewBox="0 0 24 24" class="card-icon">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"/>
         </svg>
-        <span>今日低估指数</span>
+        <span class="title editorial-title">今日低估指数</span>
       </div>
       <div class="card-header-actions">
-        <span class="card-data-time">{{ undervaluedUpdatedAt || dataDate || '' }}</span>
-        <span v-if="undervaluedIndexes.length" class="card-badge">{{ count || undervaluedIndexes.length }}只</span>
+        <span class="card-data-time meta terminal-label">{{ undervaluedUpdatedAt || dataDate || '' }}</span>
+        <span v-if="undervaluedIndexes.length" class="card-badge font-jet">{{ count || undervaluedIndexes.length }}只</span>
         <button
           class="btn-ai-action btn-card-refresh"
           :class="{ 'btn-loading': fetchingValuation }"
@@ -51,28 +51,28 @@ const emit = defineEmits(['refresh', 'navigate'])
     <div v-else class="card-body">
       <!-- 摘要指标条 -->
       <div class="health-metrics">
-        <div class="metric-item">
-          <span class="metric-label">低估数量</span>
-          <span class="metric-value">{{ undervaluedIndexes.length }} 只</span>
+        <div class="metric-item reveal-stagger">
+          <span class="metric-label terminal-label">低估数量</span>
+          <span class="metric-value font-jet-lg">{{ undervaluedIndexes.length }} 只</span>
         </div>
-        <div class="metric-item">
-          <span class="metric-label">最低百分位</span>
-          <span class="metric-value" :style="{ color: getPercentileColor(undervaluedIndexes[0]?.percentile) }">
+        <div class="metric-item reveal-stagger">
+          <span class="metric-label terminal-label">最低百分位</span>
+          <span class="metric-value font-jet-lg" :style="{ color: getPercentileColor(undervaluedIndexes[0]?.percentile) }">
             {{ undervaluedIndexes[0]?.percentile }}%
           </span>
         </div>
-        <div class="metric-item">
-          <span class="metric-label">极度低估</span>
-          <span class="metric-value" style="color: #dc2626">
+        <div class="metric-item reveal-stagger">
+          <span class="metric-label terminal-label">极度低估</span>
+          <span class="metric-value font-jet-lg" style="color: #dc2626">
             {{ undervaluedIndexes.filter(i => i.assessment_level === 'extreme').length }} 只
           </span>
         </div>
       </div>
 
-      <div v-for="idx in undervaluedIndexes.slice(0, 10)" :key="idx.index_code" class="index-row" @click="emit('navigate', 'valuation')">
+      <div v-for="idx in undervaluedIndexes.slice(0, 10)" :key="idx.index_code" class="index-row reveal-stagger" @click="emit('navigate', 'valuation')">
         <div class="index-info">
           <span class="index-name">{{ idx.index_name || idx.index_code }}</span>
-          <span class="index-meta">{{ idx.metric_type }} {{ idx.current_value }}</span>
+          <span class="index-meta font-jet">{{ idx.metric_type }} {{ idx.current_value }}</span>
         </div>
         <div class="index-percentile">
           <div class="percentile-bar-bg">
@@ -84,11 +84,11 @@ const emit = defineEmits(['refresh', 'navigate'])
               <span class="mark" style="left:80%">80</span>
             </div>
           </div>
-          <div class="percentile-value" :style="{ color: getPercentileColor(idx.percentile) }">
+          <div class="percentile-value font-jet" :style="{ color: getPercentileColor(idx.percentile) }">
             {{ idx.percentile }}%
           </div>
         </div>
-        <span class="assessment-tag" :style="{ background: (assessmentColors[idx.assessment_level] || assessmentColors.fair).bg + '18', color: (assessmentColors[idx.assessment_level] || assessmentColors.fair).bg }">
+        <span class="assessment-tag terminal-label" :style="{ background: (assessmentColors[idx.assessment_level] || assessmentColors.fair).bg + '18', color: (assessmentColors[idx.assessment_level] || assessmentColors.fair).bg }">
           {{ idx.assessment }}
         </span>
       </div>
@@ -113,18 +113,7 @@ const emit = defineEmits(['refresh', 'navigate'])
   min-height: auto;
   max-height: none;
 }
-/* Gradient top accent bar */
-.dash-card::before {
-  content: '';
-  position: absolute;
-  top: 0;
-  left: 0;
-  right: 0;
-  height: 3px;
-  background: var(--gradient-accent);
-  opacity: 0;
-  transition: opacity 0.3s ease;
-}
+/* 金色竖线由全局 .editorial-card::before 提供，此处不再覆盖 */
 /* Subtle corner glow on hover */
 .dash-card::after {
   content: '';
@@ -144,9 +133,6 @@ const emit = defineEmits(['refresh', 'navigate'])
   box-shadow: var(--shadow-lg), var(--shadow-glow);
   border-color: var(--color-primary-border);
   transform: translateY(-1px);
-}
-.dash-card:hover::before {
-  opacity: 1;
 }
 .dash-card:hover::after {
   opacity: 0.08;
@@ -279,7 +265,6 @@ const emit = defineEmits(['refresh', 'navigate'])
 }
 .metric-value {
   font-size: 1.1rem;
-  font-weight: 800;
   color: var(--color-text-primary);
   letter-spacing: -0.02em;
 }

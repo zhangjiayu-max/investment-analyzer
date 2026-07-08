@@ -7,14 +7,14 @@
         @click="toggleSimple('helpful')"
         :disabled="sending"
       >
-        {{ currentRating === 'helpful' ? '👍 已赞' : '👍' }}
+        {{ currentRating === 'helpful' ? '已赞' : '赞' }}
       </button>
       <button
         :class="['fb-btn', 'fb-btn-bad', { active: currentRating === 'unhelpful' }]"
         @click="toggleSimple('unhelpful')"
         :disabled="sending"
       >
-        {{ currentRating === 'unhelpful' ? '👎 已踩' : '👎' }}
+        {{ currentRating === 'unhelpful' ? '已踩' : '踩' }}
       </button>
       <span v-if="sent" class="fb-sent">已反馈，感谢</span>
     </div>
@@ -64,8 +64,8 @@
       </Transition>
 
       <div v-if="sent" class="fb-result">
-        <span class="fb-result-score">综合 {{ overallScore }} 分</span>
-        <span class="fb-result-dims">
+        <span class="fb-result-score">综合 <span class="font-jet">{{ overallScore }}</span> 分</span>
+        <span class="fb-result-dims font-jet">
           数据{{ scores.data_accuracy }} · 逻辑{{ scores.logic }} · 可执行{{ scores.actionability }}
         </span>
         <span class="fb-sent">已反馈，感谢</span>

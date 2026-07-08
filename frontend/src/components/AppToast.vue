@@ -8,7 +8,7 @@ const { toast, hideToast } = useToast()
   <Teleport to="body">
     <Transition name="fade">
       <div v-if="toast.visible" class="toast-container" @click="hideToast">
-        <div :class="['toast', `toast-${toast.type}`]">
+        <div :class="['toast', `toast-${toast.type}`, 'toast-editorial']">
           <svg v-if="toast.type === 'success'" width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/>
           </svg>
@@ -24,3 +24,13 @@ const { toast, hideToast } = useToast()
     </Transition>
   </Teleport>
 </template>
+
+<style scoped>
+.toast-editorial {
+  border-left: 3px solid var(--color-gold);
+  padding-left: 0.85rem;
+}
+.dark .toast-editorial {
+  border-left-color: var(--color-gold-light);
+}
+</style>

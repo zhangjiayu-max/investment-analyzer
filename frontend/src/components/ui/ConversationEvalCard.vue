@@ -1,21 +1,20 @@
 <template>
-  <div class="eval-card" :class="{ 'eval-card--loading': loading, 'eval-card--collapsed': collapsed }">
+  <div :class="['eval-card', 'editorial-card', 'reveal-stagger', { 'eval-card--loading': loading, 'eval-card--collapsed': collapsed }]">
     <!-- 紧凑标题栏 -->
     <div class="eval-card__header" @click="toggleCollapse">
       <div class="eval-card__header-left">
-        <span class="eval-card__icon">📊</span>
-        <span class="eval-card__title">质量评估</span>
+        <span class="eval-card__title editorial-title">质量评估</span>
         <!-- message_id 标签（可复制） -->
         <span
           v-if="evaluation?.message_id"
-          class="eval-card__msg-id"
+          class="eval-card__msg-id font-jet"
           @click.stop="copyMessageId"
           :title="'点击复制消息ID: ' + evaluation.message_id"
         >
-          #{{ evaluation.message_id }} 📋
+          #{{ evaluation.message_id }}
         </span>
         <!-- 总分徽章 -->
-        <span v-if="evaluation" class="eval-card__score-badge" :style="{ background: scoreColor(evaluation.auto_score) }">
+        <span v-if="evaluation" class="eval-card__score-badge font-jet" :style="{ background: scoreColor(evaluation.auto_score) }">
           {{ evaluation.auto_score?.toFixed(0) }}
         </span>
       </div>
@@ -33,7 +32,7 @@
           @click.stop="runEvaluation"
           title="重新评估"
         >
-          🔄
+          ↻
         </button>
         <span v-if="evaluation" class="eval-card__toggle">
           {{ collapsed ? '▼' : '▲' }}
@@ -56,14 +55,14 @@
           :class="{ active: evalMode === 'rule' }"
           @click.stop="evalMode = 'rule'"
         >
-          ⚡ 规则评估
+          规则评估
         </button>
         <button
           class="eval-card__mode-btn"
           :class="{ active: evalMode === 'llm' }"
           @click.stop="evalMode = 'llm'"
         >
-          🤖 LLM 评估
+          LLM 评估
         </button>
       </div>
 
@@ -74,7 +73,7 @@
           <div v-for="(dim, key) in dimensionScores" :key="key" class="eval-card__dimension">
             <span class="eval-card__dim-icon">{{ dim.icon }}</span>
             <span class="eval-card__dim-name">{{ dim.name }}</span>
-            <span class="eval-card__dim-score" :style="{ color: scoreColor(dim.score) }">{{ dim.score }}</span>
+            <span class="eval-card__dim-score font-jet" :style="{ color: scoreColor(dim.score) }">{{ dim.score }}</span>
             <div class="eval-card__dim-bar">
               <div class="eval-card__dim-bar-fill" :style="{ width: dim.score + '%', backgroundColor: scoreColor(dim.score) }"></div>
             </div>
@@ -83,26 +82,25 @@
 
         <!-- 元数据 -->
         <div class="eval-card__meta">
-          <span class="eval-card__meta-tag">{{ complexityLabel }}</span>
-          <span class="eval-card__meta-tag">{{ evaluation.specialist_count || 0 }}专家</span>
-          <span v-if="evaluation.duration_ms" class="eval-card__meta-tag">{{ formatDuration(evaluation.duration_ms) }}</span>
+          <span class="eval-card__meta-tag font-jet">{{ complexityLabel }}</span>
+          <span class="eval-card__meta-tag font-jet">{{ evaluation.specialist_count || 0 }}专家</span>
+          <span v-if="evaluation.duration_ms" class="eval-card__meta-tag font-jet">{{ formatDuration(evaluation.duration_ms) }}</span>
         </div>
 
         <!-- 改进建议 -->
         <div v-if="suggestions.length > 0" class="eval-card__suggestions">
           <div class="eval-card__suggestions-header">
-            <span class="eval-card__suggestions-icon">💡</span>
             <span class="eval-card__suggestions-title">优化建议</span>
           </div>
           <div class="eval-card__suggestions-list">
-            <div v-for="(s, idx) in suggestions" :key="idx" class="eval-card__suggestion-item">{{ s }}</div>
+            <div v-for="(s, idx) in suggestions" :key="idx" class="eval-card__suggestion-item reveal-stagger">{{ s }}</div>
           </div>
         </div>
 
         <!-- LLM 评估按钮 -->
         <div class="eval-card__actions">
           <button class="eval-card__btn-llm" @click.stop="runLLMEvaluation" :disabled="llmLoading">
-            {{ llmLoading ? '评估中...' : '🤖 LLM 深度评估' }}
+            {{ llmLoading ? '评估中...' : 'LLM 深度评估' }}
           </button>
         </div>
       </div>
@@ -119,7 +117,7 @@
             <div v-for="(dim, key) in llmDimensionScores" :key="key" class="eval-card__dimension">
               <span class="eval-card__dim-icon">{{ dim.icon }}</span>
               <span class="eval-card__dim-name">{{ dim.name }}</span>
-              <span class="eval-card__dim-score" :style="{ color: scoreColor(dim.score) }">{{ dim.score }}</span>
+              <span class="eval-card__dim-score font-jet" :style="{ color: scoreColor(dim.score) }">{{ dim.score }}</span>
               <div class="eval-card__dim-bar">
                 <div class="eval-card__dim-bar-fill" :style="{ width: dim.score + '%', backgroundColor: scoreColor(dim.score) }"></div>
               </div>
@@ -128,39 +126,38 @@
 
           <!-- 优点 -->
           <div v-if="llmStrengths.length > 0" class="eval-card__feedback">
-            <div class="eval-card__feedback-title">✅ 优点</div>
-            <div v-for="(s, idx) in llmStrengths" :key="idx" class="eval-card__feedback-item">{{ s }}</div>
+            <div class="eval-card__feedback-title">优点</div>
+            <div v-for="(s, idx) in llmStrengths" :key="idx" class="eval-card__feedback-item reveal-stagger">{{ s }}</div>
           </div>
 
           <!-- 缺点 -->
           <div v-if="llmWeaknesses.length > 0" class="eval-card__feedback eval-card__feedback--warning">
-            <div class="eval-card__feedback-title">⚠️ 不足</div>
-            <div v-for="(w, idx) in llmWeaknesses" :key="idx" class="eval-card__feedback-item">{{ w }}</div>
+            <div class="eval-card__feedback-title">不足</div>
+            <div v-for="(w, idx) in llmWeaknesses" :key="idx" class="eval-card__feedback-item reveal-stagger">{{ w }}</div>
           </div>
 
           <!-- 建议 -->
           <div v-if="llmSuggestions.length > 0" class="eval-card__suggestions">
             <div class="eval-card__suggestions-header">
-              <span class="eval-card__suggestions-icon">💡</span>
               <span class="eval-card__suggestions-title">改进建议</span>
             </div>
             <div class="eval-card__suggestions-list">
-              <div v-for="(s, idx) in llmSuggestions" :key="idx" class="eval-card__suggestion-item">{{ s }}</div>
+              <div v-for="(s, idx) in llmSuggestions" :key="idx" class="eval-card__suggestion-item reveal-stagger">{{ s }}</div>
             </div>
           </div>
         </div>
         <div v-else class="eval-card__empty">
           <button class="eval-card__btn-llm" @click.stop="runLLMEvaluation">
-            🤖 开始 LLM 评估
+            开始 LLM 评估
           </button>
         </div>
       </div>
 
       <!-- 进化触发状态 -->
       <div v-if="evolutionResult" class="eval-card__evolution">
-        <span v-if="evolutionResult.feedback_triggered" class="eval-card__evolution-tag eval-card__evolution-tag--success">✅ 反馈学习</span>
-        <span v-if="evolutionResult.bad_case_marked" class="eval-card__evolution-tag eval-card__evolution-tag--warning">⚠️ Bad Case</span>
-        <span v-if="evolutionResult.eval_suggested" class="eval-card__evolution-tag eval-card__evolution-tag--success">✅ Eval建议</span>
+        <span v-if="evolutionResult.feedback_triggered" class="eval-card__evolution-tag eval-card__evolution-tag--success">反馈学习</span>
+        <span v-if="evolutionResult.bad_case_marked" class="eval-card__evolution-tag eval-card__evolution-tag--warning">Bad Case</span>
+        <span v-if="evolutionResult.eval_suggested" class="eval-card__evolution-tag eval-card__evolution-tag--success">Eval建议</span>
       </div>
 
       <!-- 用户评分 -->
@@ -184,13 +181,13 @@
           </button>
         </div>
         <div v-else class="eval-card__user-score-display">
-          <span class="eval-card__user-score-label">您的评价:</span>
+          <span class="eval-card__user-score-label terminal-label">您的评价:</span>
           <span class="eval-card__user-score-stars">
             <span v-for="star in 5" :key="star" class="eval-card__star-display">
               {{ star <= userScore ? '★' : '☆' }}
             </span>
           </span>
-          <span class="eval-card__user-score-value">{{ userScore }}/5</span>
+          <span class="eval-card__user-score-value font-jet">{{ userScore }}/5</span>
         </div>
       </div>
     </div>
@@ -570,7 +567,7 @@ onMounted(() => {
 
 .eval-card__title {
   font-size: 13px;
-  font-weight: 500;
+  font-weight: inherit;
   color: var(--text-primary, #333);
 }
 
@@ -956,7 +953,7 @@ onMounted(() => {
 }
 
 .eval-card__user-score-label {
-  font-size: 11px;
+  font-size: inherit;
 }
 
 .eval-card__user-score-stars {

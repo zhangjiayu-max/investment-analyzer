@@ -36,16 +36,16 @@ function evidenceLine(item) {
 </script>
 
 <template>
-  <section v-if="loading || visibleReviews.length" class="review-panel">
-    <header class="review-panel__header">
+  <section v-if="loading || visibleReviews.length" class="review-panel editorial-card">
+    <header class="review-panel__header editorial-card-header">
       <div>
-        <h3 class="review-panel__title">
+        <h3 class="review-panel__title title editorial-title">
           <Icon name="history" size="16" />
           待复盘
         </h3>
         <p class="review-panel__subtitle">把执行结果反馈给系统，下一次建议会更贴近你</p>
       </div>
-      <span class="review-panel__count">{{ visibleReviews.length }} 项</span>
+      <span class="review-panel__count font-jet">{{ visibleReviews.length }} 项</span>
     </header>
 
     <div v-if="loading" class="review-loading">
@@ -54,12 +54,12 @@ function evidenceLine(item) {
     </div>
 
     <div v-else class="review-list">
-      <article v-for="item in visibleReviews" :key="item.id" class="review-card">
+      <article v-for="item in visibleReviews" :key="item.id" class="review-card reveal-stagger">
         <div class="review-card__main">
           <div class="review-card__topline">
-            <span class="review-card__type">{{ decisionLabel(item.decision_type) }}</span>
+            <span class="review-card__type terminal-label">{{ decisionLabel(item.decision_type) }}</span>
             <span class="review-card__target">{{ targetText(item) }}</span>
-            <span v-if="item.review_at" class="review-card__date">{{ item.review_at }}</span>
+            <span v-if="item.review_at" class="review-card__date terminal-label font-jet">{{ item.review_at }}</span>
           </div>
           <h4 class="review-card__summary">{{ item.summary }}</h4>
           <p v-if="item.rationale" class="review-card__rationale">{{ item.rationale }}</p>
@@ -127,7 +127,6 @@ function evidenceLine(item) {
   margin: 0;
   color: var(--color-text-primary);
   font-size: 0.96rem;
-  font-weight: 800;
 }
 
 .review-panel__subtitle {

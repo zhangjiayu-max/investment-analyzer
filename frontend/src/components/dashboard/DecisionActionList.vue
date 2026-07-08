@@ -154,16 +154,16 @@ function precheckState(decisionId) {
 </script>
 
 <template>
-  <section class="decision-panel">
-    <header class="decision-panel__header">
+  <section class="decision-panel editorial-card">
+    <header class="decision-panel__header editorial-card-header">
       <div>
-        <h3 class="decision-panel__title">
+        <h3 class="decision-panel__title title editorial-title">
           <Icon name="clipboard-list" size="16" />
           今日行动
         </h3>
         <p class="decision-panel__subtitle">把 AI 建议收敛成可追踪的理财动作</p>
       </div>
-      <span class="decision-panel__count">{{ visibleDecisions.length }} 项</span>
+      <span class="decision-panel__count font-jet">{{ visibleDecisions.length }} 项</span>
     </header>
 
     <div v-if="loading" class="decision-loading">
@@ -180,14 +180,14 @@ function precheckState(decisionId) {
       <article
         v-for="decision in visibleDecisions"
         :key="decision.id"
-        class="decision-card"
+        class="decision-card reveal-stagger"
         :class="`decision-card--${decision.status}`"
       >
         <div class="decision-card__main">
           <div class="decision-card__topline">
-            <span class="decision-card__type">{{ decisionLabel(decision.decision_type) }}</span>
+            <span class="decision-card__type terminal-label">{{ decisionLabel(decision.decision_type) }}</span>
             <span class="decision-card__target">{{ targetText(decision) }}</span>
-            <span class="decision-card__status">{{ statusLabel(decision.status) }}</span>
+            <span class="decision-card__status terminal-label">{{ statusLabel(decision.status) }}</span>
           </div>
           <h4 class="decision-card__summary">{{ decision.summary }}</h4>
           <p v-if="decision.rationale" class="decision-card__rationale">{{ decision.rationale }}</p>
@@ -197,15 +197,15 @@ function precheckState(decisionId) {
           </div>
           <div v-if="hasInsight(decision)" class="decision-card__insights">
             <div v-if="portfolioContextLine(decision) || suitabilityLine(decision)" class="decision-card__insight">
-              <span class="decision-card__insight-label">适配</span>
+              <span class="decision-card__insight-label terminal-label">适配</span>
               <span>{{ [portfolioContextLine(decision), suitabilityLine(decision)].filter(Boolean).join(' · ') }}</span>
             </div>
             <div v-if="missingDataLine(decision)" class="decision-card__insight">
-              <span class="decision-card__insight-label">待确认</span>
+              <span class="decision-card__insight-label terminal-label">待确认</span>
               <span>{{ missingDataLine(decision) }}</span>
             </div>
             <div v-if="counterArgumentLine(decision)" class="decision-card__insight decision-card__insight--risk">
-              <span class="decision-card__insight-label">反方提醒</span>
+              <span class="decision-card__insight-label terminal-label">反方提醒</span>
               <span>{{ counterArgumentLine(decision) }}</span>
             </div>
           </div>
@@ -298,10 +298,10 @@ function precheckState(decisionId) {
             <Icon name="users" size="14" />
             多模型评审结果
           </div>
-          <div v-for="review in peerReviews[decision.id]" :key="review.id || review.reviewer_type" class="peer-review-item">
+          <div v-for="review in peerReviews[decision.id]" :key="review.id || review.reviewer_type" class="peer-review-item reveal-stagger">
             <div class="peer-review__head">
-              <span class="peer-review__type">{{ reviewerLabel(review.reviewer_type) }}</span>
-              <span :class="['peer-review__verdict', verdictClass(review.verdict)]">
+              <span class="peer-review__type terminal-label">{{ reviewerLabel(review.reviewer_type) }}</span>
+              <span :class="['peer-review__verdict', 'terminal-label', verdictClass(review.verdict)]">
                 {{ verdictLabel(review.verdict) }}
               </span>
             </div>
@@ -351,7 +351,6 @@ function precheckState(decisionId) {
   margin: 0;
   color: var(--color-text-primary);
   font-size: 0.98rem;
-  font-weight: 800;
 }
 
 .decision-panel__subtitle {

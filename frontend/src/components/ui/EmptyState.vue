@@ -19,13 +19,13 @@ const icons = {
 </script>
 
 <template>
-  <div class="empty-state">
+  <div class="empty-state reveal-stagger">
     <div class="empty-icon">
       <svg width="48" height="48" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1">
         <path stroke-linecap="round" stroke-linejoin="round" :d="icons[icon] || icons.empty"/>
       </svg>
     </div>
-    <h3 class="empty-title">{{ title }}</h3>
+    <h3 class="empty-title editorial-title">{{ title }}</h3>
     <p v-if="description" class="empty-desc">{{ description }}</p>
     <button v-if="actionText" class="btn-primary btn-sm empty-action" @click="$emit('action')">
       {{ actionText }}

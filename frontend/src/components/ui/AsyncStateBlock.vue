@@ -26,9 +26,9 @@ const stateIcon = computed(() => {
 
 <template>
   <div :class="['async-state-block', `async-state-block--${state}`, { 'async-state-block--compact': compact }]">
-    <div v-if="isPanelState" class="async-state-block__panel">
+    <div v-if="isPanelState" class="async-state-block__panel reveal-stagger">
       <Icon class="async-state-block__icon" :name="stateIcon" />
-      <h3 v-if="title" class="async-state-block__title">{{ title }}</h3>
+      <h3 v-if="title" class="async-state-block__title editorial-title">{{ title }}</h3>
       <p v-if="description" class="async-state-block__description">{{ description }}</p>
 
       <button

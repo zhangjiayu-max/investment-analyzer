@@ -61,23 +61,23 @@ async function copyContent() {
 </script>
 
 <template>
-  <section :class="['agent-result-card', `agent-result-card--${statusConfig.tone}`]">
+  <section :class="['agent-result-card', `agent-result-card--${statusConfig.tone}`, 'editorial-card', 'reveal-stagger']">
     <header class="agent-result-card__header">
       <div class="agent-result-card__title-wrap">
         <span class="agent-result-card__icon">
           <Icon :name="statusConfig.icon" size="15" />
         </span>
         <div>
-          <h3 class="agent-result-card__title">{{ title }}</h3>
+          <h3 class="agent-result-card__title editorial-title">{{ title }}</h3>
           <p v-if="agent" class="agent-result-card__agent">{{ agent }}</p>
         </div>
       </div>
       <div class="agent-result-card__meta">
-        <span class="agent-result-card__status">{{ statusConfig.label }}</span>
-        <span v-if="tokenUsage" class="agent-result-card__token">{{ tokenUsage }} tokens</span>
-        <span v-if="recordId" class="agent-result-card__id">#{{ recordId }}</span>
-        <span v-if="updatedAt" class="agent-result-card__time">{{ updatedAt }}</span>
-        <span v-if="source" class="agent-result-card__source">{{ source }}</span>
+        <span class="agent-result-card__status terminal-label">{{ statusConfig.label }}</span>
+        <span v-if="tokenUsage" class="agent-result-card__token font-jet">{{ tokenUsage }} tokens</span>
+        <span v-if="recordId" class="agent-result-card__id font-jet">#{{ recordId }}</span>
+        <span v-if="updatedAt" class="agent-result-card__time font-jet">{{ updatedAt }}</span>
+        <span v-if="source" class="agent-result-card__source terminal-label">{{ source }}</span>
         <button
           v-if="canCopy"
           type="button"
@@ -162,7 +162,7 @@ async function copyContent() {
 .agent-result-card__title {
   margin: 0;
   font-size: 0.9rem;
-  font-weight: 800;
+  font-weight: inherit;
   color: var(--color-text-primary);
 }
 
@@ -195,7 +195,6 @@ async function copyContent() {
   background: var(--color-bg-input);
   border: 1px solid var(--color-border-light);
   color: inherit;
-  font: inherit;
 }
 
 .agent-result-card__copy,

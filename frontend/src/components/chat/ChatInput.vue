@@ -272,7 +272,7 @@ function emitSend() {
       </div>
     </div>
     <!-- 上传中提示 -->
-    <div v-if="uploadingImage" class="uploading-hint">
+    <div v-if="uploadingImage" class="uploading-hint terminal-label">
       <span class="uploading-spinner"></span>
       <span>图片上传中...</span>
     </div>
@@ -326,7 +326,7 @@ function emitSend() {
         <!-- @mention 下拉列表 -->
         <Transition name="mention">
           <div v-if="showMention && filteredAgents.length > 0" class="mention-dropdown">
-            <div class="mention-header">选择专家</div>
+            <div class="mention-header terminal-label">选择专家</div>
             <div
               v-for="(agent, idx) in filteredAgents"
               :key="agent.agent_key || agent.id"
@@ -356,11 +356,11 @@ function emitSend() {
       </button>
     </form>
     <div class="input-hints">
-      <span v-if="!sending" class="input-hint-text">Shift+Enter 换行 · Enter 发送 · @指定专家</span>
+      <span v-if="!sending" class="input-hint-text terminal-label">Shift+Enter 换行 · Enter 发送 · @指定专家</span>
     </div>
     <div v-if="sending" class="sending-hint">
       <span class="sending-spinner"></span>
-      <span class="sending-text">{{ statusMessage || 'AI 正在分析中...' }}</span>
+      <span class="sending-text terminal-label">{{ statusMessage || 'AI 正在分析中...' }}</span>
     </div>
   </div>
 </template>

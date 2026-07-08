@@ -28,14 +28,14 @@ function submitFeedbackWithComment() {
 </script>
 
 <template>
-  <div v-if="dailyReport" class="briefing-card card">
-    <div class="briefing-header" @click="emit('toggle')">
+  <div v-if="dailyReport" class="briefing-card card editorial-card">
+    <div class="briefing-header editorial-card-header" @click="emit('toggle')">
       <div class="briefing-title-row">
         <svg width="18" height="18" fill="none" stroke="currentColor" viewBox="0 0 24 24" class="briefing-icon">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M19 20H5a2 2 0 01-2-2V6a2 2 0 012-2h10a2 2 0 012 2v1m2 13a2 2 0 01-2-2V7m2 13a2 2 0 002-2V9a2 2 0 00-2-2h-2m-4-3H9M7 16h6M7 8h6v4H7V8z"/>
         </svg>
-        <span class="briefing-label">每日市场简报</span>
-        <span class="briefing-time">{{ formatBriefingTime(dailyReport.created_at) }}</span>
+        <span class="briefing-label title editorial-title">每日市场简报</span>
+        <span class="briefing-time meta terminal-label">{{ formatBriefingTime(dailyReport.created_at) }}</span>
         <AIActionButton
           label="重新生成"
           agent="市场日报分析师"
@@ -108,18 +108,7 @@ function submitFeedbackWithComment() {
   position: relative;
   transition: transform var(--transition-fast), box-shadow var(--transition-normal), border-color var(--transition-normal);
 }
-/* 渐变顶条 */
-.briefing-card::before {
-  content: '';
-  position: absolute;
-  top: 0;
-  left: 0;
-  right: 0;
-  height: 3px;
-  background: var(--gradient-accent);
-  opacity: 0.7;
-  transition: opacity var(--transition-fast);
-}
+/* 金色竖线由全局 .editorial-card::before 提供，此处不再覆盖 */
 /* 角落发光 */
 .briefing-card::after {
   content: '';
@@ -137,9 +126,6 @@ function submitFeedbackWithComment() {
   transform: var(--hover-lift);
   box-shadow: var(--shadow-glow);
   border-color: var(--color-primary-border-strong);
-}
-.briefing-card:hover::before {
-  opacity: 1;
 }
 .briefing-card:hover::after {
   opacity: 1;
@@ -167,7 +153,6 @@ function submitFeedbackWithComment() {
   flex-shrink: 0;
 }
 .briefing-label {
-  font-weight: 700;
   font-size: 0.95rem;
   color: var(--color-text-primary);
 }

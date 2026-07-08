@@ -37,8 +37,11 @@ const level = computed(() => {
 <template>
   <div class="thermo-wrap">
     <div v-if="label" class="thermo-head">
-      <span class="thermo-label">{{ label }}</span>
-      <span v-if="showValue" class="thermo-val" :style="{ color: level.color }">{{ value.toFixed(0) }}° · {{ level.label }}</span>
+      <span class="thermo-label terminal-label">{{ label }}</span>
+      <span v-if="showValue" class="thermo-val">
+        <span class="font-jet-lg" :style="{ color: level.color }">{{ value.toFixed(0) }}°</span>
+        <span class="terminal-label">{{ level.label }}</span>
+      </span>
     </div>
     <div class="thermo-track" :style="{ height: Number(height) + 'px' }">
       <div class="thermo-fill" :style="{ width: pct + '%', background: `linear-gradient(90deg, #3b82f6, var(--color-loss), var(--color-warning), var(--color-profit))` }" />
@@ -50,8 +53,7 @@ const level = computed(() => {
 <style scoped>
 .thermo-wrap { display: flex; flex-direction: column; gap: 0.3rem; }
 .thermo-head { display: flex; justify-content: space-between; align-items: center; }
-.thermo-label { font-size: 0.75rem; color: var(--color-text-secondary); font-weight: 500; }
-.thermo-val { font-size: 0.75rem; font-weight: 600; font-variant-numeric: tabular-nums; }
+.thermo-val { display: inline-flex; align-items: baseline; gap: 0.35rem; font-size: 0.85rem; }
 .thermo-track {
   position: relative; width: 100%; border-radius: 4px;
   background: var(--color-bg-input); overflow: visible;

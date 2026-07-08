@@ -28,16 +28,16 @@ function allocationValue(allocation, category) {
 </script>
 
 <template>
-  <div class="dash-card card">
-    <div class="card-header">
+  <div class="dash-card card editorial-card">
+    <div class="card-header editorial-card-header">
       <div class="card-title-row">
         <svg width="18" height="18" fill="none" stroke="currentColor" viewBox="0 0 24 24" class="card-icon">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M2 7l10-4 10 4-10 4-10-4zM2 17l10 4 10-4M2 12l10 4 10-4"/>
         </svg>
-        <span>持仓健康度</span>
+        <span class="title editorial-title">持仓健康度</span>
       </div>
       <div class="card-header-actions">
-        <span v-if="portfolioHealth" class="card-data-time">{{ portfolioUpdatedAt || '' }}</span>
+        <span v-if="portfolioHealth" class="card-data-time meta terminal-label">{{ portfolioUpdatedAt || '' }}</span>
         <AIActionButton
           v-if="portfolioHealth"
           :label="rebalanceResult ? '重新生成' : 'AI 再平衡建议'"
@@ -71,17 +71,17 @@ function allocationValue(allocation, category) {
     </div>
     <div v-else class="card-body">
       <div class="health-metrics">
-        <div class="metric-item">
-          <span class="metric-label">持有基金</span>
-          <span class="metric-value">{{ portfolioHealth.holding_count }} 只</span>
+        <div class="metric-item reveal-stagger">
+          <span class="metric-label terminal-label">持有基金</span>
+          <span class="metric-value font-jet-lg">{{ portfolioHealth.holding_count }} 只</span>
         </div>
-        <div class="metric-item">
-          <span class="metric-label">总市值</span>
-          <span class="metric-value">{{ formatMoney(portfolioHealth.total_value) }}</span>
+        <div class="metric-item reveal-stagger">
+          <span class="metric-label terminal-label">总市值</span>
+          <span class="metric-value font-jet-lg">{{ formatMoney(portfolioHealth.total_value) }}</span>
         </div>
-        <div class="metric-item">
-          <span class="metric-label">总盈亏</span>
-          <span :class="['metric-value', (portfolioHealth.total_profit || 0) >= 0 ? 'profit' : 'loss']">
+        <div class="metric-item reveal-stagger">
+          <span class="metric-label terminal-label">总盈亏</span>
+          <span :class="['metric-value', 'font-jet-lg', (portfolioHealth.total_profit || 0) >= 0 ? 'profit' : 'loss']">
             {{ formatMoney(portfolioHealth.total_profit) }}
             ({{ (portfolioHealth.profit_rate * 100).toFixed(1) }}%)
           </span>
@@ -104,12 +104,12 @@ function allocationValue(allocation, category) {
 
       <!-- 类型分布 -->
       <div v-if="Object.keys(portfolioHealth.type_distribution || {}).length" class="type-dist">
-        <div v-for="(v, k) in portfolioHealth.type_distribution" :key="k" class="type-item">
-          <span class="type-name">{{ k }}</span>
+        <div v-for="(v, k) in portfolioHealth.type_distribution" :key="k" class="type-item reveal-stagger">
+          <span class="type-name terminal-label">{{ k }}</span>
           <div class="type-bar-bg">
             <div class="type-bar" :style="{ width: Math.min(v / (portfolioHealth.total_value || 1) * 100, 100) + '%' }"></div>
           </div>
-          <span class="type-pct">{{ (v / (portfolioHealth.total_value || 1) * 100).toFixed(0) }}%</span>
+          <span class="type-pct font-jet">{{ (v / (portfolioHealth.total_value || 1) * 100).toFixed(0) }}%</span>
         </div>
       </div>
 
@@ -122,21 +122,21 @@ function allocationValue(allocation, category) {
         <div v-else-if="rebalanceResult && !rebalanceResult.error" class="rebalance-result">
           <div class="rebalance-header">
             <span class="rebalance-title">调仓分析</span>
-            <span :class="['drift-badge', rebalanceResult.drift_level]">
+            <span :class="['drift-badge', 'terminal-label', rebalanceResult.drift_level]">
               {{ { balanced: '已平衡', slight: '轻微偏离', significant: '显著偏离' }[rebalanceResult.drift_level] || '未知' }}
             </span>
-            <span class="market-tag">{{ rebalanceResult.market_level }} · {{ rebalanceResult.market_avg_percentile }}%</span>
+            <span class="market-tag font-jet">{{ rebalanceResult.market_level }} · {{ rebalanceResult.market_avg_percentile }}%</span>
           </div>
 
           <div class="allocation-compare">
-            <div class="alloc-row" v-for="cat in ['equity','bond','index','hybrid','money','qdii','cash']" :key="cat"
+            <div class="alloc-row reveal-stagger" v-for="cat in ['equity','bond','index','hybrid','money','qdii','cash']" :key="cat"
               v-show="allocationValue(rebalanceResult.current_allocation, cat) > 0.001 || allocationValue(rebalanceResult.target_allocation, cat) > 0.001">
-              <span class="alloc-label">{{ categoryLabels[cat] || cat }}</span>
+              <span class="alloc-label terminal-label">{{ categoryLabels[cat] || cat }}</span>
               <div class="alloc-bars">
                 <div class="alloc-bar-current" :style="{ width: Math.min(allocationValue(rebalanceResult.current_allocation, cat)*100, 100) + '%' }"></div>
                 <div class="alloc-bar-target" :style="{ width: Math.min(allocationValue(rebalanceResult.target_allocation, cat)*100, 100) + '%' }"></div>
               </div>
-              <span class="alloc-values">
+              <span class="alloc-values font-jet">
                 <span class="alloc-current">{{ (allocationValue(rebalanceResult.current_allocation, cat)*100).toFixed(0) }}%</span>
                 <span class="alloc-arrow"><Icon name="arrow-right" size="11" /></span>
                 <span class="alloc-target">{{ (allocationValue(rebalanceResult.target_allocation, cat)*100).toFixed(0) }}%</span>
@@ -145,13 +145,13 @@ function allocationValue(allocation, category) {
           </div>
 
           <div v-if="rebalanceResult.suggestions?.length" class="rebalance-suggestions">
-            <div v-for="(s, i) in rebalanceResult.suggestions" :key="i" class="suggestion-item">
-              <span :class="['suggestion-action', s.action]">
+            <div v-for="(s, i) in rebalanceResult.suggestions" :key="i" class="suggestion-item reveal-stagger">
+              <span :class="['suggestion-action', 'terminal-label', s.action]">
                 {{ {buy:'买入',sell:'卖出',buy_index:'定投',deploy_cash:'配置现金',reserve_cash:'保留现金'}[s.action] || s.action }}
               </span>
               <span class="suggestion-detail">
                 {{ s.fund_name || s.category }} · {{ s.reason }}
-                <span v-if="s.amount_range" class="suggestion-amount">{{ s.amount_range }}</span>
+                <span v-if="s.amount_range" class="suggestion-amount font-jet">{{ s.amount_range }}</span>
               </span>
             </div>
           </div>
@@ -205,17 +205,7 @@ function allocationValue(allocation, category) {
   min-height: auto;
   max-height: none;
 }
-.dash-card::before {
-  content: '';
-  position: absolute;
-  top: 0;
-  left: 0;
-  right: 0;
-  height: 3px;
-  background: var(--gradient-accent);
-  opacity: 0;
-  transition: opacity 0.3s ease;
-}
+/* 金色竖线由全局 .editorial-card::before 提供，此处不再覆盖 */
 .dash-card::after {
   content: '';
   position: absolute;
@@ -234,9 +224,6 @@ function allocationValue(allocation, category) {
   box-shadow: var(--shadow-lg), var(--shadow-glow);
   border-color: var(--color-primary-border);
   transform: translateY(-1px);
-}
-.dash-card:hover::before {
-  opacity: 1;
 }
 .dash-card:hover::after {
   opacity: 0.08;
@@ -319,7 +306,6 @@ function allocationValue(allocation, category) {
 }
 .metric-value {
   font-size: 1.1rem;
-  font-weight: 800;
   color: var(--color-text-primary);
   letter-spacing: -0.02em;
 }

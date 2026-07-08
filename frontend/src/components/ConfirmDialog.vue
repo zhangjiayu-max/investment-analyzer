@@ -16,7 +16,7 @@ const emit = defineEmits(['confirm', 'cancel'])
   <Teleport to="body">
     <Transition name="fade">
       <div v-if="visible" class="dialog-backdrop" @click.self="emit('cancel')">
-        <div class="dialog-box">
+        <div class="dialog-box editorial-card">
           <div class="dialog-body">
             <div :class="['dialog-icon', danger ? 'icon-danger' : 'icon-info']">
               <svg v-if="danger" width="20" height="20" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -27,7 +27,7 @@ const emit = defineEmits(['confirm', 'cancel'])
               </svg>
             </div>
             <div>
-              <h3 class="dialog-title">{{ title }}</h3>
+              <h3 class="dialog-title editorial-title-lg">{{ title }}</h3>
               <p class="dialog-message">{{ message }}</p>
             </div>
           </div>
@@ -103,8 +103,8 @@ const emit = defineEmits(['confirm', 'cancel'])
 }
 
 .dialog-title {
-  font-size: 1rem;
-  font-weight: 600;
+  font-size: inherit;
+  font-weight: inherit;
   color: var(--color-text-primary);
   margin: 0 0 0.4rem 0;
 }

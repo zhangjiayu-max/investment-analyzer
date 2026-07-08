@@ -16,16 +16,16 @@ const emit = defineEmits(['bond-recommend'])
 </script>
 
 <template>
-  <div class="dash-card card">
-    <div class="card-header">
+  <div class="dash-card card editorial-card">
+    <div class="card-header editorial-card-header">
       <div class="card-title-row">
         <svg width="18" height="18" fill="none" stroke="currentColor" viewBox="0 0 24 24" class="card-icon">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
         </svg>
-        <span>零钱配置</span>
+        <span class="title editorial-title">零钱配置</span>
       </div>
       <div class="card-header-actions">
-        <span v-if="cashManagement" class="card-data-time">{{ cashUpdatedAt || '' }}</span>
+        <span v-if="cashManagement" class="card-data-time meta terminal-label">{{ cashUpdatedAt || '' }}</span>
         <AIActionButton
           v-if="cashManagement?.balance > 0"
           :label="bondResult ? '重新分析' : 'AI 债券推荐'"
@@ -40,14 +40,14 @@ const emit = defineEmits(['bond-recommend'])
     </div>
     <div class="card-body">
       <div class="cash-balance-row">
-        <span class="cash-label">可用零钱</span>
-        <span class="cash-value">¥{{ (cashManagement?.balance || 0).toLocaleString() }}</span>
-        <span v-if="cashManagement?.suggestion?.cash_ratio != null" class="cash-ratio-tag">
+        <span class="cash-label terminal-label">可用零钱</span>
+        <span class="cash-value font-jet-lg">¥{{ (cashManagement?.balance || 0).toLocaleString() }}</span>
+        <span v-if="cashManagement?.suggestion?.cash_ratio != null" class="cash-ratio-tag font-jet">
           占比 {{ (cashManagement.suggestion.cash_ratio * 100).toFixed(0) }}%
         </span>
       </div>
       <div v-if="cashManagement?.cash_details" class="cash-details-row">
-        <span v-for="(bal, uid) in cashManagement.cash_details" :key="uid" class="cash-detail-tag">
+        <span v-for="(bal, uid) in cashManagement.cash_details" :key="uid" class="cash-detail-tag reveal-stagger font-jet">
           <Icon name="circle-user" size="12" class="cash-detail-icon" /> {{ uid }} ¥{{ bal.toLocaleString() }}
         </span>
       </div>
@@ -55,7 +55,7 @@ const emit = defineEmits(['bond-recommend'])
       <!-- 现金预警 + 权益机会 -->
       <div v-if="cashManagement?.suggestion?.alerts?.length" class="cash-alerts">
         <div v-for="(alert, i) in cashManagement.suggestion.alerts" :key="i"
-          :class="['cash-alert', alert.level]">
+          :class="['cash-alert', 'reveal-stagger', alert.level]">
           <span class="cash-alert-icon"><Icon :name="ALERT_ICON_MAP[alert.level] || 'info'" size="13" /></span>
           <span>{{ alert.message }}</span>
         </div>
@@ -63,24 +63,24 @@ const emit = defineEmits(['bond-recommend'])
 
       <div v-if="cashManagement?.bond_market" class="bond-info">
         <div class="bond-temp-row">
-          <span class="bond-temp-label">债市温度</span>
-          <span :class="['bond-temp-value', { 'bond-cold': cashManagement.bond_market.temperature <= 30, 'bond-hot': cashManagement.bond_market.temperature > 70 }]">
+          <span class="bond-temp-label terminal-label">债市温度</span>
+          <span :class="['bond-temp-value', 'font-jet-lg', { 'bond-cold': cashManagement.bond_market.temperature <= 30, 'bond-hot': cashManagement.bond_market.temperature > 70 }]">
             {{ cashManagement.bond_market.temperature }}°
           </span>
-          <span class="bond-yield">10Y收益率 {{ cashManagement.bond_market.yield_val }}%</span>
+          <span class="bond-yield font-jet">10Y收益率 {{ cashManagement.bond_market.yield_val }}%</span>
         </div>
 
         <!-- 趋势对比 -->
         <div v-if="cashManagement.bond_market.trend" class="bond-trend">
           <div class="trend-item">
-            <span class="trend-label">较一周前</span>
-            <span :class="['trend-val', { 'trend-up': (cashManagement.bond_market.trend.week_ago_yield || 0) < (cashManagement.bond_market.yield_val || 0) }]">
+            <span class="trend-label terminal-label">较一周前</span>
+            <span :class="['trend-val', 'font-jet', { 'trend-up': (cashManagement.bond_market.trend.week_ago_yield || 0) < (cashManagement.bond_market.yield_val || 0) }]">
               {{ _cmpTemp(cashManagement.bond_market.trend.week_ago_temp, cashManagement.bond_market.temperature) }}
             </span>
           </div>
           <div class="trend-item">
-            <span class="trend-label">较一月前</span>
-            <span :class="['trend-val', { 'trend-up': (cashManagement.bond_market.trend.month_ago_yield || 0) < (cashManagement.bond_market.yield_val || 0) }]">
+            <span class="trend-label terminal-label">较一月前</span>
+            <span :class="['trend-val', 'font-jet', { 'trend-up': (cashManagement.bond_market.trend.month_ago_yield || 0) < (cashManagement.bond_market.yield_val || 0) }]">
               {{ _cmpTemp(cashManagement.bond_market.trend.month_ago_temp, cashManagement.bond_market.temperature) }}
             </span>
           </div>
@@ -94,10 +94,10 @@ const emit = defineEmits(['bond-recommend'])
       <div v-if="cashManagement?.suggestion?.allocation?.length" class="allocation-section">
         <p class="allocation-summary">{{ cashManagement.suggestion.summary }}</p>
         <div class="allocation-chart">
-          <div v-for="(item, i) in cashManagement.suggestion.allocation" :key="i" class="allocation-bar-item">
+          <div v-for="(item, i) in cashManagement.suggestion.allocation" :key="i" class="allocation-bar-item reveal-stagger">
             <div class="alloc-bar-label">
               <span>{{ item.name }}</span>
-              <span class="alloc-bar-pct">{{ item.ratio }}%</span>
+              <span class="alloc-bar-pct font-jet">{{ item.ratio }}%</span>
             </div>
             <div class="alloc-bar-bg">
               <div class="alloc-bar-fill" :style="{ width: item.ratio + '%', background: ['#c9a84c', '#10b981', '#f59e0b'][i % 3] }"></div>
@@ -106,9 +106,9 @@ const emit = defineEmits(['bond-recommend'])
           </div>
         </div>
         <div class="alloc-money">
-          <div v-for="(item, i) in cashManagement.suggestion.allocation" :key="'m'+i" class="alloc-money-item">
+          <div v-for="(item, i) in cashManagement.suggestion.allocation" :key="'m'+i" class="alloc-money-item reveal-stagger">
             <span class="alloc-money-name">{{ item.name }}</span>
-            <span class="alloc-money-val">≈ ¥{{ ((cashManagement.balance || 0) * item.ratio / 100).toLocaleString() }}</span>
+            <span class="alloc-money-val font-jet">≈ ¥{{ ((cashManagement.balance || 0) * item.ratio / 100).toLocaleString() }}</span>
           </div>
         </div>
       </div>
@@ -125,24 +125,24 @@ const emit = defineEmits(['bond-recommend'])
             <span class="bond-ai-market">{{ bondResult.market_assessment }}</span>
           </div>
           <div v-if="bondResult.policy_analysis" class="bond-ai-trend">
-            <span class="bond-ai-label">政策环境：</span>{{ bondResult.policy_analysis }}
+            <span class="bond-ai-label terminal-label">政策环境：</span>{{ bondResult.policy_analysis }}
           </div>
           <div v-if="bondResult.trend_analysis" class="bond-ai-trend">
-            <span class="bond-ai-label">趋势判断：</span>{{ bondResult.trend_analysis }}
+            <span class="bond-ai-label terminal-label">趋势判断：</span>{{ bondResult.trend_analysis }}
           </div>
           <div v-if="bondResult.current_bond_analysis" class="bond-ai-analysis">
-            <span class="bond-ai-label">持仓评估：</span>{{ bondResult.current_bond_analysis }}
+            <span class="bond-ai-label terminal-label">持仓评估：</span>{{ bondResult.current_bond_analysis }}
           </div>
           <div v-if="bondResult.recommendations?.length" class="bond-rec-list">
-            <div v-for="(rec, i) in bondResult.recommendations" :key="i" class="bond-rec-item">
+            <div v-for="(rec, i) in bondResult.recommendations" :key="i" class="bond-rec-item reveal-stagger">
               <div class="bond-rec-head">
                 <span class="bond-rec-name">{{ rec.fund_name }}</span>
-                <span class="bond-rec-code">{{ rec.fund_code }}</span>
-                <span class="bond-rec-type">{{ rec.fund_type }}</span>
+                <span class="bond-rec-code font-jet">{{ rec.fund_code }}</span>
+                <span class="bond-rec-type terminal-label">{{ rec.fund_type }}</span>
               </div>
               <div class="bond-rec-body">
                 <span class="bond-rec-reason">{{ rec.reason }}</span>
-                <span class="bond-rec-amount">≈ ¥{{ (rec.amount || 0).toLocaleString() }}</span>
+                <span class="bond-rec-amount font-jet">≈ ¥{{ (rec.amount || 0).toLocaleString() }}</span>
                 <span class="bond-rec-desc">{{ rec.amount_desc }}</span>
               </div>
             </div>
@@ -172,17 +172,7 @@ const emit = defineEmits(['bond-recommend'])
   min-height: auto;
   max-height: none;
 }
-.dash-card::before {
-  content: '';
-  position: absolute;
-  top: 0;
-  left: 0;
-  right: 0;
-  height: 3px;
-  background: var(--gradient-success);
-  opacity: 0;
-  transition: opacity 0.3s ease;
-}
+/* 金色竖线由全局 .editorial-card::before 提供，此处不再覆盖 */
 .dash-card::after {
   content: '';
   position: absolute;
@@ -201,9 +191,6 @@ const emit = defineEmits(['bond-recommend'])
   box-shadow: var(--shadow-lg), var(--shadow-glow);
   border-color: var(--color-primary-border);
   transform: translateY(-1px);
-}
-.dash-card:hover::before {
-  opacity: 1;
 }
 .dash-card:hover::after {
   opacity: 0.08;
@@ -262,7 +249,6 @@ const emit = defineEmits(['bond-recommend'])
 }
 .cash-value {
   font-size: 1.5rem;
-  font-weight: 700;
   color: var(--color-text-primary);
   letter-spacing: -0.02em;
 }
@@ -508,7 +494,6 @@ const emit = defineEmits(['bond-recommend'])
 .bond-rec-code {
   font-size: 0.75rem;
   color: var(--color-text-muted);
-  font-family: monospace;
 }
 .bond-rec-type {
   font-size: 0.72rem;

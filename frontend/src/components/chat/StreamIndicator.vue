@@ -49,13 +49,13 @@ function formatElapsed(ms) {
   <div class="message assistant">
     <!-- 已完成的专家分析 -->
     <div v-if="currentStream.completedSpecialists.length > 0" class="specialists-container streaming">
-      <div v-for="(s, j) in currentStream.completedSpecialists" :key="j" class="specialist-item" :class="isSpecialistFailed(s) ? 'failed-specialist' : 'completed'">
+      <div v-for="(s, j) in currentStream.completedSpecialists" :key="j" class="specialist-item editorial-card reveal-stagger" :class="isSpecialistFailed(s) ? 'failed-specialist' : 'completed'">
         <div class="specialist-header" @click="s.expanded = !s.expanded">
           <span class="specialist-icon">{{ isSpecialistFailed(s) ? '⚠️' : s.icon }}</span>
-          <span class="specialist-name">{{ s.agent }}</span>
+          <span class="specialist-name editorial-title">{{ s.agent }}</span>
           <span v-if="isSpecialistFailed(s)" class="specialist-failed-badge">失败</span>
           <span v-else class="specialist-status done">✓</span>
-          <span v-if="s.duration_ms" class="specialist-time">{{ (s.duration_ms / 1000).toFixed(1) }}s</span>
+          <span v-if="s.duration_ms" class="specialist-time font-jet">{{ (s.duration_ms / 1000).toFixed(1) }}s</span>
           <span class="specialist-toggle">{{ s.expanded ? '▲' : '▼' }}</span>
         </div>
         <div v-if="s.expanded" class="specialist-analysis markdown-body" v-html="renderMarkdown(s.analysis || '（暂无分析内容）')"></div>
@@ -63,10 +63,10 @@ function formatElapsed(ms) {
     </div>
     <!-- 正在工作的专家 -->
     <div v-if="currentStream.activeSpecialists.length > 0" class="specialists-container streaming">
-      <div v-for="(s, j) in currentStream.activeSpecialists" :key="j" class="specialist-item running">
+      <div v-for="(s, j) in currentStream.activeSpecialists" :key="j" class="specialist-item running editorial-card reveal-stagger">
         <div class="specialist-header">
           <span class="specialist-icon spinning">{{ s.icon }}</span>
-          <span class="specialist-name">正在咨询{{ s.agent }}...</span>
+          <span class="specialist-name editorial-title">正在咨询{{ s.agent }}...</span>
           <span class="specialist-status running">
             <span class="dot"></span><span class="dot"></span><span class="dot"></span>
           </span>
@@ -75,23 +75,23 @@ function formatElapsed(ms) {
     </div>
     <!-- 交叉审阅进度 -->
     <div v-if="currentStream.completedCrossReviews.length > 0" class="specialists-container streaming cross-review">
-      <div class="cross-review-label">交叉审阅</div>
-      <div v-for="(s, j) in currentStream.completedCrossReviews" :key="j" class="specialist-item completed cross-review-item">
+      <div class="cross-review-label terminal-label">交叉审阅</div>
+      <div v-for="(s, j) in currentStream.completedCrossReviews" :key="j" class="specialist-item completed cross-review-item editorial-card reveal-stagger">
         <div class="specialist-header" @click="s.expanded = !s.expanded">
           <span class="specialist-icon">{{ s.icon }}</span>
-          <span class="specialist-name">{{ s.agent }} 审阅</span>
+          <span class="specialist-name editorial-title">{{ s.agent }} 审阅</span>
           <span class="specialist-status done">✓</span>
-          <span v-if="s.duration_ms" class="specialist-time">{{ (s.duration_ms / 1000).toFixed(1) }}s</span>
+          <span v-if="s.duration_ms" class="specialist-time font-jet">{{ (s.duration_ms / 1000).toFixed(1) }}s</span>
           <span class="specialist-toggle">{{ s.expanded ? '▲' : '▼' }}</span>
         </div>
         <div v-if="s.expanded" class="specialist-analysis markdown-body" v-html="renderMarkdown(s.analysis || '（暂无审阅内容）')"></div>
       </div>
     </div>
     <div v-if="currentStream.crossReviewSpecialists.length > 0" class="specialists-container streaming cross-review">
-      <div v-for="(s, j) in currentStream.crossReviewSpecialists" :key="j" class="specialist-item running cross-review-item">
+      <div v-for="(s, j) in currentStream.crossReviewSpecialists" :key="j" class="specialist-item running cross-review-item editorial-card reveal-stagger">
         <div class="specialist-header">
           <span class="specialist-icon spinning">{{ s.icon }}</span>
-          <span class="specialist-name">{{ s.agent }} 交叉审阅中...</span>
+          <span class="specialist-name editorial-title">{{ s.agent }} 交叉审阅中...</span>
           <span class="specialist-status running">
             <span class="dot"></span><span class="dot"></span><span class="dot"></span>
           </span>
@@ -111,19 +111,18 @@ function formatElapsed(ms) {
     <!-- 执行计划 -->
     <div v-if="currentStream.executionPlan" class="execution-plan">
       <div class="plan-header">
-        <span class="plan-icon">📋</span>
-        <span class="plan-label">执行计划</span>
-        <span class="plan-complexity" :class="'complexity-' + currentStream.executionPlan.complexity">
+        <span class="plan-label editorial-title">执行计划</span>
+        <span class="plan-complexity terminal-label" :class="'complexity-' + currentStream.executionPlan.complexity">
           {{ {simple: '简单', medium: '中等', complex: '复杂'}[currentStream.executionPlan.complexity] || currentStream.executionPlan.complexity }}
         </span>
       </div>
       <div v-if="currentStream.executionPlan.reason" class="plan-reason">{{ currentStream.executionPlan.reason }}</div>
       <div v-if="currentStream.activeSpecialists.length > 0 || currentStream.completedSpecialists.length > 0" class="plan-steps">
-        <div v-for="(s, i) in currentStream.completedSpecialists" :key="'done-'+i" class="plan-step done">
+        <div v-for="(s, i) in currentStream.completedSpecialists" :key="'done-'+i" class="plan-step done reveal-stagger">
           <span class="step-check">✓</span>
           <span class="step-name">{{ s.agent }}</span>
         </div>
-        <div v-for="(s, i) in currentStream.activeSpecialists" :key="'run-'+i" class="plan-step running">
+        <div v-for="(s, i) in currentStream.activeSpecialists" :key="'run-'+i" class="plan-step running reveal-stagger">
           <span class="step-spinner"></span>
           <span class="step-name">{{ s.agent }}</span>
         </div>
@@ -134,30 +133,30 @@ function formatElapsed(ms) {
       <div class="progress-bar-container">
         <div class="progress-bar-fill" :style="{ width: currentStream.progressPct + '%' }"></div>
       </div>
-      <div v-if="currentStream.substep" class="substep-text">
+      <div v-if="currentStream.substep" class="substep-text terminal-label">
         <span class="dot-pulse"></span> {{ currentStream.substep }}
       </div>
     </div>
     <!-- 状态文字 -->
     <div v-else-if="currentStream.streamStatus === 'searching'" class="stream-status">
       <span class="dot"></span><span class="dot"></span><span class="dot"></span>
-      <span class="status-text">{{ currentStream.statusMessage || '正在检索知识库...' }}</span>
+      <span class="status-text terminal-label">{{ currentStream.statusMessage || '正在检索知识库...' }}</span>
     </div>
     <div v-else-if="currentStream.streamStatus === 'thinking'" class="stream-status">
       <span class="dot"></span><span class="dot"></span><span class="dot"></span>
-      <span class="status-text">{{ currentStream.statusMessage || '正在分析问题，决定需要咨询哪些专家...' }}</span>
+      <span class="status-text terminal-label">{{ currentStream.statusMessage || '正在分析问题，决定需要咨询哪些专家...' }}</span>
     </div>
     <div v-else-if="currentStream.streamStatus === 'calling_specialist'" class="stream-status">
       <span class="dot"></span><span class="dot"></span><span class="dot"></span>
-      <span class="status-text">{{ currentStream.statusMessage || '专家团队正在分析中...' }}</span>
+      <span class="status-text terminal-label">{{ currentStream.statusMessage || '专家团队正在分析中...' }}</span>
     </div>
     <div v-else-if="currentStream.streamStatus === 'calling_tool'" class="stream-status">
       <span class="dot"></span><span class="dot"></span><span class="dot"></span>
-      <span class="status-text">正在调用工具...</span>
+      <span class="status-text terminal-label">正在调用工具...</span>
     </div>
     <div v-else-if="currentStream.streamStatus === 'cross_reviewing'" class="stream-status">
       <span class="dot"></span><span class="dot"></span><span class="dot"></span>
-      <span class="status-text">正在进行交叉审阅...</span>
+      <span class="status-text terminal-label">正在进行交叉审阅...</span>
     </div>
     <div v-else class="message-bubble typing">
       <span class="dot"></span><span class="dot"></span><span class="dot"></span>
@@ -165,7 +164,7 @@ function formatElapsed(ms) {
     <!-- 实时计时器 -->
     <div v-if="currentStream.elapsedMs > 0" class="elapsed-timer">
       <span class="elapsed-icon">⏱</span>
-      <span class="elapsed-text">已执行 {{ formatElapsed(currentStream.elapsedMs) }}</span>
+      <span class="elapsed-text font-jet">已执行 {{ formatElapsed(currentStream.elapsedMs) }}</span>
     </div>
   </div>
 </template>

@@ -52,7 +52,7 @@ const isDisabled = computed(() => props.disabled || stateConfig.value.disabled)
   >
     <Icon :name="stateConfig.icon" :size="size === 'sm' ? 13 : 15" class="ai-action-button__icon" />
     <span class="ai-action-button__label">{{ stateConfig.label }}</span>
-    <span v-if="agent" class="ai-action-button__agent">{{ agent }}</span>
+    <span v-if="agent" class="ai-action-button__agent terminal-label">{{ agent }}</span>
     <span v-if="agent" class="ai-action-button__tooltip">{{ agent }}</span>
   </button>
 </template>
@@ -134,8 +134,8 @@ const isDisabled = computed(() => props.disabled || stateConfig.value.disabled)
   max-width: 8rem;
   overflow: hidden;
   text-overflow: ellipsis;
-  font-size: 0.68rem;
-  font-weight: 600;
+  font-size: inherit;
+  font-weight: inherit;
   opacity: 0.72;
 }
 

@@ -60,9 +60,9 @@ onUnmounted(() => { if (rafId) cancelAnimationFrame(rafId) })
 </script>
 
 <template>
-  <span :class="{ 'num-mono': mono }">{{ formatNum(display) }}</span>
+  <span :class="{ 'font-jet': mono }">{{ formatNum(display) }}</span>
 </template>
 
 <style scoped>
-.num-mono { font-family: var(--font-num-mono); font-variant-numeric: tabular-nums; }
+/* 等宽数字由全局 .font-jet 工具类接管（mono-jet + tabular-nums + 紧凑字距） */
 </style>

@@ -377,7 +377,7 @@ const tradeSuggestions = computed(() => {
 <template>
   <div :class="['message', msg.role]">
     <div class="message-bubble" v-if="msg.role === 'user'">
-      <span class="message-id-badge" v-if="msg.id" @click="emit('copy-message-id', msg.id)" :title="'点击复制消息ID: ' + msg.id">
+      <span class="message-id-badge font-jet" v-if="msg.id" @click="emit('copy-message-id', msg.id)" :title="'点击复制消息ID: ' + msg.id">
         #{{ msg.id }}
       </span>
       <span class="user-copy-btn" @click.stop.prevent="copyMessageContent(msg, $event)" title="复制内容">
@@ -400,7 +400,7 @@ const tradeSuggestions = computed(() => {
     <div v-else>
       <!-- 消息 ID 标识 + 评估状态 -->
       <div class="message-id-header" v-if="msg.id">
-        <span class="message-id-badge" @click="emit('copy-message-id', msg.id)" :title="'点击复制消息ID: ' + msg.id">
+        <span class="message-id-badge font-jet" @click="emit('copy-message-id', msg.id)" :title="'点击复制消息ID: ' + msg.id">
           #{{ msg.id }} <Icon name="clipboard-list" size="11" class="inline-icon" />
         </span>
         <!-- 评估状态指示器 -->
@@ -410,7 +410,7 @@ const tradeSuggestions = computed(() => {
           @click.stop="emit('toggle-eval', msg.id)"
           :title="getEvalStatusTitle(msg.id)"
         >
-          <span v-if="messageEvalStates[msg.id]?.score > 0" class="eval-score-mini">
+          <span v-if="messageEvalStates[msg.id]?.score > 0" class="eval-score-mini font-jet">
             {{ messageEvalStates[msg.id].score.toFixed(0) }}
           </span>
           <Icon v-else :name="getEvalStatusIcon(msg.id)" size="12" />
@@ -434,12 +434,12 @@ const tradeSuggestions = computed(() => {
       </div>
       <!-- 专家分析展示 -->
       <div v-if="msg.specialist_results && msg.specialist_results.length" class="specialists-container">
-        <div v-for="(s, j) in msg.specialist_results" :key="j" class="specialist-item" :class="{ 'specialist-failed': isSpecialistFailed(s) }">
+        <div v-for="(s, j) in msg.specialist_results" :key="j" class="specialist-item editorial-card reveal-stagger" :class="{ 'specialist-failed': isSpecialistFailed(s) }">
           <div class="specialist-header" @click="s.expanded = !s.expanded">
             <span class="specialist-icon">{{ isSpecialistFailed(s) ? '⚠️' : s.icon }}</span>
-            <span class="specialist-name">{{ s.agent }}</span>
+            <span class="specialist-name editorial-title">{{ s.agent }}</span>
             <span v-if="isSpecialistFailed(s)" class="specialist-failed-badge">失败</span>
-            <span v-if="s.duration_ms" class="specialist-time">{{ (s.duration_ms / 1000).toFixed(1) }}s</span>
+            <span v-if="s.duration_ms" class="specialist-time font-jet">{{ (s.duration_ms / 1000).toFixed(1) }}s</span>
             <!-- 专家反馈按钮（失败态隐藏） -->
             <div v-if="!isSpecialistFailed(s)" class="specialist-feedback" @click.stop>
               <template v-if="specialistFeedback[index + '_' + s.agent_key]">
@@ -474,12 +474,12 @@ const tradeSuggestions = computed(() => {
       </div>
       <!-- 交叉审阅展示 -->
       <div v-if="msg.cross_review_results && msg.cross_review_results.length" class="specialists-container cross-review">
-        <div class="cross-review-label">交叉审阅</div>
-        <div v-for="(s, j) in msg.cross_review_results" :key="j" class="specialist-item cross-review-item">
+        <div class="cross-review-label terminal-label">交叉审阅</div>
+        <div v-for="(s, j) in msg.cross_review_results" :key="j" class="specialist-item cross-review-item editorial-card reveal-stagger">
           <div class="specialist-header" @click="s.expanded = !s.expanded">
             <span class="specialist-icon">{{ s.icon }}</span>
-            <span class="specialist-name">{{ s.agent }} 审阅</span>
-            <span v-if="s.duration_ms" class="specialist-time">{{ (s.duration_ms / 1000).toFixed(1) }}s</span>
+            <span class="specialist-name editorial-title">{{ s.agent }} 审阅</span>
+            <span v-if="s.duration_ms" class="specialist-time font-jet">{{ (s.duration_ms / 1000).toFixed(1) }}s</span>
             <span class="specialist-toggle"><Icon name="chevron-down" size="12" :class="{ expanded: s.expanded }" /></span>
           </div>
           <div v-if="s.expanded" class="specialist-analysis-wrap">
@@ -500,10 +500,10 @@ const tradeSuggestions = computed(() => {
         <div class="execution-toggle" @click="msg._showExecution = !msg._showExecution">
           <Icon name="config" size="13" class="execution-toggle-icon" />
           <span>执行过程</span>
-          <span v-if="msg.complexity" class="execution-complexity" :class="'complexity-' + msg.complexity">
+          <span v-if="msg.complexity" class="execution-complexity terminal-label" :class="'complexity-' + msg.complexity">
             {{ msg.complexity === 'complex' ? '复杂' : msg.complexity === 'medium' ? '中等' : '简单' }}
           </span>
-          <span v-if="msg.duration_ms" class="execution-total-time">{{ formatDuration(msg.duration_ms) }}</span>
+          <span v-if="msg.duration_ms" class="execution-total-time font-jet">{{ formatDuration(msg.duration_ms) }}</span>
           <span class="execution-toggle-arrow"><Icon name="chevron-down" size="12" :class="{ expanded: msg._showExecution }" /></span>
         </div>
         <Transition name="expand">
@@ -513,35 +513,35 @@ const tradeSuggestions = computed(() => {
               <div class="timeline-item" v-if="msg.phase_timings.clarification_ms">
                 <span class="timeline-dot"></span>
                 <span class="timeline-label">理解问题</span>
-                <span class="timeline-time">{{ formatDuration(msg.phase_timings.clarification_ms) }}</span>
+                <span class="timeline-time font-jet">{{ formatDuration(msg.phase_timings.clarification_ms) }}</span>
               </div>
               <div class="timeline-item" v-if="msg.phase_timings.rag_ms">
                 <span class="timeline-dot"></span>
                 <span class="timeline-label">知识检索</span>
-                <span class="timeline-time">{{ formatDuration(msg.phase_timings.rag_ms) }}</span>
+                <span class="timeline-time font-jet">{{ formatDuration(msg.phase_timings.rag_ms) }}</span>
               </div>
               <div class="timeline-item" v-if="msg.phase_timings.orchestrator_ms">
                 <span class="timeline-dot"></span>
                 <span class="timeline-label">专家协作</span>
-                <span class="timeline-time">{{ formatDuration(msg.phase_timings.orchestrator_ms) }}</span>
+                <span class="timeline-time font-jet">{{ formatDuration(msg.phase_timings.orchestrator_ms) }}</span>
               </div>
             </div>
             <!-- 推理链（升级二：推理过程可视化） -->
             <div v-if="msg.reasoning_trail" class="reasoning-trail">
-              <div class="trail-header">🧠 推理过程 {{ msg.reasoning_trail.timeline?.length || 0 }} 步</div>
+              <div class="trail-header editorial-title">推理过程 <span class="font-jet">{{ msg.reasoning_trail.timeline?.length || 0 }}</span> 步</div>
               <div v-if="msg.reasoning_trail.query_rewritten" class="trail-rewrite">
-                <span class="trail-label">查询改写：</span>
+                <span class="trail-label terminal-label">查询改写：</span>
                 <span class="trail-rewrite-text">{{ msg.reasoning_trail.query_rewritten }}</span>
               </div>
               <div v-if="msg.reasoning_trail.rag?.used" class="trail-rag">
-                <span class="trail-label">知识检索：</span>
-                <span>{{ msg.reasoning_trail.rag.context_length }} 字符</span>
+                <span class="trail-label terminal-label">知识检索：</span>
+                <span class="font-jet">{{ msg.reasoning_trail.rag.context_length }} 字符</span>
               </div>
               <div class="trail-timeline">
-                <div v-for="(step, i) in msg.reasoning_trail.timeline" :key="i" class="trail-step" :class="step.type">
+                <div v-for="(step, i) in msg.reasoning_trail.timeline" :key="i" class="trail-step reveal-stagger" :class="step.type">
                   <span class="trail-step-icon">{{ step.icon || (step.type === 'arbitration' ? '⚖️' : '🤖') }}</span>
                   <span class="trail-step-name">{{ step.agent }}</span>
-                  <span v-if="step.duration_ms" class="trail-step-time">{{ (step.duration_ms / 1000).toFixed(1) }}s</span>
+                  <span v-if="step.duration_ms" class="trail-step-time font-jet">{{ (step.duration_ms / 1000).toFixed(1) }}s</span>
                   <div v-if="step.conclusion" class="trail-step-conclusion">{{ step.conclusion }}</div>
                 </div>
               </div>
@@ -549,14 +549,14 @@ const tradeSuggestions = computed(() => {
             <!-- 专家列表 -->
             <div v-if="msg.specialist_results?.length" class="execution-agents">
               <span class="execution-agents-label">参与专家：</span>
-              <span v-for="s in msg.specialist_results" :key="s.agent_key" class="execution-agent-tag">
+              <span v-for="s in msg.specialist_results" :key="s.agent_key" class="execution-agent-tag terminal-label">
                 {{ s.icon }} {{ s.agent }}
-                <span v-if="s.duration_ms" class="execution-agent-time">{{ (s.duration_ms / 1000).toFixed(0) }}s</span>
+                <span v-if="s.duration_ms" class="execution-agent-time font-jet">{{ (s.duration_ms / 1000).toFixed(0) }}s</span>
               </span>
             </div>
             <!-- 工具调用统计 -->
             <div v-if="msg.tool_calls?.length" class="execution-tools">
-              <span>工具调用：{{ msg.tool_calls.length }} 次</span>
+              <span>工具调用：<span class="font-jet">{{ msg.tool_calls.length }}</span> 次</span>
             </div>
             <!-- Trace 详情按钮 -->
             <button class="btn-trace-detail" @click.stop="emit('toggle-trace', msg, index)">
@@ -572,7 +572,7 @@ const tradeSuggestions = computed(() => {
       </div>
       <!-- 工具调用展示 -->
       <div v-if="filterToolCalls(msg.tool_calls).length" class="tool-calls-container">
-        <div v-for="(tc, j) in filterToolCalls(msg.tool_calls)" :key="j" class="tool-call-item" :class="{ 'tool-call-empty': isToolEmpty(tc) }">
+        <div v-for="(tc, j) in filterToolCalls(msg.tool_calls)" :key="j" class="tool-call-item reveal-stagger" :class="{ 'tool-call-empty': isToolEmpty(tc) }">
           <div class="tool-call-header" @click="tc.expanded = !tc.expanded">
             <Icon name="wrench" size="13" class="tool-icon" />
             <span class="tool-name">{{ toolDisplayName(tc.name) }}</span>
@@ -602,8 +602,8 @@ const tradeSuggestions = computed(() => {
         >
           <Icon :name="s.type === 'buy' ? 'trending-up' : 'trending-down'" size="14" />
           执行{{ s.type === 'buy' ? '加仓' : '减仓' }} {{ s.fund_name }}
-          <span v-if="s.amount" class="trade-amount-hint">¥{{ s.amount }}</span>
-          <span v-else-if="s.shares" class="trade-amount-hint">{{ s.shares }}份</span>
+          <span v-if="s.amount" class="trade-amount-hint font-jet">¥{{ s.amount }}</span>
+          <span v-else-if="s.shares" class="trade-amount-hint font-jet">{{ s.shares }}份</span>
         </button>
       </div>
       <!-- 反馈按钮 -->
@@ -648,7 +648,7 @@ const tradeSuggestions = computed(() => {
       <div v-if="msg.rag && msg.rag.sources && msg.rag.sources.length" class="rag-sources">
         <div class="rag-header">
           <Icon name="book-open" size="14" />
-          <span>参考来源 ({{ msg.rag.results_count || msg.rag.sources.length }})</span>
+          <span>参考来源 (<span class="font-jet">{{ msg.rag.results_count || msg.rag.sources.length }}</span>)</span>
         </div>
         <div class="rag-tags">
           <span v-for="(s, j) in msg.rag.sources.slice(0, 5)" :key="j" :class="['rag-tag', 'rag-tag-' + s.type]">
@@ -666,10 +666,10 @@ const tradeSuggestions = computed(() => {
           <!-- 评估分数概览 -->
           <div class="eval-header">
             <div class="eval-total">
-              <span class="eval-total-score" :style="{ color: scoreColor(messageEvalStates[msg.id].evaluation.auto_score) }">
+              <span class="eval-total-score font-jet" :style="{ color: scoreColor(messageEvalStates[msg.id].evaluation.auto_score) }">
                 {{ messageEvalStates[msg.id].evaluation.auto_score?.toFixed(0) }}
               </span>
-              <span class="eval-total-label">总分</span>
+              <span class="eval-total-label terminal-label">总分</span>
             </div>
             <span class="eval-level" :class="getEvalLevelClass(messageEvalStates[msg.id].evaluation.auto_score)">
               {{ getEvalLevel(messageEvalStates[msg.id].evaluation.auto_score) }}
@@ -678,13 +678,13 @@ const tradeSuggestions = computed(() => {
 
           <!-- 维度分数 -->
           <div class="eval-dimensions">
-            <div v-for="(dim, key) in getEvalDimensions(msg.id)" :key="key" class="eval-dim">
+            <div v-for="(dim, key) in getEvalDimensions(msg.id)" :key="key" class="eval-dim reveal-stagger">
               <Icon :name="dim.icon" size="13" class="eval-dim-icon" />
               <span class="eval-dim-name">{{ dim.name }}</span>
               <div class="eval-dim-bar">
                 <div class="eval-dim-bar-fill" :style="{ width: dim.score + '%', backgroundColor: scoreColor(dim.score) }"></div>
               </div>
-              <span class="eval-dim-score" :style="{ color: scoreColor(dim.score) }">{{ dim.score }}</span>
+              <span class="eval-dim-score font-jet" :style="{ color: scoreColor(dim.score) }">{{ dim.score }}</span>
             </div>
           </div>
 
@@ -711,7 +711,7 @@ const tradeSuggestions = computed(() => {
         </div>
       </div>
     </div>
-    <div class="message-time">{{ formatTime(msg.created_at) }}</div>
+    <div class="message-time font-jet">{{ formatTime(msg.created_at) }}</div>
   </div>
 </template>
 
