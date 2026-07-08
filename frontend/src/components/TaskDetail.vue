@@ -118,7 +118,7 @@ watch(() => props.taskId, () => {
 </script>
 
 <template>
-  <div class="task-detail">
+  <div class="task-detail bg-mesh">
     <!-- Loading -->
     <div v-if="loading && !task" class="loading-state">
       <div class="spinner-lg"></div>
@@ -136,31 +136,31 @@ watch(() => props.taskId, () => {
       </div>
 
       <!-- Progress Steps -->
-      <div v-if="task.status !== 'done' && task.status !== 'error'" class="card progress-card">
+      <div v-if="task.status !== 'done' && task.status !== 'error'" class="card progress-card editorial-card">
         <div class="steps">
           <div :class="['step', { active: statusStep >= 1, done: statusStep > 1 }]">
-            <div class="step-dot">
+            <div class="step-dot font-jet">
               <svg v-if="statusStep > 1" width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 13l4 4L19 7"/></svg>
               <span v-else>1</span>
             </div>
-            <span class="step-label">抓取文章</span>
+            <span class="step-label terminal-label">抓取文章</span>
           </div>
           <div :class="['step-line', { active: statusStep > 1 }]"></div>
           <div :class="['step', { active: statusStep >= 2, done: statusStep > 2 }]">
-            <div class="step-dot">
+            <div class="step-dot font-jet">
               <div v-if="statusStep === 2" class="step-spinner"></div>
               <svg v-else-if="statusStep > 2" width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 13l4 4L19 7"/></svg>
               <span v-else>2</span>
             </div>
-            <span class="step-label">AI 分析</span>
+            <span class="step-label terminal-label">AI 分析</span>
           </div>
           <div :class="['step-line', { active: statusStep > 2 }]"></div>
           <div :class="['step', { active: statusStep >= 3 }]">
-            <div class="step-dot">
+            <div class="step-dot font-jet">
               <svg v-if="statusStep >= 3" width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 13l4 4L19 7"/></svg>
               <span v-else>3</span>
             </div>
-            <span class="step-label">完成</span>
+            <span class="step-label terminal-label">完成</span>
           </div>
         </div>
         <p v-if="task.title" class="progress-title">{{ task.title }}</p>
@@ -175,9 +175,9 @@ watch(() => props.taskId, () => {
       </div>
 
       <!-- Article Info -->
-      <div v-if="task.title" class="card article-info-card">
-        <h2 class="article-title">{{ task.title }}</h2>
-        <a :href="task.url" target="_blank" class="article-link">{{ task.url }}</a>
+      <div v-if="task.title" class="card article-info-card editorial-card">
+        <h2 class="article-title editorial-title-lg">{{ task.title }}</h2>
+        <a :href="task.url" target="_blank" class="article-link font-jet">{{ task.url }}</a>
         <div class="article-meta">
           <span v-if="task.author" class="meta-item">
             <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z"/></svg>
@@ -185,19 +185,19 @@ watch(() => props.taskId, () => {
           </span>
           <span v-if="task.publish_time" class="meta-item">
             <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"/></svg>
-            {{ task.publish_time }}
+            <span class="font-jet">{{ task.publish_time }}</span>
           </span>
         </div>
         <div v-if="task.codes_found?.length" class="codes-found">
-          <span class="codes-label">识别到的标的：</span>
-          <span v-for="code in task.codes_found" :key="code" class="badge badge-info">{{ code }}</span>
+          <span class="codes-label terminal-label">识别到的标的：</span>
+          <span v-for="code in task.codes_found" :key="code" class="badge badge-info font-jet">{{ code }}</span>
         </div>
       </div>
 
       <!-- Images -->
-      <div v-if="images.length" class="card images-card">
-        <div class="card-header">
-          <h3 class="card-title">文章图片 <span class="count-badge">{{ images.length }}</span></h3>
+      <div v-if="images.length" class="card images-card editorial-card">
+        <div class="card-header editorial-card-header">
+          <h3 class="card-title title">文章图片 <span class="count-badge font-jet">{{ images.length }}</span></h3>
           <button
             @click="onAnalyzeImages"
             :disabled="imageAnalysisLoading"
@@ -230,12 +230,12 @@ watch(() => props.taskId, () => {
       </div>
 
       <!-- Image Analysis Results -->
-      <div v-if="imageAnalysis" class="card">
-        <div class="card-header">
-          <h3 class="card-title">图片解读结果</h3>
+      <div v-if="imageAnalysis" class="card editorial-card">
+        <div class="card-header editorial-card-header">
+          <h3 class="card-title title">图片解读结果</h3>
         </div>
         <div class="image-results">
-          <div v-for="(result, i) in imageAnalysis" :key="i" class="image-result-item">
+          <div v-for="(result, i) in imageAnalysis" :key="i" class="image-result-item reveal-stagger">
             <div v-if="result.error" class="text-danger">{{ result.error }}</div>
             <div v-else>
               <div class="result-header">
@@ -245,7 +245,7 @@ watch(() => props.taskId, () => {
               <p class="result-summary">{{ result.summary || '' }}</p>
               <details v-if="result.data && Object.keys(result.data).length" class="result-details">
                 <summary>查看结构化数据</summary>
-                <pre>{{ JSON.stringify(result.data, null, 2) }}</pre>
+                <pre class="font-jet">{{ JSON.stringify(result.data, null, 2) }}</pre>
               </details>
             </div>
           </div>
@@ -253,14 +253,14 @@ watch(() => props.taskId, () => {
       </div>
 
       <!-- Market Data -->
-      <div v-if="task.market_data && Object.keys(task.market_data).length" class="card">
-        <div class="card-header">
-          <h3 class="card-title">行情数据</h3>
+      <div v-if="task.market_data && Object.keys(task.market_data).length" class="card editorial-card">
+        <div class="card-header editorial-card-header">
+          <h3 class="card-title title">行情数据</h3>
         </div>
         <div class="market-grid">
-          <div v-for="(info, code) in task.market_data" :key="code" class="market-item">
+          <div v-for="(info, code) in task.market_data" :key="code" class="market-item reveal-stagger">
             <div class="market-name">{{ info.name || '未知' }}</div>
-            <div class="market-code">{{ code }}</div>
+            <div class="market-code font-jet">{{ code }}</div>
             <div v-if="info.recommendation" class="market-rec">
               <span
                 :class="[
@@ -276,9 +276,9 @@ watch(() => props.taskId, () => {
       </div>
 
       <!-- LLM Analysis -->
-      <div v-if="task.llm_analysis && activeTab === 'analysis'" class="card">
-        <div class="card-header">
-          <h3 class="card-title">AI 分析</h3>
+      <div v-if="task.llm_analysis && activeTab === 'analysis'" class="card editorial-card">
+        <div class="card-header editorial-card-header">
+          <h3 class="card-title title">AI 分析</h3>
         </div>
         <div class="prose" v-html="renderedAnalysis"></div>
       </div>
@@ -294,9 +294,9 @@ watch(() => props.taskId, () => {
       </div>
 
       <!-- Chat Follow-up -->
-      <div v-if="task.status === 'done'" class="card chat-card">
-        <div class="card-header">
-          <h3 class="card-title">追问</h3>
+      <div v-if="task.status === 'done'" class="card chat-card editorial-card">
+        <div class="card-header editorial-card-header">
+          <h3 class="card-title title">追问</h3>
         </div>
         <form @submit.prevent="onChat" class="chat-form">
           <input
@@ -453,14 +453,12 @@ watch(() => props.taskId, () => {
 }
 
 .article-title {
-  font-size: 1.1rem;
-  font-weight: 700;
   color: var(--color-text-primary);
   margin: 0 0 0.25rem 0;
 }
 
 .article-link {
-  font-size: 0.75rem;
+  font-size:  0.75rem;
   color: var(--color-primary-500);
   text-decoration: none;
   word-break: break-all;

@@ -92,10 +92,10 @@ async function giveFeedback(result, rating) {
 </script>
 
 <template>
-  <div class="rag-test-page">
+  <div class="rag-test-page bg-mesh">
     <div class="page-header">
-      <h2 class="page-title">🎯 命中测试</h2>
-      <p class="page-desc">测试 RAG 检索的命中效果和速度，验证不同知识源的召回质量</p>
+      <h2 class="page-title editorial-title-lg">命中测试</h2>
+      <p class="page-desc editorial-subtitle">测试 RAG 检索的命中效果和速度，验证不同知识源的召回质量</p>
     </div>
 
     <!-- 类型选择 -->
@@ -112,7 +112,7 @@ async function giveFeedback(result, rating) {
     </div>
 
     <!-- 搜索区域 -->
-    <div class="search-area">
+    <div class="search-area editorial-card">
       <div class="search-row">
         <input
           v-model="testQuery"
@@ -152,44 +152,44 @@ async function giveFeedback(result, rating) {
     <!-- 结果区域 -->
     <div v-if="testResults" class="results-area">
       <!-- 诊断面板 -->
-      <div class="diagnostics">
+      <div class="diagnostics editorial-card">
         <div class="diag-item diag-time">
-          <span class="diag-value">{{ elapsedMs }}</span>
-          <span class="diag-unit">ms</span>
+          <span class="diag-value font-jet-lg">{{ elapsedMs }}</span>
+          <span class="diag-unit terminal-label">ms</span>
         </div>
         <div class="diag-item">
-          <span class="diag-value">{{ testResults.fts_count || 0 }}</span>
-          <span class="diag-label">FTS5 命中</span>
+          <span class="diag-value font-jet-lg">{{ testResults.fts_count || 0 }}</span>
+          <span class="diag-label terminal-label">FTS5 命中</span>
         </div>
         <div class="diag-item">
-          <span class="diag-value">{{ testResults.chroma_count || 0 }}</span>
-          <span class="diag-label">向量命中</span>
+          <span class="diag-value font-jet-lg">{{ testResults.chroma_count || 0 }}</span>
+          <span class="diag-label terminal-label">向量命中</span>
         </div>
         <div v-if="testResults.timing?.source_breakdown" class="diag-item">
-          <span class="diag-value">{{ testResults.timing.source_breakdown.both }}</span>
-          <span class="diag-label">双路命中</span>
+          <span class="diag-value font-jet-lg">{{ testResults.timing.source_breakdown.both }}</span>
+          <span class="diag-label terminal-label">双路命中</span>
         </div>
         <div v-if="testResults.freshness_filtered" class="diag-item">
-          <span class="diag-value">{{ testResults.freshness_filtered }}</span>
-          <span class="diag-label">时效过滤</span>
+          <span class="diag-value font-jet-lg">{{ testResults.freshness_filtered }}</span>
+          <span class="diag-label terminal-label">时效过滤</span>
         </div>
         <div class="diag-item">
-          <span class="diag-value">{{ testResults.results?.length || 0 }}</span>
-          <span class="diag-label">最终返回</span>
+          <span class="diag-value font-jet-lg">{{ testResults.results?.length || 0 }}</span>
+          <span class="diag-label terminal-label">最终返回</span>
         </div>
       </div>
 
       <!-- Rewrite 信息 -->
       <div v-if="testResults.rewritten_query" class="rewrite-info">
-        <span class="rewrite-label">Query Rewrite:</span>
-        <span class="rewrite-original">"{{ testResults.original_query }}"</span>
+        <span class="rewrite-label terminal-label">Query Rewrite:</span>
+        <span class="rewrite-original font-jet">"{{ testResults.original_query }}"</span>
         <span class="rewrite-arrow">→</span>
-        <span class="rewrite-result">"{{ testResults.rewritten_query }}"</span>
+        <span class="rewrite-result font-jet">"{{ testResults.rewritten_query }}"</span>
       </div>
 
       <!-- 关键词 -->
       <div v-if="testResults.keywords?.length" class="keywords-bar">
-        <span class="keywords-label">检索关键词：</span>
+        <span class="keywords-label terminal-label">检索关键词：</span>
         <span v-for="kw in testResults.keywords" :key="kw" class="keyword-tag">{{ kw }}</span>
       </div>
 
@@ -200,9 +200,9 @@ async function giveFeedback(result, rating) {
       </div>
 
       <div v-else class="result-list">
-        <div v-for="(r, i) in filteredResults" :key="i" class="result-card">
+        <div v-for="(r, i) in filteredResults" :key="i" class="result-card editorial-card reveal-stagger">
           <div class="result-top">
-            <span class="result-rank">#{{ i + 1 }}</span>
+            <span class="result-rank font-jet">#{{ i + 1 }}</span>
             <span class="result-type">{{ r.label || r.content_type }}</span>
             <span :class="['result-source', getSourceClass(r.source)]">{{ getSourceLabel(r.source) }}</span>
             <span class="result-title">{{ r.title }}</span>
@@ -210,17 +210,17 @@ async function giveFeedback(result, rating) {
               <div class="score-bar">
                 <div class="score-fill" :style="{ width: getScorePercent(r._score) + '%' }"></div>
               </div>
-              <span class="score-num">{{ getScorePercent(r._score).toFixed(0) }}%</span>
+              <span class="score-num font-jet">{{ getScorePercent(r._score).toFixed(0) }}%</span>
             </div>
           </div>
           <!-- 个性化加权信息 -->
           <div v-if="r.personal_boost && r.personal_boost > 0" class="personal-boost-bar">
             <div class="boost-row">
-              <span class="boost-label">🎯 个性化加成</span>
+              <span class="boost-label terminal-label">个性化加成</span>
               <div class="boost-meter">
                 <div class="boost-fill" :style="{ width: getBoostPercent(r.personal_boost) + '%' }" />
               </div>
-              <span class="boost-value">+{{ (r.personal_boost * 500).toFixed(0) }}%</span>
+              <span class="boost-value font-jet">+{{ (r.personal_boost * 500).toFixed(0) }}%</span>
             </div>
             <div v-if="r.personal_reasons?.length" class="boost-reasons">
               <span v-for="reason in r.personal_reasons" :key="reason" class="boost-reason-tag">{{ reason }}</span>
@@ -266,14 +266,15 @@ async function giveFeedback(result, rating) {
 }
 
 .page-title {
-  font-size: 1.25rem;
-  font-weight: 700;
+  font-size: inherit;
+  font-weight: inherit;
   margin: 0 0 0.25rem;
   color: var(--color-text-primary);
 }
 
 .page-desc {
-  font-size: 0.85rem;
+  font-size: inherit;
+  font-weight: inherit;
   color: var(--color-text-muted);
   margin: 0;
 }
@@ -815,7 +816,7 @@ async function giveFeedback(result, rating) {
   }
 
   .page-title {
-    font-size: 1.1rem;
+    font-size: inherit;
   }
 
   .type-selector {

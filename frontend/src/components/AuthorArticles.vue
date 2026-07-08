@@ -214,9 +214,9 @@ function imgUrl(url) {
 </script>
 
 <template>
-  <div class="author-page">
+  <div class="author-page bg-mesh">
     <!-- URL extract bar -->
-    <div class="extract-bar card">
+    <div class="extract-bar card editorial-card">
       <form @submit.prevent="handleExtract" class="extract-form">
         <input v-model="extractUrl" type="url" placeholder="输入文章链接，自动提取标题、作者、摘要..." class="input-field extract-input" :disabled="extracting" />
         <button type="submit" class="btn-primary extract-btn" :disabled="extracting || !extractUrl.trim()">
@@ -226,10 +226,10 @@ function imgUrl(url) {
       <!-- Extracted preview -->
       <div v-if="extractedData" class="extract-preview">
         <div class="extract-info">
-          <div class="extract-field"><span class="field-label">标题</span><span class="field-value">{{ extractedData.title || '-' }}</span></div>
-          <div class="extract-field"><span class="field-label">作者</span><span class="field-value">{{ extractedData.author || '-' }}</span></div>
-          <div class="extract-field"><span class="field-label">时间</span><span class="field-value">{{ extractedData.publish_time || '-' }}</span></div>
-          <div class="extract-field"><span class="field-label">摘要</span><span class="field-value summary">{{ extractedData.summary || '-' }}</span></div>
+          <div class="extract-field"><span class="field-label terminal-label">标题</span><span class="field-value">{{ extractedData.title || '-' }}</span></div>
+          <div class="extract-field"><span class="field-label terminal-label">作者</span><span class="field-value">{{ extractedData.author || '-' }}</span></div>
+          <div class="extract-field"><span class="field-label terminal-label">时间</span><span class="field-value font-jet">{{ extractedData.publish_time || '-' }}</span></div>
+          <div class="extract-field"><span class="field-label terminal-label">摘要</span><span class="field-value summary">{{ extractedData.summary || '-' }}</span></div>
         </div>
         <div class="extract-actions">
           <button @click="handleSaveExtracted" class="btn-primary btn-sm">保存入库</button>
@@ -252,12 +252,12 @@ function imgUrl(url) {
         <option value="error">失败</option>
       </select>
       <input v-model="searchQuery" placeholder="搜索标题或摘要..." class="input-field toolbar-search" />
-      <span class="toolbar-count">共 {{ filteredArticles.length }} 篇</span>
+      <span class="toolbar-count terminal-label">共 <span class="font-jet">{{ filteredArticles.length }}</span> 篇</span>
     </div>
 
     <div class="content-area">
       <!-- Article List -->
-      <div class="article-list card">
+      <div class="article-list card editorial-card">
         <div class="list-scroll">
           <table class="list-table">
             <thead>
@@ -272,14 +272,14 @@ function imgUrl(url) {
               <tr
                 v-for="a in filteredArticles" :key="a.id"
                 @click="openArticle(a)"
-                :class="['list-row', { selected: selectedArticle?.id === a.id }]"
+                :class="['list-row', 'reveal-stagger', { selected: selectedArticle?.id === a.id }]"
               >
-                <td class="col-id">{{ a.id }}</td>
+                <td class="col-id font-jet">{{ a.id }}</td>
                 <td class="col-title">
                   <span class="title-text">{{ a.title || '无标题' }}</span>
                   <span class="title-tooltip">{{ a.title || '无标题' }}</span>
                 </td>
-                <td class="col-time">{{ formatDate(a.publish_time || a.created_at) }}</td>
+                <td class="col-time font-jet">{{ formatDate(a.publish_time || a.created_at) }}</td>
                 <td class="col-status">
                   <span :class="['badge', statusClass(a.status)]">{{ statusLabel(a.status) }}</span>
                 </td>
@@ -293,14 +293,14 @@ function imgUrl(url) {
       </div>
 
       <!-- Detail Panel -->
-      <div v-if="selectedArticle" class="detail-panel card">
+      <div v-if="selectedArticle" class="detail-panel card editorial-card">
         <div class="detail-header">
           <div class="detail-info">
-            <h3 class="detail-title">{{ selectedArticle.title || '无标题' }}</h3>
+            <h3 class="detail-title editorial-title">{{ selectedArticle.title || '无标题' }}</h3>
             <div class="detail-meta">
               <span class="meta-item">
                 <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"/></svg>
-                {{ formatDate(selectedArticle.publish_time) || '未知日期' }}
+                <span class="font-jet">{{ formatDate(selectedArticle.publish_time) || '未知日期' }}</span>
               </span>
               <span v-if="selectedArticle.article_type" class="meta-item">
                 <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 7h.01M7 3h5c.512 0 1.024.195 1.414.586l7 7a2 2 0 010 2.828l-7 7a2 2 0 01-2.828 0l-7-7A1.994 1.994 0 013 12V7a4 4 0 014-4z"/></svg>
@@ -330,23 +330,30 @@ function imgUrl(url) {
 
         <!-- Summary -->
         <div v-if="selectedArticle.summary" class="detail-section">
-          <h4 class="section-title">摘要</h4>
+          <div class="editorial-card-header">
+            <h4 class="title">摘要</h4>
+          </div>
           <p class="summary-text">{{ selectedArticle.summary }}</p>
         </div>
 
         <!-- Content -->
         <div v-if="selectedArticle.content_text" class="detail-section">
-          <h4 class="section-title">全文内容</h4>
+          <div class="editorial-card-header">
+            <h4 class="title">全文内容</h4>
+          </div>
           <div class="content-body" v-html="selectedArticle.content_html || selectedArticle.content_text"></div>
         </div>
 
         <!-- Images -->
         <div v-if="parseImages(selectedArticle.images).length" class="detail-section">
-          <h4 class="section-title">文章配图 ({{ parseImages(selectedArticle.images).length }})</h4>
+          <div class="editorial-card-header">
+            <h4 class="title">文章配图</h4>
+            <span class="meta font-jet">{{ parseImages(selectedArticle.images).length }} 张</span>
+          </div>
           <div class="article-images">
             <img
               v-for="(url, i) in parseImages(selectedArticle.images)" :key="i"
-              :src="imgUrl(url)" loading="lazy" class="article-img"
+              :src="imgUrl(url)" loading="lazy" class="article-img reveal-stagger"
             />
           </div>
         </div>
@@ -366,7 +373,7 @@ function imgUrl(url) {
       </div>
 
       <!-- Empty State -->
-      <div v-if="!selectedArticle" class="empty-panel card">
+      <div v-if="!selectedArticle" class="empty-panel card editorial-card">
         <svg width="64" height="64" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253"/></svg>
         <p class="empty-title">请从左侧选择一篇文章</p>
         <p class="empty-desc">选择后可查看摘要和全文内容</p>

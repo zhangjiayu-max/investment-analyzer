@@ -54,21 +54,24 @@ onMounted(loadTasks)
 </script>
 
 <template>
-  <div class="task-list-wrap">
-    <div class="task-list-header">
-      <h2 class="task-list-title">任务历史</h2>
+  <div class="task-list-wrap bg-mesh">
+    <div class="task-list-header editorial-card-header">
+      <div class="title-group">
+        <span class="title">任务历史</span>
+        <span class="meta"><span class="font-jet">{{ tasks.length }}</span> ITEMS</span>
+      </div>
       <button @click="$emit('newTask')" class="btn-ghost new-task-btn">+ 新任务</button>
     </div>
 
     <div class="task-list-scroll">
-      <div v-if="loading" class="task-empty">加载中...</div>
-      <div v-else-if="tasks.length === 0" class="task-empty">暂无任务</div>
+      <div v-if="loading" class="task-empty terminal-label">加载中...</div>
+      <div v-else-if="tasks.length === 0" class="task-empty terminal-label">暂无任务</div>
 
       <div
         v-for="task in tasks"
         :key="task.id"
         @click="$emit('select', task.id)"
-        class="task-item"
+        class="task-item reveal-stagger"
       >
         <div class="task-icon">
           <svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -77,7 +80,7 @@ onMounted(loadTasks)
         </div>
         <div class="task-info">
           <div class="task-name">{{ task.title || '分析中...' }}</div>
-          <div class="task-time">{{ task.created_at }}</div>
+          <div class="task-time terminal-label"><span class="font-jet">{{ task.created_at }}</span></div>
         </div>
         <div class="task-actions">
           <span :class="['badge', statusClass(task.status)]">{{ statusText(task.status) }}</span>
@@ -112,13 +115,10 @@ onMounted(loadTasks)
   padding: 0 1.25rem 0.75rem;
 }
 
-.task-list-title {
-  font-size: 0.8rem;
-  font-weight: 600;
-  color: var(--color-text-secondary);
-  margin: 0;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
+.title-group {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
 }
 
 .new-task-btn {

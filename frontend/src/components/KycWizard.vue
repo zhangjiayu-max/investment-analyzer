@@ -88,13 +88,13 @@ async function handleSubmit() {
   <Teleport to="body">
     <Transition name="fade">
       <div v-if="visible" class="kyc-backdrop" @click.self="emit('close')">
-        <div class="kyc-box">
+        <div class="kyc-box bg-mesh-card">
           <!-- Header -->
           <div class="kyc-header">
-            <div class="kyc-title-wrap">
-              <span class="kyc-emoji">🎯</span>
+            <div class="kyc-title-wrap editorial-card">
               <div>
-                <h3 class="kyc-title">我的投资画像</h3>
+                <span class="terminal-label kyc-eyebrow">RISK PROFILE</span>
+                <h3 class="kyc-title editorial-title-lg">我的投资画像</h3>
                 <p class="kyc-subtitle">完成画像后，AI 顾问会更懂你的风险偏好与需求</p>
               </div>
             </div>
@@ -111,10 +111,11 @@ async function handleSubmit() {
           <div v-else class="kyc-body">
             <div v-if="errorMsg" class="kyc-error">{{ errorMsg }}</div>
 
-            <div v-for="q in questions" :key="q.id" class="kyc-question">
+            <div v-for="(q, idx) in questions" :key="q.id" class="kyc-question reveal-stagger">
               <div class="q-head">
-                <span class="q-text">{{ q.question }}</span>
-                <span v-if="q.help" class="q-help">{{ q.help }}</span>
+                <span class="terminal-label q-eyebrow">Q{{ idx + 1 }}</span>
+                <span class="q-text editorial-title">{{ q.question }}</span>
+                <span v-if="q.help" class="q-help terminal-label">{{ q.help }}</span>
               </div>
               <div class="q-options">
                 <button
@@ -160,7 +161,6 @@ async function handleSubmit() {
 }
 
 .kyc-box {
-  background: var(--color-bg-card);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-xl);
   box-shadow: var(--shadow-lg);
@@ -187,14 +187,12 @@ async function handleSubmit() {
   align-items: flex-start;
 }
 
-.kyc-emoji {
-  font-size: 1.5rem;
-  line-height: 1;
+.kyc-eyebrow {
+  display: block;
+  margin-bottom: 0.2rem;
 }
 
 .kyc-title {
-  font-size: 1.05rem;
-  font-weight: 600;
   color: var(--color-text-primary);
   margin: 0 0 0.2rem 0;
 }

@@ -126,7 +126,7 @@
   --font-sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
   --font-mono: 'SF Mono', 'Menlo', 'Monaco', 'Consolas', monospace;
   --font-num: 'SF Pro Display', -apple-system, 'PingFang SC', sans-serif;
-  --font-serif: 'Noto Serif SC', 'Songti SC', 'STSong', 'SimSun', serif;
+  --font-serif: 'Songti SC', 'STSong', 'SimSun', 'Noto Serif SC', serif;
   --font-mono-jet: 'JetBrains Mono', 'SF Mono', ui-monospace, 'Menlo', monospace;
 
   /* Spacing */
@@ -1061,7 +1061,7 @@ body[data-density="compact"] .fin-table th { padding: 0.3rem 0.6rem; }
 .editorial-title-lg {
   font-family: var(--font-serif);
   font-weight: 700;
-  font-size: 1.6rem;
+  font-size: 1.75rem;
   letter-spacing: -0.02em;
   line-height: 1.25;
 }
@@ -1102,7 +1102,7 @@ body[data-density="compact"] .fin-table th { padding: 0.3rem 0.6rem; }
   width: 3px;
   border-radius: 2px;
   background: linear-gradient(180deg, var(--color-gold) 0%, var(--color-primary) 100%);
-  opacity: 0.7;
+  opacity: 0.9;
 }
 .editorial-card-header {
   display: flex;
@@ -1136,14 +1136,14 @@ body[data-density="compact"] .fin-table th { padding: 0.3rem 0.6rem; }
 }
 .bg-mesh {
   background:
-    radial-gradient(ellipse 80% 60% at 15% 0%, rgba(30, 64, 175, 0.05) 0%, transparent 60%),
-    radial-gradient(ellipse 70% 50% at 85% 10%, rgba(201, 168, 76, 0.04) 0%, transparent 55%),
+    radial-gradient(ellipse 80% 60% at 15% 0%, rgba(30, 64, 175, 0.08) 0%, transparent 60%),
+    radial-gradient(ellipse 70% 50% at 85% 10%, rgba(201, 168, 76, 0.06) 0%, transparent 55%),
     var(--color-bg);
 }
 .dark .bg-mesh {
   background:
-    radial-gradient(ellipse 80% 60% at 15% 0%, rgba(30, 64, 175, 0.10) 0%, transparent 60%),
-    radial-gradient(ellipse 70% 50% at 85% 10%, rgba(212, 168, 67, 0.06) 0%, transparent 55%),
+    radial-gradient(ellipse 80% 60% at 15% 0%, rgba(30, 64, 175, 0.14) 0%, transparent 60%),
+    radial-gradient(ellipse 70% 50% at 85% 10%, rgba(212, 168, 67, 0.08) 0%, transparent 55%),
     var(--color-bg);
 }
 .bg-mesh-card {

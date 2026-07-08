@@ -22,11 +22,11 @@ const hasResults = computed(() => totalCount.value > 0)
 
 // 知识库内容类型映射
 const knowledgeTypeMap = {
-  article: { label: '文章', icon: '📰' },
-  book: { label: '书籍', icon: '📖' },
-  concept: { label: '概念', icon: '📚' },
-  strategy: { label: '策略', icon: '🎯' },
-  report: { label: '报告', icon: '📋' },
+  article: { label: '文章' },
+  book: { label: '书籍' },
+  concept: { label: '概念' },
+  strategy: { label: '策略' },
+  report: { label: '报告' },
 }
 
 // 估值百分位等级
@@ -83,17 +83,17 @@ watch(() => props.query, (q) => { doSearch(q) }, { immediate: true })
 </script>
 
 <template>
-  <div class="search-results-page">
+  <div class="search-results-page bg-mesh">
     <!-- 页头 -->
     <div class="page-header">
-      <h1 class="page-title">
+      <h1 class="page-title editorial-title-lg">
         <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/>
         </svg>
         搜索结果
       </h1>
       <p v-if="query && !loading" class="page-subtitle">
-        关于「<strong>{{ query }}</strong>」共找到 {{ totalCount }} 条结果
+        关于「<strong>{{ query }}</strong>」共找到 <span class="font-jet">{{ totalCount }}</span> 条结果
       </p>
     </div>
 
@@ -131,21 +131,19 @@ watch(() => props.query, (q) => { doSearch(q) }, { immediate: true })
     <template v-else>
       <!-- 知识库 -->
       <section v-if="results.knowledge.length" class="result-group">
-        <div class="group-header">
-          <span class="group-icon">📚</span>
-          <h2 class="group-title">知识库</h2>
-          <span class="group-count">{{ results.knowledge.length }}</span>
+        <div class="group-header editorial-card-header">
+          <h2 class="group-title title">知识库</h2>
+          <span class="group-count font-jet">{{ results.knowledge.length }}</span>
         </div>
         <div class="result-cards">
           <div
             v-for="item in results.knowledge"
             :key="item.reference_id"
-            class="result-card"
+            class="result-card editorial-card reveal-stagger"
             @click="emit('navigate', knowledgePage(item))"
           >
             <div class="card-top">
-              <span class="type-badge">
-                {{ knowledgeTypeMap[item.content_type]?.icon || '📄' }}
+              <span class="type-badge terminal-label">
                 {{ knowledgeTypeMap[item.content_type]?.label || item.content_type }}
               </span>
             </div>
@@ -170,16 +168,15 @@ watch(() => props.query, (q) => { doSearch(q) }, { immediate: true })
 
       <!-- 基金 -->
       <section v-if="results.funds.length" class="result-group">
-        <div class="group-header">
-          <span class="group-icon">💰</span>
-          <h2 class="group-title">基金持仓</h2>
-          <span class="group-count">{{ results.funds.length }}</span>
+        <div class="group-header editorial-card-header">
+          <h2 class="group-title title">基金持仓</h2>
+          <span class="group-count font-jet">{{ results.funds.length }}</span>
         </div>
         <div class="result-cards">
           <div
             v-for="item in results.funds"
             :key="item.fund_code"
-            class="result-card fund-card"
+            class="result-card fund-card editorial-card reveal-stagger"
             @click="emit('navigate', 'portfolio')"
           >
             <div class="fund-main">
@@ -188,19 +185,19 @@ watch(() => props.query, (q) => { doSearch(q) }, { immediate: true })
                   class="card-title"
                   v-html="highlightText(item.fund_name, query)"
                 />
-                <span class="fund-code">{{ item.fund_code }}</span>
+                <span class="fund-code font-jet">{{ item.fund_code }}</span>
               </div>
               <div class="fund-values">
                 <div class="fund-value-item">
-                  <span class="value-label">持有份额</span>
+                  <span class="value-label terminal-label">持有份额</span>
                   <span class="value-num">{{ Number(item.shares).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) }}</span>
                 </div>
                 <div class="fund-value-item">
-                  <span class="value-label">最新净值</span>
+                  <span class="value-label terminal-label">最新净值</span>
                   <span class="value-num">{{ Number(item.current_nav).toFixed(4) }}</span>
                 </div>
                 <div class="fund-value-item">
-                  <span class="value-label">市值</span>
+                  <span class="value-label terminal-label">市值</span>
                   <span class="value-num value-highlight">
                     {{ Number(item.current_value).toLocaleString('zh-CN', { style: 'currency', currency: 'CNY' }) }}
                   </span>
@@ -219,16 +216,15 @@ watch(() => props.query, (q) => { doSearch(q) }, { immediate: true })
 
       <!-- 估值 -->
       <section v-if="results.valuations.length" class="result-group">
-        <div class="group-header">
-          <span class="group-icon">📊</span>
-          <h2 class="group-title">指数估值</h2>
-          <span class="group-count">{{ results.valuations.length }}</span>
+        <div class="group-header editorial-card-header">
+          <h2 class="group-title title">指数估值</h2>
+          <span class="group-count font-jet">{{ results.valuations.length }}</span>
         </div>
         <div class="result-cards">
           <div
             v-for="item in results.valuations"
             :key="item.index_code"
-            class="result-card valuation-card"
+            class="result-card valuation-card editorial-card reveal-stagger"
             @click="emit('navigate', 'valuation')"
           >
             <div class="valuation-main">
@@ -237,15 +233,15 @@ watch(() => props.query, (q) => { doSearch(q) }, { immediate: true })
                   class="card-title"
                   v-html="highlightText(item.index_name, query)"
                 />
-                <span class="index-code">{{ item.index_code }}</span>
+                <span class="index-code font-jet">{{ item.index_code }}</span>
               </div>
               <div class="valuation-values">
                 <div class="valuation-item">
-                  <span class="value-label">估值</span>
+                  <span class="value-label terminal-label">估值</span>
                   <span class="value-num">{{ Number(item.current_value).toFixed(2) }}</span>
                 </div>
                 <div class="valuation-item">
-                  <span class="value-label">百分位</span>
+                  <span class="value-label terminal-label">百分位</span>
                   <div class="percentile-wrap">
                     <span
                       class="percentile-badge"
@@ -257,8 +253,8 @@ watch(() => props.query, (q) => { doSearch(q) }, { immediate: true })
                   </div>
                 </div>
                 <div v-if="item.snapshot_date" class="valuation-item">
-                  <span class="value-label">更新日期</span>
-                  <span class="value-num value-muted">{{ item.snapshot_date }}</span>
+                  <span class="value-label terminal-label">更新日期</span>
+                  <span class="value-num value-muted font-jet">{{ item.snapshot_date }}</span>
                 </div>
               </div>
             </div>
@@ -291,8 +287,8 @@ watch(() => props.query, (q) => { doSearch(q) }, { immediate: true })
   display: flex;
   align-items: center;
   gap: var(--space-2);
-  font-size: 1.25rem;
-  font-weight: 700;
+  font-size: inherit;
+  font-weight: inherit;
   color: var(--color-text-primary);
   margin: 0 0 var(--space-1);
 }

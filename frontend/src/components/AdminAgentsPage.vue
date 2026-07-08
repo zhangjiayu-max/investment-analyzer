@@ -285,19 +285,19 @@ onMounted(loadAgents)
 </script>
 
 <template>
-  <div class="admin-agents-page">
+  <div class="admin-agents-page bg-mesh">
     <div class="page-header">
-      <h2 class="page-title">Agent 管理</h2>
-      <span class="page-desc">查看和编辑所有 Agent 的配置与系统提示词</span>
+      <h2 class="page-title editorial-title-lg">Agent 管理</h2>
+      <span class="page-desc editorial-subtitle">查看和编辑所有 Agent 的配置与系统提示词</span>
     </div>
 
     <!-- Tab Bar -->
     <div class="tab-bar">
       <button :class="['tab-btn', { active: activeTab === 'conversation' }]" @click="activeTab = 'conversation'; selectedAgent = null; editingAgent = null">
-        对话 Agent <span class="tab-count">{{ agents.length }}</span>
+        对话 Agent <span class="tab-count font-jet">{{ agents.length }}</span>
       </button>
       <button :class="['tab-btn', { active: activeTab === 'analysis' }]" @click="activeTab = 'analysis'; selectedAgent = null; editingAgent = null">
-        分析 Agent <span class="tab-count">{{ analysisAgents.length }}</span>
+        分析 Agent <span class="tab-count font-jet">{{ analysisAgents.length }}</span>
       </button>
     </div>
 
@@ -309,18 +309,18 @@ onMounted(loadAgents)
 
     <div v-else class="agent-layout">
       <!-- Agent List -->
-      <div class="agent-list card">
+      <div class="agent-list card editorial-card">
         <div
           v-for="agent in currentList"
           :key="agent.id"
-          :class="['agent-item', { active: selectedAgent?.id === agent.id }]"
+          :class="['agent-item', 'reveal-stagger', { active: selectedAgent?.id === agent.id }]"
           @click="selectAgent(agent)"
         >
           <span class="agent-icon">{{ getAgentIcon(agent.icon) }}</span>
           <div class="agent-item-info">
             <div class="agent-item-name">
               {{ agent.name }}
-              <span class="agent-id-tag">#{{ agent.id }}</span>
+              <span class="agent-id-tag font-jet">#{{ agent.id }}</span>
               <span v-if="agent.is_preset" class="badge-preset">预设</span>
               <span v-if="agent.is_active === 0" class="badge-inactive">已停用</span>
             </div>
@@ -331,12 +331,12 @@ onMounted(loadAgents)
       </div>
 
       <!-- Agent Detail -->
-      <div class="agent-detail card">
+      <div class="agent-detail card editorial-card">
         <template v-if="selectedAgent">
           <div class="detail-header">
             <div class="detail-title-row">
               <span class="detail-icon">{{ getAgentIcon(editingAgent?.icon || selectedAgent.icon) }}</span>
-              <h3 class="detail-name">{{ editingAgent?.name || selectedAgent.name }}</h3>
+              <h3 class="detail-name editorial-title">{{ editingAgent?.name || selectedAgent.name }}</h3>
               <span v-if="selectedAgent.is_preset" class="badge-preset">预设</span>
             </div>
             <div class="detail-actions" v-if="!editingAgent">
@@ -358,11 +358,11 @@ onMounted(loadAgents)
           <!-- View Mode -->
           <template v-if="!editingAgent">
             <div class="detail-section">
-              <div class="detail-label">描述</div>
+              <div class="detail-label terminal-label">描述</div>
               <div class="detail-value">{{ selectedAgent.description || '—' }}</div>
             </div>
             <div class="detail-section">
-              <div class="detail-label">
+              <div class="detail-label terminal-label">
                 <span>系统提示词</span>
                 <button class="copy-btn" @click="copyPrompt(selectedAgent.system_prompt)" title="复制">
                   <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"/></svg>
@@ -371,7 +371,7 @@ onMounted(loadAgents)
               <pre class="prompt-block">{{ selectedAgent.system_prompt }}</pre>
             </div>
             <div v-if="selectedAgent.knowledge_scope" class="detail-section">
-              <div class="detail-label">知识范围</div>
+              <div class="detail-label terminal-label">知识范围</div>
               <pre class="prompt-block prompt-sm">{{ selectedAgent.knowledge_scope }}</pre>
             </div>
 
@@ -390,8 +390,8 @@ onMounted(loadAgents)
                   <div v-else-if="versions.length === 0" class="version-empty">暂无历史版本</div>
                   <div v-else v-for="v in versions" :key="v.id" class="version-item">
                     <div class="version-info">
-                      <span class="version-tag">v{{ v.version }}</span>
-                      <span class="version-time">{{ formatVersionTime(v.created_at) }}</span>
+                      <span class="version-tag font-jet">v{{ v.version }}</span>
+                      <span class="version-time terminal-label">{{ formatVersionTime(v.created_at) }}</span>
                       <span class="version-preview">{{ (v.system_prompt || '').substring(0, 60) }}...</span>
                     </div>
                     <button class="btn btn-outline btn-xs version-rollback-btn" @click="confirmRollback(v)">回滚</button>
@@ -418,37 +418,37 @@ onMounted(loadAgents)
                     <span class="spinner-sm"></span> 回归测试运行中...
                   </div>
                   <div v-else-if="regressionResult.status === 'error'" class="regression-status error">
-                    ❌ 测试失败: {{ regressionResult.error }}
+                    测试失败: {{ regressionResult.error }}
                   </div>
                   <div v-else-if="regressionResult.status === 'completed'">
                     <div v-if="regressionResult.message" class="version-empty">{{ regressionResult.message }}</div>
                     <template v-else>
                       <div class="regression-summary">
                         <div class="regression-stat">
-                          <span class="stat-num">{{ regressionResult.summary?.total || 0 }}</span>
-                          <span class="stat-lbl">总用例</span>
+                          <span class="stat-num font-jet-lg">{{ regressionResult.summary?.total || 0 }}</span>
+                          <span class="stat-lbl terminal-label">总用例</span>
                         </div>
                         <div class="regression-stat improved">
-                          <span class="stat-num">{{ regressionResult.summary?.improved || 0 }}</span>
-                          <span class="stat-lbl">📈 提升</span>
+                          <span class="stat-num font-jet-lg">{{ regressionResult.summary?.improved || 0 }}</span>
+                          <span class="stat-lbl terminal-label">提升</span>
                         </div>
                         <div class="regression-stat degraded">
-                          <span class="stat-num">{{ regressionResult.summary?.degraded || 0 }}</span>
-                          <span class="stat-lbl">📉 退步</span>
+                          <span class="stat-num font-jet-lg">{{ regressionResult.summary?.degraded || 0 }}</span>
+                          <span class="stat-lbl terminal-label">退步</span>
                         </div>
                         <div class="regression-stat">
-                          <span class="stat-num">{{ regressionResult.summary?.unchanged || 0 }}</span>
-                          <span class="stat-lbl">➡️ 持平</span>
+                          <span class="stat-num font-jet-lg">{{ regressionResult.summary?.unchanged || 0 }}</span>
+                          <span class="stat-lbl terminal-label">持平</span>
                         </div>
                       </div>
                       <div class="regression-cases">
                         <div v-for="c in regressionResult.cases" :key="c.case_id" class="regression-case">
                           <span class="regression-status-icon">{{ statusIcon(c.status) }}</span>
                           <span class="regression-case-name">{{ c.case_name }}</span>
-                          <span class="regression-score" :style="{ color: scoreColor(c.score) }">
+                          <span class="regression-score font-jet" :style="{ color: scoreColor(c.score) }">
                             {{ c.score?.toFixed(1) || '-' }}分
                           </span>
-                          <span v-if="c.old_avg" class="regression-old-avg">
+                          <span v-if="c.old_avg" class="regression-old-avg font-jet">
                             (旧: {{ c.old_avg?.toFixed(1) }})
                           </span>
                         </div>
@@ -463,15 +463,15 @@ onMounted(loadAgents)
           <!-- Edit Mode -->
           <template v-else>
             <div class="edit-field">
-              <label class="edit-label">名称</label>
+              <label class="edit-label terminal-label">名称</label>
               <input v-model="editingAgent.name" class="input-field" />
             </div>
             <div class="edit-field">
-              <label class="edit-label">描述</label>
+              <label class="edit-label terminal-label">描述</label>
               <input v-model="editingAgent.description" class="input-field" />
             </div>
             <div class="edit-field">
-              <label class="edit-label">系统提示词</label>
+              <label class="edit-label terminal-label">系统提示词</label>
               <div class="prompt-toolbar">
                 <button class="btn-outline btn-xs" @click="showOptimizeConfirm = true" :disabled="aiLoading || !editingAgent.system_prompt">
                   <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>
@@ -485,11 +485,11 @@ onMounted(loadAgents)
               <textarea v-model="editingAgent.system_prompt" class="input-field prompt-textarea" rows="20"></textarea>
             </div>
             <div v-if="activeTab === 'conversation'" class="edit-field">
-              <label class="edit-label">知识范围 (JSON)</label>
+              <label class="edit-label terminal-label">知识范围 (JSON)</label>
               <textarea v-model="editingAgent.knowledge_scope" class="input-field prompt-textarea" rows="4"></textarea>
             </div>
             <div v-if="activeTab === 'analysis'" class="edit-field">
-              <label class="edit-label">状态</label>
+              <label class="edit-label terminal-label">状态</label>
               <label class="toggle-label">
                 <input type="checkbox" v-model="editingAgent.is_active" :true-value="1" :false-value="0" />
                 <span>{{ editingAgent.is_active ? '启用' : '停用' }}</span>
@@ -556,11 +556,11 @@ onMounted(loadAgents)
           <h3 class="modal-title">AI 生成提示词</h3>
           <p class="modal-desc">描述 Agent 的角色和职责，AI 将为你生成专业的系统提示词。</p>
           <div class="edit-field">
-            <label class="edit-label">Agent 名称</label>
+            <label class="edit-label terminal-label">Agent 名称</label>
             <input v-model="generateForm.name" class="input-field" placeholder="如：基金定投顾问" />
           </div>
           <div class="edit-field">
-            <label class="edit-label">角色描述</label>
+            <label class="edit-label terminal-label">角色描述</label>
             <textarea v-model="generateForm.description" class="input-field" rows="3" placeholder="如：帮助用户制定基金定投计划，分析定投收益，给出定投策略建议"></textarea>
           </div>
           <div class="modal-actions">

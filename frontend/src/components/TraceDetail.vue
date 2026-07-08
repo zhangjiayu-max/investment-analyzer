@@ -43,43 +43,43 @@ function errorCategoryLabel(c) {
 </script>
 
 <template>
-  <div class="trace-detail">
+  <div class="trace-detail bg-mesh">
     <div v-if="loading" class="trace-loading">加载中...</div>
     <div v-else-if="error" class="trace-error">{{ error }}</div>
     <template v-else-if="trace">
       <!-- 基本信息 -->
       <div class="trace-header">
         <div class="trace-meta">
-          <span class="trace-id">Trace: {{ trace.trace.trace_id }}</span>
+          <span class="trace-id font-jet">Trace: {{ trace.trace.trace_id }}</span>
           <span :class="['trace-status', 'status-' + trace.trace.status]">{{ statusLabel(trace.trace.status) }}</span>
           <span v-if="trace.trace.error_category !== 'none'" class="trace-error-cat">
             {{ errorCategoryLabel(trace.trace.error_category) }}
           </span>
         </div>
         <div class="trace-timing">
-          总耗时: <strong>{{ formatDuration(trace.trace.total_ms) }}</strong>
+          总耗时: <strong class="font-jet">{{ formatDuration(trace.trace.total_ms) }}</strong>
         </div>
       </div>
 
       <!-- 质量指标 -->
-      <div v-if="trace.trace.quality_metrics" class="trace-metrics">
-        <div class="metrics-label">质量指标</div>
+      <div v-if="trace.trace.quality_metrics" class="trace-metrics editorial-card">
+        <div class="metrics-label terminal-label">质量指标</div>
         <div class="metrics-grid">
           <div class="metric-item">
-            <span class="metric-name">RAG 覆盖</span>
-            <span class="metric-value" :class="{ good: JSON.parse(trace.trace.quality_metrics).rag_coverage > 0 }">
+            <span class="metric-name terminal-label">RAG 覆盖</span>
+            <span class="metric-value font-jet-lg" :class="{ good: JSON.parse(trace.trace.quality_metrics).rag_coverage > 0 }">
               {{ (JSON.parse(trace.trace.quality_metrics).rag_coverage * 100).toFixed(0) }}%
             </span>
           </div>
           <div class="metric-item">
-            <span class="metric-name">工具成功率</span>
-            <span class="metric-value" :class="{ good: JSON.parse(trace.trace.quality_metrics).tool_success_rate > 0.8 }">
+            <span class="metric-name terminal-label">工具成功率</span>
+            <span class="metric-value font-jet-lg" :class="{ good: JSON.parse(trace.trace.quality_metrics).tool_success_rate > 0.8 }">
               {{ (JSON.parse(trace.trace.quality_metrics).tool_success_rate * 100).toFixed(0) }}%
             </span>
           </div>
           <div class="metric-item">
-            <span class="metric-name">专家完成度</span>
-            <span class="metric-value" :class="{ good: JSON.parse(trace.trace.quality_metrics).specialist_completion > 0.8 }">
+            <span class="metric-name terminal-label">专家完成度</span>
+            <span class="metric-value font-jet-lg" :class="{ good: JSON.parse(trace.trace.quality_metrics).specialist_completion > 0.8 }">
               {{ (JSON.parse(trace.trace.quality_metrics).specialist_completion * 100).toFixed(0) }}%
             </span>
           </div>
@@ -87,36 +87,36 @@ function errorCategoryLabel(c) {
       </div>
 
       <!-- 时间线 -->
-      <div v-if="trace.trace.phase_timings" class="trace-timeline">
-        <div class="timeline-label">执行时间线</div>
+      <div v-if="trace.trace.phase_timings" class="trace-timeline editorial-card">
+        <div class="timeline-label terminal-label">执行时间线</div>
         <div class="timeline-items">
-          <div v-for="(ms, phase) in JSON.parse(trace.trace.phase_timings)" :key="phase" class="timeline-item">
+          <div v-for="(ms, phase) in JSON.parse(trace.trace.phase_timings)" :key="phase" class="timeline-item reveal-stagger">
             <span class="timeline-phase">{{ phase.replace('_ms', '') }}</span>
             <div class="timeline-bar-container">
               <div class="timeline-bar" :style="{ width: Math.min(ms / (trace.trace.total_ms || 1) * 100, 100) + '%' }"></div>
             </div>
-            <span class="timeline-time">{{ formatDuration(ms) }}</span>
+            <span class="timeline-time font-jet">{{ formatDuration(ms) }}</span>
           </div>
         </div>
       </div>
 
       <!-- Agent 执行记录 -->
-      <div v-if="trace.agent_runs?.length" class="trace-runs">
-        <div class="runs-label">Agent 执行记录 ({{ trace.agent_runs.length }})</div>
-        <div v-for="run in trace.agent_runs" :key="run.id" class="run-item">
+      <div v-if="trace.agent_runs?.length" class="trace-runs editorial-card">
+        <div class="runs-label terminal-label">Agent 执行记录 <span class="font-jet">({{ trace.agent_runs.length }})</span></div>
+        <div v-for="run in trace.agent_runs" :key="run.id" class="run-item reveal-stagger">
           <span class="run-agent">{{ run.agent_name }}</span>
-          <span class="run-key">{{ run.agent_key }}</span>
-          <span class="run-time">{{ formatDuration(run.duration_ms) }}</span>
+          <span class="run-key font-jet">{{ run.agent_key }}</span>
+          <span class="run-time font-jet">{{ formatDuration(run.duration_ms) }}</span>
         </div>
       </div>
 
       <!-- 工具审计日志 -->
-      <div v-if="trace.tool_audit_logs?.length" class="trace-tools">
-        <div class="tools-label">工具调用审计 ({{ trace.tool_audit_logs.length }})</div>
-        <div v-for="log in trace.tool_audit_logs" :key="log.id" :class="['tool-item', { failed: !log.success }]">
+      <div v-if="trace.tool_audit_logs?.length" class="trace-tools editorial-card">
+        <div class="tools-label terminal-label">工具调用审计 <span class="font-jet">({{ trace.tool_audit_logs.length }})</span></div>
+        <div v-for="log in trace.tool_audit_logs" :key="log.id" :class="['tool-item', 'reveal-stagger', { failed: !log.success }]">
           <span class="tool-name">{{ log.tool_name }}</span>
           <span :class="['tool-status', log.success ? 'ok' : 'err']">{{ log.success ? '✓' : '✗' }}</span>
-          <span class="tool-time">{{ formatDuration(log.duration_ms) }}</span>
+          <span class="tool-time font-jet">{{ formatDuration(log.duration_ms) }}</span>
           <span v-if="log.error_category !== 'none'" class="tool-error">{{ log.error_category }}</span>
         </div>
       </div>
@@ -281,7 +281,6 @@ function errorCategoryLabel(c) {
 .run-key {
   font-size: 0.68rem;
   color: var(--color-text-muted);
-  font-family: monospace;
 }
 
 .run-time {

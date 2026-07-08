@@ -141,7 +141,7 @@ onMounted(() => {
 </script>
 
 <template>
-  <div class="comparison-page">
+  <div class="comparison-page bg-mesh">
     <!-- 页头 -->
     <div class="page-header">
       <button class="btn-back" @click="goBack">
@@ -150,7 +150,7 @@ onMounted(() => {
         </svg>
         <span>返回</span>
       </button>
-      <h2 class="page-title">分析对比</h2>
+      <h2 class="page-title editorial-title-lg">分析对比</h2>
     </div>
 
     <!-- 类型选择器 -->
@@ -161,8 +161,8 @@ onMounted(() => {
           {{ opt.label }}
         </option>
       </select>
-      <span class="selected-count">
-        已选 {{ selectedIds.length }} / 2 条
+      <span class="selected-count font-jet">
+        已选 <span class="font-jet">{{ selectedIds.length }}</span> / 2 条
       </span>
     </div>
 
@@ -184,7 +184,7 @@ onMounted(() => {
         <div
           v-for="rec in records"
           :key="rec.id"
-          :class="['record-item glass-card', { 'record-selected': isChecked(rec.id) }]"
+          :class="['record-item glass-card editorial-card reveal-stagger', { 'record-selected': isChecked(rec.id) }]"
           @click="toggleRecord(rec.id)"
         >
           <div class="record-checkbox">
@@ -198,7 +198,7 @@ onMounted(() => {
           <div class="record-content">
             <div class="record-summary">{{ rec.summary || '（无摘要）' }}</div>
             <div class="record-meta">
-              <span class="record-date">{{ fmtDate(rec.created_at) }}</span>
+              <span class="record-date font-jet terminal-label">{{ fmtDate(rec.created_at) }}</span>
             </div>
           </div>
         </div>
@@ -214,38 +214,38 @@ onMounted(() => {
 
       <div v-else class="compare-grid">
         <!-- A 侧 -->
-        <div class="compare-side glass-card">
+        <div class="compare-side glass-card editorial-card">
           <div class="side-header">
-            <span class="side-badge side-badge-a">A</span>
-            <span class="side-date">{{ fmtDate(detailA?.created_at) }}</span>
+            <span class="side-badge side-badge-a font-jet">A</span>
+            <span class="side-date font-jet terminal-label">{{ fmtDate(detailA?.created_at) }}</span>
           </div>
           <div class="side-section">
-            <h4 class="section-title">摘要</h4>
+            <h4 class="section-title terminal-label">摘要</h4>
             <p class="section-text">{{ detailA?.summary || '--' }}</p>
           </div>
           <div class="side-section">
-            <h4 class="section-title">分析结果</h4>
+            <h4 class="section-title terminal-label">分析结果</h4>
             <div class="result-content" v-if="detailA?.result_data">
-              <pre class="result-pre">{{ typeof detailA.result_data === 'string' ? detailA.result_data : JSON.stringify(detailA.result_data, null, 2) }}</pre>
+              <pre class="result-pre font-jet">{{ typeof detailA.result_data === 'string' ? detailA.result_data : JSON.stringify(detailA.result_data, null, 2) }}</pre>
             </div>
             <p v-else class="section-text text-muted">暂无结果数据</p>
           </div>
         </div>
 
         <!-- B 侧 -->
-        <div class="compare-side glass-card">
+        <div class="compare-side glass-card editorial-card">
           <div class="side-header">
-            <span class="side-badge side-badge-b">B</span>
-            <span class="side-date">{{ fmtDate(detailB?.created_at) }}</span>
+            <span class="side-badge side-badge-b font-jet">B</span>
+            <span class="side-date font-jet terminal-label">{{ fmtDate(detailB?.created_at) }}</span>
           </div>
           <div class="side-section">
-            <h4 class="section-title">摘要</h4>
+            <h4 class="section-title terminal-label">摘要</h4>
             <p class="section-text">{{ detailB?.summary || '--' }}</p>
           </div>
           <div class="side-section">
-            <h4 class="section-title">分析结果</h4>
+            <h4 class="section-title terminal-label">分析结果</h4>
             <div class="result-content" v-if="detailB?.result_data">
-              <pre class="result-pre">{{ typeof detailB.result_data === 'string' ? detailB.result_data : JSON.stringify(detailB.result_data, null, 2) }}</pre>
+              <pre class="result-pre font-jet">{{ typeof detailB.result_data === 'string' ? detailB.result_data : JSON.stringify(detailB.result_data, null, 2) }}</pre>
             </div>
             <p v-else class="section-text text-muted">暂无结果数据</p>
           </div>
@@ -297,8 +297,8 @@ onMounted(() => {
 }
 
 .page-title {
-  font-size: 20px;
-  font-weight: 600;
+  font-size: inherit;
+  font-weight: inherit;
   color: var(--color-text-primary);
   margin: 0;
 }
@@ -528,7 +528,6 @@ onMounted(() => {
 
 .result-pre {
   margin: 0;
-  font-family: var(--font-sans);
   font-size: 13px;
   line-height: 1.7;
   color: var(--color-text-primary);

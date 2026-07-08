@@ -249,11 +249,11 @@ function toggleHistory() {
 </script>
 
 <template>
-  <div class="sandbox-page">
+  <div class="sandbox-page bg-mesh">
     <header class="page-head">
       <div>
-        <h2 class="page-title">策略沙盒</h2>
-        <p class="page-desc">用历史数据回测投资策略，对比买入持有，避免凭感觉调整。</p>
+        <h2 class="page-title editorial-title-lg">策略沙盒</h2>
+        <p class="page-desc editorial-subtitle">用历史数据回测投资策略，对比买入持有，避免凭感觉调整。</p>
       </div>
       <button class="btn-secondary" :class="{ active: showHistory }" @click="toggleHistory">
         <Icon name="clock" size="16" />
@@ -263,10 +263,10 @@ function toggleHistory() {
 
     <div class="sandbox-layout">
       <!-- 左侧：参数面板 -->
-      <aside class="params-panel">
+      <aside class="params-panel editorial-card">
         <!-- 预设 -->
         <div class="param-section" v-if="presets.length">
-          <label class="param-label">快速预设</label>
+          <label class="param-label terminal-label">快速预设</label>
           <div class="preset-list">
             <button
               v-for="p in presets"
@@ -275,15 +275,15 @@ function toggleHistory() {
               @click="applyPreset(p)"
             >
               <strong>{{ p.name }}</strong>
-              <small>{{ p.description }}</small>
+              <small class="terminal-label">{{ p.description }}</small>
             </button>
           </div>
         </div>
 
         <!-- 标的 -->
         <div class="param-section">
-          <label class="param-label">标的代码</label>
-          <input v-model="targetCode" class="param-input" placeholder="如 000300（沪深300）、110011" />
+          <label class="param-label terminal-label">标的代码</label>
+          <input v-model="targetCode" class="param-input font-jet" placeholder="如 000300（沪深300）、110011" />
           <div class="type-toggle">
             <button :class="{ active: targetType === 'index' }" @click="targetType = 'index'">指数</button>
             <button :class="{ active: targetType === 'fund' }" @click="targetType = 'fund'">基金</button>
@@ -292,7 +292,7 @@ function toggleHistory() {
 
         <!-- 策略 -->
         <div class="param-section">
-          <label class="param-label">策略</label>
+          <label class="param-label terminal-label">策略</label>
           <div class="strategy-list">
             <button
               v-for="s in strategies"
@@ -301,73 +301,73 @@ function toggleHistory() {
               @click="strategy = s.key"
             >
               <strong>{{ s.label }}</strong>
-              <small>{{ s.desc }}</small>
+              <small class="terminal-label">{{ s.desc }}</small>
             </button>
           </div>
         </div>
 
         <!-- 资金 -->
         <div class="param-section">
-          <label class="param-label">初始资金</label>
-          <input v-model.number="initialCash" type="number" class="param-input" min="0" step="1000" />
+          <label class="param-label terminal-label">初始资金</label>
+          <input v-model.number="initialCash" type="number" class="param-input font-jet" min="0" step="1000" />
         </div>
         <div class="param-section" v-if="strategy === 'dca' || strategy === 'valuation_dca'">
-          <label class="param-label">每月投入</label>
-          <input v-model.number="monthlyAmount" type="number" class="param-input" min="0" step="100" />
+          <label class="param-label terminal-label">每月投入</label>
+          <input v-model.number="monthlyAmount" type="number" class="param-input font-jet" min="0" step="100" />
         </div>
 
         <!-- 估值加权参数 -->
         <template v-if="strategy === 'valuation_dca'">
           <div class="param-section">
-            <label class="param-label">低估分位 (%)</label>
-            <input v-model.number="lowPct" type="number" class="param-input" min="0" max="100" />
+            <label class="param-label terminal-label">低估分位 (%)</label>
+            <input v-model.number="lowPct" type="number" class="param-input font-jet" min="0" max="100" />
           </div>
           <div class="param-section">
-            <label class="param-label">高估分位 (%)</label>
-            <input v-model.number="highPct" type="number" class="param-input" min="0" max="100" />
+            <label class="param-label terminal-label">高估分位 (%)</label>
+            <input v-model.number="highPct" type="number" class="param-input font-jet" min="0" max="100" />
           </div>
           <div class="param-section">
-            <label class="param-label">最低倍数</label>
-            <input v-model.number="minMultiplier" type="number" class="param-input" min="0" max="5" step="0.1" />
+            <label class="param-label terminal-label">最低倍数</label>
+            <input v-model.number="minMultiplier" type="number" class="param-input font-jet" min="0" max="5" step="0.1" />
           </div>
           <div class="param-section">
-            <label class="param-label">最高倍数</label>
-            <input v-model.number="maxMultiplier" type="number" class="param-input" min="0" max="5" step="0.1" />
+            <label class="param-label terminal-label">最高倍数</label>
+            <input v-model.number="maxMultiplier" type="number" class="param-input font-jet" min="0" max="5" step="0.1" />
           </div>
         </template>
 
         <!-- 估值分位买卖参数 -->
         <template v-if="strategy === 'percentile_trade'">
           <div class="param-section">
-            <label class="param-label">买入分位 (%)</label>
-            <input v-model.number="buyThreshold" type="number" class="param-input" min="0" max="100" />
+            <label class="param-label terminal-label">买入分位 (%)</label>
+            <input v-model.number="buyThreshold" type="number" class="param-input font-jet" min="0" max="100" />
           </div>
           <div class="param-section">
-            <label class="param-label">止盈分位 (%)</label>
-            <input v-model.number="sellThreshold" type="number" class="param-input" min="0" max="100" />
+            <label class="param-label terminal-label">止盈分位 (%)</label>
+            <input v-model.number="sellThreshold" type="number" class="param-input font-jet" min="0" max="100" />
           </div>
           <div class="param-section">
-            <label class="param-label">单次买入金额</label>
-            <input v-model.number="buyAmount" type="number" class="param-input" min="0" step="500" />
+            <label class="param-label terminal-label">单次买入金额</label>
+            <input v-model.number="buyAmount" type="number" class="param-input font-jet" min="0" step="500" />
           </div>
           <div class="param-section">
-            <label class="param-label">止盈卖出比例</label>
-            <input v-model.number="sellRatio" type="number" class="param-input" min="0" max="1" step="0.05" />
+            <label class="param-label terminal-label">止盈卖出比例</label>
+            <input v-model.number="sellRatio" type="number" class="param-input font-jet" min="0" max="1" step="0.05" />
           </div>
         </template>
 
         <template v-if="strategy === 'periodic_rebalance' || strategy === 'threshold_rebalance'">
           <div class="param-section">
-            <label class="param-label">权益目标比例</label>
-            <input v-model.number="equityTarget" type="number" class="param-input" min="0" max="1" step="0.05" />
+            <label class="param-label terminal-label">权益目标比例</label>
+            <input v-model.number="equityTarget" type="number" class="param-input font-jet" min="0" max="1" step="0.05" />
           </div>
           <div class="param-section" v-if="strategy === 'periodic_rebalance'">
-            <label class="param-label">再平衡频率（月）</label>
-            <input v-model.number="frequencyMonths" type="number" class="param-input" min="1" max="12" />
+            <label class="param-label terminal-label">再平衡频率（月）</label>
+            <input v-model.number="frequencyMonths" type="number" class="param-input font-jet" min="1" max="12" />
           </div>
           <div class="param-section" v-if="strategy === 'threshold_rebalance'">
-            <label class="param-label">偏离阈值</label>
-            <input v-model.number="driftThreshold" type="number" class="param-input" min="0.01" max="0.2" step="0.01" />
+            <label class="param-label terminal-label">偏离阈值</label>
+            <input v-model.number="driftThreshold" type="number" class="param-input font-jet" min="0.01" max="0.2" step="0.01" />
           </div>
         </template>
 
@@ -378,7 +378,7 @@ function toggleHistory() {
       </aside>
 
       <!-- 右侧：结果面板 -->
-      <main class="result-panel">
+      <main class="result-panel editorial-card">
         <!-- 空状态 -->
         <div v-if="!result && !loading" class="empty-result">
           <Icon name="bar-chart" size="36" />
@@ -398,58 +398,58 @@ function toggleHistory() {
         <template v-else-if="result?.status === 'ok'">
           <!-- 关键指标对比 -->
           <div class="compare-table">
-            <div class="compare-head">
-              <span></span>
-              <span class="compare-col-main">策略结果</span>
-              <span class="compare-col-bench">买入持有</span>
+            <div class="compare-head editorial-card-header">
+              <span class="title"></span>
+              <span class="compare-col-main title">策略结果</span>
+              <span class="compare-col-bench title">买入持有</span>
             </div>
-            <div class="compare-row">
+            <div class="compare-row reveal-stagger">
               <span>总投入</span>
-              <span>¥{{ money(result.result.total_invested) }}</span>
-              <span>¥{{ money(result.benchmark.total_invested) }}</span>
+              <span class="font-jet">¥{{ money(result.result.total_invested) }}</span>
+              <span class="font-jet">¥{{ money(result.benchmark.total_invested) }}</span>
             </div>
-            <div class="compare-row">
+            <div class="compare-row reveal-stagger">
               <span>期末资产</span>
-              <strong>¥{{ money(result.result.final_value) }}</strong>
-              <strong>¥{{ money(result.benchmark.final_value) }}</strong>
+              <strong class="font-jet num-gold">¥{{ money(result.result.final_value) }}</strong>
+              <strong class="font-jet">¥{{ money(result.benchmark.final_value) }}</strong>
             </div>
-            <div class="compare-row">
+            <div class="compare-row reveal-stagger">
               <span>累计收益</span>
-              <strong :class="result.result.total_return >= 0 ? 'positive' : 'negative'">{{ pct(result.result.total_return) }}</strong>
-              <strong :class="result.benchmark.total_return >= 0 ? 'positive' : 'negative'">{{ pct(result.benchmark.total_return) }}</strong>
+              <strong class="font-jet" :class="result.result.total_return >= 0 ? 'positive' : 'negative'">{{ pct(result.result.total_return) }}</strong>
+              <strong class="font-jet" :class="result.benchmark.total_return >= 0 ? 'positive' : 'negative'">{{ pct(result.benchmark.total_return) }}</strong>
             </div>
-            <div class="compare-row">
+            <div class="compare-row reveal-stagger">
               <span>年化收益</span>
-              <span :class="result.result.ann_return >= 0 ? 'positive' : 'negative'">{{ pct(result.result.ann_return) }}</span>
-              <span :class="result.benchmark.ann_return >= 0 ? 'positive' : 'negative'">{{ pct(result.benchmark.ann_return) }}</span>
+              <span class="font-jet" :class="result.result.ann_return >= 0 ? 'positive' : 'negative'">{{ pct(result.result.ann_return) }}</span>
+              <span class="font-jet" :class="result.benchmark.ann_return >= 0 ? 'positive' : 'negative'">{{ pct(result.benchmark.ann_return) }}</span>
             </div>
-            <div class="compare-row">
+            <div class="compare-row reveal-stagger">
               <span>最大回撤</span>
-              <span class="negative">{{ pct(result.result.max_drawdown) }}</span>
-              <span class="negative">{{ pct(result.benchmark.max_drawdown) }}</span>
+              <span class="font-jet negative">{{ pct(result.result.max_drawdown) }}</span>
+              <span class="font-jet negative">{{ pct(result.benchmark.max_drawdown) }}</span>
             </div>
-            <div class="compare-row">
+            <div class="compare-row reveal-stagger">
               <span>波动率</span>
-              <span>{{ pct(result.result.volatility) }}</span>
-              <span>{{ pct(result.benchmark.volatility) }}</span>
+              <span class="font-jet">{{ pct(result.result.volatility) }}</span>
+              <span class="font-jet">{{ pct(result.benchmark.volatility) }}</span>
             </div>
-            <div class="compare-row">
+            <div class="compare-row reveal-stagger">
               <span>交易次数</span>
-              <span>{{ result.result.trades }}</span>
-              <span>{{ result.benchmark.trades }}</span>
+              <span class="font-jet">{{ result.result.trades }}</span>
+              <span class="font-jet">{{ result.benchmark.trades }}</span>
             </div>
-            <div class="compare-row">
+            <div class="compare-row reveal-stagger">
               <span>回测月数</span>
-              <span>{{ result.months }}</span>
-              <span>{{ result.months }}</span>
+              <span class="font-jet">{{ result.months }}</span>
+              <span class="font-jet">{{ result.months }}</span>
             </div>
           </div>
 
           <!-- 净值曲线 -->
-          <div v-if="chartPaths" class="chart-section">
-            <div class="chart-legend">
-              <span class="legend-main">● 策略</span>
-              <span class="legend-bench">● 买入持有</span>
+          <div v-if="chartPaths" class="chart-section editorial-card">
+            <div class="chart-legend editorial-card-header">
+              <span class="legend-main title">● 策略</span>
+              <span class="legend-bench meta">● 买入持有</span>
             </div>
             <svg :viewBox="`0 0 ${chartWidth} ${chartHeight}`" class="equity-chart" preserveAspectRatio="none">
               <path :d="chartPaths.bench" fill="none" stroke="#94a3b8" stroke-width="1.5" stroke-dasharray="4,3" />
@@ -458,17 +458,17 @@ function toggleHistory() {
           </div>
 
           <!-- 免责声明 -->
-          <div class="disclaimer">
+          <div class="disclaimer terminal-label">
             <Icon name="info" size="14" />
             {{ result.disclaimer }}
           </div>
 
           <!-- 保存回测 -->
-          <div class="save-section">
-            <label class="param-label">保存回测</label>
+          <div class="save-section editorial-card">
+            <label class="param-label terminal-label">保存回测</label>
             <div class="save-row">
-              <input v-model="saveName" class="param-input save-name-input" placeholder="回测名称，如：医药50估值加权3年" />
-              <input v-model="saveNotes" class="param-input save-notes-input" placeholder="备注（可选）" />
+              <input v-model="saveName" class="param-input save-name-input font-jet" placeholder="回测名称，如：医药50估值加权3年" />
+              <input v-model="saveNotes" class="param-input save-notes-input font-jet" placeholder="备注（可选）" />
               <button class="btn-primary save-btn" :disabled="saving" @click="saveResult">
                 <Icon :name="saving ? 'spinner' : 'download'" size="15" />
                 保存
@@ -478,10 +478,10 @@ function toggleHistory() {
         </template>
 
         <!-- 历史回测 -->
-        <section v-if="showHistory" class="history-section">
-          <div class="section-title-row">
-            <h3>历史回测</h3>
-            <button class="btn-ghost btn-sm" @click="loadHistory" :disabled="historyLoading">
+        <section v-if="showHistory" class="history-section editorial-card">
+          <div class="section-title-row editorial-card-header">
+            <h3 class="title">历史回测</h3>
+            <button class="btn-ghost btn-sm meta" @click="loadHistory" :disabled="historyLoading">
               <Icon :name="historyLoading ? 'spinner' : 'refresh'" size="14" />
               刷新
             </button>
@@ -493,19 +493,19 @@ function toggleHistory() {
             暂无保存的回测
           </div>
           <div v-else class="history-list">
-            <article v-for="h in history" :key="h.id" class="history-item">
+            <article v-for="h in history" :key="h.id" class="history-item reveal-stagger">
               <div class="history-main">
                 <strong>{{ h.name }}</strong>
-                <span class="history-meta">
+                <span class="history-meta terminal-label">
                   {{ h.strategy }} · {{ h.target_code }} · {{ h.months }}个月
-                  <span v-if="h.decision_id" class="linked-badge">已关联决策 #{{ h.decision_id }}</span>
+                  <span v-if="h.decision_id" class="linked-badge font-jet">已关联决策 #{{ h.decision_id }}</span>
                 </span>
               </div>
               <div class="history-metrics">
-                <span :class="['history-return', h.total_return >= 0 ? 'positive' : 'negative']">
+                <span :class="['history-return font-jet', h.total_return >= 0 ? 'positive' : 'negative']">
                   {{ (h.total_return * 100).toFixed(1) }}%
                 </span>
-                <span class="history-date">{{ h.created_at?.slice(0, 10) }}</span>
+                <span class="history-date font-jet">{{ h.created_at?.slice(0, 10) }}</span>
               </div>
               <div class="history-actions">
                 <button v-if="!h.decision_id" class="history-link" @click="openLinkModal(h.id)" title="关联决策">
@@ -523,13 +523,13 @@ function toggleHistory() {
 
     <!-- 关联决策弹窗 -->
     <div v-if="linkModal.visible" class="modal-overlay" @click.self="linkModal.visible = false">
-      <div class="modal-card">
-        <header class="modal-head">
-          <h3>关联到决策</h3>
-          <button class="icon-btn" @click="linkModal.visible = false"><Icon name="close" size="18" /></button>
+      <div class="modal-card editorial-card">
+        <header class="modal-head editorial-card-header">
+          <h3 class="title">关联到决策</h3>
+          <button class="icon-btn meta" @click="linkModal.visible = false"><Icon name="close" size="18" /></button>
         </header>
         <div class="modal-body">
-          <p class="modal-desc">选择一条决策，将此回测结果关联到该决策，作为决策依据。</p>
+          <p class="modal-desc terminal-label">选择一条决策，将此回测结果关联到该决策，作为决策依据。</p>
           <div v-if="!decisionsForLink.length" class="modal-empty">暂无可关联的决策</div>
           <div v-else class="decision-options">
             <label
@@ -540,7 +540,7 @@ function toggleHistory() {
               <input type="radio" :value="d.id" v-model="selectedDecisionId" />
               <div class="option-content">
                 <strong>{{ d.summary }}</strong>
-                <span>{{ d.target_name || d.target_code || '组合' }} · {{ d.decision_type }}</span>
+                <span class="terminal-label">{{ d.target_name || d.target_code || '组合' }} · {{ d.decision_type }}</span>
               </div>
             </label>
           </div>
@@ -596,8 +596,8 @@ function toggleHistory() {
   gap: 6px;
 }
 .param-label {
-  font-size: 0.78rem;
-  font-weight: 600;
+  font-size: inherit;
+  font-weight: inherit;
   color: var(--color-text-muted);
 }
 .param-input {
@@ -662,7 +662,7 @@ function toggleHistory() {
 }
 .preset-btn small, .strategy-btn small {
   display: block;
-  font-size: 0.72rem;
+  font-size: inherit;
   color: var(--color-text-muted);
   margin-top: 2px;
 }
@@ -713,8 +713,8 @@ function toggleHistory() {
   padding: 8px 12px;
   background: var(--color-bg-input);
   border-radius: var(--radius-md);
-  font-size: 0.78rem;
-  font-weight: 600;
+  font-size: inherit;
+  font-weight: inherit;
   color: var(--color-text-muted);
 }
 .compare-col-main { color: var(--color-primary); }
@@ -744,10 +744,10 @@ function toggleHistory() {
 .chart-legend {
   display: flex;
   gap: var(--space-4);
-  font-size: 0.75rem;
+  font-size: inherit;
   margin-bottom: 8px;
 }
-.legend-main { color: #c9a84c; font-weight: 600; }
+.legend-main { color: #c9a84c; font-weight: inherit; }
 .legend-bench { color: #94a3b8; }
 .equity-chart {
   width: 100%;
@@ -764,7 +764,7 @@ function toggleHistory() {
   border: 1px solid var(--color-warning-border);
   border-radius: var(--radius-md);
   color: var(--color-warning-text);
-  font-size: 0.78rem;
+  font-size: inherit;
 }
 
 @media (max-width: 960px) {
@@ -809,7 +809,8 @@ function toggleHistory() {
 }
 .section-title-row h3 {
   margin: 0;
-  font-size: 0.9rem;
+  font-size: inherit;
+  font-weight: inherit;
   color: var(--color-text-primary);
 }
 .history-loading, .history-empty {
@@ -845,7 +846,7 @@ function toggleHistory() {
   color: var(--color-text-primary);
 }
 .history-meta {
-  font-size: 0.72rem;
+  font-size: inherit;
   color: var(--color-text-muted);
 }
 .history-metrics {
@@ -855,14 +856,14 @@ function toggleHistory() {
   gap: 2px;
 }
 .history-return {
-  font-size: 0.88rem;
-  font-weight: 700;
-  font-variant-numeric: tabular-nums;
+  font-size: inherit;
+  font-weight: inherit;
+  font-variant-numeric: inherit;
 }
 .history-return.positive { color: #dc2626; }
 .history-return.negative { color: #059669; }
 .history-date {
-  font-size: 0.7rem;
+  font-size: inherit;
   color: var(--color-text-muted);
 }
 .history-del {
@@ -907,8 +908,8 @@ function toggleHistory() {
 .linked-badge {
   display: inline-block;
   padding: 1px 6px;
-  font-size: 0.68rem;
-  font-weight: 600;
+  font-size: inherit;
+  font-weight: inherit;
   color: var(--color-primary);
   background: var(--color-primary-bg);
   border-radius: var(--radius-sm);
@@ -945,7 +946,8 @@ function toggleHistory() {
 }
 .modal-head h3 {
   margin: 0;
-  font-size: 1rem;
+  font-size: inherit;
+  font-weight: inherit;
   color: var(--color-text-primary);
 }
 .modal-body {
@@ -956,7 +958,7 @@ function toggleHistory() {
 }
 .modal-desc {
   margin: 0;
-  font-size: 0.82rem;
+  font-size: inherit;
   color: var(--color-text-muted);
 }
 .modal-empty {
@@ -1000,7 +1002,7 @@ function toggleHistory() {
   color: var(--color-text-primary);
 }
 .option-content span {
-  font-size: 0.74rem;
+  font-size: inherit;
   color: var(--color-text-muted);
 }
 .modal-foot {

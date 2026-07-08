@@ -132,10 +132,10 @@ onMounted(load)
 </script>
 
 <template>
-  <div class="allocation-page">
+  <div class="allocation-page bg-mesh">
     <header class="page-head">
       <div>
-        <h2 class="page-title">目标配置 / 偏离度</h2>
+        <h2 class="page-title editorial-title-lg">目标配置 / 偏离度</h2>
         <p class="page-desc">把当前组合和目标配置放在同一张表里，先看偏离，再看是否需要行动。</p>
       </div>
       <button class="btn-secondary" :disabled="loading" @click="load">
@@ -157,19 +157,19 @@ onMounted(load)
     <template v-else-if="dashboard">
       <section class="metric-strip">
         <div class="metric-cell">
-          <span>总资产</span>
-          <strong>¥{{ money(dashboard.total_assets) }}</strong>
+          <span class="terminal-label">总资产</span>
+          <strong class="font-jet">¥{{ money(dashboard.total_assets) }}</strong>
         </div>
         <div class="metric-cell">
-          <span>现金余额</span>
-          <strong>¥{{ money(dashboard.cash_balance) }}</strong>
+          <span class="terminal-label">现金余额</span>
+          <strong class="font-jet">¥{{ money(dashboard.cash_balance) }}</strong>
         </div>
         <div class="metric-cell">
-          <span>最大偏离</span>
-          <strong>{{ ratio(dashboard.max_drift) }}</strong>
+          <span class="terminal-label">最大偏离</span>
+          <strong class="font-jet">{{ ratio(dashboard.max_drift) }}</strong>
         </div>
         <div class="metric-cell">
-          <span>市场估值</span>
+          <span class="terminal-label">市场估值</span>
           <strong>{{ dashboard.market_level || '-' }}</strong>
         </div>
       </section>
@@ -182,19 +182,19 @@ onMounted(load)
       </section>
 
       <main class="allocation-layout">
-        <section class="allocation-table-panel">
+        <section class="allocation-table-panel editorial-card">
           <div class="section-title">
-            <h3>配置偏离</h3>
-            <span v-if="topDrift">最大偏离：{{ topDrift.label }}</span>
+            <h3 class="editorial-title">配置偏离</h3>
+            <span v-if="topDrift" class="terminal-label">最大偏离：{{ topDrift.label }}</span>
           </div>
           <!-- 桌面端表格 -->
           <div class="allocation-table">
             <div class="table-row table-head">
-              <span>资产类别</span>
-              <span>当前</span>
-              <span>目标</span>
-              <span>偏离</span>
-              <span>金额差</span>
+              <span class="terminal-label">资产类别</span>
+              <span class="terminal-label">当前</span>
+              <span class="terminal-label">目标</span>
+              <span class="terminal-label">偏离</span>
+              <span class="terminal-label">金额差</span>
             </div>
             <div v-for="row in rows" :key="row.category" class="table-row">
               <div class="asset-name">
@@ -202,57 +202,57 @@ onMounted(load)
                 <small>{{ row.category }}</small>
               </div>
               <div>
-                <strong>{{ ratio(row.current_ratio) }}</strong>
-                <small>¥{{ money(row.current_amount) }}</small>
+                <strong class="font-jet">{{ ratio(row.current_ratio) }}</strong>
+                <small class="font-jet">¥{{ money(row.current_amount) }}</small>
               </div>
               <div>
-                <strong>{{ ratio(row.target_ratio) }}</strong>
-                <small>¥{{ money(row.target_amount) }}</small>
+                <strong class="font-jet">{{ ratio(row.target_ratio) }}</strong>
+                <small class="font-jet">¥{{ money(row.target_amount) }}</small>
               </div>
-              <div :class="['drift-pill', driftClass(row)]">{{ driftText(row) }}</div>
+              <div :class="['drift-pill', 'font-jet', driftClass(row)]">{{ driftText(row) }}</div>
               <div>
-                <strong>¥{{ money(row.drift_amount) }}</strong>
+                <strong class="font-jet">¥{{ money(row.drift_amount) }}</strong>
               </div>
             </div>
           </div>
 
           <!-- 移动端卡片式布局 -->
           <div class="allocation-cards">
-            <div v-for="row in rows" :key="row.category + '-card'" class="alloc-card-item">
+            <div v-for="row in rows" :key="row.category + '-card'" class="alloc-card-item reveal-stagger">
               <div class="alloc-card-head">
                 <strong>{{ row.label }}</strong>
-                <span :class="['drift-pill', driftClass(row)]">{{ driftText(row) }}</span>
+                <span :class="['drift-pill', 'font-jet', driftClass(row)]">{{ driftText(row) }}</span>
               </div>
               <div class="alloc-card-grid">
                 <div class="alloc-card-metric">
                   <span>当前</span>
-                  <strong>{{ ratio(row.current_ratio) }}</strong>
-                  <small>¥{{ money(row.current_amount) }}</small>
+                  <strong class="font-jet">{{ ratio(row.current_ratio) }}</strong>
+                  <small class="font-jet">¥{{ money(row.current_amount) }}</small>
                 </div>
                 <div class="alloc-card-metric">
                   <span>目标</span>
-                  <strong>{{ ratio(row.target_ratio) }}</strong>
-                  <small>¥{{ money(row.target_amount) }}</small>
+                  <strong class="font-jet">{{ ratio(row.target_ratio) }}</strong>
+                  <small class="font-jet">¥{{ money(row.target_amount) }}</small>
                 </div>
                 <div class="alloc-card-metric">
                   <span>金额差</span>
-                  <strong>¥{{ money(row.drift_amount) }}</strong>
+                  <strong class="font-jet">¥{{ money(row.drift_amount) }}</strong>
                 </div>
               </div>
             </div>
           </div>
         </section>
 
-        <aside class="suggestion-panel">
+        <aside class="suggestion-panel editorial-card">
           <div class="section-title">
-            <h3>建议路径</h3>
-            <span>{{ suggestions.length }} 条</span>
+            <h3 class="editorial-title">建议路径</h3>
+            <span class="terminal-label">{{ suggestions.length }} 条</span>
           </div>
           <div v-if="!suggestions.length" class="quiet-empty">当前偏离不明显，保持观察即可。</div>
-          <article v-for="item in suggestions" :key="`${item.priority}-${item.action}-${item.category}`" class="suggestion-card">
+          <article v-for="item in suggestions" :key="`${item.priority}-${item.action}-${item.category}`" class="suggestion-card reveal-stagger">
             <div class="suggestion-top">
               <span class="action-badge">{{ actionLabel(item.action) }}</span>
-              <span>{{ item.amount_range || '-' }}</span>
+              <span class="font-jet">{{ item.amount_range || '-' }}</span>
             </div>
             <p>{{ item.reason }}</p>
             <small v-if="item.fund_name">{{ item.fund_name }} {{ item.fund_code }}</small>
@@ -275,10 +275,10 @@ onMounted(load)
       </main>
 
       <!-- 压力测试面板 -->
-      <section class="stress-panel">
+      <section class="stress-panel editorial-card">
         <div class="section-title">
-          <h3>压力测试</h3>
-          <span>无需 LLM，点击场景即时计算</span>
+          <h3 class="editorial-title">压力测试</h3>
+          <span class="terminal-label">无需 LLM，点击场景即时计算</span>
         </div>
 
         <div class="scenario-tabs">
@@ -303,26 +303,26 @@ onMounted(load)
           <!-- 核心指标 -->
           <div class="stress-metrics">
             <div class="stress-metric">
-              <span>当前总资产</span>
-              <strong>¥{{ money(stressResult.total_assets) }}</strong>
+              <span class="terminal-label">当前总资产</span>
+              <strong class="font-jet">¥{{ money(stressResult.total_assets) }}</strong>
             </div>
             <div class="stress-arrow">
               <Icon name="arrow-right" size="18" />
             </div>
             <div class="stress-metric">
-              <span>压力后资产</span>
-              <strong>¥{{ money(stressResult.projected_total_assets) }}</strong>
+              <span class="terminal-label">压力后资产</span>
+              <strong class="font-jet">¥{{ money(stressResult.projected_total_assets) }}</strong>
             </div>
             <div class="stress-metric">
-              <span>预计损失</span>
-              <strong class="text-danger">¥{{ money(stressResult.loss_amount) }}</strong>
+              <span class="terminal-label">预计损失</span>
+              <strong class="text-danger font-jet">¥{{ money(stressResult.loss_amount) }}</strong>
             </div>
             <div class="stress-metric">
-              <span>损失比例</span>
-              <strong class="text-danger">{{ ratio(stressResult.loss_ratio) }}</strong>
+              <span class="terminal-label">损失比例</span>
+              <strong class="text-danger font-jet">{{ ratio(stressResult.loss_ratio) }}</strong>
             </div>
             <div class="stress-metric">
-              <span>风险等级</span>
+              <span class="terminal-label">风险等级</span>
               <span :class="['risk-badge', riskLevelClass(stressResult.risk_level)]">
                 {{ riskLevelText(stressResult.risk_level) }}
               </span>
@@ -332,21 +332,21 @@ onMounted(load)
           <!-- 资产类别损失条形图 -->
           <div class="impact-bars">
             <div class="impact-head">
-              <span>资产类别</span>
-              <span>当前金额</span>
-              <span>冲击比例</span>
-              <span>损失金额</span>
+              <span class="terminal-label">资产类别</span>
+              <span class="terminal-label">当前金额</span>
+              <span class="terminal-label">冲击比例</span>
+              <span class="terminal-label">损失金额</span>
             </div>
             <div v-for="item in stressResult.asset_impacts" :key="item.category" class="impact-row">
               <div class="impact-label">{{ item.category }}</div>
-              <div class="impact-amount">¥{{ money(item.current_amount) }}</div>
-              <div class="impact-shock">{{ (item.shock_pct * 100).toFixed(1) }}%</div>
+              <div class="impact-amount font-jet">¥{{ money(item.current_amount) }}</div>
+              <div class="impact-shock font-jet">{{ (item.shock_pct * 100).toFixed(1) }}%</div>
               <div class="impact-bar-cell">
                 <div
                   class="impact-bar"
                   :style="{ width: (Math.abs(item.loss_amount) / maxLoss * 100) + '%' }"
                 />
-                <span class="impact-loss">¥{{ money(item.loss_amount) }}</span>
+                <span class="impact-loss font-jet">¥{{ money(item.loss_amount) }}</span>
               </div>
             </div>
           </div>
@@ -408,7 +408,7 @@ onMounted(load)
 .metric-cell:last-child { border-right: 0; }
 .metric-cell span {
   color: var(--color-text-muted);
-  font-size: 0.78rem;
+  font-size: inherit;
 }
 .metric-cell strong {
   color: var(--color-text-primary);
@@ -460,7 +460,7 @@ onMounted(load)
 }
 .section-title span {
   color: var(--color-text-muted);
-  font-size: 0.8rem;
+  font-size: inherit;
 }
 
 .allocation-table {
@@ -739,7 +739,7 @@ onMounted(load)
 }
 .stress-metric span {
   color: var(--color-text-muted);
-  font-size: 0.75rem;
+  font-size: inherit;
 }
 .stress-metric strong {
   color: var(--color-text-primary);

@@ -144,7 +144,7 @@ function scoreColor(score) {
 </script>
 
 <template>
-  <div class="rag-page">
+  <div class="rag-page bg-mesh">
     <!-- Tab 切换 -->
     <div class="tab-bar">
       <button :class="['tab-btn', { active: activeTab === 'stats' }]" @click="activeTab = 'stats'">
@@ -172,16 +172,19 @@ function scoreColor(score) {
       <div v-if="loading" class="loading-state">加载中...</div>
 
       <!-- 知识库索引统计 -->
-      <div v-if="indexStats" class="index-stats-section">
-        <h3 class="section-title">📚 知识库索引</h3>
+      <div v-if="indexStats" class="index-stats-section editorial-card">
+        <div class="editorial-card-header section-title">
+          <span class="title">知识库索引</span>
+          <span class="meta">KNOWLEDGE INDEX</span>
+        </div>
         <div class="index-stats-grid">
           <div class="index-stat-card">
-            <div class="index-stat-value">{{ indexStats.total_fts || 0 }}</div>
-            <div class="index-stat-label">FTS 索引总数</div>
+            <div class="index-stat-value font-jet-lg">{{ indexStats.total_fts || 0 }}</div>
+            <div class="index-stat-label terminal-label">FTS 索引总数</div>
           </div>
           <div class="index-stat-card">
-            <div class="index-stat-value">{{ indexStats.total_chroma || 0 }}</div>
-            <div class="index-stat-label">向量索引总数</div>
+            <div class="index-stat-value font-jet-lg">{{ indexStats.total_chroma || 0 }}</div>
+            <div class="index-stat-label terminal-label">向量索引总数</div>
           </div>
         </div>
 
@@ -191,12 +194,12 @@ function scoreColor(score) {
             <span class="index-type-name">{{ getTypeName(type) }}</span>
             <div class="index-type-bars">
               <div class="index-type-bar">
-                <span class="bar-label">FTS:</span>
-                <span class="bar-value">{{ count }}</span>
+                <span class="bar-label terminal-label">FTS:</span>
+                <span class="bar-value font-jet">{{ count }}</span>
               </div>
               <div class="index-type-bar">
-                <span class="bar-label">向量:</span>
-                <span class="bar-value">{{ indexStats.chroma?.[type] || 0 }}</span>
+                <span class="bar-label terminal-label">向量:</span>
+                <span class="bar-value font-jet">{{ indexStats.chroma?.[type] || 0 }}</span>
               </div>
             </div>
           </div>
@@ -205,19 +208,22 @@ function scoreColor(score) {
 
       <!-- 检索统计 -->
       <div v-if="stats" class="stats-grid">
-        <h3 class="section-title">📊 检索统计（近30天）</h3>
+        <h3 class="section-title editorial-card-header">
+          <span class="title">检索统计</span>
+          <span class="meta">LAST 30 DAYS</span>
+        </h3>
         <!-- 核心指标 -->
         <div class="stat-card">
-          <div class="stat-value">{{ stats.total || 0 }}</div>
-          <div class="stat-label">总检索次数</div>
+          <div class="stat-value font-jet-lg">{{ stats.total || 0 }}</div>
+          <div class="stat-label terminal-label">总检索次数</div>
         </div>
         <div class="stat-card">
-          <div class="stat-value">{{ stats.avg_results || 0 }}</div>
-          <div class="stat-label">平均命中数</div>
+          <div class="stat-value font-jet-lg">{{ stats.avg_results || 0 }}</div>
+          <div class="stat-label terminal-label">平均命中数</div>
         </div>
         <div class="stat-card">
-          <div class="stat-value">{{ stats.top_keywords?.length || 0 }}</div>
-          <div class="stat-label">独立关键词</div>
+          <div class="stat-value font-jet-lg">{{ stats.top_keywords?.length || 0 }}</div>
+          <div class="stat-label terminal-label">独立关键词</div>
         </div>
 
         <!-- 热门关键词 -->
@@ -227,7 +233,7 @@ function scoreColor(score) {
             <span v-for="kw in stats.top_keywords?.slice(0, 15)" :key="kw.keyword"
               :class="['keyword-tag', `size-${Math.min(Math.ceil(kw.count / 5), 4)}`]">
               {{ kw.keyword }}
-              <span class="keyword-count">{{ kw.count }}</span>
+              <span class="keyword-count font-jet">{{ kw.count }}</span>
             </span>
           </div>
         </div>
@@ -241,7 +247,7 @@ function scoreColor(score) {
               <div class="type-bar-track">
                 <div class="type-bar-fill" :style="{ width: `${Math.min(t.count / (stats.total || 1) * 100, 100)}%` }"></div>
               </div>
-              <div class="type-bar-count">{{ t.count }}</div>
+              <div class="type-bar-count font-jet">{{ t.count }}</div>
             </div>
           </div>
         </div>
@@ -253,7 +259,7 @@ function scoreColor(score) {
             <div v-for="d in stats.daily?.slice(0, 7)" :key="d.day" class="daily-bar">
               <div class="daily-bar-fill" :style="{ height: `${Math.min(d.count / 20 * 100, 100)}%` }"></div>
               <div class="daily-bar-label">{{ d.day?.slice(5) }}</div>
-              <div class="daily-bar-count">{{ d.count }}</div>
+              <div class="daily-bar-count font-jet">{{ d.count }}</div>
             </div>
           </div>
         </div>
@@ -263,17 +269,17 @@ function scoreColor(score) {
     <!-- 检索日志 -->
     <div v-if="activeTab === 'logs'" class="logs-section">
       <div class="logs-list">
-        <div v-for="log in logs" :key="log.id" class="log-item" @click="selectedLog = selectedLog?.id === log.id ? null : log">
+        <div v-for="log in logs" :key="log.id" class="log-item reveal-stagger" @click="selectedLog = selectedLog?.id === log.id ? null : log">
           <div class="log-header">
-            <span class="log-id" @click.stop="copyText(`#${log.id}`, $event)" title="点击复制">#{{ log.id }}</span>
+            <span class="log-id font-jet" @click.stop="copyText(`#${log.id}`, $event)" title="点击复制">#{{ log.id }}</span>
             <span class="log-query">{{ log.query?.slice(0, 50) }}</span>
-            <span class="log-time">{{ formatDate(log.created_at) }}</span>
+            <span class="log-time terminal-label">{{ formatDate(log.created_at) }}</span>
           </div>
           <div class="log-meta">
             <span class="log-keywords">
               检索词: {{ log.keywords?.join(', ') || '-' }}
             </span>
-            <span class="log-count">{{ log.results_count }} 条结果</span>
+            <span class="log-count font-jet">{{ log.results_count }} 条结果</span>
           </div>
 
           <!-- 展开详情 -->
@@ -296,8 +302,11 @@ function scoreColor(score) {
     <!-- 质量评估 -->
     <div v-if="activeTab === 'eval'" class="eval-section">
       <!-- 单次评估 -->
-      <div class="eval-card">
-        <h3 class="section-title">🔍 单次检索评估</h3>
+      <div class="eval-card editorial-card">
+        <div class="editorial-card-header section-title">
+          <span class="title">单次检索评估</span>
+          <span class="meta">SINGLE QUERY</span>
+        </div>
         <div class="eval-form">
           <input v-model="evalQuery" placeholder="输入检索查询词..." class="input-field" @keyup.enter="runSingleEval" />
           <input v-model="evalTopics" placeholder="期望主题（逗号分隔，可选）" class="input-field" />
@@ -309,20 +318,20 @@ function scoreColor(score) {
         <div v-if="evalResult" class="eval-result">
           <div class="eval-metrics">
             <div class="metric-item">
-              <div class="metric-value" :style="{ color: scoreColor(evalResult.precision) }">{{ (evalResult.precision * 100).toFixed(0) }}%</div>
-              <div class="metric-label">精确率</div>
+              <div class="metric-value font-jet-lg" :style="{ color: scoreColor(evalResult.precision) }">{{ (evalResult.precision * 100).toFixed(0) }}%</div>
+              <div class="metric-label terminal-label">精确率</div>
             </div>
             <div class="metric-item">
-              <div class="metric-value" :style="{ color: scoreColor(evalResult.mrr) }">{{ (evalResult.mrr * 100).toFixed(0) }}%</div>
-              <div class="metric-label">MRR</div>
+              <div class="metric-value font-jet-lg" :style="{ color: scoreColor(evalResult.mrr) }">{{ (evalResult.mrr * 100).toFixed(0) }}%</div>
+              <div class="metric-label terminal-label">MRR</div>
             </div>
             <div class="metric-item">
-              <div class="metric-value" :style="{ color: scoreColor(evalResult.ndcg) }">{{ (evalResult.ndcg * 100).toFixed(0) }}%</div>
-              <div class="metric-label">NDCG</div>
+              <div class="metric-value font-jet-lg" :style="{ color: scoreColor(evalResult.ndcg) }">{{ (evalResult.ndcg * 100).toFixed(0) }}%</div>
+              <div class="metric-label terminal-label">NDCG</div>
             </div>
             <div class="metric-item">
-              <div class="metric-value" :style="{ color: scoreColor(evalResult.recall) }">{{ (evalResult.recall * 100).toFixed(0) }}%</div>
-              <div class="metric-label">召回率</div>
+              <div class="metric-value font-jet-lg" :style="{ color: scoreColor(evalResult.recall) }">{{ (evalResult.recall * 100).toFixed(0) }}%</div>
+              <div class="metric-label terminal-label">召回率</div>
             </div>
           </div>
 
@@ -333,12 +342,12 @@ function scoreColor(score) {
               </span>
               <span class="eval-detail-type">{{ d.content_type }}</span>
               <span class="eval-detail-title">{{ d.title }}</span>
-              <span class="eval-detail-score">{{ d.score.toFixed(4) }}</span>
+              <span class="eval-detail-score font-jet">{{ d.score.toFixed(4) }}</span>
             </div>
           </div>
 
           <div v-if="evalResult.suggestions?.length" class="eval-suggestions">
-            <div class="suggestions-title">💡 优化建议</div>
+            <div class="suggestions-title">优化建议</div>
             <ul>
               <li v-for="(s, i) in evalResult.suggestions" :key="i">{{ s }}</li>
             </ul>
@@ -347,8 +356,11 @@ function scoreColor(score) {
       </div>
 
       <!-- 评估套件 -->
-      <div class="eval-card">
-        <h3 class="section-title">📊 评估套件 <span class="badge">{{ evalSuiteResult?.summary?.total_cases || 16 }} 个用例</span></h3>
+      <div class="eval-card editorial-card">
+        <div class="editorial-card-header section-title">
+          <span class="title">评估套件</span>
+          <span class="meta">EVAL SUITE · <span class="font-jet">{{ evalSuiteResult?.summary?.total_cases || 16 }}</span> CASES</span>
+        </div>
         <button class="btn-primary" :disabled="evalSuiteLoading" @click="runSuite">
           {{ evalSuiteLoading ? '运行中...' : '运行完整评估' }}
         </button>
@@ -356,28 +368,28 @@ function scoreColor(score) {
         <div v-if="evalSuiteResult?.summary" class="suite-summary">
           <div class="eval-metrics">
             <div class="metric-item">
-              <div class="metric-value" :style="{ color: scoreColor(evalSuiteResult.summary.avg_precision) }">{{ (evalSuiteResult.summary.avg_precision * 100).toFixed(0) }}%</div>
-              <div class="metric-label">平均精确率</div>
+              <div class="metric-value font-jet-lg" :style="{ color: scoreColor(evalSuiteResult.summary.avg_precision) }">{{ (evalSuiteResult.summary.avg_precision * 100).toFixed(0) }}%</div>
+              <div class="metric-label terminal-label">平均精确率</div>
             </div>
             <div class="metric-item">
-              <div class="metric-value" :style="{ color: scoreColor(evalSuiteResult.summary.avg_mrr) }">{{ (evalSuiteResult.summary.avg_mrr * 100).toFixed(0) }}%</div>
-              <div class="metric-label">平均 MRR</div>
+              <div class="metric-value font-jet-lg" :style="{ color: scoreColor(evalSuiteResult.summary.avg_mrr) }">{{ (evalSuiteResult.summary.avg_mrr * 100).toFixed(0) }}%</div>
+              <div class="metric-label terminal-label">平均 MRR</div>
             </div>
             <div class="metric-item">
-              <div class="metric-value" :style="{ color: scoreColor(evalSuiteResult.summary.avg_ndcg) }">{{ (evalSuiteResult.summary.avg_ndcg * 100).toFixed(0) }}%</div>
-              <div class="metric-label">平均 NDCG</div>
+              <div class="metric-value font-jet-lg" :style="{ color: scoreColor(evalSuiteResult.summary.avg_ndcg) }">{{ (evalSuiteResult.summary.avg_ndcg * 100).toFixed(0) }}%</div>
+              <div class="metric-label terminal-label">平均 NDCG</div>
             </div>
             <div class="metric-item">
-              <div class="metric-value">{{ evalSuiteResult.summary.elapsed_seconds }}s</div>
-              <div class="metric-label">耗时</div>
+              <div class="metric-value font-jet-lg">{{ evalSuiteResult.summary.elapsed_seconds }}s</div>
+              <div class="metric-label terminal-label">耗时</div>
             </div>
           </div>
 
           <div v-if="evalSuiteResult.summary.by_category" class="category-stats">
             <div v-for="(cat, name) in evalSuiteResult.summary.by_category" :key="name" class="category-item">
               <span class="category-name">{{ name }}</span>
-              <span class="category-score">P={{ (cat.avg_precision * 100).toFixed(0) }}% MRR={{ (cat.avg_mrr * 100).toFixed(0) }}%</span>
-              <span class="category-count">{{ cat.count }}条</span>
+              <span class="category-score font-jet">P={{ (cat.avg_precision * 100).toFixed(0) }}% MRR={{ (cat.avg_mrr * 100).toFixed(0) }}%</span>
+              <span class="category-count font-jet">{{ cat.count }}条</span>
             </div>
           </div>
         </div>
@@ -386,13 +398,13 @@ function scoreColor(score) {
 
     <!-- 结果详情弹窗 -->
     <div v-if="selectedResult" class="detail-modal" @click.self="closeDetail">
-      <div class="detail-panel">
+      <div class="detail-panel editorial-card">
         <div class="detail-header">
           <div class="detail-info">
             <span :class="['result-type', `type-${typeColor(selectedResult.label)}`]">{{ selectedResult.label }}</span>
-            <h3 class="detail-title">{{ selectedResult.title }}</h3>
-            <span class="detail-id">ID: {{ selectedResult.reference_id }}</span>
-            <span v-if="selectedResult.time" class="detail-time">{{ selectedResult.time }}</span>
+            <h3 class="detail-title editorial-title">{{ selectedResult.title }}</h3>
+            <span class="detail-id terminal-label">ID: <span class="font-jet">{{ selectedResult.reference_id }}</span></span>
+            <span v-if="selectedResult.time" class="detail-time terminal-label">{{ selectedResult.time }}</span>
           </div>
           <button @click="closeDetail" class="btn-close">
             <svg width="20" height="20" fill="none" stroke="currentColor" viewBox="0 0 24 24">

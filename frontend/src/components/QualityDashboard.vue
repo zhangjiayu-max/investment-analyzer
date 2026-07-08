@@ -1,8 +1,8 @@
 <template>
-  <div class="quality-page">
+  <div class="quality-page bg-mesh">
     <div class="page-header">
-      <h2 class="page-title">📊 质量仪表盘</h2>
-      <p class="page-desc">LLM 产出质量监控与评估</p>
+      <h2 class="page-title editorial-title-lg">质量仪表盘</h2>
+      <p class="page-desc editorial-subtitle">LLM 产出质量监控与评估</p>
     </div>
 
     <!-- Loading -->
@@ -14,28 +14,28 @@
     <div v-else>
       <!-- Summary Cards -->
       <div class="summary-grid">
-        <div class="card summary-card">
-          <div class="summary-label">评测平均分</div>
-          <div class="summary-value" :class="scoreClass(summary.eval_avg_score)">
+        <div class="card summary-card editorial-card reveal-stagger">
+          <div class="summary-label terminal-label">评测平均分</div>
+          <div class="summary-value font-jet-lg" :class="scoreClass(summary.eval_avg_score)">
             {{ summary.eval_avg_score?.toFixed(1) || '-' }}
           </div>
-          <div class="summary-sub">/ 10</div>
+          <div class="summary-sub terminal-label">/ 10</div>
         </div>
-        <div class="card summary-card">
-          <div class="summary-label">优秀 (≥7分)</div>
-          <div class="summary-value score-good">
+        <div class="card summary-card editorial-card reveal-stagger">
+          <div class="summary-label terminal-label">优秀 (≥7分)</div>
+          <div class="summary-value font-jet-lg score-good">
             {{ summary.eval_good_count || 0 }}
           </div>
         </div>
-        <div class="card summary-card">
-          <div class="summary-label">较差 (<5分)</div>
-          <div class="summary-value" :class="summary.eval_bad_count > 0 ? 'score-bad' : ''">
+        <div class="card summary-card editorial-card reveal-stagger">
+          <div class="summary-label terminal-label">较差 (&lt;5分)</div>
+          <div class="summary-value font-jet-lg" :class="summary.eval_bad_count > 0 ? 'score-bad' : ''">
             {{ summary.eval_bad_count || 0 }}
           </div>
         </div>
-        <div class="card summary-card">
-          <div class="summary-label">总评测次数</div>
-          <div class="summary-value">
+        <div class="card summary-card editorial-card reveal-stagger">
+          <div class="summary-label terminal-label">总评测次数</div>
+          <div class="summary-value font-jet-lg">
             {{ summary.scored_count || 0 }}
           </div>
         </div>
@@ -43,25 +43,25 @@
 
       <!-- Stats Row -->
       <div class="stats-row">
-        <div class="card stat-card">
-          <span class="stat-num">{{ summary.scored_count || 0 }}</span>
-          <span class="stat-label">已评估</span>
+        <div class="card stat-card editorial-card">
+          <span class="stat-num font-jet-lg">{{ summary.scored_count || 0 }}</span>
+          <span class="stat-label terminal-label">已评估</span>
         </div>
-        <div class="card stat-card">
-          <span class="stat-num">{{ summary.total_feedback || 0 }}</span>
-          <span class="stat-label">总反馈</span>
+        <div class="card stat-card editorial-card">
+          <span class="stat-num font-jet-lg">{{ summary.total_feedback || 0 }}</span>
+          <span class="stat-label terminal-label">总反馈</span>
         </div>
-        <div class="card stat-card stat-card-warn">
-          <span class="stat-num">{{ summary.low_quality_count || 0 }}</span>
-          <span class="stat-label">低分产出</span>
+        <div class="card stat-card stat-card-warn editorial-card">
+          <span class="stat-num font-jet-lg">{{ summary.low_quality_count || 0 }}</span>
+          <span class="stat-label terminal-label">低分产出</span>
         </div>
       </div>
 
       <!-- Trend Chart -->
-      <div class="card chart-card">
-        <div class="card-header">
-          <h3>质量趋势</h3>
-          <select v-model="trendDays" @change="loadTrend" class="day-select">
+      <div class="card chart-card editorial-card">
+        <div class="card-header editorial-card-header">
+          <h3 class="title">质量趋势</h3>
+          <select v-model="trendDays" @change="loadTrend" class="day-select meta">
             <option :value="7">近 7 天</option>
             <option :value="30">近 30 天</option>
             <option :value="90">近 90 天</option>
@@ -75,13 +75,13 @@
                 <div class="trend-bar bar-logic" :style="{ height: barHeight(item.avg_logic) }" :title="`逻辑: ${item.avg_logic?.toFixed(1)}`"></div>
                 <div class="trend-bar bar-action" :style="{ height: barHeight(item.avg_actionability) }" :title="`可执行: ${item.avg_actionability?.toFixed(1)}`"></div>
               </div>
-              <div class="trend-date">{{ item.day?.slice(5) }}</div>
+              <div class="trend-date font-jet">{{ item.day?.slice(5) }}</div>
             </div>
           </div>
           <div class="trend-legend">
-            <span class="legend-item"><i class="legend-dot bar-accuracy"></i> 数据</span>
-            <span class="legend-item"><i class="legend-dot bar-logic"></i> 逻辑</span>
-            <span class="legend-item"><i class="legend-dot bar-action"></i> 可执行</span>
+            <span class="legend-item terminal-label"><i class="legend-dot bar-accuracy"></i> 数据</span>
+            <span class="legend-item terminal-label"><i class="legend-dot bar-logic"></i> 逻辑</span>
+            <span class="legend-item terminal-label"><i class="legend-dot bar-action"></i> 可执行</span>
           </div>
         </div>
         <div v-else class="empty-state" style="padding:2rem">
@@ -90,15 +90,15 @@
       </div>
 
       <!-- Agent Performance -->
-      <div class="card">
-        <div class="card-header">
-          <h3>🤖 Agent 评分对比</h3>
+      <div class="card editorial-card">
+        <div class="card-header editorial-card-header">
+          <h3 class="title">Agent 评分对比</h3>
         </div>
         <div v-if="agentStats.length" class="agent-grid">
-          <div v-for="agent in agentStats" :key="agent.analysis_type" class="agent-card">
+          <div v-for="agent in agentStats" :key="agent.analysis_type" class="agent-card reveal-stagger">
             <div class="agent-header">
               <span class="agent-name">{{ agent.agent_name }}</span>
-              <span class="agent-score" :style="{ color: scoreColor(agent.avg_score) }">
+              <span class="agent-score font-jet-lg" :style="{ color: scoreColor(agent.avg_score) }">
                 {{ agent.avg_score?.toFixed(1) || '-' }}
               </span>
             </div>
@@ -106,10 +106,10 @@
               <div class="agent-bar-fill" :style="{ width: (agent.avg_score * 10) + '%', background: scoreColor(agent.avg_score) }"></div>
             </div>
             <div class="agent-meta">
-              <span>{{ agent.case_count }} 用例</span>
-              <span>{{ agent.run_count }} 次运行</span>
-              <span v-if="agent.good_count" class="text-success">{{ agent.good_count }} 优秀</span>
-              <span v-if="agent.bad_count" class="text-danger">{{ agent.bad_count }} 较差</span>
+              <span class="font-jet">{{ agent.case_count }} 用例</span>
+              <span class="font-jet">{{ agent.run_count }} 次运行</span>
+              <span v-if="agent.good_count" class="text-success font-jet">{{ agent.good_count }} 优秀</span>
+              <span v-if="agent.bad_count" class="text-danger font-jet">{{ agent.bad_count }} 较差</span>
             </div>
           </div>
         </div>
@@ -119,10 +119,10 @@
       </div>
 
       <!-- Agent Runtime Performance -->
-      <div class="card">
-        <div class="card-header">
-          <h3>⚡ Agent 运行监控</h3>
-          <div class="card-header-actions">
+      <div class="card editorial-card">
+        <div class="card-header editorial-card-header">
+          <h3 class="title">Agent 运行监控</h3>
+          <div class="card-header-actions meta">
             <select v-model="perfDays" @change="refreshPerf" class="day-select">
               <option :value="7">近 7 天</option>
               <option :value="30">近 30 天</option>
@@ -134,22 +134,22 @@
         <!-- 概览卡片 -->
         <div class="perf-overview">
           <div class="perf-stat-card">
-            <span class="perf-stat-value">{{ perfStats.total_runs }}</span>
-            <span class="perf-stat-label">总调用</span>
+            <span class="perf-stat-value font-jet-lg">{{ perfStats.total_runs }}</span>
+            <span class="perf-stat-label terminal-label">总调用</span>
           </div>
           <div class="perf-stat-card">
-            <span class="perf-stat-value">{{ formatDuration(perfStats.avg_duration_ms) }}</span>
-            <span class="perf-stat-label">平均耗时</span>
+            <span class="perf-stat-value font-jet-lg">{{ formatDuration(perfStats.avg_duration_ms) }}</span>
+            <span class="perf-stat-label terminal-label">平均耗时</span>
           </div>
           <div class="perf-stat-card">
-            <span class="perf-stat-value" :class="perfStats.success_rate >= 90 ? 'text-success' : perfStats.success_rate >= 70 ? '' : 'text-danger'">
+            <span class="perf-stat-value font-jet-lg" :class="perfStats.success_rate >= 90 ? 'text-success' : perfStats.success_rate >= 70 ? '' : 'text-danger'">
               {{ perfStats.success_rate }}%
             </span>
-            <span class="perf-stat-label">成功率</span>
+            <span class="perf-stat-label terminal-label">成功率</span>
           </div>
           <div class="perf-stat-card">
-            <span class="perf-stat-value" :class="perfStats.slow_calls > 0 ? 'text-danger' : ''">{{ perfStats.slow_calls }}</span>
-            <span class="perf-stat-label">慢调用(&gt;30s)</span>
+            <span class="perf-stat-value font-jet-lg" :class="perfStats.slow_calls > 0 ? 'text-danger' : ''">{{ perfStats.slow_calls }}</span>
+            <span class="perf-stat-label terminal-label">慢调用(&gt;30s)</span>
           </div>
         </div>
 
@@ -163,18 +163,18 @@
             <span class="col-rate">成功率</span>
             <span class="col-slow">慢调用</span>
           </div>
-          <div v-for="a in perfByAgent" :key="a.agent_key" class="perf-agent-row">
+          <div v-for="a in perfByAgent" :key="a.agent_key" class="perf-agent-row reveal-stagger">
             <span class="col-name">{{ a.agent_name }}</span>
-            <span class="col-runs">{{ a.runs }}</span>
-            <span class="col-avg">{{ formatDuration(a.avg_duration_ms) }}</span>
-            <span class="col-max">{{ formatDuration(a.max_duration_ms) }}</span>
+            <span class="col-runs font-jet">{{ a.runs }}</span>
+            <span class="col-avg font-jet">{{ formatDuration(a.avg_duration_ms) }}</span>
+            <span class="col-max font-jet">{{ formatDuration(a.max_duration_ms) }}</span>
             <span class="col-rate">
               <span class="rate-bar">
                 <span class="rate-bar-fill" :style="{ width: a.success_rate + '%', background: a.success_rate >= 90 ? '#10b981' : a.success_rate >= 70 ? '#f59e0b' : '#ef4444' }"></span>
               </span>
-              <span :class="a.success_rate >= 90 ? 'text-success' : a.success_rate >= 70 ? '' : 'text-danger'">{{ a.success_rate }}%</span>
+              <span class="font-jet" :class="a.success_rate >= 90 ? 'text-success' : a.success_rate >= 70 ? '' : 'text-danger'">{{ a.success_rate }}%</span>
             </span>
-            <span class="col-slow" :class="a.slow_calls > 0 ? 'text-danger' : ''">{{ a.slow_calls }}</span>
+            <span class="col-slow font-jet" :class="a.slow_calls > 0 ? 'text-danger' : ''">{{ a.slow_calls }}</span>
           </div>
         </div>
         <div v-else class="empty-state" style="padding:2rem">
@@ -183,10 +183,10 @@
       </div>
 
       <!-- 对话质量评估 -->
-      <div class="card">
-        <div class="card-header">
-          <h3>💬 对话质量评估</h3>
-          <div class="card-header-actions">
+      <div class="card editorial-card">
+        <div class="card-header editorial-card-header">
+          <h3 class="title">对话质量评估</h3>
+          <div class="card-header-actions meta">
             <select v-model="convEvalDays" @change="loadConvEvalStats" class="day-select">
               <option :value="7">近 7 天</option>
               <option :value="30">近 30 天</option>
@@ -199,52 +199,52 @@
         <div v-if="convEvalStats" class="conv-eval-summary">
           <div class="conv-eval-stats-grid">
             <div class="conv-eval-stat">
-              <div class="conv-eval-stat-value">{{ convEvalStats.total_evals || 0 }}</div>
-              <div class="conv-eval-stat-label">总评估数</div>
+              <div class="conv-eval-stat-value font-jet-lg">{{ convEvalStats.total_evals || 0 }}</div>
+              <div class="conv-eval-stat-label terminal-label">总评估数</div>
             </div>
             <div class="conv-eval-stat">
-              <div class="conv-eval-stat-value" :class="scoreClass(convEvalStats.avg_auto_score / 10)">
+              <div class="conv-eval-stat-value font-jet-lg" :class="scoreClass(convEvalStats.avg_auto_score / 10)">
                 {{ convEvalStats.avg_auto_score?.toFixed(0) || '-' }}
               </div>
-              <div class="conv-eval-stat-label">平均分</div>
+              <div class="conv-eval-stat-label terminal-label">平均分</div>
             </div>
             <div class="conv-eval-stat">
-              <div class="conv-eval-stat-value score-good">{{ convEvalStats.high_score_count || 0 }}</div>
-              <div class="conv-eval-stat-label">高质量 (≥80)</div>
+              <div class="conv-eval-stat-value font-jet-lg score-good">{{ convEvalStats.high_score_count || 0 }}</div>
+              <div class="conv-eval-stat-label terminal-label">高质量 (≥80)</div>
             </div>
             <div class="conv-eval-stat">
-              <div class="conv-eval-stat-value" :class="convEvalStats.low_score_count > 0 ? 'score-bad' : ''">
+              <div class="conv-eval-stat-value font-jet-lg" :class="convEvalStats.low_score_count > 0 ? 'score-bad' : ''">
                 {{ convEvalStats.low_score_count || 0 }}
               </div>
-              <div class="conv-eval-stat-label">低质量 (<60)</div>
+              <div class="conv-eval-stat-label terminal-label">低质量 (&lt;60)</div>
             </div>
           </div>
 
           <!-- 按复杂度统计 -->
           <div v-if="convEvalStats.by_complexity?.length" class="conv-eval-complexity">
-            <h4>按复杂度分布</h4>
+            <div class="editorial-card-header"><h4 class="title">按复杂度分布</h4></div>
             <div class="complexity-bars">
               <div v-for="item in convEvalStats.by_complexity" :key="item.complexity" class="complexity-bar-item">
-                <div class="complexity-label">{{ complexityLabel(item.complexity) }}</div>
+                <div class="complexity-label terminal-label">{{ complexityLabel(item.complexity) }}</div>
                 <div class="complexity-bar">
                   <div
                     class="complexity-bar-fill"
                     :style="{ width: (item.avg_score || 0) + '%', backgroundColor: scoreColor(item.avg_score) }"
                   ></div>
                 </div>
-                <div class="complexity-score">{{ item.avg_score?.toFixed(0) || '-' }}</div>
-                <div class="complexity-count">{{ item.count }}次</div>
+                <div class="complexity-score font-jet">{{ item.avg_score?.toFixed(0) || '-' }}</div>
+                <div class="complexity-count font-jet">{{ item.count }}次</div>
               </div>
             </div>
           </div>
 
           <!-- 对话质量趋势 -->
           <div v-if="convEvalStats.trend?.length" class="conv-eval-trend">
-            <h4>每日趋势</h4>
+            <div class="editorial-card-header"><h4 class="title">每日趋势</h4></div>
             <div class="trend-mini-chart">
               <div v-for="item in convEvalStats.trend" :key="item.date" class="trend-mini-bar-group">
                 <div class="trend-mini-bar" :style="{ height: barHeight(item.avg_score / 10) }"></div>
-                <div class="trend-mini-date">{{ item.date?.slice(5) }}</div>
+                <div class="trend-mini-date font-jet">{{ item.date?.slice(5) }}</div>
               </div>
             </div>
           </div>
@@ -256,56 +256,56 @@
       </div>
 
       <!-- 进化效果统计 -->
-      <div class="card">
-        <div class="card-header">
-          <h3>🔄 进化效果统计</h3>
-          <button class="btn-text" @click="loadEvolutionStats">刷新</button>
+      <div class="card editorial-card">
+        <div class="card-header editorial-card-header">
+          <h3 class="title">进化效果统计</h3>
+          <button class="btn-text meta" @click="loadEvolutionStats">刷新</button>
         </div>
 
         <div v-if="evolutionStats" class="evolution-summary">
           <!-- 概览卡片 -->
           <div class="evolution-stats-grid">
             <div class="evolution-stat">
-              <div class="evolution-stat-value">{{ evolutionStats.low_score_count || 0 }}</div>
-              <div class="evolution-stat-label">低分对话</div>
+              <div class="evolution-stat-value font-jet-lg">{{ evolutionStats.low_score_count || 0 }}</div>
+              <div class="evolution-stat-label terminal-label">低分对话</div>
             </div>
             <div class="evolution-stat">
-              <div class="evolution-stat-value">{{ evolutionStats.feedback_count || 0 }}</div>
-              <div class="evolution-stat-label">自动反馈</div>
+              <div class="evolution-stat-value font-jet-lg">{{ evolutionStats.feedback_count || 0 }}</div>
+              <div class="evolution-stat-label terminal-label">自动反馈</div>
             </div>
             <div class="evolution-stat">
-              <div class="evolution-stat-value">{{ evolutionStats.suggestion_count || 0 }}</div>
-              <div class="evolution-stat-label">高分建议</div>
+              <div class="evolution-stat-value font-jet-lg">{{ evolutionStats.suggestion_count || 0 }}</div>
+              <div class="evolution-stat-label terminal-label">高分建议</div>
             </div>
             <div class="evolution-stat">
-              <div class="evolution-stat-value" :class="evolutionStats.alert_count > 0 ? 'score-bad' : ''">
+              <div class="evolution-stat-value font-jet-lg" :class="evolutionStats.alert_count > 0 ? 'score-bad' : ''">
                 {{ evolutionStats.alert_count || 0 }}
               </div>
-              <div class="evolution-stat-label">专家告警</div>
+              <div class="evolution-stat-label terminal-label">专家告警</div>
             </div>
           </div>
 
           <!-- 质量趋势 -->
           <div v-if="evolutionStats.trend?.length" class="evolution-trend">
-            <h4>质量趋势</h4>
+            <div class="editorial-card-header"><h4 class="title">质量趋势</h4></div>
             <div class="trend-mini-chart">
               <div v-for="item in evolutionStats.trend" :key="item.date" class="trend-mini-bar-group">
                 <div class="trend-mini-bar" :style="{ height: barHeight(item.avg_score / 10) }"></div>
-                <div class="trend-mini-date">{{ item.date?.slice(5) }}</div>
+                <div class="trend-mini-date font-jet">{{ item.date?.slice(5) }}</div>
               </div>
             </div>
           </div>
 
           <!-- 专家表现 -->
           <div v-if="evolutionStats.expert_stats?.length" class="evolution-experts">
-            <h4>专家表现</h4>
+            <div class="editorial-card-header"><h4 class="title">专家表现</h4></div>
             <div class="expert-alert-list">
-              <div v-for="expert in evolutionStats.expert_stats" :key="expert.agent_key" class="expert-alert-item">
+              <div v-for="expert in evolutionStats.expert_stats" :key="expert.agent_key" class="expert-alert-item reveal-stagger">
                 <span class="expert-alert-name">{{ expert.agent_name }}</span>
-                <span class="expert-alert-rate" :class="expert.avg_success_rate < 0.8 ? 'score-bad' : ''">
+                <span class="expert-alert-rate font-jet" :class="expert.avg_success_rate < 0.8 ? 'score-bad' : ''">
                   {{ (expert.avg_success_rate * 100).toFixed(0) }}% 成功率
                 </span>
-                <span class="expert-alert-count">{{ expert.alert_count }} 次告警</span>
+                <span class="expert-alert-count font-jet">{{ expert.alert_count }} 次告警</span>
               </div>
             </div>
           </div>
@@ -317,23 +317,23 @@
       </div>
 
       <!-- 评估建议 -->
-      <div class="card">
-        <div class="card-header">
-          <h3>💡 评估建议</h3>
-          <button class="btn-text" @click="loadEvalSuggestions">刷新</button>
+      <div class="card editorial-card">
+        <div class="card-header editorial-card-header">
+          <h3 class="title">评估建议</h3>
+          <button class="btn-text meta" @click="loadEvalSuggestions">刷新</button>
         </div>
 
         <div v-if="evalSuggestions.length" class="suggestion-list">
-          <div v-for="item in evalSuggestions" :key="item.id" class="suggestion-item">
+          <div v-for="item in evalSuggestions" :key="item.id" class="suggestion-item reveal-stagger">
             <div class="suggestion-header">
               <span class="suggestion-title">{{ item.name }}</span>
-              <span class="suggestion-score" :style="{ color: scoreColor(item.auto_score) }">
+              <span class="suggestion-score font-jet" :style="{ color: scoreColor(item.auto_score) }">
                 {{ item.auto_score?.toFixed(0) }}分
               </span>
             </div>
             <div class="suggestion-meta">
-              <span class="suggestion-conv">对话 #{{ item.conversation_id }}</span>
-              <span class="suggestion-type">{{ item.analysis_type }}</span>
+              <span class="suggestion-conv font-jet">对话 #{{ item.conversation_id }}</span>
+              <span class="suggestion-type terminal-label">{{ item.analysis_type }}</span>
             </div>
             <div v-if="item.expected_quality" class="suggestion-quality">
               期望质量: {{ item.expected_quality }}
@@ -351,25 +351,25 @@
       </div>
 
       <!-- 最近对话评估列表 -->
-      <div class="card">
-        <div class="card-header">
-          <h3>📋 最近对话评估</h3>
-          <button class="btn-text" @click="loadConvEvaluations">刷新</button>
+      <div class="card editorial-card">
+        <div class="card-header editorial-card-header">
+          <h3 class="title">最近对话评估</h3>
+          <button class="btn-text meta" @click="loadConvEvaluations">刷新</button>
         </div>
         <div v-if="convEvaluations.length" class="conv-eval-list">
-          <div v-for="item in convEvaluations" :key="item.id" class="conv-eval-item">
+          <div v-for="item in convEvaluations" :key="item.id" class="conv-eval-item reveal-stagger">
             <div class="conv-eval-item-header">
               <span class="conv-eval-item-title">{{ item.conversation_title || '未命名对话' }}</span>
-              <span class="conv-eval-item-score" :style="{ color: scoreColor(item.auto_score) }">
+              <span class="conv-eval-item-score font-jet-lg" :style="{ color: scoreColor(item.auto_score) }">
                 {{ item.auto_score?.toFixed(0) || '-' }}
               </span>
             </div>
             <div class="conv-eval-item-meta">
               <span class="conv-eval-item-complexity">{{ complexityLabel(item.complexity) }}</span>
-              <span class="conv-eval-item-specialists">{{ item.specialist_count }}个专家</span>
-              <span class="conv-eval-item-time">{{ item.created_at?.slice(5, 16) }}</span>
+              <span class="conv-eval-item-specialists font-jet">{{ item.specialist_count }}个专家</span>
+              <span class="conv-eval-item-time font-jet">{{ item.created_at?.slice(5, 16) }}</span>
             </div>
-            <div v-if="item.user_score" class="conv-eval-item-user-score">
+            <div v-if="item.user_score" class="conv-eval-item-user-score font-jet">
               用户评分: {{ item.user_score }}/5
             </div>
           </div>
@@ -380,29 +380,29 @@
       </div>
 
       <!-- Low Quality List -->
-      <div class="card">
-        <div class="card-header">
-          <h3>🚨 低分产出（Bad Cases）</h3>
-          <span class="badge badge-danger">{{ lowQualityItems.length }}</span>
+      <div class="card editorial-card">
+        <div class="card-header editorial-card-header">
+          <h3 class="title">低分产出（Bad Cases）</h3>
+          <span class="badge badge-danger font-jet">{{ lowQualityItems.length }}</span>
         </div>
         <div v-if="lowQualityItems.length" class="lq-list">
-          <div v-for="item in lowQualityItems" :key="item.id" class="lq-item">
+          <div v-for="item in lowQualityItems" :key="item.id" class="lq-item reveal-stagger">
             <div class="lq-header">
               <span class="lq-caller">{{ item.caller }}</span>
-              <span class="lq-score">{{ item.overall_score?.toFixed(1) }} 分</span>
-              <span class="lq-time">{{ item.created_at?.slice(5, 16) }}</span>
+              <span class="lq-score font-jet">{{ item.overall_score?.toFixed(1) }} 分</span>
+              <span class="lq-time font-jet">{{ item.created_at?.slice(5, 16) }}</span>
             </div>
             <div class="lq-scores">
-              <span :class="dimClass(item.score_data_accuracy)">数据{{ item.score_data_accuracy }}</span>
-              <span :class="dimClass(item.score_logic)">逻辑{{ item.score_logic }}</span>
-              <span :class="dimClass(item.score_actionability)">可执行{{ item.score_actionability }}</span>
+              <span class="font-jet" :class="dimClass(item.score_data_accuracy)">数据{{ item.score_data_accuracy }}</span>
+              <span class="font-jet" :class="dimClass(item.score_logic)">逻辑{{ item.score_logic }}</span>
+              <span class="font-jet" :class="dimClass(item.score_actionability)">可执行{{ item.score_actionability }}</span>
             </div>
             <div v-if="item.input_summary" class="lq-input">{{ item.input_summary }}</div>
-            <div v-if="item.comment" class="lq-comment">💬 {{ item.comment }}</div>
+            <div v-if="item.comment" class="lq-comment">{{ item.comment }}</div>
           </div>
         </div>
         <div v-else class="empty-state" style="padding:2rem">
-          <p>暂无低分产出 👍</p>
+          <p>暂无低分产出</p>
         </div>
       </div>
     </div>
@@ -639,13 +639,14 @@ function barHeight(score) {
 }
 
 .page-title {
-  font-size: 1.5rem;
-  font-weight: 700;
+  font-size: inherit;
+  font-weight: inherit;
   color: var(--color-text-primary);
 }
 
 .page-desc {
-  font-size: 0.85rem;
+  font-size: inherit;
+  font-weight: inherit;
   color: var(--color-text-muted);
   margin-top: 0.35rem;
 }
@@ -670,7 +671,7 @@ function barHeight(score) {
 
 .summary-value {
   font-size: 2rem;
-  font-weight: 700;
+  font-weight: inherit;
 }
 
 .summary-sub {
@@ -698,7 +699,7 @@ function barHeight(score) {
 
 .stat-num {
   font-size: 1.5rem;
-  font-weight: 700;
+  font-weight: inherit;
   color: var(--color-primary-500);
 }
 
@@ -724,8 +725,8 @@ function barHeight(score) {
 }
 
 .card-header h3 {
-  font-size: 1rem;
-  font-weight: 600;
+  font-size: inherit;
+  font-weight: inherit;
 }
 
 .day-select {
@@ -831,7 +832,7 @@ function barHeight(score) {
 
 .agent-score {
   font-size: 1.5rem;
-  font-weight: 700;
+  font-weight: inherit;
 }
 
 .agent-bar {
@@ -959,7 +960,7 @@ function barHeight(score) {
 .perf-stat-value {
   display: block;
   font-size: 1.5rem;
-  font-weight: 700;
+  font-weight: inherit;
   color: var(--color-primary-500);
 }
 
@@ -1042,7 +1043,7 @@ function barHeight(score) {
 
 .conv-eval-stat-value {
   font-size: 1.5rem;
-  font-weight: 700;
+  font-weight: inherit;
   color: var(--color-text-primary);
 }
 
@@ -1054,8 +1055,8 @@ function barHeight(score) {
 
 .conv-eval-complexity h4,
 .conv-eval-trend h4 {
-  font-size: 0.85rem;
-  font-weight: 600;
+  font-size: inherit;
+  font-weight: inherit;
   color: var(--color-text-secondary);
   margin-bottom: 0.75rem;
 }
@@ -1169,7 +1170,7 @@ function barHeight(score) {
 
 .conv-eval-item-score {
   font-size: 1.1rem;
-  font-weight: 700;
+  font-weight: inherit;
 }
 
 .conv-eval-item-meta {
@@ -1216,7 +1217,7 @@ function barHeight(score) {
 
 .evolution-stat-value {
   font-size: 1.5rem;
-  font-weight: 700;
+  font-weight: inherit;
   color: var(--color-text-primary);
 }
 
@@ -1228,8 +1229,8 @@ function barHeight(score) {
 
 .evolution-trend h4,
 .evolution-experts h4 {
-  font-size: 0.85rem;
-  font-weight: 600;
+  font-size: inherit;
+  font-weight: inherit;
   color: var(--color-text-secondary);
   margin-bottom: 0.75rem;
 }
@@ -1301,7 +1302,7 @@ function barHeight(score) {
 
 .suggestion-score {
   font-size: 1.1rem;
-  font-weight: 700;
+  font-weight: inherit;
 }
 
 .suggestion-meta {

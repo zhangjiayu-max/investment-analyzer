@@ -189,11 +189,11 @@ onMounted(() => { load(); loadRootCauseStats() })
 </script>
 
 <template>
-  <div class="badcase-page">
+  <div class="badcase-page bg-mesh">
     <div class="page-header">
       <div>
-        <h2 class="page-title">Bad Case 分析看板</h2>
-        <p class="page-desc">用户标记为「没用」的模型产出，用于定位问题和持续优化</p>
+        <h2 class="page-title editorial-title-lg">Bad Case 分析看板</h2>
+        <p class="page-desc editorial-subtitle">用户标记为「没用」的模型产出，用于定位问题和持续优化</p>
       </div>
       <div class="header-actions">
         <select v-model="filterSource" class="input-field input-sm" @change="load">
@@ -206,10 +206,10 @@ onMounted(() => { load(); loadRootCauseStats() })
           <option v-for="t in analysisTypes" :key="t" :value="t">{{ analysisTypeLabels[t] || t }}</option>
         </select>
         <button class="btn-secondary btn-sm" @click="showStatsPanel = !showStatsPanel">
-          {{ showStatsPanel ? '隐藏根因' : '📊 根因统计' }}
+          {{ showStatsPanel ? '隐藏根因' : '根因统计' }}
         </button>
         <button class="btn-primary btn-sm" @click="batchAnalyze" :disabled="analyzing">
-          {{ analyzing ? '分析中...' : '🔍 批量分析根因' }}
+          {{ analyzing ? '分析中...' : '批量分析根因' }}
         </button>
         <button class="btn-secondary" @click="load" :disabled="loading">
           {{ loading ? '加载中...' : '刷新' }}
@@ -219,35 +219,38 @@ onMounted(() => { load(); loadRootCauseStats() })
 
     <!-- Stats bar -->
     <div class="stats-bar">
-      <div class="stat-card">
-        <span class="stat-value">{{ stats.total }}</span>
-        <span class="stat-label">总 Bad Cases</span>
+      <div class="stat-card editorial-card">
+        <span class="stat-value font-jet-lg">{{ stats.total }}</span>
+        <span class="stat-label terminal-label">总 Bad Cases</span>
       </div>
-      <div class="stat-card">
-        <span class="stat-value">{{ stats.analysis }}</span>
-        <span class="stat-label">分析记录</span>
+      <div class="stat-card editorial-card">
+        <span class="stat-value font-jet-lg">{{ stats.analysis }}</span>
+        <span class="stat-label terminal-label">分析记录</span>
       </div>
-      <div class="stat-card">
-        <span class="stat-value">{{ stats.chat }}</span>
-        <span class="stat-label">对话反馈</span>
+      <div class="stat-card editorial-card">
+        <span class="stat-value font-jet-lg">{{ stats.chat }}</span>
+        <span class="stat-label terminal-label">对话反馈</span>
       </div>
-      <div v-if="rootCauseStats" class="stat-card">
-        <span class="stat-value">{{ rootCauseStats.total_analyzed }}</span>
-        <span class="stat-label">已分析根因</span>
+      <div v-if="rootCauseStats" class="stat-card editorial-card">
+        <span class="stat-value font-jet-lg">{{ rootCauseStats.total_analyzed }}</span>
+        <span class="stat-label terminal-label">已分析根因</span>
       </div>
     </div>
 
     <!-- Root Cause Stats Panel -->
     <Transition name="fade">
-      <div v-if="showStatsPanel && rootCauseStats" class="root-cause-panel">
+      <div v-if="showStatsPanel && rootCauseStats" class="root-cause-panel editorial-card">
         <div class="rc-section">
-          <h4 class="rc-title">根因分布</h4>
+          <div class="editorial-card-header">
+            <span class="title">根因分布</span>
+            <span class="meta">DISTRIBUTION</span>
+          </div>
           <div class="rc-bars">
-            <div v-for="item in rootCauseStats.by_cause" :key="item.root_cause" class="rc-bar-item">
+            <div v-for="item in rootCauseStats.by_cause" :key="item.root_cause" class="rc-bar-item reveal-stagger">
               <div class="rc-bar-label">
                 <span class="rc-dot" :style="{ background: rootCauseStyles[item.root_cause]?.color || '#999' }"></span>
                 {{ item.label }}
-                <span class="rc-bar-count">{{ item.count }} ({{ item.pct }}%)</span>
+                <span class="rc-bar-count font-jet">{{ item.count }} ({{ item.pct }}%)</span>
               </div>
               <div class="rc-bar-track">
                 <div class="rc-bar-fill" :style="{ width: item.pct + '%', background: rootCauseStyles[item.root_cause]?.color || '#999' }"></div>
@@ -256,9 +259,12 @@ onMounted(() => { load(); loadRootCauseStats() })
           </div>
         </div>
         <div v-if="rootCauseStats.recent?.length" class="rc-section">
-          <h4 class="rc-title">最近分析</h4>
+          <div class="editorial-card-header">
+            <span class="title">最近分析</span>
+            <span class="meta">RECENT</span>
+          </div>
           <div class="rc-recent">
-            <div v-for="r in rootCauseStats.recent" :key="r.source + r.id" class="rc-recent-item">
+            <div v-for="r in rootCauseStats.recent" :key="r.source + r.id" class="rc-recent-item reveal-stagger">
               <span class="rc-tag" :style="{ color: rootCauseStyles[r.root_cause]?.color, background: rootCauseStyles[r.root_cause]?.bg }">
                 {{ r.label }}
               </span>
@@ -275,7 +281,7 @@ onMounted(() => { load(); loadRootCauseStats() })
         <div
           v-for="c in filteredCases"
           :key="c.source + '-' + c.id"
-          :class="['badcase-card', { selected: selectedCase?.source === c.source && selectedCase?.id === c.id }]"
+          :class="['badcase-card editorial-card reveal-stagger', { selected: selectedCase?.source === c.source && selectedCase?.id === c.id }]"
           @click="selectCase(c)"
         >
           <div class="badcase-header">
@@ -284,12 +290,12 @@ onMounted(() => { load(); loadRootCauseStats() })
             <span v-if="c.root_cause" class="rc-tag rc-tag-sm" :style="{ color: rootCauseStyles[c.root_cause]?.color, background: rootCauseStyles[c.root_cause]?.bg }">
               {{ rootCauseStyles[c.root_cause]?.label || c.root_cause }}
             </span>
-            <span class="badcase-time">{{ c.created_at?.slice(0, 16) }}</span>
+            <span class="badcase-time font-jet terminal-label">{{ c.created_at?.slice(0, 16) }}</span>
           </div>
           <div class="badcase-summary">{{ c.summary || '无摘要' }}</div>
-          <div v-if="c.note" class="badcase-note">📝 {{ c.note }}</div>
+          <div v-if="c.note" class="badcase-note">{{ c.note }}</div>
           <div v-if="!c.root_cause" class="badcase-actions-inline">
-            <button class="btn-link" @click.stop="analyzeSingle(c)">🔍 分析根因</button>
+            <button class="btn-link" @click.stop="analyzeSingle(c)">分析根因</button>
           </div>
         </div>
         <div v-if="!loading && filteredCases.length === 0" class="empty-state">
@@ -300,27 +306,27 @@ onMounted(() => { load(); loadRootCauseStats() })
       </div>
 
       <!-- Detail panel -->
-      <div class="badcase-detail" v-if="selectedCase">
+      <div class="badcase-detail editorial-card" v-if="selectedCase">
         <div class="detail-header">
           <div class="detail-header-tags">
             <span class="badge badge-sm" :class="'badge-' + selectedCase.source">{{ sourceLabels[selectedCase.source] || selectedCase.source }}</span>
             <span class="badge badge-sm badge-type">{{ typeLabel(selectedCase) }}</span>
           </div>
-          <span class="detail-time">{{ selectedCase.created_at }}</span>
+          <span class="detail-time font-jet terminal-label">{{ selectedCase.created_at }}</span>
         </div>
 
         <div class="detail-section">
-          <h4>摘要</h4>
+          <h4 class="terminal-label">摘要</h4>
           <p>{{ selectedCase.summary || '无' }}</p>
         </div>
 
         <div class="detail-section">
-          <h4>反馈原因</h4>
+          <h4 class="terminal-label">反馈原因</h4>
           <p>{{ selectedCase.note || '用户未填写原因' }}</p>
         </div>
 
         <div v-if="selectedCase.root_cause" class="detail-section">
-          <h4>根因分析</h4>
+          <h4 class="terminal-label">根因分析</h4>
           <div class="rc-detail">
             <span class="rc-tag" :style="{ color: rootCauseStyles[selectedCase.root_cause]?.color, background: rootCauseStyles[selectedCase.root_cause]?.bg }">
               {{ rootCauseStyles[selectedCase.root_cause]?.label || selectedCase.root_cause }}
@@ -333,18 +339,18 @@ onMounted(() => { load(); loadRootCauseStats() })
           </div>
         </div>
         <div v-else class="detail-section">
-          <h4>根因分析</h4>
-          <button class="btn-primary btn-sm" @click="analyzeSingle(selectedCase)">🔍 分析根因</button>
+          <h4 class="terminal-label">根因分析</h4>
+          <button class="btn-primary btn-sm" @click="analyzeSingle(selectedCase)">分析根因</button>
         </div>
 
         <div class="detail-section">
-          <h4>元数据</h4>
+          <h4 class="terminal-label">元数据</h4>
           <table class="meta-table">
             <tbody>
               <template v-if="selectedCase.source === 'analysis'">
                 <tr><td>类型</td><td>{{ typeLabel(selectedCase) }}</td></tr>
-                <tr><td>Agent ID</td><td>{{ selectedCase.metadata?.agent_id ?? '--' }}</td></tr>
-                <tr><td>Token 用量</td><td>{{ selectedCase.metadata?.token_usage ?? '--' }}</td></tr>
+                <tr><td>Agent ID</td><td><span class="font-jet">{{ selectedCase.metadata?.agent_id ?? '--' }}</span></td></tr>
+                <tr><td>Token 用量</td><td><span class="font-jet">{{ selectedCase.metadata?.token_usage ?? '--' }}</span></td></tr>
               </template>
               <template v-else>
                 <tr><td>Caller</td><td>{{ selectedCase.metadata?.caller || '--' }}</td></tr>
@@ -355,23 +361,23 @@ onMounted(() => { load(); loadRootCauseStats() })
         </div>
 
         <div class="detail-section">
-          <h4>{{ selectedCase.source === 'analysis' ? '输入数据' : '用户输入' }}</h4>
-          <pre class="code-block" v-if="selectedCase.source === 'analysis'">{{ (() => { try { return JSON.stringify(JSON.parse(selectedCase.input || '{}'), null, 2) } catch { return selectedCase.input || '无' } })() }}</pre>
+          <h4 class="terminal-label">{{ selectedCase.source === 'analysis' ? '输入数据' : '用户输入' }}</h4>
+          <pre class="code-block font-jet" v-if="selectedCase.source === 'analysis'">{{ (() => { try { return JSON.stringify(JSON.parse(selectedCase.input || '{}'), null, 2) } catch { return selectedCase.input || '无' } })() }}</pre>
           <p v-else>{{ selectedCase.input || '无' }}</p>
         </div>
 
         <div class="detail-section">
-          <h4>{{ selectedCase.source === 'analysis' ? '分析结果' : '模型输出' }}</h4>
-          <div class="result-preview">{{ selectedCase.output?.slice(0, 2000) || '无' }}</div>
+          <h4 class="terminal-label">{{ selectedCase.source === 'analysis' ? '分析结果' : '模型输出' }}</h4>
+          <div class="result-preview font-jet">{{ selectedCase.output?.slice(0, 2000) || '无' }}</div>
         </div>
 
         <div class="detail-actions">
           <button class="btn-primary btn-sm" :disabled="converting" @click="confirmConvertToEval(selectedCase)">
-            {{ converting ? '转化中...' : '🔄 转为 Eval 用例' }}
+            {{ converting ? '转化中...' : '转为 Eval 用例' }}
           </button>
         </div>
       </div>
-      <div v-else class="badcase-detail empty-detail">
+      <div v-else class="badcase-detail empty-detail editorial-card">
         <p class="text-muted">选择一条记录查看详情</p>
       </div>
     </div>

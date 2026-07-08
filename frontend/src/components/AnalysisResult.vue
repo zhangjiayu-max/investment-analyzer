@@ -16,29 +16,32 @@ const renderedAnalysis = computed(() => {
 </script>
 
 <template>
-  <div class="analysis-result">
+  <div class="analysis-result bg-mesh">
     <!-- Article Card -->
-    <div class="card">
+    <div class="card editorial-card">
       <div class="card-header-row">
         <div>
-          <h3 class="article-title">{{ article.title || '未知标题' }}</h3>
+          <h3 class="article-title editorial-title">{{ article.title || '未知标题' }}</h3>
           <div class="article-meta">
-            <span v-if="article.author">{{ article.author }}</span>
-            <span v-if="article.publish_time">{{ article.publish_time }}</span>
+            <span v-if="article.author" class="terminal-label">{{ article.author }}</span>
+            <span v-if="article.publish_time" class="terminal-label">{{ article.publish_time }}</span>
           </div>
         </div>
-        <span class="badge badge-success">已识别 {{ codesFound.length }} 个标的</span>
+        <span class="badge badge-success">已识别 <span class="font-jet">{{ codesFound.length }}</span> 个标的</span>
       </div>
     </div>
 
     <!-- Codes -->
-    <div v-if="codesFound.length" class="card">
-      <h3 class="section-title">识别到的投资标的</h3>
+    <div v-if="codesFound.length" class="card editorial-card">
+      <div class="editorial-card-header section-title">
+        <span class="title">识别到的投资标的</span>
+        <span class="meta">TARGETS · <span class="font-jet">{{ codesFound.length }}</span></span>
+      </div>
       <div class="codes-grid">
-        <div v-for="code in codesFound" :key="code" class="code-item">
+        <div v-for="code in codesFound" :key="code" class="code-item reveal-stagger">
           <div>
             <div class="code-name">{{ marketData[code]?.name || '未知' }}</div>
-            <div class="code-id">{{ code }}</div>
+            <div class="code-id font-jet">{{ code }}</div>
           </div>
           <div v-if="marketData[code]?.recommendation">
             <span
@@ -55,8 +58,11 @@ const renderedAnalysis = computed(() => {
     </div>
 
     <!-- LLM Analysis -->
-    <div v-if="llmAnalysis" class="card">
-      <h3 class="section-title">AI 投资分析</h3>
+    <div v-if="llmAnalysis" class="card editorial-card">
+      <div class="editorial-card-header section-title">
+        <span class="title">AI 投资分析</span>
+        <span class="meta">ANALYSIS</span>
+      </div>
       <div class="prose" v-html="renderedAnalysis"></div>
     </div>
   </div>

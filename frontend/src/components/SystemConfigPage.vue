@@ -33,11 +33,11 @@ const filteredConfigs = computed(() => {
 })
 
 const categoryLabels = {
-  valuation: '📊 估值阈值',
-  bond: '💰 债券配置',
-  portfolio: '📈 持仓管理',
-  llm: '🤖 LLM 参数',
-  general: '⚙️ 通用',
+  valuation: '估值阈值',
+  bond: '债券配置',
+  portfolio: '持仓管理',
+  llm: 'LLM 参数',
+  general: '通用',
 }
 
 async function loadConfigs() {
@@ -100,10 +100,10 @@ onMounted(loadConfigs)
 </script>
 
 <template>
-  <div class="config-page">
+  <div class="config-page bg-mesh">
     <div class="page-header">
-      <h2 class="page-title">系统配置</h2>
-      <span class="page-desc">管理估值阈值、LLM 参数等业务配置</span>
+      <h2 class="page-title editorial-title-lg">系统配置</h2>
+      <span class="page-desc editorial-subtitle">管理估值阈值、LLM 参数等业务配置</span>
       <div style="display: flex; gap: 0.5rem; margin-left: auto;">
         <button class="btn-outline btn-sm" @click="loadConfigs" :disabled="loading">
           <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
@@ -141,16 +141,16 @@ onMounted(loadConfigs)
 
     <!-- 配置列表 -->
     <div v-else class="config-list">
-      <div v-for="config in filteredConfigs" :key="config.key" class="config-item">
+      <div v-for="config in filteredConfigs" :key="config.key" class="config-item editorial-card reveal-stagger">
         <div class="config-info">
-          <span class="config-key">{{ config.key }}</span>
-          <span class="config-desc">{{ config.description }}</span>
+          <span class="config-key font-jet">{{ config.key }}</span>
+          <span class="config-desc terminal-label">{{ config.description }}</span>
         </div>
         <div class="config-value">
           <template v-if="editingKey === config.key">
             <input
               v-model="editingValue"
-              class="input-field input-sm"
+              class="input-field input-sm font-jet"
               @keyup.enter="saveEdit(config.key)"
               @keyup.escape="cancelEdit"
             />
@@ -158,7 +158,7 @@ onMounted(loadConfigs)
             <button class="btn-ghost btn-sm" @click="cancelEdit">取消</button>
           </template>
           <template v-else>
-            <span class="config-val">{{ config.value }}</span>
+            <span class="config-val font-jet">{{ config.value }}</span>
             <button class="btn-ghost btn-sm" @click="startEdit(config.key, config.value)">编辑</button>
           </template>
         </div>
@@ -181,12 +181,13 @@ onMounted(loadConfigs)
 }
 
 .page-title {
-  font-size: 1.25rem;
-  font-weight: 700;
+  font-size: inherit;
+  font-weight: inherit;
 }
 
 .page-desc {
-  font-size: 0.82rem;
+  font-size: inherit;
+  font-weight: inherit;
   color: var(--color-text-muted);
 }
 
@@ -258,11 +259,12 @@ onMounted(loadConfigs)
   font-size: 0.85rem;
   font-weight: 600;
   color: var(--color-primary);
-  font-family: monospace;
+  font-family: inherit;
 }
 
 .config-desc {
-  font-size: 0.78rem;
+  font-size: inherit;
+  font-weight: inherit;
   color: var(--color-text-muted);
 }
 

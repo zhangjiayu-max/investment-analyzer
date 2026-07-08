@@ -44,9 +44,9 @@ function percentileColor(p) {
 </script>
 
 <template>
-  <div class="image-grid">
+  <div class="image-grid bg-mesh">
     <div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3">
-      <div v-for="(img, i) in images" :key="i" class="image-item">
+      <div v-for="(img, i) in images" :key="i" class="image-item reveal-stagger editorial-card">
         <div @click="open(img)" class="image-thumb">
           <img :src="img.url" :alt="`图片 ${i + 1}`" loading="lazy" />
           <div class="image-overlay">
@@ -68,33 +68,33 @@ function percentileColor(p) {
 
     <!-- Parse Result -->
     <div v-if="parseResult" class="parse-result success">
-      <h4>解析成功</h4>
+      <h4 class="editorial-title">解析成功</h4>
       <div class="result-grid">
-        <div class="result-item">
-          <span class="result-label">指数</span>
+        <div class="result-item reveal-stagger">
+          <span class="result-label terminal-label">指数</span>
           <span class="result-value">{{ parseResult.index_name || '-' }}</span>
         </div>
-        <div class="result-item">
-          <span class="result-label">代码</span>
-          <span class="result-value">{{ parseResult.index_code || '-' }}</span>
+        <div class="result-item reveal-stagger">
+          <span class="result-label terminal-label">代码</span>
+          <span class="result-value font-jet">{{ parseResult.index_code || '-' }}</span>
         </div>
-        <div class="result-item">
-          <span class="result-label">指标</span>
+        <div class="result-item reveal-stagger">
+          <span class="result-label terminal-label">指标</span>
           <span class="result-value">{{ parseResult.metric_type || '-' }}</span>
         </div>
-        <div class="result-item">
-          <span class="result-label">当前值</span>
-          <span class="result-value">{{ parseResult.current_value ?? '-' }}</span>
+        <div class="result-item reveal-stagger">
+          <span class="result-label terminal-label">当前值</span>
+          <span class="result-value font-jet">{{ parseResult.current_value ?? '-' }}</span>
         </div>
-        <div class="result-item">
-          <span class="result-label">分位点</span>
-          <span :class="['result-value', percentileClass(parseResult.percentile)]">
+        <div class="result-item reveal-stagger">
+          <span class="result-label terminal-label">分位点</span>
+          <span :class="['result-value', 'font-jet', percentileClass(parseResult.percentile)]">
             {{ parseResult.percentile != null ? parseResult.percentile + '%' : '-' }}
           </span>
         </div>
-        <div class="result-item">
-          <span class="result-label">点位</span>
-          <span class="result-value">{{ parseResult.current_point ?? '-' }}</span>
+        <div class="result-item reveal-stagger">
+          <span class="result-label terminal-label">点位</span>
+          <span class="result-value font-jet">{{ parseResult.current_point ?? '-' }}</span>
         </div>
       </div>
     </div>

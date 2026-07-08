@@ -434,11 +434,11 @@ onMounted(load)
 </script>
 
 <template>
-  <div class="decisions-page">
+  <div class="decisions-page bg-mesh">
     <!-- 页头 -->
     <header class="page-head">
       <div>
-        <h2 class="page-title">决策档案</h2>
+        <h2 class="page-title editorial-title-lg">决策档案</h2>
         <p class="page-desc">记录每一次买卖决策，追踪执行和复盘，形成理财闭环。</p>
       </div>
       <button class="btn-secondary" @click="load" :disabled="loading">
@@ -450,42 +450,42 @@ onMounted(load)
     <!-- 统计条 -->
     <section class="stats-strip">
       <div class="stat-cell">
-        <span>提案</span>
-        <strong>{{ stats.proposed }}</strong>
+        <span class="terminal-label">提案</span>
+        <strong class="font-jet">{{ stats.proposed }}</strong>
       </div>
       <div class="stat-cell">
-        <span>已接受</span>
-        <strong>{{ stats.accepted }}</strong>
+        <span class="terminal-label">已接受</span>
+        <strong class="font-jet">{{ stats.accepted }}</strong>
       </div>
       <div class="stat-cell">
-        <span>已执行</span>
-        <strong>{{ stats.executed }}</strong>
+        <span class="terminal-label">已执行</span>
+        <strong class="font-jet">{{ stats.executed }}</strong>
       </div>
       <div class="stat-cell">
-        <span>已复盘</span>
-        <strong>{{ stats.reviewed }}</strong>
+        <span class="terminal-label">已复盘</span>
+        <strong class="font-jet">{{ stats.reviewed }}</strong>
       </div>
       <div class="stat-cell" :class="{ win: stats.winRate >= 60 }">
-        <span>胜率</span>
-        <strong>{{ stats.winRate }}%</strong>
+        <span class="terminal-label">胜率</span>
+        <strong class="font-jet">{{ stats.winRate }}%</strong>
       </div>
       <div class="stat-cell">
-        <span>总计</span>
-        <strong>{{ stats.total }}</strong>
+        <span class="terminal-label">总计</span>
+        <strong class="font-jet">{{ stats.total }}</strong>
       </div>
     </section>
 
     <!-- AI 建议候选 -->
-    <section class="candidate-panel">
-      <div class="candidate-head">
+    <section class="candidate-panel editorial-card">
+      <div class="candidate-head editorial-card-header">
         <div>
-          <h3>AI 建议候选</h3>
+          <h3 class="editorial-title">AI 建议候选</h3>
           <p>{{ insightText }}</p>
         </div>
-        <span class="candidate-count">{{ candidates.length }} 条待处理</span>
+        <span class="candidate-count meta terminal-label">{{ candidates.length }} 条待处理</span>
       </div>
       <div v-if="candidates.length" class="candidate-list">
-        <article v-for="c in candidates" :key="c.id" class="candidate-item">
+        <article v-for="c in candidates" :key="c.id" class="candidate-item reveal-stagger">
           <div class="candidate-main">
             <div class="candidate-topline">
               <span :class="['type-badge', decisionTypeClass(c.action_type)]">{{ decisionTypeLabel(c.action_type) }}</span>
@@ -495,7 +495,7 @@ onMounted(load)
             <div class="candidate-meta">
               <span><Icon name="sparkles" size="13" /> {{ candidateSourceLabel(c) }}</span>
               <span><Icon name="shield-check" size="13" /> {{ c.confidence || 'medium' }}</span>
-              <span v-if="c.suggested_amount"><Icon name="banknote" size="13" /> ¥{{ money(c.suggested_amount) }}</span>
+              <span v-if="c.suggested_amount"><Icon name="banknote" size="13" /> <span class="font-jet">¥{{ money(c.suggested_amount) }}</span></span>
             </div>
           </div>
           <div class="candidate-actions">
@@ -532,13 +532,13 @@ onMounted(load)
     <!-- 移动端 Tab 切换 -->
     <div class="mobile-tabs">
       <button :class="['mobile-tab', { active: mobileTab === 'pending' }]" @click="mobileTab = 'pending'">
-        待执行 <span class="tab-count">{{ pendingDecisions.length }}</span>
+        待执行 <span class="tab-count font-jet">{{ pendingDecisions.length }}</span>
       </button>
       <button :class="['mobile-tab', { active: mobileTab === 'reviewing' }]" @click="mobileTab = 'reviewing'">
-        待复盘 <span class="tab-count">{{ reviewingDecisions.length }}</span>
+        待复盘 <span class="tab-count font-jet">{{ reviewingDecisions.length }}</span>
       </button>
       <button :class="['mobile-tab', { active: mobileTab === 'completed' }]" @click="mobileTab = 'completed'">
-        已完成 <span class="tab-count">{{ completedDecisions.length }}</span>
+        已完成 <span class="tab-count font-jet">{{ completedDecisions.length }}</span>
       </button>
     </div>
 
@@ -547,8 +547,8 @@ onMounted(load)
       <!-- 待执行 -->
       <section :class="['kanban-col', { 'mobile-hidden': mobileTab !== 'pending' }]">
         <header class="col-head">
-          <h3>待执行</h3>
-          <span class="col-count">{{ pendingDecisions.length }}</span>
+          <h3 class="editorial-title">待执行</h3>
+          <span class="col-count font-jet terminal-label">{{ pendingDecisions.length }}</span>
         </header>
         <div v-if="loading && !pendingDecisions.length" class="col-empty">
           <Icon name="spinner" size="20" />
@@ -560,17 +560,17 @@ onMounted(load)
         <article
           v-for="d in pendingDecisions"
           :key="d.id"
-          :class="['decision-card', statusClass(d.status)]"
+          :class="['decision-card', 'editorial-card', 'reveal-stagger', statusClass(d.status)]"
         >
           <div class="card-top">
             <span :class="['type-badge', decisionTypeClass(d.decision_type)]">{{ decisionTypeLabel(d.decision_type) }}</span>
             <span :class="['status-tag', statusClass(d.status)]">{{ statusLabel(d.status) }}</span>
           </div>
-          <h4 class="card-title">{{ targetText(d) }}</h4>
+          <h4 class="card-title editorial-title">{{ targetText(d) }}</h4>
           <p class="card-summary">{{ d.summary }}</p>
           <div class="card-meta">
-            <span><Icon name="calendar" size="13" /> {{ formatDate(d.created_at) }}</span>
-            <span><Icon name="file-text" size="13" /> {{ d.source_type === 'chat' ? 'AI对话' : d.source_type === 'dashboard' ? '看板' : d.source_type }}</span>
+            <span class="terminal-label"><Icon name="calendar" size="13" /> {{ formatDate(d.created_at) }}</span>
+            <span class="terminal-label"><Icon name="file-text" size="13" /> {{ d.source_type === 'chat' ? 'AI对话' : d.source_type === 'dashboard' ? '看板' : d.source_type }}</span>
             <button class="timeline-link" @click="openTimeline(d)"><Icon name="clock" size="13" /> 时间线</button>
           </div>
           <!-- 预检查 -->
@@ -628,10 +628,10 @@ onMounted(load)
           <div v-if="d.status === 'accepted' && executionMatches[d.id]" class="execution-match-bar">
             <div class="match-info">
               <Icon name="check-circle" size="14" />
-              <span>检测到已执行？匹配 {{ executionMatches[d.id].tx_count }} 笔交易</span>
+              <span>检测到已执行？匹配 <span class="font-jet">{{ executionMatches[d.id].tx_count }}</span> 笔交易</span>
               <span class="match-detail">
-                <template v-if="executionMatches[d.id].buy_shares > 0">买入 {{ executionMatches[d.id].buy_shares }} 份</template>
-                <template v-if="executionMatches[d.id].sell_shares > 0"> / 卖出 {{ executionMatches[d.id].sell_shares }} 份</template>
+                <template v-if="executionMatches[d.id].buy_shares > 0">买入 <span class="font-jet">{{ executionMatches[d.id].buy_shares }}</span> 份</template>
+                <template v-if="executionMatches[d.id].sell_shares > 0"> / 卖出 <span class="font-jet">{{ executionMatches[d.id].sell_shares }}</span> 份</template>
               </span>
             </div>
             <button class="btn-sm btn-primary" @click="confirmExecutionFromMatch(d.id)">确认执行</button>
@@ -642,8 +642,8 @@ onMounted(load)
       <!-- 待复盘 -->
       <section :class="['kanban-col', { 'mobile-hidden': mobileTab !== 'reviewing' }]">
         <header class="col-head">
-          <h3>待复盘</h3>
-          <span class="col-count">{{ reviewingDecisions.length }}</span>
+          <h3 class="editorial-title">待复盘</h3>
+          <span class="col-count font-jet terminal-label">{{ reviewingDecisions.length }}</span>
         </header>
         <div v-if="!reviewingDecisions.length" class="col-empty">
           <Icon name="clock" size="24" />
@@ -652,17 +652,17 @@ onMounted(load)
         <article
           v-for="d in reviewingDecisions"
           :key="d.id"
-          :class="['decision-card', statusClass(d.status)]"
+          :class="['decision-card', 'editorial-card', 'reveal-stagger', statusClass(d.status)]"
         >
           <div class="card-top">
             <span :class="['type-badge', decisionTypeClass(d.decision_type)]">{{ decisionTypeLabel(d.decision_type) }}</span>
             <span :class="['status-tag', statusClass(d.status)]">{{ statusLabel(d.status) }}</span>
           </div>
-          <h4 class="card-title">{{ targetText(d) }}</h4>
+          <h4 class="card-title editorial-title">{{ targetText(d) }}</h4>
           <p class="card-summary">{{ d.summary }}</p>
           <div class="card-meta">
-            <span><Icon name="calendar" size="13" /> {{ formatDate(d.created_at) }}</span>
-            <span v-if="d.review_at"><Icon name="alarm-clock" size="13" /> 复盘到期 {{ formatDate(d.review_at) }}</span>
+            <span class="terminal-label"><Icon name="calendar" size="13" /> {{ formatDate(d.created_at) }}</span>
+            <span v-if="d.review_at" class="terminal-label"><Icon name="alarm-clock" size="13" /> 复盘到期 {{ formatDate(d.review_at) }}</span>
             <button class="timeline-link" @click="openTimeline(d)"><Icon name="clock" size="13" /> 时间线</button>
           </div>
           <div class="card-actions">
@@ -677,8 +677,8 @@ onMounted(load)
       <!-- 已完成 -->
       <section :class="['kanban-col', { 'mobile-hidden': mobileTab !== 'completed' }]">
         <header class="col-head">
-          <h3>已完成</h3>
-          <span class="col-count">{{ completedDecisions.length }}</span>
+          <h3 class="editorial-title">已完成</h3>
+          <span class="col-count font-jet terminal-label">{{ completedDecisions.length }}</span>
         </header>
         <div v-if="!completedDecisions.length" class="col-empty">
           <Icon name="check" size="24" />
@@ -687,24 +687,24 @@ onMounted(load)
         <article
           v-for="d in completedDecisions"
           :key="d.id"
-          :class="['decision-card', 'completed', statusClass(d.status)]"
+          :class="['decision-card', 'editorial-card', 'reveal-stagger', 'completed', statusClass(d.status)]"
         >
           <div class="card-top">
             <span :class="['type-badge', decisionTypeClass(d.decision_type)]">{{ decisionTypeLabel(d.decision_type) }}</span>
             <span :class="['status-tag', statusClass(d.status)]">{{ statusLabel(d.status) }}</span>
           </div>
-          <h4 class="card-title">{{ targetText(d) }}</h4>
+          <h4 class="card-title editorial-title">{{ targetText(d) }}</h4>
           <p class="card-summary">{{ d.summary }}</p>
           <div class="card-meta">
-            <span><Icon name="calendar" size="13" /> {{ formatDate(d.created_at) }}</span>
+            <span class="terminal-label"><Icon name="calendar" size="13" /> {{ formatDate(d.created_at) }}</span>
             <button class="timeline-link" @click="openTimeline(d)"><Icon name="clock" size="13" /> 时间线</button>
           </div>
           <!-- 复盘结果 -->
           <div v-if="d.review" class="review-result">
-            <div class="review-outcome" :class="`outcome-${d.review.outcome}`">
+            <div class="review-outcome terminal-label" :class="`outcome-${d.review.outcome}`">
               {{ { helpful: '有帮助', neutral: '一般', unhelpful: '没帮助' }[d.review.outcome] || d.review.outcome }}
             </div>
-            <div v-if="d.review.profit_change != null" class="review-pnl" :class="d.review.profit_change >= 0 ? 'positive' : 'negative'">
+            <div v-if="d.review.profit_change != null" class="review-pnl font-jet" :class="d.review.profit_change >= 0 ? 'positive' : 'negative'">
               {{ d.review.profit_change >= 0 ? '+' : '' }}¥{{ money(d.review.profit_change) }}
             </div>
             <p v-if="d.review.lesson" class="review-lesson">{{ d.review.lesson }}</p>
@@ -717,7 +717,7 @@ onMounted(load)
     <div v-if="reviewModal.visible" class="modal-overlay" @click.self="reviewModal.visible = false">
       <div class="modal-card">
         <header class="modal-head">
-          <h3>决策复盘</h3>
+          <h3 class="editorial-title">决策复盘</h3>
           <button class="icon-btn" @click="reviewModal.visible = false"><Icon name="close" size="18" /></button>
         </header>
         <div class="modal-body">
@@ -760,7 +760,7 @@ onMounted(load)
     <div v-if="timelineModal.visible" class="modal-overlay" @click.self="timelineModal.visible = false">
       <div class="modal-card modal-wide">
         <header class="modal-head">
-          <h3>决策时间线</h3>
+          <h3 class="editorial-title">决策时间线</h3>
           <button class="icon-btn" @click="timelineModal.visible = false"><Icon name="close" size="18" /></button>
         </header>
         <div class="modal-body">
@@ -770,24 +770,24 @@ onMounted(load)
           </div>
           <div v-else-if="timelineModal.data" class="tl-container">
             <div class="tl-header">
-              <strong>{{ timelineModal.data.summary }}</strong>
+              <strong class="editorial-title">{{ timelineModal.data.summary }}</strong>
               <span :class="['status-tag', statusClass(timelineModal.data.status)]">{{ statusLabel(timelineModal.data.status) }}</span>
             </div>
             <div class="tl-list">
               <div
                 v-for="(ev, i) in timelineModal.data.timeline"
                 :key="i"
-                :class="['tl-item', timelineEventClass(ev.event_type)]"
+                :class="['tl-item', 'reveal-stagger', timelineEventClass(ev.event_type)]"
               >
                 <div class="tl-dot">{{ ev.icon }}</div>
                 <div class="tl-content">
                   <div class="tl-label">{{ ev.label }}</div>
-                  <div class="tl-time">{{ ev.time }}</div>
+                  <div class="tl-time terminal-label">{{ ev.time }}</div>
                   <div v-if="ev.detail && typeof ev.detail === 'string'" class="tl-detail">{{ ev.detail }}</div>
                   <div v-if="ev.lesson" class="tl-lesson">
                     <Icon name="lightbulb" size="13" /> {{ ev.lesson }}
                   </div>
-                  <div v-if="ev.profit_change != null" class="tl-pnl" :class="ev.profit_change >= 0 ? 'positive' : 'negative'">
+                  <div v-if="ev.profit_change != null" class="tl-pnl font-jet" :class="ev.profit_change >= 0 ? 'positive' : 'negative'">
                     {{ ev.profit_change >= 0 ? '+' : '' }}¥{{ money(ev.profit_change) }}
                   </div>
                 </div>
@@ -830,7 +830,7 @@ onMounted(load)
 }
 .page-title {
   margin: 0;
-  font-size: 1.25rem;
+  font-size: inherit;
   color: var(--color-text-primary);
 }
 .page-desc {
@@ -858,7 +858,7 @@ onMounted(load)
 }
 .stat-cell:last-child { border-right: 0; }
 .stat-cell span {
-  font-size: 0.74rem;
+  font-size: inherit;
   color: var(--color-text-muted);
 }
 .stat-cell strong {
@@ -901,7 +901,7 @@ onMounted(load)
   border-radius: var(--radius-sm);
   padding: 3px 8px;
   color: var(--color-text-muted);
-  font-size: 0.74rem;
+  font-size: inherit;
   background: var(--color-bg-input);
 }
 .candidate-list {
@@ -996,7 +996,7 @@ onMounted(load)
   border: 1px solid var(--color-border-light);
   border-radius: 999px;
   padding: 1px 8px;
-  font-size: 0.72rem;
+  font-size: inherit;
   color: var(--color-text-secondary);
   font-variant-numeric: tabular-nums;
 }
@@ -1371,7 +1371,7 @@ onMounted(load)
   color: var(--color-text-primary);
 }
 .tl-time {
-  font-size: 0.75rem;
+  font-size: inherit;
   color: var(--color-text-muted);
 }
 .tl-detail {

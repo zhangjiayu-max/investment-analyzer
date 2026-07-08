@@ -417,7 +417,7 @@ function closePreview() { previewImage.value = null }
 </script>
 
 <template>
-  <div class="article-page">
+  <div class="article-page bg-mesh">
     <!-- Toolbar -->
     <div class="toolbar">
       <form @submit.prevent="handleAddArticle" class="add-article-form">
@@ -451,12 +451,12 @@ function closePreview() { previewImage.value = null }
         <option value="error">异常</option>
       </select>
       <input v-model="searchQuery" placeholder="搜索标题或序号..." class="input-field toolbar-search" />
-      <span class="toolbar-count">共 {{ filteredArticles.length }} 篇</span>
+      <span class="toolbar-count terminal-label">共 <span class="font-jet">{{ filteredArticles.length }}</span> 篇</span>
     </div>
 
     <div class="content-area">
       <!-- Article List -->
-      <div class="article-list card">
+      <div class="article-list card editorial-card">
         <div class="list-scroll">
           <table class="list-table">
             <thead>
@@ -470,12 +470,12 @@ function closePreview() { previewImage.value = null }
               <tr
                 v-for="a in filteredArticles" :key="a.id"
                 @click="openArticle(a)"
-                :class="['list-row', { selected: selectedArticle?.id === a.id }]"
+                :class="['list-row', 'reveal-stagger', { selected: selectedArticle?.id === a.id }]"
               >
-                <td class="col-seq">{{ a.seq || '-' }}</td>
+                <td class="col-seq font-jet">{{ a.seq || '-' }}</td>
                 <td>
                   <div class="row-title" :title="a.title">{{ a.title || '无标题' }}</div>
-                  <div v-if="a.publish_time" class="row-date">{{ a.publish_time.slice(0, 10) }}</div>
+                  <div v-if="a.publish_time" class="row-date font-jet">{{ a.publish_time.slice(0, 10) }}</div>
                 </td>
                 <td class="col-status">
                   <span :class="['badge', articleStatusClass(a)]">
@@ -491,19 +491,19 @@ function closePreview() { previewImage.value = null }
       </div>
 
       <!-- Detail Panel -->
-      <div v-if="selectedArticle" class="detail-panel card">
+      <div v-if="selectedArticle" class="detail-panel card editorial-card">
         <!-- Header -->
         <div class="detail-header">
           <div class="detail-info">
-            <h3 class="detail-title">{{ selectedArticle.title }}</h3>
+            <h3 class="detail-title editorial-title">{{ selectedArticle.title }}</h3>
             <div class="detail-meta">
               <span class="meta-item">
                 <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"/></svg>
-                {{ (selectedArticle.publish_time || '').slice(0, 10) || '未知日期' }}
+                <span class="font-jet">{{ (selectedArticle.publish_time || '').slice(0, 10) || '未知日期' }}</span>
               </span>
               <span class="meta-item">
                 <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"/></svg>
-                {{ selectedArticle.image_count || 0 }} 张图片
+                <span class="font-jet">{{ selectedArticle.image_count || 0 }}</span> <span class="terminal-label">张图片</span>
               </span>
               <a v-if="selectedArticle.url" :href="selectedArticle.url" target="_blank" rel="noopener" class="meta-item meta-link">
                 <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14"/></svg>
@@ -515,7 +515,7 @@ function closePreview() { previewImage.value = null }
               </span>
               <span v-if="selectedArticle.total_records" class="meta-item">
                 <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
-                {{ selectedArticle.success_count }}/{{ selectedArticle.total_records }} 成功
+                <span class="font-jet">{{ selectedArticle.success_count }}/{{ selectedArticle.total_records }}</span> <span class="terminal-label">成功</span>
               </span>
             </div>
           </div>
@@ -579,7 +579,7 @@ function closePreview() { previewImage.value = null }
 
         <!-- Image Grid -->
         <div v-if="records.length" class="record-grid">
-          <div v-for="r in filteredRecords" :key="r.id" :class="['record-card', { 'record-analyzing': analyzingRecords.has(r.id) }]">
+          <div v-for="r in filteredRecords" :key="r.id" :class="['record-card', 'editorial-card', 'reveal-stagger', { 'record-analyzing': analyzingRecords.has(r.id) }]">
             <div class="record-thumb" @click="openPreview(r.image_path)">
               <img :src="imageUrl(r.image_path)" loading="lazy" />
               <span v-if="analyzingRecords.has(r.id)" class="record-status st-analyzing">
@@ -591,7 +591,7 @@ function closePreview() { previewImage.value = null }
             </div>
             <div class="record-info">
               <div class="record-code">
-                <template v-if="r.index_code">{{ r.index_code }} {{ r.index_name || '' }}</template>
+                <template v-if="r.index_code"><span class="font-jet">{{ r.index_code }}</span> {{ r.index_name || '' }}</template>
                 <template v-else>未识别</template>
               </div>
               <div v-if="r.metric_type" :class="['record-metric-badge', metricBadgeClass(r.metric_type)]">{{ r.metric_type }}</div>
@@ -616,7 +616,7 @@ function closePreview() { previewImage.value = null }
       </div>
 
       <!-- Empty State -->
-      <div v-if="!selectedArticle" class="empty-panel card">
+      <div v-if="!selectedArticle" class="empty-panel card editorial-card">
         <svg width="64" height="64" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M19 20H5a2 2 0 01-2-2V6a2 2 0 012-2h10a2 2 0 012 2v1m2 13a2 2 0 01-2-2V7m2 13a2 2 0 002-2V9a2 2 0 00-2-2h-2m-4-3H9M7 16h6M7 8h6v4H7V8z"/></svg>
         <p class="empty-title">请从左侧选择一篇文章</p>
         <p class="empty-desc">选择后可下载图片并运行 AI 分析</p>

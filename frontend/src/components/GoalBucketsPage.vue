@@ -220,10 +220,10 @@ onMounted(loadRecentDecisions)
 </script>
 
 <template>
-  <div class="goal-page">
+  <div class="goal-page bg-mesh">
     <header class="goal-header">
       <div>
-        <h2 class="page-title">目标账户 / 资金桶</h2>
+        <h2 class="page-title editorial-title-lg">目标账户 / 资金桶</h2>
         <p class="page-desc">按资金用途、期限和风险边界分层，后续决策检查会读取这里的约束。</p>
       </div>
       <div class="header-actions">
@@ -240,19 +240,19 @@ onMounted(loadRecentDecisions)
 
     <section class="summary-strip">
       <div class="summary-cell">
-        <span>资金桶</span>
-        <strong>{{ summary.count || 0 }}</strong>
+        <span class="terminal-label">资金桶</span>
+        <strong class="font-jet">{{ summary.count || 0 }}</strong>
       </div>
       <div class="summary-cell">
-        <span>已归集</span>
-        <strong>¥{{ money(summary.total_current_amount) }}</strong>
+        <span class="terminal-label">已归集</span>
+        <strong class="font-jet">¥{{ money(summary.total_current_amount) }}</strong>
       </div>
       <div class="summary-cell">
-        <span>目标金额</span>
-        <strong>¥{{ money(summary.total_target_amount) }}</strong>
+        <span class="terminal-label">目标金额</span>
+        <strong class="font-jet">¥{{ money(summary.total_target_amount) }}</strong>
       </div>
       <div :class="['summary-cell', emergencyReady ? 'ok' : 'warn']">
-        <span>备用金</span>
+        <span class="terminal-label">备用金</span>
         <strong>{{ emergencyReady ? '已覆盖' : '需确认' }}</strong>
       </div>
     </section>
@@ -270,12 +270,12 @@ onMounted(loadRecentDecisions)
         <article
           v-for="item in sortedItems"
           :key="item.id"
-          :class="['bucket-card', { active: editingId === item.id, blocked: item.guardrail_level === 'blocked_for_risk_assets' }]"
+          :class="['bucket-card', 'editorial-card', 'reveal-stagger', { active: editingId === item.id, blocked: item.guardrail_level === 'blocked_for_risk_assets' }]"
         >
           <div class="bucket-top">
             <div>
               <div class="bucket-title-row">
-                <h3>{{ item.name }}</h3>
+                <h3 class="editorial-title">{{ item.name }}</h3>
                 <span class="type-badge">{{ typeLabel(item.bucket_type) }}</span>
               </div>
               <p>{{ item.notes || '未填写备注' }}</p>
@@ -293,11 +293,11 @@ onMounted(loadRecentDecisions)
             <div class="progress-bar" :style="{ width: `${Math.min(item.progress_pct || 0, 100)}%` }"></div>
           </div>
           <div class="bucket-meta">
-            <span>¥{{ money(item.current_amount) }} / ¥{{ money(item.target_amount) }}</span>
-            <span>进度 {{ item.progress_pct || 0 }}%</span>
-            <span>目标占比 {{ pct(item.target_ratio) }}</span>
+            <span><span class="font-jet">¥{{ money(item.current_amount) }}</span> / <span class="font-jet">¥{{ money(item.target_amount) }}</span></span>
+            <span>进度 <span class="font-jet">{{ item.progress_pct || 0 }}%</span></span>
+            <span>目标占比 <span class="font-jet">{{ pct(item.target_ratio) }}</span></span>
             <span>风险 {{ riskLabel(item.risk_level) }}</span>
-            <span>{{ item.liquidity_days || 0 }} 天内可动用</span>
+            <span><span class="font-jet">{{ item.liquidity_days || 0 }}</span> 天内可动用</span>
           </div>
           <div v-if="item.guardrail_level === 'blocked_for_risk_assets'" class="guardrail">
             <Icon name="shield-alert" size="14" />
@@ -306,9 +306,9 @@ onMounted(loadRecentDecisions)
         </article>
       </section>
 
-      <aside class="bucket-form">
+      <aside class="bucket-form editorial-card">
         <div class="form-head">
-          <h3>{{ editingId ? '编辑资金桶' : '新增资金桶' }}</h3>
+          <h3 class="editorial-title">{{ editingId ? '编辑资金桶' : '新增资金桶' }}</h3>
           <button v-if="editingId" class="btn-ghost btn-sm" @click="resetForm">取消编辑</button>
         </div>
         <label>
@@ -362,14 +362,14 @@ onMounted(loadRecentDecisions)
     </main>
 
     <!-- 决策预检查展示 -->
-    <section v-if="recentDecisions.length" class="precheck-section">
-      <h3 class="section-title">
+    <section v-if="recentDecisions.length" class="precheck-section editorial-card">
+      <h3 class="section-title editorial-title">
         <Icon name="shield-check" size="16" />
         决策预检查（资金桶拦截）
       </h3>
       <p class="section-desc">展示待执行决策与资金桶的约束关系。被拦截的决策无法执行加仓。</p>
       <div class="precheck-list">
-        <article v-for="d in recentDecisions" :key="d.id" class="precheck-card">
+        <article v-for="d in recentDecisions" :key="d.id" class="precheck-card reveal-stagger">
           <div class="precheck-top">
             <strong>{{ d.summary }}</strong>
             <span :class="['precheck-status', bucketCheckFor(d.id)?.blocked ? 'blocked' : 'ok']">
@@ -439,7 +439,7 @@ onMounted(loadRecentDecisions)
 }
 .summary-cell:last-child { border-right: 0; }
 .summary-cell span {
-  font-size: 0.78rem;
+  font-size: inherit;
   color: var(--color-text-muted);
 }
 .summary-cell strong {
@@ -658,7 +658,7 @@ onMounted(loadRecentDecisions)
     flex-direction: column;
     gap: var(--space-2);
   }
-  .page-title { font-size: 1.1rem; }
+  .page-title { font-size: inherit; }
   .page-desc { font-size: 0.78rem; }
 
   /* 汇总条：单行显示 */

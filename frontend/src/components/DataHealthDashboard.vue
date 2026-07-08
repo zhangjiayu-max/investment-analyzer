@@ -1,12 +1,12 @@
 <template>
-  <div class="data-health">
+  <div class="data-health bg-mesh">
     <div class="dh-header">
-      <h2>数据健康监控</h2>
-      <p class="dh-subtitle">各数据源的最新状态与新鲜度</p>
+      <h2 class="editorial-title-lg">数据健康监控</h2>
+      <p class="dh-subtitle editorial-subtitle">各数据源的最新状态与新鲜度</p>
       <div class="dh-summary">
-        <span class="dot dot-green" /> {{ greenCount }} 正常
-        <span class="dot dot-yellow" /> {{ yellowCount }} 注意
-        <span class="dot dot-red" /> {{ redCount }} 过期
+        <span class="dot dot-green" /> <span class="font-jet">{{ greenCount }}</span> 正常
+        <span class="dot dot-yellow" /> <span class="font-jet">{{ yellowCount }}</span> 注意
+        <span class="dot dot-red" /> <span class="font-jet">{{ redCount }}</span> 过期
       </div>
     </div>
 
@@ -15,35 +15,32 @@
     </div>
 
     <div v-else-if="error" class="dh-error">
-      ⚠️ {{ error }}
+      {{ error }}
     </div>
 
     <div v-else class="dh-grid">
       <div
         v-for="(item, key) in items"
         :key="key"
-        class="dh-card"
+        class="dh-card editorial-card reveal-stagger"
         :class="statusClass(item.stale_days)"
       >
         <div class="dh-card-header">
-          <span class="dh-card-icon" :class="statusClass(item.stale_days)">
-            {{ statusEmoji(item.stale_days) }}
-          </span>
           <span class="dh-card-name">{{ item.label }}</span>
         </div>
 
         <div class="dh-card-body">
           <div class="dh-stat">
-            <span class="dh-stat-label">记录数</span>
-            <span class="dh-stat-value">{{ formatCount(item.count) }}</span>
+            <span class="dh-stat-label terminal-label">记录数</span>
+            <span class="dh-stat-value font-jet">{{ formatCount(item.count) }}</span>
           </div>
           <div class="dh-stat">
-            <span class="dh-stat-label">最后更新</span>
-            <span class="dh-stat-value">{{ formatDate(item.latest) }}</span>
+            <span class="dh-stat-label terminal-label">最后更新</span>
+            <span class="dh-stat-value font-jet">{{ formatDate(item.latest) }}</span>
           </div>
           <div class="dh-stat" v-if="item.stale_days !== undefined">
-            <span class="dh-stat-label">距今</span>
-            <span class="dh-stat-value" :class="statusClass(item.stale_days)">
+            <span class="dh-stat-label terminal-label">距今</span>
+            <span class="dh-stat-value font-jet" :class="statusClass(item.stale_days)">
               {{ formatDays(item.stale_days) }}
             </span>
           </div>
@@ -83,13 +80,6 @@ function statusClass(days) {
   return 'status-red'
 }
 
-function statusEmoji(days) {
-  if (days === undefined || days === null) return '⚪'
-  if (days < 3) return '🟢'
-  if (days < 7) return '🟡'
-  return '🔴'
-}
-
 function formatCount(n) {
   if (!n) return '0'
   return n.toLocaleString()
@@ -123,14 +113,15 @@ function formatDays(days) {
 
 .dh-header h2 {
   margin: 0 0 4px 0;
-  font-size: 1.4rem;
-  font-weight: 600;
+  font-size: inherit;
+  font-weight: inherit;
 }
 
 .dh-subtitle {
   margin: 0 0 12px 0;
   color: var(--color-text-muted, #888);
-  font-size: 0.9rem;
+  font-size: inherit;
+  font-weight: inherit;
 }
 
 .dh-summary {
@@ -213,7 +204,7 @@ function formatDays(days) {
 
 .dh-stat-value {
   font-weight: 500;
-  font-variant-numeric: tabular-nums;
+  font-variant-numeric: inherit;
 }
 
 .status-green { color: #16a34a; }

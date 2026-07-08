@@ -25,8 +25,8 @@ function onPaste(e) {
 </script>
 
 <template>
-  <div class="card url-input-card">
-    <h2 class="url-title">输入公众号文章链接</h2>
+  <div class="card url-input-card bg-mesh editorial-card">
+    <h2 class="url-title editorial-title-lg">输入公众号文章链接</h2>
     <form @submit.prevent="submit" class="url-form">
       <input
         v-model="url"
@@ -56,8 +56,8 @@ function onPaste(e) {
 }
 
 .url-title {
-  font-size: 1.1rem;
-  font-weight: 600;
+  font-size: inherit;
+  font-weight: inherit;
   color: var(--color-text-primary);
   margin: 0 0 0.75rem;
 }

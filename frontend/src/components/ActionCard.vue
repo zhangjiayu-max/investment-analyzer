@@ -1,12 +1,11 @@
 <template>
   <div v-if="actions && actions.length > 0" class="action-section">
-    <div class="action-section-header">
-      <span class="action-section-icon">🎯</span>
-      <span class="action-section-title">下一步行动</span>
-      <span class="action-count">{{ actions.length }} 条建议</span>
+    <div class="action-section-header editorial-card-header">
+      <span class="action-section-title editorial-title">下一步行动</span>
+      <span class="action-count"><span class="font-jet">{{ actions.length }}</span> 条建议</span>
     </div>
     <div class="action-list">
-      <div v-for="(action, idx) in actions" :key="idx" class="action-card" :class="[action.priority, action.action_type]">
+      <div v-for="(action, idx) in actions" :key="idx" class="action-card editorial-card reveal-stagger" :class="[action.priority, action.action_type]">
         <div class="action-card-header">
           <span class="action-type-badge">{{ actionTypeLabel(action.action_type) }}</span>
           <span class="action-priority-badge">{{ priorityLabel(action.priority) }}</span>
@@ -15,19 +14,19 @@
           <p class="action-target">{{ action.target_name }}</p>
           <p class="action-reason">{{ action.reason }}</p>
           <p v-if="action.estimated_savings" class="action-savings">
-            预计年节省：¥{{ action.estimated_savings.toLocaleString() }}
+            预计年节省：¥<span class="font-jet">{{ action.estimated_savings.toLocaleString() }}</span>
           </p>
           <p v-if="action.score" class="action-score">
-            评分：{{ action.score }}/100
+            评分：<span class="font-jet">{{ action.score }}</span>/100
           </p>
         </div>
         <div class="action-card-buttons">
           <button v-if="action.target_code" class="btn-action btn-primary" @click="addWatchlist(action)">
-            ⭐ 加入关注
+            加入关注
           </button>
           <button v-if="action.action_type === 'buy' || action.action_type === 'sell' || action.action_type === 'reduce'"
                   class="btn-action btn-decision" @click="createDecision(action)">
-            📋 创建决策
+            创建决策
           </button>
           <button class="btn-action btn-dismiss" @click="dismissAction(idx)">
             忽略
@@ -49,19 +48,19 @@ const props = defineProps({
 const emit = defineEmits(['watch', 'decision', 'dismiss'])
 
 const actionTypeLabels = {
-  watch: '👀 关注',
-  buy: '📈 买入',
-  sell: '📉 卖出',
-  reduce: '⚠️ 减仓',
-  replace: '🔄 替换',
-  rebalance: '⚖️ 再平衡',
-  review: '📊 复盘',
+  watch: '关注',
+  buy: '买入',
+  sell: '卖出',
+  reduce: '减仓',
+  replace: '替换',
+  rebalance: '再平衡',
+  review: '复盘',
 }
 
 const priorityLabels = {
-  high: '🔴 高',
-  medium: '🟡 中',
-  low: '🟢 低',
+  high: '高',
+  medium: '中',
+  low: '低',
 }
 
 function actionTypeLabel(type) {
@@ -95,21 +94,11 @@ function dismissAction(idx) {
 }
 
 .action-section-header {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-bottom: 12px;
-  padding-bottom: 8px;
-  border-bottom: 1px solid var(--border, #e5e7eb);
-}
-
-.action-section-icon {
-  font-size: 18px;
+  /* editorial-card-header provides layout */
 }
 
 .action-section-title {
   font-size: 15px;
-  font-weight: 600;
   color: var(--text-primary, #1a1a2e);
 }
 
@@ -137,17 +126,11 @@ function dismissAction(idx) {
   border-color: var(--accent, #2563eb);
 }
 
-.action-card.high {
-  border-left: 3px solid #ef4444;
-}
+.action-card.high::before { background: #ef4444; }
 
-.action-card.medium {
-  border-left: 3px solid #f59e0b;
-}
+.action-card.medium::before { background: #f59e0b; }
 
-.action-card.low {
-  border-left: 3px solid #10b981;
-}
+.action-card.low::before { background: #10b981; }
 
 .action-card-header {
   display: flex;

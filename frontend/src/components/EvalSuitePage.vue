@@ -430,11 +430,11 @@ onMounted(() => {
 </script>
 
 <template>
-  <div class="evalsuite-page">
+  <div class="evalsuite-page bg-mesh">
     <div class="page-header">
       <div>
-        <h2 class="page-title">📊 评测集</h2>
-        <p class="page-desc">运行测试用例，评估 Agent 分析质量</p>
+        <h2 class="page-title editorial-title-lg">评测集</h2>
+        <p class="page-desc editorial-subtitle">运行测试用例，评估 Agent 分析质量</p>
       </div>
       <div class="header-actions">
         <button class="btn-secondary" @click="loadAll" :disabled="loading">
@@ -457,45 +457,42 @@ onMounted(() => {
 
     <!-- Stats -->
     <div class="stats-bar">
-      <div class="stat-card">
-        <span class="stat-value">{{ stats.total_cases || 0 }}</span>
-        <span class="stat-label">总用例</span>
+      <div class="stat-card editorial-card">
+        <span class="stat-value font-jet-lg">{{ stats.total_cases || 0 }}</span>
+        <span class="stat-label terminal-label">总用例</span>
       </div>
-      <div class="stat-card">
-        <span class="stat-value">{{ stats.active_cases || 0 }}</span>
-        <span class="stat-label">活跃用例</span>
+      <div class="stat-card editorial-card">
+        <span class="stat-value font-jet-lg">{{ stats.active_cases || 0 }}</span>
+        <span class="stat-label terminal-label">活跃用例</span>
       </div>
-      <div class="stat-card">
-        <span class="stat-value">{{ stats.total_runs || 0 }}</span>
-        <span class="stat-label">运行次数</span>
+      <div class="stat-card editorial-card">
+        <span class="stat-value font-jet-lg">{{ stats.total_runs || 0 }}</span>
+        <span class="stat-label terminal-label">运行次数</span>
       </div>
-      <div class="stat-card">
-        <span class="stat-value" :style="{ color: stats.avg_score ? scoreColor(stats.avg_score) : 'inherit' }">
+      <div class="stat-card editorial-card">
+        <span class="stat-value font-jet-lg" :style="{ color: stats.avg_score ? scoreColor(stats.avg_score) : 'inherit' }">
           {{ stats.avg_score !== null ? Number(stats.avg_score).toFixed(1) : '-' }}
         </span>
-        <span class="stat-label">平均分 /10</span>
+        <span class="stat-label terminal-label">平均分 /10</span>
       </div>
     </div>
 
     <!-- 回归结果 -->
-    <div v-if="regressionResult" class="regression-result">
-      <div class="regression-head">
-        <strong>🚀 回归结果</strong>
-        <span>通过 {{ regressionResult.passed }}/{{ regressionResult.total }}，
-          失败 {{ regressionResult.failed }}
-          <template v-if="regressionResult.degraded_count">，退化 {{ regressionResult.degraded_count }}</template>
-        </span>
+    <div v-if="regressionResult" class="regression-result editorial-card">
+      <div class="regression-head editorial-card-header">
+        <strong class="title">回归结果</strong>
+        <span class="meta font-jet">PASS <span class="font-jet">{{ regressionResult.passed }}</span>/<span class="font-jet">{{ regressionResult.total }}</span> · FAIL <span class="font-jet">{{ regressionResult.failed }}</span><template v-if="regressionResult.degraded_count"> · 退化 <span class="font-jet">{{ regressionResult.degraded_count }}</span></template></span>
       </div>
       <div v-if="regressionResult.degraded?.length" class="degraded-list">
         <div v-for="d in regressionResult.degraded" :key="d.case_id" class="degraded-item">
-          ⚠️ {{ d.name }} — 近3次分数: {{ d.scores?.join(', ') }}
+          ⚠️ {{ d.name }} — 近3次分数: <span class="font-jet">{{ d.scores?.join(', ') }}</span>
         </div>
       </div>
       <div class="regression-details">
         <div v-for="r in regressionResult.results" :key="r.case_id" class="regression-row">
           <span :class="['regression-status', r.status]">{{ r.status }}</span>
-          <span class="regression-score">{{ r.score ?? '-' }}</span>
-          <span v-if="r.dimensions" class="regression-dims">
+          <span class="regression-score font-jet">{{ r.score ?? '-' }}</span>
+          <span v-if="r.dimensions" class="regression-dims font-jet">
             数据{{ r.dimensions.data_accuracy }} / 逻辑{{ r.dimensions.logic }} /
             操作{{ r.dimensions.actionability }} / 风险{{ r.dimensions.risk_awareness }}
           </span>
@@ -506,10 +503,10 @@ onMounted(() => {
     <!-- Tabs -->
     <div class="tab-bar">
       <button :class="['tab-btn', { active: activeTab === 'cases' }]" @click="activeTab = 'cases'">
-        评测用例 ({{ cases.length }})
+        评测用例 <span class="font-jet">({{ cases.length }})</span>
       </button>
       <button :class="['tab-btn', { active: activeTab === 'runs' }]" @click="activeTab = 'runs'">
-        运行记录 ({{ runs.length }})
+        运行记录 <span class="font-jet">({{ runs.length }})</span>
       </button>
       <button :class="['tab-btn', { active: activeTab === 'prompts' }]" @click="activeTab = 'prompts'">
         Prompt 版本
@@ -533,7 +530,7 @@ onMounted(() => {
       <!-- Create Form (新建时在顶部) -->
       <Transition name="expand">
         <div v-if="showForm && !editingId" class="form-card card">
-          <h4>新建评测用例</h4>
+          <h4 class="editorial-title">新建评测用例</h4>
           <div class="form-grid">
             <div class="form-row">
               <label>名称 *</label>
@@ -576,16 +573,16 @@ onMounted(() => {
       <div v-else class="case-list">
         <template v-for="c in cases" :key="c.id">
           <!-- 用例卡片 -->
-          <div class="case-card card">
+          <div class="case-card card editorial-card reveal-stagger">
             <div class="case-header">
               <div class="case-info">
                 <span class="badge badge-sm" :class="'badge-' + c.analysis_type">{{ typeLabel(c.analysis_type) }}</span>
                 <span class="case-name">{{ c.name }}</span>
               </div>
               <div class="case-meta">
-                <span class="case-stat">运行 {{ c.run_count || 0 }} 次</span>
+                <span class="case-stat">运行 <span class="font-jet">{{ c.run_count || 0 }}</span> 次</span>
                 <span v-if="c.avg_score" class="case-stat" :style="{ color: scoreColor(c.avg_score) }">
-                  平均 {{ Number(c.avg_score).toFixed(1) }}分
+                  平均 <span class="font-jet">{{ Number(c.avg_score).toFixed(1) }}</span>分
                 </span>
               </div>
             </div>
@@ -665,22 +662,22 @@ onMounted(() => {
       <div class="runs-layout">
         <!-- Run List -->
         <div class="run-list">
-          <h4 class="section-title">运行记录</h4>
+          <h4 class="section-title terminal-label">运行记录</h4>
           <div v-if="runs.length === 0" class="empty-state">
             <p>暂无运行记录</p>
           </div>
           <div v-for="r in latestRuns" :key="r.id"
-            :class="['run-item', { selected: selectedRun?.id === r.id }]"
+            :class="['run-item reveal-stagger', { selected: selectedRun?.id === r.id }]"
             @click="viewRunDetail(r)">
             <div class="run-header">
               <span>{{ runStatusIcon(r) }}</span>
               <span class="run-case-name">{{ r.case_name || '-' }}</span>
-              <span class="run-time">{{ formatTime(r.created_at) }}</span>
+              <span class="run-time font-jet terminal-label">{{ formatTime(r.created_at) }}</span>
             </div>
             <div class="run-sub">
               <span class="badge-solid badge-xs" :class="'badge-' + r.analysis_type">{{ typeLabel(r.analysis_type) }}</span>
-              <span class="run-duration">{{ formatDuration(r.duration_ms) }}</span>
-              <span v-if="r.score !== null && r.score > 0" class="run-score" :style="{ color: scoreColor(r.score) }">
+              <span class="run-duration font-jet">{{ formatDuration(r.duration_ms) }}</span>
+              <span v-if="r.score !== null && r.score > 0" class="run-score font-jet" :style="{ color: scoreColor(r.score) }">
                 {{ Number(r.score).toFixed(0) }}/10
               </span>
               <span v-else class="run-score scoring">评分中...</span>
@@ -691,35 +688,35 @@ onMounted(() => {
         <!-- Run Detail -->
         <div class="run-detail" v-if="runDetail">
           <div class="detail-header">
-            <h4 class="section-title">运行详情</h4>
+            <h4 class="section-title terminal-label">运行详情</h4>
             <button class="btn-secondary btn-xs" @click="runDetail = null; selectedRun = null">✕ 关闭</button>
           </div>
 
           <!-- Meta Grid -->
           <div class="detail-meta-grid">
             <div class="meta-item">
-              <span class="meta-label">用例</span>
+              <span class="meta-label terminal-label">用例</span>
               <span class="meta-value">{{ runDetail.case_name }}</span>
             </div>
             <div class="meta-item">
-              <span class="meta-label">类型</span>
+              <span class="meta-label terminal-label">类型</span>
               <span class="meta-value">{{ typeLabel(runDetail.analysis_type) }}</span>
             </div>
             <div class="meta-item">
-              <span class="meta-label">耗时</span>
-              <span class="meta-value">{{ formatDuration(runDetail.duration_ms) }}</span>
+              <span class="meta-label terminal-label">耗时</span>
+              <span class="meta-value font-jet">{{ formatDuration(runDetail.duration_ms) }}</span>
             </div>
             <div class="meta-item">
-              <span class="meta-label">Token</span>
-              <span class="meta-value">{{ (runDetail.token_usage || 0).toLocaleString() }}</span>
+              <span class="meta-label terminal-label">Token</span>
+              <span class="meta-value font-jet">{{ (runDetail.token_usage || 0).toLocaleString() }}</span>
             </div>
           </div>
 
           <!-- Score Card -->
           <div v-if="runDetail.score !== null && runDetail.score > 0" class="score-card">
-            <div class="score-big" :style="{ color: scoreColor(runDetail.score) }">
+            <div class="score-big font-jet-lg" :style="{ color: scoreColor(runDetail.score) }">
               {{ Number(runDetail.score).toFixed(0) }}
-              <span class="score-max">/10</span>
+              <span class="score-max font-jet">/10</span>
             </div>
             <div class="score-label" :style="{ color: scoreColor(runDetail.score) }">
               {{ scoreLabel(runDetail.score) }}
@@ -738,7 +735,7 @@ onMounted(() => {
           <!-- Input Params -->
           <div v-if="runDetail.input_params && runDetail.input_params !== '{}'" class="detail-section">
             <div class="detail-section-head">
-              <h5>📥 输入参数</h5>
+              <h5 class="terminal-label">输入参数</h5>
               <button class="copy-btn" @click="copyToClipboard(runDetail.input_params, '输入参数')">📋 复制</button>
             </div>
             <pre class="code-block">{{ (() => { try { return JSON.stringify(JSON.parse(runDetail.input_params), null, 2) } catch { return runDetail.input_params } })() }}</pre>
@@ -747,7 +744,7 @@ onMounted(() => {
           <!-- Expected Quality -->
           <div v-if="runDetail.expected_quality" class="detail-section">
             <div class="detail-section-head">
-              <h5>📋 预期质量标准</h5>
+              <h5 class="terminal-label">预期质量标准</h5>
               <button class="copy-btn" @click="copyToClipboard(runDetail.expected_quality, '质量标准')">📋 复制</button>
             </div>
             <pre class="code-block quality-block">{{ runDetail.expected_quality }}</pre>
@@ -756,7 +753,7 @@ onMounted(() => {
           <!-- Full Result -->
           <div v-if="runDetail.result_data" class="detail-section">
             <div class="detail-section-head">
-              <h5>📤 完整结果</h5>
+              <h5 class="terminal-label">完整结果</h5>
               <button class="copy-btn" @click="copyToClipboard(extractResult(runDetail.result_data), '完整结果')">📋 复制</button>
             </div>
             <div v-if="isMarkdown(extractResult(runDetail.result_data))" class="result-content markdown-body" v-html="renderMarkdown(extractResult(runDetail.result_data))"></div>
@@ -814,12 +811,12 @@ onMounted(() => {
         <p class="text-muted">暂无 Prompt 版本记录</p>
       </div>
       <div v-else class="prompts-list">
-        <div v-for="p in prompts" :key="p.id" class="prompt-item card">
+        <div v-for="p in prompts" :key="p.id" class="prompt-item card editorial-card reveal-stagger">
           <div class="prompt-header">
-            <span class="prompt-type">{{ p.agent_type }}</span>
-            <span class="prompt-version">{{ p.version }}</span>
+            <span class="prompt-type terminal-label">{{ p.agent_type }}</span>
+            <span class="prompt-version font-jet">{{ p.version }}</span>
             <span v-if="p.is_active" class="badge-active">当前版本</span>
-            <span class="prompt-score" v-if="p.eval_count > 0">均分: {{ p.avg_score?.toFixed(1) }}/25</span>
+            <span class="prompt-score font-jet" v-if="p.eval_count > 0">均分: {{ p.avg_score?.toFixed(1) }}/25</span>
           </div>
           <p class="prompt-changelog" v-if="p.changelog">{{ p.changelog }}</p>
           <div class="prompt-actions">
@@ -829,17 +826,17 @@ onMounted(() => {
         </div>
       </div>
       <!-- A/B 对比结果 -->
-      <div v-if="abResult" class="ab-result card">
-        <h4>A/B 对比结果</h4>
+      <div v-if="abResult" class="ab-result card editorial-card">
+        <h4 class="editorial-title">A/B 对比结果</h4>
         <div class="ab-scores">
           <div class="ab-side">
-            <span class="ab-label">当前版本 ({{ abResult.active_version }})</span>
-            <span class="ab-score">{{ abResult.avg_active }}/25</span>
+            <span class="ab-label terminal-label">当前版本 ({{ abResult.active_version }})</span>
+            <span class="ab-score font-jet-lg">{{ abResult.avg_active }}/25</span>
           </div>
-          <span class="ab-vs">VS</span>
+          <span class="ab-vs terminal-label">VS</span>
           <div class="ab-side">
-            <span class="ab-label">新版本 ({{ abResult.target_version }})</span>
-            <span class="ab-score" :class="{ win: abResult.avg_target > abResult.avg_active }">{{ abResult.avg_target }}/25</span>
+            <span class="ab-label terminal-label">新版本 ({{ abResult.target_version }})</span>
+            <span class="ab-score font-jet-lg" :class="{ win: abResult.avg_target > abResult.avg_active }">{{ abResult.avg_target }}/25</span>
           </div>
         </div>
       </div>
@@ -858,15 +855,15 @@ onMounted(() => {
         <p class="text-muted">暂无质量日报</p>
       </div>
       <div v-else class="daily-list">
-        <div v-for="r in dailyReports" :key="r.id" class="daily-item card">
+        <div v-for="r in dailyReports" :key="r.id" class="daily-item card editorial-card reveal-stagger">
           <div class="daily-header">
-            <span class="daily-date">{{ r.report_date }}</span>
-            <span class="daily-score" :class="{ up: r.score_trend === 'up', down: r.score_trend === 'down' }">
+            <span class="daily-date font-jet terminal-label">{{ r.report_date }}</span>
+            <span class="daily-score font-jet-lg" :class="{ up: r.score_trend === 'up', down: r.score_trend === 'down' }">
               {{ r.avg_score }}/25
               <span v-if="r.score_trend === 'up'">↑</span>
               <span v-else-if="r.score_trend === 'down'">↓</span>
             </span>
-            <span class="daily-cases">{{ r.total_cases }} 条用例</span>
+            <span class="daily-cases font-jet">{{ r.total_cases }} 条用例</span>
           </div>
           <div v-if="r.alerts_parsed.length" class="daily-alerts">
             <p v-for="a in r.alerts_parsed" :key="a" class="alert-item">{{ a }}</p>

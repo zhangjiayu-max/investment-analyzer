@@ -79,10 +79,10 @@ const isEmpty = computed(() => !hasConsensus.value && !hasConflicts.value && !ha
 // ── 优先级映射 ──
 
 function priorityLabel(index, item) {
-  if (item.urgent) return { text: '🔴 紧急', cls: 'priority-urgent' }
-  if (item.confidence >= 0.8) return { text: '🟢 高置信', cls: 'priority-high' }
-  if (item.confidence >= 0.6) return { text: '🟡 中置信', cls: 'priority-mid' }
-  return { text: '⚪ 低置信', cls: 'priority-low' }
+  if (item.urgent) return { text: '紧急', cls: 'priority-urgent' }
+  if (item.confidence >= 0.8) return { text: '高置信', cls: 'priority-high' }
+  if (item.confidence >= 0.6) return { text: '中置信', cls: 'priority-mid' }
+  return { text: '低置信', cls: 'priority-low' }
 }
 
 function confidencePct(c) {
@@ -99,51 +99,50 @@ function confidenceClass(conf) {
 </script>
 
 <template>
-  <div class="decision-canvas">
+  <div class="decision-canvas bg-mesh">
     <!-- Header -->
     <div class="canvas-header">
       <div class="canvas-title-row">
-        <h2 class="canvas-title">📋 决策画布</h2>
-        <span v-if="summary" class="canvas-time">{{ summary.generated_at }}</span>
+        <h2 class="canvas-title editorial-title-lg">决策画布</h2>
+        <span v-if="summary" class="canvas-time terminal-label">{{ summary.generated_at }}</span>
       </div>
       <p v-if="summary" class="canvas-meta">
-        {{ summary.total }} 条分析结论 · {{ summary.consensus_count }} 共识 · {{ summary.conflict_count }} 分歧 · {{ summary.actionable_count }} 可执行
+        <span class="font-jet">{{ summary.total }}</span> 条分析结论 · <span class="font-jet">{{ summary.consensus_count }}</span> 共识 · <span class="font-jet">{{ summary.conflict_count }}</span> 分歧 · <span class="font-jet">{{ summary.actionable_count }}</span> 可执行
       </p>
     </div>
 
     <!-- Loading -->
-    <div v-if="loading" class="canvas-loading card">
+    <div v-if="loading" class="canvas-loading card editorial-card">
       <div class="skeleton skeleton-title"></div>
       <div class="skeleton skeleton-line"></div>
       <div class="skeleton skeleton-line short"></div>
     </div>
 
     <!-- Error -->
-    <div v-else-if="error" class="canvas-error card">
+    <div v-else-if="error" class="canvas-error card editorial-card">
       <p>{{ error }}</p>
       <button class="btn-secondary" @click="loadCanvas">重试</button>
     </div>
 
     <!-- Empty state -->
-    <div v-else-if="isEmpty" class="canvas-empty card">
-      <div class="empty-icon">📭</div>
-      <h3>暂无决策画布数据</h3>
+    <div v-else-if="isEmpty" class="canvas-empty card editorial-card">
+      <div class="empty-icon terminal-label">NO DATA</div>
+      <h3 class="editorial-title">暂无决策画布数据</h3>
       <p>当各分析模块（日报、全景诊断、AI 对话等）运行后，<br>共识区与关注区会自动填充。</p>
       <button class="btn-secondary" @click="loadCanvas">
-        <span>🔄</span> 刷新
+        刷新
       </button>
     </div>
 
     <template v-else>
       <!-- ══════════════════════════ 共识区 — 绿色 ══════════════════════════ -->
-      <div v-if="hasConsensus" class="canvas-zone zone-consensus card">
-        <div class="zone-header">
-          <span class="zone-icon">✅</span>
-          <h3 class="zone-title">共识区（多方验证，可信度高）</h3>
-          <span class="zone-count">{{ consensus.length }} 项</span>
+      <div v-if="hasConsensus" class="canvas-zone zone-consensus card editorial-card">
+        <div class="zone-header editorial-card-header">
+          <h3 class="zone-title title">共识区 — 多方验证，可信度高</h3>
+          <span class="zone-count meta">{{ consensus.length }} 项</span>
         </div>
         <div class="zone-body">
-          <div v-for="(item, idx) in consensus" :key="'c-' + idx" class="zone-item consensus-item">
+          <div v-for="(item, idx) in consensus" :key="'c-' + idx" class="zone-item consensus-item reveal-stagger">
             <div class="item-main">
               <span class="item-badge" :class="item.direction === 'bullish' ? 'badge-bullish' : 'badge-bearish'">
                 {{ item.direction_label }}
@@ -152,7 +151,7 @@ function confidenceClass(conf) {
                 <p class="item-summary">{{ item.summary }}</p>
                 <p v-if="item.reasoning" class="item-reasoning">{{ item.reasoning }}</p>
               </div>
-              <span class="item-confidence">{{ confidencePct(item.confidence) }}</span>
+              <span class="item-confidence font-jet">{{ confidencePct(item.confidence) }}</span>
             </div>
             <div class="item-sources">
               <span
@@ -171,16 +170,15 @@ function confidenceClass(conf) {
       </div>
 
       <!-- ══════════════════════════ 关注区 — 黄色 ══════════════════════════ -->
-      <div v-if="hasConflicts" class="canvas-zone zone-conflicts card">
-        <div class="zone-header">
-          <span class="zone-icon">⚠️</span>
-          <h3 class="zone-title">关注区（存在差异，需权衡）</h3>
-          <span class="zone-count">{{ conflicts.length }} 组冲突</span>
+      <div v-if="hasConflicts" class="canvas-zone zone-conflicts card editorial-card">
+        <div class="zone-header editorial-card-header">
+          <h3 class="zone-title title">关注区 — 存在差异，需权衡</h3>
+          <span class="zone-count meta">{{ conflicts.length }} 组冲突</span>
         </div>
         <div class="zone-body">
-          <div v-for="(item, idx) in conflicts" :key="'x-' + idx" class="zone-item conflict-item">
+          <div v-for="(item, idx) in conflicts" :key="'x-' + idx" class="zone-item conflict-item reveal-stagger">
             <div class="conflict-target">
-              <span class="conflict-tag">💥</span>
+              <span class="conflict-tag terminal-label">DIVERGENCE</span>
               <strong>{{ item.target_subject }}</strong>
             </div>
 
@@ -195,7 +193,7 @@ function confidenceClass(conf) {
                   <span class="view-source">【{{ item.bullish_view.source_label }}说】</span>
                   {{ item.bullish_view.summary }}
                 </div>
-                <div class="view-confidence">{{ confidencePct(item.bullish_view.confidence) }}</div>
+                <div class="view-confidence font-jet">{{ confidencePct(item.bullish_view.confidence) }}</div>
               </div>
 
               <!-- 看空方 -->
@@ -207,7 +205,7 @@ function confidenceClass(conf) {
                   <span class="view-source">【{{ item.bearish_view.source_label }}说】</span>
                   {{ item.bearish_view.summary }}
                 </div>
-                <div class="view-confidence">{{ confidencePct(item.bearish_view.confidence) }}</div>
+                <div class="view-confidence font-jet">{{ confidencePct(item.bearish_view.confidence) }}</div>
               </div>
             </div>
 
@@ -215,8 +213,8 @@ function confidenceClass(conf) {
             <div v-if="item.conditional_advice" class="conflict-variables">
               <p class="conflict-advice">{{ item.conditional_advice.advice }}</p>
               <div class="conflict-paths">
-                <span class="path path-a">👉 {{ item.conditional_advice.path_a }}</span>
-                <span class="path path-b">👉 {{ item.conditional_advice.path_b }}</span>
+                <span class="path path-a">→ {{ item.conditional_advice.path_a }}</span>
+                <span class="path path-b">→ {{ item.conditional_advice.path_b }}</span>
               </div>
             </div>
           </div>
@@ -224,16 +222,15 @@ function confidenceClass(conf) {
       </div>
 
       <!-- ══════════════════════════ 条件判断框架区 — 橙色 ══════════════════════════ -->
-      <div v-if="hasConditionFramework" class="canvas-zone zone-condition card">
-        <div class="zone-header">
-          <span class="zone-icon">⚠️</span>
-          <h3 class="zone-title">条件判断框架</h3>
-          <span class="zone-count">{{ conditionFramework.length }} 种情景</span>
+      <div v-if="hasConditionFramework" class="canvas-zone zone-condition card editorial-card">
+        <div class="zone-header editorial-card-header">
+          <h3 class="zone-title title">条件判断框架</h3>
+          <span class="zone-count meta">{{ conditionFramework.length }} 种情景</span>
         </div>
         <div class="zone-body">
           <!-- 分歧根源 -->
           <div v-if="diverggenceAnalysis" class="condition-divergence">
-            <div class="divergence-label">🔀 分歧根源</div>
+            <div class="divergence-label terminal-label">分歧根源</div>
             <p class="divergence-text">{{ diverggenceAnalysis }}</p>
           </div>
 
@@ -252,7 +249,7 @@ function confidenceClass(conf) {
                   <td class="td-condition">{{ row.condition }}</td>
                   <td class="td-action">{{ row.action }}</td>
                   <td class="td-confidence">
-                    <span class="confidence-badge" :class="confidenceClass(row.confidence)">
+                    <span class="confidence-badge font-jet" :class="confidenceClass(row.confidence)">
                       {{ row.confidence }}
                     </span>
                   </td>
@@ -263,21 +260,20 @@ function confidenceClass(conf) {
 
           <!-- 核心权衡 -->
           <div v-if="keyVariables" class="condition-tradeoff">
-            <div class="tradeoff-label">⚖️ 核心权衡</div>
+            <div class="tradeoff-label terminal-label">核心权衡</div>
             <p class="tradeoff-text">最终判断取决于你更看重哪个变量：{{ keyVariables }}</p>
           </div>
         </div>
       </div>
 
       <!-- ══════════════════════════ 建议区 — 蓝色 ══════════════════════════ -->
-      <div v-if="hasActionable" class="canvas-zone zone-actionable card">
-        <div class="zone-header">
-          <span class="zone-icon">💡</span>
-          <h3 class="zone-title">建议区（带条件的行动清单）</h3>
-          <span class="zone-count">{{ actionable.length }} 项行动</span>
+      <div v-if="hasActionable" class="canvas-zone zone-actionable card editorial-card">
+        <div class="zone-header editorial-card-header">
+          <h3 class="zone-title title">建议区 — 带条件的行动清单</h3>
+          <span class="zone-count meta">{{ actionable.length }} 项行动</span>
         </div>
         <div class="zone-body">
-          <div v-for="(item, idx) in actionable" :key="'a-' + idx" class="zone-item actionable-item">
+          <div v-for="(item, idx) in actionable" :key="'a-' + idx" class="zone-item actionable-item reveal-stagger">
             <div class="actionable-row">
               <span :class="['action-priority', priorityLabel(idx, item).cls]">
                 {{ priorityLabel(idx, item).text }}
@@ -293,10 +289,10 @@ function confidenceClass(conf) {
                 </p>
               </div>
               <div class="actionable-meta">
-                <span class="meta-conf">置信度 {{ confidencePct(item.confidence) }}</span>
-                <span class="meta-time">{{ item.time_window || '24h' }}</span>
+                <span class="meta-conf">置信度 <span class="font-jet">{{ confidencePct(item.confidence) }}</span></span>
+                <span class="meta-time terminal-label">{{ item.time_window || '24h' }}</span>
                 <span v-if="item.condition_trigger" class="meta-trigger">
-                  🔔 {{ item.condition_trigger }}
+                  {{ item.condition_trigger }}
                 </span>
               </div>
             </div>
@@ -305,21 +301,20 @@ function confidenceClass(conf) {
       </div>
 
       <!-- ══════════════════════════ 学习区 — 紫色 ══════════════════════════ -->
-      <div v-if="learning" class="canvas-zone zone-learning card">
-        <div class="zone-header">
-          <span class="zone-icon">📖</span>
-          <h3 class="zone-title">今日学到的框架</h3>
+      <div v-if="learning" class="canvas-zone zone-learning card editorial-card">
+        <div class="zone-header editorial-card-header">
+          <h3 class="zone-title title">今日学到的框架</h3>
         </div>
         <div class="zone-body">
           <p class="learning-text">
             {{ learning.framework }}
           </p>
           <div v-if="learning.key_variables_seen?.length" class="learning-vars">
-            <span class="learning-label">核心变量：</span>
+            <span class="learning-label terminal-label">核心变量</span>
             <span
               v-for="(v, vi) in learning.key_variables_seen"
               :key="vi"
-              class="variable-tag"
+              class="variable-tag font-jet"
             >
               {{ v }}
             </span>
@@ -349,13 +344,13 @@ function confidenceClass(conf) {
 }
 .canvas-title {
   margin: 0;
-  font-size: 1.25rem;
-  font-weight: 700;
+  font-size: inherit;
+  font-weight: inherit;
   color: var(--color-text-primary);
 }
 .canvas-time {
-  font-size: 0.8rem;
   color: var(--color-text-muted);
+  font-size: inherit;
 }
 .canvas-meta {
   margin: 0.25rem 0 0;
@@ -375,7 +370,7 @@ function confidenceClass(conf) {
   text-align: center;
   color: var(--color-text-secondary);
 }
-.empty-icon { font-size: 2.5rem; margin-bottom: 0.75rem; }
+.empty-icon { margin-bottom: 0.75rem; }
 .canvas-empty h3 { color: var(--color-text-primary); margin-bottom: 0.5rem; }
 
 /* ── Zone 通用 ── */
@@ -396,13 +391,13 @@ function confidenceClass(conf) {
 .zone-icon { font-size: 1.1rem; }
 .zone-title {
   margin: 0;
-  font-size: 0.95rem;
-  font-weight: 700;
+  font-size: inherit;
+  font-weight: inherit;
   flex: 1;
 }
 .zone-count {
-  font-size: 0.8rem;
   color: var(--color-text-muted);
+  font-size: inherit;
   font-weight: 500;
 }
 .zone-body {
@@ -414,7 +409,6 @@ function confidenceClass(conf) {
 
 /* ── 共识区（绿色） ── */
 .zone-consensus {
-  border-left: 4px solid #059669;
   background: linear-gradient(135deg, #f0fdf4 0%, #ffffff 100%);
 }
 .zone-consensus .zone-header {
@@ -424,7 +418,6 @@ function confidenceClass(conf) {
 
 /* ── 关注区（黄色） ── */
 .zone-conflicts {
-  border-left: 4px solid #d97706;
   background: linear-gradient(135deg, #fffbeb 0%, #ffffff 100%);
 }
 .zone-conflicts .zone-header {
@@ -434,7 +427,6 @@ function confidenceClass(conf) {
 
 /* ── 建议区（蓝色） ── */
 .zone-actionable {
-  border-left: 4px solid #2563eb;
   background: linear-gradient(135deg, #eff6ff 0%, #ffffff 100%);
 }
 .zone-actionable .zone-header {
@@ -444,7 +436,6 @@ function confidenceClass(conf) {
 
 /* ── 条件判断框架区（橙色） ── */
 .zone-condition {
-  border-left: 4px solid #ea580c;
   background: linear-gradient(135deg, #fff7ed 0%, #ffffff 100%);
 }
 .zone-condition .zone-header {
@@ -557,7 +548,6 @@ function confidenceClass(conf) {
 
 /* ── 学习区（紫色） ── */
 .zone-learning {
-  border-left: 4px solid #7c3aed;
   background: linear-gradient(135deg, #f5f3ff 0%, #ffffff 100%);
 }
 .zone-learning .zone-header {

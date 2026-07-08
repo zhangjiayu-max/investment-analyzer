@@ -785,7 +785,7 @@ watch(activeTab, (tab) => {
 
 <template>
   <div
-    class="gallery-page"
+    class="gallery-page bg-mesh"
     @dragenter="handleDragEnter"
     @dragover="handleDragOver"
     @dragleave="handleDragLeave"
@@ -833,9 +833,9 @@ watch(activeTab, (tab) => {
 
     <!-- ═══ 估值图片 Tab ═══ -->
     <template v-if="activeTab === 'gallery'">
-      <div class="section-header">
-        <span class="section-title">待解析图片</span>
-        <span class="toolbar-count">共 {{ viImages.length }} 张</span>
+      <div class="section-header editorial-card-header">
+        <span class="section-title title">待解析图片</span>
+        <span class="toolbar-count meta">共 <span class="font-jet">{{ viImages.length }}</span> 张</span>
       </div>
       <div class="toolbar">
         <input ref="viFileInput" type="file" accept="image/*" multiple @change="handleViUpload" class="hidden-input" />
@@ -871,8 +871,8 @@ watch(activeTab, (tab) => {
       <template v-else>
         <div v-for="[date, items] in viGroupedImages" :key="date" class="date-group">
           <div class="date-header">
-            <span class="date-label">{{ date }}</span>
-            <span class="date-count">{{ items.length }} 张</span>
+            <span class="date-label font-jet">{{ date }}</span>
+            <span class="date-count terminal-label"><span class="font-jet">{{ items.length }}</span> 张</span>
             <button class="btn-batch-parse" @click="confirmViBatchParse(date, items)" :disabled="viBatchParsing" title="批量识别该日期下所有图片">
               <span v-if="viBatchParsing" class="spinner-sm"></span>
               <svg v-else width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
@@ -880,7 +880,7 @@ watch(activeTab, (tab) => {
             </button>
           </div>
           <div class="gallery-grid">
-            <div v-for="(img, idx) in items" :key="img.path" class="gallery-card" :style="{ animationDelay: `${idx * 40}ms` }">
+            <div v-for="(img, idx) in items" :key="img.path" class="gallery-card editorial-card" :style="{ animationDelay: `${idx * 40}ms` }">
               <div class="gallery-thumb" @click="openPreview(img.url)">
                 <img :src="img.url" loading="lazy" />
                 <div class="thumb-overlay">
@@ -907,9 +907,9 @@ watch(activeTab, (tab) => {
 
       <!-- 已解析的图片库 -->
       <div class="section-divider"></div>
-      <div class="section-header">
-        <span class="section-title">已解析图片</span>
-        <span class="toolbar-count">共 {{ records.length }} 条</span>
+      <div class="section-header editorial-card-header">
+        <span class="section-title title">已解析图片</span>
+        <span class="toolbar-count meta">共 <span class="font-jet">{{ records.length }}</span> 条</span>
       </div>
       <div class="toolbar">
         <input
@@ -948,11 +948,11 @@ watch(activeTab, (tab) => {
         <template v-if="sortBy === 'date'">
           <div v-for="[date, items] in groupedRecords" :key="date" class="date-group">
             <div class="date-header">
-              <span class="date-label">{{ date }}</span>
-              <span class="date-count">{{ items.length }} 张</span>
+              <span class="date-label font-jet">{{ date }}</span>
+              <span class="date-count terminal-label"><span class="font-jet">{{ items.length }}</span> 张</span>
             </div>
             <div class="gallery-grid">
-              <div v-for="(r, idx) in items" :key="r.id" class="gallery-card" :style="{ animationDelay: `${idx * 40}ms` }" @click="openPreview(imageUrl(r.image_path))">
+              <div v-for="(r, idx) in items" :key="r.id" class="gallery-card editorial-card" :style="{ animationDelay: `${idx * 40}ms` }" @click="openPreview(imageUrl(r.image_path))">
                 <div class="gallery-thumb">
                   <img :src="imageUrl(r.image_path)" loading="lazy" />
                   <div class="thumb-overlay">
@@ -962,10 +962,10 @@ watch(activeTab, (tab) => {
                 <div class="gallery-info">
                   <div class="gallery-index">{{ r.index_name || r.index_code || '未识别' }}</div>
                   <span v-if="r.metric_type" :class="['badge', 'badge-sm', metricBadgeClass(r.metric_type)]">{{ r.metric_type }}</span>
-                  <div class="gallery-value" v-if="r.current_value != null">
-                    {{ r.current_value }}
-                    <span v-if="r.percentile != null" class="gallery-pct">({{ r.percentile }}%)</span>
-                  </div>
+                  <div class="gallery-value font-jet" v-if="r.current_value != null">
+                {{ r.current_value }}
+                <span v-if="r.percentile != null" class="gallery-pct">({{ r.percentile }}%)</span>
+              </div>
                 </div>
                 <button class="btn-reparse" @click.stop="confirmReParse(r)" :disabled="r._reparsing" title="重新识别">
                   <span v-if="r._reparsing" class="spinner-xs"></span>
@@ -979,7 +979,7 @@ watch(activeTab, (tab) => {
 
         <template v-else>
           <div class="gallery-grid">
-            <div v-for="(r, idx) in sortedRecords" :key="r.id" class="gallery-card" :style="{ animationDelay: `${idx * 40}ms` }" @click="openPreview(imageUrl(r.image_path))">
+            <div v-for="(r, idx) in sortedRecords" :key="r.id" class="gallery-card editorial-card" :style="{ animationDelay: `${idx * 40}ms` }" @click="openPreview(imageUrl(r.image_path))">
               <div class="gallery-thumb">
                 <img :src="imageUrl(r.image_path)" loading="lazy" />
                 <div class="thumb-overlay">
@@ -993,7 +993,7 @@ watch(activeTab, (tab) => {
                   {{ r.current_value }}
                   <span v-if="r.percentile != null" class="gallery-pct">({{ r.percentile }}%)</span>
                 </div>
-                <div class="gallery-date">{{ (r.publish_time || '').slice(0, 10) }}</div>
+                <div class="gallery-date font-jet">{{ (r.publish_time || '').slice(0, 10) }}</div>
                 <button class="btn-reparse" @click.stop="confirmReParse(r)" :disabled="r._reparsing" title="重新识别">
                   <span v-if="r._reparsing" class="spinner-xs"></span>
                   <svg v-else width="12" height="12" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
@@ -1024,7 +1024,7 @@ watch(activeTab, (tab) => {
             <option v-for="d in ddDates" :key="d.date" :value="d.date">{{ d.date }} ({{ d.count }})</option>
           </select>
         </div>
-        <span class="toolbar-count">共 {{ ddImages.length }} 张</span>
+        <span class="toolbar-count terminal-label">共 <span class="font-jet">{{ ddImages.length }}</span> 张</span>
       </div>
 
       <div v-if="ddLoading" class="loading-state">
@@ -1045,8 +1045,8 @@ watch(activeTab, (tab) => {
       <template v-else>
         <div v-for="[date, items] in ddGroupedImages" :key="date" class="date-group">
           <div class="date-header">
-            <span class="date-label">{{ date }}</span>
-            <span class="date-count">{{ items.length }} 张</span>
+            <span class="date-label font-jet">{{ date }}</span>
+            <span class="date-count terminal-label"><span class="font-jet">{{ items.length }}</span> 张</span>
             <button class="btn-batch-parse" @click="confirmDdBatchParse(date, items)" :disabled="ddBatchParsing" title="批量识别该日期下所有图片">
               <span v-if="ddBatchParsing" class="spinner-sm"></span>
               <svg v-else width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
@@ -1054,7 +1054,7 @@ watch(activeTab, (tab) => {
             </button>
           </div>
           <div class="gallery-grid">
-            <div v-for="(img, idx) in items" :key="img.path" :class="['gallery-card', { parsed: img.parsed }]" :style="{ animationDelay: `${idx * 40}ms` }">
+            <div v-for="(img, idx) in items" :key="img.path" :class="['gallery-card', 'editorial-card', { parsed: img.parsed }]" :style="{ animationDelay: `${idx * 40}ms` }">
               <div class="gallery-thumb" @click="openPreview(img.url)">
                 <img :src="img.url" loading="lazy" />
                 <div class="thumb-overlay">
@@ -1125,52 +1125,52 @@ watch(activeTab, (tab) => {
       <Transition name="fade">
         <div v-if="parseResult" class="modal-overlay" @click.self="parseResult = null">
           <div class="modal-box" style="max-width:500px">
-            <h3 class="modal-title">{{ parseResult.ok ? '解析成功' : '解析失败' }}</h3>
+            <h3 class="modal-title editorial-title">{{ parseResult.ok ? '解析成功' : '解析失败' }}</h3>
             <div v-if="parseResult.ok" class="parse-result-content">
               <p class="parse-file">{{ parseResult.name }}</p>
               <!-- 螺丝钉估值表：多指数数据 -->
               <div v-if="parseResult.data.data && parseResult.data.data.length > 0" class="parse-data">
                 <div v-if="parseResult.data.update_date" class="parse-row">
-                  <span class="parse-label">更新日期</span>
-                  <span>{{ parseResult.data.update_date }}</span>
+                  <span class="parse-label terminal-label">更新日期</span>
+                  <span class="font-jet">{{ parseResult.data.update_date }}</span>
                 </div>
                 <div v-if="parseResult.data.market_temperature != null" class="parse-row">
-                  <span class="parse-label">市场温度</span>
-                  <span>{{ parseResult.data.market_temperature }}</span>
+                  <span class="parse-label terminal-label">市场温度</span>
+                  <span class="font-jet">{{ parseResult.data.market_temperature }}</span>
                 </div>
                 <div class="parse-row">
-                  <span class="parse-label">识别指数</span>
-                  <span>{{ parseResult.data.count }} 个</span>
+                  <span class="parse-label terminal-label">识别指数</span>
+                  <span><span class="font-jet">{{ parseResult.data.count }}</span> 个</span>
                 </div>
                 <div class="dd-index-list">
                   <div v-for="(item, idx) in parseResult.data.data.slice(0, 10)" :key="idx" class="dd-index-item">
                     <span class="dd-index-name">{{ item.index_name || '未知' }}</span>
-                    <span v-if="item.pe" class="dd-index-val">PE {{ item.pe }}</span>
-                    <span v-if="item.pe_percentile" class="dd-index-val">{{ item.pe_percentile }}%</span>
+                    <span v-if="item.pe" class="dd-index-val font-jet">PE {{ item.pe }}</span>
+                    <span v-if="item.pe_percentile" class="dd-index-val font-jet">{{ item.pe_percentile }}%</span>
                     <span v-if="item.valuation_status" :class="['dd-index-status', item.valuation_status === '低估' ? 'low' : item.valuation_status === '高估' ? 'high' : '']">{{ item.valuation_status }}</span>
                   </div>
                   <div v-if="parseResult.data.data.length > 10" class="dd-index-more">
-                    还有 {{ parseResult.data.data.length - 10 }} 个指数...
+                    还有 <span class="font-jet">{{ parseResult.data.data.length - 10 }}</span> 个指数...
                   </div>
                 </div>
               </div>
               <!-- 单指数估值图 -->
               <div v-else class="parse-data">
                 <div v-if="parseResult.data.index_name" class="parse-row">
-                  <span class="parse-label">指数</span>
+                  <span class="parse-label terminal-label">指数</span>
                   <span>{{ parseResult.data.index_name }}</span>
                 </div>
                 <div v-if="parseResult.data.metric_type" class="parse-row">
-                  <span class="parse-label">指标</span>
+                  <span class="parse-label terminal-label">指标</span>
                   <span>{{ parseResult.data.metric_type }}</span>
                 </div>
                 <div v-if="parseResult.data.current_value != null" class="parse-row">
-                  <span class="parse-label">当前值</span>
-                  <span>{{ parseResult.data.current_value }}</span>
+                  <span class="parse-label terminal-label">当前值</span>
+                  <span class="font-jet">{{ parseResult.data.current_value }}</span>
                 </div>
                 <div v-if="parseResult.data.percentile != null" class="parse-row">
-                  <span class="parse-label">百分位</span>
-                  <span>{{ parseResult.data.percentile }}%</span>
+                  <span class="parse-label terminal-label">百分位</span>
+                  <span class="font-jet">{{ parseResult.data.percentile }}%</span>
                 </div>
               </div>
               <p class="parse-hint">数据已存入估值库，可前往「估值数据」页面查看</p>
@@ -1191,25 +1191,25 @@ watch(activeTab, (tab) => {
       <Transition name="fade">
         <div v-if="viParseResult" class="modal-overlay" @click.self="viParseResult = null">
           <div class="modal-box" style="max-width:420px">
-            <h3 class="modal-title">{{ viParseResult.ok ? '解析成功' : '解析失败' }}</h3>
+            <h3 class="modal-title editorial-title">{{ viParseResult.ok ? '解析成功' : '解析失败' }}</h3>
             <div v-if="viParseResult.ok" class="parse-result-content">
               <p class="parse-file">{{ viParseResult.name }}</p>
               <div class="parse-data">
                 <div v-if="viParseResult.data.index_name" class="parse-row">
-                  <span class="parse-label">指数</span>
+                  <span class="parse-label terminal-label">指数</span>
                   <span>{{ viParseResult.data.index_name }}</span>
                 </div>
                 <div v-if="viParseResult.data.metric_type" class="parse-row">
-                  <span class="parse-label">指标</span>
+                  <span class="parse-label terminal-label">指标</span>
                   <span>{{ viParseResult.data.metric_type }}</span>
                 </div>
                 <div v-if="viParseResult.data.current_value != null" class="parse-row">
-                  <span class="parse-label">当前值</span>
-                  <span>{{ viParseResult.data.current_value }}</span>
+                  <span class="parse-label terminal-label">当前值</span>
+                  <span class="font-jet">{{ viParseResult.data.current_value }}</span>
                 </div>
                 <div v-if="viParseResult.data.percentile != null" class="parse-row">
-                  <span class="parse-label">百分位</span>
-                  <span>{{ viParseResult.data.percentile }}%</span>
+                  <span class="parse-label terminal-label">百分位</span>
+                  <span class="font-jet">{{ viParseResult.data.percentile }}%</span>
                 </div>
               </div>
               <p class="parse-hint">数据已存入估值库，可前往「估值数据」页面查看</p>

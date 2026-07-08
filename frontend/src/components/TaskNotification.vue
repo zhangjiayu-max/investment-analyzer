@@ -1,13 +1,13 @@
 <template>
   <Teleport to="body">
     <Transition name="slide">
-      <div v-if="task" class="task-notification" :class="task.status">
+      <div v-if="task" class="task-notification bg-mesh-card" :class="task.status">
         <div class="notification-content">
-          <span class="notification-icon">
-            {{ task.status === 'completed' ? '✅' : '❌' }}
+          <span class="notification-icon" :class="task.status">
+            <span class="status-dot"></span>
           </span>
           <div class="notification-text">
-            <span class="notification-title">
+            <span class="notification-title editorial-title">
               {{ task.status === 'completed' ? '任务完成' : '任务失败' }}
             </span>
             <span class="notification-message">{{ task.title }}</span>
@@ -64,7 +64,6 @@ watch(() => props.task, (newTask) => {
   justify-content: space-between;
   gap: 16px;
   padding: 16px 20px;
-  background: var(--color-bg-primary, #fff);
   border-radius: 12px;
   box-shadow: 0 8px 32px rgba(0, 0, 0, 0.12),
               0 2px 8px rgba(0, 0, 0, 0.08);
@@ -88,8 +87,26 @@ watch(() => props.task, (newTask) => {
 }
 
 .notification-icon {
-  font-size: 24px;
+  display: flex;
+  align-items: center;
   flex-shrink: 0;
+}
+
+.status-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  background: var(--color-text-muted);
+}
+
+.notification-icon.completed .status-dot {
+  background: #10b981;
+  box-shadow: 0 0 8px rgba(16, 185, 129, 0.5);
+}
+
+.notification-icon.failed .status-dot {
+  background: #ef4444;
+  box-shadow: 0 0 8px rgba(239, 68, 68, 0.5);
 }
 
 .notification-text {

@@ -198,12 +198,12 @@ onMounted(loadDocuments)
 </script>
 
 <template>
-  <div class="linked-page">
+  <div class="linked-page bg-mesh">
     <!-- Header -->
     <div class="page-header">
       <div class="header-left">
-        <h2 class="page-title">个人文档</h2>
-        <span class="doc-count">共 {{ documents.length }} 份文档</span>
+        <h2 class="page-title editorial-title-lg">个人文档</h2>
+        <span class="doc-count terminal-label">共 <span class="font-jet">{{ documents.length }}</span> 份文档</span>
       </div>
       <div class="header-actions">
         <div class="search-box">
@@ -248,10 +248,10 @@ onMounted(loadDocuments)
           </thead>
           <tbody>
             <tr v-for="item in filteredDocs" :key="item.id"
-              class="doc-row" :class="{ active: selectedDoc?.id === item.id || chunksDoc?.id === item.id }"
+              class="doc-row reveal-stagger" :class="{ active: selectedDoc?.id === item.id || chunksDoc?.id === item.id }"
               @click="previewDoc(item)">
               <td class="col-type">
-                <span :class="['type-badge', getTypeClass(item.file_type)]">{{ getTypeBadge(item.file_type) }}</span>
+                <span :class="['type-badge', 'terminal-label', getTypeClass(item.file_type)]">{{ getTypeBadge(item.file_type) }}</span>
               </td>
               <td class="col-name">
                 <span class="file-name">{{ item.title }}</span>
@@ -262,11 +262,11 @@ onMounted(loadDocuments)
                 </span>
               </td>
               <td class="col-chunks">
-                <span v-if="item.chunks_count" class="chunks-count" @click.stop="showChunks(item)">{{ item.chunks_count }}</span>
+                <span v-if="item.chunks_count" class="chunks-count font-jet" @click.stop="showChunks(item)">{{ item.chunks_count }}</span>
                 <span v-else class="chunks-empty">-</span>
               </td>
-              <td class="col-size">{{ formatSize(item.file_size) }}</td>
-              <td class="col-time">{{ formatDate(item.created_at) }}</td>
+              <td class="col-size font-jet">{{ formatSize(item.file_size) }}</td>
+              <td class="col-time font-jet">{{ formatDate(item.created_at) }}</td>
               <td class="col-actions" @click.stop>
                 <button @click="confirmEmbed(item)" class="action-btn embed-btn" :disabled="embeddingIds.has(item.id) || item.embed_status === 'embedding'" :title="embeddingIds.has(item.id) || item.embed_status === 'embedding' ? '索引中...' : '索引到知识库'">
                   <svg v-if="embeddingIds.has(item.id) || item.embed_status === 'embedding'" class="spinner" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -298,11 +298,11 @@ onMounted(loadDocuments)
       </div>
 
       <!-- Preview panel -->
-      <div v-if="selectedDoc" class="preview-panel">
+      <div v-if="selectedDoc" class="preview-panel editorial-card">
         <div class="preview-header">
           <div class="preview-title-row">
-            <span :class="['type-badge', getTypeClass(selectedDoc.file_type)]">{{ getTypeBadge(selectedDoc.file_type) }}</span>
-            <h3 class="preview-title">{{ selectedDoc.title }}</h3>
+            <span :class="['type-badge', 'terminal-label', getTypeClass(selectedDoc.file_type)]">{{ getTypeBadge(selectedDoc.file_type) }}</span>
+            <h3 class="preview-title editorial-title">{{ selectedDoc.title }}</h3>
           </div>
           <button @click="selectedDoc = null; previewContent = ''" class="action-btn" title="关闭">
             <svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -318,11 +318,11 @@ onMounted(loadDocuments)
       </div>
 
       <!-- Chunks panel -->
-      <div v-if="chunksDoc && !selectedDoc" class="preview-panel">
+      <div v-if="chunksDoc && !selectedDoc" class="preview-panel editorial-card">
         <div class="preview-header">
           <div class="preview-title-row">
-            <h3 class="preview-title">分块详情：{{ chunksDoc.title }}</h3>
-            <span class="chunks-summary" v-if="chunksData.length">共 {{ chunksData.length }} 块</span>
+            <h3 class="preview-title editorial-title">分块详情：{{ chunksDoc.title }}</h3>
+            <span class="chunks-summary terminal-label" v-if="chunksData.length">共 <span class="font-jet">{{ chunksData.length }}</span> 块</span>
           </div>
           <button @click="chunksDoc = null; chunksData = []" class="action-btn" title="关闭">
             <svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -334,10 +334,10 @@ onMounted(loadDocuments)
           <div v-if="chunksLoading" class="preview-loading">加载分块...</div>
           <div v-else-if="chunksData.length === 0" class="preview-loading">暂无分块数据，请先索引</div>
           <div v-else class="chunks-list">
-            <div v-for="chunk in chunksData" :key="chunk.id" class="chunk-item">
+            <div v-for="chunk in chunksData" :key="chunk.id" class="chunk-item reveal-stagger">
               <div class="chunk-header">
-                <span class="chunk-index">#{{ chunk.chunk_index + 1 }}</span>
-                <span class="chunk-size">{{ chunk.char_count }} 字</span>
+                <span class="chunk-index font-jet">#{{ chunk.chunk_index + 1 }}</span>
+                <span class="chunk-size font-jet">{{ chunk.char_count }} 字</span>
               </div>
               <pre class="chunk-content">{{ chunk.content }}</pre>
             </div>

@@ -38,11 +38,11 @@ const dimensions = computed(() => {
   if (!score.value) return []
   const sc = score.value.scores || score.value
   return [
-    { key: 'quality', label: '选品质量', score: sc.quality || 0, max: 200, icon: '⭐' },
-    { key: 'diversification', label: '分散配置', score: sc.diversification || 0, max: 200, icon: '📊' },
-    { key: 'valuation', label: '估值合理', score: sc.valuation || 0, max: 200, icon: '📈' },
-    { key: 'behavior', label: '持有行为', score: sc.behavior || 0, max: 200, icon: '🧠' },
-    { key: 'risk', label: '风控纪律', score: sc.risk || 0, max: 200, icon: '🛡️' },
+    { key: 'quality', label: '选品质量', score: sc.quality || 0, max: 200 },
+    { key: 'diversification', label: '分散配置', score: sc.diversification || 0, max: 200 },
+    { key: 'valuation', label: '估值合理', score: sc.valuation || 0, max: 200 },
+    { key: 'behavior', label: '持有行为', score: sc.behavior || 0, max: 200 },
+    { key: 'risk', label: '风控纪律', score: sc.risk || 0, max: 200 },
   ]
 })
 
@@ -111,38 +111,37 @@ onMounted(loadData)
 </script>
 
 <template>
-  <div class="health-page">
+  <div class="health-page bg-mesh">
     <div class="page-header">
       <div>
-        <h2>🏥 投资健康分</h2>
+        <h2 class="editorial-title-lg">投资健康分</h2>
         <p class="page-desc">综合评估选品、配置、估值、行为、风控五大维度</p>
       </div>
       <button class="btn-primary" @click="recalculate" :disabled="loading">
-        {{ loading ? '计算中...' : '🔄 重新计算' }}
+        {{ loading ? '计算中...' : '重新计算' }}
       </button>
     </div>
 
     <!-- 主分数 -->
-    <div v-if="score" class="score-hero card">
+    <div v-if="score" class="score-hero card editorial-card">
       <div class="score-circle" :style="{ borderColor: scoreColor }">
-        <span class="score-number" :style="{ color: scoreColor }">{{ score.total_score }}</span>
-        <span class="score-max">/1000</span>
+        <span class="score-number font-jet-lg" :style="{ color: scoreColor }">{{ score.total_score }}</span>
+        <span class="score-max terminal-label">/1000</span>
       </div>
       <div class="score-info">
-        <span class="score-level" :style="{ color: scoreColor }">{{ scoreLevel }}</span>
-        <span class="score-date">{{ score.date || score.score_date }}</span>
+        <span class="score-level editorial-title" :style="{ color: scoreColor }">{{ scoreLevel }}</span>
+        <span class="score-date terminal-label">{{ score.date || score.score_date }}</span>
       </div>
     </div>
 
     <!-- 五维度 -->
-    <div v-if="score" class="dimensions card">
-      <h3>五维度评分</h3>
+    <div v-if="score" class="dimensions card editorial-card">
+      <h3 class="editorial-title">五维度评分</h3>
       <div class="dim-grid">
-        <div v-for="d in dimensions" :key="d.key" class="dim-item">
+        <div v-for="d in dimensions" :key="d.key" class="dim-item reveal-stagger">
           <div class="dim-header">
-            <span class="dim-icon">{{ d.icon }}</span>
             <span class="dim-label">{{ d.label }}</span>
-            <span class="dim-score">{{ d.score }}/{{ d.max }}</span>
+            <span class="dim-score font-jet">{{ d.score }}/{{ d.max }}</span>
           </div>
           <div class="dim-bar">
             <div class="dim-fill" :style="{
@@ -155,24 +154,24 @@ onMounted(loadData)
     </div>
 
     <!-- 股债性价比 -->
-    <div v-if="stockBond && !stockBond.error" class="stock-bond card">
-      <h3>📊 股债性价比（FED模型）</h3>
+    <div v-if="stockBond && !stockBond.error" class="stock-bond card editorial-card">
+      <div class="editorial-card-header"><h3 class="editorial-title">股债性价比（FED模型）</h3></div>
       <div class="sb-grid">
         <div class="sb-item">
-          <span class="sb-label">沪深300 PE</span>
-          <span class="sb-value">{{ stockBond.hs300_pe }}</span>
+          <span class="sb-label terminal-label">沪深300 PE</span>
+          <span class="sb-value font-jet">{{ stockBond.hs300_pe }}</span>
         </div>
         <div class="sb-item">
-          <span class="sb-label">盈利收益率</span>
-          <span class="sb-value">{{ stockBond.earnings_yield }}%</span>
+          <span class="sb-label terminal-label">盈利收益率</span>
+          <span class="sb-value font-jet">{{ stockBond.earnings_yield }}%</span>
         </div>
         <div class="sb-item">
-          <span class="sb-label">10年国债</span>
-          <span class="sb-value">{{ stockBond.bond_yield_10y }}%</span>
+          <span class="sb-label terminal-label">10年国债</span>
+          <span class="sb-value font-jet">{{ stockBond.bond_yield_10y }}%</span>
         </div>
         <div class="sb-item">
-          <span class="sb-label">利差</span>
-          <span class="sb-value" :class="{ positive: stockBond.spread > 0, negative: stockBond.spread < 0 }">
+          <span class="sb-label terminal-label">利差</span>
+          <span class="sb-value font-jet" :class="{ positive: stockBond.spread > 0, negative: stockBond.spread < 0 }">
             {{ stockBond.spread > 0 ? '+' : '' }}{{ stockBond.spread }}%
           </span>
         </div>
@@ -188,8 +187,8 @@ onMounted(loadData)
     </div>
 
     <!-- 恐贪指数 -->
-    <div v-if="fearGreed && !fearGreed.error" class="fear-greed card">
-      <h3>🎯 恐贪指数</h3>
+    <div v-if="fearGreed && !fearGreed.error" class="fear-greed card editorial-card">
+      <div class="editorial-card-header"><h3 class="editorial-title">恐贪指数</h3></div>
       <div class="fg-main">
         <div class="fg-gauge">
           <div class="fg-bar">
@@ -204,41 +203,41 @@ onMounted(loadData)
           </div>
         </div>
         <div class="fg-score" :style="{ color: fearGreedColor }">
-          <span class="fg-number">{{ fearGreed.score }}</span>
+          <span class="fg-number font-jet-lg">{{ fearGreed.score }}</span>
           <span class="fg-zone">{{ fearGreed.zone }}</span>
         </div>
       </div>
       <p class="fg-advice">{{ fearGreed.advice }}</p>
       <div class="fg-factors" v-if="fearGreed.factors">
-        <div v-for="(val, key) in fearGreed.factors" :key="key" class="fg-factor">
+        <div v-for="(val, key) in fearGreed.factors" :key="key" class="fg-factor reveal-stagger">
           <span class="factor-name">{{ key }}</span>
-          <span class="factor-value">{{ val }}</span>
+          <span class="factor-value font-jet">{{ val }}</span>
         </div>
       </div>
     </div>
 
     <!-- 改进建议 -->
-    <div v-if="adviceList.length" class="advice card">
-      <h3>💡 改进建议</h3>
+    <div v-if="adviceList.length" class="advice card editorial-card">
+      <div class="editorial-card-header"><h3 class="editorial-title">改进建议</h3></div>
       <ul>
-        <li v-for="(a, i) in adviceList" :key="i">{{ a }}</li>
+        <li v-for="(a, i) in adviceList" :key="i" class="reveal-stagger">{{ a }}</li>
       </ul>
       <p v-if="score?.summary" class="ai-summary">{{ score.summary }}</p>
     </div>
 
     <!-- 历史趋势 -->
-    <div v-if="history.length > 1" class="history card">
-      <h3>📈 历史趋势</h3>
+    <div v-if="history.length > 1" class="history card editorial-card">
+      <div class="editorial-card-header"><h3 class="editorial-title">历史趋势</h3></div>
       <div class="history-list">
-        <div v-for="h in history" :key="h.id || h.score_date" class="history-item">
-          <span class="hist-date">{{ h.score_date }}</span>
+        <div v-for="h in history" :key="h.id || h.score_date" class="history-item reveal-stagger">
+          <span class="hist-date terminal-label">{{ h.score_date }}</span>
           <div class="hist-bar">
             <div class="hist-fill" :style="{
               width: (h.total_score / 1000 * 100) + '%',
               background: h.total_score >= 600 ? '#10b981' : h.total_score >= 400 ? '#f59e0b' : '#ef4444'
             }"></div>
           </div>
-          <span class="hist-score">{{ h.total_score }}</span>
+          <span class="hist-score font-jet">{{ h.total_score }}</span>
         </div>
       </div>
     </div>
@@ -258,10 +257,10 @@ onMounted(loadData)
   border: 4px solid; display: flex; flex-direction: column;
   align-items: center; justify-content: center; flex-shrink: 0;
 }
-.score-number { font-size: 2em; font-weight: 800; line-height: 1; }
-.score-max { font-size: 0.8em; color: var(--color-text-muted); }
+.score-number { font-size: 2em; font-weight: inherit; line-height: 1; }
+.score-max { font-size: inherit; color: var(--color-text-muted); }
 .score-info { display: flex; flex-direction: column; gap: 4px; }
-.score-level { font-size: 1.3em; font-weight: 700; }
+.score-level { font-size: 1.3em; font-weight: inherit; }
 .score-date { color: var(--color-text-muted); font-size: 0.85em; }
 
 .dimensions h3 { margin: 0 0 12px; }
@@ -273,10 +272,10 @@ onMounted(loadData)
 .dim-bar { height: 8px; background: var(--color-bg); border-radius: 4px; overflow: hidden; }
 .dim-fill { height: 100%; border-radius: 4px; transition: width 0.6s ease; }
 
-.stock-bond h3, .fear-greed h3, .advice h3, .history h3 { margin: 0 0 12px; }
+.stock-bond h3, .fear-greed h3, .advice h3, .history h3 { margin: 0; }
 .sb-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 12px; }
 .sb-item { text-align: center; }
-.sb-label { display: block; font-size: 0.8em; color: var(--color-text-muted); margin-bottom: 4px; }
+.sb-label { display: block; font-size: inherit; color: var(--color-text-muted); margin-bottom: 4px; }
 .sb-value { font-size: 1.2em; font-weight: 700; }
 .sb-value.positive { color: #ef4444; }
 .sb-value.negative { color: #10b981; }
@@ -293,7 +292,7 @@ onMounted(loadData)
 .fg-fill { height: 100%; border-radius: 6px; transition: width 0.6s ease; }
 .fg-labels { display: flex; justify-content: space-between; font-size: 0.7em; color: var(--color-text-muted); }
 .fg-score { text-align: center; flex-shrink: 0; }
-.fg-number { display: block; font-size: 2em; font-weight: 800; }
+.fg-number { display: block; font-size: 2em; font-weight: inherit; }
 .fg-zone { font-size: 0.9em; font-weight: 600; }
 .fg-advice { color: var(--color-text-muted); font-size: 0.9em; margin-bottom: 8px; }
 .fg-factors { display: flex; gap: 12px; flex-wrap: wrap; }
@@ -307,7 +306,7 @@ onMounted(loadData)
 
 .history-list { display: flex; flex-direction: column; gap: 6px; }
 .history-item { display: flex; align-items: center; gap: 8px; }
-.hist-date { width: 80px; font-size: 0.8em; color: var(--color-text-muted); flex-shrink: 0; }
+.hist-date { width: 80px; font-size: inherit; color: var(--color-text-muted); flex-shrink: 0; }
 .hist-bar { flex: 1; height: 6px; background: var(--color-bg); border-radius: 3px; overflow: hidden; }
 .hist-fill { height: 100%; border-radius: 3px; transition: width 0.6s ease; }
 .hist-score { width: 40px; text-align: right; font-weight: 600; font-size: 0.85em; }

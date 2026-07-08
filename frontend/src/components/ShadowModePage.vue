@@ -126,11 +126,11 @@ onMounted(() => {
 </script>
 
 <template>
-  <div class="shadow-page">
+  <div class="shadow-page bg-mesh">
     <div class="page-header">
       <div>
-        <h2 class="page-title">Shadow Mode</h2>
-        <p class="page-desc">候选 Prompt 在生产环境静默运行、自动评分对比</p>
+        <h2 class="page-title editorial-title-lg">Shadow Mode</h2>
+        <p class="page-desc editorial-subtitle">候选 Prompt 在生产环境静默运行、自动评分对比</p>
       </div>
       <div class="header-actions">
         <button class="btn-primary btn-sm" @click="showCreateForm = !showCreateForm">
@@ -141,7 +141,7 @@ onMounted(() => {
 
     <!-- 创建表单 -->
     <Transition name="fade">
-      <div v-if="showCreateForm" class="card create-form">
+      <div v-if="showCreateForm" class="card create-form editorial-card">
         <div class="form-row">
           <label>名称</label>
           <input v-model="form.name" class="input-field" placeholder="如: 优化持仓分析prompt v2" />
@@ -171,25 +171,25 @@ onMounted(() => {
 
     <!-- 统计面板 -->
     <div v-if="stats" class="stats-bar">
-      <div class="stat-card">
-        <span class="stat-value">{{ configs.length }}</span>
-        <span class="stat-label">配置数</span>
+      <div class="stat-card editorial-card reveal-stagger">
+        <span class="stat-value font-jet-lg">{{ configs.length }}</span>
+        <span class="stat-label terminal-label">配置数</span>
       </div>
-      <div class="stat-card">
-        <span class="stat-value">{{ stats.total_runs || 0 }}</span>
-        <span class="stat-label">总运行次数</span>
+      <div class="stat-card editorial-card reveal-stagger">
+        <span class="stat-value font-jet-lg">{{ stats.total_runs || 0 }}</span>
+        <span class="stat-label terminal-label">总运行次数</span>
       </div>
-      <div class="stat-card">
-        <span class="stat-value" :style="{ color: scoreColor(stats.avg_prod_score || 0) }">{{ (stats.avg_prod_score || 0).toFixed(1) }}</span>
-        <span class="stat-label">Production 均分</span>
+      <div class="stat-card editorial-card reveal-stagger">
+        <span class="stat-value font-jet-lg" :style="{ color: scoreColor(stats.avg_prod_score || 0) }">{{ (stats.avg_prod_score || 0).toFixed(1) }}</span>
+        <span class="stat-label terminal-label">Production 均分</span>
       </div>
-      <div class="stat-card">
-        <span class="stat-value" :style="{ color: scoreColor(stats.avg_shadow_score || 0) }">{{ (stats.avg_shadow_score || 0).toFixed(1) }}</span>
-        <span class="stat-label">Shadow 均分</span>
+      <div class="stat-card editorial-card reveal-stagger">
+        <span class="stat-value font-jet-lg" :style="{ color: scoreColor(stats.avg_shadow_score || 0) }">{{ (stats.avg_shadow_score || 0).toFixed(1) }}</span>
+        <span class="stat-label terminal-label">Shadow 均分</span>
       </div>
-      <div class="stat-card">
-        <span class="stat-value">{{ ((stats.shadow_win_rate || 0) * 100).toFixed(0) }}%</span>
-        <span class="stat-label">Shadow 胜率</span>
+      <div class="stat-card editorial-card reveal-stagger">
+        <span class="stat-value font-jet-lg">{{ ((stats.shadow_win_rate || 0) * 100).toFixed(0) }}%</span>
+        <span class="stat-label terminal-label">Shadow 胜率</span>
       </div>
     </div>
 
@@ -198,22 +198,22 @@ onMounted(() => {
       <button :class="['tab', { active: activeTab === 'configs' }]" @click="activeTab = 'configs'">配置列表</button>
       <button :class="['tab', { active: activeTab === 'runs' }]" @click="activeTab = 'runs'">
         执行记录
-        <span v-if="selectedConfig" class="tab-badge">{{ selectedConfig.name }}</span>
+        <span v-if="selectedConfig" class="tab-badge font-jet">{{ selectedConfig.name }}</span>
       </button>
     </div>
 
     <!-- 配置列表 -->
     <div v-if="activeTab === 'configs'" class="config-list">
-      <div v-for="c in configs" :key="c.id" class="config-card">
+      <div v-for="c in configs" :key="c.id" class="config-card editorial-card reveal-stagger">
         <div class="config-header">
           <span class="config-name">{{ c.name }}</span>
           <span :class="['status-dot', c.is_active ? 'active' : 'inactive']"></span>
-          <span class="config-type">{{ agentTypes.find(t => t.value === c.agent_type)?.label || c.agent_type }}</span>
+          <span class="config-type terminal-label">{{ agentTypes.find(t => t.value === c.agent_type)?.label || c.agent_type }}</span>
         </div>
         <div class="config-stats">
-          <span>运行 {{ c.run_count || 0 }} 次</span>
-          <span v-if="c.avg_prod_score">Production: {{ Number(c.avg_prod_score).toFixed(1) }}</span>
-          <span v-if="c.avg_shadow_score">Shadow: {{ Number(c.avg_shadow_score).toFixed(1) }}</span>
+          <span><span class="font-jet">{{ c.run_count || 0 }}</span> 运行</span>
+          <span v-if="c.avg_prod_score">Production: <span class="font-jet">{{ Number(c.avg_prod_score).toFixed(1) }}</span></span>
+          <span v-if="c.avg_shadow_score">Shadow: <span class="font-jet">{{ Number(c.avg_shadow_score).toFixed(1) }}</span></span>
         </div>
         <div class="config-actions">
           <button class="btn-link" @click="selectConfig(c)">查看详情</button>
@@ -233,28 +233,28 @@ onMounted(() => {
         <span>当前查看: {{ selectedConfig.name }}</span>
         <button class="btn-link" @click="clearSelection()">查看全部</button>
       </div>
-      <div v-for="r in runs" :key="r.id" class="run-card">
+      <div v-for="r in runs" :key="r.id" class="run-card editorial-card reveal-stagger">
         <div class="run-header">
-          <span class="run-time">{{ r.created_at?.slice(0, 16) }}</span>
-          <span class="run-agent">{{ r.agent_type }}</span>
-          <span class="run-duration">{{ r.duration_ms }}ms</span>
+          <span class="run-time font-jet">{{ r.created_at?.slice(0, 16) }}</span>
+          <span class="run-agent terminal-label">{{ r.agent_type }}</span>
+          <span class="run-duration font-jet">{{ r.duration_ms }}ms</span>
         </div>
         <div class="run-scores">
           <div class="score-item">
-            <span class="score-label">Production</span>
-            <span class="score-value" :style="{ color: scoreColor(r.production_score || 0) }">
+            <span class="score-label terminal-label">Production</span>
+            <span class="score-value font-jet-lg" :style="{ color: scoreColor(r.production_score || 0) }">
               {{ (r.production_score || 0).toFixed(1) }}
             </span>
           </div>
           <div class="score-vs">vs</div>
           <div class="score-item">
-            <span class="score-label">Shadow</span>
-            <span class="score-value" :style="{ color: scoreColor(r.shadow_score || 0) }">
+            <span class="score-label terminal-label">Shadow</span>
+            <span class="score-value font-jet-lg" :style="{ color: scoreColor(r.shadow_score || 0) }">
               {{ (r.shadow_score || 0).toFixed(1) }}
             </span>
           </div>
-          <div class="score-winner" v-if="r.shadow_score && r.production_score">
-            {{ r.shadow_score > r.production_score + 0.5 ? '🏆 Shadow' : r.production_score > r.shadow_score + 0.5 ? '✅ Production' : '🤝 持平' }}
+          <div class="score-winner terminal-label" v-if="r.shadow_score && r.production_score">
+            {{ r.shadow_score > r.production_score + 0.5 ? 'SHADOW 胜' : r.production_score > r.shadow_score + 0.5 ? 'PRODUCTION 胜' : '持平' }}
           </div>
         </div>
         <div v-if="r.score_reason" class="run-reason">{{ r.score_reason }}</div>
@@ -273,8 +273,8 @@ onMounted(() => {
   display: flex; align-items: flex-start; justify-content: space-between;
   margin-bottom: 1.25rem; gap: 1rem;
 }
-.page-title { font-size: 1.1rem; font-weight: 700; color: var(--color-text-primary); }
-.page-desc { font-size: 0.82rem; color: var(--color-text-muted); margin: 0.25rem 0 0; }
+.page-title { font-size: inherit; font-weight: inherit; color: var(--color-text-primary); }
+.page-desc { font-size: inherit; color: var(--color-text-muted); margin: 0.25rem 0 0; }
 .header-actions { display: flex; gap: 0.5rem; flex-shrink: 0; }
 
 .create-form {
@@ -293,8 +293,8 @@ onMounted(() => {
   border-radius: var(--radius-md); padding: 0.6rem 1rem;
   display: flex; flex-direction: column; gap: 0.25rem;
 }
-.stat-value { font-size: 1.25rem; font-weight: 700; color: var(--color-text-primary); }
-.stat-label { font-size: 0.72rem; color: var(--color-text-muted); }
+.stat-value { font-size: inherit; font-weight: inherit; color: var(--color-text-primary); }
+.stat-label { font-size: inherit; color: var(--color-text-muted); }
 
 .tab-bar { display: flex; gap: 0; margin-bottom: 1rem; border-bottom: 1px solid var(--color-border); }
 .tab {
@@ -320,7 +320,7 @@ onMounted(() => {
 .status-dot { width: 8px; height: 8px; border-radius: 50%; }
 .status-dot.active { background: var(--color-profit); }
 .status-dot.inactive { background: var(--color-text-muted); }
-.config-type { font-size: 0.75rem; color: var(--color-text-muted); margin-left: auto; }
+.config-type { font-size: inherit; color: var(--color-text-muted); margin-left: auto; }
 .config-stats { display: flex; gap: 1rem; font-size: 0.78rem; color: var(--color-text-muted); margin-bottom: 0.4rem; }
 .config-actions { display: flex; gap: 0.75rem; }
 
@@ -338,10 +338,10 @@ onMounted(() => {
 .run-duration { margin-left: auto; }
 .run-scores { display: flex; align-items: center; gap: 0.75rem; margin-bottom: 0.4rem; }
 .score-item { display: flex; flex-direction: column; align-items: center; gap: 0.15rem; }
-.score-label { font-size: 0.7rem; color: var(--color-text-muted); }
-.score-value { font-size: 1.2rem; font-weight: 700; }
+.score-label { font-size: inherit; color: var(--color-text-muted); }
+.score-value { font-size: inherit; font-weight: inherit; }
 .score-vs { font-size: 0.8rem; color: var(--color-text-muted); }
-.score-winner { margin-left: auto; font-size: 0.85rem; font-weight: 600; }
+.score-winner { margin-left: auto; font-size: inherit; font-weight: inherit; }
 .run-reason { font-size: 0.78rem; color: var(--color-text-muted); font-style: italic; }
 
 .empty-state { text-align: center; padding: 3rem 1rem; color: var(--color-text-muted); }

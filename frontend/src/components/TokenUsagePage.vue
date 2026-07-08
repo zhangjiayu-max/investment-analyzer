@@ -81,31 +81,31 @@ let runningTimer = null
 
 // ── Label 映射 ──
 const LABEL_MAP = {
-  orchestrator: '🧠 Orchestrator 主控',
-  clarify: '🔍 需求澄清',
-  article_analysis: '📰 文章分析',
-  agent_chat: '💬 Agent 对话',
-  agent_tools: '🔧 Agent 工具调用',
-  chat: '💭 自由问答',
-  market_analysis: '📊 市场日报分析师',
-  diversification_analysis: '🎯 分散度分析师',
-  portfolio_analysis: '📈 持仓 AI 分析',
-  daily_report: '📋 每日简报',
-  hotspots_analysis: '🔥 热点分析专家',
-  bond_recommend: '💰 债券配置顾问',
-  panorama_analysis: '🌐 全景诊断分析师',
-  trade_review: '📊 交易复盘分析师',
-  deep_dive: '🔬 基金深度分析师',
-  what_if: '🔮 情景推演分析师',
-  index_deep_analysis: '📉 指数深度分析师',
+  orchestrator: 'Orchestrator 主控',
+  clarify: '需求澄清',
+  article_analysis: '文章分析',
+  agent_chat: 'Agent 对话',
+  agent_tools: 'Agent 工具调用',
+  chat: '自由问答',
+  market_analysis: '市场日报分析师',
+  diversification_analysis: '分散度分析师',
+  portfolio_analysis: '持仓 AI 分析',
+  daily_report: '每日简报',
+  hotspots_analysis: '热点分析专家',
+  bond_recommend: '债券配置顾问',
+  panorama_analysis: '全景诊断分析师',
+  trade_review: '交易复盘分析师',
+  deep_dive: '基金深度分析师',
+  what_if: '情景推演分析师',
+  index_deep_analysis: '指数深度分析师',
 }
 
 const AGENT_NAME_MAP = {
-  valuation_expert: '📊 估值专家',
-  market_analyst: '📰 择时分析师',
-  risk_assessor: '⚠️ 风险评估师',
-  allocation_advisor: '💰 资产配置师',
-  fund_analyst: '📈 基金分析师',
+  valuation_expert: '估值专家',
+  market_analyst: '择时分析师',
+  risk_assessor: '风险评估师',
+  allocation_advisor: '资产配置师',
+  fund_analyst: '基金分析师',
 }
 
 function callerLabel(c) {
@@ -390,10 +390,10 @@ const traceEvents = computed(() => {
 })
 
 const EVENT_LABELS = {
-  llm: '🧠 LLM',
-  tool: '🔧 工具',
-  agent: '🎯 Agent',
-  rag: '📚 RAG',
+  llm: 'LLM',
+  tool: '工具',
+  agent: 'Agent',
+  rag: 'RAG',
 }
 
 // ── 分页 ──
@@ -532,11 +532,11 @@ function expandGroup(group) {
 </script>
 
 <template>
-  <div class="token-usage-page">
+  <div class="token-usage-page bg-mesh">
     <!-- 页面标题 -->
     <div class="page-header">
-      <h2 class="page-title">Token 用量</h2>
-      <span class="page-desc">LLM 调用消耗统计</span>
+      <h2 class="page-title editorial-title-lg">Token 用量</h2>
+      <span class="page-desc editorial-subtitle">LLM 调用消耗统计</span>
       <!-- B2：全局时间范围选择器，所有板块统一引用 -->
       <div class="global-range">
         <span class="global-range-label">统计范围</span>
@@ -577,17 +577,17 @@ function expandGroup(group) {
         <div v-for="a in runningAgents" :key="a.id" class="running-agent-item">
           <span class="running-agent-name">{{ a.agent }}</span>
           <span class="running-agent-task">{{ a.task }}</span>
-          <span class="running-agent-time">{{ a.elapsed_s }}s</span>
+          <span class="running-agent-time font-jet">{{ a.elapsed_s }}s</span>
         </div>
       </div>
     </div>
 
     <!-- 预算进度条 + 费用概览 -->
-    <div class="budget-section">
+    <div class="budget-section editorial-card">
       <div class="budget-header">
-        <span class="budget-title">今日 Token 预算</span>
-        <span class="budget-amount">{{ (budgetData.used || 0).toLocaleString() }} / {{ (budgetData.limit || 500000).toLocaleString() }}</span>
-        <span class="budget-pct" :style="{ color: budgetColor }">{{ budgetPercentage.toFixed(1) }}%</span>
+        <span class="budget-title terminal-label">今日 Token 预算</span>
+        <span class="budget-amount font-jet">{{ (budgetData.used || 0).toLocaleString() }} / {{ (budgetData.limit || 500000).toLocaleString() }}</span>
+        <span class="budget-pct font-jet-lg" :style="{ color: budgetColor }">{{ budgetPercentage.toFixed(1) }}%</span>
       </div>
       <div class="budget-bar-bg">
         <div
@@ -601,15 +601,15 @@ function expandGroup(group) {
         <div class="budget-warn-line" :style="{ left: '80%' }" title="预警线 80%"></div>
       </div>
       <div class="budget-footer">
-        <span class="budget-hint">
-          <template v-if="budgetPercentage >= 100">⚠ 已超出今日限额</template>
-          <template v-else-if="budgetPercentage >= 80">⚠ 接近限额，请注意用量</template>
+        <span class="budget-hint terminal-label">
+          <template v-if="budgetPercentage >= 100">已超出今日限额</template>
+          <template v-else-if="budgetPercentage >= 80">接近限额，请注意用量</template>
           <template v-else>正常 · 预警线 80% ({{ ((budgetData.limit || 500000) * 0.8).toLocaleString() }})</template>
         </span>
         <div class="cost-row">
-          <span class="cost-item">💰 今日: <strong>{{ formatCost(todayCost) }}</strong></span>
-          <span class="cost-item">本周(7d): <strong>{{ formatCost(weekCost) }}</strong></span>
-          <span class="cost-item">本月(估): <strong>{{ formatCost(monthCost) }}</strong></span>
+          <span class="cost-item terminal-label">今日 <strong class="font-jet">{{ formatCost(todayCost) }}</strong></span>
+          <span class="cost-item terminal-label">本周(7d) <strong class="font-jet">{{ formatCost(weekCost) }}</strong></span>
+          <span class="cost-item terminal-label">本月(估) <strong class="font-jet">{{ formatCost(monthCost) }}</strong></span>
         </div>
       </div>
     </div>
@@ -617,16 +617,16 @@ function expandGroup(group) {
     <!-- Tab 切换 -->
     <div class="tab-bar">
       <button :class="['tab-btn', { active: activeTab === 'overview' }]" @click="switchTab('overview')">
-        📊 用量总览
+        用量总览
       </button>
       <button :class="['tab-btn', { active: activeTab === 'details' }]" @click="switchTab('details')">
-        📋 调用明细
+        调用明细
       </button>
       <button :class="['tab-btn', { active: activeTab === 'perf' }]" @click="switchTab('perf')">
-        ⚡ Agent 性能
+        Agent 性能
       </button>
       <button :class="['tab-btn', { active: activeTab === 'trace' }]" @click="switchTab('trace')">
-        🔗 Trace 链路
+        Trace 链路
       </button>
     </div>
 
@@ -642,38 +642,38 @@ function expandGroup(group) {
       <template v-else>
         <!-- 汇总卡片 -->
         <div class="summary-row">
-          <div class="summary-card">
-            <div class="summary-label">今日消耗</div>
-            <div class="summary-value">{{ (summary.today?.total || 0).toLocaleString() }}</div>
-            <div class="summary-sub">tokens</div>
+          <div class="summary-card editorial-card reveal-stagger">
+            <div class="summary-label terminal-label">今日消耗</div>
+            <div class="summary-value font-jet-lg">{{ (summary.today?.total || 0).toLocaleString() }}</div>
+            <div class="summary-sub terminal-label">tokens</div>
           </div>
-          <div class="summary-card">
-            <div class="summary-label">今日调用</div>
-            <div class="summary-value">{{ summary.today?.calls || 0 }}</div>
-            <div class="summary-sub">次 LLM 调用</div>
+          <div class="summary-card editorial-card reveal-stagger">
+            <div class="summary-label terminal-label">今日调用</div>
+            <div class="summary-value font-jet-lg">{{ summary.today?.calls || 0 }}</div>
+            <div class="summary-sub terminal-label">次 LLM 调用</div>
           </div>
-          <div class="summary-card">
-            <div class="summary-label">平均每次</div>
-            <div class="summary-value">{{ summary.avg_per_call || 0 }}</div>
-            <div class="summary-sub">tokens / call</div>
+          <div class="summary-card editorial-card reveal-stagger">
+            <div class="summary-label terminal-label">平均每次</div>
+            <div class="summary-value font-jet-lg">{{ summary.avg_per_call || 0 }}</div>
+            <div class="summary-sub terminal-label">tokens / call</div>
           </div>
-          <div class="summary-card">
-            <div class="summary-label">近 30 天累计</div>
-            <div class="summary-value">{{ (summary.total_tokens || 0).toLocaleString() }}</div>
-            <div class="summary-sub">tokens</div>
+          <div class="summary-card editorial-card reveal-stagger">
+            <div class="summary-label terminal-label">近 30 天累计</div>
+            <div class="summary-value font-jet-lg">{{ (summary.total_tokens || 0).toLocaleString() }}</div>
+            <div class="summary-sub terminal-label">tokens</div>
           </div>
-          <div class="summary-card">
-            <div class="summary-label">近 7 天费用</div>
-            <div class="summary-value">{{ formatCost(costData.total_cost || 0) }}</div>
-            <div class="summary-sub">CNY</div>
+          <div class="summary-card editorial-card reveal-stagger">
+            <div class="summary-label terminal-label">近 7 天费用</div>
+            <div class="summary-value font-jet-lg num-gold">{{ formatCost(costData.total_cost || 0) }}</div>
+            <div class="summary-sub terminal-label">CNY</div>
           </div>
         </div>
 
         <!-- 近 30 天双色堆叠柱状图 -->
-        <div class="card chart-card">
-          <div class="chart-header">
-            <h4 class="chart-title">近 30 天趋势</h4>
-            <div class="chart-legend">
+        <div class="card chart-card editorial-card">
+          <div class="chart-header editorial-card-header">
+            <h4 class="chart-title title">近 30 天趋势</h4>
+            <div class="chart-legend meta">
               <span class="legend-item"><span class="legend-dot" style="background: var(--color-primary-600)"></span> Prompt tokens</span>
               <span class="legend-item"><span class="legend-dot" style="background: rgba(59, 130, 246, 0.4)"></span> Completion tokens</span>
             </div>
@@ -696,7 +696,7 @@ function expandGroup(group) {
                   :style="{ height: ((d.prompt_tokens || d.tokens || 0) / maxDailyTokens * 100) + '%' }"
                 ></div>
               </div>
-              <div class="bar-label">{{ formatDate(d.day) }}</div>
+              <div class="bar-label font-jet">{{ formatDate(d.day) }}</div>
             </div>
           </div>
         </div>
@@ -704,39 +704,45 @@ function expandGroup(group) {
         <!-- 两列：按调用方 + 按模型 -->
         <div class="charts-row">
           <!-- 按调用方 -->
-          <div class="card chart-card">
-            <h4 class="chart-title">按调用方分布 (近 7 天)</h4>
+          <div class="card chart-card editorial-card">
+            <div class="editorial-card-header">
+              <h4 class="chart-title title">按调用方分布</h4>
+              <span class="meta">近 7 天</span>
+            </div>
             <div v-if="byCaller.length === 0" class="chart-empty">暂无数据</div>
             <div v-else class="caller-list">
-              <div v-for="item in byCaller" :key="item.caller" class="caller-item">
+              <div v-for="item in byCaller" :key="item.caller" class="caller-item reveal-stagger">
                 <div class="caller-row">
                   <span class="caller-name">{{ callerLabel(item.caller) }}</span>
-                  <span class="caller-tokens">{{ (item.total_tokens || 0).toLocaleString() }}</span>
+                  <span class="caller-tokens font-jet">{{ (item.total_tokens || 0).toLocaleString() }}</span>
                 </div>
                 <div class="caller-bar-bg">
                   <div class="caller-bar-fill" :style="{ width: (item.total_tokens / maxCallerTokens * 100) + '%' }"></div>
                 </div>
-                <div class="caller-sub">{{ item.calls }} 次调用</div>
+                <div class="caller-sub terminal-label">{{ item.calls }} 次调用</div>
               </div>
             </div>
           </div>
 
           <!-- 按模型分布 -->
-          <div class="card chart-card">
-            <h4 class="chart-title">按模型分布 (近 7 天)</h4>
+          <div class="card chart-card editorial-card">
+            <div class="editorial-card-header">
+              <h4 class="chart-title title">按模型分布</h4>
+              <span class="meta">近 7 天</span>
+            </div>
             <div v-if="byModel.length === 0" class="chart-empty">暂无数据</div>
             <div v-else class="model-list">
-              <div v-for="(item, idx) in byModel" :key="item.model" class="model-item">
+              <div v-for="(item, idx) in byModel" :key="item.model" class="model-item reveal-stagger">
                 <div class="model-row">
                   <span class="model-name" :style="{ color: modelColor(idx) }">● {{ item.model }}</span>
-                  <span class="model-tokens">{{ (item.total_tokens || 0).toLocaleString() }}</span>
+                  <span class="model-tokens font-jet">{{ (item.total_tokens || 0).toLocaleString() }}</span>
                 </div>
                 <div class="model-bar-bg">
                   <div class="model-bar-fill" :style="{ width: (item.total_tokens / maxModelTokens * 100) + '%', background: modelColor(idx) }"></div>
                 </div>
                 <div class="model-sub">
-                  <span>{{ item.calls }} 次调用</span>
-                  <span class="model-cost">{{ formatCost(calcCost(item.model, item.prompt_tokens || 0, item.completion_tokens || 0)) }}</span>
+                  <span class="terminal-label">{{ item.calls }} 次调用</span>
+                  <span class="model-cost font-jet num-gold">{{ formatCost(calcCost(item.model, item.prompt_tokens || 0, item.completion_tokens || 0)) }}</span>
                 </div>
               </div>
             </div>
@@ -744,8 +750,11 @@ function expandGroup(group) {
         </div>
 
         <!-- 今日小时分布热力图 -->
-        <div class="card chart-card">
-          <h4 class="chart-title">今日小时分布</h4>
+        <div class="card chart-card editorial-card">
+          <div class="editorial-card-header">
+            <h4 class="chart-title title">今日小时分布</h4>
+            <span class="meta">24h</span>
+          </div>
           <div v-if="hourly.length === 0" class="chart-empty">暂无数据</div>
           <div v-else class="heatmap-container">
             <div class="heatmap-grid">
@@ -756,15 +765,15 @@ function expandGroup(group) {
                 :style="{ background: hourlyColor(h.tokens) }"
                 :title="`${h.hour}:00 - ${h.hour}:59\n调用: ${h.calls} 次\nToken: ${(h.tokens || 0).toLocaleString()}`"
               >
-                <span class="heatmap-hour">{{ String(h.hour).padStart(2, '0') }}</span>
-                <span class="heatmap-val">{{ hourlyLabel(h.tokens) }}</span>
+                <span class="heatmap-hour font-jet">{{ String(h.hour).padStart(2, '0') }}</span>
+                <span class="heatmap-val font-jet">{{ hourlyLabel(h.tokens) }}</span>
               </div>
             </div>
             <div class="heatmap-legend">
-              <span class="hm-legend-item"><span class="hm-dot" style="background: var(--color-border)"></span> 0</span>
-              <span class="hm-legend-item"><span class="hm-dot" style="background: rgba(59, 130, 246, 0.25)"></span> 1-5K</span>
-              <span class="hm-legend-item"><span class="hm-dot" style="background: rgba(59, 130, 246, 0.55)"></span> 5-20K</span>
-              <span class="hm-legend-item"><span class="hm-dot" style="background: rgba(59, 130, 246, 0.85)"></span> &gt;20K</span>
+              <span class="hm-legend-item terminal-label"><span class="hm-dot" style="background: var(--color-border)"></span> 0</span>
+              <span class="hm-legend-item terminal-label"><span class="hm-dot" style="background: rgba(59, 130, 246, 0.25)"></span> 1-5K</span>
+              <span class="hm-legend-item terminal-label"><span class="hm-dot" style="background: rgba(59, 130, 246, 0.55)"></span> 5-20K</span>
+              <span class="hm-legend-item terminal-label"><span class="hm-dot" style="background: rgba(59, 130, 246, 0.85)"></span> &gt;20K</span>
             </div>
           </div>
         </div>
@@ -775,11 +784,11 @@ function expandGroup(group) {
     <!-- Tab 2: 调用明细 -->
     <!-- ═══════════════════════════════════════ -->
     <template v-if="activeTab === 'details'">
-      <div class="card">
+      <div class="card editorial-card">
         <!-- 筛选栏 -->
         <div class="filter-bar">
           <div class="filter-item">
-            <label class="filter-label">天数</label>
+            <label class="filter-label terminal-label">天数</label>
             <select v-model="detailDays" class="filter-select">
               <option :value="1">今天</option>
               <option :value="3">近 3 天</option>
@@ -789,14 +798,14 @@ function expandGroup(group) {
             </select>
           </div>
           <div class="filter-item">
-            <label class="filter-label">调用方</label>
+            <label class="filter-label terminal-label">调用方</label>
             <select v-model="detailCaller" class="filter-select">
               <option value="">全部</option>
               <option v-for="c in byCaller" :key="c.caller" :value="c.caller">{{ callerLabel(c.caller) }}</option>
             </select>
           </div>
           <div class="filter-item">
-            <label class="filter-label">模型</label>
+            <label class="filter-label terminal-label">模型</label>
             <select v-model="detailModel" class="filter-select">
               <option value="">全部</option>
               <option v-for="m in byModel" :key="m.model" :value="m.model">{{ m.model }}</option>
@@ -804,9 +813,9 @@ function expandGroup(group) {
           </div>
         </div>
 
-        <div class="table-header">
-          <h4 class="chart-title" style="margin:0;">调用记录</h4>
-          <span class="table-total">共 {{ total }} 条{{ groupedRecords.length !== records.length ? `（归组展示 ${groupedRecords.length} 行）` : '' }}</span>
+        <div class="table-header editorial-card-header">
+          <h4 class="chart-title title" style="margin:0;">调用记录</h4>
+          <span class="table-total meta">共 <span class="font-jet">{{ total }}</span> 条{{ groupedRecords.length !== records.length ? `（归组展示 ${groupedRecords.length} 行）` : '' }}</span>
         </div>
 
         <div v-if="records.length === 0" class="chart-empty">暂无数据</div>
@@ -828,46 +837,46 @@ function expandGroup(group) {
               <template v-for="(r, idx) in groupedRecords" :key="r.id || idx">
                 <!-- B3：归组行（specialist 多轮 ReAct） -->
                 <tr v-if="r.is_group" class="group-row" @click="expandGroup(r)">
-                  <td class="time-cell">{{ formatDateTime(r.first_time) }}</td>
+                  <td class="time-cell font-jet">{{ formatDateTime(r.first_time) }}</td>
                   <td>
                     <span class="caller-tag">{{ callerLabel(r.caller || '') }}</span>
-                    <span class="turn-badge">{{ r.turn_count }} 轮</span>
+                    <span class="turn-badge font-jet">{{ r.turn_count }} 轮</span>
                     <span class="expand-hint">{{ r._expanded ? '▾' : '▸' }}</span>
                   </td>
                   <td class="model-cell">{{ r.model }}</td>
-                  <td class="num">{{ r.prompt_tokens_sum.toLocaleString() }}</td>
-                  <td class="num">{{ r.completion_tokens_sum.toLocaleString() }}</td>
-                  <td class="num bold">{{ r.total_tokens_sum.toLocaleString() }}</td>
-                  <td class="num">{{ formatCost(calcCost(r.model, r.prompt_tokens_sum, r.completion_tokens_sum)) }}</td>
+                  <td class="num font-jet">{{ r.prompt_tokens_sum.toLocaleString() }}</td>
+                  <td class="num font-jet">{{ r.completion_tokens_sum.toLocaleString() }}</td>
+                  <td class="num bold font-jet">{{ r.total_tokens_sum.toLocaleString() }}</td>
+                  <td class="num font-jet num-gold">{{ formatCost(calcCost(r.model, r.prompt_tokens_sum, r.completion_tokens_sum)) }}</td>
                   <td>
-                    <a v-if="r.trace_id" class="trace-link" @click.stop="jumpToTrace(r.trace_id)">{{ shortTrace(r.trace_id) }}</a>
+                    <a v-if="r.trace_id" class="trace-link font-jet" @click.stop="jumpToTrace(r.trace_id)">{{ shortTrace(r.trace_id) }}</a>
                     <span v-else class="trace-none">-</span>
                   </td>
                 </tr>
                 <!-- 归组展开后的子行 -->
                 <template v-if="r.is_group && r._expanded">
                   <tr v-for="(t, tIdx) in r.turns" :key="`${r.id}-${tIdx}`" class="sub-row">
-                    <td class="time-cell sub-time">{{ formatDateTime(t.time) }}</td>
+                    <td class="time-cell sub-time font-jet">{{ formatDateTime(t.time) }}</td>
                     <td class="sub-caller">└ turn {{ t.turn }}</td>
                     <td class="model-cell sub-cell">{{ r.model }}</td>
                     <td class="num sub-cell">—</td>
                     <td class="num sub-cell">—</td>
-                    <td class="num sub-cell">{{ t.tokens.toLocaleString() }}</td>
-                    <td class="num sub-cell">{{ formatCost(calcCost(r.model, 0, t.tokens)) }}</td>
+                    <td class="num sub-cell font-jet">{{ t.tokens.toLocaleString() }}</td>
+                    <td class="num sub-cell font-jet">{{ formatCost(calcCost(r.model, 0, t.tokens)) }}</td>
                     <td class="sub-cell">—</td>
                   </tr>
                 </template>
                 <!-- 普通行（非归组） -->
                 <tr v-else>
-                  <td class="time-cell">{{ formatDateTime(r.created_at) }}</td>
+                  <td class="time-cell font-jet">{{ formatDateTime(r.created_at) }}</td>
                   <td><span class="caller-tag">{{ callerLabel(r.caller || '') }}</span></td>
                   <td class="model-cell">{{ r.model }}</td>
-                  <td class="num">{{ (r.prompt_tokens || 0).toLocaleString() }}</td>
-                  <td class="num">{{ (r.completion_tokens || 0).toLocaleString() }}</td>
-                  <td class="num bold">{{ (r.total_tokens || 0).toLocaleString() }}</td>
-                  <td class="num">{{ formatCost(calcCost(r.model, r.prompt_tokens || 0, r.completion_tokens || 0)) }}</td>
+                  <td class="num font-jet">{{ (r.prompt_tokens || 0).toLocaleString() }}</td>
+                  <td class="num font-jet">{{ (r.completion_tokens || 0).toLocaleString() }}</td>
+                  <td class="num bold font-jet">{{ (r.total_tokens || 0).toLocaleString() }}</td>
+                  <td class="num font-jet num-gold">{{ formatCost(calcCost(r.model, r.prompt_tokens || 0, r.completion_tokens || 0)) }}</td>
                   <td>
-                    <a v-if="r.trace_id" class="trace-link" @click="jumpToTrace(r.trace_id)">{{ shortTrace(r.trace_id) }}</a>
+                    <a v-if="r.trace_id" class="trace-link font-jet" @click="jumpToTrace(r.trace_id)">{{ shortTrace(r.trace_id) }}</a>
                     <span v-else class="trace-none">-</span>
                   </td>
                 </tr>
@@ -878,12 +887,12 @@ function expandGroup(group) {
 
         <!-- 分页 -->
         <div v-if="totalPages > 1" class="pagination">
-          <button class="page-btn" :disabled="page <= 1" @click="goPage(page - 1)">‹</button>
+          <button class="page-btn font-jet" :disabled="page <= 1" @click="goPage(page - 1)">‹</button>
           <template v-for="p in pages()" :key="p">
-            <button v-if="p === '...'" class="page-btn page-dots" disabled>…</button>
-            <button v-else :class="['page-btn', { active: p === page }]" @click="goPage(p)">{{ p }}</button>
+            <button v-if="p === '...'" class="page-btn page-dots font-jet" disabled>…</button>
+            <button v-else :class="['page-btn', 'font-jet', { active: p === page }]" @click="goPage(p)">{{ p }}</button>
           </template>
-          <button class="page-btn" :disabled="page >= totalPages" @click="goPage(page + 1)">›</button>
+          <button class="page-btn font-jet" :disabled="page >= totalPages" @click="goPage(page + 1)">›</button>
         </div>
       </div>
     </template>
@@ -892,49 +901,54 @@ function expandGroup(group) {
     <!-- Tab 3: Agent 性能 -->
     <!-- ═══════════════════════════════════════ -->
     <template v-if="activeTab === 'perf'">
-      <div class="card perf-section">
-        <h4 class="chart-title" style="margin-bottom: 0.75rem;">Agent 性能监控 (近 7 天)</h4>
+      <div class="card perf-section editorial-card">
+        <div class="editorial-card-header">
+          <h4 class="chart-title title">Agent 性能监控</h4>
+          <span class="meta">近 7 天</span>
+        </div>
 
         <!-- 性能概览 -->
         <div class="perf-stats">
           <div class="perf-stat">
-            <span class="perf-stat-value">{{ perfStats.total_runs }}</span>
-            <span class="perf-stat-label">总调用</span>
+            <span class="perf-stat-value font-jet-lg">{{ perfStats.total_runs }}</span>
+            <span class="perf-stat-label terminal-label">总调用</span>
           </div>
           <div class="perf-stat">
-            <span class="perf-stat-value">{{ formatDuration(perfStats.avg_duration_ms) }}</span>
-            <span class="perf-stat-label">平均耗时</span>
+            <span class="perf-stat-value font-jet-lg">{{ formatDuration(perfStats.avg_duration_ms) }}</span>
+            <span class="perf-stat-label terminal-label">平均耗时</span>
           </div>
           <div class="perf-stat">
-            <span class="perf-stat-value">{{ formatDuration(perfStats.max_duration_ms) }}</span>
-            <span class="perf-stat-label">最慢</span>
+            <span class="perf-stat-value font-jet-lg">{{ formatDuration(perfStats.max_duration_ms) }}</span>
+            <span class="perf-stat-label terminal-label">最慢</span>
           </div>
           <div class="perf-stat">
-            <span class="perf-stat-value" :class="{ 'warn': perfStats.slow_calls > 0 }">{{ perfStats.slow_calls }}</span>
-            <span class="perf-stat-label">慢调用 (&gt;30s)</span>
+            <span class="perf-stat-value font-jet-lg" :class="{ 'warn': perfStats.slow_calls > 0 }">{{ perfStats.slow_calls }}</span>
+            <span class="perf-stat-label terminal-label">慢调用 (&gt;30s)</span>
           </div>
           <div class="perf-stat">
-            <span class="perf-stat-value">{{ perfStats.unique_agents }}</span>
-            <span class="perf-stat-label">Agent 数</span>
+            <span class="perf-stat-value font-jet-lg">{{ perfStats.unique_agents }}</span>
+            <span class="perf-stat-label terminal-label">Agent 数</span>
           </div>
         </div>
 
         <!-- 按 Agent 分组 -->
-        <h4 class="chart-title" style="margin-top: 1.5rem; margin-bottom: 0.75rem;">按 Agent 分组</h4>
+        <div class="editorial-card-header" style="margin-top: 1.5rem;">
+          <h4 class="chart-title title">按 Agent 分组</h4>
+        </div>
         <div v-if="perfByAgent.length === 0" class="chart-empty">暂无数据</div>
         <div v-else class="perf-agent-list">
-          <div v-for="a in perfByAgent" :key="a.agent_key" class="perf-agent-item">
+          <div v-for="a in perfByAgent" :key="a.agent_key" class="perf-agent-item reveal-stagger">
             <div class="perf-agent-row">
               <span class="perf-agent-name">{{ a.agent_name || a.agent_key }}</span>
-              <span class="perf-agent-avg">{{ formatDuration(a.avg_duration_ms) }}</span>
+              <span class="perf-agent-avg font-jet">{{ formatDuration(a.avg_duration_ms) }}</span>
             </div>
             <div class="perf-agent-bar-bg">
               <div class="perf-agent-bar-fill" :style="{ width: Math.min((a.avg_duration_ms / (perfStats.max_duration_ms || 1)) * 100, 100) + '%' }"></div>
             </div>
             <div class="perf-agent-sub">
-              <span>{{ a.runs }} 次调用</span>
-              <span v-if="a.slow_calls > 0" class="warn-text">⚠ {{ a.slow_calls }} 次慢调用</span>
-              <span class="perf-agent-max">最慢 {{ formatDuration(a.max_duration_ms) }}</span>
+              <span class="terminal-label">{{ a.runs }} 次调用</span>
+              <span v-if="a.slow_calls > 0" class="warn-text">{{ a.slow_calls }} 次慢调用</span>
+              <span class="perf-agent-max terminal-label">最慢 <span class="font-jet">{{ formatDuration(a.max_duration_ms) }}</span></span>
             </div>
           </div>
         </div>
@@ -945,8 +959,10 @@ function expandGroup(group) {
     <!-- Tab 4: Trace 链路 -->
     <!-- ═══════════════════════════════════════ -->
     <template v-if="activeTab === 'trace'">
-      <div class="card">
-        <h4 class="chart-title" style="margin-bottom: 0.75rem;">Trace 链路查询</h4>
+      <div class="card editorial-card">
+        <div class="editorial-card-header">
+          <h4 class="chart-title title">Trace 链路查询</h4>
+        </div>
 
         <!-- 输入框 + 查询按钮 -->
         <div class="trace-input-bar">
@@ -979,19 +995,19 @@ function expandGroup(group) {
         <!-- Trace 完整链路 -->
         <div v-else class="trace-timeline">
           <div class="trace-header-info">
-            <span class="trace-id-label">Trace ID:</span>
-            <span class="trace-id-value">{{ traceInput }}</span>
+            <span class="trace-id-label terminal-label">Trace ID</span>
+            <span class="trace-id-value font-jet">{{ traceInput }}</span>
           </div>
 
           <!-- 汇总卡片 -->
           <div v-if="traceSummary" class="trace-summary">
-            <span class="trace-sum-item">🧠 LLM <strong>{{ traceSummary.token_calls }}</strong></span>
-            <span class="trace-sum-item">🔧 工具 <strong>{{ traceSummary.tool_calls }}</strong></span>
-            <span class="trace-sum-item">🎯 Agent <strong>{{ traceSummary.agent_runs }}</strong></span>
-            <span class="trace-sum-item">📚 RAG <strong>{{ traceSummary.rag_calls }}</strong></span>
-            <span class="trace-sum-item"><strong>{{ traceSummary.tokens.toLocaleString() }}</strong> tokens</span>
-            <span class="trace-sum-item">{{ formatCost(traceSummary.cost) }}</span>
-            <span class="trace-sum-item" v-if="traceSummary.duration > 0">耗时 {{ formatDuration(traceSummary.duration) }}</span>
+            <span class="trace-sum-item">LLM <strong class="font-jet">{{ traceSummary.token_calls }}</strong></span>
+            <span class="trace-sum-item">工具 <strong class="font-jet">{{ traceSummary.tool_calls }}</strong></span>
+            <span class="trace-sum-item">Agent <strong class="font-jet">{{ traceSummary.agent_runs }}</strong></span>
+            <span class="trace-sum-item">RAG <strong class="font-jet">{{ traceSummary.rag_calls }}</strong></span>
+            <span class="trace-sum-item"><strong class="font-jet">{{ traceSummary.tokens.toLocaleString() }}</strong> tokens</span>
+            <span class="trace-sum-item font-jet num-gold">{{ formatCost(traceSummary.cost) }}</span>
+            <span class="trace-sum-item font-jet" v-if="traceSummary.duration > 0">耗时 {{ formatDuration(traceSummary.duration) }}</span>
           </div>
 
           <div class="timeline-container">
@@ -999,22 +1015,22 @@ function expandGroup(group) {
               <div class="timeline-dot" :class="'dot-' + ev.kind"></div>
               <div v-if="idx < traceEvents.length - 1" class="timeline-line"></div>
               <div class="timeline-content">
-                <div class="timeline-time">{{ formatDateTime(ev.data.created_at) }}</div>
+                <div class="timeline-time font-jet">{{ formatDateTime(ev.data.created_at) }}</div>
                 <!-- LLM 调用 -->
                 <div v-if="ev.kind === 'llm'" class="timeline-body">
                   <span class="timeline-caller">{{ callerLabel(ev.data.caller || '') }}</span>
                   <span class="timeline-model">{{ ev.data.model }}</span>
-                  <span class="timeline-tokens">{{ (ev.data.total_tokens || 0).toLocaleString() }} tokens</span>
-                  <span class="timeline-cost">{{ formatCost(calcCost(ev.data.model, ev.data.prompt_tokens || 0, ev.data.completion_tokens || 0)) }}</span>
+                  <span class="timeline-tokens font-jet">{{ (ev.data.total_tokens || 0).toLocaleString() }} tokens</span>
+                  <span class="timeline-cost font-jet num-gold">{{ formatCost(calcCost(ev.data.model, ev.data.prompt_tokens || 0, ev.data.completion_tokens || 0)) }}</span>
                 </div>
-                <div v-if="ev.kind === 'llm'" class="timeline-detail">
+                <div v-if="ev.kind === 'llm'" class="timeline-detail font-jet">
                   Prompt: {{ (ev.data.prompt_tokens || 0).toLocaleString() }} · Completion: {{ (ev.data.completion_tokens || 0).toLocaleString() }}
                 </div>
                 <!-- 工具调用 -->
                 <div v-else-if="ev.kind === 'tool'" class="timeline-body">
                   <span class="timeline-caller">{{ EVENT_LABELS.tool }} {{ ev.data.tool_name }}</span>
                   <span :class="['timeline-status', ev.data.success ? 'ok' : 'err']">{{ ev.data.success ? '✓ 成功' : '✗ 失败' }}</span>
-                  <span class="timeline-tokens" v-if="ev.data.duration_ms">{{ formatDuration(ev.data.duration_ms) }}</span>
+                  <span class="timeline-tokens font-jet" v-if="ev.data.duration_ms">{{ formatDuration(ev.data.duration_ms) }}</span>
                 </div>
                 <div v-else-if="ev.kind === 'tool'" class="timeline-detail">
                   <span v-if="ev.data.error_category && ev.data.error_category !== 'none'" class="timeline-error">错误: {{ ev.data.error_category }}</span>
@@ -1024,7 +1040,7 @@ function expandGroup(group) {
                   <span class="timeline-caller">{{ EVENT_LABELS.agent }} {{ ev.data.agent_name }}</span>
                   <span class="timeline-key">{{ ev.data.agent_key }}</span>
                   <span :class="['timeline-status', ev.data.status === 'success' || !ev.data.status ? 'ok' : 'err']">{{ ev.data.status || 'success' }}</span>
-                  <span class="timeline-tokens" v-if="ev.data.duration_ms">{{ formatDuration(ev.data.duration_ms) }}</span>
+                  <span class="timeline-tokens font-jet" v-if="ev.data.duration_ms">{{ formatDuration(ev.data.duration_ms) }}</span>
                 </div>
                 <div v-else-if="ev.kind === 'agent' && ev.data.query" class="timeline-detail">
                   Query: {{ ev.data.query.slice(0, 100) }}{{ ev.data.query.length > 100 ? '...' : '' }}
@@ -1032,8 +1048,8 @@ function expandGroup(group) {
                 <!-- RAG 检索 -->
                 <div v-else-if="ev.kind === 'rag'" class="timeline-body">
                   <span class="timeline-caller">{{ EVENT_LABELS.rag }} 检索</span>
-                  <span class="timeline-tokens">{{ ev.data.results_count || 0 }} 条结果</span>
-                  <span class="timeline-detail-inline">FTS: {{ ev.data.fts_count || 0 }} · Chroma: {{ ev.data.chroma_count || 0 }}</span>
+                  <span class="timeline-tokens font-jet">{{ ev.data.results_count || 0 }} 条结果</span>
+                  <span class="timeline-detail-inline font-jet">FTS: {{ ev.data.fts_count || 0 }} · Chroma: {{ ev.data.chroma_count || 0 }}</span>
                 </div>
                 <div v-else-if="ev.kind === 'rag' && ev.data.query" class="timeline-detail">
                   Query: {{ ev.data.query.slice(0, 100) }}{{ ev.data.query.length > 100 ? '...' : '' }}
@@ -1061,14 +1077,13 @@ function expandGroup(group) {
 }
 
 .page-title {
-  font-size: 1.2rem;
-  font-weight: 700;
   color: var(--color-text-primary);
   margin: 0;
 }
 
 .page-desc {
-  font-size: 0.8rem;
+  font-size: inherit;
+  font-weight: inherit;
   color: var(--color-text-muted);
 }
 
@@ -1211,7 +1226,7 @@ function expandGroup(group) {
 .running-agent-time {
   color: var(--color-primary);
   font-weight: 500;
-  font-family: monospace;
+  font-family: inherit;
 }
 
 /* ── 预算进度条 ── */
@@ -1230,21 +1245,21 @@ function expandGroup(group) {
 }
 
 .budget-title {
-  font-size: 0.85rem;
-  font-weight: 600;
+  font-size: inherit;
+  font-weight: inherit;
   color: var(--color-text-primary);
 }
 
 .budget-amount {
   font-size: 0.8rem;
   color: var(--color-text-secondary);
-  font-variant-numeric: tabular-nums;
-  font-family: 'SF Mono', 'Menlo', monospace;
+  font-variant-numeric: inherit;
+  font-family: inherit;
 }
 
 .budget-pct {
   font-size: 0.9rem;
-  font-weight: 700;
+  font-weight: inherit;
   margin-left: auto;
 }
 
@@ -1371,7 +1386,7 @@ function expandGroup(group) {
 
 .summary-value {
   font-size: 1.5rem;
-  font-weight: 700;
+  font-weight: inherit;
   color: var(--color-primary-600);
   line-height: 1.2;
 }
@@ -1407,10 +1422,10 @@ function expandGroup(group) {
 }
 
 .chart-title {
-  font-size: 0.85rem;
-  font-weight: 600;
+  font-size: inherit;
+  font-weight: inherit;
   color: var(--color-text-primary);
-  margin: 0 0 0.75rem;
+  margin: 0;
 }
 
 .chart-empty {
@@ -1812,7 +1827,7 @@ function expandGroup(group) {
 .perf-stat-value {
   display: block;
   font-size: 1.15rem;
-  font-weight: 700;
+  font-weight: inherit;
   color: var(--color-text-primary);
 }
 
