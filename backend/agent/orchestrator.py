@@ -550,8 +550,13 @@ def _build_dca_rules() -> str:
         return ""
 
 
-def _build_final_synthesis_prompt(specialist_results: list, routed_specialists: list) -> str:
-    """构建最终综合提示，强制 LLM 只引用实际执行了的专家。"""
+def _build_final_synthesis_prompt(specialist_results: list, routed_specialists: list, blackboard=None) -> str:
+    """构建最终综合提示，强制 LLM 只引用实际执行了的专家。
+
+    Args:
+        blackboard: 共享黑板实例（可选）。传入时注入结构化数据：
+                    关键数据汇总、冲突检测、风险否决约束、持仓影响汇总。
+    """
     executed_keys = {sr.get("agent_key", "") for sr in specialist_results}
     executed_names = {sr.get("agent", "") for sr in specialist_results}
     routed_but_not_executed = [s for s in routed_specialists if s not in executed_keys]
@@ -606,6 +611,56 @@ def _build_final_synthesis_prompt(specialist_results: list, routed_specialists: 
             f"\n如果某些维度（如风险、配置）缺少专家分析，请明确告知用户'该维度暂缺专家分析'，"
             f"不要自行补充。"
         )
+
+    # 注入黑板结构化数据（关键数据/冲突/风险否决/持仓影响）
+    if blackboard and blackboard.entry_count > 0:
+        # 关键数据汇总
+        key_data = blackboard.get_key_data()
+        if key_data:
+            prompt += "\n\n## 关键数据汇总（来自各专家）"
+            for k, v in list(key_data.items())[:10]:
+                prompt += f"\n- {k}: {v}"
+
+        # 冲突检测
+        conflicts = blackboard.find_conflicts()
+        if conflicts:
+            prompt += "\n\n## 检测到的专家冲突"
+            for c in conflicts:
+                prompt += (
+                    f"\n- {c['target']}: 买入方={c['buy_agents']}, "
+                    f"卖出方={c['sell_agents']}"
+                )
+            prompt += "\n综合建议必须对上述冲突给出明确判断和理由。"
+
+        # P0-A: 风险否决约束（强制降级）
+        vetoes = blackboard.get_vetoes()
+        if vetoes:
+            prompt += "\n\n## ⚠️ 风险否决约束（强制遵守）"
+            for v in vetoes:
+                prompt += (
+                    f"\n- {v.get('source_agent_name','')} 否决 {v.get('vetoed_action','')} "
+                    f"{v.get('target','')}: {v.get('reason','')} "
+                    f"(严重度: {v.get('severity','')}, 建议: {v.get('suggested_action','')})"
+                )
+            prompt += (
+                "\n强制要求：上述被否决的动作必须在综合建议中降级处理——"
+                "若其他专家建议 BUY 但风险专家否决，最终建议必须降为 HOLD 或观察，不得保留 BUY。\n"
+            )
+
+        # P0-B: 持仓影响汇总
+        impacts = blackboard.get_portfolio_impacts()
+        if impacts:
+            prompt += "\n\n## 各专家建议对持仓的影响汇总"
+            prompt += "\n| 专家 | 标的 | 动作 | 变动 | 当前占比 | 变动后 | 风险检查 |"
+            prompt += "\n|------|------|------|------|----------|--------|----------|"
+            for p in impacts:
+                prompt += (
+                    f"\n| {p.get('source_agent_name','')} | {p.get('affected_holding','')} "
+                    f"| {p.get('action','')} | {p.get('suggested_change','')} "
+                    f"| {p.get('current_position_pct',0)}% | {p.get('post_change_pct',0)}% "
+                    f"| {p.get('risk_check','')} |"
+                )
+            prompt += "\n综合建议必须考虑组合层面影响，避免多专家建议叠加后单一标的超限。\n"
 
     return prompt
 
@@ -4110,7 +4165,8 @@ def _stream_final_synthesis(query: str, refined_query: str, specialists: list,
                              complexity: str, arbitration_done: bool,
                              route_result, conflicts, perf_metrics: dict,
                              cancel_event, start_time: float,
-                             conversation_id: int, message_id: int, trace_id: str):
+                             conversation_id: int, message_id: int, trace_id: str,
+                             blackboard=None):
     """阶段4-5: 最终综合（流式生成）、Validator、后处理、人在回路、答案输出。
 
     生成器：yield reasoning_chunk/answer_chunk/status/answer 事件。
@@ -4127,7 +4183,7 @@ def _stream_final_synthesis(query: str, refined_query: str, specialists: list,
             pass
         llm_messages.append({
             "role": "user",
-            "content": _build_final_synthesis_prompt(specialist_results, specialists),
+            "content": _build_final_synthesis_prompt(specialist_results, specialists, blackboard=blackboard),
         })
         final_answer = ""
         try:
@@ -4472,6 +4528,8 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
     force_skip_cross_review = budget["mode"] == "conservative"
     # P0-2.1：共享黑板架构 — 2-3 专家串行执行，后执行者能看到前序结论（默认开启）
     shared_blackboard_enabled = get_orchestration_config("shared_blackboard_enabled", "true") == "true"
+    # 统一黑板实例：所有专家执行路径（单专家/2-3串行/4+并行）共享，综合阶段注入结构化数据
+    blackboard = Blackboard(max_entries=6)
     specialist_results = []
     all_tool_calls = []
     arbitration_done = False  # 标记仲裁是否已完成,避免重复调用
@@ -4909,7 +4967,8 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
         llm_messages, prebuilt_context, complexity, arbitration_done,
         route_result, conflicts, perf_metrics,
         cancel_event, start_time,
-        conversation_id, message_id, trace_id)
+        conversation_id, message_id, trace_id,
+        blackboard=blackboard)
     return
 
 

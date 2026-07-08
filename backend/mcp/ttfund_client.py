@@ -33,7 +33,7 @@ SKILLS = {
     "fund_holding":      {"id": "TTFUND_HOLDING_INFO",      "version": "1.1.0"},
     "fund_gold":         {"id": "TTFUND_GOLD_INFO",         "version": "1.1.0"},
     "fund_tg_strategy":  {"id": "TTFUND_STRATEGY_INFO",     "version": "1.0.0"},
-    "fund_index":        {"id": "TTFUND_INDEX_INFO",        "version": "1.1.0"},
+    "fund_index":        {"id": "TTFUND_INDEX_INFO",        "version": "1.1.2"},
     "fund_nav":          {"id": "TTFUND_NAV_INFO",          "version": "1.0.0"},
     "fund_portfolio":    {"id": "TTFUND_PORTFOLIO_ANALYSIS","version": "1.0.0"},
     "fund_favor":        {"id": "TTFUND_FAVOR_ZX",          "version": "1.3.0"},

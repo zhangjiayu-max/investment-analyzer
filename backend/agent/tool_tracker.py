@@ -67,11 +67,17 @@ class ToolCallTracker:
             max(0, c - REDUNDANT_THRESHOLD) for c in pair_counts.values()
         )
 
-        # 空结果调用检测
-        metrics["empty_result_calls"] = sum(
-            1 for t in self.tool_calls
-            if not t.get("result_preview") or t["result_preview"] in ("", "{}", "null", "None")
-        )
+        # 空结果/失败调用检测
+        _empty_or_err = 0
+        _err_signals = ("error", "fail", "调用失败", "超时", "timeout", "skill_version_required",
+                        "需要登录", "HTTP 4", "HTTP 5", "未找到匹配")
+        for t in self.tool_calls:
+            rp = t.get("result_preview", "")
+            if not rp or rp in ("", "{}", "null", "None"):
+                _empty_or_err += 1
+            elif any(sig in rp.lower() for sig in _err_signals):
+                _empty_or_err += 1
+        metrics["empty_result_calls"] = _empty_or_err
 
         # 效率评分
         total = metrics["total_calls"]
