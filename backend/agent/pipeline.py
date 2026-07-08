@@ -48,6 +48,7 @@ EVENT_PLAN_GENERATED = "plan_generated"
 EVENT_SPECIALIST_START = "specialist_start"
 EVENT_SPECIALIST_DONE = "specialist_done"
 EVENT_REFLECTION_DONE = "reflection_done"
+EVENT_DEBATE_DONE = "debate_done"
 EVENT_ANSWER = "answer"
 EVENT_ERROR = "error"
 EVENT_DEGRADE = "degrade"
@@ -195,6 +196,32 @@ def run_pipeline(
                 reflection_result = None
             yield {"type": EVENT_PHASE_END, "phase": PipelinePhase.REFLECTION.value}
 
+        # ── Phase 3.7: 对抗式辩论（P1，冲突时触发）──────────────
+        debate_result = None
+        try:
+            debate_enabled = get_config_bool("pipeline.debate_enabled", True)
+        except Exception:
+            debate_enabled = True
+
+        if debate_enabled and phase3_result.get("specialists"):
+            conflicts = blackboard.find_conflicts() if blackboard else []
+            if conflicts:
+                logger.info(f"[pipeline] 检测到 {len(conflicts)} 个冲突，触发对抗式辩论")
+                state.transition_to(PipelinePhase.DEBATE)
+                yield {"type": EVENT_PHASE_START, "phase": PipelinePhase.DEBATE.value}
+                try:
+                    debate_result = _phase_debate(
+                        state, query, phase3_result, blackboard, trace_id
+                    )
+                    state.set_phase_result(PipelinePhase.DEBATE.value, debate_result)
+                    yield {"type": EVENT_DEBATE_DONE, "result": debate_result}
+                except Exception as debate_err:
+                    logger.warning(f"[pipeline] 辩论失败，跳过: {debate_err}")
+                    debate_result = None
+                yield {"type": EVENT_PHASE_END, "phase": PipelinePhase.DEBATE.value}
+            else:
+                logger.debug("[pipeline] 无冲突，跳过辩论节点")
+
         # ── Phase 4: 综合 ──────────────────
         state.transition_to(PipelinePhase.SYNTHESIS)
         yield {"type": EVENT_PHASE_START, "phase": PipelinePhase.SYNTHESIS.value}
@@ -214,6 +241,7 @@ def run_pipeline(
         phase4_result = _phase_synthesis(
             state, query, phase3_result, blackboard, trace_id,
             reflection_result=reflection_result,
+            debate_result=debate_result,
         )
         state.set_phase_result(PipelinePhase.SYNTHESIS.value, phase4_result)
         state.answer = phase4_result.get("answer", "")
@@ -452,6 +480,7 @@ def _phase_planning(
             available_specialists=specialists,
             trace_id=trace_id,
             routed_specialists=routed_specialists,  # P4: 路由 hint
+            portfolio_summary=info_gather_result.get("portfolio", ""),  # P3: 持仓感知
         )
         return {
             "plan": plan.to_dict(),
@@ -1039,11 +1068,13 @@ def _phase_synthesis(
     blackboard: Blackboard,
     trace_id: str,
     reflection_result: dict = None,
+    debate_result: dict = None,
 ) -> dict:
     """Phase 4: 交叉审阅 + 仲裁 + 生成最终回答。
 
     Args:
         reflection_result: P3 Reflection 阶段的产出（可选），包含 quality_issues 等
+        debate_result: P1 辩论节点的产出（可选），包含 bull/bear/arbitration 等
     """
     specialists = execution_result.get("specialists", [])
     tool_calls = execution_result.get("tool_calls", [])
@@ -1063,6 +1094,7 @@ def _phase_synthesis(
         answer = _synthesize_multiple_specialists(
             query, specialists, blackboard, trace_id,
             reflection_result=reflection_result,
+            debate_result=debate_result,
         )
     except Exception as e:
         logger.error(f"[pipeline] 综合失败，降级拼接: {e}")
@@ -1070,6 +1102,10 @@ def _phase_synthesis(
 
     # 冲突检测
     conflicts = blackboard.find_conflicts() if blackboard else []
+    # P0-A: 收集风险否决供前端展示
+    vetoes = blackboard.get_vetoes() if blackboard else []
+    # P0-B: 收集持仓影响供前端展示
+    impacts = blackboard.get_portfolio_impacts() if blackboard else []
 
     return {
         "answer": answer,
@@ -1077,6 +1113,8 @@ def _phase_synthesis(
         "arbitration": None,
         "specialist_count": len(specialists),
         "reflection": reflection_result,
+        "risk_vetoes": vetoes,
+        "portfolio_impacts": impacts,
     }
 
 
@@ -1086,6 +1124,7 @@ def _synthesize_multiple_specialists(
     blackboard: Blackboard,
     trace_id: str,
     reflection_result: dict = None,
+    debate_result: dict = None,
 ) -> str:
     """调用 LLM 综合多个专家的分析。"""
     from services.llm_service import _call_llm, MODEL
@@ -1115,6 +1154,21 @@ def _synthesize_multiple_specialists(
             parts.append(
                 f"- {c['target']}: 买入方={c['buy_agents']}, 卖出方={c['sell_agents']}"
             )
+
+    # P1: 注入辩论结论（如有）
+    if debate_result:
+        parts.append("\n## 对抗式辩论结论（权威，优先采纳）")
+        if debate_result.get("bull_argument"):
+            parts.append(f"### 看多方论证\n{debate_result['bull_argument']}")
+        if debate_result.get("bear_argument"):
+            parts.append(f"### 看空方论证\n{debate_result['bear_argument']}")
+        if debate_result.get("arbitration"):
+            arb = debate_result["arbitration"]
+            parts.append(
+                f"### 仲裁结论\n方向: {arb.get('direction','')} | "
+                f"置信度: {arb.get('confidence','')} | 理由: {arb.get('reason','')}"
+            )
+            parts.append("综合回答必须与仲裁结论方向一致，不得与仲裁方向相悖。\n")
 
     # P3: 注入 Reflection 结果（质量问题 + 缺失视角）
     if reflection_result:
@@ -1146,13 +1200,44 @@ def _synthesize_multiple_specialists(
             "- 若已盈利>15%或亏损>15%，需提示止盈/止损考量\n"
         )
 
+    # P0-A: 风险否决约束（强制降级被否决的动作）
+    vetoes = blackboard.get_vetoes() if blackboard else []
+    if vetoes:
+        parts.append("\n## ⚠️ 风险否决约束（强制遵守）")
+        for v in vetoes:
+            parts.append(
+                f"- {v.get('source_agent_name','')} 否决 {v.get('vetoed_action','')} "
+                f"{v.get('target','')}: {v.get('reason','')} "
+                f"(严重度: {v.get('severity','')}, 建议: {v.get('suggested_action','')})"
+            )
+        parts.append(
+            "强制要求：上述被否决的动作必须在综合建议中降级处理——"
+            "若其他专家建议 BUY 但风险专家否决，最终建议必须降为 HOLD 或观察，不得保留 BUY。\n"
+        )
+
+    # P0-B: 持仓影响汇总（让仲裁 LLM 看到全局组合影响）
+    impacts = blackboard.get_portfolio_impacts() if blackboard else []
+    if impacts:
+        parts.append("\n## 各专家建议对持仓的影响汇总")
+        parts.append("| 专家 | 标的 | 动作 | 变动 | 当前占比 | 变动后 | 风险检查 |")
+        parts.append("|------|------|------|------|----------|--------|----------|")
+        for p in impacts:
+            parts.append(
+                f"| {p.get('source_agent_name','')} | {p.get('affected_holding','')} "
+                f"| {p.get('action','')} | {p.get('suggested_change','')} "
+                f"| {p.get('current_position_pct',0)}% | {p.get('post_change_pct',0)}% "
+                f"| {p.get('risk_check','')} |"
+            )
+        parts.append("综合建议必须考虑组合层面影响，避免多专家建议叠加后单一标的超限。\n")
+
     parts.append(
         "\n## 任务\n"
         "基于以上专家分析，生成综合回答：\n"
         "1. 整合各专家观点，去重避免重复\n"
         "2. 如有冲突，给出明确判断和理由\n"
-        "3. 结尾包含「具体操作建议」段落\n"
-        "4. 使用 Markdown 格式，禁止 emoji 标题\n"
+        "3. 如有风险否决，必须遵守否决约束降级处理\n"
+        "4. 结尾包含「具体操作建议」段落\n"
+        "5. 使用 Markdown 格式，禁止 emoji 标题\n"
     )
 
     prompt = "\n".join(parts)
@@ -1166,6 +1251,205 @@ def _synthesize_multiple_specialists(
         max_tokens=3000,
     )
     return response.choices[0].message.content or ""
+
+
+# ── Phase 3.7: 对抗式辩论 ──────────────────────────
+
+def _phase_debate(
+    state: PipelineState,
+    query: str,
+    execution_result: dict,
+    blackboard: Blackboard,
+    trace_id: str,
+) -> dict:
+    """Phase 3.7: 对抗式辩论 — 看多 vs 看空 + 仲裁。
+
+    参考 TradingAgents 的 Bull/Bear Debate 机制。
+    仅在 blackboard.find_conflicts() 检测到冲突时触发。
+
+    流程（2 次 LLM 调用）:
+    1. 看多/看空论证：把买卖双方观点合并为一次 prompt，让 LLM 分别论证
+    2. 仲裁：综合两方 + 持仓约束 + 风险否决，给出明确方向
+
+    Returns:
+        {
+            "conflicts": [...],
+            "bull_argument": "看多方论证",
+            "bear_argument": "看空方论证",
+            "arbitration": {
+                "direction": "BUY|HOLD|SELL",
+                "confidence": 0.75,
+                "reason": "仲裁理由",
+                "conditions": "执行条件"
+            }
+        }
+    """
+    from services.llm_service import _call_llm, MODEL
+    from agent.orchestrator import _get_model_for_agent, _is_cost_routing_enabled
+
+    conflicts = blackboard.find_conflicts() if blackboard else []
+    if not conflicts:
+        return {"conflicts": [], "bull_argument": "", "bear_argument": "", "arbitration": None}
+
+    # 收集看多/看空方专家的分析
+    specialists = execution_result.get("specialists", [])
+    bull_analyses = []
+    bear_analyses = []
+    for c in conflicts:
+        target = c.get("target", "")
+        for s in specialists:
+            agent_name = s.get("agent", "")
+            analysis = s.get("analysis", "") or ""
+            if agent_name in c.get("buy_agents", []):
+                bull_analyses.append(f"[{agent_name} 关于 {target}]\n{analysis[:800]}")
+            elif agent_name in c.get("sell_agents", []):
+                bear_analyses.append(f"[{agent_name} 关于 {target}]\n{analysis[:800]}")
+
+    # 持仓约束
+    portfolio_line = ""
+    try:
+        from services.portfolio_context import build_portfolio_summary_line
+        portfolio_line = build_portfolio_summary_line("default")
+    except Exception:
+        pass
+
+    # 风险否决
+    vetoes = blackboard.get_vetoes() if blackboard else []
+    veto_text = ""
+    if vetoes:
+        veto_lines = []
+        for v in vetoes:
+            veto_lines.append(
+                f"- {v.get('source_agent_name','')} 否决 {v.get('vetoed_action','')} "
+                f"{v.get('target','')}: {v.get('reason','')}"
+            )
+        veto_text = "\n风险否决:\n" + "\n".join(veto_lines)
+
+    # ── Step 1: 看多/看空论证（单次 LLM 调用）──
+    debate_prompt = f"""你是投资辩论主持人。针对以下冲突，分别给出看多方和看空方的论证。
+
+## 用户问题
+{query}
+
+## 冲突标的
+{chr(10).join([f"- {c['target']}: 买方={c['buy_agents']}, 卖方={c['sell_agents']}" for c in conflicts])}
+
+## 看多方专家分析
+{chr(10).join(bull_analyses) if bull_analyses else '（无看多方分析）'}
+
+## 看空方专家分析
+{chr(10).join(bear_analyses) if bear_analyses else '（无看空方分析）'}
+
+## 用户当前持仓
+{portfolio_line or '（无持仓）'}
+{veto_text}
+
+## 输出格式（严格 JSON）
+```json
+{{
+  "bull_argument": "看多方核心论证（200字内，基于估值/政策/资金面等利好）",
+  "bear_argument": "看空方核心论证（200字内，基于波动/风险/宏观等利空）"
+}}
+```
+"""
+    bull_arg = ""
+    bear_arg = ""
+    try:
+        debate_model = MODEL
+        if _is_cost_routing_enabled():
+            debate_model = _get_model_for_agent("debate_arbitrator")
+        response = _call_llm(
+            caller="debate_argument",
+            trace_id=trace_id,
+            model=debate_model,
+            messages=[{"role": "user", "content": debate_prompt}],
+            temperature=0.3,
+            max_tokens=1000,
+        )
+        content = response.choices[0].message.content or ""
+        import json as _json
+        import re as _re
+        json_match = _re.search(r'\{.*\}', content, _re.DOTALL)
+        if json_match:
+            data = _json.loads(json_match.group(0))
+            bull_arg = data.get("bull_argument", "")
+            bear_arg = data.get("bear_argument", "")
+    except Exception as e:
+        logger.warning(f"[pipeline] 辩论论证失败: {e}")
+        bull_arg = "（看多方论证生成失败）"
+        bear_arg = "（看空方论证生成失败）"
+
+    # ── Step 2: 仲裁（单次 LLM 调用）──
+    arb_prompt = f"""你是投资仲裁专家。基于以下看多/看空论证，给出明确的仲裁方向。
+
+## 用户问题
+{query}
+
+## 看多方论证
+{bull_arg}
+
+## 看空方论证
+{bear_arg}
+
+## 用户当前持仓
+{portfolio_line or '（无持仓）'}
+{veto_text}
+
+## 仲裁原则
+1. 必须给出明确方向：BUY / HOLD / SELL（不得模棱两可）
+2. 如有风险否决，BUY 建议必须降级为 HOLD
+3. 结合用户持仓现状，考虑实际可操作性
+4. 置信度 0-1，反映判断的把握程度
+
+## 输出格式（严格 JSON）
+```json
+{{
+  "direction": "BUY|HOLD|SELL",
+  "confidence": 0.75,
+  "reason": "仲裁理由（150字内）",
+  "conditions": "执行条件（如'分批建仓，单次不超过10%'）"
+}}
+```
+"""
+    arbitration = None
+    try:
+        arb_model = MODEL
+        if _is_cost_routing_enabled():
+            arb_model = _get_model_for_agent("debate_arbitrator")
+        response = _call_llm(
+            caller="debate_arbitrator",
+            trace_id=trace_id,
+            model=arb_model,
+            messages=[{"role": "user", "content": arb_prompt}],
+            temperature=0.2,
+            max_tokens=600,
+        )
+        content = response.choices[0].message.content or ""
+        import json as _json
+        import re as _re
+        json_match = _re.search(r'\{.*\}', content, _re.DOTALL)
+        if json_match:
+            arbitration = _json.loads(json_match.group(0))
+    except Exception as e:
+        logger.warning(f"[pipeline] 辩论仲裁失败: {e}")
+        arbitration = {
+            "direction": "HOLD",
+            "confidence": 0.5,
+            "reason": f"仲裁失败，默认 HOLD: {e}",
+            "conditions": "建议人工复核",
+        }
+
+    logger.info(
+        f"[pipeline] 辩论完成: 方向={arbitration.get('direction','')} "
+        f"置信度={arbitration.get('confidence','')}"
+    )
+
+    return {
+        "conflicts": conflicts,
+        "bull_argument": bull_arg,
+        "bear_argument": bear_arg,
+        "arbitration": arbitration,
+    }
 
 
 # ── Phase 3.5: 反思 ──────────────────────────

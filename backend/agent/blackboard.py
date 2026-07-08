@@ -43,6 +43,14 @@ class BlackboardEntry:
     # token 消耗（用于审计）
     tokens_used: int = 0
     duration_ms: int = 0
+    # P0-A: 风险否决（仅 risk_assessor 填写）
+    # {"vetoed_action": "BUY", "target": "中证500", "reason": "最大回撤超30%",
+    #  "severity": "high", "suggested_action": "HOLD"}
+    risk_veto: Optional[dict] = None
+    # P0-B: 对持仓的影响（所有专家可填，建议买卖时必填）
+    # {"affected_holding": "中证500ETF", "action": "加仓", "suggested_change": "10%",
+    #  "current_position_pct": 15.0, "post_change_pct": 25.0, "risk_check": "未超25%上限"}
+    portfolio_impact: Optional[dict] = None
 
     def to_dict(self) -> dict:
         return {
@@ -56,6 +64,8 @@ class BlackboardEntry:
             "timestamp": self.timestamp,
             "tokens_used": self.tokens_used,
             "duration_ms": self.duration_ms,
+            "risk_veto": self.risk_veto,
+            "portfolio_impact": self.portfolio_impact,
         }
 
 
@@ -159,7 +169,41 @@ class Blackboard:
             data_items = list(e.key_data.items())[:3]
             data_str = "; ".join(f"{k}={v}" for k, v in data_items)
             line += f" | 数据: {data_str}"
+        # P0-A: 风险否决标注
+        if e.risk_veto:
+            v = e.risk_veto
+            line += f" | ⚠️否决{v.get('vetoed_action','')} {v.get('target','')}: {v.get('reason','')}"
+        # P0-B: 持仓影响标注
+        if e.portfolio_impact:
+            p = e.portfolio_impact
+            line += f" | 持仓影响: {p.get('action','')} {p.get('affected_holding','')}"
+            if p.get('suggested_change'):
+                line += f"({p['suggested_change']})"
+            if p.get('risk_check'):
+                line += f" [{p['risk_check']}]"
         return line
+
+    def get_vetoes(self) -> list[dict]:
+        """P0-A: 返回所有风险否决，供综合阶段强制降级。"""
+        vetoes = []
+        for e in self.entries:
+            if e.risk_veto:
+                v = dict(e.risk_veto)
+                v["source_agent"] = e.agent_key
+                v["source_agent_name"] = e.agent_name
+                vetoes.append(v)
+        return vetoes
+
+    def get_portfolio_impacts(self) -> list[dict]:
+        """P0-B: 返回所有持仓影响标注，供综合阶段组合层面决策。"""
+        impacts = []
+        for e in self.entries:
+            if e.portfolio_impact:
+                p = dict(e.portfolio_impact)
+                p["source_agent"] = e.agent_key
+                p["source_agent_name"] = e.agent_name
+                impacts.append(p)
+        return impacts
 
     def get_key_data(self) -> dict:
         """收集所有专家引用的关键数据，供综合阶段使用。"""
@@ -277,6 +321,25 @@ def extract_entry_from_result(
     key_data = _extract_key_data(analysis, result.get("tool_calls", []))
     confidence = _estimate_confidence(analysis, action_signals)
 
+    # P0-A: 风险否决提取（仅 risk_assessor + 开关开启）
+    risk_veto = None
+    try:
+        from db.config import get_config_bool
+        veto_enabled = get_config_bool("agent.risk_veto_enabled", True)
+    except Exception:
+        veto_enabled = True
+    if veto_enabled and agent_key == "risk_assessor":
+        risk_veto = _extract_risk_veto(analysis, action_signals)
+
+    # P0-B: 持仓影响提取（开关开启 + 有动作信号）
+    portfolio_impact = None
+    try:
+        impact_enabled = get_config_bool("agent.portfolio_impact_enabled", True)
+    except Exception:
+        impact_enabled = True
+    if impact_enabled and action_signals:
+        portfolio_impact = _extract_portfolio_impact(analysis, action_signals)
+
     return BlackboardEntry(
         agent_key=agent_key,
         agent_name=agent_name,
@@ -286,6 +349,8 @@ def extract_entry_from_result(
         key_data=key_data,
         tokens_used=tokens_used,
         duration_ms=duration_ms or result.get("duration_ms", 0),
+        risk_veto=risk_veto,
+        portfolio_impact=portfolio_impact,
     )
 
 
@@ -425,6 +490,185 @@ def _estimate_confidence(analysis: str, signals: list) -> float:
         confidence += 0.05
 
     return min(confidence, 0.95)  # 上限 0.95
+
+
+# ── P0-A: 风险否决提取 ──────────────────────────
+
+# 否决关键词（严重程度从高到低）
+_VETO_KEYWORDS_HIGH = [
+    "禁止加仓", "禁止买入", "不建议加仓", "不建议买入", "强烈建议不要",
+    "风险过高", "极大风险", "严重高估", "危险",
+]
+_VETO_KEYWORDS_MEDIUM = [
+    "不建议", "谨慎加仓", "谨慎买入", "风险较大", "需警惕",
+]
+
+
+def _extract_risk_veto(analysis: str, action_signals: list) -> Optional[dict]:
+    """从风险专家分析文本中提取风险否决。
+
+    仅当检测到否决关键词时返回 dict，否则返回 None。
+    否决对象优先从 action_signals 的 BUY 信号取 target，退化为文本匹配。
+    """
+    if not analysis:
+        return None
+
+    text = analysis
+    severity = None
+    matched_reason = ""
+
+    # 高严重度匹配
+    for kw in _VETO_KEYWORDS_HIGH:
+        if kw in text:
+            severity = "high"
+            matched_reason = kw
+            break
+
+    # 中严重度匹配
+    if not severity:
+        for kw in _VETO_KEYWORDS_MEDIUM:
+            if kw in text:
+                severity = "medium"
+                matched_reason = kw
+                break
+
+    if not severity:
+        return None
+
+    # 提取被否决的标的：优先 BUY 信号的 target
+    target = ""
+    buy_signal = next((s for s in action_signals if s.get("type") == "BUY"), None)
+    if buy_signal:
+        target = buy_signal.get("target", "")
+    if not target:
+        # 退化：从文本匹配常见指数名
+        target_match = re.search(r'(沪深300|中证500|中证1000|创业板|科创50|[\d]{6})', text)
+        if target_match:
+            target = target_match.group(1)
+
+    # 提取更完整的理由（关键词前后 40 字）
+    reason = matched_reason
+    try:
+        idx = text.find(matched_reason)
+        if idx >= 0:
+            start = max(0, idx - 20)
+            end = min(len(text), idx + len(matched_reason) + 40)
+            reason = text[start:end].replace("\n", " ").strip()
+            if len(reason) > 80:
+                reason = reason[:77] + "..."
+    except Exception:
+        pass
+
+    return {
+        "vetoed_action": "BUY",
+        "target": target,
+        "reason": reason,
+        "severity": severity,
+        "suggested_action": "HOLD",
+    }
+
+
+# ── P0-B: 持仓影响提取 ──────────────────────────
+
+# 持仓影响动作关键词
+_IMPACT_BUY_KEYWORDS = ["加仓", "买入", "定投", "建仓", "增持"]
+_IMPACT_SELL_KEYWORDS = ["减仓", "卖出", "止盈", "止损", "减持", "清仓"]
+
+
+def _extract_portfolio_impact(analysis: str, action_signals: list) -> Optional[dict]:
+    """从分析文本和动作信号中提取持仓影响标注。
+
+    返回结构化影响 dict，无法提取时返回 None。
+    """
+    if not analysis:
+        return None
+
+    text = analysis
+
+    # 确定动作类型
+    action = None
+    if any(kw in text for kw in _IMPACT_BUY_KEYWORDS):
+        action = "加仓"
+    elif any(kw in text for kw in _IMPACT_SELL_KEYWORDS):
+        action = "减仓"
+    if not action:
+        # 从 action_signals 推断
+        if any(s.get("type") == "BUY" for s in action_signals):
+            action = "加仓"
+        elif any(s.get("type") in ("SELL", "REDUCE") for s in action_signals):
+            action = "减仓"
+        else:
+            return None
+
+    # 提取建议变动比例
+    suggested_change = ""
+    pct_match = re.search(r'(?:加仓|减仓|买入|卖出|止盈|止损|定投|建仓|增持|减持)[^%\d]*(\d+(?:\.\d+)?)\s*%', text)
+    if pct_match:
+        suggested_change = f"{pct_match.group(1)}%"
+    else:
+        # 尝试匹配"X 成"等中文表达
+        ch_match = re.search(r'(?:加仓|减仓|买入|卖出)\s*[一二三四五六七八九十1-9]\s*成', text)
+        if ch_match:
+            suggested_change = ch_match.group(0).split()[-1] if ch_match.group(0) else ""
+
+    # 提取受影响持仓
+    affected = ""
+    for s in action_signals:
+        if s.get("target"):
+            affected = s["target"]
+            break
+    if not affected:
+        target_match = re.search(r'(沪深300|中证500|中证1000|创业板|科创50|[\d]{6})', text)
+        if target_match:
+            affected = target_match.group(1)
+    if not affected:
+        return None  # 无法确定标的，不生成影响标注
+
+    # 查询当前持仓占比（复用 portfolio_context）
+    current_pct = 0.0
+    try:
+        from services.portfolio_context import build_portfolio_summary_line
+        summary_line = build_portfolio_summary_line("default")
+        if summary_line and affected:
+            # 在持仓摘要中查找该标的的占比
+            # 持仓行格式: "持仓: 名称1(25%), 名称2(10%)"
+            # 模糊匹配标的名称
+            for seg in summary_line.split("("):
+                if affected in seg or seg in affected:
+                    pct_m = re.search(r'(\d+)%', seg)
+                    if pct_m:
+                        current_pct = float(pct_m.group(1))
+                        break
+    except Exception:
+        pass
+
+    # 计算变动后占比
+    post_pct = current_pct
+    if suggested_change:
+        try:
+            change_val = float(re.search(r'(\d+(?:\.\d+)?)', suggested_change).group(1))
+            if action == "加仓":
+                post_pct = current_pct + change_val
+            else:  # 减仓
+                post_pct = max(0, current_pct - change_val)
+        except Exception:
+            post_pct = current_pct
+
+    # 风险检查
+    risk_check = "未超25%上限"
+    if post_pct > 25:
+        risk_check = f"超限: 变动后{post_pct:.0f}%>25%"
+    elif post_pct > 20:
+        risk_check = f"接近上限: 变动后{post_pct:.0f}%"
+
+    return {
+        "affected_holding": affected,
+        "action": action,
+        "suggested_change": suggested_change,
+        "current_position_pct": round(current_pct, 1),
+        "post_change_pct": round(post_pct, 1),
+        "risk_check": risk_check,
+    }
 
 
 # ── 全局单例 ──────────────────────────────────

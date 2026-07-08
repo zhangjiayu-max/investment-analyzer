@@ -121,6 +121,17 @@ DEFAULT_CONFIGS = [
     ('cost_routing.market_analyst_model', 'deepseek-v4-flash', '市场分析模型', 'cost_routing'),
     ('cost_routing.behavioral_coach_model', 'mimo-v2.5-pro', '行为辅导模型', 'cost_routing'),
     ('cost_routing.cross_review_model', 'mimo-v2.5-pro', '交叉审阅模型', 'cost_routing'),
+    # P2: 模型分级（趋势/文本类用便宜模型，推理/仲裁类用强模型）
+    ('cost_routing.macro_strategist_model', 'deepseek-v4-flash', '宏观策略师模型（趋势判断）', 'cost_routing'),
+    ('cost_routing.article_expert_model', 'deepseek-v4-flash', '文章解读专家模型（文本摘要）', 'cost_routing'),
+    ('cost_routing.arbitrator_model', 'mimo-v2.5-pro', '仲裁专家模型（需强推理）', 'cost_routing'),
+    ('cost_routing.debate_arbitrator_model', 'mimo-v2.5-pro', '辩论仲裁模型（需强推理）', 'cost_routing'),
+
+    # 多智能体决策增强开关（P0-P3）
+    ('agent.risk_veto_enabled', 'true', 'P0-A: 风险专家硬约束否决权', 'agent'),
+    ('agent.portfolio_impact_enabled', 'true', 'P0-B: 专家结论持仓影响标注', 'agent'),
+    ('pipeline.debate_enabled', 'true', 'P1: 对抗式辩论节点（冲突时触发）', 'pipeline'),
+    ('pipeline.enhanced_plan_enabled', 'true', 'P3: 强化 Plan-and-Execute', 'pipeline'),
 
     # 多智能体对话降本增效开关
     ('router.enabled', 'true', '是否启用智能路由', 'router'),

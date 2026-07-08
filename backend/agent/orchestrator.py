@@ -215,19 +215,27 @@ _AGENT_MODEL_MAP_DEEPSEEK = {
     "fund_analyst": "deepseek-v4-flash",
     "risk_assessor": "deepseek-v4-pro",
     "market_analyst": "deepseek-v4-flash",
+    "macro_strategist": "deepseek-v4-flash",      # P2: 趋势判断，便宜模型
+    "article_expert": "deepseek-v4-flash",         # P2: 文本摘要，便宜模型
     "orchestrator": "deepseek-v4-pro",
     "cross_review": "deepseek-v4-flash",
+    "arbitrator": "deepseek-v4-pro",               # P2: 仲裁，强模型
+    "debate_arbitrator": "deepseek-v4-pro",        # P2: 辩论仲裁，强模型
 }
 
-# MIMO 模型映射 — MIMO 只有一个模型，所有 Agent 统一使用
+# MIMO 模型映射 — P2: 按任务复杂度分级
 _AGENT_MODEL_MAP_MIMO = {
-    "valuation_expert": "mimo-v2.5-pro",
-    "allocation_advisor": "mimo-v2.5-pro",
-    "fund_analyst": "mimo-v2.5-pro",
-    "risk_assessor": "mimo-v2.5-pro",
-    "market_analyst": "deepseek-v4-flash",
-    "orchestrator": "mimo-v2.5-pro",
-    "cross_review": "mimo-v2.5-pro",
+    "valuation_expert": "mimo-v2.5-pro",           # 需精确数值推理
+    "allocation_advisor": "mimo-v2.5-pro",         # 需组合优化
+    "fund_analyst": "mimo-v2.5-pro",               # 需穿透分析
+    "risk_assessor": "mimo-v2.5-pro",              # 需风险判断
+    "market_analyst": "deepseek-v4-flash",         # 趋势判断，便宜模型
+    "macro_strategist": "deepseek-v4-flash",       # P2: 趋势判断，便宜模型
+    "article_expert": "deepseek-v4-flash",         # P2: 文本摘要，便宜模型
+    "orchestrator": "mimo-v2.5-pro",               # 编排器，强模型
+    "cross_review": "mimo-v2.5-pro",               # 交叉审阅，强模型
+    "arbitrator": "mimo-v2.5-pro",                 # P2: 仲裁，强模型
+    "debate_arbitrator": "mimo-v2.5-pro",          # P2: 辩论仲裁，强模型
 }
 
 # 兼容别名

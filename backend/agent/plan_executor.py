@@ -52,6 +52,10 @@ class PlanStep:
     token_budget: int = 0        # 该步骤的 token 预算
     tokens_used: int = 0         # 实际消耗
     blackboard_entry: Optional[dict] = None  # 写入黑板的条目
+    # P3: Plan-and-Execute 强化字段
+    sub_query: str = ""          # 拆解后的具体子问题
+    allowed_tools: list = field(default_factory=list)  # 工具白名单
+    needs_debate: bool = False   # 该步骤后是否需要辩论
 
 
 @dataclass
@@ -105,6 +109,9 @@ class AnalysisPlan:
                     "agent_key": s.agent_key,
                     "agent_name": s.agent_name,
                     "query": s.query,
+                    "sub_query": s.sub_query,
+                    "allowed_tools": s.allowed_tools,
+                    "needs_debate": s.needs_debate,
                     "depends_on": s.depends_on,
                     "status": s.status.value,
                     "duration_ms": s.duration_ms,
@@ -126,6 +133,7 @@ _PLAN_GENERATION_PROMPT = """## 任务：为以下用户问题生成分析计划
 用户问题：{user_query}
 优化后问题：{refined_query}
 复杂度：{complexity}
+用户当前持仓：{portfolio_summary}
 
 可用专家列表：
 {available_specialists}
@@ -137,8 +145,11 @@ _PLAN_GENERATION_PROMPT = """## 任务：为以下用户问题生成分析计划
   "steps": [
     {{
       "step_id": 1,
-      "agent_key": "valuation_analyst",
+      "agent_key": "valuation_expert",
       "query": "发给专家的具体问题（包含用户问题中的关键信息）",
+      "sub_query": "拆解后的具体子问题（比 query 更聚焦，如'中证500当前PE分位是多少'）",
+      "allowed_tools": ["query_valuation", "get_valuation_list"],
+      "needs_debate": false,
       "depends_on": []
     }}
   ]
@@ -152,6 +163,9 @@ _PLAN_GENERATION_PROMPT = """## 任务：为以下用户问题生成分析计划
 4. simple 问题 1-2 个专家，medium 2-4 个，complex 3-6 个
 5. 无关专家不要加（如用户问估值就别加文章解读）
 6. depends_on 表示该步骤依赖前面步骤的结果，大多数步骤可以并行
+7. P3 强化：sub_query 必须比 query 更具体，让专家聚焦回答
+8. P3 强化：allowed_tools 限制专家可用工具，避免无效调用（从专家 tools 列表选取）
+9. P3 强化：涉及买卖分歧的步骤 needs_debate=true（会触发对抗式辩论）
 """
 
 
@@ -165,10 +179,12 @@ def generate_plan(
     available_specialists: list[dict],
     trace_id: str,
     routed_specialists: list[str] = None,
+    portfolio_summary: str = "",
 ) -> AnalysisPlan:
     """调用 LLM 生成分析计划。
 
     P4: 若 routed_specialists 非空，优先使用路由结果，跳过 LLM 调用（省 token）。
+    P3: 增加 portfolio_summary 参数，让 plan 感知持仓；LLM 生成时输出 sub_query/allowed_tools/needs_debate。
     仅当路由未命中时才调用 LLM 生成 plan。
 
     降级策略：LLM 调用失败或 JSON 解析失败时，降级为所有专家顺序执行。
@@ -225,11 +241,12 @@ def generate_plan(
                 updated_at=datetime.now().isoformat(),
             )
 
-    # 构建专家列表文本
+    # 构建专家列表文本（含工具列表，供 LLM 选择 allowed_tools）
     specialist_lines = []
     for s in available_specialists:
+        tools_str = ", ".join(s.get("tools", [])) if s.get("tools") else ""
         specialist_lines.append(
-            f"- {s['agent_key']}: {s['name']} — {s.get('description', '')}"
+            f"- {s['agent_key']}: {s['name']} — {s.get('description', '')} [工具: {tools_str}]"
         )
     specialists_text = "\n".join(specialist_lines)
 
@@ -237,6 +254,7 @@ def generate_plan(
         user_query=user_query,
         refined_query=refined_query,
         complexity=complexity,
+        portfolio_summary=portfolio_summary or "（无持仓）",
         available_specialists=specialists_text,
     )
 
@@ -256,6 +274,11 @@ def generate_plan(
         json_match = re.search(r'```json\s*\n(.*?)\n```', content, re.DOTALL)
         if json_match:
             plan_data = json.loads(json_match.group(1))
+        else:
+            # 尝试直接解析 JSON
+            json_match = re.search(r'\{.*\}', content, re.DOTALL)
+            if json_match:
+                plan_data = json.loads(json_match.group(0))
     except Exception as e:
         logger.warning(f"[trace:{trace_id}] Plan 生成 LLM 调用失败: {e}")
 
@@ -265,7 +288,9 @@ def generate_plan(
             "reasoning": "Plan 生成失败，降级为全量顺序执行",
             "steps": [
                 {"step_id": i + 1, "agent_key": s["agent_key"],
-                 "query": refined_query, "depends_on": []}
+                 "query": refined_query, "sub_query": refined_query,
+                 "allowed_tools": s.get("tools", []), "needs_debate": False,
+                 "depends_on": []}
                 for i, s in enumerate(available_specialists[:3])  # 降级最多 3 个
             ],
         }
@@ -280,6 +305,9 @@ def generate_plan(
                 s["agent_key"],
             ),
             query=s.get("query", refined_query),
+            sub_query=s.get("sub_query", ""),
+            allowed_tools=s.get("allowed_tools", []),
+            needs_debate=bool(s.get("needs_debate", False)),
             depends_on=s.get("depends_on", []),
         )
         for s in plan_data.get("steps", [])
