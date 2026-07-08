@@ -219,12 +219,15 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div class="bond-market">
+  <div class="bond-market bg-mesh">
     <!-- Header -->
     <div class="bond-header">
       <div>
-        <h2 class="page-title">债市市场温度</h2>
-        <p class="page-desc">数据来源：有知有行 · 10年期国债收益率与债市温度</p>
+        <h2 class="page-title editorial-title-lg">债市市场温度</h2>
+        <p class="page-desc">
+          <span class="terminal-label">数据来源</span>
+          <span class="desc-text">有知有行 · 10年期国债收益率与债市温度</span>
+        </p>
       </div>
       <a
         href="https://youzhiyouxing.cn/data/macro"
@@ -240,30 +243,38 @@ onUnmounted(() => {
     </div>
 
     <!-- Current info card -->
-    <div v-if="current" class="current-card card">
+    <div v-if="current" class="current-card card editorial-card reveal-stagger">
+      <div class="card-header editorial-card-header">
+        <h3 class="title">市场快照</h3>
+        <span class="meta">SNAPSHOT</span>
+      </div>
       <div class="current-grid">
         <div class="current-item">
-          <span class="current-label">更新日期</span>
-          <span class="current-value">{{ current.date }}</span>
+          <span class="current-label terminal-label">更新日期</span>
+          <span class="current-value font-jet-lg">{{ current.date }}</span>
         </div>
         <div class="current-item">
-          <span class="current-label">债市温度</span>
-          <span class="current-value temp-value" :style="{ color: getColorByDegree(current.temperature) }">
-            {{ current.temperature }}°
+          <span class="current-label terminal-label">债市温度</span>
+          <span class="current-value temp-value font-jet-lg" :style="{ color: getColorByDegree(current.temperature) }">
+            {{ current.temperature }}<span class="unit">°</span>
             <span class="temp-tag">{{ getTempLabel(current.temperature) }}</span>
           </span>
         </div>
         <div class="current-item">
-          <span class="current-label">10年期国债收益率</span>
-          <span class="current-value rate-value">
-            {{ (current.rate * 100).toFixed(2) }}%
+          <span class="current-label terminal-label">10年期国债收益率</span>
+          <span class="current-value rate-value font-jet-lg">
+            {{ (current.rate * 100).toFixed(2) }}<span class="unit">%</span>
           </span>
         </div>
       </div>
     </div>
 
     <!-- Chart -->
-    <div class="chart-card card">
+    <div class="chart-card card editorial-card reveal-stagger">
+      <div class="card-header editorial-card-header">
+        <h3 class="title">收益率 × 温度 走势</h3>
+        <span class="meta">TIME SERIES</span>
+      </div>
       <div ref="chartRef" class="chart-container"></div>
       <!-- Loading overlay -->
       <div v-if="loading" class="chart-overlay">
@@ -281,27 +292,30 @@ onUnmounted(() => {
     </div>
 
     <!-- Legend guide -->
-    <div class="legend-guide card" v-if="!loading && !error">
-      <h3 class="legend-title">温度解读</h3>
+    <div class="legend-guide card editorial-card reveal-stagger" v-if="!loading && !error">
+      <div class="card-header editorial-card-header">
+        <h3 class="title">温度解读</h3>
+        <span class="meta">INTERPRETATION</span>
+      </div>
       <div class="legend-items">
-        <div class="legend-item">
+        <div class="legend-item reveal-stagger">
           <span class="legend-dot" style="background:#3b82f6"></span>
-          <span class="legend-label">低温 (0-30°)</span>
+          <span class="legend-label">低温 <span class="font-jet">0–30°</span></span>
           <span class="legend-hint">债券收益率高位，适合配置</span>
         </div>
-        <div class="legend-item">
+        <div class="legend-item reveal-stagger">
           <span class="legend-dot" style="background:#60a5fa"></span>
-          <span class="legend-label">偏低 (30-50°)</span>
+          <span class="legend-label">偏低 <span class="font-jet">30–50°</span></span>
           <span class="legend-hint">收益率中高位，可适当配置</span>
         </div>
-        <div class="legend-item">
+        <div class="legend-item reveal-stagger">
           <span class="legend-dot" style="background:#f59e0b"></span>
-          <span class="legend-label">偏高 (50-70°)</span>
+          <span class="legend-label">偏高 <span class="font-jet">50–70°</span></span>
           <span class="legend-hint">收益率中低位，注意风险</span>
         </div>
-        <div class="legend-item">
+        <div class="legend-item reveal-stagger">
           <span class="legend-dot" style="background:#ef4444"></span>
-          <span class="legend-label">高温 (70-100°)</span>
+          <span class="legend-label">高温 <span class="font-jet">70–100°</span></span>
           <span class="legend-hint">收益率低位，谨慎配置</span>
         </div>
       </div>
@@ -332,6 +346,19 @@ onUnmounted(() => {
   padding: 0.45rem 0.85rem;
 }
 
+.page-desc {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  margin-top: 0.35rem;
+  flex-wrap: wrap;
+}
+
+.desc-text {
+  font-size: 0.82rem;
+  color: var(--color-text-muted);
+}
+
 /* Current info card */
 .current-card {
   padding: 1.25rem 1.5rem;
@@ -350,13 +377,20 @@ onUnmounted(() => {
 }
 
 .current-label {
-  font-size: 0.82rem;
-  color: var(--color-text-muted);
+  /* terminal-label 提供字体/字号/颜色 */
+  display: inline-block;
 }
 
 .current-value {
   font-size: 1.25rem;
   font-weight: 700;
+}
+
+.unit {
+  font-size: 0.85em;
+  font-weight: 500;
+  opacity: 0.75;
+  margin-left: 0.05em;
 }
 
 .temp-value {
@@ -444,12 +478,6 @@ onUnmounted(() => {
 /* Legend guide */
 .legend-guide {
   padding: 1.25rem 1.5rem;
-}
-
-.legend-title {
-  font-size: 0.9rem;
-  font-weight: 600;
-  margin-bottom: 0.75rem;
 }
 
 .legend-items {

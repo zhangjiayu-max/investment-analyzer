@@ -762,7 +762,7 @@ defineExpose({ loadHistory })
 </script>
 
 <template>
-  <div class="valuation-page">
+  <div class="valuation-page bg-mesh">
     <!-- Outer Tab Bar -->
     <div class="outer-tab-bar">
       <button :class="['outer-tab-btn', { active: outerTab === 'index' }]" @click="outerTab = 'index'">
@@ -789,8 +789,8 @@ defineExpose({ loadHistory })
     <template v-if="outerTab === 'index'">
 
     <!-- Index Selector (searchable) -->
-    <div class="card selector-card">
-      <label class="selector-label">选择指数</label>
+    <div class="card selector-card editorial-card">
+      <label class="selector-label terminal-label">选择指数</label>
       <div class="searchable-select" @click.stop>
         <input
           v-model="searchQuery"
@@ -813,7 +813,7 @@ defineExpose({ loadHistory })
         </div>
       </div>
       <span v-if="selectedIndexInfo" class="selector-meta">
-        最新: {{ selectedIndexInfo.latest_date || '-' }}
+        <span class="terminal-label">最新</span> <span class="font-jet">{{ selectedIndexInfo.latest_date || '-' }}</span>
       </span>
       <button class="btn-ghost btn-sm" @click="handleRefreshPrices" :disabled="refreshingPrices" style="margin-left:auto;">
         <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24" :class="{ spinning: refreshingPrices }">
@@ -824,10 +824,10 @@ defineExpose({ loadHistory })
     </div>
 
     <!-- Current Index Header -->
-    <div v-if="selectedCode" class="card index-header-card">
+    <div v-if="selectedCode" class="card index-header-card editorial-card">
       <div class="index-header-left">
         <div class="index-name-wrapper" @mouseenter="onIndexNameEnter" @mouseleave="onIndexNameLeave">
-          <div class="index-header-name">
+          <div class="index-header-name editorial-title-lg">
             {{ selectedIndexName }}
             <svg class="index-info-icon" width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
@@ -842,17 +842,17 @@ defineExpose({ loadHistory })
             </div>
           </Transition>
         </div>
-        <div class="index-header-code">{{ selectedCode }}</div>
+        <div class="index-header-code font-jet">{{ selectedCode }}</div>
         <div v-if="latest" class="index-header-metrics">
           <span class="hdr-metric">
-            <span class="term-with-tip">{{ latest.metric_type || 'PE' }}<span class="term-tip">{{ metricGlossary[latest.metric_type] || metricGlossary['市盈率'] }}</span></span>: <b>{{ latest.current_value ?? '-' }}</b>
+            <span class="term-with-tip terminal-label">{{ latest.metric_type || 'PE' }}<span class="term-tip">{{ metricGlossary[latest.metric_type] || metricGlossary['市盈率'] }}</span></span>: <b class="font-jet">{{ latest.current_value ?? '-' }}</b>
           </span>
           <span class="hdr-divider">|</span>
           <span class="hdr-metric">
-            <span class="term-with-tip">百分位<span class="term-tip">{{ metricGlossary['百分位'] }}</span></span>: <b :class="getPercentileLevel(latest.percentile) === 'success' ? 'val-low' : getPercentileLevel(latest.percentile) === 'danger' ? 'val-high' : ''">{{ latest.percentile != null ? latest.percentile + '%' : '-' }}</b>
+            <span class="term-with-tip terminal-label">百分位<span class="term-tip">{{ metricGlossary['百分位'] }}</span></span>: <b class="font-jet" :class="getPercentileLevel(latest.percentile) === 'success' ? 'val-low' : getPercentileLevel(latest.percentile) === 'danger' ? 'val-high' : ''">{{ latest.percentile != null ? latest.percentile + '%' : '-' }}</b>
           </span>
           <span class="hdr-divider">|</span>
-          <span :class="['hdr-status', 'status-' + getPercentileLevel(latest.percentile)]">
+          <span :class="['hdr-status', 'status-' + getPercentileLevel(latest.percentile), 'font-jet']">
             {{ latest.percentile == null ? '-' : latest.percentile < 30 ? '低估' : latest.percentile <= 70 ? '合理' : '高估' }}
           </span>
         </div>
@@ -924,33 +924,33 @@ defineExpose({ loadHistory })
 
       <!-- Metric Cards -->
       <div class="metric-grid">
-        <div class="card metric-card">
-          <div class="metric-label">
+        <div class="card metric-card editorial-card reveal-stagger">
+          <div class="metric-label terminal-label">
             <span class="term-with-tip">当前 {{ latest.metric_type || '值' }}<span class="term-tip">{{ metricGlossary[latest.metric_type] || '' }}</span></span>
           </div>
-          <div class="metric-value">{{ latest.current_value ?? '-' }}</div>
+          <div class="metric-value font-jet">{{ latest.current_value ?? '-' }}</div>
         </div>
-        <div :class="['card', 'metric-card', 'metric-' + getPercentileLevel(latest.percentile)]">
-          <div class="metric-label">
+        <div :class="['card', 'metric-card', 'metric-' + getPercentileLevel(latest.percentile), 'editorial-card', 'reveal-stagger']">
+          <div class="metric-label terminal-label">
             <span class="term-with-tip">分位点<span class="term-tip">{{ metricGlossary['分位点'] }}</span></span>
           </div>
-          <div class="metric-value">{{ latest.percentile != null ? latest.percentile + '%' : '-' }}</div>
+          <div class="metric-value font-jet">{{ latest.percentile != null ? latest.percentile + '%' : '-' }}</div>
         </div>
-        <div class="card metric-card">
-          <div class="metric-label">当前点位</div>
-          <div class="metric-value">{{ latest.current_point ?? '-' }}</div>
+        <div class="card metric-card editorial-card reveal-stagger">
+          <div class="metric-label terminal-label">当前点位</div>
+          <div class="metric-value font-jet">{{ latest.current_point ?? '-' }}</div>
         </div>
-        <div class="card metric-card">
-          <div class="metric-label">涨跌幅</div>
-          <div :class="['metric-value', latest.change_pct >= 0 ? 'val-high' : 'val-low']">
+        <div class="card metric-card editorial-card reveal-stagger">
+          <div class="metric-label terminal-label">涨跌幅</div>
+          <div :class="['metric-value', 'font-jet', latest.change_pct >= 0 ? 'val-high' : 'val-low']">
             {{ latest.change_pct != null ? latest.change_pct + '%' : '-' }}
           </div>
         </div>
       </div>
 
       <!-- Source Image -->
-      <div v-if="sourceImageUrl && !imageLoadError" class="card source-image-card">
-        <h3 class="card-title">来源图片 <span v-if="latest.snapshot_date" class="count-badge">{{ latest.snapshot_date }}</span></h3>
+      <div v-if="sourceImageUrl && !imageLoadError" class="card source-image-card editorial-card">
+        <h3 class="card-title editorial-title">来源图片 <span v-if="latest.snapshot_date" class="count-badge font-jet">{{ latest.snapshot_date }}</span></h3>
         <div class="source-image-wrap" @click="showLightbox = true">
           <img :src="sourceImageUrl" alt="估值来源图" class="source-image" loading="lazy" @error="imageLoadError = true" />
           <div class="image-zoom-hint">
@@ -980,11 +980,11 @@ defineExpose({ loadHistory })
       </Teleport>
 
       <!-- Valuation Range Bar -->
-      <div class="card range-card">
+      <div class="card range-card editorial-card">
         <div class="range-header">
-          <span class="range-title">{{ latest.metric_type || '估值' }} 估值区间</span>
+          <span class="range-title editorial-title">{{ latest.metric_type || '估值' }} 估值区间</span>
           <span class="range-zscore" v-if="latest.zscore != null">
-            <span class="term-with-tip">Z分数<span class="term-tip">{{ metricGlossary['Z分数'] }}</span></span>: {{ latest.zscore }}
+            <span class="term-with-tip terminal-label">Z分数<span class="term-tip">{{ metricGlossary['Z分数'] }}</span></span>: <span class="font-jet">{{ latest.zscore }}</span>
           </span>
         </div>
 
@@ -992,13 +992,13 @@ defineExpose({ loadHistory })
         <div class="gauge-container">
           <div class="gauge-bar">
             <div class="gauge-zone zone-low" style="width: 30%">
-              <span class="zone-label">低估</span>
+              <span class="zone-label terminal-label">低估</span>
             </div>
             <div class="gauge-zone zone-mid" style="width: 40%">
-              <span class="zone-label">合理</span>
+              <span class="zone-label terminal-label">合理</span>
             </div>
             <div class="gauge-zone zone-high" style="width: 30%">
-              <span class="zone-label">高估</span>
+              <span class="zone-label terminal-label">高估</span>
             </div>
             <!-- Current position marker -->
             <div
@@ -1006,7 +1006,7 @@ defineExpose({ loadHistory })
               class="gauge-marker"
               :style="{ left: Math.min(100, Math.max(0, latest.percentile)) + '%' }"
             >
-              <div class="marker-label">{{ latest.percentile }}%</div>
+              <div class="marker-label font-jet">{{ latest.percentile }}%</div>
               <div class="marker-arrow"></div>
             </div>
           </div>
@@ -1014,42 +1014,42 @@ defineExpose({ loadHistory })
           <!-- Value labels -->
           <div class="gauge-labels">
             <div class="gauge-label">
-              <span class="label-key">最小</span>
-              <span class="label-val">{{ latest.min_value ?? '-' }}</span>
+              <span class="label-key terminal-label">最小</span>
+              <span class="label-val font-jet">{{ latest.min_value ?? '-' }}</span>
             </div>
             <div class="gauge-label">
-              <span class="label-key val-low"><span class="term-with-tip">机会<span class="term-tip">{{ metricGlossary['机会值'] }}</span></span></span>
-              <span class="label-val val-low">{{ latest.opportunity_value ?? '-' }}</span>
+              <span class="label-key val-low terminal-label"><span class="term-with-tip">机会<span class="term-tip">{{ metricGlossary['机会值'] }}</span></span></span>
+              <span class="label-val val-low font-jet">{{ latest.opportunity_value ?? '-' }}</span>
             </div>
             <div class="gauge-label">
-              <span class="label-key"><span class="term-with-tip">中位<span class="term-tip">{{ metricGlossary['中位数'] }}</span></span></span>
-              <span class="label-val">{{ latest.median ?? '-' }}</span>
+              <span class="label-key terminal-label"><span class="term-with-tip">中位<span class="term-tip">{{ metricGlossary['中位数'] }}</span></span></span>
+              <span class="label-val font-jet">{{ latest.median ?? '-' }}</span>
             </div>
             <div class="gauge-label">
-              <span class="label-key val-high"><span class="term-with-tip">危险<span class="term-tip">{{ metricGlossary['危险值'] }}</span></span></span>
-              <span class="label-val val-high">{{ latest.danger_value ?? '-' }}</span>
+              <span class="label-key val-high terminal-label"><span class="term-with-tip">危险<span class="term-tip">{{ metricGlossary['危险值'] }}</span></span></span>
+              <span class="label-val val-high font-jet">{{ latest.danger_value ?? '-' }}</span>
             </div>
             <div class="gauge-label">
-              <span class="label-key">最大</span>
-              <span class="label-val">{{ latest.max_value ?? '-' }}</span>
+              <span class="label-key terminal-label">最大</span>
+              <span class="label-val font-jet">{{ latest.max_value ?? '-' }}</span>
             </div>
           </div>
         </div>
 
         <!-- Average -->
         <div class="range-avg" v-if="latest.avg_value != null">
-          平均值: {{ latest.avg_value }}
+          <span class="terminal-label">平均值</span>: <span class="font-jet">{{ latest.avg_value }}</span>
         </div>
       </div>
 
       <!-- Trend Chart -->
-      <div v-if="history.length > 1" class="card trend-card">
-        <h3 class="card-title">估值趋势 <span class="count-badge">{{ history.length }} 条</span></h3>
+      <div v-if="history.length > 1" class="card trend-card editorial-card">
+        <h3 class="card-title editorial-title">估值趋势 <span class="count-badge font-jet">{{ history.length }} 条</span></h3>
         <div ref="trendChartRef" class="trend-chart"></div>
         <div class="percentile-legend">
-          <span class="legend-item"><span class="legend-color" style="background:var(--color-profit-bg)"></span>低估区 (&lt;30%)</span>
-          <span class="legend-item"><span class="legend-color" style="background:var(--color-bg-hover)"></span>合理区 (30-70%)</span>
-          <span class="legend-item"><span class="legend-color" style="background:var(--color-loss-bg)"></span>高估区 (&gt;70%)</span>
+          <span class="legend-item"><span class="legend-color" style="background:var(--color-profit-bg)"></span><span class="terminal-label">低估区</span> <span class="font-jet">&lt;30%</span></span>
+          <span class="legend-item"><span class="legend-color" style="background:var(--color-bg-hover)"></span><span class="terminal-label">合理区</span> <span class="font-jet">30-70%</span></span>
+          <span class="legend-item"><span class="legend-color" style="background:var(--color-loss-bg)"></span><span class="terminal-label">高估区</span> <span class="font-jet">&gt;70%</span></span>
         </div>
       </div>
 
@@ -1058,12 +1058,12 @@ defineExpose({ loadHistory })
         <svg width="20" height="20" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
         </svg>
-        <span>需要至少 2 条数据才能显示趋势图，当前 {{ history.length }} 条</span>
+        <span>需要至少 2 条数据才能显示趋势图，当前 <span class="font-jet">{{ history.length }}</span> 条</span>
       </div>
 
       <!-- History Table -->
-      <div v-if="history.length > 0" class="card">
-        <h3 class="card-title">历史记录 <span class="count-badge">{{ history.length }} 条</span></h3>
+      <div v-if="history.length > 0" class="card editorial-card">
+        <h3 class="card-title editorial-title">历史记录 <span class="count-badge font-jet">{{ history.length }} 条</span></h3>
         <div class="table-wrap">
           <table class="data-table">
             <thead>
@@ -1081,19 +1081,19 @@ defineExpose({ loadHistory })
             </thead>
             <tbody>
               <tr v-for="row in history" :key="row.id">
-                <td class="td-date">{{ row.snapshot_date }}</td>
-                <td><span class="badge badge-neutral">{{ row.metric_type || '-' }}</span></td>
-                <td class="td-val">{{ row.current_value ?? '-' }}</td>
-                <td>{{ row.current_point ?? '-' }}</td>
+                <td class="td-date font-jet">{{ row.snapshot_date }}</td>
+                <td><span class="badge badge-neutral font-jet">{{ row.metric_type || '-' }}</span></td>
+                <td class="td-val font-jet">{{ row.current_value ?? '-' }}</td>
+                <td class="font-jet">{{ row.current_point ?? '-' }}</td>
                 <td>
-                  <span :class="['badge', 'badge-' + getPercentileLevel(row.percentile)]">
+                  <span :class="['badge', 'badge-' + getPercentileLevel(row.percentile), 'font-jet']">
                     {{ row.percentile != null ? row.percentile + '%' : '-' }}
                   </span>
                 </td>
-                <td class="val-low">{{ row.opportunity_value ?? '-' }}</td>
-                <td>{{ row.median ?? '-' }}</td>
-                <td class="val-high">{{ row.danger_value ?? '-' }}</td>
-                <td>{{ row.zscore ?? '-' }}</td>
+                <td class="val-low font-jet">{{ row.opportunity_value ?? '-' }}</td>
+                <td class="font-jet">{{ row.median ?? '-' }}</td>
+                <td class="val-high font-jet">{{ row.danger_value ?? '-' }}</td>
+                <td class="font-jet">{{ row.zscore ?? '-' }}</td>
               </tr>
             </tbody>
           </table>
@@ -1116,23 +1116,23 @@ defineExpose({ loadHistory })
       </div>
 
       <!-- Latest Analysis Result -->
-      <div v-if="analysisResult && !analysisLoading" class="card analysis-result-card">
+      <div v-if="analysisResult && !analysisLoading" class="card analysis-result-card editorial-card">
         <div class="analysis-result-header">
-          <h3 class="card-title">分析报告</h3>
+          <h3 class="card-title editorial-title">分析报告</h3>
           <div class="analysis-meta">
-            <span class="meta-item">{{ analysisResult.agent_name }}</span>
-            <span v-if="analysisResult.token_usage" class="meta-item">{{ analysisResult.token_usage }} tokens</span>
-            <span class="meta-item">{{ formatAnalysisTime(analysisResult.created_at) }}</span>
+            <span class="meta-item terminal-label">{{ analysisResult.agent_name }}</span>
+            <span v-if="analysisResult.token_usage" class="meta-item terminal-label"><span class="font-jet">{{ analysisResult.token_usage }}</span> tokens</span>
+            <span class="meta-item terminal-label font-jet">{{ formatAnalysisTime(analysisResult.created_at) }}</span>
           </div>
         </div>
         <div class="analysis-content markdown-body" v-html="renderMarkdown(analysisResult.result)"></div>
       </div>
 
       <!-- History List -->
-      <div class="card">
-        <h3 class="card-title">
+      <div class="card editorial-card">
+        <h3 class="card-title editorial-title">
           分析历史
-          <span class="count-badge">{{ analysisHistory.length }} 条</span>
+          <span class="count-badge font-jet">{{ analysisHistory.length }} 条</span>
         </h3>
 
         <div v-if="historyLoading" class="loading-state">
@@ -1149,19 +1149,19 @@ defineExpose({ loadHistory })
         </div>
 
         <div v-else class="history-list">
-          <div v-for="item in analysisHistory" :key="item.id" class="history-item">
+          <div v-for="item in analysisHistory" :key="item.id" class="history-item reveal-stagger">
             <div class="history-item-main" @click="viewHistoryItem(item)">
               <div class="history-item-top">
-                <span class="history-date">{{ formatAnalysisTime(item.created_at) }}</span>
+                <span class="history-date font-jet">{{ formatAnalysisTime(item.created_at) }}</span>
                 <span class="history-index">{{ item.index_name || item.index_code }}</span>
-                <span v-if="item.agent_name" class="history-agent">{{ item.agent_name }}</span>
+                <span v-if="item.agent_name" class="history-agent terminal-label">{{ item.agent_name }}</span>
               </div>
               <div class="history-item-preview">
                 {{ (item.result || '').substring(0, 100) }}...
               </div>
             </div>
             <div class="history-item-actions">
-              <span v-if="item.token_usage" class="history-tokens">{{ item.token_usage }} tokens</span>
+              <span v-if="item.token_usage" class="history-tokens font-jet">{{ item.token_usage }} tokens</span>
               <button class="btn-icon btn-icon-danger" @click.stop="handleDeleteHistory(item.id)" title="删除">
                 <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/>
@@ -1182,9 +1182,9 @@ defineExpose({ loadHistory })
             </div>
             <div class="modal-meta-bar">
               <span>{{ viewingHistory.index_name || viewingHistory.index_code }}</span>
-              <span>{{ viewingHistory.agent_name }}</span>
-              <span v-if="viewingHistory.token_usage">{{ viewingHistory.token_usage }} tokens</span>
-              <span>{{ formatAnalysisTime(viewingHistory.created_at) }}</span>
+              <span class="terminal-label">{{ viewingHistory.agent_name }}</span>
+              <span v-if="viewingHistory.token_usage" class="font-jet">{{ viewingHistory.token_usage }} tokens</span>
+              <span class="font-jet">{{ formatAnalysisTime(viewingHistory.created_at) }}</span>
             </div>
             <div class="modal-body markdown-body" v-html="renderMarkdown(viewingHistory.result)"></div>
           </div>
@@ -1211,18 +1211,18 @@ defineExpose({ loadHistory })
 
       <template v-else>
         <!-- Toolbar: Date Selector + Summary -->
-        <div class="dd-toolbar card">
+        <div class="dd-toolbar card editorial-card">
           <div class="dd-toolbar-left">
-            <div class="dd-toolbar-title">螺丝钉指数估值</div>
+            <div class="dd-toolbar-title editorial-title">螺丝钉指数估值</div>
             <div class="dd-toolbar-meta">
-              <b>{{ ddIndexList.length }}</b> 个指数
+              <b class="font-jet">{{ ddIndexList.length }}</b> <span class="terminal-label">个指数</span>
               <span v-if="ddSelectedRecord?.market_temperature != null">
-                · 市场温度 <b>{{ ddSelectedRecord.market_temperature }}</b>
+                · <span class="terminal-label">市场温度</span> <span class="num-gold">{{ ddSelectedRecord.market_temperature }}</span>
               </span>
             </div>
           </div>
           <div class="dd-toolbar-right">
-            <select v-model="ddSelectedRecordId" class="dd-date-select" @change="onDDDateChange">
+            <select v-model="ddSelectedRecordId" class="dd-date-select font-jet" @change="onDDDateChange">
               <option v-for="r in ddRecords" :key="r.id" :value="r.id">
                 {{ r.update_date || r.created_at?.slice(0, 10) }}
               </option>
@@ -1231,7 +1231,7 @@ defineExpose({ loadHistory })
         </div>
 
         <!-- Search -->
-        <div class="card dd-search-card">
+        <div class="card dd-search-card editorial-card">
           <input
             v-model="ddSearchQuery"
             class="input-field"
@@ -1241,7 +1241,7 @@ defineExpose({ loadHistory })
         </div>
 
         <!-- Index List Table -->
-        <div class="card dd-index-table-card">
+        <div class="card dd-index-table-card editorial-card">
           <div v-if="ddDetailLoading" class="loading-state" style="padding:2rem">
             <div class="spinner-sm"></div>
             <span>加载中...</span>
@@ -1272,11 +1272,11 @@ defineExpose({ loadHistory })
               <tbody>
                 <tr v-for="(item, idx) in ddFilteredList" :key="idx">
                   <td class="td-name">{{ item.index_name || '-' }}</td>
-                  <td class="td-code">{{ item.index_code || '-' }}</td>
-                  <td class="td-val">{{ item.pe ?? '-' }}</td>
+                  <td class="td-code font-jet">{{ item.index_code || '-' }}</td>
+                  <td class="td-val font-jet">{{ item.pe ?? '-' }}</td>
                   <td>
                     <div v-if="item.pe_percentile != null" class="pe-percentile-cell">
-                      <span :class="['badge', ddPercentileClass(item.pe_percentile)]">
+                      <span :class="['badge', ddPercentileClass(item.pe_percentile), 'font-jet']">
                         {{ item.pe_percentile }}%
                       </span>
                       <div class="progress-bar-gradient" :class="ddProgressClass(item.pe_percentile)">
@@ -1285,10 +1285,10 @@ defineExpose({ loadHistory })
                     </div>
                     <span v-else>-</span>
                   </td>
-                  <td class="td-val">{{ item.pb ?? '-' }}</td>
+                  <td class="td-val font-jet">{{ item.pb ?? '-' }}</td>
                   <td>
                     <div v-if="item.pb_percentile != null" class="pe-percentile-cell">
-                      <span :class="['badge', ddPercentileClass(item.pb_percentile)]">
+                      <span :class="['badge', ddPercentileClass(item.pb_percentile), 'font-jet']">
                         {{ item.pb_percentile }}%
                       </span>
                       <div class="progress-bar-gradient" :class="ddProgressClass(item.pb_percentile)">
@@ -1297,8 +1297,8 @@ defineExpose({ loadHistory })
                     </div>
                     <span v-else>-</span>
                   </td>
-                  <td>{{ item.dividend_yield ?? '-' }}</td>
-                  <td>{{ item.roe ?? '-' }}</td>
+                  <td class="font-jet">{{ item.dividend_yield ?? '-' }}</td>
+                  <td class="font-jet">{{ item.roe ?? '-' }}</td>
                   <td>
                     <span v-if="item.valuation_status" :class="['dd-status', ddStatusClass(item.valuation_status)]">
                       {{ item.valuation_status }}
@@ -1331,29 +1331,29 @@ defineExpose({ loadHistory })
         <div v-else-if="superValueData">
           <div class="sv-header">
             <div class="sv-summary">
-              <span>扫描 {{ superValueData.total_scanned }} 个指数</span>
+              <span><span class="terminal-label">扫描</span> <span class="font-jet">{{ superValueData.total_scanned }}</span> <span class="terminal-label">个指数</span></span>
               <span>·</span>
-              <span>数据范围 {{ superValueData.data_range }}</span>
+              <span><span class="terminal-label">数据范围</span> <span class="font-jet">{{ superValueData.data_range }}</span></span>
               <span>·</span>
-              <span>{{ superValueData.scan_time }}</span>
+              <span class="font-jet">{{ superValueData.scan_time }}</span>
             </div>
           </div>
           <div v-if="superValueData.opportunities?.length" class="sv-list">
-            <div v-for="(item, i) in superValueData.opportunities" :key="item.index_code" class="sv-card">
-              <div class="sv-rank">#{{ i + 1 }}</div>
+            <div v-for="(item, i) in superValueData.opportunities" :key="item.index_code" class="sv-card editorial-card reveal-stagger">
+              <div class="sv-rank font-jet">#{{ i + 1 }}</div>
               <div class="sv-main">
                 <div class="sv-top">
-                  <span class="sv-name">{{ item.index_name }}</span>
-                  <span class="sv-score" :class="item.score >= 70 ? 'sv-score-high' : item.score >= 55 ? 'sv-score-mid' : ''">{{ item.score }}分</span>
+                  <span class="sv-name editorial-title">{{ item.index_name }}</span>
+                  <span class="sv-score font-jet" :class="item.score >= 70 ? 'sv-score-high' : item.score >= 55 ? 'sv-score-mid' : ''">{{ item.score }}分</span>
                   <span class="sv-level" :class="'sv-level-' + item.valuation_level">{{ item.valuation_level }}</span>
                 </div>
                 <div class="sv-metrics">
-                  <span>百分位 <b>{{ item.current_percentile }}%</b></span>
-                  <span v-if="item.current_value">· {{ item.current_value }}</span>
-                  <span v-if="item.zscore != null">· Z-score <b>{{ item.zscore }}</b></span>
-                  <span v-if="item.consecutive_drop_days > 0">· 连续下跌 <b>{{ item.consecutive_drop_days }}天</b></span>
-                  <span v-if="item.drop_7d > 0">· 7日跌 <b>{{ item.drop_7d }}%</b></span>
-                  <span class="sv-source">{{ item.data_source }} · {{ item.data_points }}天</span>
+                  <span><span class="terminal-label">百分位</span> <b class="font-jet">{{ item.current_percentile }}%</b></span>
+                  <span v-if="item.current_value">· <span class="font-jet">{{ item.current_value }}</span></span>
+                  <span v-if="item.zscore != null">· <span class="terminal-label">Z-score</span> <b class="font-jet">{{ item.zscore }}</b></span>
+                  <span v-if="item.consecutive_drop_days > 0">· <span class="terminal-label">连续下跌</span> <b class="font-jet">{{ item.consecutive_drop_days }}天</b></span>
+                  <span v-if="item.drop_7d > 0">· <span class="terminal-label">7日跌</span> <b class="font-jet">{{ item.drop_7d }}%</b></span>
+                  <span class="sv-source terminal-label">{{ item.data_source }} · {{ item.data_points }}天</span>
                 </div>
                 <div v-if="item.tags?.length" class="sv-tags">
                   <span v-for="tag in item.tags" :key="tag" class="sv-tag">{{ tag }}</span>
@@ -1362,11 +1362,11 @@ defineExpose({ loadHistory })
                 <!-- 打分明细 -->
                 <div v-if="item.score_breakdown" class="sv-breakdown">
                   <div v-for="(dim, key) in item.score_breakdown" :key="key" class="sv-breakdown-item">
-                    <span class="sv-breakdown-label">{{ breakdownLabels[key] }}</span>
+                    <span class="sv-breakdown-label terminal-label">{{ breakdownLabels[key] }}</span>
                     <div class="sv-breakdown-bar">
                       <div class="sv-breakdown-fill" :style="{ width: (dim.score / dim.max * 100) + '%' }"></div>
                     </div>
-                    <span class="sv-breakdown-score">{{ dim.score }}/{{ dim.max }}</span>
+                    <span class="sv-breakdown-score font-jet">{{ dim.score }}/{{ dim.max }}</span>
                     <span class="sv-breakdown-detail">{{ dim.detail }}</span>
                   </div>
                 </div>
@@ -1378,9 +1378,9 @@ defineExpose({ loadHistory })
           </div>
 
           <!-- 增强策略分析 -->
-          <div class="sv-strategy-section">
-            <div class="sv-strategy-header">
-              <h3><Icon name="brain" size="15" class="title-icon" /> 增强策略分析</h3>
+          <div class="sv-strategy-section editorial-card">
+            <div class="sv-strategy-header editorial-card-header">
+              <h3 class="title"><Icon name="brain" size="15" class="title-icon" /> 增强策略分析</h3>
               <button
                 v-if="!strategyData && !strategyLoading"
                 class="btn btn-primary btn-sm"
@@ -1396,16 +1396,16 @@ defineExpose({ loadHistory })
 
             <div v-else-if="strategyData">
               <div v-if="strategyData.agent_name || strategyData.token_usage" class="sv-strategy-meta">
-                <span v-if="strategyData.agent_name">{{ strategyData.agent_name }}</span>
-                <span v-if="strategyData.token_usage">· {{ strategyData.token_usage }} tokens</span>
+                <span v-if="strategyData.agent_name" class="terminal-label">{{ strategyData.agent_name }}</span>
+                <span v-if="strategyData.token_usage" class="terminal-label">· <span class="font-jet">{{ strategyData.token_usage }}</span> tokens</span>
               </div>
               <div v-if="strategyData.overall_summary" class="sv-strategy-summary">
                 {{ strategyData.overall_summary }}
               </div>
               <div class="sv-strategy-list">
-                <div v-for="s in strategyData.strategies" :key="s.index_code" class="sv-strategy-card">
+                <div v-for="s in strategyData.strategies" :key="s.index_code" class="sv-strategy-card editorial-card reveal-stagger">
                   <div class="sv-strategy-top">
-                    <span class="sv-strategy-name">{{ s.index_name }}</span>
+                    <span class="sv-strategy-name editorial-title">{{ s.index_name }}</span>
                     <span :class="['sv-action-badge', 'sv-action-' + (s.action || '').replace(/[立即买入分批建仓观望回避]/g, m => ({'立即买入':'buy','分批建仓':'buy','观望':'hold','回避':'avoid'}[m] || 'hold'))]">
                       {{ s.action }}
                     </span>
@@ -1421,24 +1421,24 @@ defineExpose({ loadHistory })
                     </div>
                     <div v-if="s.recommended_metric" class="sv-warning-item sv-warning-tip">
                       <Icon name="chart" size="13" class="sv-warning-icon" />
-                      <span>建议参考 <strong>{{ s.recommended_metric }}</strong> 百分位判断估值</span>
+                      <span>建议参考 <strong class="font-jet">{{ s.recommended_metric }}</strong> 百分位判断估值</span>
                     </div>
                     <div v-if="s.history_years && s.history_years < 5" class="sv-warning-item sv-warning-info">
                       <Icon name="calendar" size="13" class="sv-warning-icon" />
-                      <span>数据仅覆盖 {{ s.history_years }} 年，未经历完整牛熊周期</span>
+                      <span>数据仅覆盖 <span class="font-jet">{{ s.history_years }}</span> 年，未经历完整牛熊周期</span>
                     </div>
                   </div>
                   <div class="sv-strategy-detail">
                     <div v-if="s.recovery_time" class="sv-strategy-row">
-                      <span class="sv-strategy-label">预期恢复</span>
-                      <span>{{ s.recovery_time }}</span>
+                      <span class="sv-strategy-label terminal-label">预期恢复</span>
+                      <span class="font-jet">{{ s.recovery_time }}</span>
                     </div>
                     <div v-if="s.catalysts?.length" class="sv-strategy-row">
-                      <span class="sv-strategy-label">催化剂</span>
+                      <span class="sv-strategy-label terminal-label">催化剂</span>
                       <span>{{ s.catalysts.join('、') }}</span>
                     </div>
                     <div v-if="s.risk_factors?.length" class="sv-strategy-row">
-                      <span class="sv-strategy-label">风险</span>
+                      <span class="sv-strategy-label terminal-label">风险</span>
                       <span>{{ s.risk_factors.join('、') }}</span>
                     </div>
                     <div v-if="s.action_detail" class="sv-strategy-action">{{ s.action_detail }}</div>

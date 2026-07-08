@@ -1,12 +1,12 @@
 <template>
-  <div class="intel-page">
+  <div class="intel-page bg-mesh">
     <div class="page-header">
       <div>
-        <h2 class="page-title"><Icon name="fire" size="18" class="title-icon" /> 市场热点情报</h2>
+        <h2 class="page-title editorial-title-lg"><Icon name="fire" size="18" class="title-icon" /> 市场热点情报</h2>
         <p class="page-desc">基于新闻、时事、宏观环境，AI 推断热门板块与投资机会</p>
       </div>
       <div class="header-actions">
-        <span v-if="data?.fetched_at" class="data-time">{{ data.fetched_at }}</span>
+        <span v-if="data?.fetched_at" class="data-time font-jet">{{ data.fetched_at }}</span>
         <button class="btn-primary btn-ai-action" :disabled="loading" @click="loadData(true)">
           <svg class="icon-refresh" :class="{ spinning: loading }" width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
@@ -25,9 +25,9 @@
 
     <div v-else-if="data">
       <!-- 综合研判 -->
-      <div v-if="data.summary" class="card summary-card">
-        <div class="card-header">
-          <h3><Icon name="brain" size="15" class="title-icon" /> 综合研判</h3>
+      <div v-if="data.summary" class="card summary-card editorial-card reveal-stagger">
+        <div class="card-header editorial-card-header">
+          <h3 class="title"><Icon name="brain" size="15" class="title-icon" /> 综合研判</h3>
         </div>
         <p class="summary-text">{{ data.summary }}</p>
       </div>
@@ -35,22 +35,22 @@
       <!-- 主体：左侧板块排行 + 右侧详情 -->
       <div class="intel-main">
         <!-- 左侧：热门板块排行 -->
-        <div class="card sectors-panel">
-          <div class="card-header">
-            <h3><Icon name="fire" size="15" class="title-icon" /> 热门板块</h3>
+        <div class="card sectors-panel editorial-card reveal-stagger">
+          <div class="card-header editorial-card-header">
+            <h3 class="title"><Icon name="fire" size="15" class="title-icon" /> 热门板块</h3>
             <span class="badge">{{ data.sectors?.length || 0 }}</span>
           </div>
           <div v-if="data.sectors?.length" class="sector-list">
             <div
               v-for="(s, i) in data.sectors"
               :key="i"
-              class="sector-item"
+              class="sector-item reveal-stagger"
               :class="{ active: selectedSector === i }"
               @click="selectedSector = i"
             >
-              <span class="sector-rank" :class="'heat-' + (s.heat || 'low')">{{ i + 1 }}</span>
+              <span class="sector-rank font-jet" :class="'heat-' + (s.heat || 'low')">{{ i + 1 }}</span>
               <span class="sector-name">{{ s.name }}</span>
-              <span class="sector-id">#{{ i }}</span>
+              <span class="sector-id font-jet">#{{ i }}</span>
               <span class="sector-heat-tag" :class="'heat-' + (s.heat || 'low')">
                 <span :class="heatClass(s.heat)"></span>{{ heatLabel(s.heat) }}
               </span>
@@ -67,9 +67,9 @@
         </div>
 
         <!-- 右侧：选中板块详情 -->
-        <div v-if="activeSector" class="card detail-panel">
-          <div class="card-header">
-            <h3>{{ activeSector.name }} <span class="detail-heat" :class="'heat-' + (activeSector.heat || 'low')"><span :class="heatClass(activeSector.heat)"></span>{{ heatLabel(activeSector.heat) }}</span></h3>
+        <div v-if="activeSector" class="card detail-panel editorial-card reveal-stagger">
+          <div class="card-header editorial-card-header">
+            <h3 class="title">{{ activeSector.name }} <span class="detail-heat" :class="'heat-' + (activeSector.heat || 'low')"><span :class="heatClass(activeSector.heat)"></span>{{ heatLabel(activeSector.heat) }}</span></h3>
             <span class="detail-outlook" :class="'outlook-' + (activeSector.outlook || '').replace(/[利好利空中性]/g, m => outlookMap[m])">
               {{ activeSector.outlook || '' }}
             </span>
@@ -93,13 +93,14 @@
           <div class="detail-section">
             <h4><Icon name="chart" size="13" class="title-icon" /> 关联指数</h4>
             <div v-if="activeSector.related_indexes?.length" class="index-grid">
-              <div v-for="idx in activeSector.related_indexes" :key="idx.index_code" class="index-card">
+              <div v-for="idx in activeSector.related_indexes" :key="idx.index_code" class="index-card reveal-stagger">
                 <div class="index-name">{{ idx.index_name }}</div>
-                <div class="index-code">{{ idx.index_code }}</div>
+                <div class="index-code font-jet">{{ idx.index_code }}</div>
                 <div class="index-metric">
-                  <span>{{ idx.metric_type || 'PE' }}: {{ idx.current_value }}</span>
+                  <span class="terminal-label">{{ idx.metric_type || 'PE' }}</span>
+                  <span class="font-jet">{{ idx.current_value }}</span>
                 </div>
-                <div class="index-pct" :style="{ color: pctColor(idx.percentile) }">
+                <div class="index-pct font-jet-lg" :style="{ color: pctColor(idx.percentile) }">
                   百分位 {{ idx.percentile != null ? idx.percentile.toFixed(0) + '%' : 'N/A' }}
                 </div>
               </div>
@@ -111,11 +112,11 @@
           <div class="detail-section">
             <h4><Icon name="wallet" size="13" class="title-icon" /> 关联持仓</h4>
             <div v-if="activeSector.related_funds?.length" class="fund-list">
-              <div v-for="f in activeSector.related_funds" :key="f.fund_code" class="fund-item">
+              <div v-for="f in activeSector.related_funds" :key="f.fund_code" class="fund-item reveal-stagger">
                 <span class="fund-name">{{ f.fund_name }}</span>
-                <span class="fund-code">{{ f.fund_code }}</span>
+                <span class="fund-code font-jet">{{ f.fund_code }}</span>
                 <span class="fund-tag">已持仓</span>
-                <span v-if="f.profit_rate != null" class="fund-pct" :class="f.profit_rate >= 0 ? 'text-success' : 'text-danger'">
+                <span v-if="f.profit_rate != null" class="fund-pct font-jet" :class="f.profit_rate >= 0 ? 'text-success' : 'text-danger'">
                   {{ (f.profit_rate * 100).toFixed(1) }}%
                 </span>
               </div>
@@ -143,26 +144,26 @@
           </div>
         </div>
 
-        <div v-else class="card detail-panel empty-detail">
+        <div v-else class="card detail-panel empty-detail editorial-card">
           <p>← 点击左侧板块查看详情</p>
         </div>
       </div>
 
       <!-- 央视新闻 -->
-      <div v-if="data.cctv_news?.length" class="card cctv-card">
-        <div class="card-header">
-          <h3><Icon name="tv" size="15" class="title-icon" /> 央视新闻联播</h3>
+      <div v-if="data.cctv_news?.length" class="card cctv-card editorial-card reveal-stagger">
+        <div class="card-header editorial-card-header">
+          <h3 class="title"><Icon name="tv" size="15" class="title-icon" /> 央视新闻联播</h3>
           <span class="badge badge-cctv">{{ data.cctv_news.length }}条</span>
         </div>
         <div v-if="data.cctv_signal" class="cctv-signal">
-          <span class="signal-label">政策信号：</span>
-          <span class="signal-value" :class="outlookMap[data.cctv_signal] || 'neutral'">
+          <span class="signal-label terminal-label">政策信号：</span>
+          <span class="signal-value font-jet" :class="outlookMap[data.cctv_signal] || 'neutral'">
             {{ data.cctv_signal }}
           </span>
         </div>
         <div class="news-list">
-          <div v-for="(n, i) in data.cctv_news" :key="i" class="news-item cctv-item">
-            <span class="cctv-category">{{ n.category }}</span>
+          <div v-for="(n, i) in data.cctv_news" :key="i" class="news-item cctv-item reveal-stagger">
+            <span class="cctv-category terminal-label">{{ n.category }}</span>
             <span class="news-title">{{ n.title }}</span>
             <p class="news-summary">{{ n.summary?.slice(0, 120) }}{{ n.summary?.length > 120 ? '...' : '' }}</p>
           </div>
@@ -170,57 +171,57 @@
       </div>
 
       <!-- 今日要闻 -->
-      <div v-if="data.news?.length" class="card">
-        <div class="card-header">
-          <h3><Icon name="newspaper" size="15" class="title-icon" /> 今日要闻</h3>
+      <div v-if="data.news?.length" class="card news-card editorial-card reveal-stagger">
+        <div class="card-header editorial-card-header">
+          <h3 class="title"><Icon name="newspaper" size="15" class="title-icon" /> 今日要闻</h3>
           <span class="badge">{{ data.news.length }}</span>
         </div>
         <div class="news-list">
-          <div v-for="(n, i) in data.news" :key="i" class="news-item">
+          <div v-for="(n, i) in data.news" :key="i" class="news-item reveal-stagger">
             <a v-if="n.url" :href="n.url" target="_blank" rel="noopener" class="news-title">{{ n.title }}</a>
             <span v-else class="news-title">{{ n.title }}</span>
             <p class="news-summary">{{ n.summary?.slice(0, 120) }}{{ n.summary?.length > 120 ? '...' : '' }}</p>
             <div class="news-meta">
-              <span>{{ n.source }}</span>
-              <span v-if="n.date">{{ n.date?.slice(0, 10) }}</span>
+              <span class="terminal-label">{{ n.source }}</span>
+              <span v-if="n.date" class="font-jet">{{ n.date?.slice(0, 10) }}</span>
             </div>
           </div>
         </div>
       </div>
 
       <!-- 宏观环境 -->
-      <div v-if="data.macro" class="card">
-        <div class="card-header">
-          <h3><Icon name="chart" size="15" class="title-icon" /> 宏观环境</h3>
+      <div v-if="data.macro" class="card macro-card editorial-card reveal-stagger">
+        <div class="card-header editorial-card-header">
+          <h3 class="title"><Icon name="chart" size="15" class="title-icon" /> 宏观环境</h3>
         </div>
         <div class="macro-grid">
-          <div v-if="data.macro.bond?.temperature != null" class="macro-item">
-            <span class="macro-label">债券温度</span>
-            <span class="macro-value">{{ data.macro.bond.temperature }}°</span>
+          <div v-if="data.macro.bond?.temperature != null" class="macro-item reveal-stagger">
+            <span class="macro-label terminal-label">债券温度</span>
+            <span class="macro-value font-jet-lg">{{ data.macro.bond.temperature }}°</span>
           </div>
-          <div v-if="data.macro.bond?.rate" class="macro-item">
-            <span class="macro-label">十年期国债</span>
-            <span class="macro-value">{{ data.macro.bond.rate }}%</span>
+          <div v-if="data.macro.bond?.rate" class="macro-item reveal-stagger">
+            <span class="macro-label terminal-label">十年期国债</span>
+            <span class="macro-value font-jet-lg">{{ data.macro.bond.rate }}%</span>
           </div>
-          <div v-if="data.macro.policy?.lpr" class="macro-item">
-            <span class="macro-label">LPR (1Y/5Y)</span>
-            <span class="macro-value">{{ data.macro.policy.lpr['1y'] || '-' }} / {{ data.macro.policy.lpr['5y'] || '-' }}</span>
+          <div v-if="data.macro.policy?.lpr" class="macro-item reveal-stagger">
+            <span class="macro-label terminal-label">LPR (1Y/5Y)</span>
+            <span class="macro-value font-jet-lg">{{ data.macro.policy.lpr['1y'] || '-' }} / {{ data.macro.policy.lpr['5y'] || '-' }}</span>
           </div>
-          <div v-if="data.macro.policy?.cpi?.latest" class="macro-item">
-            <span class="macro-label">CPI</span>
-            <span class="macro-value">{{ data.macro.policy.cpi.latest }}%</span>
+          <div v-if="data.macro.policy?.cpi?.latest" class="macro-item reveal-stagger">
+            <span class="macro-label terminal-label">CPI</span>
+            <span class="macro-value font-jet-lg">{{ data.macro.policy.cpi.latest }}%</span>
           </div>
         </div>
       </div>
 
       <!-- 热门话题 -->
-      <div v-if="data.hot_topics?.length" class="card">
-        <div class="card-header">
-          <h3><Icon name="message-circle" size="15" class="title-icon" /> 热门话题</h3>
+      <div v-if="data.hot_topics?.length" class="card topics-card editorial-card reveal-stagger">
+        <div class="card-header editorial-card-header">
+          <h3 class="title"><Icon name="message-circle" size="15" class="title-icon" /> 热门话题</h3>
           <span class="badge">{{ data.hot_topics.length }}</span>
         </div>
         <div class="topics-list">
-          <div v-for="(t, i) in data.hot_topics" :key="i" class="topic-item">
+          <div v-for="(t, i) in data.hot_topics" :key="i" class="topic-item reveal-stagger">
             <span class="topic-title">{{ t.title }}</span>
             <span v-if="t.summary" class="topic-summary">{{ t.summary?.slice(0, 80) }}</span>
           </div>
@@ -381,7 +382,6 @@ h3 .title-icon, h4 .title-icon { margin-right: 0.3rem; vertical-align: middle; }
 
 .summary-card {
   padding: 1.25rem;
-  border-left: 3px solid var(--color-primary-500);
   transition: all var(--transition-fast);
 }
 .summary-card:hover {
@@ -462,7 +462,7 @@ h3 .title-icon, h4 .title-icon { margin-right: 0.3rem; vertical-align: middle; }
 .sector-id {
   font-size: 0.65rem;
   color: var(--color-primary);
-  font-family: monospace;
+  font-family: var(--font-mono-jet);
   opacity: 0.8;
 }
 
@@ -614,12 +614,15 @@ h3 .title-icon, h4 .title-icon { margin-right: 0.3rem; vertical-align: middle; }
 .index-code {
   font-size: 0.7rem;
   color: var(--color-primary);
-  font-family: monospace;
+  font-family: var(--font-mono-jet);
   margin-bottom: 0.25rem;
   opacity: 0.85;
 }
 
 .index-metric {
+  display: flex;
+  align-items: baseline;
+  gap: 0.35rem;
   font-size: 0.75rem;
   color: var(--color-text-muted);
 }
@@ -652,7 +655,7 @@ h3 .title-icon, h4 .title-icon { margin-right: 0.3rem; vertical-align: middle; }
 .fund-code {
   font-size: 0.7rem;
   color: var(--color-primary);
-  font-family: monospace;
+  font-family: var(--font-mono-jet);
   opacity: 0.85;
 }
 
@@ -799,7 +802,13 @@ h3 .title-icon, h4 .title-icon { margin-right: 0.3rem; vertical-align: middle; }
 /* ── 央视新闻 ── */
 
 .cctv-card {
-  border-left: 3px solid var(--color-danger);
+  padding: 1rem;
+}
+
+.news-card,
+.macro-card,
+.topics-card {
+  padding: 1rem;
 }
 
 .badge-cctv {
@@ -809,6 +818,9 @@ h3 .title-icon, h4 .title-icon { margin-right: 0.3rem; vertical-align: middle; }
 }
 
 .cctv-signal {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
   padding: 8px 12px;
   margin-bottom: 12px;
   border-radius: 6px;

@@ -321,14 +321,20 @@ onActivated(() => {
 </script>
 
 <template>
-  <div class="alert-center">
+  <div class="alert-center bg-mesh">
     <!-- 页头 -->
     <header class="ac-header">
       <div class="ac-header-left">
-        <h2 class="ac-title">🚨 风险与提示中心</h2>
+        <div class="ac-title-block">
+          <span class="terminal-label ac-eyebrow">RISK &amp; ALERT TERMINAL</span>
+          <h2 class="ac-title editorial-title-lg">风险与提示中心</h2>
+        </div>
         <span class="ac-stats">
-          未读预警 <strong :class="{ 'has-danger': dangerAlertCount > 0 }">{{ unreadAlertCount }}</strong>
-          · 待处理提示 <strong>{{ pendingAdviceCount }}</strong>
+          <span class="ac-stats-label">未读预警</span>
+          <strong class="font-jet" :class="{ 'has-danger': dangerAlertCount > 0 }">{{ unreadAlertCount }}</strong>
+          <span class="ac-stats-sep">·</span>
+          <span class="ac-stats-label">待处理提示</span>
+          <strong class="font-jet">{{ pendingAdviceCount }}</strong>
         </span>
       </div>
       <div class="ac-header-right">
@@ -350,31 +356,38 @@ onActivated(() => {
     <!-- Tab 切换 -->
     <div class="ac-tabs">
       <button :class="['ac-tab', { active: activeTab === 'advice' }]" @click="activeTab = 'advice'">
-        📋 今日持仓提示
-        <span v-if="pendingAdviceCount > 0" class="ac-tab-badge">{{ pendingAdviceCount }}</span>
+        <span class="ac-tab-label">今日持仓提示</span>
+        <span class="terminal-label ac-tab-eyebrow">ADVICE</span>
+        <span v-if="pendingAdviceCount > 0" class="ac-tab-badge font-jet">{{ pendingAdviceCount }}</span>
       </button>
       <button :class="['ac-tab', { active: activeTab === 'alerts' }]" @click="activeTab = 'alerts'">
-        ⚠️ 风险预警
-        <span v-if="unreadAlertCount > 0" class="ac-tab-badge danger">{{ unreadAlertCount }}</span>
+        <span class="ac-tab-label">风险预警</span>
+        <span class="terminal-label ac-tab-eyebrow">ALERTS</span>
+        <span v-if="unreadAlertCount > 0" class="ac-tab-badge danger font-jet">{{ unreadAlertCount }}</span>
       </button>
       <button :class="['ac-tab', { active: activeTab === 'merged' }]" @click="activeTab = 'merged'">
-        🔀 合并视图
+        <span class="ac-tab-label">合并视图</span>
+        <span class="terminal-label ac-tab-eyebrow">MERGED</span>
       </button>
     </div>
 
     <!-- 今日持仓提示 -->
-    <section v-if="activeTab === 'advice' || activeTab === 'merged'" class="daily-advice-section">
-      <div class="advice-header">
+    <section v-if="activeTab === 'advice' || activeTab === 'merged'" class="daily-advice-section editorial-card">
+      <div class="advice-header editorial-card-header">
         <div class="advice-header-left">
-          <h3 class="advice-title">📋 今日持仓提示</h3>
-          <span v-if="dailyAdvice?.generated_at" class="advice-time">更新于 {{ dailyAdvice.generated_at.slice(11, 16) }}</span>
+          <h3 class="advice-title title">今日持仓提示</h3>
+          <span v-if="dailyAdvice?.generated_at" class="advice-time">
+            更新于 <span class="font-jet">{{ dailyAdvice.generated_at.slice(11, 16) }}</span>
+          </span>
         </div>
         <div class="advice-header-right">
           <span v-if="dailyAdvice?.summary" class="advice-headline-badge" :class="adviceSummaryClass(dailyAdvice.summary.headline)">
             {{ dailyAdvice.summary.headline }}
           </span>
           <span v-if="dailyAdvice?.signals" class="advice-count-badge">
-            {{ dailyAdvice.signals.filter(s => s.severity === 'actionable').length }} 可行动 · {{ dailyAdvice.signals.filter(s => s.severity === 'watch').length }} 观察
+            <span class="font-jet">{{ dailyAdvice.signals.filter(s => s.severity === 'actionable').length }}</span> 可行动
+            <span class="ac-stats-sep">·</span>
+            <span class="font-jet">{{ dailyAdvice.signals.filter(s => s.severity === 'watch').length }}</span> 观察
           </span>
           <!-- P1-3.3 AI 综合解读按钮（LLM 默认关闭，用户主动触发） -->
           <button
@@ -383,7 +396,7 @@ onActivated(() => {
             @click="handleComprehensiveInterpretation"
             title="AI 综合解读今日全部信号（LLM 调用，需开启 llm_cost.daily_advice_ai_interpretation）"
           >
-            🤖 {{ comprehensiveLoading ? '解读中...' : 'AI 综合解读' }}
+            {{ comprehensiveLoading ? '解读中...' : 'AI 综合解读' }}
           </button>
         </div>
       </div>
@@ -399,10 +412,12 @@ onActivated(() => {
         <span>⚠ {{ comprehensiveError }}</span>
       </div>
       <div v-else-if="comprehensiveResult" class="comprehensive-result">
-        <div class="comprehensive-result-header">
-          <strong>🤖 AI 综合操作建议</strong>
+        <div class="comprehensive-result-header editorial-card-header">
+          <strong class="title">AI 综合操作建议</strong>
           <span v-if="comprehensiveResult.cached" class="cached-tag">缓存命中</span>
-          <span class="signal-count">基于 {{ comprehensiveResult.signal_count }} 条信号</span>
+          <span class="signal-count">
+            基于 <span class="font-jet">{{ comprehensiveResult.signal_count }}</span> 条信号
+          </span>
           <button class="btn-ghost btn-xs" @click="comprehensiveResult = null">✕</button>
         </div>
         <div class="comprehensive-text" v-html="renderMarkdown(comprehensiveResult.interpretation)"></div>
@@ -421,12 +436,12 @@ onActivated(() => {
         <div
           v-for="signal in dailyAdvice.signals"
           :key="signal.id"
-          :class="['advice-card', severityClass(signal.severity)]"
+          :class="['advice-card', 'reveal-stagger', severityClass(signal.severity)]"
         >
           <div class="advice-card-header">
             <div class="advice-card-title">
               <span class="advice-fund-name">{{ signal.fund_name || signal.target_name || '未知' }}</span>
-              <span class="advice-fund-code" v-if="signal.fund_code || signal.target_code">{{ signal.fund_code || signal.target_code }}</span>
+              <span class="advice-fund-code font-jet" v-if="signal.fund_code || signal.target_code">{{ signal.fund_code || signal.target_code }}</span>
             </div>
             <span class="advice-severity-tag" :class="severityClass(signal.severity)">{{ severityLabel(signal.severity) }}</span>
           </div>
@@ -438,23 +453,25 @@ onActivated(() => {
             </div>
 
             <div class="advice-amount" v-if="signal.suggested_amount">
-              建议金额: <strong>{{ formatAdviceAmount(signal.suggested_amount) }}</strong>
+              <span class="advice-amount-label">建议金额</span>
+              <strong class="font-jet-lg">{{ formatAdviceAmount(signal.suggested_amount) }}</strong>
             </div>
 
             <div class="advice-evidence" v-if="signal.evidence && signal.evidence.length">
-              <span class="advice-evidence-label">证据:</span>
+              <span class="advice-evidence-label">证据</span>
               <div class="advice-chips">
-                <span v-for="(ev, idx) in signal.evidence" :key="idx" class="advice-chip">{{ ev }}</span>
+                <span v-for="(ev, idx) in signal.evidence" :key="idx" class="advice-chip font-jet">{{ ev }}</span>
               </div>
             </div>
 
             <div class="advice-counter-risk" v-if="signal.counter_risk">
-              <span class="advice-counter-label">⚠ 反方风险:</span>
+              <span class="advice-counter-label">反方风险</span>
               <span class="advice-counter-text">{{ signal.counter_risk }}</span>
             </div>
 
             <div class="advice-blocked-reason" v-if="signal.severity === 'blocked' && signal.blocked_reason">
-              🚫 {{ signal.blocked_reason }}
+              <span class="advice-blocked-label">拦截</span>
+              {{ signal.blocked_reason }}
             </div>
           </div>
 
@@ -472,10 +489,10 @@ onActivated(() => {
 
           <div class="advice-card-actions" v-if="signal.severity !== 'blocked'">
             <button class="btn-primary btn-sm" :disabled="adviceActionLoading[signal.id]" @click="handleAdviceAction(signal.id, 'create-candidate')">
-              💾 保存为决策
+              保存为决策
             </button>
             <button class="btn-secondary btn-sm" :disabled="aiResponseMap[signal.id]?.loading || adviceActionLoading[signal.id]" @click="handleAdviceAction(signal.id, 'ask-ai')">
-              🤖 问 AI
+              问 AI
             </button>
             <button class="btn-ghost btn-sm" :disabled="adviceActionLoading[signal.id]" @click="handleAdviceAction(signal.id, 'ignore')">
               忽略
@@ -483,7 +500,7 @@ onActivated(() => {
           </div>
           <div class="advice-card-actions" v-else>
             <button class="btn-secondary btn-sm" :disabled="adviceActionLoading[signal.id]" @click="handleAdviceAction(signal.id, 'ask-ai')">
-              🤖 问 AI
+              问 AI
             </button>
           </div>
         </div>
@@ -496,14 +513,19 @@ onActivated(() => {
     </section>
 
     <!-- 风险预警 -->
-    <section v-if="activeTab === 'alerts' || activeTab === 'merged'" class="alert-panel">
-      <div class="alert-panel-header">
-        <svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+    <section v-if="activeTab === 'alerts' || activeTab === 'merged'" class="alert-panel editorial-card">
+      <div class="alert-panel-header editorial-card-header">
+        <svg class="title-icon" width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
         </svg>
-        <strong>风险预警</strong>
-        <span v-if="unreadAlertCount > 0" class="alert-badge has-unread">{{ unreadAlertCount }}</span>
-        <span v-if="dangerAlertCount > 0" class="danger-tag">🔴 {{ dangerAlertCount }} 条 danger</span>
+        <strong class="title">风险预警</strong>
+        <span v-if="unreadAlertCount > 0" class="alert-badge has-unread font-jet">{{ unreadAlertCount }}</span>
+        <span v-if="dangerAlertCount > 0" class="danger-tag">
+          <span class="terminal-label">DANGER</span>
+          <span class="font-jet">{{ dangerAlertCount }}</span>
+          条
+        </span>
+        <span class="terminal-label alert-panel-eyebrow">RISK FEED</span>
       </div>
 
       <div class="alert-list">
@@ -512,7 +534,7 @@ onActivated(() => {
           <span class="alert-empty-hint">点击「巡检」主动扫描持仓风险</span>
         </div>
 
-        <div v-for="a in sortedAlerts" :key="a.latest_id" :class="['alert-item', 'alert-' + a.severity]">
+        <div v-for="a in sortedAlerts" :key="a.latest_id" :class="['alert-item', 'reveal-stagger', 'alert-' + a.severity]">
           <div class="alert-icon">
             <svg v-if="a.severity === 'danger'" width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
@@ -527,11 +549,11 @@ onActivated(() => {
 
           <div class="alert-body">
             <div class="alert-title">
-              <span v-if="a.severity === 'danger'" class="severity-mark danger">🔴 DANGER</span>
-              <span v-else-if="a.severity === 'warning'" class="severity-mark warning">🟡 WARNING</span>
-              <span v-else class="severity-mark info">ℹ INFO</span>
+              <span v-if="a.severity === 'danger'" class="severity-mark danger terminal-label">DANGER</span>
+              <span v-else-if="a.severity === 'warning'" class="severity-mark warning terminal-label">WARNING</span>
+              <span v-else class="severity-mark info terminal-label">INFO</span>
               {{ a.title }}
-              <span v-if="a.cnt > 1" class="alert-count-badge">×{{ a.cnt }}</span>
+              <span v-if="a.cnt > 1" class="alert-count-badge font-jet">×{{ a.cnt }}</span>
             </div>
 
             <!-- info 级预警内容折叠（P1-3.1） -->
@@ -544,7 +566,7 @@ onActivated(() => {
             </div>
 
             <div class="alert-meta">
-              <span class="alert-type-badge">{{ a.alert_type }}</span>
+              <span class="alert-type-badge terminal-label">{{ a.alert_type }}</span>
               <span v-if="a.source === 'system_scan'" class="alert-source-badge scan">系统巡检</span>
               <span v-else-if="a.source === 'ai_analysis'" class="alert-source-badge ai">AI 对话</span>
               <span v-else-if="a.source === 'watchlist_patrol'" class="alert-source-badge ai">关注巡检</span>
@@ -557,14 +579,14 @@ onActivated(() => {
               >
                 可靠性: {{ a.reliability.label }}
                 <template v-if="a.reliability.win_rate !== null && a.reliability.win_rate !== undefined">
-                  ({{ a.reliability.win_rate }}% / {{ a.reliability.samples }}样本)
+                  (<span class="font-jet">{{ a.reliability.win_rate }}%</span> / <span class="font-jet">{{ a.reliability.samples }}</span>样本)
                 </template>
               </span>
               <!-- P0-1: 首次时间 + 最新时间 -->
-              <span v-if="a.cnt > 1 && a.first_at" class="alert-time" :title="`首次：${a.first_at}`">
+              <span v-if="a.cnt > 1 && a.first_at" class="alert-time font-jet" :title="`首次：${a.first_at}`">
                 {{ a.first_at?.slice(5, 10) }} ~ {{ a.latest_at?.slice(5, 10) }}
               </span>
-              <span v-else class="alert-time">{{ a.latest_at }}</span>
+              <span v-else class="alert-time font-jet">{{ a.latest_at }}</span>
             </div>
 
             <!-- P1-3.1 历史对比 -->
@@ -577,11 +599,11 @@ onActivated(() => {
                 <div v-else-if="alertHistoryMap[a.latest_id]?.error" class="history-error">{{ alertHistoryMap[a.latest_id].error }}</div>
                 <div v-else-if="alertHistoryMap[a.latest_id]?.history?.length">
                   <div class="history-summary">
-                    近30天共 <strong>{{ alertHistoryMap[a.latest_id].history.length }}</strong> 次同类预警
+                    近30天共 <strong class="font-jet">{{ alertHistoryMap[a.latest_id].history.length }}</strong> 次同类预警
                   </div>
                   <div v-for="h in alertHistoryMap[a.latest_id].history.slice(0, 5)" :key="h.id" class="history-item">
-                    <span :class="['history-sev', `sev-${h.severity}`]">{{ h.severity }}</span>
-                    <span class="history-time">{{ h.created_at }}</span>
+                    <span :class="['history-sev', 'terminal-label', `sev-${h.severity}`]">{{ h.severity }}</span>
+                    <span class="history-time font-jet">{{ h.created_at }}</span>
                     <span class="history-title">{{ h.title }}</span>
                   </div>
                 </div>
@@ -603,14 +625,14 @@ onActivated(() => {
 
             <!-- P1-3: 相关财经新闻（MCP 检索，受 alert.news_integration 开关控制） -->
             <div v-if="a.related_news && a.related_news.length" class="alert-news-section">
-              <div class="alert-news-label">📰 相关财经新闻</div>
+              <div class="alert-news-label">相关财经新闻</div>
               <div v-for="(n, idx) in a.related_news" :key="idx" class="alert-news-item">
                 <div class="alert-news-title-row">
                   <a v-if="n.news_url" :href="n.news_url" target="_blank" rel="noopener" class="alert-news-title">
                     {{ n.news_title }}
                   </a>
                   <span v-else class="alert-news-title">{{ n.news_title }}</span>
-                  <span class="alert-news-source" v-if="n.news_source">
+                  <span class="alert-news-source font-jet" v-if="n.news_source">
                     {{ n.news_source }}<template v-if="n.published_at"> · {{ n.published_at?.slice(5, 10) }}</template>
                   </span>
                 </div>
@@ -660,25 +682,45 @@ onActivated(() => {
 .ac-header-left {
   display: flex;
   align-items: center;
-  gap: 1rem;
+  gap: 1.25rem;
   flex-wrap: wrap;
+}
+.ac-title-block {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
 }
 .ac-title {
   margin: 0;
-  font-size: 1.1rem;
-  font-weight: 600;
   color: var(--color-text-primary);
 }
+.ac-eyebrow {
+  color: var(--color-text-muted);
+  opacity: 0.8;
+}
 .ac-stats {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.4rem;
   font-size: 0.82rem;
   color: var(--color-text-secondary);
+  flex-wrap: wrap;
+}
+.ac-stats-label {
+  font-size: 0.74rem;
+  color: var(--color-text-muted);
 }
 .ac-stats strong {
   color: var(--color-text-primary);
   font-weight: 700;
+  font-size: 0.95rem;
 }
 .ac-stats strong.has-danger {
   color: var(--color-loss);
+}
+.ac-stats-sep {
+  color: var(--color-text-muted);
+  opacity: 0.5;
 }
 .ac-header-right {
   display: flex;
@@ -702,8 +744,18 @@ onActivated(() => {
   border-bottom: 2px solid transparent;
   transition: all var(--transition-fast);
   display: inline-flex;
-  align-items: center;
+  align-items: baseline;
   gap: 0.4rem;
+}
+.ac-tab-label {
+  font-family: var(--font-serif);
+  letter-spacing: -0.01em;
+}
+.ac-tab-eyebrow {
+  opacity: 0.55;
+}
+.ac-tab.active .ac-tab-eyebrow {
+  opacity: 0.9;
 }
 .ac-tab:hover {
   color: var(--color-text-primary);
@@ -747,16 +799,18 @@ onActivated(() => {
 }
 .advice-header-left {
   display: flex;
-  align-items: center;
+  align-items: baseline;
   gap: 0.75rem;
+  flex-wrap: wrap;
 }
 .advice-title {
   margin: 0;
-  font-size: 1.05rem;
-  font-weight: 600;
   color: var(--color-text-primary);
 }
 .advice-time {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.3rem;
   font-size: 0.78rem;
   color: var(--color-text-muted);
 }
@@ -865,12 +919,19 @@ onActivated(() => {
   color: var(--color-text-secondary);
 }
 .advice-amount {
+  display: flex;
+  align-items: baseline;
+  gap: 0.4rem;
   font-size: 0.82rem;
   color: var(--color-text-secondary);
 }
+.advice-amount-label {
+  font-size: 0.72rem;
+  color: var(--color-text-muted);
+}
 .advice-amount strong {
   color: var(--color-profit);
-  font-size: 0.92rem;
+  font-size: 0.95rem;
 }
 .advice-evidence { display: flex; flex-direction: column; gap: 0.25rem; }
 .advice-evidence-label {
@@ -898,11 +959,20 @@ onActivated(() => {
 }
 .advice-counter-text { color: var(--color-text-secondary); }
 .advice-blocked-reason {
+  display: flex;
+  align-items: baseline;
+  gap: 0.4rem;
   font-size: 0.78rem;
   color: #991b1b;
   background: rgba(220, 38, 38, 0.08);
   padding: 0.4rem 0.6rem;
   border-radius: 6px;
+}
+.advice-blocked-label {
+  font-size: 0.68rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  opacity: 0.85;
 }
 .advice-ai-response {
   margin-top: 0.5rem;
@@ -971,7 +1041,7 @@ onActivated(() => {
 }
 .comprehensive-result-header {
   display: flex;
-  align-items: center;
+  align-items: baseline;
   gap: 0.5rem;
   margin-bottom: 0.5rem;
   flex-wrap: wrap;
@@ -989,6 +1059,9 @@ onActivated(() => {
   font-weight: 500;
 }
 .signal-count {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.25rem;
   font-size: 0.72rem;
   color: var(--color-text-muted);
   flex: 1;
@@ -1022,6 +1095,15 @@ onActivated(() => {
   font-size: 0.85rem;
   font-weight: 600;
   border-bottom: 1px solid var(--color-border);
+  margin-bottom: 0;
+}
+.alert-panel-eyebrow {
+  margin-left: auto;
+  opacity: 0.55;
+}
+.title-icon {
+  color: var(--color-text-muted);
+  flex-shrink: 0;
 }
 .alert-list {
   display: flex;
@@ -1143,6 +1225,9 @@ onActivated(() => {
   border-radius: 10px;
 }
 .danger-tag {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.3rem;
   font-size: 0.72rem;
   color: var(--color-loss);
   font-weight: 600;

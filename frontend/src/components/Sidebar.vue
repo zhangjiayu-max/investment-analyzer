@@ -85,10 +85,10 @@ const activeGroup = computed(() => {
   <aside class="sidebar">
     <!-- Logo -->
     <div class="sidebar-logo">
-      <div class="logo-icon">IA</div>
+      <div class="logo-icon font-jet">IA</div>
       <div class="logo-text">
-        <span class="logo-title">投资分析助手</span>
-        <span class="logo-sub">Investment Analyzer</span>
+        <span class="logo-title editorial-title">投资分析助手</span>
+        <span class="logo-sub terminal-label">Investment Analyzer</span>
       </div>
     </div>
 
@@ -134,8 +134,8 @@ const activeGroup = computed(() => {
     <div class="token-meter" :class="`token-${tokenMode}`">
       <div class="token-meter-header">
         <Icon name="evolution" size="16" class="token-meter-icon" />
-        <span class="token-meter-label">今日 Token</span>
-        <span class="token-meter-value">{{ tokenLabel }}</span>
+        <span class="token-meter-label terminal-label">今日 Token</span>
+        <span class="token-meter-value font-jet">{{ tokenLabel }}</span>
       </div>
       <div class="token-bar-track">
         <div class="token-bar-fill" :style="{ width: tokenPct + '%' }"></div>
@@ -217,15 +217,12 @@ const activeGroup = computed(() => {
 
 .logo-title {
   font-size: 0.82rem;
-  font-weight: 600;
   color: var(--color-text-primary);
   line-height: 1.2;
 }
 
 .logo-sub {
-  font-size: 0.62rem;
   color: var(--color-text-muted);
-  letter-spacing: 0.02em;
 }
 
 .sidebar-nav {
@@ -269,8 +266,9 @@ const activeGroup = computed(() => {
   top: 25%;
   bottom: 25%;
   width: 3px;
-  background: var(--color-primary);
+  background: linear-gradient(180deg, var(--color-gold) 0%, var(--color-primary) 100%);
   border-radius: 0 2px 2px 0;
+  opacity: 0.85;
 }
 .dark .nav-item.active {
   background: var(--color-primary-bg);
@@ -364,8 +362,8 @@ const activeGroup = computed(() => {
 }
 
 .token-meter-icon { width: 13px; height: 13px; color: var(--color-text-muted); flex-shrink: 0; }
-.token-meter-label { font-size: 0.68rem; color: var(--color-text-muted); flex: 1; }
-.token-meter-value { font-size: 0.68rem; font-weight: 600; color: var(--color-text-secondary); font-variant-numeric: tabular-nums; }
+.token-meter-label { color: var(--color-text-muted); flex: 1; }
+.token-meter-value { font-size: 0.68rem; font-weight: 600; color: var(--color-text-secondary); }
 
 .token-bar-track {
   height: 5px;
