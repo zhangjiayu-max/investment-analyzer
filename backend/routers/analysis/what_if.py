@@ -1,4 +1,7 @@
-"""情景推演 — POST /api/portfolio/analysis/what-if"""
+"""情景推演 — POST /api/portfolio/analysis/what-if
+
+已合并到 risk_assessor 专家。保留路由用于前端/历史兼容，内部委托 run_specialist("risk_assessor", ...)。
+"""
 import asyncio
 import json
 import logging
@@ -6,29 +9,22 @@ import logging
 from fastapi import APIRouter, HTTPException
 
 from db import (
-    list_holdings, get_analysis_agent,
+    list_holdings,
     create_portfolio_analysis_record,
 )
-from db.config import get_config_int, get_config_float
 from models.portfolio import WhatIfRequest
 from ._shared import _get_valuation_context
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["analysis-what-if"])
 
-_background_tasks: set = set()
-
 
 @router.post("/api/portfolio/analysis/what-if")
 async def what_if_analysis_api(req: WhatIfRequest):
-    """模式 4：情景推演 — 模拟不同市场情景下的组合变化。"""
+    """模式 4：情景推演 — 已合并到 risk_assessor 专家。"""
     holdings = list_holdings()
     if not holdings:
         raise HTTPException(400, "暂无持仓数据")
-
-    agent = get_analysis_agent(6)
-    if not agent:
-        raise HTTPException(404, "情景推演分析师未配置")
 
     # 持仓数据
     total_value = sum(h.get('current_value', 0) or 0 for h in holdings)
@@ -59,19 +55,12 @@ async def what_if_analysis_api(req: WhatIfRequest):
     )
 
     try:
-        from services.llm_service import _call_llm, MODEL
-        response = await asyncio.to_thread(lambda: _call_llm(
-            caller="portfolio_whatif",
-            model=MODEL,
-            messages=[
-                {"role": "system", "content": agent["system_prompt"]},
-                {"role": "user", "content": user_content},
-            ],
-            temperature=get_config_float('llm.temperature_analysis', 0.3),
-            max_tokens=get_config_int('llm.max_tokens_analysis', 8192),
-        ))
-        result_text = response.choices[0].message.content or ""
-        tokens = response.usage.total_tokens if response.usage else 0
+        from agent.multi_agent import run_specialist
+        specialist_result = await asyncio.to_thread(
+            run_specialist, "risk_assessor", user_content
+        )
+        result_text = specialist_result.get("analysis", "") or ""
+        tokens = specialist_result.get("tokens_used", 0) or 0
     except Exception as e:
         logger.error(f"情景推演失败: {e}")
         raise HTTPException(500, f"AI 分析失败: {str(e)}")
@@ -85,7 +74,7 @@ async def what_if_analysis_api(req: WhatIfRequest):
         agent_id=6,
     )
 
-    return {"id": record_id, "result": result_text, "token_usage": tokens}
+    return {"id": record_id, "result": result_text, "token_usage": tokens, "merged_into": "risk_assessor"}
 
 
 @router.get("/api/portfolio/analysis/what-if/records")

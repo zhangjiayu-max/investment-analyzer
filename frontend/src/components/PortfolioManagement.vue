@@ -1262,7 +1262,7 @@ const aiAnalysisRecords = ref([])
 const aiShowHistory = ref(false)
 
 // ── 四模式状态 ──
-const aiMode = ref('panorama')  // 'panorama' | 'deepdive' | 'trade-review' | 'what-if'
+const aiMode = ref('panorama')  // 'panorama' | 'deepdive' | 'trade-review' | ...
 const modeLoading = ref(false)
 const modeResult = ref('')
 const modeRecordId = ref(null)
@@ -1623,7 +1623,6 @@ const aiModes = [
   { key: 'rolling', icon: '📈', label: '滚动收益' },
   { key: 'four-pots', icon: '🪣', label: '四笔钱' },
   { key: 'dca', icon: '🔄', label: '定投优化' },
-  { key: 'what-if', icon: '🎯', label: '情景推演' },
 ]
 
 function switchAiMode(mode) {

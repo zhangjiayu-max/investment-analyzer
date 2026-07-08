@@ -1,7 +1,6 @@
 <script setup>
 import { _cmpTemp } from '../../composables/useDashboardHelpers'
 import Icon from '../ui/Icon.vue'
-import AIActionButton from '../ui/AIActionButton.vue'
 
 const ALERT_ICON_MAP = { warning: 'warning', info: 'info', opportunity: 'lightbulb' }
 
@@ -26,16 +25,6 @@ const emit = defineEmits(['bond-recommend'])
       </div>
       <div class="card-header-actions">
         <span v-if="cashManagement" class="card-data-time meta terminal-label">{{ cashUpdatedAt || '' }}</span>
-        <AIActionButton
-          v-if="cashManagement?.balance > 0"
-          :label="bondResult ? '重新分析' : 'AI 债券推荐'"
-          agent="债券配置顾问"
-          icon="coins"
-          variant="soft"
-          size="sm"
-          :loading="bondLoading"
-          @click="emit('bond-recommend')"
-        />
       </div>
     </div>
     <div class="card-body">

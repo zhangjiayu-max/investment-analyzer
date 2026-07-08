@@ -431,14 +431,12 @@ def build_conversation_context(
 # 未列出的 agent_key 不过滤（保留全部上下文，如 arbitrator）
 CONTEXT_FILTERS: dict[str, list[str]] = {
     "risk_assessor":        ["持仓", "估值", "债市", "结构化数据"],
-    "behavior_coach":       ["持仓", "热点", "结构化数据"],
     "valuation_expert":     ["持仓", "估值", "结构化数据"],
     "allocation_advisor":   ["持仓", "估值", "知识库", "结构化数据"],
     "market_analyst":       ["估值", "热点", "知识库", "结构化数据"],
     "fund_analyst":         ["持仓", "知识库", "结构化数据"],
     "macro_strategist":     ["估值", "热点", "知识库", "债市"],
     "article_expert":       ["知识库", "结构化数据"],
-    "wealth_advisor":       ["持仓", "估值", "知识库", "结构化数据"],
 }
 
 # section 优先级（同列表内越靠前越重要，预算紧张时先保留）

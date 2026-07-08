@@ -1,4 +1,7 @@
-"""债券 AI 推荐 — 从 bond.py 提取"""
+"""债券 AI 推荐 — 从 bond.py 提取
+
+已合并到 allocation_advisor 专家。保留路由用于前端/历史兼容，内部委托 run_specialist("allocation_advisor", ...)。
+"""
 import asyncio
 import json
 import logging
@@ -7,11 +10,9 @@ import time
 
 from fastapi import APIRouter
 
-from db.config import get_config_int
 from db import (
-    list_holdings, get_total_cash_balance, get_analysis_agent,
+    list_holdings, get_total_cash_balance,
     create_portfolio_analysis_record, list_portfolio_analysis_records,
-    DEFAULT_BOND_PROMPT,
     create_async_task, update_async_task,
     save_analysis_conclusion,
 )
@@ -209,9 +210,6 @@ async def _do_bond_recommend():
     except Exception:
         pass
 
-    agent = get_analysis_agent(8)
-    system_prompt = agent["system_prompt"] if agent else DEFAULT_BOND_PROMPT
-
     context_lines = [
         f"## 债市温度历史（近90天）\n{json_mod.dumps(bond_history, ensure_ascii=False, indent=2)}",
         f"## 收益率曲线\n{json_mod.dumps(yield_curve, ensure_ascii=False, indent=2)}",
@@ -230,18 +228,23 @@ async def _do_bond_recommend():
 
     combined_input += "\n\n".join(context_lines)
 
-    # 9. 调用 LLM
+    # 9. 调用 allocation_advisor 专家（已合并）
     uid = f"bond_{int(time.time())}"
-    track_agent(uid, "债券配置顾问", "债券配置推荐")
+    track_agent(uid, "资产配置顾问", "债券配置推荐")
     try:
-        from services.llm_service import chat_with_agent
-        result = chat_with_agent(system_prompt, [{"role": "user", "content": combined_input}], max_tokens=get_config_int('llm.max_tokens_analysis', 8000))
-        logging.info(f"[bond_ai_recommend] LLM result length: {len(result) if result else 0}, type: {type(result)}")
+        from agent.multi_agent import run_specialist
+        specialist_result = run_specialist(
+            "allocation_advisor",
+            "请基于以下数据给出债券配置建议",
+            context=combined_input,
+        )
+        result = specialist_result.get("analysis", "") or ""
+        logging.info(f"[bond_ai_recommend] specialist result length: {len(result)}, status: {specialist_result.get('status')}")
         if not result:
-            logging.warning("[bond_ai_recommend] LLM returned empty/None result")
+            logging.warning("[bond_ai_recommend] specialist returned empty result")
             result = ""
     except Exception as e:
-        logging.error(f"[bond_ai_recommend] LLM call failed: {e}")
+        logging.error(f"[bond_ai_recommend] run_specialist failed: {e}")
         result = ""
     finally:
         untrack_agent(uid)
@@ -304,7 +307,7 @@ async def _do_bond_recommend():
     except Exception as e:
         logging.warning(f"[bond_ai_recommend] 结论保存失败: {e}")
 
-    return {"ok": True, "result": parsed}
+    return {"ok": True, "result": parsed, "merged_into": "allocation_advisor"}
 
 
 @router.get("/api/bond/ai-recommend/records")

@@ -22,14 +22,10 @@ class AgentRole(str, Enum):
     ANALYST = "analyst"       # 分析型专家
     ADVISOR = "advisor"       # 建议型专家（理财顾问）
     REVIEWER = "reviewer"     # 审阅型专家（反方观点、交叉审阅）
-    ARBITRATOR = "arbitrator" # 仲裁法官
 
 
 # agent_key → AgentRole 映射
 ROLE_MAP = {
-    "wealth_advisor": "advisor",
-    "behavior_coach": "advisor",
-    "counter_argument": "reviewer",
     "valuation_analyst": "analyst",
     "risk_assessor": "analyst",
     "market_analyst": "analyst",

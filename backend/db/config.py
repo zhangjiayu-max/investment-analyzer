@@ -114,7 +114,6 @@ DEFAULT_CONFIGS = [
     ('cost_routing.enabled', 'true', '是否启用成本路由', 'cost_routing'),
     ('cost_routing.conservative_model', 'mimo-v2.5-pro', '保守模式统一模型', 'cost_routing'),
     ('cost_routing.orchestrator_model', 'mimo-v2.5-pro', '编排器模型', 'cost_routing'),
-    ('cost_routing.arbitrator_model', 'deepseek-v4-pro', '仲裁模型（硬约束：必须 deepseek）', 'cost_routing'),
     ('cost_routing.valuation_expert_model', 'mimo-v2.5-pro', '估值专家模型', 'cost_routing'),
     ('cost_routing.allocation_advisor_model', 'mimo-v2.5-pro', '配置专家模型', 'cost_routing'),
     ('cost_routing.fund_analyst_model', 'mimo-v2.5-pro', '基金分析模型', 'cost_routing'),

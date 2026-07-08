@@ -19,15 +19,13 @@ _KEYWORD_ROUTES = [
     (["估值", "PE", "PB", "百分位", "低估", "高估"], ["valuation_expert"]),
     (["风险", "回撤", "止损", "亏损", "最大回撤"], ["risk_assessor"]),
     (["配置", "仓位", "股债", "比例", "再平衡"], ["allocation_advisor"]),
-    (["持仓", "分散", "穿透", "集中度"], ["allocation_advisor", "wealth_advisor"]),
+    (["持仓", "分散", "穿透", "集中度"], ["allocation_advisor"]),
     (["市场", "大盘", "行情", "走势", "牛市", "熊市"], ["market_analyst"]),
     (["诊断", "体检", "检查", "全面"], ["valuation_expert", "risk_assessor", "allocation_advisor"]),
     (["买", "卖", "操作", "定投", "止盈", "加仓", "减仓"], ["allocation_advisor", "risk_assessor", "valuation_expert"]),
     (["文章", "公众号", "解读", "新闻"], ["article_expert"]),
     (["基金", "选基", "基金分析"], ["fund_analyst"]),
-    (["行为", "情绪", "心理"], ["behavior_coach"]),
     (["宏观", "经济", "利率", "政策"], ["macro_strategist"]),
-    (["反方", "质疑", "风险另一面"], ["counter_argument"]),
 ]
 
 _HIGH_RISK_ACTION_KEYWORDS = [
@@ -84,18 +82,18 @@ class SmartRouter:
             if any(kw in query for kw in keywords):
                 specialists.update(agents)
         if _is_high_risk_action(query):
-            specialists.update(["risk_assessor", "behavior_coach", "counter_argument"])
+            specialists.update(["risk_assessor"])
         if not specialists:
             return None
 
-        # 限制最大专家数为 3；高风险行动优先保留风控/行为/反方三角。
+        # 限制最大专家数为 3；高风险行动优先保留风控专家。
         specialists_list = list(specialists)
         if len(specialists_list) > 3:
             if _is_high_risk_action(query):
                 priority_order = [
-                    "risk_assessor", "behavior_coach", "counter_argument",
+                    "risk_assessor",
                     "valuation_expert", "allocation_advisor", "market_analyst",
-                    "macro_strategist", "wealth_advisor", "fund_analyst",
+                    "macro_strategist", "fund_analyst",
                     "article_expert",
                 ]
                 priority = {agent_key: i for i, agent_key in enumerate(priority_order)}

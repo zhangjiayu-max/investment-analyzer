@@ -11,7 +11,7 @@ import hashlib
 from datetime import datetime
 
 from services.llm_service import client, MODEL, _call_llm, _parse_tool_args
-from agent.multi_agent import run_specialist, run_specialist_with_context, run_cross_review_opinion, run_arbitration, _build_portfolio_summary
+from agent.multi_agent import run_specialist, run_specialist_with_context, run_cross_review_opinion, _build_portfolio_summary
 from db.agents import (
     load_specialist_agents,
     create_pending_agent_run,
@@ -19,7 +19,6 @@ from db.agents import (
     get_completed_agents_for_message,
     cancel_running_agents,
 )
-from config import ARBITRATION_API_KEY
 from db.config import get_config, get_config_int, get_config_float
 from agent.orchestrator_optimizer import OrchestratorOptimizer, ParallelExecutor
 from agent.cache import expert_cache
@@ -97,12 +96,6 @@ DYNAMIC_SPAWN_RULES = [
         "priority": "high",
     },
     {
-        "detect": lambda result: result.get("confidence", 1.0) < 0.6,
-        "suggest": "behavior_coach",
-        "reason": "分析置信度较低,建议从行为金融角度补充",
-        "priority": "medium",
-    },
-    {
         "detect": lambda result: any(kw in result.get("analysis", "") for kw in ["港股", "美股", "QDII", "纳斯达克", "标普"] ),
         "suggest": "market_analyst",
         "reason": "涉及海外市场,建议追加市场分析",
@@ -145,7 +138,7 @@ SOP_TEMPLATES = {
             {"agent": "valuation_expert", "task": "逐只评估持仓估值水位", "order": 1, "group": 0},
             {"agent": "risk_assessor", "task": "基于估值识别主要风险暴露", "order": 1, "group": 0},
             {"agent": "allocation_advisor", "task": "综合估值和风险评估配置合理性", "order": 2, "group": 1},
-            {"agent": "behavior_coach", "task": "从行为金融角度审视操作偏差", "order": 2, "group": 1},
+            {"agent": "risk_assessor", "task": "从行为金融角度审视操作偏差", "order": 2, "group": 1},
         ],
         "cross_review": True,
         "arbitration": True,
@@ -169,11 +162,11 @@ SOP_TEMPLATES = {
         "steps": [
             {"agent": "valuation_expert", "task": "判断当前估值是否过高", "order": 1, "group": 0},
             {"agent": "risk_assessor", "task": "评估持有风险vs卖出机会成本", "order": 1, "group": 0},
-            {"agent": "behavior_coach", "task": "检查是否情绪化决策", "order": 2, "group": 1},
+            {"agent": "risk_assessor", "task": "检查是否情绪化决策", "order": 2, "group": 1},
         ],
         "cross_review": True,
         "arbitration": True,
-        "final_agent": "behavior_coach",
+        "final_agent": "risk_assessor",
     },
     "dca_plan": {
         "name": "定投方案设计",
@@ -221,9 +214,7 @@ _AGENT_MODEL_MAP_DEEPSEEK = {
     "fund_analyst": "deepseek-v4-flash",
     "risk_assessor": "deepseek-v4-pro",
     "market_analyst": "deepseek-v4-flash",
-    "behavior_coach": "deepseek-v4-pro",
     "orchestrator": "deepseek-v4-pro",
-    "arbitrator": "deepseek-v4-pro",
     "cross_review": "deepseek-v4-flash",
 }
 
@@ -234,9 +225,7 @@ _AGENT_MODEL_MAP_MIMO = {
     "fund_analyst": "mimo-v2.5-pro",
     "risk_assessor": "mimo-v2.5-pro",
     "market_analyst": "deepseek-v4-flash",
-    "behavior_coach": "mimo-v2.5-pro",
     "orchestrator": "mimo-v2.5-pro",
-    "arbitrator": "mimo-v2.5-pro",
     "cross_review": "mimo-v2.5-pro",
 }
 
@@ -917,56 +906,6 @@ def should_run_cross_review(
         return False
 
     return not OrchestratorOptimizer.should_skip_cross_review(specialist_results, complexity)
-
-
-def should_arbitrate(complexity: str, specialist_results: list, conflicts: dict = None) -> bool:
-    """判断是否需要仲裁 Agent 介入。
-
-    条件(从 orchestration_config 读取):
-    - arbitration_enabled == "true"
-    - ARBITRATION_API_KEY 已配置
-    - complexity >= arbitration_complexity（但实际检测到 medium+ 冲突时不受此限制）
-    - ≥2 个专家参与分析
-    - 存在实质性冲突（当 conflicts 传入时）
-    """
-    if OrchestratorOptimizer.should_skip_arbitration(specialist_results, complexity):
-        return False
-
-    if get_orchestration_config("arbitration_enabled", "true") != "true":
-        return False
-    if not ARBITRATION_API_KEY:
-        return False
-    min_complexity = get_orchestration_config("arbitration_complexity", "complex")
-    complexity_order = {"simple": 0, "medium": 1, "complex": 2}
-    if complexity_order.get(complexity, 0) < complexity_order.get(min_complexity, 2):
-        # complexity 不够，但如果有实际冲突，仍然可以仲裁
-        if not (conflicts and conflicts.get("detected") and conflicts.get("severity") in ("medium", "high")):
-            return False
-        logger.info(f"仲裁: complexity={complexity}<{min_complexity}，但检测到 {conflicts.get('severity')} 冲突 → 仍执行仲裁")
-    if len([sr for sr in specialist_results if not sr.get("is_cross_review")]) < 2:
-        return False
-    # 无方向冲突时不仲裁，节省成本
-    if conflicts and not conflicts.get("detected"):
-        logger.info("专家无方向冲突，跳过仲裁")
-        return False
-    # severity 分级：complex 场景 medium+ 即仲裁，其余只 high 仲裁
-    # 但如果已经突破了上面的 complexity 门槛检查（即有实际 medium+ 冲突），
-    # 这里也放行，确保三阶段流程完整
-    if conflicts:
-        severity = conflicts.get("severity", "low")
-        min_sev_for_complex = get_orchestration_config("arbitration_min_severity_complex", "medium")
-        min_sev_default = get_orchestration_config("arbitration_min_severity", "high")
-        required_sev = min_sev_for_complex if complexity == "complex" else min_sev_default
-        severity_order = {"low": 0, "medium": 1, "high": 2}
-        if severity_order.get(severity, 0) < severity_order.get(required_sev, 2):
-            # 如果冲突 severity 达到 medium，且上面已经因实际冲突突破了 complexity 门槛，
-            # 则使用 medium 作为最低要求
-            if severity == "medium" and complexity not in ("simple", "chat"):
-                logger.info(f"仲裁: severity=medium 达到仲裁门槛（complexity={complexity}），执行仲裁")
-            else:
-                logger.info(f"冲突 severity={severity} < {required_sev}（complexity={complexity}），跳过仲裁")
-                return False
-    return True
 
 
 # ── 冲突检测:专家评级方向冲突 ──────────────────────────────────
@@ -1849,14 +1788,6 @@ def route_to_specialists_by_keywords(query: str, complexity: str = "complex") ->
     if any(kw in query for kw in risk_keywords):
         specialists.append("risk_assessor")
 
-    # 行为偏差关键词 → 行为金融辅导师
-    behavior_keywords = [
-        "追涨", "杀跌", "恐慌", "很慌", "焦虑", "忍不住", "冲动",
-        "补亏", "回本", "重仓", "满仓", "梭哈", "频繁交易", "踏空",
-    ]
-    if any(kw in query for kw in behavior_keywords):
-        specialists.append("behavior_coach")
-
     # 债券相关关键词 → 市场分析师 + 资产配置师
     bond_keywords = ["债券", "债市", "国债", "利率债", "信用债", "可转债", "收益率",
                      "久期", "债券基金", "短债", "长债", "纯债", "债基",
@@ -1879,19 +1810,14 @@ def route_to_specialists_by_keywords(query: str, complexity: str = "complex") ->
         if "allocation_advisor" not in specialists:
             specialists.append("allocation_advisor")
 
-    # 高风险行动建议 → 反方观点审查员,必要时补风险评估和行为教练
+    # 高风险行动建议 → 必要时补风险评估
     action_keywords = [
         "买入", "加仓", "建仓", "卖出", "减仓", "清仓", "追涨", "重仓",
         "满仓", "梭哈", "可以买吗", "要不要买", "要不要卖",
     ]
     if any(kw in query for kw in action_keywords):
-        if "counter_argument" not in specialists:
-            specialists.append("counter_argument")
         if "risk_assessor" not in specialists:
             specialists.append("risk_assessor")
-    if any(kw in query for kw in ["追涨", "杀跌", "恐慌", "很慌", "重仓", "满仓", "梭哈", "冲动"]):
-        if "behavior_coach" not in specialists:
-            specialists.append("behavior_coach")
 
     # 基金分析关键词 → 基金分析师
     fund_analysis_keywords = ["操作记录", "交易记录", "基金分析", "基金表现", "复盘",
@@ -1915,7 +1841,7 @@ def route_to_specialists_by_keywords(query: str, complexity: str = "complex") ->
     if len(specialists) > max_allowed:
         # 统一优先级排序：高优先级在前，低优先级在后，其余中间
         HIGH_PRIORITY = ["valuation_expert", "allocation_advisor", "risk_assessor", "market_analyst"]
-        LOW_PRIORITY = ["macro_strategist", "wealth_advisor"]
+        LOW_PRIORITY = ["macro_strategist"]
         def _priority_key(s):
             if s in HIGH_PRIORITY:
                 return 0
@@ -1954,14 +1880,6 @@ SCENARIO_RAG_MAP = {
     "article_expert": {
         "query_suffix": "文章解读 观点分析 投资逻辑 研报",
         "content_types": ["article", "author_article", "book"],
-    },
-    "behavior_coach": {
-        "query_suffix": "行为金融 心理偏差 追涨杀跌 损失厌恶 过度自信 情绪",
-        "content_types": ["book", "analysis"],
-    },
-    "counter_argument": {
-        "query_suffix": "反方观点 反例 失效条件 风险边界 决策清单 安全边际",
-        "content_types": ["book", "analysis", "valuation"],
     },
 }
 
@@ -2758,7 +2676,7 @@ def _persist_agent_conclusions(
 
                 conclusion_id = save_analysis_conclusion(
                     source_system="ai_dialogue",
-                    source_type="arbitrator",
+                    source_type="orchestrator",
                     source_id=None,
                     target_subject=target_subject,
                     action=action,
@@ -3173,14 +3091,6 @@ def orchestrate(query: str, history: list, rag_context: str = "", cancel_event: 
 
                         # Phase C: 仲裁(高级模型最终裁决)
                         arbitration_done = False
-                        if should_arbitrate(complexity, specialist_results, conflicts):
-                            logger.info(f"[trace:{trace_id}] 进入仲裁阶段(Phase C)")
-                            arb_result = run_arbitration(refined_query, specialist_results, rag_context)
-                            specialist_results.append(arb_result)
-                            answer = arb_result["analysis"]
-                            all_tool_calls.append({"name": "arbitration", "arguments": {"query": refined_query},
-                                                   "result_preview": arb_result["analysis"][:300]})
-                            arbitration_done = True
 
                         # Light Validator: 输出前质检与修复
                         answer, validator_result = _validate_and_repair(
@@ -3225,15 +3135,6 @@ def orchestrate(query: str, history: list, rag_context: str = "", cancel_event: 
                         logger.info(f"[trace:{trace_id}] 专家结论一致或早停关闭，跳过交叉审阅")
 
                 answer = msg.content or ""
-
-                # Phase C: 仲裁(高级模型最终裁决,无交叉审阅时也可触发)
-                if not arbitration_done and should_arbitrate(complexity, specialist_results, conflicts):
-                    logger.info(f"[trace:{trace_id}] 进入仲裁阶段(Phase C)")
-                    arb_result = run_arbitration(refined_query, specialist_results, rag_context)
-                    specialist_results.append(arb_result)
-                    answer = arb_result["analysis"]
-                    all_tool_calls.append({"name": "arbitration", "arguments": {"query": refined_query},
-                                           "result_preview": arb_result["analysis"][:300]})
 
                 # Light Validator: 输出前质检与修复
                 answer, validator_result = _validate_and_repair(
@@ -4019,44 +3920,6 @@ def _human_in_loop_checks(specialist_results: list, answer: str, conversation_id
     return answer
 
 
-def _run_arbitration_stream(refined_query: str, specialist_results: list, rag_context: str,
-                            cancel_event: threading.Event | None, all_tool_calls: list):
-    """执行仲裁流程并返回结果。
-
-    生成器：yield phase/specialist_start/specialist_done 事件。
-    返回 arb_result dict。
-    """
-    _check_cancel(cancel_event)
-    yield {"type": "phase", "phase": "arbitrate", "message": "⚖️ 正在由仲裁法官做最终裁决..."}
-    yield {
-        "type": "specialist_start",
-        "agent_key": "arbitrator",
-        "agent": "仲裁法官",
-        "icon": "⚖️",
-    }
-    # 构建用户当前持仓摘要，让仲裁法官能做"持仓现状对照"
-    # 避免仲裁法官定"上限 X 万"却不知道用户已超上限，或建议"加仓 Y 标的"却不知道已重仓
-    portfolio_summary = _build_portfolio_summary()
-    arb_result = run_arbitration(refined_query, specialist_results, rag_context,
-                                 portfolio_summary=portfolio_summary, trace_id="")
-    specialist_results.append(arb_result)
-    all_tool_calls.append({"name": "arbitration", "arguments": {"query": refined_query},
-                           "result_preview": arb_result["analysis"][:300]})
-    yield {
-        "type": "specialist_done",
-        "agent_key": "arbitrator",
-        "agent": "仲裁法官",
-        "icon": "⚖️",
-        "analysis": arb_result["analysis"],
-        "duration_ms": arb_result["duration_ms"],
-        "is_arbitration": True,
-        "condition_framework": arb_result.get("condition_framework", []),
-        "diverggence_analysis": arb_result.get("diverggence_analysis", ""),
-        "key_variables": arb_result.get("key_variables", ""),
-    }
-    return arb_result
-
-
 def _specialists_signature(specialist_results: list) -> tuple:
     """计算原始（非 cross_review/非仲裁）专家列表的签名，用于冲突检测缓存判断。
 
@@ -4196,17 +4059,6 @@ def _stream_handle_no_tool_calls(msg, specialist_results: list, all_tool_calls: 
             _check_cancel(cancel_event)
             answer = msg.content or ""
 
-            if should_arbitrate(complexity, specialist_results, conflicts):
-                arb_gen = _run_arbitration_stream(refined_query, specialist_results, rag_context, cancel_event, all_tool_calls)
-                while True:
-                    try:
-                        yield next(arb_gen)
-                    except StopIteration as si:
-                        arb_result = si.value
-                        break
-                answer = arb_result["analysis"]
-                arbitration_done = True
-
             duration_ms = int((time.time() - start_time) * 1000)
             # 复用缓存：cross_review 只追加了 is_cross_review 结果，原始专家列表未变
             conflicts = _detect_conflicts_cached(specialist_results, refined_query, trace_id, _conflicts_cache)
@@ -4253,17 +4105,6 @@ def _stream_handle_no_tool_calls(msg, specialist_results: list, all_tool_calls: 
 
     # 无交叉审阅路径
     answer = msg.content or ""
-
-    if not arbitration_done and should_arbitrate(complexity, specialist_results, conflicts):
-        arb_gen = _run_arbitration_stream(refined_query, specialist_results, rag_context, cancel_event, all_tool_calls)
-        while True:
-            try:
-                yield next(arb_gen)
-            except StopIteration as si:
-                arb_result = si.value
-                break
-        answer = arb_result["analysis"]
-        arbitration_done = True
 
     duration_ms = int((time.time() - start_time) * 1000)
     # 复用缓存：若仲裁追加了 is_arbitration 结果，签名也只看原始专家，仍可命中
@@ -5375,7 +5216,6 @@ _PEER_REVIEW_PROMPTS = {
 请返回 JSON:
 {{
   "verdict": "approve | approve_with_concerns | reject | defer",
-  "score": {{"counter_argument_strength": 0-100}},
   "concerns": ["反对理由1", ...],
   "suggestions": ["风险缓释建议1", ...]
 }}""",
