@@ -397,8 +397,56 @@ def _inject_kyc_profile(system_content: str, agent: dict) -> str:
     return system_content
 
 
+def _check_react_convergence(tool_calls_log: list, llm_messages: list) -> bool:
+    """P2: ReAct 收敛检测 — 判断是否已产出可用结论，可提前终止。
+
+    判定标准（满足任一即视为收敛）：
+    1. 工具结果中已含结构化 JSON（含 conclusion/action_signals/confidence 字段）
+    2. 已有 assistant 消息含 ≥200 字的文本分析（非工具调用）
+    3. 工具调用次数 >= 2 且最近一次工具结果含数值型数据（PE/百分位/估值等）
+
+    Returns:
+        True 表示已收敛，可注入收口提示提前终止
+    """
+    if not tool_calls_log:
+        return False
+
+    # 判定 1：工具结果中含结构化 JSON 结论
+    for tc in tool_calls_log:
+        result_preview = tc.get("result_preview", "")
+        if any(kw in result_preview for kw in ['"conclusion"', '"action_signals"', '"confidence"', '"评级"', '"结论"']):
+            return True
+
+    # 判定 2：已有 assistant 消息含 ≥200 字文本分析
+    for msg in llm_messages:
+        if msg.get("role") == "assistant" and msg.get("content"):
+            content = msg["content"]
+            # 排除仍含工具调用标签的
+            if "arrison" in content.lower() or "<invoke>" in content:
+                continue
+            if len(content) >= 200:
+                return True
+
+    # 判定 3：工具调用 >= 2 且最近结果含数值数据
+    if len(tool_calls_log) >= 2:
+        latest_result = tool_calls_log[-1].get("result_preview", "")
+        # 检测数值型数据（PE/百分位/估值/Z-Score 等）
+        import re as _re
+        numeric_patterns = [
+            r'PE[：:]\s*\d', r'百分位[：:]\s*\d', r'估值[：:]\s*\d',
+            r'Z-Score[：:]\s*-?\d', r'\d+\.\d+%', r'高估|低估|合理',
+        ]
+        for pattern in numeric_patterns:
+            if _re.search(pattern, latest_result):
+                return True
+
+    return False
+
+
+
 def run_specialist(agent_key: str, query: str, context: str = "",
-                   prebuilt_context: str = "", model: str = None, trace_id: str = "") -> dict:
+                   prebuilt_context: str = "", model: str = None, trace_id: str = "",
+                   from_pipeline: bool = False) -> dict:
     """
     运行单个专家 Agent。
 
@@ -407,6 +455,10 @@ def run_specialist(agent_key: str, query: str, context: str = "",
     2. 发送 query + context 给 LLM
     3. LLM 通过 function calling 调用专属工具
     4. 返回专家的分析结果
+
+    Args:
+        from_pipeline: Pipeline 路径标记。True 时 prebuilt_context 已含 Layer 0-5
+                      （含 system_prompt/KYC/持仓），跳过重复注入。
 
     返回:
         {"agent": "估值专家", "icon": "📊", "analysis": "...", "tool_calls": [...], "duration_ms": 1234}
@@ -430,37 +482,40 @@ def run_specialist(agent_key: str, query: str, context: str = "",
         # 降级：ToolRegistry 未初始化时用硬编码 TOOLS
         agent_tools = [t for t in TOOLS if t["function"]["name"] in agent["tools"]]
 
-    # 构建消息
-    system_content = agent["system_prompt"]
-    if context:
-        system_content += f"\n\n以下是相关上下文信息，请结合分析：\n{context[:6000]}"
-
-    # 注入持仓上下文（优先使用预构建的，避免重复 DB 查询）
-    if prebuilt_context:
-        system_content += f"\n\n{prebuilt_context}"
+    if from_pipeline:
+        # Pipeline 路径：prebuilt_context 来自 build_specialist_context，已含 Layer 0-5
+        # （system_prompt + KYC + 持仓 + RAG + 估值 + 黑板），直接用作 system_content
+        # 跳过 system_prompt/KYC/持仓的重复注入，通用约束由后面全局代码统一追加
+        system_content = prebuilt_context or agent["system_prompt"]
     else:
-        try:
-            from services.portfolio_context import build_portfolio_context
-            portfolio_ctx = build_portfolio_context()
-            system_content += f"\n\n## 用户当前持仓\n{portfolio_ctx}"
-        except Exception:
-            pass
+        # ReAct 路径：原逻辑，手动构建上下文
+        system_content = agent["system_prompt"]
+        if context:
+            system_content += f"\n\n以下是相关上下文信息，请结合分析：\n{context[:6000]}"
 
-    # 注入 KYC 理财画像（按专家职责裁剪维度）
-    system_content = _inject_kyc_profile(system_content, agent)
+        # 注入持仓上下文（优先使用预构建的，避免重复 DB 查询）
+        if prebuilt_context:
+            system_content += f"\n\n{prebuilt_context}"
+        else:
+            try:
+                from services.portfolio_context import build_portfolio_context
+                portfolio_ctx = build_portfolio_context()
+                system_content += f"\n\n## 用户当前持仓\n{portfolio_ctx}"
+            except Exception:
+                pass
 
-    # 追加主动检索指令（仅当专家有 search_knowledge 工具时）
-    if "search_knowledge" in agent.get("tools", []):
-        system_content += _ACTIVE_RETRIEVAL_INSTRUCTION
+        # 注入 KYC 理财画像（按专家职责裁剪维度）
+        system_content = _inject_kyc_profile(system_content, agent)
+
+        # 追加主动检索指令（仅当专家有 search_knowledge 工具时）
+        if "search_knowledge" in agent.get("tools", []):
+            system_content += _ACTIVE_RETRIEVAL_INSTRUCTION
 
     # 追加通用数据约束
     system_content += _UNIVERSAL_DATA_CONSTRAINT
 
     # 追加禁止原始 tool_call 文本约束
     system_content += _NO_RAW_TOOLCALL_CONSTRAINT
-
-    # 追加风险与深度分析约束
-    system_content += _RISK_AND_DEPTH_CONSTRAINT
 
     # P0 全局视角指令：强制看全局再分析
     system_content += _UNIVERSAL_CONTEXT_INSTRUCTION
@@ -501,8 +556,20 @@ def run_specialist(agent_key: str, query: str, context: str = "",
     _CLOSURE_PROMPT = (
         "你已收集到足够信息。请不要再调用工具，直接基于以上数据给出你的专业分析结论（至少 200 字）。"
     )
+    # P2: 收敛检测 — turn1 后若已有结构化结论（JSON with action_signal/confidence），提前终止
+    _CONVERGENCE_PROMPT = (
+        "你已在前一轮工具调用中获得了关键数据，并给出了结构化结论。"
+        "现在请基于已有信息，直接输出最终的专业分析（至少 200 字），不要再调用工具。"
+    )
 
     for turn in range(MAX_TURNS):
+        # P2: 收敛检测 — turn >= 1 时，若上一轮工具结果已含结构化结论，注入收口提示
+        if turn >= 1 and not answer:
+            _has_converged = _check_react_convergence(tool_calls_log, llm_messages)
+            if _has_converged:
+                logger.info(f"[trace:{trace_id}] [{agent['name']}] turn{turn} 检测到收敛，注入收口提示提前终止")
+                llm_messages.append({"role": "user", "content": _CONVERGENCE_PROMPT})
+
         # 方案1：末轮收口 — 注入提示让 LLM 输出文本结论，而非继续调工具
         if turn == MAX_TURNS - 1:
             llm_messages.append({"role": "user", "content": _CLOSURE_PROMPT})

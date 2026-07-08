@@ -344,10 +344,10 @@ def _phase_info_gather(
     except Exception as e:
         logger.warning(f"[pipeline] RAG 检索失败: {e}")
 
-    # 2. 持仓摘要
+    # 2. 持仓摘要 — P0 修复：改用 build_portfolio_context，含完整盈亏+交易记录+集中度
     try:
-        from agent.memory import build_user_memory_context
-        results["portfolio"] = build_user_memory_context("default")[:800]
+        from services.portfolio_context import build_portfolio_context
+        results["portfolio"] = build_portfolio_context("default")
     except Exception as e:
         logger.debug(f"[pipeline] 持仓加载失败: {e}")
 
@@ -411,10 +411,14 @@ def _phase_planning(
     info_gather_result: dict,
     trace_id: str,
 ) -> dict:
-    """Phase 2: 调用 plan_executor 生成分析计划。"""
+    """Phase 2: 调用 plan_executor 生成分析计划。
+
+    P4: 优先使用路由命中的专家列表作为 hint，避免 plan_generator LLM 覆盖路由结果。
+    """
     try:
         from agent.plan_executor import generate_plan
         from db.agents import load_specialist_agents
+        from agent.router import SmartRouter
 
         # 加载可用专家（load_specialist_agents 返回 dict，需转为 list）
         specialists_dict = load_specialist_agents()
@@ -427,13 +431,27 @@ def _phase_planning(
             for k, v in specialists_dict.items()
         ]
 
-        # 调用 Plan 生成
+        # P4: 先调用 SmartRouter 获取路由建议
+        routed_specialists = None
+        try:
+            router = SmartRouter()
+            history_summary = info_gather_result.get("history_summary", "")
+            portfolio_summary = info_gather_result.get("portfolio", "")
+            route_result = router.route(state.refined_query, history_summary, portfolio_summary)
+            routed_specialists = route_result.get("specialists", [])
+            route_by = route_result.get("route_by", "unknown")
+            logger.info(f"[pipeline] P4 路由命中: {routed_specialists} (by={route_by})")
+        except Exception as route_err:
+            logger.warning(f"[pipeline] 路由失败，降级到 plan_generator: {route_err}")
+
+        # 调用 Plan 生成（传入 routed_specialists 作为 hint）
         plan = generate_plan(
             user_query=state.original_query,
             refined_query=state.refined_query,
             complexity=query_info.get("complexity", "medium"),
             available_specialists=specialists,
             trace_id=trace_id,
+            routed_specialists=routed_specialists,  # P4: 路由 hint
         )
         return {
             "plan": plan.to_dict(),
@@ -579,6 +597,7 @@ def _phase_execution(
                 query=step_query,
                 prebuilt_context=ctx,
                 trace_id=trace_id,
+                from_pipeline=True,
             )
             specialists_result.append(result)
             all_tool_calls.extend(result.get("tool_calls", []))
@@ -600,7 +619,8 @@ def _phase_execution(
             state.record_phase_tokens(PipelinePhase.EXECUTION.value, tokens)
 
             # P0: 写入 agent_runs（可观测性修复）— 失败不影响主流程
-            duration_ms_for_log = int((time.time() - step_start) * 1000)
+            # P5: 优先使用 result 自带的 duration_ms（run_specialist 内部精确计时）
+            duration_ms_for_log = result.get("duration_ms") or int((time.time() - step_start) * 1000)
             try:
                 create_agent_run(
                     conversation_id=state.conversation_id,
@@ -763,6 +783,7 @@ def _execute_steps_parallel(
             query=step_query,
             prebuilt_context=ctx,
             trace_id=trace_id,
+            from_pipeline=True,
         )
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -800,8 +821,9 @@ def _execute_steps_parallel(
                 tokens = result.get("tokens_used", 0)
                 state.record_phase_tokens(PipelinePhase.EXECUTION.value, tokens)
 
-                # P0: 写 agent_runs
-                duration_ms = int((time.time() - step_start) * 1000)
+                # P5: 优先使用 result 内部精确计时（run_specialist 记录），
+                # 避免并行场景下 step_start 在 submit 之后才记录导致 duration 偏小
+                duration_ms = result.get("duration_ms") or int((time.time() - step_start) * 1000)
                 try:
                     create_agent_run(
                         conversation_id=state.conversation_id,
@@ -927,6 +949,7 @@ def _fallback_execution(
             result = run_specialist(
                 agent_key=agent_key, query=query,
                 prebuilt_context=ctx, trace_id=trace_id,
+                from_pipeline=True,
             )
             results.append(result)
             tool_calls.extend(result.get("tool_calls", []))
@@ -938,7 +961,8 @@ def _fallback_execution(
             blackboard.write(entry)
 
             # P0: 写入 agent_runs（降级路径同样补齐）
-            duration_ms_for_log = int((time.time() - step_start) * 1000)
+            # P5: 优先使用 result 自带的 duration_ms
+            duration_ms_for_log = result.get("duration_ms") or int((time.time() - step_start) * 1000)
             try:
                 create_agent_run(
                     conversation_id=state.conversation_id,
@@ -1105,6 +1129,23 @@ def _synthesize_multiple_specialists(
             for m in missing:
                 parts.append(f"- {m}")
 
+    # P1替代: 注入持仓约束提醒（零 LLM 成本，复用 Phase 1 预取的持仓）
+    # 单专家场景已在 Phase 3 通过 build_specialist_context 注入完整持仓，此处仅多专家综合时提醒
+    portfolio_line = ""
+    try:
+        from services.portfolio_context import build_portfolio_summary_line
+        portfolio_line = build_portfolio_summary_line("default")
+    except Exception as e:
+        logger.debug(f"[pipeline] 综合阶段持仓摘要加载失败: {e}")
+    if portfolio_line:
+        parts.append(
+            f"\n## 用户当前持仓（综合建议必须兼容此约束）\n{portfolio_line}\n"
+            "提醒：\n"
+            "- 任何加仓/减仓建议需结合现有持仓结构，不要脱离实际持仓空谈\n"
+            "- 若某标的已重仓（占比>25%），继续加仓建议需额外谨慎\n"
+            "- 若已盈利>15%或亏损>15%，需提示止盈/止损考量\n"
+        )
+
     parts.append(
         "\n## 任务\n"
         "基于以上专家分析，生成综合回答：\n"
@@ -1138,13 +1179,13 @@ def _phase_reflection(
 ) -> dict:
     """Phase 3.5: Reflection 节点 — 自评质量问题 + 冲突识别。
 
-    单次 LLM 调用，输出：
-    - quality_issues: 分析中的质量问题（数据缺失、逻辑跳跃等）
-    - missing_perspectives: 未覆盖的视角
-    - conflict_resolutions: 冲突解决建议
-    - confidence_adjustment: 置信度调整（负值表示需降级）
+    4 层多重保险确保 JSON 解析成功：
+    - Layer 1: prompt 明确要求 JSON 字段
+    - Layer 2: response_format=json_object（保证返回合法 JSON）
+    - Layer 3: 鲁棒解析（递归查找字段，容错嵌套结构）
+    - Layer 4: 降级保护（失败返回默认值，但记录原始返回用于诊断）
 
-    成本：约 500 token（单次调用，max_tokens=800）
+    成本：约 800 token（单次调用）
     """
     from services.llm_service import _call_llm, MODEL
 
@@ -1174,21 +1215,27 @@ def _phase_reflection(
         analysis = s.get("analysis", "")[:500]
         parts.append(f"\n### {agent_name}\n{analysis}")
 
+    # Layer 1: prompt 明确要求字段名 + 严格 JSON 格式
     parts.append(
         "\n## 任务\n"
-        "审查以上分析，输出 JSON：\n"
+        "审查以上分析，严格输出以下 JSON 格式（不要输出任何其他文字、不要 markdown 代码块）：\n"
         "{\n"
         '  "quality_issues": ["质量问题1（如数据缺失/逻辑跳跃/证据不足）", "..."],\n'
         '  "missing_perspectives": ["未覆盖的视角1", "..."],\n'
         '  "conflict_resolutions": [{"target": "冲突标的", "resolution": "解决建议"}],\n'
         '  "confidence_adjustment": -0.1\n'
         "}\n"
-        "只输出 JSON，不要其他文字。confidence_adjustment 范围 [-0.3, 0.2]，负值表示需降级。"
+        "要求：\n"
+        "1. 必须包含上述 4 个字段，字段名完全一致\n"
+        "2. quality_issues/missing_perspectives 是字符串数组\n"
+        "3. confidence_adjustment 是数字，范围 [-0.3, 0.2]，负值表示需降级\n"
+        "4. 如果没有问题，对应字段返回空数组 []\n"
     )
 
     prompt = "\n".join(parts)
 
     try:
+        # Layer 2: response_format=json_object 保证返回合法 JSON
         response = _call_llm(
             caller="reflection",
             trace_id=trace_id,
@@ -1196,39 +1243,28 @@ def _phase_reflection(
             messages=[{"role": "user", "content": prompt}],
             temperature=0.2,
             max_tokens=800,
+            response_format={"type": "json_object"},
         )
         raw = response.choices[0].message.content.strip()
     except Exception as e:
-        logger.warning(f"[pipeline] Reflection LLM 调用失败: {e}")
-        return {"quality_issues": [], "missing_perspectives": [], "conflict_resolutions": [], "confidence_adjustment": 0.0}
-
-    # 解析 JSON
-    result = {
-        "quality_issues": [],
-        "missing_perspectives": [],
-        "conflict_resolutions": [],
-        "confidence_adjustment": 0.0,
-    }
-    if raw:
-        cleaned = raw
-        if "```" in cleaned:
-            parts_split = cleaned.split("```")
-            cleaned = parts_split[1] if len(parts_split) > 1 else parts_split[0]
-            if cleaned.startswith("json"):
-                cleaned = cleaned[4:]
-            cleaned = cleaned.strip()
+        # response_format 不支持时降级
+        logger.warning(f"[pipeline] Reflection LLM 调用失败（尝试降级）: {e}")
         try:
-            parsed = json.loads(cleaned)
-            if isinstance(parsed, dict):
-                result["quality_issues"] = parsed.get("quality_issues", []) or []
-                result["missing_perspectives"] = parsed.get("missing_perspectives", []) or []
-                result["conflict_resolutions"] = parsed.get("conflict_resolutions", []) or []
-                try:
-                    result["confidence_adjustment"] = float(parsed.get("confidence_adjustment", 0.0))
-                except (TypeError, ValueError):
-                    result["confidence_adjustment"] = 0.0
-        except (json.JSONDecodeError, ValueError) as e:
-            logger.warning(f"[pipeline] Reflection JSON 解析失败: {e}")
+            response = _call_llm(
+                caller="reflection",
+                trace_id=trace_id,
+                model=MODEL,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.2,
+                max_tokens=800,
+            )
+            raw = response.choices[0].message.content.strip()
+        except Exception as e2:
+            logger.warning(f"[pipeline] Reflection LLM 降级也失败: {e2}")
+            return {"quality_issues": [], "missing_perspectives": [], "conflict_resolutions": [], "confidence_adjustment": 0.0}
+
+    # Layer 3: 鲁棒解析
+    result = _parse_reflection_json(raw)
 
     logger.info(
         f"[pipeline] Reflection 完成: "
@@ -1236,6 +1272,126 @@ def _phase_reflection(
         f"{len(result['missing_perspectives'])} 缺失视角, "
         f"置信度调整={result['confidence_adjustment']}"
     )
+    return result
+
+
+def _parse_reflection_json(raw: str) -> dict:
+    """Layer 3: 鲁棒解析 Reflection 的 JSON 返回。
+
+    MIMO 可能返回：
+    - 标准 flat 结构: {"quality_issues": [...], "missing_perspectives": [...]}
+    - 嵌套结构: {"审查结果": {"潜在问题": {"问题": [...]}}}
+    - markdown 包裹: ```json ... ```
+    - 部分字段缺失
+
+    策略：递归查找字段，支持中英文别名。
+    """
+    result = {
+        "quality_issues": [],
+        "missing_perspectives": [],
+        "conflict_resolutions": [],
+        "confidence_adjustment": 0.0,
+    }
+    if not raw:
+        return result
+
+    # 清理 markdown 包裹
+    cleaned = raw.strip()
+    if "```" in cleaned:
+        parts_split = cleaned.split("```")
+        if len(parts_split) >= 3:
+            cleaned = parts_split[1]
+        elif len(parts_split) == 2:
+            cleaned = parts_split[1]
+        if cleaned.startswith("json"):
+            cleaned = cleaned[4:]
+        cleaned = cleaned.strip()
+
+    # 尝试 JSON 解析
+    parsed = None
+    try:
+        parsed = json.loads(cleaned)
+    except (json.JSONDecodeError, ValueError):
+        # 尝试从文本中提取第一个 JSON 对象
+        try:
+            import re
+            match = re.search(r'\{[\s\S]*\}', cleaned)
+            if match:
+                parsed = json.loads(match.group(0))
+        except (json.JSONDecodeError, ValueError):
+            pass
+
+    if not isinstance(parsed, dict):
+        logger.warning(f"[pipeline] Reflection JSON 解析完全失败，原始返回: {raw[:300]}")
+        return result
+
+    # Layer 3 核心：递归查找字段（支持中英文别名 + 嵌套结构）
+    # 字段别名映射
+    FIELD_ALIASES = {
+        "quality_issues": ["quality_issues", "质量问题", "质量问题列表", "问题", "潜在问题", "issues"],
+        "missing_perspectives": ["missing_perspectives", "缺失视角", "未覆盖视角", "缺失", "missing", "改进建议"],
+        "conflict_resolutions": ["conflict_resolutions", "冲突解决", "冲突", "resolutions"],
+        "confidence_adjustment": ["confidence_adjustment", "置信度调整", "置信度", "confidence"],
+    }
+
+    def _find_field(obj, aliases, depth=0):
+        """递归查找字段，最多 3 层深度。"""
+        if depth > 3 or not isinstance(obj, dict):
+            return None
+        for alias in aliases:
+            if alias in obj:
+                return obj[alias]
+        # 递归查找子字典
+        for v in obj.values():
+            if isinstance(v, dict):
+                found = _find_field(v, aliases, depth + 1)
+                if found is not None:
+                    return found
+        return None
+
+    # quality_issues（数组）
+    qi = _find_field(parsed, FIELD_ALIASES["quality_issues"])
+    if isinstance(qi, list):
+        result["quality_issues"] = [str(x) for x in qi if x]
+    elif isinstance(qi, str):
+        result["quality_issues"] = [qi]
+
+    # missing_perspectives（数组）
+    mp = _find_field(parsed, FIELD_ALIASES["missing_perspectives"])
+    if isinstance(mp, list):
+        result["missing_perspectives"] = [str(x) for x in mp if x]
+    elif isinstance(mp, str):
+        result["missing_perspectives"] = [mp]
+
+    # conflict_resolutions（对象数组）
+    cr = _find_field(parsed, FIELD_ALIASES["conflict_resolutions"])
+    if isinstance(cr, list):
+        for item in cr:
+            if isinstance(item, dict):
+                result["conflict_resolutions"].append({
+                    "target": str(item.get("target", item.get("标的", ""))),
+                    "resolution": str(item.get("resolution", item.get("解决", item.get("建议", "")))),
+                })
+            elif isinstance(item, str):
+                result["conflict_resolutions"].append({"target": "", "resolution": item})
+
+    # confidence_adjustment（数字）
+    ca = _find_field(parsed, FIELD_ALIASES["confidence_adjustment"])
+    if isinstance(ca, (int, float)):
+        result["confidence_adjustment"] = max(-0.3, min(0.2, float(ca)))
+    elif isinstance(ca, str):
+        try:
+            result["confidence_adjustment"] = max(-0.3, min(0.2, float(ca)))
+        except ValueError:
+            pass
+
+    # 诊断日志：如果关键字段都为空，记录原始结构
+    if not result["quality_issues"] and not result["missing_perspectives"]:
+        logger.warning(
+            f"[pipeline] Reflection 解析后关键字段为空，原始 JSON keys: {list(parsed.keys())[:10]}, "
+            f"原始返回前 300 字: {raw[:300]}"
+        )
+
     return result
 
 

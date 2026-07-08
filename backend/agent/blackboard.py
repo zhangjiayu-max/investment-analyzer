@@ -185,31 +185,48 @@ class Blackboard:
     def find_conflicts(self) -> list[dict]:
         """检测动作信号冲突（如一个说买一个说卖）。
 
+        P3 修正：同一专家对同一标的的 REDUCE/HOLD 不算冲突（不同标的的信号）。
+        只有不同专家对同一标的有相反方向（BUY vs SELL）才算真正冲突。
+
         Returns:
             冲突列表，每项 {"target": "中证500", "buy_agents": [...], "sell_agents": [...]}
         """
+        # target_signals[target] = {"BUY": [agent_names], "SELL": [...], "HOLD": [...]}
         target_signals: dict[str, dict[str, list[str]]] = {}
         for e in self.entries:
             for s in e.action_signals:
                 target = s.get("target", "")
                 sig_type = str(s.get("type", "")).upper()
-                if not target or sig_type not in ("BUY", "SELL", "HOLD"):
+                if not target or sig_type not in ("BUY", "SELL", "HOLD", "REDUCE"):
                     continue
+                # REDUCE 归类到 SELL 方向（减仓 = 卖出方向）
+                if sig_type == "REDUCE":
+                    sig_type = "SELL"
                 if target not in target_signals:
                     target_signals[target] = {"BUY": [], "SELL": [], "HOLD": []}
                 if sig_type in target_signals[target]:
-                    target_signals[target][sig_type].append(e.agent_name)
+                    # 去重：同一专家不重复加入
+                    if e.agent_name not in target_signals[target][sig_type]:
+                        target_signals[target][sig_type].append(e.agent_name)
 
         conflicts = []
         for target, sigs in target_signals.items():
-            # 买和卖同时存在 = 冲突
-            if sigs["BUY"] and sigs["SELL"]:
-                conflicts.append({
-                    "target": target,
-                    "buy_agents": sigs["BUY"],
-                    "sell_agents": sigs["SELL"],
-                    "type": "buy_sell_conflict",
-                })
+            buy_set = set(sigs["BUY"])
+            sell_set = set(sigs["SELL"])
+            # P3: 只有不同专家才有冲突（同一专家同时买/卖不算）
+            # 即 buy_set 和 sell_set 不能完全重合，且至少有一方来自不同专家
+            if buy_set and sell_set:
+                # 去除同一专家既买又卖的情况（这通常是对不同情景的模拟）
+                pure_buy = buy_set - sell_set
+                pure_sell = sell_set - buy_set
+                # 只有存在"纯买方"和"纯卖方"时才算真冲突
+                if pure_buy and pure_sell:
+                    conflicts.append({
+                        "target": target,
+                        "buy_agents": list(pure_buy),
+                        "sell_agents": list(pure_sell),
+                        "type": "buy_sell_conflict",
+                    })
         return conflicts
 
     # ── 统计 ──────────────────────────────

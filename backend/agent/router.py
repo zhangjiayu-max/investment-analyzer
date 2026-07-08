@@ -115,13 +115,28 @@ class SmartRouter:
         raw = f"{query}|{history_summary}|{context_hash}"
         return hashlib.md5(raw.encode("utf-8")).hexdigest()
 
-    def _rule_route(self, query: str) -> Optional[dict]:
+    def _rule_route(self, query: str, portfolio_summary: str = "") -> Optional[dict]:
         specialists = set()
         for keywords, agents in _KEYWORD_ROUTES:
             if any(kw in query for kw in keywords):
                 specialists.update(agents)
         if _is_high_risk_action(query):
             specialists.update(["risk_assessor"])
+
+        # 持仓感知路由：根据持仓状况追加专家（零 LLM 成本）
+        if portfolio_summary and "无持仓" not in portfolio_summary:
+            import re as _re
+            # 重仓检测：某基金占比>25% → 追加风险专家
+            pct_matches = _re.findall(r'([\d.]+)%', portfolio_summary)
+            if pct_matches and max(float(m) for m in pct_matches) > 25:
+                specialists.add("risk_assessor")
+                logger.info("[router] 持仓感知：检测到重仓(>25%)，追加 risk_assessor")
+            # 现金占比高 → 追加配置专家
+            cash_match = _re.search(r'现金.*?(\d+)%', portfolio_summary)
+            if cash_match and int(cash_match.group(1)) > 30:
+                specialists.add("allocation_advisor")
+                logger.info("[router] 持仓感知：检测到现金占比高(>30%)，追加 allocation_advisor")
+
         if not specialists:
             return None
 
@@ -276,9 +291,9 @@ class SmartRouter:
                 if now - ts < self._cache_ttl:
                     return cached
 
-        # 3. 规则路由
+        # 3. 规则路由（传入 portfolio_summary 启用持仓感知）
         if get_config("router.enabled", "true") == "true":
-            rule_result = self._rule_route(query)
+            rule_result = self._rule_route(query, portfolio_summary)
             if rule_result:
                 with self._lock:
                     self._cleanup_expired_cache(now)

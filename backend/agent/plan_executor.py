@@ -164,12 +164,66 @@ def generate_plan(
     complexity: str,
     available_specialists: list[dict],
     trace_id: str,
+    routed_specialists: list[str] = None,
 ) -> AnalysisPlan:
     """调用 LLM 生成分析计划。
+
+    P4: 若 routed_specialists 非空，优先使用路由结果，跳过 LLM 调用（省 token）。
+    仅当路由未命中时才调用 LLM 生成 plan。
 
     降级策略：LLM 调用失败或 JSON 解析失败时，降级为所有专家顺序执行。
     """
     plan_id = f"plan-{uuid.uuid4().hex[:8]}"
+
+    # P4: 优先使用路由结果，跳过 LLM 调用
+    if routed_specialists:
+        # 过滤掉不在 available_specialists 中的专家
+        available_keys = {s["agent_key"] for s in available_specialists}
+        valid_routed = [k for k in routed_specialists if k in available_keys]
+        if valid_routed:
+            logger.info(f"[trace:{trace_id}] P4 使用路由结果生成 plan: {valid_routed} (跳过 LLM)")
+            # 构造 plan_data，最多 3 个专家
+            valid_routed = valid_routed[:3]
+            steps_data = []
+            for i, agent_key in enumerate(valid_routed):
+                agent_name = next(
+                    (s["name"] for s in available_specialists if s["agent_key"] == agent_key),
+                    agent_key,
+                )
+                steps_data.append({
+                    "step_id": i + 1,
+                    "agent_key": agent_key,
+                    "agent_name": agent_name,
+                    "query": refined_query,
+                    "depends_on": [],
+                })
+            plan_data = {
+                "reasoning": f"路由命中专家: {valid_routed}",
+                "steps": steps_data,
+            }
+            # 直接构造 AnalysisPlan，跳过 LLM
+            steps = [
+                PlanStep(
+                    step_id=s["step_id"],
+                    agent_key=s["agent_key"],
+                    agent_name=s["agent_name"],
+                    query=s.get("query", refined_query),
+                    depends_on=s.get("depends_on", []),
+                )
+                for s in steps_data
+            ]
+            return AnalysisPlan(
+                plan_id=plan_id,
+                trace_id=trace_id,
+                user_query=user_query,
+                refined_query=refined_query,
+                complexity=complexity,
+                reasoning=plan_data["reasoning"],
+                steps=steps,
+                status=PlanStatus.PENDING,
+                created_at=datetime.now().isoformat(),
+                updated_at=datetime.now().isoformat(),
+            )
 
     # 构建专家列表文本
     specialist_lines = []
