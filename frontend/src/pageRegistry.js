@@ -26,4 +26,6 @@ export const pageComponentKeys = [
   'system-config',
   'knowledge',
   'search',
+  'health',
+  'shadow',
 ]

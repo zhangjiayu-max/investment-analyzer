@@ -709,11 +709,80 @@ _TOOL_TIMEOUT_OVERRIDES = {
 }
 
 
+# ── 工具结果校验（轻量规则，零 LLM 成本） ──
+
+_VALUATION_TOOLS = {"query_valuation", "get_valuation_list"}
+
+# PE/PB/分位 合理范围（超出则标记 warning）
+_PE_RANGE = (0, 500)
+_PB_RANGE = (0, 100)
+
+
+def _validate_tool_result(name: str, result_str: str) -> tuple:
+    """校验工具返回结果的数值合理性。
+
+    Returns:
+        (ok, warning_msg): ok=False 时 warning_msg 说明问题
+    """
+    try:
+        data = json.loads(result_str)
+    except (json.JSONDecodeError, ValueError):
+        # 非 JSON 结果不校验
+        return True, ""
+
+    # 错误结果
+    if isinstance(data, dict) and data.get("error"):
+        return False, f"工具返回错误: {data['error'][:100]}"
+
+    # 空结果
+    if data is None or data == {} or data == [] or data == "":
+        return False, "工具返回空结果"
+
+    # 估值类工具：校验 PE/PB/分位 范围
+    if name in _VALUATION_TOOLS:
+        items = data if isinstance(data, list) else [data]
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            for pe_key in ("pe", "pe_ttm", "PE", "pe_ttm_value"):
+                pe_val = item.get(pe_key)
+                if pe_val is not None:
+                    try:
+                        pe_f = float(pe_val)
+                        if not (_PE_RANGE[0] <= pe_f <= _PE_RANGE[1]):
+                            return False, f"PE 值 {pe_f} 超出合理范围 {_PE_RANGE}"
+                    except (ValueError, TypeError):
+                        return False, f"PE 值非数值: {pe_val}"
+            for pb_key in ("pb", "PB", "pb_value"):
+                pb_val = item.get(pb_key)
+                if pb_val is not None:
+                    try:
+                        pb_f = float(pb_val)
+                        if not (_PB_RANGE[0] <= pb_f <= _PB_RANGE[1]):
+                            return False, f"PB 值 {pb_f} 超出合理范围 {_PB_RANGE}"
+                    except (ValueError, TypeError):
+                        return False, f"PB 值非数值: {pb_val}"
+            for pct_key in ("percentile", "pe_percentile", "pb_percentile"):
+                pct_val = item.get(pct_key)
+                if pct_val is not None:
+                    try:
+                        pct_f = float(pct_val)
+                        # 分位支持 0-1 和 0-100 两种格式
+                        if pct_f > 1.5:
+                            pct_f = pct_f / 100.0
+                        if not (0 <= pct_f <= 1):
+                            return False, f"分位值 {pct_val} 超出 [0,1] 范围"
+                    except (ValueError, TypeError):
+                        return False, f"分位值非数值: {pct_val}"
+
+    return True, ""
+
+
 def execute_tool(name: str, arguments: dict, trace_id: str = "",
                  timeout: int = 30) -> str:
     """执行工具调用，返回 JSON 字符串结果。
 
-    带超时保护和审计日志。
+    带超时保护、结果校验和审计日志。
 
     Args:
         name: 工具名称
@@ -756,6 +825,39 @@ def execute_tool(name: str, arguments: dict, trace_id: str = "",
         error_category = "timeout"
         logger.warning(f"工具 {name} 执行超时 ({duration_ms}ms > {effective_timeout}s)")
         result = json.dumps({"error": f"工具 {name} 执行超时 ({effective_timeout}s)", "error_category": "timeout"}, ensure_ascii=False)
+
+    # 结果校验 + 1 次重试（开关控制）
+    try:
+        from db.config import get_config_bool
+        validate_enabled = get_config_bool("tools.validate_result_enabled", True)
+    except Exception:
+        validate_enabled = True
+
+    if validate_enabled and error_category == "none":
+        ok, warning_msg = _validate_tool_result(name, result)
+        if not ok:
+            logger.warning(f"工具 {name} 结果校验失败: {warning_msg}，触发 1 次重试")
+            error_category = "validation_failed"
+            try:
+                result = _execute_tool_impl(name, arguments)
+                ok2, warning2 = _validate_tool_result(name, result)
+                if not ok2:
+                    # 重试仍失败：保留 warning 标记返回，让 LLM 自行判断
+                    logger.warning(f"工具 {name} 重试后仍校验失败: {warning2}")
+                    error_category = "validation_failed_retry"
+                    try:
+                        wrapped = json.loads(result)
+                        if isinstance(wrapped, dict):
+                            wrapped["_validation_warning"] = warning2
+                            result = json.dumps(wrapped, ensure_ascii=False)
+                    except Exception:
+                        pass
+                else:
+                    error_category = "none"
+                    logger.info(f"工具 {name} 重试后校验通过")
+            except Exception as retry_err:
+                logger.error(f"工具 {name} 重试异常: {retry_err}")
+                error_category = "tool_error"
 
     # 审计日志（异步写入，不阻塞主流程）
     try:

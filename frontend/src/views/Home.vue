@@ -31,6 +31,8 @@ import SystemConfigPage from '../components/SystemConfigPage.vue'
 import DataHealthDashboard from '../components/DataHealthDashboard.vue'
 import KnowledgeBase from '../components/KnowledgeBase.vue'
 import SearchResults from '../components/SearchResults.vue'
+import HealthScore from '../components/HealthScore.vue'
+import ShadowModePage from '../components/ShadowModePage.vue'
 import { pageComponentKeys } from '../pageRegistry'
 
 const props = defineProps({
@@ -68,6 +70,8 @@ const pageComponents = {
   'data-health': DataHealthDashboard,
   knowledge: KnowledgeBase,
   search: SearchResults,
+  health: HealthScore,
+  shadow: ShadowModePage,
 }
 
 if (import.meta.env.DEV) {

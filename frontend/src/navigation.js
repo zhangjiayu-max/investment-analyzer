@@ -53,6 +53,15 @@ export const navItems = [
       { key: 'eval-suite', label: '评测集', icon: 'check' },
     ],
   },
+  {
+    key: 'group-lab',
+    label: '实验室',
+    icon: 'flask',
+    children: [
+      { key: 'health', label: '健康分', icon: 'health' },
+      { key: 'shadow', label: 'Shadow Mode', icon: 'shadow' },
+    ],
+  },
 ]
 
 export const flatNavItems = navItems.flatMap(item => item.children || item)

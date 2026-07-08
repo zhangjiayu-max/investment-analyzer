@@ -133,6 +133,14 @@ DEFAULT_CONFIGS = [
     ('pipeline.debate_enabled', 'true', 'P1: 对抗式辩论节点（冲突时触发）', 'pipeline'),
     ('pipeline.enhanced_plan_enabled', 'true', 'P3: 强化 Plan-and-Execute', 'pipeline'),
 
+    # 对话链路增强开关（Reflection 自纠错 + 工具校验 + 合规过滤）
+    ('pipeline.reflection_enabled', 'true', 'Reflection 阶段（自评质量问题）', 'pipeline'),
+    ('pipeline.reflection_self_correct_enabled', 'true', 'Reflection 自纠错循环（低置信重跑专家）', 'pipeline'),
+    ('pipeline.reflection_confidence_threshold', '-20', '触发重跑的置信度阈值（×100，-20 即 -0.2）', 'pipeline'),
+    ('tools.validate_result_enabled', 'true', '工具结果校验（PE/PB/分位范围）+ 重试', 'tools'),
+    ('pipeline.compliance_filter_enabled', 'true', '合规过滤（保本/稳赚等违规表述）', 'pipeline'),
+    ('pipeline.fund_code_warning_enabled', 'true', '基金代码风险标注（含代码时追加核实提示）', 'pipeline'),
+
     # 多智能体对话降本增效开关
     ('router.enabled', 'true', '是否启用智能路由', 'router'),
     ('router.use_llm_fallback', 'true', '规则未命中时是否用 LLM 兜底', 'router'),

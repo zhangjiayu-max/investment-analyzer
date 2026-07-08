@@ -13,6 +13,10 @@ import BondMarket from './BondMarket.vue'
 import RagAnalysis from './RagAnalysis.vue'
 import RagTestPage from './RagTestPage.vue'
 import PortfolioManagement from './PortfolioManagement.vue'
+import AlertCenter from './AlertCenter.vue'
+import GoalBucketsPage from './GoalBucketsPage.vue'
+import FamilyFinanceDashboard from './FamilyFinanceDashboard.vue'
+import DecisionRecordsPage from './DecisionRecordsPage.vue'
 import AdminAgentsPage from './AdminAgentsPage.vue'
 import TokenUsagePage from './TokenUsagePage.vue'
 import BadCasePage from './BadCasePage.vue'
@@ -53,6 +57,10 @@ const moreItems = [
   { key: 'rag', label: 'RAG 分析', icon: 'rag' },
   { key: 'rag-test', label: '命中测试', icon: 'test' },
   { key: 'bond', label: '债市温度', icon: 'bond' },
+  { key: 'alert-center', label: '风险提示', icon: 'warning' },
+  { key: 'decisions', label: '决策档案', icon: 'clipboard' },
+  { key: 'family-finance', label: '财务总览', icon: 'wallet' },
+  { key: 'goal-buckets', label: '资金桶', icon: 'bucket' },
   { key: 'admin-agents', label: 'Agent 管理', icon: 'admin' },
   { key: 'token-usage', label: 'Token 用量', icon: 'token' },
   { key: 'system-config', label: '系统配置', icon: 'config' },
@@ -87,6 +95,10 @@ const pageComponents = {
   'rag-test': RagTestPage,
   bond: BondMarket,
   portfolio: PortfolioManagement,
+  'alert-center': AlertCenter,
+  'decisions': DecisionRecordsPage,
+  'family-finance': FamilyFinanceDashboard,
+  'goal-buckets': GoalBucketsPage,
   'admin-agents': AdminAgentsPage,
   'token-usage': TokenUsagePage,
   'quality-dashboard': QualityDashboard,
@@ -107,6 +119,10 @@ const currentPageLabel = computed(() => {
 
 const pageProps = computed(() => {
   if (activePage.value === 'dashboard') {
+    return { onNavigate: (page) => navigate(page) }
+  }
+  // 与 Home.vue 对齐：需跨页跳转的页面透传 onNavigate
+  if (['alert-center', 'decisions', 'family-finance', 'goal-buckets', 'portfolio'].includes(activePage.value)) {
     return { onNavigate: (page) => navigate(page) }
   }
   return {}

@@ -55,6 +55,68 @@ EVENT_DEGRADE = "degrade"
 EVENT_TERMINATED = "terminated"
 
 
+# ── 合规过滤 + 基金代码风险标注 ──────────────────
+
+# 违规表述正则（金融合规：禁止保本/稳赚承诺）
+_COMPLIANCE_BLOCKLIST = [
+    "保本", "稳赚", "稳赢", "必涨", "必跌", "零风险", "无风险",
+    "guaranteed", "risk.?free", "sure.?win", "can.?not.?lose",
+    "包赚", "绝对盈利", "稳赚不赔",
+]
+_COMPLIANCE_RE = __import__("re").compile(
+    "|".join(_COMPLIANCE_BLOCKLIST), __import__("re").IGNORECASE
+)
+
+
+def _apply_compliance_and_warning(answer: str, trace_id: str) -> str:
+    """Phase 4 综合答案输出前：合规过滤 + 基金代码风险标注。
+
+    - 合规过滤：扫描违规表述（保本/稳赚等），命中则追加合规提示
+    - 基金代码标注：含基金代码时追加核实提示
+    - 均为追加文本，不修改原文
+    """
+    if not answer:
+        return answer
+
+    suffix = []
+
+    # 合规过滤
+    try:
+        compliance_enabled = get_config_bool("pipeline.compliance_filter_enabled", True)
+    except Exception:
+        compliance_enabled = True
+    if compliance_enabled:
+        hits = _COMPLIANCE_RE.findall(answer)
+        if hits:
+            logger.warning(f"[pipeline:{trace_id}] 合规过滤命中违规表述: {hits}")
+            suffix.append(
+                "\n\n---\n⚠️ **合规提示**：本回复可能含有不合规表述（如保本/稳赚承诺），"
+                "投资有风险，不存在保本承诺，请审慎判断。"
+            )
+
+    # 基金代码风险标注
+    try:
+        code_warning_enabled = get_config_bool("pipeline.fund_code_warning_enabled", True)
+    except Exception:
+        code_warning_enabled = True
+    if code_warning_enabled:
+        try:
+            from agent.hallucination_guard import quick_check_fund_codes
+            codes = quick_check_fund_codes(answer)
+            if codes:
+                logger.info(f"[pipeline:{trace_id}] 答案含基金代码 {len(codes)} 个，追加核实提示")
+                suffix.append(
+                    "\n\n---\n⚠️ **代码核实提示**：本回复含基金代码，"
+                    "请以官方平台查询结果为准，注意代码与名称匹配核实。"
+                )
+        except Exception as e:
+            logger.debug(f"[pipeline:{trace_id}] 基金代码标注跳过: {e}")
+
+    if suffix:
+        return answer + "".join(suffix)
+    return answer
+
+
 # ── 主入口 ──────────────────────────────────
 
 def run_pipeline(
@@ -174,13 +236,13 @@ def run_pipeline(
         yield {"type": EVENT_PHASE_END, "phase": PipelinePhase.EXECUTION.value,
                "result": {"specialist_count": len(phase3_result.get("specialists", []))}}
 
-        # ── Phase 3.5: 反思（可选，默认关闭）──────────────
-        # P3: Reflection 节点 — 自评质量问题 + 冲突识别，结果注入综合阶段
+        # ── Phase 3.5: 反思（默认开启）──────────────
+        # Reflection 节点 — 自评质量问题 + 冲突识别 + 自纠错重跑
         reflection_result = None
         try:
-            reflection_enabled = get_config_bool("pipeline.reflection_enabled", False)
+            reflection_enabled = get_config_bool("pipeline.reflection_enabled", True)
         except Exception:
-            reflection_enabled = False
+            reflection_enabled = True
 
         if reflection_enabled and phase3_result.get("specialists"):
             state.transition_to(PipelinePhase.REFLECTION)
@@ -191,6 +253,22 @@ def run_pipeline(
                 )
                 state.set_phase_result(PipelinePhase.REFLECTION.value, reflection_result)
                 yield {"type": EVENT_REFLECTION_DONE, "result": reflection_result}
+
+                # 自纠错循环：低置信度时重跑质量最差的专家
+                rerun_result = _maybe_rerun_specialist(
+                    state, query, phase3_result, reflection_result,
+                    blackboard, trace_id,
+                )
+                if rerun_result:
+                    # 重跑成功：更新 phase3_result 的对应专家分析
+                    phase3_result["specialists"] = _replace_specialist_analysis(
+                        phase3_result["specialists"], rerun_result
+                    )
+                    state.set_phase_result(PipelinePhase.EXECUTION.value, phase3_result)
+                    yield {"type": EVENT_SPECIALIST_DONE,
+                           "agent": rerun_result.get("agent", ""),
+                           "result": rerun_result,
+                           "rerun": True}
             except Exception as refl_err:
                 logger.warning(f"[pipeline] Reflection 失败，跳过: {refl_err}")
                 reflection_result = None
@@ -256,10 +334,14 @@ def run_pipeline(
             state.error = "empty_synthesis"
             return
 
+        # 合规过滤 + 基金代码风险标注（EVENT_ANSWER 前）
+        state.answer = _apply_compliance_and_warning(state.answer, trace_id)
+
         yield {"type": EVENT_PHASE_END, "phase": PipelinePhase.SYNTHESIS.value}
         yield {"type": EVENT_ANSWER, "content": state.answer,
                "specialist_results": phase3_specialists,
-               "tool_calls": phase3_result.get("tool_calls", [])}
+               "tool_calls": phase3_result.get("tool_calls", []),
+               "confidence": phase4_result.get("confidence", 0.0)}
 
         # ── Phase 5: 记忆持久化 ──────────────────
         state.transition_to(PipelinePhase.MEMORY)
@@ -1082,11 +1164,13 @@ def _phase_synthesis(
     # 单个专家：直接用其结果
     if len(specialists) <= 1:
         answer = specialists[0].get("analysis", "") if specialists else "无法生成分析"
+        confidence = _compute_confidence(reflection_result, 1)
         return {
             "answer": answer,
             "cross_review": None,
             "arbitration": None,
             "specialist_count": len(specialists),
+            "confidence": confidence,
         }
 
     # 多专家：调用 LLM 综合
@@ -1107,6 +1191,9 @@ def _phase_synthesis(
     # P0-B: 收集持仓影响供前端展示
     impacts = blackboard.get_portfolio_impacts() if blackboard else []
 
+    # 综合置信度（基于 Reflection 调整 + 专家数 + 冲突数）
+    confidence = _compute_confidence(reflection_result, len(specialists), len(conflicts))
+
     return {
         "answer": answer,
         "cross_review": {"conflicts": conflicts},
@@ -1115,7 +1202,167 @@ def _phase_synthesis(
         "reflection": reflection_result,
         "risk_vetoes": vetoes,
         "portfolio_impacts": impacts,
+        "confidence": confidence,
     }
+
+
+def _compute_confidence(reflection_result: dict, specialist_count: int, conflict_count: int = 0) -> float:
+    """计算综合答案的置信度（0-1）。
+
+    基础值 0.7，根据 Reflection 调整、冲突数、专家数微调。
+    """
+    base = 0.7
+    if reflection_result:
+        adj = reflection_result.get("confidence_adjustment", 0.0)
+        base += adj
+    # 冲突降低置信度
+    if conflict_count > 0:
+        base -= 0.05 * conflict_count
+    # 多专家微增
+    if specialist_count >= 3:
+        base += 0.05
+    return round(max(0.1, min(1.0, base)), 2)
+
+
+def _maybe_rerun_specialist(
+    state: PipelineState,
+    query: str,
+    execution_result: dict,
+    reflection_result: dict,
+    blackboard: Blackboard,
+    trace_id: str,
+) -> Optional[dict]:
+    """Reflection 自纠错：低置信度时重跑质量最差的专家。
+
+    触发条件：
+    1. reflection_self_correct_enabled 开关开启
+    2. confidence_adjustment < threshold（默认 -0.2）
+    3. missing_perspectives 命中已调用的某个专家
+
+    重跑：注入反思反馈到专家 prompt，最多重跑 1 次。
+    返回重跑后的 specialist dict，或 None（未触发/失败）。
+    """
+    if not reflection_result:
+        return None
+
+    try:
+        self_correct_enabled = get_config_bool("pipeline.reflection_self_correct_enabled", True)
+    except Exception:
+        self_correct_enabled = True
+    if not self_correct_enabled:
+        return None
+
+    threshold = -0.2
+    try:
+        threshold = float(get_config_int("pipeline.reflection_confidence_threshold", -20) / 100)
+    except Exception:
+        pass
+
+    conf_adj = reflection_result.get("confidence_adjustment", 0.0)
+    if conf_adj >= threshold:
+        return None
+
+    # 从 missing_perspectives 找到命中的已调用专家
+    missing = reflection_result.get("missing_perspectives", [])
+    if not missing:
+        return None
+
+    specialists = execution_result.get("specialists", [])
+    if not specialists:
+        return None
+
+    # 匹配：missing_perspective 文本含专家名/关键词 → 该专家需要重跑
+    rerun_target = None
+    for s in specialists:
+        agent_name = s.get("agent", "")
+        agent_key = s.get("agent_key", "")
+        for m in missing:
+            if agent_name and agent_name in m:
+                rerun_target = s
+                break
+            # 关键词匹配
+            kw_map = {
+                "valuation": ["估值", "PE", "PB", "分位"],
+                "risk": ["风险", "止损", "回撤"],
+                "macro": ["宏观", "趋势", "政策"],
+                "fund": ["基金", "持仓", "经理"],
+            }
+            keywords = kw_map.get(agent_key, [])
+            if any(kw in m for kw in keywords):
+                rerun_target = s
+                break
+        if rerun_target:
+            break
+
+    if not rerun_target:
+        # 默认重跑第一个专家
+        rerun_target = specialists[0]
+
+    agent_key = rerun_target.get("agent_key", "")
+    agent_name = rerun_target.get("agent", "")
+    logger.info(
+        f"[pipeline:{trace_id}] Reflection 自纠错：重跑 {agent_name} "
+        f"(confidence_adj={conf_adj}, threshold={threshold})"
+    )
+
+    try:
+        from agent.multi_agent import run_specialist
+        # 构建反思反馈注入
+        feedback = "\n\n## 反思反馈（上一轮分析质量问题，请改进）\n"
+        for issue in reflection_result.get("quality_issues", [])[:3]:
+            feedback += f"- {issue}\n"
+        for m in reflection_result.get("missing_perspectives", [])[:3]:
+            feedback += f"- 缺失视角：{m}\n"
+        enhanced_query = f"{query}{feedback}"
+
+        result = run_specialist(
+            agent_key=agent_key,
+            query=enhanced_query,
+            trace_id=f"{trace_id}#rerun",
+            from_pipeline=True,
+        )
+        if result and result.get("analysis"):
+            # 更新 blackboard 中的 entry
+            if blackboard:
+                try:
+                    from agent.blackboard import extract_entry_from_result
+                    entry = extract_entry_from_result(result, agent_key, agent_name)
+                    blackboard.add_entry(entry)
+                except Exception as e:
+                    logger.debug(f"[pipeline:{trace_id}] 重跑结果写黑板失败: {e}")
+            logger.info(f"[pipeline:{trace_id}] 自纠错重跑完成: {agent_name}")
+            return result
+    except Exception as e:
+        logger.warning(f"[pipeline:{trace_id}] 自纠错重跑失败: {e}")
+
+    return None
+
+
+def _replace_specialist_analysis(specialists: list, rerun_result: dict) -> list:
+    """用重跑结果替换对应专家的分析。"""
+    if not rerun_result:
+        return specialists
+    target_key = rerun_result.get("agent_key", "")
+    target_name = rerun_result.get("agent", "")
+    updated = []
+    replaced = False
+    for s in specialists:
+        if (target_key and s.get("agent_key") == target_key) or (
+            not target_key and s.get("agent") == target_name
+        ):
+            # 保留原 agent_key/name，替换 analysis
+            new_s = dict(s)
+            new_s["analysis"] = rerun_result.get("analysis", s.get("analysis", ""))
+            new_s["rerun"] = True
+            new_s["action_signals"] = rerun_result.get("action_signals", s.get("action_signals", []))
+            updated.append(new_s)
+            replaced = True
+        else:
+            updated.append(s)
+    if not replaced and specialists:
+        # 未匹配到：追加到末尾
+        updated.append(rerun_result)
+    return updated
 
 
 def _synthesize_multiple_specialists(
