@@ -45,16 +45,17 @@ _llm_retry = retry(
 )
 
 _api_key, _base_url, _model = get_llm_config()
-client = OpenAI(api_key=_api_key, base_url=_base_url)
+# 超时保护：3 分钟，避免 MIMO API hang 住导致 pipeline 死锁（对话 99 案例）
+client = OpenAI(api_key=_api_key, base_url=_base_url, timeout=180.0)
 MODEL = _model
 
 # 兜底客户端（主用失败时切换）
 _fallback_config = get_llm_fallback_config()
-_fallback_client = OpenAI(api_key=_fallback_config[0], base_url=_fallback_config[1]) if _fallback_config else None
+_fallback_client = OpenAI(api_key=_fallback_config[0], base_url=_fallback_config[1], timeout=180.0) if _fallback_config else None
 _fallback_model = _fallback_config[2] if _fallback_config else None
 
 # 仲裁 Agent 客户端（高级推理模型，如 DeepSeek R1）
-_arbitration_client = OpenAI(api_key=ARBITRATION_API_KEY, base_url=ARBITRATION_BASE_URL) if ARBITRATION_API_KEY else None
+_arbitration_client = OpenAI(api_key=ARBITRATION_API_KEY, base_url=ARBITRATION_BASE_URL, timeout=180.0) if ARBITRATION_API_KEY else None
 _arbitration_model = ARBITRATION_MODEL if ARBITRATION_API_KEY else None
 
 SYSTEM_PROMPT = """<role>你是一位专业的投资分析师。请根据提供的微信公众号文章内容和市场数据，给出客观的投资分析。</role>
