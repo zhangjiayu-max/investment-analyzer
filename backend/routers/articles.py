@@ -670,12 +670,16 @@ async def _background_add_article(article_id: int, url: str):
                     parse_result = await asyncio.wait_for(
                         asyncio.to_thread(parser.parse, img_path), timeout=600,
                     )
-                has_value = parse_result and parse_result.get("index_code") and parse_result.get("current_value") is not None
-                if has_value:
+                # 与图片估值一致：识别到 index_code 即视为解析成功，
+                # current_value 缺失（简化版估值卡片无 PE/PB 统计表）只记 warning 不计失败
+                has_index = parse_result and parse_result.get("index_code")
+                if has_index:
                     save_valuation(parse_result, source_image=img_path, source_url=url, snapshot_date=article_date)
+                    warn_msg = "AI 返回空值（无当前值）" if parse_result.get("current_value") is None else None
                     update_analysis_record(rid, status="success",
                         index_code=parse_result.get("index_code"), index_name=parse_result.get("index_name"),
                         metric_type=parse_result.get("metric_type"),
+                        error_msg=warn_msg,
                         raw_response=json.dumps(parse_result, ensure_ascii=False))
                     success += 1
                 else:
@@ -804,34 +808,32 @@ async def _background_analyze(article_id: int):
                 _analyze_tasks[article_id] = current_task
                 result = await asyncio.wait_for(current_task, timeout=IMAGE_TIMEOUT)
 
-                has_value = (
-                    result
-                    and result.get("index_code")
-                    and result.get("current_value") is not None
-                )
-                if has_value:
+                # 与图片估值一致：识别到 index_code 即视为解析成功
+                has_index = result and result.get("index_code")
+                if has_index:
                     vid = save_valuation(
                         result,
                         source_image=img_path,
                         source_url=article["url"],
                         snapshot_date=article.get("publish_time", "")[:10] or None,
                     )
+                    warn_msg = "AI 返回空值（无当前值）" if result.get("current_value") is None else None
                     update_analysis_record(rid,
                         status="success",
                         index_code=result.get("index_code"),
                         index_name=result.get("index_name"),
                         metric_type=result.get("metric_type"),
+                        error_msg=warn_msg,
                         raw_response=json.dumps(result, ensure_ascii=False),
                     )
                     success += 1
                 else:
-                    st = "success" if result.get("index_code") else "error"
                     update_analysis_record(rid,
-                        status=st,
+                        status="error",
                         index_code=result.get("index_code"),
                         index_name=result.get("index_name"),
                         metric_type=result.get("metric_type"),
-                        error_msg="AI 返回空值（无当前值）" if result.get("index_code") else "AI 未能提取到数据",
+                        error_msg="AI 未能提取到数据",
                         raw_response=json.dumps(result, ensure_ascii=False) if result else "",
                     )
                     failed += 1
@@ -907,16 +909,12 @@ async def _background_reanalyze(record_id: int):
                 timeout=IMAGE_TIMEOUT,
             )
 
-        has_value = (
-            result
-            and result.get("index_code")
-            and result.get("current_value") is not None
-        )
-        if not has_value:
-            err = "AI 返回空值（无当前值）" if result and result.get("index_code") else "AI 未能提取到数据"
+        # 与图片估值一致：识别到 index_code 即视为解析成功
+        has_index = result and result.get("index_code")
+        if not has_index:
             update_analysis_record(record_id,
                 status="error",
-                error_msg=err,
+                error_msg="AI 未能提取到数据",
                 raw_response=json.dumps(result, ensure_ascii=False) if result else "",
             )
             return
@@ -927,11 +925,13 @@ async def _background_reanalyze(record_id: int):
             source_url=article["url"] if article else None,
             snapshot_date=article.get("publish_time", "")[:10] if article else None,
         )
+        warn_msg = "AI 返回空值（无当前值）" if result.get("current_value") is None else None
         update_analysis_record(record_id,
             status="success",
             index_code=result.get("index_code"),
             index_name=result.get("index_name"),
             metric_type=result.get("metric_type"),
+            error_msg=warn_msg,
             raw_response=json.dumps(result, ensure_ascii=False),
         )
     except asyncio.TimeoutError:
