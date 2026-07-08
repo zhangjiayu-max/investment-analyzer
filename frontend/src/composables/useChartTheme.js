@@ -14,6 +14,10 @@ export function useChartTheme() {
       gridColor: dark ? 'rgba(255,255,255,0.06)' : '#f1f5f9',
       borderColor: dark ? 'rgba(255,255,255,0.1)' : '#e2e8f0',
 
+      // 编辑式字体（衬线标题 + 等宽数字）
+      fontSerif: "'Songti SC', 'STSong', 'SimSun', 'Noto Serif SC', serif",
+      fontMono: "'JetBrains Mono', 'SF Mono', ui-monospace, 'Menlo', monospace",
+
       // 金融配色（涨红跌绿，中国市场惯例）
       colors: {
         profit: '#dc2626',     // 红色 = 盈利/上涨
@@ -46,7 +50,7 @@ export function useChartTheme() {
       backgroundColor: isDark.value ? 'rgba(13,18,32,0.95)' : '#ffffff',
       borderColor: t.borderColor,
       borderWidth: 1,
-      textStyle: { color: t.titleColor, fontSize: 12 },
+      textStyle: { color: t.titleColor, fontSize: 12, fontFamily: t.fontMono },
       ...extra,
     }
   }
@@ -68,7 +72,7 @@ export function useChartTheme() {
     return {
       type: 'category',
       data,
-      axisLabel: { color: t.textColor, fontSize: 10, rotate: data.length > 15 ? 30 : 0, ...opts.labelOpts },
+      axisLabel: { color: t.textColor, fontSize: 10, fontFamily: t.fontMono, rotate: data.length > 15 ? 30 : 0, ...opts.labelOpts },
       axisLine: { lineStyle: { color: t.gridColor } },
       axisTick: { show: false },
       ...opts,
@@ -81,9 +85,9 @@ export function useChartTheme() {
     return {
       type: 'value',
       name,
-      nameTextStyle: { color: t.textColor, fontSize: 10 },
+      nameTextStyle: { color: t.textColor, fontSize: 10, fontFamily: t.fontMono },
       splitLine: { lineStyle: { color: t.gridColor, type: 'dashed' } },
-      axisLabel: { color: t.textColor, fontSize: 10 },
+      axisLabel: { color: t.textColor, fontSize: 10, fontFamily: t.fontMono },
       axisLine: { show: false },
       axisTick: { show: false },
       ...opts,
@@ -102,7 +106,7 @@ export function useChartTheme() {
         backgroundColor: isDark.value ? 'rgba(255,255,255,0.04)' : '#f8fafc',
         fillerColor: 'rgba(201,168,76,0.12)',
         handleStyle: { color: t.colors.primary, borderColor: t.colors.primary },
-        textStyle: { color: t.textColor, fontSize: 10 },
+        textStyle: { color: t.textColor, fontSize: 10, fontFamily: t.fontMono },
       },
     ]
   }

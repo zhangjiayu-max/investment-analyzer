@@ -45,7 +45,7 @@ function getOption(echarts) {
         lineStyle: { type: 'dashed', width: 1 },
         data: props.markLines.map(ml => ({
           yAxis: ml.yAxis,
-          label: { formatter: ml.label, color: theme.value.textColor, fontSize: 10 },
+          label: { formatter: ml.label, color: theme.value.textColor, fontSize: 10, fontFamily: theme.value.fontMono },
           lineStyle: { color: ml.color || theme.value.colors.warning },
         })),
       } : undefined,
@@ -65,7 +65,7 @@ function getOption(echarts) {
     legend: {
       data: props.series.map(s => s.name),
       bottom: 0,
-      textStyle: { color: theme.value.textColor, fontSize: 11 },
+      textStyle: { color: theme.value.textColor, fontSize: 11, fontFamily: theme.value.fontMono },
     },
     grid: getGridOpts(),
     xAxis: getCategoryAxis(props.dates),

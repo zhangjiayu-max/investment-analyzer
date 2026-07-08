@@ -117,6 +117,7 @@ const legendItems = computed(() => slices.value)
           fill="currentColor"
           :font-size="Math.max(11, size / 16)"
           font-weight="600"
+          font-family="'JetBrains Mono', 'SF Mono', ui-monospace, 'Menlo', monospace"
         >
           {{ tooltipText }}
         </text>
@@ -179,6 +180,7 @@ const legendItems = computed(() => slices.value)
   padding: 2px 4px;
   border-radius: 4px;
   transition: background 0.15s;
+  font-family: 'JetBrains Mono', 'SF Mono', ui-monospace, 'Menlo', monospace;
 }
 .legend-item.active {
   background: var(--color-bg-hover, rgba(0,0,0,0.04));

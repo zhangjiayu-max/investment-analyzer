@@ -24,7 +24,7 @@ const props = defineProps({
 })
 
 const chartRef = ref(null)
-const { isDark } = useChartTheme()
+const { theme, isDark } = useChartTheme()
 
 function getOption(echarts) {
   return {
@@ -50,6 +50,7 @@ function getOption(echarts) {
           distance: 24,
           color: isDark.value ? '#9aa0a6' : '#64748b',
           fontSize: 11,
+          fontFamily: theme.value.fontMono,
           formatter: v => v === props.min || v === props.max ? v : '',
         },
         title: {
@@ -58,6 +59,7 @@ function getOption(echarts) {
           fontSize: 13,
           color: isDark.value ? '#e8eaed' : '#0f172a',
           fontWeight: 600,
+          fontFamily: theme.value.fontSerif,
         },
         detail: {
           valueAnimation: true,
@@ -66,6 +68,7 @@ function getOption(echarts) {
           color: 'auto',
           offsetCenter: [0, '40%'],
           formatter: v => `${v}${props.unit}`,
+          fontFamily: theme.value.fontMono,
         },
         data: [{ value: props.value, name: props.title }],
       },
