@@ -151,7 +151,7 @@ function onBack() {
   <div class="mobile-app">
     <!-- 顶部栏 -->
     <header class="mobile-header">
-      <span class="mobile-title">{{ currentPageLabel || '投资分析助手' }}</span>
+      <span class="mobile-title editorial-title">{{ currentPageLabel || '投资分析助手' }}</span>
       <button class="mobile-theme-btn" @click="toggleDark" :title="isDark ? '亮色模式' : '暗色模式'">
         <svg v-if="isDark" width="18" height="18" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z"/>
@@ -167,7 +167,7 @@ function onBack() {
       <!-- 分析页（特殊处理） -->
       <template v-if="activePage === 'analysis'">
         <div v-if="!currentTaskId" class="mobile-analysis">
-          <h2 class="mobile-page-title">AI 投资分析</h2>
+          <h2 class="mobile-page-title editorial-title">AI 投资分析</h2>
           <form @submit.prevent="onSubmitAnalysis" class="mobile-analysis-form">
             <input
               v-model="analysisUrl"
@@ -196,7 +196,7 @@ function onBack() {
       <div v-if="showMoreMenu" class="mobile-more-overlay" @click.self="showMoreMenu = false">
         <div class="mobile-more-sheet">
           <div class="mobile-more-header">
-            <span>全部功能</span>
+            <span class="editorial-title">全部功能</span>
             <button @click="showMoreMenu = false" class="mobile-more-close">
               <svg width="20" height="20" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>
@@ -279,9 +279,19 @@ function onBack() {
   box-shadow: var(--shadow-sm);
 }
 
+.mobile-header::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -1px;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, var(--color-gold) 50%, transparent);
+  opacity: 0.35;
+}
+
 .mobile-title {
   font-size: 1.05rem;
-  font-weight: 700;
   color: var(--color-text-primary);
   letter-spacing: -0.02em;
 }
@@ -334,7 +344,6 @@ function onBack() {
 
 .mobile-page-title {
   font-size: 1.1rem;
-  font-weight: 600;
   color: var(--color-text-primary);
 }
 
@@ -394,7 +403,6 @@ function onBack() {
   justify-content: space-between;
   margin-bottom: 1rem;
   font-size: 1rem;
-  font-weight: 600;
   color: var(--color-text-primary);
 }
 
@@ -507,7 +515,7 @@ function onBack() {
   width: 28px;
   height: 3px;
   border-radius: 2px;
-  background: var(--gradient-primary);
+  background: linear-gradient(90deg, var(--color-gold) 0%, var(--color-primary) 100%);
   box-shadow: 0 0 12px var(--color-primary-glow-strong);
 }
 
