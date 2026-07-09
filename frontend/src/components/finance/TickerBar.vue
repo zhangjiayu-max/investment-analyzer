@@ -10,10 +10,11 @@
 import { ref, onMounted, onUnmounted } from 'vue'
 import Icon from '../ui/Icon.vue'
 import Sparkline from './Sparkline.vue'
+import AlertBell from '../AlertBell.vue'
 import { getDashboard, getFinanceQuoteBar } from '../../api'
 import { isDark, toggleDark } from '../../composables/useTheme'
 
-const emit = defineEmits(['open-kyc', 'search'])
+const emit = defineEmits(['open-kyc', 'search', 'navigate'])
 
 const searchQuery = ref('')
 
@@ -103,8 +104,9 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
       </div>
     </div>
 
-    <!-- 右侧：画像入口 + 主题切换 -->
+    <!-- 右侧：画像入口 + 主动提醒 + 主题切换 -->
     <div class="ticker-right">
+      <AlertBell @navigate="emit('navigate', $event)" />
       <button class="ticker-action" @click="emit('open-kyc')" title="我的投资画像">
         <Icon name="circle-user" size="16" />
         <span class="action-label">画像</span>

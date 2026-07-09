@@ -24,6 +24,11 @@ function handleSearch(q) {
   activePage.value = 'search'
 }
 
+// P0-B 主动提醒：点击提醒项跳转目标页面
+function handleAlertNavigate(page) {
+  activePage.value = page
+}
+
 onMounted(() => {
   window.addEventListener('open-kyc', () => { showKyc.value = true })
 })
@@ -47,7 +52,7 @@ function handleViewResult(convId) {
   <div v-else class="app-layout">
     <Sidebar :activePage="activePage" :showKyc="showKyc" @navigate="activePage = $event" @close-kyc="showKyc = false" />
     <div class="app-content">
-      <TickerBar @open-kyc="showKyc = true" @search="handleSearch" />
+      <TickerBar @open-kyc="showKyc = true" @search="handleSearch" @navigate="handleAlertNavigate" />
       <main class="app-main">
         <Home :activePage="activePage" :searchQuery="searchQuery" @navigate="activePage = $event" />
       </main>

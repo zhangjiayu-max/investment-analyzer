@@ -358,6 +358,13 @@ async def startup():
         asyncio.create_task(_auto_daily_eval())
     else:
         logging.info("每日评测 Pipeline 已关闭（llm_cost.auto_daily_eval=false）")
+
+    # P0 主动提醒扫描（估值阈值/持仓风险/建议验证，默认开启）
+    if get_config("alerts.proactive_scan_enabled", "true") == "true":
+        asyncio.create_task(_auto_periodic_scan())
+        logging.info("主动提醒扫描任务已启动（alerts.proactive_scan_enabled=true）")
+    else:
+        logging.info("主动提醒扫描已关闭（alerts.proactive_scan_enabled=false）")
     # 清理上次异常退出遗留的僵尸 agent_runs
     try:
         from db.agents import _get_conn
@@ -591,6 +598,59 @@ async def _auto_daily_eval():
                 logging.error(f"每日评测失败: {e}")
     except Exception as e:
         logging.warning(f"自动评测任务异常: {e}")
+
+
+async def _auto_periodic_scan():
+    """P0 主动提醒扫描 — 每隔 N 分钟扫描一次（默认 30 分钟）。
+
+    包含 3 个扫描函数：
+    - 建议验证：到达 verify_after_date 的 pending 建议自动验证，生成结果 alert
+    - 估值阈值：持仓相关指数 PE/PB 分位突破阈值时生成 alert
+    - 持仓风险：单标的集中度/亏损超阈值时生成 alert
+
+    开关：alerts.proactive_scan_enabled（默认 true）
+    间隔：alerts.scan_interval_minutes（默认 30）
+    """
+    import time
+    try:
+        await asyncio.sleep(60)  # 等启动完成
+
+        # 启动时立即跑一次（让用户登录就能看到最新提醒）
+        try:
+            if get_config("alerts.proactive_scan_enabled", "true") == "true":
+                from services.alert_scanner import run_periodic_scan
+                result = run_periodic_scan()
+                logging.info(
+                    f"[auto-scan] 启动扫描完成: "
+                    f"verified={result.get('verification', {}).get('verified', 0)}, "
+                    f"valuation_alerts={result.get('valuation', {}).get('alerts_created', 0)}, "
+                    f"portfolio_alerts={result.get('portfolio', {}).get('alerts_created', 0)}"
+                )
+        except Exception as e:
+            logging.warning(f"[auto-scan] 启动扫描异常: {e}")
+
+        while True:
+            try:
+                interval_min = int(get_config("alerts.scan_interval_minutes", "30"))
+            except (TypeError, ValueError):
+                interval_min = 30
+            await asyncio.sleep(max(interval_min * 60, 300))  # 至少 5 分钟
+
+            try:
+                if get_config("alerts.proactive_scan_enabled", "true") != "true":
+                    continue
+                from services.alert_scanner import run_periodic_scan
+                result = run_periodic_scan()
+                logging.info(
+                    f"[auto-scan] 定时扫描完成: "
+                    f"verified={result.get('verification', {}).get('verified', 0)}, "
+                    f"valuation_alerts={result.get('valuation', {}).get('alerts_created', 0)}, "
+                    f"portfolio_alerts={result.get('portfolio', {}).get('alerts_created', 0)}"
+                )
+            except Exception as e:
+                logging.warning(f"[auto-scan] 定时扫描异常: {e}")
+    except Exception as e:
+        logging.warning(f"主动提醒扫描任务异常: {e}")
 
 
 async def _auto_daily_report():

@@ -204,6 +204,13 @@ function handleStreamEvent(convId, event, callbacks = {}) {
       }
       break
 
+    case 'recommendations':
+      // P0-A 决策闭环：建议落库后通知前端渲染建议卡片（接在 answer 事件之后）
+      if (callbacks.onRecommendations) {
+        callbacks.onRecommendations(convId, data, state)
+      }
+      break
+
     case 'clarification':
       // 交互式澄清：通知 ChatView 展示澄清问题 + 选项
       state.streamStatus = 'clarifying'

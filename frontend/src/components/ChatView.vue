@@ -15,6 +15,7 @@ import {
   listTraces, listAgents,
   getConversationEvaluation, evaluateConversation, evaluateConversationWithLLM,
   createDecisionFromChat,
+  adoptRecommendation,
 } from '../api'
 import ConfirmDialog from './ConfirmDialog.vue'
 import AppToast from './AppToast.vue'
@@ -319,6 +320,7 @@ function _legacyResumeConversation(convId) {
         }
         nextTick(() => scrollToBottom())
       },
+      onRecommendations: (cid, data) => attachRecommendationsToLastMessage(cid, data),
       onDone: (cid) => {
         finishStream(cid)
         removeTask(cid)
@@ -748,6 +750,7 @@ async function handleSend() {
         }
         nextTick(() => scrollToBottom())
       },
+      onRecommendations: (cid, data) => attachRecommendationsToLastMessage(cid, data),
       onDone: (cid, data) => {
         if (selectedConv.value?.id === cid) {
           const state = getStreamState(cid)
@@ -837,6 +840,7 @@ function handleClarifyAnswer(msg, answer) {
         }
         nextTick(() => scrollToBottom())
       },
+      onRecommendations: (cid, data) => attachRecommendationsToLastMessage(cid, data),
       onDone: (cid) => {
         finishStream(cid)
         removeTask(cid)
@@ -876,6 +880,46 @@ function handleCancelStream() {
 function scrollToBottom() {
   if (messagesContainer.value) {
     messagesContainer.value.scrollTop = messagesContainer.value.scrollHeight
+  }
+}
+
+// P0-A 决策闭环：将后端 recommendations 事件附加到最近一条 assistant 消息
+// data 形如 { recommendations: [...], recommendation_ids: [...], conversation_id }
+function attachRecommendationsToLastMessage(cid, data) {
+  if (selectedConv.value?.id !== cid) return
+  const recs = data?.recommendations || []
+  if (!recs.length) return
+  // 找最近一条 assistant 消息（可能正在 streaming 或已 completed）
+  for (let i = messages.value.length - 1; i >= 0; i--) {
+    const m = messages.value[i]
+    if (m.role === 'assistant') {
+      m.recommendations = recs.map(r => ({
+        id: r.id,
+        index_name: r.index_name || '',
+        index_code: r.index_code || '',
+        direction: r.direction || 'hold',
+        reason: r.reason || '',
+        confidence: r.confidence || 'medium',
+        baseline_value: r.baseline_value,
+        baseline_date: r.baseline_date,
+        verify_window_days: r.verify_window_days || 5,
+        adopted: 0, // 默认未标记
+      }))
+      break
+    }
+  }
+  nextTick(() => scrollToBottom())
+}
+
+// P0-A 决策闭环：用户点击采纳/不采纳按钮
+async function handleAdoptRecommendation(msg, rec, adopted) {
+  if (!rec?.id) return
+  try {
+    await adoptRecommendation(rec.id, adopted)
+    rec.adopted = adopted
+    showToast(adopted === 1 ? '已标记为采纳' : adopted === -1 ? '已标记为不采纳' : '已取消标记', 'success')
+  } catch (e) {
+    showToast('标记失败，请重试', 'error')
   }
 }
 
@@ -1146,6 +1190,7 @@ async function handleResume() {
         }
         nextTick(() => scrollToBottom())
       },
+      onRecommendations: (cid, data) => attachRecommendationsToLastMessage(cid, data),
       onDone: (cid, data) => {
         if (selectedConv.value?.id === cid) {
           const state = getStreamState(cid)
@@ -1547,6 +1592,7 @@ function stopPollingProgress() {
             @continue-analysis="continueAssistantMessage"
             @regenerate="regenerateAssistantMessage"
             @clarify-answer="handleClarifyAnswer"
+            @adopt-recommendation="handleAdoptRecommendation"
           />
 
           <!-- 流式状态指示器 -->

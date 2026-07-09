@@ -183,6 +183,51 @@ def auto_verify_pending_recommendations(price_map: dict, verify_date: str,
     return results
 
 
+# ── P0-A 决策闭环：用户采纳标记 ────────────────────────────────────
+
+
+def adopt_recommendation(rec_id: int, adopted: int) -> dict:
+    """标记用户是否采纳某条建议。
+
+    Args:
+        rec_id: recommendation id
+        adopted: 1=已采纳, -1=未采纳, 0=取消标记（回到待定）
+
+    Returns:
+        {"ok": bool, "id": int, "adopted": int}
+    """
+    if adopted not in (-1, 0, 1):
+        return {"ok": False, "error": "invalid adopted value"}
+    conn = _get_conn()
+    rec = conn.execute("SELECT id FROM recommendations WHERE id = ?", (rec_id,)).fetchone()
+    if not rec:
+        conn.close()
+        return {"ok": False, "error": "not found"}
+    from datetime import datetime
+    adopted_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S") if adopted != 0 else None
+    conn.execute(
+        "UPDATE recommendations SET adopted = ?, adopted_at = ? WHERE id = ?",
+        (adopted, adopted_at, rec_id),
+    )
+    conn.commit()
+    conn.close()
+    return {"ok": True, "id": rec_id, "adopted": adopted}
+
+
+def list_pending_verification_recommendations(verify_date: str) -> list[dict]:
+    """列出到达验证窗口且尚未验证的建议（用于定时任务）。"""
+    conn = _get_conn()
+    rows = conn.execute(
+        "SELECT * FROM recommendations "
+        "WHERE status = 'pending' AND baseline_value IS NOT NULL "
+        "AND (verify_after_date IS NULL OR verify_after_date <= ?) "
+        "ORDER BY created_at ASC",
+        (verify_date,),
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
 # ── 推荐反馈 / 进化系统 ────────────────────────────────────
 
 

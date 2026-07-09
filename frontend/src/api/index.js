@@ -1042,6 +1042,13 @@ export function autoVerifyRecommendations() {
   return api.get('/dashboard/recommendations/auto-verify')
 }
 
+/** P0-A 决策闭环：用户采纳/不采纳某条建议。
+ *  adopted: 1=已采纳, -1=未采纳, 0=取消
+ */
+export function adoptRecommendation(recId, adopted) {
+  return api.post(`/recommendations/${recId}/adopt`, { adopted })
+}
+
 /** 提交 LLM 输出反馈（进化系统） */
 export function submitLlmFeedback({ caller, input_summary = '', output_summary = '', rating, tags = '', comment = '', score_data_accuracy = null, score_logic = null, score_actionability = null, target_type = '', target_id = null }) {
   return api.post('/llm-feedback', { caller, input_summary, output_summary, rating, tags, comment, score_data_accuracy, score_logic, score_actionability, target_type, target_id })

@@ -78,6 +78,10 @@ def init_eval_tables(conn):
     _add_column_if_not_exists(conn, "recommendations", "verify_after_date", "TEXT")
     _add_column_if_not_exists(conn, "recommendations", "benchmark_change_pct", "REAL")
     _add_column_if_not_exists(conn, "recommendations", "verify_window_days", "INTEGER DEFAULT 5")
+    # P0-A 决策闭环：用户采纳标记（与 status 验证状态分离）
+    # adopted: 0=未标记, 1=已采纳, -1=未采纳
+    _add_column_if_not_exists(conn, "recommendations", "adopted", "INTEGER DEFAULT 0")
+    _add_column_if_not_exists(conn, "recommendations", "adopted_at", "TEXT")
 
     conn.execute("""
         CREATE TABLE IF NOT EXISTS recommendation_feedback (

@@ -53,6 +53,7 @@ EVENT_ANSWER = "answer"
 EVENT_ERROR = "error"
 EVENT_DEGRADE = "degrade"
 EVENT_TERMINATED = "terminated"
+EVENT_RECOMMENDATIONS = "recommendations"  # P0-A 决策闭环：建议落库后通知前端
 
 
 # ── 合规过滤 + 基金代码风险标注 ──────────────────
@@ -357,6 +358,16 @@ def run_pipeline(
         state.set_phase_result(PipelinePhase.MEMORY.value, phase5_result)
         yield {"type": EVENT_PHASE_END, "phase": PipelinePhase.MEMORY.value}
 
+        # P0-A 决策闭环：建议落库后通知前端渲染建议卡片
+        rec_data = phase5_result.get("recommendations") or {}
+        if rec_data.get("enabled") and rec_data.get("recommendations"):
+            yield {
+                "type": EVENT_RECOMMENDATIONS,
+                "recommendations": rec_data["recommendations"],
+                "recommendation_ids": rec_data.get("recommendation_ids", []),
+                "conversation_id": state.conversation_id,
+            }
+
         state.transition_to(PipelinePhase.COMPLETED)
 
     except _PipelineCancelled:
@@ -481,6 +492,16 @@ def run_pipeline_from_checkpoint(
         phase5_result = _phase_memory(state, phase4_result, query_info, trace_id)
         state.set_phase_result(PipelinePhase.MEMORY.value, phase5_result)
         yield {"type": EVENT_PHASE_END, "phase": PipelinePhase.MEMORY.value}
+
+        # P0-A 决策闭环：建议落库后通知前端渲染建议卡片
+        rec_data = phase5_result.get("recommendations") or {}
+        if rec_data.get("enabled") and rec_data.get("recommendations"):
+            yield {
+                "type": EVENT_RECOMMENDATIONS,
+                "recommendations": rec_data["recommendations"],
+                "recommendation_ids": rec_data.get("recommendation_ids", []),
+                "conversation_id": state.conversation_id,
+            }
 
         state.transition_to(PipelinePhase.COMPLETED)
 
@@ -2208,17 +2229,168 @@ def _fallback_synthesize(query: str, specialists: list) -> str:
 
 # ── Phase 5: 记忆持久化 ──────────────────────────
 
+def _extract_and_save_recommendations(
+    state: PipelineState,
+    query_info: dict,
+    conclusion_id,
+    trace_id: str,
+) -> dict:
+    """P0-A 决策闭环：从 AI 最终回答中提取结构化建议并落库到 recommendations 表。
+
+    流程：
+    1. LLM 提取方向性建议（加仓/减仓/买入/卖出/持有），模糊建议（关注/留意）不提取
+    2. 为每条建议关联标的获取 baseline（当前估值/净值）
+    3. 调用 save_recommendations 落库，verify_days 默认 5 交易日
+    4. 返回保存的 recommendation_ids + 详情，供前端展示卡片
+
+    开关：pipeline.save_recommendations_enabled（默认 true）
+    """
+    result = {"enabled": False, "recommendation_ids": [], "recommendations": []}
+
+    # 开关检查（默认开启）
+    try:
+        enabled = get_config_bool("pipeline.save_recommendations_enabled", True)
+    except Exception:
+        enabled = True
+    if not enabled:
+        return result
+    result["enabled"] = True
+
+    if not state.answer or len(state.answer) < 30:
+        return result
+
+    # 1. LLM 提取结构化建议
+    recs = []
+    try:
+        from services.llm_service import _call_llm, MODEL
+        prompt = (
+            "你是投资建议提取器。从下面的投资分析中，提取【明确的方向性建议】。\n\n"
+            "提取规则：\n"
+            "- 只提取明确的方向性建议：加仓/减仓/买入/卖出/持有/清仓\n"
+            "- 模糊建议（如「关注」「留意」「观察」）不要提取\n"
+            "- 每条建议必须关联具体标的（指数名/指数代码/基金名/基金代码）\n"
+            "- 没有明确标的或没有方向性建议时返回空数组 []\n"
+            "- 最多 5 条\n\n"
+            "输出严格 JSON 数组（不要 markdown 代码块），每项格式：\n"
+            '{"index_name":"标的名称","index_code":"代码(可为空)","direction":"up|down|hold",'
+            '"reason":"简短理由(≤50字)","confidence":"high|medium|low"}\n\n'
+            "direction 取值：up=加仓/买入，down=减仓/卖出，hold=持有/观望\n\n"
+            f"分析内容：\n{state.answer[:3000]}"
+        )
+        response = _call_llm(
+            caller="extract_recommendations",
+            trace_id=trace_id,
+            model=MODEL,
+            messages=[
+                {"role": "system", "content": "你是严格的结构化数据提取器，只输出 JSON 数组。"},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.1,
+            max_tokens=600,
+        )
+        content = (response.choices[0].message.content or "").strip()
+        # 容错：剥离 markdown 代码块
+        if content.startswith("```"):
+            content = content.split("\n", 1)[-1] if "\n" in content else content[3:]
+            if content.endswith("```"):
+                content = content[:-3]
+            content = content.strip()
+        # 提取首个 [ 到 ] 之间的 JSON
+        lb = content.find("[")
+        rb = content.rfind("]")
+        if lb >= 0 and rb > lb:
+            recs = json.loads(content[lb:rb + 1])
+        if not isinstance(recs, list):
+            recs = []
+    except Exception as e:
+        logger.warning(f"[pipeline:{trace_id}] 建议提取失败: {e}")
+        return result
+
+    if not recs:
+        return result
+
+    # 过滤无效项 + 标准化 direction
+    valid_recs = []
+    for r in recs:
+        if not isinstance(r, dict):
+            continue
+        name = (r.get("index_name") or "").strip()
+        code = (r.get("index_code") or "").strip()
+        if not name and not code:
+            continue
+        direction = (r.get("direction") or "").strip().lower()
+        if direction not in ("up", "down", "hold"):
+            continue
+        valid_recs.append({
+            "index_name": name,
+            "index_code": code,
+            "direction": direction,
+            "reason": (r.get("reason") or "")[:200],
+            "confidence": (r.get("confidence") or "medium").lower(),
+        })
+    if not valid_recs:
+        return result
+
+    # 2. 为每条建议获取 baseline（当前估值/净值）
+    baselines = []
+    for rec in valid_recs:
+        bl = None
+        try:
+            target = rec["index_code"] or rec["index_name"]
+            val = _lookup_valuation(target)
+            if val:
+                # 用 current_value 作为基线（PE/PB 数值）
+                bl = {
+                    "price": float(val.get("current_value") or 0) or None,
+                    "date": val.get("snapshot_date") or "",
+                }
+        except Exception:
+            bl = None
+        baselines.append(bl)
+
+    # 3. 落库
+    try:
+        from db.dashboard import save_recommendations
+        analysis_id = f"dialogue_{state.conversation_id}_{state.message_id}"
+        rec_ids = save_recommendations(
+            valid_recs,
+            analysis_id=analysis_id,
+            baselines=baselines,
+            verify_days=5,
+        )
+        result["recommendation_ids"] = rec_ids
+        # 组装前端展示用详情（含 baseline）
+        for i, rec in enumerate(valid_recs):
+            bl = baselines[i] if i < len(baselines) else None
+            rec_out = dict(rec)
+            rec_out["id"] = rec_ids[i] if i < len(rec_ids) else None
+            rec_out["baseline_value"] = bl["price"] if bl else None
+            rec_out["baseline_date"] = bl["date"] if bl else None
+            rec_out["verify_window_days"] = 5
+            rec_out["conversation_id"] = state.conversation_id
+            result["recommendations"].append(rec_out)
+        logger.info(
+            f"[pipeline:{trace_id}] 已保存 {len(rec_ids)} 条建议到 recommendations 表 "
+            f"(analysis_id={analysis_id})"
+        )
+    except Exception as e:
+        logger.warning(f"[pipeline:{trace_id}] 建议落库失败: {e}")
+
+    return result
+
+
 def _phase_memory(
     state: PipelineState,
     synthesis_result: dict,
     query_info: dict,
     trace_id: str,
 ) -> dict:
-    """Phase 5: 保存结论 + 更新摘要 + 提取用户偏好。"""
+    """Phase 5: 保存结论 + 更新摘要 + 提取用户偏好 + 提取建议落库（P0-A）。"""
     result = {
         "saved_conclusion_id": None,
         "updated_memory_ids": [],
         "summary_updated": False,
+        "recommendations": {"enabled": False, "recommendation_ids": [], "recommendations": []},
     }
 
     # 1. 保存分析结论
@@ -2245,8 +2417,18 @@ def _phase_memory(
         logger.info(f"[pipeline] 分析结论已保存: id={conclusion_id}")
     except Exception as e:
         logger.warning(f"[pipeline] 保存结论失败: {e}")
+        conclusion_id = None
 
-    # 2. 更新对话摘要（异步）
+    # 2. P0-A 决策闭环：从回答中提取建议并落库
+    try:
+        rec_result = _extract_and_save_recommendations(
+            state, query_info, conclusion_id, trace_id,
+        )
+        result["recommendations"] = rec_result
+    except Exception as e:
+        logger.warning(f"[pipeline] 建议提取落库失败: {e}")
+
+    # 3. 更新对话摘要（异步）
     try:
         from agent.memory import update_conversation_summary
         update_conversation_summary(state.conversation_id)
@@ -2254,7 +2436,7 @@ def _phase_memory(
     except Exception as e:
         logger.debug(f"[pipeline] 摘要更新跳过: {e}")
 
-    # 3. 提取用户偏好（受开关控制，默认关闭）
+    # 4. 提取用户偏好（受开关控制，默认关闭）
     try:
         extract_prefs = get_config_bool("agent.auto_extract_prefs", False)
         if extract_prefs and state.answer:
@@ -2266,7 +2448,7 @@ def _phase_memory(
     except Exception as e:
         logger.debug(f"[pipeline] 偏好提取跳过: {e}")
 
-    # 4. 记录 token 审计
+    # 5. 记录 token 审计
     try:
         from db.agents import record_token_audit
         record_token_audit(

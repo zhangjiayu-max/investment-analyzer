@@ -31,7 +31,17 @@ const emit = defineEmits([
   'continue-analysis',
   'regenerate',
   'clarify-answer',
+  'adopt-recommendation',
 ])
+
+// P0-A 决策闭环：建议卡片辅助函数
+const DIRECTION_LABELS = { up: '加仓', down: '减仓', hold: '持有' }
+const DIRECTION_ICONS = { up: '↑', down: '↓', hold: '→' }
+const CONFIDENCE_LABELS = { high: '高', medium: '中', low: '低' }
+
+function directionClass(d) {
+  return { up: 'rec-dir-up', down: 'rec-dir-down', hold: 'rec-dir-hold' }[d] || 'rec-dir-hold'
+}
 
 // 评估状态相关
 function getEvalStatusClass(messageId) {
@@ -617,6 +627,47 @@ const tradeSuggestions = computed(() => {
           <span v-if="s.amount" class="trade-amount-hint font-jet">¥{{ s.amount }}</span>
           <span v-else-if="s.shares" class="trade-amount-hint font-jet">{{ s.shares }}份</span>
         </button>
+      </div>
+      <!-- P0-A 决策闭环：投资建议卡片（已记录，T+N 自动验证） -->
+      <div v-if="msg.recommendations && msg.recommendations.length" class="recommendations-card">
+        <div class="rec-card-header">
+          <Icon name="lightbulb" size="14" class="inline-icon" />
+          <span class="rec-card-title">投资建议</span>
+          <span class="rec-card-meta">已记录，T+{{ msg.recommendations[0]?.verify_window_days || 5 }} 自动验证</span>
+        </div>
+        <div v-for="(rec, idx) in msg.recommendations" :key="`rec-${idx}`" class="rec-item">
+          <div class="rec-item-header">
+            <span class="rec-target-name">{{ rec.index_name || '未命名标的' }}</span>
+            <span v-if="rec.index_code" class="rec-target-code font-jet">{{ rec.index_code }}</span>
+            <span class="rec-direction" :class="directionClass(rec.direction)">
+              {{ DIRECTION_ICONS[rec.direction] || '→' }} {{ DIRECTION_LABELS[rec.direction] || '持有' }}
+            </span>
+            <span class="rec-confidence">置信度: {{ CONFIDENCE_LABELS[rec.confidence] || '中' }}</span>
+          </div>
+          <div v-if="rec.reason" class="rec-reason">{{ rec.reason }}</div>
+          <div v-if="rec.baseline_value" class="rec-baseline font-jet">
+            基线: {{ rec.baseline_value }}<span v-if="rec.baseline_date"> ({{ rec.baseline_date }})</span>
+          </div>
+          <div class="rec-actions">
+            <button
+              class="btn-adopt"
+              :class="{ 'btn-adopt-active': rec.adopted === 1 }"
+              @click="emit('adopt-recommendation', msg, rec, 1)"
+              :disabled="rec.adopted === 1"
+            >✓ 已采纳</button>
+            <button
+              class="btn-adopt btn-adopt-reject"
+              :class="{ 'btn-adopt-active': rec.adopted === -1 }"
+              @click="emit('adopt-recommendation', msg, rec, -1)"
+              :disabled="rec.adopted === -1"
+            >✗ 不采纳</button>
+            <button
+              v-if="rec.adopted !== 0"
+              class="btn-adopt btn-adopt-reset"
+              @click="emit('adopt-recommendation', msg, rec, 0)"
+            >取消标记</button>
+          </div>
+        </div>
       </div>
       <!-- 反馈按钮 -->
       <div v-if="msg.role === 'assistant' && !feedbackGiven[index]" class="message-feedback">
@@ -1537,6 +1588,141 @@ const tradeSuggestions = computed(() => {
   font-size: 11px;
   opacity: 0.85;
   margin-left: 2px;
+}
+
+/* ── P0-A 决策闭环：投资建议卡片 ── */
+.recommendations-card {
+  margin-top: 10px;
+  border: 1px solid var(--color-border, #e5e7eb);
+  border-radius: 8px;
+  background: var(--color-bg-secondary, #f9fafb);
+  overflow: hidden;
+}
+.rec-card-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px;
+  background: rgba(59, 130, 246, 0.08);
+  border-bottom: 1px solid var(--color-border, #e5e7eb);
+  font-size: 13px;
+}
+.rec-card-title {
+  font-weight: 600;
+  color: var(--color-text-primary, #1f2937);
+}
+.rec-card-meta {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--color-text-tertiary, #6b7280);
+}
+.rec-item {
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--color-border, #f3f4f6);
+}
+.rec-item:last-child {
+  border-bottom: none;
+}
+.rec-item-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 4px;
+}
+.rec-target-name {
+  font-weight: 600;
+  font-size: 14px;
+  color: var(--color-text-primary, #1f2937);
+}
+.rec-target-code {
+  font-size: 11px;
+  color: var(--color-text-tertiary, #6b7280);
+  padding: 1px 5px;
+  background: var(--color-bg-tertiary, #f3f4f6);
+  border-radius: 3px;
+}
+.rec-direction {
+  font-size: 12px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 4px;
+}
+.rec-dir-up {
+  color: #dc2626;
+  background: rgba(220, 38, 38, 0.1);
+}
+.rec-dir-down {
+  color: #16a34a;
+  background: rgba(22, 163, 74, 0.1);
+}
+.rec-dir-hold {
+  color: #6b7280;
+  background: rgba(107, 114, 128, 0.1);
+}
+.rec-confidence {
+  font-size: 11px;
+  color: var(--color-text-tertiary, #6b7280);
+  margin-left: auto;
+}
+.rec-reason {
+  font-size: 12px;
+  color: var(--color-text-secondary, #4b5563);
+  line-height: 1.5;
+  margin: 4px 0;
+}
+.rec-baseline {
+  font-size: 11px;
+  color: var(--color-text-tertiary, #6b7280);
+  margin-bottom: 6px;
+}
+.rec-actions {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.btn-adopt {
+  padding: 4px 10px;
+  font-size: 12px;
+  border: 1px solid var(--color-border, #d1d5db);
+  background: white;
+  color: var(--color-text-secondary, #4b5563);
+  border-radius: 4px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.btn-adopt:hover:not(:disabled) {
+  border-color: var(--color-primary, #3b82f6);
+  color: var(--color-primary, #3b82f6);
+}
+.btn-adopt:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+.btn-adopt-reject {
+  color: #dc2626;
+}
+.btn-adopt-reject:hover:not(:disabled) {
+  border-color: #dc2626;
+  color: #dc2626;
+}
+.btn-adopt-active {
+  font-weight: 600;
+  opacity: 1 !important;
+}
+.btn-adopt-active.btn-adopt-reject {
+  background: rgba(220, 38, 38, 0.1);
+  border-color: #dc2626;
+  color: #dc2626;
+}
+.btn-adopt-active:not(.btn-adopt-reject):not(.btn-adopt-reset) {
+  background: rgba(22, 163, 74, 0.1);
+  border-color: #16a34a;
+  color: #16a34a;
+}
+.btn-adopt-reset {
+  font-size: 11px;
+  color: var(--color-text-tertiary, #9ca3af);
 }
 
 /* ── 交互式澄清选项 ── */

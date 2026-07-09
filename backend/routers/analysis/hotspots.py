@@ -14,6 +14,7 @@ from db import (
     save_recommendations, save_analysis_cache, get_analysis_cache,
     list_recommendations, auto_verify_pending_recommendations,
     save_recommendation_feedback, list_recommendation_feedback,
+    adopt_recommendation,
     get_config_int, get_config_float, get_config,
     create_async_task, update_async_task,
 )
@@ -590,6 +591,19 @@ async def create_recommendation_feedback(rec_id: int, body: dict):
 async def list_feedback_api():
     """列出所有推荐反馈。"""
     return {"feedback": list_recommendation_feedback()}
+
+
+@router.post("/api/recommendations/{rec_id}/adopt")
+async def adopt_recommendation_api(rec_id: int, body: dict):
+    """P0-A 决策闭环：用户采纳/不采纳某条建议。
+
+    body: {"adopted": 1=已采纳 | -1=未采纳 | 0=取消}
+    """
+    adopted = int(body.get("adopted", 0))
+    result = adopt_recommendation(rec_id, adopted)
+    if not result.get("ok"):
+        raise HTTPException(status_code=404, detail=result.get("error", "not found"))
+    return result
 
 
 @router.post("/api/recommendations/verify")

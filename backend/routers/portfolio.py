@@ -322,6 +322,17 @@ async def get_alert_history_api(alert_id: int, days: int = 30):
     return {"history": history, "count": len(history)}
 
 
+@router.post("/api/portfolio/alerts/scan")
+async def trigger_proactive_scan_api():
+    """P0-B 主动提醒扫描：手动触发一次扫描（也由 app.py 后台定时调用）。
+
+    扫描 3 项：建议验证 + 估值阈值 + 持仓风险，生成 portfolio_alerts。
+    开关：alerts.proactive_scan_enabled（默认 true）。
+    """
+    from services.alert_scanner import run_periodic_scan
+    return run_periodic_scan()
+
+
 @router.post("/api/portfolio/alerts/generate")
 async def generate_alert_api(req: CreateAlertRequest):
     """AI 主动生成预警。"""

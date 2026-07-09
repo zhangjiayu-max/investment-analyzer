@@ -49,6 +49,7 @@ from db.dashboard import (
     update_user_profile, increment_feedback_count,
     create_chat_feedback,
     get_quality_summary, get_quality_trend, get_low_quality_items,
+    adopt_recommendation, list_pending_verification_recommendations,
 )
 
 # Agent 系统
