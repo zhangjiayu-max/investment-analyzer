@@ -5,6 +5,7 @@ import Home from './views/Home.vue'
 import MobileApp from './components/MobileApp.vue'
 import TickerBar from './components/finance/TickerBar.vue'
 import TaskNotification from './components/TaskNotification.vue'
+import OnboardingWelcome from './components/OnboardingWelcome.vue'
 import { useMobile } from './composables/useMobile'
 import { useTaskTracker } from './composables/useTaskTracker'
 
@@ -14,6 +15,8 @@ const { completedTask, clearCompletedTask } = useTaskTracker()
 const activePage = ref(localStorage.getItem('activePage') || 'articles')
 const showKyc = ref(false)
 const searchQuery = ref('')
+// 首次访问引导：未标记 hasVisited 时弹出
+const showOnboarding = ref(!localStorage.getItem('hasVisited'))
 
 watch(activePage, (val) => {
   localStorage.setItem('activePage', val)
@@ -64,6 +67,13 @@ function handleViewResult(convId) {
     :task="completedTask"
     @view="handleViewResult"
     @close="clearCompletedTask"
+  />
+
+  <!-- 首次访问引导 -->
+  <OnboardingWelcome
+    v-if="showOnboarding"
+    @close="showOnboarding = false"
+    @navigate="activePage = $event"
   />
 </template>
 

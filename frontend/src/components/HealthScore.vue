@@ -5,8 +5,18 @@ import {
   getHealthHistory, getStockBondRatio, getFearGreedIndex,
 } from '../api'
 import { useToast } from '../composables/useToast'
+import EmptyState from './ui/EmptyState.vue'
 
 const { showToast } = useToast()
+
+// 五维度术语词典
+const DIMENSION_TIPS = {
+  quality: '持仓基金的综合质量评分（选品能力），满分200',
+  diversification: '资产配置分散程度，避免单一标的或行业过度集中',
+  valuation: '持仓估值水平是否合理，结合历史分位判断',
+  behavior: '持有时长、追涨杀跌等行为评估，鼓励长期持有',
+  risk: '止损、再平衡等风控纪律执行情况',
+}
 
 const loading = ref(false)
 const score = ref(null)
@@ -133,6 +143,16 @@ onMounted(loadData)
         <span class="score-date terminal-label">{{ score.date || score.score_date }}</span>
       </div>
     </div>
+    <!-- 空 state：score 为 null 时引导用户操作 -->
+    <div v-else-if="!loading" class="card editorial-card score-empty">
+      <EmptyState
+        icon="chart"
+        title="暂无健康分数据"
+        description="点击右上角'重新计算'生成最新评分，系统将综合评估选品、配置、估值、行为、风控五大维度"
+        actionText="立即计算"
+        @action="recalculate"
+      />
+    </div>
 
     <!-- 五维度 -->
     <div v-if="score" class="dimensions card editorial-card">
@@ -140,7 +160,7 @@ onMounted(loadData)
       <div class="dim-grid">
         <div v-for="d in dimensions" :key="d.key" class="dim-item reveal-stagger">
           <div class="dim-header">
-            <span class="dim-label">{{ d.label }}</span>
+            <span class="term-with-tip dim-label">{{ d.label }}<span class="term-tip">{{ DIMENSION_TIPS[d.key] || '' }}</span></span>
             <span class="dim-score font-jet">{{ d.score }}/{{ d.max }}</span>
           </div>
           <div class="dim-bar">
@@ -155,7 +175,7 @@ onMounted(loadData)
 
     <!-- 股债性价比 -->
     <div v-if="stockBond && !stockBond.error" class="stock-bond card editorial-card">
-      <div class="editorial-card-header"><h3 class="editorial-title">股债性价比（FED模型）</h3></div>
+      <div class="editorial-card-header"><h3 class="editorial-title"><span class="term-with-tip">股债性价比（FED模型）<span class="term-tip">FED模型 = 股票盈利收益率 - 10年国债收益率。利差越大，股票相对债券越有投资价值；利差为负时债券更优</span></span></h3></div>
       <div class="sb-grid">
         <div class="sb-item">
           <span class="sb-label terminal-label">沪深300 PE</span>
@@ -188,7 +208,7 @@ onMounted(loadData)
 
     <!-- 恐贪指数 -->
     <div v-if="fearGreed && !fearGreed.error" class="fear-greed card editorial-card">
-      <div class="editorial-card-header"><h3 class="editorial-title">恐贪指数</h3></div>
+      <div class="editorial-card-header"><h3 class="editorial-title"><span class="term-with-tip">恐贪指数<span class="term-tip">市场恐惧与贪婪指数，综合换手率、涨跌比、波动率等指标。0=极度恐惧（逢低买入机会），100=极度贪婪（警惕回调）</span></span></h3></div>
       <div class="fg-main">
         <div class="fg-gauge">
           <div class="fg-bar">

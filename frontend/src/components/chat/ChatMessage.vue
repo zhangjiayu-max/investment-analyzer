@@ -1,5 +1,5 @@
 <script setup>
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 import { renderMarkdown } from '../../composables/useMarkdown'
 import Icon from '../ui/Icon.vue'
 import TraceDetail from '../TraceDetail.vue'
@@ -48,9 +48,22 @@ const GUARDRAIL_LABELS = {
 
 // 机构动向共振标记（与 KYC guardrail 分离展示）
 const INSTITUTIONAL_FLAGS = {
-  institutional_confirm: { type: 'confirm', text: '机构动向共振：融资余额近期变化与建议方向一致' },
-  against_institutional_flow: { type: 'against', text: '与机构动向相反：融资余额近期变化与建议方向相反' },
+  institutional_confirm: {
+    type: 'confirm',
+    icon: '✓',
+    text: '机构动向共振：融资余额近期变化与建议方向一致',
+    detail: '本建议方向与近期融资余额变化一致，机构杠杆资金动向提供辅助支撑。\n数据来源：上交所融资融券余额（近5日 z-score 归一化）。\n注：辅助信号，不作为独立决策依据，与估值/持仓信号共振时增强置信度。',
+  },
+  against_institutional_flow: {
+    type: 'against',
+    icon: '⚠',
+    text: '与机构动向相反：融资余额近期变化与建议方向相反',
+    detail: '本建议方向与近期融资余额变化相反，机构杠杆资金动向暂不支撑此方向。\n建议结合估值分位与持仓风险综合判断。\n数据来源：上交所融资融券余额（近5日 z-score 归一化）。',
+  },
 }
+
+// 机构动向标记展开状态（按消息 id + flag 索引）
+const expandedInstFlags = ref({})
 
 function directionClass(d) {
   return { up: 'rec-dir-up', down: 'rec-dir-down', hold: 'rec-dir-hold' }[d] || 'rec-dir-hold'
@@ -60,6 +73,11 @@ function directionClass(d) {
 function institutionalFlags(flags) {
   if (!Array.isArray(flags)) return []
   return flags.filter(f => INSTITUTIONAL_FLAGS[f]).map(f => INSTITUTIONAL_FLAGS[f])
+}
+
+// 切换机构动向标记详情展开
+function toggleInstDetail(key) {
+  expandedInstFlags.value[key] = !expandedInstFlags.value[key]
 }
 
 function guardrailText(flags) {
@@ -689,15 +707,21 @@ const tradeSuggestions = computed(() => {
             <span class="guardrail-icon">⚠</span>
             <span class="guardrail-text">本建议与您的风险偏好不完全匹配（{{ guardrailText(rec.guardrail_flags) }}），请谨慎评估</span>
           </div>
-          <!-- 机构动向共振标记（辅助信号，独立展示，非风险警告） -->
+          <!-- 机构动向共振标记（辅助信号，独立展示，可点击展开详情） -->
           <div
             v-for="(flag, idx) in institutionalFlags(rec.guardrail_flags)"
             :key="'inst-' + idx"
             class="rec-institutional"
-            :class="flag.type === 'confirm' ? 'rec-inst-confirm' : 'rec-inst-against'"
+            :class="[flag.type === 'confirm' ? 'rec-inst-confirm' : 'rec-inst-against', { 'rec-inst-expanded': expandedInstFlags[msg.id + '-' + idx] }]"
+            @click="toggleInstDetail(msg.id + '-' + idx)"
+            :title="expandedInstFlags[msg.id + '-' + idx] ? '点击收起' : '点击查看详情'"
           >
-            <span class="rec-inst-icon">{{ flag.type === 'confirm' ? '✓' : '↻' }}</span>
+            <span class="rec-inst-icon">{{ flag.icon }}</span>
             <span class="rec-inst-text">{{ flag.text }}</span>
+            <Icon name="chevron-down" size="11" class="rec-inst-chevron" :class="{ 'rotated': expandedInstFlags[msg.id + '-' + idx] }" />
+            <div v-if="expandedInstFlags[msg.id + '-' + idx]" class="rec-inst-detail" @click.stop>
+              {{ flag.detail }}
+            </div>
           </div>
           <div class="rec-actions">
             <button
@@ -1760,13 +1784,36 @@ const tradeSuggestions = computed(() => {
 /* 机构动向共振标记（辅助信号提示，非风险警告） */
 .rec-institutional {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
+  flex-wrap: wrap;
   gap: 5px;
   padding: 6px 8px;
   margin-bottom: 8px;
   border-radius: var(--radius-sm, 6px);
   font-size: 11.5px;
   line-height: 1.45;
+  cursor: pointer;
+  transition: background var(--transition-fast);
+  position: relative;
+}
+.rec-institutional:hover { filter: brightness(0.97); }
+.rec-inst-expanded { margin-bottom: 4px; }
+.rec-inst-chevron {
+  margin-left: auto;
+  opacity: 0.5;
+  transition: transform var(--transition-fast);
+}
+.rec-inst-chevron.rotated { transform: rotate(180deg); }
+.rec-inst-detail {
+  flex-basis: 100%;
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px dashed rgba(128, 128, 128, 0.3);
+  white-space: pre-line;
+  font-size: 11px;
+  line-height: 1.6;
+  opacity: 0.9;
+  cursor: default;
 }
 .rec-inst-confirm {
   background: rgba(16, 185, 129, 0.08);

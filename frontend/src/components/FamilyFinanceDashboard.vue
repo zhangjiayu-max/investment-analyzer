@@ -120,7 +120,7 @@ onMounted(load)
         <section class="card net-worth-card reveal-stagger editorial-card">
           <div class="card-head editorial-card-header">
             <Icon name="wallet" size="18" />
-            <h3 class="title">净值总览</h3>
+            <h3 class="title"><span class="term-with-tip">净值总览<span class="term-tip">家庭总资产减去负债后的净值，含持仓浮盈亏与收益率趋势</span></span></h3>
           </div>
           <div class="card-body">
             <div class="hero-metric">
@@ -156,7 +156,7 @@ onMounted(load)
         <section class="card cashflow-card reveal-stagger editorial-card">
           <div class="card-head editorial-card-header">
             <Icon name="trending-up" size="18" />
-            <h3 class="title">现金流</h3>
+            <h3 class="title"><span class="term-with-tip">现金流<span class="term-tip">月度收入支出情况，含月结余、结余率与备用金覆盖月数</span></span></h3>
           </div>
           <div class="card-body">
             <div class="metric-grid three-col">
@@ -188,7 +188,7 @@ onMounted(load)
         <section class="card debt-card reveal-stagger editorial-card">
           <div class="card-head editorial-card-header">
             <Icon name="credit-card" size="18" />
-            <h3 class="title">负债</h3>
+            <h3 class="title"><span class="term-with-tip">负债<span class="term-tip">当前负债余额与负债收入比，反映家庭杠杆水平</span></span></h3>
           </div>
           <div class="card-body">
             <div v-if="debt.debt_summary" class="debt-summary">{{ debt.debt_summary }}</div>
@@ -210,7 +210,7 @@ onMounted(load)
         <section class="card goals-card reveal-stagger editorial-card">
           <div class="card-head editorial-card-header">
             <Icon name="target" size="18" />
-            <h3 class="title">目标进度</h3>
+            <h3 class="title"><span class="term-with-tip">目标进度<span class="term-tip">各财务目标（如备用金、购房、教育）的资金桶达成进度</span></span></h3>
             <span class="card-meta meta">
               共 {{ goals.buckets?.length || 0 }} 个目标，
               目标 ¥{{ money(goals.total_target) }}
@@ -243,11 +243,11 @@ onMounted(load)
           </div>
         </section>
 
-        <!-- 5. 投资状态 -->
+        <!-- 5. 投资配置 -->
         <section class="card alloc-card reveal-stagger editorial-card">
           <div class="card-head editorial-card-header">
             <Icon name="pie-chart" size="18" />
-            <h3 class="title">投资配置</h3>
+            <h3 class="title"><span class="term-with-tip">投资配置<span class="term-tip">当前资产配置比例与目标配比的偏离度，含市场估值水平与护栏触发数</span></span></h3>
           </div>
           <div class="card-body">
             <div class="metric-grid three-col">
@@ -260,7 +260,7 @@ onMounted(load)
                 <strong class="font-jet">{{ alloc.market_level || '-' }}</strong>
               </div>
               <div class="metric-item">
-                <span class="terminal-label">护栏提示</span>
+                <span class="term-with-tip">护栏提示<span class="term-tip">基于您的风险偏好和持仓上限自动触发的风险提示规则数量</span></span>
                 <strong class="font-jet">{{ alloc.guardrails_count || 0 }} 条</strong>
               </div>
             </div>
@@ -274,12 +274,12 @@ onMounted(load)
         <section class="card risk-card reveal-stagger editorial-card">
           <div class="card-head editorial-card-header">
             <Icon name="shield" size="18" />
-            <h3 class="title">风险视图</h3>
+            <h3 class="title"><span class="term-with-tip">风险视图<span class="term-tip">压力测试下的最大损失估算与风险等级，含在险金额与回撤比例</span></span></h3>
           </div>
           <div class="card-body">
             <div class="metric-grid three-col">
               <div class="metric-item">
-                <span class="terminal-label">压力测试损失</span>
+                <span class="term-with-tip">压力测试损失<span class="term-tip">模拟极端市场环境（如2008/2015级下跌）下组合的预期最大损失</span></span>
                 <strong class="font-jet negative">¥{{ money(risk.stress_loss_amount) }}</strong>
               </div>
               <div class="metric-item">

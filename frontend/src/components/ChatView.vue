@@ -593,7 +593,7 @@ async function handleNewConversation() {
     if (recentEmpty) {
       selectConversation(recentEmpty)
       showToast('已切换到未开始的对话', 'info')
-      return
+      return recentEmpty.id
     }
 
     const { data } = await createConversation({ title: '新对话' })
@@ -609,9 +609,41 @@ async function handleNewConversation() {
         if (conversations.value.length > 0) selectConversation(conversations.value[0])
       }
     })
+    return data?.conversation_id
   } catch (e) {
     console.error('Failed to create conversation:', e)
     showToast('创建对话失败', 'error')
+  }
+}
+
+// ─── 推荐提问（空状态引导）───
+const SUGGESTED_QUESTIONS = [
+  { icon: 'chart', text: '帮我分析当前主要指数的估值水平，哪些处于低估区？' },
+  { icon: 'portfolio', text: '诊断我的持仓，分析分散度和风险敞口' },
+  { icon: 'fire', text: '当前市场有哪些热点机会？' },
+  { icon: 'pie-chart', text: '我的资产配置是否合理？给出调仓建议' },
+  { icon: 'newspaper', text: '解读这篇文章：[粘贴微信公众号链接]' },
+  { icon: 'landmark', text: '融资余额近期变化如何？机构动向对当前建议有何影响？' },
+]
+
+// 点击推荐提问：创建新对话 → 填入输入框 → 触发发送
+async function handleSuggestedQuestion(q) {
+  try {
+    // 若已有选中对话且无消息，直接复用；否则新建
+    let convId = selectedConv.value?.id
+    if (!convId || (messages.value.length > 0)) {
+      convId = await handleNewConversation()
+    }
+    if (!convId) {
+      showToast('请先创建或选择一个对话', 'info')
+      return
+    }
+    inputText.value = q
+    await nextTick()
+    handleSend()
+  } catch (e) {
+    console.error('Failed to send suggested question:', e)
+    showToast('发送失败，请重试', 'error')
   }
 }
 
@@ -1658,11 +1690,22 @@ function stopPollingProgress() {
         />
       </template>
 
-      <!-- 空状态 -->
+      <!-- 空状态 + 推荐提问 -->
       <div v-else class="chat-empty bg-mesh">
         <div class="chat-empty-icon"><Icon name="chat" size="48" /></div>
-        <h3 class="editorial-title-lg">选择或创建一个对话</h3>
-        <p>选择左侧对话继续，或点击 + 创建新对话</p>
+        <h3 class="editorial-title-lg">开始你的投资分析对话</h3>
+        <p class="chat-empty-desc">选择左侧对话继续，或点击 + 创建新对话。也可以试试下面的推荐提问：</p>
+        <div class="suggested-questions">
+          <button
+            v-for="(q, idx) in SUGGESTED_QUESTIONS"
+            :key="idx"
+            class="suggested-q-card"
+            @click="handleSuggestedQuestion(q.text)"
+          >
+            <Icon :name="q.icon" size="16" class="suggested-q-icon" />
+            <span class="suggested-q-text">{{ q.text }}</span>
+          </button>
+        </div>
       </div>
     </div>
   </div>
@@ -1824,6 +1867,48 @@ function stopPollingProgress() {
   max-width: 260px;
   text-align: center;
   line-height: 1.6;
+}
+.chat-empty-desc { max-width: 360px !important; }
+
+/* 推荐提问卡片网格 */
+.suggested-questions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(220px, 1fr));
+  gap: 0.625rem;
+  margin-top: 1.25rem;
+  width: 100%;
+  max-width: 560px;
+}
+.suggested-q-card {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+  padding: 0.75rem 0.875rem;
+  background: var(--color-bg-card);
+  border: 1px solid var(--color-border-light);
+  border-radius: var(--radius-md);
+  text-align: left;
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+.suggested-q-card:hover {
+  border-color: var(--color-primary-border);
+  background: var(--color-primary-bg-weak);
+  transform: translateY(-1px);
+  box-shadow: var(--shadow-sm);
+}
+.suggested-q-icon {
+  color: var(--color-primary);
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+.suggested-q-text {
+  font-size: 0.8125rem;
+  color: var(--color-text-secondary);
+  line-height: 1.5;
+}
+.suggested-q-card:hover .suggested-q-text {
+  color: var(--color-text-primary);
 }
 
 /* ── Transition ── */

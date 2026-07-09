@@ -107,10 +107,19 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
       </template>
       <!-- 机构动向：融资余额近5日净变化（辅助信号） -->
       <div v-if="flow" class="ticker-item flow-item"
-        :class="flow.trend === 'inflow' ? 'up' : flow.trend === 'outflow' ? 'down' : ''"
-        :title="`融资余额近5日净变化（${flow.strength}）`">
+        :class="flow.trend === 'inflow' ? 'up' : flow.trend === 'outflow' ? 'down' : ''">
         <Icon name="landmark" size="12" class="flow-icon" />
-        <span class="ticker-name font-jet">融资5日</span>
+        <span class="term-with-tip flow-term">
+          <span class="ticker-name font-jet">融资5日</span>
+          <Icon name="info" size="11" class="flow-info-icon" />
+          <span class="term-tip flow-tip">
+            <b>融资余额近5日净变化</b><br/>
+            <span class="flow-tip-source">数据来源：上交所融资融券余额（akshare）</span><br/>
+            近5个交易日融资余额净变化，正值=杠杆资金加仓，负值=减仓。<br/>
+            <span class="flow-tip-strength">强度判定：|z-score|≥1.5 强信号，0.5-1.5 中等，&lt;0.5 弱。</span><br/>
+            <span class="flow-tip-note">辅助信号，不作为独立决策依据，与估值/持仓信号共振时增强置信度。</span>
+          </span>
+        </span>
         <span class="ticker-change font-jet" :class="flow.strength === 'strong' ? 'strong' : ''">
           {{ flowLabel(flow) }}
         </span>
@@ -197,6 +206,26 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
 }
 .flow-icon { opacity: 0.65; flex-shrink: 0; }
 .ticker-change.strong { font-weight: 700; }
+/* 融资5日 term-tip 覆写：TickerBar 在顶部，tooltip 向下弹出 */
+.flow-term { display: inline-flex; align-items: center; gap: 0.2rem; }
+.flow-info-icon { opacity: 0.5; }
+.flow-tip {
+  bottom: auto;
+  top: calc(100% + 8px);
+  width: 280px;
+  text-align: left;
+  font-weight: 400;
+}
+.flow-tip::after {
+  top: auto;
+  bottom: 100%;
+  border-top-color: transparent;
+  border-bottom-color: var(--color-bg-card);
+}
+.flow-tip b { color: var(--color-text-primary); font-weight: 600; }
+.flow-tip-source { color: var(--color-text-muted); font-size: 0.7rem; }
+.flow-tip-strength { color: var(--color-text-secondary); }
+.flow-tip-note { color: var(--color-warning); }
 .ticker-quote {
   display: flex; align-items: center; gap: 0.4rem;
   color: var(--color-text-muted); font-size: 0.72rem;

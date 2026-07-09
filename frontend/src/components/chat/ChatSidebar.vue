@@ -120,7 +120,11 @@ function openKycWizard() {
       </div>
       <div v-if="!conversations.length" class="conv-empty">
         <p>暂无对话</p>
-        <p class="conv-empty-hint">点击右上角 + 创建</p>
+        <p class="conv-empty-hint">开始你的第一次投资分析对话吧</p>
+        <button class="conv-empty-btn" @click="emit('new')">
+          <Icon name="plus" size="12" />
+          新建对话
+        </button>
       </div>
     </div>
 
@@ -345,6 +349,25 @@ function openKycWizard() {
 
 .conv-empty p { margin: 0; font-size: 0.82rem; }
 .conv-empty-hint { font-size: 0.75rem; margin-top: 0.35rem !important; }
+.conv-empty-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  margin-top: 0.75rem;
+  padding: 0.4rem 0.75rem;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--color-primary-border);
+  background: var(--color-primary-bg-weak);
+  color: var(--color-primary);
+  font-size: 0.75rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+.conv-empty-btn:hover {
+  background: var(--color-primary-bg);
+  transform: translateY(-1px);
+}
 
 .mobile-sidebar-overlay {
   display: block;
