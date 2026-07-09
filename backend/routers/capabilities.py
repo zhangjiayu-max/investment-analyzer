@@ -371,3 +371,252 @@ elif name == "{tool_name}":
     except Exception as e:
         logger.error(f"接入指引生成失败: {e}", exc_info=True)
         raise HTTPException(500, str(e))
+
+
+# ── 工具调用统计 ──────────────────────────────
+
+@router.get("/api/capabilities/stats")
+def api_capabilities_stats(days: int = 7, tool_name: str = ""):
+    """工具调用统计 — 聚合 tool_audit_logs。
+
+    Args:
+        days: 时间窗口（1/7/30/90）
+        tool_name: 指定工具名（空=全部）
+    """
+    try:
+        import sqlite3
+        from db._conn import DB_PATH
+        conn = sqlite3.connect(str(DB_PATH))
+        conn.row_factory = sqlite3.Row
+
+        days = max(1, min(days, 365))
+        where_clause = f"WHERE created_at >= datetime('now','-{days} days')"
+        params: list = []
+        if tool_name:
+            where_clause += " AND tool_name = ?"
+            params.append(tool_name)
+
+        # 总览
+        row = conn.execute(
+            f"SELECT COUNT(*) as cnt, "
+            f"SUM(CASE WHEN success=1 THEN 1 ELSE 0 END) as ok, "
+            f"COALESCE(ROUND(AVG(duration_ms),1),0) as avg_ms "
+            f"FROM tool_audit_logs {where_clause}", params
+        ).fetchone()
+        total_calls = row["cnt"] or 0
+        total_success = row["ok"] or 0
+        total_failed = total_calls - total_success
+        overall_rate = round(total_success / total_calls, 4) if total_calls > 0 else 0.0
+
+        # 按工具分组
+        by_tool_rows = conn.execute(
+            f"SELECT tool_name, COUNT(*) as cnt, "
+            f"SUM(CASE WHEN success=1 THEN 1 ELSE 0 END) as ok, "
+            f"COALESCE(ROUND(AVG(duration_ms),1),0) as avg_ms, "
+            f"COALESCE(MAX(duration_ms),0) as max_ms "
+            f"FROM tool_audit_logs {where_clause} "
+            f"GROUP BY tool_name ORDER BY cnt DESC", params
+        ).fetchall()
+
+        # P95 计算 + 错误分类分布（按工具）
+        by_tool = []
+        for r in by_tool_rows:
+            # P95：取该工具所有耗时的 95 分位
+            p95_row = conn.execute(
+                f"SELECT duration_ms FROM tool_audit_logs "
+                f"{where_clause} AND tool_name = ? "
+                f"ORDER BY duration_ms ASC", params + [r["tool_name"]]
+            ).fetchall()
+            durations = [x["duration_ms"] or 0 for x in p95_row]
+            p95 = _percentile(durations, 95)
+
+            # 错误分类
+            err_rows = conn.execute(
+                f"SELECT error_category, COUNT(*) as c FROM tool_audit_logs "
+                f"{where_clause} AND tool_name = ? "
+                f"GROUP BY error_category", params + [r["tool_name"]]
+            ).fetchall()
+            err_map = {x["error_category"]: x["c"] for x in err_rows}
+
+            calls = r["cnt"] or 0
+            ok = r["ok"] or 0
+            by_tool.append({
+                "tool_name": r["tool_name"],
+                "calls": calls,
+                "success": ok,
+                "failed": calls - ok,
+                "success_rate": round(ok / calls, 4) if calls > 0 else 0.0,
+                "avg_duration_ms": r["avg_ms"],
+                "max_duration_ms": r["max_ms"],
+                "p95_duration_ms": p95,
+                "error_categories": err_map,
+            })
+
+        # 按天趋势
+        by_day_rows = conn.execute(
+            f"SELECT DATE(created_at) as d, COUNT(*) as cnt, "
+            f"SUM(CASE WHEN success=1 THEN 1 ELSE 0 END) as ok "
+            f"FROM tool_audit_logs {where_clause} "
+            f"GROUP BY DATE(created_at) ORDER BY d ASC", params
+        ).fetchall()
+        by_day = [{"date": r["d"], "calls": r["cnt"], "success": r["ok"]} for r in by_day_rows]
+
+        # 错误分类总分布
+        err_total_rows = conn.execute(
+            f"SELECT error_category, COUNT(*) as c FROM tool_audit_logs "
+            f"{where_clause} GROUP BY error_category", params
+        ).fetchall()
+        by_error = {r["error_category"]: r["c"] for r in err_total_rows}
+
+        conn.close()
+
+        return {
+            "days": days,
+            "total_calls": total_calls,
+            "total_success": total_success,
+            "total_failed": total_failed,
+            "overall_success_rate": overall_rate,
+            "avg_duration_ms": row["avg_ms"],
+            "by_tool": by_tool,
+            "by_day": by_day,
+            "by_error_category": by_error,
+        }
+    except Exception as e:
+        logger.error(f"工具调用统计失败: {e}", exc_info=True)
+        raise HTTPException(500, str(e))
+
+
+def _percentile(values: list, pct: float) -> float:
+    """计算分位数（线性插值法）。"""
+    if not values:
+        return 0.0
+    s = sorted(values)
+    k = (len(s) - 1) * (pct / 100.0)
+    f = int(k)
+    c = min(f + 1, len(s) - 1)
+    if f == c:
+        return float(s[f])
+    return float(s[f] + (s[c] - s[f]) * (k - f))
+
+
+@router.get("/api/capabilities/stats/recent")
+def api_capabilities_recent(tool_name: str = "", limit: int = 20, success: str = ""):
+    """最近工具调用记录。
+
+    Args:
+        tool_name: 指定工具（空=全部）
+        limit: 返回条数（最大 100）
+        success: 'true'=仅成功, 'false'=仅失败, ''=全部
+    """
+    try:
+        import sqlite3
+        from db._conn import DB_PATH
+        conn = sqlite3.connect(str(DB_PATH))
+        conn.row_factory = sqlite3.Row
+
+        limit = max(1, min(limit, 100))
+        where_parts = []
+        params: list = []
+        if tool_name:
+            where_parts.append("tool_name = ?")
+            params.append(tool_name)
+        if success == "true":
+            where_parts.append("success = 1")
+        elif success == "false":
+            where_parts.append("success = 0")
+        where_clause = ("WHERE " + " AND ".join(where_parts)) if where_parts else ""
+
+        rows = conn.execute(
+            f"SELECT id, trace_id, tool_name, arguments, result_preview, "
+            f"success, error_category, duration_ms, created_at "
+            f"FROM tool_audit_logs {where_clause} "
+            f"ORDER BY id DESC LIMIT ?", params + [limit]
+        ).fetchall()
+        conn.close()
+
+        return {
+            "items": [{
+                "id": r["id"],
+                "trace_id": r["trace_id"] or "",
+                "tool_name": r["tool_name"],
+                "arguments": r["arguments"] or "",
+                "result_preview": r["result_preview"] or "",
+                "success": bool(r["success"]),
+                "error_category": r["error_category"] or "none",
+                "duration_ms": r["duration_ms"] or 0,
+                "created_at": r["created_at"] or "",
+            } for r in rows],
+            "total": len(rows),
+        }
+    except Exception as e:
+        logger.error(f"最近调用记录查询失败: {e}", exc_info=True)
+        raise HTTPException(500, str(e))
+
+
+# ── 工具调试 ──────────────────────────────────
+
+@router.post("/api/capabilities/debug")
+def api_capabilities_debug(body: dict):
+    """工具调试执行 — 输入参数 → 执行 → 返回真实结果。
+
+    自动写入 tool_audit_logs（trace_id 前缀 debug_）。
+
+    请求体: {"tool_name": "...", "arguments": {...}, "trace_id": "..."(可选)}
+    """
+    try:
+        import time as _time
+        import uuid as _uuid
+        from tools import TOOLS, execute_tool
+
+        tool_name = body.get("tool_name", "").strip()
+        arguments = body.get("arguments", {}) or {}
+        trace_id = body.get("trace_id", "").strip() or f"debug_{_uuid.uuid4().hex[:8]}"
+
+        if not tool_name:
+            raise HTTPException(400, "tool_name 不能为空")
+
+        # 校验：仅允许已暴露工具
+        exposed_names = {_extract_tool_fields(t)["name"] for t in TOOLS}
+        if tool_name not in exposed_names:
+            raise HTTPException(403, f"工具 {tool_name} 未暴露，禁止调试")
+
+        # 执行（复用 execute_tool，自动写审计日志 + 超时保护）
+        t0 = _time.time()
+        result_str = execute_tool(tool_name, arguments, trace_id=trace_id, timeout=30)
+        duration_ms = int((_time.time() - t0) * 1000)
+
+        # 解析结果
+        parsed = None
+        try:
+            parsed = json.loads(result_str)
+        except Exception:
+            parsed = None
+
+        # 判断成功/失败
+        success = True
+        error_category = "none"
+        if isinstance(parsed, dict) and "error" in parsed:
+            success = False
+            error_category = parsed.get("error_category", "tool_error")
+        elif parsed is None and not result_str:
+            success = False
+            error_category = "tool_error"
+
+        # 结果截断（5000 字符）
+        result_display = result_str if len(result_str) <= 5000 else result_str[:5000] + "\n...(结果已截断)"
+
+        return {
+            "tool_name": tool_name,
+            "arguments": arguments,
+            "result": result_display,
+            "parsed_result": parsed,
+            "duration_ms": duration_ms,
+            "success": success,
+            "error_category": error_category,
+            "trace_id": trace_id,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"工具调试失败: {e}", exc_info=True)
+        raise HTTPException(500, str(e))

@@ -178,6 +178,8 @@ function _clearAllTimers() {
   }
   _timers.length = 0
   stopDailyReportPolling()
+  // 停止全景诊断轮询，避免切走页面后继续无意义请求
+  if (_panoramaCancelPoll) { _panoramaCancelPoll(); _panoramaCancelPoll = null }
 }
 
 // ── 全景诊断 AI 分析 ──
@@ -290,7 +292,8 @@ onActivated(async () => {
       if (rec.status === 'running' || rec.execution_status === 'running') {
         panoramaLoading.value = true
         panoramaResult.value = { status: 'running', id: rec.id }
-        pollPanoramaStatus(rec.id, async (status) => {
+        if (_panoramaCancelPoll) { _panoramaCancelPoll(); _panoramaCancelPoll = null }
+        _panoramaCancelPoll = pollPanoramaStatus(rec.id, async (status) => {
           if (status.status === 'done') {
             panoramaResult.value = { result: status.result, id: rec.id }
             const { data: dashData } = await getDashboard()
@@ -299,9 +302,11 @@ onActivated(async () => {
               data.value.portfolio_updated_at = dashData.portfolio_updated_at
             }
             panoramaLoading.value = false
+            _panoramaCancelPoll = null
           } else if (status.status === 'error') {
             panoramaResult.value = { error: '分析失败: ' + (status.error || '未知错误') }
             panoramaLoading.value = false
+            _panoramaCancelPoll = null
           }
         })
       } else {
@@ -671,6 +676,7 @@ const showRebalance = ref(false)
 // ── 全景诊断 AI 分析 ──
 const panoramaLoading = ref(false)
 const panoramaResult = ref(null)
+let _panoramaCancelPoll = null  // 全景诊断轮询 cancel 函数（切走页面时清理）
 
 async function generatePanorama() {
   panoramaLoading.value = true
@@ -678,7 +684,8 @@ async function generatePanorama() {
   try {
     const { data: res } = await runPanoramaAnalysis()
     panoramaResult.value = { status: 'running', id: res.id }
-    pollPanoramaStatus(res.id, async (status) => {
+    if (_panoramaCancelPoll) { _panoramaCancelPoll(); _panoramaCancelPoll = null }
+    _panoramaCancelPoll = pollPanoramaStatus(res.id, async (status) => {
       if (status.status === 'done') {
         panoramaResult.value = { result: status.result, id: res.id }
         const { data: dashData } = await getDashboard()
@@ -687,9 +694,11 @@ async function generatePanorama() {
           data.value.portfolio_updated_at = dashData.portfolio_updated_at
         }
         panoramaLoading.value = false
+        _panoramaCancelPoll = null
       } else if (status.status === 'error') {
         panoramaResult.value = { error: '分析失败: ' + (status.error || '未知错误') }
         panoramaLoading.value = false
+        _panoramaCancelPoll = null
       }
     })
   } catch (e) {

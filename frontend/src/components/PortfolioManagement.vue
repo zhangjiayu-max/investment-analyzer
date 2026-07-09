@@ -1655,6 +1655,9 @@ async function loadAllModeRecords() {
 // 全局轮询状态（切页面后继续轮询）
 let _panoramaCancelPoll = null
 const _panoramaGlobalState = { recordId: null, status: null, result: null }
+// 费率/相关性分析全局状态（跨 KeepAlive 激活恢复用，避免切页面后轮询丢失导致永久 loading）
+const _feeGlobalState = { taskId: null, status: null, result: null }
+const _corrGlobalState = { taskId: null, status: null, result: null }
 
 // 深度分析/指定基金分析全局状态（切页面后恢复结果）
 const _deepDiveGlobalState = { recordId: null, status: null, result: null, tokenUsage: 0, aiMode: null }
@@ -1879,28 +1882,36 @@ async function runFeeMode() {
     const { data } = await runFeeAnalysis()
     const taskId = data.task_id
     modeRecordId.value = taskId
+    _feeGlobalState.taskId = taskId
+    _feeGlobalState.status = 'running'
+    _feeGlobalState.result = null
     _feePoll.value = setInterval(async () => {
       try {
         const resp = await getAsyncTaskStatus(taskId)
         if (resp.data.status === 'done') {
           const result = resp.data.result
           modeResult.value = result?.text || JSON.stringify(result)
+          _feeGlobalState.status = 'done'
+          _feeGlobalState.result = modeResult.value
           modeLoading.value = false
           clearInterval(_feePoll.value); _feePoll.value = null
           loadFeeRecords()
         } else if (resp.data.status === 'error') {
           modeResult.value = '分析失败：' + (resp.data.error || '未知错误')
+          _feeGlobalState.status = 'error'
           modeLoading.value = false
           clearInterval(_feePoll.value); _feePoll.value = null
         }
       } catch (e) {
         modeResult.value = '轮询失败：' + e.message
+        _feeGlobalState.status = 'error'
         modeLoading.value = false
         clearInterval(_feePoll.value); _feePoll.value = null
       }
     }, 3000)
   } catch (e) {
     modeResult.value = '分析失败：' + (e.response?.data?.detail || e.message)
+    _feeGlobalState.status = 'error'
     modeLoading.value = false
   }
 }
@@ -1924,28 +1935,36 @@ async function runCorrelationMode() {
     const { data } = await runCorrelationAnalysis()
     const taskId = data.task_id
     modeRecordId.value = taskId
+    _corrGlobalState.taskId = taskId
+    _corrGlobalState.status = 'running'
+    _corrGlobalState.result = null
     _corrPoll.value = setInterval(async () => {
       try {
         const resp = await getAsyncTaskStatus(taskId)
         if (resp.data.status === 'done') {
           const result = resp.data.result
           modeResult.value = result?.text || JSON.stringify(result)
+          _corrGlobalState.status = 'done'
+          _corrGlobalState.result = modeResult.value
           modeLoading.value = false
           clearInterval(_corrPoll.value); _corrPoll.value = null
           loadCorrelationRecords()
         } else if (resp.data.status === 'error') {
           modeResult.value = '分析失败：' + (resp.data.error || '未知错误')
+          _corrGlobalState.status = 'error'
           modeLoading.value = false
           clearInterval(_corrPoll.value); _corrPoll.value = null
         }
       } catch (e) {
         modeResult.value = '轮询失败：' + e.message
+        _corrGlobalState.status = 'error'
         modeLoading.value = false
         clearInterval(_corrPoll.value); _corrPoll.value = null
       }
     }, 3000)
   } catch (e) {
     modeResult.value = '分析失败：' + (e.response?.data?.detail || e.message)
+    _corrGlobalState.status = 'error'
     modeLoading.value = false
   }
 }
@@ -2592,6 +2611,78 @@ onActivated(async () => {
       })
     }
   } else {
+    modeLoading.value = false
+  }
+  // 恢复费率分析轮询（切页面回来时，若仍在 running 则重建轮询）
+  if (_feeGlobalState.taskId && _feeGlobalState.status === 'running') {
+    aiMode.value = 'fee'
+    modeRecordId.value = _feeGlobalState.taskId
+    modeLoading.value = true
+    const taskId = _feeGlobalState.taskId
+    _feePoll.value = setInterval(async () => {
+      try {
+        const resp = await getAsyncTaskStatus(taskId)
+        if (resp.data.status === 'done') {
+          const result = resp.data.result
+          modeResult.value = result?.text || JSON.stringify(result)
+          _feeGlobalState.status = 'done'
+          _feeGlobalState.result = modeResult.value
+          modeLoading.value = false
+          clearInterval(_feePoll.value); _feePoll.value = null
+          loadFeeRecords()
+        } else if (resp.data.status === 'error') {
+          modeResult.value = '分析失败：' + (resp.data.error || '未知错误')
+          _feeGlobalState.status = 'error'
+          modeLoading.value = false
+          clearInterval(_feePoll.value); _feePoll.value = null
+        }
+      } catch (e) {
+        modeResult.value = '轮询失败：' + e.message
+        _feeGlobalState.status = 'error'
+        modeLoading.value = false
+        clearInterval(_feePoll.value); _feePoll.value = null
+      }
+    }, 3000)
+  } else if (_feeGlobalState.taskId && _feeGlobalState.status === 'done' && _feeGlobalState.result) {
+    aiMode.value = 'fee'
+    modeRecordId.value = _feeGlobalState.taskId
+    modeResult.value = _feeGlobalState.result
+    modeLoading.value = false
+  }
+  // 恢复相关性分析轮询
+  if (_corrGlobalState.taskId && _corrGlobalState.status === 'running') {
+    aiMode.value = 'correlation'
+    modeRecordId.value = _corrGlobalState.taskId
+    modeLoading.value = true
+    const taskId = _corrGlobalState.taskId
+    _corrPoll.value = setInterval(async () => {
+      try {
+        const resp = await getAsyncTaskStatus(taskId)
+        if (resp.data.status === 'done') {
+          const result = resp.data.result
+          modeResult.value = result?.text || JSON.stringify(result)
+          _corrGlobalState.status = 'done'
+          _corrGlobalState.result = modeResult.value
+          modeLoading.value = false
+          clearInterval(_corrPoll.value); _corrPoll.value = null
+          loadCorrelationRecords()
+        } else if (resp.data.status === 'error') {
+          modeResult.value = '分析失败：' + (resp.data.error || '未知错误')
+          _corrGlobalState.status = 'error'
+          modeLoading.value = false
+          clearInterval(_corrPoll.value); _corrPoll.value = null
+        }
+      } catch (e) {
+        modeResult.value = '轮询失败：' + e.message
+        _corrGlobalState.status = 'error'
+        modeLoading.value = false
+        clearInterval(_corrPoll.value); _corrPoll.value = null
+      }
+    }, 3000)
+  } else if (_corrGlobalState.taskId && _corrGlobalState.status === 'done' && _corrGlobalState.result) {
+    aiMode.value = 'correlation'
+    modeRecordId.value = _corrGlobalState.taskId
+    modeResult.value = _corrGlobalState.result
     modeLoading.value = false
   }
   // 恢复异步任务状态

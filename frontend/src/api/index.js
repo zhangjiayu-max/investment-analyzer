@@ -2431,3 +2431,14 @@ export function getUnexposedMcp() {
 export function getIntegrationGuide(name) {
   return api.get('/capabilities/integration-guide', { params: { name } })
 }
+
+// 工具可观测 + 调试
+export function getCapabilitiesStats(days = 7, toolName = '') {
+  return api.get('/capabilities/stats', { params: { days, tool_name: toolName } })
+}
+export function getCapabilitiesRecent(toolName = '', limit = 20, success = '') {
+  return api.get('/capabilities/stats/recent', { params: { tool_name: toolName, limit, success } })
+}
+export function debugTool(toolName, args) {
+  return api.post('/capabilities/debug', { tool_name: toolName, arguments: args })
+}

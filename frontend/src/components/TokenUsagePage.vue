@@ -1,5 +1,5 @@
 <script setup>
-import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
+import { ref, computed, onMounted, onUnmounted, onActivated, onDeactivated, watch } from 'vue'
 import {
   getTokenUsage, getTokenUsageRecent, getTokenUsageSummary, getTokenUsageByCaller,
   getTokenUsageDaily, getPerformanceStats, getPerformanceByAgent, getRunningAgents,
@@ -476,6 +476,12 @@ onMounted(() => {
   startPolling()
 })
 
+// KeepAlive 切换页面时停止轮询，切回时恢复（避免切走后仍每 3s 请求）
+onDeactivated(stopPolling)
+onActivated(() => {
+  loadRunningAgents()
+  if (!runningTimer) startPolling()
+})
 onUnmounted(stopPolling)
 
 // 监听明细筛选变化（B1 修复：增加 caller/model 监听）

@@ -1,5 +1,5 @@
 <script setup>
-import { ref, onMounted, computed } from 'vue'
+import { ref, onMounted, onUnmounted, onDeactivated, computed } from 'vue'
 import { listAgents, getAgent, updateAgent, deleteAgent, listAnalysisAgents, updateAnalysisAgent, generateAgentPrompt, listAgentVersions, rollbackAgentPrompt, listAnalysisAgentVersions, rollbackAnalysisAgentPrompt, getAgentRegressionResult } from '../api'
 import ConfirmDialog from './ConfirmDialog.vue'
 import AppToast from './AppToast.vue'
@@ -11,6 +11,7 @@ const agents = ref([])
 const analysisAgents = ref([])
 const loading = ref(false)
 const activeTab = ref('conversation') // 'conversation' | 'analysis'
+let _regressionTimer = null  // 延迟加载回归测试的 timer（切走页面时清理）
 
 // 当前查看/编辑的 Agent
 const selectedAgent = ref(null)
@@ -242,7 +243,11 @@ async function saveEdit() {
     await loadAgents()
     // 延迟加载回归测试结果
     if (promptChanged) {
-      setTimeout(loadRegression, 10000)
+      if (_regressionTimer) clearTimeout(_regressionTimer)
+      _regressionTimer = setTimeout(() => {
+        loadRegression()
+        _regressionTimer = null
+      }, 10000)
     }
   } catch (e) {
     showToast('保存失败: ' + (e.response?.data?.detail || e.message), 'error')
@@ -282,6 +287,13 @@ function getAgentIcon(icon) {
 }
 
 onMounted(loadAgents)
+// KeepAlive 切换页面时清理延迟 timer，避免切走后触发无意义的回归测试加载
+onDeactivated(() => {
+  if (_regressionTimer) { clearTimeout(_regressionTimer); _regressionTimer = null }
+})
+onUnmounted(() => {
+  if (_regressionTimer) { clearTimeout(_regressionTimer); _regressionTimer = null }
+})
 </script>
 
 <template>
