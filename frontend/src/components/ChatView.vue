@@ -10,6 +10,7 @@ import {
   retryConversationMessage,
   resumeConversationStream,
   replayConversationStream,
+  clarifyAnswerStream,
   getConversationExecutionState,
   listTraces, listAgents,
   getConversationEvaluation, evaluateConversation, evaluateConversationWithLLM,
@@ -724,6 +725,29 @@ async function handleSend() {
         }
         nextTick(() => scrollToBottom())
       },
+      onClarification: (cid, data, state) => {
+        if (selectedConv.value?.id !== cid) return
+        const lastMsg = messages.value[messages.value.length - 1]
+        if (lastMsg && lastMsg.role === 'assistant' && lastMsg.streaming) {
+          lastMsg.content = data.question || '需要更多信息'
+          lastMsg.streaming = false
+          lastMsg.clarification = {
+            options: data.options || [],
+            messageId: data.message_id,
+          }
+        } else {
+          messages.value.push({
+            role: 'assistant',
+            content: data.question || '需要更多信息',
+            created_at: new Date().toISOString(),
+            clarification: {
+              options: data.options || [],
+              messageId: data.message_id,
+            },
+          })
+        }
+        nextTick(() => scrollToBottom())
+      },
       onDone: (cid, data) => {
         if (selectedConv.value?.id === cid) {
           const state = getStreamState(cid)
@@ -756,6 +780,81 @@ async function handleSend() {
       },
     })
   }, targetSpecialists, imagesToSend)
+  startStream(convId, controller)
+  addTask(convId, null, selectedConv.value?.title || `对话 #${convId}`)
+}
+
+function handleClarifyAnswer(msg, answer) {
+  const convId = selectedConv.value?.id
+  if (!convId) return
+  const clarification = msg.clarification
+  if (!clarification || !clarification.messageId) return
+
+  // 清除澄清 UI，显示用户回答
+  msg.clarification = null
+  messages.value.push({
+    role: 'user',
+    content: answer,
+    created_at: new Date().toISOString(),
+  })
+  nextTick(() => scrollToBottom())
+
+  const controller = clarifyAnswerStream(convId, answer, clarification.messageId, (event) => {
+    routeStreamEvent(convId, event, {
+      onAnswer: (cid, data, state) => {
+        if (selectedConv.value?.id !== cid) return
+        const allSpecResults = data.specialist_results || (state.completedSpecialists.length > 0 ? [...state.completedSpecialists] : [])
+        const phaseAResults = allSpecResults.filter(s => !s.is_cross_review)
+        const lastMsg = messages.value[messages.value.length - 1]
+        if (lastMsg && lastMsg.role === 'assistant' && lastMsg.streaming) {
+          lastMsg.content = data.content || lastMsg.content
+          lastMsg.streaming = false
+          lastMsg.specialist_results = phaseAResults.length > 0 ? phaseAResults : null
+        } else {
+          messages.value.push({
+            role: 'assistant',
+            content: data.content,
+            created_at: new Date().toISOString(),
+            specialist_results: phaseAResults.length > 0 ? phaseAResults : null,
+          })
+        }
+        nextTick(() => scrollToBottom())
+      },
+      onClarification: (cid, data, state) => {
+        if (selectedConv.value?.id !== cid) return
+        const lastMsg = messages.value[messages.value.length - 1]
+        if (lastMsg && lastMsg.role === 'assistant' && lastMsg.streaming) {
+          lastMsg.content = data.question || '需要更多信息'
+          lastMsg.streaming = false
+          lastMsg.clarification = { options: data.options || [], messageId: data.message_id }
+        } else {
+          messages.value.push({
+            role: 'assistant',
+            content: data.question || '需要更多信息',
+            created_at: new Date().toISOString(),
+            clarification: { options: data.options || [], messageId: data.message_id },
+          })
+        }
+        nextTick(() => scrollToBottom())
+      },
+      onDone: (cid) => {
+        finishStream(cid)
+        removeTask(cid)
+        loadConversations()
+      },
+      onError: (cid, data) => {
+        if (selectedConv.value?.id === cid) {
+          messages.value.push({
+            role: 'assistant',
+            content: '发生错误: ' + (data.message || '未知错误'),
+            created_at: new Date().toISOString(),
+          })
+        }
+        finishStream(cid)
+        removeTask(cid)
+      },
+    })
+  })
   startStream(convId, controller)
   addTask(convId, null, selectedConv.value?.title || `对话 #${convId}`)
 }
@@ -1447,6 +1546,7 @@ function stopPollingProgress() {
             @resume="tryResumeConversation"
             @continue-analysis="continueAssistantMessage"
             @regenerate="regenerateAssistantMessage"
+            @clarify-answer="handleClarifyAnswer"
           />
 
           <!-- 流式状态指示器 -->

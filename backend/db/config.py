@@ -141,6 +141,11 @@ DEFAULT_CONFIGS = [
     ('pipeline.compliance_filter_enabled', 'true', '合规过滤（保本/稳赚等违规表述）', 'pipeline'),
     ('pipeline.fund_code_warning_enabled', 'true', '基金代码风险标注（含代码时追加核实提示）', 'pipeline'),
 
+    # RAG 检索增强 + 交互式澄清
+    ('rag.subquery_expansion_enabled', 'true', 'RAG 子查询展开（多角度检索提升召回）', 'rag'),
+    ('rag.intent_driven_types_enabled', 'true', 'RAG intent 驱动 content_types 过滤', 'rag'),
+    ('pipeline.clarification_interactive_enabled', 'true', '交互式澄清（前端展示选项 + 续答恢复）', 'pipeline'),
+
     # 多智能体对话降本增效开关
     ('router.enabled', 'true', '是否启用智能路由', 'router'),
     ('router.use_llm_fallback', 'true', '规则未命中时是否用 LLM 兜底', 'router'),

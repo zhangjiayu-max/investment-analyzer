@@ -26,7 +26,7 @@ from db import (
     get_latest_channel_for_message, mark_stream_channel_aborted,
     is_stream_heartbeat_stale, list_stream_events, get_stream_channel,
 )
-from db.config import get_config, get_config_float, get_config_int
+from db.config import get_config, get_config_bool, get_config_float, get_config_int
 from infra.state import running_agents as _running_agents
 from agent.orchestrator import orchestrate, orchestrate_stream, clarify_requirement, CancelledError
 from services.portfolio_fact_layer import build_portfolio_facts
@@ -1607,6 +1607,18 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
                                 complete_stream_channel(channel_id)
                             except Exception as _e:
                                 logger.warning(f"[trace:{trace_id}] 标记 channel 完成失败: {_e}")
+                        elif et == "clarification":
+                            # 交互式澄清：保存澄清问题到占位消息，存储 checkpoint 供续答恢复
+                            try:
+                                update_message_content_and_metadata(stream_msg_id, event.get("question", "请补充更多信息"), {
+                                    "execution_status": "clarification",
+                                    "clarification_options": event.get("options", []),
+                                    "clarification_checkpoint": event.get("checkpoint"),
+                                    "trace_id": trace_id,
+                                })
+                                complete_stream_channel(channel_id)
+                            except Exception as _e:
+                                logger.warning(f"[trace:{trace_id}] 保存澄清状态失败: {_e}")
                         elif et == "cancelled":
                             _save_progress("cancelled")
                             try:
@@ -1791,6 +1803,15 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
                         "specialist_results": event.get("specialist_results", []),
                     })
 
+            elif event_type == "clarification":
+                # 交互式澄清：转发给前端展示选项（checkpoint 已在 producer 存入消息元数据）
+                if not client_disconnected:
+                    yield _sse_event("clarification", {
+                        "question": event.get("question", ""),
+                        "options": event.get("options", []),
+                        "message_id": stream_msg_id,
+                    })
+
             elif event_type == "error":
                 if not client_disconnected:
                     yield _sse_event("error", {"message": event.get("message", "未知错误")})
@@ -1838,6 +1859,206 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
                         logger.info(f"对话摘要已生成: conv={conv_id} msgs={len(msgs)}")
             except Exception as e:
                 logger.warning(f"对话摘要生成失败: {e}")
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
+@router.post("/api/conversations/{conv_id}/clarify-answer")
+async def clarify_answer_stream(conv_id: int, request: Request):
+    """交互式澄清续答 — 从 checkpoint 恢复 Pipeline 执行。
+
+    流程：
+    1. 从澄清消息元数据读取 checkpoint
+    2. 存储用户回答消息
+    3. 用回答改写 query，从 Phase 1（信息收集）开始执行
+    4. SSE 流式返回专家分析 + 最终回答
+    """
+    # 开关检查
+    try:
+        if not get_config_bool("pipeline.clarification_interactive_enabled", True):
+            raise HTTPException(400, "交互式澄清未启用，请直接重新提问并补充细节")
+    except HTTPException:
+        raise
+    except Exception:
+        pass
+
+    body = await request.json()
+    answer = (body.get("answer") or "").strip()
+    message_id = body.get("message_id")
+    if not answer:
+        raise HTTPException(400, "回答内容不能为空")
+
+    conv = get_conversation(conv_id)
+    if not conv:
+        raise HTTPException(404, "对话不存在")
+
+    # 从澄清消息元数据读取 checkpoint
+    checkpoint = None
+    if message_id:
+        try:
+            conn = _get_conn()
+            row = conn.execute(
+                "SELECT metadata FROM messages WHERE id = ? AND conversation_id = ?",
+                (message_id, conv_id),
+            ).fetchone()
+            conn.close()
+            if row and row["metadata"]:
+                meta = json.loads(row["metadata"]) if isinstance(row["metadata"], str) else row["metadata"]
+                checkpoint = meta.get("clarification_checkpoint")
+        except Exception as e:
+            logger.warning(f"[clarify-answer] 读取 checkpoint 失败: {e}")
+
+    if not checkpoint:
+        raise HTTPException(400, "澄清状态已过期，请重新提问并补充细节")
+
+    # 防重复：检查是否有进行中的任务
+    from db.agents import get_running_agent_count
+    if get_running_agent_count(conv_id) > 0:
+        raise HTTPException(409, "该对话有进行中的任务，请等待完成后再试")
+
+    trace_id = str(uuid.uuid4())[:12]
+    logger.info(f"[trace:{trace_id}] 澄清续答 conv={conv_id} answer='{answer[:50]}'")
+
+    # 存储用户回答
+    create_message(conv_id, "user", answer)
+    history = get_messages(conv_id, limit=20)
+    msg_list = [{"role": m["role"], "content": m["content"]} for m in history]
+
+    async def event_stream():
+        import threading
+        import queue as queue_module
+
+        cancel_event = threading.Event()
+        stream_msg_id = create_message(
+            conv_id, "assistant", "⏳ 根据您的补充分析中...",
+            metadata=json.dumps({"execution_status": "streaming"}, ensure_ascii=False),
+        )
+        request_start = time.time()
+        q = queue_module.Queue()
+
+        def _producer():
+            try:
+                _running_agents[f"clarify_{conv_id}"] = {
+                    "conv_id": conv_id, "started_at": time.time(),
+                    "trace_id": trace_id, "cancel_event": cancel_event,
+                }
+                from agent.pipeline import run_pipeline_from_checkpoint
+                for event in run_pipeline_from_checkpoint(
+                    checkpoint, answer, msg_list, trace_id, cancel_event,
+                ):
+                    et = event.get("type")
+                    # 持久化关键事件到消息
+                    if et == "answer":
+                        content = event.get("content", "")
+                        spec_results = event.get("specialist_results", [])
+                        try:
+                            p1 = [{"agent_key": s.get("agent_key", ""), "agent": s.get("agent", ""),
+                                   "icon": s.get("icon", ""), "analysis": (s.get("analysis", "") or "")[:3000]}
+                                  for s in spec_results if not s.get("is_cross_review")]
+                            update_message_content_and_metadata(stream_msg_id, content, {
+                                "execution_status": "completed",
+                                "specialist_results": p1,
+                                "trace_id": trace_id,
+                            })
+                        except Exception as _e:
+                            logger.warning(f"[trace:{trace_id}] 保存续答回答失败: {_e}")
+                    elif et == "degrade":
+                        try:
+                            update_message_content_and_metadata(
+                                stream_msg_id, "分析遇到问题，请重新提问", {
+                                    "execution_status": "failed", "trace_id": trace_id,
+                                })
+                        except Exception:
+                            pass
+                    elif et == "error":
+                        try:
+                            update_message_content_and_metadata(
+                                stream_msg_id, f"❌ 续答失败: {event.get('message', '')}", {
+                                    "execution_status": "failed", "trace_id": trace_id,
+                                })
+                        except Exception:
+                            pass
+                    q.put(event)
+            except Exception as e:
+                logger.exception(f"[trace:{trace_id}] 澄清续答 producer 异常: {e}")
+                q.put({"type": "error", "message": str(e)})
+            finally:
+                _running_agents.pop(f"clarify_{conv_id}", None)
+                q.put(None)
+
+        t = threading.Thread(target=_producer, daemon=True)
+        t.start()
+
+        if not await request.is_disconnected():
+            yield _sse_event("status", {"message": "正在根据您的回答检索分析..."})
+
+        spec_count = 0
+        while True:
+            try:
+                event = await asyncio.to_thread(lambda: q.get(timeout=0.5))
+            except queue_module.Empty:
+                if await request.is_disconnected():
+                    break
+                continue
+            if event is None:
+                break
+
+            et = event.get("type")
+            if et == "phase_start":
+                if not await request.is_disconnected():
+                    yield _sse_event("phase", {"message": event.get("phase", "")})
+            elif et == "plan_generated":
+                plan = event.get("plan", {})
+                if not await request.is_disconnected():
+                    yield _sse_event("plan", {
+                        "complexity": plan.get("complexity", "medium"),
+                        "reason": "澄清续答",
+                        "refined_query": plan.get("refined_query", ""),
+                    })
+            elif et == "specialist_start":
+                if not await request.is_disconnected():
+                    yield _sse_event("specialist_start", {
+                        "agent_key": event.get("agent_key", ""),
+                        "agent": event.get("agent", ""),
+                        "icon": event.get("icon", ""),
+                    })
+            elif et == "specialist_done":
+                spec_count += 1
+                if not await request.is_disconnected():
+                    yield _sse_event("specialist_done", {
+                        "agent_key": event.get("agent_key", ""),
+                        "agent": event.get("agent", ""),
+                        "icon": event.get("icon", ""),
+                        "analysis": event.get("analysis", ""),
+                        "duration_ms": event.get("duration_ms", 0),
+                    })
+                    yield _sse_event("progress", {
+                        "phase": "specialists", "phase_index": 2,
+                        "total_phases": 3, "phase_label": "专家分析",
+                        "substep": f"{event.get('agent', '')} 完成 ({spec_count} 个)",
+                        "pct": min(30 + spec_count * 20, 80),
+                    })
+            elif et == "answer":
+                if not await request.is_disconnected():
+                    yield _sse_event("answer", {
+                        "content": event.get("content", ""),
+                        "specialist_results": event.get("specialist_results", []),
+                    })
+            elif et == "degrade":
+                if not await request.is_disconnected():
+                    yield _sse_event("status", {"message": "切换到标准模式..."})
+            elif et == "error":
+                if not await request.is_disconnected():
+                    yield _sse_event("error", {"message": event.get("message", "未知错误")})
+                return
+
+        total_ms = int((time.time() - request_start) * 1000)
+        if not await request.is_disconnected():
+            yield _sse_event("done", {
+                "message_id": stream_msg_id,
+                "duration_ms": total_ms,
+                "phase_timings": {"total_ms": total_ms},
+            })
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 

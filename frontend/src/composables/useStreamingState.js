@@ -204,6 +204,15 @@ function handleStreamEvent(convId, event, callbacks = {}) {
       }
       break
 
+    case 'clarification':
+      // 交互式澄清：通知 ChatView 展示澄清问题 + 选项
+      state.streamStatus = 'clarifying'
+      state.statusMessage = data.question || '需要更多信息'
+      if (callbacks.onClarification) {
+        callbacks.onClarification(convId, data, state)
+      }
+      break
+
     case 'done':
       _finishStream(convId, state, data)
       if (callbacks.onDone) {

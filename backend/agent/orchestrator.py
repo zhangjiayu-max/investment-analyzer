@@ -4382,7 +4382,15 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
                     elif evt_type == "simple_chat":
                         yield {"type": "status", "message": "快速回复中..."}
                     elif evt_type == "clarification":
-                        yield {"type": "status", "message": f"需要澄清: {evt.get('question', '')}"}
+                        # 交互式澄清：不降级 ReAct，直接转发给前端
+                        pipeline_completed = True
+                        yield {
+                            "type": "clarification",
+                            "question": evt.get("question", ""),
+                            "options": evt.get("options", []),
+                            "checkpoint": evt.get("checkpoint"),
+                        }
+                        return
                     elif evt_type == "plan_generated":
                         yield {"type": "plan", "complexity": evt.get("plan", {}).get("complexity", "medium"),
                                "scenario_type": "", "reason": "Pipeline 计划",

@@ -188,13 +188,20 @@ def run_pipeline(
             yield from _handle_simple_chat(query, state, trace_id)
             return
 
-        # 需要澄清
+        # 需要澄清（交互式：yield checkpoint 供续答恢复）
         need_clarify, clarify_q = needs_clarification(query_info)
         if need_clarify:
-            yield {"type": EVENT_CLARIFICATION, "question": clarify_q,
-                   "answer": clarify_q}
+            # 序列化当前状态作为 checkpoint（含原始 query + phase0 结果）
+            checkpoint = state.to_dict()
+            checkpoint["query_info"] = query_info  # 供续答时跳过 Phase 0
+            yield {
+                "type": EVENT_CLARIFICATION,
+                "question": clarify_q,
+                "options": query_info.get("clarification_options", []),
+                "checkpoint": checkpoint,
+            }
             state.answer = clarify_q
-            state.transition_to(PipelinePhase.COMPLETED)
+            state.transition_to(PipelinePhase.CANCELLED)
             return
 
         # ── Phase 1: 信息收集 ──────────────────
@@ -363,6 +370,131 @@ def run_pipeline(
                "message": "Pipeline 执行失败，请重试或联系管理员"}
 
 
+def run_pipeline_from_checkpoint(
+    checkpoint: dict,
+    user_answer: str,
+    history: list,
+    trace_id: str,
+    cancel_event=None,
+) -> Generator[dict, None, None]:
+    """从澄清 checkpoint 恢复 Pipeline，用用户回答改写 query 后继续执行。
+
+    跳过 Phase 0 的澄清检查，直接从 Phase 1（信息收集）开始。
+    query 改写：original_query + user_answer 拼接。
+    """
+    start_time = time.time()
+
+    # 恢复状态
+    state = PipelineState.from_dict(checkpoint)
+    query_info = checkpoint.get("query_info", {})
+    original_query = state.original_query
+
+    # 用回答改写 query
+    state.refined_query = f"{original_query} {user_answer}".strip()
+    logger.info(
+        f"[pipeline] 澄清续答恢复: query='{original_query}' → '{state.refined_query}', "
+        f"answer='{user_answer[:50]}'"
+    )
+
+    # 重置全局状态
+    reset_convergence_detector()
+    reset_tool_call_cache()
+    reset_global_blackboard()
+
+    checker = TerminationChecker(start_time=start_time)
+    detector = ConvergenceDetector()
+    blackboard = Blackboard()
+
+    try:
+        # 直接进入 Phase 1（跳过 Phase 0 澄清检查）
+        state.transition_to(PipelinePhase.INFO_GATHER)
+        yield {"type": EVENT_PHASE_START, "phase": PipelinePhase.INFO_GATHER.value}
+        phase1_result = _phase_info_gather(state, query_info, history, trace_id)
+        state.set_phase_result(PipelinePhase.INFO_GATHER.value, phase1_result)
+        yield {"type": EVENT_PHASE_END, "phase": PipelinePhase.INFO_GATHER.value,
+               "result": {"rag_count": len(phase1_result.get("rag", [])),
+                          "has_portfolio": bool(phase1_result.get("portfolio"))}}
+
+        # Phase 2: 计划生成
+        state.transition_to(PipelinePhase.PLANNING)
+        yield {"type": EVENT_PHASE_START, "phase": PipelinePhase.PLANNING.value}
+        phase2_result = _phase_planning(state, query_info, phase1_result, trace_id)
+        state.set_phase_result(PipelinePhase.PLANNING.value, phase2_result)
+        yield {"type": EVENT_PLAN_GENERATED, "plan": phase2_result}
+        yield {"type": EVENT_PHASE_END, "phase": PipelinePhase.PLANNING.value}
+
+        # Phase 3: 专家执行
+        state.transition_to(PipelinePhase.EXECUTION)
+        yield {"type": EVENT_PHASE_START, "phase": PipelinePhase.EXECUTION.value}
+        exec_gen = _phase_execution(
+            state, phase2_result, phase1_result, query_info,
+            detector, blackboard, checker, cancel_event, trace_id,
+        )
+        phase3_result = None
+        while True:
+            try:
+                evt = next(exec_gen)
+                yield evt
+            except StopIteration as si:
+                phase3_result = si.value
+                break
+        if phase3_result is None:
+            phase3_result = {"specialists": [], "tool_calls": []}
+        state.set_phase_result(PipelinePhase.EXECUTION.value, phase3_result)
+        yield {"type": EVENT_PHASE_END, "phase": PipelinePhase.EXECUTION.value,
+               "result": {"specialist_count": len(phase3_result.get("specialists", []))}}
+
+        # Phase 4: 综合
+        state.transition_to(PipelinePhase.SYNTHESIS)
+        yield {"type": EVENT_PHASE_START, "phase": PipelinePhase.SYNTHESIS.value}
+        phase3_specialists = phase3_result.get("specialists", [])
+        if not phase3_specialists:
+            yield {"type": EVENT_DEGRADE, "reason": "no_specialist_results",
+                   "message": "Pipeline 未产出专家分析，降级到标准模式"}
+            state.transition_to(PipelinePhase.FAILED)
+            state.error = "no_specialist_results"
+            return
+
+        phase4_result = _phase_synthesis(
+            state, state.refined_query, phase3_result, blackboard, trace_id,
+        )
+        state.set_phase_result(PipelinePhase.SYNTHESIS.value, phase4_result)
+        state.answer = phase4_result.get("answer", "")
+
+        if not state.answer or state.answer == "无法生成分析":
+            yield {"type": EVENT_DEGRADE, "reason": "empty_synthesis",
+                   "message": "Pipeline 综合失败，降级到标准模式"}
+            state.transition_to(PipelinePhase.FAILED)
+            state.error = "empty_synthesis"
+            return
+
+        state.answer = _apply_compliance_and_warning(state.answer, trace_id)
+        yield {"type": EVENT_PHASE_END, "phase": PipelinePhase.SYNTHESIS.value}
+        yield {"type": EVENT_ANSWER, "content": state.answer,
+               "specialist_results": phase3_specialists,
+               "tool_calls": phase3_result.get("tool_calls", []),
+               "confidence": phase4_result.get("confidence", 0.0)}
+
+        # Phase 5: 记忆持久化
+        state.transition_to(PipelinePhase.MEMORY)
+        yield {"type": EVENT_PHASE_START, "phase": PipelinePhase.MEMORY.value}
+        phase5_result = _phase_memory(state, phase4_result, query_info, trace_id)
+        state.set_phase_result(PipelinePhase.MEMORY.value, phase5_result)
+        yield {"type": EVENT_PHASE_END, "phase": PipelinePhase.MEMORY.value}
+
+        state.transition_to(PipelinePhase.COMPLETED)
+
+    except _PipelineCancelled:
+        state.transition_to(PipelinePhase.CANCELLED)
+        yield {"type": EVENT_TERMINATED, "reason": "用户取消"}
+    except Exception as e:
+        logger.exception(f"[pipeline] 续答恢复异常: {e}")
+        state.transition_to(PipelinePhase.FAILED)
+        state.error = str(e)
+        yield {"type": EVENT_ERROR, "error": str(e),
+               "message": "续答恢复失败，请重试"}
+
+
 # ── Phase 0: 预处理 ──────────────────────────
 
 def _phase_preprocess(
@@ -443,14 +575,81 @@ def _phase_info_gather(
         "info_gaps": [],
     }
 
-    # 1. RAG 检索
+    # 1. RAG 检索（子查询展开 + intent 驱动 content_types + rag_logs 日志）
     try:
-        from services.rag import build_rag_context_with_details
+        from services.rag import build_rag_context_with_details, log_rag_search
         enhanced_query = _enhance_rag_query(state.refined_query, query_info)
-        rag_data = build_rag_context_with_details(enhanced_query, limit=8)
-        results["rag"] = rag_data.get("results", []) if isinstance(rag_data, dict) else []
-        results["rag_context"] = rag_data.get("context", "") if isinstance(rag_data, dict) else str(rag_data)
-        logger.info(f"[pipeline] RAG 检索完成: {len(results['rag'])} 条结果")
+        content_types = _map_content_types(query_info.get("needed_info", []))
+
+        # 子查询展开（开关控制）
+        sub_queries = [enhanced_query]
+        try:
+            sub_expansion_enabled = get_config_bool("rag.subquery_expansion_enabled", True)
+        except Exception:
+            sub_expansion_enabled = True
+        if sub_expansion_enabled:
+            try:
+                from agent.query_rewriter import expand_query
+                expanded = expand_query(enhanced_query)
+                if expanded and len(expanded) > 1:
+                    sub_queries = expanded[:3]  # 最多 3 个子查询
+                    logger.info(f"[pipeline] 子查询展开: {len(sub_queries)} 个 → {sub_queries}")
+            except Exception as e:
+                logger.debug(f"[pipeline] 子查询展开跳过: {e}")
+
+        # 多路检索
+        all_rag_results = []
+        rag_keywords = []
+        total_fts = 0
+        total_chroma = 0
+        for sq in sub_queries:
+            rag_data = build_rag_context_with_details(sq, limit=5, content_types=content_types)
+            if isinstance(rag_data, dict):
+                all_rag_results.extend(rag_data.get("results", []))
+                rag_keywords = rag_keywords or rag_data.get("keywords", [])
+                total_fts += rag_data.get("fts_count", 0)
+                total_chroma += rag_data.get("chroma_count", 0)
+
+        # 去重（按 content_type + reference_id + title）
+        seen = set()
+        deduped = []
+        for r in all_rag_results:
+            key = f"{r.get('content_type','')}:{r.get('reference_id','')}:{r.get('title','')}"
+            if key not in seen:
+                seen.add(key)
+                deduped.append(r)
+
+        # 按分数排序（如果有 _score 字段）
+        deduped.sort(key=lambda x: float(x.get("_score", 0)), reverse=True)
+        results["rag"] = deduped
+        # 构建上下文（复用第一条的 context 或拼接）
+        if sub_queries and len(sub_queries) == 1:
+            results["rag_context"] = rag_data.get("context", "") if isinstance(rag_data, dict) else ""
+        else:
+            # 多子查询：简单拼接 top 结果
+            results["rag_context"] = _build_rag_context_from_results(deduped[:8])
+
+        logger.info(
+            f"[pipeline] RAG 检索完成: {len(deduped)} 条结果 "
+            f"(子查询 {len(sub_queries)}, FTS {total_fts}, Chroma {total_chroma})"
+        )
+
+        # 写 rag_logs 日志（补全 Pipeline 主路径的可观测性）
+        try:
+            log_rag_search(
+                conversation_id=state.conversation_id,
+                message_id=state.message_id,
+                query=enhanced_query,
+                keywords=rag_keywords,
+                results=deduped[:10],
+                content_types=content_types,
+                fts_count=total_fts,
+                chroma_count=total_chroma,
+                trace_id=trace_id,
+            )
+        except Exception as log_err:
+            logger.debug(f"[pipeline] rag_logs 写入失败: {log_err}")
+
     except Exception as e:
         logger.warning(f"[pipeline] RAG 检索失败: {e}")
 
@@ -493,6 +692,56 @@ def _enhance_rag_query(refined_query: str, query_info: dict) -> str:
         return refined_query
     # 简单拼接 targets
     return f"{refined_query} {' '.join(targets)}"
+
+
+# intent → content_types 映射（用于 intent 驱动检索）
+_INTENT_TO_CONTENT_TYPES = {
+    "valuation": ["valuation", "analysis"],
+    "portfolio": ["book", "analysis"],
+    "risk": ["analysis", "article"],
+    "strategy": ["book", "analysis", "article"],
+    "article": ["article", "author_article"],
+}
+
+
+def _map_content_types(needed_info: list) -> Optional[list]:
+    """根据 needed_info 映射到检索 content_types。
+
+    Returns:
+        content_types 列表，或 None（表示全类型检索）
+    """
+    try:
+        enabled = get_config_bool("rag.intent_driven_types_enabled", True)
+    except Exception:
+        enabled = True
+    if not enabled or not needed_info:
+        return None
+    types = set()
+    for info in needed_info:
+        types.update(_INTENT_TO_CONTENT_TYPES.get(info, []))
+    return list(types) if types else None
+
+
+def _build_rag_context_from_results(results: list, max_chars: int = 3000) -> str:
+    """从检索结果列表构建上下文文本（多子查询场景）。"""
+    if not results:
+        return ""
+    parts = []
+    total = 0
+    for r in results:
+        label = r.get("label", r.get("content_type", ""))
+        title = r.get("title", "")
+        body = (r.get("body", "") or "")[:600]
+        source = r.get("source", "")
+        part = f"[{label}] {title}"
+        if source:
+            part += f" [来源: {source}]"
+        part += f"\n{body}"
+        parts.append(part)
+        total += len(part)
+        if total >= max_chars:
+            break
+    return "\n\n---\n\n".join(parts)
 
 
 def _lookup_valuation(target: str) -> Optional[dict]:

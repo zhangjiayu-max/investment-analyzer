@@ -30,6 +30,7 @@ const emit = defineEmits([
   'resume',
   'continue-analysis',
   'regenerate',
+  'clarify-answer',
 ])
 
 // 评估状态相关
@@ -591,6 +592,17 @@ const tradeSuggestions = computed(() => {
       </div>
       <ReasoningPanel v-if="msg.reasoning" :text="msg.reasoning" />
       <div class="message-bubble markdown-body" v-html="renderMarkdown(msg.content)"></div>
+      <!-- 交互式澄清选项 -->
+      <div v-if="msg.clarification && msg.clarification.options?.length" class="clarification-options">
+        <button
+          v-for="(opt, idx) in msg.clarification.options"
+          :key="`clarify-${idx}`"
+          class="btn-clarify-option"
+          @click="emit('clarify-answer', msg, opt)"
+        >
+          {{ opt }}
+        </button>
+      </div>
       <!-- P2: 执行交易按钮（解析 AI 回复中的交易建议） -->
       <div v-if="tradeSuggestions.length" class="message-trade-actions">
         <button
@@ -1525,5 +1537,29 @@ const tradeSuggestions = computed(() => {
   font-size: 11px;
   opacity: 0.85;
   margin-left: 2px;
+}
+
+/* ── 交互式澄清选项 ── */
+.clarification-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+.btn-clarify-option {
+  padding: 6px 14px;
+  border: 1px solid var(--color-primary, #3b82f6);
+  background: rgba(59, 130, 246, 0.08);
+  color: var(--color-primary, #3b82f6);
+  border-radius: 16px;
+  cursor: pointer;
+  font-size: 13px;
+  transition: all 0.2s;
+  line-height: 1.4;
+}
+.btn-clarify-option:hover {
+  background: var(--color-primary, #3b82f6);
+  color: white;
+  transform: translateY(-1px);
 }
 </style>

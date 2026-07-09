@@ -426,6 +426,70 @@ export function sendMessageStream(convId, content, onEvent, targetSpecialists = 
   return controller
 }
 
+/**
+ * SSE 流式澄清续答 — 从 checkpoint 恢复 Pipeline 执行。
+ * @param {number} convId - 对话 ID
+ * @param {string} answer - 用户的澄清回答
+ * @param {number} messageId - 澄清消息 ID（后端从中读取 checkpoint）
+ * @param {function} onEvent - 事件回调 (event: {type, data}) => void
+ * @returns {AbortController} 用于取消请求
+ */
+export function clarifyAnswerStream(convId, answer, messageId, onEvent) {
+  const controller = new AbortController()
+  const baseURL = api.defaults.baseURL || ''
+
+  fetch(`${baseURL}/conversations/${convId}/clarify-answer`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ answer, message_id: messageId }),
+    signal: controller.signal,
+  }).then(async response => {
+    if (!response.ok) {
+      const body = await response.text().catch(() => '')
+      let msg = '澄清续答失败'
+      try {
+        const err = JSON.parse(body)
+        msg = err.detail || msg
+      } catch {}
+      onEvent({ type: 'error', data: { message: msg, code: 'CLARIFY_FAILED', status: response.status } })
+      return
+    }
+
+    const reader = response.body.getReader()
+    const decoder = new TextDecoder()
+    let buffer = ''
+
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      buffer += decoder.decode(value, { stream: true })
+
+      const lines = buffer.split('\n')
+      buffer = lines.pop()
+
+      for (const line of lines) {
+        if (line.startsWith('data: ')) {
+          try {
+            const event = JSON.parse(line.slice(6))
+            onEvent(event)
+          } catch (e) {}
+        }
+      }
+    }
+    if (buffer.startsWith('data: ')) {
+      try {
+        const event = JSON.parse(buffer.slice(6))
+        onEvent(event)
+      } catch (e) {}
+    }
+  }).catch(err => {
+    if (err.name === 'AbortError') return
+    console.warn('澄清续答 SSE 连接断开:', err.message)
+  })
+
+  return controller
+}
+
 /** 取消对话执行（通知后端停止后台任务 + 更新 DB streaming 状态为 cancelled） */
 export function cancelConversationExecution(convId) {
   return api.post(`/conversations/${convId}/cancel`)
