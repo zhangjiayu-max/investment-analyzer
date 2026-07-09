@@ -28,6 +28,7 @@ import Dashboard from './Dashboard.vue'
 import MarketIntelligence from './MarketIntelligence.vue'
 import KnowledgeBase from './KnowledgeBase.vue'
 import SystemConfigPage from './SystemConfigPage.vue'
+import CapabilityCenter from './CapabilityCenter.vue'
 import { isDark, toggleDark } from '../composables/useTheme'
 
 const activePage = ref(localStorage.getItem('activePage') || 'chat')
@@ -69,6 +70,7 @@ const moreItems = [
   { key: 'eval-suite', label: '评测集', icon: 'check' },
   { key: 'health', label: '健康分', icon: 'health' },
   { key: 'shadow', label: 'Shadow Mode', icon: 'shadow' },
+  { key: 'capability-center', label: '能力中心', icon: 'wrench' },
 ]
 
 function navigate(key) {
@@ -107,6 +109,7 @@ const pageComponents = {
   'health': HealthScore,
   'shadow': ShadowModePage,
   'system-config': SystemConfigPage,
+  'capability-center': CapabilityCenter,
 }
 
 const pageComponent = computed(() => pageComponents[activePage.value] || null)
