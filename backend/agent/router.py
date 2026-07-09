@@ -65,6 +65,12 @@ _KEYWORD_ROUTES = [
     (["文章", "公众号", "解读", "新闻"], ["article_expert"]),
     (["基金", "选基", "基金分析"], ["fund_analyst"]),
     (["宏观", "经济", "利率", "政策"], ["macro_strategist"]),
+    # ── Top 5 新工具的路由规则 ──
+    (["基金经理", "经理任职", "管理规模", "经理履历"], ["fund_analyst"]),
+    (["净值", "最大回撤", "定投回测", "年化收益", "历史业绩"], ["fund_analyst", "risk_assessor"]),
+    (["筛选基金", "条件选基", "帮我选", "推荐基金"], ["fund_analyst"]),
+    (["GDP", "PMI", "社融", "M2", "工业增加值", "CPI", "通胀"], ["macro_strategist"]),
+    (["重仓股财务", "ROE", "营收", "利润增长", "资产负债率"], ["fund_analyst"]),
 ]
 
 _HIGH_RISK_ACTION_KEYWORDS = [

@@ -676,6 +676,78 @@ TOOLS = [
             }
         }
     },
+    # ── 基金基本面工具（Top 5 首批接入）──
+    {
+        "type": "function",
+        "function": {
+            "name": "ttfund_fund_manager",
+            "description": "查询基金经理信息（任职年限、管理规模、历史业绩、投资风格）。当用户问基金经理怎么样、经理履历、管理能力时调用。数据源：天天基金。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "manager_name": {"type": "string", "description": "基金经理姓名，如'张坤'"},
+                },
+                "required": ["manager_name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "ttfund_fund_nav",
+            "description": "查询基金净值历史（单位净值、累计净值、涨跌幅）。用于计算最大回撤、年化收益、定投回测等。当用户问净值走势、历史业绩、回测、最大回撤时调用。数据源：天天基金。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "fund_code": {"type": "string", "description": "基金代码，如'161725'"},
+                    "range": {"type": "string", "enum": ["1m", "3m", "6m", "1y", "3y", "5y", "all"], "description": "时间范围，默认1y", "default": "1y"},
+                },
+                "required": ["fund_code"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "ttfund_fund_condition",
+            "description": "条件选基（按类型/规模/收益/风险等多条件筛选）。当用户要选基金、按条件筛选基金（如'规模50亿以上的混合基''近3年收益前10的指数基'）时调用。数据源：天天基金。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "condition": {"type": "string", "description": "自然语言选基条件，如'规模大于50亿的混合型基金，近3年收益排名前20'"},
+                },
+                "required": ["condition"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "eastmoney_macro_data",
+            "description": "宏观数据查询（GDP、CPI、PMI、社融、M2、工业增加值等）。当用户问宏观经济数据、GDP走势、PMI数据、通胀、货币政策时调用。数据源：东方财富。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "宏观数据查询，如'近5年GDP增速''最新PMI数据'"},
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "eastmoney_finance_data",
+            "description": "金融数据/财务指标查询（ROE、营收、净利润、资产负债率等）。用于基金重仓股财务穿透分析。当用户问股票财务指标、重仓股基本面、ROE/营收/利润增长时调用。数据源：东方财富。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "财务数据查询，如'贵州茅台ROE和营收增长率''宁德时代近3年财务指标'"},
+                },
+                "required": ["query"],
+            },
+        },
+    },
 ]
 
 # ── Tool 执行器 ──────────────────────────────────────
@@ -1022,6 +1094,17 @@ def _execute_tool_impl(name: str, arguments: dict) -> str:
         mr = mean_reversion_analysis(code, metric)
         ew = extreme_warning(code)
         return json.dumps({"mean_reversion": mr, "extreme_warning": ew}, ensure_ascii=False)
+    # 基金基本面工具（Top 5 首批接入）
+    elif name == "ttfund_fund_manager":
+        return _ttfund_fund_manager(arguments)
+    elif name == "ttfund_fund_nav":
+        return _ttfund_fund_nav(arguments)
+    elif name == "ttfund_fund_condition":
+        return _ttfund_fund_condition(arguments)
+    elif name == "eastmoney_macro_data":
+        return _eastmoney_macro_data(arguments)
+    elif name == "eastmoney_finance_data":
+        return _eastmoney_finance_data(arguments)
     else:
         return json.dumps({"error": f"未知工具: {name}"}, ensure_ascii=False)
 
@@ -2316,6 +2399,65 @@ def _ttfund_search(args: dict) -> str:
         client = get_ttfund_client()
         result = client.fund_search(args["keyword"])
         return result[:2000] if result else json.dumps({"error": "无数据"}, ensure_ascii=False)
+    except Exception as e:
+        return json.dumps({"error": str(e)}, ensure_ascii=False)
+
+
+# ── 基金基本面工具实现（Top 5 首批接入）──
+
+
+def _ttfund_fund_manager(args: dict) -> str:
+    """基金经理信息查询。"""
+    try:
+        from mcp.ttfund_client import get_ttfund_client
+        client = get_ttfund_client()
+        result = client.fund_manager(args["manager_name"])
+        return result[:3000] if result else json.dumps({"error": "无数据"}, ensure_ascii=False)
+    except Exception as e:
+        return json.dumps({"error": str(e)}, ensure_ascii=False)
+
+
+def _ttfund_fund_nav(args: dict) -> str:
+    """基金净值历史查询。"""
+    try:
+        from mcp.ttfund_client import get_ttfund_client
+        client = get_ttfund_client()
+        result = client.fund_nav(args["fund_code"], args.get("range", "1y"))
+        # 净值历史可能较长，截断到 4000 字符
+        return json.dumps(result, ensure_ascii=False)[:4000] if result else json.dumps({"error": "无数据"}, ensure_ascii=False)
+    except Exception as e:
+        return json.dumps({"error": str(e)}, ensure_ascii=False)
+
+
+def _ttfund_fund_condition(args: dict) -> str:
+    """条件选基。"""
+    try:
+        from mcp.ttfund_client import get_ttfund_client
+        client = get_ttfund_client()
+        result = client.fund_condition(args["condition"])
+        return result[:3000] if result else json.dumps({"error": "无数据"}, ensure_ascii=False)
+    except Exception as e:
+        return json.dumps({"error": str(e)}, ensure_ascii=False)
+
+
+def _eastmoney_macro_data(args: dict) -> str:
+    """宏观数据查询。"""
+    try:
+        from mcp.eastmoney_client import get_eastmoney_client
+        client = get_eastmoney_client()
+        result = client.macro_data(args["query"])
+        return json.dumps(result, ensure_ascii=False)[:3000] if result else json.dumps({"error": "无数据"}, ensure_ascii=False)
+    except Exception as e:
+        return json.dumps({"error": str(e)}, ensure_ascii=False)
+
+
+def _eastmoney_finance_data(args: dict) -> str:
+    """金融数据/财务指标查询。"""
+    try:
+        from mcp.eastmoney_client import get_eastmoney_client
+        client = get_eastmoney_client()
+        result = client.finance_data(args["query"])
+        return json.dumps(result, ensure_ascii=False)[:3000] if result else json.dumps({"error": "无数据"}, ensure_ascii=False)
     except Exception as e:
         return json.dumps({"error": str(e)}, ensure_ascii=False)
 

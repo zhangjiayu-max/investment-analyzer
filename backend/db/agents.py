@@ -347,7 +347,8 @@ def _init_wealth_specialists(conn):
             "name": "宏观策略师",
             "description": "分析宏观周期/政策/流动性/行业轮动，提供自上而下的策略视角",
             "icon": "research",
-            "tools": ["search_knowledge", "yingmi_hot_topics", "yingmi_search_news", "yingmi_latest_quotations"],
+            "tools": ["search_knowledge", "yingmi_hot_topics", "yingmi_search_news", "yingmi_latest_quotations",
+                      "eastmoney_macro_data"],
             "system_prompt": (
                 "## 人设\n"
                 "你是宏观策略师，专注自上而下的宏观分析。"
@@ -388,7 +389,8 @@ def _init_wealth_specialists(conn):
             "name": "基金分析师",
             "description": "持仓穿透 + 业绩归因 + 同类对比 + 规模影响分析",
             "icon": "chart",
-            "tools": ["search_knowledge", "query_valuation", "query_portfolio", "yingmi_latest_quotations"],
+            "tools": ["search_knowledge", "query_valuation", "query_portfolio", "yingmi_latest_quotations",
+                      "ttfund_fund_manager", "ttfund_fund_nav", "ttfund_fund_condition", "eastmoney_finance_data"],
             "system_prompt": (
                 "## 人设\n"
                 "你是专业的基金分析师，擅长通过持仓穿透、业绩归因、同类对比和规模影响分析，"
