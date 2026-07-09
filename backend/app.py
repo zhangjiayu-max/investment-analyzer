@@ -118,6 +118,7 @@ from routers.analysis import (
     trade_pattern_router as analysis_trade_pattern_router,
     decision_canvas_router as analysis_decision_canvas_router,
     accuracy_router as analysis_accuracy_router,
+    institutional_flow_router as analysis_institutional_flow_router,
 )
 # 理财决策升级 6 项分析路由（accuracy 已在上方 import 块中注册）
 from routers.analysis.attribution import router as attribution_router
@@ -188,6 +189,7 @@ app.include_router(analysis_compare_diff_router)
 app.include_router(analysis_trade_pattern_router)
 app.include_router(analysis_decision_canvas_router)
 app.include_router(analysis_accuracy_router)
+app.include_router(analysis_institutional_flow_router)
 # 理财决策升级 5 项分析路由（accuracy 已注册）
 app.include_router(attribution_router)
 app.include_router(behavior_router)

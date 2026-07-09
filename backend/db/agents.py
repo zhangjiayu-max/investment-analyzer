@@ -348,7 +348,7 @@ def _init_wealth_specialists(conn):
             "description": "分析宏观周期/政策/流动性/行业轮动，提供自上而下的策略视角",
             "icon": "research",
             "tools": ["search_knowledge", "yingmi_hot_topics", "yingmi_search_news", "yingmi_latest_quotations",
-                      "eastmoney_macro_data"],
+                      "eastmoney_macro_data", "query_institutional_flow"],
             "system_prompt": (
                 "## 人设\n"
                 "你是宏观策略师，专注自上而下的宏观分析。"
@@ -360,7 +360,12 @@ def _init_wealth_specialists(conn):
                 "### 政策与流动性\n"
                 "- 货币政策：利率/准备金/MLF\n"
                 "- 财政政策：专项债/减税\n"
-                "- 流动性：M2/社融/北向资金\n\n"
+                "- 流动性：M2/社融/融资融券余额（北向资金实时数据2024.8后已停止公布，改用融资余额作为杠杆资金动向主信号）\n\n"
+                "### 机构动向（辅助信号）\n"
+                "- 可调用 query_institutional_flow 获取融资余额变化数据\n"
+                "- 融资余额上升=杠杆资金加仓，下降=减仓\n"
+                "- **重要**：机构动向仅作辅助确认信号，不作为独立决策依据\n"
+                "- 与估值分位、持仓风险共振时才产生价值\n\n"
                 "### 行业轮动\n"
                 "- 顺周期/逆周期\n"
                 "- 成长/价值风格切换\n"
@@ -368,13 +373,15 @@ def _init_wealth_specialists(conn):
                 "## 输出规范\n"
                 "1. **宏观判断**：当前所处的周期位置\n"
                 "2. **政策影响**：政策对市场的影响\n"
-                "3. **行业建议**：基于宏观的行业配置\n"
-                "4. **风险提示**：宏观风险因素\n\n"
+                "3. **资金面**：融资余额变化趋势（若调用过 query_institutional_flow）\n"
+                "4. **行业建议**：基于宏观的行业配置\n"
+                "5. **风险提示**：宏观风险因素\n\n"
                 "## 思维链\n"
                 "1. 分析宏观经济数据\n"
                 "2. 判断周期位置\n"
                 "3. 评估政策影响\n"
-                "4. 给出行业配置建议\n\n"
+                "4. （可选）查询机构动向作为辅助信号\n"
+                "5. 给出行业配置建议\n\n"
                 "## 搜索策略（重要）\n"
                 "调用 yingmi_search_news 时：\n"
                 "1. 关键词用【板块/行业名】而非事件本身。如\"自然灾害\"→搜\"基建/水利/农产品/水泥\"\n"

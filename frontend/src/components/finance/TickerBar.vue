@@ -11,7 +11,7 @@ import { ref, onMounted, onUnmounted } from 'vue'
 import Icon from '../ui/Icon.vue'
 import Sparkline from './Sparkline.vue'
 import AlertBell from '../AlertBell.vue'
-import { getDashboard, getFinanceQuoteBar } from '../../api'
+import { getDashboard, getFinanceQuoteBar, getInstitutionalFlowSummary } from '../../api'
 import { isDark, toggleDark } from '../../composables/useTheme'
 
 const emit = defineEmits(['open-kyc', 'search', 'navigate'])
@@ -26,6 +26,8 @@ function handleSearch() {
 const indices = ref([])
 const quoteText = ref('')
 const loading = ref(true)
+// 机构动向（融资余额近5日净变化）
+const flow = ref(null)
 let timer = null
 
 async function loadMarketData() {
@@ -42,11 +44,13 @@ async function loadMarketData() {
         spark: [0, i.change_pct * 0.3, i.change_pct * 0.6, i.change_pct * 0.5, i.change_pct],
       }))
       loading.value = false
-      return
+    } else {
+      // 降级：语录轮播
+      await loadQuote()
     }
-  } catch { /* 降级 */ }
-  // 降级：语录轮播
-  await loadQuote()
+  } catch { /* 降级 */ await loadQuote() }
+  // 并行加载机构动向（独立于指数降级路径，失败不影响主流程）
+  loadFlow()
 }
 
 async function loadQuote() {
@@ -57,6 +61,26 @@ async function loadQuote() {
     quoteText.value = '市场永远在波动，情绪稳定才是最大的优势。'
   }
   loading.value = false
+}
+
+async function loadFlow() {
+  try {
+    const { data } = await getInstitutionalFlowSummary()
+    if (data && typeof data.recent_5d_change_yi === 'number') {
+      flow.value = {
+        change: data.recent_5d_change_yi,
+        trend: data.trend || 'neutral',
+        strength: data.strength || 'weak',
+      }
+    }
+  } catch { /* 静默降级，不显示条目 */ }
+}
+
+// 机构动向条目显示文本
+function flowLabel(s) {
+  if (!s) return ''
+  const sign = s.change > 0 ? '+' : ''
+  return `${sign}${s.change.toFixed(2)}亿`
 }
 
 onMounted(() => {
@@ -81,7 +105,17 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
           <Sparkline v-if="idx.spark" :data="idx.spark" :width="40" :height="16" :fill="false" class="ticker-spark" />
         </div>
       </template>
-      <div v-else-if="!loading" class="ticker-quote">
+      <!-- 机构动向：融资余额近5日净变化（辅助信号） -->
+      <div v-if="flow" class="ticker-item flow-item"
+        :class="flow.trend === 'inflow' ? 'up' : flow.trend === 'outflow' ? 'down' : ''"
+        :title="`融资余额近5日净变化（${flow.strength}）`">
+        <Icon name="landmark" size="12" class="flow-icon" />
+        <span class="ticker-name font-jet">融资5日</span>
+        <span class="ticker-change font-jet" :class="flow.strength === 'strong' ? 'strong' : ''">
+          {{ flowLabel(flow) }}
+        </span>
+      </div>
+      <div v-else-if="!loading && !indices.length" class="ticker-quote">
         <Icon name="lightbulb" size="13" class="ticker-quote-icon" />
         <span class="ticker-quote-text">{{ quoteText }}</span>
       </div>
@@ -155,6 +189,14 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
 .ticker-price { font-weight: 600; }
 .ticker-change { font-weight: 600; min-width: 48px; }
 .ticker-spark { opacity: 0.7; }
+/* 机构动向条目（融资余额）— 与左侧指数 ticker 视觉分隔 */
+.flow-item {
+  padding-left: 0.8rem;
+  margin-left: 0.2rem;
+  border-left: 1px solid var(--color-border-light);
+}
+.flow-icon { opacity: 0.65; flex-shrink: 0; }
+.ticker-change.strong { font-weight: 700; }
 .ticker-quote {
   display: flex; align-items: center; gap: 0.4rem;
   color: var(--color-text-muted); font-size: 0.72rem;

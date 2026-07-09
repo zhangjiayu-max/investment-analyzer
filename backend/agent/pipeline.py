@@ -2485,6 +2485,64 @@ def _apply_kyc_guardrail(recommendations: list, user_profile: dict) -> list:
     return recommendations
 
 
+def _apply_institutional_confirm(recommendations: list, trace_id: str) -> list:
+    """机构动向共振检测（P0 新增）。
+
+    北向资金实时数据 2024.8 后已停止公布，改用融资余额作为杠杆资金动向主信号。
+
+    规则（仅打标记，不修改 confidence，不拦截建议）：
+    - direction=up + 资金强净流入 → guardrail_flags 追加 "institutional_confirm"
+    - direction=up + 资金强净流出 → guardrail_flags 追加 "against_institutional_flow"
+    - direction=down + 资金强净流入 → guardrail_flags 追加 "against_institutional_flow"
+    - direction=down + 资金强净流出 → guardrail_flags 追加 "institutional_confirm"
+    - strength=weak 时不打标记（信号弱不足以作为参考）
+
+    设计原则：保留原始判断可追溯，仅作辅助确认信号。
+    """
+    try:
+        from services.institutional_flow import get_institutional_flow_signal
+        signal = get_institutional_flow_signal()
+    except Exception as e:
+        logger.debug(f"[pipeline:{trace_id}] 获取机构动向信号失败（跳过共振检测）: {e}")
+        return recommendations
+
+    direction = signal.get("direction", "neutral")
+    strength = signal.get("strength", "weak")
+
+    # 信号弱时不打标记
+    if strength == "weak" or direction == "neutral":
+        return recommendations
+
+    for rec in recommendations:
+        if not isinstance(rec, dict):
+            continue
+        rec_direction = rec.get("direction", "hold")
+        if rec_direction == "hold":
+            continue
+
+        flags = rec.setdefault("guardrail_flags", [])
+        # direction=up 与资金流入共振，direction=down 与资金流出共振
+        is_resonance = (
+            (rec_direction == "up" and direction == "inflow") or
+            (rec_direction == "down" and direction == "outflow")
+        )
+        if is_resonance:
+            if "institutional_confirm" not in flags:
+                flags.append("institutional_confirm")
+        else:
+            if "against_institutional_flow" not in flags:
+                flags.append("against_institutional_flow")
+
+    confirm_count = sum(1 for r in recommendations if "institutional_confirm" in (r.get("guardrail_flags") or []))
+    against_count = sum(1 for r in recommendations if "against_institutional_flow" in (r.get("guardrail_flags") or []))
+    if confirm_count or against_count:
+        logger.info(
+            f"[pipeline:{trace_id}] 机构动向共振检测：confirm={confirm_count} against={against_count} "
+            f"(资金方向={direction} 强度={strength})"
+        )
+    return recommendations
+
+
 def _phase_memory(
     state: PipelineState,
     synthesis_result: dict,
@@ -2551,6 +2609,20 @@ def _phase_memory(
                     )
             except Exception as e:
                 logger.warning(f"[pipeline:{trace_id}] guardrail 标记失败: {e}")
+
+        # P0 新增：机构动向共振检测（北向资金不可用，改用融资余额）
+        try:
+            inst_guardrail_enabled = get_config_bool("pipeline.institutional_guardrail_enabled", True)
+        except Exception:
+            inst_guardrail_enabled = True
+        if inst_guardrail_enabled and rec_result.get("recommendations"):
+            try:
+                rec_result["recommendations"] = _apply_institutional_confirm(
+                    rec_result["recommendations"], trace_id,
+                )
+            except Exception as e:
+                logger.warning(f"[pipeline:{trace_id}] 机构动向共振检测失败: {e}")
+
         result["recommendations"] = rec_result
     except Exception as e:
         logger.warning(f"[pipeline] 建议提取落库失败: {e}")

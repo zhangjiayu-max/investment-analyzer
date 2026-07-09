@@ -2119,6 +2119,11 @@ export function getFinanceQuoteBar() {
   return api.get('/finance/quote-bar')
 }
 
+/** 机构动向摘要（融资余额变化，TickerBar 用） */
+export function getInstitutionalFlowSummary() {
+  return api.get('/institutional-flow/summary')
+}
+
 export function getRunningAgents() {
   return api.get('/running-agents')
 }

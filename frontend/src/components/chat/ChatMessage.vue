@@ -46,14 +46,28 @@ const GUARDRAIL_LABELS = {
   out_of_focus: '建议标的超出您的关注品种范围',
 }
 
+// 机构动向共振标记（与 KYC guardrail 分离展示）
+const INSTITUTIONAL_FLAGS = {
+  institutional_confirm: { type: 'confirm', text: '机构动向共振：融资余额近期变化与建议方向一致' },
+  against_institutional_flow: { type: 'against', text: '与机构动向相反：融资余额近期变化与建议方向相反' },
+}
+
 function directionClass(d) {
   return { up: 'rec-dir-up', down: 'rec-dir-down', hold: 'rec-dir-hold' }[d] || 'rec-dir-hold'
+}
+
+// 提取机构动向标记（独立展示，不混入 KYC 警告条）
+function institutionalFlags(flags) {
+  if (!Array.isArray(flags)) return []
+  return flags.filter(f => INSTITUTIONAL_FLAGS[f]).map(f => INSTITUTIONAL_FLAGS[f])
 }
 
 function guardrailText(flags) {
   if (!Array.isArray(flags) || flags.length === 0) return ''
   const parts = []
   for (const f of flags) {
+    // 机构动向标记走独立展示，不在 KYC 警告条中重复
+    if (INSTITUTIONAL_FLAGS[f]) continue
     if (GUARDRAIL_LABELS[f]) {
       parts.push(GUARDRAIL_LABELS[f])
     } else if (typeof f === 'string' && f.startsWith('position_limit:')) {
@@ -671,9 +685,19 @@ const tradeSuggestions = computed(() => {
           <div v-if="rec.baseline_value" class="rec-baseline font-jet">
             基线: {{ rec.baseline_value }}<span v-if="rec.baseline_date"> ({{ rec.baseline_date }})</span>
           </div>
-          <div v-if="rec.guardrail_flags && rec.guardrail_flags.length" class="rec-guardrail">
+          <div v-if="rec.guardrail_flags && rec.guardrail_flags.length && guardrailText(rec.guardrail_flags)" class="rec-guardrail">
             <span class="guardrail-icon">⚠</span>
             <span class="guardrail-text">本建议与您的风险偏好不完全匹配（{{ guardrailText(rec.guardrail_flags) }}），请谨慎评估</span>
+          </div>
+          <!-- 机构动向共振标记（辅助信号，独立展示，非风险警告） -->
+          <div
+            v-for="(flag, idx) in institutionalFlags(rec.guardrail_flags)"
+            :key="'inst-' + idx"
+            class="rec-institutional"
+            :class="flag.type === 'confirm' ? 'rec-inst-confirm' : 'rec-inst-against'"
+          >
+            <span class="rec-inst-icon">{{ flag.type === 'confirm' ? '✓' : '↻' }}</span>
+            <span class="rec-inst-text">{{ flag.text }}</span>
           </div>
           <div class="rec-actions">
             <button
@@ -1730,6 +1754,37 @@ const tradeSuggestions = computed(() => {
   flex: 1;
 }
 .dark .rec-guardrail {
+  background: rgba(245, 158, 11, 0.12);
+  color: #fbbf24;
+}
+/* 机构动向共振标记（辅助信号提示，非风险警告） */
+.rec-institutional {
+  display: flex;
+  align-items: flex-start;
+  gap: 5px;
+  padding: 6px 8px;
+  margin-bottom: 8px;
+  border-radius: var(--radius-sm, 6px);
+  font-size: 11.5px;
+  line-height: 1.45;
+}
+.rec-inst-confirm {
+  background: rgba(16, 185, 129, 0.08);
+  border: 1px solid rgba(16, 185, 129, 0.3);
+  color: #047857;
+}
+.rec-inst-against {
+  background: rgba(245, 158, 11, 0.08);
+  border: 1px solid rgba(245, 158, 11, 0.3);
+  color: #92400e;
+}
+.rec-inst-icon { flex-shrink: 0; font-size: 13px; line-height: 1.2; font-weight: 600; }
+.rec-inst-text { flex: 1; }
+.dark .rec-inst-confirm {
+  background: rgba(16, 185, 129, 0.12);
+  color: #34d399;
+}
+.dark .rec-inst-against {
   background: rgba(245, 158, 11, 0.12);
   color: #fbbf24;
 }

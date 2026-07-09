@@ -748,6 +748,30 @@ TOOLS = [
             },
         },
     },
+    # P0 新增：机构动向工具
+    {
+        "type": "function",
+        "function": {
+            "name": "query_institutional_flow",
+            "description": "查询机构动向数据（融资余额变化/杠杆资金方向）。当用户问到机构动向、国家队、主力资金、融资融券、杠杆资金、资金面时调用。可作为加仓/减仓建议的辅助确认信号。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query_type": {
+                        "type": "string",
+                        "enum": ["margin_balance", "summary", "signal"],
+                        "description": "查询类型：margin_balance=融资余额序列(近N日), summary=轻量摘要(今日+趋势), signal=共振信号(供guardrail用)",
+                    },
+                    "days": {
+                        "type": "integer",
+                        "default": 30,
+                        "description": "查询天数（仅 margin_balance 类型有效）",
+                    },
+                },
+                "required": ["query_type"],
+            },
+        },
+    },
 ]
 
 # ── Tool 执行器 ──────────────────────────────────────
@@ -1034,6 +1058,9 @@ def _execute_tool_impl(name: str, arguments: dict) -> str:
         return _get_bond_market_overview()
     elif name == "get_macro_policy_data":
         return _get_macro_policy_data()
+    # P0 新增：机构动向
+    elif name == "query_institutional_flow":
+        return _query_institutional_flow(arguments)
     # 天天基金 Skills
     elif name == "ttfund_fund_info":
         return _ttfund_fund_info(arguments)
@@ -2517,4 +2544,48 @@ def _eastmoney_financial_assistant(args: dict) -> str:
         result = client.financial_assistant(args["query"])
         return result[:3000] if result else json.dumps({"error": "无数据"}, ensure_ascii=False)
     except Exception as e:
+        return json.dumps({"error": str(e)}, ensure_ascii=False)
+
+
+def _query_institutional_flow(args: dict) -> str:
+    """机构动向工具实现（P0 新增）。
+
+    数据源：融资融券余额变化（北向资金实时数据 2024.8 后已不可用，改用融资余额作为主信号）。
+    """
+    try:
+        from services.institutional_flow import (
+            get_margin_balance, get_institutional_flow_summary, get_institutional_flow_signal,
+        )
+        query_type = args.get("query_type", "summary")
+        if query_type == "margin_balance":
+            days = int(args.get("days", 30))
+            data = get_margin_balance(days=days)
+            # 精简序列避免 token 膨胀
+            series = data.get("series", [])
+            if len(series) > 30:
+                series = series[-30:]
+            result = {
+                "query_type": "margin_balance",
+                "days": days,
+                "latest": data.get("latest"),
+                "recent_5d_change_yi": data.get("recent_5d_change"),
+                "z_score_5d": data.get("z_score_5d"),
+                "trend": data.get("trend"),
+                "strength": data.get("strength"),
+                "series_tail": series,
+                "note": "融资余额上升=杠杆资金加仓，下降=减仓。近5日净变化单位：亿元。",
+            }
+        elif query_type == "summary":
+            result = get_institutional_flow_summary()
+            result["query_type"] = "summary"
+            result["note"] = "latest_change_yi 为最新日融资余额变化（亿元），正=净流入，负=净流出。"
+        elif query_type == "signal":
+            result = get_institutional_flow_signal()
+            result["query_type"] = "signal"
+            result["note"] = "direction=inflow 时与加仓建议共振，outflow 时与减仓建议共振。strength=weak 时信号弱，不建议作为决策依据。"
+        else:
+            return json.dumps({"error": f"未知 query_type: {query_type}"}, ensure_ascii=False)
+        return json.dumps(result, ensure_ascii=False)
+    except Exception as e:
+        logger.exception(f"query_institutional_flow 执行失败: {e}")
         return json.dumps({"error": str(e)}, ensure_ascii=False)
