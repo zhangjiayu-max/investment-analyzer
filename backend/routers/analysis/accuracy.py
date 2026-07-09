@@ -1,8 +1,10 @@
 """决策准确率追踪 API — /api/analysis/accuracy/*
 
-  - GET  /api/analysis/accuracy/stats        准确率统计 + 专家胜率
-  - POST /api/analysis/accuracy/auto-verify  触发自动验证（推荐 + 决策回测）
-  - GET  /api/analysis/accuracy/trend        按周准确率趋势
+  - GET  /api/analysis/accuracy/stats             准确率统计 + 专家胜率
+  - POST /api/analysis/accuracy/auto-verify       触发自动验证（推荐 + 决策回测）
+  - GET  /api/analysis/accuracy/trend             按周准确率趋势
+  - GET  /api/analysis/accuracy/recent-verified   最近已验证建议列表
+  - GET  /api/analysis/accuracy/adoption-stats    采纳率 + 采纳 vs 未采纳收益对比
 """
 
 import logging
@@ -13,6 +15,8 @@ from services.decision_accuracy import (
     auto_verify_all,
     get_accuracy_stats,
     get_accuracy_trend,
+    get_adoption_stats,
+    get_verified_recent,
 )
 
 logger = logging.getLogger(__name__)
@@ -62,3 +66,33 @@ def get_trend(
     except Exception as e:
         logger.error(f"获取准确率趋势失败: {e}", exc_info=True)
         return []
+
+
+@router.get("/recent-verified")
+def get_recent_verified(
+    limit: int = Query(20, ge=1, le=100, description="返回条数"),
+):
+    """P0-A 决策闭环：最近已验证的建议列表（按验证时间倒序）。"""
+    try:
+        return {"items": get_verified_recent(limit=limit)}
+    except Exception as e:
+        logger.error(f"获取最近验证建议失败: {e}", exc_info=True)
+        return {"items": []}
+
+
+@router.get("/adoption-stats")
+def get_adoption(
+    period_days: int = Query(180, ge=1, le=730, description="统计周期（天）"),
+):
+    """P0-A 决策闭环：采纳率统计 + 采纳 vs 未采纳收益对比。"""
+    try:
+        return get_adoption_stats(period_days=period_days)
+    except Exception as e:
+        logger.error(f"获取采纳率统计失败: {e}", exc_info=True)
+        return {
+            "total_marked": 0, "adopted": 0, "rejected": 0,
+            "adoption_rate": 0.0, "adopted_avg_return": 0.0,
+            "rejected_avg_return": 0.0, "adopted_correct_rate": 0.0,
+            "rejected_correct_rate": 0.0, "verified_count": 0,
+            "error": str(e),
+        }

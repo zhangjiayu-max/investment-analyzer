@@ -2386,6 +2386,14 @@ export function getAccuracyTrend(weeks = 12) {
   return api.get('/api/analysis/accuracy/trend', { params: { weeks } })
 }
 
+// P0-A 决策闭环：最近已验证建议 + 采纳率统计
+export function getRecentVerified(limit = 20) {
+  return api.get('/api/analysis/accuracy/recent-verified', { params: { limit } })
+}
+export function getAdoptionStats(periodDays = 180) {
+  return api.get('/api/analysis/accuracy/adoption-stats', { params: { period_days: periodDays } })
+}
+
 // P1-1 策略回测
 export function listStrategies() {
   return api.get('/api/analysis/strategy/list')

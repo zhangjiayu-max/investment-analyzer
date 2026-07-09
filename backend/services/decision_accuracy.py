@@ -299,3 +299,119 @@ def auto_verify_all() -> dict:
         logger.error(f"自动回测决策失败: {e}", exc_info=True)
 
     return {"verified_count": len(verified), "decision_backtested": len(backtested)}
+
+
+def get_verified_recent(limit: int = 20) -> list[dict]:
+    """P0-A 决策闭环：最近已验证的建议列表（按验证时间倒序）。
+
+    用于 DecisionAccuracy 页面展示「最近验证结果列表」区块。
+    """
+    conn = _get_conn()
+    try:
+        rows = conn.execute(
+            """
+            SELECT id, analysis_id, index_name, index_code, direction, confidence,
+                   reason, baseline_value, baseline_date, current_value, current_date,
+                   change_pct, status, adopted, adopted_at, verified_at, created_at
+            FROM recommendations
+            WHERE status IN ('correct', 'wrong', 'flat')
+            ORDER BY verified_at DESC, created_at DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+    finally:
+        conn.close()
+    return [dict(r) for r in rows]
+
+
+def _directional_return(direction: str, change_pct: float) -> float:
+    """计算建议方向收益：up → +change, down → -change, hold/other → 0。
+
+    语义：减仓建议（down）在标的下跌时收益为正（避免了损失）。
+    """
+    if direction == "up":
+        return float(change_pct or 0)
+    if direction == "down":
+        return -float(change_pct or 0)
+    return 0.0
+
+
+def get_adoption_stats(period_days: int = 180) -> dict:
+    """P0-A 决策闭环：采纳率统计 + 采纳 vs 未采纳收益对比。
+
+    用于证明「采纳建议的收益高于未采纳」，引导用户重视 AI 建议。
+
+    Returns:
+        {
+            "total_marked": int,            # 已标记采纳/不采纳的总数
+            "adopted": int,                 # 采纳数
+            "rejected": int,                # 不采纳数
+            "adoption_rate": float,         # 采纳率（0-1）
+            "adopted_avg_return": float,    # 采纳组平均方向收益（%）
+            "rejected_avg_return": float,   # 未采纳组平均方向收益（%）
+            "adopted_correct_rate": float,  # 采纳组预测正确率（0-1）
+            "rejected_correct_rate": float, # 未采纳组预测正确率（0-1）
+            "verified_count": int,          # 已验证总数（含未标记）
+        }
+    """
+    cutoff = (datetime.now() - timedelta(days=period_days)).strftime("%Y-%m-%d 00:00:00")
+    conn = _get_conn()
+    try:
+        rows = conn.execute(
+            """
+            SELECT direction, change_pct, status, adopted
+            FROM recommendations
+            WHERE created_at >= ?
+              AND status IN ('correct', 'wrong', 'flat')
+              AND change_pct IS NOT NULL
+            """,
+            (cutoff,),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    adopted_returns: list[float] = []
+    rejected_returns: list[float] = []
+    adopted_correct = 0
+    rejected_correct = 0
+    adopted_total = 0
+    rejected_total = 0
+
+    for row in rows:
+        item = dict(row)
+        direction = item.get("direction") or ""
+        change = item.get("change_pct")
+        status = item.get("status") or ""
+        adopted = item.get("adopted") or 0
+
+        if change is None:
+            continue
+
+        ret = _directional_return(direction, float(change))
+
+        if adopted == 1:
+            adopted_returns.append(ret)
+            adopted_total += 1
+            if status == CORRECT_STATUS:
+                adopted_correct += 1
+        elif adopted == -1:
+            rejected_returns.append(ret)
+            rejected_total += 1
+            if status == CORRECT_STATUS:
+                rejected_correct += 1
+
+    adopted_avg = round(sum(adopted_returns) / len(adopted_returns), 3) if adopted_returns else 0.0
+    rejected_avg = round(sum(rejected_returns) / len(rejected_returns), 3) if rejected_returns else 0.0
+
+    return {
+        "total_marked": adopted_total + rejected_total,
+        "adopted": adopted_total,
+        "rejected": rejected_total,
+        "adoption_rate": _safe_div(adopted_total, adopted_total + rejected_total),
+        "adopted_avg_return": adopted_avg,
+        "rejected_avg_return": rejected_avg,
+        "adopted_correct_rate": _safe_div(adopted_correct, adopted_total),
+        "rejected_correct_rate": _safe_div(rejected_correct, rejected_total),
+        "verified_count": len(rows),
+    }

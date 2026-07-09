@@ -4,6 +4,8 @@ import {
   getAccuracyStats,
   autoVerifyAccuracy,
   getAccuracyTrend,
+  getRecentVerified,
+  getAdoptionStats,
 } from '../api'
 import { useToast } from '../composables/useToast'
 import Icon from './ui/Icon.vue'
@@ -30,6 +32,9 @@ const loading = ref(false)
 const verifying = ref(false)
 const stats = ref(null)
 const trend = ref([])
+// P0-A 决策闭环：最近验证结果 + 采纳率统计
+const recentVerified = ref([])
+const adoptionStats = ref(null)
 
 // ── 总体准确率 ──
 const overall = computed(() => {
@@ -80,13 +85,92 @@ function pct(v) {
   return `${Number(v || 0).toFixed(1)}%`
 }
 
+// ── P0-A：验证结果列表辅助 ──
+const DIRECTION_LABELS = { up: '加仓', down: '减仓', hold: '持有', watch: '观察' }
+const DIRECTION_ICONS = { up: '↑', down: '↓', hold: '→', watch: '·' }
+const STATUS_LABELS = { correct: '正确', wrong: '错误', flat: '持平' }
+const STATUS_ICONS = { correct: '✓', wrong: '✗', flat: '—' }
+const ADOPTED_LABELS = { 1: '已采纳', [-1]: '未采纳', 0: '未标记' }
+
+function directionClass(d) {
+  return { up: 'dir-up', down: 'dir-down', hold: 'dir-hold', watch: 'dir-hold' }[d] || 'dir-hold'
+}
+
+function statusClass(s) {
+  return { correct: 'st-correct', wrong: 'st-wrong', flat: 'st-flat' }[s] || 'st-flat'
+}
+
+function adoptedClass(a) {
+  return { 1: 'ad-adopted', [-1]: 'ad-rejected' }[a] || 'ad-unmarked'
+}
+
+function formatChange(v) {
+  if (v === null || v === undefined) return '—'
+  const n = Number(v)
+  const sign = n > 0 ? '+' : ''
+  return `${sign}${n.toFixed(2)}%`
+}
+
+function formatValue(v) {
+  if (v === null || v === undefined) return '—'
+  return Number(v).toFixed(4)
+}
+
+function formatDate(ts) {
+  if (!ts) return ''
+  const s = String(ts).replace(' ', 'T')
+  const d = new Date(s)
+  if (isNaN(d.getTime())) return ts
+  const now = new Date()
+  const isToday = d.toDateString() === now.toDateString()
+  const hh = String(d.getHours()).padStart(2, '0')
+  const mm = String(d.getMinutes()).padStart(2, '0')
+  if (isToday) return `${hh}:${mm}`
+  return `${d.getMonth() + 1}/${d.getDate()} ${hh}:${mm}`
+}
+
+// ── P0-A：采纳率统计辅助 ──
+const adoptionRatePct = computed(() => {
+  const s = adoptionStats.value || {}
+  return Number((s.adoption_rate ?? 0) * 100).toFixed(1)
+})
+
+const adoptedReturn = computed(() => {
+  const v = adoptionStats.value?.adopted_avg_return ?? 0
+  const sign = v > 0 ? '+' : ''
+  return `${sign}${Number(v).toFixed(2)}%`
+})
+
+const rejectedReturn = computed(() => {
+  const v = adoptionStats.value?.rejected_avg_return ?? 0
+  const sign = v > 0 ? '+' : ''
+  return `${sign}${Number(v).toFixed(2)}%`
+})
+
+const returnDelta = computed(() => {
+  const a = adoptionStats.value?.adopted_avg_return ?? 0
+  const r = adoptionStats.value?.rejected_avg_return ?? 0
+  const d = a - r
+  const sign = d > 0 ? '+' : ''
+  return `${sign}${Number(d).toFixed(2)}%`
+})
+
+const returnDeltaClass = computed(() => {
+  const d = (adoptionStats.value?.adopted_avg_return ?? 0) - (adoptionStats.value?.rejected_avg_return ?? 0)
+  if (d > 0.01) return 'delta-positive'
+  if (d < -0.01) return 'delta-negative'
+  return 'delta-neutral'
+})
+
 // ── 加载数据 ──
 async function loadAll() {
   loading.value = true
   try {
-    const [statsResp, trendResp] = await Promise.allSettled([
+    const [statsResp, trendResp, recentResp, adoptionResp] = await Promise.allSettled([
       getAccuracyStats(periodDays.value, groupBy.value),
       getAccuracyTrend(12),
+      getRecentVerified(20),
+      getAdoptionStats(180),
     ])
     if (statsResp.status === 'fulfilled') {
       const d = statsResp.value.data
@@ -95,6 +179,12 @@ async function loadAll() {
     if (trendResp.status === 'fulfilled') {
       const d = trendResp.value.data
       trend.value = d.items || d.trend || []
+    }
+    if (recentResp.status === 'fulfilled') {
+      recentVerified.value = recentResp.value.data?.items || []
+    }
+    if (adoptionResp.status === 'fulfilled') {
+      adoptionStats.value = adoptionResp.value.data || null
     }
   } catch (e) {
     showToast('加载准确率数据失败: ' + (e.response?.data?.detail || e.message), 'error')
@@ -228,6 +318,133 @@ onMounted(loadAll)
       icon="empty"
       title="所选范围内暂无分组数据"
       description="尝试切换分组维度或延长统计周期。"
+    />
+
+    <!-- P0-A 决策闭环：采纳率 + 采纳 vs 未采纳收益对比 -->
+    <section v-if="adoptionStats" class="adoption-section editorial-card">
+      <div class="section-head editorial-card-header">
+        <h3 class="editorial-title">采纳率与收益对比</h3>
+        <span class="terminal-label">证明采纳建议的收益更高</span>
+      </div>
+      <div class="adoption-grid">
+        <!-- 左：采纳率 -->
+        <div class="adoption-block">
+          <div class="adoption-ring" :style="{ '--ring-pct': adoptionRatePct + '%' }">
+            <div class="ring-track"></div>
+            <div class="ring-fill"></div>
+            <div class="ring-center">
+              <span class="ring-num font-jet-lg">{{ adoptionRatePct }}%</span>
+              <span class="ring-label">采纳率</span>
+            </div>
+          </div>
+          <div class="adoption-meta">
+            <div class="meta-row">
+              <span class="terminal-label">已采纳</span>
+              <strong class="font-jet positive">{{ adoptionStats.adopted ?? 0 }}</strong>
+            </div>
+            <div class="meta-row">
+              <span class="terminal-label">未采纳</span>
+              <strong class="font-jet">{{ adoptionStats.rejected ?? 0 }}</strong>
+            </div>
+            <div class="meta-row">
+              <span class="terminal-label">已验证总数</span>
+              <strong class="font-jet">{{ adoptionStats.verified_count ?? 0 }}</strong>
+            </div>
+          </div>
+        </div>
+
+        <!-- 右：采纳 vs 未采纳收益对比 -->
+        <div class="adoption-block compare-block">
+          <div class="compare-row">
+            <div class="compare-side adopted">
+              <span class="compare-label">采纳组平均收益</span>
+              <span class="compare-value font-jet-lg" :class="{ positive: (adoptionStats.adopted_avg_return ?? 0) > 0, negative: (adoptionStats.adopted_avg_return ?? 0) < 0 }">
+                {{ adoptedReturn }}
+              </span>
+              <span class="compare-sub terminal-label">预测正确率 {{ pct((adoptionStats.adopted_correct_rate ?? 0) * 100) }}</span>
+            </div>
+            <div class="compare-vs">VS</div>
+            <div class="compare-side rejected">
+              <span class="compare-label">未采纳组平均收益</span>
+              <span class="compare-value font-jet-lg" :class="{ positive: (adoptionStats.rejected_avg_return ?? 0) > 0, negative: (adoptionStats.rejected_avg_return ?? 0) < 0 }">
+                {{ rejectedReturn }}
+              </span>
+              <span class="compare-sub terminal-label">预测正确率 {{ pct((adoptionStats.rejected_correct_rate ?? 0) * 100) }}</span>
+            </div>
+          </div>
+          <div class="compare-delta" :class="returnDeltaClass">
+            <Icon name="trending-up" size="14" v-if="returnDeltaClass === 'delta-positive'" />
+            <Icon name="trending-down" size="14" v-else-if="returnDeltaClass === 'delta-negative'" />
+            <Icon name="minus" size="14" v-else />
+            <span class="font-jet">收益差 {{ returnDelta }}</span>
+            <span class="delta-hint terminal-label" v-if="returnDeltaClass === 'delta-positive'">采纳建议收益更高</span>
+            <span class="delta-hint terminal-label" v-else-if="returnDeltaClass === 'delta-negative'">未采纳反而更高</span>
+            <span class="delta-hint terminal-label" v-else>两者持平</span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- P0-A 决策闭环：最近验证结果列表 -->
+    <section v-if="recentVerified.length" class="recent-section editorial-card">
+      <div class="section-head editorial-card-header">
+        <h3 class="editorial-title">最近验证结果</h3>
+        <span class="terminal-label">共 {{ recentVerified.length }} 条已验证</span>
+      </div>
+      <div class="table-wrap">
+        <table class="data-table recent-table">
+          <thead>
+            <tr>
+              <th>标的</th>
+              <th>方向</th>
+              <th class="num-col">基线值</th>
+              <th class="num-col">当前值</th>
+              <th class="num-col">涨跌幅</th>
+              <th>结果</th>
+              <th>采纳</th>
+              <th>时间</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="r in recentVerified" :key="r.id" class="reveal-stagger">
+              <td>
+                <div class="cell-target">
+                  <span class="target-name">{{ r.index_name || '—' }}</span>
+                  <span class="target-code font-jet" v-if="r.index_code">{{ r.index_code }}</span>
+                </div>
+              </td>
+              <td>
+                <span class="dir-badge" :class="directionClass(r.direction)">
+                  {{ DIRECTION_ICONS[r.direction] || '·' }} {{ DIRECTION_LABELS[r.direction] || r.direction }}
+                </span>
+              </td>
+              <td class="num-col font-jet">{{ formatValue(r.baseline_value) }}</td>
+              <td class="num-col font-jet">{{ formatValue(r.current_value) }}</td>
+              <td class="num-col font-jet" :class="{ positive: (r.change_pct ?? 0) > 0, negative: (r.change_pct ?? 0) < 0 }">
+                {{ formatChange(r.change_pct) }}
+              </td>
+              <td>
+                <span class="status-badge" :class="statusClass(r.status)">
+                  {{ STATUS_ICONS[r.status] || '—' }} {{ STATUS_LABELS[r.status] || r.status }}
+                </span>
+              </td>
+              <td>
+                <span class="adopted-badge" :class="adoptedClass(r.adopted)">
+                  {{ ADOPTED_LABELS[r.adopted] || '未标记' }}
+                </span>
+              </td>
+              <td class="num-col font-jet cell-time">{{ formatDate(r.verified_at || r.created_at) }}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <EmptyState
+      v-if="!loading && !recentVerified.length && !adoptionStats"
+      icon="empty"
+      title="暂无验证结果"
+      description="AI 建议到期后会自动验证，请耐心等待。"
     />
   </div>
 </template>
@@ -379,6 +596,243 @@ onMounted(loadAll)
 }
 
 .positive { color: var(--color-success); }
+.negative { color: var(--color-danger); }
+
+/* P0-A 决策闭环：采纳率 + 收益对比 */
+.adoption-section { padding: var(--space-5); }
+.adoption-grid {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) 2fr;
+  gap: var(--space-5);
+  align-items: stretch;
+}
+.adoption-block {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-3);
+  border-radius: var(--radius-md);
+  background: var(--color-bg-input);
+}
+
+/* 采纳率环形进度 */
+.adoption-ring {
+  position: relative;
+  width: 140px;
+  height: 140px;
+  flex-shrink: 0;
+}
+.ring-track,
+.ring-fill {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+}
+.ring-track {
+  background: conic-gradient(var(--color-border) 0deg 360deg);
+  -webkit-mask: radial-gradient(circle, transparent 56px, #000 58px);
+  mask: radial-gradient(circle, transparent 56px, #000 58px);
+}
+.ring-fill {
+  background: conic-gradient(var(--color-primary) 0deg calc(var(--ring-pct) * 3.6deg), transparent 0deg);
+  -webkit-mask: radial-gradient(circle, transparent 56px, #000 58px);
+  mask: radial-gradient(circle, transparent 56px, #000 58px);
+  transition: background 0.6s ease;
+}
+.ring-center {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+}
+.ring-num {
+  font-size: 1.6em;
+  font-weight: 700;
+  color: var(--color-text-primary);
+  line-height: 1;
+}
+.ring-label {
+  font-size: 0.72rem;
+  color: var(--color-text-muted);
+}
+.adoption-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 100%;
+}
+.meta-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 0.82rem;
+}
+.meta-row strong { font-size: 0.95rem; }
+
+/* 采纳 vs 未采纳收益对比 */
+.compare-block { gap: var(--space-4); }
+.compare-row {
+  display: flex;
+  align-items: stretch;
+  gap: var(--space-3);
+  width: 100%;
+}
+.compare-side {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: var(--space-3);
+  border-radius: var(--radius-sm);
+  background: var(--color-bg-card);
+  border: 1px solid var(--color-border-light);
+}
+.compare-side.adopted { border-left: 3px solid var(--color-success); }
+.compare-side.rejected { border-left: 3px solid var(--color-text-muted); }
+.compare-label {
+  font-size: 0.78rem;
+  color: var(--color-text-muted);
+}
+.compare-value {
+  font-size: 1.5em;
+  font-weight: 700;
+  line-height: 1.1;
+}
+.compare-sub {
+  font-size: 0.72rem;
+  color: var(--color-text-muted);
+}
+.compare-vs {
+  display: flex;
+  align-items: center;
+  font-size: 0.78rem;
+  font-weight: 700;
+  color: var(--color-text-muted);
+  letter-spacing: 1px;
+}
+.compare-delta {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 8px 14px;
+  border-radius: var(--radius-sm);
+  font-size: 0.9rem;
+  font-weight: 600;
+  width: 100%;
+}
+.compare-delta.delta-positive {
+  background: rgba(16, 185, 129, 0.08);
+  color: var(--color-success);
+}
+.compare-delta.delta-negative {
+  background: rgba(239, 68, 68, 0.08);
+  color: var(--color-danger);
+}
+.compare-delta.delta-neutral {
+  background: var(--color-bg-hover);
+  color: var(--color-text-muted);
+}
+.delta-hint { font-weight: 400; font-size: 0.78rem; }
+
+/* P0-A 决策闭环：最近验证结果列表 */
+.recent-section { padding: var(--space-5); }
+.recent-table { font-size: 0.85rem; }
+.recent-table th { white-space: nowrap; }
+.cell-target {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.target-name {
+  font-weight: 600;
+  color: var(--color-text-primary);
+}
+.target-code {
+  font-size: 0.72rem;
+  color: var(--color-text-muted);
+}
+.cell-time {
+  font-size: 0.78rem;
+  color: var(--color-text-muted);
+  white-space: nowrap;
+}
+
+/* 方向徽章 */
+.dir-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px 8px;
+  border-radius: var(--radius-sm);
+  font-size: 0.78rem;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.dir-badge.dir-up {
+  background: rgba(16, 185, 129, 0.12);
+  color: var(--color-success);
+}
+.dir-badge.dir-down {
+  background: rgba(239, 68, 68, 0.12);
+  color: var(--color-danger);
+}
+.dir-badge.dir-hold {
+  background: var(--color-bg-hover);
+  color: var(--color-text-muted);
+}
+
+/* 结果徽章 */
+.status-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px 8px;
+  border-radius: var(--radius-sm);
+  font-size: 0.78rem;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.status-badge.st-correct {
+  background: rgba(16, 185, 129, 0.12);
+  color: var(--color-success);
+}
+.status-badge.st-wrong {
+  background: rgba(239, 68, 68, 0.12);
+  color: var(--color-danger);
+}
+.status-badge.st-flat {
+  background: var(--color-bg-hover);
+  color: var(--color-text-muted);
+}
+
+/* 采纳徽章 */
+.adopted-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: var(--radius-sm);
+  font-size: 0.72rem;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.adopted-badge.ad-adopted {
+  background: rgba(16, 185, 129, 0.12);
+  color: var(--color-success);
+}
+.adopted-badge.ad-rejected {
+  background: rgba(239, 68, 68, 0.1);
+  color: var(--color-danger);
+}
+.adopted-badge.ad-unmarked {
+  background: var(--color-bg-hover);
+  color: var(--color-text-muted);
+}
 
 @media (max-width: 768px) {
   .accuracy-page { padding: var(--space-3); }
@@ -389,5 +843,9 @@ onMounted(loadAll)
   .rate-number { font-size: 1.3em; }
   .data-table { font-size: 0.8rem; }
   .data-table th, .data-table td { padding: 6px 8px; }
+  .adoption-grid { grid-template-columns: 1fr; }
+  .compare-row { flex-direction: column; }
+  .compare-vs { justify-content: center; padding: 4px 0; }
+  .recent-table { font-size: 0.78rem; }
 }
 </style>
