@@ -284,7 +284,7 @@ onMounted(() => {
       <EmptyState
         v-else-if="!filteredTools.length"
         title="无匹配能力"
-        desc="尝试调整筛选条件或重置筛选"
+        description="尝试调整筛选条件或重置筛选"
       />
 
       <div v-else class="tools-grid">
