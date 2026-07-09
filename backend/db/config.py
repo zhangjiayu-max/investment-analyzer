@@ -196,6 +196,17 @@ DEFAULT_CONFIGS = [
     ('strategy_backtest.enabled', 'true', '策略库+回测开关', 'decision_upgrade'),
     ('portfolio_optimizer.enabled', 'true', '组合优化引擎开关', 'decision_upgrade'),
     ('valuation_forecast.enabled', 'true', '估值预测信号开关', 'decision_upgrade'),
+
+    # 智能补仓计划器
+    ('smart_add.enabled', 'true', '智能补仓计划器总开关', 'smart_add'),
+    ('smart_add.base_dca_pct', '4', '基础定投比例（年化，占总资产%）', 'smart_add'),
+    ('smart_add.pyramid_enabled', 'true', '金字塔补仓引擎开关', 'smart_add'),
+    ('smart_add.pool_pct', '15', '补仓资金池占总资产%', 'smart_add'),
+    ('smart_add.pyramid_tiers', '10:15,20:25,30:30,40:20,50:10', '金字塔档位（亏损%:释放%）', 'smart_add'),
+    ('smart_add.loss_threshold', '-10', '触发金字塔补仓的亏损阈值%', 'smart_add'),
+    ('smart_add.max_single_position_pct', '25', '单标的占总仓位上限%', 'smart_add'),
+    ('smart_add.valuation_pause_pct', '60', '估值分位回升到此值暂停引擎', 'smart_add'),
+    ('smart_add.stale_days', '14', '估值数据过期天数阈值', 'smart_add'),
 ]
 
 

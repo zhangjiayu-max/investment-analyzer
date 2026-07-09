@@ -2489,3 +2489,20 @@ export function getCapabilitiesRecent(toolName = '', limit = 20, success = '') {
 export function debugTool(toolName, args) {
   return api.post('/capabilities/debug', { tool_name: toolName, arguments: args })
 }
+
+// ── 智能补仓计划器 ──────────────────────────────────────
+
+/** 智能补仓计划器 API（估值 z-score 加权定投 + 金字塔补仓双引擎） */
+export const smartAddAPI = {
+  /** 全持仓补仓计划表 */
+  getPlan: () => api.get('/smart-add/plan').then(r => r.data),
+  /** 单标的补仓计划 */
+  getSinglePlan: (fundCode) => api.get(`/smart-add/plan/${fundCode}`).then(r => r.data),
+  /** 读取智能补仓配置 */
+  getConfig: () => api.get('/smart-add/config').then(r => r.data),
+  /** 更新配置 */
+  updateConfig: (config) => api.post('/smart-add/config', config).then(r => r.data),
+  /** 模拟"再跌X%后补Y元"的摊薄效果 */
+  previewScenario: (fundCode, additionalDropPct, addAmount) =>
+    api.post('/smart-add/preview', { fund_code: fundCode, additional_drop_pct: additionalDropPct, add_amount: addAmount }).then(r => r.data),
+}

@@ -16,6 +16,7 @@ export const pageComponentKeys = [
   'rag-test',
   'bond',
   'portfolio',
+  'smart-add',
   'alert-center',
   'data-health',
   'admin-agents',

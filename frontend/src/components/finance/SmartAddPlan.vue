@@ -1,0 +1,1086 @@
+<script setup>
+/**
+ * SmartAddPlan — 智能补仓计划器
+ *
+ * 双引擎：
+ *  1. 估值 z-score 加权定投（日常）— 基础月投 × 估值倍数
+ *  2. 金字塔补仓（极端下跌触发）— 亏损分档释放资金池
+ *
+ * 数据源：/api/smart-add/plan，含 plans / portfolio_view / summary / config。
+ */
+import { ref, computed, onMounted } from 'vue'
+import Icon from '../ui/Icon.vue'
+import { smartAddAPI } from '../../api'
+
+// ── 状态 ──────────────────────────────
+const loading = ref(true)
+const error = ref('')
+const plan = ref(null)            // generate_smart_add_plan 返回
+const cfg = ref(null)             // 配置面板数据
+
+// 折叠面板
+const showSimulator = ref(false)
+const showConfig = ref(false)
+
+// 摊薄模拟器
+const simFundCode = ref('')
+const simDropPct = ref(-10)
+const simAmount = ref(5000)
+const simResult = ref(null)
+const simLoading = ref(false)
+const simError = ref('')
+
+// 配置表单
+const cfgForm = ref({
+  base_dca_pct: 4.0,
+  pool_pct: 15.0,
+  loss_threshold: -10.0,
+  max_single_position_pct: 25.0,
+  valuation_pause_pct: 60.0,
+  pyramid_tiers: '10:15,20:25,30:30,40:20,50:10',
+  pyramid_enabled: true,
+})
+const cfgSaving = ref(false)
+const cfgSaved = ref(false)
+
+// ── 计算属性 ──────────────────────────────
+const summary = computed(() => plan.value?.summary || {})
+const portfolioView = computed(() => plan.value?.portfolio_view || {})
+const priorityList = computed(() => portfolioView.value.priority_list || [])
+const allPlans = computed(() => plan.value?.plans || [])
+// 深套标的 = 金字塔引擎已触发的标的
+const deepPlans = computed(() =>
+  allPlans.value.filter(p => p.pyramid && p.pyramid.triggered_tiers > 0)
+)
+
+const fmtMoney = (v) => {
+  if (v == null || isNaN(v)) return '--'
+  const n = Number(v)
+  return n.toLocaleString('zh-CN', { maximumFractionDigits: 2, minimumFractionDigits: 2 })
+}
+const fmtPct = (v, digits = 2) => {
+  if (v == null || isNaN(v)) return '--'
+  return Number(v).toFixed(digits) + '%'
+}
+const fmtNum = (v, digits = 2) => {
+  if (v == null || isNaN(v)) return '--'
+  return Number(v).toFixed(digits)
+}
+const fmtSignedPct = (v, digits = 2) => {
+  if (v == null || isNaN(v)) return '--'
+  const n = Number(v)
+  return (n > 0 ? '+' : '') + n.toFixed(digits) + '%'
+}
+// 盈亏率染色：项目约定 profit(红)/loss(绿)，亏损为负数 → 绿色
+const profitColor = (v) => {
+  if (v == null || isNaN(v)) return ''
+  return Number(v) >= 0 ? 'var(--color-profit)' : 'var(--color-loss)'
+}
+
+// 估值等级 → 颜色
+const levelColor = (level) => {
+  if (!level) return ''
+  if (level.includes('低估')) return 'var(--color-loss)'
+  if (level.includes('高估')) return 'var(--color-profit)'
+  return 'var(--color-text-secondary)'
+}
+
+// ── 数据加载 ──────────────────────────────
+async function loadPlan() {
+  loading.value = true
+  error.value = ''
+  try {
+    const data = await smartAddAPI.getPlan()
+    plan.value = data
+    if (data?.config) {
+      cfg.value = data.config
+      syncCfgForm(data.config)
+    }
+  } catch (e) {
+    error.value = e?.message || '加载补仓计划失败'
+  } finally {
+    loading.value = false
+  }
+}
+
+async function loadConfig() {
+  try {
+    const data = await smartAddAPI.getConfig()
+    cfg.value = data
+    syncCfgForm(data)
+  } catch { /* 静默，plan 已带 config */ }
+}
+
+function syncCfgForm(c) {
+  if (!c) return
+  cfgForm.value = {
+    base_dca_pct: Number(c.base_dca_pct ?? 4.0),
+    pool_pct: Number(c.pool_pct ?? 15.0),
+    loss_threshold: Number(c.loss_threshold ?? -10.0),
+    max_single_position_pct: Number(c.max_single_position_pct ?? 25.0),
+    valuation_pause_pct: Number(c.valuation_pause_pct ?? 60.0),
+    pyramid_tiers: tiersToString(c.tiers) || '10:15,20:25,30:30,40:20,50:10',
+    pyramid_enabled: !!c.pyramid_enabled,
+  }
+}
+
+function tiersToString(tiers) {
+  if (!Array.isArray(tiers) || !tiers.length) return ''
+  return tiers.map(t => `${Math.abs(t.loss_pct)}:${t.release_pct}`).join(',')
+}
+
+// ── 摊薄模拟器 ──────────────────────────────
+async function runSim() {
+  if (!simFundCode.value.trim()) {
+    simError.value = '请输入基金代码'
+    return
+  }
+  simLoading.value = true
+  simError.value = ''
+  simResult.value = null
+  try {
+    const data = await smartAddAPI.previewScenario(
+      simFundCode.value.trim(),
+      Number(simDropPct.value),
+      Number(simAmount.value),
+    )
+    if (data?.error) simError.value = data.error
+    else simResult.value = data
+  } catch (e) {
+    simError.value = e?.message || '模拟失败'
+  } finally {
+    simLoading.value = false
+  }
+}
+
+// 用深套标的快捷填充模拟器
+function fillSim(fundCode) {
+  simFundCode.value = fundCode
+  showSimulator.value = true
+}
+
+// ── 保存配置 ──────────────────────────────
+async function saveConfig() {
+  cfgSaving.value = true
+  cfgSaved.value = false
+  try {
+    await smartAddAPI.updateConfig({
+      'smart_add.base_dca_pct': cfgForm.value.base_dca_pct,
+      'smart_add.pool_pct': cfgForm.value.pool_pct,
+      'smart_add.loss_threshold': cfgForm.value.loss_threshold,
+      'smart_add.max_single_position_pct': cfgForm.value.max_single_position_pct,
+      'smart_add.valuation_pause_pct': cfgForm.value.valuation_pause_pct,
+      'smart_add.pyramid_tiers': cfgForm.value.pyramid_tiers,
+      'smart_add.pyramid_enabled': cfgForm.value.pyramid_enabled,
+    })
+    cfgSaved.value = true
+    setTimeout(() => { cfgSaved.value = false }, 2000)
+    // 重新拉取计划表反映新配置
+    await loadPlan()
+  } catch (e) {
+    simError.value = e?.message || '保存失败'
+  } finally {
+    cfgSaving.value = false
+  }
+}
+
+onMounted(() => {
+  loadPlan()
+})
+</script>
+
+<template>
+  <div class="smart-add-page">
+    <!-- 页头 -->
+    <header class="page-head">
+      <div class="page-head-left">
+        <h2 class="page-title">智能补仓计划器</h2>
+        <p class="page-desc">估值 z-score 加权定投 + 金字塔补仓双引擎，前瞻规划深套标的补仓路径</p>
+      </div>
+      <button class="btn-ghost" @click="loadPlan" :disabled="loading">
+        <Icon name="refresh" size="15" :class="{ spinning: loading }" />
+        <span>刷新</span>
+      </button>
+    </header>
+
+    <!-- 加载中 -->
+    <div v-if="loading" class="state-block">
+      <Icon name="spinner" size="20" class="spinning" />
+      <span>生成补仓计划中…</span>
+    </div>
+
+    <!-- 错误 -->
+    <div v-else-if="error" class="state-block state-error">
+      <Icon name="warning" size="18" />
+      <span>{{ error }}</span>
+      <button class="btn-ghost" @click="loadPlan">重试</button>
+    </div>
+
+    <!-- 未开启 / 无数据 -->
+    <div v-else-if="plan && plan.enabled === false" class="state-block">
+      <Icon name="info" size="18" />
+      <span>{{ plan.message || '智能补仓计划器未开启' }}</span>
+    </div>
+    <div v-else-if="plan && !allPlans.length" class="state-block">
+      <Icon name="info" size="18" />
+      <span>{{ plan.message || '暂无持仓数据' }}</span>
+    </div>
+
+    <template v-else>
+      <!-- ① 顶部总览卡 -->
+      <section class="overview-grid">
+        <div class="ov-card">
+          <span class="ov-label">总资产</span>
+          <span class="ov-value font-jet">¥{{ fmtMoney(summary.total_assets) }}</span>
+        </div>
+        <div class="ov-card">
+          <span class="ov-label">资金池总额</span>
+          <span class="ov-value font-jet">¥{{ fmtMoney(summary.pool_total) }}</span>
+        </div>
+        <div class="ov-card">
+          <span class="ov-label">已释放</span>
+          <span class="ov-value font-jet ov-used">¥{{ fmtMoney(summary.pool_used) }}</span>
+        </div>
+        <div class="ov-card">
+          <span class="ov-label">剩余</span>
+          <span class="ov-value font-jet ov-remain">¥{{ fmtMoney(summary.pool_remaining) }}</span>
+        </div>
+        <div class="ov-card">
+          <span class="ov-label">深套标的数</span>
+          <span class="ov-value font-jet ov-deep">{{ summary.deep_loss_count ?? 0 }}</span>
+        </div>
+        <div class="ov-card">
+          <span class="ov-label">基础月投</span>
+          <span class="ov-value font-jet">¥{{ fmtMoney(summary.base_monthly) }}</span>
+        </div>
+      </section>
+
+      <!-- ② 组合视角：深套标的优先级排序表 -->
+      <section v-if="priorityList.length" class="block">
+        <h3 class="block-title">
+          <Icon name="target" size="16" />
+          <span>组合视角 · 深套标的优先级</span>
+        </h3>
+        <div class="table-wrap">
+          <table class="priority-table">
+            <thead>
+              <tr>
+                <th>基金名称</th>
+                <th class="num">亏损率</th>
+                <th class="num">z-score</th>
+                <th>估值等级</th>
+                <th class="num">已释放</th>
+                <th class="num">剩余档位</th>
+                <th class="num">下次触发</th>
+                <th class="num">优先级</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="item in priorityList" :key="item.fund_code">
+                <td class="fund-cell">
+                  <span class="fund-name">{{ item.fund_name || '--' }}</span>
+                  <span class="fund-code font-jet">{{ item.fund_code }}</span>
+                </td>
+                <td class="num" :style="{ color: profitColor((item.profit_rate || 0) * 100) }">
+                  {{ fmtSignedPct((item.profit_rate || 0) * 100) }}
+                </td>
+                <td class="num font-jet">{{ item.zscore != null ? fmtNum(item.zscore) : '--' }}</td>
+                <td :style="{ color: levelColor(item.valuation_level) }">{{ item.valuation_level || '--' }}</td>
+                <td class="num font-jet">¥{{ fmtMoney(item.released_amount) }}</td>
+                <td class="num">{{ item.remaining_tiers ?? 0 }}</td>
+                <td class="num">
+                  <template v-if="item.next_trigger">
+                    {{ fmtPct(item.next_trigger.loss_pct) }} / ¥{{ fmtMoney(item.next_trigger.release_amount) }}
+                  </template>
+                  <span v-else class="muted">已全部触发</span>
+                </td>
+                <td class="num priority-cell">{{ item.priority || '★☆☆' }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- ③ 计划表列表 -->
+      <section v-if="deepPlans.length" class="block">
+        <h3 class="block-title">
+          <Icon name="trending-down" size="16" />
+          <span>补仓计划表 · {{ deepPlans.length }} 个深套标的</span>
+        </h3>
+        <div class="plan-cards">
+          <article
+            v-for="p in deepPlans"
+            :key="p.fund_code"
+            class="plan-card"
+            :class="{ 'pool-warn': p.pyramid?.pool_warning }"
+          >
+            <!-- 标的头部 -->
+            <div class="plan-header">
+              <div class="plan-header-left">
+                <span class="plan-fund-name">{{ p.fund_name || '--' }}</span>
+                <span class="plan-fund-code font-jet">{{ p.fund_code }}</span>
+              </div>
+              <div class="plan-header-right">
+                <span class="badge badge-loss">
+                  亏损 {{ fmtPct(p.profit_rate_pct) }}
+                </span>
+                <span class="badge badge-pos">占比 {{ fmtPct(p.position_pct) }}</span>
+              </div>
+            </div>
+
+            <!-- 估值信息 -->
+            <div v-if="p.valuation" class="plan-row plan-valuation">
+              <div class="val-item">
+                <span class="val-label">{{ p.valuation.metric_type || '估值' }}</span>
+                <span class="val-value font-jet">{{ fmtNum(p.valuation.current_value) }}</span>
+              </div>
+              <div class="val-item">
+                <span class="val-label">分位</span>
+                <span class="val-value font-jet">{{ fmtPct(p.valuation.percentile) }}</span>
+              </div>
+              <div class="val-item">
+                <span class="val-label">z-score</span>
+                <span class="val-value font-jet">{{ fmtNum(p.valuation.zscore) }}</span>
+              </div>
+              <div class="val-item">
+                <span class="term-with-tip val-level" :style="{ color: levelColor(p.valuation.level) }">
+                  {{ p.valuation.level || '未知' }}
+                  <span class="term-tip">
+                    <b>估值等级说明</b><br/>
+                    基于 z-score 划分：≤-2.5 极度低估，≤-1.5 深度低估，≤-0.5 低估，±0.5 合理区间，≤1.5 高估，&gt;1.5 深度高估。<br/>
+                    <span class="muted">数据日期：{{ p.valuation.snapshot_date || '--' }}{{ p.valuation.is_expired ? '（已过期）' : '' }}</span>
+                  </span>
+                </span>
+              </div>
+            </div>
+            <div v-else class="plan-row muted">该标的未关联指数估值数据</div>
+
+            <!-- 引擎1：估值 z-score 加权定投 -->
+            <div class="plan-row engine1-row">
+              <span class="engine-tag engine1-tag">引擎1 · 加权定投</span>
+              <span class="engine-formula">
+                基础月投 ¥{{ fmtMoney(p.engine1?.base_monthly) }}
+                <span class="x">×</span>
+                <span class="multiplier-badge">{{ fmtNum(p.engine1?.multiplier) }}</span>
+                = <span class="engine-result font-jet">¥{{ fmtMoney(p.engine1?.monthly_dca) }}</span>
+              </span>
+            </div>
+
+            <!-- 引擎2：金字塔档位 -->
+            <div v-if="p.pyramid" class="plan-row engine2-row">
+              <div class="engine2-head">
+                <span class="engine-tag engine2-tag">引擎2 · 金字塔补仓</span>
+                <span class="engine2-meta">
+                  已释放 ¥{{ fmtMoney(p.pyramid.released_amount) }} ·
+                  剩余 {{ p.pyramid.remaining_tiers }} 档
+                  <span v-if="p.pyramid.pool_warning" class="pool-warn-tag">{{ p.pyramid.pool_warning }}</span>
+                </span>
+              </div>
+              <table class="pyramid-table">
+                <thead>
+                  <tr>
+                    <th class="num">档位</th>
+                    <th class="num">亏损触发点</th>
+                    <th class="num">释放金额</th>
+                    <th class="num">累计</th>
+                    <th>状态</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr
+                    v-for="t in p.pyramid.tiers"
+                    :key="t.tier"
+                    :class="{ 'tier-triggered': t.triggered }"
+                  >
+                    <td class="num font-jet">{{ t.tier }}</td>
+                    <td class="num">{{ fmtPct(t.loss_pct) }}</td>
+                    <td class="num font-jet">¥{{ fmtMoney(t.release_amount) }}</td>
+                    <td class="num font-jet">¥{{ fmtMoney(t.cumulative) }}</td>
+                    <td>
+                      <span :class="['tier-status', t.triggered ? 'st-triggered' : 'st-pending']">
+                        {{ t.triggered ? '已触发' : '待触发' }}
+                      </span>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+
+              <!-- 预估摊薄效果 -->
+              <div v-if="p.pyramid.improvement_pct != null" class="improvement-box">
+                <Icon name="chart" size="14" />
+                <span>全档触发后预估摊薄效果：</span>
+                <span class="improvement-val font-jet" :style="{ color: profitColor(p.pyramid.improvement_pct) }">
+                  {{ fmtSignedPct(p.pyramid.improvement_pct) }}
+                </span>
+                <span class="muted">（成本 {{ fmtNum(p.pyramid.current_avg_cost, 4) }} → {{ fmtNum(p.pyramid.avg_cost_after_full_add, 4) }}）</span>
+              </div>
+
+              <!-- 下次触发提示 -->
+              <div v-if="p.pyramid.next_trigger" class="next-trigger">
+                <Icon name="info" size="13" />
+                <span>下一档触发：亏损达 {{ fmtPct(p.pyramid.next_trigger.loss_pct) }}，释放 ¥{{ fmtMoney(p.pyramid.next_trigger.release_amount) }}</span>
+              </div>
+            </div>
+
+            <!-- 安全阀 -->
+            <div class="plan-row safety-row">
+              <Icon name="shield-check" size="14" class="safety-icon" />
+              <span class="safety-label">安全阀</span>
+              <span class="safety-meta">
+                仓位占比 {{ fmtPct(p.safety?.current_position_pct) }} / 上限 {{ fmtPct(p.safety?.max_position_pct) }}
+              </span>
+              <span :class="['safety-flag', p.safety?.can_add ? 'flag-ok' : 'flag-stop']">
+                {{ p.safety?.can_add ? '可补仓' : '已达上限' }}
+              </span>
+              <button class="btn-link" @click="fillSim(p.fund_code)">模拟摊薄</button>
+            </div>
+          </article>
+        </div>
+      </section>
+
+      <!-- ④ 摊薄模拟器（折叠） -->
+      <section class="block">
+        <button class="collapse-head" @click="showSimulator = !showSimulator">
+          <Icon name="chevron-right" size="16" class="chevron" :class="{ expanded: showSimulator }" />
+          <Icon name="chart" size="16" />
+          <span>摊薄模拟器</span>
+          <span class="muted collapse-hint">输入下跌幅度与补仓金额，预估摊薄效果</span>
+        </button>
+        <div v-show="showSimulator" class="collapse-body">
+          <div class="sim-form">
+            <div class="sim-field">
+              <label>基金代码</label>
+              <input v-model="simFundCode" type="text" placeholder="如 110022" class="sim-input font-jet" />
+            </div>
+            <div class="sim-field">
+              <label>额外下跌 (%)</label>
+              <input v-model.number="simDropPct" type="number" step="1" class="sim-input font-jet" />
+            </div>
+            <div class="sim-field">
+              <label>补仓金额 (元)</label>
+              <input v-model.number="simAmount" type="number" step="100" class="sim-input font-jet" />
+            </div>
+            <button class="btn-primary" @click="runSim" :disabled="simLoading">
+              <Icon name="spinner" v-if="simLoading" size="14" class="spinning" />
+              <span>{{ simLoading ? '计算中…' : '计算' }}</span>
+            </button>
+          </div>
+          <p v-if="simError" class="sim-error">
+            <Icon name="warning" size="14" />{{ simError }}
+          </p>
+          <div v-if="simResult" class="sim-result">
+            <div class="sim-result-head">
+              <span>{{ simResult.fund_name || simResult.fund_code }}</span>
+              <span class="muted">现价 {{ fmtNum(simResult.current_price, 4) }} → 模拟价 {{ fmtNum(simResult.simulated_price, 4) }}</span>
+            </div>
+            <div class="sim-result-grid">
+              <div class="sr-item">
+                <span class="sr-label">当前成本</span>
+                <span class="sr-value font-jet">{{ fmtNum(simResult.current_avg_cost, 4) }}</span>
+              </div>
+              <div class="sr-item">
+                <span class="sr-label">补仓后成本</span>
+                <span class="sr-value font-jet sr-new">{{ fmtNum(simResult.new_avg_cost, 4) }}</span>
+              </div>
+              <div class="sr-item">
+                <span class="sr-label">当前盈亏</span>
+                <span class="sr-value font-jet" :style="{ color: profitColor(simResult.current_profit_rate * 100) }">
+                  {{ fmtSignedPct(simResult.current_profit_rate * 100) }}
+                </span>
+              </div>
+              <div class="sr-item">
+                <span class="sr-label">补仓后盈亏</span>
+                <span class="sr-value font-jet" :style="{ color: profitColor(simResult.new_profit_rate * 100) }">
+                  {{ fmtSignedPct(simResult.new_profit_rate * 100) }}
+                </span>
+              </div>
+              <div class="sr-item sr-improve">
+                <span class="sr-label">改善百分点</span>
+                <span class="sr-value font-jet" :style="{ color: profitColor(simResult.improvement_pct) }">
+                  {{ fmtSignedPct(simResult.improvement_pct) }}
+                </span>
+              </div>
+              <div class="sr-item">
+                <span class="sr-label">补仓后份额</span>
+                <span class="sr-value font-jet">{{ fmtNum(simResult.new_shares) }}</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ⑤ 配置面板（折叠） -->
+      <section class="block">
+        <button class="collapse-head" @click="showConfig = !showConfig">
+          <Icon name="chevron-right" size="16" class="chevron" :class="{ expanded: showConfig }" />
+          <Icon name="config" size="16" />
+          <span>配置面板</span>
+          <span class="muted collapse-hint">倍数公式 / 资金池比例 / 金字塔档位 / 安全阀</span>
+        </button>
+        <div v-show="showConfig" class="collapse-body">
+          <div class="cfg-formula">
+            <Icon name="info" size="14" />
+            <span>估值倍数公式：<code class="font-jet">clamp(1.0 + (-z_score) × 0.5, 0, 3.0)</code>　z=-2 → ×2.0，z=0 → ×1.0，z=+2 → ×0</span>
+          </div>
+          <div class="cfg-grid">
+            <div class="cfg-field">
+              <label>基础定投年化 (%)</label>
+              <input v-model.number="cfgForm.base_dca_pct" type="number" step="0.5" class="cfg-input font-jet" />
+            </div>
+            <div class="cfg-field">
+              <label>资金池比例 (%)</label>
+              <input v-model.number="cfgForm.pool_pct" type="number" step="1" class="cfg-input font-jet" />
+            </div>
+            <div class="cfg-field">
+              <label>金字塔触发阈值 (%)</label>
+              <input v-model.number="cfgForm.loss_threshold" type="number" step="1" class="cfg-input font-jet" />
+            </div>
+            <div class="cfg-field">
+              <label>单标的仓位上限 (%)</label>
+              <input v-model.number="cfgForm.max_single_position_pct" type="number" step="1" class="cfg-input font-jet" />
+            </div>
+            <div class="cfg-field">
+              <label>估值暂停阈值 (分位%)</label>
+              <input v-model.number="cfgForm.valuation_pause_pct" type="number" step="5" class="cfg-input font-jet" />
+            </div>
+            <div class="cfg-field cfg-field-wide">
+              <label>金字塔档位 (亏损%:释放%)</label>
+              <input v-model="cfgForm.pyramid_tiers" type="text" class="cfg-input font-jet" placeholder="10:15,20:25,30:30,40:20,50:10" />
+            </div>
+            <div class="cfg-field cfg-field-check">
+              <label class="check-label">
+                <input type="checkbox" v-model="cfgForm.pyramid_enabled" />
+                <span>启用金字塔补仓引擎</span>
+              </label>
+            </div>
+          </div>
+          <div class="cfg-actions">
+            <button class="btn-primary" @click="saveConfig" :disabled="cfgSaving">
+              <Icon name="spinner" v-if="cfgSaving" size="14" class="spinning" />
+              <span>{{ cfgSaving ? '保存中…' : '保存配置' }}</span>
+            </button>
+            <span v-if="cfgSaved" class="cfg-saved">
+              <Icon name="check" size="14" /> 已保存
+            </span>
+          </div>
+        </div>
+      </section>
+    </template>
+  </div>
+</template>
+
+<style scoped>
+.smart-add-page {
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+}
+
+/* 页头 */
+.page-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+}
+.page-title {
+  font-size: 1.15rem;
+  font-weight: 700;
+  color: var(--color-text-primary);
+  margin: 0;
+  letter-spacing: -0.01em;
+}
+.page-desc {
+  font-size: 0.8rem;
+  color: var(--color-text-muted);
+  margin: 0.25rem 0 0;
+}
+
+/* 状态块 */
+.state-block {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 2rem 1.25rem;
+  background: var(--color-bg-card);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  color: var(--color-text-secondary);
+  font-size: 0.88rem;
+}
+.state-error { color: var(--color-profit); border-color: var(--color-profit-weak); }
+
+/* 总览卡 */
+.overview-grid {
+  display: grid;
+  grid-template-columns: repeat(6, 1fr);
+  gap: 0.75rem;
+}
+.ov-card {
+  background: var(--color-bg-card);
+  border: 1px solid var(--color-border-light);
+  border-radius: var(--radius-md);
+  padding: 0.85rem 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+.ov-label {
+  font-size: 0.7rem;
+  color: var(--color-text-muted);
+}
+.ov-value {
+  font-size: 1.05rem;
+  font-weight: 700;
+  color: var(--color-text-primary);
+}
+.ov-used { color: var(--color-warning); }
+.ov-remain { color: var(--color-loss); }
+.ov-deep { color: var(--color-profit); }
+
+/* 区块 */
+.block {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+.block-title {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.92rem;
+  font-weight: 600;
+  color: var(--color-text-primary);
+  margin: 0;
+}
+
+/* 优先级表 */
+.table-wrap {
+  background: var(--color-bg-card);
+  border: 1px solid var(--color-border-light);
+  border-radius: var(--radius-md);
+  overflow-x: auto;
+}
+.priority-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.8rem;
+}
+.priority-table th,
+.priority-table td {
+  padding: 0.6rem 0.8rem;
+  text-align: left;
+  border-bottom: 1px solid var(--color-border-light);
+  white-space: nowrap;
+}
+.priority-table th {
+  font-weight: 600;
+  color: var(--color-text-muted);
+  background: var(--color-bg-input);
+  font-size: 0.74rem;
+}
+.priority-table tbody tr:last-child td { border-bottom: none; }
+.priority-table tbody tr:hover { background: var(--color-bg-hover); }
+.priority-table .num { text-align: right; }
+.fund-cell { display: flex; flex-direction: column; gap: 0.1rem; }
+.fund-name { color: var(--color-text-primary); font-weight: 500; }
+.fund-code { font-size: 0.7rem; color: var(--color-text-muted); }
+.priority-cell {
+  font-size: 0.85rem;
+  letter-spacing: 0.05em;
+  color: var(--color-gold);
+}
+.muted { color: var(--color-text-muted); font-size: 0.78rem; }
+
+/* 计划卡 */
+.plan-cards {
+  display: flex;
+  flex-direction: column;
+  gap: 0.85rem;
+}
+.plan-card {
+  background: var(--color-bg-card);
+  border: 1px solid var(--color-border-light);
+  border-left: 3px solid var(--color-profit);
+  border-radius: var(--radius-md);
+  padding: 1rem 1.1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.7rem;
+}
+.plan-card.pool-warn { border-left-color: var(--color-warning); }
+
+.plan-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+.plan-header-left { display: flex; align-items: baseline; gap: 0.5rem; }
+.plan-fund-name { font-weight: 600; color: var(--color-text-primary); font-size: 0.95rem; }
+.plan-fund-code { font-size: 0.72rem; color: var(--color-text-muted); }
+.plan-header-right { display: flex; gap: 0.4rem; }
+.badge {
+  font-size: 0.7rem;
+  padding: 0.18rem 0.5rem;
+  border-radius: 999px;
+  font-weight: 600;
+}
+.badge-loss { background: var(--color-profit-bg); color: var(--color-profit); }
+.badge-pos { background: var(--color-bg-input); color: var(--color-text-secondary); }
+
+/* 估值信息行 */
+.plan-row {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  font-size: 0.82rem;
+}
+.plan-valuation {
+  padding: 0.55rem 0.7rem;
+  background: var(--color-bg-input);
+  border-radius: var(--radius-sm);
+}
+.val-item { display: flex; flex-direction: column; gap: 0.1rem; min-width: 70px; }
+.val-label { font-size: 0.68rem; color: var(--color-text-muted); }
+.val-value { font-weight: 600; color: var(--color-text-primary); font-size: 0.85rem; }
+.val-level { font-weight: 600; font-size: 0.82rem; }
+
+/* 引擎1 */
+.engine1-row { gap: 0.5rem; }
+.engine-tag {
+  font-size: 0.7rem;
+  font-weight: 600;
+  padding: 0.15rem 0.5rem;
+  border-radius: var(--radius-sm);
+  flex-shrink: 0;
+}
+.engine1-tag { background: var(--color-primary-bg); color: var(--color-primary); }
+.engine2-tag { background: var(--color-profit-bg); color: var(--color-profit); }
+.engine-formula {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  color: var(--color-text-secondary);
+  font-size: 0.82rem;
+}
+.engine-formula .x { color: var(--color-text-muted); }
+.multiplier-badge {
+  font-weight: 700;
+  font-size: 0.85rem;
+  padding: 0.1rem 0.45rem;
+  border-radius: var(--radius-sm);
+  background: var(--color-gold-light);
+  color: #1a1a1a;
+}
+.dark .multiplier-badge { color: #1a1a1a; }
+.engine-result { font-weight: 700; color: var(--color-text-primary); }
+
+/* 引擎2 */
+.engine2-row { flex-direction: column; align-items: stretch; gap: 0.5rem; }
+.engine2-head { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
+.engine2-meta { font-size: 0.78rem; color: var(--color-text-secondary); }
+.pool-warn-tag {
+  margin-left: 0.4rem;
+  font-size: 0.68rem;
+  padding: 0.1rem 0.4rem;
+  border-radius: var(--radius-sm);
+  background: var(--color-warning-bg, rgba(217, 119, 6, 0.12));
+  color: var(--color-warning);
+  font-weight: 600;
+}
+
+.pyramid-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.78rem;
+}
+.pyramid-table th,
+.pyramid-table td {
+  padding: 0.4rem 0.6rem;
+  border-bottom: 1px solid var(--color-border-light);
+  white-space: nowrap;
+}
+.pyramid-table th {
+  color: var(--color-text-muted);
+  font-weight: 500;
+  font-size: 0.7rem;
+  background: var(--color-bg-input);
+}
+.pyramid-table .num { text-align: right; }
+.pyramid-table tbody tr:last-child td { border-bottom: none; }
+.tier-triggered { background: var(--color-loss-bg); }
+.tier-status {
+  font-size: 0.7rem;
+  padding: 0.12rem 0.45rem;
+  border-radius: 999px;
+  font-weight: 600;
+}
+.st-triggered { background: var(--color-loss-bg); color: var(--color-loss); }
+.st-pending { background: var(--color-bg-input); color: var(--color-text-muted); }
+
+.improvement-box {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.78rem;
+  color: var(--color-text-secondary);
+  padding: 0.45rem 0.6rem;
+  background: var(--color-bg-input);
+  border-radius: var(--radius-sm);
+}
+.improvement-val { font-weight: 700; font-size: 0.88rem; }
+.next-trigger {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.76rem;
+  color: var(--color-text-muted);
+}
+
+/* 安全阀 */
+.safety-row {
+  padding-top: 0.4rem;
+  border-top: 1px dashed var(--color-border-light);
+  font-size: 0.78rem;
+}
+.safety-icon { color: var(--color-text-muted); flex-shrink: 0; }
+.safety-label { font-weight: 600; color: var(--color-text-secondary); }
+.safety-meta { color: var(--color-text-muted); }
+.safety-flag {
+  font-size: 0.7rem;
+  padding: 0.12rem 0.45rem;
+  border-radius: 999px;
+  font-weight: 600;
+}
+.flag-ok { background: var(--color-loss-bg); color: var(--color-loss); }
+.flag-stop { background: var(--color-profit-bg); color: var(--color-profit); }
+
+/* 折叠头 */
+.collapse-head {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  width: 100%;
+  padding: 0.7rem 0.9rem;
+  background: var(--color-bg-card);
+  border: 1px solid var(--color-border-light);
+  border-radius: var(--radius-md);
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: var(--color-text-primary);
+  text-align: left;
+  transition: background var(--transition-fast);
+}
+.collapse-head:hover { background: var(--color-bg-hover); }
+.collapse-head .chevron {
+  transition: transform var(--transition-fast);
+  color: var(--color-text-muted);
+}
+.collapse-head .chevron.expanded { transform: rotate(90deg); }
+.collapse-hint { font-weight: 400; font-size: 0.76rem; }
+.collapse-body {
+  padding: 1rem 1.1rem;
+  background: var(--color-bg-card);
+  border: 1px solid var(--color-border-light);
+  border-top: none;
+  border-radius: 0 0 var(--radius-md) var(--radius-md);
+  display: flex;
+  flex-direction: column;
+  gap: 0.85rem;
+}
+
+/* 模拟器 */
+.sim-form {
+  display: flex;
+  align-items: flex-end;
+  gap: 0.85rem;
+  flex-wrap: wrap;
+}
+.sim-field { display: flex; flex-direction: column; gap: 0.3rem; }
+.sim-field label {
+  font-size: 0.72rem;
+  color: var(--color-text-muted);
+}
+.sim-input {
+  padding: 0.5rem 0.7rem;
+  background: var(--color-bg-input);
+  border: 1px solid var(--color-border-light);
+  border-radius: var(--radius-sm);
+  font-size: 0.85rem;
+  color: var(--color-text-primary);
+  width: 150px;
+  outline: none;
+  transition: border-color var(--transition-fast);
+}
+.sim-input:focus { border-color: var(--color-primary-border); }
+.sim-error {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  color: var(--color-profit);
+  font-size: 0.8rem;
+}
+.sim-result {
+  border-top: 1px solid var(--color-border-light);
+  padding-top: 0.75rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+.sim-result-head {
+  display: flex;
+  align-items: baseline;
+  gap: 0.6rem;
+  font-weight: 600;
+  color: var(--color-text-primary);
+  font-size: 0.88rem;
+}
+.sim-result-grid {
+  display: grid;
+  grid-template-columns: repeat(6, 1fr);
+  gap: 0.6rem;
+}
+.sr-item {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  padding: 0.55rem 0.7rem;
+  background: var(--color-bg-input);
+  border-radius: var(--radius-sm);
+}
+.sr-label { font-size: 0.68rem; color: var(--color-text-muted); }
+.sr-value { font-weight: 700; color: var(--color-text-primary); font-size: 0.88rem; }
+.sr-new { color: var(--color-primary); }
+.sr-improve { background: var(--color-gold-light); }
+.sr-improve .sr-value { color: #1a1a1a; }
+
+/* 配置面板 */
+.cfg-formula {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.76rem;
+  color: var(--color-text-secondary);
+  padding: 0.55rem 0.7rem;
+  background: var(--color-bg-input);
+  border-radius: var(--radius-sm);
+}
+.cfg-formula code {
+  background: var(--color-bg-card);
+  padding: 0.1rem 0.35rem;
+  border-radius: var(--radius-sm);
+  font-size: 0.74rem;
+  color: var(--color-primary);
+}
+.cfg-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 0.75rem;
+}
+.cfg-field { display: flex; flex-direction: column; gap: 0.3rem; }
+.cfg-field-wide { grid-column: span 2; }
+.cfg-field-check { grid-column: span 3; }
+.cfg-field label {
+  font-size: 0.72rem;
+  color: var(--color-text-muted);
+}
+.cfg-input {
+  padding: 0.5rem 0.7rem;
+  background: var(--color-bg-input);
+  border: 1px solid var(--color-border-light);
+  border-radius: var(--radius-sm);
+  font-size: 0.85rem;
+  color: var(--color-text-primary);
+  outline: none;
+  transition: border-color var(--transition-fast);
+}
+.cfg-input:focus { border-color: var(--color-primary-border); }
+.check-label {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.82rem;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+}
+.cfg-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+}
+.cfg-saved {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  font-size: 0.8rem;
+  color: var(--color-loss);
+  font-weight: 600;
+}
+
+/* 按钮 */
+.btn-primary {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.5rem 1rem;
+  background: var(--color-primary);
+  color: #fff;
+  border: none;
+  border-radius: var(--radius-sm);
+  font-size: 0.82rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background var(--transition-fast);
+}
+.btn-primary:hover:not(:disabled) { background: var(--color-primary-600, var(--color-primary)); }
+.btn-primary:disabled { opacity: 0.6; cursor: not-allowed; }
+.btn-ghost {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.4rem 0.75rem;
+  background: var(--color-bg-card);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  font-size: 0.8rem;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+.btn-ghost:hover:not(:disabled) { background: var(--color-bg-hover); color: var(--color-text-primary); }
+.btn-ghost:disabled { opacity: 0.6; cursor: not-allowed; }
+.btn-link {
+  background: none;
+  border: none;
+  color: var(--color-primary);
+  font-size: 0.76rem;
+  cursor: pointer;
+  padding: 0.1rem 0.3rem;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.btn-link:hover { color: var(--color-primary-400); }
+
+.spinning { animation: spin 0.8s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* 响应式 */
+@media (max-width: 1024px) {
+  .overview-grid { grid-template-columns: repeat(3, 1fr); }
+  .sim-result-grid { grid-template-columns: repeat(3, 1fr); }
+  .cfg-grid { grid-template-columns: repeat(2, 1fr); }
+  .cfg-field-wide { grid-column: span 2; }
+  .cfg-field-check { grid-column: span 2; }
+}
+@media (max-width: 640px) {
+  .overview-grid { grid-template-columns: repeat(2, 1fr); }
+  .sim-result-grid { grid-template-columns: repeat(2, 1fr); }
+  .cfg-grid { grid-template-columns: 1fr; }
+  .cfg-field-wide, .cfg-field-check { grid-column: span 1; }
+  .sim-input { width: 100%; }
+  .sim-form { flex-direction: column; align-items: stretch; }
+}
+</style>
