@@ -12,6 +12,9 @@ export const navItems = [
       { key: 'allocation-dashboard', label: '配置偏离', icon: 'pie-chart' },
       { key: 'strategy-sandbox', label: '策略沙盒', icon: 'bar-chart' },
       { key: 'decisions', label: '决策档案', icon: 'clipboard-list', hot: true },
+      { key: 'attribution', label: '收益归因', icon: 'chart' },
+      { key: 'behavior', label: '行为诊断', icon: 'brain' },
+      { key: 'accuracy', label: '决策准确率', icon: 'target' },
     ],
   },
   { key: 'articles', label: '文章管理', icon: 'articles' },
@@ -60,6 +63,7 @@ export const navItems = [
     children: [
       { key: 'health', label: '健康分', icon: 'health' },
       { key: 'shadow', label: 'Shadow Mode', icon: 'shadow' },
+      { key: 'strategy-backtest', label: '策略回测', icon: 'line-chart' },
     ],
   },
 ]

@@ -188,6 +188,14 @@ DEFAULT_CONFIGS = [
     ('agent.cross_review_opinion_mode', 'true', 'cross_review 单轮意见模式（不调用工具，仅 1 次 LLM）；false 回退到旧 ReAct 模式', 'agent'),
     ('agent.react_tool_result_max_chars', '1500', 'ReAct 工具结果截断阈值（字符数，原 3000）', 'agent'),
     ('agent.react_compress_history', 'true', '是否压缩历史 tool 消息为摘要（避免 ReAct context 膨胀）', 'agent'),
+
+    # 理财决策升级 6 项配置（默认全部关闭）
+    ('attribution.enabled', 'false', '收益归因分析开关', 'decision_upgrade'),
+    ('behavior_diagnosis.enabled', 'false', '行为金融诊断开关', 'decision_upgrade'),
+    ('decision_accuracy.enabled', 'false', '决策准确率追踪开关', 'decision_upgrade'),
+    ('strategy_backtest.enabled', 'false', '策略库+回测开关', 'decision_upgrade'),
+    ('portfolio_optimizer.enabled', 'false', '组合优化引擎开关', 'decision_upgrade'),
+    ('valuation_forecast.enabled', 'false', '估值预测信号开关', 'decision_upgrade'),
 ]
 
 

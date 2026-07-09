@@ -2346,3 +2346,74 @@ export const dailyAdviceAPI = {
 export function getDecisionCanvas(hours = 24) {
   return api.get('/decision/canvas', { params: { hours } })
 }
+
+// ── 理财决策升级 6 项 ───
+
+// P0-1 收益归因
+export function getAttributionReport(startDate, endDate) {
+  return api.get('/api/analysis/attribution/report', { params: { start_date: startDate, end_date: endDate } })
+}
+export function getAttributionByCategory(period) {
+  return api.get('/api/analysis/attribution/by_category', { params: { period } })
+}
+export function getAttributionContributors(limit = 10, order = 'desc') {
+  return api.get('/api/analysis/attribution/contributors', { params: { limit, order } })
+}
+
+// P0-2 行为诊断
+export function getBehaviorReport(periodDays = 90) {
+  return api.get('/api/analysis/behavior/report', { params: { period_days: periodDays } })
+}
+export function getBehaviorScore() {
+  return api.get('/api/analysis/behavior/score')
+}
+
+// P0-3 决策准确率
+export function getAccuracyStats(periodDays = 90, groupBy = 'agent') {
+  return api.get('/api/analysis/accuracy/stats', { params: { period_days: periodDays, group_by: groupBy } })
+}
+export function autoVerifyAccuracy() {
+  return api.post('/api/analysis/accuracy/auto-verify')
+}
+export function getAccuracyTrend(weeks = 12) {
+  return api.get('/api/analysis/accuracy/trend', { params: { weeks } })
+}
+
+// P1-1 策略回测
+export function listStrategies() {
+  return api.get('/api/analysis/strategy/list')
+}
+export function runStrategyBacktest(data) {
+  return api.post('/api/analysis/strategy/backtest', data)
+}
+export function runStrategySweep(data) {
+  return api.post('/api/analysis/strategy/sweep', data)
+}
+export function listStrategyResults(limit = 20) {
+  return api.get('/api/analysis/strategy/results', { params: { limit } })
+}
+
+// P1-2 组合优化
+export function getEfficientFrontier(data) {
+  return api.post('/api/analysis/optimizer/frontier', data)
+}
+export function getRiskParity(data) {
+  return api.post('/api/analysis/optimizer/risk-parity', data)
+}
+export function getBlackLitterman(data) {
+  return api.post('/api/analysis/optimizer/black-litterman', data)
+}
+export function getOptimizationSuggestion() {
+  return api.get('/api/analysis/optimizer/suggestion')
+}
+
+// P1-3 估值预测
+export function getMeanReversion(indexCode, metricType = '市盈率') {
+  return api.get('/api/analysis/forecast/mean-reversion', { params: { index_code: indexCode, metric_type: metricType } })
+}
+export function getExtremeWarning(indexCode) {
+  return api.get('/api/analysis/forecast/extreme', { params: { index_code: indexCode } })
+}
+export function getForecastSignals() {
+  return api.get('/api/analysis/forecast/signals')
+}

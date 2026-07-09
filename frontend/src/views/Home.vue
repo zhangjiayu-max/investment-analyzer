@@ -33,6 +33,10 @@ import KnowledgeBase from '../components/KnowledgeBase.vue'
 import SearchResults from '../components/SearchResults.vue'
 import HealthScore from '../components/HealthScore.vue'
 import ShadowModePage from '../components/ShadowModePage.vue'
+import AttributionReport from '../components/AttributionReport.vue'
+import BehaviorDiagnosis from '../components/BehaviorDiagnosis.vue'
+import DecisionAccuracy from '../components/DecisionAccuracy.vue'
+import StrategyBacktest from '../components/StrategyBacktest.vue'
 import { pageComponentKeys } from '../pageRegistry'
 
 const props = defineProps({
@@ -72,6 +76,10 @@ const pageComponents = {
   search: SearchResults,
   health: HealthScore,
   shadow: ShadowModePage,
+  attribution: AttributionReport,
+  behavior: BehaviorDiagnosis,
+  accuracy: DecisionAccuracy,
+  'strategy-backtest': StrategyBacktest,
 }
 
 if (import.meta.env.DEV) {

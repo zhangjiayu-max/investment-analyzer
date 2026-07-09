@@ -117,7 +117,14 @@ from routers.analysis import (
     compare_diff_router as analysis_compare_diff_router,
     trade_pattern_router as analysis_trade_pattern_router,
     decision_canvas_router as analysis_decision_canvas_router,
+    accuracy_router as analysis_accuracy_router,
 )
+# 理财决策升级 6 项分析路由（accuracy 已在上方 import 块中注册）
+from routers.analysis.attribution import router as attribution_router
+from routers.analysis.behavior import router as behavior_router
+from routers.analysis.strategy_backtest import router as strategy_bt_router
+from routers.analysis.optimizer import router as optimizer_router
+from routers.analysis.forecast import router as forecast_router
 from routers.dashboard import router as dashboard_router
 from routers.config import router as config_router
 from routers.rag import router as rag_router
@@ -179,6 +186,13 @@ app.include_router(analysis_fund_analysis_router)
 app.include_router(analysis_compare_diff_router)
 app.include_router(analysis_trade_pattern_router)
 app.include_router(analysis_decision_canvas_router)
+app.include_router(analysis_accuracy_router)
+# 理财决策升级 5 项分析路由（accuracy 已注册）
+app.include_router(attribution_router)
+app.include_router(behavior_router)
+app.include_router(strategy_bt_router)
+app.include_router(optimizer_router)
+app.include_router(forecast_router)
 app.include_router(dashboard_router)
 app.include_router(config_router)
 app.include_router(rag_router)

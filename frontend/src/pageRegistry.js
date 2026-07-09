@@ -28,4 +28,8 @@ export const pageComponentKeys = [
   'search',
   'health',
   'shadow',
+  'attribution',
+  'behavior',
+  'accuracy',
+  'strategy-backtest',
 ]

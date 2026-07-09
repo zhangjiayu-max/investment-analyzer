@@ -39,6 +39,7 @@ from .fund_analysis import router as fund_analysis_router
 from .compare_diff import router as compare_diff_router
 from .trade_pattern import router as trade_pattern_router
 from .decision_canvas import router as decision_canvas_router
+from .accuracy import router as accuracy_router
 from analysis.action_extractor import extract_actions, format_actions_for_response
 
 __all__ = [
@@ -50,5 +51,6 @@ __all__ = [
     "rolling_return_router", "four_pots_router",
     "fund_analysis_router", "compare_diff_router",
     "trade_pattern_router", "decision_canvas_router",
+    "accuracy_router",
     "extract_actions", "format_actions_for_response",
 ]

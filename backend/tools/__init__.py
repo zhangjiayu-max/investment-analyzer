@@ -618,6 +618,64 @@ TOOLS = [
             },
         },
     },
+    # ── 理财决策升级工具 ──────────────────────────────────
+    {
+        "type": "function",
+        "function": {
+            "name": "analyze_attribution",
+            "description": "分析持仓收益归因（Brinson分解：选股/择时/交互效应）",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "start_date": {"type": "string", "description": "开始日期 YYYY-MM-DD"},
+                    "end_date": {"type": "string", "description": "结束日期 YYYY-MM-DD"}
+                },
+                "required": ["start_date", "end_date"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "diagnose_behavior",
+            "description": "诊断投资行为偏差（处置效应/锚定效应/羊群效应/过度交易）",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "period_days": {"type": "integer", "description": "分析周期天数，默认90"}
+                }
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "query_decision_accuracy",
+            "description": "查询决策建议准确率统计（按专家/场景/动作分组）",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "period_days": {"type": "integer", "description": "统计周期天数，默认90"},
+                    "group_by": {"type": "string", "description": "分组维度：agent|scenario|action_type"}
+                }
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "query_valuation_forecast",
+            "description": "查询指数估值预测信号（均值回归/极值预警）",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "index_code": {"type": "string", "description": "指数代码，如000300"},
+                    "metric_type": {"type": "string", "description": "指标类型：市盈率/市净率"}
+                },
+                "required": ["index_code"]
+            }
+        }
+    },
 ]
 
 # ── Tool 执行器 ──────────────────────────────────────
@@ -939,6 +997,31 @@ def _execute_tool_impl(name: str, arguments: dict) -> str:
         return _yingmi_diagnose_portfolio(arguments)
     elif name == "yingmi_search_funds":
         return _yingmi_search_funds(arguments)
+    # 理财决策升级 4 项工具
+    elif name == "analyze_attribution":
+        from services.attribution import get_attribution_report
+        start = arguments.get("start_date", "")
+        end = arguments.get("end_date", "")
+        result = get_attribution_report("default", start, end)
+        return json.dumps(result, ensure_ascii=False)
+    elif name == "diagnose_behavior":
+        from services.behavior_diagnosis import diagnose_behavior
+        period = arguments.get("period_days", 90)
+        result = diagnose_behavior("default", period)
+        return json.dumps(result, ensure_ascii=False)
+    elif name == "query_decision_accuracy":
+        from services.decision_accuracy import get_accuracy_stats
+        period = arguments.get("period_days", 90)
+        group = arguments.get("group_by", "agent")
+        result = get_accuracy_stats(period, group)
+        return json.dumps(result, ensure_ascii=False)
+    elif name == "query_valuation_forecast":
+        from services.valuation_forecast import mean_reversion_analysis, extreme_warning
+        code = arguments.get("index_code", "")
+        metric = arguments.get("metric_type", "市盈率")
+        mr = mean_reversion_analysis(code, metric)
+        ew = extreme_warning(code)
+        return json.dumps({"mean_reversion": mr, "extreme_warning": ew}, ensure_ascii=False)
     else:
         return json.dumps({"error": f"未知工具: {name}"}, ensure_ascii=False)
 
