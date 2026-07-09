@@ -421,8 +421,8 @@ def _check_react_convergence(tool_calls_log: list, llm_messages: list) -> bool:
     for msg in llm_messages:
         if msg.get("role") == "assistant" and msg.get("content"):
             content = msg["content"]
-            # 排除仍含工具调用标签的
-            if "arrison" in content.lower() or "<invoke>" in content:
+            # 排除仍含工具调用标签的（修正拼写 bug: "arrison" → 工具调用标签检测）
+            if "<tool_call" in content.lower() or "<invoke>" in content or "tool_calls" in content.lower():
                 continue
             if len(content) >= 200:
                 return True
@@ -439,6 +439,12 @@ def _check_react_convergence(tool_calls_log: list, llm_messages: list) -> bool:
         for pattern in numeric_patterns:
             if _re.search(pattern, latest_result):
                 return True
+
+    # 判定 4（P2 扩展）：工具调用 >= 2 且已有足够非空结果（不限数值型，覆盖新闻/资讯类场景）
+    if len(tool_calls_log) >= 2:
+        valid_results = [tc for tc in tool_calls_log if tc.get("result_preview", "")]
+        if len(valid_results) >= 2:
+            return True
 
     return False
 

@@ -210,10 +210,40 @@ _NOUN_PATTERNS = [
 
 
 def _extract_core_nouns(text: str) -> list[str]:
-    """从文本中抽取核心名词（基金代码/名称/指数）。"""
+    """从文本中抽取核心名词（基金代码/名称/指数 + jieba 主题词）。"""
     nouns: list[str] = []
+    # 1. 正则匹配基金代码/指数名/市场名
     for pat in _NOUN_PATTERNS:
         nouns.extend(re.findall(pat, text))
+
+    # 2. jieba 分词提取名词性词语（主题词识别，如"自然灾害/恢复建设/政策利好"）
+    try:
+        import jieba
+        import jieba.posseg as pseg
+        # 名词性词性：n 普通/ nr 人名/ ns 地名/ nt 机构名/ nz 其他专名/ vn 动名词
+        noun_poses = {'n', 'nr', 'ns', 'nt', 'nz', 'vn'}
+        # 停用词过滤（短词/泛化词，但保留金融主题词如"政策/利好/估值"等）
+        stop_words = {
+            '什么', '怎么', '怎么样', '如何', '为什么', '最近', '目前', '现在',
+            '当前', '今天', '情况', '问题',
+            '时候', '地方', '方面', '东西', '事情', '感觉', '觉得',
+            '可以', '能', '能不', '可以不', '是不是', '有没有', '好不好',
+            '嘛', '吗', '呢', '啊', '吧', '哦', '呀',
+        }
+        words = pseg.cut(text)
+        for word, flag in words:
+            w = word.strip()
+            # 名词性、长度≥2、非停用词、非纯数字
+            if (flag in noun_poses and len(w) >= 2
+                    and w not in stop_words and not w.isdigit()
+                    and w not in nouns):
+                nouns.append(w)
+    except ImportError:
+        # jieba 不可用时降级：提取2-4字中文词组
+        for m in re.findall(r'[\u4e00-\u9fa5]{2,4}', text):
+            if m not in nouns and len(m) >= 2:
+                nouns.append(m)
+
     # 去重保序
     seen = set()
     unique = []

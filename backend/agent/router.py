@@ -132,10 +132,15 @@ class SmartRouter:
                 specialists.add("risk_assessor")
                 logger.info("[router] 持仓感知：检测到重仓(>25%)，追加 risk_assessor")
             # 现金占比高 → 追加配置专家
-            cash_match = _re.search(r'现金.*?(\d+)%', portfolio_summary)
-            if cash_match and int(cash_match.group(1)) > 30:
+            cash_match = _re.search(r'现金.*?([\d.]+)%', portfolio_summary)
+            if cash_match and float(cash_match.group(1)) > 30:
                 specialists.add("allocation_advisor")
                 logger.info("[router] 持仓感知：检测到现金占比高(>30%)，追加 allocation_advisor")
+            # 债券占比高 → 追加配置专家（债券超 50% 需评估再平衡机会）
+            bond_match = _re.search(r'债券.*?([\d.]+)%', portfolio_summary)
+            if bond_match and float(bond_match.group(1)) > 50:
+                specialists.add("allocation_advisor")
+                logger.info(f"[router] 持仓感知：检测到债券占比高({bond_match.group(1)}%>50%)，追加 allocation_advisor")
 
         if not specialists:
             return None

@@ -634,6 +634,27 @@ def _phase_info_gather(
             f"(子查询 {len(sub_queries)}, FTS {total_fts}, Chroma {total_chroma})"
         )
 
+        # P1: RAG 命中质量检测 — 最高分低于阈值时标记低质
+        max_score = max((float(r.get("_score", 0)) for r in deduped), default=0.0)
+        if deduped and max_score < 0.05:
+            results["rag_low_quality"] = True
+            logger.warning(
+                f"[pipeline] RAG 命中质量低: max_score={max_score:.4f} < 0.05, "
+                f"将提示专家基于工具数据分析"
+            )
+        elif not deduped:
+            results["rag_low_quality"] = True
+            logger.warning("[pipeline] RAG 无命中，将提示专家基于工具数据分析")
+
+        # P1: 低质时在 rag_context 追加提示，引导专家基于工具数据分析
+        if results.get("rag_low_quality"):
+            low_quality_hint = (
+                "\n\n⚠️ 注意：知识库未检索到高相关内容（命中分数偏低），"
+                "请优先通过工具调用获取最新新闻/行情/持仓数据进行分析，"
+                "不要过度依赖上述知识库片段。"
+            )
+            results["rag_context"] = (results.get("rag_context", "") or "") + low_quality_hint
+
         # 写 rag_logs 日志（补全 Pipeline 主路径的可观测性）
         try:
             log_rag_search(
@@ -697,9 +718,9 @@ def _enhance_rag_query(refined_query: str, query_info: dict) -> str:
 # intent → content_types 映射（用于 intent 驱动检索）
 _INTENT_TO_CONTENT_TYPES = {
     "valuation": ["valuation", "analysis"],
-    "portfolio": ["book", "analysis"],
+    "portfolio": ["analysis", "article"],  # P4: 移除 book（投资书籍摘录与持仓分析相关性差）
     "risk": ["analysis", "article"],
-    "strategy": ["book", "analysis", "article"],
+    "strategy": ["analysis", "article"],   # P4: 移除 book（策略类问题优先分析文章）
     "article": ["article", "author_article"],
 }
 
@@ -2203,14 +2224,22 @@ def _phase_memory(
     # 1. 保存分析结论
     try:
         from db.analysis_conclusions import save_analysis_conclusion
+        targets = query_info.get("targets", [])
+        target_subject = "、".join(targets) if targets else state.original_query[:30]
         conclusion_id = save_analysis_conclusion(
+            source_system="ai_dialogue",
+            source_type="orchestrator",
+            source_id=state.message_id,
+            target_subject=target_subject,
+            action=None,
+            summary=state.answer[:100] if state.answer else "",
+            reasoning=state.answer,
+            key_variables=targets,
+            data_basis=["rag", "portfolio", "tools"],
+            confidence=0.7,
+            urgent=0,
             conversation_id=state.conversation_id,
             message_id=state.message_id,
-            query=state.original_query,
-            answer=state.answer,
-            intent=query_info.get("intent", ""),
-            targets=query_info.get("targets", []),
-            trace_id=trace_id,
         )
         result["saved_conclusion_id"] = conclusion_id
         logger.info(f"[pipeline] 分析结论已保存: id={conclusion_id}")
