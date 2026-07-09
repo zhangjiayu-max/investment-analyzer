@@ -619,3 +619,25 @@ async def get_recommendation_stats_api(days: int = 30):
     """获取推荐准确率统计。"""
     from analysis.recommendation_verifier import get_recommendation_stats
     return get_recommendation_stats(days)
+
+
+@router.get("/api/recommendations/{rec_id}/candidate-funds")
+async def get_candidate_funds_api(rec_id: int):
+    """P2 执行落地：获取建议关联的候选基金列表。
+
+    返回结构：
+    {
+        "recommendation_id": int,
+        "index_name": str,
+        "index_code": str,
+        "direction": str,
+        "target_fund_code": str | None,
+        "target_fund_name": str | None,
+        "candidate_funds": [{"fund_code", "fund_name", "in_holdings"}, ...]
+    }
+    """
+    from services.index_fund_mapper import get_candidate_funds_for_recommendation
+    result = get_candidate_funds_for_recommendation(rec_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail="recommendation not found")
+    return result

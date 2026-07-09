@@ -22,6 +22,10 @@ from db import (
     update_goal_bucket,
     update_user_profile,
     sync_bucket_from_portfolio,
+    list_investment_goals,
+    create_investment_goal,
+    update_investment_goal,
+    delete_investment_goal,
 )
 
 logger = logging.getLogger(__name__)
@@ -216,3 +220,54 @@ def api_sync_buckets():
     cash = get_cash_balance()
     result = sync_bucket_from_portfolio("default", total_assets, cash)
     return result
+
+
+# ── P1 投资目标 CRUD ──────────────────────────────────────
+
+class InvestmentGoalRequest(BaseModel):
+    goal_type: str
+    target_amount: float | None = None
+    target_date: str | None = None
+    monthly_contribution: float | None = None
+    priority: int = 0
+
+
+@router.get("/api/profile/goals")
+def api_list_goals():
+    """列出用户的投资目标。"""
+    return {"items": list_investment_goals("default")}
+
+
+@router.post("/api/profile/goals")
+def api_create_goal(body: InvestmentGoalRequest):
+    """新增投资目标。"""
+    try:
+        goal_id = create_investment_goal(
+            "default",
+            goal_type=body.goal_type,
+            target_amount=body.target_amount,
+            target_date=body.target_date,
+            monthly_contribution=body.monthly_contribution,
+            priority=body.priority,
+        )
+        return {"ok": True, "id": goal_id}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.put("/api/profile/goals/{goal_id}")
+def api_update_goal(goal_id: int, body: dict):
+    """更新投资目标字段。"""
+    ok = update_investment_goal(goal_id, **body)
+    if not ok:
+        raise HTTPException(status_code=404, detail="目标不存在或无有效字段")
+    return {"ok": True}
+
+
+@router.delete("/api/profile/goals/{goal_id}")
+def api_delete_goal(goal_id: int):
+    """删除投资目标。"""
+    ok = delete_investment_goal(goal_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="目标不存在")
+    return {"ok": True}

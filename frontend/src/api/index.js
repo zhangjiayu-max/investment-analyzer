@@ -1049,6 +1049,11 @@ export function adoptRecommendation(recId, adopted) {
   return api.post(`/recommendations/${recId}/adopt`, { adopted })
 }
 
+/** P2 执行落地：获取建议的候选基金列表（用于"去执行"按钮） */
+export function getCandidateFunds(recId) {
+  return api.get(`/recommendations/${recId}/candidate-funds`)
+}
+
 /** 提交 LLM 输出反馈（进化系统） */
 export function submitLlmFeedback({ caller, input_summary = '', output_summary = '', rating, tags = '', comment = '', score_data_accuracy = null, score_logic = null, score_actionability = null, target_type = '', target_id = null }) {
   return api.post('/llm-feedback', { caller, input_summary, output_summary, rating, tags, comment, score_data_accuracy, score_logic, score_actionability, target_type, target_id })
@@ -2264,6 +2269,23 @@ export function deleteGoalBucket(id) {
 /** 根据持仓自动同步资金桶 current_amount */
 export function syncGoalBuckets() {
   return api.post('/profile/buckets/sync')
+}
+
+// ── 投资目标 CRUD（P1 Step3）──────────────────────────────────────
+export function listInvestmentGoals() {
+  return api.get('/profile/goals')
+}
+
+export function createInvestmentGoal(data) {
+  return api.post('/profile/goals', data)
+}
+
+export function updateInvestmentGoal(id, data) {
+  return api.put(`/profile/goals/${id}`, data)
+}
+
+export function deleteInvestmentGoal(id) {
+  return api.delete(`/profile/goals/${id}`)
 }
 
 /** 全局搜索 */

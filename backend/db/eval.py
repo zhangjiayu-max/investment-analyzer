@@ -82,6 +82,10 @@ def init_eval_tables(conn):
     # adopted: 0=未标记, 1=已采纳, -1=未采纳
     _add_column_if_not_exists(conn, "recommendations", "adopted", "INTEGER DEFAULT 0")
     _add_column_if_not_exists(conn, "recommendations", "adopted_at", "TEXT")
+    # P2 执行落地：建议关联基金代码 + 建议金额（用于"去执行"跳转）
+    _add_column_if_not_exists(conn, "recommendations", "target_fund_code", "TEXT")
+    _add_column_if_not_exists(conn, "recommendations", "target_fund_name", "TEXT")
+    _add_column_if_not_exists(conn, "recommendations", "suggested_amount", "REAL")
 
     conn.execute("""
         CREATE TABLE IF NOT EXISTS recommendation_feedback (
@@ -272,6 +276,23 @@ def init_eval_tables(conn):
         )
     """)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_user_pref_uid ON user_preference_learnings(user_id)")
+
+    # ── P1 投资目标表 ──────────────────────────────────
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS investment_goals (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id TEXT DEFAULT 'default',
+            goal_type TEXT NOT NULL,
+            target_amount REAL,
+            target_date TEXT,
+            monthly_contribution REAL,
+            current_progress REAL DEFAULT 0,
+            priority INTEGER DEFAULT 0,
+            created_at TEXT DEFAULT (datetime('now','localtime')),
+            updated_at TEXT DEFAULT (datetime('now','localtime'))
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_investment_goals_uid ON investment_goals(user_id)")
 
     # ── 失败模式表 ──────────────────────────────────
     conn.execute("""

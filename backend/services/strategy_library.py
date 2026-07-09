@@ -85,6 +85,7 @@ def _empty_result(initial_cash: float) -> dict:
         "annual_return": 0.0,
         "max_drawdown": 0.0,
         "sharpe_ratio": 0.0,
+        "volatility": 0.0,
         "nav_curve": [],
         "trades": 0,
         "days": 0,
@@ -185,7 +186,7 @@ def _execute_signals(signals: list[dict], nav_series: list[dict],
 def _build_result(strategy_name: str, nav_series: list[dict],
                   nav_curve: list[dict], total_invested: float,
                   trades: int) -> dict:
-    """构建回测结果 + 计算 4 项核心指标。"""
+    """构建回测结果 + 计算 5 项核心指标（P3 增加 volatility）。"""
     if not nav_curve:
         return _empty_result(total_invested)
 
@@ -196,6 +197,7 @@ def _build_result(strategy_name: str, nav_series: list[dict],
     annual_return = _calc_annual_return(total_return, days)
     max_drawdown = _calc_max_drawdown(values)
     sharpe_ratio = _calc_sharpe(values)
+    volatility = _calc_volatility(values)
 
     return {
         "strategy": strategy_name,
@@ -205,6 +207,7 @@ def _build_result(strategy_name: str, nav_series: list[dict],
         "annual_return": round(annual_return, 4),
         "max_drawdown": round(max_drawdown, 4),
         "sharpe_ratio": round(sharpe_ratio, 4),
+        "volatility": round(volatility, 4),
         "nav_curve": nav_curve,
         "trades": trades,
         "days": days,
@@ -267,6 +270,23 @@ def _calc_sharpe(values: list[float]) -> float:
     return (mean_ret - rf_daily) / std_ret * math.sqrt(TRADING_DAYS_PER_YEAR)
 
 
+def _calc_volatility(values: list[float]) -> float:
+    """年化波动率 = std(daily_return) * sqrt(252)。
+
+    P3 Step1 新增。返回 0.0~1.0 的小数（如 0.18 表示 18%）。
+    """
+    if len(values) < 3:
+        return 0.0
+    returns = []
+    for i in range(1, len(values)):
+        if values[i - 1] > 0:
+            returns.append((values[i] - values[i - 1]) / values[i - 1])
+    if len(returns) < 2:
+        return 0.0
+    std_ret = statistics.pstdev(returns)
+    return std_ret * math.sqrt(TRADING_DAYS_PER_YEAR)
+
+
 # ══════════════════════════════════════════════════════
 # 策略 1：定投策略 DCA
 # ══════════════════════════════════════════════════════
@@ -292,6 +312,15 @@ class DCAStrategy(Strategy):
         interval_days = int(self.params.get("interval_days", 30))
         amount = float(self.params.get("amount", 1000))
         trigger = self.params.get("trigger", "fixed")
+
+        # P3 Step5：估值触发策略仅支持指数（基金没有 percentile）
+        # 检测 series 是否有可用的 percentile 数据，无则降级到 fixed 并标注
+        valuation_degraded = False
+        if trigger == "valuation":
+            has_percentile = any(p.get("percentile") is not None for p in nav_series)
+            if not has_percentile:
+                valuation_degraded = True
+                logger.info("[dca] trigger=valuation 但无 percentile 数据（可能为基金回测），降级到 fixed")
 
         # 预计算均线（trigger=ma 时使用）
         ma20_list: list[float | None] = []
@@ -326,7 +355,7 @@ class DCAStrategy(Strategy):
                         mult = 0.5
                         reason = "MA20下穿MA60，减半买入"
 
-            elif trigger == "valuation":
+            elif trigger == "valuation" and not valuation_degraded:
                 pct = point.get("percentile")
                 if pct is not None:
                     if pct < 30:
@@ -335,6 +364,8 @@ class DCAStrategy(Strategy):
                     elif pct > 70:
                         mult = 0.5
                         reason = f"PE分位{pct:.0f}%>70%，减半买入"
+            elif trigger == "valuation" and valuation_degraded:
+                reason = "估值数据不可用（基金回测不支持估值触发），按固定定投"
 
             signals.append({
                 "date": point["date"],
@@ -477,10 +508,14 @@ class TwoEightStrategy(Strategy):
     参数：
       rebalance_day:       每月再平衡日（默认 1）
       equity_ratio:        股票目标仓位比例（默认 0.8）
-      bond_return_annual:  债券年化收益率（默认 0.03）
+      bond_return_annual:  债券年化收益率（默认 0.03，仅当无 bond_code 时使用）
+      bond_code:           P3 Step4 新增：真实债基代码（如 "511010" 国债ETF）。
+                          指定后用真实债基净值替代固定年化计息；为空或取数失败时回退到 bond_return_annual。
 
     逻辑：
-      - 初始按 equity_ratio 买入股票，剩余为债券（按固定年化计息）
+      - 初始按 equity_ratio 买入股票，剩余为债券
+      - 债券仓位：P3 Step4 优先用真实债基累计净值（与股票净值按日期对齐）；
+        无 bond_code 或取数失败时回退到固定年化计息
       - 每月 rebalance_day 再平衡到目标比例
     """
 
@@ -517,7 +552,10 @@ class TwoEightStrategy(Strategy):
         return signals
 
     def run(self, nav_series: list[dict], initial_cash: float) -> dict:
-        """重写 run：同时跟踪股票仓位和债券仓位。"""
+        """重写 run：同时跟踪股票仓位和债券仓位。
+
+        P3 Step4：债券部分优先用真实债基净值，无 bond_code 或取数失败时回退到固定年化。
+        """
         if not nav_series:
             return _empty_result(initial_cash)
 
@@ -525,15 +563,42 @@ class TwoEightStrategy(Strategy):
         equity_ratio = float(self.params.get("equity_ratio", 0.8))
         bond_return_annual = float(self.params.get("bond_return_annual", 0.03))
         bond_daily_rate = bond_return_annual / 365
+        bond_code = str(self.params.get("bond_code", "")).strip()
 
         first_nav = nav_series[0]["nav"]
         if first_nav <= 0:
             return _empty_result(initial_cash)
 
+        # P3 Step4：预取债基净值序列并按日期建索引
+        bond_nav_by_date: dict[str, float] = {}
+        use_real_bond = False
+        if bond_code:
+            try:
+                bond_series = _fetch_fund_nav_series(bond_code)
+                if bond_series:
+                    for p in bond_series:
+                        bond_nav_by_date[p["date"]] = p["nav"]
+                    # 至少有 1 个交易日匹配，才用真实债基
+                    matched = sum(1 for p in nav_series if p["date"] in bond_nav_by_date)
+                    if matched >= len(nav_series) * 0.5:
+                        use_real_bond = True
+                        logger.info(f"[two_eight] 使用真实债基净值: {bond_code}，匹配 {matched}/{len(nav_series)} 个交易日")
+            except Exception as e:
+                logger.warning(f"[two_eight] 取债基净值失败 ({bond_code})，回退到固定年化: {e}")
+
         # 初始按目标比例分配
         equity_value = initial_cash * equity_ratio
         bond_value = initial_cash * (1 - equity_ratio)
         shares = equity_value / first_nav
+        # P3 Step4：真实债基模式下记录债基份额
+        bond_shares = 0.0
+        if use_real_bond:
+            first_bond_nav = bond_nav_by_date.get(nav_series[0]["date"])
+            if first_bond_nav and first_bond_nav > 0:
+                bond_shares = bond_value / first_bond_nav
+            else:
+                # 首日匹配不到，回退到固定年化
+                use_real_bond = False
         total_invested = initial_cash
         trades = 1  # 初始建仓
         last_month: str | None = None
@@ -546,15 +611,22 @@ class TwoEightStrategy(Strategy):
             if nav <= 0:
                 continue
 
-            # 债券按日计息
-            try:
-                dt_prev = datetime.strptime(str(prev_date), "%Y-%m-%d")
-                dt_cur = datetime.strptime(str(d), "%Y-%m-%d")
-                days_diff = max(0, (dt_cur - dt_prev).days)
-                if days_diff > 0:
-                    bond_value *= (1 + bond_daily_rate) ** days_diff
-            except Exception:
-                pass
+            # 债券按日计息 / P3 Step4：用真实债基净值
+            if use_real_bond:
+                bond_nav_today = bond_nav_by_date.get(d)
+                if bond_nav_today and bond_nav_today > 0:
+                    bond_value = bond_shares * bond_nav_today
+                # 找不到当日净值时保持上一日 bond_value 不变（避免数据缺失跳变）
+            else:
+                # 固定年化计息（原逻辑）
+                try:
+                    dt_prev = datetime.strptime(str(prev_date), "%Y-%m-%d")
+                    dt_cur = datetime.strptime(str(d), "%Y-%m-%d")
+                    days_diff = max(0, (dt_cur - dt_prev).days)
+                    if days_diff > 0:
+                        bond_value *= (1 + bond_daily_rate) ** days_diff
+                except Exception:
+                    pass
             prev_date = d
 
             equity_value = shares * nav
@@ -573,10 +645,18 @@ class TwoEightStrategy(Strategy):
                             # 债转股
                             shares += diff / nav
                             bond_value -= diff
+                            if use_real_bond:
+                                bond_nav_today = bond_nav_by_date.get(d, 0)
+                                if bond_nav_today > 0:
+                                    bond_shares = bond_value / bond_nav_today
                         else:
                             # 股转债
                             shares -= (-diff) / nav
                             bond_value += (-diff)
+                            if use_real_bond:
+                                bond_nav_today = bond_nav_by_date.get(d, 0)
+                                if bond_nav_today > 0:
+                                    bond_shares = bond_value / bond_nav_today
                         trades += 1
                     equity_value = shares * nav
             except Exception:
@@ -738,7 +818,8 @@ STRATEGY_TEMPLATES = [
         "params": {
             "rebalance_day": {"type": "int", "default": 1, "description": "每月再平衡日"},
             "equity_ratio": {"type": "float", "default": 0.8, "description": "股票目标比例"},
-            "bond_return_annual": {"type": "float", "default": 0.03, "description": "债券年化收益率"},
+            "bond_return_annual": {"type": "float", "default": 0.03, "description": "债券年化收益率（无 bond_code 时使用）"},
+            "bond_code": {"type": "str", "default": "511010", "description": "P3 真实债基代码（如 511010 国债ETF），留空回退到固定年化"},
         },
     },
     {
@@ -761,13 +842,28 @@ STRATEGY_TEMPLATES = [
 # ══════════════════════════════════════════════════════
 
 def _fetch_nav_series(target_code: str, start_date: str | None = None,
-                      end_date: str | None = None) -> list[dict]:
-    """从 db.valuations 取历史净值序列（按日期升序）。
+                      end_date: str | None = None,
+                      target_type: str = "index") -> list[dict]:
+    """从 db.valuations / services.market_data 取历史净值序列（按日期升序）。
 
-    将 index_valuations 表的 current_point 作为 nav，percentile 用于估值触发。
+    P3 Step1 改造：按 target_type 分流
+      - "index"：从 index_valuations 表取 current_point 作为 nav，附带 percentile/pe（用于估值触发策略）
+      - "fund" ：从 services.market_data.get_fund_nav 取真实累计净值，无 percentile/pe 字段
 
     Returns:
         [{"date": str, "nav": float, "percentile": float|None, "pe": float|None}, ...]
+        （fund 类型中 percentile/pe 恒为 None）
+    """
+    if target_type == "fund":
+        return _fetch_fund_nav_series(target_code, start_date, end_date)
+    return _fetch_index_nav_series(target_code, start_date, end_date)
+
+
+def _fetch_index_nav_series(target_code: str, start_date: str | None = None,
+                            end_date: str | None = None) -> list[dict]:
+    """指数净值序列（原 _fetch_nav_series 逻辑）。
+
+    将 index_valuations 表的 current_point 作为 nav，percentile 用于估值触发。
     """
     rows = get_valuation_history(target_code, days=3650, metric_type="市盈率")
     if not rows:
@@ -804,36 +900,152 @@ def _fetch_nav_series(target_code: str, start_date: str | None = None,
     return series
 
 
+def _fetch_fund_nav_series(fund_code: str, start_date: str | None = None,
+                           end_date: str | None = None) -> list[dict]:
+    """基金累计净值序列（P3 Step1 新增）。
+
+    调 services.market_data.get_fund_nav 取真实累计净值（避免用指数点位冒充）。
+    基金没有估值数据，所以 percentile/pe 恒为 None（DCA valuation 触发器会自动回退到 fixed）。
+    """
+    try:
+        from services.market_data import get_fund_nav
+        df = get_fund_nav(fund_code)
+    except Exception as e:
+        logger.warning(f"取基金净值失败 ({fund_code}): {e}")
+        return []
+
+    if df is None or len(df) == 0:
+        return []
+
+    series: list[dict] = []
+    for _, row in df.iterrows():
+        try:
+            d = str(row.get("净值日期", ""))
+            # 优先用累计净值，回退到单位净值
+            nav = row.get("累计净值")
+            if nav is None or (isinstance(nav, float) and math.isnan(nav)):
+                nav = row.get("单位净值")
+            nav = float(nav) if nav is not None else None
+        except (TypeError, ValueError):
+            continue
+        if not d or nav is None or nav <= 0:
+            continue
+        if start_date and d < start_date:
+            continue
+        if end_date and d > end_date:
+            continue
+        series.append({
+            "date": d,
+            "nav": nav,
+            "percentile": None,
+            "pe": None,
+        })
+
+    series.sort(key=lambda x: x["date"])
+    return series
+
+
+def _fetch_benchmark_series(target_code: str, target_type: str,
+                            start_date: str | None = None,
+                            end_date: str | None = None) -> list[dict]:
+    """基准净值序列（P3 Step3 新增）。
+
+    用于回测时与策略净值曲线对比，返回归一化净值曲线（首日 = 1.0）。
+      - target_type="index"：直接用 _fetch_index_nav_series（指数本身就是基准）
+      - target_type="fund" ：用 _fetch_fund_nav_series 的标的指数作为基准
+        (基金代码→指数代码映射，例如 510300→000300)
+
+    Returns:
+        [{"date": str, "value": float}, ...]（首日 value=1.0）
+    """
+    raw_series: list[dict] = []
+    if target_type == "index":
+        raw_series = _fetch_index_nav_series(target_code, start_date, end_date)
+    else:
+        # 基金回测：尝试映射到对应指数作为基准
+        bench_code = _fund_to_index_code(target_code)
+        if bench_code:
+            raw_series = _fetch_index_nav_series(bench_code, start_date, end_date)
+        if not raw_series:
+            # 兜底：用基金自身累计净值作为基准
+            raw_series = _fetch_fund_nav_series(target_code, start_date, end_date)
+
+    if not raw_series:
+        return []
+
+    base_nav = raw_series[0].get("nav")
+    if not base_nav or base_nav <= 0:
+        return []
+
+    bench_curve: list[dict] = []
+    for p in raw_series:
+        nav = p.get("nav")
+        if nav is None or nav <= 0:
+            continue
+        bench_curve.append({
+            "date": p["date"],
+            "value": round(nav / base_nav, 4),
+        })
+    return bench_curve
+
+
+def _fund_to_index_code(fund_code: str) -> str | None:
+    """基金代码 → 对应指数代码（用于基准对比）。
+
+    P3 Step3 新增。覆盖常见 ETF/联接基金的指数映射。
+    """
+    _MAP = {
+        # 沪深300 ETF/联接
+        "510300": "000300", "510310": "000300", "110020": "000300", "160706": "000300",
+        # 中证500
+        "510500": "000905", "510510": "000905", "161022": "000905",
+        # 中证1000
+        "560010": "000852", "006325": "000852",
+        # 上证50
+        "510050": "000016", "110003": "000016",
+        # 创业板
+        "159915": "399006", "161022": "399006",
+        # 中证白酒
+        "161725": "399997",
+        # 中证红利
+        "100032": "000922",
+    }
+    return _MAP.get(fund_code)
+
+
 def run_backtest(strategy_name: str, target_code: str, params: dict,
                  start_date: str | None = None, end_date: str | None = None,
-                 initial_cash: float = 100000) -> dict:
+                 initial_cash: float = 100000,
+                 target_type: str = "index") -> dict:
     """运行单次回测。
 
     流程：
-      1. 从 db.valuations 取历史净值
+      1. 按 target_type 取历史净值（index=估值表点位, fund=真实累计净值）
       2. 实例化策略类
       3. 调 strategy.run() 跑回测
-      4. 计算指标（total_return / annual_return / max_drawdown / sharpe_ratio）
-      5. 保存到 backtest_results 表
-      6. 返回结果 + 净值曲线 + 信号
+      4. 计算指标（total_return / annual_return / max_drawdown / sharpe_ratio / volatility）
+      5. P3 Step3：取基准净值序列并归一化
+      6. 保存到 backtest_results 表（含 volatility + benchmark_nav_curve）
+      7. 返回结果 + 净值曲线 + 信号 + 基准曲线
 
     Args:
         strategy_name: 策略名称（dca / grid / two_eight / core_satellite）
-        target_code:   目标指数代码
+        target_code:   目标代码（指数代码或基金代码）
         params:        策略参数
         start_date:    起始日期（YYYY-MM-DD），可选
         end_date:      结束日期，可选
         initial_cash:  初始资金
+        target_type:   "index" 或 "fund"（P3 Step1 新增）
 
     Returns:
         回测结果 dict。数据不足时返回 {"status": "error", ...}。
     """
-    # 1. 取历史净值
-    nav_series = _fetch_nav_series(target_code, start_date, end_date)
+    # 1. 取历史净值（按 target_type 分流）
+    nav_series = _fetch_nav_series(target_code, start_date, end_date, target_type=target_type)
     if len(nav_series) < 2:
         return {
             "status": "error",
-            "error": f"数据不足：{target_code} 仅有 {len(nav_series)} 条记录，至少需要 2 条",
+            "error": f"数据不足：{target_code}({target_type}) 仅有 {len(nav_series)} 条记录，至少需要 2 条",
             "nav_series_count": len(nav_series),
         }
 
@@ -852,6 +1064,7 @@ def run_backtest(strategy_name: str, target_code: str, params: dict,
     # 补充元信息
     result["status"] = "ok"
     result["target_code"] = target_code
+    result["target_type"] = target_type
     result["strategy_name"] = strategy_name
     result["params"] = params
     result["start_date"] = nav_series[0]["date"]
@@ -859,15 +1072,33 @@ def run_backtest(strategy_name: str, target_code: str, params: dict,
     result["data_points"] = len(nav_series)
     result["signals"] = strategy.generate_signals(nav_series)
 
-    # 4-5. 保存到 backtest_results 表
+    # 4. P3 Step3：取基准净值序列并归一化
+    benchmark_nav_curve = _fetch_benchmark_series(
+        target_code, target_type,
+        start_date=nav_series[0]["date"],
+        end_date=nav_series[-1]["date"],
+    )
+    benchmark_return = 0.0
+    if benchmark_nav_curve:
+        first_v = benchmark_nav_curve[0].get("value", 1.0)
+        last_v = benchmark_nav_curve[-1].get("value", 1.0)
+        if first_v > 0:
+            benchmark_return = round(last_v - first_v, 4)  # 归一化后直接相减即收益率
+    result["benchmark_nav_curve"] = benchmark_nav_curve
+    result["benchmark_return"] = benchmark_return
+
+    # 5. 保存到 backtest_results 表
     try:
         name = f"{strategy_name}_{target_code}_{nav_series[-1]['date']}"
-        benchmark = {"total_return": 0}
+        benchmark = {
+            "total_return": benchmark_return,
+            "nav_curve": benchmark_nav_curve,
+        }
         months = max(1, result.get("days", 0) // 30)
         backtest_id = save_backtest(
             name=name,
             target_code=target_code,
-            target_type="index",
+            target_type=target_type,
             strategy=strategy_name,
             params=params,
             result=result,
@@ -884,22 +1115,24 @@ def run_backtest(strategy_name: str, target_code: str, params: dict,
 def parameter_sweep(strategy_name: str, target_code: str,
                     param_ranges: dict, start_date: str | None = None,
                     end_date: str | None = None,
-                    initial_cash: float = 100000) -> list[dict]:
+                    initial_cash: float = 100000,
+                    target_type: str = "index") -> list[dict]:
     """参数扫描：遍历参数组合，各跑一次回测，按 sharpe_ratio 降序返回。
 
     Args:
         strategy_name: 策略名称
-        target_code:   目标指数代码
+        target_code:   目标代码（指数或基金）
         param_ranges:  参数范围 {"param_name": [val1, val2, ...]}
         start_date:    起始日期
         end_date:      结束日期
         initial_cash:  初始资金
+        target_type:   "index" 或 "fund"（P3 Step1 新增）
 
     Returns:
         各参数组合的回测结果列表。数据不足时返回空列表。
     """
     # 取数据一次（避免重复查询）
-    nav_series = _fetch_nav_series(target_code, start_date, end_date)
+    nav_series = _fetch_nav_series(target_code, start_date, end_date, target_type=target_type)
     if len(nav_series) < 2:
         return []
 
@@ -919,6 +1152,7 @@ def parameter_sweep(strategy_name: str, target_code: str,
         result["params"] = combo
         result["strategy_name"] = strategy_name
         result["target_code"] = target_code
+        result["target_type"] = target_type
         results.append(result)
 
     # 按 sharpe_ratio 降序
@@ -990,6 +1224,8 @@ _STRATEGY_TEMPLATES = [
         "params": {
             "equity_ratio": {"type": "float", "default": 0.8, "description": "股票比例"},
             "rebalance_day": {"type": "int", "default": 1, "description": "每月再平衡日"},
+            "bond_return_annual": {"type": "float", "default": 0.03, "description": "债券年化收益率（无 bond_code 时使用）"},
+            "bond_code": {"type": "str", "default": "511010", "description": "P3 真实债基代码（如 511010 国债ETF），留空回退到固定年化"},
         },
     },
     {

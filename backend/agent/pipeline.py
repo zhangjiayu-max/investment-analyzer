@@ -2348,6 +2348,25 @@ def _extract_and_save_recommendations(
             bl = None
         baselines.append(bl)
 
+    # 2.5 P2 执行落地：尝试关联 target_fund_code（持仓优先 → 内置映射表）
+    try:
+        from services.index_fund_mapper import find_funds_by_index
+        for rec in valid_recs:
+            if rec.get("target_fund_code"):
+                continue  # 已填充，跳过
+            idx_code = (rec.get("index_code") or "").strip()
+            if not idx_code:
+                continue
+            candidates = find_funds_by_index(idx_code, user_holdings_only=True)
+            if not candidates:
+                continue
+            # 优先选 in_holdings=True 的候选
+            picked = next((c for c in candidates if c.get("in_holdings")), candidates[0])
+            rec["target_fund_code"] = picked["fund_code"]
+            rec["target_fund_name"] = picked["fund_name"]
+    except Exception as e:
+        logger.debug(f"[pipeline:{trace_id}] 关联 target_fund_code 失败（不影响主流程）: {e}")
+
     # 3. 落库
     try:
         from db.dashboard import save_recommendations
@@ -2377,6 +2396,93 @@ def _extract_and_save_recommendations(
         logger.warning(f"[pipeline:{trace_id}] 建议落库失败: {e}")
 
     return result
+
+
+# 股票类指数关键词（用于 out_of_focus 判定）
+_STOCK_INDEX_KEYWORDS = {"股票", "沪深300", "中证500", "中证1000", "上证50", "创业板", "科创", "证券", "银行", "白酒", "消费", "医药", "军工", "新能源", "半导体", "芯片"}
+
+
+def _matches_focus(index_name: str, index_code: str, focus_assets: list) -> bool:
+    """判断建议标的是否在用户关注品种范围内。
+
+    focus_assets 形如 ["index", "fund", "bond", "stock", "gold", "cash"]。
+    判定逻辑：
+    - 若 focus_assets 含 'stock' → 视为关注股票，所有标的均匹配
+    - 若 focus_assets 不含 'stock' 但标的为股票类指数 → 不匹配
+    - 其余情况默认匹配（避免过度拦截）
+    """
+    if not focus_assets:
+        return True  # 用户未设定关注品种，不拦截
+    if "stock" in focus_assets:
+        return True
+    # 用户不关注股票，但标的为股票类指数 → 不匹配
+    target = f"{index_name or ''} {index_code or ''}".strip()
+    if not target:
+        return True
+    for kw in _STOCK_INDEX_KEYWORDS:
+        if kw in target:
+            return False
+    return True
+
+
+def _apply_kyc_guardrail(recommendations: list, user_profile: dict) -> list:
+    """P1 Step5：根据用户画像对建议加 guardrail 标记。
+
+    规则：
+    1. risk_tolerance in (conservative, steady) 且 direction=up 且 confidence=low → risky_for_profile
+    2. loss_tolerance=low 且 direction=down → 不拦截（减仓对低亏损承受者是保护）
+    3. risk_tolerance in (conservative, steady) 且 focus_assets 不含 stock 但建议标的为股票指数 → out_of_focus
+    4. max_single_position_pct 已设且建议涉及加仓 → position_limit_reminder
+
+    直接修改 recommendations 中每条的 guardrail_flags 字段并返回。
+    """
+    if not recommendations or not user_profile:
+        return recommendations
+
+    risk_tolerance = (user_profile.get("risk_tolerance") or "").strip().lower()
+    focus_assets_raw = user_profile.get("focus_assets", "[]")
+    if isinstance(focus_assets_raw, str):
+        try:
+            import json as _json
+            focus_assets = _json.loads(focus_assets_raw) or []
+        except Exception:
+            focus_assets = []
+    else:
+        focus_assets = focus_assets_raw or []
+    max_pct = user_profile.get("max_single_position_pct")
+
+    is_conservative = risk_tolerance in ("conservative", "steady")
+
+    for rec in recommendations:
+        if not isinstance(rec, dict):
+            continue
+        flags = []
+        direction = (rec.get("direction") or "").strip().lower()
+        confidence = (rec.get("confidence") or "medium").strip().lower()
+
+        # 规则1：保守用户 + 低置信度加仓
+        if is_conservative and direction == "up" and confidence == "low":
+            flags.append("risky_for_profile")
+
+        # 规则3：超出关注品种
+        if is_conservative and not _matches_focus(
+            rec.get("index_name", ""), rec.get("index_code", ""), focus_assets,
+        ):
+            flags.append("out_of_focus")
+
+        # 规则4：持仓上限提醒
+        if direction == "up" and max_pct:
+            try:
+                pct_val = float(max_pct)
+                if pct_val > 0:
+                    flags.append(f"position_limit:{pct_val:.0f}%")
+            except (TypeError, ValueError):
+                pass
+
+        if flags:
+            rec["guardrail_flags"] = flags
+
+    return recommendations
 
 
 def _phase_memory(
@@ -2424,6 +2530,27 @@ def _phase_memory(
         rec_result = _extract_and_save_recommendations(
             state, query_info, conclusion_id, trace_id,
         )
+        # P1 Step5：对建议加 KYC guardrail 标记
+        try:
+            guardrail_enabled = get_config_bool("pipeline.kyc_guardrail_enabled", True)
+        except Exception:
+            guardrail_enabled = True
+        if guardrail_enabled and rec_result.get("recommendations"):
+            try:
+                from db import get_user_profile
+                user_profile = get_user_profile("default") or {}
+                rec_result["recommendations"] = _apply_kyc_guardrail(
+                    rec_result["recommendations"], user_profile,
+                )
+                # 统计有标记的建议数
+                flagged = sum(1 for r in rec_result["recommendations"] if r.get("guardrail_flags"))
+                if flagged:
+                    logger.info(
+                        f"[pipeline:{trace_id}] KYC guardrail 标记 {flagged}/"
+                        f"{len(rec_result['recommendations'])} 条建议"
+                    )
+            except Exception as e:
+                logger.warning(f"[pipeline:{trace_id}] guardrail 标记失败: {e}")
         result["recommendations"] = rec_result
     except Exception as e:
         logger.warning(f"[pipeline] 建议提取落库失败: {e}")

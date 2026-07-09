@@ -11,24 +11,35 @@ import EmptyState from './ui/EmptyState.vue'
 
 const { showToast } = useToast()
 
-// ── 策略定义 ──
+// ── 策略定义（P3 Step2：key 对齐后端 STRATEGY_REGISTRY）──
 const STRATEGIES = [
   { key: 'dca', label: '定投', desc: '定期定额买入，平滑成本' },
   { key: 'grid', label: '网格', desc: '区间网格买卖，赚取波动' },
-  { key: 'dual_momentum', label: '二八', desc: '股债轮动，动量择时' },
+  { key: 'two_eight', label: '二八', desc: '股债轮动，动量择时' },
   { key: 'core_satellite', label: '核心卫星', desc: '核心持仓 + 卫星增强' },
 ]
 
 // ── 参数 ──
 const strategy = ref('dca')
 const targetCode = ref('')
+const targetType = ref('index')  // P3 Step2：index | fund
 const initialCash = ref(10000)
-const monthlyAmount = ref(1000)
-const gridLow = ref(0.8)
-const gridHigh = ref(1.2)
-const gridSteps = ref(6)
-const rebalanceMonths = ref(3)
-const satelliteRatio = ref(0.3)
+// DCA
+const dcaIntervalDays = ref(7)
+const dcaAmount = ref(1000)
+const dcaTrigger = ref('fixed')
+// Grid
+const gridSteps = ref(5)
+const gridPct = ref(0.05)
+const gridBaseAmount = ref(5000)
+// TwoEight
+const equityRatio = ref(0.8)
+const rebalanceDay = ref(1)
+const bondCode = ref('511010')  // P3 Step4：真实债基代码
+// CoreSatellite
+const coreRatio = ref(0.6)
+const maShort = ref(20)
+const maLong = ref(60)
 
 // ── 数据状态 ──
 const loading = ref(false)
@@ -39,16 +50,17 @@ const strategyList = ref([])
 
 const activeStrategy = computed(() => STRATEGIES.find(s => s.key === strategy.value) || STRATEGIES[0])
 
-// ── 收益指标卡片 ──
+// ── 收益指标卡片（P3 Step2：字段名对齐后端 annual_return/sharpe_ratio）──
 const metrics = computed(() => {
   if (!result.value || result.value.status !== 'ok') return []
   const r = result.value.result || result.value
   return [
     { key: 'total_return', label: '累计收益', value: r.total_return, fmt: 'pct' },
-    { key: 'ann_return', label: '年化收益', value: r.ann_return, fmt: 'pct' },
+    { key: 'annual_return', label: '年化收益', value: r.annual_return, fmt: 'pct' },
     { key: 'max_drawdown', label: '最大回撤', value: r.max_drawdown, fmt: 'pct' },
     { key: 'volatility', label: '波动率', value: r.volatility, fmt: 'pct' },
-    { key: 'sharpe', label: '夏普比率', value: r.sharpe, fmt: 'num' },
+    { key: 'sharpe_ratio', label: '夏普比率', value: r.sharpe_ratio, fmt: 'num' },
+    { key: 'benchmark_return', label: '基准收益', value: r.benchmark_return, fmt: 'pct' },
     { key: 'final_value', label: '期末资产', value: r.final_value, fmt: 'money' },
   ]
 })
@@ -66,13 +78,16 @@ function metricClass(v, type) {
   return ''
 }
 
-// ── 净值曲线 SVG ──
+// ── 净值曲线 SVG（P3 Step2：用 nav_curve/benchmark_nav_curve，提取 value 字段）──
 const chartWidth = 700
 const chartHeight = 200
 const chartPath = computed(() => {
   if (!result.value || result.value.status !== 'ok') return null
-  const curve = result.value.result?.equity_curve || result.value.equity_curve || []
-  const bench = result.value.benchmark?.equity_curve || []
+  const rawCurve = result.value.result?.nav_curve || result.value.nav_curve || []
+  const rawBench = result.value.result?.benchmark_nav_curve || result.value.benchmark_nav_curve || []
+  // 提取 value 字段（后端返回 [{date, value}]）
+  const curve = rawCurve.map(p => (typeof p === 'number' ? p : p.value)).filter(v => v != null)
+  const bench = rawBench.map(p => (typeof p === 'number' ? p : p.value)).filter(v => v != null)
   if (!curve.length) return null
 
   const all = [...curve, ...bench]
@@ -102,10 +117,42 @@ async function loadStrategies() {
   }
 }
 
+// ── 按策略类型构造 params（P3 Step2：字段名对齐后端 STRATEGY_TEMPLATES）──
+function buildParams() {
+  switch (strategy.value) {
+    case 'dca':
+      return {
+        interval_days: dcaIntervalDays.value,
+        amount: dcaAmount.value,
+        trigger: dcaTrigger.value,
+      }
+    case 'grid':
+      return {
+        grid_steps: gridSteps.value,
+        grid_pct: gridPct.value,
+        base_amount: gridBaseAmount.value,
+      }
+    case 'two_eight':
+      return {
+        equity_ratio: equityRatio.value,
+        rebalance_day: rebalanceDay.value,
+        bond_code: bondCode.value.trim(),
+      }
+    case 'core_satellite':
+      return {
+        core_ratio: coreRatio.value,
+        ma_short: maShort.value,
+        ma_long: maLong.value,
+      }
+    default:
+      return {}
+  }
+}
+
 // ── 执行回测 ──
 async function doBacktest() {
   if (!targetCode.value.trim()) {
-    showToast('请输入标的指数代码', 'warning')
+    showToast('请输入标的代码', 'warning')
     return
   }
   loading.value = true
@@ -114,13 +161,9 @@ async function doBacktest() {
     const payload = {
       strategy: strategy.value,
       target_code: targetCode.value.trim(),
+      target_type: targetType.value,  // P3 Step2：新增 target_type
       initial_cash: initialCash.value,
-      monthly_amount: monthlyAmount.value,
-      grid_low: gridLow.value,
-      grid_high: gridHigh.value,
-      grid_steps: gridSteps.value,
-      rebalance_months: rebalanceMonths.value,
-      satellite_ratio: satelliteRatio.value,
+      params: buildParams(),
     }
     const { data } = await runStrategyBacktest(payload)
     result.value = data
@@ -188,10 +231,32 @@ onMounted(() => {
           </div>
         </div>
 
-        <!-- 标的 -->
+        <!-- 标的（P3 Step2：支持指数/基金切换）-->
         <div class="param-section">
-          <label class="param-label terminal-label">标的指数代码</label>
-          <input v-model="targetCode" class="param-input font-jet" placeholder="如 000300（沪深300）" />
+          <label class="param-label terminal-label">标的类型</label>
+          <div class="target-type-tabs">
+            <button
+              type="button"
+              :class="['type-btn', { active: targetType === 'index' }]"
+              @click="targetType = 'index'"
+            >指数</button>
+            <button
+              type="button"
+              :class="['type-btn', { active: targetType === 'fund' }]"
+              @click="targetType = 'fund'"
+            >基金</button>
+          </div>
+        </div>
+
+        <div class="param-section">
+          <label class="param-label terminal-label">
+            {{ targetType === 'index' ? '标的指数代码' : '标的基金代码' }}
+          </label>
+          <input
+            v-model="targetCode"
+            class="param-input font-jet"
+            :placeholder="targetType === 'index' ? '如 000300（沪深300）' : '如 510300（沪深300ETF）'"
+          />
         </div>
 
         <!-- 通用参数 -->
@@ -200,47 +265,71 @@ onMounted(() => {
           <input v-model.number="initialCash" type="number" min="0" step="1000" class="param-input font-jet" />
         </div>
 
-        <!-- 定投参数 -->
+        <!-- 定投参数（P3 Step2：字段名对齐后端）-->
         <template v-if="strategy === 'dca'">
           <div class="param-section">
-            <label class="param-label terminal-label">每月投入</label>
-            <input v-model.number="monthlyAmount" type="number" min="0" step="100" class="param-input font-jet" />
+            <label class="param-label terminal-label">定投间隔（天）</label>
+            <input v-model.number="dcaIntervalDays" type="number" min="1" max="90" class="param-input font-jet" />
+          </div>
+          <div class="param-section">
+            <label class="param-label terminal-label">每次定投金额</label>
+            <input v-model.number="dcaAmount" type="number" min="0" step="100" class="param-input font-jet" />
+          </div>
+          <div class="param-section">
+            <label class="param-label terminal-label">触发方式</label>
+            <select v-model="dcaTrigger" class="param-input font-jet">
+              <option value="fixed">固定定投</option>
+              <option value="ma">均线交叉</option>
+              <option value="valuation" :disabled="targetType === 'fund'">估值分位（仅指数）</option>
+            </select>
           </div>
         </template>
 
-        <!-- 网格参数 -->
+        <!-- 网格参数（P3 Step2：字段名对齐后端）-->
         <template v-if="strategy === 'grid'">
           <div class="param-section">
-            <label class="param-label terminal-label">网格下限（倍）</label>
-            <input v-model.number="gridLow" type="number" min="0.1" max="1" step="0.05" class="param-input font-jet" />
-          </div>
-          <div class="param-section">
-            <label class="param-label terminal-label">网格上限（倍）</label>
-            <input v-model.number="gridHigh" type="number" min="1" max="3" step="0.05" class="param-input font-jet" />
-          </div>
-          <div class="param-section">
-            <label class="param-label terminal-label">网格档数</label>
+            <label class="param-label terminal-label">网格层数</label>
             <input v-model.number="gridSteps" type="number" min="2" max="20" class="param-input font-jet" />
           </div>
-        </template>
-
-        <!-- 二八参数 -->
-        <template v-if="strategy === 'dual_momentum'">
           <div class="param-section">
-            <label class="param-label terminal-label">再平衡频率（月）</label>
-            <input v-model.number="rebalanceMonths" type="number" min="1" max="12" class="param-input font-jet" />
+            <label class="param-label terminal-label">每格涨跌幅</label>
+            <input v-model.number="gridPct" type="number" min="0.01" max="0.2" step="0.01" class="param-input font-jet" />
+          </div>
+          <div class="param-section">
+            <label class="param-label terminal-label">基础仓位金额</label>
+            <input v-model.number="gridBaseAmount" type="number" min="0" step="500" class="param-input font-jet" />
           </div>
         </template>
 
-        <!-- 核心卫星参数 -->
+        <!-- 二八参数（P3 Step2：字段名对齐后端 + P3 Step4 加 bond_code）-->
+        <template v-if="strategy === 'two_eight'">
+          <div class="param-section">
+            <label class="param-label terminal-label">股票目标比例</label>
+            <input v-model.number="equityRatio" type="number" min="0" max="1" step="0.05" class="param-input font-jet" />
+          </div>
+          <div class="param-section">
+            <label class="param-label terminal-label">每月再平衡日</label>
+            <input v-model.number="rebalanceDay" type="number" min="1" max="28" class="param-input font-jet" />
+          </div>
+          <div class="param-section">
+            <label class="param-label terminal-label">债券基金代码（P3）</label>
+            <input v-model="bondCode" class="param-input font-jet" placeholder="如 511010（国债ETF），留空用固定年化" />
+          </div>
+        </template>
+
+        <!-- 核心卫星参数（P3 Step2：字段名对齐后端）-->
         <template v-if="strategy === 'core_satellite'">
           <div class="param-section">
-            <label class="param-label terminal-label">卫星仓位比例</label>
-            <input v-model.number="satelliteRatio" type="number" min="0" max="1" step="0.05" class="param-input font-jet" />
+            <label class="param-label terminal-label">核心仓位比例</label>
+            <input v-model.number="coreRatio" type="number" min="0" max="1" step="0.05" class="param-input font-jet" />
           </div>
           <div class="param-section">
-            <label class="param-label terminal-label">再平衡频率（月）</label>
-            <input v-model.number="rebalanceMonths" type="number" min="1" max="12" class="param-input font-jet" />
+            <label class="param-label terminal-label">短期均线窗口</label>
+            <input v-model.number="maShort" type="number" min="5" max="60" class="param-input font-jet" />
+          </div>
+          <div class="param-section">
+            <label class="param-label terminal-label">长期均线窗口</label>
+            <input v-model.number="maLong" type="number" min="20" max="250" class="param-input font-jet" />
           </div>
         </template>
 
@@ -298,10 +387,12 @@ onMounted(() => {
             </svg>
           </div>
 
-          <!-- 策略信息 -->
+          <!-- 策略信息（P3 Step2：显示 target_type + 区间）-->
           <div class="strategy-info terminal-label">
             <Icon name="info" size="14" />
             策略：{{ activeStrategy.label }} · 标的：{{ result.target_code || targetCode }}
+            （{{ result.target_type === 'fund' ? '基金' : '指数' }}）
+            · 区间：{{ result.start_date || '-' }} ~ {{ result.end_date || '-' }} · {{ result.data_points || 0 }} 个数据点
           </div>
         </template>
       </main>
@@ -473,11 +564,37 @@ onMounted(() => {
 }
 .error-result { color: var(--color-danger); }
 
-/* 指标卡片 */
+/* 指标卡片（P3 Step2：7 个指标，4 列布局以便整齐展示）*/
 .metrics-grid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: var(--space-3);
+}
+
+/* P3 Step2：标的类型切换 */
+.target-type-tabs {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+}
+.type-btn {
+  padding: 6px 10px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-bg-input);
+  color: var(--color-text-muted);
+  font-size: 0.85rem;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.type-btn:hover {
+  border-color: var(--color-primary);
+}
+.type-btn.active {
+  background: var(--color-primary-bg);
+  border-color: var(--color-primary);
+  color: var(--color-primary);
+  font-weight: 600;
 }
 .metric-card {
   background: var(--color-bg-input);
@@ -604,5 +721,9 @@ onMounted(() => {
   .strategy-page { padding: var(--space-3); }
   .metrics-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .metric-card strong { font-size: 1rem; }
+}
+
+@media (max-width: 1024px) and (min-width: 769px) {
+  .metrics-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 }
 </style>

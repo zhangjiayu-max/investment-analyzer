@@ -285,6 +285,49 @@ def kyc_profile_to_text(user_id: str = "default", dimensions: list = None) -> st
             val_txt = str(val)
         if val_txt:
             parts.append(f"{label}：{val_txt}")
-    if not parts:
+
+    # P1 Step3：追加投资目标摘要（与基础画像并列，专家据此评估建议对目标的契合度）
+    goals_text = _render_investment_goals_summary(user_id)
+    if not parts and not goals_text:
         return ""
-    return "<kyc_profile>\n" + "；".join(parts) + "\n</kyc_profile>"
+
+    sections = []
+    if parts:
+        sections.append("；".join(parts))
+    if goals_text:
+        sections.append(goals_text)
+    return "<kyc_profile>\n" + "\n".join(sections) + "\n</kyc_profile>"
+
+
+def _render_investment_goals_summary(user_id: str = "default") -> str:
+    """渲染投资目标摘要段。无目标时返回空串。
+
+    示例：用户投资目标：退休储备 200万元（2030年），月投入 5000元，当前进度 35%
+    多目标时按 priority 倒序拼接，最多 3 条以控制 token。
+    """
+    try:
+        from db import list_investment_goals
+        goals = list_investment_goals(user_id)
+    except Exception as e:
+        logger.debug(f"加载投资目标失败: {e}")
+        return ""
+    if not goals:
+        return ""
+
+    fragments = []
+    for g in goals[:3]:
+        seg = g.get("goal_type", "")
+        if g.get("target_amount"):
+            seg += f" {g['target_amount']:.0f}万元" if g["target_amount"] >= 1 else f" {g['target_amount']:.2f}万元"
+        if g.get("target_date"):
+            seg += f"（{g['target_date']}）"
+        if g.get("monthly_contribution"):
+            seg += f"，月投入 {g['monthly_contribution']:.0f}元"
+        prog = g.get("current_progress")
+        if prog is not None and prog > 0:
+            seg += f"，当前进度 {prog:.0%}"
+        fragments.append(seg.strip())
+
+    if not fragments:
+        return ""
+    return "用户投资目标：" + "；".join(fragments)

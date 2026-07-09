@@ -5292,15 +5292,14 @@ def run_peer_review(decision: dict, reviewer_type: str) -> dict | None:
     Returns:
         {"verdict": ..., "score": ..., "concerns": [...], "suggestions": [...]} 或 None
     """
-    from db import get_user_profile
     from agent.kyc import kyc_profile_to_text
 
     template = _PEER_REVIEW_PROMPTS.get(reviewer_type)
     if not template:
         return None
 
-    profile = get_user_profile("default") or {}
-    profile_text = kyc_profile_to_text(profile)
+    # P1 修复：kyc_profile_to_text 期望 user_id:str，而非 profile dict
+    profile_text = kyc_profile_to_text("default")
 
     prompt = template.format(
         summary=decision.get("summary", ""),

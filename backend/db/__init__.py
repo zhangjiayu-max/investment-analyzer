@@ -50,6 +50,8 @@ from db.dashboard import (
     create_chat_feedback,
     get_quality_summary, get_quality_trend, get_low_quality_items,
     adopt_recommendation, list_pending_verification_recommendations,
+    list_investment_goals, create_investment_goal,
+    update_investment_goal, delete_investment_goal,
 )
 
 # Agent 系统

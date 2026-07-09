@@ -14,6 +14,7 @@ def save_recommendations(recommendations: list[dict], analysis_id: str = None,
     """批量保存推荐记录。baselines 可选，每项 {"price": float, "date": str}。
 
     verify_days: 验证窗口（交易日），默认 T+5。
+    rec 中可选 target_fund_code/target_fund_name/suggested_amount 字段（P2 执行落地）。
     """
     # 简单按自然日估算交易日（1 周 ≈ 5 交易日 ≈ 7 自然日）
     verify_after = (datetime.now() + timedelta(days=int(verify_days * 1.4))).strftime("%Y-%m-%d")
@@ -27,8 +28,9 @@ def save_recommendations(recommendations: list[dict], analysis_id: str = None,
         cur = conn.execute(
             "INSERT INTO recommendations "
             "(analysis_id, index_name, index_code, direction, reason, confidence, "
-            "baseline_value, baseline_date, verify_after_date, verify_window_days) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "baseline_value, baseline_date, verify_after_date, verify_window_days, "
+            "target_fund_code, target_fund_name, suggested_amount) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 analysis_id,
                 rec.get("index_name", ""),
@@ -40,6 +42,9 @@ def save_recommendations(recommendations: list[dict], analysis_id: str = None,
                 bl_date,
                 verify_after,
                 verify_days,
+                rec.get("target_fund_code") or None,
+                rec.get("target_fund_name") or None,
+                rec.get("suggested_amount"),
             )
         )
         ids.append(cur.lastrowid)
@@ -429,3 +434,70 @@ def increment_feedback_count(user_id: str = "default") -> int:
     conn.commit()
     conn.close()
     return row[0] if row else 0
+
+
+# ── P1 投资目标 CRUD ──────────────────────────────────────
+
+def list_investment_goals(user_id: str = "default") -> list[dict]:
+    """列出用户的投资目标（按优先级倒序）。"""
+    conn = _get_conn()
+    rows = conn.execute(
+        "SELECT * FROM investment_goals WHERE user_id = ? ORDER BY priority DESC, created_at ASC",
+        (user_id,),
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def create_investment_goal(user_id: str = "default", **fields) -> int:
+    """新增投资目标。必填 goal_type，可选 target_amount/target_date/monthly_contribution/priority。"""
+    allowed = {"goal_type", "target_amount", "target_date", "monthly_contribution", "priority"}
+    fields = {k: v for k, v in fields.items() if k in allowed}
+    if not fields.get("goal_type"):
+        raise ValueError("goal_type is required")
+    conn = _get_conn()
+    cur = conn.execute(
+        "INSERT INTO investment_goals (user_id, goal_type, target_amount, target_date, "
+        "monthly_contribution, priority) VALUES (?, ?, ?, ?, ?, ?)",
+        (
+            user_id,
+            fields["goal_type"],
+            fields.get("target_amount"),
+            fields.get("target_date"),
+            fields.get("monthly_contribution"),
+            fields.get("priority", 0),
+        ),
+    )
+    conn.commit()
+    goal_id = cur.lastrowid
+    conn.close()
+    return goal_id
+
+
+def update_investment_goal(goal_id: int, **fields) -> bool:
+    """更新投资目标字段。"""
+    allowed = {"goal_type", "target_amount", "target_date", "monthly_contribution",
+               "current_progress", "priority"}
+    fields = {k: v for k, v in fields.items() if k in allowed}
+    if not fields:
+        return False
+    conn = _get_conn()
+    set_clause = ", ".join(f"{k} = ?" for k in fields)
+    values = list(fields.values()) + [goal_id]
+    conn.execute(
+        f"UPDATE investment_goals SET {set_clause}, updated_at = datetime('now','localtime') WHERE id = ?",
+        values,
+    )
+    conn.commit()
+    conn.close()
+    return True
+
+
+def delete_investment_goal(goal_id: int) -> bool:
+    """删除投资目标。"""
+    conn = _get_conn()
+    cur = conn.execute("DELETE FROM investment_goals WHERE id = ?", (goal_id,))
+    conn.commit()
+    deleted = cur.rowcount > 0
+    conn.close()
+    return deleted

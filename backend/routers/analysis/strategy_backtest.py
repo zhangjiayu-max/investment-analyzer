@@ -30,17 +30,18 @@ router = APIRouter(prefix="/api/analysis/strategy", tags=["strategy-backtest"])
 class BacktestRequest(BaseModel):
     """运行回测请求。"""
     strategy: str = Field(..., description="策略名称：dca/grid/two_eight/core_satellite")
-    target_code: str = Field(..., description="目标指数代码")
+    target_code: str = Field(..., description="目标代码（指数或基金）")
     params: dict = Field(default_factory=dict, description="策略参数")
     start_date: str | None = Field(None, description="起始日期 YYYY-MM-DD")
     end_date: str | None = Field(None, description="结束日期 YYYY-MM-DD")
     initial_cash: float = Field(100000, description="初始资金")
+    target_type: str = Field("index", description="目标类型：index 或 fund（P3 新增）")
 
 
 class SweepRequest(BaseModel):
     """参数扫描请求。"""
     strategy: str = Field(..., description="策略名称")
-    target_code: str = Field(..., description="目标指数代码")
+    target_code: str = Field(..., description="目标代码（指数或基金）")
     param_ranges: dict = Field(
         default_factory=dict,
         description="参数范围 {param_name: [val1, val2, ...]}",
@@ -48,6 +49,7 @@ class SweepRequest(BaseModel):
     start_date: str | None = None
     end_date: str | None = None
     initial_cash: float = 100000
+    target_type: str = Field("index", description="目标类型：index 或 fund（P3 新增）")
 
 
 # ── API 端点 ──────────────────────────────────────────────
@@ -70,6 +72,7 @@ async def backtest(req: BacktestRequest):
             req.start_date,
             req.end_date,
             req.initial_cash,
+            req.target_type,
         )
     except Exception as e:
         logger.exception(f"回测执行异常: {e}")
@@ -92,6 +95,7 @@ async def sweep(req: SweepRequest):
             req.start_date,
             req.end_date,
             req.initial_cash,
+            req.target_type,
         )
     except Exception as e:
         logger.exception(f"参数扫描异常: {e}")

@@ -32,6 +32,7 @@ const emit = defineEmits([
   'regenerate',
   'clarify-answer',
   'adopt-recommendation',
+  'execute-recommendation',
 ])
 
 // P0-A 决策闭环：建议卡片辅助函数
@@ -39,8 +40,30 @@ const DIRECTION_LABELS = { up: '加仓', down: '减仓', hold: '持有' }
 const DIRECTION_ICONS = { up: '↑', down: '↓', hold: '→' }
 const CONFIDENCE_LABELS = { high: '高', medium: '中', low: '低' }
 
+// P1 Step5：guardrail flag 中文提示
+const GUARDRAIL_LABELS = {
+  risky_for_profile: '保守型用户+低置信度加仓，与风险偏好不完全匹配',
+  out_of_focus: '建议标的超出您的关注品种范围',
+}
+
 function directionClass(d) {
   return { up: 'rec-dir-up', down: 'rec-dir-down', hold: 'rec-dir-hold' }[d] || 'rec-dir-hold'
+}
+
+function guardrailText(flags) {
+  if (!Array.isArray(flags) || flags.length === 0) return ''
+  const parts = []
+  for (const f of flags) {
+    if (GUARDRAIL_LABELS[f]) {
+      parts.push(GUARDRAIL_LABELS[f])
+    } else if (typeof f === 'string' && f.startsWith('position_limit:')) {
+      const pct = f.split(':')[1]
+      parts.push(`请遵守单一持仓上限 ${pct}`)
+    } else {
+      parts.push(f)
+    }
+  }
+  return parts.join('；')
 }
 
 // 评估状态相关
@@ -648,6 +671,10 @@ const tradeSuggestions = computed(() => {
           <div v-if="rec.baseline_value" class="rec-baseline font-jet">
             基线: {{ rec.baseline_value }}<span v-if="rec.baseline_date"> ({{ rec.baseline_date }})</span>
           </div>
+          <div v-if="rec.guardrail_flags && rec.guardrail_flags.length" class="rec-guardrail">
+            <span class="guardrail-icon">⚠</span>
+            <span class="guardrail-text">本建议与您的风险偏好不完全匹配（{{ guardrailText(rec.guardrail_flags) }}），请谨慎评估</span>
+          </div>
           <div class="rec-actions">
             <button
               class="btn-adopt"
@@ -666,6 +693,11 @@ const tradeSuggestions = computed(() => {
               class="btn-adopt btn-adopt-reset"
               @click="emit('adopt-recommendation', msg, rec, 0)"
             >取消标记</button>
+            <button
+              v-if="rec.adopted === 1 && rec.direction && rec.direction !== 'hold'"
+              class="btn-adopt btn-execute"
+              @click="emit('execute-recommendation', msg, rec)"
+            >🚀 去执行</button>
           </div>
         </div>
       </div>
@@ -1676,6 +1708,31 @@ const tradeSuggestions = computed(() => {
   color: var(--color-text-tertiary, #6b7280);
   margin-bottom: 6px;
 }
+.rec-guardrail {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 6px 10px;
+  margin-bottom: 8px;
+  border-radius: var(--radius-sm, 6px);
+  background: rgba(245, 158, 11, 0.08);
+  border: 1px solid rgba(245, 158, 11, 0.3);
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: #92400e;
+}
+.guardrail-icon {
+  flex-shrink: 0;
+  font-size: 13px;
+  line-height: 1.2;
+}
+.guardrail-text {
+  flex: 1;
+}
+.dark .rec-guardrail {
+  background: rgba(245, 158, 11, 0.12);
+  color: #fbbf24;
+}
 .rec-actions {
   display: flex;
   gap: 6px;
@@ -1723,6 +1780,17 @@ const tradeSuggestions = computed(() => {
 .btn-adopt-reset {
   font-size: 11px;
   color: var(--color-text-tertiary, #9ca3af);
+}
+
+.btn-execute {
+  border-color: var(--color-primary, #1e40af);
+  background: var(--color-primary, #1e40af);
+  color: #fff;
+  font-weight: 600;
+}
+.btn-execute:hover:not(:disabled) {
+  background: var(--color-primary-hover, #2563eb);
+  border-color: var(--color-primary-hover, #2563eb);
 }
 
 /* ── 交互式澄清选项 ── */

@@ -420,7 +420,7 @@ def _init_wealth_specialists(conn):
                 "5. **风险提示**：规模风险、风格漂移风险\n"
                 "6. **置信度标注**：在结论后标注[高置信度/中置信度/低置信度]\n"
             ),
-            "knowledge_scope": '{"rag_types": ["article", "analysis", "book"]}',
+            "knowledge_scope": '{"rag_types": ["article", "analysis", "book"], "kyc_dimensions": ["risk_tolerance", "investment_experience", "focus_assets"]}',
         },
     ]
 
@@ -437,6 +437,33 @@ def _init_wealth_specialists(conn):
             WHERE name=?
         """, (s["description"], s["system_prompt"], s["knowledge_scope"], s["icon"],
               tools_json, s["agent_key"], s["name"]))
+
+    # P1 Step2：为非硬编码的 specialist 补 kyc_dimensions 裁剪配置（仅当 knowledge_scope 不含该字段时）
+    # 避免覆盖用户已自定义的配置；按专家职责裁剪可减少 token 浪费 + 噪声
+    _kyc_dims_by_agent = {
+        "valuation_expert": ["risk_tolerance", "loss_tolerance"],
+        "market_analyst": ["investment_horizon"],
+        "risk_assessor": ["risk_tolerance", "loss_tolerance", "max_single_position_pct"],
+        "allocation_advisor": ["risk_tolerance", "investment_horizon", "capital_scale", "target_equity_ratio"],
+    }
+    for agent_key, dims in _kyc_dims_by_agent.items():
+        row = conn.execute(
+            "SELECT knowledge_scope FROM agents WHERE agent_key=? AND is_specialist=1",
+            (agent_key,)
+        ).fetchone()
+        if not row:
+            continue
+        try:
+            ks = json.loads(row["knowledge_scope"] or "{}")
+        except Exception:
+            ks = {}
+        if "kyc_dimensions" in ks:
+            continue  # 已配置，跳过
+        ks["kyc_dimensions"] = dims
+        conn.execute(
+            "UPDATE agents SET knowledge_scope=? WHERE agent_key=? AND is_specialist=1",
+            (json.dumps(ks, ensure_ascii=False), agent_key)
+        )
 
 
 # ── Agent CRUD ──────────────────────────────────────

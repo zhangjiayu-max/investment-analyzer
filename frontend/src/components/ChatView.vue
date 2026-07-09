@@ -16,10 +16,12 @@ import {
   getConversationEvaluation, evaluateConversation, evaluateConversationWithLLM,
   createDecisionFromChat,
   adoptRecommendation,
+  getCandidateFunds,
 } from '../api'
 import ConfirmDialog from './ConfirmDialog.vue'
 import AppToast from './AppToast.vue'
 import { ChatSidebar, ChatMessage, ChatInput, StreamIndicator, FeedbackModal } from './chat'
+import TradeExecuteDialog from './chat/TradeExecuteDialog.vue'
 import Icon from './ui/Icon.vue'
 import { useToast } from '../composables/useToast'
 import { renderMarkdown } from '../composables/useMarkdown'
@@ -923,6 +925,50 @@ async function handleAdoptRecommendation(msg, rec, adopted) {
   }
 }
 
+// P2 执行落地：用户点击"去执行"按钮 → 加载候选基金 → 弹出 TradeExecuteDialog
+const tradeDialogVisible = ref(false)
+const tradeDialogRec = ref(null)
+const tradeDialogCandidates = ref([])
+const tradeDialogLoading = ref(false)
+
+async function handleExecuteRecommendation(msg, rec) {
+  if (!rec?.id) return
+  tradeDialogRec.value = {
+    id: rec.id,
+    index_name: rec.index_name,
+    index_code: rec.index_code,
+    direction: rec.direction,
+    target_fund_code: rec.target_fund_code,
+    target_fund_name: rec.target_fund_name,
+  }
+  tradeDialogCandidates.value = []
+  tradeDialogVisible.value = true
+  tradeDialogLoading.value = true
+  try {
+    const { data } = await getCandidateFunds(rec.id)
+    tradeDialogCandidates.value = data.candidate_funds || []
+    // 同步已填充的 target_fund_code（后端可能补全了）
+    if (data.target_fund_code && !tradeDialogRec.value.target_fund_code) {
+      tradeDialogRec.value.target_fund_code = data.target_fund_code
+      tradeDialogRec.value.target_fund_name = data.target_fund_name
+    }
+  } catch (e) {
+    showToast('加载候选基金失败，可手动输入', 'info')
+  } finally {
+    tradeDialogLoading.value = false
+  }
+}
+
+function handleTradeDialogConfirm(action) {
+  tradeDialogVisible.value = false
+  executeTradeFromChat(action)
+  showToast(`已跳转到持仓管理（${action.type === 'buy' ? '买入' : '卖出'} ${action.fund_code}）`, 'success')
+}
+
+function handleTradeDialogClose() {
+  tradeDialogVisible.value = false
+}
+
 function copyConvId() {
   if (!selectedConv.value) return
   const text = `对话ID: ${selectedConv.value.id}`
@@ -1593,6 +1639,7 @@ function stopPollingProgress() {
             @regenerate="regenerateAssistantMessage"
             @clarify-answer="handleClarifyAnswer"
             @adopt-recommendation="handleAdoptRecommendation"
+            @execute-recommendation="handleExecuteRecommendation"
           />
 
           <!-- 流式状态指示器 -->
@@ -1638,6 +1685,14 @@ function stopPollingProgress() {
     :danger="confirm.danger"
     @confirm="() => confirm.onConfirm?.()"
     @cancel="confirm.visible = false"
+  />
+  <TradeExecuteDialog
+    :visible="tradeDialogVisible"
+    :recommendation="tradeDialogRec"
+    :candidateFunds="tradeDialogCandidates"
+    :loading="tradeDialogLoading"
+    @close="handleTradeDialogClose"
+    @confirm="handleTradeDialogConfirm"
   />
   <AppToast />
 </template>

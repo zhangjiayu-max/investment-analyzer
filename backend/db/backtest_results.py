@@ -2,6 +2,7 @@
 
 import json
 from db._conn import _get_conn, _row_to_dict
+from db._utils import _add_column_if_not_exists
 
 
 def init_backtest_tables(conn):
@@ -29,6 +30,9 @@ def init_backtest_tables(conn):
             created_at TEXT DEFAULT (datetime('now','localtime'))
         )
     """)
+    # P3：新增 volatility + benchmark_nav_curve_json 列
+    _add_column_if_not_exists(conn, "backtest_results", "volatility", "REAL DEFAULT 0")
+    _add_column_if_not_exists(conn, "backtest_results", "benchmark_nav_curve_json", "TEXT DEFAULT '[]'")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_bt_user ON backtest_results(user_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_bt_strategy ON backtest_results(strategy)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_bt_created ON backtest_results(created_at)")
@@ -46,16 +50,21 @@ def save_backtest(
     notes: str = "",
     user_id: str = "default",
 ) -> int:
-    """保存回测结果，返回 id。"""
+    """保存回测结果，返回 id。
+
+    P3 新增字段：
+      - volatility: result["volatility"]（年化波动率）
+      - benchmark_nav_curve: benchmark["nav_curve"]（基准净值曲线）
+    """
     conn = _get_conn()
     try:
         cursor = conn.execute("""
             INSERT INTO backtest_results
                 (user_id, name, target_code, target_type, strategy, params_json,
                  initial_cash, final_value, total_return, annual_return,
-                 max_drawdown, sharpe_ratio, nav_curve_json,
-                 benchmark_return, months, notes)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 max_drawdown, sharpe_ratio, volatility, nav_curve_json,
+                 benchmark_return, benchmark_nav_curve_json, months, notes)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             user_id, name, target_code, target_type, strategy,
             json.dumps(params, ensure_ascii=False),
@@ -65,8 +74,10 @@ def save_backtest(
             result.get("annual_return", 0),
             result.get("max_drawdown", 0),
             result.get("sharpe_ratio", 0),
+            result.get("volatility", 0),
             json.dumps(result.get("nav_curve", []), ensure_ascii=False),
             benchmark.get("total_return", 0) if benchmark else 0,
+            json.dumps(benchmark.get("nav_curve", []) if benchmark else [], ensure_ascii=False),
             months,
             notes,
         ))
@@ -83,7 +94,7 @@ def list_backtests(limit: int = 20, user_id: str = "default") -> list[dict]:
         rows = conn.execute("""
             SELECT id, name, target_code, target_type, strategy,
                    initial_cash, final_value, total_return, annual_return,
-                   max_drawdown, sharpe_ratio, benchmark_return, months,
+                   max_drawdown, sharpe_ratio, volatility, benchmark_return, months,
                    decision_id, notes, created_at
             FROM backtest_results
             WHERE user_id = ?
@@ -96,7 +107,7 @@ def list_backtests(limit: int = 20, user_id: str = "default") -> list[dict]:
 
 
 def get_backtest(backtest_id: int) -> dict | None:
-    """获取单条回测结果（含净值曲线）。"""
+    """获取单条回测结果（含净值曲线 + 基准净值曲线）。"""
     conn = _get_conn()
     try:
         row = conn.execute("""
@@ -107,6 +118,7 @@ def get_backtest(backtest_id: int) -> dict | None:
         item = _row_to_dict(row)
         item["params_json"] = json.loads(item.get("params_json") or "{}")
         item["nav_curve_json"] = json.loads(item.get("nav_curve_json") or "[]")
+        item["benchmark_nav_curve_json"] = json.loads(item.get("benchmark_nav_curve_json") or "[]")
         return item
     finally:
         conn.close()
