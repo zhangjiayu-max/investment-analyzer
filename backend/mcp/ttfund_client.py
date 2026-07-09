@@ -26,21 +26,22 @@ _TTSKILL_BIN = None
 _BASE_URL = "https://skills.tiantianfunds.com/ai-smart-skill-service/openapi"
 
 # Skill 注册表（skill_id → ttskill invoke 使用的 ID + action 默认值）
+# version 对应已安装的 skill 版本（通过 ttskill skill install/update 升级）
 SKILLS = {
-    "fund_base_info":    {"id": "TTFUND_BASE_INFOS",        "version": "1.3.0"},
-    "fund_manager":      {"id": "TTFUND_MANAGER_INFO",      "version": "1.0.0"},
-    "fund_condition":    {"id": "TTFUND_CONDITION_SELECT",  "version": "1.4.0"},
-    "fund_holding":      {"id": "TTFUND_HOLDING_INFO",      "version": "1.1.0"},
-    "fund_gold":         {"id": "TTFUND_GOLD_INFO",         "version": "1.1.0"},
+    "fund_base_info":    {"id": "TTFUND_BASE_INFOS",        "version": "1.3.2"},
+    "fund_manager":      {"id": "TTFUND_MANAGER_INFO",      "version": "1.1.1"},
+    "fund_condition":    {"id": "TTFUND_CONDITION_SELECT",  "version": "1.4.1"},
+    "fund_holding":      {"id": "TTFUND_HOLDING_INFO",      "version": "1.2.0"},
+    "fund_gold":         {"id": "TTFUND_GOLD_INFO",         "version": "1.1.1"},
     "fund_tg_strategy":  {"id": "TTFUND_STRATEGY_INFO",     "version": "1.0.0"},
     "fund_index":        {"id": "TTFUND_INDEX_INFO",        "version": "1.1.2"},
-    "fund_nav":          {"id": "TTFUND_NAV_INFO",          "version": "1.0.0"},
+    "fund_nav":          {"id": "TTFUND_NAV_INFO",          "version": "1.1.1"},
     "fund_portfolio":    {"id": "TTFUND_PORTFOLIO_ANALYSIS","version": "1.0.0"},
-    "fund_favor":        {"id": "TTFUND_FAVOR_ZX",          "version": "1.3.0"},
-    "bond_market":       {"id": "TTFUND_BOND_MARKET",       "version": "1.1.0"},
-    "fund_backtest":     {"id": "TTFUND_GROUP_BACKTEST",    "version": "1.1.0"},
-    "fund_search":       {"id": "TTFUND_SEARCH",            "version": "1.1.0"},
-    "stock_price":       {"id": "TTFUND_STOCK_PRICE_QUERY", "version": "1.0.0"},
+    "fund_favor":        {"id": "TTFUND_FAVOR_ZX",          "version": "1.3.1"},
+    "bond_market":       {"id": "TTFUND_BOND_MARKET",       "version": "1.1.1"},
+    "fund_backtest":     {"id": "TTFUND_GROUP_BACKTEST",    "version": "1.1.1"},
+    "fund_search":       {"id": "TTFUND_SEARCH",            "version": "1.1.1"},
+    "stock_price":       {"id": "TTFUND_STOCK_PRICE_QUERY", "version": "1.1.1"},
 }
 
 # ttskill invoke 的 action 映射
