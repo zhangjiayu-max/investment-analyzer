@@ -362,7 +362,7 @@ def _apply_personalization_boost(results: list[dict], user_id: str):
         r["personal_reasons"] = sorted(set(reasons))
 
 
-def rewrite_query(query: str) -> str:
+def rewrite_query(query: str, force: bool = False) -> str:
     """将用户口语化问题转换为更适合检索的查询。
 
     使用 LLM 将自然语言查询转换为关键词查询，提升检索效果。
@@ -370,12 +370,13 @@ def rewrite_query(query: str) -> str:
 
     Args:
         query: 用户原始查询
+        force: 强制执行 rewrite（跳过 llm_cost.rag_query_rewrite 检查，用于长查询选择性启用）
 
     Returns:
         优化后的查询字符串
     """
     # 降本开关：默认关闭，主链路已用 jieba 分词兜底
-    if get_config("llm_cost.rag_query_rewrite", "false") != "true":
+    if not force and get_config("llm_cost.rag_query_rewrite", "false") != "true":
         return query
 
     try:
@@ -1442,20 +1443,52 @@ def delete_chroma_by_filter(content_type: str, **filters) -> int:
     return 0
 
 
-def index_book_knowledge(knowledge_id: int, title: str, content: str, source: str):
-    """索引一条书籍知识到 FTS + ChromaDB。"""
-    # FTS 索引
-    _index_document("book", title, content, str(knowledge_id))
-    # ChromaDB 索引（带上 source 便于后续清理）
-    index_to_chroma("book", str(knowledge_id), title, content,
-                    extra_metadata={"source": source or ""})
+def index_book_knowledge(knowledge_id: int, title: str, content: str, source: str,
+                         atom_type: str = "", evidence_level: str = "",
+                         importance: int = 0):
+    """索引一条书籍知识到 FTS + ChromaDB。
+
+    Args:
+        atom_type: 知识原子类型（rule/principle/checklist/user_lesson/concept/data/insight/policy/strategy）
+        evidence_level: 证据等级（book_knowledge/principle/strong/verified/user_memory）
+        importance: 重要性评分（1-10）
+    """
+    _index_knowledge_entry("book", knowledge_id, title, content, source,
+                           atom_type, evidence_level, importance)
 
 
-def index_note_knowledge(knowledge_id: int, title: str, content: str, source: str):
+def index_note_knowledge(knowledge_id: int, title: str, content: str, source: str,
+                         atom_type: str = "", evidence_level: str = "",
+                         importance: int = 0):
     """索引一条个人笔记到 FTS + ChromaDB（来自 Obsidian vault）。"""
-    _index_document("note", title, content, str(knowledge_id))
-    index_to_chroma("note", str(knowledge_id), title, content,
-                    extra_metadata={"source": source or ""})
+    _index_knowledge_entry("note", knowledge_id, title, content, source,
+                           atom_type, evidence_level, importance)
+
+
+def _index_knowledge_entry(content_type: str, knowledge_id: int, title: str,
+                           content: str, source: str,
+                           atom_type: str = "", evidence_level: str = "",
+                           importance: int = 0):
+    """通用的知识条目索引函数（FTS + ChromaDB）。
+
+    Args:
+        content_type: 内容类型（book/note/concept/strategy）
+        knowledge_id: knowledge_base.id
+        atom_type: 知识原子类型
+        evidence_level: 证据等级
+        importance: 重要性评分（1-10）
+    """
+    # FTS 索引
+    _index_document(content_type, title, content, str(knowledge_id))
+    # ChromaDB 索引（带上 source/atom_type/evidence_level/importance 便于个性化加权）
+    extra = {"source": source or ""}
+    if atom_type:
+        extra["atom_type"] = atom_type
+    if evidence_level:
+        extra["evidence_level"] = evidence_level
+    if importance:
+        extra["importance"] = int(importance)
+    index_to_chroma(content_type, str(knowledge_id), title, content, extra_metadata=extra)
 
 
 def search_chroma(query: str, content_type: str = None, content_types: list[str] = None, limit: int = 5) -> tuple[list[dict], int]:
@@ -1729,11 +1762,58 @@ def _enrich_results_with_time(results: list[dict]) -> list[dict]:
     except Exception as e:
         logger.warning(f"补充时间信息失败: {e}")
 
+    # 补充 knowledge_base 元数据（book/note/concept/strategy → importance/atom_type/evidence_level）
+    # 注意：ChromaDB metadata 可能已含这些字段，但 knowledge_base 是权威源，优先覆盖
+    kb_meta_map = {}
+    kb_ids_by_cat = {}
+    for r in results:
+        ct = r.get("content_type", "")
+        if ct in ("book", "note", "concept", "strategy"):
+            try:
+                kb_ids_by_cat.setdefault(ct, set()).add(str(r["reference_id"]))
+            except Exception:
+                pass
+    if kb_ids_by_cat:
+        try:
+            conn2 = _get_conn()
+            for ct, id_set in kb_ids_by_cat.items():
+                ids = list(id_set)
+                if not ids:
+                    continue
+                ph = ",".join("?" * len(ids))
+                for row in conn2.execute(
+                    f"SELECT id, importance, atom_type, evidence_level, source, updated_at "
+                    f"FROM knowledge_base WHERE id IN ({ph})",
+                    [int(i) if str(i).isdigit() else i for i in ids],
+                ).fetchall():
+                    kb_meta_map[f"{ct}:{row['id']}"] = {
+                        "importance": row["importance"] or 0,
+                        "atom_type": row["atom_type"] or "",
+                        "evidence_level": row["evidence_level"] or "",
+                        "source": row["source"] or "",
+                        "updated_at": row["updated_at"] or "",
+                    }
+            conn2.close()
+        except Exception as e:
+            logger.warning(f"补充知识原子元数据失败: {e}")
+
     for r in results:
         key = f"{r['content_type']}:{r['reference_id']}"
         r["time"] = time_map.get(key, "")
         r["author"] = author_map.get(key, "")
         r["source_url"] = url_map.get(key, "")
+        # 补充知识原子元数据（驱动 _apply_personalization_boost 中的加权分支）
+        kb_meta = kb_meta_map.get(key)
+        if kb_meta:
+            r["importance"] = kb_meta["importance"]
+            if kb_meta["atom_type"]:
+                r["atom_type"] = kb_meta["atom_type"]
+            if kb_meta["evidence_level"]:
+                r["evidence_level"] = kb_meta["evidence_level"]
+            if not r.get("source"):
+                r["source"] = kb_meta["source"]
+            if not r["time"]:
+                r["time"] = kb_meta["updated_at"]
 
     return results
 
@@ -1949,6 +2029,16 @@ def build_rag_context_with_details(query: str, content_types: list[str] = None, 
     if detected_indexes:
         logger.info(f"检测到指数名称: {detected_indexes}，注入估值数据 {len(direct_valuation_results)} 条")
 
+    # 选择性 LLM Query Rewrite：长查询（>15 字）且非纯指数名时启用
+    # 受 `rag.long_query_rewrite_enabled` 开关控制（默认关闭）
+    # 与 llm_cost.rag_query_rewrite 独立，此开关仅控制长查询的自动触发
+    _long_rewrite_enabled = get_config("rag.long_query_rewrite_enabled", "false") == "true"
+    if _long_rewrite_enabled and len(query) > 15 and not detected_indexes:
+        rewritten = rewrite_query(query, force=True)
+        if rewritten != query:
+            logger.info(f"长查询自动 Rewrite: '{query[:50]}' -> '{rewritten[:50]}'")
+            query = rewritten
+
     # 提取检索关键词
     tokens = _tokenize(query).split()
     # 先过滤停用词，再清洗特殊字符
@@ -2042,15 +2132,23 @@ def build_rag_context_with_details(query: str, content_types: list[str] = None, 
     fts_candidates = sorted(fts_results, key=lambda x: x["rank"])[:rrf_top_n]
     chroma_candidates = sorted(chroma_results, key=lambda x: x["rank"])[:rrf_top_n]
 
-    def _rrf_score(results: list[dict], k: int = None) -> dict:
+    # 增强混合检索：BM25(0.3) + 向量(0.5) 加权 RRF
+    # 受 `rag.enhanced_hybrid_enabled` 开关控制（默认关闭，使用等权 RRF）
+    _enhanced_hybrid = get_config("rag.enhanced_hybrid_enabled", "false") == "true"
+    _fts_weight = 0.3 if _enhanced_hybrid else 1.0
+    _chroma_weight = 0.5 if _enhanced_hybrid else 1.0
+    if _enhanced_hybrid:
+        logger.info("增强混合检索: BM25 权重=0.3, 向量权重=0.5")
+
+    def _rrf_score(results: list[dict], k: int = None, weight: float = 1.0) -> dict:
         """返回 {key: rrf_score} 的映射。rank 越小越好。"""
         if k is None:
             k = rrf_k
         sorted_r = sorted(results, key=lambda x: x["rank"])
-        return {f"{r['content_type']}:{r['reference_id']}": 1.0 / (k + i + 1) for i, r in enumerate(sorted_r)}
+        return {f"{r['content_type']}:{r['reference_id']}": weight / (k + i + 1) for i, r in enumerate(sorted_r)}
 
-    fts_rrf = _rrf_score(fts_candidates)
-    chroma_rrf = _rrf_score(chroma_candidates)
+    fts_rrf = _rrf_score(fts_candidates, weight=_fts_weight)
+    chroma_rrf = _rrf_score(chroma_candidates, weight=_chroma_weight)
 
     # 记录每个 key 的来源
     fts_keys = set(fts_rrf.keys())
@@ -2271,6 +2369,10 @@ def build_rag_context_with_details(query: str, content_types: list[str] = None, 
         all_results = lightweight_rerank(query, all_results, top_k=limit)
         logger.info(f"轻量级重排序后: {len(all_results)}条")
 
+    # 先补充知识原子元数据（atom_type/evidence_level/importance），
+    # 供后续 _apply_personalization_boost 中的加权分支使用
+    _enrich_results_with_time(all_results)
+
     # 默认个性化重排：画像 2.0、行为偏差、知识原子元数据提供温和加权。
     if all_results:
         _apply_personalization_boost(all_results, "default")
@@ -2281,9 +2383,19 @@ def build_rag_context_with_details(query: str, content_types: list[str] = None, 
     # Reranker 重排序（可选，进一步提升精度，但增加 3-15s 延迟）
     # 默认关闭：RRF + 标题加权 + 时效性加权已能提供合理排序
     # 设置环境变量 RERANK_ENABLED=true 可开启
+    # 或通过 rag.auto_rerank_topn 开关（默认关闭）仅对 top-N 结果启用轻量 rerank
+    _auto_rerank = get_config("rag.auto_rerank_topn", "false") == "true"
     if RERANK_ENABLED and len(all_results) > 3:
         all_results = rerank_results(query, all_results, top_k=limit, user_id="default")
         logger.info(f"Rerank 后: {len(all_results)}条")
+    elif _auto_rerank and len(all_results) > 3:
+        # 轻量 rerank：仅对 top-5 结果启用，减少延迟
+        _rerank_topn = min(5, len(all_results))
+        _top_results = all_results[:_rerank_topn]
+        _rest = all_results[_rerank_topn:]
+        _reranked = rerank_results(query, _top_results, top_k=_rerank_topn, user_id="default")
+        all_results = _reranked + _rest
+        logger.info(f"轻量 Rerank(top-{_rerank_topn}) 后: {len(all_results)}条")
 
     # 标记来源（fts / chroma / both）
     for r in all_results:
@@ -2307,12 +2419,14 @@ def build_rag_context_with_details(query: str, content_types: list[str] = None, 
         "linked_doc": "个人文档",
         "knowledge": "投资知识",
         "book": "书籍知识",
+        "note": "个人笔记",
+        "concept": "投资概念",
+        "strategy": "投资策略",
     }
     for r in all_results:
         r["label"] = label_map.get(r["content_type"], r["content_type"])
 
-    # 补充时间信息
-    _enrich_results_with_time(all_results)
+    # 注：_enrich_results_with_time 已在个性化加权前调用，此处不再重复
 
     # 合并直接注入的估值数据（放在最前面，确保 LLM 优先看到）
     if direct_valuation_results:
@@ -2551,6 +2665,9 @@ def reindex_all(limit: int = 1000):
                 title=item["title"],
                 content=item["content"],
                 source=item.get("source", ""),
+                atom_type=item.get("atom_type", ""),
+                evidence_level=item.get("evidence_level", ""),
+                importance=item.get("importance", 0),
             )
             book_indexed += 1
         except Exception as e:
@@ -2568,14 +2685,187 @@ def reindex_all(limit: int = 1000):
                 title=item["title"],
                 content=item["content"],
                 source=item.get("source", ""),
+                atom_type=item.get("atom_type", ""),
+                evidence_level=item.get("evidence_level", ""),
+                importance=item.get("importance", 0),
             )
             note_indexed += 1
         except Exception as e:
             logger.warning(f"笔记索引失败 id={item['id']}: {e}")
     results["notes"] = {"total": len(notes), "indexed": note_indexed}
 
+    # 7. 重建概念/策略知识索引（concept + strategy）
+    logger.info("开始重建概念/策略知识索引...")
+    for cat in ("concept", "strategy"):
+        items = list_knowledge(category=cat, limit=limit)
+        cat_indexed = 0
+        for item in items:
+            try:
+                _index_knowledge_entry(
+                    content_type=cat,
+                    knowledge_id=item["id"],
+                    title=item["title"],
+                    content=item["content"],
+                    source=item.get("source", ""),
+                    atom_type=item.get("atom_type", cat),
+                    evidence_level=item.get("evidence_level", "principle"),
+                    importance=item.get("importance", 0),
+                )
+                cat_indexed += 1
+            except Exception as e:
+                logger.warning(f"{cat} 索引失败 id={item['id']}: {e}")
+        results[cat] = {"total": len(items), "indexed": cat_indexed}
+
+    # 8. 重建技能文档索引（skill_documents）
+    logger.info("开始重建技能文档索引...")
+    try:
+        conn = _get_conn()
+        skill_rows = conn.execute("SELECT id, doc_type, content FROM skill_documents").fetchall()
+        conn.close()
+        skill_indexed = 0
+        for r in skill_rows:
+            title = r["doc_type"] or ""
+            content = r["content"] or ""
+            if content:
+                index_skill_document(r["id"], title, content)
+                skill_indexed += 1
+        results["skills"] = {"total": len(skill_rows), "indexed": skill_indexed}
+    except Exception as e:
+        logger.warning(f"技能文档索引失败: {e}")
+        results["skills"] = {"total": 0, "indexed": 0, "error": str(e)}
+
     logger.info(f"全部索引完成: {results}")
     return results
+
+
+# ── 知识原子元数据回填 ──────────────────────────────────────
+
+# atom_type 关键词启发式规则（按优先级排列，先命中先返回）
+_ATOM_TYPE_RULES = [
+    ("policy", ["政策", "法规", "监管", "证监会", "央行", "国务院", "条例"]),
+    ("checklist", ["步骤", "清单", "检查项", "如何做", "怎么做", "操作流程", "执行步骤"]),
+    ("principle", ["原则", "定律", "法则", "规律", "核心逻辑", "本质", "底层逻辑"]),
+    ("user_lesson", ["教训", "经验", "反思", "启示", "血泪", "踩坑", "亏钱", "误区"]),
+    ("data", ["数据", "统计", "回测", "年化", "收益率", "百分位", "历史数据", "概率"]),
+    ("concept", ["定义", "是什么", "是指", "什么是", "含义", "概念"]),
+    ("rule", ["规则", "必须", "应该", "不要", "切忌", "务必", "记住", "纪律"]),
+]
+
+
+def _classify_atom_type(title: str, content: str, category: str) -> str:
+    """基于内容启发式判断知识原子类型。
+
+    Args:
+        title: 标题
+        content: 正文
+        category: knowledge_base.category（book/concept/strategy/note）
+
+    Returns:
+        atom_type 字符串
+    """
+    # category 已有明确 atom_type 的直接用
+    if category == "concept":
+        return "concept"
+    if category == "strategy":
+        return "strategy"
+
+    text = f"{title} {content[:2000]}".lower()
+
+    # 按优先级匹配
+    for atom_type, keywords in _ATOM_TYPE_RULES:
+        for kw in keywords:
+            if kw in text:
+                return atom_type
+
+    # 默认分类
+    if category == "note":
+        return "user_lesson"
+    return "rule"  # 书籍知识默认为可执行规则
+
+
+def _classify_evidence_level(category: str, atom_type: str) -> str:
+    """根据 category 和 atom_type 推断证据等级。
+
+    evidence_level 含义：
+    - book_knowledge: 来自出版书籍的系统性知识（经过编辑审核）
+    - principle: 基础原理/概念（高度可信）
+    - strong: 强证据（数据/回测支撑）
+    - verified: 已验证（实践检验）
+    - user_memory: 用户个人记忆/笔记（主观性较强）
+    """
+    if category == "note":
+        return "user_memory"
+    if category in ("concept", "strategy"):
+        return "principle"
+    if category == "book":
+        if atom_type == "data":
+            return "strong"
+        if atom_type == "user_lesson":
+            return "verified"
+        return "book_knowledge"
+    return "book_knowledge"
+
+
+def backfill_atom_metadata(dry_run: bool = False) -> dict:
+    """回填 knowledge_base 表的 atom_type 和 evidence_level 字段。
+
+    对 atom_type 为空的记录，基于内容启发式分类。
+    对 evidence_level 为空的记录，基于 category + atom_type 推断。
+
+    Args:
+        dry_run: 仅统计不写入
+
+    Returns:
+        {"total": N, "atom_filled": N, "evidence_filled": N, "by_atom_type": {...}}
+    """
+    conn = _get_conn()
+
+    # 查询需要回填的记录
+    rows = conn.execute(
+        "SELECT id, category, title, content, atom_type, evidence_level "
+        "FROM knowledge_base "
+        "WHERE atom_type IS NULL OR atom_type = '' OR evidence_level IS NULL OR evidence_level = ''"
+    ).fetchall()
+
+    stats = {"total": len(rows), "atom_filled": 0, "evidence_filled": 0, "by_atom_type": {}}
+    updates = []
+
+    for row in rows:
+        kid = row["id"]
+        category = row["category"] or "book"
+        title = row["title"] or ""
+        content = row["content"] or ""
+        existing_atom = row["atom_type"] or ""
+        existing_evi = row["evidence_level"] or ""
+
+        # 判断 atom_type
+        atom_type = existing_atom
+        if not atom_type:
+            atom_type = _classify_atom_type(title, content, category)
+            stats["atom_filled"] += 1
+
+        # 判断 evidence_level
+        evidence_level = existing_evi
+        if not evidence_level:
+            evidence_level = _classify_evidence_level(category, atom_type)
+            stats["evidence_filled"] += 1
+
+        stats["by_atom_type"][atom_type] = stats["by_atom_type"].get(atom_type, 0) + 1
+
+        if not dry_run and (atom_type != existing_atom or evidence_level != existing_evi):
+            updates.append((atom_type, evidence_level, kid))
+
+    # 批量更新
+    if not dry_run and updates:
+        conn.executemany(
+            "UPDATE knowledge_base SET atom_type = ?, evidence_level = ? WHERE id = ?",
+            updates
+        )
+        conn.commit()
+        logger.info(f"知识原子元数据回填完成: {len(updates)} 条更新")
+
+    conn.close()
+    return stats
 
 
 def get_rag_stats_summary():
@@ -2584,7 +2874,7 @@ def get_rag_stats_summary():
 
     # FTS 统计
     fts_counts = {}
-    for content_type in ["article", "analysis", "author_article", "skill", "valuation", "book"]:
+    for content_type in ["article", "analysis", "author_article", "skill", "valuation", "book", "note", "concept", "strategy"]:
         row = conn.execute(
             "SELECT COUNT(*) as cnt FROM knowledge_fts WHERE content_type = ?",
             (content_type,)
@@ -2599,7 +2889,7 @@ def get_rag_stats_summary():
         init_chroma()
         collection = _get_chroma()
         if collection:
-            for content_type in ["article", "analysis", "author_article", "skill", "valuation", "book"]:
+            for content_type in ["article", "analysis", "author_article", "skill", "valuation", "book", "note", "concept", "strategy"]:
                 try:
                     result = collection.get(where={"content_type": content_type})
                     chroma_counts[content_type] = len(result["ids"]) if result and result["ids"] else 0

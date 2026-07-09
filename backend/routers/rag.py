@@ -18,6 +18,7 @@ from typing import Optional
 from services.rag import (
     reindex_all, reindex_all_articles, reindex_all_analysis_records,
     get_rag_stats_summary, build_rag_context_with_details, rewrite_query,
+    backfill_atom_metadata,
     _RAG_CONFIG_DEFAULTS, _invalidate_rag_config_cache,
 )
 
@@ -68,6 +69,21 @@ async def reindex_analysis_api(limit: int = 1000):
     except Exception as e:
         logging.error(f"重建分析记录索引失败: {e}")
         raise HTTPException(500, f"重建失败: {str(e)}")
+
+
+@router.post("/backfill-atom-metadata")
+async def backfill_atom_metadata_api(dry_run: bool = False):
+    """回填 knowledge_base 的 atom_type / evidence_level 元数据。
+
+    Args:
+        dry_run: 仅统计不写入（用于预览）
+    """
+    try:
+        stats = backfill_atom_metadata(dry_run=dry_run)
+        return {"ok": True, "stats": stats}
+    except Exception as e:
+        logging.error(f"回填知识原子元数据失败: {e}")
+        raise HTTPException(500, f"回填失败: {str(e)}")
 
 
 @router.post("/test-search")
