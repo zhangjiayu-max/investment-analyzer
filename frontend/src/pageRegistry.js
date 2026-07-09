@@ -32,4 +32,5 @@ export const pageComponentKeys = [
   'behavior',
   'accuracy',
   'strategy-backtest',
+  'capability-center',
 ]

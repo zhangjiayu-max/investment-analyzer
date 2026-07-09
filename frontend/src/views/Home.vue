@@ -37,6 +37,7 @@ import AttributionReport from '../components/AttributionReport.vue'
 import BehaviorDiagnosis from '../components/BehaviorDiagnosis.vue'
 import DecisionAccuracy from '../components/DecisionAccuracy.vue'
 import StrategyBacktest from '../components/StrategyBacktest.vue'
+import CapabilityCenter from '../components/CapabilityCenter.vue'
 import { pageComponentKeys } from '../pageRegistry'
 
 const props = defineProps({
@@ -80,6 +81,7 @@ const pageComponents = {
   behavior: BehaviorDiagnosis,
   accuracy: DecisionAccuracy,
   'strategy-backtest': StrategyBacktest,
+  'capability-center': CapabilityCenter,
 }
 
 if (import.meta.env.DEV) {

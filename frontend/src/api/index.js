@@ -2417,3 +2417,17 @@ export function getExtremeWarning(indexCode) {
 export function getForecastSignals() {
   return api.get('/api/analysis/forecast/signals')
 }
+
+// 能力中心
+export function getCapabilitiesOverview() {
+  return api.get('/api/capabilities/overview')
+}
+export function getCapabilitiesTools(params = {}) {
+  return api.get('/api/capabilities/tools', { params })
+}
+export function getUnexposedMcp() {
+  return api.get('/api/capabilities/mcp/unexposed')
+}
+export function getIntegrationGuide(name) {
+  return api.get('/api/capabilities/integration-guide', { params: { name } })
+}

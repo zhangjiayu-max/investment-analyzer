@@ -27,7 +27,7 @@ import {
   Bot, Brain, Lightbulb, Sparkles, Globe, FlaskConical, Microscope,
   Library, PenLine, Target, Tv, ClipboardList, Clipboard, MessageSquareDot,
   CircleUser, User, ThumbsUp, ThumbsDown, FileText, Users,
-  Sun, Moon, Circle, CircleAlert,
+  Sun, Moon, Circle, CircleAlert, Code, Copy,
 } from 'lucide-vue-next'
 
 const props = defineProps({
@@ -48,7 +48,7 @@ const LUCIDE_MAP = {
   // 操作类
   'chevron-down': ChevronDown, 'chevron-up': ChevronUp,
   'chevron-right': ChevronRight, 'chevron-left': ChevronLeft,
-  refresh: RefreshCw, close: X, plus: Plus, minus: Minus, send: Send,
+  refresh: RefreshCw, close: X, x: X, plus: Plus, minus: Minus, send: Send,
   more: MoreHorizontal, 'scan-search': ScanSearch, wrench: Wrench,
   pencil: Pencil, trash: Trash2, 'external-link': ExternalLink,
   download: Download, upload: Upload, eye: Eye, clock: Clock,
@@ -82,6 +82,7 @@ const LUCIDE_MAP = {
   sun: Sun, moon: Moon,
   // 杂项
   circle: Circle, test: FlaskConical,
+  code: Code, copy: Copy,
 }
 
 const Comp = computed(() => LUCIDE_MAP[props.name] || CircleAlert)

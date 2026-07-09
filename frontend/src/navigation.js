@@ -64,6 +64,7 @@ export const navItems = [
       { key: 'health', label: '健康分', icon: 'health' },
       { key: 'shadow', label: 'Shadow Mode', icon: 'shadow' },
       { key: 'strategy-backtest', label: '策略回测', icon: 'line-chart' },
+      { key: 'capability-center', label: '能力中心', icon: 'wrench' },
     ],
   },
 ]

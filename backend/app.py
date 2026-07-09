@@ -147,6 +147,7 @@ from routers.thread_review import router as thread_review_router
 from routers.chat_images import router as chat_images_router, CHAT_IMAGES_DIR  # /api/thread-review/*
 from routers.suggestion_accuracy import router as suggestion_accuracy_router  # /api/suggestion-accuracy/*
 from routers.data_quality import router as data_quality_router  # /api/data-quality/*
+from routers.capabilities import router as capabilities_router  # /api/capabilities/*
 from services.data_lineage import track_sources, get_lineage  # data lineage tracking
 
 # 注册路由
@@ -215,6 +216,7 @@ app.include_router(thread_review_router)
 app.include_router(chat_images_router)
 app.include_router(suggestion_accuracy_router)
 app.include_router(data_quality_router)
+app.include_router(capabilities_router)
 
 # ── 启动初始化 ──
 @app.on_event("startup")
