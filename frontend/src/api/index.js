@@ -2420,14 +2420,14 @@ export function getForecastSignals() {
 
 // 能力中心
 export function getCapabilitiesOverview() {
-  return api.get('/api/capabilities/overview')
+  return api.get('/capabilities/overview')
 }
 export function getCapabilitiesTools(params = {}) {
-  return api.get('/api/capabilities/tools', { params })
+  return api.get('/capabilities/tools', { params })
 }
 export function getUnexposedMcp() {
-  return api.get('/api/capabilities/mcp/unexposed')
+  return api.get('/capabilities/mcp/unexposed')
 }
 export function getIntegrationGuide(name) {
-  return api.get('/api/capabilities/integration-guide', { params: { name } })
+  return api.get('/capabilities/integration-guide', { params: { name } })
 }
