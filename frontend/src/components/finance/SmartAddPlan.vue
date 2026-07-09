@@ -355,6 +355,38 @@ onMounted(() => {
             </div>
             <div v-else class="plan-row muted">该标的未关联指数估值数据</div>
 
+            <!-- L2-L5 智能指标 -->
+            <div class="smart-metrics" v-if="p.fund_type || p.kelly || p.recovery || p.win_rate">
+              <div class="metrics-grid">
+                <!-- L2 基金类型 -->
+                <div class="metric-item" v-if="p.fund_type">
+                  <span class="metric-label">基金类型</span>
+                  <span class="metric-value font-jet">{{ p.fund_type }}</span>
+                  <span class="metric-sub" v-if="p.type_strategy">定投倍数 ×{{ p.type_strategy.dca_mult }}</span>
+                </div>
+                <!-- L3 半凯利 -->
+                <div class="metric-item" v-if="p.kelly && p.kelly.data_source !== 'default'">
+                  <span class="metric-label">凯利上限</span>
+                  <span class="metric-value font-jet">{{ fmtPct(p.kelly.limit_pct, 1) }}</span>
+                  <span class="metric-sub">μ={{ fmtPct(p.kelly.mu * 100, 1) }} σ={{ fmtPct(p.kelly.sigma * 100, 1) }}</span>
+                </div>
+                <!-- L4 修复时间 -->
+                <div class="metric-item" v-if="p.recovery && p.recovery.sample_count > 0">
+                  <span class="metric-label">修复时间</span>
+                  <span class="metric-value font-jet" v-if="p.recovery.median_recovery_months">{{ p.recovery.median_recovery_months }}月</span>
+                  <span class="metric-value font-jet" v-else>未修复</span>
+                  <span class="metric-sub">{{ p.recovery.sample_count }}个历史场景</span>
+                </div>
+                <!-- L5 胜率 -->
+                <div class="metric-item" v-if="p.win_rate && p.win_rate.sample_count > 0">
+                  <span class="metric-label">12月胜率</span>
+                  <span class="metric-value font-jet" v-if="p.win_rate.win_rate_12m != null">{{ fmtPct(p.win_rate.win_rate_12m * 100, 0) }}</span>
+                  <span class="metric-value font-jet" v-else>-</span>
+                  <span class="metric-sub">{{ p.win_rate.sample_count }}个样本</span>
+                </div>
+              </div>
+            </div>
+
             <!-- 引擎1：估值 z-score 加权定投 -->
             <div class="plan-row engine1-row">
               <span class="engine-tag engine1-tag">引擎1 · 加权定投</span>
@@ -747,6 +779,37 @@ onMounted(() => {
 .val-label { font-size: 0.68rem; color: var(--color-text-muted); }
 .val-value { font-weight: 600; color: var(--color-text-primary); font-size: 0.85rem; }
 .val-level { font-weight: 600; font-size: 0.82rem; }
+
+/* L2-L5 智能指标 */
+.smart-metrics {
+  margin: 0.5rem 0;
+  padding: 0.7rem 0.8rem;
+  background: var(--color-bg-input);
+  border-radius: var(--radius-sm);
+}
+.metrics-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 0.75rem;
+}
+.metric-item {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+.metric-label {
+  font-size: 0.68rem;
+  color: var(--color-text-muted);
+}
+.metric-value {
+  font-size: 0.95rem;
+  font-weight: 700;
+  color: var(--color-text-primary);
+}
+.metric-sub {
+  font-size: 0.66rem;
+  color: var(--color-text-muted);
+}
 
 /* 引擎1 */
 .engine1-row { gap: 0.5rem; }

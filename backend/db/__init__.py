@@ -1214,6 +1214,26 @@ def init_db():
     except Exception as e:
         print(f"[db] macro_strategist prompt 迁移失败（不阻塞启动）: {e}")
 
+    # ── 指数历史数据表（L4回撤修复时间 / L5估值胜率 算法用）──
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS index_price_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            index_code TEXT NOT NULL,
+            trade_date TEXT NOT NULL,
+            close REAL,
+            pe_ttm REAL,
+            pb REAL,
+            dividend_yield REAL,
+            source TEXT DEFAULT 'csindex',
+            created_at TEXT,
+            UNIQUE(index_code, trade_date)
+        )
+    """)
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_index_price_history_code_date "
+        "ON index_price_history(index_code, trade_date)"
+    )
+
     conn.commit()
     conn.close()
 

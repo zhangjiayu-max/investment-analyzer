@@ -26,6 +26,12 @@ from typing import Optional
 from db.config import get_config_bool, get_config_float, get_config_int
 from db.portfolio import list_holdings, get_portfolio_summary, get_cash_balance
 from db.valuations import get_best_valuation
+from services.smart_add_metrics import (
+    classify_fund,
+    calc_kelly_limit,
+    calc_recovery_time,
+    calc_valuation_win_rate,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -337,15 +343,71 @@ def _generate_single_plan(
                 "level": level,
             }
 
-    # 引擎1：估值 z-score 加权定投
+    # L2：基金类型分类
+    fund_type_info = classify_fund(holding)
+    fund_type = fund_type_info["fund_type"]
+    type_strategy = fund_type_info["strategy"]
+
+    # L3：半凯利上限（替代 25% 拍脑袋）
+    try:
+        kelly = calc_kelly_limit(fund_code, index_code, user_id="default")
+    except Exception as e:
+        logger.debug(f"[smart_add] L3 kelly 计算失败 {fund_code}: {e}")
+        kelly = {
+            "kelly_full": 0.5, "kelly_half": 0.25, "mu": 0.0, "sigma": 0.0,
+            "risk_free_rate": 0.025, "limit_pct": 25.0, "sample_days": 0,
+            "data_source": "error",
+        }
+    # 实际上限 = min(凯利上限, 类型硬上限)
+    max_position_pct = min(kelly["limit_pct"], type_strategy["hard_cap_pct"])
+
+    # L4：修复时间调整节奏
+    recovery = {}
+    rhythm_adjust = 1.0
+    try:
+        if index_code:
+            recovery = calc_recovery_time(index_code)
+            if recovery and recovery.get("median_recovery_months"):
+                if recovery["median_recovery_months"] > 24:
+                    rhythm_adjust = 0.5  # 双月投
+                elif recovery["median_recovery_months"] < 12:
+                    rhythm_adjust = 1.5  # 半月投
+    except Exception as e:
+        logger.debug(f"[smart_add] L4 recovery 计算失败 {index_code}: {e}")
+        recovery = {}
+
+    # L5：胜率调整倍数
+    win_rate = {}
+    confidence_mult = 1.0
+    try:
+        if valuation and valuation.get("percentile") is not None and index_code:
+            win_rate = calc_valuation_win_rate(index_code, valuation["percentile"])
+            if win_rate and win_rate.get("win_rate_12m") is not None:
+                if win_rate["win_rate_12m"] > 0.80:
+                    confidence_mult = 1.3
+                elif win_rate["win_rate_12m"] < 0.60:
+                    confidence_mult = 0.7
+    except Exception as e:
+        logger.debug(f"[smart_add] L5 win_rate 计算失败 {index_code}: {e}")
+        win_rate = {}
+
+    # 引擎1：估值 z-score 加权定投（含 L2/L4/L5 调整）
     multiplier = valuation["multiplier"] if valuation else 1.0
-    monthly_dca = round(base_monthly * multiplier, 2)
+    # 最终月投 = 基础 × z-score倍数 × 类型倍数 × 胜率倍数 ÷ 节奏调整
+    final_monthly = round(
+        base_monthly * multiplier * type_strategy["dca_mult"] * confidence_mult / rhythm_adjust, 2
+    )
 
     engine1 = {
         "base_monthly": base_monthly,
-        "multiplier": multiplier,
-        "monthly_dca": monthly_dca,
+        "zscore_multiplier": multiplier,
+        "multiplier": multiplier,  # 向后兼容前端展示
+        "type_multiplier": type_strategy["dca_mult"],
+        "confidence_mult": confidence_mult,
+        "rhythm_adjust": rhythm_adjust,
+        "monthly_dca": final_monthly,
         "valuation_level": valuation_level,
+        "formula": f"{base_monthly} × {multiplier} × {type_strategy['dca_mult']} × {confidence_mult} ÷ {rhythm_adjust}",
     }
 
     # 引擎2：金字塔补仓
@@ -391,10 +453,9 @@ def _generate_single_plan(
             "pool_warning": _calc_pool_warning(released_amount, pool_total, deep_loss_count),
         }
 
-    # 持仓占比 + 安全阀
+    # 持仓占比 + 安全阀（用 L3 凯利上限替代原 25%）
     position_pct = round(current_value / total_assets * 100, 2) if total_assets else 0
-    max_position_allowed = cfg["max_single_position_pct"]
-    can_add = position_pct < max_position_allowed
+    can_add = position_pct < max_position_pct
 
     return {
         "fund_code": fund_code,
@@ -412,11 +473,21 @@ def _generate_single_plan(
         "valuation": valuation,
         "engine1": engine1,
         "pyramid": engine2,
+        "fund_type": fund_type_info["label"],
+        "fund_type_code": fund_type,
+        "type_strategy": type_strategy,
+        "kelly": kelly,
+        "recovery": recovery,
+        "win_rate": win_rate,
+        "confidence_mult": confidence_mult,
+        "rhythm_adjust": rhythm_adjust,
         "safety": {
-            "max_position_pct": max_position_allowed,
+            "max_position_pct": max_position_pct,
             "current_position_pct": position_pct,
             "can_add": can_add,
-            "reason": "" if can_add else f"已达单标的仓位上限 {max_position_allowed}%",
+            "kelly_limit": kelly["limit_pct"],
+            "type_hard_cap": type_strategy["hard_cap_pct"],
+            "reason": "" if can_add else f"已达配置上限 {max_position_pct:.1f}%（凯利{kelly['limit_pct']:.0f}%/类型{type_strategy['hard_cap_pct']:.0f}%）",
         },
     }
 

@@ -274,27 +274,44 @@ def get_index_valuation(index_code: str = "000300") -> dict:
         "dividend_yield": None,
     }
 
+    # 中证指数官方接口走 urllib，需绕过 SSL 证书验证（与 get_market_overview 等保持一致）
+    import ssl
+    ssl._create_default_https_context = ssl._create_unverified_context
+
     try:
-        # 尝试从乐咕乐股获取指数估值
-        df = ak.index_value_hist_funddb(
-            symbol=_index_name_map(index_code), indicator="市盈率"
-        )
+        # 主接口：stock_zh_index_value_csindex 返回近 20 天 PE/股息率快照
+        # 原 index_value_hist_funddb 在 akshare 1.18.x 已移除，改用中证指数官方接口
+        df = ak.stock_zh_index_value_csindex(symbol=index_code)
         if df is not None and not df.empty:
             latest = df.iloc[-1]
-            result["pe"] = _to_float(latest.get("市盈率"))
-            result["pe_percentile"] = _to_float(latest.get("百分位"))
-            result["index_name"] = _index_name_map(index_code)
+            result["pe"] = _to_float(latest.get("市盈率1"))
+            result["dividend_yield"] = _to_float(latest.get("股息率1"))
+            index_name = latest.get("指数中文简称")
+            if index_name:
+                result["index_name"] = str(index_name)
     except Exception:
         pass
 
     try:
-        df_pb = ak.index_value_hist_funddb(
-            symbol=_index_name_map(index_code), indicator="市净率"
+        # 备选接口：stock_zh_index_hist_csindex 取长历史滚动市盈率，计算 PE 百分位
+        # stock_zh_index_value_csindex 仅近 20 天快照无法算百分位，故取近 3 年样本
+        end = datetime.now().strftime("%Y%m%d")
+        start = (datetime.now() - timedelta(days=365 * 3)).strftime("%Y%m%d")
+        df_hist = ak.stock_zh_index_hist_csindex(
+            symbol=index_code, start_date=start, end_date=end
         )
-        if df_pb is not None and not df_pb.empty:
-            latest = df_pb.iloc[-1]
-            result["pb"] = _to_float(latest.get("市净率"))
-            result["pb_percentile"] = _to_float(latest.get("百分位"))
+        if df_hist is not None and not df_hist.empty and "滚动市盈率" in df_hist.columns:
+            pe_series = df_hist["滚动市盈率"].dropna()
+            if len(pe_series) > 0:
+                latest_pe = _to_float(pe_series.iloc[-1])
+                if latest_pe is not None:
+                    # 主接口未取到 PE 时用历史接口兜底
+                    if result["pe"] is None:
+                        result["pe"] = latest_pe
+                    # PE 百分位 = 历史样本中小于当前值的比例 (0-1)
+                    result["pe_percentile"] = round(
+                        float((pe_series < latest_pe).sum()) / len(pe_series), 4
+                    )
     except Exception:
         pass
 

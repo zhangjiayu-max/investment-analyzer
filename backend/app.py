@@ -258,6 +258,18 @@ def _index_skill_doc_by_type(doc_type: str, title: str):
         logging.warning(f"索引 skill_document {doc_type} 失败: {e}")
 
 
+async def _async_fetch_index_history(index_codes: list):
+    """后台异步回填指数历史数据（L4/L5 算法依赖）。"""
+    from services.index_history_fetcher import fetch_index_history
+    for code in index_codes:
+        try:
+            result = fetch_index_history(code, years=10)
+            if result.get("saved", 0) > 0:
+                logging.info(f"指数 {code} 回填 {result['saved']} 条")
+        except Exception as e:
+            logging.debug(f"指数 {code} 回填失败: {e}")
+
+
 @app.on_event("startup")
 async def startup():
     """应用启动时的初始化。"""
@@ -276,6 +288,19 @@ async def startup():
             logging.info(f"回填 {count} 条 recommendations 的 target_fund_code")
     except Exception as e:
         logging.warning(f"回填 recommendations 失败（不影响启动）: {e}")
+
+    # 异步回填持仓指数历史（L4/L5 算法依赖）
+    try:
+        from services.index_history_fetcher import fetch_holdings_index_history
+        from db.portfolio import list_holdings
+        holdings = list_holdings()
+        index_codes = set(h.get("index_code") for h in holdings if h.get("index_code"))
+        if index_codes:
+            logging.info(f"开始异步回填 {len(index_codes)} 个指数历史数据...")
+            # 后台执行，不阻塞启动
+            asyncio.create_task(_async_fetch_index_history(list(index_codes)))
+    except Exception as e:
+        logging.warning(f"回填指数历史启动失败（不影响启动）: {e}")
 
     # 升级1: 初始化全局工具注册中心
     try:
