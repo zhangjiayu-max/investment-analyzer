@@ -18,6 +18,8 @@ import HotspotsCard from './dashboard/HotspotsCard.vue'
 import CashManagementCard from './dashboard/CashManagementCard.vue'
 import DecisionActionList from './dashboard/DecisionActionList.vue'
 import DecisionReviewList from './dashboard/DecisionReviewList.vue'
+import MarketOverviewCard from './dashboard/MarketOverviewCard.vue'
+import AlertsCard from './dashboard/AlertsCard.vue'
 import DecisionCanvas from './DecisionCanvas.vue'
 import Icon from './ui/Icon.vue'
 
@@ -800,6 +802,12 @@ function handlePanorama() {
       @toggle="showBriefing = !showBriefing"
       @submit-feedback="handleBriefingSubmitFeedback"
     />
+
+    <!-- 市场行情总览（环境背景） -->
+    <MarketOverviewCard class="reveal-stagger" />
+
+    <!-- 持仓预警（具体关注） -->
+    <AlertsCard class="reveal-stagger" @navigate="emit('navigate', $event)" />
 
     <!-- 今日持仓提示 Top 3 摘要 -->
     <div v-if="dailyAdvice || dailyAdviceLoading" class="advice-summary-card card editorial-card">

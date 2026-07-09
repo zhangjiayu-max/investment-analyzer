@@ -6,7 +6,7 @@ import re
 import time
 from datetime import datetime
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 
 from db import list_valuation_indexes, list_holdings, get_analysis_agent, get_config_float, get_config_int
 from db import create_async_task, update_async_task, get_async_task
@@ -456,6 +456,20 @@ def _fuzzy_match_sectors_to_data(sectors: list[dict]) -> list[dict]:
 
 
 # ── API 端点 ──────────────────────────────────────────────
+
+
+@router.get("/market-overview")
+async def market_overview_api():
+    """市场行情总览：主要指数 + 领涨/领跌板块 + 涨跌家数。
+    数据 5 分钟缓存（进程内），前端可高频调用。用于每日看板顶部行情展示。
+    """
+    try:
+        data = get_market_overview()
+        return {"ok": True, "data": data}
+    except Exception as e:
+        logging.warning(f"[market_overview] 行情数据获取失败: {e}")
+        raise HTTPException(status_code=500, detail=f"行情数据获取失败: {e}")
+
 
 
 @router.get("/overview")

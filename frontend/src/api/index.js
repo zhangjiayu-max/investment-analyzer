@@ -946,6 +946,11 @@ export function getDashboard() {
   return api.get('/dashboard')
 }
 
+/** 获取市场行情总览（主要指数 + 板块 + 涨跌家数，5 分钟缓存） */
+export function getMarketOverview() {
+  return api.get('/market-intelligence/market-overview')
+}
+
 /** 获取今日市场热点（YingMi MCP） */
 export function getHotTopics() {
   return api.get('/dashboard/hot-topics')

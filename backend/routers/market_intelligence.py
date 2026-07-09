@@ -33,6 +33,8 @@ logger = logging.getLogger(__name__)
 
 _background_tasks = set()
 
+# 注：market_overview 端点已迁移到 routers/analysis/market_intel.py 的 /overview
+
 # ── 缓存（使用数据库 analysis_cache 表，每日自动失效） ──────
 
 # ── 新闻搜索关键词（多维度覆盖） ──────────────────────────
