@@ -264,6 +264,15 @@ async def startup():
     init_db()
     logging.info("数据库初始化完成")
 
+    # P3 优化：回填存量 recommendations 的 target_fund_code（启动时执行一次）
+    try:
+        from services.index_fund_mapper import backfill_recommendations_target_fund
+        count = backfill_recommendations_target_fund()
+        if count > 0:
+            logging.info(f"回填 {count} 条 recommendations 的 target_fund_code")
+    except Exception as e:
+        logging.warning(f"回填 recommendations 失败（不影响启动）: {e}")
+
     # 升级1: 初始化全局工具注册中心
     try:
         from tools.tool_registry import ToolRegistry

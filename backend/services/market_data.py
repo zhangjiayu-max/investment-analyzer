@@ -169,21 +169,32 @@ def get_fund_nav(fund_code: str) -> pd.DataFrame:
 
     返回:
         DataFrame，列: 净值日期/单位净值/累计净值/日增长率
+
+    P3 优化：加 5 分钟 TTL 缓存，避免二八策略回测重复拉取债基净值。
     """
+    # P3 优化：先查缓存
+    cache_key = f"fund_nav:{fund_code}"
+    cached = _get_cached(cache_key)
+    if cached is not None:
+        return cached
+
     if not _HAS_AKSHARE or pd is None:
         df = _eastmoney_fund_nav(fund_code)
         if df is not None:
+            _set_cached(cache_key, df)
             return df
         return pd.DataFrame(columns=["净值日期", "累计净值"]) if pd else pd.DataFrame()
 
     try:
         df = ak.fund_open_fund_info_em(symbol=fund_code, indicator="累计净值走势")
         df.columns = ["净值日期", "累计净值"]
+        _set_cached(cache_key, df)
         return df
     except Exception as e:
         logger.warning(f"akshare 基金净值失败 ({fund_code})，降级到东方财富: {e}")
         df = _eastmoney_fund_nav(fund_code)
         if df is not None:
+            _set_cached(cache_key, df)
             return df
         return pd.DataFrame(columns=["净值日期", "累计净值"])
 

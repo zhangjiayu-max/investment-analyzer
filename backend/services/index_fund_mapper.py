@@ -45,10 +45,7 @@ _INDEX_FUND_MAP = {
     "399997": [
         {"fund_code": "161725", "fund_name": "招商中证白酒指数A"},
     ],
-    "930697": [
-        {"fund_code": "161725", "fund_name": "招商中证白酒指数A"},
-    ],
-    # 中证白酒有时用 399997 或 930697，两者都映射到同一只基金
+    # 930697 是家用电器指数（原映射错误地指向白酒，已修正）
 }
 
 # 指数代码 → 中文名关键词（用于持仓 fund_name 模糊匹配）
@@ -60,7 +57,8 @@ _INDEX_NAME_HINTS = {
     "000016": "上证50",
     "399006": "创业板",
     "399997": "白酒",
-    "930697": "白酒",
+    # 930697 是家用电器指数（原错误地映射到白酒，已修正）
+    "930697": "家电",
     # P3 补充：常见行业指数关键词
     "931638": "恒生科技",      # 港股互联网（持仓基金常叫"恒生科技ETF联接"）
     "399975": "证券",
@@ -164,17 +162,11 @@ def find_funds_by_index(index_code: str, user_holdings_only: bool = True) -> lis
 def get_candidate_funds_for_recommendation(rec_id: int) -> Optional[dict]:
     """根据 recommendation id 获取候选基金列表 + 建议详情。
 
-    返回:
-        {
-            "recommendation_id": int,
-            "index_name": str,
-            "index_code": str,
-            "direction": str,
-            "target_fund_code": str | None,  # 已填充的基金代码
-            "target_fund_name": str | None,
-            "candidate_funds": [...],
-        }
-        None 表示 recommendation 不存在。
+    P3 优化：查找优先级调整为
+    1. 持仓中 fund_name 模糊匹配（原逻辑）
+    2. fund_metadata.tracking_index 精确匹配（P3 新增，需 tracking_index 含指数名）
+    3. 内置映射表 _INDEX_FUND_MAP
+    4. 已填充的 target_fund_code 补充到首位
     """
     from db._conn import _get_conn
 
@@ -190,8 +182,14 @@ def get_candidate_funds_for_recommendation(rec_id: int) -> Optional[dict]:
 
     rec = dict(row)
     index_code = rec.get("index_code") or ""
+    index_name = rec.get("index_name") or ""
     # 如果已填充 target_fund_code，候选列表仍提供（用户可切换）
     candidates = find_funds_by_index(index_code) if index_code else []
+
+    # P3 优化：若模糊匹配为空，尝试用 index_name 在 fund_metadata.tracking_index 精确查找
+    if not candidates and index_name:
+        candidates = _find_funds_by_tracking_index(index_name)
+
     # 若已填充 target_fund_code 不在候选中，补充到候选首位
     if rec.get("target_fund_code"):
         existing_codes = {c["fund_code"] for c in candidates}
@@ -204,10 +202,118 @@ def get_candidate_funds_for_recommendation(rec_id: int) -> Optional[dict]:
 
     return {
         "recommendation_id": rec["id"],
-        "index_name": rec.get("index_name") or "",
+        "index_name": index_name,
         "index_code": index_code,
         "direction": rec.get("direction") or "",
         "target_fund_code": rec.get("target_fund_code"),
         "target_fund_name": rec.get("target_fund_name"),
         "candidate_funds": candidates,
     }
+
+
+def _find_funds_by_tracking_index(index_name: str) -> list[dict]:
+    """通过 fund_metadata.tracking_index 精确查找基金（P3 优化新增）。
+
+    akshare 的 tracking_index 字段是中文名（如"沪深300指数"），
+    我们用 LIKE 模糊匹配 index_name 关键词。
+
+    Returns:
+        [{"fund_code": str, "fund_name": str, "in_holdings": bool}, ...]
+    """
+    if not index_name:
+        return []
+    from db._conn import _get_conn
+
+    # 提取核心关键词（去掉"指数"后缀）
+    keyword = index_name.replace("指数", "").strip()
+    if not keyword:
+        return []
+
+    conn = _get_conn()
+    try:
+        rows = conn.execute(
+            "SELECT fund_code, fund_name, tracking_index FROM fund_metadata "
+            "WHERE tracking_index LIKE ? AND tracking_index != '' "
+            "ORDER BY updated_at DESC LIMIT 10",
+            (f"%{keyword}%",),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    if not rows:
+        return []
+
+    # 标记是否在持仓中
+    try:
+        from db import list_holdings
+        holdings_codes = {h.get("fund_code") for h in list_holdings()}
+    except Exception:
+        holdings_codes = set()
+
+    results = []
+    seen = set()
+    for r in rows:
+        code = r[0]
+        if code in seen:
+            continue
+        results.append({
+            "fund_code": code,
+            "fund_name": r[1],
+            "in_holdings": code in holdings_codes,
+        })
+        seen.add(code)
+    return results
+
+
+def backfill_recommendations_target_fund() -> int:
+    """P3 优化：回填存量 recommendations 的 target_fund_code。
+
+    对所有 target_fund_code 为空的 recommendations，尝试用 find_funds_by_index +
+    _find_funds_by_tracking_index 查找并填充。
+
+    Returns:
+        回填成功的记录数。
+    """
+    from db._conn import _get_conn
+
+    conn = _get_conn()
+    try:
+        rows = conn.execute(
+            "SELECT id, index_name, index_code FROM recommendations "
+            "WHERE target_fund_code IS NULL OR target_fund_code = ''"
+        ).fetchall()
+    finally:
+        conn.close()
+
+    if not rows:
+        return 0
+
+    backfilled = 0
+    for r in rows:
+        rec_id = r[0]
+        index_name = r[1] or ""
+        index_code = r[2] or ""
+
+        # 优先用 index_code 查持仓/内置映射
+        candidates = find_funds_by_index(index_code) if index_code else []
+        # 其次用 index_name 查 fund_metadata.tracking_index
+        if not candidates and index_name:
+            candidates = _find_funds_by_tracking_index(index_name)
+        if not candidates:
+            continue
+
+        picked = next((c for c in candidates if c.get("in_holdings")), candidates[0])
+        conn = _get_conn()
+        try:
+            conn.execute(
+                "UPDATE recommendations SET target_fund_code = ?, target_fund_name = ? WHERE id = ?",
+                (picked["fund_code"], picked["fund_name"], rec_id),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        backfilled += 1
+
+    if backfilled > 0:
+        logger.info(f"[backfill] 回填 {backfilled} 条 recommendations 的 target_fund_code")
+    return backfilled

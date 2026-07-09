@@ -123,7 +123,10 @@ def _fetch_fund_metadata_from_akshare(fund_code: str) -> dict | None:
 
 
 def _metadata_from_akshare_dict(raw: dict) -> dict:
-    """把 akshare 原始字典规整为 fund_metadata 表字段。"""
+    """把 akshare 原始字典规整为 fund_metadata 表字段。
+
+    P3 优化：保留 tracking_index 字段（原实现丢弃了）。
+    """
     fund_code = _safe_str(raw.get("fund_code", ""))
     fund_name = _safe_str(raw.get("fund_name", ""))
     fund_type = _safe_str(raw.get("fund_type", ""))
@@ -136,6 +139,7 @@ def _metadata_from_akshare_dict(raw: dict) -> dict:
         "fund_type": fund_type,
         "fund_category": classify_fund_category(fund_name, fund_type, fund_code),
         "benchmark": _safe_str(raw.get("benchmark", "")),
+        "tracking_index": _safe_str(raw.get("tracking_index", "")),  # P3 优化：不再丢弃
         "establish_date": _safe_str(raw.get("established", "")),
         "management_company": "",
         "management_fee": None,
@@ -186,14 +190,15 @@ def refresh_fund_metadata(fund_code: str) -> dict | None:
             """
             INSERT INTO fund_metadata (
                 fund_code, fund_name, fund_type, fund_category, benchmark,
-                establish_date, management_company, management_fee, custody_fee,
+                tracking_index, establish_date, management_company, management_fee, custody_fee,
                 subscription_fee, source, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(fund_code) DO UPDATE SET
                 fund_name = excluded.fund_name,
                 fund_type = excluded.fund_type,
                 fund_category = excluded.fund_category,
                 benchmark = excluded.benchmark,
+                tracking_index = excluded.tracking_index,
                 establish_date = excluded.establish_date,
                 management_company = excluded.management_company,
                 management_fee = excluded.management_fee,
@@ -204,8 +209,8 @@ def refresh_fund_metadata(fund_code: str) -> dict | None:
             """,
             (
                 meta["fund_code"], meta["fund_name"], meta["fund_type"],
-                meta["fund_category"], meta["benchmark"], meta["establish_date"],
-                meta["management_company"], meta["management_fee"],
+                meta["fund_category"], meta["benchmark"], meta["tracking_index"],
+                meta["establish_date"], meta["management_company"], meta["management_fee"],
                 meta["custody_fee"], meta["subscription_fee"],
                 meta["source"], meta["updated_at"],
             ),

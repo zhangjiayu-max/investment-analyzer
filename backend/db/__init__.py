@@ -766,8 +766,12 @@ def init_db():
             updated_at TEXT DEFAULT (datetime('now','localtime'))
         )
     """)
+    # P3 优化：新增 tracking_index 列（akshare 跟踪标的中文名，如"沪深300指数"）
+    _add_column_if_not_exists(conn, "fund_metadata", "tracking_index", "TEXT DEFAULT ''")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_fund_meta_type ON fund_metadata(fund_type)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_fund_meta_category ON fund_metadata(fund_category)")
+    # P3 优化：tracking_index 索引，用于按指数反查基金
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_fund_meta_tracking ON fund_metadata(tracking_index)")
 
     # ── 基金净值历史本地缓存 ──────────────────────────────────────
     conn.execute("""
