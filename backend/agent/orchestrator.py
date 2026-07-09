@@ -3345,7 +3345,7 @@ def orchestrate(query: str, history: list, rag_context: str = "", cancel_event: 
         from db._conn import _get_conn
         conn = _get_conn()
         row = conn.execute(
-            "SELECT COALESCE(SUM(total_tokens), 0) as total FROM token_usage WHERE created_at >= datetime('now', '-5 minutes')"
+            "SELECT COALESCE(SUM(total_tokens), 0) as total FROM token_usage WHERE created_at >= datetime('now', '-5 minutes') AND caller != 'embedding_index'"
         ).fetchone()
         total_tokens = row["total"] if row else 0
         conn.close()

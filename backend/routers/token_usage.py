@@ -26,20 +26,21 @@ async def get_token_usage_api(days: int = 7):
         conn.close()
         return {"total": 0, "daily": [], "by_model": []}
 
+    # 排除 embedding_index（本地 embedding 模型，非 LLM 调用），仅统计 LLM token
     row = conn.execute("""
         SELECT COUNT(*) as calls, SUM(prompt_tokens) as prompt, SUM(completion_tokens) as completion, SUM(total_tokens) as total
-        FROM token_usage WHERE created_at >= datetime('now', ?)
+        FROM token_usage WHERE created_at >= datetime('now', ?) AND caller != 'embedding_index'
     """, (f"-{days} days",)).fetchone()
 
     daily = conn.execute("""
         SELECT date(created_at) as day, COUNT(*) as calls, SUM(total_tokens) as tokens
-        FROM token_usage WHERE created_at >= datetime('now', ?)
+        FROM token_usage WHERE created_at >= datetime('now', ?) AND caller != 'embedding_index'
         GROUP BY date(created_at) ORDER BY day DESC
     """, (f"-{days} days",)).fetchall()
 
     by_model = conn.execute("""
         SELECT model, COUNT(*) as calls, SUM(prompt_tokens) as prompt, SUM(completion_tokens) as completion, SUM(total_tokens) as total
-        FROM token_usage WHERE created_at >= datetime('now', ?)
+        FROM token_usage WHERE created_at >= datetime('now', ?) AND caller != 'embedding_index'
         GROUP BY model ORDER BY total DESC
     """, (f"-{days} days",)).fetchall()
 

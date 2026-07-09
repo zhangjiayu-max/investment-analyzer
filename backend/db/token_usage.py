@@ -49,19 +49,19 @@ def count_token_usage(days: int = 7, caller: str = None, model: str = None) -> i
 
 
 def get_today_token_total() -> int:
-    """返回今日 token 总用量，用于预算检查。"""
+    """返回今日 token 总用量，用于预算检查。排除 embedding_index（非 LLM 调用）。"""
     conn = _get_conn()
     row = conn.execute("""
         SELECT COALESCE(SUM(total_tokens), 0) as total
         FROM token_usage
-        WHERE date(created_at) = date('now', 'localtime')
+        WHERE date(created_at) = date('now', 'localtime') AND caller != 'embedding_index'
     """).fetchone()
     conn.close()
     return row[0] if row else 0
 
 
 def get_token_usage_summary(days: int = 30) -> dict:
-    """汇总统计。"""
+    """汇总统计。排除 embedding_index（非 LLM 调用）。"""
     conn = _get_conn()
     row = conn.execute("""
         SELECT
@@ -71,7 +71,7 @@ def get_token_usage_summary(days: int = 30) -> dict:
             COALESCE(SUM(total_tokens), 0) as total_tokens,
             CASE WHEN COUNT(*) > 0 THEN COALESCE(SUM(total_tokens), 0) / COUNT(*) ELSE 0 END as avg_per_call
         FROM token_usage
-        WHERE created_at >= datetime('now', ?)
+        WHERE created_at >= datetime('now', ?) AND caller != 'embedding_index'
     """, (f"-{days} days",)).fetchone()
     conn.close()
     base = dict(row)
@@ -84,7 +84,7 @@ def get_token_usage_summary(days: int = 30) -> dict:
             COALESCE(SUM(completion_tokens), 0) as completion,
             COALESCE(SUM(total_tokens), 0) as total
         FROM token_usage
-        WHERE date(created_at) = date('now', 'localtime')
+        WHERE date(created_at) = date('now', 'localtime') AND caller != 'embedding_index'
     """).fetchone()
     conn.close()
 
@@ -135,7 +135,7 @@ def get_token_usage_by_caller(days: int = 7) -> list[dict]:
 
 
 def get_token_usage_daily(days: int = 30) -> list[dict]:
-    """按天统计 token 用量趋势。"""
+    """按天统计 token 用量趋势。排除 embedding_index（非 LLM 调用）。"""
     conn = _get_conn()
     rows = conn.execute("""
         SELECT
@@ -143,7 +143,7 @@ def get_token_usage_daily(days: int = 30) -> list[dict]:
             COUNT(*) as calls,
             COALESCE(SUM(total_tokens), 0) as tokens
         FROM token_usage
-        WHERE created_at >= datetime('now', ?)
+        WHERE created_at >= datetime('now', ?) AND caller != 'embedding_index'
         GROUP BY date(created_at)
         ORDER BY day ASC
     """, (f"-{days} days",)).fetchall()
@@ -244,14 +244,14 @@ except ImportError:
 
 
 def get_cost_estimate(days: int = 7) -> dict:
-    """估算近 N 天的 API 费用。"""
+    """估算近 N 天的 API 费用。排除 embedding_index（非 LLM 调用）。"""
     conn = _get_conn()
     rows = conn.execute("""
         SELECT model,
                SUM(prompt_tokens) as prompt,
                SUM(completion_tokens) as completion
         FROM token_usage
-        WHERE created_at >= datetime('now', ?)
+        WHERE created_at >= datetime('now', ?) AND caller != 'embedding_index'
         GROUP BY model
     """, (f"-{days} days",)).fetchall()
     conn.close()
@@ -280,7 +280,7 @@ def get_cost_estimate(days: int = 7) -> dict:
 
 
 def get_token_usage_hourly(date: str = None) -> list[dict]:
-    """按小时统计 token 用量。"""
+    """按小时统计 token 用量。排除 embedding_index（非 LLM 调用）。"""
     conn = _get_conn()
     if date:
         target = f"date(created_at) = '{date}'"
@@ -292,7 +292,7 @@ def get_token_usage_hourly(date: str = None) -> list[dict]:
             COUNT(*) as calls,
             SUM(total_tokens) as tokens
         FROM token_usage
-        WHERE {target}
+        WHERE {target} AND caller != 'embedding_index'
         GROUP BY hour ORDER BY hour ASC
     """).fetchall()
     conn.close()
@@ -354,7 +354,7 @@ def get_trace_tokens(trace_id: str) -> dict:
 
 
 def get_token_usage_by_model(days: int = 7) -> list[dict]:
-    """按模型分组统计。"""
+    """按模型分组统计。排除 embedding_index（非 LLM 调用）。"""
     conn = _get_conn()
     rows = conn.execute("""
         SELECT model, COUNT(*) as calls,
@@ -362,7 +362,7 @@ def get_token_usage_by_model(days: int = 7) -> list[dict]:
                SUM(completion_tokens) as completion_tokens,
                SUM(total_tokens) as total_tokens
         FROM token_usage
-        WHERE created_at >= datetime('now', ?)
+        WHERE created_at >= datetime('now', ?) AND caller != 'embedding_index'
         GROUP BY model ORDER BY total_tokens DESC
     """, (f"-{days} days",)).fetchall()
     conn.close()
