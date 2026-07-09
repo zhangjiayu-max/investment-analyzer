@@ -51,7 +51,8 @@ _INDEX_FUND_MAP = {
     # 中证白酒有时用 399997 或 930697，两者都映射到同一只基金
 }
 
-# 指数代码 → 中文名（用于持仓 fund_name 模糊匹配）
+# 指数代码 → 中文名关键词（用于持仓 fund_name 模糊匹配）
+# P3 冒烟测试发现：原表覆盖不全，港股互联网/恒生科技/医药等持仓匹配失败
 _INDEX_NAME_HINTS = {
     "000300": "沪深300",
     "000905": "中证500",
@@ -60,7 +61,31 @@ _INDEX_NAME_HINTS = {
     "399006": "创业板",
     "399997": "白酒",
     "930697": "白酒",
+    # P3 补充：常见行业指数关键词
+    "931638": "恒生科技",      # 港股互联网（持仓基金常叫"恒生科技ETF联接"）
+    "399975": "证券",
+    "931071": "人工智能",
+    "930601": "软件",
+    "931140": "医药",
+    "000922": "红利",
+    "H30184": "半导体",
+    "000688": "科创",
 }
+
+
+def _normalize_index_code(index_code: str) -> str:
+    """归一化指数代码，剥离交易所后缀（.SZ / .SH / .CSI / .HI / .GI）。
+
+    DB 中存的是 '399997.SZ'，但映射表的键是 '399997'。
+    P3 冒烟测试发现：不归一化会导致 candidate_funds 全部返回空。
+    """
+    if not index_code:
+        return ""
+    code = index_code.strip().upper()
+    for suffix in (".SZ", ".SH", ".CSI", ".HI", ".GI"):
+        if code.endswith(suffix):
+            return code[: -len(suffix)]
+    return code
 
 
 def find_funds_by_index(index_code: str, user_holdings_only: bool = True) -> list[dict]:
@@ -72,7 +97,7 @@ def find_funds_by_index(index_code: str, user_holdings_only: bool = True) -> lis
     3. 返回空列表，前端提示"未找到相关基金，请手动选择"
 
     Args:
-        index_code: 指数代码（如 000300）
+        index_code: 指数代码（如 000300 或 399997.SZ，会自动归一化）
         user_holdings_only: 是否仅从用户持仓中查找（True=优先持仓，False=仅内置表）
 
     Returns:
@@ -81,8 +106,17 @@ def find_funds_by_index(index_code: str, user_holdings_only: bool = True) -> lis
     if not index_code:
         return []
 
-    index_code = index_code.strip()
-    name_hint = _INDEX_NAME_HINTS.get(index_code, "")
+    raw_code = index_code.strip()
+    norm_code = _normalize_index_code(raw_code)
+    # 查找时同时尝试原始代码和归一化代码
+    lookup_codes = [norm_code, raw_code] if norm_code != raw_code else [norm_code]
+
+    name_hint = ""
+    for c in lookup_codes:
+        if c in _INDEX_NAME_HINTS:
+            name_hint = _INDEX_NAME_HINTS[c]
+            break
+
     results: list[dict] = []
     seen_codes: set = set()
 
@@ -108,7 +142,11 @@ def find_funds_by_index(index_code: str, user_holdings_only: bool = True) -> lis
             logger.warning(f"查找用户持仓失败: {e}")
 
     # 2. 内置映射表补充（不重复已加入的 fund_code）
-    builtin = _INDEX_FUND_MAP.get(index_code, [])
+    builtin = []
+    for c in lookup_codes:
+        if c in _INDEX_FUND_MAP:
+            builtin = _INDEX_FUND_MAP[c]
+            break
     for item in builtin:
         code = item["fund_code"]
         if code in seen_codes:
