@@ -43,6 +43,64 @@ SECTOR_TO_INDEX = {
     "化工": ["930695", "930751"],
 }
 
+# 板块别名 → SECTOR_TO_INDEX key（LLM 常见同义词归一化）
+# 解决问题：LLM 提取"国防军工"但表里是"军工"导致匹配失败
+_SECTOR_ALIASES = {
+    "国防军工": "军工", "航天": "军工", "航天航空": "军工", "商业航天": "军工",
+    "生物医药": "医药", "医疗": "医药", "医疗器械": "医药", "医药生物": "医药",
+    "银行": "金融", "证券": "金融", "保险": "金融",
+    "房地产": "地产",
+    "新能源汽车": "新能源", "新能源车": "新能源", "光伏": "新能源", "锂电": "新能源",
+    "食品饮料": "消费", "白酒": "消费", "零售": "消费",
+    "电子": "半导体", "芯片": "半导体",
+    "互联网": "科技", "软件": "科技", "计算机": "科技",
+    "煤炭": "有色", "钢铁": "有色", "黄金": "有色",
+    "国防": "军工",
+}
+
+# 板块 → 持仓 index_name 关键词（用于持仓指数名模糊匹配）
+# 场景：用户持仓 index_name="中证银行指数"，事件板块="金融"
+# 银行属于金融板块，通过关键词"银行"命中
+_SECTOR_TO_NAME_KEYWORDS = {
+    "半导体": ["半导体", "芯片", "集成电路", "存储"],
+    "人工智能": ["人工智能", "AI", "机器人", "智能"],
+    "新能源": ["新能源", "光伏", "锂电", "碳中和", "电池"],
+    "消费": ["消费", "白酒", "食品", "零售", "畜牧"],
+    "医药": ["医药", "医疗", "生物", "健康"],
+    "金融": ["银行", "证券", "保险", "金融"],
+    "地产": ["地产", "房地产", "REIT"],
+    "军工": ["军工", "国防", "航天", "航空"],
+    "教育": ["教育"],
+    "体育": ["体育"],
+    "传媒": ["传媒", "媒体", "影视", "游戏"],
+    "汽车": ["汽车", "新能源车", "智能驾驶"],
+    "基建": ["基建", "建筑", "建材"],
+    "科技": ["科技", "互联网", "软件", "计算机", "信息"],
+    "农业": ["农业", "养殖", "种植"],
+    "环保": ["环保", "环境", "新能源"],
+    "有色": ["有色", "煤炭", "钢铁", "黄金", "金属"],
+    "化工": ["化工", "化学", "材料"],
+}
+
+
+def _normalize_sector(sector: str) -> str:
+    """板块名归一化：把 LLM 常见别名映射到 SECTOR_TO_INDEX 的标准 key。
+
+    Args:
+        sector: LLM 提取的板块名（可能是"国防军工"等别名）
+
+    Returns:
+        归一化后的板块名（在 SECTOR_TO_INDEX 中则返回对应 key，否则原样返回）
+    """
+    if not sector:
+        return ""
+    sector = sector.strip()
+    # 已是标准 key，直接返回
+    if sector in SECTOR_TO_INDEX:
+        return sector
+    # 查别名表
+    return _SECTOR_ALIASES.get(sector, sector)
+
 
 def _fetch_news_from_mcp(keyword: str = "", limit: int = 50) -> list[dict]:
     """从盈米 MCP 检索财经新闻（复用 alert_news_service 的调用模式）。
@@ -137,7 +195,8 @@ def _extract_events_from_news(news_list: list[dict], trace_id: str = "") -> list
 - event_type: 事件分类（policy/industry/earnings/capital/macro/theme）
 - direction: 影响方向（positive/negative/neutral）
 - expected_date: 预期发生日期（YYYY-MM-DD 格式，从新闻推断）
-- affected_sectors: 受影响板块（数组，从以下选取：{known_sectors}）
+- affected_sectors: 受影响板块（数组，必须严格从以下标准板块名中选取：{known_sectors}）
+  注意：不要使用"国防军工""生物医药"等同义词，必须用标准名"军工""医药"
 - affected_themes: 受影响主题（数组，自由文本如"国产替代""火箭回收"）
 - confidence: 置信度（0-1，1 表示高度确定会发生）
 
@@ -147,6 +206,7 @@ def _extract_events_from_news(news_list: list[dict], trace_id: str = "") -> list
 3. 跳过无市场影响的事件（如纯娱乐八卦）
 4. 单条新闻可提取 0-2 个事件，最多输出 {max_events} 个事件
 5. expected_date 必须在 [{today}, {future_limit}] 范围内
+6. affected_sectors 必须从标准板块名列表选取，不要自创板块名
 
 只输出 JSON 数组，不要其他解释。"""
 
@@ -157,18 +217,26 @@ def _extract_events_from_news(news_list: list[dict], trace_id: str = "") -> list
             model=MODEL,
             messages=[{"role": "user", "content": prompt}],
             temperature=0.1,
-            max_tokens=2000,
+            max_tokens=4000,
         )
         raw = (resp.choices[0].message.content or "").strip()
-        # 容错：剥离可能的 markdown 代码块包裹
+        # 容错1：剥离 markdown 代码块包裹
         if raw.startswith("```"):
             raw = re.sub(r"^```(?:json)?\s*", "", raw)
             raw = re.sub(r"\s*```$", "", raw)
+        # 容错2：LLM 可能在前缀加说明文字，提取第一个 [ 到最后一个 ]
+        if not raw.startswith("["):
+            start = raw.find("[")
+            end = raw.rfind("]")
+            if start != -1 and end != -1 and end > start:
+                raw = raw[start:end + 1]
         events = json.loads(raw)
         if not isinstance(events, list):
             return []
     except Exception as e:
         logger.warning(f"[event_radar:{trace_id}] LLM 事件提取失败: {e}")
+        # 记录原始响应片段便于调试（不超过 200 字）
+        logger.debug(f"[event_radar:{trace_id}] LLM 原始响应: {raw[:200] if 'raw' in dir() else 'N/A'}")
         return []
 
     # 二次过滤：日期范围 + 置信度
@@ -196,44 +264,64 @@ def _extract_events_from_news(news_list: list[dict], trace_id: str = "") -> list
 def _find_candidate_funds(index_code: str, exclude_codes: set = None) -> list[dict]:
     """查询跟踪该指数的候选建仓基金（排除已持仓）。
 
-    复用 fund_metadata.tracking_index 列做精确匹配。
+    优先级：
+    1. fund_metadata 表精确匹配 tracking_index
+    2. 回退到 index_fund_mapper 内置映射表（_INDEX_FUND_MAP）
+       —— 解决 fund_metadata 表为空时 candidate_funds 永远为空的问题
     """
     exclude_codes = exclude_codes or set()
+    results = []
+
+    # 1. fund_metadata 表查询
     conn = _get_conn()
     try:
-        # 检查 fund_metadata 表是否存在
         row = conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name='fund_metadata'"
         ).fetchone()
-        if not row:
-            return []
-
-        # 动态构造 NOT IN 占位
-        placeholders = ",".join("?" * len(exclude_codes)) if exclude_codes else "''"
-        sql = f"""
-            SELECT fund_code, fund_name, fund_type, tracking_index
-            FROM fund_metadata
-            WHERE tracking_index = ?
-              AND fund_code NOT IN ({placeholders})
-            ORDER BY fund_type, fund_code
-            LIMIT 5
-        """
-        params = [index_code] + list(exclude_codes)
-        rows = conn.execute(sql, params).fetchall()
-        return [
-            {
-                "fund_code": r["fund_code"],
-                "fund_name": r["fund_name"],
-                "fund_type": r["fund_type"],
-                "match_reason": f"跟踪指数 {index_code}",
-            }
-            for r in rows
-        ]
+        if row:
+            placeholders = ",".join("?" * len(exclude_codes)) if exclude_codes else "''"
+            sql = f"""
+                SELECT fund_code, fund_name, fund_type, tracking_index
+                FROM fund_metadata
+                WHERE tracking_index = ?
+                  AND fund_code NOT IN ({placeholders})
+                ORDER BY fund_type, fund_code
+                LIMIT 5
+            """
+            params = [index_code] + list(exclude_codes)
+            rows = conn.execute(sql, params).fetchall()
+            for r in rows:
+                results.append({
+                    "fund_code": r["fund_code"],
+                    "fund_name": r["fund_name"],
+                    "fund_type": r["fund_type"],
+                    "match_reason": f"跟踪指数 {index_code}",
+                })
     except Exception as e:
         logger.warning(f"[event_radar] 查询候选基金失败 index={index_code}: {e}")
-        return []
     finally:
         conn.close()
+
+    # 2. fund_metadata 无结果时回退到内置映射表
+    if not results:
+        try:
+            from services.index_fund_mapper import find_funds_by_index
+            # user_holdings_only=False 表示只查内置映射表，不重复查持仓
+            builtin = find_funds_by_index(index_code, user_holdings_only=False)
+            for item in builtin:
+                code = item.get("fund_code", "")
+                if code in exclude_codes:
+                    continue
+                results.append({
+                    "fund_code": code,
+                    "fund_name": item.get("fund_name", ""),
+                    "fund_type": "ETF" if "ETF" in item.get("fund_name", "") else "",
+                    "match_reason": f"内置映射跟踪指数 {index_code}",
+                })
+        except Exception as e:
+            logger.warning(f"[event_radar] 内置映射兜底失败 index={index_code}: {e}")
+
+    return results[:5]
 
 
 def _determine_relevance(
@@ -244,11 +332,16 @@ def _determine_relevance(
 
     Args:
         event: 事件 dict（含 affected_sectors）
-        user_holdings: 用户持仓 [{fund_code, fund_name, index_code}, ...]
+        user_holdings: 用户持仓 [{fund_code, fund_name, index_code, index_name}, ...]
 
     Returns:
         (relevance, matched_holdings, candidate_funds)
         relevance: holding_impact / opportunity / market_watch
+
+    匹配策略（增强版）：
+    1. 板块名归一化（"国防军工"→"军工"）
+    2. 持仓匹配优先级：index_code 精确匹配 → index_name 关键词模糊匹配
+    3. 无持仓命中时收集候选建仓基金（fund_metadata → 内置映射兜底）
     """
     affected_sectors = event.get("affected_sectors", [])
     if not affected_sectors:
@@ -257,24 +350,49 @@ def _determine_relevance(
     matched_holdings = []
     candidate_funds = []
     holding_codes = {h.get("fund_code") for h in user_holdings}
+    matched_holding_codes = set()  # 已命中的持仓 fund_code，避免重复
 
-    for sector in affected_sectors:
+    from services.index_fund_mapper import _normalize_index_code
+
+    for raw_sector in affected_sectors:
+        sector = _normalize_sector(raw_sector)  # 别名归一化
         index_codes = SECTOR_TO_INDEX.get(sector, [])
+        name_keywords = _SECTOR_TO_NAME_KEYWORDS.get(sector, [])
+
+        # 1a. 持仓匹配：index_code 精确匹配
         for idx_code in index_codes:
-            # 1. 检查持仓基金是否跟踪该指数
             for h in user_holdings:
+                if h.get("fund_code") in matched_holding_codes:
+                    continue
                 h_index = h.get("index_code") or ""
-                # 归一化比较（剥离 .SZ/.SH 后缀）
-                from services.index_fund_mapper import _normalize_index_code
                 if _normalize_index_code(h_index) == _normalize_index_code(idx_code):
                     matched_holdings.append({
                         "fund_code": h.get("fund_code", ""),
                         "fund_name": h.get("fund_name", ""),
                         "match_reason": f"跟踪 {sector} 相关指数 {idx_code}",
                     })
+                    matched_holding_codes.add(h.get("fund_code"))
 
-            # 2. 若无持仓命中，收集候选建仓基金
-            if not matched_holdings:
+        # 1b. 持仓匹配：index_name 关键词模糊匹配（index_code 未命中时）
+        if not matched_holdings and name_keywords:
+            for h in user_holdings:
+                if h.get("fund_code") in matched_holding_codes:
+                    continue
+                h_index_name = (h.get("index_name") or "").strip()
+                h_fund_name = (h.get("fund_name") or "").strip()
+                for kw in name_keywords:
+                    if kw in h_index_name or kw in h_fund_name:
+                        matched_holdings.append({
+                            "fund_code": h.get("fund_code", ""),
+                            "fund_name": h.get("fund_name", ""),
+                            "match_reason": f"持仓名称含 {sector} 关键词 '{kw}'",
+                        })
+                        matched_holding_codes.add(h.get("fund_code"))
+                        break
+
+        # 2. 若无持仓命中，收集候选建仓基金
+        if not matched_holdings:
+            for idx_code in index_codes:
                 cands = _find_candidate_funds(idx_code, exclude_codes=holding_codes)
                 # 去重（多个 sector 可能命中同一基金）
                 existing_codes = {c["fund_code"] for c in candidate_funds}

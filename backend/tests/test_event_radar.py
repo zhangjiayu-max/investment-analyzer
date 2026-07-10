@@ -299,3 +299,75 @@ def test_scan_forward_events_disabled():
     with patch("services.event_radar.get_config", return_value="false"):
         result = scan_forward_events()
     assert result.get("skipped") == "disabled"
+
+
+# ── P1 优化：板块同义词 + 持仓 index_name 匹配 + 候选基金兜底 ──────
+
+def test_normalize_sector_handles_synonyms():
+    """_normalize_sector 把 LLM 常见的板块别名归一化到 SECTOR_TO_INDEX 的 key。"""
+    from services.event_radar import _normalize_sector, SECTOR_TO_INDEX
+
+    # 国防军工 → 军工
+    assert _normalize_sector("国防军工") == "军工"
+    # 生物医药 → 医药
+    assert _normalize_sector("生物医药") == "医药"
+    # 已在表中的板块名不变
+    assert _normalize_sector("半导体") == "半导体"
+    # 未知板块原样返回
+    assert _normalize_sector("未知板块") == "未知板块"
+    # 归一化结果必须在 SECTOR_TO_INDEX 中（除了未知板块）
+    for alias in ["国防军工", "生物医药", "医疗", "航天航空", "新能源车"]:
+        normalized = _normalize_sector(alias)
+        if normalized != alias:
+            assert normalized in SECTOR_TO_INDEX, f"{alias} 归一化到 {normalized} 但不在 SECTOR_TO_INDEX"
+
+
+def test_determine_relevance_matches_holding_by_index_name():
+    """持仓 index_name 含板块关键词时也能命中 holding_impact。
+
+    场景：用户持仓 index_name='中证银行指数'，事件板块='金融'。
+    银行属于金融板块，应通过 index_name 关键词匹配命中。
+    """
+    from services.event_radar import _determine_relevance
+
+    event = {"affected_sectors": ["金融"]}
+    holdings = [
+        {"fund_code": "009860", "fund_name": "易方达中证银行ETF联接C",
+         "index_code": "399986.SZ", "index_name": "中证银行指数"}
+    ]
+    relevance, matched, candidates = _determine_relevance(event, holdings)
+    assert relevance == "holding_impact"
+    assert len(matched) >= 1
+    assert matched[0]["fund_code"] == "009860"
+
+
+def test_determine_relevance_sector_synonym_matching():
+    """LLM 提取的板块别名（国防军工）能匹配到持仓。"""
+    from services.event_radar import _determine_relevance
+
+    event = {"affected_sectors": ["国防军工"]}  # 别名，SECTOR_TO_INDEX 里是"军工"
+    holdings = [
+        {"fund_code": "161031", "fund_name": "军工ETF", "index_code": "399967"}
+    ]
+    relevance, matched, candidates = _determine_relevance(event, holdings)
+    assert relevance == "holding_impact"
+    assert len(matched) == 1
+
+
+def test_find_candidate_funds_fallback_to_builtin_map(tmp_db):
+    """fund_metadata 表为空时，回退到 index_fund_mapper 内置映射表。"""
+    from services.event_radar import _find_candidate_funds
+    from db import _get_conn
+
+    # 确认 fund_metadata 表存在但为空
+    conn = _get_conn()
+    cnt = conn.execute("SELECT COUNT(*) FROM fund_metadata").fetchone()[0]
+    conn.close()
+    assert cnt == 0, "前置条件：fund_metadata 应为空"
+
+    # 查询白酒指数 399997 的候选基金（内置映射表有 161725）
+    candidates = _find_candidate_funds("399997")
+    codes = [c["fund_code"] for c in candidates]
+    # 内置映射表 _INDEX_FUND_MAP["399997"] = 161725 招商中证白酒指数A
+    assert len(candidates) >= 1, f"内置映射兜底应返回候选基金，实际: {candidates}"
+    assert "161725" in codes, f"应包含白酒指数基金 161725，实际: {codes}"
