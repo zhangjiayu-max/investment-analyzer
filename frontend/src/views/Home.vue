@@ -39,6 +39,7 @@ import DecisionAccuracy from '../components/DecisionAccuracy.vue'
 import StrategyBacktest from '../components/StrategyBacktest.vue'
 import CapabilityCenter from '../components/CapabilityCenter.vue'
 import SmartAddPlan from '../components/finance/SmartAddPlan.vue'
+import EventRadarPage from '../components/EventRadarPage.vue'
 import { pageComponentKeys } from '../pageRegistry'
 
 const props = defineProps({
@@ -52,6 +53,7 @@ const pageComponents = {
   dashboard: Dashboard,
   'family-finance': FamilyFinanceDashboard,
   'market-intelligence': MarketIntelligence,
+  'event-radar': EventRadarPage,
   chat: ChatView,
   articles: ArticleManagement,
   valuation: ValuationHistory,

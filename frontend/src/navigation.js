@@ -1,6 +1,7 @@
 export const navItems = [
   { key: 'dashboard', label: '每日看板', icon: 'dashboard', hot: true },
   { key: 'market-intelligence', label: '市场热点', icon: 'fire' },
+  { key: 'event-radar', label: '事件雷达', icon: 'satellite', hot: true },
   { key: 'chat', label: 'AI 对话', icon: 'chat' },
   {
     key: 'group-decision',

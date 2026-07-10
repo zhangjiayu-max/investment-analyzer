@@ -92,20 +92,30 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
 
 <template>
   <div class="ticker-bar">
-    <!-- 左侧：行情 ticker -->
+    <!-- 左侧：行情 ticker + 融资5日（融资条目固定不截断） -->
     <div class="ticker-left">
-      <template v-if="indices.length">
-        <div v-for="idx in indices" :key="idx.name" class="ticker-item"
-          :class="idx.changePct > 0 ? 'up' : idx.changePct < 0 ? 'down' : ''">
-          <span class="ticker-name font-jet">{{ idx.name }}</span>
-          <span class="ticker-price font-jet">{{ idx.price?.toFixed(2) ?? '--' }}</span>
-          <span class="ticker-change font-jet">
-            {{ idx.changePct > 0 ? '+' : '' }}{{ idx.changePct?.toFixed(2) }}%
-          </span>
-          <Sparkline v-if="idx.spark" :data="idx.spark" :width="40" :height="16" :fill="false" class="ticker-spark" />
+      <!-- 可滚动的行情指数区 -->
+      <div class="ticker-scroll">
+        <template v-if="indices.length">
+          <div v-for="idx in indices" :key="idx.name" class="ticker-item"
+            :class="idx.changePct > 0 ? 'up' : idx.changePct < 0 ? 'down' : ''">
+            <span class="ticker-name font-jet">{{ idx.name }}</span>
+            <span class="ticker-price font-jet">{{ idx.price?.toFixed(2) ?? '--' }}</span>
+            <span class="ticker-change font-jet">
+              {{ idx.changePct > 0 ? '+' : '' }}{{ idx.changePct?.toFixed(2) }}%
+            </span>
+            <Sparkline v-if="idx.spark" :data="idx.spark" :width="40" :height="16" :fill="false" class="ticker-spark" />
+          </div>
+        </template>
+        <div v-else-if="!loading" class="ticker-quote">
+          <Icon name="lightbulb" size="13" class="ticker-quote-icon" />
+          <span class="ticker-quote-text">{{ quoteText }}</span>
         </div>
-      </template>
-      <!-- 机构动向：融资余额近5日净变化（辅助信号） -->
+        <div v-else class="ticker-loading">
+          <Icon name="spinner" size="13" class="spinning" />
+        </div>
+      </div>
+      <!-- 机构动向：融资余额近5日净变化（固定在左侧区最右，不随行情滚动截断） -->
       <div v-if="flow" class="ticker-item flow-item"
         :class="flow.trend === 'inflow' ? 'up' : flow.trend === 'outflow' ? 'down' : ''">
         <Icon name="landmark" size="12" class="flow-icon" />
@@ -123,13 +133,6 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
         <span class="ticker-change font-jet" :class="flow.strength === 'strong' ? 'strong' : ''">
           {{ flowLabel(flow) }}
         </span>
-      </div>
-      <div v-else-if="!loading && !indices.length" class="ticker-quote">
-        <Icon name="lightbulb" size="13" class="ticker-quote-icon" />
-        <span class="ticker-quote-text">{{ quoteText }}</span>
-      </div>
-      <div v-else class="ticker-loading">
-        <Icon name="spinner" size="13" class="spinning" />
       </div>
     </div>
 
@@ -180,6 +183,13 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
 .ticker-left {
   display: flex;
   align-items: center;
+  gap: 1rem;
+  flex: 1;
+  min-width: 0;
+}
+.ticker-scroll {
+  display: flex;
+  align-items: center;
   gap: 1.2rem;
   flex: 1;
   min-width: 0;
@@ -191,6 +201,7 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
   gap: 0.3rem;
   white-space: nowrap;
   font-size: 0.72rem;
+  flex-shrink: 0;
 }
 .ticker-item.up { color: var(--color-profit); }
 .ticker-item.down { color: var(--color-loss); }
