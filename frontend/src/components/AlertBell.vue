@@ -63,6 +63,7 @@ function _routeForAlert(a) {
   if (a.alert_type.startsWith('valuation_')) return 'valuation'
   if (a.alert_type === 'concentration_high' || a.alert_type === 'loss_warning') return 'portfolio'
   if (a.alert_type === 'recommendation_verified') return 'decisions'
+  if (a.alert_type === 'event_radar') return null  // 事件雷达不跳转，直接在卡片展示
   return null
 }
 
@@ -76,6 +77,27 @@ function severityIcon(sev) {
 
 function severityClass(sev) {
   return `alert-sev-${sev || 'info'}`
+}
+
+// 事件雷达：按 alert_type 区分图标
+function eventTypeIcon(a) {
+  if (a.alert_type === 'event_radar') return 'satellite'
+  return null
+}
+
+// 统一图标选择：优先事件类型图标，否则按 severity
+function alertIcon(a) {
+  return eventTypeIcon(a) || severityIcon(a.severity)
+}
+
+// 事件雷达：按 title 前缀判断 3 级分级
+function alertClass(a) {
+  if (a.alert_type === 'event_radar') {
+    if (a.title && a.title.includes('[持仓影响]')) return 'alert-event-holding'
+    if (a.title && a.title.includes('[建仓机会]')) return 'alert-event-opportunity'
+    return 'alert-event-watch'
+  }
+  return severityClass(a.severity)
 }
 
 function formatTimeAgo(ts) {
@@ -142,10 +164,10 @@ onUnmounted(() => {
               v-for="a in alerts"
               :key="a.id"
               class="alert-row"
-              :class="[severityClass(a.severity), { 'alert-unread': !a.is_read }]"
+              :class="[alertClass(a), { 'alert-unread': !a.is_read }]"
               @click="handleClickAlert(a)"
             >
-              <Icon :name="severityIcon(a.severity)" size="13" class="alert-icon" />
+              <Icon :name="alertIcon(a)" size="13" class="alert-icon" />
               <div class="alert-content">
                 <div class="alert-title">{{ a.title }}</div>
                 <div v-if="a.content" class="alert-text">{{ a.content }}</div>
@@ -308,6 +330,14 @@ onUnmounted(() => {
 .alert-sev-info .alert-icon { color: #3b82f6; }
 .alert-sev-warning .alert-icon { color: #f59e0b; }
 .alert-sev-danger .alert-icon { color: #dc2626; }
+
+/* 事件雷达 3 级分级样式 */
+.alert-event-holding .alert-icon { color: #dc2626; }
+.alert-event-opportunity .alert-icon { color: #d97706; }
+.alert-event-watch .alert-icon { color: #2563eb; }
+.alert-event-holding { border-left: 2px solid #dc2626; }
+.alert-event-opportunity { border-left: 2px solid #d97706; }
+.alert-event-watch { border-left: 2px solid #2563eb; }
 
 .fade-enter-active, .fade-leave-active {
   transition: opacity 0.15s, transform 0.15s;

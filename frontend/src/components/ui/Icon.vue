@@ -27,7 +27,7 @@ import {
   Bot, Brain, Lightbulb, Sparkles, Globe, FlaskConical, Microscope,
   Library, PenLine, Target, Tv, ClipboardList, Clipboard, MessageSquareDot,
   CircleUser, User, ThumbsUp, ThumbsDown, FileText, Users,
-  Sun, Moon, Circle, CircleAlert, Code, Copy,
+  Sun, Moon, Circle, CircleAlert, Code, Copy, Satellite,
 } from 'lucide-vue-next'
 
 const props = defineProps({
@@ -82,7 +82,7 @@ const LUCIDE_MAP = {
   sun: Sun, moon: Moon,
   // 杂项
   circle: Circle, test: FlaskConical,
-  code: Code, copy: Copy,
+  code: Code, copy: Copy, satellite: Satellite,
 }
 
 const Comp = computed(() => LUCIDE_MAP[props.name] || CircleAlert)

@@ -1718,6 +1718,23 @@ export function deleteAlert(alertId) {
   return api.delete(`/portfolio/alerts/${alertId}`)
 }
 
+// ── 前瞻性事件雷达 ─────────────────────────────────────
+
+/** 手动触发事件雷达扫描 */
+export function triggerEventRadarScan() {
+  return api.post('/alerts/event-radar/scan')
+}
+
+/** 查询事件列表 */
+export function listMarketEvents(params = {}) {
+  return api.get('/alerts/event-radar/events', { params })
+}
+
+/** 查询事件详情 */
+export function getMarketEvent(eventId) {
+  return api.get(`/alerts/event-radar/events/${eventId}`)
+}
+
 /** 生成预警 */
 export function generateAlert(data) {
   return api.post('/portfolio/alerts/generate', data)
