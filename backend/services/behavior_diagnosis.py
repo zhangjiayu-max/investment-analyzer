@@ -446,13 +446,30 @@ def diagnose_behavior(user_id: str = "default", period_days: int = 90) -> dict:
         herd.get("score", 0) + over.get("score", 0)
     ) / 4.0
 
+    # 前端适配：扁平结构 + 0-100 分数（BehaviorDiagnosis.vue 的兜底字段）
+    # 原有嵌套结构保留，供 Agent 工具使用
+    def _pct(s):
+        return round(float(s) * 100, 1)
+
     return {
+        # 原有嵌套结构（Agent 工具用）
         "disposition_effect": disp,
         "anchoring_effect": anchor,
         "herding_effect": herd,
         "overtrading": over,
         "overall_score": round(overall_score, 3),
         "suggestions": _build_suggestions(disp, anchor, herd, over),
+        # 扁平结构（前端 BehaviorDiagnosis.vue 兜底用，0-100 分制）
+        "bias_score": _pct(overall_score),
+        "disposition_score": _pct(disp.get("score", 0)),
+        "disposition_detail": disp.get("detail", "") or "",
+        "anchoring_score": _pct(anchor.get("score", 0)),
+        "anchoring_detail": anchor.get("detail", "") or "",
+        "herding_score": _pct(herd.get("score", 0)),
+        "herding_detail": herd.get("detail", "") or "",
+        "overtrading_score": _pct(over.get("score", 0)),
+        "overtrading_detail": over.get("detail", "") or "",
+        "period_days": period_days,
     }
 
 

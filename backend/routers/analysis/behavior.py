@@ -28,10 +28,12 @@ async def get_behavior_report_api(
 
 @router.get("/api/analysis/behavior/score")
 async def get_behavior_score_api(user_id: str = Query("default")):
-    """获取综合行为偏差分（用于 Dashboard），0-1 之间，越高越严重。"""
+    """获取综合行为偏差分（用于 Dashboard），0-100 分，越高越严重。"""
     try:
         score = get_behavior_score(user_id=user_id)
-        return {"ok": True, "score": round(score, 3)}
+        # 后端内部 0-1 区间，前端展示 0-100 分
+        total_score = round(score * 100, 1)
+        return {"ok": True, "score": total_score, "total_score": total_score}
     except Exception as e:
         logger.error(f"行为偏差分获取失败 user_id={user_id}: {e}", exc_info=True)
         raise HTTPException(500, f"行为偏差分获取失败: {e}")
