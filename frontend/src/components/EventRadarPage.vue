@@ -9,7 +9,7 @@
  * - 手动扫描按钮
  */
 import { ref, computed, onMounted } from 'vue'
-import { listMarketEvents, triggerEventRadarScan } from '../api'
+import { listMarketEvents, triggerEventRadarScan, triggerEventRadarVerify, getEventRadarAccuracy } from '../api'
 import Icon from './ui/Icon.vue'
 import { useToast } from '../composables/useToast'
 
@@ -18,6 +18,8 @@ const emit = defineEmits(['navigate'])
 const events = ref([])
 const loading = ref(false)
 const scanning = ref(false)
+const verifying = ref(false)
+const accuracy = ref(null)
 const activeFilter = ref('all') // all / holding_impact / opportunity / market_watch
 const activeStatus = ref('active') // active / all / materialized / expired
 
@@ -90,6 +92,43 @@ async function handleScan() {
   }
 }
 
+async function handleVerify() {
+  if (verifying.value) return
+  verifying.value = true
+  try {
+    const { data } = await triggerEventRadarVerify()
+    useToast().showToast(
+      `验证完成：${data?.verified || 0} 个事件，正确 ${data?.correct || 0}，偏差 ${data?.wrong || 0}`,
+      'success'
+    )
+    await loadEvents()
+    await loadAccuracy()
+  } catch (e) {
+    useToast().showToast('验证失败', 'error')
+  } finally {
+    verifying.value = false
+  }
+}
+
+async function loadAccuracy() {
+  try {
+    const { data } = await getEventRadarAccuracy()
+    accuracy.value = data
+  } catch { /* 静默失败 */ }
+}
+
+function parseVerification(str) {
+  try { return JSON.parse(str || '') } catch { return null }
+}
+
+function verificationLabel(status) {
+  return { correct: '验证正确', wrong: '验证偏差', flat: '波动平淡' }[status] || status
+}
+
+function verificationIcon(status) {
+  return { correct: 'check-circle', wrong: 'alert-triangle', flat: 'info' }[status] || 'info'
+}
+
 function relevanceLabel(r) {
   return { holding_impact: '持仓影响', opportunity: '建仓机会', market_watch: '市场关注' }[r] || r
 }
@@ -123,6 +162,7 @@ function directionLabel(d) {
 
 onMounted(() => {
   loadEvents()
+  loadAccuracy()
 })
 </script>
 
@@ -138,10 +178,42 @@ onMounted(() => {
         <p class="page-subtitle">从每日新闻中提取未来 1-2 周即将发生的市场事件，提前布局不踏空</p>
       </div>
       <div class="header-actions">
+        <button class="btn btn-secondary verify-btn" @click="handleVerify" :disabled="verifying" title="验证已落地事件的方向预测">
+          <Icon :name="verifying ? 'spinner' : 'check-circle'" size="14" :class="{ spinning: verifying }" />
+          <span>{{ verifying ? '验证中...' : '落地验证' }}</span>
+        </button>
         <button class="btn btn-primary scan-btn" @click="handleScan" :disabled="scanning">
           <Icon :name="scanning ? 'spinner' : 'scan-search'" size="14" :class="{ spinning: scanning }" />
           <span>{{ scanning ? '扫描中...' : '立即扫描' }}</span>
         </button>
+      </div>
+    </div>
+
+    <!-- 准确率统计面板 -->
+    <div v-if="accuracy && accuracy.overall?.total > 0" class="accuracy-panel">
+      <div class="accuracy-header">
+        <Icon name="target" size="14" class="accuracy-icon" />
+        <span class="accuracy-title">验证准确率</span>
+      </div>
+      <div class="accuracy-body">
+        <div class="accuracy-overall">
+          <div class="accuracy-value">{{ (accuracy.overall.accuracy * 100).toFixed(0) }}%</div>
+          <div class="accuracy-label">总体准确率</div>
+          <div class="accuracy-detail">
+            {{ accuracy.overall.correct }}正确 / {{ accuracy.overall.wrong }}偏差 / {{ accuracy.overall.flat }}平淡
+            （共 {{ accuracy.overall.total }} 个已验证）
+          </div>
+        </div>
+        <div v-if="Object.keys(accuracy.by_sector).length" class="accuracy-sectors">
+          <div v-for="(s, name) in accuracy.by_sector" :key="name" class="sector-acc-item">
+            <span class="sector-acc-name">{{ name }}</span>
+            <div class="sector-acc-bar">
+              <div class="sector-acc-fill" :style="{ width: `${s.accuracy * 100}%` }"></div>
+            </div>
+            <span class="sector-acc-pct">{{ (s.accuracy * 100).toFixed(0) }}%</span>
+            <span class="sector-acc-samples">({{ s.total }})</span>
+          </div>
+        </div>
       </div>
     </div>
 
@@ -242,6 +314,16 @@ onMounted(() => {
                 </span>
                 <span class="confidence-tag">
                   置信度 {{ Math.round((evt.confidence || 0) * 100) }}%
+                </span>
+                <!-- 验证结果标签 -->
+                <span
+                  v-if="parseVerification(evt.verification_result)"
+                  class="verify-tag"
+                  :class="`verify-${parseVerification(evt.verification_result).status}`"
+                >
+                  <Icon :name="verificationIcon(parseVerification(evt.verification_result).status)" size="11" />
+                  {{ verificationLabel(parseVerification(evt.verification_result).status) }}
+                  {{ parseVerification(evt.verification_result).change_pct > 0 ? '+' : '' }}{{ parseVerification(evt.verification_result).change_pct }}%
                 </span>
               </div>
             </div>
@@ -675,5 +757,140 @@ onMounted(() => {
   .event-time-col { width: 55px; }
   .event-date-badge { font-size: 0.72rem; padding: 0.2rem 0.4rem; }
   .filter-bar { flex-direction: column; align-items: flex-start; }
+}
+
+/* ── 验证按钮 ── */
+.verify-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.5rem 0.9rem;
+  border-radius: 6px;
+  font-size: 0.82rem;
+  font-weight: 500;
+  border: 1px solid var(--color-border);
+  cursor: pointer;
+  transition: all 0.15s;
+  background: var(--color-bg-card);
+  color: var(--color-text-secondary);
+  margin-right: 0.5rem;
+}
+.verify-btn:hover:not(:disabled) {
+  border-color: var(--color-primary);
+  color: var(--color-primary);
+}
+.verify-btn:disabled { opacity: 0.6; cursor: not-allowed; }
+
+/* ── 准确率统计面板 ── */
+.accuracy-panel {
+  background: var(--color-bg-card);
+  border: 1px solid var(--color-border-light);
+  border-radius: 8px;
+  padding: 1rem 1.1rem;
+  margin-bottom: 1rem;
+}
+.accuracy-header {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin-bottom: 0.75rem;
+}
+.accuracy-icon { color: var(--color-primary); }
+.accuracy-title {
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--color-text-primary);
+}
+.accuracy-body {
+  display: flex;
+  gap: 1.5rem;
+  align-items: flex-start;
+}
+.accuracy-overall {
+  flex-shrink: 0;
+  min-width: 140px;
+}
+.accuracy-value {
+  font-size: 1.6rem;
+  font-weight: 700;
+  color: var(--color-primary);
+  font-family: var(--font-jet);
+  line-height: 1.2;
+}
+.accuracy-label {
+  font-size: 0.75rem;
+  color: var(--color-text-secondary);
+  margin-top: 0.15rem;
+}
+.accuracy-detail {
+  font-size: 0.7rem;
+  color: var(--color-text-tertiary);
+  margin-top: 0.3rem;
+}
+.accuracy-sectors {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  min-width: 0;
+}
+.sector-acc-item {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.75rem;
+}
+.sector-acc-name {
+  width: 60px;
+  flex-shrink: 0;
+  color: var(--color-text-secondary);
+}
+.sector-acc-bar {
+  flex: 1;
+  height: 6px;
+  background: var(--color-bg-tertiary);
+  border-radius: 3px;
+  overflow: hidden;
+}
+.sector-acc-fill {
+  height: 100%;
+  background: linear-gradient(90deg, var(--color-primary), var(--color-gold));
+  border-radius: 3px;
+  transition: width 0.3s;
+}
+.sector-acc-pct {
+  width: 36px;
+  text-align: right;
+  font-weight: 600;
+  color: var(--color-text-primary);
+  font-family: var(--font-jet);
+}
+.sector-acc-samples {
+  font-size: 0.68rem;
+  color: var(--color-text-tertiary);
+  width: 30px;
+}
+
+/* ── 验证结果标签 ── */
+.verify-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.2rem;
+  font-size: 0.68rem;
+  padding: 0.18rem 0.5rem;
+  border-radius: 3px;
+  font-weight: 500;
+}
+.verify-tag.verify-correct {
+  background: rgba(22,163,74,0.1);
+  color: #16a34a;
+}
+.verify-tag.verify-wrong {
+  background: rgba(220,38,38,0.1);
+  color: #dc2626;
+}
+.verify-tag.verify-flat {
+  background: var(--color-bg-tertiary);
+  color: var(--color-text-secondary);
 }
 </style>

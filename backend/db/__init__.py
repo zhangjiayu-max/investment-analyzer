@@ -161,6 +161,8 @@ from db.market_events import (
     init_market_events_tables, create_market_event, get_market_event,
     list_market_events, list_active_events, update_market_event_status,
     update_event_relevance, delete_market_event,
+    list_pending_verification_events, update_event_verification,
+    list_verified_events,
 )
 
 # 目标账户 / 资金桶

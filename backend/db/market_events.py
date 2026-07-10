@@ -36,10 +36,15 @@ def init_market_events_tables(conn) -> None:
             candidate_funds TEXT,
             sources TEXT,
             timeline TEXT,
+            verification_result TEXT,
             created_at TEXT DEFAULT (datetime('now','localtime')),
             updated_at TEXT DEFAULT (datetime('now','localtime'))
         )
     """)
+    # 兼容已有表：若旧表无 verification_result 列则自动追加
+    cols = [r[1] for r in conn.execute("PRAGMA table_info(market_events)").fetchall()]
+    if "verification_result" not in cols:
+        conn.execute("ALTER TABLE market_events ADD COLUMN verification_result TEXT")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_market_events_status ON market_events(status)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_market_events_expected ON market_events(expected_date)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_market_events_relevance ON market_events(relevance_to_user)")
@@ -232,5 +237,94 @@ def delete_market_event(event_id: str) -> bool:
         conn.execute("DELETE FROM market_events WHERE event_id = ?", (event_id,))
         conn.commit()
         return conn.total_changes > 0
+    finally:
+        conn.close()
+
+
+# ── 事件落地验证 ──────────────────────────────────────
+
+
+def list_pending_verification_events(days_after: int = 3) -> list[dict]:
+    """查询已落地但尚未验证、且超过验证窗口（T+days_after）的事件。
+
+    条件：
+    - status = 'materialized'
+    - verification_result IS NULL
+    - materialized_date <= today - days_after
+    """
+    from datetime import datetime, timedelta
+    cutoff = (datetime.now() - timedelta(days=days_after)).strftime("%Y-%m-%d")
+    conn = _get_conn()
+    try:
+        rows = conn.execute(
+            "SELECT * FROM market_events "
+            "WHERE status = 'materialized' AND verification_result IS NULL "
+            "AND materialized_date <= ? "
+            "ORDER BY materialized_date ASC",
+            (cutoff,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+def update_event_verification(event_id: str, result: dict) -> bool:
+    """写入事件验证结果。
+
+    result 结构：
+    {
+        "status": "correct" | "wrong" | "flat",
+        "change_pct": float,        # 实际涨跌幅
+        "verified_date": "YYYY-MM-DD",
+        "index_code": str,          # 验证用的指数代码
+        "index_name": str,
+        "direction_predicted": str, # 事件预测方向
+        "window_days": int          # 验证窗口
+    }
+    """
+    today = datetime.now().strftime("%Y-%m-%d")
+    conn = _get_conn()
+    try:
+        # 追加 timeline
+        row = conn.execute(
+            "SELECT timeline FROM market_events WHERE event_id = ?", (event_id,)
+        ).fetchone()
+        if not row:
+            return False
+        timeline = json.loads(row["timeline"]) if row["timeline"] else []
+        status = result.get("status", "flat")
+        change = result.get("change_pct", 0)
+        timeline.append({
+            "date": today,
+            "event": f"验证完成：{status}（涨跌幅 {change:+.2f}%）",
+        })
+
+        conn.execute("""
+            UPDATE market_events
+            SET verification_result = ?, timeline = ?, updated_at = ?
+            WHERE event_id = ?
+        """, (
+            json.dumps(result, ensure_ascii=False),
+            json.dumps(timeline, ensure_ascii=False),
+            today,
+            event_id,
+        ))
+        conn.commit()
+        return conn.total_changes > 0
+    finally:
+        conn.close()
+
+
+def list_verified_events(limit: int = 100) -> list[dict]:
+    """查询已验证的事件（用于准确率统计）。"""
+    conn = _get_conn()
+    try:
+        rows = conn.execute(
+            "SELECT * FROM market_events "
+            "WHERE verification_result IS NOT NULL "
+            "ORDER BY materialized_date DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        return [dict(r) for r in rows]
     finally:
         conn.close()

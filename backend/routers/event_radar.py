@@ -3,6 +3,8 @@
 - POST /api/alerts/event-radar/scan：手动触发扫描
 - GET /api/alerts/event-radar/events：事件列表（可按 status/relevance 过滤）
 - GET /api/alerts/event-radar/events/{event_id}：事件详情
+- POST /api/alerts/event-radar/verify：手动触发落地验证
+- GET /api/alerts/event-radar/accuracy：准确率统计
 """
 import logging
 from typing import Optional
@@ -49,3 +51,27 @@ async def get_event(event_id: str):
     if not event:
         raise HTTPException(status_code=404, detail="事件不存在")
     return ApiResponse.success(data=event)
+
+
+@router.post("/api/alerts/event-radar/verify")
+async def manual_verify():
+    """手动触发事件落地验证（扫描已落地超过 T+N 的事件）。"""
+    try:
+        from services.event_radar import verify_materialized_events
+        result = verify_materialized_events()
+        return ApiResponse.success(data=result)
+    except Exception as e:
+        logger.error(f"手动触发事件验证失败: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"验证失败: {e}")
+
+
+@router.get("/api/alerts/event-radar/accuracy")
+async def accuracy_stats():
+    """获取事件验证准确率统计（总体 + 分板块）。"""
+    try:
+        from services.event_radar import get_sector_accuracy_stats
+        stats = get_sector_accuracy_stats()
+        return ApiResponse.success(data=stats)
+    except Exception as e:
+        logger.error(f"获取准确率统计失败: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"获取失败: {e}")

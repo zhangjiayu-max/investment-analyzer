@@ -1725,6 +1725,11 @@ export function triggerEventRadarScan() {
   return api.post('/alerts/event-radar/scan')
 }
 
+/** 手动触发事件落地验证 */
+export function triggerEventRadarVerify() {
+  return api.post('/alerts/event-radar/verify')
+}
+
 /** 查询事件列表 */
 export function listMarketEvents(params = {}) {
   return api.get('/alerts/event-radar/events', { params })
@@ -1733,6 +1738,11 @@ export function listMarketEvents(params = {}) {
 /** 查询事件详情 */
 export function getMarketEvent(eventId) {
   return api.get(`/alerts/event-radar/events/${eventId}`)
+}
+
+/** 查询事件验证准确率统计 */
+export function getEventRadarAccuracy() {
+  return api.get('/alerts/event-radar/accuracy')
 }
 
 /** 生成预警 */

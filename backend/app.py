@@ -729,6 +729,18 @@ async def _auto_event_radar_scan():
                     f"new={result.get('new', 0)}, "
                     f"alerts={result.get('alerts_created', 0)}"
                 )
+
+                # 扫描完成后顺便执行落地验证（检查已到期的事件）
+                if get_config("alerts.event_radar_verify_enabled", "true") == "true":
+                    from services.event_radar import verify_materialized_events
+                    vresult = verify_materialized_events()
+                    if vresult.get("verified", 0) > 0:
+                        logging.info(
+                            f"[event-radar] 落地验证: "
+                            f"verified={vresult.get('verified', 0)}, "
+                            f"correct={vresult.get('correct', 0)}, "
+                            f"wrong={vresult.get('wrong', 0)}"
+                        )
             except Exception as e:
                 logging.warning(f"[event-radar] 扫描异常: {e}")
     except Exception as e:

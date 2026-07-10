@@ -511,7 +511,10 @@ def scan_forward_events(trace_id: str = "") -> dict:
                 expected_date=ev["expected_date"],
                 affected_sectors=ev.get("affected_sectors", []),
                 affected_themes=ev.get("affected_themes", []),
-                confidence=float(ev.get("confidence", 0.5)),
+                confidence=_calibrate_confidence(
+                    float(ev.get("confidence", 0.5)),
+                    ev.get("affected_sectors", []),
+                ),
                 sources=sources,
             )
             if not existing:
@@ -584,3 +587,268 @@ def scan_forward_events(trace_id: str = "") -> dict:
     }
     logger.info(f"[event_radar:{trace_id}] 扫描完成: {result}")
     return result
+
+
+# ── 事件落地验证 ──────────────────────────────────────
+
+
+def _fetch_index_close_prices(index_code: str, start_date: str, end_date: str) -> dict:
+    """获取指数在 [start_date, end_date] 区间的每日收盘价。
+
+    Returns:
+        {"YYYY-MM-DD": float, ...} 或空 dict
+    """
+    import akshare as ak
+    # 归一化代码：剥离后缀
+    base = index_code.replace(".SZ", "").replace(".SH", "").replace(".CSI", "")
+    prices = {}
+    # 尝试 sh/sz 前缀
+    for prefix in ["sh", "sz"]:
+        sina_code = f"{prefix}{base}"
+        try:
+            df = ak.stock_zh_index_daily(symbol=sina_code)
+            if df is None or df.empty:
+                continue
+            # 列名可能是 date/date字符串
+            date_col = "date" if "date" in df.columns else df.columns[0]
+            close_col = "close" if "close" in df.columns else df.columns[-1]
+            for _, row in df.iterrows():
+                d = str(row[date_col])[:10]
+                if start_date <= d <= end_date:
+                    prices[d] = float(row[close_col])
+            if prices:
+                return prices
+        except Exception:
+            continue
+    return prices
+
+
+def _verify_single_event(event: dict, window_days: int = 3) -> dict | None:
+    """验证单个已落地事件的方向预测是否正确。
+
+    逻辑：
+    1. 从 affected_sectors 取第一个板块对应的指数代码
+    2. 获取 materialized_date 和 materialized_date+window_days 的收盘价
+    3. 计算涨跌幅
+    4. 对比 direction 与实际涨跌方向
+
+    Returns:
+        验证结果 dict 或 None（无法验证时）
+    """
+    sectors = json.loads(event.get("affected_sectors") or "[]")
+    if not sectors:
+        return None
+
+    # 取第一个有指数映射的板块
+    index_code = None
+    index_name = None
+    for s in sectors:
+        key = _normalize_sector(s)
+        if key and key in SECTOR_TO_INDEX:
+            codes = SECTOR_TO_INDEX[key]
+            if codes:
+                index_code = codes[0]
+                index_name = key
+                break
+
+    if not index_code:
+        return None
+
+    mat_date = event.get("materialized_date") or event.get("expected_date")
+    if not mat_date:
+        return None
+
+    try:
+        mat_dt = datetime.strptime(mat_date[:10], "%Y-%m-%d")
+    except ValueError:
+        return None
+
+    end_dt = mat_dt + timedelta(days=window_days + 4)  # 多取几天确保有交易日数据
+    end_date = end_dt.strftime("%Y-%m-%d")
+    today = datetime.now().strftime("%Y-%m-%d")
+    if end_date > today:
+        return None  # 验证窗口未到
+
+    prices = _fetch_index_close_prices(index_code, mat_date, end_date)
+    if not prices or len(prices) < 2:
+        return None
+
+    # 取落地日收盘价（或之后最近交易日）
+    sorted_dates = sorted(prices.keys())
+    base_price = None
+    for d in sorted_dates:
+        if d >= mat_date:
+            base_price = prices[d]
+            break
+    if base_price is None:
+        return None
+
+    # 取验证窗口结束日收盘价
+    verify_price = prices[sorted_dates[-1]]
+    if verify_price == base_price:
+        return None
+
+    change_pct = (verify_price - base_price) / base_price * 100
+
+    # 方向判定（阈值 1%）
+    direction = event.get("direction", "neutral")
+    THRESHOLD = 1.0
+    if abs(change_pct) < THRESHOLD:
+        status = "flat"
+    elif direction == "positive" and change_pct > 0:
+        status = "correct"
+    elif direction == "negative" and change_pct < 0:
+        status = "correct"
+    elif direction == "neutral":
+        status = "flat"
+    else:
+        status = "wrong"
+
+    return {
+        "status": status,
+        "change_pct": round(change_pct, 2),
+        "verified_date": today,
+        "index_code": index_code,
+        "index_name": index_name,
+        "direction_predicted": direction,
+        "window_days": window_days,
+        "base_price": round(base_price, 2),
+        "verify_price": round(verify_price, 2),
+    }
+
+
+def verify_materialized_events(trace_id: str = "") -> dict:
+    """批量验证已落地且超过 T+3 窗口的事件。
+
+    Returns:
+        {"verified": int, "correct": int, "wrong": int, "flat": int, "alerts_created": int}
+    """
+    from db.market_events import (
+        list_pending_verification_events, update_event_verification,
+    )
+    from db.portfolio import create_alert
+
+    window = get_config_int("alerts.event_radar_verify_window_days", 3)
+    pending = list_pending_verification_events(window)
+    if not pending:
+        return {"verified": 0, "correct": 0, "wrong": 0, "flat": 0, "alerts_created": 0}
+
+    trace_id = trace_id or datetime.now().strftime("%Y%m%d%H%M%S")
+    logger.info(f"[event_radar:{trace_id}] 待验证事件 {len(pending)} 个")
+
+    counts = {"verified": 0, "correct": 0, "wrong": 0, "flat": 0, "alerts_created": 0}
+    for ev in pending:
+        try:
+            result = _verify_single_event(ev, window)
+            if not result:
+                logger.debug(f"[event_radar:{trace_id}] 事件 {ev['event_id']} 无法验证（无指数数据）")
+                continue
+
+            update_event_verification(ev["event_id"], result)
+            counts["verified"] += 1
+            counts[result["status"]] += 1
+
+            # 推送验证结果 alert
+            status_label = {"correct": "验证正确 ✅", "wrong": "验证偏差 ⚠️", "flat": "波动平淡 ➡️"}
+            title = f"[事件验证] {ev['title'][:30]}"
+            content = (
+                f"{status_label.get(result['status'], '')} | "
+                f"{result['index_name']} 涨跌幅 {result['change_pct']:+.2f}% | "
+                f"预测方向：{result['direction_predicted']}"
+            )
+            severity = {"correct": "info", "wrong": "warning", "flat": "info"}.get(result["status"], "info")
+            create_alert(
+                alert_type="event_radar_verified",
+                title=title,
+                content=content,
+                severity=severity,
+                source="event_radar",
+            )
+            counts["alerts_created"] += 1
+        except Exception as e:
+            logger.warning(f"[event_radar:{trace_id}] 验证事件 {ev.get('event_id')} 失败: {e}")
+
+    logger.info(f"[event_radar:{trace_id}] 验证完成: {counts}")
+    return counts
+
+
+def get_sector_accuracy_stats() -> dict:
+    """统计各板块的验证准确率（用于置信度校准和前端展示）。
+
+    Returns:
+        {
+            "overall": {"total": int, "correct": int, "wrong": int, "flat": int, "accuracy": float},
+            "by_sector": {
+                "半导体": {"total": int, "correct": int, "wrong": int, "accuracy": float},
+                ...
+            }
+        }
+    """
+    from db.market_events import list_verified_events
+
+    verified = list_verified_events(limit=200)
+    if not verified:
+        return {"overall": {"total": 0, "correct": 0, "wrong": 0, "flat": 0, "accuracy": 0.0},
+                "by_sector": {}}
+
+    overall = {"total": 0, "correct": 0, "wrong": 0, "flat": 0}
+    by_sector: dict[str, dict] = {}
+
+    for ev in verified:
+        result = json.loads(ev.get("verification_result") or "{}")
+        if not result:
+            continue
+        status = result.get("status", "flat")
+        sectors = json.loads(ev.get("affected_sectors") or "[]")
+
+        overall["total"] += 1
+        overall[status] += 1
+
+        for s in sectors:
+            key = _normalize_sector(s) or s
+            if key not in by_sector:
+                by_sector[key] = {"total": 0, "correct": 0, "wrong": 0, "flat": 0}
+            by_sector[key]["total"] += 1
+            by_sector[key][status] += 1
+
+    # 计算准确率：correct / (correct + wrong)，flat 不计入
+    def _calc_acc(d):
+        judged = d["correct"] + d["wrong"]
+        return round(d["correct"] / judged, 2) if judged > 0 else 0.0
+
+    overall["accuracy"] = _calc_acc(overall)
+    for s, d in by_sector.items():
+        d["accuracy"] = _calc_acc(d)
+
+    return {"overall": overall, "by_sector": by_sector}
+
+
+def _calibrate_confidence(original_confidence: float, sectors: list) -> float:
+    """根据板块历史准确率校准事件置信度。
+
+    校准公式：calibrated = original × sector_accuracy
+    若板块无历史数据（样本<3），不做校准返回原值。
+
+    Returns:
+        校准后的置信度 [0, 1]
+    """
+    stats = get_sector_accuracy_stats()
+    by_sector = stats.get("by_sector", {})
+
+    # 取所有相关板块中样本最多（最有参考价值）的板块准确率
+    best_acc = None
+    best_samples = 0
+    for s in sectors:
+        key = _normalize_sector(s) or s
+        s_stat = by_sector.get(key)
+        if s_stat and s_stat["total"] >= 3:  # 最少 3 个样本才校准
+            if s_stat["total"] > best_samples:
+                best_samples = s_stat["total"]
+                best_acc = s_stat["accuracy"]
+
+    if best_acc is None or best_acc == 0.0:
+        return original_confidence  # 无足够数据，不校准
+
+    calibrated = original_confidence * best_acc
+    # 下限 0.1，避免过度惩罚
+    return max(calibrated, 0.1)
