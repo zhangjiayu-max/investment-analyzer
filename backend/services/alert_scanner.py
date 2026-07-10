@@ -1,11 +1,12 @@
-"""P0 主动提醒扫描服务 — 决策闭环验证 + 估值阈值 + 持仓风险。
+"""P0 主动提醒扫描服务 — 决策闭环验证 + 估值阈值 + 持仓风险 + 关注列表信号。
 
 由 app.py 的 lifespan 定时调用（默认每 30 分钟）。
 
-包含 3 个扫描函数：
+包含 4 个扫描函数：
 - scan_and_verify_recommendations(): P0-A 建议到达验证窗口时自动验证，并生成结果 alert
 - scan_valuation_thresholds(): P0-B 持仓相关指数估值进入极端区域时生成 alert
 - scan_portfolio_risk(): P0-B 持仓集中度/亏损超过阈值时生成 alert
+- scan_watchlist_signals(): P0-C 关注列表基金触发目标价/估值低分位/单日大跌上车信号
 
 开关：
 - alerts.proactive_scan_enabled (默认 true)：总开关
@@ -13,9 +14,11 @@
 - alerts.valuation_high_threshold (默认 80)：分位 > 阈值触发高估提醒
 - alerts.concentration_threshold (默认 30)：单标的占比 > 阈值触发
 - alerts.loss_threshold (默认 15)：单标的亏损 > 阈值触发
+- alerts.watchlist_signal_enabled (默认 true)：关注列表信号扫描开关
+- alerts.watchlist_drop_threshold (默认 3)：单日跌幅%阈值触发上车提醒
 """
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from db.config import get_config_bool, get_config_int
 from db.portfolio import create_alert, list_holdings
@@ -302,11 +305,177 @@ def scan_portfolio_risk() -> dict:
     return {"alerts_created": alerts_created, "holdings_scanned": len(holdings)}
 
 
+# ── P0-C 关注列表信号扫描 ────────────────────────────────────
+
+
+def _is_alert_recently_created(alert_type: str, related_fund_code: str, hours: int = 24) -> bool:
+    """判断最近 N 小时内是否已生成过同类型 alert，避免重复打扰。"""
+    from db._conn import _get_conn
+    try:
+        conn = _get_conn()
+        threshold = (datetime.now() - timedelta(hours=hours)).strftime("%Y-%m-%d %H:%M:%S")
+        row = conn.execute(
+            "SELECT id FROM alerts WHERE alert_type = ? AND related_fund_code = ? AND created_at >= ? LIMIT 1",
+            (alert_type, related_fund_code, threshold),
+        ).fetchone()
+        conn.close()
+        return row is not None
+    except Exception:
+        return False
+
+
+def scan_watchlist_signals() -> dict:
+    """扫描关注列表基金，触发目标价/估值低分位/单日大跌上车信号。
+
+    三类信号：
+    1. target_price 到位：current_nav <= target_price → "目标价到位"
+    2. target_percentile 到位：当前指数估值分位 <= target_percentile → "估值低分位到位"
+    3. 单日大跌：change_pct <= -watchlist_drop_threshold（默认 -3%） → "单日大跌关注"
+
+    Returns:
+        {"alerts_created": int, "watchlist_scanned": int}
+    """
+    if not _is_enabled("alerts.watchlist_signal_enabled", True):
+        return {"alerts_created": 0, "skipped": "disabled"}
+
+    from db.watchlist import list_watchlist
+    from db.portfolio import fetch_fund_nav
+
+    drop_threshold = _get_int("alerts.watchlist_drop_threshold", 3)  # 单日跌幅阈值（%）
+
+    items = list_watchlist(status="watching")
+    if not items:
+        return {"alerts_created": 0, "watchlist_scanned": 0}
+
+    alerts_created = 0
+    for item in items:
+        fund_code = item.get("fund_code") or ""
+        fund_name = item.get("fund_name") or ""
+        if not fund_code:
+            continue
+
+        # 获取最新净值（优先用 watchlist 表中的 current_nav，缺失或太旧则重新拉取）
+        current_nav = item.get("current_nav")
+        nav_updated = item.get("nav_updated_at") or ""
+        need_refresh = not current_nav or (
+            nav_updated and nav_updated < (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d %H:%M:%S")
+        )
+        change_pct = None
+        if need_refresh:
+            try:
+                nav_data = fetch_fund_nav(fund_code)
+                if nav_data:
+                    current_nav = nav_data.get("nav")
+                    change_pct = nav_data.get("change_pct")
+            except Exception as e:
+                logger.debug(f"[alert_scanner] 关注基金 {fund_code} 取净值失败: {e}")
+                continue
+        elif item.get("current_nav"):
+            current_nav = float(item["current_nav"])
+
+        if not current_nav:
+            continue
+
+        target_price = item.get("target_price")
+        target_percentile = item.get("target_percentile")
+
+        # 信号1：目标价到位
+        if target_price and current_nav <= float(target_price):
+            if _is_alert_recently_created("watchlist_target_price", fund_code, hours=24):
+                continue
+            try:
+                title = f"关注基金 {fund_name} 已达目标价"
+                content = (
+                    f"{fund_name}（{fund_code}）当前净值 {current_nav:.4f}，"
+                    f"已跌破目标价 {float(target_price):.4f}，可关注上车机会。"
+                )
+                create_alert(
+                    alert_type="watchlist_target_price",
+                    title=title,
+                    content=content,
+                    severity="info",
+                    related_fund_code=fund_code,
+                    related_fund_name=fund_name,
+                    source="alert_scanner",
+                )
+                alerts_created += 1
+                logger.info(f"[alert_scanner] 关注基金 {fund_code} 目标价到位信号已生成")
+            except Exception as e:
+                logger.warning(f"[alert_scanner] 生成目标价信号失败 {fund_code}: {e}")
+
+        # 信号2：估值低分位到位
+        if target_percentile:
+            index_code = item.get("index_code") or ""
+            if index_code:
+                try:
+                    val = get_latest_valuation(index_code)
+                    if val and val.get("percentile") is not None:
+                        try:
+                            pct = float(val["percentile"])
+                        except (TypeError, ValueError):
+                            pct = None
+                        if pct is not None and pct <= float(target_percentile):
+                            if _is_alert_recently_created("watchlist_target_percentile", fund_code, hours=24):
+                                pass
+                            else:
+                                index_name = item.get("index_name") or index_code
+                                title = f"关注基金 {fund_name} 估值进入低分位"
+                                content = (
+                                    f"{fund_name}（{fund_code}）跟踪指数 {index_name} "
+                                    f"当前估值分位 {pct:.1f}%，低于目标分位 "
+                                    f"{float(target_percentile):.1f}%，可关注上车机会。"
+                                )
+                                create_alert(
+                                    alert_type="watchlist_target_percentile",
+                                    title=title,
+                                    content=content,
+                                    severity="info",
+                                    related_fund_code=fund_code,
+                                    related_fund_name=fund_name,
+                                    source="alert_scanner",
+                                )
+                                alerts_created += 1
+                                logger.info(f"[alert_scanner] 关注基金 {fund_code} 估值低分位信号已生成")
+                except Exception as e:
+                    logger.debug(f"[alert_scanner] 估值分位检查失败 {fund_code}: {e}")
+
+        # 信号3：单日大跌
+        if change_pct is not None and change_pct <= -drop_threshold:
+            if _is_alert_recently_created("watchlist_big_drop", fund_code, hours=24):
+                pass
+            else:
+                try:
+                    title = f"关注基金 {fund_name} 单日下跌 {abs(change_pct):.1f}%"
+                    content = (
+                        f"{fund_name}（{fund_code}）最新净值 {current_nav:.4f}，"
+                        f"单日下跌 {abs(change_pct):.1f}%，超过 -{drop_threshold}% 阈值，"
+                        f"可能迎来上车机会，请结合估值和趋势判断。"
+                    )
+                    create_alert(
+                        alert_type="watchlist_big_drop",
+                        title=title,
+                        content=content,
+                        severity="info",
+                        related_fund_code=fund_code,
+                        related_fund_name=fund_name,
+                        source="alert_scanner",
+                    )
+                    alerts_created += 1
+                    logger.info(f"[alert_scanner] 关注基金 {fund_code} 单日大跌信号已生成")
+                except Exception as e:
+                    logger.warning(f"[alert_scanner] 生成大跌信号失败 {fund_code}: {e}")
+
+    logger.info(
+        f"[alert_scanner] 关注列表信号扫描：扫描 {len(items)} 只基金，生成 {alerts_created} 个 alert"
+    )
+    return {"alerts_created": alerts_created, "watchlist_scanned": len(items)}
+
+
 # ── 主入口 ────────────────────────────────────
 
 
 def run_periodic_scan() -> dict:
-    """定时扫描主入口，依次执行 3 个扫描函数。"""
+    """定时扫描主入口，依次执行 4 个扫描函数。"""
     if not _is_enabled("alerts.proactive_scan_enabled", True):
         return {"skipped": "disabled"}
 
@@ -315,6 +484,7 @@ def run_periodic_scan() -> dict:
         "verification": {},
         "valuation": {},
         "portfolio": {},
+        "watchlist": {},
     }
     try:
         results["verification"] = scan_and_verify_recommendations()
@@ -331,4 +501,9 @@ def run_periodic_scan() -> dict:
     except Exception as e:
         logger.warning(f"[alert_scanner] 持仓风险扫描失败: {e}")
         results["portfolio"] = {"error": str(e)}
+    try:
+        results["watchlist"] = scan_watchlist_signals()
+    except Exception as e:
+        logger.warning(f"[alert_scanner] 关注列表扫描失败: {e}")
+        results["watchlist"] = {"error": str(e)}
     return results

@@ -2249,6 +2249,11 @@ export function getBuyScore(itemId) {
   return api.get(`/watchlist/${itemId}/buy-score`)
 }
 
+/** P0-C：手动触发关注列表上车信号扫描 */
+export function triggerWatchlistScan() {
+  return api.post('/portfolio/alerts/scan-watchlist')
+}
+
 // ── 异步任务状态 API ──────────────────────────────────────
 
 /** 查询异步任务状态 */

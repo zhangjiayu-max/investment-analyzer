@@ -28,6 +28,7 @@ import {
   Library, PenLine, Target, Tv, ClipboardList, Clipboard, MessageSquareDot,
   CircleUser, User, ThumbsUp, ThumbsDown, FileText, Users,
   Sun, Moon, Circle, CircleAlert, Code, Copy, Satellite,
+  Bookmark, BookmarkPlus,
 } from 'lucide-vue-next'
 
 const props = defineProps({
@@ -83,6 +84,11 @@ const LUCIDE_MAP = {
   // 杂项
   circle: Circle, test: FlaskConical,
   code: Code, copy: Copy, satellite: Satellite,
+  bookmark: Bookmark, 'bookmark-plus': BookmarkPlus,
+  // 别名（兼容常用 kebab-case 名称）
+  zap: Zap, 'refresh-cw': RefreshCw, 'trash-2': Trash2,
+  briefcase: Briefcase, 'alert-triangle': AlertTriangle,
+  'check-circle': CheckCircle2,
 }
 
 const Comp = computed(() => LUCIDE_MAP[props.name] || CircleAlert)

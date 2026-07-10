@@ -63,7 +63,9 @@ function _routeForAlert(a) {
   if (a.alert_type.startsWith('valuation_')) return 'valuation'
   if (a.alert_type === 'concentration_high' || a.alert_type === 'loss_warning') return 'portfolio'
   if (a.alert_type === 'recommendation_verified') return 'decisions'
-  if (a.alert_type === 'event_radar') return null  // 事件雷达不跳转，直接在卡片展示
+  if (a.alert_type === 'event_radar') return 'event-radar'
+  // 关注列表信号跳转到机会雷达页面
+  if (a.alert_type && a.alert_type.startsWith('watchlist_')) return 'event-radar'
   return null
 }
 
@@ -82,6 +84,8 @@ function severityClass(sev) {
 // 事件雷达：按 alert_type 区分图标
 function eventTypeIcon(a) {
   if (a.alert_type === 'event_radar') return 'satellite'
+  // 关注列表信号
+  if (a.alert_type && a.alert_type.startsWith('watchlist_')) return 'bookmark'
   return null
 }
 
@@ -90,12 +94,17 @@ function alertIcon(a) {
   return eventTypeIcon(a) || severityIcon(a.severity)
 }
 
-// 事件雷达：按 title 前缀判断 3 级分级
+// 事件雷达：按 title 前缀判断 4 级分级
 function alertClass(a) {
   if (a.alert_type === 'event_radar') {
     if (a.title && a.title.includes('[持仓影响]')) return 'alert-event-holding'
+    if (a.title && a.title.includes('[关注机会]')) return 'alert-event-watchlist'
     if (a.title && a.title.includes('[建仓机会]')) return 'alert-event-opportunity'
     return 'alert-event-watch'
+  }
+  // 关注列表上车信号
+  if (a.alert_type && a.alert_type.startsWith('watchlist_')) {
+    return 'alert-event-watchlist'
   }
   return severityClass(a.severity)
 }
@@ -333,9 +342,11 @@ onUnmounted(() => {
 
 /* 事件雷达 3 级分级样式 */
 .alert-event-holding .alert-icon { color: #dc2626; }
+.alert-event-watchlist .alert-icon { color: #ea580c; }
 .alert-event-opportunity .alert-icon { color: #d97706; }
 .alert-event-watch .alert-icon { color: #2563eb; }
 .alert-event-holding { border-left: 2px solid #dc2626; }
+.alert-event-watchlist { border-left: 2px solid #ea580c; }
 .alert-event-opportunity { border-left: 2px solid #d97706; }
 .alert-event-watch { border-left: 2px solid #2563eb; }
 

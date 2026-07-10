@@ -95,6 +95,8 @@ DEFAULT_CONFIGS = [
     ('alerts.event_radar_max_candidate_funds', '5', '建仓机会卡片最多展示基金数', 'alerts'),
     ('alerts.event_radar_verify_window_days', '3', '事件落地后验证窗口天数（T+N）', 'alerts'),
     ('alerts.event_radar_verify_enabled', 'true', '事件落地验证开关（非LLM相关，默认开启）', 'alerts'),
+    ('alerts.watchlist_signal_enabled', 'true', '关注列表上车信号扫描开关（非LLM相关，默认开启）', 'alerts'),
+    ('alerts.watchlist_drop_threshold', '3', '关注基金单日跌幅%阈值触发上车提醒', 'alerts'),
 
     # 业务常量
     ('portfolio.default_account', '花无缺', '默认账户名', 'portfolio'),

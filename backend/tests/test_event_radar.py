@@ -125,7 +125,7 @@ def test_determine_relevance_holding_impact():
 
     event = {"affected_sectors": ["军工"]}
     holdings = [{"fund_code": "161031", "fund_name": "军工ETF", "index_code": "399967"}]
-    relevance, matched, candidates = _determine_relevance(event, holdings)
+    relevance, matched, matched_wl, candidates = _determine_relevance(event, holdings)
     assert relevance == "holding_impact"
     assert len(matched) == 1
     assert matched[0]["fund_code"] == "161031"
@@ -144,7 +144,7 @@ def test_determine_relevance_opportunity():
         {"fund_code": "159995", "fund_name": "芯片ETF", "match_reason": "跟踪半导体指数"}
     ]
     with patch("services.event_radar._find_candidate_funds", return_value=fake_candidates):
-        relevance, matched, candidates = _determine_relevance(event, holdings)
+        relevance, matched, matched_wl, candidates = _determine_relevance(event, holdings)
 
     assert relevance == "opportunity"
     assert matched == []
@@ -157,7 +157,7 @@ def test_determine_relevance_market_watch():
 
     event = {"affected_sectors": []}  # 宏观事件无板块
     holdings = []
-    relevance, matched, candidates = _determine_relevance(event, holdings)
+    relevance, matched, matched_wl, candidates = _determine_relevance(event, holdings)
     assert relevance == "market_watch"
     assert matched == []
     assert candidates == []
@@ -335,7 +335,7 @@ def test_determine_relevance_matches_holding_by_index_name():
         {"fund_code": "009860", "fund_name": "易方达中证银行ETF联接C",
          "index_code": "399986.SZ", "index_name": "中证银行指数"}
     ]
-    relevance, matched, candidates = _determine_relevance(event, holdings)
+    relevance, matched, matched_wl, candidates = _determine_relevance(event, holdings)
     assert relevance == "holding_impact"
     assert len(matched) >= 1
     assert matched[0]["fund_code"] == "009860"
@@ -349,9 +349,40 @@ def test_determine_relevance_sector_synonym_matching():
     holdings = [
         {"fund_code": "161031", "fund_name": "军工ETF", "index_code": "399967"}
     ]
-    relevance, matched, candidates = _determine_relevance(event, holdings)
+    relevance, matched, matched_wl, candidates = _determine_relevance(event, holdings)
     assert relevance == "holding_impact"
     assert len(matched) == 1
+
+
+def test_determine_relevance_watchlist_impact():
+    """事件命中关注列表（但非持仓）→ watchlist_impact。"""
+    from services.event_radar import _determine_relevance
+
+    event = {"affected_sectors": ["军工"]}
+    holdings = []  # 无持仓
+    watchlist = [{"fund_code": "161031", "fund_name": "军工ETF", "index_code": "399967"}]
+    relevance, matched, matched_wl, candidates = _determine_relevance(
+        event, holdings, watchlist
+    )
+    assert relevance == "watchlist_impact"
+    assert matched == []
+    assert len(matched_wl) == 1
+    assert matched_wl[0]["fund_code"] == "161031"
+
+
+def test_determine_relevance_holding_takes_priority_over_watchlist():
+    """事件同时命中持仓和关注列表 → 优先 holding_impact。"""
+    from services.event_radar import _determine_relevance
+
+    event = {"affected_sectors": ["军工"]}
+    holdings = [{"fund_code": "512660", "fund_name": "军工ETF场内", "index_code": "399967"}]
+    watchlist = [{"fund_code": "161031", "fund_name": "军工ETF", "index_code": "399967"}]
+    relevance, matched, matched_wl, candidates = _determine_relevance(
+        event, holdings, watchlist
+    )
+    assert relevance == "holding_impact"
+    assert len(matched) == 1
+    assert matched[0]["fund_code"] == "512660"
 
 
 def test_find_candidate_funds_fallback_to_builtin_map(tmp_db):

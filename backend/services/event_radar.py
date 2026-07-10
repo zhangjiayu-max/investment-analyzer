@@ -327,35 +327,45 @@ def _find_candidate_funds(index_code: str, exclude_codes: set = None) -> list[di
 def _determine_relevance(
     event: dict,
     user_holdings: list[dict],
-) -> tuple[str, list[dict], list[dict]]:
+    user_watchlist: list[dict] = None,
+) -> tuple[str, list[dict], list[dict], list[dict]]:
     """判定推送分级。
 
     Args:
         event: 事件 dict（含 affected_sectors）
         user_holdings: 用户持仓 [{fund_code, fund_name, index_code, index_name}, ...]
+        user_watchlist: 用户关注列表 [{fund_code, fund_name, index_code, index_name}, ...]
 
     Returns:
-        (relevance, matched_holdings, candidate_funds)
-        relevance: holding_impact / opportunity / market_watch
+        (relevance, matched_holdings, matched_watchlist, candidate_funds)
+        relevance: holding_impact / watchlist_impact / opportunity / market_watch
 
     匹配策略（增强版）：
     1. 板块名归一化（"国防军工"→"军工"）
     2. 持仓匹配优先级：index_code 精确匹配 → index_name 关键词模糊匹配
-    3. 无持仓命中时收集候选建仓基金（fund_metadata → 内置映射兜底）
+    3. 关注列表匹配（同持仓逻辑，命中则标记 watchlist_impact）
+    4. 无持仓/关注命中时收集候选建仓基金（fund_metadata → 内置映射兜底）
     """
     affected_sectors = event.get("affected_sectors", [])
     if not affected_sectors:
-        return "market_watch", [], []
+        return "market_watch", [], [], []
+
+    if user_watchlist is None:
+        user_watchlist = []
 
     matched_holdings = []
+    matched_watchlist = []
     candidate_funds = []
     holding_codes = {h.get("fund_code") for h in user_holdings}
-    matched_holding_codes = set()  # 已命中的持仓 fund_code，避免重复
+    watchlist_codes = {w.get("fund_code") for w in user_watchlist}
+    matched_holding_codes = set()
+    matched_watchlist_codes = set()
+    exclude_codes = holding_codes | watchlist_codes
 
     from services.index_fund_mapper import _normalize_index_code
 
     for raw_sector in affected_sectors:
-        sector = _normalize_sector(raw_sector)  # 别名归一化
+        sector = _normalize_sector(raw_sector)
         index_codes = SECTOR_TO_INDEX.get(sector, [])
         name_keywords = _SECTOR_TO_NAME_KEYWORDS.get(sector, [])
 
@@ -373,7 +383,7 @@ def _determine_relevance(
                     })
                     matched_holding_codes.add(h.get("fund_code"))
 
-        # 1b. 持仓匹配：index_name 关键词模糊匹配（index_code 未命中时）
+        # 1b. 持仓匹配：index_name 关键词模糊匹配
         if not matched_holdings and name_keywords:
             for h in user_holdings:
                 if h.get("fund_code") in matched_holding_codes:
@@ -390,23 +400,57 @@ def _determine_relevance(
                         matched_holding_codes.add(h.get("fund_code"))
                         break
 
-        # 2. 若无持仓命中，收集候选建仓基金
+        # 1c. 关注列表匹配：index_code 精确匹配（持仓未命中时）
         if not matched_holdings:
             for idx_code in index_codes:
-                cands = _find_candidate_funds(idx_code, exclude_codes=holding_codes)
-                # 去重（多个 sector 可能命中同一基金）
+                for w in user_watchlist:
+                    if w.get("fund_code") in matched_watchlist_codes:
+                        continue
+                    w_index = w.get("index_code") or ""
+                    if _normalize_index_code(w_index) == _normalize_index_code(idx_code):
+                        matched_watchlist.append({
+                            "fund_code": w.get("fund_code", ""),
+                            "fund_name": w.get("fund_name", ""),
+                            "match_reason": f"关注基金跟踪 {sector} 相关指数 {idx_code}",
+                        })
+                        matched_watchlist_codes.add(w.get("fund_code"))
+
+            # 1d. 关注列表匹配：index_name 关键词模糊匹配
+            if not matched_watchlist and name_keywords:
+                for w in user_watchlist:
+                    if w.get("fund_code") in matched_watchlist_codes:
+                        continue
+                    w_index_name = (w.get("index_name") or "").strip()
+                    w_fund_name = (w.get("fund_name") or "").strip()
+                    for kw in name_keywords:
+                        if kw in w_index_name or kw in w_fund_name:
+                            matched_watchlist.append({
+                                "fund_code": w.get("fund_code", ""),
+                                "fund_name": w.get("fund_name", ""),
+                                "match_reason": f"关注基金名称含 {sector} 关键词 '{kw}'",
+                            })
+                            matched_watchlist_codes.add(w.get("fund_code"))
+                            break
+
+        # 2. 若无持仓/关注命中，收集候选建仓基金
+        if not matched_holdings and not matched_watchlist:
+            for idx_code in index_codes:
+                cands = _find_candidate_funds(idx_code, exclude_codes=exclude_codes)
                 existing_codes = {c["fund_code"] for c in candidate_funds}
                 for c in cands:
                     if c["fund_code"] not in existing_codes:
                         candidate_funds.append(c)
 
+    # 分级优先级：持仓 > 关注 > 候选基金 > 市场关注
     if matched_holdings:
-        return "holding_impact", matched_holdings, []
+        return "holding_impact", matched_holdings, [], []
+    elif matched_watchlist:
+        return "watchlist_impact", [], matched_watchlist, []
     elif candidate_funds:
         max_cands = get_config_int("alerts.event_radar_max_candidate_funds", 5)
-        return "opportunity", [], candidate_funds[:max_cands]
+        return "opportunity", [], [], candidate_funds[:max_cands]
     else:
-        return "market_watch", [], []
+        return "market_watch", [], [], []
 
 
 def _update_event_statuses() -> dict:
@@ -527,7 +571,9 @@ def scan_forward_events(trace_id: str = "") -> dict:
 
     # 5. 板块匹配 + 分级 + 生成 alert
     from db.portfolio import list_holdings, create_alert
+    from db.watchlist import list_watchlist
     holdings = list_holdings()
+    watchlist = list_watchlist(status="watching")  # 只查关注中的
     alerts_created = 0
 
     # 对所有 upcoming/imminent 事件重新计算分级
@@ -537,32 +583,43 @@ def scan_forward_events(trace_id: str = "") -> dict:
         try:
             affected = json.loads(ev_row.get("affected_sectors") or "[]")
             event_dict = {"affected_sectors": affected}
-            relevance, matched, candidates = _determine_relevance(event_dict, holdings)
+            relevance, matched, matched_wl, candidates = _determine_relevance(
+                event_dict, holdings, watchlist,
+            )
 
-            # 更新事件的分级字段
-            update_event_relevance(ev_row["event_id"], relevance, matched, candidates)
+            # 更新事件的分级字段（关注基金合并到 matched_holdings 存储，加 match_type 区分）
+            all_matched = matched + [
+                {**w, "match_type": "watchlist"} for w in matched_wl
+            ]
+            update_event_relevance(ev_row["event_id"], relevance, all_matched, candidates)
 
             # 仅对新生成的事件（本次扫描首次检测）生成 alert，避免重复推送
             ev_id = ev_row["event_id"]
             ev_detected = ev_row.get("detected_date", "")
             today = datetime.now().strftime("%Y-%m-%d")
             if ev_detected != today:
-                continue  # 不是今天首次检测，不重复推送
+                continue
 
             # 构造 alert
             severity = {
                 "holding_impact": "warning",
+                "watchlist_impact": "info",
                 "opportunity": "info",
                 "market_watch": "info",
             }.get(relevance, "info")
 
-            title_prefix = {"holding_impact": "持仓影响", "opportunity": "建仓机会",
-                            "market_watch": "市场关注"}.get(relevance, "市场关注")
+            title_prefix = {
+                "holding_impact": "持仓影响", "watchlist_impact": "关注机会",
+                "opportunity": "建仓机会", "market_watch": "市场关注",
+            }.get(relevance, "市场关注")
             alert_title = f"[{title_prefix}] {ev_row['title']}"
             content_parts = [f"预期日期：{ev_row.get('expected_date','')}"]
             if matched:
                 codes = [m["fund_name"] for m in matched[:3]]
                 content_parts.append(f"关联持仓：{', '.join(codes)}")
+            if matched_wl:
+                codes = [w["fund_name"] for w in matched_wl[:3]]
+                content_parts.append(f"关注基金：{', '.join(codes)}")
             if candidates:
                 codes = [c["fund_name"] for c in candidates[:3]]
                 content_parts.append(f"候选基金：{', '.join(codes)}")

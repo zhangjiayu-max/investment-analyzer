@@ -326,11 +326,22 @@ async def get_alert_history_api(alert_id: int, days: int = 30):
 async def trigger_proactive_scan_api():
     """P0-B 主动提醒扫描：手动触发一次扫描（也由 app.py 后台定时调用）。
 
-    扫描 3 项：建议验证 + 估值阈值 + 持仓风险，生成 portfolio_alerts。
+    扫描 4 项：建议验证 + 估值阈值 + 持仓风险 + 关注列表信号，生成 portfolio_alerts。
     开关：alerts.proactive_scan_enabled（默认 true）。
     """
     from services.alert_scanner import run_periodic_scan
     return run_periodic_scan()
+
+
+@router.post("/api/portfolio/alerts/scan-watchlist")
+async def trigger_watchlist_scan_api():
+    """P0-C 关注列表信号扫描：单独触发一次关注列表上车信号扫描。
+
+    扫描关注列表基金，触发目标价/估值低分位/单日大跌三类信号。
+    开关：alerts.watchlist_signal_enabled（默认 true）。
+    """
+    from services.alert_scanner import scan_watchlist_signals
+    return scan_watchlist_signals()
 
 
 @router.post("/api/portfolio/alerts/generate")
