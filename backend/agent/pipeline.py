@@ -183,6 +183,15 @@ def run_pipeline(
         yield {"type": EVENT_PHASE_END, "phase": PipelinePhase.PREPROCESS.value,
                "result": phase0_result}
 
+        # P0-2: 持久化 refined_query 供可观测性
+        if state.refined_query != state.original_query:
+            yield {
+                "type": "query_refined",
+                "original_query": state.original_query,
+                "refined_query": state.refined_query,
+                "rewrite_reason": phase0_result.get("rewrite_reason", ""),
+            }
+
         # 简单闲聊快速路径
         query_info = phase0_result.get("query_info", {})
         if is_simple_chat(query_info):
@@ -198,6 +207,7 @@ def run_pipeline(
             yield {
                 "type": EVENT_CLARIFICATION,
                 "question": clarify_q,
+                "reason": query_info.get("clarification_reason", ""),
                 "options": query_info.get("clarification_options", []),
                 "checkpoint": checkpoint,
             }
@@ -354,7 +364,7 @@ def run_pipeline(
         # ── Phase 5: 记忆持久化 ──────────────────
         state.transition_to(PipelinePhase.MEMORY)
         yield {"type": EVENT_PHASE_START, "phase": PipelinePhase.MEMORY.value}
-        phase5_result = _phase_memory(state, phase4_result, query_info, trace_id)
+        phase5_result = _phase_memory(state, phase4_result, query_info, trace_id, phase1_result)
         state.set_phase_result(PipelinePhase.MEMORY.value, phase5_result)
         yield {"type": EVENT_PHASE_END, "phase": PipelinePhase.MEMORY.value}
 
@@ -400,10 +410,11 @@ def run_pipeline_from_checkpoint(
     query_info = checkpoint.get("query_info", {})
     original_query = state.original_query
 
-    # 用回答改写 query
-    state.refined_query = f"{original_query} {user_answer}".strip()
+    # 用回答融合 query（LLM 语义融合，失败降级为拼接）
+    from agent.query_rewriter import fuse_clarified_query
+    state.refined_query = fuse_clarified_query(original_query, user_answer, trace_id)
     logger.info(
-        f"[pipeline] 澄清续答恢复: query='{original_query}' → '{state.refined_query}', "
+        f"[pipeline:{trace_id}] 澄清续答恢复: query='{original_query}' → '{state.refined_query}', "
         f"answer='{user_answer[:50]}'"
     )
 
@@ -467,13 +478,13 @@ def run_pipeline_from_checkpoint(
             yield {"type": EVENT_PHASE_START, "phase": PipelinePhase.REFLECTION.value}
             try:
                 reflection_result = _phase_reflection(
-                    state, query, phase3_result, blackboard, trace_id
+                    state, state.refined_query, phase3_result, blackboard, trace_id
                 )
                 state.set_phase_result(PipelinePhase.REFLECTION.value, reflection_result)
                 yield {"type": EVENT_REFLECTION_DONE, "result": reflection_result}
 
                 rerun_result = _maybe_rerun_specialist(
-                    state, query, phase3_result, reflection_result,
+                    state, state.refined_query, phase3_result, reflection_result,
                     blackboard, trace_id,
                 )
                 if rerun_result:
@@ -505,7 +516,7 @@ def run_pipeline_from_checkpoint(
                 yield {"type": EVENT_PHASE_START, "phase": PipelinePhase.DEBATE.value}
                 try:
                     debate_result = _phase_debate(
-                        state, query, phase3_result, blackboard, trace_id
+                        state, state.refined_query, phase3_result, blackboard, trace_id
                     )
                     state.set_phase_result(PipelinePhase.DEBATE.value, debate_result)
                     yield {"type": EVENT_DEBATE_DONE, "result": debate_result}
@@ -550,7 +561,7 @@ def run_pipeline_from_checkpoint(
         # Phase 5: 记忆持久化
         state.transition_to(PipelinePhase.MEMORY)
         yield {"type": EVENT_PHASE_START, "phase": PipelinePhase.MEMORY.value}
-        phase5_result = _phase_memory(state, phase4_result, query_info, trace_id)
+        phase5_result = _phase_memory(state, phase4_result, query_info, trace_id, phase1_result)
         state.set_phase_result(PipelinePhase.MEMORY.value, phase5_result)
         yield {"type": EVENT_PHASE_END, "phase": PipelinePhase.MEMORY.value}
 
@@ -598,11 +609,13 @@ def _phase_preprocess(
 
     # 2. Query 改写（复用现有 query_rewriter）
     refined_query = query
+    rewrite_reason = ""
     try:
         from agent.query_rewriter import rewrite_query, needs_rewrite
         need_rewrite, reason = needs_rewrite(query)
         if need_rewrite:
             refined_query = rewrite_query(query, history)
+            rewrite_reason = reason
             logger.info(f"[pipeline] Query 改写: '{query}' → '{refined_query}'")
     except Exception as e:
         logger.debug(f"[pipeline] Query 改写跳过: {e}")
@@ -613,6 +626,7 @@ def _phase_preprocess(
     return {
         "query_info": query_info,
         "refined_query": refined_query,
+        "rewrite_reason": rewrite_reason,
         "complexity": complexity,
         "intent": query_info.get("intent", ""),
         "targets": query_info.get("targets", []),
@@ -692,11 +706,12 @@ def _phase_info_gather(
                 total_fts += rag_data.get("fts_count", 0)
                 total_chroma += rag_data.get("chroma_count", 0)
 
-        # 去重（按 content_type + reference_id + title）
+        # 去重（按 content_type + reference_id 二元组，与 rag.py 内部去重一致）
+        # P4 半修修复：去掉 title 维度，避免 _inject_valuation_data 生成的 title 与 FTS 索引 title 微小差异导致去重失效
         seen = set()
         deduped = []
         for r in all_rag_results:
-            key = f"{r.get('content_type','')}:{r.get('reference_id','')}:{r.get('title','')}"
+            key = f"{r.get('content_type','')}:{r.get('reference_id','')}"
             if key not in seen:
                 seen.add(key)
                 deduped.append(r)
@@ -749,6 +764,7 @@ def _phase_info_gather(
                 fts_count=total_fts,
                 chroma_count=total_chroma,
                 trace_id=trace_id,
+                rag_low_quality=bool(results.get("rag_low_quality", False)),
             )
         except Exception as log_err:
             logger.debug(f"[pipeline] rag_logs 写入失败: {log_err}")
@@ -804,6 +820,7 @@ _INTENT_TO_CONTENT_TYPES = {
     "risk": ["analysis", "article"],
     "strategy": ["analysis", "article"],   # P4: 移除 book（策略类问题优先分析文章）
     "article": ["article", "author_article"],
+    "text": ["article", "author_article"],  # 补全 text 意图映射，避免纯文章解读类问题全类型检索
 }
 
 
@@ -826,7 +843,11 @@ def _map_content_types(needed_info: list) -> Optional[list]:
 
 
 def _build_rag_context_from_results(results: list, max_chars: int = 3000) -> str:
-    """从检索结果列表构建上下文文本（多子查询场景）。"""
+    """从检索结果列表构建上下文文本（多子查询场景）。
+
+    Phase C: 补相关度标签，让专家区分高分精确命中与边缘命中。
+    阈值基于实测分数分布（0.014-0.125）：高>=0.08, 中>=0.03, 低<0.03
+    """
     if not results:
         return ""
     parts = []
@@ -836,7 +857,15 @@ def _build_rag_context_from_results(results: list, max_chars: int = 3000) -> str
         title = r.get("title", "")
         body = (r.get("body", "") or "")[:600]
         source = r.get("source", "")
-        part = f"[{label}] {title}"
+        # 相关度标签（基于 _score 字段）
+        score = float(r.get("_score", 0))
+        if score >= 0.08:
+            relevance_tag = "相关度:高"
+        elif score >= 0.03:
+            relevance_tag = "相关度:中"
+        else:
+            relevance_tag = "相关度:低"
+        part = f"[{label}] [{relevance_tag}] {title}"
         if source:
             part += f" [来源: {source}]"
         part += f"\n{body}"
@@ -975,6 +1004,7 @@ def _phase_execution(
     rag_context = info_gather_result.get("rag_context", "")
     portfolio = info_gather_result.get("portfolio", "")
     valuations = info_gather_result.get("valuations", {})
+    rag_low_quality = bool(info_gather_result.get("rag_low_quality", False))
 
     # P2: 并行执行路径 — 无 depends_on 且步骤 >= 2 时启用
     # 配置开关 pipeline.parallel_execution 默认 false，验证通过后再启用
@@ -1038,6 +1068,7 @@ def _phase_execution(
             valuation_data=valuations,
             blackboard=blackboard,
             complexity=query_info.get("complexity", "medium"),
+            rag_low_quality=rag_low_quality,
         )
 
         # 记录调用
@@ -1179,6 +1210,7 @@ def _execute_steps_parallel(
     rag_context = info_gather_result.get("rag_context", "")
     portfolio = info_gather_result.get("portfolio", "")
     valuations = info_gather_result.get("valuations", {})
+    rag_low_quality = bool(info_gather_result.get("rag_low_quality", False))
 
     # 过滤可执行的步骤（收敛检测 + 终止检查）
     executable_steps = []
@@ -1217,6 +1249,7 @@ def _execute_steps_parallel(
             valuation_data=valuations,
             blackboard=blackboard,
             complexity=query_info.get("complexity", "medium"),
+            rag_low_quality=rag_low_quality,
         )
 
         detector.record_call(agent_key, step_query)
@@ -1370,6 +1403,7 @@ def _fallback_execution(
     rag_context = info_gather_result.get("rag_context", "")
     portfolio = info_gather_result.get("portfolio", "")
     valuations = info_gather_result.get("valuations", {})
+    rag_low_quality = bool(info_gather_result.get("rag_low_quality", False))
 
     results = []
     tool_calls = []
@@ -1395,6 +1429,7 @@ def _fallback_execution(
             portfolio_summary=portfolio,
             valuation_data=valuations,
             blackboard=blackboard,
+            rag_low_quality=rag_low_quality,
         )
 
         detector.record_call(agent_key, query)
@@ -2412,6 +2447,9 @@ def _extract_and_save_recommendations(
         return result
 
     # 过滤无效项 + 标准化 direction
+    # Phase D: 从 answer 中提取 referenced_books，用于归因「建议是否引用了书籍」
+    import re
+    referenced_books = list(set(re.findall(r"根据《(.+?)》", state.answer or "")))
     valid_recs = []
     for r in recs:
         if not isinstance(r, dict):
@@ -2429,6 +2467,7 @@ def _extract_and_save_recommendations(
             "direction": direction,
             "reason": (r.get("reason") or "")[:200],
             "confidence": (r.get("confidence") or "medium").lower(),
+            "referenced_books": referenced_books,  # Phase D: answer 级引用，所有 recs 共享
         })
     if not valid_recs:
         return result
@@ -2650,6 +2689,7 @@ def _phase_memory(
     synthesis_result: dict,
     query_info: dict,
     trace_id: str,
+    info_gather_result: dict = None,
 ) -> dict:
     """Phase 5: 保存结论 + 更新摘要 + 提取用户偏好 + 提取建议落库（P0-A）。"""
     result = {
@@ -2664,6 +2704,16 @@ def _phase_memory(
         from db.analysis_conclusions import save_analysis_conclusion
         targets = query_info.get("targets", [])
         target_subject = "、".join(targets) if targets else state.original_query[:30]
+        # Phase D: data_basis 改为真实值，区分 RAG 是否含 book、是否低质
+        data_basis = ["portfolio", "tools"]
+        rag_results = info_gather_result.get("rag", []) if info_gather_result else []
+        book_hits = [r for r in rag_results if r.get("content_type") == "book"]
+        if book_hits:
+            data_basis.append("rag_book")
+        elif rag_results:
+            data_basis.append("rag_other")
+        if info_gather_result and info_gather_result.get("rag_low_quality"):
+            data_basis.append("rag_low_quality")
         conclusion_id = save_analysis_conclusion(
             source_system="ai_dialogue",
             source_type="orchestrator",
@@ -2673,7 +2723,7 @@ def _phase_memory(
             summary=state.answer[:100] if state.answer else "",
             reasoning=state.answer,
             key_variables=targets,
-            data_basis=["rag", "portfolio", "tools"],
+            data_basis=data_basis,
             confidence=phase4_result.get("confidence", 0.7) if phase4_result else 0.7,
             urgent=0,
             conversation_id=state.conversation_id,

@@ -180,10 +180,14 @@ def build_layer3_shared_work(
     valuation_data: dict = None,
     market_context: str = "",
     max_tokens: int = 1500,
+    rag_low_quality: bool = False,
 ) -> str:
     """Layer 3: 共享工作上下文（本次分析，~1500 tokens）。
 
     所有专家共享，包含 RAG 检索结果、持仓摘要、预取估值数据。
+
+    Phase C: rag_low_quality=True 时在 RAG 段前加显眼警示标签，
+    程序化提示专家优先依赖工具数据（而非只在末尾追加文本）。
     """
     parts = []
 
@@ -195,7 +199,16 @@ def build_layer3_shared_work(
         except ImportError:
             rag_compressed = rag_context[:1500]
         if rag_compressed:
-            parts.append(f"## 知识库检索结果\n{rag_compressed}")
+            # Phase C: 低质命中时加显眼警示标签（前置，而非末尾追加）
+            if rag_low_quality:
+                parts.append(
+                    "## 知识库检索结果\n"
+                    "⚠️ 知识库命中质量低（最高分 < 0.05），以下内容仅供参考，"
+                    "请以工具数据（持仓/行情/估值工具）为准\n\n"
+                    f"{rag_compressed}"
+                )
+            else:
+                parts.append(f"## 知识库检索结果\n{rag_compressed}")
 
     # 持仓摘要
     if portfolio_summary:
@@ -307,6 +320,7 @@ def build_specialist_context(
     tool_results: list = None,
     complexity: str = "medium",
     max_total_tokens: int = 8000,
+    rag_low_quality: bool = False,
 ) -> str:
     """组装专家可见的完整上下文（Layer 0+1+2+3+5+4）。
 
@@ -358,6 +372,7 @@ def build_specialist_context(
         valuation_data=valuation_data,
         market_context=market_context,
         max_tokens=1500,
+        rag_low_quality=rag_low_quality,
     )
     if layer3:
         parts.append(layer3)

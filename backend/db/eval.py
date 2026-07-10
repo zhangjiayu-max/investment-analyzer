@@ -82,6 +82,8 @@ def init_eval_tables(conn):
     # adopted: 0=未标记, 1=已采纳, -1=未采纳
     _add_column_if_not_exists(conn, "recommendations", "adopted", "INTEGER DEFAULT 0")
     _add_column_if_not_exists(conn, "recommendations", "adopted_at", "TEXT")
+    # Phase D: 归因字段 — 记录建议是否引用了书籍（JSON 数组，如 ["聪明的投资者","周期"]）
+    _add_column_if_not_exists(conn, "recommendations", "referenced_books", "TEXT")
     # P2 执行落地：建议关联基金代码 + 建议金额（用于"去执行"跳转）
     _add_column_if_not_exists(conn, "recommendations", "target_fund_code", "TEXT")
     _add_column_if_not_exists(conn, "recommendations", "target_fund_name", "TEXT")

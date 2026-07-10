@@ -1050,8 +1050,12 @@ def build_rag_context(query: str, content_types: list[str] = None, limit: int = 
 def log_rag_search(conversation_id: int, message_id: int, query: str, keywords: list,
                    results: list, content_types: list = None,
                    fts_count: int = 0, chroma_count: int = 0,
-                   freshness_filtered: int = 0, trace_id: str = ""):
-    """记录 RAG 检索日志到数据库。"""
+                   freshness_filtered: int = 0, trace_id: str = "",
+                   rag_low_quality: bool = False):
+    """记录 RAG 检索日志到数据库。
+
+    Phase C: 新增 rag_low_quality 参数，统计低质命中频率。
+    """
     conn = _get_conn()
     conn.execute("""
         CREATE TABLE IF NOT EXISTS rag_logs (
@@ -1075,7 +1079,7 @@ def log_rag_search(conversation_id: int, message_id: int, query: str, keywords: 
     # 兜底：为已有表添加新字段（ALTER IF NOT EXISTS 不存在，用 try 忽略重复）
     for col, typ in [("fts_count", "INTEGER DEFAULT 0"), ("chroma_count", "INTEGER DEFAULT 0"),
                      ("freshness_filtered", "INTEGER DEFAULT 0"), ("result_sources", "TEXT"),
-                     ("result_times", "TEXT")]:
+                     ("result_times", "TEXT"), ("rag_low_quality", "INTEGER DEFAULT 0")]:
         try:
             conn.execute(f"ALTER TABLE rag_logs ADD COLUMN {col} {typ}")
         except Exception:
@@ -1096,8 +1100,9 @@ def log_rag_search(conversation_id: int, message_id: int, query: str, keywords: 
     conn.execute("""
         INSERT INTO rag_logs (conversation_id, message_id, query, keywords, content_types,
                               results_count, results, fts_count, chroma_count,
-                              freshness_filtered, result_sources, result_times, trace_id)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                              freshness_filtered, result_sources, result_times, trace_id,
+                              rag_low_quality)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (
         conversation_id,
         message_id,
@@ -1112,6 +1117,7 @@ def log_rag_search(conversation_id: int, message_id: int, query: str, keywords: 
         json.dumps(result_sources, ensure_ascii=False),
         json.dumps(result_times, ensure_ascii=False),
         trace_id,
+        1 if rag_low_quality else 0,
     ))
     conn.commit()
     conn.close()
@@ -2451,8 +2457,17 @@ def build_rag_context_with_details(query: str, content_types: list[str] = None, 
     body_preview_chars = get_rag_config_int("body_preview_chars", 600)
 
     for r in all_results:
-        # 构建单条结果（包含来源标注）
-        part = f"[{r['label']}] {r['title']}"
+        # 构建单条结果（包含来源标注 + 相关度标签）
+        # Phase C: 补可信度信号，让专家区分高分精确命中与边缘命中
+        # 阈值基于实测分数分布（0.014-0.125）：高>=0.08, 中>=0.03, 低<0.03
+        score = float(r.get("_score", 0))
+        if score >= 0.08:
+            relevance_tag = "相关度:高"
+        elif score >= 0.03:
+            relevance_tag = "相关度:中"
+        else:
+            relevance_tag = "相关度:低"
+        part = f"[{r['label']}] [{relevance_tag}] {r['title']}"
         if r.get("time"):
             part += f" ({r['time']})"
         if r.get("source"):

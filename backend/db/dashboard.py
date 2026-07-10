@@ -15,7 +15,9 @@ def save_recommendations(recommendations: list[dict], analysis_id: str = None,
 
     verify_days: 验证窗口（交易日），默认 T+5。
     rec 中可选 target_fund_code/target_fund_name/suggested_amount 字段（P2 执行落地）。
+    rec 中可选 referenced_books 字段（Phase D 归因，list[str]，序列化为 JSON 存储）。
     """
+    import json
     # 简单按自然日估算交易日（1 周 ≈ 5 交易日 ≈ 7 自然日）
     verify_after = (datetime.now() + timedelta(days=int(verify_days * 1.4))).strftime("%Y-%m-%d")
 
@@ -25,12 +27,15 @@ def save_recommendations(recommendations: list[dict], analysis_id: str = None,
         bl = baselines[i] if baselines and i < len(baselines) else None
         bl_price = bl.get("price") if bl else None
         bl_date = bl.get("date") if bl else None
+        # Phase D: referenced_books 序列化为 JSON（空列表存 NULL，便于 IS NOT NULL 查询）
+        ref_books = rec.get("referenced_books")
+        ref_books_json = json.dumps(ref_books, ensure_ascii=False) if ref_books else None
         cur = conn.execute(
             "INSERT INTO recommendations "
             "(analysis_id, index_name, index_code, direction, reason, confidence, "
             "baseline_value, baseline_date, verify_after_date, verify_window_days, "
-            "target_fund_code, target_fund_name, suggested_amount) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "target_fund_code, target_fund_name, suggested_amount, referenced_books) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 analysis_id,
                 rec.get("index_name", ""),
@@ -45,6 +50,7 @@ def save_recommendations(recommendations: list[dict], analysis_id: str = None,
                 rec.get("target_fund_code") or None,
                 rec.get("target_fund_name") or None,
                 rec.get("suggested_amount"),
+                ref_books_json,
             )
         )
         ids.append(cur.lastrowid)

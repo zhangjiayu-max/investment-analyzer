@@ -1920,30 +1920,32 @@ def route_to_specialists_by_keywords(query: str, complexity: str = "complex") ->
 
 # ── 场景化 RAG 映射 ──────────────────────────────────────
 
+# P4 半修修复：持仓类专家移除 book（与 pipeline.py _INTENT_TO_CONTENT_TYPES 一致）
+# 估值/周期/文章解读类保留 book（13 条引用证据支持）
 SCENARIO_RAG_MAP = {
     "valuation_expert": {
         "query_suffix": "估值 PE PB 安全边际 内在价值 百分位",
-        "content_types": ["book", "valuation", "analysis"],
+        "content_types": ["book", "valuation", "analysis"],  # 保留 book：估值原则类书籍有引用证据
     },
     "market_analyst": {
         "query_suffix": "市场周期 择时 牛熊 情绪 资金流向",
-        "content_types": ["book", "article", "author_article", "valuation"],
+        "content_types": ["book", "article", "author_article", "valuation"],  # 保留 book：周期类书籍价值高
     },
     "allocation_advisor": {
         "query_suffix": "资产配置 分散投资 仓位 再平衡 股债比例",
-        "content_types": ["book", "valuation", "analysis"],
+        "content_types": ["valuation", "analysis"],  # P4: 移除 book（持仓类场景书籍相关性差）
     },
     "risk_assessor": {
         "query_suffix": "风险 回撤 波动 最大回撤 风险控制",
-        "content_types": ["book", "valuation", "analysis"],
+        "content_types": ["valuation", "analysis"],  # P4: 移除 book（风险类靠工具数据）
     },
     "fund_analyst": {
         "query_suffix": "基金选择 业绩 费用 基金经理 跟踪误差",
-        "content_types": ["book", "analysis", "valuation"],
+        "content_types": ["analysis", "valuation"],  # P4: 移除 book（基金选择靠工具数据）
     },
     "article_expert": {
         "query_suffix": "文章解读 观点分析 投资逻辑 研报",
-        "content_types": ["article", "author_article", "book"],
+        "content_types": ["article", "author_article", "book"],  # 保留 book：书籍作为解读参照
     },
 }
 

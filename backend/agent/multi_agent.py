@@ -175,16 +175,20 @@ _UNIVERSAL_DATA_CONSTRAINT = """
 """
 
 # ── 专家主动检索指令（追加到有 search_knowledge 工具的 Agent） ──
+# P4 半修修复：从 6 类场景全强制检索 book 降为 3 类（估值/情绪/周期，有引用证据）
+# 买卖/企业质量/资产配置改用工具数据（靠持仓和行情工具，而非书籍）
 _ACTIVE_RETRIEVAL_INSTRUCTION = """
 ## 📚 书籍知识主动检索指令
 你拥有 search_knowledge 工具，可以检索投资经典书籍的知识库。在以下场景**必须主动调用**：
 
-1. **提出估值判断时** → 检索 query="估值 安全边际 PE PB 百分位"，content_types=["book"]
-2. **建议买卖操作时** → 检索 query="择时 仓位 策略 买入卖出"，content_types=["book"]
-3. **分析市场情绪时** → 检索 query="心理 偏差 情绪 损失厌恶"，content_types=["book"]
-4. **评估企业质量时** → 检索 query="护城河 ROE 竞争优势 现金流"，content_types=["book"]
-5. **讨论资产配置时** → 检索 query="配置 分散 再平衡 股债比例"，content_types=["book"]
-6. **分析周期位置时** → 检索 query="周期 牛熊 转折 估值温度"，content_types=["book"]
+1. **提出估值判断时** → 检索 query="估值 安全边际 PE PB 百分位"，content_types=["book", "analysis"]
+2. **分析市场情绪/心理偏差时** → 检索 query="心理 偏差 情绪 损失厌恶"，content_types=["book", "analysis"]
+3. **分析周期位置时** → 检索 query="周期 牛熊 转折 估值温度"，content_types=["book", "analysis"]
+
+以下场景请优先使用工具数据（持仓/行情/估值工具），不要检索书籍：
+- 买卖操作（用 query_portfolio / query_valuation 等工具）
+- 企业质量评估（用 query_fund_info / ttfund_fund_manager 等工具）
+- 资产配置（用 query_portfolio 查持仓后分析）
 
 引用书籍观点时请注明来源（如"根据《聪明的投资者》..."），增强分析的可信度。
 """
