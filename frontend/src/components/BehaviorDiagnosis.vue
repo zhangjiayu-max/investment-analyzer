@@ -34,12 +34,18 @@ const totalScore = computed(() => {
   return Number(score.value?.total_score ?? report.value?.bias_score ?? 0)
 })
 
-// ── 4 个偏差维度的含义说明（鼠标悬停展示） ──
+// ── 4 个偏差维度的含义说明（PC 悬停 / 移动端点击 ? 展开） ──
 const BIAS_HINTS = {
   disposition: '过早卖出盈利标的、过晚卖出亏损标的，导致「赚小钱亏大钱」。分数越高说明该倾向越明显。',
   anchoring: '过度依赖买入成本或历史高点作为决策参考，忽视当前基本面变化。分数越高说明越受锚点束缚。',
   herding: '跟随市场情绪追涨杀跌，在高位买入、低位卖出。分数越高说明越容易盲从群体行为。',
   overtrading: '交易频率过高，手续费/印花税等摩擦成本侵蚀收益。分数越高说明换手越频繁。',
+}
+
+// 移动端无 hover，用 tap 切换含义提示
+const activeHintKey = ref(null)
+function toggleHint(key) {
+  activeHintKey.value = activeHintKey.value === key ? null : key
 }
 
 // ── 4 个偏差维度 ──
@@ -156,10 +162,10 @@ onMounted(loadAll)
         class="bias-card editorial-card reveal-stagger"
       >
         <div class="bias-head">
-          <span v-if="b.hint" class="bias-label-wrap">
+          <span v-if="b.hint" class="bias-label-wrap" @click.stop="toggleHint(b.key)">
             <span class="bias-label editorial-title">{{ b.label }}</span>
             <span class="bias-hint-icon">?</span>
-            <span class="bias-hint-popover">{{ b.hint }}</span>
+            <span class="bias-hint-popover" :class="{ 'is-active': activeHintKey === b.key }">{{ b.hint }}</span>
           </span>
           <span v-else class="bias-label editorial-title">{{ b.label }}</span>
           <strong class="bias-score font-jet" :style="{ color: biasColor(b.score) }">{{ b.score }}</strong>
@@ -348,7 +354,8 @@ onMounted(loadAll)
   transition: opacity 0.18s ease, visibility 0.18s ease;
   pointer-events: none;
 }
-.bias-label-wrap:hover .bias-hint-popover {
+.bias-label-wrap:hover .bias-hint-popover,
+.bias-hint-popover.is-active {
   opacity: 1;
   visibility: visible;
 }

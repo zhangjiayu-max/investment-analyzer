@@ -17,6 +17,7 @@ import AlertCenter from './AlertCenter.vue'
 import GoalBucketsPage from './GoalBucketsPage.vue'
 import FamilyFinanceDashboard from './FamilyFinanceDashboard.vue'
 import DecisionRecordsPage from './DecisionRecordsPage.vue'
+import BehaviorDiagnosis from './BehaviorDiagnosis.vue'
 import AdminAgentsPage from './AdminAgentsPage.vue'
 import TokenUsagePage from './TokenUsagePage.vue'
 import BadCasePage from './BadCasePage.vue'
@@ -60,6 +61,7 @@ const moreItems = [
   { key: 'bond', label: '债市温度', icon: 'bond' },
   { key: 'alert-center', label: '风险提示', icon: 'warning' },
   { key: 'decisions', label: '决策档案', icon: 'clipboard' },
+  { key: 'behavior', label: '行为诊断', icon: 'brain' },
   { key: 'family-finance', label: '财务总览', icon: 'wallet' },
   { key: 'goal-buckets', label: '资金桶', icon: 'bucket' },
   { key: 'admin-agents', label: 'Agent 管理', icon: 'admin' },
@@ -99,6 +101,7 @@ const pageComponents = {
   portfolio: PortfolioManagement,
   'alert-center': AlertCenter,
   'decisions': DecisionRecordsPage,
+  'behavior': BehaviorDiagnosis,
   'family-finance': FamilyFinanceDashboard,
   'goal-buckets': GoalBucketsPage,
   'admin-agents': AdminAgentsPage,
