@@ -429,20 +429,100 @@ def _init_wealth_specialists(conn):
             ),
             "knowledge_scope": '{"rag_types": ["article", "analysis", "book"], "kyc_dimensions": ["risk_tolerance", "investment_experience", "focus_assets"]}',
         },
+        # ── P0-断点1修复：补全 4 个 specialist 定义（复用 preset 的 system_prompt）──
+        {
+            "agent_key": "valuation_expert",
+            "name": "估值分析师",
+            "description": "专注指数估值分析，结合历史分位点、趋势变化给出投资建议",
+            "icon": "chart",
+            "tools": ["search_knowledge", "query_valuation", "yingmi_latest_quotations",
+                      "eastmoney_finance_data"],
+            "system_prompt": None,  # 从同名 preset 行继承
+            "knowledge_scope": '{"rag_types": ["valuation", "analysis", "book"], "kyc_dimensions": ["risk_tolerance", "loss_tolerance"]}',
+        },
+        {
+            "agent_key": "market_analyst",
+            "name": "市场分析师",
+            "description": "分析市场情绪、资金流向、新闻资讯，提供市场动态视角",
+            "icon": "research",
+            "tools": ["search_knowledge", "yingmi_hot_topics", "yingmi_search_news",
+                      "yingmi_latest_quotations", "eastmoney_finance_data", "query_institutional_flow"],
+            "system_prompt": (
+                "## 人设\n"
+                "你是市场分析师，专注市场情绪、资金流向、新闻资讯分析，为投资决策提供市场动态视角。\n\n"
+                "## 分析框架\n"
+                "### 市场情绪\n"
+                "- 恐慌贪婪指数、换手率、涨跌停家数\n"
+                "- 北向资金/融资余额变化趋势\n"
+                "- 成交量异常放大或萎缩\n\n"
+                "### 资金流向\n"
+                "- 主力资金净流入/流出（行业/概念）\n"
+                "- 机构调仓动向（融资余额变化作为杠杆资金信号）\n"
+                "- ETF 申赎规模变化\n\n"
+                "### 新闻资讯\n"
+                "- 政策面、产业面的最新动态\n"
+                "- 热点事件对板块的短期冲击\n"
+                "- 重大会议/数据发布时间窗\n\n"
+                "## 输出规范\n"
+                "1. **市场情绪判断**：当前情绪偏多/偏空/中性\n"
+                "2. **资金面**：主力资金方向 + 融资余额变化\n"
+                "3. **热点追踪**：近期热点板块及持续性判断\n"
+                "4. **风险提示**：短期需关注的事件或数据\n"
+                "5. **置信度标注**：[高置信度/中置信度/低置信度]\n\n"
+                "## 搜索策略\n"
+                "调用 yingmi_search_news 时：\n"
+                "1. 关键词用【板块/行业名】而非事件本身\n"
+                "2. 单次关键词不超过 6 个字\n"
+                "3. 一次分析最多搜 3 个不同板块关键词\n"
+                "4. 搜不到结果时换板块名重试\n\n"
+                "## 机构动向（辅助信号）\n"
+                "- 机构动向仅作辅助确认信号，不单独决策\n"
+                "- 与估值分位、持仓风险共振时才产生价值\n"
+            ),
+            "knowledge_scope": '{"rag_types": ["article", "analysis"], "kyc_dimensions": ["investment_horizon"]}',
+        },
+        {
+            "agent_key": "risk_assessor",
+            "name": "风险管理师",
+            "description": "专注风险评估与控制，提供回撤分析、波动率评估、止损建议",
+            "icon": "shield",
+            "tools": ["search_knowledge", "query_portfolio", "query_valuation",
+                      "yingmi_latest_quotations", "eastmoney_finance_data"],
+            "system_prompt": None,  # 从同名 preset 行继承
+            "knowledge_scope": '{"rag_types": ["valuation", "analysis", "book"], "kyc_dimensions": ["risk_tolerance", "loss_tolerance", "max_single_position_pct"]}',
+        },
+        {
+            "agent_key": "allocation_advisor",
+            "name": "资产配置师",
+            "description": "专注资产配置策略，提供股债配比、行业轮动、定投策略建议",
+            "icon": "pie",
+            "tools": ["search_knowledge", "query_portfolio", "query_valuation",
+                      "yingmi_latest_quotations", "eastmoney_finance_data"],
+            "system_prompt": None,  # 从同名 preset 行继承
+            "knowledge_scope": '{"rag_types": ["valuation", "article", "book"], "kyc_dimensions": ["risk_tolerance", "investment_horizon", "capital_scale", "target_equity_ratio"]}',
+        },
     ]
 
     for s in specialists:
         tools_json = json.dumps(s["tools"], ensure_ascii=False)
+        # system_prompt 为 None 时从同名 preset 行继承（避免大段 prompt 重复）
+        system_prompt = s["system_prompt"]
+        if system_prompt is None:
+            row = conn.execute(
+                "SELECT system_prompt FROM agents WHERE name=? AND system_prompt IS NOT NULL",
+                (s["name"],)
+            ).fetchone()
+            system_prompt = row["system_prompt"] if row else ""
         conn.execute("""
             INSERT OR IGNORE INTO agents (agent_key, name, description, system_prompt, knowledge_scope, icon, is_specialist, tools, is_preset)
             VALUES (?, ?, ?, ?, ?, ?, 1, ?, 0)
-        """, (s["agent_key"], s["name"], s["description"], s["system_prompt"],
+        """, (s["agent_key"], s["name"], s["description"], system_prompt,
               s["knowledge_scope"], s["icon"], tools_json))
         # 更新已存在的内容（幂等）
         conn.execute("""
             UPDATE agents SET description=?, system_prompt=?, knowledge_scope=?, icon=?, tools=?, is_specialist=1, agent_key=?
             WHERE name=?
-        """, (s["description"], s["system_prompt"], s["knowledge_scope"], s["icon"],
+        """, (s["description"], system_prompt, s["knowledge_scope"], s["icon"],
               tools_json, s["agent_key"], s["name"]))
 
     # P1 Step2：为非硬编码的 specialist 补 kyc_dimensions 裁剪配置（仅当 knowledge_scope 不含该字段时）

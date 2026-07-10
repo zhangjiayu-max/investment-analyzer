@@ -455,6 +455,65 @@ def run_pipeline_from_checkpoint(
         yield {"type": EVENT_PHASE_END, "phase": PipelinePhase.EXECUTION.value,
                "result": {"specialist_count": len(phase3_result.get("specialists", []))}}
 
+        # ── Phase 3.5: 反思（与主路径保持一致）──────────────
+        reflection_result = None
+        try:
+            reflection_enabled = get_config_bool("pipeline.reflection_enabled", True)
+        except Exception:
+            reflection_enabled = True
+
+        if reflection_enabled and phase3_result.get("specialists"):
+            state.transition_to(PipelinePhase.REFLECTION)
+            yield {"type": EVENT_PHASE_START, "phase": PipelinePhase.REFLECTION.value}
+            try:
+                reflection_result = _phase_reflection(
+                    state, query, phase3_result, blackboard, trace_id
+                )
+                state.set_phase_result(PipelinePhase.REFLECTION.value, reflection_result)
+                yield {"type": EVENT_REFLECTION_DONE, "result": reflection_result}
+
+                rerun_result = _maybe_rerun_specialist(
+                    state, query, phase3_result, reflection_result,
+                    blackboard, trace_id,
+                )
+                if rerun_result:
+                    phase3_result["specialists"] = _replace_specialist_analysis(
+                        phase3_result["specialists"], rerun_result
+                    )
+                    state.set_phase_result(PipelinePhase.EXECUTION.value, phase3_result)
+                    yield {"type": EVENT_SPECIALIST_DONE,
+                           "agent": rerun_result.get("agent", ""),
+                           "result": rerun_result,
+                           "rerun": True}
+            except Exception as refl_err:
+                logger.warning(f"[pipeline:{trace_id}] 续答 Reflection 失败，跳过: {refl_err}")
+                reflection_result = None
+            yield {"type": EVENT_PHASE_END, "phase": PipelinePhase.REFLECTION.value}
+
+        # ── Phase 3.7: 对抗式辩论（冲突时触发）──────────────
+        debate_result = None
+        try:
+            debate_enabled = get_config_bool("pipeline.debate_enabled", True)
+        except Exception:
+            debate_enabled = True
+
+        if debate_enabled and phase3_result.get("specialists"):
+            conflicts = blackboard.find_conflicts() if blackboard else []
+            if conflicts:
+                logger.info(f"[pipeline:{trace_id}] 续答检测到 {len(conflicts)} 个冲突，触发辩论")
+                state.transition_to(PipelinePhase.DEBATE)
+                yield {"type": EVENT_PHASE_START, "phase": PipelinePhase.DEBATE.value}
+                try:
+                    debate_result = _phase_debate(
+                        state, query, phase3_result, blackboard, trace_id
+                    )
+                    state.set_phase_result(PipelinePhase.DEBATE.value, debate_result)
+                    yield {"type": EVENT_DEBATE_DONE, "result": debate_result}
+                except Exception as debate_err:
+                    logger.warning(f"[pipeline:{trace_id}] 续答辩论失败，跳过: {debate_err}")
+                    debate_result = None
+                yield {"type": EVENT_PHASE_END, "phase": PipelinePhase.DEBATE.value}
+
         # Phase 4: 综合
         state.transition_to(PipelinePhase.SYNTHESIS)
         yield {"type": EVENT_PHASE_START, "phase": PipelinePhase.SYNTHESIS.value}
@@ -468,6 +527,8 @@ def run_pipeline_from_checkpoint(
 
         phase4_result = _phase_synthesis(
             state, state.refined_query, phase3_result, blackboard, trace_id,
+            reflection_result=reflection_result,
+            debate_result=debate_result,
         )
         state.set_phase_result(PipelinePhase.SYNTHESIS.value, phase4_result)
         state.answer = phase4_result.get("answer", "")
@@ -613,7 +674,7 @@ def _phase_info_gather(
                 from agent.query_rewriter import expand_query
                 expanded = expand_query(enhanced_query)
                 if expanded and len(expanded) > 1:
-                    sub_queries = expanded[:3]  # 最多 3 个子查询
+                    sub_queries = expanded[:4]  # 最多 4 个子查询
                     logger.info(f"[pipeline] 子查询展开: {len(sub_queries)} 个 → {sub_queries}")
             except Exception as e:
                 logger.debug(f"[pipeline] 子查询展开跳过: {e}")
@@ -1617,10 +1678,10 @@ def _maybe_rerun_specialist(
             if blackboard:
                 try:
                     from agent.blackboard import extract_entry_from_result
-                    entry = extract_entry_from_result(result, agent_key, agent_name)
-                    blackboard.add_entry(entry)
+                    entry = extract_entry_from_result(agent_key, agent_name, result)
+                    blackboard.write(entry)
                 except Exception as e:
-                    logger.debug(f"[pipeline:{trace_id}] 重跑结果写黑板失败: {e}")
+                    logger.warning(f"[pipeline:{trace_id}] 重跑结果写黑板失败: {e}")
             logger.info(f"[pipeline:{trace_id}] 自纠错重跑完成: {agent_name}")
             return result
     except Exception as e:
@@ -1788,7 +1849,48 @@ def _synthesize_multiple_specialists(
         temperature=0.3,
         max_tokens=3000,
     )
-    return response.choices[0].message.content or ""
+    answer = response.choices[0].message.content or ""
+
+    # P2-问题6修复：风险否决代码层硬兜底
+    # prompt 级降级依赖 LLM 遵守，此处做事后校验：
+    # 若被否决标的在最终 answer 中仍出现 BUY/加仓 关键词，强制改写为 HOLD
+    if vetoes:
+        answer = _enforce_risk_veto(answer, vetoes, trace_id)
+
+    return answer
+
+
+def _enforce_risk_veto(answer: str, vetoes: list, trace_id: str) -> str:
+    """风险否决硬兜底：检测被否决标的的 BUY 关键词并强制降级为 HOLD。
+
+    仅作最保守的关键词匹配，避免误伤其他标的。
+    """
+    import re
+    for v in vetoes:
+        target = v.get("target", "")
+        vetoed_action = v.get("vetoed_action", "")
+        if not target or not vetoed_action:
+            continue
+        # 仅处理 BUY 类否决（加仓/买入）
+        if vetoed_action not in ("buy", "加仓", "买入"):
+            continue
+        # 匹配 answer 中该标的附近的 BUY 关键词（同一行或相邻 20 字符内）
+        buy_pattern = re.compile(
+            rf'({re.escape(target)})'
+            r'[^。\n]{0,20}?(加仓|买入|建仓|增持|买入加仓)',
+            re.IGNORECASE
+        )
+        if buy_pattern.search(answer):
+            # 将该标的附近的 BUY 关键词替换为 HOLD
+            answer = buy_pattern.sub(
+                rf'\1（风险否决：降级为持有/观望）',
+                answer
+            )
+            changed = True
+            logger.warning(
+                f"[pipeline:{trace_id}] 风险否决硬兜底：{target} 的 BUY 建议已强制降级为 HOLD"
+            )
+    return answer
 
 
 # ── Phase 3.7: 对抗式辩论 ──────────────────────────
@@ -2572,7 +2674,7 @@ def _phase_memory(
             reasoning=state.answer,
             key_variables=targets,
             data_basis=["rag", "portfolio", "tools"],
-            confidence=0.7,
+            confidence=phase4_result.get("confidence", 0.7) if phase4_result else 0.7,
             urgent=0,
             conversation_id=state.conversation_id,
             message_id=state.message_id,

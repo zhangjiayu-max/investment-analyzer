@@ -251,6 +251,14 @@ function handleStreamEvent(convId, event, callbacks = {}) {
       }
       break
 
+    case 'alert':
+      // 主动提醒事件（防御性分支：当前 alert 通过 AlertBell 轮询获取，
+      // 此分支确保后端在对话流中附带推送 alert 时不会被静默丢弃）
+      if (callbacks.onAlert) {
+        callbacks.onAlert(data.alert || data, convId)
+      }
+      break
+
     default:
       return false
   }

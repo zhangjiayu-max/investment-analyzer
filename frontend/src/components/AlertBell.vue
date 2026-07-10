@@ -98,11 +98,21 @@ function handleClickOutside(e) {
 
 onMounted(() => {
   refreshUnread()
-  pollTimer = setInterval(refreshUnread, 60000) // 每分钟刷新未读数
+  // 动态轮询：页面活跃时 20 秒，非活跃时 60 秒
+  const POLL_ACTIVE = 20000
+  const POLL_IDLE = 60000
+  const scheduleNext = () => {
+    const delay = document.hasFocus() ? POLL_ACTIVE : POLL_IDLE
+    pollTimer = setTimeout(() => {
+      refreshUnread()
+      scheduleNext()
+    }, delay)
+  }
+  scheduleNext()
   document.addEventListener('click', handleClickOutside)
 })
 onUnmounted(() => {
-  if (pollTimer) clearInterval(pollTimer)
+  if (pollTimer) clearTimeout(pollTimer)
   document.removeEventListener('click', handleClickOutside)
 })
 </script>

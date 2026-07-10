@@ -220,13 +220,18 @@ def adopt_recommendation(rec_id: int, adopted: int) -> dict:
 
 
 def list_pending_verification_recommendations(verify_date: str) -> list[dict]:
-    """列出到达验证窗口且尚未验证的建议（用于定时任务）。"""
+    """列出到达验证窗口且尚未验证的建议（用于定时任务）。
+
+    验证窗口锚点：用户采纳时间(adopted_at) + verify_window_days 天。
+    仅验证已采纳(adopted=1)的建议。
+    """
     conn = _get_conn()
     rows = conn.execute(
         "SELECT * FROM recommendations "
         "WHERE status = 'pending' AND baseline_value IS NOT NULL "
-        "AND (verify_after_date IS NULL OR verify_after_date <= ?) "
-        "ORDER BY created_at ASC",
+        "AND adopted = 1 AND adopted_at IS NOT NULL "
+        "AND date(adopted_at, '+' || COALESCE(verify_window_days, 5) || ' days') <= ? "
+        "ORDER BY adopted_at ASC",
         (verify_date,),
     ).fetchall()
     conn.close()

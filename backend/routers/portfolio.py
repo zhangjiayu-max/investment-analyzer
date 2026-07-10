@@ -348,9 +348,12 @@ async def generate_alert_api(req: CreateAlertRequest):
     return {"ok": True, "alert_id": alert_id}
 
 
-@router.post("/api/portfolio/alerts/scan")
+@router.post("/api/portfolio/alerts/scan-detailed")
 async def scan_portfolio_alerts():
-    """持仓风险巡检 — 主动扫描持仓数据生成预警。"""
+    """持仓风险巡检 — 细粒度扫描（回撤/集中度/现金/数据过期/补仓后跌幅）。
+
+    与 /alerts/scan（3类综合扫描）互补，覆盖更细的持仓维度。
+    """
     from datetime import datetime, timedelta
     from db import get_config_int
 
