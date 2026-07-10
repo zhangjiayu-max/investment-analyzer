@@ -20,7 +20,9 @@ async def get_behavior_report_api(
     """获取行为金融诊断报告：4 类偏差量化分 + 综合分 + 针对性建议。"""
     try:
         report = diagnose_behavior(user_id=user_id, period_days=period_days)
-        return {"ok": True, "data": report}
+        # 直接返回 report 对象，由统一响应中间件包装为 {code:0, message:"ok", data: report}
+        # 前端拦截器解包后直接拿到 report，避免两层 data 嵌套
+        return report
     except Exception as e:
         logger.error(f"行为诊断报告生成失败 user_id={user_id}: {e}", exc_info=True)
         raise HTTPException(500, f"行为诊断报告生成失败: {e}")
