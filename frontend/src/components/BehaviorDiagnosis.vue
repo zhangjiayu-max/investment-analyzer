@@ -34,24 +34,36 @@ const totalScore = computed(() => {
   return Number(score.value?.total_score ?? report.value?.bias_score ?? 0)
 })
 
+// ── 4 个偏差维度的含义说明（鼠标悬停展示） ──
+const BIAS_HINTS = {
+  disposition: '过早卖出盈利标的、过晚卖出亏损标的，导致「赚小钱亏大钱」。分数越高说明该倾向越明显。',
+  anchoring: '过度依赖买入成本或历史高点作为决策参考，忽视当前基本面变化。分数越高说明越受锚点束缚。',
+  herding: '跟随市场情绪追涨杀跌，在高位买入、低位卖出。分数越高说明越容易盲从群体行为。',
+  overtrading: '交易频率过高，手续费/印花税等摩擦成本侵蚀收益。分数越高说明换手越频繁。',
+}
+
 // ── 4 个偏差维度 ──
 const biasDimensions = computed(() => {
   const r = report.value || {}
   const dims = r.dimensions || r.biases || []
   if (Array.isArray(dims) && dims.length) {
-    return dims.map(d => ({
-      key: d.key || d.type,
-      label: d.label || d.name,
-      score: d.score ?? 0,
-      detail: d.detail || d.description || '',
-    }))
+    return dims.map(d => {
+      const key = d.key || d.type
+      return {
+        key,
+        label: d.label || d.name,
+        score: d.score ?? 0,
+        detail: d.detail || d.description || '',
+        hint: BIAS_HINTS[key] || '',
+      }
+    })
   }
   // 兜底：从扁平字段构造
   return [
-    { key: 'disposition', label: '处置效应', score: r.disposition_score ?? 0, detail: r.disposition_detail || '过早卖出盈利、过晚卖出亏损' },
-    { key: 'anchoring', label: '锚定效应', score: r.anchoring_score ?? 0, detail: r.anchoring_detail || '过度依赖买入成本或历史高点' },
-    { key: 'herding', label: '羊群效应', score: r.herding_score ?? 0, detail: r.herding_detail || '跟随市场情绪追涨杀跌' },
-    { key: 'overtrading', label: '过度交易', score: r.overtrading_score ?? 0, detail: r.overtrading_detail || '交易频率过高、摩擦成本大' },
+    { key: 'disposition', label: '处置效应', score: r.disposition_score ?? 0, detail: r.disposition_detail || '过早卖出盈利、过晚卖出亏损', hint: BIAS_HINTS.disposition },
+    { key: 'anchoring', label: '锚定效应', score: r.anchoring_score ?? 0, detail: r.anchoring_detail || '过度依赖买入成本或历史高点', hint: BIAS_HINTS.anchoring },
+    { key: 'herding', label: '羊群效应', score: r.herding_score ?? 0, detail: r.herding_detail || '跟随市场情绪追涨杀跌', hint: BIAS_HINTS.herding },
+    { key: 'overtrading', label: '过度交易', score: r.overtrading_score ?? 0, detail: r.overtrading_detail || '交易频率过高、摩擦成本大', hint: BIAS_HINTS.overtrading },
   ]
 })
 
@@ -144,7 +156,12 @@ onMounted(loadAll)
         class="bias-card editorial-card reveal-stagger"
       >
         <div class="bias-head">
-          <span class="bias-label editorial-title">{{ b.label }}</span>
+          <span v-if="b.hint" class="bias-label-wrap">
+            <span class="bias-label editorial-title">{{ b.label }}</span>
+            <span class="bias-hint-icon">?</span>
+            <span class="bias-hint-popover">{{ b.hint }}</span>
+          </span>
+          <span v-else class="bias-label editorial-title">{{ b.label }}</span>
           <strong class="bias-score font-jet" :style="{ color: biasColor(b.score) }">{{ b.score }}</strong>
         </div>
         <div class="bias-bar">
@@ -287,6 +304,53 @@ onMounted(loadAll)
   font-weight: 600;
   color: var(--color-text-primary);
   margin: 0;
+}
+/* 悬停含义提示 */
+.bias-label-wrap {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: help;
+}
+.bias-hint-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--color-bg-input);
+  color: var(--color-text-muted);
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+  flex-shrink: 0;
+}
+.bias-hint-popover {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 0;
+  z-index: 20;
+  width: max-content;
+  max-width: 240px;
+  padding: 8px 12px;
+  background: var(--color-bg-card);
+  color: var(--color-text-primary);
+  font-size: 0.78rem;
+  font-weight: 400;
+  line-height: 1.55;
+  border-radius: 6px;
+  border: 1px solid var(--color-border);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.18);
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity 0.18s ease, visibility 0.18s ease;
+  pointer-events: none;
+}
+.bias-label-wrap:hover .bias-hint-popover {
+  opacity: 1;
+  visibility: visible;
 }
 .bias-score {
   font-size: 1.3rem;
