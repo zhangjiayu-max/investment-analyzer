@@ -27,6 +27,7 @@ import ShadowModePage from './ShadowModePage.vue'
 import QualityDashboard from './QualityDashboard.vue'
 import Dashboard from './Dashboard.vue'
 import MarketIntelligence from './MarketIntelligence.vue'
+import EventRadarPage from './EventRadarPage.vue'
 import KnowledgeBase from './KnowledgeBase.vue'
 import SystemConfigPage from './SystemConfigPage.vue'
 import CapabilityCenter from './CapabilityCenter.vue'
@@ -48,9 +49,10 @@ const tabs = [
   { key: '__more__', label: '更多', icon: 'more' },
 ]
 
-// ── 更多菜单项 ──
+// ── 更多菜单项 ──（hot 标记常用功能，渲染时显示🔥角标）
 const moreItems = [
-  { key: 'market-intelligence', label: '市场热点', icon: 'fire' },
+  { key: 'market-intelligence', label: '市场热点', icon: 'fire', hot: true },
+  { key: 'event-radar', label: '事件雷达', icon: 'satellite', hot: true },
   { key: 'articles', label: '文章管理', icon: 'articles' },
   { key: 'gallery', label: '估值图片', icon: 'gallery' },
   { key: 'author', label: '作者文章', icon: 'author' },
@@ -60,9 +62,9 @@ const moreItems = [
   { key: 'rag-test', label: '命中测试', icon: 'test' },
   { key: 'bond', label: '债市温度', icon: 'bond' },
   { key: 'alert-center', label: '风险提示', icon: 'warning' },
-  { key: 'decisions', label: '决策档案', icon: 'clipboard' },
+  { key: 'decisions', label: '决策档案', icon: 'clipboard', hot: true },
   { key: 'behavior', label: '行为诊断', icon: 'brain' },
-  { key: 'family-finance', label: '财务总览', icon: 'wallet' },
+  { key: 'family-finance', label: '财务总览', icon: 'wallet', hot: true },
   { key: 'goal-buckets', label: '资金桶', icon: 'bucket' },
   { key: 'admin-agents', label: 'Agent 管理', icon: 'admin' },
   { key: 'token-usage', label: 'Token 用量', icon: 'token' },
@@ -70,7 +72,7 @@ const moreItems = [
   { key: 'quality-dashboard', label: '质量仪表盘', icon: 'chart' },
   { key: 'bad-cases', label: 'Bad Case', icon: 'bug' },
   { key: 'eval-suite', label: '评测集', icon: 'check' },
-  { key: 'health', label: '健康分', icon: 'health' },
+  { key: 'health', label: '健康分', icon: 'health', hot: true },
   { key: 'shadow', label: 'Shadow Mode', icon: 'shadow' },
   { key: 'capability-center', label: '能力中心', icon: 'wrench' },
 ]
@@ -88,6 +90,7 @@ function navigate(key) {
 const pageComponents = {
   dashboard: Dashboard,
   'market-intelligence': MarketIntelligence,
+  'event-radar': EventRadarPage,
   chat: ChatView,
   articles: ArticleManagement,
   valuation: ValuationHistory,
@@ -230,8 +233,9 @@ function onBack() {
               v-for="item in moreItems"
               :key="item.key"
               @click="navigate(item.key)"
-              :class="['mobile-more-item', { active: activePage === item.key }]"
+              :class="['mobile-more-item', { active: activePage === item.key, hot: item.hot }]"
             >
+              <span v-if="item.hot" class="mobile-more-hot">🔥</span>
               <span class="mobile-more-label">{{ item.label }}</span>
             </button>
           </div>
@@ -488,6 +492,24 @@ function onBack() {
 .mobile-more-item:active {
   transform: scale(0.95);
   background: var(--color-bg-hover);
+}
+
+/* 🔥 常用功能角标 */
+.mobile-more-hot {
+  position: absolute;
+  top: 3px;
+  right: 4px;
+  font-size: 0.7rem;
+  line-height: 1;
+  filter: saturate(1.2);
+  z-index: 1;
+}
+.mobile-more-item.hot {
+  border-color: rgba(245, 158, 11, 0.3);
+  background: linear-gradient(135deg, rgba(255, 247, 237, 0.5), var(--color-bg-input));
+}
+.mobile-more-item.hot.active {
+  background: var(--color-primary-bg);
 }
 
 /* ── 底部 Tab 栏 ── */
