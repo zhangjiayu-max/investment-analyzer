@@ -71,14 +71,10 @@ app.add_middleware(
 from infra.request_tracing import RequestTracingMiddleware
 app.add_middleware(RequestTracingMiddleware)
 
-
-@app.exception_handler(Exception)
-async def global_exception_handler(request, exc):
-    """全局异常处理 — 返回 JSON 而非 HTML 500。"""
-    import traceback
-    logger.error(f"Unhandled error: {exc}", exc_info=True)
-    from fastapi.responses import JSONResponse
-    return JSONResponse(status_code=500, content={"detail": str(exc)})
+# API 标准化：响应包装中间件 + 全局异常处理器
+from api.middleware import register_exception_handlers, ResponseWrapperMiddleware
+app.add_middleware(ResponseWrapperMiddleware)
+register_exception_handlers(app)
 
 # ── 路由注册 ─────────────────────────────────────
 
@@ -150,6 +146,7 @@ from routers.chat_images import router as chat_images_router, CHAT_IMAGES_DIR  #
 from routers.suggestion_accuracy import router as suggestion_accuracy_router  # /api/suggestion-accuracy/*
 from routers.data_quality import router as data_quality_router  # /api/data-quality/*
 from routers.capabilities import router as capabilities_router  # /api/capabilities/*
+from routers.event_radar import router as event_radar_router  # /api/alerts/event-radar/*
 from services.data_lineage import track_sources, get_lineage  # data lineage tracking
 
 # 注册路由
@@ -221,6 +218,7 @@ app.include_router(chat_images_router)
 app.include_router(suggestion_accuracy_router)
 app.include_router(data_quality_router)
 app.include_router(capabilities_router)
+app.include_router(event_radar_router)
 
 # ── 启动初始化 ──
 @app.on_event("startup")
@@ -403,6 +401,13 @@ async def startup():
         logging.info("主动提醒扫描任务已启动（alerts.proactive_scan_enabled=true）")
     else:
         logging.info("主动提醒扫描已关闭（alerts.proactive_scan_enabled=false）")
+
+    # 前瞻性事件雷达（每晚 20:00，默认关闭，LLM 相关开关硬约束）
+    if get_config("alerts.event_radar_enabled", "false") == "true":
+        asyncio.create_task(_auto_event_radar_scan())
+        logging.info("前瞻事件雷达任务已启动（alerts.event_radar_enabled=true）")
+    else:
+        logging.info("前瞻事件雷达已关闭（alerts.event_radar_enabled=false）")
     # 清理上次异常退出遗留的僵尸 agent_runs
     try:
         from db.agents import _get_conn
@@ -689,6 +694,45 @@ async def _auto_periodic_scan():
                 logging.warning(f"[auto-scan] 定时扫描异常: {e}")
     except Exception as e:
         logging.warning(f"主动提醒扫描任务异常: {e}")
+
+
+async def _auto_event_radar_scan():
+    """前瞻性事件雷达 — 每晚 20:00 扫描一次。
+
+    从新闻中提取未来 1-2 周的市场事件，匹配持仓/候选基金，生成 3 级 alert。
+
+    开关：alerts.event_radar_enabled（默认 false，LLM 相关开关硬约束）
+    调度：每晚 20:00 一次（不走 _auto_periodic_scan 的 30 分钟间隔）
+    """
+    from datetime import datetime, timedelta
+    try:
+        await asyncio.sleep(120)  # 等启动完成（比 _auto_periodic_scan 晚 1 分钟避免抢资源）
+
+        while True:
+            # 计算距下次 20:00 的等待秒数
+            now = datetime.now()
+            target = now.replace(hour=20, minute=0, second=0, microsecond=0)
+            if now >= target:
+                target = target + timedelta(days=1)
+            wait_seconds = (target - now).total_seconds()
+            await asyncio.sleep(wait_seconds)
+
+            if get_config("alerts.event_radar_enabled", "false") != "true":
+                continue
+
+            try:
+                from services.event_radar import scan_forward_events
+                result = scan_forward_events()
+                logging.info(
+                    f"[event-radar] 扫描完成: "
+                    f"extracted={result.get('extracted', 0)}, "
+                    f"new={result.get('new', 0)}, "
+                    f"alerts={result.get('alerts_created', 0)}"
+                )
+            except Exception as e:
+                logging.warning(f"[event-radar] 扫描异常: {e}")
+    except Exception as e:
+        logging.warning(f"前瞻事件雷达任务异常: {e}")
 
 
 async def _auto_daily_report():
