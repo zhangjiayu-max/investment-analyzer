@@ -85,6 +85,14 @@ DEFAULT_CONFIGS = [
     ('alert.news_integration', 'false', '是否启用预警财经新闻结合（MCP 调用，默认关闭）', 'alert'),
     ('alert.news_cache_ttl', '30', '新闻缓存分钟数', 'alert'),
     ('alert.news_per_fund', '3', '单基金新闻条数上限', 'alert'),
+    # 前瞻性事件雷达（LLM 相关，默认关闭）
+    ('alerts.event_radar_enabled', 'false', '前瞻性事件雷达总开关', 'alerts'),
+    ('alerts.event_radar_lookforward_days', '14', '前瞻视野天数（1-14）', 'alerts'),
+    ('alerts.event_radar_max_events', '15', '单次扫描最多提取事件数', 'alerts'),
+    ('alerts.event_radar_min_confidence', '0.4', '低于此置信度不推送', 'alerts'),
+    ('alerts.event_radar_scan_time', '20:00', '每日扫描时间 HH:MM', 'alerts'),
+    ('alerts.event_radar_news_sources', 'yingmi,eastmoney,akshare', '新闻源（逗号分隔）', 'alerts'),
+    ('alerts.event_radar_max_candidate_funds', '5', '建仓机会卡片最多展示基金数', 'alerts'),
 
     # 业务常量
     ('portfolio.default_account', '花无缺', '默认账户名', 'portfolio'),

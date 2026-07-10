@@ -97,3 +97,17 @@ def test_list_events_by_status(tmp_db):
     imminent = list_market_events(status="imminent")
     assert len(imminent) == 1
     assert imminent[0]["title"] == "E1"
+
+
+def test_event_radar_config_defaults(tmp_db):
+    """验证事件雷达配置项默认值。"""
+    from db.config import get_config, get_config_bool, get_config_int, get_config_float
+
+    # LLM 相关开关默认 false（硬约束）
+    assert get_config_bool("alerts.event_radar_enabled", True) is False
+    assert get_config_int("alerts.event_radar_lookforward_days", 99) == 14
+    assert get_config_int("alerts.event_radar_max_events", 99) == 15
+    assert get_config_float("alerts.event_radar_min_confidence", 99.0) == 0.4
+    assert get_config("alerts.event_radar_scan_time", "xxx") == "20:00"
+    assert get_config("alerts.event_radar_news_sources", "xxx") == "yingmi,eastmoney,akshare"
+    assert get_config_int("alerts.event_radar_max_candidate_funds", 99) == 5
