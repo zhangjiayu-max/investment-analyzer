@@ -2407,79 +2407,79 @@ export function getDecisionCanvas(hours = 24) {
 
 // P0-1 收益归因
 export function getAttributionReport(startDate, endDate) {
-  return api.get('/api/analysis/attribution/report', { params: { start_date: startDate, end_date: endDate } })
+  return api.get('/analysis/attribution/report', { params: { start_date: startDate, end_date: endDate } })
 }
 export function getAttributionByCategory(period) {
-  return api.get('/api/analysis/attribution/by_category', { params: { period } })
+  return api.get('/analysis/attribution/by_category', { params: { period } })
 }
 export function getAttributionContributors(limit = 10, order = 'desc') {
-  return api.get('/api/analysis/attribution/contributors', { params: { limit, order } })
+  return api.get('/analysis/attribution/contributors', { params: { limit, order } })
 }
 
 // P0-2 行为诊断
 export function getBehaviorReport(periodDays = 90) {
-  return api.get('/api/analysis/behavior/report', { params: { period_days: periodDays } })
+  return api.get('/analysis/behavior/report', { params: { period_days: periodDays } })
 }
 export function getBehaviorScore() {
-  return api.get('/api/analysis/behavior/score')
+  return api.get('/analysis/behavior/score')
 }
 
 // P0-3 决策准确率
 export function getAccuracyStats(periodDays = 90, groupBy = 'agent') {
-  return api.get('/api/analysis/accuracy/stats', { params: { period_days: periodDays, group_by: groupBy } })
+  return api.get('/analysis/accuracy/stats', { params: { period_days: periodDays, group_by: groupBy } })
 }
 export function autoVerifyAccuracy() {
-  return api.post('/api/analysis/accuracy/auto-verify')
+  return api.post('/analysis/accuracy/auto-verify')
 }
 export function getAccuracyTrend(weeks = 12) {
-  return api.get('/api/analysis/accuracy/trend', { params: { weeks } })
+  return api.get('/analysis/accuracy/trend', { params: { weeks } })
 }
 
 // P0-A 决策闭环：最近已验证建议 + 采纳率统计
 export function getRecentVerified(limit = 20) {
-  return api.get('/api/analysis/accuracy/recent-verified', { params: { limit } })
+  return api.get('/analysis/accuracy/recent-verified', { params: { limit } })
 }
 export function getAdoptionStats(periodDays = 180) {
-  return api.get('/api/analysis/accuracy/adoption-stats', { params: { period_days: periodDays } })
+  return api.get('/analysis/accuracy/adoption-stats', { params: { period_days: periodDays } })
 }
 
 // P1-1 策略回测
 export function listStrategies() {
-  return api.get('/api/analysis/strategy/list')
+  return api.get('/analysis/strategy/list')
 }
 export function runStrategyBacktest(data) {
-  return api.post('/api/analysis/strategy/backtest', data)
+  return api.post('/analysis/strategy/backtest', data)
 }
 export function runStrategySweep(data) {
-  return api.post('/api/analysis/strategy/sweep', data)
+  return api.post('/analysis/strategy/sweep', data)
 }
 export function listStrategyResults(limit = 20) {
-  return api.get('/api/analysis/strategy/results', { params: { limit } })
+  return api.get('/analysis/strategy/results', { params: { limit } })
 }
 
 // P1-2 组合优化
 export function getEfficientFrontier(data) {
-  return api.post('/api/analysis/optimizer/frontier', data)
+  return api.post('/analysis/optimizer/frontier', data)
 }
 export function getRiskParity(data) {
-  return api.post('/api/analysis/optimizer/risk-parity', data)
+  return api.post('/analysis/optimizer/risk-parity', data)
 }
 export function getBlackLitterman(data) {
-  return api.post('/api/analysis/optimizer/black-litterman', data)
+  return api.post('/analysis/optimizer/black-litterman', data)
 }
 export function getOptimizationSuggestion() {
-  return api.get('/api/analysis/optimizer/suggestion')
+  return api.get('/analysis/optimizer/suggestion')
 }
 
 // P1-3 估值预测
 export function getMeanReversion(indexCode, metricType = '市盈率') {
-  return api.get('/api/analysis/forecast/mean-reversion', { params: { index_code: indexCode, metric_type: metricType } })
+  return api.get('/analysis/forecast/mean-reversion', { params: { index_code: indexCode, metric_type: metricType } })
 }
 export function getExtremeWarning(indexCode) {
-  return api.get('/api/analysis/forecast/extreme', { params: { index_code: indexCode } })
+  return api.get('/analysis/forecast/extreme', { params: { index_code: indexCode } })
 }
 export function getForecastSignals() {
-  return api.get('/api/analysis/forecast/signals')
+  return api.get('/analysis/forecast/signals')
 }
 
 // 能力中心
