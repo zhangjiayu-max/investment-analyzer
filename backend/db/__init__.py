@@ -156,6 +156,13 @@ from db.opportunities import (
     create_decision_from_opportunity, mark_opportunity_bought,
 )
 
+# 前瞻性事件雷达
+from db.market_events import (
+    init_market_events_tables, create_market_event, get_market_event,
+    list_market_events, list_active_events, update_market_event_status,
+    update_event_relevance, delete_market_event,
+)
+
 # 目标账户 / 资金桶
 from db.goal_buckets import (
     init_goal_bucket_tables, create_goal_bucket, get_goal_bucket,
@@ -1107,6 +1114,9 @@ def init_db():
 
     # ── 短线主题机会表 ──────────────────────────────────────
     init_opportunity_tables(conn)
+
+    # ── 前瞻性事件雷达表 ──────────────────────────────────
+    init_market_events_tables(conn)
 
     # ── 目标账户 / 资金桶表 ──────────────────────────────────
     init_goal_bucket_tables(conn)
