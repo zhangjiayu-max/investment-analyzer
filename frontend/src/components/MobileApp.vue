@@ -39,6 +39,7 @@ import StrategySandboxPage from './StrategySandboxPage.vue'
 import DataHealthDashboard from './DataHealthDashboard.vue'
 import StrategyBacktest from './StrategyBacktest.vue'
 import { isDark, toggleDark } from '../composables/useTheme'
+import AlertBell from './AlertBell.vue'
 
 const activePage = ref(localStorage.getItem('activePage') || 'dashboard')
 const showMoreMenu = ref(false)
@@ -230,14 +231,17 @@ function onBack() {
     <!-- 顶部栏 -->
     <header class="mobile-header">
       <span class="mobile-title editorial-title">{{ currentPageLabel || '投资分析助手' }}</span>
-      <button class="mobile-theme-btn" @click="toggleDark" :title="isDark ? '亮色模式' : '暗色模式'">
-        <svg v-if="isDark" width="18" height="18" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z"/>
-        </svg>
-        <svg v-else width="18" height="18" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z"/>
-        </svg>
-      </button>
+      <div class="mobile-header-actions">
+        <AlertBell @navigate="navigate" />
+        <button class="mobile-theme-btn" @click="toggleDark()" :title="isDark ? '亮色模式' : '暗色模式'">
+          <svg v-if="isDark" width="18" height="18" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z"/>
+          </svg>
+          <svg v-else width="18" height="18" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z"/>
+          </svg>
+        </button>
+      </div>
     </header>
 
     <!-- 内容区 -->
@@ -390,6 +394,11 @@ function onBack() {
   border: none;
   cursor: pointer;
   transition: all var(--transition-fast);
+}
+.mobile-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
 }
 .mobile-theme-btn:hover {
   background: var(--color-bg-hover);
