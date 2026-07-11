@@ -1804,8 +1804,8 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
                     })
 
             elif event_type == "query_refined":
-                # P0-2: 持久化查询改写结果到消息元数据
-                update_message_content_and_metadata(stream_msg_id, None, {
+                # P0-2: 持久化查询改写结果到消息元数据（只更新 metadata，content 保持 placeholder）
+                update_message_metadata(stream_msg_id, {
                     "original_query": event.get("original_query"),
                     "refined_query": event.get("refined_query"),
                     "rewrite_reason": event.get("rewrite_reason", ""),
