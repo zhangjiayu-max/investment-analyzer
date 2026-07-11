@@ -488,7 +488,7 @@ def get_best_valuation(
     4. 在线兜底：akshare 中证官方 → 天天基金 MCP（受 valuation.online_fallback_enabled 开关控制）
 
     Args:
-        index_code: 指数代码
+        index_code: 指数代码（支持带后缀格式如 000922.CSI / H30217.CSI，内部自动 normalize）
         metric_type: 指标类型（市盈率/市净率）
         query_source: 查询来源（portfolio/valuation_page/agent/chat/alert_scanner），用于监控
         trace_id: 追踪ID，用于监控
@@ -504,6 +504,9 @@ def get_best_valuation(
     degraded = 0
     is_expired = 0
     error_msg = None
+
+    # 入口统一 normalize：去除 .CSI/.WI/.SH 等后缀，兼容持仓表带后缀的指数代码
+    index_code = normalize_index_code(index_code)
 
     # 1. 优先使用最近 7 天内的详细数据
     detailed = get_latest_valuation(index_code, metric_type, max_days=7)
@@ -588,7 +591,8 @@ def get_best_valuation(
 
     # 5. 全部失败
     error_msg = "all sources failed (local + akshare + ttfund)"
-    _log_valuation_query(index_code, None, query_source, "failed",
+    failed_name = _lookup_index_name(index_code)
+    _log_valuation_query(index_code, failed_name, query_source, "failed",
                          0, 0, int((datetime.now() - start_ts).total_seconds() * 1000), trace_id, error_msg)
     logger.warning(f"[valuation] {index_code} 估值查询全部失败 ({query_source})")
     return None
@@ -737,6 +741,37 @@ def _query_ttfund_valuation(index_code: str, metric_type: str, timeout_ms: int) 
     except Exception as e:
         logger.debug(f"[valuation] ttfund 查询失败 {index_code}: {e}")
         return None
+
+
+def _lookup_index_name(index_code: str) -> str | None:
+    """反查指数名称：从本地估值表、持仓表、螺丝钉数据中查找。
+
+    用于估值查询失败时补全 index_name，避免告警显示 "000922.CSI（000922.CSI）"。
+    """
+    if not index_code:
+        return None
+    try:
+        conn = _get_conn()
+        # 1. 本地估值表
+        row = conn.execute(
+            "SELECT index_name FROM index_valuations WHERE index_code = ? LIMIT 1",
+            (index_code,)
+        ).fetchone()
+        if row and row["index_name"]:
+            conn.close()
+            return row["index_name"]
+        # 2. 持仓表（基金跟踪指数）
+        row = conn.execute(
+            "SELECT fund_name FROM portfolio_holdings WHERE index_code LIKE ? LIMIT 1",
+            (f"%{index_code}%",)
+        ).fetchone()
+        if row and row["fund_name"]:
+            conn.close()
+            return row["fund_name"]
+        conn.close()
+    except Exception:
+        pass
+    return None
 
 
 def _log_valuation_query(index_code: str, index_name: str, query_source: str,

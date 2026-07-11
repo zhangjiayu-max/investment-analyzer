@@ -586,8 +586,15 @@ def scan_valuation_failures() -> dict:
     alerts_created = 0
     for row in rows:
         code = row["index_code"]
-        name = row["index_name"] or code
-        # 24 小时内不重复
+        name = row["index_name"]
+        # name 为空时反查持仓表补全指数名称
+        if not name:
+            try:
+                from db.valuations import _lookup_index_name
+                name = _lookup_index_name(code) or code
+            except Exception:
+                name = code
+        # 24 小时内不重复（按 normalize 后的 code 去重）
         if _is_alert_recently_created("valuation_query_failed", code, hours=24):
             continue
         try:
