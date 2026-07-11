@@ -886,6 +886,20 @@ async def create_transaction_api(req: CreateTransactionRequest):
         fund_name=req.fund_name,
         account=req.account,
     )
+
+    # 买入交易自动标记关注列表为「已上车」
+    if req.transaction_type in ("buy", "buyin", "subscribe"):
+        try:
+            from db.watchlist import list_watchlist, update_watchlist_item
+            watching = list_watchlist(status="watching")
+            for w in watching:
+                if w.get("fund_code") == req.fund_code:
+                    update_watchlist_item(w["id"], status="bought")
+                    logger.info(f"[portfolio] 关注基金 {req.fund_code} 已自动标记 bought（交易 {tx_id}）")
+                    break
+        except Exception as e:
+            logger.warning(f"[portfolio] 自动标记 watchlist bought 失败: {e}")
+
     return {"ok": True, "transaction_id": tx_id, "expected_confirm_date": expected_confirm}
 
 

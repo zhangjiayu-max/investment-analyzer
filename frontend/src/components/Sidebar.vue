@@ -100,9 +100,11 @@ const activeGroup = computed(() => {
           v-if="!item.children"
           @click="navigate(item.key)"
           :class="['nav-item', { active: activePage === item.key, 'nav-item-hot': item.hot }]"
+          :title="item.desc || item.label"
         >
           <Icon :name="item.icon" size="18" class="nav-icon" />
           <span class="nav-label">{{ item.label }}</span>
+          <span v-if="item.hot" class="nav-hot-badge">🔥</span>
         </button>
 
         <!-- Group item (has children) -->
@@ -110,6 +112,7 @@ const activeGroup = computed(() => {
           <button
             @click="toggleGroup(item.key)"
             :class="['nav-item', 'nav-group-header', { active: activeGroup === item.key }]"
+            :title="item.desc || item.label"
           >
             <Icon :name="item.icon" size="18" class="nav-icon" />
             <span class="nav-label">{{ item.label }}</span>
@@ -120,10 +123,12 @@ const activeGroup = computed(() => {
               v-for="child in item.children"
               :key="child.key"
               @click="navigate(child.key)"
-              :class="['nav-item', 'nav-child', { active: activePage === child.key }]"
+              :class="['nav-item', 'nav-child', { active: activePage === child.key, 'nav-item-hot': child.hot }]"
+              :title="child.desc || child.label"
             >
               <Icon :name="child.icon" size="16" class="nav-icon" />
               <span class="nav-label">{{ child.label }}</span>
+              <span v-if="child.hot" class="nav-hot-badge">🔥</span>
             </button>
           </div>
         </div>
@@ -292,6 +297,13 @@ const activeGroup = computed(() => {
 .dark .nav-item-hot { color: #fbbf24 !important; }
 .dark .nav-item-hot .nav-icon { color: #fbbf24; }
 .dark .nav-item-hot.active { background: rgba(245, 158, 11, 0.15) !important; color: #f59e0b !important; }
+
+/* Hot badge */
+.nav-hot-badge {
+  font-size: 10px;
+  margin-left: auto;
+  flex-shrink: 0;
+}
 
 .nav-icon {
   width: 18px;

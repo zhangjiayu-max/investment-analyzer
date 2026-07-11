@@ -1623,6 +1623,7 @@ const aiModes = [
   { key: 'rolling', icon: '📈', label: '滚动收益' },
   { key: 'four-pots', icon: '🪣', label: '四笔钱' },
   { key: 'dca', icon: '🔄', label: '定投优化' },
+  { key: 'what-if', icon: '🎯', label: '情景推演' },
 ]
 
 function switchAiMode(mode) {
@@ -2080,6 +2081,15 @@ const whatIfScenarios = [
   { key: 'sector_rotation', icon: '🔄', label: '行业轮动' },
   { key: 'custom', icon: '✏️', label: '自定义' },
 ]
+
+// 将 modeResult 渲染为 HTML（字符串走 markdown，对象走格式化 JSON）
+const modeResultHtml = computed(() => {
+  const r = modeResult.value
+  if (!r) return ''
+  if (typeof r === 'string') return renderMarkdown(r)
+  if (r.content || r.result || r.analysis) return renderMarkdown(r.content || r.result || r.analysis)
+  try { return renderMarkdown('```json\n' + JSON.stringify(r, null, 2) + '\n```') } catch { return '' }
+})
 
 async function runWhatIfMode() {
   whatIfLoading.value = true
@@ -4297,9 +4307,7 @@ function txDisplayAmount(tx) {
             <button class="btn-primary" @click="confirmRollingAnalysis" :disabled="rollingLoading">
               {{ rollingLoading ? '分析中...' : '▶ 开始分析' }}
             </button>
-            <div v-if="modeResult && aiMode === 'rolling'" class="ai-mode-result">
-              <pre>{{ modeResult }}</pre>
-            </div>
+            <div v-if="modeResult && aiMode === 'rolling'" class="ai-mode-result markdown-body" v-html="modeResultHtml"></div>
           </div>
 
           <!-- Mode: Four Pots -->
@@ -4314,9 +4322,7 @@ function txDisplayAmount(tx) {
             <button class="btn-primary" @click="confirmFourPotsAnalysis" :disabled="fourPotsLoading">
               {{ fourPotsLoading ? '分析中...' : '▶ 开始归类' }}
             </button>
-            <div v-if="modeResult && aiMode === 'four-pots'" class="ai-mode-result">
-              <pre>{{ modeResult }}</pre>
-            </div>
+            <div v-if="modeResult && aiMode === 'four-pots'" class="ai-mode-result markdown-body" v-html="modeResultHtml"></div>
           </div>
 
           <!-- Mode: DCA Optimization -->
@@ -4331,9 +4337,7 @@ function txDisplayAmount(tx) {
             <button class="btn-primary" @click="confirmDcaOptimization" :disabled="dcaLoading">
               {{ dcaLoading ? '计算中...' : '▶ 开始优化' }}
             </button>
-            <div v-if="modeResult && aiMode === 'dca'" class="ai-mode-result">
-              <pre>{{ modeResult }}</pre>
-            </div>
+            <div v-if="modeResult && aiMode === 'dca'" class="ai-mode-result markdown-body" v-html="modeResultHtml"></div>
           </div>
 
           <!-- Mode: What-If -->
@@ -4360,9 +4364,7 @@ function txDisplayAmount(tx) {
                 {{ whatIfLoading ? '推演中...' : '▶ 开始推演' }}
               </button>
             </div>
-            <div v-if="modeResult && aiMode === 'what-if'" class="ai-mode-result">
-              <pre>{{ modeResult }}</pre>
-            </div>
+            <div v-if="modeResult && aiMode === 'what-if'" class="ai-mode-result markdown-body" v-html="modeResultHtml"></div>
           </div>
 
           <!-- Action Card (统一行动卡片) -->

@@ -66,6 +66,8 @@ function _routeForAlert(a) {
   if (a.alert_type === 'event_radar') return 'event-radar'
   // 关注列表信号跳转到机会雷达页面
   if (a.alert_type && a.alert_type.startsWith('watchlist_')) return 'event-radar'
+  // 健康分预警跳转到健康分页面
+  if (a.alert_type === 'health_score_low') return 'health'
   return null
 }
 
@@ -86,6 +88,8 @@ function eventTypeIcon(a) {
   if (a.alert_type === 'event_radar') return 'satellite'
   // 关注列表信号
   if (a.alert_type && a.alert_type.startsWith('watchlist_')) return 'bookmark'
+  // 健康分预警
+  if (a.alert_type === 'health_score_low') return 'health'
   return null
 }
 
@@ -105,6 +109,10 @@ function alertClass(a) {
   // 关注列表上车信号
   if (a.alert_type && a.alert_type.startsWith('watchlist_')) {
     return 'alert-event-watchlist'
+  }
+  // 健康分预警
+  if (a.alert_type === 'health_score_low') {
+    return 'alert-health-warning'
   }
   return severityClass(a.severity)
 }
@@ -349,6 +357,10 @@ onUnmounted(() => {
 .alert-event-watchlist { border-left: 2px solid #ea580c; }
 .alert-event-opportunity { border-left: 2px solid #d97706; }
 .alert-event-watch { border-left: 2px solid #2563eb; }
+
+/* 健康分预警 */
+.alert-health-warning .alert-icon { color: #dc2626; }
+.alert-health-warning { border-left: 2px solid #dc2626; }
 
 .fade-enter-active, .fade-leave-active {
   transition: opacity 0.15s, transform 0.15s;

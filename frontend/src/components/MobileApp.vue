@@ -31,9 +31,16 @@ import EventRadarPage from './EventRadarPage.vue'
 import KnowledgeBase from './KnowledgeBase.vue'
 import SystemConfigPage from './SystemConfigPage.vue'
 import CapabilityCenter from './CapabilityCenter.vue'
+import SmartAddPlan from './finance/SmartAddPlan.vue'
+import AllocationDashboard from './AllocationDashboard.vue'
+import AttributionReport from './AttributionReport.vue'
+import DecisionAccuracy from './DecisionAccuracy.vue'
+import StrategySandboxPage from './StrategySandboxPage.vue'
+import DataHealthDashboard from './DataHealthDashboard.vue'
+import StrategyBacktest from './StrategyBacktest.vue'
 import { isDark, toggleDark } from '../composables/useTheme'
 
-const activePage = ref(localStorage.getItem('activePage') || 'chat')
+const activePage = ref(localStorage.getItem('activePage') || 'dashboard')
 const showMoreMenu = ref(false)
 
 watch(activePage, (val) => {
@@ -49,33 +56,72 @@ const tabs = [
   { key: '__more__', label: '更多', icon: 'more' },
 ]
 
-// ── 更多菜单项 ──（hot 标记常用功能，渲染时显示🔥角标）
-const moreItems = [
-  { key: 'market-intelligence', label: '市场热点', icon: 'fire', hot: true },
-  { key: 'event-radar', label: '事件雷达', icon: 'satellite', hot: true },
-  { key: 'articles', label: '文章管理', icon: 'articles' },
-  { key: 'gallery', label: '估值图片', icon: 'gallery' },
-  { key: 'author', label: '作者文章', icon: 'author' },
-  { key: 'linked', label: '个人文档', icon: 'link' },
-  { key: 'knowledge', label: '知识库', icon: 'book' },
-  { key: 'rag', label: 'RAG 分析', icon: 'rag' },
-  { key: 'rag-test', label: '命中测试', icon: 'test' },
-  { key: 'bond', label: '债市温度', icon: 'bond' },
-  { key: 'alert-center', label: '风险提示', icon: 'warning' },
-  { key: 'decisions', label: '决策档案', icon: 'clipboard', hot: true },
-  { key: 'behavior', label: '行为诊断', icon: 'brain' },
-  { key: 'family-finance', label: '财务总览', icon: 'wallet', hot: true },
-  { key: 'goal-buckets', label: '资金桶', icon: 'bucket' },
-  { key: 'admin-agents', label: 'Agent 管理', icon: 'admin' },
-  { key: 'token-usage', label: 'Token 用量', icon: 'token' },
-  { key: 'system-config', label: '系统配置', icon: 'config' },
-  { key: 'quality-dashboard', label: '质量仪表盘', icon: 'chart' },
-  { key: 'bad-cases', label: 'Bad Case', icon: 'bug' },
-  { key: 'eval-suite', label: '评测集', icon: 'check' },
-  { key: 'health', label: '健康分', icon: 'health', hot: true },
-  { key: 'shadow', label: 'Shadow Mode', icon: 'shadow' },
-  { key: 'capability-center', label: '能力中心', icon: 'wrench' },
+// ── 更多菜单项 ──（按新分组结构组织，hot 标记常用功能显示🔥角标）
+const moreGroups = [
+  {
+    label: '市场雷达',
+    items: [
+      { key: 'market-intelligence', label: '市场热点', icon: 'fire', hot: true },
+      { key: 'event-radar', label: '机会雷达', icon: 'satellite', hot: true },
+      { key: 'bond', label: '债市分析', icon: 'bond' },
+    ],
+  },
+  {
+    label: '持仓管理',
+    items: [
+      { key: 'smart-add', label: '智能补仓', icon: 'trending-down' },
+      { key: 'alert-center', label: '风险与提示', icon: 'warning', hot: true },
+    ],
+  },
+  {
+    label: '理财决策',
+    items: [
+      { key: 'decisions', label: '决策档案', icon: 'clipboard', hot: true },
+      { key: 'attribution', label: '收益归因', icon: 'chart' },
+      { key: 'behavior', label: '行为诊断', icon: 'brain' },
+      { key: 'accuracy', label: '决策准确率', icon: 'target' },
+      { key: 'allocation-dashboard', label: '配置偏离', icon: 'pie-chart' },
+      { key: 'strategy-sandbox', label: '策略沙盒', icon: 'bar-chart' },
+    ],
+  },
+  {
+    label: '家庭财务',
+    items: [
+      { key: 'family-finance', label: '财务总览', icon: 'wallet', hot: true },
+      { key: 'goal-buckets', label: '资金桶', icon: 'bucket' },
+    ],
+  },
+  {
+    label: '知识中心',
+    items: [
+      { key: 'articles', label: '文章管理', icon: 'articles' },
+      { key: 'gallery', label: '估值图片', icon: 'gallery' },
+      { key: 'knowledge', label: '蒸馏知识', icon: 'book' },
+      { key: 'author', label: '作者文章', icon: 'author' },
+      { key: 'linked', label: '个人文档', icon: 'link' },
+      { key: 'rag', label: 'RAG 分析', icon: 'rag' },
+    ],
+  },
+  {
+    label: '系统与进化',
+    items: [
+      { key: 'admin-agents', label: 'Agent 管理', icon: 'admin' },
+      { key: 'token-usage', label: 'Token 用量', icon: 'token' },
+      { key: 'system-config', label: '系统配置', icon: 'config' },
+      { key: 'data-health', label: '数据健康', icon: 'shield-check' },
+      { key: 'quality-dashboard', label: '质量仪表盘', icon: 'chart' },
+      { key: 'bad-cases', label: 'Bad Case', icon: 'bug' },
+      { key: 'eval-suite', label: '评测集', icon: 'check' },
+      { key: 'health', label: '健康分', icon: 'health', hot: true },
+      { key: 'shadow', label: 'Shadow Mode', icon: 'shadow' },
+      { key: 'strategy-backtest', label: '策略回测', icon: 'line-chart' },
+      { key: 'capability-center', label: '能力中心', icon: 'wrench' },
+    ],
+  },
 ]
+
+// 扁平化 moreItems（兼容 currentPageLabel 查找）
+const moreItems = moreGroups.flatMap(g => g.items)
 
 function navigate(key) {
   if (key === '__more__') {
@@ -116,6 +162,13 @@ const pageComponents = {
   'shadow': ShadowModePage,
   'system-config': SystemConfigPage,
   'capability-center': CapabilityCenter,
+  'smart-add': SmartAddPlan,
+  'allocation-dashboard': AllocationDashboard,
+  'attribution': AttributionReport,
+  'accuracy': DecisionAccuracy,
+  'strategy-sandbox': StrategySandboxPage,
+  'data-health': DataHealthDashboard,
+  'strategy-backtest': StrategyBacktest,
 }
 
 const pageComponent = computed(() => pageComponents[activePage.value] || null)
@@ -131,7 +184,7 @@ const pageProps = computed(() => {
     return { onNavigate: (page) => navigate(page) }
   }
   // 与 Home.vue 对齐：需跨页跳转的页面透传 onNavigate
-  if (['alert-center', 'decisions', 'family-finance', 'goal-buckets', 'portfolio'].includes(activePage.value)) {
+  if (['alert-center', 'decisions', 'family-finance', 'goal-buckets', 'portfolio', 'event-radar', 'smart-add'].includes(activePage.value)) {
     return { onNavigate: (page) => navigate(page) }
   }
   return {}
@@ -229,15 +282,18 @@ function onBack() {
             </button>
           </div>
           <div class="mobile-more-grid">
-            <button
-              v-for="item in moreItems"
-              :key="item.key"
-              @click="navigate(item.key)"
-              :class="['mobile-more-item', { active: activePage === item.key, hot: item.hot }]"
-            >
-              <span v-if="item.hot" class="mobile-more-hot">🔥</span>
-              <span class="mobile-more-label">{{ item.label }}</span>
-            </button>
+            <template v-for="group in moreGroups" :key="group.label">
+              <div class="mobile-more-group-label">{{ group.label }}</div>
+              <button
+                v-for="item in group.items"
+                :key="item.key"
+                @click="navigate(item.key)"
+                :class="['mobile-more-item', { active: activePage === item.key, hot: item.hot }]"
+              >
+                <span v-if="item.hot" class="mobile-more-hot">🔥</span>
+                <span class="mobile-more-label">{{ item.label }}</span>
+              </button>
+            </template>
           </div>
         </div>
       </div>
@@ -449,6 +505,22 @@ function onBack() {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
   gap: 0.6rem;
+}
+
+.mobile-more-group-label {
+  grid-column: 1 / -1;
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--color-text-tertiary);
+  padding: 0.4rem 0 0.1rem;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  border-top: 1px solid var(--color-border-light);
+  margin-top: 0.3rem;
+}
+.mobile-more-group-label:first-child {
+  border-top: none;
+  margin-top: 0;
 }
 
 .mobile-more-item {

@@ -1,12 +1,13 @@
-"""P0 主动提醒扫描服务 — 决策闭环验证 + 估值阈值 + 持仓风险 + 关注列表信号。
+"""P0 主动提醒扫描服务 — 决策闭环验证 + 估值阈值 + 持仓风险 + 关注列表信号 + 健康分预警。
 
 由 app.py 的 lifespan 定时调用（默认每 30 分钟）。
 
-包含 4 个扫描函数：
+包含 5 个扫描函数：
 - scan_and_verify_recommendations(): P0-A 建议到达验证窗口时自动验证，并生成结果 alert
 - scan_valuation_thresholds(): P0-B 持仓相关指数估值进入极端区域时生成 alert
 - scan_portfolio_risk(): P0-B 持仓集中度/亏损超过阈值时生成 alert
 - scan_watchlist_signals(): P0-C 关注列表基金触发目标价/估值低分位/单日大跌上车信号
+- scan_health_score(): P0-D 今日健康分低于阈值时生成预警
 
 开关：
 - alerts.proactive_scan_enabled (默认 true)：总开关
@@ -16,6 +17,8 @@
 - alerts.loss_threshold (默认 15)：单标的亏损 > 阈值触发
 - alerts.watchlist_signal_enabled (默认 true)：关注列表信号扫描开关
 - alerts.watchlist_drop_threshold (默认 3)：单日跌幅%阈值触发上车提醒
+- alerts.health_score_scan_enabled (默认 true)：健康分预警扫描开关
+- alerts.health_score_threshold (默认 60)：健康分预警阈值
 """
 import logging
 from datetime import datetime, timedelta
@@ -471,11 +474,84 @@ def scan_watchlist_signals() -> dict:
     return {"alerts_created": alerts_created, "watchlist_scanned": len(items)}
 
 
+# ── P0-D 健康分预警扫描 ────────────────────────────────────
+
+
+def scan_health_score() -> dict:
+    """扫描今日健康分，低于阈值时生成预警 alert。
+
+    开关：alerts.health_score_scan_enabled (默认 true)
+    阈值：alerts.health_score_threshold (默认 60，满分100)
+
+    Returns:
+        {"alerts_created": int, "score": int | None}
+    """
+    if not _is_enabled("alerts.health_score_scan_enabled", True):
+        return {"alerts_created": 0, "skipped": "disabled"}
+
+    threshold = _get_int("alerts.health_score_threshold", 60)
+    today = datetime.now().strftime("%Y-%m-%d")
+
+    try:
+        from db.health_score import get_health_score
+        score_data = get_health_score(today)
+        if not score_data:
+            return {"alerts_created": 0, "score": None, "reason": "今日无健康分数据"}
+    except Exception as e:
+        logger.debug(f"[alert_scanner] 获取健康分失败: {e}")
+        return {"alerts_created": 0, "score": None, "error": str(e)}
+
+    total_score = score_data.get("total_score", 0)
+    try:
+        total_score = int(total_score)
+    except (TypeError, ValueError):
+        return {"alerts_created": 0, "score": None, "error": "score invalid"}
+
+    if total_score >= threshold:
+        return {"alerts_created": 0, "score": total_score, "reason": f"健康分 {total_score} >= {threshold}"}
+
+    # 健康分低于阈值，生成预警
+    if _is_alert_recently_created("health_score_low", "", hours=24):
+        return {"alerts_created": 0, "score": total_score, "reason": "24小时内已生成过预警"}
+
+    # 解析各维度分数
+    dim_scores = {
+        "质量": score_data.get("score_quality"),
+        "分散度": score_data.get("score_diversification"),
+        "估值": score_data.get("score_valuation"),
+        "行为": score_data.get("score_behavior"),
+        "风险": score_data.get("score_risk"),
+    }
+    dim_str = " / ".join(
+        f"{k}:{v}" for k, v in dim_scores.items() if v is not None
+    )
+
+    try:
+        title = f"理财健康分偏低：{total_score}分"
+        content = (
+            f"今日理财健康分 {total_score} 分，低于预警阈值 {threshold} 分。\n"
+            f"各维度：{dim_str}\n"
+            f"建议查看健康分页面了解详细诊断。"
+        )
+        create_alert(
+            alert_type="health_score_low",
+            title=title,
+            content=content,
+            severity="warning",
+            source="alert_scanner",
+        )
+        logger.info(f"[alert_scanner] 健康分预警已生成：{total_score} < {threshold}")
+        return {"alerts_created": 1, "score": total_score}
+    except Exception as e:
+        logger.warning(f"[alert_scanner] 生成健康分预警失败: {e}")
+        return {"alerts_created": 0, "score": total_score, "error": str(e)}
+
+
 # ── 主入口 ────────────────────────────────────
 
 
 def run_periodic_scan() -> dict:
-    """定时扫描主入口，依次执行 4 个扫描函数。"""
+    """定时扫描主入口，依次执行 5 个扫描函数。"""
     if not _is_enabled("alerts.proactive_scan_enabled", True):
         return {"skipped": "disabled"}
 
@@ -485,6 +561,7 @@ def run_periodic_scan() -> dict:
         "valuation": {},
         "portfolio": {},
         "watchlist": {},
+        "health_score": {},
     }
     try:
         results["verification"] = scan_and_verify_recommendations()
@@ -506,4 +583,9 @@ def run_periodic_scan() -> dict:
     except Exception as e:
         logger.warning(f"[alert_scanner] 关注列表扫描失败: {e}")
         results["watchlist"] = {"error": str(e)}
+    try:
+        results["health_score"] = scan_health_score()
+    except Exception as e:
+        logger.warning(f"[alert_scanner] 健康分扫描失败: {e}")
+        results["health_score"] = {"error": str(e)}
     return results
