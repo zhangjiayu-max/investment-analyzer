@@ -99,6 +99,13 @@ DEFAULT_CONFIGS = [
     ('alerts.watchlist_drop_threshold', '3', '关注基金单日跌幅%阈值触发上车提醒', 'alerts'),
     ('alerts.health_score_scan_enabled', 'true', '健康分预警扫描开关（非LLM相关，默认开启）', 'alerts'),
     ('alerts.health_score_threshold', '60', '健康分预警阈值（低于此值触发预警）', 'alerts'),
+    ('alerts.valuation_failure_scan_enabled', 'true', '估值查询失败预警开关（闭环兜底监控，默认开启）', 'alerts'),
+
+    # 估值查询闭环兜底（非LLM相关，默认开启）
+    ('valuation.online_fallback_enabled', 'true', '估值在线兜底总开关（本地表无数据时自动查akshare/天天基金）', 'valuation'),
+    ('valuation.online_fallback_timeout_ms', '5000', '在线兜底单渠道超时（毫秒）', 'valuation'),
+    ('valuation.online_cache_ttl', '3600', '在线兜底结果内存缓存TTL（秒）', 'valuation'),
+    ('valuation.monitoring_enabled', 'true', '估值查询监控日志开关', 'valuation'),
 
     # 业务常量
     ('portfolio.default_account', '花无缺', '默认账户名', 'portfolio'),

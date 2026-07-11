@@ -323,7 +323,7 @@ def _generate_single_plan(
     zscore = None
     valuation_level = "未知"
     if index_code:
-        val = get_best_valuation(index_code)
+        val = get_best_valuation(index_code, query_source="smart_add")
         if val:
             zscore = val.get("zscore")
             percentile = val.get("percentile")

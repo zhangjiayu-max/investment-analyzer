@@ -257,7 +257,7 @@ def build_valuation_summary() -> str:
         for code, info in index_map.items():
             try:
                 from db.valuations import get_best_valuation
-                best = get_best_valuation(code, "市盈率")
+                best = get_best_valuation(code, "市盈率", query_source="portfolio")
                 if best and best.get("days_old", 0) > 7:
                     expired_warnings.append(f"{info['name']} PE: {best['days_old']}天前 ({best.get('snapshot_date','?')})")
                 elif best and best.get("days_old", 0) > 3:

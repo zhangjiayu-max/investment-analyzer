@@ -17,6 +17,7 @@ from db._utils import (
 # 估值数据 — 从 db.valuations 重导出
 from db.valuations import (
     save_valuation, get_valuation_history, get_latest_valuation,
+    get_best_valuation, get_valuation_query_stats,
     list_valuation_indexes, list_index_freshness, search_indexes_by_keyword,
     get_index_info, save_index_info, get_valuation_by_image,
     save_dd_valuation, list_dd_valuations, get_dd_valuation, get_dd_parsed_image_paths,
@@ -313,6 +314,31 @@ def init_db():
             created_at TEXT DEFAULT (datetime('now','localtime')),
             updated_at TEXT DEFAULT (datetime('now','localtime'))
         )
+    """)
+
+    # ── 估值查询监控日志表（闭环兜底可观测） ──────────────────────────
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS valuation_query_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            index_code TEXT,
+            index_name TEXT,
+            query_source TEXT,
+            final_source TEXT,
+            degraded INTEGER DEFAULT 0,
+            is_expired INTEGER DEFAULT 0,
+            latency_ms INTEGER,
+            trace_id TEXT,
+            error_msg TEXT,
+            created_at TEXT DEFAULT (datetime('now','localtime'))
+        )
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_valuation_query_logs_created
+        ON valuation_query_logs(created_at)
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_valuation_query_logs_index_code
+        ON valuation_query_logs(index_code)
     """)
 
     # ── 任务表 ──────────────────────────────────────

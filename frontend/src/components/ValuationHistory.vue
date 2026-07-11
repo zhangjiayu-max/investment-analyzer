@@ -5,7 +5,7 @@ async function getEcharts() {
   if (!echartsModule) echartsModule = await import('echarts')
   return echartsModule
 }
-import { listValuationIndexes, getValuationHistory, getIndexInfo, runAnalysis, pollIndexAnalysisStatus, listAnalysisHistory, getAnalysisHistoryDetail, deleteAnalysisHistory, refreshValuationPrices, listDDValuations, getDDValuation, getMarketTemperature, getSuperValue, getEnhancedStrategy } from '../api'
+import { listValuationIndexes, getValuationHistory, getIndexInfo, runAnalysis, pollIndexAnalysisStatus, listAnalysisHistory, getAnalysisHistoryDetail, deleteAnalysisHistory, refreshValuationPrices, listDDValuations, getDDValuation, getMarketTemperature, getSuperValue, getEnhancedStrategy, getValuationQueryStats, onlineValuationQuery } from '../api'
 import { useAsyncTask } from '../composables/useAsyncTask'
 import { renderMarkdown } from '../composables/useMarkdown'
 import { isDark } from '../composables/useTheme'
@@ -723,6 +723,7 @@ onMounted(() => {
   restoreIndexAnalysisTask()
   loadIndexes()
   loadMarketTemperature()
+  loadQueryStats()
   document.addEventListener('click', handleOutsideClick)
   // 加载分析历史（用于恢复最新结果）
   if (selectedCode.value) {
@@ -743,7 +744,50 @@ onActivated(() => {
     loadSuperValue()
     loadStrategy()
   }
+  // 刷新监控统计
+  loadQueryStats()
 })
+
+// ── 估值查询监控（闭环兜底可观测） ──
+const queryStats = ref(null)
+const onlineQueryLoading = ref(false)
+
+async function loadQueryStats() {
+  try {
+    const { data } = await getValuationQueryStats(7)
+    queryStats.value = data
+  } catch (e) { /* 静默失败 */ }
+}
+
+async function handleOnlineQuery() {
+  if (!selectedCode.value) {
+    showToast('请先选择指数', 'warning')
+    return
+  }
+  onlineQueryLoading.value = true
+  try {
+    const { data } = await onlineValuationQuery(selectedCode.value, selectedMetric.value)
+    if (data.ok) {
+      showToast(`在线查询成功（来源：${data.data.source}）`)
+      loadQueryStats()
+    } else {
+      showToast(data.error || '在线查询失败', 'error')
+    }
+  } catch (e) {
+    showToast('在线查询失败: ' + (e.message || e), 'error')
+  } finally {
+    onlineQueryLoading.value = false
+  }
+}
+
+const SOURCE_LABELS = {
+  leiniuniu: '雷牛牛',
+  dd_luosiding: '螺丝钉',
+  expired_leiniuniu: '过期数据',
+  akshare: 'akshare在线',
+  ttfund: '天天基金在线',
+  failed: '查询失败',
+}
 // 切换指数或指标类型时重新加载数据
 watch([selectedCode, selectedMetric], () => {
   imageLoadError.value = false
@@ -785,6 +829,39 @@ defineExpose({ loadHistory })
       </button>
     </div>
 
+    <!-- ════════ 估值查询监控卡片（闭环兜底可观测） ════════ -->
+    <div v-if="queryStats && queryStats.total > 0" class="card query-stats-card">
+      <div class="query-stats-header">
+        <span class="terminal-label">📊 数据健康（近{{ queryStats.days }}天）</span>
+        <button class="btn-ghost btn-sm" @click="loadQueryStats" title="刷新统计">↻</button>
+      </div>
+      <div class="query-stats-body">
+        <div class="query-stat-item">
+          <span class="stat-num">{{ queryStats.total }}</span>
+          <span class="stat-lbl">总查询</span>
+        </div>
+        <div class="query-stat-item" v-for="(pct, src) in queryStats.source_percent" :key="src"
+             :class="{ 'stat-failed': src === 'failed' }">
+          <span class="stat-num">{{ pct }}%</span>
+          <span class="stat-lbl">{{ SOURCE_LABELS[src] || src }}</span>
+        </div>
+        <div class="query-stat-item">
+          <span class="stat-num">{{ queryStats.online_fallback_count }}</span>
+          <span class="stat-lbl">在线兜底</span>
+        </div>
+        <div class="query-stat-item">
+          <span class="stat-num">{{ queryStats.avg_latency_ms }}ms</span>
+          <span class="stat-lbl">平均耗时</span>
+        </div>
+      </div>
+      <div v-if="queryStats.failed_indexes && queryStats.failed_indexes.length" class="query-stats-failed">
+        <span class="failed-label">⚠️ 查询失败的指数：</span>
+        <span v-for="idx in queryStats.failed_indexes" :key="idx.index_code" class="failed-tag">
+          {{ idx.index_name || idx.index_code }}
+        </span>
+      </div>
+    </div>
+
     <!-- ════════ Index Tab (outerTab === 'index') ════════ -->
     <template v-if="outerTab === 'index'">
 
@@ -820,6 +897,13 @@ defineExpose({ loadHistory })
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
         </svg>
         刷新行情
+      </button>
+      <button class="btn-ghost btn-sm" @click="handleOnlineQuery" :disabled="onlineQueryLoading"
+              title="本地表无数据时，通过 akshare/天天基金 在线查询" style="margin-left:0;">
+        <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M21 12a9 9 0 01-9 9m9-9a9 9 0 00-9-9m9 9H3m9 9a9 9 0 01-9-9m9 9c2.5-2.5 4-5.6 4-9s-1.5-6.5-4-9m0 18c-2.5-2.5-4-5.6-4-9s1.5-6.5 4-9"/>
+        </svg>
+        {{ onlineQueryLoading ? '查询中...' : '在线查询' }}
       </button>
     </div>
 
@@ -1606,6 +1690,66 @@ defineExpose({ loadHistory })
   box-shadow: var(--shadow-sm);
   position: relative;
   z-index: 1;
+}
+
+/* ── 估值查询监控卡片 ── */
+.query-stats-card {
+  padding: 0.75rem 1.25rem;
+  margin-bottom: 0.75rem;
+  background: linear-gradient(135deg, var(--color-bg-card) 0%, var(--color-bg-hover) 100%);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+}
+.query-stats-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 0.5rem;
+}
+.query-stats-body {
+  display: flex;
+  gap: 1.5rem;
+  flex-wrap: wrap;
+}
+.query-stat-item {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  min-width: 60px;
+}
+.query-stat-item .stat-num {
+  font-size: 1.1rem;
+  font-weight: 600;
+  color: var(--color-text);
+  font-family: 'JetBrains Mono', monospace;
+}
+.query-stat-item .stat-lbl {
+  font-size: 0.72rem;
+  color: var(--color-text-muted);
+  margin-top: 2px;
+}
+.query-stat-item.stat-failed .stat-num {
+  color: #ef4444;
+}
+.query-stats-failed {
+  margin-top: 0.5rem;
+  padding-top: 0.5rem;
+  border-top: 1px dashed var(--color-border);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  align-items: center;
+}
+.query-stats-failed .failed-label {
+  font-size: 0.78rem;
+  color: #f59e0b;
+}
+.query-stats-failed .failed-tag {
+  font-size: 0.72rem;
+  padding: 2px 8px;
+  background: rgba(239, 68, 68, 0.1);
+  color: #ef4444;
+  border-radius: 4px;
 }
 
 .selector-label {

@@ -9,6 +9,7 @@ import requests as req
 from db import (
     list_valuation_indexes,
     get_latest_valuation,
+    get_best_valuation,
     get_valuation_history,
     search_indexes_by_keyword,
     list_holdings,
@@ -1365,7 +1366,7 @@ def _query_valuation(args: dict) -> str:
 
         for metric in index_metrics:
             mt = metric["metric_type"]
-            latest = get_latest_valuation(code, mt)
+            latest = get_best_valuation(code, mt, query_source="agent")
             if not latest:
                 continue
 

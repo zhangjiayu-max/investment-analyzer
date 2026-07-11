@@ -18,6 +18,7 @@ from db.valuations import (
     save_dd_valuation, list_dd_valuations, get_dd_valuation,
     get_best_valuation, get_latest_market_temperature, get_latest_dd_valuation_for_index,
     list_index_code_mappings, save_index_code_mapping,
+    get_valuation_query_stats,
 )
 from db._conn import _get_conn
 from services.image_parser import DDImageParser
@@ -307,7 +308,7 @@ async def unified_valuation_query(
     """
     if index_code:
         # 查询单个指数
-        result = get_best_valuation(index_code, metric_type)
+        result = get_best_valuation(index_code, metric_type, query_source="valuation_page")
         if not result:
             raise HTTPException(404, f"未找到 {index_code} 的估值数据")
         return {"indexes": [result]}
@@ -322,7 +323,7 @@ async def unified_valuation_query(
             continue
 
         # 获取最佳估值数据
-        best = get_best_valuation(code, metric_type)
+        best = get_best_valuation(code, metric_type, query_source="valuation_page")
         if best:
             # 按来源筛选
             if source != "all" and best.get("data_source") != source:
@@ -991,3 +992,32 @@ async def get_index_info_api(index_code: str, index_name: str = ""):
         logging.warning(f"LLM生成指数信息失败: {e}")
 
     return {"index_code": index_code, "info": "", "source": "none"}
+
+
+# ── 估值查询闭环监控 ──────────────────────────────────────
+
+
+@router.get("/query-stats")
+async def valuation_query_stats_api(days: int = 7):
+    """获取估值查询监控统计（数据源命中率、在线兜底次数、失败指数、平均耗时）。
+
+    用于前端估值页面的「数据健康」卡片。
+    """
+    if days < 1 or days > 90:
+        days = 7
+    return get_valuation_query_stats(days)
+
+
+@router.get("/online-query/{index_code}")
+async def online_valuation_query_api(index_code: str, metric_type: str = "市盈率"):
+    """手动触发在线估值查询（akshare → 天天基金）。
+
+    前端估值页「在线查询」按钮调用此接口，
+    绕过本地表直接查在线渠道，结果不入库。
+    """
+    from db.valuations import _online_fallback
+    from datetime import datetime as _dt
+    result = _online_fallback(index_code, metric_type, _dt.now(), "valuation_page_online_btn")
+    if not result:
+        return {"ok": False, "error": f"在线查询失败：{index_code} 无可用在线数据源"}
+    return {"ok": True, "data": result}

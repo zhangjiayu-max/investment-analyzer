@@ -1,13 +1,14 @@
-"""P0 主动提醒扫描服务 — 决策闭环验证 + 估值阈值 + 持仓风险 + 关注列表信号 + 健康分预警。
+"""P0 主动提醒扫描服务 — 决策闭环验证 + 估值阈值 + 持仓风险 + 关注列表信号 + 健康分预警 + 估值查询失败。
 
 由 app.py 的 lifespan 定时调用（默认每 30 分钟）。
 
-包含 5 个扫描函数：
+包含 6 个扫描函数：
 - scan_and_verify_recommendations(): P0-A 建议到达验证窗口时自动验证，并生成结果 alert
 - scan_valuation_thresholds(): P0-B 持仓相关指数估值进入极端区域时生成 alert
 - scan_portfolio_risk(): P0-B 持仓集中度/亏损超过阈值时生成 alert
 - scan_watchlist_signals(): P0-C 关注列表基金触发目标价/估值低分位/单日大跌上车信号
 - scan_health_score(): P0-D 今日健康分低于阈值时生成预警
+- scan_valuation_failures(): P0-E 估值查询全部失败时生成预警（闭环兜底监控）
 
 开关：
 - alerts.proactive_scan_enabled (默认 true)：总开关
@@ -19,6 +20,7 @@
 - alerts.watchlist_drop_threshold (默认 3)：单日跌幅%阈值触发上车提醒
 - alerts.health_score_scan_enabled (默认 true)：健康分预警扫描开关
 - alerts.health_score_threshold (默认 60)：健康分预警阈值
+- alerts.valuation_failure_scan_enabled (默认 true)：估值查询失败预警开关
 """
 import logging
 from datetime import datetime, timedelta
@@ -29,7 +31,7 @@ from db.dashboard import (
     list_pending_verification_recommendations,
     auto_verify_pending_recommendations,
 )
-from db.valuations import get_latest_valuation
+from db.valuations import get_latest_valuation, get_best_valuation
 
 logger = logging.getLogger(__name__)
 
@@ -166,7 +168,7 @@ def scan_valuation_thresholds() -> dict:
     today = datetime.now().strftime("%Y-%m-%d")
     for code, name in index_codes.items():
         try:
-            val = get_latest_valuation(code)
+            val = get_best_valuation(code, query_source="alert_scanner")
             if not val:
                 continue
             percentile = val.get("percentile")
@@ -550,8 +552,67 @@ def scan_health_score() -> dict:
 # ── 主入口 ────────────────────────────────────
 
 
+def scan_valuation_failures() -> dict:
+    """P0-E 扫描估值查询全部失败的指数，生成预警 alert（闭环兜底监控）。
+
+    检查最近 24 小时内 valuation_query_logs 中 final_source='failed' 的记录，
+    对每个失败指数生成一条预警（同指数 24 小时内不重复）。
+
+    Returns:
+        {"alerts_created": int, "failed_indexes": int}
+    """
+    if not _is_enabled("alerts.valuation_failure_scan_enabled", True):
+        return {"alerts_created": 0, "skipped": "disabled"}
+
+    from db._conn import _get_conn
+    try:
+        conn = _get_conn()
+        since = (datetime.now() - timedelta(hours=24)).strftime("%Y-%m-%d %H:%M:%S")
+        rows = conn.execute("""
+            SELECT DISTINCT index_code, index_name
+            FROM valuation_query_logs
+            WHERE created_at >= ? AND final_source = 'failed' AND index_code IS NOT NULL
+            ORDER BY created_at DESC
+            LIMIT 10
+        """, (since,)).fetchall()
+        conn.close()
+    except Exception as e:
+        logger.debug(f"[alert_scanner] 估值失败扫描查询失败: {e}")
+        return {"alerts_created": 0, "error": str(e)}
+
+    if not rows:
+        return {"alerts_created": 0, "failed_indexes": 0}
+
+    alerts_created = 0
+    for row in rows:
+        code = row["index_code"]
+        name = row["index_name"] or code
+        # 24 小时内不重复
+        if _is_alert_recently_created("valuation_query_failed", code, hours=24):
+            continue
+        try:
+            create_alert(
+                alert_type="valuation_query_failed",
+                title=f"估值数据缺失：{name}",
+                content=(
+                    f"{name}（{code}）在本地表和在线渠道（akshare/天天基金）均无法获取估值数据，"
+                    f"建议检查指数代码映射或手动录入估值图片。"
+                ),
+                severity="warning",
+                related_fund_code=code,
+                related_fund_name=name,
+                source="alert_scanner",
+            )
+            alerts_created += 1
+        except Exception as e:
+            logger.debug(f"[alert_scanner] 估值失败 alert 创建失败 {code}: {e}")
+
+    logger.info(f"[alert_scanner] 估值查询失败扫描：{len(rows)} 个指数失败，生成 {alerts_created} 个 alert")
+    return {"alerts_created": alerts_created, "failed_indexes": len(rows)}
+
+
 def run_periodic_scan() -> dict:
-    """定时扫描主入口，依次执行 5 个扫描函数。"""
+    """定时扫描主入口，依次执行 6 个扫描函数。"""
     if not _is_enabled("alerts.proactive_scan_enabled", True):
         return {"skipped": "disabled"}
 
@@ -562,6 +623,7 @@ def run_periodic_scan() -> dict:
         "portfolio": {},
         "watchlist": {},
         "health_score": {},
+        "valuation_failures": {},
     }
     try:
         results["verification"] = scan_and_verify_recommendations()
@@ -588,4 +650,9 @@ def run_periodic_scan() -> dict:
     except Exception as e:
         logger.warning(f"[alert_scanner] 健康分扫描失败: {e}")
         results["health_score"] = {"error": str(e)}
+    try:
+        results["valuation_failures"] = scan_valuation_failures()
+    except Exception as e:
+        logger.warning(f"[alert_scanner] 估值失败扫描失败: {e}")
+        results["valuation_failures"] = {"error": str(e)}
     return results

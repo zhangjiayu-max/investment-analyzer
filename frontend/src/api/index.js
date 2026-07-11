@@ -159,6 +159,16 @@ export function getUnifiedValuation(indexCode = null, metricType = '市盈率', 
   return api.get('/valuation/unified', { params })
 }
 
+/** 估值查询监控统计（数据源命中率、在线兜底次数、失败指数） */
+export function getValuationQueryStats(days = 7) {
+  return api.get('/valuation/query-stats', { params: { days } })
+}
+
+/** 手动触发在线估值查询（akshare → 天天基金） */
+export function onlineValuationQuery(indexCode, metricType = '市盈率') {
+  return api.get(`/valuation/online-query/${indexCode}`, { params: { metric_type: metricType } })
+}
+
 /** AI 债券配置推荐 */
 export function getBondRecommend() {
   return api.post('/bond/ai-recommend')

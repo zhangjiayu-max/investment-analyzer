@@ -111,13 +111,13 @@ def analyze_fund(fund_code: str, user_valuation: dict = None) -> dict:
 
             for m in matches:
                 code = m["index_code"]
-                pe_data = get_best_valuation(code, "市盈率")
+                pe_data = get_best_valuation(code, "市盈率", query_source="portfolio")
                 if pe_data and pe_data.get("current_value") is not None:
                     pe_val = pe_data["current_value"]
                     pe_pct = pe_data.get("percentile")
                     index_code = code
                     index_name = pe_data.get("index_name", m.get("index_name", ""))
-                pb_data = get_best_valuation(code, "市净率")
+                pb_data = get_best_valuation(code, "市净率", query_source="portfolio")
                 if pb_data and pb_data.get("current_value") is not None:
                     pb_val = pb_data["current_value"]
                     pb_pct = pb_data.get("percentile")

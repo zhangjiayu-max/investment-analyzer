@@ -90,6 +90,8 @@ function eventTypeIcon(a) {
   if (a.alert_type && a.alert_type.startsWith('watchlist_')) return 'bookmark'
   // 健康分预警
   if (a.alert_type === 'health_score_low') return 'health'
+  // 估值查询失败预警
+  if (a.alert_type === 'valuation_query_failed') return 'valuation'
   return null
 }
 
