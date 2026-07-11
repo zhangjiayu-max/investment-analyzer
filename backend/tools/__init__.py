@@ -322,6 +322,18 @@ TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "query_smart_add_plan",
+            "description": "查询用户当前的智能补仓计划（z-score 加权定投 + 金字塔补仓双引擎）。返回每个持仓的补仓计划表、资金池使用情况、深套标的优先级排序。当用户问到补仓、加仓、定投、亏损回本、金字塔加仓、资金分配时调用，建议必须参考此计划。",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "generate_portfolio_alert",
             "description": "根据当前持仓状况、市场估值、新闻动态等，生成风险预警或加减仓提醒。当需要提醒用户注意持仓风险或加减仓机会时调用。",
             "parameters": {
@@ -1061,6 +1073,8 @@ def _execute_tool_impl(name: str, arguments: dict) -> str:
         return _query_transaction_history(arguments)
     elif name == "analyze_portfolio_diversification":
         return _analyze_portfolio_diversification(arguments)
+    elif name == "query_smart_add_plan":
+        return _query_smart_add_plan(arguments)
     elif name == "generate_portfolio_alert":
         return _generate_portfolio_alert(arguments)
     elif name == "get_bond_yield_curve":
@@ -2062,6 +2076,43 @@ def _analyze_portfolio_diversification(args: dict) -> str:
     tx_summary = get_transaction_summary()
     result = {**div, "transaction_summary": tx_summary}
     return json.dumps(result, ensure_ascii=False)
+
+
+def _query_smart_add_plan(args: dict) -> str:
+    """查询用户当前的智能补仓计划。"""
+    from services.smart_add_planner import generate_smart_add_plan
+    try:
+        result = generate_smart_add_plan("default")
+        # 精简返回，避免 token 过大
+        summary = result.get("summary", {})
+        plans = []
+        for p in result.get("plans", []):
+            plans.append({
+                "fund_code": p.get("fund_code"),
+                "fund_name": p.get("fund_name"),
+                "profit_rate_pct": p.get("profit_rate_pct"),
+                "position_pct": p.get("position_pct"),
+                "valuation": p.get("valuation"),
+                "engine1": p.get("engine1"),
+                "pyramid": {
+                    "released_amount": p.get("pyramid", {}).get("released_amount"),
+                    "remaining_amount": p.get("pyramid", {}).get("remaining_amount"),
+                    "triggered_tiers": p.get("pyramid", {}).get("triggered_tiers"),
+                    "next_trigger": p.get("pyramid", {}).get("next_trigger"),
+                } if p.get("pyramid") else None,
+                "safety": p.get("safety"),
+            })
+        priority_list = result.get("portfolio_view", {}).get("priority_list", [])
+        return json.dumps({
+            "enabled": result.get("enabled"),
+            "summary": summary,
+            "plans": plans,
+            "priority_list": priority_list,
+            "config": result.get("config"),
+        }, ensure_ascii=False, default=str)
+    except Exception as e:
+        logger.warning(f"[tool] query_smart_add_plan 失败: {e}")
+        return json.dumps({"error": str(e)}, ensure_ascii=False)
 
 
 def _generate_portfolio_alert(args: dict) -> str:

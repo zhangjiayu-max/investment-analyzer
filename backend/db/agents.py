@@ -396,17 +396,24 @@ def _init_wealth_specialists(conn):
             "name": "基金分析师",
             "description": "持仓穿透 + 业绩归因 + 同类对比 + 规模影响分析",
             "icon": "chart",
-            "tools": ["search_knowledge", "query_valuation", "query_portfolio", "yingmi_latest_quotations",
+            "tools": ["search_knowledge", "query_valuation", "query_portfolio", "query_fund_info",
+                      "yingmi_latest_quotations",
                       "ttfund_fund_manager", "ttfund_fund_nav", "ttfund_fund_condition", "eastmoney_finance_data"],
             "system_prompt": (
                 "## 人设\n"
-                "你是专业的基金分析师，擅长通过持仓穿透、业绩归因、同类对比和规模影响分析，"
+                "你是专业的基金分析师，擅长通过持仓穿透、业绩归因、估值匹配、同类对比和规模影响分析，"
                 "为用户提供基金层面的深度分析。\n\n"
                 "## 分析框架（必须全面执行）\n"
-                "### 持仓穿透分析\n"
-                "- 查看基金重仓股/持仓结构，判断风格漂移\n"
-                "- 分析持仓集中度、行业分布\n"
-                "- 评估持仓与基金主题的匹配度\n\n"
+                "### 持仓穿透分析（必须调用 query_fund_info）\n"
+                "- 调用 query_fund_info 查看基金重仓股/债券持仓结构，判断风格漂移\n"
+                "- 分析持仓集中度、行业分布、可转债仓位等\n"
+                "- 评估持仓与基金主题的匹配度\n"
+                "- **禁止推测**：持仓数据必须来自工具查询，不可臆测可转债仓位\n\n"
+                "### 估值匹配分析（必须调用 query_valuation）\n"
+                "- 查询基金跟踪指数的当前估值（PE/PB 百分位、z-score）\n"
+                "- 判断指数处于低估/合理/高估区间\n"
+                "- 结合估值水平给出「定投/加仓/持有/减仓」建议\n"
+                "- 如果基金无明确跟踪指数，查询其重仓股所在行业的指数估值\n\n"
                 "### 业绩归因分析\n"
                 "- 分解超额收益来源：选股 alpha vs 行业 beta\n"
                 "- 对比基准指数，计算跟踪误差\n"
@@ -487,6 +494,7 @@ def _init_wealth_specialists(conn):
             "description": "专注风险评估与控制，提供回撤分析、波动率评估、止损建议",
             "icon": "shield",
             "tools": ["search_knowledge", "query_portfolio", "query_valuation",
+                      "analyze_portfolio_diversification",
                       "yingmi_latest_quotations", "eastmoney_finance_data"],
             "system_prompt": None,  # 从同名 preset 行继承
             "knowledge_scope": '{"rag_types": ["valuation", "analysis", "book"], "kyc_dimensions": ["risk_tolerance", "loss_tolerance", "max_single_position_pct"]}',
@@ -497,6 +505,7 @@ def _init_wealth_specialists(conn):
             "description": "专注资产配置策略，提供股债配比、行业轮动、定投策略建议",
             "icon": "pie",
             "tools": ["search_knowledge", "query_portfolio", "query_valuation",
+                      "analyze_portfolio_diversification", "query_smart_add_plan",
                       "yingmi_latest_quotations", "eastmoney_finance_data"],
             "system_prompt": None,  # 从同名 preset 行继承
             "knowledge_scope": '{"rag_types": ["valuation", "article", "book"], "kyc_dimensions": ["risk_tolerance", "investment_horizon", "capital_scale", "target_equity_ratio"]}',
