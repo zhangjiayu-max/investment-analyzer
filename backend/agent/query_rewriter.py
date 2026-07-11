@@ -391,3 +391,61 @@ def rewrite_query(query: str, history: list[dict] | None = None,
                 return rewritten, {"rewritten": True, "method": "llm", "reason": reason}
 
     return query, {"rewritten": False, "reason": "rewrite_failed"}
+
+
+# ── 澄清续答融合 ────────────────────────────────────────────
+
+def fuse_clarified_query(original_query: str, user_answer: str, trace_id: str = "") -> str:
+    """将原始问题与用户澄清回答用 LLM 语义融合为一个自完整查询。
+
+    Args:
+        original_query: 用户原始问题
+        user_answer: 用户选择的澄清选项文本
+        trace_id: 追踪 ID
+
+    Returns:
+        融合后的查询（失败时降级为字符串拼接）
+    """
+    if not user_answer or not user_answer.strip():
+        return original_query
+
+    # 快速路径：回答较短且原始问题不含代词时直接拼接（省 LLM 调用）
+    if len(user_answer) < 10 and not any(
+        re.search(pat, original_query) for pat in PRONOUN_PATTERNS
+    ):
+        return f"{original_query} {user_answer}".strip()
+
+    prompt = f"""请将用户的原始问题与补充回答融合为一个完整的、自包含的投资分析问题。
+
+原始问题：{original_query}
+用户补充：{user_answer}
+
+要求：
+1. 融合后的问题应包含原始问题和补充回答的全部信息
+2. 语言通顺，不是机械拼接
+3. 保持投资分析的专业语境
+4. 只输出融合后的结果，不要解释，不要加引号"""
+
+    try:
+        from services.llm_service import _call_llm, MODEL
+        resp = _call_llm(
+            caller="query_fuser",
+            trace_id=trace_id,
+            model=MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0,
+            max_tokens=150,
+        )
+        fused = (resp.choices[0].message.content or "").strip()
+        if fused and 5 < len(fused) < 300:
+            fused = fused.strip("\"'""「」")
+            if fused and fused != original_query:
+                logger.info(
+                    f"[query_fuser:{trace_id}] 融合: '{original_query}' + '{user_answer}' → '{fused}'"
+                )
+                return fused
+    except Exception as e:
+        logger.warning(f"[query_fuser:{trace_id}] LLM 融合失败，降级为拼接: {e}")
+
+    # 降级：字符串拼接
+    return f"{original_query} {user_answer}".strip()

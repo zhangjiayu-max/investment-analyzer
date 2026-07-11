@@ -659,6 +659,9 @@ const tradeSuggestions = computed(() => {
       <div class="message-bubble markdown-body" v-html="renderMarkdown(msg.content)"></div>
       <!-- 交互式澄清选项 -->
       <div v-if="msg.clarification && msg.clarification.options?.length" class="clarification-options">
+        <div v-if="msg.clarification.reason" class="clarification-reason">
+          💡 {{ msg.clarification.reason }}
+        </div>
         <button
           v-for="(opt, idx) in msg.clarification.options"
           :key="`clarify-${idx}`"
@@ -1901,6 +1904,15 @@ const tradeSuggestions = computed(() => {
   flex-wrap: wrap;
   gap: 8px;
   margin-top: 10px;
+}
+.clarification-reason {
+  width: 100%;
+  font-size: 0.85em;
+  color: var(--color-text-secondary, #6b7280);
+  background: rgba(245, 158, 11, 0.08);
+  padding: 6px 10px;
+  border-radius: 6px;
+  margin-bottom: 4px;
 }
 .btn-clarify-option {
   padding: 6px 14px;

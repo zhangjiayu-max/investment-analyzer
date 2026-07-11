@@ -1803,11 +1803,20 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
                         "specialist_results": event.get("specialist_results", []),
                     })
 
+            elif event_type == "query_refined":
+                # P0-2: 持久化查询改写结果到消息元数据
+                update_message_content_and_metadata(stream_msg_id, None, {
+                    "original_query": event.get("original_query"),
+                    "refined_query": event.get("refined_query"),
+                    "rewrite_reason": event.get("rewrite_reason", ""),
+                })
+
             elif event_type == "clarification":
                 # 交互式澄清：转发给前端展示选项（checkpoint 已在 producer 存入消息元数据）
                 if not client_disconnected:
                     yield _sse_event("clarification", {
                         "question": event.get("question", ""),
+                        "reason": event.get("reason", ""),
                         "options": event.get("options", []),
                         "message_id": stream_msg_id,
                     })

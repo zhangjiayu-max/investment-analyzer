@@ -212,9 +212,10 @@ function handleStreamEvent(convId, event, callbacks = {}) {
       break
 
     case 'clarification':
-      // 交互式澄清：通知 ChatView 展示澄清问题 + 选项
+      // 交互式澄清：通知 ChatView 展示澄清问题 + 选项 + 原因
       state.streamStatus = 'clarifying'
-      state.statusMessage = data.question || '需要更多信息'
+      const clarifyReason = data.reason ? `（${data.reason}）` : ''
+      state.statusMessage = (data.question || '需要更多信息') + clarifyReason
       if (callbacks.onClarification) {
         callbacks.onClarification(convId, data, state)
       }

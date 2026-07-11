@@ -980,6 +980,16 @@ def execute_tool(name: str, arguments: dict, trace_id: str = "",
         logger.warning(f"工具 {name} 执行超时 ({duration_ms}ms > {effective_timeout}s)")
         result = json.dumps({"error": f"工具 {name} 执行超时 ({effective_timeout}s)", "error_category": "timeout"}, ensure_ascii=False)
 
+    # P1-3: 检测工具返回的 error 字段（HTTP 4xx/5xx 等业务错误未抛异常的情况）
+    if error_category == "none" and isinstance(result, str) and result:
+        try:
+            parsed = json.loads(result)
+            if isinstance(parsed, dict) and parsed.get("error"):
+                error_category = "tool_error"
+                logger.warning(f"工具 {name} 返回错误: {parsed.get('error', '')[:200]}")
+        except (json.JSONDecodeError, ValueError):
+            pass
+
     # 结果校验 + 1 次重试（开关控制）
     try:
         from db.config import get_config_bool

@@ -88,6 +88,7 @@ def _rule_based_understand(query: str) -> dict:
             "needed_info": [],
             "needs_clarification": False,
             "clarification_question": "",
+            "clarification_reason": "",
             "clarification_options": [],
             "complexity": "simple",
             "source": "rule",
@@ -104,6 +105,7 @@ def _rule_based_understand(query: str) -> dict:
                 "needed_info": needed_info,
                 "needs_clarification": False,
                 "clarification_question": "",
+                "clarification_reason": "",
                 "clarification_options": [],
                 "complexity": complexity,
                 "source": "rule",
@@ -117,6 +119,7 @@ def _rule_based_understand(query: str) -> dict:
         "needed_info": ["valuation", "portfolio"],
         "needs_clarification": False,
         "clarification_question": "",
+        "clarification_reason": "",
         "clarification_options": [],
         "complexity": complexity,
         "source": "rule",
@@ -192,6 +195,7 @@ _UNDERSTAND_PROMPT = """## 任务：理解用户问题的意图和信息需求
   "needed_info": ["valuation", "portfolio", "risk", "strategy", "article"],
   "needs_clarification": false,
   "clarification_question": "",
+  "clarification_reason": "",
   "clarification_options": [],
   "complexity": "simple|medium|complex"
 }}
@@ -223,12 +227,16 @@ _UNDERSTAND_PROMPT = """## 任务：理解用户问题的意图和信息需求
    - true: 问题模糊，需要先问用户（如"那这只基金怎么样"无上下文）
    - false: 问题清晰，可直接分析
 
-5. **clarification_options**：
+5. **clarification_reason**：
+   - 当 needs_clarification=true 时，简要说明为什么需要澄清（如"问题含代词无上下文"、"意图模糊缺少具体标的"）
+   - needs_clarification=false 时返回空字符串 ""
+
+6. **clarification_options**：
    - 当 needs_clarification=true 时，提供 2-4 个选项供用户快速选择
    - 选项应覆盖可能的意图方向（如 ["估值分析", "买卖建议", "风险评估"]）
    - needs_clarification=false 时返回空数组 []
 
-6. **complexity**：
+7. **complexity**：
    - simple: 单一标的、单一问题、长度<20字
    - medium: 1-2个标的、需要数据支撑、长度20-60字
    - complex: 多标的对比、嵌套问题、需要综合分析、长度>60字
@@ -308,6 +316,7 @@ def understand_query(
             "needed_info": [],
             "needs_clarification": True,
             "clarification_question": "请问您想了解什么？",
+            "clarification_reason": "用户输入为空，需要明确问题方向",
             "clarification_options": ["估值查询", "持仓分析", "买卖建议", "投资策略"],
             "complexity": "simple",
             "source": "rule",
@@ -323,6 +332,7 @@ def understand_query(
             "needed_info": [],
             "needs_clarification": False,
             "clarification_question": "",
+            "clarification_reason": "",
             "clarification_options": [],
             "complexity": "simple",
             "source": "rule",
@@ -346,6 +356,7 @@ def understand_query(
             llm_result.setdefault("needed_info", [])
             llm_result.setdefault("needs_clarification", False)
             llm_result.setdefault("clarification_question", "")
+            llm_result.setdefault("clarification_reason", "")
             llm_result.setdefault("clarification_options", [])
             llm_result.setdefault("complexity", _estimate_complexity_by_query(query))
             return llm_result

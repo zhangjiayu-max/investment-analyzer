@@ -769,6 +769,7 @@ async function handleSend() {
           lastMsg.streaming = false
           lastMsg.clarification = {
             options: data.options || [],
+            reason: data.reason || '',
             messageId: data.message_id,
           }
         } else {
@@ -778,6 +779,7 @@ async function handleSend() {
             created_at: new Date().toISOString(),
             clarification: {
               options: data.options || [],
+              reason: data.reason || '',
               messageId: data.message_id,
             },
           })
@@ -863,13 +865,13 @@ function handleClarifyAnswer(msg, answer) {
         if (lastMsg && lastMsg.role === 'assistant' && lastMsg.streaming) {
           lastMsg.content = data.question || '需要更多信息'
           lastMsg.streaming = false
-          lastMsg.clarification = { options: data.options || [], messageId: data.message_id }
+          lastMsg.clarification = { options: data.options || [], reason: data.reason || '', messageId: data.message_id }
         } else {
           messages.value.push({
             role: 'assistant',
             content: data.question || '需要更多信息',
             created_at: new Date().toISOString(),
-            clarification: { options: data.options || [], messageId: data.message_id },
+            clarification: { options: data.options || [], reason: data.reason || '', messageId: data.message_id },
           })
         }
         nextTick(() => scrollToBottom())

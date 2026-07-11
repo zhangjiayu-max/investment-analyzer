@@ -254,8 +254,21 @@ class ConversationQualityEvaluator:
         metrics["rag_rate"] = rag_rate
         details.append(f"RAG命中: {rag_hits}/{total_specialists} ({rag_rate:.0%})")
 
-        # 2. 工具调用成功率
-        successful_tools = sum(1 for tc in tool_calls if not tc.get("error"))
+        # 2. 工具调用成功率（检查 error 字段 + result 中的 error 关键词）
+        def _is_tool_failed(tc):
+            if tc.get("error"):
+                return True
+            result = str(tc.get("result", ""))
+            if result:
+                try:
+                    parsed = json.loads(result) if isinstance(result, str) else result
+                    if isinstance(parsed, dict) and parsed.get("error"):
+                        return True
+                except (json.JSONDecodeError, ValueError):
+                    pass
+            return False
+
+        successful_tools = sum(1 for tc in tool_calls if not _is_tool_failed(tc))
         total_tools = len(tool_calls)
         tool_success_rate = successful_tools / total_tools if total_tools > 0 else 1.0
         metrics["tool_success_rate"] = tool_success_rate
