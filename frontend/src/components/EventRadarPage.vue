@@ -11,7 +11,7 @@ import { ref, computed, onMounted } from 'vue'
 import {
   listMarketEvents, triggerEventRadarScan, triggerEventRadarVerify, getEventRadarAccuracy,
   listWatchlist, addToWatchlist, removeWatchlistItem, refreshWatchlistNavs,
-  triggerWatchlistScan,
+  triggerWatchlistScan, patrolWatchlist, updateWatchlistItem,
 } from '../api'
 import Icon from './ui/Icon.vue'
 import { useToast } from '../composables/useToast'
@@ -26,7 +26,11 @@ const scanning = ref(false)
 const verifying = ref(false)
 const refreshingNavs = ref(false)
 const scanningWatchlist = ref(false)
+const patrolling = ref(false)
 const accuracy = ref(null)
+// 编辑目标价/目标分位
+const editingId = ref(null)
+const editForm = ref({ target_price: '', target_percentile: '' })
 const activeFilter = ref('all') // all / holding_impact / watchlist_impact / opportunity / market_watch
 const activeStatus = ref('active') // active / all / materialized / expired
 
@@ -104,8 +108,35 @@ async function loadWatchlist() {
   try {
     const { data } = await listWatchlist('watching')
     watchlist.value = data?.items || []
+    // 自动巡检刷新估值分位（静默，不弹 toast）
+    if (watchlist.value.length) autoPatrol()
   } catch (e) {
     useToast().showToast('加载关注列表失败', 'error')
+  }
+}
+
+/** 静默巡检：刷新估值分位，更新 watchlist 数据 */
+async function autoPatrol() {
+  if (patrolling.value) return
+  patrolling.value = true
+  try {
+    const { data } = await patrolWatchlist()
+    // 用巡检结果更新当前 watchlist 的 current_percentile
+    const patrolMap = {}
+    for (const item of data?.all_items || []) {
+      patrolMap[item.id] = item
+    }
+    watchlist.value = watchlist.value.map(w => {
+      const p = patrolMap[w.id]
+      if (!p) return w
+      return {
+        ...w,
+        current_percentile: p.current_percentile ?? w.current_percentile,
+        current_nav: p.current_nav ?? w.current_nav,
+      }
+    })
+  } catch { /* 静默失败 */ } finally {
+    patrolling.value = false
   }
 }
 
@@ -151,14 +182,18 @@ async function loadAccuracy() {
   } catch { /* 静默失败 */ }
 }
 
-async function handleAddToWatchlist(fund) {
+async function handleAddToWatchlist(fund, evt) {
   try {
+    // 把来源事件和候选理由写入 notes，让用户知道"为什么关注这只基金"
+    const eventTitle = evt?.title ? `来自事件「${evt.title}」` : '来自事件雷达候选基金'
+    const reason = fund.match_reason ? `；${fund.match_reason}` : ''
+    const direction = evt?.direction ? `；影响：${directionLabel(evt.direction).text}` : ''
     await addToWatchlist({
       fund_code: fund.fund_code,
       fund_name: fund.fund_name,
       index_code: fund.index_code || '',
       index_name: fund.index_name || '',
-      notes: `来自事件雷达候选基金`,
+      notes: `${eventTitle}${direction}${reason}`,
     })
     useToast().showToast(`已加入关注：${fund.fund_name}`, 'success')
     if (activeTab.value === 'watchlist') await loadWatchlist()
@@ -176,6 +211,30 @@ async function handleRemoveWatchlist(item) {
     await loadWatchlist()
   } catch (e) {
     useToast().showToast('移除失败', 'error')
+  }
+}
+
+/** 打开目标编辑面板 */
+function startEditTarget(item) {
+  editingId.value = item.id
+  editForm.value = {
+    target_price: item.target_price || '',
+    target_percentile: item.target_percentile || '',
+  }
+}
+
+/** 保存目标价/分位 */
+async function saveTarget(item) {
+  try {
+    const payload = {}
+    if (editForm.value.target_price !== '') payload.target_price = parseFloat(editForm.value.target_price)
+    if (editForm.value.target_percentile !== '') payload.target_percentile = parseFloat(editForm.value.target_percentile)
+    await updateWatchlistItem(item.id, payload)
+    useToast().showToast('目标已更新', 'success')
+    editingId.value = null
+    await loadWatchlist()
+  } catch (e) {
+    useToast().showToast('保存失败: ' + (e?.response?.data?.detail || e.message), 'error')
   }
 }
 
@@ -262,14 +321,24 @@ function directionLabel(d) {
 
 /** 判断关注基金当前是否处于上车信号状态 */
 function watchlistSignalState(item) {
-  if (!item.current_nav) return { state: 'no_data', label: '无净值', cls: 'sig-neutral' }
-  if (item.target_price && parseFloat(item.current_nav) <= parseFloat(item.target_price)) {
+  // 有净值时优先判断目标价
+  if (item.current_nav && item.target_price && parseFloat(item.current_nav) <= parseFloat(item.target_price)) {
     return { state: 'target_hit', label: '目标价到位', cls: 'sig-hit' }
   }
+  // 目标分位到位
   if (item.target_percentile && item.current_percentile !== null && item.current_percentile !== undefined) {
     if (parseFloat(item.current_percentile) <= parseFloat(item.target_percentile)) {
       return { state: 'low_percentile', label: '估值低分位', cls: 'sig-hit' }
     }
+  }
+  // 未设目标时，估值 ≤20% 直接显示低估值信号
+  if (!item.target_price && !item.target_percentile && item.current_percentile !== null && item.current_percentile !== undefined) {
+    if (parseFloat(item.current_percentile) <= 20) {
+      return { state: 'low_percentile', label: '低估值区', cls: 'sig-hit' }
+    }
+  }
+  if (!item.current_nav && item.current_percentile === null) {
+    return { state: 'no_data', label: '无数据', cls: 'sig-neutral' }
   }
   return { state: 'waiting', label: '等待到位', cls: 'sig-waiting' }
 }
@@ -488,7 +557,7 @@ onMounted(() => {
                       <span class="candidate-name">{{ c.fund_name }}</span>
                       <span class="candidate-reason">{{ c.match_reason }}</span>
                     </div>
-                    <button class="btn-watch-add" @click="handleAddToWatchlist(c)" title="加入关注列表">
+                    <button class="btn-watch-add" @click="handleAddToWatchlist(c, evt)" title="加入关注列表">
                       <Icon name="bookmark-plus" size="13" />
                       <span>关注</span>
                     </button>
@@ -542,9 +611,28 @@ onMounted(() => {
             </span>
           </div>
           <div class="wl-card-body">
+            <!-- 来源事件说明（让用户知道为什么关注这只基金） -->
+            <div v-if="item.notes" class="wl-source-row">
+              <Icon name="info" size="11" class="wl-source-icon" />
+              <span class="wl-source-text">{{ item.notes }}</span>
+            </div>
             <div class="wl-data-row">
               <span class="wl-data-label">当前净值</span>
-              <span class="wl-data-value">{{ item.current_nav ? Number(item.current_nav).toFixed(4) : '—' }}</span>
+              <span class="wl-data-value">{{ item.current_nav ? Number(item.current_nav).toFixed(4) : (patrolling ? '查询中...' : '—') }}</span>
+            </div>
+            <div class="wl-data-row">
+              <span class="wl-data-label">估值分位</span>
+              <span
+                v-if="item.current_percentile !== null && item.current_percentile !== undefined"
+                class="wl-data-value"
+                :class="{ 'value-hit': parseFloat(item.current_percentile) <= 20 }"
+              >
+                {{ Number(item.current_percentile).toFixed(0) }}%
+                <span v-if="parseFloat(item.current_percentile) <= 20" class="wl-pct-hint">低估</span>
+                <span v-else-if="parseFloat(item.current_percentile) <= 40" class="wl-pct-hint">偏低</span>
+                <span v-else-if="parseFloat(item.current_percentile) >= 80" class="wl-pct-hint wl-pct-high">高估</span>
+              </span>
+              <span v-else class="wl-data-value wl-value-mute">{{ patrolling ? '查询中...' : '无数据' }}</span>
             </div>
             <div class="wl-data-row">
               <span class="wl-data-label">目标价</span>
@@ -560,18 +648,35 @@ onMounted(() => {
               <span class="wl-data-label">跟踪指数</span>
               <span class="wl-data-value wl-index-name">{{ item.index_name }}</span>
             </div>
-            <div v-if="item.notes" class="wl-data-row">
-              <span class="wl-data-label">备注</span>
-              <span class="wl-data-value wl-notes">{{ item.notes }}</span>
+            <!-- 编辑目标面板 -->
+            <div v-if="editingId === item.id" class="wl-edit-panel">
+              <div class="wl-edit-row">
+                <label>目标价</label>
+                <input v-model="editForm.target_price" type="number" step="0.0001" placeholder="如 1.5000" class="wl-edit-input" />
+              </div>
+              <div class="wl-edit-row">
+                <label>目标分位(%)</label>
+                <input v-model="editForm.target_percentile" type="number" step="1" placeholder="如 20" class="wl-edit-input" />
+              </div>
+              <div class="wl-edit-actions">
+                <button class="btn-wl-save" @click="saveTarget(item)">保存</button>
+                <button class="btn-wl-cancel" @click="editingId = null">取消</button>
+              </div>
             </div>
           </div>
           <div class="wl-card-footer">
             <span v-if="item.nav_updated_at" class="wl-updated">更新于 {{ item.nav_updated_at.slice(5, 16) }}</span>
             <span v-else class="wl-updated wl-updated-stale">未刷新</span>
-            <button class="btn-wl-remove" @click="handleRemoveWatchlist(item)">
-              <Icon name="trash-2" size="12" />
-              <span>移除</span>
-            </button>
+            <div class="wl-footer-actions">
+              <button class="btn-wl-edit" @click="startEditTarget(item)" v-if="editingId !== item.id">
+                <Icon name="target" size="12" />
+                <span>设目标</span>
+              </button>
+              <button class="btn-wl-remove" @click="handleRemoveWatchlist(item)">
+                <Icon name="trash-2" size="12" />
+                <span>移除</span>
+              </button>
+            </div>
           </div>
         </div>
       </div>
@@ -1351,6 +1456,125 @@ onMounted(() => {
   font-size: 0.72rem;
   color: var(--color-text-tertiary);
   font-style: italic;
+}
+
+/* 来源事件说明 */
+.wl-source-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.35rem;
+  padding: 0.4rem 0.55rem;
+  background: rgba(59,130,246,0.05);
+  border-radius: 4px;
+  border-left: 2px solid rgba(59,130,246,0.3);
+}
+.wl-source-icon { color: #2563eb; flex-shrink: 0; margin-top: 1px; }
+.wl-source-text {
+  font-size: 0.72rem;
+  color: var(--color-text-secondary);
+  line-height: 1.5;
+}
+
+/* 估值分位提示 */
+.wl-pct-hint {
+  font-size: 0.65rem;
+  padding: 0.1rem 0.35rem;
+  border-radius: 2px;
+  margin-left: 0.3rem;
+  background: rgba(22,163,74,0.1);
+  color: #16a34a;
+  font-weight: 600;
+}
+.wl-pct-high {
+  background: rgba(220,38,38,0.1);
+  color: #dc2626;
+}
+.wl-value-mute {
+  color: var(--color-text-tertiary);
+  font-style: italic;
+}
+
+/* 编辑目标面板 */
+.wl-edit-panel {
+  margin-top: 0.4rem;
+  padding: 0.6rem;
+  background: var(--color-bg-secondary);
+  border-radius: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+.wl-edit-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.75rem;
+}
+.wl-edit-row label {
+  width: 75px;
+  color: var(--color-text-tertiary);
+  flex-shrink: 0;
+}
+.wl-edit-input {
+  flex: 1;
+  padding: 0.3rem 0.5rem;
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+  background: var(--color-bg-card);
+  color: var(--color-text-primary);
+  font-size: 0.78rem;
+  font-family: var(--font-jet);
+}
+.wl-edit-input:focus {
+  outline: none;
+  border-color: var(--color-primary);
+}
+.wl-edit-actions {
+  display: flex;
+  gap: 0.4rem;
+  justify-content: flex-end;
+}
+.btn-wl-save {
+  padding: 0.25rem 0.7rem;
+  border: none;
+  background: var(--color-primary);
+  color: white;
+  border-radius: 4px;
+  font-size: 0.72rem;
+  cursor: pointer;
+}
+.btn-wl-save:hover { opacity: 0.9; }
+.btn-wl-cancel {
+  padding: 0.25rem 0.7rem;
+  border: 1px solid var(--color-border);
+  background: var(--color-bg-card);
+  color: var(--color-text-secondary);
+  border-radius: 4px;
+  font-size: 0.72rem;
+  cursor: pointer;
+}
+
+/* 底部操作区 */
+.wl-footer-actions {
+  display: flex;
+  gap: 0.3rem;
+}
+.btn-wl-edit {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.2rem;
+  padding: 0.2rem 0.5rem;
+  border: none;
+  background: transparent;
+  color: var(--color-text-tertiary);
+  font-size: 0.7rem;
+  cursor: pointer;
+  border-radius: 3px;
+  transition: all 0.15s;
+}
+.btn-wl-edit:hover {
+  color: var(--color-primary);
+  background: rgba(59,130,246,0.06);
 }
 
 .wl-card-footer {
