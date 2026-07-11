@@ -19,7 +19,7 @@ import re
 import sqlite3
 from pathlib import Path
 
-from db._conn import DB_PATH
+from db._conn import DB_PATH, _get_conn as _get_db_conn
 from services.rag_enhanced import expand_query, lightweight_rerank, get_rrf_params
 
 logger = logging.getLogger(__name__)
@@ -69,8 +69,7 @@ def get_rag_config(key: str, default=None):
     if now - _rag_config_cache_ts > _RAG_CONFIG_CACHE_TTL:
         _rag_config_cache.clear()
         try:
-            conn = sqlite3.connect(str(DB_PATH))
-            conn.row_factory = sqlite3.Row
+            conn = _get_db_conn()
             rows = conn.execute("SELECT key, value FROM rag_config").fetchall()
             for row in rows:
                 _rag_config_cache[row["key"]] = row["value"]
@@ -471,10 +470,8 @@ def _tokenize(text: str) -> str:
 
 
 def _get_conn() -> sqlite3.Connection:
-    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(DB_PATH))
-    conn.row_factory = sqlite3.Row
-    return conn
+    """统一使用 db._conn 的实现（WAL 模式 + busy_timeout），避免 database is locked。"""
+    return _get_db_conn()
 
 
 def init_fts():

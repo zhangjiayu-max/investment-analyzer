@@ -13,8 +13,8 @@ def _get_conn() -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     # 启用 WAL 模式：允许读写并发，减少锁等待
     conn.execute("PRAGMA journal_mode=WAL")
-    # 设置 busy_timeout 更友好地处理锁竞争
-    conn.execute("PRAGMA busy_timeout=5000")
+    # 设置 busy_timeout 更友好地处理锁竞争（15秒，适应并发写入密集场景）
+    conn.execute("PRAGMA busy_timeout=15000")
     return conn
 
 

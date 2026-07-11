@@ -21,6 +21,9 @@ def _normalize_query(query: str) -> str:
     """归一化 query：去标点、去多余空白、转小写。"""
     if not query:
         return ""
+    # 类型守卫：防止 list/tuple 等非字符串类型传入导致 category() 报错
+    if not isinstance(query, str):
+        query = str(query) if query else ""
     # 去除中英文标点（用字符串 translate 更安全，避免正则字符类转义问题）
     import unicodedata
     # 保留字母数字和空格，其他标点（中英文）都替换为空格
