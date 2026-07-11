@@ -614,7 +614,12 @@ def _phase_preprocess(
         from agent.query_rewriter import rewrite_query, needs_rewrite
         need_rewrite, reason = needs_rewrite(query)
         if need_rewrite:
-            refined_query = rewrite_query(query, history)
+            # rewrite_query 返回 (query, meta_dict)，只取 query 部分
+            rewrite_result = rewrite_query(query, history)
+            if isinstance(rewrite_result, tuple):
+                refined_query = rewrite_result[0]
+            else:
+                refined_query = rewrite_result
             rewrite_reason = reason
             logger.info(f"[pipeline] Query 改写: '{query}' → '{refined_query}'")
     except Exception as e:
