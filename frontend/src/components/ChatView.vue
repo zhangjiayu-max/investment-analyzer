@@ -206,6 +206,7 @@ async function loadConversations() {
     conversations.value = data.conversations || []
   } catch (e) {
     console.error('Failed to load conversations:', e)
+    showToast('加载对话列表失败', 'error')
   }
 }
 
@@ -556,6 +557,7 @@ async function loadMessages(convId) {
     scrollToBottom()
   } catch (e) {
     console.error('Failed to load messages:', e)
+    showToast('加载历史消息失败', 'error')
     messages.value = []
   }
 }
@@ -564,7 +566,7 @@ async function loadMessageEvalStatus(messageId) {
   if (!selectedConv.value?.id) return
   try {
     const { data } = await getConversationEvaluation(selectedConv.value.id, messageId)
-    if (data.ok && data.evaluation) {
+    if (data && data.evaluation) {
       messageEvalStates.value[messageId] = {
         score: data.evaluation.auto_score || 0,
         loading: false,
@@ -1358,7 +1360,7 @@ async function loadMessageEval(messageId) {
   messageEvalStates.value[messageId] = { score: 0, loading: true, expanded: true }
   try {
     const { data } = await getConversationEvaluation(selectedConv.value.id, messageId)
-    if (data.ok && data.evaluation) {
+    if (data && data.evaluation) {
       messageEvalStates.value[messageId] = {
         score: data.evaluation.auto_score || 0,
         loading: false,
@@ -1378,7 +1380,7 @@ async function triggerMessageEval(messageId) {
   messageEvalStates.value[messageId] = { score: 0, loading: true, expanded: true }
   try {
     const { data } = await evaluateConversation(selectedConv.value.id, messageId)
-    if (data.ok && data.evaluation) {
+    if (data && data.evaluation) {
       messageEvalStates.value[messageId] = {
         score: data.evaluation.auto_score || 0,
         loading: false,
@@ -1406,7 +1408,7 @@ async function triggerLLMEval(messageId) {
   }
   try {
     const { data } = await evaluateConversationWithLLM(selectedConv.value.id, messageId)
-    if (data.ok && data.evaluation) {
+    if (data && data.evaluation) {
       const llmEval = data.evaluation
       messageEvalStates.value[messageId] = {
         score: llmEval.total_score || 0,
@@ -1528,7 +1530,7 @@ async function saveMessageAsDecision(msg, index) {
           target_name: '',
           review_days: 30,
         })
-        if (data?.ok) {
+        if (data && data.id) {
           showToast(`已保存为决策草案 #${data.id}`, 'success')
         } else {
           showToast('保存决策草案失败', 'error')
