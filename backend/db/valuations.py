@@ -1,6 +1,7 @@
 """估值数据 + 指数信息 CRUD。"""
 
 import logging
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from datetime import date, datetime, timedelta
 
 from db._conn import _get_conn
@@ -476,6 +477,7 @@ def get_best_valuation(
     metric_type: str = "市盈率",
     query_source: str = "unknown",
     trace_id: str = None,
+    enable_online: bool = True,
 ) -> dict | None:
     """获取最佳估值数据（智能降级 + 在线兜底 + 监控日志）。
 
@@ -490,6 +492,8 @@ def get_best_valuation(
         metric_type: 指标类型（市盈率/市净率）
         query_source: 查询来源（portfolio/valuation_page/agent/chat/alert_scanner），用于监控
         trace_id: 追踪ID，用于监控
+        enable_online: 是否启用在线兜底。批量调用场景（如 smart_add_planner 循环多个持仓）
+                       应传 False 以避免累积超时。默认 True。
 
     返回:
         包含估值数据的字典，带 data_source、is_expired、days_old 字段；
@@ -576,10 +580,11 @@ def get_best_valuation(
                              0, is_expired, int((datetime.now() - start_ts).total_seconds() * 1000), trace_id, None)
         return detailed_expired
 
-    # 4. 在线兜底：akshare → 天天基金
-    online_result = _online_fallback(index_code, metric_type, start_ts, query_source, trace_id)
-    if online_result:
-        return online_result
+    # 4. 在线兜底：akshare → 天天基金（仅在 enable_online=True 时触发）
+    if enable_online:
+        online_result = _online_fallback(index_code, metric_type, start_ts, query_source, trace_id)
+        if online_result:
+            return online_result
 
     # 5. 全部失败
     error_msg = "all sources failed (local + akshare + ttfund)"
@@ -591,7 +596,10 @@ def get_best_valuation(
 
 def _online_fallback(index_code: str, metric_type: str, start_ts: datetime,
                      query_source: str, trace_id: str = None) -> dict | None:
-    """在线兜底：akshare → 天天基金。结果仅内存缓存，不入库。"""
+    """在线兜底：akshare → 天天基金。结果仅内存缓存，不入库。
+
+    使用 ThreadPoolExecutor 实现真正的超时控制，避免 akshare/MCP 调用卡住主线程。
+    """
     from db.config import get_config_bool, get_config_int
 
     if not get_config_bool("valuation.online_fallback_enabled", True):
@@ -611,10 +619,17 @@ def _online_fallback(index_code: str, metric_type: str, start_ts: datetime,
             del _online_cache[cache_key]
 
     timeout_ms = get_config_int("valuation.online_fallback_timeout_ms", 5000)
+    timeout_s = max(timeout_ms / 1000.0, 1.0)
 
-    # 渠道1：akshare 中证官方
+    # 渠道1：akshare 中证官方（带真正超时）
     try:
-        online_data = _query_akshare_valuation(index_code, metric_type, timeout_ms)
+        with ThreadPoolExecutor(max_workers=1) as ex:
+            fut = ex.submit(_query_akshare_valuation, index_code, metric_type, timeout_ms)
+            try:
+                online_data = fut.result(timeout=timeout_s)
+            except FuturesTimeoutError:
+                logger.warning(f"[valuation] akshare 查询超时 {index_code} ({timeout_s}s)")
+                online_data = None
         if online_data:
             online_data["data_source"] = "online"
             online_data["source"] = "akshare"
@@ -632,9 +647,15 @@ def _online_fallback(index_code: str, metric_type: str, start_ts: datetime,
     except Exception as e:
         logger.debug(f"[valuation] akshare 兜底失败 {index_code}: {e}")
 
-    # 渠道2：天天基金 MCP
+    # 渠道2：天天基金 MCP（带真正超时）
     try:
-        online_data = _query_ttfund_valuation(index_code, metric_type, timeout_ms)
+        with ThreadPoolExecutor(max_workers=1) as ex:
+            fut = ex.submit(_query_ttfund_valuation, index_code, metric_type, timeout_ms)
+            try:
+                online_data = fut.result(timeout=timeout_s)
+            except FuturesTimeoutError:
+                logger.warning(f"[valuation] ttfund 查询超时 {index_code} ({timeout_s}s)")
+                online_data = None
         if online_data:
             online_data["data_source"] = "online"
             online_data["source"] = "ttfund"
