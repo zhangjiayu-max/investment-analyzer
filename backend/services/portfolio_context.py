@@ -252,12 +252,12 @@ def build_valuation_summary() -> str:
 
         lines = ["### 当前市场估值"]
 
-        # R5: 检测过期估值数据
+        # R5: 检测过期估值数据（仅查本地，不触发在线兜底，避免批量场景串行超时）
         expired_warnings = []
         for code, info in index_map.items():
             try:
                 from db.valuations import get_best_valuation
-                best = get_best_valuation(code, "市盈率", query_source="portfolio")
+                best = get_best_valuation(code, "市盈率", query_source="portfolio", enable_online=False)
                 if best and best.get("days_old", 0) > 7:
                     expired_warnings.append(f"{info['name']} PE: {best['days_old']}天前 ({best.get('snapshot_date','?')})")
                 elif best and best.get("days_old", 0) > 3:
