@@ -676,128 +676,154 @@ def _phase_info_gather(
         "info_gaps": [],
     }
 
-    # 1. RAG 检索（子查询展开 + intent 驱动 content_types + rag_logs 日志）
-    try:
-        from services.rag import build_rag_context_with_details, log_rag_search
-        enhanced_query = _enhance_rag_query(state.refined_query, query_info)
-        content_types = _map_content_types(query_info.get("needed_info", []))
+    # 并行执行 RAG 检索 + 持仓 + 估值 + 记忆（省 3-5 秒串行等待）
+    from concurrent.futures import ThreadPoolExecutor
 
-        # 子查询展开（开关控制）
-        sub_queries = [enhanced_query]
+    def _rag_task():
+        """RAG 检索（子查询展开 + intent 驱动 content_types + rag_logs 日志）"""
         try:
-            sub_expansion_enabled = get_config_bool("rag.subquery_expansion_enabled", True)
-        except Exception:
-            sub_expansion_enabled = True
-        if sub_expansion_enabled:
+            from services.rag import build_rag_context_with_details, log_rag_search
+            enhanced_query = _enhance_rag_query(state.refined_query, query_info)
+            content_types = _map_content_types(query_info.get("needed_info", []))
+
+            # 子查询展开（开关控制）
+            sub_queries = [enhanced_query]
             try:
-                from agent.query_rewriter import expand_query
-                expanded = expand_query(enhanced_query)
-                if expanded and len(expanded) > 1:
-                    sub_queries = expanded[:4]  # 最多 4 个子查询
-                    logger.info(f"[pipeline] 子查询展开: {len(sub_queries)} 个 → {sub_queries}")
-            except Exception as e:
-                logger.debug(f"[pipeline] 子查询展开跳过: {e}")
+                sub_expansion_enabled = get_config_bool("rag.subquery_expansion_enabled", True)
+            except Exception:
+                sub_expansion_enabled = True
+            if sub_expansion_enabled:
+                try:
+                    from agent.query_rewriter import expand_query
+                    expanded = expand_query(enhanced_query)
+                    if expanded and len(expanded) > 1:
+                        sub_queries = expanded[:4]  # 最多 4 个子查询
+                        logger.info(f"[pipeline] 子查询展开: {len(sub_queries)} 个 → {sub_queries}")
+                except Exception as e:
+                    logger.debug(f"[pipeline] 子查询展开跳过: {e}")
 
-        # 多路检索
-        all_rag_results = []
-        rag_keywords = []
-        total_fts = 0
-        total_chroma = 0
-        for sq in sub_queries:
-            rag_data = build_rag_context_with_details(sq, limit=5, content_types=content_types)
-            if isinstance(rag_data, dict):
-                all_rag_results.extend(rag_data.get("results", []))
-                rag_keywords = rag_keywords or rag_data.get("keywords", [])
-                total_fts += rag_data.get("fts_count", 0)
-                total_chroma += rag_data.get("chroma_count", 0)
+            # 多路检索
+            all_rag_results = []
+            rag_keywords = []
+            total_fts = 0
+            total_chroma = 0
+            for sq in sub_queries:
+                rag_data = build_rag_context_with_details(sq, limit=5, content_types=content_types)
+                if isinstance(rag_data, dict):
+                    all_rag_results.extend(rag_data.get("results", []))
+                    rag_keywords = rag_keywords or rag_data.get("keywords", [])
+                    total_fts += rag_data.get("fts_count", 0)
+                    total_chroma += rag_data.get("chroma_count", 0)
 
-        # 去重（按 content_type + reference_id 二元组，与 rag.py 内部去重一致）
-        # P4 半修修复：去掉 title 维度，避免 _inject_valuation_data 生成的 title 与 FTS 索引 title 微小差异导致去重失效
-        seen = set()
-        deduped = []
-        for r in all_rag_results:
-            key = f"{r.get('content_type','')}:{r.get('reference_id','')}"
-            if key not in seen:
-                seen.add(key)
-                deduped.append(r)
+            # 去重（按 content_type + reference_id 二元组，与 rag.py 内部去重一致）
+            seen = set()
+            deduped = []
+            for r in all_rag_results:
+                key = f"{r.get('content_type','')}:{r.get('reference_id','')}"
+                if key not in seen:
+                    seen.add(key)
+                    deduped.append(r)
 
-        # 按分数排序（如果有 _score 字段）
-        deduped.sort(key=lambda x: float(x.get("_score", 0)), reverse=True)
-        results["rag"] = deduped
-        # 构建上下文（复用第一条的 context 或拼接）
-        if sub_queries and len(sub_queries) == 1:
-            results["rag_context"] = rag_data.get("context", "") if isinstance(rag_data, dict) else ""
-        else:
-            # 多子查询：简单拼接 top 结果
-            results["rag_context"] = _build_rag_context_from_results(deduped[:8])
+            # 按分数排序
+            deduped.sort(key=lambda x: float(x.get("_score", 0)), reverse=True)
 
-        logger.info(
-            f"[pipeline] RAG 检索完成: {len(deduped)} 条结果 "
-            f"(子查询 {len(sub_queries)}, FTS {total_fts}, Chroma {total_chroma})"
-        )
+            # 构建上下文
+            if sub_queries and len(sub_queries) == 1:
+                rag_context = rag_data.get("context", "") if isinstance(rag_data, dict) else ""
+            else:
+                rag_context = _build_rag_context_from_results(deduped[:8])
 
-        # P1: RAG 命中质量检测 — 最高分低于阈值时标记低质
-        max_score = max((float(r.get("_score", 0)) for r in deduped), default=0.0)
-        if deduped and max_score < 0.05:
-            results["rag_low_quality"] = True
-            logger.warning(
-                f"[pipeline] RAG 命中质量低: max_score={max_score:.4f} < 0.05, "
-                f"将提示专家基于工具数据分析"
+            logger.info(
+                f"[pipeline] RAG 检索完成: {len(deduped)} 条结果 "
+                f"(子查询 {len(sub_queries)}, FTS {total_fts}, Chroma {total_chroma})"
             )
-        elif not deduped:
-            results["rag_low_quality"] = True
-            logger.warning("[pipeline] RAG 无命中，将提示专家基于工具数据分析")
 
-        # P1: 低质时在 rag_context 追加提示，引导专家基于工具数据分析
-        if results.get("rag_low_quality"):
-            low_quality_hint = (
-                "\n\n⚠️ 注意：知识库未检索到高相关内容（命中分数偏低），"
-                "请优先通过工具调用获取最新新闻/行情/持仓数据进行分析，"
-                "不要过度依赖上述知识库片段。"
-            )
-            results["rag_context"] = (results.get("rag_context", "") or "") + low_quality_hint
+            # RAG 命中质量检测
+            max_score = max((float(r.get("_score", 0)) for r in deduped), default=0.0)
+            rag_low_quality = False
+            if deduped and max_score < 0.05:
+                rag_low_quality = True
+                logger.warning(
+                    f"[pipeline] RAG 命中质量低: max_score={max_score:.4f} < 0.05, "
+                    f"将提示专家基于工具数据分析"
+                )
+            elif not deduped:
+                rag_low_quality = True
+                logger.warning("[pipeline] RAG 无命中，将提示专家基于工具数据分析")
 
-        # 写 rag_logs 日志（补全 Pipeline 主路径的可观测性）
+            if rag_low_quality:
+                low_quality_hint = (
+                    "\n\n⚠️ 注意：知识库未检索到高相关内容（命中分数偏低），"
+                    "请优先通过工具调用获取最新新闻/行情/持仓数据进行分析，"
+                    "不要过度依赖上述知识库片段。"
+                )
+                rag_context = (rag_context or "") + low_quality_hint
+
+            # 写 rag_logs 日志
+            try:
+                log_rag_search(
+                    conversation_id=state.conversation_id,
+                    message_id=state.message_id,
+                    query=enhanced_query,
+                    keywords=rag_keywords,
+                    results=deduped[:10],
+                    content_types=content_types,
+                    fts_count=total_fts,
+                    chroma_count=total_chroma,
+                    trace_id=trace_id,
+                    rag_low_quality=rag_low_quality,
+                )
+            except Exception as log_err:
+                logger.debug(f"[pipeline] rag_logs 写入失败: {log_err}")
+
+            return {"rag": deduped, "rag_context": rag_context, "rag_low_quality": rag_low_quality}
+        except Exception as e:
+            logger.warning(f"[pipeline] RAG 检索失败: {e}")
+            return {"rag": [], "rag_context": "", "rag_low_quality": False}
+
+    def _portfolio_task():
+        """持仓摘要（含完整盈亏+交易记录+集中度）"""
         try:
-            log_rag_search(
-                conversation_id=state.conversation_id,
-                message_id=state.message_id,
-                query=enhanced_query,
-                keywords=rag_keywords,
-                results=deduped[:10],
-                content_types=content_types,
-                fts_count=total_fts,
-                chroma_count=total_chroma,
-                trace_id=trace_id,
-                rag_low_quality=bool(results.get("rag_low_quality", False)),
-            )
-        except Exception as log_err:
-            logger.debug(f"[pipeline] rag_logs 写入失败: {log_err}")
+            from services.portfolio_context import build_portfolio_context
+            return build_portfolio_context("default")
+        except Exception as e:
+            logger.debug(f"[pipeline] 持仓加载失败: {e}")
+            return ""
 
-    except Exception as e:
-        logger.warning(f"[pipeline] RAG 检索失败: {e}")
+    def _valuation_task():
+        """估值预取（基于 targets）"""
+        valuations = {}
+        targets = query_info.get("targets", [])
+        if targets:
+            for target in targets[:3]:
+                val = _lookup_valuation(target)
+                if val:
+                    valuations[target] = val
+        return valuations
 
-    # 2. 持仓摘要 — P0 修复：改用 build_portfolio_context，含完整盈亏+交易记录+集中度
-    try:
-        from services.portfolio_context import build_portfolio_context
-        results["portfolio"] = build_portfolio_context("default")
-    except Exception as e:
-        logger.debug(f"[pipeline] 持仓加载失败: {e}")
+    def _memory_task():
+        """用户记忆"""
+        try:
+            from agent.memory import build_user_memory_context
+            return build_user_memory_context("default")[:500]
+        except Exception as e:
+            logger.debug(f"[pipeline] 记忆加载失败: {e}")
+            return ""
 
-    # 3. 估值预取（基于 targets）
-    targets = query_info.get("targets", [])
-    if targets:
-        for target in targets[:3]:  # 最多预取 3 个标的
-            val = _lookup_valuation(target)
-            if val:
-                results["valuations"][target] = val
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        rag_future = pool.submit(_rag_task)
+        portfolio_future = pool.submit(_portfolio_task)
+        valuation_future = pool.submit(_valuation_task)
+        memory_future = pool.submit(_memory_task)
 
-    # 4. 用户记忆
-    try:
-        from agent.memory import build_user_memory_context
-        results["memory"] = build_user_memory_context("default")[:500]
-    except Exception as e:
-        logger.debug(f"[pipeline] 记忆加载失败: {e}")
+        rag_result = rag_future.result()
+        results["rag"] = rag_result["rag"]
+        results["rag_context"] = rag_result["rag_context"]
+        if rag_result.get("rag_low_quality"):
+            results["rag_low_quality"] = True
+        results["portfolio"] = portfolio_future.result()
+        results["valuations"] = valuation_future.result()
+        results["memory"] = memory_future.result()
 
     # 5. 信息缺口检测
     needed_info = set(query_info.get("needed_info", []))
@@ -1553,16 +1579,22 @@ def _phase_synthesis(
     specialists = execution_result.get("specialists", [])
     tool_calls = execution_result.get("tool_calls", [])
 
+    # P2 置信度校准：检测数据缺失信号
+    data_gaps = _detect_data_gaps(state, tool_calls, specialists, trace_id)
+
     # 单个专家：直接用其结果
     if len(specialists) <= 1:
         answer = specialists[0].get("analysis", "") if specialists else "无法生成分析"
-        confidence = _compute_confidence(reflection_result, 1)
+        confidence = _compute_confidence(
+            reflection_result, 1, conflict_count=0, data_gaps=data_gaps,
+        )
         return {
             "answer": answer,
             "cross_review": None,
             "arbitration": None,
             "specialist_count": len(specialists),
             "confidence": confidence,
+            "data_gaps": data_gaps,
         }
 
     # 多专家：调用 LLM 综合
@@ -1571,6 +1603,7 @@ def _phase_synthesis(
             query, specialists, blackboard, trace_id,
             reflection_result=reflection_result,
             debate_result=debate_result,
+            data_gaps=data_gaps,
         )
     except Exception as e:
         logger.error(f"[pipeline] 综合失败，降级拼接: {e}")
@@ -1583,8 +1616,10 @@ def _phase_synthesis(
     # P0-B: 收集持仓影响供前端展示
     impacts = blackboard.get_portfolio_impacts() if blackboard else []
 
-    # 综合置信度（基于 Reflection 调整 + 专家数 + 冲突数）
-    confidence = _compute_confidence(reflection_result, len(specialists), len(conflicts))
+    # 综合置信度（基于 Reflection 调整 + 专家数 + 冲突数 + 数据缺失）
+    confidence = _compute_confidence(
+        reflection_result, len(specialists), len(conflicts), data_gaps=data_gaps,
+    )
 
     return {
         "answer": answer,
@@ -1595,13 +1630,78 @@ def _phase_synthesis(
         "risk_vetoes": vetoes,
         "portfolio_impacts": impacts,
         "confidence": confidence,
+        "data_gaps": data_gaps,
     }
 
 
-def _compute_confidence(reflection_result: dict, specialist_count: int, conflict_count: int = 0) -> float:
+def _detect_data_gaps(
+    state: PipelineState, tool_calls: list, specialists: list, trace_id: str,
+) -> list:
+    """P2 置信度校准：检测数据缺失信号，返回数据缺口列表。
+
+    检测来源：
+    1. RAG 低质量标记（rag_low_quality）
+    2. query_valuation 工具返回 data_status=unavailable/partial 或 error
+    3. 专家分析文本中包含"数据缺失""无法获取"等关键词
+    """
+    gaps = []
+
+    # 1. RAG 低质量
+    try:
+        info_gather = state.get_phase_result(PipelinePhase.INFO_GATHER.value)
+        if info_gather and info_gather.get("rag_low_quality"):
+            gaps.append({"type": "rag_low_quality", "detail": "RAG 检索最高分<0.05，知识库参考价值低"})
+    except Exception:
+        pass
+
+    # 2. 扫描工具调用结果中的数据缺失信号
+    for tc in tool_calls or []:
+        name = tc.get("name", "")
+        preview = tc.get("result_preview", "") or ""
+
+        if name == "query_valuation":
+            # 检测 data_status 或 error
+            if "data_status" in preview and ("unavailable" in preview or "partial" in preview):
+                gaps.append({
+                    "type": "valuation_missing",
+                    "tool": name,
+                    "detail": f"估值工具返回数据缺失: {preview[:100]}",
+                })
+            elif '"error"' in preview or "未找到" in preview or "无法获取" in preview:
+                gaps.append({
+                    "type": "valuation_missing",
+                    "tool": name,
+                    "detail": f"估值工具返回错误: {preview[:100]}",
+                })
+
+    # 3. 扫描专家分析文本中的数据缺失自述（采样前200字符）
+    _missing_keywords = ("数据缺失", "无法获取", "估值数据缺失", "数据不可用", "暂无数据")
+    for s in specialists:
+        analysis = (s.get("analysis") or "")[:500]
+        for kw in _missing_keywords:
+            if kw in analysis:
+                gaps.append({
+                    "type": "expert_self_reported",
+                    "agent": s.get("agent", ""),
+                    "detail": f"专家自述数据缺失（命中关键词: {kw}）",
+                })
+                break  # 每个专家只记一次
+
+    if gaps:
+        logger.info(f"[pipeline:{trace_id}] P2 数据缺口检测: {len(gaps)} 个 → {[(g['type']) for g in gaps]}")
+    return gaps
+
+
+def _compute_confidence(
+    reflection_result: dict,
+    specialist_count: int,
+    conflict_count: int = 0,
+    data_gaps: list = None,
+) -> float:
     """计算综合答案的置信度（0-1）。
 
-    基础值 0.7，根据 Reflection 调整、冲突数、专家数微调。
+    基础值 0.7，根据 Reflection 调整、冲突数、专家数、数据完整性微调。
+    P2: 数据缺失时降低 confidence，每个缺口 -0.05（最多 -0.2）。
     """
     base = 0.7
     if reflection_result:
@@ -1613,6 +1713,10 @@ def _compute_confidence(reflection_result: dict, specialist_count: int, conflict
     # 多专家微增
     if specialist_count >= 3:
         base += 0.05
+    # P2: 数据缺失降低置信度（每个 -0.05，最多 -0.2）
+    if data_gaps:
+        penalty = min(0.2, 0.05 * len(data_gaps))
+        base -= penalty
     return round(max(0.1, min(1.0, base)), 2)
 
 
@@ -1764,6 +1868,7 @@ def _synthesize_multiple_specialists(
     trace_id: str,
     reflection_result: dict = None,
     debate_result: dict = None,
+    data_gaps: list = None,
 ) -> str:
     """调用 LLM 综合多个专家的分析。"""
     from services.llm_service import _call_llm, MODEL
@@ -1869,14 +1974,28 @@ def _synthesize_multiple_specialists(
             )
         parts.append("综合建议必须考虑组合层面影响，避免多专家建议叠加后单一标的超限。\n")
 
+    # P2 置信度校准：注入数据缺口信息，引导 LLM 标注数据完整性
+    if data_gaps:
+        parts.append("\n## ⚠️ 数据完整性警告（必须在回答中体现）")
+        for g in data_gaps:
+            parts.append(f"- [{g.get('type','')}] {g.get('detail','')}")
+        parts.append(
+            "强制要求：\n"
+            "1. 回答中必须明确标注哪些数据缺失，不要掩盖数据缺口\n"
+            "2. 对缺失数据的标的，建议降级为「观察」而非「买入/卖出」\n"
+            "3. 结尾「具体操作建议」段落必须包含置信度说明，"
+            "如「由于XX估值数据缺失，本建议置信度较低，建议补充数据后再次评估」\n"
+        )
+
     parts.append(
         "\n## 任务\n"
         "基于以上专家分析，生成综合回答：\n"
         "1. 整合各专家观点，去重避免重复\n"
         "2. 如有冲突，给出明确判断和理由\n"
         "3. 如有风险否决，必须遵守否决约束降级处理\n"
-        "4. 结尾包含「具体操作建议」段落\n"
-        "5. 使用 Markdown 格式，禁止 emoji 标题\n"
+        "4. 如有数据缺口警告，回答中必须体现数据完整性说明\n"
+        "5. 结尾包含「具体操作建议」段落\n"
+        "6. 使用 Markdown 格式，禁止 emoji 标题\n"
     )
 
     prompt = "\n".join(parts)

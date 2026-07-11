@@ -1377,11 +1377,13 @@ def _query_valuation(args: dict) -> str:
         code, name = m["code"], m["name"]
         index_metrics = [i for i in all_indexes if i["index_code"] == code]
         metrics = []
+        missing_types = []  # 记录数据缺失的指标类型
 
         for metric in index_metrics:
             mt = metric["metric_type"]
             latest = get_best_valuation(code, mt, query_source="agent")
             if not latest:
+                missing_types.append(mt)
                 continue
 
             entry = {
@@ -1411,7 +1413,27 @@ def _query_valuation(args: dict) -> str:
 
             metrics.append(entry)
 
-        results.append({"index_code": code, "index_name": name, "metrics": metrics})
+        # P1 估值降级提示：当指标数据缺失时，明确告知专家数据不可用
+        entry_result = {"index_code": code, "index_name": name, "metrics": metrics}
+        if not metrics:
+            # 所有指标都查不到
+            entry_result["data_status"] = "unavailable"
+            entry_result["degraded_hint"] = (
+                f"⚠️ 指数「{name}（{code}」的估值数据当前无法获取"
+                "（本地表无记录且在线渠道未启用或失败）。"
+                "请基于其他信息（持仓、行情、宏观）进行分析，"
+                "不要编造估值数据，并在结论中明确标注「估值数据缺失」以降低置信度。"
+            )
+        elif missing_types:
+            # 部分指标缺失
+            entry_result["data_status"] = "partial"
+            entry_result["missing_metrics"] = missing_types
+            entry_result["degraded_hint"] = (
+                f"⚠️ 指数「{name}（{code}」部分估值指标缺失：{', '.join(missing_types)}。"
+                "请基于现有指标谨慎分析，缺失指标不要推测，"
+                "并在结论中标注数据完整性。"
+            )
+        results.append(entry_result)
 
     return json.dumps(results, ensure_ascii=False)
 

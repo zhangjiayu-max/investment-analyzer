@@ -428,6 +428,22 @@ async def startup():
     except Exception as e:
         logging.warning(f"决策过期清理失败: {e}")
 
+    # Reranker 模型预加载（避免首次对话 RAG 检索时加载 6 秒）
+    try:
+        _rerank_topn = get_config("rag.auto_rerank_topn", "false") == "true"
+        if _rerank_topn:
+            import threading
+            def _preload_reranker():
+                try:
+                    from services.rag import _get_reranker
+                    _get_reranker()
+                    logging.info("Reranker 模型预加载完成")
+                except Exception as e:
+                    logging.warning(f"Reranker 预加载失败: {e}")
+            threading.Thread(target=_preload_reranker, daemon=True).start()
+    except Exception:
+        pass
+
     logging.info("=== 启动初始化完成 ===")
 
 
