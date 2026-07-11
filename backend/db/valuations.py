@@ -588,14 +588,21 @@ def get_best_valuation(
         online_result = _online_fallback(index_code, metric_type, start_ts, query_source, trace_id)
         if online_result:
             return online_result
-
-    # 5. 全部失败
-    error_msg = "all sources failed (local + akshare + ttfund)"
-    failed_name = _lookup_index_name(index_code)
-    _log_valuation_query(index_code, failed_name, query_source, "failed",
-                         0, 0, int((datetime.now() - start_ts).total_seconds() * 1000), trace_id, error_msg)
-    logger.warning(f"[valuation] {index_code} 估值查询全部失败 ({query_source})")
-    return None
+        # 在线兜底已启用但全部失败 → 真正需要告警
+        error_msg = "all sources failed (local + akshare + ttfund)"
+        failed_name = _lookup_index_name(index_code)
+        _log_valuation_query(index_code, failed_name, query_source, "failed",
+                             0, 0, int((datetime.now() - start_ts).total_seconds() * 1000), trace_id, error_msg)
+        logger.warning(f"[valuation] {index_code} 估值查询全部失败 ({query_source})")
+        return None
+    else:
+        # 在线兜底被禁用（批量场景）→ 本地表缺失，但在线渠道可能可查到，不应触发告警
+        error_msg = "local sources failed, online fallback disabled"
+        failed_name = _lookup_index_name(index_code)
+        _log_valuation_query(index_code, failed_name, query_source, "local_failed_online_disabled",
+                             0, 0, int((datetime.now() - start_ts).total_seconds() * 1000), trace_id, error_msg)
+        logger.info(f"[valuation] {index_code} 本地估值缺失，在线兜底已禁用 ({query_source})")
+        return None
 
 
 def _online_fallback(index_code: str, metric_type: str, start_ts: datetime,
