@@ -56,6 +56,72 @@ def _gen_event_id(title: str, expected_date: str) -> str:
     return hashlib.sha1(raw).hexdigest()[:16]
 
 
+def _clean_title(s: str) -> str:
+    """清洗标题：去除括号内容和空格。"""
+    s = s.lower().replace(" ", "")
+    s = s.replace("（", "(").replace("）", ")")
+    while "(" in s and ")" in s:
+        start = s.find("(")
+        end = s.find(")")
+        if end > start:
+            s = s[:start] + s[end+1:]
+        else:
+            break
+    return s
+
+
+def _ngram_set(s: str, n: int = 2) -> set:
+    """生成字符串的 n-gram 集合。"""
+    s = _clean_title(s)
+    return {s[i:i+n] for i in range(len(s) - n + 1)}
+
+
+def _extract_keywords(s: str) -> set:
+    """提取标题中的核心关键词（公司名、事件名等）。"""
+    s = _clean_title(s)
+    keywords = set()
+    company_patterns = [
+        "sk海力士", "meta", "英伟达", "微软", "苹果", "特斯拉", "阿里巴巴", "腾讯",
+        "华为", "小米", "比亚迪", "宁德时代", "贵州茅台", "招商银行", "中国平安",
+    ]
+    event_patterns = [
+        "ad定价", "ad开始交易", "复牌", "人工智能大会", "港股通", "美联储",
+        "财报", "发布", "会议", "举行", "召开", "上市", "发行", "重组", "并购",
+    ]
+    for kw in company_patterns:
+        if kw in s:
+            keywords.add(kw)
+    for kw in event_patterns:
+        if kw in s:
+            keywords.add(kw)
+    if not keywords:
+        ngrams = _ngram_set(s)
+        if ngrams:
+            keywords = set(list(ngrams)[:5])
+    return keywords
+
+
+def _title_similarity(a: str, b: str) -> float:
+    """计算两个标题的相似度（双字符 Jaccard + 关键词匹配），用于去重。
+    
+    结合 2-gram 匹配和关键词匹配，更适合中文事件标题的去重。
+    """
+    a_ngrams = _ngram_set(a)
+    b_ngrams = _ngram_set(b)
+    if not a_ngrams or not b_ngrams:
+        return 0.0
+    
+    ngram_sim = len(a_ngrams & b_ngrams) / len(a_ngrams | b_ngrams)
+    
+    a_keywords = _extract_keywords(a)
+    b_keywords = _extract_keywords(b)
+    if a_keywords and b_keywords:
+        keyword_overlap = len(a_keywords & b_keywords) / len(a_keywords | b_keywords)
+        return max(ngram_sim, keyword_overlap)
+    
+    return ngram_sim
+
+
 def create_market_event(
     title: str,
     summary: str,
@@ -69,6 +135,8 @@ def create_market_event(
 ) -> str:
     """创建事件（幂等：相同 title+expected_date 不重复创建）。
 
+    增强去重：除了精确匹配，还会检测标题相似度 > 0.7 的同类事件。
+
     Returns:
         event_id（已存在则返回已有 id，不覆盖）
     """
@@ -81,6 +149,16 @@ def create_market_event(
         ).fetchone()
         if existing:
             return event_id
+
+        # 增强去重：检测同日期、标题相似度 >= 0.6 的事件
+        same_date_events = conn.execute(
+            "SELECT event_id, title FROM market_events WHERE expected_date = ?",
+            (expected_date,),
+        ).fetchall()
+        for row in same_date_events:
+            if _title_similarity(title, row["title"]) >= 0.6:
+                logger.info(f"[market_events] 检测到相似事件，跳过创建: '{title}' -> '{row['title']}'")
+                return row["event_id"]
 
         timeline = json.dumps(
             [{"date": today, "event": "首次检测"}], ensure_ascii=False

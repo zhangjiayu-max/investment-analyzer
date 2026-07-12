@@ -43,7 +43,7 @@ from db.token_usage import (
 
 # 推荐 + 反馈 + 用户画像
 from db.dashboard import (
-    save_recommendations, list_recommendations, verify_recommendation,
+    save_recommendations, get_recommendation, list_recommendations, verify_recommendation,
     auto_verify_pending_recommendations, save_recommendation_feedback,
     list_recommendation_feedback, get_recommendation_feedback_stats,
     save_llm_feedback, list_llm_feedback, get_user_profile,
@@ -230,6 +230,30 @@ from db.decisions import (
     create_candidate_from_structured_recommendation,
     get_decision_stats,
     update_decision_backtest, get_decisions_for_backtest, auto_backtest_decisions,
+)
+
+# 交易计划
+from db.trade_plans import (
+    create_trade_plan, get_trade_plan, list_trade_plans,
+    update_trade_plan, delete_trade_plan, list_pending_trade_plans,
+)
+
+# 策略监控
+from db.strategy_monitoring import (
+    create_strategy_monitoring, get_strategy_monitoring, list_strategy_monitoring,
+    update_strategy_monitoring, delete_strategy_monitoring,
+    create_strategy_trade, list_strategy_trades,
+)
+
+# 对话上下文
+from db.conversation_context import (
+    set_conversation_context, get_conversation_context, delete_conversation_context,
+)
+
+# 用户记忆
+from db.user_memory import (
+    create_user_memory, get_user_memory, list_user_memory,
+    update_user_memory, delete_user_memory,
 )
 
 # 跨系统桥接层 — 分析结论数据层
@@ -544,6 +568,8 @@ def init_db():
     _add_column_if_not_exists(conn, "portfolio_holdings", "manager_company", "TEXT DEFAULT ''")
     _add_column_if_not_exists(conn, "portfolio_holdings", "last_buy_price", "REAL")
     _add_column_if_not_exists(conn, "portfolio_holdings", "last_buy_date", "TEXT")
+    _add_column_if_not_exists(conn, "portfolio_holdings", "bucket_id", "INTEGER")
+    _add_column_if_not_exists(conn, "portfolio_holdings", "bucket_allocation", "REAL")
     # 回填已有持仓的 fund_category
     rows = conn.execute(
         "SELECT id, fund_code, fund_name FROM portfolio_holdings WHERE fund_category IS NULL OR fund_category = ''"
@@ -1139,6 +1165,98 @@ def init_db():
 
     # ── 理财决策中枢表 ──────────────────────────────────────
     init_decision_tables(conn)
+
+    # ── 交易计划表（Phase 1：交易计划生成）──
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS trade_plans (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            recommendation_id INTEGER REFERENCES recommendations(id),
+            fund_code TEXT NOT NULL,
+            fund_name TEXT,
+            action TEXT NOT NULL DEFAULT 'BUY',
+            amount REAL DEFAULT 0,
+            shares REAL DEFAULT 0,
+            target_price REAL,
+            batch_count INTEGER DEFAULT 1,
+            batch_interval_days INTEGER DEFAULT 7,
+            stop_loss_pct REAL,
+            take_profit_pct REAL,
+            status TEXT NOT NULL DEFAULT 'pending',
+            execution_notes TEXT,
+            created_at TEXT DEFAULT (datetime('now','localtime')),
+            updated_at TEXT DEFAULT (datetime('now','localtime'))
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_trade_plans_recommendation ON trade_plans(recommendation_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_trade_plans_fund ON trade_plans(fund_code)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_trade_plans_status ON trade_plans(status)")
+
+    # ── 策略监控表（Phase 2：策略沙盒增强）──
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS strategy_monitoring (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            backtest_id INTEGER,
+            strategy_name TEXT NOT NULL,
+            strategy_type TEXT NOT NULL,
+            target_code TEXT NOT NULL,
+            target_type TEXT DEFAULT 'index',
+            parameters TEXT NOT NULL,
+            current_state TEXT DEFAULT 'running',
+            last_trigger_at TEXT,
+            next_trigger_at TEXT,
+            performance_metrics TEXT,
+            created_at TEXT DEFAULT (datetime('now','localtime')),
+            updated_at TEXT DEFAULT (datetime('now','localtime'))
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_strategy_monitoring_target ON strategy_monitoring(target_code)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_strategy_monitoring_state ON strategy_monitoring(current_state)")
+
+    # ── 策略交易记录表（Phase 2）──
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS strategy_trades (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            monitoring_id INTEGER,
+            trade_type TEXT NOT NULL,
+            fund_code TEXT NOT NULL,
+            amount REAL NOT NULL,
+            nav REAL,
+            trade_date TEXT DEFAULT (datetime('now','localtime')),
+            status TEXT DEFAULT 'executed',
+            error_message TEXT,
+            FOREIGN KEY (monitoring_id) REFERENCES strategy_monitoring(id) ON DELETE CASCADE
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_strategy_trades_monitoring ON strategy_trades(monitoring_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_strategy_trades_fund ON strategy_trades(fund_code)")
+
+    # ── 对话上下文表（Phase 4：AI 多轮记忆）──
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS conversation_context (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            conversation_id INTEGER,
+            context_key TEXT NOT NULL,
+            context_value TEXT NOT NULL,
+            created_at TEXT DEFAULT (datetime('now','localtime')),
+            updated_at TEXT DEFAULT (datetime('now','localtime'))
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_context_conversation ON conversation_context(conversation_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_context_key ON conversation_context(context_key)")
+
+    # ── user_memory 表（Phase 4：AI 多轮记忆）──
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS user_memory (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            content TEXT NOT NULL,
+            memory_type TEXT DEFAULT 'preference',
+            relevance_score REAL,
+            last_accessed_at TEXT,
+            created_at TEXT DEFAULT (datetime('now','localtime')),
+            updated_at TEXT DEFAULT (datetime('now','localtime'))
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_user_memory_type ON user_memory(memory_type)")
 
     # ── 短线主题机会表 ──────────────────────────────────────
     init_opportunity_tables(conn)

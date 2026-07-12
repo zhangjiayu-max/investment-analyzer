@@ -10,7 +10,7 @@ import { ref, onMounted, onUnmounted, computed } from 'vue'
 import Icon from './ui/Icon.vue'
 import { listAlerts, getUnreadAlertCount, markAlertRead } from '../api'
 
-const emit = defineEmits(['navigate'])
+const emit = defineEmits(['navigate', 'openNotifications'])
 
 const unreadCount = ref(0)
 const alerts = ref([])
@@ -36,6 +36,7 @@ async function loadAlerts() {
 
 async function togglePanel() {
   open.value = !open.value
+  emit('openNotifications')
   if (open.value && alerts.value.length === 0) {
     await loadAlerts()
   }

@@ -147,6 +147,12 @@ from routers.suggestion_accuracy import router as suggestion_accuracy_router  # 
 from routers.data_quality import router as data_quality_router  # /api/data-quality/*
 from routers.capabilities import router as capabilities_router  # /api/capabilities/*
 from routers.event_radar import router as event_radar_router  # /api/alerts/event-radar/*
+from routers.trade_plans import router as trade_plans_router  # /api/trade-plans/*
+from routers.strategies import router as strategies_router  # /api/strategies/*
+from routers.bucket_routes import router as bucket_routes_router  # /api/buckets/*
+from routers.memory_routes import router as memory_routes_router  # /api/memory/*
+from routers.finance_routes import router as finance_routes_router  # /api/finance/*
+from routers.notifications import router as notifications_router  # /api/notifications/*
 from services.data_lineage import track_sources, get_lineage  # data lineage tracking
 
 # 注册路由
@@ -219,6 +225,12 @@ app.include_router(suggestion_accuracy_router)
 app.include_router(data_quality_router)
 app.include_router(capabilities_router)
 app.include_router(event_radar_router)
+app.include_router(trade_plans_router)
+app.include_router(strategies_router)
+app.include_router(bucket_routes_router)
+app.include_router(memory_routes_router)
+app.include_router(finance_routes_router)
+app.include_router(notifications_router)
 
 # ── 启动初始化 ──
 @app.on_event("startup")

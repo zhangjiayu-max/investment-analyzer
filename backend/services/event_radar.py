@@ -379,6 +379,7 @@ def _determine_relevance(
                     matched_holdings.append({
                         "fund_code": h.get("fund_code", ""),
                         "fund_name": h.get("fund_name", ""),
+                        "match_type": "holding",
                         "match_reason": f"跟踪 {sector} 相关指数 {idx_code}",
                     })
                     matched_holding_codes.add(h.get("fund_code"))
@@ -395,6 +396,7 @@ def _determine_relevance(
                         matched_holdings.append({
                             "fund_code": h.get("fund_code", ""),
                             "fund_name": h.get("fund_name", ""),
+                            "match_type": "holding",
                             "match_reason": f"持仓名称含 {sector} 关键词 '{kw}'",
                         })
                         matched_holding_codes.add(h.get("fund_code"))

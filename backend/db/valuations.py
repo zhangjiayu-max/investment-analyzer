@@ -46,6 +46,9 @@ def save_valuation(data: dict, source_image: str = None, source_url: str = None,
         data["index_name"] = "未知指数"
     metric_type = data.get("metric_type", "市盈率")
 
+    # P2-4.2: 保存时统一标准化指数代码，避免后缀导致重复数据
+    data["index_code"] = normalize_index_code(data["index_code"])
+
     # P2-4.1: 写入时统一 percentile 为 float
     percentile = _normalize_percentile(data.get("percentile"))
 
@@ -153,7 +156,10 @@ def get_latest_valuation(index_code: str, metric_type: str = None, max_days: int
 
 
 def list_valuation_indexes() -> list[dict]:
-    """列出所有有估值数据的指数，按 metric_type 分别显示。"""
+    """列出所有有估值数据的指数，按 metric_type 分别显示。
+
+    按标准化后的指数代码去重，避免 000922 和 000922.CSI 被当作不同指数。
+    """
     conn = _get_conn()
     rows = conn.execute("""
         SELECT iv.index_code, iv.index_name, iv.metric_type,
@@ -176,14 +182,29 @@ def list_valuation_indexes() -> list[dict]:
         ORDER BY iv.index_code, iv.metric_type
     """).fetchall()
     conn.close()
-    # P2-4.1: 读取容错
-    return [_apply_percentile_normalize(dict(r)) for r in rows]
+
+    # 按标准化后的指数代码 + metric_type 去重，保留最新数据
+    seen = {}
+    for r in rows:
+        d = _apply_percentile_normalize(dict(r))
+        norm_code = normalize_index_code(d["index_code"])
+        key = (norm_code, d["metric_type"])
+
+        if key not in seen or d["latest_date"] > seen[key]["latest_date"]:
+            seen[key] = d
+
+    return list(seen.values())
 
 
 def list_index_freshness() -> list[dict]:
-    """列出所有指数的最新数据日期和距今天数。"""
+    """列出所有指数的最新数据日期和距今天数。
+
+    按标准化后的指数代码分组，合并同指数不同后缀的记录，
+    避免 000922 和 000922.CSI 被当作不同指数。
+    """
     conn = _get_conn()
     today = date.today().isoformat()
+
     rows = conn.execute("""
         SELECT index_code, index_name, MAX(snapshot_date) as latest_date,
                (julianday(?) - julianday(MAX(snapshot_date))) as stale_days
@@ -192,7 +213,27 @@ def list_index_freshness() -> list[dict]:
         ORDER BY stale_days DESC
     """, (today,)).fetchall()
     conn.close()
-    return [dict(r) for r in rows]
+
+    result = []
+    seen_codes = {}
+
+    for row in rows:
+        r = dict(row)
+        norm_code = normalize_index_code(r["index_code"])
+
+        if norm_code in seen_codes:
+            existing = seen_codes[norm_code]
+            if r["latest_date"] > existing["latest_date"]:
+                existing["index_code"] = r["index_code"]
+                existing["index_name"] = r["index_name"]
+                existing["latest_date"] = r["latest_date"]
+                existing["stale_days"] = r["stale_days"]
+        else:
+            seen_codes[norm_code] = r
+            result.append(r)
+
+    result.sort(key=lambda x: x["stale_days"], reverse=True)
+    return result
 
 
 def search_indexes_by_keyword(keyword: str) -> list[dict]:
@@ -370,16 +411,30 @@ def normalize_index_code(index_code: str, index_name: str = None) -> str:
     if not index_code:
         return index_code
 
-    # 去除常见后缀
     code = index_code.strip()
-    for suffix in [".SH", ".SZ", ".CSI", ".WI", ".GI", ".HI", ".MI"]:
+
+    # 处理代码和后缀之间有空格的情况（如 N225 GI -> N225）
+    # 匹配模式：代码 + 空格 + 后缀
+    for suffix in ["SH", "SZ", "CSI", "WI", "GI", "HI", "MI", "CNI"]:
+        if code.upper().endswith(" " + suffix.upper()):
+            code = code[:-(len(suffix) + 1)]
+            break
+
+    # 去除常见后缀（带点号）
+    for suffix in [".SH", ".SZ", ".CSI", ".WI", ".GI", ".HI", ".MI", ".CNI"]:
         if code.upper().endswith(suffix.upper()):
             code = code[:-len(suffix)]
             break
 
+    # 去除多余空格
+    code = code.replace(" ", "")
+
     # 补齐 6 位（前面补 0）
     if code.isdigit() and len(code) < 6:
         code = code.zfill(6)
+
+    # 统一为大写（处理 h30533 和 H30533）
+    code = code.upper()
 
     return code
 

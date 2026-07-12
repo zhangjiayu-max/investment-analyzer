@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 
 from db._conn import _get_conn
+from db._utils import _add_column_if_not_exists
 
 VALID_BUCKET_TYPES = {"emergency", "stable", "long_term", "opportunity", "learning"}
 RISK_ASSET_BLOCKED_TYPES = {"emergency"}
@@ -33,6 +34,8 @@ def init_goal_bucket_tables(conn):
     conn.execute("CREATE INDEX IF NOT EXISTS idx_goal_buckets_user ON goal_buckets(user_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_goal_buckets_type ON goal_buckets(bucket_type)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_goal_buckets_status ON goal_buckets(status)")
+    _add_column_if_not_exists(conn, "goal_buckets", "linked_holdings", "TEXT")
+    _add_column_if_not_exists(conn, "goal_buckets", "auto_allocate", "INTEGER DEFAULT 0")
 
 
 def _normalize_bucket_type(bucket_type: str) -> str:

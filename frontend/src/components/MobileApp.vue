@@ -40,9 +40,13 @@ import DataHealthDashboard from './DataHealthDashboard.vue'
 import StrategyBacktest from './StrategyBacktest.vue'
 import { isDark, toggleDark } from '../composables/useTheme'
 import AlertBell from './AlertBell.vue'
+import MobileQuickBar from './mobile/MobileQuickBar.vue'
+import MobileNotificationCenter from './mobile/MobileNotificationCenter.vue'
 
 const activePage = ref(localStorage.getItem('activePage') || 'dashboard')
 const showMoreMenu = ref(false)
+const showQuickBar = ref(false)
+const showNotificationCenter = ref(false)
 
 watch(activePage, (val) => {
   localStorage.setItem('activePage', val)
@@ -224,6 +228,21 @@ function onSelectTask(taskId) {
 function onBack() {
   currentTaskId.value = null
 }
+
+function handleQuickAction(action) {
+  showQuickBar.value = false
+  const actionMap = {
+    valuation: 'valuation',
+    portfolio: 'portfolio',
+    news: 'market-intelligence',
+    alert: 'alert-center',
+    chat: 'chat',
+  }
+  const targetPage = actionMap[action.key]
+  if (targetPage) {
+    navigate(targetPage)
+  }
+}
 </script>
 
 <template>
@@ -232,7 +251,7 @@ function onBack() {
     <header class="mobile-header">
       <span class="mobile-title editorial-title">{{ currentPageLabel || '投资分析助手' }}</span>
       <div class="mobile-header-actions">
-        <AlertBell @navigate="navigate" />
+        <AlertBell @navigate="navigate" @openNotifications="showNotificationCenter = true" />
         <button class="mobile-theme-btn" @click="toggleDark()" :title="isDark ? '亮色模式' : '暗色模式'">
           <svg v-if="isDark" width="18" height="18" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z"/>
@@ -302,6 +321,19 @@ function onBack() {
         </div>
       </div>
     </Transition>
+
+    <!-- 快捷操作按钮 -->
+    <button class="mobile-quick-btn" @click="showQuickBar = true" :title="showQuickBar ? '收起快捷栏' : '快捷操作'">
+      <svg width="24" height="24" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M4 6h16M4 12h16M4 18h16"/>
+      </svg>
+    </button>
+
+    <!-- 快捷操作栏 -->
+    <MobileQuickBar v-model="showQuickBar" @action="handleQuickAction" />
+
+    <!-- 通知中心 -->
+    <MobileNotificationCenter v-model="showNotificationCenter" />
 
     <!-- 底部 Tab 栏 -->
     <nav class="mobile-tabbar">
@@ -591,6 +623,35 @@ function onBack() {
 }
 .mobile-more-item.hot.active {
   background: var(--color-primary-bg);
+}
+
+/* ── 快捷操作按钮 ── */
+.mobile-quick-btn {
+  position: fixed;
+  bottom: calc(60px + env(safe-area-inset-bottom, 0));
+  right: 1rem;
+  width: 56px;
+  height: 56px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  background: linear-gradient(135deg, var(--color-primary) 0%, var(--color-gold) 100%);
+  color: white;
+  border: none;
+  cursor: pointer;
+  box-shadow: var(--shadow-lg);
+  z-index: 50;
+  transition: all var(--transition-fast);
+  -webkit-tap-highlight-color: transparent;
+}
+
+.mobile-quick-btn:active {
+  transform: scale(0.9);
+}
+
+.mobile-quick-btn:hover {
+  box-shadow: var(--shadow-xl);
 }
 
 /* ── 底部 Tab 栏 ── */

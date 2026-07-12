@@ -59,6 +59,14 @@ def save_recommendations(recommendations: list[dict], analysis_id: str = None,
     return ids
 
 
+def get_recommendation(rec_id: int) -> dict | None:
+    """获取单条推荐记录。"""
+    conn = _get_conn()
+    row = conn.execute("SELECT * FROM recommendations WHERE id = ?", (rec_id,)).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
 def list_recommendations(limit: int = 50, status: str = None) -> list[dict]:
     """列出推荐记录。"""
     conn = _get_conn()

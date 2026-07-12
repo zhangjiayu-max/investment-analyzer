@@ -33,6 +33,7 @@ const emit = defineEmits([
   'clarify-answer',
   'adopt-recommendation',
   'execute-recommendation',
+  'generate-trade-plan',
 ])
 
 // P0-A 决策闭环：建议卡片辅助函数
@@ -749,6 +750,10 @@ const tradeSuggestions = computed(() => {
               class="btn-adopt btn-execute"
               @click="emit('execute-recommendation', msg, rec)"
             >🚀 去执行</button>
+            <button
+              class="btn-adopt btn-trade-plan"
+              @click="emit('generate-trade-plan', msg, rec)"
+            >📋 生成交易计划</button>
           </div>
         </div>
       </div>
@@ -1896,6 +1901,15 @@ const tradeSuggestions = computed(() => {
 .btn-execute:hover:not(:disabled) {
   background: var(--color-primary-hover, #2563eb);
   border-color: var(--color-primary-hover, #2563eb);
+}
+.btn-trade-plan {
+  border-color: var(--color-info, #3b82f6);
+  background: transparent;
+  color: var(--color-info, #3b82f6);
+}
+.btn-trade-plan:hover:not(:disabled) {
+  background: var(--color-info, #3b82f6);
+  color: #fff;
 }
 
 /* ── 交互式澄清选项 ── */

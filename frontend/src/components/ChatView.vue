@@ -17,6 +17,7 @@ import {
   createDecisionFromChat,
   adoptRecommendation,
   getCandidateFunds,
+  generateTradePlan,
 } from '../api'
 import ConfirmDialog from './ConfirmDialog.vue'
 import AppToast from './AppToast.vue'
@@ -961,6 +962,18 @@ async function handleAdoptRecommendation(msg, rec, adopted) {
   }
 }
 
+// Phase 1 交易计划：用户点击"生成交易计划"按钮
+async function handleGenerateTradePlan(msg, rec) {
+  if (!rec?.id) return
+  try {
+    await generateTradePlan(rec.id)
+    showToast('交易计划已生成，请在仪表盘查看', 'success')
+    if (props.onNavigate) props.onNavigate('dashboard')
+  } catch (e) {
+    showToast('生成交易计划失败，请重试', 'error')
+  }
+}
+
 // P2 执行落地：用户点击"去执行"按钮 → 加载候选基金 → 弹出 TradeExecuteDialog
 const tradeDialogVisible = ref(false)
 const tradeDialogRec = ref(null)
@@ -1676,6 +1689,7 @@ function stopPollingProgress() {
             @clarify-answer="handleClarifyAnswer"
             @adopt-recommendation="handleAdoptRecommendation"
             @execute-recommendation="handleExecuteRecommendation"
+            @generate-trade-plan="handleGenerateTradePlan"
           />
 
           <!-- 流式状态指示器 -->

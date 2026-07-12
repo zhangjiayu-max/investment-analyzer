@@ -20,6 +20,7 @@ import DecisionActionList from './dashboard/DecisionActionList.vue'
 import DecisionReviewList from './dashboard/DecisionReviewList.vue'
 import MarketOverviewCard from './dashboard/MarketOverviewCard.vue'
 import AlertsCard from './dashboard/AlertsCard.vue'
+import TradePlanTimeline from './dashboard/TradePlanTimeline.vue'
 import DecisionCanvas from './DecisionCanvas.vue'
 import Icon from './ui/Icon.vue'
 
@@ -847,6 +848,9 @@ function handlePanorama() {
       :loading="decisionReviewsLoading"
       @submit-review="handleSubmitDecisionReview"
     />
+
+    <!-- Phase 1 交易计划时间线 -->
+    <TradePlanTimeline />
 
     <!-- 债市温度仪表盘 -->
     <div v-if="!loading && bondTemperature" class="temp-gauges-row">

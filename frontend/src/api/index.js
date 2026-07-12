@@ -2548,3 +2548,159 @@ export const smartAddAPI = {
   previewScenario: (fundCode, additionalDropPct, addAmount) =>
     api.post('/smart-add/preview', { fund_code: fundCode, additional_drop_pct: additionalDropPct, add_amount: addAmount }).then(r => r.data),
 }
+
+// ── 交易计划 API ──────────────────────────────────────
+
+export function generateTradePlan(recommendationId) {
+  return api.post('/trade-plans/generate', { recommendation_id: recommendationId })
+}
+
+export function createTradePlan(data) {
+  return api.post('/trade-plans', data)
+}
+
+export function listTradePlans(status = null, fundCode = null) {
+  const params = {}
+  if (status) params.status = status
+  if (fundCode) params.fund_code = fundCode
+  return api.get('/trade-plans', { params })
+}
+
+export function getTradePlan(planId) {
+  return api.get(`/trade-plans/${planId}`)
+}
+
+export function updateTradePlan(planId, data) {
+  return api.put(`/trade-plans/${planId}`, data)
+}
+
+export function deleteTradePlan(planId) {
+  return api.delete(`/trade-plans/${planId}`)
+}
+
+export function getPendingTradePlansSummary() {
+  return api.get('/trade-plans/pending/summary')
+}
+
+// ── 策略监控 API（/api/strategies/*）─────────────────────────────────────
+
+export function createStrategyMonitor(data) {
+  return api.post('/strategies/monitor', data)
+}
+
+export function listStrategyMonitors(status = null, targetCode = null) {
+  const params = {}
+  if (status) params.status = status
+  if (targetCode) params.target_code = targetCode
+  return api.get('/strategies/monitor', { params })
+}
+
+export function getStrategyMonitor(monitorId) {
+  return api.get(`/strategies/monitor/${monitorId}`)
+}
+
+export function updateStrategyMonitor(monitorId, data) {
+  return api.put(`/strategies/monitor/${monitorId}`, data)
+}
+
+export function deleteStrategyMonitor(monitorId) {
+  return api.delete(`/strategies/monitor/${monitorId}`)
+}
+
+export function triggerStrategy(monitorId) {
+  return api.post(`/strategies/monitor/${monitorId}/trigger`)
+}
+
+export function getStrategyMonitorStats(monitorId) {
+  return api.get(`/strategies/monitor/${monitorId}/stats`)
+}
+
+export function getStrategyMonitorTrades(monitorId) {
+  return api.get(`/strategies/monitor/${monitorId}/trades`)
+}
+
+// ── 资金桶联动 API（/api/buckets/*）─────────────────────────────────────
+
+export function syncBucketHoldings(bucketId) {
+  return api.post(`/buckets/${bucketId}/sync-holdings`)
+}
+
+export function getAllocationSuggestion() {
+  return api.get('/buckets/allocation-suggestion')
+}
+
+export function transferBucket(fromId, toId, amount) {
+  return api.post(`/buckets/${fromId}/transfer/${toId}`, { amount })
+}
+
+export function assignBucketToHolding(holdingId, bucketId) {
+  return api.put(`/buckets/holdings/${holdingId}/assign`, { bucket_id: bucketId })
+}
+
+export function getBucketDetails(bucketId) {
+  return api.get(`/buckets/${bucketId}/details`)
+}
+
+export function listBucketsWithHoldings() {
+  return api.get('/buckets/')
+}
+
+// ── 记忆 API（/api/memory/*）─────────────────────────────────────
+
+export function getUserMemory(memoryType = null) {
+  const params = {}
+  if (memoryType) params.memory_type = memoryType
+  return api.get('/memory/user', { params })
+}
+
+export function saveUserMemory(data) {
+  return api.post('/memory/user', data)
+}
+
+export function getSingleMemory(memoryId) {
+  return api.get(`/memory/user/${memoryId}`)
+}
+
+export function deleteUserMemory(memoryId) {
+  return api.delete(`/memory/user/${memoryId}`)
+}
+
+export function getConversationContext(conversationId) {
+  return api.get(`/memory/context/${conversationId}`)
+}
+
+export function updateConversationContext(conversationId, updates) {
+  return api.post(`/memory/context/${conversationId}`, updates)
+}
+
+export function getContextSummary() {
+  return api.get('/memory/context-summary')
+}
+
+// ── 家庭财务规划 API（/api/finance/*）─────────────────────────────────────
+
+export function getCashFlowForecast(months = 12) {
+  return api.get('/finance/cash-flow-forecast', { params: { months } })
+}
+
+export function getFinanceAllocationSuggestion() {
+  return api.get('/finance/allocation-suggestion')
+}
+
+export function runStressTest(scenario = 'moderate') {
+  return api.post('/finance/stress-test', scenario)
+}
+
+export function getFinanceGoals() {
+  return api.get('/finance/goals')
+}
+
+// ── 通知 API（/api/notifications/*）─────────────────────────────────────
+
+export function pushNotification(title, message, type = 'info', data = {}) {
+  return api.post('/notifications/push', { title, message, type, data })
+}
+
+export function getNotificationSubscribers() {
+  return api.get('/notifications/subscribers')
+}
