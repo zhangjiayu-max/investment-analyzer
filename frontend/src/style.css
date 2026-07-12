@@ -968,6 +968,21 @@ select.input-field {
     overflow-x: auto;
     -webkit-overflow-scrolling: touch;
     white-space: nowrap;
+    max-width: 100%;
+  }
+  /* 在专用滚动容器内的表格保持 table 布局，由容器负责横向滚动 */
+  .table-scroll-wrap > table {
+    display: table;
+    overflow: visible;
+  }
+  /* 移动端禁用列拖拽，避免与触摸滚动冲突 */
+  .holding-table-drag thead th.th-draggable {
+    cursor: default;
+    -webkit-user-select: auto;
+    user-select: auto;
+  }
+  .holding-table-drag thead th[draggable] {
+    -webkit-user-drag: none;
   }
   .toolbar { flex-wrap: wrap; gap: 0.5rem; }
   .input-field { font-size: 16px; }

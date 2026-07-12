@@ -416,9 +416,13 @@ function onBack() {
 /* ── 内容区 ── */
 .mobile-content {
   flex: 1;
+  min-width: 0;            /* 关键：覆盖 flex 默认 min-width:auto，防止子元素撑开 */
+  width: 100%;
   overflow-y: auto;
+  overflow-x: hidden;
   -webkit-overflow-scrolling: touch;
   overscroll-behavior-y: contain;
+  overscroll-behavior-x: contain;  /* 阻止横向滚动链传播到外层 */
   padding: 0.75rem;
   padding-bottom: calc(0.75rem + env(safe-area-inset-bottom, 0px));
 }

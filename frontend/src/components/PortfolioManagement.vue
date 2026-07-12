@@ -5040,7 +5040,9 @@ function txDisplayAmount(tx) {
         </div>
       </div>
 
-      <table v-if="holdings.length > 0 && !loading" class="data-table fin-table holding-table-drag">
+      <!-- 表格滚动容器：只有表格内部横向滚动，外层固定 -->
+      <div v-if="holdings.length > 0 && !loading" class="table-scroll-wrap">
+        <table class="data-table fin-table holding-table-drag">
         <thead>
           <tr>
             <th
@@ -5130,7 +5132,8 @@ function txDisplayAmount(tx) {
             </template>
           </tr>
         </tbody>
-      </table>
+        </table>
+      </div><!-- /.table-scroll-wrap -->
     </div>
 
     <!-- 已清仓 -->
@@ -6815,9 +6818,20 @@ function txDisplayAmount(tx) {
 
 /* ── Table — 更专业（条纹、hover、紧凑表头、数字右对齐） ── */
 .holdings-card {
-  overflow-x: auto;
   border-radius: var(--radius-lg);
   border: 1px solid var(--color-border);
+  overflow: hidden;          /* card 自身不滚动，由内部 .table-scroll-wrap 负责横向滚动 */
+  min-width: 0;
+  max-width: 100%;
+}
+
+/* 表格横向滚动容器：只有这里可以横向滑动，外层固定 */
+.table-scroll-wrap {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior-x: contain;   /* 阻止滚动到边界时外层跟着移动 */
+  max-width: 100%;
+  min-width: 0;
 }
 
 .data-table {
@@ -9310,9 +9324,22 @@ select.input-field {
     grid-column: span 1;
   }
 
-  .table-wrap {
+  /* 持仓卡片自身不滚动，由内部 .table-scroll-wrap 负责横向滚动 */
+  .holdings-card {
+    max-width: 100%;
+    overflow: hidden;
+  }
+
+  .table-scroll-wrap {
     overflow-x: auto;
     -webkit-overflow-scrolling: touch;
+    overscroll-behavior-x: contain;
+    max-width: 100%;
+  }
+
+  /* 搜索栏不换行溢出 */
+  .table-search-bar {
+    flex-wrap: wrap;
   }
 
   .btn-action {
