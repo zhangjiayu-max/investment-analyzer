@@ -65,6 +65,10 @@ _KEYWORD_ROUTES = [
     (["文章", "公众号", "解读", "新闻"], ["article_expert"]),
     (["基金", "选基", "基金分析"], ["fund_analyst"]),
     (["宏观", "经济", "利率", "政策"], ["macro_strategist"]),
+    # ── 周期/行业/机构相关路由 ──
+    (["周期", "景气", "产能", "供需", "拐点"], ["market_analyst", "valuation_expert"]),
+    (["锂", "锂矿", "锂电池", "新能源", "储能", "光伏", "半导体", "芯片"], ["fund_analyst", "valuation_expert"]),
+    (["机构", "主力", "散户", "做空", "筹码"], ["risk_assessor", "fund_analyst"]),
     # ── Top 5 新工具的路由规则 ──
     (["基金经理", "经理任职", "管理规模", "经理履历"], ["fund_analyst"]),
     (["净值", "最大回撤", "定投回测", "年化收益", "历史业绩"], ["fund_analyst", "risk_assessor"]),

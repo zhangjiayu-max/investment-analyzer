@@ -946,7 +946,7 @@ def _validate_tool_result(name: str, result_str: str) -> tuple:
 
 
 def execute_tool(name: str, arguments: dict, trace_id: str = "",
-                 timeout: int = 30) -> str:
+                 timeout: int = 30, conversation_id: int = None, message_id: int = None) -> str:
     """执行工具调用，返回 JSON 字符串结果。
 
     带超时保护、结果校验和审计日志。
@@ -956,21 +956,20 @@ def execute_tool(name: str, arguments: dict, trace_id: str = "",
         arguments: 工具参数
         trace_id: 执行链路 ID（用于审计日志）
         timeout: 超时秒数（默认 30s）
+        conversation_id: 对话 ID（用于 RAG 日志）
+        message_id: 消息 ID（用于 RAG 日志）
     """
     import time as _time
 
-    # 兜底：trace_id 为空时自动生成，确保 tool_audit_logs 可关联
     if not trace_id:
         import uuid as _uuid
         trace_id = f"tool-{_uuid.uuid4().hex[:8]}"
 
-    # 使用工具特定超时（如有）
     effective_timeout = _TOOL_TIMEOUT_OVERRIDES.get(name, timeout)
 
     t0 = _time.time()
     error_category = "none"
 
-    # 缺口 16：工具参数校验（required 检查 + 类型修正 + 空值兜底）
     try:
         _ok, _err, arguments = _validate_tool_arguments(name, arguments or {})
         if _err:
@@ -979,7 +978,8 @@ def execute_tool(name: str, arguments: dict, trace_id: str = "",
         logger.debug(f"工具 {name} 参数校验异常: {_ve}")
 
     try:
-        result = _execute_tool_impl(name, arguments)
+        result = _execute_tool_impl(name, arguments, trace_id=trace_id,
+                                    conversation_id=conversation_id, message_id=message_id)
     except Exception as e:
         error_category = "tool_error"
         logger.error(f"工具执行异常 [{name}]: {e}")
@@ -1045,11 +1045,15 @@ def execute_tool(name: str, arguments: dict, trace_id: str = "",
     return result
 
 
-def _execute_tool_impl(name: str, arguments: dict) -> str:
+def _execute_tool_impl(name: str, arguments: dict, trace_id: str = "",
+                       conversation_id: int = None, message_id: int = None) -> str:
     """工具执行的实际实现。"""
     if name == "query_valuation":
         return _query_valuation(arguments)
     elif name == "search_knowledge":
+        arguments["trace_id"] = trace_id
+        arguments["conversation_id"] = conversation_id
+        arguments["message_id"] = message_id
         return _search_knowledge(arguments)
     elif name == "get_bond_temperature":
         return _get_bond_temperature()
@@ -1440,15 +1444,31 @@ def _query_valuation(args: dict) -> str:
 
 def _search_knowledge(args: dict) -> str:
     """从知识库中检索相关内容。"""
-    from services.rag import build_rag_context_with_details
+    from services.rag import build_rag_context_with_details, log_rag_search
 
     query = args.get("query", "")
     content_types = args.get("content_types")
     limit = args.get("limit", 5)
+    trace_id = args.get("trace_id", "")
+    conversation_id = args.get("conversation_id")
+    message_id = args.get("message_id")
 
     result = build_rag_context_with_details(query, content_types=content_types, limit=limit)
 
-    # 精简返回（去掉过长的 body）
+    log_rag_search(
+        conversation_id=conversation_id or 0,
+        message_id=message_id or 0,
+        query=query,
+        keywords=result.get("keywords", []),
+        results=result.get("results", []),
+        content_types=content_types or [],
+        fts_count=result.get("fts_count", 0),
+        chroma_count=result.get("chroma_count", 0),
+        freshness_filtered=result.get("freshness_filtered", 0),
+        trace_id=trace_id,
+        rag_low_quality=result.get("rag_low_quality", False),
+    )
+
     slim_results = []
     for r in result.get("results", []):
         slim_results.append({

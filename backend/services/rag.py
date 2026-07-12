@@ -925,9 +925,11 @@ def _build_fts_query(query: str) -> str:
     return " OR ".join(single_char)
 
 # ── 时效性策略：不同类型内容的有效期不同 ──────────────────
+# 新鲜度策略：内容类型 → 最大有效月份（0=不过滤）
 # 书籍知识(book)和估值数据(valuation)长期有效，不过滤
 # 作者文章/分析记录有时效性，3个月
 # 投资方法论(skill)长期有效，12个月
+# 2025-07-12 更新：增加 book 类型的时间过滤（5年），避免过时书籍主导检索
 _FRESHNESS_POLICY = {
     "author_article": 3,  # 作者文章，季度内有效
     "skill": 12,  # 投资方法论长期有效，12个月
@@ -935,7 +937,19 @@ _FRESHNESS_POLICY = {
     "article": 3,  # 文章，季度内有效
     "analysis": 3,  # 分析记录，季度内有效
     "linked_doc": 0,  # 个人文档不过滤
-    "book": 0,  # 书籍知识长期有效，不过滤
+    "book": 60,  # 书籍知识，5年内有效（避免过时书籍主导）
+}
+
+# 内容类型优先级：时效性强的内容优先于理论知识
+# 数值越小优先级越高，用于结果排序时的加权
+_CONTENT_TYPE_PRIORITY = {
+    "valuation": 1,       # 估值数据优先
+    "author_article": 2,  # 作者文章（时效性强）
+    "article": 3,         # 一般文章
+    "analysis": 4,        # 分析记录
+    "skill": 5,           # 投资方法论
+    "linked_doc": 6,      # 个人文档
+    "book": 7,            # 书籍知识（优先级最低）
 }
 
 
@@ -2172,6 +2186,13 @@ def build_rag_context_with_details(query: str, content_types: list[str] = None, 
             seen[key] = r
 
     all_results = sorted(seen.values(), key=lambda x: x["_score"], reverse=True)[:limit]
+
+    # 内容类型优先级加权：时效性强的内容优先于理论知识
+    # 优先级分数 = 1 / priority，数值越小优先级越高，分数越高
+    for r in all_results:
+        ct = r.get("content_type", "")
+        priority = _CONTENT_TYPE_PRIORITY.get(ct, 10)
+        r["_score"] += 0.1 / priority
 
     # 标题匹配加权：按关键词覆盖率比例加权（更精准）
     title_boost_words = [t for t in _tokenize(query).split() if len(t) >= 2]

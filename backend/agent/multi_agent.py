@@ -326,7 +326,8 @@ def _extract_text_tool_calls(content_str):
     return results if results else None
 
 
-def _process_text_tool_calls(content_str, llm_messages, tool_calls_log, agent_name, trace_id=""):
+def _process_text_tool_calls(content_str, llm_messages, tool_calls_log, agent_name, trace_id="",
+                             conversation_id=None, message_id=None):
     """处理文本格式的 tool_call：解析、执行、将结果追加到消息列表。"""
     text_calls = _extract_text_tool_calls(content_str)
     if not text_calls:
@@ -335,7 +336,8 @@ def _process_text_tool_calls(content_str, llm_messages, tool_calls_log, agent_na
     for tc in text_calls:
         args = tc['arguments']
         logger.info(f'[{agent_name}] 文本 Tool: {tc["name"]}({json.dumps(args, ensure_ascii=False)[:100]})')
-        result = execute_tool(tc['name'], args, trace_id=trace_id)
+        result = execute_tool(tc['name'], args, trace_id=trace_id,
+                             conversation_id=conversation_id, message_id=message_id)
         if len(result) > 8000:
             result = result[:8000] + chr(10) + '... (结果过长，已截断)'
         tool_calls_log.append({
@@ -456,7 +458,7 @@ def _check_react_convergence(tool_calls_log: list, llm_messages: list) -> bool:
 
 def run_specialist(agent_key: str, query: str, context: str = "",
                    prebuilt_context: str = "", model: str = None, trace_id: str = "",
-                   from_pipeline: bool = False) -> dict:
+                   from_pipeline: bool = False, conversation_id: int = None, message_id: int = None) -> dict:
     """
     运行单个专家 Agent。
 
@@ -672,7 +674,8 @@ def run_specialist(agent_key: str, query: str, context: str = "",
             args = _parse_tool_args(tc.function.arguments, tc.function.name)
 
             logger.info(f"[trace:{trace_id}] [{agent['name']}] Tool: {tc.function.name}({json.dumps(args, ensure_ascii=False)[:100]})")
-            result = execute_tool(tc.function.name, args, trace_id=trace_id)
+            result = execute_tool(tc.function.name, args, trace_id=trace_id,
+                                 conversation_id=conversation_id, message_id=message_id)
 
             # P3 优化：截断阈值可配置（默认 1500，原 3000）
             _max_chars = _get_tool_result_max_chars()
@@ -982,7 +985,8 @@ def run_specialist_with_context(agent_key: str, query: str, peer_analyses: dict,
         for tc in msg.tool_calls:
             args = _parse_tool_args(tc.function.arguments, tc.function.name)
             logger.info(f"[trace:{trace_id}] [{agent['name']}] 交叉审阅 Tool: {tc.function.name}({json.dumps(args, ensure_ascii=False)[:100]})")
-            result = execute_tool(tc.function.name, args, trace_id=trace_id)
+            result = execute_tool(tc.function.name, args, trace_id=trace_id,
+                                 conversation_id=conversation_id, message_id=message_id)
             # P3 优化：截断阈值可配置（默认 1500，原 3000）
             _max_chars = _get_tool_result_max_chars()
             if len(result) > _max_chars:

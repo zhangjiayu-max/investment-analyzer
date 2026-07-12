@@ -1123,6 +1123,8 @@ def _phase_execution(
                 prebuilt_context=ctx,
                 trace_id=trace_id,
                 from_pipeline=True,
+                conversation_id=state.conversation_id,
+                message_id=state.message_id,
             )
             specialists_result.append(result)
             all_tool_calls.extend(result.get("tool_calls", []))
@@ -1311,6 +1313,8 @@ def _execute_steps_parallel(
             prebuilt_context=ctx,
             trace_id=trace_id,
             from_pipeline=True,
+            conversation_id=state.conversation_id,
+            message_id=state.message_id,
         )
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -1479,6 +1483,8 @@ def _fallback_execution(
                 agent_key=agent_key, query=query,
                 prebuilt_context=ctx, trace_id=trace_id,
                 from_pipeline=True,
+                conversation_id=state.conversation_id,
+                message_id=state.message_id,
             )
             results.append(result)
             tool_calls.extend(result.get("tool_calls", []))
