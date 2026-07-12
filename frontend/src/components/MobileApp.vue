@@ -40,12 +40,10 @@ import DataHealthDashboard from './DataHealthDashboard.vue'
 import StrategyBacktest from './StrategyBacktest.vue'
 import { isDark, toggleDark } from '../composables/useTheme'
 import AlertBell from './AlertBell.vue'
-import MobileQuickBar from './mobile/MobileQuickBar.vue'
 import MobileNotificationCenter from './mobile/MobileNotificationCenter.vue'
 
 const activePage = ref(localStorage.getItem('activePage') || 'dashboard')
 const showMoreMenu = ref(false)
-const showQuickBar = ref(false)
 const showNotificationCenter = ref(false)
 
 watch(activePage, (val) => {
@@ -228,21 +226,6 @@ function onSelectTask(taskId) {
 function onBack() {
   currentTaskId.value = null
 }
-
-function handleQuickAction(action) {
-  showQuickBar.value = false
-  const actionMap = {
-    valuation: 'valuation',
-    portfolio: 'portfolio',
-    news: 'market-intelligence',
-    alert: 'alert-center',
-    chat: 'chat',
-  }
-  const targetPage = actionMap[action.key]
-  if (targetPage) {
-    navigate(targetPage)
-  }
-}
 </script>
 
 <template>
@@ -321,16 +304,6 @@ function handleQuickAction(action) {
         </div>
       </div>
     </Transition>
-
-    <!-- 快捷操作按钮 -->
-    <button class="mobile-quick-btn" @click="showQuickBar = true" :title="showQuickBar ? '收起快捷栏' : '快捷操作'">
-      <svg width="24" height="24" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M4 6h16M4 12h16M4 18h16"/>
-      </svg>
-    </button>
-
-    <!-- 快捷操作栏 -->
-    <MobileQuickBar v-model="showQuickBar" @action="handleQuickAction" />
 
     <!-- 通知中心 -->
     <MobileNotificationCenter v-model="showNotificationCenter" />
@@ -623,35 +596,6 @@ function handleQuickAction(action) {
 }
 .mobile-more-item.hot.active {
   background: var(--color-primary-bg);
-}
-
-/* ── 快捷操作按钮 ── */
-.mobile-quick-btn {
-  position: fixed;
-  bottom: calc(60px + env(safe-area-inset-bottom, 0));
-  right: 1rem;
-  width: 56px;
-  height: 56px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: 50%;
-  background: linear-gradient(135deg, var(--color-primary) 0%, var(--color-gold) 100%);
-  color: white;
-  border: none;
-  cursor: pointer;
-  box-shadow: var(--shadow-lg);
-  z-index: 50;
-  transition: all var(--transition-fast);
-  -webkit-tap-highlight-color: transparent;
-}
-
-.mobile-quick-btn:active {
-  transform: scale(0.9);
-}
-
-.mobile-quick-btn:hover {
-  box-shadow: var(--shadow-xl);
 }
 
 /* ── 底部 Tab 栏 ── */
