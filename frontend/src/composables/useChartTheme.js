@@ -51,6 +51,17 @@ export function useChartTheme() {
       borderColor: t.borderColor,
       borderWidth: 1,
       textStyle: { color: t.titleColor, fontSize: 12, fontFamily: t.fontMono },
+      axisPointer: {
+        type: 'cross',
+        crossStyle: { color: t.borderColor },
+        lineStyle: { color: t.colors.primary, width: 1, type: 'dashed' },
+        label: {
+          backgroundColor: isDark.value ? '#1e293b' : '#f8fafc',
+          color: t.titleColor,
+          fontSize: 11,
+          fontFamily: t.fontMono,
+        },
+      },
       ...extra,
     }
   }

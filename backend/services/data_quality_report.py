@@ -15,32 +15,10 @@ from pathlib import Path
 from typing import Any
 
 # ---------------------------------------------------------------------------
-# 配置
+# 配置 — 统一使用 db._conn 的 DB_PATH 和 _get_conn
 # ---------------------------------------------------------------------------
 
-DB_PATH = Path(__file__).parent.parent.parent / "data" / "valuations.db"
-
-# 新鲜度阈值（小时）
-FRESH_OK_HOURS = 6       # < 6h → ok
-FRESH_STALE_HOURS = 24   # 6-24h → stale, >24h → expired
-
-# 估值数据缺口阈值（天）
-VALUATION_GAP_DAYS = 5
-
-# 不存在的表跳过列表（运行时动态检测）
-_WARNINGS: list[str] = []
-
-
-# ---------------------------------------------------------------------------
-# 工具函数
-# ---------------------------------------------------------------------------
-
-def _get_conn() -> sqlite3.Connection:
-    """获取 SQLite 连接（row_factory 启用）"""
-    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(DB_PATH), timeout=30)
-    conn.row_factory = sqlite3.Row
-    return conn
+from db._conn import DB_PATH, _get_conn
 
 
 def _table_exists(conn: sqlite3.Connection, table_name: str) -> bool:

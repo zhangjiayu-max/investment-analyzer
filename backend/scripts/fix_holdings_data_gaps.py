@@ -6,7 +6,9 @@
 import sqlite3
 import re
 
-DB_PATH = "/Users/xiaoyuer/projects/investment-analyzer/data/valuations.db"
+import sys, os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from db._conn import DB_PATH
 
 # 持仓 index_name → 估值表 index_name 的映射（手工对齐）
 INDEX_NAME_MAP = {

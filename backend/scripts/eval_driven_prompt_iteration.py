@@ -10,10 +10,11 @@
 import json
 import sqlite3
 import argparse
-from pathlib import Path
 from collections import defaultdict
 
-DB = Path("/Users/xiaoyuer/projects/investment-analyzer/data/valuations.db")
+import sys, os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from db._conn import DB_PATH as DB, _get_conn
 
 
 def main():
@@ -22,8 +23,7 @@ def main():
     parser.add_argument("--days", type=int, default=30, help="回溯天数（默认30）")
     args = parser.parse_args()
 
-    conn = sqlite3.connect(str(DB))
-    conn.row_factory = sqlite3.Row
+    conn = _get_conn()
 
     rows = conn.execute("""
         SELECT ce.*, c.title as conv_title, m.content as message_content

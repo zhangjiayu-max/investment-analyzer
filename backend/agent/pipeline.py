@@ -959,6 +959,7 @@ def _phase_planning(
             router = SmartRouter()
             history_summary = info_gather_result.get("history_summary", "")
             portfolio_summary = info_gather_result.get("portfolio", "")
+            logger.info(f"[pipeline] P4 路由参数: query='{state.refined_query[:50]}', portfolio_len={len(portfolio_summary)}")
             route_result = router.route(state.refined_query, history_summary, portfolio_summary)
             routed_specialists = route_result.get("specialists", [])
             route_by = route_result.get("route_by", "unknown")
@@ -2538,9 +2539,14 @@ def _extract_and_save_recommendations(
             "- 每条建议必须关联具体标的（指数名/指数代码/基金名/基金代码）\n"
             "- 没有明确标的或没有方向性建议时返回空数组 []\n"
             "- 最多 5 条\n\n"
+            "signal_type 判定规则（必须输出）：\n"
+            "- momentum_breakout：建议基于「趋势止跌回升/资金流入/行业景气/短期波段/试探性建仓」，"
+            "且原文明确提到严格止损（如-5%）或仓位上限（如5%）\n"
+            "- value_dip：默认值，建议基于估值低估、长期定投、分批建仓等\n\n"
             "输出严格 JSON 数组（不要 markdown 代码块），每项格式：\n"
             '{"index_name":"标的名称","index_code":"代码(可为空)","direction":"up|down|hold",'
-            '"reason":"简短理由(≤50字)","confidence":"high|medium|low"}\n\n'
+            '"reason":"简短理由(≤50字)","confidence":"high|medium|low",'
+            '"signal_type":"value_dip|momentum_breakout"}\n\n'
             "direction 取值：up=加仓/买入，down=减仓/卖出，hold=持有/观望\n\n"
             f"分析内容：\n{state.answer[:3000]}"
         )
@@ -2591,6 +2597,10 @@ def _extract_and_save_recommendations(
         direction = (r.get("direction") or "").strip().lower()
         if direction not in ("up", "down", "hold"):
             continue
+        # 2026-07-13: signal_type 标准化
+        signal_type = (r.get("signal_type") or "value_dip").strip().lower()
+        if signal_type not in ("value_dip", "momentum_breakout"):
+            signal_type = "value_dip"
         valid_recs.append({
             "index_name": name,
             "index_code": code,
@@ -2598,6 +2608,7 @@ def _extract_and_save_recommendations(
             "reason": (r.get("reason") or "")[:200],
             "confidence": (r.get("confidence") or "medium").lower(),
             "referenced_books": referenced_books,  # Phase D: answer 级引用，所有 recs 共享
+            "signal_type": signal_type,
         })
     if not valid_recs:
         return result

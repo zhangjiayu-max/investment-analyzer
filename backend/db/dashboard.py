@@ -16,6 +16,7 @@ def save_recommendations(recommendations: list[dict], analysis_id: str = None,
     verify_days: 验证窗口（交易日），默认 T+5。
     rec 中可选 target_fund_code/target_fund_name/suggested_amount 字段（P2 执行落地）。
     rec 中可选 referenced_books 字段（Phase D 归因，list[str]，序列化为 JSON 存储）。
+    rec 中可选 signal_type 字段（2026-07-13 决策模型升级，value_dip/momentum_breakout）。
     """
     import json
     # 简单按自然日估算交易日（1 周 ≈ 5 交易日 ≈ 7 自然日）
@@ -30,12 +31,16 @@ def save_recommendations(recommendations: list[dict], analysis_id: str = None,
         # Phase D: referenced_books 序列化为 JSON（空列表存 NULL，便于 IS NOT NULL 查询）
         ref_books = rec.get("referenced_books")
         ref_books_json = json.dumps(ref_books, ensure_ascii=False) if ref_books else None
+        # 2026-07-13: signal_type 默认 value_dip（低估机会）
+        signal_type = (rec.get("signal_type") or "value_dip").strip()
+        if signal_type not in ("value_dip", "momentum_breakout"):
+            signal_type = "value_dip"
         cur = conn.execute(
             "INSERT INTO recommendations "
             "(analysis_id, index_name, index_code, direction, reason, confidence, "
             "baseline_value, baseline_date, verify_after_date, verify_window_days, "
-            "target_fund_code, target_fund_name, suggested_amount, referenced_books) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "target_fund_code, target_fund_name, suggested_amount, referenced_books, signal_type) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 analysis_id,
                 rec.get("index_name", ""),
@@ -51,6 +56,7 @@ def save_recommendations(recommendations: list[dict], analysis_id: str = None,
                 rec.get("target_fund_name") or None,
                 rec.get("suggested_amount"),
                 ref_books_json,
+                signal_type,
             )
         )
         ids.append(cur.lastrowid)

@@ -431,6 +431,58 @@ def _generate_signals(**kw) -> list[dict]:
         ))
         return signals
 
+    # ── 2026-07-13 趋势动能买入（场景B：合理估值区间适当上车）──
+    # 估值在 35%-60% 区间，且趋势止跌回升+资金流入+行业景气 三选二
+    momentum = _detect_momentum_breakout(
+        fund_code, fund_name, val_name, val_percentile,
+        position_pct, recent_buy_count, cfg,
+    )
+    if momentum:
+        # 估算建议金额：基于 momentum_max_position_pct 与当前仓位的差额
+        momentum_amount = max(500, int((momentum["max_position_pct"] - position_pct) * kw.get("total_assets", 100000) / 100))
+        momentum_amount = min(momentum_amount, kw.get("cash_balance", 0) * cfg["max_cash_use_pct_per_signal"] / 100)
+
+        signals.append(_make_signal(
+            run_id=run_id, user_id=user_id, signal_date=today,
+            signal_type="momentum_breakout", action_type="add",
+            target_code=fund_code, target_name=fund_name,
+            severity="actionable", score=65, confidence="medium",
+            suggested_amount=momentum_amount if momentum_amount > 0 else None,
+            suggested_ratio=0.02,
+            summary=f"📈 {fund_name} 趋势机会（估值{val_percentile:.0f}%分位·合理区间），{momentum['trend_reason']}，{momentum['signals_passed']}/3信号确认，建议小仓位试探",
+            rationale=(
+                f"估值分位 {val_percentile:.0f}% 处于合理区间（{add_val_max:.0f}%-{cfg['momentum_valuation_max_percentile']:.0f}%），"
+                f"非低估区但满足趋势动能条件：{momentum['trend_reason']}，"
+                f"资金流{'流入' if momentum['signals_detail']['flow_in'] else '中性'}，"
+                f"行业景气分 {momentum['industry_score']}/100。"
+                f"允许小仓位试探性建仓（上限{momentum['max_position_pct']:.0f}%），严格止损{momentum['stop_loss_pct']:.0f}%。"
+            ),
+            evidence={
+                "signal_type": "momentum_breakout",
+                "valuation_percentile": val_percentile,
+                "trend_score": momentum["trend_score"],
+                "trend_reason": momentum["trend_reason"],
+                "flow_signal": momentum["flow_signal"],
+                "industry_score": momentum["industry_score"],
+                "signals_passed": momentum["signals_passed"],
+                "signals_detail": momentum["signals_detail"],
+                "max_position_pct": momentum["max_position_pct"],
+                "stop_loss_pct": momentum["stop_loss_pct"],
+                "take_profit_pct": momentum["take_profit_pct"],
+                "holding_horizon": momentum["holding_horizon"],
+            },
+            risks={
+                "notes": [
+                    momentum["risk_note"],
+                    f"止损线 {momentum['stop_loss_pct']:.0f}%，止盈线 +{momentum['take_profit_pct']:.0f}%",
+                    "仓位严格限制在 5% 以内，不恋战",
+                ],
+            },
+            dedupe_key=f"daily:{today}:momentum_breakout:fund:{fund_code}",
+            next_step="create_candidate",
+        ))
+        return signals
+
     # ── 默认：持有 ──
     signals.append(_make_signal(
         run_id=run_id, user_id=user_id, signal_date=today,
@@ -475,6 +527,15 @@ def _load_config() -> dict:
         # P0-2.1：趋势维度配置
         "trend_lookback_days": get_config_int("daily_advice.trend_lookback_days", 5),
         "trend_danger_threshold": get_config_int("daily_advice.trend_danger_threshold", 3),
+        # 2026-07-13：趋势动能买入信号（三档场景之场景B）
+        "momentum_enabled": get_config("daily_advice.momentum_enabled", "true") == "true",
+        "momentum_valuation_max_percentile": get_config_float("daily_advice.momentum_valuation_max_percentile", 60),
+        "momentum_max_position_pct": get_config_float("daily_advice.momentum_max_position_pct", 5),
+        "momentum_stop_loss_pct": get_config_float("daily_advice.momentum_stop_loss_pct", -5),
+        "momentum_take_profit_pct": get_config_float("daily_advice.momentum_take_profit_pct", 8),
+        "momentum_min_signals": get_config_int("daily_advice.momentum_min_signals", 2),
+        "momentum_trend_threshold": get_config_float("daily_advice.momentum_trend_threshold", 7),
+        "momentum_industry_threshold": get_config_float("daily_advice.momentum_industry_threshold", 50),
     }
 
 
@@ -710,32 +771,35 @@ def _calc_signal_score(
     industry_score: float = 0,
     trend_score: int = 5,
     trend_reason: str = "",
+    flow_signal: dict | None = None,
 ) -> tuple[int, str, dict]:
     """信号评分 0-100 + 置信度 + 评分明细。
 
-    P0-2.1 改造：新增"近5日趋势"维度（0-10分），跌幅权重从 35 降为 25。
+    2026-07-13 升级：三档场景决策模型，降低估值/跌幅权重，
+    新增"资金流向"维度，趋势权重从 10 升至 15。
 
     维度:
-      1. 跌幅 (0-25)          ← 原 35，腾出 10 分给趋势维度
-      2. 估值优势 (0-25)
+      1. 跌幅 (0-20)          ← 原 25，降 5 分
+      2. 估值优势 (0-20)      ← 原 25，降 5 分
       3. 仓位空间 (0-15)
       4. 流动性 (0-10)
       5. 持仓盈亏修正 (-15 ~ +10)
       6. 行业前景+政策 (0-15)
-      7. 近5日趋势 (0-10)     ← P0-2.1 新增
+      7. 近5日趋势 (0-15)     ← 原 10，升 5 分
+      8. 资金流向 (-5 ~ +5)   ← 新增（资金流入加分，流出扣分）
     """
     detail = {}
     score = 0
 
-    # 1. 跌幅（0-25分，原35分）
-    s1 = min(drop_pct / 12 * 25, 25) if drop_pct else 0
+    # 1. 跌幅（0-20分，原25分）
+    s1 = min(drop_pct / 12 * 20, 20) if drop_pct else 0
     detail["跌幅"] = round(s1, 1)
     score += s1
 
-    # 2. 估值优势（0-25分）
+    # 2. 估值优势（0-20分，原25分）
     s2 = 0
     if val_percentile is not None and val_percentile <= 35:
-        s2 = max(0, (35 - val_percentile) / 35 * 25)
+        s2 = max(0, (35 - val_percentile) / 35 * 20)
     detail["估值"] = round(s2, 1)
     score += s2
 
@@ -771,17 +835,31 @@ def _calc_signal_score(
     detail["行业前景"] = round(s6, 1)
     score += s6
 
-    # 7. 近5日趋势（0-10分，P0-2.1 新增）
-    s7 = max(0, min(10, trend_score))
+    # 7. 近5日趋势（0-15分，原10分；2026-07-13 升级）
+    s7 = max(0, min(15, int(trend_score * 1.5)))  # 0-10 → 0-15 等比放大
     detail["趋势"] = round(s7, 1)
     if trend_reason:
         detail["趋势说明"] = trend_reason
     score += s7
 
+    # 8. 资金流向（-5 ~ +5，2026-07-13 新增）
+    #    flow_signal 来自 institutional_flow.get_institutional_flow_signal()
+    #    direction=inflow + strength>=moderate → +5；outflow → -5；neutral/weak → 0
+    s8 = 0
+    if flow_signal:
+        direction = flow_signal.get("direction", "neutral")
+        strength = flow_signal.get("strength", "weak")
+        if direction == "inflow" and strength in ("moderate", "strong"):
+            s8 = 5 if strength == "strong" else 3
+        elif direction == "outflow" and strength in ("moderate", "strong"):
+            s8 = -5 if strength == "strong" else -3
+    detail["资金流"] = s8
+    score += s8
+
     final = min(100, max(0, round(score)))
 
     # 置信度判定（新增趋势分参与）
-    if final >= 70 and s5 >= 0 and s6 >= 8 and s7 >= 5:
+    if final >= 70 and s5 >= 0 and s6 >= 8 and s7 >= 7:
         confidence = "high"
     elif final >= 55 and s5 >= -10:
         confidence = "medium"
@@ -791,6 +869,100 @@ def _calc_signal_score(
         confidence = "low"
 
     return final, confidence, detail
+
+
+def _detect_momentum_breakout(
+    fund_code: str,
+    fund_name: str,
+    val_name: str,
+    val_percentile: float | None,
+    position_pct: float,
+    recent_buy_count: int,
+    cfg: dict,
+) -> dict | None:
+    """检测趋势动能买入信号（合理估值区间的适当上车机会）。
+
+    场景B：估值在 35%-60% 区间，但趋势止跌回升 + 资金流入 + 行业景气，
+    允许小仓位试探性建仓。解决"纯等低估错过机会"的痛点。
+
+    返回 None 表示未触发；触发则返回信号字典。
+    """
+    # 1. 总开关
+    if not cfg.get("momentum_enabled", True):
+        return None
+
+    # 2. 估值必须在合理区（add_max < percentile <= momentum_val_max）
+    add_max_pct = cfg["add_valuation_max_percentile"]
+    momentum_val_max = cfg["momentum_valuation_max_percentile"]
+    if val_percentile is None or val_percentile <= add_max_pct or val_percentile > momentum_val_max:
+        return None
+
+    # 3. 近5日趋势分（复用已有函数）
+    trend_lookback = cfg.get("trend_lookback_days", 5)
+    trend_score, trend_reason = _calc_trend_score(fund_code, trend_lookback)
+    # 持续大跌强制不触发（不接飞刀）
+    if trend_score <= cfg.get("trend_danger_threshold", 3):
+        return None
+
+    # 4. 资金流信号（市场级别，复用 institutional_flow）
+    flow_signal = None
+    try:
+        from services.institutional_flow import get_institutional_flow_signal
+        flow_signal = get_institutional_flow_signal()
+    except Exception as e:
+        logger.warning(f"获取资金流信号失败 {fund_code}: {e}")
+        flow_signal = None
+
+    flow_in = False
+    if flow_signal:
+        direction = flow_signal.get("direction", "neutral")
+        strength = flow_signal.get("strength", "weak")
+        flow_in = direction == "inflow" and strength in ("moderate", "strong")
+
+    # 5. 行业景气分（复用 _query_industry_outlook，返回 0-100）
+    industry_score, industry_summary = _query_industry_outlook(val_name, fund_name)
+    industry_threshold = cfg.get("momentum_industry_threshold", 50)
+    industry_good = industry_score >= industry_threshold
+
+    # 6. 三选二触发
+    trend_threshold = cfg.get("momentum_trend_threshold", 7)
+    trend_good = trend_score >= trend_threshold
+    signals_passed = sum([trend_good, flow_in, industry_good])
+    min_signals = cfg.get("momentum_min_signals", 2)
+    if signals_passed < min_signals:
+        return None
+
+    # 7. 附加约束
+    # 仓位已达上限（场景B用更严格的 5% 上限，而非 15%）
+    momentum_max_pos = cfg.get("momentum_max_position_pct", 5)
+    if position_pct >= momentum_max_pos:
+        return None
+    # 冷静期
+    if recent_buy_count >= cfg.get("recent_buy_max_count", 2):
+        return None
+
+    return {
+        "signal_type": "momentum_breakout",
+        "fund_code": fund_code,
+        "fund_name": fund_name,
+        "val_percentile": val_percentile,
+        "trend_score": trend_score,
+        "trend_reason": trend_reason,
+        "flow_signal": flow_signal,
+        "industry_score": round(industry_score, 1),
+        "industry_summary": industry_summary,
+        "signals_passed": signals_passed,
+        "signals_detail": {
+            "trend_good": trend_good,
+            "flow_in": flow_in,
+            "industry_good": industry_good,
+        },
+        "max_position_pct": momentum_max_pos,
+        "stop_loss_pct": cfg.get("momentum_stop_loss_pct", -5),
+        "take_profit_pct": cfg.get("momentum_take_profit_pct", 8),
+        "holding_horizon": "short_term",
+        "risk_note": "短期波段，严格止损-5%，不恋战",
+    }
 
 
 def total_assets_ratio(kw: dict) -> float:
@@ -966,6 +1138,49 @@ def _scan_sector_rotation(user_id: str, run_id: int, today: str, cfg: dict) -> l
                         evidence={"index_code": index_code, "percentile": val_percentile, "metric": val_metric, "is_stale": False},
                         dedupe_key=f"daily:{today}:sector_rotation:{index_code}",
                     ))
+
+            # 2026-07-13 信号3：合理区（20%-60%）+ 市场资金流入 → 趋势机会提醒
+            # 板块扫描没有单基金净值趋势，用市场资金流信号作为辅助
+            elif (20 < val_percentile <= 60
+                  and not is_stale
+                  and cfg.get("momentum_enabled", True)):
+                try:
+                    from services.institutional_flow import get_institutional_flow_signal
+                    flow_sig = get_institutional_flow_signal()
+                    if (flow_sig
+                        and flow_sig.get("direction") == "inflow"
+                        and flow_sig.get("strength") in ("moderate", "strong")):
+                        flow_strength_label = {"strong": "强", "moderate": "中等"}.get(flow_sig["strength"], "")
+                        signals.append(_make_signal(
+                            run_id=run_id, user_id=user_id, signal_date=today,
+                            signal_type="sector_rotation_momentum", action_type="watch",
+                            target_code=index_code, target_name=index_name,
+                            severity="watch", score=45, confidence="low",
+                            score_detail={
+                                "估值分位": val_percentile,
+                                "指标值": val_metric,
+                                "指标类型": metric_type,
+                                "资金流方向": flow_sig.get("direction"),
+                                "资金流强度": flow_sig.get("strength"),
+                            },
+                            summary=f"📈 {index_name} 估值{val_percentile:.0f}%分位（合理区间），市场资金{flow_strength_label}流入，可关注趋势机会",
+                            rationale=(
+                                f"趋势机会：{index_name} 估值 {val_percentile:.1f}% 处于合理区间（非低估），"
+                                f"但市场整体资金呈{flow_strength_label}流入状态（z_score={flow_sig.get('z_score', 0):.2f}），"
+                                f"可能有短期波段机会。注意严格止损，不恋战。"
+                            ),
+                            evidence={
+                                "index_code": index_code,
+                                "percentile": val_percentile,
+                                "signal_type": "sector_rotation_momentum",
+                                "flow_signal": flow_sig,
+                                "is_stale": False,
+                            },
+                            risks={"notes": ["合理区间非低估，仅趋势机会", "严格止损-5%，仓位上限5%"]},
+                            dedupe_key=f"daily:{today}:sector_rotation_momentum:{index_code}",
+                        ))
+                except Exception as e:
+                    logger.debug(f"行业轮动趋势扫描 {index_code} 失败: {e}")
 
         # ── 为生成的信号追加"已持有"标注 ──
         # 即使信号未被 already_held 跳过，用户可能通过其他关键词持有相关行业基金

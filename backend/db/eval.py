@@ -88,6 +88,8 @@ def init_eval_tables(conn):
     _add_column_if_not_exists(conn, "recommendations", "target_fund_code", "TEXT")
     _add_column_if_not_exists(conn, "recommendations", "target_fund_name", "TEXT")
     _add_column_if_not_exists(conn, "recommendations", "suggested_amount", "REAL")
+    # 2026-07-13 决策模型升级：区分 value_dip（低估机会）/ momentum_breakout（趋势机会）
+    _add_column_if_not_exists(conn, "recommendations", "signal_type", "TEXT DEFAULT 'value_dip'")
 
     conn.execute("""
         CREATE TABLE IF NOT EXISTS recommendation_feedback (

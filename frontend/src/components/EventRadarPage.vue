@@ -28,7 +28,7 @@ const refreshingNavs = ref(false)
 const scanningWatchlist = ref(false)
 const patrolling = ref(false)
 const accuracy = ref(null)
-// 编辑目标价/目标分位
+const lastScanTime = ref(null)
 const editingId = ref(null)
 const editForm = ref({ target_price: '', target_percentile: '' })
 const activeFilter = ref('all') // all / holding_impact / watchlist_impact / opportunity / market_watch
@@ -97,6 +97,7 @@ async function loadEvents() {
   try {
     const { data } = await listMarketEvents({ limit: 100 })
     events.value = data?.events || []
+    lastScanTime.value = data?.last_scan_time || null
   } catch (e) {
     useToast().showToast('加载事件失败', 'error')
   } finally {
@@ -360,6 +361,10 @@ onMounted(() => {
           <h2 class="page-title">机会雷达</h2>
         </div>
         <p class="page-subtitle">发现机会 → 跟踪观察 → 上车信号 → 落地验证，形成投资闭环</p>
+        <p v-if="lastScanTime" class="last-scan-time">
+          <Icon name="clock" size="12" />
+          上次扫描：{{ lastScanTime }}
+        </p>
       </div>
       <div class="header-actions">
         <button v-if="activeTab === 'events'" class="btn btn-secondary verify-btn" @click="handleVerify" :disabled="verifying" title="验证已落地事件的方向预测">
@@ -793,6 +798,14 @@ onMounted(() => {
   font-size: 0.82rem;
   color: var(--color-text-tertiary);
   margin: 0;
+}
+.last-scan-time {
+  font-size: 0.75rem;
+  color: var(--color-text-muted);
+  margin: 4px 0 0;
+  display: flex;
+  align-items: center;
+  gap: 4px;
 }
 .header-actions { flex-shrink: 0; }
 

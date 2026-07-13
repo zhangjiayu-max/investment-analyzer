@@ -160,9 +160,8 @@ def api_capabilities_tools(source: str = "", category: str = "", exposed_only: b
         # 查 tool_registry 启用状态
         enabled_map = {}
         try:
-            from db._conn import DB_PATH
-            import sqlite3
-            conn = sqlite3.connect(str(DB_PATH))
+            from db._conn import _get_conn
+            conn = _get_conn()
             rows = conn.execute("SELECT name, enabled FROM tool_registry").fetchall()
             conn.close()
             enabled_map = {r[0]: bool(r[1]) for r in rows}
@@ -384,10 +383,8 @@ def api_capabilities_stats(days: int = 7, tool_name: str = ""):
         tool_name: 指定工具名（空=全部）
     """
     try:
-        import sqlite3
-        from db._conn import DB_PATH
-        conn = sqlite3.connect(str(DB_PATH))
-        conn.row_factory = sqlite3.Row
+        from db._conn import _get_conn
+        conn = _get_conn()
 
         days = max(1, min(days, 365))
         where_clause = f"WHERE created_at >= datetime('now','-{days} days')"
@@ -509,10 +506,8 @@ def api_capabilities_recent(tool_name: str = "", limit: int = 20, success: str =
         success: 'true'=仅成功, 'false'=仅失败, ''=全部
     """
     try:
-        import sqlite3
-        from db._conn import DB_PATH
-        conn = sqlite3.connect(str(DB_PATH))
-        conn.row_factory = sqlite3.Row
+        from db._conn import _get_conn
+        conn = _get_conn()
 
         limit = max(1, min(limit, 100))
         where_parts = []

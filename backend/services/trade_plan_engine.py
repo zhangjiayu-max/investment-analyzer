@@ -30,6 +30,17 @@ def generate_trade_plan(recommendation_id):
     target_fund_code = recommendation.get('target_fund_code', '')
     target_fund_name = recommendation.get('target_fund_name', '')
 
+    # 2026-07-13：检测趋势动能信号（场景B），用更严格的仓位/止损止盈
+    evidence = recommendation.get('evidence') or {}
+    if isinstance(evidence, str):
+        import json as _json
+        try:
+            evidence = _json.loads(evidence)
+        except Exception:
+            evidence = {}
+    signal_type = evidence.get('signal_type', '') if isinstance(evidence, dict) else ''
+    is_momentum = signal_type == 'momentum_breakout'
+
     portfolio_summary = get_portfolio_summary()
     cash_balance = get_cash_balance()
 
@@ -46,6 +57,20 @@ def generate_trade_plan(recommendation_id):
         action, confidence, target_fund_code
     )
 
+    # 场景B（趋势动能）：覆盖为更严格的参数
+    if is_momentum and action.upper() == 'BUY':
+        # 仓位上限 5%（远低于场景A的15%）
+        momentum_max_pos = 0.05
+        max_momentum_amount = total_assets_cap(portfolio_summary, cash_balance, momentum_max_pos)
+        if amount and max_momentum_amount:
+            amount = min(amount, max_momentum_amount)
+        # 严格止损-5%，止盈+8%（短期波段）
+        stop_loss_pct = 0.05
+        take_profit_pct = 0.08
+        # 趋势机会用一次买入（试探性建仓，不分批）
+        batch_count, batch_interval = 1, 0
+        logger.info(f"交易计划应用 momentum_breakout 参数: amount={amount}, stop={stop_loss_pct}, tp={take_profit_pct}")
+
     plan_id = create_trade_plan(
         recommendation_id=recommendation_id,
         fund_code=target_fund_code or target,
@@ -58,8 +83,14 @@ def generate_trade_plan(recommendation_id):
         take_profit_pct=take_profit_pct,
     )
 
-    logger.info(f"交易计划生成成功: plan_id={plan_id}, action={action}, amount={amount}")
+    logger.info(f"交易计划生成成功: plan_id={plan_id}, action={action}, amount={amount}, signal_type={signal_type}")
     return plan_id
+
+
+def total_assets_cap(portfolio_summary, cash_balance, max_pct):
+    """计算基于总资产的仓位上限。"""
+    total_assets = portfolio_summary.get('total_value', 0) + cash_balance.get('balance', 0)
+    return total_assets * max_pct
 
 
 def _calculate_trade_amount(action, confidence, target, fund_code,

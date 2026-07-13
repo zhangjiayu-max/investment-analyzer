@@ -5,13 +5,10 @@
 import json
 import sqlite3
 import re
-from pathlib import Path
 
-DB = Path("/Users/xiaoyuer/projects/investment-analyzer/data/valuations.db")
-
-
-def get_conn():
-    return sqlite3.connect(str(DB))
+import sys, os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from db._conn import DB_PATH as DB, _get_conn as get_conn
 
 
 def load_conversations_since(date_str="2026-06-28"):

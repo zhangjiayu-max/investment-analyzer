@@ -62,6 +62,10 @@ function getOption(echarts) {
       ...getTooltipOpts(),
       trigger: 'axis',
     },
+    axisPointer: {
+      link: [{ xAxisIndex: 'all' }],
+      label: { backgroundColor: isDark.value ? '#1e293b' : '#f8fafc' },
+    },
     legend: {
       data: props.series.map(s => s.name),
       bottom: 0,

@@ -41,7 +41,24 @@ async def list_events(
 ):
     """查询事件列表。"""
     events = list_market_events(status=status, relevance=relevance, limit=limit)
-    return ApiResponse.success(data={"events": events, "total": len(events)})
+    
+    conn = None
+    last_scan_time = None
+    try:
+        from db._conn import _get_conn
+        conn = _get_conn()
+        row = conn.execute(
+            "SELECT MAX(detected_date) as last_scan FROM market_events"
+        ).fetchone()
+        if row and row["last_scan"]:
+            last_scan_time = row["last_scan"]
+    except Exception as e:
+        logger.warning(f"获取上次扫描时间失败: {e}")
+    finally:
+        if conn:
+            conn.close()
+    
+    return ApiResponse.success(data={"events": events, "total": len(events), "last_scan_time": last_scan_time})
 
 
 @router.get("/api/alerts/event-radar/events/{event_id}")

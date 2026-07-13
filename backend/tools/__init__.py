@@ -785,6 +785,35 @@ TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "query_earnings_reports",
+            "description": "查询最近发布业绩报告/业绩预告的公司。当用户问业绩报告、业绩预告、财报、业报、出公告、公司财报等时调用。数据源：东方财富。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "days": {
+                        "type": "integer",
+                        "default": 7,
+                        "description": "查询最近N天内发布的业绩报告，默认7天",
+                    },
+                    "report_type": {
+                        "type": "string",
+                        "enum": ["all", "预告", "快报", "年报", "季报"],
+                        "default": "all",
+                        "description": "报告类型：all=全部, 预告=业绩预告, 快报=业绩快报, 年报=年度报告, 季报=季度报告",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "default": 10,
+                        "description": "返回条数，默认10条",
+                    },
+                },
+                "required": [],
+            },
+        },
+    },
 ]
 
 # ── Tool 执行器 ──────────────────────────────────────
@@ -1090,6 +1119,9 @@ def _execute_tool_impl(name: str, arguments: dict, trace_id: str = "",
     # P0 新增：机构动向
     elif name == "query_institutional_flow":
         return _query_institutional_flow(arguments)
+    # P0 新增：业绩报告查询
+    elif name == "query_earnings_reports":
+        return _query_earnings_reports(arguments)
     # 天天基金 Skills
     elif name == "ttfund_fund_info":
         return _ttfund_fund_info(arguments)
@@ -2692,4 +2724,123 @@ def _query_institutional_flow(args: dict) -> str:
         return json.dumps(result, ensure_ascii=False)
     except Exception as e:
         logger.exception(f"query_institutional_flow 执行失败: {e}")
+        return json.dumps({"error": str(e)}, ensure_ascii=False)
+
+
+def _query_earnings_reports(args: dict) -> str:
+    """查询最近发布业绩报告/业绩预告的公司。"""
+    try:
+        days = args.get("days", 7)
+        report_type = args.get("report_type", "all")
+        limit = args.get("limit", 10)
+
+        import akshare as ak
+        from datetime import datetime, timedelta
+
+        reports = []
+        cutoff_date = datetime.now() - timedelta(days=days)
+
+        # 根据当前日期推断报告期
+        now = datetime.now()
+        # 当前是7月，半年报预告/快报正在披露，用 20260630
+        # 根据月份自动选择报告期
+        y, m = now.year, now.month
+        if m <= 4:
+            periods = [f"{y-1}1231", f"{y-1}0930"]  # 年报+三季报
+        elif m <= 8:
+            periods = [f"{y}0630", f"{y-1}1231"]    # 半年报+年报
+        else:
+            periods = [f"{y}0930", f"{y}0630"]      # 三季报+半年报
+
+        # 1. 业绩预告
+        if report_type in ("all", "预告"):
+            for period in periods:
+                try:
+                    df = ak.stock_yjyg_em(date=period)
+                    if df is None or len(df) == 0:
+                        continue
+                    for _, row in df.iterrows():
+                        announce_date_str = str(row.get("公告日期", ""))[:10]
+                        try:
+                            announce_date = datetime.strptime(announce_date_str, "%Y-%m-%d")
+                        except ValueError:
+                            continue
+                        if announce_date < cutoff_date:
+                            continue
+                        reports.append({
+                            "stock_name": str(row.get("股票简称", "")),
+                            "stock_code": str(row.get("股票代码", "")),
+                            "report_type": "业绩预告",
+                            "report_period": period,
+                            "announce_date": announce_date_str,
+                            "actual_date": announce_date_str,
+                            "forecast_type": str(row.get("预告类型", "")),  # 预增/预减/续亏/扭亏等
+                            "indicator": str(row.get("预测指标", "")),      # 归母净利润等
+                            "change_summary": str(row.get("业绩变动", ""))[:200],
+                            "change_pct": str(row.get("业绩变动幅度", "")),
+                            "reason": str(row.get("业绩变动原因", ""))[:200],
+                        })
+                except Exception as e:
+                    logger.warning(f"akshare stock_yjyg_em(date={period}) 调用失败: {e}")
+
+        # 2. 业绩快报
+        if report_type in ("all", "快报"):
+            for period in periods:
+                try:
+                    df = ak.stock_yjkb_em(date=period)
+                    if df is None or len(df) == 0:
+                        continue
+                    for _, row in df.iterrows():
+                        announce_date_str = str(row.get("公告日期", ""))[:10]
+                        try:
+                            announce_date = datetime.strptime(announce_date_str, "%Y-%m-%d")
+                        except ValueError:
+                            continue
+                        if announce_date < cutoff_date:
+                            continue
+                        reports.append({
+                            "stock_name": str(row.get("股票简称", "")),
+                            "stock_code": str(row.get("股票代码", "")),
+                            "report_type": "业绩快报",
+                            "report_period": period,
+                            "announce_date": announce_date_str,
+                            "actual_date": announce_date_str,
+                            "industry": str(row.get("所处行业", "")),
+                            "eps": str(row.get("每股收益", "")),
+                            "revenue": str(row.get("营业收入-营业收入", "")),
+                            "revenue_yoy": str(row.get("营业收入-同比增长", "")),
+                            "net_profit": str(row.get("净利润-净利润", "")),
+                            "net_profit_yoy": str(row.get("净利润-同比增长", "")),
+                            "roe": str(row.get("净资产收益率", "")),
+                        })
+                except Exception as e:
+                    logger.warning(f"akshare stock_yjkb_em(date={period}) 调用失败: {e}")
+
+        # 按公告日期降序
+        reports = sorted(reports, key=lambda x: x.get("actual_date", ""), reverse=True)
+
+        # 去重（同一股票同一日期只保留一条）
+        seen = set()
+        deduped = []
+        for r in reports:
+            key = (r.get("stock_code"), r.get("actual_date"), r.get("report_type"))
+            if key not in seen:
+                seen.add(key)
+                deduped.append(r)
+        reports = deduped[:limit]
+
+        if not reports:
+            return json.dumps({
+                "message": f"最近{days}天内未查询到业绩报告相关信息",
+                "data": [],
+                "query_params": {"days": days, "report_type": report_type, "limit": limit},
+            }, ensure_ascii=False)
+
+        return json.dumps({
+            "message": f"查询到最近{days}天内{len(reports)}条业绩报告信息",
+            "data": reports,
+            "query_params": {"days": days, "report_type": report_type, "limit": limit},
+        }, ensure_ascii=False)
+    except Exception as e:
+        logger.exception(f"query_earnings_reports 执行失败: {e}")
         return json.dumps({"error": str(e)}, ensure_ascii=False)

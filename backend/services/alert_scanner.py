@@ -50,6 +50,14 @@ def _get_int(switch: str, default: int) -> int:
         return default
 
 
+def _find_related_fund_for_index(index_code: str, holdings: list) -> dict | None:
+    """从持仓列表中找到跟踪该指数的基金，用于趋势验证。"""
+    for h in holdings:
+        if h.get("index_code") == index_code:
+            return h
+    return None
+
+
 # ── P0-A 建议验证扫描 ────────────────────────────────────
 
 
@@ -181,16 +189,36 @@ def scan_valuation_thresholds() -> dict:
                 continue
 
             if pct < low_threshold:
-                title = f"{name} 估值进入低估区（分位 {pct:.1f}%）"
+                # 2026-07-13：低估触发追加趋势验证，避免"低估但仍在跌"陷阱
+                trend_hint = ""
+                trend_severity = "info"
+                try:
+                    # 查该指数关联的基金，用基金净值趋势近似
+                    related_fund = _find_related_fund_for_index(code, holdings)
+                    if related_fund:
+                        from services.daily_position_advisor import _calc_trend_score
+                        ts, tr = _calc_trend_score(related_fund.get("fund_code", ""), 5)
+                        if ts >= 7:
+                            trend_hint = f"（近5日{tr}，上车信号强）"
+                            trend_severity = "info"
+                        elif ts <= 3:
+                            trend_hint = f"（近5日{tr}，建议等待企稳）"
+                            trend_severity = "info"
+                        else:
+                            trend_hint = f"（近5日{tr}，可分批建仓）"
+                except Exception as e:
+                    logger.debug(f"[alert_scanner] 趋势验证 {code} 失败: {e}")
+
+                title = f"{name} 估值进入低估区（分位 {pct:.1f}%）{trend_hint}"
                 content = (
                     f"{name}（{code}）当前估值分位 {pct:.1f}%，"
-                    f"低于 {low_threshold}% 阈值，可关注加仓机会。"
+                    f"低于 {low_threshold}% 阈值，可关注加仓机会。{trend_hint}"
                 )
                 create_alert(
                     alert_type="valuation_low",
                     title=title,
                     content=content,
-                    severity="info",
+                    severity=trend_severity,
                     related_fund_code=code,
                     related_fund_name=name,
                     source="alert_scanner",

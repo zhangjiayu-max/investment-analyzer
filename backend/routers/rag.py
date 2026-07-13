@@ -165,12 +165,10 @@ class UpdateConfigRequest(BaseModel):
 @router.get("/config")
 async def get_all_config():
     """获取所有 RAG 配置（含默认值和当前值）。"""
-    import sqlite3
-    from db._conn import DB_PATH
+    from db._conn import _get_conn
 
     try:
-        conn = sqlite3.connect(str(DB_PATH))
-        conn.row_factory = sqlite3.Row
+        conn = _get_conn()
         rows = conn.execute("SELECT key, value, description, updated_at FROM rag_config").fetchall()
         conn.close()
 
@@ -205,8 +203,7 @@ async def get_all_config():
 @router.put("/config/{key}")
 async def update_config(key: str, req: UpdateConfigRequest):
     """更新单个 RAG 配置项。"""
-    import sqlite3
-    from db._conn import DB_PATH
+    from db._conn import _get_conn
 
     if key not in _RAG_CONFIG_DEFAULTS:
         raise HTTPException(400, f"未知配置项: {key}，可选: {list(_RAG_CONFIG_DEFAULTS.keys())}")
@@ -220,7 +217,7 @@ async def update_config(key: str, req: UpdateConfigRequest):
     description = req.description or _RAG_CONFIG_DEFAULTS[key][1]
 
     try:
-        conn = sqlite3.connect(str(DB_PATH))
+        conn = _get_conn()
         conn.execute(
             "INSERT OR REPLACE INTO rag_config (key, value, description, updated_at) "
             "VALUES (?, ?, ?, datetime('now','localtime'))",
@@ -241,14 +238,13 @@ async def update_config(key: str, req: UpdateConfigRequest):
 @router.delete("/config/{key}")
 async def reset_config(key: str):
     """重置单个 RAG 配置为默认值。"""
-    import sqlite3
-    from db._conn import DB_PATH
+    from db._conn import _get_conn
 
     if key not in _RAG_CONFIG_DEFAULTS:
         raise HTTPException(400, f"未知配置项: {key}")
 
     try:
-        conn = sqlite3.connect(str(DB_PATH))
+        conn = _get_conn()
         conn.execute("DELETE FROM rag_config WHERE key = ?", (key,))
         conn.commit()
         conn.close()

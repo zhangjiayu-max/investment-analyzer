@@ -593,6 +593,12 @@ async function renderTrendChart() {
       backgroundColor: isDark.value ? 'rgba(13, 18, 32, 0.95)' : '#ffffff',
       borderColor: isDark.value ? 'rgba(255, 255, 255, 0.1)' : '#e2e8f0',
       textStyle: { color: isDark.value ? '#e8eaed' : '#0f172a', fontSize: 12 },
+      axisPointer: {
+        type: 'cross',
+        lineStyle: { color: '#c9a84c', width: 1, type: 'dashed' },
+        crossStyle: { color: '#c9a84c' },
+        label: { backgroundColor: isDark.value ? '#1e293b' : '#f8fafc', color: isDark.value ? '#e8eaed' : '#0f172a' },
+      },
       formatter: function(params) {
         let html = `<div style="font-weight:600;margin-bottom:4px">${params[0].axisValue}</div>`
         params.forEach(p => {

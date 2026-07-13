@@ -70,6 +70,25 @@ function directionClass(d) {
   return { up: 'rec-dir-up', down: 'rec-dir-down', hold: 'rec-dir-hold' }[d] || 'rec-dir-hold'
 }
 
+// 2026-07-13 决策模型升级：区分 value_dip（低估机会）/ momentum_breakout（趋势机会）
+const SIGNAL_TAG_LABELS = {
+  value_dip: '低估机会',
+  momentum_breakout: '趋势机会',
+}
+const SIGNAL_TAG_ICONS = {
+  value_dip: '📉',
+  momentum_breakout: '📈',
+}
+function signalTagLabel(t) {
+  return SIGNAL_TAG_LABELS[t] || SIGNAL_TAG_LABELS.value_dip
+}
+function signalTagIcon(t) {
+  return SIGNAL_TAG_ICONS[t] || SIGNAL_TAG_ICONS.value_dip
+}
+function signalTagClass(t) {
+  return t === 'momentum_breakout' ? 'rec-signal-momentum' : 'rec-signal-value'
+}
+
 // 提取机构动向标记（独立展示，不混入 KYC 警告条）
 function institutionalFlags(flags) {
   if (!Array.isArray(flags)) return []
@@ -698,6 +717,9 @@ const tradeSuggestions = computed(() => {
           <div class="rec-item-header">
             <span class="rec-target-name">{{ rec.index_name || '未命名标的' }}</span>
             <span v-if="rec.index_code" class="rec-target-code font-jet">{{ rec.index_code }}</span>
+            <span class="rec-signal-tag" :class="signalTagClass(rec.signal_type)">
+              {{ signalTagIcon(rec.signal_type) }} {{ signalTagLabel(rec.signal_type) }}
+            </span>
             <span class="rec-direction" :class="directionClass(rec.direction)">
               {{ DIRECTION_ICONS[rec.direction] || '→' }} {{ DIRECTION_LABELS[rec.direction] || '持有' }}
             </span>
@@ -706,6 +728,13 @@ const tradeSuggestions = computed(() => {
           <div v-if="rec.reason" class="rec-reason">{{ rec.reason }}</div>
           <div v-if="rec.baseline_value" class="rec-baseline font-jet">
             基线: {{ rec.baseline_value }}<span v-if="rec.baseline_date"> ({{ rec.baseline_date }})</span>
+          </div>
+          <!-- 趋势机会（momentum_breakout）：短期波段参数提示 -->
+          <div v-if="rec.signal_type === 'momentum_breakout'" class="rec-momentum-params">
+            <span class="momentum-param">📊 仓位上限 <strong class="font-jet">5%</strong></span>
+            <span class="momentum-param">🛑 止损 <strong class="font-jet">-5%</strong></span>
+            <span class="momentum-param">🎯 止盈 <strong class="font-jet">+8%</strong></span>
+            <span class="momentum-tag">短期波段</span>
           </div>
           <div v-if="rec.guardrail_flags && rec.guardrail_flags.length && guardrailText(rec.guardrail_flags)" class="rec-guardrail">
             <span class="guardrail-icon">⚠</span>
@@ -1747,6 +1776,78 @@ const tradeSuggestions = computed(() => {
 .rec-dir-hold {
   color: #6b7280;
   background: rgba(107, 114, 128, 0.1);
+}
+/* 2026-07-13 决策模型升级：信号类型标签（value_dip/momentum_breakout） */
+.rec-signal-tag {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 7px;
+  border-radius: 4px;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  line-height: 1.4;
+}
+.rec-signal-value {
+  color: #059669;
+  background: rgba(5, 150, 105, 0.1);
+  border: 1px solid rgba(5, 150, 105, 0.25);
+}
+.rec-signal-momentum {
+  color: #2563eb;
+  background: rgba(37, 99, 235, 0.1);
+  border: 1px solid rgba(37, 99, 235, 0.25);
+}
+.dark .rec-signal-value {
+  color: #34d399;
+  background: rgba(5, 150, 105, 0.18);
+}
+.dark .rec-signal-momentum {
+  color: #60a5fa;
+  background: rgba(37, 99, 235, 0.18);
+}
+/* 趋势机会短期波段参数提示 */
+.rec-momentum-params {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  padding: 6px 10px;
+  margin: 4px 0 6px;
+  border-radius: var(--radius-sm, 6px);
+  background: rgba(37, 99, 235, 0.06);
+  border: 1px dashed rgba(37, 99, 235, 0.3);
+  font-size: 11.5px;
+  color: #1e40af;
+}
+.momentum-param {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+.momentum-param strong {
+  font-weight: 700;
+  color: #1e3a8a;
+}
+.momentum-tag {
+  margin-left: auto;
+  padding: 1px 6px;
+  font-size: 10.5px;
+  font-weight: 600;
+  color: #fff;
+  background: #2563eb;
+  border-radius: 3px;
+}
+.dark .rec-momentum-params {
+  background: rgba(37, 99, 235, 0.12);
+  border-color: rgba(96, 165, 250, 0.4);
+  color: #bfdbfe;
+}
+.dark .momentum-param strong {
+  color: #dbeafe;
+}
+.dark .momentum-tag {
+  background: #3b82f6;
 }
 .rec-confidence {
   font-size: 11px;

@@ -1539,8 +1539,8 @@ def clarify_requirement(query: str, trace_id: str = "") -> dict:
     except Exception:
         portfolio_line = ""
     try:
-        from db.portfolio import get_watchlist
-        watchlist = get_watchlist("default")
+        from db import list_watchlist
+        watchlist = list_watchlist(user_id="default")
         has_watchlist = bool(watchlist)
     except Exception:
         pass
@@ -1577,8 +1577,8 @@ def clarify_requirement(query: str, trace_id: str = "") -> dict:
         portfolio_line = ""
 
     try:
-        from db.portfolio import get_watchlist
-        watchlist = get_watchlist("default")
+        from db import list_watchlist
+        watchlist = list_watchlist(user_id="default")
         has_watchlist = bool(watchlist)
     except Exception:
         pass
@@ -3811,7 +3811,7 @@ def _stream_build_context(refined_query: str, rag_context: str, complexity: str,
 
     # R2: 注入 DCA 定投规则（从 system_config 读取）
     try:
-        from db.config import get_config_int
+        from db.config import get_config_int, get_config_float
         base_dca = get_config_int("daily_advice.base_dca_amount", 500)
         step_pct = get_config_int("daily_advice.dca_drop_step_pct", 4)
         max_steps = get_config_int("daily_advice.max_dca_steps", 3)
@@ -3821,6 +3821,12 @@ def _stream_build_context(refined_query: str, rag_context: str, complexity: str,
         cooldown_max = get_config_int("daily_advice.recent_buy_max_count", 2)
         max_cash_pct = get_config_int("daily_advice.max_cash_use_pct_per_signal", 10)
         single_pct = get_config_int("daily_advice.default_single_position_pct", 15)
+        # 2026-07-13：三档场景之场景B（趋势动能）
+        momentum_enabled = get_config_int("daily_advice.momentum_enabled", 1)
+        momentum_val_max = get_config_int("daily_advice.momentum_valuation_max_percentile", 60)
+        momentum_max_pos = get_config_float("daily_advice.momentum_max_position_pct", 5)
+        momentum_stop = get_config_int("daily_advice.momentum_stop_loss_pct", -5)
+        momentum_tp = get_config_int("daily_advice.momentum_take_profit_pct", 8)
 
         prebuilt_context += (
             "## 定投与加减仓规则（必须遵守）\n\n"
@@ -3828,11 +3834,29 @@ def _stream_build_context(refined_query: str, rag_context: str, complexity: str,
             f"- 基础定投金额: ¥{base_dca}\n"
             f"- 每下跌 {step_pct}% 加一档，每档加 ¥{base_dca}\n"
             f"- 最多加 {max_steps} 档（即最大单次加仓 ¥{base_dca * max_steps}）\n\n"
-            "### 加仓条件\n"
-            f"- 估值百分位必须 ≤ {add_max_pct}% 才建议加仓\n"
+            "### 加仓条件（三档场景）\n\n"
+            "#### 场景A：低估区（估值≤" + str(add_max_pct) + "%）— 正常加仓\n"
+            "- 估值触发，按 4% 定投法执行\n"
+            f"- 单标的仓位上限 {single_pct}%\n"
             f"- 加仓前检查冷静期: {cooldown_days} 天内最多买入 {cooldown_max} 次\n"
-            f"- 单标的占比达 {single_pct}% 禁止加仓\n"
             f"- 单次建议使用现金上限: 总现金的 {max_cash_pct}%\n\n"
+            "#### 场景B：合理区（估值" + str(add_max_pct) + "%-" + str(momentum_val_max) + "%）— 趋势动能小仓位试探"
+            + ("\n" if momentum_enabled else "（当前已关闭，仅持有）\n")
+        )
+        if momentum_enabled:
+            prebuilt_context += (
+                "- 仅当以下三条件满足≥2时，允许小仓位试探性建仓：\n"
+                "  1. 近5日趋势止跌回升（trend_score ≥ 7）\n"
+                "  2. 资金净流入（institutional_flow.direction == inflow，强度≥moderate）\n"
+                "  3. 行业景气（industry_score ≥ 50/100）\n"
+                f"- 单标的仓位上限 {momentum_max_pos:.0f}%（严格限制，远低于场景A的{single_pct}%）\n"
+                f"- 必须标注「短期波段，严格止损{momentum_stop:.0f}%，止盈+{momentum_tp:.0f}%」\n"
+                "- 近5日持续大跌（trend_score ≤ 3）禁止触发，不接飞刀\n"
+                "- 估值 > " + str(momentum_val_max) + "% 时永远不触发此场景\n\n"
+            )
+        prebuilt_context += (
+            "#### 场景C：高估区（估值>" + str(momentum_val_max) + "%）— 不加仓\n"
+            "- 仅持有或考虑减仓\n\n"
             "### 减仓条件\n"
             f"- 估值百分位 ≥ {reduce_min_pct}% 才建议减仓\n"
             "- 单次减仓幅度不超过该基金持仓的 20%\n"
@@ -3840,7 +3864,7 @@ def _stream_build_context(refined_query: str, rag_context: str, complexity: str,
             "### 禁止行为\n"
             "- 一次性减仓超过 ¥50,000\n"
             "- 单条建议同时减仓 2 个以上基金\n"
-            "- 加仓金额超出 4% 定投法计算结果\n"
+            "- 加仓金额超出 4% 定投法计算结果（场景A）或仓位上限（场景B）\n"
             "- 对已超仓位上限的基金建议加仓\n\n"
         )
     except Exception as e:

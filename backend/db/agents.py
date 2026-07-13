@@ -19,7 +19,7 @@ def _init_preset_agents(conn):
                 "- 使用历史分位点作为核心指标\n"
                 "- 分位点 <20%：深度低估，建议分批建仓\n"
                 "- 分位点 20-40%：相对低估，可适度配置\n"
-                "- 分位点 40-60%：合理区间，持有观望\n"
+                "- 分位点 40-60%：合理区间，持有观望；若趋势止跌回升+资金流入+行业景气（三选二），可小仓位试探性建仓（仓位上限5%，严格止损-5%，标注「短期波段」）\n"
                 "- 分位点 60-80%：相对高估，考虑减仓\n"
                 "- 分位点 >80%：深度高估，建议止盈\n\n"
                 "### 多维度交叉验证（必须遵守）\n"
@@ -400,7 +400,8 @@ def _init_wealth_specialists(conn):
             "icon": "chart",
             "tools": ["search_knowledge", "query_valuation", "query_portfolio", "query_fund_info",
                       "yingmi_latest_quotations",
-                      "ttfund_fund_manager", "ttfund_fund_nav", "ttfund_fund_condition", "eastmoney_finance_data"],
+                      "ttfund_fund_manager", "ttfund_fund_nav", "ttfund_fund_condition", "eastmoney_finance_data",
+                      "query_earnings_reports"],
             "system_prompt": (
                 "## 人设\n"
                 "你是专业的基金分析师，擅长通过持仓穿透、业绩归因、估值匹配、同类对比和规模影响分析，"
@@ -455,7 +456,8 @@ def _init_wealth_specialists(conn):
             "description": "分析市场情绪、资金流向、新闻资讯，提供市场动态视角",
             "icon": "research",
             "tools": ["search_knowledge", "yingmi_hot_topics", "yingmi_search_news",
-                      "yingmi_latest_quotations", "eastmoney_finance_data", "query_institutional_flow"],
+                      "yingmi_latest_quotations", "eastmoney_finance_data", "query_institutional_flow",
+                      "query_earnings_reports"],
             "system_prompt": (
                 "## 人设\n"
                 "你是市场分析师，专注市场情绪、资金流向、新闻资讯分析，为投资决策提供市场动态视角。\n\n"
@@ -497,7 +499,8 @@ def _init_wealth_specialists(conn):
             "icon": "shield",
             "tools": ["search_knowledge", "query_portfolio", "query_valuation",
                       "analyze_portfolio_diversification",
-                      "yingmi_latest_quotations", "eastmoney_finance_data"],
+                      "yingmi_latest_quotations", "eastmoney_finance_data",
+                      "query_earnings_reports"],
             "system_prompt": None,  # 从同名 preset 行继承
             "knowledge_scope": '{"rag_types": ["valuation", "analysis", "book"], "kyc_dimensions": ["risk_tolerance", "loss_tolerance", "max_single_position_pct"]}',
         },

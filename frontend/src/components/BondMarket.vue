@@ -47,6 +47,12 @@ async function renderChart(data) {
       borderColor: 'rgba(255, 255, 255, 0.1)',
       borderWidth: 1,
       textStyle: { color: '#1f2937', fontSize: 13 },
+      axisPointer: {
+        type: 'cross',
+        lineStyle: { color: '#c9a84c', width: 1, type: 'dashed' },
+        crossStyle: { color: '#c9a84c' },
+        label: { backgroundColor: '#f8fafc', color: '#0f172a' },
+      },
       formatter(params) {
         const date = params[0].axisValue
         let html = `<div style="font-weight:600;margin-bottom:4px">${date}</div>`

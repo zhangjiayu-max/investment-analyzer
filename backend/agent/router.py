@@ -69,6 +69,8 @@ _KEYWORD_ROUTES = [
     (["周期", "景气", "产能", "供需", "拐点"], ["market_analyst", "valuation_expert"]),
     (["锂", "锂矿", "锂电池", "新能源", "储能", "光伏", "半导体", "芯片"], ["fund_analyst", "valuation_expert"]),
     (["机构", "主力", "散户", "做空", "筹码"], ["risk_assessor", "fund_analyst"]),
+    # ── 业绩报告相关路由 ──
+    (["业绩", "财报", "业报", "业绩预告", "业绩快报", "年报", "季报", "半年报"], ["market_analyst", "fund_analyst"]),
     # ── Top 5 新工具的路由规则 ──
     (["基金经理", "经理任职", "管理规模", "经理履历"], ["fund_analyst"]),
     (["净值", "最大回撤", "定投回测", "年化收益", "历史业绩"], ["fund_analyst", "risk_assessor"]),

@@ -19,10 +19,11 @@ import shutil
 from datetime import datetime
 from pathlib import Path
 
-# 项目根目录（脚本在 backend/scripts/ 下，需上溯两层到项目根）
-PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
-DB_PATH = PROJECT_ROOT / 'data' / 'valuations.db'
-BACKUP_DIR = PROJECT_ROOT / 'backend' / 'backups'
+# 统一使用 db._conn 的数据库路径
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from db._conn import DB_PATH
+
+BACKUP_DIR = DB_PATH.parent.parent / 'backups'
 
 
 def get_conn():
