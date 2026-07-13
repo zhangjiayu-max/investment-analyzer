@@ -1584,10 +1584,11 @@ def _get_fund_valuation_percentile(fund_code: str) -> float | None:
 
 
 def calculate_fund_health_report(fund_code: str, force_refresh: bool = False) -> dict:
-    """六维体检报告。
+    """七维体检报告。
 
-    综合评分 = 质量评分 × 0.20 + 回撤评分 × 0.20 + 趋势评分 × 0.15
-             + 资金评分 × 0.15 + 情绪评分 × 0.10 + 估值评分 × 0.20
+    综合评分 = 质量评分 × 0.17 + 回撤评分 × 0.15 + 趋势评分 × 0.15
+             + 资金评分 × 0.13 + 情绪评分 × 0.12 + 估值评分 × 0.15 + 基本面评分 × 0.13
+    （债基/无股票持仓时用6维：质量0.20/回撤0.20/趋势0.15/资金0.15/情绪0.10/估值0.20）
     """
     # 缓存策略：24小时内不重复计算（除非 force_refresh）
     if not force_refresh:
@@ -1604,7 +1605,7 @@ def calculate_fund_health_report(fund_code: str, force_refresh: bool = False) ->
         except Exception:
             pass
 
-    # 计算六维
+    # 计算前六维
     quality = calculate_quality_score(fund_code)
     drawdown = calculate_drawdown_analysis(fund_code)
     trend = calculate_trend_analysis(fund_code)
@@ -1623,19 +1624,39 @@ def calculate_fund_health_report(fund_code: str, force_refresh: bool = False) ->
     capital_score = capital["capital_score"]
     sentiment_score = sentiment["sentiment_score"]
 
-    # 综合评分（加权）
-    total_score = (
-        quality_score * 0.20
-        + drawdown_score * 0.20
-        + trend_score * 0.15
-        + capital_score * 0.15
-        + sentiment_score * 0.10
-        + valuation_score * 0.20
-    )
+    # 第7维：基本面（债基/无持仓时降级为6维）
+    fundamental = calculate_fundamental_score(fund_code)
+    fundamental_score = fundamental.get("fundamental_score")
+    has_fundamental = fundamental_score is not None
+
+    # 调仓动作
+    holding_changes = analyze_holding_changes(fund_code)
+
+    # 综合评分（加权，7维 vs 6维）
+    if has_fundamental:
+        total_score = (
+            quality_score * 0.17
+            + drawdown_score * 0.15
+            + trend_score * 0.15
+            + capital_score * 0.13
+            + sentiment_score * 0.12
+            + valuation_score * 0.15
+            + fundamental_score * 0.13
+        )
+    else:
+        # 债基/无持仓：6维
+        total_score = (
+            quality_score * 0.20
+            + drawdown_score * 0.20
+            + trend_score * 0.15
+            + capital_score * 0.15
+            + sentiment_score * 0.10
+            + valuation_score * 0.20
+        )
     total_score = round(total_score, 1)
     rating = _score_to_rating(total_score)
 
-    # 决策矩阵
+    # 决策矩阵（加入基本面因子）
     decision = _build_decision_matrix(
         quality_score=quality_score,
         trend_metrics=trend.get("detail", {}),
@@ -1643,10 +1664,11 @@ def calculate_fund_health_report(fund_code: str, force_refresh: bool = False) ->
         valuation_level=valuation_level,
         sentiment_score=sentiment_score,
         fear_greed=sentiment.get("fear_greed_index", 50),
+        fundamental_rating=fundamental.get("rating") if has_fundamental else None,
     )
 
     # 段永平视角
-    duan_view = _build_duanyongping_view(quality_score, valuation_level, decision["trend_direction"])
+    duan_view = _build_duanyongping_view(quality_score, valuation_level, decision["trend_direction"], fundamental.get("rating") if has_fundamental else None)
 
     # 构建报告
     report = {
@@ -1657,6 +1679,8 @@ def calculate_fund_health_report(fund_code: str, force_refresh: bool = False) ->
         "sentiment": {"score": round(sentiment_score, 1), "rating": sentiment["rating"], "label": "情绪温度"},
         "valuation": {"score": round(valuation_score, 1), "rating": _score_to_rating(valuation_score), "label": "估值水位"},
     }
+    if has_fundamental:
+        report["fundamental"] = {"score": round(fundamental_score, 1), "rating": fundamental["rating"], "label": "基本面"}
 
     advice = _build_health_advice(decision, report)
 
@@ -1677,6 +1701,8 @@ def calculate_fund_health_report(fund_code: str, force_refresh: bool = False) ->
             "capital": capital,
             "sentiment": sentiment,
             "valuation": {"pe_percentile": pe_percentile, "score": valuation_score},
+            "fundamental": fundamental if has_fundamental else None,
+            "holding_changes": holding_changes,
         },
     }
 
@@ -1720,18 +1746,24 @@ def _build_decision_matrix(
     valuation_level: str,
     sentiment_score: float,
     fear_greed: int,
+    fundamental_rating: str = None,
 ) -> dict:
-    """段永平决策矩阵。
+    """段永平决策矩阵（含基本面因子）。
 
-    - strong_buy: 质量≥good + 趋势上行 + 估值低 + 情绪偏恐
-    - dca: 质量≥good + 估值低 + (趋势不明 OR 回撤高位)
+    - strong_buy: 质量≥good + 基本面≥good + 趋势上行 + 估值低 + 情绪偏恐
+    - dca: 质量≥good + 基本面≥good + 估值低 + (趋势不明 OR 回撤高位)
     - hold: 质量≥good + 估值中 OR 趋势上行 + 估值中
-    - reduce: 估值高 OR 质量差 OR 趋势下行+估值中
-    - wait: 趋势下行 + 回撤未企稳 + 估值不低
+    - reduce: 估值高 OR 质量差 OR 基本面差 OR 趋势下行+估值中
+    - wait: 趋势下行 + 回撤未企稳 + 估值不低；基本面差即使估值低也判wait（价值陷阱）
     """
     quality_rating = _score_to_rating(quality_score)
     quality_good = quality_score >= 60  # good 及以上
     quality_poor = quality_score < 40
+
+    # 基本面因子
+    fundamental_poor = fundamental_rating == "poor"
+    fundamental_excellent = fundamental_rating == "excellent"
+    fundamental_good = fundamental_rating in ("good", "excellent")
 
     trend_direction = trend_metrics.get("arrangement", "tangled")
     trend_up = trend_direction in ("strong_bull", "weak_bull")
@@ -1745,22 +1777,31 @@ def _build_decision_matrix(
 
     fear = fear_greed <= 40 or sentiment_score >= 60  # 情绪偏恐（恐贪低或情绪分高）
 
-    # 决策优先级
+    # 决策优先级（基本面差优先拦截）
+    # 注意：fundamental_rating 为 None 时（债基/6维模式），走旧4因子逻辑
+    has_fundamental = fundamental_rating is not None
     if quality_poor:
         action = "reduce"
         reason = "基金质量较差,建议减仓或更换"
+    elif has_fundamental and fundamental_poor and valuation_level == "low":
+        # 价值陷阱预警：估值低但基本面差
+        action = "wait"
+        reason = "⚠️价值陷阱预警：估值低但重仓股基本面差,不建议抄底"
+    elif has_fundamental and fundamental_poor:
+        action = "reduce"
+        reason = "重仓股基本面差,建议减仓规避风险"
     elif valuation_level == "high":
         action = "reduce"
         reason = "估值偏高,建议分批减仓"
     elif trend_down and not is_bottoming and valuation_level != "low":
         action = "wait"
         reason = "趋势下行+回撤未企稳+估值不低,建议等待拐点"
-    elif quality_good and trend_up and valuation_level == "low" and fear:
+    elif quality_good and trend_up and valuation_level == "low" and fear and (not has_fundamental or fundamental_good):
         action = "strong_buy"
-        reason = "质量良好+趋势上行+估值低+情绪偏恐,强烈加仓"
-    elif quality_good and valuation_level == "low" and (trend_tangled or drawdown_high):
+        reason = "质量良好" + ("+基本面良好" if has_fundamental else "") + "+趋势上行+估值低+情绪偏恐,强烈加仓"
+    elif quality_good and valuation_level == "low" and (trend_tangled or drawdown_high) and (not has_fundamental or fundamental_good):
         action = "dca"
-        reason = "质量良好+估值偏低+" + ("趋势不明" if trend_tangled else "回撤高位") + ",适合定投"
+        reason = "质量良好" + ("+基本面良好" if has_fundamental else "") + "+估值偏低+" + ("趋势不明" if trend_tangled else "回撤高位") + ",适合定投"
     elif quality_good and (valuation_level == "mid" or trend_up):
         action = "hold"
         reason = "质量良好+" + ("估值中位" if valuation_level == "mid" else "趋势上行") + ",持有"
@@ -1781,6 +1822,7 @@ def _build_decision_matrix(
 
     return {
         "quality_rating": quality_rating,
+        "fundamental_rating": fundamental_rating,
         "trend_direction": trend_direction,
         "valuation_level": valuation_level,
         "action": action,
@@ -1789,15 +1831,26 @@ def _build_decision_matrix(
     }
 
 
-def _build_duanyongping_view(quality_score: float, valuation_level: str, trend_direction: str) -> str:
-    """段永平视角文案。"""
-    # 好生意
+def _build_duanyongping_view(quality_score: float, valuation_level: str, trend_direction: str, fundamental_rating: str = None) -> str:
+    """段永平视角文案（含基本面）。"""
+    # 好生意（基金质量）
     if quality_score >= 70:
         business = "好生意"
     elif quality_score >= 50:
         business = "尚可的生意"
     else:
         business = "一般的生意"
+    # 好公司（基本面，段永平"买股票就是买公司"）
+    if fundamental_rating == "excellent":
+        company = "好公司"
+    elif fundamental_rating == "good":
+        company = "质地良好的公司"
+    elif fundamental_rating == "fair":
+        company = "质地一般的公司"
+    elif fundamental_rating == "poor":
+        company = "质地差的公司"
+    else:
+        company = ""
     # 好价格
     if valuation_level == "low":
         price = "好价格(低估)"
@@ -1813,7 +1866,12 @@ def _build_duanyongping_view(quality_score: float, valuation_level: str, trend_d
     else:
         trend_text = "趋势待确立"
 
-    return f"{business}+{price}+{trend_text}"
+    parts = [business]
+    if company:
+        parts.append(company)
+    parts.append(price)
+    parts.append(trend_text)
+    return "+".join(parts)
 
 
 def _build_health_advice(decision: dict, report: dict) -> str:
@@ -1880,3 +1938,489 @@ def refresh_fund_quality_scores(fund_codes: list = None) -> dict:
         except Exception as e:
             logger.error(f"[refresh] 基金 {code} 刷新失败: {e}")
     return {"ok": True, "count": count}
+
+
+# ════════════════════════════════════════════════════════════
+# 第一阶段扩展：基本面深度维度（第7维）
+# ════════════════════════════════════════════════════════════
+
+
+def _fetch_stock_financials(stock_code: str) -> dict | None:
+    """获取个股财务指标（带90天缓存）。
+
+    Returns:
+        {roe, gross_margin, net_margin, debt_ratio, rev_growth, profit_growth,
+         roe_history, industry} 或 None
+    """
+    import json as _json
+    from db.portfolio import get_analysis_cache, save_analysis_cache
+
+    cache_key = f"stock_financial_{stock_code}"
+    cached = get_analysis_cache(cache_key)
+    if cached:
+        # 检查90天TTL
+        created = cached.get("_created_at", "")
+        try:
+            created_dt = datetime.strptime(created, "%Y-%m-%d %H:%M:%S")
+            if (datetime.now() - created_dt).days < 90:
+                return cached.get("data")
+        except Exception:
+            pass
+
+    if not _HAS_AKSHARE:
+        return None
+
+    # 调 akshare 财务指标接口
+    start_year = str(datetime.now().year - 1)
+    df = _call_akshare_with_timeout(
+        ak.stock_financial_analysis_indicator,
+        timeout=20,
+        symbol=stock_code,
+        start_year=start_year,
+    )
+    if df is None or len(df) == 0:
+        return None
+
+    try:
+        # 取最近4个季度的数据
+        df = df.head(4).copy()
+        # akshare 列名可能因版本不同有差异，做兼容处理
+        def _get_col(row, *names):
+            for n in names:
+                if n in row and row[n] is not None:
+                    return row[n]
+            return 0
+
+        latest = df.iloc[0]  # 最近一期
+        roe = _safe_float(_get_col(latest, "加权净资产收益率(%)", "净资产收益率(%)", "ROE(%)"))
+        gross_margin = _safe_float(_get_col(latest, "销售毛利率(%)", "毛利率(%)"))
+        net_margin = _safe_float(_get_col(latest, "销售净利率(%)", "净利率(%)"))
+        debt_ratio = _safe_float(_get_col(latest, "资产负债率(%)"))
+        rev_growth = _safe_float(_get_col(latest, "主营业务收入增长率(%)", "营收同比增长(%)"))
+        profit_growth = _safe_float(_get_col(latest, "净利润增长率(%)", "归母净利润同比增长(%)"))
+
+        # ROE 历史序列（4季度）
+        roe_history = []
+        for _, r in df.iterrows():
+            roe_history.append(_safe_float(_get_col(r, "加权净资产收益率(%)", "净资产收益率(%)", "ROE(%)")))
+
+        # 行业（从 stock_individual_info_em 获取，失败不影响主流程）
+        industry = ""
+        try:
+            info_df = _call_akshare_with_timeout(
+                ak.stock_individual_info_em, timeout=10, symbol=stock_code
+            )
+            if info_df is not None and len(info_df) > 0:
+                for _, r in info_df.iterrows():
+                    if "行业" in str(r.get("item", "")):
+                        industry = str(r.get("value", ""))
+                        break
+        except Exception:
+            pass
+
+        data = {
+            "roe": roe,
+            "gross_margin": gross_margin,
+            "net_margin": net_margin,
+            "debt_ratio": debt_ratio,
+            "rev_growth": rev_growth,
+            "profit_growth": profit_growth,
+            "roe_history": roe_history,
+            "industry": industry,
+        }
+
+        # 写缓存
+        save_analysis_cache(cache_key, {"data": data, "_created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")})
+        return data
+    except Exception as e:
+        logger.warning(f"[fundamental] 解析财务指标失败 {stock_code}: {e}")
+        return None
+
+
+def _safe_int(v, default: int = 0) -> int:
+    """安全转int，处理NaN/None。"""
+    try:
+        f = float(v)
+        if f != f:  # NaN check
+            return default
+        return int(f)
+    except (ValueError, TypeError):
+        return default
+
+
+def _score_profitability(roe: float, gross_margin: float, net_margin: float) -> tuple[float, str]:
+    """盈利能力评分（0-100）。"""
+    # NaN 安全处理
+    roe = _safe_float(roe) if roe == roe else 0  # NaN check
+    gross_margin = _safe_float(gross_margin) if gross_margin == gross_margin else 0
+    net_margin = _safe_float(net_margin) if net_margin == net_margin else 0
+
+    # ROE 评分（40分满分）
+    if roe >= 20:
+        roe_s, roe_r = 40, f"ROE {_safe_int(roe)}%+，盈利能力极强"
+    elif roe >= 15:
+        roe_s, roe_r = 32, f"ROE {_safe_int(roe)}%，盈利能力强"
+    elif roe >= 10:
+        roe_s, roe_r = 24, f"ROE {_safe_int(roe)}%，盈利能力中等"
+    elif roe >= 5:
+        roe_s, roe_r = 16, f"ROE {_safe_int(roe)}%，盈利能力偏弱"
+    else:
+        roe_s, roe_r = 8, f"ROE {_safe_int(roe)}%，盈利能力弱"
+
+    # 毛利率评分（30分满分）
+    if gross_margin >= 50:
+        gm_s = 30
+    elif gross_margin >= 30:
+        gm_s = 22
+    elif gross_margin >= 20:
+        gm_s = 16
+    else:
+        gm_s = 8
+
+    # 净利率评分（30分满分）
+    if net_margin >= 20:
+        nm_s = 30
+    elif net_margin >= 10:
+        nm_s = 22
+    elif net_margin >= 5:
+        nm_s = 16
+    else:
+        nm_s = 8
+
+    score = roe_s + gm_s + nm_s
+    reason = f"{roe_r}，毛利率{_safe_int(gross_margin)}%，净利率{_safe_int(net_margin)}%"
+    return score, reason
+
+
+def _score_growth(rev_growth: float, profit_growth: float, history_growth: list = None) -> tuple[float, str]:
+    """成长性评分（0-100）。"""
+    # NaN 安全处理
+    rev_growth = _safe_float(rev_growth) if rev_growth == rev_growth else 0
+    profit_growth = _safe_float(profit_growth) if profit_growth == profit_growth else 0
+
+    # 营收增速（50分）
+    if rev_growth >= 30:
+        rev_s = 50
+    elif rev_growth >= 20:
+        rev_s = 40
+    elif rev_growth >= 10:
+        rev_s = 30
+    elif rev_growth >= 0:
+        rev_s = 20
+    else:
+        rev_s = 8
+
+    # 净利润增速（50分）
+    if profit_growth >= 30:
+        prof_s = 50
+    elif profit_growth >= 20:
+        prof_s = 40
+    elif profit_growth >= 10:
+        prof_s = 30
+    elif profit_growth >= 0:
+        prof_s = 20
+    else:
+        prof_s = 8
+
+    score = rev_s + prof_s
+
+    # 连续下滑扣分
+    if history_growth and len(history_growth) >= 2:
+        if all(g < 0 for g in history_growth[:2]):
+            score -= 5
+
+    score = max(0, min(100, score))
+    reason = f"营收增速{_safe_int(rev_growth)}%，净利润增速{_safe_int(profit_growth)}%"
+    if score < 30:
+        reason += "，增速下滑需关注"
+    return score, reason
+
+
+def _score_solvency(debt_ratio: float, industry: str = "") -> tuple[float, str]:
+    """偿债能力评分（0-100）。金融行业特殊处理。"""
+    # NaN 安全处理
+    debt_ratio = _safe_float(debt_ratio) if debt_ratio == debt_ratio else 0
+
+    # 金融行业负债率高是常态，特殊处理
+    is_financial = any(kw in industry for kw in ("银行", "保险", "证券", "金融"))
+
+    if is_financial:
+        # 金融行业用相对评分
+        if debt_ratio >= 90:
+            score = 70
+        elif debt_ratio >= 80:
+            score = 80
+        else:
+            score = 60
+        reason = f"金融行业，资产负债率{_safe_int(debt_ratio)}%（行业特性）"
+    else:
+        if debt_ratio < 40:
+            score = 90
+        elif debt_ratio < 60:
+            score = 70
+        elif debt_ratio < 70:
+            score = 50
+        else:
+            score = 30
+        reason = f"资产负债率{_safe_int(debt_ratio)}%"
+
+    return score, reason
+
+
+def _score_stability(roe_history: list) -> tuple[float, str]:
+    """稳定性评分（ROE 4季度标准差，0-100）。"""
+    if not roe_history or len(roe_history) < 2:
+        return 50, "历史数据不足，默认中分"
+
+    try:
+        mean_roe = sum(roe_history) / len(roe_history)
+        variance = sum((x - mean_roe) ** 2 for x in roe_history) / len(roe_history)
+        std = variance ** 0.5
+
+        if std < 2:
+            score = 90
+        elif std < 5:
+            score = 70
+        elif std < 10:
+            score = 50
+        else:
+            score = 30
+
+        reason = f"ROE 4季度标准差{std:.1f}%"
+        return score, reason
+    except Exception:
+        return 50, "稳定性计算异常，默认中分"
+
+
+def _score_valuation_from_pe(stock_code: str) -> tuple[float, str]:
+    """个股估值评分（基于当前PE绝对值，0-100）。
+
+    简化方案：用当前PE绝对值评分，不做历史分位（个股历史PE数据获取复杂）。
+    """
+    if not _HAS_AKSHARE:
+        return 50, "akshare不可用，默认中分"
+
+    try:
+        df = _call_akshare_with_timeout(
+            ak.stock_zh_a_spot_em, timeout=10
+        )
+        if df is None or len(df) == 0:
+            return 50, "行情数据获取失败，默认中分"
+
+        row = df[df["代码"] == stock_code]
+        if len(row) == 0:
+            return 50, f"未找到{stock_code}行情，默认中分"
+
+        pe = _safe_float(row.iloc[0].get("市盈率-动态", 0))
+
+        # 亏损股PE为负或极大，直接低分
+        if pe <= 0 or pe > 200:
+            return 20, f"PE={pe}，亏损或异常，估值评分低"
+
+        if pe < 15:
+            score = 90
+        elif pe < 25:
+            score = 75
+        elif pe < 40:
+            score = 60
+        elif pe < 60:
+            score = 40
+        else:
+            score = 20
+
+        reason = f"PE={int(pe)}"
+        return score, reason
+    except Exception as e:
+        logger.warning(f"[fundamental] 个股估值评分失败 {stock_code}: {e}")
+        return 50, "估值评分异常，默认中分"
+
+
+def _score_stock_fundamentals(stock_code: str) -> dict:
+    """个股5维基本面评分。"""
+    fin = _fetch_stock_financials(stock_code)
+    if not fin:
+        return {
+            "stock_code": stock_code,
+            "stock_name": "",
+            "profitability": {"score": 50, "reason": "财务数据缺失"},
+            "growth": {"score": 50, "reason": "财务数据缺失"},
+            "solvency": {"score": 50, "reason": "财务数据缺失"},
+            "stability": {"score": 50, "reason": "财务数据缺失"},
+            "valuation": {"score": 50, "reason": "财务数据缺失"},
+            "total": 50.0,
+            "rating": "fair",
+        }
+
+    profitability, prof_reason = _score_profitability(
+        fin["roe"], fin["gross_margin"], fin["net_margin"]
+    )
+    growth, growth_reason = _score_growth(
+        fin["rev_growth"], fin["profit_growth"], fin.get("roe_history")
+    )
+    solvency, solvency_reason = _score_solvency(fin["debt_ratio"], fin.get("industry", ""))
+    stability, stability_reason = _score_stability(fin.get("roe_history", []))
+    valuation, val_reason = _score_valuation_from_pe(stock_code)
+
+    total = (
+        profitability * 0.30 + growth * 0.25 + solvency * 0.15
+        + stability * 0.15 + valuation * 0.15
+    )
+
+    return {
+        "stock_code": stock_code,
+        "profitability": {"score": profitability, "reason": prof_reason},
+        "growth": {"score": growth, "reason": growth_reason},
+        "solvency": {"score": solvency, "reason": solvency_reason},
+        "stability": {"score": stability, "reason": stability_reason},
+        "valuation": {"score": valuation, "reason": val_reason},
+        "total": round(total, 1),
+        "rating": _score_to_rating(total),
+    }
+
+
+def calculate_fundamental_score(fund_code: str) -> dict:
+    """基金基本面评分 = Σ(个股5维分 × 持仓占比)。
+
+    数据降级：
+    - 无持仓数据 → 默认50分
+    - 单股评分失败 → 该股50分，不影响其他
+    """
+    try:
+        from db.portfolio import get_fund_holdings
+        holdings = get_fund_holdings(fund_code)
+    except Exception as e:
+        logger.warning(f"[fundamental] 获取持仓失败 {fund_code}: {e}")
+        return _default_fundamental(fund_code, "持仓数据获取失败")
+
+    top_stocks = holdings.get("top_stocks", [])
+    if not top_stocks:
+        return _default_fundamental(fund_code, "无股票持仓")
+
+    # 判断是否债基（无股票持仓或基金类别为债）
+    fund_category = ""
+    try:
+        from services.fund_data_service import get_or_refresh_fund_metadata
+        meta = get_or_refresh_fund_metadata(fund_code)
+        if meta:
+            fund_category = meta.get("fund_category", "") or ""
+    except Exception:
+        pass
+
+    if fund_category in ("bond", "纯债", "混合债") and not top_stocks:
+        return {
+            "fund_code": fund_code,
+            "fundamental_score": None,
+            "rating": None,
+            "stock_scores": [],
+            "top10_coverage": 0,
+            "advice": "债基无股票持仓，跳过基本面维度",
+        }
+
+    # 并行评分Top10重仓股
+    stock_scores = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+        futures = {
+            executor.submit(_score_stock_fundamentals, s["stock_code"]): s
+            for s in top_stocks
+            if s.get("stock_code")
+        }
+        for future in concurrent.futures.as_completed(futures):
+            stock = futures[future]
+            try:
+                score = future.result()
+                score["pct_nav"] = stock.get("pct_nav", 0)
+                score["stock_name"] = stock.get("stock_name", "")
+                stock_scores.append(score)
+            except Exception as e:
+                logger.warning(f"[fundamental] 个股评分失败 {stock.get('stock_code')}: {e}")
+                stock_scores.append({
+                    "stock_code": stock.get("stock_code", ""),
+                    "stock_name": stock.get("stock_name", ""),
+                    "pct_nav": stock.get("pct_nav", 0),
+                    "profitability": {"score": 50, "reason": "评分失败"},
+                    "growth": {"score": 50, "reason": "评分失败"},
+                    "solvency": {"score": 50, "reason": "评分失败"},
+                    "stability": {"score": 50, "reason": "评分失败"},
+                    "valuation": {"score": 50, "reason": "评分失败"},
+                    "total": 50.0,
+                    "rating": "fair",
+                })
+
+    # 按持仓占比加权（归一化到Top10总占比）
+    total_weight = sum(s["pct_nav"] for s in stock_scores if s["pct_nav"] > 0)
+    if total_weight == 0:
+        return _default_fundamental(fund_code, "持仓占比缺失")
+
+    weighted_score = sum(
+        s["total"] * (s["pct_nav"] / total_weight)
+        for s in stock_scores
+    )
+
+    # 按持仓占比排序展示
+    stock_scores.sort(key=lambda x: x.get("pct_nav", 0), reverse=True)
+
+    return {
+        "fund_code": fund_code,
+        "fundamental_score": round(weighted_score, 1),
+        "rating": _score_to_rating(weighted_score),
+        "stock_scores": stock_scores,
+        "top10_coverage": round(total_weight, 1),
+        "advice": _fundamental_advice(weighted_score, stock_scores, total_weight),
+    }
+
+
+def _default_fundamental(fund_code: str, reason: str = "") -> dict:
+    """基本面评分降级默认值。"""
+    return {
+        "fund_code": fund_code,
+        "fundamental_score": 50.0,
+        "rating": "fair",
+        "stock_scores": [],
+        "top10_coverage": 0,
+        "advice": f"基本面数据不可用（{reason}），默认中分",
+    }
+
+
+def _fundamental_advice(score: float, stock_scores: list, coverage: float) -> str:
+    """生成基本面维度的建议文案。"""
+    if score >= 70:
+        base = f"重仓股基本面良好（{score}分），盈利能力强"
+    elif score >= 50:
+        base = f"重仓股基本面一般（{score}分），部分个股需关注"
+    else:
+        base = f"重仓股基本面偏弱（{score}分），建议警惕价值陷阱"
+
+    # 集中度提示
+    if coverage >= 70:
+        base += f"。Top10集中度{coverage}%偏高，个股风险需关注"
+    elif coverage >= 50:
+        base += f"。Top10集中度{coverage}%适中"
+
+    # 弱势个股提示
+    weak_stocks = [s for s in stock_scores if s["total"] < 40]
+    if weak_stocks:
+        names = "、".join(s.get("stock_name", s["stock_code"]) for s in weak_stocks[:3])
+        base += f"。弱势股：{names}"
+
+    return base
+
+
+def analyze_holding_changes(fund_code: str) -> dict:
+    """对比基金本季度 vs 上季度持仓，输出调仓动作。
+
+    Returns:
+        {has_history, current_quarter, prev_quarter, changes: [...], summary}
+    """
+    try:
+        from db.fund_holdings_snapshot import compare_fund_holdings
+        return compare_fund_holdings(fund_code)
+    except Exception as e:
+        logger.warning(f"[fundamental] 调仓分析失败 {fund_code}: {e}")
+        return {
+            "has_history": False,
+            "current_quarter": None,
+            "prev_quarter": None,
+            "changes": [],
+            "summary": f"调仓分析失败: {e}",
+        }
+

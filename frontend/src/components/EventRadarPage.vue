@@ -250,7 +250,7 @@ const BUY_DIMENSION_LABELS = {
   concentration: '集中度',
 }
 
-/** 六维体检报告维度中文名 */
+/** 七维体检报告维度中文名 */
 const DIMENSION_LABELS = {
   quality: '基金质量',
   drawdown: '回撤恢复',
@@ -258,6 +258,30 @@ const DIMENSION_LABELS = {
   capital: '资金流向',
   sentiment: '情绪温度',
   valuation: '估值水位',
+  fundamental: '基本面',
+}
+
+/** 季度调仓动作标签映射 */
+const HOLDING_ACTION_LABELS = {
+  new: { label: '新进', class: 'hc-action-new' },
+  increase: { label: '增持', class: 'hc-action-increase' },
+  decrease: { label: '减持', class: 'hc-action-decrease' },
+  exit: { label: '退出', class: 'hc-action-exit' },
+}
+
+/** 评级 → CSS 类映射（excellent绿 / good蓝 / fair黄 / poor红） */
+function ratingColorClass(rating) {
+  return {
+    excellent: 'rating-excellent',
+    good: 'rating-good',
+    fair: 'rating-fair',
+    poor: 'rating-poor',
+  }[rating] || ''
+}
+
+/** 评级中文文案 */
+function ratingLabel(rating) {
+  return { excellent: '优秀', good: '良好', fair: '一般', poor: '较差' }[rating] || rating || '—'
 }
 
 /** 操作建议映射 */
@@ -301,6 +325,15 @@ const SUBDIM_LABELS = {
   volatility_percentile: '波动率',
   news_sentiment: '新闻情绪',
   fear_greed: '恐贪指数',
+}
+
+/** 基本面重仓股5维评分中文名 */
+const STOCK_DIM_LABELS = {
+  profitability: '盈利能力',
+  growth: '成长性',
+  solvency: '偿债能力',
+  stability: '稳定性',
+  valuation: '估值',
 }
 
 /** 静默巡检：刷新估值分位，更新 watchlist 数据 */
@@ -964,6 +997,54 @@ onMounted(() => {
                 <Icon name="lightbulb" size="11" class="report-view-icon" />
                 <span class="report-view-text">{{ fundReports[item.fund_code].duan_yongping_view }}</span>
               </div>
+              <!-- 季度调仓动作面板 -->
+              <div
+                v-if="fundReports[item.fund_code].details?.holding_changes"
+                class="report-holding-changes"
+              >
+                <div class="hc-header">
+                  <Icon name="refresh-cw" size="11" class="hc-header-icon" />
+                  <span class="hc-title">季度调仓动作</span>
+                </div>
+                <template v-if="fundReports[item.fund_code].details.holding_changes.has_history">
+                  <div class="hc-date-row">
+                    {{ fundReports[item.fund_code].details.holding_changes.prev_quarter }}
+                    <Icon name="arrow-right" size="10" class="hc-date-arrow" />
+                    {{ fundReports[item.fund_code].details.holding_changes.current_quarter }}
+                  </div>
+                  <div
+                    v-if="fundReports[item.fund_code].details.holding_changes.summary"
+                    class="hc-summary"
+                  >
+                    {{ fundReports[item.fund_code].details.holding_changes.summary }}
+                  </div>
+                  <div
+                    v-if="fundReports[item.fund_code].details.holding_changes.changes?.length"
+                    class="hc-changes"
+                  >
+                    <div
+                      v-for="(ch, idx) in fundReports[item.fund_code].details.holding_changes.changes"
+                      :key="idx"
+                      class="hc-change-item"
+                    >
+                      <span class="hc-stock-name" :title="ch.stock_code">{{ ch.stock_name }}</span>
+                      <span
+                        class="hc-action-tag"
+                        :class="HOLDING_ACTION_LABELS[ch.action]?.class"
+                      >
+                        {{ HOLDING_ACTION_LABELS[ch.action]?.label || ch.action }}
+                      </span>
+                      <span
+                        class="hc-delta"
+                        :class="ch.delta_pct >= 0 ? 'hc-delta-up' : 'hc-delta-down'"
+                      >
+                        {{ ch.delta_pct > 0 ? '+' : '' }}{{ ch.delta_pct }}%
+                      </span>
+                    </div>
+                  </div>
+                </template>
+                <div v-else class="hc-empty">无历史数据</div>
+              </div>
               <div class="report-actions">
                 <button
                   class="btn-report-refresh"
@@ -1264,6 +1345,131 @@ onMounted(() => {
                     <span>维度得分 {{ dim.score }}/100</span>
                   </div>
                 </div>
+              </div>
+
+              <!-- 基本面详情：Top10重仓股5维评分 -->
+              <div v-if="reportDetailItem.details?.fundamental" class="report-detail-fundamental">
+                <div class="report-section-header">
+                  <span class="report-section-title">
+                    <Icon name="activity" size="12" class="report-detail-section-icon" />
+                    基本面详情 · Top10重仓股5维评分
+                  </span>
+                  <span class="report-section-score" :class="ratingColorClass(reportDetailItem.details.fundamental.rating)">
+                    {{ reportDetailItem.details.fundamental.fundamental_score }}分
+                  </span>
+                </div>
+                <div v-if="reportDetailItem.details.fundamental.top10_coverage != null" class="fundamental-coverage">
+                  Top10集中度：<strong>{{ reportDetailItem.details.fundamental.top10_coverage }}%</strong>
+                </div>
+                <div v-if="reportDetailItem.details.fundamental.stock_scores?.length" class="fundamental-table-wrap">
+                  <table class="fundamental-table">
+                    <thead>
+                      <tr>
+                        <th>股票名</th>
+                        <th>持仓占比</th>
+                        <th>盈利能力</th>
+                        <th>成长性</th>
+                        <th>偿债能力</th>
+                        <th>稳定性</th>
+                        <th>估值</th>
+                        <th>总分</th>
+                        <th>评级</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr
+                        v-for="(stock, idx) in reportDetailItem.details.fundamental.stock_scores"
+                        :key="idx"
+                      >
+                        <td class="ft-stock-name" :title="stock.stock_code">{{ stock.stock_name }}</td>
+                        <td class="ft-pct">{{ stock.pct_nav }}%</td>
+                        <td
+                          class="ft-score"
+                          :class="scoreColorClass(stock.profitability?.score)"
+                          :title="stock.profitability?.reason"
+                        >{{ stock.profitability?.score ?? '—' }}</td>
+                        <td
+                          class="ft-score"
+                          :class="scoreColorClass(stock.growth?.score)"
+                          :title="stock.growth?.reason"
+                        >{{ stock.growth?.score ?? '—' }}</td>
+                        <td
+                          class="ft-score"
+                          :class="scoreColorClass(stock.solvency?.score)"
+                          :title="stock.solvency?.reason"
+                        >{{ stock.solvency?.score ?? '—' }}</td>
+                        <td
+                          class="ft-score"
+                          :class="scoreColorClass(stock.stability?.score)"
+                          :title="stock.stability?.reason"
+                        >{{ stock.stability?.score ?? '—' }}</td>
+                        <td
+                          class="ft-score"
+                          :class="scoreColorClass(stock.valuation?.score)"
+                          :title="stock.valuation?.reason"
+                        >{{ stock.valuation?.score ?? '—' }}</td>
+                        <td class="ft-total" :class="scoreColorClass(stock.total)">{{ stock.total }}</td>
+                        <td>
+                          <span class="ft-rating-tag" :class="ratingColorClass(stock.rating)">
+                            {{ ratingLabel(stock.rating) }}
+                          </span>
+                        </td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+                <div v-if="reportDetailItem.details.fundamental.advice" class="fundamental-advice">
+                  {{ reportDetailItem.details.fundamental.advice }}
+                </div>
+              </div>
+
+              <!-- 调仓动作详情 -->
+              <div v-if="reportDetailItem.details?.holding_changes" class="report-detail-holding-changes">
+                <div class="report-section-header">
+                  <span class="report-section-title">
+                    <Icon name="refresh-cw" size="12" class="report-detail-section-icon" />
+                    季度调仓动作详情
+                  </span>
+                </div>
+                <template v-if="reportDetailItem.details.holding_changes.has_history">
+                  <div class="hc-date-row">
+                    {{ reportDetailItem.details.holding_changes.prev_quarter }}
+                    <Icon name="arrow-right" size="10" class="hc-date-arrow" />
+                    {{ reportDetailItem.details.holding_changes.current_quarter }}
+                  </div>
+                  <div v-if="reportDetailItem.details.holding_changes.summary" class="hc-summary">
+                    {{ reportDetailItem.details.holding_changes.summary }}
+                  </div>
+                  <div
+                    v-if="reportDetailItem.details.holding_changes.changes?.length"
+                    class="hc-changes hc-changes-detail"
+                  >
+                    <div
+                      v-for="(ch, idx) in reportDetailItem.details.holding_changes.changes"
+                      :key="idx"
+                      class="hc-change-item hc-change-item-detail"
+                    >
+                      <span class="hc-stock-name hc-stock-name-detail" :title="ch.stock_code">
+                        {{ ch.stock_name }}
+                        <span class="hc-stock-code">{{ ch.stock_code }}</span>
+                      </span>
+                      <span
+                        class="hc-action-tag"
+                        :class="HOLDING_ACTION_LABELS[ch.action]?.class"
+                      >
+                        {{ HOLDING_ACTION_LABELS[ch.action]?.label || ch.action }}
+                      </span>
+                      <span
+                        class="hc-delta"
+                        :class="ch.delta_pct >= 0 ? 'hc-delta-up' : 'hc-delta-down'"
+                      >
+                        {{ ch.delta_pct > 0 ? '+' : '' }}{{ ch.delta_pct }}%
+                      </span>
+                    </div>
+                  </div>
+                  <div v-else class="hc-empty">本季度无调仓动作</div>
+                </template>
+                <div v-else class="hc-empty">无历史数据</div>
               </div>
             </div>
           </div>
@@ -2876,6 +3082,217 @@ onMounted(() => {
   font-size: 0.72rem;
   color: var(--color-text-muted);
   font-style: italic;
+}
+
+/* ── 季度调仓动作面板（卡片内） ── */
+.report-holding-changes {
+  padding: 0.45rem 0.5rem;
+  background: rgba(59,130,246,0.04);
+  border-left: 2px solid rgba(59,130,246,0.3);
+  border-radius: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+.hc-header {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+}
+.hc-header-icon { color: #2563eb; flex-shrink: 0; }
+.hc-title {
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: #2563eb;
+}
+.hc-date-row {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  font-size: 0.7rem;
+  color: var(--color-text-secondary);
+  font-family: var(--font-jet);
+}
+.hc-date-arrow { color: var(--color-text-tertiary); }
+.hc-summary {
+  font-size: 0.7rem;
+  color: var(--color-text-secondary);
+  line-height: 1.5;
+}
+.hc-changes {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+.hc-change-item {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.7rem;
+  padding: 0.15rem 0;
+}
+.hc-stock-name {
+  flex: 1;
+  min-width: 0;
+  color: var(--color-text-primary);
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.hc-stock-name-detail {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.3rem;
+}
+.hc-stock-code {
+  font-size: 0.65rem;
+  color: var(--color-text-muted);
+  font-family: var(--font-jet);
+}
+.hc-action-tag {
+  font-size: 0.65rem;
+  padding: 0.1rem 0.35rem;
+  border-radius: 3px;
+  font-weight: 600;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.hc-action-new { background: rgba(76,175,80,0.12); color: #4caf50; }
+.hc-action-increase { background: rgba(33,150,243,0.12); color: #2196f3; }
+.hc-action-decrease { background: rgba(255,152,0,0.12); color: #ff9800; }
+.hc-action-exit { background: rgba(244,67,54,0.12); color: #f44336; }
+.hc-delta {
+  font-size: 0.68rem;
+  font-family: var(--font-jet);
+  font-weight: 600;
+  flex-shrink: 0;
+  min-width: 40px;
+  text-align: right;
+}
+.hc-delta-up { color: #16a34a; }
+.hc-delta-down { color: #dc2626; }
+.hc-empty {
+  font-size: 0.7rem;
+  color: var(--color-text-muted);
+  font-style: italic;
+  text-align: center;
+  padding: 0.2rem 0;
+}
+
+/* ── 评级颜色映射（excellent绿 / good蓝 / fair黄 / poor红） ── */
+.rating-excellent { color: #4caf50; }
+.rating-good { color: #2196f3; }
+.rating-fair { color: #ff9800; }
+.rating-poor { color: #f44336; }
+/* 评级标签背景 */
+.ft-rating-tag.rating-excellent { background: rgba(76,175,80,0.12); color: #4caf50; }
+.ft-rating-tag.rating-good { background: rgba(33,150,243,0.12); color: #2196f3; }
+.ft-rating-tag.rating-fair { background: rgba(255,152,0,0.12); color: #ff9800; }
+.ft-rating-tag.rating-poor { background: rgba(244,67,54,0.12); color: #f44336; }
+
+/* ── 弹窗内基本面详情区块 ── */
+.report-detail-fundamental,
+.report-detail-holding-changes {
+  padding: 0.6rem 0.7rem;
+  background: var(--color-bg-secondary);
+  border-radius: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+.report-detail-section-icon {
+  color: #7c3aed;
+  flex-shrink: 0;
+  margin-right: 0.15rem;
+  vertical-align: -1px;
+}
+.fundamental-coverage {
+  font-size: 0.72rem;
+  color: var(--color-text-secondary);
+}
+.fundamental-coverage strong {
+  color: var(--color-text-primary);
+  font-family: var(--font-jet);
+}
+.fundamental-table-wrap {
+  overflow-x: auto;
+  border-radius: 4px;
+  border: 1px solid var(--color-border-light);
+}
+.fundamental-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.7rem;
+  white-space: nowrap;
+}
+.fundamental-table thead {
+  background: var(--color-bg-tertiary);
+}
+.fundamental-table th {
+  padding: 0.35rem 0.4rem;
+  text-align: center;
+  font-weight: 600;
+  color: var(--color-text-secondary);
+  font-size: 0.68rem;
+  border-bottom: 1px solid var(--color-border-light);
+}
+.fundamental-table th:first-child { text-align: left; }
+.fundamental-table td {
+  padding: 0.35rem 0.4rem;
+  text-align: center;
+  color: var(--color-text-secondary);
+  border-bottom: 1px solid var(--color-border-light);
+}
+.fundamental-table tbody tr:last-child td { border-bottom: none; }
+.fundamental-table tbody tr:hover { background: var(--color-bg-tertiary); }
+.ft-stock-name {
+  text-align: left !important;
+  color: var(--color-text-primary);
+  font-weight: 500;
+  max-width: 90px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ft-pct {
+  font-family: var(--font-jet);
+  color: var(--color-text-secondary);
+}
+.ft-score {
+  font-family: var(--font-jet);
+  font-weight: 600;
+  cursor: help;
+}
+.ft-total {
+  font-family: var(--font-jet);
+  font-weight: 700;
+}
+.ft-rating-tag {
+  display: inline-block;
+  font-size: 0.65rem;
+  padding: 0.1rem 0.35rem;
+  border-radius: 3px;
+  font-weight: 600;
+}
+.fundamental-advice {
+  font-size: 0.72rem;
+  color: var(--color-text-secondary);
+  line-height: 1.5;
+  padding: 0.35rem 0.5rem;
+  background: var(--color-bg-card);
+  border-radius: 4px;
+  border-left: 2px solid rgba(124,58,237,0.3);
+}
+
+/* ── 弹窗内调仓动作详情 ── */
+.hc-changes-detail {
+  gap: 0.3rem;
+}
+.hc-change-item-detail {
+  padding: 0.3rem 0.4rem;
+  background: var(--color-bg-card);
+  border-radius: 4px;
+  font-size: 0.75rem;
 }
 
 /* fade 过渡（弹窗） */

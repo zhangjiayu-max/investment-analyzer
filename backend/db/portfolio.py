@@ -2131,6 +2131,7 @@ def get_fund_holdings(fund_code: str, year: str = None) -> dict:
         "asset_allocation": [],
         "industry_allocation": [],
         "bond_type_summary": {},
+        "report_date": None,  # 最新季报日期
     }
 
     # 1. 股票持仓 Top 10
@@ -2151,6 +2152,7 @@ def get_fund_holdings(fund_code: str, year: str = None) -> dict:
                         "shares": float(r.get("持股数", 0)),
                         "market_value": float(r.get("持仓市值", 0)),
                     })
+                result["report_date"] = str(latest_q)
     except Exception as e:
         print(f"[db] 获取股票持仓失败 {fund_code}: {e}")
 
@@ -2205,6 +2207,14 @@ def get_fund_holdings(fund_code: str, year: str = None) -> dict:
                 })
     except Exception as e:
         print(f"[db] 获取行业配置失败 {fund_code}: {e}")
+
+    # 持仓快照写入（仅当有股票持仓且有季报日期时）
+    if result["top_stocks"] and result.get("report_date"):
+        try:
+            from db.fund_holdings_snapshot import save_fund_holdings_snapshot
+            save_fund_holdings_snapshot(fund_code, result["report_date"], result["top_stocks"])
+        except Exception as e:
+            print(f"[db] 持仓快照写入失败 {fund_code}: {e}")
 
     return result
 

@@ -28,6 +28,11 @@ def init_fund_quality_tables(conn):
             PRIMARY KEY (fund_code)
         )
     """)
+    # 第一阶段扩展：基本面维度 + 调仓动作
+    from db._utils import _add_column_if_not_exists
+    _add_column_if_not_exists(conn, "fund_quality_scores", "fundamental_score", "REAL DEFAULT 0")
+    _add_column_if_not_exists(conn, "fund_quality_scores", "fundamental_detail", "TEXT DEFAULT '{}'")
+    _add_column_if_not_exists(conn, "fund_quality_scores", "holding_changes", "TEXT DEFAULT '[]'")
 
 
 def save_fund_quality_score(

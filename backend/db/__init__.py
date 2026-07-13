@@ -198,6 +198,13 @@ from db.fund_quality import (
     delete_fund_quality_score,
 )
 
+# 基金持仓快照（季度持仓变化追踪）
+from db.fund_holdings_snapshot import (
+    init_fund_holdings_snapshot_tables, save_fund_holdings_snapshot,
+    list_fund_holdings_snapshots, get_fund_holdings_snapshot,
+    compare_fund_holdings, list_fund_codes_with_snapshots,
+)
+
 # 异步分析任务
 from db.async_tasks import (
     init_async_tasks_table, create_async_task, update_async_task,
@@ -909,6 +916,9 @@ def init_db():
 
     # 初始化基金质量评分表（六维体检报告）
     init_fund_quality_tables(conn)
+
+    # 初始化基金持仓快照表（季度持仓变化追踪）
+    init_fund_holdings_snapshot_tables(conn)
 
     # 初始化记忆表（记忆生命周期管理）
     conn.execute("""
