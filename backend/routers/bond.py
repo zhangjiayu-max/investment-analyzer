@@ -24,20 +24,29 @@ router = APIRouter(prefix="/api/bond", tags=["bond"])
 
 _background_tasks = set()
 
+# 2026-07-13 性能优化：债市温度日级变化，加内存缓存避免每次 dashboard 请求都抓取
+# 缓存 TTL 1 小时（债市温度日内基本不变），失败时降级用上次缓存
+_BOND_DATA_CACHE = {"data": None, "ts": 0.0}
+_BOND_CACHE_TTL = 3600  # 秒
+
 
 def _fetch_bond_data():
-    """抓取有知有行债市温度数据，返回原始数据列表。"""
+    """抓取有知有行债市温度数据，返回原始数据列表（带 1 小时缓存）。"""
+    now = time.time()
+    cached = _BOND_DATA_CACHE.get("data")
+    if cached is not None and (now - _BOND_DATA_CACHE["ts"]) < _BOND_CACHE_TTL:
+        return cached
     try:
         resp = req.get(
             "https://youzhiyouxing.cn/data/macro",
             headers={"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"},
-            timeout=15,
+            timeout=10,
         )
         resp.raise_for_status()
 
         match = re.search(r'data-cbond-history="([^"]+)"', resp.text)
         if not match:
-            return []
+            return cached or []
 
         raw = html_mod.unescape(match.group(1))
         bracket_count = 0
@@ -53,21 +62,25 @@ def _fetch_bond_data():
 
         if end_idx == 0:
             logging.warning("[_fetch_bond_data] 未找到完整 JSON 数组")
-            return []
+            return cached or []
 
-        return json.loads(raw[:end_idx])
+        data = json.loads(raw[:end_idx])
+        # 更新缓存
+        _BOND_DATA_CACHE["data"] = data
+        _BOND_DATA_CACHE["ts"] = now
+        return data
     except req.exceptions.Timeout:
-        logging.warning("[_fetch_bond_data] 请求超时")
-        return []
+        logging.warning("[_fetch_bond_data] 请求超时，使用缓存降级")
+        return cached or []
     except req.exceptions.RequestException as e:
-        logging.warning(f"[_fetch_bond_data] 网络请求失败: {e}")
-        return []
+        logging.warning(f"[_fetch_bond_data] 网络请求失败: {e}，使用缓存降级")
+        return cached or []
     except (json.JSONDecodeError, ValueError) as e:
         logging.warning(f"[_fetch_bond_data] JSON 解析失败: {e}")
-        return []
+        return cached or []
     except Exception as e:
         logging.warning(f"[_fetch_bond_data] 未知错误: {e}")
-        return []
+        return cached or []
 
 
 @router.get("/market-temperature")

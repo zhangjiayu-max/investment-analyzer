@@ -203,7 +203,8 @@ async def refresh_index_prices():
     today = datetime.now().strftime("%Y-%m-%d")
 
     try:
-        spot_df = ak.stock_zh_index_spot_sina()
+        # 2026-07-13 性能优化：akshare 同步调用改用 to_thread，避免阻塞事件循环
+        spot_df = await asyncio.to_thread(ak.stock_zh_index_spot_sina)
         conn = _get_conn()
         for idx in freshness:
             code = idx["index_code"]

@@ -50,7 +50,8 @@ async def _get_dynamic_keywords() -> list[str]:
     # 来源1: akshare 热门概念
     try:
         import akshare as ak
-        df = ak.stock_hot_keyword_em()
+        # 2026-07-13 性能优化：akshare 同步调用改用 to_thread，避免阻塞事件循环
+        df = await asyncio.to_thread(ak.stock_hot_keyword_em)
         if df is not None and len(df) > 0:
             hot_kw = df["概念名称"].tolist()[:5]
             keywords.extend(hot_kw)

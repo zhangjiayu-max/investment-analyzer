@@ -1124,10 +1124,22 @@ def calculate_capital_flow(fund_code: str) -> dict:
 
 def _fetch_etf_share_change(fund_code: str) -> float | None:
     """获取ETF近5日份额变化率。"""
-    df = _call_akshare_with_timeout(ak.fund_etf_fund_daily_em, symbol=fund_code)
+    # 2026-07-13 修复：fund_etf_fund_daily_em() 不接受 symbol 参数（akshare 1.18.62）
+    # 返回全部 ETF 日度数据，需在本地按 fund_code 过滤
+    df = _call_akshare_with_timeout(ak.fund_etf_fund_daily_em)
     if df is None or len(df) == 0:
         return None
     try:
+        # 按基金代码过滤
+        code_col = None
+        for col in df.columns:
+            if "代码" in str(col) or "code" in str(col).lower():
+                code_col = col
+                break
+        if code_col is not None:
+            df = df[df[code_col].astype(str).str.contains(fund_code, na=False)]
+        if len(df) == 0:
+            return None
         # 取最近5日的份额数据
         recent = df.tail(5)
         share_col = None
@@ -1148,7 +1160,11 @@ def _fetch_etf_share_change(fund_code: str) -> float | None:
 
 def _fetch_lhb_institutional(fund_code: str) -> float | None:
     """获取龙虎榜机构净买入额（元）。"""
-    df = _call_akshare_with_timeout(ak.stock_lhb_detail_em, symbol=fund_code)
+    # 2026-07-13 修复：stock_lhb_detail_em 接受 start_date/end_date，不接受 symbol
+    from datetime import datetime, timedelta
+    end_date = datetime.now().strftime("%Y%m%d")
+    start_date = (datetime.now() - timedelta(days=30)).strftime("%Y%m%d")
+    df = _call_akshare_with_timeout(ak.stock_lhb_detail_em, start_date=start_date, end_date=end_date)
     if df is None or len(df) == 0:
         return None
     try:

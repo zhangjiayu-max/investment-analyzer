@@ -12,6 +12,7 @@
 import asyncio
 import json
 import logging
+import time
 from datetime import datetime, timedelta
 
 from fastapi import APIRouter
@@ -29,6 +30,13 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/health", tags=["health-score"])
 
 _background_tasks: set = set()
+
+# 2026-07-13 性能优化：akshare 同步调用在 async 函数中阻塞事件循环，
+# 加 5 分钟内存缓存 + to_thread 线程池执行，避免每次请求都串行抓取。
+_FEAR_GREED_CACHE: dict = {"data": None, "ts": 0.0}
+_STOCK_BOND_RATIO_CACHE: dict = {"data": None, "ts": 0.0}
+_HEALTH_SCORE_CACHE: dict = {"data": None, "ts": 0.0}
+_CACHE_TTL = 300  # 秒
 
 # ============ 辅助函数 ============
 
@@ -536,8 +544,8 @@ def calc_risk_score(holdings: list, holdings_with_val: list) -> tuple[int, dict]
 
 # ============ 综合评分 ============
 
-async def calc_health_score() -> dict:
-    """计算综合理财健康分。"""
+def _calc_health_score_sync() -> dict:
+    """计算综合理财健康分（同步实现，运行在线程池中）。"""
     holdings = list_holdings() or []
     active_holdings = [h for h in holdings if _safe_float(h.get("shares")) > 0]
 
@@ -577,7 +585,7 @@ async def calc_health_score() -> dict:
     if not advice:
         advice.append("整体投资行为健康，继续保持")
 
-    # LLM 总结
+    # LLM 总结（已在线程池中，直接同步调用即可，不再嵌套 to_thread）
     summary = ""
     try:
         if get_config("llm_cost.page_llm_summary", "false") != "true":
@@ -593,11 +601,11 @@ async def calc_health_score() -> dict:
 请用温和专业的语气，不超过150字。"""
         import uuid
         trace_id = f"hlth_{uuid.uuid4().hex[:12]}"
-        resp = await asyncio.to_thread(lambda: _call_llm(
+        resp = _call_llm(
             caller="health_score", trace_id=trace_id, model=MODEL,
             messages=[{"role": "user", "content": prompt}],
             temperature=0.3, max_tokens=500,
-        ))
+        )
         summary = resp.choices[0].message.content or ""
     except Exception as e:
         logger.warning(f"[health] LLM 总结失败: {e}")
@@ -648,10 +656,34 @@ async def calc_health_score() -> dict:
     return result
 
 
+async def calc_health_score() -> dict:
+    """计算综合理财健康分（带 5 分钟内存缓存，akshare 调用在线程池执行）。"""
+    now = time.time()
+    cached = _HEALTH_SCORE_CACHE.get("data")
+    if cached is not None and (now - _HEALTH_SCORE_CACHE["ts"]) < _CACHE_TTL:
+        return cached
+    try:
+        result = await asyncio.to_thread(_calc_health_score_sync)
+        _HEALTH_SCORE_CACHE["data"] = result
+        _HEALTH_SCORE_CACHE["ts"] = now
+        return result
+    except Exception as e:
+        logger.warning(f"[health] 计算失败，降级返回: {e}")
+        return cached or {
+            "date": datetime.now().strftime("%Y-%m-%d"),
+            "total_score": 0,
+            "scores": {},
+            "details": {},
+            "advice": [],
+            "summary": "",
+            "actions": [],
+        }
+
+
 # ============ 股债性价比（FED模型） ============
 
-async def calc_stock_bond_ratio() -> dict:
-    """FED模型：股票盈利收益率 vs 国债收益率。"""
+def _calc_stock_bond_ratio_sync() -> dict:
+    """FED模型同步实现（运行在线程池中）。"""
     # 获取沪深300估值（用 index_code 而非 index_name）
     hs300 = get_latest_valuation("399300.SZ")
     if not hs300:
@@ -777,10 +809,26 @@ async def calc_stock_bond_ratio() -> dict:
     return result
 
 
+async def calc_stock_bond_ratio() -> dict:
+    """FED模型：股票盈利收益率 vs 国债收益率（带 5 分钟内存缓存，akshare 调用在线程池执行）。"""
+    now = time.time()
+    cached = _STOCK_BOND_RATIO_CACHE.get("data")
+    if cached is not None and (now - _STOCK_BOND_RATIO_CACHE["ts"]) < _CACHE_TTL:
+        return cached
+    try:
+        result = await asyncio.to_thread(_calc_stock_bond_ratio_sync)
+        _STOCK_BOND_RATIO_CACHE["data"] = result
+        _STOCK_BOND_RATIO_CACHE["ts"] = now
+        return result
+    except Exception as e:
+        logger.warning(f"[stock_bond] 计算失败，降级返回: {e}")
+        return cached or {"error": "数据暂时不可用"}
+
+
 # ============ 恐贪指数 ============
 
-async def calc_fear_greed_index() -> dict:
-    """恐贪指数（0-100）：基于市场情绪指标。"""
+def _calc_fear_greed_index_sync() -> dict:
+    """恐贪指数同步实现（运行在线程池中）。"""
     import akshare as ak
 
     factors = {}
@@ -1024,6 +1072,27 @@ async def calc_fear_greed_index() -> dict:
         result["portfolio_advice"] = None
 
     return result
+
+
+async def calc_fear_greed_index() -> dict:
+    """恐贪指数（0-100）：基于市场情绪指标（带 5 分钟内存缓存，akshare 调用在线程池执行）。"""
+    now = time.time()
+    cached = _FEAR_GREED_CACHE.get("data")
+    if cached is not None and (now - _FEAR_GREED_CACHE["ts"]) < _CACHE_TTL:
+        return cached
+    try:
+        result = await asyncio.to_thread(_calc_fear_greed_index_sync)
+        _FEAR_GREED_CACHE["data"] = result
+        _FEAR_GREED_CACHE["ts"] = now
+        return result
+    except Exception as e:
+        logger.warning(f"[fear_greed] 计算失败，降级返回: {e}")
+        return cached or {
+            "score": 50,
+            "zone": "中性",
+            "advice": "数据暂时不可用",
+            "factors": {},
+        }
 
 
 # ============ API 端点 ============

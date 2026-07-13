@@ -1,6 +1,11 @@
 """系统配置 CRUD — system_config 表操作"""
 
+import time as _time
 from db._conn import _get_conn
+
+# 2026-07-13 性能优化：配置进程级缓存（dict + TTL），消除 N+1 DB 往返
+_CONFIG_CACHE: dict[str, tuple[str, float]] = {}
+_CONFIG_CACHE_TTL = 60.0  # 秒
 
 # 默认配置（首次启动时写入）
 DEFAULT_CONFIGS = [
@@ -250,13 +255,26 @@ def init_default_configs(conn=None):
 
 
 def get_config(key: str, default: str = '') -> str:
-    """获取单个配置值。"""
+    """获取单个配置值（带 60s 进程级缓存）。
+
+    2026-07-13 性能优化：dashboard 单次请求可能调用 170+ 次 get_config，
+    每次开关 SQLite 连接 + 2 条 PRAGMA，是主要耗时来源。配置极少变更，缓存 60 秒。
+    update_config / reset_configs 会自动清缓存。
+    """
+    now = _time.monotonic()
+    cached = _CONFIG_CACHE.get(key)
+    if cached is not None:
+        val, ts = cached
+        if (now - ts) < _CONFIG_CACHE_TTL:
+            return val
     conn = _get_conn()
     try:
         row = conn.execute("SELECT value FROM system_config WHERE key = ?", (key,)).fetchone()
-        return row[0] if row else default
+        val = row[0] if row else default
     finally:
         conn.close()
+    _CONFIG_CACHE[key] = (val, now)
+    return val
 
 
 def get_config_int(key: str, default: int = 0) -> int:
@@ -329,6 +347,8 @@ def update_config(key: str, value: str) -> bool:
         return cursor.rowcount > 0
     finally:
         conn.close()
+        # 清除缓存（无论是否更新成功，确保下次读取拿到最新值）
+        _CONFIG_CACHE.pop(key, None)
 
 
 def reset_configs() -> int:
@@ -337,4 +357,6 @@ def reset_configs() -> int:
     for key, value, _, _ in DEFAULT_CONFIGS:
         if update_config(key, value):
             count += 1
+    # 清除全部缓存
+    _CONFIG_CACHE.clear()
     return count
