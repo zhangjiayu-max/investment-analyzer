@@ -141,7 +141,7 @@ def create_market_event(
         event_id（已存在则返回已有 id，不覆盖）
     """
     event_id = _gen_event_id(title, expected_date)
-    today = datetime.now().strftime("%Y-%m-%d")
+    today = datetime.now().strftime("%Y-%m-%d %H:%M")
     conn = _get_conn()
     try:
         existing = conn.execute(

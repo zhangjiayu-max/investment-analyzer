@@ -599,7 +599,7 @@ def scan_forward_events(trace_id: str = "") -> dict:
             ev_id = ev_row["event_id"]
             ev_detected = ev_row.get("detected_date", "")
             today = datetime.now().strftime("%Y-%m-%d")
-            if ev_detected != today:
+            if not ev_detected.startswith(today):
                 continue
 
             # 构造 alert
