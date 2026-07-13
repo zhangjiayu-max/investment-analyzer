@@ -11,7 +11,7 @@ import { ref, computed, onMounted } from 'vue'
 import {
   listMarketEvents, triggerEventRadarScan, triggerEventRadarVerify, getEventRadarAccuracy,
   listWatchlist, addToWatchlist, removeWatchlistItem, refreshWatchlistNavs,
-  triggerWatchlistScan, patrolWatchlist, updateWatchlistItem,
+  triggerWatchlistScan, patrolWatchlist, updateWatchlistItem, analyzeArticleTrends,
 } from '../api'
 import Icon from './ui/Icon.vue'
 import { useToast } from '../composables/useToast'
@@ -33,6 +33,15 @@ const editingId = ref(null)
 const editForm = ref({ target_price: '', target_percentile: '' })
 const activeFilter = ref('all') // all / holding_impact / watchlist_impact / opportunity / market_watch
 const activeStatus = ref('active') // active / all / materialized / expired
+
+// 文章趋势分析相关状态
+const showArticleDialog = ref(false)
+const articleUrl = ref('')
+const analyzingArticle = ref(false)
+
+// 买入评分：{ [itemId]: { score, rating, dimensions, calculated_at } }
+const buyScores = ref({})
+const refreshingScores = ref(false)
 
 const FILTERS = [
   { key: 'all', label: '全部', icon: 'satellite' },
@@ -111,9 +120,62 @@ async function loadWatchlist() {
     watchlist.value = data?.items || []
     // 自动巡检刷新估值分位（静默，不弹 toast）
     if (watchlist.value.length) autoPatrol()
+    // 批量加载买入评分（静默，不弹 toast）
+    if (watchlist.value.length) loadBuyScores()
   } catch (e) {
     useToast().showToast('加载关注列表失败', 'error')
   }
+}
+
+/** 批量加载所有关注基金的买入评分（静默失败） */
+async function loadBuyScores() {
+  const items = watchlist.value
+  if (!items.length) return
+  refreshingScores.value = true
+  try {
+    const results = await Promise.allSettled(
+      items.map(item => getBuyScore(item.id))
+    )
+    const next = { ...buyScores.value }
+    results.forEach((r, idx) => {
+      const itemId = items[idx].id
+      if (r.status === 'fulfilled' && r.value?.data) {
+        next[itemId] = r.value.data
+      } else {
+        // 失败时清除旧分，避免展示过期数据
+        delete next[itemId]
+      }
+    })
+    buyScores.value = next
+  } catch { /* 静默失败 */ } finally {
+    refreshingScores.value = false
+  }
+}
+
+/** 买入评分颜色类：>=80绿 / >=60蓝 / >=40橙 / <40红 */
+function scoreColorClass(score) {
+  if (score == null) return ''
+  if (score >= 80) return 'score-excellent'
+  if (score >= 60) return 'score-good'
+  if (score >= 40) return 'score-normal'
+  return 'score-cautious'
+}
+
+/** 买入评级文案 */
+function scoreRatingLabel(score) {
+  if (score == null) return '—'
+  if (score >= 80) return '优秀'
+  if (score >= 60) return '良好'
+  if (score >= 40) return '一般'
+  return '谨慎'
+}
+
+/** 维度中文名 */
+const DIMENSION_LABELS = {
+  valuation: '估值维度',
+  price: '净值距目标',
+  correlation: '相关性',
+  concentration: '集中度',
 }
 
 /** 静默巡检：刷新估值分位，更新 watchlist 数据 */
@@ -173,6 +235,61 @@ async function handleVerify() {
     useToast().showToast('验证失败', 'error')
   } finally {
     verifying.value = false
+  }
+}
+
+/** 判断事件是否为趋势类型（有 time_frame 字段） */
+function isTrendEvent(evt) {
+  return !!(evt && evt.time_frame)
+}
+
+/** 趋势时间跨度标签 */
+function timeFrameLabel(tf) {
+  return { short: '短期', medium: '中期', long: '长期' }[tf] || tf || ''
+}
+
+/** 打开文章分析弹窗 */
+function openArticleDialog() {
+  articleUrl.value = ''
+  showArticleDialog.value = true
+}
+
+/** 关闭文章分析弹窗 */
+function closeArticleDialog() {
+  if (analyzingArticle.value) return
+  showArticleDialog.value = false
+  articleUrl.value = ''
+}
+
+/** 抓取文章并提取投资趋势 */
+async function handleAnalyzeArticle() {
+  const url = articleUrl.value.trim()
+  if (!url) {
+    useToast().showToast('请输入文章 URL', 'error')
+    return
+  }
+  if (!/^https?:\/\//i.test(url)) {
+    useToast().showToast('URL 必须以 http:// 或 https:// 开头', 'error')
+    return
+  }
+  if (analyzingArticle.value) return
+  analyzingArticle.value = true
+  try {
+    const { data } = await analyzeArticleTrends(url)
+    const total = data?.total || 0
+    const newCount = data?.new || 0
+    useToast().showToast(
+      `分析完成：提取 ${total} 个趋势，新增 ${newCount} 个`,
+      'success'
+    )
+    showArticleDialog.value = false
+    articleUrl.value = ''
+    await loadEvents()
+  } catch (e) {
+    const msg = e?.response?.data?.detail || e?.response?.data?.message || '分析失败'
+    useToast().showToast(msg, 'error')
+  } finally {
+    analyzingArticle.value = false
   }
 }
 
@@ -371,9 +488,17 @@ onMounted(() => {
           <Icon :name="verifying ? 'spinner' : 'check-circle'" size="14" :class="{ spinning: verifying }" />
           <span>{{ verifying ? '验证中...' : '落地验证' }}</span>
         </button>
+        <button v-if="activeTab === 'events'" class="btn btn-secondary analyze-btn" @click="openArticleDialog" :disabled="analyzingArticle" title="抓取文章并提取投资趋势">
+          <Icon :name="analyzingArticle ? 'spinner' : 'file-text'" size="14" :class="{ spinning: analyzingArticle }" />
+          <span>{{ analyzingArticle ? '分析中...' : '分析文章' }}</span>
+        </button>
         <button v-if="activeTab === 'events'" class="btn btn-primary scan-btn" @click="handleScan" :disabled="scanning">
           <Icon :name="scanning ? 'spinner' : 'scan-search'" size="14" :class="{ spinning: scanning }" />
           <span>{{ scanning ? '扫描中...' : '立即扫描' }}</span>
+        </button>
+        <button v-if="activeTab === 'watchlist'" class="btn btn-secondary verify-btn" @click="loadBuyScores" :disabled="refreshingScores" title="重新计算买入时机评分">
+          <Icon :name="refreshingScores ? 'spinner' : 'gauge'" size="14" :class="{ spinning: refreshingScores }" />
+          <span>{{ refreshingScores ? '评分中...' : '刷新评分' }}</span>
         </button>
         <button v-if="activeTab === 'watchlist'" class="btn btn-secondary verify-btn" @click="handleRefreshNavs" :disabled="refreshingNavs">
           <Icon :name="refreshingNavs ? 'spinner' : 'refresh-cw'" size="14" :class="{ spinning: refreshingNavs }" />
@@ -474,12 +599,15 @@ onMounted(() => {
             v-for="(evt, idx) in filteredEvents"
             :key="evt.event_id"
             class="event-card"
-            :class="[`relevance-${evt.relevance_to_user}`, `status-${evt.status}`]"
+            :class="[`relevance-${evt.relevance_to_user}`, `status-${evt.status}`, { 'event-card-trend': isTrendEvent(evt) }]"
           >
             <!-- 左侧时间标记 -->
             <div class="event-time-col">
-              <div class="event-date-badge">{{ formatDate(evt.expected_date) }}</div>
-              <div class="event-date-sub">{{ evt.expected_date || '' }}</div>
+              <div class="event-date-badge">
+                <template v-if="isTrendEvent(evt)">趋势</template>
+                <template v-else>{{ formatDate(evt.expected_date) }}</template>
+              </div>
+              <div class="event-date-sub">{{ evt.expected_date || (isTrendEvent(evt) ? timeFrameLabel(evt.time_frame) : '') }}</div>
               <div v-if="idx < filteredEvents.length - 1" class="timeline-line"></div>
             </div>
 
@@ -488,7 +616,12 @@ onMounted(() => {
               <div class="event-header">
                 <div class="event-title-row">
                   <h3 class="event-title">{{ evt.title }}</h3>
-                  <span class="event-type-tag">{{ {
+                  <span
+                    v-if="isTrendEvent(evt)"
+                    class="event-type-tag event-type-trend"
+                    title="中长期行业趋势"
+                  >趋势</span>
+                  <span v-else class="event-type-tag">{{ {
                     policy: '政策', industry: '行业', earnings: '财报',
                     capital: '资本', macro: '宏观', theme: '主题'
                   }[evt.event_type] || evt.event_type }}</span>
@@ -500,7 +633,10 @@ onMounted(() => {
                   >
                     {{ relevanceLabel(evt.relevance_to_user) }}
                   </span>
-                  <span class="status-tag" :class="`st-${evt.status}`">
+                  <span v-if="isTrendEvent(evt)" class="time-frame-tag" :class="`tf-${evt.time_frame}`">
+                    {{ timeFrameLabel(evt.time_frame) }}
+                  </span>
+                  <span v-else class="status-tag" :class="`st-${evt.status}`">
                     {{ statusLabel(evt.status) }}
                   </span>
                   <span v-if="evt.direction" class="direction-tag" :class="directionLabel(evt.direction).class">
@@ -523,6 +659,12 @@ onMounted(() => {
               </div>
 
               <p v-if="evt.summary" class="event-summary">{{ evt.summary }}</p>
+
+              <!-- 趋势证据 -->
+              <div v-if="isTrendEvent(evt) && evt.evidence" class="event-section trend-evidence">
+                <span class="section-label">证据</span>
+                <div class="evidence-text">{{ evt.evidence }}</div>
+              </div>
 
               <!-- 影响板块 -->
               <div v-if="parseJsonArray(evt.affected_sectors).length" class="event-section">
@@ -653,6 +795,48 @@ onMounted(() => {
               <span class="wl-data-label">跟踪指数</span>
               <span class="wl-data-value wl-index-name">{{ item.index_name }}</span>
             </div>
+            <!-- 买入评分区块 -->
+            <div class="wl-score-block">
+              <div class="wl-score-header">
+                <span class="wl-score-title">
+                  <Icon name="zap" size="12" class="wl-score-title-icon" />
+                  买入评分
+                </span>
+                <div v-if="buyScores[item.id]" class="wl-score-summary">
+                  <span class="wl-score-value" :class="scoreColorClass(buyScores[item.id].score)">
+                    {{ buyScores[item.id].score }}
+                  </span>
+                  <span class="wl-score-rating" :class="scoreColorClass(buyScores[item.id].score)">
+                    {{ scoreRatingLabel(buyScores[item.id].score) }}
+                  </span>
+                </div>
+                <span v-else-if="refreshingScores" class="wl-score-loading">计算中...</span>
+                <span v-else class="wl-score-loading">未计算</span>
+              </div>
+              <div v-if="buyScores[item.id]?.dimensions" class="wl-score-dims">
+                <div
+                  v-for="(dim, key) in buyScores[item.id].dimensions"
+                  :key="key"
+                  class="wl-score-dim"
+                >
+                  <div class="wl-dim-head">
+                    <span class="wl-dim-label">{{ DIMENSION_LABELS[key] || key }}</span>
+                    <span class="wl-dim-weight">权重 {{ Math.round(dim.weight * 100) }}%</span>
+                  </div>
+                  <div class="wl-dim-bar">
+                    <div
+                      class="wl-dim-fill"
+                      :class="scoreColorClass(dim.score)"
+                      :style="{ width: `${dim.score}%` }"
+                    ></div>
+                  </div>
+                  <div class="wl-dim-foot">
+                    <span class="wl-dim-score" :class="scoreColorClass(dim.score)">{{ dim.score }}</span>
+                    <span class="wl-dim-reason">{{ dim.reason }}</span>
+                  </div>
+                </div>
+              </div>
+            </div>
             <!-- 编辑目标面板 -->
             <div v-if="editingId === item.id" class="wl-edit-panel">
               <div class="wl-edit-row">
@@ -763,6 +947,47 @@ onMounted(() => {
         </template>
       </div>
     </template>
+
+    <!-- 文章分析 URL 输入弹窗 -->
+    <Teleport to="body">
+      <Transition name="fade">
+        <div v-if="showArticleDialog" class="article-dialog-backdrop" @click.self="closeArticleDialog">
+          <div class="article-dialog-box">
+            <div class="article-dialog-header">
+              <Icon name="file-text" size="16" class="article-dialog-icon" />
+              <h3 class="article-dialog-title">分析文章提取趋势</h3>
+              <button class="article-dialog-close" @click="closeArticleDialog" :disabled="analyzingArticle" title="关闭">
+                <Icon name="x" size="16" />
+              </button>
+            </div>
+            <div class="article-dialog-body">
+              <p class="article-dialog-hint">
+                输入深度分析文章 URL（CSDN/知乎/雪球/博客等），系统将抓取正文并提取中长期投资趋势。
+              </p>
+              <input
+                v-model="articleUrl"
+                type="url"
+                placeholder="https://blog.csdn.net/..."
+                class="article-url-input"
+                :disabled="analyzingArticle"
+                @keydown.enter="handleAnalyzeArticle"
+                autofocus
+              />
+            </div>
+            <div class="article-dialog-actions">
+              <button class="btn-article-cancel" @click="closeArticleDialog" :disabled="analyzingArticle">
+                取消
+              </button>
+              <button class="btn-article-confirm" @click="handleAnalyzeArticle" :disabled="analyzingArticle || !articleUrl.trim()">
+                <Icon v-if="analyzingArticle" name="spinner" size="14" class="spinning" />
+                <Icon v-else name="scan-search" size="14" />
+                <span>{{ analyzingArticle ? '分析中...' : '开始分析' }}</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      </Transition>
+    </Teleport>
   </div>
 </template>
 
@@ -825,6 +1050,28 @@ onMounted(() => {
 }
 .scan-btn:hover:not(:disabled) { opacity: 0.9; transform: translateY(-1px); }
 .scan-btn:disabled { opacity: 0.6; cursor: not-allowed; }
+
+/* 分析文章按钮 */
+.analyze-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.5rem 0.9rem;
+  border-radius: 6px;
+  font-size: 0.82rem;
+  font-weight: 500;
+  border: 1px solid var(--color-border);
+  cursor: pointer;
+  transition: all 0.15s;
+  background: var(--color-bg-card);
+  color: var(--color-text-secondary);
+  margin-right: 0.5rem;
+}
+.analyze-btn:hover:not(:disabled) {
+  border-color: #7c3aed;
+  color: #7c3aed;
+}
+.analyze-btn:disabled { opacity: 0.6; cursor: not-allowed; }
 
 /* 统计卡片 */
 .stats-row {
@@ -1055,6 +1302,45 @@ onMounted(() => {
   background: var(--color-bg-tertiary);
   color: var(--color-text-tertiary);
   font-family: var(--font-jet);
+}
+
+/* ── 趋势事件样式 ── */
+.event-card.event-card-trend {
+  border-left: 3px solid #7c3aed;
+}
+.event-card.event-card-trend .event-date-badge {
+  background: rgba(124,58,237,0.1);
+  color: #7c3aed;
+}
+.event-type-tag.event-type-trend {
+  background: rgba(124,58,237,0.1);
+  color: #7c3aed;
+}
+.time-frame-tag {
+  font-size: 0.68rem;
+  padding: 0.18rem 0.5rem;
+  border-radius: 3px;
+  font-weight: 500;
+}
+.time-frame-tag.tf-short { background: rgba(234,88,12,0.1); color: #ea580c; }
+.time-frame-tag.tf-medium { background: rgba(217,119,6,0.1); color: #d97706; }
+.time-frame-tag.tf-long { background: rgba(124,58,237,0.1); color: #7c3aed; }
+
+/* 趋势证据区域 */
+.trend-evidence {
+  background: rgba(124,58,237,0.04);
+  border-left: 2px solid rgba(124,58,237,0.3);
+  border-radius: 4px;
+  padding: 0.5rem 0.6rem;
+}
+.trend-evidence .section-label {
+  color: #7c3aed;
+}
+.evidence-text {
+  font-size: 0.78rem;
+  color: var(--color-text-secondary);
+  line-height: 1.6;
+  margin-top: 0.2rem;
 }
 
 .event-summary {
@@ -1507,6 +1793,128 @@ onMounted(() => {
   font-style: italic;
 }
 
+/* ── 买入评分区块 ── */
+.wl-score-block {
+  margin-top: 0.3rem;
+  padding: 0.6rem;
+  background: var(--color-bg-secondary);
+  border-radius: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+}
+.wl-score-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+.wl-score-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--color-text-secondary);
+}
+.wl-score-title-icon { color: #ea580c; }
+.wl-score-summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+.wl-score-value {
+  font-size: 1.15rem;
+  font-weight: 700;
+  font-family: var(--font-jet);
+  line-height: 1;
+}
+.wl-score-rating {
+  font-size: 0.7rem;
+  padding: 0.12rem 0.4rem;
+  border-radius: 3px;
+  font-weight: 600;
+}
+.wl-score-loading {
+  font-size: 0.72rem;
+  color: var(--color-text-tertiary);
+  font-style: italic;
+}
+
+/* 评分色阶：>=80绿 / >=60蓝 / >=40橙 / <40红 */
+.score-excellent { color: #16a34a; }
+.score-excellent.wl-score-rating { background: rgba(22,163,74,0.12); color: #16a34a; }
+.score-excellent.wl-dim-fill { background: #16a34a; }
+
+.score-good { color: #2563eb; }
+.score-good.wl-score-rating { background: rgba(37,99,235,0.12); color: #2563eb; }
+.score-good.wl-dim-fill { background: #2563eb; }
+
+.score-normal { color: #d97706; }
+.score-normal.wl-score-rating { background: rgba(217,119,6,0.12); color: #d97706; }
+.score-normal.wl-dim-fill { background: #d97706; }
+
+.score-cautious { color: #dc2626; }
+.score-cautious.wl-score-rating { background: rgba(220,38,38,0.12); color: #dc2626; }
+.score-cautious.wl-dim-fill { background: #dc2626; }
+
+/* 维度细分 */
+.wl-score-dims {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+.wl-score-dim {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+.wl-dim-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 0.7rem;
+}
+.wl-dim-label {
+  color: var(--color-text-secondary);
+  font-weight: 500;
+}
+.wl-dim-weight {
+  color: var(--color-text-muted);
+  font-size: 0.66rem;
+  font-family: var(--font-jet);
+}
+.wl-dim-bar {
+  height: 5px;
+  background: var(--color-bg-tertiary);
+  border-radius: 3px;
+  overflow: hidden;
+}
+.wl-dim-fill {
+  height: 100%;
+  border-radius: 3px;
+  transition: width 0.3s ease;
+}
+.wl-dim-foot {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.68rem;
+}
+.wl-dim-score {
+  font-weight: 700;
+  font-family: var(--font-jet);
+  min-width: 22px;
+}
+.wl-dim-reason {
+  color: var(--color-text-tertiary);
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* 编辑目标面板 */
 .wl-edit-panel {
   margin-top: 0.4rem;
@@ -1635,5 +2043,139 @@ onMounted(() => {
   .stats-row-3 { grid-template-columns: repeat(3, 1fr); }
   .watchlist-grid { grid-template-columns: 1fr; }
   .main-tab { padding: 0.45rem 0.6rem; font-size: 0.78rem; }
+}
+
+/* ── 文章分析 URL 输入弹窗 ── */
+.article-dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.4);
+  backdrop-filter: blur(4px);
+}
+.article-dialog-box {
+  background: var(--color-bg-card);
+  border: 1px solid var(--color-border);
+  border-radius: 10px;
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.15);
+  width: 100%;
+  max-width: 480px;
+  margin: 0 1rem;
+  overflow: hidden;
+}
+.article-dialog-header {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 1rem 1.25rem;
+  border-bottom: 1px solid var(--color-border-light);
+}
+.article-dialog-icon {
+  color: #7c3aed;
+  flex-shrink: 0;
+}
+.article-dialog-title {
+  flex: 1;
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: var(--color-text-primary);
+  margin: 0;
+}
+.article-dialog-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border: none;
+  background: transparent;
+  color: var(--color-text-tertiary);
+  border-radius: 4px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.article-dialog-close:hover:not(:disabled) {
+  background: var(--color-bg-secondary);
+  color: var(--color-text-primary);
+}
+.article-dialog-close:disabled { opacity: 0.5; cursor: not-allowed; }
+.article-dialog-body {
+  padding: 1rem 1.25rem;
+}
+.article-dialog-hint {
+  font-size: 0.78rem;
+  color: var(--color-text-tertiary);
+  line-height: 1.6;
+  margin: 0 0 0.75rem 0;
+}
+.article-url-input {
+  width: 100%;
+  padding: 0.6rem 0.75rem;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  background: var(--color-bg-secondary);
+  color: var(--color-text-primary);
+  font-size: 0.85rem;
+  font-family: var(--font-jet);
+  transition: border-color 0.15s;
+  box-sizing: border-box;
+}
+.article-url-input:focus {
+  outline: none;
+  border-color: #7c3aed;
+}
+.article-url-input:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+.article-dialog-actions {
+  display: flex;
+  gap: 0.5rem;
+  padding: 0 1.25rem 1.25rem;
+  justify-content: flex-end;
+}
+.btn-article-cancel {
+  padding: 0.5rem 1rem;
+  border: 1px solid var(--color-border);
+  background: var(--color-bg-card);
+  color: var(--color-text-secondary);
+  border-radius: 6px;
+  font-size: 0.82rem;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.btn-article-cancel:hover:not(:disabled) {
+  border-color: var(--color-text-secondary);
+}
+.btn-article-cancel:disabled { opacity: 0.6; cursor: not-allowed; }
+.btn-article-confirm {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.5rem 1rem;
+  border: none;
+  background: #7c3aed;
+  color: white;
+  border-radius: 6px;
+  font-size: 0.82rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.btn-article-confirm:hover:not(:disabled) {
+  opacity: 0.9;
+  transform: translateY(-1px);
+}
+.btn-article-confirm:disabled { opacity: 0.6; cursor: not-allowed; }
+
+/* fade 过渡（弹窗） */
+.fade-enter-active, .fade-leave-active {
+  transition: opacity 0.2s ease;
+}
+.fade-enter-from, .fade-leave-to {
+  opacity: 0;
 }
 </style>

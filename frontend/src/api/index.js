@@ -1728,6 +1728,11 @@ export function deleteAlert(alertId) {
   return api.delete(`/portfolio/alerts/${alertId}`)
 }
 
+/** 更新预警业务确认状态（已采纳/已忽略） */
+export function acknowledgeAlert(alertId, status) {
+  return api.post(`/portfolio/alerts/${alertId}/acknowledge`, { status })
+}
+
 // ── 前瞻性事件雷达 ─────────────────────────────────────
 
 /** 手动触发事件雷达扫描 */
@@ -1753,6 +1758,11 @@ export function getMarketEvent(eventId) {
 /** 查询事件验证准确率统计 */
 export function getEventRadarAccuracy() {
   return api.get('/alerts/event-radar/accuracy')
+}
+
+/** 抓取文章并提取投资趋势（写入 market_events 表） */
+export function analyzeArticleTrends(url) {
+  return api.post('/alerts/event-radar/analyze-article', { url }, { timeout: 180000 })
 }
 
 /** 生成预警 */

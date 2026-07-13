@@ -2347,11 +2347,11 @@ def list_alerts(user_id: str = "default", limit: int = 50,
         if not rows:
             return []
 
-        # 批量查最新一条的 title/content/source/related_fund_name
+        # 批量查最新一条的 title/content/source/related_fund_name/acknowledged_status
         latest_ids = [r["latest_id"] for r in rows]
         placeholders = ",".join(["?"] * len(latest_ids))
         detail_rows = conn.execute(
-            f"SELECT id, title, content, source, related_fund_name "
+            f"SELECT id, title, content, source, related_fund_name, acknowledged_status "
             f"FROM portfolio_alerts WHERE id IN ({placeholders})",
             latest_ids,
         ).fetchall()
@@ -2365,6 +2365,7 @@ def list_alerts(user_id: str = "default", limit: int = 50,
             r["content"] = d.get("content", "")
             r["source"] = d.get("source", "")
             r["related_fund_name"] = d.get("related_fund_name")
+            r["acknowledged_status"] = d.get("acknowledged_status")
             result.append(r)
     finally:
         conn.close()
@@ -2538,6 +2539,38 @@ def delete_alert(alert_id: int) -> bool:
     ok = cur.rowcount > 0
     conn.close()
     return ok
+
+
+def update_alert_acknowledgment(alert_id: int, status: str) -> bool:
+    """更新预警业务确认状态（同时更新同分组的所有预警，与 list_alerts 跨日合并一致）。
+
+    用于后续回测用户决策质量。
+
+    Args:
+        alert_id: 预警 ID（合并视图中的 latest_id）
+        status: 'acknowledged'（已采纳）或 'ignored'（已忽略）
+    """
+    conn = _get_conn()
+    try:
+        row = conn.execute(
+            "SELECT alert_type, related_fund_code, severity, user_id "
+            "FROM portfolio_alerts WHERE id = ?",
+            (alert_id,)
+        ).fetchone()
+        if not row:
+            return False
+        # 按 list_alerts 的跨日合并分组键（alert_type + fund_code + severity + user_id）批量更新
+        cur = conn.execute(
+            "UPDATE portfolio_alerts SET acknowledged_status = ? "
+            "WHERE alert_type = ? AND COALESCE(related_fund_code, '') = COALESCE(?, '') "
+            "AND severity = ? AND user_id = ?",
+            (status, row["alert_type"], row["related_fund_code"],
+             row["severity"], row["user_id"])
+        )
+        conn.commit()
+        return cur.rowcount > 0
+    finally:
+        conn.close()
 
 
 # ── 交易标签 CRUD ──────────────────────────────────────

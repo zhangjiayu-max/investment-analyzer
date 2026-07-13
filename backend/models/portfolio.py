@@ -68,6 +68,10 @@ class CreateAlertRequest(BaseModel):
     source: str = None
 
 
+class AcknowledgeAlertRequest(BaseModel):
+    status: str  # acknowledged（已采纳）| ignored（已忽略）
+
+
 class TagRequest(BaseModel):
     tag: str
 

@@ -2,7 +2,7 @@
 import { ref, computed, onMounted, onActivated } from 'vue'
 import {
   listAlerts, getUnreadAlertCount, markAlertRead, deleteAlert, scanPortfolioAlerts,
-  dailyAdviceAPI, getAlertHistory, comprehensiveInterpretation,
+  dailyAdviceAPI, getAlertHistory, comprehensiveInterpretation, acknowledgeAlert,
 } from '../api'
 import { useToast } from '../composables/useToast'
 import ConfirmDialog from './ConfirmDialog.vue'
@@ -32,6 +32,7 @@ const unreadAlertCount = ref(0)
 const alertScanning = ref(false)
 const alertHistoryMap = ref({})  // alertId -> { loading, history, show }
 const collapsedInfoAlerts = ref(new Set())  // 折叠的 info 级预警 key
+const ackLoading = ref({})  // alertId -> loading（业务确认状态更新中）
 
 // ── ConfirmDialog ──
 const confirmState = ref({ visible: false, title: '', message: '', danger: false, onConfirm: null })
@@ -229,6 +230,22 @@ async function handleScanAlerts() {
     useToast().showToast('巡检失败：' + (e.response?.data?.detail || e.message), 'error')
   } finally {
     alertScanning.value = false
+  }
+}
+
+// 业务确认状态：采纳/忽略（用于后续回测用户决策质量）
+async function handleAcknowledgeAlert(alert, status) {
+  const id = alert.latest_id
+  if (!id) return
+  ackLoading.value[id] = true
+  try {
+    await acknowledgeAlert(id, status)
+    alert.acknowledged_status = status
+    useToast().showToast(status === 'acknowledged' ? '已采纳' : '已忽略', 'info')
+  } catch (e) {
+    useToast().showToast('操作失败', 'error')
+  } finally {
+    ackLoading.value[id] = false
   }
 }
 
@@ -554,6 +571,8 @@ onActivated(() => {
               <span v-else class="severity-mark info terminal-label">INFO</span>
               {{ a.title }}
               <span v-if="a.cnt > 1" class="alert-count-badge font-jet">×{{ a.cnt }}</span>
+              <span v-if="a.acknowledged_status === 'acknowledged'" class="alert-ack-tag ack-acknowledged">已采纳</span>
+              <span v-else-if="a.acknowledged_status === 'ignored'" class="alert-ack-tag ack-ignored">已忽略</span>
             </div>
 
             <!-- info 级预警内容折叠（P1-3.1） -->
@@ -642,6 +661,18 @@ onActivated(() => {
           </div>
 
           <div class="alert-actions">
+            <button
+              class="btn-ghost btn-sm ack-adopt-btn"
+              :disabled="!!a.acknowledged_status || ackLoading[a.latest_id]"
+              @click="handleAcknowledgeAlert(a, 'acknowledged')"
+              title="采纳"
+            >采纳</button>
+            <button
+              class="btn-ghost btn-sm ack-ignore-btn"
+              :disabled="!!a.acknowledged_status || ackLoading[a.latest_id]"
+              @click="handleAcknowledgeAlert(a, 'ignored')"
+              title="忽略"
+            >忽略</button>
             <button class="btn-ghost btn-sm" @click="handleMarkAlertRead(a.latest_id, a.title, a.severity)" title="标记已读">✔</button>
             <button class="btn-ghost btn-sm btn-danger-text" @click="handleDeleteAlert(a.latest_id, a.title, a.severity)" title="删除">✕</button>
           </div>
@@ -1195,8 +1226,46 @@ onActivated(() => {
 }
 .alert-actions {
   display: flex;
+  flex-direction: column;
   gap: 0.25rem;
   flex-shrink: 0;
+  align-items: stretch;
+}
+.alert-actions .btn-sm {
+  font-size: 0.72rem;
+  padding: 2px 8px;
+  white-space: nowrap;
+}
+
+/* 业务确认状态标签 */
+.alert-ack-tag {
+  font-size: 0.68rem;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 4px;
+  white-space: nowrap;
+}
+.alert-ack-tag.ack-acknowledged {
+  background: var(--color-profit-bg);
+  color: var(--color-profit);
+}
+.alert-ack-tag.ack-ignored {
+  background: var(--color-bg-hover);
+  color: var(--color-text-muted);
+}
+
+/* 采纳/忽略按钮 */
+.ack-adopt-btn {
+  color: var(--color-profit) !important;
+}
+.ack-adopt-btn:not(:disabled):hover {
+  background: var(--color-profit-bg) !important;
+}
+.ack-ignore-btn {
+  color: var(--color-text-muted) !important;
+}
+.ack-ignore-btn:not(:disabled):hover {
+  background: var(--color-bg-hover) !important;
 }
 .alert-badge {
   display: inline-flex;

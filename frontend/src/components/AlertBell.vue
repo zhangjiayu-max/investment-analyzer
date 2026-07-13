@@ -8,7 +8,7 @@
  */
 import { ref, onMounted, onUnmounted, computed } from 'vue'
 import Icon from './ui/Icon.vue'
-import { listAlerts, getUnreadAlertCount, markAlertRead } from '../api'
+import { listAlerts, getUnreadAlertCount, markAlertRead, acknowledgeAlert } from '../api'
 
 const emit = defineEmits(['navigate', 'openNotifications'])
 
@@ -16,6 +16,7 @@ const unreadCount = ref(0)
 const alerts = ref([])
 const open = ref(false)
 const loading = ref(false)
+const ackLoading = ref({})  // alertId -> loading
 let pollTimer = null
 
 async function refreshUnread() {
@@ -57,6 +58,17 @@ async function handleClickAlert(a) {
     emit('navigate', target)
     open.value = false
   }
+}
+
+async function handleAcknowledgeAlert(a, status) {
+  const id = a.latest_id || a.id
+  if (!id) return
+  ackLoading.value[id] = true
+  try {
+    await acknowledgeAlert(id, status)
+    a.acknowledged_status = status
+  } catch { /* 静默失败 */ }
+  ackLoading.value[id] = false
 }
 
 function _routeForAlert(a) {
@@ -194,6 +206,20 @@ onUnmounted(() => {
                 <div class="alert-meta">
                   <span class="alert-time">{{ formatTimeAgo(a.latest_at || a.created_at) }}</span>
                   <span v-if="a.cnt && a.cnt > 1" class="alert-cnt">×{{ a.cnt }}</span>
+                  <span v-if="a.acknowledged_status === 'acknowledged'" class="alert-ack-tag ack-acknowledged">已采纳</span>
+                  <span v-else-if="a.acknowledged_status === 'ignored'" class="alert-ack-tag ack-ignored">已忽略</span>
+                </div>
+                <div v-if="!a.acknowledged_status" class="alert-ack-actions" @click.stop>
+                  <button
+                    class="alert-ack-btn ack-adopt"
+                    :disabled="ackLoading[a.latest_id]"
+                    @click="handleAcknowledgeAlert(a, 'acknowledged')"
+                  >采纳</button>
+                  <button
+                    class="alert-ack-btn ack-skip"
+                    :disabled="ackLoading[a.latest_id]"
+                    @click="handleAcknowledgeAlert(a, 'ignored')"
+                  >忽略</button>
                 </div>
               </div>
             </div>
@@ -344,6 +370,59 @@ onUnmounted(() => {
   background: var(--color-bg-tertiary);
   padding: 0 4px;
   border-radius: 3px;
+}
+
+/* 业务确认状态标签 + 采纳/忽略按钮 */
+.alert-ack-tag {
+  padding: 0 5px;
+  border-radius: 3px;
+  font-size: 9px;
+  font-weight: 600;
+  line-height: 14px;
+}
+.alert-ack-tag.ack-acknowledged {
+  background: rgba(22, 163, 74, 0.12);
+  color: #16a34a;
+}
+.alert-ack-tag.ack-ignored {
+  background: var(--color-bg-tertiary);
+  color: var(--color-text-tertiary);
+}
+.alert-ack-actions {
+  display: flex;
+  gap: 4px;
+  margin-top: 4px;
+}
+.alert-ack-btn {
+  padding: 2px 8px;
+  font-size: 10px;
+  font-weight: 500;
+  border-radius: 4px;
+  border: 1px solid transparent;
+  cursor: pointer;
+  transition: all 0.15s;
+  line-height: 1.4;
+}
+.alert-ack-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.alert-ack-btn.ack-adopt {
+  background: rgba(22, 163, 74, 0.1);
+  color: #16a34a;
+  border-color: rgba(22, 163, 74, 0.3);
+}
+.alert-ack-btn.ack-adopt:not(:disabled):hover {
+  background: rgba(22, 163, 74, 0.18);
+}
+.alert-ack-btn.ack-skip {
+  background: var(--color-bg-secondary);
+  color: var(--color-text-tertiary);
+  border-color: var(--color-border-light);
+}
+.alert-ack-btn.ack-skip:not(:disabled):hover {
+  background: var(--color-bg-tertiary);
+  color: var(--color-text-secondary);
 }
 
 /* 严重度图标颜色 */

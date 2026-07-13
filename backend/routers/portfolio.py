@@ -35,6 +35,7 @@ from db import (
     get_cash_balance, add_cash,
     get_fund_nav_history,
     create_alert, list_alerts, get_unread_alert_count, mark_alert_read, delete_alert,
+    update_alert_acknowledgment,
     add_transaction_tag, remove_transaction_tag, get_transaction_tags,
     create_portfolio_analysis_record, list_portfolio_analysis_records,
     get_portfolio_analysis_record, delete_portfolio_analysis_record,
@@ -55,7 +56,7 @@ from services.rag import build_rag_context_with_details, log_rag_search
 from models.portfolio import (
     CreateHoldingRequest, UpdateHoldingRequest,
     CreateTransactionRequest, ConfirmTransactionRequest,
-    CreateAlertRequest, TagRequest, AdjustCashRequest,
+    CreateAlertRequest, AcknowledgeAlertRequest, TagRequest, AdjustCashRequest,
     PortfolioAiAnalysisRequest, FeedbackRequest,
     PanoramaAnalysisRequest, DeepDiveRequest, TradeReviewRequest, WhatIfRequest,
     StressTestRequest, SellPreviewRequest,
@@ -310,6 +311,19 @@ async def mark_alert_read_api(alert_id: int):
 async def delete_alert_api(alert_id: int):
     """删除预警。"""
     if not delete_alert(alert_id):
+        raise HTTPException(404, "预警不存在")
+    return {"ok": True}
+
+
+@router.post("/api/portfolio/alerts/{alert_id}/acknowledge")
+async def acknowledge_alert_api(alert_id: int, body: AcknowledgeAlertRequest):
+    """更新预警业务确认状态（已采纳/已忽略），用于后续回测用户决策质量。
+
+    status: 'acknowledged'（已采纳）或 'ignored'（已忽略）
+    """
+    if body.status not in ("acknowledged", "ignored"):
+        raise HTTPException(400, "status 只能为 'acknowledged' 或 'ignored'")
+    if not update_alert_acknowledgment(alert_id, body.status):
         raise HTTPException(404, "预警不存在")
     return {"ok": True}
 

@@ -123,34 +123,302 @@ def _fetch_news_from_mcp(keyword: str = "", limit: int = 50) -> list[dict]:
         return []
 
 
-def _collect_news() -> list[dict]:
-    """采集最近 24 小时财经新闻（多源融合 + 去重）。
+def _call_akshare_with_timeout(fn, timeout: int = 15, **kwargs):
+    """带超时调用 akshare 函数（akshare 偶发卡死，需超时保护）。
 
-    数据源优先级：盈米 MCP → 东财妙想 → akshare（当前仅实现盈米）
-    单次最多 50 条，跨源去重。
+    Args:
+        fn: akshare 函数（如 ak.stock_news_em）
+        timeout: 超时秒数
+        **kwargs: 传给 fn 的关键字参数
+
+    Returns:
+        函数返回值；超时或异常返回 None。
     """
-    max_news = 50
-    try:
-        news = _fetch_news_from_mcp(limit=max_news)
-    except Exception as e:
-        logger.warning(f"[event_radar] 新闻采集异常: {e}")
-        news = []
+    import concurrent.futures
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(fn, **kwargs)
+        try:
+            return future.result(timeout=timeout)
+        except concurrent.futures.TimeoutError:
+            logger.warning(f"[event_radar] akshare {fn.__name__} 超时({timeout}s)")
+            return None
+        except Exception as e:
+            logger.warning(f"[event_radar] akshare {fn.__name__} 调用失败: {e}")
+            return None
 
-    if not news:
-        logger.info("[event_radar] 未采集到新闻，跳过本次扫描")
+
+def _fetch_news_from_akshare(limit: int = 30) -> list[dict]:
+    """从 akshare 获取财经新闻（东财新闻 + 央视新闻补充）。
+
+    主接口 stock_news_em 返回东方财富新闻（含标题/内容/链接/时间，数据最丰富），
+    数据不足时用 news_cctv 补充央视新闻联播（金融关键词过滤）。
+
+    Args:
+        limit: 最多返回条数
+
+    Returns:
+        [{news_title, news_summary, news_source, news_url, published_at}, ...]
+        异常时返回空列表，不阻塞流程。
+    """
+    result: list[dict] = []
+    try:
+        import akshare as ak
+    except ImportError:
+        logger.warning("[event_radar] akshare 未安装，跳过 akshare 新闻源")
         return []
 
-    # 去重：按标题相似度（简化版：完全一致去重）
+    # 主接口：东方财富财经新闻（含 URL，数据最丰富）
+    try:
+        df = _call_akshare_with_timeout(ak.stock_news_em, timeout=15, symbol="A股")
+        if df is not None and len(df) > 0:
+            for _, row in df.head(limit).iterrows():
+                title = str(row.get("新闻标题", "")).strip()
+                if not title:
+                    continue
+                result.append({
+                    "news_title": title,
+                    "news_summary": str(row.get("新闻内容", ""))[:200],
+                    "news_source": str(row.get("文章来源", "东方财富")),
+                    "news_url": str(row.get("新闻链接", "")),
+                    "published_at": str(row.get("发布时间", "")),
+                })
+    except Exception as e:
+        logger.warning(f"[event_radar] akshare stock_news_em 失败: {e}")
+
+    # 补充：央视新闻联播（金融相关过滤，弥补条数不足）
+    if len(result) < limit:
+        try:
+            today = datetime.now().strftime("%Y%m%d")
+            df2 = _call_akshare_with_timeout(ak.news_cctv, timeout=15, date=today)
+            if df2 is not None and len(df2) > 0:
+                finance_keywords = (
+                    "股", "基金", "央行", "利率", "经济", "金融",
+                    "市场", "投资", "GDP", "通胀", "行情", "债", "汇率",
+                )
+                for _, row in df2.head(limit - len(result)).iterrows():
+                    title = str(row.get("title", "")).strip()
+                    if not title or not any(kw in title for kw in finance_keywords):
+                        continue
+                    result.append({
+                        "news_title": title,
+                        "news_summary": str(row.get("content", ""))[:200],
+                        "news_source": "央视新闻",
+                        "news_url": "",
+                        "published_at": str(row.get("date", "")),
+                    })
+        except Exception as e:
+            logger.warning(f"[event_radar] akshare news_cctv 失败: {e}")
+
+    return result[:limit]
+
+
+def _fetch_news_from_eastmoney(limit: int = 20) -> list[dict]:
+    """从东方财富妙想 MCP 获取热点新闻（MCP 不可用时降级到百度财经）。
+
+    复用 mcp.eastmoney_client 的 stock_hotspot 接口获取市场热点文本，
+    按行分割为多条新闻。MCP 不可用或无结果时降级到 akshare news_economic_baidu。
+
+    Args:
+        limit: 最多返回条数
+
+    Returns:
+        [{news_title, news_summary, news_source, news_url, published_at}, ...]
+        异常时返回空列表，不阻塞流程。
+    """
+    # 优先：东方财富妙想 MCP 热点发现
+    try:
+        from mcp.eastmoney_client import get_eastmoney_client
+        client = get_eastmoney_client()
+        text = client.stock_hotspot("今日财经热点新闻")
+        if text and len(text) > 10:
+            result: list[dict] = []
+            # MCP 返回文本块，按换行分割为多条热点
+            now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            for line in text.split("\n"):
+                line = line.strip()
+                if len(line) < 10:
+                    continue
+                # 去除 markdown 列表符号前缀（如 "1." "•" "-" "*"）
+                clean = re.sub(r"^[•\-\*\d+\.、]+", "", line).strip()
+                if len(clean) < 10:
+                    continue
+                result.append({
+                    "news_title": clean[:80],
+                    "news_summary": clean[:200],
+                    "news_source": "东方财富妙想",
+                    "news_url": "",
+                    "published_at": now_str,
+                })
+                if len(result) >= limit:
+                    break
+            if result:
+                return result
+    except Exception as e:
+        logger.warning(f"[event_radar] 东方财富 MCP 热点获取失败: {e}")
+
+    # 降级：akshare 百度财经新闻
+    try:
+        import akshare as ak
+        df = _call_akshare_with_timeout(ak.news_economic_baidu, timeout=15)
+        if df is not None and len(df) > 0:
+            result = []
+            for _, row in df.head(limit).iterrows():
+                # 兼容不同版本列名差异
+                title = str(row.get("title", row.get("新闻标题", ""))).strip()
+                if not title:
+                    continue
+                result.append({
+                    "news_title": title,
+                    "news_summary": str(row.get("abstract", row.get("新闻内容", "")))[:200],
+                    "news_source": str(row.get("source", "百度财经")),
+                    "news_url": str(row.get("url", row.get("新闻链接", ""))),
+                    "published_at": str(row.get("date", row.get("发布时间", ""))),
+                })
+            return result
+    except Exception as e:
+        logger.warning(f"[event_radar] akshare news_economic_baidu 失败: {e}")
+
+    return []
+
+
+def _collect_news() -> list[dict]:
+    """采集最近 24 小时财经新闻（三源融合 + 跨源去重）。
+
+    数据源优先级：盈米 MCP → akshare → 东方财富/百度
+    每个数据源 try-except 隔离，单源失败不影响其他源。
+    单次最多 50 条，跨源标题精确去重。
+    """
+    max_news = 50
+    all_news: list[dict] = []
+
+    # 数据源1：盈米 MCP（优先）
+    try:
+        mcp_news = _fetch_news_from_mcp(limit=max_news)
+        if mcp_news:
+            all_news.extend(mcp_news)
+            logger.info(f"[event_radar] 盈米MCP 采集 {len(mcp_news)} 条")
+    except Exception as e:
+        logger.warning(f"[event_radar] 盈米MCP 采集异常: {e}")
+
+    # 数据源2：akshare 财经新闻
+    try:
+        ak_news = _fetch_news_from_akshare(limit=max_news)
+        if ak_news:
+            all_news.extend(ak_news)
+            logger.info(f"[event_radar] akshare 采集 {len(ak_news)} 条")
+    except Exception as e:
+        logger.warning(f"[event_radar] akshare 采集异常: {e}")
+
+    # 数据源3：东方财富妙想/百度财经
+    try:
+        em_news = _fetch_news_from_eastmoney(limit=max_news)
+        if em_news:
+            all_news.extend(em_news)
+            logger.info(f"[event_radar] 东方财富/百度 采集 {len(em_news)} 条")
+    except Exception as e:
+        logger.warning(f"[event_radar] 东方财富/百度 采集异常: {e}")
+
+    if not all_news:
+        logger.info("[event_radar] 三源均未采集到新闻，跳过本次扫描")
+        return []
+
+    # 跨源去重：标题精确匹配（复用现有去重逻辑）
     seen_titles = set()
     unique = []
-    for n in news:
+    for n in all_news:
         title = n.get("news_title", "").strip()
         if title and title not in seen_titles:
             seen_titles.add(title)
             unique.append(n)
 
-    logger.info(f"[event_radar] 采集新闻 {len(news)} 条，去重后 {len(unique)} 条")
+    logger.info(
+        f"[event_radar] 三源合计 {len(all_news)} 条，去重后 {len(unique)} 条"
+    )
     return unique[:max_news]
+
+
+def _extract_trends_from_articles(article_content: str, article_title: str = "") -> list[dict]:
+    """从深度分析文章中提取中长期行业趋势和投资机会。
+
+    与新闻事件提取的区别：
+    - 新闻提取：未来1-2周即将发生的具体事件
+    - 趋势提取：中长期（1-6个月）的行业发展趋势和投资主题
+
+    Args:
+        article_content: 文章正文内容
+        article_title: 文章标题
+
+    Returns:
+        趋势列表 [{title, summary, event_type, direction, affected_sectors,
+                  affected_themes, confidence, time_frame, evidence}]
+    """
+    if not article_content or len(article_content) < 500:
+        return []
+
+    known_sectors = "/".join(SECTOR_TO_INDEX.keys())
+    
+    prompt = f"""你是一位资深行业分析师。请从以下深度分析文章中提取中长期（1-6个月）的行业趋势和投资机会。
+
+【文章标题】
+{article_title}
+
+【文章内容】
+{article_content[:3000]}
+
+【输出要求】
+仅输出 JSON 数组，每个趋势包含：
+- title: 趋势标题（≤50字，主谓宾完整，如"液冷技术渗透率快速提升"）
+- summary: 趋势摘要（≤200字，说明逻辑和影响）
+- event_type: 事件分类（trend/theme/technology/policy/capital）
+- direction: 影响方向（positive/negative/neutral）
+- affected_sectors: 受影响板块（数组，从以下标准板块选取：{known_sectors}）
+- affected_themes: 受影响主题（数组，自由文本如"液冷""CPO""存算一体"）
+- confidence: 置信度（0-1，1表示高度确定）
+- time_frame: 时间跨度（short=1-3个月, medium=3-6个月, long=6-12个月）
+- evidence: 文章中的关键证据（≤100字，引用文章中的数据或事实）
+
+【过滤规则】
+1. 只提取有明确投资逻辑的趋势，不提取纯科普内容
+2. 必须能从文章中找到支撑证据
+3. 最多输出 5 个趋势
+4. affected_sectors 必须从标准板块名列表选取
+
+只输出 JSON 数组，不要其他解释。"""
+
+    try:
+        resp = _call_llm(
+            caller="event_radar_trend_extractor",
+            model=MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.2,
+            max_tokens=3000,
+        )
+        raw = (resp.choices[0].message.content or "").strip()
+        if raw.startswith("```"):
+            raw = re.sub(r"^```(?:json)?\s*", "", raw)
+            raw = re.sub(r"\s*```$", "", raw)
+        if not raw.startswith("["):
+            start = raw.find("[")
+            end = raw.rfind("]")
+            if start != -1 and end != -1 and end > start:
+                raw = raw[start:end + 1]
+        trends = json.loads(raw)
+        if not isinstance(trends, list):
+            return []
+    except Exception as e:
+        logger.warning(f"[event_radar] 趋势提取失败: {e}")
+        return []
+
+    filtered = []
+    for trend in trends:
+        if not trend.get("title"):
+            continue
+        if trend.get("confidence", 0) < 0.5:
+            continue
+        filtered.append(trend)
+
+    logger.info(f"[event_radar] 从文章提取趋势 {len(filtered)} 个")
+    return filtered
 
 
 def _extract_events_from_news(news_list: list[dict], trace_id: str = "") -> list[dict]:
@@ -509,11 +777,12 @@ def scan_forward_events(trace_id: str = "") -> dict:
     流程：
     1. 检查开关
     2. 采集新闻
-    3. LLM 提取未来事件
-    4. 写入 market_events 表（去重）
-    5. 状态流转扫描
-    6. 板块匹配 + 3 级分级
-    7. 生成 alert
+    3. LLM 提取未来事件（短期）
+    4. 提取行业趋势（中长期）
+    5. 写入 market_events 表（去重）
+    6. 状态流转扫描
+    7. 板块匹配 + 3 级分级
+    8. 生成 alert
 
     Returns:
         {"extracted": int, "new": int, "updated": int,
@@ -530,48 +799,70 @@ def scan_forward_events(trace_id: str = "") -> dict:
     if not news:
         return {"extracted": 0, "new": 0, "updated": 0, "alerts_created": 0, "reason": "no_news"}
 
-    # 2. LLM 提取
+    # 2. LLM 提取短期事件
     events = _extract_events_from_news(news, trace_id=trace_id)
-    if not events:
+
+    # 3. 提取中长期行业趋势（从新闻中筛选深度分析内容）
+    trends = []
+    try:
+        for n in news[:5]:
+            summary = n.get("news_summary", "")
+            if len(summary) > 300:
+                trend_results = _extract_trends_from_articles(summary, n.get("news_title", ""))
+                trends.extend(trend_results)
+        logger.info(f"[event_radar:{trace_id}] 提取趋势 {len(trends)} 个")
+    except Exception as e:
+        logger.warning(f"[event_radar:{trace_id}] 趋势提取异常: {e}")
+
+    # 合并事件和趋势
+    all_items = events + trends
+    if not all_items:
         return {"extracted": 0, "new": 0, "updated": 0, "alerts_created": 0, "reason": "no_events"}
 
-    # 3. 写入 market_events 表（幂等）
+    # 4. 写入 market_events 表（幂等）
     from db.market_events import create_market_event, update_event_relevance
     new_count = 0
-    for ev in events:
+    for ev in all_items:
         sources = [
             {"title": n.get("news_title", ""), "url": n.get("news_url", ""),
              "publish_date": n.get("published_at", "")}
-            for n in news[:3]  # 最多关联 3 条来源
+            for n in news[:3]
         ]
         try:
-            # 检查是否已存在
             from db.market_events import get_market_event, _gen_event_id
-            eid = _gen_event_id(ev["title"], ev["expected_date"])
+            expected_date = ev.get("expected_date", "")
+            
+            eid = _gen_event_id(ev["title"], expected_date)
             existing = get_market_event(eid)
+            
+            is_trend = ev.get("time_frame") or ev.get("evidence")
+            conf = _calibrate_confidence(
+                float(ev.get("confidence", 0.5)),
+                ev.get("affected_sectors", []),
+            ) if not is_trend else float(ev.get("confidence", 0.5))
+            
             create_market_event(
                 title=ev["title"],
                 summary=ev.get("summary", ""),
                 event_type=ev.get("event_type", "theme"),
                 direction=ev.get("direction", "neutral"),
-                expected_date=ev["expected_date"],
+                expected_date=expected_date,
                 affected_sectors=ev.get("affected_sectors", []),
                 affected_themes=ev.get("affected_themes", []),
-                confidence=_calibrate_confidence(
-                    float(ev.get("confidence", 0.5)),
-                    ev.get("affected_sectors", []),
-                ),
+                confidence=conf,
                 sources=sources,
+                time_frame=ev.get("time_frame", ""),
+                evidence=ev.get("evidence", ""),
             )
             if not existing:
                 new_count += 1
         except Exception as e:
             logger.warning(f"[event_radar:{trace_id}] 写入事件失败 '{ev.get('title','')}': {e}")
 
-    # 4. 状态流转
+    # 5. 状态流转
     status_counts = _update_event_statuses()
 
-    # 5. 板块匹配 + 分级 + 生成 alert
+    # 6. 板块匹配 + 分级 + 生成 alert
     from db.portfolio import list_holdings, create_alert
     from db.watchlist import list_watchlist
     holdings = list_holdings()
@@ -654,21 +945,23 @@ def scan_forward_events(trace_id: str = "") -> dict:
 def _fetch_index_close_prices(index_code: str, start_date: str, end_date: str) -> dict:
     """获取指数在 [start_date, end_date] 区间的每日收盘价。
 
+    支持上证(sh)、深证(sz)、中证(CSI)系列指数。中证系列先尝试 sh/sz 前缀，
+    失败后用 akshare 的 index_zh_a_hist 接口（按指数代码直接查）。
+
     Returns:
         {"YYYY-MM-DD": float, ...} 或空 dict
     """
     import akshare as ak
-    # 归一化代码：剥离后缀
     base = index_code.replace(".SZ", "").replace(".SH", "").replace(".CSI", "")
     prices = {}
-    # 尝试 sh/sz 前缀
+
+    # 策略1：sh/sz 前缀（新浪接口，覆盖上证/深证）
     for prefix in ["sh", "sz"]:
         sina_code = f"{prefix}{base}"
         try:
             df = ak.stock_zh_index_daily(symbol=sina_code)
             if df is None or df.empty:
                 continue
-            # 列名可能是 date/date字符串
             date_col = "date" if "date" in df.columns else df.columns[0]
             close_col = "close" if "close" in df.columns else df.columns[-1]
             for _, row in df.iterrows():
@@ -679,6 +972,42 @@ def _fetch_index_close_prices(index_code: str, start_date: str, end_date: str) -
                 return prices
         except Exception:
             continue
+
+    # 策略2：akshare index_zh_a_hist（中证系列 930xxx/931xxx 等）
+    if not prices:
+        try:
+            df = ak.index_zh_a_hist(symbol=base, period="daily",
+                                    start_date=start_date.replace("-", ""),
+                                    end_date=end_date.replace("-", ""))
+            if df is not None and not df.empty:
+                date_col = "日期" if "日期" in df.columns else df.columns[0]
+                close_col = "收盘" if "收盘" in df.columns else df.columns[-1]
+                for _, row in df.iterrows():
+                    d = str(row[date_col])[:10]
+                    if start_date <= d <= end_date:
+                        prices[d] = float(row[close_col])
+                if prices:
+                    return prices
+        except Exception:
+            pass
+
+    # 策略3：基金净值回退（如果指数取不到，用相关基金净值近似）
+    if not prices:
+        try:
+            from db.portfolio import list_holdings
+            holdings = list_holdings()
+            for h in holdings:
+                if h.get("index_code", "").replace(".CSI", "").replace(".SZ", "").replace(".SH", "") == base:
+                    fund_code = h.get("fund_code", "")
+                    if fund_code:
+                        from services.market_data import get_fund_nav
+                        nav = get_fund_nav(fund_code)
+                        if nav and nav.get("nav"):
+                            prices[start_date] = float(nav["nav"])
+                            return prices
+        except Exception:
+            pass
+
     return prices
 
 

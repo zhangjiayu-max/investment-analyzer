@@ -5,11 +5,12 @@
 - GET /api/alerts/event-radar/events/{event_id}：事件详情
 - POST /api/alerts/event-radar/verify：手动触发落地验证
 - GET /api/alerts/event-radar/accuracy：准确率统计
+- POST /api/alerts/event-radar/analyze-article：抓取文章并提取投资趋势
 """
 import logging
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Body
 
 from db.market_events import (
     list_market_events, get_market_event,
@@ -92,3 +93,76 @@ async def accuracy_stats():
     except Exception as e:
         logger.error(f"获取准确率统计失败: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"获取失败: {e}")
+
+
+@router.post("/api/alerts/event-radar/analyze-article")
+async def analyze_article_trends(url: str = Body(..., embed=True)):
+    """抓取文章并提取投资趋势。
+
+    流程：
+    1. 调用 services/article_reader.py 的 fetch_generic_article 抓取文章
+    2. 调用 services/event_radar.py 的 _extract_trends_from_articles 提取趋势
+    3. 将趋势写入 market_events 表（带 time_frame/evidence 字段）
+    4. 返回提取的趋势列表
+    """
+    if not url or not url.strip().startswith(("http://", "https://")):
+        raise HTTPException(status_code=400, detail="请提供合法的文章 URL（http/https）")
+    try:
+        from services.article_reader import fetch_generic_article
+        from services.event_radar import _extract_trends_from_articles
+        from db.market_events import create_market_event, get_market_event, _gen_event_id
+
+        # 1. 抓取文章
+        article = await fetch_generic_article(url)
+        content = (article or {}).get("content_text", "") or ""
+        title = (article or {}).get("title", "") or ""
+
+        if len(content) < 500:
+            raise HTTPException(
+                status_code=400,
+                detail=f"文章内容过短或抓取失败（{len(content)} 字符），无法提取趋势。标题：{title or '未知'}",
+            )
+
+        # 2. 提取趋势
+        trends = _extract_trends_from_articles(content, title)
+
+        # 3. 写入 market_events 表（幂等）
+        saved_new = 0
+        for trend in trends:
+            try:
+                eid = _gen_event_id(trend.get("title", ""), "")
+                existing = get_market_event(eid)
+                create_market_event(
+                    title=trend.get("title", ""),
+                    summary=trend.get("summary", ""),
+                    event_type=trend.get("event_type", "theme"),
+                    direction=trend.get("direction", "neutral"),
+                    expected_date="",
+                    affected_sectors=trend.get("affected_sectors", []),
+                    affected_themes=trend.get("affected_themes", []),
+                    confidence=float(trend.get("confidence", 0.5)),
+                    sources=[{"title": title, "url": url}],
+                    time_frame=trend.get("time_frame", ""),
+                    evidence=trend.get("evidence", ""),
+                )
+                if not existing:
+                    saved_new += 1
+            except Exception as e:
+                logger.warning(f"写入趋势事件失败 '{trend.get('title', '')}': {e}")
+
+        logger.info(
+            f"[event_radar] 文章趋势分析完成: url={url}, title={title}, "
+            f"提取 {len(trends)} 个趋势，新增 {saved_new} 个"
+        )
+
+        return ApiResponse.success(data={
+            "trends": trends,
+            "total": len(trends),
+            "new": saved_new,
+            "article_title": title,
+        })
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"分析文章趋势失败: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"分析失败: {e}")

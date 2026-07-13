@@ -1,10 +1,11 @@
 from db.config import get_config_int, get_config_float
-"""公众号文章抓取模块 — 用 Playwright 异步抓取微信公众号文章
+"""文章抓取模块 — 支持微信公众号文章和通用网页（CSDN、知乎、雪球等）
 
 优化：
 - 过滤带水印图片（URL含 watermark=1）
 - 按图片key去重，避免重复下载
 - 只保留无水印原图
+- 自动识别网站类型，使用不同的解析策略
 """
 
 import os
@@ -191,6 +192,147 @@ async def fetch_article(url: str) -> dict:
         "images": images,
         "image_count": len(images),
     }
+
+
+async def fetch_generic_article(url: str) -> dict:
+    """
+    异步抓取通用网页文章（CSDN、知乎、雪球、博客等）。
+    
+    返回:
+        {
+            "title": str,
+            "author": str,
+            "publish_time": str,
+            "content_text": str,
+            "content_html": str,
+            "images": list[str],
+            "image_count": int,
+        }
+    """
+    parsed = urlparse(url)
+    domain = parsed.netloc.lower()
+    
+    async with async_playwright() as p:
+        chrome_path = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+        browser = await p.chromium.launch(
+            headless=True,
+            executable_path=chrome_path,
+        )
+        context = await browser.new_context(
+            viewport={"width": 1200, "height": 800},
+            user_agent=HEADERS["User-Agent"],
+        )
+        page = await context.new_page()
+
+        await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+        await page.wait_for_timeout(3000)
+
+        title = ""
+        author = ""
+        publish_time = ""
+        content_text = ""
+        content_html = ""
+        images = []
+
+        if "csdn.net" in domain:
+            title_el = await page.query_selector("h1.title-article") or await page.query_selector("h1")
+            if title_el:
+                title = (await title_el.inner_text()).strip()
+            
+            author_el = await page.query_selector(".article-bar__name") or await page.query_selector(".blog_user_name")
+            if author_el:
+                author = (await author_el.inner_text()).strip()
+            
+            time_el = await page.query_selector(".time") or await page.query_selector(".article-bar__time")
+            if time_el:
+                publish_time = (await time_el.inner_text()).strip()
+            
+            content_el = await page.query_selector("#article_content") or await page.query_selector(".article_content")
+            if content_el:
+                content_html = await content_el.inner_html()
+                content_text = (await content_el.inner_text()).strip()
+
+        elif "zhihu.com" in domain:
+            title_el = await page.query_selector("h1")
+            if title_el:
+                title = (await title_el.inner_text()).strip()
+            
+            author_el = await page.query_selector(".AuthorInfo-name")
+            if author_el:
+                author = (await author_el.inner_text()).strip()
+            
+            time_el = await page.query_selector(".ContentItem-time")
+            if time_el:
+                publish_time = (await time_el.inner_text()).strip()
+            
+            content_el = await page.query_selector(".Post-RichText") or await page.query_selector(".RichText")
+            if content_el:
+                content_html = await content_el.inner_html()
+                content_text = (await content_el.inner_text()).strip()
+
+        elif "xueqiu.com" in domain:
+            title_el = await page.query_selector("h1")
+            if title_el:
+                title = (await title_el.inner_text()).strip()
+            
+            author_el = await page.query_selector(".user-name")
+            if author_el:
+                author = (await author_el.inner_text()).strip()
+            
+            time_el = await page.query_selector(".time")
+            if time_el:
+                publish_time = (await time_el.inner_text()).strip()
+            
+            content_el = await page.query_selector(".article__bd") or await page.query_selector(".detail-content")
+            if content_el:
+                content_html = await content_el.inner_html()
+                content_text = (await content_el.inner_text()).strip()
+
+        else:
+            title_el = await page.query_selector("h1")
+            if title_el:
+                title = (await title_el.inner_text()).strip()
+            
+            meta_author = await page.query_selector('meta[name="author"]')
+            if meta_author:
+                author = (await meta_author.get_attribute("content") or "").strip()
+            
+            meta_time = await page.query_selector('meta[property="article:published_time"]') or \
+                        await page.query_selector('meta[name="publishdate"]')
+            if meta_time:
+                publish_time = (await meta_time.get_attribute("content") or "").strip()
+            
+            content_selectors = [
+                "article",
+                ".article",
+                ".post-content",
+                ".entry-content",
+                "#content",
+                ".content",
+            ]
+            content_el = None
+            for sel in content_selectors:
+                content_el = await page.query_selector(sel)
+                if content_el:
+                    break
+            
+            if content_el:
+                content_html = await content_el.inner_html()
+                content_text = (await content_el.inner_text()).strip()
+
+        await browser.close()
+
+        content_text = content_text.replace("\n\n\n", "\n\n").strip()
+
+        return {
+            "title": title,
+            "author": author,
+            "publish_time": publish_time,
+            "content_text": content_text,
+            "content_html": content_html,
+            "images": images,
+            "image_count": len(images),
+        }
 
 
 async def download_images(image_urls: list, save_dir: str) -> list:

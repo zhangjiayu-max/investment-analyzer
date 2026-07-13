@@ -107,7 +107,7 @@ from db.portfolio import (
     settle_transaction, delete_transaction, fetch_fund_nav, get_fund_nav_history,
     refresh_holding_price, refresh_all_fund_prices, lookup_fund_info, classify_bond_type,
     classify_fund_category, get_fund_holdings, create_alert, list_alerts,
-    get_unread_alert_count, mark_alert_read, delete_alert, add_transaction_tag,
+    get_unread_alert_count, mark_alert_read, delete_alert, update_alert_acknowledgment, add_transaction_tag,
     remove_transaction_tag, get_transaction_tags, get_portfolio_diversification,
     get_transaction_summary, clear_all_portfolio_data, create_portfolio_analysis_record,
     list_portfolio_analysis_records, get_portfolio_analysis_record,
@@ -670,6 +670,7 @@ def init_db():
             related_fund_name TEXT,
             source TEXT,
             is_read INTEGER DEFAULT 0,
+            acknowledged_status TEXT,  -- 业务确认状态：'acknowledged'(已采纳) / 'ignored'(已忽略) / NULL(未处理)
             created_at TEXT DEFAULT (datetime('now','localtime'))
         )
     """)
@@ -1108,6 +1109,9 @@ def init_db():
     # P0-3.1：持仓↔预警 FK 强关联（替代 related_fund_code 字符串匹配）
     _add_column_if_not_exists(conn, "portfolio_alerts", "holding_id", "INTEGER")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_alerts_holding ON portfolio_alerts(holding_id)")
+
+    # 业务确认状态（已采纳/已忽略），用于回测用户决策质量
+    _add_column_if_not_exists(conn, "portfolio_alerts", "acknowledged_status", "TEXT")
 
     # 编排配置默认值
     _default_orchestration_config = [

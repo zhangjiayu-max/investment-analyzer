@@ -1289,33 +1289,37 @@ def _log_tool_audit(trace_id: str, tool_name: str, arguments: dict,
 
 
 def _fetch_article(args: dict) -> str:
-    """抓取并解析文章内容。"""
+    """抓取并解析文章内容（支持微信公众号、CSDN、知乎、雪球等）。"""
     url = args.get("url", "")
     if not url:
         return json.dumps({"error": "请提供文章链接"}, ensure_ascii=False)
 
     try:
         import asyncio
-        from services.article_reader import fetch_article
+        from urllib.parse import urlparse
 
-        # 运行异步函数（Playwright 渲染微信文章可能较慢，给 60s）
-        article = asyncio.run(fetch_article(url))
+        parsed = urlparse(url)
+        domain = parsed.netloc.lower()
+
+        if "mp.weixin.qq.com" in domain:
+            from services.article_reader import fetch_article
+            article = asyncio.run(fetch_article(url))
+        else:
+            from services.article_reader import fetch_generic_article
+            article = asyncio.run(fetch_generic_article(url))
 
         if not article:
             return json.dumps({"error": "文章抓取失败，请检查链接是否有效"}, ensure_ascii=False)
 
         title = article.get("title", "未知标题")
-        # article_reader 返回 content_text 字段
         content = article.get("content_text", "") or article.get("content", "")
         author = article.get("author", "")
         publish_time = article.get("publish_time", "")
 
-        # 截取前 5000 字符
-        max_chars = 5000
+        max_chars = 8000
         if len(content) > max_chars:
-            content = content[:max_chars] + "\n\n... (内容已截断)"
+            content = content[:max_chars] + "\n\n... (内容已截断，全文共 " + str(len(content)) + " 字)"
 
-        # 结构化提取（核心观点/标的/操作建议/时效性/偏见）— 失败不影响主流程
         structure = {}
         try:
             from services.article_reader import extract_article_structure
@@ -1331,6 +1335,7 @@ def _fetch_article(args: dict) -> str:
             "content": content,
             "content_length": len(content),
             "structure": structure,
+            "source_domain": domain,
         }, ensure_ascii=False)
 
     except ImportError:

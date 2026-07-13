@@ -1,18 +1,21 @@
 """前瞻性事件雷达 — 服务层测试。"""
+import pytest
 from unittest.mock import patch, MagicMock
 from datetime import datetime, timedelta
 from services.event_radar import _collect_news, SECTOR_TO_INDEX
 
 
 def test_collect_news_returns_list():
-    """_collect_news 返回新闻列表（mock MCP）。"""
+    """_collect_news 返回新闻列表（mock MCP，其他源返回空避免真实网络调用）。"""
     fake_news = [
         {"news_title": "SpaceX 宣布 7 月 18 日星舰试飞", "news_summary": "首次尝试助推器回收",
          "news_source": "新华财经", "news_url": "http://x", "published_at": "2026-07-10"},
         {"news_title": "美联储 7 月议息会议", "news_summary": "预计讨论降息",
          "news_source": "路透", "news_url": "http://y", "published_at": "2026-07-10"},
     ]
-    with patch("services.event_radar._fetch_news_from_mcp", return_value=fake_news):
+    with patch("services.event_radar._fetch_news_from_mcp", return_value=fake_news), \
+         patch("services.event_radar._fetch_news_from_akshare", return_value=[]), \
+         patch("services.event_radar._fetch_news_from_eastmoney", return_value=[]):
         result = _collect_news()
     assert isinstance(result, list)
     assert len(result) >= 1
@@ -20,10 +23,40 @@ def test_collect_news_returns_list():
 
 
 def test_collect_news_failure_returns_empty():
-    """MCP 失败时返回空列表，不抛异常。"""
-    with patch("services.event_radar._fetch_news_from_mcp", side_effect=Exception("MCP down")):
+    """三源均失败时返回空列表，不抛异常。"""
+    with patch("services.event_radar._fetch_news_from_mcp", side_effect=Exception("MCP down")), \
+         patch("services.event_radar._fetch_news_from_akshare", return_value=[]), \
+         patch("services.event_radar._fetch_news_from_eastmoney", return_value=[]):
         result = _collect_news()
     assert result == []
+
+
+def test_collect_news_multi_source_dedup():
+    """三源融合 + 跨源标题去重：相同标题只保留一条。"""
+    mcp_news = [
+        {"news_title": "央行降息", "news_summary": "降息25基点",
+         "news_source": "新华财经", "news_url": "http://x", "published_at": "2026-07-10"},
+    ]
+    ak_news = [
+        {"news_title": "央行降息", "news_summary": " duplicate from akshare",
+         "news_source": "东方财富", "news_url": "http://y", "published_at": "2026-07-10"},
+        {"news_title": "美联储议息", "news_summary": "讨论利率",
+         "news_source": "央视新闻", "news_url": "", "published_at": "2026-07-10"},
+    ]
+    em_news = [
+        {"news_title": "半导体板块大涨", "news_summary": "芯片需求回暖",
+         "news_source": "东方财富妙想", "news_url": "", "published_at": "2026-07-10"},
+    ]
+    with patch("services.event_radar._fetch_news_from_mcp", return_value=mcp_news), \
+         patch("services.event_radar._fetch_news_from_akshare", return_value=ak_news), \
+         patch("services.event_radar._fetch_news_from_eastmoney", return_value=em_news):
+        result = _collect_news()
+    titles = [n["news_title"] for n in result]
+    # "央行降息" 应只出现一次（跨源去重）
+    assert titles.count("央行降息") == 1
+    # 三条不同标题都应保留
+    assert len(result) == 3
+    assert set(titles) == {"央行降息", "美联储议息", "半导体板块大涨"}
 
 
 def test_sector_to_index_has_all_known_sectors():
@@ -402,3 +435,259 @@ def test_find_candidate_funds_fallback_to_builtin_map(tmp_db):
     # 内置映射表 _INDEX_FUND_MAP["399997"] = 161725 招商中证白酒指数A
     assert len(candidates) >= 1, f"内置映射兜底应返回候选基金，实际: {candidates}"
     assert "161725" in codes, f"应包含白酒指数基金 161725，实际: {codes}"
+
+
+# ── 事件落地验证 ──────────────────────────────────────
+
+
+def test_verify_single_event_positive_correct():
+    """正向事件 + 指数上涨>1% → correct。"""
+    from services.event_radar import _verify_single_event
+
+    # 落地日取 30 天前，确保验证窗口（落地日+7天）已过
+    mat_dt = datetime.now() - timedelta(days=30)
+    mat_date = mat_dt.strftime("%Y-%m-%d")
+    verify_date = (mat_dt + timedelta(days=7)).strftime("%Y-%m-%d")
+
+    event = {
+        "affected_sectors": '["半导体"]',
+        "materialized_date": mat_date,
+        "direction": "positive",
+    }
+    prices = {mat_date: 100.0, verify_date: 102.0}
+
+    with patch("services.event_radar._fetch_index_close_prices", return_value=prices):
+        result = _verify_single_event(event, window_days=3)
+
+    assert result is not None
+    assert result["status"] == "correct"
+    assert result["change_pct"] == 2.0
+    assert result["index_code"] == "990001"
+    assert result["index_name"] == "半导体"
+    assert result["direction_predicted"] == "positive"
+
+
+def test_verify_single_event_positive_wrong():
+    """正向事件 + 指数下跌>1% → wrong。"""
+    from services.event_radar import _verify_single_event
+
+    mat_dt = datetime.now() - timedelta(days=30)
+    mat_date = mat_dt.strftime("%Y-%m-%d")
+    verify_date = (mat_dt + timedelta(days=7)).strftime("%Y-%m-%d")
+
+    event = {
+        "affected_sectors": '["半导体"]',
+        "materialized_date": mat_date,
+        "direction": "positive",
+    }
+    prices = {mat_date: 100.0, verify_date: 98.0}
+
+    with patch("services.event_radar._fetch_index_close_prices", return_value=prices):
+        result = _verify_single_event(event, window_days=3)
+
+    assert result is not None
+    assert result["status"] == "wrong"
+    assert result["change_pct"] == -2.0
+
+
+def test_verify_single_event_flat():
+    """指数涨跌幅<1% → flat。"""
+    from services.event_radar import _verify_single_event
+
+    mat_dt = datetime.now() - timedelta(days=30)
+    mat_date = mat_dt.strftime("%Y-%m-%d")
+    verify_date = (mat_dt + timedelta(days=7)).strftime("%Y-%m-%d")
+
+    event = {
+        "affected_sectors": '["半导体"]',
+        "materialized_date": mat_date,
+        "direction": "positive",
+    }
+    prices = {mat_date: 100.0, verify_date: 100.5}
+
+    with patch("services.event_radar._fetch_index_close_prices", return_value=prices):
+        result = _verify_single_event(event, window_days=3)
+
+    assert result is not None
+    assert result["status"] == "flat"
+    assert result["change_pct"] == 0.5
+
+
+def test_verify_single_event_negative_correct():
+    """负向事件 + 指数下跌>1% → correct。"""
+    from services.event_radar import _verify_single_event
+
+    mat_dt = datetime.now() - timedelta(days=30)
+    mat_date = mat_dt.strftime("%Y-%m-%d")
+    verify_date = (mat_dt + timedelta(days=7)).strftime("%Y-%m-%d")
+
+    event = {
+        "affected_sectors": '["半导体"]',
+        "materialized_date": mat_date,
+        "direction": "negative",
+    }
+    prices = {mat_date: 100.0, verify_date: 98.0}
+
+    with patch("services.event_radar._fetch_index_close_prices", return_value=prices):
+        result = _verify_single_event(event, window_days=3)
+
+    assert result is not None
+    assert result["status"] == "correct"
+    assert result["change_pct"] == -2.0
+    assert result["direction_predicted"] == "negative"
+
+
+def test_verify_single_event_no_price_data():
+    """akshare 返回空数据 → None（无法验证）。"""
+    from services.event_radar import _verify_single_event
+
+    mat_dt = datetime.now() - timedelta(days=30)
+    mat_date = mat_dt.strftime("%Y-%m-%d")
+
+    event = {
+        "affected_sectors": '["半导体"]',
+        "materialized_date": mat_date,
+        "direction": "positive",
+    }
+
+    with patch("services.event_radar._fetch_index_close_prices", return_value={}):
+        result = _verify_single_event(event, window_days=3)
+
+    assert result is None
+
+
+def test_calibrate_confidence_with_enough_samples():
+    """样本充足时按板块准确率校准：0.9 * 0.8 = 0.72。"""
+    from services.event_radar import _calibrate_confidence
+
+    fake_stats = {
+        "overall": {"total": 10, "correct": 8, "wrong": 2, "flat": 0, "accuracy": 0.8},
+        "by_sector": {
+            "半导体": {"total": 10, "correct": 8, "wrong": 2, "flat": 0, "accuracy": 0.8}
+        },
+    }
+    with patch("services.event_radar.get_sector_accuracy_stats", return_value=fake_stats):
+        result = _calibrate_confidence(0.9, ["半导体"])
+
+    assert result == pytest.approx(0.72)
+
+
+def test_calibrate_confidence_insufficient_samples():
+    """板块样本<3 时不校准，返回原始置信度。"""
+    from services.event_radar import _calibrate_confidence
+
+    fake_stats = {
+        "overall": {"total": 2, "correct": 2, "wrong": 0, "flat": 0, "accuracy": 1.0},
+        "by_sector": {
+            "半导体": {"total": 2, "correct": 2, "wrong": 0, "flat": 0, "accuracy": 1.0}
+        },
+    }
+    with patch("services.event_radar.get_sector_accuracy_stats", return_value=fake_stats):
+        result = _calibrate_confidence(0.9, ["半导体"])
+
+    assert result == 0.9
+
+
+def test_calibrate_confidence_floor():
+    """校准后置信度不低于 0.1（下限保护）。"""
+    from services.event_radar import _calibrate_confidence
+
+    # 准确率 0.1（样本充足），0.9 * 0.1 = 0.09 < 0.1 → 触发下限保护
+    fake_stats = {
+        "overall": {"total": 10, "correct": 1, "wrong": 9, "flat": 0, "accuracy": 0.1},
+        "by_sector": {
+            "半导体": {"total": 10, "correct": 1, "wrong": 9, "flat": 0, "accuracy": 0.1}
+        },
+    }
+    with patch("services.event_radar.get_sector_accuracy_stats", return_value=fake_stats):
+        result = _calibrate_confidence(0.9, ["半导体"])
+
+    assert result == pytest.approx(0.1)
+
+
+def test_get_sector_accuracy_stats_with_records():
+    """有验证记录时统计正确（accuracy = correct/(correct+wrong)，flat 不计入）。"""
+    from services.event_radar import get_sector_accuracy_stats
+
+    verified_events = [
+        {"affected_sectors": '["半导体"]', "verification_result": '{"status": "correct"}'},
+        {"affected_sectors": '["半导体"]', "verification_result": '{"status": "wrong"}'},
+        {"affected_sectors": '["半导体"]', "verification_result": '{"status": "flat"}'},
+        {"affected_sectors": '["军工"]', "verification_result": '{"status": "correct"}'},
+    ]
+
+    with patch("db.market_events.list_verified_events", return_value=verified_events):
+        stats = get_sector_accuracy_stats()
+
+    # overall: total=4, correct=2, wrong=1, flat=1
+    # accuracy = 2/(2+1) = 0.67
+    assert stats["overall"]["total"] == 4
+    assert stats["overall"]["correct"] == 2
+    assert stats["overall"]["wrong"] == 1
+    assert stats["overall"]["flat"] == 1
+    assert stats["overall"]["accuracy"] == round(2 / 3, 2)
+
+    # 半导体: total=3, correct=1, wrong=1, flat=1
+    # accuracy = 1/(1+1) = 0.5
+    assert stats["by_sector"]["半导体"]["total"] == 3
+    assert stats["by_sector"]["半导体"]["correct"] == 1
+    assert stats["by_sector"]["半导体"]["wrong"] == 1
+    assert stats["by_sector"]["半导体"]["accuracy"] == 0.5
+
+    # 军工: total=1, correct=1, wrong=0
+    # accuracy = 1/1 = 1.0
+    assert stats["by_sector"]["军工"]["total"] == 1
+    assert stats["by_sector"]["军工"]["accuracy"] == 1.0
+
+
+def test_get_sector_accuracy_stats_empty():
+    """无验证记录时返回空结果。"""
+    from services.event_radar import get_sector_accuracy_stats
+
+    with patch("db.market_events.list_verified_events", return_value=[]):
+        stats = get_sector_accuracy_stats()
+
+    assert stats["overall"]["total"] == 0
+    assert stats["overall"]["correct"] == 0
+    assert stats["overall"]["wrong"] == 0
+    assert stats["overall"]["flat"] == 0
+    assert stats["overall"]["accuracy"] == 0.0
+    assert stats["by_sector"] == {}
+
+
+def test_verify_materialized_events_batch():
+    """批量验证已落地事件：统计 verified/correct/wrong 计数并生成 alert。"""
+    from services.event_radar import verify_materialized_events
+
+    pending = [
+        {"event_id": "ev1", "title": "事件A", "affected_sectors": '["半导体"]',
+         "materialized_date": "2026-06-01", "direction": "positive"},
+        {"event_id": "ev2", "title": "事件B", "affected_sectors": '["军工"]',
+         "materialized_date": "2026-06-01", "direction": "negative"},
+    ]
+
+    verify_results = {
+        "ev1": {"status": "correct", "change_pct": 2.0, "verified_date": "2026-07-13",
+                "index_code": "990001", "index_name": "半导体",
+                "direction_predicted": "positive", "window_days": 3,
+                "base_price": 100.0, "verify_price": 102.0},
+        "ev2": {"status": "wrong", "change_pct": 1.5, "verified_date": "2026-07-13",
+                "index_code": "399967", "index_name": "军工",
+                "direction_predicted": "negative", "window_days": 3,
+                "base_price": 100.0, "verify_price": 101.5},
+    }
+
+    def fake_verify(ev, window_days=3):
+        return verify_results.get(ev["event_id"])
+
+    with patch("db.market_events.list_pending_verification_events", return_value=pending), \
+         patch("services.event_radar._verify_single_event", side_effect=fake_verify), \
+         patch("db.market_events.update_event_verification", return_value=True), \
+         patch("db.portfolio.create_alert", return_value=1):
+        result = verify_materialized_events(trace_id="test")
+
+    assert result["verified"] == 2
+    assert result["correct"] == 1
+    assert result["wrong"] == 1
+    assert result["flat"] == 0
+    assert result["alerts_created"] == 2

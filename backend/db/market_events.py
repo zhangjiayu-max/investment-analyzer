@@ -37,14 +37,19 @@ def init_market_events_tables(conn) -> None:
             sources TEXT,
             timeline TEXT,
             verification_result TEXT,
+            time_frame TEXT,
+            evidence TEXT,
             created_at TEXT DEFAULT (datetime('now','localtime')),
             updated_at TEXT DEFAULT (datetime('now','localtime'))
         )
     """)
-    # 兼容已有表：若旧表无 verification_result 列则自动追加
     cols = [r[1] for r in conn.execute("PRAGMA table_info(market_events)").fetchall()]
     if "verification_result" not in cols:
         conn.execute("ALTER TABLE market_events ADD COLUMN verification_result TEXT")
+    if "time_frame" not in cols:
+        conn.execute("ALTER TABLE market_events ADD COLUMN time_frame TEXT")
+    if "evidence" not in cols:
+        conn.execute("ALTER TABLE market_events ADD COLUMN evidence TEXT")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_market_events_status ON market_events(status)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_market_events_expected ON market_events(expected_date)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_market_events_relevance ON market_events(relevance_to_user)")
@@ -132,15 +137,21 @@ def create_market_event(
     affected_themes: list,
     confidence: float,
     sources: list,
+    time_frame: str = "",
+    evidence: str = "",
 ) -> str:
     """创建事件（幂等：相同 title+expected_date 不重复创建）。
 
-    增强去重：除了精确匹配，还会检测标题相似度 > 0.7 的同类事件。
+    增强去重：除了精确匹配，还会检测标题相似度 > 0.6 的同类事件。
+
+    Args:
+        time_frame: 趋势时间跨度（short/medium/long），趋势类型事件使用
+        evidence: 趋势证据，趋势类型事件使用
 
     Returns:
         event_id（已存在则返回已有 id，不覆盖）
     """
-    event_id = _gen_event_id(title, expected_date)
+    event_id = _gen_event_id(title, expected_date or "")
     today = datetime.now().strftime("%Y-%m-%d %H:%M")
     conn = _get_conn()
     try:
@@ -150,13 +161,12 @@ def create_market_event(
         if existing:
             return event_id
 
-        # 增强去重：检测同日期、标题相似度 >= 0.6 的事件
-        same_date_events = conn.execute(
-            "SELECT event_id, title FROM market_events WHERE expected_date = ?",
-            (expected_date,),
+        # 增强去重：检测标题相似度 >= 0.6 的同类事件
+        all_events = conn.execute(
+            "SELECT event_id, title, expected_date FROM market_events"
         ).fetchall()
-        for row in same_date_events:
-            if _title_similarity(title, row["title"]) >= 0.6:
+        for row in all_events:
+            if row["expected_date"] == expected_date and _title_similarity(title, row["title"]) >= 0.6:
                 logger.info(f"[market_events] 检测到相似事件，跳过创建: '{title}' -> '{row['title']}'")
                 return row["event_id"]
 
@@ -167,8 +177,8 @@ def create_market_event(
             INSERT INTO market_events (
                 event_id, title, summary, event_type, status, direction, confidence,
                 expected_date, detected_date, affected_sectors, affected_themes,
-                relevance_to_user, sources, timeline
-            ) VALUES (?, ?, ?, ?, 'upcoming', ?, ?, ?, ?, ?, ?, 'market_watch', ?, ?)
+                relevance_to_user, sources, timeline, time_frame, evidence
+            ) VALUES (?, ?, ?, ?, 'upcoming', ?, ?, ?, ?, ?, ?, 'market_watch', ?, ?, ?, ?)
         """, (
             event_id, title, summary, event_type, direction, confidence,
             expected_date, today,
@@ -176,6 +186,8 @@ def create_market_event(
             json.dumps(affected_themes, ensure_ascii=False),
             json.dumps(sources, ensure_ascii=False),
             timeline,
+            time_frame,
+            evidence,
         ))
         conn.commit()
         return event_id
