@@ -12,6 +12,7 @@ import {
   listMarketEvents, triggerEventRadarScan, triggerEventRadarVerify, getEventRadarAccuracy,
   listWatchlist, addToWatchlist, removeWatchlistItem, refreshWatchlistNavs,
   triggerWatchlistScan, patrolWatchlist, updateWatchlistItem, analyzeArticleTrends,
+  getBuyScore, getFundQuality,
 } from '../api'
 import Icon from './ui/Icon.vue'
 import { useToast } from '../composables/useToast'
@@ -42,6 +43,13 @@ const analyzingArticle = ref(false)
 // 买入评分：{ [itemId]: { score, rating, dimensions, calculated_at } }
 const buyScores = ref({})
 const refreshingScores = ref(false)
+
+// 基金六维体检报告：{ [fund_code]: { total_score, rating, report, decision_matrix, ... } }
+const fundReports = ref({})
+// 单基金体检报告加载中标记：{ [fund_code]: bool }
+const loadingReports = ref({})
+// 体检报告详情弹窗当前展示的报告对象
+const reportDetailItem = ref(null)
 
 const FILTERS = [
   { key: 'all', label: '全部', icon: 'satellite' },
@@ -122,6 +130,8 @@ async function loadWatchlist() {
     if (watchlist.value.length) autoPatrol()
     // 批量加载买入评分（静默，不弹 toast）
     if (watchlist.value.length) loadBuyScores()
+    // 批量加载六维体检报告（静默，不弹 toast）
+    if (watchlist.value.length) loadFundReports()
   } catch (e) {
     useToast().showToast('加载关注列表失败', 'error')
   }
@@ -152,6 +162,68 @@ async function loadBuyScores() {
   }
 }
 
+/** 批量加载所有关注基金的六维体检报告（静默失败，单个失败不影响其他） */
+async function loadFundReports() {
+  const items = watchlist.value
+  if (!items.length) return
+  // 标记所有基金为加载中
+  const loadingMap = { ...loadingReports.value }
+  items.forEach(item => { loadingMap[item.fund_code] = true })
+  loadingReports.value = loadingMap
+  try {
+    const results = await Promise.allSettled(
+      items.map(item => getFundQuality(item.fund_code))
+    )
+    const next = { ...fundReports.value }
+    results.forEach((r, idx) => {
+      const fundCode = items[idx].fund_code
+      if (r.status === 'fulfilled' && r.value?.data) {
+        next[fundCode] = r.value.data
+      } else {
+        // 失败时清除旧报告，避免展示过期数据
+        delete next[fundCode]
+      }
+    })
+    fundReports.value = next
+  } catch { /* 静默失败 */ } finally {
+    // 清除加载中标记
+    const cleared = { ...loadingReports.value }
+    items.forEach(item => { delete cleared[item.fund_code] })
+    loadingReports.value = cleared
+  }
+}
+
+/** 刷新单个基金的六维体检报告（强制重新计算） */
+async function refreshFundReport(fundCode) {
+  if (loadingReports.value[fundCode]) return
+  loadingReports.value = { ...loadingReports.value, [fundCode]: true }
+  try {
+    const { data } = await getFundQuality(fundCode, true)
+    fundReports.value = { ...fundReports.value, [fundCode]: data }
+    useToast().showToast('体检报告已刷新', 'success')
+  } catch (e) {
+    const msg = e?.response?.data?.detail || e?.response?.data?.message || '刷新失败'
+    useToast().showToast(msg, 'error')
+  } finally {
+    const cleared = { ...loadingReports.value }
+    delete cleared[fundCode]
+    loadingReports.value = cleared
+  }
+}
+
+/** 打开体检报告详情弹窗 */
+function openReportDetail(item) {
+  const report = fundReports.value[item.fund_code]
+  if (!report) return
+  // 附上基金名称用于弹窗标题展示
+  reportDetailItem.value = { ...report, fund_name: item.fund_name }
+}
+
+/** 关闭体检报告详情弹窗 */
+function closeReportDetail() {
+  reportDetailItem.value = null
+}
+
 /** 买入评分颜色类：>=80绿 / >=60蓝 / >=40橙 / <40红 */
 function scoreColorClass(score) {
   if (score == null) return ''
@@ -170,12 +242,65 @@ function scoreRatingLabel(score) {
   return '谨慎'
 }
 
-/** 维度中文名 */
-const DIMENSION_LABELS = {
+/** 买入评分维度中文名 */
+const BUY_DIMENSION_LABELS = {
   valuation: '估值维度',
   price: '净值距目标',
   correlation: '相关性',
   concentration: '集中度',
+}
+
+/** 六维体检报告维度中文名 */
+const DIMENSION_LABELS = {
+  quality: '基金质量',
+  drawdown: '回撤恢复',
+  trend: '趋势均线',
+  capital: '资金流向',
+  sentiment: '情绪温度',
+  valuation: '估值水位',
+}
+
+/** 操作建议映射 */
+const ACTION_LABELS = {
+  strong_buy: { label: '强烈加仓', class: 'action-strong-buy' },
+  dca: { label: '定投加仓', class: 'action-dca' },
+  hold: { label: '持有', class: 'action-hold' },
+  reduce: { label: '减仓', class: 'action-reduce' },
+  wait: { label: '等待', class: 'action-wait' },
+}
+
+/** 体检报告子项中文名（用于详情弹窗展示各维度细分指标） */
+const SUBDIM_LABELS = {
+  // 基金质量
+  manager_stability: '经理稳定性',
+  tracking_error: '跟踪误差',
+  scale_trend: '规模趋势',
+  fee_competitiveness: '费率竞争',
+  peer_ranking: '同类排名',
+  // 回撤恢复
+  current_drawdown: '当前回撤',
+  drawdown_percentile: '回撤分位',
+  recovery_ability: '恢复能力',
+  drawdown_speed: '回撤速度',
+  bottoming_signal: '底部信号',
+  // 趋势均线
+  ma_arrangement: '均线排列',
+  trend_strength: '趋势强度',
+  ma_deviation: '均线偏离',
+  turning_signal: '转折信号',
+  relative_strength: '相对强弱',
+  // 资金流向
+  margin_trend: '融资趋势',
+  margin_percentile: '融资分位',
+  etf_share_change: 'ETF份额',
+  institutional_flow: '机构动向',
+  sector_flow: '板块资金',
+  // 情绪温度
+  turnover_percentile: '换手率分位',
+  advance_decline: '涨跌家数',
+  volatility_percentile: '波动率',
+  news_sentiment: '新闻情绪',
+  fear_greed: '恐贪指数',
 }
 
 /** 静默巡检：刷新估值分位，更新 watchlist 数据 */
@@ -795,6 +920,76 @@ onMounted(() => {
               <span class="wl-data-label">跟踪指数</span>
               <span class="wl-data-value wl-index-name">{{ item.index_name }}</span>
             </div>
+            <!-- 基金六维体检报告区块 -->
+            <div v-if="fundReports[item.fund_code]" class="fund-report-block">
+              <div class="report-header">
+                <span class="report-title">
+                  <Icon name="activity" size="12" class="report-title-icon" />
+                  基金体检报告
+                </span>
+                <div class="report-summary">
+                  <span class="report-total-score" :class="scoreColorClass(fundReports[item.fund_code].total_score)">
+                    {{ fundReports[item.fund_code].total_score }}
+                  </span>
+                  <span class="report-rating-tag" :class="scoreColorClass(fundReports[item.fund_code].total_score)">
+                    {{ scoreRatingLabel(fundReports[item.fund_code].total_score) }}
+                  </span>
+                </div>
+              </div>
+              <div v-if="fundReports[item.fund_code].decision_matrix" class="report-action-row">
+                <span class="report-action-tag" :class="ACTION_LABELS[fundReports[item.fund_code].decision_matrix.action]?.class">
+                  {{ ACTION_LABELS[fundReports[item.fund_code].decision_matrix.action]?.label || fundReports[item.fund_code].decision_matrix.action_label || '—' }}
+                </span>
+              </div>
+              <div v-if="fundReports[item.fund_code].report" class="report-dims">
+                <div
+                  v-for="(dim, key) in fundReports[item.fund_code].report"
+                  :key="key"
+                  class="report-dim"
+                >
+                  <div class="report-dim-head">
+                    <span class="report-dim-label">{{ DIMENSION_LABELS[key] || dim.label || key }}</span>
+                    <span class="report-dim-score" :class="scoreColorClass(dim.score)">{{ dim.score }}</span>
+                  </div>
+                  <div class="report-dim-bar">
+                    <div
+                      class="report-dim-fill"
+                      :class="scoreColorClass(dim.score)"
+                      :style="{ width: `${dim.score}%` }"
+                    ></div>
+                  </div>
+                </div>
+              </div>
+              <div v-if="fundReports[item.fund_code].duan_yongping_view" class="report-view">
+                <Icon name="lightbulb" size="11" class="report-view-icon" />
+                <span class="report-view-text">{{ fundReports[item.fund_code].duan_yongping_view }}</span>
+              </div>
+              <div class="report-actions">
+                <button
+                  class="btn-report-refresh"
+                  @click="refreshFundReport(item.fund_code)"
+                  :disabled="!!loadingReports[item.fund_code]"
+                >
+                  <Icon
+                    :name="loadingReports[item.fund_code] ? 'spinner' : 'refresh-cw'"
+                    size="11"
+                    :class="{ spinning: loadingReports[item.fund_code] }"
+                  />
+                  <span>{{ loadingReports[item.fund_code] ? '刷新中...' : '刷新分析' }}</span>
+                </button>
+                <button class="btn-report-detail" @click="openReportDetail(item)">
+                  <Icon name="file-text" size="11" />
+                  <span>查看详情</span>
+                </button>
+              </div>
+            </div>
+            <div v-else-if="loadingReports[item.fund_code]" class="fund-report-block fund-report-loading">
+              <Icon name="spinner" size="14" class="spinning" />
+              <span>体检分析中...</span>
+            </div>
+            <div v-else class="fund-report-block fund-report-empty">
+              <span class="fund-report-empty-text">暂无分析数据</span>
+            </div>
             <!-- 买入评分区块 -->
             <div class="wl-score-block">
               <div class="wl-score-header">
@@ -820,7 +1015,7 @@ onMounted(() => {
                   class="wl-score-dim"
                 >
                   <div class="wl-dim-head">
-                    <span class="wl-dim-label">{{ DIMENSION_LABELS[key] || key }}</span>
+                    <span class="wl-dim-label">{{ BUY_DIMENSION_LABELS[key] || key }}</span>
                     <span class="wl-dim-weight">权重 {{ Math.round(dim.weight * 100) }}%</span>
                   </div>
                   <div class="wl-dim-bar">
@@ -983,6 +1178,93 @@ onMounted(() => {
                 <Icon v-else name="scan-search" size="14" />
                 <span>{{ analyzingArticle ? '分析中...' : '开始分析' }}</span>
               </button>
+            </div>
+          </div>
+        </div>
+      </Transition>
+    </Teleport>
+
+    <!-- 基金六维体检报告详情弹窗 -->
+    <Teleport to="body">
+      <Transition name="fade">
+        <div v-if="reportDetailItem" class="report-detail-backdrop" @click.self="closeReportDetail">
+          <div class="report-detail-modal">
+            <div class="report-detail-header">
+              <Icon name="activity" size="16" class="report-detail-header-icon" />
+              <h3 class="report-detail-title">
+                {{ reportDetailItem.fund_name || reportDetailItem.fund_code }} — 基金体检报告
+              </h3>
+              <button class="report-detail-close" @click="closeReportDetail" title="关闭">
+                <Icon name="x" size="16" />
+              </button>
+            </div>
+            <div class="report-detail-body">
+              <!-- 综合评分 + 操作建议 -->
+              <div class="report-detail-summary">
+                <div class="report-detail-score-row">
+                  <span class="report-detail-score-label">综合评分</span>
+                  <span class="report-detail-score-value" :class="scoreColorClass(reportDetailItem.total_score)">
+                    {{ reportDetailItem.total_score }}/100
+                  </span>
+                  <span class="report-detail-rating" :class="scoreColorClass(reportDetailItem.total_score)">
+                    {{ scoreRatingLabel(reportDetailItem.total_score) }}
+                  </span>
+                </div>
+                <div v-if="reportDetailItem.decision_matrix" class="report-detail-action-row">
+                  <span class="report-detail-action-label">操作建议</span>
+                  <span class="report-action-tag" :class="ACTION_LABELS[reportDetailItem.decision_matrix.action]?.class">
+                    {{ ACTION_LABELS[reportDetailItem.decision_matrix.action]?.label || reportDetailItem.decision_matrix.action_label || '—' }}
+                  </span>
+                  <span v-if="reportDetailItem.decision_matrix.reason" class="report-detail-action-reason">
+                    {{ reportDetailItem.decision_matrix.reason }}
+                  </span>
+                </div>
+              </div>
+
+              <!-- 段永平视角 -->
+              <div v-if="reportDetailItem.duan_yongping_view" class="report-detail-view">
+                <div class="report-detail-view-title">
+                  <Icon name="lightbulb" size="12" />
+                  段永平视角
+                </div>
+                <p class="report-detail-view-text">{{ reportDetailItem.duan_yongping_view }}</p>
+              </div>
+
+              <!-- 综合建议 -->
+              <div v-if="reportDetailItem.advice" class="report-detail-advice">
+                <div class="report-detail-advice-title">综合建议</div>
+                <p class="report-detail-advice-text">{{ reportDetailItem.advice }}</p>
+              </div>
+
+              <!-- 每个维度的详细子项 -->
+              <div v-if="reportDetailItem.report" class="report-detail-dims">
+                <div
+                  v-for="(dim, key) in reportDetailItem.report"
+                  :key="key"
+                  class="report-section"
+                >
+                  <div class="report-section-header">
+                    <span class="report-section-title">{{ DIMENSION_LABELS[key] || dim.label || key }}</span>
+                    <span class="report-section-score" :class="scoreColorClass(dim.score)">{{ dim.score }}分</span>
+                  </div>
+                  <div v-if="dim.dimensions" class="report-section-subs">
+                    <div
+                      v-for="(sub, subKey) in dim.dimensions"
+                      :key="subKey"
+                      class="report-sub-item"
+                    >
+                      <div class="report-sub-head">
+                        <span class="report-sub-name">{{ SUBDIM_LABELS[subKey] || subKey }}</span>
+                        <span class="report-sub-score">{{ sub.score }}/{{ Math.round(sub.weight * 100) }}</span>
+                      </div>
+                      <div v-if="sub.reason" class="report-sub-reason">{{ sub.reason }}</div>
+                    </div>
+                  </div>
+                  <div v-else class="report-section-empty">
+                    <span>维度得分 {{ dim.score }}/100</span>
+                  </div>
+                </div>
+              </div>
             </div>
           </div>
         </div>
@@ -2170,6 +2452,431 @@ onMounted(() => {
   transform: translateY(-1px);
 }
 .btn-article-confirm:disabled { opacity: 0.6; cursor: not-allowed; }
+
+/* ── 基金六维体检报告区块 ── */
+.fund-report-block {
+  margin-top: 0.3rem;
+  padding: 0.6rem;
+  background: linear-gradient(135deg, rgba(124,58,237,0.04), rgba(37,99,235,0.04));
+  border: 1px solid rgba(124,58,237,0.15);
+  border-radius: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+}
+.fund-report-loading {
+  flex-direction: row;
+  align-items: center;
+  justify-content: center;
+  gap: 0.4rem;
+  font-size: 0.72rem;
+  color: var(--color-text-tertiary);
+  font-style: italic;
+}
+.fund-report-empty {
+  align-items: center;
+  justify-content: center;
+  background: var(--color-bg-secondary);
+  border-color: var(--color-border-light);
+}
+.fund-report-empty-text {
+  font-size: 0.72rem;
+  color: var(--color-text-muted);
+  font-style: italic;
+}
+
+.report-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+.report-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: #7c3aed;
+}
+.report-title-icon { color: #7c3aed; }
+.report-summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+.report-total-score {
+  font-size: 1.2rem;
+  font-weight: 700;
+  font-family: var(--font-jet);
+  line-height: 1;
+}
+.report-rating-tag {
+  font-size: 0.68rem;
+  padding: 0.12rem 0.4rem;
+  border-radius: 3px;
+  font-weight: 600;
+}
+/* 复用 scoreColorClass 色阶：>=80绿 / >=60蓝 / >=40橙 / <40红 */
+.score-excellent.report-rating-tag { background: rgba(22,163,74,0.12); }
+.score-good.report-rating-tag { background: rgba(37,99,235,0.12); }
+.score-normal.report-rating-tag { background: rgba(217,119,6,0.12); }
+.score-cautious.report-rating-tag { background: rgba(220,38,38,0.12); }
+
+/* 操作建议行 */
+.report-action-row {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+.report-action-tag {
+  font-size: 0.72rem;
+  padding: 0.2rem 0.55rem;
+  border-radius: 3px;
+  font-weight: 600;
+}
+.action-strong-buy {
+  background: rgba(220,38,38,0.12);
+  color: #dc2626;
+}
+.action-dca {
+  background: rgba(234,88,12,0.12);
+  color: #ea580c;
+}
+.action-hold {
+  background: rgba(37,99,235,0.12);
+  color: #2563eb;
+}
+.action-reduce {
+  background: var(--color-bg-tertiary);
+  color: var(--color-text-secondary);
+}
+.action-wait {
+  background: rgba(217,119,6,0.12);
+  color: #d97706;
+}
+
+/* 六维进度条 */
+.report-dims {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+.report-dim {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+.report-dim-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 0.7rem;
+}
+.report-dim-label {
+  color: var(--color-text-secondary);
+  font-weight: 500;
+}
+.report-dim-score {
+  font-weight: 700;
+  font-family: var(--font-jet);
+  min-width: 22px;
+  text-align: right;
+}
+.report-dim-bar {
+  height: 5px;
+  background: var(--color-bg-tertiary);
+  border-radius: 3px;
+  overflow: hidden;
+}
+.report-dim-fill {
+  height: 100%;
+  border-radius: 3px;
+  transition: width 0.3s ease;
+}
+/* 进度条颜色复用 scoreColorClass 色阶 */
+.score-excellent.report-dim-fill { background: #16a34a; }
+.score-good.report-dim-fill { background: #2563eb; }
+.score-normal.report-dim-fill { background: #d97706; }
+.score-cautious.report-dim-fill { background: #dc2626; }
+
+/* 段永平视角 */
+.report-view {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.35rem;
+  padding: 0.4rem 0.5rem;
+  background: rgba(124,58,237,0.04);
+  border-left: 2px solid rgba(124,58,237,0.3);
+  border-radius: 4px;
+}
+.report-view-icon { color: #7c3aed; flex-shrink: 0; margin-top: 1px; }
+.report-view-text {
+  font-size: 0.72rem;
+  color: var(--color-text-secondary);
+  line-height: 1.5;
+}
+
+/* 报告操作按钮区 */
+.report-actions {
+  display: flex;
+  gap: 0.4rem;
+  margin-top: 0.1rem;
+}
+.btn-report-refresh,
+.btn-report-detail {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.25rem 0.55rem;
+  border: 1px solid var(--color-border);
+  background: var(--color-bg-card);
+  color: var(--color-text-secondary);
+  border-radius: 4px;
+  font-size: 0.7rem;
+  cursor: pointer;
+  transition: all 0.15s;
+  flex: 1;
+  justify-content: center;
+}
+.btn-report-refresh:hover:not(:disabled) {
+  border-color: #7c3aed;
+  color: #7c3aed;
+  background: rgba(124,58,237,0.04);
+}
+.btn-report-refresh:disabled { opacity: 0.6; cursor: not-allowed; }
+.btn-report-detail:hover {
+  border-color: #2563eb;
+  color: #2563eb;
+  background: rgba(37,99,235,0.04);
+}
+
+/* ── 体检报告详情弹窗 ── */
+.report-detail-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.45);
+  backdrop-filter: blur(4px);
+}
+.report-detail-modal {
+  background: var(--color-bg-card);
+  border: 1px solid var(--color-border);
+  border-radius: 10px;
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.18);
+  width: 100%;
+  max-width: 560px;
+  margin: 0 1rem;
+  max-height: 80vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.report-detail-header {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 1rem 1.25rem;
+  border-bottom: 1px solid var(--color-border-light);
+  flex-shrink: 0;
+}
+.report-detail-header-icon { color: #7c3aed; flex-shrink: 0; }
+.report-detail-title {
+  flex: 1;
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: var(--color-text-primary);
+  margin: 0;
+  line-height: 1.4;
+}
+.report-detail-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border: none;
+  background: transparent;
+  color: var(--color-text-tertiary);
+  border-radius: 4px;
+  cursor: pointer;
+  transition: all 0.15s;
+  flex-shrink: 0;
+}
+.report-detail-close:hover {
+  background: var(--color-bg-secondary);
+  color: var(--color-text-primary);
+}
+.report-detail-body {
+  padding: 1rem 1.25rem;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 0.9rem;
+}
+
+/* 综合评分 + 操作建议 */
+.report-detail-summary {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  padding-bottom: 0.75rem;
+  border-bottom: 1px dashed var(--color-border-light);
+}
+.report-detail-score-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+.report-detail-score-label {
+  font-size: 0.78rem;
+  color: var(--color-text-tertiary);
+}
+.report-detail-score-value {
+  font-size: 1.15rem;
+  font-weight: 700;
+  font-family: var(--font-jet);
+}
+.report-detail-rating {
+  font-size: 0.72rem;
+  padding: 0.15rem 0.45rem;
+  border-radius: 3px;
+  font-weight: 600;
+}
+.score-excellent.report-detail-rating { background: rgba(22,163,74,0.12); }
+.score-good.report-detail-rating { background: rgba(37,99,235,0.12); }
+.score-normal.report-detail-rating { background: rgba(217,119,6,0.12); }
+.score-cautious.report-detail-rating { background: rgba(220,38,38,0.12); }
+
+.report-detail-action-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+.report-detail-action-label {
+  font-size: 0.78rem;
+  color: var(--color-text-tertiary);
+}
+.report-detail-action-reason {
+  font-size: 0.72rem;
+  color: var(--color-text-secondary);
+  flex: 1;
+  min-width: 0;
+}
+
+/* 段永平视角 */
+.report-detail-view {
+  padding: 0.6rem 0.7rem;
+  background: rgba(124,58,237,0.04);
+  border-left: 3px solid rgba(124,58,237,0.3);
+  border-radius: 4px;
+}
+.report-detail-view-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: #7c3aed;
+  margin-bottom: 0.3rem;
+}
+.report-detail-view-text {
+  font-size: 0.78rem;
+  color: var(--color-text-secondary);
+  line-height: 1.6;
+  margin: 0;
+}
+
+/* 综合建议 */
+.report-detail-advice {
+  padding: 0.6rem 0.7rem;
+  background: var(--color-bg-secondary);
+  border-radius: 4px;
+}
+.report-detail-advice-title {
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--color-text-secondary);
+  margin-bottom: 0.3rem;
+}
+.report-detail-advice-text {
+  font-size: 0.78rem;
+  color: var(--color-text-secondary);
+  line-height: 1.6;
+  margin: 0;
+}
+
+/* 各维度分区 */
+.report-detail-dims {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+.report-section {
+  padding: 0.6rem 0.7rem;
+  background: var(--color-bg-secondary);
+  border-radius: 6px;
+}
+.report-section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding-bottom: 0.4rem;
+  margin-bottom: 0.4rem;
+  border-bottom: 1px solid var(--color-border-light);
+}
+.report-section-title {
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: var(--color-text-primary);
+}
+.report-section-score {
+  font-size: 0.78rem;
+  font-weight: 700;
+  font-family: var(--font-jet);
+}
+.report-section-subs {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+.report-sub-item {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+.report-sub-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+.report-sub-name {
+  font-size: 0.75rem;
+  color: var(--color-text-secondary);
+  font-weight: 500;
+}
+.report-sub-score {
+  font-size: 0.72rem;
+  color: var(--color-text-tertiary);
+  font-family: var(--font-jet);
+  flex-shrink: 0;
+}
+.report-sub-reason {
+  font-size: 0.7rem;
+  color: var(--color-text-tertiary);
+  line-height: 1.5;
+}
+.report-section-empty {
+  font-size: 0.72rem;
+  color: var(--color-text-muted);
+  font-style: italic;
+}
 
 /* fade 过渡（弹窗） */
 .fade-enter-active, .fade-leave-active {

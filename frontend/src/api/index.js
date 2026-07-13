@@ -2274,6 +2274,20 @@ export function triggerWatchlistScan() {
   return api.post('/portfolio/alerts/scan-watchlist')
 }
 
+// ── 基金六维体检报告 API ──────────────────────────────────────
+
+/** 获取单基金六维体检报告 */
+export const getFundQuality = (fundCode, forceRefresh = false) =>
+  api.get(`/analysis/fund-quality/${fundCode}`, { params: { force_refresh: forceRefresh } })
+
+/** 批量获取基金六维体检报告 */
+export const batchFundQuality = (fundCodes) =>
+  api.post('/analysis/fund-quality/batch', { fund_codes: fundCodes })
+
+/** 刷新基金六维体检评分 */
+export const refreshFundQuality = (fundCodes = null) =>
+  api.post('/analysis/fund-quality/refresh', { fund_codes: fundCodes })
+
 // ── 异步任务状态 API ──────────────────────────────────────
 
 /** 查询异步任务状态 */

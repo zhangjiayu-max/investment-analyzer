@@ -191,6 +191,13 @@ from db.health_score import (
     save_bond_yield, get_latest_bond_yield, get_bond_yield_history,
 )
 
+# 基金质量评分（六维体检报告）
+from db.fund_quality import (
+    init_fund_quality_tables, save_fund_quality_score,
+    get_fund_quality_score, list_fund_quality_scores,
+    delete_fund_quality_score,
+)
+
 # 异步分析任务
 from db.async_tasks import (
     init_async_tasks_table, create_async_task, update_async_task,
@@ -899,6 +906,9 @@ def init_db():
     # 初始化健康分表
     from db.health_score import init_health_score_tables
     init_health_score_tables(conn)
+
+    # 初始化基金质量评分表（六维体检报告）
+    init_fund_quality_tables(conn)
 
     # 初始化记忆表（记忆生命周期管理）
     conn.execute("""
