@@ -1698,6 +1698,23 @@ def calculate_fund_health_report(fund_code: str, force_refresh: bool = False) ->
     if has_fundamental:
         report["fundamental"] = {"score": round(fundamental_score, 1), "rating": fundamental["rating"], "label": "基本面"}
 
+    # 大师理念矩阵（6位大师多视角决策，需在report构建后调用）
+    try:
+        from services.master_perspectives import build_master_perspectives_matrix
+        master_perspectives = build_master_perspectives_matrix(report, {
+            "quality": quality,
+            "drawdown": drawdown,
+            "trend": trend,
+            "capital": capital,
+            "sentiment": sentiment,
+            "valuation": {"pe_percentile": pe_percentile, "score": valuation_score},
+            "fundamental": fundamental if has_fundamental else None,
+            "holding_changes": holding_changes,
+        })
+    except Exception as e:
+        logger.warning(f"[health] 大师理念矩阵构建失败 {fund_code}: {e}")
+        master_perspectives = {"masters": [], "consensus": {}}
+
     advice = _build_health_advice(decision, report)
 
     result = {
@@ -1708,6 +1725,7 @@ def calculate_fund_health_report(fund_code: str, force_refresh: bool = False) ->
         "report": report,
         "decision_matrix": decision,
         "duan_yongping_view": duan_view,
+        "master_perspectives": master_perspectives,
         "advice": advice,
         # 详细维度数据
         "details": {

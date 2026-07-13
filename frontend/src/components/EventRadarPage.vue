@@ -336,6 +336,105 @@ const STOCK_DIM_LABELS = {
   valuation: '估值',
 }
 
+/** 大师理念矩阵 — key_metrics 字段中文映射 */
+const MASTER_METRIC_LABELS = {
+  has_moat: '护城河',
+  roe_consistent: 'ROE持续性',
+  margin_of_safety: '安全边际',
+  profitability_avg: '盈利能力',
+  stability_avg: '稳定性',
+  peg_estimate: 'PEG',
+  company_type: '公司类型',
+  is_fast_grower: '快速增长',
+  is_low_cost: '低成本',
+  is_indexed: '指数化',
+  cycle_position: '周期位置',
+  is_fearful: '逆向信号',
+  is_well_diversified: '分散化',
+  top10_coverage: 'Top10集中度',
+  business: '生意属性',
+  company: '公司质地',
+  price: '价格评估',
+}
+
+/** 大师左侧色条颜色（6位大师不同标识色） */
+const MASTER_ACCENT_COLORS = {
+  buffett: '#1565c0',
+  lynch: '#2e7d32',
+  bogle: '#ef6c00',
+  marks: '#6a1b9a',
+  dalio: '#00838f',
+  duanyongping: '#c62828',
+}
+
+/** 大师 action → 颜色（strong_buy绿/dca蓝/hold灰/reduce橙/wait红） */
+function masterActionColor(action) {
+  return {
+    strong_buy: '#4caf50',
+    dca: '#2196f3',
+    hold: '#9e9e9e',
+    reduce: '#ff9800',
+    wait: '#f44336',
+  }[action] || '#9e9e9e'
+}
+
+/** 大师 action → 中文文案（分布条 tooltip 用） */
+function masterActionLabel(action) {
+  return ACTION_LABELS[action]?.label || action || '—'
+}
+
+/** 大师 rating → 评分颜色（excellent绿/good蓝/fair黄/poor红/null灰） */
+function masterRatingColor(rating) {
+  return {
+    excellent: '#4caf50',
+    good: '#2196f3',
+    fair: '#ff9800',
+    poor: '#f44336',
+  }[rating] || '#9e9e9e'
+}
+
+/** 大师 key → 左侧色条颜色 */
+function masterAccentColor(masterKey) {
+  return MASTER_ACCENT_COLORS[masterKey] || '#6b7280'
+}
+
+/** 格式化单个指标值：布尔→是/否，数字→去除多余小数位 */
+function formatMetricValue(v) {
+  if (v === true) return '是'
+  if (v === false) return '否'
+  if (typeof v === 'number') {
+    return Number.isInteger(v) ? String(v) : v.toFixed(1).replace(/\.0$/, '')
+  }
+  return String(v)
+}
+
+/** 格式化 key_metrics 为可读键值对数组 */
+function formatMetrics(metrics) {
+  if (!metrics) return []
+  return Object.entries(metrics).map(([k, v]) => ({
+    label: MASTER_METRIC_LABELS[k] || k,
+    value: formatMetricValue(v),
+  }))
+}
+
+/** 共识强度 → CSS 类（高度共识绿/多数共识蓝/温和共识橙/意见分歧红） */
+function consensusClass(consensus) {
+  const label = consensus?.agreement_label || ''
+  if (label.includes('高度')) return 'mm-consensus-high'
+  if (label.includes('多数')) return 'mm-consensus-major'
+  if (label.includes('温和')) return 'mm-consensus-mild'
+  return 'mm-consensus-split'
+}
+
+/** 大师卡片展开状态：{ [`${fundCode}:${masterKey}`]: bool } */
+const expandedMasters = ref({})
+
+/** 切换大师卡片展开/收起 */
+function toggleMaster(fundCode, masterKey) {
+  const key = `${fundCode}:${masterKey}`
+  expandedMasters.value = { ...expandedMasters.value, [key]: !expandedMasters.value[key] }
+}
+
 /** 静默巡检：刷新估值分位，更新 watchlist 数据 */
 async function autoPatrol() {
   if (patrolling.value) return
@@ -996,6 +1095,110 @@ onMounted(() => {
               <div v-if="fundReports[item.fund_code].duan_yongping_view" class="report-view">
                 <Icon name="lightbulb" size="11" class="report-view-icon" />
                 <span class="report-view-text">{{ fundReports[item.fund_code].duan_yongping_view }}</span>
+              </div>
+              <!-- 大师理念矩阵 -->
+              <div
+                v-if="fundReports[item.fund_code].master_perspectives"
+                class="master-matrix"
+              >
+                <div class="mm-header">
+                  <span class="mm-title">🎯 大师理念矩阵</span>
+                </div>
+                <template v-if="fundReports[item.fund_code].master_perspectives.consensus">
+                  <div
+                    class="mm-consensus"
+                    :class="consensusClass(fundReports[item.fund_code].master_perspectives.consensus)"
+                  >
+                    <span class="mm-consensus-text">
+                      {{ fundReports[item.fund_code].master_perspectives.consensus.agreement_label }}
+                      · {{ fundReports[item.fund_code].master_perspectives.consensus.agreement_count }}
+                      建议{{ fundReports[item.fund_code].master_perspectives.consensus.consensus_action_label }}
+                    </span>
+                  </div>
+                  <div
+                    v-if="fundReports[item.fund_code].master_perspectives.consensus.conflicts?.length"
+                    class="mm-conflicts"
+                  >
+                    <Icon name="alert-triangle" size="11" class="mm-conflict-icon" />
+                    <span class="mm-conflict-text">
+                      {{ fundReports[item.fund_code].master_perspectives.consensus.conflicts.length }}项意见冲突
+                    </span>
+                  </div>
+                  <div
+                    v-if="fundReports[item.fund_code].master_perspectives.consensus.action_distribution"
+                    class="mm-dist"
+                  >
+                    <template
+                      v-for="(count, action) in fundReports[item.fund_code].master_perspectives.consensus.action_distribution"
+                      :key="action"
+                    >
+                      <div
+                        v-if="count > 0"
+                        class="mm-dist-seg"
+                        :style="{ flexGrow: count, background: masterActionColor(action) }"
+                        :title="`${masterActionLabel(action)}: ${count}`"
+                      ></div>
+                    </template>
+                  </div>
+                </template>
+                <div
+                  v-if="fundReports[item.fund_code].master_perspectives.masters?.length"
+                  class="mm-masters"
+                >
+                  <div
+                    v-for="m in fundReports[item.fund_code].master_perspectives.masters"
+                    :key="m.master_key"
+                    class="mm-card"
+                    :style="{ '--mm-accent': masterAccentColor(m.master_key) }"
+                    @click="toggleMaster(item.fund_code, m.master_key)"
+                  >
+                    <div class="mm-card-head">
+                      <span class="mm-master-icon">{{ m.master_icon }}</span>
+                      <span class="mm-master-name">{{ m.master_name }}</span>
+                      <span
+                        v-if="m.score == null"
+                        class="mm-score-na"
+                      >不适用</span>
+                      <span
+                        v-else
+                        class="mm-score"
+                        :style="{ color: masterRatingColor(m.rating) }"
+                      >{{ m.score }}</span>
+                      <span
+                        class="mm-action-tag"
+                        :style="{ background: masterActionColor(m.action) + '20', color: masterActionColor(m.action) }"
+                      >{{ m.action_label }}</span>
+                    </div>
+                    <div v-if="m.reason" class="mm-reason">{{ m.reason }}</div>
+                    <div
+                      v-if="expandedMasters[`${item.fund_code}:${m.master_key}`]"
+                      class="mm-detail"
+                      @click.stop
+                    >
+                      <div v-if="m.core_philosophy" class="mm-detail-row">
+                        <span class="mm-detail-label">核心理念</span>
+                        <span class="mm-detail-value">{{ m.core_philosophy }}</span>
+                      </div>
+                      <div v-if="m.view_text" class="mm-detail-row">
+                        <span class="mm-detail-label">综合视角</span>
+                        <span class="mm-detail-value">{{ m.view_text }}</span>
+                      </div>
+                      <div
+                        v-if="m.key_metrics && Object.keys(m.key_metrics).length"
+                        class="mm-metrics"
+                      >
+                        <div
+                          v-for="kv in formatMetrics(m.key_metrics)"
+                          :key="kv.label"
+                          class="mm-metric-row"
+                        >
+                          <span class="mm-metric-label">{{ kv.label }}</span>
+                          <span class="mm-metric-value">{{ kv.value }}</span>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
               </div>
               <!-- 季度调仓动作面板 -->
               <div
@@ -3301,5 +3504,162 @@ onMounted(() => {
 }
 .fade-enter-from, .fade-leave-to {
   opacity: 0;
+}
+
+/* ── 大师理念矩阵 ── */
+.master-matrix {
+  padding: 0.45rem 0.5rem;
+  background: rgba(124, 58, 237, 0.04);
+  border-left: 2px solid rgba(124, 58, 237, 0.3);
+  border-radius: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+.mm-header {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+}
+.mm-title {
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--color-text-primary);
+}
+.mm-consensus {
+  display: flex;
+  align-items: center;
+  padding: 0.35rem 0.5rem;
+  border-radius: 4px;
+  font-size: 0.72rem;
+  font-weight: 600;
+}
+.mm-consensus-text { letter-spacing: 0.01em; }
+.mm-consensus-high { background: rgba(76, 175, 80, 0.12); color: #4caf50; }
+.mm-consensus-major { background: rgba(33, 150, 243, 0.12); color: #2196f3; }
+.mm-consensus-mild { background: rgba(255, 152, 0, 0.12); color: #ff9800; }
+.mm-consensus-split { background: rgba(244, 67, 54, 0.12); color: #f44336; }
+.mm-conflicts {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.3rem 0.5rem;
+  background: rgba(255, 152, 0, 0.1);
+  border-radius: 4px;
+  font-size: 0.68rem;
+  color: #ff9800;
+}
+.mm-conflict-icon { flex-shrink: 0; }
+.mm-conflict-text { line-height: 1.4; }
+.mm-dist {
+  display: flex;
+  gap: 2px;
+  height: 6px;
+  border-radius: 3px;
+  overflow: hidden;
+}
+.mm-dist-seg {
+  flex-basis: 0;
+  min-width: 2px;
+  border-radius: 2px;
+  transition: filter 0.15s;
+}
+.mm-dist-seg:hover { filter: brightness(1.15); }
+.mm-masters {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+.mm-card {
+  border-left: 3px solid var(--mm-accent, #6b7280);
+  padding: 0.3rem 0.45rem;
+  background: var(--color-bg-card);
+  border-radius: 0 4px 4px 0;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.mm-card:hover { background: var(--color-bg-tertiary); }
+.mm-card-head {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  flex-wrap: wrap;
+}
+.mm-master-icon { font-size: 0.85rem; line-height: 1; flex-shrink: 0; }
+.mm-master-name {
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--color-text-primary);
+  flex-shrink: 0;
+}
+.mm-score {
+  font-size: 0.7rem;
+  font-weight: 700;
+  font-family: var(--font-jet);
+  margin-left: auto;
+}
+.mm-score-na {
+  font-size: 0.62rem;
+  font-weight: 600;
+  color: var(--color-text-tertiary);
+  background: var(--color-bg-tertiary);
+  padding: 0.1rem 0.35rem;
+  border-radius: 3px;
+  margin-left: auto;
+}
+.mm-action-tag {
+  font-size: 0.62rem;
+  font-weight: 600;
+  padding: 0.1rem 0.4rem;
+  border-radius: 3px;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.mm-reason {
+  font-size: 0.68rem;
+  color: var(--color-text-secondary);
+  line-height: 1.5;
+  margin-top: 0.2rem;
+}
+.mm-detail {
+  margin-top: 0.3rem;
+  padding-top: 0.3rem;
+  border-top: 1px dashed var(--color-border-light);
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+.mm-detail-row {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+}
+.mm-detail-label {
+  font-size: 0.62rem;
+  color: var(--color-text-tertiary);
+  font-weight: 600;
+}
+.mm-detail-value {
+  font-size: 0.68rem;
+  color: var(--color-text-secondary);
+  line-height: 1.5;
+}
+.mm-metrics {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem 0.5rem;
+  margin-top: 0.1rem;
+}
+.mm-metric-row {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.25rem;
+  font-size: 0.65rem;
+}
+.mm-metric-label { color: var(--color-text-tertiary); }
+.mm-metric-value {
+  color: var(--color-text-primary);
+  font-weight: 600;
+  font-family: var(--font-jet);
 }
 </style>
