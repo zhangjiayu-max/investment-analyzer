@@ -5062,7 +5062,7 @@ function txDisplayAmount(tx) {
               @click="col.sortable ? toggleSort(col.key) : null"
             >
               <template v-if="col.key === 'today_profit'">
-                <span @click="toggleSort('today_profit')">今日涨跌 / 收益{{ sortIndicator('today_profit') }}</span>
+                <span>今日涨跌 / 收益{{ sortIndicator('today_profit') }}</span>
                 <span class="th-filter" @click.stop="todayFilter = todayFilter === 'all' ? 'down' : todayFilter === 'down' ? 'up' : 'all'" :title="todayFilter === 'all' ? '全部' : todayFilter === 'up' ? '仅涨' : '仅跌'">
                   <svg width="12" height="12" fill="currentColor" viewBox="0 0 16 16">
                     <path v-if="todayFilter === 'all'" d="M1.5 1.5A.5.5 0 012 1h12a.5.5 0 01.5.5v2a.5.5 0 01-.128.334L10 8.692V13.5a.5.5 0 01-.223.416l-3 2A.5.5 0 016 15.5V8.692L1.628 3.834A.5.5 0 011.5 3.5v-2z"/>
