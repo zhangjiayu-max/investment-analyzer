@@ -1260,6 +1260,10 @@ def auto_confirm_due_transactions(as_of_date: str | None = None, user_id: str = 
 
     买入/卖出/转换均按提交时间计算实际 T 日，并用 T 日单位净值确认份额或金额。
     如果某只基金的 T 日净值尚未披露，保留 pending，等待下一次自动任务。
+
+    2026-07-15 修复：跳过今天创建的交易，保证新建买入至少在待确认列表停留一天，
+    避免 loadData() 触发自动确认导致新仓瞬间入持仓列表（用户来不及检查/撤销）。
+    手动确认按钮不受影响。
     """
     today = as_of_date or date.today().isoformat()
     conn = _get_conn()
@@ -1269,8 +1273,9 @@ def auto_confirm_due_transactions(as_of_date: str | None = None, user_id: str = 
           AND status = 'pending'
           AND expected_confirm_date IS NOT NULL
           AND expected_confirm_date <= ?
+          AND date(created_at) < date(?)
         ORDER BY expected_confirm_date ASC, id ASC
-    """, (user_id, today)).fetchall()
+    """, (user_id, today, today)).fetchall()
     conn.close()
 
     confirmed = 0
