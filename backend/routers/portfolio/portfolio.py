@@ -195,19 +195,19 @@ async def import_portfolio_csv_file(file: UploadFile = File(...)):
             if not fund_code:
                 skipped += 1
                 continue
-            # 检查是否已存在
-            existing = get_holding_by_fund(fund_code)
+            # account 解析提前到查重之前，避免跨账户同基金被错误合并
+            account = (row.get("account") or _get_config('portfolio.default_account', '花无缺')).strip()
+            shares = float(row.get("shares") or 0)
+            cost_price = float(row["cost_price"]) if row.get("cost_price") else None
+            fund_category = (row.get("fund_category") or "").strip() or None
+            # 检查是否已存在（按 account 精确匹配）
+            existing = get_holding_by_fund(fund_code, account=account)
             if existing:
                 # 更新份额
-                shares = float(row.get("shares") or 0)
                 if shares > 0:
                     update_holding(existing["id"], shares=shares)
                 skipped += 1
                 continue
-            shares = float(row.get("shares") or 0)
-            cost_price = float(row["cost_price"]) if row.get("cost_price") else None
-            account = (row.get("account") or _get_config('portfolio.default_account', '花无缺')).strip()
-            fund_category = (row.get("fund_category") or "").strip() or None
             create_holding(
                 fund_code=fund_code,
                 fund_name=fund_name,

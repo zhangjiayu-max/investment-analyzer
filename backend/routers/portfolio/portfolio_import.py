@@ -57,8 +57,12 @@ async def import_portfolio_csv(file: UploadFile = File(...)):
 
 
 def _bulk_upsert_holdings(holdings: list[dict]) -> int:
-    """批量更新持仓（按 fund_code 去重）。"""
+    """批量更新持仓（按 user_id + account + fund_code 去重）。"""
     from db._conn import _get_conn
+    from config import get_config as _get_cfg
+
+    default_user = _get_cfg('portfolio.default_user_id', 'default')
+    default_account = _get_cfg('portfolio.default_account', '花无缺')
 
     conn = _get_conn()
     saved = 0
@@ -72,21 +76,25 @@ def _bulk_upsert_holdings(holdings: list[dict]) -> int:
         return 0
 
     for h in holdings:
+        uid = h.get("user_id") or default_user
+        acct = h.get("account") or default_account
         existing = conn.execute(
-            "SELECT id FROM portfolio_holdings WHERE fund_code = ?", (h["fund_code"],)
+            "SELECT id FROM portfolio_holdings WHERE fund_code = ? AND user_id = ? AND account = ?",
+            (h["fund_code"], uid, acct)
         ).fetchone()
         if existing:
             conn.execute("""
                 UPDATE portfolio_holdings SET
                     fund_name = ?, shares = ?, cost_price = ?, current_price = ?,
                     updated_at = datetime('now','localtime')
-                WHERE fund_code = ?
-            """, (h["fund_name"], h["shares"], h["cost_price"], h["current_price"], h["fund_code"]))
+                WHERE fund_code = ? AND user_id = ? AND account = ?
+            """, (h["fund_name"], h["shares"], h["cost_price"], h["current_price"],
+                  h["fund_code"], uid, acct))
         else:
             conn.execute("""
-                INSERT INTO portfolio_holdings (fund_code, fund_name, shares, cost_price, current_price)
-                VALUES (?, ?, ?, ?, ?)
-            """, (h["fund_code"], h["fund_name"], h["shares"], h["cost_price"], h["current_price"]))
+                INSERT INTO portfolio_holdings (fund_code, fund_name, shares, cost_price, current_price, user_id, account)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, (h["fund_code"], h["fund_name"], h["shares"], h["cost_price"], h["current_price"], uid, acct))
         saved += 1
 
     conn.commit()
