@@ -2729,10 +2729,11 @@ def get_transaction_summary(user_id: str = "default") -> dict:
     sell_count = sell_rows[0]["tx_count"] if sell_rows else 0
     sell_total = sell_rows[0]["total_amount"] or 0 if sell_rows else 0
 
-    # 最近交易明细（含基金名称）
+    # 最近交易明细（含基金名称 + pending 交易的提交金额/份额）
     recent = conn.execute("""
         SELECT t.id, t.fund_code, t.transaction_type, t.shares, t.price, t.amount,
-               t.transaction_date, t.status, t.is_system,
+               t.transaction_date, t.status, t.is_system, t.fee,
+               t.submitted_amount, t.submitted_shares, t.valuation_snapshot,
                COALESCE(t.fund_name, h.fund_name, '') as fund_name,
                COALESCE(h.index_name, '') as index_name
         FROM portfolio_transactions t

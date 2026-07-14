@@ -3986,7 +3986,7 @@ function txDisplayAmount(tx) {
                   </tr>
                 </thead>
                 <tbody>
-                  <tr v-for="tx in txAnalysisData.recent_transactions" :key="tx.id">
+                  <tr v-for="tx in txAnalysisData.recent_transactions" :key="tx.id" :class="{ 'tx-row-pending': tx.status === 'pending' }">
                     <td class="tx-fund">
                       <span class="tx-fund-name">{{ tx.fund_name || tx.fund_code }}</span>
                       <code class="tx-fund-code">{{ tx.fund_code }}</code>
@@ -3995,10 +3995,26 @@ function txDisplayAmount(tx) {
                       <span :class="['tx-type-badge', tx.transaction_type === 'buy' ? 'tx-buy' : 'tx-sell']">
                         {{ tx.transaction_type === 'buy' ? '买入' : '卖出' }}
                       </span>
+                      <span v-if="tx.status === 'pending'" class="tx-status-pending">待确认</span>
                     </td>
-                    <td class="text-right">{{ (tx.shares || 0).toLocaleString() }}</td>
-                    <td class="text-right">{{ tx.price ? '¥' + tx.price.toFixed(4) : '--' }}</td>
-                    <td class="text-right">{{ tx.amount ? '¥' + tx.amount.toLocaleString() : '--' }}</td>
+                    <td class="text-right">
+                      <template v-if="tx.shares != null">{{ tx.shares.toLocaleString() }}</template>
+                      <template v-else-if="tx.submitted_shares != null">
+                        <span class="tx-estimated">{{ tx.submitted_shares.toLocaleString() }}</span>
+                      </template>
+                      <template v-else>--</template>
+                    </td>
+                    <td class="text-right">
+                      <template v-if="tx.price">{{ '¥' + tx.price.toFixed(4) }}</template>
+                      <template v-else><span class="text-muted">待确认</span></template>
+                    </td>
+                    <td class="text-right">
+                      <template v-if="tx.amount">{{ '¥' + tx.amount.toLocaleString() }}</template>
+                      <template v-else-if="tx.submitted_amount">
+                        <span class="tx-estimated">¥{{ tx.submitted_amount.toLocaleString() }}</span>
+                      </template>
+                      <template v-else>--</template>
+                    </td>
                     <td class="text-right">
                       <span v-if="tx.fee > 0" class="text-muted">¥{{ tx.fee.toFixed(2) }}</span>
                       <span v-else class="text-muted">--</span>
@@ -8137,6 +8153,26 @@ select.input-field {
   background: var(--color-warning-bg);
   color: var(--color-warning);
   font-weight: 600;
+}
+
+.tx-status-pending {
+  display: inline-block;
+  margin-left: 0.3rem;
+  padding: 0.05rem 0.3rem;
+  border-radius: 2px;
+  font-size: 0.62rem;
+  font-weight: 500;
+  background: var(--color-bg-input);
+  color: var(--color-text-muted);
+}
+
+.tx-estimated {
+  color: var(--color-text-muted);
+  font-style: italic;
+}
+
+.tx-row-pending {
+  opacity: 0.7;
 }
 
 .val-badge {
