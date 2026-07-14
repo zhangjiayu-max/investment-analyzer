@@ -635,6 +635,131 @@ onMounted(() => {
           </div>
         </div>
       </section>
+
+      <!-- ⑤ 反事实决策验证 -->
+      <section class="cfg-section">
+        <header class="cfg-head" @click="toggleCounterfactual">
+          <h3 class="cfg-title">
+            <Icon name="check-circle" size="16" />
+            <span>反事实决策验证</span>
+            <span class="cf-badge" v-if="counterfactual?.summary?.total_count > 0">
+              {{ counterfactual.summary.total_count }}条
+            </span>
+          </h3>
+          <Icon name="chevron-down" size="16" :class="{ rotated: showCounterfactual }" />
+        </header>
+
+        <div v-if="showCounterfactual" class="cfg-body">
+          <p class="cf-intro">
+            系统每次生成补仓建议时自动创建"假设交易"。此处跟踪：如果过去都按建议补仓了，现在赚/亏多少。
+            <button class="btn-link" @click="loadCounterfactual" :disabled="cfLoading">
+              {{ cfLoading ? '验证中…' : '刷新验证' }}
+            </button>
+          </p>
+
+          <div v-if="cfError" class="cf-error">{{ cfError }}</div>
+
+          <div v-else-if="counterfactual" class="cf-content">
+            <!-- 汇总卡 -->
+            <div class="cf-summary-grid" v-if="counterfactual.summary">
+              <div class="cf-sum-card">
+                <span class="cf-sum-label">假设累计投入</span>
+                <span class="cf-sum-value font-jet">¥{{ fmtMoney(counterfactual.summary.total_hypothetical_invested) }}</span>
+              </div>
+              <div class="cf-sum-card">
+                <span class="cf-sum-label">假设当前市值</span>
+                <span class="cf-sum-value font-jet">¥{{ fmtMoney(counterfactual.summary.total_hypothetical_value) }}</span>
+              </div>
+              <div class="cf-sum-card">
+                <span class="cf-sum-label">假设累计盈亏</span>
+                <span class="cf-sum-value font-jet" :style="{ color: profitColor(counterfactual.summary.total_profit_loss) }">
+                  {{ counterfactual.summary.total_profit_loss >= 0 ? '+' : '' }}¥{{ fmtMoney(counterfactual.summary.total_profit_loss) }}
+                </span>
+              </div>
+              <div class="cf-sum-card">
+                <span class="cf-sum-label">假设收益率</span>
+                <span class="cf-sum-value font-jet" :style="{ color: profitColor(counterfactual.summary.total_profit_rate) }">
+                  {{ fmtSignedPct(counterfactual.summary.total_profit_rate * 100) }}
+                </span>
+              </div>
+              <div class="cf-sum-card">
+                <span class="cf-sum-label">已回本数</span>
+                <span class="cf-sum-value font-jet">{{ counterfactual.summary.breakeven_count }} / {{ counterfactual.summary.total_count }}</span>
+              </div>
+              <div class="cf-sum-card" v-if="counterfactual.comparison?.real_portfolio_profit_rate != null">
+                <span class="cf-sum-label">真实组合收益率</span>
+                <span class="cf-sum-value font-jet" :style="{ color: profitColor(counterfactual.comparison.real_portfolio_profit_rate) }">
+                  {{ fmtSignedPct(counterfactual.comparison.real_portfolio_profit_rate * 100) }}
+                </span>
+              </div>
+            </div>
+
+            <!-- 改善幅度提示 -->
+            <div class="cf-improvement" v-if="counterfactual.comparison?.improvement != null">
+              <Icon name="trending-up" size="14" />
+              <span>
+                如果当时按建议补仓，收益率改善
+                <strong :style="{ color: profitColor(counterfactual.comparison.improvement) }">
+                  {{ fmtSignedPct(counterfactual.comparison.improvement * 100) }}
+                </strong>
+              </span>
+            </div>
+
+            <!-- 假设交易明细 -->
+            <div class="cf-txs" v-if="counterfactual.hypothetical_txs?.length">
+              <h4 class="cf-sub-title">假设交易明细</h4>
+              <table class="cf-table">
+                <thead>
+                  <tr>
+                    <th>基金</th>
+                    <th>买入日</th>
+                    <th>买入价</th>
+                    <th>现价</th>
+                    <th>投入</th>
+                    <th>市值</th>
+                    <th>盈亏</th>
+                    <th>收益率</th>
+                    <th>持有天数</th>
+                    <th>状态</th>
+                    <th></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="tx in counterfactual.hypothetical_txs" :key="tx.tx_id">
+                    <td>{{ tx.fund_name || tx.fund_code }}</td>
+                    <td>{{ tx.buy_date }}</td>
+                    <td class="font-jet">{{ tx.buy_price ?? '--' }}</td>
+                    <td class="font-jet">{{ tx.current_price ?? '--' }}</td>
+                    <td class="font-jet">¥{{ fmtMoney(tx.buy_amount) }}</td>
+                    <td class="font-jet">{{ tx.current_value != null ? '¥' + fmtMoney(tx.current_value) : '--' }}</td>
+                    <td class="font-jet" :style="{ color: profitColor(tx.profit_loss) }">
+                      {{ tx.profit_loss != null ? (tx.profit_loss >= 0 ? '+' : '') + '¥' + fmtMoney(tx.profit_loss) : '--' }}
+                    </td>
+                    <td class="font-jet" :style="{ color: profitColor(tx.profit_rate) }">
+                      {{ tx.profit_rate != null ? fmtSignedPct(tx.profit_rate * 100) : '--' }}
+                    </td>
+                    <td class="font-jet">{{ tx.holding_days ?? '--' }}</td>
+                    <td>
+                      <span v-if="tx.status === 'verified'" class="cf-tag" :class="tx.is_breakeven ? 'cf-tag-win' : 'cf-tag-loss'">
+                        {{ tx.is_breakeven ? '已回本' : '仍亏损' }}
+                      </span>
+                      <span v-else class="cf-tag cf-tag-muted">{{ tx.status === 'no_nav_data' ? '无净值' : tx.status }}</span>
+                    </td>
+                    <td>
+                      <button class="btn-link-danger" @click="removeHypothetical(tx.tx_id)">删除</button>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+
+            <div v-else class="cf-empty">
+              <Icon name="info" size="16" />
+              <span>暂无假设交易记录。每次访问补仓计划页面时，系统会自动为建议创建假设交易。</span>
+            </div>
+          </div>
+        </div>
+      </section>
     </template>
   </div>
 </template>
@@ -1183,5 +1308,142 @@ onMounted(() => {
   .cfg-field-wide, .cfg-field-check { grid-column: span 1; }
   .sim-input { width: 100%; }
   .sim-form { flex-direction: column; align-items: stretch; }
+}
+
+/* ── 反事实决策验证 ── */
+.cf-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 0 6px;
+  margin-left: 6px;
+  font-size: 0.7rem;
+  font-weight: 600;
+  color: var(--color-profit);
+  background: rgba(220, 38, 38, 0.1);
+  border-radius: 8px;
+  line-height: 18px;
+}
+.cf-intro {
+  margin: 0 0 1rem;
+  font-size: 0.85rem;
+  color: var(--color-text-secondary);
+  line-height: 1.6;
+}
+.cf-intro .btn-link {
+  margin-left: 8px;
+  color: var(--color-primary);
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-size: inherit;
+  text-decoration: underline;
+}
+.cf-error {
+  color: var(--color-profit);
+  font-size: 0.85rem;
+  padding: 0.5rem 0;
+}
+.cf-content { display: flex; flex-direction: column; gap: 1rem; }
+
+.cf-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 0.75rem;
+}
+.cf-sum-card {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 0.75rem;
+  background: var(--color-bg-secondary);
+  border-radius: 8px;
+}
+.cf-sum-label {
+  font-size: 0.72rem;
+  color: var(--color-text-secondary);
+}
+.cf-sum-value {
+  font-size: 1.05rem;
+  font-weight: 600;
+}
+
+.cf-improvement {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0.6rem 0.8rem;
+  background: rgba(34, 197, 94, 0.06);
+  border-radius: 8px;
+  font-size: 0.85rem;
+  color: var(--color-text-primary);
+}
+.cf-improvement strong { font-weight: 700; }
+
+.cf-sub-title {
+  margin: 0 0 0.5rem;
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: var(--color-text-primary);
+}
+.cf-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.82rem;
+}
+.cf-table th {
+  padding: 8px 6px;
+  text-align: left;
+  font-weight: 500;
+  color: var(--color-text-secondary);
+  border-bottom: 1px solid var(--color-border);
+  white-space: nowrap;
+}
+.cf-table td {
+  padding: 8px 6px;
+  border-bottom: 1px solid var(--color-border-light);
+  white-space: nowrap;
+}
+.cf-tag {
+  display: inline-block;
+  padding: 1px 8px;
+  border-radius: 8px;
+  font-size: 0.72rem;
+  font-weight: 600;
+}
+.cf-tag-win {
+  color: var(--color-loss);
+  background: rgba(34, 197, 94, 0.12);
+}
+.cf-tag-loss {
+  color: var(--color-profit);
+  background: rgba(220, 38, 38, 0.1);
+}
+.cf-tag-muted {
+  color: var(--color-text-secondary);
+  background: var(--color-bg-secondary);
+}
+.cf-empty {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 1rem;
+  color: var(--color-text-secondary);
+  font-size: 0.85rem;
+}
+.btn-link-danger {
+  color: var(--color-profit);
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-size: 0.78rem;
+  text-decoration: underline;
+  padding: 0;
+}
+.btn-link-danger:hover { opacity: 0.7; }
+
+@media (max-width: 768px) {
+  .cf-summary-grid { grid-template-columns: repeat(2, 1fr); }
+  .cf-table { font-size: 0.75rem; }
+  .cf-table th, .cf-table td { padding: 6px 4px; }
 }
 </style>

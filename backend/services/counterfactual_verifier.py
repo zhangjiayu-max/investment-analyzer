@@ -213,12 +213,17 @@ def verify_all_hypothetical(user_id: str = "default") -> dict:
     comparison = {"real_portfolio_profit_rate": None, "improvement": None}
     try:
         real_summary = get_portfolio_summary(user_id=user_id)
-        real_profit = real_summary.get("total_profit_rate")
-        if real_profit is not None:
-            comparison["real_portfolio_profit_rate"] = round(real_profit, 4)
+        # 兼容字段名：total_profit_rate 或 total_profit_loss / total_cost 推算
+        real_profit_rate = real_summary.get("total_profit_rate")
+        if real_profit_rate is None:
+            total_profit = real_summary.get("total_profit") or 0
+            total_cost = real_summary.get("total_cost") or 0
+            real_profit_rate = (total_profit / total_cost) if total_cost > 0 else None
+        if real_profit_rate is not None:
+            comparison["real_portfolio_profit_rate"] = round(real_profit_rate, 4)
             comparison["hypothetical_profit_rate"] = total_profit_rate
             # 改善幅度 = 假设补仓部分收益率 - 真实组合收益率（近似）
-            comparison["improvement"] = round(total_profit_rate - real_profit, 4)
+            comparison["improvement"] = round(total_profit_rate - real_profit_rate, 4)
     except Exception as e:
         logger.debug(f"[counterfactual] 真实组合对比失败: {e}")
 
