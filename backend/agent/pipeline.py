@@ -1041,9 +1041,9 @@ def _phase_execution(
     # P2: 并行执行路径 — 无 depends_on 且步骤 >= 2 时启用
     # 配置开关 pipeline.parallel_execution 默认 false，验证通过后再启用
     try:
-        parallel_enabled = get_config_bool("pipeline.parallel_execution", False)
+        parallel_enabled = get_config_bool("pipeline.parallel_execution", True)
     except Exception:
-        parallel_enabled = False
+        parallel_enabled = True
 
     if (parallel_enabled
             and len(steps) >= 2

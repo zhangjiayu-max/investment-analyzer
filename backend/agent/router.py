@@ -61,14 +61,14 @@ _KEYWORD_ROUTES = [
     (["持仓", "分散", "穿透", "集中度"], ["allocation_advisor"]),
     (["市场", "大盘", "行情", "走势", "牛市", "熊市"], ["market_analyst"]),
     (["诊断", "体检", "检查", "全面"], ["valuation_expert", "risk_assessor", "allocation_advisor"]),
-    (["买", "卖", "操作", "定投", "止盈", "加仓", "减仓"], ["allocation_advisor", "risk_assessor", "valuation_expert"]),
+    (["买", "卖", "操作", "定投", "止盈", "加仓", "减仓", "上车", "赚不到钱", "盈利", "赚钱"], ["allocation_advisor", "risk_assessor", "valuation_expert"]),
     (["文章", "公众号", "解读", "新闻"], ["article_expert"]),
     (["基金", "选基", "基金分析"], ["fund_analyst"]),
     (["宏观", "经济", "利率", "政策"], ["macro_strategist"]),
     # ── 周期/行业/机构相关路由 ──
     (["周期", "景气", "产能", "供需", "拐点"], ["market_analyst", "valuation_expert"]),
     (["锂", "锂矿", "锂电池", "新能源", "储能", "光伏", "半导体", "芯片"], ["fund_analyst", "valuation_expert"]),
-    (["机构", "主力", "散户", "做空", "筹码"], ["risk_assessor", "fund_analyst"]),
+    (["机构", "主力", "散户", "做空", "筹码"], ["risk_assessor", "fund_analyst", "allocation_advisor"]),
     # ── 业绩报告相关路由 ──
     (["业绩", "财报", "业报", "业绩预告", "业绩快报", "年报", "季报", "半年报"], ["market_analyst", "fund_analyst"]),
     # ── Top 5 新工具的路由规则 ──
@@ -157,14 +157,14 @@ class SmartRouter:
         if not specialists:
             return None
 
-        # 限制最大专家数为 3；高风险行动优先保留风控专家。
+        # 限制最大专家数为 4；高风险行动优先保留风控专家。
         specialists_list = list(specialists)
-        if len(specialists_list) > 3:
+        if len(specialists_list) > 4:
             if _is_high_risk_action(query):
                 priority_order = [
                     "risk_assessor",
-                    "valuation_expert", "allocation_advisor", "market_analyst",
-                    "macro_strategist", "fund_analyst",
+                    "allocation_advisor", "valuation_expert", "market_analyst",
+                    "fund_analyst", "macro_strategist",
                     "article_expert",
                 ]
                 priority = {agent_key: i for i, agent_key in enumerate(priority_order)}
@@ -176,8 +176,8 @@ class SmartRouter:
                         if a not in priority:
                             priority[a] = i
             specialists_list.sort(key=lambda x: priority.get(x, 999))
-            specialists_list = specialists_list[:3]
-            logger.info(f"专家数超过 3 个,按优先级截断为: {specialists_list}")
+            specialists_list = specialists_list[:4]
+            logger.info(f"专家数超过 4 个,按优先级截断为: {specialists_list}")
 
         return {
             "complexity": "simple" if len(specialists_list) == 1 else ("complex" if len(specialists_list) >= 3 else "medium"),
