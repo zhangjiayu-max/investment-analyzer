@@ -2739,6 +2739,7 @@ def get_transaction_summary(user_id: str = "default") -> dict:
         FROM portfolio_transactions t
         LEFT JOIN portfolio_holdings h ON t.holding_id = h.id
         WHERE t.user_id = ? AND (t.is_system IS NULL OR t.is_system = 0)
+            AND (t.is_hypothetical IS NULL OR t.is_hypothetical = 0)
         ORDER BY t.id DESC
         LIMIT 50
     """, (user_id,)).fetchall()
@@ -2772,6 +2773,7 @@ def analyze_trade_patterns(user_id: str = "default") -> dict:
         LEFT JOIN portfolio_holdings h ON t.holding_id = h.id
         WHERE t.user_id = ?
           AND (t.is_system IS NULL OR t.is_system = 0)
+          AND (t.is_hypothetical IS NULL OR t.is_hypothetical = 0)
           AND (t.status IN ('confirmed', 'settled') OR t.status IS NULL)
         ORDER BY t.transaction_date ASC, t.id ASC
     """, (user_id,)).fetchall()
