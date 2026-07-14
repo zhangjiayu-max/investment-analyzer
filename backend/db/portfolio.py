@@ -107,13 +107,19 @@ def get_holding(holding_id: int) -> dict | None:
     return dict(row) if row else None
 
 
-def get_holding_by_fund(fund_code: str, user_id: str = "default") -> dict | None:
-    """根据基金代码获取持仓。"""
+def get_holding_by_fund(fund_code: str, user_id: str = "default", account: str = None) -> dict | None:
+    """根据基金代码获取持仓。account 非空时按 (user_id, account, fund_code) 精确匹配。"""
     conn = _get_conn()
-    row = conn.execute(
-        "SELECT * FROM portfolio_holdings WHERE fund_code = ? AND user_id = ?",
-        (fund_code, user_id)
-    ).fetchone()
+    if account:
+        row = conn.execute(
+            "SELECT * FROM portfolio_holdings WHERE fund_code = ? AND user_id = ? AND account = ?",
+            (fund_code, user_id, account)
+        ).fetchone()
+    else:
+        row = conn.execute(
+            "SELECT * FROM portfolio_holdings WHERE fund_code = ? AND user_id = ?",
+            (fund_code, user_id)
+        ).fetchone()
     conn.close()
     return dict(row) if row else None
 
@@ -1061,7 +1067,9 @@ def confirm_transaction(tx_id: int, confirmed_price: float,
     if tx_type == "buy" and not holding_id and actual_shares and actual_shares > 0:
         fund_code = tx["fund_code"]
         fund_name = tx.get("fund_name", fund_code)
-        existing = get_holding_by_fund(fund_code, user_id)
+        tx_account = tx.get("account") or get_config('portfolio.default_account', '花无缺')
+        # 按账户精确匹配已有持仓，避免跨账户同基金被错误关联
+        existing = get_holding_by_fund(fund_code, user_id, account=tx_account)
         if existing:
             holding_id = existing["id"]
             # 更新交易记录关联
@@ -1079,8 +1087,7 @@ def confirm_transaction(tx_id: int, confirmed_price: float,
                     INSERT INTO portfolio_holdings
                     (fund_code, fund_name, shares, cost_price, current_price, user_id, account)
                     VALUES (?, ?, 0, ?, ?, ?, ?)
-                """, (fund_code, fund_name, actual_price, actual_price, user_id,
-                      tx.get("account") or get_config('portfolio.default_account', '花无缺')))
+                """, (fund_code, fund_name, actual_price, actual_price, user_id, tx_account))
                 holding_id = cursor.lastrowid
                 conn2.execute("UPDATE portfolio_transactions SET holding_id = ? WHERE id = ?", (holding_id, tx_id))
                 conn2.commit()
@@ -1145,13 +1152,19 @@ def confirm_transaction(tx_id: int, confirmed_price: float,
         # 1. 源基金减少份额（通过 _recalculate_holding 已处理）
         # 2. 创建目标基金的买入交易
         target_name = target_fund_name or target_fund_code
-        target_holding = get_holding_by_fund(target_fund_code, user_id)
+        # 目标基金进入源基金所在账户，避免跨账户错误关联
+        src_account = tx.get("account")
+        if holding_id and not src_account:
+            src_h = get_holding(holding_id)
+            src_account = src_h.get("account") if src_h else None
+        target_holding = get_holding_by_fund(target_fund_code, user_id, account=src_account)
         if not target_holding:
-            # 自动创建目标基金持仓
+            # 自动创建目标基金持仓（与源基金同账户）
             target_holding_id = create_holding(
                 fund_code=target_fund_code, fund_name=target_name,
                 shares=0, cost_price=confirmed_price,
                 current_price=confirmed_price, user_id=user_id,
+                account=src_account,
             )
         else:
             target_holding_id = target_holding["id"]
