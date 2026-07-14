@@ -1715,6 +1715,27 @@ def calculate_fund_health_report(fund_code: str, force_refresh: bool = False) ->
         logger.warning(f"[health] 大师理念矩阵构建失败 {fund_code}: {e}")
         master_perspectives = {"masters": [], "consensus": {}}
 
+    # 大师决策落库（action≠hold才记录，用于T+N回测验证）
+    try:
+        from db.master_decision_history import save_master_decision
+        baseline_price = _safe_float(current_price) if 'current_price' in dir() else None
+        for m in master_perspectives.get("masters", []):
+            if m.get("action") != "hold" and m.get("score") is not None:
+                save_master_decision(
+                    master_key=m["master_key"],
+                    master_name=m["master_name"],
+                    fund_code=fund_code,
+                    fund_name=fund_name,
+                    action=m["action"],
+                    score=m.get("score"),
+                    confidence=m.get("score", 50) / 100.0,
+                    reason=m.get("reason", ""),
+                    snapshot=m,
+                    baseline_price=baseline_price,
+                )
+    except Exception as e:
+        logger.debug(f"[health] 大师决策落库失败 {fund_code}: {e}")
+
     advice = _build_health_advice(decision, report)
 
     result = {

@@ -44,6 +44,7 @@ from .institutional_flow import router as institutional_flow_router
 from .smart_add import router as smart_add_router
 from .fund_quality import router as fund_quality_router
 from .portfolio_intelligence import router as portfolio_intelligence_router
+from .master_backtest import router as master_backtest_router
 from analysis.action_extractor import extract_actions, format_actions_for_response
 
 __all__ = [
@@ -60,5 +61,6 @@ __all__ = [
     "smart_add_router",
     "fund_quality_router",
     "portfolio_intelligence_router",
+    "master_backtest_router",
     "extract_actions", "format_actions_for_response",
 ]

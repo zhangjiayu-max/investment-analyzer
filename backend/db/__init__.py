@@ -920,6 +920,10 @@ def init_db():
     # 初始化基金持仓快照表（季度持仓变化追踪）
     init_fund_holdings_snapshot_tables(conn)
 
+    # 初始化大师决策历史表（T+N回测验证）
+    from db.master_decision_history import init_master_decision_history_table
+    init_master_decision_history_table(conn)
+
     # 初始化记忆表（记忆生命周期管理）
     conn.execute("""
         CREATE TABLE IF NOT EXISTS user_memories (

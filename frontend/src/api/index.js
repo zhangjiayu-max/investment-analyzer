@@ -2302,6 +2302,20 @@ export const getPortfolioHealthReport = (forceRefresh = false) =>
 export const getPortfolioMasterMatrix = () =>
   api.get('/analysis/portfolio-intelligence/master-matrix')
 
+// ── 大师决策回测 API ──────────────────────────────────────
+
+/** 大师决策历史列表 */
+export const getMasterDecisionHistory = (params = {}) =>
+  api.get('/analysis/master-backtest/history', { params })
+
+/** 大师胜率统计 */
+export const getMasterAccuracyStats = (days = 90) =>
+  api.get('/analysis/master-backtest/stats', { params: { days } })
+
+/** 手动触发T+N验证 */
+export const triggerMasterVerification = () =>
+  api.post('/analysis/master-backtest/verify')
+
 // ── 异步任务状态 API ──────────────────────────────────────
 
 /** 查询异步任务状态 */

@@ -14,6 +14,7 @@ import {
   triggerWatchlistScan, patrolWatchlist, updateWatchlistItem, analyzeArticleTrends,
   getBuyScore, getFundQuality,
   getPortfolioHealthReport, getPortfolioRiskMetrics,
+  getMasterDecisionHistory, getMasterAccuracyStats, triggerMasterVerification,
 } from '../api'
 import Icon from './ui/Icon.vue'
 import { useToast } from '../composables/useToast'
@@ -373,6 +374,16 @@ const MASTER_ACCENT_COLORS = {
   marks: '#6a1b9a',
   dalio: '#00838f',
   duanyongping: '#c62828',
+}
+
+/** 大师 icon 映射（回测API不返回master_icon，前端补全） */
+const MASTER_ICONS = {
+  buffett: '🏰',
+  lynch: '📈',
+  bogle: '💰',
+  marks: '🔄',
+  dalio: '⚖️',
+  duanyongping: '🎯',
 }
 
 /** 大师 action → 颜色（strong_buy绿/dca蓝/hold灰/reduce橙/wait红） */
@@ -763,11 +774,87 @@ async function loadPortfolioIntelligence() {
   }
 }
 
+// ── 大师决策回测 ──
+// 胜率统计 getMasterAccuracyStats
+const masterBacktestStats = ref(null)
+// 历史决策 getMasterDecisionHistory
+const masterHistory = ref([])
+const loadingMasterBacktest = ref(false)
+const verifyingMasters = ref(false)
+// 历史列表大师筛选
+const masterHistoryFilter = ref('all')
+
+function masterIcon(masterKey) {
+  return MASTER_ICONS[masterKey] || '🎯'
+}
+
+/** 胜率颜色：≥60%绿 / 40-60%黄 / <40%红 / 无数据灰 */
+function winRateColor(rate) {
+  if (rate == null || isNaN(rate)) return '#9e9e9e'
+  if (rate >= 60) return '#4caf50'
+  if (rate >= 40) return '#ff9800'
+  return '#f44336'
+}
+
+/** 验证结果 → {label, icon, color}（correct绿/wrong红/flat灰/待验证橙） */
+function verifyResultMeta(result) {
+  return {
+    correct: { label: '正确', icon: '✓', color: '#4caf50' },
+    wrong: { label: '偏差', icon: '✗', color: '#f44336' },
+    flat: { label: '平淡', icon: '—', color: '#9e9e9e' },
+  }[result] || { label: '待验证', icon: '⏳', color: '#ff9800' }
+}
+
+/** 历史决策可选大师列表（来自统计 per_master） */
+const masterFilterOptions = computed(() => {
+  return (masterBacktestStats.value?.per_master || []).map(m => ({ key: m.master_key, name: m.master_name }))
+})
+
+/** 按大师筛选后的历史决策 */
+const filteredMasterHistory = computed(() => {
+  if (masterHistoryFilter.value === 'all') return masterHistory.value
+  return masterHistory.value.filter(d => d.master_key === masterHistoryFilter.value)
+})
+
+/** 加载大师决策回测数据（胜率统计 + 历史列表） */
+async function loadMasterBacktest() {
+  loadingMasterBacktest.value = true
+  try {
+    const [statsRes, historyRes] = await Promise.allSettled([
+      getMasterAccuracyStats(90),
+      getMasterDecisionHistory({ days: 90, limit: 50 }),
+    ])
+    if (statsRes.status === 'fulfilled') masterBacktestStats.value = statsRes.value?.data || null
+    if (historyRes.status === 'fulfilled') masterHistory.value = historyRes.value?.data?.history || []
+  } catch { /* 静默失败 */ } finally {
+    loadingMasterBacktest.value = false
+  }
+}
+
+/** 手动触发T+N验证后重新加载 */
+async function verifyMasters() {
+  if (verifyingMasters.value) return
+  verifyingMasters.value = true
+  try {
+    const { data } = await triggerMasterVerification()
+    useToast().showToast(
+      `验证完成：T+7 已验证 ${data?.stats?.verified_7d ?? 0} 条`,
+      'success'
+    )
+    await loadMasterBacktest()
+  } catch (e) {
+    useToast().showToast('触发验证失败', 'error')
+  } finally {
+    verifyingMasters.value = false
+  }
+}
+
 onMounted(() => {
   loadEvents()
   loadAccuracy()
   loadWatchlist()
   loadPortfolioIntelligence()
+  loadMasterBacktest()
 })
 </script>
 
@@ -1295,6 +1382,159 @@ onMounted(() => {
                   </tr>
                 </tbody>
               </table>
+            </div>
+          </div>
+        </template>
+      </div>
+
+      <!-- ════ 大师决策回测面板 ════ -->
+      <div class="master-backtest-panel">
+        <div class="mb-header">
+          <div class="mb-header-left">
+            <Icon name="target" size="16" class="mb-header-icon" />
+            <h3 class="mb-title">📊 大师决策回测</h3>
+          </div>
+          <button class="btn-mb-refresh" @click="verifyMasters" :disabled="verifyingMasters">
+            <Icon :name="verifyingMasters ? 'spinner' : 'refresh-cw'" size="12" :class="{ spinning: verifyingMasters }" />
+            <span>{{ verifyingMasters ? '验证中...' : '刷新验证' }}</span>
+          </button>
+        </div>
+
+        <!-- 加载中 -->
+        <div v-if="loadingMasterBacktest && !masterBacktestStats" class="mb-loading">
+          <Icon name="spinner" size="20" class="spinning" />
+          <span>加载大师回测数据...</span>
+        </div>
+
+        <template v-else-if="masterBacktestStats">
+          <!-- 总体统计 -->
+          <div class="mb-overall">
+            <div class="mb-overall-card">
+              <div class="mb-overall-value">{{ masterBacktestStats.overall?.total ?? 0 }}</div>
+              <div class="mb-overall-label">总决策数</div>
+            </div>
+            <div class="mb-overall-card">
+              <div class="mb-overall-value">{{ masterBacktestStats.overall?.verified ?? 0 }}</div>
+              <div class="mb-overall-label">已验证</div>
+            </div>
+            <div class="mb-overall-card">
+              <div
+                class="mb-overall-value"
+                :style="{ color: winRateColor(masterBacktestStats.overall?.win_rate) }"
+              >
+                {{ masterBacktestStats.overall?.win_rate != null ? Number(masterBacktestStats.overall.win_rate).toFixed(1) + '%' : '—' }}
+              </div>
+              <div class="mb-overall-label">综合胜率</div>
+            </div>
+          </div>
+
+          <!-- 大师胜率排名（T+7） -->
+          <div v-if="masterBacktestStats.per_master?.length" class="mb-section">
+            <div class="mb-section-title">
+              <Icon name="chart" size="12" />
+              <span>大师胜率排名（T+7）</span>
+            </div>
+            <div class="mb-rank-list">
+              <div
+                v-for="m in masterBacktestStats.per_master"
+                :key="m.master_key"
+                class="mb-rank-item"
+                :class="{ 'mb-rank-best': masterBacktestStats.best_master?.master_key === m.master_key }"
+              >
+                <div class="mb-rank-master">
+                  <span class="mb-rank-icon">{{ masterIcon(m.master_key) }}</span>
+                  <span class="mb-rank-name">{{ m.master_name }}</span>
+                  <span
+                    v-if="masterBacktestStats.best_master?.master_key === m.master_key"
+                    class="mb-rank-badge"
+                  >最佳</span>
+                </div>
+                <div class="mb-rank-bar-wrap">
+                  <div class="mb-rank-bar">
+                    <div
+                      class="mb-rank-fill"
+                      :style="{
+                        width: (m.win_rate_7d || 0) + '%',
+                        background: `linear-gradient(90deg, ${winRateColor(m.win_rate_7d)}aa, ${winRateColor(m.win_rate_7d)})`
+                      }"
+                    ></div>
+                  </div>
+                  <span class="mb-rank-rate" :style="{ color: winRateColor(m.win_rate_7d) }">
+                    {{ m.verified_7d > 0 ? Number(m.win_rate_7d).toFixed(1) + '%' : '—' }}
+                  </span>
+                  <span class="mb-rank-verified">验证 {{ m.verified_7d }}/{{ m.total }}</span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- 历史决策列表 -->
+          <div class="mb-section">
+            <div class="mb-section-title">
+              <Icon name="clipboard-list" size="12" />
+              <span>历史决策</span>
+              <select v-model="masterHistoryFilter" class="mb-filter-select">
+                <option value="all">全部大师</option>
+                <option
+                  v-for="m in masterFilterOptions"
+                  :key="m.key"
+                  :value="m.key"
+                >{{ m.name }}</option>
+              </select>
+            </div>
+            <div v-if="filteredMasterHistory.length === 0" class="mb-empty">
+              暂无大师决策记录
+            </div>
+            <div v-else class="mb-history-list">
+              <div
+                v-for="d in filteredMasterHistory"
+                :key="d.id"
+                class="mb-history-item"
+              >
+                <div class="mb-hist-head">
+                  <span class="mb-hist-master">
+                    <span class="mb-hist-icon">{{ masterIcon(d.master_key) }}</span>
+                    <span class="mb-hist-name">{{ d.master_name }}</span>
+                  </span>
+                  <span
+                    class="mb-hist-action"
+                    :style="{ background: masterActionColor(d.action) + '20', color: masterActionColor(d.action) }"
+                  >{{ masterActionLabel(d.action) }}</span>
+                </div>
+                <div class="mb-hist-fund">
+                  {{ d.fund_name }}
+                  <span class="mb-hist-code">{{ d.fund_code }}</span>
+                </div>
+                <div v-if="d.score != null" class="mb-hist-score">评分 {{ Number(d.score).toFixed(0) }}</div>
+                <div v-if="d.reason" class="mb-hist-reason" :title="d.reason">{{ d.reason }}</div>
+                <div class="mb-hist-verify">
+                  <span class="mb-verify-label">T+7</span>
+                  <span
+                    class="mb-verify-tag"
+                    :style="{ color: verifyResultMeta(d.verify_7d_result).color, background: verifyResultMeta(d.verify_7d_result).color + '20' }"
+                  >
+                    {{ verifyResultMeta(d.verify_7d_result).icon }} {{ verifyResultMeta(d.verify_7d_result).label }}
+                  </span>
+                  <span
+                    v-if="d.verify_7d_change_pct != null"
+                    class="mb-verify-change"
+                    :style="{ color: d.verify_7d_change_pct >= 0 ? '#4caf50' : '#f44336' }"
+                  >
+                    {{ d.verify_7d_change_pct >= 0 ? '+' : '' }}{{ Number(d.verify_7d_change_pct).toFixed(2) }}%
+                  </span>
+                  <template v-if="d.verify_30d_result">
+                    <span class="mb-verify-sep">·</span>
+                    <span class="mb-verify-label">T+30</span>
+                    <span
+                      class="mb-verify-tag"
+                      :style="{ color: verifyResultMeta(d.verify_30d_result).color, background: verifyResultMeta(d.verify_30d_result).color + '20' }"
+                    >
+                      {{ verifyResultMeta(d.verify_30d_result).icon }} {{ verifyResultMeta(d.verify_30d_result).label }}
+                    </span>
+                  </template>
+                </div>
+                <div class="mb-hist-time">{{ d.created_at }}</div>
+              </div>
             </div>
           </div>
         </template>
@@ -4260,5 +4500,300 @@ onMounted(() => {
 /* 响应式：风险卡片在小屏降为2列 */
 @media (max-width: 768px) {
   .pi-risk-grid { grid-template-columns: repeat(2, 1fr); }
+}
+
+/* ── 大师决策回测面板 ── */
+.master-backtest-panel {
+  background: var(--color-bg-card);
+  border: 1px solid var(--color-border-light);
+  border-radius: 8px;
+  padding: 1rem 1.1rem;
+  margin-bottom: 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+.mb-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+.mb-header-left {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+.mb-header-icon { color: #7c3aed; flex-shrink: 0; }
+.mb-title {
+  font-size: 0.9rem;
+  font-weight: 700;
+  color: var(--color-text-primary);
+  margin: 0;
+}
+.btn-mb-refresh {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.3rem 0.65rem;
+  border: 1px solid var(--color-border);
+  background: var(--color-bg-secondary);
+  color: var(--color-text-secondary);
+  border-radius: 4px;
+  font-size: 0.72rem;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.btn-mb-refresh:hover:not(:disabled) {
+  border-color: #7c3aed;
+  color: #7c3aed;
+}
+.btn-mb-refresh:disabled { opacity: 0.6; cursor: not-allowed; }
+
+.mb-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  padding: 2rem 1rem;
+  color: var(--color-text-tertiary);
+  font-size: 0.82rem;
+  font-style: italic;
+}
+
+/* 总体统计 */
+.mb-overall {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 0.5rem;
+}
+.mb-overall-card {
+  background: var(--color-bg-secondary);
+  border: 1px solid var(--color-border-light);
+  border-radius: 6px;
+  padding: 0.55rem 0.65rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  text-align: center;
+}
+.mb-overall-value {
+  font-size: 1.15rem;
+  font-weight: 700;
+  font-family: var(--font-jet);
+  line-height: 1.2;
+  color: var(--color-text-primary);
+}
+.mb-overall-label {
+  font-size: 0.68rem;
+  color: var(--color-text-tertiary);
+  font-weight: 500;
+}
+
+/* 面板内分区 */
+.mb-section {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+}
+.mb-section-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--color-text-secondary);
+  padding-bottom: 0.2rem;
+  border-bottom: 1px dashed var(--color-border-light);
+}
+
+/* 胜率排名 */
+.mb-rank-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+.mb-rank-item {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.4rem 0.5rem;
+  background: var(--color-bg-secondary);
+  border: 1px solid var(--color-border-light);
+  border-radius: 6px;
+  transition: border-color 0.15s;
+}
+.mb-rank-best {
+  border-color: rgba(76, 175, 80, 0.4);
+  background: rgba(76, 175, 80, 0.04);
+}
+.mb-rank-master {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  width: 5.5rem;
+  flex-shrink: 0;
+}
+.mb-rank-icon { font-size: 0.9rem; line-height: 1; flex-shrink: 0; }
+.mb-rank-name {
+  font-size: 0.74rem;
+  font-weight: 600;
+  color: var(--color-text-primary);
+}
+.mb-rank-badge {
+  font-size: 0.6rem;
+  font-weight: 600;
+  color: #4caf50;
+  background: rgba(76, 175, 80, 0.15);
+  padding: 0.05rem 0.3rem;
+  border-radius: 3px;
+}
+.mb-rank-bar-wrap {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  flex: 1;
+  min-width: 0;
+}
+.mb-rank-bar {
+  flex: 1;
+  height: 8px;
+  background: var(--color-bg-tertiary);
+  border-radius: 4px;
+  overflow: hidden;
+}
+.mb-rank-fill {
+  height: 100%;
+  border-radius: 4px;
+  transition: width 0.3s ease;
+}
+.mb-rank-rate {
+  font-size: 0.72rem;
+  font-weight: 700;
+  font-family: var(--font-jet);
+  min-width: 3rem;
+  text-align: right;
+}
+.mb-rank-verified {
+  font-size: 0.66rem;
+  color: var(--color-text-tertiary);
+  font-family: var(--font-jet);
+  flex-shrink: 0;
+}
+
+/* 历史决策列表 */
+.mb-filter-select {
+  margin-left: auto;
+  padding: 0.2rem 0.4rem;
+  border: 1px solid var(--color-border);
+  background: var(--color-bg-secondary);
+  color: var(--color-text-primary);
+  border-radius: 4px;
+  font-size: 0.7rem;
+  cursor: pointer;
+}
+.mb-empty {
+  padding: 1.2rem 1rem;
+  text-align: center;
+  color: var(--color-text-tertiary);
+  font-size: 0.78rem;
+  font-style: italic;
+}
+.mb-history-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+.mb-history-item {
+  padding: 0.5rem 0.6rem;
+  background: var(--color-bg-secondary);
+  border: 1px solid var(--color-border-light);
+  border-radius: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+.mb-hist-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.4rem;
+}
+.mb-hist-master {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+}
+.mb-hist-icon { font-size: 0.85rem; line-height: 1; }
+.mb-hist-name {
+  font-size: 0.74rem;
+  font-weight: 600;
+  color: var(--color-text-primary);
+}
+.mb-hist-action {
+  font-size: 0.66rem;
+  font-weight: 600;
+  padding: 0.1rem 0.4rem;
+  border-radius: 3px;
+}
+.mb-hist-fund {
+  font-size: 0.74rem;
+  color: var(--color-text-primary);
+  font-weight: 500;
+}
+.mb-hist-code {
+  font-size: 0.66rem;
+  color: var(--color-text-tertiary);
+  font-family: var(--font-jet);
+}
+.mb-hist-score {
+  font-size: 0.68rem;
+  color: var(--color-text-secondary);
+  font-family: var(--font-jet);
+}
+.mb-hist-reason {
+  font-size: 0.7rem;
+  color: var(--color-text-secondary);
+  line-height: 1.4;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mb-hist-verify {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  flex-wrap: wrap;
+  font-size: 0.68rem;
+}
+.mb-verify-label {
+  font-size: 0.62rem;
+  font-weight: 600;
+  color: var(--color-text-tertiary);
+}
+.mb-verify-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.15rem;
+  padding: 0.05rem 0.35rem;
+  border-radius: 3px;
+  font-weight: 600;
+}
+.mb-verify-change {
+  font-family: var(--font-jet);
+  font-weight: 600;
+}
+.mb-verify-sep {
+  color: var(--color-text-muted);
+}
+.mb-hist-time {
+  font-size: 0.62rem;
+  color: var(--color-text-tertiary);
+  font-family: var(--font-jet);
+}
+
+/* 响应式：小屏大师排名适配 */
+@media (max-width: 768px) {
+  .mb-rank-master { width: 4.5rem; }
 }
 </style>
