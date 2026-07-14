@@ -81,6 +81,7 @@ import {
   getDcaSuggestion,
   previewSell,
   autoConfirmTransaction,
+  calcTransactionFee,
   listTransactionsWithFilter,
   lookupFundInfo, getFundHoldings,
   getCashBalance, adjustCashBalance,
@@ -3298,6 +3299,20 @@ function openConfirmTx(tx) {
     const input = document.querySelector('.modal-overlay .input-field')
     if (input) input.focus()
   })
+  // 自动预填手续费（用户可改）
+  fetchEstimatedFee(tx)
+}
+
+async function fetchEstimatedFee(tx, price = 0) {
+  if (!tx?.id) return
+  try {
+    const { data } = await calcTransactionFee(tx.id, price)
+    if (data && data.fee > 0) {
+      confirmTxFee.value = data.fee
+    }
+  } catch (e) {
+    // 预填失败不影响使用，用户可手填
+  }
 }
 
 async function fetchAutoNav() {
@@ -3307,6 +3322,9 @@ async function fetchAutoNav() {
   try {
     const { data } = await autoConfirmTransaction(tx.id)
     confirmTxPrice.value = data.confirmed_price
+    if (data.fee > 0) {
+      confirmTxFee.value = data.fee
+    }
     if (data.nav_source === 'latest') {
       showToast(data.message, 'warning')
     } else {
@@ -3962,6 +3980,7 @@ function txDisplayAmount(tx) {
                     <th>份额</th>
                     <th>价格</th>
                     <th>金额</th>
+                    <th>手续费</th>
                     <th>估值分位</th>
                     <th>日期</th>
                   </tr>
@@ -3980,6 +3999,10 @@ function txDisplayAmount(tx) {
                     <td class="text-right">{{ (tx.shares || 0).toLocaleString() }}</td>
                     <td class="text-right">{{ tx.price ? '¥' + tx.price.toFixed(4) : '--' }}</td>
                     <td class="text-right">{{ tx.amount ? '¥' + tx.amount.toLocaleString() : '--' }}</td>
+                    <td class="text-right">
+                      <span v-if="tx.fee > 0" class="text-muted">¥{{ tx.fee.toFixed(2) }}</span>
+                      <span v-else class="text-muted">--</span>
+                    </td>
                     <td>
                       <span v-if="tx.valuation_snapshot" :class="['val-badge', getValuationClass(tx.valuation_snapshot)]">
                         {{ getValuationText(tx.valuation_snapshot) }}
@@ -5427,6 +5450,7 @@ function txDisplayAmount(tx) {
                     <th class="text-right">金额</th>
                     <th class="text-right">份额</th>
                     <th class="text-right">净值</th>
+                    <th class="text-right">手续费</th>
                     <th>时间</th>
                     <th>备注</th>
                     <th>标签</th>
@@ -5444,6 +5468,10 @@ function txDisplayAmount(tx) {
                     <td class="text-right">{{ txDisplayAmount(tx) }}</td>
                     <td class="text-right">{{ tx.status === 'pending' ? (tx.submitted_shares ? tx.submitted_shares.toLocaleString() + ' (预估)' : '--') : (tx.shares?.toLocaleString() || '--') }}</td>
                     <td class="text-right">{{ tx.price?.toFixed(4) || '--' }}</td>
+                    <td class="text-right">
+                      <span v-if="tx.fee > 0" class="text-muted">¥{{ tx.fee.toFixed(2) }}</span>
+                      <span v-else class="text-muted">--</span>
+                    </td>
                     <td>{{ tx.transaction_time || '--' }}</td>
                     <td>{{ tx.notes || '--' }}</td>
                     <td>
@@ -5506,6 +5534,7 @@ function txDisplayAmount(tx) {
                 <div class="form-group">
                   <label>买入金额</label>
                   <input v-model.number="newBuyForm.amount" type="number" step="0.01" class="input-field" placeholder="如 10000" required />
+                  <span v-if="newBuyForm.amount > 0" class="field-hint">预估手续费 ¥{{ (newBuyForm.amount * 0.0015).toFixed(2) }}（0.15%），T+1 确认时扣除</span>
                 </div>
                 <div class="form-group">
                   <label>交易日期</label>
@@ -5755,10 +5784,11 @@ function txDisplayAmount(tx) {
               <div class="form-group">
                 <label>买入金额（元）*</label>
                 <input v-model.number="addPurchaseForm.amount" type="number" step="0.01" class="input-field" placeholder="如 10000" required />
+                <span v-if="addPurchaseForm.amount > 0" class="field-hint">预估手续费 ¥{{ (addPurchaseForm.amount * 0.0015).toFixed(2) }}（0.15%），T+1 确认时扣除</span>
               </div>
               <div v-if="addPurchaseForm.amount > 0 && addPurchaseHolding?.current_price" class="add-purchase-preview">
                 <span>预估可买入约 <strong>{{ addPurchaseEstShares }}</strong> 份</span>
-                <span class="preview-note">（按当前净值 {{ addPurchaseHolding.current_price }} 估算，实际以 T+1 确认为准）</span>
+                <span class="preview-note">（按当前净值 {{ addPurchaseHolding.current_price }} 估算，实际以 T+1 确认为准，已扣手续费）</span>
               </div>
               <div class="form-row">
                 <div class="form-group">

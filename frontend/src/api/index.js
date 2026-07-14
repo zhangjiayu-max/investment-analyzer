@@ -1396,6 +1396,11 @@ export function autoConfirmTransaction(txId) {
   return api.post(`/portfolio/transactions/${txId}/auto-confirm`, {}, { timeout: 30000 })
 }
 
+/** 预估交易手续费（用于确认弹窗预填） */
+export function calcTransactionFee(txId, confirmedPrice = 0) {
+  return api.post(`/portfolio/transactions/${txId}/calc-fee`, { confirmed_price: confirmedPrice })
+}
+
 /** 获取交易记录（支持筛选） */
 export function listTransactionsWithFilter(holdingId, params = {}) {
   return api.get(`/portfolio/${holdingId}/transactions`, { params })

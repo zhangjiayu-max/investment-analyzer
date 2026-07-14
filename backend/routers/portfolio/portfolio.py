@@ -925,16 +925,30 @@ async def auto_confirm_transactions_api():
 
 @router.post("/api/portfolio/transactions/{tx_id}/confirm")
 async def confirm_transaction_api(tx_id: int, req: ConfirmTransactionRequest):
-    """确认交易：填入 T+1 实际净值，计算实际份额/金额。"""
+    """确认交易：填入 T+1 实际净值，计算实际份额/金额。
+
+    手续费：用户填了以用户值为准；未填（fee=0）且开关开启时按费率自动计算。
+    """
+    # 用户未填手续费时按费率自动计算
+    fee = req.fee
+    fee_basis = "用户填入"
+    if fee == 0:
+        from services.fee_calculator import calc_fee_for_tx
+        from db.portfolio import get_transaction
+        tx = get_transaction(tx_id)
+        if tx:
+            holding = get_holding(tx["holding_id"]) if tx.get("holding_id") else None
+            fee, fee_basis = calc_fee_for_tx(tx, req.confirmed_price, holding)
+
     ok = confirm_transaction(tx_id, req.confirmed_price,
                              confirmed_shares=req.confirmed_shares,
                              confirmed_amount=req.confirmed_amount,
                              target_fund_code=req.target_fund_code,
                              target_fund_name=req.target_fund_name,
-                             fee=req.fee)
+                             fee=fee)
     if not ok:
         raise HTTPException(404, "交易记录不存在")
-    return {"ok": True}
+    return {"ok": True, "fee": fee, "fee_basis": fee_basis}
 
 
 @router.post("/api/portfolio/transactions/{tx_id}/auto-confirm")
@@ -966,7 +980,12 @@ async def auto_confirm_transaction_api(tx_id: int):
         if not confirmed_price:
             raise HTTPException(502, "无法获取基金净值，请稍后重试或手动填入")
 
-    ok = confirm_transaction(tx_id, confirmed_price)
+    # 按费率自动计算手续费（开关 fee.auto_calc_enabled，默认 true）
+    from services.fee_calculator import calc_fee_for_tx
+    holding = get_holding(tx["holding_id"]) if tx.get("holding_id") else None
+    fee, fee_basis = calc_fee_for_tx(tx, confirmed_price, holding)
+
+    ok = confirm_transaction(tx_id, confirmed_price, fee=fee)
     if not ok:
         raise HTTPException(500, "确认失败")
 
@@ -974,8 +993,35 @@ async def auto_confirm_transaction_api(tx_id: int):
         "ok": True,
         "confirmed_price": confirmed_price,
         "nav_source": "history" if not used_latest else "latest",
-        "message": "已使用历史净值确认" if not used_latest else f"未找到 {expected_date} 历史净值，已使用最新净值确认，请核实",
+        "fee": fee,
+        "fee_basis": fee_basis,
+        "message": ("已使用历史净值确认" if not used_latest else f"未找到 {expected_date} 历史净值，已使用最新净值确认，请核实")
+                   + (f"，手续费 ¥{fee}" if fee > 0 else ""),
     }
+
+
+@router.post("/api/portfolio/transactions/{tx_id}/calc-fee")
+async def calc_transaction_fee_api(tx_id: int, body: dict = None):
+    """预估交易手续费（用于前端确认弹窗预填）。
+
+    Body: { "confirmed_price": 1.23 }  可选，卖出/转换需要净值来算
+    Returns: { "fee": 12.50, "basis": "申购费率0.15%", "rate": 0.0015 }
+    """
+    from db.portfolio import get_transaction
+    from services.fee_calculator import calc_fee_for_tx, is_auto_calc_enabled
+
+    tx = get_transaction(tx_id)
+    if not tx:
+        raise HTTPException(404, "交易记录不存在")
+
+    price = (body or {}).get("confirmed_price") or tx.get("price") or 0
+    enabled = is_auto_calc_enabled()
+    if not enabled:
+        return {"fee": 0, "basis": "自动计算已关闭", "rate": 0, "auto_calc_enabled": False}
+
+    holding = get_holding(tx["holding_id"]) if tx.get("holding_id") else None
+    fee, basis = calc_fee_for_tx(tx, price, holding)
+    return {"fee": fee, "basis": basis, "auto_calc_enabled": True}
 
 
 @router.post("/api/portfolio/transactions/{tx_id}/settle")
