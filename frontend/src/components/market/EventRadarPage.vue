@@ -110,9 +110,11 @@ const stats = computed(() => {
 
 const watchlistStats = computed(() => {
   const total = watchlist.value.length
-  const withTarget = watchlist.value.filter(w => w.target_price || w.target_percentile).length
-  // 信号触发：后端 signal_status === 'green'
-  const signalTriggered = watchlist.value.filter(w => (w.signal_status || 'gray') === 'green').length
+  // 4 档上车状态
+  const canBuy = watchlist.value.filter(w => (w.signal_status || 'gray') === 'green').length
+  const approaching = watchlist.value.filter(w => (w.signal_status || 'gray') === 'yellow').length
+  const waiting = watchlist.value.filter(w => (w.signal_status || 'gray') === 'red').length
+  const noData = watchlist.value.filter(w => (w.signal_status || 'gray') === 'gray').length
   // 近7日新增
   const recent7d = watchlist.value.filter(w => {
     if (!w.created_at) return false
@@ -120,7 +122,7 @@ const watchlistStats = computed(() => {
     const now = new Date()
     return (now - created) / (1000 * 60 * 60 * 24) <= 7
   }).length
-  return { total, withTarget, signalTriggered, recent7d }
+  return { total, canBuy, approaching, waiting, noData, recent7d }
 })
 
 // 关注列表排序
@@ -131,12 +133,14 @@ const watchlistSortOptions = [
   { key: 'created', label: '最近加入' },
   { key: 'updated', label: '最近更新' },
 ]
-// 关注列表筛选：all | signal | withTarget | recent7d | bought
+// 关注列表筛选：all | canBuy | approaching | waiting | noData | recent7d
 const watchlistFilter = ref('all')
 const watchlistFilterOptions = [
   { key: 'all', label: '全部' },
-  { key: 'signal', label: '信号触发' },
-  { key: 'withTarget', label: '已设目标' },
+  { key: 'canBuy', label: '可上车' },
+  { key: 'approaching', label: '接近上车' },
+  { key: 'waiting', label: '等待中' },
+  { key: 'noData', label: '数据不足' },
   { key: 'recent7d', label: '近7日新增' },
 ]
 // 基金类型筛选（从 watchlist 数据动态提取）
@@ -155,10 +159,14 @@ const sortedWatchlist = computed(() => {
     list = list.filter(w => w.fund_category === watchlistCategoryFilter.value)
   }
   // 应用筛选
-  if (watchlistFilter.value === 'signal') {
+  if (watchlistFilter.value === 'canBuy') {
     list = list.filter(w => (w.signal_status || 'gray') === 'green')
-  } else if (watchlistFilter.value === 'withTarget') {
-    list = list.filter(w => w.target_price || w.target_percentile)
+  } else if (watchlistFilter.value === 'approaching') {
+    list = list.filter(w => (w.signal_status || 'gray') === 'yellow')
+  } else if (watchlistFilter.value === 'waiting') {
+    list = list.filter(w => (w.signal_status || 'gray') === 'red')
+  } else if (watchlistFilter.value === 'noData') {
+    list = list.filter(w => (w.signal_status || 'gray') === 'gray')
   } else if (watchlistFilter.value === 'recent7d') {
     list = list.filter(w => {
       if (!w.created_at) return false
@@ -610,6 +618,10 @@ async function autoPatrol() {
         pb: p.pb ?? w.pb ?? null,
         change_pct: p.change_pct ?? w.change_pct ?? null,
         source: p.source ?? w.source ?? '',
+        suggested_buy_price: p.suggested_buy_price ?? w.suggested_buy_price ?? null,
+        buy_price_source: p.buy_price_source ?? w.buy_price_source ?? '',
+        distance_to_buy: p.distance_to_buy ?? w.distance_to_buy ?? null,
+        nav_updated_at: p.nav_updated_at ?? w.nav_updated_at ?? '',
       }
     })
   } catch { /* 静默失败 */ } finally {
@@ -619,10 +631,10 @@ async function autoPatrol() {
 
 /** 信号状态映射：signal_status → { label, cls }（统一使用后端 4 态：green/yellow/red/gray） */
 const SIGNAL_STATUS_META = {
-  green: { label: '信号触发', cls: 'sig-hit' },
-  yellow: { label: '接近目标', cls: 'sig-warn' },
-  red: { label: '估值仍高', cls: 'sig-bad' },
-  gray: { label: '数据缺失', cls: 'sig-neutral' },
+  green: { label: '可上车', cls: 'sig-hit' },
+  yellow: { label: '接近上车', cls: 'sig-warn' },
+  red: { label: '等待中', cls: 'sig-bad' },
+  gray: { label: '数据不足', cls: 'sig-neutral' },
 }
 
 /** 取关注基金信号状态元信息（默认 gray） */
@@ -1725,7 +1737,7 @@ onMounted(() => {
       </div>
 
       <!-- 关注列表统计 -->
-      <div class="stats-row stats-row-4">
+      <div class="stats-row stats-row-6">
         <div
           class="stat-card stat-all"
           :class="{ 'stat-active': watchlistFilter === 'all' }"
@@ -1736,19 +1748,35 @@ onMounted(() => {
         </div>
         <div
           class="stat-card stat-watchlist-hit"
-          :class="{ 'stat-active': watchlistFilter === 'signal' }"
-          @click="toggleWatchlistFilter('signal')"
+          :class="{ 'stat-active': watchlistFilter === 'canBuy' }"
+          @click="toggleWatchlistFilter('canBuy')"
         >
-          <div class="stat-value">{{ watchlistStats.signalTriggered }}</div>
-          <div class="stat-label">信号触发</div>
+          <div class="stat-value">{{ watchlistStats.canBuy }}</div>
+          <div class="stat-label">可上车</div>
         </div>
         <div
           class="stat-card stat-holding"
-          :class="{ 'stat-active': watchlistFilter === 'withTarget' }"
-          @click="toggleWatchlistFilter('withTarget')"
+          :class="{ 'stat-active': watchlistFilter === 'approaching' }"
+          @click="toggleWatchlistFilter('approaching')"
         >
-          <div class="stat-value">{{ watchlistStats.withTarget }}</div>
-          <div class="stat-label">已设目标</div>
+          <div class="stat-value">{{ watchlistStats.approaching }}</div>
+          <div class="stat-label">接近上车</div>
+        </div>
+        <div
+          class="stat-card stat-opportunity"
+          :class="{ 'stat-active': watchlistFilter === 'waiting' }"
+          @click="toggleWatchlistFilter('waiting')"
+        >
+          <div class="stat-value">{{ watchlistStats.waiting }}</div>
+          <div class="stat-label">等待中</div>
+        </div>
+        <div
+          class="stat-card"
+          :class="{ 'stat-active': watchlistFilter === 'noData' }"
+          @click="toggleWatchlistFilter('noData')"
+        >
+          <div class="stat-value">{{ watchlistStats.noData }}</div>
+          <div class="stat-label">数据不足</div>
         </div>
         <div
           class="stat-card stat-opportunity"
@@ -1881,6 +1909,37 @@ onMounted(() => {
                   距目标 {{ parseFloat(item.distance_to_target) >= 0 ? '+' : '' }}{{ Number(item.distance_to_target).toFixed(1) }}%
                 </span>
               </span>
+            </div>
+            <!-- 上车时机区块 -->
+            <div class="wl-buy-timing">
+              <div class="wl-buy-signal" :class="signalMeta(item).cls">
+                <span class="wl-buy-dot"></span>
+                <span class="wl-buy-label">{{ signalMeta(item).label }}</span>
+                <span v-if="item.signal_reason" class="wl-buy-reason">{{ item.signal_reason }}</span>
+              </div>
+              <div v-if="item.suggested_buy_price" class="wl-buy-row">
+                <span class="wl-data-label">建议上车价</span>
+                <span class="wl-data-value">
+                  {{ Number(item.suggested_buy_price).toFixed(4) }}
+                  <span v-if="item.buy_price_source" class="wl-buy-source">（{{ item.buy_price_source }}）</span>
+                </span>
+              </div>
+              <div v-if="item.distance_to_buy != null && item.current_nav" class="wl-buy-row">
+                <span class="wl-data-label">距上车</span>
+                <span
+                  class="wl-data-value"
+                  :class="parseFloat(item.distance_to_buy) <= 0 ? 'value-hit' : (parseFloat(item.distance_to_buy) < 5 ? 'wl-distance-wait' : '')"
+                >
+                  {{ parseFloat(item.distance_to_buy) >= 0 ? '+' : '' }}{{ Number(item.distance_to_buy).toFixed(2) }}%
+                  <span v-if="parseFloat(item.distance_to_buy) <= 0" class="wl-pct-hint">已到上车价</span>
+                  <span v-else-if="parseFloat(item.distance_to_buy) < 5" class="wl-pct-hint">接近</span>
+                  <span v-else class="wl-pct-hint wl-pct-high">还需跌</span>
+                </span>
+              </div>
+              <div v-if="!item.suggested_buy_price && (item.signal_status || 'gray') === 'gray'" class="wl-buy-hint">
+                <Icon name="info" size="11" class="wl-source-icon" />
+                <span>估值数据不足，无法推算上车价。点击"扫描信号"刷新数据。</span>
+              </div>
             </div>
             <div v-if="item.target_percentile" class="wl-data-row">
               <span class="wl-data-label">目标分位</span>
@@ -3672,6 +3731,79 @@ onMounted(() => {
 .wl-value-mute {
   color: var(--color-text-tertiary);
   font-style: italic;
+}
+
+/* ── 上车时机区块 ── */
+.wl-buy-timing {
+  margin: 0.4rem 0;
+  padding: 0.6rem;
+  background: var(--color-bg-secondary);
+  border-radius: 6px;
+  border: 1px solid var(--color-border-light);
+}
+.wl-buy-signal {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.8rem;
+  font-weight: 700;
+  margin-bottom: 0.4rem;
+  padding-bottom: 0.35rem;
+  border-bottom: 1px dashed var(--color-border-light);
+}
+.wl-buy-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.wl-buy-label {
+  white-space: nowrap;
+}
+.wl-buy-reason {
+  font-size: 0.65rem;
+  font-weight: 400;
+  color: var(--color-text-tertiary);
+  margin-left: auto;
+  text-align: right;
+}
+.wl-buy-timing .sig-hit .wl-buy-dot { background: #16a34a; }
+.wl-buy-timing .sig-hit .wl-buy-label { color: #16a34a; }
+.wl-buy-timing .sig-warn .wl-buy-dot { background: #ea580c; }
+.wl-buy-timing .sig-warn .wl-buy-label { color: #ea580c; }
+.wl-buy-timing .sig-bad .wl-buy-dot { background: #dc2626; }
+.wl-buy-timing .sig-bad .wl-buy-label { color: #dc2626; }
+.wl-buy-timing .sig-neutral .wl-buy-dot { background: var(--color-text-tertiary); }
+.wl-buy-timing .sig-neutral .wl-buy-label { color: var(--color-text-tertiary); }
+.wl-buy-row {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  font-size: 0.75rem;
+  margin-top: 0.25rem;
+}
+.wl-buy-source {
+  font-size: 0.65rem;
+  color: var(--color-text-tertiary);
+  font-weight: 400;
+}
+.wl-pct-hint {
+  font-size: 0.62rem;
+  color: var(--color-text-tertiary);
+  font-weight: 400;
+  margin-left: 0.2rem;
+}
+.wl-pct-hint.wl-pct-high {
+  color: #dc2626;
+}
+.wl-buy-hint {
+  font-size: 0.7rem;
+  color: var(--color-text-tertiary);
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  margin-top: 0.2rem;
 }
 
 /* ── 买入评分区块 ── */

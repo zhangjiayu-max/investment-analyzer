@@ -86,6 +86,7 @@ def update_watchlist_item(item_id: int, **fields) -> bool:
         'fund_name', 'fund_category', 'index_code', 'index_name',
         'target_price', 'target_percentile', 'notes', 'priority', 'status',
         'current_nav', 'current_percentile', 'nav_updated_at',
+        'suggested_buy_price', 'buy_price_source',
     }
     invalid = set(fields.keys()) - allowed
     if invalid:

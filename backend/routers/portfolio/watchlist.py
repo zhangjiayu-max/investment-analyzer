@@ -100,15 +100,22 @@ async def watchlist_summary_api():
 
 @router.get("/api/watchlist/patrol")
 async def watchlist_patrol_api():
-    """关注列表巡检 — 检查估值，低于目标百分位时提醒建仓。"""
+    """关注列表巡检 — 刷新净值/估值，计算上车价位与信号灯。
+
+    2026-07-14 增强：
+    - 巡检时强制刷新净值（fetch_fund_nav）
+    - 估值查询增加 akshare 兜底（本地 DB + 天天基金 + akshare 三级）
+    - 自动推算建议上车价（suggested_buy_price）
+    - 响应 all_items 增加 suggested_buy_price/buy_price_source/distance_to_buy
+    """
     global _patrol_cache, _patrol_cache_time
-    
+
     # 5分钟缓存
     now = time.time()
     if now - _patrol_cache_time < 5 * 60 and _patrol_cache:
         logger.info("[watchlist] 使用巡检缓存")
         return _patrol_cache
-    
+
     items = list_watchlist(status="watching")
     if not items:
         return {"alerts": [], "checked": 0, "message": "关注列表为空"}
@@ -116,7 +123,7 @@ async def watchlist_patrol_api():
     from db.valuations import search_indexes_by_keyword, get_latest_valuation
 
     alerts = []
-    all_items = []  # P0-2.2：所有关注基金 + 信号灯状态
+    all_items = []
     checked = 0
 
     for item in items:
@@ -125,16 +132,31 @@ async def watchlist_patrol_api():
         index_name = item.get("index_name", "")
         target_pct = item.get("target_percentile")
 
-        # 查询当前估值
+        # ── A1. 强制刷新净值 ──
+        current_nav = item.get("current_nav")
+        try:
+            nav_data = fetch_fund_nav(fund_code)
+            if nav_data and nav_data.get("nav"):
+                current_nav = nav_data["nav"]
+                from datetime import datetime
+                update_watchlist_item(
+                    item["id"],
+                    current_nav=current_nav,
+                    nav_updated_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                )
+        except Exception as e:
+            logger.debug(f"[watchlist] 刷新净值失败 {fund_code}: {e}")
+
+        # ── A2. 估值查询（三级兜底）──
         current_pct = None
         pe = None
         pb = None
         source = ""
 
         # 1) 本地 DB
-        if index_name:
+        if index_name and current_pct is None:
             try:
-                search_term = index_name.replace("指数", "").replace("中证", "").replace("全指", "")
+                search_term = index_name.replace("指数", "").replace("中证", "").replace("全指", "").replace("上证", "")
                 matches = search_indexes_by_keyword(search_term)
                 for m in matches:
                     val = get_latest_valuation(m["index_code"])
@@ -161,19 +183,49 @@ async def watchlist_patrol_api():
             except Exception:
                 pass
 
+        # 3) akshare 兜底（按指数名反查代码再查估值）
+        if current_pct is None and index_name:
+            ak_result = _fetch_valuation_via_akshare(index_name)
+            if ak_result:
+                current_pct = ak_result.get("percentile")
+                pe = ak_result.get("pe")
+                pb = ak_result.get("pb")
+                source = "akshare"
+
         checked += 1
 
-        # 判断是否触发提醒
-        is_alert = False
-        alert_reason = ""
-
+        # 更新 watchlist 的当前百分位
         if current_pct is not None:
-            # 更新 watchlist 的当前百分位
             try:
                 update_watchlist_item(item["id"], current_percentile=current_pct)
             except Exception:
                 pass
 
+        # ── A3. 自动推算上车价 ──
+        suggested_buy_price, buy_price_source = _calculate_suggested_buy_price(
+            current_pct=current_pct,
+            current_nav=current_nav,
+            user_target_price=item.get("target_price"),
+        )
+        if suggested_buy_price is not None:
+            try:
+                update_watchlist_item(
+                    item["id"],
+                    suggested_buy_price=suggested_buy_price,
+                    buy_price_source=buy_price_source,
+                )
+            except Exception:
+                pass
+
+        # 距上车价差距（正数=高于上车价，负数=已跌破）
+        distance_to_buy = None
+        if suggested_buy_price and current_nav and suggested_buy_price > 0:
+            distance_to_buy = round((current_nav - suggested_buy_price) / suggested_buy_price * 100, 2)
+
+        # 判断是否触发提醒
+        is_alert = False
+        alert_reason = ""
+        if current_pct is not None:
             if target_pct is not None and current_pct <= target_pct:
                 is_alert = True
                 alert_reason = f"当前百分位 {current_pct:.0f}% 已低于目标 {target_pct:.0f}%"
@@ -181,7 +233,7 @@ async def watchlist_patrol_api():
                 is_alert = True
                 alert_reason = f"当前百分位 {current_pct:.0f}% 处于低估区域（≤20%）"
 
-        # P0-2.2：计算信号灯状态（green/yellow/red/gray）
+        # 信号灯状态（green/yellow/red/gray）
         signal_status, signal_reason, distance = _compute_signal_status(current_pct, target_pct)
         all_items.append({
             "id": item["id"],
@@ -190,14 +242,23 @@ async def watchlist_patrol_api():
             "index_name": index_name,
             "current_percentile": current_pct,
             "target_percentile": target_pct,
-            "current_nav": item.get("current_nav"),
+            "current_nav": current_nav,
             "target_price": item.get("target_price"),
             "priority": item.get("priority", 0),
             "signal_status": signal_status,
             "signal_reason": signal_reason,
             "distance_to_target": distance,
             "pe": pe,
+            "pb": pb,
             "source": source,
+            "suggested_buy_price": suggested_buy_price,
+            "buy_price_source": buy_price_source,
+            "distance_to_buy": distance_to_buy,
+            "nav_updated_at": item.get("nav_updated_at"),
+            "created_at": item.get("created_at"),
+            "updated_at": item.get("updated_at"),
+            "notes": item.get("notes", ""),
+            "status": item.get("status"),
         })
 
         if is_alert:
@@ -219,7 +280,6 @@ async def watchlist_patrol_api():
             except Exception as e:
                 logger.warning(f"[watchlist] 保存建议候选失败: {e}")
 
-            # P2-4.2：关注基金动态提醒 — 触发买入信号时同时生成 portfolio_alerts（info 级，不干扰 danger）
             try:
                 from db.portfolio import create_alert
                 create_alert(
@@ -239,15 +299,77 @@ async def watchlist_patrol_api():
     result = {
         "checked": checked,
         "alerts": alerts,
-        "all_items": all_items,  # P0-2.2：所有关注基金 + 信号灯状态
+        "all_items": all_items,
         "message": f"巡检完成，{checked} 只基金中有 {len(alerts)} 只触发提醒",
     }
-    
-    # 更新缓存
+
     _patrol_cache = result
     _patrol_cache_time = time.time()
-    
+
     return result
+
+
+def _fetch_valuation_via_akshare(index_name: str) -> dict | None:
+    """akshare 兜底估值查询：按指数名反查代码，再查 PE 百分位。
+
+    返回 {"percentile": 0.25, "pe": 12.3, "pb": 1.5} 或 None。
+    """
+    try:
+        from services.market.market_data import get_index_valuation
+        # 从 index_name 提取关键词反查代码
+        from db._conn import _get_conn
+        conn = _get_conn()
+        search_term = index_name.replace("指数", "").replace("中证", "").replace("全指", "").replace("上证", "").strip()
+        rows = conn.execute(
+            "SELECT DISTINCT index_code FROM index_valuations WHERE index_name LIKE ? OR index_code LIKE ? LIMIT 1",
+            (f"%{search_term}%", f"%{search_term}%"),
+        ).fetchall()
+        conn.close()
+        if not rows:
+            return None
+        index_code = rows[0]["index_code"]
+        # 去掉后缀（.CSI/.SH/.SZ）适配 akshare
+        clean_code = index_code.split(".")[0]
+        val = get_index_valuation(clean_code)
+        if val and val.get("pe_percentile") is not None:
+            return {
+                "percentile": round(val["pe_percentile"] * 100, 1),
+                "pe": val.get("pe"),
+                "pb": val.get("pb"),
+            }
+    except Exception as e:
+        logger.debug(f"[watchlist] akshare 估值兜底失败 {index_name}: {e}")
+    return None
+
+
+def _calculate_suggested_buy_price(current_pct: float | None, current_nav: float | None,
+                                    user_target_price: float | None) -> tuple[float | None, str]:
+    """自动推算建议上车价。
+
+    规则（按估值分位分档）：
+    - 分位 ≤20%（低估区）：上车价 = 当前净值 × 1.00
+    - 分位 20-40%（偏低区）：上车价 = 当前净值 × 0.95
+    - 分位 40-60%（中性区）：上车价 = 当前净值 × 0.90
+    - 分位 >60%（偏高区）：上车价 = 当前净值 × 0.85
+    - 分位缺失：上车价 = None
+
+    用户已设 target_price 时以用户设置为准。
+    """
+    # 用户已设目标价，优先使用
+    if user_target_price and user_target_price > 0:
+        return round(user_target_price, 4), "用户设置"
+
+    if current_pct is None or current_nav is None or current_nav <= 0:
+        return None, ""
+
+    if current_pct <= 20:
+        return round(current_nav, 4), f"低估区·当前净值"
+    elif current_pct <= 40:
+        return round(current_nav * 0.95, 4), f"偏低区·-5%"
+    elif current_pct <= 60:
+        return round(current_nav * 0.90, 4), f"中性区·-10%"
+    else:
+        return round(current_nav * 0.85, 4), f"偏高区·-15%"
 
 
 # ── P0-2.2：信号灯状态计算（纯规则，0 LLM/0 MCP） ──

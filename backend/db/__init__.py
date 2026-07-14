@@ -278,6 +278,13 @@ from db.analysis_conclusions import (
 )
 
 
+def _ensure_column(conn, table: str, column: str, col_type: str):
+    """老库升级：若列不存在则添加。SQLite 不支持 ADD COLUMN IF NOT EXISTS。"""
+    cols = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+    if column not in cols:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}")
+
+
 def init_db():
     """建表，启动时调用。各子模块的 init_tables(conn) 负责创建自己的表。"""
     conn = _get_conn()
@@ -1205,11 +1212,16 @@ def init_db():
             current_nav REAL,
             current_percentile REAL,
             nav_updated_at TEXT,
+            suggested_buy_price REAL,
+            buy_price_source TEXT,
             created_at TEXT DEFAULT (datetime('now','localtime')),
             updated_at TEXT DEFAULT (datetime('now','localtime')),
             UNIQUE(user_id, fund_code)
         )
     """)
+    # 老库升级：补列（CREATE TABLE IF NOT EXISTS 不会对已存在的表加列）
+    _ensure_column(conn, "watchlist", "suggested_buy_price", "REAL")
+    _ensure_column(conn, "watchlist", "buy_price_source", "TEXT")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_watchlist_user ON watchlist(user_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_watchlist_status ON watchlist(status)")
 
