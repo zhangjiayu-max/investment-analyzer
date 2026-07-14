@@ -52,7 +52,7 @@
 
 <script setup>
 import { ref, computed, onMounted } from 'vue'
-import { getDataHealth } from '../api'
+import { getDataHealth } from '../../api'
 
 const loading = ref(true)
 const error = ref('')

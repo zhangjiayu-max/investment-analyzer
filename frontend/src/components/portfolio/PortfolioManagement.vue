@@ -112,22 +112,22 @@ import {
   createDecisionFromAction, runWhatIf,
   patrolWatchlist, getBuyScore,
   dailyAdviceAPI,
-} from '../api'
-import { useToast } from '../composables/useToast'
-import ConfirmDialog from './ConfirmDialog.vue'
-import PieChart from './charts/PieChart.vue'
-import SimplePieChart from './charts/SimplePieChart.vue'
-import LineChart from './charts/LineChart.vue'
-import Skeleton from './ui/Skeleton.vue'
-import EmptyState from './ui/EmptyState.vue'
-import AnalysisCard from './ui/AnalysisCard.vue'
-import AIActionButton from './ui/AIActionButton.vue'
-import AnalysisComparison from './AnalysisComparison.vue'
-import ActionCard from './ActionCard.vue'
-import { renderMarkdown } from '../composables/useMarkdown'
-import { isDark } from '../composables/useTheme'
-import { useAsyncTask } from '../composables/useAsyncTask'
-import { usePendingAction } from '../composables/usePendingAction'
+} from '../../api'
+import { useToast } from '../../composables/useToast'
+import ConfirmDialog from '../layout/ConfirmDialog.vue'
+import PieChart from '../charts/PieChart.vue'
+import SimplePieChart from '../charts/SimplePieChart.vue'
+import LineChart from '../charts/LineChart.vue'
+import Skeleton from '../ui/Skeleton.vue'
+import EmptyState from '../ui/EmptyState.vue'
+import AnalysisCard from '../ui/AnalysisCard.vue'
+import AIActionButton from '../ui/AIActionButton.vue'
+import AnalysisComparison from '../analysis/AnalysisComparison.vue'
+import ActionCard from '../ActionCard.vue'
+import { renderMarkdown } from '../../composables/useMarkdown'
+import { isDark } from '../../composables/useTheme'
+import { useAsyncTask } from '../../composables/useAsyncTask'
+import { usePendingAction } from '../../composables/usePendingAction'
 
 const props = defineProps({
   onNavigate: { type: Function, default: null },

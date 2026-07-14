@@ -161,7 +161,7 @@ async def _run_regenerate_daily_report_async(task_id: int, agent: dict):
         conn.close()
 
         # 复用 _auto_daily_report 的数据收集逻辑
-        from routers.dashboard import get_hot_topics
+        from routers.dashboard.dashboard import get_hot_topics
         news_context = ""
         try:
             news_data = await get_hot_topics()

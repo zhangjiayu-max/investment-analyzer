@@ -6,7 +6,7 @@
  * 通过 localStorage 'hasVisited' 标记，点击"不再提示"后不再弹出。
  * 复用 Teleport + Transition 模式，保持非 AI 美学风格。
  */
-import Icon from './ui/Icon.vue'
+import Icon from '../ui/Icon.vue'
 
 const emit = defineEmits(['close', 'navigate'])
 

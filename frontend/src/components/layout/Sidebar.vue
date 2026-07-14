@@ -1,10 +1,10 @@
 <script setup>
 import { ref, computed, onMounted, onUnmounted } from 'vue'
-import { isDark, toggleDark } from '../composables/useTheme'
-import { getTokenUsageBudget, getKycQuestionnaire } from '../api'
-import { navItems } from '../navigation'
-import Icon from './ui/Icon.vue'
-import KycWizard from './KycWizard.vue'
+import { isDark, toggleDark } from '../../composables/useTheme'
+import { getTokenUsageBudget, getKycQuestionnaire } from '../../api'
+import { navItems } from '../../navigation'
+import Icon from '../ui/Icon.vue'
+import KycWizard from '../family/KycWizard.vue'
 
 const props = defineProps({
   activePage: String,

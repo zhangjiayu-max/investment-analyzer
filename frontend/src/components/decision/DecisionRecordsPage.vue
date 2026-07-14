@@ -5,10 +5,10 @@ import {
   getDecisionPrecheck, getExecutionStatus, getDecisionTimeline, createTransactionDraftFromDecision,
   getDecisionStats, listRecommendationCandidates, ignoreRecommendationCandidate,
   createDecisionFromCandidate, deferRecommendationCandidate,
-} from '../api'
-import { useToast } from '../composables/useToast'
-import Icon from './ui/Icon.vue'
-import ConfirmDialog from './ConfirmDialog.vue'
+} from '../../api'
+import { useToast } from '../../composables/useToast'
+import Icon from '../ui/Icon.vue'
+import ConfirmDialog from '../layout/ConfirmDialog.vue'
 
 const { showToast } = useToast()
 

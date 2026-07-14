@@ -35,7 +35,7 @@ class SessionSteward:
     @staticmethod
     def extract_and_save_candidates(conversation_id: int, user_id: str = "default"):
         """从对话中提取记忆候选并保存。"""
-        from agent.memory_lifecycle import extract_memory_candidates, save_memory, should_promote
+        from agent.memory.memory_lifecycle import extract_memory_candidates, save_memory, should_promote
 
         candidates = extract_memory_candidates(conversation_id, user_id)
 
@@ -60,7 +60,7 @@ class SessionSteward:
     @staticmethod
     def get_working_context(conversation_id: int, max_tokens: int = 3000) -> str:
         """获取当前会话的工作上下文。"""
-        from agent.memory import compress_history_semantic, estimate_tokens
+        from agent.memory.memory import compress_history_semantic, estimate_tokens
         from db import get_messages
 
         messages = get_messages(conversation_id)
@@ -100,7 +100,7 @@ class ProjectCurator:
     @staticmethod
     def promote_session_insights(user_id: str = "default"):
         """将会话级洞察提升为项目级知识。"""
-        from agent.memory_lifecycle import get_memories, save_memory, compact_memories
+        from agent.memory.memory_lifecycle import get_memories, save_memory, compact_memories
 
         # 1. 获取所有未压缩的记忆
         memories = get_memories(user_id, limit=50)
@@ -133,7 +133,7 @@ class ProjectCurator:
 
         # 1. 用户偏好画像
         try:
-            from agent.feedback_learner import get_preference_context
+            from agent.memory.feedback_learner import get_preference_context
             pref_ctx = get_preference_context(user_id)
             if pref_ctx:
                 parts.append(pref_ctx)
@@ -142,7 +142,7 @@ class ProjectCurator:
 
         # 2. 项目级记忆（profile 类型）
         try:
-            from agent.memory_lifecycle import get_memories
+            from agent.memory.memory_lifecycle import get_memories
             profiles = get_memories(user_id, memory_type="fact_profile", limit=5)
             if profiles:
                 profile_text = "\n".join(f"- {p['content'][:150]}" for p in profiles)
@@ -202,7 +202,7 @@ class SpaceCurator:
                         })
 
             # 保存到系统级知识库
-            from agent.memory_lifecycle import save_memory
+            from agent.memory.memory_lifecycle import save_memory
             saved_count = 0
             for sector, insights in industry_insights.items():
                 if len(insights) >= 2:
@@ -231,7 +231,7 @@ class SpaceCurator:
     def get_space_context() -> str:
         """获取空间级上下文（系统级知识）。"""
         try:
-            from agent.memory_lifecycle import get_memories
+            from agent.memory.memory_lifecycle import get_memories
             knowledge = get_memories("system", memory_type="industry_knowledge", limit=5)
             if knowledge:
                 knowledge_text = "\n".join(f"- {k['content'][:150]}" for k in knowledge)
@@ -253,7 +253,7 @@ def assemble_full_context(conversation_id: int, user_id: str = "default",
     - medium: 会话级 + 项目级
     - complex: 会话级 + 项目级 + 空间级
     """
-    from agent.memory import get_token_budget
+    from agent.memory.memory import get_token_budget
 
     budget = get_token_budget(complexity)
     parts = []
@@ -295,7 +295,7 @@ def run_governance_maintenance():
     SpaceCurator.distill_industry_knowledge()
 
     # 3. 记忆维护（压缩 + 遗忘）
-    from agent.memory_lifecycle import run_memory_maintenance
+    from agent.memory.memory_lifecycle import run_memory_maintenance
     run_memory_maintenance()
 
     logger.info("三层治理维护完成")

@@ -1,8 +1,8 @@
 <script setup>
 import { computed, onMounted, ref, watch } from 'vue'
-import { getBacktestPresets, runBacktest, saveBacktest, listBacktests, deleteBacktest, linkBacktestToDecision, listDecisions } from '../api'
-import { useToast } from '../composables/useToast'
-import Icon from './ui/Icon.vue'
+import { getBacktestPresets, runBacktest, saveBacktest, listBacktests, deleteBacktest, linkBacktestToDecision, listDecisions } from '../../api'
+import { useToast } from '../../composables/useToast'
+import Icon from '../ui/Icon.vue'
 
 const { showToast } = useToast()
 

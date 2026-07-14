@@ -1,9 +1,9 @@
 <script setup>
 import { computed, onMounted, ref } from 'vue'
-import { getBehaviorReport, getBehaviorScore } from '../api'
-import { useToast } from '../composables/useToast'
-import Icon from './ui/Icon.vue'
-import EmptyState from './ui/EmptyState.vue'
+import { getBehaviorReport, getBehaviorScore } from '../../api'
+import { useToast } from '../../composables/useToast'
+import Icon from '../ui/Icon.vue'
+import EmptyState from '../ui/EmptyState.vue'
 
 const { showToast } = useToast()
 

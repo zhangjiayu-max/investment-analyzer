@@ -53,7 +53,7 @@ async def _run_hotspots_analysis_async(task_id: int):
 async def _do_hotspots_analysis():
     """结构化热点分析 — LLM 输出 JSON 推荐。"""
     # 1. 收集今日数据
-    from routers.dashboard import get_hot_topics
+    from routers.dashboard.dashboard import get_hot_topics
     news_data = await get_hot_topics()
     news_list = news_data.get("news", [])[:5]
     news_text = "\n".join(
@@ -334,7 +334,7 @@ async def hotspots_relate_indexes():
     """热点→指数关联：关键词匹配 + LLM 兜底推理（300秒缓存）。"""
     import time
     from db import list_valuation_indexes, list_holdings
-    from routers.dashboard import get_hot_topics
+    from routers.dashboard.dashboard import get_hot_topics
 
     news_data = await get_hot_topics()
     news_list = news_data.get("news", [])[:6]

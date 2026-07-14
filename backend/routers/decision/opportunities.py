@@ -47,7 +47,7 @@ async def daily_scan_api(req: DailyScanRequest):
     news_items = req.news_items
     if news_items is None:
         try:
-            from routers.dashboard import get_hot_topics
+            from routers.dashboard.dashboard import get_hot_topics
             hot = await get_hot_topics()
             news_items = hot.get("news", [])
         except Exception:

@@ -229,10 +229,10 @@ def save_skill_document(doc: str):
     conn.close()
 
     # 保存到文件
-    with open("skill_document.md", "w", encoding="utf-8") as f:
+    with open("docs/skill_document.md", "w", encoding="utf-8") as f:
         f.write(doc)
 
-    print(f"Skill 文档已保存到 skill_document.md")
+    print(f"Skill 文档已保存到 docs/skill_document.md")
 
 
 if __name__ == "__main__":

@@ -3,10 +3,10 @@ import { ref, onMounted, computed, nextTick } from 'vue'
 import {
   listBadCases, createEvalFromBadCase,
   getRootCauseStats, batchAnalyzeRootCause, analyzeSingleRootCause,
-} from '../api'
-import ConfirmDialog from './ConfirmDialog.vue'
-import AppToast from './AppToast.vue'
-import { useToast } from '../composables/useToast'
+} from '../../api'
+import ConfirmDialog from '../layout/ConfirmDialog.vue'
+import AppToast from '../layout/AppToast.vue'
+import { useToast } from '../../composables/useToast'
 
 const { showToast } = useToast()
 const confirm = ref({ visible: false, title: '', message: '', danger: false, onConfirm: null })

@@ -78,18 +78,18 @@ register_exception_handlers(app)
 
 # ── 路由注册 ─────────────────────────────────────
 
-from routers.valuation import router as valuation_router, index_info_router  # /api/valuation/* + /api/index-info/*
-from routers.agents import router as agents_router
-from routers.conversations import router as conversations_router
-from routers.tasks import router as tasks_router
-from routers.articles import router as articles_router
-from routers.portfolio import router as portfolio_router
+from routers.market.valuation import router as valuation_router, index_info_router  # /api/valuation/* + /api/index-info/*
+from routers.admin.agents import router as agents_router
+from routers.conversation.conversations import router as conversations_router
+from routers.task.tasks import router as tasks_router
+from routers.knowledge.articles import router as articles_router
+from routers.portfolio.portfolio import router as portfolio_router
 
 # 其他路由
-from routers.bond import router as bond_router
-from routers.token_usage import router as token_usage_router
-from routers.images import router as images_router
-from routers.eval import router as eval_router
+from routers.market.bond import router as bond_router
+from routers.admin.token_usage import router as token_usage_router
+from routers.task.images import router as images_router
+from routers.admin.eval import router as eval_router
 from routers.analysis import (
     panorama_router as analysis_panorama_router,
     deep_dive_router as analysis_deep_dive_router,
@@ -126,36 +126,36 @@ from routers.analysis.behavior import router as behavior_router
 from routers.analysis.strategy_backtest import router as strategy_bt_router
 from routers.analysis.optimizer import router as optimizer_router
 from routers.analysis.forecast import router as forecast_router
-from routers.dashboard import router as dashboard_router
-from routers.config import router as config_router
-from routers.rag import router as rag_router
+from routers.dashboard.dashboard import router as dashboard_router
+from routers.admin.config import router as config_router
+from routers.knowledge.rag import router as rag_router
 # market_intelligence routes moved to routers/analysis/market_intel.py
-from routers.knowledge import router as knowledge_router
-from routers.watchlist import router as watchlist_router
+from routers.knowledge.knowledge import router as knowledge_router
+from routers.portfolio.watchlist import router as watchlist_router
 from routers.profile import router as profile_router                    # /api/profile/*
-from routers.async_tasks import router as async_tasks_router           # /api/async-tasks/*
-from routers.search import router as search_router                     # /api/search/*
-from routers.decisions import router as decisions_router               # /api/decisions/*
-from routers.finance_dashboard import router as finance_dashboard_router  # /api/finance-dashboard
+from routers.task.async_tasks import router as async_tasks_router           # /api/async-tasks/*
+from routers.knowledge.search import router as search_router                     # /api/search/*
+from routers.decision.decisions import router as decisions_router               # /api/decisions/*
+from routers.dashboard.finance_dashboard import router as finance_dashboard_router  # /api/finance-dashboard
 from routers.strategy_sandbox import router as strategy_sandbox_router  # /api/strategy-sandbox
 from routers.fund_manager import router as fund_manager_router  # /api/fund-manager
-from routers.data_health import router as data_health_router          # /api/data-health
-from routers.portfolio_import import router as portfolio_import_router  # /api/portfolio/import-csv
-from routers.opportunities import router as opportunities_router      # /api/opportunities/*
-from routers.daily_advice import router as daily_advice_router        # /api/daily-advice/*
-from routers.cost_governance import router as cost_governance_router  # /api/cost-governance/*
-from routers.thread_review import router as thread_review_router
-from routers.chat_images import router as chat_images_router, CHAT_IMAGES_DIR  # /api/thread-review/*
-from routers.suggestion_accuracy import router as suggestion_accuracy_router  # /api/suggestion-accuracy/*
-from routers.data_quality import router as data_quality_router  # /api/data-quality/*
-from routers.capabilities import router as capabilities_router  # /api/capabilities/*
-from routers.event_radar import router as event_radar_router  # /api/alerts/event-radar/*
-from routers.trade_plans import router as trade_plans_router  # /api/trade-plans/*
-from routers.strategies import router as strategies_router  # /api/strategies/*
-from routers.bucket_routes import router as bucket_routes_router  # /api/buckets/*
-from routers.memory_routes import router as memory_routes_router  # /api/memory/*
-from routers.finance_routes import router as finance_routes_router  # /api/finance/*
-from routers.notifications import router as notifications_router  # /api/notifications/*
+from routers.admin.data_health import router as data_health_router          # /api/data-health
+from routers.portfolio.portfolio_import import router as portfolio_import_router  # /api/portfolio/import-csv
+from routers.decision.opportunities import router as opportunities_router      # /api/opportunities/*
+from routers.dashboard.daily_advice import router as daily_advice_router        # /api/daily-advice/*
+from routers.admin.cost_governance import router as cost_governance_router  # /api/cost-governance/*
+from routers.conversation.thread_review import router as thread_review_router
+from routers.conversation.chat_images import router as chat_images_router, CHAT_IMAGES_DIR  # /api/thread-review/*
+from routers.decision.suggestion_accuracy import router as suggestion_accuracy_router  # /api/suggestion-accuracy/*
+from routers.admin.data_quality import router as data_quality_router  # /api/data-quality/*
+from routers.admin.capabilities import router as capabilities_router  # /api/capabilities/*
+from routers.market.event_radar import router as event_radar_router  # /api/alerts/event-radar/*
+from routers.portfolio.trade_plans import router as trade_plans_router  # /api/trade-plans/*
+from routers.portfolio.strategies import router as strategies_router  # /api/strategies/*
+from routers.portfolio.bucket_routes import router as bucket_routes_router  # /api/buckets/*
+from routers.conversation.memory_routes import router as memory_routes_router  # /api/memory/*
+from routers.dashboard.finance_routes import router as finance_routes_router  # /api/finance/*
+from routers.conversation.notifications import router as notifications_router  # /api/notifications/*
 from services.data_lineage import track_sources, get_lineage  # data lineage tracking
 
 # 注册路由
@@ -815,7 +815,7 @@ async def _auto_daily_report():
         # 1. 新闻
         news_context = ""
         try:
-            from routers.dashboard import get_hot_topics
+            from routers.dashboard.dashboard import get_hot_topics
             news_data = await get_hot_topics()
             news_list = news_data.get("news", [])[:8]
             news_context = "\n".join(
@@ -1051,7 +1051,7 @@ async def _auto_refresh_nav():
 
             # 净值刷新后自动触发预警扫描
             try:
-                from routers.portfolio import scan_portfolio_alerts
+                from routers.portfolio.portfolio import scan_portfolio_alerts
                 alert_result = await scan_portfolio_alerts()
                 logging.info(f"[auto-nav] 预警扫描完成: {alert_result}")
             except Exception as ae:

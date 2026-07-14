@@ -1,7 +1,7 @@
 <script setup>
 import { ref, computed } from 'vue'
-import { testRagSearch, submitRagFeedback } from '../api'
-import { useToast } from '../composables/useToast'
+import { testRagSearch, submitRagFeedback } from '../../api'
+import { useToast } from '../../composables/useToast'
 
 const { showToast } = useToast()
 

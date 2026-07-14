@@ -15,7 +15,7 @@ def seed_bond_knowledge():
     if existing > 0:
         conn.close()
         return False
-    md_path = os.path.join(os.path.dirname(__file__), "bond_knowledge.md")
+    md_path = os.path.join(os.path.dirname(__file__), "..", "docs", "bond_knowledge.md")
     try:
         with open(md_path, "r", encoding="utf-8") as f:
             content = f.read()

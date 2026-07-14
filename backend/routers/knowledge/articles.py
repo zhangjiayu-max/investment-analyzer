@@ -44,7 +44,7 @@ from services.article_reader import fetch_article, download_images
 from services.image_parser import ImageParser
 from services.rag import index_to_chroma, index_author_article
 from models.articles import ExtractUrlRequest
-from routers.tasks import CreateTaskRequest
+from routers.task.tasks import CreateTaskRequest
 
 router = APIRouter(tags=["articles"])
 

@@ -1,8 +1,8 @@
 <script setup>
 import { ref, onMounted, computed } from 'vue'
-import { getKnowledgeStats, getKnowledgeBooks, listKnowledge, searchKnowledge, deleteKnowledge } from '../api'
-import { useToast } from '../composables/useToast'
-import ConfirmDialog from './ConfirmDialog.vue'
+import { getKnowledgeStats, getKnowledgeBooks, listKnowledge, searchKnowledge, deleteKnowledge } from '../../api'
+import { useToast } from '../../composables/useToast'
+import ConfirmDialog from '../layout/ConfirmDialog.vue'
 
 const { showToast } = useToast()
 

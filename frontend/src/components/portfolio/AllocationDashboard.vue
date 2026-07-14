@@ -1,8 +1,8 @@
 <script setup>
 import { computed, onMounted, ref } from 'vue'
-import { getAllocationDashboard, runPortfolioStressTest, createDecision } from '../api'
-import { useToast } from '../composables/useToast'
-import Icon from './ui/Icon.vue'
+import { getAllocationDashboard, runPortfolioStressTest, createDecision } from '../../api'
+import { useToast } from '../../composables/useToast'
+import Icon from '../ui/Icon.vue'
 
 const { showToast } = useToast()
 

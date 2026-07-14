@@ -1,7 +1,7 @@
 <script setup>
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
-import { listGalleryRecords, uploadDdImage, listDdImages, listDdImageDates, deleteDdImage, parseAndSaveValuation, parseValuationBatch, parseDDImage, parseDDImageAsync, parseDDBatchAsync, getDDParseTask, pollDDParseTask, uploadValuationImage, listValuationImages, listValuationImageDates, deleteValuationImage, getSystemConfig, updateSystemConfig } from '../api'
-import ConfirmDialog from './ConfirmDialog.vue'
+import { listGalleryRecords, uploadDdImage, listDdImages, listDdImageDates, deleteDdImage, parseAndSaveValuation, parseValuationBatch, parseDDImage, parseDDImageAsync, parseDDBatchAsync, getDDParseTask, pollDDParseTask, uploadValuationImage, listValuationImages, listValuationImageDates, deleteValuationImage, getSystemConfig, updateSystemConfig } from '../../api'
+import ConfirmDialog from '../layout/ConfirmDialog.vue'
 
 // ── 并发限制工具函数 ──
 async function asyncPool(limit, items, fn) {

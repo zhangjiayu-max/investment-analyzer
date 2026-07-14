@@ -1,11 +1,11 @@
 <script setup>
 import { ref, watch, onMounted, onUnmounted, defineAsyncComponent } from 'vue'
-import Sidebar from './components/Sidebar.vue'
+import Sidebar from './components/layout/Sidebar.vue'
 import Home from './views/Home.vue'
 import MobileApp from './components/MobileApp.vue'
 import TickerBar from './components/finance/TickerBar.vue'
 import TaskNotification from './components/TaskNotification.vue'
-import OnboardingWelcome from './components/OnboardingWelcome.vue'
+import OnboardingWelcome from './components/family/OnboardingWelcome.vue'
 import { useMobile } from './composables/useMobile'
 import { useTaskTracker } from './composables/useTaskTracker'
 

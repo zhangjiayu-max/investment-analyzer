@@ -304,7 +304,7 @@ async def get_dashboard():
 
     bond_info = None
     try:
-        from routers.bond import _fetch_bond_data
+        from routers.market.bond import _fetch_bond_data
         raw_bond = _fetch_bond_data()
         if raw_bond and len(raw_bond) > 1:
             last = raw_bond[-1]

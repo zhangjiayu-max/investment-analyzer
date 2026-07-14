@@ -8,10 +8,10 @@ import {
   syncGoalBuckets,
   listDecisions,
   getDecisionPrecheck,
-} from '../api'
-import { useToast } from '../composables/useToast'
-import ConfirmDialog from './ConfirmDialog.vue'
-import Icon from './ui/Icon.vue'
+} from '../../api'
+import { useToast } from '../../composables/useToast'
+import ConfirmDialog from '../layout/ConfirmDialog.vue'
+import Icon from '../ui/Icon.vue'
 
 const { showToast } = useToast()
 

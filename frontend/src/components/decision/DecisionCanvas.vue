@@ -1,6 +1,6 @@
 <script setup>
 import { ref, computed, onMounted } from 'vue'
-import { getDecisionCanvas } from '../api'
+import { getDecisionCanvas } from '../../api'
 
 const emit = defineEmits(['navigate'])
 

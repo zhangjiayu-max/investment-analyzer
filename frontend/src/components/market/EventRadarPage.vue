@@ -15,9 +15,9 @@ import {
   getBuyScore, getFundQuality,
   getPortfolioHealthReport, getPortfolioRiskMetrics,
   getMasterDecisionHistory, getMasterAccuracyStats, triggerMasterVerification,
-} from '../api'
-import Icon from './ui/Icon.vue'
-import { useToast } from '../composables/useToast'
+} from '../../api'
+import Icon from '../ui/Icon.vue'
+import { useToast } from '../../composables/useToast'
 
 const emit = defineEmits(['navigate'])
 

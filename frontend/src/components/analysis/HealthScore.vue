@@ -3,9 +3,9 @@ import { ref, onMounted, computed } from 'vue'
 import {
   calculateHealthScore, getTodayHealthScore,
   getHealthHistory, getStockBondRatio, getFearGreedIndex,
-} from '../api'
-import { useToast } from '../composables/useToast'
-import EmptyState from './ui/EmptyState.vue'
+} from '../../api'
+import { useToast } from '../../composables/useToast'
+import EmptyState from '../ui/EmptyState.vue'
 
 const { showToast } = useToast()
 

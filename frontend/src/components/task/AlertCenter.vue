@@ -3,11 +3,11 @@ import { ref, computed, onMounted, onActivated } from 'vue'
 import {
   listAlerts, getUnreadAlertCount, markAlertRead, deleteAlert, scanPortfolioAlerts,
   dailyAdviceAPI, getAlertHistory, comprehensiveInterpretation, acknowledgeAlert,
-} from '../api'
-import { useToast } from '../composables/useToast'
-import ConfirmDialog from './ConfirmDialog.vue'
-import Skeleton from './ui/Skeleton.vue'
-import { renderMarkdown } from '../composables/useMarkdown'
+} from '../../api'
+import { useToast } from '../../composables/useToast'
+import ConfirmDialog from '../layout/ConfirmDialog.vue'
+import Skeleton from '../ui/Skeleton.vue'
+import { renderMarkdown } from '../../composables/useMarkdown'
 
 const emit = defineEmits(['navigate'])
 

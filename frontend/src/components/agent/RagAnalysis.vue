@@ -1,6 +1,6 @@
 <script setup>
 import { ref, onMounted } from 'vue'
-import { getRagStats, getRagLogs, getRagIndexStats, getAuthorArticle, runRagEval, runRagEvalSuite, getRagEvalResults } from '../api'
+import { getRagStats, getRagLogs, getRagIndexStats, getAuthorArticle, runRagEval, runRagEvalSuite, getRagEvalResults } from '../../api'
 
 const stats = ref(null)
 const indexStats = ref(null)

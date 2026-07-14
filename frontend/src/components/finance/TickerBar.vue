@@ -10,7 +10,7 @@
 import { ref, onMounted, onUnmounted } from 'vue'
 import Icon from '../ui/Icon.vue'
 import Sparkline from './Sparkline.vue'
-import AlertBell from '../AlertBell.vue'
+import AlertBell from '../task/AlertBell.vue'
 import { getDashboard, getFinanceQuoteBar, getInstitutionalFlowSummary } from '../../api'
 import { isDark, toggleDark } from '../../composables/useTheme'
 

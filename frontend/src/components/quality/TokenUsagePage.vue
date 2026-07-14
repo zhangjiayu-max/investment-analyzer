@@ -5,8 +5,8 @@ import {
   getTokenUsageDaily, getPerformanceStats, getPerformanceByAgent, getRunningAgents,
   clearTokenUsage, getTokenUsageCost, getTokenUsageByModel, getTokenUsageHourly,
   getTokenUsageTrace, getTokenUsageBudget
-} from '../api'
-import ConfirmDialog from './ConfirmDialog.vue'
+} from '../../api'
+import ConfirmDialog from '../layout/ConfirmDialog.vue'
 
 // ── 费用计算（A3 修复：与后端 infra/cost_tracker.py 统一定价） ──
 const MODEL_PRICING = {

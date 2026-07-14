@@ -19,8 +19,8 @@ import {
   getCandidateFunds,
   generateTradePlan,
 } from '../api'
-import ConfirmDialog from './ConfirmDialog.vue'
-import AppToast from './AppToast.vue'
+import ConfirmDialog from './layout/ConfirmDialog.vue'
+import AppToast from './layout/AppToast.vue'
 import { ChatSidebar, ChatMessage, ChatInput, StreamIndicator, FeedbackModal } from './chat'
 import TradeExecuteDialog from './chat/TradeExecuteDialog.vue'
 import Icon from './ui/Icon.vue'

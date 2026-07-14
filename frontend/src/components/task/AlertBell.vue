@@ -7,8 +7,8 @@
  * 每 60 秒轮询未读数，点击展开最近 10 条。
  */
 import { ref, onMounted, onUnmounted, computed } from 'vue'
-import Icon from './ui/Icon.vue'
-import { listAlerts, getUnreadAlertCount, markAlertRead, acknowledgeAlert } from '../api'
+import Icon from '../ui/Icon.vue'
+import { listAlerts, getUnreadAlertCount, markAlertRead, acknowledgeAlert } from '../../api'
 
 const emit = defineEmits(['navigate', 'openNotifications'])
 

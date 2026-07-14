@@ -1,10 +1,10 @@
 <script setup>
 import { ref, watch, computed, onBeforeUnmount } from 'vue'
 import { marked } from 'marked'
-import { getTask, getTaskImages, pollTask, chat, analyzeTaskImages } from '../api'
-import ImageGrid from './ImageGrid.vue'
-import StockChart from './StockChart.vue'
-import ValuationHistory from './ValuationHistory.vue'
+import { getTask, getTaskImages, pollTask, chat, analyzeTaskImages } from '../../api'
+import ImageGrid from '../knowledge/ImageGrid.vue'
+import StockChart from '../valuation/StockChart.vue'
+import ValuationHistory from '../valuation/ValuationHistory.vue'
 
 const props = defineProps({ taskId: Number })
 const emit = defineEmits(['back'])

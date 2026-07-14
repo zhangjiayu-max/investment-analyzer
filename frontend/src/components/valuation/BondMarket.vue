@@ -1,6 +1,6 @@
 <script setup>
 import { ref, onMounted, onUnmounted, nextTick, computed } from 'vue'
-import { getBondMarketTemperature } from '../api'
+import { getBondMarketTemperature } from '../../api'
 
 const chartRef = ref(null)
 const loading = ref(true)

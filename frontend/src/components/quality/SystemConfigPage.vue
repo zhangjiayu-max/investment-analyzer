@@ -1,7 +1,7 @@
 <script setup>
 import { ref, computed, onMounted } from 'vue'
-import { getSystemConfigs, updateSystemConfig, resetSystemConfigs } from '../api'
-import ConfirmDialog from './ConfirmDialog.vue'
+import { getSystemConfigs, updateSystemConfig, resetSystemConfigs } from '../../api'
+import ConfirmDialog from '../layout/ConfirmDialog.vue'
 
 const loading = ref(true)
 const configs = ref([])

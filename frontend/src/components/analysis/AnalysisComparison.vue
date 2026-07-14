@@ -1,6 +1,6 @@
 <script setup>
 import { ref, watch, onMounted, computed } from 'vue'
-import { listPanoramaRecords, listDeepDiveRecords, listTradeReviewRecords, getPortfolioAiAnalysisRecord } from '../api'
+import { listPanoramaRecords, listDeepDiveRecords, listTradeReviewRecords, getPortfolioAiAnalysisRecord } from '../../api'
 
 const props = defineProps({
   recordType: { type: String, default: 'panorama' },

@@ -41,7 +41,7 @@ def test_dca_result_creates_dca_candidates(tmp_db):
 
 
 def test_watchlist_trigger_creates_add_candidate(tmp_db):
-    from routers.watchlist import save_watchlist_trigger_candidate
+    from routers.portfolio.watchlist import save_watchlist_trigger_candidate
 
     item = {
         "id": 3,
@@ -61,7 +61,7 @@ def test_watchlist_trigger_creates_add_candidate(tmp_db):
 
 
 def test_rebalance_drift_creates_rebalance_candidate(tmp_db):
-    from routers.portfolio import save_rebalance_drift_candidate
+    from routers.portfolio.portfolio import save_rebalance_drift_candidate
 
     create_holding("000003", "偏离基金", shares=100, cost_price=1, current_price=1)
     candidate_id = save_rebalance_drift_candidate({

@@ -4,10 +4,10 @@ import {
   listAuthorArticles, getAuthorArticle,
   deleteAuthorArticle, crawlSingleAuthorArticle,
   extractAuthorArticle, createAuthorArticle,
-} from '../api'
-import ConfirmDialog from './ConfirmDialog.vue'
-import AppToast from './AppToast.vue'
-import { useToast } from '../composables/useToast'
+} from '../../api'
+import ConfirmDialog from '../layout/ConfirmDialog.vue'
+import AppToast from '../layout/AppToast.vue'
+import { useToast } from '../../composables/useToast'
 
 const { showToast } = useToast()
 

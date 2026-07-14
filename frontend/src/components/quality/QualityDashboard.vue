@@ -411,7 +411,7 @@
 
 <script setup>
 import { ref, onMounted } from 'vue'
-import { getQualitySummary, getQualityTrend, getLowQualityItems, getEvalStatsByAgent, getPerformanceStats, getPerformanceByAgent, getConversationEvalStats, listConversationEvaluations, getEvolutionStats, listEvalSuggestions, acceptEvalSuggestion, rejectEvalSuggestion, getExpertAlerts } from '../api'
+import { getQualitySummary, getQualityTrend, getLowQualityItems, getEvalStatsByAgent, getPerformanceStats, getPerformanceByAgent, getConversationEvalStats, listConversationEvaluations, getEvolutionStats, listEvalSuggestions, acceptEvalSuggestion, rejectEvalSuggestion, getExpertAlerts } from '../../api'
 
 const loading = ref(true)
 const summary = ref({})

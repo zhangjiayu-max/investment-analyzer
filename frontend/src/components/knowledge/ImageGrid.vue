@@ -1,6 +1,6 @@
 <script setup>
 import { ref } from 'vue'
-import { parseAndSaveValuation } from '../api'
+import { parseAndSaveValuation } from '../../api'
 
 const props = defineProps({ images: Array })
 const emit = defineEmits(['parsed'])

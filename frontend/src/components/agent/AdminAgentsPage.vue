@@ -1,9 +1,9 @@
 <script setup>
 import { ref, onMounted, onUnmounted, onDeactivated, computed } from 'vue'
-import { listAgents, getAgent, updateAgent, deleteAgent, listAnalysisAgents, updateAnalysisAgent, generateAgentPrompt, listAgentVersions, rollbackAgentPrompt, listAnalysisAgentVersions, rollbackAnalysisAgentPrompt, getAgentRegressionResult } from '../api'
-import ConfirmDialog from './ConfirmDialog.vue'
-import AppToast from './AppToast.vue'
-import { useToast } from '../composables/useToast'
+import { listAgents, getAgent, updateAgent, deleteAgent, listAnalysisAgents, updateAnalysisAgent, generateAgentPrompt, listAgentVersions, rollbackAgentPrompt, listAnalysisAgentVersions, rollbackAnalysisAgentPrompt, getAgentRegressionResult } from '../../api'
+import ConfirmDialog from '../layout/ConfirmDialog.vue'
+import AppToast from '../layout/AppToast.vue'
+import { useToast } from '../../composables/useToast'
 
 const { showToast } = useToast()
 

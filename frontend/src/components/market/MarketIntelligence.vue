@@ -237,9 +237,9 @@
 
 <script setup>
 import { ref, computed, onMounted } from 'vue'
-import { getMarketIntelligenceOverview, triggerMarketIntelligence } from '../api'
-import { useAsyncTask } from '../composables/useAsyncTask'
-import Icon from './ui/Icon.vue'
+import { getMarketIntelligenceOverview, triggerMarketIntelligence } from '../../api'
+import { useAsyncTask } from '../../composables/useAsyncTask'
+import Icon from '../ui/Icon.vue'
 
 const { taskState, taskResult, taskError, start, restore, reset } = useAsyncTask('market_intelligence')
 const loading = ref(false)

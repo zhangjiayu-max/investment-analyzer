@@ -1,8 +1,8 @@
 <!-- 全局搜索结果页 -->
 <script setup>
 import { ref, watch, computed } from 'vue'
-import { globalSearch } from '../api'
-import EmptyState from './ui/EmptyState.vue'
+import { globalSearch } from '../../api'
+import EmptyState from '../ui/EmptyState.vue'
 
 const props = defineProps({
   query: { type: String, default: '' },

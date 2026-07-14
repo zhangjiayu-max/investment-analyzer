@@ -2,7 +2,7 @@
 import { computed, ref } from 'vue'
 import { renderMarkdown } from '../../composables/useMarkdown'
 import Icon from '../ui/Icon.vue'
-import TraceDetail from '../TraceDetail.vue'
+import TraceDetail from '../task/TraceDetail.vue'
 import ReasoningPanel from './ReasoningPanel.vue'
 
 const props = defineProps({

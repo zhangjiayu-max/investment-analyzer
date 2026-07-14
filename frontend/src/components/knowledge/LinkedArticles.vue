@@ -1,10 +1,10 @@
 <script setup>
 import { ref, computed, onMounted } from 'vue'
-import { listLinkedArticles, uploadDocument, downloadDocument, deleteLinkedArticle, getDocumentContent, embedDocument, getDocumentChunks } from '../api'
-import { renderMarkdown } from '../composables/useMarkdown'
-import ConfirmDialog from './ConfirmDialog.vue'
-import AppToast from './AppToast.vue'
-import { useToast } from '../composables/useToast'
+import { listLinkedArticles, uploadDocument, downloadDocument, deleteLinkedArticle, getDocumentContent, embedDocument, getDocumentChunks } from '../../api'
+import { renderMarkdown } from '../../composables/useMarkdown'
+import ConfirmDialog from '../layout/ConfirmDialog.vue'
+import AppToast from '../layout/AppToast.vue'
+import { useToast } from '../../composables/useToast'
 
 const { showToast } = useToast()
 

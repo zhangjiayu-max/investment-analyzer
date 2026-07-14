@@ -1,6 +1,6 @@
 <script setup>
 import { ref, onMounted, computed } from 'vue'
-import { useToast } from '../composables/useToast'
+import { useToast } from '../../composables/useToast'
 
 const { showToast } = useToast()
 

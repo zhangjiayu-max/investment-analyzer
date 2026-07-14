@@ -1,7 +1,7 @@
 <script setup>
 import { ref, onMounted } from 'vue'
-import { listTasks, deleteTask } from '../api'
-import ConfirmDialog from './ConfirmDialog.vue'
+import { listTasks, deleteTask } from '../../api'
+import ConfirmDialog from '../layout/ConfirmDialog.vue'
 
 const emit = defineEmits(['select', 'newTask'])
 const confirm = ref({ visible: false, title: '', message: '', danger: false, onConfirm: null })

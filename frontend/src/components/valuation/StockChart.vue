@@ -1,7 +1,7 @@
 <script setup>
 import { ref, onMounted, onUnmounted } from 'vue'
-import { getChart } from '../api'
-import { isDark } from '../composables/useTheme'
+import { getChart } from '../../api'
+import { isDark } from '../../composables/useTheme'
 
 const props = defineProps({
   symbol: String,

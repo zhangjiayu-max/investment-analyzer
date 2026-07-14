@@ -6,12 +6,12 @@ import {
   batchConvertBadCases, extractEvalFromConversations, runAutoRegression,
   listPromptVersions, savePromptVersion, activatePromptVersion, comparePrompt,
   listDailyReports, triggerDailyEval, autoGenerateEvalCases,
-} from '../api'
-import { useAsyncTask } from '../composables/useAsyncTask'
-import ConfirmDialog from './ConfirmDialog.vue'
-import AppToast from './AppToast.vue'
-import { useToast } from '../composables/useToast'
-import { renderMarkdown } from '../composables/useMarkdown'
+} from '../../api'
+import { useAsyncTask } from '../../composables/useAsyncTask'
+import ConfirmDialog from '../layout/ConfirmDialog.vue'
+import AppToast from '../layout/AppToast.vue'
+import { useToast } from '../../composables/useToast'
+import { renderMarkdown } from '../../composables/useMarkdown'
 
 const { showToast } = useToast()
 const confirm = ref({ visible: false, title: '', message: '', danger: false, onConfirm: null })

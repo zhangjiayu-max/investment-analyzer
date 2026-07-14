@@ -9,32 +9,68 @@
 ```
 investment-analyzer/
 ├── backend/
-│   ├── app.py              # FastAPI 入口，所有 API 路由（146 条）
+│   ├── app.py              # FastAPI 入口
 │   ├── config.py           # 环境变量配置
-│   ├── llm_service.py      # LLM 调用封装（重试、流式、token 记录）
-│   ├── rag.py              # RAG 检索（FTS5 + ChromaDB）
-│   ├── tools/              # Agent 工具定义 + 执行器（__init__.py）
-│   ├── agent/              # 多 Agent 协作
-│   │   ├── multi_agent.py  #   专家 Agent 定义 + run_specialist()
-│   │   └── orchestrator.py #   主控编排 + clarification
-│   ├── mcp/                # MCP 协议客户端
-│   │   ├── yingmi_client.py#   盈米且慢 MCP（Streamable HTTP）
-│   │   └── trading_calendar.py
-│   ├── db/                 # SQLite 数据层
-│   │   ├── core.py         #   连接管理 _get_conn()、init_db()
-│   │   ├── portfolio.py    #   持仓/交易/现金/预警
-│   │   ├── agents.py       #   对话/消息/Agent 运行
-│   │   └── ...             #   文章/估值/评测/反馈等模块
-│   ├── article_reader.py   # 公众号文章抓取
-│   ├── market_data.py      # 行情数据（akshare）
-│   ├── valuation.py        # PE/PB 百分位估值分析
-│   ├── image_parser.py     # 图片估值解析
+│   ├── docs/               # 非代码文档（bond_knowledge.md, skill_document.md）
+│   ├── agent/              # 多 Agent 协作（按功能分子目录）
+│   │   ├── core/           #   编排核心（orchestrator, pipeline, multi_agent, router）
+│   │   ├── memory/         #   记忆系统（memory, feedback_learner, kyc_learner）
+│   │   ├── eval/           #   评估系统（conversation_evaluator, eval_scorer）
+│   │   ├── safety/         #   安全防幻觉（hallucination_guard, prompt_defense）
+│   │   ├── infra/          #   基础设施（cache, blackboard, tool_broadcast）
+│   │   ├── query/          #   查询处理（query_rewriter, multi_hop_rag）
+│   │   ├── kyc/            #   KYC 画像（kyc, wealth_advisor）
+│   │   └── state/          #   状态管理（pipeline_state, ab_testing）
+│   ├── routers/            # API 路由（按功能分子目录）
+│   │   ├── conversation/   #   对话系统
+│   │   ├── portfolio/      #   持仓管理
+│   │   ├── market/         #   市场数据
+│   │   ├── dashboard/      #   看板
+│   │   ├── knowledge/      #   知识库
+│   │   ├── admin/          #   系统管理
+│   │   ├── decision/       #   决策系统
+│   │   ├── task/           #   任务管理
+│   │   └── analysis/       #   持仓分析
+│   ├── services/           # 业务服务层（按功能分子目录）
+│   │   ├── llm/            #   LLM 服务
+│   │   ├── rag/            #   RAG 检索
+│   │   ├── fund/           #   基金分析
+│   │   ├── portfolio/      #   组合管理
+│   │   ├── valuation/      #   估值分析
+│   │   ├── advisor/        #   投资建议
+│   │   ├── market/         #   市场数据
+│   │   ├── strategy/       #   策略引擎
+│   │   └── ...             #   content/conversation/finance/quality/index
+│   ├── tools/              # Agent 工具定义 + 执行器
+│   ├── mcp/                # MCP 协议客户端（盈米/东方财富/天天基金）
+│   ├── db/                 # SQLite 数据层（_conn.py 连接管理 + 按领域分模块）
+│   ├── infra/              # 基础设施（熔断器/成本追踪/影子模式）
+│   ├── models/             # Pydantic 请求模型
+│   ├── api/                # 统一响应协议 + 异常处理
+│   ├── scripts/            # 运维脚本
 │   └── data/               # SQLite + 图片
 ├── frontend/
 │   └── src/
 │       ├── api/index.js    # 所有 API 调用（axios）
 │       ├── views/Home.vue  # activePage + v-if 路由切换
 │       ├── components/     # 按功能划分的页面组件
+│       │   ├── layout/     #   布局组件（Sidebar, ConfirmDialog）
+│       │   ├── dashboard/  #   仪表盘卡片
+│       │   ├── chat/       #   对话组件
+│       │   ├── charts/     #   图表组件
+│       │   ├── finance/    #   金融可视化
+│       │   ├── ui/         #   通用 UI
+│       │   ├── mobile/     #   移动端
+│       │   ├── valuation/  #   估值分析
+│       │   ├── portfolio/  #   持仓管理
+│       │   ├── decision/   #   决策系统
+│       │   ├── agent/      #   Agent 管理
+│       │   ├── knowledge/  #   知识库
+│       │   ├── task/       #   任务与监控
+│       │   ├── quality/    #   质量评测
+│       │   ├── family/     #   家庭财务
+│       │   ├── market/     #   市场分析
+│       │   └── analysis/   #   分析结果
 │       └── style.css       # CSS 变量设计系统
 ├── doc/plans/              # 设计文档（日期前缀命名）
 └── static/                 # 构建产物

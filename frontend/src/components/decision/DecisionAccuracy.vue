@@ -6,10 +6,10 @@ import {
   getAccuracyTrend,
   getRecentVerified,
   getAdoptionStats,
-} from '../api'
-import { useToast } from '../composables/useToast'
-import Icon from './ui/Icon.vue'
-import EmptyState from './ui/EmptyState.vue'
+} from '../../api'
+import { useToast } from '../../composables/useToast'
+import Icon from '../ui/Icon.vue'
+import EmptyState from '../ui/EmptyState.vue'
 
 const { showToast } = useToast()
 

@@ -3,7 +3,7 @@ import { ref, watch, computed, reactive } from 'vue'
 import {
   getKycQuestionnaire, submitKyc, updateProfile, getProfile,
   listInvestmentGoals, createInvestmentGoal,
-} from '../api'
+} from '../../api'
 
 const props = defineProps({
   visible: Boolean,

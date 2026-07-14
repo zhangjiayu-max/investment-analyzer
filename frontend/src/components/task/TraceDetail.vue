@@ -1,6 +1,6 @@
 <script setup>
 import { ref, onMounted } from 'vue'
-import { getTraceDetail } from '../api'
+import { getTraceDetail } from '../../api'
 
 const props = defineProps({
   convId: { type: Number, required: true },
