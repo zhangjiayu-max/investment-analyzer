@@ -1300,7 +1300,15 @@ def auto_confirm_due_transactions(as_of_date: str | None = None, user_id: str = 
             })
             continue
         try:
-            ok = confirm_transaction(tx["id"], confirmed_price=float(nav_data["nav"]))
+            # 按费率自动计算手续费（开关 fee.auto_calc_enabled，默认 true）
+            fee = 0.0
+            try:
+                from services.fee_calculator import calc_fee_for_tx
+                holding = get_holding(tx["holding_id"]) if tx.get("holding_id") else None
+                fee, _ = calc_fee_for_tx(tx, float(nav_data["nav"]), holding)
+            except Exception as e:
+                logger.warning(f"交易 {tx['id']} 手续费计算失败，按0处理: {e}")
+            ok = confirm_transaction(tx["id"], confirmed_price=float(nav_data["nav"]), fee=fee)
             if ok:
                 confirmed += 1
             else:
@@ -2725,7 +2733,7 @@ def get_transaction_summary(user_id: str = "default") -> dict:
     recent = conn.execute("""
         SELECT t.id, t.fund_code, t.transaction_type, t.shares, t.price, t.amount,
                t.transaction_date, t.status, t.is_system,
-               COALESCE(h.fund_name, '') as fund_name,
+               COALESCE(t.fund_name, h.fund_name, '') as fund_name,
                COALESCE(h.index_name, '') as index_name
         FROM portfolio_transactions t
         LEFT JOIN portfolio_holdings h ON t.holding_id = h.id
