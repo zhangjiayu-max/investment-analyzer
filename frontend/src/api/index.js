@@ -2288,6 +2288,20 @@ export const batchFundQuality = (fundCodes) =>
 export const refreshFundQuality = (fundCodes = null) =>
   api.post('/analysis/fund-quality/refresh', { fund_codes: fundCodes })
 
+// ── 组合智能 API ──────────────────────────────────────────
+
+/** 组合风险度量（波动率/VaR/CVaR/最大回撤/夏普） */
+export const getPortfolioRiskMetrics = (days = 365) =>
+  api.get('/analysis/portfolio-intelligence/risk-metrics', { params: { days } })
+
+/** 组合7维体检报告（聚合版 + 大师组合版） */
+export const getPortfolioHealthReport = (forceRefresh = false) =>
+  api.get('/analysis/portfolio-intelligence/health-report', { params: { force_refresh: forceRefresh } })
+
+/** 大师矩阵组合版 */
+export const getPortfolioMasterMatrix = () =>
+  api.get('/analysis/portfolio-intelligence/master-matrix')
+
 // ── 异步任务状态 API ──────────────────────────────────────
 
 /** 查询异步任务状态 */

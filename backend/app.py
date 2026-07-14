@@ -117,6 +117,7 @@ from routers.analysis import (
     institutional_flow_router as analysis_institutional_flow_router,
     smart_add_router as analysis_smart_add_router,
     fund_quality_router as analysis_fund_quality_router,
+    portfolio_intelligence_router as analysis_portfolio_intelligence_router,
 )
 # 理财决策升级 6 项分析路由（accuracy 已在上方 import 块中注册）
 from routers.analysis.attribution import router as attribution_router
@@ -197,6 +198,7 @@ app.include_router(analysis_accuracy_router)
 app.include_router(analysis_institutional_flow_router)
 app.include_router(analysis_smart_add_router)
 app.include_router(analysis_fund_quality_router)
+app.include_router(analysis_portfolio_intelligence_router)
 # 理财决策升级 5 项分析路由（accuracy 已注册）
 app.include_router(attribution_router)
 app.include_router(behavior_router)

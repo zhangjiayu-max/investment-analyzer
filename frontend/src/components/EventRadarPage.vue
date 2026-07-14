@@ -13,6 +13,7 @@ import {
   listWatchlist, addToWatchlist, removeWatchlistItem, refreshWatchlistNavs,
   triggerWatchlistScan, patrolWatchlist, updateWatchlistItem, analyzeArticleTrends,
   getBuyScore, getFundQuality,
+  getPortfolioHealthReport, getPortfolioRiskMetrics,
 } from '../api'
 import Icon from './ui/Icon.vue'
 import { useToast } from '../composables/useToast'
@@ -50,6 +51,13 @@ const fundReports = ref({})
 const loadingReports = ref({})
 // 体检报告详情弹窗当前展示的报告对象
 const reportDetailItem = ref(null)
+
+// ── 组合智能 ──
+// 组合7维体检+大师组合版（getPortfolioHealthReport）
+const portfolioData = ref(null)
+// 组合风险度量（getPortfolioRiskMetrics）
+const portfolioRisk = ref(null)
+const loadingPortfolio = ref(false)
 
 const FILTERS = [
   { key: 'all', label: '全部', icon: 'satellite' },
@@ -435,6 +443,28 @@ function toggleMaster(fundCode, masterKey) {
   expandedMasters.value = { ...expandedMasters.value, [key]: !expandedMasters.value[key] }
 }
 
+/** 切换组合智能大师卡片展开/收起 */
+function togglePortfolioMaster(masterKey) {
+  const key = `portfolio:${masterKey}`
+  expandedMasters.value = { ...expandedMasters.value, [key]: !expandedMasters.value[key] }
+}
+
+/** 夏普比率颜色：>1绿 / 0-1蓝 / <0红 */
+function sharpeColorClass(v) {
+  if (v == null) return ''
+  if (v > 1) return 'risk-good'
+  if (v >= 0) return 'risk-normal'
+  return 'risk-bad'
+}
+
+/** 波动率颜色：<15%绿 / 15-25%黄 / >25%红 */
+function volatilityColorClass(v) {
+  if (v == null) return ''
+  if (v < 15) return 'risk-good'
+  if (v <= 25) return 'risk-warn'
+  return 'risk-bad'
+}
+
 /** 静默巡检：刷新估值分位，更新 watchlist 数据 */
 async function autoPatrol() {
   if (patrolling.value) return
@@ -718,10 +748,26 @@ function watchlistSignalState(item) {
   return { state: 'waiting', label: '等待到位', cls: 'sig-waiting' }
 }
 
+/** 加载组合智能数据（7维体检+大师组合版+风险度量） */
+async function loadPortfolioIntelligence() {
+  loadingPortfolio.value = true
+  try {
+    const [healthRes, riskRes] = await Promise.allSettled([
+      getPortfolioHealthReport(),
+      getPortfolioRiskMetrics(),
+    ])
+    if (healthRes.status === 'fulfilled') portfolioData.value = healthRes.value?.data || null
+    if (riskRes.status === 'fulfilled') portfolioRisk.value = riskRes.value?.data || null
+  } catch { /* 静默失败 */ } finally {
+    loadingPortfolio.value = false
+  }
+}
+
 onMounted(() => {
   loadEvents()
   loadAccuracy()
   loadWatchlist()
+  loadPortfolioIntelligence()
 })
 </script>
 
@@ -976,6 +1022,284 @@ onMounted(() => {
 
     <!-- ════ Tab 2：关注机会 ════ -->
     <template v-if="activeTab === 'watchlist'">
+      <!-- ════ 组合智能面板 ════ -->
+      <div class="portfolio-intelligence-panel">
+        <div class="pi-header">
+          <div class="pi-header-left">
+            <Icon name="activity" size="16" class="pi-header-icon" />
+            <h3 class="pi-title">组合智能</h3>
+          </div>
+          <button class="btn-pi-refresh" @click="loadPortfolioIntelligence" :disabled="loadingPortfolio">
+            <Icon :name="loadingPortfolio ? 'spinner' : 'refresh-cw'" size="12" :class="{ spinning: loadingPortfolio }" />
+            <span>{{ loadingPortfolio ? '分析中...' : '刷新' }}</span>
+          </button>
+        </div>
+
+        <!-- 加载中 -->
+        <div v-if="loadingPortfolio && !portfolioData" class="pi-loading">
+          <Icon name="spinner" size="20" class="spinning" />
+          <span>组合智能分析中...</span>
+        </div>
+
+        <template v-else-if="portfolioData">
+          <!-- 数据降级提示 -->
+          <div v-if="portfolioData.data_status === 'degraded'" class="pi-degraded">
+            <Icon name="alert-triangle" size="12" />
+            <span>数据降级：持仓数据不足，部分指标可能不准确</span>
+          </div>
+
+          <!-- 2.1 组合风险卡片 -->
+          <div v-if="portfolioRisk" class="pi-section">
+            <div class="pi-section-title">
+              <Icon name="trending-up" size="12" />
+              <span>组合风险度量</span>
+            </div>
+            <div class="pi-risk-grid">
+              <div class="pi-risk-card">
+                <div class="pi-risk-label">年化波动率</div>
+                <div class="pi-risk-value" :class="volatilityColorClass(portfolioRisk.portfolio_volatility)">
+                  {{ portfolioRisk.portfolio_volatility != null ? Number(portfolioRisk.portfolio_volatility).toFixed(2) + '%' : '—' }}
+                </div>
+              </div>
+              <div class="pi-risk-card">
+                <div class="pi-risk-label">VaR 95% (1日)</div>
+                <div class="pi-risk-value risk-bad">
+                  {{ portfolioRisk.var_95_daily != null ? Number(portfolioRisk.var_95_daily).toFixed(2) + '%' : '—' }}
+                </div>
+                <div v-if="portfolioRisk.var_95_amount != null" class="pi-risk-sub">
+                  ≈ ¥{{ Number(portfolioRisk.var_95_amount).toLocaleString() }}
+                </div>
+              </div>
+              <div class="pi-risk-card">
+                <div class="pi-risk-label">CVaR 95%</div>
+                <div class="pi-risk-value risk-bad">
+                  {{ portfolioRisk.cvar_95_daily != null ? Number(portfolioRisk.cvar_95_daily).toFixed(2) + '%' : '—' }}
+                </div>
+                <div v-if="portfolioRisk.cvar_95_amount != null" class="pi-risk-sub">
+                  ≈ ¥{{ Number(portfolioRisk.cvar_95_amount).toLocaleString() }}
+                </div>
+              </div>
+              <div class="pi-risk-card">
+                <div class="pi-risk-label">最大回撤</div>
+                <div class="pi-risk-value risk-bad">
+                  {{ portfolioRisk.max_drawdown != null ? Number(portfolioRisk.max_drawdown).toFixed(2) + '%' : '—' }}
+                </div>
+                <div v-if="portfolioRisk.recovery_days != null" class="pi-risk-sub">
+                  恢复 {{ portfolioRisk.recovery_days }} 天
+                </div>
+              </div>
+              <div class="pi-risk-card">
+                <div class="pi-risk-label">夏普比率</div>
+                <div class="pi-risk-value" :class="sharpeColorClass(portfolioRisk.sharpe_ratio)">
+                  {{ portfolioRisk.sharpe_ratio != null ? Number(portfolioRisk.sharpe_ratio).toFixed(2) : '—' }}
+                </div>
+              </div>
+              <div class="pi-risk-card">
+                <div class="pi-risk-label">Sortino 比率</div>
+                <div class="pi-risk-value" :class="sharpeColorClass(portfolioRisk.sortino_ratio)">
+                  {{ portfolioRisk.sortino_ratio != null ? Number(portfolioRisk.sortino_ratio).toFixed(2) : '—' }}
+                </div>
+              </div>
+              <div class="pi-risk-card">
+                <div class="pi-risk-label">Effective N</div>
+                <div class="pi-risk-value">
+                  {{ portfolioRisk.effective_n != null ? Number(portfolioRisk.effective_n).toFixed(2) : '—' }}
+                </div>
+              </div>
+              <div class="pi-risk-card">
+                <div class="pi-risk-label">平均相关系数</div>
+                <div class="pi-risk-value">
+                  {{ portfolioRisk.avg_correlation != null ? Number(portfolioRisk.avg_correlation).toFixed(2) : '—' }}
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- 2.2 组合7维体检 -->
+          <div v-if="portfolioData.portfolio_total_score != null" class="pi-section">
+            <div class="pi-section-title">
+              <Icon name="activity" size="12" />
+              <span>组合7维体检</span>
+            </div>
+            <div class="pi-health-summary">
+              <span class="pi-health-score" :class="scoreColorClass(portfolioData.portfolio_total_score)">
+                {{ portfolioData.portfolio_total_score }}
+              </span>
+              <span class="pi-health-rating" :class="scoreColorClass(portfolioData.portfolio_total_score)">
+                {{ scoreRatingLabel(portfolioData.portfolio_total_score) }}
+              </span>
+              <span
+                v-if="portfolioData.portfolio_decision?.action || portfolioData.portfolio_decision?.action_label"
+                class="pi-health-action"
+                :class="ACTION_LABELS[portfolioData.portfolio_decision?.action]?.class"
+              >
+                {{ portfolioData.portfolio_decision?.action_label || ACTION_LABELS[portfolioData.portfolio_decision?.action]?.label || '—' }}
+              </span>
+            </div>
+            <div v-if="portfolioData.portfolio_decision?.reason" class="pi-health-reason">
+              {{ portfolioData.portfolio_decision.reason }}
+            </div>
+            <div v-if="portfolioData.portfolio_report" class="pi-health-dims">
+              <div
+                v-for="(dim, key) in portfolioData.portfolio_report"
+                :key="key"
+                class="pi-health-dim"
+              >
+                <div class="pi-health-dim-head">
+                  <span class="pi-health-dim-label">{{ DIMENSION_LABELS[key] || dim.label || key }}</span>
+                  <span class="pi-health-dim-score" :class="scoreColorClass(dim.score)">{{ dim.score }}</span>
+                </div>
+                <div class="pi-health-dim-bar">
+                  <div
+                    class="pi-health-dim-fill"
+                    :class="scoreColorClass(dim.score)"
+                    :style="{ width: `${dim.score}%` }"
+                  ></div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- 2.3 大师矩阵组合版 -->
+          <div v-if="portfolioData.master_perspectives" class="pi-section">
+            <div class="pi-section-title">
+              <Icon name="target" size="12" />
+              <span>大师矩阵 · 组合版</span>
+            </div>
+            <template v-if="portfolioData.master_perspectives.consensus">
+              <div
+                class="mm-consensus"
+                :class="consensusClass(portfolioData.master_perspectives.consensus)"
+              >
+                <span class="mm-consensus-text">
+                  {{ portfolioData.master_perspectives.consensus.agreement_label }}
+                  · {{ portfolioData.master_perspectives.consensus.agreement_count }}
+                  建议{{ portfolioData.master_perspectives.consensus.consensus_action_label }}
+                </span>
+              </div>
+              <div
+                v-if="portfolioData.master_perspectives.consensus.action_distribution"
+                class="mm-dist"
+              >
+                <template
+                  v-for="(count, action) in portfolioData.master_perspectives.consensus.action_distribution"
+                  :key="action"
+                >
+                  <div
+                    v-if="count > 0"
+                    class="mm-dist-seg"
+                    :style="{ flexGrow: count, background: masterActionColor(action) }"
+                    :title="`${masterActionLabel(action)}: ${count}`"
+                  ></div>
+                </template>
+              </div>
+            </template>
+            <div
+              v-if="portfolioData.master_perspectives.masters?.length"
+              class="mm-masters"
+            >
+              <div
+                v-for="m in portfolioData.master_perspectives.masters"
+                :key="m.master_key"
+                class="mm-card"
+                :style="{ '--mm-accent': masterAccentColor(m.master_key) }"
+                @click="togglePortfolioMaster(m.master_key)"
+              >
+                <div class="mm-card-head">
+                  <span class="mm-master-icon">{{ m.master_icon }}</span>
+                  <span class="mm-master-name">{{ m.master_name }}</span>
+                  <span
+                    v-if="m.score == null"
+                    class="mm-score-na"
+                  >不适用</span>
+                  <span
+                    v-else
+                    class="mm-score"
+                    :style="{ color: masterRatingColor(m.rating) }"
+                  >{{ m.score }}</span>
+                  <span
+                    class="mm-action-tag"
+                    :style="{ background: masterActionColor(m.action) + '20', color: masterActionColor(m.action) }"
+                  >{{ m.action_label }}</span>
+                </div>
+                <div v-if="m.reason" class="mm-reason">{{ m.reason }}</div>
+                <div
+                  v-if="expandedMasters[`portfolio:${m.master_key}`]"
+                  class="mm-detail"
+                  @click.stop
+                >
+                  <div v-if="m.core_philosophy" class="mm-detail-row">
+                    <span class="mm-detail-label">核心理念</span>
+                    <span class="mm-detail-value">{{ m.core_philosophy }}</span>
+                  </div>
+                  <div v-if="m.view_text" class="mm-detail-row">
+                    <span class="mm-detail-label">综合视角</span>
+                    <span class="mm-detail-value">{{ m.view_text }}</span>
+                  </div>
+                  <div
+                    v-if="m.key_metrics && Object.keys(m.key_metrics).length"
+                    class="mm-metrics"
+                  >
+                    <div
+                      v-for="kv in formatMetrics(m.key_metrics)"
+                      :key="kv.label"
+                      class="mm-metric-row"
+                    >
+                      <span class="mm-metric-label">{{ kv.label }}</span>
+                      <span class="mm-metric-value">{{ kv.value }}</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- 2.4 持仓明细表 -->
+          <div v-if="portfolioData.holding_reports?.length" class="pi-section">
+            <div class="pi-section-title">
+              <Icon name="briefcase" size="12" />
+              <span>持仓明细</span>
+            </div>
+            <div class="pi-holdings-table-wrap">
+              <table class="pi-holdings-table">
+                <thead>
+                  <tr>
+                    <th>基金名称</th>
+                    <th>总分</th>
+                    <th>评级</th>
+                    <th>决策</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr
+                    v-for="h in portfolioData.holding_reports"
+                    :key="h.fund_code"
+                  >
+                    <td class="pi-ht-name" :title="h.fund_code">{{ h.fund_name || h.fund_code }}</td>
+                    <td class="pi-ht-score" :class="scoreColorClass(h.total_score)">{{ h.total_score ?? '—' }}</td>
+                    <td>
+                      <span class="pi-ht-rating" :class="ratingColorClass(h.rating)">
+                        {{ ratingLabel(h.rating) }}
+                      </span>
+                    </td>
+                    <td>
+                      <span
+                        v-if="h.decision?.action || h.decision?.action_label"
+                        class="pi-ht-action"
+                        :class="ACTION_LABELS[h.decision?.action]?.class"
+                      >
+                        {{ h.decision?.action_label || ACTION_LABELS[h.decision?.action]?.label || '—' }}
+                      </span>
+                      <span v-else class="pi-ht-mute">—</span>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </template>
+      </div>
+
       <!-- 关注列表统计 -->
       <div class="stats-row stats-row-3">
         <div class="stat-card stat-all">
@@ -3661,5 +3985,280 @@ onMounted(() => {
   color: var(--color-text-primary);
   font-weight: 600;
   font-family: var(--font-jet);
+}
+
+/* ── 组合智能面板 ── */
+.portfolio-intelligence-panel {
+  background: var(--color-bg-card);
+  border: 1px solid var(--color-border-light);
+  border-radius: 8px;
+  padding: 1rem 1.1rem;
+  margin-bottom: 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+.pi-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+.pi-header-left {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+.pi-header-icon { color: #7c3aed; flex-shrink: 0; }
+.pi-title {
+  font-size: 0.9rem;
+  font-weight: 700;
+  color: var(--color-text-primary);
+  margin: 0;
+}
+.btn-pi-refresh {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.3rem 0.65rem;
+  border: 1px solid var(--color-border);
+  background: var(--color-bg-secondary);
+  color: var(--color-text-secondary);
+  border-radius: 4px;
+  font-size: 0.72rem;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.btn-pi-refresh:hover:not(:disabled) {
+  border-color: #7c3aed;
+  color: #7c3aed;
+}
+.btn-pi-refresh:disabled { opacity: 0.6; cursor: not-allowed; }
+
+.pi-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  padding: 2rem 1rem;
+  color: var(--color-text-tertiary);
+  font-size: 0.82rem;
+  font-style: italic;
+}
+.pi-degraded {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.45rem 0.6rem;
+  background: rgba(255, 152, 0, 0.08);
+  border-left: 2px solid rgba(255, 152, 0, 0.4);
+  border-radius: 4px;
+  font-size: 0.72rem;
+  color: #ff9800;
+}
+
+/* 面板内分区 */
+.pi-section {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+}
+.pi-section-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--color-text-secondary);
+  padding-bottom: 0.2rem;
+  border-bottom: 1px dashed var(--color-border-light);
+}
+
+/* 风险卡片网格（4列） */
+.pi-risk-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 0.5rem;
+}
+.pi-risk-card {
+  background: var(--color-bg-secondary);
+  border: 1px solid var(--color-border-light);
+  border-radius: 6px;
+  padding: 0.55rem 0.65rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+.pi-risk-label {
+  font-size: 0.68rem;
+  color: var(--color-text-tertiary);
+  font-weight: 500;
+}
+.pi-risk-value {
+  font-size: 1.05rem;
+  font-weight: 700;
+  font-family: var(--font-jet);
+  line-height: 1.2;
+}
+.pi-risk-sub {
+  font-size: 0.66rem;
+  color: var(--color-text-tertiary);
+  font-family: var(--font-jet);
+}
+
+/* 风险数值色阶 */
+.risk-good { color: #16a34a; }
+.risk-normal { color: #2563eb; }
+.risk-warn { color: #d97706; }
+.risk-bad { color: #dc2626; }
+
+/* 组合7维体检 */
+.pi-health-summary {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+.pi-health-score {
+  font-size: 1.5rem;
+  font-weight: 700;
+  font-family: var(--font-jet);
+  line-height: 1;
+}
+.pi-health-rating {
+  font-size: 0.72rem;
+  padding: 0.15rem 0.45rem;
+  border-radius: 3px;
+  font-weight: 600;
+}
+.score-excellent.pi-health-rating { background: rgba(22,163,74,0.12); }
+.score-good.pi-health-rating { background: rgba(37,99,235,0.12); }
+.score-normal.pi-health-rating { background: rgba(217,119,6,0.12); }
+.score-cautious.pi-health-rating { background: rgba(220,38,38,0.12); }
+.pi-health-action {
+  font-size: 0.72rem;
+  padding: 0.2rem 0.55rem;
+  border-radius: 3px;
+  font-weight: 600;
+}
+.pi-health-reason {
+  font-size: 0.72rem;
+  color: var(--color-text-secondary);
+  line-height: 1.5;
+  padding: 0.35rem 0.5rem;
+  background: var(--color-bg-secondary);
+  border-radius: 4px;
+}
+.pi-health-dims {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+.pi-health-dim {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+.pi-health-dim-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 0.7rem;
+}
+.pi-health-dim-label {
+  color: var(--color-text-secondary);
+  font-weight: 500;
+}
+.pi-health-dim-score {
+  font-weight: 700;
+  font-family: var(--font-jet);
+  min-width: 22px;
+  text-align: right;
+}
+.pi-health-dim-bar {
+  height: 5px;
+  background: var(--color-bg-tertiary);
+  border-radius: 3px;
+  overflow: hidden;
+}
+.pi-health-dim-fill {
+  height: 100%;
+  border-radius: 3px;
+  transition: width 0.3s ease;
+}
+.score-excellent.pi-health-dim-fill { background: #16a34a; }
+.score-good.pi-health-dim-fill { background: #2563eb; }
+.score-normal.pi-health-dim-fill { background: #d97706; }
+.score-cautious.pi-health-dim-fill { background: #dc2626; }
+
+/* 持仓明细表 */
+.pi-holdings-table-wrap {
+  overflow-x: auto;
+  border-radius: 4px;
+  border: 1px solid var(--color-border-light);
+}
+.pi-holdings-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.72rem;
+  white-space: nowrap;
+}
+.pi-holdings-table thead {
+  background: var(--color-bg-tertiary);
+}
+.pi-holdings-table th {
+  padding: 0.4rem 0.5rem;
+  text-align: left;
+  font-weight: 600;
+  color: var(--color-text-secondary);
+  font-size: 0.68rem;
+  border-bottom: 1px solid var(--color-border-light);
+}
+.pi-holdings-table th:nth-child(n+2) { text-align: center; }
+.pi-holdings-table td {
+  padding: 0.4rem 0.5rem;
+  color: var(--color-text-secondary);
+  border-bottom: 1px solid var(--color-border-light);
+}
+.pi-holdings-table td:nth-child(n+2) { text-align: center; }
+.pi-holdings-table tbody tr:last-child td { border-bottom: none; }
+.pi-holdings-table tbody tr:hover { background: var(--color-bg-tertiary); }
+.pi-ht-name {
+  color: var(--color-text-primary);
+  font-weight: 500;
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.pi-ht-score {
+  font-family: var(--font-jet);
+  font-weight: 700;
+}
+.pi-ht-rating {
+  display: inline-block;
+  font-size: 0.65rem;
+  padding: 0.1rem 0.35rem;
+  border-radius: 3px;
+  font-weight: 600;
+}
+.pi-ht-rating.rating-excellent { background: rgba(76,175,80,0.12); color: #4caf50; }
+.pi-ht-rating.rating-good { background: rgba(33,150,243,0.12); color: #2196f3; }
+.pi-ht-rating.rating-fair { background: rgba(255,152,0,0.12); color: #ff9800; }
+.pi-ht-rating.rating-poor { background: rgba(244,67,54,0.12); color: #f44336; }
+.pi-ht-action {
+  display: inline-block;
+  font-size: 0.65rem;
+  padding: 0.1rem 0.35rem;
+  border-radius: 3px;
+  font-weight: 600;
+}
+.pi-ht-mute {
+  color: var(--color-text-muted);
+  font-style: italic;
+}
+
+/* 响应式：风险卡片在小屏降为2列 */
+@media (max-width: 768px) {
+  .pi-risk-grid { grid-template-columns: repeat(2, 1fr); }
 }
 </style>
