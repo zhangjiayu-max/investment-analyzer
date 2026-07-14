@@ -97,7 +97,10 @@ async def _get_dynamic_keywords() -> list[str]:
 
 
 async def _fetch_news_multi() -> list[dict]:
-    """多关键词并行搜索财经新闻，去重后返回。"""
+    """多关键词并行搜索财经新闻，去重后返回。
+
+    2026-07-14 修复：传 startDate/endDate 限定最近 7 天，避免返回相关性排序的旧新闻。
+    """
     try:
         from mcp.yingmi_client import get_yingmi_client
         mcp = get_yingmi_client()
@@ -106,10 +109,20 @@ async def _fetch_news_multi() -> list[dict]:
         all_keywords = dynamic_kw + _BASE_NEWS_KEYWORDS
         logger.info(f"[market-intel] 搜索关键词: {all_keywords}")
 
+        # 限定最近 7 天，确保拿到的都是近期新闻
+        from datetime import timedelta
+        end_date = datetime.now().strftime("%Y-%m-%d")
+        start_date = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
+
         async def _search(keyword: str) -> list[dict]:
             try:
                 raw = await asyncio.to_thread(
-                    lambda kw=keyword: mcp.call_tool("SearchFinancialNews", {"keyword": kw, "pageSize": 5})
+                    lambda kw=keyword: mcp.call_tool("SearchFinancialNews", {
+                        "keyword": kw,
+                        "pageSize": 5,
+                        "startDate": start_date,
+                        "endDate": end_date,
+                    })
                 )
                 items = []
                 if isinstance(raw, dict):
@@ -138,6 +151,8 @@ async def _fetch_news_multi() -> list[dict]:
                 if title and title not in seen_titles:
                     seen_titles.add(title)
                     all_news.append(n)
+        # 按 publishDate 倒序，最新的排前面
+        all_news.sort(key=lambda x: x.get("date", ""), reverse=True)
         return all_news[:15]
     except Exception as e:
         logger.warning(f"市场情报新闻获取失败: {e}")

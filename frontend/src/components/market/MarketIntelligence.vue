@@ -261,19 +261,18 @@ onMounted(() => {
 async function loadData(force = false) {
   loading.value = true
   try {
-    // 1. 先获取缓存
-    const { data: result } = await getMarketIntelligenceOverview()
-    if (result && !result.need_trigger && result.news?.length) {
-      // 有缓存数据，直接展示
-      data.value = result
-      selectedSector.value = 0
-      loading.value = false
-      return
+    if (!force) {
+      // 非强制刷新：先尝试获取当日缓存
+      const { data: result } = await getMarketIntelligenceOverview()
+      if (result && !result.need_trigger && result.news?.length) {
+        data.value = result
+        selectedSector.value = 0
+        loading.value = false
+        return
+      }
     }
-    // 2. 无缓存或强制刷新，触发分析
-    await triggerMarketIntelligence()
-    // 3. 轮询等待结果
-    await start(() => getMarketIntelligenceOverview(), {
+    // 强制刷新或无缓存：触发分析并轮询（start 内部调用 triggerMarketIntelligence 拿 task_id）
+    await start(triggerMarketIntelligence, {
       onComplete: (result) => {
         data.value = result
         selectedSector.value = 0
