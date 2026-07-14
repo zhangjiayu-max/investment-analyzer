@@ -2700,6 +2700,21 @@ onMounted(() => {
   .event-time-col { width: 55px; }
   .event-date-badge { font-size: 0.72rem; padding: 0.2rem 0.4rem; }
   .filter-bar { flex-direction: column; align-items: flex-start; }
+
+  /* 事件卡片移动端适配 —— 避免标签/文字挤压堆叠 */
+  .event-card { padding: 0.75rem 0.8rem; gap: 0.6rem; }
+  .event-title { font-size: 0.88rem; line-height: 1.35; }
+  .event-title-row { gap: 0.4rem; margin-bottom: 0.35rem; }
+  .event-type-tag { font-size: 0.64rem; padding: 0.12rem 0.4rem; }
+  .event-meta-row { gap: 0.3rem; }
+  .relevance-tag,
+  .status-tag,
+  .direction-tag,
+  .confidence-tag,
+  .time-frame-tag { font-size: 0.64rem; padding: 0.15rem 0.4rem; }
+  .event-summary { font-size: 0.78rem; line-height: 1.55; margin-bottom: 0.45rem; }
+  .section-label { font-size: 0.68rem; }
+  .chip { font-size: 0.66rem; padding: 0.12rem 0.4rem; }
 }
 
 /* ── 验证按钮 ── */
@@ -4499,7 +4514,20 @@ onMounted(() => {
 
 /* 响应式：风险卡片在小屏降为2列 */
 @media (max-width: 768px) {
+  .portfolio-intelligence-panel { padding: 0.75rem 0.8rem; gap: 0.6rem; }
+  .pi-title { font-size: 0.85rem; }
   .pi-risk-grid { grid-template-columns: repeat(2, 1fr); }
+  .pi-risk-card { padding: 0.45rem 0.55rem; }
+  .pi-risk-value { font-size: 0.95rem; }
+  .pi-risk-label { font-size: 0.64rem; }
+  .pi-risk-sub { font-size: 0.62rem; }
+  .pi-health-score { font-size: 1.25rem; }
+  .pi-health-reason { font-size: 0.68rem; line-height: 1.45; padding: 0.3rem 0.45rem; }
+  .pi-health-dim-head { font-size: 0.66rem; }
+  .pi-holdings-table { font-size: 0.68rem; }
+  .pi-holdings-table th,
+  .pi-holdings-table td { padding: 0.3rem 0.4rem; }
+  .pi-ht-name { max-width: 120px; }
 }
 
 /* ── 大师决策回测面板 ── */
@@ -4792,8 +4820,24 @@ onMounted(() => {
   font-family: var(--font-jet);
 }
 
-/* 响应式：小屏大师排名适配 */
+/* 响应式：小屏大师回测面板适配 */
 @media (max-width: 768px) {
-  .mb-rank-master { width: 4.5rem; }
+  .master-backtest-panel { padding: 0.75rem 0.8rem; gap: 0.6rem; }
+  .mb-title { font-size: 0.85rem; }
+  .mb-overall { grid-template-columns: repeat(3, 1fr); gap: 0.35rem; }
+  .mb-overall-card { padding: 0.4rem 0.35rem; }
+  .mb-overall-value { font-size: 0.95rem; }
+  .mb-overall-label { font-size: 0.62rem; }
+  .mb-rank-item { gap: 0.4rem; padding: 0.35rem 0.4rem; }
+  .mb-rank-master { width: 4.2rem; gap: 0.25rem; }
+  .mb-rank-name { font-size: 0.7rem; }
+  .mb-rank-rate { font-size: 0.68rem; min-width: 2.5rem; }
+  .mb-rank-verified { font-size: 0.6rem; }
+  .mb-history-item { padding: 0.4rem 0.45rem; gap: 0.2rem; }
+  .mb-hist-name { font-size: 0.7rem; }
+  .mb-hist-fund { font-size: 0.7rem; }
+  .mb-hist-reason { font-size: 0.66rem; line-height: 1.4; white-space: normal; word-break: break-word; }
+  .mb-hist-verify { font-size: 0.64rem; }
+  .mb-filter-select { font-size: 0.66rem; padding: 0.15rem 0.3rem; }
 }
 </style>
