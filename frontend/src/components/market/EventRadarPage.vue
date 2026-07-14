@@ -115,8 +115,61 @@ const watchlistStats = computed(() => {
     if (!w.target_price || !w.current_nav) return false
     return parseFloat(w.current_nav) <= parseFloat(w.target_price)
   }).length
-  return { total, withTarget, lowNav }
+  // 低估数量：估值分位 ≤ 20%
+  const lowValuation = watchlist.value.filter(w => {
+    if (w.current_percentile === null || w.current_percentile === undefined) return false
+    return parseFloat(w.current_percentile) <= 20
+  }).length
+  // 信号触发：目标价到位 或 低估值区
+  const signalTriggered = watchlist.value.filter(w => watchlistSignalState(w).cls === 'sig-hit').length
+  // 近7日新增
+  const recent7d = watchlist.value.filter(w => {
+    if (!w.created_at) return false
+    const created = new Date(w.created_at)
+    const now = new Date()
+    return (now - created) / (1000 * 60 * 60 * 24) <= 7
+  }).length
+  return { total, withTarget, lowNav, lowValuation, signalTriggered, recent7d }
 })
+
+// 关注列表排序
+const watchlistSort = ref('default') // default | percentile | created | updated
+const watchlistSortOptions = [
+  { key: 'default', label: '默认' },
+  { key: 'percentile', label: '估值低→高' },
+  { key: 'created', label: '最近加入' },
+  { key: 'updated', label: '最近更新' },
+]
+const sortedWatchlist = computed(() => {
+  const list = [...watchlist.value]
+  if (watchlistSort.value === 'percentile') {
+    // 估值分位升序，null/undefined 排最后
+    list.sort((a, b) => {
+      const pa = (a.current_percentile === null || a.current_percentile === undefined) ? Infinity : parseFloat(a.current_percentile)
+      const pb = (b.current_percentile === null || b.current_percentile === undefined) ? Infinity : parseFloat(b.current_percentile)
+      return pa - pb
+    })
+  } else if (watchlistSort.value === 'created') {
+    list.sort((a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0))
+  } else if (watchlistSort.value === 'updated') {
+    list.sort((a, b) => new Date(b.nav_updated_at || b.updated_at || 0) - new Date(a.nav_updated_at || a.updated_at || 0))
+  }
+  return list
+})
+
+/** 格式化短日期：MM-DD（超过1年显示 MM-DD-YY） */
+function formatShortDate(dateStr) {
+  if (!dateStr) return ''
+  const d = new Date(dateStr)
+  if (isNaN(d.getTime())) return ''
+  const mm = String(d.getMonth() + 1).padStart(2, '0')
+  const dd = String(d.getDate()).padStart(2, '0')
+  const now = new Date()
+  if (d.getFullYear() !== now.getFullYear()) {
+    return `${mm}-${dd}-${String(d.getFullYear()).slice(-2)}`
+  }
+  return `${mm}-${dd}`
+}
 
 async function loadEvents() {
   loading.value = true
@@ -1562,18 +1615,44 @@ onMounted(() => {
       </div>
 
       <!-- 关注列表统计 -->
-      <div class="stats-row stats-row-3">
+      <div class="stats-row stats-row-6">
         <div class="stat-card stat-all">
           <div class="stat-value">{{ watchlistStats.total }}</div>
           <div class="stat-label">关注总数</div>
         </div>
         <div class="stat-card stat-watchlist-hit">
+          <div class="stat-value">{{ watchlistStats.signalTriggered }}</div>
+          <div class="stat-label">信号触发</div>
+        </div>
+        <div class="stat-card stat-holding">
+          <div class="stat-value">{{ watchlistStats.lowValuation }}</div>
+          <div class="stat-label">低估数量</div>
+        </div>
+        <div class="stat-card stat-all">
           <div class="stat-value">{{ watchlistStats.withTarget }}</div>
           <div class="stat-label">已设目标</div>
         </div>
-        <div class="stat-card stat-holding">
+        <div class="stat-card stat-watchlist-hit">
           <div class="stat-value">{{ watchlistStats.lowNav }}</div>
-          <div class="stat-label">目标价到位</div>
+          <div class="stat-label">目标到位</div>
+        </div>
+        <div class="stat-card stat-all">
+          <div class="stat-value">{{ watchlistStats.recent7d }}</div>
+          <div class="stat-label">近7日新增</div>
+        </div>
+      </div>
+
+      <!-- 排序工具栏 -->
+      <div v-if="watchlist.length > 0" class="wl-sort-bar">
+        <span class="wl-sort-label">排序：</span>
+        <div class="wl-sort-group">
+          <button
+            v-for="opt in watchlistSortOptions"
+            :key="opt.key"
+            class="wl-sort-btn"
+            :class="{ active: watchlistSort === opt.key }"
+            @click="watchlistSort = opt.key"
+          >{{ opt.label }}</button>
         </div>
       </div>
 
@@ -1585,7 +1664,7 @@ onMounted(() => {
           <span class="empty-hint">在「事件雷达」Tab 的候选基金中点击「关注」按钮加入</span>
         </div>
         <div
-          v-for="item in watchlist"
+          v-for="item in sortedWatchlist"
           :key="item.id"
           class="wl-card"
           :class="watchlistSignalState(item).cls"
@@ -1594,6 +1673,7 @@ onMounted(() => {
             <div class="wl-name-block">
               <Icon name="bookmark" size="14" class="wl-icon" />
               <span class="wl-fund-name">{{ item.fund_name }}</span>
+              <span v-if="item.created_at" class="wl-joined-date">加入于 {{ formatShortDate(item.created_at) }}</span>
             </div>
             <span class="wl-signal-tag" :class="watchlistSignalState(item).cls">
               {{ watchlistSignalState(item).label }}
@@ -1627,6 +1707,7 @@ onMounted(() => {
               <span class="wl-data-label">目标价</span>
               <span class="wl-data-value" :class="{ 'value-hit': item.target_price && item.current_nav && parseFloat(item.current_nav) <= parseFloat(item.target_price) }">
                 {{ item.target_price ? Number(item.target_price).toFixed(4) : '未设' }}
+                <span v-if="item.target_price && item.updated_at" class="wl-target-set-date">（{{ formatShortDate(item.updated_at) }}设）</span>
               </span>
             </div>
             <div v-if="item.target_percentile" class="wl-data-row">
@@ -2359,6 +2440,9 @@ onMounted(() => {
 .stats-row-3 {
   grid-template-columns: repeat(3, 1fr);
 }
+.stats-row-6 {
+  grid-template-columns: repeat(6, 1fr);
+}
 .stat-card {
   background: var(--color-bg-card);
   border: 1px solid var(--color-border-light);
@@ -3012,6 +3096,7 @@ onMounted(() => {
   gap: 0.35rem;
   min-width: 0;
   flex: 1;
+  flex-wrap: wrap;
 }
 .wl-icon { color: #ea580c; flex-shrink: 0; }
 .wl-fund-name {
@@ -3020,6 +3105,55 @@ onMounted(() => {
   color: var(--color-text-primary);
   line-height: 1.3;
   word-break: break-all;
+}
+.wl-joined-date {
+  font-size: 0.68rem;
+  color: var(--color-text-tertiary);
+  font-weight: 400;
+  white-space: nowrap;
+}
+.wl-target-set-date {
+  font-size: 0.68rem;
+  color: var(--color-text-tertiary);
+  font-weight: 400;
+}
+/* 排序工具栏 */
+.wl-sort-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.75rem;
+  flex-wrap: wrap;
+}
+.wl-sort-label {
+  font-size: 0.75rem;
+  color: var(--color-text-tertiary);
+  white-space: nowrap;
+}
+.wl-sort-group {
+  display: flex;
+  gap: 0.25rem;
+  flex-wrap: wrap;
+}
+.wl-sort-btn {
+  font-size: 0.72rem;
+  padding: 0.25rem 0.6rem;
+  border: 1px solid var(--color-border);
+  background: var(--color-bg-card);
+  color: var(--color-text-secondary);
+  border-radius: 4px;
+  cursor: pointer;
+  transition: all 0.15s;
+  white-space: nowrap;
+}
+.wl-sort-btn:hover {
+  border-color: var(--color-text-tertiary);
+  color: var(--color-text-primary);
+}
+.wl-sort-btn.active {
+  background: #ea580c;
+  border-color: #ea580c;
+  color: #fff;
 }
 .wl-signal-tag {
   flex-shrink: 0;
@@ -3364,8 +3498,12 @@ onMounted(() => {
 @media (max-width: 768px) {
   .stats-row { grid-template-columns: repeat(2, 1fr); }
   .stats-row-3 { grid-template-columns: repeat(3, 1fr); }
+  .stats-row-6 { grid-template-columns: repeat(3, 1fr); }
   .watchlist-grid { grid-template-columns: 1fr; }
   .main-tab { padding: 0.45rem 0.6rem; font-size: 0.78rem; }
+  .stat-card { padding: 0.6rem 0.5rem; }
+  .stat-value { font-size: 1.1rem; }
+  .stat-label { font-size: 0.68rem; }
 }
 
 /* ── 文章分析 URL 输入弹窗 ── */
