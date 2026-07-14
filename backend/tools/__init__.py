@@ -978,7 +978,7 @@ def execute_tool(name: str, arguments: dict, trace_id: str = "",
                  timeout: int = 30, conversation_id: int = None, message_id: int = None) -> str:
     """执行工具调用，返回 JSON 字符串结果。
 
-    带超时保护、结果校验和审计日志。
+    带超时保护、结果校验、审计日志和结果缓存（仅对数据查询类工具）。
 
     Args:
         name: 工具名称
@@ -1006,6 +1006,25 @@ def execute_tool(name: str, arguments: dict, trace_id: str = "",
     except Exception as _ve:
         logger.debug(f"工具 {name} 参数校验异常: {_ve}")
 
+    # ── 缓存命中检查（仅对白名单内的数据查询工具）──
+    # 同参数调用在 TTL 内直接返回缓存结果，避免多专家重复查询浪费 token
+    _cache_hit = False
+    try:
+        from agent.tool_dedup import get_tool_call_cache
+        _cache = get_tool_call_cache()
+        _cached = _cache.get(name, arguments or {})
+        if _cached is not None:
+            _cache_hit = True
+            logger.debug(f"[tool_cache] 命中 {name} (trace={trace_id})")
+            # 审计日志记录缓存命中
+            try:
+                _log_tool_audit(trace_id, name, arguments, _cached, "cache_hit", 0)
+            except Exception:
+                pass
+            return _cached
+    except Exception as _ce:
+        logger.debug(f"工具缓存检查异常 {name}: {_ce}")
+
     try:
         result = _execute_tool_impl(name, arguments, trace_id=trace_id,
                                     conversation_id=conversation_id, message_id=message_id)
@@ -1023,12 +1042,20 @@ def execute_tool(name: str, arguments: dict, trace_id: str = "",
         result = json.dumps({"error": f"工具 {name} 执行超时 ({effective_timeout}s)", "error_category": "timeout"}, ensure_ascii=False)
 
     # P1-3: 检测工具返回的 error 字段（HTTP 4xx/5xx 等业务错误未抛异常的情况）
+    # 同时细化错误分类：区分"工具调用失败"和"查询无数据"（data_missing）
     if error_category == "none" and isinstance(result, str) and result:
         try:
             parsed = json.loads(result)
-            if isinstance(parsed, dict) and parsed.get("error"):
-                error_category = "tool_error"
-                logger.warning(f"工具 {name} 返回错误: {parsed.get('error', '')[:200]}")
+            if isinstance(parsed, dict):
+                _err_msg = parsed.get("error")
+                if _err_msg:
+                    # 区分"未找到数据"和真正的工具错误
+                    _err_lower = str(_err_msg).lower()
+                    if any(kw in _err_lower for kw in ["未找到", "not found", "no data", "无数据"]):
+                        error_category = "data_missing"
+                    else:
+                        error_category = "tool_error"
+                    logger.warning(f"工具 {name} 返回: {str(_err_msg)[:200]} (category={error_category})")
         except (json.JSONDecodeError, ValueError):
             pass
 
@@ -1070,6 +1097,16 @@ def execute_tool(name: str, arguments: dict, trace_id: str = "",
         _log_tool_audit(trace_id, name, arguments, result, error_category, duration_ms)
     except Exception as e:
         logger.debug(f"工具审计日志写入失败: {e}")
+
+    # ── 写入缓存（仅成功且有效的数据查询结果）──
+    # data_missing 也缓存，避免重复查询已知不存在的数据（如"券商"未找到）
+    if error_category in ("none", "data_missing") and not _cache_hit:
+        try:
+            from agent.tool_dedup import get_tool_call_cache
+            _cache = get_tool_call_cache()
+            _cache.set(name, arguments or {}, result)
+        except Exception as _ce:
+            logger.debug(f"工具缓存写入异常 {name}: {_ce}")
 
     return result
 

@@ -1152,6 +1152,7 @@ def init_db():
         ("human_in_loop_timeout", "30", "人在回路确认超时秒数"),
         ("pipeline_enabled", "true", "是否启用Pipeline模式（6阶段确定性流水线，失败自动降级ReAct）"),
         ("pipeline_degrade_on_error", "true", "Pipeline异常时是否自动降级到ReAct模式"),
+        ("plan_execute_enabled", "auto", "Plan&Execute模式(auto/true/false)，auto时complex任务多专家并行"),
     ]
     for key, value, desc in _default_orchestration_config:
         conn.execute("""

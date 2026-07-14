@@ -550,12 +550,14 @@ def _build_dca_rules() -> str:
         return ""
 
 
-def _build_final_synthesis_prompt(specialist_results: list, routed_specialists: list, blackboard=None) -> str:
+def _build_final_synthesis_prompt(specialist_results: list, routed_specialists: list, blackboard=None,
+                                 cross_review_performed: bool = False) -> str:
     """构建最终综合提示，强制 LLM 只引用实际执行了的专家。
 
     Args:
         blackboard: 共享黑板实例（可选）。传入时注入结构化数据：
                     关键数据汇总、冲突检测、风险否决约束、持仓影响汇总。
+        cross_review_performed: 是否实际执行了交叉评审。用于防止 LLM 虚构交叉评审过程。
     """
     executed_keys = {sr.get("agent_key", "") for sr in specialist_results}
     executed_names = {sr.get("agent", "") for sr in specialist_results}
@@ -661,6 +663,21 @@ def _build_final_synthesis_prompt(specialist_results: list, routed_specialists: 
                     f"| {p.get('risk_check','')} |"
                 )
             prompt += "\n综合建议必须考虑组合层面影响，避免多专家建议叠加后单一标的超限。\n"
+
+    # P0-C: 交叉评审状态诚实声明（防止 LLM 虚构交叉评审过程）
+    if cross_review_performed:
+        prompt += (
+            "\n\n## 交叉评审状态\n"
+            "本次分析已执行专家间交叉评审，你可以在回复中引用各专家的交叉审阅意见。"
+        )
+    else:
+        prompt += (
+            "\n\n## 交叉评审状态\n"
+            "⚠️ 本次分析未执行专家间交叉评审（专家结论一致或早停关闭）。"
+            "禁止在回复中声称「经过交叉评审」「反思发现」「各专家相互审阅后」等表述。"
+            "如需引用风险否决约束，应表述为「根据风险管理师的否决约束」，"
+            "而非「经过交叉评审后降级」。诚实描述分析过程。"
+        )
 
     return prompt
 
@@ -2973,9 +2990,14 @@ def orchestrate(query: str, history: list, rag_context: str = "", cancel_event: 
     arbitration_done = False  # 标记仲裁是否已完成,避免重复调用
     route_result = None  # 路由结果，用于最终返回监控
 
-    # 升级3: Plan & Execute 模式（通过 orchestration_config 启停，默认关闭）
+    # 升级3: Plan & Execute 模式（complex 任务默认启用并行执行，可通过配置关闭）
     _plan_done = False
-    _plan_execute_enabled = get_orchestration_config("plan_execute_enabled", "false") == "true"
+    # complex 任务默认启用 Plan&Execute（多专家并行），其他级别默认关闭
+    _plan_execute_flag = get_orchestration_config("plan_execute_enabled", "auto")
+    if _plan_execute_flag == "auto":
+        _plan_execute_enabled = complexity == "complex"
+    else:
+        _plan_execute_enabled = _plan_execute_flag == "true"
     if _plan_execute_enabled:
         try:
             from agent.plan_executor import generate_plan, execute_plan
@@ -3145,6 +3167,40 @@ def orchestrate(query: str, history: list, rag_context: str = "", cancel_event: 
                         logger.info(f"[trace:{trace_id}] 专家结论一致或早停关闭，跳过交叉审阅")
 
                 answer = msg.content or ""
+
+                # P0-C: 交叉评审诚实性检查 —— 未执行交叉评审时，移除回复中虚构的交叉评审表述
+                if not needs_cross_review and answer:
+                    _fictional_phrases = [
+                        "交叉评审", "交叉审阅", "相互审阅", "反思发现",
+                        "经过审阅后", "经过评审后", "各专家相互",
+                    ]
+                    if any(p in answer for p in _fictional_phrases):
+                        # 注入修正提示，让 LLM 重写诚实版本
+                        _honesty_prompt = (
+                            "⚠️ 检测到你的回复中提及了「交叉评审/交叉审阅/反思发现」，"
+                            "但本次分析实际未执行专家间交叉评审（专家结论一致或早停关闭）。\n"
+                            "请修正回复，移除所有关于交叉评审/交叉审阅/反思发现的表述。\n"
+                            "如需引用风险管理师的否决约束，请直接表述为「根据风险管理师的否决约束」，"
+                            "而非「经过交叉评审后降级」。保持其他内容不变，仅修正虚构的交叉评审描述。"
+                        )
+                        try:
+                            _repair_resp = _call_llm(
+                                caller="orchestrator_honesty",
+                                trace_id=trace_id,
+                                model=MODEL,
+                                messages=llm_messages + [
+                                    {"role": "assistant", "content": answer},
+                                    {"role": "user", "content": _honesty_prompt},
+                                ],
+                                temperature=get_config_float('llm.temperature_agent', 0.3),
+                                max_tokens=get_config_int('llm.max_tokens_orchestrator', 8192),
+                            )
+                            _repaired = _repair_resp.choices[0].message.content or ""
+                            if _repaired and len(_repaired) > 50:
+                                answer = _repaired
+                                logger.info(f"[trace:{trace_id}] 交叉评审诚实性修正完成")
+                        except Exception as _he:
+                            logger.warning(f"[trace:{trace_id}] 交叉评审诚实性修正失败: {_he}")
 
                 # Light Validator: 输出前质检与修复
                 answer, validator_result = _validate_and_repair(
@@ -3326,7 +3382,8 @@ def orchestrate(query: str, history: list, rag_context: str = "", cancel_event: 
     try:
         llm_messages.append({
             "role": "user",
-            "content": _build_final_synthesis_prompt(specialist_results, specialists),
+            "content": _build_final_synthesis_prompt(
+                specialist_results, specialists, cross_review_performed=False),
         })
         response = _call_llm(
             caller="orchestrator",
@@ -4209,7 +4266,9 @@ def _stream_final_synthesis(query: str, refined_query: str, specialists: list,
             pass
         llm_messages.append({
             "role": "user",
-            "content": _build_final_synthesis_prompt(specialist_results, specialists, blackboard=blackboard),
+            "content": _build_final_synthesis_prompt(
+                specialist_results, specialists, blackboard=blackboard,
+                cross_review_performed=bool(cross_review_results)),
         })
         final_answer = ""
         try:
