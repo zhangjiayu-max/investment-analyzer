@@ -7,6 +7,7 @@ import json
 import logging
 import re
 import time
+import uuid
 
 from fastapi import APIRouter
 
@@ -16,6 +17,7 @@ from db import (
     create_async_task, update_async_task,
     save_analysis_conclusion,
 )
+from db.agent_analysis_log import create_analysis_log, complete_analysis_log
 from infra.state import track_agent, untrack_agent
 
 logger = logging.getLogger(__name__)
@@ -231,6 +233,19 @@ async def _do_bond_recommend():
     # 9. 调用 allocation_advisor 专家（已合并）
     uid = f"bond_{int(time.time())}"
     track_agent(uid, "资产配置顾问", "债券配置推荐")
+    # 分析记录埋点（running）
+    trace_id = f"log_{uuid.uuid4().hex[:12]}"
+    _start_ts = time.time()
+    _trace_completed = False
+    try:
+        create_analysis_log(
+            trace_id=trace_id, agent_id=8, agent_name="债券配置顾问",
+            analysis_type="bond_recommend", source_table="portfolio_analysis_records",
+            source_id=None, query="债券配置推荐",
+            input_summary="债券推荐",
+        )
+    except Exception as _e:
+        logging.warning(f"create_analysis_log 失败: {_e}")
     try:
         from agent.multi_agent import run_specialist
         specialist_result = run_specialist(
@@ -246,6 +261,15 @@ async def _do_bond_recommend():
     except Exception as e:
         logging.error(f"[bond_ai_recommend] run_specialist failed: {e}")
         result = ""
+        try:
+            complete_analysis_log(
+                trace_id=trace_id, status="error",
+                duration_ms=int((time.time() - _start_ts) * 1000),
+                error_msg=str(e),
+            )
+            _trace_completed = True
+        except Exception as _e:
+            logging.warning(f"complete_analysis_log 失败: {_e}")
     finally:
         untrack_agent(uid)
 
@@ -274,6 +298,16 @@ async def _do_bond_recommend():
         )
     except Exception as e:
         logging.error(f"[bond_ai_recommend] 保存记录失败: {e}")
+
+    # 分析记录埋点（done）
+    if not _trace_completed:
+        try:
+            complete_analysis_log(
+                trace_id=trace_id, status="done",
+                duration_ms=int((time.time() - _start_ts) * 1000),
+            )
+        except Exception as _e:
+            logging.warning(f"complete_analysis_log 失败: {_e}")
 
     # ── 桥接 B：保存分析结论 ──
     try:

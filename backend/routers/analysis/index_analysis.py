@@ -2,6 +2,8 @@
 import asyncio
 import json
 import logging
+import time
+import uuid
 
 from fastapi import APIRouter, HTTPException
 
@@ -19,6 +21,7 @@ from db import (
 from services.llm_service import _call_llm, MODEL
 from services.rag import build_rag_context_with_details, log_rag_search
 from models.analysis import AnalysisRunRequest, AnalysisAgentUpdateRequest
+from db.agent_analysis_log import create_analysis_log, complete_analysis_log
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["analysis-index-analysis"])
@@ -56,6 +59,19 @@ async def _run_index_analysis_async(history_id: int, req_data: dict, agent: dict
     """后台执行指数深度分析。"""
     req = AnalysisRunRequest(**req_data)
     index_label = req.index_name or req.index_code
+
+    # 分析记录埋点（running）
+    trace_id = f"log_{uuid.uuid4().hex[:12]}"
+    _start_ts = time.time()
+    try:
+        create_analysis_log(
+            trace_id=trace_id, agent_id=9, agent_name="指数深度分析师",
+            analysis_type="index_analysis", source_table="analysis_history",
+            source_id=history_id, query=f"分析 {index_label}",
+            input_summary=f"指数:{req.index_code}",
+        )
+    except Exception as _e:
+        logger.warning(f"create_analysis_log 失败: {_e}")
 
     # 2. 获取估值数据
     valuation_context = ""
@@ -224,12 +240,21 @@ async def _run_index_analysis_async(history_id: int, req_data: dict, agent: dict
             ],
             temperature=get_config_float('llm.temperature_default', 0.3),
             max_tokens=get_config_int('llm.max_tokens_report', 8192),
+            trace_id=trace_id,
         ))
         result_text = response.choices[0].message.content or ""
         token_usage = response.usage.total_tokens if response.usage else 0
     except Exception as e:
         logger.error(f"AI 分析失败: {e}")
         update_analysis_history(history_id, status="error", error_msg=str(e))
+        try:
+            complete_analysis_log(
+                trace_id=trace_id, status="error",
+                duration_ms=int((time.time() - _start_ts) * 1000),
+                error_msg=str(e),
+            )
+        except Exception as _e:
+            logger.warning(f"complete_analysis_log 失败: {_e}")
         if async_task_id:
             update_async_task(async_task_id, status="error", error_msg=str(e))
         return
@@ -244,6 +269,14 @@ async def _run_index_analysis_async(history_id: int, req_data: dict, agent: dict
         status="done",
         error_msg="",
     )
+    try:
+        complete_analysis_log(
+            trace_id=trace_id, status="done",
+            duration_ms=int((time.time() - _start_ts) * 1000),
+            token_usage=token_usage,
+        )
+    except Exception as _e:
+        logger.warning(f"complete_analysis_log 失败: {_e}")
     if async_task_id:
         update_async_task(async_task_id, status="done", result={"history_id": history_id, "result": result_text, "token_usage": token_usage}, token_usage=token_usage)
 

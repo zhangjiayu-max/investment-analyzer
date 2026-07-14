@@ -2,6 +2,8 @@
 import asyncio
 import json
 import logging
+import time
+import uuid
 
 from fastapi import APIRouter, HTTPException
 
@@ -14,6 +16,7 @@ from db import (
 )
 from db.portfolio import update_analysis_record
 from db.config import get_config_int, get_config_float
+from db.agent_analysis_log import create_analysis_log, complete_analysis_log
 from services.rag import build_rag_context_with_details, log_rag_search
 from models.portfolio import PortfolioAiAnalysisRequest, FeedbackRequest
 
@@ -75,6 +78,19 @@ async def _run_portfolio_ai_async(task_id: int, record_id: int, user_question: s
 
 async def _run_portfolio_ai_analysis_async(record_id: int, user_question: str):
     """后台执行通用 AI 持仓分析。"""
+    # 分析记录埋点（running）
+    trace_id = f"log_{uuid.uuid4().hex[:12]}"
+    _start_ts = time.time()
+    try:
+        create_analysis_log(
+            trace_id=trace_id, agent_id=None, agent_name="AI持仓分析",
+            analysis_type="portfolio_ai", source_table="portfolio_analysis_records",
+            source_id=record_id, query=user_question[:200],
+            input_summary="AI持仓分析",
+        )
+    except Exception as _e:
+        logger.warning(f"create_analysis_log 失败: {_e}")
+
     # 1. 获取持仓数据
     holdings = list_holdings()
 
@@ -189,12 +205,21 @@ async def _run_portfolio_ai_analysis_async(record_id: int, user_question: str):
             ],
             temperature=get_config_float('llm.temperature_analysis', 0.3),
             max_tokens=get_config_int('llm.max_tokens_analysis', 8192),
+            trace_id=trace_id,
         ))
         result_text = response.choices[0].message.content or ""
         tokens = response.usage.total_tokens if response.usage else 0
     except Exception as e:
         logger.error(f"AI 分析失败: {e}")
         update_analysis_record(record_id, status="error", error_msg=str(e))
+        try:
+            complete_analysis_log(
+                trace_id=trace_id, status="error",
+                duration_ms=int((time.time() - _start_ts) * 1000),
+                error_msg=str(e),
+            )
+        except Exception as _e:
+            logger.warning(f"complete_analysis_log 失败: {_e}")
         return
 
     update_analysis_record(
@@ -204,6 +229,14 @@ async def _run_portfolio_ai_analysis_async(record_id: int, user_question: str):
         status="done",
         error_msg="",
     )
+    try:
+        complete_analysis_log(
+            trace_id=trace_id, status="done",
+            duration_ms=int((time.time() - _start_ts) * 1000),
+            token_usage=tokens,
+        )
+    except Exception as _e:
+        logger.warning(f"complete_analysis_log 失败: {_e}")
     _extract_candidates_safely(record_id, "ai", result_text)
     logger.info(f"AI 持仓分析完成 record_id={record_id}, mcp={list(mcp_context.keys())}")
 

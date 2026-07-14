@@ -2,6 +2,7 @@
 import asyncio
 import json
 import logging
+import time
 
 from fastapi import APIRouter, HTTPException
 
@@ -13,6 +14,7 @@ from db import (
     save_analysis_conclusion,
 )
 from db.portfolio import update_analysis_record, get_analysis_record_status
+from db.agent_analysis_log import create_analysis_log, complete_analysis_log
 from db.config import get_config as _get_config, get_config_int, get_config_float
 from services.rag import build_rag_context_with_details
 from models.portfolio import PanoramaAnalysisRequest
@@ -118,7 +120,14 @@ async def _run_panorama_async(record_id: int, system_prompt: str, holdings: list
 
         _track_agent(uid, "全景诊断分析师", "持仓诊断")
         import uuid
-        trace_id = f"pano_{uuid.uuid4().hex[:12]}"
+        trace_id = f"log_{uuid.uuid4().hex[:12]}"
+        _start_ts = time.time()
+        create_analysis_log(
+            trace_id=trace_id, agent_id=3, agent_name="全景诊断分析师",
+            analysis_type="panorama", source_table="portfolio_analysis_records",
+            source_id=record_id, query=user_content[:300],
+            input_summary="全景诊断",
+        )
         from services.llm_service import _call_llm, MODEL
         response = await asyncio.to_thread(lambda: _call_llm(
             caller="portfolio_panorama",
@@ -135,6 +144,8 @@ async def _run_panorama_async(record_id: int, system_prompt: str, holdings: list
         tokens = response.usage.total_tokens if response.usage else 0
 
         update_analysis_record(record_id, result_data=result_text, token_usage=tokens, status="done")
+        _elapsed_ms = int((time.time() - _start_ts) * 1000)
+        complete_analysis_log(trace_id=trace_id, status="done", duration_ms=_elapsed_ms, token_usage=tokens)
         _extract_candidates_safely(record_id, "panorama", result_text)
 
         # ── 桥接 B：保存分析结论 ──
@@ -173,6 +184,8 @@ async def _run_panorama_async(record_id: int, system_prompt: str, holdings: list
     except Exception as e:
         logger.error(f"全景诊断失败 record_id={record_id}: {e}")
         update_analysis_record(record_id, status="error", error_msg=str(e))
+        _elapsed_ms = int((time.time() - _start_ts) * 1000)
+        complete_analysis_log(trace_id=trace_id, status="error", duration_ms=_elapsed_ms, error_msg=str(e))
     finally:
         _untrack_agent(uid)
 

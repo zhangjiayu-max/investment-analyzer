@@ -4,6 +4,7 @@ import json
 import logging
 import re
 import time
+import uuid
 from datetime import datetime
 
 from fastapi import APIRouter, HTTPException
@@ -13,6 +14,7 @@ from db import create_async_task, update_async_task, get_async_task
 from db.portfolio import save_analysis_cache, get_analysis_cache
 from db.agents import create_agent_run
 from db._conn import _get_conn
+from db.agent_analysis_log import create_analysis_log, complete_analysis_log
 
 
 def _safe_percentile(v, default=None):
@@ -670,6 +672,18 @@ async def _do_market_intelligence():
     llm_start = time.time()
     llm_status = "success"
     response = None
+    llm_error_msg = ""
+    # 分析记录埋点（running）
+    trace_id = f"log_{uuid.uuid4().hex[:12]}"
+    try:
+        create_analysis_log(
+            trace_id=trace_id, agent_id=10, agent_name="市场情报分析师",
+            analysis_type="market_intel", source_table="analysis_history",
+            source_id=None, query="市场情报分析",
+            input_summary="市场情报",
+        )
+    except Exception as _e:
+        logger.warning(f"create_analysis_log 失败: {_e}")
     try:
         response = await asyncio.wait_for(
             asyncio.to_thread(lambda: _call_llm(
@@ -678,6 +692,7 @@ async def _do_market_intelligence():
                 messages=[{"role": "user", "content": prompt}],
                 temperature=get_config_float("llm.temperature_default", 0.3),
                 max_tokens=get_config_int("llm.max_tokens_report", 8192),
+                trace_id=trace_id,
             )),
             timeout=120,
         )
@@ -695,8 +710,24 @@ async def _do_market_intelligence():
         summary = f"分析失败: {e}"
         content = ""
         llm_status = "error"
+        llm_error_msg = str(e)
 
     llm_duration = int((time.time() - llm_start) * 1000)
+    # 分析记录埋点（done/error）
+    try:
+        if llm_status == "success":
+            _tokens = response.usage.total_tokens if hasattr(response, 'usage') and response.usage else 0
+            complete_analysis_log(
+                trace_id=trace_id, status="done",
+                duration_ms=llm_duration, token_usage=_tokens,
+            )
+        else:
+            complete_analysis_log(
+                trace_id=trace_id, status="error",
+                duration_ms=llm_duration, error_msg=llm_error_msg,
+            )
+    except Exception as _e:
+        logger.warning(f"complete_analysis_log 失败: {_e}")
 
     sectors = _fuzzy_match_sectors_to_data(sectors)
 

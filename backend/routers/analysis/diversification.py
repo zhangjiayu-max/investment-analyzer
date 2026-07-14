@@ -20,6 +20,7 @@ from db import (
     save_analysis_conclusion,
 )
 from db.portfolio import update_analysis_record
+from db.agent_analysis_log import create_analysis_log, complete_analysis_log
 from db.config import get_config as _get_config, get_config_int, get_config_float
 from services.rag import build_rag_context_with_details
 from ._shared import _parse_mcp_pct_pairs, _parse_mcp_correlation
@@ -408,7 +409,14 @@ async def _run_diversification_ai_summary_async(record_id: int, agent_id: int = 
 """
 
     uid = f"diversification_{int(time.time())}"
-    trace_id = f"divr_{uuid.uuid4().hex[:12]}"
+    trace_id = f"log_{uuid.uuid4().hex[:12]}"
+    _start_ts = time.time()
+    create_analysis_log(
+        trace_id=trace_id, agent_id=2, agent_name="分散度分析师",
+        analysis_type="diversification", source_table="portfolio_analysis_records",
+        source_id=record_id, query=user_content[:300],
+        input_summary="分散度AI",
+    )
     _track_agent(uid, "分散度分析师", "持仓分散度解读")
     logger.info(f"[trace:{trace_id}] 分散度分析师开始 record_id={record_id}")
     try:
@@ -430,6 +438,8 @@ async def _run_diversification_ai_summary_async(record_id: int, agent_id: int = 
     except Exception as e:
         logger.error(f"[trace:{trace_id}] 分散度 AI 分析失败 record_id={record_id}: {e}")
         update_analysis_record(record_id, status="error", error_msg=str(e))
+        _elapsed_ms = int((time.time() - _start_ts) * 1000)
+        complete_analysis_log(trace_id=trace_id, status="error", duration_ms=_elapsed_ms, error_msg=str(e))
         return
     finally:
         _untrack_agent(uid)
@@ -441,6 +451,8 @@ async def _run_diversification_ai_summary_async(record_id: int, agent_id: int = 
         status="done",
         error_msg="",
     )
+    _elapsed_ms = int((time.time() - _start_ts) * 1000)
+    complete_analysis_log(trace_id=trace_id, status="done", duration_ms=_elapsed_ms, token_usage=tokens)
 
     # ── 桥接 B：保存分析结论 ──
     try:

@@ -59,3 +59,37 @@ async def preview_scenario(req: PreviewRequest):
     """模拟"如果再跌X%后补Y元"的摊薄效果。"""
     from services.smart_add_planner import preview_add_scenario
     return preview_add_scenario(req.fund_code, req.additional_drop_pct, req.add_amount)
+
+
+# ── 反事实决策验证：假设操作跟踪 ──
+
+
+@router.get("/api/smart-add/snapshots")
+async def list_snapshots(
+    fund_code: str = Query(None),
+    start_date: str = Query(None),
+    end_date: str = Query(None),
+    limit: int = Query(100, ge=1, le=500),
+):
+    """查询历史智能补仓建议快照。"""
+    from db.smart_add_snapshots import list_snapshots as _list
+    rows = _list(fund_code=fund_code, start_date=start_date, end_date=end_date, limit=limit)
+    return {"data": rows, "total": len(rows)}
+
+
+@router.get("/api/smart-add/hypothetical/track")
+async def track_hypothetical():
+    """反事实跟踪验证：所有假设补仓操作的当前盈亏 + 假设vs真实组合对比。
+
+    假设操作由系统自动生成（每次生成补仓建议时自动创建），用户无需手动操作。
+    """
+    from services.counterfactual_verifier import verify_all_hypothetical
+    return verify_all_hypothetical()
+
+
+@router.delete("/api/smart-add/hypothetical/{tx_id}")
+async def delete_hypothetical(tx_id: int):
+    """删除假设交易（清理噪声用，不影响真实持仓）。"""
+    from db.smart_add_snapshots import delete_hypothetical_tx
+    ok = delete_hypothetical_tx(tx_id)
+    return {"ok": ok}

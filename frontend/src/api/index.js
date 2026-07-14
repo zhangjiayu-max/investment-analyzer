@@ -939,6 +939,24 @@ export function deleteAnalysisHistory(id) {
   return api.delete(`/analysis/history/${id}`)
 }
 
+// ==================== 分析记录统一查询 ====================
+
+/** 分析记录列表（支持多维度过滤） */
+export function listAnalysisLogs(params = {}) {
+  return api.get('/analysis/log/list', { params })
+}
+
+/** 分析记录详情（含原始结果） */
+export function getAnalysisLogDetail(logId) {
+  return api.get(`/analysis/log/${logId}`)
+}
+
+/** 手动触发质量评估 */
+export function evaluateAnalysisLog(logId) {
+  return api.post(`/analysis/log/${logId}/evaluate`)
+}
+
+
 /** Agent 配置列表 */
 export function listAnalysisAgents() {
   return api.get('/analysis-agents')
@@ -2599,6 +2617,12 @@ export const smartAddAPI = {
   /** 模拟"再跌X%后补Y元"的摊薄效果 */
   previewScenario: (fundCode, additionalDropPct, addAmount) =>
     api.post('/smart-add/preview', { fund_code: fundCode, additional_drop_pct: additionalDropPct, add_amount: addAmount }).then(r => r.data),
+  /** 查询历史建议快照 */
+  getSnapshots: (params = {}) => api.get('/smart-add/snapshots', { params }).then(r => r.data),
+  /** 反事实跟踪验证：所有假设补仓操作的当前盈亏 + 假设vs真实组合对比 */
+  trackHypothetical: () => api.get('/smart-add/hypothetical/track').then(r => r.data),
+  /** 删除假设交易 */
+  deleteHypothetical: (txId) => api.delete(`/smart-add/hypothetical/${txId}`).then(r => r.data),
 }
 
 // ── 交易计划 API ──────────────────────────────────────

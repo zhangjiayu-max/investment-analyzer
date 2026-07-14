@@ -2,6 +2,7 @@
 import asyncio
 import json
 import logging
+import time
 
 from fastapi import APIRouter, HTTPException
 
@@ -15,6 +16,7 @@ from db import (
     get_related_orchestrator_decisions,
 )
 from db.portfolio import update_analysis_record
+from db.agent_analysis_log import create_analysis_log, complete_analysis_log
 from db.config import get_config as _get_config, get_config_int, get_config_float
 from services.rag import build_rag_context_with_details, log_rag_search
 from models.portfolio import DeepDiveRequest
@@ -239,17 +241,24 @@ async def fund_deep_dive_api(holding_id: int, req: DeepDiveRequest):
     )
 
     # 后台执行分析
-    task = asyncio.create_task(_run_deep_dive_async(record_id, agent["system_prompt"], user_content))
+    task = asyncio.create_task(_run_deep_dive_async(record_id, agent["system_prompt"], user_content, fund_name))
     _background_tasks.add(task)
     task.add_done_callback(_background_tasks.discard)
 
     return {"ok": True, "id": record_id, "status": "running"}
 
 
-async def _run_deep_dive_async(record_id: int, system_prompt: str, user_content: str):
+async def _run_deep_dive_async(record_id: int, system_prompt: str, user_content: str, fund_name: str = ""):
     """后台执行单基金深度分析。"""
     import uuid
-    trace_id = f"deep_{uuid.uuid4().hex[:12]}"
+    trace_id = f"log_{uuid.uuid4().hex[:12]}"
+    _start_ts = time.time()
+    create_analysis_log(
+        trace_id=trace_id, agent_id=4, agent_name="基金深度分析师",
+        analysis_type="deep_dive", source_table="portfolio_analysis_records",
+        source_id=record_id, query=user_content[:300],
+        input_summary=f"深度:{fund_name}",
+    )
     try:
         from services.llm_service import _call_llm, MODEL
         response = await asyncio.to_thread(lambda: _call_llm(
@@ -266,6 +275,8 @@ async def _run_deep_dive_async(record_id: int, system_prompt: str, user_content:
         result_text = response.choices[0].message.content or ""
         tokens = response.usage.total_tokens if response.usage else 0
         update_analysis_record(record_id, result_data=result_text, token_usage=tokens, status="done")
+        _elapsed_ms = int((time.time() - _start_ts) * 1000)
+        complete_analysis_log(trace_id=trace_id, status="done", duration_ms=_elapsed_ms, token_usage=tokens)
         _extract_candidates_safely(record_id, "deep_dive", result_text)
 
         # ── 桥接 B：保存分析结论 ──
@@ -318,6 +329,8 @@ async def _run_deep_dive_async(record_id: int, system_prompt: str, user_content:
     except Exception as e:
         logger.error(f"深度分析失败 record_id={record_id}: {e}")
         update_analysis_record(record_id, status="error", error_msg=str(e))
+        _elapsed_ms = int((time.time() - _start_ts) * 1000)
+        complete_analysis_log(trace_id=trace_id, status="error", duration_ms=_elapsed_ms, error_msg=str(e))
 
 
 @router.get("/api/portfolio/analysis/deep-dive/records")

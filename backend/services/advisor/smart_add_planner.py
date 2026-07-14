@@ -26,7 +26,8 @@ from typing import Optional
 from db.config import get_config_bool, get_config_float, get_config_int
 from db.portfolio import list_holdings, get_portfolio_summary, get_cash_balance
 from db.valuations import get_best_valuation
-from services.smart_add_metrics import (
+from db.smart_add_snapshots import create_snapshot_with_hypothetical
+from services.advisor.smart_add_metrics import (
     classify_fund,
     calc_kelly_limit,
     calc_recovery_time,
@@ -277,6 +278,45 @@ def generate_smart_add_plan(user_id: str = "default") -> dict:
             for p in deep_loss_plans
         ],
     }
+
+    # ── 反事实决策验证：建议快照 + 假设交易自动落库 ──
+    try:
+        snapshot_enabled = get_config_bool("smart_add.snapshot_enabled", True)
+    except Exception:
+        snapshot_enabled = True
+    if snapshot_enabled:
+        for p in plans:
+            try:
+                # 建议金额 = 金字塔引擎释放金额（有深套才触发）；无金字塔则用 engine1 的月投额
+                pyr = p.get("pyramid") or {}
+                suggested_amount = pyr.get("released_amount", 0) if pyr else 0
+                suggested_tier = None
+                if pyr and pyr.get("triggered_tiers", 0) > 0:
+                    # 取已触发档位的描述
+                    triggered = [t for t in pyr.get("tiers", []) if t.get("triggered")]
+                    if triggered:
+                        t0 = triggered[0]
+                        suggested_tier = f"{t0.get('loss_pct', '?')}%档 ×{t0.get('release_pct', 0)}%"
+
+                # 无金字塔释放金额时，用 engine1 定投额作为建议
+                if not suggested_amount or suggested_amount <= 0:
+                    e1 = p.get("engine1") or {}
+                    suggested_amount = e1.get("monthly_amount", 0)
+
+                if suggested_amount and suggested_amount > 0:
+                    val = p.get("valuation") or {}
+                    create_snapshot_with_hypothetical(
+                        fund_code=p["fund_code"],
+                        fund_name=p.get("fund_name", ""),
+                        suggested_amount=round(suggested_amount, 2),
+                        suggested_tier=suggested_tier,
+                        profit_rate_at_snapshot=p.get("profit_rate"),
+                        valuation_zscore=val.get("zscore"),
+                        current_price_at_snapshot=p.get("current_price"),
+                        user_id=user_id,
+                    )
+            except Exception as e:
+                logger.debug(f"[smart_add] 快照落库失败 {p.get('fund_code')}: {e}")
 
     return {
         "enabled": True,

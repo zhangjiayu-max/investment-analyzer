@@ -4,6 +4,7 @@ import json
 import logging
 import re
 import time
+import uuid
 
 from fastapi import APIRouter, HTTPException
 
@@ -19,6 +20,7 @@ from db import (
     create_async_task, update_async_task,
 )
 from db._conn import _get_conn
+from db.agent_analysis_log import create_analysis_log, complete_analysis_log
 from services.llm_service import _call_llm, MODEL
 from services.market_data import get_index_current_price
 from infra.state import track_agent as _track_agent, untrack_agent as _untrack_agent, hot_topics_cache as _hot_topics_cache
@@ -199,15 +201,25 @@ async def _do_hotspots_analysis():
 
     uid = f"hotspots_{int(time.time())}"
     _track_agent(uid, "热点分析专家", "市场热点分析")
+    trace_id = f"log_{uuid.uuid4().hex[:12]}"
+    _start_ts = time.time()
+    create_analysis_log(
+        trace_id=trace_id, agent_id=7, agent_name="热点分析专家",
+        analysis_type="hotspots", source_table="analysis_history",
+        source_id=None, query=prompt[:300],
+        input_summary="热点分析",
+    )
     try:
         response = await asyncio.wait_for(asyncio.to_thread(lambda: _call_llm(
             caller="hotspots_analysis",
+            trace_id=trace_id,
             model=MODEL,
             messages=[{"role": "user", "content": prompt}],
             temperature=get_config_float('llm.temperature_default', 0.3),
             max_tokens=get_config_int('llm.max_tokens_report', 8192),
         )), timeout=120)
         content = response.choices[0].message.content or "{}"
+        _tokens = response.usage.total_tokens if response.usage else 0
         json_match = re.search(r'\{.*\}', content, re.DOTALL)
         if json_match:
             parsed = json.loads(json_match.group())
@@ -266,10 +278,16 @@ async def _do_hotspots_analysis():
                 save_analysis_cache("hotspots_latest", result)
             except Exception:
                 pass
+        _elapsed_ms = int((time.time() - _start_ts) * 1000)
+        complete_analysis_log(trace_id=trace_id, status="done", duration_ms=_elapsed_ms, token_usage=_tokens)
         return result
     except asyncio.TimeoutError:
+        _elapsed_ms = int((time.time() - _start_ts) * 1000)
+        complete_analysis_log(trace_id=trace_id, status="error", duration_ms=_elapsed_ms, error_msg="分析超时")
         return {"summary": "分析超时，请重试", "recommendations": [], "analysis_text": ""}
     except Exception as e:
+        _elapsed_ms = int((time.time() - _start_ts) * 1000)
+        complete_analysis_log(trace_id=trace_id, status="error", duration_ms=_elapsed_ms, error_msg=str(e))
         logging.warning(f"热点结构化分析失败: {e}")
         return {"summary": f"分析失败: {str(e)}", "recommendations": [], "analysis_text": ""}
     finally:

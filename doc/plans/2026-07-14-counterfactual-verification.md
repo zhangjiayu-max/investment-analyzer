@@ -41,9 +41,9 @@
                           (is_hypothetical=1)          真实收益
 ```
 
-### 2.1 新增表：`smart_add_snapshots`（智能补仓建议快照）
+### 2.1 新增表：`smart_add_snapshots`（智能补仓建议快照 + 自动假设交易）
 
-每次 `generate_smart_add_plan()` 被调用时，为每个标的的建议落库一条快照。
+每次 `generate_smart_add_plan()` 被调用时，为每个标的的建议落库一条快照，**同时自动创建一笔假设交易**（is_hypothetical=1）。用户无需任何操作，直接看验证结果。
 
 ```sql
 CREATE TABLE IF NOT EXISTS smart_add_snapshots (
@@ -68,9 +68,10 @@ CREATE TABLE IF NOT EXISTS smart_add_snapshots (
 ```
 
 **设计要点**：
-- 每次生成建议自动落库，用户无感知
-- 同一标的同一天只保留最新一条（去重，按 fund_code + snapshot_date 唯一）
-- `hypothetical_tx_id` 延后填充：用户事后标记"假设补仓"时才关联
+- 每次生成建议自动落库快照，**同时自动创建假设交易**（用户无感知、无需操作）
+- 同一标的同一天只保留最新一条（去重，按 fund_code + snapshot_date 唯一，旧的假设交易一并删除）
+- `hypothetical_tx_id` 在快照创建时立即填入（关联自动生成的假设交易）
+- 假设交易金额 = 系统建议金额（suggested_amount），买入日 = 快照日期，买入价 = 当日净值
 
 ### 2.2 扩展 `portfolio_transactions` 表：新增 `is_hypothetical` 字段
 
@@ -118,22 +119,14 @@ def verify_hypothetical_tx(tx_id: int) -> dict:
 
 ### 2.4 API 设计
 
-新增 3 个 API（在 `routers/analysis/smart_add.py` 中）：
+新增 2 个 API（在 `routers/analysis/smart_add.py` 中）。**假设操作自动生成，无需用户录入**：
 
 | API | 方法 | 用途 |
 |-----|------|------|
 | `/api/smart-add/snapshots` | GET | 查询历史建议快照列表（支持按fund_code/日期筛选） |
-| `/api/smart-add/hypothetical` | POST | 记录假设操作：基于快照标记"假设我补了X元" |
-| `/api/smart-add/hypothetical/track` | GET | 查询所有假设交易的当前盈亏 + 假设vs真实组合对比 |
+| `/api/smart-add/hypothetical/track` | GET | 查询所有假设交易的当前盈亏 + 假设vs真实组合对比（只读，自动跟踪） |
 
-**POST `/api/smart-add/hypothetical` 请求体**：
-```json
-{
-    "snapshot_id": 123,           // 基于哪条建议快照
-    "add_amount": 5000,           // 假设补仓金额（可改写建议金额）
-    "buy_date": "2026-06-15"      // 假设买入日期（默认快照日期）
-}
-```
+可选：`DELETE /api/smart-add/hypothetical/{tx_id}` 删除某条假设交易（清理噪声用）。
 
 **GET `/api/smart-add/hypothetical/track` 返回**：
 ```json
@@ -201,15 +194,16 @@ def verify_hypothetical_tx(tx_id: int) -> dict:
 
 ## 四、关键设计决策
 
-### 4.1 为什么用"快照表 + 假设交易标记"而非"自动影子交易"？
+### 4.1 为什么用"自动影子交易"而非"手动标记"？
 
-**选择方案**：用户手动标记"假设补仓"
-**否决方案**：系统每次生成建议自动创建假设交易
+**选择方案**：系统每次生成建议时自动创建假设交易
+**否决方案**：用户手动回看历史建议并标记"假设我补了"
 
 **理由**：
-- 自动影子交易会产生大量噪声（每次刷新都生成），用户难以区分"我真正想验证的"和"系统自动记的"
-- 手动标记让用户明确"我想验证这个建议"，数据更有价值
-- 快照表保留了所有历史建议，用户随时可回看"当时系统建议什么"
+- 用户无需任何额外操作，打开页面就能看到"如果过去都按建议补仓了，现在赚/亏多少"
+- 防噪声：同一标的同一天去重（按 fund_code + snapshot_date 唯一），不会因刷新产生重复
+- 快照表完整保留历史建议，假设交易跟随快照自动生成、自动更新关联
+- 如果用户实际执行了操作，可后续把 `is_hypothetical` 改为 0 转为真实交易
 
 ### 4.2 为什么假设交易复用 `portfolio_transactions` 而非新表？
 
@@ -232,26 +226,18 @@ def verify_hypothetical_tx(tx_id: int) -> dict:
 
 ## 五、数据流
 
-### 5.1 建议快照自动落库
+### 5.1 建议快照 + 假设交易自动落库
 ```
 用户访问智能补仓页面
   → GET /api/smart-add/plan
   → generate_smart_add_plan() 计算建议
   → 落库 smart_add_snapshots（每个标的一条）
+  → 同时自动创建 portfolio_transactions (is_hypothetical=1)
+  → 关联 snapshot.hypothetical_tx_id
   → 返回建议给前端
 ```
 
-### 5.2 用户标记假设操作
-```
-用户回看历史建议
-  → GET /api/smart-add/snapshots 看到某条建议
-  → 点击"假设我补了" + 输入金额
-  → POST /api/smart-add/hypothetical {snapshot_id, add_amount}
-  → 创建 portfolio_transactions (is_hypothetical=1)
-  → 更新 snapshot.hypothetical_tx_id 关联
-```
-
-### 5.3 反事实跟踪验证
+### 5.2 反事实跟踪验证（只读，用户无需操作）
 ```
 用户查看假设操作效果
   → GET /api/smart-add/hypothetical/track

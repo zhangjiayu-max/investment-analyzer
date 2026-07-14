@@ -21,6 +21,7 @@ import StrategySandboxPage from '../components/decision/StrategySandboxPage.vue'
 import FamilyFinanceDashboard from '../components/family/FamilyFinanceDashboard.vue'
 import DecisionRecordsPage from '../components/decision/DecisionRecordsPage.vue'
 import AdminAgentsPage from '../components/agent/AdminAgentsPage.vue'
+import AnalysisLogPage from '../components/analysis/AnalysisLogPage.vue'
 import TokenUsagePage from '../components/quality/TokenUsagePage.vue'
 import BadCasePage from '../components/quality/BadCasePage.vue'
 import EvalSuitePage from '../components/quality/EvalSuitePage.vue'
@@ -70,6 +71,7 @@ const pageComponents = {
   'strategy-sandbox': StrategySandboxPage,
   'decisions': DecisionRecordsPage,
   'admin-agents': AdminAgentsPage,
+  'analysis-log': AnalysisLogPage,
   'token-usage': TokenUsagePage,
   'quality-dashboard': QualityDashboard,
   'bad-cases': BadCasePage,

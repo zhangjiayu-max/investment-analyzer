@@ -241,6 +241,8 @@ DEFAULT_CONFIGS = [
     ('smart_add.max_single_position_pct', '25', '单标的占总仓位上限%', 'smart_add'),
     ('smart_add.valuation_pause_pct', '60', '估值分位回升到此值暂停引擎', 'smart_add'),
     ('smart_add.stale_days', '14', '估值数据过期天数阈值', 'smart_add'),
+    ('smart_add.snapshot_enabled', 'true', '智能补仓建议快照落库开关（反事实决策验证，默认开启）', 'smart_add'),
+    ('smart_add.hypothetical_enabled', 'true', '假设操作自动生成开关（每次建议自动创建假设交易，默认开启）', 'smart_add'),
 ]
 
 

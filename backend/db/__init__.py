@@ -643,6 +643,29 @@ def init_db():
     _add_column_if_not_exists(conn, "portfolio_transactions", "account", "TEXT")
     _add_column_if_not_exists(conn, "portfolio_transactions", "fee", "REAL DEFAULT 0")
     _add_column_if_not_exists(conn, "portfolio_transactions", "valuation_snapshot", "TEXT")
+    # 反事实决策验证：假设交易标记（0=真实交易，1=假设交易，不影响真实持仓）
+    _add_column_if_not_exists(conn, "portfolio_transactions", "is_hypothetical", "INTEGER DEFAULT 0")
+
+    # ── 智能补仓建议快照表（反事实决策验证）──
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS smart_add_snapshots (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id TEXT DEFAULT 'default',
+            fund_code TEXT NOT NULL,
+            fund_name TEXT,
+            suggested_amount REAL,
+            suggested_tier TEXT,
+            profit_rate_at_snapshot REAL,
+            valuation_zscore REAL,
+            current_price_at_snapshot REAL,
+            hypothetical_tx_id INTEGER,
+            snapshot_date TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            notes TEXT
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_snapshots_fund_date ON smart_add_snapshots(fund_code, snapshot_date)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_snapshots_user ON smart_add_snapshots(user_id)")
 
     # ── 交易操作审计日志 ──
     conn.execute("""
@@ -909,6 +932,10 @@ def init_db():
 
     # 初始化评测集表
     init_eval_tables(conn)
+
+    # 初始化分析 Agent 统一记录表
+    from db.agent_analysis_log import init_table as init_analysis_log_table
+    init_analysis_log_table()
 
     # 初始化健康分表
     from db.health_score import init_health_score_tables

@@ -21,6 +21,12 @@ const cfg = ref(null)             // 配置面板数据
 // 折叠面板
 const showSimulator = ref(false)
 const showConfig = ref(false)
+const showCounterfactual = ref(false)
+
+// 反事实决策验证
+const counterfactual = ref(null)
+const cfLoading = ref(false)
+const cfError = ref('')
 
 // 摊薄模拟器
 const simFundCode = ref('')
@@ -109,6 +115,38 @@ async function loadConfig() {
     cfg.value = data
     syncCfgForm(data)
   } catch { /* 静默，plan 已带 config */ }
+}
+
+// 反事实决策验证：加载假设操作跟踪结果
+async function loadCounterfactual() {
+  cfLoading.value = true
+  cfError.value = ''
+  try {
+    counterfactual.value = await smartAddAPI.trackHypothetical()
+  } catch (e) {
+    cfError.value = e?.message || '加载反事实验证失败'
+  } finally {
+    cfLoading.value = false
+  }
+}
+
+// 切换反事实面板时按需加载
+async function toggleCounterfactual() {
+  showCounterfactual.value = !showCounterfactual.value
+  if (showCounterfactual.value && !counterfactual.value) {
+    await loadCounterfactual()
+  }
+}
+
+// 删除假设交易
+async function removeHypothetical(txId) {
+  if (!confirm('确认删除这条假设交易记录？')) return
+  try {
+    await smartAddAPI.deleteHypothetical(txId)
+    await loadCounterfactual()
+  } catch (e) {
+    alert('删除失败：' + (e?.message || ''))
+  }
 }
 
 function syncCfgForm(c) {

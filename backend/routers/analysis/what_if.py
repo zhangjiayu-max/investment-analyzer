@@ -5,6 +5,8 @@
 import asyncio
 import json
 import logging
+import time
+import uuid
 
 from fastapi import APIRouter, HTTPException
 
@@ -12,6 +14,7 @@ from db import (
     list_holdings,
     create_portfolio_analysis_record,
 )
+from db.agent_analysis_log import create_analysis_log, complete_analysis_log
 from models.portfolio import WhatIfRequest
 from ._shared import _get_valuation_context
 
@@ -54,6 +57,8 @@ async def what_if_analysis_api(req: WhatIfRequest):
         f"\n{valuation_context}"
     )
 
+    trace_id = f"log_{uuid.uuid4().hex[:12]}"
+    _start_ts = time.time()
     try:
         from agent.multi_agent import run_specialist
         specialist_result = await asyncio.to_thread(
@@ -63,6 +68,14 @@ async def what_if_analysis_api(req: WhatIfRequest):
         tokens = specialist_result.get("tokens_used", 0) or 0
     except Exception as e:
         logger.error(f"情景推演失败: {e}")
+        _elapsed_ms = int((time.time() - _start_ts) * 1000)
+        create_analysis_log(
+            trace_id=trace_id, agent_id=6, agent_name="情景推演分析师",
+            analysis_type="what_if", source_table="portfolio_analysis_records",
+            source_id=None, query=user_content[:300],
+            input_summary=f"情景:{scenario_desc}",
+        )
+        complete_analysis_log(trace_id=trace_id, status="error", duration_ms=_elapsed_ms, error_msg=str(e))
         raise HTTPException(500, f"AI 分析失败: {str(e)}")
 
     record_id = create_portfolio_analysis_record(
@@ -73,6 +86,14 @@ async def what_if_analysis_api(req: WhatIfRequest):
         token_usage=tokens,
         agent_id=6,
     )
+    _elapsed_ms = int((time.time() - _start_ts) * 1000)
+    create_analysis_log(
+        trace_id=trace_id, agent_id=6, agent_name="情景推演分析师",
+        analysis_type="what_if", source_table="portfolio_analysis_records",
+        source_id=record_id, query=user_content[:300],
+        input_summary=f"情景:{scenario_desc}",
+    )
+    complete_analysis_log(trace_id=trace_id, status="done", duration_ms=_elapsed_ms, token_usage=tokens)
 
     return {"id": record_id, "result": result_text, "token_usage": tokens, "merged_into": "risk_assessor"}
 

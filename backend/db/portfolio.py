@@ -150,14 +150,14 @@ def get_dca_suggestion(holding_id: int) -> dict:
         recent_count = conn.execute("""
             SELECT COUNT(*) as cnt FROM portfolio_transactions
             WHERE holding_id = ? AND transaction_type = 'buy'
-              AND (is_system IS NULL OR is_system = 0)
+              AND (is_system IS NULL OR is_system = 0) AND (is_hypothetical IS NULL OR is_hypothetical = 0)
               AND transaction_date >= ?
         """, (holding_id, cutoff)).fetchone()["cnt"]
         today = datetime.now().strftime("%Y-%m-%d")
         today_count = conn.execute("""
             SELECT COUNT(*) as cnt FROM portfolio_transactions
             WHERE holding_id = ? AND transaction_type = 'buy'
-              AND (is_system IS NULL OR is_system = 0)
+              AND (is_system IS NULL OR is_system = 0) AND (is_hypothetical IS NULL OR is_hypothetical = 0)
               AND transaction_date = ?
         """, (holding_id, today)).fetchone()["cnt"]
     finally:
@@ -760,7 +760,7 @@ def list_transactions(fund_code: str = None, holding_id: int = None,
         conditions.append("transaction_date <= ?")
         params.append(end_date)
     if not include_system:
-        conditions.append("(is_system IS NULL OR is_system = 0)")
+        conditions.append("(is_system IS NULL OR is_system = 0) AND (is_hypothetical IS NULL OR is_hypothetical = 0)")
 
     where = " AND ".join(conditions)
     params.append(limit)
@@ -790,6 +790,7 @@ def _recalculate_holding(holding_id: int):
         txs = conn.execute("""
             SELECT * FROM portfolio_transactions
             WHERE holding_id = ? AND (status IN ('confirmed', 'settled') OR status IS NULL)
+              AND (is_hypothetical IS NULL OR is_hypothetical = 0)
             ORDER BY id ASC
         """, (holding_id,)).fetchall()
 
@@ -2700,7 +2701,7 @@ def get_transaction_summary(user_id: str = "default") -> dict:
         SELECT COUNT(*) as tx_count, SUM(amount) as total_amount
         FROM portfolio_transactions
         WHERE user_id = ? AND transaction_type = 'buy' AND (status IN ('confirmed', 'settled') OR status IS NULL)
-            AND (is_system IS NULL OR is_system = 0)
+            AND (is_system IS NULL OR is_system = 0) AND (is_hypothetical IS NULL OR is_hypothetical = 0)
     """, (user_id,)).fetchall()
     buy_count = buy_rows[0]["tx_count"] if buy_rows else 0
     buy_total = buy_rows[0]["total_amount"] or 0 if buy_rows else 0
@@ -2710,7 +2711,7 @@ def get_transaction_summary(user_id: str = "default") -> dict:
         SELECT COUNT(*) as tx_count, SUM(amount) as total_amount
         FROM portfolio_transactions
         WHERE user_id = ? AND transaction_type = 'sell' AND (status IN ('confirmed', 'settled') OR status IS NULL)
-            AND (is_system IS NULL OR is_system = 0)
+            AND (is_system IS NULL OR is_system = 0) AND (is_hypothetical IS NULL OR is_hypothetical = 0)
     """, (user_id,)).fetchall()
     sell_count = sell_rows[0]["tx_count"] if sell_rows else 0
     sell_total = sell_rows[0]["total_amount"] or 0 if sell_rows else 0

@@ -106,6 +106,8 @@ export const navItems = [
     children: [
       { key: 'admin-agents', label: 'Agent 管理', icon: 'admin',
         desc: '专家Agent配置、Prompt版本管理、工具注册' },
+      { key: 'analysis-log', label: '分析记录', icon: 'clipboard',
+        desc: '所有分析Agent执行记录、质量评估、快速定位' },
       { key: 'token-usage', label: 'Token 用量', icon: 'token',
         desc: 'LLM调用token统计、预算监控、成本分析' },
       { key: 'system-config', label: '系统配置', icon: 'config',

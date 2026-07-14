@@ -4,6 +4,7 @@ import json
 import logging
 import re
 import time
+import uuid
 
 from fastapi import APIRouter, HTTPException
 
@@ -17,6 +18,7 @@ from db import (
     get_related_orchestrator_decisions,
 )
 from db._conn import _get_conn
+from db.agent_analysis_log import create_analysis_log, complete_analysis_log
 from services.llm_service import _call_llm, MODEL
 from infra.state import track_agent as _track_agent, untrack_agent as _untrack_agent
 
@@ -149,6 +151,8 @@ async def regenerate_daily_report():
 
 async def _run_regenerate_daily_report_async(task_id: int, agent: dict):
     """后台执行重新生成今日市场简报。"""
+    trace_id = f"log_{uuid.uuid4().hex[:12]}"
+    _start_ts = time.time()
     try:
         # 删除今日旧报告
         today = time.strftime("%Y-%m-%d")
@@ -327,6 +331,7 @@ async def _run_regenerate_daily_report_async(task_id: int, agent: dict):
 
         response = await asyncio.to_thread(lambda: _call_llm(
             caller="daily_report",
+            trace_id=trace_id,
             model=MODEL,
             messages=[
                 {"role": "system", "content": full_prompt},
@@ -345,6 +350,14 @@ async def _run_regenerate_daily_report_async(task_id: int, agent: dict):
             valuation_context=val_context[:500], result=result_text,
             token_usage=token_usage,
         )
+        _elapsed_ms = int((time.time() - _start_ts) * 1000)
+        create_analysis_log(
+            trace_id=trace_id, agent_id=1, agent_name="市场日报分析师",
+            analysis_type="daily_report", source_table="analysis_history",
+            source_id=new_id, query="生成今日市场简报",
+            input_summary=f"日报:{time.strftime('%Y-%m-%d')}",
+        )
+        complete_analysis_log(trace_id=trace_id, status="done", duration_ms=_elapsed_ms, token_usage=token_usage)
 
         # ── 桥接 B：保存分析结论 + 关联对话上下文 ──
         try:
@@ -400,4 +413,12 @@ async def _run_regenerate_daily_report_async(task_id: int, agent: dict):
         update_async_task(task_id, status="done", result={"ok": True, "id": new_id, "token_usage": token_usage}, token_usage=token_usage)
     except Exception as e:
         logging.error(f"重新生成日报异步任务失败: {e}")
+        _elapsed_ms = int((time.time() - _start_ts) * 1000)
+        create_analysis_log(
+            trace_id=trace_id, agent_id=1, agent_name="市场日报分析师",
+            analysis_type="daily_report", source_table="analysis_history",
+            source_id=None, query="生成今日市场简报",
+            input_summary=f"日报:{time.strftime('%Y-%m-%d')}",
+        )
+        complete_analysis_log(trace_id=trace_id, status="error", duration_ms=_elapsed_ms, error_msg=str(e))
         update_async_task(task_id, status="error", error_msg=str(e))

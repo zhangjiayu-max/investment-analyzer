@@ -2,6 +2,7 @@
 import asyncio
 import json
 import logging
+import time
 
 from fastapi import APIRouter, HTTPException
 
@@ -10,6 +11,7 @@ from db import (
     create_portfolio_analysis_record,
 )
 from db.portfolio import update_analysis_record
+from db.agent_analysis_log import create_analysis_log, complete_analysis_log
 from db.config import get_config_int, get_config_float
 from models.portfolio import TradeReviewRequest
 
@@ -148,7 +150,14 @@ async def trade_review_api(req: TradeReviewRequest):
 async def _run_trade_review_async(record_id: int, system_prompt: str, user_content: str):
     """后台执行交易复盘分析。"""
     import uuid
-    trace_id = f"trd_{uuid.uuid4().hex[:12]}"
+    trace_id = f"log_{uuid.uuid4().hex[:12]}"
+    _start_ts = time.time()
+    create_analysis_log(
+        trace_id=trace_id, agent_id=5, agent_name="交易复盘分析师",
+        analysis_type="trade_review", source_table="portfolio_analysis_records",
+        source_id=record_id, query=user_content[:300],
+        input_summary="交易复盘",
+    )
     try:
         from services.llm_service import _call_llm, MODEL
         response = await asyncio.to_thread(lambda: _call_llm(
@@ -165,11 +174,15 @@ async def _run_trade_review_async(record_id: int, system_prompt: str, user_conte
         result_text = response.choices[0].message.content or ""
         tokens = response.usage.total_tokens if response.usage else 0
         update_analysis_record(record_id, result_data=result_text, token_usage=tokens, status="done")
+        _elapsed_ms = int((time.time() - _start_ts) * 1000)
+        complete_analysis_log(trace_id=trace_id, status="done", duration_ms=_elapsed_ms, token_usage=tokens)
         _extract_candidates_safely(record_id, "trade_review", result_text)
         logger.info(f"交易复盘完成 record_id={record_id}")
     except Exception as e:
         logger.error(f"交易复盘失败 record_id={record_id}: {e}")
         update_analysis_record(record_id, status="error", error_msg=str(e))
+        _elapsed_ms = int((time.time() - _start_ts) * 1000)
+        complete_analysis_log(trace_id=trace_id, status="error", duration_ms=_elapsed_ms, error_msg=str(e))
 
 
 @router.get("/api/portfolio/analysis/trade-review/records")

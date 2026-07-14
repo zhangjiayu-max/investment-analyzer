@@ -2,6 +2,7 @@
 import asyncio
 import json
 import logging
+import time
 
 from fastapi import APIRouter, HTTPException
 
@@ -11,6 +12,7 @@ from db import (
     create_portfolio_analysis_record, list_portfolio_analysis_records,
 )
 from db.portfolio import update_analysis_record, compare_funds
+from db.agent_analysis_log import create_analysis_log, complete_analysis_log
 from db.config import get_config_int, get_config_float
 from ._shared import _get_valuation_context, _get_valuation_context_for_fund
 
@@ -101,17 +103,24 @@ async def fund_analysis_api(req: dict):
     )
 
     # 后台执行分析
-    task = asyncio.create_task(_run_fund_analysis_async(record_id, system_prompt, user_content))
+    task = asyncio.create_task(_run_fund_analysis_async(record_id, system_prompt, user_content, fund_code, fund_name))
     _background_tasks.add(task)
     task.add_done_callback(_background_tasks.discard)
 
     return {"ok": True, "id": record_id, "status": "running"}
 
 
-async def _run_fund_analysis_async(record_id: int, system_prompt: str, user_content: str):
+async def _run_fund_analysis_async(record_id: int, system_prompt: str, user_content: str, fund_code: str = "", fund_name: str = ""):
     """后台执行指定基金分析。"""
     import uuid
-    trace_id = f"fund_{uuid.uuid4().hex[:12]}"
+    trace_id = f"log_{uuid.uuid4().hex[:12]}"
+    _start_ts = time.time()
+    create_analysis_log(
+        trace_id=trace_id, agent_id=6, agent_name="情景推演分析师",
+        analysis_type="fund_analysis", source_table="portfolio_analysis_records",
+        source_id=record_id, query=user_content[:300],
+        input_summary=f"基金:{fund_code}({fund_name})",
+    )
     try:
         from services.llm_service import _call_llm, MODEL
         response = await asyncio.to_thread(lambda: _call_llm(
@@ -128,11 +137,15 @@ async def _run_fund_analysis_async(record_id: int, system_prompt: str, user_cont
         result_text = response.choices[0].message.content or ""
         tokens = response.usage.total_tokens if response.usage else 0
         update_analysis_record(record_id, result_data=result_text, token_usage=tokens, status="done")
+        _elapsed_ms = int((time.time() - _start_ts) * 1000)
+        complete_analysis_log(trace_id=trace_id, status="done", duration_ms=_elapsed_ms, token_usage=tokens)
         _extract_candidates_safely(record_id, "fund_analysis", result_text)
         logger.info(f"指定基金分析完成 record_id={record_id}")
     except Exception as e:
         logger.error(f"指定基金分析失败 record_id={record_id}: {e}")
         update_analysis_record(record_id, status="error", error_msg=str(e))
+        _elapsed_ms = int((time.time() - _start_ts) * 1000)
+        complete_analysis_log(trace_id=trace_id, status="error", duration_ms=_elapsed_ms, error_msg=str(e))
 
 
 @router.get("/api/portfolio/analysis/fund-analysis/records")
