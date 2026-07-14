@@ -1735,9 +1735,9 @@ export function acknowledgeAlert(alertId, status) {
 
 // ── 前瞻性事件雷达 ─────────────────────────────────────
 
-/** 手动触发事件雷达扫描 */
+/** 手动触发事件雷达扫描（LLM调用较多，给180秒超时） */
 export function triggerEventRadarScan() {
-  return api.post('/alerts/event-radar/scan')
+  return api.post('/alerts/event-radar/scan', {}, { timeout: 180000 })
 }
 
 /** 手动触发事件落地验证 */

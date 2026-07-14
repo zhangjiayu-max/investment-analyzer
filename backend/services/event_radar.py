@@ -803,9 +803,10 @@ def scan_forward_events(trace_id: str = "") -> dict:
     events = _extract_events_from_news(news, trace_id=trace_id)
 
     # 3. 提取中长期行业趋势（从新闻中筛选深度分析内容）
+    # 移动端扫描超时风险：每篇新闻1次LLM调用，限制为2篇控制耗时
     trends = []
     try:
-        for n in news[:5]:
+        for n in news[:2]:
             summary = n.get("news_summary", "")
             if len(summary) > 300:
                 trend_results = _extract_trends_from_articles(summary, n.get("news_title", ""))

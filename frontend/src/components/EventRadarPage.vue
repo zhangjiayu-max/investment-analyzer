@@ -2699,7 +2699,33 @@ onMounted(() => {
   .stats-row { grid-template-columns: repeat(2, 1fr); }
   .event-time-col { width: 55px; }
   .event-date-badge { font-size: 0.72rem; padding: 0.2rem 0.4rem; }
-  .filter-bar { flex-direction: column; align-items: flex-start; }
+  .filter-bar { flex-direction: column; align-items: stretch; }
+
+  /* 顶部标题区 —— 纵向布局，避免标题与按钮挤压 */
+  .page-header { flex-direction: column; align-items: stretch; gap: 0.6rem; }
+  .header-left { flex: none; }
+  .page-title { font-size: 1.1rem; }
+  .page-subtitle { font-size: 0.76rem; }
+  .header-actions { flex-shrink: 1; display: flex; flex-wrap: wrap; gap: 0.4rem; }
+  .header-actions .btn,
+  .header-actions .scan-btn,
+  .header-actions .analyze-btn,
+  .header-actions .verify-btn { margin-right: 0; padding: 0.4rem 0.7rem; font-size: 0.76rem; }
+
+  /* 主Tab —— 允许换行，避免3个标签挤压 */
+  .main-tabs { flex-wrap: wrap; gap: 0.2rem; }
+  .main-tab { padding: 0.4rem 0.6rem; font-size: 0.78rem; }
+
+  /* 筛选区 —— 允许换行 */
+  .filter-tabs { flex-wrap: wrap; gap: 0.2rem; padding: 2px; }
+  .filter-tab { padding: 0.3rem 0.5rem; font-size: 0.72rem; }
+  .status-tabs { flex-wrap: wrap; gap: 0.15rem; }
+  .status-tab { padding: 0.3rem 0.5rem; font-size: 0.7rem; }
+
+  /* 统计卡片 */
+  .stat-card { padding: 0.6rem 0.65rem; }
+  .stat-value { font-size: 1.05rem; }
+  .stat-label { font-size: 0.68rem; }
 
   /* 事件卡片移动端适配 —— 避免标签/文字挤压堆叠 */
   .event-card { padding: 0.75rem 0.8rem; gap: 0.6rem; }
