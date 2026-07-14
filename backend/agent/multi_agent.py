@@ -177,20 +177,41 @@ _UNIVERSAL_DATA_CONSTRAINT = """
 # ── 专家主动检索指令（追加到有 search_knowledge 工具的 Agent） ──
 # P4 半修修复：从 6 类场景全强制检索 book 降为 3 类（估值/情绪/周期，有引用证据）
 # 买卖/企业质量/资产配置改用工具数据（靠持仓和行情工具，而非书籍）
+# 升级：扩展为 3 阶段 Agentic RAG 策略（信息缺口判断→主动检索→充分性自检）
 _ACTIVE_RETRIEVAL_INSTRUCTION = """
-## 📚 书籍知识主动检索指令
-你拥有 search_knowledge 工具，可以检索投资经典书籍的知识库。在以下场景**必须主动调用**：
+## 📚 主动检索策略（Agentic RAG）
+你拥有 search_knowledge 工具，可以检索投资经典书籍、分析记录、文章等知识库。
 
-1. **提出估值判断时** → 检索 query="估值 安全边际 PE PB 百分位"，content_types=["book", "analysis"]
+### 阶段 1：信息缺口判断
+分析用户问题，列出你需要的关键信息清单。对照已提供的上下文和工具结果，
+明确标注哪些信息已有、哪些还缺失。**特别注意黑板上的"已有工具结果"区块**——
+如果其他专家已经查询过相同数据，直接引用，不要重复查询。
+
+### 阶段 2：主动检索
+对每个缺失信息，使用 search_knowledge 工具主动检索：
+- 第一轮：用核心关键词检索
+- 若结果不足，第二轮：换同义词或扩展词检索
+- 每个信息缺口最多 2 轮检索
+
+**强制检索场景**（必须主动调用）：
+1. **估值判断时** → 检索 query="估值 安全边际 PE PB 百分位"，content_types=["book", "analysis"]
 2. **分析市场情绪/心理偏差时** → 检索 query="心理 偏差 情绪 损失厌恶"，content_types=["book", "analysis"]
 3. **分析周期位置时** → 检索 query="周期 牛熊 转折 估值温度"，content_types=["book", "analysis"]
+4. **行业/板块分析时** → 检索 query="<板块名> 政策 趋势"，content_types=["article", "analysis"]
 
-以下场景请优先使用工具数据（持仓/行情/估值工具），不要检索书籍：
-- 买卖操作（用 query_portfolio / query_valuation 等工具）
-- 企业质量评估（用 query_fund_info / ttfund_fund_manager 等工具）
-- 资产配置（用 query_portfolio 查持仓后分析）
+### 阶段 3：充分性自检
+检索完成后，判断信息是否充分：
+- 充分 → 开始分析
+- 仍不足 → 在分析中明确标注"该维度数据不足"，**不要编造数据**
 
-引用书籍观点时请注明来源（如"根据《聪明的投资者》..."），增强分析的可信度。
+### 不检索场景（用工具数据替代）
+- 买卖操作 → 用 query_portfolio / query_valuation 等工具
+- 企业质量评估 → 用 query_fund_info / ttfund_fund_manager 等工具
+- 资产配置 → 用 query_portfolio 查持仓后分析
+
+引用书籍/文章观点时请注明来源（如"根据《聪明的投资者》..."），增强分析的可信度。
+**禁止引用工具未返回的数据**——如果 search_knowledge 或 query_valuation 未找到某指数数据，
+不得在分析中编造该指数的 PE/PB/百分位等数值。
 """
 
 # ── 风险与深度分析约束（追加到所有专家 prompt） ──
@@ -458,7 +479,8 @@ def _check_react_convergence(tool_calls_log: list, llm_messages: list) -> bool:
 
 def run_specialist(agent_key: str, query: str, context: str = "",
                    prebuilt_context: str = "", model: str = None, trace_id: str = "",
-                   from_pipeline: bool = False, conversation_id: int = None, message_id: int = None) -> dict:
+                   from_pipeline: bool = False, conversation_id: int = None, message_id: int = None,
+                   blackboard=None) -> dict:
     """
     运行单个专家 Agent。
 
@@ -499,6 +521,9 @@ def run_specialist(agent_key: str, query: str, context: str = "",
         # （system_prompt + KYC + 持仓 + RAG + 估值 + 黑板），直接用作 system_content
         # 跳过 system_prompt/KYC/持仓的重复注入，通用约束由后面全局代码统一追加
         system_content = prebuilt_context or agent["system_prompt"]
+        # Agentic RAG：pipeline 路径也注入主动检索指令（让专家能主动多轮检索）
+        if "search_knowledge" in agent.get("tools", []) and get_config_bool("agent.agentic_rag_enabled", True):
+            system_content += _ACTIVE_RETRIEVAL_INSTRUCTION
     else:
         # ReAct 路径：原逻辑，手动构建上下文
         system_content = agent["system_prompt"]
@@ -520,7 +545,7 @@ def run_specialist(agent_key: str, query: str, context: str = "",
         system_content = _inject_kyc_profile(system_content, agent)
 
         # 追加主动检索指令（仅当专家有 search_knowledge 工具时）
-        if "search_knowledge" in agent.get("tools", []):
+        if "search_knowledge" in agent.get("tools", []) and get_config_bool("agent.agentic_rag_enabled", True):
             system_content += _ACTIVE_RETRIEVAL_INSTRUCTION
 
     # 追加通用数据约束
@@ -688,6 +713,20 @@ def run_specialist(agent_key: str, query: str, context: str = "",
                 "result_preview": result[:200] if result.strip() else "（无数据返回）",
             })
 
+            # 工具结果广播：结构化提取并写入黑板，供后续专家引用
+            if blackboard is not None and get_config_bool("agent.tool_broadcast_enabled", True):
+                try:
+                    from agent.tool_broadcast import extract_broadcast, should_broadcast
+                    if should_broadcast(tc.function.name):
+                        entry = extract_broadcast(
+                            tc.function.name, args, result,
+                            agent_key, agent["name"]
+                        )
+                        if entry:
+                            blackboard.write_tool_broadcast(entry)
+                except Exception as e:
+                    logger.debug(f"[tool_broadcast] 广播失败 {tc.function.name}: {e}")
+
             llm_messages.append({
                 "role": "tool",
                 "tool_call_id": tc.id,
@@ -742,6 +781,57 @@ def run_specialist(agent_key: str, query: str, context: str = "",
     if answer:
         answer = _clean_dsml_from_content(answer)
 
+    # ── 单专家自我反思（Self-Reflection） ──
+    # 在 answer 定型后、返回前，评估分析质量，发现缺口时重试补充
+    self_reflection_result = None
+    try:
+        from agent.self_reflection import (
+            evaluate_analysis, build_retry_prompt,
+            is_self_reflection_enabled, get_max_retry,
+        )
+        if is_self_reflection_enabled() and answer and len(answer) > 50:
+            reflection = evaluate_analysis(
+                analysis=answer,
+                tool_calls=tool_calls_log,
+                user_question=query,
+                agent_key=agent_key,
+                agent_name=agent["name"],
+                trace_id=trace_id,
+            )
+
+            if reflection and reflection.get("need_retry") and reflection.get("gaps"):
+                # 注入补充提示，重新调用 LLM 完善分析
+                retry_prompt = build_retry_prompt(reflection)
+                if retry_prompt:
+                    max_retry = get_max_retry()
+                    _retry_model = model or MODEL
+                    for retry_idx in range(max_retry):
+                        retry_messages = llm_messages + [
+                            {"role": "user", "content": retry_prompt}
+                        ]
+                        try:
+                            retry_answer = _call_llm(
+                                caller=f"{agent_key}#self_reflection_retry",
+                                trace_id=trace_id,
+                                model=_retry_model,
+                                messages=retry_messages,
+                                temperature=0.3,
+                                max_tokens=4000,
+                            )
+                        except Exception as retry_err:
+                            logger.warning(f"[self_reflection] {agent['name']} 重试调用失败: {retry_err}")
+                            retry_answer = None
+                        if retry_answer and len(retry_answer) > 50:
+                            answer = _clean_dsml_from_content(retry_answer)
+                            reflection["gaps_resolved"] = True
+                            break
+                    else:
+                        reflection["gaps_resolved"] = False
+
+            self_reflection_result = reflection
+    except Exception as e:
+        logger.warning(f"[self_reflection] {agent['name']} 反思异常: {e}")
+
     # Pipeline Phase C：估算 token 消耗（用于预算追踪）
     tokens_used = _estimate_specialist_tokens(llm_messages, answer, tool_calls_log)
 
@@ -760,6 +850,7 @@ def run_specialist(agent_key: str, query: str, context: str = "",
         "tool_calls": tool_calls_log,
         "duration_ms": duration_ms,
         "tokens_used": tokens_used,
+        "self_reflection": self_reflection_result,
     }
 
 

@@ -221,6 +221,7 @@ _AGENT_MODEL_MAP_DEEPSEEK = {
     "cross_review": "deepseek-v4-flash",
     "arbitrator": "deepseek-v4-pro",               # P2: 仲裁，强模型
     "debate_arbitrator": "deepseek-v4-pro",        # P2: 辩论仲裁，强模型
+    "self_reflection": "deepseek-v4-flash",        # 自我反思，轻量模型控成本
 }
 
 # MIMO 模型映射 — P2: 按任务复杂度分级
@@ -236,6 +237,7 @@ _AGENT_MODEL_MAP_MIMO = {
     "cross_review": "mimo-v2.5-pro",               # 交叉审阅，强模型
     "arbitrator": "mimo-v2.5-pro",                 # P2: 仲裁，强模型
     "debate_arbitrator": "mimo-v2.5-pro",          # P2: 辩论仲裁，强模型
+    "self_reflection": "mimo-v2.5-pro",            # 自我反思，需精确推理
 }
 
 # 兼容别名

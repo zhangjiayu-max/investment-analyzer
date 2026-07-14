@@ -89,13 +89,16 @@ class Blackboard:
         all_data = bb.get_key_data()
     """
 
-    def __init__(self, max_entries: int = 6):
+    def __init__(self, max_entries: int = 6, max_broadcasts: int = 10):
         self.entries: list[BlackboardEntry] = []
         self.max_entries = max_entries
         # token 追踪：每个 agent 消耗
         self.tokens_used_by_agent: dict[str, int] = {}
         # P2: 并行写入时的线程安全锁
         self._lock = threading.Lock()
+        # 工具结果广播（不占 entries 配额，独立存储）
+        self._tool_broadcasts: list = []  # list[ToolBroadcastEntry]
+        self.max_broadcasts = max_broadcasts
 
     def write(self, entry: BlackboardEntry) -> None:
         """写入一条专家结论（线程安全）。"""
@@ -120,8 +123,42 @@ class Blackboard:
                 f"(置信度={entry.confidence:.0%}, 当前 {len(self.entries)}/{self.max_entries})"
             )
 
+    def write_tool_broadcast(self, entry) -> None:
+        """写入工具结果广播（不占 entries 配额，线程安全）。
+
+        Args:
+            entry: ToolBroadcastEntry 实例
+        """
+        with self._lock:
+            if not getattr(entry, "timestamp", 0):
+                entry.timestamp = time.time()
+            self._tool_broadcasts.append(entry)
+            # FIFO 淘汰
+            if len(self._tool_broadcasts) > self.max_broadcasts:
+                self._tool_broadcasts.pop(0)
+            logger.debug(
+                f"[blackboard] 工具广播 {entry.caller_agent_name}"
+                f"调用{entry.tool_name}「{entry.query}」"
+                f"(当前 {len(self._tool_broadcasts)}/{self.max_broadcasts})"
+            )
+
+    def get_tool_broadcasts(self, exclude_agent: Optional[str] = None) -> list:
+        """获取工具广播列表。
+
+        Args:
+            exclude_agent: 排除的 agent_key（避免专家看到自己的工具调用）
+
+        Returns:
+            ToolBroadcastEntry 列表
+        """
+        if not self._tool_broadcasts:
+            return []
+        if exclude_agent:
+            return [b for b in self._tool_broadcasts if b.caller_agent != exclude_agent]
+        return list(self._tool_broadcasts)
+
     def to_context_text(self, max_chars: int = 800, exclude_agent: Optional[str] = None) -> str:
-        """生成注入专家上下文的黑板摘要。
+        """生成注入专家上下文的黑板摘要（含工具广播区块）。
 
         Args:
             max_chars: 最大字符数，超出截断
@@ -130,27 +167,36 @@ class Blackboard:
         Returns:
             黑板摘要文本，空字符串表示无条目
         """
-        if not self.entries:
-            return ""
+        parts = []
 
-        lines = ["## 已完成专家的结论（Blackboard）"]
-        total = len(lines[0])
-        for e in self.entries:
-            if exclude_agent and e.agent_key == exclude_agent:
-                continue
-            line = self._format_entry(e)
-            if total + len(line) > max_chars:
-                # 截断，添加提示
-                remaining = max_chars - total
-                if remaining > 50:  # 至少能显示一部分
-                    lines.append(line[:remaining] + "...")
-                break
-            lines.append(line)
-            total += len(line)
+        # 1. 专家结论区块（原有逻辑）
+        if self.entries:
+            lines = ["## 已完成专家的结论（Blackboard）"]
+            total = len(lines[0])
+            for e in self.entries:
+                if exclude_agent and e.agent_key == exclude_agent:
+                    continue
+                line = self._format_entry(e)
+                if total + len(line) > max_chars:
+                    remaining = max_chars - total
+                    if remaining > 50:
+                        lines.append(line[:remaining] + "...")
+                    break
+                lines.append(line)
+                total += len(line)
+            if len(lines) > 1:
+                parts.append("\n".join(lines))
 
-        if len(lines) <= 1:
-            return ""
-        return "\n".join(lines)
+        # 2. 工具广播区块（新增）
+        if self._tool_broadcasts:
+            from agent.tool_broadcast import format_broadcasts_for_context
+            broadcast_text = format_broadcasts_for_context(
+                self._tool_broadcasts, exclude_agent=exclude_agent
+            )
+            if broadcast_text:
+                parts.append(broadcast_text)
+
+        return "\n\n".join(parts) if parts else ""
 
     def _format_entry(self, e: BlackboardEntry) -> str:
         """格式化单条条目为上下文文本。"""

@@ -215,6 +215,14 @@ DEFAULT_CONFIGS = [
     ('agent.react_tool_result_max_chars', '1500', 'ReAct 工具结果截断阈值（字符数，原 3000）', 'agent'),
     ('agent.react_compress_history', 'true', '是否压缩历史 tool 消息为摘要（避免 ReAct context 膨胀）', 'agent'),
 
+    # Agent 决策质量增强（自我反思 + 工具广播 + Agentic RAG，默认开启 — 质量优先）
+    ('agent.self_reflection_enabled', 'true', '单专家自我反思开关：专家生成分析后自评4维度，发现缺口时重试补充', 'agent'),
+    ('agent.self_reflection_max_retry', '1', '自我反思触发后的最大重试次数', 'agent'),
+    ('agent.tool_broadcast_enabled', 'true', '工具结果广播开关：白名单工具结果结构化提取写入黑板，后续专家直接引用避免重复查询', 'agent'),
+    ('agent.tool_broadcast_max_entries', '10', '黑板工具广播区最大条目数（FIFO淘汰）', 'agent'),
+    ('agent.agentic_rag_enabled', 'true', 'Agentic RAG开关：3阶段主动检索策略（信息缺口判断→主动检索→充分性自检）', 'agent'),
+    ('agent.agentic_rag_max_rounds', '2', 'Agentic RAG每个信息缺口最大检索轮数', 'agent'),
+
     # 理财决策升级 6 项配置（默认全部开启 — 最强版本）
     ('attribution.enabled', 'true', '收益归因分析开关', 'decision_upgrade'),
     ('behavior_diagnosis.enabled', 'true', '行为金融诊断开关', 'decision_upgrade'),

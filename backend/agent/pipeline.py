@@ -169,7 +169,7 @@ def run_pipeline(
     # 初始化检查器
     checker = TerminationChecker(start_time=start_time)
     detector = ConvergenceDetector()
-    blackboard = Blackboard()
+    blackboard = Blackboard(max_broadcasts=get_config_int("agent.tool_broadcast_max_entries", 10))
 
     try:
         # ── Phase 0: 预处理 ──────────────────
@@ -425,7 +425,7 @@ def run_pipeline_from_checkpoint(
 
     checker = TerminationChecker(start_time=start_time)
     detector = ConvergenceDetector()
-    blackboard = Blackboard()
+    blackboard = Blackboard(max_broadcasts=get_config_int("agent.tool_broadcast_max_entries", 10))
 
     try:
         # 直接进入 Phase 1（跳过 Phase 0 澄清检查）
@@ -1126,6 +1126,7 @@ def _phase_execution(
                 from_pipeline=True,
                 conversation_id=state.conversation_id,
                 message_id=state.message_id,
+                blackboard=blackboard,
             )
             specialists_result.append(result)
             all_tool_calls.extend(result.get("tool_calls", []))
@@ -1316,6 +1317,7 @@ def _execute_steps_parallel(
             from_pipeline=True,
             conversation_id=state.conversation_id,
             message_id=state.message_id,
+            blackboard=blackboard,
         )
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -1486,6 +1488,7 @@ def _fallback_execution(
                 from_pipeline=True,
                 conversation_id=state.conversation_id,
                 message_id=state.message_id,
+                blackboard=blackboard,
             )
             results.append(result)
             tool_calls.extend(result.get("tool_calls", []))
@@ -1823,6 +1826,7 @@ def _maybe_rerun_specialist(
             query=enhanced_query,
             trace_id=f"{trace_id}#rerun",
             from_pipeline=True,
+            blackboard=blackboard,
         )
         if result and result.get("analysis"):
             # 更新 blackboard 中的 entry
