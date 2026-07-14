@@ -298,6 +298,15 @@ async def startup():
     init_db()
     logging.info("数据库初始化完成")
 
+    # 恢复因重启中断的对话（专家已完成但综合阶段未执行）
+    try:
+        from services.conv_recovery import recover_interrupted_conversations
+        stats = recover_interrupted_conversations()
+        if stats["recovered"] or stats["marked_interrupted"]:
+            logging.info(f"中断对话恢复: {stats}")
+    except Exception as e:
+        logging.warning(f"中断对话恢复失败（不影响启动）: {e}")
+
     # P3 优化：回填存量 recommendations 的 target_fund_code（启动时执行一次）
     try:
         from services.index_fund_mapper import backfill_recommendations_target_fund
