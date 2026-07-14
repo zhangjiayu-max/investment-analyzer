@@ -416,7 +416,6 @@ async def get_hot_topics():
     if _hot_topics_cache["data"] and now - _hot_topics_cache["ts"] < 300:
         return _hot_topics_cache["data"]
 
-    # 进程重启后首次请求：尝试从持久化文件恢复今日数据
     persisted_file = ROOT / "data" / "hot_topics_cache.json"
     if not _hot_topics_cache["data"]:
         try:
@@ -434,98 +433,95 @@ async def get_hot_topics():
     news_items = []
     sources_used = []
 
-    # ── 数据源 1: 盈米 MCP SearchFinancialNews ──
-    try:
-        from mcp.yingmi_client import get_yingmi_client
-        mcp = get_yingmi_client()
-        raw = mcp.call_tool("SearchFinancialNews", {"keyword": "A股", "pageSize": 6})
-        if isinstance(raw, dict):
-            for c in raw.get("content", []):
-                if c.get("type") == "text":
-                    parsed = json.loads(c["text"])
-                    if parsed.get("success") and parsed.get("data", {}).get("items"):
-                        for item in parsed["data"]["items"]:
-                            news_items.append({
+    async def _fetch_yingmi():
+        try:
+            from mcp.yingmi_client import get_yingmi_client
+            mcp = get_yingmi_client()
+            raw = await asyncio.to_thread(mcp.call_tool, "SearchFinancialNews", {"keyword": "A股", "pageSize": 6})
+            if isinstance(raw, dict):
+                for c in raw.get("content", []):
+                    if c.get("type") == "text":
+                        parsed = json.loads(c["text"])
+                        if parsed.get("success") and parsed.get("data", {}).get("items"):
+                            return [{
                                 "title": item.get("title", ""),
                                 "summary": item.get("summary", ""),
                                 "source": item.get("sources", "盈米"),
                                 "date": item.get("publishDate", ""),
                                 "url": item.get("url", ""),
-                            })
-        if news_items:
-            sources_used.append("yingmi")
-    except Exception as e:
-        logging.warning(f"盈米热点新闻获取失败: {e}")
+                            } for item in parsed["data"]["items"]]
+        except Exception as e:
+            logging.warning(f"盈米热点新闻获取失败: {e}")
+        return []
 
-    # ── 数据源 2: 东方财富 financialSearch 金融资讯 ──
-    eastmoney_items = []
-    try:
-        from mcp.eastmoney_client import get_eastmoney_client
-        client = get_eastmoney_client()
-        raw_text = client.financial_search("今日A股市场热点新闻")
-        if raw_text:
-            import re
-            # 东方财富返回的可能是 markdown/文本格式，提取标题和摘要
-            # 尝试按行解析，每条新闻通常有标题和摘要
-            lines = [l.strip() for l in raw_text.split('\n') if l.strip()]
-            current_item = None
-            for line in lines:
-                # 跳过纯标记行
-                if line.startswith('#') or line.startswith('---') or len(line) < 5:
-                    continue
-                # 识别标题行（数字开头、或带【】、或较短的加粗文本）
-                is_title = (
-                    re.match(r'^\d+[.、）)]\s*', line) or
-                    re.match(r'^【.+】', line) or
-                    (len(line) < 50 and '**' in line)
-                )
-                if is_title:
-                    if current_item and current_item.get("title"):
-                        eastmoney_items.append(current_item)
-                    title = re.sub(r'^\d+[.、）)]\s*', '', line)
-                    title = re.sub(r'\*\*', '', title)
-                    current_item = {"title": title.strip(), "summary": "", "source": "东方财富", "date": "", "url": ""}
-                elif current_item:
-                    # 作为摘要追加
-                    if current_item["summary"]:
-                        current_item["summary"] += " " + line
-                    else:
-                        current_item["summary"] = line
-                    # 限制摘要长度
-                    if len(current_item["summary"]) > 300:
-                        current_item["summary"] = current_item["summary"][:300]
-            if current_item and current_item.get("title"):
-                eastmoney_items.append(current_item)
+    async def _fetch_eastmoney():
+        eastmoney_items = []
+        try:
+            from mcp.eastmoney_client import get_eastmoney_client
+            client = get_eastmoney_client()
+            raw_text = await asyncio.to_thread(client.financial_search, "今日A股市场热点新闻")
+            if raw_text:
+                import re
+                lines = [l.strip() for l in raw_text.split('\n') if l.strip()]
+                current_item = None
+                for line in lines:
+                    if line.startswith('#') or line.startswith('---') or len(line) < 5:
+                        continue
+                    is_title = (
+                        re.match(r'^\d+[.、）)]\s*', line) or
+                        re.match(r'^【.+】', line) or
+                        (len(line) < 50 and '**' in line)
+                    )
+                    if is_title:
+                        if current_item and current_item.get("title"):
+                            eastmoney_items.append(current_item)
+                        title = re.sub(r'^\d+[.、）)]\s*', '', line)
+                        title = re.sub(r'\*\*', '', title)
+                        current_item = {"title": title.strip(), "summary": "", "source": "东方财富", "date": "", "url": ""}
+                    elif current_item:
+                        if current_item["summary"]:
+                            current_item["summary"] += " " + line
+                        else:
+                            current_item["summary"] = line
+                        if len(current_item["summary"]) > 300:
+                            current_item["summary"] = current_item["summary"][:300]
+                if current_item and current_item.get("title"):
+                    eastmoney_items.append(current_item)
+                if not eastmoney_items and len(raw_text) > 50:
+                    eastmoney_items.append({
+                        "title": "东方财富市场资讯",
+                        "summary": raw_text[:500],
+                        "source": "东方财富",
+                        "date": "",
+                        "url": "",
+                    })
+        except Exception as e:
+            logging.warning(f"东方财富资讯获取失败: {e}")
+        return eastmoney_items
 
-            # 如果文本解析没提取到结构化新闻，整段作为一条
-            if not eastmoney_items and len(raw_text) > 50:
-                eastmoney_items.append({
-                    "title": "东方财富市场资讯",
-                    "summary": raw_text[:500],
-                    "source": "东方财富",
-                    "date": "",
-                    "url": "",
-                })
-        if eastmoney_items:
-            sources_used.append("eastmoney")
-    except Exception as e:
-        logging.warning(f"东方财富资讯获取失败: {e}")
+    yingmi_future, eastmoney_future = await asyncio.gather(
+        _fetch_yingmi(),
+        _fetch_eastmoney(),
+        return_exceptions=True
+    )
 
-    # ── 合并去重（按标题相似度） ──
-    if eastmoney_items:
+    if isinstance(yingmi_future, list) and yingmi_future:
+        news_items.extend(yingmi_future)
+        sources_used.append("yingmi")
+
+    if isinstance(eastmoney_future, list) and eastmoney_future:
         existing_titles = {item["title"][:15] for item in news_items}
-        for item in eastmoney_items:
-            # 标题前 15 字符去重
+        for item in eastmoney_future:
             short_title = item["title"][:15]
             if short_title not in existing_titles:
                 news_items.append(item)
                 existing_titles.add(short_title)
+        sources_used.append("eastmoney")
 
-    # ── 兜底: web_search ──
     if not news_items:
         try:
             from tools import execute_tool
-            web_raw = execute_tool("web_search", {"query": "A股 今日热点 板块 基金", "max_results": 5})
+            web_raw = await asyncio.to_thread(execute_tool, "web_search", {"query": "A股 今日热点 板块 基金", "max_results": 5})
             if web_raw:
                 news_items.append({"title": "网络资讯", "summary": web_raw[:500], "source": "web_search", "date": "", "url": ""})
                 sources_used.append("web_search")
@@ -538,7 +534,6 @@ async def get_hot_topics():
     result = {"news": news_items, "source": source_label, "fetched_at": fetched_at}
     _hot_topics_cache["data"] = result
     _hot_topics_cache["ts"] = now
-    # 持久化完整数据，进程重启后可恢复（含 fetched_at）
     try:
         import json as _json
         persisted_file.write_text(_json.dumps(result, ensure_ascii=False))

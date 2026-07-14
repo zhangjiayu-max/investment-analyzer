@@ -327,9 +327,12 @@ async def get_latest_hotspots_analysis():
     return {"summary": "", "recommendations": [], "analysis_text": "", "actions": []}
 
 
+_hotspots_relate_cache = {"data": None, "ts": 0, "news_hash": ""}
+
 @router.post("/api/dashboard/hotspots-relate")
 async def hotspots_relate_indexes():
-    """热点→指数关联：关键词匹配 + LLM 兜底推理。"""
+    """热点→指数关联：关键词匹配 + LLM 兜底推理（300秒缓存）。"""
+    import time
     from db import list_valuation_indexes, list_holdings
     from routers.dashboard import get_hot_topics
 
@@ -337,6 +340,11 @@ async def hotspots_relate_indexes():
     news_list = news_data.get("news", [])[:6]
     if not news_list:
         return {"items": []}
+
+    news_hash = hash(tuple(n.get("title", "") for n in news_list))
+    now = time.time()
+    if _hotspots_relate_cache["data"] and _hotspots_relate_cache["news_hash"] == news_hash and now - _hotspots_relate_cache["ts"] < 300:
+        return {"items": _hotspots_relate_cache["data"]}
 
     indexes = list_valuation_indexes()
     holdings = list_holdings()
@@ -396,8 +404,8 @@ async def hotspots_relate_indexes():
                 caller="hotspots_relate",
                 model=MODEL,
                 messages=[{"role": "user", "content": prompt}],
-                temperature=get_config_float('llm.temperature_vision', 0.1),
-                max_tokens=get_config_int('llm.max_tokens_dashboard_summary', 200),
+                temperature=0.1,
+                max_tokens=200,
             ))
             text = response.choices[0].message.content or ""
             import re, json as _json
@@ -453,9 +461,9 @@ async def hotspots_relate_indexes():
 
     llm_results = {}
     if llm_indices:
-        tasks = [llm_infer_sectors(news_list[i]["title"], news_list[i].get("summary", "")) for i in llm_indices]
+        tasks = [llm_infer_sectors(news_list[i]["title"], news_list[i].get("summary", "")) for i in llm_indices[:2]]
         results = await asyncio.gather(*tasks, return_exceptions=True)
-        for idx, result in zip(llm_indices, results):
+        for idx, result in zip(llm_indices[:2], results):
             llm_results[idx] = result if isinstance(result, list) else []
 
     items = []
@@ -478,6 +486,10 @@ async def hotspots_relate_indexes():
             "related_holdings": related_holdings[:3],
             "match_source": source,
         })
+
+    _hotspots_relate_cache["data"] = items
+    _hotspots_relate_cache["ts"] = now
+    _hotspots_relate_cache["news_hash"] = news_hash
 
     return {"items": items}
 

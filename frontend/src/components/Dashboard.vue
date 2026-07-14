@@ -387,25 +387,32 @@ function stopDailyReportPolling() {
 async function loadHotTopics() {
   hotTopicsLoading.value = true
   try {
-    const { data: res } = await getHotTopics()
+    const [{ data: res }, { data: relateData }] = await Promise.all([
+      getHotTopics(),
+      getHotspotsRelate(),
+    ])
     if (res?.news?.length) {
       hotTopics.value = res.news
       if (!hotTopicsAnalyzedAt.value) {
         hotTopicsFetchedAt.value = res.fetched_at || ''
       }
-      loadHotspotsRelate()
+    }
+    if (relateData?.items?.length) {
+      hotspotsRelate.value = relateData.items
     }
   } catch (e) {
+    try {
+      const { data: res } = await getHotTopics()
+      if (res?.news?.length) {
+        hotTopics.value = res.news
+        if (!hotTopicsAnalyzedAt.value) {
+          hotTopicsFetchedAt.value = res.fetched_at || ''
+        }
+      }
+    } catch (_) {}
   } finally {
     hotTopicsLoading.value = false
   }
-}
-
-async function loadHotspotsRelate() {
-  try {
-    const { data } = await getHotspotsRelate()
-    hotspotsRelate.value = data.items || []
-  } catch (_) {}
 }
 
 async function loadOpportunities() {
