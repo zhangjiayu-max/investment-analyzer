@@ -1,9 +1,10 @@
 """关注列表路由 — /api/watchlist/*
 
-管理看好但未持有的基金，方便择机买入。
-"""
+管理看好但未持有的基金，方便择机买入。"""
 
 import logging
+import time
+from functools import lru_cache
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
@@ -19,6 +20,10 @@ from db import (
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["watchlist"])
+
+# 巡检结果缓存（5分钟）
+_patrol_cache = {}
+_patrol_cache_time = 0
 
 
 def save_watchlist_trigger_candidate(item: dict, user_id: str = "default") -> int:
@@ -96,6 +101,14 @@ async def watchlist_summary_api():
 @router.get("/api/watchlist/patrol")
 async def watchlist_patrol_api():
     """关注列表巡检 — 检查估值，低于目标百分位时提醒建仓。"""
+    global _patrol_cache, _patrol_cache_time
+    
+    # 5分钟缓存
+    now = time.time()
+    if now - _patrol_cache_time < 5 * 60 and _patrol_cache:
+        logger.info("[watchlist] 使用巡检缓存")
+        return _patrol_cache
+    
     items = list_watchlist(status="watching")
     if not items:
         return {"alerts": [], "checked": 0, "message": "关注列表为空"}
@@ -223,12 +236,18 @@ async def watchlist_patrol_api():
 
             alerts.append(alert_item)
 
-    return {
+    result = {
         "checked": checked,
         "alerts": alerts,
         "all_items": all_items,  # P0-2.2：所有关注基金 + 信号灯状态
         "message": f"巡检完成，{checked} 只基金中有 {len(alerts)} 只触发提醒",
     }
+    
+    # 更新缓存
+    _patrol_cache = result
+    _patrol_cache_time = time.time()
+    
+    return result
 
 
 # ── P0-2.2：信号灯状态计算（纯规则，0 LLM/0 MCP） ──

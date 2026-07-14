@@ -1,17 +1,21 @@
 """前瞻性事件雷达 — market_events 表 CRUD。
 
 事件结构见 doc/plans/2026-07-10-forward-looking-event-radar.md §3。
-状态流转见 §5：upcoming → imminent → materialized → expired。
-"""
+状态流转见 §5：upcoming → imminent → materialized → expired。"""
 import hashlib
 import json
 import logging
+import time
 from datetime import datetime
 from typing import Optional
 
 from db._conn import _get_conn
 
 logger = logging.getLogger(__name__)
+
+# 事件列表缓存（5分钟）
+_events_cache = {}
+_events_cache_time = 0
 
 
 def init_market_events_tables(conn) -> None:
@@ -190,6 +194,7 @@ def create_market_event(
             evidence,
         ))
         conn.commit()
+        _clear_events_cache()
         return event_id
     finally:
         conn.close()
@@ -207,12 +212,26 @@ def get_market_event(event_id: str) -> Optional[dict]:
         conn.close()
 
 
+def _clear_events_cache():
+    """清除事件列表缓存（写入时调用）。"""
+    global _events_cache, _events_cache_time
+    _events_cache = {}
+    _events_cache_time = 0
+
 def list_market_events(
     status: Optional[str] = None,
     relevance: Optional[str] = None,
     limit: int = 50,
 ) -> list[dict]:
     """查询事件列表（可按 status/relevance 过滤）。"""
+    global _events_cache, _events_cache_time
+    
+    cache_key = f"{status}_{relevance}_{limit}"
+    now = time.time()
+    if now - _events_cache_time < 5 * 60 and cache_key in _events_cache:
+        logger.info("[market_events] 使用事件列表缓存")
+        return _events_cache[cache_key]
+    
     sql = "SELECT * FROM market_events"
     params: list = []
     conditions = []
@@ -230,7 +249,10 @@ def list_market_events(
     conn = _get_conn()
     try:
         rows = conn.execute(sql, params).fetchall()
-        return [dict(r) for r in rows]
+        result = [dict(r) for r in rows]
+        _events_cache[cache_key] = result
+        _events_cache_time = now
+        return result
     finally:
         conn.close()
 
@@ -315,6 +337,7 @@ def update_event_relevance(
             event_id,
         ))
         conn.commit()
+        _clear_events_cache()
         return conn.total_changes > 0
     finally:
         conn.close()
@@ -326,6 +349,7 @@ def delete_market_event(event_id: str) -> bool:
     try:
         conn.execute("DELETE FROM market_events WHERE event_id = ?", (event_id,))
         conn.commit()
+        _clear_events_cache()
         return conn.total_changes > 0
     finally:
         conn.close()

@@ -135,12 +135,9 @@ async function loadWatchlist() {
   try {
     const { data } = await listWatchlist('watching')
     watchlist.value = data?.items || []
-    // 自动巡检刷新估值分位（静默，不弹 toast）
+    // 只做轻量级巡检刷新估值分位（静默）
     if (watchlist.value.length) autoPatrol()
-    // 批量加载买入评分（静默，不弹 toast）
-    if (watchlist.value.length) loadBuyScores()
-    // 批量加载六维体检报告（静默，不弹 toast）
-    if (watchlist.value.length) loadFundReports()
+    // 买入评分和体检报告改为按需加载（用户查看时再加载）
   } catch (e) {
     useToast().showToast('加载关注列表失败', 'error')
   }
@@ -849,12 +846,36 @@ async function verifyMasters() {
   }
 }
 
+// Tab 切换时按需加载数据
+const watchlistDataLoaded = ref(false)
+const portfolioDataLoaded = ref(false)
+
+function handleTabChange(tab) {
+  activeTab.value = tab
+  if (tab === 'watchlist' && !watchlistDataLoaded.value) {
+    watchlistDataLoaded.value = true
+    // 加载买入评分和体检报告
+    if (watchlist.value.length) {
+      loadBuyScores()
+      loadFundReports()
+    }
+  }
+  if (tab === 'watchlist' && !portfolioDataLoaded.value) {
+    portfolioDataLoaded.value = true
+    // 加载组合智能和大师回测
+    loadPortfolioIntelligence()
+    loadMasterBacktest()
+  }
+}
+
 onMounted(() => {
   loadEvents()
   loadAccuracy()
-  loadWatchlist()
-  loadPortfolioIntelligence()
-  loadMasterBacktest()
+  
+  // 延迟加载非核心数据，提升首屏加载速度
+  setTimeout(() => {
+    loadWatchlist()
+  }, 300)
 })
 </script>
 
@@ -2695,52 +2716,58 @@ onMounted(() => {
 
 /* 响应式 */
 @media (max-width: 768px) {
-  .event-radar-page { padding: 0.75rem; }
-  .stats-row { grid-template-columns: repeat(2, 1fr); }
-  .event-time-col { width: 55px; }
-  .event-date-badge { font-size: 0.72rem; padding: 0.2rem 0.4rem; }
-  .filter-bar { flex-direction: column; align-items: stretch; }
+  .event-radar-page { padding: 0.5rem; }
+  .stats-row { grid-template-columns: repeat(2, 1fr); gap: 0.35rem; }
+  .event-time-col { width: 48px; }
+  .event-date-badge { font-size: 0.68rem; padding: 0.15rem 0.35rem; }
+  .event-date-sub { font-size: 0.62rem; }
+  .filter-bar { flex-direction: column; align-items: stretch; gap: 0.4rem; }
 
   /* 顶部标题区 —— 纵向布局，避免标题与按钮挤压 */
-  .page-header { flex-direction: column; align-items: stretch; gap: 0.6rem; }
+  .page-header { flex-direction: column; align-items: stretch; gap: 0.4rem; }
   .header-left { flex: none; }
-  .page-title { font-size: 1.1rem; }
-  .page-subtitle { font-size: 0.76rem; }
-  .header-actions { flex-shrink: 1; display: flex; flex-wrap: wrap; gap: 0.4rem; }
+  .page-title-row { flex-wrap: wrap; }
+  .page-title { font-size: 1.05rem; }
+  .page-subtitle { font-size: 0.72rem; display: none; }
+  .header-actions { flex-shrink: 1; display: flex; flex-wrap: wrap; gap: 0.3rem; }
   .header-actions .btn,
   .header-actions .scan-btn,
   .header-actions .analyze-btn,
-  .header-actions .verify-btn { margin-right: 0; padding: 0.4rem 0.7rem; font-size: 0.76rem; }
+  .header-actions .verify-btn { margin-right: 0; padding: 0.35rem 0.6rem; font-size: 0.72rem; }
 
   /* 主Tab —— 允许换行，避免3个标签挤压 */
-  .main-tabs { flex-wrap: wrap; gap: 0.2rem; }
-  .main-tab { padding: 0.4rem 0.6rem; font-size: 0.78rem; }
+  .main-tabs { flex-wrap: wrap; gap: 0.15rem; }
+  .main-tab { padding: 0.35rem 0.5rem; font-size: 0.74rem; }
 
-  /* 筛选区 —— 允许换行 */
-  .filter-tabs { flex-wrap: wrap; gap: 0.2rem; padding: 2px; }
-  .filter-tab { padding: 0.3rem 0.5rem; font-size: 0.72rem; }
-  .status-tabs { flex-wrap: wrap; gap: 0.15rem; }
-  .status-tab { padding: 0.3rem 0.5rem; font-size: 0.7rem; }
+  /* 筛选区 —— 允许换行，控制最大宽度 */
+  .filter-tabs { flex-wrap: wrap; gap: 0.15rem; padding: 2px; }
+  .filter-tab { padding: 0.25rem 0.4rem; font-size: 0.68rem; white-space: nowrap; }
+  .status-tabs { flex-wrap: wrap; gap: 0.1rem; }
+  .status-tab { padding: 0.25rem 0.4rem; font-size: 0.66rem; white-space: nowrap; }
 
   /* 统计卡片 */
-  .stat-card { padding: 0.6rem 0.65rem; }
-  .stat-value { font-size: 1.05rem; }
-  .stat-label { font-size: 0.68rem; }
+  .stat-card { padding: 0.5rem 0.55rem; }
+  .stat-value { font-size: 1rem; }
+  .stat-label { font-size: 0.64rem; }
 
   /* 事件卡片移动端适配 —— 避免标签/文字挤压堆叠 */
-  .event-card { padding: 0.75rem 0.8rem; gap: 0.6rem; }
-  .event-title { font-size: 0.88rem; line-height: 1.35; }
-  .event-title-row { gap: 0.4rem; margin-bottom: 0.35rem; }
-  .event-type-tag { font-size: 0.64rem; padding: 0.12rem 0.4rem; }
-  .event-meta-row { gap: 0.3rem; }
+  .event-card { padding: 0.65rem 0.7rem; gap: 0.5rem; flex-wrap: wrap; }
+  .event-content-col { flex: 1; min-width: 0; }
+  .event-title { font-size: 0.84rem; line-height: 1.35; word-break: break-word; }
+  .event-title-row { gap: 0.3rem; margin-bottom: 0.3rem; flex-wrap: wrap; }
+  .event-type-tag { font-size: 0.62rem; padding: 0.1rem 0.35rem; }
+  .event-meta-row { gap: 0.25rem; }
   .relevance-tag,
   .status-tag,
   .direction-tag,
   .confidence-tag,
-  .time-frame-tag { font-size: 0.64rem; padding: 0.15rem 0.4rem; }
-  .event-summary { font-size: 0.78rem; line-height: 1.55; margin-bottom: 0.45rem; }
-  .section-label { font-size: 0.68rem; }
-  .chip { font-size: 0.66rem; padding: 0.12rem 0.4rem; }
+  .time-frame-tag { font-size: 0.62rem; padding: 0.12rem 0.35rem; }
+  .event-summary { font-size: 0.76rem; line-height: 1.5; margin-bottom: 0.4rem; word-break: break-word; }
+  .section-label { font-size: 0.64rem; }
+  .chip { font-size: 0.64rem; padding: 0.1rem 0.35rem; }
+  
+  /* 验证标签在移动端更小 */
+  .verify-tag { font-size: 0.62rem; padding: 0.12rem 0.4rem; }
 }
 
 /* ── 验证按钮 ── */
