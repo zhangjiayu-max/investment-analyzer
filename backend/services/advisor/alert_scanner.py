@@ -176,7 +176,7 @@ def scan_valuation_thresholds() -> dict:
     today = datetime.now().strftime("%Y-%m-%d")
     for code, name in index_codes.items():
         try:
-            val = get_best_valuation(code, query_source="alert_scanner")
+            val = get_best_valuation(code, query_source="alert_scanner", enable_online=False)
             if not val:
                 continue
             percentile = val.get("percentile")

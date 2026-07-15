@@ -704,10 +704,11 @@ async def _auto_periodic_scan():
         await asyncio.sleep(60)  # 等启动完成
 
         # 启动时立即跑一次（让用户登录就能看到最新提醒）
+        # 放到线程中执行，避免同步 DB 查询阻塞事件循环导致启动后 HTTP 请求超时
         try:
             if get_config("alerts.proactive_scan_enabled", "true") == "true":
                 from services.alert_scanner import run_periodic_scan
-                result = run_periodic_scan()
+                result = await asyncio.to_thread(run_periodic_scan)
                 logging.info(
                     f"[auto-scan] 启动扫描完成: "
                     f"verified={result.get('verification', {}).get('verified', 0)}, "
@@ -728,7 +729,7 @@ async def _auto_periodic_scan():
                 if get_config("alerts.proactive_scan_enabled", "true") != "true":
                     continue
                 from services.alert_scanner import run_periodic_scan
-                result = run_periodic_scan()
+                result = await asyncio.to_thread(run_periodic_scan)
                 logging.info(
                     f"[auto-scan] 定时扫描完成: "
                     f"verified={result.get('verification', {}).get('verified', 0)}, "

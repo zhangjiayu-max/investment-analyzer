@@ -2429,51 +2429,51 @@ export default api
 
 // ========== 综合理财健康分 ==========
 export function calculateHealthScore() {
-  return api.post('/api/health/calculate')
+  return api.post('/health/calculate')
 }
 export function getTodayHealthScore() {
-  return api.get('/api/health/today')
+  return api.get('/health/today')
 }
 export function getHealthHistory(limit = 30) {
-  return api.get('/api/health/history', { params: { limit } })
+  return api.get('/health/history', { params: { limit } })
 }
 export function getStockBondRatio() {
-  return api.get('/api/health/stock-bond-ratio')
+  return api.get('/health/stock-bond-ratio')
 }
 export function getFearGreedIndex() {
-  return api.get('/api/health/fear-greed')
+  return api.get('/health/fear-greed')
 }
 
 // ========== 滚动收益分析 ==========
 export function analyzeRollingReturn(data) {
-  return api.post('/api/rolling/analyze', data)
+  return api.post('/rolling/analyze', data)
 }
 export function analyzeRollingPortfolio(lookbackYears = 5) {
-  return api.post('/api/rolling/portfolio', { lookback_years: lookbackYears })
+  return api.post('/rolling/portfolio', { lookback_years: lookbackYears })
 }
 export function analyzeRollingIndex(code, lookbackYears = 5) {
-  return api.post('/api/rolling/index', { code, lookback_years: lookbackYears })
+  return api.post('/rolling/index', { code, lookback_years: lookbackYears })
 }
 export function analyzeRollingFund(code, lookbackYears = 5) {
-  return api.post('/api/rolling/fund', { code, lookback_years: lookbackYears })
+  return api.post('/rolling/fund', { code, lookback_years: lookbackYears })
 }
 
 // ========== 四笔钱归类 + 定投优化 ==========
 export function classifyFourPots() {
-  return api.get('/api/four-pots/classify')
+  return api.get('/four-pots/classify')
 }
 export function getDcaOptimization() {
-  return api.post('/api/four-pots/dca-optimization')
+  return api.post('/four-pots/dca-optimization')
 }
 
 // ========== 情景推演 ==========
 export function runWhatIf(scenario) {
-  return api.post('/api/portfolio/analysis/what-if', { scenario })
+  return api.post('/portfolio/analysis/what-if', { scenario })
 }
 
 // ========== 对比分析 AI 差异 ==========
 export function runCompareDiff(recordA, recordB, type) {
-  return api.post('/api/portfolio/analysis/compare-diff', { record_a: recordA, record_b: recordB, type })
+  return api.post('/portfolio/analysis/compare-diff', { record_a: recordA, record_b: recordB, type })
 }
 
 // ── 每日持仓提示 API ──────────────────────────────────────

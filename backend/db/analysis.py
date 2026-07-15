@@ -1,5 +1,7 @@
 """AI 市场分析 Agent + 历史 + Prompt 常量。"""
 
+import logging
+
 from db._conn import _get_conn
 
 
@@ -48,7 +50,7 @@ def _init_analysis_tables(conn=None):
         pass
     # 插入默认 agent（如果不存在）
     # 逐个插入默认 agent（如缺失）
-    for name, desc, prompt in [
+    _default_agents = [
         ('市场日报分析师', '基于最新财经新闻生成 A 股市场快报，服务于基金配置决策', DEFAULT_MARKET_ANALYST_PROMPT),
         ('分散度分析师', '基于持仓数据和 MCP 数据，分析持仓分散度、集中度风险并给出改进建议', DEFAULT_DIVERSIFICATION_PROMPT),
         ('全景诊断分析师', '从全局视角诊断投资组合健康状况，给出评分和加减仓建议', DEFAULT_PANORAMA_PROMPT),
@@ -61,7 +63,8 @@ def _init_analysis_tables(conn=None):
         ('指数深度分析师', '针对单个指数进行深度分析，结合估值趋势、知识库、政策新闻给出投资建议', DEFAULT_INDEX_DEEP_ANALYSIS_PROMPT),
         ('市场情报分析师', '聚合多源新闻和市场数据，推断当日热门板块和投资机会', DEFAULT_MARKET_INTELLIGENCE_PROMPT),
         ('增强策略分析师', '结合估值趋势、宏观政策、行业周期，判断低估指数是真机会还是价值陷阱', DEFAULT_ENHANCED_STRATEGY_PROMPT),
-    ]:
+    ]
+    for name, desc, prompt in _default_agents:
         row = conn.execute("SELECT id FROM analysis_agents WHERE name = ?", (name,)).fetchone()
         if not row:
             conn.execute("INSERT INTO analysis_agents (name, description, system_prompt) VALUES (?, ?, ?)", (name, desc, prompt))
@@ -72,6 +75,22 @@ def _init_analysis_tables(conn=None):
                 from db.agents import save_prompt_version
                 save_prompt_version(old["id"], 'analysis', old["system_prompt"], conn=conn)
             conn.execute("UPDATE analysis_agents SET system_prompt = ?, description = ? WHERE name = ?", (prompt, desc, name))
+
+    # P1-2: 清理历史 DB 残留的伪删除 agent 行
+    # 仅删除「既不在默认 agent 列表、且 is_active=0」的残留行，避免影响现役 agent
+    # 已知残留：id=6 AI基金分析师、id=7 文章解读专家（职责重叠已由其他 agent 取代）
+    default_names = tuple(n for n, _, _ in _default_agents)
+    placeholders = ",".join("?" * len(default_names))
+    residue = conn.execute(
+        f"SELECT id, name FROM analysis_agents WHERE is_active = 0 AND name NOT IN ({placeholders})",
+        default_names,
+    ).fetchall()
+    if residue:
+        residue_ids = [r["id"] for r in residue]
+        logging.info(f"[analysis] 清理 {len(residue)} 个伪删除残留 agent: {[(r['id'], r['name']) for r in residue]}")
+        # analysis_history.agent_id 无外键约束，保留历史记录不级联删除
+        conn.executemany("DELETE FROM analysis_agents WHERE id = ?", [(i,) for i in residue_ids])
+
     if own_conn:
         conn.commit()
         conn.close()

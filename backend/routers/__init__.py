@@ -43,7 +43,6 @@ from .market import (
     valuation_router,
     index_info_router,
     bond_router,
-    market_intelligence_router,
     event_radar_router,
 )
 

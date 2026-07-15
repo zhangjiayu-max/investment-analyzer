@@ -9,7 +9,7 @@ from datetime import datetime
 
 from fastapi import APIRouter, HTTPException
 
-from db import list_valuation_indexes, list_holdings, get_analysis_agent, get_config_float, get_config_int
+from db import list_valuation_indexes, list_holdings, get_analysis_agent_by_name, get_config_float, get_config_int
 from db import create_async_task, update_async_task, get_async_task
 from db.portfolio import save_analysis_cache, get_analysis_cache
 from db.agents import create_agent_run
@@ -633,13 +633,11 @@ async def _do_market_intelligence():
     agent_id = None
     agent_name = "市场情报分析师"
     try:
-        conn = _get_conn()
-        row = conn.execute("SELECT id, name, system_prompt FROM analysis_agents WHERE name = ?", ("市场情报分析师",)).fetchone()
-        conn.close()
-        if row:
-            agent_id = row["id"]
-            agent_name = row["name"] or "市场情报分析师"
-            base_prompt = row["system_prompt"] or ""
+        agent_row = get_analysis_agent_by_name("市场情报分析师")
+        if agent_row:
+            agent_id = agent_row.get("id")
+            agent_name = agent_row.get("name", "市场情报分析师")
+            base_prompt = agent_row.get("system_prompt") or ""
     except Exception:
         pass
     if not base_prompt:

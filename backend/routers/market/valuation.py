@@ -842,22 +842,19 @@ async def get_enhanced_strategy():
 请基于以上数据和知识库参考，结合你对 A 股市场的理解，给出专业分析。"""
 
     # 5. 加载 agent 配置
-    from db import get_analysis_agent, create_analysis_history
+    from db import get_analysis_agent_by_name, create_analysis_history
     from db.agents import create_agent_run
 
     agent = None
     agent_id = None
     try:
-        conn = _get_conn()
-        row = conn.execute("SELECT id, system_prompt FROM analysis_agents WHERE name = ?", ("增强策略分析师",)).fetchone()
-        conn.close()
-        if row:
-            agent_id = row["id"]
-            agent = dict(row)
+        agent = get_analysis_agent_by_name("增强策略分析师")
+        if agent:
+            agent_id = agent.get("id")
     except Exception:
         pass
 
-    system_prompt = agent["system_prompt"] if agent else ""
+    system_prompt = agent.get("system_prompt") if agent else ""
     if not system_prompt:
         from db.analysis import DEFAULT_ENHANCED_STRATEGY_PROMPT
         system_prompt = DEFAULT_ENHANCED_STRATEGY_PROMPT
