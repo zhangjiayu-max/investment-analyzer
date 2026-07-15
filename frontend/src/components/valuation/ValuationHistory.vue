@@ -1051,6 +1051,12 @@ defineExpose({ loadHistory })
           </div>
         </div>
       </div>
+      <div v-else-if="latest && !sourceImageUrl" class="card hint-card">
+        <svg width="20" height="20" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
+        </svg>
+        <span>该数据来自在线查询，无来源图片。趋势图可正常查看。</span>
+      </div>
 
       <!-- Lightbox -->
       <Teleport to="body">
