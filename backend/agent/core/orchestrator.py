@@ -1844,75 +1844,32 @@ def detect_complexity_by_keywords(query: str) -> str:
 
 
 def route_to_specialists_by_keywords(query: str, complexity: str = "complex") -> list[str]:
-    """根据关键词路由到合适的专家。返回 agent_key 列表。"""
-    query = query.strip()
-    specialists = []
+    """根据关键词路由到合适的专家。返回 agent_key 列表。
 
-    # 链接检测 → 文章解读专家
+    统一路由层：内部委托给 SmartRouter.route()，避免与主路由规则不一致。
+    保留此函数仅为兼容 clarify_requirement 的调用，新代码应直接使用 SmartRouter。
+    """
+    query = query.strip()
+
+    # 链接检测 → 文章解读专家（保留特殊处理：纯链接场景只走文章专家）
     if detect_urls(query):
-        specialists.append("article_expert")
-        # 如果只是链接+简单指令,只用文章专家
         query_without_url = re.sub(r'https?://[^\s]+', '', query).strip()
         if len(query_without_url) < 20:
-            return specialists
+            return ["article_expert"]
 
-    # 估值相关关键词 → 估值专家
-    valuation_keywords = ["估值", "PE", "PB", "百分位", "z-score", "高估", "低估", "贵不贵", "便宜"]
-    if any(kw in query for kw in valuation_keywords):
-        specialists.append("valuation_expert")
+    # 委托给 SmartRouter 统一路由（消除两套规则不一致）
+    try:
+        from agent.core.router import SmartRouter
+        router = SmartRouter()
+        route_result = router.route(query)
+        specialists = list(route_result.get("specialists", []))
+    except Exception as e:
+        logger.warning(f"SmartRouter 委托失败，回退到默认专家: {e}")
+        specialists = ["valuation_expert", "risk_assessor"]
 
-    # 新闻/市场动态关键词 → 择时分析师
-    news_keywords = ["新闻", "最新", "动态", "政策", "消息", "市场", "今天", "昨天"]
-    if any(kw in query for kw in news_keywords):
-        specialists.append("market_analyst")
-
-    # 风险相关关键词 → 风险评估师
-    risk_keywords = ["风险", "回撤", "波动", "最大回撤", "重仓", "满仓", "清仓"]
-    if any(kw in query for kw in risk_keywords):
-        specialists.append("risk_assessor")
-
-    # 债券相关关键词 → 市场分析师 + 资产配置师
-    bond_keywords = ["债券", "债市", "国债", "利率债", "信用债", "可转债", "收益率",
-                     "久期", "债券基金", "短债", "长债", "纯债", "债基",
-                     "资金面", "货币宽松", "加息", "降息", "央行"]
-    if any(kw in query for kw in bond_keywords):
-        specialists.append("market_analyst")
-        if "allocation_advisor" not in specialists:
-            specialists.append("allocation_advisor")
-
-    # 配置相关关键词 → 资产配置师
-    allocation_keywords = ["配置", "配比", "定投", "股债", "组合"]
-    if any(kw in query for kw in allocation_keywords):
-        specialists.append("allocation_advisor")
-
-    # 持仓相关关键词 → 风险评估师 + 资产配置师
-    portfolio_keywords = ["持仓", "加仓", "减仓", "盈亏", "我的基金", "持有", "仓位"]
-    if any(kw in query for kw in portfolio_keywords):
-        if "risk_assessor" not in specialists:
-            specialists.append("risk_assessor")
-        if "allocation_advisor" not in specialists:
-            specialists.append("allocation_advisor")
-
-    # 高风险行动建议 → 必要时补风险评估
-    action_keywords = [
-        "买入", "加仓", "建仓", "卖出", "减仓", "清仓", "追涨", "重仓",
-        "满仓", "梭哈", "可以买吗", "要不要买", "要不要卖",
-    ]
-    if any(kw in query for kw in action_keywords):
-        if "risk_assessor" not in specialists:
-            specialists.append("risk_assessor")
-
-    # 基金分析关键词 → 基金分析师
-    fund_analysis_keywords = ["操作记录", "交易记录", "基金分析", "基金表现", "复盘",
-                               "收益怎么样", "赚了", "亏了", "买卖", "操作复盘",
-                               "我的操作", "这只基金", "基金持仓"]
-    if any(kw in query for kw in fund_analysis_keywords):
-        if "fund_analyst" not in specialists:
-            specialists.append("fund_analyst")
-
-    # 默认返回估值专家
+    # 兜底：SmartRouter 未命中任何专家
     if not specialists:
-        specialists.append("valuation_expert")
+        specialists = ["valuation_expert"]
 
     # ── 根据复杂度上限截断，防止过度调度 ──
     MAX_SPECIALISTS = {
@@ -1922,7 +1879,6 @@ def route_to_specialists_by_keywords(query: str, complexity: str = "complex") ->
     }
     max_allowed = MAX_SPECIALISTS.get(complexity, 4)
     if len(specialists) > max_allowed:
-        # 统一优先级排序：高优先级在前，低优先级在后，其余中间
         HIGH_PRIORITY = ["valuation_expert", "allocation_advisor", "risk_assessor", "market_analyst"]
         LOW_PRIORITY = ["macro_strategist"]
         def _priority_key(s):

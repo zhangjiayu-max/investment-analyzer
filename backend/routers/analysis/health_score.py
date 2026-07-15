@@ -645,6 +645,21 @@ def _calc_health_score_sync() -> dict:
         detail=result["details"],
     )
 
+    # 接入统一日志（health_score 类型，agent_id=NULL）
+    try:
+        import uuid as _uuid
+        from db.agent_analysis_log import create_analysis_log, complete_analysis_log
+        _hs_trace_id = f"log_{_uuid.uuid4().hex[:12]}"
+        create_analysis_log(
+            trace_id=_hs_trace_id, agent_id=None, agent_name="健康分",
+            analysis_type="health_score", source_table="health_scores",
+            source_id=None, query="综合理财健康分计算",
+            input_summary=f"健康分:{total}",
+        )
+        complete_analysis_log(trace_id=_hs_trace_id, status="done")
+    except Exception as _e:
+        logger.warning(f"健康分日志埋点失败: {_e}")
+
     # 提取可执行行动
     try:
         from analysis.action_extractor import extract_actions, format_actions_for_response

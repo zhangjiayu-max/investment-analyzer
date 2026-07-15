@@ -631,12 +631,14 @@ async def _do_market_intelligence():
 
     base_prompt = ""
     agent_id = None
+    agent_name = "市场情报分析师"
     try:
         conn = _get_conn()
-        row = conn.execute("SELECT id, system_prompt FROM analysis_agents WHERE name = ?", ("市场情报分析师",)).fetchone()
+        row = conn.execute("SELECT id, name, system_prompt FROM analysis_agents WHERE name = ?", ("市场情报分析师",)).fetchone()
         conn.close()
         if row:
             agent_id = row["id"]
+            agent_name = row["name"] or "市场情报分析师"
             base_prompt = row["system_prompt"] or ""
     except Exception:
         pass
@@ -692,7 +694,7 @@ async def _do_market_intelligence():
     trace_id = f"log_{uuid.uuid4().hex[:12]}"
     try:
         create_analysis_log(
-            trace_id=trace_id, agent_id=10, agent_name="市场情报分析师",
+            trace_id=trace_id, agent_id=agent_id, agent_name=agent_name,
             analysis_type="market_intel", source_table="analysis_history",
             source_id=None, query="市场情报分析",
             input_summary="市场情报",

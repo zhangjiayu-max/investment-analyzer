@@ -350,7 +350,8 @@ def _init_wealth_specialists(conn):
             "description": "分析宏观周期/政策/流动性/行业轮动，提供自上而下的策略视角",
             "icon": "research",
             "tools": ["search_knowledge", "yingmi_hot_topics", "yingmi_search_news", "yingmi_latest_quotations",
-                      "eastmoney_macro_data", "query_institutional_flow"],
+                      "eastmoney_macro_data", "query_institutional_flow",
+                      "get_macro_policy_data", "get_bond_yield_curve", "get_bond_temperature"],
             "system_prompt": (
                 "## 人设\n"
                 "你是宏观策略师，专注自上而下的宏观分析。"
@@ -401,7 +402,7 @@ def _init_wealth_specialists(conn):
             "tools": ["search_knowledge", "query_valuation", "query_portfolio", "query_fund_info",
                       "yingmi_latest_quotations",
                       "ttfund_fund_manager", "ttfund_fund_nav", "ttfund_fund_condition", "eastmoney_finance_data",
-                      "query_earnings_reports"],
+                      "query_earnings_reports", "query_transaction_history", "analyze_holding_performance"],
             "system_prompt": (
                 "## 人设\n"
                 "你是专业的基金分析师，擅长通过持仓穿透、业绩归因、估值匹配、同类对比和规模影响分析，"
@@ -445,7 +446,7 @@ def _init_wealth_specialists(conn):
             "name": "估值分析师",
             "description": "专注指数估值分析，结合历史分位点、趋势变化给出投资建议",
             "icon": "chart",
-            "tools": ["search_knowledge", "query_valuation", "yingmi_latest_quotations",
+            "tools": ["search_knowledge", "query_valuation", "query_portfolio", "yingmi_latest_quotations",
                       "eastmoney_finance_data"],
             "system_prompt": None,  # 从同名 preset 行继承
             "knowledge_scope": '{"rag_types": ["valuation", "analysis", "book"], "kyc_dimensions": ["risk_tolerance", "loss_tolerance"]}',
@@ -500,7 +501,7 @@ def _init_wealth_specialists(conn):
             "tools": ["search_knowledge", "query_portfolio", "query_valuation",
                       "analyze_portfolio_diversification",
                       "yingmi_latest_quotations", "eastmoney_finance_data",
-                      "query_earnings_reports"],
+                      "query_earnings_reports", "calculate_metrics"],
             "system_prompt": None,  # 从同名 preset 行继承
             "knowledge_scope": '{"rag_types": ["valuation", "analysis", "book"], "kyc_dimensions": ["risk_tolerance", "loss_tolerance", "max_single_position_pct"]}',
         },
@@ -511,9 +512,53 @@ def _init_wealth_specialists(conn):
             "icon": "pie",
             "tools": ["search_knowledge", "query_portfolio", "query_valuation",
                       "analyze_portfolio_diversification", "query_smart_add_plan",
-                      "yingmi_latest_quotations", "eastmoney_finance_data"],
+                      "yingmi_latest_quotations", "eastmoney_finance_data",
+                      "get_bond_temperature"],
             "system_prompt": None,  # 从同名 preset 行继承
             "knowledge_scope": '{"rag_types": ["valuation", "article", "book"], "kyc_dimensions": ["risk_tolerance", "investment_horizon", "capital_scale", "target_equity_ratio"]}',
+        },
+        {
+            "agent_key": "article_expert",
+            "name": "文章解读专家",
+            "description": "解读公众号文章/政策文件/研报，提取投资建议与机会信号",
+            "icon": "newspaper",
+            "tools": ["fetch_article", "search_knowledge", "get_author_opinions",
+                      "yingmi_search_news", "yingmi_latest_quotations", "eastmoney_finance_data"],
+            "system_prompt": (
+                "## 人设\n"
+                "你是文章解读专家，擅长解读公众号文章、政策文件、券商研报，"
+                "提取其中的投资建议、机会信号和风险提示，结合用户持仓给出可执行建议。\n\n"
+                "## 分析框架\n"
+                "### 文章内容提取\n"
+                "- 调用 fetch_article 获取文章全文（若用户发链接）\n"
+                "- 提取文章核心观点、推荐标的、操作建议\n"
+                "- 识别文章类型（科普/推荐/复盘/政策解读/研报）\n\n"
+                "### 标的识别与验证\n"
+                "- 提取文章提及的基金代码、指数、行业\n"
+                "- 调用 search_knowledge 查询知识库中相关资料\n"
+                "- 调用 yingmi_latest_quotations 获取最新行情验证\n"
+                "- 调用 eastmoney_finance_data 补充财务数据\n\n"
+                "### 持仓关联分析\n"
+                "- 文章推荐标的是否已在用户持仓中\n"
+                "- 文章观点与用户当前配置是否冲突\n"
+                "- 是否需要调整持仓以响应文章建议\n\n"
+                "### 作者 credibility 评估\n"
+                "- 调用 get_author_opinions 查询作者历史观点\n"
+                "- 评估作者在本文中的逻辑严谨性\n"
+                "- 标注是否有利益相关（如推荐自己管理的产品）\n\n"
+                "## 输出规范\n"
+                "1. **文章概要**：一句话总结文章核心观点\n"
+                "2. **标的清单**：文章提及的基金/指数，标注是否已持仓\n"
+                "3. **机会信号**：文章给出的买入/加仓/止盈信号\n"
+                "4. **风险提示**：文章提到的风险或潜在风险\n"
+                "5. **持仓建议**：结合用户持仓的可执行建议\n"
+                "6. **置信度标注**：[高置信度/中置信度/低置信度]\n\n"
+                "## 负面约束\n"
+                "- 不编造文章未提及的标的\n"
+                "- 区分作者观点与事实，标注「作者观点」vs「客观数据」\n"
+                "- 对广告性质文章明确标注「疑似软文」\n"
+            ),
+            "knowledge_scope": '{"rag_types": ["article", "analysis", "book"], "kyc_dimensions": ["investment_experience"]}',
         },
     ]
 
@@ -664,9 +709,9 @@ def load_specialist_agents() -> dict:
                 "system_prompt": r["system_prompt"],
             }
     else:
-        # 降级：DB 无数据，从硬编码加载
-        from agent.multi_agent import SPECIALIST_AGENTS
-        result = dict(SPECIALIST_AGENTS)
+        # DB 未初始化：返回空 dict（调用方应确保 _init_wealth_specialists 已执行）
+        # 旧代码 from agent.multi_agent import SPECIALIST_AGENTS 已废弃（该变量不存在）
+        result = {}
 
     _specialist_cache = result
     _specialist_cache_ts = _time.time()

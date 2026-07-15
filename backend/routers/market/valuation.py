@@ -868,6 +868,18 @@ async def get_enhanced_strategy():
     llm_start = time.time()
     llm_status = "success"
     tokens = 0
+    # 接入统一日志（running）
+    _es_trace_id = f"log_{uuid.uuid4().hex[:12]}"
+    try:
+        from db.agent_analysis_log import create_analysis_log, complete_analysis_log
+        create_analysis_log(
+            trace_id=_es_trace_id, agent_id=agent_id, agent_name="增强策略分析师",
+            analysis_type="enhanced_strategy", source_table="analysis_history",
+            source_id=None, query=candidate_text[:300],
+            input_summary=f"增强策略:{len(candidates)}只低估指数",
+        )
+    except Exception as _e:
+        logger.warning(f"create_analysis_log 失败: {_e}")
     try:
         response = await asyncio.wait_for(
             asyncio.to_thread(lambda: _call_llm(
@@ -917,6 +929,17 @@ async def get_enhanced_strategy():
         )
     except Exception as e:
         logger.warning(f"记录 agent_run 失败: {e}")
+
+    # 完成统一日志
+    try:
+        complete_analysis_log(
+            trace_id=_es_trace_id,
+            status="done" if llm_status == "success" else "error",
+            duration_ms=llm_duration,
+            token_usage=tokens,
+        )
+    except Exception as _e:
+        logger.warning(f"complete_analysis_log 失败: {_e}")
 
     # 8. 附加原始数据和风险预警到结果
     strategy_map = {s.get("index_code", ""): s for s in parsed.get("strategies", [])}

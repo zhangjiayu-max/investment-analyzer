@@ -65,8 +65,8 @@ def _init_analysis_tables(conn=None):
         row = conn.execute("SELECT id FROM analysis_agents WHERE name = ?", (name,)).fetchone()
         if not row:
             conn.execute("INSERT INTO analysis_agents (name, description, system_prompt) VALUES (?, ?, ?)", (name, desc, prompt))
-        elif name in ('债券配置顾问', '指数深度分析师', '全景诊断分析师', '基金深度分析师'):
-            # 这些 agent 的 prompt 需要保持最新，更新前先保存旧版本
+        else:
+            # 所有 agent 的 prompt 都保持最新，更新前先保存旧版本
             old = conn.execute("SELECT id, system_prompt FROM analysis_agents WHERE name = ?", (name,)).fetchone()
             if old and old["system_prompt"] != prompt:
                 from db.agents import save_prompt_version

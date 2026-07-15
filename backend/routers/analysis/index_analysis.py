@@ -65,7 +65,7 @@ async def _run_index_analysis_async(history_id: int, req_data: dict, agent: dict
     _start_ts = time.time()
     try:
         create_analysis_log(
-            trace_id=trace_id, agent_id=9, agent_name="指数深度分析师",
+            trace_id=trace_id, agent_id=agent.get("id"), agent_name=agent.get("name", "指数深度分析师"),
             analysis_type="index_analysis", source_table="analysis_history",
             source_id=history_id, query=f"分析 {index_label}",
             input_summary=f"指数:{req.index_code}",

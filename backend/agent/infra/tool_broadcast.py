@@ -35,10 +35,12 @@ _BROADCASTABLE_TOOLS = {
     "ttfund_fund_manager",
     "ttfund_fund_nav",
     "ttfund_fund_condition",
-    "get_index_valuation",
-    "get_valuation_history",
     "get_bond_yield_curve",
     "get_bond_market_overview",
+    "get_bond_temperature",
+    "get_macro_policy_data",
+    "query_smart_add_plan",
+    "query_transaction_history",
 }
 
 

@@ -59,6 +59,17 @@ async def what_if_analysis_api(req: WhatIfRequest):
 
     trace_id = f"log_{uuid.uuid4().hex[:12]}"
     _start_ts = time.time()
+    # 先创建 running 记录（source_id 暂为 None，成功后补更新）
+    try:
+        create_analysis_log(
+            trace_id=trace_id, agent_id=6, agent_name="情景推演分析师",
+            analysis_type="what_if", source_table="portfolio_analysis_records",
+            source_id=None, query=user_content[:300],
+            input_summary=f"情景:{scenario_desc}",
+        )
+    except Exception as _e:
+        logger.warning(f"create_analysis_log(running) 失败: {_e}")
+
     try:
         from agent.multi_agent import run_specialist
         specialist_result = await asyncio.to_thread(
@@ -69,12 +80,6 @@ async def what_if_analysis_api(req: WhatIfRequest):
     except Exception as e:
         logger.error(f"情景推演失败: {e}")
         _elapsed_ms = int((time.time() - _start_ts) * 1000)
-        create_analysis_log(
-            trace_id=trace_id, agent_id=6, agent_name="情景推演分析师",
-            analysis_type="what_if", source_table="portfolio_analysis_records",
-            source_id=None, query=user_content[:300],
-            input_summary=f"情景:{scenario_desc}",
-        )
         complete_analysis_log(trace_id=trace_id, status="error", duration_ms=_elapsed_ms, error_msg=str(e))
         raise HTTPException(500, f"AI 分析失败: {str(e)}")
 
@@ -87,12 +92,12 @@ async def what_if_analysis_api(req: WhatIfRequest):
         agent_id=6,
     )
     _elapsed_ms = int((time.time() - _start_ts) * 1000)
-    create_analysis_log(
-        trace_id=trace_id, agent_id=6, agent_name="情景推演分析师",
-        analysis_type="what_if", source_table="portfolio_analysis_records",
-        source_id=record_id, query=user_content[:300],
-        input_summary=f"情景:{scenario_desc}",
-    )
+    # 更新 source_id 并标记完成（避免重复 INSERT 触发 UNIQUE 冲突）
+    try:
+        from db.agent_analysis_log import update_analysis_log_source
+        update_analysis_log_source(trace_id=trace_id, source_id=record_id)
+    except Exception:
+        pass  # 容错：即使更新失败也不影响主流程
     complete_analysis_log(trace_id=trace_id, status="done", duration_ms=_elapsed_ms, token_usage=tokens)
 
     return {"id": record_id, "result": result_text, "token_usage": tokens, "merged_into": "risk_assessor"}

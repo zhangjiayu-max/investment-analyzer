@@ -16,6 +16,7 @@ from db import (
     create_portfolio_analysis_record, list_portfolio_analysis_records,
     create_async_task, update_async_task,
     save_analysis_conclusion,
+    get_analysis_agent_by_name,
 )
 from db.agent_analysis_log import create_analysis_log, complete_analysis_log
 from infra.state import track_agent, untrack_agent
@@ -233,13 +234,17 @@ async def _do_bond_recommend():
     # 9. 调用 allocation_advisor 专家（已合并）
     uid = f"bond_{int(time.time())}"
     track_agent(uid, "资产配置顾问", "债券配置推荐")
+    # 动态查找 agent_id，避免硬编码错位
+    _bond_agent = get_analysis_agent_by_name("债券配置顾问")
+    _bond_agent_id = _bond_agent.get("id") if _bond_agent else 8
+    _bond_agent_name = _bond_agent.get("name", "债券配置顾问") if _bond_agent else "债券配置顾问"
     # 分析记录埋点（running）
     trace_id = f"log_{uuid.uuid4().hex[:12]}"
     _start_ts = time.time()
     _trace_completed = False
     try:
         create_analysis_log(
-            trace_id=trace_id, agent_id=8, agent_name="债券配置顾问",
+            trace_id=trace_id, agent_id=_bond_agent_id, agent_name=_bond_agent_name,
             analysis_type="bond_recommend", source_table="portfolio_analysis_records",
             source_id=None, query="债券配置推荐",
             input_summary="债券推荐",
@@ -295,6 +300,7 @@ async def _do_bond_recommend():
             summary=summary_text[:100],
             input_data=combined_input[:2000],
             result_data=json_mod.dumps(parsed, ensure_ascii=False),
+            agent_id=_bond_agent_id,
         )
     except Exception as e:
         logging.error(f"[bond_ai_recommend] 保存记录失败: {e}")

@@ -10,7 +10,7 @@ from fastapi import APIRouter, HTTPException
 
 from db import (
     list_valuation_indexes, list_holdings, get_portfolio_diversification,
-    get_total_cash_balance, get_analysis_agent,
+    get_total_cash_balance, get_analysis_agent, get_analysis_agent_by_name,
     create_analysis_history,
     save_recommendations, save_analysis_cache, get_analysis_cache,
     list_recommendations, auto_verify_pending_recommendations,
@@ -139,10 +139,19 @@ async def _do_hotspots_analysis():
     except Exception:
         bond_text = "暂无"
 
-    # 从 analysis_agents 加载热点分析 prompt
+    # 从 analysis_agents 加载热点分析 prompt（动态查找，避免 id 错位）
+    agent_id = None
+    agent_name = "热点分析专家"
     try:
-        agent = get_analysis_agent(13)
-        base_prompt = agent["system_prompt"] if agent else ""
+        agent = get_analysis_agent_by_name("热点分析专家")
+        if not agent:
+            agent = get_analysis_agent(8)  # 回退到旧 id
+        if agent:
+            agent_id = agent.get("id")
+            agent_name = agent.get("name", "热点分析专家")
+            base_prompt = agent.get("system_prompt", "") or ""
+        else:
+            base_prompt = ""
     except Exception:
         base_prompt = ""
     if not base_prompt:
@@ -204,7 +213,7 @@ async def _do_hotspots_analysis():
     trace_id = f"log_{uuid.uuid4().hex[:12]}"
     _start_ts = time.time()
     create_analysis_log(
-        trace_id=trace_id, agent_id=7, agent_name="热点分析专家",
+        trace_id=trace_id, agent_id=agent_id, agent_name=agent_name,
         analysis_type="hotspots", source_table="analysis_history",
         source_id=None, query=prompt[:300],
         input_summary="热点分析",

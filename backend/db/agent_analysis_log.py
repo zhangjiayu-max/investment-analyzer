@@ -78,6 +78,21 @@ def complete_analysis_log(trace_id: str, status: str, duration_ms: int = None,
     return updated
 
 
+def update_analysis_log_source(trace_id: str, source_id: int) -> bool:
+    """回补 source_id（running 阶段创建时 source_id=None，业务记录创建后再更新）。
+
+    用于避免同一 trace_id 重复 INSERT 触发 UNIQUE 冲突。
+    """
+    conn = _get_conn()
+    cur = conn.execute("""
+        UPDATE agent_analysis_log SET source_id = ? WHERE trace_id = ?
+    """, (source_id, trace_id))
+    updated = cur.rowcount > 0
+    conn.commit()
+    conn.close()
+    return updated
+
+
 def get_analysis_log(log_id: int) -> dict | None:
     """获取单条分析记录。"""
     conn = _get_conn()
