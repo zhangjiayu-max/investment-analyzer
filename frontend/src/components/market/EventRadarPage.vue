@@ -5607,4 +5607,227 @@ onMounted(() => {
   .mb-hist-verify { font-size: 0.64rem; }
   .mb-filter-select { font-size: 0.66rem; padding: 0.15rem 0.3rem; }
 }
+/* 事件雷达联动：关注基金名称可点击 */
+.holding-name-clickable {
+  color: #ea580c;
+  cursor: pointer;
+  text-decoration: underline;
+  text-decoration-style: dotted;
+  text-underline-offset: 2px;
+}
+.holding-name-clickable:hover {
+  color: #dc2626;
+}
+
+/* 卡片高亮动画（事件雷达跳转） */
+.wl-card-highlight {
+  animation: wl-card-pulse 0.6s ease-in-out 2;
+}
+@keyframes wl-card-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(234, 88, 12, 0.4); }
+  50% { box-shadow: 0 0 0 6px rgba(234, 88, 12, 0.1); }
+}
+
+/* 可折叠面板（组合智能/大师回测） */
+.collapsible-panel {
+  border: 1px solid var(--color-border-light);
+  border-radius: 8px;
+  background: var(--color-bg-card);
+  margin-bottom: 0.75rem;
+  overflow: hidden;
+}
+.collapsible-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.6rem 0.9rem;
+  cursor: pointer;
+  transition: background 0.15s;
+  user-select: none;
+}
+.collapsible-header:hover {
+  background: var(--color-bg-secondary);
+}
+.collapsible-header-left {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+.collapsible-title {
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--color-text-primary);
+}
+.collapsible-badge {
+  font-size: 0.7rem;
+  padding: 0.1rem 0.4rem;
+  border-radius: 3px;
+  font-weight: 600;
+}
+.collapsible-badge.score-good {
+  background: rgba(22, 163, 74, 0.1);
+  color: #16a34a;
+}
+.collapsible-badge.score-warn {
+  background: rgba(234, 88, 12, 0.1);
+  color: #ea580c;
+}
+.collapsible-body {
+  border-top: 1px solid var(--color-border-light);
+}
+.collapsible-body .portfolio-intelligence-panel {
+  border: none;
+  border-radius: 0;
+  margin: 0;
+}
+.collapsible-body .master-backtest-panel {
+  border: none;
+  border-radius: 0;
+  margin: 0;
+}
+
+/* 今日操作建议横幅 */
+.daily-advice-banner {
+  background: linear-gradient(135deg, #e8f5e9, #c8e6c9);
+  border: 1px solid #a5d6a7;
+  border-radius: 8px;
+  padding: 0.75rem 1rem;
+  margin-bottom: 0.75rem;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+.da-content {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.82rem;
+  color: #2e7d32;
+  flex: 1;
+  min-width: 0;
+}
+.da-icon {
+  font-size: 1.1rem;
+  flex-shrink: 0;
+}
+.da-text {
+  line-height: 1.4;
+}
+.da-text strong {
+  color: #1b5e20;
+}
+.da-tags {
+  display: flex;
+  gap: 0.35rem;
+  flex-wrap: wrap;
+}
+.da-tag {
+  font-size: 0.68rem;
+  padding: 0.2rem 0.5rem;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: all 0.15s;
+  white-space: nowrap;
+  border: 1px solid transparent;
+  font-weight: 500;
+}
+.da-tag-green { background: rgba(22, 163, 74, 0.12); color: #2e7d32; }
+.da-tag-yellow { background: rgba(234, 88, 12, 0.1); color: #e65100; }
+.da-tag-red { background: rgba(220, 38, 38, 0.08); color: #b71c1c; }
+.da-tag-gray { background: rgba(0, 0, 0, 0.06); color: #666; }
+.da-tag:hover { filter: brightness(0.9); }
+.da-tag.active { border-color: currentColor; }
+
+/* 3列关键指标网格 */
+.wl-key-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 0.5rem;
+  padding: 0.4rem 0;
+}
+.wl-key-item {
+  text-align: center;
+  padding: 0.4rem 0.3rem;
+  background: var(--color-bg-secondary);
+  border-radius: 6px;
+}
+.wl-key-label {
+  display: block;
+  font-size: 0.65rem;
+  color: var(--color-text-tertiary);
+  margin-bottom: 0.15rem;
+}
+.wl-key-value {
+  font-size: 0.85rem;
+  font-weight: 700;
+  color: var(--color-text-primary);
+  font-family: var(--font-jet);
+}
+.wl-key-value.value-hit {
+  color: #16a34a;
+}
+.wl-key-value.wl-key-mute {
+  color: var(--color-text-tertiary);
+  font-weight: 400;
+}
+.wl-key-hint {
+  display: block;
+  font-size: 0.6rem;
+  font-weight: 500;
+  color: #16a34a;
+  margin-top: 0.1rem;
+}
+.wl-key-hint.wl-key-high {
+  color: #dc2626;
+}
+
+/* 信号理由1句话 */
+.wl-signal-reason {
+  font-size: 0.72rem;
+  color: var(--color-text-secondary);
+  padding: 0.35rem 0.5rem;
+  background: var(--color-bg-secondary);
+  border-radius: 4px;
+  line-height: 1.4;
+  margin-top: 0.2rem;
+}
+.wl-signal-reason.sig-hit {
+  border-left: 2px solid #16a34a;
+}
+.wl-signal-reason.sig-warn {
+  border-left: 2px solid #ea580c;
+}
+.wl-signal-reason.sig-bad {
+  border-left: 2px solid #dc2626;
+}
+
+/* 展开/收起按钮 */
+.wl-expand-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.35rem 0;
+  font-size: 0.7rem;
+  color: var(--color-text-tertiary);
+  cursor: pointer;
+  user-select: none;
+  transition: color 0.15s;
+}
+.wl-expand-bar:hover {
+  color: var(--color-text-primary);
+}
+.wl-expand-hint {
+  font-size: 0.65rem;
+  color: var(--color-text-tertiary);
+  margin-left: auto;
+}
+
+/* 折叠详情区 */
+.wl-card-details {
+  border-top: 1px solid var(--color-border-light);
+  padding-top: 0.5rem;
+  margin-top: 0.3rem;
+}
 </style>
