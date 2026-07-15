@@ -71,6 +71,8 @@ def _load_config() -> dict:
         "max_single_position_pct": get_config_float_safe("smart_add.max_single_position_pct", 25.0),
         "valuation_pause_pct": get_config_float_safe("smart_add.valuation_pause_pct", 60.0),
         "stale_days": get_config_int_safe("smart_add.stale_days", 14),
+        # 修复5：单标的补仓金额上限 = 原市值 × 此倍数（避免小仓位标的巨额补仓）
+        "max_add_vs_position_mult": get_config_float_safe("smart_add.max_add_vs_position_mult", 2.0),
     }
 
 
@@ -257,6 +259,22 @@ def generate_smart_add_plan(user_id: str = "default") -> dict:
     pool_demand = sum((p.get("pyramid") or {}).get("released_amount", 0) for p in plans)
     pool_used = min(pool_demand, pool_total)
     pool_remaining = max(0.0, pool_total - pool_used)
+
+    # 修复6：资金池硬约束
+    # 原逻辑各标的独立计算 released_amount，需求合计可能远超池总额（实测30.6万 vs 12.2万，超额150%）
+    # 新逻辑：超额时按优先级等比缩减各标的释放额至池总额内
+    if pool_demand > pool_total and pool_demand > 0:
+        scale = pool_total / pool_demand
+        for p in deep_loss_plans:
+            pyr = p.get("pyramid")
+            if pyr and pyr.get("released_amount", 0) > 0:
+                original = pyr["released_amount"]
+                pyr["scaled_from_pool"] = original
+                pyr["released_amount"] = round(original * scale, 2)
+                pyr["scale_reason"] = f"资金池不足，按{scale:.0%}缩减"
+        # 缩减后重新计算 pool_used/pool_remaining
+        pool_used = min(sum((p.get("pyramid") or {}).get("released_amount", 0) for p in plans), pool_total)
+        pool_remaining = max(0.0, pool_total - pool_used)
     portfolio_view = {
         "total_assets": total_assets,
         "pool_total": pool_total,
@@ -287,8 +305,10 @@ def generate_smart_add_plan(user_id: str = "default") -> dict:
     if snapshot_enabled:
         for p in plans:
             try:
-                # 建议金额 = 金字塔引擎释放金额（有深套才触发）；无金字塔则用 engine1 的月投额
+                # 修复9：仅金字塔触发的标的落库假设交易，engine1 月投不再落库
+                # 原逻辑 engine1 月投(recurring)被当作一次性 buy 落库，语义错位且无法验证定投效果
                 pyr = p.get("pyramid") or {}
+                saf = p.get("safety") or {}
                 suggested_amount = pyr.get("released_amount", 0) if pyr else 0
                 suggested_tier = None
                 if pyr and pyr.get("triggered_tiers", 0) > 0:
@@ -298,12 +318,8 @@ def generate_smart_add_plan(user_id: str = "default") -> dict:
                         t0 = triggered[0]
                         suggested_tier = f"{t0.get('loss_pct', '?')}%档 ×{t0.get('release_pct', 0)}%"
 
-                # 无金字塔释放金额时，用 engine1 定投额作为建议
-                if not suggested_amount or suggested_amount <= 0:
-                    e1 = p.get("engine1") or {}
-                    suggested_amount = e1.get("monthly_amount", 0)
-
-                if suggested_amount and suggested_amount > 0:
+                # 安全阀拦截时不落库（修复3 配套）
+                if suggested_amount > 0 and saf.get("can_add", True):
                     val = p.get("valuation") or {}
                     create_snapshot_with_hypothetical(
                         fund_code=p["fund_code"],
@@ -363,7 +379,10 @@ def _generate_single_plan(
     zscore = None
     valuation_level = "未知"
     if index_code:
-        val = get_best_valuation(index_code, query_source="smart_add", enable_online=False)
+        # 先查市盈率，查不到则降级查市净率（部分指数如银行/地产只有 PB 数据）
+        val = get_best_valuation(index_code, metric_type="市盈率", query_source="smart_add", enable_online=False)
+        if not val:
+            val = get_best_valuation(index_code, metric_type="市净率", query_source="smart_add", enable_online=False)
         if val:
             zscore = val.get("zscore")
             percentile = val.get("percentile")
@@ -398,8 +417,13 @@ def _generate_single_plan(
             "risk_free_rate": 0.025, "limit_pct": 25.0, "sample_days": 0,
             "data_source": "error",
         }
-    # 实际上限 = min(凯利上限, 类型硬上限)
-    max_position_pct = min(kelly["limit_pct"], type_strategy["hard_cap_pct"])
+    # 修复4：实际上限 = min(凯利上限, 类型硬上限, 用户配置全局上限)
+    # 原代码未纳入 cfg["max_single_position_pct"]，导致该配置项是死代码（前端可改不生效）
+    max_position_pct = min(
+        kelly["limit_pct"],
+        type_strategy["hard_cap_pct"],
+        cfg["max_single_position_pct"],
+    )
 
     # L4：修复时间调整节奏
     recovery = {}
@@ -433,9 +457,10 @@ def _generate_single_plan(
 
     # 引擎1：估值 z-score 加权定投（含 L2/L4/L5 调整）
     multiplier = valuation["multiplier"] if valuation else 1.0
-    # 最终月投 = 基础 × z-score倍数 × 类型倍数 × 胜率倍数 ÷ 节奏调整
+    # 修复1：最终月投 = 基础 × z-score倍数 × 类型倍数 × 胜率倍数 × 节奏调整
+    # 原代码为 ÷ rhythm_adjust，导致长修复(>24月,rhythm=0.5)时金额翻倍，与"拉长周期减半"意图相反
     final_monthly = round(
-        base_monthly * multiplier * type_strategy["dca_mult"] * confidence_mult / rhythm_adjust, 2
+        base_monthly * multiplier * type_strategy["dca_mult"] * confidence_mult * rhythm_adjust, 2
     )
 
     engine1 = {
@@ -447,16 +472,33 @@ def _generate_single_plan(
         "rhythm_adjust": rhythm_adjust,
         "monthly_dca": final_monthly,
         "valuation_level": valuation_level,
-        "formula": f"{base_monthly} × {multiplier} × {type_strategy['dca_mult']} × {confidence_mult} ÷ {rhythm_adjust}",
+        "formula": f"{base_monthly} × {multiplier} × {type_strategy['dca_mult']} × {confidence_mult} × {rhythm_adjust}",
     }
 
     # 引擎2：金字塔补仓
     engine2 = None
     profit_rate_pct = profit_rate * 100
+
+    # 修复2：估值暂停机制
+    # 原逻辑 `not valuation or (percentile or 0) < 60` 在无估值数据时直接放行，导致高估值但数据缺失的标的误补
+    # 新逻辑：有分位数据时检查阈值；无分位数据时权益类保守不触发，债券类放行（债券不走估值逻辑）
+    valuation_ok = True
+    if valuation and valuation.get("percentile") is not None:
+        valuation_ok = valuation["percentile"] < cfg["valuation_pause_pct"]
+    elif fund_type != "bond":
+        # 无估值数据且非债券：保守不触发（避免高估值标的数据缺失时误补）
+        valuation_ok = False
+    # bond 类型无指数估值是正常的，不因此阻止
+
+    # 修复7：债券基金排除金字塔
+    # bond 类型 pyramid_aggressive=False，但原逻辑未检查此字段；债券靠票息修复，不需金字塔
+    pyramid_aggressive = type_strategy.get("pyramid_aggressive", True)
+
     if (
         cfg["pyramid_enabled"]
         and profit_rate_pct <= cfg["loss_threshold"]
-        and (not valuation or (valuation.get("percentile") or 0) < cfg["valuation_pause_pct"])
+        and valuation_ok
+        and pyramid_aggressive
     ):
         tiers = _calc_pyramid_tiers(
             profit_rate, pool_total, 0, cfg["tiers"], cfg["loss_threshold"],
@@ -493,9 +535,24 @@ def _generate_single_plan(
             "pool_warning": _calc_pool_warning(released_amount, pool_total, deep_loss_count),
         }
 
+        # 修复5：小仓位标的补仓上限
+        # 原逻辑无"补仓金额 ≤ 原市值 × N倍"约束，导致0.3%仓位标的建议补4.9万（原市值20倍）
+        max_add_amount = current_value * cfg["max_add_vs_position_mult"]
+        if engine2["released_amount"] > max_add_amount and max_add_amount > 0:
+            engine2["scaled_from_position_cap"] = engine2["released_amount"]
+            engine2["released_amount"] = round(max_add_amount, 2)
+            engine2["capped_reason"] = f"受原市值{cfg['max_add_vs_position_mult']}倍上限约束"
+
     # 持仓占比 + 安全阀（用 L3 凯利上限替代原 25%）
     position_pct = round(current_value / total_assets * 100, 2) if total_assets else 0
     can_add = position_pct < max_position_pct
+
+    # 修复3：安全阀拦截
+    # 原逻辑 can_add=False 时仅设标志位，released_amount 照常计算并落库假设交易
+    # 新逻辑：安全阀未通过时，金字塔释放额归零，标记拦截原因
+    if engine2 and not can_add:
+        engine2["blocked_reason"] = f"已达仓位上限 {max_position_pct:.1f}%，暂停补仓"
+        engine2["released_amount"] = 0
 
     return {
         "fund_code": fund_code,

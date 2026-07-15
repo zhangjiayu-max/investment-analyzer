@@ -45,6 +45,7 @@ const cfgForm = ref({
   valuation_pause_pct: 60.0,
   pyramid_tiers: '10:15,20:25,30:30,40:20,50:10',
   pyramid_enabled: true,
+  max_add_vs_position_mult: 2.0,
 })
 const cfgSaving = ref(false)
 const cfgSaved = ref(false)
@@ -159,6 +160,7 @@ function syncCfgForm(c) {
     valuation_pause_pct: Number(c.valuation_pause_pct ?? 60.0),
     pyramid_tiers: tiersToString(c.tiers) || '10:15,20:25,30:30,40:20,50:10',
     pyramid_enabled: !!c.pyramid_enabled,
+    max_add_vs_position_mult: Number(c.max_add_vs_position_mult ?? 2.0),
   }
 }
 
@@ -210,6 +212,7 @@ async function saveConfig() {
       'smart_add.valuation_pause_pct': cfgForm.value.valuation_pause_pct,
       'smart_add.pyramid_tiers': cfgForm.value.pyramid_tiers,
       'smart_add.pyramid_enabled': cfgForm.value.pyramid_enabled,
+      'smart_add.max_add_vs_position_mult': cfgForm.value.max_add_vs_position_mult,
     })
     cfgSaved.value = true
     setTimeout(() => { cfgSaved.value = false }, 2000)
@@ -446,6 +449,18 @@ onMounted(() => {
                   <span v-if="p.pyramid.pool_warning" class="pool-warn-tag">{{ p.pyramid.pool_warning }}</span>
                 </span>
               </div>
+
+              <!-- 拦截/缩减提示（修复3/5/6） -->
+              <div v-if="p.pyramid.blocked_reason || p.pyramid.capped_reason || p.pyramid.scale_reason" class="cap-warn-box">
+                <Icon name="alert" size="13" />
+                <span v-if="p.pyramid.blocked_reason" class="cap-blocked">{{ p.pyramid.blocked_reason }}</span>
+                <span v-if="p.pyramid.capped_reason" class="cap-capped">
+                  {{ p.pyramid.capped_reason }}（原 {{ fmtMoney(p.pyramid.scaled_from_position_cap) }} → {{ fmtMoney(p.pyramid.released_amount) }}）
+                </span>
+                <span v-if="p.pyramid.scale_reason" class="cap-scaled">
+                  {{ p.pyramid.scale_reason }}（原 {{ fmtMoney(p.pyramid.scaled_from_pool) }} → {{ fmtMoney(p.pyramid.released_amount) }}）
+                </span>
+              </div>
               <table class="pyramid-table">
                 <thead>
                   <tr>
@@ -608,6 +623,10 @@ onMounted(() => {
             <div class="cfg-field">
               <label>单标的仓位上限 (%)</label>
               <input v-model.number="cfgForm.max_single_position_pct" type="number" step="1" class="cfg-input font-jet" />
+            </div>
+            <div class="cfg-field">
+              <label>补仓额≤原市值×倍数</label>
+              <input v-model.number="cfgForm.max_add_vs_position_mult" type="number" step="0.5" min="0.5" class="cfg-input font-jet" />
             </div>
             <div class="cfg-field">
               <label>估值暂停阈值 (分位%)</label>
@@ -1017,6 +1036,23 @@ onMounted(() => {
   color: var(--color-warning);
   font-weight: 600;
 }
+
+/* 拦截/缩减提示（修复3/5/6） */
+.cap-warn-box {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+  margin: 0.4rem 0;
+  padding: 0.35rem 0.6rem;
+  border-radius: var(--radius-sm);
+  font-size: 0.72rem;
+  background: var(--color-warning-bg, rgba(217, 119, 6, 0.08));
+  border-left: 3px solid var(--color-warning);
+}
+.cap-blocked { color: var(--color-loss); font-weight: 600; }
+.cap-capped { color: var(--color-warning); }
+.cap-scaled { color: var(--color-info, #2563eb); }
 
 .pyramid-table {
   width: 100%;

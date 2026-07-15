@@ -215,15 +215,21 @@ def verify_all_hypothetical(user_id: str = "default") -> dict:
         real_summary = get_portfolio_summary(user_id=user_id)
         # 兼容字段名：total_profit_rate 或 total_profit_loss / total_cost 推算
         real_profit_rate = real_summary.get("total_profit_rate")
+        real_profit_loss = real_summary.get("total_profit") or 0
+        real_total_cost = real_summary.get("total_cost") or 0
         if real_profit_rate is None:
-            total_profit = real_summary.get("total_profit") or 0
-            total_cost = real_summary.get("total_cost") or 0
-            real_profit_rate = (total_profit / total_cost) if total_cost > 0 else None
+            real_profit_rate = (real_profit_loss / real_total_cost) if real_total_cost > 0 else None
         if real_profit_rate is not None:
             comparison["real_portfolio_profit_rate"] = round(real_profit_rate, 4)
             comparison["hypothetical_profit_rate"] = total_profit_rate
-            # 改善幅度 = 假设补仓部分收益率 - 真实组合收益率（近似）
-            comparison["improvement"] = round(total_profit_rate - real_profit_rate, 4)
+            # 修复8：改善口径修正
+            # 原口径：improvement = 假设部分独立收益率 - 真实组合整体收益率（分母不同，不严谨）
+            # 新口径：模拟"真实盈亏+假设盈亏"与"真实成本+假设投入"的对比，反映"如果当时补了的整体效果"
+            combined_profit = real_profit_loss + total_profit_loss
+            combined_cost = real_total_cost + total_invested
+            combined_profit_rate = (combined_profit / combined_cost) if combined_cost > 0 else 0
+            comparison["improvement"] = round(combined_profit_rate - real_profit_rate, 4)
+            comparison["combined_profit_rate"] = round(combined_profit_rate, 4)
     except Exception as e:
         logger.debug(f"[counterfactual] 真实组合对比失败: {e}")
 

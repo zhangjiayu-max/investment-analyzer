@@ -243,6 +243,7 @@ DEFAULT_CONFIGS = [
     ('smart_add.stale_days', '14', '估值数据过期天数阈值', 'smart_add'),
     ('smart_add.snapshot_enabled', 'true', '智能补仓建议快照落库开关（反事实决策验证，默认开启）', 'smart_add'),
     ('smart_add.hypothetical_enabled', 'true', '假设操作自动生成开关（每次建议自动创建假设交易，默认开启）', 'smart_add'),
+    ('smart_add.max_add_vs_position_mult', '2.0', '单标的补仓金额上限=原市值×此倍数（避免小仓位标的巨额补仓）', 'smart_add'),
 ]
 
 
