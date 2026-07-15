@@ -7,7 +7,7 @@
  * - 关注机会：关注列表基金卡片，展示目标价/估值分位/上车信号状态
  * - 落地验证：已验证事件 + 板块准确率统计
  */
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, watch, nextTick } from 'vue'
 import {
   listMarketEvents, triggerEventRadarScan, triggerEventRadarVerify, getEventRadarAccuracy,
   listWatchlist, addToWatchlist, removeWatchlistItem, refreshWatchlistNavs,
@@ -123,6 +123,21 @@ const watchlistStats = computed(() => {
     return (now - created) / (1000 * 60 * 60 * 24) <= 7
   }).length
   return { total, canBuy, approaching, waiting, noData, recent7d }
+})
+
+// 今日操作建议：优先可上车基金名称
+const firstCanBuyFund = computed(() => {
+  const green = sortedWatchlist.value.filter(w => (w.signal_status || 'gray') === 'green')
+  return green.length > 0 ? green[0].fund_name : ''
+})
+const firstCanBuyInfo = computed(() => {
+  const green = sortedWatchlist.value.filter(w => (w.signal_status || 'gray') === 'green')
+  if (green.length === 0) return null
+  const f = green[0]
+  return {
+    percentile: f.current_percentile != null ? Number(f.current_percentile).toFixed(0) + '%' : '未知',
+    distance: f.distance_to_buy != null ? (parseFloat(f.distance_to_buy) >= 0 ? '+' : '') + Number(f.distance_to_buy).toFixed(2) + '%' : '未知',
+  }
 })
 
 // 关注列表排序
@@ -564,6 +579,17 @@ function consensusClass(consensus) {
 
 /** 大师卡片展开状态：{ [`${fundCode}:${masterKey}`]: bool } */
 const expandedMasters = ref({})
+// 关注基金卡片展开状态（记录 fund_code）
+const expandedCards = ref({})
+// 事件雷达跳转：需要滚动到的基金代码
+const scrollToFundCode = ref('')
+// 组合智能/大师回测面板折叠状态（默认折叠）
+const expandedPortfolio = ref(false)
+const expandedMasterBacktest = ref(false)
+
+function toggleCardExpand(fundCode) {
+  expandedCards.value = { ...expandedCards.value, [fundCode]: !expandedCards.value[fundCode] }
+}
 
 /** 切换大师卡片展开/收起 */
 function toggleMaster(fundCode, masterKey) {
@@ -1052,6 +1078,22 @@ onMounted(() => {
     loadWatchlist()
   }, 300)
 })
+
+// 事件雷达联动：点击关联关注基金 → 跳转到关注机会 Tab 并滚动到对应卡片
+watch(scrollToFundCode, async (code) => {
+  if (!code) return
+  activeTab.value = 'watchlist'
+  expandedCards.value = { ...expandedCards.value, [code]: true }
+  await nextTick()
+  setTimeout(() => {
+    const el = document.querySelector(`.wl-card[data-fund-code="${code}"]`)
+    if (el) {
+      el.scrollIntoView({ behavior: 'smooth', block: 'center' })
+      el.classList.add('wl-card-highlight')
+      setTimeout(() => el.classList.remove('wl-card-highlight'), 2000)
+    }
+  }, 300)
+})
 </script>
 
 <template>
@@ -1274,7 +1316,12 @@ onMounted(() => {
                 <div class="holding-list">
                   <div v-for="h in parseJsonArray(evt.matched_holdings)" :key="h.fund_code" class="holding-item" :class="{ 'holding-item-watchlist': h.match_type === 'watchlist' }">
                     <Icon :name="h.match_type === 'watchlist' ? 'bookmark' : 'briefcase'" size="13" />
-                    <span class="holding-name">{{ h.fund_name }}</span>
+                    <span
+                      class="holding-name"
+                      :class="{ 'holding-name-clickable': h.match_type === 'watchlist' }"
+                      @click="h.match_type === 'watchlist' && scrollToFundCode && (scrollToFundCode = h.fund_code)"
+                      :title="h.match_type === 'watchlist' ? '点击查看关注详情' : ''"
+                    >{{ h.fund_name }}</span>
                     <span class="holding-reason">{{ h.match_reason }}</span>
                   </div>
                 </div>
@@ -1305,18 +1352,41 @@ onMounted(() => {
 
     <!-- ════ Tab 2：关注机会 ════ -->
     <template v-if="activeTab === 'watchlist'">
+      <!-- ════ 今日操作建议 ════ -->
+      <div v-if="watchlist.length" class="daily-advice-banner">
+        <div class="da-content">
+          <span class="da-icon">💡</span>
+          <span class="da-text" v-if="watchlistStats.canBuy > 0">
+            <strong>{{ watchlistStats.canBuy }}</strong> 只基金可上车，建议优先关注<strong>「{{ firstCanBuyFund }}」</strong>
+            <span v-if="firstCanBuyInfo">（估值分位{{ firstCanBuyInfo.percentile }}%，距上车价{{ firstCanBuyInfo.distance }}）</span>
+          </span>
+          <span class="da-text" v-else-if="watchlistStats.approaching > 0">
+            <strong>{{ watchlistStats.approaching }}</strong> 只接近上车，近期关注
+          </span>
+          <span class="da-text" v-else>暂无上车信号，继续等待</span>
+        </div>
+        <div class="da-tags">
+          <span class="da-tag da-tag-green" :class="{ active: watchlistFilter === 'canBuy' }" @click="toggleWatchlistFilter('canBuy')">🟢 可上车 {{ watchlistStats.canBuy }}</span>
+          <span class="da-tag da-tag-yellow" :class="{ active: watchlistFilter === 'approaching' }" @click="toggleWatchlistFilter('approaching')">🟡 接近 {{ watchlistStats.approaching }}</span>
+          <span class="da-tag da-tag-red" :class="{ active: watchlistFilter === 'waiting' }" @click="toggleWatchlistFilter('waiting')">🔴 等待 {{ watchlistStats.waiting }}</span>
+          <span v-if="watchlistStats.noData" class="da-tag da-tag-gray" :class="{ active: watchlistFilter === 'noData' }" @click="toggleWatchlistFilter('noData')">⚪ 数据不足 {{ watchlistStats.noData }}</span>
+        </div>
+      </div>
       <!-- ════ 组合智能面板 ════ -->
-      <div class="portfolio-intelligence-panel">
-        <div class="pi-header">
-          <div class="pi-header-left">
+      <div class="collapsible-panel">
+        <div class="collapsible-header" @click="expandedPortfolio = !expandedPortfolio">
+          <div class="collapsible-header-left">
+            <Icon :name="expandedPortfolio ? 'chevron-down' : 'chevron-right'" size="14" />
             <Icon name="activity" size="16" class="pi-header-icon" />
-            <h3 class="pi-title">组合智能</h3>
+            <span class="collapsible-title">📊 组合智能</span>
+            <span v-if="portfolioData?.health_score != null" class="collapsible-badge" :class="scoreColorClass(portfolioData.health_score)">{{ portfolioData.health_score }}分</span>
           </div>
-          <button class="btn-pi-refresh" @click="loadPortfolioIntelligence" :disabled="loadingPortfolio">
+          <button class="btn-pi-refresh" @click.stop="loadPortfolioIntelligence" :disabled="loadingPortfolio">
             <Icon :name="loadingPortfolio ? 'spinner' : 'refresh-cw'" size="12" :class="{ spinning: loadingPortfolio }" />
-            <span>{{ loadingPortfolio ? '分析中...' : '刷新' }}</span>
           </button>
         </div>
+        <div v-if="expandedPortfolio" class="collapsible-body">
+          <div class="portfolio-intelligence-panel">
 
         <!-- 加载中 -->
         <div v-if="loadingPortfolio && !portfolioData" class="pi-loading">
@@ -1582,19 +1652,24 @@ onMounted(() => {
           </div>
         </template>
       </div>
+        </div>
+      </div>
 
       <!-- ════ 大师决策回测面板 ════ -->
-      <div class="master-backtest-panel">
-        <div class="mb-header">
-          <div class="mb-header-left">
+      <div class="collapsible-panel">
+        <div class="collapsible-header" @click="expandedMasterBacktest = !expandedMasterBacktest">
+          <div class="collapsible-header-left">
+            <Icon :name="expandedMasterBacktest ? 'chevron-down' : 'chevron-right'" size="14" />
             <Icon name="target" size="16" class="mb-header-icon" />
-            <h3 class="mb-title">📊 大师决策回测</h3>
+            <span class="collapsible-title">🎯 大师决策回测</span>
+            <span v-if="masterBacktestStats?.accuracy != null" class="collapsible-badge" :class="masterBacktestStats.accuracy >= 0.6 ? 'score-good' : 'score-warn'">胜率 {{ (masterBacktestStats.accuracy * 100).toFixed(0) }}%</span>
           </div>
-          <button class="btn-mb-refresh" @click="verifyMasters" :disabled="verifyingMasters">
+          <button class="btn-mb-refresh" @click.stop="verifyMasters" :disabled="verifyingMasters">
             <Icon :name="verifyingMasters ? 'spinner' : 'refresh-cw'" size="12" :class="{ spinning: verifyingMasters }" />
-            <span>{{ verifyingMasters ? '验证中...' : '刷新验证' }}</span>
           </button>
         </div>
+        <div v-if="expandedMasterBacktest" class="collapsible-body">
+          <div class="master-backtest-panel">
 
         <!-- 加载中 -->
         <div v-if="loadingMasterBacktest && !masterBacktestStats" class="mb-loading">
@@ -1735,6 +1810,8 @@ onMounted(() => {
           </div>
         </template>
       </div>
+        </div>
+      </div>
 
       <!-- 关注列表统计 -->
       <div class="stats-row stats-row-6">
@@ -1828,6 +1905,7 @@ onMounted(() => {
           :key="item.id"
           class="wl-card"
           :class="[signalMeta(item).cls, { 'wl-card-bought': item.status === 'bought' }]"
+          :data-fund-code="item.fund_code"
         >
           <div class="wl-card-header">
             <div class="wl-name-block">
@@ -1843,13 +1921,52 @@ onMounted(() => {
             </span>
           </div>
           <div class="wl-card-body">
-            <!-- 来源事件说明（让用户知道为什么关注这只基金） -->
+            <!-- 来源事件说明 -->
             <div v-if="item.notes" class="wl-source-row">
               <Icon name="info" size="11" class="wl-source-icon" />
               <span class="wl-source-text" v-html="renderNotes(item.notes)"></span>
             </div>
-            <div class="wl-data-row">
-              <span class="wl-data-label">当前净值</span>
+            <!-- 3列关键指标 -->
+            <div class="wl-key-grid">
+              <div class="wl-key-item">
+                <span class="wl-key-label">估值分位</span>
+                <span v-if="item.current_percentile !== null && item.current_percentile !== undefined" class="wl-key-value" :class="{ 'value-hit': parseFloat(item.current_percentile) <= 20 }">
+                  {{ Number(item.current_percentile).toFixed(0) }}%
+                  <span v-if="parseFloat(item.current_percentile) <= 20" class="wl-key-hint">低估</span>
+                  <span v-else-if="parseFloat(item.current_percentile) <= 40" class="wl-key-hint">偏低</span>
+                  <span v-else-if="parseFloat(item.current_percentile) >= 80" class="wl-key-hint wl-key-high">高估</span>
+                </span>
+                <span v-else class="wl-key-value wl-key-mute">{{ patrolling ? '查询中' : '无数据' }}</span>
+              </div>
+              <div class="wl-key-item">
+                <span class="wl-key-label">距上车</span>
+                <span v-if="item.distance_to_buy != null && item.current_nav" class="wl-key-value" :class="parseFloat(item.distance_to_buy) <= 0 ? 'value-hit' : ''">
+                  {{ parseFloat(item.distance_to_buy) >= 0 ? '+' : '' }}{{ Number(item.distance_to_buy).toFixed(2) }}%
+                  <span v-if="parseFloat(item.distance_to_buy) <= 0" class="wl-key-hint">已到</span>
+                  <span v-else-if="parseFloat(item.distance_to_buy) < 5" class="wl-key-hint">接近</span>
+                </span>
+                <span v-else class="wl-key-value wl-key-mute">--</span>
+              </div>
+              <div class="wl-key-item">
+                <span class="wl-key-label">建议上车价</span>
+                <span v-if="item.suggested_buy_price" class="wl-key-value">{{ Number(item.suggested_buy_price).toFixed(4) }}</span>
+                <span v-else class="wl-key-value wl-key-mute">数据不足</span>
+              </div>
+            </div>
+            <!-- 1句话理由 -->
+            <div v-if="item.signal_reason" class="wl-signal-reason" :class="signalMeta(item).cls">
+              {{ item.signal_reason }}
+            </div>
+            <!-- 展开/收起按钮 -->
+            <div class="wl-expand-bar" @click="toggleCardExpand(item.fund_code)">
+              <Icon :name="expandedCards[item.fund_code] ? 'chevron-up' : 'chevron-down'" size="12" />
+              <span>{{ expandedCards[item.fund_code] ? '收起详情' : '展开详情' }}</span>
+              <span class="wl-expand-hint">体检报告 · 大师矩阵 · 买入评分 · 走势</span>
+            </div>
+            <!-- 折叠详情区 -->
+            <div v-if="expandedCards[item.fund_code]" class="wl-card-details">
+              <div class="wl-data-row">
+                <span class="wl-data-label">当前净值</span>
               <span
                 class="wl-data-value"
                 :title="item.source ? `数据来源：${item.source}` : ''"
@@ -2227,6 +2344,7 @@ onMounted(() => {
                 <button class="btn-wl-save" @click="saveTarget(item)">保存</button>
                 <button class="btn-wl-cancel" @click="editingId = null">取消</button>
               </div>
+            </div>
             </div>
           </div>
           <div class="wl-card-footer">

@@ -860,12 +860,7 @@ defineExpose({ loadHistory })
           <span class="stat-lbl">平均耗时</span>
         </div>
       </div>
-      <div v-if="queryStats.failed_indexes && queryStats.failed_indexes.length" class="query-stats-failed">
-        <span class="failed-label">⚠️ 查询失败的指数：</span>
-        <span v-for="idx in queryStats.failed_indexes" :key="idx.index_code" class="failed-tag">
-          {{ idx.index_name || idx.index_code }}
-        </span>
-      </div>
+      
     </div>
 
     <!-- ════════ Index Tab (outerTab === 'index') ════════ -->
@@ -1743,26 +1738,7 @@ defineExpose({ loadHistory })
 .query-stat-item.stat-failed .stat-num {
   color: #ef4444;
 }
-.query-stats-failed {
-  margin-top: 0.5rem;
-  padding-top: 0.5rem;
-  border-top: 1px dashed var(--color-border);
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.4rem;
-  align-items: center;
-}
-.query-stats-failed .failed-label {
-  font-size: 0.78rem;
-  color: #f59e0b;
-}
-.query-stats-failed .failed-tag {
-  font-size: 0.72rem;
-  padding: 2px 8px;
-  background: rgba(239, 68, 68, 0.1);
-  color: #ef4444;
-  border-radius: 4px;
-}
+
 
 .selector-label {
   font-size: 0.9rem;
