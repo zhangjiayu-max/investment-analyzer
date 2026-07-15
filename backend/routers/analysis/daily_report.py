@@ -10,7 +10,7 @@ from fastapi import APIRouter, HTTPException
 
 from db import (
     list_valuation_indexes, list_holdings, get_portfolio_diversification,
-    get_total_cash_balance, get_analysis_agent,
+    get_total_cash_balance, get_analysis_agent_by_name,
     create_analysis_history,
     create_async_task, update_async_task, get_async_task, get_latest_async_task,
     get_config_int, get_config_float,
@@ -26,6 +26,8 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["analysis-daily-report"])
 
 _background_tasks = set()
+
+_DAILY_AGENT_NAME = "市场日报分析师"
 
 
 # ── 桥接 B：对话→分析关联 ──
@@ -106,12 +108,13 @@ async def get_daily_report():
     today = datetime.now().strftime("%Y-%m-%d")
     conn = _get_conn()
     row = conn.execute(
-        "SELECT * FROM analysis_history WHERE agent_id = 1 AND date(created_at) = ? ORDER BY created_at DESC LIMIT 1",
-        (today,)
+        "SELECT * FROM analysis_history WHERE agent_name = ? AND date(created_at) = ? ORDER BY created_at DESC LIMIT 1",
+        (_DAILY_AGENT_NAME, today)
     ).fetchone()
     if not row:
         row = conn.execute(
-            "SELECT * FROM analysis_history WHERE agent_id = 1 ORDER BY created_at DESC LIMIT 1"
+            "SELECT * FROM analysis_history WHERE agent_name = ? ORDER BY created_at DESC LIMIT 1",
+            (_DAILY_AGENT_NAME,)
         ).fetchone()
     conn.close()
     if row:
@@ -139,7 +142,7 @@ async def get_daily_report_task():
 @router.post("/api/dashboard/daily-report/regenerate")
 async def regenerate_daily_report():
     """重新生成今日市场简报（异步）。立即返回 task_id，后台执行。"""
-    agent = get_analysis_agent(1)
+    agent = get_analysis_agent_by_name(_DAILY_AGENT_NAME)
     if not agent:
         raise HTTPException(400, "市场日报分析师未配置")
     task_id = create_async_task("daily_report", caller="daily_report")
@@ -158,8 +161,8 @@ async def _run_regenerate_daily_report_async(task_id: int, agent: dict):
         today = time.strftime("%Y-%m-%d")
         conn = _get_conn()
         conn.execute(
-            "DELETE FROM analysis_history WHERE agent_id = 1 AND date(created_at) = ?",
-            (today,)
+            "DELETE FROM analysis_history WHERE agent_name = ? AND date(created_at) = ?",
+            (_DAILY_AGENT_NAME, today)
         )
         conn.commit()
         conn.close()
@@ -345,14 +348,14 @@ async def _run_regenerate_daily_report_async(task_id: int, agent: dict):
 
         new_id = create_analysis_history(
             index_code="", index_name="",
-            agent_id=1, agent_name=agent["name"],
+            agent_id=agent["id"], agent_name=agent["name"],
             prompt_used=full_prompt[:500], news_context=news_context[:500],
             valuation_context=val_context[:500], result=result_text,
             token_usage=token_usage,
         )
         _elapsed_ms = int((time.time() - _start_ts) * 1000)
         create_analysis_log(
-            trace_id=trace_id, agent_id=1, agent_name="市场日报分析师",
+            trace_id=trace_id, agent_id=agent["id"], agent_name=agent["name"],
             analysis_type="daily_report", source_table="analysis_history",
             source_id=new_id, query="生成今日市场简报",
             input_summary=f"日报:{time.strftime('%Y-%m-%d')}",
@@ -415,7 +418,7 @@ async def _run_regenerate_daily_report_async(task_id: int, agent: dict):
         logging.error(f"重新生成日报异步任务失败: {e}")
         _elapsed_ms = int((time.time() - _start_ts) * 1000)
         create_analysis_log(
-            trace_id=trace_id, agent_id=1, agent_name="市场日报分析师",
+            trace_id=trace_id, agent_id=agent["id"], agent_name=agent["name"],
             analysis_type="daily_report", source_table="analysis_history",
             source_id=None, query="生成今日市场简报",
             input_summary=f"日报:{time.strftime('%Y-%m-%d')}",

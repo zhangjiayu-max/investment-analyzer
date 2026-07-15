@@ -10,7 +10,7 @@ from infra.state import track_agent as _track_agent, untrack_agent as _untrack_a
 from db import (
     list_holdings, get_portfolio_diversification,
     create_portfolio_analysis_record, list_portfolio_analysis_records,
-    get_analysis_agent,
+    get_analysis_agent_by_name,
     save_analysis_conclusion,
 )
 from db.portfolio import update_analysis_record, get_analysis_record_status
@@ -43,7 +43,7 @@ async def panorama_analysis_api(req: PanoramaAnalysisRequest):
     if not holdings:
         raise HTTPException(400, "暂无持仓数据")
 
-    agent = get_analysis_agent(3)
+    agent = get_analysis_agent_by_name("全景诊断分析师")
     if not agent:
         raise HTTPException(404, "全景诊断分析师未配置")
 
@@ -53,17 +53,17 @@ async def panorama_analysis_api(req: PanoramaAnalysisRequest):
         input_data=json.dumps({"holdings_count": len(holdings)}, ensure_ascii=False),
         result_data="",
         status="running",
-        agent_id=3,
+        agent_id=agent["id"],
     )
 
-    task = asyncio.create_task(_run_panorama_async(record_id, agent["system_prompt"], holdings))
+    task = asyncio.create_task(_run_panorama_async(record_id, agent["system_prompt"], holdings, agent["id"], agent["name"]))
     _background_tasks.add(task)
     task.add_done_callback(_background_tasks.discard)
 
     return {"ok": True, "id": record_id, "status": "running"}
 
 
-async def _run_panorama_async(record_id: int, system_prompt: str, holdings: list):
+async def _run_panorama_async(record_id: int, system_prompt: str, holdings: list, agent_id: int = None, agent_name: str = ""):
     """后台执行全景诊断分析。"""
     uid = f"panorama_{record_id}"
     try:
@@ -123,7 +123,7 @@ async def _run_panorama_async(record_id: int, system_prompt: str, holdings: list
         trace_id = f"log_{uuid.uuid4().hex[:12]}"
         _start_ts = time.time()
         create_analysis_log(
-            trace_id=trace_id, agent_id=3, agent_name="全景诊断分析师",
+            trace_id=trace_id, agent_id=agent_id, agent_name=agent_name,
             analysis_type="panorama", source_table="portfolio_analysis_records",
             source_id=record_id, query=user_content[:300],
             input_summary="全景诊断",

@@ -10,7 +10,7 @@ from fastapi import APIRouter, HTTPException
 
 from db import (
     list_valuation_indexes, list_holdings, get_portfolio_diversification,
-    get_total_cash_balance, get_analysis_agent, get_analysis_agent_by_name,
+    get_total_cash_balance, get_analysis_agent_by_name,
     create_analysis_history,
     save_recommendations, save_analysis_cache, get_analysis_cache,
     list_recommendations, auto_verify_pending_recommendations,
@@ -144,8 +144,6 @@ async def _do_hotspots_analysis():
     agent_name = "热点分析专家"
     try:
         agent = get_analysis_agent_by_name("热点分析专家")
-        if not agent:
-            agent = get_analysis_agent(8)  # 回退到旧 id
         if agent:
             agent_id = agent.get("id")
             agent_name = agent.get("name", "热点分析专家")

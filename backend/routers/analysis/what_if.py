@@ -13,6 +13,7 @@ from fastapi import APIRouter, HTTPException
 from db import (
     list_holdings,
     create_portfolio_analysis_record,
+    get_analysis_agent_by_name,
 )
 from db.agent_analysis_log import create_analysis_log, complete_analysis_log
 from models.portfolio import WhatIfRequest
@@ -57,12 +58,17 @@ async def what_if_analysis_api(req: WhatIfRequest):
         f"\n{valuation_context}"
     )
 
+    # 动态查找情景推演分析师（避免硬编码 id 错位）
+    _whatif_agent = get_analysis_agent_by_name("情景推演分析师")
+    _whatif_agent_id = _whatif_agent.get("id") if _whatif_agent else None
+    _whatif_agent_name = _whatif_agent.get("name", "情景推演分析师") if _whatif_agent else "情景推演分析师"
+
     trace_id = f"log_{uuid.uuid4().hex[:12]}"
     _start_ts = time.time()
     # 先创建 running 记录（source_id 暂为 None，成功后补更新）
     try:
         create_analysis_log(
-            trace_id=trace_id, agent_id=6, agent_name="情景推演分析师",
+            trace_id=trace_id, agent_id=_whatif_agent_id, agent_name=_whatif_agent_name,
             analysis_type="what_if", source_table="portfolio_analysis_records",
             source_id=None, query=user_content[:300],
             input_summary=f"情景:{scenario_desc}",
@@ -89,7 +95,7 @@ async def what_if_analysis_api(req: WhatIfRequest):
         input_data=json.dumps({"scenario": req.scenario, "parameter": req.parameter}, ensure_ascii=False),
         result_data=result_text,
         token_usage=tokens,
-        agent_id=6,
+        agent_id=_whatif_agent_id,
     )
     _elapsed_ms = int((time.time() - _start_ts) * 1000)
     # 更新 source_id 并标记完成（避免重复 INSERT 触发 UNIQUE 冲突）

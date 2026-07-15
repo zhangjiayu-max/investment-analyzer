@@ -7,7 +7,7 @@ import time
 from fastapi import APIRouter, HTTPException
 
 from db import (
-    list_transactions, get_transaction_tags, get_analysis_agent,
+    list_transactions, get_transaction_tags, get_analysis_agent_by_name,
     create_portfolio_analysis_record,
 )
 from db.portfolio import update_analysis_record
@@ -36,7 +36,7 @@ async def trade_review_api(req: TradeReviewRequest):
     if not txs:
         raise HTTPException(400, "暂无交易记录")
 
-    agent = get_analysis_agent(5)
+    agent = get_analysis_agent_by_name("交易复盘分析师")
     if not agent:
         raise HTTPException(404, "交易复盘分析师未配置")
 
@@ -136,24 +136,24 @@ async def trade_review_api(req: TradeReviewRequest):
         input_data=json.dumps({"start_date": req.start_date, "end_date": req.end_date, "tx_count": len(txs)},
                               ensure_ascii=False),
         status="running",
-        agent_id=5,
+        agent_id=agent["id"],
     )
 
     # 后台执行分析
-    task = asyncio.create_task(_run_trade_review_async(record_id, agent["system_prompt"], user_content))
+    task = asyncio.create_task(_run_trade_review_async(record_id, agent["system_prompt"], user_content, agent["id"], agent["name"]))
     _background_tasks.add(task)
     task.add_done_callback(_background_tasks.discard)
 
     return {"ok": True, "id": record_id, "status": "running"}
 
 
-async def _run_trade_review_async(record_id: int, system_prompt: str, user_content: str):
+async def _run_trade_review_async(record_id: int, system_prompt: str, user_content: str, agent_id: int = None, agent_name: str = ""):
     """后台执行交易复盘分析。"""
     import uuid
     trace_id = f"log_{uuid.uuid4().hex[:12]}"
     _start_ts = time.time()
     create_analysis_log(
-        trace_id=trace_id, agent_id=5, agent_name="交易复盘分析师",
+        trace_id=trace_id, agent_id=agent_id, agent_name=agent_name,
         analysis_type="trade_review", source_table="portfolio_analysis_records",
         source_id=record_id, query=user_content[:300],
         input_summary="交易复盘",

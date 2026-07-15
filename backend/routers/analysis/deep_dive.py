@@ -8,7 +8,7 @@ from fastapi import APIRouter, HTTPException
 
 from infra.state import track_agent as _track_agent, untrack_agent as _untrack_agent
 from db import (
-    list_holdings, get_holding, list_transactions, get_analysis_agent,
+    list_holdings, get_holding, list_transactions, get_analysis_agent_by_name,
     lookup_fund_info, get_fund_holdings, fetch_fund_nav,
     get_valuation_history, get_latest_valuation,
     create_portfolio_analysis_record,
@@ -45,7 +45,7 @@ async def fund_deep_dive_api(holding_id: int, req: DeepDiveRequest):
     if not holding:
         raise HTTPException(404, "持仓不存在")
 
-    agent = get_analysis_agent(4)
+    agent = get_analysis_agent_by_name("基金深度分析师")
     if not agent:
         raise HTTPException(404, "基金深度分析师未配置")
 
@@ -237,24 +237,24 @@ async def fund_deep_dive_api(holding_id: int, req: DeepDiveRequest):
         summary=f"深度分析 · {fund_name}",
         input_data=json.dumps({"holding_id": holding_id, "fund_code": fund_code}, ensure_ascii=False),
         status="running",
-        agent_id=4,
+        agent_id=agent["id"],
     )
 
     # 后台执行分析
-    task = asyncio.create_task(_run_deep_dive_async(record_id, agent["system_prompt"], user_content, fund_name))
+    task = asyncio.create_task(_run_deep_dive_async(record_id, agent["system_prompt"], user_content, fund_name, agent["id"], agent["name"]))
     _background_tasks.add(task)
     task.add_done_callback(_background_tasks.discard)
 
     return {"ok": True, "id": record_id, "status": "running"}
 
 
-async def _run_deep_dive_async(record_id: int, system_prompt: str, user_content: str, fund_name: str = ""):
+async def _run_deep_dive_async(record_id: int, system_prompt: str, user_content: str, fund_name: str = "", agent_id: int = None, agent_name: str = ""):
     """后台执行单基金深度分析。"""
     import uuid
     trace_id = f"log_{uuid.uuid4().hex[:12]}"
     _start_ts = time.time()
     create_analysis_log(
-        trace_id=trace_id, agent_id=4, agent_name="基金深度分析师",
+        trace_id=trace_id, agent_id=agent_id, agent_name=agent_name,
         analysis_type="deep_dive", source_table="portfolio_analysis_records",
         source_id=record_id, query=user_content[:300],
         input_summary=f"深度:{fund_name}",

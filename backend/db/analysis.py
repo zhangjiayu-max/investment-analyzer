@@ -972,17 +972,17 @@ def list_analysis_agents() -> list[dict]:
 
 
 def get_analysis_agent(agent_id: int) -> dict | None:
-    """获取单个分析 Agent。"""
+    """获取单个分析 Agent（仅返回未禁用的）。"""
     conn = _get_conn()
-    row = conn.execute("SELECT * FROM analysis_agents WHERE id = ?", (agent_id,)).fetchone()
+    row = conn.execute("SELECT * FROM analysis_agents WHERE id = ? AND is_active = 1", (agent_id,)).fetchone()
     conn.close()
     return dict(row) if row else None
 
 
 def get_analysis_agent_by_name(name: str) -> dict | None:
-    """按名称获取分析 Agent。"""
+    """按名称获取分析 Agent（仅返回未禁用的）。"""
     conn = _get_conn()
-    row = conn.execute("SELECT * FROM analysis_agents WHERE name = ?", (name,)).fetchone()
+    row = conn.execute("SELECT * FROM analysis_agents WHERE name = ? AND is_active = 1", (name,)).fetchone()
     conn.close()
     return dict(row) if row else None
 

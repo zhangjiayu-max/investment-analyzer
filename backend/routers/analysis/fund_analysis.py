@@ -67,15 +67,12 @@ async def fund_analysis_api(req: dict):
     if not fund_code:
         raise HTTPException(400, "请输入基金代码")
 
-    # 优先使用独立的"指定基金分析师"，未配置时回退到情景推演分析师（agent_id=6）
+    # 动态查找"指定基金分析师"（不再回退到 agent_id=6，避免取到已废弃的 AI 基金分析师）
     agent = get_analysis_agent_by_name("指定基金分析师")
     if not agent:
-        from db import get_analysis_agent
-        agent = get_analysis_agent(6)
-    if not agent:
-        raise HTTPException(404, "AI 基金分析师未配置")
+        raise HTTPException(404, "指定基金分析师未配置，请在 Agent 管理页面添加")
 
-    agent_id = agent.get("id", 6)
+    agent_id = agent.get("id")
     agent_name = agent.get("name", "指定基金分析师")
 
     # 确保 system_prompt 是字符串类型

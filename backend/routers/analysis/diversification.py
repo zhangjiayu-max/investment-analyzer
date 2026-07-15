@@ -412,7 +412,7 @@ async def _run_diversification_ai_summary_async(record_id: int, agent_id: int = 
     trace_id = f"log_{uuid.uuid4().hex[:12]}"
     _start_ts = time.time()
     create_analysis_log(
-        trace_id=trace_id, agent_id=2, agent_name="分散度分析师",
+        trace_id=trace_id, agent_id=agent["id"], agent_name=agent["name"],
         analysis_type="diversification", source_table="portfolio_analysis_records",
         source_id=record_id, query=user_content[:300],
         input_summary="分散度AI",
