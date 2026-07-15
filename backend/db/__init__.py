@@ -121,12 +121,14 @@ from db.portfolio import (
 # AI 分析 Agent + 历史 + Prompt 常量
 from db.analysis import (
     _init_analysis_tables, list_analysis_agents, get_analysis_agent,
+    get_analysis_agent_by_name,
     update_analysis_agent, create_analysis_history, list_analysis_history,
     get_analysis_history_item, get_analysis_history_status, update_analysis_history,
     delete_analysis_history,
     DEFAULT_MARKET_ANALYST_PROMPT, DEFAULT_DIVERSIFICATION_PROMPT,
     DEFAULT_PANORAMA_PROMPT, DEFAULT_FUND_DEEP_DIVE_PROMPT,
     DEFAULT_TRADE_REVIEW_PROMPT, DEFAULT_WHATIF_PROMPT,
+    DEFAULT_FUND_ANALYSIS_PROMPT,
     DEFAULT_HOTSPOTS_PROMPT, DEFAULT_BOND_PROMPT,
     DEFAULT_INDEX_DEEP_ANALYSIS_PROMPT,
 )

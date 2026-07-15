@@ -7,7 +7,7 @@ import time
 from fastapi import APIRouter, HTTPException
 
 from db import (
-    list_holdings, get_analysis_agent,
+    list_holdings, get_analysis_agent_by_name,
     lookup_fund_info, fetch_fund_nav,
     create_portfolio_analysis_record, list_portfolio_analysis_records,
 )
@@ -20,6 +20,36 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["analysis-fund-analysis"])
 
 _background_tasks: set = set()
+
+
+def _migrate_legacy_records():
+    """一次性迁移：把历史"指定基金分析"记录从 what_if 拆分到 fund_analysis。
+
+    - portfolio_analysis_records: summary LIKE '指定基金分析%' AND analysis_type='what_if' → analysis_type='fund_analysis'
+    - agent_analysis_log: analysis_type='fund_analysis' AND agent_name='情景推演分析师' → agent_name='指定基金分析师'
+
+    幂等：已正确的记录不受影响。
+    """
+    try:
+        from db._conn import _get_conn
+        conn = _get_conn()
+        # 1. 修正 portfolio_analysis_records 旧记录类型
+        conn.execute(
+            "UPDATE portfolio_analysis_records SET analysis_type='fund_analysis' "
+            "WHERE analysis_type='what_if' AND summary LIKE '指定基金分析%'"
+        )
+        # 2. 修正 agent_analysis_log 旧记录的 agent_name
+        conn.execute(
+            "UPDATE agent_analysis_log SET agent_name='指定基金分析师' "
+            "WHERE analysis_type='fund_analysis' AND agent_name='情景推演分析师'"
+        )
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logger.warning(f"指定基金分析历史记录迁移失败（可忽略）: {e}")
+
+
+_migrate_legacy_records()
 
 
 def _extract_candidates_safely(record_id: int, analysis_type: str, result_text: str):
@@ -37,9 +67,16 @@ async def fund_analysis_api(req: dict):
     if not fund_code:
         raise HTTPException(400, "请输入基金代码")
 
-    agent = get_analysis_agent(6)
+    # 优先使用独立的"指定基金分析师"，未配置时回退到情景推演分析师（agent_id=6）
+    agent = get_analysis_agent_by_name("指定基金分析师")
+    if not agent:
+        from db import get_analysis_agent
+        agent = get_analysis_agent(6)
     if not agent:
         raise HTTPException(404, "AI 基金分析师未配置")
+
+    agent_id = agent.get("id", 6)
+    agent_name = agent.get("name", "指定基金分析师")
 
     # 确保 system_prompt 是字符串类型
     system_prompt = agent.get("system_prompt", "")
@@ -95,28 +132,28 @@ async def fund_analysis_api(req: dict):
 
     # 创建记录（status='running'）
     record_id = create_portfolio_analysis_record(
-        analysis_type="what_if",
+        analysis_type="fund_analysis",
         summary=f"指定基金分析 · {fund_name}({fund_code})",
         input_data=json.dumps({"fund_code": fund_code, "fund_name": fund_name}, ensure_ascii=False),
         status="running",
-        agent_id=6,
+        agent_id=agent_id,
     )
 
     # 后台执行分析
-    task = asyncio.create_task(_run_fund_analysis_async(record_id, system_prompt, user_content, fund_code, fund_name))
+    task = asyncio.create_task(_run_fund_analysis_async(record_id, system_prompt, user_content, fund_code, fund_name, agent_id, agent_name))
     _background_tasks.add(task)
     task.add_done_callback(_background_tasks.discard)
 
     return {"ok": True, "id": record_id, "status": "running"}
 
 
-async def _run_fund_analysis_async(record_id: int, system_prompt: str, user_content: str, fund_code: str = "", fund_name: str = ""):
+async def _run_fund_analysis_async(record_id: int, system_prompt: str, user_content: str, fund_code: str = "", fund_name: str = "", agent_id: int = 6, agent_name: str = "指定基金分析师"):
     """后台执行指定基金分析。"""
     import uuid
     trace_id = f"log_{uuid.uuid4().hex[:12]}"
     _start_ts = time.time()
     create_analysis_log(
-        trace_id=trace_id, agent_id=6, agent_name="情景推演分析师",
+        trace_id=trace_id, agent_id=agent_id, agent_name=agent_name,
         analysis_type="fund_analysis", source_table="portfolio_analysis_records",
         source_id=record_id, query=user_content[:300],
         input_summary=f"基金:{fund_code}({fund_name})",
@@ -151,7 +188,7 @@ async def _run_fund_analysis_async(record_id: int, system_prompt: str, user_cont
 @router.get("/api/portfolio/analysis/fund-analysis/records")
 async def list_fund_analysis_records_api(limit: int = 10):
     """列出指定基金分析历史记录。"""
-    records = list_portfolio_analysis_records(analysis_type="what_if", limit=limit)
+    records = list_portfolio_analysis_records(analysis_type="fund_analysis", limit=limit)
     return {"records": records}
 
 
