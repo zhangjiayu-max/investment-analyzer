@@ -38,6 +38,7 @@ import DecisionAccuracy from './decision/DecisionAccuracy.vue'
 import StrategySandboxPage from './decision/StrategySandboxPage.vue'
 import DataHealthDashboard from './quality/DataHealthDashboard.vue'
 import StrategyBacktest from './decision/StrategyBacktest.vue'
+import AnalysisLogPage from './analysis/AnalysisLogPage.vue'
 import { isDark, toggleDark } from '../composables/useTheme'
 import AlertBell from './task/AlertBell.vue'
 import MobileNotificationCenter from './mobile/MobileNotificationCenter.vue'
@@ -109,6 +110,7 @@ const moreGroups = [
     label: '系统与进化',
     items: [
       { key: 'admin-agents', label: 'Agent 管理', icon: 'admin' },
+      { key: 'analysis-log', label: '分析记录', icon: 'clipboard' },
       { key: 'token-usage', label: 'Token 用量', icon: 'token' },
       { key: 'system-config', label: '系统配置', icon: 'config' },
       { key: 'data-health', label: '数据健康', icon: 'shield-check' },
@@ -157,6 +159,7 @@ const pageComponents = {
   'family-finance': FamilyFinanceDashboard,
   'goal-buckets': GoalBucketsPage,
   'admin-agents': AdminAgentsPage,
+  'analysis-log': AnalysisLogPage,
   'token-usage': TokenUsagePage,
   'quality-dashboard': QualityDashboard,
   'bad-cases': BadCasePage,
