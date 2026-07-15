@@ -334,6 +334,9 @@ def generate_smart_add_plan(user_id: str = "default") -> dict:
             except Exception as e:
                 logger.debug(f"[smart_add] 快照落库失败 {p.get('fund_code')}: {e}")
 
+    # 自动将补仓建议转为决策候选（去重：14天内同标的同来源不重复）
+    _plans_to_candidates(plans)
+
     return {
         "enabled": True,
         "plans": plans,
@@ -681,3 +684,53 @@ def preview_add_scenario(
         "improvement_pct": round((new_profit - current_profit) * 100, 2),
         "new_shares": round(shares + add_amount / simulated_price, 2),
     }
+
+
+def _plans_to_candidates(plans: list[dict]) -> None:
+    """将智能补仓建议自动转为决策候选（去重：14天内同标的同来源不重复）。
+
+    复用 smart_add.enabled 配置项，无需新增开关。
+    """
+    from db.decisions import create_candidate_from_structured_recommendation
+    for plan in plans:
+        fund_code = plan.get("fund_code", "")
+        fund_name = plan.get("fund_name", "")
+        if not fund_code:
+            continue
+        pyramid = plan.get("pyramid") or {}
+        engine1 = plan.get("engine1") or {}
+        released = pyramid.get("released_amount", 0) or 0
+        monthly = engine1.get("monthly_dca", 0) or 0
+        if released <= 0 and monthly <= 0:
+            continue
+        # 安全阀未通过的不创建
+        if not (plan.get("safety") or {}).get("can_add", True):
+            continue
+        amount = released if released > 0 else monthly
+        profit_rate = plan.get("profit_rate_pct", 0) or 0
+        val = plan.get("valuation") or {}
+        percentile = val.get("percentile", "N/A")
+        rationale_parts = [f"当前盈亏 {profit_rate:.1f}%", f"估值分位 {percentile}", f"月定投 {monthly:.0f}元"]
+        if released > 0:
+            rationale_parts.append(f"金字塔释放 {released:.0f}元")
+        try:
+            create_candidate_from_structured_recommendation({
+                "source_type": "smart_add",
+                "action_type": "add",
+                "target_type": "fund",
+                "target_code": fund_code,
+                "target_name": fund_name,
+                "summary": f"{fund_name} 智能补仓建议：{amount:.0f}元",
+                "rationale": "；".join(rationale_parts),
+                "suggested_amount": amount,
+                "confidence": "high" if plan.get("confidence_mult", 1) > 1 else "medium",
+                "dedupe_key": f"smart_add_{fund_code}",
+                "priority": 1 if profit_rate < -10 else 2,
+                "source_snapshot": {
+                    "profit_rate": plan.get("profit_rate"),
+                    "valuation": val,
+                    "safety": plan.get("safety"),
+                },
+            })
+        except Exception as e:
+            logger.debug(f"[smart_add] 自动创建决策候选失败 {fund_code}: {e}")

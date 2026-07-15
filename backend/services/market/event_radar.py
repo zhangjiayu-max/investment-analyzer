@@ -927,6 +927,11 @@ def scan_forward_events(trace_id: str = "") -> dict:
                 source="event_radar",
             )
             alerts_created += 1
+
+            # P2 闭环：高影响持仓事件 → 自动创建决策候选
+            # 仅对 holding_impact 级别 + 暂停/复牌/强制退市/大股东变更等高影响事件类型
+            if relevance == "holding_impact" and matched:
+                _event_to_candidates(ev_row, matched, relevance)
         except Exception as e:
             logger.warning(f"[event_radar:{trace_id}] 生成 alert 失败 ev={ev_row.get('event_id')}: {e}")
 
@@ -938,6 +943,55 @@ def scan_forward_events(trace_id: str = "") -> dict:
     }
     logger.info(f"[event_radar:{trace_id}] 扫描完成: {result}")
     return result
+
+
+def _event_to_candidates(event_row: dict, matched_holdings: list[dict], relevance: str) -> None:
+    """将高影响持仓事件自动转为决策候选（去重：14天内同事件+同标的同来源不重复）。
+
+    开关：alerts.event_auto_candidate_enabled（默认 false，遵循项目规范）。
+    """
+    from db.config import get_config_bool
+    if not get_config_bool("alerts.event_auto_candidate_enabled", False):
+        return
+
+    HIGH_IMPACT_TYPES = {
+        "manager_change", "regulatory_penalty", "major_dividend",
+        "delisting_risk", "suspension", "policy", "earnings",
+    }
+    event_type = event_row.get("event_type", "")
+    if event_type not in HIGH_IMPACT_TYPES:
+        return
+
+    try:
+        from db.decisions import create_candidate_from_structured_recommendation
+        event_id = event_row.get("event_id", "")
+        event_title = event_row.get("title", "")
+        expected_date = event_row.get("expected_date", "")
+
+        for h in matched_holdings:
+            fund_code = h.get("fund_code", "")
+            fund_name = h.get("fund_name", "")
+            if not fund_code:
+                continue
+            create_candidate_from_structured_recommendation({
+                "source_type": "event_radar",
+                "action_type": "watch",
+                "target_type": "fund",
+                "target_code": fund_code,
+                "target_name": fund_name,
+                "summary": f"事件预警：{event_title[:80]}",
+                "rationale": f"事件类型：{event_type}，预期日期：{expected_date}，关联基金：{fund_name}",
+                "confidence": "high",
+                "dedupe_key": f"event_{event_id}_{fund_code}",
+                "priority": 1,
+                "source_snapshot": {
+                    "event_id": event_id,
+                    "event_type": event_type,
+                    "expected_date": expected_date,
+                },
+            })
+    except Exception as e:
+        logger.debug(f"[event_radar] 自动创建决策候选失败: {e}")
 
 
 # ── 事件落地验证 ──────────────────────────────────────

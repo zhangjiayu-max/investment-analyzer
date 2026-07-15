@@ -223,6 +223,8 @@ def scan_valuation_thresholds() -> dict:
                     related_fund_name=name,
                     source="alert_scanner",
                 )
+                _auto_candidate(code, name, "valuation_low", title, content,
+                                trend_severity, {"percentile": pct, "metric_type": val.get("metric_type")})
                 alerts_created += 1
             elif pct > high_threshold:
                 title = f"{name} 估值进入高估区（分位 {pct:.1f}%）"
@@ -239,6 +241,8 @@ def scan_valuation_thresholds() -> dict:
                     related_fund_name=name,
                     source="alert_scanner",
                 )
+                _auto_candidate(code, name, "valuation_high", title, content,
+                                "warning", {"percentile": pct, "metric_type": val.get("metric_type")})
                 alerts_created += 1
         except Exception as e:
             logger.debug(f"[alert_scanner] 估值扫描 {code} 失败: {e}")
@@ -310,6 +314,8 @@ def scan_portfolio_risk() -> dict:
                     related_fund_name=fund_name,
                     source="alert_scanner",
                 )
+                _auto_candidate(fund_code, fund_name, "concentration_high", title, content,
+                                "warning", {"weight": weight, "threshold": concentration_threshold})
                 alerts_created += 1
 
             # 亏损检测
@@ -330,6 +336,8 @@ def scan_portfolio_risk() -> dict:
                         related_fund_name=fund_name,
                         source="alert_scanner",
                     )
+                    _auto_candidate(fund_code, fund_name, "loss_warning", title, content,
+                                    "warning", {"profit_rate": profit_rate, "threshold": loss_threshold})
                     alerts_created += 1
         except Exception as e:
             logger.debug(f"[alert_scanner] 持仓扫描失败 {h.get('fund_code')}: {e}")
@@ -355,6 +363,44 @@ def _is_alert_recently_created(alert_type: str, related_fund_code: str, hours: i
         return row is not None
     except Exception:
         return False
+
+
+def _auto_candidate(fund_code: str, fund_name: str, alert_type: str, title: str,
+                    content: str, severity: str = "info", source_snapshot: dict = None) -> int | None:
+    """将高优先级预警自动转为决策候选（去重：同 alert_type + fund_code 14天内不重复）。
+
+    开关：alerts.auto_candidate_enabled（默认 false，遵循项目规范）。
+    """
+    if not _is_enabled("alerts.auto_candidate_enabled", False):
+        return None
+    action_map = {
+        "valuation_low": "add",
+        "valuation_high": "reduce",
+        "concentration_high": "rebalance",
+        "loss_warning": "add",
+    }
+    action_type = action_map.get(alert_type, "watch")
+    try:
+        from db.decisions import create_candidate_from_structured_recommendation
+        candidate_id = create_candidate_from_structured_recommendation({
+            "source_type": "alert",
+            "scenario_type": alert_type,
+            "action_type": action_type,
+            "target_type": "fund",
+            "target_code": fund_code,
+            "target_name": fund_name,
+            "summary": title[:120],
+            "rationale": content,
+            "confidence": "medium",
+            "dedupe_key": f"alert_{alert_type}_{fund_code}",
+            "priority": 2 if severity == "warning" else 3,
+            "source_snapshot": source_snapshot or {},
+        })
+        logger.info(f"[alert_scanner] 自动创建决策候选 #{candidate_id}：{title[:60]}")
+        return candidate_id
+    except Exception as e:
+        logger.debug(f"[alert_scanner] 自动创建决策候选失败 {fund_code}: {e}")
+        return None
 
 
 def scan_watchlist_signals() -> dict:
