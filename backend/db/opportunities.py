@@ -62,20 +62,6 @@ def init_opportunity_tables(conn):
     _add_column_if_not_exists(conn, "theme_opportunity_tracks", "transaction_id", "INTEGER")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_theme_track_opp ON theme_opportunity_tracks(opportunity_id)")
 
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS fund_trade_profiles (
-            fund_code TEXT PRIMARY KEY,
-            fund_name TEXT DEFAULT '',
-            vehicle_type TEXT DEFAULT 'unknown',
-            short_term_suitable INTEGER DEFAULT 0,
-            min_holding_days INTEGER DEFAULT 7,
-            redemption_fee_note TEXT DEFAULT '',
-            tracking_index TEXT DEFAULT '',
-            theme_tags_json TEXT DEFAULT '[]',
-            updated_at TEXT DEFAULT (datetime('now','localtime'))
-        )
-    """)
-
 
 def _json_dumps(value) -> str:
     return json.dumps(value if value is not None else {}, ensure_ascii=False)

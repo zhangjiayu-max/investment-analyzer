@@ -499,22 +499,6 @@ def data_gap_analysis() -> list[dict]:
             "severity": "warning",
         })
 
-    # ---- 1.7 fund_trade_profiles: 交易画像缺失 ----
-    if _table_exists(conn, "fund_trade_profiles"):
-        total = conn.execute("SELECT COUNT(*) FROM fund_trade_profiles").fetchone()[0]
-        if total == 0:
-            results.append({
-                "table": "fund_trade_profiles",
-                "field": "overall",
-                "issue": "fund_trade_profiles 表为空，缺少基金短期/长期适配性、赎回费等信息",
-                "null_count": 0,
-                "total_count": 0,
-                "null_rate": 1.0,
-                "severity": "warning",
-            })
-    else:
-        _WARNINGS.append("fund_trade_profiles 表不存在，跳过检查")
-
     conn.close()
     return results
 
