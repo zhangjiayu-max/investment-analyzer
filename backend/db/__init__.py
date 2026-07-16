@@ -81,6 +81,8 @@ from db.eval import (
     list_eval_runs, get_eval_stats, get_eval_run_detail,
     list_eval_cases_by_agent, get_eval_case_avg_score,
     save_rag_feedback, get_rag_feedback_stats,
+    get_agent_eval_scores, save_regression_result, get_latest_regression_result,
+    create_improvement_task,
 )
 
 # 文章 + 分析记录 + 作者文章 + 链接文章

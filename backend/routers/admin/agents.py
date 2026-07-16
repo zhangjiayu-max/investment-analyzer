@@ -91,14 +91,39 @@ async def update_agent_api(agent_id: int, req: UpdateAgentRequest):
         from db.agents import clear_specialist_cache
         clear_specialist_cache()
     # prompt 变更后触发回归测试
+    regression_warning = None
     if prompt_changed:
         try:
             from agent.regression import run_regression_tests
             agent_type = "specialist" if agent.get("is_specialist") else "conversation"
             asyncio.create_task(run_regression_tests(agent_id, agent_type))
+            regression_warning = "regression_running"
         except Exception as e:
             logging.warning(f"触发回归测试失败: {e}")
-    return {"ok": True}
+            regression_warning = f"regression_trigger_failed: {e}"
+
+        # 检查上一轮回归结果（如果有），退步超阈值则创建 improvement_task
+        try:
+            from agent.regression import get_regression_result
+            from db.eval import create_improvement_task
+            prev = get_regression_result(agent_id, agent_type)
+            if prev and prev.get("status") == "completed":
+                summary = prev.get("summary", {})
+                total = summary.get("total", 0)
+                degraded = summary.get("degraded", 0)
+                if total > 0 and degraded / total > 0.3:
+                    create_improvement_task(
+                        source_type="regression_degraded",
+                        source_id=agent_id,
+                        agent_type=agent_type,
+                        root_cause=f"Prompt 变更后回归测试退步: {degraded}/{total} cases degraded",
+                        suggestion="请人工确认 prompt 变更，必要时回滚到上一版本",
+                    )
+                    regression_warning = f"regression_degraded: {degraded}/{total}"
+        except Exception as e:
+            logging.debug(f"回归历史检查失败: {e}")
+
+    return {"ok": True, "regression_warning": regression_warning}
 
 
 @router.delete("/api/agents/{agent_id}")

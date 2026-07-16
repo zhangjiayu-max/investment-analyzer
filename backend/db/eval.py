@@ -340,6 +340,7 @@ def init_eval_tables(conn):
     _init_eval_daily_reports_table(conn)
     _init_eval_suites_tables(conn)
     _init_improvement_tasks_table(conn)
+    _init_prompt_regression_results_table(conn)
 
 
 def create_eval_case(name: str, analysis_type: str, input_params: str = "{}",
@@ -814,6 +815,35 @@ def get_conversation_eval_stats() -> dict:
     return result
 
 
+def get_agent_eval_scores(days: int = 7) -> dict:
+    """获取各专家最近 N 天的评估平均分（供路由降权使用）。
+
+    通过 agent_runs JOIN conversation_evaluations 按 message_id 关联。
+    仅返回 eval_count >= 3 的专家（样本不足不参与降权）。
+    返回: {agent_key: {"avg_score": float, "eval_count": int}}
+    """
+    conn = _get_conn()
+    try:
+        rows = conn.execute(f"""
+            SELECT ar.agent_key,
+                   AVG(ce.auto_score) as avg_score,
+                   COUNT(ce.auto_score) as eval_count
+            FROM agent_runs ar
+            JOIN conversation_evaluations ce ON ar.message_id = ce.message_id
+            WHERE ar.status = 'completed'
+              AND ce.auto_score IS NOT NULL
+              AND ce.created_at >= datetime('now', '-{days} days')
+            GROUP BY ar.agent_key
+            HAVING eval_count >= 3
+        """).fetchall()
+        return {r["agent_key"]: {"avg_score": r["avg_score"], "eval_count": r["eval_count"]}
+                for r in rows}
+    except Exception:
+        return {}
+    finally:
+        conn.close()
+
+
 def save_eval_details(eval_id: int, details: list[dict]):
     """保存评估详情"""
     conn = _get_conn()
@@ -1206,6 +1236,69 @@ def _init_improvement_tasks_table(conn):
         )
     """)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_improvement_tasks_status ON improvement_tasks(status)")
+
+
+def _init_prompt_regression_results_table(conn):
+    """Prompt 变更回归测试结果持久化表。"""
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS prompt_regression_results (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            agent_id INTEGER NOT NULL,
+            agent_type TEXT DEFAULT 'conversation',
+            status TEXT NOT NULL,
+            total_cases INTEGER DEFAULT 0,
+            improved INTEGER DEFAULT 0,
+            degraded INTEGER DEFAULT 0,
+            unchanged INTEGER DEFAULT 0,
+            cases_detail TEXT DEFAULT '[]',
+            error TEXT DEFAULT '',
+            created_at TEXT DEFAULT (datetime('now','localtime'))
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_prr_agent ON prompt_regression_results(agent_id, agent_type)")
+
+
+def save_regression_result(agent_id: int, agent_type: str, result: dict) -> int:
+    """持久化回归测试结果，返回记录 id。"""
+    conn = _get_conn()
+    summary = result.get("summary", {})
+    cur = conn.execute("""
+        INSERT INTO prompt_regression_results
+            (agent_id, agent_type, status, total_cases, improved, degraded, unchanged, cases_detail, error)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (
+        agent_id, agent_type,
+        result.get("status", "completed"),
+        summary.get("total", 0),
+        summary.get("improved", 0),
+        summary.get("degraded", 0),
+        summary.get("unchanged", 0),
+        json.dumps(result.get("cases", []), ensure_ascii=False),
+        result.get("error", ""),
+    ))
+    rid = cur.lastrowid
+    conn.commit()
+    conn.close()
+    return rid
+
+
+def get_latest_regression_result(agent_id: int, agent_type: str) -> dict | None:
+    """从 DB 取最近一条回归测试结果。"""
+    conn = _get_conn()
+    row = conn.execute(
+        "SELECT * FROM prompt_regression_results WHERE agent_id=? AND agent_type=? "
+        "ORDER BY id DESC LIMIT 1",
+        (agent_id, agent_type)
+    ).fetchone()
+    conn.close()
+    if not row:
+        return None
+    r = dict(row)
+    try:
+        r["cases"] = json.loads(r.get("cases_detail", "[]"))
+    except Exception:
+        r["cases"] = []
+    return r
 
 
 def create_prompt_version(agent_type: str, version: str, prompt_content: str,

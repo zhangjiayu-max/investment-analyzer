@@ -37,13 +37,29 @@ def _result_key(agent_id: int, agent_type: str) -> str:
 
 
 def get_regression_result(agent_id: int, agent_type: str) -> dict | None:
-    """获取最近一次回归测试结果。"""
-    return _regression_results.get(_result_key(agent_id, agent_type))
+    """获取最近一次回归测试结果。优先读内存，fallback 读 DB。"""
+    key = _result_key(agent_id, agent_type)
+    if key in _regression_results:
+        return _regression_results[key]
+    # fallback: 从 DB 读取最近一条
+    try:
+        from db.eval import get_latest_regression_result
+        return get_latest_regression_result(agent_id, agent_type)
+    except Exception as e:
+        logger.debug(f"从 DB 读取回归结果失败: {e}")
+        return None
 
 
 def set_regression_result(agent_id: int, agent_type: str, result: dict):
-    """存储回归测试结果。"""
+    """存储回归测试结果（内存 + DB 持久化）。"""
     _regression_results[_result_key(agent_id, agent_type)] = result
+    # 同步写入 DB（仅 completed/error 状态持久化，running 状态不写）
+    if result.get("status") in ("completed", "error"):
+        try:
+            from db.eval import save_regression_result
+            save_regression_result(agent_id, agent_type, result)
+        except Exception as e:
+            logger.warning(f"回归结果持久化失败: {e}")
 
 
 async def run_regression_tests(agent_id: int, agent_type: str = "conversation"):

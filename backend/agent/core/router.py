@@ -318,6 +318,8 @@ class SmartRouter:
         if get_config("router.enabled", "true") == "true":
             rule_result = self._rule_route(query, portfolio_summary)
             if rule_result:
+                # 防退步：基于 eval 分数对低分专家降权
+                rule_result = self._adjust_by_eval_scores(rule_result)
                 with self._lock:
                     self._cleanup_expired_cache(now)
                     self._cache[cache_key] = (rule_result, now)
@@ -326,6 +328,7 @@ class SmartRouter:
         # 3.5 P4: 声明式 fallback（零 LLM 成本，YAML 配置可热更新）
         declarative_result = self._declarative_fallback_route(query)
         if declarative_result:
+            declarative_result = self._adjust_by_eval_scores(declarative_result)
             with self._lock:
                 self._cleanup_expired_cache(now)
                 self._cache[cache_key] = (declarative_result, now)
@@ -416,3 +419,47 @@ class SmartRouter:
                     specialists.append(expert)
                     logger.info(f"附加共享专家: {expert}")
         return specialists
+
+    def _adjust_by_eval_scores(self, route_result: dict) -> dict:
+        """防退步：基于历史 eval 分数对低分专家降权（排到末尾，截断时优先淘汰）。
+
+        策略（温和，不硬删）：
+        - 读取最近 7 天各专家 eval 平均分
+        - avg_score < 阈值 且 eval_count >= 3 的专家排到列表末尾
+        - 超过 max_specialists 上限时自然被淘汰
+        - 样本不足(<3)或无评估数据的不降权（避免误杀）
+        """
+        if get_config("router.eval_aware_enabled", "true") != "true":
+            return route_result
+
+        specialists = route_result.get("specialists", [])
+        if len(specialists) <= 1:
+            return route_result  # 单专家不降权
+
+        threshold = get_config_float("router.eval_low_score_threshold", 60.0)
+        try:
+            from db.eval import get_agent_eval_scores
+            eval_scores = get_agent_eval_scores(days=7)
+        except Exception as e:
+            logger.debug(f"[router] eval 分数加载失败，跳过降权: {e}")
+            return route_result
+
+        if not eval_scores:
+            return route_result  # 无评估数据，不降权
+
+        demoted = []
+        kept = []
+        for s in specialists:
+            info = eval_scores.get(s)
+            if info and info.get("avg_score", 100) < threshold and info.get("eval_count", 0) >= 3:
+                demoted.append(s)
+                logger.info(f"[router] eval 降权: {s} avg={info['avg_score']:.1f} count={info['eval_count']}")
+            else:
+                kept.append(s)
+
+        if demoted:
+            # 降权专家排到末尾，但不删除（截断时自然淘汰）
+            route_result["specialists"] = kept + demoted
+            route_result["reason"] = route_result.get("reason", "") + f" | eval降权: {','.join(demoted)}"
+
+        return route_result
