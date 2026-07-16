@@ -15,7 +15,7 @@ const HOLDING_COLUMNS = [
   { key: 'current_value', label: '当前市值', align: 'right', sortable: true },
   { key: 'profit_loss', label: '盈亏', align: 'right', sortable: true },
   { key: 'profit_rate', label: '收益率', align: 'right', sortable: true },
-  { key: 'price_updated_at', label: '净值更新' },
+  { key: 'price_updated_at', label: '净值更新', sortable: true },
   { key: 'actions', label: '操作', draggable: false },
 ]
 const COLUMN_ORDER_KEY = 'portfolio_holding_column_order'
@@ -291,9 +291,15 @@ const sortableHoldings = computed(() => {
   }
   if (sortKey.value) {
     list.sort((a, b) => {
-      const va = a[sortKey.value] ?? 0
-      const vb = b[sortKey.value] ?? 0
-      return (va - vb) * sortOrder.value
+      const va = a[sortKey.value] ?? ''
+      const vb = b[sortKey.value] ?? ''
+      // 数字字段用数值比较，字符串字段（如 price_updated_at）用 localeCompare
+      const na = Number(va), nb = Number(vb)
+      if (!isNaN(na) && !isNaN(nb) && typeof va !== 'string') {
+        return (na - nb) * sortOrder.value
+      }
+      // 字符串/混合类型：统一转字符串比较（datetime 字符串 ISO 格式可直接字典序排序）
+      return String(va).localeCompare(String(vb)) * sortOrder.value
     })
   }
   return list
@@ -4844,7 +4850,7 @@ function txDisplayAmount(tx) {
                 <h5>按账户</h5>
                 <PieChart
                   v-if="distributionData.by_account && distributionData.by_account.length"
-                  :data="distributionData.by_account.map(d => ({ name: d.account || '未分类', value: d.market_value }))"
+                  :data="distributionData.by_account.map(d => ({ name: d.name || '未分类', value: d.value }))"
                   :height="'260px'"
                   :legendPosition="'right'"
                 />
@@ -4854,7 +4860,7 @@ function txDisplayAmount(tx) {
                 <h5>按基金类别</h5>
                 <PieChart
                   v-if="distributionData.by_category && distributionData.by_category.length"
-                  :data="distributionData.by_category.map(d => ({ name: d.fund_category || '未分类', value: d.market_value }))"
+                  :data="distributionData.by_category.map(d => ({ name: CATEGORY_LABELS[d.name] || d.name || '未分类', value: d.value }))"
                   :height="'260px'"
                   :legendPosition="'right'"
                 />
@@ -4875,12 +4881,15 @@ function txDisplayAmount(tx) {
                 <div class="profit-fund-bar">
                   <div class="profit-bar-track">
                     <div
-                      :class="['profit-bar-fill', h.profit_loss >= 0 ? 'positive' : 'negative']"
+                      :class="['profit-bar-fill', h.profit_loss >= 0 ? 'profit-up' : 'profit-down']"
                       :style="{ width: Math.min(Math.abs(h.profit_loss) / maxAbsProfit * 100, 100) + '%' }"
                     ></div>
                   </div>
                 </div>
-                <div :class="['profit-fund-value', h.profit_loss >= 0 ? 'text-success' : 'text-danger']">
+                <div
+                  class="profit-fund-value"
+                  :style="{ color: h.profit_loss >= 0 ? 'var(--color-danger)' : 'var(--color-success)' }"
+                >
                   {{ h.profit_loss >= 0 ? '+' : '' }}{{ formatMoney(h.profit_loss) }}
                   <span class="profit-rate">({{ (h.profit_rate * 100).toFixed(2) }}%)</span>
                 </div>
@@ -10052,11 +10061,12 @@ select.input-field {
   height: 100%;
   border-radius: 4px;
 }
-.profit-bar-fill.positive {
-  background: var(--color-success, #18a058);
+/* 中国习惯：红涨绿跌（盈利=红、亏损=绿），与 5 年走势图保持一致 */
+.profit-bar-fill.profit-up {
+  background: var(--color-danger, #dc2626);
 }
-.profit-bar-fill.negative {
-  background: var(--color-danger, #d03050);
+.profit-bar-fill.profit-down {
+  background: var(--color-success, #059669);
 }
 .profit-fund-value {
   text-align: right;
