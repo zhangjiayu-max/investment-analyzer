@@ -87,6 +87,7 @@ def update_watchlist_item(item_id: int, **fields) -> bool:
         'target_price', 'target_percentile', 'notes', 'priority', 'status',
         'current_nav', 'current_percentile', 'nav_updated_at',
         'suggested_buy_price', 'buy_price_source',
+        'analysis_method', 'drawdown_percentile', 'nav_percentile',
     }
     invalid = set(fields.keys()) - allowed
     if invalid:

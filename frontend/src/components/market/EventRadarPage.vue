@@ -99,6 +99,22 @@ const verifiedEvents = computed(() => {
     .sort((a, b) => (b.expected_date || '').localeCompare(a.expected_date || ''))
 })
 
+/** 被回溯校准过的事件（原始置信度 ≠ 校准后） */
+const calibratedEvents = computed(() => {
+  return events.value
+    .filter(e => e.original_confidence != null && Math.abs((e.original_confidence || 0) - (e.confidence || 0)) > 0.001)
+    .sort((a, b) => (b.updated_at || '').localeCompare(a.updated_at || ''))
+    .slice(0, 10)
+})
+
+/** 板块准确率颜色（绿→红渐变） */
+function sectorAccuracyColor(acc) {
+  if (acc >= 0.8) return 'rgba(22, 163, 74, 0.18)'
+  if (acc >= 0.6) return 'rgba(34, 197, 94, 0.12)'
+  if (acc >= 0.4) return 'rgba(245, 158, 11, 0.15)'
+  return 'rgba(220, 38, 38, 0.12)'
+}
+
 const stats = computed(() => {
   const total = events.value.length
   const holding = events.value.filter(e => e.relevance_to_user === 'holding_impact').length
@@ -666,6 +682,40 @@ const SIGNAL_STATUS_META = {
 /** 取关注基金信号状态元信息（默认 gray） */
 function signalMeta(item) {
   return SIGNAL_STATUS_META[item.signal_status || 'gray'] || SIGNAL_STATUS_META.gray
+}
+
+/** 机会值分析维度标签（估值分位/回撤分位/净值分位） */
+function opportunityLabel(item) {
+  if (item.current_percentile != null) return '估值分位'
+  if (item.drawdown_percentile != null) return '回撤分位'
+  if (item.nav_percentile != null) return '净值分位'
+  return '机会值'
+}
+
+/** 机会值分析数值（含%），无则 null */
+function opportunityValue(item) {
+  if (item.current_percentile != null) return Number(item.current_percentile).toFixed(0)
+  if (item.drawdown_percentile != null) return Number(item.drawdown_percentile).toFixed(0)
+  if (item.nav_percentile != null) return Number(item.nav_percentile).toFixed(0)
+  return null
+}
+
+/** 机会值是否处于低位/机会区 */
+function opportunityIsLow(item) {
+  if (item.current_percentile != null) return parseFloat(item.current_percentile) <= 20
+  if (item.drawdown_percentile != null) return parseFloat(item.drawdown_percentile) >= 80
+  if (item.nav_percentile != null) return parseFloat(item.nav_percentile) <= 20
+  return false
+}
+
+/** 分析方法描述文案 */
+function analysisMethodLabel(item) {
+  const m = item.analysis_method
+  if (m === 'drawdown') return '基于回撤分位'
+  if (m === 'nav_percentile') return '基于净值分位'
+  if (m === 'yingmi') return '基于盈米诊断'
+  if (m === 'index_valuation') return '基于指数估值'
+  return ''
 }
 
 async function handleScan() {
@@ -1270,8 +1320,13 @@ watch(scrollToFundCode, async (code) => {
                   <span v-if="evt.direction" class="direction-tag" :class="directionLabel(evt.direction).class">
                     {{ directionLabel(evt.direction).text }}
                   </span>
-                  <span class="confidence-tag">
-                    置信度 {{ Math.round((evt.confidence || 0) * 100) }}%
+                  <span class="confidence-tag" :class="{ 'confidence-calibrated': evt.original_confidence != null && Math.abs((evt.original_confidence || 0) - (evt.confidence || 0)) > 0.001 }">
+                    <template v-if="evt.original_confidence != null && Math.abs((evt.original_confidence || 0) - (evt.confidence || 0)) > 0.001">
+                      原始 {{ Math.round((evt.original_confidence || 0) * 100) }}% → 校准 {{ Math.round((evt.confidence || 0) * 100) }}%
+                    </template>
+                    <template v-else>
+                      置信度 {{ Math.round((evt.confidence || 0) * 100) }}%
+                    </template>
                   </span>
                   <!-- 验证结果标签 -->
                   <span
@@ -1929,12 +1984,15 @@ watch(scrollToFundCode, async (code) => {
             <!-- 3列关键指标 -->
             <div class="wl-key-grid">
               <div class="wl-key-item">
-                <span class="wl-key-label">估值分位</span>
-                <span v-if="item.current_percentile !== null && item.current_percentile !== undefined" class="wl-key-value" :class="{ 'value-hit': parseFloat(item.current_percentile) <= 20 }">
-                  {{ Number(item.current_percentile).toFixed(0) }}%
-                  <span v-if="parseFloat(item.current_percentile) <= 20" class="wl-key-hint">低估</span>
-                  <span v-else-if="parseFloat(item.current_percentile) <= 40" class="wl-key-hint">偏低</span>
-                  <span v-else-if="parseFloat(item.current_percentile) >= 80" class="wl-key-hint wl-key-high">高估</span>
+                <span class="wl-key-label">{{ opportunityLabel(item) }}</span>
+                <span v-if="opportunityValue(item) !== null" class="wl-key-value" :class="{ 'value-hit': opportunityIsLow(item) }">
+                  {{ opportunityValue(item) }}%
+                  <span v-if="item.drawdown_percentile != null && parseFloat(item.drawdown_percentile) >= 80" class="wl-key-hint">深回撤</span>
+                  <span v-else-if="item.drawdown_percentile != null && parseFloat(item.drawdown_percentile) >= 60" class="wl-key-hint">回撤深</span>
+                  <span v-else-if="item.current_percentile != null && parseFloat(item.current_percentile) <= 20" class="wl-key-hint">低估</span>
+                  <span v-else-if="item.current_percentile != null && parseFloat(item.current_percentile) <= 40" class="wl-key-hint">偏低</span>
+                  <span v-else-if="item.nav_percentile != null && parseFloat(item.nav_percentile) <= 20" class="wl-key-hint">低位</span>
+                  <span v-else-if="item.nav_percentile != null && parseFloat(item.nav_percentile) <= 40" class="wl-key-hint">偏低</span>
                 </span>
                 <span v-else class="wl-key-value wl-key-mute">{{ patrolling ? '查询中' : '无数据' }}</span>
               </div>
@@ -1982,7 +2040,7 @@ watch(scrollToFundCode, async (code) => {
               </span>
             </div>
             <div class="wl-data-row">
-              <span class="wl-data-label">估值分位</span>
+              <span class="wl-data-label">{{ opportunityLabel(item) }}</span>
               <span
                 v-if="item.current_percentile !== null && item.current_percentile !== undefined"
                 class="wl-data-value"
@@ -2000,6 +2058,20 @@ watch(scrollToFundCode, async (code) => {
                   <template v-if="item.pe != null && item.pb != null"> </template>
                   <template v-if="item.pb != null">PB:{{ Number(item.pb).toFixed(1) }}</template>
                 </span>
+              </span>
+              <span v-else-if="item.drawdown_percentile != null" class="wl-data-value" :class="{ 'value-hit': parseFloat(item.drawdown_percentile) >= 80 }">
+                {{ Number(item.drawdown_percentile).toFixed(0) }}%
+                <span v-if="parseFloat(item.drawdown_percentile) >= 80" class="wl-pct-hint">深回撤</span>
+                <span v-else-if="parseFloat(item.drawdown_percentile) >= 60" class="wl-pct-hint">回撤深</span>
+                <span v-else class="wl-pct-hint wl-pct-high">回撤不足</span>
+                <span class="wl-pe-pb">{{ analysisMethodLabel(item) }}</span>
+              </span>
+              <span v-else-if="item.nav_percentile != null" class="wl-data-value" :class="{ 'value-hit': parseFloat(item.nav_percentile) <= 20 }">
+                {{ Number(item.nav_percentile).toFixed(0) }}%
+                <span v-if="parseFloat(item.nav_percentile) <= 20" class="wl-pct-hint">低位</span>
+                <span v-else-if="parseFloat(item.nav_percentile) <= 40" class="wl-pct-hint">偏低</span>
+                <span v-else class="wl-pct-hint wl-pct-high">偏高</span>
+                <span class="wl-pe-pb">{{ analysisMethodLabel(item) }}</span>
               </span>
               <span v-else class="wl-data-value wl-value-mute">
                 {{ patrolling ? '查询中...' : '无数据' }}
@@ -2393,7 +2465,12 @@ watch(scrollToFundCode, async (code) => {
             </div>
           </div>
           <div v-if="Object.keys(accuracy.by_sector).length" class="accuracy-sectors">
-            <div v-for="(s, name) in accuracy.by_sector" :key="name" class="sector-acc-item">
+            <div
+              v-for="(s, name) in accuracy.by_sector"
+              :key="name"
+              class="sector-acc-item"
+              :style="{ background: sectorAccuracyColor(s.accuracy) }"
+            >
               <span class="sector-acc-name">{{ name }}</span>
               <div class="sector-acc-bar">
                 <div class="sector-acc-fill" :style="{ width: `${s.accuracy * 100}%` }"></div>
@@ -2401,6 +2478,52 @@ watch(scrollToFundCode, async (code) => {
               <span class="sector-acc-pct">{{ (s.accuracy * 100).toFixed(0) }}%</span>
               <span class="sector-acc-samples">({{ s.total }})</span>
             </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 最近验证事件列表 -->
+      <div v-if="verifiedEvents.length" class="verify-section">
+        <div class="verify-section-header">
+          <Icon name="list" size="14" class="verify-section-icon" />
+          <span class="verify-section-title">最近验证事件（{{ verifiedEvents.length }}）</span>
+        </div>
+        <div class="verify-events-list">
+          <div v-for="evt in verifiedEvents.slice(0, 10)" :key="evt.event_id" class="verify-event-row">
+            <span class="verify-event-date">{{ formatShortDate(evt.expected_date) }}</span>
+            <span class="verify-event-title" :title="evt.title">{{ evt.title }}</span>
+            <span v-if="evt.direction" class="direction-tag" :class="directionLabel(evt.direction).class">
+              {{ directionLabel(evt.direction).text }}
+            </span>
+            <span
+              v-if="parseVerification(evt.verification_result)"
+              class="verify-tag"
+              :class="`verify-${parseVerification(evt.verification_result).status}`"
+            >
+              <Icon :name="verificationIcon(parseVerification(evt.verification_result).status)" size="11" />
+              {{ verificationLabel(parseVerification(evt.verification_result).status) }}
+              {{ parseVerification(evt.verification_result).change_pct > 0 ? '+' : '' }}{{ parseVerification(evt.verification_result).change_pct }}%
+            </span>
+          </div>
+        </div>
+      </div>
+
+      <!-- 回溯校准日志 -->
+      <div v-if="calibratedEvents.length" class="verify-section">
+        <div class="verify-section-header">
+          <Icon name="refresh-cw" size="14" class="verify-section-icon" />
+          <span class="verify-section-title">回溯校准日志（{{ calibratedEvents.length }}）</span>
+        </div>
+        <div class="verify-events-list">
+          <div v-for="evt in calibratedEvents" :key="evt.event_id" class="verify-event-row">
+            <span class="verify-event-date">{{ formatShortDate(evt.updated_at) }}</span>
+            <span class="verify-event-title" :title="evt.title">{{ evt.title }}</span>
+            <span class="calibrate-arrow">
+              {{ Math.round((evt.original_confidence || 0) * 100) }}% → {{ Math.round((evt.confidence || 0) * 100) }}%
+            </span>
+            <span v-if="evt.original_direction && evt.original_direction !== evt.direction" class="direction-tag dir-neutral">
+              {{ directionLabel(evt.original_direction).text }}→中性
+            </span>
           </div>
         </div>
       </div>
@@ -3062,6 +3185,11 @@ watch(scrollToFundCode, async (code) => {
   font-family: var(--font-jet);
 }
 
+.confidence-tag.confidence-calibrated {
+  background: rgba(245, 158, 11, 0.12);
+  color: #d97706;
+}
+
 /* ── 趋势事件样式 ── */
 .event-card.event-card-trend {
   border-left: 3px solid #7c3aed;
@@ -3294,6 +3422,55 @@ watch(scrollToFundCode, async (code) => {
   border-radius: 8px;
   color: var(--color-text-secondary);
   flex-wrap: wrap;
+}
+
+/* ── 落地验证：事件列表 + 校准日志 ── */
+.verify-section {
+  margin-top: 1rem;
+  background: var(--color-bg-card);
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+.verify-section-header {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.7rem 1rem;
+  border-bottom: 1px solid var(--color-border);
+  background: var(--color-bg-secondary);
+}
+.verify-section-icon { color: var(--color-text-tertiary); flex-shrink: 0; }
+.verify-section-title { font-size: 0.85rem; font-weight: 600; color: var(--color-text-primary); }
+.verify-events-list { display: flex; flex-direction: column; }
+.verify-event-row {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.55rem 1rem;
+  border-bottom: 1px solid var(--color-border-light);
+  font-size: 0.78rem;
+}
+.verify-event-row:last-child { border-bottom: none; }
+.verify-event-date {
+  color: var(--color-text-tertiary);
+  font-family: var(--font-jet);
+  font-size: 0.72rem;
+  flex-shrink: 0;
+  width: 70px;
+}
+.verify-event-title {
+  flex: 1;
+  color: var(--color-text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.calibrate-arrow {
+  color: #d97706;
+  font-family: var(--font-jet);
+  font-size: 0.72rem;
+  flex-shrink: 0;
 }
 .verify-guide-icon { color: var(--color-text-tertiary); flex-shrink: 0; }
 .verify-guide-text {
