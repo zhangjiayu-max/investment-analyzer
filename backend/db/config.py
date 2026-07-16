@@ -258,7 +258,7 @@ DEFAULT_CONFIGS = [
     ('smart_add.base_dca_pct', '4', '基础定投比例（年化，占总资产%）', 'smart_add'),
     ('smart_add.pyramid_enabled', 'true', '金字塔补仓引擎开关', 'smart_add'),
     ('smart_add.pool_pct', '15', '补仓资金池占总资产%', 'smart_add'),
-    ('smart_add.pyramid_tiers', '10:15:20,20:25:30,30:30:40,40:20:50,50:10:60', '金字塔档位（亏损%:释放率:加仓占市值%）', 'smart_add'),
+    ('smart_add.pyramid_tiers', '10:15:5,20:25:10,30:30:15,40:20:20,50:10:25', '金字塔档位（亏损%:释放率:加仓占市值%）', 'smart_add'),
     ('smart_add.loss_threshold', '-10', '触发金字塔补仓的亏损阈值%', 'smart_add'),
     ('smart_add.max_single_position_pct', '25', '单标的占总仓位上限%', 'smart_add'),
     ('smart_add.valuation_pause_pct', '60', '估值分位回升到此值暂停引擎', 'smart_add'),

@@ -42,20 +42,21 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_PYRAMID_TIERS = [
     # 2026-07-17 重构：金额基准从"资金池×释放率"改为"标的市值×加仓比例"
-    # add_ratio = 加仓额占标的当前市值的百分比（亏损越深加仓比例越大）
-    {"loss_pct": -10, "release_pct": 15, "add_ratio": 20},
-    {"loss_pct": -20, "release_pct": 25, "add_ratio": 30},
-    {"loss_pct": -30, "release_pct": 30, "add_ratio": 40},
-    {"loss_pct": -40, "release_pct": 20, "add_ratio": 50},
-    {"loss_pct": -50, "release_pct": 10, "add_ratio": 60},
+    # add_ratio = 加仓额占标的当前市值的百分比（亏损越深加仓比例越大，但单次不超过25%）
+    # 每次只补"下一档"，不累加历史档位
+    {"loss_pct": -10, "release_pct": 15, "add_ratio": 5},
+    {"loss_pct": -20, "release_pct": 25, "add_ratio": 10},
+    {"loss_pct": -30, "release_pct": 30, "add_ratio": 15},
+    {"loss_pct": -40, "release_pct": 20, "add_ratio": 20},
+    {"loss_pct": -50, "release_pct": 10, "add_ratio": 25},
 ]
 
 
 def _load_config() -> dict:
     """读取智能补仓配置。"""
-    # 金字塔档位解析：支持新格式"10:15:20,20:25:30,30:30:40,40:20:50,50:10:60"（亏损:释放率:加仓比例）
+    # 金字塔档位解析：支持新格式"10:15:5,20:25:10,30:30:15,40:20:20,50:10:25"（亏损:释放率:加仓比例）
     # 兼容旧格式"10:15,20:25,30:30,40:20,50:10"（无add_ratio时用release_pct兜底）
-    raw_tiers = get_config_str_safe("smart_add.pyramid_tiers", "10:15:20,20:25:30,30:30:40,40:20:50,50:10:60")
+    raw_tiers = get_config_str_safe("smart_add.pyramid_tiers", "10:15:5,20:25:10,30:30:15,40:20:20,50:10:25")
     tiers = []
     try:
         for part in raw_tiers.split(","):
@@ -166,11 +167,13 @@ def _calc_pyramid_tiers(
 ) -> list:
     """计算金字塔补仓档位。
 
-    2026-07-17 重构：金额计算从"资金池×释放率"改为"标的市值×加仓比例"。
-    原逻辑：release_amount = pool_total × release_pct/100
-        问题：金额与标的自身规模脱钩，小仓位标的补仓远超市值
-    新逻辑：release_amount = current_value × add_ratio/100
-        保留 pool_total 作为组合层总额约束（在 generate_smart_add_plan 中缩减）
+    2026-07-17 重构：
+    1. 金额计算从"资金池×释放率"改为"标的市值×加仓比例"
+    2. 只预估下次补仓金额（不累加历史已触发档位）
+
+    金字塔补仓法本意：每跌一档补一次，不是一次把所有档都补了。
+    当前-31.3%触发-10/-20/-30三档，但下次实际只会补"跌到-40%时"那一档。
+    所以"建议金额"=下一档待触发档位的加仓额，而非所有已触发档位累加。
 
     Args:
         profit_rate: 当前盈亏率（如 -0.35 = -35%）
@@ -181,12 +184,29 @@ def _calc_pyramid_tiers(
         current_value: 标的当前市值（新参数，金额计算基准）
 
     Returns:
-        档位列表 [{tier, loss_pct, release_amount, triggered, cumulative, add_ratio}]
+        档位列表 [{tier, loss_pct, release_amount, triggered, cumulative, add_ratio, is_next}]
+        is_next=True 表示这是"下次待触发"的档位（建议金额以此为准）
     """
     result = []
     cumulative = 0
+    # 找到"下次待触发"档位 = 亏损加深后下一个会触发的档位
+    # tiers 已按 loss_pct 升序排序（-50 < -40 < -30 < -20 < -10）
+    # 当前亏损-16.9%，已触发-10%（浅档），未触发-20/-30/-40/-50
+    # 下次待触发 = 未触发档位中 loss_pct 最接近当前亏损率的那个（即最浅的未触发档）
+    # 即：第一个 triggered=False 的档位（从浅到深方向）
+    # 但 tiers 是从深(-50)到浅(-10)排序，所以要反向找
+    next_untriggered_idx = None
+    # 从浅档往深档找第一个未触发的
+    for i in range(len(tiers) - 1, -1, -1):
+        if not (profit_rate * 100 <= tiers[i]["loss_pct"]):
+            next_untriggered_idx = i
+            break
+    # 特殊处理：如果所有档都触发（亏损极深），取最深的档
+    if next_untriggered_idx is None and tiers:
+        next_untriggered_idx = 0  # 最深档（-50%）
+
     for i, tier in enumerate(tiers):
-        # 新逻辑：金额 = 标的市值 × 加仓比例（%）；无市值数据时降级回池子×释放率
+        # 金额 = 标的市值 × 加仓比例（%）；无市值数据时降级回池子×释放率
         add_ratio = tier.get("add_ratio", tier.get("release_pct", 0))
         if current_value > 0:
             release_amount = round(current_value * add_ratio / 100, 2)
@@ -201,7 +221,8 @@ def _calc_pyramid_tiers(
             "release_amount": release_amount,
             "cumulative": round(cumulative, 2),
             "triggered": triggered,
-            "add_ratio": add_ratio,  # 新增：加仓占市值百分比
+            "add_ratio": add_ratio,
+            "is_next": (i == next_untriggered_idx),  # 下次待触发的档位
         })
     return result
 
@@ -864,9 +885,15 @@ def _generate_single_plan(
             current_value=current_value,  # 新增：金额计算基准为标的市值
         )
         triggered_count = sum(1 for t in tiers if t["triggered"])
-        released_amount = sum(t["release_amount"] for t in tiers if t["triggered"])
+        # 2026-07-17 重构：只预估下次补仓金额（不累加历史已触发档位）
+        # 下次补仓 = 第一个未触发档位（is_next=True）的金额；若所有档位都触发，取最后一档
+        next_tier = next((t for t in tiers if t.get("is_next")), None)
+        if next_tier is None:
+            # 所有档位都触发，取最后一档作为"下次"档
+            next_tier = tiers[-1] if tiers else None
+        released_amount = next_tier["release_amount"] if next_tier else 0
         remaining_tiers = len(tiers) - triggered_count
-        next_trigger = next((t for t in tiers if not t["triggered"]), None)
+        next_trigger = next_tier
 
         # 预估摊薄效果（全触发后）
         total_release = sum(t["release_amount"] for t in tiers)
@@ -886,8 +913,9 @@ def _generate_single_plan(
             "remaining_tiers": remaining_tiers,
             "tiers": tiers,
             "next_trigger": {
-                "loss_pct": next_trigger["loss_pct"] if next_trigger else None,
-                "release_amount": next_trigger["release_amount"] if next_trigger else None,
+                "loss_pct": next_trigger["loss_pct"],
+                "release_amount": next_trigger["release_amount"],
+                "add_ratio": next_trigger.get("add_ratio"),
             } if next_trigger else None,
             "avg_cost_after_full_add": avg_cost_after,
             "current_avg_cost": round(current_avg_cost, 4) if current_avg_cost else None,
