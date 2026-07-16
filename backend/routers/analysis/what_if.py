@@ -1,6 +1,8 @@
 """情景推演 — POST /api/portfolio/analysis/what-if
 
-已合并到 risk_assessor 专家。保留路由用于前端/历史兼容，内部委托 run_specialist("risk_assessor", ...)。
+独立情景引擎：支持市场下跌/估值修复/降息/加息/政策刺激/流动性收紧/自定义等情景。
+政策类情景路由到 macro_strategist + risk_assessor 双专家协作；
+市场类情景路由到 risk_assessor 单专家。
 """
 import asyncio
 import json
@@ -22,10 +24,25 @@ from ._shared import _get_valuation_context
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["analysis-what-if"])
 
+# 情景 → 主专家映射（政策类需宏观专家，市场类用风险专家）
+_SCENARIO_EXPERT = {
+    "market_drop": "risk_assessor",
+    "repair_to_median": "risk_assessor",
+    "repair_to_opportunity": "risk_assessor",
+    "rate_cut": "macro_strategist",
+    "rate_hike": "macro_strategist",
+    "policy_stimulus": "macro_strategist",
+    "liquidity_tighten": "macro_strategist",
+    "custom": "macro_strategist",
+}
+
+# 政策类情景需要双专家协作（宏观分析 + 风险评估）
+_POLICY_SCENARIOS = {"rate_cut", "rate_hike", "policy_stimulus", "liquidity_tighten", "custom"}
+
 
 @router.post("/api/portfolio/analysis/what-if")
 async def what_if_analysis_api(req: WhatIfRequest):
-    """模式 4：情景推演 — 已合并到 risk_assessor 专家。"""
+    """模式 4：情景推演 — 独立情景引擎。"""
     holdings = list_holdings()
     if not holdings:
         raise HTTPException(400, "暂无持仓数据")
@@ -44,18 +61,29 @@ async def what_if_analysis_api(req: WhatIfRequest):
     # 估值数据
     valuation_context = _get_valuation_context()
 
+    # 情景描述构建
     scenario_desc = {
         "market_drop": f"市场整体下跌 {req.parameter or 10}%",
         "repair_to_median": "估值修复到历史中位数",
         "repair_to_opportunity": "估值修复到机会值（20%分位）",
+        "rate_cut": f"央行降息 {req.parameter or 25}个基点",
+        "rate_hike": f"央行加息 {req.parameter or 25}个基点",
+        "policy_stimulus": "出台重大经济刺激政策（如大规模基建/消费补贴）",
+        "liquidity_tighten": "流动性收紧（如央行收紧MLF/提高准备金率）",
+        "custom": req.custom_scenario or "自定义情景",
     }.get(req.scenario, req.scenario)
 
     user_content = (
         f"## 用户选择的情景\n{scenario_desc}"
-        f"{'(跌幅: ' + str(req.parameter) + '%)' if req.scenario == 'market_drop' and req.parameter else ''}"
+        f"{'(参数: ' + str(req.parameter) + ')' if req.parameter and req.scenario not in ('repair_to_median', 'repair_to_opportunity', 'policy_stimulus') else ''}"
         f"\n\n## 当前持仓\n" + "\n".join(holdings_lines) +
         f"\n总市值: {total_value:.2f}\n"
         f"\n{valuation_context}"
+        f"\n\n## 情景推演要求"
+        f"\n- 分析该情景发生时的传导路径（宏观→行业→持仓标的）"
+        f"\n- 评估对用户当前持仓的冲击（哪些受益/受损，幅度多大）"
+        f"\n- 给出应对建议（是否调整仓位，如何调整）"
+        f"\n- 标注情景发生概率（基于当前数据推断）"
     )
 
     # 动态查找情景推演分析师（避免硬编码 id 错位）
@@ -76,13 +104,33 @@ async def what_if_analysis_api(req: WhatIfRequest):
     except Exception as _e:
         logger.warning(f"create_analysis_log(running) 失败: {_e}")
 
+    # 根据情景类型选择专家
+    primary_expert = _SCENARIO_EXPERT.get(req.scenario, "risk_assessor")
+
     try:
         from agent.multi_agent import run_specialist
-        specialist_result = await asyncio.to_thread(
-            run_specialist, "risk_assessor", user_content
-        )
-        result_text = specialist_result.get("analysis", "") or ""
-        tokens = specialist_result.get("tokens_used", 0) or 0
+        # 政策类情景：宏观专家 + 风险专家双专家协作
+        if req.scenario in _POLICY_SCENARIOS:
+            macro_result = await asyncio.to_thread(
+                run_specialist, "macro_strategist", user_content
+            )
+            macro_text = macro_result.get("analysis", "") or ""
+            # 将宏观分析注入风险专家上下文
+            risk_content = user_content + f"\n\n## 宏观策略师的分析（参考）\n{macro_text}"
+            risk_result = await asyncio.to_thread(
+                run_specialist, "risk_assessor", risk_content
+            )
+            risk_text = risk_result.get("analysis", "") or ""
+            # 合并结果
+            result_text = f"## 宏观策略师分析\n{macro_text}\n\n## 风险评估师分析\n{risk_text}"
+            tokens = (macro_result.get("tokens_used", 0) or 0) + (risk_result.get("tokens_used", 0) or 0)
+        else:
+            # 市场类情景：单专家
+            specialist_result = await asyncio.to_thread(
+                run_specialist, primary_expert, user_content
+            )
+            result_text = specialist_result.get("analysis", "") or ""
+            tokens = specialist_result.get("tokens_used", 0) or 0
     except Exception as e:
         logger.error(f"情景推演失败: {e}")
         _elapsed_ms = int((time.time() - _start_ts) * 1000)
@@ -92,7 +140,7 @@ async def what_if_analysis_api(req: WhatIfRequest):
     record_id = create_portfolio_analysis_record(
         analysis_type="what_if",
         summary=f"情景推演 · {scenario_desc}",
-        input_data=json.dumps({"scenario": req.scenario, "parameter": req.parameter}, ensure_ascii=False),
+        input_data=json.dumps({"scenario": req.scenario, "parameter": req.parameter, "custom_scenario": req.custom_scenario}, ensure_ascii=False),
         result_data=result_text,
         token_usage=tokens,
         agent_id=_whatif_agent_id,
@@ -106,7 +154,7 @@ async def what_if_analysis_api(req: WhatIfRequest):
         pass  # 容错：即使更新失败也不影响主流程
     complete_analysis_log(trace_id=trace_id, status="done", duration_ms=_elapsed_ms, token_usage=tokens)
 
-    return {"id": record_id, "result": result_text, "token_usage": tokens, "merged_into": "risk_assessor"}
+    return {"id": record_id, "result": result_text, "token_usage": tokens, "expert": primary_expert}
 
 
 @router.get("/api/portfolio/analysis/what-if/records")

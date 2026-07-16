@@ -109,8 +109,9 @@ class TradeReviewRequest(BaseModel):
 
 class WhatIfRequest(BaseModel):
     """情景推演请求。"""
-    scenario: str  # 'market_drop' | 'repair_to_median' | 'repair_to_opportunity'
-    parameter: float | None = None  # 市场下跌场景的跌幅百分比
+    scenario: str  # 'market_drop' | 'repair_to_median' | 'repair_to_opportunity' | 'rate_cut' | 'rate_hike' | 'policy_stimulus' | 'liquidity_tighten' | 'custom'
+    parameter: float | None = None  # 参数（跌幅百分比/降息幅度等）
+    custom_scenario: str | None = None  # 自定义情景描述（scenario='custom'时使用）
 
 
 class StressTestRequest(BaseModel):
