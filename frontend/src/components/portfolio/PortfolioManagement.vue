@@ -444,25 +444,64 @@ function renderChart5y() {
     const pcts = navs.map(n => ((n - firstNav) / firstNav * 100))
 
     const txs = chart5yTransactions.value
+    // 约定：红色▲=买入（朝上）、绿色▼=卖出（朝下）
+    // symbolOffset 让三角形底边贴合净值点，顶点像箭头指向交易位置
+    const labelBg = isDark.value ? 'rgba(13,18,32,0.92)' : 'rgba(255,255,255,0.95)'
     const buyPoints = txs.filter(t => t.transaction_type === 'buy').map(t => ({
       name: '买入',
       coord: [t.transaction_date, t.price],
-      value: t.amount ? `¥${t.amount.toLocaleString()}` : '',
+      value: t.amount || '',
       symbol: 'triangle',
-      symbolRotate: 180,
-      symbolSize: 12,
-      itemStyle: { color: '#ef4444' },
-      label: { show: false },
+      symbolRotate: 0,            // ▲ 朝上 = 买入
+      symbolSize: 16,             // 从 12 放大到 16，5 年密集图上可见
+      symbolOffset: [0, -8],     // 向上偏移，让底边贴在净值点上
+      itemStyle: {
+        color: '#ef4444',
+        borderColor: '#ffffff',   // 白色描边提升对比度
+        borderWidth: 2,
+      },
+      label: {
+        show: !!t.amount,
+        position: 'top',
+        distance: 4,
+        formatter: `¥${(t.amount || 0).toLocaleString()}`,
+        color: '#ef4444',
+        fontSize: 10,
+        fontWeight: 'bold',
+        backgroundColor: labelBg,
+        borderColor: 'rgba(239,68,68,0.25)',
+        borderWidth: 1,
+        padding: [2, 5],
+        borderRadius: 3,
+      },
     }))
     const sellPoints = txs.filter(t => t.transaction_type === 'sell').map(t => ({
       name: '卖出',
       coord: [t.transaction_date, t.price],
-      value: t.amount ? `¥${t.amount.toLocaleString()}` : '',
+      value: t.amount || '',
       symbol: 'triangle',
-      symbolRotate: 0,
-      symbolSize: 12,
-      itemStyle: { color: '#22c55e' },
-      label: { show: false },
+      symbolRotate: 180,          // ▼ 朝下 = 卖出
+      symbolSize: 16,
+      symbolOffset: [0, 8],       // 向下偏移，让底边贴在净值点上
+      itemStyle: {
+        color: '#22c55e',
+        borderColor: '#ffffff',
+        borderWidth: 2,
+      },
+      label: {
+        show: !!t.amount,
+        position: 'bottom',
+        distance: 4,
+        formatter: `¥${(t.amount || 0).toLocaleString()}`,
+        color: '#22c55e',
+        fontSize: 10,
+        fontWeight: 'bold',
+        backgroundColor: labelBg,
+        borderColor: 'rgba(34,197,94,0.25)',
+        borderWidth: 1,
+        padding: [2, 5],
+        borderRadius: 3,
+      },
     }))
 
     const bgColor = isDark.value ? '#0a0e1a' : '#ffffff'
@@ -537,9 +576,6 @@ function renderChart5y() {
             ]),
           },
           markPoint: buyPoints.length || sellPoints.length ? {
-            symbol: 'pin',
-            symbolSize: 28,
-            label: { show: false },
             data: [...buyPoints, ...sellPoints],
           } : undefined,
         },
