@@ -2284,7 +2284,7 @@ export function lookupWatchlistFund(id) {
 
 /** P0-2.2：关注列表巡检（patrol）— 返回信号灯状态 + 触发预警 */
 export function patrolWatchlist() {
-  return api.post('/watchlist/patrol', {}, { timeout: 60000 })
+  return api.get('/watchlist/patrol', { timeout: 60000 })
 }
 
 /** P2-4.1：获取关注基金买入时机综合评分（纯规则计算，无 LLM） */
