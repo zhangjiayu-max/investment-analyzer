@@ -21,6 +21,7 @@
 """
 
 import logging
+from datetime import datetime, timedelta
 from typing import Optional
 
 from db.config import get_config_bool, get_config_float, get_config_int
@@ -73,6 +74,16 @@ def _load_config() -> dict:
         "stale_days": get_config_int_safe("smart_add.stale_days", 14),
         # 修复5：单标的补仓金额上限 = 原市值 × 此倍数（避免小仓位标的巨额补仓）
         "max_add_vs_position_mult": get_config_float_safe("smart_add.max_add_vs_position_mult", 2.0),
+        # 多维度触发器配置（2026-07-17 新增）
+        "cooldown_days": get_config_int_safe("smart_add.cooldown_days", 10),
+        "max_buys_in_cooldown": get_config_int_safe("smart_add.max_buys_in_cooldown", 2),
+        "trend_signal_enabled": get_config_bool_safe("smart_add.trend_signal_enabled", True),
+        "trend_lookback_days": get_config_int_safe("smart_add.trend_lookback_days", 20),
+        "trend_min_gain_pct": get_config_float_safe("smart_add.trend_min_gain_pct", 3.0),
+        "trend_position_pct": get_config_float_safe("smart_add.trend_position_pct", 5.0),
+        "dip_signal_enabled": get_config_bool_safe("smart_add.dip_signal_enabled", True),
+        "dca_drop_step_pct": get_config_float_safe("smart_add.dca_drop_step_pct", 4.0),
+        "dca_tiers": get_config_str_safe("smart_add.dca_tiers", "4:1.0,8:1.5,12:2.0"),
     }
 
 
@@ -354,6 +365,257 @@ def generate_smart_add_plan(user_id: str = "default") -> dict:
     }
 
 
+# ── 多维度触发器：信号 B 趋势加仓 + 信号 C 大跌定投 + 冷却期 ───
+
+def _check_cooldown(fund_code: str, cfg: dict) -> tuple[bool, int, str]:
+    """冷却期检查：近 cooldown_days 内同基金买入次数是否超限。
+
+    Returns:
+        (can_proceed, recent_buy_count, reason)
+        - can_proceed=True: 可继续补仓
+        - can_proceed=False: 已达冷却期上限，应拦截
+    """
+    try:
+        from db._conn import _get_conn
+        cooldown_days = cfg.get("cooldown_days", 10)
+        max_buys = cfg.get("max_buys_in_cooldown", 2)
+        cutoff = (datetime.now() - timedelta(days=cooldown_days)).strftime("%Y-%m-%d")
+        conn = _get_conn()
+        try:
+            row = conn.execute(
+                "SELECT COUNT(*) as cnt FROM portfolio_transactions "
+                "WHERE fund_code=? AND transaction_type='buy' "
+                "AND transaction_date >= ? AND status IN ('confirmed','pending','submitted')",
+                (fund_code, cutoff),
+            ).fetchone()
+            count = row["cnt"] if row else 0
+        finally:
+            conn.close()
+        if count >= max_buys:
+            return False, count, f"冷却期内已补仓{count}次（{cooldown_days}天内上限{max_buys}次）"
+        return True, count, ""
+    except Exception as e:
+        logger.debug(f"[smart_add] 冷却期检查失败 {fund_code}: {e}")
+        return True, 0, ""  # 失败时放行
+
+
+def _get_last_buy_price(fund_code: str) -> Optional[float]:
+    """获取最近一次买入价（用于计算累计跌幅）。"""
+    try:
+        from db._conn import _get_conn
+        conn = _get_conn()
+        try:
+            row = conn.execute(
+                "SELECT price FROM portfolio_transactions "
+                "WHERE fund_code=? AND transaction_type='buy' AND status='confirmed' "
+                "AND price IS NOT NULL AND price > 0 "
+                "ORDER BY transaction_date DESC LIMIT 1",
+                (fund_code,),
+            ).fetchone()
+            return float(row["price"]) if row else None
+        finally:
+            conn.close()
+    except Exception as e:
+        logger.debug(f"[smart_add] 获取上次买入价失败 {fund_code}: {e}")
+        return None
+
+
+def _calc_recent_nav_change(fund_code: str, lookback_days: int) -> Optional[float]:
+    """计算近 N 日基金净值涨跌幅（%）。
+
+    Returns:
+        涨跌幅（如 3.5 表示 +3.5%），数据不足返回 None
+    """
+    try:
+        from services.fund_data_service import get_fund_nav_history_from_cache
+        navs = get_fund_nav_history_from_cache(fund_code, days=lookback_days)
+        if not navs or len(navs) < 2:
+            return None
+        valid = [n for n in navs if n.get("nav") and n["nav"] > 0]
+        if len(valid) < 2:
+            return None
+        first = valid[0]["nav"]
+        last = valid[-1]["nav"]
+        if first <= 0:
+            return None
+        return round((last - first) / first * 100, 2)
+    except Exception as e:
+        logger.debug(f"[smart_add] 计算近{lookback_days}日涨跌失败 {fund_code}: {e}")
+        return None
+
+
+def _detect_trend_signal(
+    holding: dict,
+    valuation: Optional[dict],
+    cfg: dict,
+    base_monthly: float,
+) -> Optional[dict]:
+    """信号 B：趋势加仓（近期涨势好）。
+
+    触发条件（三选二）：
+    1. 估值分位 35-60%（合理区间，非高估）
+    2. 近 20 日基金净值涨幅 > trend_min_gain_pct%
+    3. 近 5 日涨幅 > 1%（短趋势确认，数据不可得时降级为条件2放大）
+
+    建议金额：基础月投 × 1.5（轻仓试探，仓位上限 5% 总资产）
+    """
+    if not cfg.get("trend_signal_enabled", True):
+        return None
+
+    fund_code = holding.get("fund_code", "")
+    fund_name = holding.get("fund_name", "")
+
+    # 条件1：估值分位 35-60%
+    cond1 = False
+    val_pct = None
+    if valuation and valuation.get("percentile") is not None:
+        val_pct = valuation["percentile"]
+        cond1 = 35 <= val_pct < 60
+
+    # 条件2：近 20 日涨幅 > trend_min_gain_pct%
+    lookback = cfg.get("trend_lookback_days", 20)
+    min_gain = cfg.get("trend_min_gain_pct", 3.0)
+    gain_20d = _calc_recent_nav_change(fund_code, lookback)
+    cond2 = gain_20d is not None and gain_20d > min_gain
+
+    # 条件3：近 5 日短趋势确认（数据不足时降级为条件2放大）
+    gain_5d = _calc_recent_nav_change(fund_code, 5)
+    cond3 = gain_5d is not None and gain_5d > 1.0
+    if gain_5d is None and gain_20d is not None and gain_20d > min_gain * 1.5:
+        cond3 = True  # 降级：近20日涨幅超1.5倍阈值视为短趋势确认
+
+    # 三选二
+    hits = sum([cond1, cond2, cond3])
+    if hits < 2:
+        return None
+
+    # 冷却期检查
+    can_proceed, recent_count, block_reason = _check_cooldown(fund_code, cfg)
+    if not can_proceed:
+        return {
+            "type": "trend",
+            "label": "趋势加仓",
+            "triggered": False,
+            "blocked_reason": block_reason,
+            "conditions_met": [c for c, v in zip(["估值合理", f"近{lookback}日涨{gain_20d}%", "近5日涨{gain_5d}%"], [cond1, cond2, cond3]) if v],
+        }
+
+    # 建议金额：基础月投 × 1.5
+    amount = round(base_monthly * 1.5, 2)
+    # 仓位上限：5% 总资产
+    position_cap_pct = cfg.get("trend_position_pct", 5)
+    total_assets = holding.get("_total_assets", 0)  # 由调用方注入
+    if total_assets:
+        cap_amount = round(total_assets * position_cap_pct / 100, 2)
+        if amount > cap_amount:
+            amount = cap_amount
+
+    reasons = []
+    if cond1:
+        reasons.append(f"估值合理({val_pct:.0f}%分位)")
+    if cond2:
+        reasons.append(f"近{lookback}日涨{gain_20d}%")
+    if cond3:
+        reasons.append("短趋势确认")
+
+    return {
+        "type": "trend",
+        "label": "趋势加仓",
+        "triggered": True,
+        "amount": amount,
+        "reason": "近期涨势好，轻仓试探（短期波段，严格止损-5%）",
+        "conditions_met": reasons,
+        "position_cap_pct": position_cap_pct,
+        "tag": "短期波段",
+    }
+
+
+def _detect_dip_signal(
+    holding: dict,
+    valuation: Optional[dict],
+    cfg: dict,
+    base_monthly: float,
+) -> Optional[dict]:
+    """信号 C：大跌定投（连续大跌4%定投）。
+
+    触发条件：
+    1. 相对上次买入价累计跌幅 ≥ dca_drop_step_pct（默认4%）
+    2. 估值分位 < valuation_pause_pct（非高估，避免接飞刀）
+    3. 冷却期内买入次数 < max_buys_in_cooldown（跌幅≥8%可突破）
+
+    档位：4%→月投×1.0，8%→月投×1.5，12%→月投×2.0
+    """
+    if not cfg.get("dip_signal_enabled", True):
+        return None
+
+    fund_code = holding.get("fund_code", "")
+    current_price = holding.get("current_price") or 0
+    if current_price <= 0:
+        return None
+
+    # 条件1：累计跌幅 ≥ 4%
+    last_buy_price = _get_last_buy_price(fund_code)
+    if not last_buy_price or last_buy_price <= 0:
+        return None  # 无历史买入价，无法计算跌幅
+    drop_pct = (last_buy_price - current_price) / last_buy_price * 100
+    step_pct = cfg.get("dca_drop_step_pct", 4)
+    if drop_pct < step_pct:
+        return None
+
+    # 条件2：估值分位 < valuation_pause_pct（非高估）
+    if valuation and valuation.get("percentile") is not None:
+        if valuation["percentile"] >= cfg.get("valuation_pause_pct", 60):
+            return None  # 高估，不接飞刀
+
+    # 档位计算：4%→×1.0，8%→×1.5，12%→×2.0
+    tiers_str = cfg.get("dca_tiers", "4:1.0,8:1.5,12:2.0")
+    try:
+        tiers = []
+        for t in tiers_str.split(","):
+            parts = t.strip().split(":")
+            if len(parts) == 2:
+                tiers.append((float(parts[0]), float(parts[1])))
+        tiers.sort(key=lambda x: x[0])
+    except Exception:
+        tiers = [(4, 1.0), (8, 1.5), (12, 2.0)]
+
+    # 找命中的最高档
+    matched_tier = None
+    for thresh, mult in tiers:
+        if drop_pct >= thresh:
+            matched_tier = (thresh, mult)
+    if not matched_tier:
+        return None
+
+    # 条件3：冷却期检查（跌幅≥8%可突破）
+    can_proceed, recent_count, block_reason = _check_cooldown(fund_code, cfg)
+    if not can_proceed and drop_pct < 8:
+        return {
+            "type": "dip",
+            "label": "大跌定投",
+            "triggered": False,
+            "blocked_reason": block_reason,
+            "drop_pct": round(drop_pct, 2),
+            "tier": f"-{matched_tier[0]}%",
+        }
+
+    amount = round(base_monthly * matched_tier[1], 2)
+
+    return {
+        "type": "dip",
+        "label": "大跌定投",
+        "triggered": True,
+        "amount": amount,
+        "drop_pct": round(drop_pct, 2),
+        "last_buy_price": last_buy_price,
+        "current_price": current_price,
+        "tier": f"-{matched_tier[0]}%",
+        "multiplier": matched_tier[1],
+        "reason": f"较上次买入跌{drop_pct:.1f}%，分批定投（档位-{matched_tier[0]}%，月投×{matched_tier[1]}）",
+        "tag": "分批定投",
+    }
+
+
 def _generate_single_plan(
     holding: dict,
     cfg: dict,
@@ -375,6 +637,8 @@ def _generate_single_plan(
     current_value = holding.get("current_value") or 0
     total_cost = holding.get("total_cost") or 0
     shares = holding.get("shares") or 0
+    # 注入总资产供信号 B 仓位上限计算
+    holding["_total_assets"] = total_assets
     current_price = holding.get("current_price") or 0
 
     # 估值数据
@@ -557,6 +821,38 @@ def _generate_single_plan(
         engine2["blocked_reason"] = f"已达仓位上限 {max_position_pct:.1f}%，暂停补仓"
         engine2["released_amount"] = 0
 
+    # ── 多维度触发器：信号 A 金字塔(已有) + 信号 B 趋势 + 信号 C 大跌定投 ──
+    triggered_signals = []
+    # 信号 A：金字塔（已有 engine2，转成统一格式）
+    if engine2 and engine2.get("released_amount", 0) > 0 and not engine2.get("blocked_reason"):
+        triggered_signals.append({
+            "type": "pyramid",
+            "label": "金字塔补仓",
+            "triggered": True,
+            "amount": engine2["released_amount"],
+            "reason": f"亏损{profit_rate*100:.1f}%+估值合理，金字塔档位释放",
+            "tag": "摊低成本",
+        })
+
+    # 信号 B：趋势加仓（近期涨势好）— 与信号 A 可叠加
+    signal_b = _detect_trend_signal(holding, valuation, cfg, base_monthly)
+    if signal_b:
+        triggered_signals.append(signal_b)
+
+    # 信号 C：大跌定投（连续大跌4%）— 与信号 A 互斥（亏损-10%已触发金字塔不再触发4%定投）
+    signal_c = None
+    if not (engine2 and engine2.get("released_amount", 0) > 0):
+        signal_c = _detect_dip_signal(holding, valuation, cfg, base_monthly)
+        if signal_c:
+            triggered_signals.append(signal_c)
+
+    # 总建议金额（所有命中信号汇总，受安全阀约束）
+    total_suggested = sum(
+        s.get("amount", 0) for s in triggered_signals if s.get("triggered")
+    )
+    if not can_add:
+        total_suggested = 0
+
     return {
         "fund_code": fund_code,
         "fund_name": fund_name,
@@ -573,6 +869,9 @@ def _generate_single_plan(
         "valuation": valuation,
         "engine1": engine1,
         "pyramid": engine2,
+        "triggered_signals": triggered_signals,  # 多维度触发器命中的信号列表
+        "total_suggested": round(total_suggested, 2),  # 所有命中信号的建议金额汇总
+        "has_signal": len([s for s in triggered_signals if s.get("triggered")]) > 0,
         "fund_type": fund_type_info["label"],
         "fund_type_code": fund_type,
         "type_strategy": type_strategy,

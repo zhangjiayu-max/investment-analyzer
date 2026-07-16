@@ -55,10 +55,20 @@ const summary = computed(() => plan.value?.summary || {})
 const portfolioView = computed(() => plan.value?.portfolio_view || {})
 const priorityList = computed(() => portfolioView.value.priority_list || [])
 const allPlans = computed(() => plan.value?.plans || [])
-// 深套标的 = 金字塔引擎已触发的标的
+// 有信号的标的 = 金字塔触发 OR 趋势加仓 OR 大跌定投（多维度触发器命中任一）
 const deepPlans = computed(() =>
-  allPlans.value.filter(p => p.pyramid && p.pyramid.triggered_tiers > 0)
+  allPlans.value.filter(p => p.has_signal || (p.pyramid && p.pyramid.triggered_tiers > 0))
 )
+
+// 信号类型 -> 短标签
+const signalShortLabel = (p) => {
+  if (!p.triggered_signals || !p.triggered_signals.length) return ''
+  const map = { pyramid: 'A', trend: 'B', dip: 'C' }
+  return p.triggered_signals
+    .filter(s => s.triggered)
+    .map(s => map[s.type] || '')
+    .join('+')
+}
 
 const fmtMoney = (v) => {
   if (v == null || isNaN(v)) return '--'
@@ -518,6 +528,37 @@ onMounted(() => {
                 {{ p.safety?.can_add ? '可补仓' : '已达上限' }}
               </span>
               <button class="btn-link" @click="fillSim(p.fund_code)">模拟摊薄</button>
+            </div>
+
+            <!-- 多维度触发器：命中的信号列表 -->
+            <div v-if="p.triggered_signals && p.triggered_signals.length" class="plan-row signals-row">
+              <div class="signals-head">
+                <Icon name="zap" size="14" />
+                <span class="signals-title">触发信号（多维度）</span>
+                <span v-if="p.total_suggested > 0" class="signals-total">
+                  合计建议 <b class="font-jet">¥{{ fmtMoney(p.total_suggested) }}</b>
+                </span>
+              </div>
+              <div class="signals-list">
+                <div
+                  v-for="(sig, idx) in p.triggered_signals"
+                  :key="idx"
+                  :class="['signal-item', `sig-${sig.type}`, sig.triggered ? 'sig-on' : 'sig-blocked']"
+                >
+                  <div class="signal-head">
+                    <span class="signal-tag">{{ { pyramid: 'A', trend: 'B', dip: 'C' }[sig.type] || '?' }}</span>
+                    <span class="signal-label">{{ sig.label }}</span>
+                    <span v-if="sig.triggered" class="signal-amount font-jet">¥{{ fmtMoney(sig.amount) }}</span>
+                    <span v-else class="signal-blocked-tag">已拦截</span>
+                    <span v-if="sig.tag" class="signal-sub-tag">{{ sig.tag }}</span>
+                  </div>
+                  <div v-if="sig.reason" class="signal-reason">{{ sig.reason }}</div>
+                  <div v-if="sig.blocked_reason" class="signal-reason blocked">{{ sig.blocked_reason }}</div>
+                  <div v-if="sig.conditions_met && sig.conditions_met.length" class="signal-conditions">
+                    <span v-for="(c, ci) in sig.conditions_met" :key="ci" class="cond-chip">{{ c }}</span>
+                  </div>
+                </div>
+              </div>
             </div>
           </article>
         </div>
@@ -1119,6 +1160,89 @@ onMounted(() => {
 }
 .flag-ok { background: var(--color-loss-bg); color: var(--color-loss); }
 .flag-stop { background: var(--color-profit-bg); color: var(--color-profit); }
+
+/* ── 多维度触发器：信号展示 ── */
+.signals-row {
+  margin-top: 0.5rem;
+  padding: 0.7rem 0.85rem;
+  background: linear-gradient(135deg, rgba(99,102,241,0.05), rgba(168,85,247,0.05));
+  border: 1px solid var(--color-border-light);
+  border-radius: var(--radius-md);
+}
+.signals-head {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin-bottom: 0.5rem;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--color-text-primary);
+}
+.signals-title { margin-right: auto; }
+.signals-total { color: var(--color-text-secondary); font-size: 0.8rem; }
+.signals-total b { color: var(--color-loss); font-weight: 600; }
+.signals-list { display: flex; flex-direction: column; gap: 0.4rem; }
+.signal-item {
+  padding: 0.5rem 0.65rem;
+  border-radius: var(--radius-sm);
+  border-left: 3px solid var(--color-border-light);
+  background: var(--color-bg-card);
+  font-size: 0.82rem;
+}
+.signal-item.sig-on { border-left-color: var(--color-loss); }
+.signal-item.sig-blocked { border-left-color: var(--color-warning, #f59e0b); opacity: 0.78; }
+.signal-item.sig-pyramid { border-left-color: #ef4444; }
+.signal-item.sig-trend { border-left-color: #10b981; }
+.signal-item.sig-dip { border-left-color: #f59e0b; }
+.signal-head {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin-bottom: 0.2rem;
+}
+.signal-tag {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 4px;
+  font-size: 0.72rem;
+  font-weight: 700;
+  color: #fff;
+  background: #6366f1;
+}
+.sig-pyramid .signal-tag { background: #ef4444; }
+.sig-trend .signal-tag { background: #10b981; }
+.sig-dip .signal-tag { background: #f59e0b; }
+.signal-label { font-weight: 600; color: var(--color-text-primary); }
+.signal-amount { margin-left: auto; color: var(--color-loss); font-weight: 600; }
+.signal-blocked-tag {
+  margin-left: auto;
+  padding: 0 6px;
+  border-radius: 3px;
+  font-size: 0.7rem;
+  background: rgba(245,158,11,0.15);
+  color: #b45309;
+}
+.signal-sub-tag {
+  padding: 0 6px;
+  border-radius: 3px;
+  font-size: 0.7rem;
+  background: var(--color-bg-muted, #f3f4f6);
+  color: var(--color-text-secondary);
+}
+.signal-reason { color: var(--color-text-secondary); font-size: 0.78rem; }
+.signal-reason.blocked { color: #b45309; }
+.signal-conditions { display: flex; flex-wrap: wrap; gap: 0.25rem; margin-top: 0.3rem; }
+.cond-chip {
+  padding: 1px 6px;
+  border-radius: 3px;
+  font-size: 0.7rem;
+  background: rgba(99,102,241,0.08);
+  color: #4f46e5;
+}
 
 /* 折叠头 */
 .collapse-head {
