@@ -258,14 +258,14 @@ DEFAULT_CONFIGS = [
     ('smart_add.base_dca_pct', '4', '基础定投比例（年化，占总资产%）', 'smart_add'),
     ('smart_add.pyramid_enabled', 'true', '金字塔补仓引擎开关', 'smart_add'),
     ('smart_add.pool_pct', '15', '补仓资金池占总资产%', 'smart_add'),
-    ('smart_add.pyramid_tiers', '10:15,20:25,30:30,40:20,50:10', '金字塔档位（亏损%:释放%）', 'smart_add'),
+    ('smart_add.pyramid_tiers', '10:15:20,20:25:30,30:30:40,40:20:50,50:10:60', '金字塔档位（亏损%:释放率:加仓占市值%）', 'smart_add'),
     ('smart_add.loss_threshold', '-10', '触发金字塔补仓的亏损阈值%', 'smart_add'),
     ('smart_add.max_single_position_pct', '25', '单标的占总仓位上限%', 'smart_add'),
     ('smart_add.valuation_pause_pct', '60', '估值分位回升到此值暂停引擎', 'smart_add'),
     ('smart_add.stale_days', '14', '估值数据过期天数阈值', 'smart_add'),
     ('smart_add.snapshot_enabled', 'true', '智能补仓建议快照落库开关（反事实决策验证，默认开启）', 'smart_add'),
     ('smart_add.hypothetical_enabled', 'true', '假设操作自动生成开关（每次建议自动创建假设交易，默认开启）', 'smart_add'),
-    ('smart_add.max_add_vs_position_mult', '2.0', '单标的补仓金额上限=原市值×此倍数（避免小仓位标的巨额补仓）', 'smart_add'),
+    ('smart_add.max_add_vs_position_mult', '1.0', '单标的补仓金额上限=原市值×此倍数（2026-07-17从2.0降至1.0，配合档位重构）', 'smart_add'),
 
     # 多维度触发器（2026-07-17 新增）— 冷却期+趋势加仓+大跌定投
     ('smart_add.cooldown_days', '10', '冷却期天数：近N天内同基金买入次数超限则拦截', 'smart_add'),

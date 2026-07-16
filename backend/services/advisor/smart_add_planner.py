@@ -41,23 +41,33 @@ logger = logging.getLogger(__name__)
 # ── 默认配置 ──────────────────────────────────
 
 _DEFAULT_PYRAMID_TIERS = [
-    {"loss_pct": -10, "release_pct": 15},
-    {"loss_pct": -20, "release_pct": 25},
-    {"loss_pct": -30, "release_pct": 30},
-    {"loss_pct": -40, "release_pct": 20},
-    {"loss_pct": -50, "release_pct": 10},
+    # 2026-07-17 重构：金额基准从"资金池×释放率"改为"标的市值×加仓比例"
+    # add_ratio = 加仓额占标的当前市值的百分比（亏损越深加仓比例越大）
+    {"loss_pct": -10, "release_pct": 15, "add_ratio": 20},
+    {"loss_pct": -20, "release_pct": 25, "add_ratio": 30},
+    {"loss_pct": -30, "release_pct": 30, "add_ratio": 40},
+    {"loss_pct": -40, "release_pct": 20, "add_ratio": 50},
+    {"loss_pct": -50, "release_pct": 10, "add_ratio": 60},
 ]
 
 
 def _load_config() -> dict:
     """读取智能补仓配置。"""
-    # 金字塔档位解析："10:15,20:25,30:30,40:20,50:10"
-    raw_tiers = get_config_str_safe("smart_add.pyramid_tiers", "10:15,20:25,30:30,40:20,50:10")
+    # 金字塔档位解析：支持新格式"10:15:20,20:25:30,30:30:40,40:20:50,50:10:60"（亏损:释放率:加仓比例）
+    # 兼容旧格式"10:15,20:25,30:30,40:20,50:10"（无add_ratio时用release_pct兜底）
+    raw_tiers = get_config_str_safe("smart_add.pyramid_tiers", "10:15:20,20:25:30,30:30:40,40:20:50,50:10:60")
     tiers = []
     try:
         for part in raw_tiers.split(","):
-            loss_str, release_str = part.strip().split(":")
-            tiers.append({"loss_pct": -int(loss_str), "release_pct": int(release_str)})
+            fields = part.strip().split(":")
+            if len(fields) >= 3:
+                # 新格式：亏损:释放率:加仓比例
+                loss_str, release_str, add_str = fields[0], fields[1], fields[2]
+                tiers.append({"loss_pct": -int(loss_str), "release_pct": int(release_str), "add_ratio": int(add_str)})
+            elif len(fields) == 2:
+                # 旧格式兼容：亏损:释放率（add_ratio=release_pct兜底）
+                loss_str, release_str = fields[0], fields[1]
+                tiers.append({"loss_pct": -int(loss_str), "release_pct": int(release_str), "add_ratio": int(release_str)})
         tiers.sort(key=lambda t: t["loss_pct"])
     except Exception:
         tiers = list(_DEFAULT_PYRAMID_TIERS)
@@ -73,7 +83,8 @@ def _load_config() -> dict:
         "valuation_pause_pct": get_config_float_safe("smart_add.valuation_pause_pct", 60.0),
         "stale_days": get_config_int_safe("smart_add.stale_days", 14),
         # 修复5：单标的补仓金额上限 = 原市值 × 此倍数（避免小仓位标的巨额补仓）
-        "max_add_vs_position_mult": get_config_float_safe("smart_add.max_add_vs_position_mult", 2.0),
+        # 2026-07-17 调整：从2.0降至1.0（配合档位重构，单次补仓不超过当前市值）
+        "max_add_vs_position_mult": get_config_float_safe("smart_add.max_add_vs_position_mult", 1.0),
         # 多维度触发器配置（2026-07-17 新增）
         "cooldown_days": get_config_int_safe("smart_add.cooldown_days", 10),
         "max_buys_in_cooldown": get_config_int_safe("smart_add.max_buys_in_cooldown", 2),
@@ -151,23 +162,37 @@ def _calc_pyramid_tiers(
     already_released: float,
     tiers: list,
     loss_threshold: float,
+    current_value: float = 0,
 ) -> list:
     """计算金字塔补仓档位。
 
+    2026-07-17 重构：金额计算从"资金池×释放率"改为"标的市值×加仓比例"。
+    原逻辑：release_amount = pool_total × release_pct/100
+        问题：金额与标的自身规模脱钩，小仓位标的补仓远超市值
+    新逻辑：release_amount = current_value × add_ratio/100
+        保留 pool_total 作为组合层总额约束（在 generate_smart_add_plan 中缩减）
+
     Args:
         profit_rate: 当前盈亏率（如 -0.35 = -35%）
-        pool_total: 资金池总额
+        pool_total: 资金池总额（组合层硬约束，仅在缩减时使用）
         already_released: 已释放金额
-        tiers: 档位配置 [{loss_pct, release_pct}]
+        tiers: 档位配置 [{loss_pct, release_pct, add_ratio}]
         loss_threshold: 触发阈值（如 -10）
+        current_value: 标的当前市值（新参数，金额计算基准）
 
     Returns:
-        档位列表 [{tier, loss_pct, release_amount, triggered, cumulative}]
+        档位列表 [{tier, loss_pct, release_amount, triggered, cumulative, add_ratio}]
     """
     result = []
     cumulative = 0
     for i, tier in enumerate(tiers):
-        release_amount = round(pool_total * tier["release_pct"] / 100, 2)
+        # 新逻辑：金额 = 标的市值 × 加仓比例（%）；无市值数据时降级回池子×释放率
+        add_ratio = tier.get("add_ratio", tier.get("release_pct", 0))
+        if current_value > 0:
+            release_amount = round(current_value * add_ratio / 100, 2)
+        else:
+            # 降级：原逻辑兜底
+            release_amount = round(pool_total * tier["release_pct"] / 100, 2)
         cumulative += release_amount
         triggered = profit_rate * 100 <= tier["loss_pct"]
         result.append({
@@ -176,6 +201,7 @@ def _calc_pyramid_tiers(
             "release_amount": release_amount,
             "cumulative": round(cumulative, 2),
             "triggered": triggered,
+            "add_ratio": add_ratio,  # 新增：加仓占市值百分比
         })
     return result
 
@@ -835,6 +861,7 @@ def _generate_single_plan(
     ):
         tiers = _calc_pyramid_tiers(
             profit_rate, pool_total, 0, cfg["tiers"], cfg["loss_threshold"],
+            current_value=current_value,  # 新增：金额计算基准为标的市值
         )
         triggered_count = sum(1 for t in tiers if t["triggered"])
         released_amount = sum(t["release_amount"] for t in tiers if t["triggered"])
