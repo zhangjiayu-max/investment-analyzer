@@ -27,18 +27,23 @@
 """
 
 import json
+import logging
 import os
 import sqlite3
 from pathlib import Path
 
+logger = logging.getLogger(__name__)
+
 # 全局唯一数据库路径定义
 # 1. 优先环境变量 DB_PATH（绝对路径）
-# 2. 默认: backend/data/valuations.db
+# 2. 默认: <project_root>/data/valuations.db
 _ENV_DB_PATH = os.getenv("DB_PATH")
 if _ENV_DB_PATH:
     DB_PATH = Path(_ENV_DB_PATH)
 else:
     DB_PATH = Path(__file__).parent.parent.parent / "data" / "valuations.db"
+
+logger.info(f"数据库路径: {DB_PATH}")
 
 
 def _get_conn() -> sqlite3.Connection:
