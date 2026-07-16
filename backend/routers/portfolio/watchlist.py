@@ -192,6 +192,26 @@ async def watchlist_patrol_api():
                 pb = ak_result.get("pb")
                 source = "akshare"
 
+        # ── A2.5 混合基金机会值替代分析（无跟踪指数或估值查询失败）──
+        # 混合基金无 index_name → 三级估值查询全跳过 → 启用回撤分位/净值分位替代
+        drawdown_percentile = None
+        nav_percentile = None
+        analysis_method = "index_valuation" if current_pct is not None else "none"
+        if current_pct is None:
+            mixed = _analyze_mixed_fund_opportunity(fund_code)
+            analysis_method = mixed["analysis_method"]
+            drawdown_percentile = mixed["drawdown_percentile"]
+            nav_percentile = mixed["nav_percentile"]
+            try:
+                update_watchlist_item(
+                    item["id"],
+                    analysis_method=analysis_method,
+                    drawdown_percentile=drawdown_percentile,
+                    nav_percentile=nav_percentile,
+                )
+            except Exception:
+                pass
+
         checked += 1
 
         # 更新 watchlist 的当前百分位
@@ -206,6 +226,8 @@ async def watchlist_patrol_api():
             current_pct=current_pct,
             current_nav=current_nav,
             user_target_price=item.get("target_price"),
+            drawdown_percentile=drawdown_percentile,
+            nav_percentile=nav_percentile,
         )
         if suggested_buy_price is not None:
             try:
@@ -232,9 +254,19 @@ async def watchlist_patrol_api():
             elif target_pct is None and current_pct <= 20:
                 is_alert = True
                 alert_reason = f"当前百分位 {current_pct:.0f}% 处于低估区域（≤20%）"
+        elif drawdown_percentile is not None and drawdown_percentile >= 80:
+            is_alert = True
+            alert_reason = f"回撤分位 {drawdown_percentile:.0f}% 处于历史深度回撤区（≥80%）"
+        elif nav_percentile is not None and nav_percentile <= 20:
+            is_alert = True
+            alert_reason = f"净值历史分位 {nav_percentile:.0f}% 处于低位（≤20%）"
 
         # 信号灯状态（green/yellow/red/gray）
-        signal_status, signal_reason, distance = _compute_signal_status(current_pct, target_pct)
+        signal_status, signal_reason, distance = _compute_signal_status(
+            current_pct, target_pct,
+            drawdown_percentile=drawdown_percentile,
+            nav_percentile=nav_percentile,
+        )
         all_items.append({
             "id": item["id"],
             "fund_code": fund_code,
@@ -254,6 +286,9 @@ async def watchlist_patrol_api():
             "suggested_buy_price": suggested_buy_price,
             "buy_price_source": buy_price_source,
             "distance_to_buy": distance_to_buy,
+            "analysis_method": analysis_method,
+            "drawdown_percentile": drawdown_percentile,
+            "nav_percentile": nav_percentile,
             "nav_updated_at": item.get("nav_updated_at"),
             "created_at": item.get("created_at"),
             "updated_at": item.get("updated_at"),
@@ -274,6 +309,9 @@ async def watchlist_patrol_api():
                 "source": source,
                 "reason": alert_reason,
                 "notes": item.get("notes", ""),
+                "analysis_method": analysis_method,
+                "drawdown_percentile": drawdown_percentile,
+                "nav_percentile": nav_percentile,
             }
             try:
                 alert_item["candidate_id"] = save_watchlist_trigger_candidate(alert_item)
@@ -342,8 +380,117 @@ def _fetch_valuation_via_akshare(index_name: str) -> dict | None:
     return None
 
 
+def _analyze_mixed_fund_opportunity(fund_code: str) -> dict:
+    """混合基金（无跟踪指数）机会值替代分析。
+
+    三级替代（巡检默认仅用本地数据，0 外部 MCP 调用）：
+    1. 回撤分位分析（calculate_drawdown_analysis）— 数据足够则用此
+    2. 净值历史分位（本地 fund_nav_history）— 回撤数据不足时兜底
+    3. 盈米基金诊断（MCP）— 默认关闭，开关 watchlist.yingmi_diagnosis_enabled
+
+    Returns:
+        {
+            "analysis_method": "drawdown" | "nav_percentile" | "yingmi" | "none",
+            "drawdown_percentile": float | None,  # 0-100
+            "nav_percentile": float | None,        # 0-100
+            "current_drawdown": float | None,
+            "detail": dict,
+        }
+    """
+    # 第一级：回撤分位分析（本地，0 外部调用）
+    try:
+        from services.fund.fund_analysis import calculate_drawdown_analysis
+        result = calculate_drawdown_analysis(fund_code)
+        detail = result.get("detail", {}) or {}
+        dd_pct = detail.get("drawdown_percentile")
+        data_points = detail.get("data_points", 0)
+        if dd_pct is not None and data_points >= 30:
+            return {
+                "analysis_method": "drawdown",
+                "drawdown_percentile": round(dd_pct * 100, 1),
+                "nav_percentile": None,
+                "current_drawdown": detail.get("current_drawdown"),
+                "detail": {
+                    "max_drawdown": detail.get("max_drawdown"),
+                    "avg_recovery_days": detail.get("avg_recovery_days"),
+                    "is_bottoming": detail.get("is_bottoming"),
+                    "data_points": data_points,
+                },
+            }
+    except Exception as e:
+        logger.debug(f"[watchlist] 回撤分析失败 {fund_code}: {e}")
+
+    # 第二级：净值历史分位（本地 fund_nav_history）
+    nav_pct = _calc_nav_percentile(fund_code)
+    if nav_pct is not None:
+        return {
+            "analysis_method": "nav_percentile",
+            "drawdown_percentile": None,
+            "nav_percentile": nav_pct,
+            "current_drawdown": None,
+            "detail": {},
+        }
+
+    # 第三级：盈米基金诊断（MCP，默认关闭以控制成本）
+    try:
+        from db.config import get_config
+        yingmi_enabled = str(get_config("watchlist.yingmi_diagnosis_enabled", "false")).lower()
+        if yingmi_enabled == "true":
+            from mcp.yingmi_client import get_yingmi_client
+            client = get_yingmi_client()
+            text = client.get_fund_diagnosis(fund_code)
+            if text and len(text) > 50:
+                return {
+                    "analysis_method": "yingmi",
+                    "drawdown_percentile": None,
+                    "nav_percentile": None,
+                    "current_drawdown": None,
+                    "detail": {"diagnosis_text": text[:500]},
+                }
+    except Exception as e:
+        logger.debug(f"[watchlist] 盈米诊断失败 {fund_code}: {e}")
+
+    return {
+        "analysis_method": "none",
+        "drawdown_percentile": None,
+        "nav_percentile": None,
+        "current_drawdown": None,
+        "detail": {},
+    }
+
+
+def _calc_nav_percentile(fund_code: str) -> float | None:
+    """计算当前净值在历史净值中的分位（0-100）。
+
+    0 = 历史最低（最便宜），100 = 历史最高。数据不足返回 None。
+    """
+    try:
+        from services.fund.fund_data_service import get_or_refresh_fund_nav_history
+        nav_history = get_or_refresh_fund_nav_history(fund_code, days=1000)
+        if not nav_history or len(nav_history) < 30:
+            return None
+        navs = []
+        for r in nav_history:
+            try:
+                n = float(r.get("nav", 0))
+                if n > 0:
+                    navs.append(n)
+            except (TypeError, ValueError):
+                continue
+        if len(navs) < 30:
+            return None
+        current_nav = navs[-1]
+        sorted_navs = sorted(navs)
+        rank = sum(1 for n in sorted_navs if n <= current_nav) / len(sorted_navs)
+        return round(rank * 100, 1)
+    except Exception:
+        return None
+
+
 def _calculate_suggested_buy_price(current_pct: float | None, current_nav: float | None,
-                                    user_target_price: float | None) -> tuple[float | None, str]:
+                                    user_target_price: float | None,
+                                    drawdown_percentile: float | None = None,
+                                    nav_percentile: float | None = None) -> tuple[float | None, str]:
     """自动推算建议上车价。
 
     规则（按估值分位分档）：
@@ -351,7 +498,9 @@ def _calculate_suggested_buy_price(current_pct: float | None, current_nav: float
     - 分位 20-40%（偏低区）：上车价 = 当前净值 × 0.95
     - 分位 40-60%（中性区）：上车价 = 当前净值 × 0.90
     - 分位 >60%（偏高区）：上车价 = 当前净值 × 0.85
-    - 分位缺失：上车价 = None
+    - 分位缺失 + 回撤分位可用：按回撤分位分档（混合基金替代）
+    - 分位缺失 + 净值分位可用：按净值分位分档（兜底）
+    - 全部缺失：上车价 = None
 
     用户已设 target_price 时以用户设置为准。
     """
@@ -359,31 +508,75 @@ def _calculate_suggested_buy_price(current_pct: float | None, current_nav: float
     if user_target_price and user_target_price > 0:
         return round(user_target_price, 4), "用户设置"
 
-    if current_pct is None or current_nav is None or current_nav <= 0:
+    if current_nav is None or current_nav <= 0:
         return None, ""
 
-    if current_pct <= 20:
-        return round(current_nav, 4), f"低估区·当前净值"
-    elif current_pct <= 40:
-        return round(current_nav * 0.95, 4), f"偏低区·-5%"
-    elif current_pct <= 60:
-        return round(current_nav * 0.90, 4), f"中性区·-10%"
-    else:
-        return round(current_nav * 0.85, 4), f"偏高区·-15%"
+    # 估值分位可用
+    if current_pct is not None:
+        if current_pct <= 20:
+            return round(current_nav, 4), "低估区·当前净值"
+        elif current_pct <= 40:
+            return round(current_nav * 0.95, 4), "偏低区·-5%"
+        elif current_pct <= 60:
+            return round(current_nav * 0.90, 4), "中性区·-10%"
+        else:
+            return round(current_nav * 0.85, 4), "偏高区·-15%"
+
+    # 回撤分位替代（混合基金，回撤越深越接近机会）
+    if drawdown_percentile is not None:
+        if drawdown_percentile >= 80:
+            return round(current_nav, 4), "历史大底区·当前净值"
+        elif drawdown_percentile >= 60:
+            return round(current_nav * 0.97, 4), "深度回撤区·-3%"
+        elif drawdown_percentile >= 40:
+            return round(current_nav * 0.93, 4), "中度回撤区·-7%"
+        else:
+            return round(current_nav * 0.90, 4), "等待更大回撤·-10%"
+
+    # 净值历史分位替代（兜底，分位越低越便宜）
+    if nav_percentile is not None:
+        if nav_percentile <= 20:
+            return round(current_nav, 4), "净值历史低位·当前净值"
+        elif nav_percentile <= 40:
+            return round(current_nav * 0.95, 4), "净值偏低区·-5%"
+        elif nav_percentile <= 60:
+            return round(current_nav * 0.90, 4), "净值中性区·-10%"
+        else:
+            return round(current_nav * 0.85, 4), "净值偏高区·-15%"
+
+    return None, ""
 
 
 # ── P0-2.2：信号灯状态计算（纯规则，0 LLM/0 MCP） ──
 
-def _compute_signal_status(current_pct, target_pct):
+def _compute_signal_status(current_pct, target_pct, drawdown_percentile=None, nav_percentile=None):
     """根据当前估值百分位与目标百分位计算信号灯状态。
 
     返回 (signal_status, signal_reason, distance_to_target)：
     - green:  current ≤ target（或未设 target 且 ≤20）→ 可买入
     - yellow: abs(current - target) ≤ 5 → 接近目标，持续关注
     - red:    current > target + 5 → 估值仍高，继续等待
-    - gray:   current_pct 为 None → 数据缺失，需巡检刷新
+    - gray:   current_pct 为 None 且无替代分析 → 数据缺失，需巡检刷新
+
+    混合基金替代：current_pct 为 None 时，依次用回撤分位/净值分位计算信号灯。
     """
     if current_pct is None:
+        # 回撤分位替代（回撤越深越接近机会）
+        if drawdown_percentile is not None:
+            if drawdown_percentile >= 80:
+                return "green", f"处于历史深度回撤区（回撤分位{drawdown_percentile:.0f}%），接近大底", None
+            elif drawdown_percentile >= 60:
+                return "yellow", f"回撤较深（分位{drawdown_percentile:.0f}%），接近机会区", None
+            else:
+                return "red", f"回撤不足（分位{drawdown_percentile:.0f}%），等待更深回调", None
+        # 净值历史分位替代（分位越低越便宜）
+        if nav_percentile is not None:
+            if nav_percentile <= 20:
+                return "green", f"净值处于历史低位（分位{nav_percentile:.0f}%），机会区", None
+            elif nav_percentile <= 40:
+                return "yellow", f"净值偏低（分位{nav_percentile:.0f}%），接近机会区", None
+            else:
+                return "red", f"净值未到低位（分位{nav_percentile:.0f}%），继续等待", None
         return "gray", "估值数据缺失，请巡检刷新", None
     distance = None
     if target_pct is not None:
@@ -428,13 +621,24 @@ def _calculate_buy_score(item: dict) -> dict:
     """
     dims = {}
 
-    # 1. 估值百分位（50%）
+    # 1. 估值百分位（50%）— 混合基金用回撤分位/净值分位替代
     pct = item.get("current_percentile")
-    if pct is None:
-        dims["valuation"] = {"score": 50, "weight": 0.5, "reason": "估值数据缺失"}
-    else:
+    dd_pct = item.get("drawdown_percentile")
+    nav_pct = item.get("nav_percentile")
+    if pct is not None:
         v_score = max(0, 100 - max(0, pct - 20) * 1.2)
         dims["valuation"] = {"score": round(v_score), "weight": 0.5, "reason": f"PE百分位 {pct:.0f}%"}
+    elif dd_pct is not None:
+        # 回撤分位越高=回撤越深=越便宜，转换为等价估值分位: equiv = 100 - dd_pct
+        equiv = 100 - dd_pct
+        v_score = max(0, 100 - max(0, equiv - 20) * 1.2)
+        dims["valuation"] = {"score": round(v_score), "weight": 0.5, "reason": f"回撤分位 {dd_pct:.0f}%（等价估值{equiv:.0f}%）"}
+    elif nav_pct is not None:
+        # 净值分位越低=越便宜，直接等价估值分位
+        v_score = max(0, 100 - max(0, nav_pct - 20) * 1.2)
+        dims["valuation"] = {"score": round(v_score), "weight": 0.5, "reason": f"净值分位 {nav_pct:.0f}%"}
+    else:
+        dims["valuation"] = {"score": 50, "weight": 0.5, "reason": "估值数据缺失"}
 
     # 2. 净值距目标价（25%）
     nav = item.get("current_nav")

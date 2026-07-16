@@ -54,6 +54,11 @@ def init_market_events_tables(conn) -> None:
         conn.execute("ALTER TABLE market_events ADD COLUMN time_frame TEXT")
     if "evidence" not in cols:
         conn.execute("ALTER TABLE market_events ADD COLUMN evidence TEXT")
+    # P1-2: 原始置信度/方向（校准前），供前端展示"原始 vs 校准后"
+    if "original_confidence" not in cols:
+        conn.execute("ALTER TABLE market_events ADD COLUMN original_confidence REAL")
+    if "original_direction" not in cols:
+        conn.execute("ALTER TABLE market_events ADD COLUMN original_direction TEXT")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_market_events_status ON market_events(status)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_market_events_expected ON market_events(expected_date)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_market_events_relevance ON market_events(relevance_to_user)")
@@ -143,6 +148,8 @@ def create_market_event(
     sources: list,
     time_frame: str = "",
     evidence: str = "",
+    original_confidence: float | None = None,
+    original_direction: str | None = None,
 ) -> str:
     """创建事件（幂等：相同 title+expected_date 不重复创建）。
 
@@ -151,6 +158,8 @@ def create_market_event(
     Args:
         time_frame: 趋势时间跨度（short/medium/long），趋势类型事件使用
         evidence: 趋势证据，趋势类型事件使用
+        original_confidence: 校准前的原始置信度（P1-2 前端展示用）
+        original_direction: 校准前的原始方向（P1-1 方向降级追踪用）
 
     Returns:
         event_id（已存在则返回已有 id，不覆盖）
@@ -181,8 +190,9 @@ def create_market_event(
             INSERT INTO market_events (
                 event_id, title, summary, event_type, status, direction, confidence,
                 expected_date, detected_date, affected_sectors, affected_themes,
-                relevance_to_user, sources, timeline, time_frame, evidence
-            ) VALUES (?, ?, ?, ?, 'upcoming', ?, ?, ?, ?, ?, ?, 'market_watch', ?, ?, ?, ?)
+                relevance_to_user, sources, timeline, time_frame, evidence,
+                original_confidence, original_direction
+            ) VALUES (?, ?, ?, ?, 'upcoming', ?, ?, ?, ?, ?, ?, 'market_watch', ?, ?, ?, ?, ?, ?)
         """, (
             event_id, title, summary, event_type, direction, confidence,
             expected_date, today,
@@ -192,10 +202,46 @@ def create_market_event(
             timeline,
             time_frame,
             evidence,
+            original_confidence if original_confidence is not None else confidence,
+            original_direction if original_direction is not None else direction,
         ))
         conn.commit()
         _clear_events_cache()
         return event_id
+    finally:
+        conn.close()
+
+
+def update_market_event_fields(event_id: str, fields: dict) -> bool:
+    """批量更新事件字段（回溯校准用）。
+
+    Args:
+        event_id: 事件 ID
+        fields: 要更新的字段字典，如 {"confidence": 0.6, "direction": "neutral"}
+
+    Returns:
+        True if updated, False if event not found.
+    """
+    if not fields:
+        return False
+    conn = _get_conn()
+    try:
+        allowed = {"confidence", "direction", "status", "relevance_to_user",
+                   "original_confidence", "original_direction"}
+        updates = {k: v for k, v in fields.items() if k in allowed}
+        if not updates:
+            return False
+        set_clauses = ", ".join(f"{k} = ?" for k in updates)
+        values = list(updates.values()) + [event_id]
+        cursor = conn.execute(
+            f"UPDATE market_events SET {set_clauses}, updated_at = datetime('now','localtime') WHERE event_id = ?",
+            values,
+        )
+        conn.commit()
+        if cursor.rowcount > 0:
+            _clear_events_cache()
+            return True
+        return False
     finally:
         conn.close()
 
@@ -270,8 +316,13 @@ def list_active_events() -> list[dict]:
         conn.close()
 
 
-def update_market_event_status(event_id: str, new_status: str) -> bool:
+def update_market_event_status(event_id: str, new_status: str, timeline_note: str = "") -> bool:
     """更新事件状态，追加 timeline 记录。
+
+    Args:
+        event_id: 事件 ID
+        new_status: 新状态
+        timeline_note: 自定义 timeline 文本（如回溯校准说明），为空则用默认"状态更新为 X"
 
     Returns:
         True if 更新成功，False if 事件不存在
@@ -286,7 +337,8 @@ def update_market_event_status(event_id: str, new_status: str) -> bool:
             return False
 
         timeline = json.loads(row["timeline"]) if row["timeline"] else []
-        timeline.append({"date": today, "event": f"状态更新为 {new_status}"})
+        note = timeline_note if timeline_note else f"状态更新为 {new_status}"
+        timeline.append({"date": today, "event": note})
 
         date_field = ""
         date_val = None

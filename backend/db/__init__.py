@@ -1226,6 +1226,10 @@ def init_db():
     # 老库升级：补列（CREATE TABLE IF NOT EXISTS 不会对已存在的表加列）
     _ensure_column(conn, "watchlist", "suggested_buy_price", "REAL")
     _ensure_column(conn, "watchlist", "buy_price_source", "TEXT")
+    # P0-4: 混合基金机会值分析字段
+    _ensure_column(conn, "watchlist", "analysis_method", "TEXT")  # index_valuation/drawdown/yingmi/nav_percentile
+    _ensure_column(conn, "watchlist", "drawdown_percentile", "REAL")
+    _ensure_column(conn, "watchlist", "nav_percentile", "REAL")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_watchlist_user ON watchlist(user_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_watchlist_status ON watchlist(status)")
 

@@ -837,16 +837,24 @@ def scan_forward_events(trace_id: str = "") -> dict:
             existing = get_market_event(eid)
             
             is_trend = ev.get("time_frame") or ev.get("evidence")
+            # P0-3: 趋势事件也参与校准（移除豁免），校准后置信度更真实
             conf = _calibrate_confidence(
                 float(ev.get("confidence", 0.5)),
                 ev.get("affected_sectors", []),
-            ) if not is_trend else float(ev.get("confidence", 0.5))
+            )
+            # P1-1: 方向错误惩罚 — 高错误率板块方向降级
+            calibrated_dir, _dir_reason = _calibrate_direction(
+                ev.get("direction", "neutral"),
+                ev.get("affected_sectors", []),
+            )
+            original_conf = float(ev.get("confidence", 0.5))
+            original_dir = ev.get("direction", "neutral")
             
             create_market_event(
                 title=ev["title"],
                 summary=ev.get("summary", ""),
                 event_type=ev.get("event_type", "theme"),
-                direction=ev.get("direction", "neutral"),
+                direction=calibrated_dir,  # P1-1: 使用校准后的方向
                 expected_date=expected_date,
                 affected_sectors=ev.get("affected_sectors", []),
                 affected_themes=ev.get("affected_themes", []),
@@ -854,6 +862,8 @@ def scan_forward_events(trace_id: str = "") -> dict:
                 sources=sources,
                 time_frame=ev.get("time_frame", ""),
                 evidence=ev.get("evidence", ""),
+                original_confidence=original_conf,  # P1-2: 保留原始置信度供前端展示
+                original_direction=original_dir,    # 保留原始方向
             )
             if not existing:
                 new_count += 1
@@ -1070,31 +1080,16 @@ def _verify_single_event(event: dict, window_days: int = 3) -> dict | None:
     """验证单个已落地事件的方向预测是否正确。
 
     逻辑：
-    1. 从 affected_sectors 取第一个板块对应的指数代码
+    1. 遍历 affected_sectors 所有板块，对每个有指数映射的板块分别验证
     2. 获取 materialized_date 和 materialized_date+window_days 的收盘价
-    3. 计算涨跌幅
-    4. 对比 direction 与实际涨跌方向
+    3. 计算各板块涨跌幅
+    4. 多板块加权平均 + 多数投票判定最终方向
 
     Returns:
         验证结果 dict 或 None（无法验证时）
     """
     sectors = json.loads(event.get("affected_sectors") or "[]")
     if not sectors:
-        return None
-
-    # 取第一个有指数映射的板块
-    index_code = None
-    index_name = None
-    for s in sectors:
-        key = _normalize_sector(s)
-        if key and key in SECTOR_TO_INDEX:
-            codes = SECTOR_TO_INDEX[key]
-            if codes:
-                index_code = codes[0]
-                index_name = key
-                break
-
-    if not index_code:
         return None
 
     mat_date = event.get("materialized_date") or event.get("expected_date")
@@ -1112,51 +1107,101 @@ def _verify_single_event(event: dict, window_days: int = 3) -> dict | None:
     if end_date > today:
         return None  # 验证窗口未到
 
-    prices = _fetch_index_close_prices(index_code, mat_date, end_date)
-    if not prices or len(prices) < 2:
-        return None
-
-    # 取落地日收盘价（或之后最近交易日）
-    sorted_dates = sorted(prices.keys())
-    base_price = None
-    for d in sorted_dates:
-        if d >= mat_date:
-            base_price = prices[d]
-            break
-    if base_price is None:
-        return None
-
-    # 取验证窗口结束日收盘价
-    verify_price = prices[sorted_dates[-1]]
-    if verify_price == base_price:
-        return None
-
-    change_pct = (verify_price - base_price) / base_price * 100
-
-    # 方向判定（阈值 1%）
     direction = event.get("direction", "neutral")
     THRESHOLD = 1.0
-    if abs(change_pct) < THRESHOLD:
-        status = "flat"
-    elif direction == "positive" and change_pct > 0:
-        status = "correct"
-    elif direction == "negative" and change_pct < 0:
-        status = "correct"
-    elif direction == "neutral":
-        status = "flat"
+
+    # 遍历所有板块，分别验证
+    sector_results = []
+    for s in sectors:
+        key = _normalize_sector(s)
+        if not key or key not in SECTOR_TO_INDEX:
+            continue
+        codes = SECTOR_TO_INDEX[key]
+        if not codes:
+            continue
+        idx_code = codes[0]
+
+        prices = _fetch_index_close_prices(idx_code, mat_date, end_date)
+        if not prices or len(prices) < 2:
+            continue
+
+        sorted_dates = sorted(prices.keys())
+        base_price = None
+        for d in sorted_dates:
+            if d >= mat_date:
+                base_price = prices[d]
+                break
+        if base_price is None:
+            continue
+
+        verify_price = prices[sorted_dates[-1]]
+        if verify_price == base_price:
+            continue
+
+        s_change = (verify_price - base_price) / base_price * 100
+
+        # 单板块方向判定
+        if abs(s_change) < THRESHOLD:
+            s_status = "flat"
+        elif direction == "positive" and s_change > 0:
+            s_status = "correct"
+        elif direction == "negative" and s_change < 0:
+            s_status = "correct"
+        elif direction == "neutral":
+            s_status = "flat"
+        else:
+            s_status = "wrong"
+
+        sector_results.append({
+            "sector": s,
+            "index_code": idx_code,
+            "index_name": key,
+            "change_pct": round(s_change, 2),
+            "status": s_status,
+            "base_price": round(base_price, 2),
+            "verify_price": round(verify_price, 2),
+        })
+
+    if not sector_results:
+        return None
+
+    # 多板块综合判定：多数投票 + 加权平均涨跌幅
+    correct_count = sum(1 for r in sector_results if r["status"] == "correct")
+    wrong_count = sum(1 for r in sector_results if r["status"] == "wrong")
+    flat_count = sum(1 for r in sector_results if r["status"] == "flat")
+
+    if correct_count > wrong_count:
+        final_status = "correct"
+    elif wrong_count > correct_count:
+        final_status = "wrong"
     else:
-        status = "wrong"
+        final_status = "flat"
+
+    avg_change = sum(r["change_pct"] for r in sector_results) / len(sector_results)
+    # 单板块时保留原逻辑（阈值判定）
+    if len(sector_results) == 1:
+        final_status = sector_results[0]["status"]
+
+    # 取第一个板块作为主指数（兼容旧前端展示）
+    primary = sector_results[0]
 
     return {
-        "status": status,
-        "change_pct": round(change_pct, 2),
+        "status": final_status,
+        "change_pct": round(avg_change, 2),
         "verified_date": today,
-        "index_code": index_code,
-        "index_name": index_name,
+        "index_code": primary["index_code"],
+        "index_name": primary["index_name"],
         "direction_predicted": direction,
         "window_days": window_days,
-        "base_price": round(base_price, 2),
-        "verify_price": round(verify_price, 2),
+        "base_price": primary["base_price"],
+        "verify_price": primary["verify_price"],
+        "sector_results": sector_results,
+        "sector_summary": {
+            "correct": correct_count,
+            "wrong": wrong_count,
+            "flat": flat_count,
+            "total": len(sector_results),
+        },
     }
 
 
@@ -1212,6 +1257,17 @@ def verify_materialized_events(trace_id: str = "") -> dict:
             logger.warning(f"[event_radar:{trace_id}] 验证事件 {ev.get('event_id')} 失败: {e}")
 
     logger.info(f"[event_radar:{trace_id}] 验证完成: {counts}")
+
+    # P0-2: 验证完成后回溯校准已存在的 upcoming/imminent 事件
+    try:
+        recal_counts = recalibrate_existing_events(trace_id)
+        counts["recalibrated"] = recal_counts["recalibrated"]
+        counts["confidence_changed"] = recal_counts["confidence_changed"]
+        counts["direction_changed"] = recal_counts["direction_changed"]
+    except Exception as e:
+        logger.warning(f"[event_radar:{trace_id}] 回溯校准失败: {e}")
+        counts["recalibrated"] = 0
+
     return counts
 
 
@@ -1295,3 +1351,97 @@ def _calibrate_confidence(original_confidence: float, sectors: list) -> float:
     calibrated = original_confidence * best_acc
     # 下限 0.1，避免过度惩罚
     return max(calibrated, 0.1)
+
+
+def _calibrate_direction(original_direction: str, sectors: list) -> tuple[str, str]:
+    """根据板块历史方向错误率校准事件方向。
+
+    若某板块近 10 个验证事件中方向错误率 > 40%，将该板块的新事件方向降级为 neutral。
+
+    Returns:
+        (calibrated_direction, reason) — reason 为空字符串表示未降级
+    """
+    if original_direction == "neutral":
+        return original_direction, ""
+
+    stats = get_sector_accuracy_stats()
+    by_sector = stats.get("by_sector", {})
+
+    for s in sectors:
+        key = _normalize_sector(s) or s
+        s_stat = by_sector.get(key)
+        if not s_stat or s_stat.get("total", 0) < 5:  # 最少 5 个样本才校准方向
+            continue
+        wrong_rate = s_stat.get("wrong", 0) / max(s_stat["total"], 1)
+        if wrong_rate > 0.4:
+            reason = f"板块「{key}」方向错误率 {wrong_rate:.0%}（{s_stat['wrong']}/{s_stat['total']}），降级为中性"
+            return "neutral", reason
+
+    return original_direction, ""
+
+
+def recalibrate_existing_events(trace_id: str = "") -> dict:
+    """回溯校准已存在的 upcoming/imminent 事件。
+
+    在 verify_materialized_events 完成后调用，用最新的板块准确率重新校准
+    尚未落地的事件的 confidence 和 direction。
+
+    Returns:
+        {"recalibrated": int, "confidence_changed": int, "direction_changed": int}
+    """
+    from db.market_events import list_active_events, update_market_event_fields
+    from db.market_events import update_market_event_status
+
+    trace_id = trace_id or datetime.now().strftime("%Y%m%d%H%M%S")
+    active = list_active_events()
+    if not active:
+        return {"recalibrated": 0, "confidence_changed": 0, "direction_changed": 0}
+
+    counts = {"recalibrated": 0, "confidence_changed": 0, "direction_changed": 0}
+    for ev in active:
+        try:
+            sectors = json.loads(ev.get("affected_sectors") or "[]")
+            if not sectors:
+                continue
+
+            old_conf = float(ev.get("confidence", 0.5))
+            old_dir = ev.get("direction", "neutral")
+
+            # 重新校准 confidence
+            new_conf = _calibrate_confidence(old_conf, sectors)
+            # 重新校准 direction
+            new_dir, dir_reason = _calibrate_direction(old_dir, sectors)
+
+            conf_changed = abs(new_conf - old_conf) > 0.05
+            dir_changed = new_dir != old_dir
+
+            if not conf_changed and not dir_changed:
+                continue
+
+            # 更新事件字段
+            updates = {}
+            if conf_changed:
+                updates["confidence"] = new_conf
+                counts["confidence_changed"] += 1
+            if dir_changed:
+                updates["direction"] = new_dir
+                counts["direction_changed"] += 1
+
+            update_market_event_fields(ev["event_id"], updates)
+
+            # 追加 timeline
+            timeline_msgs = []
+            if conf_changed:
+                timeline_msgs.append(f"回溯校准置信度：{old_conf:.0%}→{new_conf:.0%}")
+            if dir_changed:
+                timeline_msgs.append(f"回溯校准方向：{old_dir}→{new_dir}（{dir_reason}）")
+            if timeline_msgs:
+                update_market_event_status(ev["event_id"], ev.get("status", "upcoming"),
+                                           timeline_note="；".join(timeline_msgs))
+
+            counts["recalibrated"] += 1
+        except Exception as e:
+            logger.warning(f"[event_radar:{trace_id}] 回溯校准事件 {ev.get('event_id')} 失败: {e}")
+
+    logger.info(f"[event_radar:{trace_id}] 回溯校准完成: {counts}")
+    return counts

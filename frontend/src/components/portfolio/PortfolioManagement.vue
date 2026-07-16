@@ -345,6 +345,18 @@ const navChartData = computed(() => {
     }],
   }
 })
+
+const navChartMarkPoints = computed(() => {
+  const txs = chartData.value?.transactions
+  if (!txs?.length) return []
+  return txs.map(t => ({
+    type: t.transaction_type,
+    date: t.transaction_date,
+    price: t.price,
+    shares: t.shares,
+    amount: t.amount,
+  }))
+})
 const loading = ref(false)
 const showForm = ref(false)
 const editingId = ref(null)
@@ -375,6 +387,7 @@ const detailFundName = ref('')
 // ── 基金 5 年走势图 ──
 const chartMode = ref('')  // '' | 'detail' | 'chart5y'
 const fundChartData = ref(null)  // 5年净值数据
+const fundChartTransactions = ref([])  // 5年图表交易数据
 const fundChartLoading = ref(false)
 const chartSearchQuery = ref('')
 const chartSearching = ref(false)
@@ -407,223 +420,138 @@ const fundChartStats = computed(() => {
   }
 })
 
-// ── 5 年走势图计算属性 ──
-const chart5yW = 700, chart5yH = 300, chart5yPL = 55, chart5yPR = 20, chart5yPT = 20, chart5yPB = 20
+// ── 5 年走势图 ECharts ──
+const chart5yRef = ref(null)
+let chart5yInstance = null
 
-const chart5yRange = computed(() => {
-  const data = chart5yDisplayData.value
-  if (!data?.length) return { min: -5, max: 5, range: 10 }
-  const firstNav = fundChartData.value[0]?.nav
-  if (!firstNav) return { min: -5, max: 5, range: 10 }
-  let min = Infinity, max = -Infinity
-  for (const d of data) {
-    const pct = (d.nav - firstNav) / firstNav * 100
-    if (pct < min) min = pct
-    if (pct > max) max = pct
-  }
-  const pad = Math.max((max - min) * 0.1, 1)
-  return { min: min - pad, max: max + pad, range: max - min + 2 * pad }
+const chart5yTransactions = computed(() => {
+  return fundChartTransactions.value || []
 })
 
-function chart5yScaleY(pct) {
-  const { min, range } = chart5yRange.value
-  return chart5yPT + (1 - (pct - min) / range) * (chart5yH - chart5yPT - chart5yPB)
+function renderChart5y() {
+  if (!chart5yRef.value || !fundChartData.value?.length) return
+  import('echarts').then(({ default: echarts }) => {
+    if (!chart5yRef.value) return
+    if (chart5yInstance) chart5yInstance.dispose()
+    chart5yInstance = echarts.init(chart5yRef.value, isDark.value ? 'dark' : null)
+
+    const data = fundChartData.value
+    const dates = data.map(d => d.date)
+    const navs = data.map(d => d.nav)
+    const firstNav = navs[0]
+    const pcts = navs.map(n => ((n - firstNav) / firstNav * 100))
+
+    const txs = chart5yTransactions.value
+    const buyPoints = txs.filter(t => t.transaction_type === 'buy').map(t => ({
+      name: '买入',
+      coord: [t.transaction_date, t.price],
+      value: t.amount ? `¥${t.amount.toLocaleString()}` : '',
+      symbol: 'triangle',
+      symbolRotate: 180,
+      symbolSize: 12,
+      itemStyle: { color: '#ef4444' },
+      label: { show: false },
+    }))
+    const sellPoints = txs.filter(t => t.transaction_type === 'sell').map(t => ({
+      name: '卖出',
+      coord: [t.transaction_date, t.price],
+      value: t.amount ? `¥${t.amount.toLocaleString()}` : '',
+      symbol: 'triangle',
+      symbolRotate: 0,
+      symbolSize: 12,
+      itemStyle: { color: '#22c55e' },
+      label: { show: false },
+    }))
+
+    const bgColor = isDark.value ? '#0a0e1a' : '#ffffff'
+    const textColor = isDark.value ? '#9aa0a6' : '#64748b'
+    const gridColor = isDark.value ? 'rgba(255,255,255,0.06)' : '#f1f5f9'
+
+    chart5yInstance.setOption({
+      backgroundColor: 'transparent',
+      tooltip: {
+        trigger: 'axis',
+        triggerOn: 'click',
+        backgroundColor: isDark.value ? 'rgba(13,18,32,0.95)' : '#ffffff',
+        borderColor: isDark.value ? 'rgba(255,255,255,0.1)' : '#e2e8f0',
+        textStyle: { color: isDark.value ? '#e8eaed' : '#0f172a', fontSize: 12 },
+        formatter: (params) => {
+          const p = Array.isArray(params) ? params[0] : params
+          if (!p) return ''
+          const idx = p.dataIndex
+          const d = data[idx]
+          const pct = pcts[idx]
+          return `<div style="font-size:12px">
+            <div style="margin-bottom:4px">${d.date}</div>
+            <div>净值: <b>${d.nav.toFixed(4)}</b></div>
+            <div style="color:${pct >= 0 ? '#ef4444' : '#22c55e'}">${pct >= 0 ? '+' : ''}${pct.toFixed(2)}%</div>
+          </div>`
+        },
+      },
+      legend: {
+        data: ['净值', ...(buyPoints.length ? ['买入'] : []), ...(sellPoints.length ? ['卖出'] : [])],
+        bottom: 0,
+        textStyle: { color: textColor, fontSize: 11 },
+      },
+      grid: { left: '8%', right: '5%', top: '8%', bottom: '15%' },
+      xAxis: {
+        type: 'category',
+        data: dates,
+        axisLabel: { color: textColor, fontSize: 10, rotate: dates.length > 60 ? 30 : 0 },
+        axisLine: { lineStyle: { color: gridColor } },
+      },
+      yAxis: {
+        type: 'value',
+        name: '净值',
+        nameTextStyle: { color: textColor, fontSize: 10 },
+        splitLine: { lineStyle: { color: gridColor, type: 'dashed' } },
+        axisLabel: { color: textColor, fontSize: 10 },
+        scale: true,
+      },
+      dataZoom: [
+        { type: 'inside', start: 0, end: 100 },
+        { type: 'slider', start: 0, end: 100, height: 20, bottom: 4,
+          borderColor: 'transparent',
+          backgroundColor: isDark.value ? 'rgba(255,255,255,0.04)' : '#f8fafc',
+          fillerColor: 'rgba(201,168,76,0.12)',
+          handleStyle: { color: '#c9a84c' },
+          textStyle: { color: textColor, fontSize: 10 },
+        },
+      ],
+      series: [
+        {
+          name: '净值',
+          type: 'line',
+          data: navs,
+          smooth: true,
+          symbol: 'circle',
+          symbolSize: 3,
+          lineStyle: { width: 2, color: '#c9a84c' },
+          itemStyle: { color: '#c9a84c' },
+          areaStyle: {
+            color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
+              { offset: 0, color: 'rgba(201,168,76,0.2)' },
+              { offset: 1, color: 'rgba(201,168,76,0)' },
+            ]),
+          },
+          markPoint: buyPoints.length || sellPoints.length ? {
+            symbol: 'pin',
+            symbolSize: 28,
+            label: { show: false },
+            data: [...buyPoints, ...sellPoints],
+          } : undefined,
+        },
+      ],
+    })
+  })
 }
 
-function chart5yScaleX(i, total) {
-  return chart5yPL + (i / (total - 1 || 1)) * (chart5yW - chart5yPL - chart5yPR)
-}
-
-const chart5yGridY = computed(() => {
-  const lines = []
-  const steps = 5
-  const { min, range } = chart5yRange.value
-  for (let i = 0; i <= steps; i++) {
-    const pct = min + (i / steps) * range
-    lines.push(chart5yScaleY(pct))
-  }
-  return lines
+watch(fundChartData, () => {
+  nextTick(() => renderChart5y())
 })
 
-const chart5yYLabels = computed(() => {
-  const steps = 5
-  const { min, range } = chart5yRange.value
-  const labels = []
-  for (let i = 0; i <= steps; i++) {
-    const pct = min + (i / steps) * range
-    const y = chart5yScaleY(pct)
-    labels.push({ y, label: (pct >= 0 ? '+' : '') + pct.toFixed(1) + '%' })
-  }
-  return labels
-})
-
-const chart5yXLabels = computed(() => {
-  const data = chart5yDisplayData.value
-  if (!data?.length) return []
-  const total = data.length
-  const count = 6
-  const step = Math.max(1, Math.floor((total - 1) / count))
-  const labels = []
-  for (let i = 0; i < total; i += step) {
-    const d = data[i]
-    labels.push({ x: chart5yScaleX(i, total), label: d.date })
-  }
-  const last = data[total - 1]
-  if (labels.length === 0 || labels[labels.length - 1].label !== last.date) {
-    labels.push({ x: chart5yScaleX(total - 1, total), label: last.date })
-  }
-  return labels
-})
-
-const chart5yLinePoints = computed(() => {
-  const data = chart5yDisplayData.value
-  if (!data?.length) return ''
-  const firstNav = fundChartData.value[0].nav
-  return data.map((d, i) => {
-    const pct = (d.nav - firstNav) / firstNav * 100
-    return `${chart5yScaleX(i, data.length)},${chart5yScaleY(pct)}`
-  }).join(' ')
-})
-
-const chart5yZeroY = computed(() => chart5yScaleY(0))
-
-// ── 5 年走势图区域选择（缩放） ──
-const chart5yZoomRange = ref(null)  // { startIdx, endIdx } | null
-const chart5yBrush = ref(null)      // { active, startX, currentX } | null
-
-const chart5yDisplayData = computed(() => {
-  if (!fundChartData.value?.length) return []
-  if (!chart5yZoomRange.value) return fundChartData.value
-  const { startIdx, endIdx } = chart5yZoomRange.value
-  return fundChartData.value.slice(startIdx, endIdx + 1)
-})
-
-function chart5yGetDataIdx(vbX) {
-  const total = chart5yDisplayData.value.length
-  if (!total) return 0
-  const plotW = chart5yW - chart5yPL - chart5yPR
-  const rawIdx = ((vbX - chart5yPL) / plotW) * (total - 1)
-  return Math.max(0, Math.min(total - 1, Math.round(rawIdx)))
-}
-
-function chart5yMouseVbX(event, svg) {
-  const svgRect = svg.getBoundingClientRect()
-  return (event.clientX - svgRect.left) / svgRect.width * chart5yW
-}
-
-function onChart5yMouseDown(event) {
-  if (!chart5yDisplayData.value?.length) return
-  const svg = event.currentTarget
-  const vbX = chart5yMouseVbX(event, svg)
-  chart5yBrush.value = { active: true, startX: vbX, currentX: vbX }
-  chart5yHoverIndex.value = null
-}
-
-function onChart5yMouseMove(event) {
-  const svg = event.currentTarget
-  const vbX = chart5yMouseVbX(event, svg)
-  const data = chart5yDisplayData.value
-  if (!data?.length) return
-
-  // 正在拖拽选择
-  if (chart5yBrush.value?.active) {
-    chart5yBrush.value.currentX = vbX
-    return
-  }
-
-  // 普通 hover
-  const total = data.length
-  const plotW = chart5yW - chart5yPL - chart5yPR
-  const rawIdx = ((vbX - chart5yPL) / plotW) * (total - 1)
-  chart5yHoverIndex.value = Math.max(0, Math.min(total - 1, Math.round(rawIdx)))
-
-  const dp = chart5yHoverPoint.value
-  if (dp) {
-    const svgRect = svg.getBoundingClientRect()
-    const xRatio = svgRect.width / chart5yW
-    const yRatio = svgRect.height / chart5yH
-    const tooltipW = 160 // 预估 tooltip 宽度
-    const px = dp.x * xRatio
-    // 靠近右侧时 tooltip 放左边，避免被遮挡
-    const left = (px + tooltipW > svgRect.width) ? (px - tooltipW - 12) : (px + 12)
-    chart5yTooltipStyle.value = {
-      left: left + 'px',
-      top: (dp.y * yRatio - 10) + 'px',
-    }
-  }
-}
-
-function onChart5yMouseUp(event) {
-  if (!chart5yBrush.value?.active) return
-  const svg = event.currentTarget
-  const vbX = chart5yMouseVbX(event, svg)
-  chart5yBrush.value.active = false
-
-  const startX = Math.min(chart5yBrush.value.startX, vbX)
-  const endX = Math.max(chart5yBrush.value.startX, vbX)
-  const minWidth = (chart5yW - chart5yPL - chart5yPR) * 0.02  // 至少 2% 宽度
-
-  if (endX - startX < minWidth) {
-    // 点击而非拖拽，清除缩放
-    chart5yBrush.value = null
-    return
-  }
-
-  const startIdx = chart5yGetDataIdx(startX)
-  const endIdx = chart5yGetDataIdx(endX)
-  if (startIdx === 0 && endIdx === chart5yDisplayData.value.length - 1) {
-    // 选中全部，等同于重置
-    chart5yZoomRange.value = null
-    chart5yBrush.value = null
-    return
-  }
-  chart5yZoomRange.value = { startIdx, endIdx }
-  chart5yBrush.value = null
-}
-
-function onChart5yMouseLeave() {
-  if (!chart5yBrush.value?.active) {
-    chart5yHoverIndex.value = null
-    chart5yTooltipStyle.value = {}
-  }
-}
-
-function resetChart5yZoom() {
-  chart5yZoomRange.value = null
-  chart5yBrush.value = null
-  chart5yHoverIndex.value = null
-  chart5yTooltipStyle.value = {}
-}
-
-const chart5yBrushRect = computed(() => {
-  if (!chart5yBrush.value?.active) return null
-  const { startX, currentX } = chart5yBrush.value
-  const x = Math.min(startX, currentX)
-  const w = Math.abs(currentX - startX)
-  // 过小不显示
-  if (w < 2) return null
-  return { x, y: 20, w, h: 260 }
-})
-
-// ── 5 年走势图悬浮交互 ──
-const chart5yHoverIndex = ref(null)
-const chart5yTooltipStyle = ref({})
-
-const chart5yHoverPoint = computed(() => {
-  const data = chart5yDisplayData.value
-  if (chart5yHoverIndex.value == null || !data?.length) return null
-  const idx = Math.min(chart5yHoverIndex.value, data.length - 1)
-  const d = data[idx]
-  const firstNav = fundChartData.value[0]?.nav
-  if (!firstNav) return null
-  const pct = (d.nav - firstNav) / firstNav * 100
-  return {
-    ...d,
-    idx,
-    pct,
-    x: chart5yScaleX(idx, data.length),
-    y: chart5yScaleY(pct),
-  }
+watch(isDark, () => {
+  nextTick(() => renderChart5y())
 })
 
 // Add purchase (追加买入) panel — amount-based
@@ -2843,9 +2771,11 @@ async function openFundAnalysis(h) {
   showDetail.value = true
   fundChartLoading.value = true
   fundChartData.value = null
+  fundChartTransactions.value = []
   try {
     const { data } = await getFundNavHistory(h.fund_code, 1825)  // ~5年
     fundChartData.value = data?.nav_history || null
+    fundChartTransactions.value = data?.transactions || []
   } catch (e) {
     fundChartData.value = null
     showToast('获取 5 年净值数据失败', 'error')
@@ -2862,9 +2792,11 @@ async function openWatchlistChart(item) {
   showDetail.value = true
   fundChartLoading.value = true
   fundChartData.value = null
+  fundChartTransactions.value = []
   try {
     const { data } = await getFundNavHistory(item.fund_code, 1825)  // ~5年
     fundChartData.value = data?.nav_history || null
+    fundChartTransactions.value = data?.transactions || []
   } catch (e) {
     fundChartData.value = null
     showToast('获取净值数据失败', 'error')
@@ -2879,7 +2811,7 @@ async function searchAndLoadChart() {
   chartSearchError.value = ''
   chartSearching.value = true
   fundChartData.value = null
-  resetChart5yZoom()
+  fundChartTransactions.value = []
   try {
     // 先查基金名称
     const info = await lookupFundInfo(code)
@@ -2890,6 +2822,7 @@ async function searchAndLoadChart() {
   try {
     const { data } = await getFundNavHistory(code, 1825)
     fundChartData.value = data?.nav_history || null
+    fundChartTransactions.value = data?.transactions || []
     if (!fundChartData.value?.length) {
       chartSearchError.value = '未找到该基金的净值数据'
     }
@@ -2907,9 +2840,10 @@ function switchChartFund(fundCode, fundName) {
   chartSearchError.value = ''
   fundChartLoading.value = true
   fundChartData.value = null
-  resetChart5yZoom()
+  fundChartTransactions.value = []
   getFundNavHistory(fundCode, 1825).then(({ data }) => {
     fundChartData.value = data?.nav_history || null
+    fundChartTransactions.value = data?.transactions || []
   }).catch(() => {
     fundChartData.value = null
   }).finally(() => {
@@ -4051,6 +3985,7 @@ function txDisplayAmount(tx) {
                 :y-names="['净值']"
                 :area="true"
                 :smooth="true"
+                :mark-points="navChartMarkPoints"
                 height="280px"
               />
               <div v-else class="chart-empty">暂无净值数据</div>
@@ -5974,7 +5909,7 @@ function txDisplayAmount(tx) {
             <h3 class="modal-title">
               {{ detailFundName }}
               <span style="font-size:0.75rem;font-weight:400;color:var(--color-text-muted);margin-left:0.5rem">
-                {{ chartMode === 'chart5y' ? '近 5 年净值走势 · 拖拽选择时间段' : '持仓分析' }}
+                {{ chartMode === 'chart5y' ? '近 5 年净值走势 · 点击查看数据点 · 拖拽滑块缩放' : '持仓分析' }}
               </span>
             </h3>
 
@@ -6004,41 +5939,7 @@ function txDisplayAmount(tx) {
                 <span>加载 5 年净值数据...</span>
               </div>
               <div v-else-if="fundChartData" class="fund-chart-5y">
-                <div class="chart-5y-canvas">
-                  <svg class="nav-chart" :viewBox="'0 0 700 300'" preserveAspectRatio="xMidYMid meet" @mousedown="onChart5yMouseDown" @mousemove="onChart5yMouseMove" @mouseup="onChart5yMouseUp" @mouseleave="onChart5yMouseLeave">
-                    <!-- 网格线 -->
-                    <line v-for="(y, i) in chart5yGridY" :key="'g'+i" :x1="55" :y1="y" :x2="680" :y2="y" stroke="var(--color-border-light)" stroke-width="0.5"/>
-                    <!-- Y 轴标签 -->
-                    <text v-for="la in chart5yYLabels" :key="'yl'+la.label" :x="50" :y="la.y + 4" text-anchor="end" fill="var(--color-text-muted)" font-size="11" font-family="monospace">{{ la.label }}</text>
-                    <!-- X 轴标签 -->
-                    <text v-for="la in chart5yXLabels" :key="'xl'+la.label" :x="la.x" :y="296" text-anchor="middle" fill="var(--color-text-muted)" font-size="10">{{ la.label }}</text>
-                    <!-- 净值线 -->
-                    <polyline :points="chart5yLinePoints" fill="none" stroke="var(--color-primary-500)" stroke-width="1.5" stroke-linejoin="round"/>
-                    <!-- 填充 -->
-                    <polyline :points="chart5yLinePoints + ' 680,280 55,280'" fill="url(#chart5yGrad)" opacity="0.12"/>
-                    <!-- 参考基准线(100%) -->
-                    <line x1="55" y1="chart5yZeroY" x2="680" y2="chart5yZeroY" stroke="var(--color-text-muted)" stroke-width="0.8" stroke-dasharray="4,4"/>
-                    <defs>
-                      <linearGradient id="chart5yGrad" x1="0" y1="0" x2="0" y2="1">
-                        <stop offset="0%" stop-color="var(--color-primary-500)"/>
-                        <stop offset="100%" stop-color="var(--color-primary-500)" stop-opacity="0"/>
-                      </linearGradient>
-                    </defs>
-                    <!-- 选择遮罩 -->
-                    <rect v-if="chart5yBrushRect" :x="chart5yBrushRect.x" :y="chart5yBrushRect.y" :width="chart5yBrushRect.w" :height="chart5yBrushRect.h" fill="var(--color-primary-500)" opacity="0.15" stroke="var(--color-primary-500)" stroke-width="0.8" stroke-dasharray="3,3"/>
-                    <!-- hover 竖线 -->
-                    <line v-if="chart5yHoverPoint && !chart5yBrush?.active" :x1="chart5yHoverPoint.x" :y1="20" :x2="chart5yHoverPoint.x" :y2="280" stroke="var(--color-text-muted)" stroke-width="0.8" stroke-dasharray="3,3"/>
-                    <!-- hover 圆点 -->
-                    <circle v-if="chart5yHoverPoint && !chart5yBrush?.active" :cx="chart5yHoverPoint.x" :cy="chart5yHoverPoint.y" r="4" fill="var(--color-bg-card)" stroke="var(--color-primary-500)" stroke-width="2"/>
-                  </svg>
-                  <div v-if="chart5yHoverPoint" class="chart-tooltip" :style="chart5yTooltipStyle">
-                    <div class="tooltip-date">{{ chart5yHoverPoint.date }}</div>
-                    <div class="tooltip-nav">净值: <strong>{{ chart5yHoverPoint.nav?.toFixed(4) }}</strong></div>
-                    <div :class="['tooltip-nav', chart5yHoverPoint.pct >= 0 ? 'profit-positive' : 'profit-negative']">
-                      {{ (chart5yHoverPoint.pct >= 0 ? '+' : '') + chart5yHoverPoint.pct?.toFixed(2) + '%' }}
-                    </div>
-                  </div>
-                </div>
+                <div ref="chart5yRef" class="chart-5y-canvas" style="height:300px"></div>
                 <!-- 涨跌幅统计 -->
                 <div class="chart-5y-stats" v-if="fundChartStats">
                   <div class="stat-card-stat">
@@ -6075,7 +5976,6 @@ function txDisplayAmount(tx) {
                 <p>暂无近 5 年净值数据</p>
               </div>
               <div class="modal-actions chart5y-actions" style="margin-top:1rem">
-                <button v-if="chart5yZoomRange" class="btn-ghost btn-sm" @click="resetChart5yZoom">恢复全景</button>
                 <button class="btn-secondary" @click="showDetail = false">关闭</button>
               </div>
             </template>

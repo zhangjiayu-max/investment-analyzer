@@ -6,6 +6,7 @@ import { isDark } from '../../composables/useTheme'
 const props = defineProps({
   symbol: String,
   name: String,
+  transactions: { type: Array, default: () => [] },  // [{ type: 'buy'|'sell', date, price, shares, amount }]
 })
 
 const chartRef = ref(null)
@@ -176,6 +177,21 @@ function renderChart(plotlyData) {
           borderColor: '#ef4444',
           borderColor0: '#22c55e',
         },
+        ...(props.transactions.length ? {
+          markPoint: {
+            symbol: 'pin',
+            symbolSize: 28,
+            label: { show: false },
+            data: props.transactions.map(t => ({
+              name: t.type === 'buy' ? '买入' : '卖出',
+              coord: [t.date, t.price],
+              symbol: t.type === 'buy' ? 'triangle' : 'triangle',
+              symbolRotate: t.type === 'buy' ? 180 : 0,
+              symbolSize: 12,
+              itemStyle: { color: t.type === 'buy' ? '#ef4444' : '#22c55e' },
+            })),
+          },
+        } : {}),
       },
       {
         name: 'MA5',
