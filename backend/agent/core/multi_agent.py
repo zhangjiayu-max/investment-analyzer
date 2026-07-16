@@ -840,11 +840,18 @@ def run_specialist(agent_key: str, query: str, context: str = "",
     is_fallback = answer in _FALLBACK_ANSWERS or answer.startswith("（执行失败：") or len(answer.strip()) < 50
     status = "failed" if is_fallback else "success"
 
+    # 剥离 A2A JSON 块，analysis 字段只保留纯 Markdown 给用户
+    import re as _re
+    _json_match = _re.search(r'```json\s*\n.*?\n```', answer, _re.DOTALL)
+    clean_analysis = answer
+    if _json_match:
+        clean_analysis = (answer[:_json_match.start()] + answer[_json_match.end():]).strip()
+
     return {
         "agent_key": agent_key,
         "agent": agent["name"],
         "icon": agent["icon"],
-        "analysis": answer,
+        "analysis": clean_analysis,
         "status": status,
         "structured": _parse_structured_output(answer, agent_key, agent["name"], trace_id, tool_calls_log, duration_ms),
         "tool_calls": tool_calls_log,

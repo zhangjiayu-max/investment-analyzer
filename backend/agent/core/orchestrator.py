@@ -4841,8 +4841,8 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
                                               trace_id=trace_id)
             result_queue.put((0, tc, args, agent_key, agent_info, result_str))
             _bb_written_during_execution = False
-        elif shared_blackboard_enabled and 2 <= len(tool_tasks) <= 3:
-            # P1：统一黑板 — 2-3 专家串行执行，后执行者能看到前序结构化结论
+        elif shared_blackboard_enabled and 2 <= len(tool_tasks) <= 4:
+            # P1：统一黑板 — 2-4 专家串行执行，后执行者能看到前序结构化结论
             _bb_written_during_execution = True
             for idx, (tc, args, expert_query, agent_key, agent_info) in enumerate(tool_tasks):
                 _check_cancel(cancel_event)

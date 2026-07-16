@@ -64,10 +64,16 @@ _KEYWORD_ROUTES = [
     (["买", "卖", "操作", "定投", "止盈", "加仓", "减仓", "上车", "赚不到钱", "盈利", "赚钱"], ["allocation_advisor", "risk_assessor", "valuation_expert"]),
     (["文章", "公众号", "解读", "新闻"], ["article_expert"]),
     (["基金", "选基", "基金分析"], ["fund_analyst"]),
-    (["宏观", "经济", "利率", "政策"], ["macro_strategist"]),
+    (["宏观", "经济", "利率"], ["macro_strategist"]),
+    (["政策", "利好", "利空"], ["macro_strategist", "market_analyst", "valuation_expert"]),
     # ── 周期/行业/机构相关路由 ──
     (["周期", "景气", "产能", "供需", "拐点"], ["market_analyst", "valuation_expert"]),
+    (["医药", "医疗", "生物医药", "创新药", "中药"], ["macro_strategist", "valuation_expert", "fund_analyst"]),
     (["锂", "锂矿", "锂电池", "新能源", "储能", "光伏", "半导体", "芯片"], ["fund_analyst", "valuation_expert"]),
+    (["白酒", "食品饮料", "消费", "食品"], ["fund_analyst", "valuation_expert"]),
+    (["银行", "金融", "券商", "保险"], ["fund_analyst", "valuation_expert", "market_analyst"]),
+    (["军工", "国防", "航天", "军品"], ["fund_analyst", "valuation_expert"]),
+    (["房地产", "地产", "楼市", "建材"], ["macro_strategist", "fund_analyst", "valuation_expert"]),
     (["机构", "主力", "散户", "做空", "筹码"], ["risk_assessor", "fund_analyst", "allocation_advisor"]),
     # ── 业绩报告相关路由 ──
     (["业绩", "财报", "业报", "业绩预告", "业绩快报", "年报", "季报", "半年报"], ["market_analyst", "fund_analyst"]),
