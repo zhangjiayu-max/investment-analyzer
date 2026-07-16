@@ -725,7 +725,51 @@ def _build_final_synthesis_prompt(specialist_results: list, routed_specialists: 
             "而非「经过交叉评审后降级」。诚实描述分析过程。"
         )
 
+    # B3: 统一报告格式 — 强制纯 Markdown，禁止 JSON 代码块
+    prompt += (
+        "\n\n## 输出格式规范（必须遵守）\n"
+        "- 最终输出必须是**纯 Markdown 叙述式报告**，禁止使用 ```json 代码块\n"
+        "- 如需呈现结构化数据，使用 Markdown 表格或列表\n"
+        "- 禁止输出原始 JSON，所有结论必须转化为自然语言 + Markdown 格式化\n"
+        '- 投资建议部分**禁止使用绝对化措辞**（一定/必然/绝对/肯定），'
+        '改用大概率/预计/较可能等表述'
+    )
+
     return prompt
+
+
+def _filter_absolutism(text: str) -> str:
+    """B4: 绝对化措辞后处理过滤。
+
+    投资建议中"一定/必然/绝对/肯定"等绝对化表述容易误导用户，
+    替换为概率性表述。保留"必须遵守红线"等规则性表述（通过上下文判断）。
+    """
+    if not text:
+        return text
+    try:
+        from db.config import get_config_bool
+        if not get_config_bool("agent.absolutism_filter_enabled", True):
+            return text
+    except Exception:
+        pass
+    # 仅替换投资结论类绝对化措辞（保留"必须/禁止"等规则性表述）
+    replacements = [
+        ("一定会涨", "大概率上涨"),
+        ("一定会跌", "大概率下跌"),
+        ("一定会", "大概率会"),
+        ("肯定会涨", "大概率上涨"),
+        ("肯定会跌", "大概率下跌"),
+        ("肯定会", "可能会"),
+        ("必然上涨", "预计上涨"),
+        ("必然下跌", "预计下跌"),
+        ("必然会", "预计会"),
+        ("必然", "预计"),
+        ("绝对会", "较可能会"),
+        ("百分之百", "大概率"),
+    ]
+    for old, new in replacements:
+        text = text.replace(old, new)
+    return text
 
 
 def _validate_and_repair(query: str, answer: str, specialist_results: list,
@@ -1000,6 +1044,15 @@ def should_run_cross_review(
         return False
     if len(specialist_results) < min_specialists:
         return False
+
+    # B1: 复杂度强制触发 — complex/medium 即使无冲突也强制交叉审阅（发挥魔鬼代言人作用）
+    try:
+        force_on_complexity = get_orchestration_config("cross_review_force_on_complexity", "true") == "true"
+    except Exception:
+        force_on_complexity = True
+    if force_on_complexity and complexity in ("complex", "medium") and len(specialist_results) >= 1:
+        logger.info(f"交叉审阅: complexity={complexity} 强制触发（魔鬼代言人/盲点检查），专家数={len(specialist_results)}")
+        return not OrchestratorOptimizer.should_skip_cross_review(specialist_results, complexity)
 
     has_conflicts = conflicts and conflicts.get("detected")
 
@@ -1883,6 +1936,34 @@ def clarify_requirement(query: str, trace_id: str = "") -> dict:
             logger.warning(f"澄清置信度过低 ({confidence}),降级为 simple")
             complexity = "simple"
             specialists = ["valuation_expert"]
+
+        # B2: 强制复杂度→专家数量配额（complex≥3, medium≥2，避免复杂问题只有1个专家）
+        try:
+            from db.config import get_config_bool as _gcb
+            quota_enabled = _gcb("agent.specialist_quota_enabled", True)
+        except Exception:
+            quota_enabled = True
+        if quota_enabled and complexity in ("complex", "medium") and specialists:
+            quota_min = 3 if complexity == "complex" else 2
+            try:
+                from db.config import get_config_int
+                quota_min = get_config_int(
+                    f"agent.complexity_min_specialists_{complexity}", quota_min)
+            except Exception:
+                pass
+            if len(specialists) < quota_min:
+                # 按优先级补充专家，确保视角多样性
+                fallback_priority = [
+                    "risk_assessor", "allocation_advisor",
+                    "market_analyst", "macro_strategist",
+                    "fund_analyst", "valuation_expert",
+                ]
+                for fb in fallback_priority:
+                    if len(specialists) >= quota_min:
+                        break
+                    if fb in valid_specialists and fb not in specialists:
+                        specialists.append(fb)
+                        logger.info(f"专家配额补充: {fb} (complexity={complexity}, 目标≥{quota_min})")
 
         # 提取 LLM 规划的专家任务和交叉审阅预判
         specialist_tasks = result.get("specialist_tasks", {})
@@ -3196,7 +3277,7 @@ def orchestrate(query: str, history: list, rag_context: str = "", cancel_event: 
                 conflicts = detect_conflicts_smart(specialist_results, refined_query, trace_id)
 
                 cross_review_enabled = get_orchestration_config("cross_review_enabled", "true") == "true"
-                cross_review_min = int(get_orchestration_config("cross_review_min_specialists", "2"))
+                cross_review_min = int(get_orchestration_config("cross_review_min_specialists", "1"))
                 cross_review_min_sev = get_orchestration_config("cross_review_min_severity", "medium")
                 # 从 clarification 中获取 LLM 预判的 need_cross_review
                 predicted_need_cr = False
@@ -3577,7 +3658,7 @@ def orchestrate(query: str, history: list, rag_context: str = "", cancel_event: 
             temperature=get_config_float('llm.temperature_agent', 0.3),
             max_tokens=get_config_int('llm.max_tokens_orchestrator', 8192),
         )
-        final_answer = response.choices[0].message.content or ""
+        final_answer = _filter_absolutism(response.choices[0].message.content or "")
     except Exception:
         final_answer = "分析过程较长,请参考以上各专家的分析结果。"
 
@@ -4316,7 +4397,7 @@ def _stream_handle_no_tool_calls(msg, specialist_results: list, all_tool_calls: 
     _conflicts_cache: dict = {}
     conflicts = _detect_conflicts_cached(specialist_results, refined_query, trace_id, _conflicts_cache)
     cross_review_enabled = get_orchestration_config("cross_review_enabled", "true") == "true"
-    cross_review_min = int(get_orchestration_config("cross_review_min_specialists", "2"))
+    cross_review_min = int(get_orchestration_config("cross_review_min_specialists", "1"))
     cross_review_min_sev = get_orchestration_config("cross_review_min_severity", "medium")
     predicted_need_cr = False
     if isinstance(clarification, dict):
@@ -4586,7 +4667,7 @@ def _stream_final_synthesis(query: str, refined_query: str, specialists: list,
                     temperature=get_config_float('llm.temperature_agent', 0.3),
                     max_tokens=get_config_int('llm.max_tokens_orchestrator', 8192),
                 )
-                final_answer = response.choices[0].message.content or ""
+                final_answer = _filter_absolutism(response.choices[0].message.content or "")
         if not final_answer:
             final_answer = "分析过程较长,请参考以上各专家的分析结果。"
     except CancelledError:

@@ -238,6 +238,13 @@ DEFAULT_CONFIGS = [
     ('agent.behavioral_advisor_enabled', 'true', '行为金融学专家开关：识别追涨杀跌/损失厌恶/处置效应/锚定效应等6大偏差，给行为纠偏建议', 'agent'),
     ('agent.self_reflection_cross_check_enabled', 'false', '自我反思跨专家盲点检查开关（默认关，需手动开）：反思增加第5维度，检查跨专家盲点', 'agent'),
 
+    # 持仓幻觉修复 + 分析质量提升（2026-07-16）
+    ('agent.cross_review_force_on_complexity', 'true', '复杂度强制交叉审阅开关：complex/medium即使无冲突也强制触发交叉审阅（魔鬼代言人/盲点检查）', 'agent'),
+    ('agent.specialist_quota_enabled', 'true', '专家数量配额开关：complex≥3、medium≥2，不足时按优先级补充风险/配置/市场专家', 'agent'),
+    ('agent.complexity_min_specialists_complex', '3', 'complex复杂度最少专家数', 'agent'),
+    ('agent.complexity_min_specialists_medium', '2', 'medium复杂度最少专家数', 'agent'),
+    ('agent.absolutism_filter_enabled', 'true', '绝对化措辞过滤开关：最终回答后处理替换"一定/必然/绝对/肯定"为概率性表述', 'agent'),
+
     # 理财决策升级 6 项配置（默认全部开启 — 最强版本）
     ('attribution.enabled', 'true', '收益归因分析开关', 'decision_upgrade'),
     ('behavior_diagnosis.enabled', 'true', '行为金融诊断开关', 'decision_upgrade'),

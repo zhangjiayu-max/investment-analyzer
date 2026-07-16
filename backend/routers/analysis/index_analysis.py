@@ -123,10 +123,11 @@ async def _run_index_analysis_async(history_id: int, req_data: dict, agent: dict
             matched = [h for h in all_holdings if h.get("index_code") and h["index_code"] == req.index_code]
             if req.index_name:
                 keywords = req.index_name.replace("指数", "").strip()
-                fuzzy_matched = [h for h in all_holdings
-                                 if h.get("fund_name") and keywords in h["fund_name"]
-                                 and h not in matched]
-                matched.extend(fuzzy_matched)
+                if keywords:  # 修复：空 keywords 会使 "" in fund_name 恒为 True，错误匹配全部持仓
+                    fuzzy_matched = [h for h in all_holdings
+                                     if h.get("fund_name") and keywords in h["fund_name"]
+                                     and h not in matched]
+                    matched.extend(fuzzy_matched)
             if matched:
                 portfolio_lines = []
                 total_value = sum(h.get("current_value", 0) for h in all_holdings if h.get("current_value"))
@@ -209,9 +210,33 @@ async def _run_index_analysis_async(history_id: int, req_data: dict, agent: dict
     # 6. 拼装 prompt
     full_prompt = agent["system_prompt"]
 
-    # 注入组合约束
+    # 注入组合约束（按字段语义分段标注，防止 LLM 把历史决策/市场数据误认为持仓）
     if facts_block:
-        full_prompt += f"\n\n## 组合约束（系统注入，优先级最高）\n```json\n{facts_block}\n```"
+        try:
+            facts = json.loads(facts_block)
+            # 仅注入真实持仓相关字段 + 约束红线，剔除易致幻的历史字段
+            portfolio_relevant = {
+                "持仓快照": facts.get("snapshot", {}),
+                "组合约束": facts.get("constraints", {}),
+            }
+            # 市场参考数据单独标注，明确不是持仓
+            market_ref = {
+                "市场指数估值参考": facts.get("market", {}).get("indices", []),
+                "市场状态": facts.get("market_state", {}),
+            }
+            full_prompt += (
+                f"\n\n## 组合约束（系统注入，仅约束加仓红线）\n```json\n"
+                f"{json.dumps(portfolio_relevant, ensure_ascii=False, indent=2, default=str)}\n```"
+                f"\n\n## 市场参考数据（仅作参考，**不是用户持仓**，禁止当作持仓引用）\n```json\n"
+                f"{json.dumps(market_ref, ensure_ascii=False, indent=2, default=str)}\n```"
+            )
+            # recent_decisions / recent_analyses 不注入（历史数据易致幻觉）
+        except Exception:
+            # 降级：原整块注入但加显著警告
+            full_prompt += (
+                f"\n\n## 组合约束（系统注入）\n```json\n{facts_block}\n```\n"
+                "⚠️ 注意：以下 JSON 中的 recent_decisions/market 字段不是用户持仓，禁止当作持仓引用。"
+            )
 
     full_prompt += """
 
