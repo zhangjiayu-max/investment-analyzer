@@ -1874,7 +1874,7 @@ def route_to_specialists_by_keywords(query: str, complexity: str = "complex") ->
     # ── 根据复杂度上限截断，防止过度调度 ──
     MAX_SPECIALISTS = {
         "simple": 1,
-        "medium": 2,
+        "medium": 3,
         "complex": 4,
     }
     max_allowed = MAX_SPECIALISTS.get(complexity, 4)
