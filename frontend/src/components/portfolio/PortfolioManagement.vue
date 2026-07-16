@@ -430,7 +430,9 @@ const chart5yTransactions = computed(() => {
 
 function renderChart5y() {
   if (!chart5yRef.value || !fundChartData.value?.length) return
-  import('echarts').then(({ default: echarts }) => {
+  // ECharts 6 无 default export，需兼容 v5/v6
+  import('echarts').then(mod => {
+    const echarts = mod.default || mod
     if (!chart5yRef.value) return
     if (chart5yInstance) chart5yInstance.dispose()
     chart5yInstance = echarts.init(chart5yRef.value, isDark.value ? 'dark' : null)
