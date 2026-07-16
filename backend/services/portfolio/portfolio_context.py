@@ -175,6 +175,120 @@ def build_portfolio_context(user_id: str = "default") -> str:
         return ""
 
 
+def build_bond_fund_holdings_context(user_id: str = "default") -> str:
+    """构建债券/混合型基金的底层持仓上下文，供专家分析亏损归因时使用。
+
+    仅当组合中债券占比 > 50% 时才返回有意义的内容，否则返回空字符串。
+    获取每个债券/混合型基金的重仓股、可转债占比、资产配置，
+    超时 5s/基金，失败跳过。
+    """
+    try:
+        from db import list_holdings, get_cash_balance
+        from db.portfolio import get_fund_holdings
+
+        holdings = list_holdings(user_id)
+        active = [h for h in holdings if (h.get("shares") or 0) > 0]
+        if not active:
+            return ""
+
+        total_value = sum(h.get("current_value", 0) or 0 for h in active)
+        if total_value <= 0:
+            return ""
+
+        # 计算债券+混合型占比
+        bond_value = 0
+        bond_funds = []
+        for h in active:
+            cat = h.get("fund_category") or "equity"
+            value = h.get("current_value", 0) or 0
+            if cat in ("bond", "hybrid"):
+                bond_value += value
+                bond_funds.append(h)
+
+        if total_value <= 0 or bond_value / total_value < 0.3:
+            return ""  # 债券占比 < 30%，不需要底层持仓分析
+
+        lines = ["## 债券/混合型基金底层持仓分析"]
+        lines.append("> 以下数据用于亏损归因分析，帮助判断下跌是来自权益端还是固收端。")
+        lines.append("")
+
+        for h in bond_funds[:5]:  # 最多 5 只
+            fund_code = h.get("fund_code", "")
+            fund_name = h.get("fund_name", fund_code)
+            value = h.get("current_value", 0) or 0
+            pct = value / total_value * 100
+            pr = h.get("profit_rate", 0) or 0
+
+            # 获取基金底层持仓（超时 5s）
+            try:
+                import concurrent.futures
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                    future = executor.submit(get_fund_holdings, fund_code)
+                    try:
+                        fund_data = future.result(timeout=5)
+                    except concurrent.futures.TimeoutError:
+                        fund_data = None
+            except Exception:
+                fund_data = None
+
+            if not fund_data:
+                continue
+
+            lines.append(f"### {fund_name}（{fund_code}）")
+            lines.append(f"- 占组合: {pct:.1f}% | 盈亏率: {pr:+.2%}")
+
+            # 股票重仓 top 3
+            stocks = fund_data.get("top_stocks", [])
+            if stocks:
+                stock_strs = []
+                for s in stocks[:3]:
+                    sn = s.get("stock_name", "?")
+                    sp = s.get("pct_nav", "?")
+                    stock_strs.append(f"{sn}({sp}%)")
+                lines.append(f"- 重仓股: {', '.join(stock_strs)}")
+
+            # 可转债占比
+            bond_summary = fund_data.get("bond_type_summary", {})
+            if bond_summary:
+                cb_pct = bond_summary.get("可转债", 0)
+                if cb_pct and cb_pct > 1:
+                    parts = [f"- 可转债占比: {cb_pct:.1f}%"]
+                    if cb_pct > 5:
+                        parts.append("⚠️ 偏高，股市波动时风险较大")
+                    lines.append("".join(parts))
+
+            # 资产配置
+            alloc = fund_data.get("asset_allocation", [])
+            if alloc:
+                stock_pct = None
+                bond_pct = None
+                for a in alloc:
+                    t = a.get("type", "")
+                    try:
+                        p = float(str(a.get("pct", "0")).replace("%", ""))
+                    except (ValueError, TypeError):
+                        p = 0
+                    if "股票" in t or "权益" in t:
+                        stock_pct = p
+                    elif "债券" in t or "固收" in t:
+                        bond_pct = p
+                if stock_pct is not None:
+                    lines.append(f"- 股票仓位: {stock_pct:.0f}%")
+                if bond_pct is not None:
+                    lines.append(f"- 债券仓位: {bond_pct:.0f}%")
+
+            lines.append("")
+
+        if len(lines) <= 3:
+            return ""  # 没有获取到任何有效数据
+
+        return "\n".join(lines)
+
+    except Exception as e:
+        logger.warning(f"构建债券持仓上下文失败: {e}")
+        return ""
+
+
 def build_portfolio_summary_line(user_id: str = "default") -> str:
     """构建单行持仓摘要，用于 clarify_requirement 等对 token 敏感的场景。
 

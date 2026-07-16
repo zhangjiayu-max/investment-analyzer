@@ -257,6 +257,9 @@ def scan_valuation_thresholds() -> dict:
 def scan_portfolio_risk() -> dict:
     """扫描持仓集中度和亏损，生成风险 alert。
 
+    增强版：content 不仅包含占比/亏损数据，还包含基金底层持仓的关键风险信息
+    （重仓股、可转债占比、资产配置），让预警更有说服力。
+
     Returns:
         {"alerts_created": int}
     """
@@ -297,14 +300,14 @@ def scan_portfolio_risk() -> dict:
             fund_code = h.get("fund_code") or ""
             fund_name = h.get("fund_name") or ""
 
-            # 集中度检测
             weight = current_value / total_value * 100
+            alert_triggered = False
+
+            # 集中度检测
             if weight > concentration_threshold:
+                alert_triggered = True
                 title = f"{fund_name} 占比 {weight:.1f}%，集中度过高"
-                content = (
-                    f"{fund_name}（{fund_code}）当前占组合 {weight:.1f}%，"
-                    f"超过 {concentration_threshold}% 阈值，建议关注分散化风险。"
-                )
+                content = _build_risk_content(fund_code, fund_name, weight, concentration_threshold, None)
                 create_alert(
                     alert_type="concentration_high",
                     title=title,
@@ -319,14 +322,11 @@ def scan_portfolio_risk() -> dict:
                 alerts_created += 1
 
             # 亏损检测
-            if cost_price > 0:
+            if cost_price > 0 and not alert_triggered:
                 profit_rate = (current_price - cost_price) / cost_price * 100
                 if profit_rate < -loss_threshold:
                     title = f"{fund_name} 当前亏损 {abs(profit_rate):.1f}%"
-                    content = (
-                        f"{fund_name}（{fund_code}）当前亏损 {abs(profit_rate):.1f}%，"
-                        f"超过 -{loss_threshold}% 阈值，建议关注是否止损或加仓。"
-                    )
+                    content = _build_risk_content(fund_code, fund_name, weight, None, profit_rate)
                     create_alert(
                         alert_type="loss_warning",
                         title=title,
@@ -344,6 +344,76 @@ def scan_portfolio_risk() -> dict:
 
     logger.info(f"[alert_scanner] 持仓风险扫描生成 {alerts_created} 个 alert")
     return {"alerts_created": alerts_created, "holdings_scanned": len(holdings)}
+
+
+def _build_risk_content(fund_code: str, fund_name: str, weight: float,
+                        concentration_threshold: float | None,
+                        profit_rate: float | None) -> str:
+    """构建增强版预警 content，包含基金底层持仓的关键风险信息。
+
+    从 get_fund_holdings() 获取重仓股、可转债占比、资产配置，
+    让预警不仅有结论还有论据。调用 akshare 超时 5s，失败则退回原逻辑。
+    """
+    parts = []
+
+    # 基础信息
+    if concentration_threshold is not None:
+        parts.append(f"{fund_name}（{fund_code}）当前占组合 {weight:.1f}%，超过 {concentration_threshold}% 阈值")
+    if profit_rate is not None:
+        parts.append(f"{fund_name}（{fund_code}）当前亏损 {abs(profit_rate):.1f}%")
+
+    # 尝试获取基金底层持仓数据（超时 5s）
+    try:
+        import concurrent.futures
+        from db.portfolio import get_fund_holdings
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(get_fund_holdings, fund_code)
+            try:
+                fund_data = future.result(timeout=5)
+            except concurrent.futures.TimeoutError:
+                fund_data = None
+                logger.debug(f"[alert_scanner] 获取 {fund_code} 持仓数据超时，退回基础内容")
+    except Exception as e:
+        fund_data = None
+        logger.debug(f"[alert_scanner] 获取 {fund_code} 持仓数据失败: {e}")
+
+    if fund_data:
+        # 股票重仓（top 3）
+        stocks = fund_data.get("top_stocks", [])
+        if stocks:
+            stock_strs = [f"{s['stock_name']}({s.get('pct_nav', '?')}%)" for s in stocks[:3]]
+            parts.append(f"重仓股：{', '.join(stock_strs)}")
+
+        # 可转债占比（>3% 提示风险）
+        bond_summary = fund_data.get("bond_type_summary", {})
+        if bond_summary:
+            cb_pct = bond_summary.get("可转债", 0)
+            if cb_pct and cb_pct > 3:
+                parts.append(f"可转债占比 {cb_pct:.1f}%，股市波动时风险较高")
+
+        # 资产配置（股票仓位 > 20% 提示是混合型基金）
+        alloc = fund_data.get("asset_allocation", [])
+        if alloc:
+            stock_pct = None
+            for a in alloc:
+                t = a.get("type", "")
+                if "股票" in t or "权益" in t:
+                    try:
+                        stock_pct = float(str(a.get("pct", "0")).replace("%", ""))
+                    except (ValueError, TypeError):
+                        pass
+                    break
+            if stock_pct and stock_pct > 20:
+                parts.append(f"股票仓位 {stock_pct:.0f}%，混合型基金波动大于纯债")
+
+    # 结论
+    if concentration_threshold is not None:
+        parts.append("建议关注分散化风险")
+    elif profit_rate is not None:
+        parts.append("建议关注是否止损或低位补仓")
+
+    return "；".join(parts) + "。"
 
 
 # ── P0-C 关注列表信号扫描 ────────────────────────────────────

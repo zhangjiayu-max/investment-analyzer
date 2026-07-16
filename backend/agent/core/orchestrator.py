@@ -2893,7 +2893,7 @@ def orchestrate(query: str, history: list, rag_context: str = "", cancel_event: 
         prebuilt_context += f"## 知识库参考(书籍/文章/技能)\n{compressed_rag_for_specialist}\n\n"
 
     try:
-        from services.portfolio_context import build_portfolio_context, build_valuation_summary
+        from services.portfolio_context import build_portfolio_context, build_valuation_summary, build_bond_fund_holdings_context
         portfolio_ctx = build_portfolio_context()
         # 始终注入持仓上下文(空持仓时也会明确告知"无持仓",防止 AI 编造)
         system_content += f"\n\n## 用户当前持仓\n{portfolio_ctx}"
@@ -2902,6 +2902,11 @@ def orchestrate(query: str, history: list, rag_context: str = "", cancel_event: 
         if valuation_ctx:
             system_content += f"\n\n## 当前市场估值\n{valuation_ctx}"
             prebuilt_context += f"## 当前市场估值数据\n{valuation_ctx}\n\n"
+        # 债券/混合型基金底层持仓分析（论据增强：帮助专家做亏损归因）
+        bond_holdings_ctx = build_bond_fund_holdings_context()
+        if bond_holdings_ctx:
+            system_content += f"\n\n{bond_holdings_ctx}"
+            prebuilt_context += f"{bond_holdings_ctx}\n\n"
     except Exception as e:
         logger.warning(f"注入持仓/估值上下文失败: {e}")
 
@@ -3813,7 +3818,7 @@ def _stream_build_context(refined_query: str, rag_context: str, complexity: str,
         prebuilt_context += f"## 知识库参考(书籍/文章/技能)\n{compressed_rag_for_specialist}\n\n"
 
     try:
-        from services.portfolio_context import build_portfolio_context, build_valuation_summary
+        from services.portfolio_context import build_portfolio_context, build_valuation_summary, build_bond_fund_holdings_context
         portfolio_ctx = build_portfolio_context()
         system_content += f"\n\n## 用户当前持仓\n{portfolio_ctx}"
         prebuilt_context += f"## 用户当前持仓\n{portfolio_ctx}\n\n"
@@ -3821,6 +3826,11 @@ def _stream_build_context(refined_query: str, rag_context: str, complexity: str,
         if valuation_ctx:
             system_content += f"\n\n## 当前市场估值\n{valuation_ctx}"
             prebuilt_context += f"## 当前市场估值数据\n{valuation_ctx}\n\n"
+        # 债券/混合型基金底层持仓分析（论据增强：帮助专家做亏损归因）
+        bond_holdings_ctx = build_bond_fund_holdings_context()
+        if bond_holdings_ctx:
+            system_content += f"\n\n{bond_holdings_ctx}"
+            prebuilt_context += f"{bond_holdings_ctx}\n\n"
     except Exception as e:
         logger.warning(f"注入持仓/估值上下文失败: {e}")
 
@@ -3923,6 +3933,15 @@ def _stream_build_context(refined_query: str, rag_context: str, complexity: str,
     portfolio_ctx = _build_portfolio_context()
     if portfolio_ctx:
         prebuilt_context = (prebuilt_context or "") + "\n\n" + portfolio_ctx
+
+    # 债券/混合型基金底层持仓分析（论据增强：帮助专家做亏损归因）
+    try:
+        from services.portfolio_context import build_bond_fund_holdings_context
+        bond_holdings_ctx = build_bond_fund_holdings_context()
+        if bond_holdings_ctx:
+            prebuilt_context = (prebuilt_context or "") + "\n\n" + bond_holdings_ctx
+    except Exception:
+        pass
 
     # 注入 4% 定投法规则和减仓约束，避免专家给出随意的加减仓金额
     dca_rules = _build_dca_rules()
