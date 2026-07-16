@@ -2,7 +2,7 @@
 
 设计要点：
 - 替代现有 shared_blackboard（dict+全文摘要），改为结构化 BlackboardEntry
-- 每条 entry 约 100 字，只含结论+信号+置信度+关键数据，不含全文分析
+- 每条 entry 约 300 字（M5：原 100→300，保留关键推理），只含结论+信号+置信度+关键数据
 - max_entries=6，超出自动淘汰最早条目
 - to_context_text() 生成注入专家上下文的黑板摘要（≤800 字）
 - 与 message_protocol.AgentOutput 字段对齐，便于 A2A 协议复用
@@ -31,7 +31,7 @@ class BlackboardEntry:
     """
     agent_key: str
     agent_name: str
-    conclusion: str = ""              # 一句话结论（≤100 字）
+    conclusion: str = ""              # 结论（M5：≤300 字，保留关键推理）
     action_signals: list = field(default_factory=list)
     # [{"type": "BUY", "target": "中证500", "confidence": 0.72, "urgency": "medium"}]
     confidence: float = 0.0           # 综合置信度 0-1
@@ -401,15 +401,18 @@ def extract_entry_from_result(
 
 
 def _extract_conclusion(analysis: str) -> str:
-    """从分析文本中提取一句话结论。
+    """从分析文本中提取结论（M5：长度 100→300，保留关键推理）。
 
     策略：
     1. 查找"结论"段落
     2. 查找加粗的第一句
-    3. 退化为前 100 字
+    3. 退化为前 300 字
     """
     if not analysis:
         return ""
+
+    # M5：结论长度上限 100 → 300，保留关键推理链条
+    MAX_CONCLUSION_LEN = 300
 
     # 策略1：查找"结论"段落
     conclusion_patterns = [
@@ -423,23 +426,22 @@ def _extract_conclusion(analysis: str) -> str:
         match = re.search(pat, analysis)
         if match:
             conclusion = match.group(1).strip()
-            # 限制 100 字
-            if len(conclusion) > 100:
-                conclusion = conclusion[:97] + "..."
+            if len(conclusion) > MAX_CONCLUSION_LEN:
+                conclusion = conclusion[:MAX_CONCLUSION_LEN - 3] + "..."
             return conclusion
 
     # 策略2：第一个加粗行
     bold_match = re.search(r'\*\*(.+?)\*\*', analysis)
     if bold_match:
         conclusion = bold_match.group(1).strip()
-        if len(conclusion) > 100:
-            conclusion = conclusion[:97] + "..."
+        if len(conclusion) > MAX_CONCLUSION_LEN:
+            conclusion = conclusion[:MAX_CONCLUSION_LEN - 3] + "..."
         return conclusion
 
-    # 策略3：前 100 字
+    # 策略3：前 300 字
     clean = re.sub(r'[#*\-\n]', ' ', analysis).strip()
     clean = re.sub(r'\s+', ' ', clean)
-    return clean[:100] + ("..." if len(clean) > 100 else "")
+    return clean[:MAX_CONCLUSION_LEN] + ("..." if len(clean) > MAX_CONCLUSION_LEN else "")
 
 
 def _extract_action_signals(analysis: str, agent_key: str) -> list[dict]:

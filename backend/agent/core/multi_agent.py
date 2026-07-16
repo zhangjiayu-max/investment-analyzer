@@ -589,6 +589,15 @@ def run_specialist(agent_key: str, query: str, context: str = "",
     MAX_TURNS = 3
     tool_calls_log = []
     answer = ""
+    # M6: Agentic RAG 硬性限制 — 检索类工具单独计数，超过上限强制进入分析
+    # 解决原 max_rounds=2 仅是 prompt 指令、无硬性截断的问题
+    _SEARCH_TOOLS = {
+        "search_knowledge", "web_search", "yingmi_search_news", "eastmoney_search",
+        "query_policy_news", "get_author_opinions", "fetch_article",
+    }
+    _MAX_SEARCH_ROUNDS = get_config_int("agent.agentic_rag_max_rounds", 2)
+    _SEARCH_LIMIT_ENABLED = get_config_bool("agent.agentic_rag_hard_limit_enabled", True)
+    search_rounds = 0
     # 收口提示：末轮强制要求输出文本结论，不再调工具，避免进入强制总结+重新生成链路
     _CLOSURE_PROMPT = (
         "你已收集到足够信息。请不要再调用工具，直接基于以上数据给出你的专业分析结论（至少 200 字）。"
@@ -598,8 +607,20 @@ def run_specialist(agent_key: str, query: str, context: str = "",
         "你已在前一轮工具调用中获得了关键数据，并给出了结构化结论。"
         "现在请基于已有信息，直接输出最终的专业分析（至少 200 字），不要再调用工具。"
     )
+    # M6: 检索轮次超限提示
+    _SEARCH_LIMIT_PROMPT = (
+        "检索轮次已达上限，请基于已有信息给出分析结论，标注数据缺口。"
+        "不要再调用检索类工具（search_knowledge/web_search/yingmi_search_news/query_policy_news等），"
+        "可以直接使用 query_valuation/query_portfolio 等数据查询工具。"
+    )
 
     for turn in range(MAX_TURNS):
+        # M6: Agentic RAG 硬性限制 — turn 开始时检查检索轮次
+        # 超过上限时注入提示，强制 LLM 进入分析阶段（不再调用检索类工具）
+        if _SEARCH_LIMIT_ENABLED and search_rounds >= _MAX_SEARCH_ROUNDS and turn > 0 and not answer:
+            logger.info(f"[trace:{trace_id}] [{agent['name']}] turn{turn} 检索轮次达上限({search_rounds}/{_MAX_SEARCH_ROUNDS})，强制进入分析")
+            llm_messages.append({"role": "user", "content": _SEARCH_LIMIT_PROMPT})
+
         # P2: 收敛检测 — turn >= 1 时，若上一轮工具结果已含结构化结论，注入收口提示
         if turn >= 1 and not answer:
             _has_converged = _check_react_convergence(tool_calls_log, llm_messages)
@@ -697,9 +718,24 @@ def run_specialist(agent_key: str, query: str, context: str = "",
 
         for tc in msg.tool_calls:
             args = _parse_tool_args(tc.function.arguments, tc.function.name)
+            _tool_name = tc.function.name
 
-            logger.info(f"[trace:{trace_id}] [{agent['name']}] Tool: {tc.function.name}({json.dumps(args, ensure_ascii=False)[:100]})")
-            result = execute_tool(tc.function.name, args, trace_id=trace_id,
+            # M6: Agentic RAG 硬性限制 — 检索类工具计数与拦截
+            if _SEARCH_LIMIT_ENABLED and _tool_name in _SEARCH_TOOLS:
+                if search_rounds >= _MAX_SEARCH_ROUNDS:
+                    # 已超限，跳过检索工具调用，注入提示让 LLM 用已有数据分析
+                    logger.info(f"[trace:{trace_id}] [{agent['name']}] 拦截检索工具 {_tool_name}（轮次 {search_rounds}/{_MAX_SEARCH_ROUNDS}）")
+                    llm_messages.append({
+                        "role": "tool",
+                        "tool_call_id": tc.id,
+                        "content": "检索轮次已达上限。请基于已有信息分析，标注数据缺口，不要再调用检索类工具。",
+                    })
+                    continue
+                search_rounds += 1
+                logger.info(f"[trace:{trace_id}] [{agent['name']}] 检索轮次 {search_rounds}/{_MAX_SEARCH_ROUNDS} ({_tool_name})")
+
+            logger.info(f"[trace:{trace_id}] [{agent['name']}] Tool: {_tool_name}({json.dumps(args, ensure_ascii=False)[:100]})")
+            result = execute_tool(_tool_name, args, trace_id=trace_id,
                                  conversation_id=conversation_id, message_id=message_id)
 
             # P3 优化：截断阈值可配置（默认 1500，原 3000）
@@ -790,6 +826,13 @@ def run_specialist(agent_key: str, query: str, context: str = "",
             is_self_reflection_enabled, get_max_retry,
         )
         if is_self_reflection_enabled() and answer and len(answer) > 50:
+            # M7：从黑板获取其他专家结论，供跨专家盲点检查（开关关闭时不传，无额外成本）
+            peer_conclusions = ""
+            if blackboard:
+                try:
+                    peer_conclusions = blackboard.to_context_text(exclude_agent=agent_key)
+                except Exception:
+                    peer_conclusions = ""
             reflection = evaluate_analysis(
                 analysis=answer,
                 tool_calls=tool_calls_log,
@@ -797,6 +840,7 @@ def run_specialist(agent_key: str, query: str, context: str = "",
                 agent_key=agent_key,
                 agent_name=agent["name"],
                 trace_id=trace_id,
+                peer_conclusions=peer_conclusions,
             )
 
             if reflection and reflection.get("need_retry") and reflection.get("gaps"):
@@ -1285,6 +1329,75 @@ def run_cross_review_opinion(agent_key: str, query: str, self_analysis: str,
                 }
         except (json.JSONDecodeError, ValueError) as e:
             logger.warning(f"[trace:{trace_id}] [{agent['name']}] cross_review_opinion JSON 解析失败: {e}")
+
+        # M3：强制魔鬼代言人 — 若 disagreements 为空且存在其他专家，二次提示强制反驳
+        has_peers = len(peer_analyses) > 1  # peer_analyses 含自己，>1 表示有其他专家
+        try:
+            force_devil = get_config_bool("agent.force_devil_advocate_enabled", True)
+        except Exception:
+            force_devil = True
+        if (
+            force_devil
+            and has_peers
+            and len(opinion.get("disagreements", [])) == 0
+            and raw
+        ):
+            try:
+                from db.config import get_config as _get_cfg
+                devil_model = _get_cfg("agent.devil_advocate_model", "") or None
+            except Exception:
+                devil_model = None
+            retry_system = (
+                "你是魔鬼代言人。前面的交叉审阅未能提出任何质疑，这是不合格的。"
+                "即使其他专家方向一致，也必须找到至少 1 个潜在盲点或风险。请从以下角度反思：\n"
+                "- 是否存在价值陷阱？（低估可能有更深原因）\n"
+                "- 是否低估了下行风险？（黑天鹅/尾部风险）\n"
+                "- 数据是否有幸存者偏差？（只看成功的样本）\n"
+                "- 推理链是否有逻辑跳跃？（因果倒置/相关≠因果）\n"
+                "- 是否遗漏了重要前置假设？\n"
+                "输出 JSON：{\"disagreements\": [{\"peer\": \"专家名\", \"point\": \"质疑的观点\", "
+                "\"reason\": \"反驳理由\"}], \"summary\": \"魔鬼代言人总结\"}\n"
+                "只输出 JSON，必须包含至少 1 条 disagreement。"
+            )
+            retry_user = (
+                f"原始问题：{query}\n\n"
+                f"其他专家分析：\n{peer_text[:6000]}"
+            )
+            try:
+                retry_resp = _call_llm(
+                    caller=_caller + ":devil",
+                    trace_id=trace_id,
+                    model=devil_model or _model,
+                    messages=[
+                        {"role": "system", "content": retry_system},
+                        {"role": "user", "content": retry_user},
+                    ],
+                    temperature=0.5,
+                    max_tokens=400,
+                )
+                retry_raw = retry_resp.choices[0].message.content.strip()
+                cleaned_r = retry_raw
+                if "```" in cleaned_r:
+                    parts_r = cleaned_r.split("```")
+                    cleaned_r = parts_r[1] if len(parts_r) > 1 else parts_r[0]
+                    if cleaned_r.startswith("json"):
+                        cleaned_r = cleaned_r[4:]
+                    cleaned_r = cleaned_r.strip()
+                retry_parsed = json.loads(cleaned_r)
+                if isinstance(retry_parsed, dict):
+                    retry_dis = retry_parsed.get("disagreements", []) or []
+                    if retry_dis:
+                        opinion["disagreements"] = retry_dis
+                        if retry_parsed.get("summary"):
+                            opinion["summary"] = retry_parsed["summary"]
+                        logger.info(
+                            f"[trace:{trace_id}] [{agent['name']}] 魔鬼代言人强制反驳成功: "
+                            f"{len(retry_dis)} 条质疑"
+                        )
+            except Exception as devil_err:
+                logger.warning(
+                    f"[trace:{trace_id}] [{agent['name']}] 魔鬼代言人二次调用失败: {devil_err}"
+                )
 
         # 构造兼容的 analysis 文本
         parts = []

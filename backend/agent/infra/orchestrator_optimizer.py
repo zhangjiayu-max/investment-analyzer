@@ -47,12 +47,16 @@ class OrchestratorOptimizer:
 
     @staticmethod
     def should_skip_cross_review(specialist_results: list, complexity: str) -> bool:
-        """判断是否应该跳过交叉审阅（优化版）
+        """判断是否应该跳过交叉审阅（M3 增强版）
 
         跳过条件：
         1. 专家数量 < 2
         2. 简单/闲聊任务
-        3. 专家方向一致（无实质性分歧）— 新增
+
+        M3 改动：移除"方向一致跳过"逻辑。
+        原逻辑：专家方向一致（都买或都观望）时跳过交叉审阅。
+        新逻辑：即使方向一致也执行，强制找盲点（魔鬼代言人角色）。
+        原因：对话118案例显示，方向一致时跳过交叉审阅导致无对抗性，分析不透彻。
         """
         # 条件1：专家数量不足
         if len(specialist_results) < 2:
@@ -62,11 +66,9 @@ class OrchestratorOptimizer:
         if complexity in ("simple", "chat"):
             return True
 
-        # 条件3：方向一致时跳过交叉审阅
-        if not _has_disagreement(specialist_results):
-            logger.info(f"专家方向一致，跳过交叉审阅 ({len(specialist_results)}人)")
-            return True
-
+        # M3: 移除"方向一致跳过"逻辑
+        # 原逻辑：if not _has_disagreement(specialist_results): return True
+        # 新逻辑：即使方向一致也执行交叉审阅，强制找盲点
         return False
 
     @staticmethod

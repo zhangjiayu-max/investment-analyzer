@@ -814,6 +814,58 @@ TOOLS = [
             },
         },
     },
+    # M4 新增：南向资金（港股通）工具
+    {
+        "type": "function",
+        "function": {
+            "name": "query_southbound_capital",
+            "description": "查询南向资金（港股通）净流入数据。当用户问到港股、恒生科技、恒生指数、南向资金、港股通、内地资金流入港股等问题时调用。可判断港股行情的资金面驱动，作为恒生科技/港股行情归因的核心数据。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query_type": {
+                        "type": "string",
+                        "enum": ["summary", "flow", "signal"],
+                        "description": "查询类型：summary=轻量摘要(近期净流入+趋势), flow=每日净流入序列(近N日), signal=共振信号(bullish_resonance/bearish_resonance/neutral)",
+                    },
+                    "days": {
+                        "type": "integer",
+                        "default": 30,
+                        "description": "查询天数（仅 flow 类型有效）",
+                    },
+                },
+                "required": ["query_type"],
+            },
+        },
+    },
+    # M4 新增：政策新闻聚合工具
+    {
+        "type": "function",
+        "function": {
+            "name": "query_policy_news",
+            "description": "查询政策面新闻聚合（央行/国务院/证监会/财政部/发改委）。当用户问到政策、利好、利空、为什么涨/跌（归因类问题）、央行降准/降息、行业政策影响等问题时调用。按重要性分级（high/medium/low），标注涉及行业。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query_type": {
+                        "type": "string",
+                        "enum": ["summary", "full"],
+                        "description": "查询类型：summary=仅统计(高级别数量+综合提示+top3标题), full=完整新闻列表(含snippet/importance/industries)",
+                    },
+                    "query": {
+                        "type": "string",
+                        "description": "查询关键词（如'恒生科技'、'房地产'、'新能源'），为空则拉今日全部政策面新闻",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "default": 10,
+                        "description": "每个数据源最大返回数量（仅 full 类型有效）",
+                    },
+                },
+                "required": ["query_type"],
+            },
+        },
+    },
 ]
 
 # ── Tool 执行器 ──────────────────────────────────────
@@ -1159,6 +1211,12 @@ def _execute_tool_impl(name: str, arguments: dict, trace_id: str = "",
     # P0 新增：业绩报告查询
     elif name == "query_earnings_reports":
         return _query_earnings_reports(arguments)
+    # M4 新增：南向资金（港股通）查询
+    elif name == "query_southbound_capital":
+        return _query_southbound_capital(arguments)
+    # M4 新增：政策新闻聚合
+    elif name == "query_policy_news":
+        return _query_policy_news(arguments)
     # 天天基金 Skills
     elif name == "ttfund_fund_info":
         return _ttfund_fund_info(arguments)
@@ -1874,12 +1932,49 @@ def _calculate_metrics(args: dict) -> str:
 
 
 def _web_search(args: dict) -> str:
-    """获取最新财经新闻和市场信息。优先用 akshare（稳定），备用搜狗搜索。"""
+    """获取最新财经新闻和市场信息。优先用 akshare（稳定），备用搜狗搜索。
+
+    M4 修复：东方财富源 stock_news_em(symbol="A股") 不按 query 过滤，
+    现在拉取后按 query 关键词过滤标题/内容，确保结果与用户查询相关。
+    """
     query = args.get("query", "")
     max_results = args.get("max_results", 5)
 
     if not query:
         return json.dumps({"error": "搜索关键词不能为空"}, ensure_ascii=False)
+
+    # M4: 从 query 中提取核心关键词用于过滤
+    def _extract_filter_keywords(q: str) -> list:
+        """提取查询的核心关键词（去掉停用词）。"""
+        # 移除常见疑问词
+        stop_words = ["为什么", "怎么", "如何", "是不是", "有没有", "请问", "一下", "最近", "目前", "现在", "的", "了", "吗", "呢", "啊"]
+        cleaned = q
+        for sw in stop_words:
+            cleaned = cleaned.replace(sw, "")
+        cleaned = cleaned.strip()
+        if not cleaned:
+            return [q]  # 兜底用原 query
+        # 简单分词：按标点切分，每段 2-4 字
+        keywords = []
+        # 处理中文：按 2-4 字滑窗
+        for i in range(0, len(cleaned), 2):
+            kw = cleaned[i:i+4]
+            if len(kw) >= 2:
+                keywords.append(kw)
+        # 也加入完整 query 的一部分（前 6 字）
+        if len(cleaned) >= 2:
+            keywords.append(cleaned[:6])
+        return keywords[:5]  # 最多 5 个关键词
+
+    filter_keywords = _extract_filter_keywords(query)
+
+    def _matches_query(title: str, snippet: str = "") -> bool:
+        """判断标题/内容是否与 query 相关。"""
+        text = (title + " " + snippet).lower()
+        for kw in filter_keywords:
+            if kw and kw.lower() in text:
+                return True
+        return False
 
     results = []
 
@@ -1891,42 +1986,55 @@ def _web_search(args: dict) -> str:
         try:
             df = ak.stock_news_em(symbol="A股")
             if df is not None and len(df) > 0:
-                for _, row in df.head(max_results).iterrows():
+                # M4: 拉取更多条，过滤后取 top max_results
+                candidate_count = min(len(df), max_results * 5)
+                for _, row in df.head(candidate_count).iterrows():
+                    title = str(row.get("新闻标题", ""))
+                    snippet = str(row.get("新闻内容", ""))[:200] if row.get("新闻内容") else ""
+                    # M4: 按 query 关键词过滤
+                    if not _matches_query(title, snippet):
+                        continue
                     results.append({
-                        "title": str(row.get("新闻标题", "")),
-                        "snippet": str(row.get("新闻内容", ""))[:200] if row.get("新闻内容") else "",
+                        "title": title,
+                        "snippet": snippet,
                         "url": str(row.get("新闻链接", "")),
                         "time": str(row.get("发布时间", "")),
                         "source": "东方财富",
                     })
+                    if len(results) >= max_results:
+                        break
         except Exception:
             pass
 
-        # 如果结果不够，补充央视新闻
+        # 如果结果不够，补充央视新闻（也按 query 过滤）
         if len(results) < max_results:
             try:
                 from datetime import datetime
                 today = datetime.now().strftime("%Y%m%d")
                 df2 = ak.news_cctv(date=today)
                 if df2 is not None and len(df2) > 0:
-                    for _, row in df2.head(max_results - len(results)).iterrows():
+                    for _, row in df2.head(max_results * 3 - len(results)).iterrows():
                         title = str(row.get("title", ""))
-                        # 过滤掉与金融无关的新闻
-                        if any(kw in title for kw in ["股", "基金", "央行", "利率", "经济", "金融", "市场", "投资", "GDP", "通胀"]):
+                        content = str(row.get("content", ""))[:200] if row.get("content") else ""
+                        # 双重过滤：金融相关 + 与 query 相关
+                        is_finance = any(kw in title + content for kw in ["股", "基金", "央行", "利率", "经济", "金融", "市场", "投资", "GDP", "通胀"])
+                        if is_finance and _matches_query(title, content):
                             results.append({
                                 "title": title,
-                                "snippet": str(row.get("content", ""))[:200] if row.get("content") else "",
+                                "snippet": content,
                                 "url": "",
                                 "time": str(row.get("date", "")),
                                 "source": "央视新闻",
                             })
+                            if len(results) >= max_results:
+                                break
             except Exception:
                 pass
 
     except ImportError:
         logger.warning("akshare 未安装，跳过财经新闻获取")
 
-    # 备用：搜狗搜索（可能被反爬）
+    # 备用：搜狗搜索（按 query 直接搜，本身就是 query 相关的）
     if len(results) < 2:
         try:
             from bs4 import BeautifulSoup
@@ -1974,14 +2082,81 @@ def _web_search(args: dict) -> str:
             "query": query,
             "count": 0,
             "results": [],
-            "note": "未找到相关新闻，请基于知识库和估值数据回答。",
+            "filter_keywords": filter_keywords,
+            "note": "未找到与查询相关的新闻。可尝试用 query_policy_news 工具查询政策面新闻，或基于知识库和估值数据回答。",
         }, ensure_ascii=False)
 
     return json.dumps({
         "query": query,
         "count": len(results[:max_results]),
         "results": results[:max_results],
+        "filter_keywords": filter_keywords,
     }, ensure_ascii=False)
+
+
+def _query_southbound_capital(args: dict) -> str:
+    """南向资金（港股通）查询工具（M4 新增）。
+
+    数据源：akshare stock_hsgt_south_net_flow_in_em。
+    用于分析港股/恒生科技行情的资金面驱动。
+    """
+    try:
+        from services.market.southbound_capital import (
+            get_southbound_capital_flow, get_southbound_capital_summary,
+            get_southbound_capital_signal,
+        )
+        query_type = args.get("query_type", "summary")
+        if query_type == "flow":
+            days = int(args.get("days", 30))
+            data = get_southbound_capital_flow(days=days)
+            result = {
+                "query_type": "flow",
+                "days": days,
+                "latest": data.get("latest"),
+                "recent_5d_net_yi": data.get("recent_5d_net_yi"),
+                "recent_20d_net_yi": data.get("recent_20d_net_yi"),
+                "recent_60d_net_yi": data.get("recent_60d_net_yi"),
+                "trend": data.get("trend"),
+                "strength": data.get("strength"),
+                "series_tail": data.get("series", [])[-15:],  # 限制返回数量
+                "note": data.get("note", ""),
+            }
+        elif query_type == "summary":
+            result = get_southbound_capital_summary()
+            result["query_type"] = "summary"
+        elif query_type == "signal":
+            result = get_southbound_capital_signal()
+            result["query_type"] = "signal"
+            result["note"] = "signal=bullish_resonance 时与港股看多建议共振；bearish_resonance 时与减仓建议共振。"
+        else:
+            return json.dumps({"error": f"未知 query_type: {query_type}"}, ensure_ascii=False)
+        return json.dumps(result, ensure_ascii=False)
+    except Exception as e:
+        logger.exception(f"query_southbound_capital 执行失败: {e}")
+        return json.dumps({"error": str(e)}, ensure_ascii=False)
+
+
+def _query_policy_news(args: dict) -> str:
+    """政策新闻聚合工具（M4 新增）。
+
+    多源聚合：盈米新闻 + 东方财富 + 央视新闻。
+    按重要性分级（high/medium/low），标注涉及行业。
+    """
+    try:
+        from services.market.policy_news import get_policy_news, get_policy_news_summary
+        query_type = args.get("query_type", "summary")
+        query = args.get("query", "")
+        limit = int(args.get("limit", 10))
+        if query_type == "summary":
+            result = get_policy_news_summary(query=query)
+        elif query_type == "full":
+            result = get_policy_news(query=query, limit=limit)
+        else:
+            return json.dumps({"error": f"未知 query_type: {query_type}"}, ensure_ascii=False)
+        return json.dumps(result, ensure_ascii=False)
+    except Exception as e:
+        logger.exception(f"query_policy_news 执行失败: {e}")
+        return json.dumps({"error": str(e)}, ensure_ascii=False)
 
 
 def _auto_refresh_if_stale(holdings: list) -> list:

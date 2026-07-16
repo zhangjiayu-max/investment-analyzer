@@ -223,6 +223,20 @@ DEFAULT_CONFIGS = [
     ('agent.agentic_rag_enabled', 'true', 'Agentic RAG开关：3阶段主动检索策略（信息缺口判断→主动检索→充分性自检）', 'agent'),
     ('agent.agentic_rag_max_rounds', '2', 'Agentic RAG每个信息缺口最大检索轮数', 'agent'),
 
+    # M1/M4/M6 多Agent整体增强开关（2026-07-16 Phase 1）
+    ('agent.question_type_routing_enabled', 'true', '问题类型感知路由开关：纯规则分类5类问题（归因/预测/操作/对比/通用），强制追加对应专家', 'agent'),
+    ('agent.agentic_rag_hard_limit_enabled', 'true', 'Agentic RAG硬性限制开关：检索类工具单独计数，超过agentic_rag_max_rounds强制拦截并进入分析', 'agent'),
+    ('tool.southbound_capital_enabled', 'true', '南向资金（港股通）查询工具开关：akshare stock_hsgt_south_net_flow_in_em 数据源', 'tool'),
+    ('tool.policy_news_enabled', 'true', '政策新闻聚合工具开关：盈米+东方财富+央视多源聚合，按重要性分级', 'tool'),
+
+    # M3/M5/M2/M7 多Agent整体增强开关（2026-07-16 Phase 2/3）
+    ('agent.force_devil_advocate_enabled', 'true', '强制魔鬼代言人开关：交叉审阅disagreements为空时二次提示强制反驳，串行最后位专家注入质疑角色', 'agent'),
+    ('agent.devil_advocate_model', 'deepseek-v4-flash', '魔鬼代言人使用的轻量模型（控制成本）', 'agent'),
+    ('agent.deep_synthesis_enabled', 'true', '综合报告深度保留开关：5段结构(核心结论/推理链条/分歧反驳/操作建议/风险提示)，结论长度300字，max_tokens提升至3000', 'agent'),
+    ('agent.industry_fundamentalist_enabled', 'true', '行业基本面分析师开关：自下而上行业景气度分析（批价/动销/库存/产能），补全估值/风险/配置之外的维度', 'agent'),
+    ('agent.behavioral_advisor_enabled', 'true', '行为金融学专家开关：识别追涨杀跌/损失厌恶/处置效应/锚定效应等6大偏差，给行为纠偏建议', 'agent'),
+    ('agent.self_reflection_cross_check_enabled', 'false', '自我反思跨专家盲点检查开关（默认关，需手动开）：反思增加第5维度，检查跨专家盲点', 'agent'),
+
     # 理财决策升级 6 项配置（默认全部开启 — 最强版本）
     ('attribution.enabled', 'true', '收益归因分析开关', 'decision_upgrade'),
     ('behavior_diagnosis.enabled', 'true', '行为金融诊断开关', 'decision_upgrade'),

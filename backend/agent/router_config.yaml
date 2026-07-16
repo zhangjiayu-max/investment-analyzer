@@ -44,6 +44,28 @@ routes:
     patterns: ["宏观", "经济", "利率", "政策"]
     experts: [macro_strategist]
 
+  # ── M1 新增：港股/归因/资金类路由盲区补全 ──
+  - name: hongkong_stocks
+    patterns: ["恒生", "港股", "恒生科技", "恒生指数", "港股通", "恒生互联网", "H股"]
+    experts: [macro_strategist, market_analyst, valuation_expert]
+
+  - name: attribution
+    patterns: ["为什么涨", "为什么跌", "原因", "驱动", "归因", "怎么回事", "为何"]
+    experts: [macro_strategist, market_analyst]
+
+  - name: capital_flow
+    patterns: ["资金", "流入", "流出", "外资", "南向", "北向", "主力资金", "资金注入", "净买"]
+    experts: [macro_strategist, market_analyst]
+
+  # ── M2 新增：行业基本面 + 行为金融学专家路由 ──
+  - name: industry_fundamental
+    patterns: ["批价", "动销", "库存周期", "产能利用率", "产业链", "景气度", "渠道库存", "经销商"]
+    experts: [industry_fundamentalist]
+
+  - name: behavioral
+    patterns: ["行为", "心理", "情绪", "偏差", "追涨", "杀跌", "恐慌", "冲动", "焦虑", "贪婪"]
+    experts: [behavioral_advisor]
+
 # 声明式 fallback 规则（主路由未命中时按顺序匹配）
 # 替代 LLM fallback，覆盖常见模糊查询
 declarative_fallback:
@@ -76,6 +98,16 @@ declarative_fallback:
   - name: investment_generic
     patterns: ["投资", "理财", "分析", "看看", "帮我看"]
     experts: [allocation_advisor, valuation_expert]
+
+  # M1 新增：港股模糊查询 fallback
+  - name: hongkong_generic
+    patterns: ["香港", "港市", "恒指", "科技指数"]
+    experts: [macro_strategist, market_analyst]
+
+  # M1 新增：归因类模糊查询 fallback
+  - name: attribution_generic
+    patterns: ["为啥", "咋回事", "什么情况", "怎么看涨", "怎么看跌"]
+    experts: [macro_strategist, market_analyst]
 
 # 最终默认专家（所有规则均未命中时）
 default_experts: [allocation_advisor, valuation_expert]

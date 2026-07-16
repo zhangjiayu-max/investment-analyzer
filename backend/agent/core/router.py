@@ -65,7 +65,15 @@ _KEYWORD_ROUTES = [
     (["文章", "公众号", "解读", "新闻"], ["article_expert"]),
     (["基金", "选基", "基金分析"], ["fund_analyst"]),
     (["宏观", "经济", "利率"], ["macro_strategist"]),
-    (["政策", "利好", "利空"], ["macro_strategist", "market_analyst", "valuation_expert"]),
+    # M1: 政策类只路由到 macro_strategist（拆分职责，避免与 market_analyst 重叠）
+    (["政策", "利好", "利空"], ["macro_strategist"]),
+    # ── M1 新增：港股/恒生/归因/资金类路由盲区补全 ──
+    (["恒生", "港股", "恒生科技", "恒生指数", "港股通", "恒生互联网", "H股"],
+     ["macro_strategist", "market_analyst", "valuation_expert"]),
+    (["为什么涨", "为什么跌", "原因", "驱动", "归因", "怎么回事", "为何"],
+     ["macro_strategist", "market_analyst"]),
+    (["资金", "流入", "流出", "外资", "南向", "北向", "主力资金", "资金注入", "净买"],
+     ["macro_strategist", "market_analyst"]),
     # ── 周期/行业/机构相关路由 ──
     (["周期", "景气", "产能", "供需", "拐点"], ["market_analyst", "valuation_expert"]),
     (["医药", "医疗", "生物医药", "创新药", "中药"], ["macro_strategist", "valuation_expert", "fund_analyst"]),
@@ -83,6 +91,11 @@ _KEYWORD_ROUTES = [
     (["筛选基金", "条件选基", "帮我选", "推荐基金"], ["fund_analyst"]),
     (["GDP", "PMI", "社融", "M2", "工业增加值", "CPI", "通胀"], ["macro_strategist"]),
     (["重仓股财务", "ROE", "营收", "利润增长", "资产负债率"], ["fund_analyst"]),
+    # ── M2 新增：行业基本面 + 行为金融学专家路由 ──
+    (["批价", "动销", "库存周期", "产能利用率", "产业链", "景气度", "渠道库存", "经销商"],
+     ["industry_fundamentalist"]),
+    (["行为", "心理", "情绪", "偏差", "追涨", "杀跌", "恐慌", "冲动", "焦虑", "贪婪"],
+     ["behavioral_advisor"]),
 ]
 
 _HIGH_RISK_ACTION_KEYWORDS = [
@@ -90,8 +103,142 @@ _HIGH_RISK_ACTION_KEYWORDS = [
 ]
 
 
+# ── M1: 问题类型感知路由（零 LLM 成本，纯规则） ──────────────────
+
+# 问题类型关键词特征
+_QUESTION_TYPE_KEYWORDS = {
+    "attribution": [
+        "为什么涨", "为什么跌", "为何", "怎么回事", "原因", "驱动", "归因",
+        "利好", "利空", "刺激", "推动", "带动", "导致", "影响",
+    ],
+    "prediction": [
+        "会涨吗", "会跌吗", "还能涨", "还会涨", "见底", "到顶", "还能跌",
+        "未来走势", "接下来", "还会", "能涨多少", "能跌多少",
+    ],
+    "action": [
+        "买", "卖", "加仓", "减仓", "止盈", "止损", "清仓", "建仓",
+        "上车", "下车", "调仓", "换仓", "止盈点", "止损点",
+    ],
+    "comparison": [
+        "vs", "VS", "对比", "比较", "哪个好", "区别", "差异", "相比",
+        "A 和 B", "和", "与",
+    ],
+}
+
+
+def _classify_question_type(query: str) -> str:
+    """问题类型分类器（纯规则，零 LLM 成本）。
+
+    返回 5 类之一：
+    - attribution: 归因类（为什么涨/跌、原因、驱动）
+    - prediction: 预测类（会涨吗、见底吗）
+    - action: 操作类（买/卖/加仓/减仓）
+    - comparison: 对比类（VS、哪个好）
+    - generic: 通用（走原关键词路由）
+
+    优先级：action > attribution > comparison > prediction > generic
+    （action 最高，因操作类问题需最严格的强制专家组合）
+    """
+    if not query:
+        return "generic"
+
+    # action 优先级最高（操作类问题涉及真金白银决策）
+    for kw in _QUESTION_TYPE_KEYWORDS["action"]:
+        if kw in query:
+            return "action"
+
+    # attribution（归因类）
+    for kw in _QUESTION_TYPE_KEYWORDS["attribution"]:
+        if kw in query:
+            return "attribution"
+
+    # comparison（对比类，需同时含"和/vs/对比"特征）
+    for kw in _QUESTION_TYPE_KEYWORDS["comparison"]:
+        if kw in query:
+            return "comparison"
+
+    # prediction（预测类）
+    for kw in _QUESTION_TYPE_KEYWORDS["prediction"]:
+        if kw in query:
+            return "prediction"
+
+    return "generic"
+
+
+def _apply_question_type_routing(specialists: list, query: str) -> tuple[list, str]:
+    """根据问题类型修正专家列表（零 LLM 成本）。
+
+    Returns:
+        (修正后的专家列表, 修正原因)
+    """
+    qtype = _classify_question_type(query)
+    if qtype == "generic":
+        return specialists, ""
+
+    specialist_set = set(specialists)
+    reason = ""
+
+    if qtype == "attribution":
+        # 归因类：强制 macro + market + industry_fundamentalist，用微观景气度验证宏观叙事
+        forced = {"macro_strategist", "market_analyst", "industry_fundamentalist"}
+        missing = forced - specialist_set
+        if missing:
+            specialist_set.update(missing)
+            reason = f"归因类问题，追加 {','.join(missing)}"
+        else:
+            reason = f"归因类问题（已含 macro/market/industry）"
+    elif qtype == "action":
+        # 操作类：强制 allocation + risk + behavioral_advisor，检查操作行为偏差
+        forced = {"allocation_advisor", "risk_assessor", "behavioral_advisor"}
+        missing = forced - specialist_set
+        if missing:
+            specialist_set.update(missing)
+            reason = f"操作类问题，追加 {','.join(missing)}"
+        else:
+            reason = f"操作类问题（已含 allocation/risk/behavioral）"
+    elif qtype == "prediction":
+        # 预测类：估值 + 市场派
+        forced = {"valuation_expert", "market_analyst"}
+        missing = forced - specialist_set
+        if missing:
+            specialist_set.update(missing)
+            reason = f"预测类问题，追加 {','.join(missing)}"
+    elif qtype == "comparison":
+        # 对比类：基金 + 估值
+        forced = {"fund_analyst", "valuation_expert"}
+        missing = forced - specialist_set
+        if missing:
+            specialist_set.update(missing)
+            reason = f"对比类问题，追加 {','.join(missing)}"
+
+    return list(specialist_set), reason
+
+
 def _is_high_risk_action(query: str) -> bool:
     return any(kw in query for kw in _HIGH_RISK_ACTION_KEYWORDS)
+
+
+def _filter_disabled_specialists(specialists: list) -> tuple[list, list]:
+    """M2：根据配置开关过滤禁用的专家。
+
+    新增专家默认启用，但可通过配置关闭以控制成本。
+
+    Returns:
+        (过滤后的专家列表, 被过滤掉的专家列表)
+    """
+    disabled_map = {
+        "industry_fundamentalist": "agent.industry_fundamentalist_enabled",
+        "behavioral_advisor": "agent.behavioral_advisor_enabled",
+    }
+    filtered = []
+    removed = []
+    for s in specialists:
+        cfg_key = disabled_map.get(s)
+        if cfg_key and get_config(cfg_key, "true") != "true":
+            removed.append(s)
+        else:
+            filtered.append(s)
+    return filtered, removed
 
 
 def _load_specialist_keys() -> dict:
@@ -138,6 +285,15 @@ class SmartRouter:
         if _is_high_risk_action(query):
             specialists.update(["risk_assessor"])
 
+        # M1: 问题类型感知路由（零 LLM 成本，纯规则）
+        # 在关键词命中后、专家截断前，根据问题类型强制追加专家
+        qtype_reason = ""
+        if get_config("agent.question_type_routing_enabled", "true") == "true":
+            specialists_list_q, qtype_reason = _apply_question_type_routing(list(specialists), query)
+            if qtype_reason:
+                specialists = set(specialists_list_q)
+                logger.info(f"[router] 问题类型感知: {qtype_reason}")
+
         # 持仓感知路由：根据持仓状况追加专家（零 LLM 成本）
         if portfolio_summary and "无持仓" not in portfolio_summary:
             import re as _re
@@ -160,15 +316,16 @@ class SmartRouter:
         if not specialists:
             return None
 
-        # 限制最大专家数为 4；高风险行动优先保留风控专家。
+        # 限制最大专家数为 5（M2后从4提升至5，容纳新增的industry_fundamentalist/behavioral_advisor）
+        # 高风险行动优先保留风控专家。
         specialists_list = list(specialists)
-        if len(specialists_list) > 4:
+        if len(specialists_list) > 5:
             if _is_high_risk_action(query):
                 priority_order = [
                     "risk_assessor",
                     "allocation_advisor", "valuation_expert", "market_analyst",
                     "fund_analyst", "macro_strategist",
-                    "article_expert",
+                    "article_expert", "industry_fundamentalist", "behavioral_advisor",
                 ]
                 priority = {agent_key: i for i, agent_key in enumerate(priority_order)}
             else:
@@ -179,15 +336,29 @@ class SmartRouter:
                         if a not in priority:
                             priority[a] = i
             specialists_list.sort(key=lambda x: priority.get(x, 999))
-            specialists_list = specialists_list[:4]
-            logger.info(f"专家数超过 4 个,按优先级截断为: {specialists_list}")
+            specialists_list = specialists_list[:5]
+            logger.info(f"专家数超过 5 个,按优先级截断为: {specialists_list}")
+
+        reason_parts = [f"关键词路由命中: {', '.join(specialists_list)}"]
+        if qtype_reason:
+            reason_parts.append(f"问题类型修正: {qtype_reason}")
+
+        # M2：根据配置开关过滤禁用的专家（新增专家可关闭以控制成本）
+        specialists_list, removed = _filter_disabled_specialists(specialists_list)
+        if removed:
+            reason_parts.append(f"配置禁用过滤: {','.join(removed)}")
+            logger.info(f"[router] M2 配置过滤: 禁用 {removed}")
+
+        if not specialists_list:
+            return None
 
         return {
             "complexity": "simple" if len(specialists_list) == 1 else ("complex" if len(specialists_list) >= 3 else "medium"),
             "specialists": specialists_list,
-            "reason": f"关键词路由命中: {', '.join(specialists_list)}",
+            "reason": " | ".join(reason_parts),
             "needs_arbitration": len(specialists_list) >= 2,
             "route_by": "rule",
+            "question_type": _classify_question_type(query),
         }
 
     def _declarative_fallback_route(self, query: str) -> Optional[dict]:
