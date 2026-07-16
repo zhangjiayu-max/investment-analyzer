@@ -228,6 +228,7 @@ DEFAULT_CONFIGS = [
     ('agent.agentic_rag_hard_limit_enabled', 'true', 'Agentic RAG硬性限制开关：检索类工具单独计数，超过agentic_rag_max_rounds强制拦截并进入分析', 'agent'),
     ('tool.southbound_capital_enabled', 'true', '南向资金（港股通）查询工具开关：akshare stock_hsgt_south_net_flow_in_em 数据源', 'tool'),
     ('tool.policy_news_enabled', 'true', '政策新闻聚合工具开关：盈米+东方财富+央视多源聚合，按重要性分级', 'tool'),
+    ('tool.online_valuation_query_enabled', 'true', '主动在线估值查询工具开关：专家主动调用akshare查最新估值（不受自动兜底开关控制），默认true', 'tool'),
 
     # M3/M5/M2/M7 多Agent整体增强开关（2026-07-16 Phase 2/3）
     ('agent.force_devil_advocate_enabled', 'true', '强制魔鬼代言人开关：交叉审阅disagreements为空时二次提示强制反驳，串行最后位专家注入质疑角色', 'agent'),

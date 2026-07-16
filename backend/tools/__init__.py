@@ -53,6 +53,23 @@ TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "query_online_valuation",
+            "description": "主动查询在线最新估值（akshare中证官方，实时数据）。当库内估值数据超过7天未更新、或用户明确要求查最新数据时调用。注意：query_valuation优先用库内数据，只有数据明显过时时才调用此工具查最新。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "index_name": {
+                        "type": "string",
+                        "description": "指数名称或关键词，如'沪深300'、'中证500'、'白酒'",
+                    },
+                },
+                "required": ["index_name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "search_knowledge",
             "description": "从知识库中检索相关文章、分析记录、个人文档。当需要引用专业观点、查找历史分析、检索文档内容时调用。",
             "parameters": {
@@ -959,7 +976,7 @@ _TOOL_TIMEOUT_OVERRIDES = {
 
 # ── 工具结果校验（轻量规则，零 LLM 成本） ──
 
-_VALUATION_TOOLS = {"query_valuation", "get_valuation_list"}
+_VALUATION_TOOLS = {"query_valuation", "query_online_valuation", "get_valuation_list"}
 
 # PE/PB/分位 合理范围（超出则标记 warning）
 _PE_RANGE = (0, 500)
@@ -1168,6 +1185,8 @@ def _execute_tool_impl(name: str, arguments: dict, trace_id: str = "",
     """工具执行的实际实现。"""
     if name == "query_valuation":
         return _query_valuation(arguments)
+    elif name == "query_online_valuation":
+        return _query_online_valuation_impl(arguments)
     elif name == "search_knowledge":
         arguments["trace_id"] = trace_id
         arguments["conversation_id"] = conversation_id
@@ -1570,6 +1589,137 @@ def _query_valuation(args: dict) -> str:
                 "并在结论中标注数据完整性。"
             )
         results.append(entry_result)
+
+    return json.dumps(results, ensure_ascii=False)
+
+
+def _query_online_valuation_impl(args: dict) -> str:
+    """主动查询在线最新估值（akshare 中证官方，实时数据）。
+
+    与 _query_valuation 的区别：
+    - _query_valuation 优先用库内数据（雷牛牛7天→螺丝钉30天→过期）
+    - 本函数直接查 akshare 在线最新，不受 valuation.online_fallback_enabled 控制
+    - 受 tool.online_valuation_query_enabled 开关控制（默认 true）
+    - 带内存缓存（1小时TTL），重复查询秒返
+
+    触发场景：库内数据超过7天未更新 / 用户明确要求查最新
+    """
+    from db.valuations import fetch_online_valuation, normalize_index_code
+
+    index_name = args.get("index_name", "")
+    if not index_name:
+        return json.dumps({"error": "index_name 不能为空"}, ensure_ascii=False)
+
+    # 1. 按名称匹配指数代码（复用 _query_valuation 的匹配逻辑）
+    all_indexes = list_valuation_indexes()
+    unique_indexes = {}
+    for idx in all_indexes:
+        code = idx["index_code"]
+        if code not in unique_indexes:
+            unique_indexes[code] = idx["index_name"]
+
+    _prefixes = ("中证", "国证", "沪", "深", "恒生")
+    matched = []
+    seen_codes = set()
+
+    for code, name in unique_indexes.items():
+        if code in seen_codes:
+            continue
+        if name in index_name or index_name in name:
+            seen_codes.add(code)
+            matched.append({"code": code, "name": name})
+            continue
+        for prefix in _prefixes:
+            core = name.replace(prefix, "", 1)
+            if len(core) >= 2 and (core in index_name or index_name in core):
+                seen_codes.add(code)
+                matched.append({"code": code, "name": name})
+                break
+
+    if not matched:
+        db_results = search_indexes_by_keyword(index_name)
+        for r in db_results:
+            if r["index_code"] not in seen_codes:
+                seen_codes.add(r["index_code"])
+                matched.append({"code": r["index_code"], "name": r["index_name"]})
+
+    if not matched:
+        return json.dumps({
+            "error": f"未找到'{index_name}'相关的指数，无法查在线估值",
+            "hint": "请尝试更通用的名称，如'沪深300'、'中证500'、'白酒'",
+        }, ensure_ascii=False)
+
+    # 同名指数去重：保留主代码（优先 000/399 开头的无后缀代码）
+    _dedup = {}
+    for m in matched:
+        name = m["name"]
+        code = m["code"]
+        if name not in _dedup:
+            _dedup[name] = code
+        else:
+            # 已有同名的，优先保留无后缀的主代码
+            old_code = _dedup[name]
+            if "." not in code and "." in old_code:
+                _dedup[name] = code
+            elif code.startswith("000") and not old_code.startswith("000"):
+                _dedup[name] = code
+    matched = [{"code": c, "name": n} for n, c in _dedup.items()]
+
+    # 2. 对每个匹配指数查在线最新估值（最多3个，避免过多在线请求）
+    results = []
+    for m in matched[:3]:
+        code, name = m["code"], m["name"]
+        normalized_code = normalize_index_code(code)
+
+        # 查市盈率
+        pe_data = fetch_online_valuation(normalized_code, "市盈率")
+        # 查市净率
+        pb_data = fetch_online_valuation(normalized_code, "市净率")
+
+        # 过滤：pe/pb 都没有有效数值（current_value 为 None）时跳过
+        pe_valid = pe_data and pe_data.get("current_value") is not None
+        pb_valid = pb_data and pb_data.get("current_value") is not None
+        if not pe_valid and not pb_valid:
+            results.append({
+                "index_code": code,
+                "index_name": name,
+                "data_status": "online_failed",
+                "hint": f"在线查询'{name}'无有效数据（akshare 无此指数或超时），请用 query_valuation 查库内数据",
+            })
+            continue
+
+        entry = {
+            "index_code": code,
+            "index_name": name,
+            "data_source": "online_latest",
+            "source": "akshare",
+            "snapshot_date": (pe_data or pb_data or {}).get("snapshot_date"),
+            "metrics": [],
+        }
+        if pe_valid:
+            pe_entry = {
+                "metric_type": "市盈率",
+                "current_value": pe_data.get("current_value"),
+                "percentile": pe_data.get("percentile"),
+                "source": pe_data.get("source"),
+            }
+            pct = pe_data.get("percentile")
+            if pct is not None:
+                pe_entry["level"] = "低估" if pct < 30 else ("合理" if pct < 70 else "高估")
+            entry["metrics"].append(pe_entry)
+        if pb_valid:
+            pb_entry = {
+                "metric_type": "市净率",
+                "current_value": pb_data.get("current_value"),
+                "percentile": pb_data.get("percentile"),
+                "source": pb_data.get("source"),
+            }
+            pct = pb_data.get("percentile")
+            if pct is not None:
+                pb_entry["level"] = "低估" if pct < 30 else ("合理" if pct < 70 else "高估")
+            entry["metrics"].append(pb_entry)
+
+        results.append(entry)
 
     return json.dumps(results, ensure_ascii=False)
 

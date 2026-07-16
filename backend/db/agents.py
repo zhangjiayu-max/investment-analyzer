@@ -352,7 +352,7 @@ def _init_wealth_specialists(conn):
             "tools": ["search_knowledge", "yingmi_hot_topics", "yingmi_search_news", "yingmi_latest_quotations",
                       "eastmoney_macro_data", "query_institutional_flow",
                       "get_macro_policy_data", "get_bond_yield_curve", "get_bond_temperature",
-                      "web_search", "query_southbound_capital", "query_policy_news"],
+                      "web_search", "query_southbound_capital", "query_policy_news", "query_online_valuation"],
             "system_prompt": (
                 "## 人设\n"
                 "你是宏观策略师，专注自上而下的宏观分析。"
@@ -405,7 +405,7 @@ def _init_wealth_specialists(conn):
             "name": "基金分析师",
             "description": "持仓穿透 + 业绩归因 + 同类对比 + 规模影响分析",
             "icon": "chart",
-            "tools": ["search_knowledge", "query_valuation", "query_portfolio", "query_fund_info",
+            "tools": ["search_knowledge", "query_valuation", "query_online_valuation", "query_portfolio", "query_fund_info",
                       "yingmi_latest_quotations",
                       "ttfund_fund_manager", "ttfund_fund_nav", "ttfund_fund_condition", "eastmoney_finance_data",
                       "query_earnings_reports", "query_transaction_history", "analyze_holding_performance"],
@@ -452,7 +452,7 @@ def _init_wealth_specialists(conn):
             "name": "估值分析师",
             "description": "专注指数估值分析，结合历史分位点、趋势变化给出投资建议",
             "icon": "chart",
-            "tools": ["search_knowledge", "query_valuation", "query_portfolio", "yingmi_latest_quotations",
+            "tools": ["search_knowledge", "query_valuation", "query_online_valuation", "query_portfolio", "yingmi_latest_quotations",
                       "eastmoney_finance_data"],
             "system_prompt": None,  # 从同名 preset 行继承
             "knowledge_scope": '{"rag_types": ["valuation", "analysis", "book"], "kyc_dimensions": ["risk_tolerance", "loss_tolerance"]}',
@@ -465,7 +465,7 @@ def _init_wealth_specialists(conn):
             "tools": ["search_knowledge", "yingmi_hot_topics", "yingmi_search_news",
                       "yingmi_latest_quotations", "eastmoney_finance_data", "query_institutional_flow",
                       "query_earnings_reports",
-                      "web_search", "query_southbound_capital", "query_policy_news"],
+                      "web_search", "query_southbound_capital", "query_policy_news", "query_online_valuation"],
             "system_prompt": (
                 "## 人设\n"
                 "你是市场分析师，专注市场情绪、资金流向、新闻资讯分析，为投资决策提供市场动态视角。\n\n"
@@ -510,7 +510,7 @@ def _init_wealth_specialists(conn):
             "name": "风险管理师",
             "description": "专注风险评估与控制，提供回撤分析、波动率评估、止损建议",
             "icon": "shield",
-            "tools": ["search_knowledge", "query_portfolio", "query_valuation",
+            "tools": ["search_knowledge", "query_portfolio", "query_valuation", "query_online_valuation",
                       "analyze_portfolio_diversification",
                       "yingmi_latest_quotations", "eastmoney_finance_data",
                       "query_earnings_reports", "calculate_metrics"],

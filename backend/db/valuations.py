@@ -805,11 +805,77 @@ def _query_ttfund_valuation(index_code: str, metric_type: str, timeout_ms: int) 
         return None
 
 
-def _lookup_index_name(index_code: str) -> str | None:
-    """反查指数名称：从本地估值表、持仓表、螺丝钉数据中查找。
+def fetch_online_valuation(index_code: str, metric_type: str = "市盈率",
+                            timeout_ms: int = 6000) -> dict | None:
+    """主动查询在线最新估值（akshare 中证官方）。
 
-    用于估值查询失败时补全 index_name，避免告警显示 "000922.CSI（000922.CSI）"。
+    与自动兜底 _online_fallback 的区别：
+    - 不受 valuation.online_fallback_enabled 开关控制（这是用户/专家主动调用）
+    - 受 tool.online_valuation_query_enabled 开关控制（默认 true）
+    - 复用 akshare 数据源 + 内存缓存（1小时TTL）
+    - 带真正超时控制（ThreadPoolExecutor）
+
+    Args:
+        index_code: 指数代码（支持带后缀，内部 normalize）
+        metric_type: 市盈率/市净率
+        timeout_ms: 超时毫秒（默认 6 秒，略长于自动兜底的 5 秒）
+
+    Returns:
+        估值字典，带 source="akshare_online" 标识；失败返回 None
     """
+    from db.config import get_config_bool, get_config_int
+    try:
+        if not get_config_bool("tool.online_valuation_query_enabled", True):
+            logger.info(f"[valuation] 主动在线查询已禁用 (tool.online_valuation_query_enabled=false) {index_code}")
+            return None
+    except Exception:
+        pass
+
+    index_code = normalize_index_code(index_code)
+
+    # 复用在线缓存（与自动兜底共享）
+    cache_ttl = get_config_int("valuation.online_cache_ttl", 3600)
+    cache_key = f"{index_code}:{metric_type}"
+    cached = _online_cache.get(cache_key)
+    if cached:
+        if (datetime.now() - cached["_cached_at"]).total_seconds() < cache_ttl:
+            result = {k: v for k, v in cached.items() if k != "_cached_at"}
+            result["source"] = "akshare_online_cached"
+            logger.debug(f"[valuation] 主动在线查询命中缓存 {index_code}")
+            return result
+        else:
+            del _online_cache[cache_key]
+
+    timeout_s = max(timeout_ms / 1000.0, 1.0)
+    try:
+        with ThreadPoolExecutor(max_workers=1) as ex:
+            fut = ex.submit(_query_akshare_valuation, index_code, metric_type, timeout_ms)
+            try:
+                online_data = fut.result(timeout=timeout_s)
+            except FuturesTimeoutError:
+                logger.warning(f"[valuation] 主动在线查询超时 {index_code} ({timeout_s}s)")
+                return None
+        if online_data:
+            online_data["data_source"] = "online"
+            online_data["source"] = "akshare_online"
+            online_data["is_expired"] = False
+            online_data["days_old"] = 0
+            # 统一 percentile 为 0-100 格式（akshare 返回 0-1 小数）
+            pct_raw = online_data.get("percentile")
+            if pct_raw is not None and pct_raw <= 1.0:
+                online_data["percentile"] = round(pct_raw * 100, 2)
+            online_data["_cached_at"] = datetime.now()
+            _online_cache[cache_key] = online_data
+            result = {k: v for k, v in online_data.items() if k != "_cached_at"}
+            logger.info(f"[valuation] 主动在线查询成功 {index_code} ({metric_type}={result.get('current_value')}, 分位={result.get('percentile')}%)")
+            return result
+    except Exception as e:
+        logger.warning(f"[valuation] 主动在线查询失败 {index_code}: {e}")
+    return None
+
+
+def _lookup_index_name(index_code: str) -> str | None:
+    """反查指数名称：从本地估值表、持仓表、螺丝钉数据中查找。"""
     if not index_code:
         return None
     try:
