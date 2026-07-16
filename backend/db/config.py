@@ -274,7 +274,9 @@ DEFAULT_CONFIGS = [
     ('smart_add.trend_lookback_days', '20', '趋势加仓回看天数（计算近N日涨幅）', 'smart_add'),
     ('smart_add.trend_min_gain_pct', '3.0', '趋势加仓最小涨幅%（近N日涨幅超过此值才触发）', 'smart_add'),
     ('smart_add.trend_position_pct', '5', '趋势加仓仓位上限%（占总资产，小仓位试探）', 'smart_add'),
+    ('smart_add.trend_base_ratio', '5', '趋势加仓基数（占标的市值%，5%即小仓位试探）', 'smart_add'),
     ('smart_add.dip_signal_enabled', 'true', '大跌定投信号开关（连续大跌4%分批定投）', 'smart_add'),
+    ('smart_add.dip_base_ratio', '8', '大跌定投基数（占标的市值%，8%因跌幅已确认略大于趋势）', 'smart_add'),
     ('smart_add.dca_drop_step_pct', '4', '大跌定投触发步长%（累计跌幅达此值触发定投）', 'smart_add'),
     ('smart_add.dca_tiers', '4:1.0,8:1.5,12:2.0', '大跌定投档位（跌幅%:月投倍数，逗号分隔）', 'smart_add'),
 ]

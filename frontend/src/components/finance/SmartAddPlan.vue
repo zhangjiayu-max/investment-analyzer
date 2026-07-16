@@ -563,11 +563,13 @@ onMounted(() => {
                     <b class="formula-amount font-jet">¥{{ fmtMoney(sig.amount) }}</b>
                     <span class="formula-detail font-jet">{{ sig.amount_formula.formula }}</span>
                     <span class="formula-breakdown">
+                      <span v-if="sig.amount_formula.base_amount">基数¥{{ fmtMoney(sig.amount_formula.base_amount) }}</span>
                       <span v-if="sig.amount_formula.trend_strength_mult">趋势{{ sig.amount_formula.trend_strength_mult }}×</span>
                       <span v-if="sig.amount_formula.valuation_mult">估值{{ sig.amount_formula.valuation_mult }}×</span>
                       <span v-if="sig.amount_formula.drop_mult">跌幅{{ sig.amount_formula.drop_mult }}×</span>
                       <span v-if="sig.amount_formula.loss_mult">亏损{{ sig.amount_formula.loss_mult }}×</span>
                       <span v-if="sig.amount_formula.room_mult">仓位余量{{ sig.amount_formula.room_mult }}×</span>
+                      <span v-if="sig.amount_formula.recent_buy_deducted > 0" class="deduct-info">已补扣减¥{{ fmtMoney(sig.amount_formula.recent_buy_deducted) }}</span>
                       <span class="pos-info">当前仓位{{ sig.amount_formula.current_position_pct }}%</span>
                     </span>
                   </div>
@@ -1300,6 +1302,10 @@ onMounted(() => {
   margin-left: auto;
   background: rgba(100,116,139,0.08);
   color: var(--color-text-secondary);
+}
+.formula-breakdown .deduct-info {
+  background: rgba(239,68,68,0.08);
+  color: var(--color-loss);
 }
 
 /* 折叠头 */

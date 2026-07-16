@@ -93,7 +93,9 @@ def _load_config() -> dict:
         "trend_lookback_days": get_config_int_safe("smart_add.trend_lookback_days", 20),
         "trend_min_gain_pct": get_config_float_safe("smart_add.trend_min_gain_pct", 3.0),
         "trend_position_pct": get_config_float_safe("smart_add.trend_position_pct", 5.0),
+        "trend_base_ratio": get_config_float_safe("smart_add.trend_base_ratio", 5.0),
         "dip_signal_enabled": get_config_bool_safe("smart_add.dip_signal_enabled", True),
+        "dip_base_ratio": get_config_float_safe("smart_add.dip_base_ratio", 8.0),
         "dca_drop_step_pct": get_config_float_safe("smart_add.dca_drop_step_pct", 4.0),
         "dca_tiers": get_config_str_safe("smart_add.dca_tiers", "4:1.0,8:1.5,12:2.0"),
     }
@@ -414,13 +416,14 @@ def generate_smart_add_plan(user_id: str = "default") -> dict:
 
 # ── 多维度触发器：信号 B 趋势加仓 + 信号 C 大跌定投 + 冷却期 ───
 
-def _check_cooldown(fund_code: str, cfg: dict) -> tuple[bool, int, str]:
-    """冷却期检查：近 cooldown_days 内同基金买入次数是否超限。
+def _check_cooldown(fund_code: str, cfg: dict) -> tuple[bool, int, float, str]:
+    """冷却期检查：近 cooldown_days 内同基金买入次数是否超限，并返回已补金额。
 
     Returns:
-        (can_proceed, recent_buy_count, reason)
-        - can_proceed=True: 可继续补仓
+        (can_proceed, recent_buy_count, recent_buy_amount, reason)
+        - can_proceed=True: 可继续补仓（但建议金额应减去 recent_buy_amount）
         - can_proceed=False: 已达冷却期上限，应拦截
+        - recent_buy_amount: 冷却期内已补仓总金额（供信号减扣，避免重复补仓）
     """
     try:
         from db._conn import _get_conn
@@ -430,20 +433,21 @@ def _check_cooldown(fund_code: str, cfg: dict) -> tuple[bool, int, str]:
         conn = _get_conn()
         try:
             row = conn.execute(
-                "SELECT COUNT(*) as cnt FROM portfolio_transactions "
+                "SELECT COUNT(*) as cnt, COALESCE(SUM(amount),0) as total_amount FROM portfolio_transactions "
                 "WHERE fund_code=? AND transaction_type='buy' "
                 "AND transaction_date >= ? AND status IN ('confirmed','pending','submitted')",
                 (fund_code, cutoff),
             ).fetchone()
             count = row["cnt"] if row else 0
+            recent_amount = float(row["total_amount"]) if row and row["total_amount"] else 0.0
         finally:
             conn.close()
         if count >= max_buys:
-            return False, count, f"冷却期内已补仓{count}次（{cooldown_days}天内上限{max_buys}次）"
-        return True, count, ""
+            return False, count, recent_amount, f"冷却期内已补仓{count}次¥{recent_amount:,.0f}（{cooldown_days}天内上限{max_buys}次）"
+        return True, count, recent_amount, ""
     except Exception as e:
         logger.debug(f"[smart_add] 冷却期检查失败 {fund_code}: {e}")
-        return True, 0, ""  # 失败时放行
+        return True, 0, 0.0, ""  # 失败时放行
 
 
 def _get_last_buy_price(fund_code: str) -> Optional[float]:
@@ -536,27 +540,41 @@ def _detect_trend_signal(
     if hits < 2:
         return None
 
-    # 冷却期检查
-    can_proceed, recent_count, block_reason = _check_cooldown(fund_code, cfg)
+    # 冷却期检查（返回已补金额，供减扣）
+    can_proceed, recent_count, recent_buy_amount, block_reason = _check_cooldown(fund_code, cfg)
     if not can_proceed:
         return {
             "type": "trend",
             "label": "趋势加仓",
             "triggered": False,
             "blocked_reason": block_reason,
-            "conditions_met": [c for c, v in zip(["估值合理", f"近{lookback}日涨{gain_20d}%", "近5日涨{gain_5d}%"], [cond1, cond2, cond3]) if v],
+            "conditions_met": [
+                c for c, v in zip(
+                    [f"估值合理({val_pct:.0f}%分位)" if val_pct is not None else "估值合理",
+                     f"近{lookback}日涨{gain_20d}%" if gain_20d is not None else "近N日涨",
+                     f"近5日涨{gain_5d}%" if gain_5d is not None else "短趋势确认"],
+                    [cond1, cond2, cond3]
+                ) if v
+            ],
         }
 
-    # 建议金额动态化：基础月投 × 趋势强度系数 × 估值系数 × 仓位余量系数
+    # 建议金额动态化：标的市值 × 趋势加仓比例 × 趋势强度系数 × 估值系数 × 仓位余量系数
+    # 2026-07-17 改进：基数从全局 base_monthly 改为"标的市值×趋势加仓比例"
+    #   原因：全局2760对小仓位基金(¥7766)占比过大，对大仓位基金(¥51534)占比过小
+    # 趋势加仓比例默认5%（小仓位试探），可通过 trend_base_ratio 配置
+    current_value = holding.get("current_value") or 0
+    trend_base_ratio = cfg.get("trend_base_ratio", 5.0)  # 标的市值的5%作为趋势加仓基数
+    base_amount = current_value * trend_base_ratio / 100
+
     # 1. 趋势强度系数：涨3%→×1.0，涨5%→×1.3，涨8%→×1.5（线性插值，上限1.5）
     trend_strength_mult = 1.0
     if gain_20d is not None:
         if gain_20d >= 8:
             trend_strength_mult = 1.5
         elif gain_20d >= 5:
-            trend_strength_mult = 1.0 + (gain_20d - 5) * 0.1  # 5→1.0, 8→1.3... 线性
+            trend_strength_mult = 1.0 + (gain_20d - 5) * 0.1
         elif gain_20d >= 3:
-            trend_strength_mult = 1.0  # 刚达阈值
+            trend_strength_mult = 1.0
         else:
             trend_strength_mult = max(0.8, 1.0 - (3 - gain_20d) * 0.1)
 
@@ -572,18 +590,22 @@ def _detect_trend_signal(
 
     # 3. 仓位余量系数：(上限-当前仓位)/上限，仓位越低补越多
     position_cap_pct = cfg.get("trend_position_pct", 5)
-    total_assets = holding.get("_total_assets", 0)  # 由调用方注入
-    current_value = holding.get("current_value") or 0
+    total_assets = holding.get("_total_assets", 0)
     current_position_pct = (current_value / total_assets * 100) if total_assets else 0
-    # 仓位余量 = max(0.3, (上限-当前)/上限)，最低0.3避免仓位已高时建议为0
     room_mult = max(0.3, (position_cap_pct - current_position_pct) / position_cap_pct) if position_cap_pct > 0 else 1.0
 
-    amount = round(base_monthly * trend_strength_mult * valuation_mult * room_mult, 2)
+    amount = round(base_amount * trend_strength_mult * valuation_mult * room_mult, 2)
     # 仓位上限硬约束：5% 总资产
     if total_assets:
         cap_amount = round(total_assets * position_cap_pct / 100, 2)
         if amount > cap_amount:
             amount = cap_amount
+
+    # 减去冷却期内已补金额（避免重复补仓）
+    deducted_amount = 0
+    if recent_buy_amount > 0:
+        deducted_amount = min(amount, recent_buy_amount)
+        amount = max(0, round(amount - recent_buy_amount, 2))
 
     reasons = []
     if cond1:
@@ -591,8 +613,9 @@ def _detect_trend_signal(
     if cond2:
         reasons.append(f"近{lookback}日涨{gain_20d}%")
     if cond3:
-        reasons.append("短趋势确认")
+        reasons.append(f"近5日涨{gain_5d}%" if gain_5d is not None else "短趋势确认")
 
+    formula_base = round(base_amount, 2)
     return {
         "type": "trend",
         "label": "趋势加仓",
@@ -602,14 +625,16 @@ def _detect_trend_signal(
         "conditions_met": reasons,
         "position_cap_pct": position_cap_pct,
         "tag": "短期波段",
-        # 金额计算依据（让用户看懂"一次加多少"是怎么来的）
+        "recent_buy_amount": round(recent_buy_amount, 2),
+        "deducted_amount": round(deducted_amount, 2),
         "amount_formula": {
-            "base_monthly": base_monthly,
+            "base_amount": formula_base,
             "trend_strength_mult": round(trend_strength_mult, 2),
             "valuation_mult": valuation_mult,
             "room_mult": round(room_mult, 2),
             "current_position_pct": round(current_position_pct, 2),
-            "formula": f"{base_monthly} × {round(trend_strength_mult,2)} × {valuation_mult} × {round(room_mult,2)} = {amount}",
+            "recent_buy_deducted": round(deducted_amount, 2),
+            "formula": f"{formula_base} × {round(trend_strength_mult,2)} × {valuation_mult} × {round(room_mult,2)} - {round(deducted_amount,2)}(已补) = {amount}",
         },
     }
 
@@ -672,7 +697,7 @@ def _detect_dip_signal(
         return None
 
     # 条件3：冷却期检查（跌幅≥8%可突破）
-    can_proceed, recent_count, block_reason = _check_cooldown(fund_code, cfg)
+    can_proceed, recent_count, recent_buy_amount, block_reason = _check_cooldown(fund_code, cfg)
     if not can_proceed and drop_pct < 8:
         return {
             "type": "dip",
@@ -683,8 +708,14 @@ def _detect_dip_signal(
             "tier": f"-{matched_tier[0]}%",
         }
 
-    # 建议金额动态化：基础月投 × 跌幅系数 × 亏损系数 × 仓位余量系数
-    # 1. 跌幅系数：使用档位倍数（4%→×1.0, 8%→×1.5, 12%→×2.0），档位间线性插值
+    # 建议金额动态化：标的市值 × 大跌定投比例 × 跌幅系数 × 亏损系数 × 仓位余量系数
+    # 2026-07-17 改进：基数从全局 base_monthly 改为"标的市值×大跌定投比例"
+    # 大跌定投比例默认8%（比趋势加仓5%略大，因跌幅已确认）
+    dip_base_ratio = cfg.get("dip_base_ratio", 8.0)
+    current_value = holding.get("current_value") or 0
+    base_amount = current_value * dip_base_ratio / 100
+
+    # 1. 跌幅系数：使用档位倍数（4%→×1.0, 8%→×1.5, 12%→×2.0）
     drop_mult = matched_tier[1]
 
     # 2. 亏损系数：亏损0-10%→×1.0，亏损10-20%→×1.2，亏损>20%→×1.3
@@ -698,12 +729,18 @@ def _detect_dip_signal(
     # 3. 仓位余量系数：(25%上限-当前仓位)/25%，仓位越低补越多，最低0.3
     max_pos_pct = cfg.get("max_single_position_pct", 25.0)
     total_assets = holding.get("_total_assets", 0)
-    current_value = holding.get("current_value") or 0
     current_position_pct = (current_value / total_assets * 100) if total_assets else 0
     room_mult = max(0.3, (max_pos_pct - current_position_pct) / max_pos_pct) if max_pos_pct > 0 else 1.0
 
-    amount = round(base_monthly * drop_mult * loss_mult * room_mult, 2)
+    amount = round(base_amount * drop_mult * loss_mult * room_mult, 2)
 
+    # 减去冷却期内已补金额（避免重复补仓）
+    deducted_amount = 0
+    if recent_buy_amount > 0:
+        deducted_amount = min(amount, recent_buy_amount)
+        amount = max(0, round(amount - recent_buy_amount, 2))
+
+    formula_base = round(base_amount, 2)
     return {
         "type": "dip",
         "label": "大跌定投",
@@ -714,17 +751,19 @@ def _detect_dip_signal(
         "current_price": current_price,
         "tier": f"-{matched_tier[0]}%",
         "multiplier": matched_tier[1],
-        "reason": f"较上次买入跌{drop_pct:.1f}%，分批定投（档位-{matched_tier[0]}%，月投×{matched_tier[1]}）",
+        "reason": f"较上次买入跌{drop_pct:.1f}%，分批定投（档位-{matched_tier[0]}%，×{matched_tier[1]}）",
         "tag": "分批定投",
-        # 金额计算依据
+        "recent_buy_amount": round(recent_buy_amount, 2),
+        "deducted_amount": round(deducted_amount, 2),
         "amount_formula": {
-            "base_monthly": base_monthly,
+            "base_amount": formula_base,
             "drop_mult": drop_mult,
             "loss_mult": loss_mult,
             "room_mult": round(room_mult, 2),
             "current_position_pct": round(current_position_pct, 2),
             "profit_rate_pct": round(profit_rate * 100, 2),
-            "formula": f"{base_monthly} × {drop_mult} × {loss_mult} × {round(room_mult,2)} = {amount}",
+            "recent_buy_deducted": round(deducted_amount, 2),
+            "formula": f"{formula_base} × {drop_mult} × {loss_mult} × {round(room_mult,2)} - {round(deducted_amount,2)}(已补) = {amount}",
         },
     }
 
