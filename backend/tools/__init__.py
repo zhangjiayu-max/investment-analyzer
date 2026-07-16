@@ -1549,6 +1549,8 @@ def _query_valuation(args: dict) -> str:
                 "opportunity_value": latest.get("opportunity_value"),
                 "zscore": latest.get("zscore"),
                 "date": latest.get("snapshot_date"),
+                "days_old": latest.get("days_old", 0),
+                "is_expired": latest.get("is_expired", False),
             }
 
             # 判断估值水平
@@ -1565,6 +1567,33 @@ def _query_valuation(args: dict) -> str:
             history = get_valuation_history(code, 5, mt)
             if history:
                 entry["trend"] = [h["current_value"] for h in reversed(history)]
+
+            # 库内数据超 3 天 → 自动补充查在线最新（用户要求：估值一定要新）
+            days_old = latest.get("days_old", 0) or 0
+            if days_old > 3 or latest.get("is_expired"):
+                try:
+                    from db.valuations import fetch_online_valuation, normalize_index_code
+                    online = fetch_online_valuation(normalize_index_code(code), mt)
+                    if online and online.get("current_value") is not None:
+                        entry["online_latest"] = {
+                            "current_value": online.get("current_value"),
+                            "percentile": online.get("percentile"),
+                            "snapshot_date": online.get("snapshot_date"),
+                            "source": online.get("source"),
+                        }
+                        # 在线数据有百分位时补充 level
+                        online_pct = online.get("percentile")
+                        if online_pct is not None:
+                            entry["online_latest"]["level"] = (
+                                "低估" if online_pct < 30 else ("合理" if online_pct < 70 else "高估")
+                            )
+                        entry["data_freshness_hint"] = (
+                            f"⚠️ 库内数据已 {days_old} 天未更新，已自动补充在线最新数据。"
+                            "分析时请以 online_latest 字段为准（数据更新）。"
+                        )
+                        logger.info(f"[valuation] {code} {mt} 库内{days_old}天旧, 自动补充在线数据: {online.get('current_value')}")
+                except Exception as e:
+                    logger.debug(f"[valuation] 自动补充在线数据失败 {code} {mt}: {e}")
 
             metrics.append(entry)
 
@@ -1666,6 +1695,8 @@ def _query_online_valuation_impl(args: dict) -> str:
     matched = [{"code": c, "name": n} for n, c in _dedup.items()]
 
     # 2. 对每个匹配指数查在线最新估值（最多3个，避免过多在线请求）
+    # 在线查不到时回退库内表数据兜底（用户要求：查不到就用库内表数据）
+    from db.valuations import get_best_valuation
     results = []
     for m in matched[:3]:
         code, name = m["code"], m["name"]
@@ -1676,18 +1707,63 @@ def _query_online_valuation_impl(args: dict) -> str:
         # 查市净率
         pb_data = fetch_online_valuation(normalized_code, "市净率")
 
-        # 过滤：pe/pb 都没有有效数值（current_value 为 None）时跳过
+        # 在线数据有效性检查
         pe_valid = pe_data and pe_data.get("current_value") is not None
         pb_valid = pb_data and pb_data.get("current_value") is not None
+
+        # 在线都查不到 → 回退库内表数据兜底
         if not pe_valid and not pb_valid:
-            results.append({
+            local_pe = get_best_valuation(code, "市盈率", query_source="agent", enable_online=False)
+            local_pb = get_best_valuation(code, "市净率", query_source="agent", enable_online=False)
+            local_pe_valid = local_pe and local_pe.get("current_value") is not None
+            local_pb_valid = local_pb and local_pb.get("current_value") is not None
+            if not local_pe_valid and not local_pb_valid:
+                results.append({
+                    "index_code": code,
+                    "index_name": name,
+                    "data_status": "all_failed",
+                    "hint": f"'{name}'在线和库内均无有效估值数据",
+                })
+                continue
+            # 用库内数据兜底
+            entry = {
                 "index_code": code,
                 "index_name": name,
-                "data_status": "online_failed",
-                "hint": f"在线查询'{name}'无有效数据（akshare 无此指数或超时），请用 query_valuation 查库内数据",
-            })
+                "data_source": "local_fallback",
+                "source": "库内表(在线查询失败回退)",
+                "snapshot_date": (local_pe or local_pb or {}).get("snapshot_date"),
+                "metrics": [],
+            }
+            if local_pe_valid:
+                pe_entry = {
+                    "metric_type": "市盈率",
+                    "current_value": local_pe.get("current_value"),
+                    "percentile": local_pe.get("percentile"),
+                    "source": "local_fallback",
+                    "days_old": local_pe.get("days_old", 0),
+                    "is_expired": local_pe.get("is_expired", False),
+                }
+                pct = local_pe.get("percentile")
+                if pct is not None:
+                    pe_entry["level"] = "低估" if pct < 30 else ("合理" if pct < 70 else "高估")
+                entry["metrics"].append(pe_entry)
+            if local_pb_valid:
+                pb_entry = {
+                    "metric_type": "市净率",
+                    "current_value": local_pb.get("current_value"),
+                    "percentile": local_pb.get("percentile"),
+                    "source": "local_fallback",
+                    "days_old": local_pb.get("days_old", 0),
+                    "is_expired": local_pb.get("is_expired", False),
+                }
+                pct = local_pb.get("percentile")
+                if pct is not None:
+                    pb_entry["level"] = "低估" if pct < 30 else ("合理" if pct < 70 else "高估")
+                entry["metrics"].append(pb_entry)
+            results.append(entry)
             continue
 
+        # 在线数据有效
         entry = {
             "index_code": code,
             "index_name": name,
