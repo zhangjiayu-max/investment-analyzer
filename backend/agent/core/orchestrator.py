@@ -220,7 +220,6 @@ _AGENT_MODEL_MAP_DEEPSEEK = {
     "orchestrator": "deepseek-v4-pro",
     "cross_review": "deepseek-v4-flash",
     "arbitrator": "deepseek-v4-pro",               # P2: 仲裁，强模型
-    "debate_arbitrator": "deepseek-v4-pro",        # P2: 辩论仲裁，强模型
     "self_reflection": "deepseek-v4-flash",        # 自我反思，轻量模型控成本
 }
 
@@ -236,7 +235,6 @@ _AGENT_MODEL_MAP_MIMO = {
     "orchestrator": "mimo-v2.5-pro",               # 编排器，强模型
     "cross_review": "mimo-v2.5-pro",               # 交叉审阅，强模型
     "arbitrator": "mimo-v2.5-pro",                 # P2: 仲裁，强模型
-    "debate_arbitrator": "mimo-v2.5-pro",          # P2: 辩论仲裁，强模型
     "self_reflection": "mimo-v2.5-pro",            # 自我反思，需精确推理
 }
 
@@ -3918,6 +3916,63 @@ def _stream_build_context(refined_query: str, rag_context: str, complexity: str,
                 prebuilt_context += f"## 今日市场热点\n{news_lines}\n\n"
     except Exception as e:
         logger.warning(f"注入热点新闻失败: {e}")
+
+    # 注入宏观经济数据到 prebuilt_context（LPR/RRR/SHIBOR/CPI + 政策环境判断）
+    try:
+        from tools import _get_macro_policy_data
+        macro_raw = _get_macro_policy_data()
+        if macro_raw and len(macro_raw) > 10:
+            import json as _json
+            macro_data = _json.loads(macro_raw)
+            macro_lines = []
+            if macro_data.get("policy_summary"):
+                macro_lines.append(f"- 政策环境: {macro_data['policy_summary']}")
+            if macro_data.get("lpr"):
+                lpr = macro_data["lpr"]
+                if isinstance(lpr, list) and lpr:
+                    latest_lpr = lpr[-1] if isinstance(lpr, list) else lpr
+                    macro_lines.append(f"- LPR 1Y={latest_lpr.get('lpr_1y','?')}% 5Y={latest_lpr.get('lpr_5y','?')}%")
+            if macro_data.get("shibor"):
+                sh = macro_data["shibor"]
+                macro_lines.append(f"- SHIBOR 隔夜={sh.get('overnight','?')}% 3M={sh.get('3m','?')}%")
+            if macro_data.get("cpi"):
+                cpi = macro_data["cpi"]
+                macro_lines.append(f"- CPI={cpi.get('value','?')}% (前值{cpi.get('previous','?')}%)")
+            if macro_lines:
+                prebuilt_context += f"## 宏观经济数据\n" + "\n".join(macro_lines) + "\n\n"
+    except Exception as e:
+        logger.debug(f"注入宏观数据失败: {e}")
+
+    # 注入资金流向（融资余额信号）到 prebuilt_context
+    try:
+        from services.market.institutional_flow import get_institutional_flow_signal
+        flow_signal = get_institutional_flow_signal()
+        if flow_signal:
+            direction = flow_signal.get("direction", "neutral")
+            strength = flow_signal.get("strength", "weak")
+            z_score = flow_signal.get("z_score", 0)
+            direction_cn = {"inflow": "净流入", "outflow": "净流出", "neutral": "中性"}.get(direction, direction)
+            prebuilt_context += f"## 资金流向信号\n- 融资余额: {direction_cn}({strength}) z_score={z_score:.2f}\n\n"
+    except Exception as e:
+        logger.debug(f"注入资金流向失败: {e}")
+
+    # 注入事件雷达（前瞻性事件）到 prebuilt_context
+    try:
+        from db.market_events import list_active_events
+        active_events = list_active_events()
+        if active_events:
+            event_lines = []
+            for ev in active_events[:5]:  # 最近5条活跃事件
+                title = ev.get("event_title", ev.get("title", ""))
+                sector = ev.get("sector", "")
+                confidence = ev.get("confidence", 0)
+                direction = ev.get("direction", "")
+                if title:
+                    event_lines.append(f"- [{sector}] {title} (方向:{direction} 置信度:{confidence:.0%})")
+            if event_lines:
+                prebuilt_context += f"## 事件雷达\n" + "\n".join(event_lines) + "\n\n"
+    except Exception as e:
+        logger.debug(f"注入事件雷达失败: {e}")
 
     llm_messages = [{"role": "system", "content": system_content}]
 

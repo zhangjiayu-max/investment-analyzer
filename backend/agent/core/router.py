@@ -114,9 +114,6 @@ class SmartRouter:
     - 动态负载均衡（避免单一专家过载）
     """
 
-    # 共享专家：所有复杂查询都会附带，提供通用投资框架
-    SHARED_EXPERTS = ["risk_assessor"]  # 风险评估始终参与复杂分析
-
     # 专家容量上限（滑动窗口 5 分钟内最大调用次数）
     EXPERT_CAPACITY = 10
 
@@ -410,15 +407,6 @@ class SmartRouter:
                 else:
                     logger.warning(f"专家 {s} 容量已满 ({len(window)}/{self.EXPERT_CAPACITY})，跳过")
         return result if result else specialists  # 保底：全部满载时仍返回原列表
-
-    def attach_shared_experts(self, specialists: list[str], complexity: str) -> list[str]:
-        """复杂查询附带共享专家（风险评估）。"""
-        if complexity == "complex":
-            for expert in self.SHARED_EXPERTS:
-                if expert not in specialists:
-                    specialists.append(expert)
-                    logger.info(f"附加共享专家: {expert}")
-        return specialists
 
     def _adjust_by_eval_scores(self, route_result: dict) -> dict:
         """防退步：基于历史 eval 分数对低分专家降权（排到末尾，截断时优先淘汰）。

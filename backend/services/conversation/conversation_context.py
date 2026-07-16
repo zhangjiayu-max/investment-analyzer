@@ -430,21 +430,23 @@ def build_conversation_context(
 # 每个 Agent 允许接收的上下文 section 关键词（按 ## 标题匹配）
 # 未列出的 agent_key 不过滤（保留全部上下文，如 arbitrator）
 CONTEXT_FILTERS: dict[str, list[str]] = {
-    "risk_assessor":        ["持仓", "估值", "债市", "结构化数据"],
+    "risk_assessor":        ["持仓", "估值", "债市", "资金", "结构化数据"],
     "valuation_expert":     ["持仓", "估值", "结构化数据"],
-    "allocation_advisor":   ["持仓", "估值", "知识库", "结构化数据"],
-    "market_analyst":       ["估值", "热点", "知识库", "结构化数据"],
-    "fund_analyst":         ["持仓", "知识库", "结构化数据"],
-    "macro_strategist":     ["估值", "热点", "知识库", "债市"],
-    "article_expert":       ["知识库", "结构化数据"],
+    "allocation_advisor":   ["持仓", "估值", "资金", "知识库", "结构化数据"],
+    "market_analyst":       ["估值", "热点", "资金", "事件", "知识库", "结构化数据"],
+    "fund_analyst":         ["持仓", "估值", "事件", "知识库", "结构化数据"],
+    "macro_strategist":     ["估值", "热点", "宏观", "资金", "事件", "知识库", "债市"],
+    "article_expert":       ["持仓", "估值", "事件", "知识库", "结构化数据"],
 }
 
 # section 优先级（同列表内越靠前越重要，预算紧张时先保留）
 CONTEXT_PRIORITY: dict[str, list[str]] = {
-    "risk_assessor":        ["持仓", "估值", "债市", "结构化数据"],
+    "risk_assessor":        ["持仓", "估值", "债市", "资金", "结构化数据"],
     "valuation_expert":     ["估值", "持仓", "结构化数据"],
-    "allocation_advisor":   ["持仓", "估值", "知识库", "结构化数据"],
-    "market_analyst":       ["热点", "估值", "知识库", "结构化数据"],
+    "allocation_advisor":   ["持仓", "估值", "资金", "知识库", "结构化数据"],
+    "market_analyst":       ["热点", "估值", "资金", "事件", "知识库", "结构化数据"],
+    "macro_strategist":     ["宏观", "资金", "事件", "估值", "热点", "债市", "知识库"],
+    "article_expert":       ["事件", "持仓", "估值", "知识库", "结构化数据"],
 }
 
 # 通用兜底 section（预算没用完 70% 时补充）
