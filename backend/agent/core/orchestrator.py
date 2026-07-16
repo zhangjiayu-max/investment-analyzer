@@ -1281,6 +1281,137 @@ def detect_conflicts_smart(specialist_results: list, query: str = "", trace_id: 
         return conflicts
 
 
+def _run_react_arbitration(query: str, specialist_results: list, conflicts: dict,
+                           prebuilt_context: str, llm_messages: list,
+                           trace_id: str = "") -> tuple[bool, list]:
+    """ReAct 路径仲裁：检测到中等/严重冲突时，用强模型给出仲裁结论。
+
+    复用 pipeline 的仲裁 prompt 设计，但适配 ReAct 路径的上下文结构。
+    仲裁结论作为 is_arbitration 专家结果追加到 specialist_results，
+    并注入 llm_messages 让最终综合阶段感知仲裁方向。
+
+    Returns:
+        (arbitration_done, specialist_results)
+    """
+    if len(specialist_results) < 2:
+        return False, specialist_results
+
+    # 仅在检测到冲突且严重度 >= medium 时触发
+    if not conflicts.get("detected", False):
+        return False, specialist_results
+    severity = conflicts.get("severity", "low")
+    if severity not in ("medium", "high"):
+        return False, specialist_results
+
+    # 开关控制（默认开启）
+    if get_orchestration_config("react_arbitration_enabled", "true") != "true":
+        return False, specialist_results
+
+    logger.info(f"[trace:{trace_id}] ReAct 仲裁触发: severity={severity}, conflicts={len(conflicts.get('items', []))}")
+
+    # 构建冲突摘要
+    conflict_lines = []
+    for c in conflicts.get("items", [])[:5]:
+        conflict_lines.append(
+            f"- [{c.get('type','')}] {c.get('expert1','')}({c.get('rating1','')}) vs "
+            f"{c.get('expert2','')}({c.get('rating2','')}) 标的:{c.get('fund','')}"
+        )
+    conflict_text = "\n".join(conflict_lines) if conflict_lines else "（冲突详情解析失败）"
+
+    # 构建专家结论摘要
+    expert_lines = []
+    for sr in specialist_results:
+        if sr.get("is_cross_review"):
+            continue
+        analysis = sr.get("analysis", "")[:500]
+        expert_lines.append(f"### {sr.get('agent', sr.get('agent_key',''))}\n{analysis}")
+    expert_text = "\n\n".join(expert_lines)
+
+    arb_prompt = f"""你是投资仲裁专家。以下多位专家对同一问题给出了存在冲突的分析结论，请给出明确的仲裁方向。
+
+## 用户问题
+{query}
+
+## 专家冲突点
+{conflict_text}
+
+## 各专家分析结论
+{expert_text}
+
+## 仲裁原则
+1. 必须给出明确方向：BUY / HOLD / SELL（不得模棱两可）
+2. 如有风险否决（risk_assessor 反对），BUY 建议必须降级为 HOLD
+3. 结合用户持仓现状，考虑实际可操作性
+4. 置信度 0-1，反映判断的把握程度
+5. 说明采纳哪位专家观点、否决哪位、为什么
+
+## 输出格式（严格 JSON，放在 ```json 代码块中）
+```json
+{{
+  "direction": "BUY|HOLD|SELL",
+  "confidence": 0.75,
+  "reason": "仲裁理由（200字内，说明采纳/否决了哪位专家）",
+  "conditions": "执行条件（如'分批建仓，单次不超过10%'）",
+  "adopted_expert": "采纳的专家名",
+  "rejected_expert": "否决的专家名"
+}}
+```
+"""
+
+    try:
+        arb_model = MODEL
+        if _is_cost_routing_enabled():
+            arb_model = _get_model_for_agent("arbitrator")
+        response = _call_llm(
+            caller="react_arbitration",
+            trace_id=trace_id,
+            model=arb_model,
+            messages=[{"role": "user", "content": arb_prompt}],
+            temperature=0.2,
+            max_tokens=800,
+        )
+        content = response.choices[0].message.content or ""
+        import json as _json
+        import re as _re
+        json_match = _re.search(r'\{.*\}', content, _re.DOTALL)
+        arbitration = _json.loads(json_match.group(0)) if json_match else {}
+
+        # 提取仲裁理由文本（JSON 之外的内容）
+        arb_analysis = content
+        if json_match:
+            arb_analysis = (content[:json_match.start()] + content[json_match.end():]).strip()
+        if not arb_analysis:
+            arb_analysis = f"仲裁方向: {arbitration.get('direction','HOLD')} (置信度 {arbitration.get('confidence',0.5)})\n理由: {arbitration.get('reason','')}\n执行条件: {arbitration.get('conditions','')}"
+
+        # 追加为 is_arbitration 专家结果
+        arb_result = {
+            "agent_key": "arbitrator",
+            "agent": "仲裁专家",
+            "icon": "⚖️",
+            "analysis": arb_analysis,
+            "status": "completed",
+            "is_arbitration": True,
+            "arbitration": arbitration,
+            "duration_ms": 0,
+            "tokens_used": 0,
+            "tool_calls": [],
+        }
+        specialist_results.append(arb_result)
+
+        # 注入 llm_messages 让综合阶段感知仲裁
+        llm_messages.append({
+            "role": "user",
+            "content": f"## 仲裁专家结论（请优先参考）\n方向: {arbitration.get('direction','HOLD')}\n置信度: {arbitration.get('confidence',0.5)}\n理由: {arbitration.get('reason','')}\n执行条件: {arbitration.get('conditions','')}\n采纳: {arbitration.get('adopted_expert','')} | 否决: {arbitration.get('rejected_expert','')}",
+        })
+
+        logger.info(f"[trace:{trace_id}] ReAct 仲裁完成: direction={arbitration.get('direction','')}, confidence={arbitration.get('confidence','')}")
+        return True, specialist_results
+
+    except Exception as e:
+        logger.warning(f"[trace:{trace_id}] ReAct 仲裁失败: {e}")
+        return False, specialist_results
+
+
 # ── Token 预算检查 ──────────────────────────────────────────
 
 def check_token_budget() -> dict:
@@ -3082,8 +3213,30 @@ def orchestrate(query: str, history: list, rag_context: str = "", cancel_event: 
                         except Exception:
                             answer = msg.content or ""
 
-                        # Phase C: 仲裁(高级模型最终裁决)
-                        arbitration_done = False
+                        # Phase C: 仲裁(高级模型最终裁决) — 检测到冲突时用强模型仲裁
+                        conflicts_pre = detect_conflicts_smart(specialist_results, refined_query, trace_id)
+                        arbitration_done, specialist_results = _run_react_arbitration(
+                            query, specialist_results, conflicts_pre, prebuilt_context,
+                            llm_messages, trace_id=trace_id,
+                        )
+                        # 若仲裁追加了新结论，需重新生成 answer 融入仲裁观点
+                        if arbitration_done:
+                            try:
+                                _arb_msg = llm_messages[-1]  # 仲裁结论注入的消息
+                                _regen_resp = _call_llm(
+                                    caller="orchestrator_post_arbitration",
+                                    trace_id=trace_id,
+                                    model=MODEL,
+                                    messages=llm_messages + [
+                                        {"role": "assistant", "content": answer},
+                                        {"role": "user", "content": "请根据仲裁专家的结论，修正你的回复。如果仲裁方向与你之前的建议不一致，请采纳仲裁结论。保持回复结构不变，仅调整方向性建议。"},
+                                    ],
+                                    temperature=get_config_float('llm.temperature_agent', 0.3),
+                                    max_tokens=get_config_int('llm.max_tokens_orchestrator', 8192),
+                                )
+                                answer = _regen_resp.choices[0].message.content or answer
+                            except Exception:
+                                pass  # 仲裁后重生成失败，保留原 answer
 
                         # Light Validator: 输出前质检与修复
                         answer, validator_result = _validate_and_repair(
@@ -3091,7 +3244,7 @@ def orchestrate(query: str, history: list, rag_context: str = "", cancel_event: 
                         )
 
                         duration_ms = int((time.time() - start_time) * 1000)
-                        conflicts = detect_conflicts_smart(specialist_results, refined_query, trace_id)
+                        conflicts = detect_conflicts_smart(specialist_results, refined_query, trace_id) if not conflicts_pre.get("detected") else conflicts_pre
                         _result = {
                             "answer": answer,
                             "specialist_results": specialist_results,
@@ -3170,6 +3323,30 @@ def orchestrate(query: str, history: list, rag_context: str = "", cancel_event: 
 
                 duration_ms = int((time.time() - start_time) * 1000)
                 conflicts = detect_conflicts_smart(specialist_results, refined_query, trace_id)
+
+                # ReAct 仲裁：无交叉审阅路径也检测冲突并仲裁
+                if not arbitration_done and conflicts.get("detected") and conflicts.get("severity") in ("medium", "high"):
+                    arbitration_done, specialist_results = _run_react_arbitration(
+                        query, specialist_results, conflicts, prebuilt_context,
+                        llm_messages, trace_id=trace_id,
+                    )
+                    if arbitration_done:
+                        try:
+                            _regen_resp = _call_llm(
+                                caller="orchestrator_post_arbitration",
+                                trace_id=trace_id,
+                                model=MODEL,
+                                messages=llm_messages + [
+                                    {"role": "assistant", "content": answer},
+                                    {"role": "user", "content": "请根据仲裁专家的结论，修正你的回复。如果仲裁方向与你之前的建议不一致，请采纳仲裁结论。保持回复结构不变，仅调整方向性建议。"},
+                                ],
+                                temperature=get_config_float('llm.temperature_agent', 0.3),
+                                max_tokens=get_config_int('llm.max_tokens_orchestrator', 8192),
+                            )
+                            answer = _regen_resp.choices[0].message.content or answer
+                        except Exception:
+                            pass
+
                 _result = {
                     "answer": answer,
                     "specialist_results": specialist_results,
@@ -4188,6 +4365,22 @@ def _stream_handle_no_tool_calls(msg, specialist_results: list, all_tool_calls: 
             # 复用缓存：cross_review 只追加了 is_cross_review 结果，原始专家列表未变
             conflicts = _detect_conflicts_cached(specialist_results, refined_query, trace_id, _conflicts_cache)
 
+            # ReAct 仲裁：检测到中等/严重冲突时用强模型仲裁
+            if conflicts.get("detected") and conflicts.get("severity") in ("medium", "high"):
+                yield {"type": "status", "message": "检测到专家冲突，正在仲裁..."}
+                _llm_msgs_for_arb = []  # 流式路径仲裁仅追加结果，不注入 llm_messages
+                arbitration_done, specialist_results = _run_react_arbitration(
+                    query, specialist_results, conflicts, prebuilt_context,
+                    _llm_msgs_for_arb, trace_id=trace_id,
+                )
+                if arbitration_done:
+                    yield {
+                        "type": "arbitration_done",
+                        "agent": "仲裁专家",
+                        "icon": "⚖️",
+                        "analysis": next((sr["analysis"] for sr in specialist_results if sr.get("is_arbitration")), ""),
+                    }
+
             if conversation_id and message_id:
                 _save_checkpoint(conversation_id, message_id, "cross_review", {
                     "specialist_results": specialist_results,
@@ -4234,6 +4427,22 @@ def _stream_handle_no_tool_calls(msg, specialist_results: list, all_tool_calls: 
     duration_ms = int((time.time() - start_time) * 1000)
     # 复用缓存：若仲裁追加了 is_arbitration 结果，签名也只看原始专家，仍可命中
     conflicts = _detect_conflicts_cached(specialist_results, refined_query, trace_id, _conflicts_cache)
+
+    # ReAct 仲裁：无交叉审阅时仍检测冲突并仲裁
+    if conflicts.get("detected") and conflicts.get("severity") in ("medium", "high"):
+        yield {"type": "status", "message": "检测到专家冲突，正在仲裁..."}
+        _llm_msgs_for_arb = []
+        arbitration_done, specialist_results = _run_react_arbitration(
+            query, specialist_results, conflicts, prebuilt_context,
+            _llm_msgs_for_arb, trace_id=trace_id,
+        )
+        if arbitration_done:
+            yield {
+                "type": "arbitration_done",
+                "agent": "仲裁专家",
+                "icon": "⚖️",
+                "analysis": next((sr["analysis"] for sr in specialist_results if sr.get("is_arbitration")), ""),
+            }
 
     if conversation_id and message_id and specialist_results:
         _save_checkpoint(conversation_id, message_id, "experts", {
