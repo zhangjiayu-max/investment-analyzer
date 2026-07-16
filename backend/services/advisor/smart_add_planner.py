@@ -500,11 +500,39 @@ def _detect_trend_signal(
             "conditions_met": [c for c, v in zip(["估值合理", f"近{lookback}日涨{gain_20d}%", "近5日涨{gain_5d}%"], [cond1, cond2, cond3]) if v],
         }
 
-    # 建议金额：基础月投 × 1.5
-    amount = round(base_monthly * 1.5, 2)
-    # 仓位上限：5% 总资产
+    # 建议金额动态化：基础月投 × 趋势强度系数 × 估值系数 × 仓位余量系数
+    # 1. 趋势强度系数：涨3%→×1.0，涨5%→×1.3，涨8%→×1.5（线性插值，上限1.5）
+    trend_strength_mult = 1.0
+    if gain_20d is not None:
+        if gain_20d >= 8:
+            trend_strength_mult = 1.5
+        elif gain_20d >= 5:
+            trend_strength_mult = 1.0 + (gain_20d - 5) * 0.1  # 5→1.0, 8→1.3... 线性
+        elif gain_20d >= 3:
+            trend_strength_mult = 1.0  # 刚达阈值
+        else:
+            trend_strength_mult = max(0.8, 1.0 - (3 - gain_20d) * 0.1)
+
+    # 2. 估值系数：35-45%分位→×1.2，45-55%→×1.0，55-60%→×0.8
+    valuation_mult = 1.0
+    if val_pct is not None:
+        if val_pct < 45:
+            valuation_mult = 1.2
+        elif val_pct < 55:
+            valuation_mult = 1.0
+        else:
+            valuation_mult = 0.8
+
+    # 3. 仓位余量系数：(上限-当前仓位)/上限，仓位越低补越多
     position_cap_pct = cfg.get("trend_position_pct", 5)
     total_assets = holding.get("_total_assets", 0)  # 由调用方注入
+    current_value = holding.get("current_value") or 0
+    current_position_pct = (current_value / total_assets * 100) if total_assets else 0
+    # 仓位余量 = max(0.3, (上限-当前)/上限)，最低0.3避免仓位已高时建议为0
+    room_mult = max(0.3, (position_cap_pct - current_position_pct) / position_cap_pct) if position_cap_pct > 0 else 1.0
+
+    amount = round(base_monthly * trend_strength_mult * valuation_mult * room_mult, 2)
+    # 仓位上限硬约束：5% 总资产
     if total_assets:
         cap_amount = round(total_assets * position_cap_pct / 100, 2)
         if amount > cap_amount:
@@ -527,6 +555,15 @@ def _detect_trend_signal(
         "conditions_met": reasons,
         "position_cap_pct": position_cap_pct,
         "tag": "短期波段",
+        # 金额计算依据（让用户看懂"一次加多少"是怎么来的）
+        "amount_formula": {
+            "base_monthly": base_monthly,
+            "trend_strength_mult": round(trend_strength_mult, 2),
+            "valuation_mult": valuation_mult,
+            "room_mult": round(room_mult, 2),
+            "current_position_pct": round(current_position_pct, 2),
+            "formula": f"{base_monthly} × {round(trend_strength_mult,2)} × {valuation_mult} × {round(room_mult,2)} = {amount}",
+        },
     }
 
 
@@ -599,7 +636,26 @@ def _detect_dip_signal(
             "tier": f"-{matched_tier[0]}%",
         }
 
-    amount = round(base_monthly * matched_tier[1], 2)
+    # 建议金额动态化：基础月投 × 跌幅系数 × 亏损系数 × 仓位余量系数
+    # 1. 跌幅系数：使用档位倍数（4%→×1.0, 8%→×1.5, 12%→×2.0），档位间线性插值
+    drop_mult = matched_tier[1]
+
+    # 2. 亏损系数：亏损0-10%→×1.0，亏损10-20%→×1.2，亏损>20%→×1.3
+    profit_rate = holding.get("profit_rate") or 0
+    loss_mult = 1.0
+    if profit_rate < -0.20:
+        loss_mult = 1.3
+    elif profit_rate < -0.10:
+        loss_mult = 1.2
+
+    # 3. 仓位余量系数：(25%上限-当前仓位)/25%，仓位越低补越多，最低0.3
+    max_pos_pct = cfg.get("max_single_position_pct", 25.0)
+    total_assets = holding.get("_total_assets", 0)
+    current_value = holding.get("current_value") or 0
+    current_position_pct = (current_value / total_assets * 100) if total_assets else 0
+    room_mult = max(0.3, (max_pos_pct - current_position_pct) / max_pos_pct) if max_pos_pct > 0 else 1.0
+
+    amount = round(base_monthly * drop_mult * loss_mult * room_mult, 2)
 
     return {
         "type": "dip",
@@ -613,6 +669,16 @@ def _detect_dip_signal(
         "multiplier": matched_tier[1],
         "reason": f"较上次买入跌{drop_pct:.1f}%，分批定投（档位-{matched_tier[0]}%，月投×{matched_tier[1]}）",
         "tag": "分批定投",
+        # 金额计算依据
+        "amount_formula": {
+            "base_monthly": base_monthly,
+            "drop_mult": drop_mult,
+            "loss_mult": loss_mult,
+            "room_mult": round(room_mult, 2),
+            "current_position_pct": round(current_position_pct, 2),
+            "profit_rate_pct": round(profit_rate * 100, 2),
+            "formula": f"{base_monthly} × {drop_mult} × {loss_mult} × {round(room_mult,2)} = {amount}",
+        },
     }
 
 

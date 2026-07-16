@@ -557,6 +557,20 @@ onMounted(() => {
                   <div v-if="sig.conditions_met && sig.conditions_met.length" class="signal-conditions">
                     <span v-for="(c, ci) in sig.conditions_met" :key="ci" class="cond-chip">{{ c }}</span>
                   </div>
+                  <!-- 金额计算依据（动态化公式） -->
+                  <div v-if="sig.triggered && sig.amount_formula" class="signal-formula">
+                    <span class="formula-label">本次建议补仓</span>
+                    <b class="formula-amount font-jet">¥{{ fmtMoney(sig.amount) }}</b>
+                    <span class="formula-detail font-jet">{{ sig.amount_formula.formula }}</span>
+                    <span class="formula-breakdown">
+                      <span v-if="sig.amount_formula.trend_strength_mult">趋势{{ sig.amount_formula.trend_strength_mult }}×</span>
+                      <span v-if="sig.amount_formula.valuation_mult">估值{{ sig.amount_formula.valuation_mult }}×</span>
+                      <span v-if="sig.amount_formula.drop_mult">跌幅{{ sig.amount_formula.drop_mult }}×</span>
+                      <span v-if="sig.amount_formula.loss_mult">亏损{{ sig.amount_formula.loss_mult }}×</span>
+                      <span v-if="sig.amount_formula.room_mult">仓位余量{{ sig.amount_formula.room_mult }}×</span>
+                      <span class="pos-info">当前仓位{{ sig.amount_formula.current_position_pct }}%</span>
+                    </span>
+                  </div>
                 </div>
               </div>
             </div>
@@ -1242,6 +1256,50 @@ onMounted(() => {
   font-size: 0.7rem;
   background: rgba(99,102,241,0.08);
   color: #4f46e5;
+}
+
+/* 金额计算依据（动态化公式展示） */
+.signal-formula {
+  margin-top: 0.35rem;
+  padding: 0.4rem 0.55rem;
+  background: rgba(16,185,129,0.06);
+  border-radius: var(--radius-sm);
+  border: 1px dashed rgba(16,185,129,0.3);
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.76rem;
+}
+.formula-label { color: var(--color-text-secondary); font-weight: 500; }
+.formula-amount {
+  font-size: 0.95rem;
+  font-weight: 700;
+  color: var(--color-loss);
+}
+.formula-detail {
+  color: var(--color-text-secondary);
+  font-size: 0.72rem;
+  opacity: 0.85;
+}
+.formula-breakdown {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+  width: 100%;
+  margin-top: 0.2rem;
+}
+.formula-breakdown span {
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-size: 0.68rem;
+  background: rgba(99,102,241,0.06);
+  color: #6366f1;
+}
+.formula-breakdown .pos-info {
+  margin-left: auto;
+  background: rgba(100,116,139,0.08);
+  color: var(--color-text-secondary);
 }
 
 /* 折叠头 */
