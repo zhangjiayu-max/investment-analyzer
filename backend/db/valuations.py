@@ -773,16 +773,25 @@ def _query_akshare_valuation(index_code: str, metric_type: str, timeout_ms: int)
 
 
 def _query_ttfund_valuation(index_code: str, metric_type: str, timeout_ms: int) -> dict | None:
-    """通过天天基金 MCP 查询估值。"""
+    """通过天天基金 MCP 查询估值。
+
+    修正：_invoke 返回 {success, errorCode, data} 结构，估值数据在 data.valuation 中。
+    之前错误地取 result.get("valuation") 导致一直返回 None。
+    """
     try:
-        from mcp.ttfund_client import ttfund_client
-        result = ttfund_client._invoke("fund_index", {
+        from mcp.ttfund_client import get_ttfund_client
+        tc = get_ttfund_client()
+        result = tc._invoke("fund_index", {
             "index_id": index_code,
             "query_scope": "valuation",
         })
         if not result:
             return None
-        valuation = result.get("valuation") or {}
+        # 数据在 data 字段内（修正关键 bug）
+        data = result.get("data", {}) or {}
+        valuation = data.get("valuation", {}) or {}
+        index_profile = data.get("index_profile", {}) or {}
+        quote = data.get("quote", {}) or {}
         percentile = None
         current_value = None
         if metric_type == "市盈率":
@@ -791,14 +800,20 @@ def _query_ttfund_valuation(index_code: str, metric_type: str, timeout_ms: int) 
         elif metric_type == "市净率":
             percentile = valuation.get("pb_percentile_10y")
             current_value = valuation.get("pb")
+        # 天天基金百分位是 0-100 格式，统一转为 0-1（与 akshare 一致，后续统一转 0-100）
+        if percentile is not None and percentile > 1.0:
+            percentile = round(percentile / 100.0, 4)
+        index_name = (quote.get("index_name") or index_profile.get("index_name")
+                      or index_profile.get("full_index_name") or index_code)
         return {
             "index_code": index_code,
-            "index_name": result.get("index_name") or (result.get("index_profile") or {}).get("name") or index_code,
+            "index_name": index_name,
             "metric_type": metric_type,
             "current_value": current_value,
             "percentile": percentile,
-            "snapshot_date": datetime.now().strftime("%Y-%m-%d"),
+            "snapshot_date": quote.get("quote_time") or datetime.now().strftime("%Y-%m-%d"),
             "dividend_yield": valuation.get("dividend_yield"),
+            "roe": valuation.get("roe"),
         }
     except Exception as e:
         logger.debug(f"[valuation] ttfund 查询失败 {index_code}: {e}")
@@ -847,14 +862,16 @@ def fetch_online_valuation(index_code: str, metric_type: str = "市盈率",
             del _online_cache[cache_key]
 
     timeout_s = max(timeout_ms / 1000.0, 1.0)
+
+    # 渠道1：akshare 中证官方
     try:
         with ThreadPoolExecutor(max_workers=1) as ex:
             fut = ex.submit(_query_akshare_valuation, index_code, metric_type, timeout_ms)
             try:
                 online_data = fut.result(timeout=timeout_s)
             except FuturesTimeoutError:
-                logger.warning(f"[valuation] 主动在线查询超时 {index_code} ({timeout_s}s)")
-                return None
+                logger.warning(f"[valuation] 主动在线查询 akshare 超时 {index_code} ({timeout_s}s)")
+                online_data = None
         if online_data:
             online_data["data_source"] = "online"
             online_data["source"] = "akshare_online"
@@ -867,10 +884,36 @@ def fetch_online_valuation(index_code: str, metric_type: str = "市盈率",
             online_data["_cached_at"] = datetime.now()
             _online_cache[cache_key] = online_data
             result = {k: v for k, v in online_data.items() if k != "_cached_at"}
-            logger.info(f"[valuation] 主动在线查询成功 {index_code} ({metric_type}={result.get('current_value')}, 分位={result.get('percentile')}%)")
+            logger.info(f"[valuation] 主动在线查询成功(akshare) {index_code} ({metric_type}={result.get('current_value')}, 分位={result.get('percentile')}%)")
             return result
     except Exception as e:
-        logger.warning(f"[valuation] 主动在线查询失败 {index_code}: {e}")
+        logger.warning(f"[valuation] 主动在线查询 akshare 失败 {index_code}: {e}")
+
+    # 渠道2：天天基金 MCP（akshare 查不到或超时时兜底）
+    try:
+        with ThreadPoolExecutor(max_workers=1) as ex:
+            fut = ex.submit(_query_ttfund_valuation, index_code, metric_type, timeout_ms)
+            try:
+                online_data = fut.result(timeout=timeout_s)
+            except FuturesTimeoutError:
+                logger.warning(f"[valuation] 主动在线查询 ttfund 超时 {index_code} ({timeout_s}s)")
+                online_data = None
+        if online_data:
+            online_data["data_source"] = "online"
+            online_data["source"] = "ttfund_online"
+            online_data["is_expired"] = False
+            online_data["days_old"] = 0
+            # 天天基金 percentile 已在 _query_ttfund_valuation 转为 0-1，这里统一转 0-100
+            pct_raw = online_data.get("percentile")
+            if pct_raw is not None and pct_raw <= 1.0:
+                online_data["percentile"] = round(pct_raw * 100, 2)
+            online_data["_cached_at"] = datetime.now()
+            _online_cache[cache_key] = online_data
+            result = {k: v for k, v in online_data.items() if k != "_cached_at"}
+            logger.info(f"[valuation] 主动在线查询成功(ttfund) {index_code} ({metric_type}={result.get('current_value')}, 分位={result.get('percentile')}%)")
+            return result
+    except Exception as e:
+        logger.warning(f"[valuation] 主动在线查询 ttfund 失败 {index_code}: {e}")
     return None
 
 
