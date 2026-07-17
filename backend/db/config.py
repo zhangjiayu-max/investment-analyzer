@@ -279,6 +279,15 @@ DEFAULT_CONFIGS = [
     ('smart_add.dip_base_ratio', '8', '大跌定投基数（占标的市值%，8%因跌幅已确认略大于趋势）', 'smart_add'),
     ('smart_add.dca_drop_step_pct', '4', '大跌定投触发步长%（累计跌幅达此值触发定投）', 'smart_add'),
     ('smart_add.dca_tiers', '4:1.0,8:1.5,12:2.0', '大跌定投档位（跌幅%:月投倍数，逗号分隔）', 'smart_add'),
+
+    # 退出信号（2026-07-17 新增）— 止盈/止损/暂停，默认关闭
+    ('smart_add.exit_signal_enabled', 'false', '退出信号开关（止盈/止损/暂停，默认关闭）', 'smart_add'),
+    ('smart_add.take_profit_broad_pct', '20', '宽基止盈阈值%（盈利超过此值建议减仓）', 'smart_add'),
+    ('smart_add.take_profit_theme_pct', '30', '主题/行业止盈阈值%（盈利超过此值建议减仓）', 'smart_add'),
+    ('smart_add.stop_loss_pct', '-30', '止损阈值%（亏损超过此值建议止损）', 'smart_add'),
+    ('smart_add.stop_loss_valuation_pct', '50', '止损辅助条件：估值分位>此值才建议止损（低估时不建议止损）', 'smart_add'),
+    ('smart_add.max_drawdown_from_peak_pct', '25', '从最高净值回撤超过此值建议止损', 'smart_add'),
+    ('smart_add.max_consecutive_failed_adds', '3', '连续补仓失败次数上限（超过则暂停该标的）', 'smart_add'),
 ]
 
 

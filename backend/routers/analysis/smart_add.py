@@ -39,6 +39,12 @@ async def update_config(config: dict):
         "smart_add.enabled", "smart_add.base_dca_pct", "smart_add.pyramid_enabled",
         "smart_add.pool_pct", "smart_add.pyramid_tiers", "smart_add.loss_threshold",
         "smart_add.max_single_position_pct", "smart_add.valuation_pause_pct", "smart_add.stale_days",
+        "smart_add.max_add_vs_position_mult", "smart_add.cooldown_days", "smart_add.max_buys_in_cooldown",
+        "smart_add.trend_signal_enabled", "smart_add.trend_base_ratio", "smart_add.trend_position_pct",
+        "smart_add.dip_signal_enabled", "smart_add.dip_base_ratio", "smart_add.dca_drop_step_pct",
+        "smart_add.dca_tiers",
+        # 退出信号（2026-07-17 新增）
+        "smart_add.exit_signal_enabled",
     ]
     updated = []
     for k, v in config.items():

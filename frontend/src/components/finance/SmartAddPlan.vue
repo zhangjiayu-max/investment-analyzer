@@ -46,6 +46,7 @@ const cfgForm = ref({
   pyramid_tiers: '10:15,20:25,30:30,40:20,50:10',
   pyramid_enabled: true,
   max_add_vs_position_mult: 2.0,
+  exit_signal_enabled: false,
 })
 const cfgSaving = ref(false)
 const cfgSaved = ref(false)
@@ -171,6 +172,7 @@ function syncCfgForm(c) {
     pyramid_tiers: tiersToString(c.tiers) || '10:15,20:25,30:30,40:20,50:10',
     pyramid_enabled: !!c.pyramid_enabled,
     max_add_vs_position_mult: Number(c.max_add_vs_position_mult ?? 2.0),
+    exit_signal_enabled: !!c.exit_signal_enabled,
   }
 }
 
@@ -223,6 +225,7 @@ async function saveConfig() {
       'smart_add.pyramid_tiers': cfgForm.value.pyramid_tiers,
       'smart_add.pyramid_enabled': cfgForm.value.pyramid_enabled,
       'smart_add.max_add_vs_position_mult': cfgForm.value.max_add_vs_position_mult,
+      'smart_add.exit_signal_enabled': cfgForm.value.exit_signal_enabled,
     })
     cfgSaved.value = true
     setTimeout(() => { cfgSaved.value = false }, 2000)
@@ -305,6 +308,12 @@ onMounted(() => {
           <span class="ov-value font-jet">¥{{ fmtMoney(summary.base_monthly) }}</span>
         </div>
       </section>
+
+      <!-- 资金池耗尽警告 -->
+      <div v-if="summary.pool_exit_signals && summary.pool_exit_signals.length" class="pool-warn-banner">
+        <Icon name="alert-triangle" size="16" />
+        <span class="pool-warn-text">{{ summary.pool_exit_signals[0].suggested_action }}</span>
+      </div>
 
       <!-- ② 组合视角：深套标的优先级排序表 -->
       <section v-if="priorityList.length" class="block">
@@ -557,6 +566,11 @@ onMounted(() => {
                   <div v-if="sig.conditions_met && sig.conditions_met.length" class="signal-conditions">
                     <span v-for="(c, ci) in sig.conditions_met" :key="ci" class="cond-chip">{{ c }}</span>
                   </div>
+                  <!-- 信号B风险提示 -->
+                  <div v-if="sig.type === 'trend' && sig.risk_note && sig.triggered" class="risk-warn-box">
+                    <Icon name="alert-triangle" size="12" />
+                    <span>{{ sig.risk_note }}</span>
+                  </div>
                   <!-- 金额计算依据（动态化公式） -->
                   <div v-if="sig.triggered && sig.amount_formula" class="signal-formula">
                     <span class="formula-label">本次建议补仓</span>
@@ -573,6 +587,27 @@ onMounted(() => {
                       <span class="pos-info">当前仓位{{ sig.amount_formula.current_position_pct }}%</span>
                     </span>
                   </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- 退出信号（止盈/止损/暂停） -->
+            <div v-if="p.exit_signals && p.exit_signals.length" class="plan-row exit-signals-row">
+              <div class="exit-signals-head">
+                <Icon name="alert-triangle" size="14" />
+                <span class="exit-signals-title">退出信号</span>
+              </div>
+              <div class="exit-signals-list">
+                <div
+                  v-for="(sig, idx) in p.exit_signals"
+                  :key="idx"
+                  :class="['exit-item', `exit-${sig.severity}`]"
+                >
+                  <div class="exit-head">
+                    <span class="exit-tag">{{ sig.label }}</span>
+                    <span class="exit-action">{{ sig.suggested_action }}</span>
+                  </div>
+                  <div class="exit-reason">{{ sig.reason }}</div>
                 </div>
               </div>
             </div>
@@ -697,6 +732,12 @@ onMounted(() => {
               <label class="check-label">
                 <input type="checkbox" v-model="cfgForm.pyramid_enabled" />
                 <span>启用金字塔补仓引擎</span>
+              </label>
+            </div>
+            <div class="cfg-field cfg-field-check">
+              <label class="check-label">
+                <input type="checkbox" v-model="cfgForm.exit_signal_enabled" />
+                <span>启用退出信号（止盈/止损/暂停）</span>
               </label>
             </div>
           </div>
@@ -1664,6 +1705,99 @@ onMounted(() => {
   padding: 0;
 }
 .btn-link-danger:hover { opacity: 0.7; }
+
+/* —— 退出信号（止盈/止损/暂停） —— */
+.exit-signals-row {
+  border-left: 3px solid var(--color-profit, #dc2626);
+  background: rgba(220, 38, 38, 0.03);
+  padding: 0.6rem 0.8rem;
+  border-radius: var(--radius-sm);
+}
+.exit-signals-head {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin-bottom: 0.4rem;
+  color: var(--color-profit, #dc2626);
+  font-weight: 600;
+  font-size: 0.82rem;
+}
+.exit-signals-title { color: var(--color-profit, #dc2626); }
+.exit-signals-list { display: flex; flex-direction: column; gap: 0.35rem; }
+.exit-item {
+  padding: 0.35rem 0.5rem;
+  border-radius: var(--radius-sm);
+  border: 1px solid transparent;
+  font-size: 0.78rem;
+}
+.exit-item.exit-danger {
+  background: rgba(220, 38, 38, 0.08);
+  border-color: rgba(220, 38, 38, 0.2);
+}
+.exit-item.exit-warning {
+  background: rgba(245, 158, 11, 0.08);
+  border-color: rgba(245, 158, 11, 0.2);
+}
+.exit-item.exit-info {
+  background: rgba(59, 130, 246, 0.06);
+  border-color: rgba(59, 130, 246, 0.15);
+}
+.exit-head {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.15rem;
+}
+.exit-tag {
+  padding: 1px 6px;
+  border-radius: 3px;
+  font-size: 0.7rem;
+  font-weight: 700;
+  white-space: nowrap;
+}
+.exit-danger .exit-tag { background: rgba(220, 38, 38, 0.2); color: #dc2626; }
+.exit-warning .exit-tag { background: rgba(245, 158, 11, 0.2); color: #b45309; }
+.exit-info .exit-tag { background: rgba(59, 130, 246, 0.15); color: #2563eb; }
+.exit-action {
+  font-weight: 600;
+  color: var(--color-text-primary);
+}
+.exit-reason {
+  color: var(--color-text-secondary);
+  font-size: 0.74rem;
+  padding-left: 0.3rem;
+}
+
+/* —— 信号B风险提示条 —— */
+.risk-warn-box {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.35rem;
+  margin-top: 0.4rem;
+  padding: 0.35rem 0.5rem;
+  background: rgba(245, 158, 11, 0.1);
+  border: 1px solid rgba(245, 158, 11, 0.25);
+  border-radius: var(--radius-sm);
+  font-size: 0.74rem;
+  color: #b45309;
+  line-height: 1.4;
+}
+
+/* —— 资金池耗尽警告横幅 —— */
+.pool-warn-banner {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 0.75rem 0;
+  padding: 0.6rem 0.9rem;
+  background: rgba(220, 38, 38, 0.08);
+  border: 1px solid rgba(220, 38, 38, 0.25);
+  border-radius: var(--radius-sm);
+  color: var(--color-profit, #dc2626);
+  font-size: 0.82rem;
+  font-weight: 500;
+}
+.pool-warn-text { flex: 1; }
 
 @media (max-width: 768px) {
   .cf-summary-grid { grid-template-columns: repeat(2, 1fr); }

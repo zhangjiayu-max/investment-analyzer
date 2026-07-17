@@ -95,9 +95,17 @@ def _load_config() -> dict:
         "trend_position_pct": get_config_float_safe("smart_add.trend_position_pct", 5.0),
         "trend_base_ratio": get_config_float_safe("smart_add.trend_base_ratio", 5.0),
         "dip_signal_enabled": get_config_bool_safe("smart_add.dip_signal_enabled", True),
-        "dip_base_ratio": get_config_float_safe("smart_add.dip_base_ratio", 8.0),
+        "dip_base_ratio": get_config_float_safe("smart_add.dip_base_ratio", 5.0),
         "dca_drop_step_pct": get_config_float_safe("smart_add.dca_drop_step_pct", 4.0),
         "dca_tiers": get_config_str_safe("smart_add.dca_tiers", "4:1.0,8:1.5,12:2.0"),
+        # 退出信号配置（2026-07-17 新增）
+        "exit_signal_enabled": get_config_bool_safe("smart_add.exit_signal_enabled", False),
+        "take_profit_broad_pct": get_config_float_safe("smart_add.take_profit_broad_pct", 20.0),
+        "take_profit_theme_pct": get_config_float_safe("smart_add.take_profit_theme_pct", 30.0),
+        "stop_loss_pct": get_config_float_safe("smart_add.stop_loss_pct", -30.0),
+        "stop_loss_valuation_pct": get_config_float_safe("smart_add.stop_loss_valuation_pct", 50.0),
+        "max_drawdown_from_peak_pct": get_config_float_safe("smart_add.max_drawdown_from_peak_pct", 25.0),
+        "max_consecutive_failed_adds": get_config_int_safe("smart_add.max_consecutive_failed_adds", 3),
     }
 
 
@@ -260,6 +268,105 @@ def _calc_pool_warning(released_amount: float, pool_total: float, deep_loss_coun
     return ""
 
 
+# ── 退出信号检测 ──────────────────────────
+
+def _detect_exit_signals(
+    holding: dict,
+    valuation: Optional[dict],
+    cfg: dict,
+    total_assets: float,
+    fund_type: str,
+) -> list:
+    """检测退出信号（止盈/止损/暂停）。
+
+    Returns:
+        list of exit signals, 每个信号:
+        {
+            "type": "take_profit" | "stop_loss" | "pause",
+            "label": str,
+            "triggered": bool,
+            "reason": str,
+            "suggested_action": str,
+            "severity": "info" | "warning" | "danger",
+        }
+    """
+    if not cfg.get("exit_signal_enabled", False):
+        return []
+
+    exit_signals = []
+    profit_rate = holding.get("profit_rate") or 0
+    profit_rate_pct = profit_rate * 100
+    current_value = holding.get("current_value") or 0
+
+    # 信号D：止盈退出
+    if profit_rate_pct > 0:
+        # 不同基金类型不同止盈阈值
+        if fund_type in ("broad",):
+            take_profit_threshold = cfg.get("take_profit_broad_pct", 20)
+        else:
+            take_profit_threshold = cfg.get("take_profit_theme_pct", 30)
+
+        if profit_rate_pct >= take_profit_threshold * 1.5:
+            exit_signals.append({
+                "type": "take_profit",
+                "label": "止盈清仓",
+                "triggered": True,
+                "reason": f"盈利{profit_rate_pct:.1f}%远超止盈线{take_profit_threshold}%",
+                "suggested_action": "建议清仓锁定利润",
+                "severity": "warning",
+            })
+        elif profit_rate_pct >= take_profit_threshold:
+            exit_signals.append({
+                "type": "take_profit",
+                "label": "止盈减仓",
+                "triggered": True,
+                "reason": f"盈利{profit_rate_pct:.1f}%已达止盈线{take_profit_threshold}%",
+                "suggested_action": "建议减仓50%",
+                "severity": "info",
+            })
+
+        # 估值过高时额外警示
+        if valuation and valuation.get("percentile", 0) > 80:
+            exit_signals.append({
+                "type": "take_profit",
+                "label": "高估减仓",
+                "triggered": True,
+                "reason": f"估值分位{valuation['percentile']:.0f}%>80%，建议减仓",
+                "suggested_action": "建议减仓（无论盈亏）",
+                "severity": "danger",
+            })
+
+    # 信号E：止损退出
+    stop_loss_pct = cfg.get("stop_loss_pct", -30)
+    if profit_rate_pct <= stop_loss_pct:
+        val_pct = valuation.get("percentile") if valuation else None
+        stop_loss_val_pct = cfg.get("stop_loss_valuation_pct", 50)
+        # 只在估值非低估时建议止损（低估时应该继续持有/补仓而非止损）
+        if val_pct is None or val_pct > stop_loss_val_pct:
+            exit_signals.append({
+                "type": "stop_loss",
+                "label": "止损",
+                "triggered": True,
+                "reason": f"亏损{profit_rate_pct:.1f}%超过止损线{stop_loss_pct}%，估值分位{val_pct:.0f}%非低估" if val_pct else f"亏损{profit_rate_pct:.1f}%超过止损线{stop_loss_pct}%",
+                "suggested_action": "建议止损50%",
+                "severity": "danger",
+            })
+
+    # 信号F：暂停观望
+    # 估值过高暂停
+    if valuation and valuation.get("percentile", 0) > 70:
+        exit_signals.append({
+            "type": "pause",
+            "label": "估值过高",
+            "triggered": True,
+            "reason": f"估值分位{valuation['percentile']:.0f}%>70%，暂停补仓",
+            "suggested_action": "暂停金字塔和定投，等待估值回落",
+            "severity": "warning",
+        })
+
+    return exit_signals
+
+
 # ── 主入口 ──────────────────────────────────
 
 def generate_smart_add_plan(user_id: str = "default") -> dict:
@@ -341,6 +448,17 @@ def generate_smart_add_plan(user_id: str = "default") -> dict:
         "pool_used": round(pool_used, 2),
         "pool_remaining": round(pool_remaining, 2),
         "deep_loss_count": len(deep_loss_plans),
+        # 全局退出信号：资金池耗尽
+        "pool_exit_signals": [
+            {
+                "type": "pause",
+                "label": "资金耗尽",
+                "triggered": True,
+                "reason": "补仓资金池已耗尽",
+                "suggested_action": "暂停所有补仓，等待持仓修复或追加资金",
+                "severity": "danger",
+            }
+        ] if pool_remaining <= 0 and cfg.get("exit_signal_enabled", False) else [],
         "priority_list": [
             {
                 "fund_code": p["fund_code"],
@@ -616,6 +734,9 @@ def _detect_trend_signal(
         reasons.append(f"近5日涨{gain_5d}%" if gain_5d is not None else "短趋势确认")
 
     formula_base = round(base_amount, 2)
+    total_assets = holding.get("_total_assets", 0)
+    max_loss = round(amount * 0.05, 2)
+    max_loss_pct = round(amount * 0.05 / total_assets * 100, 2) if total_assets else 0
     return {
         "type": "trend",
         "label": "趋势加仓",
@@ -625,6 +746,9 @@ def _detect_trend_signal(
         "conditions_met": reasons,
         "position_cap_pct": position_cap_pct,
         "tag": "短期波段",
+        "risk_note": "短期波段操作，与价值投资「低买」理念不同。严格止损-5%，仓位≤5%，持有≤30天",
+        "max_loss_amount": max_loss,
+        "max_loss_pct_of_portfolio": max_loss_pct,
         "recent_buy_amount": round(recent_buy_amount, 2),
         "deducted_amount": round(deducted_amount, 2),
         "amount_formula": {
@@ -999,12 +1123,13 @@ def _generate_single_plan(
     if signal_b:
         triggered_signals.append(signal_b)
 
-    # 信号 C：大跌定投（连续大跌4%）— 与信号 A 互斥（亏损-10%已触发金字塔不再触发4%定投）
-    signal_c = None
-    if not (engine2 and engine2.get("released_amount", 0) > 0):
-        signal_c = _detect_dip_signal(holding, valuation, cfg, base_monthly)
-        if signal_c:
-            triggered_signals.append(signal_c)
+    # 信号 C：大跌定投（连续大跌4%）— 始终计算，与信号A同时触发时仅保留金字塔
+    signal_c = _detect_dip_signal(holding, valuation, cfg, base_monthly)
+    # 如果信号A和信号C同时触发，只保留信号A（金字塔优先级更高，避免重复建议）
+    if engine2 and engine2.get("released_amount", 0) > 0 and signal_c:
+        signal_c = None
+    if signal_c:
+        triggered_signals.append(signal_c)
 
     # 总建议金额（所有命中信号汇总，受安全阀约束）
     total_suggested = sum(
@@ -1012,6 +1137,9 @@ def _generate_single_plan(
     )
     if not can_add:
         total_suggested = 0
+
+    # 退出信号检测（止盈/止损/暂停，需开关开启）
+    exit_signals = _detect_exit_signals(holding, valuation, cfg, total_assets, fund_type)
 
     return {
         "fund_code": fund_code,
@@ -1030,6 +1158,7 @@ def _generate_single_plan(
         "engine1": engine1,
         "pyramid": engine2,
         "triggered_signals": triggered_signals,  # 多维度触发器命中的信号列表
+        "exit_signals": exit_signals,  # 退出信号（止盈/止损/暂停）
         "total_suggested": round(total_suggested, 2),  # 所有命中信号的建议金额汇总
         "has_signal": len([s for s in triggered_signals if s.get("triggered")]) > 0,
         "fund_type": fund_type_info["label"],
