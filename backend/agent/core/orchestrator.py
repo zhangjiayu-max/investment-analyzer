@@ -2415,6 +2415,47 @@ def build_orchestrator_system_prompt() -> str:
 - 资产配置师：效率前沿分析 + 相关性矩阵 + 再平衡建议"""
 
 
+def _run_specialist_with_timeout(func, timeout_seconds: int, trace_id: str,
+                                 agent_key_for_log: str, *args, **kwargs):
+    """通用超时包装：用线程池执行专家调用，超时返回降级占位结果。
+
+    解决 cross_review 串行路径和动态追加专家路径无超时保护导致整个
+    orchestrator 卡死的问题（如 allocation_advisor 在 cross_review 阶段
+    LLM 调用挂起，主流程无限等待）。
+
+    超时后返回 unavailable 占位结果，不阻塞主流程。
+    注意：future.cancel() 只能取消未开始的任务，正在运行的线程仍会继续，
+    但至少主流程不会被阻塞，其他专家和综合阶段能继续。
+
+    Args:
+        func: run_specialist 或 run_specialist_with_context
+        timeout_seconds: 超时秒数
+        trace_id: 追踪 ID
+        agent_key_for_log: 用于日志和降级结果的 agent_key
+        *args, **kwargs: 传给 func 的参数
+    """
+    import concurrent.futures as _cf
+    with _cf.ThreadPoolExecutor(max_workers=1) as _pool:
+        future = _pool.submit(func, *args, **kwargs)
+        try:
+            return future.result(timeout=timeout_seconds)
+        except _cf.TimeoutError:
+            future.cancel()
+            logger.warning(
+                f"[trace:{trace_id}] 专家 {agent_key_for_log} 执行超时（{timeout_seconds}秒），"
+                f"返回降级结果，主流程继续"
+            )
+            return {
+                "agent_key": agent_key_for_log,
+                "agent": agent_key_for_log,
+                "icon": "⚠️",
+                "analysis": f"（{agent_key_for_log} 执行超时，已跳过该专家分析）",
+                "tool_calls": [],
+                "duration_ms": timeout_seconds * 1000,
+                "status": "timeout",
+            }
+
+
 def _execute_specialist(tool_name: str, query: str, cancel_event: threading.Event | None = None,
                         prebuilt_context: str = "", budget_mode: str = "normal", trace_id: str = "",
                         timeout_seconds: int = 120) -> str:
@@ -3323,7 +3364,12 @@ def orchestrate(query: str, history: list, rag_context: str = "", cancel_event: 
                         _check_cancel(cancel_event)
                         _check_timeout(start_time)
                         try:
-                            cr_result = run_specialist_with_context(
+                            # 超时保护：cross_review 路径之前无超时，导致 allocation_advisor
+                            # 等专家 LLM 调用挂起时整个 orchestrator 无限等待。默认 180s。
+                            _cr_timeout = get_config_int("agent.cross_review_timeout_seconds", 180)
+                            cr_result = _run_specialist_with_timeout(
+                                run_specialist_with_context,
+                                _cr_timeout, trace_id, sr["agent_key"],
                                 sr["agent_key"], refined_query, peer_analyses, max_turns=2,
                                 prebuilt_context=prebuilt_context,
                                 model=_get_model_for_agent("cross_review") if _is_cost_routing_enabled() else None,
@@ -5435,9 +5481,15 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
                        "agent": agent_info.get("name", agent_key), "icon": agent_info.get("icon", "🤖")}
                 try:
                     model = _get_model_for_agent(agent_key) if _is_cost_routing_enabled() else MODEL
-                    spawn_result = run_specialist(agent_key, refined_query,
-                                                  prebuilt_context=prebuilt_context, model=model,
-                                                  trace_id=trace_id)
+                    # 超时保护：动态追加专家路径之前无超时，与 Phase A 保持一致（默认 120s）
+                    _spawn_timeout = get_config_int("agent.specialist_timeout_seconds", 120)
+                    spawn_result = _run_specialist_with_timeout(
+                        run_specialist,
+                        _spawn_timeout, trace_id, agent_key,
+                        agent_key, refined_query,
+                        prebuilt_context=prebuilt_context, model=model,
+                        trace_id=trace_id,
+                    )
                     specialist_results.append(spawn_result)
                     all_tool_calls.append({"name": f"consult_{agent_key}",
                                            "arguments": {"query": refined_query},
