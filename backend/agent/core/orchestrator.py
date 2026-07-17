@@ -2640,6 +2640,22 @@ def _run_portfolio_panorama_scan(conn=None) -> str:
 
                 lines.append("## 近30天操作记录")
                 lines.append("- 近30天有操作: " + "；".join(parts))
+
+                # 最近 10 条交易明细（供专家避免建议重复买卖）
+                recent_lines = []
+                for t in active_txns[:10]:
+                    txn_date = (t.get("transaction_date") or "")[:10]
+                    action = (t.get("action") or t.get("type") or "")
+                    fname = t.get("fund_name") or t.get("fund_code", "")
+                    shares = t.get("shares") or t.get("amount") or 0
+                    amount = t.get("total_amount") or t.get("amount") or 0
+                    price = t.get("price") or t.get("nav") or ""
+                    recent_lines.append(
+                        f"  {txn_date} | {fname} | {action} | {shares}份 | ¥{amount} | 价格{price}"
+                    )
+                if recent_lines:
+                    lines.append("### 最近交易明细")
+                    lines.extend(recent_lines)
         except Exception:
             pass
 
@@ -4288,24 +4304,7 @@ def _stream_build_context(refined_query: str, rag_context: str, complexity: str,
 
     llm_messages.append({"role": "user", "content": refined_query})
 
-    # 注入持仓上下文（基金名、占比、盈亏率、成本），避免专家不看盈亏就建议加仓
-    portfolio_ctx = _build_portfolio_context()
-    if portfolio_ctx:
-        prebuilt_context = (prebuilt_context or "") + "\n\n" + portfolio_ctx
-
-    # 债券/混合型基金底层持仓分析（论据增强：帮助专家做亏损归因）
-    try:
-        from services.portfolio_context import build_bond_fund_holdings_context
-        bond_holdings_ctx = build_bond_fund_holdings_context()
-        if bond_holdings_ctx:
-            prebuilt_context = (prebuilt_context or "") + "\n\n" + bond_holdings_ctx
-    except Exception:
-        pass
-
-    # 注入 4% 定投法规则和减仓约束，避免专家给出随意的加减仓金额
-    dca_rules = _build_dca_rules()
-    if dca_rules:
-        prebuilt_context = (prebuilt_context or "") + "\n\n" + dca_rules
+    # 持仓/债基/DCA 规则已在上方第一次注入（完整版），此处不再重复
 
     return {
         "llm_messages": llm_messages,

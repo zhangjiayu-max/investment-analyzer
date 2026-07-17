@@ -116,16 +116,49 @@ def _fetch_fund_metadata_from_akshare(fund_code: str) -> dict | None:
             "scale": _safe_str(row.get("净资产规模", "")),
             "established": _safe_str(row.get("成立日期/规模", "")),
             "benchmark": _safe_str(row.get("业绩比较基准", "")),
+            # 费率（akshare fund_open_fund_info_em indicator="费率"）
+            "management_fee": _fetch_fee_from_akshare(fund_code, "管理"),
+            "custody_fee": _fetch_fee_from_akshare(fund_code, "托管"),
         }
     except Exception as e:
         logger.warning(f"akshare 获取基金元信息失败 {fund_code}: {e}")
         return None
 
 
+def _fetch_fee_from_akshare(fund_code: str, fee_type: str) -> float | None:
+    """从 akshare 获取基金费率（管理费/托管费）。
+
+    Args:
+        fund_code: 基金代码
+        fee_type: "管理" 或 "托管"
+    """
+    if not _HAS_AKSHARE or ak is None:
+        return None
+    try:
+        df = ak.fund_open_fund_info_em(symbol=fund_code, indicator="费率")
+        if df is None or len(df) == 0:
+            return None
+        for _, row in df.iterrows():
+            for val in row:
+                s = str(val)
+                if fee_type in s:
+                    idx = list(row).index(val)
+                    if idx + 1 < len(row):
+                        fee_str = str(row.iloc[idx + 1]).replace("%", "").strip()
+                        try:
+                            return float(fee_str)
+                        except (ValueError, TypeError):
+                            pass
+    except Exception as e:
+        logger.debug(f"akshare 获取费率失败 {fund_code}({fee_type}): {e}")
+    return None
+
+
 def _metadata_from_akshare_dict(raw: dict) -> dict:
     """把 akshare 原始字典规整为 fund_metadata 表字段。
 
     P3 优化：保留 tracking_index 字段（原实现丢弃了）。
+    2026-07-17 修复：保留费率字段（原实现硬编码为 None）。
     """
     fund_code = _safe_str(raw.get("fund_code", ""))
     fund_name = _safe_str(raw.get("fund_name", ""))
@@ -141,10 +174,10 @@ def _metadata_from_akshare_dict(raw: dict) -> dict:
         "benchmark": _safe_str(raw.get("benchmark", "")),
         "tracking_index": _safe_str(raw.get("tracking_index", "")),  # P3 优化：不再丢弃
         "establish_date": _safe_str(raw.get("established", "")),
-        "management_company": "",
-        "management_fee": None,
-        "custody_fee": None,
-        "subscription_fee": None,
+        "management_company": _safe_str(raw.get("fund_manager", "")),
+        "management_fee": raw.get("management_fee"),
+        "custody_fee": raw.get("custody_fee"),
+        "subscription_fee": None,  # akshare 该接口无申购费
         "source": "akshare",
         "updated_at": _now_str(),
     }

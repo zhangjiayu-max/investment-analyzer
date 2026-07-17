@@ -416,10 +416,10 @@ def _generate_grid_plan(
     if current_price <= 0 or current_value <= 0:
         return None
 
-    # 触发条件：估值分位 30-70%
+    # 触发条件：估值分位 30-70%（数据缺失时不生成网格）
     val_pct = valuation.get("percentile") if valuation else None
-    if val_pct is not None and (val_pct < 30 or val_pct > 70):
-        # 估值不在合理区间，不适合网格
+    if val_pct is None or val_pct < 30 or val_pct > 70:
+        # 估值不在合理区间或数据缺失，不适合网格
         return None
 
     # 触发条件：非深度亏损
@@ -502,13 +502,14 @@ def _generate_grid_plan(
 def _check_fund_health(
     fund_code: str,
     cfg: dict,
+    holding: dict | None = None,
 ) -> dict:
     """检查基金基本面是否健康。
 
-    检查项：
-    1. 基金经理是否变更（近6个月）
-    2. 基金规模是否暴增（近1年规模增长>100%）
-    3. 跟踪误差是否扩大（近1年跟踪误差>历史均值+2σ）
+    数据源：
+    - 基金经理/规模：services.fund.fund_manager.get_fund_manager（akshare 雪球接口）
+    - 费率：services.fund.fund_analysis._fetch_fund_fee（akshare 费率接口）
+    - 经理变更：对比 portfolio_holdings.manager_name 与 akshare 最新经理名
 
     Returns:
         {
@@ -521,56 +522,55 @@ def _check_fund_health(
     if not cfg.get("fund_health_enabled", False):
         return {"healthy": True, "warnings": [], "risks": [], "data_available": False}
 
-    warnings = []
-    risks = []
+    warnings: list[str] = []
+    risks: list[str] = []
     data_available = False
 
+    # 1. 基金经理 + 规模（akshare 雪球接口）
     try:
-        from db.fund_info import get_fund_info
-        from db.config import get_config
+        from services.fund.fund_manager import get_fund_manager, check_manager_change
 
-        fund_info = get_fund_info(fund_code)
-        if not fund_info:
-            return {"healthy": True, "warnings": [], "risks": [], "data_available": False}
+        mgr_info = get_fund_manager(fund_code)
+        if mgr_info:
+            data_available = True
 
-        data_available = True
+            # 经理变更检测：对比持仓表存储的经理名
+            stored_manager = (holding or {}).get("manager_name", "")
+            if stored_manager and mgr_info.get("manager_name"):
+                change = check_manager_change(fund_code, stored_manager)
+                if change:
+                    risks.append(
+                        f"基金经理变更：{change['old_manager']}→{change['new_manager']}，需关注风格变化"
+                    )
 
-        # 1. 检查基金规模
-        fund_size = fund_info.get("fund_size")
-        fund_size_date = fund_info.get("fund_size_date", "")
-        if fund_size:
-            try:
-                size = float(fund_size)
-                if size > 100:  # 规模超过100亿
-                    warnings.append(f"基金规模{size:.1f}亿较大，可能影响灵活性")
-            except (ValueError, TypeError):
-                pass
+            # 规模检查（scale 字段为字符串，如"95.44亿"）
+            scale_str = mgr_info.get("scale", "")
+            if scale_str:
+                try:
+                    # 提取数值部分
+                    import re as _re
 
-        # 2. 检查基金经理变更（如果有最近变更日期）
-        manager_change_date = fund_info.get("manager_change_date", "")
-        if manager_change_date:
-            from datetime import datetime, timedelta
-            try:
-                change_dt = datetime.strptime(manager_change_date[:10], "%Y-%m-%d")
-                if change_dt > datetime.now() - timedelta(days=180):
-                    risks.append(f"基金经理近期变更（{manager_change_date[:10]}），需关注风格变化")
-            except (ValueError, TypeError):
-                pass
-
-        # 3. 检查费率
-        mgmt_fee = fund_info.get("management_fee")
-        if mgmt_fee:
-            try:
-                fee = float(mgmt_fee)
-                if fee > 1.5:
-                    warnings.append(f"管理费率{fee}%偏高，长期持有成本较高")
-            except (ValueError, TypeError):
-                pass
-
-    except ImportError:
-        pass
+                    num_match = _re.search(r"[\d.]+", scale_str)
+                    if num_match:
+                        size = float(num_match.group())
+                        if "亿" in scale_str and size > 100:
+                            warnings.append(f"基金规模{size:.1f}亿较大，可能影响灵活性")
+                except (ValueError, TypeError):
+                    pass
     except Exception as e:
-        logger.debug(f"[smart_add] fund_health 检查失败 {fund_code}: {e}")
+        logger.debug(f"[smart_add] fund_health 经理信息获取失败 {fund_code}: {e}")
+
+    # 2. 费率检查（akshare 费率接口，返回管理费+托管费综合）
+    try:
+        from services.fund.fund_analysis import _fetch_fund_fee
+
+        total_fee = _fetch_fund_fee(fund_code)
+        if total_fee > 0:
+            data_available = True
+            if total_fee > 1.5:
+                warnings.append(f"综合费率{total_fee:.2f}%偏高，长期持有成本较高")
+    except Exception as e:
+        logger.debug(f"[smart_add] fund_health 费率获取失败 {fund_code}: {e}")
 
     healthy = len(risks) == 0
     return {
@@ -655,12 +655,13 @@ def _detect_exit_signals(
         val_pct = valuation.get("percentile") if valuation else None
         stop_loss_val_pct = cfg.get("stop_loss_valuation_pct", 50)
         # 只在估值非低估时建议止损（低估时应该继续持有/补仓而非止损）
-        if val_pct is None or val_pct > stop_loss_val_pct:
+        # 估值数据缺失时不触发止损（避免数据缺失标的被错误止损）
+        if val_pct is not None and val_pct > stop_loss_val_pct:
             exit_signals.append({
                 "type": "stop_loss",
                 "label": "止损",
                 "triggered": True,
-                "reason": f"亏损{profit_rate_pct:.1f}%超过止损线{stop_loss_pct}%，估值分位{val_pct:.0f}%非低估" if val_pct else f"亏损{profit_rate_pct:.1f}%超过止损线{stop_loss_pct}%",
+                "reason": f"亏损{profit_rate_pct:.1f}%超过止损线{stop_loss_pct}%，估值分位{val_pct:.0f}%非低估",
                 "suggested_action": "建议止损50%",
                 "severity": "danger",
             })
@@ -1524,6 +1525,10 @@ def _generate_single_plan(
         type_strategy["hard_cap_pct"],
         cfg["max_single_position_pct"],
     )
+    # 凯利数据不足时告警（data_source 为 default/error 时为默认 25%）
+    kelly_warning = ""
+    if kelly.get("data_source") in ("default", "error", "insufficient"):
+        kelly_warning = f"历史数据不足（{kelly.get('data_source', 'default')}），仓位上限为默认值{max_position_pct:.0f}%"
 
     # L4：修复时间调整节奏
     recovery = {}
@@ -1710,7 +1715,7 @@ def _generate_single_plan(
         triggered_signals.append(signal_e)
 
     # 基本面健康检查
-    fund_health = _check_fund_health(fund_code, cfg)
+    fund_health = _check_fund_health(fund_code, cfg, holding=holding)
 
     # 总建议金额（所有命中信号汇总，受安全阀约束）
     total_suggested = sum(
@@ -1759,6 +1764,7 @@ def _generate_single_plan(
             "can_add": can_add,
             "kelly_limit": kelly["limit_pct"],
             "type_hard_cap": type_strategy["hard_cap_pct"],
+            "kelly_warning": kelly_warning,
             "reason": "" if can_add else f"已达配置上限 {max_position_pct:.1f}%（凯利{kelly['limit_pct']:.0f}%/类型{type_strategy['hard_cap_pct']:.0f}%）",
         },
     }

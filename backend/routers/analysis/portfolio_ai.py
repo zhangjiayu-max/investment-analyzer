@@ -136,16 +136,39 @@ async def _run_portfolio_ai_analysis_async(record_id: int, user_question: str):
     except Exception as e:
         mcp_context["error"] = f"MCP 调用异常: {e}"
 
-    # 3. 拼装 LLM 上下文
+    # 3. 拼装 LLM 上下文 — 复用统一组合事实层 + 估值摘要 + 完整持仓字段
     holdings_summary = []
     for h in holdings:
+        profit_rate_pct = ((h.get("profit_rate") or 0) * 100)
+        current_value = h.get("current_value") or 0
+        total_cost = h.get("total_cost") or 0
         holdings_summary.append(
             f"- {h.get('fund_name', '')}({h.get('fund_code', '')}): "
-            f"持有 {h.get('shares', 0)} 份, "
+            f"持有 {h.get('shares', 0):.2f} 份, "
             f"成本价 {h.get('cost_price', 'N/A')}, "
             f"当前净值 {h.get('current_price', 'N/A')}, "
-            f"盈亏 {(h.get('profit_loss') or 0):.2f}元"
+            f"市值 ¥{current_value:,.0f}, "
+            f"成本 ¥{total_cost:,.0f}, "
+            f"盈亏 ¥{(h.get('profit_loss') or 0):,.0f} ({profit_rate_pct:+.1f}%), "
+            f"跟踪指数 {h.get('index_name', 'N/A')}"
         )
+
+    # 组合事实层（snapshot+constraints+market+recent_analyses+market_state+recent_decisions）
+    portfolio_facts_text = ""
+    try:
+        from services.portfolio.portfolio_fact_layer import build_portfolio_facts
+        facts = build_portfolio_facts()
+        portfolio_facts_text = json.dumps(facts, ensure_ascii=False, indent=2, default=str)
+    except Exception as e:
+        logger.warning(f"build_portfolio_facts 失败: {e}")
+
+    # 估值摘要
+    valuation_text = ""
+    try:
+        from services.portfolio_context import build_valuation_summary
+        valuation_text = build_valuation_summary() or ""
+    except Exception as e:
+        logger.warning(f"build_valuation_summary 失败: {e}")
 
     # RAG 知识库检索（搜索与持仓相关的文章、分析）
     rag_context = ""
@@ -179,11 +202,17 @@ async def _run_portfolio_ai_analysis_async(record_id: int, user_question: str):
 
 输出格式：使用 Markdown 标题层级，结论先行，数据支撑，内容专业易懂。"""
 
-    user_content = f"""## 当前持仓
+    user_content = f"""## 当前持仓（完整字段）
 {chr(10).join(holdings_summary)}
 
-## 专业分析数据
-{json.dumps(mcp_context, ensure_ascii=False, indent=2)}
+## 组合事实层（snapshot+constraints+market+recent_analyses+market_state+recent_decisions）
+{portfolio_facts_text[:3000] if portfolio_facts_text else '暂无'}
+
+## 当前市场估值数据
+{valuation_text or '暂无估值数据'}
+
+## 专业分析数据（MCP 诊断）
+{json.dumps(mcp_context, ensure_ascii=False, indent=2)[:3000]}
 
 ## 知识库参考（历史分析/文章）
 {rag_context[:1500] if rag_context else '暂无相关知识库内容'}
