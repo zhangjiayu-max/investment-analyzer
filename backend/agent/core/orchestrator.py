@@ -3219,7 +3219,9 @@ def orchestrate(query: str, history: list, rag_context: str = "", cancel_event: 
     clarification = clarification if clarification else route_result or {}
 
     MAX_TURNS = 3 if budget["mode"] == "conservative" else 6
-    force_skip_cross_review = budget["mode"] == "conservative"
+    # 修复：conservative 模式不再强制跳过交叉审阅（违反"强制交叉审阅"约束）
+    # 只通过减少 MAX_TURNS 来控制成本，交叉审阅对 complex 任务是必须的
+    force_skip_cross_review = False
     specialist_results = []
     all_tool_calls = []
     arbitration_done = False  # 标记仲裁是否已完成,避免重复调用
@@ -4991,7 +4993,8 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
             yield {"type": "status", "message": "已简化为快速分析"}
 
     MAX_TURNS = 3 if budget["mode"] == "conservative" else 6
-    force_skip_cross_review = budget["mode"] == "conservative"
+    # 修复：conservative 模式不再强制跳过交叉审阅（违反"强制交叉审阅"约束）
+    force_skip_cross_review = False
     # P0-2.1：共享黑板架构 — 2-3 专家串行执行，后执行者能看到前序结论（默认开启）
     shared_blackboard_enabled = get_orchestration_config("shared_blackboard_enabled", "true") == "true"
     # 统一黑板实例：所有专家执行路径（单专家/2-3串行/4+并行）共享，综合阶段注入结构化数据

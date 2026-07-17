@@ -1600,6 +1600,30 @@ def _query_valuation(args: dict) -> str:
         # P1 估值降级提示：当指标数据缺失时，明确告知专家数据不可用
         entry_result = {"index_code": code, "index_name": name, "metrics": metrics}
         if not metrics:
+            # 修复：matched 非空但所有指标都查不到时，用 ttfund 名称兜底
+            try:
+                from mcp.ttfund_client import get_ttfund_client
+                tc = get_ttfund_client()
+                raw = tc._invoke("fund_index", {"index_id": name, "query_scope": "valuation"})
+                if isinstance(raw, dict) and raw.get("success"):
+                    data = raw.get("data", {}) or {}
+                    v = data.get("valuation", {}) or {}
+                    profile = data.get("index_profile", {}) or {}
+                    if v:
+                        fallback_result = {
+                            "index_name": profile.get("index_name", name),
+                            "index_code": profile.get("index_code", code),
+                            "source": "天天基金",
+                            "pe_ttm": v.get("pe_ttm"),
+                            "pe_percentile_10y": v.get("pe_percentile_10y"),
+                            "pb": v.get("pb"),
+                            "pb_percentile_10y": v.get("pb_percentile_10y"),
+                            "roe": v.get("roe"),
+                        }
+                        return json.dumps({"ok": True, "indexes": [fallback_result]}, ensure_ascii=False)
+            except Exception as e:
+                logger.debug(f"[valuation] ttfund 名称兜底失败 {name}: {e}")
+
             # 所有指标都查不到
             entry_result["data_status"] = "unavailable"
             entry_result["degraded_hint"] = (

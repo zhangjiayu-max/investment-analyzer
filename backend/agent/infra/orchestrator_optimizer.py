@@ -50,25 +50,23 @@ class OrchestratorOptimizer:
         """判断是否应该跳过交叉审阅（M3 增强版）
 
         跳过条件：
-        1. 专家数量 < 2
-        2. 简单/闲聊任务
+        1. 简单/闲聊任务
+        2. 专家数量 < 1（完全无专家时才跳过）
 
-        M3 改动：移除"方向一致跳过"逻辑。
-        原逻辑：专家方向一致（都买或都观望）时跳过交叉审阅。
-        新逻辑：即使方向一致也执行，强制找盲点（魔鬼代言人角色）。
-        原因：对话118案例显示，方向一致时跳过交叉审阅导致无对抗性，分析不透彻。
+        修复：原逻辑要求专家数 >= 2 才执行交叉审阅，
+        但 should_run_cross_review 的 force_on_complexity 分支允许 >= 1 就触发，
+        导致 complex 任务单专家时被否决。现在 complex/medium 任务即使单专家也执行
+        交叉审阅（发挥魔鬼代言人作用，对单一视角进行盲点检查）。
         """
-        # 条件1：专家数量不足
-        if len(specialist_results) < 2:
-            return True
-
-        # 条件2：简单任务
+        # 条件1：简单任务
         if complexity in ("simple", "chat"):
             return True
 
-        # M3: 移除"方向一致跳过"逻辑
-        # 原逻辑：if not _has_disagreement(specialist_results): return True
-        # 新逻辑：即使方向一致也执行交叉审阅，强制找盲点
+        # 条件2：完全无专家
+        if len(specialist_results) < 1:
+            return True
+
+        # complex/medium 任务即使单专家也执行交叉审阅（魔鬼代言人盲点检查）
         return False
 
     @staticmethod

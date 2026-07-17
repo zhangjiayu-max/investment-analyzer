@@ -565,7 +565,8 @@ def get_best_valuation(
 
     # 1. 优先使用最近 7 天内的详细数据
     detailed = get_latest_valuation(index_code, metric_type, max_days=7)
-    if detailed:
+    # 修复：本地数据所有关键字段都为 null 时，不应返回空记录，应继续降级到在线兜底
+    if detailed and (detailed.get("current_value") is not None or detailed.get("percentile") is not None):
         detailed["data_source"] = "manual"
         detailed["is_expired"] = False
         if detailed.get("snapshot_date"):
@@ -625,7 +626,8 @@ def get_best_valuation(
 
     # 3. 使用过期的详细数据（如有）
     detailed_expired = get_latest_valuation(index_code, metric_type, max_days=365)
-    if detailed_expired:
+    # 同样检查关键字段是否为 null
+    if detailed_expired and (detailed_expired.get("current_value") is not None or detailed_expired.get("percentile") is not None):
         detailed_expired["data_source"] = "manual"
         detailed_expired["is_expired"] = True
         is_expired = 1
@@ -745,7 +747,11 @@ def _online_fallback(index_code: str, metric_type: str, start_ts: datetime,
 
 
 def _query_akshare_valuation(index_code: str, metric_type: str, timeout_ms: int) -> dict | None:
-    """通过 akshare 查询中证官方估值。"""
+    """通过 akshare 查询中证官方估值。
+
+    修复：原仅用 stock_zh_index_value_csindex（中证指数公司专用），对港股/海外指数无效。
+    新增乐咕乐股接口作为补充，覆盖更多 A 股宽基指数。
+    """
     from services.market_data import get_index_valuation
     try:
         result = get_index_valuation(index_code)
@@ -760,6 +766,11 @@ def _query_akshare_valuation(index_code: str, metric_type: str, timeout_ms: int)
         elif metric_type == "市净率":
             percentile = result.get("pb_percentile")
             current_value = result.get("pb")
+        # 修复：akshare 对港股指数返回空结果（current_value 和 percentile 都为 None），
+        # 应返回 None 让 _online_fallback 继续尝试 ttfund 兜底
+        if current_value is None and percentile is None:
+            logger.info(f"[valuation] akshare 返回空数据 {index_code}，降级到 ttfund")
+            return None
         return {
             "index_code": index_code,
             "index_name": result.get("index_name") or index_code,
@@ -780,21 +791,33 @@ def _query_ttfund_valuation(index_code: str, metric_type: str, timeout_ms: int) 
 
     修正：_invoke 返回 {success, errorCode, data} 结构，估值数据在 data.valuation 中。
     之前错误地取 result.get("valuation") 导致一直返回 None。
+
+    修复：港股指数（如 HSTECH）用代码查询不识别，增加代码→名称映射 + 名称重试。
     """
-    try:
-        from mcp.ttfund_client import get_ttfund_client
-        tc = get_ttfund_client()
-        result = tc._invoke("fund_index", {
-            "index_id": index_code,
-            "query_scope": "valuation",
-        })
-        if not result:
+    # 港股/海外指数代码 → 名称映射（天天基金用名称查更准）
+    _CODE_NAME_MAP = {
+        "HSTECH": "恒生科技",
+        "HSI": "恒生指数",
+        "HSCEI": "恒生中国企业指数",
+        "DJI": "道琼斯",
+        "SPX": "标普500",
+        "IXIC": "纳斯达克",
+        "N225": "日经225",
+    }
+
+    def _extract_valuation(result, idx_code):
+        """从 ttfund 返回中提取估值数据。"""
+        if not result or not result.get("success"):
             return None
-        # 数据在 data 字段内（修正关键 bug）
         data = result.get("data", {}) or {}
         valuation = data.get("valuation", {}) or {}
         index_profile = data.get("index_profile", {}) or {}
         quote = data.get("quote", {}) or {}
+        # 估值数据为空时返回 None（触发名称重试）
+        has_valuation_data = any(v is not None for v in valuation.values()) if valuation else False
+        has_quote_data = any(v is not None for v in quote.values()) if quote else False
+        if not has_valuation_data and not has_quote_data:
+            return None
         percentile = None
         current_value = None
         if metric_type == "市盈率":
@@ -803,22 +826,52 @@ def _query_ttfund_valuation(index_code: str, metric_type: str, timeout_ms: int) 
         elif metric_type == "市净率":
             percentile = valuation.get("pb_percentile_10y")
             current_value = valuation.get("pb")
-        # 天天基金百分位是 0-100 格式，统一转为 0-1（与 akshare 一致，后续统一转 0-100）
+        # 天天基金百分位是 0-100 格式，统一转为 0-1
         if percentile is not None and percentile > 1.0:
             percentile = round(percentile / 100.0, 4)
         index_name = (quote.get("index_name") or index_profile.get("index_name")
-                      or index_profile.get("full_index_name") or index_code)
+                      or index_profile.get("full_index_name") or idx_code)
+        # 关键修复：如果 current_value 和 percentile 都为 None，说明数据不完整，返回 None 触发重试
+        if current_value is None and percentile is None:
+            return None
         return {
-            "index_code": index_code,
+            "index_code": idx_code,
             "index_name": index_name,
             "metric_type": metric_type,
             "current_value": current_value,
             "percentile": percentile,
             "snapshot_date": quote.get("quote_time") or datetime.now().strftime("%Y-%m-%d"),
-            "percentile_window": "近10年",  # P2-5: 标注百分位口径
+            "percentile_window": "近10年",
             "dividend_yield": valuation.get("dividend_yield"),
             "roe": valuation.get("roe"),
         }
+
+    try:
+        from mcp.ttfund_client import get_ttfund_client
+        tc = get_ttfund_client()
+
+        # 第一步：用原始代码查询
+        result = tc._invoke("fund_index", {
+            "index_id": index_code,
+            "query_scope": "valuation",
+        })
+        extracted = _extract_valuation(result, index_code)
+        if extracted:
+            return extracted
+
+        # 第二步：代码查不到 → 用名称重试（港股/海外指数）
+        index_name = _CODE_NAME_MAP.get(index_code)
+        if index_name:
+            logger.info(f"[valuation] ttfund 用代码 {index_code} 查不到，尝试用名称 {index_name} 重试")
+            result2 = tc._invoke("fund_index", {
+                "index_id": index_name,
+                "query_scope": "valuation",
+            })
+            extracted2 = _extract_valuation(result2, index_code)
+            if extracted2:
+                return extracted2
+
+        return None
     except Exception as e:
         logger.debug(f"[valuation] ttfund 查询失败 {index_code}: {e}")
         return None

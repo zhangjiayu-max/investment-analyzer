@@ -791,14 +791,45 @@ def _phase_info_gather(
             return ""
 
     def _valuation_task():
-        """估值预取（基于 targets）"""
+        """估值预取（基于 targets + 持仓行业指数遍历）"""
         valuations = {}
+        queried = set()  # 去重
+
+        # 1. 基于用户问题中提取的 targets
         targets = query_info.get("targets", [])
         if targets:
             for target in targets[:3]:
+                if target in queried:
+                    continue
                 val = _lookup_valuation(target)
                 if val:
                     valuations[target] = val
+                    queried.add(target)
+
+        # 2. 修复：遍历持仓中的行业/主题指数，自动补全估值查询
+        # 原问题：只查用户文本中提及的 targets（最多3个），持仓中的其他行业指数被遗漏
+        try:
+            from db.portfolio import list_holdings
+            holdings = list_holdings()
+            for h in holdings:
+                fname = h.get("fund_name", "") or ""
+                fcode = h.get("fund_code", "") or ""
+                # 从基金名称中提取行业关键词
+                industry_keywords = _extract_industry_from_fund_name(fname)
+                for kw in industry_keywords:
+                    if kw in queried:
+                        continue
+                    val = _lookup_valuation(kw)
+                    if val:
+                        valuations[kw] = val
+                        queried.add(kw)
+                    if len(valuations) >= 8:  # 最多预取 8 个，避免过多
+                        break
+                if len(valuations) >= 8:
+                    break
+        except Exception as e:
+            logger.debug(f"[pipeline] 持仓行业指数估值预取失败: {e}")
+
         return valuations
 
     def _memory_task():
@@ -923,6 +954,35 @@ def _lookup_valuation(target: str) -> Optional[dict]:
     except Exception:
         pass
     return None
+
+
+# 基金名称 → 行业指数关键词映射（用于持仓估值预取）
+_FUND_INDUSTRY_MAP = {
+    "白酒": "白酒", "消费": "消费", "医疗": "医疗", "医药": "医药",
+    "医疗器械": "医疗器械", "生物": "生物医药", "创新药": "创新药",
+    "恒生科技": "恒生科技", "港股通": "港股通", "恒生互联网": "恒生互联网",
+    "房地产": "房地产", "地产": "房地产", "畜牧": "畜牧养殖", "养殖": "畜牧养殖",
+    "新能源": "新能源", "光伏": "光伏", "半导体": "半导体", "芯片": "芯片",
+    "军工": "军工", "国防": "军工", "银行": "银行", "券商": "券商",
+    "保险": "保险", "红利": "红利", "科技": "科技", "互联网": "互联网",
+    "食品饮料": "食品饮料", "食品": "食品饮料", "消费红利": "消费红利",
+    "创业板": "创业板", "沪深300": "沪深300", "中证500": "中证500",
+    "中证1000": "中证1000", "科创板": "科创板", "上证50": "上证50",
+}
+
+def _extract_industry_from_fund_name(fund_name: str) -> list[str]:
+    """从基金名称中提取对应的行业指数关键词。
+
+    用于持仓估值预取：遍历持仓基金名称，提取行业关键词，
+    自动查询对应的行业指数估值，避免只查用户提及的标的。
+    """
+    keywords = []
+    if not fund_name:
+        return keywords
+    for kw, index_name in _FUND_INDUSTRY_MAP.items():
+        if kw in fund_name and index_name not in keywords:
+            keywords.append(index_name)
+    return keywords
 
 
 # ── Phase 2: 计划生成 ──────────────────────────

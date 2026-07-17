@@ -39,6 +39,10 @@ _CACHEABLE_TOOLS = {
     "get_index_valuation",   # 指数估值
     "get_market_status",     # 市场状态
     "get_valuation_history", # 估值历史
+    # 修复：盈米行情/热点为纯查询无副作用，日内不变，加入缓存避免重复调用
+    "yingmi_latest_quotations",  # 市场行情解读（日内不变）
+    "yingmi_hot_topics",         # 热点话题（5分钟TTL足够）
+    "query_institutional_flow", # 机构资金流向（5分钟TTL）
 }
 
 
