@@ -281,7 +281,7 @@ DEFAULT_CONFIGS = [
     ('smart_add.dca_tiers', '4:1.0,8:1.5,12:2.0', '大跌定投档位（跌幅%:月投倍数，逗号分隔）', 'smart_add'),
 
     # 退出信号（2026-07-17 新增）— 止盈/止损/暂停，默认关闭
-    ('smart_add.exit_signal_enabled', 'false', '退出信号开关（止盈/止损/暂停，默认关闭）', 'smart_add'),
+    ('smart_add.exit_signal_enabled', 'true', '退出信号开关（止盈/止损/暂停）', 'smart_add'),
     ('smart_add.take_profit_broad_pct', '20', '宽基止盈阈值%（盈利超过此值建议减仓）', 'smart_add'),
     ('smart_add.take_profit_theme_pct', '30', '主题/行业止盈阈值%（盈利超过此值建议减仓）', 'smart_add'),
     ('smart_add.stop_loss_pct', '-30', '止损阈值%（亏损超过此值建议止损）', 'smart_add'),
@@ -290,18 +290,18 @@ DEFAULT_CONFIGS = [
     ('smart_add.max_consecutive_failed_adds', '3', '连续补仓失败次数上限（超过则暂停该标的）', 'smart_add'),
 
     # 价值平均法（2026-07-17 新增）— 默认关闭
-    ('smart_add.va_enabled', 'false', '价值平均法引擎开关（替代DCA的市值驱动策略，默认关闭）', 'smart_add'),
+    ('smart_add.va_enabled', 'true', '价值平均法引擎开关（替代DCA的市值驱动策略）', 'smart_add'),
     ('smart_add.va_target_growth_pct', '0.33', 'VA目标月增长%（默认=base_dca_pct/12≈0.33%）', 'smart_add'),
     ('smart_add.va_max_monthly_mult', '3.0', 'VA单月最大投入倍数（防止极端行情超额投入）', 'smart_add'),
     ('smart_add.va_allow_sell', 'false', 'VA是否允许卖出建议（默认false，保守）', 'smart_add'),
 
     # 网格交易（2026-07-17 新增）— 默认关闭
-    ('smart_add.grid_enabled', 'false', '网格交易策略开关（估值合理区间30-70%时启用，默认关闭）', 'smart_add'),
+    ('smart_add.grid_enabled', 'true', '网格交易策略开关（估值合理区间30-70%时启用）', 'smart_add'),
     ('smart_add.grid_count', '5', '网格数量', 'smart_add'),
     ('smart_add.grid_range_pct', '20', '网格区间%（±20%）', 'smart_add'),
 
     # 基本面健康检查（2026-07-17 新增）— 默认关闭
-    ('smart_add.fund_health_enabled', 'false', '基本面健康检查开关（经理变更/规模暴增/跟踪误差，默认关闭）', 'smart_add'),
+    ('smart_add.fund_health_enabled', 'true', '基本面健康检查开关（经理变更/规模暴增/跟踪误差）', 'smart_add'),
 ]
 
 

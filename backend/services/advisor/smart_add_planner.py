@@ -639,7 +639,7 @@ def _detect_exit_signals(
             })
 
         # 估值过高时额外警示
-        if valuation and valuation.get("percentile", 0) > 80:
+        if valuation and (valuation.get("percentile") or 0) > 80:
             exit_signals.append({
                 "type": "take_profit",
                 "label": "高估减仓",
@@ -667,7 +667,7 @@ def _detect_exit_signals(
 
     # 信号F：暂停观望
     # 估值过高暂停
-    if valuation and valuation.get("percentile", 0) > 70:
+    if valuation and (valuation.get("percentile") or 0) > 70:
         exit_signals.append({
             "type": "pause",
             "label": "估值过高",
