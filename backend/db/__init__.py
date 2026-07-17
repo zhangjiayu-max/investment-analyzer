@@ -143,7 +143,7 @@ from db.bond_knowledge import (
 
 # 系统配置
 from db.config import (
-    init_default_configs, get_config, get_config_int, get_config_float, get_config_list,
+    init_default_configs, get_config, get_config_int, get_config_float, get_config_bool, get_config_list,
     list_configs, update_config, reset_configs,
 )
 
@@ -193,6 +193,10 @@ from db.knowledge_graph import (
 from db.health_score import (
     save_health_score, get_health_score, list_health_scores,
     save_bond_yield, get_latest_bond_yield, get_bond_yield_history,
+    init_health_score_v2_tables,
+    get_user_investment_profile, save_user_investment_profile,
+    save_health_score_v2, get_health_score_v2, list_health_scores_v2,
+    track_health_action, update_health_action_status, list_health_action_tracking,
 )
 
 # 基金质量评分（六维体检报告）
@@ -951,6 +955,9 @@ def init_db():
     # 初始化健康分表
     from db.health_score import init_health_score_tables
     init_health_score_tables(conn)
+
+    # 初始化全账户资产健康度诊断 2.0 表
+    init_health_score_v2_tables(conn)
 
     # 初始化基金质量评分表（六维体检报告）
     init_fund_quality_tables(conn)

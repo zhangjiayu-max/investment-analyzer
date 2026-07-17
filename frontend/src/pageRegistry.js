@@ -28,6 +28,7 @@ export const pageComponentKeys = [
   'knowledge',
   'search',
   'health',
+  'health-v2',
   'shadow',
   'attribution',
   'behavior',

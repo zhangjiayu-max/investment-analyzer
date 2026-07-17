@@ -2444,6 +2444,29 @@ export function getFearGreedIndex() {
   return api.get('/health/fear-greed')
 }
 
+// ========== 全账户资产健康度诊断 2.0 ==========
+export function getHealthV2Dashboard(forceRefresh = false) {
+  return api.get('/health-v2/dashboard', { params: { force_refresh: forceRefresh } })
+}
+export function recalculateHealthV2() {
+  return api.post('/health-v2/recalculate')
+}
+export function getHealthV2Profile() {
+  return api.get('/health-v2/profile')
+}
+export function updateHealthV2Profile(payload) {
+  return api.put('/health-v2/profile', payload)
+}
+export function getHealthV2TargetPotsDefaults() {
+  return api.get('/health-v2/profile/target-pots-defaults')
+}
+export function getHealthV2History(days = 30) {
+  return api.get('/health-v2/history', { params: { days } })
+}
+export function updateHealthV2ActionStatus(actionId, payload) {
+  return api.post(`/health-v2/actions/${actionId}/status`, payload)
+}
+
 // ========== 滚动收益分析 ==========
 export function analyzeRollingReturn(data) {
   return api.post('/rolling/analyze', data)

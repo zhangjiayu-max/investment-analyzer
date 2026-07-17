@@ -122,6 +122,8 @@ export const navItems = [
         desc: '评测用例管理、批量回归、Shadow对比' },
       { key: 'health', label: '健康分', icon: 'health',
         desc: '综合理财健康分、股债比例、恐贪指数' },
+      { key: 'health-v2', label: '全账户诊断', icon: 'heart-pulse', hot: true,
+        desc: '资产全景、健康分2.0、四笔钱偏离、今日行动清单' },
       { key: 'shadow', label: 'Shadow Mode', icon: 'shadow',
         desc: 'Prompt变更对比验证、AB测试' },
       { key: 'strategy-backtest', label: '策略回测', icon: 'line-chart',

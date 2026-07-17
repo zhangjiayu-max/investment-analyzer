@@ -41,6 +41,7 @@ import StrategyBacktest from '../components/decision/StrategyBacktest.vue'
 import CapabilityCenter from '../components/agent/CapabilityCenter.vue'
 import SmartAddPlan from '../components/finance/SmartAddPlan.vue'
 import EventRadarPage from '../components/market/EventRadarPage.vue'
+import HealthDashboardV2 from '../components/health/HealthDashboardV2.vue'
 import { pageComponentKeys } from '../pageRegistry'
 
 const props = defineProps({
@@ -88,6 +89,7 @@ const pageComponents = {
   'strategy-backtest': StrategyBacktest,
   'capability-center': CapabilityCenter,
   'smart-add': SmartAddPlan,
+  'health-v2': HealthDashboardV2,
 }
 
 if (import.meta.env.DEV) {
