@@ -33,7 +33,7 @@ logger = logging.getLogger(__name__)
 _CACHEABLE_TOOLS = {
     "query_valuation",       # 估值查询
     "search_knowledge",      # 知识库检索
-    "get_portfolio",         # 持仓查询
+    # P2-10: 移除 get_portfolio — 盈亏需实时刷新，5分钟缓存会导致数据不准
     "query_fund_info",       # 基金信息查询
     "ttfund_search",         # 基金搜索
     "get_index_valuation",   # 指数估值

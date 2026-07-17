@@ -4272,7 +4272,7 @@ def _stream_build_context(refined_query: str, rag_context: str, complexity: str,
             strength = flow_signal.get("strength", "weak")
             z_score = flow_signal.get("z_score", 0)
             direction_cn = {"inflow": "净流入", "outflow": "净流出", "neutral": "中性"}.get(direction, direction)
-            prebuilt_context += f"## 资金流向信号\n- 融资余额: {direction_cn}({strength}) z_score={z_score:.2f}\n\n"
+            prebuilt_context += f"## 资金流向信号（全市场级别，非个股级别）\n- 融资余额: {direction_cn}({strength}) z_score={z_score:.2f}\n- 注：此为全市场融资余额信号，不代表单只基金/个股资金流向\n\n"
     except Exception as e:
         logger.debug(f"注入资金流向失败: {e}")
 

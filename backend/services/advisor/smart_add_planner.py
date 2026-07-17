@@ -1467,7 +1467,10 @@ def _generate_single_plan(
     fund_code = holding.get("fund_code", "")
     fund_name = holding.get("fund_name", "")
     index_code = holding.get("index_code", "")
-    profit_rate = holding.get("profit_rate") or 0
+    # P2-1: profit_rate/current_price 为 None 时标记数据缺失，不按 0 处理
+    _profit_rate_raw = holding.get("profit_rate")
+    profit_rate = _profit_rate_raw if _profit_rate_raw is not None else 0
+    _price_stale = holding.get("current_price") is None  # 净值为空标记数据过期
     current_value = holding.get("current_value") or 0
     total_cost = holding.get("total_cost") or 0
     shares = holding.get("shares") or 0
@@ -1481,9 +1484,10 @@ def _generate_single_plan(
     valuation_level = "未知"
     if index_code:
         # 先查市盈率，查不到则降级查市净率（部分指数如银行/地产只有 PB 数据）
-        val = get_best_valuation(index_code, metric_type="市盈率", query_source="smart_add", enable_online=False)
+        # P2-3: 单标的查询启用在线兜底（非批量场景），避免本地无估值时 valuation=None
+        val = get_best_valuation(index_code, metric_type="市盈率", query_source="smart_add", enable_online=True)
         if not val:
-            val = get_best_valuation(index_code, metric_type="市净率", query_source="smart_add", enable_online=False)
+            val = get_best_valuation(index_code, metric_type="市净率", query_source="smart_add", enable_online=True)
         if val:
             zscore = val.get("zscore")
             percentile = val.get("percentile")
@@ -1765,6 +1769,7 @@ def _generate_single_plan(
             "kelly_limit": kelly["limit_pct"],
             "type_hard_cap": type_strategy["hard_cap_pct"],
             "kelly_warning": kelly_warning,
+            "data_warning": "持仓净值数据缺失，盈亏可能不准" if _price_stale else "",
             "reason": "" if can_add else f"已达配置上限 {max_position_pct:.1f}%（凯利{kelly['limit_pct']:.0f}%/类型{type_strategy['hard_cap_pct']:.0f}%）",
         },
     }

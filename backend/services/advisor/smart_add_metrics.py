@@ -462,10 +462,23 @@ def classify_fund(holding: dict) -> dict:
     """基金类型分类，返回对应策略参数。
 
     分类依据：fund_category + index_name + fund_name 关键词
+    P2-2: fund_category 为空时从 fund_metadata 表兜底
     """
     fund_category = (holding.get("fund_category") or "").lower()
     index_name = holding.get("index_name") or ""
     fund_name = holding.get("fund_name") or ""
+
+    # P2-2: fund_category 为空时从 fund_metadata 表兜底
+    if not fund_category:
+        try:
+            from services.fund.fund_data_service import get_fund_metadata
+            meta = get_fund_metadata(holding.get("fund_code", ""))
+            if meta:
+                fund_category = (meta.get("fund_category") or "").lower()
+                if not index_name:
+                    index_name = meta.get("tracking_index") or ""
+        except Exception:
+            pass
 
     # 关键词匹配
     text = f"{fund_name} {index_name} {fund_category}".lower()

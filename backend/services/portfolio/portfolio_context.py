@@ -353,16 +353,24 @@ def build_valuation_summary() -> str:
             percentile = v.get("percentile")
 
             if code not in index_map:
-                index_map[code] = {"name": name, "pe": "-", "pb": "-", "percentile": None}
+                index_map[code] = {"name": name, "pe": "-", "pb": "-", "percentile": None, "snapshot_date": ""}
 
             if metric == "市盈率" and value is not None:
                 index_map[code]["pe"] = f"{value:.1f}"
                 if percentile is not None:
                     index_map[code]["percentile"] = percentile
+                # P2-4: 记录数据日期
+                snap = v.get("snapshot_date", "")
+                if snap:
+                    index_map[code]["snapshot_date"] = snap
             elif metric == "市净率" and value is not None:
                 index_map[code]["pb"] = f"{value:.2f}"
                 if percentile is not None and index_map[code]["percentile"] is None:
                     index_map[code]["percentile"] = percentile
+                # P2-4: 记录数据日期（PE 无数据时用 PB 的日期）
+                snap = v.get("snapshot_date", "")
+                if snap and not index_map[code]["snapshot_date"]:
+                    index_map[code]["snapshot_date"] = snap
 
         lines = ["### 当前市场估值"]
 
@@ -406,7 +414,10 @@ def build_valuation_summary() -> str:
             else:
                 level = "极度高估"
 
-            lines.append(f"| {info['name']} | {info['pe']} | {info['pb']} | {percentile:.0f}% | {level} |")
+            # P2-4: 标注数据更新日期
+            date_str = info.get("snapshot_date", "")
+            date_suffix = f" ({date_str})" if date_str else ""
+            lines.append(f"| {info['name']} | {info['pe']} | {info['pb']} | {percentile:.0f}% | {level} |{date_suffix}")
 
         if len(lines) <= 3:
             return ""

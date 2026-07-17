@@ -764,7 +764,8 @@ def _query_akshare_valuation(index_code: str, metric_type: str, timeout_ms: int)
             "metric_type": metric_type,
             "current_value": current_value,
             "percentile": percentile,
-            "snapshot_date": datetime.now().strftime("%Y-%m-%d"),
+            "snapshot_date": result.get("date") or datetime.now().strftime("%Y-%m-%d"),
+            "percentile_window": "近3年",  # P2-5: 标注百分位口径
             "dividend_yield": result.get("dividend_yield"),
         }
     except Exception as e:
@@ -812,6 +813,7 @@ def _query_ttfund_valuation(index_code: str, metric_type: str, timeout_ms: int) 
             "current_value": current_value,
             "percentile": percentile,
             "snapshot_date": quote.get("quote_time") or datetime.now().strftime("%Y-%m-%d"),
+            "percentile_window": "近10年",  # P2-5: 标注百分位口径
             "dividend_yield": valuation.get("dividend_yield"),
             "roe": valuation.get("roe"),
         }

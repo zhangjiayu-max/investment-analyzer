@@ -394,6 +394,13 @@ def build_conversation_context(
         "entity_memory": _build_entity_memory_context(),  # 增强4: 实体记忆
         "trade_pattern_context": _build_trade_pattern_context(user_id=user_id),
         "conversation_state": _build_conversation_state_text(conversation_id, current_user_message, messages),
+        # P2-8: 补全缺失的 6 类数据（债市/宏观/资金流/事件雷达/DCA规则/热点新闻）
+        "bond_market_context": _build_bond_market_context(),
+        "macro_data_context": _build_macro_data_context(),
+        "capital_flow_context": _build_capital_flow_context(),
+        "event_radar_context": _build_event_radar_context(),
+        "dca_rules_context": _build_dca_rules_context(),
+        "hot_topics_context": _build_hot_topics_context(),
     }
     sections["missing_context"] = _build_missing_context(scenario_type, sections)
 
@@ -430,20 +437,20 @@ def build_conversation_context(
 # 每个 Agent 允许接收的上下文 section 关键词（按 ## 标题匹配）
 # 未列出的 agent_key 不过滤（保留全部上下文，如 arbitrator）
 CONTEXT_FILTERS: dict[str, list[str]] = {
-    "risk_assessor":        ["持仓", "估值", "债市", "资金", "结构化数据"],
+    "risk_assessor":        ["持仓", "估值", "债市", "资金", "事件", "结构化数据"],
     "valuation_expert":     ["持仓", "估值", "结构化数据"],
-    "allocation_advisor":   ["持仓", "估值", "资金", "知识库", "结构化数据"],
+    "allocation_advisor":   ["持仓", "估值", "资金", "知识库", "DCA", "结构化数据"],
     "market_analyst":       ["估值", "热点", "资金", "事件", "知识库", "结构化数据"],
-    "fund_analyst":         ["持仓", "估值", "事件", "知识库", "结构化数据"],
+    "fund_analyst":         ["持仓", "估值", "事件", "知识库", "DCA", "结构化数据"],
     "macro_strategist":     ["估值", "热点", "宏观", "资金", "事件", "知识库", "债市"],
     "article_expert":       ["持仓", "估值", "事件", "知识库", "结构化数据"],
 }
 
 # section 优先级（同列表内越靠前越重要，预算紧张时先保留）
 CONTEXT_PRIORITY: dict[str, list[str]] = {
-    "risk_assessor":        ["持仓", "估值", "债市", "资金", "结构化数据"],
+    "risk_assessor":        ["持仓", "估值", "债市", "资金", "事件", "结构化数据"],
     "valuation_expert":     ["估值", "持仓", "结构化数据"],
-    "allocation_advisor":   ["持仓", "估值", "资金", "知识库", "结构化数据"],
+    "allocation_advisor":   ["持仓", "估值", "资金", "知识库", "DCA", "结构化数据"],
     "market_analyst":       ["热点", "估值", "资金", "事件", "知识库", "结构化数据"],
     "macro_strategist":     ["宏观", "资金", "事件", "估值", "热点", "债市", "知识库"],
     "article_expert":       ["事件", "持仓", "估值", "知识库", "结构化数据"],
@@ -590,6 +597,99 @@ def build_structured_data_block(sections: dict[str, str]) -> str:
     if not data["holdings"] and not data["valuations"]:
         return ""
     return f"## 结构化数据\n```json\n{_json.dumps(data, ensure_ascii=False, indent=2)}\n```"
+
+
+# ═══════════════════════════════════════════════════════════════
+# P2-8: 补全缺失的 6 类上下文数据（债市/宏观/资金流/事件雷达/DCA规则/热点新闻）
+# ═══════════════════════════════════════════════════════════════
+
+
+def _build_bond_market_context() -> str:
+    """债市温度 + 10年期国债收益率。"""
+    try:
+        from routers.market.bond import _fetch_bond_data
+        bond_raw = _fetch_bond_data()
+        if bond_raw and len(bond_raw) > 1:
+            last = bond_raw[-1]
+            temp = last.get("degree", "?")
+            rate = float(last["yield"]) * 100 if last.get("yield") else "?"
+            return f"## 债市数据\n- 债市温度: {temp}°\n- 10年期国债收益率: {rate}%"
+    except Exception:
+        pass
+    return ""
+
+
+def _build_macro_data_context() -> str:
+    """宏观经济数据（LPR/SHIBOR/CPI）。"""
+    try:
+        from tools import _get_macro_policy_data_impl
+        macro = _get_macro_policy_data_impl({})
+        if macro:
+            import json as _json
+            return f"## 宏观经济数据\n{_json.dumps(macro, ensure_ascii=False, indent=2)[:800]}"
+    except Exception:
+        pass
+    return ""
+
+
+def _build_capital_flow_context() -> str:
+    """资金流向信号（全市场级别）。"""
+    try:
+        from services.market.institutional_flow import get_institutional_flow_signal
+        flow_signal = get_institutional_flow_signal()
+        if flow_signal:
+            direction = flow_signal.get("direction", "neutral")
+            strength = flow_signal.get("strength", "weak")
+            z_score = flow_signal.get("z_score", 0)
+            direction_cn = {"inflow": "净流入", "outflow": "净流出", "neutral": "中性"}.get(direction, direction)
+            return f"## 资金流向信号（全市场级别）\n- 融资余额: {direction_cn}({strength}) z_score={z_score:.2f}"
+    except Exception:
+        pass
+    return ""
+
+
+def _build_event_radar_context() -> str:
+    """事件雷达（前瞻性事件）。"""
+    try:
+        from db.market_events import list_active_events
+        active_events = list_active_events()
+        if active_events:
+            lines = ["## 事件雷达"]
+            for ev in active_events[:5]:
+                title = ev.get("event_title", ev.get("title", ""))
+                sector = ev.get("sector", "")
+                lines.append(f"- {title} [{sector}]")
+            return "\n".join(lines)
+    except Exception:
+        pass
+    return ""
+
+
+def _build_dca_rules_context() -> str:
+    """DCA 4% 定投法规则。"""
+    try:
+        from agent.core.orchestrator import _build_dca_rules
+        rules = _build_dca_rules()
+        if rules:
+            return rules
+    except Exception:
+        pass
+    return ""
+
+
+def _build_hot_topics_context() -> str:
+    """今日市场热点新闻。"""
+    try:
+        from routers.dashboard.dashboard import _hot_topics_cache
+        if _hot_topics_cache:
+            lines = ["## 今日市场热点"]
+            for topic in _hot_topics_cache[:3]:
+                title = topic.get("title", "")
+                lines.append(f"- {title}")
+            return "\n".join(lines)
+    except Exception:
+        pass
+    return ""
 
 
 
