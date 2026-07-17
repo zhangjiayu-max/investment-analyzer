@@ -45,6 +45,8 @@ async def update_config(config: dict):
         "smart_add.dca_tiers",
         # 退出信号（2026-07-17 新增）
         "smart_add.exit_signal_enabled",
+        # 价值平均法 + 网格交易 + 基本面健康（2026-07-17 新增）
+        "smart_add.va_enabled", "smart_add.grid_enabled", "smart_add.fund_health_enabled",
     ]
     updated = []
     for k, v in config.items():

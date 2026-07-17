@@ -47,6 +47,9 @@ const cfgForm = ref({
   pyramid_enabled: true,
   max_add_vs_position_mult: 2.0,
   exit_signal_enabled: false,
+  va_enabled: false,
+  grid_enabled: false,
+  fund_health_enabled: false,
 })
 const cfgSaving = ref(false)
 const cfgSaved = ref(false)
@@ -173,6 +176,9 @@ function syncCfgForm(c) {
     pyramid_enabled: !!c.pyramid_enabled,
     max_add_vs_position_mult: Number(c.max_add_vs_position_mult ?? 2.0),
     exit_signal_enabled: !!c.exit_signal_enabled,
+    va_enabled: !!c.va_enabled,
+    grid_enabled: !!c.grid_enabled,
+    fund_health_enabled: !!c.fund_health_enabled,
   }
 }
 
@@ -226,6 +232,9 @@ async function saveConfig() {
       'smart_add.pyramid_enabled': cfgForm.value.pyramid_enabled,
       'smart_add.max_add_vs_position_mult': cfgForm.value.max_add_vs_position_mult,
       'smart_add.exit_signal_enabled': cfgForm.value.exit_signal_enabled,
+      'smart_add.va_enabled': cfgForm.value.va_enabled,
+      'smart_add.grid_enabled': cfgForm.value.grid_enabled,
+      'smart_add.fund_health_enabled': cfgForm.value.fund_health_enabled,
     })
     cfgSaved.value = true
     setTimeout(() => { cfgSaved.value = false }, 2000)
@@ -611,6 +620,66 @@ onMounted(() => {
                 </div>
               </div>
             </div>
+
+            <!-- 价值平均法（VA）结果 -->
+            <div v-if="p.va_result" class="plan-row va-row">
+              <div class="va-head">
+                <Icon name="trending-up" size="14" />
+                <span class="va-title">价值平均法（VA）</span>
+                <span :class="['va-action-tag', `va-${p.va_result.action}`]">
+                  {{ { buy: '建议买入', sell: '建议卖出', hold: '维持不变' }[p.va_result.action] || p.va_result.action }}
+                </span>
+              </div>
+              <div class="va-body">
+                <div class="va-reason">{{ p.va_result.reason }}</div>
+                <div class="va-meta">
+                  <span>目标市值 ¥{{ fmtMoney(p.va_result.target_value) }}</span>
+                  <span>实际市值 ¥{{ fmtMoney(p.va_result.actual_value) }}</span>
+                  <span :class="p.va_result.gap_pct > 0 ? 'text-profit' : 'text-loss'">偏离 {{ fmtSignedPct(p.va_result.gap_pct) }}</span>
+                  <span v-if="p.va_result.action === 'buy' && p.va_result.amount > 0" class="va-amount font-jet">建议 ¥{{ fmtMoney(p.va_result.amount) }}</span>
+                  <span class="va-max">上限 ¥{{ fmtMoney(p.va_result.max_monthly) }}</span>
+                </div>
+              </div>
+            </div>
+
+            <!-- 网格交易结果 -->
+            <div v-if="p.grid_result" class="plan-row grid-row">
+              <div class="grid-head">
+                <Icon name="grid" size="14" />
+                <span class="grid-title">网格交易</span>
+                <span :class="['grid-action-tag', `grid-${p.grid_result.action}`]">
+                  {{ { buy: '建议买入', sell: '建议卖出', wait: '等待触发' }[p.grid_result.action] || p.grid_result.action }}
+                </span>
+              </div>
+              <div class="grid-body">
+                <div class="grid-reason">{{ p.grid_result.reason }}</div>
+                <div class="grid-meta">
+                  <span>区间 ¥{{ fmtNum(p.grid_result.price_low, 4) }} ~ ¥{{ fmtNum(p.grid_result.price_high, 4) }}</span>
+                  <span>步长 ¥{{ fmtNum(p.grid_result.grid_step, 4) }}</span>
+                  <span v-if="p.grid_result.action !== 'wait'" class="grid-amount font-jet">每格 ¥{{ fmtMoney(p.grid_result.suggested_amount) }}</span>
+                </div>
+              </div>
+            </div>
+
+            <!-- 基本面健康检查 -->
+            <div v-if="p.fund_health && p.fund_health.data_available" class="plan-row health-row">
+              <div class="health-head">
+                <Icon name="activity" size="14" />
+                <span class="health-title">基本面健康</span>
+                <span :class="['health-tag', p.fund_health.healthy ? 'health-ok' : 'health-risk']">
+                  {{ p.fund_health.healthy ? '健康' : '有风险' }}
+                </span>
+              </div>
+              <div class="health-body">
+                <div v-if="p.fund_health.warnings && p.fund_health.warnings.length" class="health-warnings">
+                  <span v-for="(w, wi) in p.fund_health.warnings" :key="wi" class="health-item health-warn">{{ w }}</span>
+                </div>
+                <div v-if="p.fund_health.risks && p.fund_health.risks.length" class="health-risks">
+                  <span v-for="(r, ri) in p.fund_health.risks" :key="ri" class="health-item health-danger">{{ r }}</span>
+                </div>
+                <div v-if="!p.fund_health.warnings?.length && !p.fund_health.risks?.length" class="health-clean">未发现明显问题</div>
+              </div>
+            </div>
           </article>
         </div>
       </section>
@@ -738,6 +807,24 @@ onMounted(() => {
               <label class="check-label">
                 <input type="checkbox" v-model="cfgForm.exit_signal_enabled" />
                 <span>启用退出信号（止盈/止损/暂停）</span>
+              </label>
+            </div>
+            <div class="cfg-field cfg-field-check">
+              <label class="check-label">
+                <input type="checkbox" v-model="cfgForm.va_enabled" />
+                <span>启用价值平均法（VA）</span>
+              </label>
+            </div>
+            <div class="cfg-field cfg-field-check">
+              <label class="check-label">
+                <input type="checkbox" v-model="cfgForm.grid_enabled" />
+                <span>启用网格交易</span>
+              </label>
+            </div>
+            <div class="cfg-field cfg-field-check">
+              <label class="check-label">
+                <input type="checkbox" v-model="cfgForm.fund_health_enabled" />
+                <span>启基本面健康检查</span>
               </label>
             </div>
           </div>
@@ -1798,6 +1885,116 @@ onMounted(() => {
   font-weight: 500;
 }
 .pool-warn-text { flex: 1; }
+
+/* —— 价值平均法（VA） —— */
+.va-row {
+  background: rgba(16, 185, 129, 0.03);
+  border-left: 3px solid rgba(16, 185, 129, 0.4);
+  padding: 0.5rem 0.7rem;
+  border-radius: var(--radius-sm);
+}
+.va-head {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin-bottom: 0.3rem;
+  font-size: 0.82rem;
+  font-weight: 600;
+}
+.va-title { color: var(--color-text-primary); }
+.va-action-tag {
+  padding: 1px 6px;
+  border-radius: 3px;
+  font-size: 0.7rem;
+  font-weight: 700;
+}
+.va-buy { background: rgba(16, 185, 129, 0.15); color: #059669; }
+.va-sell { background: rgba(220, 38, 38, 0.12); color: #dc2626; }
+.va-hold { background: var(--color-bg-muted, #f3f4f6); color: var(--color-text-secondary); }
+.va-body { font-size: 0.76rem; }
+.va-reason { color: var(--color-text-secondary); margin-bottom: 0.25rem; }
+.va-meta { display: flex; flex-wrap: wrap; gap: 0.4rem; }
+.va-meta span {
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-size: 0.7rem;
+  background: rgba(99, 102, 241, 0.06);
+  color: var(--color-text-secondary);
+}
+.va-amount { font-weight: 700; color: var(--color-loss); background: rgba(16, 185, 129, 0.1); }
+.va-max { background: rgba(100, 116, 139, 0.08); }
+
+/* —— 网格交易 —— */
+.grid-row {
+  background: rgba(99, 102, 241, 0.03);
+  border-left: 3px solid rgba(99, 102, 241, 0.4);
+  padding: 0.5rem 0.7rem;
+  border-radius: var(--radius-sm);
+}
+.grid-head {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin-bottom: 0.3rem;
+  font-size: 0.82rem;
+  font-weight: 600;
+}
+.grid-title { color: var(--color-text-primary); }
+.grid-action-tag {
+  padding: 1px 6px;
+  border-radius: 3px;
+  font-size: 0.7rem;
+  font-weight: 700;
+}
+.grid-buy { background: rgba(16, 185, 129, 0.15); color: #059669; }
+.grid-sell { background: rgba(220, 38, 38, 0.12); color: #dc2626; }
+.grid-wait { background: var(--color-bg-muted, #f3f4f6); color: var(--color-text-secondary); }
+.grid-body { font-size: 0.76rem; }
+.grid-reason { color: var(--color-text-secondary); margin-bottom: 0.25rem; }
+.grid-meta { display: flex; flex-wrap: wrap; gap: 0.4rem; }
+.grid-meta span {
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-size: 0.7rem;
+  background: rgba(99, 102, 241, 0.06);
+  color: var(--color-text-secondary);
+}
+.grid-amount { font-weight: 700; color: #6366f1; background: rgba(99, 102, 241, 0.1); }
+
+/* —— 基本面健康检查 —— */
+.health-row {
+  background: rgba(100, 116, 139, 0.03);
+  border-left: 3px solid rgba(100, 116, 139, 0.3);
+  padding: 0.5rem 0.7rem;
+  border-radius: var(--radius-sm);
+}
+.health-head {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin-bottom: 0.3rem;
+  font-size: 0.82rem;
+  font-weight: 600;
+}
+.health-title { color: var(--color-text-primary); }
+.health-tag {
+  padding: 1px 6px;
+  border-radius: 3px;
+  font-size: 0.7rem;
+  font-weight: 700;
+}
+.health-ok { background: rgba(16, 185, 129, 0.15); color: #059669; }
+.health-risk { background: rgba(220, 38, 38, 0.12); color: #dc2626; }
+.health-body { font-size: 0.76rem; }
+.health-warnings, .health-risks { display: flex; flex-direction: column; gap: 0.2rem; }
+.health-item {
+  padding: 2px 6px;
+  border-radius: 3px;
+  font-size: 0.72rem;
+}
+.health-warn { background: rgba(245, 158, 11, 0.1); color: #b45309; }
+.health-danger { background: rgba(220, 38, 38, 0.08); color: #dc2626; }
+.health-clean { color: #059669; font-size: 0.74rem; }
 
 @media (max-width: 768px) {
   .cf-summary-grid { grid-template-columns: repeat(2, 1fr); }

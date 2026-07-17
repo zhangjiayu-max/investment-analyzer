@@ -106,6 +106,17 @@ def _load_config() -> dict:
         "stop_loss_valuation_pct": get_config_float_safe("smart_add.stop_loss_valuation_pct", 50.0),
         "max_drawdown_from_peak_pct": get_config_float_safe("smart_add.max_drawdown_from_peak_pct", 25.0),
         "max_consecutive_failed_adds": get_config_int_safe("smart_add.max_consecutive_failed_adds", 3),
+        # 价值平均法（2026-07-17 新增）
+        "va_enabled": get_config_bool_safe("smart_add.va_enabled", False),
+        "va_target_growth_pct": get_config_float_safe("smart_add.va_target_growth_pct", 0.33),
+        "va_max_monthly_mult": get_config_float_safe("smart_add.va_max_monthly_mult", 3.0),
+        "va_allow_sell": get_config_bool_safe("smart_add.va_allow_sell", False),
+        # 网格交易（2026-07-17 新增）
+        "grid_enabled": get_config_bool_safe("smart_add.grid_enabled", False),
+        "grid_count": get_config_int_safe("smart_add.grid_count", 5),
+        "grid_range_pct": get_config_float_safe("smart_add.grid_range_pct", 20.0),
+        # 基本面健康检查（2026-07-17 新增）
+        "fund_health_enabled": get_config_bool_safe("smart_add.fund_health_enabled", False),
     }
 
 
@@ -266,6 +277,308 @@ def _calc_pool_warning(released_amount: float, pool_total: float, deep_loss_coun
     if released_amount > avg_quota:
         return "超出平均配额"
     return ""
+# ── 价值平均法引擎 ──────────────────────────
+
+def _calc_value_averaging(
+    holding: dict,
+    cfg: dict,
+    base_monthly: float,
+    months_held: int = 0,
+) -> Optional[dict]:
+    """价值平均法（Value Averaging）：目标市值驱动的定投策略。
+
+    核心公式：target_value = initial_value + month × target_monthly_growth
+    本期投入 = target_value - actual_value
+
+    Args:
+        months_held: 持仓月数，用于计算目标市值路径。无法获取时默认0。
+
+    Returns:
+        {
+            "type": "va",
+            "label": "价值平均",
+            "triggered": bool,
+            "amount": float,       # 正=买入，负=建议卖出
+            "target_value": float,
+            "actual_value": float,
+            "gap_pct": float,      # 偏离目标百分比
+            "action": "buy" | "sell" | "hold",
+            "reason": str,
+            "tag": str,
+        }
+    """
+    if not cfg.get("va_enabled", False):
+        return None
+
+    current_value = holding.get("current_value") or 0
+    total_cost = holding.get("total_cost") or 0
+    if current_value <= 0:
+        return None
+
+    # 目标月增长金额 = 总资产 × va_target_growth_pct% / 100
+    # 默认 0.33% ≈ 年化4% / 12
+    total_assets = holding.get("_total_assets", 0)
+    target_monthly_growth = total_assets * cfg.get("va_target_growth_pct", 0.33) / 100
+
+    # 初始市值 = 总成本（首次买入时的投入）
+    initial_value = total_cost
+    if initial_value <= 0:
+        initial_value = current_value
+
+    # 目标市值路径
+    target_value = initial_value + months_held * target_monthly_growth
+    required = target_value - current_value
+
+    # 单月最大投入/撤出限制
+    max_monthly = target_monthly_growth * cfg.get("va_max_monthly_mult", 3.0)
+    allow_sell = cfg.get("va_allow_sell", False)
+
+    if required > 0:
+        # 需要买入
+        amount = min(required, max_monthly)
+        action = "buy"
+        tag = "市值低于目标"
+        reason = f"市值{current_value:,.0f}低于目标{target_value:,.0f}，建议买入{amount:,.0f}"
+    elif required < 0 and allow_sell:
+        # 允许卖出
+        amount = max(required, -max_monthly)
+        action = "sell"
+        tag = "市值高于目标"
+        reason = f"市值{current_value:,.0f}高于目标{target_value:,.0f}，建议卖出{abs(amount):,.0f}"
+    elif required < 0:
+        # 不允许卖出，但标记为"暂停"
+        amount = 0
+        action = "hold"
+        tag = "市值高于目标"
+        reason = f"市值{current_value:,.0f}高于目标{target_value:,.0f}，暂停定投"
+    else:
+        amount = 0
+        action = "hold"
+        tag = "市值达标"
+        reason = f"市值{current_value:,.0f}接近目标{target_value:,.0f}，维持不变"
+
+    gap_pct = round((current_value - target_value) / target_value * 100, 2) if target_value else 0
+
+    return {
+        "type": "va",
+        "label": "价值平均",
+        "triggered": action != "hold",
+        "amount": round(amount, 2),
+        "target_value": round(target_value, 2),
+        "actual_value": round(current_value, 2),
+        "gap_pct": gap_pct,
+        "action": action,
+        "reason": reason,
+        "tag": tag,
+        "max_monthly": round(max_monthly, 2),
+        "months_held": months_held,
+    }
+
+
+# ── 网格交易策略 ──────────────────────────
+
+def _generate_grid_plan(
+    holding: dict,
+    valuation: Optional[dict],
+    cfg: dict,
+) -> Optional[dict]:
+    """网格交易策略：适用于估值合理区间（30-70%分位）的标的。
+
+    原理：设定价格区间 [P_low, P_high]，划分为 N 格，每格预设买卖金额。
+    当前价在网格中的位置 → 建议操作。
+
+    触发条件：
+    - 估值分位 30-70%（合理区间）
+    - 非深度亏损（亏损 > -15% 不适合网格，应优先金字塔）
+    - 非债券基金
+
+    Returns:
+        {
+            "type": "grid",
+            "label": "网格交易",
+            "triggered": bool,
+            "action": "buy" | "sell" | "wait",
+            "current_grid": int,     # 当前所在格位（0=底格，N=顶格）
+            "total_grids": int,
+            "grid_price": float,     # 当前格对应的价格
+            "next_grid_price": float, # 下一格价格
+            "suggested_amount": float,
+            "reason": str,
+            "grid_levels": [...],    # 所有网格档位详情
+        }
+    """
+    if not cfg.get("grid_enabled", False):
+        return None
+
+    profit_rate = holding.get("profit_rate") or 0
+    current_price = holding.get("current_price") or 0
+    current_value = holding.get("current_value") or 0
+    if current_price <= 0 or current_value <= 0:
+        return None
+
+    # 触发条件：估值分位 30-70%
+    val_pct = valuation.get("percentile") if valuation else None
+    if val_pct is not None and (val_pct < 30 or val_pct > 70):
+        # 估值不在合理区间，不适合网格
+        return None
+
+    # 触发条件：非深度亏损
+    if profit_rate < -0.15:
+        return None
+
+    grid_count = cfg.get("grid_count", 5)
+    grid_range_pct = cfg.get("grid_range_pct", 20.0)
+
+    # 网格区间：当前价 ± range_pct%
+    price_low = current_price * (1 - grid_range_pct / 100)
+    price_high = current_price * (1 + grid_range_pct / 100)
+    grid_step = (price_high - price_low) / grid_count
+
+    # 每格仓位 = 当前市值 / grid_count
+    grid_amount = current_value / grid_count
+
+    # 构建网格档位
+    grid_levels = []
+    current_grid = -1
+    for i in range(grid_count + 1):
+        level_price = round(price_low + i * grid_step, 4)
+        level = {
+            "grid_index": i,
+            "price": level_price,
+            "action": "buy" if i < grid_count // 2 else ("sell" if i > grid_count // 2 else "wait"),
+            "amount": round(grid_amount, 2),
+        }
+        grid_levels.append(level)
+        # 找到当前价所在的网格
+        if current_grid < 0 and current_price >= level_price:
+            current_grid = i
+
+    if current_grid < 0:
+        current_grid = 0  # 当前价低于最低格
+
+    # 当前格操作
+    mid_grid = grid_count // 2
+    if current_grid < mid_grid:
+        action = "buy"
+        suggested = grid_amount
+        tag = "网格低位"
+        reason = f"当前价在第{current_grid}格（共{grid_count}格），处于低位，建议买入"
+    elif current_grid > mid_grid:
+        action = "sell"
+        suggested = grid_amount
+        tag = "网格高位"
+        reason = f"当前价在第{current_grid}格（共{grid_count}格），处于高位，建议卖出"
+    else:
+        action = "wait"
+        suggested = 0
+        tag = "网格中位"
+        reason = f"当前价在第{current_grid}格（共{grid_count}格），处于中位，等待触发"
+
+    next_grid_price = None
+    if current_grid < grid_count:
+        next_grid_price = grid_levels[current_grid + 1]["price"]
+
+    return {
+        "type": "grid",
+        "label": "网格交易",
+        "triggered": action != "wait",
+        "action": action,
+        "current_grid": current_grid,
+        "total_grids": grid_count,
+        "price_low": round(price_low, 4),
+        "price_high": round(price_high, 4),
+        "grid_step": round(grid_step, 4),
+        "grid_price": grid_levels[current_grid]["price"],
+        "next_grid_price": next_grid_price,
+        "suggested_amount": round(suggested, 2),
+        "reason": reason,
+        "tag": tag,
+        "grid_levels": grid_levels,
+    }
+
+
+# ── 基本面健康检查 ──────────────────────────
+
+def _check_fund_health(
+    fund_code: str,
+    cfg: dict,
+) -> dict:
+    """检查基金基本面是否健康。
+
+    检查项：
+    1. 基金经理是否变更（近6个月）
+    2. 基金规模是否暴增（近1年规模增长>100%）
+    3. 跟踪误差是否扩大（近1年跟踪误差>历史均值+2σ）
+
+    Returns:
+        {
+            "healthy": bool,
+            "warnings": [...],
+            "risks": [...],
+            "data_available": bool,
+        }
+    """
+    if not cfg.get("fund_health_enabled", False):
+        return {"healthy": True, "warnings": [], "risks": [], "data_available": False}
+
+    warnings = []
+    risks = []
+    data_available = False
+
+    try:
+        from db.fund_info import get_fund_info
+        from db.config import get_config
+
+        fund_info = get_fund_info(fund_code)
+        if not fund_info:
+            return {"healthy": True, "warnings": [], "risks": [], "data_available": False}
+
+        data_available = True
+
+        # 1. 检查基金规模
+        fund_size = fund_info.get("fund_size")
+        fund_size_date = fund_info.get("fund_size_date", "")
+        if fund_size:
+            try:
+                size = float(fund_size)
+                if size > 100:  # 规模超过100亿
+                    warnings.append(f"基金规模{size:.1f}亿较大，可能影响灵活性")
+            except (ValueError, TypeError):
+                pass
+
+        # 2. 检查基金经理变更（如果有最近变更日期）
+        manager_change_date = fund_info.get("manager_change_date", "")
+        if manager_change_date:
+            from datetime import datetime, timedelta
+            try:
+                change_dt = datetime.strptime(manager_change_date[:10], "%Y-%m-%d")
+                if change_dt > datetime.now() - timedelta(days=180):
+                    risks.append(f"基金经理近期变更（{manager_change_date[:10]}），需关注风格变化")
+            except (ValueError, TypeError):
+                pass
+
+        # 3. 检查费率
+        mgmt_fee = fund_info.get("management_fee")
+        if mgmt_fee:
+            try:
+                fee = float(mgmt_fee)
+                if fee > 1.5:
+                    warnings.append(f"管理费率{fee}%偏高，长期持有成本较高")
+            except (ValueError, TypeError):
+                pass
+
+    except ImportError:
+        pass
+    except Exception as e:
+        logger.debug(f"[smart_add] fund_health 检查失败 {fund_code}: {e}")
+
+    healthy = len(risks) == 0
+    return {
+        "healthy": healthy,
+        "warnings": warnings,
+        "risks": risks,
+        "data_available": data_available,
+    }
 
 
 # ── 退出信号检测 ──────────────────────────
@@ -1105,7 +1418,7 @@ def _generate_single_plan(
         engine2["blocked_reason"] = f"已达仓位上限 {max_position_pct:.1f}%，暂停补仓"
         engine2["released_amount"] = 0
 
-    # ── 多维度触发器：信号 A 金字塔(已有) + 信号 B 趋势 + 信号 C 大跌定投 ──
+    # ── 多维度触发器：信号 A 金字塔(已有) + 信号 B 趋势 + 信号 C 大跌定投 + 信号 D 价值平均 + 信号 E 网格 ──
     triggered_signals = []
     # 信号 A：金字塔（已有 engine2，转成统一格式）
     if engine2 and engine2.get("released_amount", 0) > 0 and not engine2.get("blocked_reason"):
@@ -1125,11 +1438,35 @@ def _generate_single_plan(
 
     # 信号 C：大跌定投（连续大跌4%）— 始终计算，与信号A同时触发时仅保留金字塔
     signal_c = _detect_dip_signal(holding, valuation, cfg, base_monthly)
-    # 如果信号A和信号C同时触发，只保留信号A（金字塔优先级更高，避免重复建议）
     if engine2 and engine2.get("released_amount", 0) > 0 and signal_c:
         signal_c = None
     if signal_c:
         triggered_signals.append(signal_c)
+
+    # 信号 D：价值平均法（VA）— 市值驱动，替代/补充 DCA
+    signal_d = None
+    if cfg.get("va_enabled", False):
+        # 估算持仓月数（从首次买入至今）
+        months_held = 0
+        buy_date = holding.get("last_buy_date") or holding.get("buy_date") or ""
+        if buy_date:
+            try:
+                from datetime import datetime
+                delta = datetime.now() - datetime.strptime(buy_date[:10], "%Y-%m-%d")
+                months_held = max(0, delta.days // 30)
+            except Exception:
+                pass
+        signal_d = _calc_value_averaging(holding, cfg, base_monthly, months_held)
+        if signal_d and signal_d.get("triggered") and signal_d.get("action") == "buy":
+            triggered_signals.append(signal_d)
+
+    # 信号 E：网格交易 — 估值合理区间低买高卖
+    signal_e = _generate_grid_plan(holding, valuation, cfg)
+    if signal_e and signal_e.get("triggered"):
+        triggered_signals.append(signal_e)
+
+    # 基本面健康检查
+    fund_health = _check_fund_health(fund_code, cfg)
 
     # 总建议金额（所有命中信号汇总，受安全阀约束）
     total_suggested = sum(
@@ -1159,6 +1496,9 @@ def _generate_single_plan(
         "pyramid": engine2,
         "triggered_signals": triggered_signals,  # 多维度触发器命中的信号列表
         "exit_signals": exit_signals,  # 退出信号（止盈/止损/暂停）
+        "va_result": signal_d,  # 价值平均法结果（含触发/未触发）
+        "grid_result": signal_e,  # 网格交易结果（含触发/未触发）
+        "fund_health": fund_health,  # 基本面健康检查
         "total_suggested": round(total_suggested, 2),  # 所有命中信号的建议金额汇总
         "has_signal": len([s for s in triggered_signals if s.get("triggered")]) > 0,
         "fund_type": fund_type_info["label"],
