@@ -676,9 +676,16 @@ async def replay_conversation(conv_id: int, channel_id: str, last_seq: int = 0, 
             yield _sse_event("replay_end", {"status": status})
             return
 
-        # 4. running 但心跳超时 → 标记 aborted
+        # 4. running 但心跳超时 → 标记 aborted + 同步恢复 message
         if is_stream_heartbeat_stale(channel_id, threshold_sec=15):
             mark_stream_channel_aborted(channel_id, "heartbeat timeout")
+            # 立即恢复占位符 message，避免长期悬挂（不依赖后端重启）
+            try:
+                from services.conv_recovery import recover_message
+                if channel.get("message_id"):
+                    recover_message(channel["message_id"])
+            except Exception as e:
+                logger.warning(f"[replay] recover_message 失败: {e}")
             yield _sse_event("error", {"message": "任务中断，请点击重试"})
             yield _sse_event("replay_end", {"status": "aborted"})
             return
@@ -705,6 +712,13 @@ async def replay_conversation(conv_id: int, channel_id: str, last_seq: int = 0, 
             # 心跳超时检测
             if is_stream_heartbeat_stale(channel_id, threshold_sec=15):
                 mark_stream_channel_aborted(channel_id, "heartbeat timeout")
+                # 立即恢复占位符 message
+                try:
+                    from services.conv_recovery import recover_message
+                    if channel.get("message_id"):
+                        recover_message(channel["message_id"])
+                except Exception as e:
+                    logger.warning(f"[replay] recover_message 失败: {e}")
                 yield _sse_event("error", {"message": "任务中断，请点击重试"})
                 yield _sse_event("replay_end", {"status": "aborted"})
                 return
