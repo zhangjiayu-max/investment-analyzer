@@ -1946,7 +1946,6 @@ def clarify_requirement(query: str, trace_id: str = "") -> dict:
         if quota_enabled and complexity in ("complex", "medium") and specialists:
             quota_min = 3 if complexity == "complex" else 2
             try:
-                from db.config import get_config_int
                 quota_min = get_config_int(
                     f"agent.complexity_min_specialists_{complexity}", quota_min)
             except Exception:
@@ -1990,17 +1989,31 @@ def clarify_requirement(query: str, trace_id: str = "") -> dict:
 
     except Exception as e:
         logger.warning(f"LLM 澄清失败,回退到关键词匹配: {e}")
-        # 回退到关键词匹配
-        complexity = detect_complexity_by_keywords(query)
-        specialists = route_to_specialists_by_keywords(query, complexity)
+        # 回退到 SmartRouter 规则路由（比 detect_complexity_by_keywords 更准确，
+        # 后者过于保守会把含"做空/大跌"的问题判为 simple，导致专家被截断到 1 个）
+        try:
+            from agent.core.router import SmartRouter
+            _router = SmartRouter()
+            _route_result = _router.route(query)
+            specialists = _route_result.get("specialists", [])
+            complexity = _route_result.get("complexity", "medium")
+            reason = f"SmartRouter规则回退(LLM澄清失败): {_route_result.get('reason','')}"
+        except Exception as _re:
+            logger.warning(f"SmartRouter 回退也失败: {_re}，使用基础关键词匹配")
+            complexity = detect_complexity_by_keywords(query)
+            specialists = route_to_specialists_by_keywords(query, complexity)
+            reason = "基础关键词匹配(LLM+SmartRouter均失败)"
+        if not specialists:
+            specialists = ["valuation_expert"]
+            complexity = "simple"
         return {
             "complexity": complexity,
             "specialists": specialists,
-            "reason": "关键词匹配(LLM澄清失败)",
+            "reason": reason,
             "refined_query": query,
             "confidence": 0.5,
             "scenario_type": detect_scenario_type(query),
-            "classification_method": "keywords_fallback",
+            "classification_method": "smart_router_fallback",
             "specialist_tasks": {},
             "need_cross_review": False,
         }
