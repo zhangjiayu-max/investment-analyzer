@@ -2311,14 +2311,18 @@ def build_rag_context_with_details(query: str, content_types: list[str] = None, 
     if all_results and not _is_non_chinese_query(query):
         before_rel = len(all_results)
         kept = []
+        # 记录相关性排序后的结果（用于防退化时取 top-N）
+        scored_results = []
         for r in all_results:
             # 直接注入的估值数据已通过指数名严格匹配，跳过
             if r.get("_direct_inject"):
                 r["_relevance"] = 1.0
                 kept.append(r)
+                scored_results.append((1.0, r))
                 continue
             score, _ = _relevance_score(query, r)
             r["_relevance"] = score
+            scored_results.append((score, r))
             if score >= RELEVANCE_MIN:
                 kept.append(r)
             else:
@@ -2326,7 +2330,18 @@ def build_rag_context_with_details(query: str, content_types: list[str] = None, 
                     f"相关性过滤: 移除 '{(r.get('title') or '')[:30]}' "
                     f"(score={score:.2f}, ct={r.get('content_type')})"
                 )
-        # 防退化：过滤后为空则保留原结果（避免空上下文）
+        # 防退化：过滤后为空时只保留 top-3（按相关性降序），避免低质结果占满上下文
+        # 案例 conv 122：全部 10 条相关性都为 0.083（"指数" 单词命中），
+        # 旧逻辑保留全部导致"英国富时100"等不相关海外指数进入上下文
+        # 排序：相关性降序 → RRF _score 降序（同等相关性时优先高分结果）
+        if not kept and scored_results:
+            scored_results.sort(key=lambda x: (x[0], x[1].get("_score", 0)), reverse=True)
+            _fallback_n = min(3, len(scored_results))
+            kept = [r for _, r in scored_results[:_fallback_n]]
+            logger.warning(
+                f"相关性过滤防退化: 所有 {before_rel} 条结果均低于阈值 {RELEVANCE_MIN}，"
+                f"仅保留 top-{_fallback_n} (最高相关性={scored_results[0][0]:.3f})"
+            )
         if kept:
             all_results = kept
         if len(all_results) < before_rel:

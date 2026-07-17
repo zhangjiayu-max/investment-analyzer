@@ -13,24 +13,40 @@ _online_cache: dict[str, dict] = {}  # key: f"{index_code}:{metric_type}"
 
 
 def _normalize_percentile(val) -> float | None:
-    """P2-4.1: 统一百分位字段为 float 类型。
+    """P2-4.1: 统一百分位字段为 float 类型（0-100 区间）。
 
-    历史数据存在三种格式：float（13.89）、字符串（"99.22%"）、None，
-    影响评分逻辑（如 dca_add 的估值维度比较）。
+    历史数据存在多种格式，影响评分逻辑（如 dca_add 的估值维度比较）。
+    案例 conv 122：akshare 返回 0.7231（0-1 小数），图片解析返回 "84.71%"（0-100），
+    格式不一致导致专家看到"百分位 0.7231%"和"百分位 93%"两个矛盾数据。
 
     规则：
       - None / 空字符串 → None
-      - int / float → float(val)
-      - 字符串 "13.89%" / "13.89" → 13.89
+      - int / float：
+        - 0 < val < 1 → 视为小数表示，乘以 100 转百分比（0.7231 → 72.31）
+        - 1 ≤ val ≤ 100 → 已是百分比，原样返回
+        - val > 100 → 异常值，截断到 100
+        - val < 0 → 异常值，截断到 0
+      - 字符串 "13.89%" / "13.89" → 13.89（按上述 float 规则处理）
       - 无法解析 → None
     """
     if val is None or val == "":
         return None
+
+    def _to_pct(v: float) -> float:
+        """归一化到 0-100 区间。"""
+        if 0 < v < 1:
+            return round(v * 100, 4)
+        if v > 100:
+            return 100.0
+        if v < 0:
+            return 0.0
+        return v
+
     if isinstance(val, (int, float)):
-        return float(val)
+        return _to_pct(float(val))
     if isinstance(val, str):
         try:
-            return float(val.replace('%', '').strip())
+            return _to_pct(float(val.replace('%', '').strip()))
         except ValueError:
             return None
     return None
