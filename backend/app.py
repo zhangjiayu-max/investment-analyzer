@@ -302,7 +302,13 @@ async def startup():
 
     # 恢复因重启中断的对话（专家已完成但综合阶段未执行）
     try:
-        from services.conv_recovery import recover_interrupted_conversations
+        from services.conv_recovery import recover_interrupted_conversations, auto_retry_process_restart_interrupted
+        # 1. 先自动重试 process restart 中断（专家未执行的），后台线程执行不阻塞启动
+        #    必须在 recover_interrupted_conversations 之前执行，否则会被标记为 failed
+        retry_stats = auto_retry_process_restart_interrupted()
+        if retry_stats["triggered"]:
+            logging.info(f"自动重试 process restart 中断: {retry_stats}")
+        # 2. 再恢复其他中断（有专家结果的合并写回，无专家的标记中断）
         stats = recover_interrupted_conversations()
         if stats["recovered"] or stats["marked_interrupted"]:
             logging.info(f"中断对话恢复: {stats}")
