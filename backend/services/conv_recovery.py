@@ -52,6 +52,29 @@ def _merge_runs_to_answer(runs) -> str | None:
     return _INTERRUPTED_NOTICE + "\n".join(parts)
 
 
+def _apply_recovery(conn, msg_id: int, content: str) -> None:
+    """统一恢复写回：同时更新 content 和 metadata.execution_status='failed'。
+
+    关键：必须更新 metadata.execution_status，否则前端看到 streaming 状态
+    会显示"后台执行中"+"恢复连接"按钮，但任务已死，点击无效。
+    改为 failed 后前端显示"执行失败"+"重新生成"按钮（走 retry-message 接口，有效）。
+    """
+    import json as _json
+    row = conn.execute("SELECT metadata FROM messages WHERE id = ?", (msg_id,)).fetchone()
+    meta = {}
+    if row and row["metadata"]:
+        try:
+            meta = _json.loads(row["metadata"])
+        except Exception:
+            meta = {}
+    meta["execution_status"] = "failed"
+    meta["recovered"] = True  # 标记为恢复产生，便于排查
+    conn.execute(
+        "UPDATE messages SET content = ?, metadata = ? WHERE id = ?",
+        (content, _json.dumps(meta, ensure_ascii=False), msg_id),
+    )
+
+
 def recover_message(message_id: int) -> str:
     """恢复单条中断消息。
 
@@ -90,18 +113,12 @@ def recover_message(message_id: int) -> str:
         if runs:
             full_answer = _merge_runs_to_answer(runs)
             if full_answer:
-                conn.execute(
-                    "UPDATE messages SET content = ? WHERE id = ?",
-                    (full_answer, msg_id),
-                )
+                _apply_recovery(conn, msg_id, full_answer)
                 conn.commit()
                 logger.info(f"[conv_recovery] msg {msg_id} (conv {conv_id}) 心跳超时恢复（合并 {len(runs)} 个专家结果）")
                 return full_answer
         # 无专家结果 → 标记为中断
-        conn.execute(
-            "UPDATE messages SET content = ? WHERE id = ?",
-            (_NO_RESULT_NOTICE, msg_id),
-        )
+        _apply_recovery(conn, msg_id, _NO_RESULT_NOTICE)
         conn.commit()
         logger.info(f"[conv_recovery] msg {msg_id} (conv {conv_id}) 心跳超时，无专家结果，标记为中断")
         return _NO_RESULT_NOTICE
@@ -154,20 +171,14 @@ def recover_interrupted_conversations() -> dict:
                 # 有专家结果 → 合并写回
                 full_answer = _merge_runs_to_answer(runs)
                 if full_answer:
-                    conn.execute(
-                        "UPDATE messages SET content = ? WHERE id = ?",
-                        (full_answer, msg_id),
-                    )
+                    _apply_recovery(conn, msg_id, full_answer)
                     stats["recovered"] += 1
                     logger.info(f"[conv_recovery] msg {msg_id} (conv {conv_id}) 已恢复（合并 {len(runs)} 个专家结果）")
                 else:
                     stats["skipped"] += 1
             else:
                 # 无专家结果 → 标记为中断
-                conn.execute(
-                    "UPDATE messages SET content = ? WHERE id = ?",
-                    (_NO_RESULT_NOTICE, msg_id),
-                )
+                _apply_recovery(conn, msg_id, _NO_RESULT_NOTICE)
                 stats["marked_interrupted"] += 1
                 logger.info(f"[conv_recovery] msg {msg_id} (conv {conv_id}) 无专家结果，标记为中断")
 

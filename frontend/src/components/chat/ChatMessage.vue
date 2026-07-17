@@ -516,7 +516,6 @@ const tradeSuggestions = computed(() => {
         <template v-else-if="msg.execution_status === 'timeout'"><Icon name="alarm-clock" size="13" class="inline-icon" /> 执行超时</template>
         <template v-else-if="msg.execution_status === 'completed' && isErrorResponse(msg)"><Icon name="error" size="13" class="inline-icon" /> 分析失败（未产出有效内容）</template>
         <button v-if="['failed', 'cancelled', 'timeout'].includes(msg.execution_status) || (msg.execution_status === 'completed' && isErrorResponse(msg))" class="btn-retry btn-ai-action" @click="emit('regenerate', msg)" title="重新生成"><Icon name="refresh" size="12" class="inline-icon" /> 重新生成<span class="ai-agent-tooltip">投资分析助手</span></button>
-        <button v-else-if="index > 0" class="btn-retry btn-ai-action" @click="emit('retry', msg)" title="重试"><Icon name="refresh" size="12" class="inline-icon" /> 重试<span class="ai-agent-tooltip">投资分析助手</span></button>
       </div>
       <!-- 专家分析展示 -->
       <div v-if="msg.specialist_results && msg.specialist_results.length" class="specialists-container">
@@ -545,7 +544,7 @@ const tradeSuggestions = computed(() => {
             </div>
             <div class="specialist-analysis markdown-body" v-html="renderMarkdown(s.analysis || '（暂无分析内容）')"></div>
             <div class="specialist-actions">
-              <button v-if="isSpecialistFailed(s)" class="btn-retry-specialist" @click.stop="emit('retry', msg)" title="重新生成此专家">
+              <button v-if="isSpecialistFailed(s)" class="btn-retry-specialist" @click.stop="emit('regenerate', msg)" title="重新生成">
                 <Icon name="refresh" size="12" class="inline-icon" /> 重新生成
               </button>
               <button class="btn-copy-specialist" @click.stop="copySpecialistContent(s, $event)" title="复制分析内容">
