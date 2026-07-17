@@ -2628,6 +2628,8 @@ export const smartAddAPI = {
   trackHypothetical: () => api.get('/smart-add/hypothetical/track').then(r => r.data),
   /** 删除假设交易 */
   deleteHypothetical: (txId) => api.delete(`/smart-add/hypothetical/${txId}`).then(r => r.data),
+  /** 策略对比模拟器：对比不补仓/DCA/金字塔/VA */
+  simulate: (data) => api.post('/smart-add/simulate', data).then(r => r.data),
 }
 
 // ── 交易计划 API ──────────────────────────────────────

@@ -680,6 +680,248 @@ def _detect_exit_signals(
     return exit_signals
 
 
+# ── 组合再平衡视角 ──────────────────────────
+
+def _calc_rebalance_suggestion(holdings: list[dict], total_assets: float) -> list[dict]:
+    """计算组合再平衡建议。
+
+    原理：对比每标的当前仓位与目标仓位（等权或按配置），偏离>5%标记为需再平衡。
+
+    Returns:
+        list of rebalance items, 每个:
+        {
+            "fund_code": str,
+            "fund_name": str,
+            "current_pct": float,
+            "target_pct": float,
+            "deviation": float,      # 正=超配，负=低配
+            "action": "reduce" | "add" | "hold",
+            "suggested_amount": float,  # 建议调整金额
+        }
+    """
+    if not holdings or total_assets <= 0:
+        return []
+
+    n = len(holdings)
+    if n == 0:
+        return []
+
+    # 等权目标配置
+    target_pct = 100 / n
+
+    rebalance_items = []
+    for h in holdings:
+        current_value = h.get("current_value") or 0
+        current_pct = round(current_value / total_assets * 100, 2) if total_assets else 0
+        deviation = round(current_pct - target_pct, 2)
+        target_value = round(total_assets * target_pct / 100, 2)
+
+        if abs(deviation) < 5:
+            action = "hold"
+            suggested_amount = 0
+        elif deviation > 0:
+            action = "reduce"
+            suggested_amount = round(current_value - target_value, 2)
+        else:
+            action = "add"
+            suggested_amount = round(target_value - current_value, 2)
+
+        rebalance_items.append({
+            "fund_code": h.get("fund_code", ""),
+            "fund_name": h.get("fund_name", ""),
+            "current_pct": current_pct,
+            "target_pct": round(target_pct, 2),
+            "deviation": deviation,
+            "action": action,
+            "suggested_amount": suggested_amount,
+        })
+
+    return rebalance_items
+
+
+# ── 策略对比模拟器 ──────────────────────────
+
+def simulate_strategies(
+    fund_code: str,
+    monthly_drop_pct: float,
+    months: int = 6,
+    user_id: str = "default",
+) -> dict:
+    """对比不同补仓策略在持续下跌场景下的效果。
+
+    策略对比：
+    1. 不补仓（躺平）
+    2. 等额定投（DCA）
+    3. 金字塔补仓
+    4. 价值平均法（VA）
+
+    Args:
+        fund_code: 基金代码
+        monthly_drop_pct: 每月下跌百分比（如 -5 表示每月跌5%）
+        months: 模拟月数（默认6个月）
+        user_id: 用户ID
+
+    Returns:
+        {
+            "fund_code": str,
+            "fund_name": str,
+            "scenario": {...},
+            "strategies": [
+                {"name": "不补仓", "final_cost": float, "final_value": float, "profit_rate": float, "total_invested": float},
+                ...
+            ],
+            "best_strategy": "xxx",
+        }
+    """
+    from db.portfolio import get_holding_by_fund, get_portfolio_summary
+    from db.config import get_config_float, get_config
+
+    holding = get_holding_by_fund(fund_code, user_id=user_id)
+    if not holding:
+        return {"error": f"未找到持仓 {fund_code}"}
+
+    current_price = holding.get("current_price") or 0
+    shares = holding.get("shares") or 0
+    total_cost = holding.get("total_cost") or 0
+
+    # 获取总资产
+    summary = get_portfolio_summary(user_id=user_id)
+    total_assets = summary.get("total_assets", 0) if summary else 0
+
+    if not current_price or not shares:
+        return {"error": "持仓数据不完整"}
+
+    # 场景参数
+    base_monthly = total_assets * get_config_float("smart_add.base_dca_pct", 4) / 100 / 12
+    tiers_str = get_config("smart_add.pyramid_tiers", "10:15:5,20:25:10,30:30:15,40:20:20,50:10:25")
+    tiers = []
+    for t in tiers_str.split(","):
+        parts = t.strip().split(":")
+        if len(parts) == 3:
+            tiers.append((float(parts[0]), float(parts[1]), float(parts[2])))
+
+    # 模拟价格路径
+    prices = [current_price]
+    for i in range(1, months + 1):
+        prices.append(round(prices[-1] * (1 + monthly_drop_pct / 100), 4))
+
+    strategies = []
+
+    # 策略1：不补仓
+    final_price = prices[-1]
+    final_value = shares * final_price
+    strategies.append({
+        "name": "不补仓",
+        "icon": "minus-circle",
+        "total_invested": total_cost,
+        "final_shares": round(shares, 2),
+        "final_cost": round(total_cost / shares, 4) if shares else 0,
+        "final_value": round(final_value, 2),
+        "profit_rate": round((final_value - total_cost) / total_cost * 100, 2) if total_cost else 0,
+        "description": "不操作，观望",
+    })
+
+    # 策略2：等额定投（每月固定金额）
+    dca_shares = shares
+    dca_invested = total_cost
+    for i in range(1, months + 1):
+        buy_price = prices[i]
+        dca_shares += base_monthly / buy_price
+        dca_invested += base_monthly
+    dca_value = dca_shares * final_price
+    dca_cost = dca_invested / dca_shares if dca_shares else 0
+    strategies.append({
+        "name": "等额定投",
+        "icon": "repeat",
+        "total_invested": round(dca_invested, 2),
+        "final_shares": round(dca_shares, 2),
+        "final_cost": round(dca_cost, 4),
+        "final_value": round(dca_value, 2),
+        "profit_rate": round((dca_value - dca_invested) / dca_invested * 100, 2) if dca_invested else 0,
+        "description": f"每月固定投入¥{base_monthly:,.0f}",
+    })
+
+    # 策略3：金字塔补仓
+    pyr_shares = shares
+    pyr_invested = total_cost
+    last_buy_price = current_price
+    for i in range(1, months + 1):
+        buy_price = prices[i]
+        loss_pct = (buy_price - last_buy_price) / last_buy_price * 100
+        # 检查是否触发金字塔档位
+        triggered = False
+        for loss_threshold, release_pct, add_ratio in tiers:
+            if loss_pct <= -loss_threshold:
+                # 触发该档位
+                position_value = pyr_shares * buy_price
+                add_amount = position_value * add_ratio / 100
+                pyr_shares += add_amount / buy_price
+                pyr_invested += add_amount
+                triggered = True
+                break
+        if not triggered:
+            # 未触发金字塔，按等额定投
+            pyr_shares += base_monthly / buy_price
+            pyr_invested += base_monthly
+    pyr_value = pyr_shares * final_price
+    pyr_cost = pyr_invested / pyr_shares if pyr_shares else 0
+    strategies.append({
+        "name": "金字塔补仓",
+        "icon": "layers",
+        "total_invested": round(pyr_invested, 2),
+        "final_shares": round(pyr_shares, 2),
+        "final_cost": round(pyr_cost, 4),
+        "final_value": round(pyr_value, 2),
+        "profit_rate": round((pyr_value - pyr_invested) / pyr_invested * 100, 2) if pyr_invested else 0,
+        "description": f"按档位{tiers[0][0]:.0f}%起触发的金字塔补仓",
+    })
+
+    # 策略4：价值平均法
+    va_shares = shares
+    va_invested = total_cost
+    target_monthly = total_assets * get_config_float("smart_add.va_target_growth_pct", 0.33) / 100
+    target_value = total_cost  # 初始目标市值 = 总成本
+    for i in range(1, months + 1):
+        buy_price = prices[i]
+        target_value += target_monthly
+        actual_value = va_shares * buy_price
+        required = target_value - actual_value
+        if required > 0:
+            max_monthly = target_monthly * get_config_float("smart_add.va_max_monthly_mult", 3.0)
+            invest = min(required, max_monthly)
+            va_shares += invest / buy_price
+            va_invested += invest
+    va_value = va_shares * final_price
+    va_cost = va_invested / va_shares if va_shares else 0
+    strategies.append({
+        "name": "价值平均法",
+        "icon": "trending-up",
+        "total_invested": round(va_invested, 2),
+        "final_shares": round(va_shares, 2),
+        "final_cost": round(va_cost, 4),
+        "final_value": round(va_value, 2),
+        "profit_rate": round((va_value - va_invested) / va_invested * 100, 2) if va_invested else 0,
+        "description": f"市值驱动，目标月增长¥{target_monthly:,.0f}",
+    })
+
+    # 找最佳策略（最高最终价值）
+    best = max(strategies, key=lambda s: s["final_value"])
+    best["is_best"] = True
+
+    return {
+        "fund_code": fund_code,
+        "fund_name": holding.get("fund_name", ""),
+        "scenario": {
+            "current_price": current_price,
+            "monthly_drop_pct": monthly_drop_pct,
+            "months": months,
+            "price_path": prices,
+        },
+        "strategies": strategies,
+        "best_strategy": best["name"],
+    }
+
+
 # ── 主入口 ──────────────────────────────────
 
 def generate_smart_add_plan(user_id: str = "default") -> dict:
@@ -786,6 +1028,8 @@ def generate_smart_add_plan(user_id: str = "default") -> dict:
             }
             for p in deep_loss_plans
         ],
+        # 组合再平衡建议（2026-07-17 新增）
+        "rebalance_suggestions": _calc_rebalance_suggestion(holdings, total_assets),
     }
 
     # ── 反事实决策验证：建议快照 + 假设交易自动落库 ──

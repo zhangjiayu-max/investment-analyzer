@@ -69,6 +69,19 @@ async def preview_scenario(req: PreviewRequest):
     return preview_add_scenario(req.fund_code, req.additional_drop_pct, req.add_amount)
 
 
+class SimulateRequest(BaseModel):
+    fund_code: str
+    monthly_drop_pct: float = -5.0
+    months: int = 6
+
+
+@router.post("/api/smart-add/simulate")
+async def simulate_strategies_api(req: SimulateRequest):
+    """策略对比模拟器：对比不补仓/DCA/金字塔/VA在持续下跌场景下的效果。"""
+    from services.smart_add_planner import simulate_strategies
+    return simulate_strategies(req.fund_code, req.monthly_drop_pct, req.months)
+
+
 # ── 反事实决策验证：假设操作跟踪 ──
 
 

@@ -20,6 +20,7 @@ const cfg = ref(null)             // 配置面板数据
 
 // 折叠面板
 const showSimulator = ref(false)
+const showStratSim = ref(false)
 const showConfig = ref(false)
 const showCounterfactual = ref(false)
 
@@ -35,6 +36,14 @@ const simAmount = ref(5000)
 const simResult = ref(null)
 const simLoading = ref(false)
 const simError = ref('')
+
+// 策略对比模拟器（新增）
+const simStratLoading = ref(false)
+const simStratResult = ref(null)
+const simStratCode = ref('')
+const simStratDrop = ref(-5)
+const simStratMonths = ref(6)
+const simStratError = ref('')
 
 // 配置表单
 const cfgForm = ref({
@@ -58,6 +67,10 @@ const cfgSaved = ref(false)
 const summary = computed(() => plan.value?.summary || {})
 const portfolioView = computed(() => plan.value?.portfolio_view || {})
 const priorityList = computed(() => portfolioView.value.priority_list || [])
+const rebalanceItems = computed(() => {
+  const items = portfolioView.value.rebalance_suggestions || []
+  return items.filter(i => i.action !== 'hold')
+})
 const allPlans = computed(() => plan.value?.plans || [])
 // 有信号的标的 = 金字塔触发 OR 趋势加仓 OR 大跌定投（多维度触发器命中任一）
 const deepPlans = computed(() =>
@@ -208,6 +221,30 @@ async function runSim() {
     simError.value = e?.message || '模拟失败'
   } finally {
     simLoading.value = false
+  }
+}
+
+// 策略对比模拟器
+async function runSimulate() {
+  if (!simStratCode.value.trim()) {
+    simStratError.value = '请输入基金代码'
+    return
+  }
+  simStratLoading.value = true
+  simStratError.value = ''
+  simStratResult.value = null
+  try {
+    const data = await smartAdd.simulate({
+      fund_code: simStratCode.value.trim(),
+      monthly_drop_pct: Number(simStratDrop.value),
+      months: Number(simStratMonths.value),
+    })
+    if (data?.error) simStratError.value = data.error
+    else simStratResult.value = data
+  } catch (e) {
+    simStratError.value = e?.message || '模拟失败'
+  } finally {
+    simStratLoading.value = false
   }
 }
 
@@ -367,6 +404,49 @@ onMounted(() => {
               </tr>
             </tbody>
           </table>
+        </div>
+      </section>
+
+      <!-- ②.5 组合再平衡视角 -->
+      <section v-if="rebalanceItems.length" class="block">
+        <h3 class="block-title">
+          <Icon name="refresh-cw" size="16" />
+          <span>组合再平衡建议</span>
+          <span class="block-subtitle">偏离等权配置>5%的标的</span>
+        </h3>
+        <div class="rebalance-grid">
+          <div
+            v-for="item in rebalanceItems"
+            :key="item.fund_code"
+            :class="['rebalance-card', `rebalance-${item.action}`]"
+          >
+            <div class="rebalance-head">
+              <span class="rebalance-name">{{ item.fund_name }}</span>
+              <span :class="['rebalance-tag', `tag-${item.action}`]">
+                {{ { add: '加仓', reduce: '减仓', hold: '维持' }[item.action] }}
+              </span>
+            </div>
+            <div class="rebalance-body">
+              <div class="rebalance-row">
+                <span>当前仓位</span>
+                <span class="font-jet">{{ fmtSignedPct(item.current_pct) }}</span>
+              </div>
+              <div class="rebalance-row">
+                <span>目标仓位</span>
+                <span class="font-jet">{{ fmtSignedPct(item.target_pct) }}</span>
+              </div>
+              <div class="rebalance-row">
+                <span>偏离</span>
+                <span :class="item.deviation > 0 ? 'text-profit' : 'text-safe'" class="font-jet">
+                  {{ fmtSignedPct(item.deviation) }}
+                </span>
+              </div>
+              <div v-if="item.suggested_amount > 0" class="rebalance-row rebalance-amount">
+                <span>建议调整</span>
+                <span class="font-jet">¥{{ fmtMoney(item.suggested_amount) }}</span>
+              </div>
+            </div>
+          </div>
         </div>
       </section>
 
@@ -749,6 +829,66 @@ onMounted(() => {
               <div class="sr-item">
                 <span class="sr-label">补仓后份额</span>
                 <span class="sr-value font-jet">{{ fmtNum(simResult.new_shares) }}</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ④.5 策略对比模拟器（折叠） -->
+      <section class="block">
+        <button class="collapse-head" @click="showStratSim = !showStratSim">
+          <Icon name="bar-chart" size="16" />
+          <span>策略对比模拟器</span>
+          <span class="collapse-hint">{{ showStratSim ? '收起' : '展开' }}</span>
+        </button>
+        <div v-if="showStratSim" class="sim-panel">
+          <div class="sim-form">
+            <input v-model="simStratCode" placeholder="基金代码" class="sim-input" style="width:100px" />
+            <label class="sim-label">
+              月跌
+              <input v-model.number="simStratDrop" type="number" step="0.5" class="sim-input" style="width:70px" />%
+            </label>
+            <label class="sim-label">
+              月数
+              <input v-model.number="simStratMonths" type="number" min="1" max="24" class="sim-input" style="width:60px" />
+            </label>
+            <button class="btn btn-sm btn-primary" :disabled="simStratLoading" @click="runSimulate">
+              {{ simStratLoading ? '模拟中...' : '对比' }}
+            </button>
+          </div>
+          <div v-if="simStratError" class="sim-error">{{ simStratError }}</div>
+          <div v-if="simStratResult" class="sim-strategies">
+            <div
+              v-for="(s, idx) in simStratResult.strategies"
+              :key="idx"
+              :class="['sim-card', s.is_best ? 'sim-best' : '']"
+            >
+              <div class="sim-card-head">
+                <Icon :name="s.icon" size="14" />
+                <span>{{ s.name }}</span>
+                <span v-if="s.is_best" class="sim-best-badge">最优</span>
+              </div>
+              <div class="sim-card-body">
+                <div class="sim-row">
+                  <span>最终成本</span>
+                  <span class="font-jet">{{ fmtNum(s.final_cost, 4) }}</span>
+                </div>
+                <div class="sim-row">
+                  <span>最终市值</span>
+                  <span class="font-jet">¥{{ fmtMoney(s.final_value) }}</span>
+                </div>
+                <div class="sim-row">
+                  <span>总投入</span>
+                  <span class="font-jet">¥{{ fmtMoney(s.total_invested) }}</span>
+                </div>
+                <div class="sim-row">
+                  <span>盈亏率</span>
+                  <span class="font-jet" :style="{ color: profitColor(s.profit_rate) }">
+                    {{ fmtSignedPct(s.profit_rate) }}
+                  </span>
+                </div>
+                <div class="sim-desc">{{ s.description }}</div>
               </div>
             </div>
           </div>
@@ -1995,6 +2135,87 @@ onMounted(() => {
 .health-warn { background: rgba(245, 158, 11, 0.1); color: #b45309; }
 .health-danger { background: rgba(220, 38, 38, 0.08); color: #dc2626; }
 .health-clean { color: #059669; font-size: 0.74rem; }
+
+/* —— 组合再平衡 —— */
+.rebalance-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 0.5rem;
+}
+.rebalance-card {
+  padding: 0.5rem 0.6rem;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--color-border);
+  background: var(--color-bg-white);
+}
+.rebalance-card.rebalance-add { border-left: 3px solid #059669; }
+.rebalance-card.rebalance-reduce { border-left: 3px solid #dc2626; }
+.rebalance-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 0.35rem;
+}
+.rebalance-name { font-weight: 600; font-size: 0.8rem; }
+.rebalance-tag {
+  padding: 1px 6px;
+  border-radius: 3px;
+  font-size: 0.68rem;
+  font-weight: 700;
+}
+.tag-add { background: rgba(16, 185, 129, 0.15); color: #059669; }
+.tag-reduce { background: rgba(220, 38, 38, 0.12); color: #dc2626; }
+.tag-hold { background: var(--color-bg-muted); color: var(--color-text-secondary); }
+.rebalance-body { font-size: 0.74rem; }
+.rebalance-row {
+  display: flex;
+  justify-content: space-between;
+  padding: 1px 0;
+  color: var(--color-text-secondary);
+}
+.rebalance-amount { font-weight: 600; color: var(--color-text-primary); }
+
+/* —— 策略对比模拟器 —— */
+.sim-result {
+  margin-top: 0.4rem;
+  font-size: 0.78rem;
+}
+.sim-strategies {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 0.5rem;
+  margin-top: 0.5rem;
+}
+.sim-card {
+  padding: 0.5rem 0.6rem;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--color-border);
+  background: var(--color-bg-white);
+}
+.sim-card.sim-best {
+  border-color: #059669;
+  border-width: 2px;
+  background: rgba(16, 185, 129, 0.03);
+}
+.sim-card-head {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  margin-bottom: 0.35rem;
+  font-weight: 600;
+  font-size: 0.8rem;
+}
+.sim-best-badge {
+  font-size: 0.65rem;
+  padding: 0 4px;
+  border-radius: 3px;
+  background: rgba(16, 185, 129, 0.15);
+  color: #059669;
+  font-weight: 700;
+}
+.sim-card-body { font-size: 0.74rem; display: flex; flex-direction: column; gap: 0.2rem; }
+.sim-row { display: flex; justify-content: space-between; color: var(--color-text-secondary); }
+.sim-desc { font-size: 0.68rem; color: var(--color-text-tertiary); margin-top: 0.2rem; }
 
 @media (max-width: 768px) {
   .cf-summary-grid { grid-template-columns: repeat(2, 1fr); }

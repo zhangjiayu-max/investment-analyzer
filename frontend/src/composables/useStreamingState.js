@@ -212,10 +212,9 @@ function handleStreamEvent(convId, event, callbacks = {}) {
       break
 
     case 'clarification':
-      // 交互式澄清：通知 ChatView 展示澄清问题 + 选项 + 原因
+      // 交互式澄清：通知 ChatView 展示澄清问题 + 选项
       state.streamStatus = 'clarifying'
-      const clarifyReason = data.reason ? `（${data.reason}）` : ''
-      state.statusMessage = (data.question || '需要更多信息') + clarifyReason
+      state.statusMessage = data.question || '需要更多信息'
       if (callbacks.onClarification) {
         callbacks.onClarification(convId, data, state)
       }
@@ -249,14 +248,6 @@ function handleStreamEvent(convId, event, callbacks = {}) {
       // 标题更新事件，通知前端刷新对话列表
       if (callbacks.onTitleUpdated) {
         callbacks.onTitleUpdated(convId, data.title)
-      }
-      break
-
-    case 'alert':
-      // 主动提醒事件（防御性分支：当前 alert 通过 AlertBell 轮询获取，
-      // 此分支确保后端在对话流中附带推送 alert 时不会被静默丢弃）
-      if (callbacks.onAlert) {
-        callbacks.onAlert(data.alert || data, convId)
       }
       break
 
