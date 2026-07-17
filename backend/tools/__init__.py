@@ -802,6 +802,27 @@ TOOLS = [
             },
         },
     },
+    # P0 新增：实时指数行情工具（防止专家凭记忆编造点位/涨跌幅）
+    # 案例：conv 122 因 eastmoney_finance_data 返回"无数据"，专家凭训练数据
+    # 编造了"沪深300 4529.1点 下跌3.6%"和"上证指数3170点"，全是幻觉。
+    {
+        "type": "function",
+        "function": {
+            "name": "query_market_indices",
+            "description": "查询A股主要指数实时行情（点位/涨跌幅/成交额）。当用户提到指数点位、大盘涨跌、上证指数、深证成指、创业板、沪深300、中证500/1000、科创50、北证50时必须调用。严禁凭记忆或训练数据回答指数点位/涨跌幅——必须通过此工具获取真实数据。数据源：akshare stock_zh_index_spot_sina（新浪财经），失败时降级到东方财富。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "index_name": {
+                        "type": "string",
+                        "description": "可选，指定单个指数名称过滤（如 上证指数、沪深300、创业板指）。留空返回全部8大核心指数。",
+                        "default": "",
+                    },
+                },
+                "required": [],
+            },
+        },
+    },
     {
         "type": "function",
         "function": {
@@ -1227,6 +1248,9 @@ def _execute_tool_impl(name: str, arguments: dict, trace_id: str = "",
     # P0 新增：机构动向
     elif name == "query_institutional_flow":
         return _query_institutional_flow(arguments)
+    # P0 新增：实时指数行情（防幻觉）
+    elif name == "query_market_indices":
+        return _query_market_indices(arguments)
     # P0 新增：业绩报告查询
     elif name == "query_earnings_reports":
         return _query_earnings_reports(arguments)
@@ -3191,6 +3215,52 @@ def _query_institutional_flow(args: dict) -> str:
         return json.dumps(result, ensure_ascii=False)
     except Exception as e:
         logger.exception(f"query_institutional_flow 执行失败: {e}")
+        return json.dumps({"error": str(e)}, ensure_ascii=False)
+
+
+def _query_market_indices(args: dict) -> str:
+    """实时指数行情工具（防幻觉）。
+
+    复用 services.market.market_data.get_market_overview() 的指数获取逻辑，
+    但只返回指数部分（不含板块/涨跌家数），减少 token 占用。
+
+    数据源优先级：akshare stock_zh_index_spot_sina → 东方财富降级。
+    带 5 分钟缓存（复用 market_data 缓存机制）。
+    """
+    try:
+        from services.market.market_data import get_market_overview
+        import concurrent.futures
+
+        # get_market_overview 内部有多个 akshare 调用，可能阻塞。
+        # 用线程池 + 10s 超时保护，避免卡住专家编排。
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as _ex:
+            _future = _ex.submit(get_market_overview)
+            try:
+                overview = _future.result(timeout=10)
+            except concurrent.futures.TimeoutError:
+                logger.warning("[query_market_indices] get_market_overview 超时 10s")
+                return json.dumps({"error": "指数行情查询超时，请稍后重试或使用 web_search 查询"}, ensure_ascii=False)
+
+        indices = overview.get("indices", []) if overview else []
+        if not indices:
+            return json.dumps({"error": "暂未获取到指数行情数据，请使用 web_search 查询最新点位"}, ensure_ascii=False)
+
+        # 可选：按 index_name 过滤
+        index_name_filter = (args.get("index_name") or "").strip()
+        if index_name_filter:
+            filtered = [i for i in indices if index_name_filter in i.get("name", "")]
+            if filtered:
+                indices = filtered
+
+        result = {
+            "data_source": "akshare stock_zh_index_spot_sina / 东方财富降级",
+            "count": len(indices),
+            "indices": indices,
+            "note": "实时行情数据，含点位/涨跌幅/成交额。严禁凭记忆回答指数点位，必须以此工具结果为准。",
+        }
+        return json.dumps(result, ensure_ascii=False)
+    except Exception as e:
+        logger.exception(f"query_market_indices 执行失败: {e}")
         return json.dumps({"error": str(e)}, ensure_ascii=False)
 
 
