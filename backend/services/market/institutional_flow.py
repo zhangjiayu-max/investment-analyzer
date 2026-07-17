@@ -79,9 +79,19 @@ def get_margin_balance(days: int = 30) -> dict:
     try:
         # 上交所融资融券数据（按日期范围查询）
         from datetime import datetime, timedelta
+        import concurrent.futures
         end_date = datetime.now().strftime("%Y%m%d")
         start_date = (datetime.now() - timedelta(days=days + 30)).strftime("%Y%m%d")
-        df = ak.stock_margin_sse(start_date=start_date, end_date=end_date)
+        # akshare 内部用 requests 无 timeout，异常时会无限等待。
+        # 用 ThreadPoolExecutor + future.result(timeout=10) 强制超时，
+        # 避免卡住整个事件循环（案例：conv 122 卡 11 分钟）。
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as _ex:
+            _future = _ex.submit(ak.stock_margin_sse, start_date=start_date, end_date=end_date)
+            try:
+                df = _future.result(timeout=10)
+            except concurrent.futures.TimeoutError:
+                logger.warning("[get_margin_balance] ak.stock_margin_sse 超时 10s，返回空信号")
+                return _empty_margin_balance()
         if df is None or len(df) == 0:
             return _empty_margin_balance()
 

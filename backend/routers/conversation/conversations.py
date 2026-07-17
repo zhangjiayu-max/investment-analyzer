@@ -1092,14 +1092,26 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
             logger.debug(f"多跳检索跳过: {_mh_e}")
 
         scenario_type = clarification.get("scenario_type", "general_analysis")
-        unified_context = _build_unified_context_safe(
-            conv_id=conv_id,
-            query=effective_query,
-            scenario_type=scenario_type,
-            agent_id=conv.get("agent_id"),
-            rag_context=rag_context,
-            token_budget=get_config_int("llm.max_tokens_orchestrator", 6000),
-        )
+        # 用 asyncio.to_thread + wait_for 包装，避免 _build_unified_context_safe 内部
+        # 同步阻塞调用（如 ak.stock_margin_sse 无 timeout）卡死整个事件循环。
+        # 案例：conv 122 trace=7b36d072 因 akshare 卡住导致 11 分钟无任何日志，
+        # 连 alert_scanner（asyncio.create_task）都无法运行。
+        try:
+            unified_context = await asyncio.wait_for(
+                asyncio.to_thread(
+                    _build_unified_context_safe,
+                    conv_id=conv_id,
+                    query=effective_query,
+                    scenario_type=scenario_type,
+                    agent_id=conv.get("agent_id"),
+                    rag_context=rag_context,
+                    token_budget=get_config_int("llm.max_tokens_orchestrator", 6000),
+                ),
+                timeout=30.0,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(f"[trace:{trace_id}] _build_unified_context_safe 超时 30s（可能 akshare/外部接口卡住），跳过统一上下文")
+            unified_context = ""
 
         yield _sse_event("status", {"message": f"问题类型: {complexity} ({clarification.get('reason', '')})"})
 
