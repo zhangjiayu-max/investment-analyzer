@@ -520,7 +520,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "eastmoney_stock_diagnosis",
-            "description": "股票综合诊断（基本面、技术面、资金面、估值等多维度分析）。数据源：东方财富妙想AI。",
+            "description": "股票综合诊断（基本面、技术面、资金面、估值等多维度分析）。数据源：东方财富妙想AI。注意：结果为AI生成，可能存在幻觉，关键数据请交叉验证。",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -534,7 +534,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "eastmoney_fund_diagnosis",
-            "description": "基金诊断（经理、规模、业绩、持仓配置等分析）。数据源：东方财富妙想AI。",
+            "description": "基金诊断（经理、规模、业绩、持仓配置等分析）。数据源：东方财富妙想AI。注意：结果为AI生成，可能存在幻觉，关键数据请交叉验证。",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -548,7 +548,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "eastmoney_financial_assistant",
-            "description": "金融问答（通用金融分析能力）。数据源：东方财富妙想AI。",
+            "description": "金融问答（通用金融分析能力）。数据源：东方财富妙想AI。注意：结果为AI生成，可能存在幻觉，关键数据请交叉验证。",
             "parameters": {
                 "type": "object",
                 "properties": {

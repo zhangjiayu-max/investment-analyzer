@@ -17,8 +17,43 @@ from datetime import datetime, timedelta
 
 logger = logging.getLogger(__name__)
 
-# 无风险利率（10年期国债，默认2.5%）
-RISK_FREE_RATE = 0.025
+# 无风险利率默认值（10年期国债，仅在使用时动态更新失败时兜底）
+_DEFAULT_RISK_FREE_RATE = 0.025
+# 内存缓存：10年期国债收益率（1小时 TTL）
+_bond_yield_cache: dict = {"value": None, "ts": 0}
+
+
+def _get_risk_free_rate() -> float:
+    """获取10年期国债收益率作为无风险利率。
+
+    优先从 akshare 获取最新国债收益率，失败时用缓存，再失败用默认值 2.5%。
+    缓存 1 小时。
+    """
+    import time
+    now = time.time()
+    # 缓存 1 小时内有效
+    if _bond_yield_cache["value"] is not None and (now - _bond_yield_cache["ts"]) < 3600:
+        return _bond_yield_cache["value"]
+
+    try:
+        import akshare as ak
+        df = ak.bond_zh_us_rate(start_date="2025-01-01")
+        if df is not None and not df.empty:
+            # 取最近一行，中国10年期国债收益率
+            latest = df.iloc[-1]
+            # akshare 列名: 日期, 中国国债收益率10年, 美国国债收益率10年
+            for col in df.columns:
+                if "中国" in col and "10" in col:
+                    rate = float(latest[col])
+                    if rate > 0:
+                        rate_decimal = rate / 100.0
+                        _bond_yield_cache["value"] = rate_decimal
+                        _bond_yield_cache["ts"] = now
+                        return rate_decimal
+    except Exception as e:
+        logger.debug(f"获取国债收益率失败，使用默认值: {e}")
+
+    return _DEFAULT_RISK_FREE_RATE
 
 
 # ── L3：半凯利公式 ──────────────────────────
@@ -78,8 +113,10 @@ def calc_kelly_limit(fund_code: str, index_code: str = "", user_id: str = "defau
     sigma = math.sqrt(variance) * math.sqrt(252)
 
     # 凯利公式：f* = (μ - r) / σ²
+    # P3-1: 动态获取无风险利率（10年期国债收益率）
+    risk_free_rate = _get_risk_free_rate()
     if sigma > 0:
-        kelly_full = (mu - RISK_FREE_RATE) / (sigma ** 2)
+        kelly_full = (mu - risk_free_rate) / (sigma ** 2)
     else:
         kelly_full = 0.5
 
@@ -88,14 +125,14 @@ def calc_kelly_limit(fund_code: str, index_code: str = "", user_id: str = "defau
     kelly_half = kelly_full * 0.5
     limit_pct = min(kelly_half * 100, 60.0)
 
-    logger.debug(f"[kelly] {fund_code}/{index_code}: μ={mu:.4f} σ={sigma:.4f} f*={kelly_full:.3f} 半凯利={kelly_half:.3f}")
+    logger.debug(f"[kelly] {fund_code}/{index_code}: μ={mu:.4f} σ={sigma:.4f} r={risk_free_rate:.4f} f*={kelly_full:.3f} 半凯利={kelly_half:.3f}")
 
     return {
         "kelly_full": round(kelly_full, 4),
         "kelly_half": round(kelly_half, 4),
         "mu": round(mu, 4),
         "sigma": round(sigma, 4),
-        "risk_free_rate": RISK_FREE_RATE,
+        "risk_free_rate": round(risk_free_rate, 4),
         "limit_pct": round(limit_pct, 2),
         "sample_days": len(daily_returns),
         "data_source": data_source,
@@ -108,7 +145,7 @@ def _default_kelly_result(sample_days: int) -> dict:
         "kelly_half": 0.25,
         "mu": 0.0,
         "sigma": 0.0,
-        "risk_free_rate": RISK_FREE_RATE,
+        "risk_free_rate": _get_risk_free_rate(),
         "limit_pct": 25.0,
         "sample_days": sample_days,
         "data_source": "default",

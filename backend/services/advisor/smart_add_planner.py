@@ -1471,6 +1471,17 @@ def _generate_single_plan(
     _profit_rate_raw = holding.get("profit_rate")
     profit_rate = _profit_rate_raw if _profit_rate_raw is not None else 0
     _price_stale = holding.get("current_price") is None  # 净值为空标记数据过期
+    # P3-5: 检查 price_updated_at 是否过期（超过3天标记数据陈旧）
+    if not _price_stale:
+        price_updated = holding.get("price_updated_at", "")
+        if price_updated:
+            try:
+                from datetime import datetime as _dt
+                update_dt = _dt.fromisoformat(price_updated)
+                if (_dt.now() - update_dt).days > 3:
+                    _price_stale = True
+            except Exception:
+                pass
     current_value = holding.get("current_value") or 0
     total_cost = holding.get("total_cost") or 0
     shares = holding.get("shares") or 0
@@ -1769,7 +1780,8 @@ def _generate_single_plan(
             "kelly_limit": kelly["limit_pct"],
             "type_hard_cap": type_strategy["hard_cap_pct"],
             "kelly_warning": kelly_warning,
-            "data_warning": "持仓净值数据缺失，盈亏可能不准" if _price_stale else "",
+            "data_warning": ("持仓净值数据缺失或过期（>3天），盈亏可能不准" if _price_stale
+                             else ""),
             "reason": "" if can_add else f"已达配置上限 {max_position_pct:.1f}%（凯利{kelly['limit_pct']:.0f}%/类型{type_strategy['hard_cap_pct']:.0f}%）",
         },
     }

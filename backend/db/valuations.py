@@ -589,6 +589,8 @@ def get_best_valuation(
                     if pb_days_old <= 7:
                         detailed["percentile"] = pb_data["percentile"]
                         detailed["percentile_source"] = f"PB替代(PE过期{detailed['days_old']}天)"
+                        # P3-6: 周期股 PE/PB 可能反向，标注警告
+                        detailed["pb_substitute_warning"] = "PE过期使用PB替代，周期股PE/PB可能反向，注意估值判断偏差"
                         detailed["fallback_pb_value"] = pb_data.get("current_value")
                         detailed["fallback_pb_percentile"] = pb_data.get("percentile")
                         logger.info(

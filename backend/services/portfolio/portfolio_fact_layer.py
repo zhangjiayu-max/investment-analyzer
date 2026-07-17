@@ -191,9 +191,9 @@ def _build_recent_analyses() -> list:
             conclusion = ""
             try:
                 result_text = r.get("result_data", "") or ""
-                # 取前 200 字符作为结论摘要
+                # P3-4: 前 200 字符截断关键结论，提升到 500 字符
                 if result_text:
-                    conclusion = result_text[:200].strip()
+                    conclusion = result_text[:500].strip()
             except Exception:
                 pass
 
@@ -265,7 +265,7 @@ def _build_market_state() -> dict:
         c, own = _get_conn_once(None)
         if c is not None:
             row = c.execute(
-                "SELECT value FROM system_config WHERE key = ?",
+                "SELECT value, updated_at FROM system_config WHERE key = ?",
                 ("market.fear_greed_index",),
             ).fetchone()
             if own and c:
@@ -274,12 +274,26 @@ def _build_market_state() -> dict:
             if row:
                 try:
                     fgi = float(row["value"])
+                    # P3-2: 检查恐贪指数是否过期（超过7天标记stale）
+                    updated_at = row["updated_at"] or ""
+                    is_stale = False
+                    if updated_at:
+                        try:
+                            from datetime import datetime as _dt
+                            update_dt = _dt.fromisoformat(updated_at)
+                            if (_dt.now() - update_dt).days > 7:
+                                is_stale = True
+                        except Exception:
+                            pass
+
                     if fgi > 60:
                         result["sentiment"] = "greed"
                     elif fgi < 40:
                         result["sentiment"] = "fear"
                     else:
                         result["sentiment"] = "neutral"
+                    if is_stale:
+                        result["sentiment_stale"] = True
                     return result
                 except (ValueError, TypeError):
                     pass

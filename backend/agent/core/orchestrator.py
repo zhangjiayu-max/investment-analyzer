@@ -4228,9 +4228,12 @@ def _stream_build_context(refined_query: str, rag_context: str, complexity: str,
     # 注入近期热点新闻到 prebuilt_context
     try:
         from routers.dashboard.dashboard import _hot_topics_cache
-        hot_cache = _hot_topics_cache.get("data")
-        if hot_cache:
-            news_list = hot_cache.get("news", [])[:3]
+        import time as _time
+        # P3-3: 检查缓存是否过期（超过5分钟不注入）
+        hot_ts = _hot_topics_cache.get("ts", 0)
+        hot_data = _hot_topics_cache.get("data")
+        if hot_data and (_time.time() - hot_ts) < 300:
+            news_list = hot_data.get("news", [])[:3]
             if news_list:
                 news_lines = "\n".join(f"- {n.get('title', '')}" for n in news_list if n.get("title"))
                 prebuilt_context += f"## 今日市场热点\n{news_lines}\n\n"
