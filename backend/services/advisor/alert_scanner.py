@@ -176,7 +176,9 @@ def scan_valuation_thresholds() -> dict:
     today = datetime.now().strftime("%Y-%m-%d")
     for code, name in index_codes.items():
         try:
-            val = get_best_valuation(code, query_source="alert_scanner", enable_online=False)
+            # 修复 P1-2：此前硬编码 enable_online=False 导致本地缺失时无法在线兜底，
+            # 9 个指数全部返回 None。改为启用在线兜底（受全局 valuation.online_fallback_enabled 开关控制）
+            val = get_best_valuation(code, query_source="alert_scanner", enable_online=True)
             if not val:
                 continue
             percentile = val.get("percentile")
@@ -268,6 +270,9 @@ def scan_portfolio_risk() -> dict:
 
     concentration_threshold = _get_int("alerts.concentration_threshold", 30)
     loss_threshold = _get_int("alerts.loss_threshold", 15)
+    # P0-2 新增：当日跌幅阈值（独立于累计亏损），开关 alerts.daily_drop_scan_enabled 默认开启
+    daily_drop_enabled = _is_enabled("alerts.daily_drop_scan_enabled", True)
+    daily_drop_threshold = _get_int("alerts.daily_drop_threshold", 3)  # 当日跌幅 ≥3% 触发
 
     holdings = list_holdings()
     if not holdings:
@@ -321,10 +326,11 @@ def scan_portfolio_risk() -> dict:
                                 "warning", {"weight": weight, "threshold": concentration_threshold})
                 alerts_created += 1
 
-            # 亏损检测
+            # 亏损检测（累计亏损）
             if cost_price > 0 and not alert_triggered:
                 profit_rate = (current_price - cost_price) / cost_price * 100
                 if profit_rate < -loss_threshold:
+                    alert_triggered = True
                     title = f"{fund_name} 当前亏损 {abs(profit_rate):.1f}%"
                     content = _build_risk_content(fund_code, fund_name, weight, None, profit_rate)
                     create_alert(
@@ -339,11 +345,250 @@ def scan_portfolio_risk() -> dict:
                     _auto_candidate(fund_code, fund_name, "loss_warning", title, content,
                                     "warning", {"profit_rate": profit_rate, "threshold": loss_threshold})
                     alerts_created += 1
+
+            # P0-2 新增：当日跌幅检测（区别于累计亏损，捕捉"今天突然大跌"）
+            # 数据源：holding 的 change_pct 字段（基金当日涨跌幅，由 refresh_all_fund_prices 更新）
+            if daily_drop_enabled and not alert_triggered:
+                try:
+                    change_pct = float(h.get("change_pct") or 0)
+                except (TypeError, ValueError):
+                    change_pct = 0.0
+                # 数据时效性检查：nav_updated_at 必须是今天，避免用昨日数据误报
+                nav_updated = h.get("nav_updated_at") or ""
+                is_today = nav_updated.startswith(datetime.now().strftime("%Y-%m-%d"))
+                if is_today and change_pct <= -daily_drop_threshold:
+                    title = f"{fund_name} 当日跌幅 {abs(change_pct):.2f}%"
+                    content = (
+                        f"{fund_name}（{fund_code}）今日下跌 {abs(change_pct):.2f}%，"
+                        f"超过 {daily_drop_threshold}% 当日跌幅阈值。"
+                        f"当前持仓市值 {current_value:.0f} 元，占组合 {weight:.1f}%。"
+                    )
+                    create_alert(
+                        alert_type="daily_drop",
+                        title=title,
+                        content=content,
+                        severity="danger" if change_pct <= -5 else "warning",
+                        related_fund_code=fund_code,
+                        related_fund_name=fund_name,
+                        source="alert_scanner",
+                    )
+                    _auto_candidate(fund_code, fund_name, "daily_drop", title, content,
+                                    "danger" if change_pct <= -5 else "warning",
+                                    source_snapshot={"change_pct": change_pct, "threshold": daily_drop_threshold})
+                    alerts_created += 1
         except Exception as e:
             logger.debug(f"[alert_scanner] 持仓扫描失败 {h.get('fund_code')}: {e}")
 
     logger.info(f"[alert_scanner] 持仓风险扫描生成 {alerts_created} 个 alert")
     return {"alerts_created": alerts_created, "holdings_scanned": len(holdings)}
+
+
+# ── P0-1 大盘指数当日跌幅监控 ──────────────────────────────
+
+
+# 监控的核心大盘指数（代码 → 显示名）
+_MARKET_INDEX_MONITOR = {
+    "000001": "上证指数",
+    "399001": "深证成指",
+    "399006": "创业板指",
+    "000688": "科创50",
+    "000300": "沪深300",
+    "000905": "中证500",
+    "000852": "中证1000",
+}
+
+
+def scan_market_index_drop() -> dict:
+    """扫描核心大盘指数当日跌幅，捕捉系统性大跌风险。
+
+    数据源：services/market/market_data.py:get_market_overview()
+    （内部调用 akshare stock_zh_index_spot_sina，含 change_pct 字段）
+
+    开关：alerts.market_index_drop_scan_enabled（默认开启，属预警系统核心能力）
+    阈值：alerts.market_index_warn_threshold（默认 2，跌幅≥2% 触发 warning）
+          alerts.market_index_danger_threshold（默认 4，跌幅≥4% 触发 danger）
+
+    Returns:
+        {"alerts_created": int, "scanned": int, "dropped_indexes": [...]}
+    """
+    if not _is_enabled("alerts.market_index_drop_scan_enabled", True):
+        return {"alerts_created": 0, "skipped": "disabled"}
+
+    warn_threshold = _get_int("alerts.market_index_warn_threshold", 2)
+    danger_threshold = _get_int("alerts.market_index_danger_threshold", 4)
+
+    try:
+        from services.market_data import get_market_overview
+        overview = get_market_overview()
+    except Exception as e:
+        logger.warning(f"[alert_scanner] 大盘指数行情获取失败: {e}")
+        return {"alerts_created": 0, "error": str(e)}
+
+    indices = overview.get("indices", [])
+    if not indices:
+        logger.info("[alert_scanner] 大盘指数行情为空，跳过跌幅扫描")
+        return {"alerts_created": 0, "scanned": 0}
+
+    alerts_created = 0
+    dropped_indexes = []
+    today = datetime.now().strftime("%Y-%m-%d")
+
+    for idx in indices:
+        name = idx.get("name", "")
+        change_pct = idx.get("change_pct")
+        if change_pct is None:
+            continue
+        try:
+            chg = float(change_pct)
+        except (TypeError, ValueError):
+            continue
+
+        if chg <= -warn_threshold:
+            # 判断严重等级
+            if chg <= -danger_threshold:
+                severity = "danger"
+                level_desc = f"大跌（≥{danger_threshold}%）"
+            else:
+                severity = "warning"
+                level_desc = f"下跌（≥{warn_threshold}%）"
+
+            title = f"{name} 当日{level_desc}：{chg:.2f}%"
+            content = (
+                f"{name} 今日下跌 {abs(chg):.2f}%，触发{level_desc}预警。\n"
+                f"当前点位：{idx.get('price', 'N/A')}\n"
+                f"成交额：{idx.get('volume_yi', 'N/A')} 亿\n"
+                f"时间：{today}"
+            )
+            create_alert(
+                alert_type="market_index_drop",
+                title=title,
+                content=content,
+                severity=severity,
+                source="alert_scanner",
+            )
+            # 大盘大跌自动生成决策候选（建议减仓/观望）
+            _auto_candidate(
+                fund_code="",
+                fund_name=name,
+                alert_type="market_index_drop",
+                title=title,
+                content=content,
+                severity=severity,
+                source_snapshot={"change_pct": chg, "index_name": name},
+            )
+            alerts_created += 1
+            dropped_indexes.append({"name": name, "change_pct": chg, "severity": severity})
+
+    # 如果有多个指数同时大跌，额外生成一条系统性风险预警
+    if len(dropped_indexes) >= 3:
+        names = "、".join(d["name"] for d in dropped_indexes)
+        avg_drop = sum(d["change_pct"] for d in dropped_indexes) / len(dropped_indexes)
+        title = f"⚠️ 系统性大跌风险：{len(dropped_indexes)} 大指数齐跌，均值 {avg_drop:.2f}%"
+        content = (
+            f"今日{names}同时大幅下跌，均值跌幅 {abs(avg_drop):.2f}%。\n"
+            f"建议：1) 检查持仓是否触及止损线；2) 评估是否需要减仓控制风险；"
+            f"3) 关注南向资金/北向资金流向；4) 查阅当日重大新闻。"
+        )
+        create_alert(
+            alert_type="systemic_market_risk",
+            title=title,
+            content=content,
+            severity="danger",
+            source="alert_scanner",
+        )
+        _auto_candidate(
+            fund_code="",
+            fund_name="大盘系统性风险",
+            alert_type="systemic_market_risk",
+            title=title,
+            content=content,
+            severity="danger",
+            source_snapshot={"avg_drop": avg_drop, "dropped_count": len(dropped_indexes)},
+        )
+        alerts_created += 1
+
+    logger.info(
+        f"[alert_scanner] 大盘指数跌幅扫描: {len(indices)} 个指数, "
+        f"{len(dropped_indexes)} 个触发预警, 生成 {alerts_created} 个 alert"
+    )
+    return {
+        "alerts_created": alerts_created,
+        "scanned": len(indices),
+        "dropped_indexes": dropped_indexes,
+    }
+
+
+# ── P0-3 资金流向异常监控 ──────────────────────────────────
+
+
+def scan_capital_flow_anomaly() -> dict:
+    """扫描南向资金异常流出，捕捉主力撤退信号。
+
+    数据源：services/market/southbound_capital.py:get_southbound_capital_signal()
+    （已有现成实现，此前从未被 alert_scanner 引用）
+
+    开关：alerts.capital_flow_scan_enabled（默认开启）
+    触发条件：signal 为 bearish_resonance（持续净流出 + 强度中/强）
+
+    Returns:
+        {"alerts_created": int, "signal": str, "trend": str}
+    """
+    if not _is_enabled("alerts.capital_flow_scan_enabled", True):
+        return {"alerts_created": 0, "skipped": "disabled"}
+
+    try:
+        from services.market.southbound_capital import get_southbound_capital_signal
+        signal_data = get_southbound_capital_signal()
+    except Exception as e:
+        logger.warning(f"[alert_scanner] 南向资金信号获取失败: {e}")
+        return {"alerts_created": 0, "error": str(e)}
+
+    signal = signal_data.get("signal", "neutral")
+    trend = signal_data.get("trend", "neutral")
+    strength = signal_data.get("strength", "weak")
+
+    alerts_created = 0
+
+    # 仅在"持续净流出 + 强度中/强"时触发预警
+    if signal == "bearish_resonance":
+        recent_5d = signal_data.get("recent_5d_net_yi", 0.0)
+        recent_20d = signal_data.get("recent_20d_net_yi", 0.0)
+        title = f"南向资金持续净流出（{strength}），主力撤退信号"
+        content = (
+            f"南向资金信号：{signal_data.get('advice', '')}\n"
+            f"趋势：{trend}（{strength}）\n"
+            f"近 5 日净额：{recent_5d:.2f} 亿\n"
+            f"近 20 日净额：{recent_20d:.2f} 亿\n"
+            f"建议：港股持仓注意减仓风险，A 股关注资金面共振下行风险。"
+        )
+        create_alert(
+            alert_type="capital_outflow",
+            title=title,
+            content=content,
+            severity="warning" if strength == "moderate" else "danger",
+            source="alert_scanner",
+        )
+        _auto_candidate(
+            fund_code="",
+            fund_name="南向资金",
+            alert_type="capital_outflow",
+            title=title,
+            content=content,
+            severity="warning" if strength == "moderate" else "danger",
+            source_snapshot={"signal": signal, "recent_5d": recent_5d, "recent_20d": recent_20d},
+        )
+        alerts_created += 1
+
+    logger.info(
+        f"[alert_scanner] 资金流向扫描: signal={signal}, trend={trend}, "
+        f"strength={strength}, alerts={alerts_created}"
+    )
+    return {
+        "alerts_created": alerts_created,
+        "signal": signal,
+        "trend": trend,
+        "strength": strength,
+    }
 
 
 def _build_risk_content(fund_code: str, fund_name: str, weight: float,
@@ -763,7 +1008,12 @@ def scan_valuation_failures() -> dict:
 
 
 def run_periodic_scan() -> dict:
-    """定时扫描主入口，依次执行 6 个扫描函数。"""
+    """定时扫描主入口，依次执行 8 个扫描函数。
+
+    新增（2026-07-17）：
+    - market_index_drop: 大盘指数当日跌幅监控（P0-1）
+    - capital_flow: 南向资金异常流出监控（P0-3）
+    """
     if not _is_enabled("alerts.proactive_scan_enabled", True):
         return {"skipped": "disabled"}
 
@@ -775,6 +1025,8 @@ def run_periodic_scan() -> dict:
         "watchlist": {},
         "health_score": {},
         "valuation_failures": {},
+        "market_index_drop": {},
+        "capital_flow": {},
     }
     try:
         results["verification"] = scan_and_verify_recommendations()
@@ -806,4 +1058,16 @@ def run_periodic_scan() -> dict:
     except Exception as e:
         logger.warning(f"[alert_scanner] 估值失败扫描失败: {e}")
         results["valuation_failures"] = {"error": str(e)}
+    # P0-1: 大盘指数当日跌幅监控（新增）
+    try:
+        results["market_index_drop"] = scan_market_index_drop()
+    except Exception as e:
+        logger.warning(f"[alert_scanner] 大盘指数跌幅扫描失败: {e}")
+        results["market_index_drop"] = {"error": str(e)}
+    # P0-3: 资金流向异常监控（新增）
+    try:
+        results["capital_flow"] = scan_capital_flow_anomaly()
+    except Exception as e:
+        logger.warning(f"[alert_scanner] 资金流向扫描失败: {e}")
+        results["capital_flow"] = {"error": str(e)}
     return results

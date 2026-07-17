@@ -105,6 +105,17 @@ DEFAULT_CONFIGS = [
     ('alerts.health_score_scan_enabled', 'true', '健康分预警扫描开关（非LLM相关，默认开启）', 'alerts'),
     ('alerts.health_score_threshold', '60', '健康分预警阈值（低于此值触发预警）', 'alerts'),
     ('alerts.valuation_failure_scan_enabled', 'true', '估值查询失败预警开关（闭环兜底监控，默认开启）', 'alerts'),
+    # 2026-07-17 新增：大盘大跌预警（捕捉系统性风险）
+    ('alerts.market_index_drop_scan_enabled', 'true', '大盘指数当日跌幅监控开关（预警核心能力，默认开启）', 'alerts'),
+    ('alerts.market_index_warn_threshold', '2', '大盘指数当日跌幅 warning 阈值（%）', 'alerts'),
+    ('alerts.market_index_danger_threshold', '4', '大盘指数当日跌幅 danger 阈值（%）', 'alerts'),
+    # 2026-07-17 新增：持仓当日跌幅（区别于累计亏损）
+    ('alerts.daily_drop_scan_enabled', 'true', '持仓基金当日跌幅扫描开关（区别于累计亏损，默认开启）', 'alerts'),
+    ('alerts.daily_drop_threshold', '3', '持仓基金当日跌幅阈值（%，当日跌≥此值触发预警）', 'alerts'),
+    # 2026-07-17 新增：资金流向异常监控
+    ('alerts.capital_flow_scan_enabled', 'true', '南向资金异常流出监控开关（默认开启）', 'alerts'),
+    # 2026-07-17 新增：交易时段缩短扫描间隔
+    ('alerts.trading_hours_scan_interval_minutes', '5', '交易时段（9:00-15:00）扫描间隔分钟数（默认5，捕捉盘内异动）', 'alerts'),
 
     # 估值查询闭环兜底（非LLM相关，默认开启）
     ('valuation.online_fallback_enabled', 'true', '估值在线兜底总开关（本地表无数据时自动查akshare/天天基金）', 'valuation'),

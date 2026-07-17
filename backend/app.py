@@ -727,11 +727,24 @@ async def _auto_periodic_scan():
             logging.warning(f"[auto-scan] 启动扫描异常: {e}")
 
         while True:
-            try:
-                interval_min = int(get_config("alerts.scan_interval_minutes", "30"))
-            except (TypeError, ValueError):
-                interval_min = 30
-            await asyncio.sleep(max(interval_min * 60, 300))  # 至少 5 分钟
+            # P1-1: 交易时段缩短扫描间隔，捕捉盘内异动
+            # 交易日 09:30-15:00 用 alerts.trading_hours_scan_interval_minutes（默认 5）
+            # 非交易时段用 alerts.scan_interval_minutes（默认 30）
+            from datetime import datetime as _dt
+            now = _dt.now()
+            is_weekday = now.weekday() < 5  # 0-4 = 周一到周五
+            is_trading_hours = is_weekday and 9 <= now.hour < 15
+            if is_trading_hours:
+                try:
+                    interval_min = int(get_config("alerts.trading_hours_scan_interval_minutes", "5"))
+                except (TypeError, ValueError):
+                    interval_min = 5
+            else:
+                try:
+                    interval_min = int(get_config("alerts.scan_interval_minutes", "30"))
+                except (TypeError, ValueError):
+                    interval_min = 30
+            await asyncio.sleep(max(interval_min * 60, 60))  # 至少 1 分钟
 
             try:
                 if get_config("alerts.proactive_scan_enabled", "true") != "true":
@@ -739,10 +752,12 @@ async def _auto_periodic_scan():
                 from services.alert_scanner import run_periodic_scan
                 result = await asyncio.to_thread(run_periodic_scan)
                 logging.info(
-                    f"[auto-scan] 定时扫描完成: "
+                    f"[auto-scan] 定时扫描完成 ({'盘中' if is_trading_hours else '盘后'} {interval_min}min): "
                     f"verified={result.get('verification', {}).get('verified', 0)}, "
                     f"valuation_alerts={result.get('valuation', {}).get('alerts_created', 0)}, "
-                    f"portfolio_alerts={result.get('portfolio', {}).get('alerts_created', 0)}"
+                    f"portfolio_alerts={result.get('portfolio', {}).get('alerts_created', 0)}, "
+                    f"market_index_drop={result.get('market_index_drop', {}).get('alerts_created', 0)}, "
+                    f"capital_flow={result.get('capital_flow', {}).get('alerts_created', 0)}"
                 )
             except Exception as e:
                 logging.warning(f"[auto-scan] 定时扫描异常: {e}")
@@ -751,34 +766,48 @@ async def _auto_periodic_scan():
 
 
 async def _auto_event_radar_scan():
-    """前瞻性事件雷达 — 每晚 20:00 扫描一次。
+    """前瞻性事件雷达 — 每日 3 次扫描（11:30 / 14:30 / 20:00）。
 
     从新闻中提取未来 1-2 周的市场事件，匹配持仓/候选基金，生成 3 级 alert。
 
     开关：alerts.event_radar_enabled（默认 false，LLM 相关开关硬约束）
-    调度：每晚 20:00 一次（不走 _auto_periodic_scan 的 30 分钟间隔）
+    调度：
+    - 11:30 / 14:30（盘中）：捕捉当日正在发生的异动（P2 新增）
+    - 20:00（盘后）：完整扫描未来 1-2 周事件（原有逻辑）
+    周末/节假日仍会触发但不影响（新闻采集会返回空）
     """
     from datetime import datetime, timedelta
+    # 3 个扫描时间点（小时, 分钟）
+    _SCAN_TIMES = [(11, 30), (14, 30), (20, 0)]
     try:
         await asyncio.sleep(120)  # 等启动完成（比 _auto_periodic_scan 晚 1 分钟避免抢资源）
 
         while True:
-            # 计算距下次 20:00 的等待秒数
+            # 计算距下次扫描时间点的等待秒数
             now = datetime.now()
-            target = now.replace(hour=20, minute=0, second=0, microsecond=0)
-            if now >= target:
-                target = target + timedelta(days=1)
-            wait_seconds = (target - now).total_seconds()
+            next_target = None
+            for (h, m) in _SCAN_TIMES:
+                target = now.replace(hour=h, minute=m, second=0, microsecond=0)
+                if target > now:
+                    next_target = target
+                    break
+            if next_target is None:
+                # 今天所有时间点已过，等到明天第一个
+                first_h, first_m = _SCAN_TIMES[0]
+                next_target = (now + timedelta(days=1)).replace(
+                    hour=first_h, minute=first_m, second=0, microsecond=0)
+            wait_seconds = (next_target - now).total_seconds()
             await asyncio.sleep(wait_seconds)
 
             if get_config("alerts.event_radar_enabled", "false") != "true":
                 continue
 
+            scan_hour = next_target.hour
             try:
                 from services.event_radar import scan_forward_events
                 result = scan_forward_events()
                 logging.info(
-                    f"[event-radar] 扫描完成: "
+                    f"[event-radar] 扫描完成 ({scan_hour:02d}:00): "
                     f"extracted={result.get('extracted', 0)}, "
                     f"new={result.get('new', 0)}, "
                     f"alerts={result.get('alerts_created', 0)}"
@@ -796,7 +825,7 @@ async def _auto_event_radar_scan():
                             f"wrong={vresult.get('wrong', 0)}"
                         )
             except Exception as e:
-                logging.warning(f"[event-radar] 扫描异常: {e}")
+                logging.warning(f"[event-radar] 扫描异常 ({scan_hour:02d}:00): {e}")
     except Exception as e:
         logging.warning(f"前瞻事件雷达任务异常: {e}")
 

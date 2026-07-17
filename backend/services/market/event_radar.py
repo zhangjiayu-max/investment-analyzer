@@ -498,11 +498,42 @@ def _extract_events_from_news(news_list: list[dict], trace_id: str = "") -> list
             end = raw.rfind("]")
             if start != -1 and end != -1 and end > start:
                 raw = raw[start:end + 1]
-        events = json.loads(raw)
+        try:
+            events = json.loads(raw)
+        except json.JSONDecodeError as je:
+            # P1-3 修复：首次解析失败时，二次重试（提高 temperature，加更强约束）
+            logger.warning(
+                f"[event_radar:{trace_id}] LLM 首次解析失败({je})，二次重试"
+            )
+            logger.debug(f"[event_radar:{trace_id}] 首次原始响应: {raw[:300]}")
+            retry_prompt = (
+                prompt
+                + "\n\n【重要】上次返回的内容不是合法 JSON 数组，请严格只输出 "
+                "JSON 数组，以 [ 开头、] 结尾，不要任何其他文字、代码块或解释。"
+            )
+            retry_resp = _call_llm(
+                caller="event_radar_extractor_retry",
+                trace_id=trace_id,
+                model=MODEL,
+                messages=[{"role": "user", "content": retry_prompt}],
+                temperature=0.0,  # 更确定性的输出
+                max_tokens=4000,
+            )
+            raw = (retry_resp.choices[0].message.content or "").strip()
+            # 再次清理代码块
+            if raw.startswith("```"):
+                raw = re.sub(r"^```(?:json)?\s*", "", raw)
+                raw = re.sub(r"\s*```$", "", raw)
+            if not raw.startswith("["):
+                start = raw.find("[")
+                end = raw.rfind("]")
+                if start != -1 and end != -1 and end > start:
+                    raw = raw[start:end + 1]
+            events = json.loads(raw)
         if not isinstance(events, list):
             return []
     except Exception as e:
-        logger.warning(f"[event_radar:{trace_id}] LLM 事件提取失败: {e}")
+        logger.warning(f"[event_radar:{trace_id}] LLM 事件提取失败(含重试): {e}")
         # 记录原始响应片段便于调试（不超过 200 字）
         logger.debug(f"[event_radar:{trace_id}] LLM 原始响应: {raw[:200] if 'raw' in dir() else 'N/A'}")
         return []
