@@ -16,6 +16,7 @@ const props = defineProps({
   hotspotsAnalysis: { type: Object, default: null },
   opportunities: { type: Array, default: () => [] },
   opportunitiesLoading: { type: Boolean, default: false },
+  opportunityStats: { type: Object, default: null },
   hotspotsRelate: { type: Array, default: () => [] },
   recHistory: { type: Array, default: null },
   recStats: { type: Object, default: null },
@@ -48,6 +49,8 @@ const allRelatedHoldings = computed(() => {
   }
   return result
 })
+const opportunityTrackStats = computed(() => props.opportunityStats?.track_stats || null)
+const opportunityReviewQueue = computed(() => props.opportunityStats?.review_queue || [])
 
 const verdictMeta = {
   can_buy: { label: '可小仓', className: 'verdict-buy' },
@@ -136,11 +139,11 @@ const verdictMeta = {
       <p>正在筛选主题机会...</p>
     </div>
 
-    <div v-if="opportunities?.length && !opportunitiesLoading && !hotspotLoading" class="card-body opportunities-body">
-      <div class="opportunity-summary-row">
-        <span class="opportunity-summary-title terminal-label">机会引擎</span>
-        <span class="opportunity-count font-jet">{{ opportunities.length }} 个主题</span>
-      </div>
+      <div v-if="opportunities?.length && !opportunitiesLoading && !hotspotLoading" class="card-body opportunities-body">
+        <div class="opportunity-summary-row">
+          <span class="opportunity-summary-title terminal-label">机会引擎</span>
+          <span class="opportunity-count font-jet">{{ opportunities.length }} 个主题</span>
+        </div>
       <div v-for="item in opportunities.slice(0, 4)" :key="item.id" class="opportunity-card reveal-stagger">
         <div class="opportunity-top">
           <span :class="['opportunity-verdict', 'terminal-label', verdictMeta[item.verdict]?.className || 'verdict-watch']">
@@ -168,6 +171,33 @@ const verdictMeta = {
           <button class="btn-ghost btn-sm btn-primary-text" @click="emit('create-decision', item)">
             <Icon name="check" size="13" /> 存决策
           </button>
+        </div>
+      </div>
+    </div>
+
+    <div v-if="opportunityStats" class="opportunity-review-panel">
+      <div class="opportunity-review-head">
+        <span class="opportunity-summary-title terminal-label">机会回看</span>
+        <span class="opportunity-count font-jet">{{ opportunityStats.date || '' }}</span>
+      </div>
+      <div class="opportunity-review-chips">
+        <span class="review-chip">已跟踪 {{ opportunityTrackStats?.bought_tracks || 0 }}</span>
+        <span class="review-chip">待复盘 {{ opportunityTrackStats?.due_reviews || 0 }}</span>
+        <span class="review-chip">已验证 {{ opportunityTrackStats?.evaluated_tracks || 0 }}</span>
+        <span class="review-chip" :class="{ 'review-chip-good': (opportunityTrackStats?.hit_rate || 0) >= 50 }">
+          命中率 {{ opportunityTrackStats?.hit_rate != null ? opportunityTrackStats.hit_rate + '%' : '待回填' }}
+        </span>
+      </div>
+      <div v-if="opportunityReviewQueue.length" class="opportunity-review-list">
+        <div v-for="item in opportunityReviewQueue.slice(0, 3)" :key="item.track_id" class="opportunity-review-item">
+          <span class="review-theme">{{ item.theme || '未命名主题' }}</span>
+          <span class="review-meta font-jet">
+            {{ item.review_due_date || '未定' }}
+            <em v-if="item.current_return_pct != null" :class="item.current_return_pct >= 0 ? 'review-good' : 'review-bad'">
+              {{ item.current_return_pct > 0 ? '+' : '' }}{{ Number(item.current_return_pct).toFixed(1) }}%
+            </em>
+            <em v-else class="review-muted">待回填</em>
+          </span>
         </div>
       </div>
     </div>
@@ -409,6 +439,83 @@ const verdictMeta = {
   gap: 0.65rem;
   padding: 0.2rem 0 0.4rem;
   border-bottom: 1px dashed var(--color-border);
+}
+.opportunity-review-panel {
+  display: grid;
+  gap: 0.6rem;
+  padding: 0.75rem 0.85rem;
+  border: 1px solid var(--color-border-light);
+  border-radius: var(--radius-md);
+  background: linear-gradient(180deg, var(--color-bg-card), var(--color-bg-input));
+}
+.opportunity-review-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  font-size: 0.72rem;
+}
+.opportunity-review-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+.review-chip {
+  padding: 0.18rem 0.48rem;
+  border-radius: 999px;
+  border: 1px solid var(--color-border-light);
+  background: var(--color-bg-card);
+  color: var(--color-text-secondary);
+  font-size: 0.68rem;
+  font-weight: 700;
+}
+.review-chip-good {
+  background: var(--color-success-bg);
+  color: var(--color-success);
+}
+.opportunity-review-list {
+  display: grid;
+  gap: 0.35rem;
+}
+.opportunity-review-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.4rem 0;
+  border-top: 1px dashed var(--color-border-light);
+  font-size: 0.72rem;
+}
+.opportunity-review-item:first-child {
+  border-top: 0;
+  padding-top: 0;
+}
+.review-theme {
+  min-width: 0;
+  color: var(--color-text-primary);
+  font-weight: 700;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.review-meta {
+  flex-shrink: 0;
+  color: var(--color-text-muted);
+}
+.review-good {
+  color: var(--color-success);
+  font-style: normal;
+  margin-left: 0.35rem;
+}
+.review-bad {
+  color: var(--color-danger);
+  font-style: normal;
+  margin-left: 0.35rem;
+}
+.review-muted {
+  color: var(--color-text-muted);
+  font-style: normal;
+  margin-left: 0.35rem;
 }
 .opportunity-summary-row {
   display: flex;

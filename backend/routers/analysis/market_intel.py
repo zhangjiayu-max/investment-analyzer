@@ -35,6 +35,7 @@ def _safe_percentile(v, default=None):
 from services.llm_service import _call_llm, MODEL
 from services.rag import build_rag_context_with_details, log_rag_search
 from services.market_data import get_market_overview
+from services.unified_evidence import build_unified_evidence
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/market-intelligence", tags=["analysis-market-intel"])
@@ -404,6 +405,145 @@ def _build_holdings_text() -> str:
     return "\n".join(lines)
 
 
+def _build_event_radar_brief(limit: int = 5) -> dict:
+    """构建事件雷达摘要，供市场情报分析复用。"""
+    try:
+        from db.market_events import list_active_events, list_verified_events
+        from services.event_radar import get_sector_accuracy_stats
+
+        accuracy_stats = get_sector_accuracy_stats()
+        active_events = list_active_events()[:limit]
+        verified_events = list_verified_events(limit=limit)
+    except Exception as e:
+        logger.debug(f"事件雷达摘要构建失败: {e}")
+        return {
+            "summary": "暂无事件雷达数据。",
+            "accuracy": {"overall": {"total": 0, "correct": 0, "wrong": 0, "flat": 0, "accuracy": 0.0}, "by_sector": {}},
+            "active_events": [],
+            "recent_verified": [],
+        }
+
+    overall = accuracy_stats.get("overall", {})
+    by_sector = accuracy_stats.get("by_sector", {})
+    active_items = []
+    for ev in active_events:
+        sectors = []
+        try:
+            sectors = json.loads(ev.get("affected_sectors") or "[]")
+        except Exception:
+            sectors = []
+        active_items.append({
+            "title": ev.get("title", ""),
+            "status": ev.get("status", ""),
+            "direction": ev.get("direction", ""),
+            "confidence": float(ev.get("confidence") or 0),
+            "relevance_to_user": ev.get("relevance_to_user", ""),
+            "expected_date": ev.get("expected_date", ""),
+            "sectors": sectors[:3],
+        })
+
+    recent_verified = []
+    for ev in verified_events:
+        try:
+            result = json.loads(ev.get("verification_result") or "{}")
+        except Exception:
+            result = {}
+        if not result:
+            continue
+        recent_verified.append({
+            "title": ev.get("title", ""),
+            "status": result.get("status", "flat"),
+            "change_pct": result.get("change_pct"),
+            "verified_date": result.get("verified_date", ""),
+            "direction_predicted": result.get("direction_predicted", ""),
+        })
+
+    summary_parts = []
+    if overall.get("total"):
+        summary_parts.append(
+            f"已验证 {overall.get('total', 0)} 个，正确 {overall.get('correct', 0)}，偏差 {overall.get('wrong', 0)}，准确率 {overall.get('accuracy', 0.0) * 100:.0f}%"
+        )
+    if active_items:
+        top_titles = "、".join(item["title"][:18] for item in active_items[:3] if item.get("title"))
+        if top_titles:
+            summary_parts.append(f"当前前瞻事件：{top_titles}")
+    if recent_verified:
+        latest = recent_verified[0]
+        summary_parts.append(
+            f"最近验证：{latest.get('title', '')[:18]} -> {latest.get('status', 'flat')}"
+        )
+
+    return {
+        "summary": "；".join(summary_parts) or "暂无事件雷达数据。",
+        "accuracy": {
+            "overall": overall,
+            "by_sector": by_sector,
+        },
+        "active_events": active_items,
+        "recent_verified": recent_verified,
+    }
+
+
+def _build_watchlist_signal_brief(user_id: str = "default", limit: int = 5) -> dict:
+    """构建关注列表信号摘要，供市场情报分析复用。"""
+    try:
+        from db.watchlist import list_watchlist
+
+        items = [
+            item for item in list_watchlist(user_id=user_id, status="watching")
+            if item.get("status") != "bought"
+        ]
+    except Exception as e:
+        logger.debug(f"关注列表摘要构建失败: {e}")
+        return {
+            "summary": "暂无关注基金信号。",
+            "counts": {"green": 0, "yellow": 0, "red": 0, "gray": 0, "total": 0},
+            "top_items": [],
+        }
+
+    counts = {"green": 0, "yellow": 0, "red": 0, "gray": 0}
+    priority_rank = {"green": 0, "yellow": 1, "red": 2, "gray": 3}
+    for item in items:
+        status = item.get("signal_status") or "gray"
+        counts[status] = counts.get(status, 0) + 1
+
+    sorted_items = sorted(
+        items,
+        key=lambda item: (
+            priority_rank.get(item.get("signal_status") or "gray", 3),
+            float(_safe_percentile(item.get("current_percentile"), default=999) or 999),
+            -float(item.get("priority") or 0),
+        ),
+    )[:limit]
+
+    top_items = []
+    for item in sorted_items:
+        top_items.append({
+            "id": item.get("id"),
+            "fund_code": item.get("fund_code", ""),
+            "fund_name": item.get("fund_name", ""),
+            "signal_status": item.get("signal_status") or "gray",
+            "signal_reason": item.get("signal_reason") or item.get("notes") or "",
+            "current_percentile": item.get("current_percentile"),
+            "target_percentile": item.get("target_percentile"),
+            "distance_to_buy": item.get("distance_to_buy"),
+            "nav_updated_at": item.get("nav_updated_at"),
+            "suggested_buy_price": item.get("suggested_buy_price"),
+        })
+
+    counts["total"] = len(items)
+    summary = (
+        f"可上车 {counts['green']}，接近上车 {counts['yellow']}，等待中 {counts['red']}，数据不足 {counts['gray']}，共 {counts['total']} 只"
+        if counts["total"]
+        else "暂无关注基金信号。"
+    )
+    return {
+        "summary": summary,
+        "counts": counts,
+        "top_items": top_items,
+    }
+
+
 # 扩展的板块关键词映射
 _SECTOR_ALIAS = {
     "cpo": ["cpo", "光模块", "光通信", "光器件", "硅光"],
@@ -507,7 +647,22 @@ async def get_market_intelligence_overview(force: bool = False):
         "hot_topics": [],
         "sectors": [],
         "macro": {},
+        "event_radar": {
+            "summary": "",
+            "accuracy": {"overall": {"total": 0, "correct": 0, "wrong": 0, "flat": 0, "accuracy": 0.0}, "by_sector": {}},
+            "active_events": [],
+            "recent_verified": [],
+        },
+        "watchlist_signals": {
+            "summary": "",
+            "counts": {"green": 0, "yellow": 0, "red": 0, "gray": 0, "total": 0},
+            "top_items": [],
+        },
         "summary": "暂无今日市场情报，请点击刷新触发分析",
+        "forecast_1w": "",
+        "forecast_2w": "",
+        "risk_warning": "",
+        "shared_signals": None,
         "fetched_at": "",
         "need_trigger": True,
     }
@@ -548,6 +703,8 @@ async def _do_market_intelligence():
         _fetch_market_hotspots(),
         asyncio.to_thread(get_market_overview),
     )
+    event_radar_brief = await asyncio.to_thread(_build_event_radar_brief)
+    watchlist_brief = await asyncio.to_thread(_build_watchlist_signal_brief)
     all_news = news
 
     news_text = "\n".join(
@@ -596,6 +753,17 @@ async def _do_market_intelligence():
         )
     except Exception as e:
         logger.warning(f"RAG 检索失败: {e}")
+
+    shared_evidence = {}
+    try:
+        shared_evidence = build_unified_evidence(
+            user_id="default",
+            query="市场热点 板块轮动 投资策略 未来1-2周",
+            scenario_type="market_intelligence",
+            limit=5,
+        )
+    except Exception as e:
+        logger.warning(f"共享证据构建失败: {e}")
 
     bond = macro.get("bond", {})
     bond_text = f"债券温度{bond.get('temperature', '?')}°，收益率{bond.get('rate', '?')}%" if bond else "暂无"
@@ -674,16 +842,31 @@ async def _do_market_intelligence():
 【知识库参考（历史分析/文章）】
 {rag_context[:1500] if rag_context else '暂无相关知识库内容'}
 
+【共享证据层】
+{shared_evidence.get("prompt_context", "")[:1800] if shared_evidence else '暂无共享证据'}
+
+【事件雷达验证摘要】
+{event_radar_brief.get("summary", "暂无事件雷达数据。")}
+
+【关注基金信号摘要】
+{watchlist_brief.get("summary", "暂无关注基金信号。")}
+
 请从以上新闻中提炼今日真正的市场热点，特别关注央视新闻的政策信号，输出严格JSON。
 
 重要规则：
 1. 只推荐今日板块实时涨跌中涨幅靠前或有明确政策驱动的板块
 2. 如果某板块新闻利好但今日实际下跌，需说明「短期承压但中长期有逻辑」，不要标为"今日热门"
-3. 结合板块涨跌和新闻，区分「已兑现」（已大涨）和「待兑现」（有逻辑但还没涨）的机会"""
+3. 结合板块涨跌和新闻，区分「已兑现」（已大涨）和「待兑现」（有逻辑但还没涨）的机会
+4. 结合事件雷达验证结果，给出未来 1-2 周偏多/偏空的短期判断
+5. 结合关注基金信号，提示哪些基金更接近可上车区间"""
 
     sectors = []
     summary = ""
     cctv_signal = ""
+    forecast_1w = ""
+    forecast_2w = ""
+    risk_warning = ""
+    watchlist_takeaway = ""
     llm_start = time.time()
     llm_status = "success"
     response = None
@@ -720,6 +903,10 @@ async def _do_market_intelligence():
         sectors = parsed.get("sectors", [])
         summary = parsed.get("summary", "")
         cctv_signal = parsed.get("cctv_signal", "")
+        forecast_1w = parsed.get("forecast_1w", "")
+        forecast_2w = parsed.get("forecast_2w", "")
+        risk_warning = parsed.get("risk_warning", "")
+        watchlist_takeaway = parsed.get("watchlist_takeaway", "")
     except Exception as e:
         logger.warning(f"市场情报 LLM 推断失败: {e}")
         summary = f"分析失败: {e}"
@@ -783,6 +970,13 @@ async def _do_market_intelligence():
             "policy_text": policy_text,
         },
         "summary": summary,
+        "forecast_1w": forecast_1w,
+        "forecast_2w": forecast_2w,
+        "risk_warning": risk_warning,
+        "watchlist_takeaway": watchlist_takeaway,
+        "event_radar": event_radar_brief,
+        "watchlist_signals": watchlist_brief,
+        "shared_signals": shared_evidence,
         "fetched_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
     }
 

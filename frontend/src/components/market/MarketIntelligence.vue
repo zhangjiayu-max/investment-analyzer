@@ -32,6 +32,79 @@
         <p class="summary-text">{{ data.summary }}</p>
       </div>
 
+      <SharedSignalsCard
+        v-if="sharedSignals"
+        :signals="sharedSignals"
+        compact
+      />
+
+      <div class="intel-highlights">
+        <div class="card highlight-card editorial-card reveal-stagger">
+          <div class="card-header editorial-card-header">
+            <h3 class="title"><Icon name="target" size="15" class="title-icon" /> 未来展望</h3>
+            <span class="badge">1-2 周</span>
+          </div>
+          <div class="forecast-grid">
+            <div class="forecast-item">
+              <span class="forecast-label terminal-label">1 周</span>
+              <p class="forecast-text">{{ data.forecast_1w || '暂无明确判断' }}</p>
+            </div>
+            <div class="forecast-item">
+              <span class="forecast-label terminal-label">2 周</span>
+              <p class="forecast-text">{{ data.forecast_2w || '暂无明确判断' }}</p>
+            </div>
+            <div v-if="data.risk_warning" class="forecast-item forecast-risk">
+              <span class="forecast-label terminal-label">风险提示</span>
+              <p class="forecast-text">{{ data.risk_warning }}</p>
+            </div>
+          </div>
+        </div>
+
+        <div class="card highlight-card editorial-card reveal-stagger">
+          <div class="card-header editorial-card-header">
+            <h3 class="title"><Icon name="activity" size="15" class="title-icon" /> 闭环信号</h3>
+            <span class="badge">{{ watchlistBrief?.counts?.total || 0 }} 只关注</span>
+          </div>
+          <div class="signal-summary">
+            <div class="signal-chip signal-green">可上车 {{ watchlistBrief?.counts?.green || 0 }}</div>
+            <div class="signal-chip signal-yellow">接近上车 {{ watchlistBrief?.counts?.yellow || 0 }}</div>
+            <div class="signal-chip signal-red">等待中 {{ watchlistBrief?.counts?.red || 0 }}</div>
+            <div class="signal-chip signal-gray">数据不足 {{ watchlistBrief?.counts?.gray || 0 }}</div>
+          </div>
+          <p v-if="watchlistBrief?.summary" class="signal-summary-text">{{ watchlistBrief.summary }}</p>
+          <div v-if="eventRadarBrief?.summary" class="event-brief">
+            <span class="terminal-label">事件雷达：</span>
+            <span>{{ eventRadarBrief.summary }}</span>
+          </div>
+          <div v-if="eventAccuracy?.total" class="event-accuracy">
+            <span class="terminal-label">验证准确率：</span>
+            <span>{{ (eventAccuracy.accuracy * 100).toFixed(0) }}%（{{ eventAccuracy.correct }}正 / {{ eventAccuracy.wrong }}偏）</span>
+          </div>
+          <p v-if="data.watchlist_takeaway" class="signal-summary-text">{{ data.watchlist_takeaway }}</p>
+        </div>
+      </div>
+
+      <div v-if="watchlistTopItems.length" class="card watchlist-brief editorial-card reveal-stagger">
+        <div class="card-header editorial-card-header">
+          <h3 class="title"><Icon name="bookmark" size="15" class="title-icon" /> 关注基金提醒</h3>
+          <span class="badge">Top {{ watchlistTopItems.length }}</span>
+        </div>
+        <div class="watchlist-brief-list">
+          <div v-for="item in watchlistTopItems" :key="item.id || item.fund_code" class="watchlist-brief-item">
+            <div class="watchlist-brief-main">
+              <span class="watchlist-name">{{ item.fund_name || item.fund_code }}</span>
+              <span class="watchlist-code font-jet">{{ item.fund_code }}</span>
+            </div>
+            <div class="watchlist-brief-meta">
+              <span class="watchlist-signal" :class="'signal-' + (item.signal_status || 'gray')">{{ signalStatusLabel(item.signal_status) }}</span>
+              <span v-if="item.current_percentile != null" class="watchlist-meta">分位 {{ formatPercent(item.current_percentile, 0) }}%</span>
+              <span v-if="item.distance_to_buy != null" class="watchlist-meta">距上车 {{ formatPercent(item.distance_to_buy, 1) }}%</span>
+            </div>
+            <p v-if="item.signal_reason" class="watchlist-reason">{{ item.signal_reason }}</p>
+          </div>
+        </div>
+      </div>
+
       <!-- 主体：左侧板块排行 + 右侧详情 -->
       <div class="intel-main">
         <!-- 左侧：热门板块排行 -->
@@ -240,11 +313,17 @@ import { ref, computed, onMounted } from 'vue'
 import { getMarketIntelligenceOverview, triggerMarketIntelligence } from '../../api'
 import { useAsyncTask } from '../../composables/useAsyncTask'
 import Icon from '../ui/Icon.vue'
+import SharedSignalsCard from '../shared/SharedSignalsCard.vue'
 
 const { taskState, taskResult, taskError, start, restore, reset } = useAsyncTask('market_intelligence')
 const loading = ref(false)
 const data = ref(null)
 const selectedSector = ref(0)
+const eventRadarBrief = computed(() => data.value?.event_radar || null)
+const watchlistBrief = computed(() => data.value?.watchlist_signals || null)
+const sharedSignals = computed(() => data.value?.shared_signals || null)
+const watchlistTopItems = computed(() => watchlistBrief.value?.top_items || [])
+const eventAccuracy = computed(() => eventRadarBrief.value?.accuracy?.overall || null)
 
 const outlookMap = { '利好': 'good', '利空': 'bad', '中性': 'neutral' }
 
@@ -305,6 +384,20 @@ function pctColor(pct) {
   if (pct < 30) return 'var(--color-loss)'
   if (pct < 70) return 'var(--color-text-secondary)'
   return 'var(--color-profit)'
+}
+
+function signalStatusLabel(status) {
+  return {
+    green: '可上车',
+    yellow: '接近上车',
+    red: '等待中',
+    gray: '数据不足',
+  }[status || 'gray'] || '数据不足'
+}
+
+function formatPercent(value, digits = 0) {
+  const n = Number.parseFloat(value)
+  return Number.isFinite(n) ? n.toFixed(digits) : '—'
 }
 </script>
 
@@ -394,6 +487,130 @@ h3 .title-icon, h4 .title-icon { margin-right: 0.3rem; vertical-align: middle; }
   color: var(--color-text-secondary);
   margin-top: 0.6rem;
 }
+
+.intel-highlights {
+  display: grid;
+  grid-template-columns: 1.1fr 0.9fr;
+  gap: 1.25rem;
+  margin-top: 1.25rem;
+}
+
+.highlight-card,
+.watchlist-brief {
+  padding: 1rem;
+}
+
+.forecast-grid {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.forecast-item {
+  padding: 0.75rem;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-bg-secondary);
+}
+
+.forecast-risk {
+  border-color: var(--color-warning-border);
+  background: var(--color-warning-bg);
+}
+
+.forecast-label {
+  display: block;
+  margin-bottom: 0.35rem;
+}
+
+.forecast-text {
+  color: var(--color-text-secondary);
+  line-height: 1.7;
+  font-size: 0.88rem;
+}
+
+.signal-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin-bottom: 0.75rem;
+}
+
+.signal-chip {
+  padding: 0.18rem 0.55rem;
+  border-radius: 999px;
+  font-size: 0.72rem;
+  font-weight: 600;
+}
+
+.signal-green { background: var(--color-success-bg); color: var(--color-success); }
+.signal-yellow { background: var(--color-warning-bg); color: var(--color-warning); }
+.signal-red { background: var(--color-danger-bg); color: var(--color-danger); }
+.signal-gray { background: var(--color-bg-hover); color: var(--color-text-muted); }
+
+.signal-summary-text,
+.event-brief,
+.event-accuracy,
+.watchlist-reason {
+  font-size: 0.82rem;
+  line-height: 1.7;
+  color: var(--color-text-secondary);
+}
+
+.event-brief,
+.event-accuracy {
+  margin-top: 0.5rem;
+  padding-top: 0.5rem;
+  border-top: 1px dashed var(--color-border);
+}
+
+.watchlist-brief-list {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.watchlist-brief-item {
+  padding: 0.75rem;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-bg-secondary);
+}
+
+.watchlist-brief-main {
+  display: flex;
+  align-items: baseline;
+  gap: 0.45rem;
+  margin-bottom: 0.35rem;
+}
+
+.watchlist-name {
+  font-weight: 600;
+  font-size: 0.88rem;
+}
+
+.watchlist-code,
+.watchlist-meta {
+  font-size: 0.72rem;
+  color: var(--color-text-muted);
+}
+
+.watchlist-brief-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin-bottom: 0.35rem;
+}
+
+.watchlist-signal {
+  font-size: 0.72rem;
+  font-weight: 600;
+  padding: 0.15rem 0.45rem;
+  border-radius: 999px;
+}
+
+.watchlist-signal.signal-green { background: var(--color-success-bg); color: var(--color-success); }
+.watchlist-signal.signal-yellow { background: var(--color-warning-bg); color: var(--color-warning); }
+.watchlist-signal.signal-red { background: var(--color-danger-bg); color: var(--color-danger); }
+.watchlist-signal.signal-gray { background: var(--color-bg-hover); color: var(--color-text-muted); }
 
 /* ── 主体布局 ── */
 
@@ -875,6 +1092,9 @@ h3 .title-icon, h4 .title-icon { margin-right: 0.3rem; vertical-align: middle; }
 
 @media (max-width: 768px) {
   .intel-main {
+    grid-template-columns: 1fr;
+  }
+  .intel-highlights {
     grid-template-columns: 1fr;
   }
   .page-header {

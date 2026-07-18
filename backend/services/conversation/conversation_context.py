@@ -71,29 +71,104 @@ def _build_decision_context(user_id: str = "default", limit: int = 6) -> str:
     return "\n".join(lines) or "暂无未完成决策。"
 
 
-def _build_watchlist_context(user_id: str = "default", limit: int = 8) -> str:
-    try:
-        from db import list_watchlist
+def _build_watchlist_context(user_id: str = "default", limit: int = 8, evidence: dict | None = None) -> str:
+    items = []
+    if evidence:
+        try:
+            items = (evidence.get("market") or {}).get("watchlist_items", [])[:limit]
+        except Exception:
+            items = []
+    if not items:
+        try:
+            from db import list_watchlist
 
-        items = [
-            item for item in list_watchlist(user_id=user_id)
-            if item.get("status") != "bought"
-        ][:limit]
-    except Exception:
-        items = []
+            items = [
+                item for item in list_watchlist(user_id=user_id)
+                if item.get("status") != "bought"
+            ][:limit]
+        except Exception:
+            items = []
     if not items:
         return "暂无关注标的。"
 
     lines = ["### 关注列表"]
     for item in items:
-        trigger_parts = []
-        if item.get("target_price") is not None:
+        current_pct = item.get("current_percentile")
+        target_pct = item.get("target_percentile")
+        signal = item.get("signal_status") or "gray"
+        signal_text = {
+            "green": "可上车",
+            "yellow": "接近上车",
+            "red": "等待中",
+            "gray": "数据不足",
+        }.get(signal, signal)
+        trigger_parts = [signal_text]
+        if current_pct is not None:
+            trigger_parts.append(f"当前分位 {float(current_pct):.0f}%")
+        if target_pct is not None:
+            trigger_parts.append(f"目标分位 {float(target_pct):.0f}%")
+        if item.get("distance_to_buy") is not None:
+            trigger_parts.append(f"距上车价 {float(item.get('distance_to_buy')):+.1f}%")
+        elif item.get("target_price") is not None:
             trigger_parts.append(f"目标净值 {item.get('target_price')}")
-        if item.get("target_percentile") is not None:
-            trigger_parts.append(f"目标分位 {item.get('target_percentile')}%")
-        trigger = "，".join(trigger_parts) if trigger_parts else "未设置触发条件"
-        lines.append(f"- {item.get('fund_name') or item.get('fund_code')}（{item.get('fund_code')}）：{trigger}")
+        if item.get("nav_updated_at"):
+            trigger_parts.append(f"更新 {str(item.get('nav_updated_at'))[:16]}")
+        lines.append(
+            f"- {item.get('fund_name') or item.get('fund_code')}（{item.get('fund_code')}）："
+            + "，".join(trigger_parts)
+        )
     return "\n".join(lines)
+
+
+def _build_opportunity_context(user_id: str = "default", limit: int = 5, evidence: dict | None = None) -> str:
+    items = []
+    if evidence:
+        try:
+            items = (evidence.get("opportunity") or {}).get("opportunity_items", [])
+        except Exception:
+            items = []
+    if not items:
+        try:
+            from db.opportunities import list_opportunities
+
+            items = list_opportunities(user_id=user_id, limit=limit)
+        except Exception:
+            items = []
+    if not items:
+        return "暂无主题机会。"
+
+    lines = ["### 主题机会"]
+    for item in items:
+        funds = item.get("matched_funds") or []
+        fund_text = "、".join(
+            f"{f.get('fund_name') or f.get('fund_code')}" for f in funds[:2] if f
+        )
+        entry = item.get("entry_plan") or {}
+        if not entry and item.get("entry_action"):
+            entry = {"action": item.get("entry_action")}
+        lines.append(
+            f"- {item.get('theme')}: {item.get('verdict')} / {item.get('opportunity_score', 0):.0f}分"
+            + (f" / {fund_text}" if fund_text else "")
+            + (f" / {entry.get('action')}" if entry.get("action") else "")
+        )
+    return "\n".join(lines)
+
+
+def _build_shared_evidence_context(user_id: str = "default", query: str = "", scenario_type: str = "general_analysis", limit: int = 5, evidence: dict | None = None) -> str:
+    """统一证据层：市场、决策、知识库、回归验证的共享摘要。"""
+    try:
+        if evidence is None:
+            from services.unified_evidence import build_unified_evidence
+
+            evidence = build_unified_evidence(
+                user_id=user_id,
+                query=query,
+                scenario_type=scenario_type,
+                limit=limit,
+            )
+        return evidence.get("prompt_context", "") or "暂无共享证据。"
+    except Exception:
+        return "暂无共享证据。"
 
 
 def _build_user_profile_context(user_id: str = "default") -> str:
@@ -135,6 +210,8 @@ def _build_missing_context(scenario_type: str, sections: dict[str, str]) -> str:
             missing.append("风险偏好/现金流画像")
     if "用户当前无持仓记录" in sections.get("portfolio_context", ""):
         missing.append("当前持仓")
+    if scenario_type in {"buy_decision", "sell_decision", "portfolio_review"} and "暂无主题机会" in sections.get("opportunity_context", ""):
+        missing.append("主题机会")
     if not missing:
         return "暂无明显缺失。"
     return "、".join(dict.fromkeys(missing))
@@ -337,6 +414,9 @@ def _compose_prompt_context(sections: dict[str, str], current_user_message: str,
         ("最近对话", sections.get("recent_messages", "")),
         ("近期决策", sections.get("decision_context", "")),
         ("关注列表", sections.get("watchlist_context", "")),
+        ("主题机会", sections.get("opportunity_context", "")),
+        ("市场雷达", sections.get("event_radar_context", "")),
+        ("共享证据", sections.get("shared_evidence_context", "")),
         ("近期标的变化", sections.get("entity_memory", "")),  # 增强4: 实体记忆
         ("交易行为数据", sections.get("trade_pattern_context", "")),
         ("对话上下文", sections.get("conversation_state", "")),
@@ -355,6 +435,8 @@ def _compose_prompt_context(sections: dict[str, str], current_user_message: str,
             body = _clip(body, max(1200, max_chars // 5))
         elif title == "最近对话":
             body = _clip(body, max(1200, max_chars // 4))
+        elif title == "共享证据":
+            body = _clip(body, max(1500, max_chars // 4))
         parts.append(f"## {title}\n{body}")
     return _clip("\n\n".join(parts), max_chars)
 
@@ -381,15 +463,36 @@ def build_conversation_context(
     if up_to_message_id:
         messages = [m for m in messages if (m.get("id") or 0) > up_to_message_id]
 
+    shared_evidence = {}
+    try:
+        from services.unified_evidence import build_unified_evidence
+
+        shared_evidence = build_unified_evidence(
+            user_id=user_id,
+            query=current_user_message,
+            scenario_type=scenario_type,
+            limit=recent_limit,
+        )
+    except Exception:
+        shared_evidence = {}
+
     sections = {
         "conversation_summary": summary_text or "暂无历史摘要。",
         "recent_messages": _format_recent_messages(messages),
         "portfolio_context": build_portfolio_context(user_id=user_id),
         "valuation_context": build_valuation_summary() or "暂无估值摘要。",
         "decision_context": _build_decision_context(user_id=user_id),
-        "watchlist_context": _build_watchlist_context(user_id=user_id),
+        "watchlist_context": _build_watchlist_context(user_id=user_id, evidence=shared_evidence),
+        "opportunity_context": _build_opportunity_context(user_id=user_id, evidence=shared_evidence),
         "user_profile_context": _build_user_profile_context(user_id=user_id),
         "rag_context": rag_context or "暂无额外知识库证据。",
+        "shared_evidence_context": _build_shared_evidence_context(
+            user_id=user_id,
+            query=current_user_message,
+            scenario_type=scenario_type,
+            limit=recent_limit,
+            evidence=shared_evidence,
+        ),
         "change_context": _build_change_context(user_id=user_id),
         "entity_memory": _build_entity_memory_context(),  # 增强4: 实体记忆
         "trade_pattern_context": _build_trade_pattern_context(user_id=user_id),
@@ -437,27 +540,27 @@ def build_conversation_context(
 # 每个 Agent 允许接收的上下文 section 关键词（按 ## 标题匹配）
 # 未列出的 agent_key 不过滤（保留全部上下文，如 arbitrator）
 CONTEXT_FILTERS: dict[str, list[str]] = {
-    "risk_assessor":        ["持仓", "估值", "债市", "资金", "事件", "结构化数据"],
-    "valuation_expert":     ["持仓", "估值", "结构化数据"],
-    "allocation_advisor":   ["持仓", "估值", "资金", "知识库", "DCA", "结构化数据"],
-    "market_analyst":       ["估值", "热点", "资金", "事件", "知识库", "结构化数据"],
-    "fund_analyst":         ["持仓", "估值", "事件", "知识库", "DCA", "结构化数据"],
-    "macro_strategist":     ["估值", "热点", "宏观", "资金", "事件", "知识库", "债市"],
-    "article_expert":       ["持仓", "估值", "事件", "知识库", "结构化数据"],
+    "risk_assessor":        ["持仓", "估值", "债市", "资金", "事件", "市场雷达", "主题机会", "共享证据", "结构化数据"],
+    "valuation_expert":     ["持仓", "估值", "共享证据", "结构化数据"],
+    "allocation_advisor":   ["持仓", "估值", "资金", "事件", "市场雷达", "主题机会", "知识库", "共享证据", "DCA", "结构化数据"],
+    "market_analyst":       ["估值", "热点", "资金", "事件", "市场雷达", "主题机会", "知识库", "共享证据", "结构化数据"],
+    "fund_analyst":         ["持仓", "估值", "事件", "知识库", "共享证据", "DCA", "结构化数据"],
+    "macro_strategist":     ["估值", "热点", "宏观", "资金", "事件", "市场雷达", "主题机会", "知识库", "共享证据", "债市"],
+    "article_expert":       ["持仓", "估值", "事件", "知识库", "共享证据", "结构化数据"],
 }
 
 # section 优先级（同列表内越靠前越重要，预算紧张时先保留）
 CONTEXT_PRIORITY: dict[str, list[str]] = {
-    "risk_assessor":        ["持仓", "估值", "债市", "资金", "事件", "结构化数据"],
-    "valuation_expert":     ["估值", "持仓", "结构化数据"],
-    "allocation_advisor":   ["持仓", "估值", "资金", "知识库", "DCA", "结构化数据"],
-    "market_analyst":       ["热点", "估值", "资金", "事件", "知识库", "结构化数据"],
-    "macro_strategist":     ["宏观", "资金", "事件", "估值", "热点", "债市", "知识库"],
-    "article_expert":       ["事件", "持仓", "估值", "知识库", "结构化数据"],
+    "risk_assessor":        ["持仓", "估值", "共享证据", "债市", "资金", "事件", "市场雷达", "主题机会", "结构化数据"],
+    "valuation_expert":     ["估值", "共享证据", "持仓", "结构化数据"],
+    "allocation_advisor":   ["持仓", "估值", "共享证据", "资金", "事件", "市场雷达", "主题机会", "知识库", "DCA", "结构化数据"],
+    "market_analyst":       ["市场雷达", "共享证据", "主题机会", "热点", "估值", "资金", "事件", "知识库", "结构化数据"],
+    "macro_strategist":     ["共享证据", "宏观", "市场雷达", "主题机会", "资金", "事件", "估值", "热点", "债市", "知识库"],
+    "article_expert":       ["事件", "共享证据", "持仓", "估值", "知识库", "结构化数据"],
 }
 
 # 通用兜底 section（预算没用完 70% 时补充）
-_FALLBACK_SECTIONS = ["知识库", "结构化数据"]
+_FALLBACK_SECTIONS = ["共享证据", "知识库", "结构化数据"]
 
 
 def _split_sections_by_header(context_str: str) -> list[tuple[str, str]]:
@@ -651,15 +754,44 @@ def _build_capital_flow_context() -> str:
 def _build_event_radar_context() -> str:
     """事件雷达（前瞻性事件）。"""
     try:
-        from db.market_events import list_active_events
+        from db.market_events import list_active_events, list_verified_events
         active_events = list_active_events()
-        if active_events:
-            lines = ["## 事件雷达"]
-            for ev in active_events[:5]:
-                title = ev.get("event_title", ev.get("title", ""))
-                sector = ev.get("sector", "")
-                lines.append(f"- {title} [{sector}]")
-            return "\n".join(lines)
+        verified_events = list_verified_events(limit=50)
+        lines = ["### 市场雷达"]
+
+        if verified_events:
+            correct = wrong = flat = 0
+            for ev in verified_events:
+                try:
+                    result = __import__("json").loads(ev.get("verification_result") or "{}")
+                except Exception:
+                    result = {}
+                status = result.get("status", "flat")
+                if status == "correct":
+                    correct += 1
+                elif status == "wrong":
+                    wrong += 1
+                else:
+                    flat += 1
+            total = correct + wrong + flat
+            accuracy = round(correct / max(correct + wrong, 1) * 100, 1) if total else 0
+            lines.append(f"- 已验证事件：{total} 个，正确 {correct}，偏差 {wrong}，平 {flat}，准确率 {accuracy}%")
+
+        for ev in active_events[:5]:
+            title = ev.get("title", "")
+            if not title:
+                continue
+            sectors = ev.get("affected_sectors") or "[]"
+            try:
+                sector_list = __import__("json").loads(sectors)
+            except Exception:
+                sector_list = []
+            sector_text = "、".join(sector_list[:3]) if sector_list else "无"
+            lines.append(
+                f"- {title} | {ev.get('status', '')} | {ev.get('direction', '')} | "
+                f"{float(ev.get('confidence', 0) or 0) * 100:.0f}% | {ev.get('relevance_to_user', '')} | {sector_text}"
+            )
+        return "\n".join(lines)
     except Exception:
         pass
     return ""

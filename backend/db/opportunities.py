@@ -256,17 +256,41 @@ def mark_opportunity_bought(opportunity_id: int, fund_code: str, amount: float =
     if not item:
         raise ValueError("机会不存在")
     review_date = (item.get("exit_plan") or {}).get("review_date")
+    entry_price = None
+    entry_shares = None
+    if transaction_id:
+        try:
+            from db.portfolio import get_transaction, get_holding_by_fund
+
+            tx = get_transaction(transaction_id)
+            if tx:
+                entry_price = tx.get("price")
+                entry_shares = tx.get("shares")
+                if not amount:
+                    amount = tx.get("amount") or 0
+                if not review_date and tx.get("transaction_date"):
+                    review_date = tx.get("transaction_date")
+            holding = get_holding_by_fund(fund_code, user_id=user_id)
+            current_price = (holding or {}).get("current_price")
+        except Exception:
+            current_price = None
+    else:
+        current_price = None
     conn = _get_conn()
     cur = conn.execute("""
         INSERT INTO theme_opportunity_tracks
-            (opportunity_id, fund_code, transaction_id, entry_date, entry_amount, review_due_date, last_checked_at)
-        VALUES (?, ?, ?, ?, ?, ?, datetime('now','localtime'))
+            (opportunity_id, fund_code, transaction_id, entry_date, entry_amount, entry_price, entry_shares,
+             current_price, review_due_date, last_checked_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now','localtime'))
     """, (
         opportunity_id,
         fund_code,
         transaction_id,
         datetime.now().strftime("%Y-%m-%d"),
         amount,
+        entry_price,
+        entry_shares,
+        current_price,
         review_date,
     ))
     conn.commit()
@@ -274,3 +298,187 @@ def mark_opportunity_bought(opportunity_id: int, fund_code: str, amount: float =
     conn.close()
     update_opportunity_status(opportunity_id, "bought")
     return track_id
+
+
+def _refresh_track_metrics(track: dict) -> dict:
+    """基于交易与当前净值刷新机会跟踪收益率。"""
+    track = dict(track)
+    performance = _calculate_track_performance(track)
+    if performance.get("current_price") is not None:
+        track.update(performance)
+    if not track.get("transaction_id"):
+        return track
+    try:
+        fields = {k: v for k, v in performance.items() if v is not None}
+        if "current_price" not in fields and performance.get("current_price") is None:
+            fields["current_price"] = track.get("current_price")
+        if not fields:
+            return track
+        conn = _get_conn()
+        set_sql = ", ".join([f"{key} = ?" for key in fields.keys()])
+        conn.execute(
+            f"UPDATE theme_opportunity_tracks SET {set_sql}, last_checked_at = datetime('now','localtime') WHERE id = ?",
+            (*fields.values(), track["id"]),
+        )
+        conn.commit()
+        conn.close()
+        track.update(fields)
+        return track
+    except Exception:
+        return track
+
+
+def _calculate_track_performance(track: dict) -> dict:
+    """计算机会跟踪的当前收益，不负责落库。"""
+    if not track.get("transaction_id"):
+        return {}
+    try:
+        from db.portfolio import get_transaction, get_holding_by_fund
+
+        tx = get_transaction(track["transaction_id"])
+        if not tx:
+            return {}
+        entry_price = tx.get("price") or track.get("entry_price")
+        entry_amount = tx.get("amount") or track.get("entry_amount") or 0
+        entry_shares = tx.get("shares") or track.get("entry_shares") or 0
+        current_price = track.get("current_price")
+        holding = get_holding_by_fund(track.get("fund_code") or "", user_id=track.get("user_id") or "default")
+        if holding and holding.get("current_price") is not None:
+            current_price = holding.get("current_price")
+
+        current_return_pct = None
+        if entry_price and current_price and entry_price > 0 and current_price > 0:
+            current_return_pct = round(((current_price - entry_price) / entry_price) * 100, 2)
+        elif entry_amount and entry_shares and current_price and current_price > 0:
+            current_value = entry_shares * current_price
+            current_return_pct = round(((current_value - entry_amount) / entry_amount) * 100, 2)
+        fields = {"current_price": current_price}
+        if current_return_pct is not None:
+            fields["current_return_pct"] = current_return_pct
+            if current_return_pct > (track.get("max_return_pct") or 0):
+                fields["max_return_pct"] = current_return_pct
+            if current_return_pct < 0:
+                existing_drawdown = abs(track.get("max_drawdown_pct") or 0)
+                fields["max_drawdown_pct"] = max(existing_drawdown, abs(current_return_pct))
+        return fields
+    except Exception:
+        return {}
+
+
+def list_opportunity_tracks(user_id: str = "default", limit: int = 20) -> list[dict]:
+    """列出机会跟踪记录，带上机会卡摘要。"""
+    conn = _get_conn()
+    rows = conn.execute("""
+        SELECT
+            t.*,
+            o.user_id AS opportunity_user_id,
+            o.trade_date,
+            o.theme,
+            o.verdict,
+            o.opportunity_score,
+            o.summary,
+            o.policy_signal,
+            o.future_direction,
+            o.exit_plan_json,
+            o.status AS opportunity_status
+        FROM theme_opportunity_tracks t
+        JOIN theme_opportunities o ON o.id = t.opportunity_id
+        WHERE o.user_id = ?
+        ORDER BY COALESCE(t.last_checked_at, t.created_at) DESC, t.id DESC
+        LIMIT ?
+    """, (user_id, limit)).fetchall()
+    conn.close()
+
+    items = []
+    for row in rows:
+        item = dict(row)
+        item["exit_plan"] = _json_loads(item.pop("exit_plan_json", ""), {})
+        items.append(item)
+    return items
+
+
+def get_opportunity_track_stats(user_id: str = "default", limit: int = 10) -> dict:
+    """汇总机会跟踪状态，用于共享证据和复盘提示。"""
+    conn = _get_conn()
+    today = datetime.now().strftime("%Y-%m-%d")
+    joined = conn.execute("""
+        SELECT
+            t.id,
+            t.fund_code,
+            t.transaction_id,
+            t.entry_price,
+            t.entry_amount,
+            t.entry_shares,
+            t.current_price,
+            t.review_due_date,
+            t.exit_triggered,
+            t.current_return_pct,
+            t.max_return_pct,
+            t.max_drawdown_pct,
+            t.last_checked_at,
+            o.status AS opportunity_status,
+            o.user_id AS user_id,
+            o.theme,
+            o.opportunity_score
+        FROM theme_opportunity_tracks t
+        JOIN theme_opportunities o ON o.id = t.opportunity_id
+        WHERE o.user_id = ?
+    """, (user_id,)).fetchall()
+    conn.close()
+
+    total = len(joined)
+    due_reviews = 0
+    open_tracks = 0
+    bought_tracks = 0
+    exited_tracks = 0
+    returns = []
+    evaluated_tracks = 0
+    positive_tracks = 0
+    recent_items = []
+
+    for row in joined:
+        track = dict(row)
+        track.update(_calculate_track_performance(track))
+        track = _refresh_track_metrics(track)
+        review_due_date = track["review_due_date"]
+        current_return_pct = track.get("current_return_pct")
+        if row["exit_triggered"]:
+            exited_tracks += 1
+        if row["opportunity_status"] == "bought":
+            bought_tracks += 1
+        if row["opportunity_status"] in ("watching", "bought"):
+            open_tracks += 1
+        if review_due_date and str(review_due_date) <= today and not row["exit_triggered"]:
+            due_reviews += 1
+        if current_return_pct is not None:
+            returns.append(float(current_return_pct))
+            evaluated_tracks += 1
+            if current_return_pct > 0:
+                positive_tracks += 1
+        if len(recent_items) < limit:
+            recent_items.append({
+                "track_id": track["id"],
+                "theme": track["theme"],
+                "opportunity_score": track["opportunity_score"],
+                "review_due_date": review_due_date,
+                "exit_triggered": bool(track["exit_triggered"]),
+                "current_return_pct": track.get("current_return_pct"),
+                "max_return_pct": track.get("max_return_pct"),
+                "max_drawdown_pct": track.get("max_drawdown_pct"),
+                "last_checked_at": track.get("last_checked_at"),
+                "opportunity_status": track["opportunity_status"],
+            })
+
+    average_return = round(sum(returns) / len(returns), 2) if returns else None
+    return {
+        "total": total,
+        "open_tracks": open_tracks,
+        "bought_tracks": bought_tracks,
+        "exited_tracks": exited_tracks,
+        "due_reviews": due_reviews,
+        "evaluated_tracks": evaluated_tracks,
+        "positive_tracks": positive_tracks,
+        "hit_rate": round((positive_tracks / evaluated_tracks) * 100, 1) if evaluated_tracks else None,
+        "average_return_pct": average_return,
+        "recent_items": recent_items,
+    }

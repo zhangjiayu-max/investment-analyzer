@@ -17,6 +17,12 @@ from datetime import datetime
 from enum import Enum
 from typing import Optional, Callable
 
+from agent.core.task_planner import (
+    classify_question_type,
+    build_shared_evidence_keys,
+    build_arbitration_mode,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -66,6 +72,9 @@ class AnalysisPlan:
     user_query: str
     refined_query: str
     complexity: str            # simple | medium | complex
+    question_type: str = "generic"
+    arbitration_mode: str = "if_complex"
+    shared_evidence_keys: list[str] = field(default_factory=list)
     reasoning: str = ""        # 规划理由（LLM 生成）
     steps: list[PlanStep] = field(default_factory=list)
     status: PlanStatus = PlanStatus.PENDING
@@ -102,6 +111,9 @@ class AnalysisPlan:
             "user_query": self.user_query,
             "refined_query": self.refined_query,
             "complexity": self.complexity,
+            "question_type": self.question_type,
+            "arbitration_mode": self.arbitration_mode,
+            "shared_evidence_keys": self.shared_evidence_keys,
             "reasoning": self.reasoning,
             "steps": [
                 {
@@ -198,6 +210,9 @@ def generate_plan(
         valid_routed = [k for k in routed_specialists if k in available_keys]
         if valid_routed:
             logger.info(f"[trace:{trace_id}] P4 使用路由结果生成 plan: {valid_routed} (跳过 LLM)")
+            question_type = classify_question_type(user_query)
+            arbitration_mode = build_arbitration_mode(question_type, complexity, len(valid_routed))
+            shared_evidence_keys = build_shared_evidence_keys(question_type, complexity)
             # 构造 plan_data，最多 3 个专家
             valid_routed = valid_routed[:3]
             steps_data = []
@@ -211,10 +226,19 @@ def generate_plan(
                     "agent_key": agent_key,
                     "agent_name": agent_name,
                     "query": refined_query,
+                    "sub_query": refined_query,
+                    "allowed_tools": next(
+                        (s.get("tools", []) for s in available_specialists if s["agent_key"] == agent_key),
+                        [],
+                    ),
+                    "needs_debate": question_type == "action" and agent_key in ("risk_assessor", "allocation_advisor"),
                     "depends_on": [],
                 })
             plan_data = {
                 "reasoning": f"路由命中专家: {valid_routed}",
+                "question_type": question_type,
+                "arbitration_mode": arbitration_mode,
+                "shared_evidence_keys": shared_evidence_keys,
                 "steps": steps_data,
             }
             # 直接构造 AnalysisPlan，跳过 LLM
@@ -234,6 +258,9 @@ def generate_plan(
                 user_query=user_query,
                 refined_query=refined_query,
                 complexity=complexity,
+                question_type=question_type,
+                arbitration_mode=arbitration_mode,
+                shared_evidence_keys=shared_evidence_keys,
                 reasoning=plan_data["reasoning"],
                 steps=steps,
                 status=PlanStatus.PENDING,
@@ -284,8 +311,12 @@ def generate_plan(
 
     # 降级：所有专家顺序执行
     if not plan_data:
+        question_type = classify_question_type(refined_query or user_query)
         plan_data = {
             "reasoning": "Plan 生成失败，降级为全量顺序执行",
+            "question_type": question_type,
+            "arbitration_mode": build_arbitration_mode(question_type, complexity, min(len(available_specialists[:3]), 3)),
+            "shared_evidence_keys": build_shared_evidence_keys(question_type, complexity),
             "steps": [
                 {"step_id": i + 1, "agent_key": s["agent_key"],
                  "query": refined_query, "sub_query": refined_query,
@@ -307,7 +338,8 @@ def generate_plan(
             query=s.get("query", refined_query),
             sub_query=s.get("sub_query", ""),
             allowed_tools=s.get("allowed_tools", []),
-            needs_debate=bool(s.get("needs_debate", False)),
+            needs_debate=bool(s.get("needs_debate", False))
+            or (plan_data.get("question_type") == "action" and s.get("agent_key") in ("risk_assessor", "allocation_advisor")),
             depends_on=s.get("depends_on", []),
         )
         for s in plan_data.get("steps", [])
@@ -326,6 +358,15 @@ def generate_plan(
         user_query=user_query,
         refined_query=refined_query,
         complexity=complexity,
+        question_type=plan_data.get("question_type", classify_question_type(refined_query or user_query)),
+        arbitration_mode=plan_data.get(
+            "arbitration_mode",
+            build_arbitration_mode(classify_question_type(refined_query or user_query), complexity, len(steps)),
+        ),
+        shared_evidence_keys=plan_data.get(
+            "shared_evidence_keys",
+            build_shared_evidence_keys(classify_question_type(refined_query or user_query), complexity),
+        ),
         reasoning=plan_data.get("reasoning", ""),
         steps=steps,
         status=PlanStatus.PENDING,
@@ -364,6 +405,18 @@ def execute_plan(
     plan.status = PlanStatus.RUNNING
     specialist_results: list[dict] = []
     all_tool_calls: list[dict] = []
+
+    def _build_step_context(step: PlanStep) -> str:
+        """为单个步骤构造共享上下文，尽量减少并行分支的信息割裂。"""
+        ctx = prebuilt_context
+        if blackboard and blackboard.entry_count > 0:
+            try:
+                bb_summary = blackboard.to_context_text(exclude_agent=step.agent_key)
+                if bb_summary:
+                    ctx = prebuilt_context + "\n\n" + bb_summary
+            except Exception as e:
+                logger.debug(f"[trace:{plan.trace_id}] 构造步骤上下文失败: {e}")
+        return ctx
 
     # 步骤数上限保护
     MAX_STEPS = 8
@@ -425,17 +478,10 @@ def execute_plan(
             if convergence_detector:
                 convergence_detector.record_call(step.agent_key, step.query)
             try:
-                # 注入黑板摘要到上下文（Pipeline 扩展）
-                ctx = prebuilt_context
-                if blackboard and blackboard.entry_count > 0:
-                    bb_summary = blackboard.to_context_text(exclude_agent=step.agent_key)
-                    if bb_summary:
-                        ctx = prebuilt_context + "\n\n" + bb_summary
-
                 result = run_specialist(
                     agent_key=step.agent_key,
                     query=step.query,
-                    prebuilt_context=ctx,
+                    prebuilt_context=_build_step_context(step),
                     trace_id=plan.trace_id,
                 )
                 step.result = result
@@ -488,7 +534,7 @@ def execute_plan(
                         run_specialist,
                         agent_key=step.agent_key,
                         query=step.query,
-                        prebuilt_context=prebuilt_context,
+                        prebuilt_context=_build_step_context(step),
                         trace_id=plan.trace_id,
                     )
                     future_map[future] = step

@@ -1183,6 +1183,10 @@ export function getTodayOpportunities(limit = 8) {
   return api.get('/opportunities/today', { params: { limit } })
 }
 
+export function getOpportunityStats(limit = 10) {
+  return api.get('/opportunities/stats', { params: { limit } })
+}
+
 export function scanDailyOpportunities(data = {}) {
   return api.post('/opportunities/daily-scan', data, { timeout: 120000 })
 }

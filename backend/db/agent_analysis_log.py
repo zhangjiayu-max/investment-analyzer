@@ -11,10 +11,13 @@ from db._conn import _get_conn
 logger = logging.getLogger(__name__)
 
 
-def init_table():
+def init_table(conn=None):
     """建表（由 init_db 调用）。"""
-    conn = _get_conn()
-    conn.execute("""
+    own_conn = conn is None
+    if own_conn:
+        conn = _get_conn()
+    try:
+        conn.execute("""
         CREATE TABLE IF NOT EXISTS agent_analysis_log (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             trace_id TEXT UNIQUE NOT NULL,
@@ -34,13 +37,15 @@ def init_table():
             created_at TEXT DEFAULT (datetime('now','localtime')),
             completed_at TEXT
         )
-    """)
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_aal_agent ON agent_analysis_log(agent_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_aal_type ON agent_analysis_log(analysis_type)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_aal_created ON agent_analysis_log(created_at DESC)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_aal_trace ON agent_analysis_log(trace_id)")
-    conn.commit()
-    conn.close()
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_aal_agent ON agent_analysis_log(agent_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_aal_type ON agent_analysis_log(analysis_type)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_aal_created ON agent_analysis_log(created_at DESC)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_aal_trace ON agent_analysis_log(trace_id)")
+        conn.commit()
+    finally:
+        if own_conn:
+            conn.close()
 
 
 def create_analysis_log(trace_id: str, analysis_type: str, source_table: str,

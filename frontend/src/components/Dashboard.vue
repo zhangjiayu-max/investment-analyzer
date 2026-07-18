@@ -1,6 +1,6 @@
 <script setup>
 import { ref, computed, onMounted, onActivated, onDeactivated } from 'vue'
-import { getDashboard, runAnalysis, runPanoramaAnalysis, pollPanoramaStatus, getHotTopics, getDailyReport, getDailyReportTask, regenerateDailyReport, submitDailyReportFeedback, listPanoramaRecords, triggerHotspotsAnalysis, getLatestHotspotsAnalysis, getRecommendations, getRecommendationStats, submitRecommendationFeedback, getBondRecommend, listBondRecommendRecords, autoVerifyRecommendations, fetchRecentValuations, getBondMarketTemperature, getHotspotsRelate, getRebalancingSuggestion, listTodayDecisions, updateDecisionStatus, completeDecisionAction, listDueDecisionReviews, submitDecisionReview, getDecisionPrecheck, getTodayOpportunities, scanDailyOpportunities, createDecisionFromOpportunity, watchOpportunity, dailyAdviceAPI } from '../api'
+import { getDashboard, runAnalysis, runPanoramaAnalysis, pollPanoramaStatus, getHotTopics, getDailyReport, getDailyReportTask, regenerateDailyReport, submitDailyReportFeedback, listPanoramaRecords, triggerHotspotsAnalysis, getLatestHotspotsAnalysis, getRecommendations, getRecommendationStats, submitRecommendationFeedback, getBondRecommend, listBondRecommendRecords, autoVerifyRecommendations, fetchRecentValuations, getBondMarketTemperature, getHotspotsRelate, getRebalancingSuggestion, listTodayDecisions, updateDecisionStatus, completeDecisionAction, listDueDecisionReviews, submitDecisionReview, getDecisionPrecheck, getTodayOpportunities, getOpportunityStats, scanDailyOpportunities, createDecisionFromOpportunity, watchOpportunity, dailyAdviceAPI } from '../api'
 import GaugeChart from './charts/GaugeChart.vue'
 import ConfirmDialog from './layout/ConfirmDialog.vue'
 import AppToast from './layout/AppToast.vue'
@@ -16,6 +16,7 @@ import UndervaluedIndexesCard from './dashboard/UndervaluedIndexesCard.vue'
 import PortfolioHealthCard from './dashboard/PortfolioHealthCard.vue'
 import HotspotsCard from './dashboard/HotspotsCard.vue'
 import CashManagementCard from './dashboard/CashManagementCard.vue'
+import SharedSignalsCard from './shared/SharedSignalsCard.vue'
 import DecisionActionList from './dashboard/DecisionActionList.vue'
 import DecisionReviewList from './dashboard/DecisionReviewList.vue'
 import MarketOverviewCard from './dashboard/MarketOverviewCard.vue'
@@ -55,6 +56,7 @@ const decisionsLoading = ref(false)
 const precheckStates = ref({})
 const decisionReviews = ref([])
 const decisionReviewsLoading = ref(false)
+const sharedSignals = computed(() => data.value?.shared_signals || null)
 
 // ── 市场热点（自动加载+AI增强） ──
 const hotTopics = ref(null)
@@ -63,6 +65,7 @@ const hotTopicsLoading = ref(true)
 const hotspotsRelate = ref(null)
 const opportunities = ref([])
 const opportunitiesLoading = ref(false)
+const opportunityStats = ref(null)
 
 // ── 决策画布开关 ──
 const showDecisionCanvas = ref(false)
@@ -418,10 +421,15 @@ async function loadHotTopics() {
 async function loadOpportunities() {
   opportunitiesLoading.value = true
   try {
-    const { data: res } = await getTodayOpportunities()
+    const [{ data: res }, { data: stats }] = await Promise.all([
+      getTodayOpportunities(),
+      getOpportunityStats(),
+    ])
     opportunities.value = res.items || []
+    opportunityStats.value = stats
   } catch (e) {
     opportunities.value = []
+    opportunityStats.value = null
   } finally {
     opportunitiesLoading.value = false
   }
@@ -811,6 +819,12 @@ function handlePanorama() {
       @submit-feedback="handleBriefingSubmitFeedback"
     />
 
+    <SharedSignalsCard
+      v-if="sharedSignals"
+      class="reveal-stagger"
+      :signals="sharedSignals"
+    />
+
     <!-- 市场行情总览（环境背景） -->
     <MarketOverviewCard class="reveal-stagger" />
 
@@ -926,6 +940,7 @@ function handlePanorama() {
         :opportunities="opportunities"
         :opportunities-loading="opportunitiesLoading"
         :hotspots-relate="hotspotsRelate || []"
+        :opportunity-stats="opportunityStats"
         :rec-history="recHistory"
         :rec-stats="recStats"
         :show-verify="showVerify"

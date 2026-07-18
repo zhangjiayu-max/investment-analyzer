@@ -9,6 +9,7 @@ import {
 import { useToast } from '../../composables/useToast'
 import Icon from '../ui/Icon.vue'
 import ConfirmDialog from '../layout/ConfirmDialog.vue'
+import SharedSignalsCard from '../shared/SharedSignalsCard.vue'
 
 const { showToast } = useToast()
 
@@ -21,6 +22,7 @@ const draftingDecisionId = ref(null)
 const candidates = ref([])
 const decisionStats = ref(null)
 const candidateActionId = ref(null)
+const sharedSignals = computed(() => decisionStats.value?.shared_signals || null)
 
 // ── 筛选 ──
 const activeFilter = ref('all')  // all | proposed | accepted | executed | reviewed | rejected
@@ -447,6 +449,12 @@ onMounted(load)
         刷新
       </button>
     </header>
+
+    <SharedSignalsCard
+      v-if="sharedSignals"
+      :signals="sharedSignals"
+      compact
+    />
 
     <!-- 统计条 -->
     <section class="stats-strip">

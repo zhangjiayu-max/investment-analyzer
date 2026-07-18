@@ -159,6 +159,7 @@ from db.opportunities import (
     init_opportunity_tables, save_opportunity, get_opportunity,
     list_opportunities, update_opportunity_status,
     create_decision_from_opportunity, mark_opportunity_bought,
+    list_opportunity_tracks, get_opportunity_track_stats,
 )
 
 # 前瞻性事件雷达
@@ -950,7 +951,7 @@ def init_db():
 
     # 初始化分析 Agent 统一记录表
     from db.agent_analysis_log import init_table as init_analysis_log_table
-    init_analysis_log_table()
+    init_analysis_log_table(conn)
 
     # 初始化健康分表
     from db.health_score import init_health_score_tables

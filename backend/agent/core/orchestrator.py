@@ -24,6 +24,11 @@ from db.config import get_config, get_config_int, get_config_float
 from agent.infra.orchestrator_optimizer import OrchestratorOptimizer, ParallelExecutor
 from agent.infra.cache import expert_cache
 from services.conversation_context import record_entity_snapshots
+from agent.core.task_planner import (
+    classify_question_type,
+    build_shared_evidence_keys,
+    build_arbitration_mode,
+)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -125,6 +130,61 @@ def _check_dynamic_spawn(result: dict, already_called: set[str]) -> list[dict]:
         except Exception:
             pass
     return suggestions
+
+
+def _enrich_clarification_result(query: str, complexity: str, specialists: list[str], result: dict) -> dict:
+    """补充任务规划元数据，避免澄清结果和计划阶段语义割裂。"""
+    try:
+        from agent.core.task_planner import (
+            classify_question_type,
+            build_shared_evidence_keys,
+            build_arbitration_mode,
+        )
+        question_type = classify_question_type(query)
+        result["question_type"] = question_type
+        result["shared_evidence_keys"] = build_shared_evidence_keys(question_type, complexity)
+        result["arbitration_mode"] = build_arbitration_mode(question_type, complexity, len(specialists or []))
+    except Exception as e:
+        logger.debug(f"补充澄清元数据失败: {e}")
+    return result
+
+
+def _build_flow_metadata(
+    query: str,
+    complexity: str,
+    specialists_count: int = 0,
+    active_plan=None,
+    route_result: dict | None = None,
+    clarification: dict | None = None,
+) -> dict:
+    """统一构造问题类型、仲裁模式、共享证据池元数据。"""
+    route_result = route_result or {}
+    clarification = clarification or {}
+
+    question_type = (
+        getattr(active_plan, "question_type", None)
+        or route_result.get("question_type")
+        or clarification.get("question_type")
+        or classify_question_type(query)
+    )
+    arbitration_mode = (
+        getattr(active_plan, "arbitration_mode", None)
+        or route_result.get("arbitration_mode")
+        or clarification.get("arbitration_mode")
+        or build_arbitration_mode(question_type, complexity, specialists_count)
+    )
+    shared_evidence_keys = (
+        getattr(active_plan, "shared_evidence_keys", None)
+        or route_result.get("shared_evidence_keys")
+        or clarification.get("shared_evidence_keys")
+        or build_shared_evidence_keys(question_type, complexity)
+    )
+
+    return {
+        "question_type": question_type,
+        "arbitration_mode": arbitration_mode,
+        "shared_evidence_keys": shared_evidence_keys,
+    }
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -551,7 +611,7 @@ def _build_dca_rules() -> str:
 
 
 def _build_final_synthesis_prompt(specialist_results: list, routed_specialists: list, blackboard=None,
-                                 cross_review_performed: bool = False) -> str:
+                                 cross_review_performed: bool = False, plan=None) -> str:
     """构建最终综合提示，强制 LLM 只引用实际执行了的专家。
 
     Args:
@@ -644,6 +704,19 @@ def _build_final_synthesis_prompt(specialist_results: list, routed_specialists: 
             "- 风险提示：单独一节说明主要风险点\n"
             "- 数据表格必须标注数据来源和日期"
         )
+
+    plan_question_type = getattr(plan, "question_type", "") if plan else ""
+    plan_arbitration_mode = getattr(plan, "arbitration_mode", "") if plan else ""
+    plan_shared_evidence = getattr(plan, "shared_evidence_keys", []) if plan else []
+    if plan_question_type or plan_arbitration_mode or plan_shared_evidence:
+        prompt += "\n\n## 计划元数据"
+        if plan_question_type:
+            prompt += f"\n- 问题类型: {plan_question_type}"
+        if plan_arbitration_mode:
+            prompt += f"\n- 仲裁模式: {plan_arbitration_mode}"
+        if plan_shared_evidence:
+            prompt += f"\n- 共享证据池: {', '.join(plan_shared_evidence)}"
+        prompt += "\n回答时必须优先围绕这些元数据组织结论，不要混淆问题类型。"
 
     if routed_but_not_executed:
         from db.agents import load_specialist_agents
@@ -1814,6 +1887,7 @@ def clarify_requirement(query: str, trace_id: str = "") -> dict:
             "specialist_tasks": sop_specialist_tasks,
             "need_cross_review": sop.get("cross_review", False),
         }
+        result_out = _enrich_clarification_result(query, "complex", result_out["specialists"], result_out)
         if len(_clarification_cache) >= _CLARIFICATION_CACHE_MAX:
             _clarification_cache.pop(next(iter(_clarification_cache)))
         _clarification_cache[cache_key] = result_out
@@ -1847,6 +1921,7 @@ def clarify_requirement(query: str, trace_id: str = "") -> dict:
             "specialist_tasks": {},
             "need_cross_review": False,
         }
+        result_out = _enrich_clarification_result(query, rule_complexity, specialists, result_out)
         # 缓存结果
         if len(_clarification_cache) >= _CLARIFICATION_CACHE_MAX:
             _clarification_cache.pop(next(iter(_clarification_cache)))
@@ -1979,6 +2054,7 @@ def clarify_requirement(query: str, trace_id: str = "") -> dict:
             "specialist_tasks": specialist_tasks,
             "need_cross_review": need_cross_review,
         }
+        result_out = _enrich_clarification_result(query, complexity, specialists, result_out)
 
         # 缓存结果
         if len(_clarification_cache) >= _CLARIFICATION_CACHE_MAX:
@@ -2016,7 +2092,7 @@ def clarify_requirement(query: str, trace_id: str = "") -> dict:
             "classification_method": "smart_router_fallback",
             "specialist_tasks": {},
             "need_cross_review": False,
-        }
+        } | _enrich_clarification_result(query, complexity, specialists, {})
 
 
 # ── 任务复杂度检测(关键词匹配,作为回退方案)──────────────────────────
@@ -3415,6 +3491,7 @@ def orchestrate(query: str, history: list, rag_context: str = "", cancel_event: 
     all_tool_calls = []
     arbitration_done = False  # 标记仲裁是否已完成,避免重复调用
     route_result = None  # 路由结果，用于最终返回监控
+    active_plan = None
 
     # 升级3: Plan & Execute 模式（complex 任务默认启用并行执行，可通过配置关闭）
     _plan_done = False
@@ -3441,6 +3518,7 @@ def orchestrate(query: str, history: list, rag_context: str = "", cancel_event: 
             specialist_results, all_tool_calls = execute_plan(
                 plan=_plan, prebuilt_context=prebuilt_context, cancel_event=cancel_event,
             )
+            active_plan = _plan
             _plan_done = True
             logger.info(f"[trace:{trace_id}] Plan & Execute 完成: {len(specialist_results)} 个专家")
         except Exception as e:
@@ -3584,6 +3662,14 @@ def orchestrate(query: str, history: list, rag_context: str = "", cancel_event: 
 
                         duration_ms = int((time.time() - start_time) * 1000)
                         conflicts = detect_conflicts_smart(specialist_results, refined_query, trace_id) if not conflicts_pre.get("detected") else conflicts_pre
+                        flow_meta = _build_flow_metadata(
+                            query,
+                            complexity,
+                            len(specialist_results),
+                            active_plan=active_plan,
+                            route_result=route_result,
+                            clarification=clarification,
+                        )
                         _result = {
                             "answer": answer,
                             "specialist_results": specialist_results,
@@ -3591,6 +3677,7 @@ def orchestrate(query: str, history: list, rag_context: str = "", cancel_event: 
                             "turns": turn + 1,
                             "duration_ms": duration_ms,
                             "complexity": complexity,
+                            **flow_meta,
                             "cross_review": True,
                             "arbitration": arbitration_done,
                             "conflicts": conflicts,
@@ -3693,6 +3780,14 @@ def orchestrate(query: str, history: list, rag_context: str = "", cancel_event: 
                     "turns": turn + 1,
                     "duration_ms": duration_ms,
                     "complexity": complexity,
+                    **_build_flow_metadata(
+                        query,
+                        complexity,
+                        len(specialist_results),
+                        active_plan=active_plan,
+                        route_result=route_result,
+                        clarification=clarification,
+                    ),
                     "arbitration": arbitration_done,
                     "conflicts": conflicts,
                     "validator": validator_result,
@@ -3857,10 +3952,22 @@ def orchestrate(query: str, history: list, rag_context: str = "", cancel_event: 
 
         # 超过最大轮次,做最后一次总结
     try:
+        try:
+            from agent.core.arbitration import arbitrate_results
+            arbitration_summary = arbitrate_results(refined_query, specialist_results, plan=active_plan)
+            llm_messages.append({
+                "role": "system",
+                "content": (
+                    "以下是仲裁 Agent 的结构化裁决摘要，综合回答必须遵守：\n"
+                    f"{json.dumps(arbitration_summary, ensure_ascii=False)[:1500]}"
+                ),
+            })
+        except Exception as e:
+            logger.debug(f"[trace:{trace_id}] 注入仲裁摘要失败: {e}")
         llm_messages.append({
             "role": "user",
             "content": _build_final_synthesis_prompt(
-                specialist_results, specialists, cross_review_performed=False),
+                specialist_results, specialists, cross_review_performed=bool(cross_review_results), plan=active_plan),
         })
         response = _call_llm(
             caller="orchestrator",
@@ -3911,6 +4018,14 @@ def orchestrate(query: str, history: list, rag_context: str = "", cancel_event: 
         "turns": MAX_TURNS,
         "duration_ms": duration_ms,
         "complexity": complexity,
+        **_build_flow_metadata(
+            query,
+            complexity,
+            len(specialist_results),
+            active_plan=active_plan,
+            route_result=route_result,
+            clarification=clarification,
+        ),
         "token_usage": total_tokens,
         "conflicts": conflicts,
     }
@@ -4603,7 +4718,8 @@ def _stream_handle_no_tool_calls(msg, specialist_results: list, all_tool_calls: 
                                   conflicts, force_skip_cross_review: bool,
                                   arbitration_done: bool, prebuilt_context: str,
                                   cancel_event, start_time: float,
-                                  conversation_id: int, message_id: int, trace_id: str):
+                                  conversation_id: int, message_id: int, trace_id: str,
+                                  active_plan=None):
     """处理 LLM 无工具调用时的交叉审阅 + 仲裁 + 最终回答。
 
     生成器：yield 各类事件。
@@ -4730,6 +4846,13 @@ def _stream_handle_no_tool_calls(msg, specialist_results: list, all_tool_calls: 
                     "all_tool_calls": all_tool_calls,
                     "arbitration_done": arbitration_done,
                     "complexity": complexity,
+                    **_build_flow_metadata(
+                        query,
+                        complexity,
+                        len(specialist_results),
+                        route_result=route_result,
+                        clarification=clarification,
+                    ),
                 })
 
             hil_gen = _human_in_loop_checks(specialist_results, answer, conversation_id)
@@ -4747,6 +4870,9 @@ def _stream_handle_no_tool_calls(msg, specialist_results: list, all_tool_calls: 
                 "tool_calls": all_tool_calls,
                 "duration_ms": duration_ms,
                 "complexity": complexity,
+                "question_type": getattr(active_plan, "question_type", route_result.get("question_type", "generic") if route_result else "generic"),
+                "arbitration_mode": getattr(active_plan, "arbitration_mode", route_result.get("arbitration_mode", "if_complex") if route_result else "if_complex"),
+                "shared_evidence_keys": getattr(active_plan, "shared_evidence_keys", route_result.get("shared_evidence_keys", []) if route_result else []),
                 "cross_review": True,
                 "arbitration": arbitration_done,
                 "conflicts": conflicts,
@@ -4757,9 +4883,12 @@ def _stream_handle_no_tool_calls(msg, specialist_results: list, all_tool_calls: 
             }
             if conversation_id:
                 _schedule_auto_evaluation(conversation_id, message_id, {
-                    "answer": answer, "specialist_results": specialist_results,
+                "answer": answer, "specialist_results": specialist_results,
                     "tool_calls": all_tool_calls, "duration_ms": duration_ms,
                     "complexity": complexity, "conflicts": conflicts,
+                    "question_type": getattr(active_plan, "question_type", route_result.get("question_type", "generic") if route_result else "generic"),
+                    "arbitration_mode": getattr(active_plan, "arbitration_mode", route_result.get("arbitration_mode", "if_complex") if route_result else "if_complex"),
+                    "shared_evidence_keys": getattr(active_plan, "shared_evidence_keys", route_result.get("shared_evidence_keys", []) if route_result else []),
                     "route_info": route_result, "cache_stats": expert_cache.stats,
                 })
             return True
@@ -4793,6 +4922,14 @@ def _stream_handle_no_tool_calls(msg, specialist_results: list, all_tool_calls: 
             "all_tool_calls": all_tool_calls,
             "arbitration_done": arbitration_done,
             "complexity": complexity,
+            **_build_flow_metadata(
+                query,
+                complexity,
+                len(specialist_results),
+                active_plan=active_plan,
+                route_result=route_result,
+                clarification=clarification,
+            ),
         })
 
     hil_gen = _human_in_loop_checks(specialist_results, answer, conversation_id)
@@ -4833,7 +4970,7 @@ def _stream_final_synthesis(query: str, refined_query: str, specialists: list,
                              route_result, conflicts, perf_metrics: dict,
                              cancel_event, start_time: float,
                              conversation_id: int, message_id: int, trace_id: str,
-                             blackboard=None):
+                             blackboard=None, plan=None, cross_review_performed: bool = False):
     """阶段4-5: 最终综合（流式生成）、Validator、后处理、人在回路、答案输出。
 
     生成器：yield reasoning_chunk/answer_chunk/status/answer 事件。
@@ -4848,11 +4985,23 @@ def _stream_final_synthesis(query: str, refined_query: str, specialists: list,
                 llm_messages.append({"role": "system", "content": f"在综合各专家意见给出最终建议时,请务必结合用户的投资画像:\n{kyc_text}"})
         except Exception:
             pass
+        try:
+            from agent.core.arbitration import arbitrate_results
+            arbitration_summary = arbitrate_results(refined_query, specialist_results, blackboard=blackboard, plan=plan)
+            llm_messages.append({
+                "role": "system",
+                "content": (
+                    "以下是仲裁 Agent 的结构化裁决摘要，综合回答必须遵守：\n"
+                    f"{json.dumps(arbitration_summary, ensure_ascii=False)[:1500]}"
+                ),
+            })
+        except Exception as e:
+            logger.debug(f"[trace:{trace_id}] 注入仲裁摘要失败: {e}")
         llm_messages.append({
             "role": "user",
             "content": _build_final_synthesis_prompt(
                 specialist_results, specialists, blackboard=blackboard,
-                cross_review_performed=bool(cross_review_results)),
+                cross_review_performed=cross_review_performed, plan=plan),
         })
         final_answer = ""
         try:
@@ -4933,6 +5082,14 @@ def _stream_final_synthesis(query: str, refined_query: str, specialists: list,
             "all_tool_calls": all_tool_calls,
             "arbitration_done": arbitration_done,
             "complexity": complexity,
+            **_build_flow_metadata(
+                query,
+                complexity,
+                len(specialist_results),
+                active_plan=active_plan,
+                route_result=route_result,
+                clarification=clarification,
+            ),
         })
 
     # 人在回路
@@ -4974,6 +5131,9 @@ def _stream_final_synthesis(query: str, refined_query: str, specialists: list,
         "tool_calls": all_tool_calls,
         "duration_ms": duration_ms,
         "complexity": complexity,
+        "question_type": getattr(active_plan, "question_type", route_result.get("question_type", "generic") if route_result else "generic"),
+        "arbitration_mode": getattr(active_plan, "arbitration_mode", route_result.get("arbitration_mode", "if_complex") if route_result else "if_complex"),
+        "shared_evidence_keys": getattr(active_plan, "shared_evidence_keys", route_result.get("shared_evidence_keys", []) if route_result else []),
         "perf_metrics": perf_metrics,
         "conflicts": conflicts,
     }
@@ -5187,6 +5347,10 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
                 specialist_results = checkpoint_state.get("specialist_results", [])
                 all_tool_calls = checkpoint_state.get("all_tool_calls", [])
                 arbitration_done = checkpoint_state.get("arbitration_done", False)
+                for _meta_key in ("question_type", "arbitration_mode", "shared_evidence_keys"):
+                    _meta_val = checkpoint_state.get(_meta_key)
+                    if _meta_val and not route_result.get(_meta_key):
+                        route_result[_meta_key] = _meta_val
                 completed_specialists.update(sr.get("agent_key", "") for sr in specialist_results)
 
     # 增强5: 人在回路 — 路由确认（complex + 低置信度时暂停）
@@ -5216,6 +5380,10 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
     arbitration_done = False  # 标记仲裁是否已完成,避免重复调用
     conflicts = {}  # 初始化冲突检测结果，后续在无工具调用分支中更新
     already_called = set()  # 增强2: 动态选角防循环
+
+    if checkpoint_state:
+        all_tool_calls = checkpoint_state.get("all_tool_calls", all_tool_calls)
+        arbitration_done = checkpoint_state.get("arbitration_done", arbitration_done)
 
     # 恢复模式:添加已有结果
     if resumed_results:
@@ -5298,7 +5466,7 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
                 complexity, clarification, route_result,
                 conflicts, force_skip_cross_review, arbitration_done,
                 prebuilt_context, cancel_event, start_time,
-                conversation_id, message_id, trace_id)
+                conversation_id, message_id, trace_id, active_plan=active_plan)
             ntc_done = False
             while True:
                 try:
@@ -5672,13 +5840,20 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
                     logger.error(f"动态追加专家 {agent_key} 执行失败: {e}")
 
         # 增强1: 检查点存档 — Phase A 专家执行完成
-        if conversation_id and message_id and specialist_results:
-            _save_checkpoint(conversation_id, message_id, "experts", {
-                "specialist_results": specialist_results,
-                "all_tool_calls": all_tool_calls,
-                "arbitration_done": arbitration_done,
-                "complexity": complexity,
-            })
+    if conversation_id and message_id and specialist_results:
+        _save_checkpoint(conversation_id, message_id, "experts", {
+            "specialist_results": specialist_results,
+            "all_tool_calls": all_tool_calls,
+            "arbitration_done": arbitration_done,
+            "complexity": complexity,
+            **_build_flow_metadata(
+                query,
+                complexity,
+                len(specialist_results),
+                route_result=route_result,
+                clarification=clarification,
+            ),
+        })
 
     # 超过最大轮次,做最后一次总结
     yield from _stream_final_synthesis(
@@ -5687,7 +5862,7 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
         route_result, conflicts, perf_metrics,
         cancel_event, start_time,
         conversation_id, message_id, trace_id,
-        blackboard=blackboard)
+        blackboard=blackboard, plan=active_plan, cross_review_performed=bool(cross_review_results))
     return
 
 

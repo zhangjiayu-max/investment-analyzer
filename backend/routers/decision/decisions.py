@@ -27,6 +27,7 @@ from db import (
     update_decision_status,
 )
 from db.decisions import match_pending_decisions
+from services.shared_signals import build_shared_signals
 
 router = APIRouter(tags=["decisions"])
 
@@ -144,7 +145,20 @@ async def list_decisions_api(status: str = "", limit: int = 50):
 @router.get("/api/decisions/stats")
 async def get_decision_stats_api(user_id: str = "default"):
     """返回决策复盘与质量统计。"""
-    return get_decision_stats(user_id=user_id or "default")
+    stats = get_decision_stats(user_id=user_id or "default")
+    try:
+        stats["shared_signals"] = build_shared_signals(user_id=user_id or "default")
+    except Exception as e:
+        stats["shared_signals"] = {
+            "summary": "",
+            "recommendation": "",
+            "market": {},
+            "decision": {},
+            "knowledge": {},
+            "regression": {},
+        }
+        stats["shared_signals_error"] = str(e)
+    return stats
 
 
 @router.get("/api/recommendation-candidates")

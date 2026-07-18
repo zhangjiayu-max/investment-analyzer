@@ -9,7 +9,9 @@ from db import (
     add_to_watchlist,
     create_decision_from_opportunity,
     get_opportunity,
+    get_opportunity_track_stats,
     list_opportunities,
+    list_opportunity_tracks,
     mark_opportunity_bought,
     update_opportunity_status,
 )
@@ -29,6 +31,34 @@ class MarkBoughtRequest(BaseModel):
     fund_code: str
     amount: float = 0
     transaction_id: int | None = None
+
+
+@router.get("/api/opportunities/stats")
+async def opportunity_stats_api(user_id: str = "default", limit: int = 10):
+    """机会回看统计，包含命中、待复盘和最近跟踪项。"""
+    today = datetime.now().strftime("%Y-%m-%d")
+    track_stats = get_opportunity_track_stats(user_id=user_id, limit=limit)
+    opportunities = list_opportunities(user_id=user_id, limit=limit * 2)
+    active = [
+        item for item in opportunities
+        if item.get("status") in ("active", "watching", "bought")
+    ][:limit]
+    review_queue = [
+        item for item in list_opportunity_tracks(user_id=user_id, limit=limit)
+        if item.get("review_due_date")
+    ]
+    return {
+        "date": today,
+        "track_stats": track_stats,
+        "summary": {
+            "active": len(active),
+            "can_buy": sum(1 for item in active if item.get("verdict") == "can_buy"),
+            "watch": sum(1 for item in active if item.get("verdict") == "watch"),
+            "avoid": sum(1 for item in active if item.get("verdict") == "avoid"),
+        },
+        "review_queue": review_queue,
+        "opportunities": active,
+    }
 
 
 @router.get("/api/opportunities/today")

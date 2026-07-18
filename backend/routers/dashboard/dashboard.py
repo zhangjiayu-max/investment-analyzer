@@ -24,6 +24,7 @@ from db import (
 from db._conn import _get_conn
 from services.llm_service import _call_llm, MODEL
 from services.market_data import get_index_current_price
+from services.shared_signals import build_shared_signals
 from infra.state import track_agent as _track_agent, untrack_agent as _untrack_agent, hot_topics_cache as _hot_topics_cache
 
 router = APIRouter(tags=["dashboard"])
@@ -395,6 +396,10 @@ async def get_dashboard():
         "cash_updated_at": bond_info.get("date", "") if bond_info else "",
         "data_freshness": freshness_info,
     }
+    try:
+        payload["shared_signals"] = build_shared_signals(user_id="default")
+    except Exception as e:
+        logging.warning(f"Dashboard 共享信号获取失败: {e}")
     try:
         from db import ensure_dashboard_decisions
         ensure_dashboard_decisions(payload)

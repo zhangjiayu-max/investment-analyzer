@@ -65,6 +65,7 @@ def test_build_context_includes_portfolio_summary_decisions_and_recent_messages(
     assert "测试医疗基金分批加仓草案" in bundle["sections"]["decision_context"]
     assert "现在还能继续加吗" in bundle["sections"]["recent_messages"]
     assert "医疗估值处于历史较低区间" in bundle["sections"]["rag_context"]
+    assert "共享证据" in bundle["sections"]["shared_evidence_context"]
     assert "当前问题" in bundle["prompt_context"]
 
 

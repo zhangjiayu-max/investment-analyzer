@@ -86,6 +86,13 @@ def _build_unified_context_safe(
     """构建统一上下文，失败时返回空字符串，避免阻断对话主流程。"""
     try:
         from services.conversation_context import build_conversation_context
+        user_id = "default"
+        try:
+            conv = get_conversation(conv_id)
+            if conv and conv.get("user_id"):
+                user_id = conv.get("user_id") or "default"
+        except Exception:
+            pass
 
         bundle = build_conversation_context(
             conversation_id=conv_id,
@@ -94,6 +101,7 @@ def _build_unified_context_safe(
             agent_id=agent_id,
             rag_context=rag_context,
             token_budget=token_budget,
+            user_id=user_id,
         )
         return bundle.get("prompt_context", "")
     except Exception as e:
