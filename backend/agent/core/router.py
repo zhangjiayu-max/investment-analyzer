@@ -70,13 +70,16 @@ _KEYWORD_ROUTES = [
     # ── M1 新增：港股/恒生/归因/资金类路由盲区补全 ──
     (["恒生", "港股", "恒生科技", "恒生指数", "港股通", "恒生互联网", "H股"],
      ["macro_strategist", "market_analyst", "valuation_expert"]),
+    # D-修改：归因类问题补充行业基本面视角（验证宏观叙事的微观景气度）
     (["为什么涨", "为什么跌", "原因", "驱动", "归因", "怎么回事", "为何"],
-     ["macro_strategist", "market_analyst"]),
+     ["macro_strategist", "market_analyst", "industry_fundamentalist"]),
     (["资金", "流入", "流出", "外资", "南向", "北向", "主力资金", "资金注入", "净买"],
      ["macro_strategist", "market_analyst"]),
     # ── 周期/行业/机构相关路由 ──
     (["周期", "景气", "产能", "供需", "拐点"], ["market_analyst", "valuation_expert"]),
-    (["医药", "医疗", "生物医药", "创新药", "中药"], ["macro_strategist", "valuation_expert", "fund_analyst"]),
+    # D-修改：医药问题补充行业基本面视角（批价/动销/库存等微观景气度）
+    (["医药", "医疗", "生物医药", "创新药", "中药"],
+     ["macro_strategist", "valuation_expert", "fund_analyst", "industry_fundamentalist"]),
     (["锂", "锂矿", "锂电池", "新能源", "储能", "光伏", "半导体", "芯片"], ["fund_analyst", "valuation_expert"]),
     (["白酒", "食品饮料", "消费", "食品"], ["fund_analyst", "valuation_expert"]),
     (["银行", "金融", "券商", "保险"], ["fund_analyst", "valuation_expert", "market_analyst"]),
@@ -96,12 +99,112 @@ _KEYWORD_ROUTES = [
      ["industry_fundamentalist"]),
     (["行为", "心理", "情绪", "偏差", "追涨", "杀跌", "恐慌", "冲动", "焦虑", "贪婪"],
      ["behavioral_advisor"]),
+    # ── D 方向：关键词覆盖扩展（修复 conv 122/113/117 等主题专家错配） ──
+    # D-1: 市场极端关键词 → 强制 market+macro+risk（熊市判断必须多维视角）
+    (["跌破", "破位", "熔断", "股灾", "熊市", "崩盘", "暴跌", "新低",
+      "历史新低", "千股跌停"],
+     ["market_analyst", "macro_strategist", "risk_assessor"]),
+    # D-2: 债券主题 → fund+macro+valuation（当前缺失，补齐）
+    (["债券", "国债", "利率债", "信用债", "可转债", "债基", "纯债", "短债"],
+     ["fund_analyst", "macro_strategist", "valuation_expert"]),
+    # D-3: 政策利好强化 → macro+industry（行业基本面验证政策传导）
+    (["利好", "利空", "刺激政策", "补贴", "减税", "降准", "降息", "政策受益"],
+     ["macro_strategist", "industry_fundamentalist"]),
+    # D-4: 估值查询口语化表达（补"百分位低/高"等）
+    (["百分位低", "百分位高", "历史低位", "历史高位", "低估区间", "高估区间"],
+     ["valuation_expert"]),
+    # D-5: 补仓抄底场景增强 → allocation+risk+valuation（时机+风控+估值三视角）
+    (["抄底", "补仓时机", "加仓时机", "分批建仓", "左侧交易"],
+     ["allocation_advisor", "risk_assessor", "valuation_expert"]),
 ]
 
 _HIGH_RISK_ACTION_KEYWORDS = [
     "清仓", "满仓", "梭哈", "追涨", "杀跌", "恐慌", "很慌", "冲动", "重仓买入",
     "补仓", "抄底", "加杠杆",
 ]
+
+# ── A 方向：复杂度独立判定（不再依赖命中专家数反推） ──────────────────
+# 领域关键词组（用于复杂度判定，与 _KEYWORD_ROUTES 解耦）
+_COMPLEXITY_DOMAIN_GROUPS = [
+    {"估值", "PE", "PB", "百分位", "低估", "高估", "百分位低", "百分位高",
+     "历史低位", "历史高位", "低估区间", "高估区间"},
+    {"风险", "回撤", "止损", "亏损", "最大回撤", "清仓", "满仓", "梭哈",
+     "追涨", "杀跌", "恐慌", "补仓", "抄底", "加杠杆"},
+    {"配置", "仓位", "股债", "比例", "再平衡", "持仓", "分散", "穿透", "集中度"},
+    {"市场", "大盘", "行情", "走势", "牛市", "熊市", "跌破", "破位", "熔断",
+     "股灾", "崩盘", "暴跌", "新低", "历史新低", "千股跌停"},
+    {"宏观", "经济", "利率", "政策", "利好", "利空", "GDP", "PMI", "社融",
+     "M2", "CPI", "通胀", "降准", "降息"},
+    {"基金", "选基", "基金分析", "基金经理", "净值", "年化收益"},
+    {"债券", "国债", "利率债", "信用债", "可转债", "债基", "纯债", "短债"},
+    {"医药", "医疗", "白酒", "食品饮料", "新能源", "半导体", "银行", "军工", "房地产"},
+]
+
+# 多意图分隔符（出现 ≥2 次表示多意图问题）
+_MULTI_INTENT_SEPARATORS = ["和", "跟", "另外", "同时", "结合", "以及", "又", "再"]
+
+# 市场极端关键词（命中即升级 complex）
+_MARKET_EXTREME_KEYWORDS = {
+    "跌破", "破位", "熔断", "股灾", "熊市", "崩盘", "暴跌",
+    "新低", "历史新低", "千股跌停"
+}
+
+
+def _classify_complexity_by_semantics(query: str, history_summary: str = "") -> Optional[str]:
+    """基于问题语义独立判定复杂度（不依赖命中专家数）。
+
+    判定规则（按优先级）：
+    1. complex: 满足以下任一
+       - 多意图分隔符出现 ≥2 次（"和/跟/另外/同时/结合/以及"）
+       - 命中 ≥2 个不同领域关键词组
+       - 命中高风险关键词（清仓/满仓/梭哈/追涨/杀跌/恐慌/补仓/抄底/加杠杆）
+       - 命中市场极端关键词（跌破/破位/熔断/股灾/熊市/崩盘/暴跌/新低/历史新低）
+    2. medium: 命中 1 个领域 + 单一意图但需工具数据
+    3. simple: 单一主题、无多意图、无高风险词
+
+    开关：router.semantic_complexity_enabled（默认 true）
+    关闭时返回 None，调用方回退到旧的 len(specialists) 反推逻辑。
+
+    Args:
+        query: 用户问题
+        history_summary: 历史摘要（当前未使用，预留扩展）
+
+    Returns:
+        "simple" | "medium" | "complex" | None（开关关闭时）
+    """
+    try:
+        from db.config import get_config_bool
+        enabled = get_config_bool("router.semantic_complexity_enabled", True)
+    except Exception:
+        enabled = True
+
+    if not enabled:
+        return None  # 调用方回退到旧逻辑
+
+    if not query:
+        return "simple"
+
+    # 1. 多意图分隔符计数（≥2 次即 complex）
+    sep_count = sum(query.count(sep) for sep in _MULTI_INTENT_SEPARATORS)
+    if sep_count >= 2:
+        return "complex"
+
+    # 2. 命中领域数
+    hit_domains = sum(1 for group in _COMPLEXITY_DOMAIN_GROUPS
+                      if any(kw in query for kw in group))
+    if hit_domains >= 2:
+        return "complex"
+
+    # 3. 高风险关键词
+    if any(kw in query for kw in _HIGH_RISK_ACTION_KEYWORDS):
+        return "complex"
+
+    # 4. 市场极端关键词
+    if any(kw in query for kw in _MARKET_EXTREME_KEYWORDS):
+        return "complex"
+
+    # 5. 单领域 → medium；零领域 → simple
+    return "medium" if hit_domains == 1 else "simple"
 
 
 # ── M1: 问题类型感知路由（零 LLM 成本，纯规则） ──────────────────
@@ -353,8 +456,17 @@ class SmartRouter:
         if not specialists_list:
             return None
 
+        # A 方向：复杂度独立判定（不再用命中专家数反推）
+        # 开关 router.semantic_complexity_enabled=false 时回退到旧反推逻辑
+        semantic_complexity = _classify_complexity_by_semantics(query)
+        if semantic_complexity is not None:
+            complexity = semantic_complexity
+        else:
+            # 旧逻辑回退：用命中专家数反推
+            complexity = "simple" if len(specialists_list) == 1 else ("complex" if len(specialists_list) >= 3 else "medium")
+
         return {
-            "complexity": "simple" if len(specialists_list) == 1 else ("complex" if len(specialists_list) >= 3 else "medium"),
+            "complexity": complexity,
             "specialists": specialists_list,
             "reason": " | ".join(reason_parts),
             "needs_arbitration": len(specialists_list) >= 2,

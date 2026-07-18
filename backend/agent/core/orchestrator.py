@@ -2232,7 +2232,10 @@ def build_scenario_rag_context(query: str, specialists: list[str],
 
 
 def get_context_config(complexity: str) -> dict:
-    """根据复杂度返回上下文配置，max_specialists 从 DB 读取。"""
+    """根据复杂度返回上下文配置，max_specialists/min_specialists 从 DB 读取。
+
+    E 方向：新增 min_specialists（仅 complex=4），用于强制下限补齐。
+    """
     try:
         max_key = f"max_specialists.{complexity}"
         from db.config import get_config_int
@@ -2246,6 +2249,7 @@ def get_context_config(complexity: str) -> dict:
             "history_limit": 3,
             "rag_enabled": True,
             "max_specialists": max_spec,
+            "min_specialists": 1,  # E 方向：simple 下限 1（保持）
             "rag_max_chars": 800,
         }
     elif complexity == "medium":
@@ -2254,16 +2258,139 @@ def get_context_config(complexity: str) -> dict:
             "history_limit": 5,
             "rag_enabled": True,
             "max_specialists": max_spec,
+            "min_specialists": 2,  # E 方向：medium 下限 2（保持）
             "rag_max_chars": 1500,
         }
     else:  # complex
         max_spec = db_max if db_max > 0 else 4
+        # E 方向：complex 下限默认 4，可从 DB 读取覆盖
+        try:
+            from db.config import get_config_int as _gci
+            min_spec = _gci("router.complex_min_specialists", 4)
+        except Exception:
+            min_spec = 4
         return {
             "history_limit": 10,
             "rag_enabled": True,
             "max_specialists": max_spec,
+            "min_specialists": min(min_spec, max_spec),  # 下限不超过上限
             "rag_max_chars": 2500,
         }
+
+
+# ── E 方向：complex 下限补齐（问题类型必选集） ──────────────────
+
+# 问题类型 → 必选专家候选池（按优先级排序）
+_QUESTION_TYPE_MANDATORY = {
+    # 操作类：补仓/抄底/止盈 → 配置+风险+行为+估值
+    "action": ["allocation_advisor", "risk_assessor",
+               "behavioral_advisor", "valuation_expert"],
+    # 归因类：为什么涨/跌 → 宏观+市场+行业基本面
+    "attribution": ["macro_strategist", "market_analyst",
+                    "industry_fundamentalist"],
+    # 预测类：未来走势 → 估值+市场+宏观
+    "prediction": ["valuation_expert", "market_analyst", "macro_strategist"],
+    # 对比类：A vs B → 基金+估值
+    "comparison": ["fund_analyst", "valuation_expert"],
+    # 通用兜底：常驻保底组合
+    "generic": ["risk_assessor", "allocation_advisor",
+                "market_analyst", "valuation_expert"],
+}
+
+
+def _is_specialist_enabled(specialist_key: str) -> bool:
+    """检查专家是否启用（受 _filter_disabled_specialists 同款开关控制）。
+
+    复用 router.py 的禁用开关配置，保持一致。
+    """
+    try:
+        from db.config import get_config
+        enabled_map = {
+            "industry_fundamentalist": "agent.industry_fundamentalist_enabled",
+            "behavioral_advisor": "agent.behavioral_advisor_enabled",
+        }
+        config_key = enabled_map.get(specialist_key)
+        if not config_key:
+            return True
+        return get_config(config_key, "true") == "true"
+    except Exception:
+        return True
+
+
+def _sort_candidates_by_eval(candidates: list[str]) -> list[str]:
+    """按 DB eval 分数排序候选专家（高分优先）。
+
+    无 eval 数据的专家默认 50 分，排到有数据专家之后但不阻塞补齐。
+    """
+    try:
+        from db.eval import get_agent_eval_scores
+        scores = get_agent_eval_scores(days=7)
+        return sorted(candidates,
+                      key=lambda s: scores.get(s, {}).get("avg_score", 50),
+                      reverse=True)
+    except Exception:
+        return candidates
+
+
+def _apply_min_specialists(specialists: list[str], complexity: str,
+                            question_type: str, min_spec: int,
+                            max_spec: int) -> tuple[list[str], str]:
+    """E 方向：complex 下限补齐（问题类型必选集）。
+
+    当 complexity == "complex" 且 len(specialists) < min_spec 时，
+    从 _QUESTION_TYPE_MANDATORY[question_type] 候选池中补入专家。
+
+    Args:
+        specialists: 当前专家列表
+        complexity: 复杂度
+        question_type: 问题类型（来自 route_result）
+        min_spec: 下限（complex=4）
+        max_spec: 上限（complex=4 或 5）
+
+    Returns:
+        (补齐后的专家列表, 补齐原因)
+    """
+    # 开关检查
+    try:
+        from db.config import get_config
+        if get_config("router.complex_min_specialists_enabled", "true") != "true":
+            return specialists, ""
+    except Exception:
+        pass
+
+    # 仅 complex 触发
+    if complexity != "complex":
+        return specialists, ""
+
+    # 已达下限无需补齐
+    if len(specialists) >= min_spec:
+        return specialists, ""
+
+    needed = min_spec - len(specialists)
+    # 上限保护：补齐后不超过 max_spec
+    needed = min(needed, max_spec - len(specialists))
+    if needed <= 0:
+        return specialists, ""
+
+    # 获取候选池（按问题类型，回退到 generic）
+    pool = _QUESTION_TYPE_MANDATORY.get(question_type,
+                                         _QUESTION_TYPE_MANDATORY["generic"])
+    # 过滤已在列表中的 + 禁用的
+    candidates = [s for s in pool
+                  if s not in specialists and _is_specialist_enabled(s)]
+    # 按 eval 分数排序（高分优先）
+    candidates = _sort_candidates_by_eval(candidates)
+
+    # 补入
+    padded = candidates[:needed]
+    if not padded:
+        return specialists, ""
+
+    new_specialists = specialists + padded
+    reason = (f"complex 下限补齐: question_type={question_type}, "
+              f"补入 {padded} (共 {len(new_specialists)} 个专家)")
+    logger.info(f"[orchestrator] {reason}")
+    return new_specialists, reason
 
 
 def compress_history(history: list, max_messages: int = 10) -> list:
@@ -3132,6 +3259,14 @@ def orchestrate(query: str, history: list, rag_context: str = "", cancel_event: 
         if len(specialists) > max_spec:
             logger.info(f"specialists 超出上限({len(specialists)} > {max_spec})，截断")
             specialists = specialists[:max_spec]
+
+        # E 方向：complex 下限补齐（问题类型必选集）
+        min_spec = context_config.get("min_specialists", 1)
+        qtype = route_result.get("question_type", "generic")
+        specialists, pad_reason = _apply_min_specialists(
+            specialists, complexity, qtype, min_spec, max_spec)
+        if pad_reason:
+            logger.info(f"[orchestrator] {pad_reason}")
 
         # 恢复模式：排除已完成的专家，避免重复执行
         if resume_message_id and specialists and completed_specialists:
@@ -4083,6 +4218,14 @@ def _stream_route(query: str, history: list, rag_context: str, cancel_event: thr
             logger.info(f"specialists 超出上限({len(specialists)} > {max_spec})，截断")
             specialists = specialists[:max_spec]
 
+        # E 方向：complex 下限补齐（问题类型必选集）
+        min_spec = context_config.get("min_specialists", 1)
+        qtype = route_result.get("question_type", "generic")
+        specialists, pad_reason = _apply_min_specialists(
+            specialists, complexity, qtype, min_spec, max_spec)
+        if pad_reason:
+            logger.info(f"[orchestrator] {pad_reason}")
+
         # 恢复模式：排除已完成的专家
         if resume_message_id and specialists and completed_specialists:
             specialists = [s for s in specialists if s not in completed_specialists]
@@ -4109,6 +4252,16 @@ def _stream_route(query: str, history: list, rag_context: str, cancel_event: thr
     if len(specialists) > max_spec:
         logger.info(f"专家数量限制: {len(specialists)} → {max_spec},丢弃: {specialists[max_spec:]}")
         specialists = specialists[:max_spec]
+
+    # E 方向：complex 下限补齐（clarify_requirement 兜底路径也应用）
+    min_spec = context_config.get("min_specialists", 1)
+    # clarify 路径无 question_type，用 generic 兜底
+    qtype_fallback = clarification.get("question_type") if isinstance(clarification, dict) else None
+    qtype_fallback = qtype_fallback or "generic"
+    specialists, pad_reason = _apply_min_specialists(
+        specialists, complexity, qtype_fallback, min_spec, max_spec)
+    if pad_reason:
+        logger.info(f"[orchestrator] {pad_reason}")
 
     # 1.5 场景化 RAG 增强
     rag_context = build_scenario_rag_context(refined_query, specialists, rag_context)
