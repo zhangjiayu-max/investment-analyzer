@@ -1492,7 +1492,7 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
                 except Exception as e:
                     logger.warning(f"增量保存进度失败: {e}")
 
-            def _save_final(content, spec_results, tool_calls, orch_ms):
+            def _save_final(content, spec_results, tool_calls, orch_ms, arbitration=None):
                 total_ms = int((time.time() - request_start) * 1000)
                 pt = {"orchestrator_ms": orch_ms, "total_ms": total_ms}
                 # 输出审核
@@ -1506,11 +1506,21 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
                 p1 = [{"agent_key": s["agent_key"], "agent": s.get("agent", ""), "icon": s.get("icon", ""), "analysis": s.get("analysis", "")[:3000]} for s in _prod_spec_results if not s.get("is_cross_review")]
                 p2 = [{"agent_key": s["agent_key"], "agent": s.get("agent", ""), "icon": s.get("icon", ""), "analysis": s.get("analysis", "")[:3000]} for s in _prod_spec_results if s.get("is_cross_review")]
                 if stream_msg_id > 0:
-                    update_message_content_and_metadata(stream_msg_id, content, {
+                    # 构建 metadata（含仲裁结果，让前端可见对话链路完整四阶段）
+                    _meta = {
                         "execution_status": "completed", "complexity": complexity,
                         "specialist_results": p1, "cross_review_results": p2,
                         "tool_calls": tool_calls, "phase_timings": pt, "trace_id": trace_id,
-                    })
+                    }
+                    if arbitration:
+                        # 截断仲裁摘要避免 metadata 过大
+                        _meta["arbitration"] = {
+                            "verdict": arbitration.get("verdict", "")[:500],
+                            "confidence": arbitration.get("confidence", ""),
+                            "key_conflicts": arbitration.get("key_conflicts", [])[:5],
+                            "reasoning": arbitration.get("reasoning", "")[:800],
+                        }
+                    update_message_content_and_metadata(stream_msg_id, content, _meta)
                 try:
                     conn = _get_conn()
                     conn.execute("UPDATE agent_runs SET message_id = ? WHERE conversation_id = ? AND message_id = 0", (stream_msg_id, conv_id))
@@ -1633,7 +1643,7 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
                             _prod_spec_results.append({"agent_key": event.get("agent_key"), "agent": event.get("agent"), "icon": event.get("icon"), "analysis": event.get("analysis"), "duration_ms": event.get("duration_ms"), "is_cross_review": True})
                             _save_progress("streaming")
                         elif et == "answer":
-                            reviewed = _save_final(event.get("content", ""), event.get("specialist_results", []), event.get("tool_calls", []), int((time.time() - _prod_start) * 1000))
+                            reviewed = _save_final(event.get("content", ""), event.get("specialist_results", []), event.get("tool_calls", []), int((time.time() - _prod_start) * 1000), arbitration=event.get("arbitration"))
                             event = dict(event)
                             event["content"] = reviewed
                             # 标记 channel 完成
@@ -1994,15 +2004,24 @@ async def clarify_answer_stream(conv_id: int, request: Request):
                     if et == "answer":
                         content = event.get("content", "")
                         spec_results = event.get("specialist_results", [])
+                        arbitration = event.get("arbitration")
                         try:
                             p1 = [{"agent_key": s.get("agent_key", ""), "agent": s.get("agent", ""),
                                    "icon": s.get("icon", ""), "analysis": (s.get("analysis", "") or "")[:3000]}
                                   for s in spec_results if not s.get("is_cross_review")]
-                            update_message_content_and_metadata(stream_msg_id, content, {
+                            _meta = {
                                 "execution_status": "completed",
                                 "specialist_results": p1,
                                 "trace_id": trace_id,
-                            })
+                            }
+                            if arbitration:
+                                _meta["arbitration"] = {
+                                    "verdict": arbitration.get("verdict", "")[:500],
+                                    "confidence": arbitration.get("confidence", ""),
+                                    "key_conflicts": arbitration.get("key_conflicts", [])[:5],
+                                    "reasoning": arbitration.get("reasoning", "")[:800],
+                                }
+                            update_message_content_and_metadata(stream_msg_id, content, _meta)
                         except Exception as _e:
                             logger.warning(f"[trace:{trace_id}] 保存续答回答失败: {_e}")
                     elif et == "degrade":

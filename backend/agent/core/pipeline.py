@@ -338,6 +338,7 @@ def run_pipeline(
             state, query, phase3_result, blackboard, trace_id,
             reflection_result=reflection_result,
             debate_result=debate_result,
+            plan=phase2_result,
         )
         state.set_phase_result(PipelinePhase.SYNTHESIS.value, phase4_result)
         state.answer = phase4_result.get("answer", "")
@@ -359,7 +360,8 @@ def run_pipeline(
         yield {"type": EVENT_ANSWER, "content": state.answer,
                "specialist_results": phase3_specialists,
                "tool_calls": phase3_result.get("tool_calls", []),
-               "confidence": phase4_result.get("confidence", 0.0)}
+               "confidence": phase4_result.get("confidence", 0.0),
+               "arbitration": phase4_result.get("arbitration")}
 
         # ── Phase 5: 记忆持久化 ──────────────────
         state.transition_to(PipelinePhase.MEMORY)
@@ -540,6 +542,7 @@ def run_pipeline_from_checkpoint(
             state, state.refined_query, phase3_result, blackboard, trace_id,
             reflection_result=reflection_result,
             debate_result=debate_result,
+            plan=phase2_result,
         )
         state.set_phase_result(PipelinePhase.SYNTHESIS.value, phase4_result)
         state.answer = phase4_result.get("answer", "")
@@ -556,7 +559,8 @@ def run_pipeline_from_checkpoint(
         yield {"type": EVENT_ANSWER, "content": state.answer,
                "specialist_results": phase3_specialists,
                "tool_calls": phase3_result.get("tool_calls", []),
-               "confidence": phase4_result.get("confidence", 0.0)}
+               "confidence": phase4_result.get("confidence", 0.0),
+               "arbitration": phase4_result.get("arbitration")}
 
         # Phase 5: 记忆持久化
         state.transition_to(PipelinePhase.MEMORY)
@@ -1639,12 +1643,14 @@ def _phase_synthesis(
     trace_id: str,
     reflection_result: dict = None,
     debate_result: dict = None,
+    plan: dict = None,
 ) -> dict:
     """Phase 4: 交叉审阅 + 仲裁 + 生成最终回答。
 
     Args:
         reflection_result: P3 Reflection 阶段的产出（可选），包含 quality_issues 等
         debate_result: P1 辩论节点的产出（可选），包含 bull/bear/arbitration 等
+        plan: Phase 2 生成的执行计划（可选），供仲裁阶段引用任务清单
     """
     specialists = execution_result.get("specialists", [])
     tool_calls = execution_result.get("tool_calls", [])
@@ -1668,12 +1674,14 @@ def _phase_synthesis(
         }
 
     # 多专家：调用 LLM 综合
+    arbitration_summary = None
     try:
-        answer = _synthesize_multiple_specialists(
+        answer, arbitration_summary = _synthesize_multiple_specialists(
             query, specialists, blackboard, trace_id,
             reflection_result=reflection_result,
             debate_result=debate_result,
             data_gaps=data_gaps,
+            plan=plan,
         )
     except Exception as e:
         logger.error(f"[pipeline] 综合失败，降级拼接: {e}")
@@ -1694,7 +1702,7 @@ def _phase_synthesis(
     return {
         "answer": answer,
         "cross_review": {"conflicts": conflicts},
-        "arbitration": None,
+        "arbitration": arbitration_summary,
         "specialist_count": len(specialists),
         "reflection": reflection_result,
         "risk_vetoes": vetoes,
@@ -1940,8 +1948,15 @@ def _synthesize_multiple_specialists(
     reflection_result: dict = None,
     debate_result: dict = None,
     data_gaps: list = None,
-) -> str:
-    """调用 LLM 综合多个专家的分析。"""
+    plan: dict = None,
+) -> tuple:
+    """调用 LLM 综合多个专家的分析。
+
+    Returns:
+        (answer, arbitration_summary)
+        - answer: 综合回答文本
+        - arbitration_summary: 仲裁 Agent 的结构化裁决摘要（dict 或 None）
+    """
     from services.llm_service import _call_llm, MODEL
 
     # 构建综合 prompt
@@ -2058,6 +2073,39 @@ def _synthesize_multiple_specialists(
             "如「由于XX估值数据缺失，本建议置信度较低，建议补充数据后再次评估」\n"
         )
 
+    # ── 综合阶段仲裁：调用 arbitrate_results 注入结构化裁决摘要 ──
+    # 修复 conv 123：原 pipeline 路径未触发仲裁，导致用户期望的
+    # 「需求澄清→规划→拆解→仲裁给最终结果」四阶段缺最后一环。
+    # 开关：orchestration_config.arbitration_in_synthesis_enabled（默认 true）
+    arbitration_summary = None
+    try:
+        from agent.core.orchestrator import get_orchestration_config
+        arb_enabled = get_orchestration_config("arbitration_in_synthesis_enabled", "true") == "true"
+    except Exception:
+        arb_enabled = True
+
+    if arb_enabled and len(specialists) >= 2:
+        try:
+            from agent.core.arbitration import arbitrate_results
+            arbitration_summary = arbitrate_results(
+                query, specialists, blackboard=blackboard, plan=plan
+            )
+            if arbitration_summary:
+                parts.append("\n## 仲裁 Agent 的结构化裁决（综合回答必须遵守）")
+                parts.append(
+                    f"```json\n{json.dumps(arbitration_summary, ensure_ascii=False, indent=2)[:1500]}\n```"
+                )
+                parts.append(
+                    "强制要求：综合回答必须与仲裁裁决方向一致，"
+                    "不得与仲裁结论相悖。如有冲突，以仲裁结论为准。\n"
+                )
+                logger.info(
+                    f"[trace:{trace_id}] [pipeline] 仲裁已注入综合阶段: "
+                    f"verdict={arbitration_summary.get('verdict', '')[:50]}"
+                )
+        except Exception as e:
+            logger.warning(f"[trace:{trace_id}] [pipeline] 仲裁注入失败（继续无仲裁综合）: {e}")
+
     parts.append(
         "\n## 任务\n"
         "基于以上专家分析，生成综合回答：\n"
@@ -2065,8 +2113,9 @@ def _synthesize_multiple_specialists(
         "2. 如有冲突，给出明确判断和理由\n"
         "3. 如有风险否决，必须遵守否决约束降级处理\n"
         "4. 如有数据缺口警告，回答中必须体现数据完整性说明\n"
-        "5. 结尾包含「具体操作建议」段落\n"
-        "6. 使用 Markdown 格式，禁止 emoji 标题\n"
+        "5. 如有仲裁裁决，最终结论必须与仲裁方向一致\n"
+        "6. 结尾包含「具体操作建议」段落\n"
+        "7. 使用 Markdown 格式，禁止 emoji 标题\n"
     )
 
     prompt = "\n".join(parts)
@@ -2087,7 +2136,7 @@ def _synthesize_multiple_specialists(
     if vetoes:
         answer = _enforce_risk_veto(answer, vetoes, trace_id)
 
-    return answer
+    return answer, arbitration_summary
 
 
 def _enforce_risk_veto(answer: str, vetoes: list, trace_id: str) -> str:
@@ -2929,7 +2978,7 @@ def _phase_memory(
             reasoning=state.answer,
             key_variables=targets,
             data_basis=data_basis,
-            confidence=phase4_result.get("confidence", 0.7) if phase4_result else 0.7,
+            confidence=synthesis_result.get("confidence", 0.7) if synthesis_result else 0.7,
             urgent=0,
             conversation_id=state.conversation_id,
             message_id=state.message_id,

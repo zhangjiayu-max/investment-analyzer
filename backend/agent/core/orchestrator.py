@@ -3513,7 +3513,10 @@ def orchestrate(query: str, history: list, rag_context: str = "", cancel_event: 
                 complexity=complexity, available_specialists=available, trace_id=trace_id,
             )
             logger.info(f"[trace:{trace_id}] Plan & Execute: {len(_plan.steps)} 步计划")
-            yield {"type": "plan", "plan": _plan.to_dict()}
+            # 注意：非流式 orchestrate 不能 yield，否则整个函数会被 Python 视为 generator
+            # （即使该 yield 永不执行）。如需流式输出 plan 事件，请在 orchestrate_stream 中处理。
+            # 修复 conv 126：原 yield 导致 orchestrate() 返回 generator 而非 dict，
+            # 调用方 llm_result["answer"] 抛出 'generator' object is not subscriptable。
 
             specialist_results, all_tool_calls = execute_plan(
                 plan=_plan, prebuilt_context=prebuilt_context, cancel_event=cancel_event,
