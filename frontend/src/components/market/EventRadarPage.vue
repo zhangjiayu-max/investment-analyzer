@@ -16,6 +16,7 @@ import {
   getPortfolioHealthReport, getPortfolioRiskMetrics,
   getMasterDecisionHistory, getMasterAccuracyStats, triggerMasterVerification,
   updateWatchlistEntry, getWatchlistExitStatus, analyzeEventImpact,
+  getEventImpactAmount,
 } from '../../api'
 import Icon from '../ui/Icon.vue'
 import { useToast } from '../../composables/useToast'
@@ -862,6 +863,59 @@ function toggleImpactExpand(eid) {
   expandedImpactEvents.value[eid] = !expandedImpactEvents.value[eid]
 }
 
+// ── Batch2 增强点 2：事件影响金额估算（纯计算） ─────────────────────────
+const impactAmountMap = ref({})
+const expandedImpactAmountEvents = ref({})
+
+/** 触发事件金额影响估算（纯计算，无 LLM） */
+async function handleGetImpactAmount(evt) {
+  const eid = evt.event_id
+  if (!eid) return
+  // 已有数据则直接展开
+  if (impactAmountMap.value[eid]?.data) {
+    expandedImpactAmountEvents.value[eid] = !expandedImpactAmountEvents.value[eid]
+    return
+  }
+  impactAmountMap.value[eid] = { loading: true }
+  try {
+    const { data } = await getEventImpactAmount(eid)
+    impactAmountMap.value[eid] = { loading: false, data: data?.data || data }
+    // 自动展开
+    expandedImpactAmountEvents.value[eid] = true
+  } catch (e) {
+    const msg = e?.response?.data?.detail || e?.response?.data?.message || '金额估算失败'
+    impactAmountMap.value[eid] = { loading: false, error: msg }
+    useToast().showToast(msg, 'error')
+  }
+}
+
+/** 切换金额影响展开/收起 */
+function toggleImpactAmountExpand(eid) {
+  expandedImpactAmountEvents.value[eid] = !expandedImpactAmountEvents.value[eid]
+}
+
+/** 格式化金额（千分位） */
+function formatAmount(num) {
+  if (num == null) return '-'
+  const n = Number(num)
+  if (isNaN(n)) return '-'
+  return Math.abs(n).toLocaleString('zh-CN', { minimumFractionDigits: 0, maximumFractionDigits: 0 })
+}
+
+// ── Batch2 增强点 1：关注计划自动同步徽章判定 ──────────────────────────
+/** 判断关注基金是否在 7 天内被自动同步为 bought */
+function isAutoSynced(item) {
+  if (!item.entry_date) return false
+  try {
+    const d = new Date(item.entry_date)
+    if (isNaN(d.getTime())) return false
+    const days = (Date.now() - d.getTime()) / 86400000
+    return days <= 7
+  } catch {
+    return false
+  }
+}
+
 /** 打开文章分析弹窗 */
 function openArticleDialog() {
   articleUrl.value = ''
@@ -1518,12 +1572,23 @@ watch(scrollToFundCode, async (code) => {
                     <Icon name="chart" size="11" />
                     预估 {{ impactPctText(evt.expected_impact_pct) }} {{ impactDirectionLabel(evt.impact_direction).text }}
                   </span>
-                  <span class="confidence-tag" :class="{ 'confidence-calibrated': evt.original_confidence != null && Math.abs((evt.original_confidence || 0) - (evt.confidence || 0)) > 0.001 }">
+                  <span
+                    class="confidence-tag"
+                    :class="{
+                      'confidence-calibrated': evt.original_confidence != null && Math.abs((evt.original_confidence || 0) - (evt.confidence || 0)) > 0.001,
+                      'confidence-decayed': evt.effective_confidence != null && Math.abs((evt.effective_confidence || 0) - (evt.confidence || 0)) > 0.001
+                    }"
+                    :title="evt.effective_confidence != null && Math.abs((evt.effective_confidence || 0) - (evt.confidence || 0)) > 0.001 ? '该事件过期未验证，已自动降权' : ''"
+                  >
                     <template v-if="evt.original_confidence != null && Math.abs((evt.original_confidence || 0) - (evt.confidence || 0)) > 0.001">
                       原始 {{ Math.round((evt.original_confidence || 0) * 100) }}% → 校准 {{ Math.round((evt.confidence || 0) * 100) }}%
                     </template>
                     <template v-else>
                       置信度 {{ Math.round((evt.confidence || 0) * 100) }}%
+                    </template>
+                    <!-- Batch2 增强点 3：时间衰减后的有效置信度 -->
+                    <template v-if="evt.effective_confidence != null && Math.abs((evt.effective_confidence || 0) - (evt.confidence || 0)) > 0.001">
+                      ⚠️ 有效 {{ Math.round((evt.effective_confidence || 0) * 100) }}%
                     </template>
                   </span>
                   <!-- 已有缓存的影响分析标记 -->
@@ -1609,6 +1674,69 @@ watch(scrollToFundCode, async (code) => {
 
               <!-- Batch1 增强点 3：事件深度解读（LLM 分析，结合用户持仓） -->
               <div class="event-impact-section">
+                <!-- Batch2 增强点 2：金额影响按钮 + 展开列表（纯计算，无 LLM） -->
+                <button
+                  v-if="evt.expected_impact_pct != null"
+                  class="btn-event-amount"
+                  :disabled="impactAmountMap[evt.event_id]?.loading"
+                  @click="handleGetImpactAmount(evt)"
+                >
+                  <Icon
+                    :name="impactAmountMap[evt.event_id]?.loading ? 'spinner' : 'circle-dollar-sign'"
+                    size="12"
+                  />
+                  <span>{{
+                    impactAmountMap[evt.event_id]?.loading ? '计算中...' :
+                    impactAmountMap[evt.event_id]?.data ? '查看金额影响' :
+                    '估算金额影响'
+                  }}</span>
+                  <span
+                    v-if="impactAmountMap[evt.event_id]?.data && impactAmountMap[evt.event_id].data.total_impact_amount !== 0"
+                    class="amount-summary"
+                    :class="impactAmountMap[evt.event_id].data.total_impact_amount > 0 ? 'amount-positive' : 'amount-negative'"
+                  >
+                    ¥{{ formatAmount(impactAmountMap[evt.event_id].data.total_impact_amount) }}
+                  </span>
+                </button>
+                <!-- 金额影响展开/收起按钮 -->
+                <button
+                  v-if="impactAmountMap[evt.event_id]?.data?.affected_holdings?.length"
+                  class="btn-impact-toggle"
+                  @click="toggleImpactAmountExpand(evt.event_id)"
+                >
+                  <Icon :name="expandedImpactAmountEvents[evt.event_id] ? 'chevron-up' : 'chevron-down'" size="11" />
+                  {{ expandedImpactAmountEvents[evt.event_id] ? '收起' : '展开' }}
+                </button>
+                <!-- 金额影响受影响持仓列表 -->
+                <div
+                  v-if="expandedImpactAmountEvents[evt.event_id] && impactAmountMap[evt.event_id]?.data?.affected_holdings?.length"
+                  class="event-amount-content"
+                >
+                  <div class="amount-row amount-header">
+                    <span>基金</span>
+                    <span>占比</span>
+                    <span>市值</span>
+                    <span>影响金额</span>
+                  </div>
+                  <div
+                    v-for="h in impactAmountMap[evt.event_id].data.affected_holdings"
+                    :key="h.fund_code"
+                    class="amount-row"
+                  >
+                    <span class="amount-name">{{ h.fund_name || h.fund_code }}</span>
+                    <span>{{ h.weight != null ? Number(h.weight).toFixed(1) + '%' : '-' }}</span>
+                    <span>¥{{ formatAmount(h.holding_value) }}</span>
+                    <span :class="h.impact_amount > 0 ? 'amount-positive' : 'amount-negative'">
+                      {{ h.impact_amount > 0 ? '+' : '' }}¥{{ formatAmount(h.impact_amount) }}
+                    </span>
+                  </div>
+                </div>
+                <!-- 金额影响原因说明（空数据时） -->
+                <div v-if="impactAmountMap[evt.event_id]?.data?.reason" class="event-amount-reason">
+                  <Icon name="info" size="11" />
+                  {{ impactAmountMap[evt.event_id].data.reason }}
+                </div>
+
                 <button
                   class="btn-event-impact"
                   :disabled="eventImpactMap[evt.event_id]?.loading"
@@ -2250,6 +2378,15 @@ watch(scrollToFundCode, async (code) => {
               <Icon name="alert-triangle" size="11" />
               {{ item.volatility_alert === 'severe' ? '大跌' : '异动' }}
               <template v-if="item.daily_change_pct != null">{{ Number(item.daily_change_pct).toFixed(2) }}%</template>
+            </span>
+            <!-- Batch2 增强点 1：自动同步徽章（status=bought 且 entry_date 在 7 天内） -->
+            <span
+              v-if="item.status === 'bought' && isAutoSynced(item)"
+              class="wl-auto-sync-badge"
+              title="该基金已自动同步持仓买入信息"
+            >
+              <Icon name="refresh-cw" size="11" />
+              自动同步
             </span>
           </div>
           <div class="wl-card-body">
@@ -3584,6 +3721,27 @@ watch(scrollToFundCode, async (code) => {
   color: #d97706;
 }
 
+/* Batch2 增强点 3：置信度时间衰减样式 */
+.confidence-tag.confidence-decayed {
+  background: rgba(239, 68, 68, 0.12);
+  color: #dc2626;
+  border: 1px dashed rgba(239, 68, 68, 0.4);
+}
+
+/* Batch2 增强点 1：关注计划自动同步徽章 */
+.wl-auto-sync-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 0.18rem 0.45rem;
+  border-radius: 3px;
+  font-size: 0.66rem;
+  font-weight: 500;
+  background: rgba(16, 185, 129, 0.12);
+  color: #059669;
+  border: 1px solid rgba(16, 185, 129, 0.3);
+}
+
 /* ── 趋势事件样式 ── */
 .event-card.event-card-trend {
   border-left: 3px solid #7c3aed;
@@ -4158,6 +4316,86 @@ watch(scrollToFundCode, async (code) => {
   font-size: 0.7rem;
   color: #dc2626;
   background: rgba(220,38,38,0.08);
+  padding: 0.2rem 0.5rem;
+  border-radius: 3px;
+}
+
+/* ── Batch2 增强点 2：事件金额影响（纯计算） ── */
+.btn-event-amount {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.32rem 0.7rem;
+  background: linear-gradient(135deg, rgba(16,185,129,0.08), rgba(20,184,166,0.08));
+  color: #059669;
+  border: 1px solid rgba(16,185,129,0.3);
+  border-radius: 4px;
+  font-size: 0.74rem;
+  cursor: pointer;
+  transition: all 0.18s;
+  font-weight: 500;
+}
+.btn-event-amount:hover:not(:disabled) {
+  background: linear-gradient(135deg, rgba(16,185,129,0.15), rgba(20,184,166,0.15));
+  border-color: rgba(16,185,129,0.5);
+}
+.btn-event-amount:disabled {
+  cursor: wait;
+  opacity: 0.7;
+}
+.amount-summary {
+  font-weight: 700;
+  padding-left: 0.3rem;
+  border-left: 1px solid currentColor;
+  margin-left: 0.2rem;
+}
+.amount-positive {
+  color: #16a34a;
+}
+.amount-negative {
+  color: #dc2626;
+}
+.event-amount-content {
+  width: 100%;
+  margin-top: 0.5rem;
+  padding: 0.5rem 0.65rem;
+  background: var(--color-bg-tertiary);
+  border-radius: 4px;
+  border-left: 3px solid #059669;
+  font-size: 0.78rem;
+}
+.amount-row {
+  display: grid;
+  grid-template-columns: 2fr 0.8fr 1fr 1.2fr;
+  gap: 0.4rem;
+  padding: 0.22rem 0;
+  border-bottom: 1px dashed var(--color-border);
+  align-items: center;
+}
+.amount-row:last-child {
+  border-bottom: none;
+}
+.amount-row.amount-header {
+  font-size: 0.66rem;
+  color: var(--color-text-tertiary);
+  font-weight: 600;
+  border-bottom: 1px solid var(--color-border);
+  padding-bottom: 0.3rem;
+}
+.amount-name {
+  color: var(--color-text-primary);
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.event-amount-reason {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  font-size: 0.7rem;
+  color: var(--color-text-tertiary);
+  background: var(--color-bg-tertiary);
   padding: 0.2rem 0.5rem;
   border-radius: 3px;
 }

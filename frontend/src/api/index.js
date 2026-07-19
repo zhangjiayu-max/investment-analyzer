@@ -1797,6 +1797,11 @@ export function analyzeEventImpact(eventId) {
   return api.post('/alerts/event-radar/analyze-impact', { event_id: eventId }, { timeout: 120000 })
 }
 
+/** Batch2 增强点 2：实时估算事件对用户持仓的金额影响（纯计算，无 LLM） */
+export function getEventImpactAmount(eventId) {
+  return api.get(`/alerts/event-radar/events/${eventId}/impact-amount`)
+}
+
 /** 生成预警 */
 export function generateAlert(data) {
   return api.post('/portfolio/alerts/generate', data)

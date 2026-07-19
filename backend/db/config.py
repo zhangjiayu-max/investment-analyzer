@@ -330,6 +330,15 @@ DEFAULT_CONFIGS = [
     ('alerts.event_impact_quantification_enabled', 'false', '事件影响量化开关：true时LLM提取阶段输出影响幅度/方向/持续期', 'alerts'),
     ('alerts.event_impact_analysis_enabled', 'false', '事件深度解读开关：true时允许手动触发LLM个性化影响分析', 'alerts'),
     ('alerts.event_impact_analysis_cache_days', '7', '深度解读缓存天数', 'alerts'),
+
+    # ── Batch2 增强点 1：关注计划自动剔除已上车（2026-07-19，默认关闭） ──
+    ('watchlist.auto_mark_bought_enabled', 'false', '关注计划自动剔除已上车开关：portfolio买入时自动同步watchlist状态', 'watchlist'),
+
+    # ── Batch2 增强点 2：事件影响金额估算（2026-07-19，默认关闭） ──
+    ('alerts.event_impact_amount_enabled', 'false', '事件影响金额估算开关：实时计算事件对用户持仓的金额影响', 'alerts'),
+
+    # ── Batch2 增强点 3：事件置信度时间衰减（2026-07-19，默认关闭） ──
+    ('alerts.event_confidence_time_decay_enabled', 'false', '事件置信度时间衰减开关：未验证的过期事件自动降权', 'alerts'),
 ]
 
 

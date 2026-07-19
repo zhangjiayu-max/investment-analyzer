@@ -42,7 +42,14 @@ async def list_events(
 ):
     """查询事件列表。"""
     events = list_market_events(status=status, relevance=relevance, limit=limit)
-    
+
+    # Batch2 增强点 3：附加 effective_confidence 字段（开关控制）
+    try:
+        from services.event_radar import attach_effective_confidence
+        attach_effective_confidence(events)
+    except Exception as e:
+        logger.warning(f"附加 effective_confidence 失败: {e}")
+
     conn = None
     last_scan_time = None
     try:
@@ -58,7 +65,7 @@ async def list_events(
     finally:
         if conn:
             conn.close()
-    
+
     return ApiResponse.success(data={"events": events, "total": len(events), "last_scan_time": last_scan_time})
 
 
@@ -68,6 +75,14 @@ async def get_event(event_id: str):
     event = get_market_event(event_id)
     if not event:
         raise HTTPException(status_code=404, detail="事件不存在")
+
+    # Batch2 增强点 3：附加 effective_confidence 字段（开关控制）
+    try:
+        from services.event_radar import attach_effective_confidence
+        attach_effective_confidence(event)
+    except Exception as e:
+        logger.warning(f"附加 effective_confidence 失败: {e}")
+
     return ApiResponse.success(data=event)
 
 
@@ -112,6 +127,40 @@ async def analyze_event_impact_api(event_id: str = Body(..., embed=True)):
     except Exception as e:
         logger.error(f"事件影响分析失败 event_id={event_id}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"分析失败: {e}")
+
+
+@router.get("/api/alerts/event-radar/events/{event_id}/impact-amount")
+async def estimate_impact_amount_api(event_id: str):
+    """Batch2 增强点 2：实时估算事件对用户持仓的金额影响（纯计算，无 LLM）。
+
+    - 开关：alerts.event_impact_amount_enabled（默认 false）
+    - 公式：影响金额 = expected_impact_pct × holding_value / 100
+    - 不缓存：每次调用实时计算（持仓会变化）
+    - 失败时返回 reason 字段说明原因
+    """
+    try:
+        from db.config import get_config_bool
+        if not get_config_bool("alerts.event_impact_amount_enabled", False):
+            return ApiResponse.success(data={
+                "event_id": event_id,
+                "total_impact_amount": 0.0,
+                "affected_holdings": [],
+                "reason": "事件影响金额估算开关未开启",
+            })
+    except Exception as e:
+        logger.warning(f"检查 event_impact_amount 开关失败: {e}")
+
+    event = get_market_event(event_id)
+    if not event:
+        raise HTTPException(status_code=404, detail="事件不存在")
+
+    try:
+        from services.event_radar import estimate_event_impact_amount
+        result = estimate_event_impact_amount(event)
+        return ApiResponse.success(data=result)
+    except Exception as e:
+        logger.error(f"事件影响金额估算失败 event_id={event_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"估算失败: {e}")
 
 
 @router.post("/api/alerts/event-radar/analyze-article")

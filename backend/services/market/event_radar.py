@@ -1653,3 +1653,247 @@ def analyze_event_impact(event_id: str, trace_id: str = "") -> dict:
         "analyzed_at": analyzed_at,
         "cached": False,
     }
+
+
+# ── Batch2 增强点 2：事件影响金额估算 ───────────────────────────────────────
+
+def estimate_event_impact_amount(event: dict, holdings: list = None,
+                                  portfolio_total: float = None) -> dict:
+    """估算事件对用户持仓的金额影响（纯计算，无 LLM 调用）。
+
+    公式：影响金额 = expected_impact_pct × holding_value / 100
+
+    Args:
+        event: market_events 行（含 expected_impact_pct, affected_sectors 等）
+        holdings: 用户持仓列表（list_holdings 输出）；None 时实时查询
+        portfolio_total: 持仓总市值；None 时自动汇总
+
+    Returns:
+        {
+            "event_id": str,
+            "title": str,
+            "total_impact_amount": float,    # 总影响金额（正=利好，负=利空）
+            "impact_pct": float,              # 事件预估影响幅度
+            "affected_holdings": [            # 受影响的持仓列表
+                {
+                    "fund_code": str,
+                    "fund_name": str,
+                    "weight": float,         # 持仓占比（%）
+                    "holding_value": float,  # 持仓市值
+                    "impact_pct": float,
+                    "impact_amount": float,  # 影响金额
+                    "match_reason": str,
+                }
+            ],
+            "portfolio_total": float,
+            "estimated_at": str,
+            "reason": str,                   # 空数据时说明原因
+        }
+    """
+    estimated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    event_id = event.get("event_id", "")
+    title = event.get("title", "")
+
+    impact_pct = event.get("expected_impact_pct")
+    if impact_pct is None:
+        return {
+            "event_id": event_id, "title": title,
+            "total_impact_amount": 0.0, "impact_pct": 0.0,
+            "affected_holdings": [], "portfolio_total": 0.0,
+            "estimated_at": estimated_at,
+            "reason": "事件未启用影响量化（expected_impact_pct 为空）",
+        }
+
+    try:
+        impact_pct = float(impact_pct)
+    except (TypeError, ValueError):
+        return {
+            "event_id": event_id, "title": title,
+            "total_impact_amount": 0.0, "impact_pct": 0.0,
+            "affected_holdings": [], "portfolio_total": 0.0,
+            "estimated_at": estimated_at,
+            "reason": "expected_impact_pct 非法",
+        }
+
+    # 实时查询持仓
+    if holdings is None:
+        try:
+            from db.portfolio import list_holdings
+            holdings = list_holdings() or []
+        except Exception as e:
+            logger.warning(f"[event_radar] estimate_event_impact_amount 查询持仓失败: {e}")
+            holdings = []
+
+    if not holdings:
+        return {
+            "event_id": event_id, "title": title,
+            "total_impact_amount": 0.0, "impact_pct": impact_pct,
+            "affected_holdings": [], "portfolio_total": 0.0,
+            "estimated_at": estimated_at,
+            "reason": "用户无持仓",
+        }
+
+    # 自动计算 portfolio_total
+    if portfolio_total is None:
+        portfolio_total = sum(float(h.get("current_value") or 0) for h in holdings)
+
+    if portfolio_total <= 0:
+        return {
+            "event_id": event_id, "title": title,
+            "total_impact_amount": 0.0, "impact_pct": impact_pct,
+            "affected_holdings": [], "portfolio_total": 0.0,
+            "estimated_at": estimated_at,
+            "reason": "持仓总市值 ≤ 0",
+        }
+
+    # 调用 _determine_relevance 判定受影响持仓
+    # 注意：DB 中 affected_sectors/affected_themes 是 JSON 字符串，需先解析回 list
+    event_for_match = dict(event)
+    try:
+        raw_sectors = event_for_match.get("affected_sectors")
+        if isinstance(raw_sectors, str):
+            event_for_match["affected_sectors"] = json.loads(raw_sectors or "[]")
+        raw_themes = event_for_match.get("affected_themes")
+        if isinstance(raw_themes, str):
+            event_for_match["affected_themes"] = json.loads(raw_themes or "[]")
+    except (json.JSONDecodeError, TypeError):
+        pass
+
+    try:
+        _, matched_holdings, _, _ = _determine_relevance(event_for_match, holdings)
+    except Exception as e:
+        logger.warning(f"[event_radar] estimate_event_impact_amount 判定关联失败: {e}")
+        matched_holdings = []
+
+    # 用 fund_code 关联回 holdings 拿 weight/holding_value
+    holding_map = {h.get("fund_code"): h for h in holdings}
+    affected = []
+    for m in matched_holdings:
+        fund_code = m.get("fund_code")
+        h = holding_map.get(fund_code, {})
+        current_value = float(h.get("current_value") or 0)
+        if current_value <= 0:
+            continue
+        weight = (current_value / portfolio_total * 100) if portfolio_total > 0 else 0
+        impact_amount = impact_pct / 100.0 * current_value
+        affected.append({
+            "fund_code": fund_code,
+            "fund_name": h.get("fund_name") or m.get("fund_name") or "",
+            "weight": round(weight, 2),
+            "holding_value": round(current_value, 2),
+            "impact_pct": impact_pct,
+            "impact_amount": round(impact_amount, 2),
+            "match_reason": m.get("match_reason", ""),
+        })
+
+    affected.sort(key=lambda x: abs(x["impact_amount"]), reverse=True)
+    total = round(sum(a["impact_amount"] for a in affected), 2)
+
+    return {
+        "event_id": event_id,
+        "title": title,
+        "total_impact_amount": total,
+        "impact_pct": impact_pct,
+        "affected_holdings": affected,
+        "portfolio_total": round(portfolio_total, 2),
+        "estimated_at": estimated_at,
+        "reason": "",
+    }
+
+
+# ── Batch2 增强点 3：事件置信度时间衰减 ─────────────────────────────────────
+
+def _time_decay_factor(event: dict, now: datetime = None) -> float:
+    """计算事件置信度的时间衰减因子。
+
+    衰减规则：
+    - status=upcoming/imminent/materialized：factor=1.0（不衰减）
+    - status=expired & verification_result 非空：factor=1.0（已验证，不衰减）
+    - status=expired & verification_result 为空 & 过期 ≤ 30 天：factor=0.7
+    - status=expired & verification_result 为空 & 过期 > 30 天：factor=0.3
+    - 其他异常情况：factor=0.5
+
+    Args:
+        event: market_events 行
+        now: 当前时间（测试注入用）
+
+    Returns:
+        0.0 ~ 1.0 的衰减因子
+    """
+    if now is None:
+        now = datetime.now()
+
+    status = event.get("status", "upcoming")
+    verification = event.get("verification_result")
+
+    # 非 expired 状态不衰减
+    if status != "expired":
+        return 1.0
+
+    # 已验证的过期事件不衰减
+    if verification:
+        return 1.0
+
+    # 未验证的过期事件按过期天数衰减
+    expired_date = event.get("expired_date")
+    if not expired_date:
+        return 0.5  # 无过期时间，默认衰减到 0.5
+
+    try:
+        exp_dt = datetime.strptime(str(expired_date)[:10], "%Y-%m-%d")
+        days_since_expired = (now - exp_dt).days
+        if days_since_expired <= 30:
+            return 0.7
+        else:
+            return 0.3
+    except Exception:
+        return 0.5
+
+
+def apply_time_decay_to_confidence(event: dict, now: datetime = None) -> float:
+    """对事件置信度应用时间衰减，返回有效置信度。
+
+    effective_confidence = original_confidence × time_decay_factor
+
+    Args:
+        event: market_events 行
+        now: 当前时间（测试注入用）
+
+    Returns:
+        衰减后的有效置信度（0.0 ~ 1.0，保留 3 位小数）
+    """
+    try:
+        original = float(event.get("confidence") or 0.5)
+    except (TypeError, ValueError):
+        original = 0.5
+    factor = _time_decay_factor(event, now=now)
+    return round(original * factor, 3)
+
+
+def attach_effective_confidence(events: list[dict] | dict, now: datetime = None) -> None:
+    """给事件列表（或单个事件）附加 effective_confidence 字段（in-place 修改）。
+
+    开关 alerts.event_confidence_time_decay_enabled 控制是否附加：
+    - 开启：附加 effective_confidence 字段
+    - 关闭：不修改事件数据（保持原状）
+
+    Args:
+        events: list[dict] 或单个 dict
+        now: 当前时间（测试注入用）
+    """
+    try:
+        from db.config import get_config_bool
+        enabled = get_config_bool("alerts.event_confidence_time_decay_enabled", False)
+    except Exception:
+        enabled = False
+
+    if not enabled:
+        return
+
+    if isinstance(events, dict):
+        events["effective_confidence"] = apply_time_decay_to_confidence(events, now=now)
+    elif isinstance(events, list):
+        for ev in events:
+            if isinstance(ev, dict):
+                ev["effective_confidence"] = apply_time_decay_to_confidence(ev, now=now)
+

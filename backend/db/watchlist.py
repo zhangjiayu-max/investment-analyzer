@@ -299,3 +299,38 @@ def get_watchlist_with_exit_status(item_id: int) -> dict | None:
         item["exit_signal_reason"] = item.get("exit_signal_reason") or ""
 
     return item
+
+
+# ── Batch2 增强点 1：关注计划自动剔除已上车 ─────────────────────────────────
+
+def auto_mark_bought_on_trade(fund_code: str, entry_price: float,
+                              entry_date: str, user_id: str = "default") -> int:
+    """当 portfolio 中买入某基金时，自动把 watchlist 中同 fund_code 的 watching 项标为 bought。
+
+    用于解决用户在持仓中买入关注基金后，watchlist 仍停留 watching 状态导致巡检继续生成 green 信号的问题。
+
+    Args:
+        fund_code: 基金代码
+        entry_price: 买入价
+        entry_date: 买入日期（YYYY-MM-DD）
+        user_id: 用户 ID，默认 'default'
+
+    Returns:
+        受影响的行数（0 表示无匹配项）
+    """
+    conn = _get_conn()
+    try:
+        cursor = conn.execute("""
+            UPDATE watchlist
+            SET status = 'bought',
+                entry_price = ?,
+                entry_date = ?,
+                exit_signal = 'none',
+                exit_signal_reason = '',
+                updated_at = datetime('now','localtime')
+            WHERE fund_code = ? AND user_id = ? AND status = 'watching'
+        """, (float(entry_price) if entry_price else None, entry_date, fund_code, user_id))
+        conn.commit()
+        return cursor.rowcount
+    finally:
+        conn.close()

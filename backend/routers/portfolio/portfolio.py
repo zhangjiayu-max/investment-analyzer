@@ -904,13 +904,26 @@ async def create_transaction_api(req: CreateTransactionRequest):
     # 买入交易自动标记关注列表为「已上车」
     if req.transaction_type in ("buy", "buyin", "subscribe"):
         try:
-            from db.watchlist import list_watchlist, update_watchlist_item
-            watching = list_watchlist(status="watching")
-            for w in watching:
-                if w.get("fund_code") == req.fund_code:
-                    update_watchlist_item(w["id"], status="bought")
-                    logger.info(f"[portfolio] 关注基金 {req.fund_code} 已自动标记 bought（交易 {tx_id}）")
-                    break
+            from db.config import get_config_bool
+            auto_mark_full = get_config_bool("watchlist.auto_mark_bought_enabled", False)
+            if auto_mark_full:
+                # Batch2 增强点 1：完整字段同步（status + entry_price + entry_date）
+                from db.watchlist import auto_mark_bought_on_trade
+                from datetime import datetime as _dt_b2
+                entry_price = req.price or 0.0
+                entry_date = req.transaction_date or _dt_b2.now().strftime("%Y-%m-%d")
+                affected = auto_mark_bought_on_trade(req.fund_code, entry_price, entry_date)
+                if affected > 0:
+                    logger.info(f"[portfolio] 关注基金 {req.fund_code} 已自动同步上车信息（entry_price={entry_price}, entry_date={entry_date}，影响 {affected} 行）")
+            else:
+                # 保留原有简单逻辑：仅标 status=bought，不填 entry_price
+                from db.watchlist import list_watchlist, update_watchlist_item
+                watching = list_watchlist(status="watching")
+                for w in watching:
+                    if w.get("fund_code") == req.fund_code:
+                        update_watchlist_item(w["id"], status="bought")
+                        logger.info(f"[portfolio] 关注基金 {req.fund_code} 已自动标记 bought（交易 {tx_id}）")
+                        break
         except Exception as e:
             logger.warning(f"[portfolio] 自动标记 watchlist bought 失败: {e}")
 
