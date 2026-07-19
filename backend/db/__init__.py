@@ -1238,8 +1238,22 @@ def init_db():
     _ensure_column(conn, "watchlist", "analysis_method", "TEXT")  # index_valuation/drawdown/yingmi/nav_percentile
     _ensure_column(conn, "watchlist", "drawdown_percentile", "REAL")
     _ensure_column(conn, "watchlist", "nav_percentile", "REAL")
+    # ── Batch1 增强点 1：退出机制（止盈/止损信号） ──
+    _ensure_column(conn, "watchlist", "target_profit_pct", "REAL")        # 目标止盈百分比（如 30 = 30%）
+    _ensure_column(conn, "watchlist", "stop_loss_pct", "REAL")            # 止损百分比（如 10 = 10%）
+    _ensure_column(conn, "watchlist", "entry_price", "REAL")              # 实际买入价
+    _ensure_column(conn, "watchlist", "entry_date", "TEXT")               # 买入日期
+    _ensure_column(conn, "watchlist", "exit_signal", "TEXT")              # 退出信号：profit_target/stop_loss/none
+    _ensure_column(conn, "watchlist", "exit_signal_reason", "TEXT")       # 退出信号原因
+    # ── Batch1 增强点 2：异常波动预警 ──
+    _ensure_column(conn, "watchlist", "daily_change_pct", "REAL")         # 近1日涨跌幅
+    _ensure_column(conn, "watchlist", "weekly_change_pct", "REAL")        # 近5日涨跌幅
+    _ensure_column(conn, "watchlist", "volatility_alert", "TEXT")         # 波动预警：severe/warning/none
+    _ensure_column(conn, "watchlist", "volatility_alert_reason", "TEXT")  # 预警原因
+    _ensure_column(conn, "watchlist", "volatility_updated_at", "TEXT")    # 预警刷新时间
     conn.execute("CREATE INDEX IF NOT EXISTS idx_watchlist_user ON watchlist(user_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_watchlist_status ON watchlist(status)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_watchlist_exit_signal ON watchlist(exit_signal)")
 
     # ── 异步分析任务表 ──────────────────────────────────────
     init_async_tasks_table(conn)

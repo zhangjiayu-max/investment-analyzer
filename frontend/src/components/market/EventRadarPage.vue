@@ -15,9 +15,11 @@ import {
   getBuyScore, getFundQuality,
   getPortfolioHealthReport, getPortfolioRiskMetrics,
   getMasterDecisionHistory, getMasterAccuracyStats, triggerMasterVerification,
+  updateWatchlistEntry, getWatchlistExitStatus, analyzeEventImpact,
 } from '../../api'
 import Icon from '../ui/Icon.vue'
 import { useToast } from '../../composables/useToast'
+import { renderMarkdown } from '../../composables/useMarkdown'
 
 const emit = defineEmits(['navigate'])
 
@@ -126,11 +128,14 @@ const stats = computed(() => {
 
 const watchlistStats = computed(() => {
   const total = watchlist.value.length
-  // 4 档上车状态
-  const canBuy = watchlist.value.filter(w => (w.signal_status || 'gray') === 'green').length
-  const approaching = watchlist.value.filter(w => (w.signal_status || 'gray') === 'yellow').length
-  const waiting = watchlist.value.filter(w => (w.signal_status || 'gray') === 'red').length
-  const noData = watchlist.value.filter(w => (w.signal_status || 'gray') === 'gray').length
+  // 使用 effectiveSignal：已触发退出信号(profit_target/stop_loss)的项不计入估值信号统计
+  const canBuy = watchlist.value.filter(w => effectiveSignal(w) === 'green').length
+  const approaching = watchlist.value.filter(w => effectiveSignal(w) === 'yellow').length
+  const waiting = watchlist.value.filter(w => effectiveSignal(w) === 'red').length
+  const noData = watchlist.value.filter(w => effectiveSignal(w) === 'gray').length
+  // Batch1 增强点 1：退出信号统计
+  const profitTargets = watchlist.value.filter(w => effectiveSignal(w) === 'profit_target').length
+  const stopLosses = watchlist.value.filter(w => effectiveSignal(w) === 'stop_loss').length
   // 近7日新增
   const recent7d = watchlist.value.filter(w => {
     if (!w.created_at) return false
@@ -138,16 +143,16 @@ const watchlistStats = computed(() => {
     const now = new Date()
     return (now - created) / (1000 * 60 * 60 * 24) <= 7
   }).length
-  return { total, canBuy, approaching, waiting, noData, recent7d }
+  return { total, canBuy, approaching, waiting, noData, recent7d, profitTargets, stopLosses }
 })
 
 // 今日操作建议：优先可上车基金名称
 const firstCanBuyFund = computed(() => {
-  const green = sortedWatchlist.value.filter(w => (w.signal_status || 'gray') === 'green')
+  const green = sortedWatchlist.value.filter(w => effectiveSignal(w) === 'green')
   return green.length > 0 ? green[0].fund_name : ''
 })
 const firstCanBuyInfo = computed(() => {
-  const green = sortedWatchlist.value.filter(w => (w.signal_status || 'gray') === 'green')
+  const green = sortedWatchlist.value.filter(w => effectiveSignal(w) === 'green')
   if (green.length === 0) return null
   const f = green[0]
   return {
@@ -189,15 +194,15 @@ const sortedWatchlist = computed(() => {
   if (watchlistCategoryFilter.value !== 'all') {
     list = list.filter(w => w.fund_category === watchlistCategoryFilter.value)
   }
-  // 应用筛选
+  // 应用筛选（使用 effectiveSignal：已触发退出信号的项不归入估值信号档位）
   if (watchlistFilter.value === 'canBuy') {
-    list = list.filter(w => (w.signal_status || 'gray') === 'green')
+    list = list.filter(w => effectiveSignal(w) === 'green')
   } else if (watchlistFilter.value === 'approaching') {
-    list = list.filter(w => (w.signal_status || 'gray') === 'yellow')
+    list = list.filter(w => effectiveSignal(w) === 'yellow')
   } else if (watchlistFilter.value === 'waiting') {
-    list = list.filter(w => (w.signal_status || 'gray') === 'red')
+    list = list.filter(w => effectiveSignal(w) === 'red')
   } else if (watchlistFilter.value === 'noData') {
-    list = list.filter(w => (w.signal_status || 'gray') === 'gray')
+    list = list.filter(w => effectiveSignal(w) === 'gray')
   } else if (watchlistFilter.value === 'recent7d') {
     list = list.filter(w => {
       if (!w.created_at) return false
@@ -671,17 +676,33 @@ async function autoPatrol() {
   }
 }
 
-/** 信号状态映射：signal_status → { label, cls }（统一使用后端 4 态：green/yellow/red/gray） */
+/** 信号状态映射：6 档 = 4 档估值信号 + 2 档退出信号
+ *  - 估值信号：green/yellow/red/gray（来自后端 signal_status）
+ *  - 退出信号：profit_target（止盈，蓝）/ stop_loss（止损，红）（来自后端 exit_signal）
+ *  - 退出信号优先级高于估值信号，触发时覆盖估值显示
+ */
 const SIGNAL_STATUS_META = {
   green: { label: '可上车', cls: 'sig-hit' },
   yellow: { label: '接近上车', cls: 'sig-warn' },
   red: { label: '等待中', cls: 'sig-bad' },
   gray: { label: '数据不足', cls: 'sig-neutral' },
+  profit_target: { label: '止盈', cls: 'sig-profit' },
+  stop_loss: { label: '止损', cls: 'sig-stop' },
 }
 
-/** 取关注基金信号状态元信息（默认 gray） */
+/** 计算有效信号：退出信号优先于估值信号
+ *  - item.exit_signal 为 profit_target / stop_loss 时，覆盖估值信号
+ *  - 否则使用 item.signal_status（4 档估值信号）
+ */
+function effectiveSignal(item) {
+  const exit = item.exit_signal
+  if (exit === 'profit_target' || exit === 'stop_loss') return exit
+  return item.signal_status || 'gray'
+}
+
+/** 取关注基金信号状态元信息（默认 gray，退出信号优先级高） */
 function signalMeta(item) {
-  return SIGNAL_STATUS_META[item.signal_status || 'gray'] || SIGNAL_STATUS_META.gray
+  return SIGNAL_STATUS_META[effectiveSignal(item)] || SIGNAL_STATUS_META.gray
 }
 
 /** 机会值分析维度标签（估值分位/回撤分位/净值分位） */
@@ -761,6 +782,84 @@ function isTrendEvent(evt) {
 /** 趋势时间跨度标签 */
 function timeFrameLabel(tf) {
   return { short: '短期', medium: '中期', long: '长期' }[tf] || tf || ''
+}
+
+// ── Batch1 增强点 3：事件影响量化辅助展示 ──
+/** 影响方向 → {text, cls} */
+function impactDirectionLabel(dir) {
+  return {
+    up: { text: '↑ 利好', cls: 'impact-up' },
+    down: { text: '↓ 利空', cls: 'impact-down' },
+    flat: { text: '→ 中性', cls: 'impact-flat' },
+  }[dir] || { text: dir || '', cls: 'impact-flat' }
+}
+
+/** 影响持续期 → 中文标签 */
+function impactDurationLabel(d) {
+  return { short_term: '1-3天', medium_term: '1-2周', long_term: '>2周' }[d] || d || ''
+}
+
+/** 影响幅度格式化（带正负号） */
+function impactPctText(pct) {
+  if (pct == null || pct === '') return ''
+  const n = parseFloat(pct)
+  if (Number.isNaN(n)) return ''
+  return (n >= 0 ? '+' : '') + n.toFixed(2) + '%'
+}
+
+/** 判断事件是否已有缓存的影响分析（7 天内） */
+function hasCachedImpactAnalysis(evt) {
+  if (!evt.impact_analysis || !evt.impact_analyzed_at) return false
+  try {
+    const dt = new Date(evt.impact_analyzed_at.replace(' ', 'T'))
+    const days = (Date.now() - dt.getTime()) / (1000 * 60 * 60 * 24)
+    return days < 7
+  } catch (_) { return false }
+}
+
+// 事件深度解读状态：{ [event_id]: { loading, analysis, analyzed_at, cached, error } }
+const eventImpactMap = ref({})
+
+/** 触发事件深度解读（LLM） */
+async function handleAnalyzeImpact(evt) {
+  if (!evt?.event_id) return
+  const eid = evt.event_id
+  const cur = eventImpactMap.value[eid] || {}
+  if (cur.loading) return
+  eventImpactMap.value[eid] = { ...cur, loading: true, error: '' }
+  try {
+    const { data } = await analyzeEventImpact(eid)
+    const result = data?.data || data || {}
+    if (result.error) {
+      eventImpactMap.value[eid] = { ...cur, loading: false, error: result.error }
+      useToast().showToast(result.error, 'warning')
+      return
+    }
+    eventImpactMap.value[eid] = {
+      loading: false,
+      analysis: result.analysis || '',
+      analyzed_at: result.analyzed_at || '',
+      cached: !!result.cached,
+      error: '',
+    }
+    // 同步写回 evt 本地状态（影响分析展示用）
+    evt.impact_analysis = result.analysis || evt.impact_analysis
+    evt.impact_analyzed_at = result.analyzed_at || evt.impact_analyzed_at
+    useToast().showToast(
+      result.cached ? '已读取缓存的影响分析' : '影响分析生成完成',
+      'success'
+    )
+  } catch (e) {
+    const msg = e?.response?.data?.detail || e?.response?.data?.message || '深度解读失败'
+    eventImpactMap.value[eid] = { ...cur, loading: false, error: msg }
+    useToast().showToast(msg, 'error')
+  }
+}
+
+/** 切换事件深度解读展开/收起 */
+const expandedImpactEvents = ref({})
+function toggleImpactExpand(eid) {
+  expandedImpactEvents.value[eid] = !expandedImpactEvents.value[eid]
 }
 
 /** 打开文章分析弹窗 */
@@ -847,16 +946,105 @@ async function handleRemoveWatchlist(item) {
   }
 }
 
-/** 标记关注基金为已买入 */
-async function handleMarkBought(item) {
-  if (item.status === 'bought') return
+/** 标记关注基金为已买入（支持可选 payload：买入价/止盈/止损） */
+async function handleMarkBought(item, payload = null) {
+  if (item.status === 'bought' && !payload) return
   try {
-    await markWatchlistBought(item.id)
+    const { data } = await markWatchlistBought(item.id, payload)
     item.status = 'bought'
-    useToast().showToast(`已标记「${item.fund_name}」为已买入`, 'success')
+    if (payload) {
+      // 同步本地字段，避免再查一次
+      item.entry_price = payload.entry_price
+      item.entry_date = payload.entry_date
+      item.target_profit_pct = payload.target_profit_pct
+      item.stop_loss_pct = payload.stop_loss_pct
+    }
+    useToast().showToast(
+      payload ? `已记录「${item.fund_name}」上车信息` : `已标记「${item.fund_name}」为已买入`,
+      'success'
+    )
   } catch (e) {
     const msg = e?.response?.data?.detail || e?.response?.data?.message || '标记失败'
     useToast().showToast(msg, 'error')
+  }
+}
+
+// ── Batch1 增强点 1：上车设置弹窗（entry_price/target_profit_pct/stop_loss_pct） ──
+const showEntryDialog = ref(false)
+const entryFormItem = ref(null) // 当前编辑的 watchlist item
+const entryForm = ref({ entry_price: '', entry_date: '', target_profit_pct: '', stop_loss_pct: '' })
+const savingEntry = ref(false)
+
+/** 打开上车设置弹窗 */
+function openEntryDialog(item) {
+  entryFormItem.value = item
+  const today = new Date().toISOString().slice(0, 10)
+  entryForm.value = {
+    entry_price: item.entry_price || item.current_nav || '',
+    entry_date: item.entry_date || today,
+    target_profit_pct: item.target_profit_pct ?? '',
+    stop_loss_pct: item.stop_loss_pct ?? '',
+  }
+  showEntryDialog.value = true
+}
+
+/** 关闭上车设置弹窗 */
+function closeEntryDialog() {
+  if (savingEntry.value) return
+  showEntryDialog.value = false
+  entryFormItem.value = null
+}
+
+/** 提交上车设置 */
+async function handleEntrySubmit() {
+  const item = entryFormItem.value
+  if (!item) return
+  const ep = parseFloat(entryForm.value.entry_price)
+  if (!ep || ep <= 0) {
+    useToast().showToast('请输入有效的买入价', 'error')
+    return
+  }
+  const tp = entryForm.value.target_profit_pct !== '' ? parseFloat(entryForm.value.target_profit_pct) : null
+  const sl = entryForm.value.stop_loss_pct !== '' ? parseFloat(entryForm.value.stop_loss_pct) : null
+  if (tp !== null && tp <= 0) {
+    useToast().showToast('止盈百分比必须大于 0', 'error')
+    return
+  }
+  if (sl !== null && sl <= 0) {
+    useToast().showToast('止损百分比必须大于 0', 'error')
+    return
+  }
+  if (savingEntry.value) return
+  savingEntry.value = true
+  try {
+    const payload = {
+      entry_price: ep,
+      entry_date: entryForm.value.entry_date,
+    }
+    if (tp !== null) payload.target_profit_pct = tp
+    if (sl !== null) payload.stop_loss_pct = sl
+    // 已买入的走 updateWatchlistEntry，未买入的走 markWatchlistBought 带 payload
+    if (item.status === 'bought') {
+      await updateWatchlistEntry(item.id, payload)
+    } else {
+      await handleMarkBought(item, payload)
+    }
+    // 拉一次退出状态，让前端立即显示盈亏
+    try {
+      const { data: exitData } = await getWatchlistExitStatus(item.id)
+      if (exitData) {
+        item.pnl_pct = exitData.pnl_pct
+        item.exit_signal = exitData.exit_signal
+        item.exit_signal_reason = exitData.exit_signal_reason
+      }
+    } catch (_) { /* 忽略，主流程已成功 */ }
+    showEntryDialog.value = false
+    entryFormItem.value = null
+  } catch (e) {
+    const msg = e?.response?.data?.detail || e?.response?.data?.message || '保存失败'
+    useToast().showToast(msg, 'error')
+  } finally {
+    savingEntry.value = false
   }
 }
 
@@ -1320,6 +1508,16 @@ watch(scrollToFundCode, async (code) => {
                   <span v-if="evt.direction" class="direction-tag" :class="directionLabel(evt.direction).class">
                     {{ directionLabel(evt.direction).text }}
                   </span>
+                  <!-- Batch1 增强点 3：影响预估徽章（幅度 + 方向 + 持续期） -->
+                  <span
+                    v-if="evt.expected_impact_pct != null || evt.impact_direction"
+                    class="impact-est-tag"
+                    :class="impactDirectionLabel(evt.impact_direction).cls"
+                    :title="evt.impact_duration ? `持续期：${impactDurationLabel(evt.impact_duration)}` : ''"
+                  >
+                    <Icon name="chart" size="11" />
+                    预估 {{ impactPctText(evt.expected_impact_pct) }} {{ impactDirectionLabel(evt.impact_direction).text }}
+                  </span>
                   <span class="confidence-tag" :class="{ 'confidence-calibrated': evt.original_confidence != null && Math.abs((evt.original_confidence || 0) - (evt.confidence || 0)) > 0.001 }">
                     <template v-if="evt.original_confidence != null && Math.abs((evt.original_confidence || 0) - (evt.confidence || 0)) > 0.001">
                       原始 {{ Math.round((evt.original_confidence || 0) * 100) }}% → 校准 {{ Math.round((evt.confidence || 0) * 100) }}%
@@ -1327,6 +1525,15 @@ watch(scrollToFundCode, async (code) => {
                     <template v-else>
                       置信度 {{ Math.round((evt.confidence || 0) * 100) }}%
                     </template>
+                  </span>
+                  <!-- 已有缓存的影响分析标记 -->
+                  <span
+                    v-if="hasCachedImpactAnalysis(evt)"
+                    class="impact-cached-tag"
+                    :title="`已于 ${formatShortDate(evt.impact_analyzed_at)} 生成影响分析`"
+                  >
+                    <Icon name="check-circle" size="11" />
+                    已分析
                   </span>
                   <!-- 验证结果标签 -->
                   <span
@@ -1399,6 +1606,48 @@ watch(scrollToFundCode, async (code) => {
                   </div>
                 </div>
               </div>
+
+              <!-- Batch1 增强点 3：事件深度解读（LLM 分析，结合用户持仓） -->
+              <div class="event-impact-section">
+                <button
+                  class="btn-event-impact"
+                  :disabled="eventImpactMap[evt.event_id]?.loading"
+                  @click="handleAnalyzeImpact(evt)"
+                >
+                  <Icon
+                    :name="eventImpactMap[evt.event_id]?.loading ? 'spinner' : 'lightbulb'"
+                    size="12"
+                  />
+                  <span>{{
+                    eventImpactMap[evt.event_id]?.loading ? '分析中...' :
+                    eventImpactMap[evt.event_id]?.analysis || evt.impact_analysis ? '查看影响分析' :
+                    '深度解读影响'
+                  }}</span>
+                </button>
+                <span v-if="hasCachedImpactAnalysis(evt) && !eventImpactMap[evt.event_id]?.analysis" class="impact-cached-hint">
+                  缓存于 {{ formatShortDate(evt.impact_analyzed_at) }}
+                </span>
+                <!-- 展开切换按钮（已有分析结果时） -->
+                <button
+                  v-if="eventImpactMap[evt.event_id]?.analysis || evt.impact_analysis"
+                  class="btn-impact-toggle"
+                  @click="toggleImpactExpand(evt.event_id)"
+                >
+                  <Icon :name="expandedImpactEvents[evt.event_id] ? 'chevron-up' : 'chevron-down'" size="11" />
+                  {{ expandedImpactEvents[evt.event_id] ? '收起' : '展开' }}
+                </button>
+                <!-- 错误提示 -->
+                <div v-if="eventImpactMap[evt.event_id]?.error" class="event-impact-error">
+                  <Icon name="info" size="11" />
+                  {{ eventImpactMap[evt.event_id].error }}
+                </div>
+                <!-- 影响分析结果展示 -->
+                <div
+                  v-if="expandedImpactEvents[evt.event_id] && (eventImpactMap[evt.event_id]?.analysis || evt.impact_analysis)"
+                  class="event-impact-content"
+                  v-html="renderMarkdown((eventImpactMap[evt.event_id]?.analysis || evt.impact_analysis))"
+                ></div>
+              </div>
             </div>
           </div>
         </template>
@@ -1425,6 +1674,13 @@ watch(scrollToFundCode, async (code) => {
           <span class="da-tag da-tag-yellow" :class="{ active: watchlistFilter === 'approaching' }" @click="toggleWatchlistFilter('approaching')">🟡 接近 {{ watchlistStats.approaching }}</span>
           <span class="da-tag da-tag-red" :class="{ active: watchlistFilter === 'waiting' }" @click="toggleWatchlistFilter('waiting')">🔴 等待 {{ watchlistStats.waiting }}</span>
           <span v-if="watchlistStats.noData" class="da-tag da-tag-gray" :class="{ active: watchlistFilter === 'noData' }" @click="toggleWatchlistFilter('noData')">⚪ 数据不足 {{ watchlistStats.noData }}</span>
+          <!-- Batch1 增强点 1：退出信号统计（止盈/止损） -->
+          <span v-if="watchlistStats.profitTargets" class="da-tag da-tag-profit" title="已触发止盈目标的持仓">
+            🎯 止盈 {{ watchlistStats.profitTargets }}
+          </span>
+          <span v-if="watchlistStats.stopLosses" class="da-tag da-tag-stop" title="已触发止损线的持仓">
+            ⛔ 止损 {{ watchlistStats.stopLosses }}
+          </span>
         </div>
       </div>
       <!-- ════ 组合智能面板 ════ -->
@@ -1974,6 +2230,27 @@ watch(scrollToFundCode, async (code) => {
             <span class="wl-signal-tag" :class="signalMeta(item).cls" :title="item.signal_reason || ''">
               {{ signalMeta(item).label }}
             </span>
+            <!-- Batch1 增强点 1：退出信号徽章（profit_target/stop_loss 优先级高于估值信号） -->
+            <span
+              v-if="item.exit_signal && item.exit_signal !== 'none'"
+              class="wl-exit-badge"
+              :class="`exit-${item.exit_signal}`"
+              :title="item.exit_signal_reason || ''"
+            >
+              <Icon :name="item.exit_signal === 'profit_target' ? 'trending-up' : 'trending-down'" size="11" />
+              {{ item.exit_signal === 'profit_target' ? '止盈' : '止损' }}
+            </span>
+            <!-- Batch1 增强点 2：异常波动徽章（severe=红 / warning=黄） -->
+            <span
+              v-if="item.volatility_alert && item.volatility_alert !== 'none'"
+              class="wl-volatility-badge"
+              :class="`vol-${item.volatility_alert}`"
+              :title="item.volatility_alert_reason || ''"
+            >
+              <Icon name="alert-triangle" size="11" />
+              {{ item.volatility_alert === 'severe' ? '大跌' : '异动' }}
+              <template v-if="item.daily_change_pct != null">{{ Number(item.daily_change_pct).toFixed(2) }}%</template>
+            </span>
           </div>
           <div class="wl-card-body">
             <!-- 来源事件说明 -->
@@ -2024,7 +2301,7 @@ watch(scrollToFundCode, async (code) => {
             <!-- 折叠详情区 -->
             <div v-if="expandedCards[item.fund_code]" class="wl-card-details">
               <div class="wl-data-row">
-                <span class="wl-data-label">当前净值</span>
+              <span class="wl-data-label">当前净值</span>
               <span
                 class="wl-data-value"
                 :title="item.source ? `数据来源：${item.source}` : ''"
@@ -2037,6 +2314,24 @@ watch(scrollToFundCode, async (code) => {
                 >
                   今日 {{ parseFloat(item.change_pct) >= 0 ? '+' : '' }}{{ Number(item.change_pct).toFixed(2) }}%
                 </span>
+              </span>
+            </div>
+            <!-- Batch1 增强点 1：买入价 + 当前盈亏 -->
+            <div v-if="item.entry_price" class="wl-data-row">
+              <span class="wl-data-label">买入价</span>
+              <span class="wl-data-value">
+                {{ Number(item.entry_price).toFixed(4) }}
+                <span v-if="item.entry_date" class="wl-target-set-date">（{{ formatShortDate(item.entry_date) }}入）</span>
+                <span v-if="item.pnl_pct != null" class="wl-change-tag" :class="parseFloat(item.pnl_pct) >= 0 ? 'wl-change-up' : 'wl-change-down'">
+                  盈亏 {{ parseFloat(item.pnl_pct) >= 0 ? '+' : '' }}{{ Number(item.pnl_pct).toFixed(2) }}%
+                </span>
+              </span>
+            </div>
+            <div v-if="item.target_profit_pct || item.stop_loss_pct" class="wl-data-row">
+              <span class="wl-data-label">止盈/止损</span>
+              <span class="wl-data-value">
+                <span v-if="item.target_profit_pct" class="wl-change-tag wl-change-up">+{{ Number(item.target_profit_pct).toFixed(1) }}%</span>
+                <span v-if="item.stop_loss_pct" class="wl-change-tag wl-change-down">-{{ Number(item.stop_loss_pct).toFixed(1) }}%</span>
               </span>
             </div>
             <div class="wl-data-row">
@@ -2427,14 +2722,18 @@ watch(scrollToFundCode, async (code) => {
                 <Icon name="target" size="12" />
                 <span>设目标</span>
               </button>
+              <!-- Batch1 增强点 1：上车设置（买入价/止盈/止损） -->
+              <button class="btn-wl-entry" @click="openEntryDialog(item)">
+                <Icon name="pencil" size="12" />
+                <span>{{ item.entry_price ? '改上车' : '上车设置' }}</span>
+              </button>
               <button
+                v-if="item.status !== 'bought'"
                 class="btn-wl-bought"
-                :class="{ 'btn-wl-bought-done': item.status === 'bought' }"
-                :disabled="item.status === 'bought'"
                 @click="handleMarkBought(item)"
               >
-                <Icon :name="item.status === 'bought' ? 'check-circle' : 'target'" size="12" />
-                <span>{{ item.status === 'bought' ? '已买入' : '标记买入' }}</span>
+                <Icon name="target" size="12" />
+                <span>标记买入</span>
               </button>
               <button class="btn-wl-remove" @click="handleRemoveWatchlist(item)">
                 <Icon name="trash-2" size="12" />
@@ -2637,6 +2936,101 @@ watch(scrollToFundCode, async (code) => {
                 <Icon v-if="analyzingArticle" name="spinner" size="14" class="spinning" />
                 <Icon v-else name="scan-search" size="14" />
                 <span>{{ analyzingArticle ? '分析中...' : '开始分析' }}</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      </Transition>
+    </Teleport>
+
+    <!-- Batch1 增强点 1：上车设置弹窗（买入价/止盈/止损） -->
+    <Teleport to="body">
+      <Transition name="fade">
+        <div v-if="showEntryDialog" class="entry-dialog-backdrop" @click.self="closeEntryDialog">
+          <div class="entry-dialog-box">
+            <div class="entry-dialog-header">
+              <Icon name="pencil" size="16" class="entry-dialog-icon" />
+              <h3 class="entry-dialog-title">
+                {{ entryFormItem?.status === 'bought' ? '修改上车信息' : '设置上车信息' }}
+                <span v-if="entryFormItem?.fund_name" class="entry-dialog-subtitle">— {{ entryFormItem.fund_name }}</span>
+              </h3>
+              <button class="entry-dialog-close" @click="closeEntryDialog" :disabled="savingEntry" title="关闭">
+                <Icon name="x" size="16" />
+              </button>
+            </div>
+            <div class="entry-dialog-body">
+              <p class="entry-dialog-hint">
+                填写买入价和止盈/止损目标，系统会在巡检时自动计算盈亏并触发退出信号。
+                <br />止盈/止损留空则使用系统默认（止盈 30% / 止损 10%）。
+              </p>
+              <div class="entry-form-grid">
+                <div class="entry-form-row">
+                  <label class="entry-form-label">买入价 *</label>
+                  <input
+                    v-model="entryForm.entry_price"
+                    type="number"
+                    step="0.0001"
+                    min="0"
+                    placeholder="如 1.2345"
+                    class="entry-form-input"
+                    :disabled="savingEntry"
+                  />
+                </div>
+                <div class="entry-form-row">
+                  <label class="entry-form-label">买入日期</label>
+                  <input
+                    v-model="entryForm.entry_date"
+                    type="date"
+                    class="entry-form-input"
+                    :disabled="savingEntry"
+                  />
+                </div>
+                <div class="entry-form-row">
+                  <label class="entry-form-label">止盈目标 (%)</label>
+                  <input
+                    v-model="entryForm.target_profit_pct"
+                    type="number"
+                    step="0.1"
+                    min="0"
+                    placeholder="如 30（留空使用默认）"
+                    class="entry-form-input"
+                    :disabled="savingEntry"
+                  />
+                </div>
+                <div class="entry-form-row">
+                  <label class="entry-form-label">止损线 (%)</label>
+                  <input
+                    v-model="entryForm.stop_loss_pct"
+                    type="number"
+                    step="0.1"
+                    min="0"
+                    placeholder="如 10（留空使用默认）"
+                    class="entry-form-input"
+                    :disabled="savingEntry"
+                  />
+                </div>
+              </div>
+              <div v-if="entryFormItem?.current_nav" class="entry-form-tip">
+                <Icon name="info" size="11" />
+                <span>
+                  当前净值 {{ Number(entryFormItem.current_nav).toFixed(4) }}，
+                  <template v-if="entryForm.entry_price">
+                    距买入价
+                    <strong :class="parseFloat(entryFormItem.current_nav) >= parseFloat(entryForm.entry_price) ? 'tip-up' : 'tip-down'">
+                      {{ ((parseFloat(entryFormItem.current_nav) - parseFloat(entryForm.entry_price)) / parseFloat(entryForm.entry_price) * 100).toFixed(2) }}%
+                    </strong>
+                  </template>
+                </span>
+              </div>
+            </div>
+            <div class="entry-dialog-actions">
+              <button class="btn-entry-cancel" @click="closeEntryDialog" :disabled="savingEntry">
+                取消
+              </button>
+              <button class="btn-entry-confirm" @click="handleEntrySubmit" :disabled="savingEntry || !entryForm.entry_price">
+                <Icon v-if="savingEntry" name="spinner" size="14" class="spinning" />
+                <Icon v-else name="check-circle" size="14" />
+                <span>{{ savingEntry ? '保存中...' : '保存' }}</span>
               </button>
             </div>
           </div>
@@ -3671,6 +4065,297 @@ watch(scrollToFundCode, async (code) => {
   background: rgba(234,88,12,0.04);
 }
 
+/* ── Batch1 增强点 3：事件影响预估徽章 + 深度解读 ── */
+.impact-est-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.2rem;
+  font-size: 0.68rem;
+  padding: 0.15rem 0.45rem;
+  border-radius: 3px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+.impact-est-tag.impact-up {
+  background: rgba(22,163,74,0.1);
+  color: #16a34a;
+}
+.impact-est-tag.impact-down {
+  background: rgba(220,38,38,0.1);
+  color: #dc2626;
+}
+.impact-est-tag.impact-flat {
+  background: var(--color-bg-tertiary);
+  color: var(--color-text-secondary);
+}
+.impact-cached-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.2rem;
+  font-size: 0.66rem;
+  padding: 0.12rem 0.4rem;
+  border-radius: 3px;
+  background: rgba(22,163,74,0.08);
+  color: #16a34a;
+  white-space: nowrap;
+}
+.event-impact-section {
+  margin-top: 0.6rem;
+  padding-top: 0.5rem;
+  border-top: 1px dashed var(--color-border);
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+}
+.btn-event-impact {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.32rem 0.7rem;
+  background: linear-gradient(135deg, rgba(37,99,235,0.08), rgba(139,92,246,0.08));
+  color: #4f46e5;
+  border: 1px solid rgba(79,70,229,0.25);
+  border-radius: 4px;
+  font-size: 0.74rem;
+  cursor: pointer;
+  transition: all 0.18s;
+  font-weight: 500;
+}
+.btn-event-impact:hover:not(:disabled) {
+  background: linear-gradient(135deg, rgba(37,99,235,0.15), rgba(139,92,246,0.15));
+  border-color: rgba(79,70,229,0.5);
+}
+.btn-event-impact:disabled {
+  cursor: wait;
+  opacity: 0.7;
+}
+.btn-impact-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.2rem;
+  padding: 0.25rem 0.5rem;
+  background: transparent;
+  color: var(--color-text-secondary);
+  border: 1px solid var(--color-border);
+  border-radius: 3px;
+  font-size: 0.7rem;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.btn-impact-toggle:hover {
+  background: var(--color-bg-tertiary);
+  color: var(--color-text-primary);
+}
+.impact-cached-hint {
+  font-size: 0.66rem;
+  color: var(--color-text-tertiary);
+}
+.event-impact-error {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  font-size: 0.7rem;
+  color: #dc2626;
+  background: rgba(220,38,38,0.08);
+  padding: 0.2rem 0.5rem;
+  border-radius: 3px;
+}
+.event-impact-content {
+  width: 100%;
+  margin-top: 0.5rem;
+  padding: 0.7rem 0.85rem;
+  background: var(--color-bg-tertiary);
+  border-radius: 4px;
+  font-size: 0.82rem;
+  line-height: 1.6;
+  color: var(--color-text-primary);
+  border-left: 3px solid #4f46e5;
+}
+.event-impact-content :deep(h3) {
+  font-size: 0.85rem;
+  margin: 0.4rem 0 0.2rem;
+  color: #4f46e5;
+}
+.event-impact-content :deep(h3:first-child) {
+  margin-top: 0;
+}
+.event-impact-content :deep(ul),
+.event-impact-content :deep(ol) {
+  padding-left: 1.2rem;
+  margin: 0.3rem 0;
+}
+.event-impact-content :deep(li) {
+  margin: 0.15rem 0;
+}
+.event-impact-content :deep(strong) {
+  color: var(--color-text-primary);
+}
+
+/* ── Batch1 增强点 1：上车设置弹窗 ── */
+.entry-dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+.entry-dialog-box {
+  width: 92%;
+  max-width: 480px;
+  background: var(--color-bg-card);
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  box-shadow: 0 8px 32px rgba(0,0,0,0.2);
+  display: flex;
+  flex-direction: column;
+  max-height: 90vh;
+}
+.entry-dialog-header {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.85rem 1rem;
+  border-bottom: 1px solid var(--color-border);
+}
+.entry-dialog-icon {
+  color: #2563eb;
+}
+.entry-dialog-title {
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: var(--color-text-primary);
+  margin: 0;
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+.entry-dialog-subtitle {
+  font-size: 0.85rem;
+  color: var(--color-text-secondary);
+  font-weight: 400;
+}
+.entry-dialog-close {
+  background: transparent;
+  border: none;
+  color: var(--color-text-tertiary);
+  cursor: pointer;
+  padding: 0.2rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 3px;
+}
+.entry-dialog-close:hover:not(:disabled) {
+  background: var(--color-bg-tertiary);
+  color: var(--color-text-primary);
+}
+.entry-dialog-close:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+.entry-dialog-body {
+  padding: 0.85rem 1rem;
+  overflow-y: auto;
+}
+.entry-dialog-hint {
+  font-size: 0.78rem;
+  color: var(--color-text-secondary);
+  line-height: 1.6;
+  margin: 0 0 0.7rem;
+}
+.entry-form-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.65rem 0.7rem;
+}
+.entry-form-row {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+.entry-form-label {
+  font-size: 0.74rem;
+  color: var(--color-text-secondary);
+  font-weight: 500;
+}
+.entry-form-input {
+  padding: 0.4rem 0.55rem;
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+  font-size: 0.85rem;
+  background: var(--color-bg-input, var(--color-bg-card));
+  color: var(--color-text-primary);
+  outline: none;
+  transition: border-color 0.15s;
+}
+.entry-form-input:focus {
+  border-color: #2563eb;
+}
+.entry-form-input:disabled {
+  background: var(--color-bg-tertiary);
+  cursor: not-allowed;
+}
+.entry-form-tip {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  margin-top: 0.65rem;
+  font-size: 0.74rem;
+  color: var(--color-text-secondary);
+}
+.entry-form-tip .tip-up { color: #dc2626; font-weight: 600; }
+.entry-form-tip .tip-down { color: #16a34a; font-weight: 600; }
+.entry-dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+  padding: 0.75rem 1rem;
+  border-top: 1px solid var(--color-border);
+}
+.btn-entry-cancel,
+.btn-entry-confirm {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.4rem 0.85rem;
+  border-radius: 4px;
+  font-size: 0.82rem;
+  cursor: pointer;
+  transition: all 0.15s;
+  border: 1px solid;
+}
+.btn-entry-cancel {
+  background: var(--color-bg-card);
+  color: var(--color-text-secondary);
+  border-color: var(--color-border);
+}
+.btn-entry-cancel:hover:not(:disabled) {
+  background: var(--color-bg-tertiary);
+}
+.btn-entry-confirm {
+  background: #2563eb;
+  color: #fff;
+  border-color: #2563eb;
+  font-weight: 500;
+}
+.btn-entry-confirm:hover:not(:disabled) {
+  background: #1d4ed8;
+  border-color: #1d4ed8;
+}
+.btn-entry-confirm:disabled,
+.btn-entry-cancel:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+@media (max-width: 540px) {
+  .entry-form-grid { grid-template-columns: 1fr; }
+  .entry-dialog-box { width: 96%; }
+}
+
 /* ── 关注列表卡片 ── */
 .watchlist-grid {
   display: grid;
@@ -3897,6 +4582,92 @@ watch(scrollToFundCode, async (code) => {
 .wl-signal-tag.sig-neutral {
   background: var(--color-bg-tertiary);
   color: var(--color-text-tertiary);
+}
+/* Batch1 增强点 1：止盈/止损信号灯（6 档扩展） */
+.wl-signal-tag.sig-profit {
+  background: rgba(37,99,235,0.12);
+  color: #2563eb;
+  font-weight: 600;
+}
+.wl-signal-tag.sig-stop {
+  background: rgba(220,38,38,0.15);
+  color: #dc2626;
+  font-weight: 600;
+}
+.wl-card.sig-profit {
+  border-left-color: #2563eb;
+  box-shadow: 0 0 0 1px rgba(37,99,235,0.15);
+}
+.wl-card.sig-stop {
+  border-left-color: #dc2626;
+  box-shadow: 0 0 0 1px rgba(220,38,38,0.2);
+}
+/* 退出信号徽章 */
+.wl-exit-badge {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.2rem;
+  font-size: 0.68rem;
+  padding: 0.18rem 0.5rem;
+  border-radius: 3px;
+  font-weight: 600;
+  white-space: nowrap;
+  animation: pulse-badge 1.6s ease-in-out infinite;
+}
+.wl-exit-badge.exit-profit_target {
+  background: rgba(37,99,235,0.15);
+  color: #2563eb;
+  border: 1px solid rgba(37,99,235,0.3);
+}
+.wl-exit-badge.exit-stop_loss {
+  background: rgba(220,38,38,0.18);
+  color: #dc2626;
+  border: 1px solid rgba(220,38,38,0.4);
+}
+@keyframes pulse-badge {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.7; }
+}
+/* 异常波动徽章 */
+.wl-volatility-badge {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.2rem;
+  font-size: 0.68rem;
+  padding: 0.18rem 0.5rem;
+  border-radius: 3px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+.wl-volatility-badge.vol-severe {
+  background: rgba(220,38,38,0.12);
+  color: #dc2626;
+  border: 1px solid rgba(220,38,38,0.25);
+}
+.wl-volatility-badge.vol-warning {
+  background: rgba(234,88,12,0.1);
+  color: #ea580c;
+  border: 1px solid rgba(234,88,12,0.2);
+}
+/* 上车设置按钮 */
+.btn-wl-entry {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.25rem 0.55rem;
+  background: rgba(37,99,235,0.08);
+  color: #2563eb;
+  border: 1px solid rgba(37,99,235,0.2);
+  border-radius: 4px;
+  font-size: 0.7rem;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.btn-wl-entry:hover {
+  background: rgba(37,99,235,0.15);
+  border-color: rgba(37,99,235,0.4);
 }
 
 .wl-card-body {
@@ -6032,6 +6803,9 @@ watch(scrollToFundCode, async (code) => {
 .da-tag-yellow { background: rgba(234, 88, 12, 0.1); color: #e65100; }
 .da-tag-red { background: rgba(220, 38, 38, 0.08); color: #b71c1c; }
 .da-tag-gray { background: rgba(0, 0, 0, 0.06); color: #666; }
+/* Batch1 增强点 1：退出信号统计标签 */
+.da-tag-profit { background: rgba(37, 99, 235, 0.1); color: #1d4ed8; }
+.da-tag-stop { background: rgba(220, 38, 38, 0.12); color: #b91c1c; font-weight: 600; }
 .da-tag:hover { filter: brightness(0.9); }
 .da-tag.active { border-color: currentColor; }
 

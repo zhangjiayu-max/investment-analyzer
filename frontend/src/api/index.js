@@ -1792,6 +1792,11 @@ export function analyzeArticleTrends(url) {
   return api.post('/alerts/event-radar/analyze-article', { url }, { timeout: 180000 })
 }
 
+/** Batch1 增强点 3：LLM 深度解读事件影响（结合用户持仓），7天缓存 */
+export function analyzeEventImpact(eventId) {
+  return api.post('/alerts/event-radar/analyze-impact', { event_id: eventId }, { timeout: 120000 })
+}
+
 /** 生成预警 */
 export function generateAlert(data) {
   return api.post('/portfolio/alerts/generate', data)
@@ -2277,8 +2282,18 @@ export function refreshWatchlistNavs() {
 }
 
 /** 标记为已买入 */
-export function markWatchlistBought(id) {
-  return api.post(`/watchlist/${id}/mark-bought`)
+export function markWatchlistBought(id, payload = null) {
+  return api.post(`/watchlist/${id}/mark-bought`, payload || {})
+}
+
+/** Batch1 增强点 1：用户上车后更新买入信息（买入价/日期/止盈/止损） */
+export function updateWatchlistEntry(id, payload) {
+  return api.post(`/watchlist/${id}/entry`, payload)
+}
+
+/** Batch1 增强点 1：查询退出信号状态（盈亏百分比 + 止盈/止损徽章） */
+export function getWatchlistExitStatus(id) {
+  return api.get(`/watchlist/${id}/exit-status`)
 }
 
 /** 查询基金信息并自动填充 */

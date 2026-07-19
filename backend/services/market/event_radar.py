@@ -451,6 +451,20 @@ def _extract_events_from_news(news_list: list[dict], trace_id: str = "") -> list
     ]
 
     known_sectors = "/".join(SECTOR_TO_INDEX.keys())
+
+    # Batch1 增强点 3：事件影响量化字段（开关控制，默认关闭）
+    try:
+        impact_quant_enabled = get_config_bool("alerts.event_impact_quantification_enabled", False)
+    except Exception:
+        impact_quant_enabled = False
+
+    impact_fields_prompt = ""
+    if impact_quant_enabled:
+        impact_fields_prompt = """
+- expected_impact_pct: 预估影响幅度（正负数，如 3.5 表示预估涨 3.5%，-2.0 表示预估跌 2.0%）
+- impact_direction: 影响方向（up=上涨 / down=下跌 / flat=无影响）
+- impact_duration: 影响持续期（short_term=1-3天 / medium_term=1-2周 / long_term=超过2周）"""
+
     prompt = f"""你是一位资深财经分析师。请从以下新闻列表中提取「即将在未来 {lookforward_days} 天内发生」的市场事件。
 
 【新闻列表】
@@ -466,7 +480,7 @@ def _extract_events_from_news(news_list: list[dict], trace_id: str = "") -> list
 - affected_sectors: 受影响板块（数组，必须严格从以下标准板块名中选取：{known_sectors}）
   注意：不要使用"国防军工""生物医药"等同义词，必须用标准名"军工""医药"
 - affected_themes: 受影响主题（数组，自由文本如"国产替代""火箭回收"）
-- confidence: 置信度（0-1，1 表示高度确定会发生）
+- confidence: 置信度（0-1，1 表示高度确定会发生）{impact_fields_prompt}
 
 【过滤规则】
 1. 只提取"即将发生"的事件，不提取"已经发生"的新闻
@@ -896,6 +910,28 @@ def scan_forward_events(trace_id: str = "") -> dict:
                 original_confidence=original_conf,  # P1-2: 保留原始置信度供前端展示
                 original_direction=original_dir,    # 保留原始方向
             )
+            # Batch1 增强点 3：写入影响量化字段（仅开关开启且 LLM 返回了数据时）
+            try:
+                impact_quant_enabled = get_config_bool("alerts.event_impact_quantification_enabled", False)
+            except Exception:
+                impact_quant_enabled = False
+            if impact_quant_enabled:
+                impact_fields = {}
+                if ev.get("expected_impact_pct") is not None:
+                    try:
+                        impact_fields["expected_impact_pct"] = float(ev.get("expected_impact_pct"))
+                    except (TypeError, ValueError):
+                        pass
+                if ev.get("impact_direction"):
+                    impact_fields["impact_direction"] = ev.get("impact_direction")
+                if ev.get("impact_duration"):
+                    impact_fields["impact_duration"] = ev.get("impact_duration")
+                if impact_fields:
+                    try:
+                        from db.market_events import update_market_event_fields as _update_fields
+                        _update_fields(eid, impact_fields)
+                    except Exception as _e:
+                        logger.debug(f"[event_radar:{trace_id}] 影响量化字段写入失败: {_e}")
             if not existing:
                 new_count += 1
         except Exception as e:
@@ -1476,3 +1512,144 @@ def recalibrate_existing_events(trace_id: str = "") -> dict:
 
     logger.info(f"[event_radar:{trace_id}] 回溯校准完成: {counts}")
     return counts
+
+
+# ── Batch1 增强点 3：事件深度解读（LLM 个性化影响分析）──────────────
+
+def analyze_event_impact(event_id: str, trace_id: str = "") -> dict:
+    """LLM 深度解读事件影响，结合用户持仓生成个性化影响分析。
+
+    - 开关：alerts.event_impact_analysis_enabled（默认 false）
+    - 缓存：alerts.event_impact_analysis_cache_days（默认 7 天）
+    - LLM 调用：传入事件标题/摘要/affected_sectors + 用户持仓 → 输出个性化影响分析
+
+    Returns:
+        {
+            "event_id": str,
+            "analysis": str,  # LLM 分析全文
+            "analyzed_at": str,
+            "cached": bool,   # 是否命中缓存
+        }
+    """
+    try:
+        enabled = get_config_bool("alerts.event_impact_analysis_enabled", False)
+    except Exception:
+        enabled = False
+    if not enabled:
+        return {"event_id": event_id, "analysis": "", "error": "深度解读开关未开启", "cached": False}
+
+    # 查事件
+    from db.market_events import get_market_event, update_market_event_fields
+    event = get_market_event(event_id)
+    if not event:
+        return {"event_id": event_id, "analysis": "", "error": "事件不存在", "cached": False}
+
+    # 缓存检查
+    cache_days = get_config_int("alerts.event_impact_analysis_cache_days", 7)
+    cached_analysis = event.get("impact_analysis")
+    cached_at = event.get("impact_analyzed_at")
+    if cached_analysis and cached_at:
+        try:
+            cached_dt = datetime.strptime(cached_at[:19], "%Y-%m-%d %H:%M:%S")
+            if (datetime.now() - cached_dt).days < cache_days:
+                return {
+                    "event_id": event_id,
+                    "analysis": cached_analysis,
+                    "analyzed_at": cached_at,
+                    "cached": True,
+                }
+        except Exception:
+            pass  # 缓存解析失败，重新调用
+
+    title = event.get("title", "")
+    summary = event.get("summary", "")
+    direction = event.get("direction", "neutral")
+    sectors = json.loads(event.get("affected_sectors") or "[]")
+    themes = json.loads(event.get("affected_themes") or "[]")
+    expected_impact_pct = event.get("expected_impact_pct")
+    impact_duration = event.get("impact_duration")
+
+    # 查用户持仓
+    try:
+        from db.portfolio import list_holdings
+        holdings = list_holdings() or []
+    except Exception:
+        holdings = []
+    holdings_summary = "\n".join(
+        f"- {h.get('fund_name','')}（{h.get('fund_code','')}）：占比 {h.get('weight',0):.1%}"
+        for h in holdings[:10]
+    ) or "暂无持仓"
+
+    # 构造 prompt
+    impact_hint = ""
+    if expected_impact_pct is not None:
+        impact_hint += f"\n- 预估影响幅度: {expected_impact_pct}%"
+    if impact_duration:
+        impact_hint += f"\n- 影响持续期: {impact_duration}"
+
+    prompt = f"""你是资深投资顾问。请针对以下市场事件，结合用户当前持仓，生成个性化的影响分析。
+
+【事件信息】
+- 标题: {title}
+- 摘要: {summary}
+- 影响方向: {direction}
+- 受影响板块: {", ".join(sectors)}
+- 受影响主题: {", ".join(themes)}{impact_hint}
+
+【用户当前持仓】
+{holdings_summary}
+
+【输出要求】
+1. 用 markdown 格式输出
+2. 包含以下章节：
+   ### 事件核心
+   一句话说明事件本质和影响时点
+
+   ### 对用户持仓的影响
+   - 逐个分析用户持仓中受此事件影响的基金（按受影响程度排序）
+   - 标注影响程度（高/中/低）和方向（利好/利空/中性）
+   - 给出具体的影响金额估算（基于持仓占比和预估影响幅度）
+
+   ### 操作建议
+   - 是否需要调仓？如果需要，给出 2-3 条具体建议
+   - 短期（1周）和中期（1月）的应对策略
+
+   ### 风险提示
+   - 此事件的不确定性因素
+   - 最坏情况下的应对预案
+
+3. 不要使用"建议立即买卖"等绝对化表述
+4. 最多 800 字
+"""
+
+    try:
+        resp = _call_llm(
+            caller="event_impact_analyzer",
+            trace_id=trace_id,
+            model=MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.3,
+            max_tokens=2000,
+        )
+        analysis = (resp.choices[0].message.content or "").strip()
+        if not analysis:
+            return {"event_id": event_id, "analysis": "", "error": "LLM 返回空内容", "cached": False}
+    except Exception as e:
+        logger.warning(f"[event_radar:{trace_id}] 影响分析失败: {e}")
+        return {"event_id": event_id, "analysis": "", "error": f"LLM 调用失败: {e}", "cached": False}
+
+    # 写回 market_events 表（缓存）
+    analyzed_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        update_market_event_fields(event_id, {
+            "impact_analysis": analysis,
+            "impact_analyzed_at": analyzed_at,
+        })
+    except Exception as _e:
+        logger.debug(f"[event_radar:{trace_id}] 影响分析缓存写入失败: {_e}")
+    return {
+        "event_id": event_id,
+        "analysis": analysis,
+        "analyzed_at": analyzed_at,
+        "cached": False,
+    }

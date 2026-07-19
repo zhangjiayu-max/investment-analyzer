@@ -88,6 +88,12 @@ def update_watchlist_item(item_id: int, **fields) -> bool:
         'current_nav', 'current_percentile', 'nav_updated_at',
         'suggested_buy_price', 'buy_price_source',
         'analysis_method', 'drawdown_percentile', 'nav_percentile',
+        # Batch1 增强点 1：退出机制字段
+        'target_profit_pct', 'stop_loss_pct', 'entry_price', 'entry_date',
+        'exit_signal', 'exit_signal_reason',
+        # Batch1 增强点 2：异常波动预警字段
+        'daily_change_pct', 'weekly_change_pct',
+        'volatility_alert', 'volatility_alert_reason', 'volatility_updated_at',
     }
     invalid = set(fields.keys()) - allowed
     if invalid:
@@ -229,3 +235,67 @@ def get_watchlist_summary(user_id: str = "default") -> dict:
         "bought": len(bought),
         "category_count": category_count,
     }
+
+
+# ── Batch1 增强点 1：退出机制（止盈/止损）─────────────────────────────────
+
+def update_entry_info(item_id: int, entry_price: float = None, entry_date: str = None,
+                     target_profit_pct: float = None, stop_loss_pct: float = None) -> bool:
+    """用户上车后更新买入信息（买入价/日期/止盈/止损）。
+
+    所有参数可选，只更新传入的字段。同时把 status 改为 'bought'。
+    """
+    fields = {"status": "bought"}
+    if entry_price is not None:
+        fields["entry_price"] = float(entry_price)
+    if entry_date is not None:
+        fields["entry_date"] = entry_date
+    if target_profit_pct is not None:
+        fields["target_profit_pct"] = float(target_profit_pct)
+    if stop_loss_pct is not None:
+        fields["stop_loss_pct"] = float(stop_loss_pct)
+    # 上车时清空旧的退出信号
+    fields["exit_signal"] = "none"
+    fields["exit_signal_reason"] = ""
+    return update_watchlist_item(item_id, **fields)
+
+
+def get_watchlist_with_exit_status(item_id: int) -> dict | None:
+    """查询单条关注记录，附带当前盈亏百分比和退出信号状态。
+
+    Returns:
+        {
+            ...原 watchlist 字段,
+            pnl_pct: 当前盈亏百分比（current_nav 相对 entry_price）,
+            exit_signal: profit_target / stop_loss / none,
+            exit_signal_reason: 触发原因,
+        }
+    """
+    item = get_watchlist_item(item_id)
+    if not item:
+        return None
+
+    entry_price = item.get("entry_price")
+    current_nav = item.get("current_nav")
+    if entry_price and current_nav and entry_price > 0:
+        pnl_pct = (current_nav - entry_price) / entry_price * 100
+        item["pnl_pct"] = round(pnl_pct, 2)
+
+        target_profit = item.get("target_profit_pct")
+        stop_loss = item.get("stop_loss_pct")
+        exit_signal = "none"
+        exit_reason = ""
+        if target_profit and pnl_pct >= target_profit:
+            exit_signal = "profit_target"
+            exit_reason = f"已涨 {pnl_pct:.1f}%，达到止盈目标 {target_profit}%"
+        elif stop_loss and pnl_pct <= -stop_loss:
+            exit_signal = "stop_loss"
+            exit_reason = f"已跌 {abs(pnl_pct):.1f}%，触发止损 -{stop_loss}%"
+        item["exit_signal"] = exit_signal
+        item["exit_signal_reason"] = exit_reason
+    else:
+        item["pnl_pct"] = None
+        item["exit_signal"] = item.get("exit_signal") or "none"
+        item["exit_signal_reason"] = item.get("exit_signal_reason") or ""
+
+    return item

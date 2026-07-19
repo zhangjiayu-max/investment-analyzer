@@ -5,6 +5,7 @@
 import logging
 import time
 from functools import lru_cache
+from datetime import datetime, timedelta
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
@@ -16,6 +17,8 @@ from db import (
     lookup_fund_info, fetch_fund_nav,
     get_holding_by_fund,
 )
+from db.config import get_config, get_config_bool, get_config_float, get_config_int
+from db.watchlist import update_entry_info, get_watchlist_with_exit_status
 
 logger = logging.getLogger(__name__)
 
@@ -295,6 +298,69 @@ async def watchlist_patrol_api():
             "notes": item.get("notes", ""),
             "status": item.get("status"),
         })
+
+        # ── Batch1 增强点 1：退出信号计算（开关控制，默认关闭） ──
+        exit_signal = "none"
+        exit_signal_reason = ""
+        pnl_pct = None
+        try:
+            exit_enabled = get_config_bool("watchlist.exit_signal_enabled", False)
+        except Exception:
+            exit_enabled = False
+        if exit_enabled:
+            entry_price = item.get("entry_price")
+            if entry_price and current_nav and entry_price > 0:
+                pnl_pct = round((current_nav - entry_price) / entry_price * 100, 2)
+                target_profit = item.get("target_profit_pct")
+                stop_loss = item.get("stop_loss_pct")
+                if target_profit and pnl_pct >= target_profit:
+                    exit_signal = "profit_target"
+                    exit_signal_reason = f"已涨 {pnl_pct:.1f}%，达到止盈目标 {target_profit}%"
+                elif stop_loss and pnl_pct <= -stop_loss:
+                    exit_signal = "stop_loss"
+                    exit_signal_reason = f"已跌 {abs(pnl_pct):.1f}%，触发止损 -{stop_loss}%"
+                # 写回 watchlist 表
+                try:
+                    update_watchlist_item(item["id"],
+                                          exit_signal=exit_signal,
+                                          exit_signal_reason=exit_signal_reason)
+                except Exception as _e:
+                    logger.debug(f"[watchlist] 退出信号写回失败 {fund_code}: {_e}")
+        all_items[-1]["entry_price"] = item.get("entry_price")
+        all_items[-1]["entry_date"] = item.get("entry_date")
+        all_items[-1]["target_profit_pct"] = item.get("target_profit_pct")
+        all_items[-1]["stop_loss_pct"] = item.get("stop_loss_pct")
+        all_items[-1]["pnl_pct"] = pnl_pct
+        all_items[-1]["exit_signal"] = exit_signal
+        all_items[-1]["exit_signal_reason"] = exit_signal_reason
+
+        # ── Batch1 增强点 2：异常波动预警（开关控制，默认关闭） ──
+        vol_alert = "none"
+        vol_reason = ""
+        daily_pct = None
+        weekly_pct = None
+        try:
+            vol_enabled = get_config_bool("watchlist.volatility_alert_enabled", False)
+        except Exception:
+            vol_enabled = False
+        if vol_enabled and current_nav:
+            vol_alert, vol_reason, daily_pct, weekly_pct = _calculate_volatility_alert(fund_code, current_nav)
+            if vol_alert != "none":
+                try:
+                    update_watchlist_item(
+                        item["id"],
+                        volatility_alert=vol_alert,
+                        volatility_alert_reason=vol_reason,
+                        daily_change_pct=daily_pct,
+                        weekly_change_pct=weekly_pct,
+                        volatility_updated_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    )
+                except Exception as _e:
+                    logger.debug(f"[watchlist] 波动预警写回失败 {fund_code}: {_e}")
+        all_items[-1]["volatility_alert"] = vol_alert
+        all_items[-1]["volatility_alert_reason"] = vol_reason
+        all_items[-1]["daily_change_pct"] = daily_pct
+        all_items[-1]["weekly_change_pct"] = weekly_pct
 
         if is_alert:
             alert_item = {
@@ -780,14 +846,178 @@ async def refresh_watchlist_navs_api():
 
 
 @router.post("/api/watchlist/{item_id}/mark-bought")
-async def mark_as_bought_api(item_id: int):
-    """标记为已买入（从关注列表移到持仓）。"""
+async def mark_as_bought_api(item_id: int, payload: dict = None):
+    """标记为已买入（从关注列表移到持仓）。
+
+    Batch1 增强点 1：支持可选 payload 中的 entry_price/entry_date/target_profit_pct/stop_loss_pct，
+    用于后续退出信号计算。
+    """
     item = get_watchlist_item(item_id)
     if not item:
         raise HTTPException(404, "关注记录不存在")
 
-    update_watchlist_item(item_id, status="bought")
-    return {"ok": True, "message": f"{item.get('fund_name','')} 已标记为已买入"}
+    payload = payload or {}
+    entry_price = payload.get("entry_price")
+    entry_date = payload.get("entry_date") or datetime.now().strftime("%Y-%m-%d")
+    target_profit_pct = payload.get("target_profit_pct")
+    stop_loss_pct = payload.get("stop_loss_pct")
+
+    # 如果传了任意一个退出相关字段，走 update_entry_info 路径
+    if any(v is not None for v in [entry_price, target_profit_pct, stop_loss_pct]):
+        update_entry_info(
+            item_id,
+            entry_price=float(entry_price) if entry_price is not None else None,
+            entry_date=entry_date,
+            target_profit_pct=float(target_profit_pct) if target_profit_pct is not None else None,
+            stop_loss_pct=float(stop_loss_pct) if stop_loss_pct is not None else None,
+        )
+        return {
+            "ok": True,
+            "message": f"{item.get('fund_name','')} 已标记为已买入，已记录上车信息",
+            "entry_price": entry_price,
+            "entry_date": entry_date,
+            "target_profit_pct": target_profit_pct,
+            "stop_loss_pct": stop_loss_pct,
+        }
+    else:
+        update_watchlist_item(item_id, status="bought")
+        return {"ok": True, "message": f"{item.get('fund_name','')} 已标记为已买入"}
+
+
+# ── Batch1 增强点 1：退出机制 API ──────────────────────────────────
+
+@router.post("/api/watchlist/{item_id}/entry")
+async def update_entry_info_api(item_id: int, payload: dict):
+    """用户上车后更新买入信息（买入价/日期/止盈/止损）。
+
+    必填: entry_price
+    可选: entry_date（默认今天）, target_profit_pct（默认 30）, stop_loss_pct（默认 10）
+    """
+    item = get_watchlist_item(item_id)
+    if not item:
+        raise HTTPException(404, "关注记录不存在")
+
+    entry_price = payload.get("entry_price")
+    if entry_price is None:
+        raise HTTPException(400, "缺少 entry_price 参数")
+    try:
+        entry_price = float(entry_price)
+    except (TypeError, ValueError):
+        raise HTTPException(400, "entry_price 必须是数字")
+    if entry_price <= 0:
+        raise HTTPException(400, "entry_price 必须大于 0")
+
+    entry_date = payload.get("entry_date") or datetime.now().strftime("%Y-%m-%d")
+    target_profit_pct = payload.get("target_profit_pct")
+    stop_loss_pct = payload.get("stop_loss_pct")
+    # 未设止盈/止损时使用默认值
+    if target_profit_pct is None:
+        target_profit_pct = get_config_float("watchlist.default_target_profit_pct", 30.0)
+    if stop_loss_pct is None:
+        stop_loss_pct = get_config_float("watchlist.default_stop_loss_pct", 10.0)
+
+    update_entry_info(
+        item_id,
+        entry_price=entry_price,
+        entry_date=entry_date,
+        target_profit_pct=float(target_profit_pct),
+        stop_loss_pct=float(stop_loss_pct),
+    )
+
+    return {
+        "ok": True,
+        "message": f"{item.get('fund_name','')} 上车信息已记录",
+        "entry_price": entry_price,
+        "entry_date": entry_date,
+        "target_profit_pct": float(target_profit_pct),
+        "stop_loss_pct": float(stop_loss_pct),
+    }
+
+
+@router.get("/api/watchlist/{item_id}/exit-status")
+async def get_exit_status_api(item_id: int):
+    """查询退出信号状态（止盈/止损）。
+
+    返回当前盈亏百分比和退出信号，前端用于展示止盈/止损徽章。
+    """
+    result = get_watchlist_with_exit_status(item_id)
+    if not result:
+        raise HTTPException(404, "关注记录不存在")
+    return {
+        "item_id": item_id,
+        "fund_code": result.get("fund_code"),
+        "fund_name": result.get("fund_name"),
+        "entry_price": result.get("entry_price"),
+        "current_nav": result.get("current_nav"),
+        "pnl_pct": result.get("pnl_pct"),
+        "target_profit_pct": result.get("target_profit_pct"),
+        "stop_loss_pct": result.get("stop_loss_pct"),
+        "exit_signal": result.get("exit_signal"),
+        "exit_signal_reason": result.get("exit_signal_reason"),
+    }
+
+
+# ── Batch1 增强点 2：异常波动预警 ──────────────────────────────────
+
+def _calculate_volatility_alert(fund_code: str, current_nav: float) -> tuple[str, str, float | None, float | None]:
+    """计算异常波动预警。
+
+    通过本地缓存查近 7 日净值历史，计算日/周涨跌幅，按阈值判定预警级别。
+
+    Returns:
+        (alert_level, reason, daily_pct, weekly_pct)
+        alert_level: severe / warning / none
+    """
+    try:
+        from services.fund.fund_data_service import get_fund_nav_history_from_cache
+        history = get_fund_nav_history_from_cache(fund_code, days=7)
+    except Exception as e:
+        logger.debug(f"[volatility] 获取净值历史失败 {fund_code}: {e}")
+        return "none", "", None, None
+
+    if not history or len(history) < 2:
+        return "none", "", None, None
+
+    # history 按日期升序，最后一条是最近一天
+    last_nav = float(history[-1].get("nav") or 0)
+    if last_nav <= 0 or not current_nav:
+        return "none", "", None, None
+
+    daily_pct = (current_nav - last_nav) / last_nav * 100
+
+    # 周涨跌幅：用最早的一条
+    weekly_pct = None
+    if len(history) >= 6:
+        first_nav = float(history[0].get("nav") or 0)
+        if first_nav > 0:
+            weekly_pct = (current_nav - first_nav) / first_nav * 100
+
+    # 读阈值配置
+    severe_daily = get_config_float("watchlist.volatility_severe_daily_threshold", -3.0)
+    severe_weekly = get_config_float("watchlist.volatility_severe_weekly_threshold", -6.0)
+    warning_daily = get_config_float("watchlist.volatility_warning_daily_threshold", -1.5)
+    warning_weekly = get_config_float("watchlist.volatility_warning_weekly_threshold", -3.0)
+
+    # 判定级别
+    reasons = []
+    if daily_pct <= severe_daily:
+        reasons.append(f"近1日跌{abs(daily_pct):.2f}%")
+    if weekly_pct is not None and weekly_pct <= severe_weekly:
+        reasons.append(f"近5日跌{abs(weekly_pct):.2f}%")
+
+    if reasons:
+        return "severe", "，".join(reasons), daily_pct, weekly_pct
+
+    reasons = []
+    if daily_pct <= warning_daily:
+        reasons.append(f"近1日跌{abs(daily_pct):.2f}%")
+    if weekly_pct is not None and weekly_pct <= warning_weekly:
+        reasons.append(f"近5日跌{abs(weekly_pct):.2f}%")
+
+    if reasons:
+        return "warning", "，".join(reasons), daily_pct, weekly_pct
+
+    return "none", "", daily_pct, weekly_pct
 
 
 @router.post("/api/watchlist/{item_id}/lookup")

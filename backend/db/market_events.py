@@ -59,6 +59,17 @@ def init_market_events_tables(conn) -> None:
         conn.execute("ALTER TABLE market_events ADD COLUMN original_confidence REAL")
     if "original_direction" not in cols:
         conn.execute("ALTER TABLE market_events ADD COLUMN original_direction TEXT")
+    # ── Batch1 增强点 3：事件影响量化 ──
+    if "expected_impact_pct" not in cols:
+        conn.execute("ALTER TABLE market_events ADD COLUMN expected_impact_pct REAL")  # 预估影响幅度（如 3.5 = +3.5%）
+    if "impact_direction" not in cols:
+        conn.execute("ALTER TABLE market_events ADD COLUMN impact_direction TEXT")     # 影响方向（up/down/flat）
+    if "impact_duration" not in cols:
+        conn.execute("ALTER TABLE market_events ADD COLUMN impact_duration TEXT")     # 影响持续期（short_term/medium_term/long_term）
+    if "impact_analysis" not in cols:
+        conn.execute("ALTER TABLE market_events ADD COLUMN impact_analysis TEXT")     # LLM 影响分析全文（缓存）
+    if "impact_analyzed_at" not in cols:
+        conn.execute("ALTER TABLE market_events ADD COLUMN impact_analyzed_at TEXT")   # 分析时间戳
     conn.execute("CREATE INDEX IF NOT EXISTS idx_market_events_status ON market_events(status)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_market_events_expected ON market_events(expected_date)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_market_events_relevance ON market_events(relevance_to_user)")
@@ -227,7 +238,10 @@ def update_market_event_fields(event_id: str, fields: dict) -> bool:
     conn = _get_conn()
     try:
         allowed = {"confidence", "direction", "status", "relevance_to_user",
-                   "original_confidence", "original_direction"}
+                   "original_confidence", "original_direction",
+                   # Batch1 增强点 3：事件影响量化字段
+                   "expected_impact_pct", "impact_direction", "impact_duration",
+                   "impact_analysis", "impact_analyzed_at"}
         updates = {k: v for k, v in fields.items() if k in allowed}
         if not updates:
             return False

@@ -313,6 +313,23 @@ DEFAULT_CONFIGS = [
 
     # 基本面健康检查（2026-07-17 新增）— 默认关闭
     ('smart_add.fund_health_enabled', 'true', '基本面健康检查开关（经理变更/规模暴增/跟踪误差）', 'smart_add'),
+
+    # ── Batch1 增强点 1：关注计划退出机制（2026-07-18，默认关闭） ──
+    ('watchlist.exit_signal_enabled', 'false', '关注计划退出机制开关：true时巡检计算止盈/止损信号', 'watchlist'),
+    ('watchlist.default_target_profit_pct', '30', '默认止盈百分比（用户未设时使用）', 'watchlist'),
+    ('watchlist.default_stop_loss_pct', '10', '默认止损百分比（用户未设时使用）', 'watchlist'),
+
+    # ── Batch1 增强点 2：异常波动预警（2026-07-18，默认关闭） ──
+    ('watchlist.volatility_alert_enabled', 'false', '异常波动预警开关：true时巡检计算日/周涨跌幅及预警级别', 'watchlist'),
+    ('watchlist.volatility_severe_daily_threshold', '-3.0', '日跌触发 severe 的阈值（百分比，-3.0 表示 -3%）', 'watchlist'),
+    ('watchlist.volatility_severe_weekly_threshold', '-6.0', '周跌触发 severe 的阈值', 'watchlist'),
+    ('watchlist.volatility_warning_daily_threshold', '-1.5', '日跌触发 warning 的阈值', 'watchlist'),
+    ('watchlist.volatility_warning_weekly_threshold', '-3.0', '周跌触发 warning 的阈值', 'watchlist'),
+
+    # ── Batch1 增强点 3：事件影响量化（2026-07-18，默认关闭） ──
+    ('alerts.event_impact_quantification_enabled', 'false', '事件影响量化开关：true时LLM提取阶段输出影响幅度/方向/持续期', 'alerts'),
+    ('alerts.event_impact_analysis_enabled', 'false', '事件深度解读开关：true时允许手动触发LLM个性化影响分析', 'alerts'),
+    ('alerts.event_impact_analysis_cache_days', '7', '深度解读缓存天数', 'alerts'),
 ]
 
 

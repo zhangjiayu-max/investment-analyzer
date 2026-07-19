@@ -95,6 +95,25 @@ async def accuracy_stats():
         raise HTTPException(status_code=500, detail=f"获取失败: {e}")
 
 
+@router.post("/api/alerts/event-radar/analyze-impact")
+async def analyze_event_impact_api(event_id: str = Body(..., embed=True)):
+    """LLM 深度解读事件影响（结合用户持仓）。
+
+    - 开关：alerts.event_impact_analysis_enabled（默认 false）
+    - 缓存：alerts.event_impact_analysis_cache_days（默认 7 天）
+    - 失败时返回 error 字段，HTTP 仍 200，前端按 data.error 判断
+    """
+    if not event_id:
+        raise HTTPException(status_code=400, detail="event_id 不能为空")
+    try:
+        from services.event_radar import analyze_event_impact
+        result = analyze_event_impact(event_id)
+        return ApiResponse.success(data=result)
+    except Exception as e:
+        logger.error(f"事件影响分析失败 event_id={event_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"分析失败: {e}")
+
+
 @router.post("/api/alerts/event-radar/analyze-article")
 async def analyze_article_trends(url: str = Body(..., embed=True)):
     """抓取文章并提取投资趋势。
