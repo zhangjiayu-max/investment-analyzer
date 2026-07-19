@@ -227,16 +227,23 @@ _UNDERSTAND_PROMPT = """## 任务：理解用户问题的意图和信息需求
    - true: 问题模糊，需要先问用户（如"那这只基金怎么样"无上下文）
    - false: 问题清晰，可直接分析
 
-5. **clarification_reason**：
+5. **clarification_question**：
+   - 当 needs_clarification=true 时，**必须填写具体的澄清问题文本**（向用户提问的完整句子）
+   - 例："您提到'当前持仓'，请问想分析哪只基金或哪个账户的持仓风险？"
+   - 例："您的投资目标是什么？稳健增值还是激进成长？"
+   - **禁止返回空字符串**，必须是一句完整的中文问句
+   - needs_clarification=false 时返回空字符串 ""
+
+6. **clarification_reason**：
    - 当 needs_clarification=true 时，简要说明为什么需要澄清（如"问题含代词无上下文"、"意图模糊缺少具体标的"）
    - needs_clarification=false 时返回空字符串 ""
 
-6. **clarification_options**：
+7. **clarification_options**：
    - 当 needs_clarification=true 时，提供 2-4 个选项供用户快速选择
    - 选项应覆盖可能的意图方向（如 ["估值分析", "买卖建议", "风险评估"]）
    - needs_clarification=false 时返回空数组 []
 
-7. **complexity**：
+8. **complexity**：
    - simple: 单一标的、单一问题、长度<20字
    - medium: 1-2个标的、需要数据支撑、长度20-60字
    - complex: 多标的对比、嵌套问题、需要综合分析、长度>60字
@@ -379,7 +386,18 @@ def get_complexity(query_info: dict) -> str:
 
 
 def needs_clarification(query_info: dict) -> tuple[bool, str]:
-    """判断是否需要澄清，返回 (是否需要, 澄清问题)。"""
-    if query_info.get("needs_clarification"):
-        return True, query_info.get("clarification_question", "请提供更多细节")
-    return False, ""
+    """判断是否需要澄清，返回 (是否需要, 澄清问题)。
+
+    修复 conv 127：LLM 有时返回 needs_clarification=true 但 clarification_question=""，
+    导致前端显示空白。此处对空字符串做兜底，用 reason 拼接成完整问句。
+    """
+    if not query_info.get("needs_clarification"):
+        return False, ""
+    q = (query_info.get("clarification_question") or "").strip()
+    if q:
+        return True, q
+    # 兜底：用 reason 拼接成问句，或用默认提示
+    reason = (query_info.get("clarification_reason") or "").strip()
+    if reason:
+        return True, f"为了给您更准确的分析，请补充：{reason}"
+    return True, "请提供更多细节，以便我们给出准确的分析。"

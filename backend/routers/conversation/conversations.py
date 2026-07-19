@@ -109,6 +109,51 @@ def _build_unified_context_safe(
         return ""
 
 
+def _build_arbitrator_specialist(arbitration: dict) -> dict | None:
+    """把仲裁结果构造成一个独立的 specialist 项，追加到 specialist_results 末尾。
+
+    让前端 ChatMessage.vue 的专家列表能直接展示「⚖️ 仲裁 Agent」卡片，
+    而不是只把仲裁埋在 metadata.arbitration 字段里看不到。
+
+    修复 conv 127 用户反馈："仲裁 agent 为什么不是以 agent 总结的形式出现呢"
+    """
+    if not arbitration or not isinstance(arbitration, dict):
+        return None
+    arb_verdict = arbitration.get("verdict", "未裁决")
+    arb_confidence = arbitration.get("confidence", "")
+    arb_conflicts = arbitration.get("key_conflicts", []) or []
+    arb_reasoning = (arbitration.get("reasoning", "") or "")[:1500]
+
+    lines = [
+        "### 仲裁裁决",
+        "",
+        f"- **裁决**: {arb_verdict}",
+        f"- **置信度**: {arb_confidence}",
+        "",
+    ]
+    if arb_conflicts:
+        lines.append("#### 关键分歧")
+        for c in arb_conflicts:
+            if isinstance(c, dict):
+                note = c.get("note", "")
+                buy = c.get("buy_side", [])
+                opp = c.get("opposing_side", [])
+                lines.append(f"- {note}：看多 {buy} vs 看空/持有 {opp}")
+        lines.append("")
+    if arb_reasoning:
+        lines.append("#### 推理依据")
+        lines.append("")
+        for piece in arb_reasoning.split(" | "):
+            if piece.strip():
+                lines.append(f"- {piece.strip()[:300]}")
+    return {
+        "agent_key": "arbitrator",
+        "agent": "仲裁 Agent",
+        "icon": "⚖️",
+        "analysis": "\n".join(lines),
+    }
+
+
 # ── 请求模型 ─────────────────────────────────────────────
 
 
@@ -1520,6 +1565,11 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
                             "key_conflicts": arbitration.get("key_conflicts", [])[:5],
                             "reasoning": arbitration.get("reasoning", "")[:800],
                         }
+                        # 仲裁以独立 specialist 卡片形式追加到列表末尾
+                        # 修复 conv 127：原仲裁只写 metadata，前端 specialist_results 列表无仲裁 Agent
+                        arb_specialist = _build_arbitrator_specialist(arbitration)
+                        if arb_specialist:
+                            _meta["specialist_results"] = p1 + [arb_specialist]
                     update_message_content_and_metadata(stream_msg_id, content, _meta)
                 try:
                     conn = _get_conn()
@@ -1653,12 +1703,25 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
                                 logger.warning(f"[trace:{trace_id}] 标记 channel 完成失败: {_e}")
                         elif et == "clarification":
                             # 交互式澄清：保存澄清问题到占位消息，存储 checkpoint 供续答恢复
+                            # 前端 ChatMessage.vue 期望 msg.clarification = {reason, options, question}
+                            # 修复 conv 127：原只存 clarification_options/clarification_checkpoint，
+                            # 字段名与前端不匹配，导致澄清内容不展示
                             try:
-                                update_message_content_and_metadata(stream_msg_id, event.get("question", "请补充更多信息"), {
+                                clarify_question = event.get("question", "请补充更多信息")
+                                clarify_reason = event.get("reason", "")
+                                clarify_options = event.get("options", [])
+                                update_message_content_and_metadata(stream_msg_id, clarify_question, {
                                     "execution_status": "clarification",
-                                    "clarification_options": event.get("options", []),
+                                    # 兼容旧字段
+                                    "clarification_options": clarify_options,
                                     "clarification_checkpoint": event.get("checkpoint"),
                                     "trace_id": trace_id,
+                                    # 新增：与前端 ChatMessage.vue L680 期望的字段一致
+                                    "clarification": {
+                                        "question": clarify_question,
+                                        "reason": clarify_reason,
+                                        "options": clarify_options,
+                                    },
                                 })
                                 complete_stream_channel(channel_id)
                             except Exception as _e:
@@ -2021,6 +2084,10 @@ async def clarify_answer_stream(conv_id: int, request: Request):
                                     "key_conflicts": arbitration.get("key_conflicts", [])[:5],
                                     "reasoning": arbitration.get("reasoning", "")[:800],
                                 }
+                                # 续答路径同样把仲裁追加为独立 specialist 卡片
+                                arb_specialist = _build_arbitrator_specialist(arbitration)
+                                if arb_specialist:
+                                    _meta["specialist_results"] = p1 + [arb_specialist]
                             update_message_content_and_metadata(stream_msg_id, content, _meta)
                         except Exception as _e:
                             logger.warning(f"[trace:{trace_id}] 保存续答回答失败: {_e}")
