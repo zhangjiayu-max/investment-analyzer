@@ -190,8 +190,26 @@ def create_market_event(
             "SELECT event_id, title, expected_date FROM market_events"
         ).fetchall()
         for row in all_events:
-            if row["expected_date"] == expected_date and _title_similarity(title, row["title"]) >= 0.6:
-                logger.info(f"[market_events] 检测到相似事件，跳过创建: '{title}' -> '{row['title']}'")
+            # ── P0-I 修复：原逻辑要求 expected_date 完全相同，导致 LLM 微调日期即可绕过 ──
+            # 问题案例：同事件 LLM 给出 "7-17"/"7-15" 等不同日期 → 去重失效，17 条重复
+            # 新逻辑：expected_date 在 ±3 天范围内 + 相似度 >= 0.6 即判重
+            row_date_str = row["expected_date"] or ""
+            new_date_str = expected_date or ""
+            if row_date_str and new_date_str:
+                try:
+                    row_date = datetime.strptime(row_date_str, "%Y-%m-%d")
+                    new_date = datetime.strptime(new_date_str, "%Y-%m-%d")
+                    date_diff = abs((row_date - new_date).days)
+                except (ValueError, TypeError):
+                    date_diff = 0 if row_date_str == new_date_str else 999
+            else:
+                date_diff = 0 if row_date_str == new_date_str else 999
+
+            if date_diff <= 3 and _title_similarity(title, row["title"]) >= 0.6:
+                logger.info(
+                    f"[market_events] 检测到相似事件(日期差{date_diff}天)，跳过创建: "
+                    f"'{title}' -> '{row['title']}'"
+                )
                 return row["event_id"]
 
         timeline = json.dumps(

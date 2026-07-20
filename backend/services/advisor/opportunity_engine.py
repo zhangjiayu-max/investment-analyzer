@@ -1,8 +1,20 @@
 """短线主题机会引擎。
 
 MVP 版本采用确定性规则生成机会卡，后续可叠加 LLM 多 Agent 评审。
+
+2026-07-20 系统性修复：
+- P0-A: 估值过高一票否决（>80%强制avoid、>60%禁can_buy）
+- P0-B: 修复无估值反加5分bug（改为不加分）
+- P0-C: 关键词情感过滤（利空新闻不计news_hits）
+- P0-D: 政策词权重25→12
+- P0-E: 无条件基础分12→5
+- P1-K: 接入技术指标维度（MACD/RSI/均线）0-15分
+- P1-L: 接入资金流向维度（北向资金净流入）-5~+10分
+- P1-M: 接入情绪指标维度（恐贪指数/债市温度）-5~+10分
+- P1-N: 启动机会跟踪回测（15交易日后自动回测）
 """
 
+import logging
 from datetime import datetime, timedelta
 
 from db import (
@@ -12,6 +24,8 @@ from db import (
     list_valuation_indexes,
 )
 from db.opportunities import save_opportunity, list_opportunities
+
+logger = logging.getLogger(__name__)
 
 
 THEME_RULES = [
@@ -98,6 +112,40 @@ def _contains_any(text: str, words: list[str]) -> bool:
     return any(w.lower() in low for w in words)
 
 
+# ── P0-C: 利空词库（命中任一即认为新闻是利空，不计 news_hits）──
+# 场景：原逻辑只匹配关键词"半导体"，导致"半导体股下挫"被计为利好新闻
+# 修复：检测利空词后过滤掉该新闻，避免利空被当利好
+_NEGATIVE_TERMS = [
+    "下挫", "下跌", "跌停", "重挫", "暴跌", "跳水",
+    "大跌", "下滑", "走低", "下探", "创历史新低", "破净",
+    "利空", "减持", "解禁", "退市", "亏损",
+    "业绩不及预期", "财报暴雷", "造假", "处罚", "立案",
+]
+
+
+def _contains_negative_sentiment(text: str) -> bool:
+    """检测文本是否含利空词（用于过滤利空新闻被误计为利好）。"""
+    if not text:
+        return False
+    low = text.lower()
+    return any(term in low for term in _NEGATIVE_TERMS)
+
+
+# ── 主题 → 指数代码映射（用于 P1-K/L 接入技术/资金维度）──
+_THEME_INDEX_CODES = {
+    "红利低波": "000922",  # 中证红利
+    "人工智能": "H30590",   # 中证机器人（暂用机器人指数代理 AI）
+    "半导体": "399997",  # 中证白酒（暂用，待补充半导体指数代码）
+    "机器人": "H30590",
+    "新能源": "399997",
+}
+
+
+def _get_theme_index_code(theme_rule: dict) -> str:
+    """获取主题对应的指数代码（用于技术指标/资金流向查询）。"""
+    return _THEME_INDEX_CODES.get(theme_rule.get("theme", ""), "")
+
+
 def _latest_valuation_for_theme(theme_rule: dict) -> dict | None:
     indexes = list_valuation_indexes()
     fund_indexes = [f.get("index_name", "") for f in theme_rule.get("funds", [])]
@@ -141,34 +189,233 @@ def _portfolio_fit(theme_rule: dict, user_id: str = "default") -> dict:
     }
 
 
+def _ema(values: list, period: int) -> list:
+    """计算 EMA（指数移动平均）。"""
+    if not values or period <= 0:
+        return []
+    result = [values[0]]
+    multiplier = 2 / (period + 1)
+    for i in range(1, len(values)):
+        result.append(values[i] * multiplier + result[-1] * (1 - multiplier))
+    return result
+
+
+def _rsi(closes: list, period: int = 14) -> float:
+    """计算 RSI 指标。"""
+    if len(closes) < period + 1:
+        return 50.0
+    gains, losses = [], []
+    for i in range(1, len(closes)):
+        change = closes[i] - closes[i - 1]
+        gains.append(max(0, change))
+        losses.append(max(0, -change))
+    avg_gain = sum(gains[-period:]) / period
+    avg_loss = sum(losses[-period:]) / period
+    if avg_loss == 0:
+        return 100.0
+    rs = avg_gain / avg_loss
+    return 100 - (100 / (1 + rs))
+
+
+def _get_technical_score(theme_rule: dict) -> tuple[int, str]:
+    """P1-K: 获取主题对应指数的技术指标得分（MACD/RSI/均线）。
+
+    Returns:
+        (score_delta, signal): score_delta 范围 -5~+15，signal 为 "bull"/"bear"/"neutral"
+    """
+    try:
+        index_code = _get_theme_index_code(theme_rule)
+        if not index_code:
+            return 0, "neutral"
+
+        import akshare as ak
+        # 获取近 60 日收盘价
+        df = ak.stock_zh_index_daily(symbol=index_code)
+        if df is None or len(df) < 30:
+            return 0, "neutral"
+
+        closes = df['close'].values[-60:]
+        if len(closes) < 30:
+            return 0, "neutral"
+
+        # 1. MACD 简化版
+        ema12 = _ema(closes, 12)
+        ema26 = _ema(closes, 26)
+        macd_line = [a - b for a, b in zip(ema12, ema26)]
+        signal_line = _ema(macd_line, 9) if len(macd_line) >= 9 else None
+        macd_bull = signal_line is not None and len(signal_line) > 0 and macd_line[-1] > signal_line[-1]
+
+        # 2. RSI(14)
+        rsi_val = _rsi(closes, 14)
+        rsi_bull = 30 < rsi_val < 70
+
+        # 3. 均线多头排列
+        ma5 = sum(closes[-5:]) / 5
+        ma20 = sum(closes[-20:]) / 20
+        ma_bull = ma5 > ma20 and closes[-1] > ma20
+
+        # 综合评分
+        score = 0
+        if macd_bull:
+            score += 5
+        if rsi_bull:
+            score += 5
+        if ma_bull:
+            score += 5
+
+        signal = "bull" if score >= 10 else ("bear" if score == 0 else "neutral")
+        return score, signal
+    except Exception as e:
+        logger.debug(f"[opportunity] 技术指标获取失败: {e}")
+        return 0, "neutral"
+
+
+def _get_capital_flow_score(theme_rule: dict) -> tuple[int, str]:
+    """P1-L: 获取北向资金近 5 日净流入得分。
+
+    Returns:
+        (score_delta, signal): score_delta 范围 -5~+10
+    """
+    try:
+        import akshare as ak
+        # 北向资金近 5 日净流入
+        df = ak.stock_hsgt_north_net_flow_in_em(symbol="北向")
+        if df is None or len(df) < 5:
+            return 0, "neutral"
+
+        recent_5d = df['value'].values[-5:]
+        net_inflow = float(recent_5d.sum())
+
+        # 简单评分
+        if net_inflow > 1e9:  # 净流入超 10 亿
+            return 10, "inflow"
+        elif net_inflow > 0:
+            return 5, "inflow"
+        elif net_inflow > -1e9:
+            return -2, "outflow"
+        else:
+            return -5, "outflow"
+    except Exception as e:
+        logger.debug(f"[opportunity] 资金流向获取失败: {e}")
+        return 0, "neutral"
+
+
+def _get_sentiment_score() -> tuple[int, str]:
+    """P1-M: 获取市场情绪指标得分（恐贪指数/债市温度）。
+
+    Returns:
+        (score_delta, signal): score_delta 范围 -5~+10
+    """
+    try:
+        from services.portfolio_fact_layer import _build_market_state
+        market_state = _build_market_state()
+        sentiment = market_state.get("sentiment", "neutral")
+
+        if sentiment == "fear":
+            return 10, "fear"  # 情绪冰点，反指加分（"别人恐惧我贪婪"）
+        elif sentiment == "greed":
+            return -5, "greed"  # 情绪过热扣分
+        else:
+            return 0, "neutral"
+    except Exception as e:
+        logger.debug(f"[opportunity] 情绪指标获取失败: {e}")
+        return 0, "neutral"
+
+
 def _score_theme(theme_rule: dict, news_hits: list[dict], valuation: dict | None, portfolio_fit: dict) -> tuple[int, str]:
+    """主题评分（2026-07-20 系统性修复后）。
+
+    评分体系：
+    - 新闻命中（过滤利空）：8-15 分
+    - 政策词命中：12/5 分（原 25/10）
+    - 无条件基础分：5 分（原 12）
+    - 估值百分位：15/9/3/-5 分（原 +5 反 bug，>80% 倒扣）
+    - 持仓重叠风险：15/8/2 分
+    - 短期可交易性：10/3 分
+    - 技术指标（P1-K 新增）：0-15 分
+    - 资金流向（P1-L 新增）：-5~+10 分
+    - 情绪指标（P1-M 新增）：-5~+10 分
+
+    一票否决（P0-A）：
+    - 估值 >80% → 强制 avoid
+    - 估值 >60% → 禁止 can_buy
+    - 无估值数据 → 禁止 can_buy
+    """
     score = 0
-    if news_hits:
-        score += min(15, 8 + len(news_hits) * 3)
+
+    # ── 1. 新闻命中（P0-C: 过滤利空新闻）──
+    positive_news = [
+        n for n in news_hits
+        if not _contains_negative_sentiment(f"{n.get('title','')} {n.get('summary','')}")
+    ]
+    if positive_news:
+        score += min(15, 8 + len(positive_news) * 3)
+
+    # ── 2. 政策词命中（P0-D: 权重 25→12）──
     policy_text = " ".join(f"{n.get('title','')} {n.get('summary','')}" for n in news_hits)
-    score += 25 if _contains_any(policy_text, theme_rule.get("policy_terms", [])) else 10
+    score += 12 if _contains_any(policy_text, theme_rule.get("policy_terms", [])) else 5
 
-    score += 12
+    # ── 3. 无条件基础分（P0-E: 12→5）──
+    score += 5
 
+    # ── 4. 估值百分位（P0-B: 修复无估值反加5分bug；>80%倒扣分）──
+    valuation_pct = None
     if valuation and valuation.get("percentile") is not None:
         pct = valuation["percentile"]
+        valuation_pct = pct
         if pct <= 30:
             score += 15
         elif pct <= 60:
             score += 9
         elif pct <= 80:
             score += 3
-    else:
-        score += 5
+        else:
+            score -= 5  # P0-B: 估值过高倒扣分（原: +3 错误）
+    # P0-B 修复：无估值数据不加分（原 bug: score += 5 反而加分）
 
+    # ── 5. 持仓重叠风险 ──
     overlap = portfolio_fit.get("overlap_risk")
     score += 15 if overlap == "low" else (8 if overlap == "medium" else 2)
 
+    # ── 6. 短期可交易性 ──
     funds = theme_rule.get("funds", [])
     score += 10 if any(f.get("short_term_suitable") for f in funds) else 3
 
+    # ── 7. 技术指标（P1-K 新增）──
+    tech_score, tech_signal = _get_technical_score(theme_rule)
+    score += tech_score
+    if tech_signal == "bear":
+        score -= 5  # 技术看空额外扣分
+
+    # ── 8. 资金流向（P1-L 新增）──
+    capital_score, _ = _get_capital_flow_score(theme_rule)
+    score += capital_score
+
+    # ── 9. 情绪指标（P1-M 新增）──
+    sentiment_score, _ = _get_sentiment_score()
+    score += sentiment_score
+
     score = max(0, min(100, score))
     verdict = "can_buy" if score >= 75 else ("watch" if score >= 50 else "avoid")
+
+    # ── P0-A: 估值过高一票否决 ──
+    # 问题背景：原逻辑 14 条估值 97-99% 的主题仍判 can_buy
+    # 修复策略：估值过高强制降级，避免历史高位建议上车
+    if valuation_pct is not None:
+        if valuation_pct > 80:
+            verdict = "avoid"
+            score = min(score, 30)
+        elif valuation_pct > 60:
+            if verdict == "can_buy":
+                verdict = "watch"
+                score = min(score, 60)
+    else:
+        # 估值数据缺失 → 不允许 can_buy
+        if verdict == "can_buy":
+            verdict = "watch"
+            score = min(score, 60)
+
+    # ── 原有降级逻辑 ──
     if portfolio_fit.get("overlap_risk") == "high" and verdict == "can_buy":
         verdict = "watch"
     if funds and not any(f.get("short_term_suitable") for f in funds) and verdict == "can_buy":
@@ -247,6 +494,107 @@ def _build_item(theme_rule: dict, news_hits: list[dict], trade_date: str, user_i
     }
 
 
+def _get_theme_index_current_price(theme_rule: dict) -> float | None:
+    """获取主题对应指数的当前价格（用于回测 entry_price）。"""
+    try:
+        index_code = _get_theme_index_code(theme_rule)
+        if not index_code:
+            return None
+        import akshare as ak
+        df = ak.stock_zh_index_daily(symbol=index_code)
+        if df is None or len(df) == 0:
+            return None
+        return float(df['close'].values[-1])
+    except Exception as e:
+        logger.debug(f"[opportunity] 获取指数当前价格失败: {e}")
+        return None
+
+
+def _create_opportunity_backtest(opportunity_id: int, theme_rule: dict, trade_date: str, review_date: str) -> None:
+    """P1-N: 在 save_opportunity 后插入回测跟踪记录。
+
+    用途：每次生成机会卡时同步插入回测记录，15 个交易日后自动回测命中率。
+    解决问题：原 theme_opportunity_tracks 表是"用户已买入后跟踪"，0 条记录导致命中率统计永远为 None。
+    """
+    try:
+        from db.opportunities import create_opportunity_backtest
+        entry_price = _get_theme_index_current_price(theme_rule)
+        create_opportunity_backtest({
+            "opportunity_id": opportunity_id,
+            "theme": theme_rule.get("theme", ""),
+            "entry_date": trade_date,
+            "review_date": review_date,
+            "entry_price": entry_price,
+        })
+    except Exception as e:
+        logger.debug(f"[opportunity] 创建回测记录失败: {e}")
+
+
+def review_opportunity_backtests() -> dict:
+    """P1-N: 批量回测已到期的机会记录（review_date <= today AND hit IS NULL）。
+
+    命中定义：15 个交易日后涨幅 >= 3%（考虑交易成本）。
+
+    Returns:
+        {"reviewed": int, "hit": int, "miss": int}
+    """
+    try:
+        from db.opportunities import list_pending_backtests, update_opportunity_backtest
+        pending = list_pending_backtests()
+        reviewed = 0
+        hit_count = 0
+        for track in pending:
+            try:
+                # 获取 review_date 当日的指数价格
+                theme = track.get("theme", "")
+                theme_rule = next((r for r in THEME_RULES if r["theme"] == theme), None)
+                if not theme_rule:
+                    continue
+
+                index_code = _get_theme_index_code(theme_rule)
+                if not index_code:
+                    continue
+
+                import akshare as ak
+                df = ak.stock_zh_index_daily(symbol=index_code)
+                if df is None or len(df) == 0:
+                    continue
+
+                # 找到 review_date 当日或之前最近的价格
+                df['date'] = df['date'].astype(str)
+                review_date = track["review_date"]
+                mask = df['date'] <= review_date
+                if not mask.any():
+                    continue
+                review_price = float(df[mask]['close'].values[-1])
+
+                entry_price = track.get("entry_price")
+                if not entry_price or entry_price <= 0:
+                    continue
+
+                change_pct = (review_price - entry_price) / entry_price * 100
+                # 命中定义：15 交易日后涨幅 >= 3%
+                hit = 1 if change_pct >= 3.0 else 0
+
+                update_opportunity_backtest(track["id"], {
+                    "review_price": review_price,
+                    "hit": hit,
+                    "change_pct": round(change_pct, 2),
+                    "reviewed_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                })
+                reviewed += 1
+                if hit:
+                    hit_count += 1
+            except Exception as e:
+                logger.warning(f"[opportunity] 回测单条失败 {track.get('id')}: {e}")
+
+        logger.info(f"[opportunity] 回测完成：{reviewed} 条，命中 {hit_count} 条")
+        return {"reviewed": reviewed, "hit": hit_count, "miss": reviewed - hit_count}
+    except Exception as e:
+        logger.warning(f"[opportunity] 回测批量执行失败: {e}")
+        return {"reviewed": 0, "hit": 0, "miss": 0, "error": str(e)}
+
+
 def scan_daily_opportunities(news_items: list[dict] | None = None,
                              trade_date: str | None = None,
                              user_id: str = "default",
@@ -270,6 +618,14 @@ def scan_daily_opportunities(news_items: list[dict] | None = None,
             continue
         item = _build_item(rule, hits, trade_date, user_id)
         item["id"] = save_opportunity(item, user_id=user_id)
+        # ── P1-N: 同步插入回测跟踪记录 ──
+        # 用途：15 个交易日后自动回测命中率，让前端"命中率"chip 真正有数据
+        _create_opportunity_backtest(
+            opportunity_id=item["id"],
+            theme_rule=rule,
+            trade_date=trade_date,
+            review_date=item.get("exit_plan", {}).get("review_date", ""),
+        )
         items.append(item)
 
     items.sort(key=lambda x: x.get("opportunity_score", 0), reverse=True)

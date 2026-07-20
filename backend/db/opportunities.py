@@ -62,6 +62,26 @@ def init_opportunity_tables(conn):
     _add_column_if_not_exists(conn, "theme_opportunity_tracks", "transaction_id", "INTEGER")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_theme_track_opp ON theme_opportunity_tracks(opportunity_id)")
 
+    # ── P1-N: 机会回测命中率跟踪表 ──
+    # 用途：每次 save_opportunity 时插入模拟跟踪记录，15 个交易日后自动回测
+    # 解决问题：原 theme_opportunity_tracks 表是"用户已买入后跟踪"，0 条记录导致命中率统计永远为 None
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS theme_opportunity_backtests (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            opportunity_id INTEGER REFERENCES theme_opportunities(id) ON DELETE CASCADE,
+            theme TEXT NOT NULL,
+            entry_date TEXT NOT NULL,
+            review_date TEXT NOT NULL,
+            entry_price REAL,
+            review_price REAL,
+            change_pct REAL,
+            hit INTEGER,
+            created_at TEXT DEFAULT (datetime('now','localtime')),
+            reviewed_at TEXT
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_theme_backtest_review ON theme_opportunity_backtests(review_date, hit)")
+
 
 def _json_dumps(value) -> str:
     return json.dumps(value if value is not None else {}, ensure_ascii=False)
@@ -482,3 +502,122 @@ def get_opportunity_track_stats(user_id: str = "default", limit: int = 10) -> di
         "average_return_pct": average_return,
         "recent_items": recent_items,
     }
+
+
+# ── P1-N: 机会回测命中率跟踪 ──────────────────────────────────
+
+
+def create_opportunity_backtest(data: dict) -> int:
+    """创建机会回测记录（每次 save_opportunity 时插入）。
+
+    Args:
+        data: {opportunity_id, theme, entry_date, review_date, entry_price}
+
+    Returns:
+        backtest_id
+    """
+    conn = _get_conn()
+    try:
+        cur = conn.execute("""
+            INSERT INTO theme_opportunity_backtests (
+                opportunity_id, theme, entry_date, review_date, entry_price
+            ) VALUES (?, ?, ?, ?, ?)
+        """, (
+            data.get("opportunity_id"),
+            data.get("theme", ""),
+            data.get("entry_date", ""),
+            data.get("review_date", ""),
+            data.get("entry_price"),
+        ))
+        conn.commit()
+        return cur.lastrowid
+    finally:
+        conn.close()
+
+
+def list_pending_backtests() -> list[dict]:
+    """列出已到期但未回测的记录（review_date <= today AND hit IS NULL）。"""
+    conn = _get_conn()
+    try:
+        today = datetime.now().strftime("%Y-%m-%d")
+        rows = conn.execute(
+            "SELECT * FROM theme_opportunity_backtests "
+            "WHERE review_date <= ? AND hit IS NULL "
+            "ORDER BY review_date ASC",
+            (today,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+def update_opportunity_backtest(backtest_id: int, fields: dict) -> bool:
+    """更新回测记录（回测后填充 review_price/hit/change_pct）。"""
+    if not fields:
+        return False
+    conn = _get_conn()
+    try:
+        allowed = {"review_price", "hit", "change_pct", "reviewed_at"}
+        sets = []
+        values = []
+        for k, v in fields.items():
+            if k in allowed:
+                sets.append(f"{k} = ?")
+                values.append(v)
+        if not sets:
+            return False
+        values.append(backtest_id)
+        cur = conn.execute(
+            f"UPDATE theme_opportunity_backtests SET {', '.join(sets)} WHERE id = ?",
+            values,
+        )
+        conn.commit()
+        return cur.rowcount > 0
+    finally:
+        conn.close()
+
+
+def get_backtest_stats() -> dict:
+    """获取回测命中率统计（用于前端展示）。"""
+    conn = _get_conn()
+    try:
+        total = conn.execute(
+            "SELECT COUNT(*) AS n FROM theme_opportunity_backtests"
+        ).fetchone()["n"]
+        reviewed = conn.execute(
+            "SELECT COUNT(*) AS n FROM theme_opportunity_backtests WHERE hit IS NOT NULL"
+        ).fetchone()["n"]
+        hit = conn.execute(
+            "SELECT COUNT(*) AS n FROM theme_opportunity_backtests WHERE hit = 1"
+        ).fetchone()["n"]
+        miss = conn.execute(
+            "SELECT COUNT(*) AS n FROM theme_opportunity_backtests WHERE hit = 0"
+        ).fetchone()["n"]
+
+        # 按主题分组命中率
+        theme_rows = conn.execute(
+            "SELECT theme, "
+            "SUM(CASE WHEN hit IS NOT NULL THEN 1 ELSE 0 END) AS reviewed, "
+            "SUM(CASE WHEN hit = 1 THEN 1 ELSE 0 END) AS hit "
+            "FROM theme_opportunity_backtests GROUP BY theme"
+        ).fetchall()
+        theme_stats = [
+            {
+                "theme": r["theme"],
+                "reviewed": r["reviewed"],
+                "hit": r["hit"],
+                "hit_rate": round(r["hit"] / r["reviewed"] * 100, 1) if r["reviewed"] else None,
+            }
+            for r in theme_rows
+        ]
+
+        return {
+            "total": total,
+            "reviewed": reviewed,
+            "hit": hit,
+            "miss": miss,
+            "hit_rate": round(hit / reviewed * 100, 1) if reviewed else None,
+            "theme_stats": theme_stats,
+        }
+    finally:
+        conn.close()

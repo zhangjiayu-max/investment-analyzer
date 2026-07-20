@@ -83,6 +83,30 @@ _SECTOR_TO_NAME_KEYWORDS = {
 }
 
 
+# ── P0-J: 反向排除规则 ──
+# 场景：基金名"生物医药科技"含"科技"但实为医药基金，不应被关联到科技事件
+# 规则：若基金名含以下关键词，即使含板块关键词也不匹配该板块
+_SECTOR_EXCLUDE_RULES = {
+    "科技": ["医药", "医疗", "生物", "健康"],          # 含医药词的基金不匹配科技板块
+    "消费": ["科技", "半导体", "芯片", "医药", "医疗"],  # 消费板块排除科技/医药基金
+    "人工智能": ["医药", "医疗", "生物"],               # AI 板块排除医药基金
+    "半导体": ["医药", "医疗", "生物", "白酒", "食品"],  # 半导体板块排除医药/消费基金
+}
+
+
+def _should_exclude_for_sector(sector: str, fund_name: str, index_name: str) -> bool:
+    """反向校验：基金是否应被排除在该板块之外（避免误关联）。
+
+    场景：基金名"中信保诚中证800医药"含"科技"子串时被关联到"科技IPO"事件，
+    实际是医药基金，应排除。
+    """
+    exclude_terms = _SECTOR_EXCLUDE_RULES.get(sector, [])
+    if not exclude_terms:
+        return False
+    text = f"{fund_name} {index_name}".lower()
+    return any(term in text for term in exclude_terms)
+
+
 def _normalize_sector(sector: str) -> str:
     """板块名归一化：把 LLM 常见别名映射到 SECTOR_TO_INDEX 的标准 key。
 
@@ -704,6 +728,10 @@ def _determine_relevance(
                     continue
                 h_index_name = (h.get("index_name") or "").strip()
                 h_fund_name = (h.get("fund_name") or "").strip()
+                # ── P0-J: 反向校验 ──
+                # 避免医药基金（含"医药/医疗/生物"）被关联到科技事件
+                if _should_exclude_for_sector(sector, h_fund_name, h_index_name):
+                    continue
                 for kw in name_keywords:
                     if kw in h_index_name or kw in h_fund_name:
                         matched_holdings.append({
@@ -737,6 +765,9 @@ def _determine_relevance(
                         continue
                     w_index_name = (w.get("index_name") or "").strip()
                     w_fund_name = (w.get("fund_name") or "").strip()
+                    # ── P0-J: 反向校验（关注列表同样适用）──
+                    if _should_exclude_for_sector(sector, w_fund_name, w_index_name):
+                        continue
                     for kw in name_keywords:
                         if kw in w_index_name or kw in w_fund_name:
                             matched_watchlist.append({
@@ -801,6 +832,15 @@ def _update_event_statuses() -> dict:
         # today > expected_date + 7 → expired
         if days_to_event < -7:
             update_market_event_status(ev["event_id"], "expired")
+            # ── P0-G 修复：写入 expired_date 字段 ──
+            # 原bug：只更新 status，未写 expired_date，导致 _time_decay_factor() 计算时
+            # expired_date 为 NULL，fallback 到 0.5，时间衰减功能完全失效
+            # 修复：同步写入 expired_date，让 Batch2 时间衰减能正确计算
+            try:
+                from db.market_events import update_market_event_fields
+                update_market_event_fields(ev["event_id"], {"expired_date": today})
+            except Exception as e:
+                logger.warning(f"[event_radar] 写入 expired_date 失败 {ev.get('event_id')}: {e}")
             counts["expired"] += 1
         # today >= expected_date → materialized
         elif days_to_event <= 0:
@@ -1215,7 +1255,14 @@ def _verify_single_event(event: dict, window_days: int = 3) -> dict | None:
         elif direction == "negative" and s_change < 0:
             s_status = "correct"
         elif direction == "neutral":
-            s_status = "flat"
+            # ── P0-H 修复：原逻辑直接判 flat，不看幅度 ──
+            # 问题案例：SK海力士事件预测 neutral，实际跌 -16.36%，竟判为"平淡"
+            # 修复策略：neutral 方向 + 涨跌幅超阈值（abs(s_change) >= 3%）应判为 wrong
+            # （预测"无影响"但实际有大波动，说明预测错误）
+            if abs(s_change) >= 3.0:
+                s_status = "wrong"
+            else:
+                s_status = "flat"
         else:
             s_status = "wrong"
 
