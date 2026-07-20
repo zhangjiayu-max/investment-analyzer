@@ -445,6 +445,24 @@ async def startup():
         logging.info("前瞻事件雷达任务已启动（alerts.event_radar_enabled=true）")
     else:
         logging.info("前瞻事件雷达已关闭（alerts.event_radar_enabled=false）")
+
+    # P0-C 修复（2026-07-20）：机会雷达回测机制修复
+    # 1. 启动时补建历史机会卡的 backtest 记录（alerts.opportunity_backfill_enabled 默认 true）
+    # 2. 每日 09:30 自动回测已到期记录（alerts.opportunity_backtest_enabled 默认 true）
+    try:
+        if get_config("alerts.opportunity_backfill_enabled", "true") == "true":
+            from services.advisor.opportunity_engine import backfill_opportunity_backtests
+            backfill_stats = backfill_opportunity_backtests()
+            if backfill_stats.get("created", 0) > 0:
+                logging.info(f"机会雷达 backfill: {backfill_stats}")
+    except Exception as e:
+        logging.warning(f"机会雷达 backfill 失败（不影响启动）: {e}")
+
+    if get_config("alerts.opportunity_backtest_enabled", "true") == "true":
+        asyncio.create_task(_auto_opportunity_backtest())
+        logging.info("机会雷达每日回测任务已启动（alerts.opportunity_backtest_enabled=true）")
+    else:
+        logging.info("机会雷达每日回测已关闭（alerts.opportunity_backtest_enabled=false）")
     # 清理上次异常退出遗留的僵尸 agent_runs
     try:
         from db.agents import _get_conn
@@ -828,6 +846,49 @@ async def _auto_event_radar_scan():
                 logging.warning(f"[event-radar] 扫描异常 ({scan_hour:02d}:00): {e}")
     except Exception as e:
         logging.warning(f"前瞻事件雷达任务异常: {e}")
+
+
+async def _auto_opportunity_backtest():
+    """机会雷达回测 — 每日 09:30 自动回测已到期的机会卡。
+
+    P0-C 修复（2026-07-20）：
+    - 原问题：theme_opportunity_backtests 表 0 条，命中率永远 None
+    - 修复：每日 09:30 自动跑 review_opportunity_backtests()，
+            回测所有 review_date <= today 的记录
+
+    开关：alerts.opportunity_backtest_enabled（默认 true）
+    """
+    from datetime import datetime, timedelta
+    # 每日 09:30 自动回测
+    _SCAN_TIME = (9, 30)
+    try:
+        await asyncio.sleep(180)  # 等启动完成（避免与 backfill 抢资源）
+
+        while True:
+            now = datetime.now()
+            target = now.replace(hour=_SCAN_TIME[0], minute=_SCAN_TIME[1], second=0, microsecond=0)
+            if target <= now:
+                target = (now + timedelta(days=1)).replace(
+                    hour=_SCAN_TIME[0], minute=_SCAN_TIME[1], second=0, microsecond=0)
+            wait_seconds = (target - now).total_seconds()
+            await asyncio.sleep(wait_seconds)
+
+            if get_config("alerts.opportunity_backtest_enabled", "true") != "true":
+                continue
+
+            try:
+                from services.advisor.opportunity_engine import review_opportunity_backtests
+                result = review_opportunity_backtests()
+                logging.info(
+                    f"[opportunity-backtest] 回测完成: "
+                    f"reviewed={result.get('reviewed', 0)}, "
+                    f"hit={result.get('hit', 0)}, "
+                    f"miss={result.get('miss', 0)}"
+                )
+            except Exception as e:
+                logging.warning(f"[opportunity-backtest] 回测异常: {e}")
+    except Exception as e:
+        logging.warning(f"机会雷达回测任务异常: {e}")
 
 
 async def _auto_daily_report():

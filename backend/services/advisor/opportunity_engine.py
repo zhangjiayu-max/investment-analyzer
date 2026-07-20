@@ -132,12 +132,14 @@ def _contains_negative_sentiment(text: str) -> bool:
 
 
 # ── 主题 → 指数代码映射（用于 P1-K/L 接入技术/资金维度）──
+# P0-A 修复（2026-07-20）：原映射错误，半导体/新能源都映射到 399997（白酒）
+# 现基于本地 index_valuations 表实际可查的指数代码修正
 _THEME_INDEX_CODES = {
-    "红利低波": "000922",  # 中证红利
-    "人工智能": "H30590",   # 中证机器人（暂用机器人指数代理 AI）
-    "半导体": "399997",  # 中证白酒（暂用，待补充半导体指数代码）
-    "机器人": "H30590",
-    "新能源": "399997",
+    "红利低波": "H30269",   # 红利低波（更精确，区别于 000922 中证红利）
+    "人工智能": "931071.CSI",  # CS 人工智能
+    "半导体": "H30184",      # 中证全指半导体
+    "机器人": "H30590",      # 中证机器人
+    "新能源": "399808",      # 中证新能
 }
 
 
@@ -439,12 +441,126 @@ def _build_matched_funds(theme_rule: dict) -> list[dict]:
     return result
 
 
+def _build_summary(theme: str, news_hits: list, valuation: dict | None,
+                   tech_signal: str, verdict: str) -> str:
+    """P1-A 修复（2026-07-20）：动态生成 summary，禁止模板化。
+
+    基于新闻+估值+技术面+verdict 多维度拼接，让用户看到具体差异。
+    """
+    parts = []
+    # 1. 新闻维度
+    if news_hits:
+        top_news_title = news_hits[0].get("title", "")[:30]
+        parts.append(f"新闻线索「{top_news_title}」")
+    # 2. 估值维度
+    if valuation and valuation.get("percentile") is not None:
+        pct = valuation["percentile"]
+        if pct > 80:
+            parts.append(f"估值偏高（{pct}%分位，风险高）")
+        elif pct < 30:
+            parts.append(f"估值偏低（{pct}%分位，安全边际足）")
+        else:
+            parts.append(f"估值合理（{pct}%分位）")
+    # 3. 技术维度
+    if tech_signal == "bull":
+        parts.append("技术指标偏多")
+    elif tech_signal == "bear":
+        parts.append("技术指标偏空")
+    # 4. verdict 总结
+    verdict_text = {
+        "can_buy": "综合多维信号可小仓试投",
+        "watch": "信号分歧建议观察",
+        "avoid": "风险较高不建议追",
+    }.get(verdict, "")
+    if verdict_text:
+        parts.append(verdict_text)
+    return "；".join(parts) if parts else f"{theme}暂无明显信号"
+
+
+def _build_risk_note(matched_funds: list, valuation: dict | None,
+                     tech_signal: str, verdict: str) -> str:
+    """P1-A 修复（2026-07-20）：动态生成 risk_note，禁止千篇一律。"""
+    notes = []
+    # 1. 估值风险
+    if valuation and valuation.get("percentile") is not None:
+        pct = valuation["percentile"]
+        if pct > 80:
+            notes.append(f"估值已处历史高位（{pct}%分位），追高风险大")
+        elif pct > 60:
+            notes.append(f"估值偏高（{pct}%分位），需关注回调")
+    # 2. 技术风险
+    if tech_signal == "bear":
+        notes.append("技术指标偏空，短期可能继续调整")
+    # 3. 估值数据缺失风险
+    if not valuation or valuation.get("percentile") is None:
+        notes.append("估值数据缺失，建议人工核实")
+    # 4. 场外基金流动性风险
+    otc_funds = [f for f in matched_funds if not f.get("short_term_suitable")]
+    if otc_funds:
+        notes.append(f"{len(otc_funds)}只场外基金不适合少于7天的超短线交易")
+    # 5. 默认提示
+    if not notes:
+        notes.append("热点可能一日游，需按退出条件执行")
+    return "；".join(notes)
+
+
+def _calc_entry_amount(verdict: str, valuation: dict | None,
+                       base_budget: float) -> float:
+    """P1-B 修复（2026-07-20）：entry_plan amount 与估值分位挂钩。
+
+    原问题：97% 高估和 43% 合理给的金额一样，风险失控
+    修复：
+    - <20% 分位：1.5x（深度低估加仓）
+    - 20-40% 分位：1.0x（合理偏低）
+    - 40-60% 分位：0.7x（合理）
+    - 60-80% 分位：0.4x（偏高减仓）
+    - >=80% 分位：0（理论上 verdict 已 avoid）
+    - 无估值数据：0.5x（减半，保守）
+    """
+    if verdict != "can_buy":
+        return 0
+    if not valuation or valuation.get("percentile") is None:
+        return round(base_budget * 0.5, 2)
+    pct = valuation["percentile"]
+    if pct < 20:
+        multiplier = 1.5
+    elif pct < 40:
+        multiplier = 1.0
+    elif pct < 60:
+        multiplier = 0.7
+    elif pct < 80:
+        multiplier = 0.4
+    else:
+        return 0  # 高估不应入场
+    return round(base_budget * multiplier, 2)
+
+
+def _build_entry_condition(verdict: str, valuation: dict | None,
+                          tech_signal: str) -> str:
+    """P1-A 修复：entry_condition 也动态生成。"""
+    if verdict != "can_buy":
+        return "信号不足，暂观察"
+    conditions = ["热点延续"]
+    if valuation and valuation.get("percentile") is not None:
+        pct = valuation["percentile"]
+        if pct > 60:
+            conditions.append("估值回落至 60% 分位以下再加仓")
+        elif pct < 30:
+            conditions.append("估值仍处低位可分批")
+    if tech_signal == "bear":
+        conditions.append("技术指标转多再入场")
+    return "；".join(conditions)
+
+
 def _build_item(theme_rule: dict, news_hits: list[dict], trade_date: str, user_id: str) -> dict:
     valuation = _latest_valuation_for_theme(theme_rule)
     portfolio_fit = _portfolio_fit(theme_rule, user_id)
     score, verdict = _score_theme(theme_rule, news_hits, valuation, portfolio_fit)
     matched_funds = _build_matched_funds(theme_rule)
     review_date = (datetime.strptime(trade_date, "%Y-%m-%d") + timedelta(days=15)).strftime("%Y-%m-%d")
+
+    # P1-K: 获取技术信号用于动态文案
+    _, tech_signal = _get_technical_score(theme_rule)
 
     policy_signal = (
         f"政策/新闻线索命中：{news_hits[0].get('title', theme_rule['theme'])}"
@@ -456,9 +572,15 @@ def _build_item(theme_rule: dict, news_hits: list[dict], trade_date: str, user_i
             f"{valuation.get('index_name')} {valuation.get('metric_type', '')}"
             f"百分位约 {valuation.get('percentile')}%，作为安全边际约束"
         )
-    risk_note = "热点可能一日游，需按退出条件执行"
-    if any(not f.get("short_term_suitable") for f in matched_funds):
-        risk_note += "；场外基金不适合少于7天的超短线交易"
+
+    # P1-A: 动态生成 summary / risk_note
+    summary = _build_summary(theme_rule["theme"], news_hits, valuation, tech_signal, verdict)
+    risk_note = _build_risk_note(matched_funds, valuation, tech_signal, verdict)
+
+    # P1-B: entry_plan amount 与估值挂钩
+    base_budget = portfolio_fit.get("suggested_budget", 0)
+    entry_amount = _calc_entry_amount(verdict, valuation, base_budget)
+    entry_condition = _build_entry_condition(verdict, valuation, tech_signal)
 
     return {
         "trade_date": trade_date,
@@ -466,7 +588,7 @@ def _build_item(theme_rule: dict, news_hits: list[dict], trade_date: str, user_i
         "verdict": verdict,
         "opportunity_score": score,
         "time_horizon": "7-15个交易日",
-        "summary": f"{theme_rule['theme']}出现热点线索，当前结论为{'可小仓试投' if verdict == 'can_buy' else '观察优先' if verdict == 'watch' else '不建议追'}",
+        "summary": summary,
         "policy_signal": policy_signal,
         "future_direction": theme_rule["future_direction"],
         "market_signal": "已从今日热点中识别到主题线索，需结合后续成交与相对强弱确认",
@@ -475,9 +597,9 @@ def _build_item(theme_rule: dict, news_hits: list[dict], trade_date: str, user_i
         "portfolio_fit": portfolio_fit,
         "entry_plan": {
             "action": "小仓试投" if verdict == "can_buy" else "加入观察",
-            "amount": portfolio_fit.get("suggested_budget", 0) if verdict == "can_buy" else 0,
+            "amount": entry_amount,
             "batching": "一次试投或分2笔",
-            "entry_condition": "热点延续且指数未明显冲高回落",
+            "entry_condition": entry_condition,
         },
         "exit_plan": {
             "take_profit": "上涨5%-8%分批止盈",
@@ -495,19 +617,43 @@ def _build_item(theme_rule: dict, news_hits: list[dict], trade_date: str, user_i
 
 
 def _get_theme_index_current_price(theme_rule: dict) -> float | None:
-    """获取主题对应指数的当前价格（用于回测 entry_price）。"""
-    try:
-        index_code = _get_theme_index_code(theme_rule)
-        if not index_code:
-            return None
-        import akshare as ak
-        df = ak.stock_zh_index_daily(symbol=index_code)
-        if df is None or len(df) == 0:
-            return None
-        return float(df['close'].values[-1])
-    except Exception as e:
-        logger.debug(f"[opportunity] 获取指数当前价格失败: {e}")
+    """获取主题对应指数的当前价格（用于回测 entry_price）。
+
+    P0-B 修复（2026-07-20）：原用 ak.stock_zh_index_daily(sina API) 全部 404
+    新策略：1. 优先查本地 index_valuations.current_point（同时尝试 code 与 code.CSI 后缀）
+            2. 降级 akshare index_zh_a_hist（A 股指数日 K）
+            3. 返回 None（回测逻辑需容忍 None）
+    """
+    index_code = _get_theme_index_code(theme_rule)
+    if not index_code:
         return None
+
+    # 1. 优先查本地估值表 current_point（尝试两种代码形式）
+    try:
+        from db.valuations import get_latest_valuation
+        # P0-B 修复：H30590 在本地表存为 H30590.CSI，需尝试两种形式
+        candidates = [index_code]
+        if "." not in index_code:
+            candidates.append(f"{index_code}.CSI")
+        for code in candidates:
+            v = get_latest_valuation(code)
+            if v and v.get("current_point"):
+                return float(v["current_point"])
+    except Exception as e:
+        logger.debug(f"[opportunity] 本地估值表查询失败 {index_code}: {e}")
+
+    # 2. 降级 akshare index_zh_a_hist
+    try:
+        import akshare as ak
+        # akshare 指数代码通常不带后缀（如 000922 而非 000922.CSI）
+        bare_code = index_code.split(".")[0].split(" ")[0]
+        df = ak.index_zh_a_hist(symbol=bare_code, period="daily", start_date=(datetime.now() - timedelta(days=7)).strftime("%Y%m%d"))
+        if df is not None and len(df) > 0 and "收盘" in df.columns:
+            return float(df['收盘'].values[-1])
+    except Exception as e:
+        logger.debug(f"[opportunity] akshare 获取指数价格失败 {index_code}: {e}")
+
+    return None
 
 
 def _create_opportunity_backtest(opportunity_id: int, theme_rule: dict, trade_date: str, review_date: str) -> None:
@@ -530,6 +676,63 @@ def _create_opportunity_backtest(opportunity_id: int, theme_rule: dict, trade_da
         logger.debug(f"[opportunity] 创建回测记录失败: {e}")
 
 
+def _get_theme_index_price_at(theme_rule: dict, target_date: str) -> float | None:
+    """获取主题对应指数在指定日期（或之前最近一日）的收盘价。
+
+    用于回测：review_date 当日价格查询。
+    P0-B 修复（2026-07-20）：原用 ak.stock_zh_index_daily(sina API) 全部 404
+    新策略：1. 优先查本地 index_valuations 表 snapshot_date <= target_date 的最近一条
+            2. 降级 akshare index_zh_a_hist
+            3. 返回 None
+    """
+    index_code = _get_theme_index_code(theme_rule)
+    if not index_code:
+        return None
+
+    # 1. 优先查本地估值表 snapshot_date <= target_date 的最近一条
+    try:
+        from db._conn import _get_conn
+        conn = _get_conn()
+        try:
+            # 尝试两种代码形式（H30590 和 H30590.CSI）
+            candidates = [index_code]
+            if "." not in index_code:
+                candidates.append(f"{index_code}.CSI")
+            placeholders = ",".join("?" * len(candidates))
+            row = conn.execute(
+                f"""SELECT current_point FROM index_valuations
+                    WHERE index_code IN ({placeholders})
+                      AND snapshot_date <= ?
+                    ORDER BY snapshot_date DESC LIMIT 1""",
+                (*candidates, target_date),
+            ).fetchone()
+            if row and row["current_point"]:
+                return float(row["current_point"])
+        finally:
+            conn.close()
+    except Exception as e:
+        logger.debug(f"[opportunity] 本地估值表历史价查询失败 {index_code} @ {target_date}: {e}")
+
+    # 2. 降级 akshare index_zh_a_hist
+    try:
+        import akshare as ak
+        bare_code = index_code.split(".")[0].split(" ")[0]
+        # 查询 target_date 前 7 天到 target_date 的数据
+        end = target_date.replace("-", "")
+        start_d = (datetime.strptime(target_date, "%Y-%m-%d") - timedelta(days=7)).strftime("%Y%m%d")
+        df = ak.index_zh_a_hist(symbol=bare_code, period="daily",
+                               start_date=start_d, end_date=end)
+        if df is None or len(df) == 0:
+            return None
+        # 取最后一行（target_date 或之前最近交易日）
+        if "收盘" in df.columns:
+            return float(df["收盘"].values[-1])
+    except Exception as e:
+        logger.debug(f"[opportunity] 获取指数历史价格失败 {index_code} @ {target_date}: {e}")
+
+    return None
+
+
 def review_opportunity_backtests() -> dict:
     """P1-N: 批量回测已到期的机会记录（review_date <= today AND hit IS NULL）。
 
@@ -545,28 +748,16 @@ def review_opportunity_backtests() -> dict:
         hit_count = 0
         for track in pending:
             try:
-                # 获取 review_date 当日的指数价格
                 theme = track.get("theme", "")
                 theme_rule = next((r for r in THEME_RULES if r["theme"] == theme), None)
                 if not theme_rule:
                     continue
 
-                index_code = _get_theme_index_code(theme_rule)
-                if not index_code:
-                    continue
-
-                import akshare as ak
-                df = ak.stock_zh_index_daily(symbol=index_code)
-                if df is None or len(df) == 0:
-                    continue
-
-                # 找到 review_date 当日或之前最近的价格
-                df['date'] = df['date'].astype(str)
                 review_date = track["review_date"]
-                mask = df['date'] <= review_date
-                if not mask.any():
+                review_price = _get_theme_index_price_at(theme_rule, review_date)
+                if not review_price:
+                    logger.debug(f"[opportunity] 无法获取 review_price {theme} @ {review_date}")
                     continue
-                review_price = float(df[mask]['close'].values[-1])
 
                 entry_price = track.get("entry_price")
                 if not entry_price or entry_price <= 0:
@@ -593,6 +784,68 @@ def review_opportunity_backtests() -> dict:
     except Exception as e:
         logger.warning(f"[opportunity] 回测批量执行失败: {e}")
         return {"reviewed": 0, "hit": 0, "miss": 0, "error": str(e)}
+
+
+def backfill_opportunity_backtests() -> dict:
+    """P0-C 修复（2026-07-20）：补建历史机会卡的 backtest 记录。
+
+    问题：theme_opportunities 表 79 条历史记录，theme_opportunity_backtests 表 0 条
+    原因：原 _create_opportunity_backtest 用 sina API 返回 None，未写入
+    修复：扫描所有没对应 backtest 记录的 opportunity，补建记录
+
+    Returns:
+        {"scanned": int, "created": int, "skipped": int}
+    """
+    try:
+        from db._conn import _get_conn
+        from db.opportunities import create_opportunity_backtest
+        conn = _get_conn()
+        try:
+            # 找到所有没有对应 backtest 记录的 opportunity
+            rows = conn.execute("""
+                SELECT t.id, t.trade_date, t.theme
+                FROM theme_opportunities t
+                LEFT JOIN theme_opportunity_backtests b
+                       ON b.opportunity_id = t.id
+                WHERE b.id IS NULL
+                ORDER BY t.id
+            """).fetchall()
+        finally:
+            conn.close()
+
+        scanned = len(rows)
+        created = 0
+        skipped = 0
+        for r in rows:
+            d = dict(r)
+            try:
+                theme = d.get("theme", "")
+                theme_rule = next((r for r in THEME_RULES if r["theme"] == theme), None)
+                if not theme_rule:
+                    skipped += 1
+                    continue
+
+                trade_date = d["trade_date"]
+                review_date = (datetime.strptime(trade_date, "%Y-%m-%d") + timedelta(days=21)).strftime("%Y-%m-%d")
+                entry_price = _get_theme_index_price_at(theme_rule, trade_date)
+                # 即使 entry_price 是 None 也写入（后续回测会自动跳过 entry_price<=0 的记录）
+                create_opportunity_backtest({
+                    "opportunity_id": d["id"],
+                    "theme": theme,
+                    "entry_date": trade_date,
+                    "review_date": review_date,
+                    "entry_price": entry_price,
+                })
+                created += 1
+            except Exception as e:
+                logger.warning(f"[opportunity] backfill 单条失败 {d.get('id')}: {e}")
+                skipped += 1
+
+        logger.info(f"[opportunity] backfill 完成：扫描 {scanned}，新建 {created}，跳过 {skipped}")
+        return {"scanned": scanned, "created": created, "skipped": skipped}
+    except Exception as e:
+        logger.warning(f"[opportunity] backfill 批量执行失败: {e}")
+        return {"scanned": 0, "created": 0, "skipped": 0, "error": str(e)}
 
 
 def scan_daily_opportunities(news_items: list[dict] | None = None,

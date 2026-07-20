@@ -61,9 +61,11 @@ _SECTOR_ALIASES = {
 # 板块 → 持仓 index_name 关键词（用于持仓指数名模糊匹配）
 # 场景：用户持仓 index_name="中证银行指数"，事件板块="金融"
 # 银行属于金融板块，通过关键词"银行"命中
+# P0-F 修复（2026-07-20）：移除"机器人"从 AI 关键词（机器人是独立板块，应通过自己的 SECTOR_TO_INDEX 匹配）
+# 移除"智能"从 AI 关键词（"智能"过宽，会匹配"智能制造"等无关基金）
 _SECTOR_TO_NAME_KEYWORDS = {
     "半导体": ["半导体", "芯片", "集成电路", "存储"],
-    "人工智能": ["人工智能", "AI", "机器人", "智能"],
+    "人工智能": ["人工智能", "AI", "算力", "大模型"],
     "新能源": ["新能源", "光伏", "锂电", "碳中和", "电池"],
     "消费": ["消费", "白酒", "食品", "零售", "畜牧"],
     "医药": ["医药", "医疗", "生物", "健康"],
@@ -80,17 +82,34 @@ _SECTOR_TO_NAME_KEYWORDS = {
     "环保": ["环保", "环境", "新能源"],
     "有色": ["有色", "煤炭", "钢铁", "黄金", "金属"],
     "化工": ["化工", "化学", "材料"],
+    # P0-F: 机器人作为独立板块，独立配置关键词
+    "机器人": ["机器人", "人形机器人", "自动化"],
 }
 
 
 # ── P0-J: 反向排除规则 ──
 # 场景：基金名"生物医药科技"含"科技"但实为医药基金，不应被关联到科技事件
 # 规则：若基金名含以下关键词，即使含板块关键词也不匹配该板块
+# P0-F 修复（2026-07-20）：扩充排除规则
 _SECTOR_EXCLUDE_RULES = {
-    "科技": ["医药", "医疗", "生物", "健康"],          # 含医药词的基金不匹配科技板块
-    "消费": ["科技", "半导体", "芯片", "医药", "医疗"],  # 消费板块排除科技/医药基金
-    "人工智能": ["医药", "医疗", "生物"],               # AI 板块排除医药基金
-    "半导体": ["医药", "医疗", "生物", "白酒", "食品"],  # 半导体板块排除医药/消费基金
+    "科技": ["医药", "医疗", "生物", "健康", "恒生", "港股"],  # 排除港股科技（A 股 IPO 不影响港股）
+    "消费": ["科技", "半导体", "芯片", "医药", "医疗"],
+    "人工智能": ["医药", "医疗", "生物", "白酒", "食品", "消费"],
+    "半导体": ["医药", "医疗", "生物", "白酒", "食品", "恒生", "港股"],
+    "机器人": ["医药", "医疗", "生物", "白酒", "食品"],  # 机器人板块排除医药/消费基金
+}
+
+# P0-F 修复（2026-07-20）：名称模糊匹配的最小关键词命中数
+# 原问题：单个关键词命中即匹配（如"科技"单独命中"生物医药科技"）
+# 修复：板块要求至少 N 个关键词同时命中才视为匹配
+_SECTOR_MIN_KEYWORD_HITS = {
+    "科技": 2,        # "科技" 单独命中不算（"生物医药科技"只命中 1 个）
+    "人工智能": 1,    # AI 关键词足够特异
+    "半导体": 1,
+    "新能源": 1,
+    "消费": 1,
+    "医药": 1,
+    "机器人": 1,
 }
 
 
@@ -359,6 +378,160 @@ def _collect_news() -> list[dict]:
         f"[event_radar] 三源合计 {len(all_news)} 条，去重后 {len(unique)} 条"
     )
     return unique[:max_news]
+
+
+# P0-E 修复（2026-07-20）：按事件主题过滤相关 sources
+# 原问题：scan_forward_events 中 sources = [n for n in news[:3]] 给所有事件塞同一批
+# 修复：按 affected_sectors/affected_themes/title 关键词过滤，每个事件只保留真正相关 sources
+def _filter_sources_by_relevance(event: dict, all_news: list[dict],
+                                  max_per_event: int = 3) -> list[dict]:
+    """按事件主题过滤相关新闻作为 sources。
+
+    Args:
+        event: 事件 dict（含 affected_sectors, affected_themes, title, summary）
+        all_news: 全部采集的新闻列表
+        max_per_event: 每个事件最多保留几条 sources
+    Returns:
+        排序后的相关 sources 列表；无相关新闻则返回 []（前端会展示"暂无来源"）
+    """
+    if not all_news:
+        return []
+
+    sectors = event.get("affected_sectors", []) or []
+    themes = event.get("affected_themes", []) or []
+    title = event.get("title", "") or ""
+    summary = event.get("summary", "") or ""
+
+    # 构建关键词集合：板块 + 主题 + 事件标题分词
+    keywords = set()
+    for s in sectors:
+        if s:
+            keywords.add(str(s).strip())
+    for t in themes:
+        if t:
+            keywords.add(str(t).strip())
+    # 标题关键词（去掉常见停用词）
+    _stop_words = {"的", "了", "和", "与", "或", "在", "为", "是", "及",
+                   "将", "上", "中", "下", "对", "等", "可", "可能"}
+    for kw in _extract_keywords_from_text(title + " " + summary):
+        if kw not in _stop_words and len(kw) >= 2:
+            keywords.add(kw)
+
+    if not keywords:
+        # 关键词全空：回退用 news[:3]（兼容旧行为）
+        return [
+            {"title": n.get("news_title", n.get("title", "")),
+             "url": n.get("news_url", n.get("url", "")),
+             "publish_date": n.get("published_at", n.get("publish_date", ""))}
+            for n in all_news[:max_per_event]
+        ]
+
+    # 对每条新闻打分
+    scored = []
+    for n in all_news:
+        text = " ".join([
+            str(n.get("news_title", "")) or "",
+            str(n.get("title", "")) or "",
+            str(n.get("news_summary", "")) or "",
+            str(n.get("summary", "")) or "",
+        ])
+        score = sum(1 for kw in keywords if kw in text)
+        if score > 0:
+            scored.append((score, n))
+
+    # 按相关度排序，取前 max_per_event 条
+    scored.sort(key=lambda x: -x[0])
+    return [
+        {"title": n.get("news_title", n.get("title", "")),
+         "url": n.get("news_url", n.get("url", "")),
+         "publish_date": n.get("published_at", n.get("publish_date", ""))}
+        for _, n in scored[:max_per_event]
+    ]
+
+
+def _extract_keywords_from_text(text: str) -> list[str]:
+    """从文本中提取候选关键词（简单版：2-6 字 CJK 子串）。
+
+    用于事件 sources 过滤。后续可换成 jieba 分词。
+    """
+    if not text:
+        return []
+    import re
+    # 提取 2-6 个连续中文字符
+    matches = re.findall(r'[\u4e00-\u9fa5]{2,6}', text)
+    # 去重保留顺序
+    seen = set()
+    result = []
+    for m in matches:
+        if m not in seen:
+            seen.add(m)
+            result.append(m)
+    return result[:20]  # 最多 20 个关键词
+
+
+# P1-C 修复（2026-07-20）：影响量化字段规则化兜底
+# 原问题：alerts.event_impact_quantification_enabled 默认关闭 + LLM 可能不返回 → 字段全 None
+# 修复：基于事件类型+方向+置信度，按规则估算影响幅度
+def _analyze_event_impact_by_rule(event: dict, calibrated_dir: str = "") -> dict:
+    """基于规则估算事件影响幅度（不调 LLM，避免成本）。
+
+    Args:
+        event: 事件 dict
+        calibrated_dir: 校准后的方向（up/down/neutral）
+    Returns:
+        {expected_impact_pct, impact_direction, impact_duration, impact_analysis}
+    """
+    direction = calibrated_dir or event.get("direction", "neutral")
+    confidence = float(event.get("confidence", 0.5) or 0.5)
+    event_type = event.get("event_type", "theme")
+
+    # 基础影响幅度（基于事件类型经验值）
+    base_map = {
+        "policy": 2.5,       # 政策类影响较大
+        "industry": 1.5,     # 行业类中等
+        "earnings": 2.0,     # 业绩类较大
+        "capital": 1.8,      # 资金类中等
+        "macro": 1.0,        # 宏观类偏小
+        "theme": 1.2,        # 主题类偏小
+    }
+    base_pct = base_map.get(event_type, 1.0)
+
+    # 方向调整
+    if "down" in direction or "neg" in direction:
+        impact_pct = -base_pct
+        impact_dir = "down"
+    elif "up" in direction or "pos" in direction:
+        impact_pct = base_pct
+        impact_dir = "up"
+    else:
+        impact_pct = base_pct * 0.3  # 中性影响小
+        impact_dir = "flat"
+
+    # 置信度调整（置信度高的影响幅度大）
+    impact_pct = round(impact_pct * (0.5 + confidence), 2)
+
+    # 持续期：政策类 long，行业类 medium，其他 short
+    duration_map = {
+        "policy": "long_term",
+        "industry": "medium_term",
+        "macro": "medium_term",
+        "earnings": "short_term",
+        "capital": "short_term",
+        "theme": "short_term",
+    }
+    impact_duration = duration_map.get(event_type, "short_term")
+
+    impact_analysis = (
+        f"基于规则估算（事件类型={event_type}, 方向={impact_dir}, "
+        f"置信度={confidence:.2f}）：预估影响 {impact_pct}%，持续期 {impact_duration}"
+    )
+
+    return {
+        "expected_impact_pct": impact_pct,
+        "impact_direction": impact_dir,
+        "impact_duration": impact_duration,
+        "impact_analysis": impact_analysis,
+    }
 
 
 def _extract_trends_from_articles(article_content: str, article_title: str = "") -> list[dict]:
@@ -722,7 +895,9 @@ def _determine_relevance(
                     matched_holding_codes.add(h.get("fund_code"))
 
         # 1b. 持仓匹配：index_name 关键词模糊匹配
+        # P0-F 修复：增加最小关键词命中数检查，避免单"科技"匹配"生物医药科技"
         if not matched_holdings and name_keywords:
+            min_hits = _SECTOR_MIN_KEYWORD_HITS.get(sector, 1)
             for h in user_holdings:
                 if h.get("fund_code") in matched_holding_codes:
                     continue
@@ -732,16 +907,19 @@ def _determine_relevance(
                 # 避免医药基金（含"医药/医疗/生物"）被关联到科技事件
                 if _should_exclude_for_sector(sector, h_fund_name, h_index_name):
                     continue
-                for kw in name_keywords:
-                    if kw in h_index_name or kw in h_fund_name:
-                        matched_holdings.append({
-                            "fund_code": h.get("fund_code", ""),
-                            "fund_name": h.get("fund_name", ""),
-                            "match_type": "holding",
-                            "match_reason": f"持仓名称含 {sector} 关键词 '{kw}'",
-                        })
-                        matched_holding_codes.add(h.get("fund_code"))
-                        break
+                # P0-F: 统计命中的关键词数
+                hit_kws = [kw for kw in name_keywords
+                           if kw in h_index_name or kw in h_fund_name]
+                if len(hit_kws) >= min_hits and hit_kws:
+                    matched_holdings.append({
+                        "fund_code": h.get("fund_code", ""),
+                        "fund_name": h.get("fund_name", ""),
+                        "match_type": "holding",
+                        "match_reason": f"持仓名称含 {sector} 关键词 '{','.join(hit_kws[:3])}'" + (
+                            f"（命中 {len(hit_kws)} 个）" if len(hit_kws) > 1 else ""
+                        ),
+                    })
+                    matched_holding_codes.add(h.get("fund_code"))
 
         # 1c. 关注列表匹配：index_code 精确匹配（持仓未命中时）
         if not matched_holdings:
@@ -759,7 +937,9 @@ def _determine_relevance(
                         matched_watchlist_codes.add(w.get("fund_code"))
 
             # 1d. 关注列表匹配：index_name 关键词模糊匹配
+            # P0-F 修复：同样应用最小命中数检查
             if not matched_watchlist and name_keywords:
+                min_hits = _SECTOR_MIN_KEYWORD_HITS.get(sector, 1)
                 for w in user_watchlist:
                     if w.get("fund_code") in matched_watchlist_codes:
                         continue
@@ -768,15 +948,15 @@ def _determine_relevance(
                     # ── P0-J: 反向校验（关注列表同样适用）──
                     if _should_exclude_for_sector(sector, w_fund_name, w_index_name):
                         continue
-                    for kw in name_keywords:
-                        if kw in w_index_name or kw in w_fund_name:
-                            matched_watchlist.append({
-                                "fund_code": w.get("fund_code", ""),
-                                "fund_name": w.get("fund_name", ""),
-                                "match_reason": f"关注基金名称含 {sector} 关键词 '{kw}'",
-                            })
-                            matched_watchlist_codes.add(w.get("fund_code"))
-                            break
+                    hit_kws = [kw for kw in name_keywords
+                               if kw in w_index_name or kw in w_fund_name]
+                    if len(hit_kws) >= min_hits and hit_kws:
+                        matched_watchlist.append({
+                            "fund_code": w.get("fund_code", ""),
+                            "fund_name": w.get("fund_name", ""),
+                            "match_reason": f"关注基金名称含 {sector} 关键词 '{','.join(hit_kws[:3])}'",
+                        })
+                        matched_watchlist_codes.add(w.get("fund_code"))
 
         # 2. 若无持仓/关注命中，收集候选建仓基金
         if not matched_holdings and not matched_watchlist:
@@ -909,11 +1089,9 @@ def scan_forward_events(trace_id: str = "") -> dict:
     from db.market_events import create_market_event, update_event_relevance
     new_count = 0
     for ev in all_items:
-        sources = [
-            {"title": n.get("news_title", ""), "url": n.get("news_url", ""),
-             "publish_date": n.get("published_at", "")}
-            for n in news[:3]
-        ]
+        # P0-E 修复（2026-07-20）：按事件主题过滤相关 sources
+        # 原问题：所有事件塞同一批 news[:3]，导致 sources 张冠李戴
+        sources = _filter_sources_by_relevance(ev, news)
         try:
             from db.market_events import get_market_event, _gen_event_id
             expected_date = ev.get("expected_date", "")
@@ -972,6 +1150,22 @@ def scan_forward_events(trace_id: str = "") -> dict:
                         _update_fields(eid, impact_fields)
                     except Exception as _e:
                         logger.debug(f"[event_radar:{trace_id}] 影响量化字段写入失败: {_e}")
+
+            # P1-C 修复（2026-07-20）：影响量化字段规则化兜底
+            # 原问题：alerts.event_impact_quantification_enabled 默认关闭 + LLM 可能不返回 → 字段全 None
+            # 修复：开关关闭或 LLM 没返回时，基于事件类型+方向用规则填充
+            try:
+                rule_based_enabled = get_config_bool("alerts.event_impact_rule_based_enabled", True)
+            except Exception:
+                rule_based_enabled = True
+            if rule_based_enabled and not existing:
+                rule_impact = _analyze_event_impact_by_rule(ev, calibrated_dir)
+                if rule_impact:
+                    try:
+                        from db.market_events import update_market_event_fields as _update_fields
+                        _update_fields(eid, rule_impact)
+                    except Exception as _e:
+                        logger.debug(f"[event_radar:{trace_id}] 规则化影响字段写入失败: {_e}")
             if not existing:
                 new_count += 1
         except Exception as e:
