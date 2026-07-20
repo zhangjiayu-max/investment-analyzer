@@ -2066,10 +2066,49 @@ def classify_bond_type(bond_name: str) -> str:
     return "信用债"
 
 
+def _refine_bond_subcategory(default_category: str, fund_type: str) -> str:
+    """P1-1: 把粗分类 'bond' 细化为子类，识别混合二级/可转债/纯债/中短债。
+
+    Args:
+        default_category: 默认分类（'bond' / 'bond_pure' 等）
+        fund_type: fund_metadata.fund_type 字段，如 "债券型-混合二级"
+
+    Returns:
+        细化后的子类：
+        - bond_hybrid: 混合二级债基（可持有最多 20% 股票，必须穿透分析）
+        - bond_convertible: 可转债基金
+        - bond_pure: 纯债基金
+        - bond_short: 中短债基金
+        - bond: 默认债基（无法判断子类时保留）
+    """
+    ft = (fund_type or "").strip()
+    if not ft:
+        return default_category
+
+    # 可转债优先判断
+    if "可转" in ft or "转债" in ft:
+        return "bond_convertible"
+    # 混合二级 / 混合一级
+    if "混合" in ft or "二级" in ft or "一级" in ft:
+        return "bond_hybrid"
+    # 中短债 / 短债
+    if "中短债" in ft or "短债" in ft:
+        return "bond_short"
+    # 纯债
+    if "纯债" in ft:
+        return "bond_pure"
+    # 默认返回原分类
+    return default_category
+
+
 def classify_fund_category(fund_name: str, fund_type: str = "", fund_code: str = "") -> str:
     """根据基金名称、类型和本地缓存分类：equity / bond / hybrid / money_market / index 等。
 
     优先读取 fund_metadata 缓存的 fund_category，其次用 fund_type，最后退回到名称启发式。
+
+    P1-1: bond 子类细化（bond_pure / bond_hybrid / bond_convertible / bond_short）
+    - 修复 conv 129 根因之五：bond_category='bond' 误导 AI 把"混合二级债基"当纯债处理
+    - 子类值兼容性：上层使用方对未知值可回退为 'bond'（如 _map_category_to_risk_level）
     """
     name = fund_name.strip()
     ft = fund_type.strip()
@@ -2106,9 +2145,9 @@ def classify_fund_category(fund_name: str, fund_type: str = "", fund_code: str =
 
     # 4) 债券基金 — 纯债
     if any(kw in name for kw in ("纯债", "短债", "长债", "中短债", "中长债", "利率债", "信用债")):
-        return "bond"
+        return _refine_bond_subcategory("bond_pure", ft)
     if any(kw in name for kw in ("债券", "债基", "国债", "政金")):
-        return "bond"
+        return _refine_bond_subcategory("bond", ft)
     if "中债" in name and "指数" in name:
         return "bond_index"
 
@@ -2122,12 +2161,12 @@ def classify_fund_category(fund_name: str, fund_type: str = "", fund_code: str =
     # 6) 混合型
     if "混合" in name or "平衡" in name or "灵活" in name:
         if any(kw in ft for kw in ("债券", "债")):
-            return "bond"
+            return _refine_bond_subcategory("bond_hybrid", ft)
         return "hybrid"
 
     # 7) 根据 fund_type 判断
     if "债券型" in ft:
-        return "bond"
+        return _refine_bond_subcategory("bond", ft)
     if "货币型" in ft:
         return "money_market"
     if "混合型" in ft:
@@ -2146,11 +2185,54 @@ def classify_fund_category(fund_name: str, fund_type: str = "", fund_code: str =
 
 
 def get_fund_holdings(fund_code: str, year: str = None) -> dict:
-    """获取基金持仓详情：股票重仓 + 债券持仓 + 资产配置。"""
+    """获取基金持仓详情：股票重仓 + 债券持仓 + 资产配置（三级兜底：akshare → ttfund → 本地快照）。
+
+    P0-6 系统性修复：conv 129 根因之三修复
+    - 问题：akshare `fund_portfolio_hold_em` / `fund_portfolio_bond_hold_em` 对所有基金报
+      `JSONDecodeError: Can not decode value starting with character ';'`，导致 top_stocks 永远为空
+    - 修复：akshare 失效时依次尝试 ttfund MCP → 本地综合快照表，确保穿透数据非空
+    """
     if not year:
         from datetime import datetime
         year = str(datetime.now().year)
 
+    # 第 1 级：akshare 主路径
+    result = _akshare_fund_holdings(fund_code, year)
+    if result.get("top_stocks"):
+        # akshare 成功 → 写入综合快照 + 细粒度快照
+        _save_full_snapshot_silent(fund_code, result, "akshare")
+        return result
+
+    # 第 2 级：ttfund MCP 兜底（需先登录）
+    ttfund_data = _ttfund_fund_holding(fund_code)
+    if ttfund_data and ttfund_data.get("top_stocks"):
+        # 合并 akshare 的部分有效数据（asset_allocation / industry_allocation 通常仍可用）
+        merged = _merge_holdings(result, ttfund_data)
+        merged["_data_source"] = "ttfund_fallback"
+        _save_full_snapshot_silent(fund_code, merged, "ttfund")
+        return merged
+
+    # 第 3 级：本地综合快照表兜底（akshare + ttfund 都失败时）
+    try:
+        from db.fund_holdings_snapshot import get_latest_full_fund_holdings_snapshot
+        snapshot = get_latest_full_fund_holdings_snapshot(fund_code)
+        if snapshot and (snapshot.get("top_stocks") or snapshot.get("asset_allocation")):
+            snapshot["_data_source"] = "local_snapshot_stale"
+            logger.warning(
+                f"[fund_holdings] {fund_code} akshare+ttfund 均失败，使用本地快照（updated_at={snapshot.get('_snapshot_updated_at')})"
+            )
+            return snapshot
+    except Exception as e:
+        logger.warning(f"[fund_holdings] 本地快照读取失败 {fund_code}: {e}")
+
+    # 全部失败：返回 akshare 的部分结果（可能含 asset_allocation / industry_allocation）
+    if not result.get("_data_source"):
+        result["_data_source"] = "akshare_partial_failure"
+    return result
+
+
+def _akshare_fund_holdings(fund_code: str, year: str) -> dict:
+    """第 1 级：通过 akshare 获取基金持仓（原 get_fund_holdings 主体逻辑）。"""
     result = {
         "fund_code": fund_code,
         "top_stocks": [],
@@ -2158,7 +2240,7 @@ def get_fund_holdings(fund_code: str, year: str = None) -> dict:
         "asset_allocation": [],
         "industry_allocation": [],
         "bond_type_summary": {},
-        "report_date": None,  # 最新季报日期
+        "report_date": None,
     }
 
     # 1. 股票持仓 Top 10
@@ -2166,7 +2248,6 @@ def get_fund_holdings(fund_code: str, year: str = None) -> dict:
         import akshare as ak
         df = ak.fund_portfolio_hold_em(symbol=fund_code, date=year)
         if df is not None and len(df) > 0:
-            # 取最新一期的前 10
             quarters = df["季度"].unique()
             if len(quarters) > 0:
                 latest_q = quarters[-1]
@@ -2181,7 +2262,7 @@ def get_fund_holdings(fund_code: str, year: str = None) -> dict:
                     })
                 result["report_date"] = str(latest_q)
     except Exception as e:
-        print(f"[db] 获取股票持仓失败 {fund_code}: {e}")
+        logger.warning(f"[fund_holdings] akshare 股票持仓失败 {fund_code}: {e}")
 
     # 2. 债券持仓
     bond_type_counter = {}
@@ -2205,7 +2286,7 @@ def get_fund_holdings(fund_code: str, year: str = None) -> dict:
                         "bond_type": btype,
                     })
     except Exception as e:
-        print(f"[db] 获取债券持仓失败 {fund_code}: {e}")
+        logger.warning(f"[fund_holdings] akshare 债券持仓失败 {fund_code}: {e}")
 
     result["bond_type_summary"] = {k: round(v, 2) for k, v in bond_type_counter.items()}
 
@@ -2220,7 +2301,7 @@ def get_fund_holdings(fund_code: str, year: str = None) -> dict:
                     "pct": str(r.get("仓位占比", "")),
                 })
     except Exception as e:
-        print(f"[db] 获取资产配置失败 {fund_code}: {e}")
+        logger.warning(f"[fund_holdings] akshare 资产配置失败 {fund_code}: {e}")
 
     # 4. 行业配置
     try:
@@ -2233,17 +2314,107 @@ def get_fund_holdings(fund_code: str, year: str = None) -> dict:
                     "pct_nav": float(r.get("占净值比例", 0)),
                 })
     except Exception as e:
-        print(f"[db] 获取行业配置失败 {fund_code}: {e}")
+        logger.warning(f"[fund_holdings] akshare 行业配置失败 {fund_code}: {e}")
 
-    # 持仓快照写入（仅当有股票持仓且有季报日期时）
+    # 细粒度快照写入（仅当有股票持仓且有季报日期时；保持原行为）
     if result["top_stocks"] and result.get("report_date"):
         try:
             from db.fund_holdings_snapshot import save_fund_holdings_snapshot
             save_fund_holdings_snapshot(fund_code, result["report_date"], result["top_stocks"])
         except Exception as e:
-            print(f"[db] 持仓快照写入失败 {fund_code}: {e}")
+            logger.warning(f"[fund_holdings] 细粒度快照写入失败 {fund_code}: {e}")
 
     return result
+
+
+def _ttfund_fund_holding(fund_code: str) -> dict | None:
+    """第 2 级：通过 ttfund MCP 获取基金持仓（akshare 失效时兜底）。
+
+    ttfund MCP 需先登录才能调用，未登录时返回 None 并打印警告。
+    """
+    try:
+        from mcp.ttfund_client import TtfundClient
+        client = TtfundClient()
+        raw = client.fund_holding(fund_code)
+        if not raw:
+            return None
+        # 转换 ttfund 返回结构为标准 schema
+        return _normalize_ttfund_holding(fund_code, raw)
+    except RuntimeError as e:
+        # ttfund 未登录
+        logger.warning(f"[fund_holdings] ttfund MCP 未登录或不可用 {fund_code}: {e}")
+        return None
+    except Exception as e:
+        logger.warning(f"[fund_holdings] ttfund 兜底失败 {fund_code}: {e}")
+        return None
+
+
+def _normalize_ttfund_holding(fund_code: str, raw: dict) -> dict:
+    """把 ttfund MCP 的 fund_holding 返回值标准化为 get_fund_holdings 同结构。"""
+    result = {
+        "fund_code": fund_code,
+        "top_stocks": [],
+        "bond_holdings": [],
+        "asset_allocation": [],
+        "industry_allocation": [],
+        "bond_type_summary": {},
+        "report_date": None,
+    }
+    # ttfund 字段名: top_holdings / asset_allocation / industry_allocation
+    for s in (raw.get("top_holdings") or [])[:10]:
+        result["top_stocks"].append({
+            "stock_code": str(s.get("stock_code", "")),
+            "stock_name": str(s.get("stock_name", "")),
+            "pct_nav": float(s.get("pct_nav", 0) or 0),
+            "shares": float(s.get("shares", 0) or 0),
+            "market_value": float(s.get("market_value", 0) or 0),
+        })
+    for b in (raw.get("bond_holdings") or [])[:10]:
+        bond_name = str(b.get("bond_name", ""))
+        btype = classify_bond_type(bond_name)
+        result["bond_holdings"].append({
+            "bond_code": str(b.get("bond_code", "")),
+            "bond_name": bond_name,
+            "pct_nav": float(b.get("pct_nav", 0) or 0),
+            "market_value": float(b.get("market_value", 0) or 0),
+            "bond_type": btype,
+        })
+        result["bond_type_summary"][btype] = result["bond_type_summary"].get(btype, 0) + float(b.get("pct_nav", 0) or 0)
+    for a in (raw.get("asset_allocation") or []):
+        result["asset_allocation"].append({
+            "type": str(a.get("type", "")),
+            "pct": str(a.get("pct", "")),
+        })
+    for ind in (raw.get("industry_allocation") or [])[:10]:
+        result["industry_allocation"].append({
+            "industry": str(ind.get("industry", "")),
+            "pct_nav": float(ind.get("pct_nav", 0) or 0),
+        })
+    result["bond_type_summary"] = {k: round(v, 2) for k, v in result["bond_type_summary"].items()}
+    result["report_date"] = raw.get("report_date")
+    return result
+
+
+def _merge_holdings(ak_data: dict, ttfund_data: dict) -> dict:
+    """合并 akshare 部分有效数据（asset_allocation / industry_allocation）+ ttfund 数据。"""
+    merged = dict(ttfund_data)
+    # 优先用 akshare 的 asset_allocation / industry_allocation（通常仍可用）
+    if ak_data.get("asset_allocation") and not merged.get("asset_allocation"):
+        merged["asset_allocation"] = ak_data["asset_allocation"]
+    if ak_data.get("industry_allocation") and not merged.get("industry_allocation"):
+        merged["industry_allocation"] = ak_data["industry_allocation"]
+    if ak_data.get("bond_type_summary") and not merged.get("bond_type_summary"):
+        merged["bond_type_summary"] = ak_data["bond_type_summary"]
+    return merged
+
+
+def _save_full_snapshot_silent(fund_code: str, data: dict, data_source: str) -> None:
+    """静默写入综合快照（失败不阻塞主流程）。"""
+    try:
+        from db.fund_holdings_snapshot import save_full_fund_holdings_snapshot
+        save_full_fund_holdings_snapshot(fund_code, data, data_source)
+    except Exception as e:
+        logger.warning(f"[fund_holdings] 综合快照写入失败 {fund_code}: {e}")
 
 
 # ── 风险预警 CRUD ──────────────────────────────────────

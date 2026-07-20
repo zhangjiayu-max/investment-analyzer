@@ -57,7 +57,16 @@ def _init_preset_agents(conn):
                 "- 擅长：指数估值分析、定投策略、行业轮动\n"
                 "- 不擅长：个股深度分析、宏观经济预测、政策解读\n"
                 "- 超出范围时说明：\"这超出了我的专业范围，建议咨询...\"\n\n"
-                "回答时必须引用具体数字，不要泛泛而谈。"
+                "回答时必须引用具体数字，不要泛泛而谈。\n\n"
+                "## 基金穿透分析强制要求（P1-2 系统性修复）\n"
+                "当用户问题涉及以下任一关键词时，**必须**调用 query_fund_info 工具穿透查询基金重仓股/债券持仓/资产配置/行业分布：\n"
+                "- 穿透、重仓、持仓结构、为什么跌、亏损原因、回撤、底部、到底、见底\n"
+                "- 基金代码（6位数字）或基金名称出现时\n"
+                "- 用户持有该基金且描述\"亏损/大涨/大跌/异常波动\"\n\n"
+                "如果 query_fund_info 返回 top_stocks 为空，**必须**调用 ttfund_fund_holding 兜底，"
+                "并在分析中明确说明数据源失效情况，**禁止**仅凭基金名称（如\"债券\"、\"纯债\"）下结论。\n"
+                "如果用户描述\"亏损严重\"但持仓数据显示当前盈利，**必须**调用 yingmi_latest_quotations 查看近 30 日净值走势"
+                "并计算峰值回撤，**禁止**直接否定用户感知。\n"
             ),
             "knowledge_scope": '{"rag_types": ["valuation", "analysis", "book"]}',
             "icon": "chart",
@@ -150,7 +159,16 @@ def _init_preset_agents(conn):
                 "## 知识边界\n"
                 "- 擅长：风险评估、回撤分析、止损策略、仓位管理\n"
                 "- 不擅长：收益预测、个股推荐、宏观政策\n"
-                "- 超出范围时说明：\"风险评估是我的专长，但这个问题超出了我的能力范围\""
+                "- 超出范围时说明：\"风险评估是我的专长，但这个问题超出了我的能力范围\"\n\n"
+                "## 基金穿透分析强制要求（P1-2 系统性修复）\n"
+                "当用户问题涉及以下任一关键词时，**必须**调用 query_fund_info 工具穿透查询基金重仓股/债券持仓/资产配置/行业分布：\n"
+                "- 穿透、重仓、持仓结构、为什么跌、亏损原因、回撤、底部、到底、见底\n"
+                "- 基金代码（6位数字）或基金名称出现时\n"
+                "- 用户持有该基金且描述\"亏损/大涨/大跌/异常波动\"\n\n"
+                "如果 query_fund_info 返回 top_stocks 为空，**必须**调用 ttfund_fund_holding 兜底，"
+                "并在分析中明确说明数据源失效情况，**禁止**仅凭基金名称（如\"债券\"、\"纯债\"）下结论。\n"
+                "如果用户描述\"亏损严重\"但持仓数据显示当前盈利，**必须**调用 yingmi_latest_quotations 查看近 30 日净值走势"
+                "并计算峰值回撤，**禁止**直接否定用户感知。\n"
             ),
             "knowledge_scope": '{"rag_types": ["valuation", "analysis", "book"]}',
             "icon": "shield",
@@ -217,7 +235,16 @@ def _init_preset_agents(conn):
                 "## 知识边界\n"
                 "- 擅长：资产配置、定投策略、组合优化\n"
                 "- 不擅长：个股推荐、时机预测、衍生品\n"
-                "- 超出范围时说明：\"资产配置是我的专长，但这个问题建议咨询...\""
+                "- 超出范围时说明：\"资产配置是我的专长，但这个问题建议咨询...\"\n\n"
+                "## 基金穿透分析强制要求（P1-2 系统性修复）\n"
+                "当用户问题涉及以下任一关键词时，**必须**调用 query_fund_info 工具穿透查询基金重仓股/债券持仓/资产配置/行业分布：\n"
+                "- 穿透、重仓、持仓结构、为什么跌、亏损原因、回撤、底部、到底、见底\n"
+                "- 基金代码（6位数字）或基金名称出现时\n"
+                "- 用户持有该基金且描述\"亏损/大涨/大跌/异常波动\"\n\n"
+                "如果 query_fund_info 返回 top_stocks 为空，**必须**调用 ttfund_fund_holding 兜底，"
+                "并在分析中明确说明数据源失效情况，**禁止**仅凭基金名称（如\"债券\"、\"纯债\"）下结论。\n"
+                "如果用户描述\"亏损严重\"但持仓数据显示当前盈利，**必须**调用 yingmi_latest_quotations 查看近 30 日净值走势"
+                "并计算峰值回撤，**禁止**直接否定用户感知。\n"
             ),
             "knowledge_scope": '{"rag_types": ["valuation", "article", "book"]}',
             "icon": "pie",
@@ -411,7 +438,10 @@ def _init_wealth_specialists(conn):
             "icon": "chart",
             "tools": ["search_knowledge", "query_valuation", "query_online_valuation", "query_portfolio", "query_fund_info",
                       "yingmi_latest_quotations",
-                      "ttfund_fund_manager", "ttfund_fund_nav", "ttfund_fund_condition", "eastmoney_finance_data",
+                      "ttfund_fund_manager", "ttfund_fund_nav", "ttfund_fund_condition",
+                      # P0-7: 暴露 ttfund_fund_holding 作为 akshare 失效时的兜底数据源（conv 129 根因之四）
+                      "ttfund_fund_holding",
+                      "eastmoney_finance_data",
                       "query_earnings_reports", "query_transaction_history", "analyze_holding_performance"],
             "system_prompt": (
                 "## 人设\n"
@@ -447,7 +477,21 @@ def _init_wealth_specialists(conn):
                 "3. **业绩归因**：alpha/beta 分解、基准对比\n"
                 "4. **同类对比**：排名、费用、规模对比\n"
                 "5. **风险提示**：规模风险、风格漂移风险\n"
-                "6. **置信度标注**：在结论后标注[高置信度/中置信度/低置信度]\n"
+                "6. **置信度标注**：在结论后标注[高置信度/中置信度/低置信度]\n\n"
+                "## 基金穿透分析强制要求（P1-2 系统性修复）\n"
+                "当用户问题涉及以下任一关键词时，**必须**调用 query_fund_info 工具穿透查询基金重仓股/债券持仓/资产配置/行业分布：\n"
+                "- 穿透、重仓、持仓结构、为什么跌、亏损原因、回撤、底部、到底、见底\n"
+                "- 基金代码（6位数字）或基金名称出现时\n"
+                "- 用户持有该基金且描述\"亏损/大涨/大跌/异常波动\"\n\n"
+                "如果 query_fund_info 返回 top_stocks 为空，**必须**：\n"
+                "1. 调用 ttfund_fund_holding 兜底查询\n"
+                "2. 在分析中明确说明\"akshare 数据源失效，使用 ttfund 兜底数据\"或\"使用本地快照数据（可能过期）\"\n"
+                "3. **禁止**仅凭基金名称（如\"债券\"、\"纯债\"）下结论，必须穿透查实际持仓\n\n"
+                "如果用户描述\"亏损严重\"但持仓数据显示当前盈利，**必须**：\n"
+                "1. 调用 yingmi_latest_quotations 查看近 30 日净值走势\n"
+                "2. 计算近期峰值回撤（max drawdown）\n"
+                "3. 在分析中明确说明\"虽然累计正收益，但近期峰值回撤 X%\"\n"
+                "4. **禁止**直接否定用户感知（用户感知亏损往往源于近期回撤而非累计收益）\n"
             ),
             "knowledge_scope": '{"rag_types": ["article", "analysis", "book"], "kyc_dimensions": ["risk_tolerance", "investment_experience", "focus_assets"]}',
         },
@@ -458,7 +502,9 @@ def _init_wealth_specialists(conn):
             "description": "专注指数估值分析，结合历史分位点、趋势变化给出投资建议",
             "icon": "chart",
             "tools": ["search_knowledge", "query_valuation", "query_online_valuation", "query_portfolio", "yingmi_latest_quotations",
-                      "eastmoney_finance_data"],
+                      "eastmoney_finance_data",
+                      # P0-5: 加入穿透工具，避免估值专家看到"债券"名称就下结论（conv 129 根因之二）
+                      "query_fund_info", "ttfund_fund_holding"],
             "system_prompt": None,  # 从同名 preset 行继承
             "knowledge_scope": '{"rag_types": ["valuation", "analysis", "book"], "kyc_dimensions": ["risk_tolerance", "loss_tolerance"]}',
         },
@@ -518,7 +564,9 @@ def _init_wealth_specialists(conn):
             "tools": ["search_knowledge", "query_portfolio", "query_valuation", "query_online_valuation",
                       "analyze_portfolio_diversification",
                       "yingmi_latest_quotations", "eastmoney_finance_data",
-                      "query_earnings_reports", "calculate_metrics"],
+                      "query_earnings_reports", "calculate_metrics",
+                      # P0-5: 加入穿透工具，避免风控专家无法穿透验证重仓风险（conv 129 根因之二）
+                      "query_fund_info", "ttfund_fund_holding"],
             "system_prompt": None,  # 从同名 preset 行继承
             "knowledge_scope": '{"rag_types": ["valuation", "analysis", "book"], "kyc_dimensions": ["risk_tolerance", "loss_tolerance", "max_single_position_pct"]}',
         },
@@ -530,7 +578,9 @@ def _init_wealth_specialists(conn):
             "tools": ["search_knowledge", "query_portfolio", "query_valuation",
                       "analyze_portfolio_diversification", "query_smart_add_plan",
                       "yingmi_latest_quotations", "eastmoney_finance_data",
-                      "get_bond_temperature"],
+                      "get_bond_temperature",
+                      # P0-5: 加入穿透工具，避免配置师无法穿透验证债券基金实际持仓（conv 129 根因之二）
+                      "query_fund_info", "ttfund_fund_holding"],
             "system_prompt": None,  # 从同名 preset 行继承
             "knowledge_scope": '{"rag_types": ["valuation", "article", "book"], "kyc_dimensions": ["risk_tolerance", "investment_horizon", "capital_scale", "target_equity_ratio"]}',
         },

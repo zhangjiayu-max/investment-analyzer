@@ -753,6 +753,20 @@ TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "ttfund_fund_holding",
+            "description": "查询基金重仓股/债券持仓/资产配置/行业分布（穿透分析必用）。当 query_fund_info 返回 top_stocks 为空时调用本工具兜底；用户问'穿透看/重仓股/持仓结构/为什么跌/亏损原因'时必须调用。数据源：天天基金。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "fund_code": {"type": "string", "description": "基金代码，如 014846"},
+                },
+                "required": ["fund_code"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "eastmoney_macro_data",
             "description": "宏观数据查询（GDP、CPI、PMI、社融、M2、工业增加值等）。当用户问宏观经济数据、GDP走势、PMI数据、通胀、货币政策时调用。数据源：东方财富。",
             "parameters": {
@@ -1327,6 +1341,8 @@ def _execute_tool_impl(name: str, arguments: dict, trace_id: str = "",
         return _ttfund_fund_nav(arguments)
     elif name == "ttfund_fund_condition":
         return _ttfund_fund_condition(arguments)
+    elif name == "ttfund_fund_holding":
+        return _ttfund_fund_holding(arguments)
     elif name == "eastmoney_macro_data":
         return _eastmoney_macro_data(arguments)
     elif name == "eastmoney_finance_data":
@@ -2544,6 +2560,10 @@ def _query_fund_info(args: dict) -> str:
             if bt:
                 bt_str = "、".join(f"{k}{v}%" for k, v in bt.items())
                 analysis_parts.append(f"债券类型：{bt_str}")
+        # P1-3: 暴露数据来源给 LLM（akshare / ttfund 兜底 / 本地快照 / 部分失效）
+        ds = holdings.get("_data_source", "")
+        if ds:
+            analysis_parts.append(f"数据来源：{ds}")
         result["brief_analysis"] = "；".join(analysis_parts)
 
     return json.dumps(result, ensure_ascii=False)
@@ -3092,6 +3112,25 @@ def _ttfund_fund_condition(args: dict) -> str:
         client = get_ttfund_client()
         result = client.fund_condition(args["condition"])
         return result[:3000] if result else json.dumps({"error": "无数据"}, ensure_ascii=False)
+    except Exception as e:
+        return json.dumps({"error": str(e)}, ensure_ascii=False)
+
+
+def _ttfund_fund_holding(args: dict) -> str:
+    """查询基金重仓股/债券持仓/资产配置/行业分布（穿透分析必用）。
+
+    P0-7: 暴露 ttfund MCP 的 fund_holding 方法作为 LLM 工具，
+    当 query_fund_info 返回 top_stocks 为空（akshare 失效）时调用本工具兜底。
+    """
+    fund_code = args.get("fund_code") or ""
+    if not fund_code:
+        return json.dumps({"error": "fund_code 不能为空"}, ensure_ascii=False)
+    try:
+        from db.portfolio import get_fund_holdings
+        # 直接复用 db 层的三级兜底逻辑（akshare → ttfund → 本地快照）
+        # 避免重复实现兜底链路
+        result = get_fund_holdings(fund_code)
+        return json.dumps(result, ensure_ascii=False)[:4000]
     except Exception as e:
         return json.dumps({"error": str(e)}, ensure_ascii=False)
 

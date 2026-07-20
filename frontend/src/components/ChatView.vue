@@ -51,6 +51,7 @@ const messages = ref([])
 const inputText = ref('')
 const agents = ref([])
 const messagesContainer = ref(null)
+const convIdBtnRef = ref(null)
 const showMobileSidebar = ref(false)
 const isRecovering = ref(false)
 const pendingImages = ref([])
@@ -1018,18 +1019,59 @@ function handleTradeDialogClose() {
   tradeDialogVisible.value = false
 }
 
+// ─── 复制工具函数（统一前缀格式 + 移动端兼容兜底）──
+// P0-1/P0-2: 统一 conv_id: <id> / message_id: <id> 格式，便于排查
+// 兼容：navigator.clipboard 在 HTTP/微信内置浏览器/iOS 低版本 WebView 下不可用，降级 execCommand
+function copyToClipboard(text, btnEl = null, toastMsg = '') {
+  const fallbackExec = () => {
+    try {
+      const input = document.createElement('textarea')
+      input.value = text
+      // iOS Safari 必须先 contentEditable + readOnly=false 才能 setSelectionRange
+      input.contentEditable = true
+      input.readOnly = false
+      input.style.position = 'fixed'
+      input.style.top = '-9999px'
+      input.style.left = '-9999px'
+      document.body.appendChild(input)
+      const range = document.createRange()
+      range.selectNodeContents(input)
+      const sel = window.getSelection()
+      sel.removeAllRanges()
+      sel.addRange(range)
+      input.setSelectionRange(0, text.length)
+      const ok = document.execCommand('copy')
+      document.body.removeChild(input)
+      return ok
+    } catch (e) {
+      console.warn('[clipboard] execCommand 失败:', e)
+      return false
+    }
+  }
+
+  const finish = (success) => {
+    if (success && btnEl) {
+      btnEl.classList.add('copied')
+      setTimeout(() => btnEl.classList.remove('copied'), 1500)
+    }
+    if (toastMsg) showToast(toastMsg, success ? 'success' : 'error')
+  }
+
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(() => finish(true)).catch(() => {
+      const ok = fallbackExec()
+      finish(ok)
+    })
+  } else {
+    const ok = fallbackExec()
+    finish(ok)
+  }
+}
+
 function copyConvId() {
   if (!selectedConv.value) return
-  const text = `对话ID: ${selectedConv.value.id}`
-  navigator.clipboard.writeText(text).then(() => {
-    const btn = document.querySelector('.btn-conv-id')
-    if (btn) {
-      btn.classList.add('copied')
-      setTimeout(() => btn.classList.remove('copied'), 1500)
-    }
-  }).catch(() => {
-    window.prompt('复制对话ID:', selectedConv.value.id)
-  })
+  const text = `conv_id: ${selectedConv.value.id}`
+  copyToClipboard(text, convIdBtnRef.value, `已复制对话ID: ${selectedConv.value.id}`)
 }
 
 // ─── 恢复流 ───
@@ -1511,18 +1553,8 @@ async function submitMessageFeedback() {
 }
 
 function copyMessageId(msgId) {
-  const text = String(msgId)
-  navigator.clipboard.writeText(text).then(() => {
-    showToast('已复制消息ID: ' + text, 'success')
-  }).catch(() => {
-    const input = document.createElement('input')
-    input.value = text
-    document.body.appendChild(input)
-    input.select()
-    document.execCommand('copy')
-    document.body.removeChild(input)
-    showToast('已复制消息ID: ' + text, 'success')
-  })
+  const text = `message_id: ${msgId}`
+  copyToClipboard(text, null, `已复制消息ID: ${msgId}`)
 }
 
 async function saveMessageAsDecision(msg, index) {
@@ -1651,7 +1683,7 @@ function stopPollingProgress() {
             <span class="chat-agent-icon"><Icon name="bot" size="16" /></span>
             <span class="chat-agent-name editorial-title">投资分析助手</span>
           </div>
-          <button class="btn-conv-id" @click="copyConvId" :title="'对话 #' + selectedConv.id">
+          <button ref="convIdBtnRef" class="btn-conv-id" @click="copyConvId" :title="'对话 #' + selectedConv.id">
             <span class="conv-id-text font-jet">#{{ selectedConv.id }}</span>
             <svg width="12" height="12" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <rect x="9" y="9" width="13" height="13" rx="2" stroke-width="2"/>
@@ -1989,6 +2021,36 @@ function stopPollingProgress() {
     flex: 1;
     padding: 0.75rem;
     gap: 0.6rem;
+  }
+
+  /* P0-2 移动端 UI 适配：增大 conv id 按钮 + message id 徽章点击区域 */
+  .btn-conv-id {
+    min-height: 36px;
+    min-width: 44px;
+    padding: 6px 12px;
+    font-size: 0.78rem;
+    gap: 0.4rem;
+  }
+
+  .btn-conv-id .conv-id-text {
+    font-size: 0.78rem;
+  }
+
+  /* message id 徽章点击区域放大（移动端手指点击） */
+  :deep(.message-id-badge) {
+    min-height: 28px;
+    min-width: 36px;
+    padding: 4px 10px;
+    font-size: 0.72rem;
+    user-select: none;
+    -webkit-user-select: none;
+    -webkit-tap-highlight-color: rgba(0, 0, 0, 0.05);
+  }
+
+  /* iOS 下点击徽章时高亮反馈 */
+  :deep(.message-id-badge:active) {
+    background: var(--color-primary-50);
+    transform: scale(0.96);
   }
 }
 </style>

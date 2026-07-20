@@ -29,6 +29,24 @@ def init_fund_holdings_snapshot_tables(conn):
         "ON fund_stock_holdings(fund_code, report_date)"
     )
 
+    # ── P0-6 综合快照表（含 top_stocks/bond_holdings/asset_allocation/industry_allocation）──
+    # 用途：akshare 失效时返回最近一次成功的缓存，避免 top_stocks 永远为空
+    # 与 fund_stock_holdings 共存：后者按 (fund_code, report_date, stock_code) 粒度细分，
+    # 本表按 fund_code 唯一存最近一次完整数据
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS fund_holdings_snapshots (
+            fund_code                 TEXT PRIMARY KEY,
+            top_stocks_json           TEXT DEFAULT '[]',
+            bond_holdings_json        TEXT DEFAULT '[]',
+            asset_allocation_json     TEXT DEFAULT '[]',
+            industry_allocation_json  TEXT DEFAULT '[]',
+            bond_type_summary_json    TEXT DEFAULT '{}',
+            report_date               TEXT,
+            data_source               TEXT,  -- akshare / ttfund
+            updated_at                TEXT DEFAULT (datetime('now','localtime'))
+        )
+    """)
+
 
 def save_fund_holdings_snapshot(
     fund_code: str, report_date: str, holdings: list[dict]
@@ -258,3 +276,78 @@ def list_fund_codes_with_snapshots() -> list[str]:
         return [r["fund_code"] for r in rows]
     finally:
         conn.close()
+
+
+# ── P0-6 综合快照表 CRUD ──────────────────────────────────────
+
+
+def save_full_fund_holdings_snapshot(fund_code: str, data: dict, data_source: str = "akshare") -> bool:
+    """写入/更新基金完整持仓快照（top_stocks + bond_holdings + asset_allocation + industry_allocation）。
+
+    用途：akshare 失效时返回最近一次成功的缓存，避免 top_stocks 永远为空。
+    何时调用：get_fund_holdings 成功获取数据后；ttfund 兜底成功后。
+
+    Args:
+        fund_code: 基金代码
+        data: 完整持仓数据，结构同 get_fund_holdings 的返回值
+        data_source: "akshare" / "ttfund"
+    Returns:
+        True 表示写入成功。
+    """
+    if not fund_code or not data:
+        return False
+    conn = _get_conn()
+    try:
+        conn.execute("""
+            INSERT OR REPLACE INTO fund_holdings_snapshots
+                (fund_code, top_stocks_json, bond_holdings_json, asset_allocation_json,
+                 industry_allocation_json, bond_type_summary_json, report_date, data_source, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now','localtime'))
+        """, (
+            fund_code,
+            json.dumps(data.get("top_stocks", []), ensure_ascii=False),
+            json.dumps(data.get("bond_holdings", []), ensure_ascii=False),
+            json.dumps(data.get("asset_allocation", []), ensure_ascii=False),
+            json.dumps(data.get("industry_allocation", []), ensure_ascii=False),
+            json.dumps(data.get("bond_type_summary", {}), ensure_ascii=False),
+            data.get("report_date"),
+            data_source,
+        ))
+        conn.commit()
+        return True
+    finally:
+        conn.close()
+
+
+def get_latest_full_fund_holdings_snapshot(fund_code: str) -> dict | None:
+    """读取基金最近一次完整持仓快照（akshare/ttfund 数据失效时兜底）。
+
+    Returns:
+        与 get_fund_holdings 相同结构的 dict；额外字段 _data_source / _snapshot_updated_at
+        用于标记数据来源和陈旧度；无快照返回 None。
+    """
+    conn = _get_conn()
+    try:
+        row = conn.execute(
+            "SELECT * FROM fund_holdings_snapshots WHERE fund_code = ?",
+            (fund_code,),
+        ).fetchone()
+    finally:
+        conn.close()
+
+    if not row:
+        return None
+
+    d = dict(row)
+    return {
+        "fund_code": fund_code,
+        "top_stocks": json.loads(d.get("top_stocks_json") or "[]"),
+        "bond_holdings": json.loads(d.get("bond_holdings_json") or "[]"),
+        "asset_allocation": json.loads(d.get("asset_allocation_json") or "[]"),
+        "industry_allocation": json.loads(d.get("industry_allocation_json") or "[]"),
+        "bond_type_summary": json.loads(d.get("bond_type_summary_json") or "{}"),
+        "report_date": d.get("report_date"),
+        "_data_source": d.get("data_source") or "local_snapshot",
+        "_snapshot_updated_at": d.get("updated_at"),
+        "_stale": True,  # 标记为陈旧数据，调用方可据此降低置信度
+    }

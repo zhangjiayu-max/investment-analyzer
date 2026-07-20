@@ -2353,23 +2353,40 @@ def calculate_fundamental_score(fund_code: str) -> dict:
 
     # 判断是否债基（无股票持仓或基金类别为债）
     fund_category = ""
+    fund_type = ""
     try:
         from services.fund_data_service import get_or_refresh_fund_metadata
         meta = get_or_refresh_fund_metadata(fund_code)
         if meta:
             fund_category = meta.get("fund_category", "") or ""
+            fund_type = meta.get("fund_type", "") or ""
     except Exception:
         pass
 
-    if fund_category in ("bond", "纯债", "混合债") and not top_stocks:
+    # P0-8: 修复 conv 129 根因之五（bond_category=bond 误导 AI 跳过基本面分析）
+    # 原 bug：`fund_category in ("bond", "纯债", "混合债")` 把所有债基都跳过，包括"混合二级债基"
+    # 实际"混合二级债基"（fund_type 含"混合"/"二级"）和"可转债基金"必须穿透分析重仓股
+    # 新逻辑：仅"纯债"才跳过，混合二级/可转债即使持仓少也要分析
+    is_pure_bond = (
+        fund_category in ("纯债", "bond_pure", "bond_short")
+        or "纯债" in fund_type
+        or "中短债" in fund_type
+    )
+    is_hybrid_bond = (
+        fund_category in ("bond_hybrid", "bond_convertible")
+        or any(k in fund_type for k in ["混合", "二级", "可转"])
+    )
+    if is_pure_bond and not top_stocks:
         return {
             "fund_code": fund_code,
             "fundamental_score": None,
             "rating": None,
             "stock_scores": [],
             "top10_coverage": 0,
-            "advice": "债基无股票持仓，跳过基本面维度",
+            "advice": "纯债基金无股票持仓，跳过基本面维度",
         }
+    if is_hybrid_bond:
+        logger.info(f"[fundamental] {fund_code} 是混合债基/可转债({fund_type})，强制穿透分析重仓股")
 
     # 并行评分Top10重仓股
     stock_scores = []

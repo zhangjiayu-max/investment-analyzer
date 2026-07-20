@@ -130,13 +130,25 @@ def transfer_between_buckets(from_bucket_id, to_bucket_id, amount):
 
 
 def _map_category_to_risk_level(category):
-    """将基金类别映射到风险等级。"""
+    """将基金类别映射到风险等级。
+
+    P1-1: 加入 bond 子类映射（bond_pure/bond_hybrid/bond_convertible/bond_short）
+    """
     risk_map = {
         'money': 'low',
+        'money_market': 'low',
         'bond': 'low',
+        'bond_pure': 'low',
+        'bond_short': 'low',
+        'bond_index': 'low',
+        'bond_hybrid': 'medium',         # 混合二级债基可持 20% 股票，风险中等
+        'bond_convertible': 'medium',    # 可转债波动较大
+        'convertible_bond': 'medium',
         'balanced': 'medium',
+        'hybrid': 'medium',
         'equity': 'high',
         'index': 'high',
+        'qdii': 'high',
     }
     return risk_map.get(category, 'medium')
 

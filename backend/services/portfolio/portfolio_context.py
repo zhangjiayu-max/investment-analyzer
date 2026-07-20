@@ -6,6 +6,37 @@ from datetime import datetime
 logger = logging.getLogger(__name__)
 
 
+def _format_holdings_source(data_source: str, report_date: str,
+                            snapshot_updated: str, is_stale: bool) -> str:
+    """P1-3: 格式化基金持仓数据来源标注行。
+
+    Returns:
+        格式化后的标注行（如 "- 数据来源: akshare（截至 2025-09-30）"）。
+        若无法识别来源，返回空字符串。
+    """
+    ds = (data_source or "").strip()
+    rd = (report_date or "").strip()
+    su = (snapshot_updated or "").strip()
+
+    if ds == "akshare":
+        date_part = f"（截至 {rd}）" if rd else ""
+        return f"- 数据来源: akshare{date_part}"
+    if ds == "ttfund_fallback":
+        date_part = f"（截至 {rd}）" if rd else ""
+        return f"- 数据来源: ttfund 兜底{date_part} ⚠️ akshare 主源失效"
+    if ds == "local_snapshot_stale":
+        date_part = f"（快照更新于 {su}）" if su else ""
+        return (
+            f"- 数据来源: 本地快照{date_part} ⚠️ 数据可能过期，置信度降低"
+            if is_stale else f"- 数据来源: 本地快照{date_part}"
+        )
+    if ds == "akshare_partial_failure":
+        return "- 数据来源: akshare 部分失效 ⚠️ 数据不完整，建议人工核实"
+    if ds:
+        return f"- 数据来源: {ds}"
+    return ""
+
+
 def build_portfolio_context(user_id: str = "default") -> str:
     """构建持仓+现金的紧凑上下文文本，供 Orchestrator 和专家 Agent 使用。
 
@@ -276,6 +307,15 @@ def build_bond_fund_holdings_context(user_id: str = "default") -> str:
                     lines.append(f"- 股票仓位: {stock_pct:.0f}%")
                 if bond_pct is not None:
                     lines.append(f"- 债券仓位: {bond_pct:.0f}%")
+
+            # P1-3: 穿透数据来源标注（akshare / ttfund 兜底 / 本地快照 / 部分失效）
+            data_source = fund_data.get("_data_source", "")
+            report_date = fund_data.get("report_date", "")
+            snapshot_updated = fund_data.get("_snapshot_updated_at", "")
+            is_stale = fund_data.get("_stale", False)
+            source_line = _format_holdings_source(data_source, report_date, snapshot_updated, is_stale)
+            if source_line:
+                lines.append(source_line)
 
             lines.append("")
 

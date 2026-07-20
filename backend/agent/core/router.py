@@ -123,6 +123,15 @@ _HIGH_RISK_ACTION_KEYWORDS = [
     "补仓", "抄底", "加杠杆",
 ]
 
+# ── P0-4 穿透分析强制触发关键词（命中即强制路由 fund_analyst）──
+# 问题背景：conv 129 问"穿透看下亏损原因"，但 fund_analyst 被优先级截断
+# 修复策略：命中以下关键词时直接追加 fund_analyst，不依赖 _KEYWORD_ROUTES 顺序
+_PENETRATION_MANDATORY_KEYWORDS = [
+    "穿透", "重仓", "持仓结构", "为什么跌", "亏损原因", "基金重仓",
+    "穿透看", "穿透查", "穿透分析", "重仓股", "重仓股票",
+    "到底", "到底了没", "底部", "见底", "回撤原因",
+]
+
 # ── A 方向：复杂度独立判定（不再依赖命中专家数反推） ──────────────────
 # 领域关键词组（用于复杂度判定，与 _KEYWORD_ROUTES 解耦）
 _COMPLEXITY_DOMAIN_GROUPS = [
@@ -283,14 +292,15 @@ def _apply_question_type_routing(specialists: list, query: str) -> tuple[list, s
     reason = ""
 
     if qtype == "attribution":
-        # 归因类：强制 macro + market + industry_fundamentalist，用微观景气度验证宏观叙事
-        forced = {"macro_strategist", "market_analyst", "industry_fundamentalist"}
+        # 归因类：强制 macro + market + industry_fundamentalist + fund_analyst
+        # P0-4: 加入 fund_analyst 确保穿透分析（conv 129 "穿透看亏损原因"未路由 fund_analyst 的根因之一）
+        forced = {"macro_strategist", "market_analyst", "industry_fundamentalist", "fund_analyst"}
         missing = forced - specialist_set
         if missing:
             specialist_set.update(missing)
             reason = f"归因类问题，追加 {','.join(missing)}"
         else:
-            reason = f"归因类问题（已含 macro/market/industry）"
+            reason = f"归因类问题（已含 macro/market/industry/fund）"
     elif qtype == "action":
         # 操作类：强制 allocation + risk + behavioral_advisor，检查操作行为偏差
         forced = {"allocation_advisor", "risk_assessor", "behavioral_advisor"}
@@ -388,6 +398,13 @@ class SmartRouter:
                 specialists.update(agents)
         if _is_high_risk_action(query):
             specialists.update(["risk_assessor"])
+
+        # P0-4: 穿透分析强制触发（conv 129 "穿透看亏损原因"未路由 fund_analyst 的根因修复）
+        # 命中关键词即直接追加 fund_analyst，不依赖 _KEYWORD_ROUTES 顺序和优先级
+        if any(kw in query for kw in _PENETRATION_MANDATORY_KEYWORDS):
+            if "fund_analyst" not in specialists:
+                specialists.add("fund_analyst")
+                logger.info(f"[router] 穿透关键词命中，强制追加 fund_analyst")
 
         # M1: 问题类型感知路由（零 LLM 成本，纯规则）
         # 在关键词命中后、专家截断前，根据问题类型强制追加专家
