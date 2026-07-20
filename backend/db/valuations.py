@@ -549,6 +549,7 @@ def get_best_valuation(
     query_source: str = "unknown",
     trace_id: str = None,
     enable_online: bool = True,
+    allow_metric_fallback: bool = False,
 ) -> dict | None:
     """获取最佳估值数据（智能降级 + 在线兜底 + 监控日志）。
 
@@ -565,6 +566,11 @@ def get_best_valuation(
         trace_id: 追踪ID，用于监控
         enable_online: 是否启用在线兜底。批量调用场景（如 smart_add_planner 循环多个持仓）
                        应传 False 以避免累积超时。默认 True。
+        allow_metric_fallback: 是否允许 metric_type 自动 fallback。
+                              当指定 metric_type 本地查不到时，按预设顺序自动尝试其他 metric_type。
+                              fallback 顺序：市盈率 → 市净率 → 市销率 → 股息率。
+                              默认 False（不破坏现有调用），alert_scanner 等场景传 True。
+                              返回结果中新增 fallback_metric_type 字段标注实际命中的指标。
 
     返回:
         包含估值数据的字典，带 data_source、is_expired、days_old 字段；
@@ -657,6 +663,34 @@ def get_best_valuation(
         _log_valuation_query(index_code, detailed_expired.get("index_name"), query_source, final_source,
                              0, is_expired, int((datetime.now() - start_ts).total_seconds() * 1000), trace_id, None)
         return detailed_expired
+
+    # 3.5 metric_type fallback：本地指定 metric_type 查不到时，尝试本地其他 metric_type
+    #     场景：alert_scanner 默认查"市盈率"，但持仓中很多指数本地只有"市净率/市销率/股息率"
+    #     此步骤不触发在线兜底（避免误超时），仅用本地已有数据，命中后直接返回
+    if allow_metric_fallback:
+        for fallback_type in ["市净率", "市销率", "股息率"]:
+            if fallback_type == metric_type:
+                continue
+            fb_data = get_latest_valuation(index_code, fallback_type, max_days=7)
+            if fb_data and (fb_data.get("current_value") is not None or fb_data.get("percentile") is not None):
+                fb_data["data_source"] = "manual"
+                fb_data["is_expired"] = False
+                fb_data["fallback_metric_type"] = fallback_type
+                fb_data["original_metric_type"] = metric_type
+                if fb_data.get("snapshot_date"):
+                    try:
+                        days_old = (datetime.now() - datetime.fromisoformat(fb_data["snapshot_date"])).days
+                        fb_data["days_old"] = days_old
+                    except Exception:
+                        fb_data["days_old"] = 0
+                final_source = f"leiniuniu_fallback_{fallback_type}"
+                _log_valuation_query(index_code, fb_data.get("index_name"), query_source, final_source,
+                                     0, 0, int((datetime.now() - start_ts).total_seconds() * 1000), trace_id, None)
+                logger.info(
+                    f"[valuation] {index_code} metric_type fallback：{metric_type} 无数据，"
+                    f"改用 {fallback_type} 命中（query_source={query_source}）"
+                )
+                return fb_data
 
     # 4. 在线兜底：akshare → 天天基金（仅在 enable_online=True 时触发）
     if enable_online:
@@ -767,7 +801,19 @@ def _query_akshare_valuation(index_code: str, metric_type: str, timeout_ms: int)
 
     修复：原仅用 stock_zh_index_value_csindex（中证指数公司专用），对港股/海外指数无效。
     新增乐咕乐股接口作为补充，覆盖更多 A 股宽基指数。
+
+    2026-07-20 优化：对已知 akshare 中证官方不支持的代码提前返回 None，避免每次浪费
+    0.2-0.7s 网络请求（实测 HSTECH/HSI 港股代码、882011 Wind 全指均返回 404）。
     """
+    # 已知 akshare 中证官方不支持的代码（实测返回 404）
+    # 港股指数：HSTECH/HSI/HSCEI（中证官方接口只覆盖 A 股）
+    # Wind 88xxxx：Wind 自有代码，中证官方无数据
+    _AKSHARE_UNSUPPORTED_PREFIXES = ("HSTECH", "HSI", "HSCEI", "DJI", "SPX", "IXIC", "N225")
+    _AKSHARE_UNSUPPORTED_CODES = {"882011"}  # Wind 全指房地产
+    if index_code in _AKSHARE_UNSUPPORTED_CODES or index_code.startswith(_AKSHARE_UNSUPPORTED_PREFIXES):
+        logger.debug(f"[valuation] akshare 已知不支持 {index_code}（港股/Wind 代码），跳过直接返回 None")
+        return None
+
     from services.market_data import get_index_valuation
     try:
         result = get_index_valuation(index_code)
@@ -810,8 +856,10 @@ def _query_ttfund_valuation(index_code: str, metric_type: str, timeout_ms: int) 
 
     修复：港股指数（如 HSTECH）用代码查询不识别，增加代码→名称映射 + 名称重试。
     """
-    # 港股/海外指数代码 → 名称映射（天天基金用名称查更准）
+    # 指数代码 → 名称映射（天天基金用名称查更准）
+    # 2026-07-20 扩展：从 7 个港股代码扩展到覆盖持仓所有 17 个指数
     _CODE_NAME_MAP = {
+        # ── 港股/海外（原有）──
         "HSTECH": "恒生科技",
         "HSI": "恒生指数",
         "HSCEI": "恒生中国企业指数",
@@ -819,6 +867,22 @@ def _query_ttfund_valuation(index_code: str, metric_type: str, timeout_ms: int) 
         "SPX": "标普500",
         "IXIC": "纳斯达克",
         "N225": "日经225",
+        # ── 国证 H 系（新增）──
+        "H30094": "中证主要消费红利",
+        "H30217": "中证全指医疗器械",
+        "H30590": "中证机器人",
+        # ── Wind 88xxxx（新增）──
+        "882011": "中证全指房地产",
+        # ── 中证 931xxx（新增）──
+        "931140": "中证800医药",
+        "931468": "中证红利质量",
+        "931638": "中证港股通互联网",
+        # ── 中证 000xxx（新增）──
+        "000922": "中证红利",
+        "000949": "中证畜牧养殖",
+        # ── 中证 399xxx（新增）──
+        "399997": "中证白酒",
+        "399986": "中证银行",
     }
 
     def _extract_valuation(result, idx_code):

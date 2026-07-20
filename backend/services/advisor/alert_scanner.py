@@ -124,6 +124,39 @@ def scan_and_verify_recommendations() -> dict:
     return {"verified": len(results), "alerts_created": alerts_created}
 
 
+def _get_preferred_metric_type(index_code: str) -> str:
+    """查询本地 index_valuations 表中该指数有哪些 metric_type，返回优先选用的指标。
+
+    优先级：市盈率 > 市净率 > 市销率 > 股息率
+    本地完全没有时返回"市盈率"（让 get_best_valuation 走在线兜底）。
+
+    2026-07-20 新增：alert_scanner 之前硬编码"市盈率"导致持仓中只有"市净率/市销率"
+    的指数本地查不到，被迫走在线兜底，akshare 不支持国证 H 系 → 触发估值失败预警。
+    """
+    try:
+        from db._conn import _get_conn
+        from db.valuations import normalize_index_code
+        normalized_code = normalize_index_code(index_code)
+        conn = _get_conn()
+        rows = conn.execute(
+            "SELECT DISTINCT metric_type FROM index_valuations WHERE index_code = ? "
+            "AND (current_value IS NOT NULL OR percentile IS NOT NULL)",
+            (normalized_code,),
+        ).fetchall()
+        conn.close()
+        local_metrics = [r["metric_type"] for r in rows if r["metric_type"]]
+        if not local_metrics:
+            return "市盈率"
+        # 按优先级返回第一个匹配的
+        for preferred in ["市盈率", "市净率", "市销率", "股息率"]:
+            if preferred in local_metrics:
+                return preferred
+        return local_metrics[0]
+    except Exception as e:
+        logger.debug(f"[alert_scanner] 查询本地 metric_type 失败 {index_code}: {e}")
+        return "市盈率"
+
+
 def _fetch_current_price(index_code: str):
     """获取指数当前价格，回退到估值表的 current_value。"""
     if not index_code:
@@ -178,7 +211,20 @@ def scan_valuation_thresholds() -> dict:
         try:
             # 修复 P1-2：此前硬编码 enable_online=False 导致本地缺失时无法在线兜底，
             # 9 个指数全部返回 None。改为启用在线兜底（受全局 valuation.online_fallback_enabled 开关控制）
-            val = get_best_valuation(code, query_source="alert_scanner", enable_online=True)
+            #
+            # 2026-07-20 改造：之前硬编码 metric_type="市盈率"（get_best_valuation 默认值），
+            # 但持仓中 6 个指数本地只有"市净率/市销率/股息率" → 必然本地查不到 → 走在线兜底 →
+            # akshare 不支持国证 H 系/Wind 88xxxx → 最终 failed → 触发 scan_valuation_failures 预警。
+            # 现改为：先查本地该指数有哪些 metric_type，优先用本地已有的；同时传 allow_metric_fallback=True
+            # 让 get_best_valuation 在指定 metric_type 查不到时自动 fallback 到本地其他指标。
+            preferred_metric = _get_preferred_metric_type(code)
+            val = get_best_valuation(
+                code,
+                metric_type=preferred_metric,
+                query_source="alert_scanner",
+                enable_online=True,
+                allow_metric_fallback=True,
+            )
             if not val:
                 continue
             percentile = val.get("percentile")
@@ -665,13 +711,17 @@ def _build_risk_content(fund_code: str, fund_name: str, weight: float,
 
 
 def _is_alert_recently_created(alert_type: str, related_fund_code: str, hours: int = 24) -> bool:
-    """判断最近 N 小时内是否已生成过同类型 alert，避免重复打扰。"""
+    """判断最近 N 小时内是否已生成过同类型 alert，避免重复打扰。
+
+    2026-07-20 修复：原 SQL 查询 `alerts` 表（不存在），实际表名是 `portfolio_alerts`，
+    导致 SQL 抛异常被 except 吞掉，永远返回 False，去重完全失效。
+    """
     from db._conn import _get_conn
     try:
         conn = _get_conn()
         threshold = (datetime.now() - timedelta(hours=hours)).strftime("%Y-%m-%d %H:%M:%S")
         row = conn.execute(
-            "SELECT id FROM alerts WHERE alert_type = ? AND related_fund_code = ? AND created_at >= ? LIMIT 1",
+            "SELECT id FROM portfolio_alerts WHERE alert_type = ? AND related_fund_code = ? AND created_at >= ? LIMIT 1",
             (alert_type, related_fund_code, threshold),
         ).fetchone()
         conn.close()
@@ -942,16 +992,20 @@ def scan_health_score() -> dict:
 
 
 def scan_valuation_failures() -> dict:
-    """P0-E 扫描估值查询全部失败的指数，生成预警 alert（闭环兜底监控）。
+    """P0-E 扫描估值查询全部失败的指数，仅写日志不生成 alert。
 
-    检查最近 24 小时内 valuation_query_logs 中 final_source='failed' 的记录，
-    对每个失败指数生成一条预警（同指数 24 小时内不重复）。
+    2026-07-20 改造：用户反馈"估值没查到就别预警提醒了"。
+    原设计主动 create_alert 推送到右上角铃铛，对终端用户无价值（用户看到"估值数据缺失"
+    也无法处理），属于开发侧监控误暴露给终端用户。现改为只写 warning 日志，便于
+    开发侧排查；同时用模块级 set 做进程内去重（同指数同进程不重复刷屏）。
+
+    检查最近 24 小时内 valuation_query_logs 中 final_source='failed' 的记录。
 
     Returns:
-        {"alerts_created": int, "failed_indexes": int}
+        {"failed_indexes": int, "logged_indexes": int}
     """
     if not _is_enabled("alerts.valuation_failure_scan_enabled", True):
-        return {"alerts_created": 0, "skipped": "disabled"}
+        return {"failed_indexes": 0, "skipped": "disabled"}
 
     from db._conn import _get_conn
     try:
@@ -967,12 +1021,18 @@ def scan_valuation_failures() -> dict:
         conn.close()
     except Exception as e:
         logger.debug(f"[alert_scanner] 估值失败扫描查询失败: {e}")
-        return {"alerts_created": 0, "error": str(e)}
+        return {"failed_indexes": 0, "error": str(e)}
 
     if not rows:
-        return {"alerts_created": 0, "failed_indexes": 0}
+        return {"failed_indexes": 0, "logged_indexes": 0}
 
-    alerts_created = 0
+    # 模块级去重 set：记录本次进程已写过日志的 code，避免同进程内重复刷屏
+    # （原 _is_alert_recently_created 检查 portfolio_alerts 表，但不写 alert 后失效）
+    global _VALUATION_FAILURE_LOGGED_CODES
+    if '_VALUATION_FAILURE_LOGGED_CODES' not in globals():
+        _VALUATION_FAILURE_LOGGED_CODES = set()
+
+    logged = 0
     for row in rows:
         code = row["index_code"]
         name = row["index_name"]
@@ -983,28 +1043,18 @@ def scan_valuation_failures() -> dict:
                 name = _lookup_index_name(code) or code
             except Exception:
                 name = code
-        # 24 小时内不重复（按 normalize 后的 code 去重）
-        if _is_alert_recently_created("valuation_query_failed", code, hours=24):
+        # 进程内去重：同 code 不重复写日志
+        if code in _VALUATION_FAILURE_LOGGED_CODES:
             continue
-        try:
-            create_alert(
-                alert_type="valuation_query_failed",
-                title=f"估值数据缺失：{name}",
-                content=(
-                    f"{name}（{code}）在本地表和在线渠道（akshare/天天基金）均无法获取估值数据，"
-                    f"建议检查指数代码映射或手动录入估值图片。"
-                ),
-                severity="warning",
-                related_fund_code=code,
-                related_fund_name=name,
-                source="alert_scanner",
-            )
-            alerts_created += 1
-        except Exception as e:
-            logger.debug(f"[alert_scanner] 估值失败 alert 创建失败 {code}: {e}")
+        logger.warning(
+            f"[alert_scanner] 估值查询失败 {code} ({name})：本地表和在线渠道"
+            f"（akshare/天天基金）均无法获取估值数据，建议检查指数代码映射或手动录入估值图片"
+        )
+        _VALUATION_FAILURE_LOGGED_CODES.add(code)
+        logged += 1
 
-    logger.info(f"[alert_scanner] 估值查询失败扫描：{len(rows)} 个指数失败，生成 {alerts_created} 个 alert")
-    return {"alerts_created": alerts_created, "failed_indexes": len(rows)}
+    logger.info(f"[alert_scanner] 估值查询失败扫描：{len(rows)} 个指数失败，写入 {logged} 条 warning 日志")
+    return {"failed_indexes": len(rows), "logged_indexes": logged}
 
 
 def run_periodic_scan() -> dict:
