@@ -220,6 +220,127 @@ def refresh_watchlist_navs(user_id: str = "default") -> list[dict]:
     return results
 
 
+# ── O-4（2026-07-21）：watchlist current_percentile fallback ──
+# 场景：无 index_code 的关注基金（如 020256/004253/021608/005661）current_percentile=None
+# 修复：fallback 1 从 fund_metadata 查 tracking_index；fallback 2 用基金净值回撤估算
+
+
+def refresh_watchlist_percentile(user_id: str = "default") -> dict:
+    """O-4: 刷新关注列表 current_percentile，对无 index_code 的基金走 fallback。
+
+    Returns:
+        {"processed": N, "updated": M, "skipped": K, "details": [...]}
+    """
+    try:
+        from db.config import get_config_bool
+        fallback_enabled = get_config_bool("watchlist.fallback_percentile_enabled", True)
+    except Exception:
+        fallback_enabled = True
+
+    items = list_watchlist(user_id)
+    processed = len(items)
+    updated = 0
+    skipped = 0
+    details = []
+
+    for item in items:
+        fund_code = item["fund_code"]
+        try:
+            pct = _resolve_watchlist_percentile(item, fallback_enabled)
+            if pct is not None:
+                update_watchlist_item(item["id"], current_percentile=pct)
+                updated += 1
+                details.append({"fund_code": fund_code, "percentile": pct})
+            else:
+                skipped += 1
+                details.append({"fund_code": fund_code, "skipped": True})
+        except Exception as e:
+            skipped += 1
+            details.append({"fund_code": fund_code, "error": str(e)})
+
+    logger.info(f"[watchlist] refresh_percentile: processed={processed}, updated={updated}, skipped={skipped}")
+    return {"processed": processed, "updated": updated, "skipped": skipped, "details": details}
+
+
+def _resolve_watchlist_percentile(item: dict, fallback_enabled: bool = True) -> float | None:
+    """解析单条 watchlist 项的 current_percentile，支持多级 fallback。
+
+    Args:
+        item: watchlist dict
+        fallback_enabled: 是否启用 fallback（受 watchlist.fallback_percentile_enabled 开关控制）
+    Returns:
+        percentile [0, 100] 或 None
+    """
+    fund_code = item.get("fund_code")
+    if not fund_code:
+        return None
+
+    # 1. 直接用 item 的 index_code 查本地估值
+    index_code = item.get("index_code")
+    if index_code:
+        pct = _query_percentile_from_valuation(index_code)
+        if pct is not None:
+            return pct
+
+    # 2. fallback 1: 从 fund_metadata 查 tracking_index
+    if fallback_enabled:
+        try:
+            from db import lookup_fund_info
+            fm = lookup_fund_info(fund_code)
+            if fm:
+                tracking_index = fm.get("tracking_index") or fm.get("index_code")
+                if tracking_index:
+                    pct = _query_percentile_from_valuation(tracking_index)
+                    if pct is not None:
+                        return pct
+        except Exception as e:
+            logger.debug(f"[watchlist] lookup_fund_info fallback 失败 {fund_code}: {e}")
+
+        # 3. fallback 2: 用基金净值回撤估算「相对分位」
+        # 简单线性映射：drawdown 0% → 100；drawdown -50% → 0
+        try:
+            from services.fund_data_service import get_fund_nav_history_from_cache
+            navs = get_fund_nav_history_from_cache(fund_code, days=365)
+            if navs and len(navs) > 30:
+                valid = [n for n in navs if n.get("nav") and n["nav"] > 0]
+                if len(valid) > 30:
+                    current = valid[-1]["nav"]
+                    max_nav = max(n["nav"] for n in valid)
+                    if max_nav > 0:
+                        drawdown = (current - max_nav) / max_nav  # 负数
+                        # 线性映射：drawdown=0 → 100；drawdown=-0.5 → 0
+                        pct = max(0.0, min(100.0, 100 + drawdown * 200))
+                        return round(pct, 2)
+        except Exception as e:
+            logger.debug(f"[watchlist] nav_history fallback 失败 {fund_code}: {e}")
+
+    return None
+
+
+def _query_percentile_from_valuation(index_code: str) -> float | None:
+    """从本地估值表查 percentile，尝试带/不带 .CSI 后缀。"""
+    if not index_code:
+        return None
+    try:
+        from db.valuations import get_latest_valuation
+        candidates = [index_code]
+        if "." not in index_code:
+            candidates.append(f"{index_code}.CSI")
+        else:
+            # 同时尝试去后缀形式
+            candidates.append(index_code.split(".")[0])
+        for code in candidates:
+            try:
+                v = get_latest_valuation(code)
+                if v and v.get("percentile") is not None:
+                    return float(v["percentile"])
+            except Exception:
+                continue
+    except Exception as e:
+        logger.debug(f"[watchlist] _query_percentile_from_valuation 失败 {index_code}: {e}")
+    return None
+
+
 def get_watchlist_summary(user_id: str = "default") -> dict:
     """获取关注列表统计。"""
     items = list_watchlist(user_id)

@@ -36,6 +36,13 @@ def init_opportunity_tables(conn):
     """)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_theme_opp_user_date ON theme_opportunities(user_id, trade_date)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_theme_opp_status ON theme_opportunities(status)")
+    # O-3（2026-07-21）：theme_opportunities 主表新增 4 个核心字段
+    # 原问题：save_opportunity 只写 verdict/score/summary，前端机会卡片缺核心数据
+    # 修复：通过 _add_column_if_not_exists 兼容已存在的表
+    _add_column_if_not_exists(conn, "theme_opportunities", "entry_price", "REAL")
+    _add_column_if_not_exists(conn, "theme_opportunities", "entry_amount", "REAL")
+    _add_column_if_not_exists(conn, "theme_opportunities", "valuation_percentile", "REAL")
+    _add_column_if_not_exists(conn, "theme_opportunities", "review_status", "TEXT")
 
     conn.execute("""
         CREATE TABLE IF NOT EXISTS theme_opportunity_tracks (
@@ -114,8 +121,10 @@ def save_opportunity(item: dict, user_id: str = "default") -> int:
             (user_id, trade_date, theme, verdict, opportunity_score, summary,
              policy_signal, future_direction, market_signal, valuation_role,
              portfolio_fit_json, matched_funds_json, entry_plan_json, exit_plan_json,
-             risk_note, evidence_json, status, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now','localtime'))
+             risk_note, evidence_json, status, updated_at,
+             entry_price, entry_amount, valuation_percentile, review_status)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now','localtime'),
+                ?, ?, ?, ?)
         ON CONFLICT(user_id, trade_date, theme) DO UPDATE SET
             verdict = excluded.verdict,
             opportunity_score = excluded.opportunity_score,
@@ -131,6 +140,10 @@ def save_opportunity(item: dict, user_id: str = "default") -> int:
             risk_note = excluded.risk_note,
             evidence_json = excluded.evidence_json,
             status = excluded.status,
+            entry_price = COALESCE(excluded.entry_price, theme_opportunities.entry_price),
+            entry_amount = COALESCE(excluded.entry_amount, theme_opportunities.entry_amount),
+            valuation_percentile = COALESCE(excluded.valuation_percentile, theme_opportunities.valuation_percentile),
+            review_status = COALESCE(excluded.review_status, theme_opportunities.review_status),
             updated_at = datetime('now','localtime')
     """, (
         user_id,
@@ -150,6 +163,11 @@ def save_opportunity(item: dict, user_id: str = "default") -> int:
         item.get("risk_note", ""),
         _json_dumps(item.get("evidence", [])),
         item.get("status", "active"),
+        # O-3 新增 4 个核心字段
+        item.get("entry_price"),
+        item.get("entry_amount"),
+        item.get("valuation_percentile"),
+        item.get("review_status", "pending"),
     ))
     conn.commit()
     if cur.lastrowid:

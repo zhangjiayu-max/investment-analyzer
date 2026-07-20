@@ -582,6 +582,10 @@ def _build_item(theme_rule: dict, news_hits: list[dict], trade_date: str, user_i
     entry_amount = _calc_entry_amount(verdict, valuation, base_budget)
     entry_condition = _build_entry_condition(verdict, valuation, tech_signal)
 
+    # O-3（2026-07-21）：填充主表核心字段，避免前端机会卡片缺失数据
+    entry_price = _get_theme_index_current_price(theme_rule)
+    valuation_percentile = valuation.get("percentile") if valuation else None
+
     return {
         "trade_date": trade_date,
         "theme": theme_rule["theme"],
@@ -613,6 +617,11 @@ def _build_item(theme_rule: dict, news_hits: list[dict], trade_date: str, user_i
             for n in news_hits[:3]
         ] + ([{"type": "valuation", "summary": valuation_role}] if valuation else []),
         "status": "active",
+        # O-3 新增 4 个核心字段（与 theme_opportunity_backtests 同步）
+        "entry_price": entry_price,
+        "entry_amount": entry_amount,
+        "valuation_percentile": valuation_percentile,
+        "review_status": "pending",  # 默认 pending，回测完成后改为 completed
     }
 
 
@@ -846,6 +855,73 @@ def backfill_opportunity_backtests() -> dict:
     except Exception as e:
         logger.warning(f"[opportunity] backfill 批量执行失败: {e}")
         return {"scanned": 0, "created": 0, "skipped": 0, "error": str(e)}
+
+
+def backfill_opportunity_fields(max_items: int = 100) -> dict:
+    """O-3 backfill: 对历史 theme_opportunities 补齐 entry_price/entry_amount/valuation_percentile。
+
+    场景：theme_opportunities 表中 entry_price IS NULL 的历史记录（save_opportunity 修复前）。
+    本函数遍历 THEME_RULES，按 theme 反查 entry_price / valuation_percentile 并更新。
+
+    Returns:
+        {"scanned": N, "updated": M, "skipped": K}
+    """
+    from db._conn import _get_conn
+    try:
+        conn = _get_conn()
+        # 查询所有 entry_price IS NULL 的记录
+        rows = conn.execute(
+            "SELECT id, theme, trade_date FROM theme_opportunities "
+            "WHERE entry_price IS NULL OR entry_amount IS NULL "
+            "ORDER BY id DESC LIMIT ?",
+            (max_items,),
+        ).fetchall()
+        scanned = len(rows)
+        updated = 0
+        skipped = 0
+
+        for r in rows:
+            try:
+                theme = r["theme"]
+                # 通过 theme 反查 THEME_RULES
+                theme_rule = next((t for t in THEME_RULES if t["theme"] == theme), None)
+                if not theme_rule:
+                    skipped += 1
+                    continue
+
+                # 计算字段
+                entry_price = _get_theme_index_current_price(theme_rule)
+                valuation = _latest_valuation_for_theme(theme_rule)
+                valuation_percentile = valuation.get("percentile") if valuation else None
+                # 计算 entry_amount 需要 portfolio_fit
+                portfolio_fit = _portfolio_fit(theme_rule)
+                base_budget = portfolio_fit.get("suggested_budget", 0)
+                # 查 verdict
+                verdict_row = conn.execute(
+                    "SELECT verdict FROM theme_opportunities WHERE id = ?", (r["id"],)
+                ).fetchone()
+                verdict = verdict_row["verdict"] if verdict_row else "watch"
+                entry_amount = _calc_entry_amount(verdict, valuation, base_budget)
+
+                # 更新主表
+                conn.execute(
+                    "UPDATE theme_opportunities SET entry_price = ?, entry_amount = ?, "
+                    "valuation_percentile = ?, review_status = 'pending', "
+                    "updated_at = datetime('now','localtime') WHERE id = ?",
+                    (entry_price, entry_amount, valuation_percentile, r["id"]),
+                )
+                updated += 1
+            except Exception as e:
+                logger.warning(f"[opportunity] backfill fields 单条失败 {r['id']}: {e}")
+                skipped += 1
+
+        conn.commit()
+        conn.close()
+        logger.info(f"[opportunity] backfill_fields 完成：扫描 {scanned}，更新 {updated}，跳过 {skipped}")
+        return {"scanned": scanned, "updated": updated, "skipped": skipped}
+    except Exception as e:
+        logger.warning(f"[opportunity] backfill_fields 批量执行失败: {e}")
+        return {"scanned": 0, "updated": 0, "skipped": 0, "error": str(e)}
 
 
 def scan_daily_opportunities(news_items: list[dict] | None = None,

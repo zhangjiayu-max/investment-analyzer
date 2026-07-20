@@ -246,14 +246,16 @@ def scan_valuation_thresholds() -> dict:
                     if related_fund:
                         from services.daily_position_advisor import _calc_trend_score
                         ts, tr = _calc_trend_score(related_fund.get("fund_code", ""), 5)
+                        # O-1 修复（2026-07-21）：_calc_trend_score 返回的 tr 已含「近5日」前缀，
+                        # 此处无需重复拼接，否则会生成「近5日近5日」重复 title
                         if ts >= 7:
-                            trend_hint = f"（近5日{tr}，上车信号强）"
+                            trend_hint = f"（{tr}，上车信号强）"
                             trend_severity = "info"
                         elif ts <= 3:
-                            trend_hint = f"（近5日{tr}，建议等待企稳）"
+                            trend_hint = f"（{tr}，建议等待企稳）"
                             trend_severity = "info"
                         else:
-                            trend_hint = f"（近5日{tr}，可分批建仓）"
+                            trend_hint = f"（{tr}，可分批建仓）"
                 except Exception as e:
                     logger.debug(f"[alert_scanner] 趋势验证 {code} 失败: {e}")
 

@@ -259,12 +259,24 @@ def update_market_event_fields(event_id: str, fields: dict) -> bool:
                    "original_confidence", "original_direction",
                    # Batch1 增强点 3：事件影响量化字段
                    "expected_impact_pct", "impact_direction", "impact_duration",
-                   "impact_analysis", "impact_analyzed_at"}
+                   "impact_analysis", "impact_analyzed_at",
+                   # O-2/O-8（2026-07-21）：backfill sources 字段
+                   "sources"}
         updates = {k: v for k, v in fields.items() if k in allowed}
         if not updates:
             return False
+        # sources/matched_holdings 等 JSON 字段需要序列化
+        json_fields = {"sources", "matched_holdings", "candidate_funds",
+                       "affected_sectors", "affected_themes", "timeline",
+                       "verification_result", "evidence"}
+        serialized_updates = {}
+        for k, v in updates.items():
+            if k in json_fields and not isinstance(v, str):
+                serialized_updates[k] = json.dumps(v, ensure_ascii=False)
+            else:
+                serialized_updates[k] = v
         set_clauses = ", ".join(f"{k} = ?" for k in updates)
-        values = list(updates.values()) + [event_id]
+        values = list(serialized_updates.values()) + [event_id]
         cursor = conn.execute(
             f"UPDATE market_events SET {set_clauses}, updated_at = datetime('now','localtime') WHERE event_id = ?",
             values,

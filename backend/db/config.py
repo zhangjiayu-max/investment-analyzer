@@ -339,6 +339,16 @@ DEFAULT_CONFIGS = [
 
     # ── Batch2 增强点 3：事件置信度时间衰减（2026-07-19，默认关闭） ──
     ('alerts.event_confidence_time_decay_enabled', 'false', '事件置信度时间衰减开关：未验证的过期事件自动降权', 'alerts'),
+
+    # ── O-6/O-7/O-8（2026-07-21）：机会雷达与事件雷达剩余优化项开关 ──
+    # O-6: 方向关键词推断（neutral 事件基于正/负向关键词推断 positive/negative）
+    ('alerts.event_direction_infer_enabled', 'true', '事件方向关键词推断开关：neutral 事件基于关键词推断方向（默认开启）', 'alerts'),
+    # O-7: 置信度动态调整 v2（在板块准确率基础上叠加 sources/matched_holdings/时效性）
+    ('alerts.confidence_dynamic_adjust_enabled', 'true', '置信度动态调整 v2 开关：叠加 sources 数量/持仓命中/时效性三维度（默认开启）', 'alerts'),
+    # O-8: 启动时一键 backfill 历史数据（sources/impact/direction/confidence/opportunity/watchlist）
+    ('alerts.auto_backfill_on_startup_enabled', 'true', '启动时一键 backfill 开关：启动时回补历史事件/机会/watchlist 数据（默认开启）', 'alerts'),
+    # O-4: watchlist current_percentile fallback（无 index_code 时从 fund_metadata 或净值回撤估算）
+    ('watchlist.fallback_percentile_enabled', 'true', 'watchlist 分位 fallback 开关：无 index_code 时从 tracking_index 或净值回撤估算（默认开启）', 'watchlist'),
 ]
 
 

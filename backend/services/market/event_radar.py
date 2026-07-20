@@ -1101,15 +1101,37 @@ def scan_forward_events(trace_id: str = "") -> dict:
             
             is_trend = ev.get("time_frame") or ev.get("evidence")
             # P0-3: 趋势事件也参与校准（移除豁免），校准后置信度更真实
-            conf = _calibrate_confidence(
+            # O-7（2026-07-21）：升级为 v2，叠加 sources/matched/时效 三个维度动态调整
+            try:
+                _dyn_sources_count = len(sources) if sources else 0
+            except Exception:
+                _dyn_sources_count = 0
+            try:
+                _dyn_matched = json.loads(ev.get("matched_holdings") or "[]") if ev.get("matched_holdings") else []
+                _dyn_matched_count = len(_dyn_matched)
+            except Exception:
+                _dyn_matched_count = 0
+            conf = _calibrate_confidence_v2(
                 float(ev.get("confidence", 0.5)),
                 ev.get("affected_sectors", []),
+                ev,
+                sources_count=_dyn_sources_count,
+                matched_count=_dyn_matched_count,
             )
             # P1-1: 方向错误惩罚 — 高错误率板块方向降级
             calibrated_dir, _dir_reason = _calibrate_direction(
                 ev.get("direction", "neutral"),
                 ev.get("affected_sectors", []),
             )
+            # O-6（2026-07-21）：LLM 给 neutral 时，基于关键词推断兜底
+            try:
+                _dir_infer_enabled = get_config_bool("alerts.event_direction_infer_enabled", True)
+            except Exception:
+                _dir_infer_enabled = True
+            if _dir_infer_enabled and calibrated_dir == "neutral":
+                _inferred = _infer_direction_by_keywords(ev)
+                if _inferred != "neutral":
+                    calibrated_dir = _inferred
             original_conf = float(ev.get("confidence", 0.5))
             original_dir = ev.get("direction", "neutral")
             
@@ -1154,18 +1176,25 @@ def scan_forward_events(trace_id: str = "") -> dict:
             # P1-C 修复（2026-07-20）：影响量化字段规则化兜底
             # 原问题：alerts.event_impact_quantification_enabled 默认关闭 + LLM 可能不返回 → 字段全 None
             # 修复：开关关闭或 LLM 没返回时，基于事件类型+方向用规则填充
+            # O-5 修复（2026-07-21）：移除 `and not existing` 限制，对已有事件也触发兜底
+            # 原问题：仅新事件触发，导致历史事件 expected_impact_pct 永远 None
             try:
                 rule_based_enabled = get_config_bool("alerts.event_impact_rule_based_enabled", True)
             except Exception:
                 rule_based_enabled = True
-            if rule_based_enabled and not existing:
-                rule_impact = _analyze_event_impact_by_rule(ev, calibrated_dir)
-                if rule_impact:
-                    try:
-                        from db.market_events import update_market_event_fields as _update_fields
-                        _update_fields(eid, rule_impact)
-                    except Exception as _e:
-                        logger.debug(f"[event_radar:{trace_id}] 规则化影响字段写入失败: {_e}")
+            if rule_based_enabled:
+                # 仅当 LLM 未返回 + 当前 expected_impact_pct IS NULL 时才用规则填充
+                _need_rule_fill = True
+                if impact_quant_enabled and ev.get("expected_impact_pct") is not None:
+                    _need_rule_fill = False
+                if _need_rule_fill and (not existing or existing.get("expected_impact_pct") is None):
+                    rule_impact = _analyze_event_impact_by_rule(ev, calibrated_dir)
+                    if rule_impact:
+                        try:
+                            from db.market_events import update_market_event_fields as _update_fields
+                            _update_fields(eid, rule_impact)
+                        except Exception as _e:
+                            logger.debug(f"[event_radar:{trace_id}] 规则化影响字段写入失败: {_e}")
             if not existing:
                 new_count += 1
         except Exception as e:
@@ -2137,4 +2166,294 @@ def attach_effective_confidence(events: list[dict] | dict, now: datetime = None)
         for ev in events:
             if isinstance(ev, dict):
                 ev["effective_confidence"] = apply_time_decay_to_confidence(ev, now=now)
+
+
+# ════════════════════════════════════════════════════════════════
+# O-2/O-5/O-6/O-8（2026-07-21）：历史数据 backfill + 方向推断兜底
+# ════════════════════════════════════════════════════════════════
+
+# O-6: 方向推断关键词库（LLM 给 neutral 时兜底）
+_POSITIVE_DIRECTION_KW = [
+    "利好", "支持", "出台", "发布", "增长", "上升", "上涨",
+    "批准", "获批", "落地", "推进", "加速", "突破", "提升",
+    "催化", "刺激", "回暖", "复苏", "超预期",
+]
+_NEGATIVE_DIRECTION_KW = [
+    "利空", "下跌", "下滑", "风险", "警告", "违约", "退市",
+    "亏损", "减持", "解禁", "处罚", "不及预期", "下调",
+    "暴跌", "重挫", "跳水", "下挫", "走低", "停滞", "收紧",
+]
+
+
+def _infer_direction_by_keywords(event: dict) -> str:
+    """O-6: 基于事件标题/摘要关键词推断方向（LLM 给 neutral 时的兜底）。
+
+    场景：LLM 提取 direction 时倾向给 neutral（保守），导致几乎所有事件方向都是 neutral，
+    影响分析无法展开。本函数基于关键词命中数推断方向。
+
+    Args:
+        event: 事件 dict（含 title, summary）
+    Returns:
+        "positive" / "negative" / "neutral"
+    """
+    title = (event.get("title") or "") + " " + (event.get("summary") or "")
+    pos_hits = sum(1 for kw in _POSITIVE_DIRECTION_KW if kw in title)
+    neg_hits = sum(1 for kw in _NEGATIVE_DIRECTION_KW if kw in title)
+    if pos_hits > neg_hits and pos_hits > 0:
+        return "positive"
+    if neg_hits > pos_hits and neg_hits > 0:
+        return "negative"
+    return "neutral"
+
+
+def backfill_event_sources(max_events: int = 100) -> dict:
+    """O-2: 对历史 market_events 重新跑 _filter_sources_by_relevance。
+
+    场景：事件 42/41 等创建于 P0-E 修复之前，sources 用旧 news[:3] 生成，
+    与事件主题无关。本函数重新采集最近 24h 新闻并按主题过滤，覆盖旧 sources。
+
+    Args:
+        max_events: 最多 backfill 多少条（按 rowid DESC 倒序）
+    Returns:
+        {"processed": N, "updated": M, "skipped": K, "reason": str}
+    """
+    from db.market_events import list_market_events, update_market_event_fields
+    try:
+        events = list_market_events(limit=max_events)
+    except Exception as e:
+        logger.warning(f"[event_radar] backfill_event_sources list 失败: {e}")
+        return {"processed": 0, "updated": 0, "skipped": 0, "reason": f"list fail: {e}"}
+
+    # 重新采集最近 24h 新闻（用于过滤）
+    try:
+        all_news = _collect_news()
+    except Exception as e:
+        logger.warning(f"[event_radar] backfill_event_sources news 采集失败: {e}")
+        return {"processed": len(events), "updated": 0, "skipped": len(events),
+                "reason": f"news collect fail: {e}"}
+
+    if not all_news:
+        return {"processed": len(events), "updated": 0, "skipped": len(events),
+                "reason": "no news available"}
+
+    updated = 0
+    for ev in events:
+        try:
+            new_sources = _filter_sources_by_relevance(ev, all_news, max_per_event=3)
+            if new_sources:
+                update_market_event_fields(ev["event_id"], {"sources": new_sources})
+                updated += 1
+        except Exception as e:
+            logger.warning(f"[event_radar] backfill sources 失败 {ev.get('event_id')}: {e}")
+
+    logger.info(f"[event_radar] backfill_event_sources: processed={len(events)}, updated={updated}")
+    return {"processed": len(events), "updated": updated, "skipped": len(events) - updated}
+
+
+def backfill_event_impact_fields(max_events: int = 100) -> dict:
+    """O-5: 对历史 market_events 重新跑 _analyze_event_impact_by_rule。
+
+    场景：事件 42 等创建于 P1-C 修复之前，expected_impact_pct=None。
+    本函数对所有 expected_impact_pct IS NULL 的事件补齐规则化影响字段。
+
+    Returns:
+        {"processed": N, "updated": M, "skipped": K}
+    """
+    from db.market_events import list_market_events, update_market_event_fields
+    try:
+        events = list_market_events(limit=max_events)
+    except Exception as e:
+        logger.warning(f"[event_radar] backfill_event_impact list 失败: {e}")
+        return {"processed": 0, "updated": 0, "skipped": 0}
+
+    updated = 0
+    for ev in events:
+        if ev.get("expected_impact_pct") is not None:
+            continue  # 已有数据，跳过
+        try:
+            rule_impact = _analyze_event_impact_by_rule(ev, ev.get("direction", "neutral"))
+            if rule_impact:
+                update_market_event_fields(ev["event_id"], rule_impact)
+                updated += 1
+        except Exception as e:
+            logger.warning(f"[event_radar] backfill impact 失败 {ev.get('event_id')}: {e}")
+
+    logger.info(f"[event_radar] backfill_event_impact_fields: processed={len(events)}, updated={updated}")
+    return {"processed": len(events), "updated": updated, "skipped": len(events) - updated}
+
+
+def backfill_event_direction(max_events: int = 100) -> dict:
+    """O-6 backfill: 对所有 direction=neutral 的事件跑关键词推断。
+
+    场景：历史事件 LLM 给 neutral 太多，本函数基于标题/摘要关键词重新推断方向。
+    仅对 direction=neutral 且未触发 _calibrate_direction 降级的事件生效。
+
+    Returns:
+        {"processed": N, "updated": M, "skipped": K}
+    """
+    from db.market_events import list_market_events, update_market_event_fields
+    try:
+        events = list_market_events(limit=max_events)
+    except Exception as e:
+        logger.warning(f"[event_radar] backfill_event_direction list 失败: {e}")
+        return {"processed": 0, "updated": 0, "skipped": 0}
+
+    updated = 0
+    for ev in events:
+        if ev.get("direction") != "neutral":
+            continue  # 已有正/负方向，跳过
+        try:
+            new_dir = _infer_direction_by_keywords(ev)
+            if new_dir != "neutral":
+                update_market_event_fields(ev["event_id"], {"direction": new_dir})
+                updated += 1
+        except Exception as e:
+            logger.warning(f"[event_radar] backfill direction 失败 {ev.get('event_id')}: {e}")
+
+    logger.info(f"[event_radar] backfill_event_direction: processed={len(events)}, updated={updated}")
+    return {"processed": len(events), "updated": updated, "skipped": len(events) - updated}
+
+
+def backfill_event_confidence(max_events: int = 100) -> dict:
+    """O-7 backfill: 对历史事件跑 _calibrate_confidence_v2 动态评分。
+
+    场景：历史 confidence 集中在 0.8-1.0，缺乏动态依据。
+    本函数基于 sources/matched_holdings/时效 重新计算 confidence。
+
+    Returns:
+        {"processed": N, "updated": M, "skipped": K}
+    """
+    from db.market_events import list_market_events, update_market_event_fields
+    try:
+        events = list_market_events(limit=max_events)
+    except Exception as e:
+        logger.warning(f"[event_radar] backfill_event_confidence list 失败: {e}")
+        return {"processed": 0, "updated": 0, "skipped": 0}
+
+    updated = 0
+    for ev in events:
+        try:
+            original = float(ev.get("original_confidence") or ev.get("confidence") or 0.5)
+            sources_count = 0
+            try:
+                sources = json.loads(ev["sources"]) if ev.get("sources") else []
+                sources_count = len(sources)
+            except Exception:
+                sources_count = 0
+            matched_count = 0
+            try:
+                mh = json.loads(ev["matched_holdings"]) if ev.get("matched_holdings") else []
+                matched_count = len(mh)
+            except Exception:
+                matched_count = 0
+            new_conf = _calibrate_confidence_v2(
+                original,
+                json.loads(ev["affected_sectors"]) if ev.get("affected_sectors") else [],
+                ev,
+                sources_count=sources_count,
+                matched_count=matched_count,
+            )
+            # 仅当变化超过 0.02 时才更新（避免无意义的小幅波动）
+            old_conf = float(ev.get("confidence") or 0.5)
+            if abs(new_conf - old_conf) > 0.02:
+                update_market_event_fields(ev["event_id"], {"confidence": new_conf})
+                updated += 1
+        except Exception as e:
+            logger.warning(f"[event_radar] backfill confidence 失败 {ev.get('event_id')}: {e}")
+
+    logger.info(f"[event_radar] backfill_event_confidence: processed={len(events)}, updated={updated}")
+    return {"processed": len(events), "updated": updated, "skipped": len(events) - updated}
+
+
+def _calibrate_confidence_v2(original_confidence: float, sectors: list,
+                              event: dict = None, sources_count: int = 0,
+                              matched_count: int = 0) -> float:
+    """O-7: 升级版置信度校准 — 在原板块准确率基础上叠加数据质量维度。
+
+    新增维度：
+    1. sources 数量：0 → -0.15, 1-2 → -0.05, 3+ → +0
+    2. matched_holdings 数量：0 → -0.1（与用户无关），1+ → +0.05
+    3. 时效性：detected_date > 7天 → -0.1
+    4. 上限约束：不超过 0.95（避免「100% 把握」误导用户）
+    5. 下限约束：不低于 0.3（避免过度惩罚）
+
+    Args:
+        original_confidence: 原始置信度
+        sectors: 板块列表
+        event: 事件 dict（用于时效性判断）
+        sources_count: sources 数量
+        matched_count: matched_holdings 数量
+    Returns:
+        校准后的置信度 [0.3, 0.95]
+    """
+    try:
+        enabled = get_config_bool("alerts.confidence_dynamic_adjust_enabled", True)
+    except Exception:
+        enabled = True
+
+    # 1. 先调原 _calibrate_confidence（板块准确率校准）
+    conf = _calibrate_confidence(original_confidence, sectors)
+
+    if not enabled:
+        return conf
+
+    # 2. sources 数量调整
+    if sources_count == 0:
+        conf -= 0.15
+    elif sources_count <= 2:
+        conf -= 0.05
+
+    # 3. matched_holdings 调整
+    if matched_count == 0:
+        conf -= 0.1
+    else:
+        conf += 0.05
+
+    # 4. 时效性
+    if event:
+        detected = event.get("detected_date") or event.get("created_at") or ""
+        if detected:
+            try:
+                dt = datetime.strptime(str(detected)[:10], "%Y-%m-%d")
+                age_days = (datetime.now() - dt).days
+                if age_days > 7:
+                    conf -= 0.1
+            except Exception:
+                pass
+
+    # 5. 上下限约束
+    return max(0.3, min(0.95, conf))
+
+
+def backfill_all_once(max_events: int = 100) -> dict:
+    """O-8: 一键触发所有 backfill（启动钩子 + 手动 API 共用）。
+
+    Args:
+        max_events: 每类 backfill 最多处理多少条
+    Returns:
+        {"sources": {...}, "impact": {...}, "direction": {...}, "confidence": {...}}
+    """
+    results = {}
+    try:
+        results["sources"] = backfill_event_sources(max_events=max_events)
+    except Exception as e:
+        results["sources"] = {"error": str(e)}
+        logger.warning(f"[event_radar] backfill_all_once sources 失败: {e}")
+    try:
+        results["impact"] = backfill_event_impact_fields(max_events=max_events)
+    except Exception as e:
+        results["impact"] = {"error": str(e)}
+        logger.warning(f"[event_radar] backfill_all_once impact 失败: {e}")
+    try:
+        results["direction"] = backfill_event_direction(max_events=max_events)
+    except Exception as e:
+        results["direction"] = {"error": str(e)}
+        logger.warning(f"[event_radar] backfill_all_once direction 失败: {e}")
+    try:
+        results["confidence"] = backfill_event_confidence(max_events=max_events)
+    except Exception as e:
+        results["confidence"] = {"error": str(e)}
+        logger.warning(f"[event_radar] backfill_all_once confidence 失败: {e}")
+    logger.info(f"[event_radar] backfill_all_once 完成: {results}")
+    return results
 

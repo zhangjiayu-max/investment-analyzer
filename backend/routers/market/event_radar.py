@@ -234,3 +234,44 @@ async def analyze_article_trends(url: str = Body(..., embed=True)):
     except Exception as e:
         logger.error(f"分析文章趋势失败: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"分析失败: {e}")
+
+
+# ── O-8（2026-07-21）：一键触发历史数据 backfill ──
+
+@router.post("/api/alerts/event-radar/backfill")
+async def backfill_history(
+    max_events: int = Body(100, embed=True, ge=1, le=500),
+    only: Optional[str] = Query(None, description="仅执行指定 backfill 类型：sources/impact/direction/confidence/opportunity/watchlist。空则执行全部"),
+):
+    """一键触发历史数据 backfill（O-2/O-3/O-4/O-5/O-6/O-7/O-8）。
+
+    Args:
+        max_events: 每类 backfill 最多处理多少条
+        only: 仅执行指定类型（默认全部）
+    Returns:
+        各类 backfill 的 processed/updated/skipped 统计
+    """
+    try:
+        results = {}
+        if only is None or only == "sources":
+            from services.market.event_radar import backfill_event_sources
+            results["sources"] = backfill_event_sources(max_events=max_events)
+        if only is None or only == "impact":
+            from services.market.event_radar import backfill_event_impact_fields
+            results["impact"] = backfill_event_impact_fields(max_events=max_events)
+        if only is None or only == "direction":
+            from services.market.event_radar import backfill_event_direction
+            results["direction"] = backfill_event_direction(max_events=max_events)
+        if only is None or only == "confidence":
+            from services.market.event_radar import backfill_event_confidence
+            results["confidence"] = backfill_event_confidence(max_events=max_events)
+        if only is None or only == "opportunity":
+            from services.advisor.opportunity_engine import backfill_opportunity_fields
+            results["opportunity"] = backfill_opportunity_fields(max_items=max_events)
+        if only is None or only == "watchlist":
+            from db.watchlist import refresh_watchlist_percentile
+            results["watchlist"] = refresh_watchlist_percentile()
+        return ApiResponse.success(data=results)
+    except Exception as e:
+        logger.error(f"backfill 失败: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"backfill 失败: {e}")

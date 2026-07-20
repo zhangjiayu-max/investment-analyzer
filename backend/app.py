@@ -463,6 +463,36 @@ async def startup():
         logging.info("机会雷达每日回测任务已启动（alerts.opportunity_backtest_enabled=true）")
     else:
         logging.info("机会雷达每日回测已关闭（alerts.opportunity_backtest_enabled=false）")
+
+    # O-8（2026-07-21）：启动时一键 backfill 机会雷达与事件雷达历史数据
+    # 开关：alerts.auto_backfill_on_startup_enabled（默认 true）
+    # 触发：sources/impact/direction/confidence/opportunity/watchlist 全量回补
+    try:
+        if get_config("alerts.auto_backfill_on_startup_enabled", "true") == "true":
+            from services.market.event_radar import backfill_all_once
+            backfill_stats = backfill_all_once(max_events=100)
+            logging.info(f"[启动 backfill] 事件雷达历史数据回补完成: {backfill_stats}")
+
+            # O-3: 机会雷达核心字段 backfill（entry_price/entry_amount/valuation_percentile）
+            try:
+                from services.advisor.opportunity_engine import backfill_opportunity_fields
+                opp_stats = backfill_opportunity_fields(max_items=100)
+                logging.info(f"[启动 backfill] 机会雷达核心字段回补完成: {opp_stats}")
+            except Exception as _e:
+                logging.warning(f"[启动 backfill] 机会雷达字段回补失败（不影响启动）: {_e}")
+
+            # O-4: watchlist current_percentile fallback 刷新
+            try:
+                from db.watchlist import refresh_watchlist_percentile
+                wl_stats = refresh_watchlist_percentile()
+                logging.info(f"[启动 backfill] watchlist 分位刷新完成: {wl_stats}")
+            except Exception as _e:
+                logging.warning(f"[启动 backfill] watchlist 分位刷新失败（不影响启动）: {_e}")
+        else:
+            logging.info("启动 backfill 已关闭（alerts.auto_backfill_on_startup_enabled=false）")
+    except Exception as e:
+        logging.warning(f"[启动 backfill] 失败（不影响启动）: {e}")
+
     # 清理上次异常退出遗留的僵尸 agent_runs
     try:
         from db.agents import _get_conn
