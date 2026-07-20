@@ -1463,10 +1463,23 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
         history = get_messages(conv_id, limit=20)
         msg_list = [{"role": m["role"], "content": m["content"]} for m in history]
         # 构建组合约束上下文（Portfolio Fact Layer）
+        # ⚠️ 必须用 asyncio.to_thread + wait_for 包装：build_portfolio_facts() 内部调用
+        # _get_bond_temperature() 会发起 HTTP 请求到 youzhiyouxing.cn（timeout=15s），
+        # 同步调用会阻塞整个事件循环，导致 SSE 事件无法中继、orchestrate_stream 无法启动。
+        # 案例：conv 128 第一次执行因 DNS 解析挂起卡死 6+ 分钟。
         portfolio_facts = None
+        facts_text = None
         try:
-            portfolio_facts = build_portfolio_facts()
-            facts_text = json.dumps(portfolio_facts, ensure_ascii=False, indent=2, default=str)
+            portfolio_facts = await asyncio.wait_for(
+                asyncio.to_thread(build_portfolio_facts),
+                timeout=30.0,
+            )
+            if portfolio_facts:
+                facts_text = json.dumps(portfolio_facts, ensure_ascii=False, indent=2, default=str)
+        except asyncio.TimeoutError:
+            logger.warning(f"[trace:{trace_id}] build_portfolio_facts 超时 30s（可能 youzhiyouxing.cn 卡住），跳过组合约束")
+            portfolio_facts = None
+            facts_text = None
         except Exception as e:
             logger.warning(f"构建组合约束失败: {e}")
             facts_text = None

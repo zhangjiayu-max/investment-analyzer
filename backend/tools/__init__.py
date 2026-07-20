@@ -1894,10 +1894,12 @@ def _search_knowledge(args: dict) -> str:
 def _get_bond_temperature() -> str:
     """获取债市温度数据。"""
     try:
+        # timeout=(connect, read): connect=5s 限制 DNS+TCP 建连阶段，read=15s 限制数据传输
+        # 单值 timeout 无法限制 DNS 解析，曾导致 conv 128 卡死 6+ 分钟
         resp = req.get(
             "https://youzhiyouxing.cn/data/macro",
             headers={"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"},
-            timeout=15,
+            timeout=(5, 15),
         )
         resp.raise_for_status()
     except Exception as e:
