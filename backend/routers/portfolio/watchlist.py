@@ -303,16 +303,40 @@ async def watchlist_patrol_api():
                 signal_status, signal_reason, signal_reasons = adjust_signal_by_multidim(
                     signal_status, signal_reason, multidim,
                 )
-                # 计算置信度
-                signal_confidence = compute_signal_confidence(signal_status, multidim)
+                # 计算置信度（P1-B：传入 fund_code 用于历史命中率反哺）
+                signal_confidence = compute_signal_confidence(signal_status, multidim, fund_code=fund_code)
             except Exception as _e:
                 logger.debug(f"[watchlist] 多维信号获取失败 {fund_code}: {_e}")
                 # 降级：仅按估值偏离度计算
                 try:
                     from services.advisor.watchlist_multidim import compute_signal_confidence
-                    signal_confidence = compute_signal_confidence(signal_status, None)
+                    signal_confidence = compute_signal_confidence(signal_status, None, fund_code=fund_code)
                 except Exception:
                     signal_confidence = None
+
+        # ── P1-D（2026-07-21）信号有效期：green 信号 5/10 天自动降级 ──
+        try:
+            expiry_enabled = get_config_bool("watchlist.signal_expiry_enabled", True)
+        except Exception:
+            expiry_enabled = True
+        if expiry_enabled and signal_status == "green" and item.get("signal_triggered_at"):
+            try:
+                triggered_at = datetime.strptime(item["signal_triggered_at"], "%Y-%m-%d %H:%M:%S")
+                days_since = (datetime.now() - triggered_at).days
+                # 规则 1:5 天前触发 + 估值已涨 20% → 降 yellow
+                if days_since >= 5:
+                    # 用 entry_percentile（首次触发时记录的）与当前对比
+                    entry_pct_at_trigger = item.get("entry_percentile")
+                    if entry_pct_at_trigger is not None and current_pct is not None:
+                        if current_pct - entry_pct_at_trigger >= 20:
+                            signal_status = "yellow"
+                            signal_reason = f"{signal_reason}（信号超 5 天且估值已涨 20%，自动降级）"
+                # 规则 2:10 天前触发 + 多维转 bear → 降 yellow
+                if days_since >= 10 and tech_signal == "bear" and signal_status == "green":
+                    signal_status = "yellow"
+                    signal_reason = f"{signal_reason}（信号超 10 天且技术面转空，自动降级）"
+            except Exception as _e:
+                logger.debug(f"[watchlist] 信号有效期检查失败 {fund_code}: {_e}")
 
         # ── P0-3（2026-07-21）信号回测闭环：signal_status 从非 green 变 green 时插入回测记录 ──
         try:
@@ -322,8 +346,13 @@ async def watchlist_patrol_api():
                 # 同日去重
                 from db.watchlist import has_signal_backtest_on_date, create_signal_backtest
                 if not has_signal_backtest_on_date(item["id"], today_str):
-                    # 计算 15 交易日后的 review_date（粗略：21 自然日，含周末）
-                    review_dt = datetime.now() + timedelta(days=21)
+                    # P1-B：用 akshare 交易日历精确计算 15 交易日（失败兜底 +21 自然日）
+                    try:
+                        from services.advisor.watchlist_backtest import _calc_review_date
+                        review_date_str = _calc_review_date(today_str)
+                    except Exception:
+                        review_dt = datetime.now() + timedelta(days=21)
+                        review_date_str = review_dt.strftime("%Y-%m-%d")
                     # 序列化多维信号快照
                     multidim_snapshot = None
                     if multidim_enabled and (tech_signal != "neutral" or capital_signal != "neutral" or sentiment_signal != "neutral"):
@@ -341,7 +370,7 @@ async def watchlist_patrol_api():
                         "signal_status": "green",
                         "entry_nav": current_nav,
                         "entry_percentile": current_pct if current_pct is not None else (drawdown_percentile if drawdown_percentile is not None else nav_percentile),
-                        "review_date": review_dt.strftime("%Y-%m-%d"),
+                        "review_date": review_date_str,
                         "signal_confidence": signal_confidence,
                         "multidim_snapshot": multidim_snapshot,
                     })
@@ -355,6 +384,11 @@ async def watchlist_patrol_api():
                 update_fields["capital_signal"] = capital_signal
             if sentiment_signal != "neutral":
                 update_fields["sentiment_signal"] = sentiment_signal
+            # P1-D：green 首次触发时写入 signal_triggered_at；非 green 清空
+            if signal_status == "green" and last_status != "green":
+                update_fields["signal_triggered_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            elif signal_status != "green" and item.get("signal_triggered_at"):
+                update_fields["signal_triggered_at"] = None
             update_watchlist_item(item["id"], **update_fields)
         except Exception as _e:
             logger.debug(f"[watchlist] 信号回测记录插入失败 {fund_code}: {_e}")
@@ -392,12 +426,16 @@ async def watchlist_patrol_api():
             "capital_signal": capital_signal,
             "sentiment_signal": sentiment_signal,
             "signal_reasons": signal_reasons,
+            # P1-D 信号有效期
+            "signal_triggered_at": item.get("signal_triggered_at"),
         })
 
         # ── Batch1 增强点 1：退出信号计算（P0-2 2026-07-21 默认改为 true） ──
+        # P1-C（2026-07-21）退出信号动态化：移动止盈 + 保本止损 + 时间止损
         exit_signal = "none"
         exit_signal_reason = ""
         pnl_pct = None
+        holding_days = None
         try:
             exit_enabled = get_config_bool("watchlist.exit_signal_enabled", True)
         except Exception:
@@ -408,12 +446,64 @@ async def watchlist_patrol_api():
                 pnl_pct = round((current_nav - entry_price) / entry_price * 100, 2)
                 target_profit = item.get("target_profit_pct")
                 stop_loss = item.get("stop_loss_pct")
+
+                # 计算持有天数（P1-C 时间止损需要）
+                entry_date = item.get("entry_date")
+                if entry_date:
+                    try:
+                        holding_days = (datetime.now() - datetime.strptime(entry_date, "%Y-%m-%d")).days
+                    except Exception:
+                        holding_days = None
+
+                # P1-C 移动止盈：更新 high_water_mark
+                try:
+                    moving_enabled = get_config_bool("watchlist.moving_profit_target_enabled", True)
+                except Exception:
+                    moving_enabled = True
+                hwm = item.get("high_water_mark")
+                if moving_enabled and current_nav:
+                    if not hwm or current_nav > hwm:
+                        try:
+                            update_watchlist_item(item["id"], high_water_mark=current_nav)
+                            hwm = current_nav
+                        except Exception:
+                            pass
+
+                # 退出信号优先级：原 profit_target/stop_loss > P1-C 三类动态退出
                 if target_profit and pnl_pct >= target_profit:
                     exit_signal = "profit_target"
                     exit_signal_reason = f"已涨 {pnl_pct:.1f}%，达到止盈目标 {target_profit}%"
                 elif stop_loss and pnl_pct <= -stop_loss:
                     exit_signal = "stop_loss"
                     exit_signal_reason = f"已跌 {abs(pnl_pct):.1f}%，触发止损 -{stop_loss}%"
+                else:
+                    # P1-C 移动止盈：pnl>=20% 后从最高点回撤 5%
+                    if moving_enabled and pnl_pct >= 20 and hwm and hwm > 0:
+                        drawdown_from_peak = (current_nav - hwm) / hwm * 100
+                        if drawdown_from_peak <= -5:
+                            exit_signal = "moving_profit_target"
+                            exit_signal_reason = f"已从最高点 {hwm:.3f} 回撤 {abs(drawdown_from_peak):.1f}%，移动止盈"
+
+                    # P1-C 保本止损：pnl>=10% 后回落至 5% 以下
+                    if exit_signal == "none":
+                        try:
+                            breakeven_enabled = get_config_bool("watchlist.breakeven_stop_loss_enabled", True)
+                        except Exception:
+                            breakeven_enabled = True
+                        if breakeven_enabled and pnl_pct >= 10 and pnl_pct <= 5:
+                            exit_signal = "breakeven_stop_loss"
+                            exit_signal_reason = f"已涨超 10% 后回落至 {pnl_pct:.1f}%，触发保本止损(>5%)"
+
+                    # P1-C 时间止损：持有 30 天 + pnl<3%
+                    if exit_signal == "none":
+                        try:
+                            time_stop_enabled = get_config_bool("watchlist.time_stop_loss_enabled", True)
+                        except Exception:
+                            time_stop_enabled = True
+                        if time_stop_enabled and holding_days is not None and holding_days >= 30 and pnl_pct < 3:
+                            exit_signal = "time_stop_loss"
+                            exit_signal_reason = f"持有 {holding_days} 天涨幅仅 {pnl_pct:.1f}%，时间止损提示减仓"
+
                 # 写回 watchlist 表
                 try:
                     update_watchlist_item(item["id"],
@@ -428,6 +518,9 @@ async def watchlist_patrol_api():
         all_items[-1]["pnl_pct"] = pnl_pct
         all_items[-1]["exit_signal"] = exit_signal
         all_items[-1]["exit_signal_reason"] = exit_signal_reason
+        # P1-C 新增字段
+        all_items[-1]["holding_days"] = holding_days
+        all_items[-1]["high_water_mark"] = item.get("high_water_mark")
 
         # ── Batch1 增强点 2：异常波动预警（P0-2 2026-07-21 默认改为 true） ──
         vol_alert = "none"

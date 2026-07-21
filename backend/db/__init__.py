@@ -1262,6 +1262,10 @@ def init_db():
     _ensure_column(conn, "watchlist", "sentiment_signal", "TEXT")         # fear/greed/neutral
     # P0-3（2026-07-21）信号回测闭环：上一信号状态（用于检测 signal_status 从非 green 变 green）
     _ensure_column(conn, "watchlist", "last_signal_status", "TEXT")       # green/yellow/red/gray
+    # P1-C（2026-07-21）退出信号动态化：移动止盈需要历史最高价
+    _ensure_column(conn, "watchlist", "high_water_mark", "REAL")          # 历史最高净值
+    # P1-D（2026-07-21）信号有效期：green 信号触发时间，用于 5/10 天自动降级
+    _ensure_column(conn, "watchlist", "signal_triggered_at", "TEXT")      # green 信号首次触发时间
     conn.execute("CREATE INDEX IF NOT EXISTS idx_watchlist_user ON watchlist(user_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_watchlist_status ON watchlist(status)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_watchlist_exit_signal ON watchlist(exit_signal)")

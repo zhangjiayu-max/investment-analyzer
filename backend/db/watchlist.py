@@ -98,6 +98,10 @@ def update_watchlist_item(item_id: int, **fields) -> bool:
         'signal_confidence', 'tech_signal', 'capital_signal', 'sentiment_signal',
         # P0-3（2026-07-21）信号回测闭环
         'last_signal_status',
+        # P1-C（2026-07-21）退出信号动态化
+        'high_water_mark',
+        # P1-D（2026-07-21）信号有效期
+        'signal_triggered_at',
     }
     invalid = set(fields.keys()) - allowed
     if invalid:
@@ -558,6 +562,21 @@ def get_signal_backtest_stats(fund_code: str = None) -> dict:
             "hit": int,           # 命中数
             "miss": int,          # 未命中数
             "hit_rate": float,    # 命中率（0-100），已回测数为 0 时返回 None
+            # P1-B（2026-07-21）分桶统计
+            "by_confidence": {    # 按 signal_confidence 分桶
+                "high": {"total": int, "hit": int, "hit_rate": float},  # >= 70
+                "mid": {"total": int, "hit": int, "hit_rate": float},   # 50-70
+                "low": {"total": int, "hit": int, "hit_rate": float},   # < 50
+            },
+            "by_tech": {          # 按 tech_signal 分桶(从 multidim_snapshot 解析)
+                "bull": {...}, "neutral": {...}, "bear": {...},
+            },
+            "by_capital": {       # 按 capital_signal 分桶
+                "inflow": {...}, "neutral": {...}, "outflow": {...},
+            },
+            "recent_30d": {       # 近 30 天统计
+                "total": int, "reviewed": int, "hit": int, "hit_rate": float,
+            },
         }
     """
     conn = _get_conn()
@@ -575,13 +594,88 @@ def get_signal_backtest_stats(fund_code: str = None) -> dict:
             params,
         ).fetchone()
         if not row:
-            return {"total": 0, "reviewed": 0, "pending": 0, "hit": 0, "miss": 0, "hit_rate": None}
+            return _empty_stats()
         total = int(row["total"] or 0)
         reviewed = int(row["reviewed"] or 0)
         pending = int(row["pending"] or 0)
         hit = int(row["hit"] or 0)
         miss = int(row["miss"] or 0)
         hit_rate = round(hit / reviewed * 100, 1) if reviewed > 0 else None
+
+        # ── P1-B 分桶统计 ───────────────────────────────────────────
+        import json as _json
+
+        # 按 confidence 分桶
+        by_confidence = {"high": {"total": 0, "hit": 0, "hit_rate": None},
+                         "mid": {"total": 0, "hit": 0, "hit_rate": None},
+                         "low": {"total": 0, "hit": 0, "hit_rate": None}}
+        # 按 multidim_snapshot.tech / capital 分桶
+        by_tech = {k: {"total": 0, "hit": 0, "hit_rate": None} for k in ("bull", "neutral", "bear")}
+        by_capital = {k: {"total": 0, "hit": 0, "hit_rate": None} for k in ("inflow", "neutral", "outflow")}
+
+        rows = conn.execute(
+            f"""SELECT signal_confidence, multidim_snapshot, hit
+                FROM watchlist_signal_backtests {where}""",
+            params,
+        ).fetchall()
+        for r in rows:
+            conf = r["signal_confidence"]
+            hit_val = r["hit"]
+            # confidence 桶
+            if conf is not None:
+                if conf >= 70:
+                    bucket = "high"
+                elif conf >= 50:
+                    bucket = "mid"
+                else:
+                    bucket = "low"
+                by_confidence[bucket]["total"] += 1
+                if hit_val == 1:
+                    by_confidence[bucket]["hit"] += 1
+            # multidim_snapshot 桶
+            snap = r["multidim_snapshot"]
+            if snap:
+                try:
+                    snap_data = _json.loads(snap) if isinstance(snap, str) else snap
+                    tech_v = snap_data.get("tech", "neutral")
+                    cap_v = snap_data.get("capital", "neutral")
+                    if tech_v in by_tech:
+                        by_tech[tech_v]["total"] += 1
+                        if hit_val == 1:
+                            by_tech[tech_v]["hit"] += 1
+                    if cap_v in by_capital:
+                        by_capital[cap_v]["total"] += 1
+                        if hit_val == 1:
+                            by_capital[cap_v]["hit"] += 1
+                except Exception:
+                    pass
+
+        # 计算各桶命中率
+        for bucket_dict in (by_confidence, by_tech, by_capital):
+            for k, v in bucket_dict.items():
+                if v["total"] > 0:
+                    v["hit_rate"] = round(v["hit"] / v["total"] * 100, 1)
+
+        # 近 30 天统计
+        from datetime import datetime, timedelta
+        cutoff = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
+        if where:
+            recent_sql = f"SELECT COUNT(*) AS total, SUM(CASE WHEN hit IS NOT NULL THEN 1 ELSE 0 END) AS reviewed, SUM(CASE WHEN hit = 1 THEN 1 ELSE 0 END) AS hit FROM watchlist_signal_backtests {where} AND signal_date >= ?"
+            recent_params = params + [cutoff]
+        else:
+            recent_sql = "SELECT COUNT(*) AS total, SUM(CASE WHEN hit IS NOT NULL THEN 1 ELSE 0 END) AS reviewed, SUM(CASE WHEN hit = 1 THEN 1 ELSE 0 END) AS hit FROM watchlist_signal_backtests WHERE signal_date >= ?"
+            recent_params = [cutoff]
+        recent_row = conn.execute(recent_sql, recent_params).fetchone()
+        recent_total = int(recent_row["total"] or 0) if recent_row else 0
+        recent_reviewed = int(recent_row["reviewed"] or 0) if recent_row else 0
+        recent_hit = int(recent_row["hit"] or 0) if recent_row else 0
+        recent_30d = {
+            "total": recent_total,
+            "reviewed": recent_reviewed,
+            "hit": recent_hit,
+            "hit_rate": round(recent_hit / recent_reviewed * 100, 1) if recent_reviewed > 0 else None,
+        }
+
         return {
             "total": total,
             "reviewed": reviewed,
@@ -589,9 +683,25 @@ def get_signal_backtest_stats(fund_code: str = None) -> dict:
             "hit": hit,
             "miss": miss,
             "hit_rate": hit_rate,
+            "by_confidence": by_confidence,
+            "by_tech": by_tech,
+            "by_capital": by_capital,
+            "recent_30d": recent_30d,
         }
     finally:
         conn.close()
+
+
+def _empty_stats() -> dict:
+    """空统计结构(P1-B)。"""
+    empty_bucket = lambda: {"total": 0, "hit": 0, "hit_rate": None}
+    return {
+        "total": 0, "reviewed": 0, "pending": 0, "hit": 0, "miss": 0, "hit_rate": None,
+        "by_confidence": {k: empty_bucket() for k in ("high", "mid", "low")},
+        "by_tech": {k: empty_bucket() for k in ("bull", "neutral", "bear")},
+        "by_capital": {k: empty_bucket() for k in ("inflow", "neutral", "outflow")},
+        "recent_30d": {"total": 0, "reviewed": 0, "hit": 0, "hit_rate": None},
+    }
 
 
 def get_fund_signal_backtest_history(fund_code: str, limit: int = 20) -> list[dict]:

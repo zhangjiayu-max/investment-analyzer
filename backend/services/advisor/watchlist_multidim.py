@@ -9,6 +9,15 @@
 - 多维结果 5 分钟缓存（同 _patrol_cache 周期）
 - 信号灯降级规则：green + tech=bear → yellow；yellow + tech=bull → green
 - signal_confidence 计算（0-100）：估值偏离度 40% + 技术 20% + 资金 20% + 情绪 20%
+
+P1-D（2026-07-21）缓存分层增强：
+- 全局指标（情绪/北向资金）独立 30 分钟缓存，所有基金共享，避免重复 akshare 调用
+- 主题级指标（技术）保持 5 分钟缓存，按指数代码隔离
+- 信号灯规则升级为复合规则 + 三重共振 + 反向升级（P1-A）
+
+P1-B（2026-07-21）命中率反哺：
+- compute_signal_confidence 增加 fund_code 参数，引入历史命中率维度
+- 权重重分配：估值 35% + 技术 20% + 资金 15% + 情绪 15% + 历史 15%
 """
 
 import logging
@@ -19,10 +28,75 @@ from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
-# 多维信号缓存：{index_key: (timestamp, result_dict)}
+# ── P1-D 缓存分层 ───────────────────────────────────────────────────
+# 全局指标缓存（情绪/北向资金）：30 分钟，所有基金共享
+_global_cache = {}
+_global_cache_lock = threading.Lock()
+_GLOBAL_CACHE_TTL = 30 * 60  # 30 分钟
+
+# 主题级缓存（技术指标）：5 分钟，按指数代码隔离
+_theme_cache = {}
+_theme_cache_lock = threading.Lock()
+_THEME_CACHE_TTL = 5 * 60  # 5 分钟
+
+# 兼容旧接口：多维信号聚合缓存（按 index_name|index_code 聚合）
 _multidim_cache = {}
 _multidim_cache_lock = threading.Lock()
 _CACHE_TTL = 5 * 60  # 5 分钟缓存
+
+
+def _get_global_cache_ttl() -> int:
+    """获取全局缓存 TTL（秒），从配置读取，默认 30 分钟。"""
+    try:
+        from db.config import get_config_int
+        minutes = get_config_int("watchlist.global_indicator_cache_ttl_minutes", 30)
+        return max(1, minutes) * 60
+    except Exception:
+        return _GLOBAL_CACHE_TTL
+
+
+def _get_sentiment_score_cached() -> dict:
+    """情绪指标（全局共享，30 分钟缓存）。
+
+    所有基金共享同一个市场情绪，无需重复查询。
+    """
+    ttl = _get_global_cache_ttl()
+    with _global_cache_lock:
+        cached = _global_cache.get("sentiment")
+        if cached and time.time() - cached[0] < ttl:
+            return cached[1]
+    try:
+        from services.advisor.opportunity_engine import _get_sentiment_score
+        score, signal = _get_sentiment_score()
+    except Exception as e:
+        logger.debug(f"[wl_multidim] 情绪指标获取失败: {e}")
+        score, signal = 0, "neutral"
+    result = {"score": int(score), "signal": signal}
+    with _global_cache_lock:
+        _global_cache["sentiment"] = (time.time(), result)
+    return result
+
+
+def _get_capital_flow_score_cached(theme_rule: dict) -> dict:
+    """资金流向/北向资金（全局共享，30 分钟缓存）。
+
+    北向资金是市场级指标，所有主题共用。
+    """
+    ttl = _get_global_cache_ttl()
+    with _global_cache_lock:
+        cached = _global_cache.get("capital")
+        if cached and time.time() - cached[0] < ttl:
+            return cached[1]
+    try:
+        from services.advisor.opportunity_engine import _get_capital_flow_score
+        score, signal = _get_capital_flow_score(theme_rule)
+    except Exception as e:
+        logger.debug(f"[wl_multidim] 资金流向获取失败: {e}")
+        score, signal = 0, "neutral"
+    result = {"score": int(score), "signal": signal}
+    with _global_cache_lock:
+        _global_cache["capital"] = (time.time(), result)
+    return result
 
 
 def _build_theme_rule_from_index(index_name: str, index_code: str = None) -> dict:
@@ -144,24 +218,20 @@ def _compute_multidim_signals(index_name: str, index_code: str = None,
     except Exception as e:
         logger.debug(f"[wl_multidim] 技术指标获取失败 {bare_code}: {e}")
 
-    # 2. 资金流向（北向资金，全局指标，不依赖主题）
-    try:
-        from services.advisor.opportunity_engine import _get_capital_flow_score
-        capital_score, capital_signal = _get_capital_flow_score(theme_rule)
-        if capital_signal != "neutral":
-            reasons.append(f"资金{'净流入' if capital_signal == 'inflow' else '净流出'}{'+' if capital_score > 0 else ''}{capital_score}")
-    except Exception as e:
-        logger.debug(f"[wl_multidim] 资金流向获取失败: {e}")
+    # 2. 资金流向（北向资金，全局指标，不依赖主题）— P1-D 改用 30 分钟全局缓存
+    capital_cached = _get_capital_flow_score_cached(theme_rule)
+    capital_score = capital_cached["score"]
+    capital_signal = capital_cached["signal"]
+    if capital_signal != "neutral":
+        reasons.append(f"资金{'净流入' if capital_signal == 'inflow' else '净流出'}{'+' if capital_score > 0 else ''}{capital_score}")
 
-    # 3. 情绪指标（全局市场状态）
-    try:
-        from services.advisor.opportunity_engine import _get_sentiment_score
-        sentiment_score, sentiment_signal = _get_sentiment_score()
-        if sentiment_signal != "neutral":
-            label = "恐惧" if sentiment_signal == "fear" else "贪婪"
-            reasons.append(f"市场情绪{label}{'+' if sentiment_score > 0 else ''}{sentiment_score}")
-    except Exception as e:
-        logger.debug(f"[wl_multidim] 情绪指标获取失败: {e}")
+    # 3. 情绪指标（全局市场状态）— P1-D 改用 30 分钟全局缓存
+    sentiment_cached = _get_sentiment_score_cached()
+    sentiment_score = sentiment_cached["score"]
+    sentiment_signal = sentiment_cached["signal"]
+    if sentiment_signal != "neutral":
+        label = "恐惧" if sentiment_signal == "fear" else "贪婪"
+        reasons.append(f"市场情绪{label}{'+' if sentiment_score > 0 else ''}{sentiment_score}")
 
     result = {
         "tech_signal": tech_signal,
@@ -250,6 +320,11 @@ def adjust_signal_by_multidim(signal_status: str, signal_reason: str,
                                 multidim: dict) -> tuple:
     """根据多维信号调整信号灯状态（降级/升级）。
 
+    P1-A（2026-07-21）增强：
+    - 复合规则：双重看空强制降级（green→red、yellow→red）
+    - 三重共振：三重同向时强制升/降一档
+    - 反向升级：red + 双重看多 → yellow（反弹信号）
+
     Args:
         signal_status: 原始估值信号（green/yellow/red/gray）
         signal_reason: 原始信号原因
@@ -266,26 +341,84 @@ def adjust_signal_by_multidim(signal_status: str, signal_reason: str,
     sentiment = multidim.get("sentiment_signal", "neutral")
     reasons = list(multidim.get("reasons", []))
 
+    # 读取开关（默认开启）
+    try:
+        from db.config import get_config_bool
+        composite_enabled = get_config_bool("watchlist.composite_rule_enabled", True)
+        resonance_enabled = get_config_bool("watchlist.three_way_resonance_enabled", True)
+    except Exception:
+        composite_enabled = True
+        resonance_enabled = True
+
+    # 多空计数
+    bullish_count = sum([tech == "bull", capital == "inflow", sentiment == "fear"])
+    bearish_count = sum([tech == "bear", capital == "outflow", sentiment == "greed"])
+
     adjusted = signal_status
     extra_notes = []
 
-    # green + 技术看空 → 降级 yellow
-    if signal_status == "green" and tech == "bear":
-        adjusted = "yellow"
-        extra_notes.append("⚠️ 技术面看空，降级为接近上车")
-    # green + 资金流出 → 维持 green 但提示
-    elif signal_status == "green" and capital == "outflow":
-        extra_notes.append("⚠️ 资金流出，谨慎上车")
-    # yellow + 技术多头 → 升级 green
-    elif signal_status == "yellow" and tech == "bull":
-        adjusted = "green"
-        extra_notes.append("✓ 技术面确认，升级为可上车")
+    # ── P1-A 三重共振(最高优先级,强信号识别) ──
+    if resonance_enabled:
+        # 三重看多 → 强制升一档
+        if bullish_count == 3:
+            if signal_status == "red":
+                adjusted = "yellow"
+                extra_notes.append("✓ 三重共振看多,反弹信号关注")
+            elif signal_status == "yellow":
+                adjusted = "green"
+                extra_notes.append("✓ 三重共振看多,强信号确认")
+            elif signal_status == "gray":
+                adjusted = "yellow"
+                extra_notes.append("✓ 三重共振看多,值得关注")
+            # green 维持,只加提示
+            elif signal_status == "green":
+                extra_notes.append("✓ 三重共振看多,强信号确认")
 
-    # 情绪极端时附加提示
-    if signal_status == "green" and sentiment == "greed":
-        extra_notes.append("⚠️ 市场过热，注意情绪反转风险")
-    elif signal_status in ("green", "yellow") and sentiment == "fear":
-        extra_notes.append("✓ 市场恐惧，逆向布局机会")
+        # 三重看空 → 强制降一档
+        if bearish_count == 3:
+            if signal_status == "green":
+                adjusted = "red"
+                extra_notes.append("⚠️ 三重共振看空,清仓观望")
+            elif signal_status == "yellow":
+                adjusted = "red"
+                extra_notes.append("⚠️ 三重共振看空,暂不介入")
+            # red/gray 维持
+
+    # ── P1-A 复合规则(双重看空强制降级) ──
+    if composite_enabled and bearish_count >= 2 and bullish_count < 3:
+        # 三重共振看多已处理,此处仅处理看空方
+        if signal_status == "green" and adjusted == "green":
+            adjusted = "red"
+            extra_notes.append("⚠️ 多维双重看空,强制降级为观望")
+        elif signal_status == "yellow" and adjusted == "yellow":
+            adjusted = "red"
+            extra_notes.append("⚠️ 多维双重看空,降级为暂不介入")
+
+    # ── P1-A 反向升级(red + 双重看多 → yellow) ──
+    if composite_enabled and signal_status == "red" and adjusted == "red" and bullish_count >= 2 and bearish_count < 3:
+        adjusted = "yellow"
+        extra_notes.append("✓ 多维双重看多,反弹信号可关注")
+
+    # ── 原有 P0-1 单维度规则(降级触发条件,与上面互斥) ──
+    # 仅当三重共振/复合规则未触发时,执行原单维度规则
+    if adjusted == signal_status:
+        # green + 技术看空 → 降级 yellow
+        if signal_status == "green" and tech == "bear":
+            adjusted = "yellow"
+            extra_notes.append("⚠️ 技术面看空,降级为接近上车")
+        # green + 资金流出 → 维持 green 但提示
+        elif signal_status == "green" and capital == "outflow":
+            extra_notes.append("⚠️ 资金流出,谨慎上车")
+        # yellow + 技术多头 → 升级 green
+        elif signal_status == "yellow" and tech == "bull":
+            adjusted = "green"
+            extra_notes.append("✓ 技术面确认,升级为可上车")
+
+    # 情绪极端时附加提示(独立于上面规则)
+    if signal_status == "green" and sentiment == "greed" and "市场过热" not in " ".join(extra_notes):
+        extra_notes.append("⚠️ 市场过热,注意情绪反转风险")
+    elif signal_status in ("green", "yellow") and sentiment == "fear" and "逆向布局" not in " ".join(extra_notes):
+        extra_notes.append("✓ 市场恐惧,逆向布局机会")
 
     final_reason = signal_reason
     if extra_notes:
@@ -294,23 +427,50 @@ def adjust_signal_by_multidim(signal_status: str, signal_reason: str,
     return adjusted, final_reason, reasons
 
 
-def compute_signal_confidence(signal_status: str, multidim: dict) -> int:
+def compute_signal_confidence(signal_status: str, multidim: dict,
+                                fund_code: str = None) -> int:
     """计算信号置信度（0-100）。
 
-    权重：
-    - 估值偏离度 40%：green=80、yellow=55、red=20、gray=0
-    - 技术面 20%：bull=100、neutral=50、bear=10
-    - 资金面 20%：inflow=90、neutral=50、outflow=20
-    - 情绪面 20%：fear=80（逆向加分）、neutral=50、greed=30
+    P1-B（2026-07-21）权重重分配:
+    - 估值偏离度 35%（原 40%）：green=80、yellow=55、red=20、gray=0
+    - 技术面 20%（不变）：bull=100、neutral=50、bear=10
+    - 资金面 15%（原 20%）：inflow=90、neutral=50、outflow=20
+    - 情绪面 15%（原 20%）：fear=80（逆向加分）、neutral=50、greed=30
+    - 历史命中率 15%（新增）：hit_rate>=70 加分、<40 扣分
 
-    无多维数据时仅按估值偏离度计算，confidence 上限 60。
+    无多维数据时仅按估值偏离度计算 + 历史命中率，confidence 上限 60。
     """
     base_map = {"green": 80, "yellow": 55, "red": 20, "gray": 0}
     base = base_map.get(signal_status, 50)
 
-    if not multidim or multidim.get("tech_signal") == "neutral" and multidim.get("capital_signal") == "neutral" and multidim.get("sentiment_signal") == "neutral":
-        # 无多维数据，confidence 上限 60
-        return min(60, int(base * 0.4 / 0.4))  # = min(60, base)
+    # 历史命中率反哺（需 fund_code + 开关开启）
+    history_bonus = 0
+    try:
+        from db.config import get_config_bool
+        history_enabled = get_config_bool("watchlist.history_hitrate_feedback_enabled", True)
+    except Exception:
+        history_enabled = True
+    if history_enabled and fund_code:
+        try:
+            from db.watchlist import get_signal_backtest_stats
+            stats = get_signal_backtest_stats(fund_code=fund_code)
+            if stats.get("reviewed", 0) >= 3:  # 样本量 >= 3 才反哺
+                hit_rate = stats.get("hit_rate", 0) or 0
+                if hit_rate >= 70:
+                    history_bonus = 10
+                elif hit_rate < 40:
+                    history_bonus = -15
+                # 40-70 不调整
+        except Exception as e:
+            logger.debug(f"[wl_multidim] 历史命中率反哺失败 {fund_code}: {e}")
+
+    # 无多维数据时仅按估值偏离度 + 历史命中率，confidence 上限 60
+    if not multidim or (
+        multidim.get("tech_signal") == "neutral"
+        and multidim.get("capital_signal") == "neutral"
+        and multidim.get("sentiment_signal") == "neutral"
+    ):
+        return max(0, min(60, int(base) + history_bonus))
 
     tech_map = {"bull": 100, "neutral": 50, "bear": 10}
     capital_map = {"inflow": 90, "neutral": 50, "outflow": 20}
@@ -320,5 +480,13 @@ def compute_signal_confidence(signal_status: str, multidim: dict) -> int:
     capital_score = capital_map.get(multidim.get("capital_signal", "neutral"), 50)
     sentiment_score = sentiment_map.get(multidim.get("sentiment_signal", "neutral"), 50)
 
-    confidence = int(base * 0.4 + tech_score * 0.2 + capital_score * 0.2 + sentiment_score * 0.2)
+    # 5 维加权:估值 35% + 技术 20% + 资金 15% + 情绪 15% + 历史 15%
+    history_dim_score = 50 + history_bonus * 2  # 50 中性,bonus 翻倍归一到 0-100
+    confidence = int(
+        base * 0.35
+        + tech_score * 0.20
+        + capital_score * 0.15
+        + sentiment_score * 0.15
+        + history_dim_score * 0.15
+    )
     return max(0, min(100, confidence))
