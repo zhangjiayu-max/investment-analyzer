@@ -114,3 +114,65 @@ async def delete_hypothetical(tx_id: int):
     from db.smart_add_snapshots import delete_hypothetical_tx
     ok = delete_hypothetical_tx(tx_id)
     return {"ok": ok}
+
+
+@router.get("/api/smart-add/index-exposure")
+async def get_index_exposure():
+    """穿透指数集中度：基于持仓穿透后的指数暴露占比 + 软提示。
+
+    返回每个指数的：
+    - total_pct: 占总资产百分比（基于 effective_base = max(total_cost, current_value)）
+    - funds: 涉及的基金代码列表
+    - fund_names: 涉及的基金名称列表
+    - fund_type: 基金类型（broad/industry/theme/bond/hk_overseas/unknown）
+    - limit_pct: 该类型指数集中度上限
+    - warning: {level, current_pct, limit_pct, exceeded, room_pct, message}
+
+    软提示：超限不拦截，仅返回 warning，由前端展示橙色警告。
+    """
+    from db.portfolio import list_holdings, get_portfolio_summary
+    from services.advisor.position_sizing import (
+        calc_index_exposure,
+        check_index_exposure_warning,
+        INDEX_EXPOSURE_LIMITS,
+    )
+    from services.advisor.smart_add_metrics import classify_fund
+
+    holdings = list_holdings()
+    summary = get_portfolio_summary()
+    total_assets = summary.get("total_assets") or 0
+
+    exposure = calc_index_exposure(holdings, total_assets)
+
+    # 给每个指数附加 fund_type / limit_pct / warning
+    enriched = {}
+    for index_code, info in exposure.items():
+        # 取该指数下第一个能识别出 fund_type 的基金作为代表
+        fund_type = "unknown"
+        for fc in info.get("funds", []):
+            h = next((x for x in holdings if x.get("fund_code") == fc), None)
+            if h:
+                ft_info = classify_fund(h)
+                ft = ft_info.get("fund_type", "unknown")
+                if ft and ft != "unknown":
+                    fund_type = ft
+                    break
+        limit_pct = INDEX_EXPOSURE_LIMITS.get(fund_type, 30)
+        warning = check_index_exposure_warning(exposure, index_code, fund_type)
+        enriched[index_code] = {
+            **info,
+            "fund_type": fund_type,
+            "limit_pct": limit_pct,
+            "warning": warning,
+        }
+
+    # 按占比降序
+    sorted_exposure = dict(
+        sorted(enriched.items(), key=lambda kv: kv[1]["total_pct"], reverse=True)
+    )
+
+    return {
+        "exposure": sorted_exposure,
+        "total_assets": round(total_assets, 2),
+        "fund_count": len(holdings),
+    }

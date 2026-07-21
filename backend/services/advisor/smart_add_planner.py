@@ -34,6 +34,10 @@ from services.advisor.smart_add_metrics import (
     calc_recovery_time,
     calc_valuation_win_rate,
 )
+from services.advisor.position_sizing import (
+    generate_position_sizing_plan,
+    _effective_base,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -185,12 +189,17 @@ def _calc_pyramid_tiers(
     tiers: list,
     loss_threshold: float,
     current_value: float = 0,
+    total_cost: float = 0,
 ) -> list:
     """计算金字塔补仓档位。
 
     2026-07-17 重构：
     1. 金额计算从"资金池×释放率"改为"标的市值×加仓比例"
     2. 只预估下次补仓金额（不累加历史已触发档位）
+
+    2026-07-10 基准修正：
+    金额计算基准从 current_value 改为 max(total_cost, current_value)
+    原因：深套标的当前市值严重缩水，按市值计算的补仓金额过小，永远补不起来
 
     金字塔补仓法本意：每跌一档补一次，不是一次把所有档都补了。
     当前-31.3%触发-10/-20/-30三档，但下次实际只会补"跌到-40%时"那一档。
@@ -202,7 +211,8 @@ def _calc_pyramid_tiers(
         already_released: 已释放金额
         tiers: 档位配置 [{loss_pct, release_pct, add_ratio}]
         loss_threshold: 触发阈值（如 -10）
-        current_value: 标的当前市值（新参数，金额计算基准）
+        current_value: 标的当前市值
+        total_cost: 标的原始投入本金（2026-07-10 新增，用于基准修正）
 
     Returns:
         档位列表 [{tier, loss_pct, release_amount, triggered, cumulative, add_ratio, is_next}]
@@ -210,6 +220,8 @@ def _calc_pyramid_tiers(
     """
     result = []
     cumulative = 0
+    # 基准修正：用 max(total_cost, current_value) 避免深套标的补仓金额过小
+    effective_base = max(total_cost, current_value)
     # 找到"下次待触发"档位 = 亏损加深后下一个会触发的档位
     # tiers 已按 loss_pct 升序排序（-50 < -40 < -30 < -20 < -10）
     # 当前亏损-16.9%，已触发-10%（浅档），未触发-20/-30/-40/-50
@@ -227,10 +239,10 @@ def _calc_pyramid_tiers(
         next_untriggered_idx = 0  # 最深档（-50%）
 
     for i, tier in enumerate(tiers):
-        # 金额 = 标的市值 × 加仓比例（%）；无市值数据时降级回池子×释放率
+        # 金额 = 有效基准 × 加仓比例（%）；无数据时降级回池子×释放率
         add_ratio = tier.get("add_ratio", tier.get("release_pct", 0))
-        if current_value > 0:
-            release_amount = round(current_value * add_ratio / 100, 2)
+        if effective_base > 0:
+            release_amount = round(effective_base * add_ratio / 100, 2)
         else:
             # 降级：原逻辑兜底
             release_amount = round(pool_total * tier["release_pct"] / 100, 2)
@@ -957,7 +969,7 @@ def generate_smart_add_plan(user_id: str = "default") -> dict:
     # 2. 对每个持仓计算计划
     plans = []
     for h in holdings:
-        plan = _generate_single_plan(h, cfg, total_assets, pool_total, base_monthly)
+        plan = _generate_single_plan(h, cfg, total_assets, pool_total, base_monthly, holdings=holdings)
         if plan:
             plans.append(plan)
 
@@ -1234,13 +1246,17 @@ def _detect_trend_signal(
             ],
         }
 
-    # 建议金额动态化：标的市值 × 趋势加仓比例 × 趋势强度系数 × 估值系数 × 仓位余量系数
+    # 建议金额动态化：有效基准 × 趋势加仓比例 × 趋势强度系数 × 估值系数 × 仓位余量系数
     # 2026-07-17 改进：基数从全局 base_monthly 改为"标的市值×趋势加仓比例"
     #   原因：全局2760对小仓位基金(¥7766)占比过大，对大仓位基金(¥51534)占比过小
+    # 2026-07-10 基准修正：current_value → max(total_cost, current_value)
+    #   原因：深套标的市值缩水，按市值计算的加仓金额过小
     # 趋势加仓比例默认5%（小仓位试探），可通过 trend_base_ratio 配置
     current_value = holding.get("current_value") or 0
-    trend_base_ratio = cfg.get("trend_base_ratio", 5.0)  # 标的市值的5%作为趋势加仓基数
-    base_amount = current_value * trend_base_ratio / 100
+    total_cost = holding.get("total_cost") or 0
+    effective_base = max(total_cost, current_value)
+    trend_base_ratio = cfg.get("trend_base_ratio", 5.0)  # 有效基准的5%作为趋势加仓基数
+    base_amount = effective_base * trend_base_ratio / 100
 
     # 1. 趋势强度系数：涨3%→×1.0，涨5%→×1.3，涨8%→×1.5（线性插值，上限1.5）
     trend_strength_mult = 1.0
@@ -1265,9 +1281,10 @@ def _detect_trend_signal(
             valuation_mult = 0.8
 
     # 3. 仓位余量系数：(上限-当前仓位)/上限，仓位越低补越多
+    # 2026-07-10 基准修正：仓位计算用 effective_base 避免深套误判低仓位
     position_cap_pct = cfg.get("trend_position_pct", 5)
     total_assets = holding.get("_total_assets", 0)
-    current_position_pct = (current_value / total_assets * 100) if total_assets else 0
+    current_position_pct = (effective_base / total_assets * 100) if total_assets else 0
     room_mult = max(0.3, (position_cap_pct - current_position_pct) / position_cap_pct) if position_cap_pct > 0 else 1.0
 
     amount = round(base_amount * trend_strength_mult * valuation_mult * room_mult, 2)
@@ -1390,12 +1407,15 @@ def _detect_dip_signal(
             "tier": f"-{matched_tier[0]}%",
         }
 
-    # 建议金额动态化：标的市值 × 大跌定投比例 × 跌幅系数 × 亏损系数 × 仓位余量系数
+    # 建议金额动态化：有效基准 × 大跌定投比例 × 跌幅系数 × 亏损系数 × 仓位余量系数
     # 2026-07-17 改进：基数从全局 base_monthly 改为"标的市值×大跌定投比例"
+    # 2026-07-10 基准修正：current_value → max(total_cost, current_value)
     # 大跌定投比例默认8%（比趋势加仓5%略大，因跌幅已确认）
     dip_base_ratio = cfg.get("dip_base_ratio", 8.0)
     current_value = holding.get("current_value") or 0
-    base_amount = current_value * dip_base_ratio / 100
+    total_cost = holding.get("total_cost") or 0
+    effective_base = max(total_cost, current_value)
+    base_amount = effective_base * dip_base_ratio / 100
 
     # 1. 跌幅系数：使用档位倍数（4%→×1.0, 8%→×1.5, 12%→×2.0）
     drop_mult = matched_tier[1]
@@ -1409,9 +1429,10 @@ def _detect_dip_signal(
         loss_mult = 1.2
 
     # 3. 仓位余量系数：(25%上限-当前仓位)/25%，仓位越低补越多，最低0.3
+    # 2026-07-10 基准修正：仓位计算用 effective_base 避免深套误判低仓位
     max_pos_pct = cfg.get("max_single_position_pct", 25.0)
     total_assets = holding.get("_total_assets", 0)
-    current_position_pct = (current_value / total_assets * 100) if total_assets else 0
+    current_position_pct = (effective_base / total_assets * 100) if total_assets else 0
     room_mult = max(0.3, (max_pos_pct - current_position_pct) / max_pos_pct) if max_pos_pct > 0 else 1.0
 
     amount = round(base_amount * drop_mult * loss_mult * room_mult, 2)
@@ -1457,12 +1478,14 @@ def _generate_single_plan(
     pool_total: float,
     base_monthly: float,
     deep_loss_count: int = 0,
+    holdings: list = None,
 ) -> Optional[dict]:
     """生成单个持仓的补仓计划。
 
     Args:
         deep_loss_count: 全局深套标的数，用于计算资金池平均配额预警。
             主流程在汇总所有计划后回填该值，首次生成时为 0（不触发预警）。
+        holdings: 全部持仓列表，用于维度2穿透集中度计算（2026-07-10 新增）
     """
     fund_code = holding.get("fund_code", "")
     fund_name = holding.get("fund_name", "")
@@ -1622,7 +1645,8 @@ def _generate_single_plan(
     ):
         tiers = _calc_pyramid_tiers(
             profit_rate, pool_total, 0, cfg["tiers"], cfg["loss_threshold"],
-            current_value=current_value,  # 新增：金额计算基准为标的市值
+            current_value=current_value,
+            total_cost=total_cost,  # 2026-07-10 基准修正
         )
         triggered_count = sum(1 for t in tiers if t["triggered"])
         # 2026-07-17 重构：只预估下次补仓金额（不累加历史已触发档位）
@@ -1665,14 +1689,18 @@ def _generate_single_plan(
 
         # 修复5：小仓位标的补仓上限
         # 原逻辑无"补仓金额 ≤ 原市值 × N倍"约束，导致0.3%仓位标的建议补4.9万（原市值20倍）
-        max_add_amount = current_value * cfg["max_add_vs_position_mult"]
+        # 2026-07-10 基准修正：小仓位上限用 effective_base 避免深套误判
+        effective_base_for_cap = max(total_cost, current_value)
+        max_add_amount = effective_base_for_cap * cfg["max_add_vs_position_mult"]
         if engine2["released_amount"] > max_add_amount and max_add_amount > 0:
             engine2["scaled_from_position_cap"] = engine2["released_amount"]
             engine2["released_amount"] = round(max_add_amount, 2)
-            engine2["capped_reason"] = f"受原市值{cfg['max_add_vs_position_mult']}倍上限约束"
+            engine2["capped_reason"] = f"受有效基准{cfg['max_add_vs_position_mult']}倍上限约束"
 
     # 持仓占比 + 安全阀（用 L3 凯利上限替代原 25%）
-    position_pct = round(current_value / total_assets * 100, 2) if total_assets else 0
+    # 2026-07-10 基准修正：仓位计算用 effective_base 避免深套误判低仓位
+    effective_base_for_pos = max(total_cost, current_value)
+    position_pct = round(effective_base_for_pos / total_assets * 100, 2) if total_assets else 0
     can_add = position_pct < max_position_pct
 
     # 修复3：安全阀拦截
@@ -1742,6 +1770,58 @@ def _generate_single_plan(
     # 退出信号检测（止盈/止损/暂停，需开关开启）
     exit_signals = _detect_exit_signals(holding, valuation, cfg, total_assets, fund_type)
 
+    # ── 多维度仓位决策层（2026-07-10 新增）──
+    # 维度1目标仓位 + 维度2穿透 + 维度3首次仓 + 维度4弹性 + 维度5增强减仓 + 维度6资金约束
+    position_sizing = None
+    target_driven_monthly = 0.0
+    final_suggested_amount = total_suggested
+    try:
+        position_sizing = generate_position_sizing_plan(
+            holding=holding,
+            cfg=cfg,
+            total_assets=total_assets,
+            all_holdings=holdings or [holding],
+            kelly=kelly,
+            valuation=valuation,
+            fund_type=fund_type,
+            type_strategy=type_strategy,
+            user_id="default",
+        )
+        target_driven_monthly = position_sizing.get("target_driven_monthly", 0.0)
+
+        # 最终金额 = max(目标驱动, 信号触发) × 多维约束
+        # 维度5减仓信号优先：触发减仓时加仓归零
+        enhanced_exits = position_sizing.get("exit_signals", [])
+        has_enhanced_exit = any(s.get("triggered") for s in enhanced_exits)
+        if has_enhanced_exit:
+            final_suggested_amount = 0
+            # 合并增强减仓信号到 exit_signals
+            exit_signals = (exit_signals or []) + enhanced_exits
+        else:
+            # 取目标驱动与信号触发的较大值
+            base_amount = max(target_driven_monthly, total_suggested)
+            # 多维约束：安全阀 + 资金约束
+            cash_room = (position_sizing.get("cash_constraint") or {}).get("total_available_3m", 0)
+            # 资金约束为组合层3个月总额，单标的月度建议不超过资金池的合理份额
+            # 此处保守约束：单标的月度 ≤ 资金3月可用 / 深套标的数（避免单标的吃掉全部资金）
+            # 仅在目标驱动 > 信号触发时启用（信号触发由各自引擎已约束）
+            if target_driven_monthly > total_suggested and cash_room > 0:
+                # 资金约束软上限：单标的月度不超过可用资金的 1/3（保守）
+                cash_cap = cash_room / 3
+                if base_amount > cash_cap:
+                    base_amount = cash_cap
+                    position_sizing["cash_warning"] = (
+                        f"资金约束：月度建议上限¥{cash_cap:,.0f}（3月可用¥{cash_room:,.0f}/3）"
+                    )
+            final_suggested_amount = round(base_amount, 2)
+
+        # 安全阀未通过时归零
+        if not can_add:
+            final_suggested_amount = 0
+    except Exception as e:
+        logger.debug(f"[smart_add] 多维度仓位决策失败 {fund_code}: {e}")
+        position_sizing = None
+
     return {
         "fund_code": fund_code,
         "fund_name": fund_name,
@@ -1752,6 +1832,7 @@ def _generate_single_plan(
         "current_price": current_price,
         "total_cost": total_cost,
         "current_value": current_value,
+        "effective_base": max(total_cost, current_value),  # 2026-07-10 新增：统一基准
         "profit_rate": round(profit_rate, 4),
         "profit_rate_pct": round(profit_rate * 100, 2),
         "position_pct": position_pct,
@@ -1759,11 +1840,12 @@ def _generate_single_plan(
         "engine1": engine1,
         "pyramid": engine2,
         "triggered_signals": triggered_signals,  # 多维度触发器命中的信号列表
-        "exit_signals": exit_signals,  # 退出信号（止盈/止损/暂停）
+        "exit_signals": exit_signals,  # 退出信号（止盈/止损/暂停 + 维度5增强）
         "va_result": signal_d,  # 价值平均法结果（含触发/未触发）
         "grid_result": signal_e,  # 网格交易结果（含触发/未触发）
         "fund_health": fund_health,  # 基本面健康检查
-        "total_suggested": round(total_suggested, 2),  # 所有命中信号的建议金额汇总
+        "total_suggested": round(total_suggested, 2),  # 信号触发金额汇总（旧字段，向后兼容）
+        "final_suggested_amount": round(final_suggested_amount, 2),  # 2026-07-10 新增：多维度最终金额
         "has_signal": len([s for s in triggered_signals if s.get("triggered")]) > 0,
         "fund_type": fund_type_info["label"],
         "fund_type_code": fund_type,
@@ -1773,6 +1855,9 @@ def _generate_single_plan(
         "win_rate": win_rate,
         "confidence_mult": confidence_mult,
         "rhythm_adjust": rhythm_adjust,
+        # 2026-07-10 新增：多维度仓位决策详情
+        "position_sizing": position_sizing,
+        "target_driven_monthly": round(target_driven_monthly, 2),
         "safety": {
             "max_position_pct": max_position_pct,
             "current_position_pct": position_pct,

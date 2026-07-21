@@ -2687,6 +2687,8 @@ export const smartAddAPI = {
   deleteHypothetical: (txId) => api.delete(`/smart-add/hypothetical/${txId}`).then(r => r.data),
   /** 策略对比模拟器：对比不补仓/DCA/金字塔/VA */
   simulate: (data) => api.post('/smart-add/simulate', data).then(r => r.data),
+  /** 穿透指数集中度（含软提示） */
+  getIndexExposure: () => api.get('/smart-add/index-exposure').then(r => r.data),
 }
 
 // ── 交易计划 API ──────────────────────────────────────

@@ -29,6 +29,11 @@ const counterfactual = ref(null)
 const cfLoading = ref(false)
 const cfError = ref('')
 
+// 穿透指数集中度（维度2）
+const indexExposure = ref(null)
+const exposureLoading = ref(false)
+const exposureError = ref('')
+
 // 摊薄模拟器
 const simFundCode = ref('')
 const simDropPct = ref(-10)
@@ -143,6 +148,55 @@ async function loadConfig() {
     cfg.value = data
     syncCfgForm(data)
   } catch { /* 静默，plan 已带 config */ }
+}
+
+// 加载穿透指数集中度
+async function loadIndexExposure() {
+  exposureLoading.value = true
+  exposureError.value = ''
+  try {
+    indexExposure.value = await smartAddAPI.getIndexExposure()
+  } catch (e) {
+    exposureError.value = e?.message || '加载穿透集中度失败'
+  } finally {
+    exposureLoading.value = false
+  }
+}
+
+// 穿透条目转为数组（按占比降序已由后端完成）
+const exposureList = computed(() => {
+  const exp = indexExposure.value?.exposure
+  if (!exp) return []
+  return Object.entries(exp).map(([code, info]) => ({ code, ...info }))
+})
+
+// 多维度决策层摘要：从 plan.position_sizing 取关键字段
+const positionSizingView = (p) => {
+  const ps = p?.position_sizing
+  if (!ps) return null
+  const tp = ps.target_position || {}
+  return {
+    effective_base: p.effective_base,
+    target_driven_monthly: p.target_driven_monthly,
+    final_suggested_amount: p.final_suggested_amount,
+    target_position_pct: tp.target_pct,
+    adjust_months: tp.adjust_months,
+    valuation_bucket: tp.bucket,
+    valuation_coeff: tp.valuation_coeff,
+    exposure_warning: (ps.index_exposure && ps.index_exposure.warning) || null,
+    first_position: ps.first_position,
+    return_elasticity: ps.elasticity,
+    cash_constraint: ps.cash_constraint,
+    exit_signals: ps.exit_signals,
+    summary: ps.summary,
+    risk_multiplier: tp.components && tp.components.risk_mult,
+  }
+}
+
+// 基金类型中文标签
+const fundTypeLabel = (t) => {
+  const m = { broad: '宽基', industry: '行业', theme: '主题', bond: '债基', hk_overseas: '港股/海外', unknown: '未分类' }
+  return m[t] || t || '--'
 }
 
 // 反事实决策验证：加载假设操作跟踪结果
@@ -286,6 +340,7 @@ async function saveConfig() {
 
 onMounted(() => {
   loadPlan()
+  loadIndexExposure()
 })
 </script>
 
@@ -360,6 +415,57 @@ onMounted(() => {
         <Icon name="alert-triangle" size="16" />
         <span class="pool-warn-text">{{ summary.pool_exit_signals[0].suggested_action }}</span>
       </div>
+
+      <!-- ①.5 穿透指数集中度（维度2 软提示） -->
+      <section v-if="exposureList.length" class="block">
+        <h3 class="block-title">
+          <Icon name="layers" size="16" />
+          <span>穿透指数集中度</span>
+          <span class="block-subtitle">基于原始投入 max(total_cost, current_value)，超限仅警告不拦截</span>
+        </h3>
+        <div class="exposure-table-wrap">
+          <table class="exposure-table">
+            <thead>
+              <tr>
+                <th>指数代码</th>
+                <th>类型</th>
+                <th class="num">穿透占比</th>
+                <th class="num">上限</th>
+                <th class="num">余量</th>
+                <th>状态</th>
+                <th>涉及基金</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr
+                v-for="item in exposureList"
+                :key="item.code"
+                :class="{ 'exposure-warn-row': item.warning?.exceeded }"
+              >
+                <td class="font-jet">{{ item.code }}</td>
+                <td>
+                  <span :class="['exposure-type-tag', `type-${item.fund_type}`]">
+                    {{ fundTypeLabel(item.fund_type) }}
+                  </span>
+                </td>
+                <td class="num font-jet">{{ fmtPct(item.total_pct) }}</td>
+                <td class="num font-jet">{{ fmtPct(item.limit_pct, 0) }}</td>
+                <td class="num font-jet" :class="item.warning?.exceeded ? 'text-loss' : ''">
+                  {{ item.warning?.room_pct != null ? fmtPct(item.warning.room_pct) : '--' }}
+                </td>
+                <td>
+                  <span v-if="item.warning?.exceeded" class="exposure-flag flag-warn">超限</span>
+                  <span v-else class="exposure-flag flag-ok">正常</span>
+                </td>
+                <td class="exposure-funds">
+                  <span v-for="(name, i) in item.fund_names" :key="i" class="exposure-fund-chip">{{ name }}</span>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div v-if="exposureError" class="exposure-error">{{ exposureError }}</div>
+      </section>
 
       <!-- ② 组合视角：深套标的优先级排序表 -->
       <section v-if="priorityList.length" class="block">
@@ -626,6 +732,130 @@ onMounted(() => {
                 {{ p.safety?.can_add ? '可补仓' : '已达上限' }}
               </span>
               <button class="btn-link" @click="fillSim(p.fund_code)">模拟摊薄</button>
+            </div>
+
+            <!-- 多维度决策层（六维金额计算体系） -->
+            <div v-if="positionSizingView(p)" class="plan-row ps-row">
+              <div class="ps-head">
+                <Icon name="compass" size="14" />
+                <span class="ps-title">多维度决策层</span>
+                <span v-if="p.final_suggested_amount != null" class="ps-final">
+                  最终建议 <b class="font-jet">¥{{ fmtMoney(p.final_suggested_amount) }}</b>
+                </span>
+                <span v-if="positionSizingView(p).risk_multiplier != null" class="ps-risk">
+                  风险偏好 ×{{ fmtNum(positionSizingView(p).risk_multiplier) }}
+                </span>
+              </div>
+              <div class="ps-summary" v-if="positionSizingView(p).summary">
+                <Icon name="info" size="12" />
+                <span>{{ positionSizingView(p).summary }}</span>
+              </div>
+              <div class="ps-grid">
+                <!-- 维度1：目标仓位锚定 -->
+                <div class="ps-item ps-d1">
+                  <span class="ps-label">维度1 · 目标仓位</span>
+                  <span class="ps-value font-jet" v-if="positionSizingView(p).target_position_pct != null">
+                    {{ fmtPct(positionSizingView(p).target_position_pct) }}
+                  </span>
+                  <span class="ps-value font-jet" v-else>--</span>
+                  <span class="ps-sub">
+                    <span v-if="positionSizingView(p).valuation_bucket">{{ positionSizingView(p).valuation_bucket }}</span>
+                    <span v-if="positionSizingView(p).valuation_coeff != null"> ×{{ fmtNum(positionSizingView(p).valuation_coeff) }}</span>
+                    <span v-if="positionSizingView(p).adjust_months"> / {{ positionSizingView(p).adjust_months }}月</span>
+                  </span>
+                  <span class="ps-sub" v-if="p.target_driven_monthly != null">
+                    目标驱动月投 ¥{{ fmtMoney(p.target_driven_monthly) }}
+                  </span>
+                </div>
+                <!-- 维度2：穿透集中度软提示 -->
+                <div
+                  class="ps-item ps-d2"
+                  :class="{ 'ps-warn': positionSizingView(p).exposure_warning?.exceeded }"
+                >
+                  <span class="ps-label">维度2 · 穿透集中度</span>
+                  <span class="ps-value font-jet" v-if="positionSizingView(p).exposure_warning?.current_pct != null">
+                    {{ fmtPct(positionSizingView(p).exposure_warning.current_pct) }}
+                    / 上限 {{ fmtPct(positionSizingView(p).exposure_warning.limit_pct, 0) }}
+                  </span>
+                  <span class="ps-value font-jet" v-else>未关联指数</span>
+                  <span class="ps-sub" v-if="positionSizingView(p).exposure_warning?.message">
+                    {{ positionSizingView(p).exposure_warning.message }}
+                  </span>
+                </div>
+                <!-- 维度3：首次建仓标准仓 -->
+                <div class="ps-item ps-d3" v-if="positionSizingView(p).first_position">
+                  <span class="ps-label">维度3 · 首次建仓</span>
+                  <span class="ps-value font-jet" v-if="positionSizingView(p).first_position.first_pct != null">
+                    标准 {{ fmtPct(positionSizingView(p).first_position.first_pct, 0) }}
+                  </span>
+                  <span class="ps-value font-jet" v-else>--</span>
+                  <span
+                    class="ps-sub"
+                    v-if="positionSizingView(p).first_position.needed && positionSizingView(p).first_position.target_add_total != null"
+                  >
+                    缺口 ¥{{ fmtMoney(positionSizingView(p).first_position.target_add_total) }} · 月补 ¥{{ fmtMoney(positionSizingView(p).first_position.monthly_add) }}
+                  </span>
+                  <span class="ps-sub" v-else>
+                    {{ positionSizingView(p).first_position.reason || '原投入已达标' }}
+                  </span>
+                </div>
+                <!-- 维度4：收益弹性 -->
+                <div
+                  class="ps-item ps-d4"
+                  :class="{ 'ps-warn': positionSizingView(p).return_elasticity && positionSizingView(p).return_elasticity.level !== 'normal' }"
+                  v-if="positionSizingView(p).return_elasticity"
+                >
+                  <span class="ps-label">维度4 · 收益弹性</span>
+                  <span class="ps-value font-jet" v-if="positionSizingView(p).return_elasticity.elasticity != null">
+                    {{ fmtSignedPct(positionSizingView(p).return_elasticity.elasticity) }}
+                  </span>
+                  <span class="ps-value font-jet" v-else>--</span>
+                  <span class="ps-sub" v-if="positionSizingView(p).return_elasticity.message">
+                    {{ positionSizingView(p).return_elasticity.message }}
+                  </span>
+                  <span
+                    class="ps-sub"
+                    v-else-if="positionSizingView(p).return_elasticity.expected_return_pct != null"
+                  >
+                    预期{{ fmtSignedPct(positionSizingView(p).return_elasticity.expected_return_pct) }} · 仓位{{ fmtPct(positionSizingView(p).return_elasticity.position_pct) }}
+                  </span>
+                </div>
+                <!-- 维度6：资金约束 -->
+                <div class="ps-item ps-d6" v-if="positionSizingView(p).cash_constraint">
+                  <span class="ps-label">维度6 · 资金约束</span>
+                  <span class="ps-value font-jet" v-if="positionSizingView(p).cash_constraint.total_available_3m != null">
+                    ¥{{ fmtMoney(positionSizingView(p).cash_constraint.total_available_3m) }}
+                  </span>
+                  <span class="ps-value font-jet" v-else>--</span>
+                  <span class="ps-sub" v-if="positionSizingView(p).cash_constraint.position_room_pct != null">
+                    可加仓位 {{ fmtPct(positionSizingView(p).cash_constraint.position_room_pct) }}
+                  </span>
+                </div>
+                <!-- 有效基准（核心：原始投入驱动） -->
+                <div class="ps-item ps-base">
+                  <span class="ps-label">有效基准（原始投入驱动）</span>
+                  <span class="ps-value font-jet" v-if="p.effective_base != null">
+                    ¥{{ fmtMoney(p.effective_base) }}
+                  </span>
+                  <span class="ps-value font-jet" v-else>--</span>
+                  <span class="ps-sub">max(总成本, 当前市值)</span>
+                </div>
+              </div>
+              <!-- 维度5：减仓信号（如有触发） -->
+              <div
+                v-if="positionSizingView(p).exit_signals && positionSizingView(p).exit_signals.filter(s => s.triggered).length"
+                class="ps-exit-list"
+              >
+                <div
+                  v-for="(sig, idx) in positionSizingView(p).exit_signals.filter(s => s.triggered)"
+                  :key="idx"
+                  :class="['ps-exit-item', `ps-exit-${sig.severity || 'info'}`]"
+                >
+                  <span class="ps-exit-tag">{{ sig.label || '减仓信号' }}</span>
+                  <span class="ps-exit-action">{{ sig.suggested_action }}</span>
+                  <span class="ps-exit-reason">{{ sig.reason }}</span>
+                </div>
+              </div>
             </div>
 
             <!-- 多维度触发器：命中的信号列表 -->
@@ -2221,5 +2451,197 @@ onMounted(() => {
   .cf-summary-grid { grid-template-columns: repeat(2, 1fr); }
   .cf-table { font-size: 0.75rem; }
   .cf-table th, .cf-table td { padding: 6px 4px; }
+}
+
+/* ── 穿透指数集中度 ── */
+.exposure-table-wrap {
+  background: var(--color-bg-card);
+  border: 1px solid var(--color-border-light);
+  border-radius: var(--radius-md);
+  overflow-x: auto;
+}
+.exposure-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.8rem;
+}
+.exposure-table th,
+.exposure-table td {
+  padding: 0.55rem 0.8rem;
+  text-align: left;
+  border-bottom: 1px solid var(--color-border-light);
+  white-space: nowrap;
+}
+.exposure-table th {
+  font-size: 0.7rem;
+  font-weight: 600;
+  color: var(--color-text-muted);
+  background: var(--color-bg-input);
+}
+.exposure-table tbody tr:last-child td { border-bottom: none; }
+.exposure-table tbody tr:hover { background: var(--color-bg-hover); }
+.exposure-table .num { text-align: right; }
+.exposure-warn-row { background: rgba(245, 158, 11, 0.06); }
+.exposure-warn-row:hover { background: rgba(245, 158, 11, 0.1) !important; }
+
+.exposure-type-tag {
+  display: inline-block;
+  padding: 0.15rem 0.5rem;
+  border-radius: 4px;
+  font-size: 0.68rem;
+  background: var(--color-bg-input);
+  color: var(--color-text-secondary);
+}
+.exposure-type-tag.type-broad { background: rgba(59, 130, 246, 0.12); color: #1d4ed8; }
+.exposure-type-tag.type-industry { background: rgba(16, 185, 129, 0.12); color: #047857; }
+.exposure-type-tag.type-theme { background: rgba(168, 85, 247, 0.12); color: #7c3aed; }
+.exposure-type-tag.type-bond { background: rgba(100, 116, 139, 0.14); color: #334155; }
+.exposure-type-tag.type-hk_overseas { background: rgba(245, 158, 11, 0.12); color: #b45309; }
+
+.exposure-flag {
+  display: inline-block;
+  padding: 0.15rem 0.5rem;
+  border-radius: 4px;
+  font-size: 0.7rem;
+  font-weight: 500;
+}
+.exposure-flag.flag-ok { background: rgba(16, 185, 129, 0.12); color: #047857; }
+.exposure-flag.flag-warn { background: rgba(245, 158, 11, 0.18); color: #b45309; }
+
+.exposure-funds { max-width: 320px; }
+.exposure-fund-chip {
+  display: inline-block;
+  margin-right: 0.3rem;
+  margin-bottom: 0.2rem;
+  padding: 0.1rem 0.4rem;
+  border-radius: 3px;
+  font-size: 0.66rem;
+  background: var(--color-bg-input);
+  color: var(--color-text-tertiary);
+  white-space: nowrap;
+}
+.exposure-error { color: var(--color-loss); font-size: 0.78rem; padding: 0.4rem 0.6rem; }
+
+/* ── 多维度决策层 ── */
+.ps-row {
+  margin: 0.5rem 0;
+  padding: 0.7rem 0.8rem;
+  background: linear-gradient(180deg, rgba(99, 102, 241, 0.04), rgba(99, 102, 241, 0.01));
+  border: 1px solid rgba(99, 102, 241, 0.15);
+  border-radius: var(--radius-sm);
+}
+.ps-head {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.4rem;
+}
+.ps-title {
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: var(--color-text-primary);
+}
+.ps-final {
+  margin-left: auto;
+  font-size: 0.78rem;
+  color: var(--color-text-secondary);
+}
+.ps-final b {
+  color: var(--color-profit);
+  font-size: 0.92rem;
+  margin-left: 0.3rem;
+}
+.ps-risk {
+  font-size: 0.7rem;
+  padding: 0.1rem 0.4rem;
+  border-radius: 3px;
+  background: var(--color-bg-input);
+  color: var(--color-text-muted);
+}
+.ps-summary {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.74rem;
+  color: var(--color-text-secondary);
+  margin-bottom: 0.55rem;
+  padding: 0.4rem 0.55rem;
+  background: var(--color-bg-input);
+  border-radius: var(--radius-sm);
+  line-height: 1.5;
+}
+.ps-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 0.55rem;
+}
+.ps-item {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  padding: 0.5rem 0.6rem;
+  background: var(--color-bg-card);
+  border: 1px solid var(--color-border-light);
+  border-radius: var(--radius-sm);
+}
+.ps-item.ps-warn {
+  background: rgba(245, 158, 11, 0.06);
+  border-color: rgba(245, 158, 11, 0.3);
+}
+.ps-label {
+  font-size: 0.66rem;
+  color: var(--color-text-muted);
+  font-weight: 500;
+}
+.ps-value {
+  font-size: 0.86rem;
+  font-weight: 600;
+  color: var(--color-text-primary);
+}
+.ps-sub {
+  font-size: 0.66rem;
+  color: var(--color-text-tertiary);
+  line-height: 1.4;
+}
+.ps-base {
+  background: rgba(99, 102, 241, 0.05);
+  border-color: rgba(99, 102, 241, 0.2);
+}
+.ps-base .ps-value { color: #4338ca; }
+
+.ps-exit-list {
+  margin-top: 0.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+.ps-exit-item {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.4rem 0.6rem;
+  border-radius: var(--radius-sm);
+  font-size: 0.75rem;
+  border-left: 3px solid;
+}
+.ps-exit-info { background: rgba(59, 130, 246, 0.08); border-color: #3b82f6; }
+.ps-exit-warning { background: rgba(245, 158, 11, 0.08); border-color: #f59e0b; }
+.ps-exit-danger { background: rgba(220, 38, 38, 0.08); border-color: #dc2626; }
+.ps-exit-tag {
+  font-weight: 600;
+  color: var(--color-text-primary);
+}
+.ps-exit-action {
+  color: var(--color-text-secondary);
+}
+.ps-exit-reason {
+  color: var(--color-text-muted);
+  font-size: 0.7rem;
+  margin-left: auto;
+}
+
+@media (max-width: 768px) {
+  .ps-grid { grid-template-columns: repeat(2, 1fr); }
+  .exposure-funds { max-width: 200px; }
 }
 </style>
