@@ -6,13 +6,46 @@ from collections import Counter
 
 
 def _detect_stance(text: str) -> str:
+    """从专家分析文本中检测操作立场。
+
+    conv#131 修复：原优先级 hold > buy > sell 且 hold 关键词含"风险""谨慎"，
+    导致几乎所有专家都被识别为 hold，key_conflicts 恒空。
+
+    新优先级：sell > buy > hold（先检测明确操作意图，最后 fallback 到 hold）。
+    否定形式（"不建议X"/"先别X"/"暂停X"/"不X"）优先识别为 hold 或 unknown。
+    """
     text = (text or "").lower()
-    if any(kw in text for kw in ["不建议", "观望", "持有", "风险", "谨慎", "先别", "暂停"]):
+    # 否定形式优先：不建议/先别/暂停 + 任何操作 → hold
+    # 避免"不建议加仓""不建议买入"被 buy 关键词截获
+    if any(neg in text for neg in ["不建议", "先别", "暂停"]):
         return "hold"
-    if any(kw in text for kw in ["建议买", "买入", "加仓", "建仓", "上车", "分批买"]):
-        return "buy"
-    if any(kw in text for kw in ["卖出", "减仓", "止盈", "止损", "退出"]):
+    # sell 优先级最高：明确卖出/减仓意图
+    # "减仓/清仓/赎回/退出/止损"直接判定 sell（这些词很少用于否定语境）
+    # "卖出"需要排除"不卖出/没有卖出"等否定形式
+    if any(kw in text for kw in ["减仓", "清仓", "赎回", "退出", "止损"]):
         return "sell"
+    if "卖出" in text:
+        # 检查"卖出"是否在否定语境中
+        sell_negated = any(neg in text for neg in ["不卖出", "没有卖出", "无需卖出", "暂不卖出", "不急着卖出"])
+        if not sell_negated:
+            return "sell"
+    # buy 次高：明确买入/加仓意图
+    # 但排除"不买入""没有买入""而非...买入/建仓"等否定形式
+    if any(kw in text for kw in ["建议买", "买入", "加仓", "建仓", "上车", "分批买", "定投", "补仓"]):
+        neg_contexts = ["不买入", "没有买入", "无需买入", "暂不买入", "不急买入",
+                        "而非长期价值资金的稳步建仓", "而非.*建仓"]
+        # 用正则检查"而非...建仓/买入"模式（10 字符内）
+        is_negated = any(neg in text for neg in neg_contexts)
+        if not is_negated:
+            import re
+            if re.search(r"而非[^。]{0,15}(建仓|买入|加仓)", text):
+                is_negated = True
+        if not is_negated:
+            return "buy"
+    # hold 最低：被动立场，仅匹配明确的不操作意图
+    # 移除"风险""谨慎"（风险描述不是立场），移除"止盈"（盈利操作不是 sell）
+    if any(kw in text for kw in ["观望", "持有"]):
+        return "hold"
     return "unknown"
 
 
@@ -34,9 +67,13 @@ def arbitrate_results(query: str, specialist_results: list[dict], blackboard=Non
             reasons.append(f"{agent_name}: {analysis[:120]}")
 
     counts = Counter(s for s in stances if s != "unknown")
-    if counts["hold"] > 0:
+    # conv#131 修复：原逻辑"1 个 hold 就压倒一切"违反多数决原则
+    # 新逻辑：hold 需过半才生效，否则 buy/sell 的明确意图优先
+    total_stanced = sum(counts.values())
+    half = total_stanced / 2
+    if counts["hold"] > half:
         final_stance = "hold"
-        arbitration_mode = "conflict" if counts["buy"] or counts["sell"] else "consensus"
+        arbitration_mode = "conflict" if (counts["buy"] or counts["sell"]) else "consensus"
     elif counts["sell"] > counts["buy"]:
         final_stance = "sell"
         arbitration_mode = "consensus" if counts["sell"] > 1 else "conflict"
@@ -56,6 +93,8 @@ def arbitrate_results(query: str, specialist_results: list[dict], blackboard=Non
         except Exception:
             shared_evidence["key_data"] = {}
 
+    # conv#131 修复：disagreements 只提取明确操作意图（buy/sell），不含 hold
+    # 原逻辑含 hold 导致大量"伪 hold"污染分歧列表
     disagreements = [
         {
             "agent_key": result.get("agent_key", "unknown"),
@@ -63,7 +102,7 @@ def arbitrate_results(query: str, specialist_results: list[dict], blackboard=Non
             "stance": result.get("stance") or _detect_stance(result.get("analysis", "")),
         }
         for result in specialist_results or []
-        if (result.get("stance") or _detect_stance(result.get("analysis", ""))) in ("buy", "sell", "hold")
+        if (result.get("stance") or _detect_stance(result.get("analysis", ""))) in ("buy", "sell")
     ]
 
     # ── 兼容字段：供 _save_final / pipeline 日志直接使用 ──
@@ -89,28 +128,22 @@ def arbitrate_results(query: str, specialist_results: list[dict], blackboard=Non
     else:
         confidence = "medium"
 
-    # 关键冲突：按 stance 分组提取对立观点（buy vs sell/hold 等）
-    stance_groups: dict[str, list[str]] = {"buy": [], "sell": [], "hold": []}
+    # conv#131 修复：key_conflicts 只检测 buy vs sell 的真实分歧
+    # 原逻辑含 buy_vs_hold/sell_vs_hold，但 hold 是被动立场不是真实分歧方，
+    # 且"伪 hold"误判严重导致大量假冲突或假共识
+    stance_groups: dict[str, list[str]] = {"buy": [], "sell": []}
     for d in disagreements:
         s = d.get("stance", "unknown")
         if s in stance_groups:
             agent_label = d.get("agent") or d.get("agent_key") or "unknown"
             stance_groups[s].append(agent_label)
     key_conflicts = []
-    if stance_groups["buy"] and (stance_groups["sell"] or stance_groups["hold"]):
-        opposing = stance_groups["sell"] + stance_groups["hold"]
+    if stance_groups["buy"] and stance_groups["sell"]:
         key_conflicts.append({
-            "type": "buy_vs_sell_hold",
+            "type": "buy_vs_sell",
             "buy_side": stance_groups["buy"],
-            "opposing_side": opposing,
-            "note": "看多与看空/持有观点存在分歧",
-        })
-    if stance_groups["sell"] and stance_groups["hold"]:
-        key_conflicts.append({
-            "type": "sell_vs_hold",
             "sell_side": stance_groups["sell"],
-            "hold_side": stance_groups["hold"],
-            "note": "看空与持有观点存在分歧",
+            "note": "看多与看空观点存在分歧",
         })
 
     # 推理摘要：重构为"识别分歧+解决冲突+独立置信度评估"格式
@@ -178,12 +211,8 @@ def _build_arbitration_reasoning(
         for c in key_conflicts:
             buy_side = "、".join(c.get("buy_side", [])) if c.get("buy_side") else ""
             sell_side = "、".join(c.get("sell_side", [])) if c.get("sell_side") else ""
-            hold_side = "、".join(c.get("hold_side", [])) if c.get("hold_side") else ""
-            opposing = sell_side or hold_side or "、".join(c.get("opposing_side", []))
-            if buy_side and opposing:
-                conflict_lines.append(f"  - {buy_side} 看多 vs {opposing} 持谨慎")
-            elif sell_side and hold_side:
-                conflict_lines.append(f"  - {sell_side} 看空 vs {hold_side} 倾向持有")
+            if buy_side and sell_side:
+                conflict_lines.append(f"  - {buy_side} 看多 vs {sell_side} 看空")
         if conflict_lines:
             parts.append("【分歧】\n" + "\n".join(conflict_lines))
     else:
