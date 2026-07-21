@@ -820,6 +820,77 @@ def _build_final_synthesis_prompt(specialist_results: list, routed_specialists: 
         '改用大概率/预计/较可能等表述'
     )
 
+    # P0-B 时机判断强制注入（conv#131 修复）
+    # 开关：agent.timing_judgment_enforced（默认 false）
+    try:
+        from db.config import get_config_bool as _gcb_timing
+        if _gcb_timing("agent.timing_judgment_enforced", False):
+            prompt += (
+                "\n\n## 时机判断强制要求（如涉及买卖操作）\n"
+                "每条操作建议必须显式回答以下 3 个问题：\n"
+                "1. **估值时机**：标的当前 PE/PB 百分位是多少？属于「低估（<30%）/合理（30-70%）/高估（>70%）」？\n"
+                "2. **盈亏时机**：标的当前盈亏率是多少？属于「深度亏损（<-15%）/浅度亏损/微利/盈利（>15%）」？\n"
+                "3. **执行时机**：当前是否适合执行？为什么？（如「估值处于历史 0.45% 分位，此时清仓等于高买低卖」）\n\n"
+                "禁止规则：\n"
+                "- 禁止建议「立即清仓」亏损标的（profit_rate < 0）且估值分位 < 30%（底部割肉）\n"
+                "- 禁止建议「立即减仓」亏损标的（除非风险止损场景：单只亏损 > 20% 且趋势确认向下）\n"
+                "- 禁止建议「立即买入」高估标的（估值分位 > 70%）\n"
+                "- 禁止仅因「功能重叠/持仓过多」就建议清仓亏损标的，必须先判断时机\n"
+                "- 禁止用「未来一周内择机执行」等模糊时机表述，必须给出具体条件\n"
+            )
+    except Exception:
+        pass
+
+    # P0-C 止盈不止损原则注入（conv#131 修复）
+    # 开关：agent.profit_not_loss_principle_enabled（默认 false）
+    try:
+        from db.config import get_config_bool as _gcb_pnl
+        if _gcb_pnl("agent.profit_not_loss_principle_enabled", False):
+            prompt += (
+                "\n\n## 止盈不止损原则（违反时必须显式说明理由）\n"
+                "- **盈利标的（profit_rate > 0）**：可建议部分止盈（如减仓 50%）或全部止盈\n"
+                "- **亏损标的（profit_rate < 0）**：禁止建议清仓/止损，除非满足以下任一条件：\n"
+                "  1. 标的估值分位 ≥ 70%（高估）\n"
+                "  2. 标的基本面恶化（如基金规模骤降、经理变更、策略失效）\n"
+                "  3. 风险止损场景（单只亏损 > 20% 且趋势确认向下）\n"
+                "  4. 功能重叠整合（合并同类项，不改变总敞口，如 3 只恒生科技合并为 1 只）\n\n"
+                "- **亏损标的整合建议应为**：\n"
+                "  * 「持有等反弹」（估值低位时）\n"
+                "  * 「合并同类项」（不改变总敞口，只减数量不减仓位）\n"
+                "  * 「分批减仓」（估值修复到中位后逐步减）\n\n"
+                "- **禁止行为**：\n"
+                "  * 禁止仅因「功能重叠/持仓过多」就建议清仓亏损标的\n"
+                "  * 禁止「先减后加」逻辑漏洞（低位割肉再低位买入=无意义操作）\n"
+                "  * 禁止用「立即行动」「择机执行」等模糊时机表述\n"
+            )
+    except Exception:
+        pass
+
+    # P2-F 综合报告工具结果汇总注入（conv#131 修复）
+    # 开关：agent.synthesis_tool_summary_enabled（默认 false）
+    try:
+        from db.config import get_config_bool as _gcb_toolsum
+        if _gcb_toolsum("agent.synthesis_tool_summary_enabled", False) and blackboard:
+            tool_broadcasts = blackboard.get_tool_broadcasts() if hasattr(blackboard, "get_tool_broadcasts") else []
+            if tool_broadcasts:
+                prompt += "\n\n## 工具结果汇总（综合回答必须引用）"
+                for tb in tool_broadcasts[:10]:
+                    tool_name = getattr(tb, "tool_name", "") or (tb.get("tool_name", "") if isinstance(tb, dict) else "")
+                    query_text = getattr(tb, "query", "") or (tb.get("query", "") if isinstance(tb, dict) else "")
+                    summary_text = getattr(tb, "summary", "") or (tb.get("summary", "") if isinstance(tb, dict) else "")
+                    key_fields = getattr(tb, "key_fields", None)
+                    if key_fields is None and isinstance(tb, dict):
+                        key_fields = tb.get("key_fields")
+                    prompt += f"\n- {tool_name}「{query_text}」: {summary_text}"
+                    if key_fields:
+                        try:
+                            prompt += f"\n  关键字段: {json.dumps(key_fields, ensure_ascii=False)}"
+                        except Exception:
+                            pass
+                prompt += "\n约束：涉及估值/盈亏/补仓金额时，必须引用上述工具结果，禁止编造未出现的数据。\n"
+    except Exception:
+        pass
+
     return prompt
 
 
@@ -5079,6 +5150,42 @@ def _stream_final_synthesis(query: str, refined_query: str, specialists: list,
     except Exception as e:
         logger.warning(f"流式 Validator 调用失败: {e}")
         validator_result = {"enabled": True, "passed": True, "issues": []}
+
+    # P0-A 仲裁-综合一致性硬校验（conv#131 修复）
+    # 检测综合报告操作建议与仲裁裁决方向是否冲突，冲突时追加警告
+    # 开关：agent.arbitration_consistency_guard_enabled（默认 false）
+    try:
+        from agent.safety.arbitration_guard import enforce_arbitration_consistency
+        # arbitration_summary 在上方 try 块中定义，若失败则使用 None
+        _arb_summary_local = locals().get("arbitration_summary")
+        final_answer, _guard_warnings = enforce_arbitration_consistency(
+            final_answer, _arb_summary_local, trace_id=trace_id
+        )
+        if _guard_warnings:
+            logger.info(
+                f"[trace:{trace_id}] [orchestrator] 仲裁一致性校验触发: {_guard_warnings}"
+            )
+    except Exception as _guard_err:
+        logger.warning(
+            f"[trace:{trace_id}] [orchestrator] 仲裁一致性校验失败: {_guard_err}"
+        )
+
+    # P1-E 卖出操作时机守卫（conv#131 修复）
+    # 检测卖出/减仓/清仓等操作建议时，强制要求 answer 包含估值分位和盈亏状态
+    # 开关：agent.sell_timing_guard_enabled（默认 false）
+    try:
+        from agent.safety.sell_timing_guard import enforce_sell_timing_guard
+        final_answer, _timing_warnings = enforce_sell_timing_guard(
+            final_answer, trace_id=trace_id
+        )
+        if _timing_warnings:
+            logger.info(
+                f"[trace:{trace_id}] [orchestrator] 卖出时机守卫触发: {_timing_warnings}"
+            )
+    except Exception as _timing_err:
+        logger.warning(
+            f"[trace:{trace_id}] [orchestrator] 卖出时机守卫失败: {_timing_err}"
+        )
 
     duration_ms = int((time.time() - start_time) * 1000)
     perf_metrics["phases"]["total"] = duration_ms

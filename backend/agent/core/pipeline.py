@@ -318,6 +318,126 @@ def run_pipeline(
             else:
                 logger.debug("[pipeline] 无冲突，跳过辩论节点")
 
+        # ── Phase 3.8: 交叉审阅（P2-G 修复 conv#131）──────────────
+        # 原 Pipeline 路径未触发 run_cross_review_opinion，导致 cross_review_results 恒为空
+        # 此处补全：≥2 个专家时，并行执行交叉审阅，emit cross_review_start/done 事件
+        # 让 conversations.py 通过事件监听器正确写入 metadata.cross_review_results
+        try:
+            cross_review_enabled_cfg = get_config_bool("cross_review_enabled", True)
+        except Exception:
+            cross_review_enabled_cfg = True
+        try:
+            cross_review_min_spec = get_config_int("cross_review_min_specialists", 1)
+        except Exception:
+            cross_review_min_spec = 1
+
+        _phase3_specialists_list = phase3_result.get("specialists", []) or []
+        if (cross_review_enabled_cfg
+                and len(_phase3_specialists_list) >= max(2, cross_review_min_spec)):
+            logger.info(
+                f"[pipeline] 触发交叉审阅（{len(_phase3_specialists_list)} 个专家）"
+            )
+            yield {
+                "type": "status",
+                "message": f"正在进行交叉审阅（{len(_phase3_specialists_list)} 个专家并行互相验证）..."
+            }
+
+            # 构造 peer 分析字典
+            _peer_analyses = {
+                sr.get("agent_key", f"agent_{i}"): sr.get("analysis", "")
+                for i, sr in enumerate(_phase3_specialists_list)
+            }
+            _original_specialists = list(_phase3_specialists_list)
+
+            # 发送所有 cross_review_start 事件
+            for sr in _original_specialists:
+                yield {
+                    "type": "cross_review_start",
+                    "agent_key": sr.get("agent_key", ""),
+                    "agent": sr.get("agent", sr.get("agent_key", "")),
+                    "icon": sr.get("icon", "🤖"),
+                }
+
+            # 并行执行交叉审阅
+            import concurrent.futures as _cf
+            from agent.core.multi_agent import run_cross_review_opinion as _run_cr_op
+
+            def _review_single_pipeline(sr):
+                peer = {k: v for k, v in _peer_analyses.items()
+                        if k != sr.get("agent_key")}
+                try:
+                    return sr, _run_cr_op(
+                        sr.get("agent_key", ""), state.refined_query,
+                        sr.get("analysis", ""), peer,
+                        trace_id=trace_id,
+                        conversation_id=state.conversation_id,
+                        message_id=state.message_id,
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"[pipeline] 交叉审阅失败 {sr.get('agent_key', '')}: {e}"
+                    )
+                    # 兜底：返回一个标记失败的 cross_review 结果
+                    return sr, {
+                        "agent_key": sr.get("agent_key", ""),
+                        "agent": sr.get("agent", sr.get("agent_key", "")),
+                        "icon": sr.get("icon", "🤖"),
+                        "analysis": f"交叉审阅失败: {e}",
+                        "tool_calls": [],
+                        "duration_ms": 0,
+                        "is_cross_review": True,
+                        "opinion": {"agreements": [], "disagreements": [], "additions": []},
+                    }
+
+            _cr_results = []
+            try:
+                with _cf.ThreadPoolExecutor(
+                    max_workers=min(len(_original_specialists), 3)
+                ) as executor:
+                    futures = {
+                        executor.submit(_review_single_pipeline, sr): sr
+                        for sr in _original_specialists
+                    }
+                    for future in _cf.as_completed(futures):
+                        sr = futures[future]
+                        try:
+                            _, cr_result = future.result(timeout=300)
+                            _cr_results.append(cr_result)
+                            # 追加到 phase3_result 让综合阶段能看到
+                            phase3_result.setdefault("specialists", []).append(cr_result)
+                            yield {
+                                "type": "cross_review_done",
+                                "agent_key": sr.get("agent_key", ""),
+                                "agent": sr.get("agent", sr.get("agent_key", "")),
+                                "icon": sr.get("icon", "🤖"),
+                                "analysis": cr_result.get("analysis", ""),
+                                "duration_ms": cr_result.get("duration_ms", 0),
+                            }
+                        except Exception as e:
+                            logger.error(
+                                f"[pipeline] 交叉审阅 future 失败 {sr.get('agent_key', '')}: {e}"
+                            )
+                            yield {
+                                "type": "cross_review_done",
+                                "agent_key": sr.get("agent_key", ""),
+                                "agent": sr.get("agent", sr.get("agent_key", "")),
+                                "icon": sr.get("icon", "🤖"),
+                                "analysis": f"交叉审阅失败: {e}",
+                                "duration_ms": 0,
+                            }
+            except Exception as cr_phase_err:
+                logger.warning(f"[pipeline] 交叉审阅阶段失败，继续综合: {cr_phase_err}")
+
+            if _cr_results:
+                logger.info(
+                    f"[pipeline] 交叉审阅完成，{len(_cr_results)} 个专家已互相验证"
+                )
+        else:
+            logger.debug(
+                f"[pipeline] 跳过交叉审阅（enabled={cross_review_enabled_cfg}, "
+                f"specialists={len(_phase3_specialists_list)})"
+            )
+
         # ── Phase 4: 综合 ──────────────────
         state.transition_to(PipelinePhase.SYNTHESIS)
         yield {"type": EVENT_PHASE_START, "phase": PipelinePhase.SYNTHESIS.value}
@@ -361,7 +481,8 @@ def run_pipeline(
                "specialist_results": phase3_specialists,
                "tool_calls": phase3_result.get("tool_calls", []),
                "confidence": phase4_result.get("confidence", 0.0),
-               "arbitration": phase4_result.get("arbitration")}
+               "arbitration": phase4_result.get("arbitration"),
+               "cross_review_results": phase4_result.get("cross_review_results", [])}
 
         # ── Phase 5: 记忆持久化 ──────────────────
         state.transition_to(PipelinePhase.MEMORY)
@@ -560,7 +681,8 @@ def run_pipeline_from_checkpoint(
                "specialist_results": phase3_specialists,
                "tool_calls": phase3_result.get("tool_calls", []),
                "confidence": phase4_result.get("confidence", 0.0),
-               "arbitration": phase4_result.get("arbitration")}
+               "arbitration": phase4_result.get("arbitration"),
+               "cross_review_results": phase4_result.get("cross_review_results", [])}
 
         # Phase 5: 记忆持久化
         state.transition_to(PipelinePhase.MEMORY)
@@ -1694,6 +1816,12 @@ def _phase_synthesis(
     # P0-B: 收集持仓影响供前端展示
     impacts = blackboard.get_portfolio_impacts() if blackboard else []
 
+    # P2-G: 提取交叉审阅结果（在 Phase 3.8 已追加到 specialists 列表）
+    # 让 _phase_synthesis 返回值携带 cross_review_results，供 metadata 写入
+    cross_review_results = [
+        s for s in specialists if s.get("is_cross_review")
+    ]
+
     # 综合置信度（基于 Reflection 调整 + 专家数 + 冲突数 + 数据缺失）
     confidence = _compute_confidence(
         reflection_result, len(specialists), len(conflicts), data_gaps=data_gaps,
@@ -1702,6 +1830,7 @@ def _phase_synthesis(
     return {
         "answer": answer,
         "cross_review": {"conflicts": conflicts},
+        "cross_review_results": cross_review_results,
         "arbitration": arbitration_summary,
         "specialist_count": len(specialists),
         "reflection": reflection_result,
@@ -2135,6 +2264,38 @@ def _synthesize_multiple_specialists(
     # 若被否决标的在最终 answer 中仍出现 BUY/加仓 关键词，强制改写为 HOLD
     if vetoes:
         answer = _enforce_risk_veto(answer, vetoes, trace_id)
+
+    # P0-A 仲裁-综合一致性硬校验（conv#131 修复）
+    # 检测综合报告操作建议与仲裁裁决方向是否冲突，冲突时追加警告
+    # 开关：agent.arbitration_consistency_guard_enabled（默认 false）
+    try:
+        from agent.safety.arbitration_guard import enforce_arbitration_consistency
+        answer, _guard_warnings = enforce_arbitration_consistency(
+            answer, arbitration_summary, trace_id=trace_id
+        )
+        if _guard_warnings:
+            logger.info(
+                f"[trace:{trace_id}] [pipeline] 仲裁一致性校验触发: {_guard_warnings}"
+            )
+    except Exception as _guard_err:
+        logger.warning(
+            f"[trace:{trace_id}] [pipeline] 仲裁一致性校验失败: {_guard_err}"
+        )
+
+    # P1-E 卖出操作时机守卫（conv#131 修复）
+    # 检测卖出/减仓/清仓等操作建议时，强制要求 answer 包含估值分位和盈亏状态
+    # 开关：agent.sell_timing_guard_enabled（默认 false）
+    try:
+        from agent.safety.sell_timing_guard import enforce_sell_timing_guard
+        answer, _timing_warnings = enforce_sell_timing_guard(answer, trace_id=trace_id)
+        if _timing_warnings:
+            logger.info(
+                f"[trace:{trace_id}] [pipeline] 卖出时机守卫触发: {_timing_warnings}"
+            )
+    except Exception as _timing_err:
+        logger.warning(
+            f"[trace:{trace_id}] [pipeline] 卖出时机守卫失败: {_timing_err}"
+        )
 
     return answer, arbitration_summary
 

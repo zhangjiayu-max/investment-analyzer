@@ -256,6 +256,14 @@ DEFAULT_CONFIGS = [
     ('agent.complexity_min_specialists_medium', '2', 'medium复杂度最少专家数', 'agent'),
     ('agent.absolutism_filter_enabled', 'true', '绝对化措辞过滤开关：最终回答后处理替换"一定/必然/绝对/肯定"为概率性表述', 'agent'),
 
+    # 对话质量仲裁与时机判断完全优化（conv#131 修复，2026-07-21）
+    # 所有新开关默认 false，符合项目规范"新 LLM 相关开关默认 false"
+    ('agent.arbitration_consistency_guard_enabled', 'false', 'P0-A 仲裁-综合一致性硬校验：检测综合报告操作建议与仲裁裁决方向冲突，冲突时追加警告', 'agent'),
+    ('agent.timing_judgment_enforced', 'false', 'P0-B 时机判断强制注入：综合报告 prompt 强制要求估值时机/盈亏时机/执行时机三问', 'agent'),
+    ('agent.profit_not_loss_principle_enabled', 'false', 'P0-C 止盈不止损原则注入：综合报告 prompt 强制要求亏损标的禁止清仓（除非满足4条件之一）', 'agent'),
+    ('agent.sell_timing_guard_enabled', 'false', 'P1-E 卖出时机守卫：检测卖出操作但未提供估值分位/盈亏状态时追加警告', 'agent'),
+    ('agent.synthesis_tool_summary_enabled', 'false', 'P2-F 综合报告工具结果汇总注入：综合阶段注入黑板工具广播结构化数据', 'agent'),
+
     # 理财决策升级 6 项配置（默认全部开启 — 最强版本）
     ('attribution.enabled', 'true', '收益归因分析开关', 'decision_upgrade'),
     ('behavior_diagnosis.enabled', 'true', '行为金融诊断开关', 'decision_upgrade'),

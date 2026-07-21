@@ -266,6 +266,57 @@ def _extract_key_fields(tool_name: str, args: dict, parsed: dict) -> dict:
                     if val is not None:
                         fields[k] = val
 
+        elif tool_name == "query_smart_add_plan":
+            # P1-D 智能补仓计划：提取资金池汇总 + top3 已触发档位
+            # conv#131 修复：原实现未提取档位数据，导致综合报告无法引用补仓档位
+            # 数据结构：{summary: {pool_total, pool_used, pool_remaining, deep_loss_count}, plans: [{fund_code, fund_name, profit_rate_pct, pyramid: {released_amount, triggered_tiers, next_trigger: {drop_pct, amount}}}]}
+            summary = parsed.get("summary", parsed.get("data", {}).get("summary", {})) or {}
+            if isinstance(summary, dict):
+                for k in ("pool_total", "pool_used", "pool_remaining", "deep_loss_count", "active_count"):
+                    val = summary.get(k)
+                    if val is not None:
+                        fields[k] = val
+
+            plans = parsed.get("plans", parsed.get("data", {}).get("plans", [])) or []
+            if isinstance(plans, list):
+                fields["plans_count"] = len(plans)
+                top3_released = []
+                for p in plans[:3]:
+                    if not isinstance(p, dict):
+                        continue
+                    pyramid = p.get("pyramid", {}) or {}
+                    next_trigger = pyramid.get("next_trigger", {}) or {}
+                    top3_released.append({
+                        "fund_code": p.get("fund_code"),
+                        "fund_name": p.get("fund_name"),
+                        "profit_rate_pct": p.get("profit_rate_pct"),
+                        "released_amount": pyramid.get("released_amount"),
+                        "triggered_tiers": pyramid.get("triggered_tiers"),
+                        "next_trigger_pct": next_trigger.get("drop_pct"),
+                        "next_trigger_amount": next_trigger.get("amount"),
+                    })
+                if top3_released:
+                    fields["top3_released"] = top3_released
+
+        elif tool_name == "query_transaction_history":
+            # P1-D 交易历史：提取近期买卖操作汇总
+            transactions = parsed.get("transactions", parsed.get("data", {}).get("transactions", [])) or []
+            if isinstance(transactions, list) and transactions:
+                fields["total_count"] = len(transactions)
+                # 近5笔交易
+                recent = []
+                for tx in transactions[:5]:
+                    if not isinstance(tx, dict):
+                        continue
+                    recent.append({
+                        "fund_code": tx.get("fund_code"),
+                        "type": tx.get("type", tx.get("transaction_type")),
+                        "amount": tx.get("amount"),
+                        "date": tx.get("date", tx.get("transaction_date")),
+                    })
+                if recent:
+                    fields["recent_5"] = recent
+
     except Exception as e:
         logger.debug(f"[tool_broadcast] 字段提取异常 {tool_name}: {e}")
 

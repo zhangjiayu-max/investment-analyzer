@@ -1550,7 +1550,7 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
                 except Exception as e:
                     logger.warning(f"增量保存进度失败: {e}")
 
-            def _save_final(content, spec_results, tool_calls, orch_ms, arbitration=None):
+            def _save_final(content, spec_results, tool_calls, orch_ms, arbitration=None, cross_review_results=None):
                 total_ms = int((time.time() - request_start) * 1000)
                 pt = {"orchestrator_ms": orch_ms, "total_ms": total_ms}
                 # 输出审核
@@ -1563,6 +1563,10 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
                     pass
                 p1 = [{"agent_key": s["agent_key"], "agent": s.get("agent", ""), "icon": s.get("icon", ""), "analysis": s.get("analysis", "")[:3000]} for s in _prod_spec_results if not s.get("is_cross_review")]
                 p2 = [{"agent_key": s["agent_key"], "agent": s.get("agent", ""), "icon": s.get("icon", ""), "analysis": s.get("analysis", "")[:3000]} for s in _prod_spec_results if s.get("is_cross_review")]
+                # P2-G 修复 conv#131：Pipeline 路径下 _prod_spec_results 可能未捕获 cross_review_done 事件
+                # 此时使用 EVENT_ANSWER 携带的 cross_review_results 作为兜底
+                if not p2 and cross_review_results:
+                    p2 = [{"agent_key": s.get("agent_key", ""), "agent": s.get("agent", ""), "icon": s.get("icon", ""), "analysis": s.get("analysis", "")[:3000]} for s in cross_review_results if isinstance(s, dict)]
                 if stream_msg_id > 0:
                     # 构建 metadata（含仲裁结果，让前端可见对话链路完整四阶段）
                     _meta = {
@@ -1706,7 +1710,7 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
                             _prod_spec_results.append({"agent_key": event.get("agent_key"), "agent": event.get("agent"), "icon": event.get("icon"), "analysis": event.get("analysis"), "duration_ms": event.get("duration_ms"), "is_cross_review": True})
                             _save_progress("streaming")
                         elif et == "answer":
-                            reviewed = _save_final(event.get("content", ""), event.get("specialist_results", []), event.get("tool_calls", []), int((time.time() - _prod_start) * 1000), arbitration=event.get("arbitration"))
+                            reviewed = _save_final(event.get("content", ""), event.get("specialist_results", []), event.get("tool_calls", []), int((time.time() - _prod_start) * 1000), arbitration=event.get("arbitration"), cross_review_results=event.get("cross_review_results"))
                             event = dict(event)
                             event["content"] = reviewed
                             # 标记 channel 完成

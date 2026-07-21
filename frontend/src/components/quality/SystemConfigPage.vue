@@ -40,6 +40,8 @@ const categoryLabels = {
   watchlist: '关注列表信号',
   alerts: '预警系统',
   smart_add: '智能补仓',
+  agent: 'Agent 系统',
+  decision_upgrade: '理财决策升级',
   general: '通用',
 }
 
