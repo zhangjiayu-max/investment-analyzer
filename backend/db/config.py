@@ -264,6 +264,12 @@ DEFAULT_CONFIGS = [
     ('agent.sell_timing_guard_enabled', 'false', 'P1-E 卖出时机守卫：检测卖出操作但未提供估值分位/盈亏状态时追加警告', 'agent'),
     ('agent.synthesis_tool_summary_enabled', 'false', 'P2-F 综合报告工具结果汇总注入：综合阶段注入黑板工具广播结构化数据', 'agent'),
 
+    # 机会雷达深度研究增强（2026-07-21）
+    # L1/L2 为 LLM 相关，默认 false；L3 为非 LLM 相关，默认 true
+    ('opportunity.llm_policy_analysis_enabled', 'false', 'L1 政策解读 LLM 化：对 watch/can_buy 候选调用 LLM 做政策实质解读，调整 score ±5~8', 'opportunity'),
+    ('opportunity.llm_deep_review_enabled', 'false', 'L2 深度推理评审：对 can_buy 候选调用 LLM 做多维度权衡评审，可降级不可升级', 'opportunity'),
+    ('opportunity.benchmark_backtest_enabled', 'true', 'L3 回测基准化：引入沪深300超额收益，超额≥2%才算命中（非LLM相关，默认开启）', 'opportunity'),
+
     # 理财决策升级 6 项配置（默认全部开启 — 最强版本）
     ('attribution.enabled', 'true', '收益归因分析开关', 'decision_upgrade'),
     ('behavior_diagnosis.enabled', 'true', '行为金融诊断开关', 'decision_upgrade'),

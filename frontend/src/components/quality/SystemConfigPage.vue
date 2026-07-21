@@ -42,6 +42,7 @@ const categoryLabels = {
   smart_add: '智能补仓',
   agent: 'Agent 系统',
   decision_upgrade: '理财决策升级',
+  opportunity: '机会雷达',
   general: '通用',
 }
 

@@ -561,6 +561,31 @@ def _build_item(theme_rule: dict, news_hits: list[dict], trade_date: str, user_i
 
     # P1-K: 获取技术信号用于动态文案
     _, tech_signal = _get_technical_score(theme_rule)
+    _, capital_signal = _get_capital_flow_score(theme_rule)
+    _, sentiment_signal = _get_sentiment_score()
+
+    # ── L1 政策解读 LLM 化（2026-07-21）──
+    # 对 watch/can_buy 候选调用 LLM 做政策实质解读，调整 score
+    llm_policy = None
+    if verdict in ("watch", "can_buy"):
+        llm_policy = _llm_policy_analysis(theme_rule, news_hits)
+        if llm_policy and isinstance(llm_policy.get("score_adjust"), int):
+            score += llm_policy["score_adjust"]
+            score = max(0, min(100, score))
+            # 重新计算 verdict（L1 可能改变 verdict）
+            verdict = "can_buy" if score >= 75 else ("watch" if score >= 50 else "avoid")
+            # 重新应用一票否决
+            valuation_pct = valuation.get("percentile") if valuation else None
+            if valuation_pct is not None:
+                if valuation_pct > 80:
+                    verdict = "avoid"
+                    score = min(score, 30)
+                elif valuation_pct > 60 and verdict == "can_buy":
+                    verdict = "watch"
+                    score = min(score, 60)
+            elif verdict == "can_buy":
+                verdict = "watch"
+                score = min(score, 60)
 
     policy_signal = (
         f"政策/新闻线索命中：{news_hits[0].get('title', theme_rule['theme'])}"
@@ -586,7 +611,8 @@ def _build_item(theme_rule: dict, news_hits: list[dict], trade_date: str, user_i
     entry_price = _get_theme_index_current_price(theme_rule)
     valuation_percentile = valuation.get("percentile") if valuation else None
 
-    return {
+    # 构造 item（L2 评审需要完整 item）
+    item = {
         "trade_date": trade_date,
         "theme": theme_rule["theme"],
         "verdict": verdict,
@@ -623,6 +649,25 @@ def _build_item(theme_rule: dict, news_hits: list[dict], trade_date: str, user_i
         "valuation_percentile": valuation_percentile,
         "review_status": "pending",  # 默认 pending，回测完成后改为 completed
     }
+
+    # ── L1 政策解读结果写入 item ──
+    if llm_policy:
+        item["llm_policy_analysis"] = llm_policy
+
+    # ── L2 深度推理评审（2026-07-21）──
+    # 对 can_buy 候选调用 LLM 做最终评审，可降级不可升级
+    llm_review = _llm_deep_review(item, valuation, tech_signal, capital_signal, sentiment_signal)
+    if llm_review:
+        item["llm_review"] = llm_review
+        # 应用 LLM 降级（仅可降级，不可升级）
+        new_verdict = llm_review.get("final_verdict")
+        if new_verdict in ("watch", "avoid") and item["verdict"] == "can_buy":
+            item["verdict"] = new_verdict
+            # 降级后重新计算 entry_amount
+            item["entry_plan"]["amount"] = _calc_entry_amount(new_verdict, valuation, base_budget)
+            item["entry_plan"]["action"] = "加入观察" if new_verdict == "watch" else "暂不入场"
+
+    return item
 
 
 def _get_theme_index_current_price(theme_rule: dict) -> float | None:
@@ -745,13 +790,17 @@ def _get_theme_index_price_at(theme_rule: dict, target_date: str) -> float | Non
 def review_opportunity_backtests() -> dict:
     """P1-N: 批量回测已到期的机会记录（review_date <= today AND hit IS NULL）。
 
-    命中定义：15 个交易日后涨幅 >= 3%（考虑交易成本）。
+    命中定义（L3 基准化后）：
+    - 开关开：超额收益（涨幅 - 沪深300同期涨幅）>= 2% 视为命中
+    - 开关关：绝对涨幅 >= 3% 视为命中（原逻辑）
 
     Returns:
         {"reviewed": int, "hit": int, "miss": int}
     """
     try:
+        from db.config import get_config_bool
         from db.opportunities import list_pending_backtests, update_opportunity_backtest
+        benchmark_enabled = get_config_bool("opportunity.benchmark_backtest_enabled", True)
         pending = list_pending_backtests()
         reviewed = 0
         hit_count = 0
@@ -773,15 +822,38 @@ def review_opportunity_backtests() -> dict:
                     continue
 
                 change_pct = (review_price - entry_price) / entry_price * 100
-                # 命中定义：15 交易日后涨幅 >= 3%
-                hit = 1 if change_pct >= 3.0 else 0
 
-                update_opportunity_backtest(track["id"], {
+                # L3 回测基准化：引入沪深300超额收益
+                benchmark_pct = None
+                excess_return = None
+                hit = None
+                if benchmark_enabled:
+                    benchmark_pct = _get_benchmark_return(
+                        track.get("entry_date", ""), review_date
+                    )
+                    if benchmark_pct is not None:
+                        excess_return = change_pct - benchmark_pct
+                        # 超额收益 >= 2% 视为命中
+                        hit = 1 if excess_return >= 2.0 else 0
+                    else:
+                        # 基准获取失败，回退原逻辑
+                        hit = 1 if change_pct >= 3.0 else 0
+                else:
+                    # 开关关：原逻辑
+                    hit = 1 if change_pct >= 3.0 else 0
+
+                update_fields = {
                     "review_price": review_price,
                     "hit": hit,
                     "change_pct": round(change_pct, 2),
                     "reviewed_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                })
+                }
+                if benchmark_pct is not None:
+                    update_fields["benchmark_pct"] = round(benchmark_pct, 2)
+                if excess_return is not None:
+                    update_fields["excess_return"] = round(excess_return, 2)
+
+                update_opportunity_backtest(track["id"], update_fields)
                 reviewed += 1
                 if hit:
                     hit_count += 1
@@ -793,6 +865,35 @@ def review_opportunity_backtests() -> dict:
     except Exception as e:
         logger.warning(f"[opportunity] 回测批量执行失败: {e}")
         return {"reviewed": 0, "hit": 0, "miss": 0, "error": str(e)}
+
+
+def _get_benchmark_return(entry_date: str, review_date: str) -> float | None:
+    """L3 回测基准化：获取沪深300在 entry_date 到 review_date 的涨幅。
+
+    用于计算超额收益，避免牛市普涨导致的假命中。
+
+    Returns:
+        涨幅百分比（如 2.5 表示涨 2.5%），或 None（获取失败）
+    """
+    if not entry_date or not review_date:
+        return None
+    try:
+        import akshare as ak
+        # 沪深300指数代码 000300
+        df = ak.index_zh_a_hist(symbol="000300", period="daily",
+                                start_date=entry_date.replace("-", ""),
+                                end_date=review_date.replace("-", ""))
+        if df is None or df.empty or len(df) < 2:
+            return None
+        # 取首尾收盘价
+        first_close = float(df.iloc[0]["收盘"])
+        last_close = float(df.iloc[-1]["收盘"])
+        if first_close <= 0:
+            return None
+        return (last_close - first_close) / first_close * 100
+    except Exception as e:
+        logger.debug(f"[opportunity] 获取沪深300基准失败: {e}")
+        return None
 
 
 def backfill_opportunity_backtests() -> dict:
@@ -967,3 +1068,174 @@ def scan_daily_opportunities(news_items: list[dict] | None = None,
             "portfolio": datetime.now().strftime("%Y-%m-%d %H:%M"),
         },
     }
+
+
+# ════════════════════════════════════════════════════════════════════
+# 深度研究增强（2026-07-21）：L1 政策解读 LLM 化 + L2 深度推理评审
+# ════════════════════════════════════════════════════════════════════
+
+def _llm_policy_analysis(theme_rule: dict, news_hits: list[dict]) -> dict | None:
+    """L1 政策解读 LLM 化。
+
+    对 watch/can_buy 候选机会，调用 LLM 做政策实质解读。
+    原规则只是字符串匹配 policy_terms，不理解政策实质利好/利空、力度强弱、落地概率。
+
+    Returns:
+        {
+            "policy_substance": "strong|weak|neutral",
+            "beneficiary_alignment": "high|medium|low",
+            "implementation_probability": "high|medium|low",
+            "key_risk": "...",
+            "reasoning": "30-80字解读",
+            "score_adjust": int  // +8 / -5 / 0
+        }
+        或 None（开关关闭/调用失败/无新闻）
+    """
+    try:
+        from db.config import get_config_bool
+        if not get_config_bool("opportunity.llm_policy_analysis_enabled", False):
+            return None
+    except Exception:
+        return None
+
+    if not news_hits:
+        return None
+
+    # 构造新闻摘要（取前 3 条，每条 title+summary 前 100 字）
+    news_text = ""
+    for n in news_hits[:3]:
+        title = n.get("title", "")
+        summary = (n.get("summary", "") or "")[:100]
+        news_text += f"- {title}：{summary}\n"
+
+    prompt = f"""你是政策分析师。请分析以下新闻对"{theme_rule['theme']}"主题的实质影响。
+
+主题关键词：{', '.join(theme_rule.get('keywords', []))}
+政策词库：{', '.join(theme_rule.get('policy_terms', []))}
+
+今日命中新闻：
+{news_text}
+
+请输出 JSON（不要 markdown 代码块）：
+{{
+  "policy_substance": "strong/weak/neutral（政策实质力度）",
+  "beneficiary_alignment": "high/medium/low（与主题受益契合度）",
+  "implementation_probability": "high/medium/low（落地概率）",
+  "key_risk": "主要风险（20字内）",
+  "reasoning": "综合解读（30-80字）"
+}}"""
+
+    try:
+        from services.llm.llm_service import _call_llm
+        resp = _call_llm(
+            caller="opportunity_policy_analysis",
+            model="deepseek-v4-flash",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.2,
+            max_tokens=400,
+            timeout=15,
+        )
+        content = resp.get("content", "") if isinstance(resp, dict) else str(resp)
+        import json as _json
+        # 容错：提取 JSON
+        content = content.strip()
+        if content.startswith("```"):
+            content = content.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+        result = _json.loads(content)
+
+        # 计算 score_adjust
+        substance = result.get("policy_substance", "neutral")
+        alignment = result.get("beneficiary_alignment", "medium")
+        if substance == "strong" and alignment == "high":
+            result["score_adjust"] = 8
+        elif substance == "weak" or alignment == "low":
+            result["score_adjust"] = -5
+        else:
+            result["score_adjust"] = 0
+        return result
+    except Exception as e:
+        logger.warning(f"[opportunity] L1 政策解读失败: {e}")
+        return None
+
+
+def _llm_deep_review(item: dict, valuation: dict | None,
+                     tech_signal: str, capital_signal: str, sentiment_signal: str) -> dict | None:
+    """L2 深度推理评审。
+
+    对 can_buy 候选，调用 LLM 做最终多维度权衡评审。
+    LLM 可降级 verdict（can_buy → watch/avoid），不可升级（避免过度乐观）。
+
+    Returns:
+        {
+            "final_verdict": "can_buy|watch|avoid",
+            "confidence": "high|medium|low",
+            "key_pros": ["..."],
+            "key_cons": ["..."],
+            "net_assessment": "50-150字综合权衡",
+            "timing_note": "最佳入场时机判断"
+        }
+        或 None（开关关闭/调用失败/非 can_buy）
+    """
+    try:
+        from db.config import get_config_bool
+        if not get_config_bool("opportunity.llm_deep_review_enabled", False):
+            return None
+    except Exception:
+        return None
+
+    # 仅对 can_buy 候选做深度评审
+    if item.get("verdict") != "can_buy":
+        return None
+
+    valuation_pct = valuation.get("percentile") if valuation else None
+    prompt = f"""你是资深投资经理。请对以下"可上车"机会做最终深度评审。
+
+主题：{item.get('theme', '')}
+综合评分：{item.get('opportunity_score', 0)}/100
+估值分位：{valuation_pct}%
+技术信号：{tech_signal}
+资金信号：{capital_signal}
+情绪信号：{sentiment_signal}
+持仓重叠：{item.get('portfolio_fit', {}).get('overlap_risk', 'unknown')}
+摘要：{item.get('summary', '')[:200]}
+
+评审规则：
+- 你只能维持或降级（can_buy → watch/avoid），不能升级
+- 权衡估值/技术/资金/情绪/持仓的矛盾点
+- 给出明确的入场时机判断
+
+输出 JSON（不要 markdown 代码块）：
+{{
+  "final_verdict": "can_buy/watch/avoid",
+  "confidence": "high/medium/low",
+  "key_pros": ["看多理由1", "看多理由2"],
+  "key_cons": ["看空理由1", "看空理由2"],
+  "net_assessment": "50-150字综合权衡",
+  "timing_note": "入场时机判断（30字内）"
+}}"""
+
+    try:
+        from services.llm.llm_service import _call_llm
+        resp = _call_llm(
+            caller="opportunity_deep_review",
+            model="deepseek-v4-flash",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.2,
+            max_tokens=600,
+            timeout=20,
+        )
+        content = resp.get("content", "") if isinstance(resp, dict) else str(resp)
+        import json as _json
+        content = content.strip()
+        if content.startswith("```"):
+            content = content.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+        result = _json.loads(content)
+
+        # 强制降级约束：LLM 不能升级
+        if result.get("final_verdict") not in ("can_buy", "watch", "avoid"):
+            result["final_verdict"] = "watch"  # 异常时保守
+        return result
+    except Exception as e:
+        logger.warning(f"[opportunity] L2 深度评审失败: {e}")
+        return None
+

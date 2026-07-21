@@ -154,6 +154,33 @@ const verdictMeta = {
         </div>
         <p class="opportunity-line">{{ item.policy_signal }}</p>
         <p class="opportunity-risk">{{ item.risk_note }}</p>
+        <!-- L1 政策解读 LLM 化（开关开时显示） -->
+        <div v-if="item.llm_policy_analysis" class="opportunity-llm-policy">
+          <span class="terminal-label llm-tag">政策解读</span>
+          <span class="llm-reasoning">{{ item.llm_policy_analysis.reasoning }}</span>
+        </div>
+        <!-- L2 深度推理评审（开关开时显示，仅 can_buy 候选） -->
+        <div v-if="item.llm_review" class="opportunity-llm-review">
+          <div class="llm-review-head">
+            <span class="terminal-label llm-tag">深度评审</span>
+            <span :class="['llm-verdict', `llm-verdict-${item.llm_review.final_verdict}`]">
+              {{ item.llm_review.final_verdict === 'can_buy' ? '维持可上车' : item.llm_review.final_verdict === 'watch' ? '降级观察' : '降级回避' }}
+            </span>
+            <span class="llm-confidence">{{ item.llm_review.confidence }}</span>
+          </div>
+          <p class="llm-assessment">{{ item.llm_review.net_assessment }}</p>
+          <div v-if="item.llm_review.key_pros?.length || item.llm_review.key_cons?.length" class="llm-pros-cons">
+            <div v-if="item.llm_review.key_pros?.length" class="llm-pros">
+              <span class="terminal-label">看多</span>
+              <span v-for="pro in item.llm_review.key_pros" :key="pro" class="llm-item">{{ pro }}</span>
+            </div>
+            <div v-if="item.llm_review.key_cons?.length" class="llm-cons">
+              <span class="terminal-label">看空</span>
+              <span v-for="con in item.llm_review.key_cons" :key="con" class="llm-item">{{ con }}</span>
+            </div>
+          </div>
+          <p v-if="item.llm_review.timing_note" class="llm-timing">{{ item.llm_review.timing_note }}</p>
+        </div>
         <div v-if="item.matched_funds?.length" class="opportunity-funds">
           <span v-for="fund in item.matched_funds.slice(0, 2)" :key="fund.fund_code" class="opportunity-fund">
             {{ fund.fund_name || fund.fund_code }}
@@ -612,6 +639,85 @@ const verdictMeta = {
   color: var(--color-danger);
   font-size: 0.72rem;
   -webkit-line-clamp: 2;
+}
+/* L1 政策解读 + L2 深度评审 */
+.opportunity-llm-policy,
+.opportunity-llm-review {
+  margin-top: 0.4rem;
+  padding: 0.4rem 0.5rem;
+  border-left: 2px solid var(--color-primary-500);
+  background: rgba(59, 130, 246, 0.05);
+  border-radius: 0 4px 4px 0;
+  font-size: 0.72rem;
+  line-height: 1.5;
+}
+.opportunity-llm-policy {
+  display: flex;
+  gap: 0.4rem;
+  align-items: flex-start;
+}
+.opportunity-llm-review {
+  border-left-color: var(--color-warning, #f59e0b);
+  background: rgba(245, 158, 11, 0.05);
+}
+.llm-tag {
+  flex-shrink: 0;
+  color: var(--color-primary);
+  font-size: 0.68rem;
+  font-weight: 600;
+}
+.llm-reasoning {
+  color: var(--color-text-secondary);
+}
+.llm-review-head {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin-bottom: 0.3rem;
+}
+.llm-verdict {
+  font-weight: 600;
+  font-size: 0.7rem;
+  padding: 1px 6px;
+  border-radius: 3px;
+}
+.llm-verdict-can_buy { color: #16a34a; background: rgba(22, 163, 74, 0.1); }
+.llm-verdict-watch { color: #d97706; background: rgba(217, 119, 6, 0.1); }
+.llm-verdict-avoid { color: #dc2626; background: rgba(220, 38, 38, 0.1); }
+.llm-confidence {
+  font-size: 0.68rem;
+  color: var(--color-text-muted);
+  text-transform: uppercase;
+}
+.llm-assessment {
+  margin: 0 0 0.3rem 0;
+  color: var(--color-text-primary);
+  line-height: 1.5;
+}
+.llm-pros-cons {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  margin-bottom: 0.2rem;
+}
+.llm-pros,
+.llm-cons {
+  display: flex;
+  gap: 0.3rem;
+  align-items: flex-start;
+  flex-wrap: wrap;
+}
+.llm-pros .terminal-label { color: #16a34a; }
+.llm-cons .terminal-label { color: #dc2626; }
+.llm-item {
+  font-size: 0.7rem;
+  color: var(--color-text-secondary);
+}
+.llm-timing {
+  margin: 0.2rem 0 0 0;
+  font-size: 0.7rem;
+  color: var(--color-primary);
+  font-style: italic;
 }
 .opportunity-funds {
   display: flex;

@@ -89,6 +89,22 @@ def init_opportunity_tables(conn):
     """)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_theme_backtest_review ON theme_opportunity_backtests(review_date, hit)")
 
+    # L3 回测基准化（2026-07-21）：新增 benchmark_pct/excess_return 字段
+    # 用 ALTER TABLE 兼容已有数据
+    _ensure_column(conn, "theme_opportunity_backtests", "benchmark_pct", "REAL")
+    _ensure_column(conn, "theme_opportunity_backtests", "excess_return", "REAL")
+
+
+def _ensure_column(conn, table: str, column: str, col_type: str):
+    """安全添加列（如果不存在）。"""
+    try:
+        cols = {r[1] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+        if column not in cols:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}")
+            conn.commit()
+    except Exception:
+        pass
+
 
 def _json_dumps(value) -> str:
     return json.dumps(value if value is not None else {}, ensure_ascii=False)
@@ -575,7 +591,7 @@ def update_opportunity_backtest(backtest_id: int, fields: dict) -> bool:
         return False
     conn = _get_conn()
     try:
-        allowed = {"review_price", "hit", "change_pct", "reviewed_at"}
+        allowed = {"review_price", "hit", "change_pct", "reviewed_at", "benchmark_pct", "excess_return"}
         sets = []
         values = []
         for k, v in fields.items():
