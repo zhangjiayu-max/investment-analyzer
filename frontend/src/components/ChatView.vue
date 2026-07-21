@@ -1057,6 +1057,20 @@ function copyToClipboard(text, btnEl = null, toastMsg = '') {
     if (toastMsg) showToast(toastMsg, success ? 'success' : 'error')
   }
 
+  // 移动端/非安全上下文优先同步 execCommand（必须在用户手势内执行）
+  // 否则 navigator.clipboard.writeText 异步回调中已脱离手势，iOS Safari / 微信浏览器
+  // 会"假成功"（Promise resolve 或 execCommand 返回 true，但剪贴板实际未写入）
+  const isMobile = /Android|iPhone|iPad|iPod|Mobile|MicroMessenger/i.test(navigator.userAgent)
+  const isSecureContext = typeof window !== 'undefined' && window.isSecureContext
+
+  if (isMobile || !isSecureContext) {
+    // 同步路径：保留用户手势上下文
+    const ok = fallbackExec()
+    finish(ok)
+    return
+  }
+
+  // 桌面端 HTTPS：用现代 Clipboard API
   if (navigator.clipboard && navigator.clipboard.writeText) {
     navigator.clipboard.writeText(text).then(() => finish(true)).catch(() => {
       const ok = fallbackExec()
