@@ -102,6 +102,9 @@ def update_watchlist_item(item_id: int, **fields) -> bool:
         'high_water_mark',
         # P1-D（2026-07-21）信号有效期
         'signal_triggered_at',
+        # P2-A（2026-07-21）回测闭环深化：自适应阈值
+        'adaptive_target_pct',
+        'adaptive_reason',
     }
     invalid = set(fields.keys()) - allowed
     if invalid:

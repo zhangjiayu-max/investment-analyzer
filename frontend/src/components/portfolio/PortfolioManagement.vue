@@ -1,5 +1,5 @@
 <script setup>
-import { ref, computed, onMounted, onActivated, onDeactivated, watch, nextTick } from 'vue'
+import { ref, computed, onMounted, onActivated, onDeactivated, watch, nextTick, onUnmounted } from 'vue'
 
 // ── 持仓表格列拖拽排序 ──
 const HOLDING_COLUMNS = [
@@ -112,6 +112,7 @@ import {
   listRecommendationCandidates, listDecisions, listDueDecisionReviews,
   createDecisionFromAction, runWhatIf,
   patrolWatchlist, getBuyScore,
+  getWatchlistSignalHistory, getWatchlistResonance, getWatchlistSignalStats,
   dailyAdviceAPI,
 } from '../../api'
 import { useToast } from '../../composables/useToast'
@@ -844,6 +845,231 @@ async function loadBuyScore(item) {
     }
   }
 }
+
+// ── P2-E（2026-07-21）信号历史轨迹图 + 共振分析 + 置信度分桶 ──
+const signalHistoryMap = ref({})       // fundCode -> { loading, history: [], error }
+const expandedHistoryCode = ref(null)  // 当前展开历史轨迹的基金代码
+const signalHistoryChartRef = ref(null)
+let signalHistoryChartInstance = null
+
+const resonanceData = ref(null)        // P2-C 共振分析结果
+const resonanceLoading = ref(false)
+const signalStatsData = ref(null)      // P1-B 命中率分桶统计
+const bucketChartRef = ref(null)
+let bucketChartInstance = null
+
+const RESONANCE_LEVEL_MAP = {
+  strong: { label: '强共振（看多）', cls: 'resonance-strong', icon: '🚀' },
+  strong_bearish: { label: '强共振（看空）', cls: 'resonance-bearish', icon: '⚠️' },
+  moderate: { label: '中等共振', cls: 'resonance-moderate', icon: '📊' },
+  weak: { label: '弱共振', cls: 'resonance-weak', icon: '💡' },
+  none: { label: '无共振', cls: 'resonance-none', icon: '➖' },
+}
+
+const resonanceLevelInfo = computed(() => {
+  const level = resonanceData.value?.watchlist_resonance?.resonance_level || 'none'
+  return RESONANCE_LEVEL_MAP[level] || RESONANCE_LEVEL_MAP.none
+})
+
+const resonanceLevelClass = computed(() => resonanceLevelInfo.value.cls)
+
+async function loadSignalHistory(item) {
+  const code = item.fund_code
+  if (expandedHistoryCode.value === code) {
+    expandedHistoryCode.value = null
+    return
+  }
+  expandedHistoryCode.value = code
+  if (signalHistoryMap.value[code]?.history?.length) {
+    await nextTick()
+    renderSignalHistoryChart(code)
+    return
+  }
+  signalHistoryMap.value[code] = { loading: true }
+  try {
+    const { data } = await getWatchlistSignalHistory(code)
+    signalHistoryMap.value[code] = { loading: false, history: data.history || [] }
+    await nextTick()
+    renderSignalHistoryChart(code)
+  } catch (e) {
+    signalHistoryMap.value[code] = {
+      loading: false,
+      error: e?.response?.data?.detail || e?.message || '加载失败',
+      history: [],
+    }
+  }
+}
+
+function renderSignalHistoryChart(code) {
+  if (!signalHistoryChartRef.value) return
+  const history = signalHistoryMap.value[code]?.history || []
+  if (!history.length) return
+  import('echarts').then(mod => {
+    const echarts = mod.default || mod
+    if (!signalHistoryChartRef.value) return
+    if (signalHistoryChartInstance) signalHistoryChartInstance.dispose()
+    signalHistoryChartInstance = echarts.init(signalHistoryChartRef.value, isDark.value ? 'dark' : null)
+
+    // 散点图：x=signal_date，y=change_pct（15 交易日涨跌幅），颜色=hit
+    const hitPoints = history.filter(h => h.hit != null).map(h => ({
+      value: [h.signal_date, Number(h.change_pct ?? 0), h.hit ? 1 : 0, h.fund_name || '', h.signal_confidence ?? null],
+      itemStyle: { color: h.hit ? '#10b981' : '#ef4444' },
+    }))
+
+    // pending（未回测）点用灰色
+    const pendingPoints = history.filter(h => h.hit == null).map(h => ({
+      value: [h.signal_date, 0, -1, h.fund_name || '', h.signal_confidence ?? null],
+      itemStyle: { color: '#9ca3af', opacity: 0.5 },
+    }))
+
+    signalHistoryChartInstance.setOption({
+      backgroundColor: 'transparent',
+      grid: { left: 50, right: 20, top: 30, bottom: 60 },
+      tooltip: {
+        trigger: 'item',
+        formatter: (p) => {
+          const v = p.value
+          const hitLabel = v[2] === 1 ? '<span style="color:#10b981">✓ 命中</span>'
+                           : v[2] === 0 ? '<span style="color:#ef4444">✗ 未命中</span>'
+                           : '<span style="color:#9ca3af">待回测</span>'
+          const conf = v[4] != null ? ` | 置信度 ${v[4]}` : ''
+          return `<div style="font-size:12px">${v[0]}<br/>${v[3]}${conf}<br/>涨跌: ${Number(v[1]).toFixed(2)}%<br/>${hitLabel}</div>`
+        },
+      },
+      xAxis: {
+        type: 'category',
+        name: '信号日期',
+        axisLabel: { rotate: 35, fontSize: 10 },
+      },
+      yAxis: {
+        type: 'value',
+        name: '15日涨跌%',
+        axisLine: { show: true },
+        splitLine: { lineStyle: { type: 'dashed' } },
+      },
+      legend: {
+        data: [
+          { name: '✓ 命中（≥3%）', icon: 'circle' },
+          { name: '✗ 未命中', icon: 'circle' },
+          { name: '待回测', icon: 'circle' },
+        ],
+        top: 0,
+        textStyle: { fontSize: 11 },
+      },
+      series: [
+        {
+          name: '✓ 命中（≥3%）',
+          type: 'scatter',
+          symbolSize: 12,
+          data: hitPoints.filter(p => p.value[2] === 1),
+        },
+        {
+          name: '✗ 未命中',
+          type: 'scatter',
+          symbolSize: 12,
+          data: hitPoints.filter(p => p.value[2] === 0),
+        },
+        {
+          name: '待回测',
+          type: 'scatter',
+          symbolSize: 10,
+          data: pendingPoints,
+        },
+      ],
+    })
+  })
+}
+
+async function loadResonanceData() {
+  resonanceLoading.value = true
+  try {
+    const { data } = await getWatchlistResonance()
+    resonanceData.value = data
+  } catch (e) {
+    showToast('共振分析加载失败：' + (e?.message || ''), 'error')
+  } finally {
+    resonanceLoading.value = false
+  }
+}
+
+async function loadSignalStatsAndBuckets() {
+  try {
+    const { data } = await getWatchlistSignalStats()
+    signalStatsData.value = data
+    await nextTick()
+    renderBucketChart()
+  } catch (e) {
+    /* silent */
+  }
+}
+
+function renderBucketChart() {
+  if (!bucketChartRef.value) return
+  const stats = signalStatsData.value
+  if (!stats) return
+  import('echarts').then(mod => {
+    const echarts = mod.default || mod
+    if (!bucketChartRef.value) return
+    if (bucketChartInstance) bucketChartInstance.dispose()
+    bucketChartInstance = echarts.init(bucketChartRef.value, isDark.value ? 'dark' : null)
+
+    // 按置信度分桶：0-40 / 40-60 / 60-80 / 80-100
+    const buckets = [
+      { range: '0-40 (低)', hit: 0, miss: 0, total: 0 },
+      { range: '40-60 (中低)', hit: 0, miss: 0, total: 0 },
+      { range: '60-80 (中高)', hit: 0, miss: 0, total: 0 },
+      { range: '80-100 (高)', hit: 0, miss: 0, total: 0 },
+    ]
+    const history = stats.recent_backtests || []
+    history.forEach(h => {
+      const conf = h.signal_confidence
+      if (conf == null || h.hit == null) return
+      const idx = conf < 40 ? 0 : conf < 60 ? 1 : conf < 80 ? 2 : 3
+      buckets[idx].total++
+      if (h.hit) buckets[idx].hit++
+      else buckets[idx].miss++
+    })
+
+    bucketChartInstance.setOption({
+      backgroundColor: 'transparent',
+      grid: { left: 40, right: 20, top: 30, bottom: 30 },
+      tooltip: {
+        trigger: 'axis',
+        axisPointer: { type: 'shadow' },
+        formatter: (params) => {
+          const b = buckets[params[0].dataIndex]
+          const rate = b.total > 0 ? ((b.hit / b.total) * 100).toFixed(0) : '-'
+          return `${b.range}<br/>命中 ${b.hit} / 未命中 ${b.miss}<br/>命中率 ${rate}%`
+        },
+      },
+      legend: { data: ['命中', '未命中'], top: 0, textStyle: { fontSize: 11 } },
+      xAxis: {
+        type: 'category',
+        data: buckets.map(b => b.range),
+        axisLabel: { fontSize: 10 },
+      },
+      yAxis: { type: 'value', name: '信号数' },
+      series: [
+        { name: '命中', type: 'bar', stack: 'total', data: buckets.map(b => b.hit), itemStyle: { color: '#10b981' } },
+        { name: '未命中', type: 'bar', stack: 'total', data: buckets.map(b => b.miss), itemStyle: { color: '#ef4444' } },
+      ],
+    })
+  })
+}
+
+// 巡检完成后联动加载共振 + 分桶
+watch(patrolResults, (val) => {
+  if (val && val.all_items?.length) {
+    loadResonanceData()
+    loadSignalStatsAndBuckets()
+  }
+})
+
+// 组件卸载清理 ECharts 实例
+onUnmounted(() => {
+  if (signalHistoryChartInstance) { signalHistoryChartInstance.dispose(); signalHistoryChartInstance = null }
+  if (bucketChartInstance) { bucketChartInstance.dispose(); bucketChartInstance = null }
+})
 
 function scoreRatingInfo(rating) {
   return {
@@ -4638,6 +4864,64 @@ function txDisplayAmount(tx) {
           <span class="sig-stat sig-gray">⚪ {{ patrolResults.all_items?.filter(x => x.signal_status === 'gray').length || 0 }} 缺数据</span>
         </div>
 
+        <!-- P2-C（2026-07-21）共振分析 + 系统性风险 -->
+        <div v-if="resonanceData" class="resonance-panel">
+          <div class="resonance-section">
+            <div class="resonance-section-title">📡 关注列表共振</div>
+            <div :class="['resonance-card', resonanceLevelClass]">
+              <span class="resonance-icon">{{ resonanceLevelInfo.icon }}</span>
+              <div class="resonance-body">
+                <div class="resonance-label">{{ resonanceLevelInfo.label }}</div>
+                <div class="resonance-stats">
+                  <span>🟢 {{ resonanceData.watchlist_resonance?.green_count || 0 }}</span>
+                  <span>🟡 {{ resonanceData.watchlist_resonance?.yellow_count || 0 }}</span>
+                  <span>🔴 {{ resonanceData.watchlist_resonance?.red_count || 0 }}</span>
+                  <span>共 {{ resonanceData.watchlist_resonance?.total || 0 }} 只</span>
+                </div>
+                <div class="resonance-suggestion">{{ resonanceData.watchlist_resonance?.suggestion || '' }}</div>
+              </div>
+            </div>
+            <div v-if="resonanceData.watchlist_resonance?.alert_funds?.length" class="resonance-alert-funds">
+              <span class="alert-funds-title">共振标的：</span>
+              <span v-for="f in resonanceData.watchlist_resonance.alert_funds" :key="f.fund_code" class="alert-fund-chip">
+                {{ f.fund_name }} <small>({{ (f.current_percentile ?? 0).toFixed(0) }}%)</small>
+              </span>
+            </div>
+          </div>
+
+          <div class="resonance-section">
+            <div class="resonance-section-title">⚠️ 持仓系统性风险</div>
+            <div :class="['resonance-card', resonanceData.holding_systemic_risk?.systemic_risk ? 'resonance-bearish' : 'resonance-none']">
+              <span class="resonance-icon">{{ resonanceData.holding_systemic_risk?.systemic_risk ? '⚠️' : '✅' }}</span>
+              <div class="resonance-body">
+                <div class="resonance-label">
+                  {{ resonanceData.holding_systemic_risk?.systemic_risk ? '系统性风险预警' : '无系统性风险' }}
+                </div>
+                <div class="resonance-stats">
+                  <span>严重亏损 {{ resonanceData.holding_systemic_risk?.severe_loss_count || 0 }} / {{ resonanceData.holding_systemic_risk?.total || 0 }}</span>
+                  <span>今日大跌 {{ resonanceData.holding_systemic_risk?.today_drop_count || 0 }} / {{ resonanceData.holding_systemic_risk?.total || 0 }}</span>
+                </div>
+                <div class="resonance-suggestion">{{ resonanceData.holding_systemic_risk?.suggestion || '' }}</div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- P2-E（2026-07-21）信号置信度分桶柱状图 -->
+        <div v-if="signalStatsData && (signalStatsData.reviewed || 0) > 0" class="bucket-chart-panel">
+          <div class="bucket-header">
+            <span class="bucket-title">📊 信号置信度 vs 命中率分桶</span>
+            <span class="bucket-meta">
+              总样本 {{ signalStatsData.reviewed || 0 }} · 命中 {{ signalStatsData.hit_count || 0 }} · 命中率 {{ ((signalStatsData.hit_rate || 0)).toFixed(1) }}%
+            </span>
+          </div>
+          <div ref="bucketChartRef" class="bucket-chart-canvas"></div>
+          <div class="bucket-hint">
+            说明：按信号触发时的置信度分桶，柱高=样本数，绿色=15 交易日涨幅 ≥3% 命中，红色=未命中。
+            若高置信度桶命中率反而低，说明 confidence 计算有偏差，需校准。
+          </div>
+        </div>
+
         <div v-if="watchlistLoading" class="loading-state"><div class="spinner"></div></div>
         <div v-else-if="watchlistItems.length === 0" class="empty-state" style="padding:2rem;text-align:center">
           <p style="color:var(--color-muted);margin-bottom:1rem">还没有关注任何基金</p>
@@ -4699,6 +4983,12 @@ function txDisplayAmount(tx) {
                         {{ signalStatusOf(item).distance <= 0 ? '已达标' : `差 +${signalStatusOf(item).distance}%` }}
                       </span>
                     </div>
+                    <!-- P2-A（2026-07-21）自适应阈值提示 -->
+                    <div v-if="item.adaptive_target_pct != null && item.adaptive_target_pct !== item.target_percentile"
+                         class="adaptive-hint" :title="item.adaptive_reason || ''">
+                      ⚙️ 自适应 {{ item.adaptive_target_pct.toFixed(0) }}%
+                      <span v-if="item.adaptive_reason" class="adaptive-reason">{{ item.adaptive_reason }}</span>
+                    </div>
                   </div>
                   <span v-else class="text-muted">未刷新</span>
                 </td>
@@ -4748,8 +5038,39 @@ function txDisplayAmount(tx) {
                   <!-- P2-4.3 估值历史图叠加 -->
                   <button class="btn-ghost btn-xs" @click="openValuationChart(item)" title="查看估值历史图">📈</button>
                   <button class="btn-ghost btn-xs" @click="openWatchlistChart(item)" title="查看净值走势">📊</button>
+                  <!-- P2-E（2026-07-21）信号历史轨迹图 -->
+                  <button class="btn-ghost btn-xs" @click="loadSignalHistory(item)" title="查看信号历史轨迹" :class="{ 'btn-active': expandedHistoryCode === item.fund_code }">🎯</button>
                   <button class="btn-ghost btn-xs" @click="lookupWatchlistFund(item)" title="查询基金信息">🔍</button>
                   <button class="btn-ghost btn-xs" style="color:var(--color-danger)" @click="deleteWatchlistItem(item)" title="移除">✕</button>
+                </td>
+              </tr>
+              <!-- P2-E 信号历史轨迹展开行 -->
+              <tr v-if="expandedHistoryCode === item.fund_code" class="history-row">
+                <td colspan="8">
+                  <div class="history-panel">
+                    <div class="history-header">
+                      <strong>🎯 {{ item.fund_name }}（{{ item.fund_code }}）信号历史轨迹</strong>
+                      <button class="btn-ghost btn-xs" @click="expandedHistoryCode = null">✕ 关闭</button>
+                    </div>
+                    <div v-if="signalHistoryMap[item.fund_code]?.loading" class="loading-state">
+                      <div class="spinner"></div><span>加载中...</span>
+                    </div>
+                    <div v-else-if="signalHistoryMap[item.fund_code]?.error" class="score-error">
+                      {{ signalHistoryMap[item.fund_code].error }}
+                    </div>
+                    <div v-else-if="!signalHistoryMap[item.fund_code]?.history?.length" class="empty-state" style="padding:1rem;text-align:center">
+                      <p style="color:var(--color-text-muted);margin:0">暂无信号历史记录（信号灯由非 green 变 green 时才会记录）</p>
+                    </div>
+                    <template v-else>
+                      <div ref="signalHistoryChartRef" class="history-chart-canvas"></div>
+                      <div class="history-summary">
+                        <span>共 {{ signalHistoryMap[item.fund_code].history.length }} 次信号</span>
+                        <span>✓ 命中 {{ signalHistoryMap[item.fund_code].history.filter(h => h.hit === 1).length }}</span>
+                        <span>✗ 未命中 {{ signalHistoryMap[item.fund_code].history.filter(h => h.hit === 0).length }}</span>
+                        <span>⏳ 待回测 {{ signalHistoryMap[item.fund_code].history.filter(h => h.hit == null).length }}</span>
+                      </div>
+                    </template>
+                  </div>
                 </td>
               </tr>
             </tbody>
@@ -9560,6 +9881,159 @@ select.input-field {
 .sig-stat.sig-yellow { color: var(--color-warning); }
 .sig-stat.sig-red { color: var(--color-loss); }
 .sig-stat.sig-gray { color: var(--color-text-muted); }
+
+/* P2-C（2026-07-21）共振分析面板 */
+.resonance-panel {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.75rem;
+  margin-bottom: 0.75rem;
+}
+@media (max-width: 900px) {
+  .resonance-panel { grid-template-columns: 1fr; }
+}
+.resonance-section {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  padding: 0.6rem 0.875rem;
+  background: var(--color-bg-hover);
+  border-radius: var(--radius-sm);
+  border-left: 3px solid var(--color-border);
+}
+.resonance-section-title {
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--color-text-primary);
+}
+.resonance-card {
+  display: flex;
+  gap: 0.6rem;
+  padding: 0.5rem 0.6rem;
+  border-radius: var(--radius-sm);
+  background: var(--color-bg-card);
+  border: 1px solid var(--color-border);
+  align-items: flex-start;
+}
+.resonance-icon { font-size: 1.25rem; line-height: 1.2; flex-shrink: 0; }
+.resonance-body { flex: 1; min-width: 0; }
+.resonance-label {
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: var(--color-text-primary);
+  margin-bottom: 0.2rem;
+}
+.resonance-stats {
+  display: flex;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+  font-size: 0.72rem;
+  color: var(--color-text-secondary);
+  margin-bottom: 0.25rem;
+}
+.resonance-suggestion {
+  font-size: 0.72rem;
+  color: var(--color-text-muted);
+  line-height: 1.5;
+}
+.resonance-strong { border-left: 3px solid var(--color-profit); }
+.resonance-bearish { border-left: 3px solid var(--color-loss); }
+.resonance-moderate { border-left: 3px solid var(--color-warning); }
+.resonance-weak { border-left: 3px solid var(--color-text-muted); }
+.resonance-none { border-left: 3px solid var(--color-border); }
+.resonance-alert-funds {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+  align-items: center;
+}
+.alert-funds-title { font-size: 0.7rem; color: var(--color-text-muted); }
+.alert-fund-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.15rem 0.45rem;
+  background: var(--color-bg-card);
+  border: 1px solid var(--color-border);
+  border-radius: 10px;
+  font-size: 0.7rem;
+  color: var(--color-text-primary);
+}
+.alert-fund-chip small { color: var(--color-text-muted); }
+
+/* P2-E 信号置信度分桶柱状图 */
+.bucket-chart-panel {
+  margin-bottom: 0.75rem;
+  padding: 0.6rem 0.875rem;
+  background: var(--color-bg-hover);
+  border-radius: var(--radius-sm);
+}
+.bucket-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 0.4rem;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+.bucket-title { font-size: 0.82rem; font-weight: 600; color: var(--color-text-primary); }
+.bucket-meta { font-size: 0.72rem; color: var(--color-text-muted); }
+.bucket-chart-canvas { width: 100%; height: 180px; }
+.bucket-hint {
+  margin-top: 0.35rem;
+  font-size: 0.68rem;
+  color: var(--color-text-tertiary);
+  line-height: 1.5;
+}
+
+/* P2-E 信号历史轨迹展开行 */
+.history-row td { padding: 0 !important; background: var(--color-bg-hover); }
+.history-panel {
+  margin: 0.4rem 0.875rem;
+  padding: 0.6rem;
+  background: var(--color-bg-card);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+}
+.history-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 0.5rem;
+}
+.history-chart-canvas { width: 100%; height: 280px; }
+.history-summary {
+  display: flex;
+  gap: 1rem;
+  flex-wrap: wrap;
+  margin-top: 0.4rem;
+  font-size: 0.75rem;
+  color: var(--color-text-secondary);
+}
+.btn-active {
+  background: var(--color-primary-bg) !important;
+  color: var(--color-primary) !important;
+}
+
+/* P2-A 自适应阈值提示 */
+.adaptive-hint {
+  margin-top: 0.25rem;
+  padding: 0.15rem 0.4rem;
+  background: var(--color-warning-bg, rgba(245, 158, 11, 0.1));
+  border-radius: var(--radius-sm, 4px);
+  font-size: 0.68rem;
+  color: var(--color-warning, #f59e0b);
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+}
+.adaptive-reason {
+  font-size: 0.65rem;
+  color: var(--color-text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 120px;
+}
 
 /* 信号灯 */
 .signal-light {

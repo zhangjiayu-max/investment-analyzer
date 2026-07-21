@@ -5,6 +5,7 @@ import { getTokenUsageBudget, getKycQuestionnaire } from '../../api'
 import { navItems } from '../../navigation'
 import Icon from '../ui/Icon.vue'
 import KycWizard from '../family/KycWizard.vue'
+import NotificationCenter from './NotificationCenter.vue'
 
 const props = defineProps({
   activePage: String,
@@ -158,6 +159,7 @@ const activeGroup = computed(() => {
 
     <!-- Bottom actions -->
     <div class="sidebar-bottom">
+      <NotificationCenter @navigate="navigate" />
       <button @click="localShowKyc = true" class="nav-item kyc-entry" title="完善投资画像，让 AI 更懂你">
         <Icon name="evolution" size="18" class="nav-icon" />
         <span class="nav-label">我的投资画像</span>

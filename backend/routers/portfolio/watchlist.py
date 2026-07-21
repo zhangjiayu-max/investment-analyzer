@@ -264,9 +264,28 @@ async def watchlist_patrol_api():
             is_alert = True
             alert_reason = f"净值历史分位 {nav_percentile:.0f}% 处于低位（≤20%）"
 
-        # 信号灯状态（green/yellow/red/gray）
+        # ── P2-A（2026-07-21）自适应阈值：命中率反哺 target_percentile ──
+        adaptive_target = target_pct
+        adaptive_reason_text = ""
+        if target_pct is not None:
+            try:
+                from services.advisor.watchlist_adaptive import apply_adaptive_threshold
+                adaptive_target, adaptive_reason_text = apply_adaptive_threshold(fund_code, target_pct)
+                if adaptive_target != target_pct:
+                    try:
+                        update_watchlist_item(
+                            item["id"],
+                            adaptive_target_pct=adaptive_target,
+                            adaptive_reason=adaptive_reason_text,
+                        )
+                    except Exception:
+                        pass
+            except Exception as _e:
+                logger.debug(f"[watchlist] 自适应阈值失败 {fund_code}: {_e}")
+
+        # 信号灯状态（green/yellow/red/gray）— P2-A：使用 adaptive_target（若有调整）
         signal_status, signal_reason, distance = _compute_signal_status(
-            current_pct, target_pct,
+            current_pct, adaptive_target,
             drawdown_percentile=drawdown_percentile,
             nav_percentile=nav_percentile,
         )
@@ -277,6 +296,8 @@ async def watchlist_patrol_api():
         sentiment_signal = "neutral"
         signal_confidence = None
         signal_reasons = []
+        if adaptive_reason_text:
+            signal_reasons.append(adaptive_reason_text)
         try:
             multidim_enabled = get_config_bool("watchlist.multidim_signal_enabled", True)
         except Exception:
@@ -392,6 +413,94 @@ async def watchlist_patrol_api():
             update_watchlist_item(item["id"], **update_fields)
         except Exception as _e:
             logger.debug(f"[watchlist] 信号回测记录插入失败 {fund_code}: {_e}")
+
+        # ── P2-D（2026-07-21）信号变更主动通知：alert + SSE 推送 ──
+        try:
+            original_last_status = item.get("last_signal_status")
+            if original_last_status and original_last_status != signal_status:
+                try:
+                    sse_enabled = get_config_bool("watchlist.signal_change_sse_enabled", True)
+                    alert_enabled = get_config_bool("watchlist.signal_change_alert_enabled", True)
+                except Exception:
+                    sse_enabled = True
+                    alert_enabled = True
+
+                # severity 映射
+                _to = signal_status
+                _from = original_last_status
+                if _to == "green":
+                    change_severity = "info"
+                    change_emoji = "🟢"
+                    change_label = "机会出现"
+                elif _to == "red":
+                    change_severity = "warning"
+                    change_emoji = "🔴"
+                    change_label = "机会消失"
+                elif _to == "yellow":
+                    if _from == "green":
+                        change_severity = "warning"
+                        change_emoji = "🟡"
+                        change_label = "机会减弱"
+                    else:
+                        change_severity = "info"
+                        change_emoji = "🟡"
+                        change_label = "接近上车"
+                else:  # gray
+                    change_severity = "info"
+                    change_emoji = "⚪"
+                    change_label = "数据缺失"
+
+                change_title = f"{change_emoji} [信号变更] {fund_name} {_from}→{_to}"
+                change_content = (
+                    f"{fund_name}({fund_code}) 信号灯由 {_from} 变为 {_to}：{change_label}。"
+                    f"{'原因：' + signal_reason if signal_reason else ''}"
+                )
+
+                # 1) 写入 portfolio_alerts
+                if alert_enabled:
+                    try:
+                        from db.portfolio import create_alert
+                        create_alert(
+                            alert_type="watchlist_signal_change",
+                            title=change_title,
+                            content=change_content,
+                            severity=change_severity,
+                            related_fund_code=fund_code,
+                            related_fund_name=fund_name,
+                            source="watchlist_patrol",
+                        )
+                    except Exception as _ae:
+                        logger.debug(f"[watchlist] 信号变更 alert 写入失败 {fund_code}: {_ae}")
+
+                # 2) SSE 实时推送
+                if sse_enabled:
+                    try:
+                        from routers.conversation.notifications import notify_subscribers
+                        import asyncio as _asyncio
+                        sse_payload = {
+                            "title": change_title,
+                            "message": change_content,
+                            "type": change_severity,
+                            "category": "watchlist_signal_change",
+                            "data": {
+                                "fund_code": fund_code,
+                                "fund_name": fund_name,
+                                "from_status": _from,
+                                "to_status": _to,
+                                "signal_reason": signal_reason,
+                                "signal_confidence": signal_confidence,
+                                "current_percentile": current_pct,
+                                "target_percentile": target_pct,
+                                "change_label": change_label,
+                            },
+                            "timestamp": _asyncio.get_event_loop().time(),
+                        }
+                        # patrol 是 async 函数，可直接 await
+                        await notify_subscribers(sse_payload)
+                    except Exception as _se:
+                        logger.debug(f"[watchlist] 信号变更 SSE 推送失败 {fund_code}: {_se}")
+        except Exception as _e:
+            logger.debug(f"[watchlist] 信号变更检测失败 {fund_code}: {_e}")
 
         all_items.append({
             "id": item["id"],
@@ -894,6 +1003,88 @@ async def watchlist_review_backtests_api():
     """
     from services.advisor.watchlist_backtest import review_watchlist_signal_backtests
     return review_watchlist_signal_backtests()
+
+
+@router.get("/api/watchlist/{fund_code}/signal-history")
+async def watchlist_signal_history_api(fund_code: str, limit: int = 20):
+    """获取基金信号回测历史（P2-A 2026-07-21 新增，用于前端轨迹图）。
+
+    Query 参数：
+    - limit: 返回记录数上限，默认 20，范围 1-100
+
+    Returns:
+        {
+            "fund_code": str,
+            "history": [
+                {
+                    "signal_date": str, "signal_status": str,
+                    "entry_nav": float, "entry_percentile": float,
+                    "review_date": str, "review_nav": float | None,
+                    "change_pct": float | None, "hit": int | None,
+                    "signal_confidence": float | None,
+                    "multidim_snapshot": str | None,
+                    "reviewed_at": str | None
+                },
+                ...
+            ],
+            "count": int
+        }
+    """
+    if limit < 1 or limit > 100:
+        limit = 20
+    from db.watchlist import get_fund_signal_backtest_history
+    history = get_fund_signal_backtest_history(fund_code, limit=limit)
+    return {"fund_code": fund_code, "history": history, "count": len(history)}
+
+
+@router.get("/api/watchlist/resonance")
+async def watchlist_resonance_api():
+    """获取关注列表信号共振 + 持仓系统性风险分析（P2-C 2026-07-21 新增）。
+
+    Returns:
+        {
+            "watchlist_resonance": {
+                "green_count": int, "yellow_count": int, "red_count": int, "total": int,
+                "green_ratio": float,
+                "resonance_level": "strong" | "moderate" | "weak" | "none" | "strong_bearish",
+                "resonance_type": "bullish" | "bearish" | "neutral",
+                "alert_funds": [...], "suggestion": str
+            },
+            "holding_systemic_risk": {
+                "systemic_risk": bool, "triggered_count": int, "total_holdings": int,
+                "triggered_ratio": float, "triggered_funds": [...], "suggestion": str
+            }
+        }
+    """
+    from services.advisor.watchlist_resonance import (
+        detect_watchlist_resonance, detect_holding_systemic_risk
+    )
+    wl_resonance = detect_watchlist_resonance()
+    holding_risk = detect_holding_systemic_risk()
+
+    # 强共振 / 系统性风险生成 alert
+    try:
+        from db.portfolio import create_alert
+        if wl_resonance.get("resonance_level") == "strong":
+            create_alert(
+                alert_type="watchlist_resonance_bullish",
+                title=f"关注列表强共振：{wl_resonance['green_count']} 只 green",
+                content=wl_resonance.get("suggestion", ""),
+                severity="info",
+                source="watchlist_resonance",
+            )
+        if holding_risk.get("systemic_risk"):
+            create_alert(
+                alert_type="holding_systemic_risk",
+                title=f"持仓系统性风险：{holding_risk['triggered_count']} 只触发退出",
+                content=holding_risk.get("suggestion", ""),
+                severity="danger",
+                source="watchlist_resonance",
+            )
+    except Exception as _e:
+        logger.debug(f"[watchlist] 共振 alert 写入失败: {_e}")
+
+    return {"watchlist_resonance": wl_resonance, "holding_systemic_risk": holding_risk}
 
 
 def _calculate_buy_score(item: dict) -> dict:

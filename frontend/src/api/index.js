@@ -2331,6 +2331,16 @@ export function reviewWatchlistBacktests() {
   return api.post('/watchlist/review-backtests')
 }
 
+/** P2-A（2026-07-21）：获取关注基金信号回测历史轨迹（前端散点图用） */
+export function getWatchlistSignalHistory(fundCode) {
+  return api.get(`/watchlist/${fundCode}/signal-history`)
+}
+
+/** P2-C（2026-07-21）：获取关注列表信号共振 + 持仓系统性风险分析 */
+export function getWatchlistResonance() {
+  return api.get('/watchlist/resonance')
+}
+
 // ── 基金六维体检报告 API ──────────────────────────────────────
 
 /** 获取单基金六维体检报告 */

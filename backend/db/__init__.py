@@ -1266,6 +1266,9 @@ def init_db():
     _ensure_column(conn, "watchlist", "high_water_mark", "REAL")          # 历史最高净值
     # P1-D（2026-07-21）信号有效期：green 信号触发时间，用于 5/10 天自动降级
     _ensure_column(conn, "watchlist", "signal_triggered_at", "TEXT")      # green 信号首次触发时间
+    # P2-A（2026-07-21）回测闭环深化：自适应阈值（命中率反哺 target_percentile）
+    _ensure_column(conn, "watchlist", "adaptive_target_pct", "REAL")      # 自适应后的阈值
+    _ensure_column(conn, "watchlist", "adaptive_reason", "TEXT")          # 自适应原因
     conn.execute("CREATE INDEX IF NOT EXISTS idx_watchlist_user ON watchlist(user_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_watchlist_status ON watchlist(status)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_watchlist_exit_signal ON watchlist(exit_signal)")

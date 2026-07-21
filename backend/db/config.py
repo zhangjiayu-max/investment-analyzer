@@ -349,6 +349,42 @@ DEFAULT_CONFIGS = [
     ('alerts.auto_backfill_on_startup_enabled', 'true', '启动时一键 backfill 开关：启动时回补历史事件/机会/watchlist 数据（默认开启）', 'alerts'),
     # O-4: watchlist current_percentile fallback（无 index_code 时从 fund_metadata 或净值回撤估算）
     ('watchlist.fallback_percentile_enabled', 'true', 'watchlist 分位 fallback 开关：无 index_code 时从 tracking_index 或净值回撤估算（默认开启）', 'watchlist'),
+
+    # ── P2-F（2026-07-21）P0/P1 开关注册到 system_config（前端配置面板可管理） ──
+    ('watchlist.multidim_signal_enabled', 'true', '多维信号接入开关（技术/资金/情绪三维）', 'watchlist'),
+    ('watchlist.multidim_signal_timeout_seconds', '5', '多维信号获取超时秒数', 'watchlist'),
+    ('watchlist.signal_expiry_enabled', 'true', '信号有效期开关（green 5/10 天自动降级）', 'watchlist'),
+    ('watchlist.moving_profit_target_enabled', 'true', '移动止盈开关（pnl>=20% 后回撤 5%）', 'watchlist'),
+    ('watchlist.breakeven_stop_loss_enabled', 'true', '保本止损开关（pnl>=10% 后回落至 5%）', 'watchlist'),
+    ('watchlist.time_stop_loss_enabled', 'true', '时间止损开关（持有 30 天 + pnl<3%）', 'watchlist'),
+    ('watchlist.composite_rule_enabled', 'true', '复合规则开关（双重看空降级 red）', 'watchlist'),
+    ('watchlist.three_way_resonance_enabled', 'true', '三重共振开关（同向三维升级/降级）', 'watchlist'),
+    ('watchlist.history_hitrate_feedback_enabled', 'true', '历史命中率反哺 confidence 开关', 'watchlist'),
+    ('watchlist.review_date_precision_enabled', 'true', 'review_date 交易日精度开关', 'watchlist'),
+    ('watchlist.global_indicator_cache_ttl_minutes', '30', '全局指标缓存 TTL（分钟）', 'watchlist'),
+    ('watchlist.yingmi_diagnosis_enabled', 'false', '盈米基金诊断开关', 'watchlist'),
+
+    # ── P2-A（2026-07-21）回测闭环深化：自适应阈值 ──
+    ('watchlist.adaptive_threshold_enabled', 'true', '自适应阈值开关：根据历史命中率动态调整 target_percentile', 'watchlist'),
+    ('watchlist.adaptive_min_samples', '5', '自适应阈值最小样本量（reviewed < 此值不调整）', 'watchlist'),
+
+    # ── P2-B（2026-07-21）多维信号+宏观扩展 ──
+    ('watchlist.macro_signal_enabled', 'true', '宏观信号维度开关（LPR/SHIBOR/美债/汇率/政策）', 'watchlist'),
+
+    # ── P2-C（2026-07-21）组合层信号共振 ──
+    ('watchlist.resonance_detection_enabled', 'true', '共振检测开关：多标的同向共振 + 持仓系统性风险预警', 'watchlist'),
+    ('watchlist.resonance_strong_threshold', '3', '强共振基金数阈值（green/退出 >= 此值触发 strong）', 'watchlist'),
+    ('watchlist.resonance_ratio_threshold', '0.3', '强共振比例阈值（green/退出占总数 >= 此值触发 strong）', 'watchlist'),
+    ('watchlist.resonance_bearish_count_threshold', '3', '强看空共振基金数阈值（red >= 此值触发 strong_bearish）', 'watchlist'),
+    ('watchlist.resonance_bearish_ratio_threshold', '0.5', '强看空共振比例阈值（red 占总数 >= 此值触发 strong_bearish）', 'watchlist'),
+    ('watchlist.systemic_loss_threshold', '-10.0', '持仓系统性风险：严重亏损阈值（profit_rate <= 此值视为严重亏损，单位 %）', 'watchlist'),
+    ('watchlist.systemic_drop_threshold', '-3.0', '持仓系统性风险：今日大跌阈值（today_change_pct <= 此值视为大跌，单位 %）', 'watchlist'),
+    ('watchlist.systemic_ratio_threshold', '0.4', '持仓系统性风险：触发比例阈值（严重亏损或今日大跌持仓数 / 总持仓 >= 此值则系统性风险=True）', 'watchlist'),
+    ('watchlist.systemic_max_display', '5', '持仓系统性风险：triggered_holdings 最大返回数量', 'watchlist'),
+
+    # ── P2-D（2026-07-21）信号变更主动通知 ──
+    ('watchlist.signal_change_alert_enabled', 'true', '信号变更 alert 开关：信号灯变更时生成 alert', 'watchlist'),
+    ('watchlist.signal_change_sse_enabled', 'true', '信号变更 SSE 推送开关：信号灯变更时实时推送到前端', 'watchlist'),
 ]
 
 

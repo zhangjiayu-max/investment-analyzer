@@ -37,6 +37,9 @@ const categoryLabels = {
   bond: '债券配置',
   portfolio: '持仓管理',
   llm: 'LLM 参数',
+  watchlist: '关注列表信号',
+  alerts: '预警系统',
+  smart_add: '智能补仓',
   general: '通用',
 }
 

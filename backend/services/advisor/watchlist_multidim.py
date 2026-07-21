@@ -233,6 +233,26 @@ def _compute_multidim_signals(index_name: str, index_code: str = None,
         label = "恐惧" if sentiment_signal == "fear" else "贪婪"
         reasons.append(f"市场情绪{label}{'+' if sentiment_score > 0 else ''}{sentiment_score}")
 
+    # 4. P2-B（2026-07-21）宏观信号维度（LPR/SHIBOR/美债/汇率/政策，1 小时全局缓存）
+    macro_signal = "neutral"
+    macro_score = 0
+    macro_reasons: list[str] = []
+    macro_details: dict = {}
+    try:
+        from services.advisor.watchlist_macro import get_macro_score_cached
+        macro = get_macro_score_cached()
+        macro_signal = macro.get("signal", "neutral")
+        macro_score = macro.get("score", 0)
+        macro_reasons = macro.get("reasons", [])
+        macro_details = macro.get("details", {})
+        if macro_signal != "neutral" and not macro.get("disabled"):
+            label = "宽松" if macro_signal == "easing" else "收紧"
+            reasons.append(f"宏观{label}{'+' if macro_score > 0 else ''}{macro_score}")
+            if macro_reasons:
+                reasons.extend(macro_reasons[:1])  # 最多追加 1 条原因，避免 reasons 过长
+    except Exception as _e:
+        logger.debug(f"[wl_multidim] 宏观信号获取失败: {_e}")
+
     result = {
         "tech_signal": tech_signal,
         "tech_score": int(tech_score),
@@ -240,6 +260,11 @@ def _compute_multidim_signals(index_name: str, index_code: str = None,
         "capital_score": int(capital_score),
         "sentiment_signal": sentiment_signal,
         "sentiment_score": int(sentiment_score),
+        # P2-B（2026-07-21）宏观维度
+        "macro_signal": macro_signal,
+        "macro_score": int(macro_score),
+        "macro_reasons": macro_reasons,
+        "macro_details": macro_details,
         "reasons": reasons,
         "fetched_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     }
@@ -339,6 +364,8 @@ def adjust_signal_by_multidim(signal_status: str, signal_reason: str,
     tech = multidim.get("tech_signal", "neutral")
     capital = multidim.get("capital_signal", "neutral")
     sentiment = multidim.get("sentiment_signal", "neutral")
+    # P2-B（2026-07-21）宏观信号
+    macro = multidim.get("macro_signal", "neutral")
     reasons = list(multidim.get("reasons", []))
 
     # 读取开关（默认开启）
@@ -346,9 +373,11 @@ def adjust_signal_by_multidim(signal_status: str, signal_reason: str,
         from db.config import get_config_bool
         composite_enabled = get_config_bool("watchlist.composite_rule_enabled", True)
         resonance_enabled = get_config_bool("watchlist.three_way_resonance_enabled", True)
+        macro_enabled = get_config_bool("watchlist.macro_signal_enabled", True)
     except Exception:
         composite_enabled = True
         resonance_enabled = True
+        macro_enabled = True
 
     # 多空计数
     bullish_count = sum([tech == "bull", capital == "inflow", sentiment == "fear"])
@@ -383,6 +412,17 @@ def adjust_signal_by_multidim(signal_status: str, signal_reason: str,
                 adjusted = "red"
                 extra_notes.append("⚠️ 三重共振看空,暂不介入")
             # red/gray 维持
+
+    # ── P2-B（2026-07-21）宏观维度规则 ──
+    # 宏观收紧压制 green：货币环境收紧时，估值 green 信号需降级观察
+    # 宽松环境提亮 yellow：货币环境宽松时，估值 yellow 可视为政策托底机会
+    if macro_enabled:
+        if macro == "tightening" and signal_status == "green" and adjusted == "green":
+            adjusted = "yellow"
+            extra_notes.append("⚠️ 宏观环境收紧,green 信号降级观察")
+        elif macro == "easing" and signal_status == "yellow" and adjusted == "yellow":
+            adjusted = "green"
+            extra_notes.append("✓ 宏观环境宽松,yellow 信号升级")
 
     # ── P1-A 复合规则(双重看空强制降级) ──
     if composite_enabled and bearish_count >= 2 and bullish_count < 3:
@@ -431,12 +471,13 @@ def compute_signal_confidence(signal_status: str, multidim: dict,
                                 fund_code: str = None) -> int:
     """计算信号置信度（0-100）。
 
-    P1-B（2026-07-21）权重重分配:
-    - 估值偏离度 35%（原 40%）：green=80、yellow=55、red=20、gray=0
-    - 技术面 20%（不变）：bull=100、neutral=50、bear=10
-    - 资金面 15%（原 20%）：inflow=90、neutral=50、outflow=20
-    - 情绪面 15%（原 20%）：fear=80（逆向加分）、neutral=50、greed=30
-    - 历史命中率 15%（新增）：hit_rate>=70 加分、<40 扣分
+    P2-B（2026-07-21）权重重分配为 6 维加权:
+    - 估值偏离度 30%（原 35%）：green=80、yellow=55、red=20、gray=0
+    - 技术面 18%（原 20%）：bull=100、neutral=50、bear=10
+    - 资金面 12%（原 15%）：inflow=90、neutral=50、outflow=20
+    - 情绪面 12%（原 15%）：fear=80（逆向加分）、neutral=50、greed=30
+    - 历史命中率 13%（原 15%）：hit_rate>=70 加分、<40 扣分
+    - 宏观面 15%（新增）：easing=90、neutral=50、tightening=10
 
     无多维数据时仅按估值偏离度计算 + 历史命中率，confidence 上限 60。
     """
@@ -469,24 +510,28 @@ def compute_signal_confidence(signal_status: str, multidim: dict,
         multidim.get("tech_signal") == "neutral"
         and multidim.get("capital_signal") == "neutral"
         and multidim.get("sentiment_signal") == "neutral"
+        and multidim.get("macro_signal", "neutral") == "neutral"
     ):
         return max(0, min(60, int(base) + history_bonus))
 
     tech_map = {"bull": 100, "neutral": 50, "bear": 10}
     capital_map = {"inflow": 90, "neutral": 50, "outflow": 20}
     sentiment_map = {"fear": 80, "neutral": 50, "greed": 30}
+    macro_map = {"easing": 90, "neutral": 50, "tightening": 10}
 
     tech_score = tech_map.get(multidim.get("tech_signal", "neutral"), 50)
     capital_score = capital_map.get(multidim.get("capital_signal", "neutral"), 50)
     sentiment_score = sentiment_map.get(multidim.get("sentiment_signal", "neutral"), 50)
+    macro_score = macro_map.get(multidim.get("macro_signal", "neutral"), 50)
 
-    # 5 维加权:估值 35% + 技术 20% + 资金 15% + 情绪 15% + 历史 15%
+    # 6 维加权:估值 30% + 技术 18% + 资金 12% + 情绪 12% + 历史 13% + 宏观 15%
     history_dim_score = 50 + history_bonus * 2  # 50 中性,bonus 翻倍归一到 0-100
     confidence = int(
-        base * 0.35
-        + tech_score * 0.20
-        + capital_score * 0.15
-        + sentiment_score * 0.15
-        + history_dim_score * 0.15
+        base * 0.30
+        + tech_score * 0.18
+        + capital_score * 0.12
+        + sentiment_score * 0.12
+        + history_dim_score * 0.13
+        + macro_score * 0.15
     )
     return max(0, min(100, confidence))
