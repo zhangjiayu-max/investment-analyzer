@@ -51,6 +51,27 @@ def is_cacheable(tool_name: str) -> bool:
     return tool_name in _CACHEABLE_TOOLS
 
 
+def _deep_sort(obj: Any) -> Any:
+    """递归排序 dict 的所有层级 key，并对 list 元素排序（仅当元素可比较时）。
+
+    conv#130 修复：json.dumps(sort_keys=True) 只对顶层 dict 排序，
+    嵌套 dict 的 key 顺序仍可能不同。本函数递归排序所有层级的 dict key，
+    确保参数顺序不影响缓存命中。
+    """
+    if isinstance(obj, dict):
+        return {k: _deep_sort(obj[k]) for k in sorted(obj.keys(), key=str)}
+    if isinstance(obj, list):
+        sorted_items = []
+        for item in obj:
+            sorted_items.append(_deep_sort(item))
+        # 尝试对 list 排序（仅当所有元素类型一致且可比较时）
+        try:
+            return sorted(sorted_items, key=lambda x: json.dumps(x, ensure_ascii=False, default=str))
+        except Exception:
+            return sorted_items
+    return obj
+
+
 class ToolCallCache:
     """工具调用结果缓存。
 
@@ -73,9 +94,12 @@ class ToolCallCache:
 
     def _key(self, tool_name: str, args: dict) -> str:
         """生成缓存 key：工具名 + 参数哈希。"""
-        # 对参数排序后哈希，避免参数顺序影响缓存命中
+        # 对参数递归排序后哈希，避免参数顺序影响缓存命中
+        # conv#130 修复：原 json.dumps(sort_keys=True) 只对顶层 dict 排序，
+        # 嵌套 dict/list 不排序，导致 fund_code 列表顺序不同时 cache miss
         try:
-            normalized = json.dumps(args, sort_keys=True, ensure_ascii=False, default=str)
+            normalized_args = _deep_sort(args)
+            normalized = json.dumps(normalized_args, sort_keys=True, ensure_ascii=False, default=str)
         except (TypeError, ValueError):
             # 不可序列化的参数，退化为字符串表示
             normalized = str(sorted(args.items(), key=lambda x: x[0]))
@@ -96,6 +120,12 @@ class ToolCallCache:
         entry = self._cache.get(key)
         if entry is None:
             self._misses += 1
+            # conv#130 排查：记录 cache miss 的工具名和参数摘要，便于排查重复调用
+            try:
+                args_brief = {k: (str(v)[:50] if not isinstance(v, (list, dict)) else f"<{type(v).__name__} len={len(v)}>") for k, v in (args or {}).items()}
+                logger.info(f"[tool_cache] MISS {tool_name} key={key} args={args_brief}")
+            except Exception:
+                pass
             return None
 
         ts, result = entry
@@ -103,6 +133,7 @@ class ToolCallCache:
             # 过期
             del self._cache[key]
             self._misses += 1
+            logger.info(f"[tool_cache] EXPIRED {tool_name} key={key} ttl={self._ttl}s")
             return None
 
         self._hits += 1

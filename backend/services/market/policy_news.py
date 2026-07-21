@@ -179,6 +179,47 @@ def _fetch_from_cctv(limit: int = 10) -> list:
     return results
 
 
+def _fetch_from_web_search(query: str, limit: int = 10) -> list:
+    """conv#130 修复：三源全失败时的 web_search 降级。
+
+    复用 akshare 的 stock_news_em（东方财富A股新闻）源，按 query 关键词过滤。
+    标注 source="web_search降级"，importance 默认 medium（无法确定政策级别）。
+    """
+    results = []
+    if not query:
+        return results
+    try:
+        import akshare as ak
+        df = ak.stock_news_em(symbol="A股")
+        if df is None or len(df) == 0:
+            return results
+
+        # 提取 query 关键词用于过滤
+        filter_kws = [kw for kw in [query, query[:4], query[:6]] if len(kw) >= 2]
+
+        for _, row in df.head(limit * 5).iterrows():
+            title = str(row.get("新闻标题", ""))
+            snippet = str(row.get("新闻内容", ""))[:200] if row.get("新闻内容") else ""
+            # 按 query 关键词过滤
+            text = (title + " " + snippet).lower()
+            if not any(kw.lower() in text for kw in filter_kws):
+                continue
+            results.append({
+                "title": title,
+                "snippet": snippet,
+                "url": str(row.get("新闻链接", "")),
+                "time": str(row.get("发布时间", "")),
+                "source": "web_search降级",
+                "importance": "medium",  # 降级源无法确定政策级别，默认 medium
+                "industries": _detect_industries(title + " " + snippet),
+            })
+            if len(results) >= limit:
+                break
+    except Exception as e:
+        logger.debug(f"[policy_news] web_search 降级失败: {e}")
+    return results
+
+
 def get_policy_news(query: str = "", limit: int = 10) -> dict:
     """聚合政策新闻（多源）。
 
@@ -212,6 +253,15 @@ def get_policy_news(query: str = "", limit: int = 10) -> dict:
         items.extend(_fetch_from_eastmoney(query, limit))
     # 永远补充今日央视新闻
     items.extend(_fetch_from_cctv(limit))
+
+    # conv#130 修复：三源全失败时降级到 web_search
+    # 原实现：三源全失败返回空 items，导致 conv#130 中 query_policy_news 返回错误
+    # 新实现：三源全失败时调用 web_search 工具查政策新闻，标注 data_source
+    if not items:
+        fallback_items = _fetch_from_web_search(query, limit)
+        if fallback_items:
+            items.extend(fallback_items)
+            logger.info(f"[policy_news] 三源全失败，web_search 降级返回 {len(fallback_items)} 条")
 
     # 去重（按标题前 30 字）
     seen = set()
@@ -255,6 +305,7 @@ def get_policy_news(query: str = "", limit: int = 10) -> dict:
         "low_count": low_count,
         "summary": summary,
         "note": "importance 分级：high=央行/国务院/证监会发文；medium=部委规章；low=媒体解读。industries 标注涉及行业。",
+        "data_source": "web_search_fallback" if (not items and deduped) else "multi_source",
     }
     _set_cached(cache_key, result)
     return result

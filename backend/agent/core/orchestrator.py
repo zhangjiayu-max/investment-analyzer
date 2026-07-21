@@ -1125,9 +1125,23 @@ def should_run_cross_review(
         predicted_need_cross_review: 来自 clarify_requirement 的 LLM 预判。
         needs_arbitration: 来自路由结果，complex 场景通常为 True。
     """
+    # 详细排查日志：记录所有入口参数（conv#130 排查用）
+    spec_count = len(specialist_results)
+    conflict_detected = bool(conflicts and conflicts.get("detected"))
+    conflict_severity = conflicts.get("severity") if conflicts else None
+    logger.info(
+        f"交叉审阅排查: enabled={enabled} force_skip={force_skip} spec_count={spec_count} "
+        f"min_specialists={min_specialists} complexity={complexity} "
+        f"conflict_detected={conflict_detected} conflict_severity={conflict_severity} "
+        f"min_severity={min_severity} predicted_need_cr={predicted_need_cross_review} "
+        f"needs_arbitration={needs_arbitration}"
+    )
+
     if not enabled or force_skip:
+        logger.info(f"交叉审阅跳过: enabled={enabled} force_skip={force_skip}")
         return False
-    if len(specialist_results) < min_specialists:
+    if spec_count < min_specialists:
+        logger.info(f"交叉审阅跳过: spec_count={spec_count} < min_specialists={min_specialists}")
         return False
 
     # B1: 复杂度强制触发 — complex/medium 即使无冲突也强制交叉审阅（发挥魔鬼代言人作用）

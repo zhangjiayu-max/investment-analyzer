@@ -66,6 +66,13 @@ routes:
     patterns: ["行为", "心理", "情绪", "偏差", "追涨", "杀跌", "恐慌", "冲动", "焦虑", "贪婪"]
     experts: [behavioral_advisor]
 
+  # conv#130 修复：市场极端波动关键词 → 强制路由行为金融学专家
+  # 识别追涨/羊群效应/过度自信/确认偏差等行为偏差
+  - name: market_extreme_volatility
+    patterns: ["暴涨", "暴跌", "大涨", "大跌", "涨停", "跌停", "爆炒", "狂飙", "飙升",
+               "量化", "资金注入", "主力", "游资", "炒作", "热钱", "接力", "打板"]
+    experts: [behavioral_advisor]
+
 # 声明式 fallback 规则（主路由未命中时按顺序匹配）
 # 替代 LLM fallback，覆盖常见模糊查询
 declarative_fallback:
