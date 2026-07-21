@@ -217,27 +217,62 @@ def _get_user_risk_multiplier(user_id: str) -> float:
 
 def calc_index_exposure(holdings: list, total_assets: float) -> dict:
     """计算每个指数的穿透暴露占比。
-    
-    数据源：holding.index_code（已由 index_fund_mapper 回填）
+
+    数据源优先级：
+    1. holding.index_code（已由 index_fund_mapper 回填）
+    2. fund_metadata.tracking_index（指数名称，作为聚合 key）
+    3. holding.index_name（兜底）
+
     基准：max(total_cost, current_value)（避免深套标的被低估暴露）
+
+    Returns:
+        {index_code_or_name: {total_pct, funds, fund_names}}
     """
     exposure = {}
     if total_assets <= 0:
         return exposure
+
+    # 懒加载 fund_metadata 缓存（避免每个持仓重复查询）
+    _meta_cache = {}
+
+    def _resolve_index(h: dict) -> str:
+        """解析持仓对应的指数标识（代码或名称）。"""
+        # 优先用 index_code
+        code = (h.get("index_code") or "").strip()
+        if code:
+            return code
+        # 回退1: fund_metadata.tracking_index
+        fund_code = h.get("fund_code", "")
+        if fund_code and fund_code not in _meta_cache:
+            try:
+                from services.fund.fund_data_service import get_fund_metadata
+                _meta_cache[fund_code] = get_fund_metadata(fund_code) or {}
+            except Exception:
+                _meta_cache[fund_code] = {}
+        meta = _meta_cache.get(fund_code, {})
+        tracking = (meta.get("tracking_index") or "").strip()
+        if tracking and "无跟踪" not in tracking:
+            return tracking
+        # 回退2: index_name
+        idx_name = (h.get("index_name") or "").strip()
+        if idx_name:
+            return idx_name
+        return ""
+
     for h in holdings:
-        index_code = h.get("index_code") or ""
-        if not index_code:
+        index_key = _resolve_index(h)
+        if not index_key:
             continue
         effective_base = _effective_base(h)
         pct = effective_base / total_assets * 100
-        exposure.setdefault(index_code, {
+        exposure.setdefault(index_key, {
             "total_pct": 0.0,
             "funds": [],
             "fund_names": [],
         })
-        exposure[index_code]["total_pct"] += pct
-        exposure[index_code]["funds"].append(h.get("fund_code", ""))
-        exposure[index_code]["fund_names"].append(h.get("fund_name", ""))
+        exposure[index_key]["total_pct"] += pct
+        exposure[index_key]["funds"].append(h.get("fund_code", ""))
+        exposure[index_key]["fund_names"].append(h.get("fund_name", ""))
     # 四舍五入
     for code, info in exposure.items():
         info["total_pct"] = round(info["total_pct"], 2)
