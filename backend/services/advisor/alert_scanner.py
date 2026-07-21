@@ -917,6 +917,132 @@ def scan_watchlist_signals() -> dict:
     return {"alerts_created": alerts_created, "watchlist_scanned": len(items)}
 
 
+# ── P0-2 关注列表退出信号扫描（2026-07-21 新增）───────────────────────────
+
+
+def scan_watchlist_exit_signals() -> dict:
+    """扫描关注列表已上车基金的止盈/止损触发，生成 alert。
+
+    与 watchlist_patrol_api 的区别：
+    - patrol 是用户主动调用，5 分钟缓存
+    - 这里是定时扫描（每 30 分钟），触发后立即生成 portfolio_alerts
+    - 24h 去重（fund_code + alert_type）
+
+    开关：alerts.watchlist_exit_scan_enabled（默认 true）
+    扫描对象：status='bought' 且 entry_price 非空的项
+
+    Returns:
+        {"alerts_created": int, "scanned": int, "profit_targets": int, "stop_losses": int}
+    """
+    if not _is_enabled("alerts.watchlist_exit_scan_enabled", True):
+        return {"alerts_created": 0, "skipped": "disabled"}
+
+    from db.watchlist import list_watchlist
+    from db.portfolio import fetch_fund_nav
+
+    items = list_watchlist()  # 全部
+    bought_items = [i for i in items if i.get("status") == "bought" and i.get("entry_price")]
+    if not bought_items:
+        return {"alerts_created": 0, "scanned": 0, "profit_targets": 0, "stop_losses": 0}
+
+    alerts_created = 0
+    profit_targets = 0
+    stop_losses = 0
+
+    for item in bought_items:
+        fund_code = item.get("fund_code") or ""
+        fund_name = item.get("fund_name") or fund_code
+        entry_price = float(item.get("entry_price") or 0)
+        if entry_price <= 0:
+            continue
+
+        # 获取最新净值（优先用 watchlist.current_nav，旧了再拉取）
+        current_nav = item.get("current_nav")
+        nav_updated = item.get("nav_updated_at") or ""
+        need_refresh = not current_nav or (
+            nav_updated and nav_updated < (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d %H:%M:%S")
+        )
+        if need_refresh:
+            try:
+                nav_data = fetch_fund_nav(fund_code)
+                if nav_data and nav_data.get("nav"):
+                    current_nav = float(nav_data["nav"])
+            except Exception as e:
+                logger.debug(f"[alert_scanner] 退出扫描取净值失败 {fund_code}: {e}")
+                continue
+
+        if not current_nav:
+            continue
+        current_nav = float(current_nav)
+
+        pnl_pct = (current_nav - entry_price) / entry_price * 100
+        target_profit = item.get("target_profit_pct")
+        stop_loss = item.get("stop_loss_pct")
+
+        # 信号1：止盈触发
+        if target_profit and pnl_pct >= float(target_profit):
+            if _is_alert_recently_created("watchlist_profit_target", fund_code, hours=24):
+                continue
+            try:
+                title = f"关注基金 {fund_name} 已达止盈目标"
+                content = (
+                    f"{fund_name}（{fund_code}）当前净值 {current_nav:.4f}，"
+                    f"买入价 {entry_price:.4f}，已涨 {pnl_pct:.1f}%，"
+                    f"达到止盈目标 {float(target_profit):.1f}%，可考虑获利了结。"
+                )
+                create_alert(
+                    alert_type="watchlist_profit_target",
+                    title=title,
+                    content=content,
+                    severity="info",
+                    related_fund_code=fund_code,
+                    related_fund_name=fund_name,
+                    source="alert_scanner_exit",
+                )
+                alerts_created += 1
+                profit_targets += 1
+                logger.info(f"[alert_scanner] 关注基金 {fund_code} 止盈信号已生成（pnl={pnl_pct:.1f}%）")
+            except Exception as e:
+                logger.warning(f"[alert_scanner] 生成止盈信号失败 {fund_code}: {e}")
+
+        # 信号2：止损触发
+        elif stop_loss and pnl_pct <= -float(stop_loss):
+            if _is_alert_recently_created("watchlist_stop_loss", fund_code, hours=24):
+                continue
+            try:
+                title = f"关注基金 {fund_name} 触发止损"
+                content = (
+                    f"{fund_name}（{fund_code}）当前净值 {current_nav:.4f}，"
+                    f"买入价 {entry_price:.4f}，已跌 {abs(pnl_pct):.1f}%，"
+                    f"触发止损线 -{float(stop_loss):.1f}%，建议止损离场或重新评估。"
+                )
+                create_alert(
+                    alert_type="watchlist_stop_loss",
+                    title=title,
+                    content=content,
+                    severity="warning",
+                    related_fund_code=fund_code,
+                    related_fund_name=fund_name,
+                    source="alert_scanner_exit",
+                )
+                alerts_created += 1
+                stop_losses += 1
+                logger.info(f"[alert_scanner] 关注基金 {fund_code} 止损信号已生成（pnl={pnl_pct:.1f}%）")
+            except Exception as e:
+                logger.warning(f"[alert_scanner] 生成止损信号失败 {fund_code}: {e}")
+
+    logger.info(
+        f"[alert_scanner] 关注列表退出信号扫描：扫描 {len(bought_items)} 只已上车基金，"
+        f"生成 {alerts_created} 个 alert（止盈 {profit_targets} / 止损 {stop_losses}）"
+    )
+    return {
+        "alerts_created": alerts_created,
+        "scanned": len(bought_items),
+        "profit_targets": profit_targets,
+        "stop_losses": stop_losses,
+    }
+
+
 # ── P0-D 健康分预警扫描 ────────────────────────────────────
 
 
@@ -1079,6 +1205,7 @@ def run_periodic_scan() -> dict:
         "valuation_failures": {},
         "market_index_drop": {},
         "capital_flow": {},
+        "watchlist_exit": {},
     }
     try:
         results["verification"] = scan_and_verify_recommendations()
@@ -1122,4 +1249,10 @@ def run_periodic_scan() -> dict:
     except Exception as e:
         logger.warning(f"[alert_scanner] 资金流向扫描失败: {e}")
         results["capital_flow"] = {"error": str(e)}
+    # P0-2: 关注列表退出信号扫描（2026-07-21 新增）
+    try:
+        results["watchlist_exit"] = scan_watchlist_exit_signals()
+    except Exception as e:
+        logger.warning(f"[alert_scanner] 关注列表退出信号扫描失败: {e}")
+        results["watchlist_exit"] = {"error": str(e)}
     return results

@@ -152,6 +152,10 @@ from db.watchlist import (
     add_to_watchlist, get_watchlist_item, get_watchlist_by_fund,
     list_watchlist, update_watchlist_item, remove_from_watchlist,
     batch_add_to_watchlist, refresh_watchlist_navs, get_watchlist_summary,
+    # P0-3（2026-07-21）信号回测 CRUD
+    create_signal_backtest, has_signal_backtest_on_date,
+    list_pending_signal_backtests, update_signal_backtest,
+    get_signal_backtest_stats, get_fund_signal_backtest_history,
 )
 
 # 主题机会
@@ -1251,9 +1255,44 @@ def init_db():
     _ensure_column(conn, "watchlist", "volatility_alert", "TEXT")         # 波动预警：severe/warning/none
     _ensure_column(conn, "watchlist", "volatility_alert_reason", "TEXT")  # 预警原因
     _ensure_column(conn, "watchlist", "volatility_updated_at", "TEXT")    # 预警刷新时间
+    # P0-1（2026-07-21）多维信号 + 信号置信度字段
+    _ensure_column(conn, "watchlist", "signal_confidence", "REAL")        # 0-100
+    _ensure_column(conn, "watchlist", "tech_signal", "TEXT")              # bull/bear/neutral
+    _ensure_column(conn, "watchlist", "capital_signal", "TEXT")           # inflow/outflow/neutral
+    _ensure_column(conn, "watchlist", "sentiment_signal", "TEXT")         # fear/greed/neutral
+    # P0-3（2026-07-21）信号回测闭环：上一信号状态（用于检测 signal_status 从非 green 变 green）
+    _ensure_column(conn, "watchlist", "last_signal_status", "TEXT")       # green/yellow/red/gray
     conn.execute("CREATE INDEX IF NOT EXISTS idx_watchlist_user ON watchlist(user_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_watchlist_status ON watchlist(status)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_watchlist_exit_signal ON watchlist(exit_signal)")
+
+    # ── P0-3（2026-07-21）关注列表信号回测表 ─────────────────────────────────
+    # 用途：watchlist 信号灯由非 green 变 green 时插入回测记录，15 交易日后自动回测命中率
+    # 解决问题：原关注机会"可上车"信号准不准永远是黑盒，无量化验证
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS watchlist_signal_backtests (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            watchlist_id INTEGER NOT NULL,
+            fund_code TEXT NOT NULL,
+            fund_name TEXT,
+            signal_date TEXT NOT NULL,
+            signal_status TEXT NOT NULL,
+            entry_nav REAL,
+            entry_percentile REAL,
+            review_date TEXT NOT NULL,
+            review_nav REAL,
+            change_pct REAL,
+            hit INTEGER,
+            signal_confidence REAL,
+            multidim_snapshot TEXT,
+            created_at TEXT DEFAULT (datetime('now','localtime')),
+            reviewed_at TEXT,
+            FOREIGN KEY (watchlist_id) REFERENCES watchlist(id) ON DELETE CASCADE
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_wl_bt_review ON watchlist_signal_backtests(review_date, hit)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_wl_bt_fund ON watchlist_signal_backtests(fund_code)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_wl_bt_watchlist ON watchlist_signal_backtests(watchlist_id)")
 
     # ── 异步分析任务表 ──────────────────────────────────────
     init_async_tasks_table(conn)

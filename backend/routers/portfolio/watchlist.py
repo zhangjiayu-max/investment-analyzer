@@ -270,6 +270,95 @@ async def watchlist_patrol_api():
             drawdown_percentile=drawdown_percentile,
             nav_percentile=nav_percentile,
         )
+
+        # ── P0-1（2026-07-21）多维信号接入 + 信号置信度 ──
+        tech_signal = "neutral"
+        capital_signal = "neutral"
+        sentiment_signal = "neutral"
+        signal_confidence = None
+        signal_reasons = []
+        try:
+            multidim_enabled = get_config_bool("watchlist.multidim_signal_enabled", True)
+        except Exception:
+            multidim_enabled = True
+        if multidim_enabled and signal_status in ("green", "yellow"):
+            try:
+                timeout_sec = 5
+                try:
+                    timeout_sec = int(get_config("watchlist.multidim_signal_timeout_seconds", "5"))
+                except Exception:
+                    pass
+                from services.advisor.watchlist_multidim import (
+                    _compute_multidim_signals, adjust_signal_by_multidim, compute_signal_confidence
+                )
+                multidim = _compute_multidim_signals(
+                    index_name=index_name,
+                    index_code=item.get("index_code"),
+                    timeout_seconds=timeout_sec,
+                )
+                tech_signal = multidim.get("tech_signal", "neutral")
+                capital_signal = multidim.get("capital_signal", "neutral")
+                sentiment_signal = multidim.get("sentiment_signal", "neutral")
+                # 根据多维信号调整信号灯
+                signal_status, signal_reason, signal_reasons = adjust_signal_by_multidim(
+                    signal_status, signal_reason, multidim,
+                )
+                # 计算置信度
+                signal_confidence = compute_signal_confidence(signal_status, multidim)
+            except Exception as _e:
+                logger.debug(f"[watchlist] 多维信号获取失败 {fund_code}: {_e}")
+                # 降级：仅按估值偏离度计算
+                try:
+                    from services.advisor.watchlist_multidim import compute_signal_confidence
+                    signal_confidence = compute_signal_confidence(signal_status, None)
+                except Exception:
+                    signal_confidence = None
+
+        # ── P0-3（2026-07-21）信号回测闭环：signal_status 从非 green 变 green 时插入回测记录 ──
+        try:
+            last_status = item.get("last_signal_status")
+            today_str = datetime.now().strftime("%Y-%m-%d")
+            if signal_status == "green" and last_status != "green":
+                # 同日去重
+                from db.watchlist import has_signal_backtest_on_date, create_signal_backtest
+                if not has_signal_backtest_on_date(item["id"], today_str):
+                    # 计算 15 交易日后的 review_date（粗略：21 自然日，含周末）
+                    review_dt = datetime.now() + timedelta(days=21)
+                    # 序列化多维信号快照
+                    multidim_snapshot = None
+                    if multidim_enabled and (tech_signal != "neutral" or capital_signal != "neutral" or sentiment_signal != "neutral"):
+                        import json as _json
+                        multidim_snapshot = _json.dumps({
+                            "tech": tech_signal, "capital": capital_signal,
+                            "sentiment": sentiment_signal,
+                            "confidence": signal_confidence,
+                        }, ensure_ascii=False)
+                    create_signal_backtest({
+                        "watchlist_id": item["id"],
+                        "fund_code": fund_code,
+                        "fund_name": fund_name,
+                        "signal_date": today_str,
+                        "signal_status": "green",
+                        "entry_nav": current_nav,
+                        "entry_percentile": current_pct if current_pct is not None else (drawdown_percentile if drawdown_percentile is not None else nav_percentile),
+                        "review_date": review_dt.strftime("%Y-%m-%d"),
+                        "signal_confidence": signal_confidence,
+                        "multidim_snapshot": multidim_snapshot,
+                    })
+            # 更新 last_signal_status（无论是否插入回测）+ 多维信号字段
+            update_fields = {"last_signal_status": signal_status}
+            if signal_confidence is not None:
+                update_fields["signal_confidence"] = signal_confidence
+            if tech_signal != "neutral":
+                update_fields["tech_signal"] = tech_signal
+            if capital_signal != "neutral":
+                update_fields["capital_signal"] = capital_signal
+            if sentiment_signal != "neutral":
+                update_fields["sentiment_signal"] = sentiment_signal
+            update_watchlist_item(item["id"], **update_fields)
+        except Exception as _e:
+            logger.debug(f"[watchlist] 信号回测记录插入失败 {fund_code}: {_e}")
+
         all_items.append({
             "id": item["id"],
             "fund_code": fund_code,
@@ -297,16 +386,22 @@ async def watchlist_patrol_api():
             "updated_at": item.get("updated_at"),
             "notes": item.get("notes", ""),
             "status": item.get("status"),
+            # P0-1（2026-07-21）多维信号 + 置信度
+            "signal_confidence": signal_confidence,
+            "tech_signal": tech_signal,
+            "capital_signal": capital_signal,
+            "sentiment_signal": sentiment_signal,
+            "signal_reasons": signal_reasons,
         })
 
-        # ── Batch1 增强点 1：退出信号计算（开关控制，默认关闭） ──
+        # ── Batch1 增强点 1：退出信号计算（P0-2 2026-07-21 默认改为 true） ──
         exit_signal = "none"
         exit_signal_reason = ""
         pnl_pct = None
         try:
-            exit_enabled = get_config_bool("watchlist.exit_signal_enabled", False)
+            exit_enabled = get_config_bool("watchlist.exit_signal_enabled", True)
         except Exception:
-            exit_enabled = False
+            exit_enabled = True
         if exit_enabled:
             entry_price = item.get("entry_price")
             if entry_price and current_nav and entry_price > 0:
@@ -334,15 +429,15 @@ async def watchlist_patrol_api():
         all_items[-1]["exit_signal"] = exit_signal
         all_items[-1]["exit_signal_reason"] = exit_signal_reason
 
-        # ── Batch1 增强点 2：异常波动预警（开关控制，默认关闭） ──
+        # ── Batch1 增强点 2：异常波动预警（P0-2 2026-07-21 默认改为 true） ──
         vol_alert = "none"
         vol_reason = ""
         daily_pct = None
         weekly_pct = None
         try:
-            vol_enabled = get_config_bool("watchlist.volatility_alert_enabled", False)
+            vol_enabled = get_config_bool("watchlist.volatility_alert_enabled", True)
         except Exception:
-            vol_enabled = False
+            vol_enabled = True
         if vol_enabled and current_nav:
             vol_alert, vol_reason, daily_pct, weekly_pct = _calculate_volatility_alert(fund_code, current_nav)
             if vol_alert != "none":
@@ -678,6 +773,34 @@ async def get_buy_score_api(item_id: int):
         "dimensions": score["dimensions"],
         "calculated_at": __import__("datetime").datetime.now().isoformat(),
     }
+
+
+@router.get("/api/watchlist/signal-backtest-stats")
+async def watchlist_signal_backtest_stats_api(fund_code: str = None):
+    """获取关注列表信号回测命中率统计（P0-3 2026-07-21 新增）。
+
+    Query 参数：
+    - fund_code: 指定基金代码则返回该基金的统计，省略则返回全局统计
+
+    Returns:
+        {
+            "total": int, "reviewed": int, "pending": int,
+            "hit": int, "miss": int, "hit_rate": float | None
+        }
+    """
+    from db.watchlist import get_signal_backtest_stats
+    return get_signal_backtest_stats(fund_code=fund_code)
+
+
+@router.post("/api/watchlist/review-backtests")
+async def watchlist_review_backtests_api():
+    """手动触发 watchlist 信号回测（管理员用，P0-3 2026-07-21 新增）。
+
+    正常情况下由 _auto_watchlist_backtest 每日 09:35 自动执行；
+    此接口用于调试或补回测。
+    """
+    from services.advisor.watchlist_backtest import review_watchlist_signal_backtests
+    return review_watchlist_signal_backtests()
 
 
 def _calculate_buy_score(item: dict) -> dict:

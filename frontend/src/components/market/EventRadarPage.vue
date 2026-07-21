@@ -12,7 +12,7 @@ import {
   listMarketEvents, triggerEventRadarScan, triggerEventRadarVerify, getEventRadarAccuracy,
   listWatchlist, addToWatchlist, removeWatchlistItem, refreshWatchlistNavs,
   triggerWatchlistScan, patrolWatchlist, updateWatchlistItem, markWatchlistBought, analyzeArticleTrends,
-  getBuyScore, getFundQuality,
+  getBuyScore, getFundQuality, getWatchlistSignalStats,
   getPortfolioHealthReport, getPortfolioRiskMetrics,
   getMasterDecisionHistory, getMasterAccuracyStats, triggerMasterVerification,
   updateWatchlistEntry, getWatchlistExitStatus, analyzeEventImpact,
@@ -48,6 +48,8 @@ const analyzingArticle = ref(false)
 // 买入评分：{ [itemId]: { score, rating, dimensions, calculated_at } }
 const buyScores = ref({})
 const refreshingScores = ref(false)
+// P0-3（2026-07-21）信号回测命中率统计
+const signalStats = ref({ total: 0, reviewed: 0, pending: 0, hit: 0, miss: 0, hit_rate: null })
 
 // 基金六维体检报告：{ [fund_code]: { total_score, rating, report, decision_matrix, ... } }
 const fundReports = ref({})
@@ -144,7 +146,11 @@ const watchlistStats = computed(() => {
     const now = new Date()
     return (now - created) / (1000 * 60 * 60 * 24) <= 7
   }).length
-  return { total, canBuy, approaching, waiting, noData, recent7d, profitTargets, stopLosses }
+  // P0-3（2026-07-21）信号回测命中率
+  const hitRate = signalStats.value.hit_rate
+  const hitReviewed = signalStats.value.reviewed || 0
+  const hitCount = signalStats.value.hit || 0
+  return { total, canBuy, approaching, waiting, noData, recent7d, profitTargets, stopLosses, hitRate, hitReviewed, hitCount }
 })
 
 // 今日操作建议：优先可上车基金名称
@@ -294,9 +300,21 @@ async function loadWatchlist() {
     watchlist.value = data?.items || []
     // 只做轻量级巡检刷新估值分位（静默）
     if (watchlist.value.length) autoPatrol()
+    // P0-3（2026-07-21）并行加载信号回测命中率统计
+    loadSignalStats()
     // 买入评分和体检报告改为按需加载（用户查看时再加载）
   } catch (e) {
     useToast().showToast('加载关注列表失败', 'error')
+  }
+}
+
+/** P0-3（2026-07-21）加载信号回测命中率统计（静默失败） */
+async function loadSignalStats() {
+  try {
+    const { data } = await getWatchlistSignalStats()
+    if (data) signalStats.value = data
+  } catch (e) {
+    // 静默失败，不打扰用户
   }
 }
 
@@ -704,6 +722,51 @@ function effectiveSignal(item) {
 /** 取关注基金信号状态元信息（默认 gray，退出信号优先级高） */
 function signalMeta(item) {
   return SIGNAL_STATUS_META[effectiveSignal(item)] || SIGNAL_STATUS_META.gray
+}
+
+/** P0-1（2026-07-21）信号置信度颜色分级 */
+function confidenceClass(score) {
+  if (score == null) return ''
+  if (score >= 75) return 'conf-high'
+  if (score >= 50) return 'conf-mid'
+  return 'conf-low'
+}
+
+/** P0-1（2026-07-21）是否有多维信号（至少一个非 neutral） */
+function hasMultidimSignal(item) {
+  return (item.tech_signal && item.tech_signal !== 'neutral')
+      || (item.capital_signal && item.capital_signal !== 'neutral')
+      || (item.sentiment_signal && item.sentiment_signal !== 'neutral')
+}
+
+/** P0-1（2026-07-21）多维信号徽章样式 */
+function multidimBadgeClass(dim, signal) {
+  if (dim === 'tech') {
+    if (signal === 'bull') return 'md-bull'
+    if (signal === 'bear') return 'md-bear'
+    return 'md-neutral'
+  }
+  if (dim === 'capital') {
+    if (signal === 'inflow') return 'md-bull'
+    if (signal === 'outflow') return 'md-bear'
+    return 'md-neutral'
+  }
+  if (dim === 'sentiment') {
+    if (signal === 'fear') return 'md-bull'  // 逆向布局机会
+    if (signal === 'greed') return 'md-bear' // 过热风险
+    return 'md-neutral'
+  }
+  return 'md-neutral'
+}
+
+/** P0-1（2026-07-21）多维信号中文标签 */
+function multidimLabel(dim, signal) {
+  const map = {
+    tech: { bull: '多头', bear: '看空', neutral: '中性' },
+    capital: { inflow: '净流入', outflow: '净流出', neutral: '中性' },
+    sentiment: { fear: '恐惧', greed: '贪婪', neutral: '中性' },
+  }
+  return (map[dim] && map[dim][signal]) || signal
 }
 
 /** 机会值分析维度标签（估值分位/回撤分位/净值分位） */
@@ -2302,6 +2365,16 @@ watch(scrollToFundCode, async (code) => {
           <div class="stat-value">{{ watchlistStats.recent7d }}</div>
           <div class="stat-label">近7日新增</div>
         </div>
+        <!-- P0-3（2026-07-21）信号命中率 chip -->
+        <div
+          class="stat-card stat-hit-rate"
+          :title="`已回测 ${watchlistStats.hitReviewed} 条，命中 ${watchlistStats.hitCount} 条`"
+        >
+          <div class="stat-value">
+            {{ watchlistStats.hitRate != null ? watchlistStats.hitRate + '%' : '--' }}
+          </div>
+          <div class="stat-label">信号命中率</div>
+        </div>
       </div>
 
       <!-- 排序工具栏 -->
@@ -2536,7 +2609,28 @@ watch(scrollToFundCode, async (code) => {
               <div class="wl-buy-signal" :class="signalMeta(item).cls">
                 <span class="wl-buy-dot"></span>
                 <span class="wl-buy-label">{{ signalMeta(item).label }}</span>
+                <span v-if="item.signal_confidence != null" class="wl-buy-confidence" :class="confidenceClass(item.signal_confidence)">
+                  置信度 {{ item.signal_confidence }}
+                </span>
                 <span v-if="item.signal_reason" class="wl-buy-reason">{{ item.signal_reason }}</span>
+              </div>
+              <!-- P0-1（2026-07-21）多维信号徽章 -->
+              <div v-if="hasMultidimSignal(item)" class="wl-multidim-badges">
+                <span v-if="item.tech_signal && item.tech_signal !== 'neutral'"
+                      class="wl-md-badge"
+                      :class="multidimBadgeClass('tech', item.tech_signal)">
+                  技术 {{ multidimLabel('tech', item.tech_signal) }}
+                </span>
+                <span v-if="item.capital_signal && item.capital_signal !== 'neutral'"
+                      class="wl-md-badge"
+                      :class="multidimBadgeClass('capital', item.capital_signal)">
+                  资金 {{ multidimLabel('capital', item.capital_signal) }}
+                </span>
+                <span v-if="item.sentiment_signal && item.sentiment_signal !== 'neutral'"
+                      class="wl-md-badge"
+                      :class="multidimBadgeClass('sentiment', item.sentiment_signal)">
+                  情绪 {{ multidimLabel('sentiment', item.sentiment_signal) }}
+                </span>
               </div>
               <div v-if="item.suggested_buy_price" class="wl-buy-row">
                 <span class="wl-data-label">建议上车价</span>
@@ -3512,6 +3606,9 @@ watch(scrollToFundCode, async (code) => {
 .stat-holding { border-left-color: #dc2626; }
 .stat-watchlist-hit { border-left-color: #ea580c; }
 .stat-opportunity { border-left-color: #d97706; }
+/* P0-3（2026-07-21）信号命中率 chip：青色边框区分 */
+.stat-hit-rate { border-left-color: #0891b2; cursor: default; }
+.stat-hit-rate .stat-value { color: #0891b2; }
 .stat-watch { border-left-color: #2563eb; }
 .stat-value {
   font-size: 1.5rem;
@@ -5072,6 +5169,36 @@ watch(scrollToFundCode, async (code) => {
   margin-left: auto;
   text-align: right;
 }
+/* P0-1（2026-07-21）信号置信度小标签 */
+.wl-buy-confidence {
+  font-size: 0.62rem;
+  font-weight: 600;
+  padding: 0.05rem 0.3rem;
+  border-radius: 4px;
+  margin-left: 0.3rem;
+  white-space: nowrap;
+}
+.wl-buy-confidence.conf-high { background: #dcfce7; color: #16a34a; }
+.wl-buy-confidence.conf-mid { background: #fef3c7; color: #d97706; }
+.wl-buy-confidence.conf-low { background: #fee2e2; color: #dc2626; }
+
+/* P0-1（2026-07-21）多维信号徽章 */
+.wl-multidim-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+  margin-top: 0.25rem;
+}
+.wl-md-badge {
+  font-size: 0.6rem;
+  font-weight: 500;
+  padding: 0.05rem 0.35rem;
+  border-radius: 8px;
+  white-space: nowrap;
+}
+.wl-md-badge.md-bull { background: #dcfce7; color: #16a34a; }
+.wl-md-badge.md-bear { background: #fee2e2; color: #dc2626; }
+.wl-md-badge.md-neutral { background: #f3f4f6; color: var(--color-text-tertiary); }
 .wl-buy-timing .sig-hit .wl-buy-dot { background: #16a34a; }
 .wl-buy-timing .sig-hit .wl-buy-label { color: #16a34a; }
 .wl-buy-timing .sig-warn .wl-buy-dot { background: #ea580c; }

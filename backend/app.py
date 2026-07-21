@@ -464,6 +464,13 @@ async def startup():
     else:
         logging.info("机会雷达每日回测已关闭（alerts.opportunity_backtest_enabled=false）")
 
+    # P0-3（2026-07-21）：关注列表信号回测定时任务
+    if get_config("alerts.watchlist_backtest_enabled", "true") == "true":
+        asyncio.create_task(_auto_watchlist_backtest())
+        logging.info("关注列表信号回测任务已启动（alerts.watchlist_backtest_enabled=true）")
+    else:
+        logging.info("关注列表信号回测已关闭（alerts.watchlist_backtest_enabled=false）")
+
     # O-8（2026-07-21）：启动时一键 backfill 机会雷达与事件雷达历史数据
     # 开关：alerts.auto_backfill_on_startup_enabled（默认 true）
     # 触发：sources/impact/direction/confidence/opportunity/watchlist 全量回补
@@ -919,6 +926,49 @@ async def _auto_opportunity_backtest():
                 logging.warning(f"[opportunity-backtest] 回测异常: {e}")
     except Exception as e:
         logging.warning(f"机会雷达回测任务异常: {e}")
+
+
+async def _auto_watchlist_backtest():
+    """关注列表信号回测 — 每日 09:35 自动回测已到期的上车信号。
+
+    P0-3（2026-07-21）新增：
+    - 原 watchlist 信号灯"可上车"是否准确无量化验证
+    - 每次信号由非 green 变 green 时插入回测记录
+    - 15 交易日后自动回测涨幅（命中定义 >= 3%）
+
+    开关：alerts.watchlist_backtest_enabled（默认 true）
+    """
+    from datetime import datetime, timedelta
+    _SCAN_TIME = (9, 35)
+    try:
+        await asyncio.sleep(240)  # 等启动完成（比机会雷达回测晚 4 分钟避免抢资源）
+
+        while True:
+            now = datetime.now()
+            target = now.replace(hour=_SCAN_TIME[0], minute=_SCAN_TIME[1], second=0, microsecond=0)
+            if target <= now:
+                target = (now + timedelta(days=1)).replace(
+                    hour=_SCAN_TIME[0], minute=_SCAN_TIME[1], second=0, microsecond=0)
+            wait_seconds = (target - now).total_seconds()
+            await asyncio.sleep(wait_seconds)
+
+            if get_config("alerts.watchlist_backtest_enabled", "true") != "true":
+                continue
+
+            try:
+                from services.advisor.watchlist_backtest import review_watchlist_signal_backtests
+                result = review_watchlist_signal_backtests()
+                logging.info(
+                    f"[watchlist-backtest] 回测完成: "
+                    f"reviewed={result.get('reviewed', 0)}, "
+                    f"hit={result.get('hit', 0)}, "
+                    f"miss={result.get('miss', 0)}, "
+                    f"skipped={result.get('skipped', 0)}"
+                )
+            except Exception as e:
+                logging.warning(f"[watchlist-backtest] 回测异常: {e}")
+    except Exception as e:
+        logging.warning(f"[watchlist-backtest] 任务异常: {e}")
 
 
 async def _auto_daily_report():

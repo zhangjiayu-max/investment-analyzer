@@ -94,6 +94,10 @@ def update_watchlist_item(item_id: int, **fields) -> bool:
         # Batch1 增强点 2：异常波动预警字段
         'daily_change_pct', 'weekly_change_pct',
         'volatility_alert', 'volatility_alert_reason', 'volatility_updated_at',
+        # P0-1（2026-07-21）多维信号字段
+        'signal_confidence', 'tech_signal', 'capital_signal', 'sentiment_signal',
+        # P0-3（2026-07-21）信号回测闭环
+        'last_signal_status',
     }
     invalid = set(fields.keys()) - allowed
     if invalid:
@@ -453,5 +457,153 @@ def auto_mark_bought_on_trade(fund_code: str, entry_price: float,
         """, (float(entry_price) if entry_price else None, entry_date, fund_code, user_id))
         conn.commit()
         return cursor.rowcount
+    finally:
+        conn.close()
+
+
+# ── P0-3（2026-07-21）关注列表信号回测 CRUD ─────────────────────────────────
+
+
+def create_signal_backtest(item: dict) -> int:
+    """插入一条 watchlist 信号回测记录，返回 id。
+
+    必填字段：watchlist_id, fund_code, signal_date, signal_status, review_date
+    可选字段：entry_nav, entry_percentile, signal_confidence, multidim_snapshot, fund_name
+    """
+    conn = _get_conn()
+    try:
+        cur = conn.execute("""
+            INSERT INTO watchlist_signal_backtests
+                (watchlist_id, fund_code, fund_name, signal_date, signal_status,
+                 entry_nav, entry_percentile, review_date, signal_confidence, multidim_snapshot)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            item["watchlist_id"],
+            item["fund_code"],
+            item.get("fund_name", ""),
+            item["signal_date"],
+            item["signal_status"],
+            item.get("entry_nav"),
+            item.get("entry_percentile"),
+            item["review_date"],
+            item.get("signal_confidence"),
+            item.get("multidim_snapshot"),
+        ))
+        conn.commit()
+        return cur.lastrowid
+    finally:
+        conn.close()
+
+
+def has_signal_backtest_on_date(watchlist_id: int, signal_date: str) -> bool:
+    """判断某 watchlist 项在某日是否已插入过回测记录（避免重复插入）。"""
+    conn = _get_conn()
+    try:
+        row = conn.execute(
+            "SELECT 1 FROM watchlist_signal_backtests WHERE watchlist_id = ? AND signal_date = ? LIMIT 1",
+            (watchlist_id, signal_date),
+        ).fetchone()
+        return row is not None
+    finally:
+        conn.close()
+
+
+def list_pending_signal_backtests() -> list[dict]:
+    """列出所有已到期但未回测的记录（review_date <= today AND hit IS NULL）。"""
+    conn = _get_conn()
+    try:
+        rows = conn.execute(
+            """SELECT * FROM watchlist_signal_backtests
+               WHERE hit IS NULL AND review_date <= date('now','localtime')
+               ORDER BY review_date ASC LIMIT 200""",
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+def update_signal_backtest(bt_id: int, **fields) -> bool:
+    """更新回测记录字段。允许字段：review_nav, change_pct, hit, reviewed_at。"""
+    allowed = {"review_nav", "change_pct", "hit", "reviewed_at"}
+    invalid = set(fields.keys()) - allowed
+    if invalid:
+        raise ValueError(f"非法字段名: {invalid}")
+    if not fields:
+        return False
+    sets = [f"{k} = ?" for k in fields]
+    params = list(fields.values()) + [bt_id]
+    conn = _get_conn()
+    try:
+        conn.execute(
+            f"UPDATE watchlist_signal_backtests SET {', '.join(sets)} WHERE id = ?",
+            params,
+        )
+        conn.commit()
+        return True
+    finally:
+        conn.close()
+
+
+def get_signal_backtest_stats(fund_code: str = None) -> dict:
+    """获取信号回测命中率统计。
+
+    Args:
+        fund_code: 指定基金代码则返回该基金的统计，None 则返回全局统计
+
+    Returns:
+        {
+            "total": int,         # 总记录数
+            "reviewed": int,      # 已回测数
+            "pending": int,       # 待回测数
+            "hit": int,           # 命中数
+            "miss": int,          # 未命中数
+            "hit_rate": float,    # 命中率（0-100），已回测数为 0 时返回 None
+        }
+    """
+    conn = _get_conn()
+    try:
+        where = "WHERE fund_code = ?" if fund_code else ""
+        params = [fund_code] if fund_code else []
+        row = conn.execute(
+            f"""SELECT
+                COUNT(*) AS total,
+                SUM(CASE WHEN hit IS NOT NULL THEN 1 ELSE 0 END) AS reviewed,
+                SUM(CASE WHEN hit IS NULL THEN 1 ELSE 0 END) AS pending,
+                SUM(CASE WHEN hit = 1 THEN 1 ELSE 0 END) AS hit,
+                SUM(CASE WHEN hit = 0 THEN 1 ELSE 0 END) AS miss
+                FROM watchlist_signal_backtests {where}""",
+            params,
+        ).fetchone()
+        if not row:
+            return {"total": 0, "reviewed": 0, "pending": 0, "hit": 0, "miss": 0, "hit_rate": None}
+        total = int(row["total"] or 0)
+        reviewed = int(row["reviewed"] or 0)
+        pending = int(row["pending"] or 0)
+        hit = int(row["hit"] or 0)
+        miss = int(row["miss"] or 0)
+        hit_rate = round(hit / reviewed * 100, 1) if reviewed > 0 else None
+        return {
+            "total": total,
+            "reviewed": reviewed,
+            "pending": pending,
+            "hit": hit,
+            "miss": miss,
+            "hit_rate": hit_rate,
+        }
+    finally:
+        conn.close()
+
+
+def get_fund_signal_backtest_history(fund_code: str, limit: int = 20) -> list[dict]:
+    """获取某基金的信号回测历史（按 signal_date 降序）。"""
+    conn = _get_conn()
+    try:
+        rows = conn.execute(
+            """SELECT * FROM watchlist_signal_backtests
+               WHERE fund_code = ?
+               ORDER BY signal_date DESC LIMIT ?""",
+            (fund_code, limit),
+        ).fetchall()
+        return [dict(r) for r in rows]
     finally:
         conn.close()

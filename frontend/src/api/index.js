@@ -2321,6 +2321,16 @@ export function triggerWatchlistScan() {
   return api.post('/portfolio/alerts/scan-watchlist')
 }
 
+/** P0-3（2026-07-21）：获取关注列表信号回测命中率统计 */
+export function getWatchlistSignalStats(fundCode = null) {
+  return api.get('/watchlist/signal-backtest-stats', { params: { fund_code: fundCode } })
+}
+
+/** P0-3（2026-07-21）：手动触发关注列表信号回测（管理员用） */
+export function reviewWatchlistBacktests() {
+  return api.post('/watchlist/review-backtests')
+}
+
 // ── 基金六维体检报告 API ──────────────────────────────────────
 
 /** 获取单基金六维体检报告 */
