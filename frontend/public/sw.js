@@ -1,4 +1,4 @@
-const CACHE_NAME = 'ia-v2'
+const CACHE_NAME = 'ia-v3'
 const STATIC_ASSETS = ['/', '/index.html', '/favicon.svg']
 
 self.addEventListener('install', (event) => {
@@ -24,18 +24,33 @@ self.addEventListener('fetch', (event) => {
   if (request.url.includes('/api/')) return
   if (request.headers.get('Accept')?.includes('text/event-stream')) return
 
+  // HTML 文档：network-first（确保用户拿到最新版本，避免 SW 缓存旧 JS）
+  if (request.destination === 'document') {
+    event.respondWith(
+      fetch(request)
+        .then((response) => {
+          if (response.ok) {
+            const clone = response.clone()
+            caches.open(CACHE_NAME).then((cache) => cache.put(request, clone))
+          }
+          return response
+        })
+        .catch(() => caches.match(request).then((cached) => cached || new Response('Offline', { status: 503 })))
+    )
+    return
+  }
+
+  // 带 hash 的静态资源（JS/CSS）：stale-while-revalidate
   event.respondWith(
     fetch(request)
       .then((response) => {
-        // 缓存成功的静态资源
-        if (response.ok && (request.destination === 'document' || request.destination === 'script' || request.destination === 'style' || request.destination === 'image')) {
+        if (response.ok) {
           const clone = response.clone()
           caches.open(CACHE_NAME).then((cache) => cache.put(request, clone))
         }
         return response
       })
       .catch(() => {
-        // 离线时返回缓存
         return caches.match(request).then((cached) => cached || new Response('Offline', { status: 503 }))
       })
   )

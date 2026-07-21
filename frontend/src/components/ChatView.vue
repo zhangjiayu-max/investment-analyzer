@@ -1027,20 +1027,46 @@ function copyToClipboard(text, btnEl = null, toastMsg = '') {
     try {
       const input = document.createElement('textarea')
       input.value = text
-      // iOS Safari 必须先 contentEditable + readOnly=false 才能 setSelectionRange
-      input.contentEditable = true
-      input.readOnly = false
+      // iOS Safari 16+ / 微信内置浏览器关键兼容点：
+      // 1. 必须在 viewport 内（top:-9999px 会导致 select 失败）
+      // 2. opacity:0 而非 display:none（display:none 无法 select）
+      // 3. fontSize >= 16px 防止 iOS 自动缩放
+      // 4. 必须先 focus() 再 select()
+      input.setAttribute('readonly', '')
       input.style.position = 'fixed'
-      input.style.top = '-9999px'
-      input.style.left = '-9999px'
+      input.style.top = '0'
+      input.style.left = '0'
+      input.style.width = '1px'
+      input.style.height = '1px'
+      input.style.padding = '0'
+      input.style.border = 'none'
+      input.style.outline = 'none'
+      input.style.boxShadow = 'none'
+      input.style.background = 'transparent'
+      input.style.opacity = '0'
+      input.style.fontSize = '16px'
       document.body.appendChild(input)
-      const range = document.createRange()
-      range.selectNodeContents(input)
-      const sel = window.getSelection()
-      sel.removeAllRanges()
-      sel.addRange(range)
-      input.setSelectionRange(0, text.length)
-      const ok = document.execCommand('copy')
+
+      // iOS Safari 需要先 focus 再 select，且 setSelectionRange 必须 readOnly=false
+      input.focus()
+      input.select()
+      input.setSelectionRange(0, input.value.length)
+
+      // 部分微信 Android 还需要 Selection API
+      let ok = document.execCommand('copy')
+      if (!ok) {
+        try {
+          const range = document.createRange()
+          range.selectNodeContents(input)
+          const sel = window.getSelection()
+          sel.removeAllRanges()
+          sel.addRange(range)
+          ok = document.execCommand('copy')
+        } catch (e2) {
+          ok = false
+        }
+      }
+
       document.body.removeChild(input)
       return ok
     } catch (e) {
