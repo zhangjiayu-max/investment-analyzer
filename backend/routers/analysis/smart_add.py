@@ -176,3 +176,56 @@ async def get_index_exposure():
         "total_assets": round(total_assets, 2),
         "fund_count": len(holdings),
     }
+
+
+# ── S-1（2026-07-22）：计划持久化历史查询 + 计划vs实际对比 ──
+
+
+@router.get("/api/smart-add/history")
+async def smart_add_history(
+    fund_code: str = Query(None),
+    start_date: str = Query(None),
+    end_date: str = Query(None),
+    days: int = Query(30, ge=1, le=365),
+    limit: int = Query(50, ge=1, le=500),
+):
+    """查询历史补仓计划列表（不含 plan_detail）。
+
+    查询条件：
+    - fund_code: 指定基金代码（可选）
+    - start_date / end_date: 日期范围（可选，与 days 二选一）
+    - days: 回溯天数（默认30，无 start_date 时生效）
+    - limit: 最多返回条数
+    """
+    from datetime import datetime, timedelta
+    from db.smart_add_plans import list_smart_add_plans
+
+    if not start_date:
+        start_date = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+
+    rows = list_smart_add_plans(
+        fund_code=fund_code,
+        start_date=start_date,
+        end_date=end_date,
+        limit=limit,
+    )
+    return {"data": rows, "total": len(rows), "start_date": start_date}
+
+
+@router.get("/api/smart-add/plan-vs-actual")
+async def smart_add_plan_vs_actual(
+    fund_code: str = Query(...),
+    days: int = Query(30, ge=1, le=365),
+):
+    """计划vs实际交易对比。
+
+    对比指定基金在指定天数内的补仓计划与实际买入交易，
+    计算执行率（actual_total / plan_total × 100%）。
+
+    Args:
+        fund_code: 基金代码（必填）
+        days: 回溯天数（默认30）
+    """
+    from db.smart_add_plans import get_plan_vs_actual
+
+    return get_plan_vs_actual(fund_code=fund_code, days=days)

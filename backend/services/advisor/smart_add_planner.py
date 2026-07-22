@@ -28,6 +28,8 @@ from db.config import get_config_bool, get_config_float, get_config_int
 from db.portfolio import list_holdings, get_portfolio_summary, get_cash_balance
 from db.valuations import get_best_valuation
 from db.smart_add_snapshots import create_snapshot_with_hypothetical
+# S-1（2026-07-22）：计划持久化
+from db.smart_add_plans import save_smart_add_plan
 from services.advisor.smart_add_metrics import (
     classify_fund,
     calc_kelly_limit,
@@ -1085,6 +1087,49 @@ def generate_smart_add_plan(user_id: str = "default") -> dict:
     # 自动将补仓建议转为决策候选（去重：14天内同标的同来源不重复）
     _plans_to_candidates(plans)
 
+    # ── S-1（2026-07-22）：计划持久化到 smart_add_plans 表 ──
+    # 用途：历史回溯、计划vs实际对比、所有信号的反事实验证
+    try:
+        persist_enabled = get_config_bool("smart_add.persist_plans_enabled", True)
+    except Exception:
+        persist_enabled = True
+    if persist_enabled:
+        today = datetime.now().strftime("%Y-%m-%d")
+        for p in plans:
+            try:
+                val = p.get("valuation") or {}
+                saf = p.get("safety") or {}
+                # 提取触发的信号类型标签
+                triggered = [
+                    {"type": s.get("type", ""), "label": s.get("label", ""),
+                     "amount": s.get("amount", 0), "triggered": s.get("triggered", False)}
+                    for s in (p.get("triggered_signals") or [])
+                    if s.get("triggered")
+                ]
+                exit_sigs = [
+                    {"type": s.get("type", ""), "label": s.get("label", ""),
+                     "severity": s.get("severity", "")}
+                    for s in (p.get("exit_signals") or [])
+                    if s.get("triggered")
+                ]
+                save_smart_add_plan(
+                    user_id=user_id,
+                    fund_code=p["fund_code"],
+                    fund_name=p.get("fund_name", ""),
+                    snapshot_date=today,
+                    triggered_signals=triggered,
+                    exit_signals=exit_sigs,
+                    total_suggested=p.get("total_suggested", 0),
+                    final_suggested_amount=p.get("final_suggested_amount", 0),
+                    safety_status="can_add" if saf.get("can_add", True) else "blocked",
+                    valuation_percentile=val.get("percentile"),
+                    profit_rate_pct=p.get("profit_rate_pct"),
+                    position_pct=p.get("position_pct"),
+                    plan_detail=p,  # 完整 plan 对象
+                )
+            except Exception as e:
+                logger.debug(f"[smart_add] 计划持久化失败 {p.get('fund_code')}: {e}")
+
     return {
         "enabled": True,
         "plans": plans,
@@ -1107,6 +1152,9 @@ def generate_smart_add_plan(user_id: str = "default") -> dict:
 def _check_cooldown(fund_code: str, cfg: dict) -> tuple[bool, int, float, str]:
     """冷却期检查：近 cooldown_days 内同基金买入次数是否超限，并返回已补金额。
 
+    S-2（2026-07-22）修复：SQL 增加 `AND (is_hypothetical=0 OR is_hypothetical IS NULL)`
+    排除假设交易，避免假设交易污染冷却期计数导致真实补仓被误拦截。
+
     Returns:
         (can_proceed, recent_buy_count, recent_buy_amount, reason)
         - can_proceed=True: 可继续补仓（但建议金额应减去 recent_buy_amount）
@@ -1120,10 +1168,12 @@ def _check_cooldown(fund_code: str, cfg: dict) -> tuple[bool, int, float, str]:
         cutoff = (datetime.now() - timedelta(days=cooldown_days)).strftime("%Y-%m-%d")
         conn = _get_conn()
         try:
+            # S-2: 排除 is_hypothetical=1 的假设交易（仅统计真实交易）
             row = conn.execute(
                 "SELECT COUNT(*) as cnt, COALESCE(SUM(amount),0) as total_amount FROM portfolio_transactions "
                 "WHERE fund_code=? AND transaction_type='buy' "
-                "AND transaction_date >= ? AND status IN ('confirmed','pending','submitted')",
+                "AND transaction_date >= ? AND status IN ('confirmed','pending','submitted') "
+                "AND (is_hypothetical=0 OR is_hypothetical IS NULL)",
                 (fund_code, cutoff),
             ).fetchone()
             count = row["cnt"] if row else 0
@@ -1321,7 +1371,12 @@ def _detect_trend_signal(
         "conditions_met": reasons,
         "position_cap_pct": position_cap_pct,
         "tag": "短期波段",
-        "risk_note": "短期波段操作，与价值投资「低买」理念不同。严格止损-5%，仓位≤5%，持有≤30天",
+        # S-3（2026-07-22）：信号B风险提示增强（保持默认开启+强提示）
+        # 用户决策：trend_signal_enabled 保持 true，但触发时增加醒目风险提示
+        "risk_note": "⚠️ 此为趋势追涨信号，与价值投资「低买」理念不同，请谨慎评估。"
+                     "严格止损-5%，仓位≤5%，持有≤30天。"
+                     "若您为保守型投资者，建议关闭 trend_signal_enabled 开关。",
+        "risk_level": "warning",  # 新增：风险级别 warning/danger
         "max_loss_amount": max_loss,
         "max_loss_pct_of_portfolio": max_loss_pct,
         "recent_buy_amount": round(recent_buy_amount, 2),

@@ -295,6 +295,11 @@ from db.analysis_conclusions import (
     get_latest_analysis_conclusions, get_conclusions_by_target,
     get_conflicting_conclusions, get_related_orchestrator_decisions,
 )
+# S-1（2026-07-22）：智能补仓计划持久化
+from db.smart_add_plans import (
+    init_smart_add_plans_table, save_smart_add_plan,
+    list_smart_add_plans, get_smart_add_plan_detail, get_plan_vs_actual,
+)
 
 
 def _ensure_column(conn, table: str, column: str, col_type: str):
@@ -692,6 +697,9 @@ def init_db():
     """)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_snapshots_fund_date ON smart_add_snapshots(fund_code, snapshot_date)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_snapshots_user ON smart_add_snapshots(user_id)")
+
+    # S-1（2026-07-22）：智能补仓计划持久化表（支持历史回溯 + 计划vs实际对比）
+    init_smart_add_plans_table(conn)
 
     # ── 交易操作审计日志 ──
     conn.execute("""

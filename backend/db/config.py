@@ -297,11 +297,13 @@ DEFAULT_CONFIGS = [
     ('smart_add.stale_days', '14', '估值数据过期天数阈值', 'smart_add'),
     ('smart_add.snapshot_enabled', 'true', '智能补仓建议快照落库开关（反事实决策验证，默认开启）', 'smart_add'),
     ('smart_add.hypothetical_enabled', 'true', '假设操作自动生成开关（每次建议自动创建假设交易，默认开启）', 'smart_add'),
+    # S-1（2026-07-22）：计划持久化到 smart_add_plans 表（默认开启，非LLM相关）
+    ('smart_add.persist_plans_enabled', 'true', '智能补仓计划持久化开关：每次生成计划自动落库smart_add_plans表，支持历史回溯和计划vs实际对比（默认开启）', 'smart_add'),
     ('smart_add.max_add_vs_position_mult', '1.0', '单标的补仓金额上限=原市值×此倍数（2026-07-17从2.0降至1.0，配合档位重构）', 'smart_add'),
 
     # 多维度触发器（2026-07-17 新增）— 冷却期+趋势加仓+大跌定投
     ('smart_add.cooldown_days', '10', '冷却期天数：近N天内同基金买入次数超限则拦截', 'smart_add'),
-    ('smart_add.max_buys_in_cooldown', '2', '冷却期内最大买入次数（含真实+假设交易）', 'smart_add'),
+    ('smart_add.max_buys_in_cooldown', '2', '冷却期内最大买入次数（S-2修复：仅统计真实交易，排除假设交易）', 'smart_add'),
     ('smart_add.trend_signal_enabled', 'true', '趋势加仓信号开关（近期涨势好时小仓位试探）', 'smart_add'),
     ('smart_add.trend_lookback_days', '20', '趋势加仓回看天数（计算近N日涨幅）', 'smart_add'),
     ('smart_add.trend_min_gain_pct', '3.0', '趋势加仓最小涨幅%（近N日涨幅超过此值才触发）', 'smart_add'),
