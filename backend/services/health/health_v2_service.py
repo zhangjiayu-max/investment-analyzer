@@ -26,6 +26,45 @@ logger = logging.getLogger(__name__)
 _DASHBOARD_CACHE: dict = {"data": None, "ts": 0, "user_id": None}
 _CACHE_TTL = 300
 
+# H-1（2026-07-22）：费率/排名7天缓存（避免每次诊断都调akshare）
+_FEE_CACHE: dict[str, tuple[float, float]] = {}   # fund_code -> (fee, cached_ts)
+_RANK_CACHE: dict[str, tuple[float, float]] = {}   # fund_code -> (rank_pct, cached_ts)
+_FEE_RANK_CACHE_TTL = 7 * 24 * 3600               # 7天
+
+
+def _get_fund_fee_cached(fund_code: str) -> float:
+    """获取基金综合费率（管理费+托管费），7天缓存。H-1从V1迁移。"""
+    now = time.time()
+    cached = _FEE_CACHE.get(fund_code)
+    if cached and (now - cached[1]) < _FEE_RANK_CACHE_TTL:
+        return cached[0]
+    try:
+        from services.fund.fund_analysis import _fetch_fund_fee
+        fee = _fetch_fund_fee(fund_code)
+        if fee > 0:
+            _FEE_CACHE[fund_code] = (fee, now)
+            return fee
+    except Exception as e:
+        logger.debug(f"[health_v2] 获取费率失败 {fund_code}: {e}")
+    return 0.0
+
+
+def _get_peer_ranking_cached(fund_code: str) -> float | None:
+    """获取同类排名百分位（0-100，越小越好），7天缓存。H-1从V1迁移。"""
+    now = time.time()
+    cached = _RANK_CACHE.get(fund_code)
+    if cached and (now - cached[1]) < _FEE_RANK_CACHE_TTL:
+        return cached[0]
+    try:
+        from services.fund.fund_analysis import _fetch_peer_ranking
+        rank = _fetch_peer_ranking(fund_code)
+        if rank is not None:
+            _RANK_CACHE[fund_code] = (rank, now)
+            return rank
+    except Exception as e:
+        logger.debug(f"[health_v2] 获取同类排名失败 {fund_code}: {e}")
+    return None
+
 # 默认目标配置（按风险等级）
 DEFAULT_TARGET_POTS = {
     "conservative": {"cash": 20, "steady": 50, "long_term": 25, "insurance": 5},
@@ -124,7 +163,11 @@ def build_asset_overview(user_id: str = "default") -> dict:
 # ════════════════════════════════════════════════════════════
 
 def _calc_quality_score(holdings: list) -> tuple[int, dict]:
-    """选品质量：基于持仓盈亏、费率、规模健康度。"""
+    """选品质量：盈亏贡献 + 同类排名 + 费率水平（H-1从V1迁移）。
+
+    V1原逻辑：akshare查同类排名(80)+费率(60)+估值(60)
+    V2增强：同类排名(60)+费率(40)+盈亏(40)+基础60 = 200
+    """
     if not holdings:
         return 100, {"reason": "无持仓数据，给予中性分"}
 
@@ -138,15 +181,16 @@ def _calc_quality_score(holdings: list) -> tuple[int, dict]:
         value = _safe_float(h.get("current_value", 0))
         weight = value / total_value if total_value > 0 else 0
         profit_rate = _safe_float(h.get("profit_rate", 0))
-        fund_score = 100
+        fund_code = h.get("fund_code", "")
+        fund_score = 60  # 基础分
         reasons = []
 
-        # 盈亏贡献
+        # 1. 盈亏贡献（±40）
         if profit_rate > 0.1:
-            fund_score += 30
+            fund_score += 40
             reasons.append(f"盈利{profit_rate*100:.1f}%")
         elif profit_rate > 0:
-            fund_score += 10
+            fund_score += 15
         elif profit_rate > -0.1:
             fund_score -= 20
             reasons.append(f"亏损{abs(profit_rate)*100:.1f}%")
@@ -154,15 +198,41 @@ def _calc_quality_score(holdings: list) -> tuple[int, dict]:
             fund_score -= 40
             reasons.append(f"深亏{abs(profit_rate)*100:.1f}%")
 
-        # 费率健康（如已知）
-        mgmt_fee = _safe_float(h.get("mgmt_fee", 0))
-        if mgmt_fee > 0:
-            if mgmt_fee <= 0.5:
-                fund_score += 20
-                reasons.append(f"低费率{mgmt_fee}%")
-            elif mgmt_fee >= 1.5:
+        # 2. 同类排名（+60，H-1从V1迁移，7天缓存）
+        rank_pct = _get_peer_ranking_cached(fund_code)
+        if rank_pct is not None:
+            if rank_pct <= 10:
+                fund_score += 60
+                reasons.append("同类排名前10%")
+            elif rank_pct <= 25:
+                fund_score += 45
+                reasons.append("同类排名前25%")
+            elif rank_pct <= 50:
+                fund_score += 30
+            elif rank_pct <= 75:
+                fund_score += 15
+            else:
+                fund_score += 5
+                reasons.append("同类排名后25%")
+        else:
+            fund_score += 25  # 无数据给中性分
+
+        # 3. 费率水平（±40，H-1从V1迁移，使用缓存查询）
+        fee = _get_fund_fee_cached(fund_code)
+        if fee > 0:
+            if fee <= 0.5:
+                fund_score += 40
+                reasons.append(f"低费率{fee}%")
+            elif fee <= 1.0:
+                fund_score += 25
+            elif fee <= 1.5:
+                fund_score += 10
+                reasons.append(f"费率偏高{fee}%")
+            else:
                 fund_score -= 20
-                reasons.append(f"高费率{mgmt_fee}%")
+                reasons.append(f"高费率{fee}%")
+        else:
+            fund_score += 15  # 无数据给中性分
 
         fund_score = max(0, min(200, fund_score))
         scores.append(fund_score * weight)
@@ -172,10 +242,12 @@ def _calc_quality_score(holdings: list) -> tuple[int, dict]:
             bad_count += 1
         details.append({
             "fund_name": h.get("fund_name", ""),
-            "fund_code": h.get("fund_code", ""),
+            "fund_code": fund_code,
             "score": fund_score,
             "weight": round(weight, 4),
             "reasons": reasons,
+            "peer_ranking": rank_pct,
+            "fee": fee,
         })
 
     avg_score = int(sum(scores))
@@ -341,81 +413,241 @@ def _calc_valuation_score(holdings: list) -> tuple[int, dict]:
 
 
 def _calc_behavior_score(user_id: str, holdings: list) -> tuple[int, dict]:
-    """持有行为：交易频率、持有时长。"""
+    """持有行为：交易频率 + 追涨杀跌检测 + 持有时长（H-1从V1迁移）。
+
+    V1原逻辑：交易频率(80)+追涨杀跌(60)+持有时长(60)=200
+    V2原逻辑：仅看交易次数（基础150只减不加）
+    V2增强：三维度评分，满分200，与V1对齐
+    """
     from db.portfolio import list_transactions
     txs = list_transactions(user_id=user_id, limit=200)
     if not txs:
         return 130, {"reason": "暂无交易记录，给予默认分"}
 
-    # 近 30 天交易次数
-    cutoff = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
-    recent_txs = [t for t in txs if str(t.get("transaction_date", "")) >= cutoff]
-    recent_count = len(recent_txs)
+    now = datetime.now()
 
-    score = 150
-    if recent_count >= 10:
-        score -= 50
-    elif recent_count >= 6:
-        score -= 30
-    elif recent_count >= 3:
-        score -= 10
+    # 1. 交易频率（80分）
+    cutoff_90d = (now - timedelta(days=90)).strftime("%Y-%m-%d")
+    recent_90d = [t for t in txs if str(t.get("transaction_date", "")) >= cutoff_90d]
+    freq = len(recent_90d)
+    if freq <= 3:
+        freq_score = 80
+    elif freq <= 6:
+        freq_score = 60
+    elif freq <= 12:
+        freq_score = 40
+    elif freq <= 20:
+        freq_score = 20
+    else:
+        freq_score = 5
 
-    # 追涨杀跌初判：近 30 天买入次数 vs 市场位置（简化）
-    recent_buys = [t for t in recent_txs if t.get("transaction_type") == "buy"]
-    if len(recent_buys) >= 3:
-        score -= 20
+    # 近30天（用于提示）
+    cutoff_30d = (now - timedelta(days=30)).strftime("%Y-%m-%d")
+    recent_30d = [t for t in txs if str(t.get("transaction_date", "")) >= cutoff_30d]
 
+    # 2. 追涨杀跌检测（60分，H-1从V1迁移）
+    # 买入时对应指数估值百分位 > 70% 视为追涨
+    from db.valuations import get_valuation_history
+    buy_trades = [t for t in txs if t.get("transaction_type") == "buy"]
+    chase_count = 0
+    if buy_trades:
+        for t in buy_trades:
+            trade_date = str(t.get("transaction_date", ""))
+            fund_code = t.get("fund_code", "")
+            holding = next((h for h in holdings if h.get("fund_code") == fund_code), None)
+            index_code = holding.get("index_code", "") if holding else ""
+            if index_code and trade_date:
+                try:
+                    val_hist = get_valuation_history(index_code, days=5)
+                    closest_pct = None
+                    for v in val_hist:
+                        if str(v.get("snapshot_date", "")) <= trade_date:
+                            closest_pct = _safe_float(v.get("percentile"))
+                            break
+                    if closest_pct is None and val_hist:
+                        closest_pct = _safe_float(val_hist[0].get("percentile"))
+                    if closest_pct and closest_pct > 70:
+                        chase_count += 1
+                except Exception:
+                    pass
+        chase_ratio = chase_count / len(buy_trades)
+        if chase_ratio <= 0.1:
+            chase_score = 60
+        elif chase_ratio <= 0.3:
+            chase_score = 40
+        elif chase_ratio <= 0.5:
+            chase_score = 20
+        else:
+            chase_score = 5
+    else:
+        chase_ratio = 0.0
+        chase_score = 40  # 无买入给中性分
+
+    # 3. 平均持有时长（60分，H-1从V1迁移）
+    avg_days = 180  # 默认值
+    try:
+        active = [h for h in holdings if _safe_float(h.get("shares", 0)) > 0]
+        holding_days_list = []
+        for h in active:
+            buy_date_str = h.get("buy_date", "")
+            if not buy_date_str:
+                # 从交易记录推算最早买入日期
+                fund_code = h.get("fund_code", "")
+                if fund_code:
+                    try:
+                        from db._conn import _get_conn
+                        conn = _get_conn()
+                        try:
+                            earliest = conn.execute(
+                                "SELECT MIN(transaction_date) FROM portfolio_transactions "
+                                "WHERE fund_code = ? AND transaction_type = 'buy'",
+                                (fund_code,)
+                            ).fetchone()
+                            if earliest and earliest[0]:
+                                buy_date_str = earliest[0]
+                        finally:
+                            conn.close()
+                    except Exception:
+                        pass
+            if buy_date_str:
+                try:
+                    bd = datetime.strptime(str(buy_date_str)[:10], "%Y-%m-%d")
+                    days_held = (now - bd).days
+                    if days_held > 0:
+                        holding_days_list.append(days_held)
+                except Exception:
+                    pass
+        if holding_days_list:
+            avg_days = int(sum(holding_days_list) / len(holding_days_list))
+    except Exception:
+        pass
+
+    if avg_days >= 365:
+        hold_score = 60
+    elif avg_days >= 180:
+        hold_score = 45
+    elif avg_days >= 90:
+        hold_score = 30
+    else:
+        hold_score = 10
+
+    score = freq_score + chase_score + hold_score
     score = max(0, min(200, score))
 
     top_issue = ""
-    if recent_count >= 6:
-        top_issue = f"近 30 天交易 {recent_count} 次，存在过度交易嫌疑"
-    elif len(recent_buys) >= 3:
-        top_issue = f"近 30 天买入 {len(recent_buys)} 次，注意追涨风险"
+    if len(recent_30d) >= 6:
+        top_issue = f"近30天交易 {len(recent_30d)} 次，存在过度交易嫌疑"
+    elif chase_ratio > 0.3:
+        top_issue = f"追涨买入占比 {chase_ratio*100:.0f}%，建议在低估时买入"
+    elif avg_days < 90:
+        top_issue = f"平均持有时长 {avg_days} 天偏短，建议长期持有"
 
     return score, {
-        "recent_30d_tx_count": recent_count,
-        "recent_30d_buy_count": len(recent_buys),
-        "total_tx_count": len(txs),
+        "trades_90d": freq,
+        "trades_30d": len(recent_30d),
+        "buy_count": len(buy_trades),
+        "chase_ratio": round(chase_ratio * 100, 1) if buy_trades else 0,
+        "chase_count": chase_count,
+        "avg_holding_days": avg_days,
+        "freq_score": freq_score,
+        "chase_score": chase_score,
+        "hold_score": hold_score,
         "top_issue": top_issue,
     }
 
 
 def _calc_risk_score(holdings: list) -> tuple[int, dict]:
-    """风控纪律：最大回撤、波动率、单只仓位、现金占比。"""
+    """风控纪律：单只仓位 + 高估持仓占比 + 止损意识（H-1从V1迁移）。
+
+    V1原逻辑：单只仓位(80)+高估持仓占比(60)+止损意识(60)=200
+    V2原逻辑：单只仓位+最大亏损（基础150只减不加）
+    V2增强：三维度评分，满分200，与V1对齐
+    """
     if not holdings:
         return 130, {"reason": "无持仓数据"}
 
     total_value = sum(_safe_float(h.get("current_value", 0)) for h in holdings)
+
+    # 1. 单只仓位控制（80分）
     max_value = max(_safe_float(h.get("current_value", 0)) for h in holdings)
     max_pct = max_value / total_value * 100 if total_value > 0 else 0
+    if max_pct <= 10:
+        pos_score = 80
+    elif max_pct <= 15:
+        pos_score = 65
+    elif max_pct <= 20:
+        pos_score = 50
+    elif max_pct <= 30:
+        pos_score = 30
+    else:
+        pos_score = 10
 
-    score = 150
-    if max_pct > 50:
-        score -= 50
-    elif max_pct > 35:
-        score -= 30
-    elif max_pct > 25:
-        score -= 10
+    # 2. 高估持仓占比（60分，H-1从V1迁移）
+    # 估值百分位 > 80% 的持仓市值占比
+    from db.valuations import get_latest_valuation
+    overvalued_value = 0
+    for h in holdings:
+        index_code = h.get("index_code", "")
+        if not index_code:
+            continue
+        val = get_latest_valuation(index_code)
+        if not val:
+            continue
+        pe_pct = _safe_float(val.get("pe_percentile") or val.get("percentile"))
+        if pe_pct > 80:
+            overvalued_value += _safe_float(h.get("current_value", 0))
+    overvalued_pct = overvalued_value / total_value * 100 if total_value > 0 else 0
+    if overvalued_pct <= 10:
+        val_score = 60
+    elif overvalued_pct <= 20:
+        val_score = 45
+    elif overvalued_pct <= 30:
+        val_score = 30
+    elif overvalued_pct <= 50:
+        val_score = 15
+    else:
+        val_score = 5
 
-    # 最大亏损
+    # 3. 止损意识（60分，H-1从V1迁移）
+    from db.portfolio import list_transactions
+    txs = list_transactions(limit=200)
+    sell_trades = [t for t in txs if t.get("transaction_type") == "sell"]
+    stop_loss_count = sum(
+        1 for t in sell_trades if _safe_float(t.get("profit_loss_pct", 0)) < -10
+    )
+    if sell_trades:
+        stop_loss_ratio = stop_loss_count / len(sell_trades)
+        if stop_loss_ratio <= 0.1:
+            stop_score = 60  # 很少大亏卖出
+        elif stop_loss_ratio <= 0.3:
+            stop_score = 40
+        else:
+            stop_score = 15
+    else:
+        stop_score = 40  # 无卖出给中性分
+
+    # 最大亏损（用于提示）
     max_loss = min(_safe_float(h.get("profit_rate", 0)) for h in holdings)
-    if max_loss < -0.3:
-        score -= 30
-    elif max_loss < -0.2:
-        score -= 15
 
+    score = pos_score + val_score + stop_score
     score = max(0, min(200, score))
 
     top_issue = ""
     if max_pct > 35:
         top_issue = f"单只基金仓位 {max_pct:.1f}%，风险过于集中"
+    elif overvalued_pct > 30:
+        top_issue = f"高估持仓占比 {overvalued_pct:.1f}%，建议分批止盈"
     elif max_loss < -0.3:
         top_issue = f"最大亏损标的 {max_loss*100:.1f}%，建议检查止损纪律"
 
     return score, {
         "max_single_pct": round(max_pct, 1),
+        "overvalued_pct": round(overvalued_pct, 1),
+        "stop_loss_count": stop_loss_count,
         "max_loss_pct": round(max_loss * 100, 1),
+        "pos_score": pos_score,
+        "val_score": val_score,
+        "stop_score": stop_score,
         "top_issue": top_issue,
     }
 
@@ -520,7 +752,7 @@ def _generate_actions_from_smart_add(user_id: str) -> list[dict]:
         if amount <= 0:
             continue
 
-        action_id = f"smart_add:{fund_code}:{datetime.now().strftime('%Y%m%d')}"
+        action_id = f"smart_add:{fund_code}"  # H-2：去掉日期后缀，避免跨日重复创建候选
         actions.append({
             "action_id": action_id,
             "title": f"{fund_name} 触发金字塔补仓",
@@ -539,7 +771,7 @@ def _generate_actions_from_smart_add(user_id: str) -> list[dict]:
     # 再平衡建议
     for rb in (plan.get("portfolio_view") or {}).get("rebalance_suggestions", []) or []:
         actions.append({
-            "action_id": f"rebalance:{rb.get('fund_code', '')}:{datetime.now().strftime('%Y%m%d')}",
+            "action_id": f"rebalance:{rb.get('fund_code', '')}",  # H-2：去掉日期后缀
             "title": f"{rb.get('fund_name', '')} 偏离目标仓位",
             "subtitle": rb.get("reason", ""),
             "impact": 60,
@@ -563,7 +795,7 @@ def _generate_actions_from_cash(user_id: str, asset_overview: dict) -> list[dict
         return []
 
     return [{
-        "action_id": f"cash_deploy:{datetime.now().strftime('%Y%m%d')}",
+        "action_id": "cash_deploy",  # H-2：去掉日期后缀
         "title": "现金占比偏高，建议增配债券或低估权益",
         "subtitle": f"当前现金 {cash_ratio:.1%}（¥{cash_balance:,.0f}），可适当配置",
         "impact": 60,
@@ -588,7 +820,7 @@ def generate_actions(user_id: str = "default", asset_overview: dict = None,
         for dim in health_score.get("dimensions", []):
             if dim["key"] == "risk" and dim["score"] < 120:
                 actions.append({
-                    "action_id": f"risk_review:{datetime.now().strftime('%Y%m%d')}",
+                    "action_id": "risk_review",  # H-2：去掉日期后缀
                     "title": "风控分偏低，建议检查止损与仓位",
                     "subtitle": dim.get("top_issue", ""),
                     "impact": 70,
@@ -610,7 +842,28 @@ def generate_actions(user_id: str = "default", asset_overview: dict = None,
 
 
 def _persist_actions(actions: list, user_id: str = "default") -> list[dict]:
-    """将行动项沉淀为决策候选并记录追踪。"""
+    """将行动项沉淀为决策候选并记录追踪。
+
+    H-2（2026-07-22）：查询已存在的 pending/accepted 行动项，跳过已活跃项，避免重复沉淀。
+    """
+    # H-2：查询已存在的 pending/accepted 行动项，跳过已活跃项
+    existing_action_ids: set = set()
+    try:
+        from db.health_score import list_health_action_tracking
+        for status in ("pending", "accepted"):
+            existing = list_health_action_tracking(user_id=user_id, status=status, limit=200)
+            existing_action_ids.update(a.get("action_id", "") for a in existing)
+    except Exception as e:
+        logger.debug(f"[health_v2] 查询已存在行动项失败: {e}")
+
+    # 过滤掉已存在的活跃行动项
+    if existing_action_ids:
+        before_count = len(actions)
+        actions = [a for a in actions if a.get("action_id", "") not in existing_action_ids]
+        skipped = before_count - len(actions)
+        if skipped > 0:
+            logger.info(f"[health_v2] H-2 跳过 {skipped} 个已活跃行动项")
+
     for a in actions:
         try:
             candidate_id = create_candidate_from_structured_recommendation({

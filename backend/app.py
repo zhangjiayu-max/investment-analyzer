@@ -475,6 +475,15 @@ async def startup():
     else:
         logging.info("主题机会每日扫描已关闭（opportunity.auto_daily_scan_enabled=false）")
 
+    # H-2（2026-07-22）：全账户诊断每日自动调度（18:00 盘后）
+    # 开关：health_v2.auto_daily_diagnosis_enabled（默认 true）
+    # 确保历史快照连续，score_change_7d 计算准确
+    if get_config("health_v2.auto_daily_diagnosis_enabled", "true") == "true":
+        asyncio.create_task(_auto_daily_health_diagnosis())
+        logging.info("全账户诊断每日自动调度已启动（health_v2.auto_daily_diagnosis_enabled=true，18:00 触发）")
+    else:
+        logging.info("全账户诊断每日自动调度已关闭（health_v2.auto_daily_diagnosis_enabled=false）")
+
     # P0-3（2026-07-21）：关注列表信号回测定时任务
     if get_config("alerts.watchlist_backtest_enabled", "true") == "true":
         asyncio.create_task(_auto_watchlist_backtest())
@@ -1002,6 +1011,52 @@ async def _auto_daily_opportunity_scan():
                 logging.warning(f"[opportunity-scan] 每日扫描异常: {e}")
     except Exception as e:
         logging.warning(f"主题机会每日扫描任务异常: {e}")
+
+
+async def _auto_daily_health_diagnosis():
+    """H-2（2026-07-22）：全账户诊断每日自动调度 — 每日 18:00 盘后自动调用 get_health_v2_dashboard。
+
+    原问题：get_health_v2_dashboard 仅由 /api/health-v2/dashboard 手动触发，
+            用户不打开页面就不会写入快照，导致 score_change_7d 计算失真，
+            recommendation_candidates 表跨日重复创建候选堆积。
+
+    修复：每日 18:00 自动调用 get_health_v2_dashboard(force_refresh=True)，
+          确保历史快照连续，action_id 已稳定化（H-2去掉日期后缀）避免重复沉淀。
+
+    开关：health_v2.auto_daily_diagnosis_enabled（默认 true）
+    调度：每日 18:00（盘后，晚于机会雷达16:00，避免抢资源）
+    """
+    from datetime import datetime, timedelta
+    _SCAN_TIME = (18, 0)
+    try:
+        await asyncio.sleep(300)  # 等启动完成（晚于机会雷达5分钟）
+
+        while True:
+            now = datetime.now()
+            target = now.replace(hour=_SCAN_TIME[0], minute=_SCAN_TIME[1], second=0, microsecond=0)
+            if target <= now:
+                target = (now + timedelta(days=1)).replace(
+                    hour=_SCAN_TIME[0], minute=_SCAN_TIME[1], second=0, microsecond=0)
+            wait_seconds = (target - now).total_seconds()
+            await asyncio.sleep(wait_seconds)
+
+            if get_config("health_v2.auto_daily_diagnosis_enabled", "true") != "true":
+                continue
+
+            try:
+                from services.health.health_v2_service import get_health_v2_dashboard
+                result = get_health_v2_dashboard(force_refresh=True)
+                total_score = result.get("health_score", {}).get("total_score", 0)
+                actions_count = len(result.get("actions", []))
+                logging.info(
+                    f"[health-v2-diagnosis] 每日自动诊断完成: "
+                    f"total_score={total_score}, "
+                    f"actions={actions_count}"
+                )
+            except Exception as e:
+                logging.warning(f"[health-v2-diagnosis] 每日自动诊断异常: {e}")
+    except Exception as e:
+        logging.warning(f"全账户诊断每日自动调度任务异常: {e}")
 
 
 async def _auto_watchlist_backtest():

@@ -299,6 +299,9 @@ DEFAULT_CONFIGS = [
     ('smart_add.hypothetical_enabled', 'true', '假设操作自动生成开关（每次建议自动创建假设交易，默认开启）', 'smart_add'),
     # S-1（2026-07-22）：计划持久化到 smart_add_plans 表（默认开启，非LLM相关）
     ('smart_add.persist_plans_enabled', 'true', '智能补仓计划持久化开关：每次生成计划自动落库smart_add_plans表，支持历史回溯和计划vs实际对比（默认开启）', 'smart_add'),
+    # H-2（2026-07-22）：全账户诊断每日自动调度（默认开启，非LLM相关）
+    ('health_v2.auto_daily_diagnosis_enabled', 'true', '全账户诊断每日自动调度开关：每日18:00自动调用get_health_v2_dashboard(force_refresh=True)，确保历史快照连续（默认开启）', 'health_v2'),
+    ('health_v2.persist_actions_enabled', 'true', '全账户诊断行动项沉淀为决策候选开关（默认开启）', 'health_v2'),
     ('smart_add.max_add_vs_position_mult', '1.0', '单标的补仓金额上限=原市值×此倍数（2026-07-17从2.0降至1.0，配合档位重构）', 'smart_add'),
 
     # 多维度触发器（2026-07-17 新增）— 冷却期+趋势加仓+大跌定投
