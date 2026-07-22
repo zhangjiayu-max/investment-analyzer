@@ -151,6 +151,7 @@ from routers.conversation.chat_images import router as chat_images_router, CHAT_
 from routers.decision.suggestion_accuracy import router as suggestion_accuracy_router  # /api/suggestion-accuracy/*
 from routers.admin.data_quality import router as data_quality_router  # /api/data-quality/*
 from routers.admin.capabilities import router as capabilities_router  # /api/capabilities/*
+from routers.admin.theme_rules import router as theme_rules_router  # /api/admin/theme-rules/*
 from routers.market.event_radar import router as event_radar_router  # /api/alerts/event-radar/*
 from routers.portfolio.trade_plans import router as trade_plans_router  # /api/trade-plans/*
 from routers.portfolio.strategies import router as strategies_router  # /api/strategies/*
@@ -234,6 +235,7 @@ app.include_router(chat_images_router)
 app.include_router(suggestion_accuracy_router)
 app.include_router(data_quality_router)
 app.include_router(capabilities_router)
+app.include_router(theme_rules_router)
 app.include_router(event_radar_router)
 app.include_router(trade_plans_router)
 app.include_router(strategies_router)
@@ -463,6 +465,15 @@ async def startup():
         logging.info("机会雷达每日回测任务已启动（alerts.opportunity_backtest_enabled=true）")
     else:
         logging.info("机会雷达每日回测已关闭（alerts.opportunity_backtest_enabled=false）")
+
+    # O-1（2026-07-22）：主题机会引擎每日自动扫描（16:00 盘后）
+    # 开关：opportunity.auto_daily_scan_enabled（默认 true）
+    # 复用事件雷达 _collect_news() 三源新闻，避免重复采集
+    if get_config("opportunity.auto_daily_scan_enabled", "true") == "true":
+        asyncio.create_task(_auto_daily_opportunity_scan())
+        logging.info("主题机会每日扫描任务已启动（opportunity.auto_daily_scan_enabled=true，16:00 触发）")
+    else:
+        logging.info("主题机会每日扫描已关闭（opportunity.auto_daily_scan_enabled=false）")
 
     # P0-3（2026-07-21）：关注列表信号回测定时任务
     if get_config("alerts.watchlist_backtest_enabled", "true") == "true":
@@ -926,6 +937,71 @@ async def _auto_opportunity_backtest():
                 logging.warning(f"[opportunity-backtest] 回测异常: {e}")
     except Exception as e:
         logging.warning(f"机会雷达回测任务异常: {e}")
+
+
+async def _auto_daily_opportunity_scan():
+    """O-1（2026-07-22）：主题机会引擎每日自动扫描 — 每日 16:00 盘后自动生成主题机会卡。
+
+    原问题：scan_daily_opportunities 仅由 /api/opportunities/daily-scan 手动触发，
+            用户不点"扫描"按钮就不会生成新机会卡，回测表只能 backfill 历史数据，
+            无法形成"每日生成→15日回测→命中率反馈"闭环。
+
+    修复：每日 16:00 自动调用 scan_daily_opportunities，
+          新闻源优先复用事件雷达 _collect_news() 三源采集结果（避免重复采集），
+          失败时降级为 Dashboard get_hot_topics。
+
+    开关：opportunity.auto_daily_scan_enabled（默认 true）
+    调度：每日 16:00（盘后，避免与 event_radar 20:00 抢资源）
+    """
+    from datetime import datetime, timedelta
+    _SCAN_TIME = (16, 0)
+    try:
+        await asyncio.sleep(240)  # 等启动完成（比 backfill 晚 4 分钟）
+
+        while True:
+            now = datetime.now()
+            target = now.replace(hour=_SCAN_TIME[0], minute=_SCAN_TIME[1], second=0, microsecond=0)
+            if target <= now:
+                target = (now + timedelta(days=1)).replace(
+                    hour=_SCAN_TIME[0], minute=_SCAN_TIME[1], second=0, microsecond=0)
+            wait_seconds = (target - now).total_seconds()
+            await asyncio.sleep(wait_seconds)
+
+            if get_config("opportunity.auto_daily_scan_enabled", "true") != "true":
+                continue
+
+            try:
+                # 新闻源优先复用事件雷达三源采集
+                news_items = []
+                try:
+                    from services.market.event_radar import _collect_news
+                    news_items = _collect_news()
+                    logging.info(f"[opportunity-scan] 复用 event_radar 新闻 {len(news_items)} 条")
+                except Exception as e:
+                    logging.warning(f"[opportunity-scan] 复用 _collect_news 失败，降级 Dashboard: {e}")
+                    try:
+                        from routers.dashboard.dashboard import get_hot_topics
+                        import asyncio as _aio
+                        hot = await get_hot_topics()
+                        news_items = hot.get("news", []) if hot else []
+                    except Exception as e2:
+                        logging.warning(f"[opportunity-scan] Dashboard get_hot_topics 也失败: {e2}")
+
+                from services.advisor.opportunity_engine import scan_daily_opportunities
+                result = scan_daily_opportunities(
+                    news_items=news_items,
+                    force_refresh=True,
+                )
+                items_count = len(result.get("items", []))
+                logging.info(
+                    f"[opportunity-scan] 每日扫描完成: "
+                    f"items={items_count}, "
+                    f"source={result.get('source', 'unknown')}"
+                )
+            except Exception as e:
+                logging.warning(f"[opportunity-scan] 每日扫描异常: {e}")
+    except Exception as e:
+        logging.warning(f"主题机会每日扫描任务异常: {e}")
 
 
 async def _auto_watchlist_backtest():

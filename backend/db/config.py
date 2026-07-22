@@ -269,6 +269,13 @@ DEFAULT_CONFIGS = [
     ('opportunity.llm_policy_analysis_enabled', 'false', 'L1 政策解读 LLM 化：对 watch/can_buy 候选调用 LLM 做政策实质解读，调整 score ±5~8', 'opportunity'),
     ('opportunity.llm_deep_review_enabled', 'false', 'L2 深度推理评审：对 can_buy 候选调用 LLM 做多维度权衡评审，可降级不可升级', 'opportunity'),
     ('opportunity.benchmark_backtest_enabled', 'true', 'L3 回测基准化：引入沪深300超额收益，超额≥2%才算命中（非LLM相关，默认开启）', 'opportunity'),
+    # O-1（2026-07-22）：主题机会引擎每日自动扫描（默认开启，非LLM相关）
+    ('opportunity.auto_daily_scan_enabled', 'true', '主题机会每日自动扫描开关：每日16:00盘后自动生成主题机会卡（非LLM相关，默认开启）', 'opportunity'),
+    # O-2（2026-07-22）：THEME_RULES 配置化（默认开启）
+    ('opportunity.theme_rules_db_enabled', 'true', '主题规则表配置化开关：从theme_rules表加载主题配置（开启后DB优先，硬编码兜底）', 'opportunity'),
+    # O-3（2026-07-22）：技术指标本地优先 + 资金流向板块级化（默认开启）
+    ('opportunity.tech_indicator_local_first_enabled', 'true', '技术指标本地优先开关：优先查index_price_history表，akshare兜底（默认开启）', 'opportunity'),
+    ('opportunity.sector_capital_flow_enabled', 'true', '板块级资金流向开关：按主题对应板块查询资金净流入（默认开启，关闭则用全市场北向资金）', 'opportunity'),
 
     # 理财决策升级 6 项配置（默认全部开启 — 最强版本）
     ('attribution.enabled', 'true', '收益归因分析开关', 'decision_upgrade'),

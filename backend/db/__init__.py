@@ -165,6 +165,12 @@ from db.opportunities import (
     create_decision_from_opportunity, mark_opportunity_bought,
     list_opportunity_tracks, get_opportunity_track_stats,
 )
+# O-2（2026-07-22）：主题规则配置化
+from db.theme_rules import (
+    init_theme_rules_tables, list_theme_rules, get_theme_rule,
+    create_theme_rule, update_theme_rule, delete_theme_rule,
+    get_theme_index_code,
+)
 
 # 前瞻性事件雷达
 from db.market_events import (
@@ -1404,6 +1410,9 @@ def init_db():
 
     # ── 短线主题机会表 ──────────────────────────────────────
     init_opportunity_tables(conn)
+
+    # O-2（2026-07-22）：主题规则配置化表（DB 优先 + 硬编码兜底）
+    init_theme_rules_tables(conn)
 
     # ── 前瞻性事件雷达表 ──────────────────────────────────
     init_market_events_tables(conn)
