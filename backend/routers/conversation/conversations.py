@@ -1669,7 +1669,33 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
                     warn_at_sec = get_config_int("conversation.warn_at_minutes", 5) * 60
                     abort_at_sec = get_config_int("conversation.abort_at_minutes", 8) * 60
                     timeout_warned = False
-                    for event in orchestrate_stream(effective_query, msg_list, orchestrator_context, cancel_event=cancel_event, conversation_id=conv_id, message_id=stream_msg_id, trace_id=trace_id, target_specialists=req.target_specialists):
+                    # 首事件超时守卫：orchestrate_stream 在 yield 第一个事件前可能卡在
+                    # _stream_build_context（akshare/HTTP 无超时），此时 for 循环体不执行，
+                    # 循环内超时检查(warn_at_sec/abort_at_sec)永远不触发，导致无限卡死。
+                    # 案例：conv#132/133 因 akshare HTTP 挂起导致 40min 无日志
+                    import itertools as _it
+                    import concurrent.futures as _cf
+                    _orch_gen = orchestrate_stream(effective_query, msg_list, orchestrator_context, cancel_event=cancel_event, conversation_id=conv_id, message_id=stream_msg_id, trace_id=trace_id, target_specialists=req.target_specialists)
+                    _first_evt_executor = _cf.ThreadPoolExecutor(max_workers=1)
+                    try:
+                        _first_evt_future = _first_evt_executor.submit(next, _orch_gen)
+                        _first_event = _first_evt_future.result(timeout=90)
+                        _event_chain = _it.chain([_first_event], _orch_gen)
+                    except _cf.TimeoutError:
+                        logger.error(f"[trace:{trace_id}] orchestrate_stream 首事件超时 90s，可能卡在上下文构建（akshare/HTTP），强制终止")
+                        _first_evt_executor.shutdown(wait=False, cancel_futures=True)
+                        q.put({"type": "error", "message": "上下文构建超时，请重试。可能因外部数据源（akshare）响应缓慢。"})
+                        _running_agents.pop(f"prod_{conv_id}", None)
+                        q.put(None)
+                        return
+                    except StopIteration:
+                        _first_evt_executor.shutdown(wait=False, cancel_futures=True)
+                        _running_agents.pop(f"prod_{conv_id}", None)
+                        q.put(None)
+                        return
+                    finally:
+                        _first_evt_executor.shutdown(wait=False, cancel_futures=True)
+                    for event in _event_chain:
                         # P2-1：在每个事件前检查总耗时
                         elapsed = time.time() - producer_started
                         if elapsed >= abort_at_sec:

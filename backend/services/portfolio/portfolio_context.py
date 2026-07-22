@@ -251,14 +251,24 @@ def build_bond_fund_holdings_context(user_id: str = "default") -> str:
             pr = h.get("profit_rate", 0) or 0
 
             # 获取基金底层持仓（超时 5s）
+            # 不使用 with 语句：with 退出时 shutdown(wait=True) 会无限等待 akshare zombie 线程
+            # 案例：conv#132/133 因 akshare HTTP 挂起导致 with 退出阻塞 40min
             try:
                 import concurrent.futures
-                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-                    future = executor.submit(get_fund_holdings, fund_code)
-                    try:
-                        fund_data = future.result(timeout=5)
-                    except concurrent.futures.TimeoutError:
-                        fund_data = None
+                executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+                future = executor.submit(get_fund_holdings, fund_code)
+                try:
+                    fund_data = future.result(timeout=5)
+                except concurrent.futures.TimeoutError:
+                    fund_data = None
+                    logger.warning(f"[bond_holdings] {fund_code} 底层持仓获取超时 5s，跳过")
+                except Exception as e:
+                    fund_data = None
+                    logger.warning(f"[bond_holdings] {fund_code} 底层持仓获取失败: {e}")
+                finally:
+                    # shutdown(wait=False) 不等待线程完成，立即返回
+                    # cancel_futures=True 尝试取消尚未开始的任务（Python 3.9+）
+                    executor.shutdown(wait=False, cancel_futures=True)
             except Exception:
                 fund_data = None
 

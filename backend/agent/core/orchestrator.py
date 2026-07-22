@@ -5447,8 +5447,24 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
     perf_metrics["phases"]["routing"] = int((time.time() - start_time) * 1000)
 
     # ── 阶段2: 构建上下文 ──
-    ctx_data = _stream_build_context(refined_query, rag_context, complexity,
-                                     context_config, token_budget, history)
+    # _stream_build_context 内部有多个外部 I/O（akshare/HTTP），用超时包装避免卡死
+    # 案例：conv#132/133 因 build_bond_fund_holdings_context 内 akshare 卡死导致 40min 无日志
+    import concurrent.futures as _cf
+    _ctx_executor = _cf.ThreadPoolExecutor(max_workers=1)
+    _ctx_future = _ctx_executor.submit(
+        _stream_build_context, refined_query, rag_context, complexity,
+        context_config, token_budget, history
+    )
+    try:
+        ctx_data = _ctx_future.result(timeout=60)
+    except _cf.TimeoutError:
+        logger.warning(f"[trace:{trace_id}] _stream_build_context 超时 60s，使用空上下文降级")
+        ctx_data = {"llm_messages": [], "prebuilt_context": "", "system_content": build_orchestrator_system_prompt()}
+    except Exception as e:
+        logger.warning(f"[trace:{trace_id}] _stream_build_context 失败: {e}，使用空上下文降级")
+        ctx_data = {"llm_messages": [], "prebuilt_context": "", "system_content": build_orchestrator_system_prompt()}
+    finally:
+        _ctx_executor.shutdown(wait=False, cancel_futures=True)
     llm_messages = ctx_data["llm_messages"]
     prebuilt_context = ctx_data["prebuilt_context"]
     system_content = ctx_data["system_content"]
