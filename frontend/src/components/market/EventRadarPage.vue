@@ -16,7 +16,7 @@ import {
   getPortfolioHealthReport, getPortfolioRiskMetrics,
   getMasterDecisionHistory, getMasterAccuracyStats, triggerMasterVerification,
   updateWatchlistEntry, getWatchlistExitStatus, analyzeEventImpact,
-  getEventImpactAmount,
+  getEventImpactAmount, getLeadingIndicatorSignals, getBacktestStatsBySource,
 } from '../../api'
 import Icon from '../ui/Icon.vue'
 import { useToast } from '../../composables/useToast'
@@ -24,10 +24,13 @@ import { renderMarkdown } from '../../composables/useMarkdown'
 
 const emit = defineEmits(['navigate'])
 
-const activeTab = ref('events') // events / watchlist / verification
+const activeTab = ref('events') // events / watchlist / verification / leading
 const events = ref([])
 const watchlist = ref([])
 const loading = ref(false)
+const leadingSignals = ref([])
+const leadingLoading = ref(false)
+const backtestStatsBySource = ref({})
 const scanning = ref(false)
 const verifying = ref(false)
 const refreshingNavs = ref(false)
@@ -1424,6 +1427,31 @@ function handleTabChange(tab) {
   }
 }
 
+// ── LI-8: 领先指标 Tab ──
+const LEADING_TYPE_LABELS = {
+  policy_draft: '政策草案', capex_announcement: '资本开支', insider_trading: '产业资本',
+  customs_data: '海关数据', pmi_subitem: 'PMI分项',
+}
+const LEADING_LEVEL_LABELS = { strong: '强领先', medium: '中领先', weak: '弱领先' }
+const LEADING_LEVEL_COLORS = { strong: '#ef4444', medium: '#f59e0b', weak: '#9ca3af' }
+
+async function loadLeadingSignals() {
+  leadingLoading.value = true
+  try {
+    const { data } = await getLeadingIndicatorSignals(7)
+    leadingSignals.value = data?.signals || []
+    // 同时加载回测统计
+    try {
+      const { data: stats } = await getBacktestStatsBySource()
+      backtestStatsBySource.value = stats || {}
+    } catch { /* ignore */ }
+  } catch (e) {
+    console.error('领先指标加载失败', e)
+  } finally {
+    leadingLoading.value = false
+  }
+}
+
 onMounted(() => {
   loadEvents()
   loadAccuracy()
@@ -1510,6 +1538,11 @@ watch(scrollToFundCode, async (code) => {
         <Icon name="check-circle" size="14" />
         <span>落地验证</span>
         <span v-if="accuracy?.overall?.total" class="tab-badge tab-badge-green">{{ accuracy.overall.total }}</span>
+      </button>
+      <button class="main-tab" :class="{ active: activeTab === 'leading' }" @click="activeTab = 'leading'; loadLeadingSignals()">
+        <Icon name="trending-up" size="14" />
+        <span>领先指标</span>
+        <span v-if="leadingSignals.length" class="tab-badge" style="background:#8b5cf6">{{ leadingSignals.length }}</span>
       </button>
     </div>
 
@@ -3069,6 +3102,58 @@ watch(scrollToFundCode, async (code) => {
           <span>去事件雷达</span>
         </button>
       </div>
+    </template>
+
+    <!-- ════ Tab 4：领先指标（LI-8）════ -->
+    <template v-if="activeTab === 'leading'">
+      <div v-if="leadingLoading" class="loading-spinner">
+        <Icon name="loader" size="20" class="spin" /> 加载领先指标...
+      </div>
+      <div v-else-if="!leadingSignals.length" class="empty-state">
+        <Icon name="trending-up" size="40" />
+        <p>近 7 天无领先指标信号</p>
+        <p style="font-size:12px;color:var(--text-tertiary)">领先指标包括政策草案、资本开支、产业资本增减持、海关数据、PMI分项</p>
+      </div>
+      <template v-else>
+        <!-- 回测命中率统计 -->
+        <div v-if="Object.keys(backtestStatsBySource).length" class="backtest-stats-row">
+          <div v-for="(stat, source) in backtestStatsBySource" :key="source" class="backtest-stat-card">
+            <div class="bs-source">{{ source === 'news' ? '新闻驱动' : source === 'leading_strong' ? '强领先' : '中领先' }}</div>
+            <div class="bs-rate" :style="{ color: (stat.hit_rate || 0) >= 50 ? '#10b981' : '#ef4444' }">
+              {{ stat.hit_rate !== null ? stat.hit_rate + '%' : '—' }}
+            </div>
+            <div class="bs-detail">{{ stat.hits }}/{{ stat.reviewed }} 命中</div>
+          </div>
+        </div>
+        <!-- 领先指标信号列表 -->
+        <div class="leading-signal-list">
+          <div v-for="(sig, idx) in leadingSignals" :key="idx" class="leading-signal-card">
+            <div class="ls-header">
+              <span class="ls-type-tag">{{ LEADING_TYPE_LABELS[sig.signal_type] || sig.signal_type }}</span>
+              <span class="ls-level-badge" :style="{ background: LEADING_LEVEL_COLORS[sig.leading_level] || '#9ca3af' }">
+                {{ LEADING_LEVEL_LABELS[sig.leading_level] || sig.leading_level }}
+              </span>
+              <span class="ls-direction" :class="{ 'dir-positive': sig.direction === 'positive', 'dir-negative': sig.direction === 'negative' }">
+                {{ sig.direction === 'positive' ? '↑利好' : sig.direction === 'negative' ? '↓利空' : '中性' }}
+              </span>
+              <span class="ls-date">{{ sig.publish_date }}</span>
+            </div>
+            <div class="ls-title">{{ sig.title }}</div>
+            <div class="ls-summary">{{ sig.summary }}</div>
+            <div v-if="sig.affected_sectors?.length" class="ls-sectors">
+              <Icon name="layers" size="11" />
+              <span v-for="s in sig.affected_sectors" :key="s" class="ls-sector-tag">{{ s }}</span>
+            </div>
+            <div v-if="sig.metric_value !== null && sig.metric_value !== undefined" class="ls-metric">
+              <span class="ls-metric-value">{{ sig.metric_value }}{{ sig.metric_unit }}</span>
+              <span v-if="sig.metric_yoy !== null" class="ls-metric-yoy">同比 {{ sig.metric_yoy > 0 ? '+' : '' }}{{ sig.metric_yoy }}%</span>
+            </div>
+            <a v-if="sig.source_url" :href="sig.source_url" target="_blank" class="ls-source-link">
+              <Icon name="external-link" size="10" /> 来源
+            </a>
+          </div>
+        </div>
+      </template>
     </template>
 
     <!-- 添加关注基金弹窗 -->
@@ -7264,4 +7349,100 @@ watch(scrollToFundCode, async (code) => {
   padding-top: 0.5rem;
   margin-top: 0.3rem;
 }
+
+/* ══ LI-8 领先指标 Tab 样式 ══ */
+.backtest-stats-row {
+  display: flex;
+  gap: 0.75rem;
+  margin-bottom: 1rem;
+  flex-wrap: wrap;
+}
+.backtest-stat-card {
+  background: var(--color-bg-secondary, #f8fafc);
+  border: 1px solid var(--color-border-light, #e2e8f0);
+  border-radius: 8px;
+  padding: 0.5rem 0.75rem;
+  text-align: center;
+  min-width: 90px;
+}
+.bs-source { font-size: 11px; color: var(--text-secondary, #64748b); margin-bottom: 2px; }
+.bs-rate { font-size: 20px; font-weight: 700; }
+.bs-detail { font-size: 10px; color: var(--text-tertiary, #94a3b8); }
+
+.leading-signal-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.625rem;
+}
+.leading-signal-card {
+  background: var(--color-bg-card, #fff);
+  border: 1px solid var(--color-border-light, #e2e8f0);
+  border-radius: 10px;
+  padding: 0.75rem 1rem;
+  transition: box-shadow 0.2s;
+}
+.leading-signal-card:hover { box-shadow: 0 2px 8px rgba(0,0,0,0.06); }
+.ls-header {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.375rem;
+  flex-wrap: wrap;
+}
+.ls-type-tag {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-secondary, #64748b);
+  background: var(--color-bg-tertiary, #f1f5f9);
+  padding: 2px 8px;
+  border-radius: 4px;
+}
+.ls-level-badge {
+  font-size: 10px;
+  font-weight: 600;
+  color: #fff;
+  padding: 2px 7px;
+  border-radius: 10px;
+}
+.ls-direction { font-size: 11px; font-weight: 600; }
+.dir-positive { color: #10b981; }
+.dir-negative { color: #ef4444; }
+.ls-date { font-size: 11px; color: var(--text-tertiary, #94a3b8); margin-left: auto; }
+.ls-title { font-size: 14px; font-weight: 600; margin-bottom: 0.25rem; line-height: 1.4; }
+.ls-summary { font-size: 12px; color: var(--text-secondary, #64748b); line-height: 1.5; margin-bottom: 0.375rem; }
+.ls-sectors { display: flex; align-items: center; gap: 0.25rem; flex-wrap: wrap; margin-bottom: 0.25rem; }
+.ls-sector-tag {
+  font-size: 10px;
+  color: var(--text-secondary, #64748b);
+  background: var(--color-bg-tertiary, #f1f5f9);
+  padding: 1px 6px;
+  border-radius: 3px;
+}
+.ls-metric { display: flex; gap: 0.5rem; align-items: baseline; margin-bottom: 0.25rem; }
+.ls-metric-value { font-size: 16px; font-weight: 700; color: var(--text-primary, #1e293b); }
+.ls-metric-yoy { font-size: 11px; color: var(--text-secondary, #64748b); }
+.ls-source-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  font-size: 11px;
+  color: var(--color-link, #3b82f6);
+  text-decoration: none;
+}
+.empty-state {
+  text-align: center;
+  padding: 3rem 1rem;
+  color: var(--text-tertiary, #94a3b8);
+}
+.empty-state p { margin: 0.5rem 0; }
+.loading-spinner {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  padding: 2rem;
+  color: var(--text-secondary, #64748b);
+}
+.spin { animation: spin 1s linear infinite; }
+@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
 </style>

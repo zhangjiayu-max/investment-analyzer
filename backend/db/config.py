@@ -277,6 +277,18 @@ DEFAULT_CONFIGS = [
     ('opportunity.tech_indicator_local_first_enabled', 'true', '技术指标本地优先开关：优先查index_price_history表，akshare兜底（默认开启）', 'opportunity'),
     ('opportunity.sector_capital_flow_enabled', 'true', '板块级资金流向开关：按主题对应板块查询资金净流入（默认开启，关闭则用全市场北向资金）', 'opportunity'),
 
+    # LI-5/LI-6（2026-07-22）：领先指标评分 + 回测增强
+    ('opportunity.leading_indicator_score_enabled', 'false', '机会雷达领先指标评分维度开关：近7天领先指标命中该主题时加减分（新增维度，默认关闭需观察）', 'opportunity'),
+    ('opportunity.leading_indicator_lookback_days', '7', '机会雷达领先指标评分回看天数', 'opportunity'),
+    ('opportunity.signal_source_tracking_enabled', 'true', '回测按信号来源标记开关：news/leading_strong/leading_medium（非LLM，默认开启）', 'opportunity'),
+    ('opportunity.hit_rate_feedback_enabled', 'true', '回测命中率反哺评分权重开关：连续3次miss降权20%（非LLM，默认开启）', 'opportunity'),
+
+    # 领先指标接入层配置（2026-07-22 LI-1~LI-7）
+    ('alerts.leading_indicator_enabled', 'true', '领先指标接入层总开关：接入政策草案/资本开支/产业资本等领先信号（非LLM，默认开启）', 'alerts'),
+    ('alerts.leading_indicator_sources', 'policy_draft,capex,insider_trading', '领先指标数据源列表（逗号分隔，真正驱动代码选择）', 'alerts'),
+    ('alerts.leading_indicator_lookback_days', '7', '领先指标抓取回看天数', 'alerts'),
+    ('alerts.leading_indicator_fetch_timeout', '15', '领先指标单Provider抓取超时（秒）', 'alerts'),
+
     # 理财决策升级 6 项配置（默认全部开启 — 最强版本）
     ('attribution.enabled', 'true', '收益归因分析开关', 'decision_upgrade'),
     ('behavior_diagnosis.enabled', 'true', '行为金融诊断开关', 'decision_upgrade'),

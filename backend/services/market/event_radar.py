@@ -1036,6 +1036,50 @@ def _update_event_statuses() -> dict:
     return counts
 
 
+def _leading_bonus(level: str) -> float:
+    """领先级别置信度加成。strong +0.1, medium +0.05, weak +0.0。"""
+    return {"strong": 0.1, "medium": 0.05, "weak": 0.0}.get(level, 0.0)
+
+
+def _collect_leading_signals(trace_id: str = "") -> list:
+    """LI-4（2026-07-22）：采集领先指标信号，转换为 market_events 格式。
+
+    从领先指标接入层（leading_indicators aggregator）拉取信号，
+    转换为 market_events 写表所需的 dict 格式，并叠加领先级别置信度加成。
+
+    开关：alerts.leading_indicator_enabled（默认 true）
+    """
+    from db.config import get_config_bool
+    if not get_config_bool("alerts.leading_indicator_enabled", True):
+        return []
+    try:
+        from services.market.leading_indicators import collect_leading_signals
+        from db.config import get_config
+        lookback = int(get_config("alerts.leading_indicator_lookback_days", "7"))
+        signals = collect_leading_signals(lookback_days=lookback)
+    except Exception as e:
+        logger.warning(f"[event_radar:{trace_id}] 领先指标采集失败: {e}")
+        return []
+
+    events = []
+    today = datetime.now().strftime("%Y-%m-%d")
+    for sig in signals:
+        events.append({
+            "title": sig.title,
+            "summary": sig.summary,
+            "event_type": sig.signal_type,
+            "direction": sig.direction,
+            "confidence": min(sig.confidence + _leading_bonus(sig.leading_level), 0.95),
+            "expected_date": today,  # 领先指标"预期日期"=今天
+            "affected_sectors": sig.affected_sectors,
+            "affected_themes": sig.affected_themes,
+            "sources": [{"title": sig.title, "url": sig.source_url, "publish_date": sig.publish_date}],
+            "time_frame": "short" if sig.leading_level == "medium" else "medium",
+            "evidence": f"领先指标({sig.leading_level}): {sig.metric_value or ''} {sig.metric_unit}".strip(),
+        })
+    return events
+
+
 def scan_forward_events(trace_id: str = "") -> dict:
     """前瞻性事件雷达主扫描函数。
 
@@ -1044,6 +1088,7 @@ def scan_forward_events(trace_id: str = "") -> dict:
     2. 采集新闻
     3. LLM 提取未来事件（短期）
     4. 提取行业趋势（中长期）
+    4.5 LI-4: 采集领先指标信号（政策草案/资本开支/产业资本等）
     5. 写入 market_events 表（去重）
     6. 状态流转扫描
     7. 板块匹配 + 3 级分级
@@ -1082,6 +1127,13 @@ def scan_forward_events(trace_id: str = "") -> dict:
 
     # 合并事件和趋势
     all_items = events + trends
+
+    # LI-4（2026-07-22）：领先指标接入层 — 采集领先指标信号并合并
+    leading_events = _collect_leading_signals(trace_id=trace_id)
+    if leading_events:
+        all_items = all_items + leading_events
+        logger.info(f"[event_radar:{trace_id}] 领先指标合并 {len(leading_events)} 条")
+
     if not all_items:
         return {"extracted": 0, "new": 0, "updated": 0, "alerts_created": 0, "reason": "no_events"}
 

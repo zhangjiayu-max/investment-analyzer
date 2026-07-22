@@ -275,3 +275,52 @@ async def backfill_history(
     except Exception as e:
         logger.error(f"backfill 失败: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"backfill 失败: {e}")
+
+
+# ── LI-8（2026-07-22）：领先指标接入层 API ──
+
+@router.get("/api/alerts/leading-indicators/signals")
+async def list_leading_indicator_signals(
+    lookback_days: int = Query(7, ge=1, le=30, description="回看天数"),
+):
+    """获取领先指标信号列表（政策草案/资本开支/产业资本/海关/PMI）。"""
+    try:
+        from services.market.leading_indicators import collect_leading_signals
+        signals = collect_leading_signals(lookback_days=lookback_days)
+        return ApiResponse.success(data={
+            "signals": [
+                {
+                    "signal_type": s.signal_type,
+                    "leading_level": s.leading_level,
+                    "title": s.title,
+                    "summary": s.summary,
+                    "source_url": s.source_url,
+                    "publish_date": s.publish_date,
+                    "affected_sectors": s.affected_sectors,
+                    "affected_themes": s.affected_themes,
+                    "direction": s.direction,
+                    "confidence": s.confidence,
+                    "metric_value": s.metric_value,
+                    "metric_unit": s.metric_unit,
+                    "metric_yoy": s.metric_yoy,
+                    "metric_mom": s.metric_mom,
+                }
+                for s in signals
+            ],
+            "total": len(signals),
+        })
+    except Exception as e:
+        logger.error(f"获取领先指标信号失败: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/api/opportunities/backtest-stats-by-source")
+async def get_backtest_stats_by_source():
+    """LI-6：按信号来源分组统计回测命中率。"""
+    try:
+        from db.opportunities import get_backtest_stats_by_source
+        stats = get_backtest_stats_by_source()
+        return ApiResponse.success(data=stats)
+    except Exception as e:
+        logger.error(f"获取回测统计失败: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))

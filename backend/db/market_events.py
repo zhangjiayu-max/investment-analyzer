@@ -538,3 +538,39 @@ def list_verified_events(limit: int = 100) -> list[dict]:
         return [dict(r) for r in rows]
     finally:
         conn.close()
+
+
+def list_events_by_date_range(
+    start_date: str,
+    end_date: str,
+    event_types: tuple = None,
+    limit: int = 200,
+) -> list[dict]:
+    """LI-5（2026-07-22）：按日期范围和事件类型查询领先指标事件。
+
+    Args:
+        start_date: 起始日期 YYYY-MM-DD
+        end_date: 结束日期 YYYY-MM-DD
+        event_types: 事件类型元组（如 ('policy_draft', 'capex_announcement')），None 则不过滤
+        limit: 最多返回条数
+
+    Returns:
+        list[dict] 事件列表
+    """
+    conn = _get_conn()
+    try:
+        sql = (
+            "SELECT * FROM market_events "
+            "WHERE detected_date >= ? AND detected_date <= ? "
+        )
+        params: list = [start_date, end_date]
+        if event_types:
+            placeholders = ",".join("?" * len(event_types))
+            sql += f"AND event_type IN ({placeholders}) "
+            params.extend(event_types)
+        sql += "ORDER BY detected_date DESC LIMIT ?"
+        params.append(limit)
+        rows = conn.execute(sql, params).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()

@@ -1802,6 +1802,16 @@ export function getEventImpactAmount(eventId) {
   return api.get(`/alerts/event-radar/events/${eventId}/impact-amount`)
 }
 
+/** LI-8：获取领先指标信号列表（政策草案/资本开支/产业资本/海关/PMI） */
+export function getLeadingIndicatorSignals(lookbackDays = 7) {
+  return api.get('/alerts/leading-indicators/signals', { params: { lookback_days: lookbackDays } })
+}
+
+/** LI-6：按信号来源分组统计回测命中率 */
+export function getBacktestStatsBySource() {
+  return api.get('/opportunities/backtest-stats-by-source')
+}
+
 /** 生成预警 */
 export function generateAlert(data) {
   return api.post('/portfolio/alerts/generate', data)

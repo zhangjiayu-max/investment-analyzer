@@ -542,6 +542,71 @@ def _get_sentiment_score() -> tuple[int, str]:
         return 0, "neutral"
 
 
+def _get_leading_indicator_score(theme_rule: dict, trade_date: str) -> tuple[int, str]:
+    """LI-5（2026-07-22）：计算领先指标得分。返回 (score, reason)。
+
+    评分规则：
+    - 近 7 天有 strong 领先指标命中该主题 → +15
+    - 近 7 天有 medium 领先指标命中 → +8
+    - 近 7 天有领先指标但方向 negative 占多数 → -10
+    - 无领先指标命中 → 0
+
+    开关：opportunity.leading_indicator_score_enabled（默认 false，新增维度需观察）
+    """
+    from db.config import get_config
+    if get_config("opportunity.leading_indicator_score_enabled", "false") != "true":
+        return 0, ""
+
+    try:
+        from db.market_events import list_events_by_date_range
+        from datetime import datetime, timedelta
+        import json as _json
+
+        theme = theme_rule.get("theme", "")
+        sectors = [theme_rule.get("sector", "")] if theme_rule.get("sector") else []
+
+        # 查近 7 天领先指标事件
+        lookback = int(get_config("opportunity.leading_indicator_lookback_days", "7"))
+        end_date = trade_date
+        start_dt = datetime.strptime(trade_date, "%Y-%m-%d") - timedelta(days=lookback)
+        start_date = start_dt.strftime("%Y-%m-%d")
+
+        leading_types = ("policy_draft", "capex_announcement", "insider_trading", "customs_data", "pmi_subitem")
+        events = list_events_by_date_range(
+            start_date=start_date,
+            end_date=end_date,
+            event_types=leading_types,
+        )
+
+        matched = []
+        for ev in events:
+            ev_sectors = _json.loads(ev.get("affected_sectors", "[]")) if ev.get("affected_sectors") else []
+            ev_themes = _json.loads(ev.get("affected_themes", "[]")) if ev.get("affected_themes") else []
+            if theme in ev_themes or (sectors and set(sectors) & set(ev_sectors)):
+                matched.append(ev)
+
+        if not matched:
+            return 0, ""
+
+        strong_count = sum(1 for e in matched if e.get("event_type") in ("policy_draft", "capex_announcement", "insider_trading"))
+        medium_count = sum(1 for e in matched if e.get("event_type") in ("customs_data", "pmi_subitem"))
+        negative_count = sum(1 for e in matched if e.get("direction") == "negative")
+
+        score = 0
+        if strong_count > 0:
+            score += 15
+        if medium_count > 0:
+            score += 8
+        if negative_count > len(matched) / 2:  # 过半利空
+            score = -10
+
+        reason = f"领先指标命中: strong={strong_count}, medium={medium_count}, negative={negative_count}"
+        return score, reason
+    except Exception as e:
+        logger.debug(f"[opportunity] 领先指标评分失败: {e}")
+        return 0, ""
+
+
 def _score_theme(theme_rule: dict, news_hits: list[dict], valuation: dict | None, portfolio_fit: dict) -> tuple[int, str]:
     """主题评分（2026-07-20 系统性修复后）。
 
@@ -555,6 +620,7 @@ def _score_theme(theme_rule: dict, news_hits: list[dict], valuation: dict | None
     - 技术指标（P1-K 新增）：0-15 分
     - 资金流向（P1-L 新增）：-5~+10 分
     - 情绪指标（P1-M 新增）：-5~+10 分
+    - 领先指标（LI-5 新增）：-10~+15 分（开关默认关闭）
 
     一票否决（P0-A）：
     - 估值 >80% → 强制 avoid
@@ -614,6 +680,11 @@ def _score_theme(theme_rule: dict, news_hits: list[dict], valuation: dict | None
     # ── 9. 情绪指标（P1-M 新增）──
     sentiment_score, _ = _get_sentiment_score()
     score += sentiment_score
+
+    # ── 10. 领先指标（LI-5 新增，开关默认关闭）──
+    trade_date = datetime.now().strftime("%Y-%m-%d")
+    leading_score, _ = _get_leading_indicator_score(theme_rule, trade_date)
+    score += leading_score
 
     score = max(0, min(100, score))
     verdict = "can_buy" if score >= 75 else ("watch" if score >= 50 else "avoid")
@@ -936,13 +1007,26 @@ def _create_opportunity_backtest(opportunity_id: int, theme_rule: dict, trade_da
     """
     try:
         from db.opportunities import create_opportunity_backtest
+        from db.config import get_config_bool
         entry_price = _get_theme_index_current_price(theme_rule)
+
+        # LI-6（2026-07-22）：标记信号来源
+        signal_source = "news"
+        if get_config_bool("opportunity.signal_source_tracking_enabled", True):
+            # 检查是否有领先指标命中该主题
+            leading_score, _ = _get_leading_indicator_score(theme_rule, trade_date)
+            if leading_score > 0:
+                signal_source = "leading_strong"
+            elif leading_score < 0:
+                signal_source = "leading_medium"
+
         create_opportunity_backtest({
             "opportunity_id": opportunity_id,
             "theme": theme_rule.get("theme", ""),
             "entry_date": trade_date,
             "review_date": review_date,
             "entry_price": entry_price,
+            "signal_source": signal_source,
         })
     except Exception as e:
         logger.debug(f"[opportunity] 创建回测记录失败: {e}")
@@ -1003,6 +1087,31 @@ def _get_theme_index_price_at(theme_rule: dict, target_date: str) -> float | Non
         logger.debug(f"[opportunity] 获取指数历史价格失败 {index_code} @ {target_date}: {e}")
 
     return None
+
+
+def _apply_hit_rate_feedback():
+    """LI-6（2026-07-22）：命中率反哺评分权重。
+
+    规则：
+    - 某信号来源连续 3 次 miss → 降权 20%（写入 system_config）
+    - 连续 2 次 hit → 恢复原权重
+    """
+    try:
+        from db.opportunities import get_consecutive_misses_by_source
+        from db.config import update_config, get_config
+
+        consecutive_misses = get_consecutive_misses_by_source()
+        for source, miss_count in consecutive_misses.items():
+            config_key = f"opportunity.weight_adjust_{source}"
+            if miss_count >= 3:
+                # 降权 20%
+                current = float(get_config(config_key, "1.0"))
+                new_weight = max(0.5, current * 0.8)  # 最低 50%
+                if new_weight != current:
+                    update_config(config_key, str(round(new_weight, 2)))
+                    logger.info(f"[opportunity] 命中率反哺: {source} 连续{miss_count}次miss，权重 {current}→{new_weight}")
+    except Exception as e:
+        logger.debug(f"[opportunity] _apply_hit_rate_feedback 失败: {e}")
 
 
 def review_opportunity_backtests() -> dict:
@@ -1072,11 +1181,48 @@ def review_opportunity_backtests() -> dict:
                     update_fields["excess_return"] = round(excess_return, 2)
 
                 update_opportunity_backtest(track["id"], update_fields)
+
+                # LI-6（2026-07-22）：miss 时记录原因
+                if hit == 0:
+                    try:
+                        from db.opportunities import update_backtest_miss_reason
+                        from db.config import get_config_bool
+                        if get_config_bool("opportunity.signal_source_tracking_enabled", True):
+                            # 拼接 miss 原因
+                            reasons = []
+                            if benchmark_pct is not None:
+                                reasons.append(f"超额收益={excess_return:.1f}%（基准={benchmark_pct:.1f}%）")
+                            else:
+                                reasons.append(f"绝对涨幅={change_pct:.1f}%")
+                            # 查该机会的估值分位
+                            opp_val = None
+                            try:
+                                from db.opportunities import get_opportunity
+                                opp = get_opportunity(track.get("opportunity_id"))
+                                if opp:
+                                    opp_val = opp.get("valuation_percentile")
+                            except Exception:
+                                pass
+                            if opp_val is not None:
+                                reasons.append(f"入场估值分位={opp_val:.0f}%")
+                            miss_reason = " | ".join(reasons)
+                            update_backtest_miss_reason(track["id"], miss_reason)
+                    except Exception as e:
+                        logger.debug(f"[opportunity] miss_reason 更新失败: {e}")
+
                 reviewed += 1
                 if hit:
                     hit_count += 1
             except Exception as e:
                 logger.warning(f"[opportunity] 回测单条失败 {track.get('id')}: {e}")
+
+        # LI-6（2026-07-22）：命中率反哺 — 连续3次miss降权
+        try:
+            from db.config import get_config_bool
+            if get_config_bool("opportunity.hit_rate_feedback_enabled", True):
+                _apply_hit_rate_feedback()
+        except Exception as e:
+            logger.debug(f"[opportunity] 命中率反哺失败: {e}")
 
         logger.info(f"[opportunity] 回测完成：{reviewed} 条，命中 {hit_count} 条")
         return {"reviewed": reviewed, "hit": hit_count, "miss": reviewed - hit_count}

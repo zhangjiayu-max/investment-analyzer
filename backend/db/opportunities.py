@@ -94,6 +94,10 @@ def init_opportunity_tables(conn):
     _ensure_column(conn, "theme_opportunity_backtests", "benchmark_pct", "REAL")
     _ensure_column(conn, "theme_opportunity_backtests", "excess_return", "REAL")
 
+    # LI-6（2026-07-22）：回测增强 — 信号来源标记 + miss 原因
+    _ensure_column(conn, "theme_opportunity_backtests", "signal_source", "TEXT DEFAULT 'news'")
+    _ensure_column(conn, "theme_opportunity_backtests", "miss_reason", "TEXT")
+
 
 def _ensure_column(conn, table: str, column: str, col_type: str):
     """安全添加列（如果不存在）。"""
@@ -545,23 +549,25 @@ def create_opportunity_backtest(data: dict) -> int:
     """创建机会回测记录（每次 save_opportunity 时插入）。
 
     Args:
-        data: {opportunity_id, theme, entry_date, review_date, entry_price}
+        data: {opportunity_id, theme, entry_date, review_date, entry_price, signal_source?}
 
     Returns:
         backtest_id
     """
     conn = _get_conn()
     try:
+        # LI-6（2026-07-22）：新增 signal_source 字段（默认 'news'）
         cur = conn.execute("""
             INSERT INTO theme_opportunity_backtests (
-                opportunity_id, theme, entry_date, review_date, entry_price
-            ) VALUES (?, ?, ?, ?, ?)
+                opportunity_id, theme, entry_date, review_date, entry_price, signal_source
+            ) VALUES (?, ?, ?, ?, ?, ?)
         """, (
             data.get("opportunity_id"),
             data.get("theme", ""),
             data.get("entry_date", ""),
             data.get("review_date", ""),
             data.get("entry_price"),
+            data.get("signal_source", "news"),
         ))
         conn.commit()
         return cur.lastrowid
@@ -653,5 +659,92 @@ def get_backtest_stats() -> dict:
             "hit_rate": round(hit / reviewed * 100, 1) if reviewed else None,
             "theme_stats": theme_stats,
         }
+    finally:
+        conn.close()
+
+
+def get_backtest_stats_by_source() -> dict:
+    """LI-6（2026-07-22）：按信号来源分组统计命中率。
+
+    Returns:
+        {
+            "news": {"total": N, "hits": H, "hit_rate": R},
+            "leading_strong": {...},
+            "leading_medium": {...},
+        }
+    """
+    conn = _get_conn()
+    try:
+        rows = conn.execute("""
+            SELECT signal_source,
+                   COUNT(*) as total,
+                   SUM(CASE WHEN hit=1 THEN 1 ELSE 0 END) as hits,
+                   SUM(CASE WHEN hit IS NOT NULL THEN 1 ELSE 0 END) as reviewed
+            FROM theme_opportunity_backtests
+            GROUP BY signal_source
+        """).fetchall()
+        result = {}
+        for r in rows:
+            source = r["signal_source"] or "news"
+            reviewed = r["reviewed"] or 0
+            result[source] = {
+                "total": r["total"],
+                "hits": r["hits"] or 0,
+                "reviewed": reviewed,
+                "hit_rate": round((r["hits"] or 0) / reviewed * 100, 1) if reviewed else None,
+            }
+        return result
+    finally:
+        conn.close()
+
+
+def update_backtest_miss_reason(backtest_id: int, miss_reason: str) -> bool:
+    """LI-6（2026-07-22）：更新回测 miss 原因。"""
+    conn = _get_conn()
+    try:
+        conn.execute(
+            "UPDATE theme_opportunity_backtests SET miss_reason = ? WHERE id = ?",
+            (miss_reason, backtest_id),
+        )
+        conn.commit()
+        return conn.total_changes > 0
+    finally:
+        conn.close()
+
+
+def get_consecutive_misses_by_source() -> dict:
+    """LI-6（2026-07-22）：查询各信号来源的连续 miss 次数（用于命中率反哺）。
+
+    Returns:
+        {signal_source: consecutive_miss_count}
+    """
+    conn = _get_conn()
+    try:
+        # 取每个 signal_source 最近的记录，从后往前数连续 miss
+        rows = conn.execute("""
+            SELECT signal_source, hit
+            FROM theme_opportunity_backtests
+            WHERE hit IS NOT NULL
+            ORDER BY signal_source, reviewed_at DESC
+        """).fetchall()
+
+        result = {}
+        current_source = None
+        miss_streak = 0
+        for r in rows:
+            source = r["signal_source"] or "news"
+            if source != current_source:
+                if current_source and miss_streak >= 3:
+                    result[current_source] = miss_streak
+                current_source = source
+                miss_streak = 0
+            if r["hit"] == 0:
+                miss_streak += 1
+            else:
+                miss_streak = 0
+        # 最后一个
+        if current_source and miss_streak >= 3:
+            result[current_source] = miss_streak
+        return result
     finally:
         conn.close()
