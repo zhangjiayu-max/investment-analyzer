@@ -151,7 +151,14 @@ def _call_vision(prompt: str, img_b64: str, mime: str, model: str = "", trace_id
 
 
 def _extract_json(raw: str) -> dict:
-    """从响应中提取 JSON，兼容 markdown、截断、多余文字。"""
+    """从响应中提取 JSON，兼容 markdown、截断、多余文字。
+
+    2026-07-22 修复：模型有时直接返回 JSON 数组 `[{...}, {...}]` 而非对象，
+    导致后续 `_normalize` 中 `data.get(...)` 报 `'list' object has no attribute 'get'`。
+    此处统一将 list 包装成 dict：
+    - 螺丝钉场景（元素含"指数名称"/"PE"等）：包装成 {"数据": list}
+    - 其他场景：包装成 {"raw_response": 原始文本} 触发兜底
+    """
     raw = raw.strip()
     if raw.startswith("```"):
         parts = raw.split("```")
@@ -161,15 +168,18 @@ def _extract_json(raw: str) -> dict:
                 raw = raw[4:]
             raw = raw.strip()
     try:
-        return json.loads(raw)
+        parsed = json.loads(raw)
+        return _wrap_if_list(parsed, raw)
     except json.JSONDecodeError:
         pass
+    # 优先尝试提取对象（{...}）
     brace_start = raw.find("{")
     brace_end = raw.rfind("}")
     if brace_start != -1 and brace_end > brace_start:
         candidate = raw[brace_start:brace_end + 1]
         try:
-            return json.loads(candidate)
+            parsed = json.loads(candidate)
+            return _wrap_if_list(parsed, raw)
         except json.JSONDecodeError:
             pass
         s = re.sub(r',\s*([}\]])', r'\1', candidate)
@@ -179,9 +189,37 @@ def _extract_json(raw: str) -> dict:
             s = s.rstrip().rstrip(',')
             s += ']' * open_brackets + '}' * open_braces
         try:
-            return json.loads(s)
+            parsed = json.loads(s)
+            return _wrap_if_list(parsed, raw)
         except json.JSONDecodeError:
             pass
+    # 次选：尝试提取数组（[...]）—— 模型可能只返回了数组而没有外层对象
+    bracket_start = raw.find("[")
+    bracket_end = raw.rfind("]")
+    if bracket_start != -1 and bracket_end > bracket_start:
+        candidate = raw[bracket_start:bracket_end + 1]
+        try:
+            parsed = json.loads(candidate)
+            return _wrap_if_list(parsed, raw)
+        except json.JSONDecodeError:
+            pass
+    return {"raw_response": raw}
+
+
+def _wrap_if_list(parsed, raw: str) -> dict:
+    """如果 json.loads 解析出 list，包装成 dict。"""
+    if isinstance(parsed, dict):
+        return parsed
+    if isinstance(parsed, list):
+        # 螺丝钉估值表场景：元素是 dict 且含螺丝钉字段 → 包装成 {"数据": list}
+        if parsed and all(isinstance(it, dict) for it in parsed):
+            first = parsed[0]
+            if any(k in first for k in ("指数名称", "PE", "PB", "股息率", "ROE", "估值状态", "背景颜色")):
+                logger.info(f"[_extract_json] 模型返回裸数组，自动包装为 {{\"数据\": [...]}}（{len(parsed)} 条）")
+                return {"数据": parsed}
+        # 其他场景：回退为 raw_response 触发文本兜底
+        return {"raw_response": raw}
+    # 字符串/数字等标量
     return {"raw_response": raw}
 
 
@@ -294,6 +332,11 @@ class ImageParser:
         return result
 
     def _normalize(self, data: dict) -> dict:
+        # 2026-07-22 防御：模型可能直接返回数组，_extract_json 已包装，但保险起见再检查
+        if isinstance(data, list):
+            data = {"数据": data}
+        if not isinstance(data, dict):
+            return {"index_name": None, "current_value": None, "raw_json": json.dumps(data, ensure_ascii=False, default=str)}
         if "raw_response" in data and len(data) == 1:
             raw_text = data["raw_response"]
             try:
@@ -454,6 +497,12 @@ class DDImageParser:
             return {"ok": False, "error": f"裁剪解析失败: {e}", "data": [], "count": 0}
 
     def _normalize(self, data: dict) -> dict:
+        # 2026-07-22 防御：模型可能直接返回数组，_extract_json 已包装，但保险起见再检查
+        if isinstance(data, list):
+            data = {"数据": data}
+        if not isinstance(data, dict):
+            return {"ok": False, "error": f"解析结果非对象: {type(data).__name__}",
+                    "data": [], "count": 0, "raw_json": json.dumps(data, ensure_ascii=False, default=str)}
         if "raw_response" in data and len(data) == 1:
             parsed = self._extract_key_value_text(data["raw_response"])
             if parsed:
