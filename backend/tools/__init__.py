@@ -257,13 +257,17 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "query_fund_info",
-            "description": "查询基金详细信息，包括基本信息（名称、类型、跟踪标的）、持仓详情（重仓股票、债券持仓及类型）、资产配置。当用户问到某只基金的持仓、重仓股、债券类型等问题时调用。",
+            "description": "查询基金详细信息。支持基金代码或名称查询（名称会自动从用户持仓匹配代码）。包括基本信息（名称、类型、跟踪标的）、持仓详情（重仓股票、债券持仓及类型）、资产配置。当用户问到某只基金的持仓、重仓股、债券类型等问题时调用。",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "fund_code": {
                         "type": "string",
-                        "description": "基金代码，如 '161725'",
+                        "description": "基金代码（6位数字，如 '161725'）。如果只知道基金名称，可传入名称，系统会自动从持仓匹配代码。也建议同时传 fund_name 提高匹配准确率。",
+                    },
+                    "fund_name": {
+                        "type": "string",
+                        "description": "基金名称（可选，用于辅助匹配，如'博时恒乐债券'）",
                     },
                     "detail_type": {
                         "type": "string",
@@ -2523,21 +2527,90 @@ def _query_portfolio(args: dict) -> str:
     return json.dumps({"error": f"未知查询类型: {query_type}"}, ensure_ascii=False)
 
 
+def _match_fund_code_by_name(name_hint: str) -> str | None:
+    """从用户持仓列表中模糊匹配基金名称，返回 fund_code。
+
+    匹配策略：
+    1. 完全包含匹配（持仓 fund_name 包含 name_hint）
+    2. 去空格后包含匹配
+    3. 关键词匹配（取名称前3字做子串匹配）
+    返回第一个匹配项的 fund_code，无匹配返回 None。
+
+    L1 防幻觉：LLM 凭记忆猜测基金代码（如 conv#133 博时恒乐债券幻觉成 007679），
+    本函数从持仓列表中精确匹配名称，避免代码错误。
+    """
+    try:
+        holdings = list_holdings()
+    except Exception:
+        return None
+    name_hint = (name_hint or "").strip()
+    if not name_hint:
+        return None
+    # 1. 完全包含
+    for h in holdings:
+        fn = h.get("fund_name") or ""
+        if name_hint in fn:
+            return h.get("fund_code")
+    # 2. 去空格包含
+    name_clean = name_hint.replace(" ", "")
+    for h in holdings:
+        fn = (h.get("fund_name") or "").replace(" ", "")
+        if name_clean in fn:
+            return h.get("fund_code")
+    # 3. 关键词匹配（取 hint 的前3字做子串匹配）
+    if len(name_hint) >= 3:
+        for h in holdings:
+            fn = h.get("fund_name") or ""
+            if name_hint[:3] in fn:
+                return h.get("fund_code")
+    return None
+
+
 def _query_fund_info(args: dict) -> str:
-    """查询基金详细信息。"""
-    fund_code = args.get("fund_code", "").strip()
+    """查询基金详细信息。支持基金代码或名称（名称自动从持仓匹配代码）。"""
+    fund_code = (args.get("fund_code") or "").strip()
+    fund_name_hint = (args.get("fund_name") or "").strip()
     detail_type = args.get("detail_type", "all")
+
+    if not fund_code and not fund_name_hint:
+        return json.dumps({"error": "请提供基金代码或基金名称"}, ensure_ascii=False)
+
+    # L1 防幻觉：如果 fund_code 不是纯数字，当作名称处理
+    _match_note = ""
+    if fund_code and not fund_code.isdigit():
+        fund_name_hint = fund_code
+        fund_code = ""
+    if fund_name_hint and not fund_code:
+        matched_code = _match_fund_code_by_name(fund_name_hint)
+        if matched_code:
+            _match_note = f"通过名称'{fund_name_hint}'匹配到基金代码 {matched_code}"
+            fund_code = matched_code
+        else:
+            return json.dumps({
+                "error": f"未在持仓中找到名称包含'{fund_name_hint}'的基金",
+                "hint": "请先调用 query_portfolio 查看持仓列表，使用其中的 fund_code 调用本工具",
+            }, ensure_ascii=False)
 
     if not fund_code:
         return json.dumps({"error": "请提供基金代码"}, ensure_ascii=False)
 
     result = {"fund_code": fund_code}
+    if _match_note:
+        result["_match_note"] = _match_note
 
     # 基本信息
     if detail_type in ("basic", "all"):
         info = lookup_fund_info(fund_code)
         if info:
             result["basic_info"] = info
+            # L2 防幻觉：名称不匹配警告
+            if fund_name_hint and info.get("fund_name"):
+                actual_name = info.get("fund_name", "")
+                if fund_name_hint[:3] not in actual_name and actual_name[:3] not in fund_name_hint:
+                    result["_name_mismatch_warning"] = (
+                        f"⚠️ 查到的基金名称'{actual_name}'与您查询的'{fund_name_hint}'不匹配，"
+                        f"可能代码错误。请调用 query_portfolio 确认正确的 fund_code。"
+                    )
         else:
             result["basic_info_error"] = f"未找到基金 {fund_code} 的基本信息"
 

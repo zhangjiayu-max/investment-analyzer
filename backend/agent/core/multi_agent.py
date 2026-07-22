@@ -800,6 +800,14 @@ def run_specialist(agent_key: str, query: str, context: str = "",
         if len(answer) < 200:
             logger.info(f'[trace:{trace_id}] [{agent["name"]}] answer 为空或过短({len(answer)}字)，触发单次收口')
             try:
+                # L4 防幻觉：收口前检测基金代码幻觉，注入纠正提示
+                _hallucination_hints = _detect_fund_code_hallucination(tool_calls_log, agent)
+                if _hallucination_hints:
+                    logger.warning(f'[trace:{trace_id}] [{agent["name"]}] 检测到基金代码幻觉，注入纠正提示')
+                    llm_messages.append({
+                        "role": "user",
+                        "content": _hallucination_hints,
+                    })
                 llm_messages.append({
                     "role": "user",
                     "content": "请基于以上工具调用结果，给出你的专业分析结论。要求：不调用工具，直接输出分析，至少 200 字。",
@@ -915,6 +923,69 @@ def run_specialist(agent_key: str, query: str, context: str = "",
         "tokens_used": tokens_used,
         "self_reflection": self_reflection_result,
     }
+
+
+def _detect_fund_code_hallucination(tool_calls_log: list, agent: dict) -> str:
+    """L4 防幻觉：检测基金分析师是否幻觉了不在持仓中的基金代码。
+
+    检查 query_fund_info 调用的 fund_code 是否在用户持仓中存在。
+    如果不存在，返回纠正提示；否则返回空字符串。
+
+    案例：conv#133 基金分析师幻觉了 007679/016181/016182，实际博时恒乐债券代码是 014846。
+    """
+    if agent.get("agent_key") != "fund_analyst":
+        return ""
+    # 收集所有 query_fund_info 调用的 fund_code
+    queried_codes = []
+    for tc in tool_calls_log:
+        if tc.get("name") == "query_fund_info":
+            try:
+                args = json.loads(tc.get("arguments", "{}") or "{}")
+                code = (args.get("fund_code") or "").strip()
+                if code and code.isdigit():
+                    queried_codes.append(code)
+            except Exception:
+                pass
+    if not queried_codes:
+        return ""
+    # 检查这些代码是否在持仓中
+    try:
+        from db import list_holdings
+        holdings = list_holdings()
+        holding_codes = {h.get("fund_code") for h in holdings}
+    except Exception:
+        return ""
+    wrong_codes = [c for c in queried_codes if c not in holding_codes]
+    if not wrong_codes:
+        return ""
+    # 尝试从工具结果中找到查到的基金名称，帮 LLM 对应到正确代码
+    code_suggestions = []
+    for wc in wrong_codes:
+        for tc in tool_calls_log:
+            if tc.get("name") != "query_fund_info":
+                continue
+            try:
+                args = json.loads(tc.get("arguments", "{}") or "{}")
+                if (args.get("fund_code") or "").strip() != wc:
+                    continue
+                result_raw = tc.get("result", "") or ""
+                try:
+                    result = json.loads(result_raw) if isinstance(result_raw, str) else result_raw
+                except Exception:
+                    result = {}
+                wrong_name = (result.get("basic_info") or {}).get("fund_name", "")
+                if wrong_name:
+                    code_suggestions.append(f"代码 {wc} 实际是'{wrong_name}'，不是用户问的基金")
+                break
+            except Exception:
+                pass
+    return (
+        f"⚠️ 检测到基金代码错误：您查询的代码 {wrong_codes} 不在用户持仓列表中。"
+        f"{'；'.join(code_suggestions) if code_suggestions else ''}。"
+        f"请重新调用 query_portfolio(query_type='detail') 获取持仓列表，"
+        f"从中找到用户提到的基金名称对应的正确 fund_code，再调用 query_fund_info。"
+        f"禁止使用持仓列表中不存在的基金代码。"
+    )
 
 
 def _fallback_from_tool_results(tool_calls_log: list) -> str:
