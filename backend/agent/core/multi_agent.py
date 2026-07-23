@@ -609,6 +609,12 @@ def run_specialist(agent_key: str, query: str, context: str = "",
     }
     _MAX_SEARCH_ROUNDS = get_config_int("agent.agentic_rag_max_rounds", 2)
     _SEARCH_LIMIT_ENABLED = get_config_bool("agent.agentic_rag_hard_limit_enabled", True)
+    # R-3（2026-07-23）：宏观策略师 search_knowledge 引导增强 — 轮次预算单独提升至 3
+    # 修复断层 C：原 prompt 强引导 yingmi_search_news，挤占 search_knowledge 轮次
+    # 默认关闭（需手动开启 rag.macro_strategist_search_knowledge_boost），开启后从 2 提升到 3
+    if agent_key == "macro_strategist" and get_config_bool("rag.macro_strategist_search_knowledge_boost", False):
+        _MAX_SEARCH_ROUNDS = max(_MAX_SEARCH_ROUNDS, 3)
+        logger.info(f"[trace:{trace_id}] [{agent['name']}] R-3 boost: _MAX_SEARCH_ROUNDS → {_MAX_SEARCH_ROUNDS}")
     search_rounds = 0
     # 收口提示：末轮强制要求输出文本结论，不再调工具，避免进入强制总结+重新生成链路
     _CLOSURE_PROMPT = (

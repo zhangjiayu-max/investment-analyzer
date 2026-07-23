@@ -434,7 +434,15 @@ def _init_wealth_specialists(conn):
                 "- **归因类问题**（为什么涨/跌、利好政策、外部资金）必须先调用 query_policy_news + query_southbound_capital\n"
                 "- **港股/恒生科技问题**必须调用 query_southbound_capital 查南向资金动向\n"
                 "- **政策面问题**优先调用 query_policy_news（聚合央行/国务院/证监会发文），再考虑 web_search\n"
-                "- **web_search**用于补充 query_policy_news 未覆盖的实时新闻，按 query 关键词自动过滤"
+                "- **web_search**用于补充 query_policy_news 未覆盖的实时新闻，按 query 关键词自动过滤\n\n"
+                "## 知识库检索策略（重要）\n"
+                "除新闻和政策检索外，你必须优先使用 search_knowledge 工具检索蒸馏书籍中的宏观规律：\n"
+                "- 分析周期位置时：检索\"周期 经济周期 康波周期\"（参考《周期》《周期估值与人性》）\n"
+                "- 分析通胀影响时：检索\"通货膨胀 CPI 货币政策\"（参考《经济学原理》）\n"
+                "- 分析资产配置时：检索\"资产配置 多元化 风险平价\"（参考《全球资产配置》）\n"
+                "- 分析房地产周期时：检索\"房地产 周期 建筑周期\"（参考《房地产周期》）\n\n"
+                "原则：新闻告诉你\"正在发生什么\"，书籍告诉你\"规律上会怎样\"。两者必须结合，\n"
+                "不能只看新闻不看历史规律。建议每个宏观分析至少调用 1 次 search_knowledge。"
             ),
             "knowledge_scope": '{"rag_types": ["article", "analysis", "book"], "kyc_dimensions": ["investment_horizon"]}',
         },

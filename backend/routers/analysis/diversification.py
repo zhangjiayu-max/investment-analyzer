@@ -22,8 +22,8 @@ from db import (
 from db.portfolio import update_analysis_record
 from db.agent_analysis_log import create_analysis_log, complete_analysis_log
 from db.config import get_config as _get_config, get_config_int, get_config_float
-from services.rag import build_rag_context_with_details
-from ._shared import _parse_mcp_pct_pairs, _parse_mcp_correlation
+from services.rag import build_rag_context_with_details  # 保留向后兼容
+from ._shared import _parse_mcp_pct_pairs, _parse_mcp_correlation, inject_rag_context
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["analysis-diversification"])
@@ -407,6 +407,16 @@ async def _run_diversification_ai_summary_async(record_id: int, agent_id: int = 
 {facts_block}
 ```
 """
+
+    # R-1（2026-07-23）：RAG 蒸馏知识注入（修复死代码 — 原仅 import 未调用）
+    fund_names_str = " ".join([h.get("fund_name", "") for h in holdings[:5]])
+    rag_section = inject_rag_context(
+        base_query="持仓分散度 集中度 相关性 资产配置 风险管理",
+        extra_keywords=fund_names_str,
+        caller="diversification",
+    )
+    if rag_section:
+        user_content += rag_section
 
     uid = f"diversification_{int(time.time())}"
     trace_id = f"log_{uuid.uuid4().hex[:12]}"

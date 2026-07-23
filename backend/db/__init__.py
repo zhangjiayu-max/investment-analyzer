@@ -1531,6 +1531,20 @@ def init_db():
     except Exception as e:
         print(f"[db] macro_strategist prompt 迁移失败（不阻塞启动）: {e}")
 
+    # ── R-3（2026-07-23）迁移：macro_strategist 追加知识库检索策略段 ──
+    # 修复断层 C：原 prompt 强引导 yingmi_search_news，挤占 search_knowledge 轮次预算
+    try:
+        _cur = conn.execute("""
+            UPDATE agents SET system_prompt = system_prompt ||
+            '\n\n## 知识库检索策略（重要）\n除新闻和政策检索外，你必须优先使用 search_knowledge 工具检索蒸馏书籍中的宏观规律：\n- 分析周期位置时：检索"周期 经济周期 康波周期"（参考《周期》《周期估值与人性》）\n- 分析通胀影响时：检索"通货膨胀 CPI 货币政策"（参考《经济学原理》）\n- 分析资产配置时：检索"资产配置 多元化 风险平价"（参考《全球资产配置》）\n- 分析房地产周期时：检索"房地产 周期 建筑周期"（参考《房地产周期》）\n\n原则：新闻告诉你"正在发生什么"，书籍告诉你"规律上会怎样"。两者必须结合，\n不能只看新闻不看历史规律。建议每个宏观分析至少调用 1 次 search_knowledge。'
+            WHERE agent_key = 'macro_strategist'
+            AND system_prompt NOT LIKE '%知识库检索策略%'
+        """)
+        if _cur.rowcount > 0:
+            print(f"[db] 迁移 macro_strategist system_prompt（R-3 增加知识库检索策略）")
+    except Exception as e:
+        print(f"[db] macro_strategist R-3 prompt 迁移失败（不阻塞启动）: {e}")
+
     # ── 指数历史数据表（L4回撤修复时间 / L5估值胜率 算法用）──
     conn.execute("""
         CREATE TABLE IF NOT EXISTS index_price_history (

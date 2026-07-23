@@ -19,9 +19,10 @@ from db import (
     get_config_float, get_config_int,
 )
 from services.llm_service import _call_llm, MODEL
-from services.rag import build_rag_context_with_details, log_rag_search
+from services.rag import build_rag_context_with_details, log_rag_search  # 保留向后兼容
 from models.analysis import AnalysisRunRequest, AnalysisAgentUpdateRequest
 from db.agent_analysis_log import create_analysis_log, complete_analysis_log
+from ._shared import inject_rag_context
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["analysis-index-analysis"])
@@ -88,21 +89,12 @@ async def _run_index_analysis_async(history_id: int, req_data: dict, agent: dict
 
     # 3. RAG 知识库检索
     rag_context = ""
-    rag_result = {}
     if req.index_name:
         try:
-            rag_query = f"{req.index_name} 估值 分析 投资"
-            rag_result = build_rag_context_with_details(query=rag_query, limit=5)
-            rag_context = rag_result.get("context", "")
-            log_rag_search(
-                conversation_id=0,
-                message_id=0,
-                query=rag_query,
-                keywords=rag_result.get("keywords", []),
-                results=rag_result.get("results", []),
-                fts_count=rag_result.get("fts_count", 0),
-                chroma_count=rag_result.get("chroma_count", 0),
-                freshness_filtered=rag_result.get("freshness_filtered", 0),
+            rag_context = inject_rag_context(
+                base_query="指数分析 估值",
+                extra_keywords=req.index_name,
+                caller="index_analysis",
             )
         except Exception as e:
             logger.warning(f"RAG 检索失败: {e}")
@@ -249,7 +241,7 @@ async def _run_index_analysis_async(history_id: int, req_data: dict, agent: dict
     if valuation_context:
         full_prompt += f"\n\n<valuation_data>\n指数估值数据（{index_label}）：\n{valuation_context}\n</valuation_data>"
     if rag_context:
-        full_prompt += f"\n\n<knowledge_base>\n知识库检索结果（与{index_label}相关的历史分析和文章）：\n{rag_context}\n</knowledge_base>"
+        full_prompt += f"\n\n<knowledge_base>\n知识库检索结果（与{index_label}相关的历史分析和文章）：{rag_context}\n</knowledge_base>"
     if portfolio_context:
         full_prompt += f"\n\n<user_portfolio>\n用户持仓情况（与{index_label}相关）：\n{portfolio_context}\n</user_portfolio>"
     if news_context:

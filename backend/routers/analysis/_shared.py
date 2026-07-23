@@ -398,3 +398,57 @@ def _parse_mcp_correlation(text: str) -> list[dict]:
     for m in re.finditer(r'(\S+?)\s*[-—]\s*(\S+?)\s*[:：]\s*([\d.]+)', text):
         items.append({"fund_a": m.group(1), "fund_b": m.group(2), "correlation": float(m.group(3))})
     return items
+
+
+# ── R-2（2026-07-23）：分析路由统一 RAG 注入入口 ──
+
+def inject_rag_context(
+    base_query: str,
+    extra_keywords: str = "",
+    limit: int = 5,
+    max_chars: int = 1500,
+    caller: str = "",
+) -> str:
+    """分析路由统一 RAG 注入入口。
+
+    所有分析路由（panorama/portfolio_ai/deep_dive/index_analysis/market_intel/diversification）
+    必须通过本函数注入蒸馏知识，避免手写调用导致漏写（如 diversification 死代码 bug）。
+
+    Args:
+        base_query: 基础检索词（如"持仓分散度 集中度"）
+        extra_keywords: 附加关键词（如基金名、指数名）
+        limit: 最大返回条数
+        max_chars: 注入上下文最大字符数
+        caller: 调用方标识，用于日志追踪
+    Returns:
+        RAG 上下文文本（含 ## 知识库参考 标题），空则返回空字符串
+    """
+    try:
+        from db.config import get_config_bool
+        if not get_config_bool("rag.analysis_rag_injection_enabled", True):
+            return ""
+    except Exception:
+        pass
+
+    try:
+        from services.rag import build_rag_context_with_details, log_rag_search
+        rag_query = f"{base_query} {extra_keywords}".strip()
+        rag_result = build_rag_context_with_details(query=rag_query, limit=limit)
+        context = rag_result.get("context", "")
+        if context:
+            try:
+                log_rag_search(
+                    conversation_id=0, message_id=0, query=rag_query,
+                    keywords=rag_result.get("keywords", []),
+                    results=rag_result.get("results", []),
+                    fts_count=rag_result.get("fts_count", 0),
+                    chroma_count=rag_result.get("chroma_count", 0),
+                    freshness_filtered=rag_result.get("freshness_filtered", 0),
+                )
+            except Exception:
+                pass
+            return f"\n\n## 知识库参考（蒸馏书籍）\n{context[:max_chars]}"
+        return ""
+    except Exception as e:
+        logger.warning(f"[{caller}] RAG 检索失败: {e}")
+        return ""

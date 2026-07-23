@@ -18,10 +18,11 @@ from db import (
 from db.portfolio import update_analysis_record
 from db.agent_analysis_log import create_analysis_log, complete_analysis_log
 from db.config import get_config as _get_config, get_config_int, get_config_float
-from services.rag import build_rag_context_with_details, log_rag_search
+from services.rag import build_rag_context_with_details, log_rag_search  # 保留向后兼容
 from models.portfolio import DeepDiveRequest
 from ._shared import (
     _get_fund_mcp_diagnosis, _fetch_valuation_fallback,
+    inject_rag_context,
 )
 
 logger = logging.getLogger(__name__)
@@ -197,16 +198,10 @@ async def fund_deep_dive_api(holding_id: int, req: DeepDiveRequest):
     # RAG 知识库检索
     rag_context = ""
     try:
-        rag_query = f"{fund_name} 基金分析 投资策略"
-        rag_result = build_rag_context_with_details(query=rag_query, limit=5)
-        rag_context = rag_result.get("context", "")
-        log_rag_search(
-            conversation_id=0, message_id=0, query=rag_query,
-            keywords=rag_result.get("keywords", []),
-            results=rag_result.get("results", []),
-            fts_count=rag_result.get("fts_count", 0),
-            chroma_count=rag_result.get("chroma_count", 0),
-            freshness_filtered=rag_result.get("freshness_filtered", 0),
+        rag_context = inject_rag_context(
+            base_query="基金深度分析 投资策略",
+            extra_keywords=fund_name,
+            caller="deep_dive",
         )
     except Exception as e:
         logger.warning(f"RAG 检索失败: {e}")
@@ -228,7 +223,7 @@ async def fund_deep_dive_api(holding_id: int, req: DeepDiveRequest):
         f"```json\n{facts_context}\n```"
         f"\n\n## MCP 诊断\n{_get_fund_mcp_diagnosis(fund_code)}"
         f"\n\n{news_context}"
-        f"\n\n## 知识库参考\n{rag_context[:1500] if rag_context else '暂无相关知识库内容'}"
+        f"{rag_context if rag_context else ''}"
     )
 
     # 创建记录（status='running'）

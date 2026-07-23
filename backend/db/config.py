@@ -423,6 +423,18 @@ DEFAULT_CONFIGS = [
     # ── P2-D（2026-07-21）信号变更主动通知 ──
     ('watchlist.signal_change_alert_enabled', 'true', '信号变更 alert 开关：信号灯变更时生成 alert', 'watchlist'),
     ('watchlist.signal_change_sse_enabled', 'true', '信号变更 SSE 推送开关：信号灯变更时实时推送到前端', 'watchlist'),
+
+    # ── RAG 断层修复（2026-07-23 R-1~R-9）──
+    # 设计稿：doc/plans/2026-07-23-蒸馏知识RAG断层修复设计稿.md
+    # 原则：非 LLM 检索质量类默认开启（R-1/R-2/R-4/R-5/R-6）；LLM/数据写入类默认关闭（R-3/R-7/R-8/R-9）
+    ('rag.analysis_rag_injection_enabled', 'true', 'R-1/R-2 分析路由 RAG 注入总开关：6 个分析路由统一通过 inject_rag_context() 注入蒸馏知识', 'rag'),
+    ('rag.macro_strategist_search_knowledge_boost', 'false', 'R-3 宏观策略师 search_knowledge 引导增强：开启后 _MAX_SEARCH_ROUNDS 单独提升至 3（LLM 相关，默认关）', 'rag'),
+    ('rag.query_preprocess_enabled', 'true', 'R-4 查询预处理：URL 剥离 + 基金名识别 + jieba 自定义词典（非 LLM，默认开）', 'rag'),
+    ('rag.exclude_note_from_investment_search', 'true', 'R-5 note 索引治理：AI/LLM 技术笔记不参与投资对话/分析检索（非 LLM，默认开；note 仍在 knowledge_base 表中供前端展示）', 'rag'),
+    ('rag.history_intent_freshness_relax', 'true', 'R-6 时效过滤放宽：历史/规律类查询（含"历年/复盘/周期"等关键词）不强制 3 个月时效过滤（非 LLM，默认开）', 'rag'),
+    ('rag.auto_seed_fund_knowledge', 'false', 'R-7 自动补充持仓基金知识：写入 21 只基金基础知识卡片到 knowledge_base（数据写入类，默认关，手动触发）', 'rag'),
+    ('rag.feedback_ui_enabled', 'false', 'R-8 RAG 反馈 UI 激活：ChatView 显示知识引用折叠块 + 赞/踩按钮（LLM 相关，默认关）', 'rag'),
+    ('rag.auto_run_eval_on_startup', 'false', 'R-9 启动时自动运行 RAG 评估套件（LLM 相关，默认关）', 'rag'),
 ]
 
 

@@ -16,10 +16,11 @@ from db import (
 from db.portfolio import update_analysis_record, get_analysis_record_status
 from db.agent_analysis_log import create_analysis_log, complete_analysis_log
 from db.config import get_config as _get_config, get_config_int, get_config_float
-from services.rag import build_rag_context_with_details
+from services.rag import build_rag_context_with_details  # 保留向后兼容
 from models.portfolio import PanoramaAnalysisRequest
 from ._shared import (
     _get_mcp_context, _get_holdings_valuation_context, _format_news_section,
+    inject_rag_context,
 )
 
 logger = logging.getLogger(__name__)
@@ -91,9 +92,11 @@ async def _run_panorama_async(record_id: int, system_prompt: str, holdings: list
         rag_context = ""
         try:
             fund_names = " ".join([h.get("fund_name", "") for h in holdings[:5]])
-            rag_query = f"投资组合 资产配置 风险分析 {fund_names}"
-            rag_result = build_rag_context_with_details(query=rag_query, limit=5)
-            rag_context = rag_result.get("context", "")
+            rag_context = inject_rag_context(
+                base_query="投资组合 资产配置 风险分析",
+                extra_keywords=fund_names,
+                caller="panorama",
+            )
         except Exception as e:
             logger.warning(f"RAG 检索失败: {e}")
 
@@ -115,7 +118,7 @@ async def _run_panorama_async(record_id: int, system_prompt: str, holdings: list
             f"\n## MCP 专业数据\n{json.dumps(mcp_context, ensure_ascii=False, indent=2)}\n"
             f"\n{valuation_context}"
             f"\n\n{news_section}"
-            f"\n\n## 知识库参考\n{rag_context[:1500] if rag_context else '暂无相关知识库内容'}"
+            f"{rag_context if rag_context else ''}"
         )
 
         _track_agent(uid, "全景诊断分析师", "持仓诊断")

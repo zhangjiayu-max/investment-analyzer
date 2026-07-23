@@ -33,9 +33,10 @@ def _safe_percentile(v, default=None):
 
 
 from services.llm_service import _call_llm, MODEL
-from services.rag import build_rag_context_with_details, log_rag_search
+from services.rag import build_rag_context_with_details, log_rag_search  # 保留向后兼容
 from services.market_data import get_market_overview
 from services.unified_evidence import build_unified_evidence
+from ._shared import inject_rag_context
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/market-intelligence", tags=["analysis-market-intel"])
@@ -738,18 +739,9 @@ async def _do_market_intelligence():
 
     rag_context = ""
     try:
-        rag_query = "市场热点 板块轮动 投资策略 行业分析"
-        rag_result = build_rag_context_with_details(query=rag_query, limit=5)
-        rag_context = rag_result.get("context", "")
-        log_rag_search(
-            conversation_id=0,
-            message_id=0,
-            query=rag_query,
-            keywords=rag_result.get("keywords", []),
-            results=rag_result.get("results", []),
-            fts_count=rag_result.get("fts_count", 0),
-            chroma_count=rag_result.get("chroma_count", 0),
-            freshness_filtered=rag_result.get("freshness_filtered", 0),
+        rag_context = inject_rag_context(
+            base_query="市场热点 板块轮动 投资策略 行业分析",
+            caller="market_intel",
         )
     except Exception as e:
         logger.warning(f"RAG 检索失败: {e}")
@@ -838,9 +830,7 @@ async def _do_market_intelligence():
 【宏观环境】
 债券市场：{bond_text}
 政策指标：{policy_text or '暂无'}
-
-【知识库参考（历史分析/文章）】
-{rag_context[:1500] if rag_context else '暂无相关知识库内容'}
+{rag_context if rag_context else ''}
 
 【共享证据层】
 {shared_evidence.get("prompt_context", "")[:1800] if shared_evidence else '暂无共享证据'}

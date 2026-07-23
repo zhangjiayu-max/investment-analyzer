@@ -17,8 +17,9 @@ from db import (
 from db.portfolio import update_analysis_record
 from db.config import get_config_int, get_config_float
 from db.agent_analysis_log import create_analysis_log, complete_analysis_log
-from services.rag import build_rag_context_with_details, log_rag_search
+from services.rag import build_rag_context_with_details, log_rag_search  # 保留向后兼容
 from models.portfolio import PortfolioAiAnalysisRequest, FeedbackRequest
+from ._shared import inject_rag_context
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["analysis-portfolio-ai"])
@@ -174,19 +175,10 @@ async def _run_portfolio_ai_analysis_async(record_id: int, user_question: str):
     rag_context = ""
     try:
         fund_names = " ".join([h.get("fund_name", "") for h in holdings[:5]])
-        rag_query = f"持仓分析 基金投资 {fund_names}"
-        rag_result = build_rag_context_with_details(query=rag_query, limit=5)
-        rag_context = rag_result.get("context", "")
-        # 记录 RAG 检索日志
-        log_rag_search(
-            conversation_id=0,
-            message_id=0,
-            query=rag_query,
-            keywords=rag_result.get("keywords", []),
-            results=rag_result.get("results", []),
-            fts_count=rag_result.get("fts_count", 0),
-            chroma_count=rag_result.get("chroma_count", 0),
-            freshness_filtered=rag_result.get("freshness_filtered", 0),
+        rag_context = inject_rag_context(
+            base_query="持仓分析 基金投资",
+            extra_keywords=fund_names,
+            caller="portfolio_ai",
         )
     except Exception as e:
         logger.warning(f"RAG 检索失败: {e}")
@@ -213,9 +205,7 @@ async def _run_portfolio_ai_analysis_async(record_id: int, user_question: str):
 
 ## 专业分析数据（MCP 诊断）
 {json.dumps(mcp_context, ensure_ascii=False, indent=2)[:3000]}
-
-## 知识库参考（历史分析/文章）
-{rag_context[:1500] if rag_context else '暂无相关知识库内容'}
+{rag_context if rag_context else ''}
 
 ## 用户问题
 {user_question}
