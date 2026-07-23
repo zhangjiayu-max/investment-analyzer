@@ -26,6 +26,10 @@ logger = logging.getLogger(__name__)
 
 CHROMA_DIR = Path(__file__).parent.parent.parent / "data" / "chroma_db"
 
+# R-4-1（2026-07-23）：URL 剥离正则 — 匹配 http(s):// 开头直到首个中文字符或空白
+# 解决 mp.weixin.qq.com 类查询的 URL token 进入 FTS5 后被引号包裹 AND 连接破坏匹配
+_URL_PATTERN = re.compile(r'https?://[^\s\u4e00-\u9fff]+')
+
 
 # ══════════════════════════════════════════════════════════════
 # RAG 配置管理（从 rag_config 表读取，带内存缓存）
@@ -427,17 +431,61 @@ def rewrite_query(query: str, force: bool = False) -> str:
 
 # 中文分词（延迟导入，首次使用时加载）
 _jieba = None
+# R-4-3（2026-07-23）：jieba 自定义词典加载标记
+_jieba_dict_loaded = False
 
 
 def _get_jieba():
-    global _jieba
+    global _jieba, _jieba_dict_loaded
     if _jieba is None:
         try:
             import jieba
             _jieba = jieba
         except ImportError:
             _jieba = False
+    # R-4-3：首次拿到 jieba 后加载基金名 + 指数名自定义词典（避免"华泰保兴安悦债券C"被切碎）
+    if _jieba and not _jieba_dict_loaded:
+        try:
+            from db.config import get_config_bool
+            _load_dict = get_config_bool("rag.query_preprocess_enabled", True)
+        except Exception:
+            _load_dict = True
+        if _load_dict:
+            try:
+                _load_jieba_custom_dict(_jieba)
+            except Exception as _e:
+                logger.warning(f"jieba 自定义词典加载失败: {_e}")
+        _jieba_dict_loaded = True
     return _jieba
+
+
+def _load_jieba_custom_dict(jb):
+    """加载基金名 + 指数名到 jieba 自定义词典（高频，避免被切碎）。"""
+    loaded = 0
+    # 基金名
+    try:
+        conn = _get_conn()
+        rows = conn.execute(
+            "SELECT fund_name FROM fund_metadata WHERE fund_name IS NOT NULL AND fund_name != ''"
+        ).fetchall()
+        conn.close()
+        for r in rows:
+            name = r["fund_name"]
+            if name and len(name) >= 4:
+                jb.add_word(name, freq=1000)
+                loaded += 1
+    except Exception:
+        pass
+    # 指数名
+    try:
+        for name in _get_known_index_names():
+            if name and len(name) >= 2:
+                jb.add_word(name, freq=1000)
+                loaded += 1
+    except Exception:
+        pass
+    if loaded:
+        logger.info(f"jieba 自定义词典加载 {loaded} 条（基金名+指数名）")
 
 
 def _reset_jieba_cache():
@@ -445,9 +493,11 @@ def _reset_jieba_cache():
 
     场景：jieba 安装前 _get_jieba 已将 _jieba 置为 False（永久失败），
     安装后调用此函数复位，让下次 _get_jieba 重新尝试 import。
+    R-4-3：同时复位自定义词典标记，让重试后重新加载基金名+指数名。
     """
-    global _jieba
+    global _jieba, _jieba_dict_loaded
     _jieba = None
+    _jieba_dict_loaded = False
 
 
 _JIEBA_WARNED = False  # 全局标记，避免重复告警
@@ -940,6 +990,25 @@ _FRESHNESS_POLICY = {
     "book": 60,  # 书籍知识，5年内有效（避免过时书籍主导）
 }
 
+# R-6（2026-07-23）：历史/规律类查询意图关键词
+# 命中这些关键词时，放宽 author_article/article/analysis 的 3 个月时效过滤
+# （历史规律类查询需要引用较早的文章/分析，不应被时效清空）
+_HISTORY_INTENT_KEYWORDS = {
+    "历年", "历史", "规律", "前奏", "原理", "本质",
+    "复盘", "回顾", "周期", "金融危机", "经验", "教训",
+    "案例", "启示", "演变", "沿革", "变迁", "史",
+}
+
+# R-6：历史规律类查询放宽时效的内容类型（仅这 3 类有 3 个月限制）
+_HISTORY_RELAXED_TYPES = {"author_article", "article", "analysis"}
+
+
+def _is_history_intent_query(query: str) -> bool:
+    """判断是否为历史/规律类查询（应放宽时效过滤）。"""
+    if not query:
+        return False
+    return any(kw in query for kw in _HISTORY_INTENT_KEYWORDS)
+
 # 内容类型优先级：时效性强的内容优先于理论知识
 # 数值越小优先级越高，用于结果排序时的加权
 _CONTENT_TYPE_PRIORITY = {
@@ -1047,7 +1116,7 @@ def search_knowledge(query: str, content_type: str = None, limit: int = 5) -> tu
                 return [], 0
 
     results = [dict(r) for r in rows]
-    results, dropped = _filter_old_results(results, conn=conn)
+    results, dropped = _filter_old_results(results, conn=conn, query=query)
     conn.close()
     return results[:limit], dropped
 
@@ -1578,12 +1647,27 @@ def search_chroma(query: str, content_type: str = None, content_types: list[str]
     return output, 0
 
 
-def _filter_old_results(results: list[dict], conn=None) -> tuple[list[dict], int]:
-    """按 _FRESHNESS_POLICY 策略过滤过时数据。返回 (过滤后结果, 被过滤条数)。"""
+def _filter_old_results(results: list[dict], conn=None, query: str = None) -> tuple[list[dict], int]:
+    """按 _FRESHNESS_POLICY 策略过滤过时数据。返回 (过滤后结果, 被过滤条数)。
+
+    R-6（2026-07-23）：query 为历史/规律类查询时，放宽 author_article/article/analysis
+    的 3 个月时效过滤（受 rag.history_intent_freshness_relax 开关控制，默认开）。
+    """
     if not results:
         return results, 0
 
     from datetime import datetime, timedelta
+
+    # R-6：历史规律类查询放宽时效检测
+    _history_relax = False
+    if query:
+        try:
+            _relax_enabled = get_rag_config("rag.history_intent_freshness_relax", "true") == "true"
+        except Exception:
+            _relax_enabled = True
+        if _relax_enabled and _is_history_intent_query(query):
+            _history_relax = True
+            logger.info(f"R-6 历史规律类查询，放宽时效过滤: '{query[:40]}'")
 
     # 按类型分组需要查日期的 reference_id
     ids_by_type = {}
@@ -1689,6 +1773,10 @@ def _filter_old_results(results: list[dict], conn=None) -> tuple[list[dict], int
         ct = r.get("content_type", "")
         max_months = _FRESHNESS_POLICY.get(ct, 0)
         if max_months > 0:
+            # R-6：历史规律类查询放宽 author_article/article/analysis 时效
+            if _history_relax and ct in _HISTORY_RELAXED_TYPES:
+                filtered.append(r)
+                continue
             date_str = date_map.get(f"{ct}:{r['reference_id']}", "")
             if date_str:
                 cutoff = (now - timedelta(days=max_months * 30)).strftime("%Y-%m")
@@ -1875,6 +1963,52 @@ def _detect_index_names(query: str) -> list[str]:
     return matched
 
 
+# R-4-2（2026-07-23）：基金名识别 + 跟踪指数映射
+# 解决"华泰保兴安悦债券C"被 jieba 切碎、无法关联跟踪指数估值的问题
+_known_fund_names_cache: list[dict] = []
+_known_fund_names_ts: float = 0.0
+
+
+def _get_known_fund_names() -> list[dict]:
+    """从 fund_metadata 表获取所有基金名+代码+跟踪指数（带 300s 缓存）。"""
+    global _known_fund_names_cache, _known_fund_names_ts
+    import time
+    now = time.time()
+    if now - _known_fund_names_ts < 300 and _known_fund_names_cache:
+        return _known_fund_names_cache
+    try:
+        conn = _get_conn()
+        rows = conn.execute(
+            "SELECT fund_name, fund_code, tracking_index FROM fund_metadata "
+            "WHERE fund_name IS NOT NULL AND fund_name != ''"
+        ).fetchall()
+        conn.close()
+        _known_fund_names_cache = [
+            {"fund_name": r["fund_name"], "fund_code": r["fund_code"],
+             "tracking_index": r["tracking_index"] or ""}
+            for r in rows
+        ]
+        _known_fund_names_ts = now
+    except Exception:
+        pass
+    return _known_fund_names_cache
+
+
+def _detect_fund_names(query: str) -> list[dict]:
+    """从查询中检测基金名，返回 [{fund_name, fund_code, tracking_index}]。
+
+    命中后调用方可将 tracking_index 加入 detected_indexes，复用 _inject_valuation_data。
+    """
+    funds = _get_known_fund_names()
+    matched = []
+    # 按名称长度降序匹配，优先匹配长名称（避免"安信"误匹配"安信稳健增值"）
+    for f in sorted(funds, key=lambda x: len(x["fund_name"]), reverse=True):
+        name = f["fund_name"]
+        if name in query and name not in [m["fund_name"] for m in matched]:
+            matched.append(f)
+    return matched
+
+
 def _inject_valuation_data(query: str, detected_indexes: list[str]) -> tuple[str, list[dict]]:
     """当检测到指数名称时，直接从 index_valuations 表注入最新估值数据。
 
@@ -2040,11 +2174,38 @@ def build_rag_context_with_details(query: str, content_types: list[str] = None, 
             "freshness_filtered": int,   # 被时效性策略过滤的条数
         }
     """
+    # R-4-1（2026-07-23）：URL 剥离 — mp.weixin.qq.com 类查询的 URL token 会进入 FTS5
+    # 被 AND 连接后破坏匹配。剥离 URL 后用纯文本检索。
+    _preprocess_enabled = get_rag_config("rag.query_preprocess_enabled", "true") == "true"
+    _original_query = query
+    if _preprocess_enabled:
+        _url_match = _URL_PATTERN.search(query)
+        if _url_match:
+            query = _URL_PATTERN.sub('', query).strip()
+            if query != _original_query:
+                logger.info(f"R-4-1 URL 剥离: '{_original_query[:60]}' -> '{query[:60]}'")
+
     # 检测查询中的指数名称，直接注入估值数据
     detected_indexes = _detect_index_names(query)
+    # R-4-2：基金名识别 — 命中基金后，将其 tracking_index 合并到 detected_indexes
+    # 复用 _inject_valuation_data 注入跟踪指数估值（解决持仓基金无估值关联的问题）
+    if _preprocess_enabled:
+        detected_funds = _detect_fund_names(query)
+        if detected_funds:
+            for f in detected_funds:
+                ti = f.get("tracking_index", "")
+                if ti and ti not in detected_indexes:
+                    detected_indexes.append(ti)
+            logger.info(f"R-4-2 检测到基金: {[f['fund_name'] for f in detected_funds]}，"
+                        f"合并跟踪指数: {detected_indexes}")
     direct_valuation_text, direct_valuation_results = _inject_valuation_data(query, detected_indexes)
     if detected_indexes:
         logger.info(f"检测到指数名称: {detected_indexes}，注入估值数据 {len(direct_valuation_results)} 条")
+
+    # R-5（2026-07-23）：note 索引治理 — AI/LLM 技术笔记不参与投资检索
+    # 仅当调用方未显式指定 content_types 时生效（保留前端笔记 Tab搜索的入口）
+    _exclude_note = (get_rag_config("rag.exclude_note_from_investment_search", "true") == "true"
+                     and not content_types)
 
     # 选择性 LLM Query Rewrite：长查询（>15 字）且非纯指数名时启用
     # 受 `rag.long_query_rewrite_enabled` 开关控制（默认关闭）
@@ -2083,6 +2244,15 @@ def build_rag_context_with_details(query: str, content_types: list[str] = None, 
         fts_results, dropped = search_knowledge(query, limit=limit)
         total_freshness_filtered += dropped
 
+    # R-5：note 索引治理 — 从投资检索结果中排除 note 类型
+    if _exclude_note and fts_results:
+        _before = len(fts_results)
+        fts_results = [r for r in fts_results if r.get("content_type") != "note"]
+        _note_dropped = _before - len(fts_results)
+        if _note_dropped:
+            total_freshness_filtered += _note_dropped
+            logger.info(f"R-5 FTS 排除 note: {_note_dropped} 条")
+
     fts_count = len(fts_results)
 
     # 补充搜索：当查询较长且 FTS 结果中没有新入库的知识条目时，用核心词再搜一次
@@ -2106,7 +2276,7 @@ def build_rag_context_with_details(query: str, content_types: list[str] = None, 
                 """, (core_supplement_q, limit * 2)).fetchall()
                 conn2.close()
                 supplement_results = [dict(r) for r in supplement_rows]
-                supplement_results, supp_dropped = _filter_old_results(supplement_results)
+                supplement_results, supp_dropped = _filter_old_results(supplement_results, query=query)
                 total_freshness_filtered += supp_dropped
                 existing_keys = {f"{r['content_type']}:{r['reference_id']}" for r in fts_results}
                 added = 0
@@ -2132,8 +2302,17 @@ def build_rag_context_with_details(query: str, content_types: list[str] = None, 
     chroma_count = len(chroma_results)
 
     # 过滤 ChromaDB 中的旧数据（FTS 已在 search_knowledge 中过滤）
-    chroma_results, chroma_dropped = _filter_old_results(chroma_results)
+    chroma_results, chroma_dropped = _filter_old_results(chroma_results, query=query)
     total_freshness_filtered += chroma_dropped
+
+    # R-5：note 索引治理 — 从向量检索结果中排除 note 类型
+    if _exclude_note and chroma_results:
+        _before = len(chroma_results)
+        chroma_results = [r for r in chroma_results if r.get("content_type") != "note"]
+        _note_dropped = _before - len(chroma_results)
+        if _note_dropped:
+            total_freshness_filtered += _note_dropped
+            logger.info(f"R-5 Chroma 排除 note: {_note_dropped} 条")
 
     logger.info(f"RAG 搜索: query='{query}', FTS5={fts_count}条, 向量={chroma_count}条, 过滤={total_freshness_filtered}条")
 
