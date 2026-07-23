@@ -588,17 +588,25 @@ async def startup():
         pass
 
     # R-9（2026-07-23）：启动时自动运行 RAG 评估（开关控制，默认关）
+    # 修复：reranker 推理是同步阻塞操作，asyncio.create_task 会阻塞事件循环导致端口无法绑定
+    # 改用 threading.Thread 在独立线程中运行，不阻塞 uvicorn startup
     try:
         from db.config import get_config_bool
         if get_config_bool("rag.auto_run_eval_on_startup", False):
-            from scripts.rag_eval_suite import run_eval_suite_by_category, save_results, EVAL_SUITE_CASES
-            async def _run_startup_eval():
-                # 只跑盲区类别，避免启动过慢
-                blind_spot_cases = {"blind_spot_coverage": EVAL_SUITE_CASES.get("blind_spot_coverage", [])}
-                result = await run_eval_suite_by_category(cases=blind_spot_cases, verbose=False)
-                save_results(result)
-                logger.info(f"[R-9] 启动评估完成，结果已写入 data/rag_eval_results.json")
-            asyncio.create_task(_run_startup_eval())
+            def _run_startup_eval_in_thread():
+                import asyncio as _asyncio
+                from scripts.rag_eval_suite import run_eval_suite_by_category, save_results, EVAL_SUITE_CASES
+                async def _eval():
+                    blind_spot_cases = {"blind_spot_coverage": EVAL_SUITE_CASES.get("blind_spot_coverage", [])}
+                    result = await run_eval_suite_by_category(cases=blind_spot_cases, verbose=False)
+                    save_results(result)
+                    logger.info(f"[R-9] 启动评估完成，结果已写入 data/rag_eval_results.json")
+                try:
+                    _asyncio.run(_eval())
+                except Exception as e:
+                    logger.warning(f"[R-9] 评估执行失败（不阻塞）: {e}")
+            import threading
+            threading.Thread(target=_run_startup_eval_in_thread, daemon=True).start()
     except Exception as e:
         logger.warning(f"[R-9] 启动评估失败（不阻塞）: {e}")
 
