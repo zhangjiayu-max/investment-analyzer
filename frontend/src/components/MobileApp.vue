@@ -39,6 +39,7 @@ import StrategySandboxPage from './decision/StrategySandboxPage.vue'
 import DataHealthDashboard from './quality/DataHealthDashboard.vue'
 import StrategyBacktest from './decision/StrategyBacktest.vue'
 import AnalysisLogPage from './analysis/AnalysisLogPage.vue'
+import HealthDashboardV2 from './health/HealthDashboardV2.vue'
 import { isDark, toggleDark } from '../composables/useTheme'
 import AlertBell from './task/AlertBell.vue'
 import MobileNotificationCenter from './mobile/MobileNotificationCenter.vue'
@@ -118,6 +119,7 @@ const moreGroups = [
       { key: 'bad-cases', label: 'Bad Case', icon: 'bug' },
       { key: 'eval-suite', label: '评测集', icon: 'check' },
       { key: 'health', label: '健康分', icon: 'health', hot: true },
+      { key: 'health-v2', label: '全账户诊断', icon: 'heart-pulse', hot: true },
       { key: 'shadow', label: 'Shadow Mode', icon: 'shadow' },
       { key: 'strategy-backtest', label: '策略回测', icon: 'line-chart' },
       { key: 'capability-center', label: '能力中心', icon: 'wrench' },
@@ -175,6 +177,7 @@ const pageComponents = {
   'strategy-sandbox': StrategySandboxPage,
   'data-health': DataHealthDashboard,
   'strategy-backtest': StrategyBacktest,
+  'health-v2': HealthDashboardV2,
 }
 
 const pageComponent = computed(() => pageComponents[activePage.value] || null)
