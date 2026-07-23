@@ -332,6 +332,18 @@ async def startup():
         from db.portfolio import list_holdings
         holdings = list_holdings()
         index_codes = set(h.get("index_code") for h in holdings if h.get("index_code"))
+        # F-1（2026-07-23）：始终回填沪深300（000300），L3 回测基准化依赖本地 index_price_history
+        index_codes.add("000300")
+        # F-5+（2026-07-23）：回填 theme_rules 中所有主题指数（含新能源 399808 等），
+        # 确保 _get_theme_index_price_at 本地命中，entry_price 不再缺失
+        try:
+            from db.theme_rules import list_theme_rules
+            for tr in list_theme_rules(active_only=True):
+                ic = tr.get("index_code")
+                if ic:
+                    index_codes.add(ic)
+        except Exception:
+            pass
         if index_codes:
             logging.info(f"开始异步回填 {len(index_codes)} 个指数历史数据...")
             # 后台执行，不阻塞启动
@@ -451,12 +463,31 @@ async def startup():
     # P0-C 修复（2026-07-20）：机会雷达回测机制修复
     # 1. 启动时补建历史机会卡的 backtest 记录（alerts.opportunity_backfill_enabled 默认 true）
     # 2. 每日 09:30 自动回测已到期记录（alerts.opportunity_backtest_enabled 默认 true）
+    # F-1/F-4 补充（2026-07-23）：启动时重算历史基准 + 回填 miss_reason，形成"信号→回测→降权→再生成"闭环
     try:
         if get_config("alerts.opportunity_backfill_enabled", "true") == "true":
             from services.advisor.opportunity_engine import backfill_opportunity_backtests
             backfill_stats = backfill_opportunity_backtests()
             if backfill_stats.get("created", 0) > 0:
                 logging.info(f"机会雷达 backfill: {backfill_stats}")
+
+        # F-1：重算历史已回测记录的 benchmark_pct + excess_return + 重新判定 hit
+        try:
+            from services.advisor.opportunity_engine import recompute_benchmark_for_reviewed
+            recompute_stats = recompute_benchmark_for_reviewed()
+            if recompute_stats.get("updated", 0) > 0:
+                logging.info(f"[opportunity] F-1 重算基准: {recompute_stats}")
+        except Exception as e:
+            logging.warning(f"[opportunity] F-1 重算基准失败（不影响启动）: {e}")
+
+        # F-4：回填 miss_reason（基于重算后的 hit/benchmark）
+        try:
+            from services.advisor.opportunity_engine import backfill_miss_reason
+            miss_stats = backfill_miss_reason()
+            if miss_stats.get("filled", 0) > 0:
+                logging.info(f"[opportunity] F-4 miss_reason 回填: {miss_stats}")
+        except Exception as e:
+            logging.warning(f"[opportunity] F-4 miss_reason 回填失败（不影响启动）: {e}")
     except Exception as e:
         logging.warning(f"机会雷达 backfill 失败（不影响启动）: {e}")
 

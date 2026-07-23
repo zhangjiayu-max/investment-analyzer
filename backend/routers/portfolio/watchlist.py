@@ -290,6 +290,18 @@ async def watchlist_patrol_api():
             nav_percentile=nav_percentile,
         )
 
+        # F-3（2026-07-23）：估值高位否决 — 与机会雷达 P0-A「估值>80% 强制 avoid」对齐
+        # 防止 adaptive_target 被调高后，current_pct 95% 仍判 green 的误触发
+        try:
+            veto_enabled = get_config_bool("watchlist.high_valuation_veto_enabled", True)
+        except Exception:
+            veto_enabled = True
+        if veto_enabled:
+            _veto_pct = current_pct if current_pct is not None else nav_percentile
+            if _veto_pct is not None and _veto_pct > 80:
+                signal_status = "red"
+                signal_reason = f"估值高位否决（当前{_veto_pct:.0f}% > 80%阈值，禁止 green 信号）"
+
         # ── P0-1（2026-07-21）多维信号接入 + 信号置信度 ──
         tech_signal = "neutral"
         capital_signal = "neutral"

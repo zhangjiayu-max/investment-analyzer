@@ -98,6 +98,9 @@ def init_opportunity_tables(conn):
     _ensure_column(conn, "theme_opportunity_backtests", "signal_source", "TEXT DEFAULT 'news'")
     _ensure_column(conn, "theme_opportunity_backtests", "miss_reason", "TEXT")
 
+    # F-4（2026-07-23）：入场估值分位（用于 miss_reason 拼接和反哺分析）
+    _ensure_column(conn, "theme_opportunity_backtests", "entry_percentile", "REAL")
+
 
 def _ensure_column(conn, table: str, column: str, col_type: str):
     """安全添加列（如果不存在）。"""
@@ -597,7 +600,7 @@ def update_opportunity_backtest(backtest_id: int, fields: dict) -> bool:
         return False
     conn = _get_conn()
     try:
-        allowed = {"review_price", "hit", "change_pct", "reviewed_at", "benchmark_pct", "excess_return"}
+        allowed = {"review_price", "hit", "change_pct", "reviewed_at", "benchmark_pct", "excess_return", "miss_reason", "entry_percentile"}
         sets = []
         values = []
         for k, v in fields.items():
@@ -745,6 +748,45 @@ def get_consecutive_misses_by_source() -> dict:
         # 最后一个
         if current_source and miss_streak >= 3:
             result[current_source] = miss_streak
+        return result
+    finally:
+        conn.close()
+
+
+def get_consecutive_misses_by_theme() -> dict:
+    """F-4+（2026-07-23）：查询各主题的连续 miss 次数（用于 per-theme 降权反哺）。
+
+    解决 per-source 统计中不同主题 hit/miss 交错导致连续 miss 计数被打断的问题。
+    按 theme 分组独立统计，半导体 6 连 miss 即使与其他主题 hit 交错也能被检测到。
+
+    Returns:
+        {theme: consecutive_miss_count}
+    """
+    conn = _get_conn()
+    try:
+        rows = conn.execute("""
+            SELECT theme, hit
+            FROM theme_opportunity_backtests
+            WHERE hit IS NOT NULL
+            ORDER BY theme, reviewed_at DESC
+        """).fetchall()
+
+        result = {}
+        current_theme = None
+        miss_streak = 0
+        for r in rows:
+            theme = r["theme"] or ""
+            if theme != current_theme:
+                if current_theme and miss_streak >= 3:
+                    result[current_theme] = miss_streak
+                current_theme = theme
+                miss_streak = 0
+            if r["hit"] == 0:
+                miss_streak += 1
+            else:
+                miss_streak = 0
+        if current_theme and miss_streak >= 3:
+            result[current_theme] = miss_streak
         return result
     finally:
         conn.close()

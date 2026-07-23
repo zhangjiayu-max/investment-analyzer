@@ -538,12 +538,16 @@ def list_configs(category: str = None) -> list[dict]:
 
 
 def update_config(key: str, value: str) -> bool:
-    """更新配置值。返回是否成功。"""
+    """更新配置值。返回是否成功。
+
+    F-4+（2026-07-23）：改为 INSERT OR REPLACE，支持新增 key（如降权权重）。
+    """
     conn = _get_conn()
     try:
         cursor = conn.execute(
-            "UPDATE system_config SET value = ?, updated_at = datetime('now','localtime') WHERE key = ?",
-            (value, key)
+            "INSERT OR REPLACE INTO system_config (key, value, updated_at) "
+            "VALUES (?, ?, datetime('now','localtime'))",
+            (key, value)
         )
         conn.commit()
         return cursor.rowcount > 0

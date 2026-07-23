@@ -686,6 +686,17 @@ def _score_theme(theme_rule: dict, news_hits: list[dict], valuation: dict | None
     leading_score, _ = _get_leading_indicator_score(theme_rule, trade_date)
     score += leading_score
 
+    # ── F-4+（2026-07-23）：命中率反哺降权 — 闭环关键 ──
+    # 主题连续 miss ≥3 次后降权，使低命中率主题的评分自动降低
+    try:
+        from db.config import get_config
+        theme_name = theme_rule.get("theme", "")
+        theme_weight = float(get_config(f"opportunity.weight_adjust_theme_{theme_name}", "1.0"))
+        if theme_weight < 1.0:
+            score = int(score * theme_weight)
+    except Exception:
+        pass
+
     score = max(0, min(100, score))
     verdict = "can_buy" if score >= 75 else ("watch" if score >= 50 else "avoid")
 
@@ -1037,20 +1048,45 @@ def _get_theme_index_price_at(theme_rule: dict, target_date: str) -> float | Non
 
     用于回测：review_date 当日价格查询。
     P0-B 修复（2026-07-20）：原用 ak.stock_zh_index_daily(sina API) 全部 404
-    新策略：1. 优先查本地 index_valuations 表 snapshot_date <= target_date 的最近一条
-            2. 降级 akshare index_zh_a_hist
-            3. 返回 None
+    新策略：1. 优先查本地 index_price_history 表（F-5+ 回填的主题指数）
+            2. 查本地 index_valuations 表 snapshot_date <= target_date 的最近一条
+            3. 降级 akshare index_zh_a_hist（带超时保护）
+            4. 返回 None
     """
     index_code = _get_theme_index_code(theme_rule)
     if not index_code:
         return None
 
-    # 1. 优先查本地估值表 snapshot_date <= target_date 的最近一条
+    bare_code = index_code.split(".")[0].split(" ")[0]
+
+    # 1. F-5+（2026-07-23）：优先查本地 index_price_history（启动回填的主题指数）
     try:
         from db._conn import _get_conn
         conn = _get_conn()
         try:
-            # 尝试两种代码形式（H30590 和 H30590.CSI）
+            candidates = [bare_code, index_code]
+            if "." not in index_code:
+                candidates.append(f"{index_code}.CSI")
+            placeholders = ",".join("?" * len(candidates))
+            row = conn.execute(
+                f"""SELECT close FROM index_price_history
+                    WHERE index_code IN ({placeholders})
+                      AND trade_date <= ?
+                    ORDER BY trade_date DESC LIMIT 1""",
+                (*candidates, target_date),
+            ).fetchone()
+            if row and row["close"]:
+                return float(row["close"])
+        finally:
+            conn.close()
+    except Exception as e:
+        logger.debug(f"[opportunity] 本地 index_price_history 查询失败 {index_code} @ {target_date}: {e}")
+
+    # 2. 查本地估值表 snapshot_date <= target_date 的最近一条
+    try:
+        from db._conn import _get_conn
+        conn = _get_conn()
+        try:
             candidates = [index_code]
             if "." not in index_code:
                 candidates.append(f"{index_code}.CSI")
@@ -1069,18 +1105,18 @@ def _get_theme_index_price_at(theme_rule: dict, target_date: str) -> float | Non
     except Exception as e:
         logger.debug(f"[opportunity] 本地估值表历史价查询失败 {index_code} @ {target_date}: {e}")
 
-    # 2. 降级 akshare index_zh_a_hist
+    # 3. 降级 akshare index_zh_a_hist（带超时保护）
     try:
         import akshare as ak
-        bare_code = index_code.split(".")[0].split(" ")[0]
-        # 查询 target_date 前 7 天到 target_date 的数据
+        from services.market.leading_indicators.akshare_utils import call_akshare_with_timeout
         end = target_date.replace("-", "")
         start_d = (datetime.strptime(target_date, "%Y-%m-%d") - timedelta(days=7)).strftime("%Y%m%d")
-        df = ak.index_zh_a_hist(symbol=bare_code, period="daily",
-                               start_date=start_d, end_date=end)
+        df = call_akshare_with_timeout(
+            ak.index_zh_a_hist, symbol=bare_code, period="daily",
+            start_date=start_d, end_date=end, timeout=20,
+        )
         if df is None or len(df) == 0:
             return None
-        # 取最后一行（target_date 或之前最近交易日）
         if "收盘" in df.columns:
             return float(df["收盘"].values[-1])
     except Exception as e:
@@ -1089,27 +1125,133 @@ def _get_theme_index_price_at(theme_rule: dict, target_date: str) -> float | Non
     return None
 
 
+def _build_miss_reason(change_pct: float, benchmark_pct: float | None,
+                       excess_return: float | None, entry_percentile: float | None) -> str:
+    """F-4（2026-07-23）：拼接 miss 原因，用于反哺分析。
+
+    根据回测数据拼接人类可读的 miss 原因，帮助人工分析命中率低的根因。
+    """
+    reasons = []
+    if excess_return is not None:
+        reasons.append(f"超额收益{excess_return:+.1f}%（未达+2%阈值）")
+    else:
+        reasons.append(f"绝对涨幅{change_pct:+.1f}%（未达+3%阈值）")
+    if benchmark_pct is not None:
+        reasons.append(f"沪深300同期{benchmark_pct:+.1f}%")
+    if entry_percentile is not None:
+        if entry_percentile > 60:
+            reasons.append(f"入场估值偏高({entry_percentile:.0f}%)")
+        elif entry_percentile < 30:
+            reasons.append(f"入场估值偏低({entry_percentile:.0f}%)")
+    return "；".join(reasons) if reasons else ""
+
+
+def _build_hit_reason(change_pct: float, benchmark_pct: float | None,
+                      excess_return: float | None, entry_percentile: float | None) -> str:
+    """F-4：拼接命中原因（hit=1 时）。"""
+    reasons = []
+    if excess_return is not None:
+        reasons.append(f"超额收益{excess_return:+.1f}%（达+2%阈值）")
+    else:
+        reasons.append(f"绝对涨幅{change_pct:+.1f}%（达+3%阈值）")
+    if benchmark_pct is not None:
+        reasons.append(f"沪深300同期{benchmark_pct:+.1f}%")
+    if entry_percentile is not None:
+        if entry_percentile <= 30:
+            reasons.append(f"入场估值偏低({entry_percentile:.0f}%)")
+        elif entry_percentile <= 60:
+            reasons.append(f"入场估值合理({entry_percentile:.0f}%)")
+    return "；".join(reasons) if reasons else ""
+
+
+def backfill_miss_reason() -> dict:
+    """F-4（2026-07-23）：批量回填已回测记录的 miss_reason。
+
+    扫描 hit IS NOT NULL AND miss_reason IS NULL 的记录，
+    根据 change_pct/benchmark_pct/excess_return/entry_percentile 拼接 miss 原因。
+
+    Returns:
+        {"scanned": int, "filled": int, "skipped": int}
+    """
+    try:
+        from db._conn import _get_conn
+        conn = _get_conn()
+        try:
+            rows = conn.execute("""
+                SELECT id, change_pct, benchmark_pct, excess_return, entry_percentile, hit
+                FROM theme_opportunity_backtests
+                WHERE hit IS NOT NULL AND (miss_reason IS NULL OR miss_reason = '')
+            """).fetchall()
+        finally:
+            conn.close()
+
+        if not rows:
+            return {"scanned": 0, "filled": 0, "skipped": 0}
+
+        scanned = len(rows)
+        filled = 0
+        conn = _get_conn()
+        try:
+            for r in rows:
+                d = dict(r)
+                hit = d.get("hit")
+                if hit == 1:
+                    # 命中记录也补充原因（标注命中原因）
+                    reason = _build_hit_reason(d.get("change_pct"), d.get("benchmark_pct"),
+                                               d.get("excess_return"), d.get("entry_percentile"))
+                else:
+                    reason = _build_miss_reason(d.get("change_pct"), d.get("benchmark_pct"),
+                                                d.get("excess_return"), d.get("entry_percentile"))
+                if reason:
+                    conn.execute(
+                        "UPDATE theme_opportunity_backtests SET miss_reason = ? WHERE id = ?",
+                        (reason, d["id"])
+                    )
+                    filled += 1
+            conn.commit()
+        finally:
+            conn.close()
+
+        logger.info(f"[opportunity] miss_reason 回填: 扫描{scanned}, 填充{filled}")
+        return {"scanned": scanned, "filled": filled, "skipped": scanned - filled}
+    except Exception as e:
+        logger.warning(f"[opportunity] miss_reason 回填失败: {e}")
+        return {"scanned": 0, "filled": 0, "skipped": 0, "error": str(e)}
+
+
 def _apply_hit_rate_feedback():
-    """LI-6（2026-07-22）：命中率反哺评分权重。
+    """LI-6（2026-07-22）+ F-4+（2026-07-23）：命中率反哺评分权重。
 
     规则：
     - 某信号来源连续 3 次 miss → 降权 20%（写入 system_config）
+    - F-4+：某主题连续 3 次 miss → 该主题降权 20%（opportunity.weight_adjust_theme_{theme}）
     - 连续 2 次 hit → 恢复原权重
     """
     try:
-        from db.opportunities import get_consecutive_misses_by_source
+        from db.opportunities import get_consecutive_misses_by_source, get_consecutive_misses_by_theme
         from db.config import update_config, get_config
 
+        # 1. per-source 降权
         consecutive_misses = get_consecutive_misses_by_source()
         for source, miss_count in consecutive_misses.items():
             config_key = f"opportunity.weight_adjust_{source}"
             if miss_count >= 3:
-                # 降权 20%
                 current = float(get_config(config_key, "1.0"))
                 new_weight = max(0.5, current * 0.8)  # 最低 50%
                 if new_weight != current:
                     update_config(config_key, str(round(new_weight, 2)))
-                    logger.info(f"[opportunity] 命中率反哺: {source} 连续{miss_count}次miss，权重 {current}→{new_weight}")
+                    logger.info(f"[opportunity] 命中率反哺(source): {source} 连续{miss_count}次miss，权重 {current}→{new_weight}")
+
+        # 2. F-4+：per-theme 降权（解决不同主题 hit/miss 交错导致 per-source 统计失效）
+        consecutive_misses_theme = get_consecutive_misses_by_theme()
+        for theme, miss_count in consecutive_misses_theme.items():
+            config_key = f"opportunity.weight_adjust_theme_{theme}"
+            if miss_count >= 3:
+                current = float(get_config(config_key, "1.0"))
+                new_weight = max(0.5, current * 0.8)  # 最低 50%
+                if new_weight != current:
+                    update_config(config_key, str(round(new_weight, 2)))
+                    logger.info(f"[opportunity] 命中率反哺(theme): {theme} 连续{miss_count}次miss，权重 {current}→{new_weight}")
     except Exception as e:
         logger.debug(f"[opportunity] _apply_hit_rate_feedback 失败: {e}")
 
@@ -1180,6 +1322,15 @@ def review_opportunity_backtests() -> dict:
                 if excess_return is not None:
                     update_fields["excess_return"] = round(excess_return, 2)
 
+                # F-4（2026-07-23）：拼接 miss_reason 用于反哺分析
+                entry_pct = track.get("entry_percentile")
+                if hit == 1:
+                    miss_reason_text = _build_hit_reason(change_pct, benchmark_pct, excess_return, entry_pct)
+                else:
+                    miss_reason_text = _build_miss_reason(change_pct, benchmark_pct, excess_return, entry_pct)
+                if miss_reason_text:
+                    update_fields["miss_reason"] = miss_reason_text
+
                 update_opportunity_backtest(track["id"], update_fields)
 
                 # LI-6（2026-07-22）：miss 时记录原因
@@ -1231,32 +1382,157 @@ def review_opportunity_backtests() -> dict:
         return {"reviewed": 0, "hit": 0, "miss": 0, "error": str(e)}
 
 
+def recompute_benchmark_for_reviewed() -> dict:
+    """F-1 补充（2026-07-23）：重算已回测记录的 benchmark_pct + excess_return + 重新判定 hit。
+
+    修复历史 24 条已回测记录中仅 1 条有 benchmark_pct 的问题。
+    基于新的本地优先 _get_benchmark_return 重新计算沪深300基准，
+    并根据基准化逻辑重新判定 hit（超额 ≥ 2% 命中）。
+
+    Returns:
+        {"scanned": int, "updated": int, "benchmark_filled": int, "hit_changed": int}
+    """
+    try:
+        from db.config import get_config_bool
+        from db.opportunities import update_opportunity_backtest
+        benchmark_enabled = get_config_bool("opportunity.benchmark_backtest_enabled", True)
+        if not benchmark_enabled:
+            return {"scanned": 0, "updated": 0, "benchmark_filled": 0, "hit_changed": 0,
+                    "message": "基准化回测开关关闭"}
+
+        from db._conn import _get_conn
+        conn = _get_conn()
+        try:
+            rows = conn.execute("""
+                SELECT b.id, b.theme, b.entry_date, b.review_date, b.entry_price, b.review_price,
+                       b.change_pct, b.hit, b.benchmark_pct, b.entry_percentile,
+                       b.opportunity_id, t.valuation_percentile as opp_valuation_pct
+                FROM theme_opportunity_backtests b
+                LEFT JOIN theme_opportunities t ON b.opportunity_id = t.id
+                WHERE b.hit IS NOT NULL AND b.entry_price IS NOT NULL AND b.entry_price > 0
+                  AND b.review_price IS NOT NULL AND b.review_price > 0
+            """).fetchall()
+        finally:
+            conn.close()
+
+        scanned = len(rows)
+        if not rows:
+            return {"scanned": 0, "updated": 0, "benchmark_filled": 0, "hit_changed": 0}
+
+        updated = 0
+        benchmark_filled = 0
+        hit_changed = 0
+
+        for r in rows:
+            d = dict(r)
+            entry_date = d.get("entry_date", "")
+            review_date = d.get("review_date", "")
+            change_pct = d.get("change_pct")
+            old_hit = d.get("hit")
+
+            # 重新计算基准
+            benchmark_pct = _get_benchmark_return(entry_date, review_date)
+            if benchmark_pct is None:
+                continue  # 基准仍获取失败，跳过
+
+            excess_return = round(change_pct - benchmark_pct, 2) if change_pct is not None else None
+            # 重新判定 hit（超额 ≥ 2% 命中）
+            new_hit = 1 if (excess_return is not None and excess_return >= 2.0) else 0
+
+            # F-4+：回填 entry_percentile（从 theme_opportunities.valuation_percentile）
+            entry_pct = d.get("entry_percentile")
+            if entry_pct is None:
+                entry_pct = d.get("opp_valuation_pct")
+
+            update_fields = {
+                "benchmark_pct": round(benchmark_pct, 2),
+                "excess_return": excess_return,
+                "hit": new_hit,
+            }
+            # F-4+：回填 entry_percentile
+            if entry_pct is not None:
+                update_fields["entry_percentile"] = round(float(entry_pct), 2)
+            # 拼接 miss_reason / hit_reason（用回填后的 entry_pct）
+            if new_hit == 1:
+                update_fields["miss_reason"] = _build_hit_reason(
+                    change_pct, benchmark_pct, excess_return, entry_pct)
+            else:
+                update_fields["miss_reason"] = _build_miss_reason(
+                    change_pct, benchmark_pct, excess_return, entry_pct)
+
+            update_opportunity_backtest(d["id"], update_fields)
+            updated += 1
+            benchmark_filled += 1
+            if new_hit != old_hit:
+                hit_changed += 1
+
+        # 重算后触发命中率反哺
+        try:
+            _apply_hit_rate_feedback()
+        except Exception:
+            pass
+
+        logger.info(f"[opportunity] F-1 重算基准: 扫描{scanned}, 更新{updated}, "
+                    f"基准填充{benchmark_filled}, hit变化{hit_changed}")
+        return {"scanned": scanned, "updated": updated,
+                "benchmark_filled": benchmark_filled, "hit_changed": hit_changed}
+    except Exception as e:
+        logger.warning(f"[opportunity] F-1 重算基准失败: {e}")
+        return {"scanned": 0, "updated": 0, "benchmark_filled": 0, "hit_changed": 0,
+                "error": str(e)}
+
+
 def _get_benchmark_return(entry_date: str, review_date: str) -> float | None:
-    """L3 回测基准化：获取沪深300在 entry_date 到 review_date 的涨幅。
+    """L3 回测基准化：获取沪深300涨幅（本地优先 + akshare 兜底）。
 
     用于计算超额收益，避免牛市普涨导致的假命中。
+    F-1（2026-07-23）修复：本地 index_price_history 优先，akshare 带超时兜底。
 
     Returns:
         涨幅百分比（如 2.5 表示涨 2.5%），或 None（获取失败）
     """
     if not entry_date or not review_date:
         return None
+    # 1. 本地 index_price_history 优先
+    try:
+        from db._conn import _get_conn
+        conn = _get_conn()
+        try:
+            entry_row = conn.execute(
+                "SELECT close FROM index_price_history WHERE index_code='000300' "
+                "AND trade_date <= ? ORDER BY trade_date DESC LIMIT 1",
+                (entry_date,)
+            ).fetchone()
+            review_row = conn.execute(
+                "SELECT close FROM index_price_history WHERE index_code='000300' "
+                "AND trade_date <= ? ORDER BY trade_date DESC LIMIT 1",
+                (review_date,)
+            ).fetchone()
+        finally:
+            conn.close()
+        if entry_row and review_row and entry_row[0] and review_row[0] and entry_row[0] > 0:
+            return (review_row[0] - entry_row[0]) / entry_row[0] * 100
+    except Exception as e:
+        logger.debug(f"[opportunity] 本地基准查询失败: {e}")
+    # 2. akshare 兜底（带超时保护，避免 zombie 线程）
     try:
         import akshare as ak
-        # 沪深300指数代码 000300
-        df = ak.index_zh_a_hist(symbol="000300", period="daily",
-                                start_date=entry_date.replace("-", ""),
-                                end_date=review_date.replace("-", ""))
+        from services.market.leading_indicators.akshare_utils import call_akshare_with_timeout
+        df = call_akshare_with_timeout(
+            ak.index_zh_a_hist, symbol="000300", period="daily",
+            start_date=entry_date.replace("-", ""),
+            end_date=review_date.replace("-", ""),
+            timeout=20,
+        )
         if df is None or df.empty or len(df) < 2:
             return None
-        # 取首尾收盘价
         first_close = float(df.iloc[0]["收盘"])
         last_close = float(df.iloc[-1]["收盘"])
         if first_close <= 0:
             return None
         return (last_close - first_close) / first_close * 100
     except Exception as e:
-        logger.debug(f"[opportunity] 获取沪深300基准失败: {e}")
+        logger.debug(f"[opportunity] akshare 基准获取失败: {e}")
         return None
 
 
@@ -1316,6 +1592,46 @@ def backfill_opportunity_backtests() -> dict:
                 skipped += 1
 
         logger.info(f"[opportunity] backfill 完成：扫描 {scanned}，新建 {created}，跳过 {skipped}")
+
+        # F-5（2026-07-23）：修复 entry_price 缺失的记录
+        try:
+            from db._conn import _get_conn
+            conn = _get_conn()
+            try:
+                null_price_rows = conn.execute(
+                    "SELECT id, opportunity_id, theme, entry_date FROM theme_opportunity_backtests "
+                    "WHERE entry_price IS NULL OR entry_price <= 0"
+                ).fetchall()
+            finally:
+                conn.close()
+
+            if null_price_rows:
+                repaired = 0
+                for r in null_price_rows:
+                    d = dict(r)
+                    theme = d.get("theme", "")
+                    theme_rule = next((tr for tr in _get_active_theme_rules() if tr["theme"] == theme), None)
+                    if not theme_rule:
+                        continue
+                    entry_date = d.get("entry_date", "")
+                    if not entry_date:
+                        continue
+                    entry_price = _get_theme_index_price_at(theme_rule, entry_date)
+                    if entry_price and entry_price > 0:
+                        conn = _get_conn()
+                        try:
+                            conn.execute(
+                                "UPDATE theme_opportunity_backtests SET entry_price = ? WHERE id = ?",
+                                (entry_price, d["id"])
+                            )
+                            conn.commit()
+                        finally:
+                            conn.close()
+                        repaired += 1
+                logger.info(f"[opportunity] F-5 entry_price 修复: 扫描{len(null_price_rows)}, 修复{repaired}")
+        except Exception as e:
+            logger.warning(f"[opportunity] F-5 entry_price 修复失败: {e}")
+
         return {"scanned": scanned, "created": created, "skipped": skipped}
     except Exception as e:
         logger.warning(f"[opportunity] backfill 批量执行失败: {e}")
