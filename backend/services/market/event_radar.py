@@ -169,6 +169,11 @@ def _fetch_news_from_mcp(keyword: str = "", limit: int = 50) -> list[dict]:
 def _call_akshare_with_timeout(fn, timeout: int = 15, **kwargs):
     """带超时调用 akshare 函数（akshare 偶发卡死，需超时保护）。
 
+    F-akshare（2026-07-23）：修复 shutdown(wait=True) 无限等待 zombie 线程的致命 bug。
+    原实现 `with ThreadPoolExecutor` 退出时 shutdown(wait=True) 会等待 pending future，
+    但 akshare 内部 requests 无超时，网络异常时 future 永不完成 → 无限等待。
+    修复：手动管理 executor + shutdown(wait=False, cancel_futures=True)。
+
     Args:
         fn: akshare 函数（如 ak.stock_news_em）
         timeout: 超时秒数
@@ -178,16 +183,19 @@ def _call_akshare_with_timeout(fn, timeout: int = 15, **kwargs):
         函数返回值；超时或异常返回 None。
     """
     import concurrent.futures
-    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-        future = executor.submit(fn, **kwargs)
-        try:
-            return future.result(timeout=timeout)
-        except concurrent.futures.TimeoutError:
-            logger.warning(f"[event_radar] akshare {fn.__name__} 超时({timeout}s)")
-            return None
-        except Exception as e:
-            logger.warning(f"[event_radar] akshare {fn.__name__} 调用失败: {e}")
-            return None
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    future = executor.submit(fn, **kwargs)
+    try:
+        return future.result(timeout=timeout)
+    except concurrent.futures.TimeoutError:
+        logger.warning(f"[event_radar] akshare {fn.__name__} 超时({timeout}s)")
+        return None
+    except Exception as e:
+        logger.warning(f"[event_radar] akshare {fn.__name__} 调用失败: {e}")
+        return None
+    finally:
+        # 关键修复：wait=False 不等待 zombie 线程，cancel_futures=True 取消未开始的 future
+        executor.shutdown(wait=False, cancel_futures=True)
 
 
 def _fetch_news_from_akshare(limit: int = 30) -> list[dict]:

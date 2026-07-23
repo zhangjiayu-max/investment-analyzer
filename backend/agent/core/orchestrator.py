@@ -1025,9 +1025,14 @@ def fetch_article_content(url: str) -> dict | None:
         def _fetch_sync():
             return asyncio.run(fetch_article(url))
 
-        with ThreadPoolExecutor(max_workers=1) as pool:
-            future = pool.submit(_fetch_sync)
+        # F-akshare（2026-07-23）：手动管理 executor，避免 `with ThreadPoolExecutor`
+        # 退出时 shutdown(wait=True) 等待 zombie 线程导致服务卡死。
+        executor = ThreadPoolExecutor(max_workers=1)
+        future = executor.submit(_fetch_sync)
+        try:
             result = future.result(timeout=30)
+        finally:
+            executor.shutdown(wait=False, cancel_futures=True)
 
         # 缓存成功结果
         if result:

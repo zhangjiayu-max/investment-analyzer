@@ -8,6 +8,29 @@ from db._conn import _get_conn
 
 logger = logging.getLogger(__name__)
 
+
+def _run_with_safe_timeout(fn, *args, timeout_s: float, timeout_msg: str = ""):
+    """F-akshare（2026-07-23）：带超时执行函数，修复 shutdown(wait=True) zombie 线程 bug。
+
+    替代 `with ThreadPoolExecutor(max_workers=1) as ex:` 模式，
+    超时后用 shutdown(wait=False, cancel_futures=True) 立即释放，不等待 zombie 线程。
+
+    Returns: fn 的返回值，超时或异常返回 None。
+    """
+    executor = ThreadPoolExecutor(max_workers=1)
+    fut = executor.submit(fn, *args)
+    try:
+        return fut.result(timeout=timeout_s)
+    except FuturesTimeoutError:
+        if timeout_msg:
+            logger.warning(timeout_msg)
+        return None
+    except Exception as e:
+        logger.debug(f"[valuation] _run_with_safe_timeout 调用失败: {e}")
+        return None
+    finally:
+        executor.shutdown(wait=False, cancel_futures=True)
+
 # ── 在线兜底结果内存缓存 ────────────────────────────────────
 _online_cache: dict[str, dict] = {}  # key: f"{index_code}:{metric_type}"
 
@@ -743,13 +766,11 @@ def _online_fallback(index_code: str, metric_type: str, start_ts: datetime,
 
     # 渠道1：akshare 中证官方（带真正超时）
     try:
-        with ThreadPoolExecutor(max_workers=1) as ex:
-            fut = ex.submit(_query_akshare_valuation, index_code, metric_type, timeout_ms)
-            try:
-                online_data = fut.result(timeout=timeout_s)
-            except FuturesTimeoutError:
-                logger.warning(f"[valuation] akshare 查询超时 {index_code} ({timeout_s}s)")
-                online_data = None
+        online_data = _run_with_safe_timeout(
+            _query_akshare_valuation, index_code, metric_type, timeout_ms,
+            timeout_s=timeout_s,
+            timeout_msg=f"[valuation] akshare 查询超时 {index_code} ({timeout_s}s)",
+        )
         if online_data:
             online_data["data_source"] = "online"
             online_data["source"] = "akshare"
@@ -769,13 +790,11 @@ def _online_fallback(index_code: str, metric_type: str, start_ts: datetime,
 
     # 渠道2：天天基金 MCP（带真正超时）
     try:
-        with ThreadPoolExecutor(max_workers=1) as ex:
-            fut = ex.submit(_query_ttfund_valuation, index_code, metric_type, timeout_ms)
-            try:
-                online_data = fut.result(timeout=timeout_s)
-            except FuturesTimeoutError:
-                logger.warning(f"[valuation] ttfund 查询超时 {index_code} ({timeout_s}s)")
-                online_data = None
+        online_data = _run_with_safe_timeout(
+            _query_ttfund_valuation, index_code, metric_type, timeout_ms,
+            timeout_s=timeout_s,
+            timeout_msg=f"[valuation] ttfund 查询超时 {index_code} ({timeout_s}s)",
+        )
         if online_data:
             online_data["data_source"] = "online"
             online_data["source"] = "ttfund"
@@ -1002,13 +1021,11 @@ def fetch_online_valuation(index_code: str, metric_type: str = "市盈率",
 
     # 渠道1：akshare 中证官方
     try:
-        with ThreadPoolExecutor(max_workers=1) as ex:
-            fut = ex.submit(_query_akshare_valuation, index_code, metric_type, timeout_ms)
-            try:
-                online_data = fut.result(timeout=timeout_s)
-            except FuturesTimeoutError:
-                logger.warning(f"[valuation] 主动在线查询 akshare 超时 {index_code} ({timeout_s}s)")
-                online_data = None
+        online_data = _run_with_safe_timeout(
+            _query_akshare_valuation, index_code, metric_type, timeout_ms,
+            timeout_s=timeout_s,
+            timeout_msg=f"[valuation] 主动在线查询 akshare 超时 {index_code} ({timeout_s}s)",
+        )
         if online_data:
             online_data["data_source"] = "online"
             online_data["source"] = "akshare_online"
@@ -1028,13 +1045,13 @@ def fetch_online_valuation(index_code: str, metric_type: str = "市盈率",
 
     # 渠道2：天天基金 MCP（akshare 查不到或超时时兜底）
     try:
-        with ThreadPoolExecutor(max_workers=1) as ex:
-            fut = ex.submit(_query_ttfund_valuation, index_code, metric_type, timeout_ms)
-            try:
-                online_data = fut.result(timeout=timeout_s)
-            except FuturesTimeoutError:
-                logger.warning(f"[valuation] 主动在线查询 ttfund 超时 {index_code} ({timeout_s}s)")
-                online_data = None
+        # F-akshare（2026-07-23）：用 _run_with_safe_timeout 替代 `with ThreadPoolExecutor`，
+        # 避免 shutdown(wait=True) 无限等待 zombie 线程导致服务卡死。
+        online_data = _run_with_safe_timeout(
+            _query_ttfund_valuation, index_code, metric_type, timeout_ms,
+            timeout_s=timeout_s,
+            timeout_msg=f"[valuation] 主动在线查询 ttfund 超时 {index_code} ({timeout_s}s)",
+        )
         if online_data:
             online_data["data_source"] = "online"
             online_data["source"] = "ttfund_online"

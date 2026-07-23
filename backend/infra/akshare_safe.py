@@ -30,19 +30,25 @@ def safe_call(fn, *args, default=None, timeout=30, **kwargs):
                 raise CircuitOpenError(f"熔断器开启: {getattr(fn, '__name__', 'call')}")
 
         # 用线程池 + 超时保护调用（akshare 同步阻塞，可能无限挂起）
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-            future = executor.submit(fn, *args, **kwargs)
-            try:
-                result = future.result(timeout=timeout)
-            except concurrent.futures.TimeoutError:
-                logger.warning(f"akshare 超时({timeout}s): {getattr(fn, '__name__', 'call')}")
-                # 超时也计入失败，可能触发熔断
-                _ak_breaker.failures += 1
-                _ak_breaker.last_failure_time = __import__('time').time()
-                if _ak_breaker.failures >= _ak_breaker.failure_threshold:
-                    _ak_breaker.state = "open"
-                    logger.warning(f"熔断器开启: {getattr(fn, '__name__', 'call')} 连续失败 {_ak_breaker.failures} 次")
-                return default
+        # F-akshare（2026-07-23）：修复 shutdown(wait=True) 无限等待 zombie 线程 bug。
+        # 原实现 `with ThreadPoolExecutor` 退出时 shutdown(wait=True) 会等待 pending future，
+        # 但 akshare 内部 requests 无超时，网络异常时 future 永不完成 → 无限等待。
+        executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        future = executor.submit(fn, *args, **kwargs)
+        try:
+            result = future.result(timeout=timeout)
+        except concurrent.futures.TimeoutError:
+            logger.warning(f"akshare 超时({timeout}s): {getattr(fn, '__name__', 'call')}")
+            # 超时也计入失败，可能触发熔断
+            _ak_breaker.failures += 1
+            _ak_breaker.last_failure_time = __import__('time').time()
+            if _ak_breaker.failures >= _ak_breaker.failure_threshold:
+                _ak_breaker.state = "open"
+                logger.warning(f"熔断器开启: {getattr(fn, '__name__', 'call')} 连续失败 {_ak_breaker.failures} 次")
+            return default
+        finally:
+            # 关键修复：wait=False 不等待 zombie 线程，cancel_futures=True 取消未开始的 future
+            executor.shutdown(wait=False, cancel_futures=True)
 
         # 成功：重置熔断器
         _ak_breaker.failures = 0
