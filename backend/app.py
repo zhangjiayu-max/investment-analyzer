@@ -560,7 +560,6 @@ async def startup():
     try:
         from db.config import get_config_bool
         if get_config_bool("rag.auto_run_eval_on_startup", False):
-            import asyncio
             from scripts.rag_eval_suite import run_eval_suite_by_category, save_results, EVAL_SUITE_CASES
             async def _run_startup_eval():
                 # 只跑盲区类别，避免启动过慢
