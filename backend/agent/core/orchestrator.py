@@ -654,7 +654,13 @@ def _build_final_synthesis_prompt(specialist_results: list, routed_specialists: 
             "### 第 4 段：操作建议（如适用）\n"
             "- 具体到金额/比例/触发条件\n"
             "- 操作表格：基金 | 操作 | 金额 | 理由 | 前提条件\n"
-            "- 如涉及减仓，必须遵守减仓约束（单基金≤持仓20%、总减仓≤总资产10%、最多2只基金、单次≤5万元）\n\n"
+            "- 如涉及减仓，必须遵守减仓约束（单基金≤持仓20%、总减仓≤总资产10%、最多2只基金、单次≤5万元）\n"
+            "- 【止盈不止损硬约束】涉及亏损标的（盈亏率<0）的减仓/清仓建议，必须同时满足以下条件之一：\n"
+            "  (1) 标的当前估值分位 > 60%（高估）—— 需引用 query_valuation 工具结果\n"
+            "  (2) 基本面恶化（业绩下滑/规模缩水/经理变更/费率上调/评级下调）—— 需明确恶化证据\n"
+            "  否则只能建议「持有观察」或「暂停加仓」，禁止建议减仓/清仓\n"
+            "- 涉及卖出操作时，必须引用 query_valuation 工具结果中的估值分位数据作为依据，标注「现在是否适合卖」\n"
+            "- 亏损标的若无估值高位/基本面恶化证据，应建议「坚持定投/持有观察」而非割肉\n\n"
             "### 第 5 段：风险提示与盲点\n"
             "- 每个操作建议的风险说明\n"
             "- 标注置信度（高/中/低）及原因\n"
@@ -2368,10 +2374,14 @@ SCENARIO_RAG_MAP = {
 
 
 def build_scenario_rag_context(query: str, specialists: list[str],
-                                original_rag_context: str = "") -> str:
+                                original_rag_context: str = "",
+                                article_context: str = "") -> str:
     """
     根据命中的专家类型,对原始 RAG 上下文做场景化增强。
     如果原始 RAG 已有内容,补充场景化检索结果;否则全新构建。
+
+    G-4（2026-07-23）：article_expert 场景下，从文章内容提取核心论点作为 RAG query，
+    替代原固定 suffix "文章解读 观点分析 投资逻辑 研报"。
     """
     from services.rag import build_rag_context_with_details
 
@@ -2381,7 +2391,15 @@ def build_scenario_rag_context(query: str, specialists: list[str],
     for specialist in specialists:
         if specialist in SCENARIO_RAG_MAP:
             cfg = SCENARIO_RAG_MAP[specialist]
-            scenario_queries.append(cfg["query_suffix"])
+            # G-4：article_expert 场景下用文章核心论点作为 RAG query
+            if specialist == "article_expert" and article_context:
+                viewpoints = _extract_viewpoints_for_rag(article_context)
+                if viewpoints:
+                    scenario_queries.extend(viewpoints[:3])  # 最多3个核心论点
+                else:
+                    scenario_queries.append(cfg["query_suffix"])  # 兜底用原 suffix
+            else:
+                scenario_queries.append(cfg["query_suffix"])
             all_content_types.update(cfg["content_types"])
 
     if not scenario_queries:
@@ -2402,6 +2420,62 @@ def build_scenario_rag_context(query: str, specialists: list[str],
     if original_rag_context and scenario_context:
         return f"{original_rag_context}\n\n---\n\n{scenario_context}"
     return scenario_context or original_rag_context
+
+
+def _extract_viewpoints_for_rag(article_context: str) -> list[str]:
+    """G-4：从文章内容提取核心论点用于 RAG 检索。
+
+    复用 services/content/article_reader.py 的 extract_article_structure，
+    取 core_viewpoints 前3个，每个扩展为检索 query。
+
+    Args:
+        article_context: 文章正文（fetch_article 抓取后的内容）
+
+    Returns:
+        核心论点列表（用于 RAG query）；失败返回空列表，由调用方兜底
+    """
+    try:
+        from db.config import get_config_bool
+        if not get_config_bool("rag.article_viewpoint_query_enabled", True):
+            return []
+    except Exception:
+        pass
+
+    try:
+        from services.content.article_reader import extract_article_structure
+        structure = extract_article_structure(article_context)
+        viewpoints = structure.get("core_viewpoints", []) or []
+        mentioned_targets = structure.get("mentioned_targets", []) or []
+
+        # 取前2个标的名称作为 query 补充
+        target_names = []
+        for t in mentioned_targets[:2]:
+            if isinstance(t, dict):
+                name = t.get("name") or t.get("target") or ""
+            else:
+                name = str(t)
+            if name:
+                target_names.append(name)
+        targets_str = " ".join(target_names)
+
+        queries = []
+        for vp in viewpoints[:3]:
+            if isinstance(vp, dict):
+                viewpoint = vp.get("viewpoint") or vp.get("content") or ""
+            else:
+                viewpoint = str(vp)
+            if not viewpoint:
+                continue
+            # 拼接：核心论点 + 提及标的
+            query = viewpoint.strip()
+            if targets_str:
+                query += " " + targets_str
+            if query.strip():
+                queries.append(query.strip())
+        return queries
+    except Exception as e:
+        logger.debug(f"[G-4] 文章核心论点提取失败，兜底用原 suffix: {e}")
+        return []
 
 
 def get_context_config(complexity: str) -> dict:
@@ -3461,7 +3535,8 @@ def orchestrate(query: str, history: list, rag_context: str = "", cancel_event: 
             specialists = clarification.get("specialists", [])
 
     # 1.5 场景化 RAG 增强:根据命中的专家类型补充相关书籍知识
-    rag_context = build_scenario_rag_context(refined_query, specialists, rag_context)
+    # G-4：传入 article_context 让 article_expert 用文章核心论点检索
+    rag_context = build_scenario_rag_context(refined_query, specialists, rag_context, article_context)
 
     # 2. 根据复杂度优化上下文(Token 预算管理)
     system_content = build_orchestrator_system_prompt()
@@ -4479,7 +4554,8 @@ def _stream_route(query: str, history: list, rag_context: str, cancel_event: thr
         logger.info(f"[orchestrator] {pad_reason}")
 
     # 1.5 场景化 RAG 增强
-    rag_context = build_scenario_rag_context(refined_query, specialists, rag_context)
+    # G-4：传入 article_context 让 article_expert 用文章核心论点检索
+    rag_context = build_scenario_rag_context(refined_query, specialists, rag_context, article_context)
 
     return {
         "specialists": specialists,

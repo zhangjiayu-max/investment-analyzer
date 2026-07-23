@@ -53,7 +53,7 @@ def arbitrate_results(query: str, specialist_results: list[dict], blackboard=Non
     """基于专家结果做轻量仲裁，输出可解释裁决。"""
     stances = []
     reasons = []
-    supporting_agents = []
+    agent_keys_list = []  # G-2a：与 stances 对齐，用于二次过滤
 
     for result in specialist_results or []:
         agent_key = result.get("agent_key", "unknown")
@@ -61,8 +61,7 @@ def arbitrate_results(query: str, specialist_results: list[dict], blackboard=Non
         analysis = result.get("analysis", "")
         stance = result.get("stance") or _detect_stance(analysis)
         stances.append(stance)
-        if stance != "unknown":
-            supporting_agents.append(agent_key)
+        agent_keys_list.append(agent_key)
         if analysis:
             reasons.append(f"{agent_name}: {analysis[:120]}")
 
@@ -83,6 +82,30 @@ def arbitrate_results(query: str, specialist_results: list[dict], blackboard=Non
     else:
         final_stance = "watch"
         arbitration_mode = "consensus"
+
+    # G-2a（2026-07-23）修复 supporting_agents 计数 bug：
+    # 原逻辑收集所有 stance != "unknown" 的专家，导致"4位一致"文案失真
+    # 修复后：只收集与最终裁决方向一致的专家
+    supporting_agents = [
+        ak for ak, st in zip(agent_keys_list, stances) if st == final_stance
+    ]
+
+    # G-2b（2026-07-23）sell 裁决强制估值前置：
+    # 无估值数据时降级为 hold，避免盲目割肉
+    valuation_gap = False
+    has_valuation_data = False
+    try:
+        from db.config import get_config_bool
+        valuation_required = get_config_bool("agent.arbitration_valuation_required", True)
+    except Exception:
+        valuation_required = True
+    if valuation_required and final_stance == "sell":
+        has_valuation_data = _check_valuation_in_results(specialist_results or [])
+        if not has_valuation_data:
+            # 降级为 hold，标注估值缺口
+            final_stance = "hold"
+            arbitration_mode = "valuation_gap"
+            valuation_gap = True
 
     shared_evidence = {}
     if plan and getattr(plan, "shared_evidence_keys", None):
@@ -158,6 +181,7 @@ def arbitrate_results(query: str, specialist_results: list[dict], blackboard=Non
         key_conflicts=key_conflicts,
         confidence=confidence,
         supporting_count=len(supporting_agents),
+        valuation_gap=valuation_gap,
     )
 
     summary = {
@@ -174,8 +198,51 @@ def arbitrate_results(query: str, specialist_results: list[dict], blackboard=Non
         "confidence": confidence,
         "key_conflicts": key_conflicts,
         "reasoning": reasoning,
+        # G-2b 新增字段：估值前置检查结果
+        "has_valuation_data": has_valuation_data,
+        "valuation_gap": valuation_gap,
     }
     return summary
+
+
+def _check_valuation_in_results(specialist_results: list[dict]) -> bool:
+    """G-2b：检查专家结果中是否包含估值数据（query_valuation 调用或 PE/PB/分位 提及）。
+
+    Args:
+        specialist_results: 专家结果列表
+
+    Returns:
+        True 表示有估值数据，False 表示缺失
+    """
+    if not specialist_results:
+        return False
+
+    # 估值关键词：PE/PB/分位/估值/percentile
+    valuation_kws = [
+        "pe分位", "pb分位", "估值分位", "百分位", "percentile",
+        "pe(", "pb(", "pe：", "pb：",
+        "估值高位", "估值低位", "估值合理", "估值偏高", "估值偏低",
+        "分位>", "分位<", "分位约",
+    ]
+
+    for result in specialist_results:
+        analysis = result.get("analysis", "") or ""
+        analysis_lower = analysis.lower()
+        # 检测文本中是否提及估值分位
+        if any(kw in analysis_lower for kw in valuation_kws):
+            return True
+        # 检测工具调用记录
+        tool_calls = result.get("tool_calls") or result.get("tools_used") or []
+        for tc in tool_calls:
+            tc_name = ""
+            if isinstance(tc, dict):
+                tc_name = tc.get("name", "") or tc.get("tool", "")
+            elif isinstance(tc, str):
+                tc_name = tc
+            if "valuation" in tc_name.lower() or "估值" in tc_name:
+                return True
+
+    return False
 
 
 def _build_arbitration_reasoning(
@@ -187,6 +254,7 @@ def _build_arbitration_reasoning(
     key_conflicts: list[dict],
     confidence: str,
     supporting_count: int,
+    valuation_gap: bool = False,
 ) -> str:
     """构建结构化仲裁推理依据。
 
@@ -220,8 +288,11 @@ def _build_arbitration_reasoning(
         parts.append("【分歧】专家立场一致，未检测到方向性冲突")
 
     # 段3：解决逻辑
-    if arbitration_mode == "consensus":
-        parts.append(f"【解决】{supporting_count} 位专家立场一致，采纳共识结论")
+    if arbitration_mode == "valuation_gap":
+        # G-2b：估值缺口降级
+        parts.append("【解决】检测到卖出信号但专家未查询估值分位，按止盈不止损原则降级为持有/观望，建议补充估值数据后再决策")
+    elif arbitration_mode == "consensus":
+        parts.append(f"【解决】{supporting_count} 位专家立场一致支持该方向，采纳共识结论")
     elif arbitration_mode == "conflict":
         # 冲突模式：按风险优先原则解决（风控视角优先）
         if final_stance == "hold":
