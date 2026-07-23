@@ -556,6 +556,22 @@ async def startup():
     except Exception:
         pass
 
+    # R-9（2026-07-23）：启动时自动运行 RAG 评估（开关控制，默认关）
+    try:
+        from db.config import get_config_bool
+        if get_config_bool("rag.auto_run_eval_on_startup", False):
+            import asyncio
+            from scripts.rag_eval_suite import run_eval_suite_by_category, save_results, EVAL_SUITE_CASES
+            async def _run_startup_eval():
+                # 只跑盲区类别，避免启动过慢
+                blind_spot_cases = {"blind_spot_coverage": EVAL_SUITE_CASES.get("blind_spot_coverage", [])}
+                result = await run_eval_suite_by_category(cases=blind_spot_cases, verbose=False)
+                save_results(result)
+                logger.info(f"[R-9] 启动评估完成，结果已写入 data/rag_eval_results.json")
+            asyncio.create_task(_run_startup_eval())
+    except Exception as e:
+        logger.warning(f"[R-9] 启动评估失败（不阻塞）: {e}")
+
     logging.info("=== 启动初始化完成 ===")
 
 

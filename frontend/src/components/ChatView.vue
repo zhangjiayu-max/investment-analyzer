@@ -18,6 +18,8 @@ import {
   adoptRecommendation,
   getCandidateFunds,
   generateTradePlan,
+  submitRagFeedback,
+  getSystemConfig,
 } from '../api'
 import ConfirmDialog from './layout/ConfirmDialog.vue'
 import AppToast from './layout/AppToast.vue'
@@ -67,6 +69,9 @@ const feedbackGiven = ref({})
 const specialistFeedback = ref({})
 const feedbackModal = ref({ visible: false, type: '', feedbackType: '', msgIndex: 0, msg: null, specialist: null, note: '' })
 
+// R-8 RAG 反馈 UI 开关（rag.feedback_ui_enabled，默认 false）
+const ragFeedbackEnabled = ref(false)
+
 // Trace 详情
 const traceDetailVisible = ref({})
 const traceDetailData = ref({})
@@ -105,6 +110,13 @@ onMounted(async () => {
     agents.value = allAgents.filter(a => a.is_specialist)
   } catch (e) {
     console.warn('加载 Agent 列表失败:', e)
+  }
+  // R-8 加载 RAG 反馈 UI 开关
+  try {
+    const { data } = await getSystemConfig('rag.feedback_ui_enabled')
+    ragFeedbackEnabled.value = data?.value === 'true'
+  } catch (e) {
+    console.warn('加载 RAG 反馈开关失败:', e)
   }
 })
 
@@ -1567,6 +1579,23 @@ async function submitSpecialistFeedback() {
   }
 }
 
+// R-8 RAG 反馈：调用后端 API 提交知识检索结果反馈（source 防御性处理 reference_id 缺失）
+async function handleRagFeedback(source, index, type) {
+  try {
+    await submitRagFeedback({
+      knowledgeId: source.reference_id || source.id || null,
+      contentType: source.type || '',
+      query: '',
+      rating: type === 'helpful' ? 1 : -1,
+      reasons: [],
+    })
+    console.log('[RAG Feedback] 已提交:', { source, type })
+  } catch (e) {
+    console.error('[RAG Feedback] 提交失败:', e)
+    showToast('反馈提交失败，请重试', 'error')
+  }
+}
+
 async function handleFeedback(msg, index, feedbackType) {
   if (feedbackGiven.value[index]) return
   feedbackModal.value = {
@@ -1745,8 +1774,10 @@ function stopPollingProgress() {
             :messageEvalStates="messageEvalStates"
             :traceDetailVisible="traceDetailVisible"
             :traceDetailData="traceDetailData"
+            :rag-feedback-enabled="ragFeedbackEnabled"
             @feedback="handleFeedback"
             @specialist-feedback="handleSpecialistFeedback"
+            @rag-feedback="handleRagFeedback"
             @toggle-eval="toggleMessageEval"
             @trigger-eval="triggerMessageEval"
             @trigger-llm-eval="triggerLLMEval"

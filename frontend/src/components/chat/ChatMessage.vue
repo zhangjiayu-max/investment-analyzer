@@ -14,6 +14,7 @@ const props = defineProps({
   messageEvalStates: { type: Object, default: () => ({}) },
   traceDetailVisible: { type: Object, default: () => ({}) },
   traceDetailData: { type: Object, default: () => ({}) },
+  ragFeedbackEnabled: { type: Boolean, default: false },
 })
 
 const emit = defineEmits([
@@ -34,6 +35,7 @@ const emit = defineEmits([
   'adopt-recommendation',
   'execute-recommendation',
   'generate-trade-plan',
+  'rag-feedback',
 ])
 
 // P0-A 决策闭环：建议卡片辅助函数
@@ -65,6 +67,14 @@ const INSTITUTIONAL_FLAGS = {
 
 // 机构动向标记展开状态（按消息 id + flag 索引）
 const expandedInstFlags = ref({})
+
+// R-8 RAG 反馈状态（按 message index + source index 跟踪，值为 'helpful'/'unhelpful'）
+const ragFeedback = ref({})
+
+// R-8 RAG 反馈：子组件内部状态管理（设置只读态后由父组件处理 API 调用）
+function handleRagFeedbackState(index, j, type) {
+  ragFeedback.value[`${index}_${j}`] = type
+}
 
 function directionClass(d) {
   return { up: 'rec-dir-up', down: 'rec-dir-down', hold: 'rec-dir-hold' }[d] || 'rec-dir-hold'
@@ -832,6 +842,17 @@ const tradeSuggestions = computed(() => {
         <div class="rag-tags">
           <span v-for="(s, j) in msg.rag.sources.slice(0, 5)" :key="j" :class="['rag-tag', 'rag-tag-' + s.type]">
             {{ s.type }}: {{ s.title ? s.title.slice(0, 20) : '' }}
+            <!-- R-8 RAG 反馈闭环：赞/踩按钮（仅 ragFeedbackEnabled 时显示） -->
+            <template v-if="ragFeedbackEnabled">
+              <span v-if="ragFeedback[index + '_' + j]" class="rag-feedback-done">
+                {{ ragFeedback[index + '_' + j] === 'helpful' ? '已赞' : '已踩' }}
+                <Icon :name="ragFeedback[index + '_' + j] === 'helpful' ? 'thumbs-up' : 'thumbs-down'" size="12" class="inline-icon" />
+              </span>
+              <span v-else class="rag-feedback" @click.stop>
+                <button class="btn-rag-feedback" @click="handleRagFeedbackState(index, j, 'helpful'); emit('rag-feedback', s, j, 'helpful')" title="有用"><Icon name="thumbs-up" size="14" /></button>
+                <button class="btn-rag-feedback" @click="handleRagFeedbackState(index, j, 'unhelpful'); emit('rag-feedback', s, j, 'unhelpful')" title="无用"><Icon name="thumbs-down" size="14" /></button>
+              </span>
+            </template>
           </span>
         </div>
       </div>
@@ -1603,6 +1624,12 @@ const tradeSuggestions = computed(() => {
 .rag-tag-作者文章 { border-color: #10b981; color: #059669; background: var(--color-success-bg); }
 .rag-tag-技能知识 { border-color: #8b5cf6; color: #7c3aed; background: rgba(139, 92, 246, 0.1); }
 .rag-tag-文章 { border-color: #3b82f6; color: #2563eb; background: var(--color-info-bg); }
+
+/* R-8 RAG 反馈按钮 */
+.rag-feedback { display: inline-flex; gap: 2px; margin-left: 4px; vertical-align: middle; }
+.btn-rag-feedback { width: 20px; height: 20px; border: none; background: transparent; cursor: pointer; color: var(--color-text-muted, #999); border-radius: 4px; display: inline-flex; align-items: center; justify-content: center; opacity: 0.6; transition: all 0.15s; }
+.btn-rag-feedback:hover { background: var(--color-bg-hover); opacity: 1; }
+.rag-feedback-done { font-size: 11px; color: var(--color-text-muted, #999); display: inline-flex; align-items: center; gap: 2px; margin-left: 4px; }
 
 @keyframes typingBounce {
   0%, 80%, 100% { transform: scale(0.6); opacity: 0.4; }

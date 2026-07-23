@@ -206,6 +206,27 @@ EVAL_SUITE_CASES = {
         {"query": "如何做仓位管理？", "expected_topics": ["仓位管理", "凯利公式", "风险控制"]},
         {"query": "抄底和追涨哪个更好？", "expected_topics": ["抄底", "追涨", "策略对比"]},
     ],
+    "blind_spot_coverage": [
+        # 盲区覆盖类（R-9 新增 2026-07-23）：覆盖 URL/基金名/政策历史三类盲区
+        # URL 类查询 5 条（验证 R-4-1 URL 剥离效果）
+        {"query": "https://mp.weixin.qq.com/s/SZbOITjeSTzSHU6DgGKjsw 这篇文章说的对吗", "expected_topics": ["微信", "文章"]},
+        {"query": "https://finance.sina.com.cn/stock/2024-01-15 估值分析", "expected_topics": ["估值"]},
+        {"query": "看这个链接 https://xueqiu.com/123456 基金分析", "expected_topics": ["基金"]},
+        {"query": "https://www.zhihu.com/question/123 定投策略", "expected_topics": ["定投"]},
+        {"query": "这篇文章 https://mp.weixin.qq.com/s/abc 资产配置", "expected_topics": ["资产配置"]},
+        # 具体基金名查询 5 条（验证 R-4-2 基金名识别，用持仓实际基金名）
+        {"query": "招商中证白酒指数(LOF)A 现在估值高吗", "expected_topics": ["白酒", "估值"]},
+        {"query": "易方达恒生科技ETF联接(QDII)C 可以加仓吗", "expected_topics": ["恒生科技", "加仓"]},
+        {"query": "南方中债7-10年国开行债券指数C 收益如何", "expected_topics": ["债券", "收益"]},
+        {"query": "南方上证科创板芯片ETF发起联接C 估值分位", "expected_topics": ["芯片", "估值"]},
+        {"query": "永赢中证全指医疗器械ETF发起联接A 前景怎么样", "expected_topics": ["医疗器械", "前景"]},
+        # 政策历史类查询 5 条（验证 R-6 时效放宽）
+        {"query": "历年金融危机前奏和规律", "expected_topics": ["金融危机", "规律"]},
+        {"query": "复盘2024年经济周期演变", "expected_topics": ["经济周期", "复盘"]},
+        {"query": "房地产周期历史教训启示", "expected_topics": ["房地产", "周期"]},
+        {"query": "货币政策历史沿革变迁", "expected_topics": ["货币政策", "历史"]},
+        {"query": "历次熊市底部特征案例", "expected_topics": ["熊市", "底部"]},
+    ],
 }
 
 
