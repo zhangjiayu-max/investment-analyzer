@@ -388,7 +388,8 @@ export function sendMessageStream(convId, content, onEvent, targetSpecialists = 
       let msg = '请求失败'
       try {
         const err = JSON.parse(body)
-        msg = err.detail || msg
+        // 兼容统一响应协议 {message} 和 FastAPI 原生 {detail} 两种格式
+        msg = err.detail || err.message || msg
       } catch {}
       onEvent({ type: 'error', data: { message: msg, code: 'HTTP_ERROR', status: response.status } })
       return
@@ -459,7 +460,7 @@ export function clarifyAnswerStream(convId, answer, messageId, onEvent) {
       let msg = '澄清续答失败'
       try {
         const err = JSON.parse(body)
-        msg = err.detail || msg
+        msg = err.detail || err.message || msg
       } catch {}
       onEvent({ type: 'error', data: { message: msg, code: 'CLARIFY_FAILED', status: response.status } })
       return
@@ -538,7 +539,7 @@ export function resumeConversationStream(convId, onEvent) {
       let msg = '恢复执行失败'
       try {
         const err = JSON.parse(body)
-        msg = err.detail || msg
+        msg = err.detail || err.message || msg
       } catch {}
       onEvent({ type: 'error', data: { message: msg, code: 'RESUME_FAILED', status: response.status } })
       return
@@ -597,7 +598,7 @@ export function replayConversationStream(convId, channelId, lastSeq, onEvent) {
       let msg = 'replay 请求失败'
       try {
         const err = JSON.parse(body)
-        msg = err.detail || msg
+        msg = err.detail || err.message || msg
       } catch {}
       onEvent({ type: 'error', data: { message: msg, status: response.status } })
       return
