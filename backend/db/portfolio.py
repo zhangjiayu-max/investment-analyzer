@@ -9,6 +9,9 @@ from datetime import datetime, date
 from db._conn import _get_conn, _row_to_dict
 from db.config import get_config
 
+# G-akshare-stats（2026-07-24）：统一 akshare 调用入口，记录统计 + 超时保护
+from services.market.leading_indicators.akshare_utils import call_akshare_with_timeout
+
 logger = logging.getLogger(__name__)
 
 
@@ -1236,7 +1239,10 @@ def fetch_fund_nav_on_or_before(fund_code: str, nav_date: str) -> dict | None:
     try:
         import akshare as ak
 
-        df = ak.fund_open_fund_info_em(symbol=fund_code, indicator='单位净值走势')
+        df = call_akshare_with_timeout(
+            ak.fund_open_fund_info_em,
+            symbol=fund_code, indicator='单位净值走势', timeout=20,
+        )
         if df is None or len(df) == 0:
             return None
         target = str(nav_date)
@@ -1462,7 +1468,10 @@ def fetch_fund_nav(fund_code: str) -> dict | None:
     # ── MCP 失败，尝试 akshare ──
     try:
         import akshare as ak
-        df = ak.fund_open_fund_info_em(symbol=fund_code, indicator='单位净值走势')
+        df = call_akshare_with_timeout(
+            ak.fund_open_fund_info_em,
+            symbol=fund_code, indicator='单位净值走势', timeout=20,
+        )
         if df is not None and len(df) > 0:
             last = df.iloc[-1]
             nav_date = str(last["净值日期"])
@@ -1692,7 +1701,9 @@ def lookup_fund_info(fund_code: str) -> dict | None:
     """通过 akshare 查询基金基本信息，自动填充名称、类型、跟踪标的。"""
     try:
         import akshare as ak
-        df = ak.fund_overview_em(symbol=fund_code)
+        df = call_akshare_with_timeout(
+            ak.fund_overview_em, symbol=fund_code, timeout=15,
+        )
         if df is None or len(df) == 0:
             return None
         row = df.iloc[0]
@@ -1770,7 +1781,9 @@ def compare_funds(fund_a: str, fund_b: str) -> dict:
         try:
             import akshare as ak
             # 获取基金费率信息
-            fee_df = ak.fund_fee_fund_ratio_em(symbol=fund_code)
+            fee_df = call_akshare_with_timeout(
+                ak.fund_fee_fund_ratio_em, symbol=fund_code, timeout=15,
+            )
             if fee_df is not None and len(fee_df) > 0:
                 # 取管理费率或申购费率
                 for _, row in fee_df.iterrows():
@@ -1788,7 +1801,10 @@ def compare_funds(fund_a: str, fund_b: str) -> dict:
         nav_series = []  # [(date_str, nav_float), ...]
         try:
             import akshare as ak
-            df = ak.fund_open_fund_info_em(symbol=fund_code, indicator="累计净值走势")
+            df = call_akshare_with_timeout(
+                ak.fund_open_fund_info_em,
+                symbol=fund_code, indicator="累计净值走势", timeout=20,
+            )
             if df is not None and len(df) > 0:
                 for _, row in df.iterrows():
                     d = str(row.get("净值日期", ""))
@@ -2246,7 +2262,9 @@ def _akshare_fund_holdings(fund_code: str, year: str) -> dict:
     # 1. 股票持仓 Top 10
     try:
         import akshare as ak
-        df = ak.fund_portfolio_hold_em(symbol=fund_code, date=year)
+        df = call_akshare_with_timeout(
+            ak.fund_portfolio_hold_em, symbol=fund_code, date=year, timeout=15,
+        )
         if df is not None and len(df) > 0:
             quarters = df["季度"].unique()
             if len(quarters) > 0:
@@ -2268,7 +2286,9 @@ def _akshare_fund_holdings(fund_code: str, year: str) -> dict:
     bond_type_counter = {}
     try:
         import akshare as ak
-        df = ak.fund_portfolio_bond_hold_em(symbol=fund_code, date=year)
+        df = call_akshare_with_timeout(
+            ak.fund_portfolio_bond_hold_em, symbol=fund_code, date=year, timeout=15,
+        )
         if df is not None and len(df) > 0:
             quarters = df["季度"].unique()
             if len(quarters) > 0:
@@ -2293,7 +2313,9 @@ def _akshare_fund_holdings(fund_code: str, year: str) -> dict:
     # 3. 资产配置（股票/债券/现金/其他）
     try:
         import akshare as ak
-        df = ak.fund_individual_detail_hold_xq(symbol=fund_code)
+        df = call_akshare_with_timeout(
+            ak.fund_individual_detail_hold_xq, symbol=fund_code, timeout=15,
+        )
         if df is not None and len(df) > 0:
             for _, r in df.iterrows():
                 result["asset_allocation"].append({
@@ -2306,7 +2328,10 @@ def _akshare_fund_holdings(fund_code: str, year: str) -> dict:
     # 4. 行业配置
     try:
         import akshare as ak
-        df = ak.fund_portfolio_industry_allocation_em(symbol=fund_code, date=year)
+        df = call_akshare_with_timeout(
+            ak.fund_portfolio_industry_allocation_em,
+            symbol=fund_code, date=year, timeout=15,
+        )
         if df is not None and len(df) > 0:
             for _, r in df.head(10).iterrows():
                 result["industry_allocation"].append({

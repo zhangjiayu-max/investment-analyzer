@@ -398,6 +398,11 @@ def init_db():
             latency_ms INTEGER,
             trace_id TEXT,
             error_msg TEXT,
+            conv_id INTEGER,
+            message_id INTEGER,
+            agent_name TEXT,
+            user_query TEXT,
+            cache_hit INTEGER DEFAULT 0,
             created_at TEXT DEFAULT (datetime('now','localtime'))
         )
     """)
@@ -408,6 +413,82 @@ def init_db():
     conn.execute("""
         CREATE INDEX IF NOT EXISTS idx_valuation_query_logs_index_code
         ON valuation_query_logs(index_code)
+    """)
+    # 迁移：为旧表补齐新字段（必须在 CREATE INDEX 之前，否则旧表缺列会启动失败）
+    _add_column_if_not_exists(conn, "valuation_query_logs", "conv_id", "INTEGER")
+    _add_column_if_not_exists(conn, "valuation_query_logs", "message_id", "INTEGER")
+    _add_column_if_not_exists(conn, "valuation_query_logs", "agent_name", "TEXT")
+    _add_column_if_not_exists(conn, "valuation_query_logs", "user_query", "TEXT")
+    _add_column_if_not_exists(conn, "valuation_query_logs", "cache_hit", "INTEGER DEFAULT 0")
+    # conv_id 列补齐后再建索引，避免旧表启动失败（G-akshare-stats 2026-07-24）
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_valuation_query_logs_conv
+        ON valuation_query_logs(conv_id)
+    """)
+
+    # ── 估值上下文注入监测表 ──────────────────────────
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS valuation_context_usage (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            conv_id INTEGER,
+            message_id INTEGER,
+            trace_id TEXT,
+            query_source TEXT,
+            valuation_summary_length INTEGER,
+            index_count INTEGER,
+            data_sources TEXT,
+            metric_types TEXT,
+            max_days_old INTEGER,
+            has_expired INTEGER,
+            online_fallback_count INTEGER,
+            created_at TEXT DEFAULT (datetime('now','localtime'))
+        )
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_vcu_created
+        ON valuation_context_usage(created_at)
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_vcu_conv
+        ON valuation_context_usage(conv_id)
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_vcu_trace
+        ON valuation_context_usage(trace_id)
+    """)
+
+    # ── 估值引用检测表（LLM 实际消费侧） ──────────────────────────
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS valuation_reference_check (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            trace_id TEXT,
+            conv_id INTEGER,
+            message_id INTEGER,
+            agent_name TEXT,
+            analysis_type TEXT,
+            context_injected INTEGER,
+            tool_called INTEGER,
+            tool_call_count INTEGER,
+            refs_found INTEGER,
+            ref_sources TEXT,
+            ref_metrics TEXT,
+            has_hallucination_risk INTEGER,
+            confidence TEXT,
+            sample_text TEXT,
+            created_at TEXT DEFAULT (datetime('now','localtime'))
+        )
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_vrc_created
+        ON valuation_reference_check(created_at)
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_vrc_trace
+        ON valuation_reference_check(trace_id)
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_vrc_conv
+        ON valuation_reference_check(conv_id)
     """)
 
     # ── 任务表 ──────────────────────────────────────
