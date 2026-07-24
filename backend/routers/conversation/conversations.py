@@ -1036,22 +1036,30 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
         except (json.JSONDecodeError, TypeError):
             pass
 
-    async def event_stream():
+    # ── 同步初始化：trace_id 提前生成，供外层中继循环和 producer 线程日志共用 ──
+    # 修复 conv#136 message_id=438：原架构 event_stream 主体在主 generator 里 await，
+    # 客户端断开导致整个 generator 被 cancel，后台 producer 线程启动得太晚（L1813），
+    # 永远没机会执行。方案：把 event_stream 改名 event_stream_producer，放到独立
+    # daemon 线程的独立 event loop 里跑，所有 yield 通过 adapter 推到 queue，
+    # 外层中继循环消费。客户端断开时中继停止 yield，但 producer 继续跑完，
+    # 事件通过 stream_events 表持久化，用户重进页面可 replay 恢复显示。
+    trace_id = str(uuid.uuid4())[:12]
+    effective_query = _build_effective_query(req.content, req.images)
+    logger.info(f"[trace:{trace_id}] 对话 {conv_id} 开始: {effective_query[:50]}...")
+
+    async def event_stream_producer():
+        """producer 主体：所有准备工作（clarify/RAG/portfolio_facts）+ 编排都在这里执行。
+        通过独立 daemon 线程 + 独立 event loop 运行，不受 SSE 连接断开影响。
+        所有 yield 通过 adapter 推到 queue，由外层 _relay 中继循环消费。"""
         import threading
 
         cancel_event = threading.Event()
         request_start = time.time()
         phase_timings = {}
         error_category = "none"
-        client_disconnected = False  # 标记客户端是否断开
-
-        # 生成 trace_id，关联本次对话的所有事件
-        trace_id = str(uuid.uuid4())[:12]
-
-        # 构造 effective_query（包含图片上下文）
-        effective_query = _build_effective_query(req.content, req.images)
-
-        logger.info(f"[trace:{trace_id}] 对话 {conv_id} 开始: {effective_query[:50]}...")
+        # client_disconnected 固定为 False：producer 无条件推送所有事件，
+        # 客户端断开由外层 _relay 中继循环处理（不 yield 但继续读 queue）
+        client_disconnected = False
 
         # 执行 before_prompt hooks
         try:
@@ -1838,13 +1846,13 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
             yield _sse_event("channel_started", {"channel_id": channel_id, "message_id": stream_msg_id})
 
         # 简化的事件中继循环 — 持久化已在生产者线程完成
+        # 注意：producer 运行在独立 event loop，不能调用 request.is_disconnected()
+        # （request 绑定到主 loop）。client_disconnected 固定为 False，所有事件无条件 yield，
+        # 客户端断开由外层 _relay 中继循环统一处理
         while True:
             try:
                 event = await asyncio.to_thread(lambda: q.get(timeout=0.5))
             except queue.Empty:
-                if not client_disconnected and await request.is_disconnected():
-                    logger.info("客户端断开连接，后台任务将继续自动保存结果")
-                    client_disconnected = True
                 continue
 
             if event is None:
@@ -2019,7 +2027,60 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
             except Exception as e:
                 logger.warning(f"对话摘要生成失败: {e}")
 
-    return StreamingResponse(event_stream(), media_type="text/event-stream")
+    # ── 启动独立 daemon 线程跑 producer ──
+    # producer 在独立 event loop 里跑，不受 SSE 连接断开影响。
+    # 所有 yield 通过 adapter 推到 queue，外层 _relay 中继循环消费。
+    # 客户端断开时 _relay 停止 yield，但 producer 继续跑完，事件已通过
+    # append_stream_event 持久化到 stream_events 表，用户重进页面可 replay 恢复。
+    _producer_q: "queue.Queue[str]" = queue.Queue()
+
+    def _producer_thread_main():
+        """独立线程：独立 event loop 跑 producer，所有 yield 推到 queue"""
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            async def _drive():
+                async for sse_str in event_stream_producer():
+                    _producer_q.put(sse_str)
+            loop.run_until_complete(_drive())
+        except Exception as e:
+            logger.error(f"[trace:{trace_id}] producer 线程异常: {e}", exc_info=True)
+            try:
+                _producer_q.put(_sse_event("error", {"message": f"后台执行失败: {e}"}))
+            except Exception:
+                pass
+        finally:
+            try:
+                loop.close()
+            except Exception:
+                pass
+            _producer_q.put(None)
+
+    _producer_thread = threading.Thread(target=_producer_thread_main, daemon=True)
+    _producer_thread.start()
+    _running_agents[f"prod_{conv_id}"] = {
+        "conv_id": conv_id, "started_at": time.time(),
+        "trace_id": trace_id, "cancel_event": threading.Event(),
+    }
+
+    # 中继循环：从 queue 读事件 yield 给 SSE
+    # 客户端断开时停止 yield，但继续消费 queue 让 producer 能正常完成（避免 queue 堵塞）
+    async def _relay():
+        client_disconnected = False
+        while True:
+            try:
+                sse_str = await asyncio.to_thread(_producer_q.get, timeout=0.5)
+            except queue.Empty:
+                if not client_disconnected and await request.is_disconnected():
+                    client_disconnected = True
+                    logger.info(f"[trace:{trace_id}] 客户端断开连接，后台任务继续执行 conv={conv_id}")
+                continue
+            if sse_str is None:
+                break
+            if not client_disconnected:
+                yield sse_str
+
+    return StreamingResponse(_relay(), media_type="text/event-stream")
 
 
 @router.post("/api/conversations/{conv_id}/clarify-answer")
