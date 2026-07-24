@@ -1047,13 +1047,14 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
     effective_query = _build_effective_query(req.content, req.images)
     logger.info(f"[trace:{trace_id}] 对话 {conv_id} 开始: {effective_query[:50]}...")
 
+    # 共享 cancel_event：producer 内部检查 + _running_agents 存储 + /cancel 端点 set
+    # 必须在 event_stream_producer 闭包外创建，保证取消信号能真正传到后台线程。
+    cancel_event = threading.Event()
+
     async def event_stream_producer():
         """producer 主体：所有准备工作（clarify/RAG/portfolio_facts）+ 编排都在这里执行。
         通过独立 daemon 线程 + 独立 event loop 运行，不受 SSE 连接断开影响。
         所有 yield 通过 adapter 推到 queue，由外层 _relay 中继循环消费。"""
-        import threading
-
-        cancel_event = threading.Event()
         request_start = time.time()
         phase_timings = {}
         error_category = "none"
@@ -2058,9 +2059,10 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
 
     _producer_thread = threading.Thread(target=_producer_thread_main, daemon=True)
     _producer_thread.start()
+    # 复用外层共享 cancel_event，确保 /cancel 端点 set 后能传到 producer 线程
     _running_agents[f"prod_{conv_id}"] = {
         "conv_id": conv_id, "started_at": time.time(),
-        "trace_id": trace_id, "cancel_event": threading.Event(),
+        "trace_id": trace_id, "cancel_event": cancel_event,
     }
 
     # 中继循环：从 queue 读事件 yield 给 SSE
