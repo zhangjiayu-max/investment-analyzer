@@ -238,6 +238,9 @@ app.include_router(capabilities_router)
 # G-akshare-stats（2026-07-24）：akshare 成功率统计 /api/admin/akshare-stats
 from routers.admin.akshare_stats import router as akshare_stats_router
 app.include_router(akshare_stats_router)
+# 估值数据利用监测 /api/admin/valuation-usage/*
+from routers.admin.valuation_usage import router as valuation_usage_router
+app.include_router(valuation_usage_router)
 app.include_router(theme_rules_router)
 app.include_router(event_radar_router)
 app.include_router(trade_plans_router)

@@ -1083,7 +1083,8 @@ def _validate_tool_result(name: str, result_str: str) -> tuple:
 
 
 def execute_tool(name: str, arguments: dict, trace_id: str = "",
-                 timeout: int = 30, conversation_id: int = None, message_id: int = None) -> str:
+                 timeout: int = 30, conversation_id: int = None, message_id: int = None,
+                 agent_name: str = None, user_query: str = None) -> str:
     """执行工具调用，返回 JSON 字符串结果。
 
     带超时保护、结果校验、审计日志和结果缓存（仅对数据查询类工具）。
@@ -1095,6 +1096,8 @@ def execute_tool(name: str, arguments: dict, trace_id: str = "",
         timeout: 超时秒数（默认 30s）
         conversation_id: 对话 ID（用于 RAG 日志）
         message_id: 消息 ID（用于 RAG 日志）
+        agent_name: 专家/调用方名称（用于估值监控日志）
+        user_query: 用户问题（用于估值监控日志）
     """
     import time as _time
 
@@ -1135,7 +1138,8 @@ def execute_tool(name: str, arguments: dict, trace_id: str = "",
 
     try:
         result = _execute_tool_impl(name, arguments, trace_id=trace_id,
-                                    conversation_id=conversation_id, message_id=message_id)
+                                    conversation_id=conversation_id, message_id=message_id,
+                                    agent_name=agent_name, user_query=user_query)
     except Exception as e:
         error_category = "tool_error"
         logger.error(f"工具执行异常 [{name}]: {e}")
@@ -1180,7 +1184,9 @@ def execute_tool(name: str, arguments: dict, trace_id: str = "",
             logger.warning(f"工具 {name} 结果校验失败: {warning_msg}，触发 1 次重试")
             error_category = "validation_failed"
             try:
-                result = _execute_tool_impl(name, arguments)
+                result = _execute_tool_impl(name, arguments, trace_id=trace_id,
+                                            conversation_id=conversation_id, message_id=message_id,
+                                            agent_name=agent_name, user_query=user_query)
                 ok2, warning2 = _validate_tool_result(name, result)
                 if not ok2:
                     # 重试仍失败：保留 warning 标记返回，让 LLM 自行判断
@@ -1220,12 +1226,15 @@ def execute_tool(name: str, arguments: dict, trace_id: str = "",
 
 
 def _execute_tool_impl(name: str, arguments: dict, trace_id: str = "",
-                       conversation_id: int = None, message_id: int = None) -> str:
+                       conversation_id: int = None, message_id: int = None,
+                       agent_name: str = None, user_query: str = None) -> str:
     """工具执行的实际实现。"""
     if name == "query_valuation":
-        return _query_valuation(arguments)
+        return _query_valuation(arguments, trace_id=trace_id, conversation_id=conversation_id,
+                                message_id=message_id, agent_name=agent_name, user_query=user_query)
     elif name == "query_online_valuation":
-        return _query_online_valuation_impl(arguments)
+        return _query_online_valuation_impl(arguments, trace_id=trace_id, conversation_id=conversation_id,
+                                            message_id=message_id, agent_name=agent_name, user_query=user_query)
     elif name == "search_knowledge":
         arguments["trace_id"] = trace_id
         arguments["conversation_id"] = conversation_id
@@ -1503,7 +1512,8 @@ def _fetch_article(args: dict) -> str:
         return json.dumps({"error": f"文章抓取失败: {str(e)}"}, ensure_ascii=False)
 
 
-def _query_valuation(args: dict) -> str:
+def _query_valuation(args: dict, trace_id: str = "", conversation_id: int = None,
+                     message_id: int = None, agent_name: str = None, user_query: str = None) -> str:
     """查询指定指数的估值数据。"""
     index_name = args.get("index_name", "")
 
@@ -1580,7 +1590,9 @@ def _query_valuation(args: dict) -> str:
 
         for metric in index_metrics:
             mt = metric["metric_type"]
-            latest = get_best_valuation(code, mt, query_source="agent")
+            latest = get_best_valuation(code, mt, query_source="agent", trace_id=trace_id,
+                                        conv_id=conversation_id, message_id=message_id,
+                                        agent_name=agent_name, user_query=user_query)
             if not latest:
                 missing_types.append(mt)
                 continue
@@ -1690,7 +1702,9 @@ def _query_valuation(args: dict) -> str:
     return json.dumps(results, ensure_ascii=False)
 
 
-def _query_online_valuation_impl(args: dict) -> str:
+def _query_online_valuation_impl(args: dict, trace_id: str = "", conversation_id: int = None,
+                                  message_id: int = None, agent_name: str = None,
+                                  user_query: str = None) -> str:
     """主动查询在线最新估值（akshare 中证官方，实时数据）。
 
     与 _query_valuation 的区别：
@@ -1781,8 +1795,12 @@ def _query_online_valuation_impl(args: dict) -> str:
 
         # 在线都查不到 → 回退库内表数据兜底
         if not pe_valid and not pb_valid:
-            local_pe = get_best_valuation(code, "市盈率", query_source="agent", enable_online=False)
-            local_pb = get_best_valuation(code, "市净率", query_source="agent", enable_online=False)
+            local_pe = get_best_valuation(code, "市盈率", query_source="agent", enable_online=False,
+                                          trace_id=trace_id, conv_id=conversation_id, message_id=message_id,
+                                          agent_name=agent_name, user_query=user_query)
+            local_pb = get_best_valuation(code, "市净率", query_source="agent", enable_online=False,
+                                          trace_id=trace_id, conv_id=conversation_id, message_id=message_id,
+                                          agent_name=agent_name, user_query=user_query)
             local_pe_valid = local_pe and local_pe.get("current_value") is not None
             local_pb_valid = local_pb and local_pb.get("current_value") is not None
             if not local_pe_valid and not local_pb_valid:

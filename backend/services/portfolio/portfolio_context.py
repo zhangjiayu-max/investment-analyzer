@@ -381,13 +381,16 @@ def build_portfolio_summary_line(user_id: str = "default") -> str:
         return ""
 
 
-def build_valuation_summary() -> str:
+def build_valuation_summary(conv_id: int = None, message_id: int = None,
+                           trace_id: str = None, user_query: str = None) -> str:
     """构建估值摘要上下文，供 Orchestrator 使用。
 
     返回格式化的估值数据，包含所有跟踪指数的 PE/PB/百分位。
+    同时记录估值上下文注入监测日志。
     """
     try:
         from db import list_valuation_indexes
+        from services.valuation.valuation_monitor import log_valuation_context_usage
 
         valuations = list_valuation_indexes()
         if not valuations:

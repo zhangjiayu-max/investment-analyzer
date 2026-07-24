@@ -573,6 +573,11 @@ def get_best_valuation(
     trace_id: str = None,
     enable_online: bool = True,
     allow_metric_fallback: bool = False,
+    conv_id: int = None,
+    message_id: int = None,
+    agent_name: str = None,
+    user_query: str = None,
+    cache_hit: int = 0,
 ) -> dict | None:
     """获取最佳估值数据（智能降级 + 在线兜底 + 监控日志）。
 
@@ -594,6 +599,11 @@ def get_best_valuation(
                               fallback 顺序：市盈率 → 市净率 → 市销率 → 股息率。
                               默认 False（不破坏现有调用），alert_scanner 等场景传 True。
                               返回结果中新增 fallback_metric_type 字段标注实际命中的指标。
+        conv_id: 对话ID，用于监控关联
+        message_id: 消息ID，用于监控关联
+        agent_name: 专家名称，用于监控关联
+        user_query: 用户问题，用于监控关联
+        cache_hit: 是否命中缓存（1=缓存命中，0=未命中）
 
     返回:
         包含估值数据的字典，带 data_source、is_expired、days_old 字段；
@@ -648,7 +658,9 @@ def get_best_valuation(
 
         final_source = "leiniuniu"
         _log_valuation_query(index_code, detailed.get("index_name"), query_source, final_source,
-                             0, 0, int((datetime.now() - start_ts).total_seconds() * 1000), trace_id, None)
+                             0, 0, int((datetime.now() - start_ts).total_seconds() * 1000), trace_id, None,
+                             conv_id=conv_id, message_id=message_id, agent_name=agent_name,
+                             user_query=user_query, cache_hit=cache_hit)
         return detailed
 
     # 2. 降级到螺丝钉数据（最近 30 天内）
@@ -666,7 +678,9 @@ def get_best_valuation(
                 dd_data["days_old"] = 0
         final_source = "dd_luosiding"
         _log_valuation_query(index_code, dd_data.get("index_name"), query_source, final_source,
-                             degraded, 0, int((datetime.now() - start_ts).total_seconds() * 1000), trace_id, None)
+                             degraded, 0, int((datetime.now() - start_ts).total_seconds() * 1000), trace_id, None,
+                             conv_id=conv_id, message_id=message_id, agent_name=agent_name,
+                             user_query=user_query, cache_hit=cache_hit)
         return dd_data
 
     # 3. 使用过期的详细数据（如有）
@@ -684,7 +698,9 @@ def get_best_valuation(
                 detailed_expired["days_old"] = 0
         final_source = "expired_leiniuniu"
         _log_valuation_query(index_code, detailed_expired.get("index_name"), query_source, final_source,
-                             0, is_expired, int((datetime.now() - start_ts).total_seconds() * 1000), trace_id, None)
+                             0, is_expired, int((datetime.now() - start_ts).total_seconds() * 1000), trace_id, None,
+                             conv_id=conv_id, message_id=message_id, agent_name=agent_name,
+                             user_query=user_query, cache_hit=cache_hit)
         return detailed_expired
 
     # 3.5 metric_type fallback：本地指定 metric_type 查不到时，尝试本地其他 metric_type
@@ -708,7 +724,9 @@ def get_best_valuation(
                         fb_data["days_old"] = 0
                 final_source = f"leiniuniu_fallback_{fallback_type}"
                 _log_valuation_query(index_code, fb_data.get("index_name"), query_source, final_source,
-                                     0, 0, int((datetime.now() - start_ts).total_seconds() * 1000), trace_id, None)
+                                     0, 0, int((datetime.now() - start_ts).total_seconds() * 1000), trace_id, None,
+                                     conv_id=conv_id, message_id=message_id, agent_name=agent_name,
+                                     user_query=user_query, cache_hit=cache_hit)
                 logger.info(
                     f"[valuation] {index_code} metric_type fallback：{metric_type} 无数据，"
                     f"改用 {fallback_type} 命中（query_source={query_source}）"
@@ -717,14 +735,18 @@ def get_best_valuation(
 
     # 4. 在线兜底：akshare → 天天基金（仅在 enable_online=True 时触发）
     if enable_online:
-        online_result = _online_fallback(index_code, metric_type, start_ts, query_source, trace_id)
+        online_result = _online_fallback(index_code, metric_type, start_ts, query_source, trace_id,
+                                         conv_id=conv_id, message_id=message_id, agent_name=agent_name,
+                                         user_query=user_query, cache_hit=cache_hit)
         if online_result:
             return online_result
         # 在线兜底已启用但全部失败 → 真正需要告警
         error_msg = "all sources failed (local + akshare + ttfund)"
         failed_name = _lookup_index_name(index_code)
         _log_valuation_query(index_code, failed_name, query_source, "failed",
-                             0, 0, int((datetime.now() - start_ts).total_seconds() * 1000), trace_id, error_msg)
+                             0, 0, int((datetime.now() - start_ts).total_seconds() * 1000), trace_id, error_msg,
+                             conv_id=conv_id, message_id=message_id, agent_name=agent_name,
+                             user_query=user_query, cache_hit=cache_hit)
         logger.warning(f"[valuation] {index_code} 估值查询全部失败 ({query_source})")
         return None
     else:
@@ -732,13 +754,18 @@ def get_best_valuation(
         error_msg = "local sources failed, online fallback disabled"
         failed_name = _lookup_index_name(index_code)
         _log_valuation_query(index_code, failed_name, query_source, "local_failed_online_disabled",
-                             0, 0, int((datetime.now() - start_ts).total_seconds() * 1000), trace_id, error_msg)
+                             0, 0, int((datetime.now() - start_ts).total_seconds() * 1000), trace_id, error_msg,
+                             conv_id=conv_id, message_id=message_id, agent_name=agent_name,
+                             user_query=user_query, cache_hit=cache_hit)
         logger.info(f"[valuation] {index_code} 本地估值缺失，在线兜底已禁用 ({query_source})")
         return None
 
 
 def _online_fallback(index_code: str, metric_type: str, start_ts: datetime,
-                     query_source: str, trace_id: str = None) -> dict | None:
+                     query_source: str, trace_id: str = None,
+                     conv_id: int = None, message_id: int = None,
+                     agent_name: str = None, user_query: str = None,
+                     cache_hit: int = 0) -> dict | None:
     """在线兜底：akshare → 天天基金。结果仅内存缓存，不入库。
 
     使用 ThreadPoolExecutor 实现真正的超时控制，避免 akshare/MCP 调用卡住主线程。
@@ -756,7 +783,9 @@ def _online_fallback(index_code: str, metric_type: str, start_ts: datetime,
             logger.debug(f"[valuation] {index_code} 命中在线缓存 (source={cached.get('source')})")
             final_source = cached.get("source", "online_cached")
             _log_valuation_query(index_code, cached.get("index_name"), query_source, final_source,
-                                 1, 0, int((datetime.now() - start_ts).total_seconds() * 1000), trace_id, None)
+                                 1, 0, int((datetime.now() - start_ts).total_seconds() * 1000), trace_id, None,
+                                 conv_id=conv_id, message_id=message_id, agent_name=agent_name,
+                                 user_query=user_query, cache_hit=1)
             return {k: v for k, v in cached.items() if k != "_cached_at"}
         else:
             del _online_cache[cache_key]
@@ -782,7 +811,9 @@ def _online_fallback(index_code: str, metric_type: str, start_ts: datetime,
             result = {k: v for k, v in online_data.items() if k != "_cached_at"}
             final_source = "akshare"
             _log_valuation_query(index_code, result.get("index_name"), query_source, final_source,
-                                 1, 0, int((datetime.now() - start_ts).total_seconds() * 1000), trace_id, None)
+                                 1, 0, int((datetime.now() - start_ts).total_seconds() * 1000), trace_id, None,
+                                 conv_id=conv_id, message_id=message_id, agent_name=agent_name,
+                                 user_query=user_query, cache_hit=cache_hit)
             logger.info(f"[valuation] {index_code} 在线兜底成功 (akshare, {query_source})")
             return result
     except Exception as e:
@@ -806,7 +837,9 @@ def _online_fallback(index_code: str, metric_type: str, start_ts: datetime,
             result = {k: v for k, v in online_data.items() if k != "_cached_at"}
             final_source = "ttfund"
             _log_valuation_query(index_code, result.get("index_name"), query_source, final_source,
-                                 1, 0, int((datetime.now() - start_ts).total_seconds() * 1000), trace_id, None)
+                                 1, 0, int((datetime.now() - start_ts).total_seconds() * 1000), trace_id, None,
+                                 conv_id=conv_id, message_id=message_id, agent_name=agent_name,
+                                 user_query=user_query, cache_hit=cache_hit)
             logger.info(f"[valuation] {index_code} 在线兜底成功 (ttfund, {query_source})")
             return result
     except Exception as e:
@@ -1101,8 +1134,15 @@ def _lookup_index_name(index_code: str) -> str | None:
 
 def _log_valuation_query(index_code: str, index_name: str, query_source: str,
                          final_source: str, degraded: int, is_expired: int,
-                         latency_ms: int, trace_id: str, error_msg: str):
-    """记录估值查询监控日志。"""
+                         latency_ms: int, trace_id: str, error_msg: str,
+                         conv_id: int = None, message_id: int = None,
+                         agent_name: str = None, user_query: str = None,
+                         cache_hit: int = 0):
+    """记录估值查询监控日志。
+
+    扩展字段：conv_id/message_id/agent_name/user_query/cache_hit，
+    用于把估值查询关联回具体对话、专家和用户问题。
+    """
     try:
         from db.config import get_config_bool
         if not get_config_bool("valuation.monitoring_enabled", True):
@@ -1111,10 +1151,13 @@ def _log_valuation_query(index_code: str, index_name: str, query_source: str,
         conn.execute("""
             INSERT INTO valuation_query_logs
                 (index_code, index_name, query_source, final_source,
-                 degraded, is_expired, latency_ms, trace_id, error_msg)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 degraded, is_expired, latency_ms, trace_id, error_msg,
+                 conv_id, message_id, agent_name, user_query, cache_hit)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (index_code, index_name, query_source, final_source,
-              degraded, is_expired, latency_ms, trace_id, error_msg))
+              degraded, is_expired, latency_ms, trace_id, error_msg,
+              conv_id, message_id, agent_name,
+              (user_query or "")[:500], cache_hit))
         conn.commit()
         conn.close()
     except Exception as e:

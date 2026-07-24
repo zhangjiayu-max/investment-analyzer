@@ -24,6 +24,7 @@ from db.config import get_config, get_config_int, get_config_float
 from agent.infra.orchestrator_optimizer import OrchestratorOptimizer, ParallelExecutor
 from agent.infra.cache import expert_cache
 from services.conversation_context import record_entity_snapshots
+from services.valuation.valuation_monitor import check_valuation_reference
 from agent.core.task_planner import (
     classify_question_type,
     build_shared_evidence_keys,
@@ -185,6 +186,34 @@ def _build_flow_metadata(
         "arbitration_mode": arbitration_mode,
         "shared_evidence_keys": shared_evidence_keys,
     }
+
+
+def _record_valuation_references(specialist_results: list, final_answer: str | None,
+                                  trace_id: str, conversation_id: int, message_id: int):
+    """记录专家分析与综合报告对估值数据的引用情况（不阻塞主流程）。"""
+    try:
+        for sr in specialist_results:
+            if sr.get("is_cross_review"):
+                continue
+            check_valuation_reference(
+                trace_id=trace_id,
+                conv_id=conversation_id or None,
+                message_id=message_id or None,
+                agent_name=sr.get("agent", sr.get("agent_key", "unknown")),
+                analysis_type="specialist",
+                analysis_text=sr.get("analysis", ""),
+            )
+        if final_answer:
+            check_valuation_reference(
+                trace_id=trace_id,
+                conv_id=conversation_id or None,
+                message_id=message_id or None,
+                agent_name="orchestrator",
+                analysis_type="synthesis",
+                analysis_text=final_answer,
+            )
+    except Exception as e:
+        logger.debug(f"[valuation_monitor] 记录引用检测失败: {e}")
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -3880,6 +3909,7 @@ def orchestrate(query: str, history: list, rag_context: str = "", cancel_event: 
                                 )
                             except Exception as _e:
                                 logger.warning(f"[trace:{trace_id}] [P1-1] 结论持久化失败(早返回路径): {_e}")
+                        _record_valuation_references(specialist_results, answer, trace_id, conversation_id, message_id)
                         _schedule_tool_eval(query, specialist_results)
                         return _result
                 else:
@@ -3980,6 +4010,7 @@ def orchestrate(query: str, history: list, rag_context: str = "", cancel_event: 
                 }
                 if conversation_id:
                     _schedule_auto_evaluation(conversation_id, message_id, _result)
+                _record_valuation_references(specialist_results, answer, trace_id, conversation_id, message_id)
                 _schedule_tool_eval(query, specialist_results)
                 return _result
 
@@ -4191,6 +4222,7 @@ def orchestrate(query: str, history: list, rag_context: str = "", cancel_event: 
             )
         except Exception as _e:
             logger.warning(f"[trace:{trace_id}] [P1-1] 结论持久化失败(终返回路径): {_e}")
+    _record_valuation_references(specialist_results, final_answer, trace_id, conversation_id, message_id)
     return {
         "answer": final_answer,
         "specialist_results": specialist_results,
@@ -5268,6 +5300,9 @@ def _stream_final_synthesis(query: str, refined_query: str, specialists: list,
             f"[trace:{trace_id}] [orchestrator] 卖出时机守卫失败: {_timing_err}"
         )
 
+    # 估值数据利用监测：记录综合报告对估值数据的引用情况
+    _record_valuation_references(specialist_results, final_answer, trace_id, conversation_id, message_id)
+
     duration_ms = int((time.time() - start_time) * 1000)
     perf_metrics["phases"]["total"] = duration_ms
     perf_metrics["complexity"] = complexity
@@ -5679,6 +5714,7 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
                         "tool_calls": [tc for sr in specialist_results for tc in sr.get("tool_calls", [])],
                         "duration_ms": duration_ms, "complexity": complexity, "conflicts": conflicts,
                     })
+                _record_valuation_references(specialist_results, fb_result["answer"], trace_id, conversation_id, message_id)
                 yield {
                     "type": "answer",
                     "content": fb_result["answer"],
@@ -6013,6 +6049,9 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
             })
 
         yield {"type": "status", "message": "正在综合各专家意见..."}
+
+        # 估值数据利用监测：记录本轮专家分析对估值的引用情况
+        _record_valuation_references(specialist_results, None, trace_id, conversation_id, message_id)
 
         # 增强2: 动态 Agent 选择 — 检测是否需要追加专家（预算门控）
         _check_cancel(cancel_event)
