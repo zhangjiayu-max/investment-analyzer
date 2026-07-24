@@ -262,6 +262,13 @@ async function autoRecoverIfNeeded(convId) {
       if (state?.sending) return
       const hasAssistantAfter = msgs.some((m, i) => i > msgs.indexOf(lastMsg) && m.role === 'assistant')
       if (!hasAssistantAfter) {
+        // 对话历史中已有完成的 assistant 回答时，这条 user 消息可能是重复发送的
+        // （如 409 后 DB 仍保留 user 消息但前端已移除内存副本），不自动恢复避免循环
+        const hasCompletedAssistant = msgs.some(m => m.role === 'assistant' && m.execution_status === 'completed')
+        if (hasCompletedAssistant) {
+          console.log('[ChatView] 对话已完成，不自动恢复可能重复的 user 消息')
+          return
+        }
         showToast('检测到中断的请求，正在重新执行...', 'info')
         sendMessageAndTrack(convId, lastMsg.content)
       }
