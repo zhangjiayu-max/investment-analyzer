@@ -2201,25 +2201,51 @@ def classify_fund_category(fund_name: str, fund_type: str = "", fund_code: str =
 
 
 def get_fund_holdings(fund_code: str, year: str = None) -> dict:
-    """获取基金持仓详情：股票重仓 + 债券持仓 + 资产配置（三级兜底：akshare → ttfund → 本地快照）。
+    """获取基金持仓详情：股票重仓 + 债券持仓 + 资产配置。
 
-    P0-6 系统性修复：conv 129 根因之三修复
-    - 问题：akshare `fund_portfolio_hold_em` / `fund_portfolio_bond_hold_em` 对所有基金报
-      `JSONDecodeError: Can not decode value starting with character ';'`，导致 top_stocks 永远为空
-    - 修复：akshare 失效时依次尝试 ttfund MCP → 本地综合快照表，确保穿透数据非空
+    G-ttfund-priority（2026-07-24）：动态路由 akshare/ttfund。
+    - akshare 持续反爬失败率 > 80% 时跳过 akshare，直接走 ttfund
+    - ttfund 未登录或失败时回退 akshare（一次性尝试）
+    - akshare 部分成功（如 asset_allocation 可用）+ ttfund 成功时合并
+    - 全部失败时降级到本地综合快照表
     """
     if not year:
         from datetime import datetime
         year = str(datetime.now().year)
 
-    # 第 1 级：akshare 主路径
+    # 检测 akshare 持续反爬接口（fund_portfolio_hold_em / fund_portfolio_bond_hold_em）
+    # 这两个接口在 conv#136 后被东财 100% 反爬拦截，先调 akshare 等于白等 30s 超时
+    from infra.akshare_stats import should_skip_akshare
+    skip_hold = should_skip_akshare("fund_portfolio_hold_em")
+    skip_bond = should_skip_akshare("fund_portfolio_bond_hold_em")
+    # 行业配置接口失败率较低（~44%），保留 akshare 主路径
+
+    # ── 路径 A：akshare 持续反爬 → ttfund 优先 ──
+    if skip_hold and skip_bond:
+        logger.info(f"[fund_holdings] {fund_code} akshare 持续反爬，直接走 ttfund")
+        ttfund_data = _ttfund_fund_holding(fund_code)
+        if ttfund_data and ttfund_data.get("top_stocks"):
+            # ttfund 成功 → 仍尝试 akshare 的 asset_allocation / industry_allocation 补充
+            akshare_partial = _akshare_fund_holdings_partial(fund_code, year, skip_hold=True, skip_bond=True)
+            merged = _merge_holdings(akshare_partial, ttfund_data)
+            merged["_data_source"] = "ttfund_priority"
+            _save_full_snapshot_silent(fund_code, merged, "ttfund")
+            return merged
+        # ttfund 失败（未登录/无数据）→ 降级 akshare 一次性尝试
+        logger.warning(f"[fund_holdings] {fund_code} ttfund 不可用，降级 akshare 一次性尝试")
+        # 清空 skip 缓存，本次走 akshare
+        from infra.akshare_stats import invalidate_skip_cache
+        invalidate_skip_cache("fund_portfolio_hold_em")
+        invalidate_skip_cache("fund_portfolio_bond_hold_em")
+
+    # ── 路径 B：akshare 主路径（正常或降级）──
     result = _akshare_fund_holdings(fund_code, year)
     if result.get("top_stocks"):
         # akshare 成功 → 写入综合快照 + 细粒度快照
         _save_full_snapshot_silent(fund_code, result, "akshare")
         return result
 
-    # 第 2 级：ttfund MCP 兜底（需先登录）
+    # 第 2 级：ttfund MCP 兜底（akshare top_stocks 为空时）
     ttfund_data = _ttfund_fund_holding(fund_code)
     if ttfund_data and ttfund_data.get("top_stocks"):
         # 合并 akshare 的部分有效数据（asset_allocation / industry_allocation 通常仍可用）
@@ -2244,6 +2270,56 @@ def get_fund_holdings(fund_code: str, year: str = None) -> dict:
     # 全部失败：返回 akshare 的部分结果（可能含 asset_allocation / industry_allocation）
     if not result.get("_data_source"):
         result["_data_source"] = "akshare_partial_failure"
+    return result
+
+
+def _akshare_fund_holdings_partial(fund_code: str, year: str,
+                                    skip_hold: bool = False, skip_bond: bool = False) -> dict:
+    """ttfund 优先时补充 akshare 的 asset_allocation / industry_allocation。
+
+    skip_hold / skip_bond 为 True 时跳过对应接口（已知持续反爬），只取仍可用的部分。
+    """
+    result = {
+        "fund_code": fund_code,
+        "top_stocks": [],
+        "bond_holdings": [],
+        "asset_allocation": [],
+        "industry_allocation": [],
+        "bond_type_summary": {},
+        "report_date": None,
+    }
+
+    # 3. 资产配置（fund_individual_detail_hold_xq 失败率低，仍可调用）
+    try:
+        import akshare as ak
+        df = call_akshare_with_timeout(
+            ak.fund_individual_detail_hold_xq, symbol=fund_code, timeout=15,
+        )
+        if df is not None and len(df) > 0:
+            for _, r in df.iterrows():
+                result["asset_allocation"].append({
+                    "type": str(r.get("资产类型", "")),
+                    "pct": str(r.get("仓位占比", "")),
+                })
+    except Exception as e:
+        logger.warning(f"[fund_holdings] akshare 资产配置失败 {fund_code}: {e}")
+
+    # 4. 行业配置
+    try:
+        import akshare as ak
+        df = call_akshare_with_timeout(
+            ak.fund_portfolio_industry_allocation_em,
+            symbol=fund_code, date=year, timeout=15,
+        )
+        if df is not None and len(df) > 0:
+            for _, r in df.head(10).iterrows():
+                result["industry_allocation"].append({
+                    "industry": str(r.get("行业类别", "")),
+                    "pct_nav": float(r.get("占净值比例", 0)),
+                })
+    except Exception as e:
+        logger.warning(f"[fund_holdings] akshare 行业配置失败 {fund_code}: {e}")
+
     return result
 
 

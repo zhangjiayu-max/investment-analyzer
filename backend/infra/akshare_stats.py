@@ -185,3 +185,67 @@ def reset() -> None:
     """重置统计（测试用）。"""
     with _lock:
         _records.clear()
+
+
+# ── 持续反爬检测 ──────────────────────────────────────────
+# 缓存：fn_name → (last_check_ts, should_skip)
+# 5 分钟内复用结果，避免每次调用都扫一遍 records
+_skip_cache: dict[str, tuple[float, bool]] = {}
+_SKIP_CACHE_TTL = 300  # 5 分钟
+_SKIP_SAMPLE_MIN = 5   # 样本数下限，少于 5 次时不跳过（数据不足）
+_SKIP_FAILURE_THRESHOLD = 0.8  # 失败率 > 80% 才跳过
+
+
+def should_skip_akshare(fn_name: str, window_seconds: int = 3600) -> bool:
+    """判断某 akshare 接口是否应跳过（持续反爬/失败率过高）。
+
+    用途：get_fund_holdings 等高频接口在 akshare 持续反爬时直接走 ttfund，
+    避免每次都先白白浪费 15s 超时等待。
+
+    判定规则（窗口内）：
+    - 样本数 ≥ 5（数据不足时不跳过，保留兜底）
+    - 失败率（failure + anti_crawl + timeout）/ total > 80%
+
+    Args:
+        fn_name: akshare 函数名（如 fund_portfolio_hold_em）
+        window_seconds: 统计窗口，默认 1h
+
+    Returns:
+        True 表示该接口持续失败，应跳过 akshare 直接走 ttfund
+    """
+    now = time.time()
+    cached = _skip_cache.get(fn_name)
+    if cached and now - cached[0] < _SKIP_CACHE_TTL:
+        return cached[1]
+
+    stats = get_stats(window_seconds=window_seconds)
+    should_skip = False
+    sample_sufficient = False
+    for fn in stats.get("by_function", []):
+        if fn["fn_name"] == fn_name:
+            if fn["total"] >= _SKIP_SAMPLE_MIN:
+                sample_sufficient = True
+                failure_rate = fn["failure_rate"]
+                if failure_rate > _SKIP_FAILURE_THRESHOLD:
+                    should_skip = True
+                    # 仅在状态变化时记日志
+                    if not cached or cached[1] != should_skip:
+                        logger.warning(
+                            f"[akshare-stats] {fn_name} 失败率 {failure_rate*100:.0f}% "
+                            f"({fn['failure'] + fn['anti_crawl'] + fn['timeout']}/{fn['total']}) "
+                            f"> 阈值 {_SKIP_FAILURE_THRESHOLD*100:.0f}%，将跳过 akshare 改走 ttfund"
+                        )
+            break
+
+    # 仅在样本充足时缓存；样本不足时不缓存，下次调用重新判断（避免冷启动期 False 被锁 5 分钟）
+    if sample_sufficient:
+        _skip_cache[fn_name] = (now, should_skip)
+    return should_skip
+
+
+def invalidate_skip_cache(fn_name: str = None) -> None:
+    """清空跳过判定缓存（ttfund 失败回退 akshare 时调用，或测试用）。"""
+    if fn_name:
+        _skip_cache.pop(fn_name, None)
+    else:
+        _skip_cache.clear()
