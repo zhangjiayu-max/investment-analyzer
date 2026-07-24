@@ -751,6 +751,26 @@ def _phase_preprocess(
     except Exception as e:
         logger.debug(f"[pipeline] Query 改写跳过: {e}")
 
+    # 2.5 文章内容抓取与注入（G-article-fix, 2026-07-24）
+    # 根因：pipeline 路径未调用 enrich_query_with_article，导致非 article_expert 专家
+    #   （如 risk_assessor）收不到文章内容，只能回复"我无法访问链接"。
+    # 修复：检测 URL 后抓取文章，注入到 refined_query，使所有专家都能看到文章。
+    # article_expert 也不再需要自行调用 fetch_article 工具，节省 1 轮检索。
+    article_context = ""
+    try:
+        from agent.core.orchestrator import enrich_query_with_article, detect_urls
+        if detect_urls(query):
+            enriched_query, article_context = enrich_query_with_article(query)
+            if article_context and not article_context.startswith("[抓取失败]"):
+                # 用 enriched_query 替换 refined_query（保留文章内容）
+                # 注意：只在抓取成功时替换，失败时保持原 query 让专家引导用户
+                refined_query = enriched_query
+                logger.info(f"[pipeline] 文章内容已注入 refined_query ({len(article_context)} 字符)")
+            else:
+                logger.warning(f"[pipeline] 文章抓取失败，专家将引导用户粘贴正文")
+    except Exception as e:
+        logger.warning(f"[pipeline] 文章抓取注入失败（不阻塞主流程）: {e}")
+
     # 3. 复杂度（优先用 query_understander 的结果）
     complexity = query_info.get("complexity", "medium")
 
@@ -762,6 +782,7 @@ def _phase_preprocess(
         "intent": query_info.get("intent", ""),
         "targets": query_info.get("targets", []),
         "needed_info": query_info.get("needed_info", []),
+        "article_context": article_context,
     }
 
 
