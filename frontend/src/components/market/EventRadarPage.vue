@@ -4112,6 +4112,141 @@ watch(scrollToFundCode, async (code) => {
   
   /* 验证标签在移动端更小 */
   .verify-tag { font-size: 0.62rem; padding: 0.12rem 0.4rem; }
+
+  /* ── 事件卡片内容格式优化 ── */
+  /* 事件段落间距收紧，标签更紧凑 */
+  .event-section { margin-top: 0.4rem; }
+  .section-label { font-size: 0.66rem; margin-right: 0.35rem; }
+  .tag-list { gap: 0.25rem; }
+
+  /* 候选基金卡片 —— 移动端换行，避免名称与按钮挤压 */
+  .candidate-item {
+    flex-wrap: wrap;
+    padding: 0.45rem 0.55rem;
+    gap: 0.35rem;
+  }
+  .candidate-info { flex: 1; min-width: 60%; }
+  .candidate-name { font-size: 0.76rem; }
+  .candidate-reason { font-size: 0.66rem; line-height: 1.4; }
+  .btn-watch-add { padding: 0.22rem 0.5rem; font-size: 0.68rem; }
+
+  /* 关联持仓项 —— 移动端允许换行 */
+  .holding-item { flex-wrap: wrap; padding: 0.22rem 0.45rem; font-size: 0.74rem; }
+  .holding-item .holding-reason { font-size: 0.68rem; }
+
+  /* 事件影响操作区 —— 移动端紧凑 */
+  .event-impact-section { gap: 0.35rem; margin-top: 0.5rem; padding-top: 0.4rem; }
+  .btn-event-impact,
+  .btn-event-amount { padding: 0.28rem 0.55rem; font-size: 0.7rem; }
+  .btn-impact-toggle { padding: 0.22rem 0.45rem; font-size: 0.66rem; }
+
+  /* 金额影响表格 —— 移动端4列收紧，字体缩小 */
+  .event-amount-content { padding: 0.4rem 0.5rem; font-size: 0.72rem; }
+  .amount-row {
+    grid-template-columns: 1.6fr 0.7fr 0.9fr 1.1fr;
+    gap: 0.25rem;
+    padding: 0.18rem 0;
+  }
+  .amount-row.amount-header { font-size: 0.62rem; }
+  .amount-name { font-size: 0.72rem; }
+
+  /* 深度解读内容区 —— 移动端padding收紧 */
+  .event-impact-content { padding: 0.55rem 0.65rem; font-size: 0.76rem; line-height: 1.55; }
+  .event-impact-content :deep(h3) { font-size: 0.8rem; }
+  .event-impact-content :deep(ul),
+  .event-impact-content :deep(ol) { padding-left: 1rem; }
+
+  /* ── 关注基金卡片(wl-card)移动端优化 ── */
+  .wl-card { padding: 0.7rem 0.75rem; gap: 0.4rem; }
+  .wl-card-header { gap: 0.35rem; flex-wrap: wrap; align-items: flex-start; }
+  .wl-name-block { gap: 0.25rem; }
+  .wl-fund-name { font-size: 0.82rem; line-height: 1.3; }
+  .wl-joined-date { font-size: 0.64rem; }
+  .wl-priority-tag { font-size: 0.58rem; padding: 0.06rem 0.28rem; }
+  .wl-signal-tag { font-size: 0.66rem; padding: 0.12rem 0.4rem; }
+  .wl-exit-badge,
+  .wl-volatility-badge,
+  .wl-auto-sync-badge { font-size: 0.6rem; padding: 0.1rem 0.35rem; }
+
+  /* 来源事件说明 —— 移动端紧凑 */
+  .wl-source-row { padding: 0.32rem 0.45rem; gap: 0.3rem; }
+  .wl-source-text { font-size: 0.68rem; line-height: 1.45; }
+
+  /* 3列关键指标 —— 移动端保持3列但更紧凑 */
+  .wl-key-grid { gap: 0.35rem; padding: 0.3rem 0; }
+  .wl-key-item { padding: 0.35rem 0.25rem; }
+  .wl-key-label { font-size: 0.6rem; margin-bottom: 0.1rem; }
+  .wl-key-value { font-size: 0.78rem; }
+  .wl-key-hint { font-size: 0.56rem; }
+
+  /* 信号理由 —— 移动端紧凑 */
+  .wl-signal-reason { font-size: 0.68rem; padding: 0.3rem 0.45rem; line-height: 1.45; }
+
+  /* 展开/收起按钮 —— 移动端紧凑 */
+  .wl-expand-bar { padding: 0.28rem 0; font-size: 0.66rem; gap: 0.3rem; }
+  .wl-expand-hint { font-size: 0.6rem; }
+
+  /* 折叠详情区 —— 移动端收紧 */
+  .wl-card-details { padding-top: 0.4rem; margin-top: 0.2rem; }
+  .wl-data-row { font-size: 0.74rem; gap: 0.35rem; padding: 0.12rem 0; }
+  .wl-data-label { font-size: 0.7rem; }
+  .wl-data-value { font-size: 0.74rem; }
+  .wl-pct-hint,
+  .wl-pe-pb { font-size: 0.6rem; padding: 0.08rem 0.3rem; margin-left: 0.2rem; }
+  .wl-change-tag { font-size: 0.64rem; padding: 0.1rem 0.3rem; }
+
+  /* 卡片底部 —— 移动端紧凑 */
+  .wl-card-footer { padding-top: 0.3rem; gap: 0.3rem; flex-wrap: wrap; }
+  .wl-updated { font-size: 0.66rem; }
+  .btn-wl-entry,
+  .btn-wl-edit,
+  .btn-wl-remove { font-size: 0.66rem; padding: 0.18rem 0.45rem; }
+
+  /* 排序工具栏 —— 移动端换行 */
+  .wl-sort-bar { gap: 0.35rem; margin-bottom: 0.5rem; }
+  .wl-sort-label { font-size: 0.7rem; }
+  .wl-sort-btn { font-size: 0.68rem; padding: 0.22rem 0.5rem; }
+
+  /* ── 领先指标卡片移动端优化 ── */
+  .backtest-stats-row { gap: 0.4rem; margin-bottom: 0.6rem; }
+  .backtest-stat-card { padding: 0.4rem 0.5rem; min-width: 78px; }
+  .bs-source { font-size: 10px; }
+  .bs-rate { font-size: 17px; }
+  .bs-detail { font-size: 9px; }
+
+  .leading-signal-list { gap: 0.5rem; }
+  .leading-signal-card { padding: 0.6rem 0.7rem; border-radius: 8px; }
+  .ls-header { gap: 0.35rem; margin-bottom: 0.3rem; }
+  .ls-type-tag { font-size: 10px; padding: 2px 6px; }
+  .ls-level-badge { font-size: 9px; padding: 2px 6px; }
+  .ls-direction { font-size: 10px; }
+  .ls-date { font-size: 10px; }
+  .ls-title { font-size: 13px; line-height: 1.35; margin-bottom: 0.2rem; }
+  .ls-summary { font-size: 11px; line-height: 1.5; margin-bottom: 0.3rem; }
+  .ls-sectors { gap: 0.2rem; margin-bottom: 0.2rem; }
+  .ls-sector-tag { font-size: 9px; padding: 1px 5px; }
+  .ls-metric-value { font-size: 12px; }
+  .ls-metric-yoy { font-size: 10px; }
+  .ls-source-link { font-size: 10px; }
+
+  /* ── 落地验证区移动端优化 ── */
+  .accuracy-panel { padding: 0.7rem 0.8rem; margin-bottom: 0.6rem; }
+  .accuracy-body { gap: 0.8rem; flex-direction: column; }
+  .accuracy-overall { min-width: 0; }
+  .accuracy-value { font-size: 1.3rem; }
+  .verify-section-header { padding: 0.55rem 0.75rem; }
+  .verify-section-title { font-size: 0.8rem; }
+  .verify-event-row { padding: 0.45rem 0.75rem; gap: 0.4rem; font-size: 0.74rem; }
+  .verify-event-date { width: 58px; font-size: 0.68rem; }
+  .verify-guide { padding: 0.7rem 0.8rem; gap: 0.4rem; }
+  .verify-guide-text { font-size: 0.74rem; min-width: 0; }
+  .btn-verify-goto-events { padding: 0.3rem 0.6rem; font-size: 0.7rem; }
+
+  /* ── 今日操作建议横幅移动端优化 ── */
+  .daily-advice-banner { padding: 0.55rem 0.7rem; gap: 0.4rem; }
+  .da-content { font-size: 0.76rem; gap: 0.3rem; }
+  .da-icon { font-size: 1rem; }
+  .da-tag { font-size: 0.64rem; padding: 0.16rem 0.4rem; }
 }
 
 /* ── 验证按钮 ── */
