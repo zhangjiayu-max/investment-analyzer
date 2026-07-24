@@ -818,11 +818,20 @@ async function handleSend() {
       },
       onError: (cid, data) => {
         if (selectedConv.value?.id === cid) {
-          messages.value.push({
-            role: 'assistant',
-            content: '发生错误: ' + (data.message || '未知错误'),
-            created_at: new Date().toISOString(),
-          })
+          // 409 重复请求：移除刚 push 的 user 消息，用 toast 温和提示
+          if (data.status === 409) {
+            const lastMsg = messages.value[messages.value.length - 1]
+            if (lastMsg && lastMsg.role === 'user') {
+              messages.value.pop()
+            }
+            showToast(data.message || '该问题已处理完成，请勿重复发送', 'warning')
+          } else {
+            messages.value.push({
+              role: 'assistant',
+              content: '发生错误: ' + (data.message || '未知错误'),
+              created_at: new Date().toISOString(),
+            })
+          }
         }
         finishStream(cid)
         removeTask(cid)
@@ -900,11 +909,20 @@ function handleClarifyAnswer(msg, answer) {
       },
       onError: (cid, data) => {
         if (selectedConv.value?.id === cid) {
-          messages.value.push({
-            role: 'assistant',
-            content: '发生错误: ' + (data.message || '未知错误'),
-            created_at: new Date().toISOString(),
-          })
+          // 409 重复请求：移除刚 push 的 user 消息，用 toast 温和提示
+          if (data.status === 409) {
+            const lastMsg = messages.value[messages.value.length - 1]
+            if (lastMsg && lastMsg.role === 'user') {
+              messages.value.pop()
+            }
+            showToast(data.message || '该问题已处理完成，请勿重复发送', 'warning')
+          } else {
+            messages.value.push({
+              role: 'assistant',
+              content: '发生错误: ' + (data.message || '未知错误'),
+              created_at: new Date().toISOString(),
+            })
+          }
         }
         finishStream(cid)
         removeTask(cid)
