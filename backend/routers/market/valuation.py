@@ -6,6 +6,7 @@ import logging
 import re
 import ssl
 import time
+import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
 

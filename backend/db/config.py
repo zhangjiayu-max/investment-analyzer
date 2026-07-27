@@ -155,12 +155,12 @@ DEFAULT_CONFIGS = [
     ('cost_routing.allocation_advisor_model', 'mimo-v2.5-pro', '配置专家模型', 'cost_routing'),
     ('cost_routing.fund_analyst_model', 'mimo-v2.5-pro', '基金分析模型', 'cost_routing'),
     ('cost_routing.risk_assessor_model', 'mimo-v2.5-pro', '风控专家模型', 'cost_routing'),
-    ('cost_routing.market_analyst_model', 'deepseek-v4-flash', '市场分析模型', 'cost_routing'),
+    ('cost_routing.market_analyst_model', 'mimo-v2.5-pro', '市场分析模型', 'cost_routing'),
     ('cost_routing.behavioral_coach_model', 'mimo-v2.5-pro', '行为辅导模型', 'cost_routing'),
     ('cost_routing.cross_review_model', 'mimo-v2.5-pro', '交叉审阅模型', 'cost_routing'),
     # P2: 模型分级（趋势/文本类用便宜模型，推理/仲裁类用强模型）
-    ('cost_routing.macro_strategist_model', 'deepseek-v4-flash', '宏观策略师模型（趋势判断）', 'cost_routing'),
-    ('cost_routing.article_expert_model', 'deepseek-v4-flash', '文章解读专家模型（文本摘要）', 'cost_routing'),
+    ('cost_routing.macro_strategist_model', 'mimo-v2.5-pro', '宏观策略师模型（趋势判断）', 'cost_routing'),
+    ('cost_routing.article_expert_model', 'mimo-v2.5-pro', '文章解读专家模型（文本摘要）', 'cost_routing'),
     ('cost_routing.arbitrator_model', 'mimo-v2.5-pro', '仲裁专家模型（需强推理）', 'cost_routing'),
     ('cost_routing.debate_arbitrator_model', 'mimo-v2.5-pro', '辩论仲裁模型（需强推理）', 'cost_routing'),
 
@@ -243,7 +243,7 @@ DEFAULT_CONFIGS = [
 
     # M3/M5/M2/M7 多Agent整体增强开关（2026-07-16 Phase 2/3）
     ('agent.force_devil_advocate_enabled', 'true', '强制魔鬼代言人开关：交叉审阅disagreements为空时二次提示强制反驳，串行最后位专家注入质疑角色', 'agent'),
-    ('agent.devil_advocate_model', 'deepseek-v4-flash', '魔鬼代言人使用的轻量模型（控制成本）', 'agent'),
+    ('agent.devil_advocate_model', 'mimo-v2.5-pro', '魔鬼代言人使用的轻量模型（控制成本）', 'agent'),
     ('agent.deep_synthesis_enabled', 'true', '综合报告深度保留开关：5段结构(核心结论/推理链条/分歧反驳/操作建议/风险提示)，结论长度300字，max_tokens提升至3000', 'agent'),
     ('agent.industry_fundamentalist_enabled', 'true', '行业基本面分析师开关：自下而上行业景气度分析（批价/动销/库存/产能），补全估值/风险/配置之外的维度', 'agent'),
     ('agent.behavioral_advisor_enabled', 'true', '行为金融学专家开关：识别追涨杀跌/损失厌恶/处置效应/锚定效应等6大偏差，给行为纠偏建议', 'agent'),

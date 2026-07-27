@@ -95,16 +95,8 @@ def get_llm_config() -> tuple[str, str, str]:
 def get_llm_fallback_config() -> tuple[str, str, str] | None:
     """返回兜底 LLM 配置，主用失败时使用。
 
-    - LLM_PROVIDER=deepseek 时无 fallback（MIMO 已停用，避免无效重试）
-    - LLM_PROVIDER=mimo 时 fallback 到 DeepSeek
+    用户要求禁用 deepseek：MIMO 失败直接异常，不 fallback。
     """
-    if LLM_PROVIDER == "deepseek":
-        return None
-    # MIMO 模式下，DeepSeek 作为 fallback
-    # 优先用 DEEPSEEK_API_KEY，其次复用 ARBITRATION_API_KEY（同一个 DeepSeek 账号）
-    _ds_key = DEEPSEEK_API_KEY or ARBITRATION_API_KEY
-    if (MIMO_PLAN_API_KEY or MIMO_API_KEY) and _ds_key:
-        return _ds_key, DEEPSEEK_BASE_URL, DEEPSEEK_MODEL
     return None
 
 

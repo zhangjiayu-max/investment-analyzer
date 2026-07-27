@@ -654,6 +654,7 @@ async def resume_conversation(conv_id: int, request: Request):
                         "specialist_results": specialist_results_so_far,
                         "complexity": final_complexity,
                         "duration_ms": duration_ms,
+                        "tool_calls": tool_calls_so_far,
                     })
             elif event_type == "cancelled":
                 update_message_metadata(stream_msg_id, {

@@ -1941,7 +1941,7 @@ def _llm_policy_analysis(theme_rule: dict, news_hits: list[dict]) -> dict | None
         from services.llm.llm_service import _call_llm
         resp = _call_llm(
             caller="opportunity_policy_analysis",
-            model="deepseek-v4-flash",
+            model=None,  # 使用默认 MIMO 模型（禁用 deepseek）
             messages=[{"role": "user", "content": prompt}],
             temperature=0.2,
             max_tokens=400,
@@ -2030,7 +2030,7 @@ def _llm_deep_review(item: dict, valuation: dict | None,
         from services.llm.llm_service import _call_llm
         resp = _call_llm(
             caller="opportunity_deep_review",
-            model="deepseek-v4-flash",
+            model=None,  # 使用默认 MIMO 模型（禁用 deepseek）
             messages=[{"role": "user", "content": prompt}],
             temperature=0.2,
             max_tokens=600,
