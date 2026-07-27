@@ -1082,6 +1082,117 @@ def _validate_tool_result(name: str, result_str: str) -> tuple:
     return True, ""
 
 
+# ── 工具结果 _warning 注入（P0: 工具错误结果未识别） ──
+# 专家 prompt 会引用 _warning 字段，提示"工具调用失败，以下基于定性判断"
+
+
+def _check_valuation_warning(data, query_name: str) -> str:
+    """检查 query_valuation/query_online_valuation 结果是否需要告警。
+
+    - 索引名称与查询参数不匹配 → 告警
+    - 所有指标值（current_value/percentile）全为 null → 告警
+    """
+    # 提取指数条目列表（兼容 list / {"indexes": [...]} / {"ok": True, "indexes": [...]} 格式）
+    entries = []
+    if isinstance(data, list):
+        entries = data
+    elif isinstance(data, dict):
+        if isinstance(data.get("indexes"), list):
+            entries = data["indexes"]
+        elif "index_name" in data or "index_code" in data:
+            entries = [data]
+        elif isinstance(data.get("results"), list):
+            entries = data["results"]
+
+    if not entries:
+        # 无条目且非明确的 ok 响应 → 数据缺失
+        if isinstance(data, dict) and data.get("error"):
+            return None  # 错误已由 _validate_tool_result 处理
+        return "估值数据缺失或索引不匹配"
+
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        # 索引名称不匹配检查
+        idx_name = entry.get("index_name", "")
+        if idx_name and query_name and _has_meaningful_mismatch(query_name, idx_name):
+            return f"估值数据缺失或索引不匹配（查询'{query_name}'但返回'{idx_name}'）"
+        # 所有指标值全 null 检查
+        metrics = entry.get("metrics", [])
+        if metrics:
+            all_null = all(
+                m.get("current_value") is None and m.get("percentile") is None
+                for m in metrics if isinstance(m, dict)
+            )
+            if all_null:
+                return "估值数据缺失或索引不匹配（所有指标值为 null）"
+        elif entry.get("data_status") in ("unavailable", "all_failed"):
+            return "估值数据缺失或索引不匹配"
+    return None
+
+
+def _check_policy_news_warning(data) -> str:
+    """检查 query_policy_news 结果是否需要告警。
+
+    - items 为空 → 告警
+    - 任何 item 的 title/snippet 包含 "API Key" 错误文本 → 告警
+    """
+    if not isinstance(data, dict):
+        return None
+    items = data.get("items", [])
+    if not items:
+        return "政策新闻工具不可用（未返回任何新闻）"
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        text = (str(item.get("title", "")) + str(item.get("snippet", "")) + str(item.get("source", "")))
+        if "API Key" in text or "api key" in text.lower() or "首次使用" in text:
+            return "政策新闻工具不可用：API Key 未配置或数据源返回错误"
+    return None
+
+
+def _inject_tool_warning(name: str, arguments: dict, result_str: str) -> str:
+    """为工具结果注入 _warning 字段，提示专家工具调用失败（P0: 工具错误结果未识别）。
+
+    保守注入：仅在明确判定异常时添加 _warning，不影响正常结果。
+    """
+    if not result_str:
+        return result_str
+    try:
+        data = json.loads(result_str)
+    except (json.JSONDecodeError, ValueError):
+        return result_str  # 非 JSON 结果不注入
+
+    warning = None
+
+    # query_valuation / query_online_valuation：估值数据缺失或索引不匹配
+    if name in ("query_valuation", "query_online_valuation"):
+        query_name = (arguments or {}).get("index_name", "")
+        warning = _check_valuation_warning(data, query_name)
+
+    # query_policy_news：政策新闻工具不可用
+    elif name == "query_policy_news":
+        warning = _check_policy_news_warning(data)
+
+    # 一般工具：返回空结果（None / 空 dict / 空 list）
+    else:
+        if data is None or data == {} or data == [] or data == "":
+            warning = "工具返回空结果"
+
+    if not warning:
+        return result_str
+
+    # 注入 _warning（兼容 dict / list 两种结果格式）
+    if isinstance(data, dict):
+        data["_warning"] = warning
+        return json.dumps(data, ensure_ascii=False)
+    elif isinstance(data, list):
+        # 列表结果：包裹为 dict，保留原始列表在 results 字段
+        wrapped = {"_warning": warning, "results": data}
+        return json.dumps(wrapped, ensure_ascii=False)
+    return result_str
+
+
 def execute_tool(name: str, arguments: dict, trace_id: str = "",
                  timeout: int = 30, conversation_id: int = None, message_id: int = None,
                  agent_name: str = None, user_query: str = None) -> str:
@@ -1211,6 +1322,13 @@ def execute_tool(name: str, arguments: dict, trace_id: str = "",
         _log_tool_audit(trace_id, name, arguments, result, error_category, duration_ms)
     except Exception as e:
         logger.debug(f"工具审计日志写入失败: {e}")
+
+    # P0 修复：工具结果 _warning 注入（在缓存写入前，确保缓存结果也带 warning）
+    # 专家 prompt 会引用 _warning 字段，提示"工具调用失败，以下基于定性判断"
+    try:
+        result = _inject_tool_warning(name, arguments or {}, result)
+    except Exception as _we:
+        logger.debug(f"工具 {name} _warning 注入异常: {_we}")
 
     # ── 写入缓存（仅成功且有效的数据查询结果）──
     # data_missing 也缓存，避免重复查询已知不存在的数据（如"券商"未找到）
@@ -1513,6 +1631,99 @@ def _fetch_article(args: dict) -> str:
         return json.dumps({"error": f"文章抓取失败: {str(e)}"}, ensure_ascii=False)
 
 
+# ── 索引名称匹配（P0 修复：恒生科技/消费红利误匹配） ──
+
+# 通用字符：匹配时允许指数名称额外出现（前缀字 + 后缀字 + 数字）
+_GENERIC_INDEX_CHARS = set(
+    "中证国上证深沪恒生香港中华指数全综港股通ETFLOFA股B股人民币"
+) | set("0123456789")
+
+# 通用前缀词（匹配时允许剥离）
+_INDEX_PREFIX_TOKENS = ("中证", "国证", "上证", "深证", "沪", "深", "恒生", "香港", "中华")
+
+# 通用后缀词（匹配时允许剥离）
+_INDEX_SUFFIX_TOKENS = ("指数", "ETF", "LOF", "全指", "综指", "港股通", "A股", "B股", "港股", "人民币")
+
+
+def _has_meaningful_mismatch(query: str, name: str) -> bool:
+    """检查 query 与 name 是否存在有意义的关键词不匹配（P0 索引名称误匹配修复）。
+
+    允许 name/query 包含通用前缀(中证/恒生等)、后缀(指数/ETF等)和数字，
+    但若任一方包含对方没有的"行业关键词"字符，则视为不匹配，返回 True。
+
+    例：query="恒生科技" vs name="恒生生物科技指数" → name 含"物"→True(不匹配)
+        query="消费红利" vs name="中证红利" → query 含"消费"→True(不匹配)
+        query="白酒" vs name="中证白酒" → 仅通用前缀差异→False(匹配)
+    """
+    if not query or not name:
+        return False
+    # name 中有 query 没有的额外行业关键词
+    for c in name:
+        if c not in query and c not in _GENERIC_INDEX_CHARS:
+            return True
+    # query 中有 name 没有的额外行业关键词
+    for c in query:
+        if c not in name and c not in _GENERIC_INDEX_CHARS:
+            return True
+    return False
+
+
+def _is_index_name_match(query: str, name: str) -> bool:
+    """判断用户查询 query 是否匹配指数名称 name。
+
+    匹配优先级：
+    1. 精确匹配
+    2. 双向子串匹配（query∈name 或 name∈query）
+    3. 剥离通用前缀后子串匹配 + 无额外行业关键词
+    4. 核心词（剥离前缀+数字+后缀）匹配 + 无额外行业关键词
+
+    修复 P0：query="恒生科技" 不再匹配 name="恒生生物科技指数"（"生物"是额外词）；
+             query="消费红利" 不再匹配 name="中证红利"（"消费"是 query 独有关键词）。
+    """
+    if not query or not name:
+        return False
+    q = query.strip()
+    n = name.strip()
+    if q == n:
+        return True
+    # 2. 双向子串匹配
+    if q in n or n in q:
+        return True
+    # 3. 剥离通用前缀后子串匹配
+    q_stripped = q
+    for p in _INDEX_PREFIX_TOKENS:
+        if q_stripped.startswith(p) and len(q_stripped) > len(p):
+            q_stripped = q_stripped[len(p):]
+            break
+    n_stripped = n
+    for p in _INDEX_PREFIX_TOKENS:
+        if n_stripped.startswith(p) and len(n_stripped) > len(p):
+            n_stripped = n_stripped[len(p):]
+            break
+    if len(q_stripped) >= 2 or len(n_stripped) >= 2:
+        if (q_stripped in n_stripped or n_stripped in q_stripped) and not _has_meaningful_mismatch(q, n):
+            return True
+    # 4. 核心词匹配（剥离前缀+数字+后缀）
+    q_core = re.sub(r'^[\d]+', '', q_stripped)
+    for suf in _INDEX_SUFFIX_TOKENS:
+        if q_core.endswith(suf) and len(q_core) > len(suf):
+            q_core = q_core[:-len(suf)]
+            break
+    q_core = re.sub(r'[\d]+$', '', q_core).strip()
+    n_core = re.sub(r'^[\d]+', '', n_stripped)
+    for suf in _INDEX_SUFFIX_TOKENS:
+        if n_core.endswith(suf) and len(n_core) > len(suf):
+            n_core = n_core[:-len(suf)]
+            break
+    n_core = re.sub(r'[\d]+$', '', n_core).strip()
+    if q_core and n_core:
+        if q_core == n_core:
+            return True
+        if (q_core in n_core or n_core in q_core) and not _has_meaningful_mismatch(q, n):
+            return True
+    return False
+
+
 def _query_valuation(args: dict, trace_id: str = "", conversation_id: int = None,
                      message_id: int = None, agent_name: str = None, user_query: str = None) -> str:
     """查询指定指数的估值数据。"""
@@ -1526,37 +1737,14 @@ def _query_valuation(args: dict, trace_id: str = "", conversation_id: int = None
         if code not in unique_indexes:
             unique_indexes[code] = idx["index_name"]
 
-    # 匹配逻辑（复用 app.py 的前缀剥离策略）
-    _prefixes = ("中证", "国证", "沪", "深", "恒生")
-    _middles = ("全指", "综指", "50", "100", "200", "300", "500", "800", "1000")
+    # 匹配逻辑：使用 _is_index_name_match 修复 P0 索引名称误匹配
+    # （"恒生科技"误匹配"恒生生物科技指数"、"消费红利"误匹配"中证红利"）
     matched = []
     seen_codes = set()
-
-    # 提取用户输入的核心词：剥离前缀 + 数字中缀
-    # 解决"中证800医药"/"中证医药"匹配不到"医药50"的问题（双向子串匹配失效）
-    _user_core = index_name
-    for prefix in _prefixes:
-        if _user_core.startswith(prefix):
-            _user_core = _user_core[len(prefix):]
-            break
-    _user_core = re.sub(r'^(全指|综指)?\d+', '', _user_core).strip()
-
     for code, name in unique_indexes.items():
         if code in seen_codes:
             continue
-        if name in index_name or index_name in name:
-            seen_codes.add(code)
-            matched.append({"code": code, "name": name})
-            continue
-        for prefix in _prefixes:
-            core = name.replace(prefix, "", 1)
-            if len(core) >= 2 and (core in index_name or index_name in core):
-                seen_codes.add(code)
-                matched.append({"code": code, "name": name})
-                break
-        # 用户输入核心词匹配：处理"中证800医药"→"医药"匹配"医药50"
-        # 仅做 _user_core in name（核心词是库名称子串），不做反向避免短词误匹配
-        if code not in seen_codes and _user_core and len(_user_core) >= 2 and _user_core in name:
+        if _is_index_name_match(index_name, name):
             seen_codes.add(code)
             matched.append({"code": code, "name": name})
 
@@ -1588,6 +1776,12 @@ def _query_valuation(args: dict, trace_id: str = "", conversation_id: int = None
                         "pb": v.get("pb"),
                         "pb_percentile_10y": v.get("pb_percentile_10y"),
                         "roe": v.get("roe"),
+                        # P1 修复（指标混淆）：明确标注各字段对应的指标类型
+                        "metric_types": {
+                            "pe_ttm": "市盈率TTM", "pe_percentile_10y": "市盈率TTM十年百分位",
+                            "pb": "市净率", "pb_percentile_10y": "市净率十年百分位",
+                            "roe": "净资产收益率",
+                        },
                     }
                     return json.dumps({"ok": True, "indexes": [result]}, ensure_ascii=False)
         except Exception as e:
@@ -1623,6 +1817,16 @@ def _query_valuation(args: dict, trace_id: str = "", conversation_id: int = None
                 "days_old": latest.get("days_old", 0),
                 "is_expired": latest.get("is_expired", False),
             }
+
+            # P1 修复（指标混淆）：按 metric_type 命名 percentile 字段，
+            # 避免专家将 PB 百分位误读为 PE 百分位
+            _pct_key = {
+                "市盈率": "pe_percentile", "市盈率TTM": "pe_percentile",
+                "市净率": "pb_percentile",
+                "市销率": "ps_percentile", "市销率TTM": "ps_percentile",
+                "股息率": "dividend_percentile",
+            }.get(mt, "percentile")
+            entry[_pct_key] = latest.get("percentile")
 
             # 判断估值水平
             pct = latest.get("percentile")
@@ -1690,6 +1894,12 @@ def _query_valuation(args: dict, trace_id: str = "", conversation_id: int = None
                             "pb": v.get("pb"),
                             "pb_percentile_10y": v.get("pb_percentile_10y"),
                             "roe": v.get("roe"),
+                            # P1 修复（指标混淆）：明确标注各字段对应的指标类型
+                            "metric_types": {
+                                "pe_ttm": "市盈率TTM", "pe_percentile_10y": "市盈率TTM十年百分位",
+                                "pb": "市净率", "pb_percentile_10y": "市净率十年百分位",
+                                "roe": "净资产收益率",
+                            },
                         }
                         return json.dumps({"ok": True, "indexes": [fallback_result]}, ensure_ascii=False)
             except Exception as e:
@@ -1736,7 +1946,7 @@ def _query_online_valuation_impl(args: dict, trace_id: str = "", conversation_id
     if not index_name:
         return json.dumps({"error": "index_name 不能为空"}, ensure_ascii=False)
 
-    # 1. 按名称匹配指数代码（复用 _query_valuation 的匹配逻辑）
+    # 1. 按名称匹配指数代码（复用 _is_index_name_match，修复 P0 索引名称误匹配）
     all_indexes = list_valuation_indexes()
     unique_indexes = {}
     for idx in all_indexes:
@@ -1744,23 +1954,14 @@ def _query_online_valuation_impl(args: dict, trace_id: str = "", conversation_id
         if code not in unique_indexes:
             unique_indexes[code] = idx["index_name"]
 
-    _prefixes = ("中证", "国证", "沪", "深", "恒生")
     matched = []
     seen_codes = set()
-
     for code, name in unique_indexes.items():
         if code in seen_codes:
             continue
-        if name in index_name or index_name in name:
+        if _is_index_name_match(index_name, name):
             seen_codes.add(code)
             matched.append({"code": code, "name": name})
-            continue
-        for prefix in _prefixes:
-            core = name.replace(prefix, "", 1)
-            if len(core) >= 2 and (core in index_name or index_name in core):
-                seen_codes.add(code)
-                matched.append({"code": code, "name": name})
-                break
 
     if not matched:
         db_results = search_indexes_by_keyword(index_name)

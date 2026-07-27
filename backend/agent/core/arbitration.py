@@ -31,7 +31,7 @@ def _detect_stance(text: str) -> str:
             return "sell"
     # buy 次高：明确买入/加仓意图
     # 但排除"不买入""没有买入""而非...买入/建仓"等否定形式
-    if any(kw in text for kw in ["建议买", "买入", "加仓", "建仓", "上车", "分批买", "定投", "补仓"]):
+    if any(kw in text for kw in ["建议买", "买入", "加仓", "建仓", "上车", "分批买", "补仓", "加倍定投", "加大定投", "增加定投"]):
         neg_contexts = ["不买入", "没有买入", "无需买入", "暂不买入", "不急买入",
                         "而非长期价值资金的稳步建仓", "而非.*建仓"]
         # 用正则检查"而非...建仓/买入"模式（10 字符内）
@@ -44,7 +44,7 @@ def _detect_stance(text: str) -> str:
             return "buy"
     # hold 最低：被动立场，仅匹配明确的不操作意图
     # 移除"风险""谨慎"（风险描述不是立场），移除"止盈"（盈利操作不是 sell）
-    if any(kw in text for kw in ["观望", "持有"]):
+    if any(kw in text for kw in ["观望", "持有", "定投"]):
         return "hold"
     return "unknown"
 
@@ -86,9 +86,12 @@ def arbitrate_results(query: str, specialist_results: list[dict], blackboard=Non
     # G-2a（2026-07-23）修复 supporting_agents 计数 bug：
     # 原逻辑收集所有 stance != "unknown" 的专家，导致"4位一致"文案失真
     # 修复后：只收集与最终裁决方向一致的专家
-    supporting_agents = [
-        ak for ak, st in zip(agent_keys_list, stances) if st == final_stance
-    ]
+    seen = set()
+    supporting_agents = []
+    for ak, st in zip(agent_keys_list, stances):
+        if st == final_stance and ak not in seen:
+            seen.add(ak)
+            supporting_agents.append(ak)
 
     # G-2b（2026-07-23）sell 裁决强制估值前置：
     # 无估值数据时降级为 hold，避免盲目割肉
@@ -118,15 +121,19 @@ def arbitrate_results(query: str, specialist_results: list[dict], blackboard=Non
 
     # conv#131 修复：disagreements 只提取明确操作意图（buy/sell），不含 hold
     # 原逻辑含 hold 导致大量"伪 hold"污染分歧列表
-    disagreements = [
-        {
-            "agent_key": result.get("agent_key", "unknown"),
-            "agent": result.get("agent", result.get("agent_key", "unknown")),
-            "stance": result.get("stance") or _detect_stance(result.get("analysis", "")),
-        }
-        for result in specialist_results or []
-        if (result.get("stance") or _detect_stance(result.get("analysis", ""))) in ("buy", "sell")
-    ]
+    disagreements = []
+    _seen_disagree_keys = set()
+    for result in specialist_results or []:
+        stance = result.get("stance") or _detect_stance(result.get("analysis", ""))
+        if stance in ("buy", "sell"):
+            ak = result.get("agent_key", "unknown")
+            if ak not in _seen_disagree_keys:
+                _seen_disagree_keys.add(ak)
+                disagreements.append({
+                    "agent_key": ak,
+                    "agent": result.get("agent", ak),
+                    "stance": stance,
+                })
 
     # ── 兼容字段：供 _save_final / pipeline 日志直接使用 ──
     # 修复 conv 125：原返回字段 final_stance/arbitration_mode/disagreements
@@ -159,7 +166,8 @@ def arbitrate_results(query: str, specialist_results: list[dict], blackboard=Non
         s = d.get("stance", "unknown")
         if s in stance_groups:
             agent_label = d.get("agent") or d.get("agent_key") or "unknown"
-            stance_groups[s].append(agent_label)
+            if agent_label not in stance_groups[s]:
+                stance_groups[s].append(agent_label)
     key_conflicts = []
     if stance_groups["buy"] and stance_groups["sell"]:
         key_conflicts.append({
@@ -282,10 +290,16 @@ def _build_arbitration_reasoning(
             if buy_side and sell_side:
                 conflict_lines.append(f"  - {buy_side} 看多 vs {sell_side} 看空")
         if conflict_lines:
-            parts.append("【分歧】\n" + "\n".join(conflict_lines))
+            parts.append("【分歧】检测到方向性冲突\n" + "\n".join(conflict_lines))
+        else:
+            parts.append("【分歧】未检测到方向性冲突")
     else:
-        # 无立场分歧时，识别数据/逻辑差异
-        parts.append("【分歧】专家立场一致，未检测到方向性冲突")
+        # 无方向性冲突时，根据 arbitration_mode 区分描述，避免与段3矛盾
+        if arbitration_mode == "consensus":
+            parts.append("【分歧】专家立场一致，未检测到方向性冲突")
+        else:
+            # conflict 模式但无 buy_vs_sell 冲突：部分专家持中性立场
+            parts.append("【分歧】未检测到方向性冲突（部分专家持中性立场）")
 
     # 段3：解决逻辑
     if arbitration_mode == "valuation_gap":
@@ -295,12 +309,20 @@ def _build_arbitration_reasoning(
         parts.append(f"【解决】{supporting_count} 位专家立场一致支持该方向，采纳共识结论")
     elif arbitration_mode == "conflict":
         # 冲突模式：按风险优先原则解决（风控视角优先）
-        if final_stance == "hold":
-            parts.append("【解决】专家立场存在分歧，按风险优先原则采纳谨慎立场（持有/观望）")
-        elif final_stance == "sell":
-            parts.append("【解决】专家立场存在分歧，检测到看空信号，优先保护本金")
+        if key_conflicts:
+            # 有方向性冲突（buy vs sell）
+            if final_stance == "hold":
+                parts.append("【解决】专家立场存在分歧，按风险优先原则采纳谨慎立场（持有/观望）")
+            elif final_stance == "sell":
+                parts.append("【解决】专家立场存在分歧，检测到看空信号，优先保护本金")
+            else:
+                parts.append("【解决】专家立场存在分歧，综合评估后给出方向性建议")
         else:
-            parts.append("【解决】专家立场存在分歧，综合评估后给出方向性建议")
+            # 无方向性冲突但进入 conflict 模式（部分专家持中性立场）
+            if final_stance == "hold":
+                parts.append("【解决】部分专家持中性立场，按风险优先原则采纳谨慎立场（持有/观望）")
+            else:
+                parts.append("【解决】综合各专家观点给出方向性建议")
     else:
         parts.append("【解决】综合各专家观点给出裁决")
 
@@ -317,3 +339,32 @@ def _build_arbitration_reasoning(
     if len(reasoning) > 800:
         reasoning = reasoning[:797] + "..."
     return reasoning
+
+
+if __name__ == "__main__":
+    # 测试1：定投不应判为buy
+    assert _detect_stance("建议持有并继续定投") == "hold"
+    assert _detect_stance("维持定投不变") == "hold"
+    assert _detect_stance("加大定投力度") == "buy"
+    assert _detect_stance("加倍定投") == "buy"
+
+    # 测试2：去重
+    results = [
+        {"agent_key": "risk_assessor", "agent": "风险管理师", "analysis": "建议持有观察", "stance": "hold"},
+        {"agent_key": "risk_assessor", "agent": "风险管理师", "analysis": "交叉审阅：同意持有", "stance": "hold"},
+        {"agent_key": "allocation_advisor", "agent": "资产配置师", "analysis": "建议持有", "stance": "hold"},
+    ]
+    arb = arbitrate_results("测试", results)
+    assert len(arb["supporting_agents"]) == 2, f"去重失败: {arb['supporting_agents']}"
+    assert "立场一致" not in arb["reasoning"] or "存在分歧" not in arb["reasoning"], f"推理矛盾: {arb['reasoning']}"
+
+    # 测试3：定投误判为buy
+    results2 = [
+        {"agent_key": "risk_assessor", "agent": "风险管理师", "analysis": "建议持有观察，维持定投", "stance": None},
+        {"agent_key": "allocation_advisor", "agent": "资产配置师", "analysis": "持有并继续定投", "stance": None},
+    ]
+    arb2 = arbitrate_results("定投策略", results2)
+    # 两个专家都应该是 hold，不应判为 buy
+    assert arb2["final_stance"] == "hold", f"定投误判: {arb2['final_stance']}, stances={arb2['disagreements']}"
+
+    print("所有测试通过")

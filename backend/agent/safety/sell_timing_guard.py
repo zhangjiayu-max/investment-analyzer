@@ -132,6 +132,7 @@ def _has_profit_info(answer: str) -> bool:
 def enforce_sell_timing_guard(
     answer: str,
     trace_id: str = "",
+    arbitration_summary: dict | None = None,
 ) -> tuple[str, list[str]]:
     """卖出操作时机守卫。
 
@@ -142,9 +143,17 @@ def enforce_sell_timing_guard(
     - 区分止盈（盈利卖出）vs 止损（亏损清仓/减仓）
     - 止损类操作必须满足额外条件（估值高位/基本面恶化），否则拦截
 
+    P1 修复（conv_150/153/155）：
+    - 检查基于最终回复内容（final_content），不再受专家原始建议干扰
+    - 若仲裁裁决为 hold/watch，直接跳过止盈不止损检查：此时若综合报告
+      出现卖出关键词，属于方向冲突，由 arbitration_guard 负责；
+      sell_timing_guard 仅在已确认卖出方向时校验时机依据
+
     Args:
-        answer: 综合报告 LLM 生成的回答
+        answer: 综合报告 LLM 生成的回答（最终回复内容）
         trace_id: 追踪 ID，用于日志
+        arbitration_summary: 仲裁模块输出的结构化裁决（含 verdict/stance），
+            为 hold/watch 时跳过检查；None 或提取失败时不影响原逻辑
 
     Returns:
         (修正后的 answer, warnings 列表)
@@ -169,6 +178,24 @@ def enforce_sell_timing_guard(
 
     if not answer:
         return answer, warnings
+
+    # P1 修复（conv_153）：仲裁裁决为 hold/watch 时直接跳过止盈不止损检查。
+    # 此时若最终回复出现卖出关键词，属于方向冲突（由 arbitration_guard 负责）；
+    # sell_timing_guard 仅在已确认卖出方向时校验时机依据，避免基于专家原始建议误判。
+    if arbitration_summary is not None:
+        try:
+            from agent.safety.arbitration_guard import _extract_arbitration_stance
+            _arb_stance, _arb_verdict = _extract_arbitration_stance(arbitration_summary)
+            if _arb_stance in ("hold", "watch"):
+                logger.info(
+                    f"[trace:{trace_id}] [sell_timing_guard] 仲裁裁决为 "
+                    f"{_arb_stance}（{_arb_verdict or _arb_stance}），跳过止盈不止损检查"
+                )
+                return answer, warnings
+        except Exception as _e:
+            logger.debug(
+                f"[trace:{trace_id}] [sell_timing_guard] 仲裁 stance 提取失败，按原逻辑继续: {_e}"
+            )
 
     # 检测卖出操作
     sell_kws = _detect_sell_actions(answer)

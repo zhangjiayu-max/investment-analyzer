@@ -3222,6 +3222,93 @@ def build_reasoning_trail(
 # ── P1-1：多智能体结论持久化（Bug C 修复）──────────────────────
 
 # 板块关键词（用于在没有明确基金代码时识别分析标的）
+# ── P0 修复 conv_148/149：估值类问题强制预查询 query_valuation ──
+# 避免专家凭记忆给出错误 PE/PB 数值（数据来源不明/疑似幻觉）
+_VALUATION_QUERY_KEYWORDS = [
+    "估值", "PE", "PB", "分位", "百分位", "便宜", "贵", "低估", "高估",
+    "能买吗", "贵不贵", "值不值得买", "泡沫", "安全边际",
+]
+
+# 常见指数名称关键词（用于从用户查询中提取估值查询目标）
+_INDEX_NAME_KEYWORDS = [
+    "沪深300", "沪深 300", "中证500", "中证 500", "中证1000", "中证 1000",
+    "创业板指", "创业板", "科创50", "科创板", "上证50", "上证 50",
+    "恒生科技", "恒生指数", "恒生互联网", "恒生医疗", "恒生", "港股通", "港股",
+    "白酒", "食品饮料", "消费", "医药", "医疗", "生物医药", "创新药", "中药",
+    "半导体", "芯片", "新能源", "光伏", "锂电", "储能", "电动汽车",
+    "银行", "金融", "券商", "保险",
+    "军工", "国防", "房地产", "地产",
+    "科技", "人工智能", "机器人", "5G", "通信", "计算机", "消费电子",
+    "煤炭", "钢铁", "有色", "化工", "建材",
+    "农业", "旅游", "传媒", "游戏",
+    "中证白酒", "中证医药", "中证银行", "中证军工",
+    "纳斯达克", "标普500", "日经225",
+]
+
+
+def _prequery_valuation_context(query: str, trace_id: str = "") -> str:
+    """估值类问题预查询：检测到估值相关问题时，强制预调用 query_valuation 获取实时数据。
+
+    解决 conv_148/149 P0 问题：专家给出具体 PE/PB 数据但 metadata 中无 tool_calls，
+    数据来源不明（疑似幻觉）。通过编排层预查询，确保估值数据有明确工具来源。
+
+    Returns:
+        格式化的估值上下文字符串；非估值类问题或查询失败时返回空字符串。
+    """
+    if not query:
+        return ""
+
+    # 1. 检测是否为估值类问题
+    if not any(kw in query for kw in _VALUATION_QUERY_KEYWORDS):
+        return ""
+
+    # 2. 从查询中提取指数名称
+    matched_indexes = []
+    seen = set()
+    for idx_kw in _INDEX_NAME_KEYWORDS:
+        if idx_kw in query and idx_kw not in seen:
+            seen.add(idx_kw)
+            matched_indexes.append(idx_kw)
+
+    if not matched_indexes:
+        return ""
+
+    # 3. 调用 query_valuation 工具获取实时估值数据（最多查 3 个指数，避免超时）
+    try:
+        from tools import execute_tool
+        import json as _json
+        valuation_results = []
+        for idx_name in matched_indexes[:3]:
+            try:
+                raw = execute_tool(
+                    "query_valuation",
+                    {"index_name": idx_name},
+                    trace_id=trace_id,
+                    timeout=15,
+                    agent_name="orchestrator_prequery",
+                    user_query=query,
+                )
+                if isinstance(raw, str):
+                    valuation_results.append(f"### {idx_name}\n{raw}")
+                elif isinstance(raw, (dict, list)):
+                    valuation_results.append(
+                        f"### {idx_name}\n{_json.dumps(raw, ensure_ascii=False)[:800]}"
+                    )
+            except Exception as e:
+                logger.warning(f"[trace:{trace_id}] 估值预查询 {idx_name} 失败: {e}")
+                valuation_results.append(f"### {idx_name}\n（估值数据获取失败：{e}）")
+
+        if valuation_results:
+            return (
+                "## 估值预查询结果（编排层强制调用 query_valuation 工具获取，专家必须引用此数据，禁止凭记忆给数值）\n"
+                + "\n\n".join(valuation_results) + "\n\n"
+            )
+    except Exception as e:
+        logger.warning(f"[trace:{trace_id}] 估值预查询失败（不阻塞主流程）: {e}")
+
+    return ""
+
+
 _SECTOR_KEYWORDS = [
     "白酒", "医药", "医疗", "新能源", "半导体", "芯片", "消费", "科技",
     "金融", "银行", "券商", "房地产", "军工", "周期", "创业板", "科创板",
@@ -3652,6 +3739,15 @@ def orchestrate(query: str, history: list, rag_context: str = "", cancel_event: 
             prebuilt_context += f"{bond_holdings_ctx}\n\n"
     except Exception as e:
         logger.warning(f"注入持仓/估值上下文失败: {e}")
+
+    # P0 修复 conv_148/149：估值类问题强制预查询 query_valuation，避免专家凭记忆给数据
+    try:
+        _val_prequery = _prequery_valuation_context(refined_query or query, trace_id=trace_id)
+        if _val_prequery:
+            prebuilt_context += _val_prequery
+            system_content += f"\n\n{_val_prequery}"
+    except Exception as e:
+        logger.warning(f"估值预查询注入失败（不阻塞主流程）: {e}")
 
     # 注入债市数据到 prebuilt_context
     try:
@@ -4607,7 +4703,8 @@ def _stream_route(query: str, history: list, rag_context: str, cancel_event: thr
 
 
 def _stream_build_context(refined_query: str, rag_context: str, complexity: str,
-                           context_config: dict, token_budget: dict, history: list):
+                           context_config: dict, token_budget: dict, history: list,
+                           trace_id: str = ""):
     """阶段2: 构建上下文（token预算、RAG、用户画像、持仓上下文、估值上下文等）。
 
     纯函数，无 yield。返回 dict:
@@ -4693,6 +4790,15 @@ def _stream_build_context(refined_query: str, rag_context: str, complexity: str,
             prebuilt_context += f"{bond_holdings_ctx}\n\n"
     except Exception as e:
         logger.warning(f"注入持仓/估值上下文失败: {e}")
+
+    # P0 修复 conv_148/149：估值类问题强制预查询 query_valuation，避免专家凭记忆给数据
+    try:
+        _val_prequery = _prequery_valuation_context(refined_query, trace_id=trace_id)
+        if _val_prequery:
+            prebuilt_context += _val_prequery
+            system_content += f"\n\n{_val_prequery}"
+    except Exception as e:
+        logger.warning(f"估值预查询注入失败（不阻塞主流程）: {e}")
 
     # R2: 注入 DCA 定投规则（从 system_config 读取）
     try:
@@ -5289,7 +5395,7 @@ def _stream_final_synthesis(query: str, refined_query: str, specialists: list,
     try:
         from agent.safety.sell_timing_guard import enforce_sell_timing_guard
         final_answer, _timing_warnings = enforce_sell_timing_guard(
-            final_answer, trace_id=trace_id
+            final_answer, trace_id=trace_id, arbitration_summary=_arb_summary_local
         )
         if _timing_warnings:
             logger.info(
@@ -5569,7 +5675,7 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
     _ctx_executor = _cf.ThreadPoolExecutor(max_workers=1)
     _ctx_future = _ctx_executor.submit(
         _stream_build_context, refined_query, rag_context, complexity,
-        context_config, token_budget, history
+        context_config, token_budget, history, trace_id=trace_id
     )
     try:
         ctx_data = _ctx_future.result(timeout=60)

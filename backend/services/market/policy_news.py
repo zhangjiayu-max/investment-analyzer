@@ -94,11 +94,20 @@ def _fetch_from_yingmi(query: str, limit: int = 10) -> list:
     """从盈米新闻 API 拉取政策相关新闻。"""
     results = []
     try:
+        # P0 修复：API Key 缺失时跳过该数据源，而非抛异常让专家误以为有数据
+        from config import YINGMI_API_KEY
+        if not YINGMI_API_KEY:
+            logger.debug("[policy_news] 盈米 API Key 未配置，跳过该数据源")
+            return results
         from mcp.yingmi_client import get_yingmi_client
         client = get_yingmi_client()
         # 用政策关键词扩展查询
         policy_query = query if any(kw in query for kw in ["政策", "央行", "国务院"]) else f"{query} 政策"
         raw = client._invoke("search_news", {"query": policy_query, "limit": limit})
+        # P0 修复：检测 API Key 错误文本，避免将错误信息当作新闻返回给专家
+        if isinstance(raw, str) and ("API Key" in raw or "api key" in raw.lower() or "首次使用" in raw):
+            logger.warning(f"[policy_news] 盈米返回 API Key 错误: {raw[:100]}")
+            return results
         if isinstance(raw, dict) and raw.get("success"):
             items = raw.get("data", {}).get("items", []) or raw.get("data", {}).get("news", [])
             for item in items:
@@ -122,11 +131,20 @@ def _fetch_from_eastmoney(query: str, limit: int = 10) -> list:
     """从东方财富妙想拉取政策新闻。"""
     results = []
     try:
+        # P0 修复：API Key 缺失时跳过该数据源，而非抛异常让专家误以为有数据
+        from config import EASTMONEY_API_KEY
+        if not EASTMONEY_API_KEY:
+            logger.debug("[policy_news] 东方财富 API Key 未配置，跳过该数据源")
+            return results
         from mcp.eastmoney_client import get_eastmoney_client
         client = get_eastmoney_client()
         # 用政策关键词查询
         policy_query = f"{query} 政策 利好"
         text = client.financial_assistant(policy_query)
+        # P0 修复：检测 API Key 错误文本，避免将"首次使用需要先获取 API Key"当作新闻返回给专家
+        if text and ("API Key" in text or "api key" in text.lower() or "首次使用" in text):
+            logger.warning(f"[policy_news] 东方财富返回 API Key 错误: {text[:100]}")
+            return results
         if text and len(text) > 50:
             # 拆分为多条新闻（按段落或换行）
             paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()]
@@ -245,6 +263,15 @@ def get_policy_news(query: str = "", limit: int = 10) -> dict:
     if cached is not None:
         return cached
 
+    # P0 修复：检测 API Key 配置状态，三源全失败时明确标注原因
+    try:
+        from config import YINGMI_API_KEY, EASTMONEY_API_KEY
+        _yingmi_key_ok = bool(YINGMI_API_KEY)
+        _eastmoney_key_ok = bool(EASTMONEY_API_KEY)
+    except Exception:
+        _yingmi_key_ok = True
+        _eastmoney_key_ok = True
+
     items = []
     # 并行拉取多源（实际是顺序，因 MCP 客户端单实例）
     if query:
@@ -287,6 +314,7 @@ def get_policy_news(query: str = "", limit: int = 10) -> dict:
     low_count = sum(1 for x in deduped if x["importance"] == "low")
 
     # 综合提示
+    tool_unavailable = False
     if high_count > 0:
         summary = f"今日有 {high_count} 条高级别政策新闻（央行/国务院/证监会等），需重点关注"
     elif medium_count > 0:
@@ -294,7 +322,16 @@ def get_policy_news(query: str = "", limit: int = 10) -> dict:
     elif low_count > 0:
         summary = f"今日有 {low_count} 条政策解读/媒体观点，参考性较弱"
     else:
-        summary = "今日暂无明显政策面新闻"
+        # P0 修复：API Key 未配置时明确标注工具不可用，而非返回错误字符串让专家误以为有数据
+        if not _yingmi_key_ok and not _eastmoney_key_ok:
+            summary = "政策新闻工具不可用：API Key 未配置（盈米 YINGMI_API_KEY 和东方财富 MX_APIKEY 均缺失），以下基于定性判断"
+            tool_unavailable = True
+        elif not _yingmi_key_ok:
+            summary = "政策新闻工具部分不可用：盈米 API Key 未配置（YINGMI_API_KEY）"
+        elif not _eastmoney_key_ok:
+            summary = "政策新闻工具部分不可用：东方财富 API Key 未配置（MX_APIKEY）"
+        else:
+            summary = "今日暂无明显政策面新闻"
 
     result = {
         "query": query,
@@ -307,6 +344,8 @@ def get_policy_news(query: str = "", limit: int = 10) -> dict:
         "note": "importance 分级：high=央行/国务院/证监会发文；medium=部委规章；low=媒体解读。industries 标注涉及行业。",
         "data_source": "web_search_fallback" if (not items and deduped) else "multi_source",
     }
+    if tool_unavailable:
+        result["tool_unavailable"] = True
     _set_cached(cache_key, result)
     return result
 

@@ -3,6 +3,44 @@
 from db._conn import _get_conn
 
 
+# ── P0/P1 反幻觉约束（conv_148/149/154 修复）──
+# 持仓幻觉约束：防止专家编造用户持仓（conv_154 "您的持仓易方达中证银行ETF联接C将直接受益"——用户实际无此持仓）
+_HOLDING_HALLUCINATION_GUARD = (
+    "\n\n【持仓数据约束】\n"
+    "- 引用用户持仓时必须基于 query_portfolio 工具的真实返回结果\n"
+    "- 禁止假设用户持有某基金，禁止编造基金名称或代码\n"
+    "- 如果未调用 query_portfolio，不得提及任何具体持仓基金\n"
+    "- 引用持仓时必须标注「（数据来源：query_portfolio 工具查询结果）」"
+)
+
+# 知识引用约束：防止引用未检索的书籍知识（conv_149 引用《聪明的投资者》但未通过 search_knowledge 检索）
+_KNOWLEDGE_CITATION_GUARD = (
+    "\n\n【知识引用约束】\n"
+    "- 引用书籍/文章/研究报告时必须通过 search_knowledge 工具检索\n"
+    "- 禁止直接引用 LLM 内化的通用知识（如「《聪明的投资者》认为...」）\n"
+    "- 如果未调用 search_knowledge，不得引用任何具体书籍名称\n"
+    "- 引用知识时必须标注「（来源：知识库检索结果）」"
+)
+
+# 估值数据约束：防止凭记忆给出 PE/PB 数值（conv_148/149 专家给出具体数据但无 tool_calls）
+_VALUATION_DATA_GUARD = (
+    "\n\n【估值数据约束】\n"
+    "- 所有 PE/PB/PS/分位数据必须通过 query_valuation 或 query_online_valuation 工具获取\n"
+    "- 禁止凭记忆给出具体估值数值\n"
+    "- 如果工具调用失败或未返回数据，必须明确说「估值数据获取失败」，不得编造数据\n"
+    "- 引用估值时必须标注数据来源和日期"
+)
+
+# 数据冲突处理：用户输入与系统数据冲突时必须澄清（conv_149 用户说"亏损20%" vs 专家"-17.04%"）
+_DATA_CONFLICT_GUARD = (
+    "\n\n【数据冲突处理】\n"
+    "- 用户输入与系统数据不一致时（如用户说「亏损20%」但系统显示「-17.04%」），必须明确澄清差异\n"
+    "- 多数据源同一指标不一致时（如本地库 PE百分位 87.86% vs 在线 93.2%），必须标注两个数据源及差异原因\n"
+    "- 格式：「您提到X，系统查询显示Y，差异可能源于Z。本次采用Y作为决策依据，因为...」"
+)
+
+
+
 def _init_preset_agents(conn):
     """初始化预设 Agent（幂等，已存在则跳过）。"""
     presets = [
@@ -356,6 +394,14 @@ def _init_preset_agents(conn):
         },
     ]
     for agent in presets:
+        # P0/P1 反幻觉约束：按专家职责追加相应约束（conv_148/149/154 修复）
+        _name = agent["name"]
+        if _name in ("估值分析师", "风险管理师", "资产配置师", "文章解读专家"):
+            agent["system_prompt"] += _HOLDING_HALLUCINATION_GUARD
+        if _name == "估值分析师":
+            agent["system_prompt"] += _VALUATION_DATA_GUARD
+        if _name != "需求澄清":  # 需求澄清是路由助手，非分析专家，不加知识/冲突约束
+            agent["system_prompt"] += _KNOWLEDGE_CITATION_GUARD + _DATA_CONFLICT_GUARD
         conn.execute("""
             INSERT OR IGNORE INTO agents (name, description, system_prompt, knowledge_scope, icon, is_preset)
             VALUES (?, ?, ?, ?, ?, ?)
@@ -775,6 +821,12 @@ def _init_wealth_specialists(conn):
                 (s["name"],)
             ).fetchone()
             system_prompt = row["system_prompt"] if row else ""
+        else:
+            # P0/P1 反幻觉约束：仅对有显式 prompt 的专家追加（None 继承的已在 preset 中追加，避免重复）
+            _agent_key = s["agent_key"]
+            if _agent_key in ("fund_analyst", "article_expert", "behavioral_advisor"):
+                system_prompt += _HOLDING_HALLUCINATION_GUARD
+            system_prompt += _KNOWLEDGE_CITATION_GUARD + _DATA_CONFLICT_GUARD
         conn.execute("""
             INSERT OR IGNORE INTO agents (agent_key, name, description, system_prompt, knowledge_scope, icon, is_specialist, tools, is_preset)
             VALUES (?, ?, ?, ?, ?, ?, 1, ?, 0)

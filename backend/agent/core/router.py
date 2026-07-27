@@ -55,13 +55,17 @@ def _load_router_config() -> dict:
 # 关键词 → 专家 key 列表（按优先级排序）
 # 注意：专家 key 来自 db.agents.load_specialist_agents() 的返回值
 _KEYWORD_ROUTES = [
-    (["估值", "PE", "PB", "百分位", "低估", "高估"], ["valuation_expert"]),
+    # P0 修复 conv_147：估值类关键词补全（"分位"/"便宜"/"贵"/"能买吗" 原缺失导致未路由 valuation_expert）
+    (["估值", "PE", "PB", "百分位", "分位", "低估", "高估", "便宜", "贵", "能买吗", "贵不贵", "值不值得买"],
+     ["valuation_expert"]),
     (["风险", "回撤", "止损", "亏损", "最大回撤"], ["risk_assessor"]),
     (["配置", "仓位", "股债", "比例", "再平衡"], ["allocation_advisor"]),
     (["持仓", "分散", "穿透", "集中度"], ["allocation_advisor"]),
     (["市场", "大盘", "行情", "走势", "牛市", "熊市"], ["market_analyst"]),
     (["诊断", "体检", "检查", "全面"], ["valuation_expert", "risk_assessor", "allocation_advisor"]),
-    (["买", "卖", "操作", "定投", "止盈", "加仓", "减仓", "补仓", "上车", "赚不到钱", "盈利", "赚钱"], ["allocation_advisor", "risk_assessor", "valuation_expert"]),
+    # P1 修复 conv_149：补仓类补全"割肉"/"止损"（原缺失 valuation_expert，补仓决策缺估值视角）
+    (["买", "卖", "操作", "定投", "止盈", "止损", "加仓", "减仓", "补仓", "割肉", "上车", "赚不到钱", "盈利", "赚钱"],
+     ["allocation_advisor", "risk_assessor", "valuation_expert"]),
     (["文章", "公众号", "解读", "新闻"], ["article_expert"]),
     (["基金", "选基", "基金分析"], ["fund_analyst"]),
     (["宏观", "经济", "利率"], ["macro_strategist"]),
@@ -97,7 +101,8 @@ _KEYWORD_ROUTES = [
     # ── M2 新增：行业基本面 + 行为金融学专家路由 ──
     (["批价", "动销", "库存周期", "产能利用率", "产业链", "景气度", "渠道库存", "经销商"],
      ["industry_fundamentalist"]),
-    (["行为", "心理", "情绪", "偏差", "追涨", "杀跌", "恐慌", "冲动", "焦虑", "贪婪"],
+    # P1 修复 conv_153：behavioral 类补全"清仓"/"害怕"（原缺失导致未路由 behavioral_advisor）
+    (["行为", "心理", "情绪", "偏差", "追涨", "杀跌", "恐慌", "冲动", "焦虑", "贪婪", "清仓", "害怕"],
      ["behavioral_advisor"]),
     # conv#130 修复：暴涨/暴跌/大涨/大跌/量化/资金注入等市场极端波动关键词
     # 必须路由 behavioral_advisor 识别追涨/羊群效应/过度自信等行为偏差

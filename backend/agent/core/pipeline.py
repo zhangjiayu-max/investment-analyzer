@@ -68,6 +68,38 @@ _COMPLIANCE_RE = __import__("re").compile(
     "|".join(_COMPLIANCE_BLOCKLIST), __import__("re").IGNORECASE
 )
 
+# P2 修复（conv_150/155）：否定语境正则
+# 匹配 "否定词 + (保证)? + 保本/稳赚/稳赢/稳赚不赔"，如 "不保本"/"不能保本"/
+# "不保证稳赚"/"无法保本"/"并非稳赚"。命中此模式的属于风险提示而非违规承诺，不触发告警。
+# 说明：(?:保证)? 兼容 "不能保证保本" 中间的 "保证"，使否定区间覆盖到关键词。
+_NEGATED_COMPLIANCE_RE = __import__("re").compile(
+    r"(?:不保证|不能|无法|不存在|没有|并非|难以|不|非)"
+    r"(?:保证)?"
+    r"(稳赚不赔|保本|稳赚|稳赢)"
+)
+
+
+def _find_compliance_hits(text: str) -> list:
+    """检测违规表述，排除否定语境。
+
+    conv_150/155 修复：专家回复常出现"不能保本""不保证稳赚"等否定形式，原逻辑
+    仅按关键词命中即告警，误报率高。本函数先标记所有否定区间，再剔除落在否定区间
+    内的关键词命中，仅保留肯定性承诺（如"保证保本"/"稳赚不赔"/"绝对盈利"）。
+
+    其余绝对化表述（"必涨"/"零风险"/"无风险"/"包赚"等）保持原检测逻辑不变。
+    """
+    if not text:
+        return []
+    negated_spans = [m.span() for m in _NEGATED_COMPLIANCE_RE.finditer(text)]
+
+    hits = []
+    for m in _COMPLIANCE_RE.finditer(text):
+        # 落在否定区间内的命中（如"不保本"中的"保本"）跳过
+        if any(ns[0] <= m.start() < ns[1] for ns in negated_spans):
+            continue
+        hits.append(m.group(0))
+    return hits
+
 
 def _apply_compliance_and_warning(answer: str, trace_id: str) -> str:
     """Phase 4 综合答案输出前：合规过滤 + 基金代码风险标注。
@@ -87,7 +119,7 @@ def _apply_compliance_and_warning(answer: str, trace_id: str) -> str:
     except Exception:
         compliance_enabled = True
     if compliance_enabled:
-        hits = _COMPLIANCE_RE.findall(answer)
+        hits = _find_compliance_hits(answer)
         if hits:
             logger.warning(f"[pipeline:{trace_id}] 合规过滤命中违规表述: {hits}")
             suffix.append(
@@ -2308,7 +2340,9 @@ def _synthesize_multiple_specialists(
     # 开关：agent.sell_timing_guard_enabled（默认 false）
     try:
         from agent.safety.sell_timing_guard import enforce_sell_timing_guard
-        answer, _timing_warnings = enforce_sell_timing_guard(answer, trace_id=trace_id)
+        answer, _timing_warnings = enforce_sell_timing_guard(
+            answer, trace_id=trace_id, arbitration_summary=arbitration_summary
+        )
         if _timing_warnings:
             logger.info(
                 f"[trace:{trace_id}] [pipeline] 卖出时机守卫触发: {_timing_warnings}"
