@@ -1442,7 +1442,8 @@ def _log_tool_audit(trace_id: str, tool_name: str, arguments: dict,
             tool_name,
             json.dumps(arguments, ensure_ascii=False)[:500],
             (result or "")[:500],
-            1 if error_category == "none" else 0,
+            # cache_hit 是缓存命中（实际成功），不应计为失败
+            1 if error_category in ("none", "cache_hit") else 0,
             error_category,
             duration_ms,
         ))
@@ -1531,6 +1532,15 @@ def _query_valuation(args: dict, trace_id: str = "", conversation_id: int = None
     matched = []
     seen_codes = set()
 
+    # 提取用户输入的核心词：剥离前缀 + 数字中缀
+    # 解决"中证800医药"/"中证医药"匹配不到"医药50"的问题（双向子串匹配失效）
+    _user_core = index_name
+    for prefix in _prefixes:
+        if _user_core.startswith(prefix):
+            _user_core = _user_core[len(prefix):]
+            break
+    _user_core = re.sub(r'^(全指|综指)?\d+', '', _user_core).strip()
+
     for code, name in unique_indexes.items():
         if code in seen_codes:
             continue
@@ -1544,6 +1554,11 @@ def _query_valuation(args: dict, trace_id: str = "", conversation_id: int = None
                 seen_codes.add(code)
                 matched.append({"code": code, "name": name})
                 break
+        # 用户输入核心词匹配：处理"中证800医药"→"医药"匹配"医药50"
+        # 仅做 _user_core in name（核心词是库名称子串），不做反向避免短词误匹配
+        if code not in seen_codes and _user_core and len(_user_core) >= 2 and _user_core in name:
+            seen_codes.add(code)
+            matched.append({"code": code, "name": name})
 
     if not matched:
         # 尝试数据库关键词搜索
