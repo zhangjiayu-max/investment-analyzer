@@ -1018,7 +1018,8 @@ _CONTENT_TYPE_PRIORITY = {
     "analysis": 4,        # 分析记录
     "skill": 5,           # 投资方法论
     "linked_doc": 6,      # 个人文档
-    "book": 7,            # 书籍知识（优先级最低）
+    "fund": 7,            # 基金档案（持仓基金基础信息）
+    "book": 8,            # 书籍知识（优先级最低）
 }
 
 

@@ -33,11 +33,11 @@ def _list_all_funds() -> list[dict]:
 
 
 def _exists_fund_knowledge(fund_name: str) -> bool:
-    """检查 knowledge_base 是否已有 source=fund_name 且 category='book' 的记录。"""
+    """检查 knowledge_base 是否已有 source=fund_name 且 category='fund' 的记录。"""
     conn = _get_conn()
     try:
         row = conn.execute(
-            "SELECT COUNT(*) FROM knowledge_base WHERE source = ? AND category = 'book'",
+            "SELECT COUNT(*) FROM knowledge_base WHERE source = ? AND category = 'fund'",
             (fund_name,),
         ).fetchone()
         return row[0] > 0
@@ -167,7 +167,7 @@ def seed_fund_knowledge(force: bool = False, respect_switch: bool = True):
                 continue
             title, content, keywords = _build_card(fund)
             kid = add_knowledge(
-                category="book",
+                category="fund",
                 title=title,
                 content=content,
                 subcategory="indicator",
