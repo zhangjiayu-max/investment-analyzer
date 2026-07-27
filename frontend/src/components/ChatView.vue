@@ -226,6 +226,9 @@ async function loadConversations() {
 
 async function selectConversation(conv) {
   showMobileSidebar.value = false
+  // 切换对话前暂停当前 SSE 连接（任务在后台继续执行，仅断开前端流）
+  // 修复：切换对话时旧 SSE 未清理，导致 streamStates 残留、侧边栏错误显示脉动
+  pauseCurrentStream()
   selectedConv.value = conv
   localStorage.setItem(LAST_CONV_KEY, String(conv.id))
   await loadMessages(conv.id)
@@ -1342,6 +1345,12 @@ async function regenerateAssistantMessage(msg) {
   if (!convId || !msg?.id || sending.value) return
   try {
     const { data } = await retryConversationMessage(convId, msg.id)
+    // 一致性检查：await 期间用户可能已切换到其他对话
+    // 若已切换，不再用旧 convId 的 loadMessages 覆盖当前对话的消息显示
+    if (selectedConv.value?.id !== convId) {
+      console.log(`[regenerate] 重新生成 ${convId} 期间已切换对话，跳过 loadMessages 避免覆盖`)
+      return
+    }
     await loadMessages(convId)
     if (data.original_query) {
       sendMessageAndTrack(convId, data.original_query)
