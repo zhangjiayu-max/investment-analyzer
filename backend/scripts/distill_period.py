@@ -60,9 +60,10 @@ _primary_cfg = get_llm_config()  # (api_key, base_url, model)
 _fallback_cfg = get_llm_fallback_config()  # (api_key, base_url, model) or None
 _DISTILL_MODEL = _primary_cfg[2]
 
-# MIMO 套餐 API — 三个 key 轮询，避免并发限流（蒸馏专用）
+# MIMO 套餐 API — 多 key 轮询，避免并发限流（蒸馏专用）
+# 注意：旧 key tp-ca65... 已失效（AuthenticationError），只保留新 key
 _DISTILL_KEYS = [
-    "tp-ca65d13uw5f06odkihv9336gb69avpj3hjrx6r38og6e8ejw",
+    "tp-cztoehx9kc6uqpwm53adzok8agg84zfokfje362cqmfjzprg",
 ]
 _DISTILL_BASE_URL = "https://token-plan-cn.xiaomimimo.com/v1"
 
@@ -71,9 +72,9 @@ _distill_clients = [OpenAI(api_key=k, base_url=_DISTILL_BASE_URL) for k in _DIST
 _key_idx = 0
 _key_lock = threading.Lock()
 
-# fallback client（DeepSeek 等）
-_fallback_client = OpenAI(api_key=_fallback_cfg[0], base_url=_fallback_cfg[1]) if _fallback_cfg else None
-_fallback_model = _fallback_cfg[2] if _fallback_cfg else None
+# fallback 已禁用：用户要求不允许使用 DeepSeek
+_fallback_client = None
+_fallback_model = None
 
 
 def _get_next_client() -> OpenAI:
@@ -90,11 +91,11 @@ def _get_model_name() -> str:
 
 
 def _call_llm(caller: str = "", model: str = None, **kwargs):
-    """三 key 轮询调用 MIMO，自带重试 + fallback 到 DeepSeek。"""
+    """多 key 轮询调用 MIMO（已禁用 DeepSeek fallback）。"""
     use_model = model or _DISTILL_MODEL
     client = _get_next_client()
 
-    # 主力 MIMO 轮询重试
+    # 主力 MIMO 轮询重试（两个 key 各试 2 次，共 4 次）
     for attempt in range(4):
         try:
             resp = client.chat.completions.create(model=use_model, **kwargs)
@@ -110,22 +111,9 @@ def _call_llm(caller: str = "", model: str = None, **kwargs):
                 time.sleep(wait)
                 client = _get_next_client()  # 失败时换下一个 key
             else:
-                print(f"  [{caller}] MIMO 全部失败，尝试 fallback...")
+                print(f"  [{caller}] MIMO 全部失败")
 
-    # fallback 到 DeepSeek（如果配置了）
-    if _fallback_client and _fallback_model:
-        try:
-            print(f"  [{caller}] Fallback 到 {_fallback_model}...")
-            resp = _fallback_client.chat.completions.create(model=_fallback_model, **kwargs)
-            # 记录 token 用量
-            if resp.usage:
-                from services.llm_service import _record_token_usage
-                _record_token_usage(resp.usage, resp.model or _fallback_model, "distill_period")
-            return resp
-        except Exception as e:
-            print(f"  [{caller}] Fallback 也失败: {e}")
-            raise
-    raise RuntimeError(f" [{caller}] 所有 LLM 调用失败，无 fallback 配置")
+    raise RuntimeError(f" [{caller}] 所有 MIMO key 调用失败（已禁用 DeepSeek fallback）")
 
 # 输出目录：data/books/
 BOOKS_DIR = Path(__file__).parent.parent.parent / "data" / "books"
