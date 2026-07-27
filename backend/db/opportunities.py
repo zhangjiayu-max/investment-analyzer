@@ -101,6 +101,11 @@ def init_opportunity_tables(conn):
     # F-4（2026-07-23）：入场估值分位（用于 miss_reason 拼接和反哺分析）
     _ensure_column(conn, "theme_opportunity_backtests", "entry_percentile", "REAL")
 
+    # Accuracy-Fix（2026-07-27）：入场时的资金面/量能信号，用于分维度命中率分析
+    # capital_signal: inflow/outflow/neutral  volume_signal: expand/shrink/neutral
+    _ensure_column(conn, "theme_opportunity_backtests", "capital_signal", "TEXT")
+    _ensure_column(conn, "theme_opportunity_backtests", "volume_signal", "TEXT")
+
 
 def _ensure_column(conn, table: str, column: str, col_type: str):
     """安全添加列（如果不存在）。"""
@@ -552,7 +557,8 @@ def create_opportunity_backtest(data: dict) -> int:
     """创建机会回测记录（每次 save_opportunity 时插入）。
 
     Args:
-        data: {opportunity_id, theme, entry_date, review_date, entry_price, signal_source?}
+        data: {opportunity_id, theme, entry_date, review_date, entry_price,
+               signal_source?, capital_signal?, volume_signal?}
 
     Returns:
         backtest_id
@@ -560,10 +566,12 @@ def create_opportunity_backtest(data: dict) -> int:
     conn = _get_conn()
     try:
         # LI-6（2026-07-22）：新增 signal_source 字段（默认 'news'）
+        # Accuracy-Fix（2026-07-27）：新增 capital_signal/volume_signal 字段
         cur = conn.execute("""
             INSERT INTO theme_opportunity_backtests (
-                opportunity_id, theme, entry_date, review_date, entry_price, signal_source
-            ) VALUES (?, ?, ?, ?, ?, ?)
+                opportunity_id, theme, entry_date, review_date, entry_price,
+                signal_source, capital_signal, volume_signal
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             data.get("opportunity_id"),
             data.get("theme", ""),
@@ -571,6 +579,8 @@ def create_opportunity_backtest(data: dict) -> int:
             data.get("review_date", ""),
             data.get("entry_price"),
             data.get("signal_source", "news"),
+            data.get("capital_signal"),
+            data.get("volume_signal"),
         ))
         conn.commit()
         return cur.lastrowid
@@ -600,7 +610,7 @@ def update_opportunity_backtest(backtest_id: int, fields: dict) -> bool:
         return False
     conn = _get_conn()
     try:
-        allowed = {"review_price", "hit", "change_pct", "reviewed_at", "benchmark_pct", "excess_return", "miss_reason", "entry_percentile"}
+        allowed = {"review_price", "hit", "change_pct", "reviewed_at", "benchmark_pct", "excess_return", "miss_reason", "entry_percentile", "capital_signal", "volume_signal"}
         sets = []
         values = []
         for k, v in fields.items():
@@ -787,6 +797,80 @@ def get_consecutive_misses_by_theme() -> dict:
                 miss_streak = 0
         if current_theme and miss_streak >= 3:
             result[current_theme] = miss_streak
+        return result
+    finally:
+        conn.close()
+
+
+def delete_avoid_verdict_backtests() -> dict:
+    """Accuracy-Fix（2026-07-27）：清理 verdict=avoid 机会对应的回测记录。
+
+    场景：历史 10 条 avoid 机会仍创建了 backtest 记录，污染命中率统计。
+    策略：删除 theme_opportunity_backtests 中 opportunity_id 对应的 theme_opportunities.verdict=avoid 的记录，
+    但保留已回测（hit IS NOT NULL）的 avoid 记录 —— 它们已贡献到历史统计，删除会破坏历史数据完整性。
+
+    Returns:
+        {"scanned": N, "deleted": M, "kept_reviewed": K}
+    """
+    conn = _get_conn()
+    try:
+        # 找到 avoid 机会对应的 backtest 记录
+        rows = conn.execute("""
+            SELECT b.id, b.hit
+            FROM theme_opportunity_backtests b
+            JOIN theme_opportunities o ON o.id = b.opportunity_id
+            WHERE o.verdict = 'avoid'
+        """).fetchall()
+        scanned = len(rows)
+        deleted = 0
+        kept_reviewed = 0
+        for r in rows:
+            # 已回测的记录保留（历史数据不破坏），仅删除未回测的
+            if r["hit"] is None:
+                conn.execute("DELETE FROM theme_opportunity_backtests WHERE id = ?", (r["id"],))
+                deleted += 1
+            else:
+                kept_reviewed += 1
+        conn.commit()
+        return {"scanned": scanned, "deleted": deleted, "kept_reviewed": kept_reviewed}
+    finally:
+        conn.close()
+
+
+def get_backtest_stats_by_signal() -> dict:
+    """Accuracy-Fix（2026-07-27）：按资金面/量能信号分组统计命中率。
+
+    用于分析"资金流入 + 放量"信号的命中率是否高于"资金流出 + 缩量"信号，
+    验证资金面和量能维度对准确率的贡献。
+
+    Returns:
+        {
+            "capital_signal": {"inflow": {...}, "outflow": {...}, "neutral": {...}},
+            "volume_signal": {"expand": {...}, "shrink": {...}, "neutral": {...}}
+        }
+    """
+    conn = _get_conn()
+    try:
+        result = {"capital_signal": {}, "volume_signal": {}}
+        for signal_col in ("capital_signal", "volume_signal"):
+            rows = conn.execute(f"""
+                SELECT {signal_col} as sig,
+                   COUNT(*) as total,
+                   SUM(CASE WHEN hit=1 THEN 1 ELSE 0 END) as hits,
+                   SUM(CASE WHEN hit IS NOT NULL THEN 1 ELSE 0 END) as reviewed
+                FROM theme_opportunity_backtests
+                WHERE {signal_col} IS NOT NULL
+                GROUP BY {signal_col}
+            """).fetchall()
+            for r in rows:
+                sig = r["sig"] or "unknown"
+                reviewed = r["reviewed"] or 0
+                result[signal_col][sig] = {
+                    "total": r["total"],
+                    "hits": r["hits"] or 0,
+                    "reviewed": reviewed,
+                    "hit_rate": round((r["hits"] or 0) / reviewed * 100, 1) if reviewed else None,
+                }
         return result
     finally:
         conn.close()

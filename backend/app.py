@@ -494,6 +494,16 @@ async def startup():
                 logging.info(f"[opportunity] F-4 miss_reason 回填: {miss_stats}")
         except Exception as e:
             logging.warning(f"[opportunity] F-4 miss_reason 回填失败（不影响启动）: {e}")
+
+        # Accuracy-Fix（2026-07-27）：清理 verdict=avoid 机会的回测记录
+        # 避免已否决的信号污染命中率统计
+        try:
+            from db.opportunities import delete_avoid_verdict_backtests
+            cleanup_stats = delete_avoid_verdict_backtests()
+            if cleanup_stats.get("deleted", 0) > 0:
+                logging.info(f"[opportunity] 清理 avoid 回测记录: {cleanup_stats}")
+        except Exception as e:
+            logging.warning(f"[opportunity] 清理 avoid 回测记录失败（不影响启动）: {e}")
     except Exception as e:
         logging.warning(f"机会雷达 backfill 失败（不影响启动）: {e}")
 

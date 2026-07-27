@@ -324,3 +324,34 @@ async def get_backtest_stats_by_source():
     except Exception as e:
         logger.error(f"获取回测统计失败: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/api/opportunities/backtest-stats-by-signal")
+async def get_backtest_stats_by_signal():
+    """Accuracy-Fix（2026-07-27）：按资金面/量能信号分组统计回测命中率。
+
+    用于验证"资金流入+放量"信号的命中率是否高于"资金流出+缩量"信号，
+    为后续调整评分维度权重提供数据支撑。
+    """
+    try:
+        from db.opportunities import get_backtest_stats_by_signal
+        stats = get_backtest_stats_by_signal()
+        return ApiResponse.success(data=stats)
+    except Exception as e:
+        logger.error(f"获取信号分组统计失败: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/api/opportunities/cleanup-avoid-backtests")
+async def cleanup_avoid_backtests():
+    """Accuracy-Fix（2026-07-27）：手动清理 verdict=avoid 机会的未回测 backtest 记录。
+
+    启动时已自动执行，此接口供手动触发使用。
+    """
+    try:
+        from db.opportunities import delete_avoid_verdict_backtests
+        result = delete_avoid_verdict_backtests()
+        return ApiResponse.success(data=result)
+    except Exception as e:
+        logger.error(f"清理 avoid 回测记录失败: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))

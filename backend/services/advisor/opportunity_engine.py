@@ -542,6 +542,94 @@ def _get_sentiment_score() -> tuple[int, str]:
         return 0, "neutral"
 
 
+# Accuracy-Fix（2026-07-27）：成交量缓存（5 分钟 TTL，与技术指标共用窗口）
+_VOLUME_CACHE: dict[str, tuple[float, tuple[int, str]]] = {}
+_VOLUME_CACHE_TTL = 300.0
+
+
+def _get_volume_score(theme_rule: dict) -> tuple[int, str]:
+    """Accuracy-Fix（2026-07-27）：成交量确认机制。
+
+    通过对比主题指数近 5 日成交量与 20 日平均成交量，判断量能配合：
+    - 放量（>1.3x）：+5（量价齐升，有效确认）
+    - 正常（0.8x~1.3x）：0
+    - 缩量（<0.8x）：-5（无量上涨，可靠性低）
+
+    作为第二数据源验证新闻信号的真实性，避免"干拔"主题被误判。
+
+    Returns:
+        (score_delta, signal): score_delta 范围 -5~+5，signal 为 "expand"/"shrink"/"neutral"
+    """
+    try:
+        index_code = _get_theme_index_code(theme_rule)
+        if not index_code:
+            return 0, "neutral"
+
+        # 5 分钟缓存
+        cache_key = f"vol_{index_code}"
+        cached = _VOLUME_CACHE.get(cache_key)
+        if cached and (time.time() - cached[0]) < _VOLUME_CACHE_TTL:
+            return cached[1]
+
+        volumes = _fetch_index_volumes(index_code, days=25)
+        if not volumes or len(volumes) < 20:
+            _VOLUME_CACHE[cache_key] = (time.time(), (0, "neutral"))
+            return 0, "neutral"
+
+        recent_5d_avg = sum(volumes[-5:]) / 5
+        base_20d_avg = sum(volumes[-20:]) / 20
+
+        if base_20d_avg <= 0:
+            _VOLUME_CACHE[cache_key] = (time.time(), (0, "neutral"))
+            return 0, "neutral"
+
+        ratio = recent_5d_avg / base_20d_avg
+        if ratio > 1.3:
+            result = (5, "expand")
+        elif ratio < 0.8:
+            result = (-5, "shrink")
+        else:
+            result = (0, "neutral")
+
+        _VOLUME_CACHE[cache_key] = (time.time(), result)
+        return result
+    except Exception as e:
+        logger.debug(f"[opportunity] 成交量获取失败: {e}")
+        return 0, "neutral"
+
+
+def _fetch_index_volumes(index_code: str, days: int = 25) -> list[float]:
+    """Accuracy-Fix（2026-07-27）：获取指数近 N 日成交量序列。
+
+    优先从 akshare index_zh_a_hist 获取（带超时保护），返回成交量列表。
+    本地表无 volume 字段，只能走 akshare。
+
+    Returns:
+        成交量列表（按时间升序）；空列表表示获取失败
+    """
+    try:
+        import akshare as ak
+        from services.market.leading_indicators.akshare_utils import call_akshare_with_timeout
+        bare_code = index_code.split(".")[0].split(" ")[0]
+        # 多取一倍容错
+        end_date = datetime.now().strftime("%Y%m%d")
+        start_date = (datetime.now() - timedelta(days=days * 2 + 10)).strftime("%Y%m%d")
+        df = call_akshare_with_timeout(
+            ak.index_zh_a_hist, symbol=bare_code, period="daily",
+            start_date=start_date, end_date=end_date, timeout=15,
+        )
+        if df is None or len(df) < days:
+            return []
+        # akshare 返回的列名为中文：成交量
+        if "成交量" not in df.columns:
+            return []
+        volumes = [float(v) for v in df["成交量"].values[-days:]]
+        return volumes
+    except Exception as e:
+        logger.debug(f"[opportunity] 获取指数成交量失败 {index_code}: {e}")
+        return []
+
+
 def _get_leading_indicator_score(theme_rule: dict, trade_date: str) -> tuple[int, str]:
     """LI-5（2026-07-22）：计算领先指标得分。返回 (score, reason)。
 
@@ -607,7 +695,7 @@ def _get_leading_indicator_score(theme_rule: dict, trade_date: str) -> tuple[int
         return 0, ""
 
 
-def _score_theme(theme_rule: dict, news_hits: list[dict], valuation: dict | None, portfolio_fit: dict) -> tuple[int, str]:
+def _score_theme(theme_rule: dict, news_hits: list[dict], valuation: dict | None, portfolio_fit: dict) -> tuple[int, str, str, str]:
     """主题评分（2026-07-20 系统性修复后）。
 
     评分体系：
@@ -621,11 +709,18 @@ def _score_theme(theme_rule: dict, news_hits: list[dict], valuation: dict | None
     - 资金流向（P1-L 新增）：-5~+10 分
     - 情绪指标（P1-M 新增）：-5~+10 分
     - 领先指标（LI-5 新增）：-10~+15 分（开关默认关闭）
+    - 成交量确认（Accuracy-Fix 新增）：-5~+5 分
 
     一票否决（P0-A）：
     - 估值 >80% → 强制 avoid
     - 估值 >60% → 禁止 can_buy
     - 无估值数据 → 禁止 can_buy
+
+    Accuracy-Fix（2026-07-27）资金面确认机制：
+    - verdict=can_buy 但 capital_signal=outflow → 降级为 watch（资金流出与看多信号矛盾）
+
+    Returns:
+        (score, verdict, capital_signal, volume_signal)
     """
     score = 0
 
@@ -674,7 +769,7 @@ def _score_theme(theme_rule: dict, news_hits: list[dict], valuation: dict | None
         score -= 5  # 技术看空额外扣分
 
     # ── 8. 资金流向（P1-L 新增）──
-    capital_score, _ = _get_capital_flow_score(theme_rule)
+    capital_score, capital_signal = _get_capital_flow_score(theme_rule)
     score += capital_score
 
     # ── 9. 情绪指标（P1-M 新增）──
@@ -685,6 +780,11 @@ def _score_theme(theme_rule: dict, news_hits: list[dict], valuation: dict | None
     trade_date = datetime.now().strftime("%Y-%m-%d")
     leading_score, _ = _get_leading_indicator_score(theme_rule, trade_date)
     score += leading_score
+
+    # ── 11. 成交量确认（Accuracy-Fix 2026-07-27 新增）──
+    # 作为第二数据源验证新闻信号真实性，避免"干拔"主题被误判
+    volume_score, volume_signal = _get_volume_score(theme_rule)
+    score += volume_score
 
     # ── F-4+（2026-07-23）：命中率反哺降权 — 闭环关键 ──
     # 主题连续 miss ≥3 次后降权，使低命中率主题的评分自动降低
@@ -717,12 +817,25 @@ def _score_theme(theme_rule: dict, news_hits: list[dict], valuation: dict | None
             verdict = "watch"
             score = min(score, 60)
 
+    # ── Accuracy-Fix（2026-07-27）：资金面确认机制（第二数据源验证）──
+    # 场景：新闻信号看多但资金大幅流出，信号矛盾应降级
+    # 策略：can_buy + 强资金流出 → watch；不升级 watch → can_buy（避免过度乐观）
+    if verdict == "can_buy" and capital_signal == "outflow":
+        verdict = "watch"
+        score = min(score, 65)
+
+    # ── Accuracy-Fix（2026-07-27）：量能确认机制 ──
+    # 场景：can_buy 但严重缩量，无量上涨可靠性低
+    if verdict == "can_buy" and volume_signal == "shrink":
+        verdict = "watch"
+        score = min(score, 65)
+
     # ── 原有降级逻辑 ──
     if portfolio_fit.get("overlap_risk") == "high" and verdict == "can_buy":
         verdict = "watch"
     if funds and not any(f.get("short_term_suitable") for f in funds) and verdict == "can_buy":
         verdict = "watch"
-    return score, verdict
+    return score, verdict, capital_signal, volume_signal
 
 
 def _build_matched_funds(theme_rule: dict) -> list[dict]:
@@ -855,13 +968,12 @@ def _build_entry_condition(verdict: str, valuation: dict | None,
 def _build_item(theme_rule: dict, news_hits: list[dict], trade_date: str, user_id: str) -> dict:
     valuation = _latest_valuation_for_theme(theme_rule)
     portfolio_fit = _portfolio_fit(theme_rule, user_id)
-    score, verdict = _score_theme(theme_rule, news_hits, valuation, portfolio_fit)
+    score, verdict, capital_signal, volume_signal = _score_theme(theme_rule, news_hits, valuation, portfolio_fit)
     matched_funds = _build_matched_funds(theme_rule)
     review_date = (datetime.strptime(trade_date, "%Y-%m-%d") + timedelta(days=15)).strftime("%Y-%m-%d")
 
     # P1-K: 获取技术信号用于动态文案
     _, tech_signal = _get_technical_score(theme_rule)
-    _, capital_signal = _get_capital_flow_score(theme_rule)
     _, sentiment_signal = _get_sentiment_score()
 
     # ── L1 政策解读 LLM 化（2026-07-21）──
@@ -948,6 +1060,9 @@ def _build_item(theme_rule: dict, news_hits: list[dict], trade_date: str, user_i
         "entry_amount": entry_amount,
         "valuation_percentile": valuation_percentile,
         "review_status": "pending",  # 默认 pending，回测完成后改为 completed
+        # Accuracy-Fix（2026-07-27）：入场信号快照（下划线前缀=不入库，仅供 backtest 记录引用）
+        "_capital_signal": capital_signal,
+        "_volume_signal": volume_signal,
     }
 
     # ── L1 政策解读结果写入 item ──
@@ -1010,11 +1125,15 @@ def _get_theme_index_current_price(theme_rule: dict) -> float | None:
     return None
 
 
-def _create_opportunity_backtest(opportunity_id: int, theme_rule: dict, trade_date: str, review_date: str) -> None:
+def _create_opportunity_backtest(opportunity_id: int, theme_rule: dict, trade_date: str, review_date: str,
+                                capital_signal: str | None = None, volume_signal: str | None = None) -> None:
     """P1-N: 在 save_opportunity 后插入回测跟踪记录。
 
     用途：每次生成机会卡时同步插入回测记录，15 个交易日后自动回测命中率。
     解决问题：原 theme_opportunity_tracks 表是"用户已买入后跟踪"，0 条记录导致命中率统计永远为 None。
+
+    Accuracy-Fix（2026-07-27）：新增 capital_signal/volume_signal 字段存储入场时的资金面/量能信号，
+    用于后续命中率分维度分析（如资金流入信号的命中率 vs 流出信号的命中率）。
     """
     try:
         from db.opportunities import create_opportunity_backtest
@@ -1038,6 +1157,8 @@ def _create_opportunity_backtest(opportunity_id: int, theme_rule: dict, trade_da
             "review_date": review_date,
             "entry_price": entry_price,
             "signal_source": signal_source,
+            "capital_signal": capital_signal,
+            "volume_signal": volume_signal,
         })
     except Exception as e:
         logger.debug(f"[opportunity] 创建回测记录失败: {e}")
@@ -1732,12 +1853,21 @@ def scan_daily_opportunities(news_items: list[dict] | None = None,
         item["id"] = save_opportunity(item, user_id=user_id)
         # ── P1-N: 同步插入回测跟踪记录 ──
         # 用途：15 个交易日后自动回测命中率，让前端"命中率"chip 真正有数据
-        _create_opportunity_backtest(
-            opportunity_id=item["id"],
-            theme_rule=rule,
-            trade_date=trade_date,
-            review_date=item.get("exit_plan", {}).get("review_date", ""),
-        )
+        # Accuracy-Fix（2026-07-27）：verdict=avoid 不创建回测记录
+        # 原因：avoid 信号本就建议不入场，回测它命中率无意义且污染统计
+        # 同时清理估值>80% 的防御性检查（P0-A 已强制 avoid，此处兜底）
+        if item.get("verdict") != "avoid":
+            _create_opportunity_backtest(
+                opportunity_id=item["id"],
+                theme_rule=rule,
+                trade_date=trade_date,
+                review_date=item.get("exit_plan", {}).get("review_date", ""),
+                capital_signal=item.get("_capital_signal"),
+                volume_signal=item.get("_volume_signal"),
+            )
+        # 清理内部字段，不暴露给前端 API 响应
+        item.pop("_capital_signal", None)
+        item.pop("_volume_signal", None)
         items.append(item)
 
     items.sort(key=lambda x: x.get("opportunity_score", 0), reverse=True)

@@ -42,6 +42,7 @@ import time
 import base64
 import argparse
 import threading
+import hashlib
 from pathlib import Path
 from io import BytesIO
 
@@ -223,10 +224,259 @@ def _cleanup_text_pdf(text: str, book_title: str) -> str:
     return '\n'.join(result)
 
 
+# ══════════════════════════════════════════════════════════════
+# PaddleOCR-VL 引擎：本地 0.9B 模型，原生版面分析 + 跨页合并
+# ══════════════════════════════════════════════════════════════
+
+# PaddleOCR venv 路径（独立环境，避免污染主项目）
+_PADDLE_VENV_PYTHON = "/Users/xiaoyuer/projects/investment-analyzer/backend/.venv-paddle/bin/python"
+
+# 页级缓存目录：避免重跑时重复 OCR（mimo 和 paddle 共用，按引擎前缀区分）
+_OCR_CACHE_DIR = BOOKS_DIR / ".ocr_cache"
+
+
+def _ocr_cache_key(engine: str, book_title: str, page_num: int) -> Path:
+    """生成页级缓存文件路径。"""
+    _OCR_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    safe_name = re.sub(r'[^\w\u4e00-\u9fa5]', '_', book_title)
+    return _OCR_CACHE_DIR / f"{engine}_{safe_name}_p{page_num:04d}.md"
+
+
+def _paddle_cache_key(book_title: str, page_num: int) -> Path:
+    """PaddleOCR 页级缓存（兼容旧调用）。"""
+    return _ocr_cache_key("paddle", book_title, page_num)
+
+
+def _mimo_cache_key(book_title: str, page_num: int) -> Path:
+    """mimo 视觉模型页级缓存。"""
+    return _ocr_cache_key("mimo", book_title, page_num)
+
+
+def ocr_pdf_with_paddle(pdf_path: str, book_title: str,
+                       start_page: int = None, end_page: int = None) -> str:
+    """用 PaddleOCR-VL-1.5 本地模型 OCR 扫描版 PDF，返回 Markdown 全文。
+
+    优势：
+    - 原生版面分析（PP-DocLayoutV3），自动识别多栏、表格、公式、标题层级
+    - 原生跨页表格合并、跨页段落标题识别
+    - 无需 pdf2image 逐页转图，PaddleOCR 直接吃 PDF
+    - 无需 _merge_pages 二次 LLM 合并
+    - 页级缓存，支持断点续跑
+    """
+    reader = PdfReader(pdf_path)
+    total_pages = len(reader.pages)
+
+    if start_page is None:
+        start_page = 1
+    if end_page is None:
+        end_page = total_pages
+    start_page = max(1, min(start_page, total_pages))
+    end_page = max(start_page, min(end_page, total_pages))
+
+    print(f"  PaddleOCR-VL-1.5 引擎")
+    print(f"  页码范围: {start_page}-{end_page} ({end_page - start_page + 1} 页)")
+
+    # 检查缓存，统计已完成页
+    cached_pages = {}
+    missing_pages = []
+    for page_num in range(start_page, end_page + 1):
+        cache_file = _paddle_cache_key(book_title, page_num)
+        if cache_file.exists():
+            content = cache_file.read_text(encoding="utf-8")
+            if len(content) > 20:
+                cached_pages[page_num] = content
+                continue
+        missing_pages.append(page_num)
+
+    if cached_pages:
+        print(f"  缓存命中: {len(cached_pages)} 页, 待 OCR: {len(missing_pages)} 页")
+
+    if not missing_pages:
+        print(f"  全部页码已缓存，直接组装")
+        all_text = "\n\n---\n\n".join(cached_pages[p] for p in sorted(cached_pages.keys()))
+        return all_text
+
+    # 调用 PaddleOCR（在独立 venv 中运行，避免依赖冲突）
+    # 一次性处理所有缺失页，PaddleOCR 内部会批处理
+    print(f"  启动 PaddleOCR-VL 推理（{len(missing_pages)} 页）...")
+
+    # 构造调用脚本：使用 PaddleOCR 的 doc_parser pipeline
+    # 为了支持页级缓存和断点续跑，按批次处理（每批 50 页，平衡模型加载开销和进度可见性）
+    BATCH_SIZE = 50
+    batches = [missing_pages[i:i + BATCH_SIZE] for i in range(0, len(missing_pages), BATCH_SIZE)]
+
+    for batch_idx, page_batch in enumerate(batches):
+        batch_start = page_batch[0]
+        batch_end = page_batch[-1]
+        print(f"  [批次 {batch_idx + 1}/{len(batches)}] 处理第 {batch_start}-{batch_end} 页...")
+
+        # 通过子进程调用独立 venv 的 Python，避免依赖冲突
+        # 传入 PDF 路径和页码范围，返回每页 Markdown
+        script_code = f'''
+import sys
+import json
+import os
+import re
+import shutil
+import warnings
+warnings.filterwarnings("ignore")
+
+# 抑制 paddle 的 ccache 警告
+os.environ.setdefault("GLOG_minloglevel", "3")
+
+from paddleocr import PaddleOCRVL
+
+print("  [paddle] 初始化 PaddleOCRVL v1.5...", flush=True)
+pipeline = PaddleOCRVL(pipeline_version="v1.5")
+print("  [paddle] 模型加载完成", flush=True)
+
+pdf_path = {repr(pdf_path)}
+start_page = {batch_start}
+end_page = {batch_end}
+
+print(f"  [paddle] 处理 PDF: {{pdf_path}} 页 {{start_page}}-{{end_page}}", flush=True)
+
+# PaddleOCR predict 不直接支持页码范围，需要先用 pypdfium2 切页
+import pypdfium2 as pdfium
+import tempfile
+
+pdf = pdfium.PdfDocument(pdf_path)
+total = len(pdf)
+print(f"  [paddle] PDF 总页数: {{total}}", flush=True)
+
+results = {{}}
+# 逐页处理，便于精确控制页码和缓存
+for page_idx in range(start_page - 1, min(end_page, total)):
+    page_num = page_idx + 1
+    print(f"  [paddle] 第 {{page_num}} 页: 渲染中...", flush=True)
+
+    # 渲染页面为图片
+    page = pdf[page_idx]
+    bitmap = page.render(scale=2.0)  # 约 150 DPI
+    pil_image = bitmap.to_pil()
+
+    # 保存为临时文件
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+        tmp_path = tmp.name
+        pil_image.save(tmp_path, format="PNG")
+
+    try:
+        print(f"  [paddle] 第 {{page_num}} 页: OCR 识别中...", flush=True)
+        output = pipeline.predict(tmp_path)
+
+        # 用 save_to_markdown 写到临时目录，再读回来
+        # res.markdown 是 dict（包含 text 和 images），不能直接 JSON 序列化
+        out_dir = f"/tmp/_paddle_page_{{page_num}}"
+        shutil.rmtree(out_dir, ignore_errors=True)
+        os.makedirs(out_dir, exist_ok=True)
+
+        for res in output:
+            res.save_to_markdown(save_path=out_dir)
+
+        # 读取生成的 md 文件
+        page_md = ""
+        for f in os.listdir(out_dir):
+            if f.endswith(".md"):
+                page_md = open(os.path.join(out_dir, f), encoding="utf-8").read()
+                break
+
+        # 移除 img 标签（图片对蒸馏无价值，但保留 alt 文本作为图片描述）
+        # <div ...><img src="imgs/xxx.jpg" alt="Image" width="..." /></div>
+        # → [图片: Image]
+        page_md = re.sub(
+            r'<div[^>]*><img[^>]*alt="([^"]*)"[^>]*/?></div>',
+            lambda m: f"[图片: {{m.group(1)}}]" if m.group(1) else "[图片]",
+            page_md
+        )
+        # 兜底：移除剩余的 img 标签
+        page_md = re.sub(r'<img[^>]*/?>', '[图片]', page_md)
+        # 移除 HTML div 标签
+        page_md = re.sub(r'</?div[^>]*>', '', page_md)
+
+        results[str(page_num)] = page_md
+        print(f"  [paddle] 第 {{page_num}} 页: 完成 ({{len(page_md)}} 字)", flush=True)
+
+    finally:
+        if os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+        # 清理临时输出目录
+        shutil.rmtree(out_dir, ignore_errors=True)
+
+# 输出 JSON 结果到 stdout（最后一行）
+print("__PADDLE_RESULT_JSON__" + json.dumps(results, ensure_ascii=False))
+'''
+        # 写入临时脚本文件
+        script_path = BOOKS_DIR / f"_paddle_ocr_{book_title}_{batch_start}_{batch_end}.py"
+        try:
+            script_path.write_text(script_code, encoding="utf-8")
+
+            # 调用独立 venv 的 Python
+            import subprocess
+            result = subprocess.run(
+                [_PADDLE_VENV_PYTHON, str(script_path)],
+                capture_output=True,
+                text=True,
+                timeout=7200,  # 2 小时超时（50 页 batch 约 20 分钟，留余量）
+                cwd=str(BOOKS_DIR.parent),
+            )
+
+            # 解析输出
+            stdout = result.stdout
+            stderr = result.stderr
+
+            # 找到结果 JSON
+            marker = "__PADDLE_RESULT_JSON__"
+            if marker not in stdout:
+                print(f"  ⚠ PaddleOCR 批次 {batch_idx + 1} 未返回结果")
+                if stderr:
+                    print(f"  stderr (最后 500 字): {stderr[-500:]}")
+                if stdout:
+                    print(f"  stdout (最后 500 字): {stdout[-500:]}")
+                continue
+
+            json_str = stdout.split(marker)[-1].strip()
+            try:
+                page_results = json.loads(json_str)
+            except json.JSONDecodeError as e:
+                print(f"  ⚠ 结果 JSON 解析失败: {e}")
+                continue
+
+            # 写入缓存
+            for page_str, md_text in page_results.items():
+                page_num = int(page_str)
+                if md_text and len(md_text) > 20:
+                    cache_file = _paddle_cache_key(book_title, page_num)
+                    cache_file.write_text(md_text, encoding="utf-8")
+                    cached_pages[page_num] = md_text
+                    print(f"  第 {page_num} 页: ✓ ({len(md_text)} 字)")
+                else:
+                    print(f"  第 {page_num} 页: ⚠ 结果过短或为空")
+
+            # 打印 paddle 进度日志（最后几行）
+            paddle_logs = [l for l in stdout.split("\n") if l.startswith("  [paddle]")]
+            for log in paddle_logs[-3:]:
+                print(f"  {log}")
+
+        finally:
+            if script_path.exists():
+                script_path.unlink()
+
+    # 按页码顺序组装
+    all_text = "\n\n---\n\n".join(
+        cached_pages[p] for p in sorted(cached_pages.keys())
+        if p in cached_pages
+    )
+    print(f"  PaddleOCR 完成: {len(cached_pages)}/{end_page - start_page + 1} 页")
+    return all_text
+
+
 def ocr_scanned_pdf(pdf_path: str, book_title: str,
                     start_page: int = None, end_page: int = None,
                     dpi: int = 150, pages_per_chunk: int = 10) -> str:
-    """用多模态 LLM 逐页 OCR 扫描版 PDF，返回 Markdown 全文。"""
+    """用多模态 LLM 逐页 OCR 扫描版 PDF，返回 Markdown 全文。
+
+    支持页级缓存（断点续跑）：每页 OCR 成功后立即写入缓存，中断后重跑会跳过已缓存页。
+    """
     from config import get_vision_config
 
     api_key, base_url, model = get_vision_config()
@@ -247,90 +497,127 @@ def ocr_scanned_pdf(pdf_path: str, book_title: str,
 
     print(f"  页码范围: {start_page}-{end_page} ({end_page - start_page + 1} 页)")
 
+    # 页级缓存：检查已完成的页
+    page_texts = {}  # page_num -> text
+    missing_pages = []
+    for page_num in range(start_page, end_page + 1):
+        cache_file = _mimo_cache_key(book_title, page_num)
+        if cache_file.exists():
+            content = cache_file.read_text(encoding="utf-8")
+            if len(content) > 20:
+                page_texts[page_num] = content
+                continue
+        missing_pages.append(page_num)
+
+    if page_texts:
+        print(f"  缓存命中: {len(page_texts)} 页, 待 OCR: {len(missing_pages)} 页")
+
+    if not missing_pages:
+        print(f"  全部页码已缓存，直接组装")
+        return "\n\n---\n\n".join(page_texts[p] for p in sorted(page_texts.keys()))
+
+    # OCR 缺失的页
     all_chunks = []
     chunk_texts = []
 
-    for page_num in range(start_page - 1, end_page):
-        print(f"  第 {page_num + 1} 页: 转换图片...", end="", flush=True)
+    # 先把已缓存的页加入 chunk（按顺序）
+    # 为了简化逻辑：按页码顺序处理，已缓存的直接用，未缓存的新 OCR
+    chunk_page_nums = []  # 当前 chunk 包含的页码
 
-        # 转为图片
-        from pdf2image import convert_from_path
-        images = convert_from_path(
-            pdf_path, dpi=dpi,
-            first_page=page_num + 1,
-            last_page=page_num + 1
-        )
-        if not images:
-            print(" 失败，跳过")
-            continue
-
-        img = images[0]
-        buf = BytesIO()
-        img.save(buf, format="JPEG", quality=85)
-        img_b64 = base64.b64encode(buf.getvalue()).decode()
-
-        # OCR（带重试）
-        print(" 识别中...", end="", flush=True)
-        text = ""
-        for attempt in range(3):
-            try:
-                resp = client.chat.completions.create(
-                    model=model,
-                    messages=[{
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "image_url",
-                                "image_url": {"url": f"data:image/jpeg;base64,{img_b64}"}
-                            },
-                            {
-                                "type": "text",
-                                "text": (
-                                    "请完整提取这张书籍页面中的所有文字内容。\n"
-                                    "要求：\n"
-                                    "1. 保持原文段落结构，不要遗漏任何正文\n"
-                                    "2. 严格忽略页码、页眉页脚、装饰性分隔线\n"
-                                    "3. 保留标题层级（用 # 标记，如 # 第一章、## 1.1 节）\n"
-                                    "4. 公式用 LaTeX 格式（行内 $...$，行间 $$...$$）\n"
-                                    "5. 表格用 Markdown 表格格式，尽量还原行列结构\n"
-                                    "6. 图片/图表用文字描述其含义（如『图1：XX趋势图』）\n"
-                                    "7. 注释/脚注保留在正文对应位置，用〔注〕标记\n"
-                                    "8. 只输出文字内容，无其他说明"
-                                )
-                            }
-                        ]
-                    }],
-                    max_tokens=4000,
-                )
-                text = resp.choices[0].message.content or ""
-                if len(text) > 20:
-                    # 记录 token 用量
-                    if resp.usage:
-                        from services.llm_service import _record_token_usage
-                        _record_token_usage(resp.usage, resp.model or model, "distill_period_ocr")
-                    break
-            except Exception as e:
-                if attempt < 2:
-                    print(f" 重试{attempt + 1}...", end="", flush=True)
-                    time.sleep(1)
-                else:
-                    print(f" ✗ ({e})")
-                    break
-
-        if text and len(text) > 20:
-            chunk_texts.append(text)
-            print(f" ✓ ({len(text)} 字)")
-        elif text:
-            print(f" ⚠ 结果过短 ({len(text)} 字)，跳过)")
+    for page_num in range(start_page, end_page + 1):
+        # 检查缓存
+        if page_num in page_texts:
+            text = page_texts[page_num]
+            print(f"  第 {page_num} 页: [缓存] ({len(text)} 字)")
         else:
-            print(" ✗ 识别失败")
+            print(f"  第 {page_num} 页: 转换图片...", end="", flush=True)
+
+            # 转为图片
+            from pdf2image import convert_from_path
+            images = convert_from_path(
+                pdf_path, dpi=dpi,
+                first_page=page_num,
+                last_page=page_num
+            )
+            if not images:
+                print(" 失败，跳过")
+                continue
+
+            img = images[0]
+            buf = BytesIO()
+            img.save(buf, format="JPEG", quality=85)
+            img_b64 = base64.b64encode(buf.getvalue()).decode()
+
+            # OCR（带重试）
+            print(" 识别中...", end="", flush=True)
+            text = ""
+            for attempt in range(3):
+                try:
+                    resp = client.chat.completions.create(
+                        model=model,
+                        messages=[{
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "image_url",
+                                    "image_url": {"url": f"data:image/jpeg;base64,{img_b64}"}
+                                },
+                                {
+                                    "type": "text",
+                                    "text": (
+                                        "请完整提取这张书籍页面中的所有文字内容。\n"
+                                        "要求：\n"
+                                        "1. 保持原文段落结构，不要遗漏任何正文\n"
+                                        "2. 严格忽略页码、页眉页脚、装饰性分隔线\n"
+                                        "3. 保留标题层级（用 # 标记，如 # 第一章、## 1.1 节）\n"
+                                        "4. 公式用 LaTeX 格式（行内 $...$，行间 $$...$$）\n"
+                                        "5. 表格用 Markdown 表格格式，尽量还原行列结构\n"
+                                        "6. 图片/图表用文字描述其含义（如『图1：XX趋势图』）\n"
+                                        "7. 注释/脚注保留在正文对应位置，用〔注〕标记\n"
+                                        "8. 只输出文字内容，无其他说明"
+                                    )
+                                }
+                            ]
+                        }],
+                        max_tokens=4000,
+                    )
+                    text = resp.choices[0].message.content or ""
+                    if len(text) > 20:
+                        # 记录 token 用量
+                        if resp.usage:
+                            from services.llm_service import _record_token_usage
+                            _record_token_usage(resp.usage, resp.model or model, "distill_period_ocr")
+                        break
+                except Exception as e:
+                    if attempt < 2:
+                        print(f" 重试{attempt + 1}...", end="", flush=True)
+                        time.sleep(1)
+                    else:
+                        print(f" ✗ ({e})")
+                        break
+
+            if text and len(text) > 20:
+                # 立即写入缓存（断点续跑支持）
+                cache_file = _mimo_cache_key(book_title, page_num)
+                cache_file.write_text(text, encoding="utf-8")
+                print(f" ✓ ({len(text)} 字)")
+            elif text:
+                print(f" ⚠ 结果过短 ({len(text)} 字)，跳过)")
+                continue
+            else:
+                print(" ✗ 识别失败")
+                continue
+
+        chunk_texts.append(text)
+        chunk_page_nums.append(page_num)
 
         # 每 pages_per_chunk 页合并一次
         if len(chunk_texts) >= pages_per_chunk:
             merged = _merge_pages(chunk_texts, book_title, client, model)
             all_chunks.append(merged)
+            print(f"  [合并] 已合并 {pages_per_chunk} 页 (p{chunk_page_nums[0]}-p{chunk_page_nums[-1]}, {len(merged)} 字)")
             chunk_texts = []
-            print(f"  [合并] 已合并 {pages_per_chunk} 页 ({len(merged)} 字)")
+            chunk_page_nums = []
 
         time.sleep(0.3)
 
@@ -338,6 +625,7 @@ def ocr_scanned_pdf(pdf_path: str, book_title: str,
     if chunk_texts:
         merged = _merge_pages(chunk_texts, book_title, client, model)
         all_chunks.append(merged)
+        print(f"  [合并] 已合并 {len(chunk_texts)} 页 (p{chunk_page_nums[0]}-p{chunk_page_nums[-1]}, {len(merged)} 字)")
 
     return "\n\n---\n\n".join(all_chunks)
 
@@ -383,8 +671,13 @@ def _merge_pages(pages_text: list[str], book_title: str, client, model: str) -> 
 
 
 def pdf_to_markdown(pdf_path: str, book_title: str,
-                    start_page: int = None, end_page: int = None) -> str:
-    """PDF 转 Markdown（自动选择方式）。返回 Markdown 内容，同时保存 .md 文件。"""
+                    start_page: int = None, end_page: int = None,
+                    ocr_engine: str = "mimo") -> str:
+    """PDF 转 Markdown（自动选择方式）。返回 Markdown 内容，同时保存 .md 文件。
+
+    Args:
+        ocr_engine: OCR 引擎，"mimo"（多模态 LLM）或 "paddle"（PaddleOCR-VL 本地）
+    """
     pdf_path = Path(pdf_path)
     BOOKS_DIR.mkdir(parents=True, exist_ok=True)
     md_file = BOOKS_DIR / f"{book_title}.md"
@@ -400,6 +693,7 @@ def pdf_to_markdown(pdf_path: str, book_title: str,
     # 检测类型
     pdf_type, total_pages, text_pages = detect_pdf_type(str(pdf_path))
     print(f"  PDF 类型: {pdf_type} ({total_pages} 页, ~{text_pages} 页有文字)")
+    print(f"  OCR 引擎: {ocr_engine}")
 
     if pdf_type == "text":
         print(f"  提取文字...")
@@ -408,8 +702,12 @@ def pdf_to_markdown(pdf_path: str, book_title: str,
         full_text = _cleanup_text_pdf(raw_text, book_title)
         print(f"  提取完成: {len(raw_text)} 字 → 整理后 {len(full_text)} 字")
     else:
-        print(f"  使用多模态 OCR...")
-        full_text = ocr_scanned_pdf(str(pdf_path), book_title, start_page, end_page)
+        if ocr_engine == "paddle":
+            print(f"  使用 PaddleOCR-VL 本地 OCR...")
+            full_text = ocr_pdf_with_paddle(str(pdf_path), book_title, start_page, end_page)
+        else:
+            print(f"  使用多模态 LLM OCR...")
+            full_text = ocr_scanned_pdf(str(pdf_path), book_title, start_page, end_page)
 
     # 保存 Markdown 文件
     header = f"# {book_title}\n\n"
@@ -1285,9 +1583,11 @@ def cmd_ocr(args):
     print(f"{'=' * 60}")
     print(f"OCR 识别: {args.name}")
     print(f"输入文件: {args.input}")
+    print(f"OCR 引擎: {args.ocr_engine}")
     print(f"{'=' * 60}")
 
-    pdf_to_markdown(args.input, args.name, args.start, args.end)
+    pdf_to_markdown(args.input, args.name, args.start, args.end,
+                    ocr_engine=args.ocr_engine)
 
     print(f"\n{'=' * 60}")
     print(f"OCR 完成!")
@@ -1323,7 +1623,7 @@ def cmd_distill(args):
         text = input_path.read_text(encoding="utf-8")
     elif input_path.suffix.lower() == '.pdf':
         # PDF 直接 OCR 读取（不入库 Markdown）
-        text = pdf_to_markdown(str(input_path), args.name)
+        text = pdf_to_markdown(str(input_path), args.name, ocr_engine=args.ocr_engine)
     else:
         print(f"错误: 不支持的文件格式 {input_path.suffix}")
         sys.exit(1)
@@ -1381,7 +1681,8 @@ def cmd_full(args):
     print(f"\n[3/4] 读取文本...")
     if input_path.suffix.lower() == '.pdf':
         # PDF 需要先 OCR 转成 Markdown（保存到 data/books 方便复用）
-        text = pdf_to_markdown(str(input_path), args.name, args.start, args.end)
+        text = pdf_to_markdown(str(input_path), args.name, args.start, args.end,
+                               ocr_engine=args.ocr_engine)
     elif input_path.suffix.lower() in ('.md', '.txt'):
         text = input_path.read_text(encoding="utf-8")
         print(f"  读取完成: {len(text)} 字")
@@ -1554,6 +1855,8 @@ def main():
     p_ocr.add_argument("--name", required=True, help="书名")
     p_ocr.add_argument("--start", type=int, help="起始页码（1-based）")
     p_ocr.add_argument("--end", type=int, help="结束页码（1-based）")
+    p_ocr.add_argument("--ocr-engine", choices=["mimo", "paddle"], default="mimo",
+                       help="OCR 引擎：mimo（多模态LLM，默认）或 paddle（PaddleOCR-VL 本地）")
 
     # distill 子命令
     p_distill = subparsers.add_parser("distill", help="Markdown → 知识点（蒸馏），自动查找源文件")
@@ -1564,6 +1867,8 @@ def main():
     p_distill.add_argument("--concurrency", type=int, default=1, help="并发提取数（默认1，避免API限流）")
     p_distill.add_argument("--dry-run", action="store_true", help="试运行，不写入数据库")
     p_distill.add_argument("--skip-review", action="store_true", help="跳过 LLM 质量审核")
+    p_distill.add_argument("--ocr-engine", choices=["mimo", "paddle"], default="mimo",
+                           help="OCR 引擎（输入为 PDF 时使用）：mimo 或 paddle")
 
     # full 子命令
     p_full = subparsers.add_parser("full", help="完整流程：清理旧数据 → 自动查找 → OCR(如需) → 蒸馏 → 入库")
@@ -1576,6 +1881,8 @@ def main():
     p_full.add_argument("--end", type=int, help="结束页码（1-based）")
     p_full.add_argument("--dry-run", action="store_true", help="试运行，不写入数据库")
     p_full.add_argument("--skip-review", action="store_true", help="跳过 LLM 质量审核")
+    p_full.add_argument("--ocr-engine", choices=["mimo", "paddle"], default="mimo",
+                       help="OCR 引擎（PDF 扫描版时使用）：mimo（多模态LLM，默认）或 paddle（PaddleOCR-VL 本地）")
 
     # clean 子命令
     p_clean = subparsers.add_parser("clean", help="清理某书的旧数据")
