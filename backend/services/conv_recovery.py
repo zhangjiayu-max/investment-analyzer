@@ -27,11 +27,12 @@ logger = logging.getLogger(__name__)
 # 占位符前缀（匹配所有 ⏳ 开头的临时状态文本）
 _PLACEHOLDER_PREFIX = "⏳"
 
-# 中断提示文本（有部分专家结果时）
-_INTERRUPTED_NOTICE = (
-    "⚠️ 本次分析因服务重启中断。"
-    "如需完整分析，请点击「重新生成」。\n\n"
-    "---\n\n以下为中断前已完成的专家分析片段：\n\n"
+# 专家已完成提示文本（有专家结果，仅综合报告未生成）
+# 修复 conv#140：专家全部成功时不应标记为"中断失败"，应标为"已完成（专家分析）"
+_EXPERTS_DONE_NOTICE = (
+    "✅ 专家分析已完成（综合报告因服务重启未生成）。"
+    "如需综合报告，可点击「重新生成」。\n\n"
+    "---\n\n以下为已完成的专家分析：\n\n"
 )
 
 # 中断提示文本（专家未执行时）
@@ -42,9 +43,30 @@ _RETRYING_NOTICE = "⏳ 检测到服务重启导致中断，正在自动重试..
 
 
 def _merge_runs_to_answer(runs) -> str | None:
-    """把 agent_runs 合并成中断恢复后的 content。无有效结果返回 None。"""
-    parts = []
+    """把 agent_runs 合并成恢复后的 content。无有效结果返回 None。
+
+    修复 conv#140：
+    1. 只合并 primary 阶段的专家结果（cross_review 是中间步骤，不应作为最终答案）。
+       因 run_phase 字段有时未正确区分，按 agent_name 去重保留首次出现的结果
+       （交叉审阅是同一专家的第二次调用，去重后自然只保留首轮分析）。
+    2. 用"专家分析已完成"文案替代误导性的"服务重启中断"。
+    """
+    # 按 agent_name 去重，保留首次出现（首轮 primary 分析）
+    seen_agents = set()
+    primary_runs = []
     for r in runs:
+        name = r["agent_name"] or "专家分析"
+        if name in seen_agents:
+            continue
+        # 跳过明显的交叉审阅结果（内容以"审阅"或"综合审阅"开头）
+        text = r["result"] or ""
+        if text.startswith("审阅") or text.startswith("综合审阅"):
+            continue
+        seen_agents.add(name)
+        primary_runs.append(r)
+
+    parts = []
+    for r in primary_runs:
         text = r["result"] or ""
         # 去掉 JSON 块，从第一个 markdown 标题开始取
         idx = text.find("\n## ")
@@ -54,15 +76,14 @@ def _merge_runs_to_answer(runs) -> str | None:
         parts.append(body.strip())
     if not parts:
         return None
-    return _INTERRUPTED_NOTICE + "\n".join(parts)
+    return _EXPERTS_DONE_NOTICE + "\n".join(parts)
 
 
-def _apply_recovery(conn, msg_id: int, content: str) -> None:
-    """统一恢复写回：同时更新 content 和 metadata.execution_status='failed'。
+def _apply_recovery(conn, msg_id: int, content: str, has_expert_results: bool = False) -> None:
+    """统一恢复写回：同时更新 content 和 metadata.execution_status。
 
-    关键：必须更新 metadata.execution_status，否则前端看到 streaming 状态
-    会显示"后台执行中"+"恢复连接"按钮，但任务已死，点击无效。
-    改为 failed 后前端显示"执行失败"+"重新生成"按钮（走 retry-message 接口，有效）。
+    修复 conv#140：专家已成功时 execution_status 设为 'completed'（专家分析可用），
+    仅无专家结果时设为 'failed'。避免把"专家都跑完了"误标为"失败"。
     """
     import json as _json
     row = conn.execute("SELECT metadata FROM messages WHERE id = ?", (msg_id,)).fetchone()
@@ -72,8 +93,10 @@ def _apply_recovery(conn, msg_id: int, content: str) -> None:
             meta = _json.loads(row["metadata"])
         except Exception:
             meta = {}
-    meta["execution_status"] = "failed"
+    # 专家有结果时标 completed（前端不显示"失败"，用户能看到专家分析）
+    meta["execution_status"] = "completed" if has_expert_results else "failed"
     meta["recovered"] = True  # 标记为恢复产生，便于排查
+    meta["recovery_type"] = "experts_done" if has_expert_results else "no_expert"
     conn.execute(
         "UPDATE messages SET content = ?, metadata = ? WHERE id = ?",
         (content, _json.dumps(meta, ensure_ascii=False), msg_id),
@@ -118,12 +141,12 @@ def recover_message(message_id: int) -> str:
         if runs:
             full_answer = _merge_runs_to_answer(runs)
             if full_answer:
-                _apply_recovery(conn, msg_id, full_answer)
+                _apply_recovery(conn, msg_id, full_answer, has_expert_results=True)
                 conn.commit()
                 logger.info(f"[conv_recovery] msg {msg_id} (conv {conv_id}) 心跳超时恢复（合并 {len(runs)} 个专家结果）")
                 return full_answer
         # 无专家结果 → 标记为中断
-        _apply_recovery(conn, msg_id, _NO_RESULT_NOTICE)
+        _apply_recovery(conn, msg_id, _NO_RESULT_NOTICE, has_expert_results=False)
         conn.commit()
         logger.info(f"[conv_recovery] msg {msg_id} (conv {conv_id}) 心跳超时，无专家结果，标记为中断")
         return _NO_RESULT_NOTICE
@@ -173,17 +196,17 @@ def recover_interrupted_conversations() -> dict:
             """, (msg_id,)).fetchall()
 
             if runs:
-                # 有专家结果 → 合并写回
+                # 有专家结果 → 合并写回（标 completed，专家分析可用）
                 full_answer = _merge_runs_to_answer(runs)
                 if full_answer:
-                    _apply_recovery(conn, msg_id, full_answer)
+                    _apply_recovery(conn, msg_id, full_answer, has_expert_results=True)
                     stats["recovered"] += 1
                     logger.info(f"[conv_recovery] msg {msg_id} (conv {conv_id}) 已恢复（合并 {len(runs)} 个专家结果）")
                 else:
                     stats["skipped"] += 1
             else:
                 # 无专家结果 → 标记为中断
-                _apply_recovery(conn, msg_id, _NO_RESULT_NOTICE)
+                _apply_recovery(conn, msg_id, _NO_RESULT_NOTICE, has_expert_results=False)
                 stats["marked_interrupted"] += 1
                 logger.info(f"[conv_recovery] msg {msg_id} (conv {conv_id}) 无专家结果，标记为中断")
 
