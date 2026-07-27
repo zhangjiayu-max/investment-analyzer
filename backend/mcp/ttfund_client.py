@@ -177,11 +177,14 @@ def install() -> dict:
 
 
 def login() -> dict:
-    """执行 ttskill login，打开浏览器让用户扫码。"""
+    """执行 ttskill login，打开浏览器让用户扫码。
+
+    使用 --env prod --force 强制重新登录，避免已过期 token 被判为 already_logged_in。
+    """
     ttskill = _find_ttskill()
     try:
         result = subprocess.run(
-            [ttskill, "login"],
+            [ttskill, "login", "--env", "prod", "--force"],
             capture_output=True, text=True, timeout=120,
         )
         output = result.stdout + result.stderr
@@ -190,13 +193,17 @@ def login() -> dict:
         else:
             return {"ok": False, "error": output}
     except subprocess.TimeoutExpired:
-        return {"ok": False, "error": "登录超时，请重试"}
+        return {"ok": False, "error": "登录超时（120s），请重试"}
     except Exception as e:
         return {"ok": False, "error": str(e)}
 
 
 def check_login() -> dict:
-    """检查登录状态。"""
+    """检查登录状态。
+
+    判断逻辑：auth.current_user.is_expired 为 False 才算已登录。
+    旧逻辑查 auth_token_present（不存在该字段）导致永远返回 False。
+    """
     ttskill = _find_ttskill()
     try:
         result = subprocess.run(
@@ -205,10 +212,13 @@ def check_login() -> dict:
         )
         if result.returncode == 0:
             data = json.loads(result.stdout) if result.stdout.strip().startswith("{") else {}
+            user = data.get("auth", {}).get("current_user", {})
+            is_expired = user.get("is_expired", True)
             return {
                 "ok": True,
                 "installed": True,
-                "logged_in": bool(data.get("auth_token_present") or "present" in result.stdout),
+                "logged_in": bool(user) and not is_expired,
+                "expires_at": user.get("expires_at", ""),
                 "output": result.stdout.strip(),
             }
         return {"ok": True, "installed": True, "logged_in": False, "output": result.stdout.strip()}
