@@ -1253,6 +1253,11 @@ def _phase_execution(
     Generator：yield specialist_start/done 事件，return 结果 dict。
     """
     from agent.core.multi_agent import run_specialist
+    from agent.core.orchestrator import _get_model_for_agent, _is_cost_routing_enabled, MODEL as _ORCH_MODEL
+
+    def _route_model(agent_key: str) -> str:
+        """成本感知路由：按 agent_key 选择分级模型，避免全部用最贵模型。"""
+        return _get_model_for_agent(agent_key) if _is_cost_routing_enabled() else _ORCH_MODEL
 
     specialists_result = []
     all_tool_calls = []
@@ -1363,6 +1368,7 @@ def _phase_execution(
                 prebuilt_context=ctx,
                 trace_id=trace_id,
                 from_pipeline=True,
+                model=_route_model(agent_key),
                 conversation_id=state.conversation_id,
                 message_id=state.message_id,
                 blackboard=blackboard,
@@ -1554,6 +1560,7 @@ def _execute_steps_parallel(
             prebuilt_context=ctx,
             trace_id=trace_id,
             from_pipeline=True,
+            model=_route_model(agent_key),
             conversation_id=state.conversation_id,
             message_id=state.message_id,
             blackboard=blackboard,
@@ -1725,6 +1732,7 @@ def _fallback_execution(
                 agent_key=agent_key, query=query,
                 prebuilt_context=ctx, trace_id=trace_id,
                 from_pipeline=True,
+                model=_route_model(agent_key),
                 conversation_id=state.conversation_id,
                 message_id=state.message_id,
                 blackboard=blackboard,
@@ -2063,6 +2071,7 @@ def _maybe_rerun_specialist(
 
     try:
         from agent.core.multi_agent import run_specialist
+        from agent.core.orchestrator import _get_model_for_agent, _is_cost_routing_enabled, MODEL as _ORCH_MODEL
         # 构建反思反馈注入
         feedback = "\n\n## 反思反馈（上一轮分析质量问题，请改进）\n"
         for issue in reflection_result.get("quality_issues", [])[:3]:
@@ -2071,11 +2080,13 @@ def _maybe_rerun_specialist(
             feedback += f"- 缺失视角：{m}\n"
         enhanced_query = f"{query}{feedback}"
 
+        _rerun_model = _get_model_for_agent(agent_key) if _is_cost_routing_enabled() else _ORCH_MODEL
         result = run_specialist(
             agent_key=agent_key,
             query=enhanced_query,
             trace_id=f"{trace_id}#rerun",
             from_pipeline=True,
+            model=_rerun_model,
             blackboard=blackboard,
         )
         if result and result.get("analysis"):

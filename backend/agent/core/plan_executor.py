@@ -478,11 +478,14 @@ def execute_plan(
             if convergence_detector:
                 convergence_detector.record_call(step.agent_key, step.query)
             try:
+                from agent.core.orchestrator import _get_model_for_agent, _is_cost_routing_enabled, MODEL as _ORCH_MODEL
+                _step_model = _get_model_for_agent(step.agent_key) if _is_cost_routing_enabled() else _ORCH_MODEL
                 result = run_specialist(
                     agent_key=step.agent_key,
                     query=step.query,
                     prebuilt_context=_build_step_context(step),
                     trace_id=plan.trace_id,
+                    model=_step_model,
                 )
                 step.result = result
                 step.status = StepStatus.DONE

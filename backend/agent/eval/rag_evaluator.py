@@ -19,7 +19,24 @@ import math
 
 from services.rag import build_rag_context_with_details
 from services.llm_service import _call_llm, MODEL
-from db.config import get_config_int, get_config_float
+from db.config import get_config_int, get_config_float, get_config
+
+
+def _get_eval_model() -> str:
+    """RAG 评估用便宜模型，避免用最贵的 max-preview。
+    
+    优先读 system_config 'rag.eval_model'，否则按 provider 选便宜模型。
+    """
+    configured = get_config("rag.eval_model", "")
+    if configured:
+        return configured
+    # 按 provider 选便宜模型
+    from config import LLM_PROVIDER
+    if LLM_PROVIDER == "qwen":
+        return "qwen3.7-plus"
+    elif LLM_PROVIDER == "mimo":
+        return "mimo-v2.5-pro"
+    return MODEL  # 兜底
 
 logger = logging.getLogger(__name__)
 
@@ -128,7 +145,7 @@ relevance 取值：
     try:
         response = _call_llm(
             caller="rag_evaluator",
-            model=MODEL,
+            model=_get_eval_model(),
             messages=[{"role": "user", "content": prompt}],
             temperature=get_config_float('llm.temperature_eval', 0.1),
             max_tokens=get_config_int('llm.max_tokens_eval', 2000),
