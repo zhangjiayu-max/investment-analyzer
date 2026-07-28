@@ -30,6 +30,15 @@ MODEL_PRICES = {
     "mimo": {"input": 0.3, "output": 1.2},
     "mimo-v2.5-pro": {"input": 0.3, "output": 1.2},
     "mimo-v2.5": {"input": 0.3, "output": 1.2},
+    # Qwen 系列（阿里云百炼，每百万 tokens，单位：元）
+    # 来源：https://help.aliyun.com/zh/model-studio/billing
+    "qwen3.8-max-preview": {"input": 18.0, "output": 54.0},
+    "qwen3.7-max":         {"input": 12.0, "output": 36.0},
+    "qwen3.7-plus":        {"input": 4.0,  "output": 12.0},
+    "qwen3.7-flash":       {"input": 0.0,  "output": 0.0},  # 免费额度内
+    "qwen-max":            {"input": 12.0, "output": 36.0},
+    "qwen-plus":           {"input": 4.0,  "output": 12.0},
+    "qwen-turbo":          {"input": 2.0,  "output": 6.0},
     # Ollama 本地模型（零成本）
     "ollama": {"input": 0.0, "output": 0.0},
     "qwen3-vl": {"input": 0.0, "output": 0.0},

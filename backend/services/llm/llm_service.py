@@ -66,6 +66,20 @@ else:
     _arbitration_client = None
     _arbitration_model = None
 
+# P0: 启动时检测 Token Plan 订阅端点（可能导致分级路由失效）
+if LLM_PROVIDER == "qwen" and "token-plan" in QWEN_BASE_URL.lower():
+    logger.warning(
+        "⚠️ [模型路由警告] 检测到 QWEN_BASE_URL 使用 Token Plan 订阅端点 "
+        f"({QWEN_BASE_URL})。\n"
+        "Token Plan 订阅通常只支持单一模型（如 qwen3.8-max-preview），"
+        "对 qwen3.7-max/qwen3.7-plus 的请求会被静默映射到订阅模型，"
+        "导致成本分级路由失效（所有调用都按最贵模型计费）。\n"
+        "解决方案：\n"
+        "  1. 切换到按量计费端点: QWEN_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1\n"
+        "  2. 或接受统一模型，通过关闭非核心 LLM 开关（reflection/cross_review）降本\n"
+        f"  当前 QWEN_MODEL={MODEL}，分级映射表 _AGENT_MODEL_MAP_QWEN 可能被端点绕过。"
+    )
+
 SYSTEM_PROMPT = """<role>你是一位专业的投资分析师。请根据提供的微信公众号文章内容和市场数据，给出客观的投资分析。</role>
 
 <instructions>
@@ -87,6 +101,7 @@ SYSTEM_PROMPT = """<role>你是一位专业的投资分析师。请根据提供�
 
 def _call_llm(caller: str = "", trace_id: str = "", **kwargs):
     """统一的 LLM 调用入口，带指数退避重试、token 记录和兜底切换。"""
+    requested_model = kwargs.get("model", MODEL)
     @_llm_retry
     def _do_call():
         try:
@@ -99,13 +114,16 @@ def _call_llm(caller: str = "", trace_id: str = "", **kwargs):
                 resp = _fallback_client.chat.completions.create(**kwargs)
             else:
                 raise
+        # P4: 检测 provider 静默映射（请求模型 ≠ 响应模型）
+        _check_model_silent_mapping(requested_model, resp.model, caller, trace_id)
         if resp.usage:
             logger.info(
                 f"[trace:{trace_id}] LLM tokens — prompt: {resp.usage.prompt_tokens}, "
                 f"completion: {resp.usage.completion_tokens}, "
                 f"total: {resp.usage.total_tokens}, model: {resp.model}, caller: {caller}"
             )
-            _record_token_usage(resp.usage, resp.model, caller, trace_id=trace_id)
+            _record_token_usage(resp.usage, resp.model, caller, trace_id=trace_id,
+                                requested_model=requested_model)
         return resp
     return _do_call()
 
@@ -132,6 +150,7 @@ def _call_llm_stream(caller: str = "", trace_id: str = "", **kwargs):
     """
     kwargs["stream"] = True
 
+    requested_model = kwargs.get("model", MODEL)
     used_client = client
     try:
         stream = used_client.chat.completions.create(**kwargs)
@@ -167,10 +186,13 @@ def _call_llm_stream(caller: str = "", trace_id: str = "", **kwargs):
         if content or reasoning:
             yield {"content": content, "reasoning": reasoning}
 
+    # P4: 检测 provider 静默映射
+    _check_model_silent_mapping(requested_model, last_model, caller, trace_id)
     # 末包 token 记录（best-effort，部分 provider 流式不返回 usage）
     if last_usage:
         try:
-            _record_token_usage(last_usage, last_model, caller, trace_id=trace_id)
+            _record_token_usage(last_usage, last_model, caller, trace_id=trace_id,
+                                requested_model=requested_model)
         except Exception:
             pass
     else:
@@ -188,7 +210,8 @@ def _call_llm_stream(caller: str = "", trace_id: str = "", **kwargs):
                         self.completion_tokens = c
                         self.total_tokens = p + c
                 last_usage = _EstUsage(prompt_tokens, completion_tokens)
-                _record_token_usage(last_usage, last_model, caller, trace_id=trace_id)
+                _record_token_usage(last_usage, last_model, caller, trace_id=trace_id,
+                                    requested_model=requested_model)
         except Exception:
             pass
 
@@ -210,15 +233,18 @@ def call_arbitration_llm(trace_id: str = "", **kwargs):
         effective_model = _arbitration_model
 
     kwargs.setdefault("model", effective_model)
+    requested_model = kwargs.get("model", effective_model)
     try:
         resp = _arbitration_client.chat.completions.create(**kwargs)
+        _check_model_silent_mapping(requested_model, resp.model, "arbitration", trace_id)
         if resp.usage:
             logger.info(
                 f"[trace:{trace_id}] Arbitration LLM tokens — prompt: {resp.usage.prompt_tokens}, "
                 f"completion: {resp.usage.completion_tokens}, "
                 f"total: {resp.usage.total_tokens}, model: {resp.model}"
             )
-            _record_token_usage(resp.usage, resp.model, "arbitration", trace_id=trace_id)
+            _record_token_usage(resp.usage, resp.model, "arbitration", trace_id=trace_id,
+                                requested_model=requested_model)
         return resp
     except Exception as e:
         logger.error(f"[trace:{trace_id}] 仲裁 LLM 调用异常: {e}")
@@ -227,7 +253,44 @@ def call_arbitration_llm(trace_id: str = "", **kwargs):
 
 _token_log_conn = None
 
-def _record_token_usage(usage, model: str, caller: str = "", trace_id: str = ""):
+# P4: 静默映射检测计数器（进程级，避免日志刷屏）
+_silent_mapping_counter: dict[str, int] = {}
+_SILENT_MAPPING_WARN_INTERVAL = 10  # 每 10 次静默映射输出一次 WARNING
+
+
+def _check_model_silent_mapping(requested: str, responded: str, caller: str, trace_id: str):
+    """P4: 检测 provider 静默映射（请求模型 ≠ 响应模型）。
+
+    阿里云 Token Plan 端点等订阅制 provider 可能只支持单一模型，
+    对其他模型请求静默映射到订阅模型，导致成本分级路由失效。
+
+    检测到映射时：
+    1. 计数器累加（避免日志刷屏，每 10 次输出一次 WARNING）
+    2. 首次映射输出 WARNING，提示用户检查端点配置
+    """
+    if not requested or not responded:
+        return
+    # 归一化比较（去掉版本后缀差异，如 qwen3.7-max vs qwen3.7-max-20240101）
+    req_norm = requested.lower().split("-20")[0]
+    resp_norm = responded.lower().split("-20")[0]
+    if req_norm == resp_norm:
+        return
+
+    key = f"{requested}->{responded}"
+    _silent_mapping_counter[key] = _silent_mapping_counter.get(key, 0) + 1
+    count = _silent_mapping_counter[key]
+
+    if count == 1 or count % _SILENT_MAPPING_WARN_INTERVAL == 0:
+        logger.warning(
+            f"[trace:{trace_id}] ⚠️ 模型静默映射: 请求 '{requested}' → 响应 '{responded}' "
+            f"(caller={caller}, 累计 {count} 次)。"
+            f"provider 端点可能不支持请求的模型，成本分级路由失效。"
+            f"请检查 QWEN_BASE_URL 是否为 token-plan 订阅端点（仅支持单一模型）。"
+        )
+
+
+def _record_token_usage(usage, model: str, caller: str = "", trace_id: str = "",
+                        requested_model: str = ""):
     """将 token 用量写入数据库。"""
     try:
         from db import _get_conn
@@ -244,14 +307,16 @@ def _record_token_usage(usage, model: str, caller: str = "", trace_id: str = "")
             )
         """)
         # 兼容已有表
-        for col in ['caller', 'trace_id']:
+        for col in ['caller', 'trace_id', 'requested_model']:
             try:
                 conn.execute(f"ALTER TABLE token_usage ADD COLUMN {col} TEXT DEFAULT ''")
             except Exception:
                 pass
         conn.execute(
-            "INSERT INTO token_usage (model, caller, prompt_tokens, completion_tokens, total_tokens, created_at, trace_id) VALUES (?, ?, ?, ?, ?, datetime('now','localtime'), ?)",
-            (model, caller, usage.prompt_tokens, usage.completion_tokens, usage.total_tokens, trace_id)
+            "INSERT INTO token_usage (model, caller, prompt_tokens, completion_tokens, total_tokens, created_at, trace_id, requested_model) "
+            "VALUES (?, ?, ?, ?, ?, datetime('now','localtime'), ?, ?)",
+            (model, caller, usage.prompt_tokens, usage.completion_tokens, usage.total_tokens,
+             trace_id, requested_model or "")
         )
         conn.commit()
         conn.close()

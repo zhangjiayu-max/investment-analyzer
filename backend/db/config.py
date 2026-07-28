@@ -148,21 +148,23 @@ DEFAULT_CONFIGS = [
     ('index.hs300_code', '000300.SH', '沪深300指数代码', 'index'),
 
     # 成本路由模型映射（增强6）
+    # 注意：值为空时走代码内嵌 _AGENT_MODEL_MAP_* 默认值（按 LLM_PROVIDER 自动选择）
+    # 这样切换 provider 时无需同步修改 DB 配置，避免遗留不兼容模型名
     ('cost_routing.enabled', 'true', '是否启用成本路由', 'cost_routing'),
-    ('cost_routing.conservative_model', 'mimo-v2.5-pro', '保守模式统一模型', 'cost_routing'),
-    ('cost_routing.orchestrator_model', 'mimo-v2.5-pro', '编排器模型', 'cost_routing'),
-    ('cost_routing.valuation_expert_model', 'mimo-v2.5-pro', '估值专家模型', 'cost_routing'),
-    ('cost_routing.allocation_advisor_model', 'mimo-v2.5-pro', '配置专家模型', 'cost_routing'),
-    ('cost_routing.fund_analyst_model', 'mimo-v2.5-pro', '基金分析模型', 'cost_routing'),
-    ('cost_routing.risk_assessor_model', 'mimo-v2.5-pro', '风控专家模型', 'cost_routing'),
-    ('cost_routing.market_analyst_model', 'mimo-v2.5-pro', '市场分析模型', 'cost_routing'),
-    ('cost_routing.behavioral_coach_model', 'mimo-v2.5-pro', '行为辅导模型', 'cost_routing'),
-    ('cost_routing.cross_review_model', 'mimo-v2.5-pro', '交叉审阅模型', 'cost_routing'),
+    ('cost_routing.conservative_model', '', '保守模式统一模型（空则走代码默认）', 'cost_routing'),
+    ('cost_routing.orchestrator_model', '', '编排器模型（空则走代码默认）', 'cost_routing'),
+    ('cost_routing.valuation_expert_model', '', '估值专家模型（空则走代码默认）', 'cost_routing'),
+    ('cost_routing.allocation_advisor_model', '', '配置专家模型（空则走代码默认）', 'cost_routing'),
+    ('cost_routing.fund_analyst_model', '', '基金分析模型（空则走代码默认）', 'cost_routing'),
+    ('cost_routing.risk_assessor_model', '', '风控专家模型（空则走代码默认）', 'cost_routing'),
+    ('cost_routing.market_analyst_model', '', '市场分析模型（空则走代码默认）', 'cost_routing'),
+    ('cost_routing.behavioral_coach_model', '', '行为辅导模型（空则走代码默认）', 'cost_routing'),
+    ('cost_routing.cross_review_model', '', '交叉审阅模型（空则走代码默认）', 'cost_routing'),
     # P2: 模型分级（趋势/文本类用便宜模型，推理/仲裁类用强模型）
-    ('cost_routing.macro_strategist_model', 'mimo-v2.5-pro', '宏观策略师模型（趋势判断）', 'cost_routing'),
-    ('cost_routing.article_expert_model', 'mimo-v2.5-pro', '文章解读专家模型（文本摘要）', 'cost_routing'),
-    ('cost_routing.arbitrator_model', 'mimo-v2.5-pro', '仲裁专家模型（需强推理）', 'cost_routing'),
-    ('cost_routing.debate_arbitrator_model', 'mimo-v2.5-pro', '辩论仲裁模型（需强推理）', 'cost_routing'),
+    ('cost_routing.macro_strategist_model', '', '宏观策略师模型（空则走代码默认）', 'cost_routing'),
+    ('cost_routing.article_expert_model', '', '文章解读专家模型（空则走代码默认）', 'cost_routing'),
+    ('cost_routing.arbitrator_model', '', '仲裁专家模型（空则走代码默认）', 'cost_routing'),
+    ('cost_routing.debate_arbitrator_model', '', '辩论仲裁模型（空则走代码默认）', 'cost_routing'),
 
     # 多智能体决策增强开关（P0-P3）
     ('agent.risk_veto_enabled', 'true', 'P0-A: 风险专家硬约束否决权', 'agent'),
