@@ -66,18 +66,19 @@ else:
     _arbitration_client = None
     _arbitration_model = None
 
-# P0: 启动时检测 Token Plan 订阅端点（可能导致分级路由失效）
+# P0: 启动时检测 Token Plan 订阅端点（提示检查订阅档位是否支持分级模型）
 if LLM_PROVIDER == "qwen" and "token-plan" in QWEN_BASE_URL.lower():
-    logger.warning(
-        "⚠️ [模型路由警告] 检测到 QWEN_BASE_URL 使用 Token Plan 订阅端点 "
+    logger.info(
+        "[模型路由提示] 检测到 QWEN_BASE_URL 使用 Token Plan 订阅端点 "
         f"({QWEN_BASE_URL})。\n"
-        "Token Plan 订阅通常只支持单一模型（如 qwen3.8-max-preview），"
-        "对 qwen3.7-max/qwen3.7-plus 的请求会被静默映射到订阅模型，"
-        "导致成本分级路由失效（所有调用都按最贵模型计费）。\n"
+        "Token Plan 个人版 Lite 档位可能仅支持 qwen3.8-max-preview，"
+        "Standard/Pro 档位才包含 qwen3.7-max/qwen3.7-plus 等分级模型。\n"
+        "如果运行时日志频繁出现 '模型静默映射' WARNING，说明当前订阅档位不支持"
+        "代码请求的分级模型，被端点降级到 qwen3.8-max-preview。\n"
         "解决方案：\n"
-        "  1. 切换到按量计费端点: QWEN_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1\n"
-        "  2. 或接受统一模型，通过关闭非核心 LLM 开关（reflection/cross_review）降本\n"
-        f"  当前 QWEN_MODEL={MODEL}，分级映射表 _AGENT_MODEL_MAP_QWEN 可能被端点绕过。"
+        "  1. 升级到 Standard/Pro 档位（支持完整 11 款模型）\n"
+        "  2. 或切换到按量计费端点: QWEN_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1\n"
+        "  3. 或关闭非核心 LLM 开关（reflection/cross_review）减少调用次数降本"
     )
 
 SYSTEM_PROMPT = """<role>你是一位专业的投资分析师。请根据提供的微信公众号文章内容和市场数据，给出客观的投资分析。</role>
