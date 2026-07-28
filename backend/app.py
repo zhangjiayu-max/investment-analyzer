@@ -152,7 +152,9 @@ from routers.decision.suggestion_accuracy import router as suggestion_accuracy_r
 from routers.admin.data_quality import router as data_quality_router  # /api/data-quality/*
 from routers.admin.capabilities import router as capabilities_router  # /api/capabilities/*
 from routers.admin.theme_rules import router as theme_rules_router  # /api/admin/theme-rules/*
+from routers.admin.specialist_weights import router as specialist_weights_router  # /api/admin/specialist-weights/*
 from routers.market.event_radar import router as event_radar_router  # /api/alerts/event-radar/*
+from routers.market.dragon_tiger import router as dragon_tiger_router  # /api/market/dragon-tiger/*
 from routers.portfolio.trade_plans import router as trade_plans_router  # /api/trade-plans/*
 from routers.portfolio.strategies import router as strategies_router  # /api/strategies/*
 from routers.portfolio.bucket_routes import router as bucket_routes_router  # /api/buckets/*
@@ -242,7 +244,9 @@ app.include_router(akshare_stats_router)
 from routers.admin.valuation_usage import router as valuation_usage_router
 app.include_router(valuation_usage_router)
 app.include_router(theme_rules_router)
+app.include_router(specialist_weights_router)
 app.include_router(event_radar_router)
+app.include_router(dragon_tiger_router)
 app.include_router(trade_plans_router)
 app.include_router(strategies_router)
 app.include_router(bucket_routes_router)
@@ -588,9 +592,12 @@ async def startup():
         logging.warning(f"决策过期清理失败: {e}")
 
     # Reranker 模型预加载（避免首次对话 RAG 检索时加载 6 秒）
+    # P3-12：rag.reranker_enabled 默认开启，启动时后台预加载
     try:
+        from db.config import get_config_bool as _get_config_bool
+        _reranker_enabled = _get_config_bool("rag.reranker_enabled", True)
         _rerank_topn = get_config("rag.auto_rerank_topn", "false") == "true"
-        if _rerank_topn:
+        if _reranker_enabled or _rerank_topn:
             import threading
             def _preload_reranker():
                 try:
@@ -1714,6 +1721,32 @@ async def reindex_rag():
 @app.get("/api/health")
 async def health():
     return {"status": "ok"}
+
+
+# ── P4-14 前端错误监控 + Web Vitals 采集端点 ──────────────────────────────────
+# 自建轻量上报，不引入 Sentry。前端用 sendBeacon / fetch keepalive 上报。
+@app.post("/api/monitor/errors")
+async def report_frontend_error(body: dict = Body(...)):
+    """接收前端错误上报（js_error / promise_rejection / vue_error / api_error）。"""
+    try:
+        etype = body.get("type", "unknown")
+        msg = str(body.get("message", ""))[:200]
+        logger.info(f"[frontend-error] {etype}: {msg} | component={body.get('component')} | url={body.get('url')}")
+    except Exception as e:
+        logger.warning(f"[frontend-error] 解析上报失败: {e}")
+    return {"ok": True}
+
+
+@app.post("/api/monitor/vitals")
+async def report_frontend_vitals(body: dict = Body(...)):
+    """接收前端 Web Vitals 上报（lcp / fid / cls）。"""
+    try:
+        name = body.get("name", "unknown")
+        value = body.get("value")
+        logger.info(f"[web-vital] {name}: {value}")
+    except Exception as e:
+        logger.warning(f"[web-vital] 解析上报失败: {e}")
+    return {"ok": True}
 
 
 @app.get("/api/proxy-image")

@@ -11,7 +11,9 @@ from pydantic import BaseModel
 
 from agent.kyc import (
     get_kyc_questionnaire, get_kyc_profile, submit_kyc_answers,
+    get_enhanced_profile,
 )
+from agent.kyc.behavior_profiler import infer_behavior_profile, clear_behavior_cache
 from db import (
     create_goal_bucket,
     delete_goal_bucket,
@@ -97,6 +99,37 @@ def api_submit_kyc(req: KycSubmitRequest):
         return {"ok": True, "profile": profile}
     except Exception as e:
         logger.error(f"提交 KYC 失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/api/kyc/behavior-profile")
+def api_get_behavior_profile(refresh: bool = False):
+    """查看行为反推画像（从交易记录反推的风险偏好）。
+
+    P0-3：解决用户说的风险偏好与实际行为脱节问题。
+    refresh=true 强制刷新缓存（默认缓存 1 小时）。
+    """
+    try:
+        if refresh:
+            clear_behavior_cache("default")
+        profile = infer_behavior_profile("default", use_cache=not refresh)
+        return {"ok": True, "behavior_profile": profile}
+    except Exception as e:
+        logger.error(f"获取行为画像失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/api/kyc/enhanced-profile")
+def api_get_enhanced_profile():
+    """获取增强画像 = 问卷画像 + 行为画像融合。
+
+    P0-3：返回融合后的画像视图，含差异标注（divergence）。
+    不修改原问卷画像，仅做融合增强。
+    """
+    try:
+        return {"ok": True, "enhanced_profile": get_enhanced_profile("default")}
+    except Exception as e:
+        logger.error(f"获取增强画像失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

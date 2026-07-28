@@ -1,7 +1,7 @@
 <script setup>
-import { ref, watch, computed, onBeforeUnmount } from 'vue'
+import { ref, watch, computed, onBeforeUnmount, reactive } from 'vue'
 import { marked } from 'marked'
-import { getTask, getTaskImages, pollTask, chat, analyzeTaskImages } from '../../api'
+import { getTask, getTaskImages, pollTask, chat, analyzeTaskImages, getTraceDetail, getMessages } from '../../api'
 import ImageGrid from '../knowledge/ImageGrid.vue'
 import StockChart from '../valuation/StockChart.vue'
 import ValuationHistory from '../valuation/ValuationHistory.vue'
@@ -22,6 +22,19 @@ const imageAnalysis = ref(null)
 const imageAnalysisLoading = ref(false)
 const activeTab = ref('analysis')
 const valuationHistoryRef = ref(null)
+
+// ── Agent 执行细节展示状态 ──────────────────────────────────────
+// 动态进度条阶段（反映实际 Agent 编排阶段，区别于上方 4 步固定流程）
+const phases = [
+  { icon: '🔍', label: '检索' },
+  { icon: '🤖', label: '专家分析' },
+  { icon: '🔄', label: '交叉审阅' },
+  { icon: '⚖️', label: '仲裁' },
+  { icon: '📝', label: '综合报告' },
+]
+
+// 工具调用展开/收起状态（用 reactive Set 触发模板更新）
+const expandedTools = reactive(new Set())
 
 const renderedAnalysis = computed(() => {
   if (!task.value?.llm_analysis) return ''
@@ -44,6 +57,101 @@ const statusStep = computed(() => {
   return map[task.value?.status] ?? 0
 })
 
+// 是否有动态阶段数据（后端提供 phase_index/current_phase/total_phases 时才展示动态进度条）
+const hasPhaseData = computed(() => {
+  const t = task.value
+  return !!(t && (t.phase_index != null || t.current_phase != null || t.total_phases))
+})
+
+// 当前动态阶段索引：优先用后端字段，否则按 status 回退
+const currentPhase = computed(() => {
+  const t = task.value
+  if (!t) return -1
+  if (typeof t.phase_index === 'number') return t.phase_index
+  if (typeof t.current_phase === 'number') return t.current_phase
+  const fallback = { pending: -1, fetching: 0, analyzing: 1, done: phases.length - 1, error: -1 }
+  return fallback[t.status] ?? -1
+})
+
+// 专家状态文案
+function specialistStatusText(status) {
+  return { running: '执行中', success: '完成', failed: '失败' }[status] || status || ''
+}
+
+// 工具调用结果格式化：截断到 500 字符
+function formatResult(result) {
+  if (result == null) return ''
+  let text = typeof result === 'string' ? result : JSON.stringify(result, null, 2)
+  if (text.length > 500) {
+    text = text.slice(0, 500) + `\n... (截断，共 ${text.length} 字符)`
+  }
+  return text
+}
+
+// 思考流摘要：截断到 1000 字符
+function formatReasoning(text) {
+  if (!text) return ''
+  return text.length > 1000 ? text.slice(0, 1000) + '\n... (思考流已截断)' : text
+}
+
+function toggleTool(i) {
+  if (expandedTools.has(i)) expandedTools.delete(i)
+  else expandedTools.add(i)
+}
+
+/**
+ * 拉取 Agent 执行细节（专家编排 / 工具调用 / 思考流）。
+ * 前向兼容：后端 task 若已直接携带这些字段则跳过；否则尝试用 conversation_id + trace_id
+ * 调用 trace API，回退到 messages 元数据。任一环节失败均静默处理（执行细节为增强信息）。
+ */
+async function fetchExecutionDetail(t) {
+  if (!t) return
+  // 后端已直接携带，无需再请求
+  if (t.specialists?.length || t.tool_calls?.length || t.reasoning) return
+  const convId = t.conversation_id
+  if (!convId) return
+  try {
+    if (t.trace_id) {
+      const { data } = await getTraceDetail(convId, t.trace_id)
+      if (data?.agent_runs?.length) {
+        t.specialists = data.agent_runs.map(r => ({
+          agent_key: r.agent_key || r.id,
+          name: r.agent_name || r.agent || r.agent_key,
+          icon: r.icon || '🤖',
+          status: r.status === 'running' ? 'running' : (r.status === 'failed' ? 'failed' : 'success'),
+          duration_ms: r.duration_ms,
+        }))
+      }
+      if (data?.tool_audit_logs?.length) {
+        t.tool_calls = data.tool_audit_logs.map(l => {
+          let args = l.arguments ?? l.args
+          if (typeof args === 'string') { try { args = JSON.parse(args) } catch (_) { /* keep raw */ } }
+          return {
+            tool_name: l.tool_name || l.name,
+            args: args ?? null,
+            result: l.result_preview || l.result || '',
+            error: !l.success,
+          }
+        })
+      }
+      if (data?.trace?.reasoning) t.reasoning = data.trace.reasoning
+    } else {
+      // 回退：从对话消息元数据中提取
+      const { data } = await getMessages(convId, 5)
+      const msg = data?.messages?.find(m => m.metadata)
+      if (msg?.metadata) {
+        const md = typeof msg.metadata === 'string' ? JSON.parse(msg.metadata) : msg.metadata
+        if (md.specialists) t.specialists = md.specialists
+        if (md.tool_calls) t.tool_calls = md.tool_calls
+        if (md.reasoning_content) t.reasoning = md.reasoning_content
+      }
+    }
+  } catch (e) {
+    // 静默失败：执行细节是增强信息，不影响主流程
+    console.debug('fetchExecutionDetail failed:', e)
+  }
+}
+
 async function loadTask() {
   // 切换任务前先停掉上一次的轮询，避免并发 pollTask 累积
   if (stopPollFn) { stopPollFn(); stopPollFn = null }
@@ -51,9 +159,11 @@ async function loadTask() {
   try {
     const { data } = await getTask(props.taskId)
     task.value = data
+    await fetchExecutionDetail(data)
     if (data.status === 'pending' || data.status === 'fetching' || data.status === 'analyzing') {
-      stopPollFn = pollTask(props.taskId, (updated) => {
+      stopPollFn = pollTask(props.taskId, async (updated) => {
         task.value = updated
+        await fetchExecutionDetail(updated)
         if (updated.status === 'done') loadImages()
       })
     } else if (data.status === 'done') {
@@ -166,6 +276,27 @@ watch(() => props.taskId, () => {
         <p v-if="task.title" class="progress-title">{{ task.title }}</p>
       </div>
 
+      <!-- Dynamic Phase Progress（Agent 编排阶段，后端提供阶段数据时展示） -->
+      <div v-if="hasPhaseData && task.status !== 'error'" class="card phase-card editorial-card">
+        <div class="phase-card-header">
+          <h4 class="phase-card-title title">Agent 执行阶段</h4>
+          <span v-if="task.phaseLabel || task.phase_label" class="phase-current font-jet">
+            {{ task.phaseLabel || task.phase_label }}
+          </span>
+        </div>
+        <div class="progress-steps">
+          <div
+            v-for="(phase, i) in phases"
+            :key="i"
+            class="progress-step"
+            :class="{ active: currentPhase === i, done: currentPhase > i }"
+          >
+            <span class="step-icon">{{ phase.icon }}</span>
+            <span class="step-label">{{ phase.label }}</span>
+          </div>
+        </div>
+      </div>
+
       <!-- Error -->
       <div v-if="task.status === 'error'" class="card error-card">
         <svg width="20" height="20" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -192,6 +323,59 @@ watch(() => props.taskId, () => {
           <span class="codes-label terminal-label">识别到的标的：</span>
           <span v-for="code in task.codes_found" :key="code" class="badge badge-info font-jet">{{ code }}</span>
         </div>
+      </div>
+
+      <!-- Agent 执行细节：专家编排 / 工具调用 / 思考流（task 携带数据时才展示） -->
+
+      <!-- A. 专家编排区 -->
+      <div v-if="task.specialists?.length" class="card specialists-panel editorial-card">
+        <div class="card-header editorial-card-header">
+          <h4 class="card-title title">参与专家 <span class="count-badge font-jet">{{ task.specialists.length }}</span></h4>
+        </div>
+        <div class="specialist-list">
+          <div v-for="s in task.specialists" :key="s.agent_key" class="specialist-item reveal-stagger">
+            <span class="specialist-icon">{{ s.icon || '🤖' }}</span>
+            <span class="specialist-name">{{ s.name || s.agent_key }}</span>
+            <span class="specialist-status" :class="s.status">{{ specialistStatusText(s.status) }}</span>
+            <span v-if="s.duration_ms" class="specialist-duration font-jet">{{ (s.duration_ms / 1000).toFixed(1) }}s</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- B. 工具调用区 -->
+      <div v-if="task.tool_calls?.length" class="card tool-calls-panel editorial-card">
+        <div class="card-header editorial-card-header">
+          <h4 class="card-title title">工具调用 <span class="count-badge font-jet">{{ task.tool_calls.length }}</span></h4>
+        </div>
+        <div class="tool-call-list">
+          <div v-for="(tc, i) in task.tool_calls" :key="i" class="tool-call-item reveal-stagger">
+            <div class="tool-header" @click="toggleTool(i)">
+              <span class="tool-name font-jet">{{ tc.tool_name }}</span>
+              <span class="tool-status" :class="tc.error ? 'error' : 'success'">
+                {{ tc.error ? '失败' : '成功' }}
+              </span>
+              <span class="tool-toggle">{{ expandedTools.has(i) ? '▼' : '▶' }}</span>
+            </div>
+            <div v-if="expandedTools.has(i)" class="tool-detail">
+              <div v-if="tc.args" class="tool-args">
+                <div class="tool-detail-label terminal-label">参数</div>
+                <pre>{{ typeof tc.args === 'string' ? tc.args : JSON.stringify(tc.args, null, 2) }}</pre>
+              </div>
+              <div v-if="tc.result" class="tool-result">
+                <div class="tool-detail-label terminal-label">结果</div>
+                <pre>{{ formatResult(tc.result) }}</pre>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- C. 思考流摘要 -->
+      <div v-if="task.reasoning" class="card reasoning-panel editorial-card">
+        <div class="card-header editorial-card-header">
+          <h4 class="card-title title">思考过程</h4>
+        </div>
+        <div class="reasoning-content">{{ formatReasoning(task.reasoning) }}</div>
       </div>
 
       <!-- Images -->
@@ -662,6 +846,296 @@ watch(() => props.taskId, () => {
   font-size: 0.875rem;
 }
 
+/* ── 动态阶段进度条 ────────────────────────────────────── */
+.phase-card {
+  padding: 1.25rem;
+}
+
+.phase-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 1rem;
+}
+
+.phase-card-title {
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: var(--color-text-primary);
+  margin: 0;
+}
+
+.phase-current {
+  font-size: 0.75rem;
+  color: var(--color-primary-600);
+  background: var(--color-primary-50);
+  padding: 0.15rem 0.5rem;
+  border-radius: var(--radius-sm);
+}
+
+.dark .phase-current {
+  background: rgba(201, 168, 76, 0.12);
+  color: var(--color-primary-500);
+}
+
+.progress-steps {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.progress-step {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.4rem;
+  flex: 1;
+  opacity: 0.4;
+  transition: opacity var(--transition-fast);
+  position: relative;
+}
+
+.progress-step.active,
+.progress-step.done {
+  opacity: 1;
+}
+
+.progress-step:not(:last-child)::after {
+  content: '';
+  position: absolute;
+  top: 14px;
+  right: -50%;
+  width: 100%;
+  height: 2px;
+  background: var(--color-border);
+  z-index: 0;
+}
+
+.progress-step.done:not(:last-child)::after {
+  background: var(--color-success);
+}
+
+.step-icon {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: var(--color-bg-input);
+  border: 2px solid var(--color-border);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.8rem;
+  z-index: 1;
+  transition: all var(--transition-fast);
+}
+
+.progress-step.active .step-icon {
+  background: var(--color-primary-500);
+  border-color: var(--color-primary-500);
+  box-shadow: 0 0 0 4px rgba(201, 168, 76, 0.15);
+}
+
+.progress-step.done .step-icon {
+  background: var(--color-success);
+  border-color: var(--color-success);
+}
+
+.progress-step .step-label {
+  font-size: 0.72rem;
+  color: var(--color-text-muted);
+  font-weight: 500;
+}
+
+.progress-step.active .step-label {
+  color: var(--color-primary-600);
+  font-weight: 600;
+}
+
+.progress-step.done .step-label {
+  color: var(--color-text-secondary);
+}
+
+/* ── 专家编排区 ────────────────────────────────────── */
+.specialists-panel {
+  padding: 1.25rem;
+}
+
+.specialist-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.specialist-item {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.6rem 0.75rem;
+  background: var(--color-bg-input);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--color-border);
+}
+
+.specialist-icon {
+  font-size: 1.1rem;
+  line-height: 1;
+}
+
+.specialist-name {
+  flex: 1;
+  font-size: 0.875rem;
+  font-weight: 500;
+  color: var(--color-text-primary);
+}
+
+.specialist-status {
+  font-size: 0.72rem;
+  padding: 0.15rem 0.5rem;
+  border-radius: 999px;
+  font-weight: 500;
+}
+
+.specialist-status.running {
+  background: rgba(201, 168, 76, 0.15);
+  color: var(--color-primary-600);
+}
+
+.specialist-status.success {
+  background: rgba(34, 197, 94, 0.12);
+  color: var(--color-success);
+}
+
+.specialist-status.failed {
+  background: rgba(239, 68, 68, 0.12);
+  color: var(--color-danger);
+}
+
+.specialist-duration {
+  font-size: 0.72rem;
+  color: var(--color-text-muted);
+  min-width: 40px;
+  text-align: right;
+}
+
+/* ── 工具调用区 ────────────────────────────────────── */
+.tool-calls-panel {
+  padding: 1.25rem;
+}
+
+.tool-call-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.tool-call-item {
+  background: var(--color-bg-input);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+}
+
+.tool-header {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.55rem 0.75rem;
+  cursor: pointer;
+  user-select: none;
+  transition: background var(--transition-fast);
+}
+
+.tool-header:hover {
+  background: var(--color-bg-card);
+}
+
+.tool-name {
+  flex: 1;
+  font-size: 0.8rem;
+  font-weight: 500;
+  color: var(--color-text-primary);
+}
+
+.tool-status {
+  font-size: 0.7rem;
+  padding: 0.1rem 0.45rem;
+  border-radius: 999px;
+  font-weight: 500;
+}
+
+.tool-status.success {
+  background: rgba(34, 197, 94, 0.12);
+  color: var(--color-success);
+}
+
+.tool-status.error {
+  background: rgba(239, 68, 68, 0.12);
+  color: var(--color-danger);
+}
+
+.tool-toggle {
+  font-size: 0.7rem;
+  color: var(--color-text-muted);
+  width: 14px;
+  text-align: center;
+}
+
+.tool-detail {
+  padding: 0.5rem 0.75rem 0.75rem;
+  border-top: 1px solid var(--color-border);
+  background: var(--color-bg-card);
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.tool-detail-label {
+  font-size: 0.68rem;
+  font-weight: 600;
+  color: var(--color-text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 0.25rem;
+}
+
+.tool-args pre,
+.tool-result pre {
+  margin: 0;
+  padding: 0.6rem;
+  background: var(--color-bg-input);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  font-size: 0.72rem;
+  line-height: 1.5;
+  color: var(--color-text-secondary);
+  overflow-x: auto;
+  max-height: 240px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* ── 思考流摘要 ────────────────────────────────────── */
+.reasoning-panel {
+  padding: 1.25rem;
+}
+
+.reasoning-content {
+  font-size: 0.8rem;
+  line-height: 1.7;
+  color: var(--color-text-secondary);
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: var(--color-bg-input);
+  border: 1px solid var(--color-border);
+  border-left: 3px solid var(--color-primary-500);
+  border-radius: var(--radius-md);
+  padding: 0.85rem 1rem;
+  max-height: 320px;
+  overflow-y: auto;
+}
+
 @media (max-width: 640px) {
   .chart-grid {
     grid-template-columns: 1fr;
@@ -674,6 +1148,33 @@ watch(() => props.taskId, () => {
   }
   .chat-form {
     flex-direction: column;
+  }
+  /* 动态阶段进度条：移动端允许换行 */
+  .progress-steps {
+    flex-wrap: wrap;
+    gap: 0.75rem 0.5rem;
+  }
+  .progress-step {
+    flex: 1 1 30%;
+    min-width: 60px;
+  }
+  .progress-step:not(:last-child)::after {
+    display: none;
+  }
+  /* 工具调用 header 在移动端紧凑展示 */
+  .tool-header {
+    flex-wrap: wrap;
+    gap: 0.35rem;
+  }
+  .tool-name {
+    width: 100%;
+  }
+  .specialist-item {
+    flex-wrap: wrap;
+    gap: 0.4rem;
+  }
+  .specialist-duration {
+    margin-left: auto;
   }
 }
 </style>

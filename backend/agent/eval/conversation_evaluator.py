@@ -1097,3 +1097,31 @@ def get_low_score_conversations(limit: int = 10, days: int = 30,
         })
 
     return results
+
+
+async def auto_evaluate_conversation(conversation_id: int, message_id: int = None) -> bool:
+    """对话完成后自动触发评估（开关控制，默认开启）。
+
+    开关：eval.auto_evaluate_enabled（默认 true）
+    失败不抛异常，仅记日志，避免影响主流程。
+    """
+    from db.config import get_config_bool
+    if not get_config_bool("eval.auto_evaluate_enabled", True):
+        return False
+    try:
+        evaluator = get_evaluator()
+        # 自动评估用规则模式（不调LLM，避免成本），trigger_evolution=True 触发进化
+        result = evaluator.evaluate(
+            conversation_id=conversation_id,
+            message_id=message_id,
+            trigger_evolution=True,
+            use_llm=False,
+        )
+        # 持久化到 conversation_evaluations 表
+        from db.eval import save_conversation_evaluation
+        save_conversation_evaluation(result)
+        logger.info(f"[auto-eval] 对话 {conversation_id} 自动评估完成，分数: {result.auto_score}")
+        return True
+    except Exception as e:
+        logger.warning(f"[auto-eval] 对话 {conversation_id} 自动评估失败: {e}")
+        return False

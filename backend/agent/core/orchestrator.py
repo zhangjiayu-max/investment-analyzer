@@ -4138,6 +4138,20 @@ def orchestrate(query: str, history: list, rag_context: str = "", cancel_event: 
                 }
                 if conversation_id:
                     _schedule_auto_evaluation(conversation_id, message_id, _result)
+                    # P0-2: 对话完成后自动触发质量评估（开关 eval.auto_evaluate_enabled，默认开启）
+                    try:
+                        import threading as _threading
+                        import asyncio as _asyncio
+                        from agent.eval.conversation_evaluator import auto_evaluate_conversation
+
+                        def _run_auto_eval(_cid=conversation_id, _mid=message_id):
+                            try:
+                                _asyncio.run(auto_evaluate_conversation(_cid, _mid))
+                            except Exception as _e:
+                                logger.warning(f"自动评估执行失败: {_e}")
+                        _threading.Thread(target=_run_auto_eval, daemon=True).start()
+                    except Exception as _e:
+                        logger.warning(f"自动评估触发失败: {_e}")
                 _record_valuation_references(specialist_results, answer, trace_id, conversation_id, message_id)
                 _schedule_tool_eval(query, specialist_results)
                 return _result
@@ -5140,7 +5154,7 @@ def _stream_handle_no_tool_calls(msg, specialist_results: list, all_tool_calls: 
             )
 
         with concurrent.futures.ThreadPoolExecutor(
-            max_workers=min(len(original_specialists), 3)
+            max_workers=min(len(original_specialists), 5)
         ) as executor:
             futures = {executor.submit(_review_single, sr): sr for sr in original_specialists}
             for future in concurrent.futures.as_completed(futures):

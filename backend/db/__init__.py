@@ -265,6 +265,12 @@ from db.decisions import (
     update_decision_backtest, get_decisions_for_backtest, auto_backtest_decisions,
 )
 
+# P0-1 决策执行回写闭环：记录决策执行结果（执行价/执行时间/实际盈亏/归因）
+from db.decision_execution import (
+    create_execution_log, get_execution_log, list_execution_logs,
+    update_execution_pnl, get_execution_accuracy_stats,
+)
+
 # 交易计划
 from db.trade_plans import (
     create_trade_plan, get_trade_plan, list_trade_plans,
@@ -1645,6 +1651,66 @@ def init_db():
         "CREATE INDEX IF NOT EXISTS idx_index_price_history_code_date "
         "ON index_price_history(index_code, trade_date)"
     )
+
+    # ── P0-4 在线估值兜底持久化缓存表（L2，7天TTL）──
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS valuations_online (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            index_code TEXT NOT NULL,
+            metric_type TEXT NOT NULL,
+            current_value REAL,
+            percentile REAL,
+            current_point REAL,
+            index_name TEXT,
+            snapshot_date TEXT,
+            source TEXT,
+            created_at TEXT DEFAULT (datetime('now', 'localtime')),
+            UNIQUE(index_code, metric_type, source)
+        )
+    """)
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_valuations_online_code "
+        "ON valuations_online(index_code)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_valuations_online_created "
+        "ON valuations_online(created_at)"
+    )
+
+    # ── P0-1 决策执行回写闭环：记录决策执行结果（执行价/执行时间/实际盈亏/归因）──
+    # 解决问题：原 suggestion_accuracy 仅统计到 verdict 阶段（can_buy/watch/avoid），
+    # 决策"采纳→执行→账户实际盈亏"链路未回写，建议准确率无法用真实账户盈亏校准。
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS decision_execution_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            decision_id INTEGER NOT NULL,
+            action_type TEXT NOT NULL,
+            executed_price REAL,
+            executed_amount REAL,
+            executed_shares REAL,
+            executed_at TEXT NOT NULL,
+            actual_pnl REAL,
+            pnl_percentage REAL,
+            holding_period_days INTEGER,
+            attribution TEXT,
+            notes TEXT,
+            created_at TEXT DEFAULT (datetime('now', 'localtime')),
+            FOREIGN KEY (decision_id) REFERENCES decision_records(id)
+        )
+    """)
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_decision_exec_decision "
+        "ON decision_execution_log(decision_id)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_decision_exec_action "
+        "ON decision_execution_log(action_type)"
+    )
+
+    # ── P5-19 评估反哺专家权重表 ──────────────────────────
+    # 评估低分专家累计 N 次后自动降权，连续高分后恢复（带手动重置）
+    from db.specialist_weight import init_specialist_weight_table
+    init_specialist_weight_table(conn)
 
     conn.commit()
     conn.close()

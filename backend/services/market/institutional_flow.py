@@ -7,7 +7,7 @@
 - 北向资金实时净买额：2024年8月监管叫停公布，已不可用
 - 融资融券余额：日频实时可查，杠杆资金动向，作为主信号
 - 南向资金（港股通）：仍在公布实时数据，但方向相反，作辅助
-- 龙虎榜机构席位：日频，机构短期动向（P1 扩展）
+- 龙虎榜机构席位：日频，机构短期动向（P1-8 已实现，见 dragon_tiger.py）
 
 缓存：复用 market_data._get_cached/_set_cached 5 分钟 TTL。
 """
@@ -202,4 +202,177 @@ def get_institutional_flow_signal() -> dict:
         "direction": data.get("trend", "neutral"),
         "strength": data.get("strength", "weak"),
         "z_score": data.get("z_score_5d", 0),
+    }
+
+
+# ── P1-8：龙虎榜机构席位信号补充 ──────────────────────────────────────────────
+# 北向资金 2024-08 被监管叫停、融资融券余额是滞后指标，
+# 龙虎榜机构席位作为机构短期动向补充信号。
+# 开关：market.dragon_tiger_enabled（默认 true）
+# 失败降级：龙虎榜数据获取失败时返回 neutral 信号，不影响主流程。
+
+def get_dragon_tiger_signal(days: int = 5) -> dict:
+    """龙虎榜机构席位共振信号（P1-8 新增）。
+
+    信号方向：
+    - 机构净买入额 > 0 → inflow（正面信号）
+    - 机构净买入额 < 0 → outflow（负面信号）
+    - 无数据或开关关闭 → neutral
+
+    信号强度：
+    - |净买入额| ≥ 5亿 → strong
+    - |净买入额| ≥ 1亿 → moderate
+    - 其他 → weak
+
+    Returns:
+        {
+            "direction": "inflow" | "outflow" | "neutral",
+            "strength": "strong" | "moderate" | "weak",
+            "institutional_net_buy": float,        # 机构净买入总额（元）
+            "institutional_active_rate": float,     # 机构参与率（0-1）
+            "top_buy_stocks": list,                 # 机构净买入 TOP3 个股
+            "top_sell_stocks": list,                # 机构净卖出 TOP3 个股
+            "enabled": bool,                        # 开关状态
+        }
+    """
+    try:
+        from db.config import get_config_bool
+        enabled = get_config_bool("market.dragon_tiger_enabled", True)
+    except Exception:
+        enabled = True
+
+    if not enabled:
+        return {
+            "direction": "neutral",
+            "strength": "weak",
+            "institutional_net_buy": 0.0,
+            "institutional_active_rate": 0.0,
+            "top_buy_stocks": [],
+            "top_sell_stocks": [],
+            "enabled": False,
+        }
+
+    try:
+        from services.market.dragon_tiger import get_dragon_tiger_signals
+        signals = get_dragon_tiger_signals(days=days)
+    except Exception as e:
+        logger.warning(f"获取龙虎榜信号失败，降级为 neutral: {e}")
+        return {
+            "direction": "neutral",
+            "strength": "weak",
+            "institutional_net_buy": 0.0,
+            "institutional_active_rate": 0.0,
+            "top_buy_stocks": [],
+            "top_sell_stocks": [],
+            "enabled": True,
+        }
+
+    # 汇总机构净买入额（TOP10 买入 - TOP10 卖出）
+    top_buys = signals.get("top_institutional_buys", [])
+    top_sells = signals.get("top_institutional_sells", [])
+    buy_sum = sum(x.get("institutional_net_buy", 0.0) for x in top_buys)
+    sell_sum = sum(x.get("institutional_net_buy", 0.0) for x in top_sells)  # 负值
+    institutional_net_buy = buy_sum + sell_sum  # sell_sum 已是负数
+
+    active_rate = float(signals.get("institutional_active_rate", 0.0))
+
+    # 方向判定
+    if institutional_net_buy > 0:
+        direction = "inflow"
+    elif institutional_net_buy < 0:
+        direction = "outflow"
+    else:
+        direction = "neutral"
+
+    # 强度判定（|净买入额| 阈值：5亿 strong / 1亿 moderate）
+    abs_net = abs(institutional_net_buy)
+    if abs_net >= 5e8:
+        strength = "strong"
+    elif abs_net >= 1e8:
+        strength = "moderate"
+    else:
+        strength = "weak"
+
+    # TOP3 个股摘要
+    def _stock_summary(x):
+        return {
+            "code": x.get("code", ""),
+            "name": x.get("name", ""),
+            "institutional_net_buy": round(x.get("institutional_net_buy", 0.0), 2),
+        }
+
+    return {
+        "direction": direction,
+        "strength": strength,
+        "institutional_net_buy": round(institutional_net_buy, 2),
+        "institutional_active_rate": active_rate,
+        "top_buy_stocks": [_stock_summary(x) for x in top_buys[:3]],
+        "top_sell_stocks": [_stock_summary(x) for x in top_sells[:3]],
+        "enabled": True,
+    }
+
+
+def get_institutional_flow_signal_combined() -> dict:
+    """机构动向综合共振信号（融资融券 + 龙虎榜）。
+
+    融资融券是滞后主信号，龙虎榜是短期补充信号。
+    两者方向一致 → 增强置信度；方向冲突 → 降级为 neutral。
+
+    Returns:
+        {
+            "direction": "inflow" | "outflow" | "neutral",
+            "strength": "strong" | "moderate" | "weak",
+            "margin_signal": dict,         # 融资融券信号
+            "dragon_tiger_signal": dict,   # 龙虎榜信号
+            "consensus": bool,             # 两信号是否一致
+            "sources": list[str],          # 信号来源列表
+        }
+    """
+    margin = get_institutional_flow_signal()
+    dragon = get_dragon_tiger_signal()
+
+    sources = ["margin_balance"]
+    if dragon.get("enabled", False):
+        sources.append("dragon_tiger")
+
+    # 龙虎榜关闭或无数据时，沿用融资融券信号
+    if not dragon.get("enabled", False) or dragon.get("direction") == "neutral":
+        return {
+            "direction": margin["direction"],
+            "strength": margin["strength"],
+            "margin_signal": margin,
+            "dragon_tiger_signal": dragon,
+            "consensus": True,
+            "sources": sources,
+        }
+
+    # 两信号方向一致 → 增强强度
+    margin_dir = margin.get("direction", "neutral")
+    dragon_dir = dragon.get("direction", "neutral")
+
+    if margin_dir == dragon_dir and margin_dir != "neutral":
+        # 一致：强度取较高者
+        strength_order = {"weak": 1, "moderate": 2, "strong": 3}
+        max_strength = max(
+            strength_order.get(margin.get("strength", "weak"), 1),
+            strength_order.get(dragon.get("strength", "weak"), 1),
+        )
+        strength = {v: k for k, v in strength_order.items()}[max_strength]
+        return {
+            "direction": margin_dir,
+            "strength": strength,
+            "margin_signal": margin,
+            "dragon_tiger_signal": dragon,
+            "consensus": True,
+            "sources": sources,
+        }
+
+    # 方向冲突 → 降级为 neutral
+    return {
+        "direction": "neutral",
+        "strength": "weak",
+        "margin_signal": margin,
+        "dragon_tiger_signal": dragon,
+        "consensus": False,
+        "sources": sources,
     }

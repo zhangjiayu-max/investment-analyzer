@@ -3,6 +3,7 @@ import { computed, onMounted, ref } from 'vue'
 import { getFinanceDashboard, getFinanceTrend } from '../../api'
 import { useToast } from '../../composables/useToast'
 import Icon from '../ui/Icon.vue'
+import LineChart from '../charts/LineChart.vue'
 
 const { showToast } = useToast()
 
@@ -61,27 +62,24 @@ async function loadTrend() {
   }
 }
 
-// ── 趋势图 ──
-const trendChartWidth = 700
-const trendChartHeight = 160
+// ── 趋势图（ECharts LineChart 数据） ──
+const trendChartReady = computed(() => {
+  if (!trend.value || !trend.value.trend?.length) return false
+  return trend.value.trend.length >= 2
+})
 
-const trendChartPaths = computed(() => {
-  if (!trend.value || !trend.value.trend?.length) return null
-  const items = trend.value.trend
-  const maxVal = Math.max(...items.map(i => i.cumulative_invested), 1) * 1.1
-  const len = items.length
-  if (len < 2) return null
+const trendDates = computed(() => {
+  if (!trend.value?.trend) return []
+  return trend.value.trend.map(i => i.month)
+})
 
-  const path = items.map((item, i) => {
-    const x = (i / (len - 1)) * trendChartWidth
-    const y = trendChartHeight - (item.cumulative_invested / maxVal) * trendChartHeight
-    return `${i === 0 ? 'M' : 'L'}${x.toFixed(1)},${y.toFixed(1)}`
-  }).join(' ')
-
-  // 填充区域路径
-  const areaPath = path + ` L${trendChartWidth},${trendChartHeight} L0,${trendChartHeight} Z`
-
-  return { line: path, area: areaPath, labels: items }
+const trendSeries = computed(() => {
+  if (!trend.value?.trend) return []
+  return [{
+    name: '累计投入',
+    data: trend.value.trend.map(i => i.cumulative_invested),
+    color: 'rgb(201,168,76)',
+  }]
 })
 
 onMounted(load)
@@ -336,22 +334,16 @@ onMounted(load)
                 </strong>
               </div>
             </div>
-            <div v-if="trendChartPaths" class="trend-chart-wrap">
-              <svg :viewBox="`0 0 ${trendChartWidth} ${trendChartHeight}`" class="trend-chart" preserveAspectRatio="none">
-                <defs>
-                  <linearGradient :id="'trend-grad'" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="0%" stop-color="#c9a84c" stop-opacity="0.3" />
-                    <stop offset="100%" stop-color="#c9a84c" stop-opacity="0" />
-                  </linearGradient>
-                </defs>
-                <path :d="trendChartPaths.area" :fill="`url(#trend-grad)`" />
-                <path :d="trendChartPaths.line" fill="none" stroke="#c9a84c" stroke-width="2" />
-              </svg>
-              <div class="trend-labels">
-                <span v-for="item in trendChartPaths.labels" :key="item.month" class="trend-label">
-                  {{ item.month.slice(5) }}
-                </span>
-              </div>
+            <div v-if="trendChartReady" class="trend-chart-wrap">
+              <LineChart
+                :dates="trendDates"
+                :series="trendSeries"
+                :y-names="['累计投入']"
+                :area="true"
+                :smooth="true"
+                :zoomable="false"
+                height="180px"
+              />
             </div>
             <div v-else class="no-data">数据不足，至少需要 2 个月记录</div>
           </template>
@@ -612,20 +604,6 @@ onMounted(load)
   flex-direction: column;
   gap: 6px;
 }
-.trend-chart {
-  width: 100%;
-  height: 160px;
-}
-.trend-labels {
-  display: flex;
-  justify-content: space-between;
-  font-size: 0.68rem;
-  color: var(--color-text-muted);
-  overflow-x: auto;
-}
-.trend-label {
-  white-space: nowrap;
-}
 
 @media (max-width: 760px) {
   .finance-page { padding: var(--space-4); }
@@ -679,12 +657,6 @@ onMounted(load)
     overflow-x: auto;
     -webkit-overflow-scrolling: touch;
     scrollbar-width: thin;
-  }
-  .trend-chart {
-    min-width: 600px;
-  }
-  .trend-labels {
-    min-width: 600px;
   }
   .trend-summary {
     flex-wrap: wrap;

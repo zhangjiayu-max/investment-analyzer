@@ -484,31 +484,53 @@ async def watchlist_patrol_api():
                     except Exception as _ae:
                         logger.debug(f"[watchlist] 信号变更 alert 写入失败 {fund_code}: {_ae}")
 
-                # 2) SSE 实时推送
+                # 2) SSE 实时推送（P1-7: 携带数据，前端免二次拉取）
                 if sse_enabled:
                     try:
-                        from routers.conversation.notifications import notify_subscribers
                         import asyncio as _asyncio
-                        sse_payload = {
-                            "title": change_title,
-                            "message": change_content,
-                            "type": change_severity,
-                            "category": "watchlist_signal_change",
-                            "data": {
-                                "fund_code": fund_code,
-                                "fund_name": fund_name,
-                                "from_status": _from,
-                                "to_status": _to,
-                                "signal_reason": signal_reason,
-                                "signal_confidence": signal_confidence,
-                                "current_percentile": current_pct,
-                                "target_percentile": target_pct,
-                                "change_label": change_label,
-                            },
-                            "timestamp": _asyncio.get_event_loop().time(),
+                        from routers.conversation.notifications import broadcast_notification
+                        sse_data = {
+                            "fund_code": fund_code,
+                            "fund_name": fund_name,
+                            "alert_type": change_severity,
+                            "action_url": "watchlist",
+                            "from_status": _from,
+                            "to_status": _to,
+                            "signal_reason": signal_reason,
+                            "signal_confidence": signal_confidence,
+                            "current_percentile": current_pct,
+                            "target_percentile": target_pct,
+                            "change_label": change_label,
                         }
+                        # warning 级且开启新闻集成時，附带新闻摘要（前端直接展示）
+                        if change_severity == "warning":
+                            try:
+                                _news_enabled = get_config("alert.news_integration", "false") == "true"
+                            except Exception:
+                                _news_enabled = False
+                            if _news_enabled:
+                                try:
+                                    from services.alert_news_service import get_alert_news
+                                    _news = await _asyncio.to_thread(
+                                        get_alert_news, fund_code, fund_name
+                                    )
+                                    if _news and isinstance(_news[0], dict):
+                                        _first = _news[0]
+                                        _summary = (_first.get("news_summary") or _first.get("news_title") or "")
+                                        if _summary:
+                                            # build_notification 会再截断到 200 字
+                                            sse_data["news_summary"] = _summary
+                                        if _first.get("news_url"):
+                                            sse_data["news_url"] = _first["news_url"]
+                                except Exception as _ne:
+                                    logger.debug(f"[watchlist] 新闻摘要附加失败 {fund_code}: {_ne}")
                         # patrol 是 async 函数，可直接 await
-                        await notify_subscribers(sse_payload)
+                        await broadcast_notification(
+                            change_title, change_content,
+                            notify_type="alert",
+                            category="watchlist_signal_change",
+                            data=sse_data,
+                        )
                     except Exception as _se:
                         logger.debug(f"[watchlist] 信号变更 SSE 推送失败 {fund_code}: {_se}")
         except Exception as _e:

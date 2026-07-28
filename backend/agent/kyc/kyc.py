@@ -232,6 +232,83 @@ def update_kyc_dimension(user_id: str = "default", dimension: str = "", value=No
     return False
 
 
+# ── P0-3 行为画像融合 ──────────────────────────────────
+
+
+def get_enhanced_profile(user_id: str = "default") -> dict:
+    """获取增强画像 = 问卷画像 + 行为画像融合。
+
+    开关：kyc.behavior_inference_enabled（默认 true）
+    融合策略：
+    - 行为置信度 >0.7 时，行为画像权重 60%，问卷 40%
+    - 行为置信度 0.3-0.7 时，行为画像权重 30%，问卷 70%
+    - 行为置信度 <0.3 时，纯问卷画像
+    - 标注 divergence（差异点），供专家 prompt 参考
+
+    不修改原问卷画像（user_profiles 表），仅返回融合后的视图。
+    """
+    questionnaire = get_kyc_profile(user_id)
+
+    # 开关：默认开启
+    try:
+        from db import get_config_bool
+        enabled = get_config_bool("kyc.behavior_inference_enabled", True)
+    except Exception:
+        enabled = True
+
+    if not enabled:
+        return {
+            "questionnaire_profile": questionnaire,
+            "behavior_profile": None,
+            "fused_profile": questionnaire,
+            "behavior_inference_enabled": False,
+            "note": "行为画像反推已关闭（kyc.behavior_inference_enabled=false）",
+        }
+
+    from agent.kyc.behavior_profiler import infer_behavior_profile
+    behavior = infer_behavior_profile(user_id)
+
+    confidence = behavior.get("confidence", 0)
+    if confidence < 0.3 or behavior.get("inferred_risk_tolerance") is None:
+        # 置信度太低或样本不足，纯问卷画像
+        return {
+            "questionnaire_profile": questionnaire,
+            "behavior_profile": behavior,
+            "fused_profile": questionnaire,
+            "behavior_inference_enabled": True,
+            "fusion_applied": False,
+            "note": behavior.get("note", "行为画像置信度不足，未融合"),
+        }
+
+    # 按置信度决定权重
+    if confidence > 0.7:
+        behavior_weight, questionnaire_weight = 0.6, 0.4
+    else:
+        behavior_weight, questionnaire_weight = 0.3, 0.7
+
+    # 融合：行为画像与问卷画像维度值不同时，按权重倾向选择
+    # 这里不强行替换维度值（避免覆盖用户主观意愿），而是产出"建议融合值"+保留差异标注
+    fused = dict(questionnaire)
+    fused["fused_risk_tolerance"] = behavior.get("inferred_risk_tolerance")
+    fused["fused_investment_horizon"] = behavior.get("inferred_investment_horizon")
+    fused["fused_loss_tolerance"] = behavior.get("inferred_loss_tolerance")
+    fused["fused_experience_level"] = behavior.get("inferred_experience_level")
+    fused["behavior_confidence"] = confidence
+    fused["behavior_weight"] = behavior_weight
+    fused["questionnaire_weight"] = questionnaire_weight
+
+    return {
+        "questionnaire_profile": questionnaire,
+        "behavior_profile": behavior,
+        "fused_profile": fused,
+        "behavior_inference_enabled": True,
+        "fusion_applied": True,
+        "behavior_weight": behavior_weight,
+        "questionnaire_weight": questionnaire_weight,
+        "divergence": behavior.get("divergence_from_questionnaire", {}),
+    }
+
+
 # ── 画像 → 文本（注入专家 prompt 用）──────────────────
 
 _DIMENSION_LABELS = {
@@ -288,7 +365,9 @@ def kyc_profile_to_text(user_id: str = "default", dimensions: list = None) -> st
 
     # P1 Step3：追加投资目标摘要（与基础画像并列，专家据此评估建议对目标的契合度）
     goals_text = _render_investment_goals_summary(user_id)
-    if not parts and not goals_text:
+    # P0-3：追加行为画像差异段（与问卷画像并列，提示专家参考实际行为）
+    behavior_text = _render_behavior_insights(user_id)
+    if not parts and not goals_text and not behavior_text:
         return ""
 
     sections = []
@@ -296,7 +375,90 @@ def kyc_profile_to_text(user_id: str = "default", dimensions: list = None) -> st
         sections.append("；".join(parts))
     if goals_text:
         sections.append(goals_text)
-    return "<kyc_profile>\n" + "\n".join(sections) + "\n</kyc_profile>"
+    profile_block = "<kyc_profile>\n" + "\n".join(sections) + "\n</kyc_profile>"
+    if behavior_text:
+        return profile_block + "\n" + behavior_text
+    return profile_block
+
+
+def _render_behavior_insights(user_id: str = "default") -> str:
+    """渲染行为画像差异段。无差异或置信度不足时返回空串。
+
+    仅当行为画像与问卷画像存在显著差异时，输出 <behavior_insights> 段，
+    提示专家分析时参考用户实际行为。
+    """
+    # 开关：默认开启
+    try:
+        from db import get_config_bool
+        if not get_config_bool("kyc.behavior_inference_enabled", True):
+            return ""
+    except Exception:
+        pass
+
+    try:
+        from agent.kyc.behavior_profiler import infer_behavior_profile
+        behavior = infer_behavior_profile(user_id)
+    except Exception as e:
+        logger.debug(f"行为画像反推失败: {e}")
+        return ""
+
+    # 置信度不足或样本不足，不注入
+    if behavior.get("confidence", 0) < 0.3 or behavior.get("inferred_risk_tolerance") is None:
+        return ""
+
+    divergence = behavior.get("divergence_from_questionnaire", {})
+    if not divergence:
+        return ""
+
+    metrics = behavior.get("behavior_metrics", {})
+    lines = ["⚠️ 行为画像与自评存在差异："]
+
+    risk_div = divergence.get("risk_tolerance")
+    if risk_div:
+        q_label = _RISK_LABELS.get(risk_div["questionnaire"], risk_div["questionnaire"])
+        i_label = _RISK_LABELS.get(risk_div["inferred"], risk_div["inferred"])
+        conc_pct = int(metrics.get("position_concentration", 0) * 100)
+        freq = metrics.get("trade_frequency_per_month", 0)
+        lines.append(
+            f"- 自评风险偏好：{q_label} | 实际行为：{i_label}"
+            f"（仓位集中度 {conc_pct}%，月交易 {freq:.1f} 次）"
+        )
+
+    horizon_div = divergence.get("investment_horizon")
+    if horizon_div:
+        q_label = _HORIZON_LABELS.get(horizon_div["questionnaire"], horizon_div["questionnaire"])
+        i_label = _HORIZON_LABELS.get(horizon_div["inferred"], horizon_div["inferred"])
+        avg_days = metrics.get("avg_holding_days", 0)
+        lines.append(
+            f"- 自评投资期限：{q_label} | 实际行为：{i_label}"
+            f"（平均持仓 {avg_days:.0f} 天）"
+        )
+
+    loss_div = divergence.get("loss_tolerance")
+    if loss_div:
+        q_label = _LOSS_LABELS.get(loss_div["questionnaire"], loss_div["questionnaire"])
+        i_label = _LOSS_LABELS.get(loss_div["inferred"], loss_div["inferred"])
+        stop_rate = metrics.get("stop_loss_rate", 0)
+        discipline = metrics.get("loss_cutting_discipline", 0)
+        lines.append(
+            f"- 自评亏损承受度：{q_label} | 实际行为：{i_label}"
+            f"（止损率 {stop_rate:.0%}，止损纪律 {discipline:.0f} 分）"
+        )
+
+    exp_div = divergence.get("investment_experience")
+    if exp_div:
+        q_label = _EXP_LABELS.get(exp_div["questionnaire"], exp_div["questionnaire"])
+        i_label = _EXP_LABELS.get(exp_div["inferred"], exp_div["inferred"])
+        lines.append(f"- 自评投资经验：{q_label} | 实际行为：{i_label}")
+
+    confidence = behavior.get("confidence", 0)
+    sample = behavior.get("sample_size", 0)
+    lines.append(
+        f"- 建议：用户实际行为可能与自评不一致（样本 {sample} 笔，置信度 {confidence:.0%}），"
+        "分析时请参考实际行为"
+    )
+
+    return "<behavior_insights>\n" + "\n".join(lines) + "\n</behavior_insights>"
 
 
 def _render_investment_goals_summary(user_id: str = "default") -> str:

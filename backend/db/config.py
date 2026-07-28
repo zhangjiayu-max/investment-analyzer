@@ -247,6 +247,7 @@ DEFAULT_CONFIGS = [
     ('agent.deep_synthesis_enabled', 'true', '综合报告深度保留开关：5段结构(核心结论/推理链条/分歧反驳/操作建议/风险提示)，结论长度300字，max_tokens提升至3000', 'agent'),
     ('agent.industry_fundamentalist_enabled', 'true', '行业基本面分析师开关：自下而上行业景气度分析（批价/动销/库存/产能），补全估值/风险/配置之外的维度', 'agent'),
     ('agent.behavioral_advisor_enabled', 'true', '行为金融学专家开关：识别追涨杀跌/损失厌恶/处置效应/锚定效应等6大偏差，给行为纠偏建议', 'agent'),
+    ('agents.new_specialists_enabled', 'true', 'P2-9 新增专家开关：可转债分析师+量化技术分析师，关键词触发路由，关闭后两个专家均不参与编排', 'agent'),
     ('agent.self_reflection_cross_check_enabled', 'false', '自我反思跨专家盲点检查开关（默认关，需手动开）：反思增加第5维度，检查跨专家盲点', 'agent'),
 
     # 持仓幻觉修复 + 分析质量提升（2026-07-16）
@@ -435,6 +436,30 @@ DEFAULT_CONFIGS = [
     ('rag.auto_seed_fund_knowledge', 'false', 'R-7 自动补充持仓基金知识：写入 21 只基金基础知识卡片到 knowledge_base（数据写入类，默认关，手动触发）', 'rag'),
     ('rag.feedback_ui_enabled', 'false', 'R-8 RAG 反馈 UI 激活：ChatView 显示知识引用折叠块 + 赞/踩按钮（LLM 相关，默认关）', 'rag'),
     ('rag.auto_run_eval_on_startup', 'false', 'R-9 启动时自动运行 RAG 评估套件（LLM 相关，默认关）', 'rag'),
+
+    # P3-12 Reranker 默认开启（CrossEncoder 重排序 + 超时降级保护）
+    ('rag.reranker_enabled', 'true', 'CrossEncoder 重排序开关（默认开启，超时/失败降级到轻量重排序）', 'rag'),
+    ('rag.reranker_timeout_ms', '800', '重排序超时毫秒数，超时降级到轻量重排序', 'rag'),
+    ('rag.reranker_max_docs', '20', '重排序最大文档数（超过先截断，避免延迟过大）', 'rag'),
+
+    # P0-3 行为数据反推 KYC 画像（非 LLM 相关，默认开启）
+    ('kyc.behavior_inference_enabled', 'true', '行为画像反推开关：从交易记录反推风险偏好并与问卷画像融合（默认开启）', 'kyc'),
+
+    # P1-8 龙虎榜机构席位信号补充（非 LLM 相关，默认开启）
+    # 北向资金 2024-08 被监管叫停、融资融券余额是滞后指标，龙虎榜机构席位作为机构短期动向补充信号
+    ('market.dragon_tiger_enabled', 'true', '龙虎榜数据采集开关（默认开启，机构席位短期动向信号）', 'market'),
+    ('market.dragon_tiger_cache_ttl', '3600', '龙虎榜数据缓存TTL秒数（默认1小时）', 'market'),
+
+    # ── P5-19 评估反哺专家权重（非 LLM 相关，默认开启） ──
+    # 评估低分专家累计 N 次后自动降权，连续高分后恢复（带手动重置）
+    ('eval.weight_feedback_enabled', 'true', 'P5-19 评估反哺专家权重总开关：低分累计降权，高分恢复（默认开启）', 'eval'),
+    ('eval.low_score_threshold', '60', '低分阈值：评估分低于此值时累计低分次数（默认60）', 'eval'),
+    ('eval.demotion_threshold', '3', '降权阈值次数：累计到此值触发权重降级（默认3）', 'eval'),
+    ('eval.demotion_factor', '0.7', '每次降权乘数：weight_multiplier *= 此值（默认0.7）', 'eval'),
+    ('eval.min_weight', '0.3', '最低权重：低于此值不再降权，保留兜底能力（默认0.3）', 'eval'),
+    ('eval.recovery_high_score', '80', '恢复阈值：评估分高于此值计为高分，累计恢复（默认80）', 'eval'),
+    ('eval.recovery_consecutive_count', '2', '恢复所需连续高分次数（默认2）', 'eval'),
+    ('eval.recovery_factor', '1.3', '每次恢复乘数：weight_multiplier *= 此值（默认1.3，上限1.0）', 'eval'),
 ]
 
 

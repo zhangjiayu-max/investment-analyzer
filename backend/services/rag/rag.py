@@ -12,6 +12,7 @@ from db.config import get_config_int, get_config_float, get_config
 - 批量索引
 """
 
+import concurrent.futures
 import json
 import logging
 import os
@@ -20,6 +21,7 @@ import sqlite3
 from pathlib import Path
 
 from db._conn import DB_PATH, _get_conn as _get_db_conn
+from db.config import get_config_int, get_config_float, get_config, get_config_bool
 from services.rag_enhanced import expand_query, lightweight_rerank, get_rrf_params
 
 logger = logging.getLogger(__name__)
@@ -116,9 +118,9 @@ def _invalidate_rag_config_cache():
     global _rag_config_cache_ts
     _rag_config_cache_ts = 0
 
-# Reranker 配置：默认关闭（轻量级重排序已够用，reranker 增加 500ms+ 延迟）
-# 设置环境变量 RERANK_ENABLED=true 可开启
-RERANK_ENABLED = os.getenv("RERANK_ENABLED", "false").lower() == "true"
+# P3-12: Reranker 默认开启 — 主开关由 rag.reranker_enabled 配置控制（默认 true）
+# 环境变量 RERANK_ENABLED 作为兼容性覆盖（设为 false 可强制关闭）
+RERANK_ENABLED = os.getenv("RERANK_ENABLED", "true").lower() == "true"
 
 # Reranker（延迟加载，首次使用时初始化）
 _reranker = None
@@ -139,9 +141,25 @@ def _get_reranker():
     return _reranker
 
 
+def _cross_encoder_predict(reranker, query: str, results: list[dict]) -> list[float]:
+    """调用 CrossEncoder 计算相关性分数。
+
+    单独封装以便通过 ThreadPoolExecutor 做超时控制（predict 为 CPU 密集型，
+    可能耗时 500ms~数秒）。
+    """
+    # 构建 query-document 对（扩展到 1024 字符，保留更多上下文）
+    pairs = [(query, r.get("body", "")[:1024]) for r in results]
+    scores = reranker.predict(pairs)
+    return [float(s) for s in scores]
+
+
 def rerank_results(query: str, results: list[dict], top_k: int = 5,
                    user_id: str = None) -> list[dict]:
     """对检索结果进行重排序（cross-encoder 相关性 + 用户画像个性化加权）。
+
+    P3-12: 默认开启，增加超时保护（rag.reranker_timeout_ms，默认 800ms）和
+    文档数限制（rag.reranker_max_docs，默认 20）。超时或失败时降级到
+    lightweight_rerank，不影响主流程。
 
     Args:
         query: 用户查询
@@ -155,6 +173,11 @@ def rerank_results(query: str, results: list[dict], top_k: int = 5,
     if not results or len(results) <= 1:
         return results
 
+    # P3-12: 限制重排序文档数，避免大量文档导致延迟
+    max_docs = get_config_int("rag.reranker_max_docs", 20)
+    if len(results) > max_docs:
+        results = results[:max_docs]
+
     reranker = _get_reranker()
     if not reranker:
         # 无 reranker 时仍可做画像加权
@@ -163,28 +186,36 @@ def rerank_results(query: str, results: list[dict], top_k: int = 5,
             results.sort(key=lambda x: x.get("personal_boost", 0), reverse=True)
         return results[:top_k]
 
+    # P3-12: 超时保护 — predict 在子线程执行，超时降级到轻量重排序
+    timeout_ms = get_config_int("rag.reranker_timeout_ms", 800)
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
     try:
-        # 构建 query-document 对（扩展到 1024 字符，保留更多上下文）
-        pairs = [(query, r.get("body", "")[:1024]) for r in results]
-
-        # 计算相关性分数
-        scores = reranker.predict(pairs)
+        future = pool.submit(_cross_encoder_predict, reranker, query, results)
+        scores = future.result(timeout=timeout_ms / 1000)
 
         # 将分数添加到结果中
         for i, score in enumerate(scores):
-            results[i]["rerank_score"] = float(score)
+            results[i]["rerank_score"] = score
 
         # 个性化加权（在 cross-encoder 分数基础上叠加）
         if user_id:
             _apply_personalization_boost(results, user_id)
 
         # 按总分排序（rerank_score + personal_boost）
-        results.sort(key=lambda x: x.get("rerank_score", 0) + x.get("personal_boost", 0), reverse=True)
-
+        results.sort(
+            key=lambda x: x.get("rerank_score", 0) + x.get("personal_boost", 0),
+            reverse=True,
+        )
         return results[:top_k]
+    except concurrent.futures.TimeoutError:
+        logger.warning(f"重排序超时（{timeout_ms}ms），降级到轻量重排序")
+        return lightweight_rerank(query, results, top_k=top_k)
     except Exception as e:
-        logger.error(f"Rerank 失败: {e}")
-        return results[:top_k]
+        logger.warning(f"重排序失败，降级到轻量重排序: {e}")
+        return lightweight_rerank(query, results, top_k=top_k)
+    finally:
+        # wait=False 避免超时后阻塞主流程等待孤儿线程
+        pool.shutdown(wait=False)
 
 
 # ── 品种关键词映射（用于个性化加权）──
@@ -2599,12 +2630,13 @@ def build_rag_context_with_details(query: str, content_types: list[str] = None, 
             r["_score"] = r.get("_score", 0) + r.get("personal_boost", 0)
         all_results.sort(key=lambda x: x.get("_score", 0), reverse=True)
 
-    # Reranker 重排序（可选，进一步提升精度，但增加 3-15s 延迟）
-    # 默认关闭：RRF + 标题加权 + 时效性加权已能提供合理排序
-    # 设置环境变量 RERANK_ENABLED=true 可开启
-    # 或通过 rag.auto_rerank_topn 开关（默认关闭）仅对 top-N 结果启用轻量 rerank
+    # P3-12: Reranker 默认开启（CrossEncoder 重排序 + 超时降级保护）
+    # rag.reranker_enabled=true（默认）：CrossEncoder 重排序，超时/失败降级到 lightweight_rerank
+    # 环境变量 RERANK_ENABLED=false 可兼容性强制关闭
+    # rag.auto_rerank_topn=true：轻量 rerank（仅 top-5），reranker 关闭时的备选方案
+    _reranker_enabled = get_config_bool("rag.reranker_enabled", True) and RERANK_ENABLED
     _auto_rerank = get_config("rag.auto_rerank_topn", "false") == "true"
-    if RERANK_ENABLED and len(all_results) > 3:
+    if _reranker_enabled and len(all_results) > 3:
         all_results = rerank_results(query, all_results, top_k=limit, user_id="default")
         logger.info(f"Rerank 后: {len(all_results)}条")
     elif _auto_rerank and len(all_results) > 3:

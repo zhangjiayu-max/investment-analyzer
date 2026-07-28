@@ -5,8 +5,10 @@
  * - 标准协议解包（{code, message, data} → data）
  * - 统一错误处理（401/403/404/422/500）
  * - 自动注入 token（如果存在）
+ * - P4-14：API 错误自动上报到 /api/monitor/errors
  */
 import api from './http'
+import { reportManualError } from '../services/errorMonitor'
 
 // ── 响应拦截器：标准协议解包 + 统一错误处理 ──
 api.interceptors.response.use(
@@ -28,6 +30,18 @@ api.interceptors.response.use(
     return response
   },
   (error) => {
+    // P4-14：上报 API 错误（网络错误 + HTTP 错误统一上报，失败不影响后续处理）
+    try {
+      reportManualError('api_error', `${error.config?.method?.toUpperCase()} ${error.config?.url} ${error.response?.status}`, {
+        url: error.config?.url,
+        method: error.config?.method,
+        status: error.response?.status,
+        responseData: JSON.stringify(error.response?.data).slice(0, 500),
+      })
+    } catch (e) {
+      // 上报本身出错绝不影响业务错误处理
+    }
+
     // 网络错误
     if (!error.response) {
       const msg = error.message || '网络连接失败，请检查网络'

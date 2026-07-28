@@ -33,6 +33,50 @@ RISK_FREE_RATE_ANNUAL = 0.03
 # 年化交易日数
 TRADING_DAYS_PER_YEAR = 252
 
+# 默认交易成本参数（A 股）
+DEFAULT_COMMISSION_RATE = 0.00025   # 佣金 万2.5
+DEFAULT_STAMP_DUTY_RATE = 0.0005    # 印花税 万5（仅卖出）
+DEFAULT_TRANSFER_FEE_RATE = 0.00001  # 过户费 万0.1（双向）
+DEFAULT_SLIPPAGE_RATE = 0.0005      # 滑点 万5（双向）
+DEFAULT_MIN_COMMISSION = 5.0        # 最低佣金 5 元
+
+
+def _calc_trade_cost(amount: float, trade_type: str, params: dict | None = None) -> float:
+    """计算单笔交易成本（佣金+印花税+过户费+滑点）。
+
+    Args:
+        amount: 交易金额（元）
+        trade_type: "buy" / "sell" / "rebalance"
+        params: 策略参数，可覆盖默认成本率：
+            cost_enabled（默认 True）、commission_rate、stamp_duty_rate、
+            transfer_fee_rate、slippage_rate、min_commission
+
+    Returns:
+        交易成本金额（元）。cost_enabled=False 时返回 0。
+    """
+    params = params or {}
+    if not params.get("cost_enabled", True):
+        return 0.0
+    if amount <= 0:
+        return 0.0
+
+    commission_rate = float(params.get("commission_rate", DEFAULT_COMMISSION_RATE))
+    stamp_duty_rate = float(params.get("stamp_duty_rate", DEFAULT_STAMP_DUTY_RATE))
+    transfer_fee_rate = float(params.get("transfer_fee_rate", DEFAULT_TRANSFER_FEE_RATE))
+    slippage_rate = float(params.get("slippage_rate", DEFAULT_SLIPPAGE_RATE))
+    min_commission = float(params.get("min_commission", DEFAULT_MIN_COMMISSION))
+
+    # 佣金（最低 5 元）
+    commission = max(amount * commission_rate, min_commission)
+    # 印花税（仅卖出）
+    stamp_duty = amount * stamp_duty_rate if trade_type == "sell" else 0.0
+    # 过户费（双向）
+    transfer_fee = amount * transfer_fee_rate
+    # 滑点（双向，按金额估算）
+    slippage = amount * slippage_rate
+
+    return round(commission + stamp_duty + transfer_fee + slippage, 2)
+
 
 # ══════════════════════════════════════════════════════
 # 策略基类
@@ -68,7 +112,8 @@ class Strategy:
         if not nav_series:
             return _empty_result(initial_cash)
         signals = self.generate_signals(nav_series)
-        return _execute_signals(signals, nav_series, initial_cash, self.name)
+        return _execute_signals(signals, nav_series, initial_cash, self.name,
+                                cost_params=self.params)
 
 
 # ══════════════════════════════════════════════════════
@@ -89,6 +134,7 @@ def _empty_result(initial_cash: float) -> dict:
         "nav_curve": [],
         "trades": 0,
         "days": 0,
+        "total_cost": 0.0,
     }
 
 
@@ -138,11 +184,13 @@ def _rsi_value(avg_gain: float, avg_loss: float) -> float:
 
 
 def _execute_signals(signals: list[dict], nav_series: list[dict],
-                     initial_cash: float, strategy_name: str) -> dict:
+                     initial_cash: float, strategy_name: str,
+                     cost_params: dict | None = None) -> dict:
     """通用信号执行器：买入从现金扣，卖出回现金。
 
     适用于资金已在initial_cash中、买卖均在组合内部完成的策略（网格等）。
     total_invested = initial_cash（无外部资金注入）。
+    P0-5: 扣除交易成本（佣金/印花税/过户费/滑点）。
     """
     if not nav_series:
         return _empty_result(initial_cash)
@@ -150,6 +198,7 @@ def _execute_signals(signals: list[dict], nav_series: list[dict],
     cash = initial_cash
     shares = 0.0
     total_invested = initial_cash
+    total_cost = 0.0
     nav_curve: list[dict] = []
     trades = 0
 
@@ -168,19 +217,29 @@ def _execute_signals(signals: list[dict], nav_series: list[dict],
             sig_type = sig.get("type")
             amount = float(sig.get("amount", 0))
             if sig_type == "buy" and amount > 0 and cash >= amount:
-                shares += amount / nav
+                # P0-5: 买入成本从投入金额中扣除
+                cost = _calc_trade_cost(amount, "buy", cost_params)
+                actual_invest = amount - cost
+                shares += actual_invest / nav
                 cash -= amount
+                total_cost += cost
                 trades += 1
             elif sig_type == "sell" and amount > 0 and shares > 0:
                 sell_shares = min(shares, amount / nav)
-                cash += sell_shares * nav
+                proceeds = sell_shares * nav
+                # P0-5: 卖出成本从所得中扣除
+                cost = _calc_trade_cost(proceeds, "sell", cost_params)
+                cash += proceeds - cost
+                total_cost += cost
                 shares -= sell_shares
                 trades += 1
 
         total_value = cash + shares * nav
         nav_curve.append({"date": d, "value": round(total_value, 2)})
 
-    return _build_result(strategy_name, nav_series, nav_curve, total_invested, trades)
+    result = _build_result(strategy_name, nav_series, nav_curve, total_invested, trades)
+    result["total_cost"] = round(total_cost, 2)
+    return result
 
 
 def _build_result(strategy_name: str, nav_series: list[dict],
@@ -211,6 +270,7 @@ def _build_result(strategy_name: str, nav_series: list[dict],
         "nav_curve": nav_curve,
         "trades": trades,
         "days": days,
+        "total_cost": 0.0,
     }
 
 
@@ -380,6 +440,7 @@ class DCAStrategy(Strategy):
         """DCA 模式：初始资金建仓 + 定期新资金注入买入。
 
         total_invested = initial_cash + sum(每次定投金额)。
+        P0-5: 扣除交易成本。
         """
         if not nav_series:
             return _empty_result(initial_cash)
@@ -390,8 +451,9 @@ class DCAStrategy(Strategy):
 
         signals = self.generate_signals(nav_series)
 
-        # 初始资金在首日全部建仓（作为底仓）
-        shares = initial_cash / first_nav
+        # P0-5: 初始资金建仓扣成本
+        total_cost = _calc_trade_cost(initial_cash, "buy", self.params)
+        shares = (initial_cash - total_cost) / first_nav
         total_invested = initial_cash
         trades = 1
         nav_curve: list[dict] = []
@@ -413,12 +475,17 @@ class DCAStrategy(Strategy):
                     amount = float(sig.get("amount", 0))
                     if amount > 0:
                         total_invested += amount
-                        shares += amount / nav
+                        # P0-5: 定投扣成本
+                        cost = _calc_trade_cost(amount, "buy", self.params)
+                        shares += (amount - cost) / nav
+                        total_cost += cost
                         trades += 1
 
             nav_curve.append({"date": d, "value": round(shares * nav, 2)})
 
-        return _build_result(self.name, nav_series, nav_curve, total_invested, trades)
+        result = _build_result(self.name, nav_series, nav_curve, total_invested, trades)
+        result["total_cost"] = round(total_cost, 2)
+        return result
 
 
 # ══════════════════════════════════════════════════════
@@ -589,7 +656,9 @@ class TwoEightStrategy(Strategy):
         # 初始按目标比例分配
         equity_value = initial_cash * equity_ratio
         bond_value = initial_cash * (1 - equity_ratio)
-        shares = equity_value / first_nav
+        # P0-5: 初始建仓扣成本
+        total_cost = _calc_trade_cost(equity_value, "buy", self.params)
+        shares = (equity_value - total_cost) / first_nav
         # P3 Step4：真实债基模式下记录债基份额
         bond_shares = 0.0
         if use_real_bond:
@@ -642,17 +711,22 @@ class TwoEightStrategy(Strategy):
                     diff = target_equity - equity_value
                     if abs(diff) > 1:
                         if diff > 0:
-                            # 债转股
-                            shares += diff / nav
+                            # 债转股（买入股票）
+                            cost = _calc_trade_cost(diff, "buy", self.params)
+                            shares += (diff - cost) / nav
                             bond_value -= diff
+                            total_cost += cost
                             if use_real_bond:
                                 bond_nav_today = bond_nav_by_date.get(d, 0)
                                 if bond_nav_today > 0:
                                     bond_shares = bond_value / bond_nav_today
                         else:
-                            # 股转债
-                            shares -= (-diff) / nav
-                            bond_value += (-diff)
+                            # 股转债（卖出股票）
+                            sell_amount = -diff
+                            cost = _calc_trade_cost(sell_amount, "sell", self.params)
+                            shares -= sell_amount / nav
+                            bond_value += (sell_amount - cost)
+                            total_cost += cost
                             if use_real_bond:
                                 bond_nav_today = bond_nav_by_date.get(d, 0)
                                 if bond_nav_today > 0:
@@ -664,7 +738,9 @@ class TwoEightStrategy(Strategy):
 
             nav_curve.append({"date": d, "value": round(equity_value + bond_value, 2)})
 
-        return _build_result(self.name, nav_series, nav_curve, total_invested, trades)
+        result = _build_result(self.name, nav_series, nav_curve, total_invested, trades)
+        result["total_cost"] = round(total_cost, 2)
+        return result
 
 
 # ══════════════════════════════════════════════════════
@@ -725,7 +801,10 @@ class CoreSatelliteStrategy(Strategy):
         return signals
 
     def run(self, nav_series: list[dict], initial_cash: float) -> dict:
-        """重写 run：核心仓位买入持有，卫星仓位按信号调仓。"""
+        """重写 run：核心仓位买入持有，卫星仓位按信号调仓。
+
+        P0-5: 扣除交易成本。
+        """
         if not nav_series:
             return _empty_result(initial_cash)
 
@@ -734,8 +813,10 @@ class CoreSatelliteStrategy(Strategy):
         if first_nav <= 0:
             return _empty_result(initial_cash)
 
-        # 核心仓位买入持有
-        core_shares = (initial_cash * core_ratio) / first_nav
+        # P0-5: 核心仓位建仓扣成本
+        core_invest = initial_cash * core_ratio
+        total_cost = _calc_trade_cost(core_invest, "buy", self.params)
+        core_shares = (core_invest - total_cost) / first_nav
         # 卫星仓位初始为现金
         sat_cash = initial_cash * (1 - core_ratio)
         sat_shares = 0.0
@@ -759,19 +840,28 @@ class CoreSatelliteStrategy(Strategy):
                 sig_type = sig.get("type")
                 amount = float(sig.get("amount", 0))
                 if sig_type == "buy" and sat_cash >= amount:
-                    sat_shares += amount / nav
+                    # P0-5: 卫星买入扣成本
+                    cost = _calc_trade_cost(amount, "buy", self.params)
+                    sat_shares += (amount - cost) / nav
                     sat_cash -= amount
+                    total_cost += cost
                     trades += 1
                 elif sig_type == "sell" and sat_shares > 0:
                     sell_shares = min(sat_shares, amount / nav)
-                    sat_cash += sell_shares * nav
+                    proceeds = sell_shares * nav
+                    # P0-5: 卫星卖出扣成本
+                    cost = _calc_trade_cost(proceeds, "sell", self.params)
+                    sat_cash += proceeds - cost
+                    total_cost += cost
                     sat_shares -= sell_shares
                     trades += 1
 
             total_value = core_shares * nav + sat_cash + sat_shares * nav
             nav_curve.append({"date": d, "value": round(total_value, 2)})
 
-        return _build_result(self.name, nav_series, nav_curve, total_invested, trades)
+        result = _build_result(self.name, nav_series, nav_curve, total_invested, trades)
+        result["total_cost"] = round(total_cost, 2)
+        return result
 
 
 # ══════════════════════════════════════════════════════

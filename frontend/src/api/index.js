@@ -1243,6 +1243,28 @@ export function getDecisionTimeline(decisionId) {
   return api.get(`/decisions/${decisionId}/timeline`)
 }
 
+// ── P0-1 决策执行回写闭环 ──────────────────────────────────────
+
+/** 记录决策执行结果（执行价/执行时间/执行金额/份额） */
+export function logDecisionExecution(decisionId, data) {
+  return api.post(`/decisions/${decisionId}/execution`, data)
+}
+
+/** 查看决策的执行记录列表 */
+export function listDecisionExecutions(decisionId) {
+  return api.get(`/decisions/${decisionId}/executions`)
+}
+
+/** 更新执行盈亏（复盘时回填实际盈亏/归因） */
+export function updateExecutionPnl(logId, data) {
+  return api.put(`/decisions/execution/${logId}/pnl`, data)
+}
+
+/** 获取决策执行准确率统计（按 action_type 分组，含胜率/平均盈亏） */
+export function getExecutionStats() {
+  return api.get('/decisions/execution/stats')
+}
+
 /** 获取质量评分概览 */
 export function getQualitySummary(days = 30) {
   return api.get('/eval/quality-summary', { params: { days } })
@@ -2860,8 +2882,8 @@ export function getFinanceGoals() {
 
 // ── 通知 API（/api/notifications/*）─────────────────────────────────────
 
-export function pushNotification(title, message, type = 'info', data = {}) {
-  return api.post('/notifications/push', { title, message, type, data })
+export function pushNotification(title, message, type = 'system', data = {}, category = null) {
+  return api.post('/notifications/push', { title, message, type, data, category })
 }
 
 export function getNotificationSubscribers() {

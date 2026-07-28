@@ -170,6 +170,53 @@ def _extract_keyword(fund_name: str) -> str:
     return kw.strip() or fund_name
 
 
+# P1-7: SSE 通知携带的新闻摘要最大字符数
+NEWS_SUMMARY_MAX = 200
+
+
+def build_news_notification_data(fund_code: str, fund_name: str = "",
+                                 alert_type: str = "info",
+                                 news_list: list[dict] = None,
+                                 extra: dict = None) -> dict:
+    """构造携带新闻摘要的通知 data 字段（P1-7）。
+
+    供 SSE 推送调用：前端收到后可直接展示摘要，无需二次拉取。
+
+    Args:
+        fund_code: 基金代码
+        fund_name: 基金名称
+        alert_type: danger|warning|info
+        news_list: get_alert_news 返回的新闻列表，取首条摘要
+        extra: 额外 data 字段（如 metric/snapshot/action_url）
+
+    Returns:
+        data dict，包含 news_summary（截断到 200 字）、news_title、news_url、
+        alert_type、fund_code、fund_name、action_url
+    """
+    data = {
+        "fund_code": fund_code,
+        "fund_name": fund_name,
+        "alert_type": alert_type,
+        "action_url": "watchlist",
+    }
+    if extra:
+        data.update(extra)
+
+    news_list = news_list or []
+    if news_list:
+        first = news_list[0] if isinstance(news_list[0], dict) else {}
+        summary = (first.get("news_summary") or first.get("news_title") or "").strip()
+        if len(summary) > NEWS_SUMMARY_MAX:
+            summary = summary[:NEWS_SUMMARY_MAX] + "…"
+        if summary:
+            data["news_summary"] = summary
+        if first.get("news_title"):
+            data["news_title"] = first["news_title"][:120]
+        if first.get("news_url"):
+            data["news_url"] = first["news_url"]
+    return data
+
+
 def enrich_alerts_with_news(alerts: list[dict]) -> list[dict]:
     """批量给预警列表附加 related_news 字段。
 

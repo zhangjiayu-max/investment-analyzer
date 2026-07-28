@@ -19,8 +19,19 @@ const isOpen = computed({
   set: (val) => emit('update:modelValue', val)
 })
 
+// 兼容 ISO 字符串与旧数字时间戳（秒/毫秒）
+function parseTs(ts) {
+  if (!ts) return 0
+  if (typeof ts === 'number') return ts < 1e12 ? ts * 1000 : ts
+  if (typeof ts === 'string') {
+    const d = new Date(ts)
+    return isNaN(d.getTime()) ? 0 : d.getTime()
+  }
+  return 0
+}
+
 const sortedNotifications = computed(() => {
-  return [...notifications.value].sort((a, b) => b.timestamp - a.timestamp)
+  return [...notifications.value].sort((a, b) => parseTs(b.timestamp) - parseTs(a.timestamp))
 })
 
 function connectNotificationStream() {
@@ -65,7 +76,8 @@ function markAllAsRead() {
   unreadCount.value = 0
 }
 
-function getNotificationIcon(type) {
+function getNotificationIcon(n) {
+  const cat = n.category || n.type
   const icons = {
     info: 'ℹ️',
     warning: '⚠️',
@@ -73,8 +85,32 @@ function getNotificationIcon(type) {
     success: '✅',
     valuation: '📊',
     strategy: '🎯',
+    watchlist_signal_change: '🔔',
+    alert: '🚨',
+    news: '📰',
+    decision: '🧭',
+    system: '⚙️',
   }
-  return icons[type] || '📌'
+  return icons[cat] || '📌'
+}
+
+function formatTime(ts) {
+  const ms = parseTs(ts)
+  if (!ms) return ''
+  return new Date(ms).toLocaleString()
+}
+
+function onNotificationClick(n) {
+  markAsRead(n)
+  // P1-7: 携带 action_url 时上抛动作，由父组件决定跳转
+  if (n.data?.action_url) {
+    emit('action', n.data.action_url)
+  }
+}
+
+function snapshotEntries(snapshot) {
+  if (!snapshot || typeof snapshot !== 'object') return []
+  return Object.entries(snapshot).slice(0, 3)
 }
 
 onMounted(() => {
@@ -116,15 +152,23 @@ onUnmounted(() => {
             v-for="(notification, index) in sortedNotifications"
             :key="index"
             :class="['notification-item', { unread: !notification.read }]"
-            @click="markAsRead(notification)"
+            @click="onNotificationClick(notification)"
           >
-            <span class="notification-icon">{{ getNotificationIcon(notification.type) }}</span>
+            <span class="notification-icon">{{ getNotificationIcon(notification) }}</span>
             <div class="notification-content">
               <div class="notification-title-text">{{ notification.title }}</div>
               <div class="notification-message">{{ notification.message }}</div>
+              <div v-if="notification.data?.news_summary" class="notification-news">📰 {{ notification.data.news_summary }}</div>
+              <div v-if="snapshotEntries(notification.data?.snapshot).length" class="notification-snapshot">
+                <span v-for="([k, v]) in snapshotEntries(notification.data.snapshot)" :key="k" class="snapshot-item">
+                  <span class="snapshot-key">{{ k }}</span>: {{ v }}
+                </span>
+              </div>
               <div class="notification-meta">
-                <span>{{ new Date(notification.timestamp * 1000).toLocaleString() }}</span>
-                <span v-if="notification.type" :class="['type-tag', `type-${notification.type}`]">{{ notification.type }}</span>
+                <span>{{ formatTime(notification.timestamp) }}</span>
+                <span v-if="notification.category || notification.type" :class="['type-tag', `type-${notification.category || notification.type}`]">{{ notification.category || notification.type }}</span>
+                <span v-if="notification.data?.fund_name" class="fund-name">· {{ notification.data.fund_name }}</span>
+                <span v-if="notification.data?.action_url" class="action-hint">查看 →</span>
               </div>
             </div>
           </div>
@@ -287,6 +331,56 @@ onUnmounted(() => {
 .type-success { background: var(--color-profit-bg); color: var(--color-profit); }
 .type-valuation { background: var(--color-gold-bg); color: var(--color-gold); }
 .type-strategy { background: var(--color-primary-bg); color: var(--color-primary); }
+.type-watchlist_signal_change { background: var(--color-gold-bg); color: var(--color-gold); }
+.type-alert { background: var(--color-loss-bg); color: var(--color-loss); }
+.type-news { background: var(--color-primary-bg); color: var(--color-primary); }
+.type-decision { background: var(--color-info-bg); color: var(--color-info); }
+.type-system { background: var(--color-bg-hover, rgba(255,255,255,0.08)); color: var(--color-text-muted); }
+
+.notification-news {
+  font-size: 0.75rem;
+  color: var(--color-text-secondary);
+  background: var(--color-bg-hover, rgba(255,255,255,0.04));
+  border-left: 2px solid var(--color-primary);
+  padding: 0.3rem 0.5rem;
+  border-radius: var(--radius-sm, 4px);
+  margin-bottom: 0.3rem;
+  line-height: 1.5;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.notification-snapshot {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  margin-bottom: 0.3rem;
+}
+
+.snapshot-item {
+  font-size: 0.7rem;
+  padding: 0.1rem 0.4rem;
+  border-radius: 4px;
+  background: var(--color-bg-hover, rgba(255,255,255,0.05));
+  color: var(--color-text-secondary);
+}
+
+.snapshot-key {
+  color: var(--color-text-tertiary);
+}
+
+.fund-name {
+  font-style: italic;
+}
+
+.action-hint {
+  margin-left: auto;
+  color: var(--color-primary);
+  font-weight: 600;
+  font-size: 0.7rem;
+}
 
 .slide-up-enter-active,
 .slide-up-leave-active {

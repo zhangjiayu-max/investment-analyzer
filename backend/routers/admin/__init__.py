@@ -7,3 +7,4 @@ from .config import router as config_router
 from .data_health import router as data_health_router
 from .data_quality import router as data_quality_router
 from .akshare_stats import router as akshare_stats_router
+from .specialist_weights import router as specialist_weights_router

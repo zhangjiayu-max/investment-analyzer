@@ -192,6 +192,22 @@ const pieChartData = computed(() => {
     }))
 })
 
+// P4-17: 基金类型分布饼图（ECharts）
+const typeDistributionPieData = computed(() => {
+  if (!diversificationData.value?.type_distribution) return []
+  return Object.entries(diversificationData.value.type_distribution)
+    .sort((a, b) => b[1] - a[1])
+    .map(([name, value]) => ({ name, value: Number(value) || 0 }))
+})
+
+// P4-17: 指数分布饼图（ECharts）
+const indexDistributionPieData = computed(() => {
+  if (!diversificationData.value?.index_distribution) return []
+  return Object.entries(diversificationData.value.index_distribution)
+    .sort((a, b) => b[1] - a[1])
+    .map(([name, value]) => ({ name, value: Number(value) || 0 }))
+})
+
 // ── 折叠状态 ──
 const showIndexDist = ref(false)
 const showHoldingWeight = ref(true)
@@ -228,29 +244,6 @@ function pieColorAt(index) {
   return colors[index % colors.length] || 'var(--color-primary)'
 }
 
-function calcPieSlices(data, total) {
-  const slices = []
-  let cumulative = 0
-  const entries = Object.entries(data).sort((a, b) => b[1] - a[1])
-  const cx = 60, cy = 60, r = 50
-  entries.forEach(([label, val], i) => {
-    const pct = val / total
-    const angle = pct * 360
-    const startRad = (cumulative - 90) * Math.PI / 180
-    const endRad = (cumulative + angle - 90) * Math.PI / 180
-    cumulative += angle
-    const x1 = cx + r * Math.cos(startRad)
-    const y1 = cy + r * Math.sin(startRad)
-    const x2 = cx + r * Math.cos(endRad)
-    const y2 = cy + r * Math.sin(endRad)
-    const largeArc = angle > 180 ? 1 : 0
-    const path = angle >= 360
-      ? `M ${cx},${cy - r} A ${r},${r} 0 1,1 ${cx - 0.01},${cy - r} Z`
-      : `M ${cx},${cy} L ${x1},${y1} A ${r},${r} 0 ${largeArc},1 ${x2},${y2} Z`
-    slices.push({ label, value: val, pct: (pct * 100).toFixed(1), path, color: pieColorAt(i) })
-  })
-  return slices
-}
 
 // ── 排序 & 筛选 ──
 const sortKey = ref('')
@@ -3873,19 +3866,14 @@ function txDisplayAmount(tx) {
           </div>
           <div v-if="diversificationData.type_distribution" class="analysis-section">
             <h4>基金类型分布</h4>
-            <div class="pie-chart-row">
-              <svg width="120" height="120" viewBox="0 0 120 120">
-                <template v-for="s in calcPieSlices(diversificationData.type_distribution, diversificationData.total_value)" :key="s.label">
-                  <path :d="s.path" :fill="s.color" stroke="var(--color-bg-card)" stroke-width="1.5"/>
-                </template>
-              </svg>
-              <div class="pie-legend">
-                <div v-for="s in calcPieSlices(diversificationData.type_distribution, diversificationData.total_value)" :key="s.label" class="legend-item">
-                  <span class="legend-dot" :style="{background:s.color}"></span>
-                  <span class="legend-label">{{ s.label }}</span>
-                  <span class="legend-pct">{{ s.pct }}%</span>
-                </div>
-              </div>
+            <div v-if="typeDistributionPieData.length" class="echart-pie-wrap">
+              <PieChart
+                :data="typeDistributionPieData"
+                :inner-radius="45"
+                :outer-radius="75"
+                legend-position="right"
+                height="220px"
+              />
             </div>
             <div class="distribution-bars">
               <div v-for="(val, key) in diversificationData.type_distribution" :key="key" class="dist-bar-row">
@@ -3903,19 +3891,14 @@ function txDisplayAmount(tx) {
               指数分布
             </h4>
             <div v-show="showIndexDist" class="collapse-content">
-              <div class="pie-chart-row">
-                <svg width="120" height="120" viewBox="0 0 120 120">
-                  <template v-for="s in calcPieSlices(diversificationData.index_distribution, diversificationData.total_value)" :key="s.label">
-                    <path :d="s.path" :fill="s.color" stroke="var(--color-bg-card)" stroke-width="1.5" style="cursor:pointer" @click="expandedIndexDist = (expandedIndexDist === s.label ? null : s.label)"/>
-                  </template>
-                </svg>
-                <div class="pie-legend">
-                  <div v-for="s in calcPieSlices(diversificationData.index_distribution, diversificationData.total_value)" :key="s.label" class="legend-item">
-                    <span class="legend-dot" :style="{background:s.color}"></span>
-                    <span class="legend-label" style="cursor:pointer" @click="expandedIndexDist = (expandedIndexDist === s.label ? null : s.label)">{{ s.label }}</span>
-                    <span class="legend-pct">{{ s.pct }}%</span>
-                  </div>
-                </div>
+              <div v-if="indexDistributionPieData.length" class="echart-pie-wrap">
+                <PieChart
+                  :data="indexDistributionPieData"
+                  :inner-radius="45"
+                  :outer-radius="75"
+                  legend-position="right"
+                  height="220px"
+                />
               </div>
               <div class="distribution-bars">
                 <div v-for="(val, key) in diversificationData.index_distribution" :key="key" class="dist-bar-row">
@@ -8651,45 +8634,9 @@ select.input-field {
   max-width: 400px;
 }
 
-/* ── 饼图 ── */
-.pie-chart-row {
-  display: flex;
-  align-items: center;
-  gap: 0.75rem;
+/* ── 饼图（ECharts） ── */
+.echart-pie-wrap {
   margin-bottom: 0.75rem;
-}
-.pie-legend {
-  display: flex;
-  flex-direction: column;
-  gap: 0.2rem;
-  flex: 1;
-}
-.legend-item {
-  display: flex;
-  align-items: center;
-  gap: 0.35rem;
-  font-size: 0.75rem;
-  padding: 0.1rem 0;
-}
-.legend-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  flex-shrink: 0;
-}
-.legend-label {
-  color: var(--color-text-secondary);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  flex: 1;
-}
-.legend-pct {
-  margin-left: auto;
-  font-weight: 600;
-  font-size: 0.74rem;
-  font-variant-numeric: tabular-nums;
-  color: var(--color-text-primary);
 }
 
 /* ── 折叠面板 ── */

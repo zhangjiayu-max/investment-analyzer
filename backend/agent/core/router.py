@@ -126,6 +126,12 @@ _KEYWORD_ROUTES = [
     # D-5: 补仓抄底场景增强 → allocation+risk+valuation（时机+风控+估值三视角）
     (["抄底", "补仓时机", "加仓时机", "分批建仓", "左侧交易"],
      ["allocation_advisor", "risk_assessor", "valuation_expert"]),
+    # ── P2-9 新增：可转债专家 + 量化技术分析师关键词路由（priority=2，不抢占核心专家）──
+    (["可转债", "转债", "转股", "下修", "强赎", "回售", "转股溢价率", "到期收益率", "债底", "期权价值"],
+     ["convertible_bond_analyst"]),
+    (["K线", "k线", "技术分析", "技术面", "均线", "MACD", "RSI", "KDJ", "布林", "缠论",
+      "量价", "成交量", "技术指标", "支撑位", "阻力位", "突破", "回踩", "金叉", "死叉"],
+     ["quant_technical_analyst"]),
 ]
 
 _HIGH_RISK_ACTION_KEYWORDS = [
@@ -353,6 +359,9 @@ def _filter_disabled_specialists(specialists: list) -> tuple[list, list]:
     disabled_map = {
         "industry_fundamentalist": "agent.industry_fundamentalist_enabled",
         "behavioral_advisor": "agent.behavioral_advisor_enabled",
+        # P2-9：可转债/量化技术面新专家共用一个开关，默认启用，可关闭控制成本
+        "convertible_bond_analyst": "agents.new_specialists_enabled",
+        "quant_technical_analyst": "agents.new_specialists_enabled",
     }
     filtered = []
     removed = []
@@ -457,6 +466,7 @@ class SmartRouter:
                     "allocation_advisor", "valuation_expert", "market_analyst",
                     "fund_analyst", "macro_strategist",
                     "article_expert", "industry_fundamentalist", "behavioral_advisor",
+                    "convertible_bond_analyst", "quant_technical_analyst",
                 ]
                 priority = {agent_key: i for i, agent_key in enumerate(priority_order)}
             else:
@@ -628,6 +638,8 @@ class SmartRouter:
             if rule_result:
                 # 防退步：基于 eval 分数对低分专家降权
                 rule_result = self._adjust_by_eval_scores(rule_result)
+                # P5-19: 评估反哺专家权重（累计低分降权）
+                rule_result = self._apply_weight_adjustments(rule_result)
                 with self._lock:
                     self._cleanup_expired_cache(now)
                     self._cache[cache_key] = (rule_result, now)
@@ -637,6 +649,8 @@ class SmartRouter:
         declarative_result = self._declarative_fallback_route(query)
         if declarative_result:
             declarative_result = self._adjust_by_eval_scores(declarative_result)
+            # P5-19: 评估反哺专家权重（累计低分降权）
+            declarative_result = self._apply_weight_adjustments(declarative_result)
             with self._lock:
                 self._cleanup_expired_cache(now)
                 self._cache[cache_key] = (declarative_result, now)
@@ -760,5 +774,47 @@ class SmartRouter:
             # 降权专家排到末尾，但不删除（截断时自然淘汰）
             route_result["specialists"] = kept + demoted
             route_result["reason"] = route_result.get("reason", "") + f" | eval降权: {','.join(demoted)}"
+
+        return route_result
+
+    def _apply_weight_adjustments(self, route_result: dict) -> dict:
+        """P5-19: 应用专家权重调整（评估反哺）。
+
+        读取 specialist_weight_adjustments 表中的权重乘数，
+        将权重显著降低（< 0.5）的专家排到列表末尾，降低路由优先级。
+        不直接排除专家，保留兜底能力。
+
+        开关：eval.weight_feedback_enabled（默认 true）
+        """
+        if get_config("eval.weight_feedback_enabled", "true") != "true":
+            return route_result
+
+        specialists = route_result.get("specialists", [])
+        if len(specialists) <= 1:
+            return route_result  # 单专家不降权
+
+        try:
+            from db.specialist_weight import get_specialist_weight
+        except Exception as e:
+            logger.debug(f"[router] P5-19 权重模块加载失败，跳过: {e}")
+            return route_result
+
+        demoted = []
+        kept = []
+        for s in specialists:
+            try:
+                weight = get_specialist_weight(s)
+            except Exception:
+                weight = 1.0
+            if weight < 0.5:
+                demoted.append(s)
+                logger.info(f"[router] P5-19 权重降权: {s} weight={weight:.2f}")
+            else:
+                kept.append(s)
+
+        if demoted:
+            route_result["specialists"] = kept + demoted
+            route_result["reason"] = route_result.get("reason", "") + \
+                f" | P5-19权重降权: {','.join(demoted)}"
 
         return route_result

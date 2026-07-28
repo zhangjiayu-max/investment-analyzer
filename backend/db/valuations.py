@@ -761,12 +761,83 @@ def get_best_valuation(
         return None
 
 
+def save_online_valuation(index_code: str, metric_type: str, data: dict, source: str) -> None:
+    """保存在线兜底查询结果到 valuations_online 表（L2 持久化缓存）。
+
+    Args:
+        index_code: 指数代码（已 normalize）
+        metric_type: 指标类型
+        data: 在线查询返回的估值数据 dict
+        source: "akshare" / "ttfund"
+    """
+    conn = _get_conn()
+    try:
+        conn.execute("""
+            INSERT OR REPLACE INTO valuations_online
+            (index_code, metric_type, current_value, percentile, current_point,
+             index_name, snapshot_date, source, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now', 'localtime'))
+        """, (
+            index_code, metric_type,
+            data.get("current_value"),
+            data.get("percentile"),
+            data.get("current_point"),
+            data.get("index_name"),
+            data.get("snapshot_date"),
+            source,
+        ))
+        conn.commit()
+    except Exception as e:
+        logger.warning(f"保存在线估值失败: {e}")
+    finally:
+        conn.close()
+
+
+def get_online_valuation_cached(index_code: str, metric_type: str, max_days: int = 7) -> dict | None:
+    """从 valuations_online 表读取 L2 缓存（默认7天TTL）。
+
+    Args:
+        index_code: 指数代码（已 normalize）
+        metric_type: 指标类型
+        max_days: 缓存有效期天数，默认7天
+
+    Returns:
+        估值数据 dict（带 data_source/cached 字段），无缓存或过期返回 None
+    """
+    conn = _get_conn()
+    try:
+        row = conn.execute("""
+            SELECT * FROM valuations_online
+            WHERE index_code = ? AND metric_type = ?
+              AND created_at >= datetime('now', ?)
+            ORDER BY created_at DESC LIMIT 1
+        """, (index_code, metric_type, f"-{max_days} days")).fetchone()
+        if not row:
+            return None
+        row = dict(row)
+        row["data_source"] = f"online_{row.get('source', 'unknown')}"
+        row["is_expired"] = False
+        row["cached"] = True
+        if row.get("snapshot_date"):
+            try:
+                days_old = (datetime.now() - datetime.fromisoformat(row["snapshot_date"])).days
+                row["days_old"] = days_old
+            except Exception:
+                row["days_old"] = 0
+        return row
+    except Exception as e:
+        logger.warning(f"读取在线估值缓存失败: {e}")
+        return None
+    finally:
+        conn.close()
+
+
 def _online_fallback(index_code: str, metric_type: str, start_ts: datetime,
                      query_source: str, trace_id: str = None,
                      conv_id: int = None, message_id: int = None,
                      agent_name: str = None, user_query: str = None,
                      cache_hit: int = 0) -> dict | None:
-    """在线兜底：akshare → 天天基金。结果仅内存缓存，不入库。
+    """在线兜底：akshare → 天天基金。结果写入 L1 内存缓存 + L2 持久化缓存（valuations_online 表）。
 
     使用 ThreadPoolExecutor 实现真正的超时控制，避免 akshare/MCP 调用卡住主线程。
     """
@@ -790,6 +861,20 @@ def _online_fallback(index_code: str, metric_type: str, start_ts: datetime,
         else:
             del _online_cache[cache_key]
 
+    # P0-4: L2 持久化缓存（valuations_online 表，可配置 valuation.online_cache_ttl_days，默认7天）
+    online_ttl_days = get_config_int("valuation.online_cache_ttl_days", 7)
+    l2_cached = get_online_valuation_cached(index_code, metric_type, max_days=online_ttl_days)
+    if l2_cached:
+        l2_cached["source"] = l2_cached.get("source", "cached")
+        l2_cached["degraded"] = True
+        final_source = f"online_{l2_cached.get('source')}_cached"
+        _log_valuation_query(index_code, l2_cached.get("index_name"), query_source, final_source,
+                             0, 0, int((datetime.now() - start_ts).total_seconds() * 1000), trace_id, None,
+                             conv_id=conv_id, message_id=message_id, agent_name=agent_name,
+                             user_query=user_query, cache_hit=1)
+        logger.debug(f"[valuation] {index_code} 命中 L2 在线缓存 (source={l2_cached.get('source')})")
+        return l2_cached
+
     timeout_ms = get_config_int("valuation.online_fallback_timeout_ms", 5000)
     timeout_s = max(timeout_ms / 1000.0, 1.0)
 
@@ -809,6 +894,8 @@ def _online_fallback(index_code: str, metric_type: str, start_ts: datetime,
             online_data["_cached_at"] = datetime.now()
             _online_cache[cache_key] = online_data
             result = {k: v for k, v in online_data.items() if k != "_cached_at"}
+            # P0-4: 写入 L2 持久化缓存（保存失败不影响主流程）
+            save_online_valuation(index_code, metric_type, result, "akshare")
             final_source = "akshare"
             _log_valuation_query(index_code, result.get("index_name"), query_source, final_source,
                                  1, 0, int((datetime.now() - start_ts).total_seconds() * 1000), trace_id, None,
@@ -835,6 +922,8 @@ def _online_fallback(index_code: str, metric_type: str, start_ts: datetime,
             online_data["_cached_at"] = datetime.now()
             _online_cache[cache_key] = online_data
             result = {k: v for k, v in online_data.items() if k != "_cached_at"}
+            # P0-4: 写入 L2 持久化缓存（保存失败不影响主流程）
+            save_online_valuation(index_code, metric_type, result, "ttfund")
             final_source = "ttfund"
             _log_valuation_query(index_code, result.get("index_name"), query_source, final_source,
                                  1, 0, int((datetime.now() - start_ts).total_seconds() * 1000), trace_id, None,

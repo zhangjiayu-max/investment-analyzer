@@ -26,6 +26,10 @@ const categoryLabels = {
   warning: '风险提示',
   error: '错误',
   success: '成功',
+  alert: '预警',
+  news: '新闻',
+  decision: '决策',
+  system: '系统',
 }
 
 const categoryList = computed(() => {
@@ -33,8 +37,19 @@ const categoryList = computed(() => {
   return cats
 })
 
+// 兼容 ISO 字符串与旧数字时间戳（秒/毫秒）
+function parseTs(ts) {
+  if (!ts) return 0
+  if (typeof ts === 'number') return ts < 1e12 ? ts * 1000 : ts
+  if (typeof ts === 'string') {
+    const d = new Date(ts)
+    return isNaN(d.getTime()) ? 0 : d.getTime()
+  }
+  return 0
+}
+
 const filteredNotifications = computed(() => {
-  const sorted = [...notifications.value].sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0))
+  const sorted = [...notifications.value].sort((a, b) => parseTs(b.timestamp) - parseTs(a.timestamp))
   if (!filterCategory.value) return sorted
   return sorted.filter(n => (n.category || n.type) === filterCategory.value)
 })
@@ -110,13 +125,18 @@ function getIcon(n) {
     warning: '⚠️',
     error: '❌',
     success: '✅',
+    alert: '🚨',
+    news: '📰',
+    decision: '🧭',
+    system: '⚙️',
   }
   return icons[cat] || '📌'
 }
 
 function formatTime(ts) {
-  if (!ts) return ''
-  const d = new Date(ts * 1000)
+  const ms = parseTs(ts)
+  if (!ms) return ''
+  const d = new Date(ms)
   const now = new Date()
   const diff = (now - d) / 1000
   if (diff < 60) return '刚刚'
@@ -127,11 +147,22 @@ function formatTime(ts) {
 
 function onNotificationClick(n) {
   markAsRead(n)
-  // 信号变更通知点击后跳转到关注列表
+  // P1-7: 优先使用 data.action_url 跳转，回退到旧逻辑
+  const action = n.data?.action_url
+  if (action) {
+    emit('navigate', action)
+    isOpen.value = false
+    return
+  }
   if (n.category === 'watchlist_signal_change' && n.data?.fund_code) {
     emit('navigate', 'watchlist')
     isOpen.value = false
   }
+}
+
+function snapshotEntries(snapshot) {
+  if (!snapshot || typeof snapshot !== 'object') return []
+  return Object.entries(snapshot).slice(0, 4)
 }
 
 onMounted(() => {
@@ -218,10 +249,18 @@ onUnmounted(() => {
                 <div class="notif-content">
                   <div class="notif-title-text">{{ n.title }}</div>
                   <div class="notif-message">{{ n.message }}</div>
+                  <div v-if="n.data?.news_summary" class="notif-news">📰 {{ n.data.news_summary }}</div>
+                  <div v-if="snapshotEntries(n.data?.snapshot).length" class="notif-snapshot">
+                    <span v-for="([k, v]) in snapshotEntries(n.data.snapshot)" :key="k" class="snapshot-item">
+                      <span class="snapshot-key">{{ k }}</span>: <span class="snapshot-val">{{ v }}</span>
+                    </span>
+                  </div>
                   <div class="notif-meta">
                     <span class="notif-time">{{ formatTime(n.timestamp) }}</span>
                     <span v-if="n.category || n.type" class="notif-cat-tag">{{ categoryLabels[n.category || n.type] || n.category || n.type }}</span>
                     <span v-if="n.data?.fund_name" class="notif-fund">· {{ n.data.fund_name }}</span>
+                    <span v-if="n.data?.alert_type" class="notif-alert-type" :class="`at-${n.data.alert_type}`">{{ n.data.alert_type }}</span>
+                    <span v-if="n.data?.action_url" class="notif-action">查看 →</span>
                   </div>
                 </div>
                 <span v-if="!n.read" class="unread-dot"></span>
@@ -459,6 +498,75 @@ onUnmounted(() => {
 
 .notif-fund {
   font-style: italic;
+}
+
+.notif-news {
+  font-size: 0.75rem;
+  color: var(--color-text-secondary, #d1d5db);
+  background: var(--color-bg-hover, rgba(255,255,255,0.04));
+  border-left: 2px solid var(--color-primary-500, #3b82f6);
+  padding: 0.3rem 0.5rem;
+  border-radius: var(--radius-sm, 4px);
+  margin-bottom: 0.35rem;
+  line-height: 1.5;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.notif-snapshot {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin-bottom: 0.35rem;
+}
+
+.snapshot-item {
+  font-size: 0.7rem;
+  padding: 0.1rem 0.4rem;
+  border-radius: 4px;
+  background: var(--color-bg-hover, rgba(255,255,255,0.05));
+  color: var(--color-text-secondary, #d1d5db);
+}
+
+.snapshot-key {
+  color: var(--color-text-tertiary, #9ca3af);
+}
+
+.snapshot-val {
+  font-weight: 600;
+  color: var(--color-text-primary, #f3f4f6);
+}
+
+.notif-alert-type {
+  padding: 0.1rem 0.4rem;
+  border-radius: 4px;
+  font-size: 0.65rem;
+  font-weight: 600;
+  text-transform: uppercase;
+}
+
+.notif-alert-type.at-danger {
+  background: var(--color-loss-bg, rgba(239,68,68,0.15));
+  color: var(--color-loss, #ef4444);
+}
+
+.notif-alert-type.at-warning {
+  background: var(--color-gold-bg, rgba(245,158,11,0.15));
+  color: var(--color-gold, #f59e0b);
+}
+
+.notif-alert-type.at-info {
+  background: var(--color-info-bg, rgba(59,130,246,0.15));
+  color: var(--color-primary-500, #3b82f6);
+}
+
+.notif-action {
+  margin-left: auto;
+  color: var(--color-primary-500, #3b82f6);
+  font-weight: 600;
+  font-size: 0.7rem;
 }
 
 .unread-dot {

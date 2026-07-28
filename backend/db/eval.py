@@ -658,6 +658,48 @@ def create_conversation_evaluation(
     return eval_id
 
 
+def save_conversation_evaluation(result) -> int:
+    """持久化对话评估结果到 conversation_evaluations 表。
+
+    参数:
+        result: ConversationEvaluation dataclass（或含同名字段的 dict）
+    返回:
+        新建记录 id
+    """
+    # 兼容 dataclass 与 dict
+    if isinstance(result, dict):
+        _get = lambda f, d=None: result.get(f, d)
+    else:
+        _get = lambda f, d=None: getattr(result, f, d)
+
+    metadata = _get("metadata", {}) or {}
+
+    # duplicate_calls 不在 metadata 中，从 execution 维度的 metrics 提取
+    duplicate_calls = 0
+    for dim in (_get("dimensions", []) or []):
+        dim_dict = dim if isinstance(dim, dict) else getattr(dim, "__dict__", {})
+        if dim_dict.get("name") == "execution":
+            duplicate_calls = (dim_dict.get("metrics", {}) or {}).get("duplicate_calls", 0)
+            break
+
+    breakdown = _get("auto_score_breakdown", {}) or {}
+    suggestions = _get("suggestions", []) or []
+
+    return create_conversation_evaluation(
+        conversation_id=_get("conversation_id"),
+        message_id=_get("message_id"),
+        auto_score=_get("auto_score"),
+        auto_score_breakdown=json.dumps(breakdown, ensure_ascii=False),
+        complexity=metadata.get("complexity", "medium"),
+        specialist_count=metadata.get("specialist_count", 0),
+        duration_ms=metadata.get("duration_ms", 0),
+        has_cross_review=metadata.get("has_cross_review", False),
+        has_arbitration=metadata.get("has_arbitration", False),
+        duplicate_calls=duplicate_calls,
+        suggestions=json.dumps(suggestions, ensure_ascii=False),
+    )
+
+
 def update_conversation_evaluation_user_score(
     eval_id: int,
     user_score: float,

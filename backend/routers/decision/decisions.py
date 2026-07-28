@@ -10,18 +10,23 @@ from db import (
     create_decision_from_candidate,
     create_decision,
     create_decision_action,
+    create_execution_log,
     create_transaction_draft_from_decision,
     defer_recommendation_candidate,
     expire_recommendation_candidates,
     get_decision_stats,
     get_recommendation_candidate,
     get_decision,
+    get_execution_accuracy_stats,
+    get_execution_log,
     get_messages,
+    list_execution_logs,
     list_recommendation_candidates,
     list_due_decision_reviews,
     list_decisions,
     list_today_decisions,
     record_decision_review,
+    update_execution_pnl,
     update_recommendation_candidate_status,
     update_decision_action_status,
     update_decision_status,
@@ -134,6 +139,77 @@ async def get_execution_status(user_id: str = "default"):
         "matches": matches,
         "total_pending": len(matches),
     }
+
+
+# ── P0-1 决策执行回写闭环 ──────────────────────────────────────
+# 注意：固定路径（execution/stats、execution/{log_id}/pnl）必须定义在
+# /api/decisions/{decision_id} 之前，否则 execution 会被当作 decision_id。
+
+class ExecutionLogRequest(BaseModel):
+    action_type: str = "execute"  # execute / skip / partial
+    executed_price: float | None = None
+    executed_amount: float | None = None
+    executed_shares: float | None = None
+    executed_at: str
+    notes: str = ""
+
+
+class ExecutionPnlRequest(BaseModel):
+    actual_pnl: float
+    pnl_percentage: float
+    holding_period_days: int
+    attribution: str = ""
+
+
+@router.get("/api/decisions/execution/stats")
+async def get_execution_stats_api():
+    """获取决策执行准确率统计（按 action_type 分组，含胜率/平均盈亏）。"""
+    return get_execution_accuracy_stats()
+
+
+@router.put("/api/decisions/execution/{log_id}/pnl")
+async def update_execution_pnl_api(log_id: int, req: ExecutionPnlRequest):
+    """更新执行盈亏（复盘时回填实际盈亏/归因）。"""
+    existing = get_execution_log(log_id)
+    if not existing:
+        raise HTTPException(404, "执行记录不存在")
+    ok = update_execution_pnl(
+        log_id,
+        actual_pnl=req.actual_pnl,
+        pnl_percentage=req.pnl_percentage,
+        holding_period_days=req.holding_period_days,
+        attribution=req.attribution or None,
+    )
+    if not ok:
+        raise HTTPException(400, "盈亏更新失败")
+    return {"ok": True, "item": get_execution_log(log_id)}
+
+
+@router.post("/api/decisions/{decision_id}/execution")
+async def log_decision_execution_api(decision_id: int, req: ExecutionLogRequest):
+    """记录决策执行结果（执行价/执行时间/执行金额/份额）。"""
+    decision = get_decision(decision_id)
+    if not decision:
+        raise HTTPException(404, "决策不存在")
+    log_id = create_execution_log(
+        decision_id=decision_id,
+        action_type=req.action_type,
+        executed_at=req.executed_at,
+        executed_price=req.executed_price,
+        executed_amount=req.executed_amount,
+        executed_shares=req.executed_shares,
+        notes=req.notes or None,
+    )
+    return {"ok": True, "id": log_id, "item": get_execution_log(log_id)}
+
+
+@router.get("/api/decisions/{decision_id}/executions")
+async def list_decision_executions_api(decision_id: int):
+    """查看决策的执行记录列表。"""
+    decision = get_decision(decision_id)
+    if not decision:
+        raise HTTPException(404, "决策不存在")
+    return {"items": list_execution_logs(decision_id=decision_id)}
 
 
 @router.get("/api/decisions")

@@ -73,6 +73,14 @@ async def process_conversation_evaluation(conversation_id: int, evaluation: dict
     except Exception as e:
         logger.error(f"分析专家表现失败: {e}")
 
+    # 6. P5-19: 评估反哺专家权重（低分累计降权 / 高分恢复）
+    try:
+        weight_results = _adjust_specialist_weights(conversation_id, auto_score)
+        if weight_results:
+            results["weight_adjustments"] = weight_results
+    except Exception as e:
+        logger.error(f"P5-19 权重反哺失败: {e}")
+
     logger.info(
         f"对话 {conversation_id} 进化处理完成: "
         f"分数={auto_score:.0f}, "
@@ -83,6 +91,60 @@ async def process_conversation_evaluation(conversation_id: int, evaluation: dict
     )
 
     return results
+
+
+def _adjust_specialist_weights(conversation_id: int, auto_score: float) -> dict:
+    """P5-19: 评估反哺专家权重 — 低分累计降权，高分恢复。
+
+    从 agent_runs 提取本对话涉及的专家 key，按评估分数调用降权/恢复。
+    """
+    from db.agents import get_agent_runs
+    from db.config import get_config_bool, get_config_float
+    from db.specialist_weight import (
+        adjust_weight_on_low_score,
+        recover_weight_on_high_score,
+    )
+
+    if not get_config_bool("eval.weight_feedback_enabled", True):
+        return {}
+
+    runs = get_agent_runs(conversation_id)
+    if not runs:
+        return {}
+
+    # 去重提取 agent_key
+    agent_keys = set()
+    for run in runs:
+        key = run.get("agent_key", "")
+        if key:
+            agent_keys.add(key)
+
+    if not agent_keys:
+        return {}
+
+    low_threshold = get_config_float("eval.low_score_threshold", LOW_SCORE_THRESHOLD)
+    recovery_threshold = get_config_float("eval.recovery_high_score", 80.0)
+
+    demoted = []
+    recovered = []
+
+    if auto_score < low_threshold:
+        for key in agent_keys:
+            adjust_weight_on_low_score(key, auto_score)
+        demoted = list(agent_keys)
+    elif auto_score >= recovery_threshold:
+        for key in agent_keys:
+            recover_weight_on_high_score(key, auto_score)
+        recovered = list(agent_keys)
+
+    if demoted or recovered:
+        logger.info(
+            f"[P5-19] 对话 {conversation_id} 权重反哺: "
+            f"score={auto_score:.0f}, "
+            f"低分累计={len(demoted)}, 高分恢复={len(recovered)}"
+        )
+
+    return {"demoted": demoted, "recovered": recovered}
 
 
 async def _trigger_feedback_learning(conversation_id: int, evaluation: dict):
