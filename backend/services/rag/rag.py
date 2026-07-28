@@ -128,16 +128,37 @@ _reranker_model_name = "BAAI/bge-reranker-base"
 
 
 def _get_reranker():
-    """获取 Reranker 模型（延迟加载）。"""
+    """获取 Reranker 模型（延迟加载）。
+
+    网络加固与 _ensure_embed_model 对齐：
+    - 优先使用本地缓存（local_files_only=True）
+    - 失败时降级到镜像下载，绝不走 huggingface.co 直连（国内被墙）
+    - 案例：conv 190 因 HF HEAD 校验超时 50s × 重试 5 次卡死 4+ 分钟
+    """
     global _reranker
     if _reranker is None:
+        # 与 _ensure_embed_model 一致的环境变量加固
+        # 注意：HF_ENDPOINT 必须在 import huggingface_hub 之前设置才能生效，
+        # 但模块可能已被其他代码 import，所以最稳妥的方式是直接用本地缓存
+        os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
+        os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
         try:
             from sentence_transformers import CrossEncoder
-            _reranker = CrossEncoder(_reranker_model_name)
-            logger.info(f"Reranker 模型加载成功: {_reranker_model_name}")
+            # 优先用本地缓存，避免任何网络请求
+            # 模型已在 _ensure_embed_model 或预加载阶段下载到 ~/.cache/huggingface
+            _reranker = CrossEncoder(_reranker_model_name, local_files_only=True)
+            logger.info(f"Reranker 模型从本地加载成功: {_reranker_model_name}")
         except Exception as e:
-            logger.warning(f"Reranker 模型加载失败: {e}")
-            _reranker = False
+            logger.warning(f"Reranker 本地加载失败，尝试镜像下载: {e}")
+            try:
+                # 兜底：从 hf-mirror 下载（不走 huggingface.co）
+                os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
+                os.environ["HF_HUB_DISABLE_SSL_VERIFICATION"] = "1"
+                _reranker = CrossEncoder(_reranker_model_name)
+                logger.info(f"Reranker 模型镜像下载成功: {_reranker_model_name}")
+            except Exception as e2:
+                logger.warning(f"Reranker 模型加载失败（本地+镜像均失败）: {e2}")
+                _reranker = False
     return _reranker
 
 

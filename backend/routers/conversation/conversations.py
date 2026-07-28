@@ -1129,8 +1129,41 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
         clarification_task = asyncio.to_thread(_run_clarification)
         rag_task = asyncio.to_thread(_run_rag)
 
-        # 等待两者都完成
-        clarification, rag_result = await asyncio.gather(clarification_task, rag_task)
+        # 等待两者都完成（含超时保护）
+        # 案例：conv 190 因 Reranker 模型 HF HEAD 校验超时（huggingface.co 被墙）
+        # 导致 asyncio.gather 无限等待，连 producer 内的 90s/5min/8min 守卫都
+        # 触达不到（RAG 在 orchestrate_stream 之前执行）。
+        rag_timeout_sec = get_config_float("rag.context_build_timeout_sec", 30.0)
+        try:
+            clarification, rag_result = await asyncio.wait_for(
+                asyncio.gather(clarification_task, rag_task),
+                timeout=rag_timeout_sec
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                f"[trace:{trace_id}] RAG+澄清超时 {rag_timeout_sec}s，降级处理。"
+                f"query={effective_query[:50]}"
+            )
+            # 取消仍在执行的后台 task（同步代码无法真正中断，但释放 await 句柄）
+            for _task in (clarification_task, rag_task):
+                _task.cancel()
+            # 降级：用默认 clarification + 空 RAG 上下文
+            clarification = {
+                "complexity": "medium",
+                "specialists": [],
+                "reason": "clarification_timeout",
+                "refined_query": effective_query,
+                "scenario_type": "general_analysis",
+            }
+            rag_result = {
+                "context": "",
+                "results": [],
+                "keywords": [],
+                "query": effective_query,
+                "fts_count": 0,
+                "chroma_count": 0,
+                "freshness_filtered": 0,
+            }
         phase_timings["clarification_rag_ms"] = int((time.time() - t0) * 1000)
         complexity = clarification["complexity"]
         rag_context = rag_result["context"]
