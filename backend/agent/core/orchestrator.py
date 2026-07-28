@@ -327,6 +327,24 @@ _AGENT_MODEL_MAP_MIMO = {
     "self_reflection": "mimo-v2.5-pro",            # 自我反思，需精确推理
 }
 
+# Qwen 模型映射 — 按任务复杂度分级（阿里云百炼）
+# qwen3.8-max-preview: 最强，用于编排器+仲裁
+# qwen3.7-max: 强，用于核心分析 Agent
+# qwen3.7-plus: 中等，用于辅助分析 Agent
+_AGENT_MODEL_MAP_QWEN = {
+    "valuation_expert": "qwen3.7-max",             # 估值专家，需精确数值推理
+    "allocation_advisor": "qwen3.7-plus",          # 配置顾问，组合优化
+    "fund_analyst": "qwen3.7-max",                 # 基金分析，需穿透分析
+    "risk_assessor": "qwen3.7-max",               # 风险评估，需风险判断
+    "market_analyst": "qwen3.7-plus",             # 市场分析，趋势判断
+    "macro_strategist": "qwen3.7-plus",           # 宏观策略
+    "article_expert": "qwen3.7-plus",             # 文章专家，文本摘要
+    "orchestrator": "qwen3.8-max-preview",        # 编排器，最强模型
+    "cross_review": "qwen3.7-plus",               # 交叉审阅
+    "arbitrator": "qwen3.8-max-preview",          # 仲裁，最强模型
+    "self_reflection": "qwen3.7-plus",            # 自我反思
+}
+
 # 兼容别名
 AGENT_MODEL_MAP = _AGENT_MODEL_MAP_DEEPSEEK
 
@@ -337,16 +355,27 @@ def _get_model_for_agent(agent_key: str, budget_mode: str = "normal") -> str:
     自动感知当前 LLM provider：
     - LLM_PROVIDER=deepseek → 使用 DeepSeek 模型映射
     - LLM_PROVIDER=mimo → 使用 MIMO 模型映射（避免模型名不匹配导致 404）
+    - LLM_PROVIDER=qwen → 使用 Qwen 模型映射
     """
     from db.config import get_config
     from config import LLM_PROVIDER
 
-    model_map = _AGENT_MODEL_MAP_MIMO if LLM_PROVIDER == "mimo" else _AGENT_MODEL_MAP_DEEPSEEK
+    if LLM_PROVIDER == "qwen":
+        model_map = _AGENT_MODEL_MAP_QWEN
+    elif LLM_PROVIDER == "mimo":
+        model_map = _AGENT_MODEL_MAP_MIMO
+    else:
+        model_map = _AGENT_MODEL_MAP_DEEPSEEK
     default_model = model_map.get(agent_key, MODEL)
 
     # conservative 模式：所有 Agent 用同一个省钱模型
     if budget_mode == "conservative":
-        default_conservative = "mimo-v2.5-pro" if LLM_PROVIDER == "mimo" else "deepseek-v4-flash"
+        if LLM_PROVIDER == "qwen":
+            default_conservative = "qwen3.7-plus"
+        elif LLM_PROVIDER == "mimo":
+            default_conservative = "mimo-v2.5-pro"
+        else:
+            default_conservative = "deepseek-v4-flash"
         configured = get_config("cost_routing.conservative_model", "")
         # 验证配置的模型是否兼容当前 provider
         if configured and _is_model_compatible(configured, LLM_PROVIDER):
@@ -366,11 +395,14 @@ def _is_model_compatible(model_name: str, provider: str) -> bool:
     """检查模型名是否与当前 provider 兼容。"""
     if not model_name:
         return False
+    if provider == "qwen":
+        # Qwen 模式下只允许 qwen 系列模型
+        return model_name.startswith("qwen")
     if provider == "mimo":
         # MIMO 模式下允许 deepseek-v4-flash 用于 market_analyst（跨provider回退）
         return not model_name.startswith("deepseek") or model_name == "deepseek-v4-flash"
-    # DeepSeek 模式下不接受 mimo 模型名
-    return not model_name.startswith("mimo")
+    # DeepSeek 模式下不接受 mimo/qwen 模型名
+    return not model_name.startswith("mimo") and not model_name.startswith("qwen")
 
 
 def _is_cost_routing_enabled() -> bool:

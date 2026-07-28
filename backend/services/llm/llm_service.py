@@ -6,7 +6,7 @@ import logging
 from functools import wraps
 from openai import OpenAI, RateLimitError, APIStatusError, APITimeoutError, APIConnectionError
 from tenacity import retry, stop_after_attempt, wait_exponential_jitter, retry_if_exception, before_sleep_log
-from config import get_llm_config, get_llm_fallback_config, ARBITRATION_API_KEY, ARBITRATION_BASE_URL, ARBITRATION_MODEL
+from config import get_llm_config, get_llm_fallback_config, ARBITRATION_API_KEY, ARBITRATION_BASE_URL, ARBITRATION_MODEL, LLM_PROVIDER, QWEN_API_KEY, QWEN_BASE_URL, QWEN_MODEL
 from db.config import get_config_float, get_config_int
 
 logger = logging.getLogger(__name__)
@@ -54,9 +54,17 @@ _fallback_config = get_llm_fallback_config()
 _fallback_client = OpenAI(api_key=_fallback_config[0], base_url=_fallback_config[1], timeout=180.0) if _fallback_config else None
 _fallback_model = _fallback_config[2] if _fallback_config else None
 
-# 仲裁 Agent 客户端（高级推理模型，如 DeepSeek R1）
-_arbitration_client = OpenAI(api_key=ARBITRATION_API_KEY, base_url=ARBITRATION_BASE_URL, timeout=180.0) if ARBITRATION_API_KEY else None
-_arbitration_model = ARBITRATION_MODEL if ARBITRATION_API_KEY else None
+# 仲裁 Agent 客户端（高级推理模型）
+# 根据 LLM_PROVIDER 自动选择仲裁模型
+if LLM_PROVIDER == "qwen" and QWEN_API_KEY:
+    _arbitration_client = OpenAI(api_key=QWEN_API_KEY, base_url=QWEN_BASE_URL, timeout=180.0)
+    _arbitration_model = "qwen3.8-max-preview"  # 仲裁用最强 Qwen
+elif ARBITRATION_API_KEY:
+    _arbitration_client = OpenAI(api_key=ARBITRATION_API_KEY, base_url=ARBITRATION_BASE_URL, timeout=180.0)
+    _arbitration_model = ARBITRATION_MODEL
+else:
+    _arbitration_client = None
+    _arbitration_model = None
 
 SYSTEM_PROMPT = """<role>你是一位专业的投资分析师。请根据提供的微信公众号文章内容和市场数据，给出客观的投资分析。</role>
 

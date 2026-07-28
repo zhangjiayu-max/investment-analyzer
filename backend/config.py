@@ -20,7 +20,7 @@ _ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(_ROOT / ".env.keys")
 load_dotenv(_ROOT / ".env")
 
-# 当前使用的模型提供商: "deepseek" 或 "mimo"
+# 当前使用的模型提供商: "deepseek" / "mimo" / "qwen"
 LLM_PROVIDER = os.getenv("LLM_PROVIDER", "mimo")
 
 # DeepSeek API 配置（OpenAI 兼容接口）
@@ -56,10 +56,20 @@ EASTMONEY_API_KEY = os.getenv("MX_APIKEY", "") or os.getenv("MX_API_KEY", "")
 # 天天基金 Skills API
 TTFUND_APIKEY = os.getenv("TTFUND_APIKEY", "")  # 已废弃：ttskill CLI 登录型，不再需要 API Key
 
-# 仲裁 Agent 配置（DeepSeek R1 高级推理模型）
+# 仲裁 Agent 配置（高级推理模型）
 ARBITRATION_API_KEY = os.getenv("ARBITRATION_API_KEY", "")
 ARBITRATION_BASE_URL = os.getenv("ARBITRATION_BASE_URL", "https://api.deepseek.com")
 ARBITRATION_MODEL = os.getenv("ARBITRATION_MODEL", "deepseek-v4-pro")
+
+# ── Qwen (阿里云百炼) API 配置 ──
+QWEN_API_KEY = os.getenv("QWEN_API_KEY", "")
+QWEN_BASE_URL = os.getenv("QWEN_BASE_URL", "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1")
+QWEN_MODEL = os.getenv("QWEN_MODEL", "qwen3.8-max-preview")
+# Qwen 视觉模型（用于估值图片解析）
+# qwen3.7-flash 在百炼实例上不可用，qwen3.7-plus 支持多模态
+QWEN_VISION_API_KEY = os.getenv("QWEN_VISION_API_KEY", QWEN_API_KEY)
+QWEN_VISION_BASE_URL = os.getenv("QWEN_VISION_BASE_URL", QWEN_BASE_URL)
+QWEN_VISION_MODEL = os.getenv("QWEN_VISION_MODEL", "qwen3.7-plus")
 
 # ── 热点分析政策关键词（可从环境变量覆盖） ─────────────────
 # 逗号分隔，修改 .env 即可生效，无需改代码
@@ -79,11 +89,14 @@ def get_llm_config() -> tuple[str, str, str]:
     """返回主用 LLM 配置 (api_key, base_url, model)。
 
     优先级：
-    1. LLM_PROVIDER=deepseek → 直接走 DeepSeek（MIMO key 即使存在也不抢占）
+    1. LLM_PROVIDER=deepseek → 直接走 DeepSeek
     2. LLM_PROVIDER=mimo → 优先 MIMO 套餐 API，再 MIMO 普通 API
+    3. LLM_PROVIDER=qwen → 使用阿里云百炼 Qwen API
     """
     if LLM_PROVIDER == "deepseek":
         return DEEPSEEK_API_KEY, DEEPSEEK_BASE_URL, DEEPSEEK_MODEL
+    if LLM_PROVIDER == "qwen":
+        return QWEN_API_KEY, QWEN_BASE_URL, QWEN_MODEL
     # MIMO 模式（保留代码路径，后续 MIMO 恢复时可切回）
     if MIMO_PLAN_API_KEY:
         return MIMO_PLAN_API_KEY, MIMO_PLAN_BASE_URL, MIMO_PLAN_MODEL
@@ -101,7 +114,15 @@ def get_llm_fallback_config() -> tuple[str, str, str] | None:
 
 
 def get_vision_config() -> tuple[str, str, str]:
-    """返回视觉模型配置 (api_key, base_url, model)。"""
+    """返回视觉模型配置 (api_key, base_url, model)。
+
+    根据 LLM_PROVIDER 自动选择：
+    - qwen → Qwen 视觉模型 (qwen3.7-flash)
+    - mimo → MIMO 多模态
+    - deepseek → 环境变量配置
+    """
+    if LLM_PROVIDER == "qwen":
+        return QWEN_VISION_API_KEY, QWEN_VISION_BASE_URL, QWEN_VISION_MODEL
     return VISION_API_KEY, VISION_BASE_URL, VISION_MODEL
 
 
@@ -113,12 +134,16 @@ def get_vision_config_db() -> tuple[str, str, str]:
     """
     try:
         from db.config import get_config
-        provider = get_config('vision.provider', 'ollama')
-        prefix = 'vision.mimo' if provider == 'mimo' else 'vision.ollama'
-        api_key = get_config(f'{prefix}.api_key', '') or VISION_API_KEY
-        base_url = get_config(f'{prefix}.base_url', '') or VISION_BASE_URL
-        model = get_config(f'{prefix}.model', '') or VISION_MODEL
-        return api_key, base_url, model
+        provider = get_config('vision.provider', '')
+        if provider:
+            prefix = f'vision.{provider}'
+            api_key = get_config(f'{prefix}.api_key', '')
+            base_url = get_config(f'{prefix}.base_url', '')
+            model = get_config(f'{prefix}.model', '')
+            if api_key and base_url and model:
+                return api_key, base_url, model
+        # 无 DB 配置时，按 LLM_PROVIDER 自动选择
+        return get_vision_config()
     except Exception:
         return get_vision_config()
 
