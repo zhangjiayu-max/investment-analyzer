@@ -1,5 +1,6 @@
 """系统配置 CRUD — system_config 表操作"""
 
+import os
 import time as _time
 from db._conn import _get_conn
 
@@ -199,13 +200,17 @@ DEFAULT_CONFIGS = [
     ('validator.llm_check_enabled', 'false', '是否启用 LLM 质检（默认关闭以节约成本）', 'validator'),
 
     # 视觉模型切换（运行时可切换，无需重启）
-    ('vision.provider', 'mimo', '视觉模型提供商（ollama / mimo）', 'vision'),
+    ('vision.provider', 'mimo', '视觉模型提供商（ollama / mimo / qwen）', 'vision'),
     ('vision.ollama.api_key', 'ollama', 'Ollama API Key', 'vision'),
     ('vision.ollama.base_url', 'http://localhost:11434/v1', 'Ollama Base URL', 'vision'),
     ('vision.ollama.model', 'qwen3-vl:8b', 'Ollama 视觉模型名', 'vision'),
     ('vision.mimo.api_key', 'tp-cztoehx9kc6uqpwm53adzok8agg84zfokfje362cqmfjzprg', 'MiMo API Key', 'vision'),
     ('vision.mimo.base_url', 'https://token-plan-cn.xiaomimimo.com/v1', 'MiMo Base URL', 'vision'),
     ('vision.mimo.model', 'mimo-v2.5', 'MiMo 视觉模型名', 'vision'),
+    # Qwen 视觉模型（走 OpenAI 兼容接口，默认值从环境变量读取，无需手填即可切换）
+    ('vision.qwen.api_key', os.getenv("QWEN_VISION_API_KEY", os.getenv("QWEN_API_KEY", "")), 'Qwen API Key', 'vision'),
+    ('vision.qwen.base_url', os.getenv("QWEN_VISION_BASE_URL", os.getenv("QWEN_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")), 'Qwen Base URL', 'vision'),
+    ('vision.qwen.model', os.getenv("QWEN_VISION_MODEL", "qwen3.7-plus"), 'Qwen 视觉模型名', 'vision'),
 
     # 专家调度上限
     ('max_specialists.simple', '1', '简单任务最大专家数', 'orchestrator'),

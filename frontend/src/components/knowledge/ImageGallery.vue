@@ -828,6 +828,11 @@ watch(activeTab, (tab) => {
           :disabled="visionSwitching"
           @click="switchVisionProvider('mimo')"
         >MiMo</button>
+        <button
+          :class="['vision-btn', { active: visionProvider === 'qwen' }]"
+          :disabled="visionSwitching"
+          @click="switchVisionProvider('qwen')"
+        >Qwen</button>
       </div>
     </div>
 
