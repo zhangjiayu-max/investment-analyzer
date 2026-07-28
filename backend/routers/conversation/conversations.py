@@ -852,6 +852,12 @@ async def retry_conversation_message_api(conv_id: int, message_id: int):
     conv = get_conversation(conv_id)
     if not conv:
         raise HTTPException(404, "对话不存在")
+    # P0 修复：清除 cancel_requested 标记，避免新执行期间刷新页面时 /resume 返回 409
+    # 原因：retry-message 创建新 assistant 消息并重新触发 send_message_stream，但若不清除
+    # cancel_requested，新执行过程中用户刷新页面 → /replay 检测 channel running →
+    # /resume 被 cancel_requested=true 拦截返回 409，形成孤立状态。
+    from db.conversations import clear_conversation_cancel_flag
+    clear_conversation_cancel_flag(conv_id)
     messages = get_messages(conv_id, limit=200)
     target = next((m for m in messages if m["id"] == message_id and m["role"] == "assistant"), None)
     if not target:
