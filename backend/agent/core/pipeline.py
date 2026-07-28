@@ -1207,9 +1207,14 @@ def _phase_planning(
             router = SmartRouter()
             history_summary = info_gather_result.get("history_summary", "")
             portfolio_summary = info_gather_result.get("portfolio", "")
-            logger.info(f"[pipeline] P4 路由参数: query='{state.refined_query[:50]}', original='{state.original_query[:50] if state.original_query else ''}', portfolio_len={len(portfolio_summary)}")
+            # P0 修复 conv_190：路由用 original_query，避免文章正文注入 refined_query 后污染路由
+            # 根因：Phase 0 的文章注入会把 7000 字文章正文追加到 refined_query，
+            #   导致关键词路由命中"科技/半导体/跌"等，错误路由到 5 个通用专家。
+            # 方案：路由基于用户原始 query，refined_query（含文章内容）仅供专家执行使用。
+            _route_query = state.original_query or state.refined_query
+            logger.info(f"[pipeline] P4 路由参数: route_query='{_route_query[:50]}', refined='{state.refined_query[:50]}', portfolio_len={len(portfolio_summary)}")
             # P1-5 修复 conv_189：传入 original_query，避免澄清融合丢失"加仓"等动作关键词
-            route_result = router.route(state.refined_query, history_summary, portfolio_summary,
+            route_result = router.route(_route_query, history_summary, portfolio_summary,
                                         original_query=state.original_query or "")
             routed_specialists = route_result.get("specialists", [])
             route_by = route_result.get("route_by", "unknown")

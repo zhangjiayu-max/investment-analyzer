@@ -17,6 +17,10 @@ import os
 LOG_DIR = Path(__file__).parent / "logs"
 LOG_DIR.mkdir(exist_ok=True)
 log_fmt = "%(asctime)s [%(name)s] %(message)s"
+# P2 修复 conv_190：先清除 root logger 已有 handler，避免 uvicorn/basicConfig 重复添加
+_root_logger = logging.getLogger()
+for _h in list(_root_logger.handlers):
+    _root_logger.removeHandler(_h)
 logging.basicConfig(level=logging.INFO, format=log_fmt)
 _file_handler = TimedRotatingFileHandler(
     str(LOG_DIR / "backend.log"), when="midnight", interval=1, backupCount=7, encoding="utf-8"

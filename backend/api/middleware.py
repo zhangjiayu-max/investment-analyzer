@@ -70,6 +70,10 @@ class ResponseWrapperMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         response = await call_next(request)
 
+        # P2 修复 conv_190：防御 SSE 端点在 middleware 中返回 None 的情况
+        if response is None:
+            return Response(status_code=204)
+
         content_type = response.headers.get("content-type", "")
 
         # 排除非 JSON 响应（文件下载、HTML、SSE 等）

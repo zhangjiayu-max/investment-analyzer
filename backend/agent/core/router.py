@@ -640,6 +640,27 @@ class SmartRouter:
                 "route_by": "mention",
             }
 
+        # P0 修复 conv_190：纯链接场景直接路由到 article_expert
+        # 根因：pipeline Phase 0 会把文章正文注入 refined_query，导致关键词路由
+        # 被文章内容污染（命中"科技/半导体/跌"等），路由到 5 个通用专家而非 article_expert。
+        # 方案：检测到 URL 且非 URL 部分文字较短时，直接返回 article_expert。
+        _route_query = original_query or query
+        try:
+            import re as _re
+            _urls = _re.findall(r'https?://[^\s<>"{}|\\^`\[\]]+', _route_query)
+            if _urls:
+                _text_without_url = _re.sub(r'https?://[^\s]+', '', _route_query).strip()
+                if len(_text_without_url) < 20:
+                    return {
+                        "complexity": "simple",
+                        "specialists": ["article_expert"],
+                        "reason": "纯链接场景，直接路由到文章解读专家",
+                        "needs_arbitration": False,
+                        "route_by": "url_detection",
+                    }
+        except Exception:
+            pass
+
         # 2. 检查缓存（线程安全）
         ctx_hash = hashlib.md5((history_summary + portfolio_summary).encode("utf-8")).hexdigest()[:16]
         cache_key = self._cache_key(query, history_summary, ctx_hash)

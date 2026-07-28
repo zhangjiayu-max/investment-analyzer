@@ -37,6 +37,49 @@ from infra.output_reviewer import review_output
 
 logger = logging.getLogger(__name__)
 
+# P0 修复 conv_190：对话级发送互斥锁，防止用户快速重复发送导致两次回答并行
+# 原有守卫（get_running_agent_count / completed agent_runs 检查）在 clarify→RAG→orchestrator LLM
+# 阶段（约 40 秒）尚未创建 agent_runs 记录，存在空窗期。
+# 此锁在 send_message_stream 入口即获取，覆盖全生命周期，producer 线程结束时释放。
+_conv_send_locks: dict[int, threading.Lock] = {}
+_conv_send_locks_guard = threading.Lock()
+
+
+def _acquire_conv_send_lock(conv_id: int) -> bool:
+    """尝试获取对话级发送锁（非阻塞）。已锁定返回 False。"""
+    with _conv_send_locks_guard:
+        lock = _conv_send_locks.get(conv_id)
+        if lock is None:
+            lock = threading.Lock()
+            _conv_send_locks[conv_id] = lock
+        return lock.acquire(blocking=False)
+
+
+def _release_conv_send_lock(conv_id: int):
+    """释放对话级发送锁。"""
+    with _conv_send_locks_guard:
+        lock = _conv_send_locks.get(conv_id)
+        if lock is not None:
+            try:
+                lock.release()
+            except RuntimeError:
+                pass  # 未持有锁，忽略
+
+
+def _cancel_producer_by_conv(conv_id: int):
+    """通过 conv_id 查找并取消后台 producer 线程。
+
+    P1 修复 conv_190：mark_stream_channel_aborted 时同步取消后台 producer，
+    避免"前端显示中断 / 后台继续跑"的撕裂状态。
+    """
+    try:
+        entry = _running_agents.get(f"prod_{conv_id}")
+        if entry and entry.get("cancel_event"):
+            entry["cancel_event"].set()
+            logger.info(f"[conv {conv_id}] 已通知后台 producer 停止")
+    except Exception as e:
+        logger.warning(f"[conv {conv_id}] 取消后台 producer 失败: {e}")
+
 
 async def _async_verify_and_log(conv_id: int, msg_id: int, answer: str):
     """异步基金代码幻觉校验（不阻塞主回复流）。"""
@@ -731,8 +774,11 @@ async def replay_conversation(conv_id: int, channel_id: str, last_seq: int = 0, 
             return
 
         # 4. running 但心跳超时 → 标记 aborted + 同步恢复 message
-        if is_stream_heartbeat_stale(channel_id, threshold_sec=15):
+        # P0 修复 conv_190：阈值从 15s 调到 90s，避免专家 LLM 调用期间（30-60s）误判超时
+        if is_stream_heartbeat_stale(channel_id, threshold_sec=90):
             mark_stream_channel_aborted(channel_id, "heartbeat timeout")
+            # P1 修复 conv_190：通知后台 producer 停止，避免"前端中断/后台继续跑"的撕裂
+            _cancel_producer_by_conv(conv_id)
             # 立即恢复占位符 message，避免长期悬挂（不依赖后端重启）
             try:
                 from services.conv_recovery import recover_message
@@ -764,8 +810,11 @@ async def replay_conversation(conv_id: int, channel_id: str, last_seq: int = 0, 
                 yield _sse_event("replay_end", {"status": status})
                 return
             # 心跳超时检测
-            if is_stream_heartbeat_stale(channel_id, threshold_sec=15):
+            # P0 修复 conv_190：阈值从 15s 调到 90s
+            if is_stream_heartbeat_stale(channel_id, threshold_sec=90):
                 mark_stream_channel_aborted(channel_id, "heartbeat timeout")
+                # P1 修复 conv_190：通知后台 producer 停止
+                _cancel_producer_by_conv(conv_id)
                 # 立即恢复占位符 message
                 try:
                     from services.conv_recovery import recover_message
@@ -1047,6 +1096,14 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
     trace_id = str(uuid.uuid4())[:12]
     effective_query = _build_effective_query(req.content, req.images)
     logger.info(f"[trace:{trace_id}] 对话 {conv_id} 开始: {effective_query[:50]}...")
+
+    # P0 修复 conv_190：获取对话级发送锁，覆盖 clarify/RAG 阶段的 40 秒空窗期
+    # 原有守卫在 agent_runs 记录创建前（约 40 秒）失效，用户在此期间重复发送
+    # 会创建第二个 producer 线程，导致两次回答并行 + 资源争抢 + 双倍超时。
+    if not _acquire_conv_send_lock(conv_id):
+        logger.warning(f"[trace:{trace_id}] 对话 {conv_id} 发送锁已被占用，拒绝重复发送")
+        raise HTTPException(409, "该对话正在处理中，请等待当前分析完成后再发送新消息")
+    _lock_acquired = True
 
     # 共享 cancel_event：producer 内部检查 + _running_agents 存储 + /cancel 端点 set
     # 必须在 event_stream_producer 闭包外创建，保证取消信号能真正传到后台线程。
@@ -1707,6 +1764,19 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
                 try:
                     # 将 cancel_event 存入 _running_agents，供 /cancel 端点真正中断后台任务
                     _running_agents[f"prod_{conv_id}"] = {"conv_id": conv_id, "started_at": time.time(), "trace_id": trace_id, "cancel_event": cancel_event}
+                    # P0 修复 conv_190：后台心跳守护线程，每 30s 更新一次心跳
+                    # 解决专家 LLM 调用期间（30-60s）for 循环不迭代、心跳不更新的问题
+                    _heartbeat_stop = threading.Event()
+
+                    def _heartbeat_daemon():
+                        while not _heartbeat_stop.wait(timeout=30):
+                            try:
+                                update_stream_heartbeat(channel_id)
+                            except Exception:
+                                pass
+
+                    _hb_thread = threading.Thread(target=_heartbeat_daemon, daemon=True)
+                    _hb_thread.start()
                     # P2-1：长对话超时保护（5min 警告 / 8min 硬收尾）
                     producer_started = time.time()
                     warn_at_sec = get_config_int("conversation.warn_at_minutes", 5) * 60
@@ -1739,6 +1809,13 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
                     finally:
                         _first_evt_executor.shutdown(wait=False, cancel_futures=True)
                     for event in _event_chain:
+                        # P0 修复 conv_190：主动更新心跳，避免专家 LLM 调用期间心跳 stale
+                        # 原因：update_stream_heartbeat 导入但从未调用，心跳仅靠 append_event
+                        # 自动更新。专家 LLM 调用 30-60s 期间无事件产生，心跳 stale 被误判超时。
+                        try:
+                            update_stream_heartbeat(channel_id)
+                        except Exception:
+                            pass
                         # P2-1：在每个事件前检查总耗时
                         elapsed = time.time() - producer_started
                         if elapsed >= abort_at_sec:
@@ -1871,6 +1948,11 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
                         pass
                     q.put({"type": "error", "message": err})
                 finally:
+                    # P0 修复 conv_190：停止心跳守护线程
+                    try:
+                        _heartbeat_stop.set()
+                    except Exception:
+                        pass
                     _running_agents.pop(f"prod_{conv_id}", None)
                     q.put(None)
 
@@ -2110,6 +2192,9 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
                 loop.close()
             except Exception:
                 pass
+            # P0 修复 conv_190：释放对话级发送锁，允许后续发送
+            if _lock_acquired:
+                _release_conv_send_lock(conv_id)
             _producer_q.put(None)
 
     _producer_thread = threading.Thread(target=_producer_thread_main, daemon=True)
