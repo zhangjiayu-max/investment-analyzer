@@ -4590,6 +4590,7 @@ def _stream_route(query: str, history: list, rag_context: str, cancel_event: thr
     _check_cancel(cancel_event)
     route_result = None
     clarification = {}
+    article_context = ""  # 初始化文章上下文，供场景化 RAG 使用
 
     # 如果用户通过 @mention 指定了专家,跳过自动路由
     if target_specialists:
@@ -4699,6 +4700,7 @@ def _stream_route(query: str, history: list, rag_context: str, cancel_event: thr
         "context_config": context_config,
         "token_budget": token_budget,
         "rag_context": rag_context,
+        "article_context": article_context,
     }
 
 
