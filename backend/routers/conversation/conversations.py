@@ -1709,6 +1709,27 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
                         # P2-1：在每个事件前检查总耗时
                         elapsed = time.time() - producer_started
                         if elapsed >= abort_at_sec:
+                            # P0-1 修复 conv_189：超时 break 前若当前事件是最终答案，先持久化再退出
+                            # 避免 synthesis 已完成但 EVENT_ANSWER 被丢弃导致综合报告丢失
+                            if event.get("type") == "answer":
+                                try:
+                                    reviewed = _save_final(
+                                        event.get("content", ""),
+                                        event.get("specialist_results", []),
+                                        event.get("tool_calls", []),
+                                        int((time.time() - _prod_start) * 1000),
+                                        arbitration=event.get("arbitration"),
+                                        cross_review_results=event.get("cross_review_results"),
+                                    )
+                                    event = dict(event)
+                                    event["content"] = reviewed
+                                    try:
+                                        complete_stream_channel(channel_id)
+                                    except Exception as _e:
+                                        logger.warning(f"[trace:{trace_id}] 超时收尾标记 channel 完成失败: {_e}")
+                                    logger.info(f"[P0-1] trace:{trace_id} 超时退出前成功保存综合报告")
+                                except Exception as save_err:
+                                    logger.warning(f"[P0-1] trace:{trace_id} 超时退出前保存答案失败: {save_err}")
                             logger.warning(
                                 f"[P2-1] 对话 #{conv_id} 已运行 {elapsed:.0f}s 超过 {abort_at_sec}s 阈值，强制收尾"
                             )
@@ -2168,6 +2189,7 @@ async def clarify_answer_stream(conv_id: int, request: Request):
                 from agent.pipeline import run_pipeline_from_checkpoint
                 for event in run_pipeline_from_checkpoint(
                     checkpoint, answer, msg_list, trace_id, cancel_event,
+                    message_id=stream_msg_id,
                 ):
                     et = event.get("type")
                     # 持久化关键事件到消息

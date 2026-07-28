@@ -552,16 +552,25 @@ def run_pipeline_from_checkpoint(
     history: list,
     trace_id: str,
     cancel_event=None,
+    message_id: int | None = None,
 ) -> Generator[dict, None, None]:
     """从澄清 checkpoint 恢复 Pipeline，用用户回答改写 query 后继续执行。
 
     跳过 Phase 0 的澄清检查，直接从 Phase 1（信息收集）开始。
     query 改写：original_query + user_answer 拼接。
+
+    P0-3 修复 conv_189：增加 message_id 参数，覆写 state.message_id 为澄清后的新占位消息 id，
+    避免 agent_runs 归属到旧的澄清消息（msg 549），导致恢复逻辑查不到（按 msg 551 查询）。
     """
     start_time = time.time()
 
     # 恢复状态
     state = PipelineState.from_dict(checkpoint)
+    # P0-3: 覆写 message_id 为澄清续答后的新占位消息 id
+    if message_id:
+        old_msg_id = state.message_id
+        state.message_id = message_id
+        logger.info(f"[pipeline:{trace_id}] 澄清续答 message_id 覆写: {old_msg_id} → {message_id}")
     query_info = checkpoint.get("query_info", {})
     original_query = state.original_query
 
@@ -1198,8 +1207,10 @@ def _phase_planning(
             router = SmartRouter()
             history_summary = info_gather_result.get("history_summary", "")
             portfolio_summary = info_gather_result.get("portfolio", "")
-            logger.info(f"[pipeline] P4 路由参数: query='{state.refined_query[:50]}', portfolio_len={len(portfolio_summary)}")
-            route_result = router.route(state.refined_query, history_summary, portfolio_summary)
+            logger.info(f"[pipeline] P4 路由参数: query='{state.refined_query[:50]}', original='{state.original_query[:50] if state.original_query else ''}', portfolio_len={len(portfolio_summary)}")
+            # P1-5 修复 conv_189：传入 original_query，避免澄清融合丢失"加仓"等动作关键词
+            route_result = router.route(state.refined_query, history_summary, portfolio_summary,
+                                        original_query=state.original_query or "")
             routed_specialists = route_result.get("specialists", [])
             route_by = route_result.get("route_by", "unknown")
             logger.info(f"[pipeline] P4 路由命中: {routed_specialists} (by={route_by})")
@@ -1402,7 +1413,7 @@ def _phase_execution(
                     agent_key=agent_key,
                     agent_name=agent_name,
                     query=step_query,
-                    result=result.get("analysis", "")[:4000],
+                    result=result.get("analysis", "")[:16000],
                     tool_calls=str(result.get("tool_calls", []))[:2000],
                     duration_ms=duration_ms_for_log,
                     trace_id=trace_id,
@@ -1611,7 +1622,7 @@ def _execute_steps_parallel(
                         agent_key=agent_key,
                         agent_name=agent_name,
                         query=step_query,
-                        result=result.get("analysis", "")[:4000],
+                        result=result.get("analysis", "")[:16000],
                         tool_calls=str(result.get("tool_calls", []))[:2000],
                         duration_ms=duration_ms,
                         trace_id=trace_id,
@@ -1756,7 +1767,7 @@ def _fallback_execution(
                     agent_key=agent_key,
                     agent_name=agent_name,
                     query=query,
-                    result=result.get("analysis", "")[:4000],
+                    result=result.get("analysis", "")[:16000],
                     tool_calls=str(result.get("tool_calls", []))[:2000],
                     duration_ms=duration_ms_for_log,
                     trace_id=trace_id,

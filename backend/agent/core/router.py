@@ -102,7 +102,10 @@ _KEYWORD_ROUTES = [
     (["批价", "动销", "库存周期", "产能利用率", "产业链", "景气度", "渠道库存", "经销商"],
      ["industry_fundamentalist"]),
     # P1 修复 conv_153：behavioral 类补全"清仓"/"害怕"（原缺失导致未路由 behavioral_advisor）
-    (["行为", "心理", "情绪", "偏差", "追涨", "杀跌", "恐慌", "冲动", "焦虑", "贪婪", "清仓", "害怕"],
+    # P1-6 修复 conv_189：加仓类操作场景补充行为偏差关键词（损失厌恶、追涨、抄底心理等）
+    (["行为", "心理", "情绪", "偏差", "追涨", "杀跌", "恐慌", "冲动", "焦虑", "贪婪", "清仓", "害怕",
+      # 操作场景中的行为偏差信号
+      "加仓", "减仓", "补仓", "抄底", "满仓", "梭哈", "重仓", "割肉", "追高", "频繁交易", "情绪化"],
      ["behavioral_advisor"]),
     # conv#130 修复：暴涨/暴跌/大涨/大跌/量化/资金注入等市场极端波动关键词
     # 必须路由 behavioral_advisor 识别追涨/羊群效应/过度自信等行为偏差
@@ -247,6 +250,9 @@ _QUESTION_TYPE_KEYWORDS = {
     "action": [
         "买", "卖", "加仓", "减仓", "补仓", "止盈", "止损", "清仓", "建仓",
         "上车", "下车", "调仓", "换仓", "止盈点", "止损点", "抄底",
+        # P1-5 修复 conv_189：澄清融合后可能产生的名词型表达（隐含操作意图）
+        "配置分析", "持仓分析", "持仓配置", "整体持仓", "配置建议", "仓位调整",
+        "配置调整", "组合优化",
     ],
     "comparison": [
         "vs", "VS", "对比", "比较", "哪个好", "区别", "差异", "相比",
@@ -410,12 +416,17 @@ class SmartRouter:
         raw = f"{query}|{history_summary}|{context_hash}"
         return hashlib.md5(raw.encode("utf-8")).hexdigest()
 
-    def _rule_route(self, query: str, portfolio_summary: str = "") -> Optional[dict]:
+    def _rule_route(self, query: str, portfolio_summary: str = "",
+                    original_query: str = "") -> Optional[dict]:
+        # P1-5 修复 conv_189：关键词匹配时合并原始 query 和融合后 query
+        # 原因：澄清融合把"加仓"改写成"整体持仓配置分析"，丢失了"加仓"等动作关键词
+        # 合并后路由器仍能从原始 query 识别 action/valuation 等语义
+        combined_text = f"{query} {original_query}".strip() if original_query else query
         specialists = set()
         for keywords, agents in _KEYWORD_ROUTES:
-            if any(kw in query for kw in keywords):
+            if any(kw in combined_text for kw in keywords):
                 specialists.update(agents)
-        if _is_high_risk_action(query):
+        if _is_high_risk_action(combined_text):
             specialists.update(["risk_assessor"])
 
         # P0-4: 穿透分析强制触发（conv 129 "穿透看亏损原因"未路由 fund_analyst 的根因修复）
@@ -427,9 +438,10 @@ class SmartRouter:
 
         # M1: 问题类型感知路由（零 LLM 成本，纯规则）
         # 在关键词命中后、专家截断前，根据问题类型强制追加专家
+        # P1-5 修复 conv_189：问题类型识别也使用 combined_text（原始 query + 融合 query）
         qtype_reason = ""
         if get_config("agent.question_type_routing_enabled", "true") == "true":
-            specialists_list_q, qtype_reason = _apply_question_type_routing(list(specialists), query)
+            specialists_list_q, qtype_reason = _apply_question_type_routing(list(specialists), combined_text)
             if qtype_reason:
                 specialists = set(specialists_list_q)
                 logger.info(f"[router] 问题类型感知: {qtype_reason}")
@@ -610,8 +622,14 @@ class SmartRouter:
             del self._cache[k]
 
     def route(self, query: str, history_summary: str = "", portfolio_summary: str = "",
-              target_specialists: Optional[list] = None) -> dict:
-        """路由入口。"""
+              target_specialists: Optional[list] = None,
+              original_query: str = "") -> dict:
+        """路由入口。
+
+        P1-5 修复 conv_189：增加 original_query 参数，用于澄清续答场景。
+        澄清融合会把"加仓"改写成"整体持仓配置分析"，丢失动作关键词。
+        路由器合并原始 query 和融合 query 进行关键词匹配，确保动作语义不丢失。
+        """
         # 1. 用户显式指定专家：直接尊重用户选择，不过滤（上游已校验或执行时校验）
         if target_specialists:
             return {
@@ -632,9 +650,9 @@ class SmartRouter:
                 if now - ts < self._cache_ttl:
                     return cached
 
-        # 3. 规则路由（传入 portfolio_summary 启用持仓感知）
+        # 3. 规则路由（传入 portfolio_summary 启用持仓感知，传入 original_query 追踪原始语义）
         if get_config("router.enabled", "true") == "true":
-            rule_result = self._rule_route(query, portfolio_summary)
+            rule_result = self._rule_route(query, portfolio_summary, original_query=original_query)
             if rule_result:
                 # 防退步：基于 eval 分数对低分专家降权
                 rule_result = self._adjust_by_eval_scores(rule_result)

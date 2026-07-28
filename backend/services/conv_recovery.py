@@ -38,6 +38,12 @@ _EXPERTS_DONE_NOTICE = (
 # 中断提示文本（专家未执行时）
 _NO_RESULT_NOTICE = "⚠️ 本次分析因服务中断未完成（专家未执行）。请重新发送问题以获得完整分析。"
 
+# P0-4 修复 conv_189：专家已执行但归属其他消息时，提示更准确
+_EXPERTS_MISPLACED_NOTICE = (
+    "⚠️ 本次分析因服务中断未完成。专家分析可能已在上一轮执行，"
+    "但因服务重启未能生成综合报告。建议点击「重新生成」以复用已有专家结果。"
+)
+
 # 自动重试中提示文本
 _RETRYING_NOTICE = "⏳ 检测到服务重启导致中断，正在自动重试..."
 
@@ -132,24 +138,63 @@ def recover_message(message_id: int) -> str:
 
         # 按 message_id 过滤（关键修复）
         runs = conn.execute("""
-            SELECT agent_name, result, run_phase
+            SELECT agent_name, result, run_phase, trace_id
             FROM agent_runs
             WHERE message_id = ? AND status = 'success'
             ORDER BY id
         """, (msg_id,)).fetchall()
 
-        if runs:
-            full_answer = _merge_runs_to_answer(runs)
+        # P0-3/P0-4 修复 conv_189：message_id 查不到时，按 conversation_id + 近期 trace_id fallback
+        # 原因：澄清续答流程的 checkpoint 未更新 message_id，导致专家结果归属到旧消息
+        misplaced_runs = []
+        if not runs:
+            # 查同对话最近 30 分钟内、其他 message_id 的 success agent_runs
+            recent_runs = conn.execute("""
+                SELECT agent_name, result, run_phase, trace_id, message_id
+                FROM agent_runs
+                WHERE conversation_id = ? AND status = 'success'
+                  AND created_at >= datetime('now', 'localtime', '-30 minutes')
+                ORDER BY id DESC
+            """, (conv_id,)).fetchall()
+            if recent_runs:
+                # 按 trace_id 分组，取最新 trace 的结果
+                latest_trace = recent_runs[0]["trace_id"] if recent_runs else None
+                if latest_trace:
+                    misplaced_runs = [r for r in recent_runs if r["trace_id"] == latest_trace]
+                    logger.info(
+                        f"[conv_recovery] msg {msg_id} (conv {conv_id}) message_id 无结果，"
+                        f"fallback 到同对话 trace_id={latest_trace} 的 {len(misplaced_runs)} 个专家结果"
+                    )
+
+        # 使用 fallback 结果（如果有）
+        effective_runs = runs if runs else misplaced_runs
+        if effective_runs:
+            full_answer = _merge_runs_to_answer(effective_runs)
             if full_answer:
                 _apply_recovery(conn, msg_id, full_answer, has_expert_results=True)
                 conn.commit()
-                logger.info(f"[conv_recovery] msg {msg_id} (conv {conv_id}) 心跳超时恢复（合并 {len(runs)} 个专家结果）")
+                source = "message_id" if runs else "trace_id fallback"
+                logger.info(
+                    f"[conv_recovery] msg {msg_id} (conv {conv_id}) 心跳超时恢复"
+                    f"（{source}，合并 {len(effective_runs)} 个专家结果）"
+                )
                 return full_answer
+
         # 无专家结果 → 标记为中断
-        _apply_recovery(conn, msg_id, _NO_RESULT_NOTICE, has_expert_results=False)
+        # P0-4：如果同对话有近期的 success agent_runs（但 trace 不同），用更准确的提示
+        has_nearby_experts = bool(misplaced_runs) or bool(
+            conn.execute("""
+                SELECT 1 FROM agent_runs
+                WHERE conversation_id = ? AND status = 'success'
+                  AND created_at >= datetime('now', 'localtime', '-30 minutes')
+                LIMIT 1
+            """, (conv_id,)).fetchone()
+        )
+        notice = _EXPERTS_MISPLACED_NOTICE if has_nearby_experts else _NO_RESULT_NOTICE
+        _apply_recovery(conn, msg_id, notice, has_expert_results=False)
         conn.commit()
         logger.info(f"[conv_recovery] msg {msg_id} (conv {conv_id}) 心跳超时，无专家结果，标记为中断")
-        return _NO_RESULT_NOTICE
+        return notice
     except Exception as e:
         logger.warning(f"[conv_recovery] recover_message({message_id}) 失败: {e}")
         return ""
