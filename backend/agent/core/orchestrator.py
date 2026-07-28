@@ -5800,6 +5800,11 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
     specialist_results = []
     all_tool_calls = []
     arbitration_done = False  # 标记仲裁是否已完成,避免重复调用
+    # P0 修复 conv_190：orchestrate_stream 使用 ReAct 模式（无 Plan & Execute），
+    # active_plan 始终为 None，但综合阶段 _stream_final_synthesis 和 _stream_handle_no_tool_calls
+    # 引用了它。原代码漏定义导致 NameError: name 'active_plan' is not defined，
+    # 两个 trace 都在综合阶段崩溃。
+    active_plan = None
     conflicts = {}  # 初始化冲突检测结果，后续在无工具调用分支中更新
     already_called = set()  # 增强2: 动态选角防循环
 
