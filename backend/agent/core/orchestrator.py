@@ -1175,6 +1175,82 @@ def enrich_query_with_article(query: str) -> tuple[str, str]:
     return enriched_query, article_context
 
 
+# ── P1 文章二次路由：根据文章实际内容追加专家 ──────────────────────
+# 纯链接场景路由器只返回 article_expert，文章抓取后需根据内容追加行为金融学/风控专家
+_BEHAVIORAL_ARTICLE_KEYWORDS = [
+    "追涨", "杀跌", "贪婪", "恐惧", "波动", "暴涨", "暴跌", "大涨", "大跌",
+    "散户", "羊群", "认知偏差", "情绪", "恐慌", "焦虑", "过度自信", "损失厌恶",
+    "抄底心理", "频繁交易", "情绪化", "风险承受", "高波动",
+]
+
+_ACTION_ARTICLE_KEYWORDS = [
+    "加仓", "减仓", "清仓", "买入", "卖出", "止盈", "止损", "补仓", "抄底",
+    "建仓", "调仓", "上车", "下车", "割肉",
+]
+
+
+def _secondary_route_by_article(
+    specialists: list, article_context: str, route_result: dict | None,
+    context_config: dict
+) -> tuple[list, str]:
+    """文章内容注入后根据关键词二次路由，追加行为金融学/风控专家。
+
+    Args:
+        specialists: 当前专家列表
+        article_context: 文章正文（enrich_query_with_article 返回的 article_context）
+        route_result: 路由结果 dict（可能含 article_context_pending 标记）
+        context_config: 上下文配置（含 max_specialists 限制）
+
+    Returns:
+        (更新后的专家列表, 追加原因描述)
+    """
+    if not article_context or article_context.startswith("[抓取失败]"):
+        return specialists, ""
+
+    # 仅在路由器标记了 article_context_pending 或当前只有 article_expert 时触发
+    is_article_pending = bool(route_result and route_result.get("article_context_pending"))
+    only_article_expert = len(specialists) == 1 and "article_expert" in specialists
+    if not (is_article_pending or only_article_expert):
+        return specialists, ""
+
+    specialist_set = list(specialists)
+    reasons = []
+
+    # 检测行为金融学关键词 → 追加 behavioral_advisor
+    if "behavioral_advisor" not in specialist_set:
+        hit_behavioral = [kw for kw in _BEHAVIORAL_ARTICLE_KEYWORDS if kw in article_context]
+        if hit_behavioral:
+            specialist_set.append("behavioral_advisor")
+            reasons.append(f"文章含行为金融学关键词({hit_behavioral[:3]})→追加行为金融学专家")
+
+    # 检测操作建议关键词 → 追加 risk_assessor
+    if "risk_assessor" not in specialist_set:
+        hit_action = [kw for kw in _ACTION_ARTICLE_KEYWORDS if kw in article_context]
+        if hit_action:
+            specialist_set.append("risk_assessor")
+            reasons.append(f"文章含操作建议关键词({hit_action[:3]})→追加风险评估师")
+
+    # 检测估值/板块关键词 → 追加 valuation_expert（文章常提及具体板块估值）
+    if "valuation_expert" not in specialist_set:
+        _valuation_hints = ["估值", "PE", "PB", "百分位", "低估", "高估", "红利", "科技", "白酒",
+                            "医药", "半导体", "新能源", "银行", "军工", "消费"]
+        hit_valuation = [kw for kw in _valuation_hints if kw in article_context]
+        if hit_valuation:
+            specialist_set.append("valuation_expert")
+            reasons.append(f"文章含板块/估值关键词({hit_valuation[:3]})→追加估值分析师")
+
+    # 受 max_specialists 限制
+    max_spec = context_config.get("max_specialists", 3)
+    if len(specialist_set) > max_spec:
+        # article_expert 必须保留，优先保留新追加的专家
+        article_idx = specialist_set.index("article_expert") if "article_expert" in specialist_set else 0
+        article_expert = specialist_set.pop(article_idx)
+        specialist_set = [article_expert] + specialist_set[:max_spec - 1]
+
+    reason = "; ".join(reasons)
+    return specialist_set, reason
+
+
 def get_orchestration_config(key: str, default=None):
     """从数据库读取编排配置。"""
     try:
@@ -1286,6 +1362,23 @@ def should_run_cross_review(
     if spec_count < min_specialists:
         logger.info(f"交叉审阅跳过: spec_count={spec_count} < min_specialists={min_specialists}")
         return False
+
+    # P1 文章质量强化：操作建议强制交叉审阅
+    # 文章解读常含加仓/减仓/清仓等操作建议，即使无冲突也需魔鬼代言人制衡
+    try:
+        force_on_action = get_orchestration_config("cross_review_force_on_action_advice", "true") == "true"
+    except Exception:
+        force_on_action = True
+    if force_on_action and spec_count >= 1:
+        _action_kws = {"加仓", "减仓", "清仓", "买入", "卖出", "止盈", "止损", "补仓", "抄底",
+                       "建议买", "建议卖", "建仓", "调仓", "割肉"}
+        has_action_advice = any(
+            any(kw in (sr.get("analysis", "") or "") for kw in _action_kws)
+            for sr in specialist_results if not sr.get("is_cross_review")
+        )
+        if has_action_advice:
+            logger.info(f"交叉审阅: 检测到操作建议关键词，强制触发（魔鬼代言人制衡），专家数={spec_count}")
+            return not OrchestratorOptimizer.should_skip_cross_review(specialist_results, complexity)
 
     # B1: 复杂度强制触发 — complex/medium 即使无冲突也强制交叉审阅（发挥魔鬼代言人作用）
     try:
@@ -3904,7 +3997,8 @@ def orchestrate(query: str, history: list, rag_context: str = "", cancel_event: 
                 # 从 clarification 中获取 LLM 预判的 need_cross_review
                 predicted_need_cr = False
                 if isinstance(clarification, dict):
-                    predicted_need_cr = clarification.get("need_cross_review", False)
+                    predicted_need_cr = clarification.get("need_cross_review", False) or \
+                                        clarification.get("needs_cross_review", False)
                 needs_cross_review = should_run_cross_review(
                     specialist_results=specialist_results,
                     complexity=complexity,
@@ -5100,7 +5194,8 @@ def _stream_handle_no_tool_calls(msg, specialist_results: list, all_tool_calls: 
     cross_review_min_sev = get_orchestration_config("cross_review_min_severity", "medium")
     predicted_need_cr = False
     if isinstance(clarification, dict):
-        predicted_need_cr = clarification.get("need_cross_review", False)
+        predicted_need_cr = clarification.get("need_cross_review", False) or \
+                            clarification.get("needs_cross_review", False)
     should_cross_review = should_run_cross_review(
         specialist_results=specialist_results,
         complexity=complexity,
@@ -5688,6 +5783,7 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
     completed_specialists = precheck_result["completed_specialists"]
     resumed_results = precheck_result["resumed_results"]
     resume_message_id = precheck_result["resume_message_id"]
+    article_context = precheck_result.get("article_context", "")
 
     # ── 阶段1-1.5: 专家路由、复杂度分类、RAG增强 ──
     route_gen = _stream_route(query, history, rag_context, cancel_event, resume_from,
@@ -5713,6 +5809,16 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
     context_config = route_result_data["context_config"]
     token_budget = route_result_data["token_budget"]
     rag_context = route_result_data["rag_context"]
+
+    # P1 优化 conv_190 质量：文章内容注入后二次路由
+    # 纯链接场景路由器只返回 article_expert，此处根据文章实际内容追加行为金融学/风控专家
+    if article_context and not article_context.startswith("[抓取失败]"):
+        specialists, _sec_reason = _secondary_route_by_article(
+            specialists, article_context, route_result, context_config
+        )
+        if _sec_reason:
+            logger.info(f"[trace:{trace_id}] 文章二次路由: {_sec_reason}")
+            yield {"type": "status", "message": f"文章内容分析: {_sec_reason}"}
 
     perf_metrics["phases"]["routing"] = int((time.time() - start_time) * 1000)
 

@@ -398,7 +398,7 @@ def _init_preset_agents(conn):
         _name = agent["name"]
         if _name in ("估值分析师", "风险管理师", "资产配置师", "文章解读专家"):
             agent["system_prompt"] += _HOLDING_HALLUCINATION_GUARD
-        if _name == "估值分析师":
+        if _name in ("估值分析师", "文章解读专家"):
             agent["system_prompt"] += _VALUATION_DATA_GUARD
         if _name != "需求澄清":  # 需求澄清是路由助手，非分析专家，不加知识/冲突约束
             agent["system_prompt"] += _KNOWLEDGE_CITATION_GUARD + _DATA_CONFLICT_GUARD
@@ -676,7 +676,11 @@ def _init_wealth_specialists(conn):
                 "- 不要只复述结论，要让用户看到「为什么」会这样\n\n"
                 "### 量化验证维度（必做，G-1）\n"
                 "- 文章提到的每个数据点（如「暴涨翻倍」「阴跌」）必须尝试量化\n"
-                "- 对涉及标的/板块，必须调用 query_valuation 工具查询当前估值分位\n"
+                "- **文章提及的每个具体板块/指数/行业**都必须调用 query_valuation 查询当前估值分位\n"
+                "  例：文章提到「科创综指」「创业板」「半导体」「白酒」「红利低波」→ 逐一查询，禁止漏查\n"
+                "- 禁止从持仓上下文带入估值数据而不标注来源（如「来自持仓上下文」不算数据来源）\n"
+                "- 所有估值数据必须标注来源：`[来源: query_valuation工具 / 持仓上下文 / 文章引用]`\n"
+                "- 若某标的查询失败或无数据，必须在「数据缺口」中明确标注，禁止凭记忆推测\n"
                 "- 文章未提供的数据（如 PE/PB 百分位）必须在「数据缺口」中明确标注\n"
                 "- 禁止在无估值数据的情况下给出「减仓/清仓」操作建议\n\n"
                 "### 标的识别与验证\n"
@@ -948,6 +952,9 @@ def _init_wealth_specialists(conn):
             if _agent_key in ("fund_analyst", "article_expert", "behavioral_advisor",
                               "convertible_bond_analyst", "quant_technical_analyst"):
                 system_prompt += _HOLDING_HALLUCINATION_GUARD
+            # P1 文章解读质量强化：article_expert 需查询并引用估值数据，追加估值数据约束
+            if _agent_key in ("article_expert",):
+                system_prompt += _VALUATION_DATA_GUARD
             system_prompt += _KNOWLEDGE_CITATION_GUARD + _DATA_CONFLICT_GUARD
         conn.execute("""
             INSERT OR IGNORE INTO agents (agent_key, name, description, system_prompt, knowledge_scope, icon, is_specialist, tools, is_preset)

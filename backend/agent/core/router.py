@@ -644,6 +644,9 @@ class SmartRouter:
         # 根因：pipeline Phase 0 会把文章正文注入 refined_query，导致关键词路由
         # 被文章内容污染（命中"科技/半导体/跌"等），路由到 5 个通用专家而非 article_expert。
         # 方案：检测到 URL 且非 URL 部分文字较短时，直接返回 article_expert。
+        # P1 优化 conv_190 质量：标记 article_context_pending，让编排器在抓取文章后
+        # 根据文章内容做二次路由（追加 behavioral_advisor/risk_assessor），
+        # 并标记 needs_cross_review=True，让操作建议能触发交叉审阅。
         _route_query = original_query or query
         try:
             import re as _re
@@ -654,8 +657,10 @@ class SmartRouter:
                     return {
                         "complexity": "simple",
                         "specialists": ["article_expert"],
-                        "reason": "纯链接场景，直接路由到文章解读专家",
+                        "reason": "纯链接场景，直接路由到文章解读专家；文章内容注入后由编排器做二次路由",
                         "needs_arbitration": False,
+                        "needs_cross_review": True,  # 文章解读常含操作建议，需交叉审阅制衡
+                        "article_context_pending": True,  # 文章内容未注入，编排器需二次路由
                         "route_by": "url_detection",
                     }
         except Exception:
