@@ -1345,9 +1345,11 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
                 f"[trace:{trace_id}] RAG+澄清超时 {rag_timeout_sec}s，降级处理。"
                 f"query={effective_query[:50]}"
             )
-            # 取消仍在执行的后台 task（同步代码无法真正中断，但释放 await 句柄）
-            for _task in (clarification_task, rag_task):
-                _task.cancel()
+            # 注意：asyncio.to_thread 返回的是 coroutine 而非 Task，没有 .cancel() 方法。
+            # asyncio.wait_for 超时后已自动取消 gather 返回的 Future；
+            # to_thread 内部的同步函数仍在线程池执行（无法真正中断），
+            # 这里不能调用 _task.cancel()，否则抛 AttributeError 导致 producer 崩溃。
+            # 降级逻辑会继续执行，不影响对话流程。
             # 降级：用默认 clarification + 空 RAG 上下文
             clarification = {
                 "complexity": "medium",
