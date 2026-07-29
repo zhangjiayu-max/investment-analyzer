@@ -17,7 +17,7 @@ from fastapi import APIRouter, HTTPException
 from db._conn import _get_conn
 from db.health_score import save_bond_yield
 from db.config import get_config, get_config_int
-from services.llm_service import _call_llm, MODEL
+from services.llm_service import _call_llm, MODEL_ANALYSIS
 
 logger = logging.getLogger(__name__)
 
@@ -342,7 +342,7 @@ async def analyze_rolling_return(target: str = "portfolio", code: str = "",
 
 请给出持有建议和风险提示。不超过200字。"""
         resp = await asyncio.to_thread(lambda: _call_llm(
-            caller="page_summary_rolling_return", model=MODEL,
+            caller="page_summary_rolling_return", model=MODEL_ANALYSIS,
             messages=[{"role": "user", "content": prompt}],
             temperature=0.3, max_tokens=500,
         ))

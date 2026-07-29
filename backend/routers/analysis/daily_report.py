@@ -19,7 +19,7 @@ from db import (
 )
 from db._conn import _get_conn
 from db.agent_analysis_log import create_analysis_log, complete_analysis_log
-from services.llm_service import _call_llm, MODEL
+from services.llm_service import _call_llm, MODEL_AUX
 from infra.state import track_agent as _track_agent, untrack_agent as _untrack_agent
 
 logger = logging.getLogger(__name__)
@@ -335,7 +335,7 @@ async def _run_regenerate_daily_report_async(task_id: int, agent: dict):
         response = await asyncio.to_thread(lambda: _call_llm(
             caller="daily_report",
             trace_id=trace_id,
-            model=MODEL,
+            model=MODEL_AUX,
             messages=[
                 {"role": "system", "content": full_prompt},
                 {"role": "user", "content": "请生成今日市场分析报告。"},

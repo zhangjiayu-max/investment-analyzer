@@ -12,7 +12,7 @@ import logging
 import re
 from typing import Optional
 
-from services.llm_service import _call_llm, MODEL
+from services.llm_service import _call_llm, MODEL_AUX
 from db.config import get_config_int, get_config_float
 
 logger = logging.getLogger(__name__)
@@ -150,7 +150,7 @@ class LlmEvaluatorAgent:
         try:
             response = _call_llm(
                 caller="llm_evaluator",
-                model=MODEL,
+                model=MODEL_AUX,
                 messages=[
                     {"role": "system", "content": EVALUATOR_SYSTEM_PROMPT},
                     {"role": "user", "content": user_prompt},

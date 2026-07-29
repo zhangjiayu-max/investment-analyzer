@@ -414,7 +414,7 @@ def extract_article_structure(title: str, content: str) -> dict:
     """
     import json as _json
     import logging
-    from services.llm_service import _call_llm, MODEL
+    from services.llm_service import _call_llm, MODEL_AUX
 
     prompt = f"""分析以下投资相关文章，提取结构化信息。
 
@@ -445,7 +445,7 @@ def extract_article_structure(title: str, content: str) -> dict:
     try:
         response = _call_llm(
             caller="article_structure",
-            model=MODEL,
+            model=MODEL_AUX,
             messages=[
                 {"role": "system", "content": "你是投资文章分析助手。只输出 JSON。"},
                 {"role": "user", "content": prompt},

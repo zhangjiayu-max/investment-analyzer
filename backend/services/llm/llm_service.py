@@ -49,6 +49,25 @@ _api_key, _base_url, _model = get_llm_config()
 client = OpenAI(api_key=_api_key, base_url=_base_url, timeout=180.0)
 MODEL = _model
 
+# ── 分级模型常量（供独立分析路由使用，避免一律走最强模型浪费 token）────
+# 与 orchestrator._AGENT_MODEL_MAP_* 保持一致：
+#   MODEL_STRONG   : 最强，仅编排器/仲裁使用
+#   MODEL_ANALYSIS : 核心数值分析（max 档），用于估值/基金/风险/分散度/相关性等需精确推理
+#   MODEL_AUX      : 辅助文本/综合（plus 档），用于全景/热点/日报/市场情报等
+# 注：mimo 仅一档，三档统一为 mimo-v2.5-pro
+if LLM_PROVIDER == "qwen":
+    MODEL_STRONG = "qwen3.8-max-preview"
+    MODEL_ANALYSIS = "qwen3.7-max"
+    MODEL_AUX = "qwen3.7-plus"
+elif LLM_PROVIDER == "mimo":
+    MODEL_STRONG = "mimo-v2.5-pro"
+    MODEL_ANALYSIS = "mimo-v2.5-pro"
+    MODEL_AUX = "mimo-v2.5-pro"
+else:  # deepseek
+    MODEL_STRONG = "deepseek-v4-pro"
+    MODEL_ANALYSIS = "deepseek-v4-pro"
+    MODEL_AUX = "deepseek-v4-flash"
+
 # 兜底客户端（主用失败时切换）
 _fallback_config = get_llm_fallback_config()
 _fallback_client = OpenAI(api_key=_fallback_config[0], base_url=_fallback_config[1], timeout=180.0) if _fallback_config else None

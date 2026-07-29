@@ -22,7 +22,7 @@ from db.health_score import save_health_score, get_health_score, list_health_sco
 from db.portfolio import list_holdings
 from db.valuations import get_latest_valuation, list_valuation_indexes, get_index_info
 from db.config import get_config, get_config_float
-from services.llm_service import _call_llm, MODEL
+from services.llm_service import _call_llm, MODEL_AUX
 from infra.utils import _safe_float
 
 logger = logging.getLogger(__name__)
@@ -602,7 +602,7 @@ def _calc_health_score_sync() -> dict:
         import uuid
         trace_id = f"hlth_{uuid.uuid4().hex[:12]}"
         resp = _call_llm(
-            caller="health_score", trace_id=trace_id, model=MODEL,
+            caller="health_score", trace_id=trace_id, model=MODEL_AUX,
             messages=[{"role": "user", "content": prompt}],
             temperature=0.3, max_tokens=500,
         )

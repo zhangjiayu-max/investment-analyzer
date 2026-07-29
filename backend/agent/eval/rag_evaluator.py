@@ -18,7 +18,7 @@ import logging
 import math
 
 from services.rag import build_rag_context_with_details
-from services.llm_service import _call_llm, MODEL
+from services.llm_service import _call_llm, MODEL_AUX
 from db.config import get_config_int, get_config_float, get_config
 
 
@@ -36,7 +36,7 @@ def _get_eval_model() -> str:
         return "qwen3.7-plus"
     elif LLM_PROVIDER == "mimo":
         return "mimo-v2.5-pro"
-    return MODEL  # 兜底
+    return MODEL_AUX  # 兜底
 
 logger = logging.getLogger(__name__)
 

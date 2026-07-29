@@ -32,7 +32,7 @@ def fusion_score(stock_result: dict, kyc_profile: dict = None) -> dict:
             "adjustment": int,             # 融合分 - 规则分（正=上调，负=下调）
         }
     """
-    from services.llm_service import _call_llm, MODEL
+    from services.llm_service import _call_llm, MODEL_ANALYSIS
 
     rule_score = stock_result.get("score", 50)
     rule_rec = stock_result.get("recommendation", "")
@@ -80,7 +80,7 @@ def fusion_score(stock_result: dict, kyc_profile: dict = None) -> dict:
     try:
         response = _call_llm(
             caller="valuation_fusion",
-            model=MODEL,
+            model=MODEL_ANALYSIS,
             messages=[
                 {"role": "system", "content": "你是估值分析融合引擎。只输出 JSON。"},
                 {"role": "user", "content": prompt},

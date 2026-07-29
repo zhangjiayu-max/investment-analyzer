@@ -131,11 +131,11 @@ async def _run_panorama_async(record_id: int, system_prompt: str, holdings: list
             source_id=record_id, query=user_content[:300],
             input_summary="全景诊断",
         )
-        from services.llm_service import _call_llm, MODEL
+        from services.llm_service import _call_llm, MODEL_AUX
         response = await asyncio.to_thread(lambda: _call_llm(
             caller="portfolio_panorama",
             trace_id=trace_id,
-            model=MODEL,
+            model=MODEL_AUX,
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_content},

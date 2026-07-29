@@ -331,11 +331,11 @@ def _rewrite_by_llm(query: str, history: list[dict]) -> str:
 4. 只输出改写后的结果，不要解释，不要加引号"""
 
     try:
-        from services.llm_service import _call_llm, MODEL
+        from services.llm_service import _call_llm, MODEL_AUX
         from db.config import get_config_float
         resp = _call_llm(
             caller="query_rewriter",
-            model=MODEL,
+            model=MODEL_AUX,
             messages=[{"role": "user", "content": prompt}],
             temperature=0,
             max_tokens=100,
@@ -427,11 +427,11 @@ def fuse_clarified_query(original_query: str, user_answer: str, trace_id: str = 
 4. 只输出融合后的结果，不要解释，不要加引号"""
 
     try:
-        from services.llm_service import _call_llm, MODEL
+        from services.llm_service import _call_llm, MODEL_AUX
         resp = _call_llm(
             caller="query_fuser",
             trace_id=trace_id,
-            model=MODEL,
+            model=MODEL_AUX,
             messages=[{"role": "user", "content": prompt}],
             temperature=0,
             max_tokens=150,

@@ -825,7 +825,7 @@ def rerank_results(query: str, results: list[dict], top_k: int = 5,
 
     if use_llm:
         try:
-            from services.llm_service import _call_llm, MODEL
+            from services.llm_service import _call_llm, MODEL_AUX
 
             # 构建重排序 prompt
             doc_summaries = []
@@ -846,7 +846,7 @@ def rerank_results(query: str, results: list[dict], top_k: int = 5,
 
             response = _call_llm(
                 caller="rag_rerank",
-                model=MODEL,
+                model=MODEL_AUX,
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0,
                 max_tokens=100,

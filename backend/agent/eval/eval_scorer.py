@@ -6,7 +6,7 @@
 import json
 import logging
 
-from services.llm_service import _call_llm, MODEL
+from services.llm_service import _call_llm, MODEL_AUX
 from db.config import get_config_int, get_config_float
 
 logger = logging.getLogger(__name__)
@@ -235,7 +235,7 @@ async def score_eval_result(expected_quality: str, actual_result: str,
         # 关闭 thinking mode，强制模型直接输出 JSON
         resp = _call_llm(
             caller="eval_scorer",
-            model=MODEL,
+            model=MODEL_AUX,
             messages=[
                 {"role": "system", "content": prompt},
                 {"role": "user", "content": "输出评分JSON："},
@@ -346,7 +346,7 @@ async def evaluate_llm_output(query: str, output: str, context: str = "",
         # 关闭 thinking mode，强制模型直接输出 JSON
         resp = _call_llm(
             caller="quality_evaluator",
-            model=MODEL,
+            model=MODEL_AUX,
             messages=[
                 {"role": "system", "content": prompt},
                 {"role": "user", "content": "请对上述产出进行多维度评估。\n\n直接输出JSON，不要其他文字："},

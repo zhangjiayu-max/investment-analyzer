@@ -885,7 +885,7 @@ async def evaluate_with_llm(conversation_id: int, message_id: int = None) -> dic
     }
     """
     from db.conversations import get_messages
-    from services.llm_service import _call_llm, MODEL
+    from services.llm_service import _call_llm, MODEL_AUX
 
     messages = get_messages(conversation_id)
     if not messages:
@@ -937,7 +937,7 @@ async def evaluate_with_llm(conversation_id: int, message_id: int = None) -> dic
     try:
         response = _call_llm(
             caller="conversation_evaluator",
-            model=MODEL,
+            model=MODEL_AUX,
             messages=[
                 {"role": "system", "content": "你是专业的投资分析质量评估专家。只输出 JSON，不要其他文字。"},
                 {"role": "user", "content": prompt},

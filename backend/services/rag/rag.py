@@ -435,7 +435,7 @@ def rewrite_query(query: str, force: bool = False) -> str:
         return query
 
     try:
-        from services.llm_service import _call_llm, MODEL
+        from services.llm_service import _call_llm, MODEL_AUX
 
         prompt = f"""将以下用户问题转换为适合知识库检索的关键词查询。
 
@@ -463,7 +463,7 @@ def rewrite_query(query: str, force: bool = False) -> str:
 
         response = _call_llm(
             caller="rag_rewrite",
-            model=MODEL,
+            model=MODEL_AUX,
             messages=[{"role": "user", "content": prompt}],
             temperature=get_config_float('llm.temperature_rewrite', 0.1),
             max_tokens=get_config_int('llm.max_tokens_rewrite', 50),

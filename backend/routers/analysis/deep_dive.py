@@ -255,11 +255,11 @@ async def _run_deep_dive_async(record_id: int, system_prompt: str, user_content:
         input_summary=f"深度:{fund_name}",
     )
     try:
-        from services.llm_service import _call_llm, MODEL
+        from services.llm_service import _call_llm, MODEL_ANALYSIS
         response = await asyncio.to_thread(lambda: _call_llm(
             caller="portfolio_deep_dive",
             trace_id=trace_id,
-            model=MODEL,
+            model=MODEL_ANALYSIS,
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_content},

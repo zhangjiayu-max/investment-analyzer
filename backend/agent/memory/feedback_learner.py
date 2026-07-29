@@ -3,7 +3,7 @@
 import json
 import logging
 
-from services.llm_service import _call_llm, MODEL
+from services.llm_service import _call_llm, MODEL_AUX
 from db.config import get_config_int, get_config_float, get_config
 
 logger = logging.getLogger(__name__)
@@ -150,7 +150,7 @@ def update_user_profile_from_feedback(user_id: str, feedback_type: str,
     try:
         response = _call_llm(
             caller="feedback_learner",
-            model=MODEL,
+            model=MODEL_AUX,
             messages=[
                 {"role": "system", "content": "你是一个精确的用户偏好分析助手。只输出 JSON。"},
                 {"role": "user", "content": prompt},

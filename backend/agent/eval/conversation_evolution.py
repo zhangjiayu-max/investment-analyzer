@@ -521,7 +521,7 @@ def _generate_improved_prompt(
     bad_cases: list,
 ) -> str:
     """让 LLM 基于根因和建议，生成改进版的 prompt。"""
-    from services.llm_service import _call_llm, MODEL
+    from services.llm_service import _call_llm, MODEL_AUX
 
     cases_text = "\n\n".join(
         f"Bad Case #{i+1}: {c.get('detail', '') or c.get('summary', '')}\n"
@@ -553,7 +553,7 @@ def _generate_improved_prompt(
 
     response = _call_llm(
         caller="prompt_improver",
-        model=MODEL,
+        model=MODEL_AUX,
         messages=[{"role": "user", "content": prompt}],
         temperature=0.3,
         max_tokens=8000,

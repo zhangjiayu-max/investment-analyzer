@@ -159,11 +159,11 @@ async def _run_trade_review_async(record_id: int, system_prompt: str, user_conte
         input_summary="交易复盘",
     )
     try:
-        from services.llm_service import _call_llm, MODEL
+        from services.llm_service import _call_llm, MODEL_AUX
         response = await asyncio.to_thread(lambda: _call_llm(
             caller="portfolio_trade_review",
             trace_id=trace_id,
-            model=MODEL,
+            model=MODEL_AUX,
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_content},

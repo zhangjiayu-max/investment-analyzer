@@ -7,7 +7,7 @@ from fastapi import APIRouter
 
 from db import list_holdings, get_config, get_config_int, create_async_task, update_async_task
 from db.portfolio import save_analysis_cache, get_analysis_cache
-from services.llm_service import _call_llm, call_llm_async, MODEL
+from services.llm_service import _call_llm, call_llm_async, MODEL_ANALYSIS
 
 logger = logging.getLogger(__name__)
 
@@ -253,7 +253,7 @@ async def _run_correlation_async(task_id: int, holdings: list, lookback_days: in
 
             llm_result = await asyncio.to_thread(lambda: _call_llm(
                 caller="page_summary_correlation",
-                model=MODEL,
+                model=MODEL_ANALYSIS,
                 messages=[{"role": "user", "content": llm_prompt}],
                 temperature=0.3,
                 max_tokens=get_config_int("llm.max_tokens_analysis", 8000),

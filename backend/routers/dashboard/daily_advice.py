@@ -211,12 +211,12 @@ async def ask_ai_about_signal(signal_id: int):
 请给出你的解释和建议："""
 
     try:
-        from services.llm_service import _call_llm, MODEL
+        from services.llm_service import _call_llm, MODEL_ANALYSIS_ANALYSIS
         from db.config import get_config_float, get_config_int
 
         response = _call_llm(
             caller="daily_advice_ask_ai",
-            model=MODEL,
+            model=MODEL_ANALYSIS,
             messages=[
                 {"role": "system", "content": "你是一位专业的投资持仓顾问。请根据数据给出客观、具体的分析和建议，最后加一句风险提示。"},
                 {"role": "user", "content": prompt},
@@ -249,7 +249,7 @@ async def comprehensive_interpretation(user_id: str = "default"):
     - Prompt 限制 500 token 输出
     """
     from db.config import get_config
-    from services.llm_service import _call_llm, MODEL
+    from services.llm_service import _call_llm, MODEL_ANALYSIS
     from services.rag import build_rag_context_with_details
     import time
 
@@ -318,7 +318,7 @@ async def comprehensive_interpretation(user_id: str = "default"):
         response = _call_llm(
             caller="daily_advice_interpretation",
             trace_id=f"dai-{int(time.time())}",
-            model=MODEL,
+            model=MODEL_ANALYSIS,
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
@@ -406,12 +406,12 @@ async def generate_weekly_report(user_id: str = "default"):
 """
 
     try:
-        from services.llm_service import _call_llm, MODEL
+        from services.llm_service import _call_llm, MODEL_ANALYSIS_ANALYSIS
         from db.config import get_config_float, get_config_int
 
         response = _call_llm(
             caller="weekly_report",
-            model=MODEL,
+            model=MODEL_ANALYSIS,
             messages=[
                 {"role": "system", "content": "你是一个专业的投资周报撰写助手。"},
                 {"role": "user", "content": prompt},

@@ -22,7 +22,7 @@ from db import (
     create_async_task, update_async_task, get_async_task, get_latest_async_task,
 )
 from db._conn import _get_conn
-from services.llm_service import _call_llm, MODEL
+from services.llm_service import _call_llm, MODEL_ANALYSIS
 from services.market_data import get_index_current_price
 from services.shared_signals import build_shared_signals
 from infra.state import track_agent as _track_agent, untrack_agent as _untrack_agent, hot_topics_cache as _hot_topics_cache

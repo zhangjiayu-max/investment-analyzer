@@ -214,10 +214,10 @@ async def _run_portfolio_ai_analysis_async(record_id: int, user_question: str):
 
     # 4. 调用 LLM
     try:
-        from services.llm_service import _call_llm, MODEL
+        from services.llm_service import _call_llm, MODEL_ANALYSIS
         response = await asyncio.to_thread(lambda: _call_llm(
             caller="portfolio_analysis",
-            model=MODEL,
+            model=MODEL_ANALYSIS,
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_content},

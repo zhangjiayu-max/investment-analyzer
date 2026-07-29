@@ -258,7 +258,7 @@ def _call_llm_for_understanding(
 ) -> Optional[dict]:
     """调用 LLM 做 Query 理解，失败返回 None。"""
     try:
-        from services.llm_service import _call_llm, MODEL
+        from services.llm_service import _call_llm, MODEL_AUX
     except ImportError:
         return None
 
@@ -272,7 +272,7 @@ def _call_llm_for_understanding(
         response = _call_llm(
             caller="query_understander",
             trace_id=trace_id,
-            model=MODEL,
+            model=MODEL_AUX,
             messages=[{"role": "user", "content": prompt}],
             temperature=0.1,
             max_tokens=400,

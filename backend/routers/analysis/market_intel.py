@@ -32,7 +32,7 @@ def _safe_percentile(v, default=None):
         return default
 
 
-from services.llm_service import _call_llm, MODEL
+from services.llm_service import _call_llm, MODEL_AUX
 from services.rag import build_rag_context_with_details, log_rag_search  # 保留向后兼容
 from services.market_data import get_market_overview
 from services.unified_evidence import build_unified_evidence
@@ -876,7 +876,7 @@ async def _do_market_intelligence():
         response = await asyncio.wait_for(
             asyncio.to_thread(lambda: _call_llm(
                 caller="market_intelligence",
-                model=MODEL,
+                model=MODEL_AUX,
                 messages=[{"role": "user", "content": prompt}],
                 temperature=get_config_float("llm.temperature_default", 0.3),
                 max_tokens=get_config_int("llm.max_tokens_report", 8192),

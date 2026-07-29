@@ -9,7 +9,7 @@ import re
 from typing import Optional
 
 from db.config import get_config, get_config_float
-from services.llm_service import _call_llm, MODEL
+from services.llm_service import _call_llm, MODEL_ANALYSIS
 from agent.safety.prompt_defense import validate_financial_data
 
 logger = logging.getLogger(__name__)
@@ -98,7 +98,7 @@ class LightValidator:
         try:
             response = _call_llm(
                 caller="light_validator",
-                model=MODEL,
+                model=MODEL_ANALYSIS,
                 messages=[{"role": "user", "content": prompt}],
                 temperature=get_config_float("llm.temperature_tool", 0.2),
                 max_tokens=400,
@@ -182,7 +182,7 @@ class LightValidator:
                 try:
                     resp = _call_llm(
                         caller="self_consistency",
-                        model=MODEL,
+                        model=MODEL_ANALYSIS,
                         messages=[{"role": "user", "content": verify_prompt}],
                         temperature=0.5,
                         max_tokens=10,

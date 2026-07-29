@@ -12,9 +12,9 @@ from typing import Optional
 
 from db._conn import _get_conn
 from db.config import get_config, get_config_bool, get_config_int, get_config_float, get_config_list
-# 模块级导入 _call_llm / MODEL：使 patch("services.event_radar._call_llm") 生效
+# 模块级导入 _call_llm / MODEL_AUX：使 patch("services.event_radar._call_llm") 生效
 # （局部 import 会在调用时重新绑定，导致 mock 失效）
-from services.llm_service import _call_llm, MODEL
+from services.llm_service import _call_llm, MODEL_AUX
 
 logger = logging.getLogger(__name__)
 
@@ -593,7 +593,7 @@ def _extract_trends_from_articles(article_content: str, article_title: str = "")
     try:
         resp = _call_llm(
             caller="event_radar_trend_extractor",
-            model=MODEL,
+            model=MODEL_AUX,
             messages=[{"role": "user", "content": prompt}],
             temperature=0.2,
             max_tokens=3000,
@@ -701,7 +701,7 @@ def _extract_events_from_news(news_list: list[dict], trace_id: str = "") -> list
         resp = _call_llm(
             caller="event_radar_extractor",
             trace_id=trace_id,
-            model=MODEL,
+            model=MODEL_AUX,
             messages=[{"role": "user", "content": prompt}],
             temperature=0.1,
             max_tokens=4000,
@@ -733,7 +733,7 @@ def _extract_events_from_news(news_list: list[dict], trace_id: str = "") -> list
             retry_resp = _call_llm(
                 caller="event_radar_extractor_retry",
                 trace_id=trace_id,
-                model=MODEL,
+                model=MODEL_AUX,
                 messages=[{"role": "user", "content": retry_prompt}],
                 temperature=0.0,  # 更确定性的输出
                 max_tokens=4000,
@@ -1956,7 +1956,7 @@ def analyze_event_impact(event_id: str, trace_id: str = "") -> dict:
         resp = _call_llm(
             caller="event_impact_analyzer",
             trace_id=trace_id,
-            model=MODEL,
+            model=MODEL_AUX,
             messages=[{"role": "user", "content": prompt}],
             temperature=0.3,
             max_tokens=2000,

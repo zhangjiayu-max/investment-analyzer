@@ -18,7 +18,7 @@ from db.eval import (
     activate_prompt_version, update_prompt_scores,
     save_eval_daily_report, get_eval_daily_report, list_eval_daily_reports, get_eval_trends,
 )
-from services.llm_service import _call_llm, MODEL
+from services.llm_service import _call_llm, MODEL_AUX
 
 logger = logging.getLogger(__name__)
 
@@ -88,7 +88,7 @@ async def run_llm_judge(case_type: str, expected_behavior: str,
     try:
         response = await asyncio.to_thread(lambda: _call_llm(
             caller="eval_judge",
-            model=MODEL,
+            model=MODEL_AUX,
             messages=[{"role": "user", "content": prompt}],
             temperature=0.1,
             max_tokens=get_config_int("llm.max_tokens_eval", 2000),
@@ -143,7 +143,7 @@ async def _generate_agent_output(case: dict) -> str:
     try:
         response = await asyncio.to_thread(lambda: _call_llm(
             caller="eval_agent_gen",
-            model=MODEL,
+            model=MODEL_AUX,
             messages=[{"role": "user", "content": full_prompt}],
             temperature=0.3,
             max_tokens=get_config_int("llm.max_tokens_analysis", 8000),

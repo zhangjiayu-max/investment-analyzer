@@ -3,7 +3,7 @@
 import json
 import logging
 
-from services.llm_service import _call_llm, MODEL
+from services.llm_service import _call_llm, MODEL_AUX
 from db.config import get_config_int, get_config_float, get_config
 
 logger = logging.getLogger(__name__)
@@ -145,7 +145,7 @@ def _generate_summary(messages: list) -> str:
     try:
         response = _call_llm(
             caller="memory:summarize",
-            model=MODEL,
+            model=MODEL_AUX,
             messages=[
                 {"role": "system", "content": "你是一个精确的对话摘要助手。只输出摘要内容。"},
                 {"role": "user", "content": prompt},

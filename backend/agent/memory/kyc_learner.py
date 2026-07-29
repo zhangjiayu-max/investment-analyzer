@@ -11,7 +11,7 @@
 import json
 import logging
 
-from services.llm_service import _call_llm, MODEL
+from services.llm_service import _call_llm, MODEL_AUX
 from db.config import get_config_int, get_config_float, get_config
 
 logger = logging.getLogger(__name__)
@@ -68,7 +68,7 @@ def extract_profile_signals(message: str, user_id: str = "default") -> list:
     try:
         response = _call_llm(
             caller="kyc_learner",
-            model=MODEL,
+            model=MODEL_AUX,
             messages=[
                 {"role": "system", "content": "你是精确的用户投资画像分析助手。只输出 JSON。"},
                 {"role": "user", "content": _EXTRACT_PROMPT.format(message=message[:500])},

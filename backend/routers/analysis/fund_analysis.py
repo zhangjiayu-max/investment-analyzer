@@ -156,11 +156,11 @@ async def _run_fund_analysis_async(record_id: int, system_prompt: str, user_cont
         input_summary=f"基金:{fund_code}({fund_name})",
     )
     try:
-        from services.llm_service import _call_llm, MODEL
+        from services.llm_service import _call_llm, MODEL_ANALYSIS
         response = await asyncio.to_thread(lambda: _call_llm(
             caller="portfolio_fund_analysis",
             trace_id=trace_id,
-            model=MODEL,
+            model=MODEL_ANALYSIS,
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_content},

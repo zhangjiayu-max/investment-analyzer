@@ -18,7 +18,7 @@ from db import (
     create_async_task, update_async_task, get_async_task,
     get_config_float, get_config_int,
 )
-from services.llm_service import _call_llm, MODEL
+from services.llm_service import _call_llm, MODEL_ANALYSIS
 from services.rag import build_rag_context_with_details, log_rag_search  # 保留向后兼容
 from models.analysis import AnalysisRunRequest, AnalysisAgentUpdateRequest
 from db.agent_analysis_log import create_analysis_log, complete_analysis_log
@@ -250,7 +250,7 @@ async def _run_index_analysis_async(history_id: int, req_data: dict, agent: dict
     try:
         response = await asyncio.to_thread(lambda: _call_llm(
             caller="index_deep_analysis",
-            model=MODEL,
+            model=MODEL_ANALYSIS,
             messages=[
                 {"role": "system", "content": full_prompt},
                 {"role": "user", "content": f"请对 {index_label} 进行深度分析。"},

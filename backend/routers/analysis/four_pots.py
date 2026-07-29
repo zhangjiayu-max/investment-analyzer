@@ -19,7 +19,7 @@ from fastapi import APIRouter
 from db._conn import _get_conn
 from db.portfolio import list_holdings
 from db.config import get_config, get_config_float
-from services.llm_service import _call_llm, MODEL
+from services.llm_service import _call_llm, MODEL_AUX
 
 logger = logging.getLogger(__name__)
 
@@ -328,7 +328,7 @@ async def calc_dca_optimization() -> dict:
 
 请用通俗语言解释为什么这样建议。不超过150字。"""
             resp = await asyncio.to_thread(lambda: _call_llm(
-                caller="page_summary_four_pots", model=MODEL,
+                caller="page_summary_four_pots", model=MODEL_AUX,
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.3, max_tokens=500,
             ))

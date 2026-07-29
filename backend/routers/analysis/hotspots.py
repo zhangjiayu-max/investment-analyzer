@@ -21,7 +21,7 @@ from db import (
 )
 from db._conn import _get_conn
 from db.agent_analysis_log import create_analysis_log, complete_analysis_log
-from services.llm_service import _call_llm, MODEL
+from services.llm_service import _call_llm, MODEL_AUX
 from services.market_data import get_index_current_price
 from infra.state import track_agent as _track_agent, untrack_agent as _untrack_agent, hot_topics_cache as _hot_topics_cache
 from analysis.action_extractor import extract_actions, format_actions_for_response
@@ -220,7 +220,7 @@ async def _do_hotspots_analysis():
         response = await asyncio.wait_for(asyncio.to_thread(lambda: _call_llm(
             caller="hotspots_analysis",
             trace_id=trace_id,
-            model=MODEL,
+            model=MODEL_AUX,
             messages=[{"role": "user", "content": prompt}],
             temperature=get_config_float('llm.temperature_default', 0.3),
             max_tokens=get_config_int('llm.max_tokens_report', 8192),
@@ -408,7 +408,7 @@ async def hotspots_relate_indexes():
         return matched
 
     async def llm_infer_sectors(title, summary):
-        from services.llm_service import _call_llm, MODEL
+        from services.llm_service import _call_llm, MODEL_AUX
         prompt = f"""分析以下财经新闻，判断涉及哪些行业/板块。
 
 新闻标题：{title}
@@ -427,7 +427,7 @@ async def hotspots_relate_indexes():
         try:
             response = await asyncio.to_thread(lambda: _call_llm(
                 caller="hotspots_relate",
-                model=MODEL,
+                model=MODEL_AUX,
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.1,
                 max_tokens=200,
