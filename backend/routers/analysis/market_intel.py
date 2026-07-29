@@ -924,18 +924,29 @@ async def _do_market_intelligence():
     sectors = _fuzzy_match_sectors_to_data(sectors)
 
     sector_names = [s.get("name", "") for s in sectors if s.get("name")]
+    _mi_history_id = None
     try:
         conn = _get_conn()
-        conn.execute(
-            "INSERT INTO analysis_history (agent_id, agent_name, prompt_used, news_context, result, token_usage) VALUES (?, ?, ?, ?, ?, ?)",
+        _mi_cur = conn.execute(
+            "INSERT INTO analysis_history (agent_id, agent_name, prompt_used, news_context, result, token_usage, status, error_msg) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (agent_id or 0, "市场情报分析师", base_prompt[:500], news_text[:500],
              json.dumps({"summary": summary, "sectors": sector_names}, ensure_ascii=False),
-             (response.usage.total_tokens if llm_status == "success" and hasattr(response, 'usage') and response.usage else 0))
+             (response.usage.total_tokens if llm_status == "success" and hasattr(response, 'usage') and response.usage else 0),
+             llm_status, llm_error_msg[:500] if llm_status == "error" else "")
         )
         conn.commit()
+        _mi_history_id = _mi_cur.lastrowid
         conn.close()
     except Exception as e:
         logger.warning(f"记录市场情报分析历史失败: {e}")
+
+    # 回补 source_id 到统一日志
+    if _mi_history_id:
+        try:
+            from db.agent_analysis_log import update_analysis_log_source
+            update_analysis_log_source(trace_id, _mi_history_id)
+        except Exception as _e:
+            logger.warning(f"market_intel update_analysis_log_source 失败: {_e}")
 
     try:
         create_agent_run(

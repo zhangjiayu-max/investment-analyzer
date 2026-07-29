@@ -866,10 +866,11 @@ async def get_enhanced_strategy():
     llm_start = time.time()
     llm_status = "success"
     tokens = 0
+    llm_error_msg = ""
     # 接入统一日志（running）
     _es_trace_id = f"log_{uuid.uuid4().hex[:12]}"
     try:
-        from db.agent_analysis_log import create_analysis_log, complete_analysis_log
+        from db.agent_analysis_log import create_analysis_log, complete_analysis_log, update_analysis_log_source
         create_analysis_log(
             trace_id=_es_trace_id, agent_id=agent_id, agent_name="增强策略分析师",
             analysis_type="enhanced_strategy", source_table="analysis_history",
@@ -900,22 +901,35 @@ async def get_enhanced_strategy():
         logger.warning(f"增强策略 LLM 分析失败: {e}")
         parsed = {"strategies": [], "overall_summary": f"分析失败: {e}"}
         llm_status = "error"
+        llm_error_msg = str(e)
         content = ""
 
     llm_duration = int((time.time() - llm_start) * 1000)
 
     # 7. 记录分析历史 + agent_runs
+    _es_history_id = None
     try:
-        create_analysis_history(
-            agent_id=agent_id or 0,
-            agent_name="增强策略分析师",
-            prompt_used=system_prompt[:500],
-            news_context=news_text[:500],
-            result=json.dumps(parsed, ensure_ascii=False)[:2000],
-            token_usage=tokens,
+        from db._conn import _get_conn as _es_get_conn
+        _es_conn = _es_get_conn()
+        _es_cur = _es_conn.execute(
+            "INSERT INTO analysis_history (agent_id, agent_name, prompt_used, news_context, result, token_usage, status, error_msg) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (agent_id or 0, "增强策略分析师", system_prompt[:500], news_text[:500],
+             json.dumps(parsed, ensure_ascii=False)[:2000], tokens, llm_status,
+             llm_error_msg[:500] if llm_status == "error" else ""),
         )
+        _es_conn.commit()
+        _es_history_id = _es_cur.lastrowid
+        _es_conn.close()
     except Exception as e:
         logger.warning(f"记录增强策略分析历史失败: {e}")
+
+    # 回补 source_id 到统一日志
+    if _es_history_id:
+        try:
+            update_analysis_log_source(_es_trace_id, _es_history_id)
+        except Exception as _e:
+            logger.warning(f"update_analysis_log_source 失败: {_e}")
 
     try:
         create_agent_run(
@@ -935,6 +949,7 @@ async def get_enhanced_strategy():
             status="done" if llm_status == "success" else "error",
             duration_ms=llm_duration,
             token_usage=tokens,
+            error_msg=llm_error_msg if llm_status == "error" else None,
         )
     except Exception as _e:
         logger.warning(f"complete_analysis_log 失败: {_e}")
