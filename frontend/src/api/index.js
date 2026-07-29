@@ -957,6 +957,18 @@ export function evaluateAnalysisLog(logId) {
   return api.post(`/analysis/log/${logId}/evaluate`)
 }
 
+// ==================== 对话协作 agent 产出（agent_runs 表） ====================
+
+/** 对话协作 agent 执行记录列表（支持多维度过滤） */
+export function listAgentRuns(params = {}) {
+  return api.get('/analysis/log/list_runs', { params })
+}
+
+/** 对话协作单条 agent_run 详情（含完整 result 和 tool_calls） */
+export function getAgentRunDetail(runId) {
+  return api.get(`/analysis/log/runs/${runId}`)
+}
+
 
 /** Agent 配置列表 */
 export function listAnalysisAgents() {

@@ -1294,6 +1294,139 @@ def get_agent_runs(conversation_id: int, limit: int = 50) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+def list_agent_runs_with_filter(
+    conversation_id: int = None,
+    agent_key: str = None,
+    status: str = None,
+    date_from: str = None,
+    date_to: str = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> tuple[list[dict], int]:
+    """多维度查询 agent_runs 表（对话协作产出），返回 (列表, 总数)。
+
+    用于"分析记录"页面的"对话协作"Tab，展示每次对话中各专家的执行产出。
+    与 agent_analysis_log 表互补：agent_analysis_log 记录独立分析接口，
+    agent_runs 记录对话流程的多专家协作。
+
+    过滤维度：
+    - conversation_id: 按对话筛选
+    - agent_key: 按专家筛选（如 valuation_expert, risk_assessor）
+    - status: 按状态筛选（success/completed/error/timeout/cancelled）
+    - date_from/date_to: 时间范围
+    """
+    conn = _get_conn()
+    try:
+        where_parts = ["1=1"]
+        params = []
+        if conversation_id is not None:
+            where_parts.append("conversation_id = ?")
+            params.append(conversation_id)
+        if agent_key:
+            where_parts.append("agent_key = ?")
+            params.append(agent_key)
+        if status:
+            where_parts.append("status = ?")
+            params.append(status)
+        if date_from:
+            where_parts.append("date(created_at) >= date(?)")
+            params.append(date_from)
+        if date_to:
+            where_parts.append("date(created_at) <= date(?)")
+            params.append(date_to)
+        where_clause = " AND ".join(where_parts)
+
+        # 总数
+        total = conn.execute(
+            f"SELECT COUNT(*) as cnt FROM agent_runs WHERE {where_clause}", params
+        ).fetchone()["cnt"]
+
+        # 列表（result 截取避免响应过大；排除"对话整体"汇总行，只看专家产出）
+        rows = conn.execute(
+            f"""
+            SELECT id, conversation_id, message_id, agent_key, agent_name,
+                   query, substr(result, 1, 500) as result_preview,
+                   length(result) as result_len,
+                   substr(tool_calls, 1, 200) as tool_calls_preview,
+                   duration_ms, status, run_phase, trace_id, created_at
+            FROM agent_runs
+            WHERE {where_clause}
+            ORDER BY id DESC
+            LIMIT ? OFFSET ?
+            """,
+            [*params, limit, offset],
+        ).fetchall()
+        return [dict(r) for r in rows], total
+    finally:
+        conn.close()
+
+
+def get_agent_run_stats() -> dict:
+    """agent_runs 表的统计信息（对话协作 Tab 概览）。
+
+    返回各状态分布、专家 Top N、今日/总数等，用于页头展示。
+    """
+    conn = _get_conn()
+    try:
+        # 总数
+        total = conn.execute("SELECT COUNT(*) as cnt FROM agent_runs").fetchone()["cnt"]
+        today = conn.execute(
+            "SELECT COUNT(*) as cnt FROM agent_runs WHERE date(created_at)=date('now','localtime')"
+        ).fetchone()["cnt"]
+
+        # 按 status 分布
+        status_rows = conn.execute(
+            "SELECT status, COUNT(*) as cnt FROM agent_runs GROUP BY status ORDER BY cnt DESC"
+        ).fetchall()
+        status_dist = {r["status"]: r["cnt"] for r in status_rows}
+
+        # 按 agent_key Top 10（排除 chat_turn 汇总行）
+        agent_rows = conn.execute("""
+            SELECT agent_key, agent_name, COUNT(*) as cnt,
+                   ROUND(AVG(duration_ms)) as avg_ms,
+                   SUM(CASE WHEN status IN ('success','completed') THEN 1 ELSE 0 END) as success_cnt
+            FROM agent_runs
+            WHERE agent_key != 'chat_turn'
+            GROUP BY agent_key
+            ORDER BY cnt DESC
+            LIMIT 10
+        """).fetchall()
+        top_agents = [dict(r) for r in agent_rows]
+
+        # 平均耗时（仅成功）
+        avg_row = conn.execute("""
+            SELECT ROUND(AVG(duration_ms)) as avg_ms,
+                   MAX(duration_ms) as max_ms,
+                   MIN(duration_ms) as min_ms
+            FROM agent_runs
+            WHERE status IN ('success','completed') AND duration_ms > 0
+        """).fetchone()
+
+        return {
+            "total": total,
+            "today": today,
+            "status_dist": status_dist,
+            "top_agents": top_agents,
+            "avg_duration_ms": avg_row["avg_ms"] if avg_row else 0,
+            "max_duration_ms": avg_row["max_ms"] if avg_row else 0,
+            "min_duration_ms": avg_row["min_ms"] if avg_row else 0,
+        }
+    finally:
+        conn.close()
+
+
+def get_agent_run_detail(run_id: int) -> dict:
+    """获取单条 agent_run 完整记录（含完整 result 和 tool_calls）。"""
+    conn = _get_conn()
+    try:
+        row = conn.execute(
+            "SELECT * FROM agent_runs WHERE id = ?", (run_id,)
+        ).fetchone()
+        return dict(row) if row else None
+    finally:
+        conn.close()
+
+
 def get_running_agent_count(conversation_id: int) -> int:
     """获取对话中正在运行的 agent 数量（用于防重复发送）。
     实际状态值: pending / running / completed / failed / success / error / cancelled

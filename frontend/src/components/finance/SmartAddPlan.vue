@@ -676,14 +676,6 @@ onMounted(() => {
                 </span>
               </div>
               <table class="pyramid-table">
-                <thead>
-                  <tr>
-                    <th class="num">档位</th>
-                    <th class="num">亏损触发点</th>
-                    <th class="num">释放金额</th>
-                    <th class="num">累计</th>
-                    <th>状态</th>
-                  </tr>
                 </thead>
                 <tbody>
                   <tr

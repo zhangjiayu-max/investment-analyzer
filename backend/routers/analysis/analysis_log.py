@@ -8,6 +8,9 @@ from db.agent_analysis_log import (
     list_analysis_logs, get_analysis_log, count_analysis_logs,
     get_analysis_stats, fetch_source_result, update_eval_result,
 )
+from db.agents import (
+    list_agent_runs_with_filter, get_agent_run_stats, get_agent_run_detail,
+)
 from db.config import get_config_bool
 
 logger = logging.getLogger(__name__)
@@ -43,6 +46,53 @@ async def list_analysis_log_api(
     )
     stats = get_analysis_stats()
     return {"logs": logs, "total": total, "stats": stats}
+
+
+# ── 对话协作 Tab：查询 agent_runs 表（对话流程的专家产出）──
+# 注意：list_runs 和 runs/{run_id} 必须在 {log_id} 之前注册，否则会被吞掉
+
+
+@router.get("/api/analysis/log/list_runs")
+async def list_agent_runs_api(
+    conversation_id: int = None,
+    agent_key: str = "",
+    status: str = "",
+    date_from: str = "",
+    date_to: str = "",
+    limit: int = 50,
+    offset: int = 0,
+):
+    """查询对话协作的 agent 执行记录（agent_runs 表）。
+
+    与 /api/analysis/log/list（独立分析接口）互补：
+    - list：查 agent_analysis_log 表，记录独立分析接口（日报/分散度/全景等）
+    - list_runs：查 agent_runs 表，记录对话流程的多专家协作产出
+
+    支持按对话ID/专家/状态/日期过滤，返回分页列表 + 总数 + 统计。
+    """
+    runs, total = list_agent_runs_with_filter(
+        conversation_id=conversation_id,
+        agent_key=agent_key or None,
+        status=status or None,
+        date_from=date_from or None,
+        date_to=date_to or None,
+        limit=limit,
+        offset=offset,
+    )
+    stats = get_agent_run_stats()
+    return {"runs": runs, "total": total, "stats": stats}
+
+
+@router.get("/api/analysis/log/runs/{run_id}")
+async def get_agent_run_detail_api(run_id: int):
+    """获取单条 agent_run 详情（含完整 result 和 tool_calls）。
+
+    用于对话协作 Tab 的详情弹窗，查看专家完整分析内容。
+    """
+    run = get_agent_run_detail(run_id)
+    if not run:
+        raise HTTPException(404, "记录不存在")
+    return {"run": run}
 
 
 @router.get("/api/analysis/log/{log_id}")
