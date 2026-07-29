@@ -1450,6 +1450,7 @@ async def _auto_daily_report():
                         context=f"新闻: {news_context[:300]}\n估值: {val_context[:300]}",
                         target_type="daily_report",
                         target_id=report_id,
+                        analysis_type="daily_report",
                     )
                 except Exception as e:
                     logging.warning(f"简报自动质量评估失败: {e}")

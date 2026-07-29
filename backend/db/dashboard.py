@@ -360,6 +360,20 @@ def list_llm_feedback(caller: str = None, rating: str = None, limit: int = 50) -
     return [dict(r) for r in rows]
 
 
+def get_llm_feedback_by_target(target_type: str, target_id: int) -> dict | None:
+    """按 target_type + target_id 查询最新一条 LLM 反馈（含各维度评语）。"""
+    if not target_type or not target_id:
+        return None
+    conn = _get_conn()
+    row = conn.execute("""
+        SELECT * FROM llm_feedback
+        WHERE target_type = ? AND target_id = ?
+        ORDER BY id DESC LIMIT 1
+    """, (target_type, target_id)).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
 def get_quality_summary(days: int = 30) -> dict:
     """获取质量评分概览。"""
     conn = _get_conn()

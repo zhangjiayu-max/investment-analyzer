@@ -35,6 +35,7 @@ const detailVisible = ref(false)
 const detailLoading = ref(false)
 const detailData = ref(null)
 const detailResult = ref('')
+const evalFeedback = ref(null)
 
 // ── 加载列表 ──
 async function loadLogs() {
@@ -64,10 +65,12 @@ async function viewDetail(logId) {
   detailLoading.value = true
   detailData.value = null
   detailResult.value = ''
+  evalFeedback.value = null
   try {
     const res = await getAnalysisLogDetail(logId)
     detailData.value = res.data.log
     detailResult.value = res.data.source_result || ''
+    evalFeedback.value = res.data.eval_feedback || null
   } catch (e) {
     console.error('加载详情失败:', e)
   } finally {
@@ -465,6 +468,43 @@ onMounted(() => loadLogs())
                 <h4>分析结果</h4>
                 <div class="detail-result" v-html="detailResult"></div>
               </div>
+              <div class="detail-section" v-if="evalFeedback">
+                <h4>质量评估 <span class="eval-type-tag" v-if="evalFeedback.analysis_type">{{ evalFeedback.analysis_type }}</span></h4>
+                <div class="eval-overview">
+                  <div class="eval-overall">
+                    <span class="eval-overall-label">综合评分</span>
+                    <span class="eval-overall-score" :class="scoreClass(evalFeedback.overall_score)">{{ evalFeedback.overall_score ?? '-' }}</span>
+                    <span class="eval-overall-reason" v-if="evalFeedback.overall_reason">{{ evalFeedback.overall_reason }}</span>
+                  </div>
+                </div>
+                <div class="eval-metrics">
+                  <div class="metric-item">
+                    <div class="metric-head">
+                      <span class="metric-label">数据准确性</span>
+                      <span class="metric-score" :class="scoreClass(evalFeedback.score_data_accuracy)">{{ evalFeedback.score_data_accuracy ?? '-' }}</span>
+                    </div>
+                    <div class="metric-reason" v-if="evalFeedback.data_accuracy_reason">{{ evalFeedback.data_accuracy_reason }}</div>
+                  </div>
+                  <div class="metric-item">
+                    <div class="metric-head">
+                      <span class="metric-label">逻辑性</span>
+                      <span class="metric-score" :class="scoreClass(evalFeedback.score_logic)">{{ evalFeedback.score_logic ?? '-' }}</span>
+                    </div>
+                    <div class="metric-reason" v-if="evalFeedback.logic_reason">{{ evalFeedback.logic_reason }}</div>
+                  </div>
+                  <div class="metric-item">
+                    <div class="metric-head">
+                      <span class="metric-label">可执行性</span>
+                      <span class="metric-score" :class="scoreClass(evalFeedback.score_actionability)">{{ evalFeedback.score_actionability ?? '-' }}</span>
+                    </div>
+                    <div class="metric-reason" v-if="evalFeedback.actionability_reason">{{ evalFeedback.actionability_reason }}</div>
+                  </div>
+                </div>
+              </div>
+              <div class="detail-section eval-empty" v-else-if="detailData && detailData.status === 'done'">
+                <h4>质量评估</h4>
+                <div class="eval-empty-tip">暂无评估数据，可点击列表"评分"按钮触发评估</div>
+              </div>
             </div>
             <div class="drawer-body" v-else-if="detailLoading">
               加载中...
@@ -624,6 +664,21 @@ onMounted(() => loadLogs())
 .error-text { color: #dc2626; }
 .detail-section h4 { font-size: 0.9rem; margin: 0 0 0.5rem; }
 .detail-result { font-size: 0.8rem; line-height: 1.7; color: var(--color-text-primary); white-space: pre-wrap; word-break: break-word; background: var(--color-bg-secondary); padding: 1rem; border-radius: 6px; }
+
+/* 质量评估区块 */
+.eval-type-tag { display: inline-block; padding: 0.05rem 0.4rem; margin-left: 0.4rem; background: var(--color-bg-secondary); color: var(--color-text-tertiary); border-radius: 8px; font-size: 0.68rem; font-weight: 500; }
+.eval-overview { background: var(--color-bg-secondary); border-radius: 6px; padding: 0.75rem 1rem; margin-bottom: 0.5rem; }
+.eval-overall { display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap; }
+.eval-overall-label { font-size: 0.75rem; color: var(--color-text-tertiary); }
+.eval-overall-score { display: inline-block; padding: 0.1rem 0.5rem; border-radius: 4px; font-size: 0.9rem; font-weight: 700; min-width: 32px; text-align: center; }
+.eval-overall-reason { font-size: 0.75rem; color: var(--color-text-secondary); flex: 1 1 100%; margin-top: 0.25rem; line-height: 1.5; }
+.eval-metrics { display: flex; flex-direction: column; gap: 0.5rem; }
+.metric-item { background: var(--color-bg-secondary); border-radius: 6px; padding: 0.6rem 0.85rem; }
+.metric-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.25rem; }
+.metric-label { font-size: 0.78rem; color: var(--color-text-secondary); font-weight: 500; }
+.metric-score { display: inline-block; padding: 0.05rem 0.45rem; border-radius: 4px; font-size: 0.78rem; font-weight: 700; min-width: 28px; text-align: center; }
+.metric-reason { font-size: 0.72rem; color: var(--color-text-tertiary); line-height: 1.55; }
+.eval-empty .eval-empty-tip { font-size: 0.75rem; color: var(--color-text-tertiary); padding: 0.75rem 1rem; background: var(--color-bg-secondary); border-radius: 6px; }
 
 /* 动画 */
 .fade-enter-active, .fade-leave-active { transition: opacity 0.2s; }

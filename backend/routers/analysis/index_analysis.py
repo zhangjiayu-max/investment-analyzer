@@ -306,6 +306,7 @@ async def _run_index_analysis_async(history_id: int, req_data: dict, agent: dict
                 context=f"新闻: {news_context[:300]}\n估值: {valuation_context[:300]}",
                 target_type="analysis",
                 target_id=history_id,
+                analysis_type="index_analysis",
             )
         except Exception as e:
             logger.warning(f"自动质量评估失败: {e}")

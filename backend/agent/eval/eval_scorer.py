@@ -25,6 +25,91 @@ def _get_eval_agent() -> dict | None:
         return None
 
 
+# 各 analysis_type 对应的输出规范（用于评估时对照打分）
+_ANALYSIS_TYPE_SPECS: dict[str, str] = {
+    "diversification": (
+        "【分散度分析输出规范】\n"
+        "- 总体判断：一句话概括分散度水平\n"
+        "- 集中度分析：逐一列出超阈值的基金，含具体数值和阈值对比\n"
+        "- 相关性分析：列出高相关基金对及相关系数\n"
+        "- 行业/风格暴露：分析行业集中度及风险\n"
+        "- 改进建议：3-5条具体可操作建议，含调整比例和标的\n"
+        "- 每条分析标注数据来源\n"
+        "- 输出长度≥500字，禁止过度压缩为要点式"
+    ),
+    "panorama": (
+        "【全景分析输出规范】\n"
+        "- 覆盖估值/趋势/风险/资金面多维度\n"
+        "- 引用具体数据指标（分位点/PE/PB等）\n"
+        "- 给出明确的综合判断和操作建议\n"
+        "- 标注数据来源和置信度"
+    ),
+    "deep_dive": (
+        "【深度分析输出规范】\n"
+        "- 多维度交叉验证（估值/基本面/资金/技术面）\n"
+        "- 引用具体数据并标注来源\n"
+        "- 识别主要风险点和催化剂\n"
+        "- 给出明确结论和操作建议"
+    ),
+    "enhanced_strategy": (
+        "【增强策略输出规范】\n"
+        "- 策略逻辑清晰，基于真实估值/持仓数据\n"
+        "- 给出具体可执行的调仓建议（金额/比例/标的）\n"
+        "- 包含风险提示和止损/止盈条件\n"
+        "- 引用智能补仓档位数据作为建议依据"
+    ),
+    "market_intel": (
+        "【市场情报输出规范】\n"
+        "- 覆盖资金面/政策面/情绪面多维度\n"
+        "- 引用具体数据（北向资金/南向资金/成交量等）\n"
+        "- 给出明确的市场判断\n"
+        "- 标注数据来源和时效性"
+    ),
+    "daily_report": (
+        "【日报输出规范】\n"
+        "- 覆盖市场概况/估值/资金/新闻多维度\n"
+        "- 引用具体数据指标\n"
+        "- 给出明确的市场温度和操作建议\n"
+        "- 结构清晰，要点突出"
+    ),
+    "index_analysis": (
+        "【指数分析输出规范】\n"
+        "- 多维度估值分析（PE/PB/PS/分位点）\n"
+        "- 趋势判断结合资金面和宏观环境\n"
+        "- 给出明确的投资建议和风险提示\n"
+        "- 引用具体数据并标注来源"
+    ),
+    "fund_analysis": (
+        "【基金分析输出规范】\n"
+        "- 穿透分析基金重仓股/行业分布\n"
+        "- 估值/持仓协同分析\n"
+        "- 建仓决策建议（金额/比例/节奏）\n"
+        "- 引用组合约束红线并标注超限情况"
+    ),
+    "what_if": (
+        "【情景推演输出规范】\n"
+        "- 多情景分析（乐观/中性/悲观）\n"
+        "- 引用具体数据支撑推演\n"
+        "- 给出各情景概率和预期收益\n"
+        "- 标注关键假设和风险点"
+    ),
+    "article_expert": (
+        "【文章解读输出规范】\n"
+        "- 提取核心观点和关键数据\n"
+        "- 历史对比/机制拆解/量化验证三维度\n"
+        "- 文章提及的板块/指数必须调用query_valuation查询\n"
+        "- 标注数据来源，查询失败标注数据缺口"
+    ),
+}
+
+
+def _get_analysis_type_specs(analysis_type: str) -> str:
+    """获取 analysis_type 对应的输出规范文本。"""
+    if not analysis_type:
+        return ""
+    return _ANALYSIS_TYPE_SPECS.get(analysis_type, "")
+
+
 def _build_eval_prompt(analysis_type: str, expected_quality: str, actual_result: str,
                        agent_prompt: str = "") -> str:
     """构建评估 system prompt。"""
@@ -286,7 +371,8 @@ async def score_eval_result(expected_quality: str, actual_result: str,
 
 
 async def evaluate_llm_output(query: str, output: str, context: str = "",
-                               target_type: str = "", target_id: int = None) -> dict:
+                               target_type: str = "", target_id: int = None,
+                               analysis_type: str = "") -> dict:
     """对 LLM 产出进行多维度质量评估。
 
     Args:
@@ -295,6 +381,7 @@ async def evaluate_llm_output(query: str, output: str, context: str = "",
         context: 上下文信息（数据来源等）
         target_type: 目标类型（analysis/daily_report/chat）
         target_id: 关联目标 ID
+        analysis_type: 分析类型（diversification/panorama/...），用于注入对应输出规范
 
     Returns:
         {
@@ -318,7 +405,12 @@ async def evaluate_llm_output(query: str, output: str, context: str = "",
     agent = _get_eval_agent()
     agent_prompt = agent["system_prompt"] if agent else ""
 
+    # 按 analysis_type 注入对应输出规范，作为评分对照标准
+    type_specs = _get_analysis_type_specs(analysis_type)
+    type_specs_block = f"\n\n## 类型特定要求（{analysis_type}）\n{type_specs}" if type_specs else ""
+
     prompt = f"""{agent_prompt}
+{type_specs_block}
 
 ## 待评估内容
 
@@ -339,6 +431,7 @@ async def evaluate_llm_output(query: str, output: str, context: str = "",
 
 注意：
 - score 必须是 1-10 的整数
+- reason 必须包含具体的优点和扣分点，禁止泛泛而谈
 - 直接输出 JSON，不要有其他任何内容
 - 不要输出 ```json 代码块标记"""
 
@@ -364,19 +457,27 @@ async def evaluate_llm_output(query: str, output: str, context: str = "",
             text = getattr(msg, "reasoning_content", None) or ""
         scores = _parse_multi_dim_response(text)
 
-        logger.info(f"质量评估完成: 综合{scores['overall_score']}分 "
+        logger.info(f"质量评估完成 [{analysis_type or '未知'}]: 综合{scores['overall_score']}分 "
                     f"(数据{scores['data_accuracy']['score']}, "
                     f"逻辑{scores['logic']['score']}, "
                     f"可执行{scores['actionability']['score']})")
 
-        # 异步保存到 llm_feedback
+        # 异步保存到 llm_feedback，含各维度评语（存入 comment 字段）
         try:
             from db import save_llm_feedback
+            comment_data = {
+                "analysis_type": analysis_type,
+                "data_accuracy_reason": scores["data_accuracy"]["reason"],
+                "logic_reason": scores["logic"]["reason"],
+                "actionability_reason": scores["actionability"]["reason"],
+                "overall_reason": scores["overall_reason"],
+            }
             save_llm_feedback(
                 caller="quality_evaluator",
                 input_summary=query[:200],
                 output_summary=output[:200],
                 rating="neutral",
+                comment=json.dumps(comment_data, ensure_ascii=False),
                 score_data_accuracy=scores["data_accuracy"]["score"],
                 score_logic=scores["logic"]["score"],
                 score_actionability=scores["actionability"]["score"],

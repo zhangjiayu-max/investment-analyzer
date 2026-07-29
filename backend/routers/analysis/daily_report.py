@@ -408,6 +408,7 @@ async def _run_regenerate_daily_report_async(task_id: int, agent: dict):
                     context=f"新闻: {news_context[:300]}\n估值: {val_context[:300]}",
                     target_type="daily_report",
                     target_id=new_id,
+                    analysis_type="daily_report",
                 )
             except Exception as e:
                 logging.warning(f"简报自动质量评估失败: {e}")

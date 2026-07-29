@@ -107,7 +107,34 @@ async def get_analysis_log_detail_api(log_id: int):
         log.get("source_table", ""), log.get("source_id"),
         trace_id=log.get("trace_id"),
     )
-    return {"log": log, "source_result": source_result}
+    # 查询最新一条质量评估反馈（含各维度评语）
+    eval_feedback = None
+    try:
+        from db import get_llm_feedback_by_target
+        fb = get_llm_feedback_by_target("analysis_log", log_id)
+        if fb:
+            comment = fb.get("comment") or ""
+            reasons = {}
+            if comment:
+                import json as _json
+                try:
+                    reasons = _json.loads(comment)
+                except (ValueError, TypeError):
+                    reasons = {}
+            eval_feedback = {
+                "overall_score": fb.get("overall_score"),
+                "score_data_accuracy": fb.get("score_data_accuracy"),
+                "score_logic": fb.get("score_logic"),
+                "score_actionability": fb.get("score_actionability"),
+                "analysis_type": reasons.get("analysis_type", ""),
+                "data_accuracy_reason": reasons.get("data_accuracy_reason", ""),
+                "logic_reason": reasons.get("logic_reason", ""),
+                "actionability_reason": reasons.get("actionability_reason", ""),
+                "overall_reason": reasons.get("overall_reason", ""),
+            }
+    except Exception as e:
+        logger.warning(f"查询质量评估反馈失败 log_id={log_id}: {e}")
+    return {"log": log, "source_result": source_result, "eval_feedback": eval_feedback}
 
 
 @router.post("/api/analysis/log/{log_id}/evaluate")
@@ -118,10 +145,11 @@ async def evaluate_analysis_log_api(log_id: int):
         raise HTTPException(404, "记录不存在")
     if log.get("status") != "done":
         raise HTTPException(400, "仅完成状态的分析可评估")
-    # 查回原始结果
-    output = ""
-    if log.get("source_id"):
-        output = fetch_source_result(log["source_table"], log["source_id"])
+    # 查回原始结果（传入 trace_id 用于 fallback：当 source_id 为 None 时从 agent_runs 查）
+    output = fetch_source_result(
+        log.get("source_table", ""), log.get("source_id"),
+        trace_id=log.get("trace_id"),
+    )
     if not output or len(output.strip()) < 50:
         raise HTTPException(400, "分析结果为空或过短，无法评估")
 
@@ -134,6 +162,7 @@ async def evaluate_analysis_log_api(log_id: int):
                 context=log.get("input_summary") or "",
                 target_type="analysis_log",
                 target_id=log_id,
+                analysis_type=log.get("analysis_type", "") or "",
             )
             overall = result.get("overall_score", 0)
             update_eval_result(log_id, float(overall))

@@ -46,7 +46,7 @@ from db.dashboard import (
     save_recommendations, get_recommendation, list_recommendations, verify_recommendation,
     auto_verify_pending_recommendations, save_recommendation_feedback,
     list_recommendation_feedback, get_recommendation_feedback_stats,
-    save_llm_feedback, list_llm_feedback, get_user_profile,
+    save_llm_feedback, list_llm_feedback, get_llm_feedback_by_target, get_user_profile,
     update_user_profile, increment_feedback_count,
     create_chat_feedback,
     get_quality_summary, get_quality_trend, get_low_quality_items,
