@@ -38,6 +38,17 @@ from agent.core.context_builder import build_specialist_context, build_simple_ch
 logger = logging.getLogger(__name__)
 
 
+def _route_model(agent_key: str) -> str:
+    """成本感知路由：按 agent_key 选择分级模型，避免全部用最贵模型。
+
+    模块级函数（2026-07-29 修复）：原为 _phase_execution 内的嵌套函数，
+    但 _execute_steps_parallel 和 _fallback_execution 是独立的模块级函数，
+    无法通过闭包访问，导致并行/降级路径触发 NameError（conv 191 案例）。
+    """
+    from agent.core.orchestrator import _get_model_for_agent, _is_cost_routing_enabled, MODEL as _ORCH_MODEL
+    return _get_model_for_agent(agent_key) if _is_cost_routing_enabled() else _ORCH_MODEL
+
+
 # ── Pipeline 事件类型 ──────────────────────────
 
 EVENT_PHASE_START = "phase_start"
@@ -1269,11 +1280,6 @@ def _phase_execution(
     Generator：yield specialist_start/done 事件，return 结果 dict。
     """
     from agent.core.multi_agent import run_specialist
-    from agent.core.orchestrator import _get_model_for_agent, _is_cost_routing_enabled, MODEL as _ORCH_MODEL
-
-    def _route_model(agent_key: str) -> str:
-        """成本感知路由：按 agent_key 选择分级模型，避免全部用最贵模型。"""
-        return _get_model_for_agent(agent_key) if _is_cost_routing_enabled() else _ORCH_MODEL
 
     specialists_result = []
     all_tool_calls = []
