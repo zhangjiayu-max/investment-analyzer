@@ -675,7 +675,16 @@ onMounted(() => {
                   {{ p.pyramid.scale_reason }}（原 {{ fmtMoney(p.pyramid.scaled_from_pool) }} → {{ fmtMoney(p.pyramid.released_amount) }}）
                 </span>
               </div>
+              <div class="table-scroll-wrap">
               <table class="pyramid-table">
+                <thead>
+                  <tr>
+                    <th class="num">档位</th>
+                    <th class="num">亏损触发点</th>
+                    <th class="num">释放金额</th>
+                    <th class="num">累计</th>
+                    <th>状态</th>
+                  </tr>
                 </thead>
                 <tbody>
                   <tr
@@ -695,6 +704,7 @@ onMounted(() => {
                   </tr>
                 </tbody>
               </table>
+              </div>
 
               <!-- 预估摊薄效果 -->
               <div v-if="p.pyramid.improvement_pct != null" class="improvement-box">
@@ -1274,6 +1284,7 @@ onMounted(() => {
             <!-- 假设交易明细 -->
             <div class="cf-txs" v-if="counterfactual.hypothetical_txs?.length">
               <h4 class="cf-sub-title">假设交易明细</h4>
+              <div class="table-scroll-wrap">
               <table class="cf-table">
                 <thead>
                   <tr>
@@ -1317,6 +1328,7 @@ onMounted(() => {
                   </tr>
                 </tbody>
               </table>
+              </div>
             </div>
 
             <div v-else class="cf-empty">
@@ -1421,6 +1433,11 @@ onMounted(() => {
   border: 1px solid var(--color-border-light);
   border-radius: var(--radius-md);
   overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+.table-scroll-wrap {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
 }
 .priority-table {
   width: 100%;

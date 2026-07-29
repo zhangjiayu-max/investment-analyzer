@@ -772,6 +772,31 @@ function toggleHistory() {
   .params-panel { position: static; }
 }
 
+@media (max-width: 768px) {
+  /* 对比表：3列改为纵向堆叠，每行一个指标 */
+  .compare-head { display: none; }
+  .compare-row {
+    grid-template-columns: 1fr;
+    gap: 4px;
+    padding: 8px 10px;
+  }
+  .compare-row span:first-child {
+    font-size: 0.75rem;
+    font-weight: 600;
+  }
+  .compare-row span:not(:first-child) {
+    font-size: 0.85rem;
+  }
+  /* 保存回测：输入框和按钮纵向排列 */
+  .save-row { flex-direction: column; gap: 6px; }
+  .save-name-input, .save-notes-input { flex: 1; }
+  .save-btn { width: 100%; }
+  /* 图表图例换行 */
+  .chart-legend { flex-wrap: wrap; gap: var(--space-2); }
+  /* 历史回测项紧凑 */
+  .history-section { padding: 0.5rem; }
+}
+
 /* ── 保存回测 ── */
 .save-section {
   border: 1px solid var(--color-border);
