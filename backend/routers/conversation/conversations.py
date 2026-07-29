@@ -371,6 +371,52 @@ async def resume_conversation(conv_id: int, request: Request):
                 raise HTTPException(409, "对话上次执行失败，不会自动恢复。如需重试请点击重试按钮。")
             break  # 只检查最后一条 assistant 消息
 
+    # 优先路径：最后一条 assistant 消息为占位符且已有 success agent_runs 时，
+    # 直接走 resume_synthesis_only 原地恢复（复用专家结果+重建黑板+只跑综合阶段），
+    # 避免走 SSE 流重跑专家。覆盖 resuming/pending/streaming 等所有占位符状态。
+    msgs_all = get_messages(conv_id, limit=200)
+    last_assistant_msg = next((m for m in reversed(msgs_all) if m["role"] == "assistant"), None)
+    if last_assistant_msg:
+        _content = (last_assistant_msg.get("content") or "")
+        if _content.startswith("⏳"):
+            from db._conn import _get_conn as _get_conn_resume
+            _conn = _get_conn_resume()
+            try:
+                _has_success = _conn.execute(
+                    "SELECT 1 FROM agent_runs WHERE message_id = ? AND status = 'success' LIMIT 1",
+                    (last_assistant_msg["id"],),
+                ).fetchone()
+            finally:
+                _conn.close()
+            if _has_success:
+                logger.info(
+                    f"恢复对话 {conv_id}：msg {last_assistant_msg['id']} 为占位符且有成功专家，"
+                    f"走 resume_synthesis_only 原地恢复"
+                )
+                from services.conv_recovery import resume_synthesis_only
+                _result = resume_synthesis_only(last_assistant_msg["id"], conv_id)
+                if _result.get("success"):
+                    from db.conversations import update_message_content_and_metadata
+                    update_message_content_and_metadata(
+                        last_assistant_msg["id"],
+                        _result["answer"],
+                        {
+                            "recovered": True,
+                            "recovery_method": "resume_synthesis",
+                            "specialist_count": _result["specialist_count"],
+                            "blackboard_entries": _result.get("blackboard_entries", 0),
+                        },
+                    )
+                    # 返回一个简单的 SSE 流：直接发 answer 事件后 done
+                    async def _resume_synthesis_stream():
+                        yield f"data: {json.dumps({'type': 'answer', 'data': {'content': _result['answer'], 'specialist_results': []}})}\n\n"
+                        yield f"data: {json.dumps({'type': 'done', 'data': {'message_id': last_assistant_msg['id']}})}\n\n"
+                    return StreamingResponse(_resume_synthesis_stream(), media_type="text/event-stream")
+                # resume_synthesis 失败 → 降级到原 SSE 流程
+                logger.warning(
+                    f"恢复对话 {conv_id}：resume_synthesis 失败 ({_result.get('reason','')})，降级到 SSE 流"
+                )
+
     # 获取消息
     msgs = get_messages(conv_id)
     if not msgs:
