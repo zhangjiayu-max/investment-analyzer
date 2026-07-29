@@ -138,6 +138,8 @@ async def analyze_article_images(article_id: int):
         return {"ok": False, "message": "正在分析中，请稍候"}
 
     update_article(article_id, status="analyzing")
+    # 清理可能残留的取消标志（上次取消时若 task 正好在 sleep 阶段，CancelledError 跳过内层 except 导致 _analyze_cancel 未清理）
+    _analyze_cancel.discard(article_id)
     _analyze_progress[article_id] = {"total": len(pending), "done": 0, "success": 0, "failed": 0, "current_record_id": None}
     asyncio.create_task(_background_analyze(article_id))
     return {"ok": True, "message": "分析已开始"}
@@ -879,6 +881,8 @@ async def _background_analyze(article_id: int):
     except Exception as e:
         update_article(article_id, status="error", error_msg=str(e))
     finally:
+        # 防御性清理：确保 _analyze_cancel 不残留（CancelledError 在 sleep 阶段抛出时会跳过内层 except）
+        _analyze_cancel.discard(article_id)
         _analyze_progress.pop(article_id, None)
         _analyze_tasks.pop(article_id, None)
 
