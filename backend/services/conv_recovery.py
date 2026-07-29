@@ -66,15 +66,10 @@ def _rebuild_specialists_from_runs(runs: list) -> list:
 
     每个 specialist 需包含：agent_key, agent, analysis, icon, tool_calls, duration_ms
     """
-    from agent.core.multi_agent import SPECIALIST_AGENTS
+    # SPECIALIST_AGENTS 已迁移到 DB，用 load_specialist_agents() 加载
+    from db.agents import load_specialist_agents
 
-    # 构建 agent_key → icon 映射
-    icon_map = {}
-    name_map = {}
-    for sa in SPECIALIST_AGENTS:
-        key = sa.get("agent_key", "")
-        icon_map[key] = sa.get("icon", "🤖")
-        name_map[key] = sa.get("name", "")
+    specialists_db = load_specialist_agents()  # {agent_key: {name, icon, ...}}
 
     specialists = []
     seen_keys = set()
@@ -93,6 +88,11 @@ def _rebuild_specialists_from_runs(runs: list) -> list:
         if agent_key:
             seen_keys.add(agent_key)
 
+        # icon 优先从 DB 取，DB 无则用默认
+        icon = "🤖"
+        if agent_key and agent_key in specialists_db:
+            icon = specialists_db[agent_key].get("icon", "🤖")
+
         # 解析 tool_calls（可能是 JSON 字符串）
         tool_calls = []
         tc_raw = r.get("tool_calls")
@@ -105,7 +105,7 @@ def _rebuild_specialists_from_runs(runs: list) -> list:
         specialists.append({
             "agent_key": agent_key,
             "agent": agent_name,
-            "icon": icon_map.get(agent_key, "🤖"),
+            "icon": icon,
             "analysis": result,
             "tool_calls": tool_calls if isinstance(tool_calls, list) else [],
             "duration_ms": r.get("duration_ms") or 0,
