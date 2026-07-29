@@ -386,11 +386,14 @@ async def scan_portfolio_alerts():
     if not holdings:
         return {"ok": True, "generated": 0, "message": "暂无持仓"}
 
-    # 自动清理 30 天前的已读预警，防止表无限膨胀
+    # 自动清理过期预警，防止表无限膨胀
     from db.portfolio import cleanup_old_alerts
-    cleaned = cleanup_old_alerts()
-    if cleaned:
-        logger.info(f"自动清理 {cleaned} 条过期预警")
+    cleaned_result = cleanup_old_alerts()
+    if cleaned_result and (cleaned_result.get("deleted") or cleaned_result.get("auto_ignored")):
+        logger.info(
+            f"自动清理预警: 删除 {cleaned_result.get('deleted', 0)} 条, "
+            f"自动忽略 info {cleaned_result.get('auto_ignored', 0)} 条"
+        )
 
     # 读取可配置阈值
     val_high = get_config_int('alert.valuation_high', 80)       # 高估百分位

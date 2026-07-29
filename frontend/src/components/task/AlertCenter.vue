@@ -34,6 +34,11 @@ const alertHistoryMap = ref({})  // alertId -> { loading, history, show }
 const collapsedInfoAlerts = ref(new Set())  // 折叠的 info 级预警 key
 const ackLoading = ref({})  // alertId -> loading（业务确认状态更新中）
 
+// 筛选器（方案 E）
+const severityFilter = ref('all')  // 'all' | 'danger_warning' | 'danger' | 'ignored'
+const typeFilter = ref('all')       // 'all' | 具体 alert_type
+const hideIgnoredInfo = ref(true)  // 默认隐藏已忽略的 info 级预警
+
 // ── ConfirmDialog ──
 const confirmState = ref({ visible: false, title: '', message: '', danger: false, onConfirm: null })
 
@@ -321,11 +326,69 @@ function isInfoCollapsed(a) {
   return collapsedInfoAlerts.value.has(alertKey(a))
 }
 
-// 排序：danger > warning > info
+// 排序：danger > warning > info，并应用筛选器
 const sortedAlerts = computed(() => {
+  let list = [...alerts.value]
+
+  // severity 筛选
+  if (severityFilter.value === 'danger') {
+    list = list.filter(a => a.severity === 'danger')
+  } else if (severityFilter.value === 'danger_warning') {
+    list = list.filter(a => a.severity === 'danger' || a.severity === 'warning')
+  } else if (severityFilter.value === 'ignored') {
+    list = list.filter(a => a.acknowledged_status === 'ignored')
+  }
+
+  // 类型筛选
+  if (typeFilter.value !== 'all') {
+    list = list.filter(a => a.alert_type === typeFilter.value)
+  }
+
+  // 默认隐藏已忽略的 info（已忽略的 info 不再占位）
+  if (hideIgnoredInfo.value && severityFilter.value !== 'ignored') {
+    list = list.filter(a => !(a.severity === 'info' && a.acknowledged_status === 'ignored'))
+  }
+
+  // 排序：danger > warning > info
   const order = { danger: 0, warning: 1, info: 2 }
-  return [...alerts.value].sort((a, b) => (order[a.severity] || 3) - (order[b.severity] || 3))
+  return list.sort((a, b) => (order[a.severity] || 3) - (order[b.severity] || 3))
 })
+
+// 类型筛选下拉选项
+const typeOptions = computed(() => {
+  const types = new Set(alerts.value.map(a => a.alert_type).filter(Boolean))
+  return [{ value: 'all', label: '全部类型' }, ...[...types].map(t => ({ value: t, label: t }))]
+})
+
+// 一键忽略全部未处理 info 预警
+async function ignoreAllInfoAlerts() {
+  const infoAlerts = alerts.value.filter(a =>
+    a.severity === 'info' && a.acknowledged_status !== 'acknowledged' && a.acknowledged_status !== 'ignored'
+  )
+  if (infoAlerts.length === 0) {
+    useToast().showToast('没有可忽略的 info 预警', 'info')
+    return
+  }
+  confirmState.value = {
+    visible: true,
+    title: '批量忽略',
+    message: `确定忽略 ${infoAlerts.length} 条 info 级预警？忽略后不再展示（仍可在"已忽略"筛选中查看）。`,
+    danger: false,
+    onConfirm: async () => {
+      confirmState.value.visible = false
+      let okCnt = 0
+      for (const a of infoAlerts) {
+        try {
+          await acknowledgeAlert(a.latest_id, 'ignored')
+          // 本地同步状态
+          a.acknowledged_status = 'ignored'
+          okCnt++
+        } catch (e) { /* continue */ }
+      }
+      useToast().showToast(`已忽略 ${okCnt} 条 info 预警`, 'success')
+    },
+  }
+}
 
 onMounted(() => {
   loadAlerts()
@@ -549,6 +612,31 @@ onActivated(() => {
         <div v-if="alerts.length === 0" class="alert-empty">
           <span>暂无预警</span>
           <span class="alert-empty-hint">点击「巡检」主动扫描持仓风险</span>
+        </div>
+
+        <!-- 筛选器工具条（方案 E） -->
+        <div v-if="alerts.length > 0" class="alert-filters">
+          <div class="filter-group">
+            <button :class="['filter-chip', { active: severityFilter === 'all' }]" @click="severityFilter = 'all'">全部</button>
+            <button :class="['filter-chip', { active: severityFilter === 'danger_warning' }]" @click="severityFilter = 'danger_warning'">仅高优</button>
+            <button :class="['filter-chip', { active: severityFilter === 'danger' }]" @click="severityFilter = 'danger'">仅 DANGER</button>
+            <button :class="['filter-chip', { active: severityFilter === 'ignored' }]" @click="severityFilter = 'ignored'">已忽略</button>
+          </div>
+          <select v-model="typeFilter" class="filter-select">
+            <option v-for="opt in typeOptions" :key="opt.value" :value="opt.value">{{ opt.label }}</option>
+          </select>
+          <button
+            v-if="alerts.some(a => a.severity === 'info' && a.acknowledged_status !== 'ignored')"
+            class="btn-ghost btn-xs ignore-all-btn"
+            @click="ignoreAllInfoAlerts"
+          >
+            一键忽略 INFO
+          </button>
+        </div>
+
+        <div v-if="sortedAlerts.length === 0 && alerts.length > 0" class="alert-empty">
+          <span>当前筛选下无预警</span>
+          <button class="btn-ghost btn-xs" @click="severityFilter = 'all'; typeFilter = 'all'">清除筛选</button>
         </div>
 
         <div v-for="a in sortedAlerts" :key="a.latest_id" :class="['alert-item', 'reveal-stagger', 'alert-' + a.severity]">
@@ -1223,6 +1311,59 @@ onActivated(() => {
 .alert-empty-hint {
   font-size: 0.75rem;
   opacity: 0.6;
+}
+
+/* 筛选器工具条（方案 E） */
+.alert-filters {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 0.75rem;
+  margin-bottom: 0.5rem;
+  background: var(--color-bg-sunken, rgba(0, 0, 0, 0.2));
+  border-radius: 6px;
+  flex-wrap: wrap;
+}
+.filter-group {
+  display: flex;
+  gap: 0.25rem;
+}
+.filter-chip {
+  padding: 0.2rem 0.6rem;
+  border: 1px solid var(--color-border, rgba(255, 255, 255, 0.1));
+  background: transparent;
+  color: var(--color-text-secondary);
+  border-radius: 12px;
+  font-size: 0.72rem;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+.filter-chip:hover {
+  border-color: var(--color-accent, #4fd1c5);
+  color: var(--color-text-primary);
+}
+.filter-chip.active {
+  background: var(--color-accent, #4fd1c5);
+  color: var(--color-bg-primary, #0a0e1a);
+  border-color: var(--color-accent, #4fd1c5);
+  font-weight: 600;
+}
+.filter-select {
+  padding: 0.2rem 0.4rem;
+  background: var(--color-bg-input, rgba(0, 0, 0, 0.3));
+  color: var(--color-text-primary);
+  border: 1px solid var(--color-border, rgba(255, 255, 255, 0.1));
+  border-radius: 4px;
+  font-size: 0.72rem;
+  cursor: pointer;
+  max-width: 160px;
+}
+.filter-select option {
+  background: var(--color-bg-primary, #0a0e1a);
+}
+.ignore-all-btn {
+  margin-left: auto;
+  color: var(--color-text-tertiary);
 }
 .alert-actions {
   display: flex;

@@ -467,6 +467,14 @@ async def startup():
     else:
         logging.info("主动提醒扫描已关闭（alerts.proactive_scan_enabled=false）")
 
+    # 预警自动清理任务（每日 03:00 执行，默认开启）
+    # 清理 14 天前所有预警（含未读），info 级 7 天未处理自动标记 ignored
+    if get_config("alerts.auto_cleanup_enabled", "true") == "true":
+        asyncio.create_task(_auto_cleanup_alerts())
+        logging.info("预警自动清理任务已启动（alerts.auto_cleanup_enabled=true）")
+    else:
+        logging.info("预警自动清理已关闭（alerts.auto_cleanup_enabled=false）")
+
     # 前瞻性事件雷达（每晚 20:00，默认关闭，LLM 相关开关硬约束）
     if get_config("alerts.event_radar_enabled", "false") == "true":
         asyncio.create_task(_auto_event_radar_scan())
@@ -884,17 +892,18 @@ async def _auto_periodic_scan():
 
         while True:
             # P1-1: 交易时段缩短扫描间隔，捕捉盘内异动
-            # 交易日 09:30-15:00 用 alerts.trading_hours_scan_interval_minutes（默认 5）
+            # 交易日 09:30-15:00 用 alerts.trading_hours_scan_interval_minutes（默认 15）
             # 非交易时段用 alerts.scan_interval_minutes（默认 30）
+            # 优化：盘中从 5 分钟降为 15 分钟，配合去重修复避免预警刷屏（原 5 分钟一天扫 66 次）
             from datetime import datetime as _dt
             now = _dt.now()
             is_weekday = now.weekday() < 5  # 0-4 = 周一到周五
             is_trading_hours = is_weekday and 9 <= now.hour < 15
             if is_trading_hours:
                 try:
-                    interval_min = int(get_config("alerts.trading_hours_scan_interval_minutes", "5"))
+                    interval_min = int(get_config("alerts.trading_hours_scan_interval_minutes", "15"))
                 except (TypeError, ValueError):
-                    interval_min = 5
+                    interval_min = 15
             else:
                 try:
                     interval_min = int(get_config("alerts.scan_interval_minutes", "30"))
@@ -919,6 +928,50 @@ async def _auto_periodic_scan():
                 logging.warning(f"[auto-scan] 定时扫描异常: {e}")
     except Exception as e:
         logging.warning(f"主动提醒扫描任务异常: {e}")
+
+
+async def _auto_cleanup_alerts():
+    """预警自动清理 — 每日 03:00 执行一次。
+
+    清理策略：
+    - 删除 14 天前所有预警（含未读，避免表无限膨胀）
+    - info 级未处理预警 7 天后自动标记 ignored（保留记录用于回测）
+
+    开关：alerts.auto_cleanup_enabled（默认 true）
+    清理天数：alerts.cleanup_days（默认 14）
+    自动忽略天数：alerts.auto_ignore_info_days（默认 7）
+    """
+    from datetime import datetime, timedelta
+    try:
+        await asyncio.sleep(180)  # 等启动完成（晚于扫描任务避免抢资源）
+        while True:
+            now = datetime.now()
+            # 下一次 03:00
+            target = now.replace(hour=3, minute=0, second=0, microsecond=0)
+            if now >= target:
+                target = (now + timedelta(days=1)).replace(hour=3, minute=0, second=0, microsecond=0)
+            sleep_sec = (target - now).total_seconds()
+            await asyncio.sleep(max(sleep_sec, 60))
+
+            try:
+                from db.portfolio import cleanup_old_alerts
+                cleanup_days = int(get_config("alerts.cleanup_days", "14"))
+                auto_ignore_days = int(get_config("alerts.auto_ignore_info_days", "7"))
+                result = await asyncio.to_thread(
+                    cleanup_old_alerts,
+                    days=cleanup_days,
+                    include_unread=True,
+                    auto_ignore_info_days=auto_ignore_days,
+                )
+                logging.info(
+                    f"[auto-cleanup] 预警清理完成: 删除 {result.get('deleted', 0)} 条 "
+                    f"({cleanup_days}天前), 自动忽略 info {result.get('auto_ignored', 0)} 条 "
+                    f"({auto_ignore_days}天未处理)"
+                )
+            except Exception as e:
+                logging.warning(f"[auto-cleanup] 预警清理异常: {e}")
+    except Exception as e:
+        logging.warning(f"预警自动清理任务异常: {e}")
 
 
 async def _auto_event_radar_scan():

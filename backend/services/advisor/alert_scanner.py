@@ -191,8 +191,10 @@ def scan_valuation_thresholds() -> dict:
     if not _is_enabled("alerts.proactive_scan_enabled", True):
         return {"alerts_created": 0, "skipped": "disabled"}
 
-    low_threshold = _get_int("alerts.valuation_low_threshold", 20)
-    high_threshold = _get_int("alerts.valuation_high_threshold", 80)
+    # 阈值优化：低估从 20% 收紧到 15%，高估从 80% 收紧到 85%
+    # 避免边缘值频繁触发（原 20% 时分位在 18-20% 间波动会反复触发）
+    low_threshold = _get_int("alerts.valuation_low_threshold", 15)
+    high_threshold = _get_int("alerts.valuation_high_threshold", 85)
 
     # 从持仓中收集关注的指数代码（去重）
     holdings = list_holdings()
@@ -320,7 +322,8 @@ def scan_portfolio_risk() -> dict:
     loss_threshold = _get_int("alerts.loss_threshold", 15)
     # P0-2 新增：当日跌幅阈值（独立于累计亏损），开关 alerts.daily_drop_scan_enabled 默认开启
     daily_drop_enabled = _is_enabled("alerts.daily_drop_scan_enabled", True)
-    daily_drop_threshold = _get_int("alerts.daily_drop_threshold", 3)  # 当日跌幅 ≥3% 触发
+    # 阈值优化：当日跌幅从 3% 提升到 4%，避免小幅波动频繁触发
+    daily_drop_threshold = _get_int("alerts.daily_drop_threshold", 4)  # 当日跌幅 ≥4% 触发
 
     holdings = list_holdings()
     if not holdings:
@@ -456,6 +459,12 @@ def scan_market_index_drop() -> dict:
     阈值：alerts.market_index_warn_threshold（默认 2，跌幅≥2% 触发 warning）
           alerts.market_index_danger_threshold（默认 4，跌幅≥4% 触发 danger）
 
+    优化：聚合为 1 条 alert（而非 7 条分散 alert），避免预警列表被大盘指数刷屏。
+    - 若有 ≥1 个指数触发阈值，生成 1 条聚合 alert（alert_type=market_index_drop）
+    - severity 取最严重的指数等级
+    - 若 ≥3 个指数齐跌，severity 升级为 danger，并在 content 中标注系统性风险
+    - 决策候选也只生成 1 条
+
     Returns:
         {"alerts_created": int, "scanned": int, "dropped_indexes": [...]}
     """
@@ -477,7 +486,6 @@ def scan_market_index_drop() -> dict:
         logger.info("[alert_scanner] 大盘指数行情为空，跳过跌幅扫描")
         return {"alerts_created": 0, "scanned": 0}
 
-    alerts_created = 0
     dropped_indexes = []
     today = datetime.now().strftime("%Y-%m-%d")
 
@@ -492,72 +500,85 @@ def scan_market_index_drop() -> dict:
             continue
 
         if chg <= -warn_threshold:
-            # 判断严重等级
             if chg <= -danger_threshold:
                 severity = "danger"
-                level_desc = f"大跌（≥{danger_threshold}%）"
             else:
                 severity = "warning"
-                level_desc = f"下跌（≥{warn_threshold}%）"
+            dropped_indexes.append({
+                "name": name,
+                "change_pct": chg,
+                "severity": severity,
+                "price": idx.get("price"),
+                "volume_yi": idx.get("volume_yi"),
+            })
 
-            title = f"{name} 当日{level_desc}：{chg:.2f}%"
-            content = (
-                f"{name} 今日下跌 {abs(chg):.2f}%，触发{level_desc}预警。\n"
-                f"当前点位：{idx.get('price', 'N/A')}\n"
-                f"成交额：{idx.get('volume_yi', 'N/A')} 亿\n"
-                f"时间：{today}"
-            )
-            create_alert(
-                alert_type="market_index_drop",
-                title=title,
-                content=content,
-                severity=severity,
-                source="alert_scanner",
-            )
-            # 大盘大跌自动生成决策候选（建议减仓/观望）
-            _auto_candidate(
-                fund_code="",
-                fund_name=name,
-                alert_type="market_index_drop",
-                title=title,
-                content=content,
-                severity=severity,
-                source_snapshot={"change_pct": chg, "index_name": name},
-            )
-            alerts_created += 1
-            dropped_indexes.append({"name": name, "change_pct": chg, "severity": severity})
+    # 聚合：若有触发阈值的指数，只生成 1 条 alert（而非每个指数 1 条）
+    if dropped_indexes:
+        # severity 取最严重等级；≥3 个齐跌升级为 danger（系统性风险）
+        has_danger = any(d["severity"] == "danger" for d in dropped_indexes)
+        is_systemic = len(dropped_indexes) >= 3
+        severity = "danger" if (has_danger or is_systemic) else "warning"
 
-    # 如果有多个指数同时大跌，额外生成一条系统性风险预警
-    if len(dropped_indexes) >= 3:
-        names = "、".join(d["name"] for d in dropped_indexes)
-        avg_drop = sum(d["change_pct"] for d in dropped_indexes) / len(dropped_indexes)
-        title = f"⚠️ 系统性大跌风险：{len(dropped_indexes)} 大指数齐跌，均值 {avg_drop:.2f}%"
-        content = (
-            f"今日{names}同时大幅下跌，均值跌幅 {abs(avg_drop):.2f}%。\n"
-            f"建议：1) 检查持仓是否触及止损线；2) 评估是否需要减仓控制风险；"
-            f"3) 关注南向资金/北向资金流向；4) 查阅当日重大新闻。"
-        )
+        # 按跌幅排序，构造聚合 title/content
+        sorted_drops = sorted(dropped_indexes, key=lambda x: x["change_pct"])
+        if len(sorted_drops) == 1:
+            d = sorted_drops[0]
+            title = f"{d['name']} 当日下跌 {d['change_pct']:.2f}%"
+            content_lines = [
+                f"{d['name']} 今日下跌 {abs(d['change_pct']):.2f}%。",
+                f"当前点位：{d.get('price', 'N/A')}",
+                f"成交额：{d.get('volume_yi', 'N/A')} 亿",
+            ]
+        else:
+            names_str = "、".join(f"{d['name']}({d['change_pct']:.2f}%)" for d in sorted_drops)
+            avg_drop = sum(d["change_pct"] for d in dropped_indexes) / len(dropped_indexes)
+            title = f"大盘指数聚合预警：{len(dropped_indexes)} 个指数下跌，均值 {avg_drop:.2f}%"
+            content_lines = [
+                f"今日 {names_str} 同时下跌，均值跌幅 {abs(avg_drop):.2f}%。",
+            ]
+            if is_systemic:
+                content_lines.append("⚠️ 系统性大跌风险：≥3 个指数齐跌。")
+            content_lines.append("各指数详情：")
+            for d in sorted_drops:
+                content_lines.append(
+                    f"  · {d['name']}：{d['change_pct']:.2f}%（{d['severity']}）"
+                    f"  点位 {d.get('price', 'N/A')}  成交 {d.get('volume_yi', 'N/A')}亿"
+                )
+
+        content_lines.append(f"时间：{today}")
+        if is_systemic:
+            content_lines.append("建议：1) 检查持仓是否触及止损线；2) 评估是否需要减仓；3) 关注资金流向；4) 查阅重大新闻。")
+        content = "\n".join(content_lines)
+
         create_alert(
-            alert_type="systemic_market_risk",
+            alert_type="market_index_drop",
             title=title,
             content=content,
-            severity="danger",
+            severity=severity,
             source="alert_scanner",
         )
+        # 决策候选也聚合为 1 条
         _auto_candidate(
             fund_code="",
-            fund_name="大盘系统性风险",
-            alert_type="systemic_market_risk",
+            fund_name="大盘指数" if not is_systemic else "大盘系统性风险",
+            alert_type="market_index_drop",
             title=title,
             content=content,
-            severity="danger",
-            source_snapshot={"avg_drop": avg_drop, "dropped_count": len(dropped_indexes)},
+            severity=severity,
+            source_snapshot={
+                "dropped_count": len(dropped_indexes),
+                "avg_drop": avg_drop if len(dropped_indexes) > 1 else dropped_indexes[0]["change_pct"],
+                "is_systemic": is_systemic,
+                "indices": [{"name": d["name"], "change_pct": d["change_pct"]} for d in dropped_indexes],
+            },
         )
-        alerts_created += 1
+        alerts_created = 1
+    else:
+        alerts_created = 0
 
     logger.info(
         f"[alert_scanner] 大盘指数跌幅扫描: {len(indices)} 个指数, "
-        f"{len(dropped_indexes)} 个触发预警, 生成 {alerts_created} 个 alert"
+        f"{len(dropped_indexes)} 个触发预警, 生成 {alerts_created} 个聚合 alert"
     )
     return {
         "alerts_created": alerts_created,

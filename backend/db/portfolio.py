@@ -2525,7 +2525,13 @@ def create_alert(alert_type: str, title: str, content: str = None,
                  severity: str = "info", related_fund_code: str = None,
                  related_fund_name: str = None, source: str = None,
                  user_id: str = "default", holding_id: int = None) -> int:
-    """新增风险预警，返回 alert_id。24小时内同标题+severity不重复生成。
+    """新增风险预警，返回 alert_id。24小时内同类型+基金+severity不重复生成。
+
+    去重 key 为 alert_type + related_fund_code + severity，而非 title + severity。
+    原因：估值/跌幅/亏损预警的 title 含动态数值（如"分位 18.5%"、"跌幅 3.25%"），
+    每次扫描数值微变导致 title 不同 → 去重完全失效，同基金同类型一天可生成数十条。
+    改为 alert_type + fund_code + severity 后，同基金同类型同等级 24h 内只生成 1 条，
+    后续触发会更新已有预警的 title/content/created_at，保持数值最新。
 
     Args:
         holding_id: 关联持仓ID（P0-3.1 FK 强关联，可选）
@@ -2533,7 +2539,6 @@ def create_alert(alert_type: str, title: str, content: str = None,
     conn = _get_conn()
     try:
         # P1-3.2：daily_advice_signal 同日同基金去重（更新而非新建）
-        # 原有 24h title+severity 去重对 daily_advice_signal 无效（title 是动态摘要文本）
         if alert_type == "daily_advice_signal" and related_fund_code:
             today = datetime.now().strftime("%Y-%m-%d")
             existing_da = conn.execute("""
@@ -2552,15 +2557,25 @@ def create_alert(alert_type: str, title: str, content: str = None,
                 conn.commit()
                 return existing_da['id']
 
-        # 去重：24小时内同 title + severity 不重复
+        # 去重：24小时内同 alert_type + related_fund_code + severity 不重复
+        # 若已存在，更新 title/content/created_at（保留最新数值，避免历史堆积）
+        dedup_key_fund = related_fund_code if related_fund_code else ''
         existing = conn.execute("""
             SELECT id FROM portfolio_alerts
-            WHERE user_id = ? AND title = ? AND severity = ?
+            WHERE user_id = ? AND alert_type = ?
+              AND COALESCE(related_fund_code, '') = ?
+              AND severity = ?
               AND created_at > datetime('now', '-1 day')
-            LIMIT 1
-        """, (user_id, title, severity)).fetchone()
+            ORDER BY id DESC LIMIT 1
+        """, (user_id, alert_type, dedup_key_fund, severity)).fetchone()
         if existing:
-            conn.close()
+            # 更新已有预警的最新数值与时间（而非丢弃，确保用户看到最新分位/跌幅）
+            conn.execute("""
+                UPDATE portfolio_alerts
+                SET title = ?, content = ?, source = ?, created_at = datetime('now','localtime')
+                WHERE id = ?
+            """, (title, content, source, existing['id']))
+            conn.commit()
             return existing['id']
 
         # 自动推断 holding_id：若未传入但有 related_fund_code，尝试匹配持仓
@@ -2767,17 +2782,53 @@ def get_unread_alert_count(user_id: str = "default") -> int:
     return row["cnt"] if row else 0
 
 
-def cleanup_old_alerts(user_id: str = "default", days: int = 30) -> int:
-    """清理已读预警中超过 N 天的记录，返回删除条数。"""
+def cleanup_old_alerts(user_id: str = "default", days: int = 14,
+                       include_unread: bool = True, auto_ignore_info_days: int = 7) -> dict:
+    """清理过期预警，返回各类清理统计。
+
+    优化：
+    - 默认清理 14 天前所有预警（不限已读），避免表无限膨胀
+    - info 级未处理预警 7 天后自动标记为 ignored（不删除，保留回测数据）
+    - 返回 dict 而非 int，便于日志记录各类清理量
+
+    Args:
+        days: 删除 N 天前的预警（默认 14）
+        include_unread: 是否清理未读预警（默认 True，原逻辑仅清已读导致表膨胀）
+        auto_ignore_info_days: info 级未处理预警自动标记 ignored 的天数（默认 7）
+
+    Returns:
+        {"deleted": int, "auto_ignored": int}
+    """
     conn = _get_conn()
     try:
-        cur = conn.execute("""
-            DELETE FROM portfolio_alerts
-            WHERE user_id = ? AND is_read = 1 AND created_at < datetime('now', ? || ' days')
-        """, (user_id, f"-{days}"))
+        # 1. 自动忽略：info 级未处理预警超过 N 天，标记为 ignored（保留记录用于回测）
+        auto_ignored = 0
+        if auto_ignore_info_days and auto_ignore_info_days > 0:
+            cur = conn.execute("""
+                UPDATE portfolio_alerts
+                SET acknowledged_status = 'ignored'
+                WHERE user_id = ? AND severity = 'info'
+                  AND acknowledged_status IS NULL
+                  AND created_at < datetime('now', ? || ' days')
+            """, (user_id, f"-{auto_ignore_info_days}"))
+            auto_ignored = cur.rowcount
+            conn.commit()
+
+        # 2. 删除：超过 N 天的预警
+        # include_unread=True 时删除所有（含未读），False 时仅删已读（兼容旧逻辑）
+        if include_unread:
+            cur = conn.execute("""
+                DELETE FROM portfolio_alerts
+                WHERE user_id = ? AND created_at < datetime('now', ? || ' days')
+            """, (user_id, f"-{days}"))
+        else:
+            cur = conn.execute("""
+                DELETE FROM portfolio_alerts
+                WHERE user_id = ? AND is_read = 1 AND created_at < datetime('now', ? || ' days')
+            """, (user_id, f"-{days}"))
         deleted = cur.rowcount
         conn.commit()
-        return deleted
+        return {"deleted": deleted, "auto_ignored": auto_ignored}
     finally:
         conn.close()
 
