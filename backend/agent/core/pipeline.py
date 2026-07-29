@@ -326,9 +326,14 @@ def run_pipeline(
                         phase3_result["specialists"], rerun_result
                     )
                     state.set_phase_result(PipelinePhase.EXECUTION.value, phase3_result)
+                    # 修复 conv 192：重跑事件必须补全 agent_key/icon/analysis 等字段，
+                    # 否则 conversations.py:1879 的 event["agent_key"] 直接索引会抛 KeyError
                     yield {"type": EVENT_SPECIALIST_DONE,
+                           "agent_key": rerun_result.get("agent_key", ""),
                            "agent": rerun_result.get("agent", ""),
-                           "result": rerun_result,
+                           "icon": rerun_result.get("icon", "🤖"),
+                           "analysis": rerun_result.get("analysis", ""),
+                           "duration_ms": rerun_result.get("duration_ms", 0),
                            "rerun": True}
             except Exception as refl_err:
                 logger.warning(f"[pipeline] Reflection 失败，跳过: {refl_err}")

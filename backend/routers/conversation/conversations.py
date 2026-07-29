@@ -1876,7 +1876,8 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
                                 logger.warning(f"[trace:{trace_id}] 持久化事件失败: {_e}")
                         # === 在线程中持久化（独立于 SSE 连接）===
                         if et == "specialist_done":
-                            _prod_spec_results.append({"agent_key": event["agent_key"], "agent": event["agent"], "icon": event.get("icon", "🤖"), "analysis": event.get("analysis", ""), "duration_ms": event.get("duration_ms", 0)})
+                            # 修复 conv 192：用 .get() 安全访问，避免自纠错重跑等场景字段缺失抛 KeyError
+                            _prod_spec_results.append({"agent_key": event.get("agent_key", ""), "agent": event.get("agent", ""), "icon": event.get("icon", "🤖"), "analysis": event.get("analysis", ""), "duration_ms": event.get("duration_ms", 0)})
                             _save_progress("streaming")
                             # 注：orchestrator.py 已创建并更新 agent_run 记录，此处不再重复创建
                         elif et == "cross_review_done":
