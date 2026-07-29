@@ -1,10 +1,11 @@
 <script setup>
-import { ref, watch, computed, onBeforeUnmount, reactive } from 'vue'
+import { ref, watch, computed, onBeforeUnmount, reactive, defineAsyncComponent } from 'vue'
 import { marked } from 'marked'
 import { getTask, getTaskImages, pollTask, chat, analyzeTaskImages, getTraceDetail, getMessages } from '../../api'
 import ImageGrid from '../knowledge/ImageGrid.vue'
 import StockChart from '../valuation/StockChart.vue'
-import ValuationHistory from '../valuation/ValuationHistory.vue'
+// ValuationHistory 改为懒加载，避免与 MobileApp/Home 的动态 import 冲突导致打包到主 chunk
+const ValuationHistory = defineAsyncComponent(() => import('../valuation/ValuationHistory.vue'))
 
 const props = defineProps({ taskId: Number })
 const emit = defineEmits(['back'])

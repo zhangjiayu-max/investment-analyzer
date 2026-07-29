@@ -353,7 +353,7 @@ function imgUrl(url) {
           <div class="article-images">
             <img
               v-for="(url, i) in parseImages(selectedArticle.images)" :key="i"
-              :src="imgUrl(url)" loading="lazy" class="article-img reveal-stagger"
+              :src="imgUrl(url)" loading="lazy" decoding="async" class="article-img reveal-stagger"
             />
           </div>
         </div>

@@ -581,7 +581,7 @@ function closePreview() { previewImage.value = null }
         <div v-if="records.length" class="record-grid">
           <div v-for="r in filteredRecords" :key="r.id" :class="['record-card', 'editorial-card', 'reveal-stagger', { 'record-analyzing': analyzingRecords.has(r.id) }]">
             <div class="record-thumb" @click="openPreview(r.image_path)">
-              <img :src="imageUrl(r.image_path)" loading="lazy" />
+              <img :src="imageUrl(r.image_path)" loading="lazy" decoding="async" />
               <span v-if="analyzingRecords.has(r.id)" class="record-status st-analyzing">
                 <span class="analyzing-spinner"></span> 分析中
               </span>

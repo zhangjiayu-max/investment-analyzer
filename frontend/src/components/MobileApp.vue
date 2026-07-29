@@ -1,48 +1,53 @@
 <script setup>
-import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
+import { ref, computed, onMounted, onUnmounted, watch, defineAsyncComponent } from 'vue'
 import { createTask, getFinanceQuoteBar } from '../api'
-import TaskList from './task/TaskList.vue'
-import TaskDetail from './task/TaskDetail.vue'
-import ArticleManagement from './knowledge/ArticleManagement.vue'
-import ValuationHistory from './valuation/ValuationHistory.vue'
-import ImageGallery from './knowledge/ImageGallery.vue'
-import ChatView from './ChatView.vue'
-import AuthorArticles from './knowledge/AuthorArticles.vue'
-import LinkedArticles from './knowledge/LinkedArticles.vue'
-import BondMarket from './valuation/BondMarket.vue'
-import RagAnalysis from './agent/RagAnalysis.vue'
-import RagTestPage from './agent/RagTestPage.vue'
-import PortfolioManagement from './portfolio/PortfolioManagement.vue'
-import AlertCenter from './task/AlertCenter.vue'
-import GoalBucketsPage from './decision/GoalBucketsPage.vue'
-import FamilyFinanceDashboard from './family/FamilyFinanceDashboard.vue'
-import DecisionRecordsPage from './decision/DecisionRecordsPage.vue'
-import BehaviorDiagnosis from './market/BehaviorDiagnosis.vue'
-import AdminAgentsPage from './agent/AdminAgentsPage.vue'
-import TokenUsagePage from './quality/TokenUsagePage.vue'
-import BadCasePage from './quality/BadCasePage.vue'
-import EvalSuitePage from './quality/EvalSuitePage.vue'
-import HealthScore from './analysis/HealthScore.vue'
-import ShadowModePage from './agent/ShadowModePage.vue'
-import QualityDashboard from './quality/QualityDashboard.vue'
+// 首屏必需组件保持静态 import（首屏即用，避免 Loading 闪烁）
 import Dashboard from './Dashboard.vue'
-import MarketIntelligence from './market/MarketIntelligence.vue'
-import EventRadarPage from './market/EventRadarPage.vue'
-import KnowledgeBase from './knowledge/KnowledgeBase.vue'
-import SystemConfigPage from './quality/SystemConfigPage.vue'
-import CapabilityCenter from './agent/CapabilityCenter.vue'
-import SmartAddPlan from './finance/SmartAddPlan.vue'
-import AllocationDashboard from './portfolio/AllocationDashboard.vue'
-import AttributionReport from './market/AttributionReport.vue'
-import DecisionAccuracy from './decision/DecisionAccuracy.vue'
-import StrategySandboxPage from './decision/StrategySandboxPage.vue'
-import DataHealthDashboard from './quality/DataHealthDashboard.vue'
-import StrategyBacktest from './decision/StrategyBacktest.vue'
-import AnalysisLogPage from './analysis/AnalysisLogPage.vue'
-import HealthDashboardV2 from './health/HealthDashboardV2.vue'
+import ChatView from './ChatView.vue'
 import { isDark, toggleDark } from '../composables/useTheme'
 import AlertBell from './task/AlertBell.vue'
 import MobileNotificationCenter from './mobile/MobileNotificationCenter.vue'
+
+// 懒加载组件：defineAsyncComponent 让 Vite 自动按动态 import 做代码分割
+// 首屏 JS 预计降 40%+，低频页面（系统管理/质量评测等）按需加载
+
+import TaskList from './task/TaskList.vue'
+import TaskDetail from './task/TaskDetail.vue'
+const ArticleManagement = defineAsyncComponent(() => import('./knowledge/ArticleManagement.vue'))
+const ValuationHistory = defineAsyncComponent(() => import('./valuation/ValuationHistory.vue'))
+const ImageGallery = defineAsyncComponent(() => import('./knowledge/ImageGallery.vue'))
+const AuthorArticles = defineAsyncComponent(() => import('./knowledge/AuthorArticles.vue'))
+const LinkedArticles = defineAsyncComponent(() => import('./knowledge/LinkedArticles.vue'))
+const BondMarket = defineAsyncComponent(() => import('./valuation/BondMarket.vue'))
+const RagAnalysis = defineAsyncComponent(() => import('./agent/RagAnalysis.vue'))
+const RagTestPage = defineAsyncComponent(() => import('./agent/RagTestPage.vue'))
+const PortfolioManagement = defineAsyncComponent(() => import('./portfolio/PortfolioManagement.vue'))
+const AlertCenter = defineAsyncComponent(() => import('./task/AlertCenter.vue'))
+const GoalBucketsPage = defineAsyncComponent(() => import('./decision/GoalBucketsPage.vue'))
+const FamilyFinanceDashboard = defineAsyncComponent(() => import('./family/FamilyFinanceDashboard.vue'))
+const DecisionRecordsPage = defineAsyncComponent(() => import('./decision/DecisionRecordsPage.vue'))
+const BehaviorDiagnosis = defineAsyncComponent(() => import('./market/BehaviorDiagnosis.vue'))
+const AdminAgentsPage = defineAsyncComponent(() => import('./agent/AdminAgentsPage.vue'))
+const TokenUsagePage = defineAsyncComponent(() => import('./quality/TokenUsagePage.vue'))
+const BadCasePage = defineAsyncComponent(() => import('./quality/BadCasePage.vue'))
+const EvalSuitePage = defineAsyncComponent(() => import('./quality/EvalSuitePage.vue'))
+const HealthScore = defineAsyncComponent(() => import('./analysis/HealthScore.vue'))
+const ShadowModePage = defineAsyncComponent(() => import('./agent/ShadowModePage.vue'))
+const QualityDashboard = defineAsyncComponent(() => import('./quality/QualityDashboard.vue'))
+const MarketIntelligence = defineAsyncComponent(() => import('./market/MarketIntelligence.vue'))
+const EventRadarPage = defineAsyncComponent(() => import('./market/EventRadarPage.vue'))
+const KnowledgeBase = defineAsyncComponent(() => import('./knowledge/KnowledgeBase.vue'))
+const SystemConfigPage = defineAsyncComponent(() => import('./quality/SystemConfigPage.vue'))
+const CapabilityCenter = defineAsyncComponent(() => import('./agent/CapabilityCenter.vue'))
+const SmartAddPlan = defineAsyncComponent(() => import('./finance/SmartAddPlan.vue'))
+const AllocationDashboard = defineAsyncComponent(() => import('./portfolio/AllocationDashboard.vue'))
+const AttributionReport = defineAsyncComponent(() => import('./market/AttributionReport.vue'))
+const DecisionAccuracy = defineAsyncComponent(() => import('./decision/DecisionAccuracy.vue'))
+const StrategySandboxPage = defineAsyncComponent(() => import('./decision/StrategySandboxPage.vue'))
+const DataHealthDashboard = defineAsyncComponent(() => import('./quality/DataHealthDashboard.vue'))
+const StrategyBacktest = defineAsyncComponent(() => import('./decision/StrategyBacktest.vue'))
+const AnalysisLogPage = defineAsyncComponent(() => import('./analysis/AnalysisLogPage.vue'))
+const HealthDashboardV2 = defineAsyncComponent(() => import('./health/HealthDashboardV2.vue'))
 
 const activePage = ref(localStorage.getItem('activePage') || 'dashboard')
 const showMoreMenu = ref(false)

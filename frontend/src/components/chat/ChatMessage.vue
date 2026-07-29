@@ -1,6 +1,7 @@
 <script setup>
 import { computed, ref } from 'vue'
 import { renderMarkdown } from '../../composables/useMarkdown'
+import { copyToClipboard } from '../../composables/useClipboard'
 import Icon from '../ui/Icon.vue'
 import TraceDetail from '../task/TraceDetail.vue'
 import ReasoningPanel from './ReasoningPanel.vue'
@@ -269,25 +270,18 @@ function copyMessageContent(msg, event) {
   const text = msg.content || ''
   if (!text) return
   const btn = event?.currentTarget
-  if (navigator.clipboard && navigator.clipboard.writeText) {
-    navigator.clipboard.writeText(text).then(() => {
-      showCopyFeedback(btn)
-    }).catch(() => fallbackCopy(text, btn))
-  } else {
-    fallbackCopy(text, btn)
-  }
+  copyToClipboard(text, {
+    btnEl: btn,
+    onSuccess: () => showCopyFeedback(btn),
+  })
 }
 
 function copySpecialistContent(s, event) {
   const text = s.analysis || ''
   if (!text) return
-  if (navigator.clipboard && navigator.clipboard.writeText) {
-    navigator.clipboard.writeText(text).then(() => {
-      showSpecialistCopyFeedback(event)
-    }).catch(() => fallbackCopy(text))
-  } else {
-    fallbackCopy(text)
-  }
+  copyToClipboard(text, {
+    onSuccess: () => showSpecialistCopyFeedback(event),
+  })
 }
 
 function showSpecialistCopyFeedback(event) {
@@ -370,24 +364,8 @@ ${content}`
   }
 }
 
-function fallbackCopy(text, el) {
-  const ta = document.createElement('textarea')
-  ta.value = text
-  ta.readOnly = true
-  ta.style.position = 'fixed'
-  ta.style.top = '-9999px'
-  ta.style.opacity = '0'
-  document.body.appendChild(ta)
-  ta.select()
-  ta.setSelectionRange(0, text.length)
-  try {
-    document.execCommand('copy')
-    showCopyFeedback(el)
-  } catch (e) {
-    alert('复制失败，请手动选择文本复制')
-  }
-  document.body.removeChild(ta)
-}
+// fallbackCopy 已移除，统一使用 composables/useClipboard.js 的 copyToClipboard
+// 修复移动端 iOS Safari/微信复制失败问题（top:-9999px → top:0, 补 fontSize:16px）
 
 function showCopyFeedback(el) {
   if (!el) return
@@ -396,6 +374,9 @@ function showCopyFeedback(el) {
   el.style.color = '#16a34a'
   setTimeout(() => { el.innerHTML = orig; el.style.color = '' }, 1500)
 }
+
+// fallbackCopy 已移除，统一使用 composables/useClipboard.js 的 copyToClipboard
+// 修复移动端 iOS Safari/微信复制失败问题（top:-9999px → top:0, 补 fontSize:16px）
 
 function formatDuration(ms) {
   if (!ms) return '0ms'
@@ -489,7 +470,7 @@ const tradeSuggestions = computed(() => {
           target="_blank"
           class="message-image-thumb"
         >
-          <img :src="img.url" :alt="img.image_id" loading="lazy" />
+          <img :src="img.url" :alt="img.image_id" loading="lazy" decoding="async" />
         </a>
       </div>
     </div>

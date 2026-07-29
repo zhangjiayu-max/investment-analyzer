@@ -1,6 +1,6 @@
 <script setup>
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
-import { listGalleryRecords, uploadDdImage, listDdImages, listDdImageDates, deleteDdImage, parseAndSaveValuation, parseValuationBatch, parseDDImage, parseDDImageAsync, parseDDBatchAsync, getDDParseTask, pollDDParseTask, uploadValuationImage, listValuationImages, listValuationImageDates, deleteValuationImage, getSystemConfig, updateSystemConfig } from '../../api'
+import { listGalleryRecords, uploadDdImage, listDdImages, listDdImageDates, deleteDdImage, parseAndSaveValuation, parseValuationBatch, parseDDImage, parseDDImageAsync, parseDDBatchAsync, getDDParseTask, pollDDParseTask, uploadValuationImage, listValuationImages, listValuationImageDates, deleteValuationImage, getSystemConfig } from '../../api'
 import ConfirmDialog from '../layout/ConfirmDialog.vue'
 
 // ── 并发限制工具函数 ──
@@ -715,29 +715,15 @@ function showToast(message, type = 'info') {
   }, 3000)
 }
 
-// ── 视觉模型切换 ──
-const visionProvider = ref('ollama')
-const visionSwitching = ref(false)
+// ── 视觉模型（固定使用 Qwen，不可切换）──
+const visionProvider = ref('qwen')
 
 async function loadVisionProvider() {
   try {
     const { data } = await getSystemConfig('vision.provider')
-    visionProvider.value = data.value || 'ollama'
+    visionProvider.value = data.value || 'qwen'
   } catch (e) {
     console.error('Failed to load vision provider:', e)
-  }
-}
-
-async function switchVisionProvider(provider) {
-  if (provider === visionProvider.value || visionSwitching.value) return
-  visionSwitching.value = true
-  try {
-    await updateSystemConfig('vision.provider', provider)
-    visionProvider.value = provider
-  } catch (e) {
-    console.error('Failed to switch vision provider:', e)
-  } finally {
-    visionSwitching.value = false
   }
 }
 
@@ -818,21 +804,7 @@ watch(activeTab, (tab) => {
       </button>
       <div class="vision-switch">
         <span class="vision-label">视觉模型</span>
-        <button
-          :class="['vision-btn', { active: visionProvider === 'ollama' }]"
-          :disabled="visionSwitching"
-          @click="switchVisionProvider('ollama')"
-        >Ollama</button>
-        <button
-          :class="['vision-btn', { active: visionProvider === 'mimo' }]"
-          :disabled="visionSwitching"
-          @click="switchVisionProvider('mimo')"
-        >MiMo</button>
-        <button
-          :class="['vision-btn', { active: visionProvider === 'qwen' }]"
-          :disabled="visionSwitching"
-          @click="switchVisionProvider('qwen')"
-        >Qwen</button>
+        <span class="vision-btn active" :title="`当前: Qwen (${visionProvider})`">Qwen</span>
       </div>
     </div>
 
@@ -887,7 +859,7 @@ watch(activeTab, (tab) => {
           <div class="gallery-grid">
             <div v-for="(img, idx) in items" :key="img.path" class="gallery-card editorial-card" :style="{ animationDelay: `${idx * 40}ms` }">
               <div class="gallery-thumb" @click="openPreview(img.url)">
-                <img :src="img.url" loading="lazy" />
+                <img :src="img.url" loading="lazy" decoding="async" />
                 <div class="thumb-overlay">
                   <svg width="20" height="20" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0zM10 7v3m0 0v3m0-3h3m-3 0H7"/></svg>
                 </div>
@@ -959,7 +931,7 @@ watch(activeTab, (tab) => {
             <div class="gallery-grid">
               <div v-for="(r, idx) in items" :key="r.id" class="gallery-card editorial-card" :style="{ animationDelay: `${idx * 40}ms` }" @click="openPreview(imageUrl(r.image_path))">
                 <div class="gallery-thumb">
-                  <img :src="imageUrl(r.image_path)" loading="lazy" />
+                  <img :src="imageUrl(r.image_path)" loading="lazy" decoding="async" />
                   <div class="thumb-overlay">
                     <svg width="20" height="20" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0zM10 7v3m0 0v3m0-3h3m-3 0H7"/></svg>
                   </div>
@@ -986,7 +958,7 @@ watch(activeTab, (tab) => {
           <div class="gallery-grid">
             <div v-for="(r, idx) in sortedRecords" :key="r.id" class="gallery-card editorial-card" :style="{ animationDelay: `${idx * 40}ms` }" @click="openPreview(imageUrl(r.image_path))">
               <div class="gallery-thumb">
-                <img :src="imageUrl(r.image_path)" loading="lazy" />
+                <img :src="imageUrl(r.image_path)" loading="lazy" decoding="async" />
                 <div class="thumb-overlay">
                   <svg width="20" height="20" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0zM10 7v3m0 0v3m0-3h3m-3 0H7"/></svg>
                 </div>
@@ -1061,7 +1033,7 @@ watch(activeTab, (tab) => {
           <div class="gallery-grid">
             <div v-for="(img, idx) in items" :key="img.path" :class="['gallery-card', 'editorial-card', { parsed: img.parsed }]" :style="{ animationDelay: `${idx * 40}ms` }">
               <div class="gallery-thumb" @click="openPreview(img.url)">
-                <img :src="img.url" loading="lazy" />
+                <img :src="img.url" loading="lazy" decoding="async" />
                 <div class="thumb-overlay">
                   <svg width="20" height="20" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0zM10 7v3m0 0v3m0-3h3m-3 0H7"/></svg>
                 </div>

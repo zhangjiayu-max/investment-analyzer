@@ -1,5 +1,5 @@
 <script setup>
-import { ref, onMounted, onUnmounted, nextTick, computed } from 'vue'
+import { ref, onMounted, onUnmounted, onActivated, nextTick, computed } from 'vue'
 import { getBondMarketTemperature } from '../../api'
 
 const chartRef = ref(null)
@@ -216,6 +216,11 @@ function handleResize() {
 onMounted(() => {
   fetchData()
   window.addEventListener('resize', handleResize)
+})
+
+// KeepAlive 切回时 resize 图表（容器尺寸可能已变化）
+onActivated(() => {
+  chart?.resize()
 })
 
 onUnmounted(() => {

@@ -3,7 +3,7 @@
  * Replaces `import * as echarts from 'echarts'` with dynamic import,
  * reducing the initial bundle by ~1MB.
  */
-import { ref, onMounted, onUnmounted, watch } from 'vue'
+import { ref, onMounted, onUnmounted, onActivated, watch } from 'vue'
 
 let echartsModule = null
 let echartsLoadPromise = null
@@ -61,6 +61,11 @@ export function useLazyChart(chartRef, optionFn, deps = []) {
   onMounted(() => {
     initChart()
     window.addEventListener('resize', handleResize)
+  })
+
+  // KeepAlive 切回时 resize 图表（容器尺寸可能已变化）
+  onActivated(() => {
+    chart?.resize()
   })
 
   onUnmounted(() => {

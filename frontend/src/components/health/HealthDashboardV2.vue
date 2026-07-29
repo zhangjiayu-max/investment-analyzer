@@ -1,5 +1,5 @@
 <script setup>
-import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
+import { ref, computed, onMounted, onUnmounted, onActivated, watch, nextTick } from 'vue'
 import {
   getHealthV2Dashboard,
   recalculateHealthV2,
@@ -228,6 +228,11 @@ onMounted(() => {
   refreshAll()
   loadDefaults()
   window.addEventListener('resize', resizeCharts)
+})
+
+// KeepAlive 切回时 resize 图表（容器尺寸可能已变化）
+onActivated(() => {
+  historyChart?.resize()
 })
 
 onUnmounted(() => {
