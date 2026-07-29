@@ -268,9 +268,14 @@ class ImageParser:
         data = _extract_json(raw)
         result = self._normalize(data)
 
-        # 兜底：整图解析无 current_value 时，裁剪底部数据表区域单独提取数值
-        if not result.get("current_value"):
-            logger.info(f"[ImageParser] 整图解析无 current_value，尝试裁剪底部数据表: {image_path}")
+        # 兜底：整图解析无 current_value，或 current_value 有值但关键统计字段
+        # (danger_value/median/percentile) 缺失时，裁剪底部数据表区域单独提取数值。
+        # 2026-07-30 修复：原条件仅 current_value 为空才触发，导致中证银行等指数
+        # 整图解析出 current_value=7.14 但 danger_value/median 全 None 时无法补全。
+        _detail_missing = not result.get("danger_value") or not result.get("median") or not result.get("percentile")
+        if not result.get("current_value") or (result.get("current_value") and _detail_missing):
+            _reason = "无 current_value" if not result.get("current_value") else "关键统计字段缺失"
+            logger.info(f"[ImageParser] 整图解析 {_reason}，尝试裁剪底部数据表: {image_path}")
             try:
                 from PIL import Image
                 import io as _io
@@ -303,23 +308,27 @@ class ImageParser:
                         stats_data = stats_data2  # 使用放大后的结果
                 if stats.get("当前值") is not None:
                     logger.info(f"[ImageParser] 裁剪兜底成功: current_value={stats.get('当前值')}")
-                    result["current_value"] = stats.get("当前值")
-                    result["percentile"] = stats.get("分位点")
-                    result["danger_value"] = stats.get("危险值")
-                    result["median"] = stats.get("中位数")
-                    result["opportunity_value"] = stats.get("机会值")
-                    result["max_value"] = stats.get("最大值")
-                    result["min_value"] = stats.get("最小值")
-                    result["avg_value"] = stats.get("平均值")
-                    result["zscore"] = stats.get("z分数")
-                    # 根据实际返回的指标类型更新 metric_type
-                    if stats_data.get("市净率统计指标", {}).get("当前值") is not None:
-                        result["metric_type"] = "市净率"
-                    elif stats_data.get("市销率TTM统计指标", {}).get("当前值") is not None:
-                        result["metric_type"] = "市销率"
+                    # 合并策略（2026-07-30 修复）：只填充 result 中为 None 的字段，
+                    # 不覆盖整图解析已得到的非空值，避免裁剪解析不准时覆盖正确数据
+                    _fill_map = {
+                        "current_value": "当前值", "percentile": "分位点",
+                        "danger_value": "危险值", "median": "中位数",
+                        "opportunity_value": "机会值", "max_value": "最大值",
+                        "min_value": "最小值", "avg_value": "平均值", "zscore": "z分数",
+                    }
+                    for rkey, skey in _fill_map.items():
+                        _val = stats.get(skey)
+                        if _val is not None and result.get(rkey) is None:
+                            result[rkey] = _val
+                    # metric_type：整图已识别则保留，仅整图未识别时用裁剪结果
+                    if not result.get("metric_type") or result["metric_type"] == "市盈率":
+                        if stats_data.get("市净率统计指标", {}).get("当前值") is not None:
+                            result["metric_type"] = "市净率"
+                        elif stats_data.get("市销率TTM统计指标", {}).get("当前值") is not None:
+                            result["metric_type"] = "市销率"
                     if not result.get("background_color"):
                         result["background_color"] = stats_data.get("背景颜色")
-                    # 合并 raw_json
+                    # 合并 raw_json（保留更完整的裁剪结果）
                     result["raw_json"] = json.dumps(stats_data, ensure_ascii=False)
             except Exception as e:
                 logger.warning(f"[ImageParser] 裁剪兜底失败: {e}")
