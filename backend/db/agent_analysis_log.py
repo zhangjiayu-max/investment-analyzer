@@ -203,24 +203,40 @@ def update_eval_result(log_id: int, eval_score: float) -> bool:
     return updated
 
 
-def fetch_source_result(source_table: str, source_id: int) -> str:
-    """按 source_table + source_id 查回原始记录的完整 result。"""
+def fetch_source_result(source_table: str, source_id: int, trace_id: str = None) -> str:
+    """按 source_table + source_id 查回原始记录的完整 result。
+
+    Fallback：当 source_id 为 None 或查不到时，通过 trace_id 查 agent_runs 表。
+    覆盖 enhanced_strategy 等场景：source_id 因 INSERT 失败而为 None，
+    但 agent_runs 表有完整记录（通过 trace_id 关联）。
+    """
     conn = _get_conn()
     try:
-        if source_table == "analysis_history":
-            row = conn.execute("SELECT result FROM analysis_history WHERE id = ?", (source_id,)).fetchone()
-        elif source_table == "portfolio_analysis_records":
-            row = conn.execute("SELECT result_data FROM portfolio_analysis_records WHERE id = ?", (source_id,)).fetchone()
-        elif source_table == "health_scores":
-            row = conn.execute("SELECT detail_json FROM health_scores WHERE id = ?", (source_id,)).fetchone()
-        else:
-            conn.close()
-            return ""
+        result = ""
+        if source_id:
+            if source_table == "analysis_history":
+                row = conn.execute("SELECT result FROM analysis_history WHERE id = ?", (source_id,)).fetchone()
+            elif source_table == "portfolio_analysis_records":
+                row = conn.execute("SELECT result_data FROM portfolio_analysis_records WHERE id = ?", (source_id,)).fetchone()
+            elif source_table == "health_scores":
+                row = conn.execute("SELECT detail_json FROM health_scores WHERE id = ?", (source_id,)).fetchone()
+            else:
+                row = None
+            if row:
+                result = row[0] or ""
+
+        # Fallback：source_id 为 None 或查不到时，通过 trace_id 查 agent_runs
+        if not result and trace_id:
+            row = conn.execute(
+                "SELECT result FROM agent_runs WHERE trace_id = ? AND result != '' ORDER BY id DESC LIMIT 1",
+                (trace_id,),
+            ).fetchone()
+            if row:
+                result = row[0] or ""
+
         conn.close()
-        if row:
-            return row[0] or ""
-        return ""
+        return result
     except Exception as e:
         conn.close()
-        logger.warning(f"查回原始记录失败 {source_table}:{source_id}: {e}")
+        logger.warning(f"查回原始记录失败 {source_table}:{source_id} trace={trace_id}: {e}")
         return ""

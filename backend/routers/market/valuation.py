@@ -938,6 +938,7 @@ async def get_enhanced_strategy():
             query=candidate_text[:500],
             result=parsed.get("overall_summary", "")[:500],
             duration_ms=llm_duration, status=llm_status,
+            trace_id=_es_trace_id,  # 关联 analysis_log，用于详情页 fallback 查询
         )
     except Exception as e:
         logger.warning(f"记录 agent_run 失败: {e}")

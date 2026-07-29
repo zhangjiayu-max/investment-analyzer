@@ -102,9 +102,11 @@ async def get_analysis_log_detail_api(log_id: int):
     if not log:
         raise HTTPException(404, "记录不存在")
     # 按 source_table + source_id 查回原始结果
-    source_result = ""
-    if log.get("source_id"):
-        source_result = fetch_source_result(log["source_table"], log["source_id"])
+    # 传入 trace_id 用于 fallback：当 source_id 为 None 时从 agent_runs 查
+    source_result = fetch_source_result(
+        log.get("source_table", ""), log.get("source_id"),
+        trace_id=log.get("trace_id"),
+    )
     return {"log": log, "source_result": source_result}
 
 
