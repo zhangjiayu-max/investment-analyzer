@@ -777,12 +777,16 @@ def _phase_preprocess(
 ) -> dict:
     """Phase 0: 意图识别 + Query 改写 + 复杂度评估。"""
     from agent.memory.memory import build_user_memory_context
+    from agent.memory.feedback_learner import get_preference_context
 
     # 1. Query 理解
     history_summary = _summarize_history_for_understanding(history)
-    portfolio_summary = build_user_memory_context(user_id)[:500] if user_id else ""
+    # 2026-07-29: 分离 KYC 和持仓上下文，避免 LLM 因看不到 KYC 而频繁澄清（conv 191 案例）
+    full_memory = build_user_memory_context(user_id) if user_id else ""
+    portfolio_summary = full_memory[:500]  # 持仓+历史主题+记忆段
+    kyc_summary = get_preference_context(user_id)[:500] if user_id else ""  # KYC 画像段
     query_info = understand_query(
-        query, history_summary, portfolio_summary, trace_id
+        query, history_summary, portfolio_summary, trace_id, kyc_summary
     )
 
     # 2. Query 改写（复用现有 query_rewriter）

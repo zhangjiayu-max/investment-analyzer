@@ -186,6 +186,7 @@ _UNDERSTAND_PROMPT = """## 任务：理解用户问题的意图和信息需求
 
 对话历史摘要：{history_summary}
 持仓摘要：{portfolio_summary}
+用户画像：{kyc_summary}
 
 ### 输出格式（严格 JSON，不要额外文本）
 ```json
@@ -227,6 +228,15 @@ _UNDERSTAND_PROMPT = """## 任务：理解用户问题的意图和信息需求
    - true: 问题模糊，需要先问用户（如"那这只基金怎么样"无上下文）
    - false: 问题清晰，可直接分析
 
+   **⚠️ 澄清抑制规则（2026-07-29 增强）**：
+   以下场景**禁止触发澄清**，必须返回 needs_clarification=false：
+   - **KYC 已答**：用户画像已包含风险承受/投资期限/投资目标/投资风格/关注资产 → 不得以"缺少风险偏好""缺少投资期限""缺少投资风格"为由触发澄清，应基于已有画像直接分析
+   - **持仓已答**：用户持仓摘要已包含具体基金/指数 → 不得以"未指定标的""未明确持仓"为由触发澄清，应基于已有持仓直接分析
+   - **历史已答**：对话历史摘要中已出现同类澄清问答 → 不得重复问相同问题（如历史中已问过"投资风格偏好"，本次不得再问）
+   - **主动推荐类问题**：用户问"推荐...""有哪些...""还有什么..."等开放性问题时，应基于画像+持仓直接给出推荐，**不得要求用户先选风格/先选板块**
+   - **上下文可推断**：从对话历史可推断出用户意图时（如刚分析完白酒，接着问"那医疗呢"），不得要求用户重新明确标的
+   - 仅当**完全无法推断用户意图**（如代词无指代物、问题过短无上下文、涉及具体标的但未说明）时才触发澄清
+
 5. **clarification_question**：
    - 当 needs_clarification=true 时，**必须填写具体的澄清问题文本**（向用户提问的完整句子）
    - 例："您提到'当前持仓'，请问想分析哪只基金或哪个账户的持仓风险？"
@@ -255,6 +265,7 @@ def _call_llm_for_understanding(
     history_summary: str,
     portfolio_summary: str,
     trace_id: str,
+    kyc_summary: str = "",
 ) -> Optional[dict]:
     """调用 LLM 做 Query 理解，失败返回 None。"""
     try:
@@ -266,6 +277,7 @@ def _call_llm_for_understanding(
         query=query[:500],  # 限制长度防止注入
         history_summary=(history_summary or "（无历史）")[:500],
         portfolio_summary=(portfolio_summary or "（无持仓）")[:500],
+        kyc_summary=(kyc_summary or "（未填写）")[:500],
     )
 
     try:
@@ -296,6 +308,7 @@ def understand_query(
     history_summary: str = "",
     portfolio_summary: str = "",
     trace_id: str = "",
+    kyc_summary: str = "",
 ) -> dict:
     """理解用户问题的意图和信息需求。
 
@@ -315,6 +328,10 @@ def understand_query(
     2. 如果规则命中简单闲聊，直接返回
     3. 否则调用 LLM 做精细理解（受 agent.query_understander_enabled 控制，默认 True）
     4. LLM 失败则降级为规则识别
+
+    2026-07-29 增强：
+    - 新增 kyc_summary 参数，传入用户画像让 LLM 看到"已答过的风险偏好/投资期限/投资风格"
+    - 同会话不重复澄清：若 history_summary 中已出现相同澄清问题，强制 needs_clarification=false
     """
     if not query or not query.strip():
         return {
@@ -354,7 +371,7 @@ def understand_query(
 
     if use_llm and trace_id:
         llm_result = _call_llm_for_understanding(
-            query, history_summary, portfolio_summary, trace_id
+            query, history_summary, portfolio_summary, trace_id, kyc_summary
         )
         if llm_result and "intent" in llm_result:
             llm_result["source"] = "llm"
@@ -366,10 +383,82 @@ def understand_query(
             llm_result.setdefault("clarification_reason", "")
             llm_result.setdefault("clarification_options", [])
             llm_result.setdefault("complexity", _estimate_complexity_by_query(query))
+
+            # 同会话不重复澄清（history-aware，2026-07-29）
+            # 若 LLM 触发澄清但 history 中已出现相同/相似澄清问题，强制抑制
+            if llm_result.get("needs_clarification"):
+                suppressed = _suppress_duplicate_clarification(
+                    llm_result.get("clarification_question", ""),
+                    history_summary,
+                    kyc_summary,
+                    portfolio_summary,
+                )
+                if suppressed:
+                    logger.info(f"[query_understander] 抑制重复澄清: {llm_result.get('clarification_question', '')[:50]} → 原因: {suppressed}")
+                    llm_result["needs_clarification"] = False
+                    llm_result["clarification_question"] = ""
+                    llm_result["clarification_reason"] = ""
+                    llm_result["clarification_options"] = []
+                    llm_result["clarification_suppressed"] = suppressed  # 标记被抑制原因，便于排查
+
             return llm_result
 
     # 3. 降级：规则识别
     return _rule_based_understand(query)
+
+
+def _suppress_duplicate_clarification(
+    clarification_question: str,
+    history_summary: str,
+    kyc_summary: str,
+    portfolio_summary: str,
+) -> str:
+    """判断是否应抑制本次澄清，返回抑制原因（空字符串表示不抑制）。
+
+    抑制规则：
+    1. 历史已问过同类问题（如"投资风格""风险偏好""投资期限"）→ 抑制
+    2. KYC 已有对应信息（如问"风险偏好"但 KYC 已填 balanced）→ 抑制
+    3. 持仓已有对应信息（如问"想分析哪只基金"但持仓已列基金）→ 抑制
+
+    返回值：抑制原因字符串，空字符串表示不抑制。
+    """
+    if not clarification_question:
+        return ""
+
+    q = clarification_question
+
+    # 规则 1：历史已问过同类澄清
+    if history_summary:
+        # 检测关键词：投资风格/风险偏好/投资期限/投资目标/风险承受
+        duplicate_keywords = [
+            ("投资风格", ["投资风格", "风格偏好", "偏好哪种"]),
+            ("风险偏好", ["风险偏好", "风险承受", "风险容忍"]),
+            ("投资期限", ["投资期限", "投资周期", "持有多久"]),
+            ("投资目标", ["投资目标", "投资目的", "稳健增值", "激进成长"]),
+        ]
+        for label, kws in duplicate_keywords:
+            if any(kw in q for kw in kws) and any(kw in history_summary for kw in kws):
+                return f"历史已问过{label}"
+
+    # 规则 2：KYC 已有对应信息
+    if kyc_summary and kyc_summary != "（未填写）":
+        kyc_pairs = [
+            ("风险偏好", ["风险偏好", "风险承受", "风险容忍"], ["风险承受", "风险容忍", "balanced", "稳健", "保守", "进取", "激进"]),
+            ("投资期限", ["投资期限", "投资周期", "持有多久"], ["投资期限", "短期", "中期", "长期", "short", "medium", "long"]),
+            ("投资目标", ["投资目标", "投资目的"], ["投资目标", "积极增值", "稳健增值", "财富保值"]),
+            ("投资风格", ["投资风格", "风格偏好"], ["风险承受", "投资目标", "投资期限"]),  # KYC组合可推断风格
+        ]
+        for label, q_kws, kyc_kws in kyc_pairs:
+            if any(kw in q for kw in q_kws) and any(kw in kyc_summary for kw in kyc_kws):
+                return f"KYC已包含{label}信息"
+
+    # 规则 3：持仓已有对应信息
+    if portfolio_summary and portfolio_summary != "（无持仓）":
+        if any(kw in q for kw in ["哪只基金", "哪个基金", "想分析哪只", "持仓中哪个"]):
+            if any(kw in portfolio_summary for kw in ["基金", "ETF", "指数", "LOF"]):
+                return "持仓已列基金"
+
+    return ""
 
 
 # ── 便捷判断函数 ──────────────────────────────

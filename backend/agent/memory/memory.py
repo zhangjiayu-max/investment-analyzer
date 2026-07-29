@@ -182,13 +182,61 @@ def build_user_memory_context(user_id: str = "default") -> str:
     except Exception:
         pass
 
-    # 2. 持仓概况
+    # 2. 持仓概况（2026-07-29 增强：总市值/盈亏/重仓行业分布）
     try:
-        from db import list_portfolio_holdings
-        holdings = list_portfolio_holdings()
+        from db import list_holdings
+        holdings = list_holdings()
         if holdings:
-            holding_names = [h.get("fund_name", h.get("index_name", "")) for h in holdings[:5]]
-            parts.append(f"<portfolio>用户当前持有: {'、'.join(holding_names)}</portfolio>")
+            # 按市值排序，取 Top 5
+            sorted_holdings = sorted(
+                holdings,
+                key=lambda h: float(h.get("current_value") or 0),
+                reverse=True
+            )
+            top = sorted_holdings[:5]
+
+            # 按行业/类别聚合
+            cat_map = {}
+            total_cost = 0.0
+            total_value = 0.0
+            for h in holdings:
+                v = float(h.get("current_value") or 0)
+                c = float(h.get("total_cost") or 0)
+                total_cost += c
+                total_value += v
+                cat = h.get("fund_category") or h.get("index_name") or "其他"
+                cat_map[cat] = cat_map.get(cat, 0) + v
+
+            # 持仓摘要：Top5 基金名 + 总盈亏 + 重仓行业 Top3
+            holding_lines = []
+            for h in top:
+                name = h.get("fund_name", h.get("index_name", ""))
+                rate = h.get("profit_rate")
+                if rate is not None:
+                    try:
+                        rate_str = f"({float(rate)*100:+.1f}%)"
+                    except (ValueError, TypeError):
+                        rate_str = ""
+                else:
+                    rate_str = ""
+                holding_lines.append(f"{name}{rate_str}")
+
+            summary_parts = [f"<portfolio>用户当前持有（市值排序Top5）: {'、'.join(holding_lines)}"]
+
+            # 总盈亏
+            if total_cost > 0:
+                total_profit = total_value - total_cost
+                total_rate = total_profit / total_cost * 100
+                summary_parts.append(f"总市值: {total_value:.0f}元，累计盈亏: {total_profit:+.0f}元（{total_rate:+.1f}%）")
+
+            # 重仓行业分布 Top3
+            if cat_map:
+                sorted_cats = sorted(cat_map.items(), key=lambda x: x[1], reverse=True)[:3]
+                cat_str = "、".join([f"{c}({v/total_value*100:.0f}%)" if total_value > 0 else f"{c}" for c, v in sorted_cats])
+                summary_parts.append(f"重仓分布: {cat_str}")
+
+            summary_parts.append("</portfolio>")
+            parts.append("，".join(summary_parts[:-1]) + summary_parts[-1])
     except Exception:
         pass
 

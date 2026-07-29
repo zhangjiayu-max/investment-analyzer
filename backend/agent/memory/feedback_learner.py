@@ -13,8 +13,9 @@ def get_preference_context(user_id: str = "default") -> str:
     """
     获取用户偏好的 prompt 注入文本。
 
-    返回约 200 token 的字符串，格式如：
+    返回约 300 token 的字符串，格式如：
     <user_preferences>
+    [KYC 画像] 风险承受：balanced；投资期限：long；主要目标：积极增值；目标权益比：15%；...
     用户偏好：详细数据支撑，关注估值和风险。
     不喜欢：笼统建议、缺具体数字。
     </user_preferences>
@@ -45,11 +46,14 @@ def get_preference_context(user_id: str = "default") -> str:
     except (json.JSONDecodeError, TypeError):
         neg = []
 
-    # 如果没有任何数据，不注入
-    if not prefs and not feedback_summary and not pos and not neg:
-        return ""
-
     parts = []
+
+    # ── KYC 画像（核心字段，2026-07-29 补充）──
+    # 此前只读 preferences_json 等 4 个字段，导致 risk_tolerance/primary_goal 等
+    # 核心 KYC 字段从未注入 prompt，LLM 因"看不到用户已填 KYC"而频繁触发澄清（conv 191 案例）
+    kyc_lines = _build_kyc_section(profile)
+    if kyc_lines:
+        parts.append(kyc_lines)
 
     # 偏好设置
     detail = prefs.get("preferred_detail_level")
@@ -84,6 +88,93 @@ def get_preference_context(user_id: str = "default") -> str:
         return ""
 
     return "<user_preferences>\n" + "\n".join(parts) + "\n</user_preferences>"
+
+
+# ── KYC 字段映射表 ───────────────────────────────────
+# 数据库字段值 → 中文可读标签（LLM 友好）
+_RISK_TOLERANCE_MAP = {
+    "conservative": "保守型", "steady": "稳健型", "balanced": "平衡型",
+    "aggressive": "进取型", "radical": "激进型",
+}
+_INVESTMENT_HORIZON_MAP = {
+    "short": "短期（<1年）", "medium": "中期（1-3年）",
+    "long": "长期（3-10年）", "very_long": "超长期（>10年）",
+}
+_INVESTMENT_EXPERIENCE_MAP = {
+    "beginner": "新手", "intermediate": "进阶", "advanced": "资深", "expert": "专家",
+}
+_LOSS_TOLERANCE_MAP = {
+    "low": "低（亏损<5%即焦虑）", "medium": "中（可接受10%亏损）",
+    "high": "高（可接受20%+亏损）", "very_high": "极高（可接受30%+亏损）",
+}
+_PRIMARY_GOAL_MAP = {
+    "wealth_preservation": "财富保值", "steady_growth": "稳健增值",
+    "积极增值": "积极增值", "aggressive_growth": "积极增值",
+    "retirement": "养老储备", "education": "教育储备",
+}
+
+
+def _build_kyc_section(profile: dict) -> str:
+    """从 user_profiles 行构建 KYC 画像段。
+
+    读取 7 个核心字段：风险承受/投资期限/主要目标/目标权益比/关注资产/行为偏差/损失容忍。
+    若字段为空则跳过，避免输出"None"或空值。
+    """
+    kyc_parts = []
+
+    risk = profile.get("risk_tolerance")
+    if risk:
+        kyc_parts.append(f"风险承受：{_RISK_TOLERANCE_MAP.get(risk, risk)}")
+
+    horizon = profile.get("investment_horizon")
+    if horizon:
+        kyc_parts.append(f"投资期限：{_INVESTMENT_HORIZON_MAP.get(horizon, horizon)}")
+
+    goal = profile.get("primary_goal")
+    if goal:
+        kyc_parts.append(f"投资目标：{_PRIMARY_GOAL_MAP.get(goal, goal)}")
+
+    equity_ratio = profile.get("target_equity_ratio")
+    if equity_ratio is not None and equity_ratio != "":
+        try:
+            ratio = float(equity_ratio)
+            kyc_parts.append(f"目标权益比：{ratio:.0f}%")
+        except (ValueError, TypeError):
+            pass
+
+    focus = profile.get("focus_assets")
+    if focus:
+        try:
+            focus_list = json.loads(focus) if isinstance(focus, str) else focus
+            if focus_list:
+                focus_map = {"index": "指数", "fund": "基金", "bond": "债券",
+                             "gold": "黄金", "stock": "股票", "crypto": "数字货币"}
+                focus_zh = [focus_map.get(a, a) for a in focus_list]
+                kyc_parts.append(f"关注资产：{'、'.join(focus_zh)}")
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+    biases = profile.get("behavior_biases")
+    if biases:
+        try:
+            bias_list = json.loads(biases) if isinstance(biases, str) else biases
+            if bias_list:
+                kyc_parts.append(f"行为偏差：{'、'.join(bias_list[:4])}")
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+    loss_tol = profile.get("loss_tolerance")
+    if loss_tol:
+        kyc_parts.append(f"损失容忍：{_LOSS_TOLERANCE_MAP.get(loss_tol, loss_tol)}")
+
+    exp = profile.get("investment_experience")
+    if exp:
+        kyc_parts.append(f"投资经验：{_INVESTMENT_EXPERIENCE_MAP.get(exp, exp)}")
+
+    if not kyc_parts:
+        return ""
+
+    return "[KYC 画像] " + "；".join(kyc_parts)
 
 
 def update_user_profile_from_feedback(user_id: str, feedback_type: str,
