@@ -171,14 +171,14 @@ async def generate_prompt_api(req: GeneratePromptRequest):
 请直接输出完整的提示词，不要加任何解释说明。"""
 
     try:
-        from services.llm_service import _call_llm, call_llm_async, MODEL_ANALYSIS
+        from services.llm_service import _call_llm, call_llm_async, MODEL_AUX
         resp = await call_llm_async(
             caller="agent_generator",
             messages=[
                 {"role": "system", "content": PROMPT_GENERATOR_META},
                 {"role": "user", "content": user_content},
             ],
-            model=MODEL_ANALYSIS,
+            model=MODEL_AUX,
             max_tokens=get_config_int('llm.max_tokens_analysis', 8000),
         )
         result = resp.choices[0].message.content if resp and resp.choices else ""
@@ -269,13 +269,13 @@ async def react_reasoning_api(body: dict):
     def _llm_call(messages):
         # 同步包装：react_loop 为同步设计，这里用 asyncio 跑
         import asyncio as _aio
-        from services.llm_service import MODEL_ANALYSIS
+        from services.llm_service import MODEL_AUX
         try:
             loop = _aio.get_event_loop()
         except RuntimeError:
             loop = _aio.new_event_loop()
         resp = loop.run_until_complete(
-            call_llm_async(caller="react_loop", model=MODEL_ANALYSIS, messages=messages)
+            call_llm_async(caller="react_loop", model=MODEL_AUX, messages=messages)
         )
         return resp.choices[0].message.content or ""
 

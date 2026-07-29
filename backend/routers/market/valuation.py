@@ -643,7 +643,7 @@ async def get_enhanced_strategy():
     - 催化剂（政策/业绩/资金轮动）
     - 建议操作（立即买入/分批建仓/观望/回避）
     """
-    from services.llm_service import _call_llm, MODEL_ANALYSIS
+    from services.llm_service import _call_llm, MODEL_AUX
     from db import get_config_float, get_config_int
 
     conn = _get_conn()
@@ -882,7 +882,7 @@ async def get_enhanced_strategy():
         response = await asyncio.wait_for(
             asyncio.to_thread(lambda: _call_llm(
                 caller="enhanced_strategy",
-                model=MODEL_ANALYSIS,
+                model=MODEL_AUX,
                 messages=[{"role": "user", "content": full_prompt}],
                 temperature=get_config_float("llm.temperature_default", 0.3),
                 max_tokens=get_config_int("llm.max_tokens_report", 8192),
@@ -1003,9 +1003,9 @@ async def get_index_info_api(index_code: str, index_name: str = ""):
         return {"index_code": index_code, "info": info, "source": "dict"}
 
     try:
-        from services.llm_service import _call_llm, call_llm_async, MODEL_ANALYSIS
+        from services.llm_service import _call_llm, call_llm_async, MODEL_AUX
         prompt = f"请用2-3句话简洁介绍「{index_name or index_code}」这个股票指数，包括它由哪些股票组成、覆盖什么行业、适合什么样的投资者。不要使用markdown格式，直接输出纯文本。"
-        resp = await call_llm_async(caller="valuation", messages=[{"role": "user", "content": prompt}], model=MODEL_ANALYSIS, max_tokens=get_config_int('llm.max_tokens_valuation_summary', 800))
+        resp = await call_llm_async(caller="valuation", messages=[{"role": "user", "content": prompt}], model=MODEL_AUX, max_tokens=get_config_int('llm.max_tokens_valuation_summary', 800))
         info = resp.choices[0].message.content if resp and resp.choices else ""
         if info:
             save_index_info(index_code, index_name, info.strip())
