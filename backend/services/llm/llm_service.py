@@ -119,8 +119,57 @@ SYSTEM_PROMPT = """<role>你是一位专业的投资分析师。请根据提供�
 </constraints>"""
 
 
+# ── 全局 Token 预算检查 ────────────────────────────────────
+# 所有 LLM 调用（_call_llm / _call_llm_stream）入口统一拦截，
+# 超出 DAILY_TOKEN_LIMIT 时抛 TokenBudgetExceeded，避免任何路径绕过限制。
+# 30 秒内存缓存避免高频查库（LLM 调用本身慢，30s 粒度足够）
+_TOKEN_BUDGET_CACHE = {"ts": 0.0, "used": 0}
+_TOKEN_BUDGET_CACHE_TTL = 30.0  # 秒
+
+
+class TokenBudgetExceeded(Exception):
+    """Token 预算超限异常。所有 LLM 调用超限时抛出，由调用方决定如何降级。"""
+    pass
+
+
+def _enforce_token_budget(caller: str = "", trace_id: str = ""):
+    """检查今日 token 用量是否超限，超限则抛 TokenBudgetExceeded。
+
+    所有 LLM 调用（对话/分析/辅助模块）均受限，避免绕过 orchestrator
+    的 check_token_budget 在独立路由里无限制调用。
+    """
+    import time
+    from config import DAILY_TOKEN_LIMIT, TOKEN_BUDGET_BYPASS
+    if TOKEN_BUDGET_BYPASS or DAILY_TOKEN_LIMIT <= 0:
+        return
+
+    now = time.time()
+    if now - _TOKEN_BUDGET_CACHE["ts"] > _TOKEN_BUDGET_CACHE_TTL:
+        try:
+            from db import get_today_token_total
+            _TOKEN_BUDGET_CACHE["used"] = get_today_token_total()
+            _TOKEN_BUDGET_CACHE["ts"] = now
+        except Exception as e:
+            # 查库失败不阻塞调用（避免 DB 抖动导致全站 LLM 不可用）
+            logger.debug(f"[token_budget] 查询今日用量失败，跳过检查: {e}")
+            return
+
+    used = _TOKEN_BUDGET_CACHE["used"]
+    if used >= DAILY_TOKEN_LIMIT:
+        logger.warning(
+            f"[trace:{trace_id}] Token 预算超限，拦截 LLM 调用 "
+            f"(caller={caller}, used={used}, limit={DAILY_TOKEN_LIMIT})"
+        )
+        raise TokenBudgetExceeded(
+            f"今日 token 用量 {used} 已达上限 {DAILY_TOKEN_LIMIT}，"
+            f"caller={caller} 调用被拦截。请明日重试或调整 DAILY_TOKEN_LIMIT。"
+        )
+
+
 def _call_llm(caller: str = "", trace_id: str = "", **kwargs):
     """统一的 LLM 调用入口，带指数退避重试、token 记录和兜底切换。"""
+    # 全局 token 预算检查：所有 LLM 调用（对话/分析/辅助模块）均受限
+    _enforce_token_budget(caller, trace_id)
     requested_model = kwargs.get("model", MODEL)
     @_llm_retry
     def _do_call():
@@ -168,6 +217,8 @@ def _call_llm_stream(caller: str = "", trace_id: str = "", **kwargs):
             if chunk["reasoning"]:  # 思考过程增量
                 ...
     """
+    # 全局 token 预算检查：流式调用同样受限
+    _enforce_token_budget(caller, trace_id)
     kwargs["stream"] = True
 
     requested_model = kwargs.get("model", MODEL)
@@ -340,6 +391,8 @@ def _record_token_usage(usage, model: str, caller: str = "", trace_id: str = "",
         )
         conn.commit()
         conn.close()
+        # 同步更新内存缓存，让超限立即生效（不必等 30s 缓存过期）
+        _TOKEN_BUDGET_CACHE["used"] = _TOKEN_BUDGET_CACHE.get("used", 0) + (usage.total_tokens or 0)
     except Exception as e:
         logger.warning(f"[trace:{trace_id}] Failed to record token usage: {e}")
 

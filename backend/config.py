@@ -152,7 +152,7 @@ IMAGE_PARSER_MODEL_TYPE = os.getenv("IMAGE_PARSER_MODEL_TYPE", "deepseek")
 
 
 # ── Token 预算配置 ─────────────────────────────────────────
-DAILY_TOKEN_LIMIT = int(os.getenv("DAILY_TOKEN_LIMIT", "500000"))
+DAILY_TOKEN_LIMIT = int(os.getenv("DAILY_TOKEN_LIMIT", "1000000"))
 TOKEN_WARN_THRESHOLD = float(os.getenv("TOKEN_WARN_THRESHOLD", "0.8"))
 TOKEN_BUDGET_BYPASS = os.getenv("TOKEN_BUDGET_BYPASS", "0") == "1"
 
