@@ -276,7 +276,10 @@ def list_index_freshness() -> list[dict]:
 
 
 def search_indexes_by_keyword(keyword: str) -> list[dict]:
-    """按关键词模糊匹配指数名称或代码。"""
+    """按关键词模糊匹配指数名称或代码。
+
+    按标准化后的指数代码去重，避免 399986 和 399986.SZ 返回两条。
+    """
     conn = _get_conn()
     rows = conn.execute("""
         SELECT DISTINCT index_code, index_name
@@ -285,7 +288,19 @@ def search_indexes_by_keyword(keyword: str) -> list[dict]:
         ORDER BY index_code
     """, (f"%{keyword}%", f"%{keyword}%")).fetchall()
     conn.close()
-    return [dict(r) for r in rows]
+
+    # 按标准化代码去重，保留不带后缀的优先（代码更短=更规范）
+    seen = {}
+    for r in rows:
+        d = dict(r)
+        norm = normalize_index_code(d["index_code"])
+        if norm not in seen:
+            seen[norm] = d
+        else:
+            # 已存在时，优先保留不带后缀的（代码更短）
+            if "." not in d["index_code"] and "." in seen[norm]["index_code"]:
+                seen[norm] = d
+    return list(seen.values())
 
 
 def get_index_info(index_code: str) -> dict | None:
