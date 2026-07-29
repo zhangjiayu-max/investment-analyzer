@@ -137,7 +137,7 @@ const activeGroup = computed(() => {
     </nav>
 
     <!-- Token 预算指示器 -->
-    <div class="token-meter" :class="`token-${tokenMode}`">
+    <div class="token-meter" :class="`token-${tokenMode}`" @click="navigate('token-usage')" role="button" tabindex="0" @keydown.enter="navigate('token-usage')">
       <div class="token-meter-header">
         <Icon name="evolution" size="16" class="token-meter-icon" />
         <span class="token-meter-label terminal-label">今日 Token</span>
@@ -366,6 +366,14 @@ const activeGroup = computed(() => {
   border-radius: var(--radius-md);
   background: var(--color-bg-input);
   border: 1px solid var(--color-border-light);
+  cursor: pointer;
+  transition: border-color 0.15s, transform 0.1s;
+}
+.token-meter:hover {
+  border-color: var(--color-accent, #4fd1c5);
+}
+.token-meter:active {
+  transform: scale(0.99);
 }
 
 .token-meter-header {
