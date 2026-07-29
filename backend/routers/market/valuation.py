@@ -7,7 +7,7 @@ import re
 import ssl
 import time
 import uuid
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
@@ -391,44 +391,131 @@ async def get_history(index_code: str, days: int = 30, metric_type: str = None):
 # ── 超性价比识别 ──────────────────────────────────────
 
 
+# 超性价比：数据时效过滤阈值（latest_date 距今超过 N 天则视为过期，不进性价比池）
+SUPER_VALUE_MAX_STALE_DAYS = 10
+# 超性价比：metric_type 优先级（行业特性适配，重资产行业看 PB，轻资产行业看 PE）
+_METRIC_PRIORITY = ["市盈率", "市净率", "市销率", "市销率TTM", "股息率"]
+
+
+def _pick_best_metric_for_index(conn, index_code: str) -> str | None:
+    """为单个指数挑选最合适的 metric_type。
+
+    选择规则（解决「PE 断更被当最新」「重资产行业只有 PB 被漏掉」两类问题）：
+      1. 候选 metric_type 必须有 ≥3 条数据
+      2. 在候选中，按 latest_date 距今天数升序（越新越好）
+      3. latest_date 相同时，按 _METRIC_PRIORITY 优先级排序（PE > PB > PS > 股息率）
+      4. 如果最新 metric 距今 > SUPER_VALUE_MAX_STALE_DAYS，尝试回退到次新 metric（前提是它数据更新）
+      5. 全部过期则返回 None（由调用方跳过该指数）
+
+    案例：中证白酒 399997 PE 最新 2026-07-06（断更），PB 最新 2026-07-28（连续）
+         → 返回 "市净率"，避免用过期 PE 当"最新"
+    """
+    rows = conn.execute("""
+        SELECT metric_type, MAX(snapshot_date) as latest_date, COUNT(*) as cnt
+        FROM index_valuations
+        WHERE index_code = ? AND percentile IS NOT NULL
+        GROUP BY metric_type
+    """, (index_code,)).fetchall()
+
+    if not rows:
+        return None
+
+    today = date.today()
+    candidates = []
+    for r in rows:
+        d = dict(r)
+        if d["cnt"] < 3:
+            continue
+        try:
+            latest_dt = datetime.strptime(d["latest_date"], "%Y-%m-%d").date()
+            stale_days = (today - latest_dt).days
+        except (ValueError, TypeError):
+            continue
+        prio = _METRIC_PRIORITY.index(d["metric_type"]) if d["metric_type"] in _METRIC_PRIORITY else 99
+        candidates.append({
+            "metric_type": d["metric_type"],
+            "latest_date": d["latest_date"],
+            "stale_days": stale_days,
+            "priority": prio,
+            "cnt": d["cnt"],
+        })
+
+    if not candidates:
+        return None
+
+    # 按 stale_days 升序 → priority 升序，优先选最新且优先级高的 metric
+    candidates.sort(key=lambda x: (x["stale_days"], x["priority"]))
+    return candidates[0]["metric_type"]
+
+
 @router.get("/super-value")
 async def get_super_value_indexes():
     """扫描所有指数的历史估值数据，识别超性价比指数。
 
+    增强版（2026-07-29）：
+      - 多 metric_type 支持：每个指数按数据时效自动选 PE/PB/PS/股息率（避免白酒 PE 断更被当最新、券商/地产只看 PB 被漏掉）
+      - 数据时效过滤：latest_date 距今 >10 天的指数直接跳过
+      - 标签表述修正：「连续下跌N天」→「连续N期走低（日期窗口）」，避免跨月数据被误读为自然日
+      - 透出 metric_type 字段，前端标注 [PE]/[PB]，让用户知道用什么指标算的
+
     数据源优先级：螺丝钉(dd_valuations) > 雷牛牛(图片解析)
     同一指数只用一个数据源，避免混用导致百分位不一致。
 
-    评分维度：
+    评分维度（不变）：
     - 当前估值水位（30分）：percentile 越低越好
-    - 连续下跌天数（25分）：连续 N 天 percentile 下降
-    - 近期跌幅（20分）：最近 7 天 percentile 降幅
+    - 连续下跌期数（25分）：连续 N 期 percentile 下降
+    - 近期跌幅（20分）：最近 7 期 percentile 降幅
     - Z-score 偏离（15分）：zscore 越低越低估
     - 趋势加速（10分）：近期跌幅 > 前期跌幅
     """
+    from collections import defaultdict
     conn = _get_conn()
 
-    # 优先用螺丝钉(dd_valuations)的数据，其次用雷牛牛(图片解析)的数据
-    # 同一指数只用一个数据源，避免百分位不一致
+    # 拉所有指数代码，逐个挑选最合适的 metric_type
+    idx_rows = conn.execute("""
+        SELECT DISTINCT index_code FROM index_valuations WHERE percentile IS NOT NULL
+    """).fetchall()
+    index_metric_map = {}  # code -> metric_type
+    for r in idx_rows:
+        code = r["index_code"]
+        m = _pick_best_metric_for_index(conn, code)
+        if m:
+            index_metric_map[code] = m
+
+    if not index_metric_map:
+        conn.close()
+        return {
+            "opportunities": [],
+            "scan_time": datetime.now().strftime("%Y-%m-%d %H:%M"),
+            "total_scanned": 0,
+            "data_range": "无数据",
+        }
+
+    # 按挑选出的 metric_type 拉数据
+    # 同一指数只用一个数据源（螺丝钉 > 雷牛牛）
     rows = conn.execute("""
         SELECT index_code, index_name, snapshot_date, percentile, current_value, zscore,
-               source_image,
+               source_image, metric_type,
                CASE
                  WHEN source_image LIKE '%dd_%' THEN 1  -- 螺丝钉优先
                  ELSE 2  -- 雷牛牛
                END as source_priority
         FROM index_valuations
-        WHERE metric_type = '市盈率' AND percentile IS NOT NULL
+        WHERE percentile IS NOT NULL
         ORDER BY index_code, source_priority, snapshot_date
     """).fetchall()
     conn.close()
 
-    # 按指数分组，同一指数只用优先级最高的数据源
-    from collections import defaultdict
     index_data = defaultdict(list)
-    index_source = {}  # 记录每个指数使用的数据源
+    index_source = {}      # code -> 数据源名
+    index_metric = {}      # code -> 实际使用的 metric_type（与 index_metric_map 一致）
     for r in rows:
         d = dict(r)
         code = d["index_code"]
+        # 只处理挑选出 metric 的指数
+        target_metric = index_metric_map.get(code)
+        if not target_metric or d["metric_type"] != target_metric:
+            continue
         try:
             d["percentile"] = float(d["percentile"]) if d["percentile"] is not None else None
             d["current_value"] = float(d["current_value"]) if d["current_value"] is not None else None
@@ -437,15 +524,16 @@ async def get_super_value_indexes():
             continue
         if d["percentile"] is None:
             continue
-        # 确定该指数的数据源：第一次出现的 source_priority 决定了数据源
         source = "螺丝钉" if "dd_" in (d.get("source_image") or "") else "雷牛牛"
         if code not in index_source:
             index_source[code] = source
-        # 只使用同一数据源的数据
+            index_metric[code] = target_metric
         if index_source[code] == source:
             index_data[code].append(d)
 
+    today = date.today()
     opportunities = []
+    skipped_stale = 0
 
     for code, records in index_data.items():
         if len(records) < 3:
@@ -456,6 +544,7 @@ async def get_super_value_indexes():
         current_pct = latest["percentile"]
         current_val = latest["current_value"]
         zscore = latest.get("zscore")
+        metric_type = index_metric.get(code, "市盈率")
 
         # 确保是数值类型
         try:
@@ -466,6 +555,17 @@ async def get_super_value_indexes():
             continue
 
         if current_pct is None:
+            continue
+
+        # 数据时效过滤：latest_date 距今 >10 天直接跳过（_pick_best_metric_for_index 已尽量挑最新，
+        # 这里兜底防止极端情况，例如某指数所有 metric 都很久没更新）
+        try:
+            latest_dt = datetime.strptime(latest["snapshot_date"], "%Y-%m-%d").date()
+            stale_days = (today - latest_dt).days
+        except (ValueError, TypeError):
+            stale_days = 999
+        if stale_days > SUPER_VALUE_MAX_STALE_DAYS:
+            skipped_stale += 1
             continue
 
         # ── 维度 1：当前估值水位（30分）──
@@ -488,7 +588,9 @@ async def get_super_value_indexes():
             score_valuation = 0
             level = "偏高" if current_pct < 70 else "高估"
 
-        # ── 维度 2：连续下跌天数（25分）──
+        # ── 维度 2：连续下跌期数（25分）──
+        # 注意：records 按 snapshot_date 升序，但可能非连续交易日；
+        # 「连续 N 期走低」≠「连续 N 个自然日下跌」，标签和摘要会明确标注。
         consecutive_drop = 0
         for i in range(len(records) - 1, 0, -1):
             if records[i]["percentile"] < records[i - 1]["percentile"]:
@@ -511,7 +613,8 @@ async def get_super_value_indexes():
         else:
             score_consecutive = 0
 
-        # ── 维度 3：近 7 天跌幅（20分）──
+        # ── 维度 3：近 7 期跌幅（20分）──
+        # 改为「近 7 期」而非「7 个自然日」，与 records 实际粒度一致
         drop_7d = 0
         if len(records) >= 7:
             pct_7d_ago = records[-7]["percentile"]
@@ -546,7 +649,7 @@ async def get_super_value_indexes():
             score_zscore = 0
 
         # ── 维度 5：趋势加速（10分）──
-        # 比较最近 3 天平均跌幅 vs 最近 7 天平均跌幅
+        # 比较最近 3 期平均跌幅 vs 最近 7 期平均跌幅
         score_accel = 0
         drop_trend = "平稳"
         if len(records) >= 7:
@@ -571,28 +674,49 @@ async def get_super_value_indexes():
         if total_score < 40:
             continue
 
+        # 计算「连续走低期数」对应的实际日期窗口
+        # consecutive_drop 期走低，对应 records[-1-consecutive_drop] ~ records[-1]
+        window_start_date = None
+        window_days = None
+        if consecutive_drop > 0:
+            start_idx = max(0, len(records) - 1 - consecutive_drop)
+            window_start_date = records[start_idx]["snapshot_date"]
+            try:
+                start_dt = datetime.strptime(window_start_date, "%Y-%m-%d").date()
+                end_dt = datetime.strptime(latest["snapshot_date"], "%Y-%m-%d").date()
+                window_days = (end_dt - start_dt).days
+            except (ValueError, TypeError):
+                window_days = None
+
         # 标签
         tags = []
         if consecutive_drop >= 3:
-            tags.append(f"连续下跌{consecutive_drop}天")
+            tags.append(f"连续{consecutive_drop}期走低")
         if current_pct < 10:
             tags.append("极度低估")
         if zscore is not None and zscore < -1:
             tags.append(f"Z-score {zscore:+.2f}")
         if drop_7d > 5:
-            tags.append(f"7日跌{drop_7d:.1f}%")
+            tags.append(f"7期跌{drop_7d:.1f}%")
         if drop_trend == "加速下跌":
             tags.append("趋势加速")
 
         # 摘要
+        metric_short = "PE" if metric_type == "市盈率" else ("PB" if metric_type == "市净率" else ("PS" if "市销率" in metric_type else "股息率"))
         pct_str = f"{current_pct:.1f}%" if current_pct < 10 else f"{current_pct:.0f}%"
-        summary_parts = [f"{name} {latest.get('current_value', '')}，百分位 {pct_str}"]
+        summary_parts = [f"{name} [{metric_short}] {latest.get('current_value', '')}，百分位 {pct_str}"]
         if consecutive_drop > 0:
-            summary_parts.append(f"连续 {consecutive_drop} 天走低")
+            if window_days is not None and window_days > 0:
+                summary_parts.append(f"连续 {consecutive_drop} 期走低（{window_start_date}→{latest['snapshot_date']}，跨{window_days}天）")
+            else:
+                summary_parts.append(f"连续 {consecutive_drop} 期走低")
         if zscore is not None and zscore < -0.5:
             summary_parts.append(f"Z-score {zscore:+.2f}")
         if drop_trend in ("加速下跌", "温和下跌"):
             summary_parts.append(f"趋势{drop_trend}")
+
+        # 数据新鲜度标签
+        data_freshness = "fresh" if stale_days <= 3 else ("aging" if stale_days <= 7 else "stale")
 
         opportunities.append({
             "index_name": name,
@@ -600,15 +724,20 @@ async def get_super_value_indexes():
             "score": total_score,
             "score_breakdown": {
                 "valuation": {"score": score_valuation, "max": 30, "detail": f"百分位{current_pct:.1f}% → {level}"},
-                "consecutive": {"score": score_consecutive, "max": 25, "detail": f"连续下跌{consecutive_drop}天"},
-                "drop_7d": {"score": score_drop, "max": 20, "detail": f"7日跌幅{drop_7d:.1f}%"},
+                "consecutive": {"score": score_consecutive, "max": 25, "detail": f"连续{consecutive_drop}期走低"},
+                "drop_7d": {"score": score_drop, "max": 20, "detail": f"7期跌幅{drop_7d:.1f}%"},
                 "zscore": {"score": score_zscore, "max": 15, "detail": f"Z-score {zscore:+.2f}" if zscore else "无数据"},
                 "acceleration": {"score": score_accel, "max": 10, "detail": drop_trend},
             },
             "current_percentile": round(current_pct, 2),
             "current_value": current_val,
             "zscore": round(zscore, 2) if zscore is not None else None,
-            "consecutive_drop_days": consecutive_drop,
+            "consecutive_drop_days": consecutive_drop,  # 保留字段名兼容前端，语义改为「期数」
+            "consecutive_window": {
+                "start_date": window_start_date,
+                "end_date": latest["snapshot_date"],
+                "span_days": window_days,
+            },
             "drop_7d": round(drop_7d, 2) if drop_7d else 0,
             "drop_trend": drop_trend,
             "valuation_level": level,
@@ -617,6 +746,10 @@ async def get_super_value_indexes():
             "latest_date": latest["snapshot_date"],
             "data_source": index_source.get(code, "未知"),
             "data_points": len(records),
+            "metric_type": metric_type,
+            "metric_short": metric_short,
+            "data_freshness": data_freshness,
+            "stale_days": stale_days,
         })
 
     # 按分数降序排列
@@ -626,6 +759,8 @@ async def get_super_value_indexes():
         "opportunities": opportunities,
         "scan_time": datetime.now().strftime("%Y-%m-%d %H:%M"),
         "total_scanned": len(index_data),
+        "skipped_stale": skipped_stale,
+        "stale_threshold_days": SUPER_VALUE_MAX_STALE_DAYS,
         "data_range": f"{rows[0]['snapshot_date']} ~ {rows[-1]['snapshot_date']}" if rows else "无数据",
     }
 

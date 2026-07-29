@@ -58,8 +58,8 @@ const strategyLoading = ref(false)
 const strategyData = ref(null)
 const breakdownLabels = {
   valuation: '估值水位',
-  consecutive: '连续下跌',
-  drop_7d: '近期跌幅',
+  consecutive: '连续走低期数',
+  drop_7d: '近7期跌幅',
   zscore: 'Z-score',
   acceleration: '趋势',
 }
@@ -1427,6 +1427,8 @@ defineExpose({ loadHistory })
               <span>·</span>
               <span><span class="terminal-label">数据范围</span> <span class="font-jet">{{ superValueData.data_range }}</span></span>
               <span>·</span>
+              <span><span class="terminal-label">时效阈值</span> <span class="font-jet">{{ superValueData.stale_threshold_days || 10 }}天</span><span v-if="superValueData.skipped_stale > 0" class="terminal-label">（跳过{{ superValueData.skipped_stale }}个过期）</span></span>
+              <span>·</span>
               <span class="font-jet">{{ superValueData.scan_time }}</span>
             </div>
           </div>
@@ -1436,16 +1438,18 @@ defineExpose({ loadHistory })
               <div class="sv-main">
                 <div class="sv-top">
                   <span class="sv-name editorial-title">{{ item.index_name }}</span>
+                  <span v-if="item.metric_short" class="sv-metric-tag" :title="item.metric_type">[{{ item.metric_short }}]</span>
                   <span class="sv-score font-jet" :class="item.score >= 70 ? 'sv-score-high' : item.score >= 55 ? 'sv-score-mid' : ''">{{ item.score }}分</span>
                   <span class="sv-level" :class="'sv-level-' + item.valuation_level">{{ item.valuation_level }}</span>
+                  <span v-if="item.data_freshness" class="sv-freshness" :class="'sv-fresh-' + item.data_freshness" :title="`最新数据距今天数: ${item.stale_days}`">{{ item.data_freshness === 'fresh' ? '新' : item.data_freshness === 'aging' ? '渐旧' : '旧' }}</span>
                 </div>
                 <div class="sv-metrics">
                   <span><span class="terminal-label">百分位</span> <b class="font-jet">{{ item.current_percentile }}%</b></span>
                   <span v-if="item.current_value">· <span class="font-jet">{{ item.current_value }}</span></span>
                   <span v-if="item.zscore != null">· <span class="terminal-label">Z-score</span> <b class="font-jet">{{ item.zscore }}</b></span>
-                  <span v-if="item.consecutive_drop_days > 0">· <span class="terminal-label">连续下跌</span> <b class="font-jet">{{ item.consecutive_drop_days }}天</b></span>
-                  <span v-if="item.drop_7d > 0">· <span class="terminal-label">7日跌</span> <b class="font-jet">{{ item.drop_7d }}%</b></span>
-                  <span class="sv-source terminal-label">{{ item.data_source }} · {{ item.data_points }}天</span>
+                  <span v-if="item.consecutive_drop_days > 0">· <span class="terminal-label">连续走低</span> <b class="font-jet">{{ item.consecutive_drop_days }}期</b><span v-if="item.consecutive_window && item.consecutive_window.span_days != null" class="terminal-label">（{{ item.consecutive_window.start_date }}→{{ item.consecutive_window.end_date }}，跨{{ item.consecutive_window.span_days }}天）</span></span>
+                  <span v-if="item.drop_7d > 0">· <span class="terminal-label">7期跌</span> <b class="font-jet">{{ item.drop_7d }}%</b></span>
+                  <span class="sv-source terminal-label">{{ item.data_source }} · {{ item.data_points }}条</span>
                 </div>
                 <div v-if="item.tags?.length" class="sv-tags">
                   <span v-for="tag in item.tags" :key="tag" class="sv-tag">{{ tag }}</span>
@@ -3185,6 +3189,29 @@ defineExpose({ loadHistory })
 .sv-level-低估 { background: var(--color-warning-bg); color: var(--color-warning); }
 .sv-level-偏低 { background: var(--color-warning-bg); color: var(--color-warning); }
 .sv-level-适中 { background: var(--color-success-bg); color: var(--color-success); }
+
+/* 指标类型标签 [PE]/[PB]/[PS]/[股息率] */
+.sv-metric-tag {
+  font-size: 0.7rem;
+  font-weight: 600;
+  padding: 0.1rem 0.4rem;
+  border-radius: 3px;
+  background: var(--color-info-bg, rgba(64, 158, 255, 0.12));
+  color: var(--color-info, #409eff);
+  letter-spacing: 0.5px;
+}
+
+/* 数据新鲜度标签 新/渐旧/旧 */
+.sv-freshness {
+  font-size: 0.65rem;
+  font-weight: 600;
+  padding: 0.1rem 0.35rem;
+  border-radius: 3px;
+  letter-spacing: 0.5px;
+}
+.sv-fresh-fresh { background: var(--color-success-bg); color: var(--color-success); }
+.sv-fresh-aging { background: var(--color-warning-bg); color: var(--color-warning); }
+.sv-fresh-stale { background: var(--color-danger-bg); color: var(--color-danger); }
 
 .sv-metrics {
   font-size: 0.82rem;
