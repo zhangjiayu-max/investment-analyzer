@@ -535,6 +535,7 @@ function ddProgressClass(pct) {
 function ddStatusClass(status) {
   if (!status) return ''
   if (status === '低估') return 'val-low'
+  if (status === '适中') return 'val-mid'
   if (status === '高估') return 'val-high'
   return ''
 }
@@ -2980,6 +2981,10 @@ defineExpose({ loadHistory })
 .dd-status.val-low {
   color: var(--color-success);
   background: var(--color-success-bg);
+}
+.dd-status.val-mid {
+  color: var(--color-text-secondary);
+  background: var(--color-bg-secondary);
 }
 .dd-status.val-high {
   color: var(--color-danger);
