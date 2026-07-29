@@ -1352,6 +1352,11 @@ async function regenerateAssistantMessage(msg) {
       return
     }
     await loadMessages(convId)
+    // resume_synthesis 模式：后端已原地恢复综合报告，无需再启动 SSE 流
+    if (data.resume_synthesis) {
+      showToast(`已复用 ${data.specialist_count} 个专家结果恢复综合报告`, 'success')
+      return
+    }
     if (data.original_query) {
       sendMessageAndTrack(convId, data.original_query)
     }

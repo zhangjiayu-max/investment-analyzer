@@ -848,14 +848,64 @@ async def continue_conversation_api(conv_id: int, request: Request):
 
 @router.post("/api/conversations/{conv_id}/retry-message/{message_id}")
 async def retry_conversation_message_api(conv_id: int, message_id: int):
-    """重新生成：创建新的 assistant 占位消息，保留原失败/取消记录。"""
+    """重新生成：优先复用已有专家结果只跑综合阶段，否则创建新消息完整重跑。
+
+    优化（2026-07-30）：
+    - 若原消息已有 success agent_runs（专家成功但综合阶段失败/中断），
+      直接走 resume_synthesis_only 原地恢复，不创建新消息、不走 SSE 流。
+      避免：① 重跑专家浪费 token/时间 ② SSE 断开后任务丢失
+    - 若无成功专家结果，降级到原流程（创建新消息 + 完整重跑）。
+    """
     conv = get_conversation(conv_id)
     if not conv:
         raise HTTPException(404, "对话不存在")
+
+    # 检查原消息是否已有 success agent_runs
+    from db._conn import _get_conn
+    conn = _get_conn()
+    try:
+        success_run = conn.execute(
+            "SELECT 1 FROM agent_runs WHERE message_id = ? AND status = 'success' LIMIT 1",
+            (message_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+
+    if success_run:
+        # 原消息已有成功专家 → 只跑综合阶段，原地恢复
+        from services.conv_recovery import resume_synthesis_only
+        result = resume_synthesis_only(message_id, conv_id)
+        if result.get("success"):
+            from db.conversations import update_message_content_and_metadata
+            update_message_content_and_metadata(
+                message_id,
+                result["answer"],
+                {
+                    "recovered": True,
+                    "recovery_method": "retry_resume_synthesis",
+                    "specialist_count": result["specialist_count"],
+                    "blackboard_entries": result.get("blackboard_entries", 0),
+                },
+            )
+            logger.info(
+                f"[retry-message] conv {conv_id} msg {message_id} 走 resume_synthesis 恢复成功 "
+                f"({result['specialist_count']} 个专家, {len(result['answer'])} 字)"
+            )
+            # resume_synthesis=true 标记：前端据此跳过 sendMessageAndTrack
+            return {
+                "ok": True,
+                "message_id": message_id,
+                "resume_synthesis": True,
+                "specialist_count": result["specialist_count"],
+            }
+        # resume_synthesis 失败 → 降级到完整重跑
+        logger.warning(
+            f"[retry-message] conv {conv_id} msg {message_id} resume_synthesis 失败 "
+            f"({result.get('reason', '')})，降级完整重跑"
+        )
+
+    # 完整重跑流程（无成功专家 或 resume_synthesis 失败）
     # P0 修复：清除 cancel_requested 标记，避免新执行期间刷新页面时 /resume 返回 409
-    # 原因：retry-message 创建新 assistant 消息并重新触发 send_message_stream，但若不清除
-    # cancel_requested，新执行过程中用户刷新页面 → /replay 检测 channel running →
-    # /resume 被 cancel_requested=true 拦截返回 409，形成孤立状态。
     from db.conversations import clear_conversation_cancel_flag
     clear_conversation_cancel_flag(conv_id)
     messages = get_messages(conv_id, limit=200)
@@ -875,6 +925,48 @@ async def retry_conversation_message_api(conv_id: int, message_id: int):
     if not original_query:
         raise HTTPException(400, "找不到原始用户消息")
     return {"ok": True, "message_id": retry_id, "original_query": original_query}
+
+
+@router.post("/api/conversations/{conv_id}/resume-synthesis/{message_id}")
+async def resume_synthesis_api(conv_id: int, message_id: int):
+    """只跑综合阶段：复用已落库的 agent_runs 专家结果，不重新分析。
+
+    适用场景：专家已成功但综合阶段未执行（如服务中断/KeyError 崩溃）。
+    前端"重新生成"按钮可调用此接口，避免重新跑专家，节省时间和 token。
+
+    流程：
+    1. 从 agent_runs 重建 specialists 列表
+    2. 调用 _phase_synthesis 生成完整综合报告（含仲裁+5段结构）
+    3. 写回 message（原地更新，不创建新消息）
+    """
+    conv = get_conversation(conv_id)
+    if not conv:
+        raise HTTPException(404, "对话不存在")
+
+    from services.conv_recovery import resume_synthesis_only
+    result = resume_synthesis_only(message_id, conv_id)
+    if not result.get("success"):
+        raise HTTPException(
+            400,
+            f"无法恢复综合阶段: {result.get('reason', 'unknown')} "
+            f"(specialists={result.get('specialist_count', 0)})"
+        )
+
+    # 写回 message
+    from db.conversations import update_message_content_and_metadata
+    update_message_content_and_metadata(
+        message_id,
+        result["answer"],
+        {"recovered": True, "recovery_method": "resume_synthesis", "specialist_count": result["specialist_count"]}
+    )
+
+    return {
+        "ok": True,
+        "message_id": message_id,
+        "specialist_count": result["specialist_count"],
+        "answer_length": len(result["answer"]),
+        "reason": result.get("reason", "ok"),
+    }
 
 
 @router.post("/api/conversations/{conv_id}/messages")
