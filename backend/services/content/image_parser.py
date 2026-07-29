@@ -308,8 +308,12 @@ class ImageParser:
                         stats_data = stats_data2  # 使用放大后的结果
                 if stats.get("当前值") is not None:
                     logger.info(f"[ImageParser] 裁剪兜底成功: current_value={stats.get('当前值')}")
-                    # 合并策略（2026-07-30 修复）：只填充 result 中为 None 的字段，
-                    # 不覆盖整图解析已得到的非空值，避免裁剪解析不准时覆盖正确数据
+                    # 合并策略（2026-07-30 修复）：
+                    # 触发裁剪兜底的前提是整图解析"current_value 缺失"或"关键统计字段缺失"，
+                    # 这两种情况下整图结果本身就不完整/不可信，因此裁剪得到的非空值应覆盖整图结果，
+                    # 而非"只填None"。否则整图识别错的 current_value（如7.14）会保留，
+                    # 裁剪识别出的正确值（如12.28）反而被丢弃。
+                    # 仅当裁剪结果为 None 时才保留整图原值（避免裁剪解析失败时清空已有数据）。
                     _fill_map = {
                         "current_value": "当前值", "percentile": "分位点",
                         "danger_value": "危险值", "median": "中位数",
@@ -318,7 +322,7 @@ class ImageParser:
                     }
                     for rkey, skey in _fill_map.items():
                         _val = stats.get(skey)
-                        if _val is not None and result.get(rkey) is None:
+                        if _val is not None:
                             result[rkey] = _val
                     # metric_type：整图已识别则保留，仅整图未识别时用裁剪结果
                     if not result.get("metric_type") or result["metric_type"] == "市盈率":
