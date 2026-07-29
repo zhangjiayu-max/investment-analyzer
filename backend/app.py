@@ -247,6 +247,9 @@ app.include_router(akshare_stats_router)
 # 估值数据利用监测 /api/admin/valuation-usage/*
 from routers.admin.valuation_usage import router as valuation_usage_router
 app.include_router(valuation_usage_router)
+# 功能使用埋点 /api/feature-usage/*
+from routers.admin.feature_usage import router as feature_usage_router
+app.include_router(feature_usage_router)
 app.include_router(theme_rules_router)
 app.include_router(specialist_weights_router)
 app.include_router(event_radar_router)
@@ -474,6 +477,12 @@ async def startup():
         logging.info("预警自动清理任务已启动（alerts.auto_cleanup_enabled=true）")
     else:
         logging.info("预警自动清理已关闭（alerts.auto_cleanup_enabled=false）")
+
+    # 功能使用埋点自动清理（每日 03:00 执行，默认开启）
+    # 清理 90 天前的埋点数据，避免表无限膨胀
+    if get_config("tracking.feature_usage_enabled", "true") == "true":
+        asyncio.create_task(_auto_cleanup_feature_usage())
+        logging.info("功能使用埋点清理任务已启动（tracking.feature_usage_enabled=true）")
 
     # 前瞻性事件雷达（每晚 20:00，默认关闭，LLM 相关开关硬约束）
     if get_config("alerts.event_radar_enabled", "false") == "true":
@@ -972,6 +981,37 @@ async def _auto_cleanup_alerts():
                 logging.warning(f"[auto-cleanup] 预警清理异常: {e}")
     except Exception as e:
         logging.warning(f"预警自动清理任务异常: {e}")
+
+
+async def _auto_cleanup_feature_usage():
+    """功能使用埋点自动清理 — 每日 03:00 执行一次。
+
+    清理 90 天前的埋点数据，避免 feature_usage 表无限膨胀。
+
+    开关：tracking.feature_usage_enabled（默认 true）
+    清理天数：tracking.feature_usage_cleanup_days（默认 90）
+    """
+    from datetime import datetime, timedelta
+    try:
+        await asyncio.sleep(200)  # 等启动完成（晚于预警清理避免抢资源）
+        while True:
+            now = datetime.now()
+            # 下一次 03:00
+            target = now.replace(hour=3, minute=0, second=0, microsecond=0)
+            if now >= target:
+                target = (now + timedelta(days=1)).replace(hour=3, minute=0, second=0, microsecond=0)
+            sleep_sec = (target - now).total_seconds()
+            await asyncio.sleep(max(sleep_sec, 60))
+
+            try:
+                from db.feature_usage import cleanup_old_feature_usage
+                cleanup_days = int(get_config("tracking.feature_usage_cleanup_days", "90"))
+                deleted = await asyncio.to_thread(cleanup_old_feature_usage, days=cleanup_days)
+                logging.info(f"[auto-cleanup] 功能埋点清理完成: 删除 {deleted} 条 ({cleanup_days}天前)")
+            except Exception as e:
+                logging.warning(f"[auto-cleanup] 功能埋点清理异常: {e}")
+    except Exception as e:
+        logging.warning(f"功能使用埋点清理任务异常: {e}")
 
 
 async def _auto_event_radar_scan():

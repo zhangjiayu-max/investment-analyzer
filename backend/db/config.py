@@ -467,6 +467,10 @@ DEFAULT_CONFIGS = [
     ('eval.recovery_high_score', '80', '恢复阈值：评估分高于此值计为高分，累计恢复（默认80）', 'eval'),
     ('eval.recovery_consecutive_count', '2', '恢复所需连续高分次数（默认2）', 'eval'),
     ('eval.recovery_factor', '1.3', '每次恢复乘数：weight_multiplier *= 此值（默认1.3，上限1.0）', 'eval'),
+
+    # 功能使用埋点（默认开启，非 LLM 相关）
+    ('tracking.feature_usage_enabled', 'true', '功能使用埋点开关：记录页面/功能访问行为用于热度分析（默认开启）', 'tracking'),
+    ('tracking.feature_usage_cleanup_days', '90', '功能使用埋点清理天数：清理 N 天前的埋点数据（默认 90）', 'tracking'),
 ]
 
 

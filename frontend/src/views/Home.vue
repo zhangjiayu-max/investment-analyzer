@@ -1,7 +1,8 @@
 <script setup>
-import { ref, computed, onMounted, onUnmounted, defineAsyncComponent } from 'vue'
+import { ref, computed, onMounted, onUnmounted, watch, defineAsyncComponent } from 'vue'
 import { createTask, getFinanceQuoteBar } from '../api'
 import Icon from '../components/ui/Icon.vue'
+import { trackPageEnter, trackPageLeave } from '../composables/useTracking'
 // 首屏必需组件保持静态 import（首屏即用，避免 Loading 闪烁）
 import TaskList from '../components/task/TaskList.vue'
 import TaskDetail from '../components/task/TaskDetail.vue'
@@ -47,6 +48,7 @@ const CapabilityCenter = defineAsyncComponent(() => import('../components/agent/
 const SmartAddPlan = defineAsyncComponent(() => import('../components/finance/SmartAddPlan.vue'))
 const EventRadarPage = defineAsyncComponent(() => import('../components/market/EventRadarPage.vue'))
 const HealthDashboardV2 = defineAsyncComponent(() => import('../components/health/HealthDashboardV2.vue'))
+const FeatureUsagePage = defineAsyncComponent(() => import('../components/analysis/FeatureUsagePage.vue'))
 
 const props = defineProps({
   activePage: String,
@@ -94,6 +96,7 @@ const pageComponents = {
   'capability-center': CapabilityCenter,
   'smart-add': SmartAddPlan,
   'health-v2': HealthDashboardV2,
+  'feature-usage': FeatureUsagePage,
 }
 
 if (import.meta.env.DEV) {
@@ -169,9 +172,19 @@ function stopQuoteRotation() {
 onMounted(() => {
   loadQuoteBar()
   startQuoteRotation()
+  // 埋点：记录初始页面进入
+  trackPageEnter(props.activePage || 'dashboard')
 })
 onUnmounted(() => {
   stopQuoteRotation()
+  // 埋点：离开当前页面
+  trackPageLeave(props.activePage || 'dashboard')
+})
+
+// 埋点：监听页面切换，自动记录进入/离开
+watch(() => props.activePage, (newPage, oldPage) => {
+  if (oldPage) trackPageLeave(oldPage)
+  if (newPage) trackPageEnter(newPage)
 })
 
 async function onSubmit() {

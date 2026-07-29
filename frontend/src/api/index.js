@@ -2901,3 +2901,10 @@ export function pushNotification(title, message, type = 'system', data = {}, cat
 export function getNotificationSubscribers() {
   return api.get('/notifications/subscribers')
 }
+
+// ── 功能使用埋点统计（/api/feature-usage/*）──────────────────────────────
+
+/** 功能使用统计（看板用） */
+export function getFeatureUsageStats(days = 30) {
+  return api.get('/feature-usage/stats', { params: { days } })
+}

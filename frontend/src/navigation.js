@@ -108,6 +108,8 @@ export const navItems = [
         desc: '专家Agent配置、Prompt版本管理、工具注册' },
       { key: 'analysis-log', label: '分析记录', icon: 'clipboard',
         desc: '所有分析Agent执行记录、质量评估、快速定位' },
+      { key: 'feature-usage', label: '功能分析', icon: 'chart',
+        desc: '功能使用频率、停留时长、价值评分排行' },
       { key: 'token-usage', label: 'Token 用量', icon: 'token',
         desc: 'LLM调用token统计、预算监控、成本分析' },
       { key: 'system-config', label: '系统配置', icon: 'config',

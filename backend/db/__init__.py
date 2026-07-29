@@ -307,6 +307,12 @@ from db.smart_add_plans import (
     list_smart_add_plans, get_smart_add_plan_detail, get_plan_vs_actual,
 )
 
+# 功能使用埋点
+from db.feature_usage import (
+    init_feature_usage_table, track_feature_usage, batch_track_feature_usage,
+    get_feature_usage_stats, cleanup_old_feature_usage,
+)
+
 
 def _ensure_column(conn, table: str, column: str, col_type: str):
     """老库升级：若列不存在则添加。SQLite 不支持 ADD COLUMN IF NOT EXISTS。"""
@@ -1711,6 +1717,9 @@ def init_db():
     # 评估低分专家累计 N 次后自动降权，连续高分后恢复（带手动重置）
     from db.specialist_weight import init_specialist_weight_table
     init_specialist_weight_table(conn)
+
+    # ── 功能使用埋点表 ──────────────────────────────────────
+    init_feature_usage_table(conn)
 
     conn.commit()
     conn.close()
