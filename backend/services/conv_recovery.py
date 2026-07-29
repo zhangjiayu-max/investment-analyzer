@@ -4,11 +4,18 @@
 - 专家分析已成功（agent_runs.status='success'）
 - 但 synthesis 阶段未执行 → assistant message 仍是占位符
 
-恢复策略：
+恢复策略（2026-07-30 增强）：
 1. 扫描所有 content 为占位符的 assistant message
 2. 检查该 message 是否有 status='success' 的 agent_runs（按 message_id 过滤）
-3. 若有，合并专家结果写回 message
-4. 若无（专家也没完成），将占位符替换为中断提示
+3. 若有专家结果：
+   a. 优先尝试"只跑综合阶段"（resume_synthesis_only）—— 复用已落库的专家结果，
+      调用 _phase_synthesis 生成完整综合报告（含仲裁+5段结构），不重新分析专家
+   b. 若综合阶段失败，降级为简单拼接（_merge_runs_to_answer）
+4. 若无专家结果，将占位符替换为中断提示
+
+收益（conv 192 案例）：
+- article_expert 已花 ~69s + ~20k token 分析完，恢复时只需跑综合阶段（~5s + ~5k token）
+- 节省 75%+ 时间和 token，且产出完整综合报告而非简单拼接
 
 注意：必须按 message_id 过滤 agent_runs，不能用 conversation_id。
 否则同一对话多轮中，会把其他轮次的专家结果错误合并到中断轮次。
@@ -18,6 +25,7 @@
 - 心跳超时单条恢复（recover_message），避免依赖后端重启
 - 启动时自动重试 process restart 中断（auto_retry_process_restart_interrupted）
 """
+import json
 import logging
 import threading
 from datetime import datetime
@@ -46,6 +54,249 @@ _EXPERTS_MISPLACED_NOTICE = (
 
 # 自动重试中提示文本
 _RETRYING_NOTICE = "⏳ 检测到服务重启导致中断，正在自动重试..."
+
+
+# ── "只跑综合阶段"恢复（2026-07-30）──────────────────────────
+# 复用已落库的 agent_runs 结果，调用 _phase_synthesis 生成完整综合报告
+# 避免重新分析专家，节省 75%+ 时间和 token
+
+
+def _rebuild_specialists_from_runs(runs: list) -> list:
+    """从 agent_runs 重建 specialists 列表（供 _phase_synthesis 使用）。
+
+    每个 specialist 需包含：agent_key, agent, analysis, icon, tool_calls, duration_ms
+    """
+    from agent.core.multi_agent import SPECIALIST_AGENTS
+
+    # 构建 agent_key → icon 映射
+    icon_map = {}
+    name_map = {}
+    for sa in SPECIALIST_AGENTS:
+        key = sa.get("agent_key", "")
+        icon_map[key] = sa.get("icon", "🤖")
+        name_map[key] = sa.get("name", "")
+
+    specialists = []
+    seen_keys = set()
+    for r in runs:
+        agent_key = r.get("agent_key") or ""
+        agent_name = r.get("agent_name") or "专家分析"
+        result = r.get("result") or ""
+
+        # 跳过交叉审阅结果（内容以"审阅"或"综合审阅"开头）
+        if result.startswith("审阅") or result.startswith("综合审阅"):
+            continue
+
+        # 按 agent_key 去重，保留首次（首轮 primary 分析）
+        if agent_key and agent_key in seen_keys:
+            continue
+        if agent_key:
+            seen_keys.add(agent_key)
+
+        # 解析 tool_calls（可能是 JSON 字符串）
+        tool_calls = []
+        tc_raw = r.get("tool_calls")
+        if tc_raw:
+            try:
+                tool_calls = json.loads(tc_raw) if isinstance(tc_raw, str) else tc_raw
+            except (json.JSONDecodeError, TypeError):
+                tool_calls = []
+
+        specialists.append({
+            "agent_key": agent_key,
+            "agent": agent_name,
+            "icon": icon_map.get(agent_key, "🤖"),
+            "analysis": result,
+            "tool_calls": tool_calls if isinstance(tool_calls, list) else [],
+            "duration_ms": r.get("duration_ms") or 0,
+        })
+
+    return specialists
+
+
+def _find_original_query(conn, conv_id: int, msg_id: int) -> str:
+    """找到 assistant message 对应的原始 user query。"""
+    rows = conn.execute("""
+        SELECT role, content FROM messages
+        WHERE conversation_id = ? AND id < ?
+        ORDER BY id DESC LIMIT 10
+    """, (conv_id, msg_id)).fetchall()
+    for r in rows:
+        if r["role"] == "user":
+            return r["content"] or ""
+    return ""
+
+
+def _rebuild_blackboard_from_specialists(specialists: list) -> "Blackboard":
+    """从已落库的 specialists 产物重建黑板。
+
+    agent_runs 落库了完整的 result(analysis) + tool_calls，
+    足以通过 extract_entry_from_result 重建与原执行等价的 BlackboardEntry：
+    - conclusion（结论）
+    - action_signals（BUY/SELL/HOLD 信号 → 冲突检测）
+    - key_data（PE/PB/分位等关键数据点 → 综合阶段关键数据汇总）
+    - risk_veto（风险评估师的否决 → 强制降级）
+    - portfolio_impact（持仓影响 → 组合层面决策）
+
+    这样恢复后的综合阶段能获得与原执行等价的上下文，
+    而非空黑板（空黑板会导致冲突检测失效、关键数据汇总缺失）。
+    """
+    from agent.infra.blackboard import Blackboard, extract_entry_from_result
+
+    blackboard = Blackboard()
+    rebuilt = 0
+    for s in specialists:
+        try:
+            entry = extract_entry_from_result(
+                agent_key=s.get("agent_key", ""),
+                agent_name=s.get("agent", "") or s.get("agent_name", "") or "专家",
+                result={
+                    "analysis": s.get("analysis", ""),
+                    "tool_calls": s.get("tool_calls", []),
+                    "duration_ms": s.get("duration_ms", 0),
+                },
+                duration_ms=s.get("duration_ms", 0),
+            )
+            if entry.conclusion or entry.action_signals or entry.key_data:
+                blackboard.write(entry)
+                rebuilt += 1
+        except Exception as e:
+            logger.debug(f"[resume_synthesis] 重建黑板条目失败 ({s.get('agent_key','')}): {e}")
+
+    logger.info(
+        f"[resume_synthesis] 黑板重建完成: {rebuilt}/{len(specialists)} 条目, "
+        f"冲突={len(blackboard.find_conflicts())}, "
+        f"否决={len(blackboard.get_vetoes())}, "
+        f"持仓影响={len(blackboard.get_portfolio_impacts())}"
+    )
+    return blackboard
+
+
+def resume_synthesis_only(msg_id: int, conv_id: int = None) -> dict:
+    """只跑综合阶段：复用已落库的 agent_runs，生成完整综合报告。
+
+    适用场景：专家已成功（agent_runs.status='success'）但综合阶段未执行。
+
+    流程：
+    1. 从 agent_runs 重建 specialists 列表
+    2. 创建空 blackboard（恢复场景无实时黑板数据）
+    3. 调用 _phase_synthesis（单专家直接返回，多专家调 LLM 综合）
+    4. 写回 message
+
+    Returns:
+        {"success": bool, "answer": str, "specialist_count": int, "reason": str}
+    """
+    from db._conn import _get_conn
+
+    conn = _get_conn()
+    try:
+        # 1. 查 agent_runs
+        if conv_id is None:
+            row = conn.execute(
+                "SELECT conversation_id FROM messages WHERE id = ?", (msg_id,)
+            ).fetchone()
+            if not row:
+                return {"success": False, "answer": "", "specialist_count": 0, "reason": "message_not_found"}
+            conv_id = row["conversation_id"]
+
+        runs = conn.execute("""
+            SELECT agent_key, agent_name, result, tool_calls, duration_ms, run_phase
+            FROM agent_runs
+            WHERE message_id = ? AND status = 'success'
+            ORDER BY id
+        """, (msg_id,)).fetchall()
+
+        if not runs:
+            return {"success": False, "answer": "", "specialist_count": 0, "reason": "no_success_runs"}
+
+        # 2. 重建 specialists
+        specialists = _rebuild_specialists_from_runs([dict(r) for r in runs])
+        if not specialists:
+            return {"success": False, "answer": "", "specialist_count": 0, "reason": "rebuild_failed"}
+
+        # 3. 找原始 query
+        query = _find_original_query(conn, conv_id, msg_id)
+        if not query:
+            query = "（恢复场景：复用已完成的专家分析生成综合报告）"
+
+        logger.info(
+            f"[resume_synthesis] msg {msg_id} (conv {conv_id}) "
+            f"复用 {len(specialists)} 个专家结果，只跑综合阶段"
+        )
+
+    finally:
+        conn.close()
+
+    # 4. 调用 _phase_synthesis（在线程中执行，避免阻塞）
+    try:
+        from agent.core.pipeline import _phase_synthesis
+        from agent.state.pipeline_state import PipelineState
+
+        # 从 agent_runs 完整产物重建黑板（关键数据/冲突/风险否决/持仓影响）
+        # agent_runs 落库了完整的 result + tool_calls，足以重建与原执行等价的黑板
+        blackboard = _rebuild_blackboard_from_specialists(specialists)
+
+        # 构建 execution_result
+        all_tool_calls = []
+        for s in specialists:
+            all_tool_calls.extend(s.get("tool_calls", []))
+
+        execution_result = {
+            "specialists": specialists,
+            "tool_calls": all_tool_calls,
+        }
+
+        # 创建临时 state（_phase_synthesis 需要）
+        trace_id = f"resume-{msg_id}"
+        state = PipelineState(
+            conversation_id=conv_id,
+            message_id=msg_id,
+            trace_id=trace_id,
+        )
+
+        # 调用综合阶段
+        synthesis_result = _phase_synthesis(
+            state=state,
+            query=query,
+            execution_result=execution_result,
+            blackboard=blackboard,
+            trace_id=trace_id,
+        )
+
+        answer = synthesis_result.get("answer", "")
+        if not answer:
+            return {
+                "success": False,
+                "answer": "",
+                "specialist_count": len(specialists),
+                "reason": "empty_synthesis",
+            }
+
+        logger.info(
+            f"[resume_synthesis] msg {msg_id} 综合报告生成成功 "
+            f"(len={len(answer)}, specialists={len(specialists)}, "
+            f"黑板={blackboard.entry_count}条目, "
+            f"冲突={len(blackboard.find_conflicts())}, "
+            f"否决={len(blackboard.get_vetoes())})"
+        )
+
+        return {
+            "success": True,
+            "answer": answer,
+            "specialist_count": len(specialists),
+            "blackboard_entries": blackboard.entry_count,
+            "synthesis_result": synthesis_result,
+            "reason": "ok",
+        }
+
+    except Exception as e:
+        logger.warning(f"[resume_synthesis] msg {msg_id} 综合阶段失败，降级拼接: {e}")
+        return {
+            "success": False,
+            "answer": "",
+            "specialist_count": len(specialists) if 'specialists' in dir() else 0,
+            "reason": f"synthesis_error: {e}",
+        }
 
 
 def _merge_runs_to_answer(runs) -> str | None:
@@ -169,6 +420,19 @@ def recover_message(message_id: int) -> str:
         # 使用 fallback 结果（如果有）
         effective_runs = runs if runs else misplaced_runs
         if effective_runs:
+            # 优先尝试"只跑综合阶段"（复用专家结果，生成完整报告）
+            resume_result = resume_synthesis_only(msg_id, conv_id)
+            if resume_result.get("success"):
+                full_answer = resume_result["answer"]
+                _apply_recovery(conn, msg_id, full_answer, has_expert_results=True)
+                conn.commit()
+                logger.info(
+                    f"[conv_recovery] msg {msg_id} (conv {conv_id}) 心跳超时恢复"
+                    f"（resume_synthesis，{resume_result['specialist_count']} 个专家）"
+                )
+                return full_answer
+
+            # 降级：简单拼接
             full_answer = _merge_runs_to_answer(effective_runs)
             if full_answer:
                 _apply_recovery(conn, msg_id, full_answer, has_expert_results=True)
@@ -176,7 +440,7 @@ def recover_message(message_id: int) -> str:
                 source = "message_id" if runs else "trace_id fallback"
                 logger.info(
                     f"[conv_recovery] msg {msg_id} (conv {conv_id}) 心跳超时恢复"
-                    f"（{source}，合并 {len(effective_runs)} 个专家结果）"
+                    f"（降级拼接 {source}，{len(effective_runs)} 个专家，原因: {resume_result.get('reason', '')}）"
                 )
                 return full_answer
 
@@ -241,14 +505,29 @@ def recover_interrupted_conversations() -> dict:
             """, (msg_id,)).fetchall()
 
             if runs:
-                # 有专家结果 → 合并写回（标 completed，专家分析可用）
-                full_answer = _merge_runs_to_answer(runs)
-                if full_answer:
+                # 有专家结果 → 优先尝试"只跑综合阶段"（复用专家结果，生成完整报告）
+                # 失败则降级为简单拼接
+                resume_result = resume_synthesis_only(msg_id, conv_id)
+                if resume_result.get("success"):
+                    full_answer = resume_result["answer"]
                     _apply_recovery(conn, msg_id, full_answer, has_expert_results=True)
                     stats["recovered"] += 1
-                    logger.info(f"[conv_recovery] msg {msg_id} (conv {conv_id}) 已恢复（合并 {len(runs)} 个专家结果）")
+                    logger.info(
+                        f"[conv_recovery] msg {msg_id} (conv {conv_id}) 已恢复"
+                        f"（resume_synthesis，{resume_result['specialist_count']} 个专家）"
+                    )
                 else:
-                    stats["skipped"] += 1
+                    # 降级：简单拼接
+                    full_answer = _merge_runs_to_answer(runs)
+                    if full_answer:
+                        _apply_recovery(conn, msg_id, full_answer, has_expert_results=True)
+                        stats["recovered"] += 1
+                        logger.info(
+                            f"[conv_recovery] msg {msg_id} (conv {conv_id}) 已恢复"
+                            f"（降级拼接，{len(runs)} 个专家，原因: {resume_result.get('reason', '')}）"
+                        )
+                    else:
+                        stats["skipped"] += 1
             else:
                 # 无专家结果 → 标记为中断
                 _apply_recovery(conn, msg_id, _NO_RESULT_NOTICE, has_expert_results=False)
