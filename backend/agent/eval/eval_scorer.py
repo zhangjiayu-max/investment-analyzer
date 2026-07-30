@@ -239,12 +239,40 @@ def _parse_multi_dim_response(text: str) -> dict:
     except (json.JSONDecodeError, ValueError):
         pass
 
-    # 尝试从文本中提取 JSON
+    # 尝试从文本中提取 JSON（支持嵌套大括号）
+    # 原正则 [^{}]* 无法匹配嵌套结构（data_accuracy 的值本身是 {...}），
+    # 改用括号平衡匹配：从第一个 { 到最后一个 } 逐层检查
     import re
-    match = re.search(r'\{[^{}]*"data_accuracy"[^{}]*\}', text, re.DOTALL)
+
+    # 策略1：找包含 data_accuracy 的最外层 JSON 块（平衡括号）
+    start = text.find("{")
+    while start >= 0:
+        depth = 0
+        for i in range(start, len(text)):
+            if text[i] == "{":
+                depth += 1
+            elif text[i] == "}":
+                depth -= 1
+                if depth == 0:
+                    candidate = text[start:i + 1]
+                    if '"data_accuracy"' in candidate:
+                        try:
+                            data = json.loads(candidate)
+                            return _normalize_scores(data)
+                        except (json.JSONDecodeError, ValueError):
+                            pass
+                    break
+        start = text.find("{", start + 1)
+
+    # 策略2：尝试修复常见的尾随逗号/单引号问题
+    match = re.search(r'\{.*"data_accuracy".*"overall_reason".*?\}', text, re.DOTALL)
     if match:
         try:
-            data = json.loads(match.group())
+            candidate = match.group()
+            # 修复可能的尾随逗号
+            candidate = re.sub(r',\s*}', '}', candidate)
+            candidate = re.sub(r',\s*]', ']', candidate)
+            data = json.loads(candidate)
             return _normalize_scores(data)
         except (json.JSONDecodeError, ValueError):
             pass
@@ -409,6 +437,10 @@ async def evaluate_llm_output(query: str, output: str, context: str = "",
     type_specs = _get_analysis_type_specs(analysis_type)
     type_specs_block = f"\n\n## 类型特定要求（{analysis_type}）\n{type_specs}" if type_specs else ""
 
+    # context 上限提升到 2500 字（原 1000 字过短，新闻原文/持仓明细常被截断，
+    # 导致评分器看不到完整上下文，把引用的新闻数据误判为 LLM 幻觉）
+    _ctx = (context or "")[:2500] if context else "无"
+
     prompt = f"""{agent_prompt}
 {type_specs_block}
 
@@ -420,8 +452,28 @@ async def evaluate_llm_output(query: str, output: str, context: str = "",
 ### LLM 产出（前3000字）
 {output[:3000]}
 
-### 上下文信息
-{context[:1000] if context else "无"}
+### 上下文信息（含新闻原文/持仓明细/MCP数据等，是 LLM 的输入依据）
+{_ctx}
+
+## 评分规则（严格遵守）
+
+### 数据准确性评分要点
+- **上下文引用不算捏造**：LLM 产出中引用的数据，凡能在"上下文信息"中找到出处的（如新闻原文的个股名/市值/涨跌幅、持仓明细的基金名/占比、MCP 的相关系数等），均视为**有据可查**，不得判为"幻觉"或"捏造"
+- **真正的数据问题**才是扣分项：
+  - 产出数据与上下文**明显矛盾**（如上下文是涨3%，产出写成跌5%）
+  - 上下文**完全没有**的数据被 LLM 编造（如上下文只有占比统计无基金名，LLM 却编造具体基金名）
+  - 数据来源标注与实际不符（如标注"持仓明细"但数据来自臆测）
+- 上下文截断时，仅对**完整可见部分**核对，截断部分不作为扣分依据
+
+### 逻辑评分要点
+- 分析框架是否完整（是否符合 analysis_type 对应输出规范）
+- 推理链条是否自洽（结论是否由数据支撑）
+- 是否识别关键风险和催化剂
+
+### 可执行性评分要点
+- 建议是否具体可操作（金额/比例/标的/时机）
+- 是否标注优先级和约束条件
+- 是否结合用户实际持仓/画像
 
 ## 重要：输出要求
 你必须直接输出一个 JSON 对象，不要输出任何其他文字、思考过程或解释。
@@ -431,7 +483,8 @@ async def evaluate_llm_output(query: str, output: str, context: str = "",
 
 注意：
 - score 必须是 1-10 的整数
-- reason 必须包含具体的优点和扣分点，禁止泛泛而谈
+- reason 必须包含具体的优点和扣分点，禁止泛泛而谈，**每条 reason 控制在 80 字以内**（避免输出超长导致截断）
+- overall_reason 控制在 120 字以内
 - 直接输出 JSON，不要有其他任何内容
 - 不要输出 ```json 代码块标记"""
 
@@ -445,7 +498,7 @@ async def evaluate_llm_output(query: str, output: str, context: str = "",
                 {"role": "user", "content": "请对上述产出进行多维度评估。\n\n直接输出JSON，不要其他文字："},
             ],
             temperature=get_config_float('llm.temperature_eval', 0.1),
-            max_tokens=get_config_int('llm.max_tokens_eval_score', 500),
+            max_tokens=get_config_int('llm.max_tokens_eval_score', 800),
             extra_body={"thinking": {"type": "disabled"}},
         )
         msg = resp.choices[0].message

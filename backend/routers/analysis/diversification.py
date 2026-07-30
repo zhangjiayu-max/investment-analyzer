@@ -137,10 +137,31 @@ async def portfolio_diversification_ai_summary(agent_id: int = 2):
     if not holdings:
         raise HTTPException(400, "暂无持仓数据")
     result = get_portfolio_diversification()
+
+    # 修复（2026-07-30）：input_data 需包含完整持仓明细（基金名/代码/占比），
+    # 否则评测时无法核对 LLM 是否编造基金名称，导致评分器误判"数据来源虚假"。
+    # 原先只存 {"holdings": result}（统计聚合），无具体基金信息。
+    total_value = result.get('total_value', 1) or 1
+    holdings_detail = [
+        {
+            "fund_name": h.get("fund_name", ""),
+            "fund_code": h.get("fund_code", ""),
+            "current_value": h.get("current_value", 0) or 0,
+            "holding_pct": round((h.get("current_value", 0) or 0) / total_value * 100, 2),
+            "profit_loss": h.get("profit_loss", 0),
+            "index_name": h.get("index_name", ""),
+        }
+        for h in holdings
+    ]
+    input_data = json.dumps({
+        "holdings_stats": result,  # 统计聚合（holding_count/total_cost/type_distribution/index_distribution）
+        "holdings_detail": holdings_detail,  # 完整持仓明细（基金名/代码/占比/盈亏/跟踪指数）
+    }, ensure_ascii=False)
+
     record_id = create_portfolio_analysis_record(
         analysis_type="diversification_ai",
         summary=f"分散度解读 · {result.get('holding_count', len(holdings))}只基金",
-        input_data=json.dumps({"holdings": result}, ensure_ascii=False),
+        input_data=input_data,
         result_data="",
         token_usage=0,
         agent_id=agent_id,
