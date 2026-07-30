@@ -23,12 +23,16 @@ logger = logging.getLogger(__name__)
 # 参考 hotspots.py 的 sector_keywords，覆盖 18 个板块。
 # 指数代码需对照 fund_metadata.tracking_index 实际数据校准。
 SECTOR_TO_INDEX = {
-    "半导体": ["990001", "H30184"],
-    "人工智能": ["930713", "931071"],
-    "新能源": ["399808", "931151"],
-    "消费": ["000932", "399932"],
-    "医药": ["930791", "000993"],
-    "金融": ["399949", "930601"],
+    # Accuracy-Boost（2026-07-31）：优先放本地 index_price_history 已有的代码
+    # 本地已有：000300/000922/000949/399808/399986/399997/931071/931140/931468/931638/H30094/H30184/H30217/H30269/H30590
+    "半导体": ["H30184", "990001"],           # H30184 本地有（中证全指半导体）
+    "人工智能": ["931071", "930713"],          # 931071 本地有（CS人工智能）
+    "新能源": ["399808", "931151"],            # 399808 本地有（中证新能）
+    "消费": ["399997", "H30094", "000932", "399932"],  # 399997白酒/H30094消费红利 本地有
+    "医药": ["931140", "H30217", "930791", "000993"],  # 931140医药50/H30217医疗器械 本地有
+    "金融": ["399986", "399949", "930601"],   # 399986中证银行 本地有
+    "农业": ["000949", "930687", "000936"],   # 000949中证农业 本地有
+    "红利": ["000922", "H30269"],             # 000922中证红利/H30269红利低波 本地有
     "地产": ["931775", "399393"],
     "军工": ["399967", "930798"],
     "教育": ["930711"],
@@ -36,8 +40,7 @@ SECTOR_TO_INDEX = {
     "传媒": ["930681", "930901"],
     "汽车": ["930758", "399975"],
     "基建": ["399388", "930608"],
-    "科技": ["931087", "930986"],
-    "农业": ["930687", "000936"],
+    "科技": ["931087", "930986"],             # 本地无，依赖 akshare 兜底
     "环保": ["930790", "930615"],
     "有色": ["930708", "399395"],
     "化工": ["930695", "930751"],
@@ -54,7 +57,7 @@ _SECTOR_ALIASES = {
     "食品饮料": "消费", "白酒": "消费", "零售": "消费",
     "电子": "半导体", "芯片": "半导体",
     "互联网": "科技", "软件": "科技", "计算机": "科技",
-    "煤炭": "有色", "钢铁": "有色", "黄金": "有色",
+    "煤炭": "有色", "钢铁": "有色", "黄金": "有色", "有色金属": "有色", "金属": "有色",
     "国防": "军工",
 }
 
@@ -1403,14 +1406,38 @@ def _fetch_index_close_prices(index_code: str, start_date: str, end_date: str) -
     支持上证(sh)、深证(sz)、中证(CSI)系列指数。中证系列先尝试 sh/sz 前缀，
     失败后用 akshare 的 index_zh_a_hist 接口（按指数代码直接查）。
 
+    Accuracy-Boost（2026-07-31）：新增策略0 — 本地 index_price_history 表优先。
+    原问题：50 条事件因 no_index_data 被跳过，akshare stock_zh_index_daily 对中证系列
+            （930xxx/931xxx/H30184 等）大量 404，但本地表启动时已回填了这些指数。
+    修复：先查本地表（毫秒级），命中则直接返回；未命中再走 akshare 三级降级。
+
     Returns:
         {"YYYY-MM-DD": float, ...} 或空 dict
     """
-    import akshare as ak
     base = index_code.replace(".SZ", "").replace(".SH", "").replace(".CSI", "")
     prices = {}
 
+    # 策略0：本地 index_price_history 表优先（Accuracy-Boost 2026-07-31）
+    try:
+        from db._conn import _get_conn
+        conn = _get_conn()
+        try:
+            rows = conn.execute("""
+                SELECT trade_date, close FROM index_price_history
+                WHERE index_code = ? AND trade_date >= ? AND trade_date <= ?
+                ORDER BY trade_date ASC
+            """, (base, start_date, end_date)).fetchall()
+        finally:
+            conn.close()
+        if rows:
+            prices = {r[0]: r[1] for r in rows if r[1] is not None}
+            if prices:
+                return prices
+    except Exception as e:
+        logger.debug(f"[event_radar] 本地 index_price_history 查询失败 {base}: {e}")
+
     # 策略1：sh/sz 前缀（新浪接口，覆盖上证/深证）
+    import akshare as ak
     for prefix in ["sh", "sz"]:
         sina_code = f"{prefix}{base}"
         try:
@@ -1517,7 +1544,7 @@ def _infer_sectors_from_event(event: dict) -> list[str]:
     return inferred
 
 
-def _verify_single_event(event: dict, window_days: int = 3) -> dict | None:
+def _verify_single_event(event: dict, window_days: int = 3, force: bool = False) -> dict | None:
     """验证单个已落地事件的方向预测是否正确。
 
     逻辑：
@@ -1550,7 +1577,9 @@ def _verify_single_event(event: dict, window_days: int = 3) -> dict | None:
     end_dt = mat_dt + timedelta(days=window_days + 4)  # 多取几天确保有交易日数据
     end_date = end_dt.strftime("%Y-%m-%d")
     today = datetime.now().strftime("%Y-%m-%d")
-    if end_date > today:
+    # Accuracy-Boost（2026-07-31）：force=True 时跳过窗口检查，用已有数据尽量验证
+    # 原问题：7/25 事件需 8/1 才到期（T+7），但 7/31 已有 5 天数据足够判断方向
+    if end_date > today and not force:
         return None  # 验证窗口未到
 
     direction = event.get("direction", "neutral")
@@ -1565,9 +1594,17 @@ def _verify_single_event(event: dict, window_days: int = 3) -> dict | None:
         codes = SECTOR_TO_INDEX[key]
         if not codes:
             continue
-        idx_code = codes[0]
 
-        prices = _fetch_index_close_prices(idx_code, mat_date, end_date)
+        # Accuracy-Boost（2026-07-31）：遍历所有候选代码，取第一个有数据的
+        # 原问题：只试 codes[0]，若第一个代码本地/akshare 都无数据则直接跳过该板块
+        #         导致 50 条事件因 no_index_data 被跳过（如半导体 codes[0]="990001" 无数据，但 codes[1]="H30184" 本地有）
+        prices = {}
+        idx_code = codes[0]
+        for code in codes:
+            prices = _fetch_index_close_prices(code, mat_date, end_date)
+            if prices and len(prices) >= 2:
+                idx_code = code
+                break
         if not prices or len(prices) < 2:
             continue
 
@@ -2745,7 +2782,7 @@ def backfill_event_verification(max_events: int = 200, force: bool = False) -> d
                 except Exception:
                     pass
 
-            result = _verify_single_event(ev, window)
+            result = _verify_single_event(ev, window, force=force)
             if not result:
                 counts["skipped"] += 1
                 counts["skip_reasons"]["no_index_data"] += 1

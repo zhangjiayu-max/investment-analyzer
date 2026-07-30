@@ -510,14 +510,13 @@ async def startup():
 
     # Accuracy-Boost：启动时补全历史未验证事件（一次性）
     # 开关：alerts.event_backfill_verify_enabled（默认 true）
+    # 修复（2026-07-31）：原同步调用阻塞启动（42条事件需逐条请求akshare，导致启动卡住端口不监听）
+    #         改为 asyncio.create_task 后台执行，不阻塞 startup
     try:
         if get_config("alerts.event_backfill_verify_enabled", "true") == "true":
-            from services.market.event_radar import backfill_event_verification
-            backfill_stats = backfill_event_verification(max_events=200, force=False)
-            if backfill_stats.get("verified", 0) > 0:
-                logging.info(f"[启动 backfill] 事件落地验证补全: {backfill_stats}")
+            asyncio.create_task(_startup_event_backfill())
     except Exception as e:
-        logging.warning(f"[启动 backfill] 事件验证补全失败（不影响启动）: {e}")
+        logging.warning(f"[启动 backfill] 事件验证补全任务创建失败（不影响启动）: {e}")
 
     # P0-C 修复（2026-07-20）：机会雷达回测机制修复
     # 1. 启动时补建历史机会卡的 backtest 记录（alerts.opportunity_backfill_enabled 默认 true）
@@ -1127,6 +1126,25 @@ async def _auto_event_radar_scan():
                 logging.warning(f"[event-radar] 扫描异常 ({scan_hour:02d}:00): {e}")
     except Exception as e:
         logging.warning(f"前瞻事件雷达任务异常: {e}")
+
+
+async def _startup_event_backfill():
+    """Accuracy-Boost（2026-07-31）：启动时后台补全历史未验证事件。
+
+    原问题：startup 中同步调用 backfill_event_verification 阻塞启动，
+            42 条事件逐条请求 akshare 导致端口长时间不监听（curl 连接失败）。
+    修复：改为 asyncio.create_task 后台执行，先 sleep 10s 让端口监听后再跑。
+    """
+    try:
+        await asyncio.sleep(10)  # 让端口先监听，不阻塞 startup
+        from services.market.event_radar import backfill_event_verification
+        backfill_stats = backfill_event_verification(max_events=200, force=False)
+        if backfill_stats.get("verified", 0) > 0:
+            logging.info(f"[启动 backfill] 事件落地验证补全: {backfill_stats}")
+        else:
+            logging.info(f"[启动 backfill] 无新增验证（{backfill_stats}）")
+    except Exception as e:
+        logging.warning(f"[启动 backfill] 事件验证补全失败（不影响运行）: {e}")
 
 
 async def _auto_event_verification():
