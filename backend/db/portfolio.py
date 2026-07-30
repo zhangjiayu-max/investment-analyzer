@@ -2254,14 +2254,40 @@ def get_fund_holdings(fund_code: str, year: str = None) -> dict:
         _save_full_snapshot_silent(fund_code, merged, "ttfund")
         return merged
 
-    # 第 3 级：本地综合快照表兜底（akshare + ttfund 都失败时）
+    # 第 3 级：东方财富 pingzhongdata web 接口兜底（2026-07-30 新增 conv#193 修复）
+    # akshare 的 fund_portfolio_hold_em / fund_portfolio_bond_hold_em 持续被反爬，
+    # ttfund MCP 也常未登录。东方财富 pingzhongdata/{code}.js 接口稳定可用，
+    # 包含：持仓股票代码、债券代码、近期收益率（syl_1n/6y/3y/1y）、仓位测算图
+    try:
+        em_data = _fetch_holdings_from_eastmoney_pingzhongdata(fund_code)
+        if em_data and (em_data.get("top_stocks") or em_data.get("bond_holdings") or em_data.get("recent_returns")):
+            # 合并 akshare 已有的 asset_allocation / industry_allocation
+            if result.get("asset_allocation") and not em_data.get("asset_allocation"):
+                em_data["asset_allocation"] = result["asset_allocation"]
+            if result.get("industry_allocation") and not em_data.get("industry_allocation"):
+                em_data["industry_allocation"] = result["industry_allocation"]
+            em_data["_data_source"] = "eastmoney_pingzhongdata"
+            logger.info(
+                f"[fund_holdings] {fund_code} 东方财富 pingzhongdata 兜底成功 "
+                f"(stocks={len(em_data.get('top_stocks', []))}, bonds={len(em_data.get('bond_holdings', []))})"
+            )
+            # 写入本地快照表供下次复用
+            try:
+                _save_full_snapshot_silent(fund_code, em_data, "eastmoney_pingzhongdata")
+            except Exception:
+                pass
+            return em_data
+    except Exception as e:
+        logger.warning(f"[fund_holdings] 东方财富 pingzhongdata 兜底失败 {fund_code}: {e}")
+
+    # 第 4 级：本地综合快照表兜底（akshare + ttfund + 东方财富都失败时）
     try:
         from db.fund_holdings_snapshot import get_latest_full_fund_holdings_snapshot
         snapshot = get_latest_full_fund_holdings_snapshot(fund_code)
         if snapshot and (snapshot.get("top_stocks") or snapshot.get("asset_allocation")):
             snapshot["_data_source"] = "local_snapshot_stale"
             logger.warning(
-                f"[fund_holdings] {fund_code} akshare+ttfund 均失败，使用本地快照（updated_at={snapshot.get('_snapshot_updated_at')})"
+                f"[fund_holdings] {fund_code} akshare+ttfund+东方财富均失败，使用本地快照（updated_at={snapshot.get('_snapshot_updated_at')})"
             )
             return snapshot
     except Exception as e:
@@ -2271,6 +2297,121 @@ def get_fund_holdings(fund_code: str, year: str = None) -> dict:
     if not result.get("_data_source"):
         result["_data_source"] = "akshare_partial_failure"
     return result
+
+
+def _fetch_holdings_from_eastmoney_pingzhongdata(fund_code: str) -> dict | None:
+    """东方财富 pingzhongdata 接口兜底获取基金持仓穿透数据。
+
+    接口：https://fund.eastmoney.com/pingzhongdata/{fund_code}.js
+    返回 JS 变量赋值文本，需正则解析。
+
+    能获取到的数据：
+    - stockCodes: 持仓股票代码列表
+    - zqCodes: 持仓债券代码列表
+    - syl_1n/6y/3y/1y: 近1年/6月/3月/1月收益率（关键：解释"连续下跌"）
+    - Data_fundSharesPositions: 股票仓位测算时间序列
+    - fS_name: 基金名称
+
+    无法获取（需季报）：股票持仓比例、债券持仓比例、报告日期
+    """
+    import re
+    import requests
+
+    try:
+        url = f"https://fund.eastmoney.com/pingzhongdata/{fund_code}.js"
+        headers = {
+            "Referer": "https://fundf10.eastmoney.com/",
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+        }
+        resp = requests.get(url, headers=headers, timeout=10)
+        if resp.status_code != 200 or len(resp.text) < 100:
+            return None
+        text = resp.text
+
+        result = {
+            "fund_code": fund_code,
+            "top_stocks": [],
+            "bond_holdings": [],
+            "asset_allocation": [],
+            "industry_allocation": [],
+            "bond_type_summary": {},
+            "report_date": None,
+            "recent_returns": {},
+            "position_history": [],
+        }
+
+        # 基金名称
+        m_name = re.search(r'var fS_name\s*=\s*"([^"]+)"', text)
+        if m_name:
+            result["fund_name"] = m_name.group(1)
+
+        # 持仓股票代码（如 ["6886301","3005020",...]）
+        m_stocks = re.search(r'var stockCodes\s*=\s*\[([^\]]*)\]', text)
+        if m_stocks:
+            codes_raw = m_stocks.group(1)
+            stock_codes = re.findall(r'"(\d+)"', codes_raw)
+            # 代码格式：6位股票代码+1位市场标识，需截取前6位
+            for code in stock_codes[:10]:
+                pure_code = code[:6] if len(code) >= 6 else code
+                result["top_stocks"].append({
+                    "stock_code": pure_code,
+                    "stock_name": "",  # pingzhongdata 不含名称，需另行查询
+                    "pct_nav": None,
+                    "_source": "eastmoney_pingzhongdata",
+                })
+
+        # 持仓债券代码（如 "0197261,0197521,0197421"）
+        m_bonds = re.search(r'var zqCodes\s*=\s*"([^"]+)"', text)
+        if m_bonds:
+            bond_codes = m_bonds.group(1).split(",")
+            for code in bond_codes[:10]:
+                if not code.strip():
+                    continue
+                pure_code = code[:6] if len(code) >= 6 else code
+                result["bond_holdings"].append({
+                    "bond_code": pure_code,
+                    "bond_name": "",  # pingzhongdata 不含名称
+                    "pct_nav": None,
+                    "_source": "eastmoney_pingzhongdata",
+                })
+
+        # 近期收益率（关键：解释"连续下跌"）
+        for period, key in [("1n", "近1年"), ("6y", "近6月"), ("3y", "近3月"), ("1y", "近1月")]:
+            m_ret = re.search(rf'var syl_{period}\s*=\s*"([^"]+)"', text)
+            if m_ret:
+                try:
+                    val = float(m_ret.group(1))
+                    result["recent_returns"][key] = val
+                except ValueError:
+                    pass
+
+        # 股票仓位测算图（时间序列，取最近5个点看趋势）
+        m_pos = re.search(r'var Data_fundSharesPositions\s*=\s*(\[.*?\]);', text, re.DOTALL)
+        if m_pos:
+            try:
+                pos_data = json.loads(m_pos.group(1))
+                if isinstance(pos_data, list) and len(pos_data) > 0:
+                    import datetime as _dt
+                    # 取最近5个点
+                    for point in pos_data[-5:]:
+                        if isinstance(point, list) and len(point) >= 2:
+                            ts_ms, pct = point[0], point[1]
+                            try:
+                                date_str = _dt.datetime.fromtimestamp(ts_ms / 1000).strftime("%Y-%m-%d")
+                                result["position_history"].append({
+                                    "date": date_str,
+                                    "stock_position_pct": float(pct),
+                                })
+                            except (ValueError, TypeError):
+                                pass
+            except (json.JSONDecodeError, TypeError):
+                pass
+
+        return result
+
+    except Exception as e:
+        logger.warning(f"[fund_holdings] 东方财富 pingzhongdata 解析失败 {fund_code}: {e}")
+        return None
 
 
 def _akshare_fund_holdings_partial(fund_code: str, year: str,

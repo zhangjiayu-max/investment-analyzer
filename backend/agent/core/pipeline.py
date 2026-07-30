@@ -1973,6 +1973,30 @@ def _detect_data_gaps(
                     "detail": f"估值工具返回错误: {preview[:100]}",
                 })
 
+        # 2026-07-30 新增 conv#193 修复：基金穿透失败检测
+        # 场景：query_fund_info 返回 _data_source=akshare_partial_failure（top_stocks/bond_holdings 为空），
+        # 说明未能穿透到基金底层持仓，专家基于宏观推断而非真实持仓分析
+        elif name == "query_fund_info":
+            if "akshare_partial_failure" in preview:
+                gaps.append({
+                    "type": "fund_holdings_missing",
+                    "tool": name,
+                    "detail": "基金持仓穿透失败：akshare/ttfund 均未返回重仓股/债券明细，专家基于宏观推断而非真实持仓分析",
+                })
+            elif '"top_stocks": []' in preview.replace(" ", "") or '"bond_holdings":[]' in preview.replace(" ", ""):
+                gaps.append({
+                    "type": "fund_holdings_missing",
+                    "tool": name,
+                    "detail": "基金持仓穿透数据为空：top_stocks 或 bond_holdings 为空数组",
+                })
+            # 检测防幻觉纠正（LLM 用错基金代码）
+            if "防幻觉纠正" in preview or "_name_mismatch_warning" in preview:
+                gaps.append({
+                    "type": "fund_code_correction",
+                    "tool": name,
+                    "detail": "基金代码被防幻觉机制纠正，原代码可能错误，需核对分析是否基于正确基金",
+                })
+
     # 3. 扫描专家分析文本中的数据缺失自述（采样前200字符）
     _missing_keywords = ("数据缺失", "无法获取", "估值数据缺失", "数据不可用", "暂无数据")
     for s in specialists:

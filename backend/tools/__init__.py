@@ -2814,6 +2814,34 @@ def _query_fund_info(args: dict) -> str:
     if fund_code and not fund_code.isdigit():
         fund_name_hint = fund_code
         fund_code = ""
+
+    # L1.5 防幻觉强化（2026-07-30 修复 conv#193）：
+    # 即使 fund_code 是纯数字，如果同时提供了 fund_name_hint，必须校验数字代码是否在持仓表中。
+    # 场景：风险管理师凭记忆猜了 015953（信澳鑫享债券A），但用户问的是博时恒乐债券A（014846）。
+    # 原逻辑只对"非数字 fund_code"做名称匹配，纯数字直接放行，导致 LLM 猜测的错误代码绕过防幻觉。
+    if fund_code and fund_code.isdigit() and fund_name_hint:
+        try:
+            holdings = list_holdings()
+            in_holdings = any(h.get("fund_code") == fund_code for h in holdings)
+            if not in_holdings:
+                # 数字代码不在持仓表 → 可能是 LLM 猜的，用 fund_name_hint 重新匹配
+                matched_code = _match_fund_code_by_name(fund_name_hint)
+                if matched_code and matched_code != fund_code:
+                    _match_note = (
+                        f"⚠️ 防幻觉纠正：您提供的 fund_code={fund_code} 不在持仓列表中，"
+                        f"通过名称'{fund_name_hint}'匹配到正确代码 {matched_code}。"
+                        f"请勿凭记忆猜测基金代码，应从 query_portfolio 结果中取 fund_code。"
+                    )
+                    fund_code = matched_code
+                else:
+                    # 名称也匹配不到 → 返回错误，强制 LLM 调 query_portfolio
+                    return json.dumps({
+                        "error": f"fund_code={fund_code} 不在持仓列表中，且名称'{fund_name_hint}'无法匹配到持仓基金",
+                        "hint": "请先调用 query_portfolio 查看持仓列表，使用其中的 fund_code 调用本工具，禁止凭记忆猜测基金代码",
+                    }, ensure_ascii=False)
+        except Exception:
+            pass  # 持仓查询失败时不阻断，保留原 fund_code 继续
+
     if fund_name_hint and not fund_code:
         matched_code = _match_fund_code_by_name(fund_name_hint)
         if matched_code:
