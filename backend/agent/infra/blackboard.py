@@ -344,6 +344,41 @@ class Blackboard:
         self.entries.clear()
         self.tokens_used_by_agent.clear()
 
+    # ── 序列化（用于 checkpoint 持久化）──────────────
+
+    def to_dict(self) -> dict:
+        """序列化为可 JSON 化的 dict（用于 checkpoint 持久化）。
+
+        注意：_tool_broadcasts 不持久化（运行时缓存，恢复时无需重建）。
+        """
+        return {
+            "entries": [e.to_dict() for e in self.entries],
+            "max_entries": self.max_entries,
+            "tokens_used_by_agent": dict(self.tokens_used_by_agent),
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "Blackboard":
+        """从 dict 重建 Blackboard 实例（用于 checkpoint 恢复）。
+
+        Args:
+            data: to_dict() 产出的 dict
+
+        Returns:
+            重建后的 Blackboard 实例，entries/tokens_used_by_agent 已恢复
+        """
+        if not data:
+            return cls()
+        bb = cls(max_entries=data.get("max_entries", 6))
+        for e_dict in data.get("entries", []):
+            try:
+                bb.entries.append(BlackboardEntry(**e_dict))
+            except Exception:
+                # 防御：单条条目反序列化失败不应阻断整体恢复
+                logger.warning(f"[blackboard] from_dict 条目反序列化失败，跳过: {e_dict}")
+        bb.tokens_used_by_agent = dict(data.get("tokens_used_by_agent", {}))
+        return bb
+
 
 # ── 从专家结果提取黑板条目 ──────────────────────
 

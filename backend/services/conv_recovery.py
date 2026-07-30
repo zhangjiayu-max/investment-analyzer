@@ -299,6 +299,140 @@ def resume_synthesis_only(msg_id: int, conv_id: int = None) -> dict:
         }
 
 
+# ── checkpoint 完整恢复（2026-07-30）──────────────────────────
+# 走和首次对话相同的代码路径（orchestrate_stream + stream_channels + stream_events）
+# 而非特殊恢复路径（resume_synthesis_only → _phase_synthesis）
+# 确保结构与写表与首次对话完全一致
+
+
+def _recover_via_orchestrate_stream(msg_id: int, conv_id: int, checkpoint: dict) -> str:
+    """通过走 orchestrate_stream 完整恢复（与首次对话相同入口）。
+
+    与首次对话的 send_message_stream 的区别：
+    - 不重复存 user 消息（已存在）
+    - 不重新创建 assistant 占位消息（复用 msg_id）
+    - 其余完全相同：创建 channel + 调用 orchestrate_stream + 事件持久化
+
+    Returns:
+        恢复后的 answer 文本；失败返回空串（调用方可降级到 resume_synthesis_only）
+    """
+    from db.stream_channels import (
+        create_stream_channel, append_stream_event, complete_stream_channel,
+        fail_stream_channel, update_stream_heartbeat,
+    )
+    from agent.core.orchestrator import orchestrate_stream
+
+    trace_id = checkpoint.get("trace_id") or f"resume-{msg_id}"
+    complexity = checkpoint.get("complexity", "medium")
+    cancel_event = threading.Event()
+
+    # 1. 创建新 stream_channel（与首次对话相同）
+    channel_id = create_stream_channel(
+        conversation_id=conv_id, message_id=msg_id,
+        trace_id=trace_id, complexity=complexity,
+    )
+    logger.info(f"[recover] msg {msg_id} 创建新 channel {channel_id}（走 orchestrate_stream）")
+
+    # 2. 调用 orchestrate_stream，消费事件并持久化（与首次对话相同）
+    answer = ""
+    specialist_results = []
+    all_tool_calls = []
+    try:
+        # 首事件超时守卫（与 send_message_stream 一致）
+        import concurrent.futures as _cf
+        import itertools as _it
+        _orch_gen = orchestrate_stream(
+            query=checkpoint.get("refined_query", ""),
+            history=[],
+            rag_context=checkpoint.get("rag_context", ""),
+            cancel_event=cancel_event,
+            resume_from={"message_id": msg_id},
+            resume_from_checkpoint=checkpoint,
+            conversation_id=conv_id, message_id=msg_id, trace_id=trace_id,
+        )
+        _first_evt_executor = _cf.ThreadPoolExecutor(max_workers=1)
+        try:
+            _first_evt_future = _first_evt_executor.submit(next, _orch_gen)
+            _first_event = _first_evt_future.result(timeout=120)
+            _event_chain = _it.chain([_first_event], _orch_gen)
+        except _cf.TimeoutError:
+            logger.error(f"[recover] msg {msg_id} orchestrate_stream 首事件超时 120s")
+            _first_evt_executor.shutdown(wait=False, cancel_futures=True)
+            fail_stream_channel(channel_id, "首事件超时")
+            return ""
+        except StopIteration:
+            _first_evt_executor.shutdown(wait=False, cancel_futures=True)
+            logger.info(f"[recover] msg {msg_id} orchestrate_stream 无事件产出")
+            complete_stream_channel(channel_id)
+            return ""
+        finally:
+            _first_evt_executor.shutdown(wait=False, cancel_futures=True)
+
+        for event in _event_chain:
+            if not isinstance(event, dict):
+                continue
+            # 更新心跳（与首次对话一致）
+            try:
+                update_stream_heartbeat(channel_id)
+            except Exception:
+                pass
+            et = event.get("type", "")
+            # 持久化事件到 stream_events（跳过增量块）
+            if et and et not in ("answer_chunk", "reasoning_chunk"):
+                try:
+                    append_stream_event(channel_id, et, event)
+                except Exception as _e:
+                    logger.warning(f"[recover] msg {msg_id} 持久化事件失败: {_e}")
+            # answer 事件：收集最终答案
+            if et == "answer":
+                answer = event.get("content", "")
+                specialist_results = event.get("specialist_results", [])
+                all_tool_calls = event.get("tool_calls", [])
+
+        # 3. 标记 channel 完成（与首次对话相同）
+        complete_stream_channel(channel_id)
+
+        # 4. 写回 message（与首次对话相同）
+        if answer:
+            from db._conn import _get_conn
+            import json as _json
+            conn = _get_conn()
+            try:
+                # 读取现有 metadata，合并恢复标记
+                row = conn.execute("SELECT metadata FROM messages WHERE id = ?", (msg_id,)).fetchone()
+                meta = {}
+                if row and row["metadata"]:
+                    try:
+                        meta = _json.loads(row["metadata"])
+                    except Exception:
+                        meta = {}
+                meta["execution_status"] = "completed"
+                meta["recovered"] = True
+                meta["recovery_method"] = "orchestrate_stream"
+                meta["specialist_count"] = len(specialist_results)
+                meta["channel_id"] = channel_id
+                conn.execute(
+                    "UPDATE messages SET content = ?, metadata = ? WHERE id = ?",
+                    (answer, _json.dumps(meta, ensure_ascii=False), msg_id),
+                )
+                conn.commit()
+                logger.info(
+                    f"[recover] msg {msg_id} 恢复成功（走 orchestrate_stream，"
+                    f"answer len={len(answer)}, specialists={len(specialist_results)})",
+                )
+            finally:
+                conn.close()
+        return answer
+
+    except Exception as e:
+        logger.warning(f"[recover] msg {msg_id} orchestrate_stream 恢复失败: {e}")
+        try:
+            fail_stream_channel(channel_id, str(e)[:200])
+        except Exception:
+            pass
+        return ""
+
+
 def _merge_runs_to_answer(runs) -> str | None:
     """把 agent_runs 合并成恢复后的 content。无有效结果返回 None。
 
@@ -366,10 +500,17 @@ def recover_message(message_id: int) -> str:
     在心跳超时标记 channel 为 aborted 后立即调用，避免占位符长期悬挂。
     幂等：非占位符消息不会被处理。
 
+    恢复优先级（2026-07-30 增强）：
+    1. checkpoint 完整恢复（_recover_via_orchestrate_stream）—— 走首次对话相同入口
+    2. resume_synthesis_only —— 复用专家结果只跑综合阶段
+    3. 简单拼接（_merge_runs_to_answer）—— 降级兜底
+    4. 标记中断提示
+
     Returns:
         恢复后的 content；若消息不存在或非占位符，返回原内容或空串。
     """
     from db._conn import _get_conn
+    from agent.core.orchestrator import _load_latest_checkpoint
 
     conn = _get_conn()
     try:
@@ -387,6 +528,24 @@ def recover_message(message_id: int) -> str:
         msg_id = msg["id"]
         conv_id = msg["conversation_id"]
 
+        # ── 优先级1：checkpoint 完整恢复（走 orchestrate_stream，与首次对话相同入口）──
+        checkpoint = _load_latest_checkpoint(conv_id, msg_id)
+        if checkpoint and checkpoint.get("phase") == "experts_done":
+            logger.info(f"[conv_recovery] msg {msg_id} (conv {conv_id}) 检测到 experts_done checkpoint，"
+                        f"优先走 orchestrate_stream 恢复")
+            # checkpoint 恢复需要先关闭 conn（orchestrate_stream 内部会开新 conn）
+            conn.close()
+            answer = _recover_via_orchestrate_stream(msg_id, conv_id, checkpoint)
+            if answer:
+                logger.info(f"[conv_recovery] msg {msg_id} (conv {conv_id}) "
+                            f"checkpoint 完整恢复成功（orchestrate_stream）")
+                return answer
+            # checkpoint 恢复失败 → 降级到 resume_synthesis_only
+            logger.warning(f"[conv_recovery] msg {msg_id} (conv {conv_id}) "
+                           f"checkpoint 恢复失败，降级到 resume_synthesis_only")
+            conn = _get_conn()  # 重新打开 conn 供后续逻辑使用
+
+        # ── 优先级2/3：现有恢复路径（resume_synthesis_only → 降级拼接）──
         # 按 message_id 过滤（关键修复）
         runs = conn.execute("""
             SELECT agent_name, result, run_phase, trace_id
@@ -463,38 +622,68 @@ def recover_message(message_id: int) -> str:
         logger.warning(f"[conv_recovery] recover_message({message_id}) 失败: {e}")
         return ""
     finally:
-        conn.close()
+        # checkpoint 恢复成功时 conn 已 close，这里防御性处理
+        try:
+            conn.close()
+        except Exception:
+            pass
 
 
 def recover_interrupted_conversations() -> dict:
     """启动时恢复中断的对话。
 
+    恢复优先级（2026-07-30 增强）：
+    1. checkpoint 完整恢复（_recover_via_orchestrate_stream）—— 走首次对话相同入口
+    2. resume_synthesis_only —— 复用专家结果只跑综合阶段
+    3. 简单拼接（_merge_runs_to_answer）—— 降级兜底
+    4. 标记中断提示
+
     Returns:
         {"recovered": int, "marked_interrupted": int, "skipped": int}
     """
     from db._conn import _get_conn
+    from agent.core.orchestrator import _load_latest_checkpoint
 
     stats = {"recovered": 0, "marked_interrupted": 0, "skipped": 0}
 
+    # 先收集所有占位符消息（避免在恢复过程中 conn 被关闭导致游标失效）
     conn = _get_conn()
     try:
-        # 找所有占位符 assistant message
         placeholder_msgs = conn.execute("""
             SELECT id, conversation_id, content
             FROM messages
             WHERE role = 'assistant' AND content LIKE ?
         """, (_PLACEHOLDER_PREFIX + "%",)).fetchall()
+    finally:
+        conn.close()
 
-        if not placeholder_msgs:
-            logger.info("[conv_recovery] 无中断对话需恢复")
-            return stats
+    if not placeholder_msgs:
+        logger.info("[conv_recovery] 无中断对话需恢复")
+        return stats
 
-        logger.info(f"[conv_recovery] 发现 {len(placeholder_msgs)} 条占位符消息，开始恢复")
+    logger.info(f"[conv_recovery] 发现 {len(placeholder_msgs)} 条占位符消息，开始恢复")
 
-        for msg in placeholder_msgs:
-            msg_id = msg["id"]
-            conv_id = msg["conversation_id"]
+    for msg in placeholder_msgs:
+        msg_id = msg["id"]
+        conv_id = msg["conversation_id"]
 
+        # ── 优先级1：checkpoint 完整恢复（走 orchestrate_stream，与首次对话相同入口）──
+        checkpoint = _load_latest_checkpoint(conv_id, msg_id)
+        if checkpoint and checkpoint.get("phase") == "experts_done":
+            logger.info(f"[conv_recovery] msg {msg_id} (conv {conv_id}) 检测到 experts_done checkpoint，"
+                        f"优先走 orchestrate_stream 恢复")
+            answer = _recover_via_orchestrate_stream(msg_id, conv_id, checkpoint)
+            if answer:
+                stats["recovered"] += 1
+                logger.info(f"[conv_recovery] msg {msg_id} (conv {conv_id}) 已恢复"
+                            f"（orchestrate_stream checkpoint）")
+                continue
+            logger.warning(f"[conv_recovery] msg {msg_id} (conv {conv_id}) "
+                           f"checkpoint 恢复失败，降级到 resume_synthesis_only")
+
+        # ── 优先级2/3/4：现有恢复路径（resume_synthesis_only → 降级拼接 → 标记中断）──
+        conn = _get_conn()
+        try:
             # 关键修复：按 message_id 过滤，而非 conversation_id
             # 同一对话多轮中，其他轮次的专家结果不应合并到中断轮次
             runs = conn.execute("""
@@ -534,15 +723,16 @@ def recover_interrupted_conversations() -> dict:
                 stats["marked_interrupted"] += 1
                 logger.info(f"[conv_recovery] msg {msg_id} (conv {conv_id}) 无专家结果，标记为中断")
 
-        conn.commit()
-        logger.info(
-            f"[conv_recovery] 恢复完成: {stats['recovered']} 条合并恢复, "
-            f"{stats['marked_interrupted']} 条标记中断, {stats['skipped']} 条跳过"
-        )
-    except Exception as e:
-        logger.warning(f"[conv_recovery] 恢复失败（不影响启动）: {e}")
-    finally:
-        conn.close()
+            conn.commit()
+        except Exception as e:
+            logger.warning(f"[conv_recovery] msg {msg_id} 恢复失败: {e}")
+        finally:
+            conn.close()
+
+    logger.info(
+        f"[conv_recovery] 恢复完成: {stats['recovered']} 条合并恢复, "
+        f"{stats['marked_interrupted']} 条标记中断, {stats['skipped']} 条跳过"
+    )
 
     return stats
 

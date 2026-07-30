@@ -484,6 +484,12 @@ async def startup():
         asyncio.create_task(_auto_cleanup_feature_usage())
         logging.info("功能使用埋点清理任务已启动（tracking.feature_usage_enabled=true）")
 
+    # 编排检查点自动清理（每日 03:00 执行，默认开启）
+    # 清理 7 天前的 checkpoint（含 llm_messages/blackboard_dict，单条约 50-150KB）
+    if get_config("orchestrator.checkpoint_cleanup_enabled", "true") == "true":
+        asyncio.create_task(_auto_cleanup_checkpoints())
+        logging.info("编排检查点清理任务已启动（orchestrator.checkpoint_cleanup_enabled=true）")
+
     # 前瞻性事件雷达（每晚 20:00，默认关闭，LLM 相关开关硬约束）
     if get_config("alerts.event_radar_enabled", "false") == "true":
         asyncio.create_task(_auto_event_radar_scan())
@@ -1012,6 +1018,38 @@ async def _auto_cleanup_feature_usage():
                 logging.warning(f"[auto-cleanup] 功能埋点清理异常: {e}")
     except Exception as e:
         logging.warning(f"功能使用埋点清理任务异常: {e}")
+
+
+async def _auto_cleanup_checkpoints():
+    """编排检查点自动清理 — 每日 03:00 执行一次。
+
+    清理 7 天前的 checkpoint（含 llm_messages/blackboard_dict），
+    避免 orchestration_checkpoints 表无限膨胀。
+
+    开关：orchestrator.checkpoint_cleanup_enabled（默认 true）
+    清理天数：orchestrator.checkpoint_cleanup_days（默认 7）
+    """
+    from datetime import datetime, timedelta
+    try:
+        await asyncio.sleep(210)  # 等启动完成（晚于其他清理任务避免抢资源）
+        while True:
+            now = datetime.now()
+            # 下一次 03:00
+            target = now.replace(hour=3, minute=0, second=0, microsecond=0)
+            if now >= target:
+                target = (now + timedelta(days=1)).replace(hour=3, minute=0, second=0, microsecond=0)
+            sleep_sec = (target - now).total_seconds()
+            await asyncio.sleep(max(sleep_sec, 60))
+
+            try:
+                from agent.core.orchestrator import cleanup_old_checkpoints
+                cleanup_days = int(get_config("orchestrator.checkpoint_cleanup_days", "7"))
+                deleted = await asyncio.to_thread(cleanup_old_checkpoints, days=cleanup_days)
+                logging.info(f"[auto-cleanup] 检查点清理完成: 删除 {deleted} 条 ({cleanup_days}天前)")
+            except Exception as e:
+                logging.warning(f"[auto-cleanup] 检查点清理异常: {e}")
+    except Exception as e:
+        logging.warning(f"编排检查点清理任务异常: {e}")
 
 
 async def _auto_event_radar_scan():

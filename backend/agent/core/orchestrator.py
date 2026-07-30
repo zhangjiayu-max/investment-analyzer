@@ -46,7 +46,7 @@ def _save_checkpoint(conv_id: int, message_id: int, phase: str, state: dict):
         conn.execute("""
             INSERT OR REPLACE INTO orchestration_checkpoints (conv_id, message_id, phase, state_json)
             VALUES (?, ?, ?, ?)
-        """, (conv_id, message_id, phase, json.dumps(state, ensure_ascii=False)))
+        """, (conv_id, message_id, phase, json.dumps(state, ensure_ascii=False, default=str)))
         conn.commit()
         conn.close()
         logger.info(f"检查点已保存: conv={conv_id} msg={message_id} phase={phase}")
@@ -74,6 +74,130 @@ def _load_checkpoint(conv_id: int, message_id: int) -> dict | None:
     except Exception as e:
         logger.warning(f"加载检查点失败: {e}")
     return None
+
+
+def _load_latest_checkpoint(conv_id: int, message_id: int) -> dict | None:
+    """加载最新 checkpoint（按 phase 优先级 + id DESC）。
+
+    与 _load_checkpoint 的区别：
+    - _load_checkpoint 只返回最新一条（按 id DESC）
+    - _load_latest_checkpoint 优先返回 experts_done 阶段（含完整内存状态），
+      若无则返回任意最新一条（向后兼容旧 checkpoint）
+
+    Returns:
+        checkpoint dict（含 phase 字段），或 None
+    """
+    if not conv_id or not message_id:
+        return None
+    try:
+        from db._conn import _get_conn
+        conn = _get_conn()
+        # 优先查 experts_done 阶段（含完整内存状态）
+        row = conn.execute("""
+            SELECT phase, state_json FROM orchestration_checkpoints
+            WHERE conv_id = ? AND message_id = ? AND phase = 'experts_done'
+            ORDER BY id DESC LIMIT 1
+        """, (conv_id, message_id)).fetchone()
+        if not row:
+            # 兼容旧 checkpoint（phase='experts'）
+            row = conn.execute("""
+                SELECT phase, state_json FROM orchestration_checkpoints
+                WHERE conv_id = ? AND message_id = ?
+                ORDER BY id DESC LIMIT 1
+            """, (conv_id, message_id)).fetchone()
+        conn.close()
+        if row:
+            state = json.loads(row["state_json"])
+            state["phase"] = row["phase"]
+            return state
+    except Exception as e:
+        logger.warning(f"加载最新检查点失败: {e}")
+    return None
+
+
+def cleanup_old_checkpoints(days: int = 7) -> int:
+    """清理 N 天前的编排检查点，避免 orchestration_checkpoints 表无限膨胀。
+
+    checkpoint 含 llm_messages（截断后）和 blackboard_dict，单条约 50-150KB，
+    7 天后已无恢复价值（对话早已完成或标记中断）。
+
+    Args:
+        days: 保留天数，默认 7
+
+    Returns:
+        删除的记录数
+    """
+    try:
+        from db._conn import _get_conn
+        conn = _get_conn()
+        cursor = conn.execute("""
+            DELETE FROM orchestration_checkpoints
+            WHERE created_at < datetime('now', 'localtime', ?)
+        """, (f"-{days} days",))
+        deleted = cursor.rowcount
+        conn.commit()
+        conn.close()
+        if deleted > 0:
+            logger.info(f"[checkpoint] 清理 {deleted} 条 {days} 天前的检查点")
+        return deleted
+    except Exception as e:
+        logger.warning(f"[checkpoint] 清理旧检查点失败: {e}")
+        return 0
+
+
+def _truncate_llm_messages_for_checkpoint(llm_messages: list) -> list:
+    """截断 llm_messages 用于 checkpoint 持久化。
+
+    - 每条 content 截断到 4KB（tool response 可能很长）
+    - 总条数限制 20 条（超出只保留首尾：首条 system + 尾部最近对话）
+    - 移除不可 JSON 序列化的字段（如 reasoning_content 中的特殊对象）
+
+    Returns:
+        可 JSON 序列化的 llm_messages 副本
+    """
+    if not llm_messages:
+        return []
+    MAX_CONTENT_LEN = 4096
+    MAX_MESSAGES = 20
+    try:
+        truncated = []
+        for msg in llm_messages:
+            if not isinstance(msg, dict):
+                continue
+            m = dict(msg)  # 浅拷贝
+            # 截断 content
+            content = m.get("content")
+            if isinstance(content, str) and len(content) > MAX_CONTENT_LEN:
+                m["content"] = content[:MAX_CONTENT_LEN] + "\n...[truncated]"
+            # 截断 tool_calls 中的 arguments
+            tool_calls = m.get("tool_calls")
+            if isinstance(tool_calls, list):
+                tc_truncated = []
+                for tc in tool_calls:
+                    if not isinstance(tc, dict):
+                        continue
+                    tc_t = dict(tc)
+                    fn = tc_t.get("function") if isinstance(tc_t.get("function"), dict) else {}
+                    if isinstance(fn, dict):
+                        fn_t = dict(fn)
+                        args = fn_t.get("arguments")
+                        if isinstance(args, str) and len(args) > MAX_CONTENT_LEN:
+                            fn_t["arguments"] = args[:MAX_CONTENT_LEN] + "...[truncated]"
+                        tc_t["function"] = fn_t
+                    tc_truncated.append(tc_t)
+                m["tool_calls"] = tc_truncated
+            # 移除 reasoning_content（可能含不可序列化对象）
+            m.pop("reasoning_content", None)
+            truncated.append(m)
+        # 限制总条数：保留首条(system) + 尾部最近对话
+        if len(truncated) > MAX_MESSAGES:
+            head = truncated[:1]
+            tail = truncated[-(MAX_MESSAGES - 1):]
+            truncated = head + tail
+        return truncated
+    except Exception as e:
+        logger.warning(f"截断 llm_messages 失败，返回空列表: {e}")
+        return []
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -4608,7 +4732,7 @@ def _load_recent_conclusions(
         return ""
 
 
-def _stream_precheck(query: str, history: list, rag_context: str, cancel_event: threading.Event | None, resume_from: dict | None, trace_id: str = ""):
+def _stream_precheck(query: str, history: list, rag_context: str, cancel_event: threading.Event | None, resume_from: dict | None, trace_id: str = "", resume_from_checkpoint: dict | None = None):
     """阶段0-0.5: prompt注入检查、token预算、链接抓取、查询改写、恢复模式。
 
     生成器：yield 状态/错误事件。调用方需检查返回值是否为 None（表示已 yield 终止事件）。
@@ -4616,7 +4740,29 @@ def _stream_precheck(query: str, history: list, rag_context: str, cancel_event: 
       - None 表示已 yield 终止性 answer 事件，调用方应直接 return
       - dict 包含: query, refined_query, rewrite_meta, budget, article_context,
         completed_specialists, resumed_results, resume_message_id
+      - 若 resume_from_checkpoint 存在，额外包含 "checkpoint" 字段（完整 checkpoint 状态）
     """
+    # ── checkpoint 完整恢复：跳过 precheck/route/build_context，直接返回 checkpoint 状态 ──
+    # 恢复场景下，所有预处理已完成（query 改写、文章抓取、token 预算等），
+    # 直接用 checkpoint 中的状态，让 orchestrate_stream 跳过这些阶段进入综合阶段
+    if resume_from_checkpoint:
+        cp = resume_from_checkpoint
+        cp_phase = cp.get("phase", "")
+        logger.info(f"[trace:{trace_id}] 从 checkpoint 恢复: phase={cp_phase}, 跳过 precheck")
+        yield {"type": "status", "message": "正在从检查点恢复..."}
+        cp_specialist_results = cp.get("specialist_results", [])
+        return {
+            "query": cp.get("refined_query", query),
+            "refined_query": cp.get("refined_query", query),
+            "rewrite_meta": {},
+            "budget": cp.get("budget", {"mode": "normal", "remaining": 500000}),
+            "article_context": cp.get("article_context", ""),
+            "completed_specialists": set(sr.get("agent_key", "") for sr in cp_specialist_results),
+            "resumed_results": cp_specialist_results,
+            "resume_message_id": None,
+            "checkpoint": cp,  # 透传给后续阶段
+        }
+
     # 0. Prompt 注入防护检查
     from agent.safety.input_sanitizer import check_injection, HIGH_CONFIDENCE_REJECT
     safety = check_injection(query)
@@ -5656,7 +5802,7 @@ def _pipeline_phase_message(phase: str) -> str:
     return messages.get(phase, f"阶段: {phase}")
 
 
-def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_event: threading.Event | None = None, resume_from: dict | None = None, conversation_id: int = 0, message_id: int = 0, trace_id: str = "", target_specialists: list[str] = None):
+def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_event: threading.Event | None = None, resume_from: dict | None = None, conversation_id: int = 0, message_id: int = 0, trace_id: str = "", target_specialists: list[str] = None, resume_from_checkpoint: dict | None = None):
     """
     Orchestrator 的流式版本,通过生成器逐步返回事件。
 
@@ -5673,6 +5819,8 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
         conversation_id: 对话 ID,用于创建 agent_runs 记录
         message_id: 消息 ID,用于创建 agent_runs 记录
         trace_id: 追踪 ID,用于关联执行记录
+        resume_from_checkpoint: 完整 checkpoint 状态,用于中断后走完整 orchestrate_stream 恢复。
+            存在时跳过 precheck/route/build_context 阶段,直接恢复内存状态进入综合阶段。
     """
     start_time = time.time()
 
@@ -5761,7 +5909,9 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
         pass  # pipeline 模块不可用，走 ReAct
 
     # ── 阶段0-0.5: 预处理（注入检查、token预算、链接抓取、查询改写、恢复模式）──
-    precheck_gen = _stream_precheck(query, history, rag_context, cancel_event, resume_from, trace_id=trace_id)
+    # resume_from_checkpoint 模式下，_stream_precheck 会跳过所有预处理直接返回 checkpoint 状态
+    precheck_gen = _stream_precheck(query, history, rag_context, cancel_event, resume_from,
+                                     trace_id=trace_id, resume_from_checkpoint=resume_from_checkpoint)
     precheck_result = None
     while True:
         try:
@@ -5785,65 +5935,89 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
     resume_message_id = precheck_result["resume_message_id"]
     article_context = precheck_result.get("article_context", "")
 
-    # ── 阶段1-1.5: 专家路由、复杂度分类、RAG增强 ──
-    route_gen = _stream_route(query, history, rag_context, cancel_event, resume_from,
-                             target_specialists, completed_specialists, resume_message_id,
-                             trace_id, start_time)
-    route_result_data = None
-    while True:
-        try:
-            evt = next(route_gen)
-            yield evt
-        except StopIteration as si:
-            route_result_data = si.value
-            break
+    # ── checkpoint 完整恢复：跳过 route/build_context，直接用 checkpoint 中的状态 ──
+    # 恢复场景下，所有预处理、路由、上下文构建都已完成（在首次对话中执行过），
+    # 直接复用 checkpoint 中的状态进入综合阶段，与首次对话代码路径完全一致
+    checkpoint = precheck_result.get("checkpoint") if precheck_result else None
 
-    if route_result_data is None:
-        return
+    if checkpoint:
+        # 从 checkpoint 恢复路由与上下文状态（跳过 route 和 build_context 阶段）
+        cp_specialists = checkpoint.get("specialists", [])
+        specialists = cp_specialists if cp_specialists else (target_specialists or ["valuation_expert"])
+        complexity = checkpoint.get("complexity", "medium")
+        clarification = checkpoint.get("clarification", {})
+        route_result = checkpoint.get("route_result", {})
+        context_config = checkpoint.get("context_config", {})
+        token_budget = checkpoint.get("token_budget", {})
+        rag_context = checkpoint.get("rag_context", rag_context)
+        refined_query = checkpoint.get("refined_query", refined_query)
+        # 恢复上下文构建结果（首次对话时由 _stream_build_context 生成）
+        llm_messages = checkpoint.get("llm_messages", [])
+        prebuilt_context = checkpoint.get("prebuilt_context", "")
+        system_content = checkpoint.get("system_content", "") or build_orchestrator_system_prompt()
+        logger.info(f"[trace:{trace_id}] checkpoint 恢复: 跳过 route/build_context，"
+                    f"specialists={len(specialists)}, complexity={complexity}, "
+                    f"llm_messages={len(llm_messages)}")
+    else:
+        # ── 阶段1-1.5: 专家路由、复杂度分类、RAG增强 ──
+        route_gen = _stream_route(query, history, rag_context, cancel_event, resume_from,
+                                 target_specialists, completed_specialists, resume_message_id,
+                                 trace_id, start_time)
+        route_result_data = None
+        while True:
+            try:
+                evt = next(route_gen)
+                yield evt
+            except StopIteration as si:
+                route_result_data = si.value
+                break
 
-    specialists = route_result_data["specialists"]
-    complexity = route_result_data["complexity"]
-    clarification = route_result_data["clarification"]
-    route_result = route_result_data["route_result"]
-    refined_query = route_result_data["refined_query"]
-    context_config = route_result_data["context_config"]
-    token_budget = route_result_data["token_budget"]
-    rag_context = route_result_data["rag_context"]
+        if route_result_data is None:
+            return
 
-    # P1 优化 conv_190 质量：文章内容注入后二次路由
-    # 纯链接场景路由器只返回 article_expert，此处根据文章实际内容追加行为金融学/风控专家
-    if article_context and not article_context.startswith("[抓取失败]"):
-        specialists, _sec_reason = _secondary_route_by_article(
-            specialists, article_context, route_result, context_config
+        specialists = route_result_data["specialists"]
+        complexity = route_result_data["complexity"]
+        clarification = route_result_data["clarification"]
+        route_result = route_result_data["route_result"]
+        refined_query = route_result_data["refined_query"]
+        context_config = route_result_data["context_config"]
+        token_budget = route_result_data["token_budget"]
+        rag_context = route_result_data["rag_context"]
+
+        # P1 优化 conv_190 质量：文章内容注入后二次路由
+        # 纯链接场景路由器只返回 article_expert，此处根据文章实际内容追加行为金融学/风控专家
+        if article_context and not article_context.startswith("[抓取失败]"):
+            specialists, _sec_reason = _secondary_route_by_article(
+                specialists, article_context, route_result, context_config
+            )
+            if _sec_reason:
+                logger.info(f"[trace:{trace_id}] 文章二次路由: {_sec_reason}")
+                yield {"type": "status", "message": f"文章内容分析: {_sec_reason}"}
+
+        perf_metrics["phases"]["routing"] = int((time.time() - start_time) * 1000)
+
+        # ── 阶段2: 构建上下文 ──
+        # _stream_build_context 内部有多个外部 I/O（akshare/HTTP），用超时包装避免卡死
+        # 案例：conv#132/133 因 build_bond_fund_holdings_context 内 akshare 卡死导致 40min 无日志
+        import concurrent.futures as _cf
+        _ctx_executor = _cf.ThreadPoolExecutor(max_workers=1)
+        _ctx_future = _ctx_executor.submit(
+            _stream_build_context, refined_query, rag_context, complexity,
+            context_config, token_budget, history, trace_id=trace_id
         )
-        if _sec_reason:
-            logger.info(f"[trace:{trace_id}] 文章二次路由: {_sec_reason}")
-            yield {"type": "status", "message": f"文章内容分析: {_sec_reason}"}
-
-    perf_metrics["phases"]["routing"] = int((time.time() - start_time) * 1000)
-
-    # ── 阶段2: 构建上下文 ──
-    # _stream_build_context 内部有多个外部 I/O（akshare/HTTP），用超时包装避免卡死
-    # 案例：conv#132/133 因 build_bond_fund_holdings_context 内 akshare 卡死导致 40min 无日志
-    import concurrent.futures as _cf
-    _ctx_executor = _cf.ThreadPoolExecutor(max_workers=1)
-    _ctx_future = _ctx_executor.submit(
-        _stream_build_context, refined_query, rag_context, complexity,
-        context_config, token_budget, history, trace_id=trace_id
-    )
-    try:
-        ctx_data = _ctx_future.result(timeout=60)
-    except _cf.TimeoutError:
-        logger.warning(f"[trace:{trace_id}] _stream_build_context 超时 60s，使用空上下文降级")
-        ctx_data = {"llm_messages": [], "prebuilt_context": "", "system_content": build_orchestrator_system_prompt()}
-    except Exception as e:
-        logger.warning(f"[trace:{trace_id}] _stream_build_context 失败: {e}，使用空上下文降级")
-        ctx_data = {"llm_messages": [], "prebuilt_context": "", "system_content": build_orchestrator_system_prompt()}
-    finally:
-        _ctx_executor.shutdown(wait=False, cancel_futures=True)
-    llm_messages = ctx_data["llm_messages"]
-    prebuilt_context = ctx_data["prebuilt_context"]
-    system_content = ctx_data["system_content"]
+        try:
+            ctx_data = _ctx_future.result(timeout=60)
+        except _cf.TimeoutError:
+            logger.warning(f"[trace:{trace_id}] _stream_build_context 超时 60s，使用空上下文降级")
+            ctx_data = {"llm_messages": [], "prebuilt_context": "", "system_content": build_orchestrator_system_prompt()}
+        except Exception as e:
+            logger.warning(f"[trace:{trace_id}] _stream_build_context 失败: {e}，使用空上下文降级")
+            ctx_data = {"llm_messages": [], "prebuilt_context": "", "system_content": build_orchestrator_system_prompt()}
+        finally:
+            _ctx_executor.shutdown(wait=False, cancel_futures=True)
+        llm_messages = ctx_data["llm_messages"]
+        prebuilt_context = ctx_data["prebuilt_context"]
+        system_content = ctx_data["system_content"]
 
     # 根据复杂度显示不同的状态消息
     if complexity == "simple":
@@ -5863,8 +6037,9 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
     }
 
     # 增强1: 检查点恢复 — 尝试从 checkpoint 恢复（跳过已完成的阶段）
+    # 注意：resume_from_checkpoint 模式下不加载旧 checkpoint（避免与 checkpoint 恢复冲突）
     checkpoint_state = None
-    if conversation_id and message_id:
+    if not checkpoint and conversation_id and message_id:
         checkpoint_state = _load_checkpoint(conversation_id, message_id)
         if checkpoint_state:
             cp_phase = checkpoint_state.get("phase", "")
@@ -5901,37 +6076,74 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
     force_skip_cross_review = False
     # P0-2.1：共享黑板架构 — 2-3 专家串行执行，后执行者能看到前序结论（默认开启）
     shared_blackboard_enabled = get_orchestration_config("shared_blackboard_enabled", "true") == "true"
-    # 统一黑板实例：所有专家执行路径（单专家/2-3串行/4+并行）共享，综合阶段注入结构化数据
-    blackboard = Blackboard(max_entries=6)
-    specialist_results = []
-    all_tool_calls = []
-    arbitration_done = False  # 标记仲裁是否已完成,避免重复调用
-    # P0 修复 conv_190：orchestrate_stream 使用 ReAct 模式（无 Plan & Execute），
-    # active_plan 始终为 None，但综合阶段 _stream_final_synthesis 和 _stream_handle_no_tool_calls
-    # 引用了它。原代码漏定义导致 NameError: name 'active_plan' is not defined，
-    # 两个 trace 都在综合阶段崩溃。
-    active_plan = None
-    conflicts = {}  # 初始化冲突检测结果，后续在无工具调用分支中更新
-    already_called = set()  # 增强2: 动态选角防循环
 
-    if checkpoint_state:
-        all_tool_calls = checkpoint_state.get("all_tool_calls", all_tool_calls)
-        arbitration_done = checkpoint_state.get("arbitration_done", arbitration_done)
+    # ── 内存状态初始化（支持 checkpoint 完整恢复）──
+    # resume_from_checkpoint 模式：从 checkpoint 恢复所有内存状态
+    # 普通模式：初始化为空，由后续专家执行填充
+    if checkpoint:
+        # 恢复黑板（含已写入的专家结论）
+        blackboard = Blackboard.from_dict(checkpoint.get("blackboard_dict", {}))
+        specialist_results = list(checkpoint.get("specialist_results", []))
+        all_tool_calls = list(checkpoint.get("all_tool_calls", []))
+        arbitration_done = checkpoint.get("arbitration_done", False)
+        active_plan = checkpoint.get("active_plan", None)
+        conflicts = checkpoint.get("conflicts", {})
+        cross_review_results = checkpoint.get("cross_review_results", [])
+        already_called = set(sr.get("agent_key", "") for sr in specialist_results)
+        # 恢复 budget（checkpoint 中可能没有，用 precheck 返回的）
+        budget = checkpoint.get("budget", budget)
+        logger.info(f"[trace:{trace_id}] checkpoint 内存状态已恢复: "
+                    f"blackboard_entries={blackboard.entry_count}, "
+                    f"specialist_results={len(specialist_results)}, "
+                    f"all_tool_calls={len(all_tool_calls)}, "
+                    f"arbitration_done={arbitration_done}, "
+                    f"cross_review_results={len(cross_review_results)}")
+    else:
+        # 统一黑板实例：所有专家执行路径（单专家/2-3串行/4+并行）共享，综合阶段注入结构化数据
+        blackboard = Blackboard(max_entries=6)
+        specialist_results = []
+        all_tool_calls = []
+        arbitration_done = False  # 标记仲裁是否已完成,避免重复调用
+        # P0 修复 conv_190：orchestrate_stream 使用 ReAct 模式（无 Plan & Execute），
+        # active_plan 始终为 None，但综合阶段 _stream_final_synthesis 和 _stream_handle_no_tool_calls
+        # 引用了它。原代码漏定义导致 NameError: name 'active_plan' is not defined，
+        # 两个 trace 都在综合阶段崩溃。
+        active_plan = None
+        conflicts = {}  # 初始化冲突检测结果，后续在无工具调用分支中更新
+        already_called = set()  # 增强2: 动态选角防循环
+        # cross_review_results 在 _stream_handle_no_tool_calls 内部定义，
+        # 但主函数末尾 _stream_final_synthesis 调用处引用了它，提前初始化避免 NameError
+        # 同时支持 checkpoint 持久化
+        cross_review_results = []
 
-    # 恢复模式:添加已有结果
-    if resumed_results:
-        specialist_results.extend(resumed_results)
-        already_called.update(sr.get("agent_key", "") for sr in resumed_results)
-        logger.info(f"恢复模式:已加载 {len(resumed_results)} 个专家结果")
+        if checkpoint_state:
+            all_tool_calls = checkpoint_state.get("all_tool_calls", all_tool_calls)
+            arbitration_done = checkpoint_state.get("arbitration_done", arbitration_done)
 
-    # 从检查点恢复的专家结果也要加入 already_called
-    if checkpoint_state and checkpoint_state.get("specialist_results"):
-        for sr in checkpoint_state["specialist_results"]:
-            if sr.get("agent_key") and sr["agent_key"] not in already_called:
-                specialist_results.append(sr)
-                already_called.add(sr["agent_key"])
+        # 恢复模式:添加已有结果
+        if resumed_results:
+            specialist_results.extend(resumed_results)
+            already_called.update(sr.get("agent_key", "") for sr in resumed_results)
+            logger.info(f"恢复模式:已加载 {len(resumed_results)} 个专家结果")
 
-    for turn in range(MAX_TURNS):
+        # 从检查点恢复的专家结果也要加入 already_called
+        if checkpoint_state and checkpoint_state.get("specialist_results"):
+            for sr in checkpoint_state["specialist_results"]:
+                if sr.get("agent_key") and sr["agent_key"] not in already_called:
+                    specialist_results.append(sr)
+                    already_called.add(sr["agent_key"])
+
+    # ── resume_from_checkpoint 模式：跳过 ReAct 循环，直接进入综合阶段 ──
+    # 恢复场景下所有专家已完成（从 checkpoint 恢复 specialist_results），
+    # 无需再调用 LLM 决策下一步，直接走 _stream_final_synthesis（5段结构+仲裁+止盈不止损）
+    # 与首次对话的综合阶段代码路径完全一致
+    # 实现：range(0) 让循环不执行，避免修改循环体缩进
+    _react_turns = 0 if checkpoint else MAX_TURNS
+    if checkpoint:
+        logger.info(f"[trace:{trace_id}] checkpoint 恢复模式：跳过 ReAct 循环，直接进入综合阶段")
+        yield {"type": "status", "message": "正在综合各专家意见..."}
+
+    for turn in range(_react_turns):
         _check_cancel(cancel_event)
         _check_timeout(start_time)
         try:
@@ -6377,8 +6589,10 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
                     logger.error(f"动态追加专家 {agent_key} 执行失败: {e}")
 
         # 增强1: 检查点存档 — Phase A 专家执行完成
+    # 扩展：保存完整内存状态，支持中断后走 orchestrate_stream 完整恢复
     if conversation_id and message_id and specialist_results:
-        _save_checkpoint(conversation_id, message_id, "experts", {
+        _save_checkpoint(conversation_id, message_id, "experts_done", {
+            # ── 现有字段（保留）──
             "specialist_results": specialist_results,
             "all_tool_calls": all_tool_calls,
             "arbitration_done": arbitration_done,
@@ -6390,6 +6604,22 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
                 route_result=route_result,
                 clarification=clarification,
             ),
+            # ── 新增：内存状态字段（用于恢复时重建 orchestrator 状态）──
+            "llm_messages": _truncate_llm_messages_for_checkpoint(llm_messages),
+            "blackboard_dict": blackboard.to_dict(),
+            "conflicts": conflicts,
+            "cross_review_results": cross_review_results,
+            "active_plan": active_plan,
+            # ── 新增：上下文字段（综合阶段需要）──
+            "refined_query": refined_query,
+            "prebuilt_context": prebuilt_context,
+            "system_content": system_content,
+            "route_result": route_result,
+            "clarification": clarification,
+            "context_config": context_config,
+            "rag_context": rag_context,
+            "specialists": specialists,
+            "trace_id": trace_id,
         })
 
     # 超过最大轮次,做最后一次总结
