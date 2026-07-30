@@ -1997,6 +1997,23 @@ def _detect_data_gaps(
                     "detail": "基金代码被防幻觉机制纠正，原代码可能错误，需核对分析是否基于正确基金",
                 })
 
+        # 2026-07-30 新增 conv#194 修复：交易记录查询防幻觉检测
+        # 场景：专家凭记忆猜 008928，实际持仓是 008929，query_transaction_history 返回空
+        elif name == "query_transaction_history":
+            if "防幻觉纠正" in preview:
+                gaps.append({
+                    "type": "fund_code_correction",
+                    "tool": name,
+                    "detail": "交易记录查询的基金代码被防幻觉机制纠正，原代码不在持仓表中，需核对分析是否基于正确基金",
+                })
+            # 空结果但未触发防幻觉（可能 fund_code 在持仓表但确实无交易记录）
+            elif '"count": 0' in preview and '"error"' not in preview:
+                gaps.append({
+                    "type": "transaction_history_empty",
+                    "tool": name,
+                    "detail": "交易记录查询返回空：该基金无真实交易记录（假设补仓已过滤），应参考 holding_summary 中的持仓盈亏数据",
+                })
+
     # 3. 扫描专家分析文本中的数据缺失自述（采样前200字符）
     _missing_keywords = ("数据缺失", "无法获取", "估值数据缺失", "数据不可用", "暂无数据")
     for s in specialists:

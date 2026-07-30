@@ -305,13 +305,17 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "query_transaction_history",
-            "description": "查询交易记录并附带分析，用于基金操作复盘。当用户问到操作记录、买入卖出记录、交易历史时调用。",
+            "description": "查询交易记录并附带持仓盈亏摘要，用于基金操作复盘。当用户问到操作记录、买入卖出记录、交易历史时调用。返回结果包含 holding_summary（当前持仓盈亏、今日涨幅、市值等），即使交易记录少也有数据支撑。禁止凭记忆猜测 fund_code，应从 query_portfolio 结果中获取。",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "fund_code": {
                         "type": "string",
-                        "description": "基金代码，如 '161725'；为空则查全部",
+                        "description": "基金代码，必须从 query_portfolio 结果中获取，禁止凭记忆猜测。如 '161725'；为空则查全部",
+                    },
+                    "fund_name": {
+                        "type": "string",
+                        "description": "基金名称（防幻觉备用）：当 fund_code 不在持仓表时，通过名称匹配正确代码。如 '招商中证白酒'、'宏利消费红利'",
                     },
                     "transaction_type": {
                         "type": "string",
@@ -2963,10 +2967,43 @@ def _analyze_holding_performance(args: dict) -> str:
 
 
 def _query_transaction_history(args: dict) -> str:
-    """查询交易记录并附带分析。"""
+    """查询交易记录并附带分析。
+
+    2026-07-30 修复 conv#194：
+    1. L1.5 防幻觉：fund_code 不在持仓表时用 fund_name 匹配纠正（与 _query_fund_info 一致），
+       避免专家凭记忆猜错代码（如 008928 vs 008929）导致空结果。
+    2. 附带返回持仓盈亏摘要：即使交易记录少（假设交易已过滤），专家也能拿到
+       profit_loss/profit_rate/today_change_pct/current_value 等数据支撑分析。
+    """
     fund_code = args.get("fund_code", "").strip() or None
+    fund_name_hint = args.get("fund_name", "").strip()
     tx_type = args.get("transaction_type", "") or None
     limit = args.get("limit", 50)
+
+    # L1.5 防幻觉校验（2026-07-30 conv#194 修复）：
+    # 场景：行为金融学专家凭记忆猜 008928，但持仓实际是 008929（宏利消费红利指数C），
+    # 导致交易记录返回空，专家误报"未找到数据"。
+    _match_note = ""
+    if fund_code and fund_name_hint:
+        try:
+            holdings = list_holdings()
+            in_holdings = any(h.get("fund_code") == fund_code for h in holdings)
+            if not in_holdings:
+                matched_code = _match_fund_code_by_name(fund_name_hint)
+                if matched_code and matched_code != fund_code:
+                    _match_note = (
+                        f"⚠️ 防幻觉纠正：您提供的 fund_code={fund_code} 不在持仓列表中，"
+                        f"通过名称'{fund_name_hint}'匹配到正确代码 {matched_code}。"
+                        f"请勿凭记忆猜测基金代码，应从 query_portfolio 结果中取 fund_code。"
+                    )
+                    fund_code = matched_code
+                else:
+                    return json.dumps({
+                        "error": f"fund_code={fund_code} 不在持仓列表中，且名称'{fund_name_hint}'无法匹配到持仓基金",
+                        "hint": "请先调用 query_portfolio 查看持仓列表，使用其中的 fund_code 调用本工具，禁止凭记忆猜测基金代码",
+                    }, ensure_ascii=False)
+        except Exception:
+            pass  # 持仓查询失败时不阻断
 
     txs = list_transactions(fund_code=fund_code, limit=limit)
 
@@ -2982,14 +3019,60 @@ def _query_transaction_history(args: dict) -> str:
     buy_total = sum(t.get("amount", 0) or 0 for t in txs if t["transaction_type"] == "buy")
     sell_total = sum(t.get("amount", 0) or 0 for t in txs if t["transaction_type"] == "sell")
 
-    return json.dumps({
+    result = {
         "count": len(txs),
         "buy_count": buy_count,
         "sell_count": sell_count,
         "buy_total": round(buy_total, 2),
         "sell_total": round(sell_total, 2),
         "transactions": txs,
-    }, ensure_ascii=False)
+    }
+    if _match_note:
+        result["_match_note"] = _match_note
+
+    # 附带持仓盈亏摘要（2026-07-30 conv#194 修复）：
+    # 交易记录已过滤假设交易（is_hypothetical=1），真实记录可能很少，
+    # 但持仓表有完整盈亏数据。注入此摘要让专家有数据支撑，避免"交易记录不完整"的误判。
+    if fund_code:
+        try:
+            holdings = list_holdings()
+            matched = [h for h in holdings if h.get("fund_code") == fund_code]
+            if matched:
+                holding_summary = []
+                for h in matched:
+                    holding_summary.append({
+                        "account": h.get("account", ""),
+                        "fund_name": h.get("fund_name", ""),
+                        "shares": h.get("shares"),
+                        "cost_price": h.get("cost_price"),
+                        "current_price": h.get("current_price"),
+                        "total_cost": h.get("total_cost"),
+                        "current_value": h.get("current_value"),
+                        "profit_loss": h.get("profit_loss"),
+                        "profit_rate": h.get("profit_rate"),
+                        "today_change_pct": h.get("today_change_pct"),
+                        "today_profit": h.get("today_profit"),
+                        "last_buy_date": h.get("last_buy_date"),
+                        "last_buy_price": h.get("last_buy_price"),
+                        "price_updated_at": h.get("price_updated_at"),
+                    })
+                result["holding_summary"] = holding_summary
+                # 真实交易数 vs 假设交易数说明
+                if len(txs) == 0:
+                    result["_data_note"] = (
+                        f"该基金无真实交易记录（假设补仓已过滤）。"
+                        f"但持仓表显示当前持有 {len(matched)} 个账户头寸，"
+                        f"盈亏数据见 holding_summary 字段，请基于此分析而非说'无数据'。"
+                    )
+                elif len(txs) < 3:
+                    result["_data_note"] = (
+                        f"真实交易记录仅 {len(txs)} 条（假设补仓已过滤）。"
+                        f"持仓盈亏数据见 holding_summary 字段，请结合分析。"
+                    )
+        except Exception as e:
+            logger.debug(f"持仓盈亏摘要注入失败: {e}")
+
+    return json.dumps(result, ensure_ascii=False, default=str)
 
 
 def _analyze_portfolio_diversification(args: dict) -> str:

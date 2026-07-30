@@ -80,14 +80,17 @@ def build_portfolio_context(user_id: str = "default") -> str:
         sorted_holdings = sorted(active, key=lambda h: h.get("current_value", 0) or 0, reverse=True)
 
         lines.append("### 持仓明细")
-        lines.append("| 基金名称 | 市值 | 占比 | 盈亏率 | 成本价 | 份额 | 上次买入 | 盈亏 |")
-        lines.append("|---------|------|------|--------|--------|------|----------|------|")
+        lines.append("| 基金名称 | 市值 | 占比 | 盈亏率 | 今日涨幅 | 成本价 | 份额 | 上次买入 | 盈亏 |")
+        lines.append("|---------|------|------|--------|---------|--------|------|----------|------|")
         for h in sorted_holdings:
             name = h.get("fund_name", h.get("fund_code", "未知"))
             value = h.get("current_value", 0) or 0
             pct = value / total_assets if total_assets > 0 else 0
             pr = h.get("profit_rate", 0) or 0
             pr_pct = f"{pr:+.2%}" if isinstance(pr, (int, float)) else "N/A"
+            # 今日涨幅（2026-07-30 conv#194 修复：注入今日涨幅让专家判断"最近涨了多少"）
+            tcp = h.get("today_change_pct")
+            tcp_str = f"{tcp:+.2f}%" if isinstance(tcp, (int, float)) and tcp != 0 else "-"
             # 成本价
             cp = h.get("cost_price")
             cp_str = f"¥{cp:,.4f}" if cp and cp > 0 else "-"
@@ -101,7 +104,7 @@ def build_portfolio_context(user_id: str = "default") -> str:
             # 盈亏金额
             pl = h.get("profit_loss", 0) or 0
             pl_str = f"¥{pl:+,.0f}" if isinstance(pl, (int, float)) else "-"
-            lines.append(f"| {name} | ¥{value:,.0f} | {pct:.1%} | {pr_pct} | {cp_str} | {shares_str} | {lb_str} | {pl_str} |")
+            lines.append(f"| {name} | ¥{value:,.0f} | {pct:.1%} | {pr_pct} | {tcp_str} | {cp_str} | {shares_str} | {lb_str} | {pl_str} |")
 
         # ── 资产分布 ──
         lines.append("")
@@ -127,6 +130,44 @@ def build_portfolio_context(user_id: str = "default") -> str:
         # 现金占比
         cash_pct = cash_balance / total_assets if total_assets > 0 else 0
         lines.append(f"- 现金: ¥{cash_balance:,.0f}（{cash_pct:.1%}）")
+
+        # ── 近期涨幅（2026-07-30 conv#194 修复）──
+        # 从 fund_nav_history 表计算近1周/1月/3月涨幅，让专家判断"最近涨了多少"
+        # 解决 conv#194 中专家说"缺少近期涨幅数据"的问题
+        try:
+            from db._conn import _get_conn as _get_conn_nav
+            _nav_conn = _get_conn_nav()
+            lines.append("")
+            lines.append("### 近期涨幅")
+            lines.append("| 基金名称 | 今日 | 近1周 | 近1月 | 近3月 | 近6月 |")
+            lines.append("|---------|------|-------|-------|-------|-------|")
+            for h in sorted_holdings:
+                _name = h.get("fund_name", h.get("fund_code", "未知"))
+                _code = h.get("fund_code", "")
+                _today = h.get("today_change_pct")
+                _today_str = f"{_today:+.2f}%" if isinstance(_today, (int, float)) and _today != 0 else "-"
+                # 从净值历史计算近期涨幅
+                _nav_rows = _nav_conn.execute(
+                    "SELECT nav_date, nav FROM fund_nav_history WHERE fund_code = ? ORDER BY nav_date DESC LIMIT 130",
+                    (_code,),
+                ).fetchall()
+                if len(_nav_rows) >= 2:
+                    _latest_nav = _nav_rows[0]["nav"]
+                    _periods = {"近1周": 5, "近1月": 22, "近3月": 66, "近6月": 132}
+                    _ret_strs = []
+                    for _label, _days in _periods.items():
+                        if len(_nav_rows) > _days and _nav_rows[_days]["nav"] and _latest_nav:
+                            _old_nav = _nav_rows[_days]["nav"]
+                            _ret = (_latest_nav - _old_nav) / _old_nav * 100 if _old_nav else None
+                            _ret_strs.append(f"{_ret:+.2f}%" if _ret is not None else "-")
+                        else:
+                            _ret_strs.append("-")
+                    lines.append(f"| {_name} | {_today_str} | {_ret_strs[0]} | {_ret_strs[1]} | {_ret_strs[2]} | {_ret_strs[3]} |")
+                else:
+                    lines.append(f"| {_name} | {_today_str} | - | - | - | - |")
+            _nav_conn.close()
+        except Exception as _ne:
+            logger.debug(f"近期涨幅注入失败: {_ne}")
 
         # ── 集中度 ──
         lines.append("")
