@@ -2330,17 +2330,90 @@ def _synthesize_multiple_specialists(
         except Exception as e:
             logger.warning(f"[trace:{trace_id}] [pipeline] 仲裁注入失败（继续无仲裁综合）: {e}")
 
-    parts.append(
-        "\n## 任务\n"
-        "基于以上专家分析，生成综合回答：\n"
-        "1. 整合各专家观点，去重避免重复\n"
-        "2. 如有冲突，给出明确判断和理由\n"
-        "3. 如有风险否决，必须遵守否决约束降级处理\n"
-        "4. 如有数据缺口警告，回答中必须体现数据完整性说明\n"
-        "5. 如有仲裁裁决，最终结论必须与仲裁方向一致\n"
-        "6. 结尾包含「具体操作建议」段落\n"
-        "7. 使用 Markdown 格式，禁止 emoji 标题\n"
-    )
+    # P0 修复 conv#192：注入工具结果汇总（与 ReAct 路径 _build_final_synthesis_prompt 对齐）
+    # Pipeline 路径原本不读取 tool_broadcasts，导致估值等工具结果只通过专家 analysis 间接传递
+    # 综合LLM 看不到完整的工具结果，容易遗漏关键估值数据（如恒生科技/医药50估值查到但未引用）
+    if blackboard and hasattr(blackboard, "get_tool_broadcasts"):
+        try:
+            tool_broadcasts = blackboard.get_tool_broadcasts()
+            if tool_broadcasts:
+                parts.append("\n## 工具结果汇总（综合回答必须引用）")
+                for tb in tool_broadcasts[:10]:
+                    tool_name = getattr(tb, "tool_name", "") or (tb.get("tool_name", "") if isinstance(tb, dict) else "")
+                    query_text = getattr(tb, "query", "") or (tb.get("query", "") if isinstance(tb, dict) else "")
+                    summary_text = getattr(tb, "summary", "") or (tb.get("summary", "") if isinstance(tb, dict) else "")
+                    key_fields = getattr(tb, "key_fields", None)
+                    if key_fields is None and isinstance(tb, dict):
+                        key_fields = tb.get("key_fields")
+                    parts.append(f"\n- {tool_name}「{query_text}」: {summary_text}")
+                    if key_fields:
+                        try:
+                            parts.append(f"\n  关键字段: {json.dumps(key_fields, ensure_ascii=False)}")
+                        except Exception:
+                            pass
+                parts.append("\n约束：涉及估值/盈亏/补仓金额时，必须引用上述工具结果，禁止编造未出现的数据。\n")
+        except Exception as e:
+            logger.debug(f"[pipeline] 工具结果汇总注入失败: {e}")
+
+    # M5：综合报告深度保留 — 5段结构（与 ReAct 路径 _build_final_synthesis_prompt 对齐）
+    # 修复 conv#192：Pipeline 路径综合报告结构不规范，缺少推理链条和分歧反驳
+    try:
+        from db.config import get_config_bool as _gcb_ds
+        deep_synthesis = _gcb_ds("agent.deep_synthesis_enabled", True)
+    except Exception:
+        deep_synthesis = True
+
+    if deep_synthesis:
+        parts.append(
+            "\n## 任务\n"
+            "基于以上专家分析，生成综合回答，必须按以下 5 段结构组织，每段缺一不可：\n\n"
+            "### 第 1 段：核心结论\n"
+            "- 1-2 句话直接回答用户问题，不要绕弯\n"
+            "- 标注置信度 [高置信度/中置信度/低置信度]\n"
+            "- 如有仲裁裁决，最终结论必须与仲裁方向一致\n\n"
+            "### 第 2 段：推理链条（必须保留，不得省略）\n"
+            "列出支撑结论的关键推理步骤，每步标注数据来源：\n"
+            "- 步骤 A：[数据来源] → [推理过程] → [子结论]\n"
+            "- 步骤 B：[数据来源] → [推理过程] → [子结论]\n"
+            "- 至少列出 2 条推理步骤，展示「为什么得出这个结论」的完整逻辑链\n"
+            "- 禁止：把多个专家结论压缩成一句话\n\n"
+            "### 第 3 段：分歧与反驳（如有）\n"
+            "- 列出专家间的分歧点（谁说买、谁说卖、各自理由）\n"
+            "- 对每个分歧给出你的判断倾向和理由\n"
+            "- 如有冲突，给出明确判断和理由\n"
+            "- 如无分歧，说明「各专家方向一致」并指出共同依赖的前置假设\n\n"
+            "### 第 4 段：操作建议（如适用）\n"
+            "- 具体到金额/比例/触发条件\n"
+            "- 操作表格：基金 | 操作 | 金额 | 理由 | 前提条件\n"
+            "- 如有风险否决，必须遵守否决约束降级处理\n"
+            "- 【止盈不止损硬约束】涉及亏损标的（盈亏率<0）的减仓/清仓建议，"
+            "必须同时满足以下条件之一：\n"
+            "  (1) 标的当前估值分位 > 60%（高估）—— 需引用工具结果中的估值数据\n"
+            "  (2) 基本面恶化（业绩下滑/规模缩水/经理变更/费率上调）—— 需明确恶化证据\n"
+            "  否则只能建议「持有观察」或「暂停加仓」，禁止建议减仓/清仓\n"
+            "- 涉及卖出操作时，必须引用估值分位数据作为依据\n\n"
+            "### 第 5 段：风险提示与盲点\n"
+            "- 每个操作建议的风险说明\n"
+            "- 标注置信度（高/中/低）及原因\n"
+            "- 列出未覆盖的盲点（哪些维度没有专家分析、哪些数据缺失）\n"
+            "- 如有数据缺口警告，回答中必须体现数据完整性说明\n"
+            "- 给出总体风险判断（高/中/低）\n\n"
+            "## 通用要求\n"
+            "- 使用 Markdown 格式，禁止 emoji 标题\n"
+            "- 使用「我的持仓」「我的方案」「我该怎么做」的用户视角\n"
+        )
+    else:
+        parts.append(
+            "\n## 任务\n"
+            "基于以上专家分析，生成综合回答：\n"
+            "1. 整合各专家观点，去重避免重复\n"
+            "2. 如有冲突，给出明确判断和理由\n"
+            "3. 如有风险否决，必须遵守否决约束降级处理\n"
+            "4. 如有数据缺口警告，回答中必须体现数据完整性说明\n"
+            "5. 如有仲裁裁决，最终结论必须与仲裁方向一致\n"
+            "6. 结尾包含「具体操作建议」段落\n"
+            "7. 使用 Markdown 格式，禁止 emoji 标题\n"
+        )
 
     prompt = "\n".join(parts)
 
