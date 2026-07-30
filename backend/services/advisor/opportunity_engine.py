@@ -778,6 +778,9 @@ def _score_theme(theme_rule: dict, news_hits: list[dict], valuation: dict | None
                 pr = float(pr)
             except (TypeError, ValueError):
                 continue
+            # 2026-07-30 修复：profit_rate 是小数（-0.26）需转百分比（-26.03）后比较
+            if abs(pr) < 1:
+                pr = pr * 100
             if pr >= -15:
                 continue  # 非深套，不触发增强逻辑
             # 深套标的：查对应指数估值分位
@@ -1983,14 +1986,21 @@ def _scan_holdings_loss_recovery(trade_date: str, user_id: str = "default") -> l
             if "债" in fund_name or "债" in fund_type or "债" in fund_category:
                 continue
 
-            # 3. 筛选 profit_rate < -15 的深套标的
-            profit_rate = h.get("profit_rate")
-            if profit_rate is None:
+            # 3. 筛选 profit_rate < -15% 的深套标的
+            # 2026-07-30 修复：profit_rate 字段是小数（如 -0.2603 表示 -26.03%），
+            # 需转为百分比后与 -15 比较
+            profit_rate_raw = h.get("profit_rate")
+            if profit_rate_raw is None:
                 continue
             try:
-                profit_rate = float(profit_rate)
+                profit_rate_raw = float(profit_rate_raw)
             except (TypeError, ValueError):
                 continue
+            # 统一转为百分比数字（-0.2603 → -26.03）
+            if abs(profit_rate_raw) < 1:
+                profit_rate = profit_rate_raw * 100  # 小数→百分比
+            else:
+                profit_rate = profit_rate_raw  # 已是百分比
             if profit_rate >= -15:
                 continue
 
@@ -2000,9 +2010,20 @@ def _scan_holdings_loss_recovery(trade_date: str, user_id: str = "default") -> l
                 index_code,
                 metric_type=preferred_metric,
                 query_source="opportunity_loss_recovery",
-                enable_online=True,
+                enable_online=False,  # 2026-07-30 修复：先用本地避免在线超时被 except 吞掉
                 allow_metric_fallback=True,
             )
+            if not val:
+                try:
+                    val = get_best_valuation(
+                        index_code,
+                        metric_type=preferred_metric,
+                        query_source="opportunity_loss_recovery_online",
+                        enable_online=True,
+                        allow_metric_fallback=True,
+                    )
+                except Exception:
+                    pass
             if not val:
                 continue  # 7. 无估值数据，保守不触发
 
@@ -2042,7 +2063,7 @@ def _scan_holdings_loss_recovery(trade_date: str, user_id: str = "default") -> l
             related_holding = {
                 "fund_code": fund_code,
                 "fund_name": fund_name,
-                "profit_rate": profit_rate,
+                "profit_rate": profit_rate,  # 百分比数字
                 "valuation_percentile": percentile,
                 "index_code": index_code,
                 "index_name": index_name,

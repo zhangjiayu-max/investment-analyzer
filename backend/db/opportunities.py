@@ -43,6 +43,10 @@ def init_opportunity_tables(conn):
     _add_column_if_not_exists(conn, "theme_opportunities", "entry_amount", "REAL")
     _add_column_if_not_exists(conn, "theme_opportunities", "valuation_percentile", "REAL")
     _add_column_if_not_exists(conn, "theme_opportunities", "review_status", "TEXT")
+    # 2026-07-30 conv#194：新增 opportunity_type 列区分卡片类型（news/loss_recovery）
+    # 原问题：loss_recovery 补仓回本卡片无法落库，因表无 opportunity_type 列
+    _add_column_if_not_exists(conn, "theme_opportunities", "opportunity_type", "TEXT")
+    _add_column_if_not_exists(conn, "theme_opportunities", "signal_source", "TEXT")
 
     conn.execute("""
         CREATE TABLE IF NOT EXISTS theme_opportunity_tracks (
@@ -150,9 +154,10 @@ def save_opportunity(item: dict, user_id: str = "default") -> int:
              policy_signal, future_direction, market_signal, valuation_role,
              portfolio_fit_json, matched_funds_json, entry_plan_json, exit_plan_json,
              risk_note, evidence_json, status, updated_at,
-             entry_price, entry_amount, valuation_percentile, review_status)
+             entry_price, entry_amount, valuation_percentile, review_status,
+             opportunity_type, signal_source)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now','localtime'),
-                ?, ?, ?, ?)
+                ?, ?, ?, ?, ?, ?)
         ON CONFLICT(user_id, trade_date, theme) DO UPDATE SET
             verdict = excluded.verdict,
             opportunity_score = excluded.opportunity_score,
@@ -172,6 +177,8 @@ def save_opportunity(item: dict, user_id: str = "default") -> int:
             entry_amount = COALESCE(excluded.entry_amount, theme_opportunities.entry_amount),
             valuation_percentile = COALESCE(excluded.valuation_percentile, theme_opportunities.valuation_percentile),
             review_status = COALESCE(excluded.review_status, theme_opportunities.review_status),
+            opportunity_type = COALESCE(excluded.opportunity_type, theme_opportunities.opportunity_type),
+            signal_source = COALESCE(excluded.signal_source, theme_opportunities.signal_source),
             updated_at = datetime('now','localtime')
     """, (
         user_id,
@@ -196,6 +203,9 @@ def save_opportunity(item: dict, user_id: str = "default") -> int:
         item.get("entry_amount"),
         item.get("valuation_percentile"),
         item.get("review_status", "pending"),
+        # 2026-07-30 conv#194 新增：卡片类型与信号来源
+        item.get("opportunity_type", "news"),
+        item.get("signal_source", "news"),
     ))
     conn.commit()
     if cur.lastrowid:
