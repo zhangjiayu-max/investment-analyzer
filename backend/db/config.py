@@ -113,6 +113,10 @@ DEFAULT_CONFIGS = [
     # 2026-07-17 新增：持仓当日跌幅（区别于累计亏损）
     ('alerts.daily_drop_scan_enabled', 'true', '持仓基金当日跌幅扫描开关（区别于累计亏损，默认开启）', 'alerts'),
     ('alerts.daily_drop_threshold', '3', '持仓基金当日跌幅阈值（%，当日跌≥此值触发预警）', 'alerts'),
+    # 2026-07-30 新增：亏损+低估联合预警（conv#194 补强：深套标的低估时提示补仓窗口）
+    ('alerts.loss_plus_undervalued_enabled', 'true', '亏损+低估联合预警开关（深套标的对应指数低估时提示补仓窗口，默认开启）', 'alerts'),
+    ('alerts.loss_plus_undervalued_loss_threshold', '-15', '亏损+低估联合预警的亏损阈值（%，亏损≤此值且低估才触发）', 'alerts'),
+    ('alerts.loss_plus_undervalued_valuation_threshold', '30', '亏损+低估联合预警的低估阈值（估值分位%，<此值视为低估）', 'alerts'),
     # 2026-07-17 新增：资金流向异常监控
     ('alerts.capital_flow_scan_enabled', 'true', '南向资金异常流出监控开关（默认开启）', 'alerts'),
     # 2026-07-17 新增：交易时段缩短扫描间隔
@@ -290,6 +294,7 @@ DEFAULT_CONFIGS = [
     ('opportunity.leading_indicator_lookback_days', '7', '机会雷达领先指标评分回看天数', 'opportunity'),
     ('opportunity.signal_source_tracking_enabled', 'true', '回测按信号来源标记开关：news/leading_strong/leading_medium（非LLM，默认开启）', 'opportunity'),
     ('opportunity.hit_rate_feedback_enabled', 'true', '回测命中率反哺评分权重开关：连续3次miss降权20%（非LLM，默认开启）', 'opportunity'),
+    ('opportunity.holding_loss_aware_enabled', 'true', '机会雷达感知持仓盈亏开关：深套标的对应指数低估时生成补仓回本机会卡（非LLM，默认开启）', 'opportunity'),
 
     # 领先指标接入层配置（2026-07-22 LI-1~LI-7）
     ('alerts.leading_indicator_enabled', 'true', '领先指标接入层总开关：接入政策草案/资本开支/产业资本等领先信号（非LLM，默认开启）', 'alerts'),
@@ -359,6 +364,8 @@ DEFAULT_CONFIGS = [
 
     # 基本面健康检查（2026-07-17 新增）— 默认关闭
     ('smart_add.fund_health_enabled', 'true', '基本面健康检查开关（经理变更/规模暴增/跟踪误差）', 'smart_add'),
+    # 2026-07-30 新增：回本路径结构化输出（conv#194 补强）
+    ('smart_add.recovery_path_enabled', 'true', '回本路径结构化输出开关：亏损+低估标的的补仓计划附带回本路径预估（成本下降/修复时间/胜率）', 'smart_add'),
 
     # ── Batch1 增强点 1：关注计划退出机制（2026-07-18，默认关闭） ──
     ('watchlist.exit_signal_enabled', 'false', '关注计划退出机制开关：true时巡检计算止盈/止损信号', 'watchlist'),

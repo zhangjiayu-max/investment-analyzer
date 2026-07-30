@@ -243,7 +243,15 @@ def _portfolio_fit(theme_rule: dict, user_id: str = "default") -> dict:
     return {
         "already_have": bool(matched),
         "related_holdings": [
-            {"fund_code": h.get("fund_code"), "fund_name": h.get("fund_name"), "current_value": h.get("current_value")}
+            {
+                "fund_code": h.get("fund_code"),
+                "fund_name": h.get("fund_name"),
+                "current_value": h.get("current_value"),
+                # Phase 2（2026-07-30）：补充 profit_rate/index_code，供 _score_theme 维度5 增强
+                "profit_rate": h.get("profit_rate"),
+                "index_code": h.get("index_code"),
+                "index_name": h.get("index_name"),
+            }
             for h in matched[:5]
         ],
         "theme_exposure_pct": round(exposure_pct, 4),
@@ -754,9 +762,61 @@ def _score_theme(theme_rule: dict, news_hits: list[dict], valuation: dict | None
             score -= 5  # P0-B: 估值过高倒扣分（原: +3 错误）
     # P0-B 修复：无估值数据不加分（原 bug: score += 5 反而加分）
 
-    # ── 5. 持仓重叠风险 ──
+    # ── 5. 持仓重叠风险（Phase 2 增强：感知持仓盈亏）──
+    # 原逻辑：按 overlap_risk 给 15/8/2 分
+    # Phase 2 增强：已持有且深套+低估 → +12（补仓窗口）；已持有且深套+高估 → -20（勿补）
     overlap = portfolio_fit.get("overlap_risk")
-    score += 15 if overlap == "low" else (8 if overlap == "medium" else 2)
+    if portfolio_fit.get("already_have"):
+        # 检查已持仓标的的盈亏和估值分位
+        deep_loss_undervalued = False  # 深套+低估 → 补仓窗口
+        deep_loss_overvalued = False   # 深套+高估 → 勿补
+        for rh in portfolio_fit.get("related_holdings", []):
+            pr = rh.get("profit_rate")
+            if pr is None:
+                continue
+            try:
+                pr = float(pr)
+            except (TypeError, ValueError):
+                continue
+            if pr >= -15:
+                continue  # 非深套，不触发增强逻辑
+            # 深套标的：查对应指数估值分位
+            idx_code = rh.get("index_code")
+            if not idx_code:
+                continue
+            val_pct = rh.get("valuation_percentile")
+            if val_pct is None:
+                # 本地查估值（enable_online=False 避免批量调用超时）
+                try:
+                    from db.valuations import get_best_valuation
+                    preferred_metric = _get_preferred_metric_type_local(idx_code)
+                    val = get_best_valuation(
+                        idx_code,
+                        metric_type=preferred_metric,
+                        query_source="opportunity_score_theme_dim5",
+                        enable_online=False,
+                        allow_metric_fallback=True,
+                    )
+                    if val and val.get("percentile") is not None:
+                        val_pct = float(val["percentile"])
+                except Exception:
+                    pass
+            if val_pct is None:
+                continue  # 无估值数据，保守不触发增强
+            if val_pct < 30:
+                deep_loss_undervalued = True
+                break
+            elif val_pct > 60:
+                deep_loss_overvalued = True
+
+        if deep_loss_undervalued:
+            score += 12  # 深套低估补仓窗口，反转为正分
+        elif deep_loss_overvalued:
+            score -= 20  # 深套高估勿补，加重扣分
+        else:
+            score += 15 if overlap == "low" else (8 if overlap == "medium" else 2)
+    else:
+        score += 15 if overlap == "low" else (8 if overlap == "medium" else 2)
 
     # ── 6. 短期可交易性 ──
     funds = theme_rule.get("funds", [])
@@ -1826,6 +1886,241 @@ def backfill_opportunity_fields(max_items: int = 100) -> dict:
         return {"scanned": 0, "updated": 0, "skipped": 0, "error": str(e)}
 
 
+# ════════════════════════════════════════════════════════════════════
+# Phase 2（2026-07-30）：机会雷达感知持仓盈亏 — 亏损持仓低估补仓回本扫描
+# 设计稿：doc/plans/2026-07-30-亏损持仓低估补仓回本联动设计稿.md 第四章
+# ════════════════════════════════════════════════════════════════════
+
+def _get_preferred_metric_type_local(index_code: str) -> str:
+    """查询本地 index_valuations 表中该指数有哪些 metric_type，返回优先选用的指标。
+
+    优先级：市盈率 > 市净率 > 市销率 > 股息率
+    本地完全没有时返回"市盈率"（让 get_best_valuation 走在线兜底）。
+
+    与 alert_scanner._get_preferred_metric_type 同名实现，这里独立维护避免跨模块耦合。
+    """
+    try:
+        from db._conn import _get_conn
+        from db.valuations import normalize_index_code
+        normalized_code = normalize_index_code(index_code)
+        conn = _get_conn()
+        try:
+            rows = conn.execute(
+                "SELECT DISTINCT metric_type FROM index_valuations WHERE index_code = ? "
+                "AND (current_value IS NOT NULL OR percentile IS NOT NULL)",
+                (normalized_code,),
+            ).fetchall()
+        finally:
+            conn.close()
+        local_metrics = [r["metric_type"] for r in rows if r["metric_type"]]
+        if not local_metrics:
+            return "市盈率"
+        for preferred in ["市盈率", "市净率", "市销率", "股息率"]:
+            if preferred in local_metrics:
+                return preferred
+        return local_metrics[0]
+    except Exception as e:
+        logger.debug(f"[opportunity] 查询本地 metric_type 失败 {index_code}: {e}")
+        return "市盈率"
+
+
+def _scan_holdings_loss_recovery(trade_date: str, user_id: str = "default") -> list[dict]:
+    """Phase 2：扫描持仓中"亏损严重+对应指数低估"的标的，生成补仓回本机会卡。
+
+    逻辑：
+    1. 读取开关 opportunity.holding_loss_aware_enabled（默认 true）
+    2. list_holdings 获取持仓，筛选 profit_rate < -15 的深套标的
+    3. 对每个深套标的查对应指数估值分位（_get_preferred_metric_type_local 选指标）
+    4. 若估值分位 < 30% → 生成 opportunity_type="loss_recovery" 的卡片
+    5. 跳过债券基金（fund_name/fund_type/fund_category 含"债"）和无 index_code 的标的
+    6. 跳过无估值数据的标的（保守不触发，与 smart_add_planner 一致）
+
+    Returns:
+        loss_recovery 机会卡列表（未入库）
+    """
+    # 1. 开关检查
+    try:
+        from db.config import get_config_bool
+        if not get_config_bool("opportunity.holding_loss_aware_enabled", True):
+            return []
+    except Exception as e:
+        logger.debug(f"[opportunity] loss_recovery 开关读取失败: {e}")
+        return []
+
+    # 2. 获取持仓
+    try:
+        from db.portfolio import list_holdings
+        from db.valuations import get_best_valuation
+    except Exception as e:
+        logger.warning(f"[opportunity] loss_recovery 依赖导入失败: {e}")
+        return []
+
+    try:
+        holdings = list_holdings(user_id)
+    except Exception as e:
+        logger.warning(f"[opportunity] loss_recovery 获取持仓失败: {e}")
+        return []
+
+    items: list[dict] = []
+
+    for h in holdings:
+        try:
+            shares = float(h.get("shares") or 0)
+            if shares <= 0:
+                continue
+
+            fund_code = h.get("fund_code") or ""
+            fund_name = h.get("fund_name") or ""
+            index_code = h.get("index_code") or ""
+
+            # 6. 跳过无 index_code 的标的
+            if not index_code:
+                continue
+
+            # 6. 跳过债券基金
+            fund_type = h.get("fund_type") or ""
+            fund_category = h.get("fund_category") or ""
+            if "债" in fund_name or "债" in fund_type or "债" in fund_category:
+                continue
+
+            # 3. 筛选 profit_rate < -15 的深套标的
+            profit_rate = h.get("profit_rate")
+            if profit_rate is None:
+                continue
+            try:
+                profit_rate = float(profit_rate)
+            except (TypeError, ValueError):
+                continue
+            if profit_rate >= -15:
+                continue
+
+            # 4. 查对应指数估值分位
+            preferred_metric = _get_preferred_metric_type_local(index_code)
+            val = get_best_valuation(
+                index_code,
+                metric_type=preferred_metric,
+                query_source="opportunity_loss_recovery",
+                enable_online=True,
+                allow_metric_fallback=True,
+            )
+            if not val:
+                continue  # 7. 无估值数据，保守不触发
+
+            percentile_raw = val.get("percentile")
+            if percentile_raw is None:
+                continue
+            try:
+                percentile = float(percentile_raw)
+            except (TypeError, ValueError):
+                continue
+
+            # 5. 估值分位 < 30% 才生成卡片
+            if percentile >= 30:
+                continue
+
+            # ── 命中：生成 loss_recovery 机会卡 ──
+            current_value = float(h.get("current_value") or 0)
+            index_name = val.get("index_name") or h.get("index_name") or index_code
+            metric_type = val.get("metric_type") or preferred_metric
+
+            # score = min(95, 50 + abs(profit_rate) + (30 - percentile))
+            # 例：-26%亏损+3%分位 → 50+26+27=103 → cap 95
+            raw_score = 50 + abs(profit_rate) + (30 - percentile)
+            score = max(0, min(95, int(raw_score)))
+
+            # 建议补仓金额：标的市值 × 8%（与 smart_add 信号C dip_base_ratio 一致）
+            entry_amount = round(current_value * 0.08, 2)
+
+            review_date = (datetime.strptime(trade_date, "%Y-%m-%d") + timedelta(days=15)).strftime("%Y-%m-%d")
+
+            reason = (
+                f"{fund_name}（{fund_code}）当前亏损 {abs(profit_rate):.1f}%，"
+                f"对应指数 {index_name}（{index_code}）估值分位 {percentile:.1f}%（低估区）。"
+                f"深套+低估=补仓窗口开启，补仓可摊薄平均成本，历史同分位回撤通常能在中期修复。"
+            )
+
+            related_holding = {
+                "fund_code": fund_code,
+                "fund_name": fund_name,
+                "profit_rate": profit_rate,
+                "valuation_percentile": percentile,
+                "index_code": index_code,
+                "index_name": index_name,
+                "current_value": current_value,
+            }
+
+            item = {
+                "trade_date": trade_date,
+                "theme": f"补仓窗口-{fund_name}",
+                "verdict": "can_buy" if score >= 75 else ("watch" if score >= 50 else "avoid"),
+                "opportunity_score": score,
+                # Phase 2 新增标识字段（不入库主表，仅供前端/去重使用）
+                "opportunity_type": "loss_recovery",
+                "data_source": "loss_recovery_scan",
+                "signal_source": "loss_recovery",
+                "time_horizon": "15-30个交易日",
+                "summary": reason,
+                "policy_signal": "持仓亏损+指数低估联合触发，非新闻驱动",
+                "future_direction": f"{index_name}估值处于历史低位，补仓摊薄成本是回本关键",
+                "market_signal": f"亏损{abs(profit_rate):.1f}%+估值分位{percentile:.1f}%，补仓窗口",
+                "valuation_role": (
+                    f"{index_name} {metric_type}"
+                    f"百分位约 {percentile:.1f}%，处于低估区，安全边际充足"
+                ),
+                "matched_funds": [{
+                    "fund_code": fund_code,
+                    "fund_name": fund_name,
+                    "index_name": index_name,
+                    "vehicle_type": "holding",
+                    "short_term_suitable": True,
+                    "tradeability": "loss_recovery",
+                    "fee_warning": "",
+                }],
+                "portfolio_fit": {
+                    "already_have": True,
+                    "related_holdings": [related_holding],
+                    "theme_exposure_pct": 0,
+                    "overlap_risk": "low",  # 深套低估补仓不算重叠风险
+                    "suggested_budget": entry_amount,
+                    "max_position_pct": 3,
+                },
+                "entry_plan": {
+                    "action": "小仓补仓" if score >= 50 else "加入观察",
+                    "amount": entry_amount,
+                    "batching": "分2-3笔金字塔补仓",
+                    "entry_condition": f"估值分位<30%且亏损>{abs(profit_rate):.0f}%，可分批补仓",
+                },
+                "exit_plan": {
+                    "take_profit": "回本后分批止盈",
+                    "stop_loss": "估值分位>60%停止补仓",
+                    "time_stop": "30个交易日未回本则复盘",
+                    "review_date": review_date,
+                },
+                "risk_note": (
+                    f"当前亏损{abs(profit_rate):.1f}%，若高估补仓会扩大亏损；"
+                    f"建议仅在低估区间分批补仓摊薄成本"
+                ),
+                "evidence": [
+                    {"type": "holding_loss", "summary": f"{fund_name} 亏损 {profit_rate:.1f}%", "source": "portfolio_holdings"},
+                    {"type": "valuation", "summary": f"{index_name} 估值分位 {percentile:.1f}%（低估）", "source": "index_valuations"},
+                ],
+                "status": "active",
+                "entry_amount": entry_amount,
+                "valuation_percentile": percentile,
+                "entry_price": float(val.get("current_point") or 0) or None,
+                "review_status": "pending",
+                # 前端去重/展示用的 related_holdings（与 portfolio_fit 内一致，方便前端直接读取）
+                "related_holdings": [related_holding],
+            }
+            items.append(item)
+        except Exception as e:
+            logger.warning(f"[opportunity] loss_recovery 单条处理失败 {h.get('fund_code')}: {e}")
+            continue
+
+    logger.info(f"[opportunity] loss_recovery 扫描完成：{len(items)} 条补仓回本机会")
+    return items
+
+
 def scan_daily_opportunities(news_items: list[dict] | None = None,
                              trade_date: str | None = None,
                              user_id: str = "default",
@@ -1869,6 +2164,43 @@ def scan_daily_opportunities(news_items: list[dict] | None = None,
         item.pop("_capital_signal", None)
         item.pop("_volume_signal", None)
         items.append(item)
+
+    # ── Phase 2（2026-07-30）：亏损持仓低估补仓回本扫描 ──
+    # 在新闻驱动扫描完成后，调用 _scan_holdings_loss_recovery 并合并到 opportunities 列表
+    # 去重：同 fund_code 只保留评分最高的卡片
+    loss_recovery_items = _scan_holdings_loss_recovery(trade_date, user_id=user_id)
+    if loss_recovery_items:
+        # 构建新闻驱动卡片的 fund_code → 最高评分映射（从 matched_funds 中提取）
+        news_fund_best: dict[str, int] = {}
+        for it in items:
+            for f in it.get("matched_funds", []):
+                fc = f.get("fund_code")
+                if not fc:
+                    continue
+                s = it.get("opportunity_score", 0)
+                if fc not in news_fund_best or s > news_fund_best[fc]:
+                    news_fund_best[fc] = s
+
+        for loss_item in loss_recovery_items:
+            # 提取该 loss_recovery 卡片的 fund_code
+            loss_fund = ""
+            loss_related = loss_item.get("related_holdings") or []
+            if loss_related:
+                loss_fund = loss_related[0].get("fund_code", "")
+            loss_score = loss_item.get("opportunity_score", 0)
+
+            # 去重：同 fund_code 只保留评分最高的卡片
+            # 若新闻驱动卡片对该 fund 评分更高或持平 → 跳过 loss_recovery 卡片
+            if loss_fund and loss_fund in news_fund_best and news_fund_best[loss_fund] >= loss_score:
+                continue
+
+            # 入库保存（loss_recovery 卡片不创建 backtest 记录，因其非新闻驱动主题）
+            try:
+                loss_item["id"] = save_opportunity(loss_item, user_id=user_id)
+            except Exception as e:
+                logger.warning(f"[opportunity] loss_recovery 保存失败 {loss_fund}: {e}")
+                continue
+            items.append(loss_item)
 
     items.sort(key=lambda x: x.get("opportunity_score", 0), reverse=True)
     return {

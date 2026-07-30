@@ -1877,6 +1877,100 @@ def _generate_single_plan(
         logger.debug(f"[smart_add] 多维度仓位决策失败 {fund_code}: {e}")
         position_sizing = None
 
+    # Phase 3：结构化回本路径（亏损+低估+触发信号A/C 时聚合回本相关指标）
+    recovery_path = None
+    try:
+        if get_config_bool("smart_add.recovery_path_enabled", True):
+            _rp_percentile = valuation.get("percentile") if valuation else None
+            _rp_pyramid_on = bool(engine2 and engine2.get("triggered_tiers", 0) > 0)
+            _rp_signal_c_on = signal_c is not None
+            if (
+                profit_rate_pct < -10
+                and _rp_percentile is not None
+                and _rp_percentile < 60
+                and (_rp_pyramid_on or _rp_signal_c_on)
+            ):
+                if _rp_percentile < 30:
+                    _rp_level = "低估"
+                elif _rp_percentile > 70:
+                    _rp_level = "高估"
+                else:
+                    _rp_level = "适中"
+
+                # 补仓场景：金字塔优先（用全触发摊薄口径），否则信号C
+                if _rp_pyramid_on:
+                    _rp_amount = total_release or 0
+                    _rp_new_cost = avg_cost_after
+                    _rp_improvement = improvement
+                else:
+                    _rp_amount = (signal_c or {}).get("amount", 0)
+                    _rp_new_cost = _calc_avg_cost_after_add(total_cost, shares, _rp_amount, current_price)
+                    _rp_improvement = None
+                    if _rp_new_cost and shares:
+                        _rp_new_profit = (current_price - _rp_new_cost) / _rp_new_cost if _rp_new_cost else 0
+                        _rp_improvement = round((_rp_new_profit - profit_rate) * 100, 2)
+
+                _rp_cost_price = holding.get("cost_price")
+                _rp_cost_reduction = (
+                    round(_rp_cost_price - _rp_new_cost, 4)
+                    if (_rp_cost_price and _rp_new_cost) else None
+                )
+                _rp_median_months = recovery.get("median_recovery_months") if recovery else None
+                _rp_win_12m = win_rate.get("win_rate_12m") if win_rate else None
+                _rp_win_24m = win_rate.get("win_rate_24m") if win_rate else None
+                _rp_profit_loss = current_value - total_cost
+                _rp_index_name = (
+                    holding.get("index_name", "")
+                    or (valuation.get("index_name", "") if valuation else "")
+                )
+
+                # summary None 防御
+                _rp_amount_str = f"{_rp_amount:.0f}" if isinstance(_rp_amount, (int, float)) else "N/A"
+                _rp_cost_str = f"{_rp_cost_price:.4f}" if isinstance(_rp_cost_price, (int, float)) else "N/A"
+                _rp_new_cost_str = f"{_rp_new_cost:.4f}" if isinstance(_rp_new_cost, (int, float)) else "N/A"
+                _rp_imp_str = f"{_rp_improvement:.1f}" if isinstance(_rp_improvement, (int, float)) else "N/A"
+                _rp_med_str = f"{_rp_median_months}" if _rp_median_months is not None else "N/A"
+                if isinstance(_rp_win_12m, (int, float)):
+                    _rp_w12_str = f"{_rp_win_12m * 100:.0f}"
+                else:
+                    _rp_w12_str = "N/A"
+
+                recovery_path = {
+                    "current_state": {
+                        "profit_rate": profit_rate,
+                        "loss_amount": _rp_profit_loss,
+                        "avg_cost": _rp_cost_price,
+                        "current_price": current_price,
+                    },
+                    "valuation_context": {
+                        "index_name": _rp_index_name,
+                        "percentile": _rp_percentile,
+                        "level": _rp_level,
+                        "zscore": zscore,
+                    },
+                    "add_scenario": {
+                        "suggested_amount": _rp_amount,
+                        "new_avg_cost": _rp_new_cost,
+                        "cost_reduction": _rp_cost_reduction,
+                        "improvement_pct": _rp_improvement,
+                    },
+                    "recovery_estimate": {
+                        "median_recovery_months": _rp_median_months,
+                        "win_rate_12m": _rp_win_12m,
+                        "win_rate_24m": _rp_win_24m,
+                        "data_source": "index_price_history",
+                    },
+                    "summary": (
+                        f"当前亏损{abs(profit_rate_pct):.1f}%，估值分位{_rp_percentile:.1f}%处于{_rp_level}区。"
+                        f"建议补仓{_rp_amount_str}元，补仓后平均成本从{_rp_cost_str}降至{_rp_new_cost_str}，"
+                        f"盈亏率改善{_rp_imp_str}%。历史同分位回撤中位修复时间{_rp_med_str}个月，"
+                        f"12月正收益概率{_rp_w12_str}%。"
+                    ),
+                }
+    except Exception as e:
+        logger.debug(f"[smart_add] recovery_path 构建失败 {fund_code}: {e}")
+        recovery_path = None
+
     return {
         "fund_code": fund_code,
         "fund_name": fund_name,
@@ -1924,6 +2018,7 @@ def _generate_single_plan(
                              else ""),
             "reason": "" if can_add else f"已达配置上限 {max_position_pct:.1f}%（凯利{kelly['limit_pct']:.0f}%/类型{type_strategy['hard_cap_pct']:.0f}%）",
         },
+        "recovery_path": recovery_path,
     }
 
 

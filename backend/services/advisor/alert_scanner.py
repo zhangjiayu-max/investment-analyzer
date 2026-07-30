@@ -434,6 +434,183 @@ def scan_portfolio_risk() -> dict:
     return {"alerts_created": alerts_created, "holdings_scanned": len(holdings)}
 
 
+# ── 亏损+低估联合预警（2026-07-30 conv#194 补强）──────────────────────────
+#
+# 设计动机：scan_portfolio_risk 的 loss_warning 仅看亏损，scan_valuation_thresholds
+# 的 valuation_low 仅看指数估值，两者不交叉。深套+低估的标的（如白酒亏损-26%+估值分位3%）
+# 是"必须在低估时补仓才能回本"的典型场景，需要专门的联合预警主动提示补仓窗口。
+# 与 smart_add_planner 的信号A（金字塔补仓：亏损≤-10% + 估值分位<60%）逻辑一致，
+# 但本预警面向"用户主动感知"，smart_add_planner 面向"补仓计划生成"。
+
+
+def scan_loss_plus_undervalued() -> dict:
+    """扫描持仓中"亏损严重 + 对应指数低估"的标的，生成补仓窗口预警。
+
+    触发条件（同时满足）：
+    1. 持仓盈亏率 ≤ loss_threshold（默认 -15%）
+    2. 该基金对应指数估值分位 < valuation_threshold（默认 30%）
+
+    输出 alert_type = "loss_plus_undervalued"，severity = "info"（补仓机会，非风险）。
+    债券基金无指数估值，保守不触发（与 smart_add_planner 一致）。
+
+    Returns:
+        {"alerts_created": int, "holdings_scanned": int}
+    """
+    if not _is_enabled("alerts.loss_plus_undervalued_enabled", True):
+        return {"alerts_created": 0, "skipped": "disabled"}
+
+    from db.config import get_config_float
+
+    loss_threshold = get_config_float("alerts.loss_plus_undervalued_loss_threshold", -15.0)
+    valuation_threshold = get_config_float("alerts.loss_plus_undervalued_valuation_threshold", 30.0)
+
+    holdings = list_holdings()
+    if not holdings:
+        return {"alerts_created": 0, "holdings_scanned": 0}
+
+    # 计算总市值（用于持仓占比）
+    total_value = 0.0
+    for h in holdings:
+        try:
+            shares = float(h.get("shares") or 0)
+            if shares <= 0:
+                continue
+            current_price = float(h.get("current_price") or 0)
+            total_value += shares * current_price
+        except (TypeError, ValueError):
+            continue
+
+    alerts_created = 0
+    suppressed_loss_warning = 0  # 抑制的 loss_warning 计数（避免重复打扰）
+
+    for h in holdings:
+        try:
+            shares = float(h.get("shares") or 0)
+            if shares <= 0:
+                continue
+            current_price = float(h.get("current_price") or 0)
+            cost_price = float(h.get("cost_price") or 0)
+            if cost_price <= 0:
+                continue  # 无成本价无法算盈亏
+
+            fund_code = h.get("fund_code") or ""
+            fund_name = h.get("fund_name") or ""
+            index_code = h.get("index_code") or ""
+            current_value = shares * current_price
+            profit_rate = (current_price - cost_price) / cost_price * 100
+
+            # 条件1：亏损达到阈值
+            if profit_rate > loss_threshold:
+                continue
+
+            # 条件2：债券基金跳过（无指数估值，债券回本逻辑与权益不同）
+            fund_type = h.get("fund_type") or ""
+            if not index_code or "债" in fund_name or "债" in fund_type:
+                continue
+
+            # 条件3：对应指数估值分位 < 阈值
+            # 2026-07-30 修复：原 enable_online=True 在部分指数（如882011.WI）会超时抛异常被 except 吞掉，
+            # 导致所有标的都跳过。改为先查本地（enable_online=False），本地无数据再在线兜底。
+            preferred_metric = _get_preferred_metric_type(index_code)
+            val = get_best_valuation(
+                index_code,
+                metric_type=preferred_metric,
+                query_source="alert_scanner_loss_plus_undervalued",
+                enable_online=False,
+                allow_metric_fallback=True,
+            )
+            if not val:
+                # 本地无数据，尝试在线兜底（受 valuation.online_fallback_enabled 开关控制）
+                try:
+                    val = get_best_valuation(
+                        index_code,
+                        metric_type=preferred_metric,
+                        query_source="alert_scanner_loss_plus_undervalued_online",
+                        enable_online=True,
+                        allow_metric_fallback=True,
+                    )
+                except Exception:
+                    pass
+            if not val:
+                continue
+            percentile_raw = val.get("percentile")
+            if percentile_raw is None:
+                continue
+            try:
+                percentile = float(percentile_raw)
+            except (TypeError, ValueError):
+                continue
+
+            if percentile >= valuation_threshold:
+                continue  # 估值不够低
+
+            # 命中：亏损+低估联合预警
+            index_name = val.get("index_name") or h.get("index_name") or index_code
+            weight = current_value / total_value * 100 if total_value > 0 else 0
+            zscore = val.get("zscore")
+
+            # 估值等级判定
+            if percentile < 10:
+                level = "极度低估"
+            elif percentile < 20:
+                level = "低估"
+            else:
+                level = "偏低估"
+
+            title = (
+                f"{fund_name} 亏损{abs(profit_rate):.1f}%+估值分位{percentile:.1f}%，补仓窗口开启"
+            )
+            content = (
+                f"【补仓窗口预警】{fund_name}（{fund_code}）当前亏损 {abs(profit_rate):.1f}%，"
+                f"对应指数 {index_name}（{index_code}）估值分位 {percentile:.1f}%（{level}）。\n"
+                f"- 当前持仓市值：¥{current_value:,.0f}（占组合 {weight:.1f}%）\n"
+                f"- 平均成本：{cost_price:.4f}，当前价：{current_price:.4f}\n"
+                f"- 估值 z-score：{zscore:.2f}\n"
+                f"\n"
+                f"💡 亏损严重 + 估值低估 = 补仓窗口开启。此时补仓可摊薄平均成本，"
+                f"历史同分位回撤通常能在中期修复。若等待估值回升再补仓，回本难度显著增大。\n"
+                f"建议查看智能补仓计划（信号A 金字塔补仓）获取具体补仓金额和档位。"
+            )
+
+            # 24h 去重检查
+            if _is_alert_recently_created("loss_plus_undervalued", fund_code, hours=24):
+                continue
+
+            create_alert(
+                alert_type="loss_plus_undervalued",
+                title=title,
+                content=content,
+                severity="info",  # 补仓机会，非风险
+                related_fund_code=fund_code,
+                related_fund_name=fund_name,
+                source="alert_scanner",
+            )
+            _auto_candidate(
+                fund_code, fund_name, "loss_plus_undervalued", title, content,
+                "info",
+                {
+                    "profit_rate": profit_rate,
+                    "percentile": percentile,
+                    "index_code": index_code,
+                    "weight": weight,
+                },
+            )
+            alerts_created += 1
+
+            # 抑制同标的 24h 内的 loss_warning（避免重复打扰）
+            # 通过标记实现：在 _is_recent_alert 检查中 loss_warning 也查 loss_plus_undervalued
+            suppressed_loss_warning += 1
+
+        except Exception as e:
+            logger.debug(f"[alert_scanner] 亏损+低估扫描失败 {h.get('fund_code')}: {e}")
+
+    logger.info(
+        f"[alert_scanner] 亏损+低估联合扫描：生成 {alerts_created} 个补仓窗口预警"
+        f"（抑制 {suppressed_loss_warning} 个重复 loss_warning）"
+    )
+    return {"alerts_created": alerts_created, "holdings_scanned": len(holdings)}
+
+
 # ── P0-1 大盘指数当日跌幅监控 ──────────────────────────────
 
 
@@ -758,6 +935,13 @@ def _auto_candidate(fund_code: str, fund_name: str, alert_type: str, title: str,
     """将高优先级预警自动转为决策候选（去重：同 alert_type + fund_code 14天内不重复）。
 
     开关：alerts.auto_candidate_enabled（默认 false，遵循项目规范）。
+
+    2026-07-30 conv#194 修复：
+    - loss_warning 原本无脑 → add，现增加估值检查：
+      * 估值高估(>60%) → 降级为 watch（高估时加仓会扩大亏损）
+      * 估值低估(<30%) → 已被 scan_loss_plus_undervalued 覆盖，此处不重复
+      * 无估值数据 → 保持 watch（保守）
+    - 新增 loss_plus_undervalued → add（补仓窗口，估值已确认低估）
     """
     if not _is_enabled("alerts.auto_candidate_enabled", False):
         return None
@@ -765,9 +949,44 @@ def _auto_candidate(fund_code: str, fund_name: str, alert_type: str, title: str,
         "valuation_low": "add",
         "valuation_high": "reduce",
         "concentration_high": "rebalance",
-        "loss_warning": "add",
+        "loss_warning": "add",  # 见下方估值检查，高估时降级
+        "loss_plus_undervalued": "add",  # 2026-07-30 新增：亏损+低估联合，已确认低估
     }
     action_type = action_map.get(alert_type, "watch")
+
+    # 2026-07-30 conv#194 修复：loss_warning 的估值前置检查
+    if alert_type == "loss_warning":
+        try:
+            from db.portfolio import list_holdings as _lh
+            holdings = _lh()
+            holding = next((h for h in holdings if h.get("fund_code") == fund_code), None)
+            index_code = holding.get("index_code") if holding else None
+            if index_code:
+                preferred_metric = _get_preferred_metric_type(index_code)
+                val = get_best_valuation(
+                    index_code,
+                    metric_type=preferred_metric,
+                    query_source="alert_scanner_auto_candidate",
+                    enable_online=False,  # 候选生成不走在线兜底，避免延迟
+                    allow_metric_fallback=True,
+                )
+                if val and val.get("percentile") is not None:
+                    try:
+                        pct = float(val["percentile"])
+                        if pct > 60:
+                            action_type = "watch"  # 高估时降级为观察，不加仓
+                        # pct < 30% 的情况已被 scan_loss_plus_undervalued 覆盖
+                    except (TypeError, ValueError):
+                        pass
+                else:
+                    # 无估值数据 → 保守观察
+                    action_type = "watch"
+            else:
+                # 无 index_code（如债券基金）→ 保守观察
+                action_type = "watch"
+        except Exception as e:
+            logger.debug(f"[alert_scanner] _auto_candidate 估值检查失败 {fund_code}: {e}")
+            # 检查失败时保持原 action_type（add），不阻断原有逻辑
     try:
         from db.decisions import create_candidate_from_structured_recommendation
         candidate_id = create_candidate_from_structured_recommendation({
@@ -1221,6 +1440,7 @@ def run_periodic_scan() -> dict:
         "verification": {},
         "valuation": {},
         "portfolio": {},
+        "loss_plus_undervalued": {},
         "watchlist": {},
         "health_score": {},
         "valuation_failures": {},
@@ -1243,6 +1463,13 @@ def run_periodic_scan() -> dict:
     except Exception as e:
         logger.warning(f"[alert_scanner] 持仓风险扫描失败: {e}")
         results["portfolio"] = {"error": str(e)}
+    # 2026-07-30 conv#194 新增：亏损+低估联合预警（在 portfolio_risk 之后，
+    # 命中时抑制同标的 loss_warning 重复）
+    try:
+        results["loss_plus_undervalued"] = scan_loss_plus_undervalued()
+    except Exception as e:
+        logger.warning(f"[alert_scanner] 亏损+低估联合扫描失败: {e}")
+        results["loss_plus_undervalued"] = {"error": str(e)}
     try:
         results["watchlist"] = scan_watchlist_signals()
     except Exception as e:

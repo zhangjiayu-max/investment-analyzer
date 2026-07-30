@@ -716,6 +716,76 @@ onMounted(() => {
                 <span class="muted">（成本 {{ fmtNum(p.pyramid.current_avg_cost, 4) }} → {{ fmtNum(p.pyramid.avg_cost_after_full_add, 4) }}）</span>
               </div>
 
+              <!-- 回本路径预估（2026-07-30 conv#194 新增）-->
+              <details v-if="p.recovery_path" class="recovery-path-box">
+                <summary class="recovery-path-summary">
+                  <Icon name="trending-up" size="14" />
+                  <span>回本路径预估</span>
+                  <span class="recovery-path-tag" :class="p.recovery_path.valuation_context?.level === '低估' || p.recovery_path.valuation_context?.level === '极度低估' ? 'tag-low' : ''">
+                    {{ p.recovery_path.valuation_context?.level || 'N/A' }}
+                  </span>
+                </summary>
+                <div class="recovery-path-content">
+                  <div class="recovery-grid">
+                    <div class="recovery-item">
+                      <span class="recovery-label">当前亏损</span>
+                      <span class="recovery-val font-jet" style="color: #ef4444;">
+                        {{ p.recovery_path.current_state?.profit_rate != null ? fmtSignedPct(p.recovery_path.current_state.profit_rate) : 'N/A' }}
+                      </span>
+                    </div>
+                    <div class="recovery-item">
+                      <span class="recovery-label">估值分位</span>
+                      <span class="recovery-val font-jet">
+                        {{ p.recovery_path.valuation_context?.percentile != null ? p.recovery_path.valuation_context.percentile.toFixed(1) + '%' : 'N/A' }}
+                        <span class="muted">({{ p.recovery_path.valuation_context?.index_name || 'N/A' }})</span>
+                      </span>
+                    </div>
+                    <div class="recovery-item">
+                      <span class="recovery-label">建议补仓</span>
+                      <span class="recovery-val font-jet" style="color: #3b82f6;">
+                        ¥{{ fmtMoney(p.recovery_path.add_scenario?.suggested_amount) }}
+                      </span>
+                    </div>
+                    <div class="recovery-item">
+                      <span class="recovery-label">成本下降</span>
+                      <span class="recovery-val font-jet">
+                        {{ fmtNum(p.recovery_path.current_state?.avg_cost, 4) }} → {{ fmtNum(p.recovery_path.add_scenario?.new_avg_cost, 4) }}
+                      </span>
+                    </div>
+                    <div class="recovery-item">
+                      <span class="recovery-label">盈亏率改善</span>
+                      <span class="recovery-val font-jet" :style="{ color: profitColor(p.recovery_path.add_scenario?.improvement_pct) }">
+                        {{ p.recovery_path.add_scenario?.improvement_pct != null ? fmtSignedPct(p.recovery_path.add_scenario.improvement_pct) : 'N/A' }}
+                      </span>
+                    </div>
+                    <div class="recovery-item">
+                      <span class="recovery-label">历史修复时间</span>
+                      <span class="recovery-val font-jet">
+                        {{ p.recovery_path.recovery_estimate?.median_recovery_months != null ? p.recovery_path.recovery_estimate.median_recovery_months + ' 个月' : 'N/A' }}
+                      </span>
+                    </div>
+                    <div class="recovery-item">
+                      <span class="recovery-label">12月正收益概率</span>
+                      <span class="recovery-val font-jet" :style="{ color: p.recovery_path.recovery_estimate?.win_rate_12m >= 0.6 ? '#10b981' : '#f59e0b' }">
+                        {{ p.recovery_path.recovery_estimate?.win_rate_12m != null ? (p.recovery_path.recovery_estimate.win_rate_12m * 100).toFixed(0) + '%' : 'N/A' }}
+                      </span>
+                    </div>
+                    <div class="recovery-item">
+                      <span class="recovery-label">24月正收益概率</span>
+                      <span class="recovery-val font-jet" :style="{ color: p.recovery_path.recovery_estimate?.win_rate_24m >= 0.7 ? '#10b981' : '#f59e0b' }">
+                        {{ p.recovery_path.recovery_estimate?.win_rate_24m != null ? (p.recovery_path.recovery_estimate.win_rate_24m * 100).toFixed(0) + '%' : 'N/A' }}
+                      </span>
+                    </div>
+                  </div>
+                  <div v-if="p.recovery_path.summary" class="recovery-summary-text">
+                    {{ p.recovery_path.summary }}
+                  </div>
+                  <div class="recovery-hint">
+                    💡 低估补仓是回本关键，高估补仓会扩大亏损
+                  </div>
+                </div>
+              </details>
+
               <!-- 下次触发提示 -->
               <div v-if="p.pyramid.next_trigger" class="next-trigger">
                 <Icon name="info" size="13" />
@@ -1664,6 +1734,80 @@ onMounted(() => {
   gap: 0.35rem;
   font-size: 0.76rem;
   color: var(--color-text-muted);
+}
+
+/* 回本路径预估（2026-07-30 conv#194 新增）*/
+.recovery-path-box {
+  margin-top: 0.5rem;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-bg-input);
+  overflow: hidden;
+}
+.recovery-path-summary {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.5rem 0.7rem;
+  cursor: pointer;
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--color-text-primary);
+  user-select: none;
+}
+.recovery-path-summary:hover { background: var(--color-bg-hover, rgba(0,0,0,0.03)); }
+.recovery-path-tag {
+  margin-left: auto;
+  padding: 0.1rem 0.5rem;
+  border-radius: 10px;
+  font-size: 0.7rem;
+  font-weight: 500;
+  background: var(--color-bg-secondary, #e5e7eb);
+  color: var(--color-text-secondary);
+}
+.recovery-path-tag.tag-low {
+  background: #dcfce7;
+  color: #15803d;
+}
+.recovery-path-content {
+  padding: 0.6rem 0.7rem 0.7rem;
+  border-top: 1px dashed var(--color-border-light);
+}
+.recovery-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 0.5rem 1rem;
+  margin-bottom: 0.5rem;
+}
+.recovery-item {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+.recovery-label {
+  font-size: 0.7rem;
+  color: var(--color-text-muted);
+}
+.recovery-val {
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--color-text-primary);
+}
+.recovery-summary-text {
+  font-size: 0.75rem;
+  color: var(--color-text-secondary);
+  line-height: 1.5;
+  padding: 0.4rem 0.5rem;
+  background: var(--color-bg-secondary, rgba(0,0,0,0.02));
+  border-radius: var(--radius-sm);
+  margin-bottom: 0.4rem;
+}
+.recovery-hint {
+  font-size: 0.72rem;
+  color: #f59e0b;
+  padding: 0.3rem 0.5rem;
+  background: #fef3c7;
+  border-radius: var(--radius-sm);
 }
 
 /* 安全阀 */
