@@ -497,6 +497,28 @@ async def startup():
     else:
         logging.info("前瞻事件雷达已关闭（alerts.event_radar_enabled=false）")
 
+    # Accuracy-Boost（2026-07-30）：事件落地验证独立定时任务
+    # 原问题：verify_materialized_events 与 scan 耦合（只在扫描后跑），
+    #         扫描未触发时验证也不跑，导致 77 个 materialized 事件只有 25 个被验证。
+    # 修复：解耦验证与扫描，独立定时任务每4小时（09:00/13:00/17:00/21:00）执行。
+    # 开关：alerts.event_radar_verify_enabled（默认 true，非LLM相关）
+    if get_config("alerts.event_radar_verify_enabled", "true") == "true":
+        asyncio.create_task(_auto_event_verification())
+        logging.info("事件落地验证独立任务已启动（alerts.event_radar_verify_enabled=true，每4小时执行）")
+    else:
+        logging.info("事件落地验证独立任务已关闭（alerts.event_radar_verify_enabled=false）")
+
+    # Accuracy-Boost：启动时补全历史未验证事件（一次性）
+    # 开关：alerts.event_backfill_verify_enabled（默认 true）
+    try:
+        if get_config("alerts.event_backfill_verify_enabled", "true") == "true":
+            from services.market.event_radar import backfill_event_verification
+            backfill_stats = backfill_event_verification(max_events=200, force=False)
+            if backfill_stats.get("verified", 0) > 0:
+                logging.info(f"[启动 backfill] 事件落地验证补全: {backfill_stats}")
+    except Exception as e:
+        logging.warning(f"[启动 backfill] 事件验证补全失败（不影响启动）: {e}")
+
     # P0-C 修复（2026-07-20）：机会雷达回测机制修复
     # 1. 启动时补建历史机会卡的 backtest 记录（alerts.opportunity_backfill_enabled 默认 true）
     # 2. 每日 09:30 自动回测已到期记录（alerts.opportunity_backtest_enabled 默认 true）
@@ -1099,22 +1121,75 @@ async def _auto_event_radar_scan():
                     f"new={result.get('new', 0)}, "
                     f"alerts={result.get('alerts_created', 0)}"
                 )
-
-                # 扫描完成后顺便执行落地验证（检查已到期的事件）
-                if get_config("alerts.event_radar_verify_enabled", "true") == "true":
-                    from services.event_radar import verify_materialized_events
-                    vresult = verify_materialized_events()
-                    if vresult.get("verified", 0) > 0:
-                        logging.info(
-                            f"[event-radar] 落地验证: "
-                            f"verified={vresult.get('verified', 0)}, "
-                            f"correct={vresult.get('correct', 0)}, "
-                            f"wrong={vresult.get('wrong', 0)}"
-                        )
+                # Accuracy-Boost（2026-07-30）：验证已解耦到独立定时任务 _auto_event_verification
+                # 不再在扫描后耦合执行 verify_materialized_events，避免扫描未触发时验证也不跑
             except Exception as e:
                 logging.warning(f"[event-radar] 扫描异常 ({scan_hour:02d}:00): {e}")
     except Exception as e:
         logging.warning(f"前瞻事件雷达任务异常: {e}")
+
+
+async def _auto_event_verification():
+    """Accuracy-Boost（2026-07-30）：事件落地验证独立定时任务 — 每4小时执行一次。
+
+    原问题：verify_materialized_events 与 scan_forward_events 耦合，
+            扫描未触发时验证也不跑，导致 77 个 materialized 事件只有 25 个被验证。
+    修复：独立定时任务，每4小时（09:00/13:00/17:00/21:00）执行验证。
+          优先调用 backfill_event_verification（含板块推断兜底），失败时降级到 verify_materialized_events。
+
+    开关：alerts.event_radar_verify_enabled（默认 true，非LLM相关）
+    调度：09:00 / 13:00 / 17:00 / 21:00（4 个时间点，覆盖盘中和盘后）
+    """
+    from datetime import datetime, timedelta
+    # 4 个验证时间点（小时, 分钟）
+    _VERIFY_TIMES = [(9, 0), (13, 0), (17, 0), (21, 0)]
+    try:
+        await asyncio.sleep(180)  # 等启动完成（避免与 backfill 抢资源）
+
+        while True:
+            # 计算距下次验证时间点的等待秒数
+            now = datetime.now()
+            next_target = None
+            for (h, m) in _VERIFY_TIMES:
+                target = now.replace(hour=h, minute=m, second=0, microsecond=0)
+                if target > now:
+                    next_target = target
+                    break
+            if next_target is None:
+                # 今天所有时间点已过，等到明天第一个
+                first_h, first_m = _VERIFY_TIMES[0]
+                next_target = (now + timedelta(days=1)).replace(
+                    hour=first_h, minute=first_m, second=0, microsecond=0)
+            wait_seconds = (next_target - now).total_seconds()
+            await asyncio.sleep(wait_seconds)
+
+            if get_config("alerts.event_radar_verify_enabled", "true") != "true":
+                continue
+
+            verify_hour = next_target.hour
+            try:
+                # 优先使用 backfill_event_verification（含板块推断兜底，验证率更高）
+                from services.market.event_radar import backfill_event_verification
+                result = backfill_event_verification(max_events=100, force=False)
+                if result.get("verified", 0) > 0:
+                    logging.info(
+                        f"[event-verify] 验证完成 ({verify_hour:02d}:00): "
+                        f"verified={result.get('verified', 0)}, "
+                        f"correct={result.get('correct', 0)}, "
+                        f"wrong={result.get('wrong', 0)}, "
+                        f"flat={result.get('flat', 0)}, "
+                        f"skipped={result.get('skipped', 0)}"
+                    )
+                else:
+                    logging.debug(
+                        f"[event-verify] 验证完成 ({verify_hour:02d}:00): "
+                        f"无新验证（processed={result.get('processed', 0)}, "
+                        f"skipped={result.get('skipped', 0)}）"
+                    )
+            except Exception as e:
+                logging.warning(f"[event-verify] 验证异常 ({verify_hour:02d}:00): {e}")
+    except Exception as e:
+        logging.warning(f"事件落地验证独立任务异常: {e}")
 
 
 async def _auto_opportunity_backtest():

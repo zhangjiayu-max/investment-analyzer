@@ -98,6 +98,30 @@ async def manual_verify():
         raise HTTPException(status_code=500, detail=f"验证失败: {e}")
 
 
+@router.post("/api/alerts/event-radar/backfill-verify")
+async def backfill_verification(
+    max_events: int = Body(200, embed=True, ge=1, le=1000),
+    force: bool = Body(False, embed=True, description="True 时忽略 T+3 窗口检查，对所有未验证事件尝试验证"),
+):
+    """Accuracy-Boost（2026-07-30）：批量补全历史未验证事件。
+
+    与 /verify 的区别：
+    1. 独立运行，不依赖 scan_forward_events
+    2. 使用 _infer_sectors_from_event 兜底空 affected_sectors
+    3. 返回详细 skip 原因统计
+    4. force=True 可突破 T+3 窗口限制（用于历史数据补全）
+
+    场景：77 个 materialized 事件只有 25 个被验证，本接口补全剩余 52 个。
+    """
+    try:
+        from services.market.event_radar import backfill_event_verification
+        result = backfill_event_verification(max_events=max_events, force=force)
+        return ApiResponse.success(data=result)
+    except Exception as e:
+        logger.error(f"backfill 验证失败: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"backfill 验证失败: {e}")
+
+
 @router.get("/api/alerts/event-radar/accuracy")
 async def accuracy_stats():
     """获取事件验证准确率统计（总体 + 分板块）。"""

@@ -1466,6 +1466,57 @@ def _fetch_index_close_prices(index_code: str, start_date: str, end_date: str) -
     return prices
 
 
+def _infer_sectors_from_event(event: dict) -> list[str]:
+    """Accuracy-Boost（2026-07-30）：从 affected_themes/title 关键词推断板块。
+
+    场景：部分历史事件 affected_sectors 为空，导致 _verify_single_event 直接返回 None，
+    验证率长期 <35%。本函数从 affected_themes 和 title 中提取关键词，映射到标准板块。
+
+    Args:
+        event: 事件 dict（含 affected_themes, title, summary）
+    Returns:
+        推断出的板块列表（可能为空）
+    """
+    # 从 affected_themes 和 title/summary 汇总文本
+    themes = []
+    try:
+        themes = json.loads(event.get("affected_themes") or "[]")
+    except Exception:
+        pass
+    text = " ".join([
+        " ".join(themes),
+        event.get("title", "") or "",
+        event.get("summary", "") or "",
+    ])
+
+    # 关键词 → 标准板块映射（与 SECTOR_TO_INDEX 的 key 对齐）
+    _KEYWORD_TO_SECTOR = {
+        "半导体": ["半导体", "芯片", "集成电路", "晶圆", "封测", "存储"],
+        "人工智能": ["人工智能", "AI", "算力", "大模型", "智能"],
+        "新能源": ["新能源", "光伏", "锂电", "电池", "储能", "碳中和"],
+        "消费": ["消费", "白酒", "食品", "零售", "畜牧"],
+        "医药": ["医药", "医疗", "生物", "健康", "创新药"],
+        "金融": ["银行", "证券", "保险", "金融", "券商"],
+        "地产": ["地产", "房地产", "REIT"],
+        "军工": ["军工", "国防", "航天", "航空"],
+        "传媒": ["传媒", "媒体", "影视", "游戏"],
+        "汽车": ["汽车", "新能源车", "智能驾驶"],
+        "基建": ["基建", "建筑", "建材"],
+        "科技": ["科技", "互联网", "软件", "计算机"],
+        "农业": ["农业", "养殖", "种植"],
+        "有色": ["有色", "煤炭", "钢铁", "黄金", "金属"],
+        "化工": ["化工", "化学", "材料"],
+        "机器人": ["机器人", "人形机器人", "自动化"],
+    }
+
+    inferred = []
+    for sector, keywords in _KEYWORD_TO_SECTOR.items():
+        if any(kw in text for kw in keywords):
+            if sector not in inferred:
+                inferred.append(sector)
+    return inferred
+
+
 def _verify_single_event(event: dict, window_days: int = 3) -> dict | None:
     """验证单个已落地事件的方向预测是否正确。
 
@@ -1475,12 +1526,17 @@ def _verify_single_event(event: dict, window_days: int = 3) -> dict | None:
     3. 计算各板块涨跌幅
     4. 多板块加权平均 + 多数投票判定最终方向
 
+    Accuracy-Boost（2026-07-30）：affected_sectors 为空时调 _infer_sectors_from_event 兜底
+
     Returns:
         验证结果 dict 或 None（无法验证时）
     """
     sectors = json.loads(event.get("affected_sectors") or "[]")
+    # Accuracy-Boost 修复3：affected_sectors 为空时从 themes/title 推断兜底
     if not sectors:
-        return None
+        sectors = _infer_sectors_from_event(event)
+        if not sectors:
+            return None
 
     mat_date = event.get("materialized_date") or event.get("expected_date")
     if not mat_date:
@@ -1671,12 +1727,22 @@ def verify_materialized_events(trace_id: str = "") -> dict:
 def get_sector_accuracy_stats() -> dict:
     """统计各板块的验证准确率（用于置信度校准和前端展示）。
 
+    Accuracy-Boost（2026-07-30）：新增 verification_progress 段，暴露
+    total_materialized / total_verified / total_pending / verification_rate，
+    让前端能展示 "25/77 已验证" 而非只看到 25。
+
     Returns:
         {
             "overall": {"total": int, "correct": int, "wrong": int, "flat": int, "accuracy": float},
             "by_sector": {
                 "半导体": {"total": int, "correct": int, "wrong": int, "accuracy": float},
                 ...
+            },
+            "verification_progress": {
+                "total_materialized": int,  # 已落地事件数（status=materialized）
+                "total_verified": int,     # 已验证数（verification_result IS NOT NULL）
+                "total_pending": int,      # 待验证数（materialized 且未验证）
+                "verification_rate": float # 验证率 = verified / materialized
             }
         }
     """
@@ -1684,8 +1750,13 @@ def get_sector_accuracy_stats() -> dict:
 
     verified = list_verified_events(limit=200)
     if not verified:
-        return {"overall": {"total": 0, "correct": 0, "wrong": 0, "flat": 0, "accuracy": 0.0},
-                "by_sector": {}}
+        # Accuracy-Boost：即使无已验证事件，也返回 verification_progress
+        progress = _query_verification_progress()
+        return {
+            "overall": {"total": 0, "correct": 0, "wrong": 0, "flat": 0, "accuracy": 0.0},
+            "by_sector": {},
+            "verification_progress": progress,
+        }
 
     overall = {"total": 0, "correct": 0, "wrong": 0, "flat": 0}
     by_sector: dict[str, dict] = {}
@@ -1716,7 +1787,51 @@ def get_sector_accuracy_stats() -> dict:
     for s, d in by_sector.items():
         d["accuracy"] = _calc_acc(d)
 
-    return {"overall": overall, "by_sector": by_sector}
+    # Accuracy-Boost：附加验证进度，让前端展示 "25/77 已验证"
+    progress = _query_verification_progress()
+    return {"overall": overall, "by_sector": by_sector, "verification_progress": progress}
+
+
+def _query_verification_progress() -> dict:
+    """Accuracy-Boost（2026-07-30）：查询事件验证进度统计。
+
+    Returns:
+        {
+            "total_materialized": int,  # status=materialized 的事件数
+            "total_verified": int,     # verification_result IS NOT NULL 的事件数
+            "total_pending": int,      # materialized 且未验证
+            "verification_rate": float # verified / materialized * 100
+        }
+    """
+    from db._conn import _get_conn
+    try:
+        conn = _get_conn()
+        try:
+            row = conn.execute(
+                "SELECT "
+                "  SUM(CASE WHEN status='materialized' THEN 1 ELSE 0 END) AS total_materialized, "
+                "  SUM(CASE WHEN verification_result IS NOT NULL THEN 1 ELSE 0 END) AS total_verified, "
+                "  SUM(CASE WHEN status='materialized' AND verification_result IS NULL THEN 1 ELSE 0 END) AS total_pending "
+                "FROM market_events"
+            ).fetchone()
+            total_mat = int(row["total_materialized"] or 0)
+            total_ver = int(row["total_verified"] or 0)
+            total_pen = int(row["total_pending"] or 0)
+            rate = round(total_ver / total_mat * 100, 1) if total_mat > 0 else 0.0
+            return {
+                "total_materialized": total_mat,
+                "total_verified": total_ver,
+                "total_pending": total_pen,
+                "verification_rate": rate,
+            }
+        finally:
+            conn.close()
+    except Exception as e:
+        logger.warning(f"[event_radar] 查询验证进度失败: {e}")
+        return {
+            "total_materialized": 0, "total_verified": 0,
+            "total_pending": 0, "verification_rate": 0.0,
+        }
 
 
 def _calibrate_confidence(original_confidence: float, sectors: list) -> float:
@@ -2516,4 +2631,160 @@ def backfill_all_once(max_events: int = 100) -> dict:
         logger.warning(f"[event_radar] backfill_all_once confidence 失败: {e}")
     logger.info(f"[event_radar] backfill_all_once 完成: {results}")
     return results
+
+
+# ════════════════════════════════════════════════════════════════
+# Accuracy-Boost（2026-07-30）：事件雷达落地验证补全
+# 原问题：77 个 materialized 事件只有 25 个被验证，52 个未验证。
+#   根因：verify_materialized_events 与 scan 耦合（只在扫描后跑），
+#         且 _verify_single_event 遇空 affected_sectors 直接返回 None。
+# 修复：新增独立 backfill 函数，对历史未验证事件批量补验证，
+#       并用 _infer_sectors_from_event 兜底空板块。
+# ════════════════════════════════════════════════════════════════
+
+
+def backfill_event_verification(max_events: int = 200, force: bool = False) -> dict:
+    """Accuracy-Boost（2026-07-30）：批量补全历史未验证事件。
+
+    与 verify_materialized_events 的区别：
+    1. 独立运行，不依赖 scan_forward_events 触发
+    2. 使用 _infer_sectors_from_event 兜底空 affected_sectors
+    3. 返回详细 skip 原因统计，便于诊断为何验证率低
+    4. force=True 时忽略验证窗口检查（用于历史数据补全）
+
+    Args:
+        max_events: 最多处理多少条（按 materialized_date ASC）
+        force: True 时忽略 T+3 窗口检查，对所有未验证事件尝试验证
+    Returns:
+        {
+            "processed": int,      # 实际处理的待验证事件数
+            "verified": int,       # 成功验证数
+            "correct": int, "wrong": int, "flat": int,
+            "skipped": int,        # 跳过数
+            "skip_reasons": {      # 跳过原因统计
+                "no_sectors": int,      # 无板块且推断失败
+                "window_not_due": int,  # 验证窗口未到（force=False 时）
+                "no_index_data": int,   # 指数价格获取失败
+                "other": int,
+            }
+        }
+    """
+    from db.market_events import (
+        list_pending_verification_events, update_event_verification,
+    )
+    from db.portfolio import create_alert
+
+    try:
+        window = get_config_int("alerts.event_radar_verify_window_days", 3)
+    except Exception:
+        window = 3
+
+    # force 模式下用 window=0（所有 materialized 事件都尝试验证）
+    effective_window = 0 if force else window
+    pending = list_pending_verification_events(effective_window)
+    if not pending:
+        logger.info("[event_radar] backfill_event_verification: 无待验证事件")
+        return {
+            "processed": 0, "verified": 0, "correct": 0, "wrong": 0, "flat": 0,
+            "skipped": 0, "skip_reasons": {
+                "no_sectors": 0, "window_not_due": 0,
+                "no_index_data": 0, "other": 0,
+            },
+        }
+
+    # 限制处理数量
+    pending = pending[:max_events]
+    trace_id = datetime.now().strftime("%Y%m%d%H%M%S")
+    logger.info(
+        f"[event_radar:{trace_id}] backfill_event_verification: "
+        f"待验证 {len(pending)} 条 (force={force}, window={effective_window})"
+    )
+
+    counts = {
+        "processed": len(pending), "verified": 0,
+        "correct": 0, "wrong": 0, "flat": 0, "skipped": 0,
+        "skip_reasons": {
+            "no_sectors": 0, "window_not_due": 0,
+            "no_index_data": 0, "other": 0,
+        },
+    }
+
+    for ev in pending:
+        try:
+            # 二次检查窗口（force=False 时 list_pending_verification_events 已过滤，
+            # 但为了保险这里再检查一次）
+            if not force:
+                mat_date = ev.get("materialized_date") or ev.get("expected_date")
+                if not mat_date:
+                    counts["skipped"] += 1
+                    counts["skip_reasons"]["other"] += 1
+                    continue
+                try:
+                    mat_dt = datetime.strptime(str(mat_date)[:10], "%Y-%m-%d")
+                    if (datetime.now() - mat_dt).days < window:
+                        counts["skipped"] += 1
+                        counts["skip_reasons"]["window_not_due"] += 1
+                        continue
+                except ValueError:
+                    counts["skipped"] += 1
+                    counts["skip_reasons"]["other"] += 1
+                    continue
+
+            # 检查板块（含推断兜底）
+            sectors = json.loads(ev.get("affected_sectors") or "[]")
+            if not sectors:
+                sectors = _infer_sectors_from_event(ev)
+                if not sectors:
+                    counts["skipped"] += 1
+                    counts["skip_reasons"]["no_sectors"] += 1
+                    continue
+                # 推断成功：写回 DB 以便后续扫描复用
+                try:
+                    from db.market_events import update_market_event_fields
+                    update_market_event_fields(ev["event_id"], {"affected_sectors": sectors})
+                except Exception:
+                    pass
+
+            result = _verify_single_event(ev, window)
+            if not result:
+                counts["skipped"] += 1
+                counts["skip_reasons"]["no_index_data"] += 1
+                continue
+
+            update_event_verification(ev["event_id"], result)
+            counts["verified"] += 1
+            counts[result["status"]] += 1
+
+            # 推送验证结果 alert（仅 correct/wrong 推送，flat 太多避免噪音）
+            if result["status"] in ("correct", "wrong"):
+                status_label = {
+                    "correct": "验证正确 ✅", "wrong": "验证偏差 ⚠️",
+                }
+                title = f"[事件验证补全] {ev['title'][:30]}"
+                content = (
+                    f"{status_label.get(result['status'], '')} | "
+                    f"{result['index_name']} 涨跌幅 {result['change_pct']:+.2f}% | "
+                    f"预测方向：{result['direction_predicted']}"
+                )
+                severity = "info" if result["status"] == "correct" else "warning"
+                try:
+                    create_alert(
+                        alert_type="event_radar_verified",
+                        title=title,
+                        content=content,
+                        severity=severity,
+                        source="event_radar_backfill",
+                    )
+                except Exception:
+                    pass
+        except Exception as e:
+            logger.warning(
+                f"[event_radar:{trace_id}] backfill 验证失败 "
+                f"ev={ev.get('event_id')}: {e}"
+            )
+            counts["skipped"] += 1
+            counts["skip_reasons"]["other"] += 1
+
+    logger.info(f"[event_radar:{trace_id}] backfill_event_verification 完成: {counts}")
+    return counts
 

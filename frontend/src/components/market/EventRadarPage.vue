@@ -1537,7 +1537,7 @@ watch(scrollToFundCode, async (code) => {
       <button class="main-tab" :class="{ active: activeTab === 'verification' }" @click="activeTab = 'verification'">
         <Icon name="check-circle" size="14" />
         <span>落地验证</span>
-        <span v-if="accuracy?.overall?.total" class="tab-badge tab-badge-green">{{ accuracy.overall.total }}</span>
+        <span v-if="accuracy?.verification_progress?.total_materialized" class="tab-badge tab-badge-green">{{ accuracy.verification_progress.total_verified }}/{{ accuracy.verification_progress.total_materialized }}</span>
       </button>
       <button class="main-tab" :class="{ active: activeTab === 'leading' }" @click="activeTab = 'leading'; loadLeadingSignals()">
         <Icon name="trending-up" size="14" />
@@ -3012,6 +3012,50 @@ watch(scrollToFundCode, async (code) => {
 
     <!-- ════ Tab 3：落地验证 ════ -->
     <template v-if="activeTab === 'verification'">
+      <!-- 验证进度面板（Accuracy-Boost 2026-07-30：显示 25/77 验证进度）-->
+      <div v-if="accuracy?.verification_progress" class="verify-progress-panel">
+        <div class="verify-progress-header">
+          <Icon name="target" size="14" class="verify-progress-icon" />
+          <span class="verify-progress-title">落地验证进度</span>
+          <span class="verify-progress-rate">{{ accuracy.verification_progress.verification_rate }}%</span>
+        </div>
+        <div class="verify-progress-bar">
+          <div
+            class="verify-progress-fill"
+            :style="{ width: `${accuracy.verification_progress.verification_rate}%` }"
+            :class="{
+              'fill-low': accuracy.verification_progress.verification_rate < 50,
+              'fill-mid': accuracy.verification_progress.verification_rate >= 50 && accuracy.verification_progress.verification_rate < 90,
+              'fill-high': accuracy.verification_progress.verification_rate >= 90,
+            }"
+          ></div>
+        </div>
+        <div class="verify-progress-stats">
+          <span class="vps-item vps-verified">
+            <Icon name="check-circle" size="11" />
+            已验证 {{ accuracy.verification_progress.total_verified }}
+          </span>
+          <span class="vps-item vps-pending">
+            <Icon name="clock" size="11" />
+            待验证 {{ accuracy.verification_progress.total_pending }}
+          </span>
+          <span class="vps-item vps-total">
+            <Icon name="layers" size="11" />
+            已落地 {{ accuracy.verification_progress.total_materialized }}
+          </span>
+        </div>
+        <div class="verify-progress-actions">
+          <button class="vp-action-btn" @click="backfillVerify(false)" :disabled="verifying">
+            <Icon name="refresh-cw" size="11" :class="{ spinning: verifying }" />
+            {{ verifying ? '补全中...' : '补全待验证' }}
+          </button>
+          <button class="vp-action-btn vp-force" @click="backfillVerify(true)" :disabled="verifying">
+            <Icon name="zap" size="11" />
+            强制全量补全
+          </button>
+        </div>
+      </div>
+
       <!-- 准确率统计面板 -->
       <div v-if="accuracy && accuracy.overall?.total > 0" class="accuracy-panel">
         <div class="accuracy-header">

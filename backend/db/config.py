@@ -101,6 +101,9 @@ DEFAULT_CONFIGS = [
     ('alerts.event_radar_max_candidate_funds', '5', '建仓机会卡片最多展示基金数', 'alerts'),
     ('alerts.event_radar_verify_window_days', '3', '事件落地后验证窗口天数（T+N）', 'alerts'),
     ('alerts.event_radar_verify_enabled', 'true', '事件落地验证开关（非LLM相关，默认开启）', 'alerts'),
+    # Accuracy-Boost（2026-07-30）：事件雷达落地验证补全 — 解耦验证与扫描
+    ('alerts.event_verify_interval_hours', '4', '事件验证独立定时任务间隔（小时，默认4小时跑一次）', 'alerts'),
+    ('alerts.event_backfill_verify_enabled', 'true', '启动时补全历史未验证事件开关（非LLM，默认开启）', 'alerts'),
     ('alerts.watchlist_signal_enabled', 'true', '关注列表上车信号扫描开关（非LLM相关，默认开启）', 'alerts'),
     ('alerts.watchlist_drop_threshold', '3', '关注基金单日跌幅%阈值触发上车提醒', 'alerts'),
     ('alerts.health_score_scan_enabled', 'true', '健康分预警扫描开关（非LLM相关，默认开启）', 'alerts'),
@@ -290,11 +293,27 @@ DEFAULT_CONFIGS = [
     ('opportunity.sector_capital_flow_enabled', 'true', '板块级资金流向开关：按主题对应板块查询资金净流入（默认开启，关闭则用全市场北向资金）', 'opportunity'),
 
     # LI-5/LI-6（2026-07-22）：领先指标评分 + 回测增强
-    ('opportunity.leading_indicator_score_enabled', 'false', '机会雷达领先指标评分维度开关：近7天领先指标命中该主题时加减分（新增维度，默认关闭需观察）', 'opportunity'),
+    ('opportunity.leading_indicator_score_enabled', 'true', '机会雷达领先指标评分维度开关：近7天领先指标命中该主题时加减分（Accuracy-Boost 2026-07-30 从false提升为true）', 'opportunity'),
     ('opportunity.leading_indicator_lookback_days', '7', '机会雷达领先指标评分回看天数', 'opportunity'),
     ('opportunity.signal_source_tracking_enabled', 'true', '回测按信号来源标记开关：news/leading_strong/leading_medium（非LLM，默认开启）', 'opportunity'),
     ('opportunity.hit_rate_feedback_enabled', 'true', '回测命中率反哺评分权重开关：连续3次miss降权20%（非LLM，默认开启）', 'opportunity'),
     ('opportunity.holding_loss_aware_enabled', 'true', '机会雷达感知持仓盈亏开关：深套标的对应指数低估时生成补仓回本机会卡（非LLM，默认开启）', 'opportunity'),
+
+    # ── Accuracy-Boost（2026-07-30）：机会雷达准确率全面提升 ──
+    # 修复1：估值时效性 — 估值数据过期则不加分且禁 can_buy
+    ('opportunity.valuation_stale_days_threshold', '3', '估值过期阈值（天）：snapshot_date 距今超过此值则标记 valuation_stale', 'opportunity'),
+    ('opportunity.valuation_stale_block_can_buy', 'true', '过期估值禁 can_buy：估值过期时与无估值同处理（降 watch，cap 60）', 'opportunity'),
+    # 修复2：主题差异化阈值 — 成长型主题需更严格标准
+    ('opportunity.theme_aware_threshold_enabled', 'true', '主题差异化阈值开关：value/growth/cycle 三类主题分别用不同 can_buy 和估值否决阈值', 'opportunity'),
+    # 修复4：领先指标维度激活（从 false 提升为 true）
+    # 修复5：信号冷却期 — 防止同主题 15 天内反复发信号
+    ('opportunity.signal_cooldown_days', '15', '信号冷却期（天）：同主题在此窗口内已有 can_buy 则当前评分 cap 50', 'opportunity'),
+    ('opportunity.signal_cooldown_enabled', 'true', '信号冷却开关（非LLM，默认开启）', 'opportunity'),
+    # Phase 4：数据源扩展（研报/融资融券/ETF申赎，默认开启；龙虎榜数据量大默认关）
+    ('opportunity.research_report_enabled', 'true', '研报情绪维度开关：近30天评级上调加分/下调扣分（非LLM，默认开启）', 'opportunity'),
+    ('opportunity.margin_data_enabled', 'true', '融资融券维度开关：融资余额上升加分/下降扣分（非LLM，默认开启）', 'opportunity'),
+    ('opportunity.etf_flow_enabled', 'true', 'ETF申赎维度开关：净申购加分/净赎回扣分（非LLM，默认开启）', 'opportunity'),
+    ('opportunity.lhb_data_enabled', 'false', '龙虎榜维度开关：游资/机构净买入加分（数据量大，默认关闭）', 'opportunity'),
 
     # 领先指标接入层配置（2026-07-22 LI-1~LI-7）
     ('alerts.leading_indicator_enabled', 'true', '领先指标接入层总开关：接入政策草案/资本开支/产业资本等领先信号（非LLM，默认开启）', 'alerts'),

@@ -1807,6 +1807,16 @@ export function triggerEventRadarVerify() {
   return api.post('/alerts/event-radar/verify')
 }
 
+/** Accuracy-Boost（2026-07-30）：批量补全历史未验证事件
+ *  与 /verify 的区别：独立运行、板块推断兜底、force=True 可突破 T+3 窗口
+ */
+export function backfillEventVerification(maxEvents = 200, force = false) {
+  return api.post('/alerts/event-radar/backfill-verify',
+    { max_events: maxEvents, force },
+    { timeout: 180000 }
+  )
+}
+
 /** 查询事件列表 */
 export function listMarketEvents(params = {}) {
   return api.get('/alerts/event-radar/events', { params })

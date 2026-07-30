@@ -110,6 +110,21 @@ def init_opportunity_tables(conn):
     _ensure_column(conn, "theme_opportunity_backtests", "capital_signal", "TEXT")
     _ensure_column(conn, "theme_opportunity_backtests", "volume_signal", "TEXT")
 
+    # Accuracy-Boost（2026-07-30）：降权/恢复日志表 — 记录权重变更历史
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS opportunity_weight_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            scope TEXT NOT NULL,
+            scope_value TEXT NOT NULL,
+            old_weight REAL NOT NULL,
+            new_weight REAL NOT NULL,
+            reason TEXT DEFAULT '',
+            consecutive_count INTEGER DEFAULT 0,
+            created_at TEXT DEFAULT (datetime('now','localtime'))
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_weight_log_scope ON opportunity_weight_log(scope, scope_value)")
+
 
 def _ensure_column(conn, table: str, column: str, col_type: str):
     """安全添加列（如果不存在）。"""
@@ -568,7 +583,7 @@ def create_opportunity_backtest(data: dict) -> int:
 
     Args:
         data: {opportunity_id, theme, entry_date, review_date, entry_price,
-               signal_source?, capital_signal?, volume_signal?}
+               signal_source?, capital_signal?, volume_signal?, entry_percentile?}
 
     Returns:
         backtest_id
@@ -577,11 +592,12 @@ def create_opportunity_backtest(data: dict) -> int:
     try:
         # LI-6（2026-07-22）：新增 signal_source 字段（默认 'news'）
         # Accuracy-Fix（2026-07-27）：新增 capital_signal/volume_signal 字段
+        # Accuracy-Boost（2026-07-30）：新增 entry_percentile 字段（用于 miss_reason 拼接和反哺分析）
         cur = conn.execute("""
             INSERT INTO theme_opportunity_backtests (
                 opportunity_id, theme, entry_date, review_date, entry_price,
-                signal_source, capital_signal, volume_signal
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                signal_source, capital_signal, volume_signal, entry_percentile
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             data.get("opportunity_id"),
             data.get("theme", ""),
@@ -591,6 +607,7 @@ def create_opportunity_backtest(data: dict) -> int:
             data.get("signal_source", "news"),
             data.get("capital_signal"),
             data.get("volume_signal"),
+            data.get("entry_percentile"),
         ))
         conn.commit()
         return cur.lastrowid
@@ -808,6 +825,60 @@ def get_consecutive_misses_by_theme() -> dict:
         if current_theme and miss_streak >= 3:
             result[current_theme] = miss_streak
         return result
+    finally:
+        conn.close()
+
+
+def get_consecutive_hits_by_theme() -> dict:
+    """Accuracy-Boost（2026-07-30）：查询各主题的连续 hit 次数（用于权重恢复）。
+
+    连续 2 次 hit → 权重恢复到 1.0（从降权状态恢复）。
+
+    Returns:
+        {theme: consecutive_hit_count}（仅返回 ≥2 的主题）
+    """
+    conn = _get_conn()
+    try:
+        rows = conn.execute("""
+            SELECT theme, hit
+            FROM theme_opportunity_backtests
+            WHERE hit IS NOT NULL
+            ORDER BY theme, reviewed_at DESC
+        """).fetchall()
+
+        result = {}
+        current_theme = None
+        hit_streak = 0
+        for r in rows:
+            theme = r["theme"] or ""
+            if theme != current_theme:
+                if current_theme and hit_streak >= 2:
+                    result[current_theme] = hit_streak
+                current_theme = theme
+                hit_streak = 0
+            if r["hit"] == 1:
+                hit_streak += 1
+            else:
+                hit_streak = 0
+        if current_theme and hit_streak >= 2:
+            result[current_theme] = hit_streak
+        return result
+    finally:
+        conn.close()
+
+
+def log_weight_change(scope: str, scope_value: str, old_weight: float,
+                       new_weight: float, reason: str, consecutive_count: int = 0) -> None:
+    """Accuracy-Boost（2026-07-30）：记录权重变更日志到 opportunity_weight_log 表。"""
+    conn = _get_conn()
+    try:
+        conn.execute("""
+            INSERT INTO opportunity_weight_log (scope, scope_value, old_weight, new_weight, reason, consecutive_count)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (scope, scope_value, old_weight, new_weight, reason, consecutive_count))
+        conn.commit()
+    except Exception:
+        pass
     finally:
         conn.close()
 
