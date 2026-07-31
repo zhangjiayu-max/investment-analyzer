@@ -70,9 +70,42 @@ def init_market_events_tables(conn) -> None:
         conn.execute("ALTER TABLE market_events ADD COLUMN impact_analysis TEXT")     # LLM 影响分析全文（缓存）
     if "impact_analyzed_at" not in cols:
         conn.execute("ALTER TABLE market_events ADD COLUMN impact_analyzed_at TEXT")   # 分析时间戳
+    # 事件影响时间跨度（short_term / medium_term / long_term），受益标的验证窗口用
+    if "impact_horizon" not in cols:
+        conn.execute("ALTER TABLE market_events ADD COLUMN impact_horizon TEXT DEFAULT 'medium_term'")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_market_events_status ON market_events(status)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_market_events_expected ON market_events(expected_date)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_market_events_relevance ON market_events(relevance_to_user)")
+
+    # ── 事件受益标的表：事件 → 受益标的 → 估值 → 个性化推荐 ──
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS event_beneficiaries (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_id TEXT NOT NULL,
+            fund_code TEXT NOT NULL,
+            fund_name TEXT NOT NULL,
+            index_code TEXT,
+            index_name TEXT,
+            vehicle_type TEXT,
+            benefit_level TEXT NOT NULL,        -- strong / medium / weak
+            benefit_logic TEXT NOT NULL,
+            valuation_percentile REAL,
+            valuation_status TEXT,              -- undervalued / fair / overvalued / expensive / unknown
+            is_holding INTEGER DEFAULT 0,
+            is_watching INTEGER DEFAULT 0,
+            recommendation_tier TEXT,           -- strong_buy / watch / add_position / observe_only
+            match_score REAL DEFAULT 0,
+            created_at TEXT DEFAULT (datetime('now', 'localtime')),
+            FOREIGN KEY (event_id) REFERENCES market_events(event_id) ON DELETE CASCADE,
+            UNIQUE (event_id, fund_code)
+        )
+    """)
+    # verification_result：T+N 相对收益验证结果（JSON）
+    ben_cols = [r[1] for r in conn.execute("PRAGMA table_info(event_beneficiaries)").fetchall()]
+    if "verification_result" not in ben_cols:
+        conn.execute("ALTER TABLE event_beneficiaries ADD COLUMN verification_result TEXT")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_event_beneficiaries_event ON event_beneficiaries(event_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_event_beneficiaries_tier ON event_beneficiaries(recommendation_tier)")
 
 
 def _gen_event_id(title: str, expected_date: str) -> str:
@@ -572,5 +605,196 @@ def list_events_by_date_range(
         params.append(limit)
         rows = conn.execute(sql, params).fetchall()
         return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+# ── 事件受益标的 CRUD（event_beneficiaries 表）────────────────────────
+
+
+def save_event_beneficiaries(event_id: str, beneficiaries: list[dict]) -> int:
+    """批量写入受益标的（先删除该 event_id 的旧记录再插入），返回写入数量。
+
+    Args:
+        event_id: 事件 ID
+        beneficiaries: discover_beneficiaries 输出的标的列表，每个 dict 需含
+            fund_code / fund_name / benefit_level / benefit_logic 等字段
+    """
+    if not event_id:
+        return 0
+    conn = _get_conn()
+    try:
+        conn.execute("DELETE FROM event_beneficiaries WHERE event_id = ?", (event_id,))
+        inserted = 0
+        for b in beneficiaries or []:
+            fund_code = b.get("fund_code", "")
+            if not fund_code:
+                continue
+            conn.execute("""
+                INSERT INTO event_beneficiaries (
+                    event_id, fund_code, fund_name, index_code, index_name,
+                    vehicle_type, benefit_level, benefit_logic,
+                    valuation_percentile, valuation_status,
+                    is_holding, is_watching, recommendation_tier, match_score
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                event_id, fund_code, b.get("fund_name", ""),
+                b.get("index_code"), b.get("index_name"),
+                b.get("vehicle_type"), b.get("benefit_level", "weak"),
+                b.get("benefit_logic", ""),
+                b.get("valuation_percentile"), b.get("valuation_status", "unknown"),
+                int(b.get("is_holding", 0) or 0), int(b.get("is_watching", 0) or 0),
+                b.get("recommendation_tier"), float(b.get("match_score", 0) or 0),
+            ))
+            inserted += 1
+        conn.commit()
+        logger.info(f"[market_events] 保存受益标的 event_id={event_id} 共 {inserted} 条")
+        return inserted
+    finally:
+        conn.close()
+
+
+def list_event_beneficiaries(event_id: str) -> list[dict]:
+    """查询某事件的受益标的列表（按 match_score 降序、benefit_level 优先级排序）。"""
+    conn = _get_conn()
+    try:
+        rows = conn.execute(
+            "SELECT * FROM event_beneficiaries WHERE event_id = ? "
+            "ORDER BY match_score DESC, CASE benefit_level "
+            "WHEN 'strong' THEN 1 WHEN 'medium' THEN 2 WHEN 'weak' THEN 3 ELSE 4 END",
+            (event_id,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+def get_beneficiary_stats(days: int = 30) -> dict:
+    """统计推荐分布（tier_distribution / valuation_distribution / top_recommended）。
+
+    Args:
+        days: 统计最近 N 天的受益标的
+    """
+    from datetime import datetime, timedelta
+    cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+    conn = _get_conn()
+    try:
+        rows = conn.execute(
+            "SELECT * FROM event_beneficiaries WHERE created_at >= ?",
+            (cutoff,),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    beneficiaries = [dict(r) for r in rows]
+
+    # 推荐分级分布
+    tier_distribution: dict[str, int] = {}
+    valuation_distribution: dict[str, int] = {}
+    for b in beneficiaries:
+        tier = b.get("recommendation_tier") or "unknown"
+        tier_distribution[tier] = tier_distribution.get(tier, 0) + 1
+        vst = b.get("valuation_status") or "unknown"
+        valuation_distribution[vst] = valuation_distribution.get(vst, 0) + 1
+
+    # 推荐度最高的标的（match_score 排序，取前 10）
+    top_sorted = sorted(
+        beneficiaries,
+        key=lambda x: x.get("match_score", 0) or 0,
+        reverse=True,
+    )[:10]
+    top_recommended = [
+        {
+            "fund_code": b.get("fund_code"),
+            "fund_name": b.get("fund_name"),
+            "event_id": b.get("event_id"),
+            "benefit_level": b.get("benefit_level"),
+            "recommendation_tier": b.get("recommendation_tier"),
+            "match_score": b.get("match_score"),
+            "valuation_status": b.get("valuation_status"),
+        }
+        for b in top_sorted
+    ]
+
+    # 按基金代码聚合统计（推荐次数 / 平均估值分位 / 最新分级）
+    fund_agg: dict[str, dict] = {}
+    for b in beneficiaries:
+        code = b.get("fund_code") or ""
+        if not code:
+            continue
+        if code not in fund_agg:
+            fund_agg[code] = {
+                "fund_code": code,
+                "fund_name": b.get("fund_name") or code,
+                "recommend_count": 0,
+                "_valuation_sum": 0.0,
+                "_valuation_n": 0,
+                "_latest_created": "",
+                "last_tier": None,
+            }
+        agg = fund_agg[code]
+        agg["recommend_count"] += 1
+        vp = b.get("valuation_percentile")
+        if vp is not None:
+            try:
+                agg["_valuation_sum"] += float(vp)
+                agg["_valuation_n"] += 1
+            except (TypeError, ValueError):
+                pass
+        created = b.get("created_at") or ""
+        if created > agg["_latest_created"]:
+            agg["_latest_created"] = created
+            agg["last_tier"] = b.get("recommendation_tier")
+    # 汇总输出（推荐次数降序，取前 10）
+    top_funds = []
+    for agg in sorted(fund_agg.values(), key=lambda x: x["recommend_count"], reverse=True)[:10]:
+        avg_val = round(agg["_valuation_sum"] / agg["_valuation_n"], 1) if agg["_valuation_n"] else None
+        top_funds.append({
+            "fund_code": agg["fund_code"],
+            "fund_name": agg["fund_name"],
+            "recommend_count": agg["recommend_count"],
+            "avg_valuation": avg_val,
+            "last_tier": agg["last_tier"],
+        })
+
+    return {
+        "days": days,
+        "total": len(beneficiaries),
+        "tier_distribution": tier_distribution,
+        "valuation_distribution": valuation_distribution,
+        "top_recommended": top_recommended,
+        "top_funds": top_funds,
+    }
+
+
+def update_beneficiary_verification(event_id: str, fund_results: list[dict]) -> bool:
+    """更新单个标的的验证结果（写入 verification_result 字段）。
+
+    Args:
+        event_id: 事件 ID
+        fund_results: [{"fund_code": str, "verification_result": {...}}]
+
+    Returns:
+        True if 至少更新一条，False otherwise
+    """
+    if not event_id or not fund_results:
+        return False
+    conn = _get_conn()
+    try:
+        updated = 0
+        for item in fund_results:
+            fund_code = item.get("fund_code", "")
+            if not fund_code:
+                continue
+            result = item.get("verification_result") or {}
+            conn.execute(
+                "UPDATE event_beneficiaries SET verification_result = ? "
+                "WHERE event_id = ? AND fund_code = ?",
+                (json.dumps(result, ensure_ascii=False), event_id, fund_code),
+            )
+            updated += 1
+        conn.commit()
+        logger.info(f"[market_events] 更新受益标的验证结果 event_id={event_id} 共 {updated} 条")
+        return updated > 0
     finally:
         conn.close()

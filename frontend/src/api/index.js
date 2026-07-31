@@ -1847,6 +1847,22 @@ export function getEventImpactAmount(eventId) {
   return api.get(`/alerts/event-radar/events/${eventId}/impact-amount`)
 }
 
+// ── 事件驱动标的发现（Phase 4） ─────────────────────────
+/** 获取事件的受益标的推荐（发现→估值筛选→用户上下文→落库→返回） */
+export function getEventBeneficiaries(eventId) {
+  return api.get(`/alerts/event-radar/events/${eventId}/beneficiaries`, { timeout: 60000 })
+}
+
+/** 获取推荐统计（按分级/估值分布、热门推荐标的） */
+export function getEventBeneficiaryStats(days = 30) {
+  return api.get('/alerts/event-radar/recommendations/stats', { params: { days } })
+}
+
+/** 获取推荐验证准确率（按 tier / valuation 分组，T+20 超额收益） */
+export function getRecommendationAccuracy() {
+  return api.get('/alerts/event-radar/recommendations/accuracy')
+}
+
 /** LI-8：获取领先指标信号列表（政策草案/资本开支/产业资本/海关/PMI） */
 export function getLeadingIndicatorSignals(lookbackDays = 7) {
   return api.get('/alerts/leading-indicators/signals', { params: { lookback_days: lookbackDays } })

@@ -2889,3 +2889,219 @@ def backfill_event_verification(max_events: int = 200, force: bool = False) -> d
     logger.info(f"[event_radar:{trace_id}] backfill_event_verification 完成: {counts}")
     return counts
 
+
+# ── 受益标的相对收益验证（T+N）──────────────────────────────────────────
+
+
+def verify_beneficiary_returns(event_id: str, horizon_days: int = 20) -> dict:
+    """T+horizon 相对收益验证（新版）。
+
+    对比推荐标的 vs 沪深300 在窗口内的超额收益。
+
+    判定规则：
+    - correct: strong_buy 组平均超额收益 > +2%
+    - wrong: < -2%
+    - neutral: 在 [-2%, +2%] 之间
+
+    总开关：alerts.relative_return_verify_enabled（默认 false）
+    """
+    # 总开关检查
+    try:
+        if not get_config_bool("alerts.relative_return_verify_enabled", False):
+            return {"status": "skipped", "reason": "switch_disabled", "event_id": event_id}
+    except Exception:
+        return {"status": "skipped", "reason": "switch_disabled", "event_id": event_id}
+
+    from db.market_events import (
+        get_market_event, list_event_beneficiaries, update_beneficiary_verification,
+    )
+
+    event = get_market_event(event_id)
+    if not event:
+        return {"status": "skipped", "reason": "event_not_found", "event_id": event_id}
+
+    # 基准日：materialized_date，回退到 expected_date
+    base_date = event.get("materialized_date") or event.get("expected_date")
+    if not base_date:
+        return {"status": "skipped", "reason": "no_base_date", "event_id": event_id}
+
+    beneficiaries = list_event_beneficiaries(event_id)
+    if not beneficiaries:
+        return {"status": "skipped", "reason": "no_beneficiaries", "event_id": event_id}
+
+    try:
+        from services.index.index_history_fetcher import get_index_price_history
+    except Exception as e:
+        logger.warning(f"[event_radar] 导入 get_index_price_history 失败: {e}")
+        return {"status": "pending", "reason": f"index_history_unavailable: {e}", "event_id": event_id}
+
+    # 沪深300 基准
+    HS300_CODE = "000300"
+    base_date_str = str(base_date)[:10]
+    try:
+        base_dt = datetime.strptime(base_date_str, "%Y-%m-%d")
+    except ValueError:
+        return {"status": "skipped", "reason": "invalid_base_date", "event_id": event_id}
+    end_date_str = (base_dt + timedelta(days=horizon_days)).strftime("%Y-%m-%d")
+
+    # 获取沪深300窗口收益
+    hs300_return = None
+    try:
+        hs300_hist = get_index_price_history(HS300_CODE, days=horizon_days + 90)
+        hs300_return = _compute_window_return(hs300_hist, base_date_str, end_date_str)
+    except Exception as e:
+        logger.warning(f"[event_radar] 获取沪深300价格失败: {e}")
+
+    if hs300_return is None:
+        # 基准指数获取失败，降级返回 pending
+        return {
+            "status": "pending",
+            "reason": "hs300_price_unavailable",
+            "event_id": event_id,
+            "base_date": base_date_str,
+            "horizon_days": horizon_days,
+        }
+
+    # 逐标的计算超额收益
+    fund_results: list[dict] = []
+    excess_returns: list[float] = []
+    strong_buy_excess: list[float] = []
+
+    for b in beneficiaries:
+        idx_code = b.get("index_code", "") or ""
+        if not idx_code:
+            continue
+        try:
+            hist = get_index_price_history(idx_code, days=horizon_days + 90)
+        except Exception as e:
+            logger.warning(
+                f"[event_radar] 获取指数价格失败 idx={idx_code} "
+                f"fund={b.get('fund_code')}: {e}"
+            )
+            continue
+
+        abs_return = _compute_window_return(hist, base_date_str, end_date_str)
+        if abs_return is None:
+            continue
+
+        excess_return = abs_return - hs300_return
+        excess_returns.append(excess_return)
+        if b.get("recommendation_tier") == "strong_buy":
+            strong_buy_excess.append(excess_return)
+
+        fund_results.append({
+            "fund_code": b.get("fund_code"),
+            "verification_result": {
+                "status": _classify_excess_return(excess_return, b.get("recommendation_tier")),
+                "abs_return": round(abs_return, 4),
+                "excess_return": round(excess_return, 4),
+                "hs300_return": round(hs300_return, 4),
+                "base_date": base_date_str,
+                "end_date": end_date_str,
+                "horizon_days": horizon_days,
+                "index_code": idx_code,
+                "recommendation_tier": b.get("recommendation_tier"),
+            },
+        })
+
+    if not fund_results:
+        # 所有标的指数价格获取失败，降级返回 pending
+        return {
+            "status": "pending",
+            "reason": "all_index_price_unavailable",
+            "event_id": event_id,
+            "base_date": base_date_str,
+            "horizon_days": horizon_days,
+        }
+
+    # 落库验证结果
+    try:
+        update_beneficiary_verification(event_id, fund_results)
+    except Exception as e:
+        logger.warning(f"[event_radar] 落库受益标的验证结果失败 event_id={event_id}: {e}")
+
+    # strong_buy 组平均超额收益判定
+    avg_strong_buy_excess = (
+        sum(strong_buy_excess) / len(strong_buy_excess)
+        if strong_buy_excess else None
+    )
+    avg_all_excess = (
+        sum(excess_returns) / len(excess_returns) if excess_returns else None
+    )
+
+    if avg_strong_buy_excess is not None:
+        if avg_strong_buy_excess > 2.0:
+            overall_status = "correct"
+        elif avg_strong_buy_excess < -2.0:
+            overall_status = "wrong"
+        else:
+            overall_status = "neutral"
+    else:
+        overall_status = "neutral"
+
+    result = {
+        "status": overall_status,
+        "event_id": event_id,
+        "base_date": base_date_str,
+        "end_date": end_date_str,
+        "horizon_days": horizon_days,
+        "verified_count": len(fund_results),
+        "strong_buy_count": len(strong_buy_excess),
+        "avg_strong_buy_excess": (
+            round(avg_strong_buy_excess, 4) if avg_strong_buy_excess is not None else None
+        ),
+        "avg_all_excess": (
+            round(avg_all_excess, 4) if avg_all_excess is not None else None
+        ),
+        "hs300_return": round(hs300_return, 4),
+        "fund_results": fund_results,
+    }
+    logger.info(
+        f"[event_radar] 受益标的验证完成 event_id={event_id} "
+        f"status={overall_status} verified={len(fund_results)}"
+    )
+    return result
+
+
+def _compute_window_return(
+    history: list[dict], base_date: str, end_date: str
+) -> float | None:
+    """计算指数在 [base_date, end_date] 窗口内的收益率（百分比）。
+
+    history 按 trade_date ASC 排序。取 base_date 之后第一个交易日收盘价为基准，
+    end_date 之前最后一个交易日收盘价为终点。
+    """
+    if not history:
+        return None
+    # 找基准日（>= base_date 的第一个交易日）
+    start_close = None
+    end_close = None
+    for row in history:
+        td = row.get("trade_date", "")
+        if not td:
+            continue
+        close = row.get("close")
+        if close is None or close == 0:
+            continue
+        if td >= base_date and start_close is None:
+            start_close = float(close)
+        if td <= end_date:
+            end_close = float(close)
+    if start_close is None or end_close is None or start_close == 0:
+        return None
+    return (end_close / start_close - 1) * 100
+
+
+def _classify_excess_return(excess_return: float, tier: str | None) -> str:
+    """按超额收益判定单个标的验证状态。
+
+    - correct: 超额收益 > +2%
+    - wrong: < -2%
+    - neutral: 在 [-2%, +2%] 之间
+    """
+    if excess_return > 2.0:
+        return "correct"
+    if excess_return < -2.0:
+        return "wrong"
+    return "neutral"
+

@@ -379,3 +379,185 @@ async def cleanup_avoid_backtests():
     except Exception as e:
         logger.error(f"清理 avoid 回测记录失败: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ── 事件受益标的发现（事件 → 受益标的 → 估值 → 个性化推荐）──
+
+
+@router.get("/api/alerts/event-radar/events/{event_id}/beneficiaries")
+async def get_event_beneficiaries(event_id: str):
+    """获取事件的受益标的推荐。
+
+    流程：发现 → 估值筛选 → 用户上下文 → 落库 → 返回
+    开关：alerts.beneficiary_finder_enabled
+    """
+    try:
+        from db.config import get_config_bool
+        from db.market_events import (
+            save_event_beneficiaries, get_market_event,
+        )
+        from services.advisor.beneficiary_finder import discover_beneficiaries
+        from services.advisor.valuation_filter import apply_valuation_filter
+        from services.advisor.context_integrator import apply_user_context
+
+        # 1. 查事件
+        event = get_market_event(event_id)
+        if not event:
+            raise HTTPException(status_code=404, detail="事件不存在")
+
+        # 2. 总开关关闭时返回空列表
+        enabled = True
+        try:
+            enabled = get_config_bool("alerts.beneficiary_finder_enabled", False)
+        except Exception as e:
+            logger.warning(f"检查 beneficiary_finder 开关失败: {e}")
+
+        if not enabled:
+            return ApiResponse.success(data={
+                "event": {"event_id": event_id, "title": event.get("title", "")},
+                "beneficiaries": [],
+                "summary": {
+                    "total": 0, "strong_buy": 0, "watch": 0,
+                    "add_position": 0, "observe_only": 0,
+                },
+                "enabled": False,
+            })
+
+        # 3. 发现 → 估值筛选 → 用户上下文
+        beneficiaries = discover_beneficiaries(event)
+        beneficiaries = apply_valuation_filter(beneficiaries)
+        beneficiaries = apply_user_context(beneficiaries)
+
+        # 4. 落库
+        try:
+            save_event_beneficiaries(event_id, beneficiaries)
+        except Exception as e:
+            logger.warning(f"落库受益标的失败 event_id={event_id}: {e}")
+
+        # 5. 汇总统计
+        summary = {
+            "total": len(beneficiaries),
+            "strong_buy": sum(1 for b in beneficiaries if b.get("recommendation_tier") == "strong_buy"),
+            "watch": sum(1 for b in beneficiaries if b.get("recommendation_tier") == "watch"),
+            "add_position": sum(1 for b in beneficiaries if b.get("recommendation_tier") == "add_position"),
+            "observe_only": sum(1 for b in beneficiaries if b.get("recommendation_tier") == "observe_only"),
+        }
+
+        return ApiResponse.success(data={
+            "event": {
+                "event_id": event_id,
+                "title": event.get("title", ""),
+                "event_type": event.get("event_type", ""),
+                "affected_sectors": event.get("affected_sectors", []),
+                "affected_themes": event.get("affected_themes", []),
+            },
+            "beneficiaries": beneficiaries,
+            "summary": summary,
+            "enabled": True,
+        })
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"获取事件受益标推荐失败 event_id={event_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/api/alerts/event-radar/recommendations/stats")
+async def recommendation_stats(days: int = Query(30, ge=1, le=365)):
+    """获取推荐统计。"""
+    try:
+        from db.market_events import get_beneficiary_stats
+        stats = get_beneficiary_stats(days=days)
+        return ApiResponse.success(data=stats)
+    except Exception as e:
+        logger.error(f"获取推荐统计失败: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/api/alerts/event-radar/recommendations/accuracy")
+async def recommendation_accuracy():
+    """获取推荐验证准确率（按 tier / valuation 分组）。
+
+    返回 {overall: {...}, by_tier: {...}, by_valuation: {...}}。
+    """
+    try:
+        import json
+        from db.market_events import list_event_beneficiaries, list_verified_events
+
+        # 收集所有已验证事件对应的受益标的
+        verified_events = list_verified_events(limit=500)
+        verified_event_ids = [e["event_id"] for e in verified_events]
+
+        all_beneficiaries: list[dict] = []
+        for eid in verified_event_ids:
+            try:
+                all_beneficiaries.extend(list_event_beneficiaries(eid))
+            except Exception:
+                continue
+
+        # 只统计有验证结果的标的
+        verified_bens = []
+        for b in all_beneficiaries:
+            vr = b.get("verification_result")
+            if not vr:
+                continue
+            if isinstance(vr, str):
+                try:
+                    vr = json.loads(vr)
+                except Exception:
+                    continue
+            if isinstance(vr, dict):
+                b = dict(b)
+                b["verification_result"] = vr
+                verified_bens.append(b)
+
+        if not verified_bens:
+            return ApiResponse.success(data={
+                "overall": {"total": 0, "correct": 0, "wrong": 0, "neutral": 0, "accuracy": 0.0},
+                "by_tier": {},
+                "by_valuation": {},
+            })
+
+        # 总体统计
+        def _status_of(b):
+            return (b.get("verification_result") or {}).get("status", "neutral")
+
+        overall_correct = sum(1 for b in verified_bens if _status_of(b) == "correct")
+        overall_wrong = sum(1 for b in verified_bens if _status_of(b) == "wrong")
+        overall_neutral = sum(1 for b in verified_bens if _status_of(b) == "neutral")
+        overall_acc = overall_correct / len(verified_bens) if verified_bens else 0.0
+
+        # 按 recommendation_tier 分组
+        by_tier: dict[str, dict] = {}
+        for b in verified_bens:
+            tier = b.get("recommendation_tier") or "unknown"
+            grp = by_tier.setdefault(tier, {"total": 0, "correct": 0, "wrong": 0, "neutral": 0})
+            grp["total"] += 1
+            grp[_status_of(b)] = grp.get(_status_of(b), 0) + 1
+        for grp in by_tier.values():
+            grp["accuracy"] = round(grp["correct"] / grp["total"], 4) if grp["total"] else 0.0
+
+        # 按 valuation_status 分组
+        by_valuation: dict[str, dict] = {}
+        for b in verified_bens:
+            vst = b.get("valuation_status") or "unknown"
+            grp = by_valuation.setdefault(vst, {"total": 0, "correct": 0, "wrong": 0, "neutral": 0})
+            grp["total"] += 1
+            grp[_status_of(b)] = grp.get(_status_of(b), 0) + 1
+        for grp in by_valuation.values():
+            grp["accuracy"] = round(grp["correct"] / grp["total"], 4) if grp["total"] else 0.0
+
+        return ApiResponse.success(data={
+            "overall": {
+                "total": len(verified_bens),
+                "correct": overall_correct,
+                "wrong": overall_wrong,
+                "neutral": overall_neutral,
+                "accuracy": round(overall_acc, 4),
+            },
+            "by_tier": by_tier,
+            "by_valuation": by_valuation,
+        })
+    except Exception as e:
+        logger.error(f"获取推荐验证准确率失败: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))

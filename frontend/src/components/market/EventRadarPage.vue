@@ -17,6 +17,7 @@ import {
   getMasterDecisionHistory, getMasterAccuracyStats, triggerMasterVerification,
   updateWatchlistEntry, getWatchlistExitStatus, analyzeEventImpact,
   getEventImpactAmount, getLeadingIndicatorSignals, getBacktestStatsBySource,
+  getEventBeneficiaries, getEventBeneficiaryStats, getRecommendationAccuracy,
 } from '../../api'
 import Icon from '../ui/Icon.vue'
 import { useToast } from '../../composables/useToast'
@@ -24,7 +25,7 @@ import { renderMarkdown } from '../../composables/useMarkdown'
 
 const emit = defineEmits(['navigate'])
 
-const activeTab = ref('events') // events / watchlist / verification / leading
+const activeTab = ref('events') // events / watchlist / verification / leading / recommendations
 const events = ref([])
 const watchlist = ref([])
 const loading = ref(false)
@@ -976,6 +977,182 @@ function formatAmount(num) {
   return Math.abs(n).toLocaleString('zh-CN', { minimumFractionDigits: 0, maximumFractionDigits: 0 })
 }
 
+// ── Phase 4：事件驱动受益标的推荐 ─────────────────────────
+// beneficiaryMap: { [event_id]: { loading, data, error } }
+// expandedBeneficiaryEvents: { [event_id]: true/false }
+const beneficiaryMap = ref({})
+const expandedBeneficiaryEvents = ref({})
+
+// 推荐统计 Tab 状态
+const recommendationStats = ref(null)
+const recommendationStatsLoading = ref(false)
+const recommendationAccuracy = ref(null)
+const recommendationAccuracyLoading = ref(false)
+const recommendationStatsDays = ref(30)
+
+// 分级中文 + 颜色
+const TIER_META = {
+  strong_buy: { label: '强推荐买入', color: '#dc2626', icon: 'star' },
+  watch: { label: '关注', color: '#2563eb', icon: 'bookmark' },
+  add_position: { label: '建议补仓', color: '#16a34a', icon: 'plus' },
+  observe_only: { label: '仅观察', color: '#6b7280', icon: 'eye' },
+}
+// 估值状态中文 + 颜色
+const VALUATION_META = {
+  undervalued: { label: '低估', color: '#16a34a' },
+  fair: { label: '合理', color: '#2563eb' },
+  overvalued: { label: '偏高', color: '#f59e0b' },
+  expensive: { label: '高估', color: '#dc2626' },
+  unknown: { label: '无数据', color: '#6b7280' },
+}
+
+/** 触发受益标的推荐（发现→估值筛选→用户上下文→落库→返回） */
+async function handleGetBeneficiaries(evt) {
+  const eid = evt.event_id
+  if (!eid) return
+  // 已有数据则切换展开
+  if (beneficiaryMap.value[eid]?.data) {
+    expandedBeneficiaryEvents.value[eid] = !expandedBeneficiaryEvents.value[eid]
+    return
+  }
+  beneficiaryMap.value[eid] = { loading: true }
+  try {
+    const { data } = await getEventBeneficiaries(eid)
+    const result = data?.data || data || {}
+    beneficiaryMap.value[eid] = { loading: false, data: result }
+    expandedBeneficiaryEvents.value[eid] = true
+    const total = result?.summary?.total || 0
+    if (total === 0) {
+      useToast().showToast('该事件暂无受益标的（可能开关未开启或匹配规则未命中）', 'warning')
+    } else {
+      useToast().showToast(`生成 ${total} 个受益标的推荐`, 'success')
+    }
+  } catch (e) {
+    const msg = e?.response?.data?.detail || e?.response?.data?.message || '受益标的推荐获取失败'
+    beneficiaryMap.value[eid] = { loading: false, error: msg }
+    useToast().showToast(msg, 'error')
+  }
+}
+
+/** 切换受益标的面板展开/收起 */
+function toggleBeneficiaryExpand(eid) {
+  expandedBeneficiaryEvents.value[eid] = !expandedBeneficiaryEvents.value[eid]
+}
+
+/** 按分级分组受益标的 */
+function groupBeneficiariesByTier(beneficiaries) {
+  if (!Array.isArray(beneficiaries) || !beneficiaries.length) return []
+  const groups = {}
+  for (const b of beneficiaries) {
+    const tier = b.recommendation_tier || 'observe_only'
+    if (!groups[tier]) groups[tier] = []
+    groups[tier].push(b)
+  }
+  // 按 strong_buy → watch → add_position → observe_only 排序
+  const order = ['strong_buy', 'watch', 'add_position', 'observe_only']
+  return order
+    .filter(t => groups[t] && groups[t].length)
+    .map(t => ({ tier: t, items: groups[t] }))
+}
+
+/** 加载推荐统计（分级/估值分布 + 热门标的） */
+async function loadRecommendationStats() {
+  recommendationStatsLoading.value = true
+  try {
+    const { data } = await getEventBeneficiaryStats(recommendationStatsDays.value)
+    recommendationStats.value = data?.data || data
+  } catch (e) {
+    const msg = e?.response?.data?.detail || '推荐统计获取失败'
+    useToast().showToast(msg, 'error')
+  } finally {
+    recommendationStatsLoading.value = false
+  }
+}
+
+/** 加载推荐验证准确率（按 tier/valuation 分组） */
+async function loadRecommendationAccuracy() {
+  recommendationAccuracyLoading.value = true
+  try {
+    const { data } = await getRecommendationAccuracy()
+    recommendationAccuracy.value = data?.data || data
+  } catch (e) {
+    const msg = e?.response?.data?.detail || '推荐准确率获取失败'
+    useToast().showToast(msg, 'error')
+  } finally {
+    recommendationAccuracyLoading.value = false
+  }
+}
+
+/** 进入推荐统计 Tab 时加载数据 */
+async function loadRecommendationsTab() {
+  await Promise.all([loadRecommendationStats(), loadRecommendationAccuracy()])
+}
+
+/** 推荐统计 - 分级分布（用于横向柱状图展示） */
+const tierDistribution = computed(() => {
+  const dist = recommendationStats.value?.tier_distribution || {}
+  return Object.entries(dist).map(([tier, count]) => ({
+    tier,
+    label: TIER_META[tier]?.label || tier,
+    color: TIER_META[tier]?.color || '#6b7280',
+    count: count || 0,
+  })).sort((a, b) => b.count - a.count)
+})
+
+/** 推荐统计 - 估值分布 */
+const valuationDistribution = computed(() => {
+  const dist = recommendationStats.value?.valuation_distribution || {}
+  return Object.entries(dist).map(([v, count]) => ({
+    valuation: v,
+    label: VALUATION_META[v]?.label || v,
+    color: VALUATION_META[v]?.color || '#6b7280',
+    count: count || 0,
+  }))
+})
+
+/** 推荐统计 - 热门标的 Top10 */
+const topRecommendedFunds = computed(() => {
+  return (recommendationStats.value?.top_funds || []).slice(0, 10)
+})
+
+/** 推荐准确率 - tier 分组列表 */
+const accuracyByTierList = computed(() => {
+  const byTier = recommendationAccuracy.value?.by_tier || {}
+  return Object.entries(byTier).map(([tier, d]) => ({
+    tier,
+    label: TIER_META[tier]?.label || tier,
+    color: TIER_META[tier]?.color || '#6b7280',
+    avg_excess_return: 0,
+    ...d,
+  })).sort((a, b) => b.total - a.total)
+})
+
+/** 推荐准确率 - valuation 分组列表 */
+const accuracyByValuationList = computed(() => {
+  const byVal = recommendationAccuracy.value?.by_valuation || {}
+  return Object.entries(byVal).map(([v, d]) => ({
+    valuation: v,
+    label: VALUATION_META[v]?.label || v,
+    color: VALUATION_META[v]?.color || '#6b7280',
+    avg_excess_return: 0,
+    ...d,
+  })).sort((a, b) => b.total - a.total)
+})
+
+/** 推荐准确率 - 总体（兼容后端 total/total_verified 两种字段） */
+const accuracyOverall = computed(() => {
+  const raw = recommendationAccuracy.value?.overall || {}
+  return {
+    total_verified: raw.total_verified ?? raw.total ?? 0,
+    total: raw.total ?? raw.total_verified ?? 0,
+    correct: raw.correct || 0,
+    wrong: raw.wrong || 0,
+    neutral: raw.neutral || 0,
+    accuracy: raw.accuracy || 0,
+    avg_excess_return: raw.avg_excess_return || 0,
+  }
+})
+
 // ── Batch2 增强点 1：关注计划自动同步徽章判定 ──────────────────────────
 /** 判断关注基金是否在 7 天内被自动同步为 bought */
 function isAutoSynced(item) {
@@ -1552,6 +1729,11 @@ watch(scrollToFundCode, async (code) => {
         <span>领先指标</span>
         <span v-if="leadingSignals.length" class="tab-badge" style="background:#8b5cf6">{{ leadingSignals.length }}</span>
       </button>
+      <button class="main-tab" :class="{ active: activeTab === 'recommendations' }" @click="activeTab = 'recommendations'; loadRecommendationsTab()">
+        <Icon name="target" size="14" />
+        <span>推荐统计</span>
+        <span v-if="accuracyOverall?.total_verified" class="tab-badge" style="background:#16a34a">{{ accuracyOverall.total_verified }}</span>
+      </button>
     </div>
 
     <!-- ════ Tab 1：事件雷达 ════ -->
@@ -1879,6 +2061,125 @@ watch(scrollToFundCode, async (code) => {
                   class="event-impact-content"
                   v-html="renderMarkdown((eventImpactMap[evt.event_id]?.analysis || evt.impact_analysis))"
                 ></div>
+              </div>
+
+              <!-- Phase 4：受益标的推荐（发现→估值筛选→用户上下文→分级） -->
+              <div class="event-beneficiary-section">
+                <button
+                  class="btn-beneficiary"
+                  :disabled="beneficiaryMap[evt.event_id]?.loading"
+                  @click="handleGetBeneficiaries(evt)"
+                >
+                  <Icon
+                    :name="beneficiaryMap[evt.event_id]?.loading ? 'spinner' : 'target'"
+                    size="12"
+                    :class="{ spinning: beneficiaryMap[evt.event_id]?.loading }"
+                  />
+                  <span>{{
+                    beneficiaryMap[evt.event_id]?.loading ? '生成中...' :
+                    beneficiaryMap[evt.event_id]?.data ? '查看受益标的' :
+                    '受益标的推荐'
+                  }}</span>
+                  <span
+                    v-if="beneficiaryMap[evt.event_id]?.data?.summary?.total"
+                    class="beneficiary-count"
+                  >
+                    {{ beneficiaryMap[evt.event_id].data.summary.total }}
+                    <template v-if="beneficiaryMap[evt.event_id].data.summary.strong_buy">
+                      （强{{ beneficiaryMap[evt.event_id].data.summary.strong_buy }}）
+                    </template>
+                  </span>
+                </button>
+                <!-- 展开切换按钮（已有数据时） -->
+                <button
+                  v-if="beneficiaryMap[evt.event_id]?.data?.beneficiaries?.length"
+                  class="btn-impact-toggle"
+                  @click="toggleBeneficiaryExpand(evt.event_id)"
+                >
+                  <Icon :name="expandedBeneficiaryEvents[evt.event_id] ? 'chevron-up' : 'chevron-down'" size="11" />
+                  {{ expandedBeneficiaryEvents[evt.event_id] ? '收起' : '展开' }}
+                </button>
+                <!-- 错误提示 -->
+                <div v-if="beneficiaryMap[evt.event_id]?.error" class="event-impact-error">
+                  <Icon name="info" size="11" />
+                  {{ beneficiaryMap[evt.event_id].error }}
+                </div>
+                <!-- 受益标的分组展示 -->
+                <div
+                  v-if="expandedBeneficiaryEvents[evt.event_id] && beneficiaryMap[evt.event_id]?.data?.beneficiaries?.length"
+                  class="beneficiary-panel"
+                >
+                  <div class="beneficiary-summary">
+                    <span class="ben-summary-item">
+                      共 <strong>{{ beneficiaryMap[evt.event_id].data.summary.total }}</strong> 个
+                    </span>
+                    <span v-if="beneficiaryMap[evt.event_id].data.summary.strong_buy" class="ben-summary-item ben-strong">
+                      强推荐 {{ beneficiaryMap[evt.event_id].data.summary.strong_buy }}
+                    </span>
+                    <span v-if="beneficiaryMap[evt.event_id].data.summary.watch" class="ben-summary-item ben-watch">
+                      关注 {{ beneficiaryMap[evt.event_id].data.summary.watch }}
+                    </span>
+                    <span v-if="beneficiaryMap[evt.event_id].data.summary.add_position" class="ben-summary-item ben-add">
+                      补仓 {{ beneficiaryMap[evt.event_id].data.summary.add_position }}
+                    </span>
+                    <span v-if="beneficiaryMap[evt.event_id].data.summary.observe_only" class="ben-summary-item ben-observe">
+                      观察 {{ beneficiaryMap[evt.event_id].data.summary.observe_only }}
+                    </span>
+                  </div>
+                  <div
+                    v-for="group in groupBeneficiariesByTier(beneficiaryMap[evt.event_id].data.beneficiaries)"
+                    :key="group.tier"
+                    class="ben-tier-group"
+                    :class="`ben-tier-${group.tier}`"
+                  >
+                    <div class="ben-tier-header">
+                      <Icon :name="TIER_META[group.tier]?.icon || 'circle'" size="12" />
+                      <span class="ben-tier-label" :style="{ color: TIER_META[group.tier]?.color }">
+                        {{ TIER_META[group.tier]?.label || group.tier }}
+                      </span>
+                      <span class="ben-tier-count">({{ group.items.length }})</span>
+                    </div>
+                    <div class="ben-fund-list">
+                      <div
+                        v-for="b in group.items"
+                        :key="b.fund_code"
+                        class="ben-fund-item"
+                      >
+                        <div class="ben-fund-main">
+                          <span class="ben-fund-name">{{ b.fund_name }}</span>
+                          <span class="ben-fund-code">({{ b.fund_code }})</span>
+                          <span
+                            v-if="b.is_holding"
+                            class="ben-tag ben-tag-holding"
+                            title="已持仓"
+                          >持仓</span>
+                          <span
+                            v-if="b.is_watching"
+                            class="ben-tag ben-tag-watching"
+                            title="在关注列表"
+                          >关注</span>
+                        </div>
+                        <div class="ben-fund-meta">
+                          <span
+                            v-if="b.valuation_status"
+                            class="ben-val-tag"
+                            :style="{ color: VALUATION_META[b.valuation_status]?.color }"
+                          >
+                            {{ VALUATION_META[b.valuation_status]?.label || b.valuation_status }}
+                            <template v-if="b.valuation_percentile != null">
+                              {{ b.valuation_percentile }}%
+                            </template>
+                          </span>
+                          <span class="ben-benefit-level" :title="b.benefit_logic">
+                            受益{{ b.benefit_level === 'strong' ? '强' : b.benefit_level === 'medium' ? '中' : '弱' }}
+                          </span>
+                          <span class="ben-match-score">匹配度 {{ Math.round(b.match_score || 0) }}</span>
+                        </div>
+                        <div v-if="b.benefit_logic" class="ben-fund-logic">{{ b.benefit_logic }}</div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
               </div>
             </div>
           </div>
@@ -3206,6 +3507,235 @@ watch(scrollToFundCode, async (code) => {
           </div>
         </div>
       </template>
+    </template>
+
+    <!-- ════ Tab 5：推荐统计（受益标的分级/估值分布 + 准确率验证） ════ -->
+    <template v-if="activeTab === 'recommendations'">
+      <!-- 顶部操作栏 -->
+      <div class="rec-toolbar">
+        <div class="rec-days-selector">
+          <span class="rec-label">统计区间：</span>
+          <button
+            v-for="d in [7, 30, 90]"
+            :key="d"
+            class="rec-days-btn"
+            :class="{ active: recommendationStatsDays === d }"
+            @click="recommendationStatsDays = d; loadRecommendationStats()"
+          >{{ d }}天</button>
+        </div>
+        <button class="btn btn-secondary" @click="loadRecommendationsTab" :disabled="recommendationStatsLoading || recommendationAccuracyLoading">
+          <Icon name="refresh-cw" size="12" :class="{ spinning: recommendationStatsLoading }" />
+          <span>刷新</span>
+        </button>
+      </div>
+
+      <!-- 总体准确率卡片 -->
+      <div class="rec-overview-card">
+        <div class="rec-overview-title">
+          <Icon name="target" size="14" />
+          <span>推荐验证准确率（T+20 相对沪深300超额收益）</span>
+        </div>
+        <div v-if="recommendationAccuracyLoading" class="rec-loading">
+          <Icon name="spinner" size="14" class="spinning" /> 加载中...
+        </div>
+        <template v-else>
+          <div class="rec-overview-stats">
+            <div class="rec-stat-item">
+              <div class="rec-stat-value">{{ accuracyOverall.total_verified }}</div>
+              <div class="rec-stat-label">已验证</div>
+            </div>
+            <div class="rec-stat-item rec-stat-correct">
+              <div class="rec-stat-value">{{ accuracyOverall.correct }}</div>
+              <div class="rec-stat-label">正确</div>
+            </div>
+            <div class="rec-stat-item rec-stat-wrong">
+              <div class="rec-stat-value">{{ accuracyOverall.wrong }}</div>
+              <div class="rec-stat-label">错误</div>
+            </div>
+            <div class="rec-stat-item rec-stat-neutral">
+              <div class="rec-stat-value">{{ accuracyOverall.neutral }}</div>
+              <div class="rec-stat-label">中性</div>
+            </div>
+            <div class="rec-stat-item rec-stat-accuracy">
+              <div class="rec-stat-value">{{ (accuracyOverall.accuracy * 100).toFixed(1) }}%</div>
+              <div class="rec-stat-label">准确率</div>
+            </div>
+            <div class="rec-stat-item">
+              <div class="rec-stat-value" :class="accuracyOverall.avg_excess_return >= 0 ? 'amount-positive' : 'amount-negative'">
+                {{ accuracyOverall.avg_excess_return > 0 ? '+' : '' }}{{ accuracyOverall.avg_excess_return }}%
+              </div>
+              <div class="rec-stat-label">平均超额</div>
+            </div>
+          </div>
+          <!-- 按 tier 分组准确率 -->
+          <div v-if="accuracyByTierList.length" class="rec-accuracy-breakdown">
+            <div class="rec-breakdown-title">按推荐分级</div>
+            <div class="rec-breakdown-table">
+              <div class="rec-breakdown-row rec-breakdown-header">
+                <span>分级</span>
+                <span>样本数</span>
+                <span>正确</span>
+                <span>错误</span>
+                <span>准确率</span>
+                <span>平均超额</span>
+              </div>
+              <div
+                v-for="row in accuracyByTierList"
+                :key="row.tier"
+                class="rec-breakdown-row"
+              >
+                <span class="rec-tier-cell" :style="{ color: row.color }">{{ row.label }}</span>
+                <span>{{ row.total }}</span>
+                <span class="amount-positive">{{ row.correct }}</span>
+                <span class="amount-negative">{{ row.wrong }}</span>
+                <span>{{ (row.accuracy * 100).toFixed(1) }}%</span>
+                <span :class="row.avg_excess_return >= 0 ? 'amount-positive' : 'amount-negative'">
+                  {{ row.avg_excess_return > 0 ? '+' : '' }}{{ row.avg_excess_return }}%
+                </span>
+              </div>
+            </div>
+          </div>
+          <!-- 按 valuation 分组准确率 -->
+          <div v-if="accuracyByValuationList.length" class="rec-accuracy-breakdown">
+            <div class="rec-breakdown-title">按估值状态</div>
+            <div class="rec-breakdown-table">
+              <div class="rec-breakdown-row rec-breakdown-header">
+                <span>估值</span>
+                <span>样本数</span>
+                <span>正确</span>
+                <span>错误</span>
+                <span>准确率</span>
+                <span>平均超额</span>
+              </div>
+              <div
+                v-for="row in accuracyByValuationList"
+                :key="row.valuation"
+                class="rec-breakdown-row"
+              >
+                <span class="rec-tier-cell" :style="{ color: row.color }">{{ row.label }}</span>
+                <span>{{ row.total }}</span>
+                <span class="amount-positive">{{ row.correct }}</span>
+                <span class="amount-negative">{{ row.wrong }}</span>
+                <span>{{ (row.accuracy * 100).toFixed(1) }}%</span>
+                <span :class="row.avg_excess_return >= 0 ? 'amount-positive' : 'amount-negative'">
+                  {{ row.avg_excess_return > 0 ? '+' : '' }}{{ row.avg_excess_return }}%
+                </span>
+              </div>
+            </div>
+          </div>
+          <div v-if="!accuracyOverall.total_verified" class="rec-empty">
+            暂无验证数据（受益标的 T+20 验证开关未开启或未到验证窗口）
+          </div>
+        </template>
+      </div>
+
+      <!-- 分级分布 + 估值分布 -->
+      <div class="rec-distribution-row">
+        <div class="rec-distribution-card">
+          <div class="rec-card-title">
+            <Icon name="chart" size="13" />
+            <span>推荐分级分布</span>
+          </div>
+          <div v-if="recommendationStatsLoading" class="rec-loading">
+            <Icon name="spinner" size="14" class="spinning" /> 加载中...
+          </div>
+          <template v-else>
+            <div v-if="tierDistribution.length" class="rec-bar-chart">
+              <div
+                v-for="item in tierDistribution"
+                :key="item.tier"
+                class="rec-bar-row"
+              >
+                <span class="rec-bar-label" :style="{ color: item.color }">{{ item.label }}</span>
+                <div class="rec-bar-track">
+                  <div
+                    class="rec-bar-fill"
+                    :style="{
+                      width: (tierDistribution.reduce((m, x) => Math.max(m, x.count), 0) ? (item.count / tierDistribution.reduce((m, x) => Math.max(m, x.count), 0) * 100) : 0) + '%',
+                      background: item.color
+                    }"
+                  ></div>
+                </div>
+                <span class="rec-bar-count">{{ item.count }}</span>
+              </div>
+            </div>
+            <div v-else class="rec-empty">暂无推荐数据</div>
+          </template>
+        </div>
+
+        <div class="rec-distribution-card">
+          <div class="rec-card-title">
+            <Icon name="pie-chart" size="13" />
+            <span>估值状态分布</span>
+          </div>
+          <div v-if="recommendationStatsLoading" class="rec-loading">
+            <Icon name="spinner" size="14" class="spinning" /> 加载中...
+          </div>
+          <template v-else>
+            <div v-if="valuationDistribution.length" class="rec-bar-chart">
+              <div
+                v-for="item in valuationDistribution"
+                :key="item.valuation"
+                class="rec-bar-row"
+              >
+                <span class="rec-bar-label" :style="{ color: item.color }">{{ item.label }}</span>
+                <div class="rec-bar-track">
+                  <div
+                    class="rec-bar-fill"
+                    :style="{
+                      width: (valuationDistribution.reduce((m, x) => Math.max(m, x.count), 0) ? (item.count / valuationDistribution.reduce((m, x) => Math.max(m, x.count), 0) * 100) : 0) + '%',
+                      background: item.color
+                    }"
+                  ></div>
+                </div>
+                <span class="rec-bar-count">{{ item.count }}</span>
+              </div>
+            </div>
+            <div v-else class="rec-empty">暂无估值数据</div>
+          </template>
+        </div>
+      </div>
+
+      <!-- 热门推荐标的 Top10 -->
+      <div class="rec-top-funds-card">
+        <div class="rec-card-title">
+          <Icon name="trending-up" size="13" />
+          <span>热门推荐标的 Top10</span>
+        </div>
+        <div v-if="recommendationStatsLoading" class="rec-loading">
+          <Icon name="spinner" size="14" class="spinning" /> 加载中...
+        </div>
+        <template v-else>
+          <div v-if="topRecommendedFunds.length" class="rec-top-table">
+            <div class="rec-top-row rec-top-header">
+              <span>基金名称</span>
+              <span>代码</span>
+              <span>推荐次数</span>
+              <span>平均估值分位</span>
+              <span>最新分级</span>
+            </div>
+            <div
+              v-for="(fund, idx) in topRecommendedFunds"
+              :key="fund.fund_code"
+              class="rec-top-row"
+            >
+              <span class="rec-top-name">
+                <span class="rec-top-rank">{{ idx + 1 }}</span>
+                {{ fund.fund_name }}
+              </span>
+              <span class="rec-top-code">{{ fund.fund_code }}</span>
+              <span class="rec-top-count">{{ fund.recommend_count }}</span>
+              <span :style="{ color: fund.avg_valuation != null && fund.avg_valuation <= 30 ? '#16a34a' : fund.avg_valuation > 80 ? '#dc2626' : '#6b7280' }">
+                {{ fund.avg_valuation != null ? fund.avg_valuation + '%' : '-' }}
+              </span>
+              <span :style="{ color: TIER_META[fund.last_tier]?.color || '#6b7280' }">
+                {{ TIER_META[fund.last_tier]?.label || fund.last_tier || '-' }}
+              </span>
+            </div>
+          </div>
+          <div v-else class="rec-empty">暂无推荐数据（在事件雷达页点击"受益标的推荐"生成）</div>
+        </template>
+      </div>
     </template>
 
     <!-- 添加关注基金弹窗 -->
@@ -7632,4 +8162,375 @@ watch(scrollToFundCode, async (code) => {
 }
 .spin { animation: spin 1s linear infinite; }
 @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+
+/* ── Phase 4：受益标的推荐面板 ─────────────────────────── */
+.event-beneficiary-section {
+  margin-top: 0.6rem;
+  padding-top: 0.5rem;
+  border-top: 1px dashed var(--color-border);
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+}
+.btn-beneficiary {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.32rem 0.7rem;
+  background: linear-gradient(135deg, rgba(220,38,38,0.08), rgba(234,88,12,0.08));
+  color: #dc2626;
+  border: 1px solid rgba(220,38,38,0.25);
+  border-radius: 4px;
+  font-size: 0.74rem;
+  cursor: pointer;
+  transition: all 0.18s;
+  font-weight: 500;
+}
+.btn-beneficiary:hover:not(:disabled) {
+  background: linear-gradient(135deg, rgba(220,38,38,0.15), rgba(234,88,12,0.15));
+  border-color: rgba(220,38,38,0.5);
+}
+.btn-beneficiary:disabled { cursor: wait; opacity: 0.7; }
+.beneficiary-count {
+  margin-left: 0.2rem;
+  padding: 0.1rem 0.4rem;
+  background: rgba(220,38,38,0.12);
+  border-radius: 8px;
+  font-size: 0.68rem;
+  font-weight: 600;
+}
+.beneficiary-panel {
+  flex-basis: 100%;
+  margin-top: 0.4rem;
+  padding: 0.6rem 0.7rem;
+  background: var(--color-bg-soft, #f8fafc);
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+}
+.beneficiary-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+  margin-bottom: 0.5rem;
+  padding-bottom: 0.5rem;
+  border-bottom: 1px dashed var(--color-border);
+  font-size: 0.75rem;
+}
+.ben-summary-item { color: var(--text-secondary, #64748b); }
+.ben-summary-item strong { color: var(--text-primary, #1f2937); margin: 0 0.15rem; }
+.ben-strong { color: #dc2626; font-weight: 600; }
+.ben-watch { color: #2563eb; font-weight: 600; }
+.ben-add { color: #16a34a; font-weight: 600; }
+.ben-observe { color: #6b7280; font-weight: 600; }
+
+.ben-tier-group {
+  margin-bottom: 0.5rem;
+  padding: 0.4rem 0.5rem;
+  border-left: 3px solid var(--color-border);
+  background: rgba(255,255,255,0.5);
+  border-radius: 0 4px 4px 0;
+}
+.ben-tier-group.ben-tier-strong_buy { border-left-color: #dc2626; }
+.ben-tier-group.ben-tier-watch { border-left-color: #2563eb; }
+.ben-tier-group.ben-tier-add_position { border-left-color: #16a34a; }
+.ben-tier-group.ben-tier-observe_only { border-left-color: #6b7280; }
+.ben-tier-header {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  margin-bottom: 0.3rem;
+  font-size: 0.74rem;
+  font-weight: 600;
+}
+.ben-tier-label { font-weight: 700; }
+.ben-tier-count { color: var(--text-secondary, #64748b); font-weight: 400; }
+.ben-fund-list { display: flex; flex-direction: column; gap: 0.35rem; }
+.ben-fund-item {
+  padding: 0.4rem 0.5rem;
+  background: var(--color-bg, #ffffff);
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+  font-size: 0.75rem;
+}
+.ben-fund-main {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  flex-wrap: wrap;
+}
+.ben-fund-name { font-weight: 600; color: var(--text-primary, #1f2937); }
+.ben-fund-code { color: var(--text-tertiary, #94a3b8); font-size: 0.7rem; }
+.ben-tag {
+  padding: 0.05rem 0.35rem;
+  border-radius: 8px;
+  font-size: 0.65rem;
+  font-weight: 600;
+}
+.ben-tag-holding { background: rgba(22,163,74,0.12); color: #16a34a; }
+.ben-tag-watching { background: rgba(37,99,235,0.12); color: #2563eb; }
+.ben-fund-meta {
+  display: flex;
+  gap: 0.6rem;
+  margin-top: 0.25rem;
+  font-size: 0.7rem;
+  color: var(--text-secondary, #64748b);
+  flex-wrap: wrap;
+}
+.ben-val-tag { font-weight: 600; }
+.ben-benefit-level {
+  padding: 0.05rem 0.3rem;
+  background: rgba(245,158,11,0.12);
+  color: #d97706;
+  border-radius: 8px;
+}
+.ben-match-score { color: var(--text-tertiary, #94a3b8); }
+.ben-fund-logic {
+  margin-top: 0.25rem;
+  padding: 0.25rem 0.4rem;
+  background: rgba(99,102,241,0.05);
+  border-left: 2px solid rgba(99,102,241,0.3);
+  font-size: 0.68rem;
+  color: var(--text-secondary, #64748b);
+  border-radius: 0 3px 3px 0;
+}
+
+/* ── Phase 4：推荐统计 Tab ─────────────────────────── */
+.rec-toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 1rem;
+  padding: 0.6rem 0.8rem;
+  background: var(--color-bg-soft, #f8fafc);
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+}
+.rec-days-selector { display: flex; align-items: center; gap: 0.3rem; }
+.rec-label { font-size: 0.78rem; color: var(--text-secondary, #64748b); }
+.rec-days-btn {
+  padding: 0.25rem 0.6rem;
+  background: transparent;
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+  font-size: 0.74rem;
+  color: var(--text-secondary, #64748b);
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.rec-days-btn:hover { border-color: var(--color-primary, #2563eb); color: var(--color-primary, #2563eb); }
+.rec-days-btn.active {
+  background: var(--color-primary, #2563eb);
+  border-color: var(--color-primary, #2563eb);
+  color: #fff;
+  font-weight: 600;
+}
+
+.rec-overview-card {
+  padding: 0.9rem 1rem;
+  background: var(--color-bg, #fff);
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  margin-bottom: 1rem;
+}
+.rec-overview-title {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--text-primary, #1f2937);
+  margin-bottom: 0.8rem;
+  padding-bottom: 0.5rem;
+  border-bottom: 1px solid var(--color-border);
+}
+.rec-overview-stats {
+  display: grid;
+  grid-template-columns: repeat(6, 1fr);
+  gap: 0.6rem;
+  margin-bottom: 0.8rem;
+}
+.rec-stat-item {
+  text-align: center;
+  padding: 0.5rem;
+  background: var(--color-bg-soft, #f8fafc);
+  border-radius: 6px;
+}
+.rec-stat-value {
+  font-size: 1.1rem;
+  font-weight: 700;
+  color: var(--text-primary, #1f2937);
+}
+.rec-stat-label {
+  font-size: 0.7rem;
+  color: var(--text-secondary, #64748b);
+  margin-top: 0.2rem;
+}
+.rec-stat-correct .rec-stat-value { color: #16a34a; }
+.rec-stat-wrong .rec-stat-value { color: #dc2626; }
+.rec-stat-neutral .rec-stat-value { color: #6b7280; }
+.rec-stat-accuracy {
+  background: linear-gradient(135deg, rgba(37,99,235,0.08), rgba(139,92,246,0.08));
+  border: 1px solid rgba(79,70,229,0.2);
+}
+.rec-stat-accuracy .rec-stat-value { color: #4f46e5; }
+
+.rec-accuracy-breakdown { margin-top: 0.8rem; }
+.rec-breakdown-title {
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--text-secondary, #64748b);
+  margin-bottom: 0.4rem;
+}
+.rec-breakdown-table {
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+  overflow: hidden;
+}
+.rec-breakdown-row {
+  display: grid;
+  grid-template-columns: 1.2fr 0.8fr 0.8fr 0.8fr 1fr 1fr;
+  gap: 0.5rem;
+  padding: 0.45rem 0.7rem;
+  font-size: 0.74rem;
+  border-bottom: 1px solid var(--color-border);
+}
+.rec-breakdown-row:last-child { border-bottom: none; }
+.rec-breakdown-row:nth-child(odd):not(.rec-breakdown-header) {
+  background: var(--color-bg-soft, #f8fafc);
+}
+.rec-breakdown-header {
+  background: var(--color-bg-soft, #f1f5f9);
+  font-weight: 600;
+  color: var(--text-secondary, #64748b);
+  font-size: 0.72rem;
+}
+.rec-tier-cell { font-weight: 600; }
+
+.rec-distribution-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1rem;
+  margin-bottom: 1rem;
+}
+.rec-distribution-card {
+  padding: 0.9rem 1rem;
+  background: var(--color-bg, #fff);
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+}
+.rec-card-title {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: var(--text-primary, #1f2937);
+  margin-bottom: 0.7rem;
+  padding-bottom: 0.5rem;
+  border-bottom: 1px solid var(--color-border);
+}
+.rec-bar-chart { display: flex; flex-direction: column; gap: 0.5rem; }
+.rec-bar-row {
+  display: grid;
+  grid-template-columns: 80px 1fr 36px;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.74rem;
+}
+.rec-bar-label { font-weight: 600; }
+.rec-bar-track {
+  height: 18px;
+  background: var(--color-bg-soft, #f1f5f9);
+  border-radius: 9px;
+  overflow: hidden;
+}
+.rec-bar-fill {
+  height: 100%;
+  border-radius: 9px;
+  transition: width 0.4s ease;
+  min-width: 2px;
+}
+.rec-bar-count {
+  text-align: right;
+  font-weight: 600;
+  color: var(--text-primary, #1f2937);
+}
+
+.rec-top-funds-card {
+  padding: 0.9rem 1rem;
+  background: var(--color-bg, #fff);
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+}
+.rec-top-table {
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+  overflow: hidden;
+}
+.rec-top-row {
+  display: grid;
+  grid-template-columns: 2fr 1fr 0.8fr 1fr 1fr;
+  gap: 0.5rem;
+  padding: 0.5rem 0.7rem;
+  font-size: 0.75rem;
+  border-bottom: 1px solid var(--color-border);
+  align-items: center;
+}
+.rec-top-row:last-child { border-bottom: none; }
+.rec-top-row:nth-child(odd):not(.rec-top-header) {
+  background: var(--color-bg-soft, #f8fafc);
+}
+.rec-top-header {
+  background: var(--color-bg-soft, #f1f5f9);
+  font-weight: 600;
+  color: var(--text-secondary, #64748b);
+  font-size: 0.72rem;
+}
+.rec-top-name {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-weight: 600;
+}
+.rec-top-rank {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  background: var(--color-bg-soft, #e2e8f0);
+  border-radius: 50%;
+  font-size: 0.68rem;
+  color: var(--text-secondary, #64748b);
+}
+.rec-top-row:first-child .rec-top-rank,
+.rec-top-row:nth-child(2) .rec-top-rank { background: #fbbf24; color: #fff; }
+.rec-top-code { color: var(--text-tertiary, #94a3b8); font-size: 0.7rem; }
+.rec-top-count { font-weight: 600; }
+
+.rec-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.4rem;
+  padding: 1.5rem;
+  color: var(--text-secondary, #64748b);
+  font-size: 0.78rem;
+}
+.rec-empty {
+  text-align: center;
+  padding: 1.5rem;
+  color: var(--text-tertiary, #94a3b8);
+  font-size: 0.78rem;
+}
+
+@media (max-width: 768px) {
+  .rec-overview-stats { grid-template-columns: repeat(3, 1fr); }
+  .rec-distribution-row { grid-template-columns: 1fr; }
+  .rec-breakdown-row { grid-template-columns: 1fr 0.6fr 0.6fr 0.6fr 0.8fr 0.8fr; font-size: 0.7rem; }
+  .rec-top-row { grid-template-columns: 1.5fr 1fr 0.8fr; font-size: 0.7rem; }
+  .rec-top-row > span:nth-child(4),
+  .rec-top-row > span:nth-child(5) { display: none; }
+}
 </style>
