@@ -123,6 +123,14 @@ function sectorAccuracyColor(acc) {
   return 'rgba(220, 38, 38, 0.12)'
 }
 
+/** 板块准确率按样本个数降序排序（样本多的板块优先展示，更有统计意义） */
+const sortedSectorAccuracy = computed(() => {
+  if (!accuracy.value?.by_sector) return []
+  return Object.entries(accuracy.value.by_sector)
+    .map(([name, s]) => ({ name, s }))
+    .sort((a, b) => b.s.total - a.s.total)
+})
+
 const stats = computed(() => {
   const total = events.value.length
   const holding = events.value.filter(e => e.relevance_to_user === 'holding_impact').length
@@ -3073,17 +3081,17 @@ watch(scrollToFundCode, async (code) => {
           </div>
           <div v-if="Object.keys(accuracy.by_sector).length" class="accuracy-sectors">
             <div
-              v-for="(s, name) in accuracy.by_sector"
-              :key="name"
+              v-for="item in sortedSectorAccuracy"
+              :key="item.name"
               class="sector-acc-item"
-              :style="{ background: sectorAccuracyColor(s.accuracy) }"
+              :style="{ background: sectorAccuracyColor(item.s.accuracy) }"
             >
-              <span class="sector-acc-name">{{ name }}</span>
+              <span class="sector-acc-name">{{ item.name }}</span>
               <div class="sector-acc-bar">
-                <div class="sector-acc-fill" :style="{ width: `${s.accuracy * 100}%` }"></div>
+                <div class="sector-acc-fill" :style="{ width: `${item.s.accuracy * 100}%` }"></div>
               </div>
-              <span class="sector-acc-pct">{{ (s.accuracy * 100).toFixed(0) }}%</span>
-              <span class="sector-acc-samples">({{ s.total }})</span>
+              <span class="sector-acc-pct">{{ (item.s.accuracy * 100).toFixed(0) }}%</span>
+              <span class="sector-acc-samples">({{ item.s.total }})</span>
             </div>
           </div>
         </div>
