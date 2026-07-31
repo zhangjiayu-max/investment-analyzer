@@ -1610,37 +1610,81 @@ def _verify_single_event(event: dict, window_days: int = 3, force: bool = False)
 
         sorted_dates = sorted(prices.keys())
         base_price = None
-        for d in sorted_dates:
+        base_idx = -1
+        for i, d in enumerate(sorted_dates):
             if d >= mat_date:
                 base_price = prices[d]
+                base_idx = i
                 break
         if base_price is None:
             continue
 
-        verify_price = prices[sorted_dates[-1]]
+        # Accuracy-Boost V2（2026-07-31）：多维路径验证，不再只看首尾两点
+        # 原问题：只比较 base_price vs verify_price（窗口最后一天），
+        #         "涨一天跌两天"但终点恰好比起点高一点就被判 correct，不科学。
+        # 新算法：获取窗口内所有交易日价格序列，计算5个维度指标：
+        #   1. end_change: 终点涨跌幅（首尾对比）
+        #   2. max_drawdown: 窗口内最大回撤（基准日到窗口内最低点）
+        #   3. max_rally: 窗口内最大涨幅（基准日到窗口内最高点）
+        #   4. above_base_ratio: 收盘价高于基准价的天数占比
+        #   5. path_consistency: 日收益方向与预测方向一致的天数占比
+        window_prices = [prices[d] for d in sorted_dates[base_idx:]]
+        verify_price = window_prices[-1]
         if verify_price == base_price:
             continue
 
         s_change = (verify_price - base_price) / base_price * 100
+        changes_from_base = [(p - base_price) / base_price * 100 for p in window_prices]
+        max_drawdown = min(changes_from_base)  # 最大回撤（负值）
+        max_rally = max(changes_from_base)     # 最大涨幅（正值）
+        above_base_ratio = sum(1 for p in window_prices if p > base_price) / len(window_prices)
 
-        # 单板块方向判定
-        if abs(s_change) < THRESHOLD:
-            s_status = "flat"
-        elif direction == "positive" and s_change > 0:
-            s_status = "correct"
-        elif direction == "negative" and s_change < 0:
-            s_status = "correct"
-        elif direction == "neutral":
-            # ── P0-H 修复：原逻辑直接判 flat，不看幅度 ──
-            # 问题案例：SK海力士事件预测 neutral，实际跌 -16.36%，竟判为"平淡"
-            # 修复策略：neutral 方向 + 涨跌幅超阈值（abs(s_change) >= 3%）应判为 wrong
-            # （预测"无影响"但实际有大波动，说明预测错误）
-            if abs(s_change) >= 3.0:
+        # 日收益方向一致性（预测positive时，上涨日占比；预测negative时，下跌日占比）
+        if len(window_prices) >= 2:
+            daily_returns = [(window_prices[i] - window_prices[i-1]) / window_prices[i-1] * 100
+                             for i in range(1, len(window_prices))]
+            if direction == "positive":
+                path_consistency = sum(1 for r in daily_returns if r > 0) / len(daily_returns)
+            elif direction == "negative":
+                path_consistency = sum(1 for r in daily_returns if r < 0) / len(daily_returns)
+            else:
+                path_consistency = 1.0 - sum(1 for r in daily_returns if abs(r) >= 1.0) / len(daily_returns)
+        else:
+            path_consistency = 0.5
+
+        # ── 严格多维度判定（防止"冲高回落"误判为 correct）──
+        if direction == "positive":
+            # correct: 持续上涨 + 回撤小 + 大部分天数在基准上方
+            if s_change > THRESHOLD and max_drawdown > -3.0 and above_base_ratio >= 0.5:
+                s_status = "correct"
+            # wrong: 终点跌了 OR 冲高回落（终点涨但中途大跌且上涨天数不足）
+            elif s_change < -THRESHOLD:
+                s_status = "wrong"
+            elif s_change > 0 and max_drawdown < -3.0 and above_base_ratio < 0.4:
+                s_status = "wrong"  # 涨一天跌两天，冲高回落
+            elif s_change > 0 and path_consistency < 0.4:
+                s_status = "wrong"  # 日收益大部分与预测方向相反
+            else:
+                s_status = "flat"
+        elif direction == "negative":
+            # correct: 持续下跌 + 反弹小 + 大部分天数在基准下方
+            if s_change < -THRESHOLD and max_rally < 3.0 and (1 - above_base_ratio) >= 0.5:
+                s_status = "correct"
+            # wrong: 终点涨了 OR 先跌后反弹
+            elif s_change > THRESHOLD:
+                s_status = "wrong"
+            elif s_change < 0 and max_rally > 3.0 and above_base_ratio > 0.4:
+                s_status = "wrong"  # 先跌后涨，反弹回落
+            elif s_change < 0 and path_consistency < 0.4:
+                s_status = "wrong"  # 日收益大部分与预测方向相反
+            else:
+                s_status = "flat"
+        else:  # neutral
+            # neutral 预测：窗口内任何方向的显著波动都说明预测错误
+            if abs(s_change) >= 3.0 or max_drawdown < -3.0 or max_rally > 3.0:
                 s_status = "wrong"
             else:
                 s_status = "flat"
-        else:
-            s_status = "wrong"
 
         sector_results.append({
             "sector": s,
@@ -1650,19 +1694,39 @@ def _verify_single_event(event: dict, window_days: int = 3, force: bool = False)
             "status": s_status,
             "base_price": round(base_price, 2),
             "verify_price": round(verify_price, 2),
+            # V2 新增维度（供前端展示和调试）
+            "max_drawdown": round(max_drawdown, 2),
+            "max_rally": round(max_rally, 2),
+            "above_base_ratio": round(above_base_ratio, 2),
+            "path_consistency": round(path_consistency, 2),
         })
 
     if not sector_results:
         return None
 
-    # 多板块综合判定：多数投票 + 加权平均涨跌幅
+    # 多板块综合判定（V2 严格版）：
+    # 原问题：correct > wrong 就判 correct，即使有1个板块大跌5%+也被淹没
+    # 新规则：任一板块显著反向（涨跌幅超 ±5% 且 status=wrong）→ 整体判 wrong
+    #         correct 占比 >= 60% 且 wrong 占比 <= 20% → correct
+    #         wrong 占比 >= 40% → wrong
+    #         否则 → flat
     correct_count = sum(1 for r in sector_results if r["status"] == "correct")
     wrong_count = sum(1 for r in sector_results if r["status"] == "wrong")
     flat_count = sum(1 for r in sector_results if r["status"] == "flat")
+    total = len(sector_results)
 
-    if correct_count > wrong_count:
+    # 任一板块显著反向（>5%）→ 整体不能判 correct
+    has_significant_wrong = any(
+        r["status"] == "wrong" and abs(r["change_pct"]) >= 5.0
+        for r in sector_results
+    )
+
+    if has_significant_wrong and correct_count < total * 0.6:
+        # 有显著反向板块且correct不足六成 → wrong
+        final_status = "wrong"
+    elif correct_count >= total * 0.6 and wrong_count <= total * 0.2:
         final_status = "correct"
-    elif wrong_count > correct_count:
+    elif wrong_count >= total * 0.4:
         final_status = "wrong"
     else:
         final_status = "flat"
