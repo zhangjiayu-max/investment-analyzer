@@ -128,8 +128,9 @@ class ConversationQualityEvaluator:
                 "complexity": metadata.get("complexity", "unknown"),
                 "specialist_count": len(metadata.get("specialist_results", [])),
                 "duration_ms": metadata.get("duration_ms", 0),
-                "has_cross_review": metadata.get("cross_review", False),
-                "has_arbitration": metadata.get("arbitration", False),
+                # 兼容两种字段：orchestrator 写入 cross_review(bool)，路由层落库为 cross_review_results(list)
+                "has_cross_review": bool(metadata.get("cross_review")) or bool(metadata.get("cross_review_results")),
+                "has_arbitration": bool(metadata.get("arbitration")),
             },
             suggestions=suggestions,
         )
@@ -373,7 +374,8 @@ class ConversationQualityEvaluator:
         details.append(f"专家覆盖: {actual}/{expected} ({coverage:.0%})")
 
         # 2. 交叉审阅
-        has_cross_review = metadata.get("cross_review", False)
+        # 兼容两种字段：orchestrator 写入 cross_review(bool)，路由层落库为 cross_review_results(list)
+        has_cross_review = bool(metadata.get("cross_review")) or bool(metadata.get("cross_review_results"))
         metrics["has_cross_review"] = has_cross_review
         if has_cross_review:
             details.append("✓ 触发了交叉审阅")
