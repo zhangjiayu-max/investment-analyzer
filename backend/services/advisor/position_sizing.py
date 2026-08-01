@@ -19,6 +19,7 @@
 """
 
 import logging
+import math
 from typing import Optional
 
 from db.config import get_config_float, get_config_int, get_config_bool
@@ -95,12 +96,44 @@ def _percentile_bucket(percentile: Optional[float]) -> str:
 
 def _effective_base(holding: dict) -> float:
     """统一基准：max(total_cost, current_value)。
-    
+
     亏损时用 total_cost（不缩水），盈利时用 current_value（不虚增）。
     """
     total_cost = holding.get("total_cost") or 0
     current_value = holding.get("current_value") or 0
     return max(total_cost, current_value)
+
+
+# ── P1-S5（2026-08-01）：份额取整 ──────────────────────────
+
+def _is_etf_fund(holding: dict, fund_type: str) -> bool:
+    """启发式判断是否为场内 ETF（按 100 股一手取整）。"""
+    fund_name = (holding.get("fund_name") or "").upper()
+    fund_category = (holding.get("fund_category") or "").upper()
+    index_name = (holding.get("index_name") or "").upper()
+    text = f"{fund_name} {fund_category} {index_name}"
+    return "ETF" in text
+
+
+def _round_shares(shares: float, holding: dict, fund_type: str) -> tuple[float, str]:
+    """P1-S5：份额取整。
+
+    - 场内 ETF：按 `opportunity.constraint.etf_lot_size`（默认 100）股一手向下取整
+    - 场外基金：保留 `opportunity.constraint.min_subscription_shares`（默认 0.01）精度
+
+    Returns: (rounded_shares, basis)
+    """
+    if not shares or shares <= 0:
+        return 0.0, ""
+    if _is_etf_fund(holding, fund_type):
+        lot = get_config_int("opportunity.constraint.etf_lot_size", 100)
+        if lot <= 0:
+            lot = 100
+        rounded = math.floor(shares / lot) * lot
+        return float(rounded), f"ETF按{lot}股一手向下取整：{shares:.2f}→{rounded}"
+    # 场外基金保留 2 位小数
+    rounded = round(shares, 2)
+    return rounded, f"场外基金保留2位小数：{shares:.4f}→{rounded}"
 
 
 # ── 维度1：目标仓位锚定 ──────────────────────────
@@ -161,8 +194,26 @@ def calc_target_position(
     # 用户风险偏好调节
     risk_mult = _get_user_risk_multiplier(user_id)
 
+    # P1-S4：investment_horizon 联动目标仓位系数（goal_aware 开启时生效）
+    horizon_mult = 1.0
+    horizon_label = "unknown"
+    try:
+        if get_config_bool("smart_add.goal_aware_enabled", False):
+            from db.dashboard import get_user_profile
+            profile = get_user_profile(user_id)
+            horizon = (profile or {}).get("investment_horizon") or ""
+            horizon_label = horizon or "unknown"
+            if horizon == "short":
+                horizon_mult = get_config_float("smart_add.horizon_scale.short", 0.7)
+            elif horizon == "medium":
+                horizon_mult = get_config_float("smart_add.horizon_scale.medium", 1.0)
+            elif horizon == "long":
+                horizon_mult = get_config_float("smart_add.horizon_scale.long", 1.2)
+    except Exception:
+        pass
+
     target_pct = min(
-        kelly_adjusted * risk_mult,
+        kelly_adjusted * risk_mult * horizon_mult,
         type_hard_cap,
         user_max_pct,
         exposure_constraint,
@@ -183,6 +234,8 @@ def calc_target_position(
             "exposure_constraint": round(exposure_constraint, 2),
             "cash_constraint": round(cash_constraint_val, 2),
             "risk_mult": risk_mult,
+            "horizon_mult": round(horizon_mult, 2),  # P1-S4
+            "horizon_label": horizon_label,          # P1-S4
         },
     }
 
@@ -539,7 +592,12 @@ def calc_cash_constraint(
     total_assets: float,
 ) -> dict:
     """计算可用补仓资金及仓位约束。
-    
+
+    P1-S4（2026-08-01）：goal-aware 资金规划。
+    - 开关 `smart_add.goal_aware_enabled`（默认 false）
+    - 开启时：优先读 user_profiles.monthly_surplus，回退到 smart_add.monthly_cash_inflow
+    - 关闭时：保持原行为（读 smart_add.monthly_cash_inflow）
+
     Returns:
         {
             "cash_balance": float,
@@ -547,6 +605,7 @@ def calc_cash_constraint(
             "monthly_inflow": float,
             "total_available_3m": float,  # 3个月可用
             "position_room_pct": float,  # 资金允许的最大仓位增量%
+            "monthly_inflow_source": str, # P1-S4：月度现金流来源（user_profiles / global_config）
         }
     """
     try:
@@ -557,11 +616,35 @@ def calc_cash_constraint(
 
     usable_cash = cash * 0.8  # 留 20% 应急
 
-    # 月度现金流（用户可配置，默认 0）
+    # P1-S4：月度现金流读取（goal_aware 开启时优先 user_profiles.monthly_surplus）
+    monthly_inflow = 0.0
+    monthly_inflow_source = "global_config"
     try:
-        monthly_inflow = get_config_float("smart_add.monthly_cash_inflow", 0.0)
+        goal_aware = get_config_bool("smart_add.goal_aware_enabled", False)
     except Exception:
-        monthly_inflow = 0.0
+        goal_aware = False
+
+    if goal_aware:
+        # 优先读 user_profiles.monthly_surplus
+        try:
+            from db.dashboard import get_user_profile
+            profile = get_user_profile(user_id)
+            if profile:
+                ms = profile.get("monthly_surplus")
+                if isinstance(ms, (int, float)) and ms > 0:
+                    monthly_inflow = float(ms)
+                    monthly_inflow_source = "user_profiles.monthly_surplus"
+        except Exception:
+            pass
+
+    # 回退到全局配置（goal_aware 关闭 或 user_profiles 无数据）
+    if monthly_inflow <= 0:
+        try:
+            monthly_inflow = get_config_float("smart_add.monthly_cash_inflow", 0.0)
+            monthly_inflow_source = "global_config" if not goal_aware else "global_config_fallback"
+        except Exception:
+            monthly_inflow = 0.0
+            monthly_inflow_source = "none"
 
     # 3个月可用资金（保守估算，不含减仓释放，因减仓需用户手动执行）
     total_available_3m = usable_cash + monthly_inflow * 3
@@ -575,6 +658,7 @@ def calc_cash_constraint(
         "monthly_inflow": round(monthly_inflow, 2),
         "total_available_3m": round(total_available_3m, 2),
         "position_room_pct": round(position_room_pct, 2),
+        "monthly_inflow_source": monthly_inflow_source,  # P1-S4：来源标记
     }
 
 
@@ -694,6 +778,11 @@ def generate_position_sizing_plan(
         first_position=first_position,
     )
 
+    # P1-S5：份额取整（基于目标驱动月度金额 + 当前净值）
+    current_price = holding.get("current_price") or 0
+    raw_shares = (target_driven_monthly / current_price) if current_price > 0 else 0.0
+    rounded_shares, shares_basis = _round_shares(raw_shares, holding, fund_type)
+
     return {
         "effective_base": round(effective_base, 2),
         "current_position_pct": round(current_position_pct, 2),
@@ -709,6 +798,10 @@ def generate_position_sizing_plan(
         "target_driven_monthly": round(target_driven_monthly, 2),
         "reduce_amount": round(reduce_amount, 2),
         "gap_pct": round(gap_pct, 2),
+        # P1-S5：份额取整后输出（ETF 100 股一手 / 场外 2 位小数）
+        "shares": rounded_shares,
+        "shares_basis": shares_basis,
+        "raw_shares": round(raw_shares, 4) if raw_shares else 0.0,
         "summary": summary,
     }
 

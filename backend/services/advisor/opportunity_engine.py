@@ -224,6 +224,124 @@ def _latest_valuation_for_theme(theme_rule: dict) -> dict | None:
     return candidates[0]
 
 
+def _calc_valuation_zscore(index_code: str | None, metric_type: str | None = None,
+                           window_years: int | None = None) -> dict | None:
+    """P0-R1（2026-08-01）：估值信号科学化 — 计算估值指标的 z-score 与均值回归半衰期。
+
+    金融原理：裸百分位只反映"当前在历史区间的位置"，z-score 进一步刻画
+    "偏离历史均值多少个标准差"，对极端低估/高估更敏感；均值回归半衰期
+    （OU 过程估计）辅助判断"估值修复大概需要多久"，用于时机判断。
+
+    所有阈值/窗口均走 system_config（金融严谨性，禁止硬编码）。
+
+    Returns:
+        {zscore, level, mean, std, current, sample_size, window_years,
+         half_life_months, indicator} 或 None（开关关闭/无数据/样本不足）
+        level ∈ {deep_low, low, neutral, high}
+    """
+    if not index_code:
+        return None
+    try:
+        from db.config import get_config_bool, get_config_int, get_config_float
+        if not get_config_bool("opportunity.valsignal.enabled", True):
+            return None
+        if window_years is None:
+            window_years = get_config_int("opportunity.valsignal.zscore_window_years", 10)
+        halflife_enabled = get_config_bool("opportunity.valsignal.halflife_enabled", True)
+        z_deep = get_config_float("opportunity.valsignal.zscore_deep", -1.5)
+        z_low = get_config_float("opportunity.valsignal.zscore_low", -1.0)
+        z_high = get_config_float("opportunity.valsignal.zscore_high", 1.0)
+    except Exception:
+        return None
+
+    try:
+        from db.valuations import get_valuation_history
+        rows = get_valuation_history(index_code, days=window_years * 365, metric_type=metric_type)
+    except Exception:
+        return None
+    if not rows:
+        return None
+
+    # 序列按时间升序（get_valuation_history 返回 DESC，需反转）；仅取有效 current_value
+    series = [r.get("current_value") for r in reversed(rows) if r.get("current_value") is not None]
+    n = len(series)
+    if n < 30:  # 样本不足，z-score 不稳定，保守不输出
+        return {"zscore": None, "level": "unknown", "sample_size": n,
+                "window_years": window_years, "reason": "insufficient_samples"}
+
+    mean = sum(series) / n
+    var = sum((x - mean) ** 2 for x in series) / n
+    std = var ** 0.5
+    current = series[-1]
+    zscore = (current - mean) / std if std > 0 else 0.0
+
+    # 均值回归半衰期（OU 过程）：对 Δx_t = α + β·x_{t-1} 做回归，half-life = -ln2 / β
+    half_life_months = None
+    if halflife_enabled and n >= 40:
+        try:
+            xs = series[:-1]            # x_{t-1}
+            dys = [series[i] - series[i - 1] for i in range(1, n)]  # Δx_t
+            m = len(xs)
+            mx = sum(xs) / m
+            sxx = sum((x - mx) ** 2 for x in xs)
+            sxy = sum((xs[i] - mx) * dys[i] for i in range(m))
+            beta = sxy / sxx if sxx > 0 else 0.0
+            if beta < 0:  # β<0 才存在均值回归
+                import math
+                # β 是"每期"回归系数，假设数据为日频→月化近似 ×21
+                half_life_periods = -math.log(2) / beta
+                half_life_months = round(half_life_periods / 21.0, 1)
+        except Exception:
+            half_life_months = None
+
+    if zscore <= z_deep:
+        level = "deep_low"
+    elif zscore <= z_low:
+        level = "low"
+    elif zscore >= z_high:
+        level = "high"
+    else:
+        level = "neutral"
+
+    return {
+        "zscore": round(zscore, 3),
+        "level": level,
+        "mean": round(mean, 3),
+        "std": round(std, 3),
+        "current": round(current, 3),
+        "sample_size": n,
+        "window_years": window_years,
+        "half_life_months": half_life_months,
+        "index_code": index_code,
+        "metric_type": metric_type,
+    }
+
+
+def _select_valuation_indicator(theme_name: str) -> str:
+    """P0-R1：按主题类型选择更合适的估值指标（周期/银行用PB、成长用PS、红利用股息率）。
+
+    金融原理：不同行业/风格的指数，最适配的估值口径不同——
+    周期与银行盈利波动大，PE 失真，宜用 PB；成长股看 PS；红利策略看股息率。
+    指标映射走 system_config（opportunity.valsignal.indicator_map，JSON）。
+    """
+    try:
+        from db.config import get_config
+        import json as _json
+        raw = get_config("opportunity.valsignal.indicator_map",
+                         '{"default":"pe","bank":"pb","cycle":"pb","growth":"ps","dividend":"dy"}')
+        mapping = _json.loads(raw) if raw else {}
+    except Exception:
+        mapping = {}
+    category = _get_theme_category(theme_name)
+    # 银行归入 cycle 类处理（_get_theme_category 未必单独区分 bank）
+    name_lower = (theme_name or "").lower()
+    if any(k in theme_name for k in ("银行", "证券", "保险", "金融")) or "bank" in name_lower:
+        category = "bank"
+    elif any(k in theme_name for k in ("红利", "股息", "高股息")):
+        category = "dividend"
+    return mapping.get(category) or mapping.get("default") or "pe"
+
+
 def _portfolio_fit(theme_rule: dict, user_id: str = "default") -> dict:
     holdings = list_holdings(user_id)
     active = [h for h in holdings if (h.get("shares") or 0) > 0]
@@ -548,6 +666,146 @@ def _get_sentiment_score() -> tuple[int, str]:
     except Exception as e:
         logger.debug(f"[opportunity] 情绪指标获取失败: {e}")
         return 0, "neutral"
+
+
+# ── P1-R5（2026-08-01）：宏观 regime 联动 ──
+# 缓存 market_state 1 小时（避免每次评分都查 DB + 调外部接口）
+_MARKET_STATE_CACHE: dict = {"data": None, "ts": 0.0}
+_MARKET_STATE_CACHE_TTL = 3600.0
+
+
+def _get_market_state_cached() -> dict:
+    """获取市场状态（regime + sentiment + pe_percentile），1 小时缓存。"""
+    import time as _time
+    now = _time.monotonic()
+    cached = _MARKET_STATE_CACHE.get("data")
+    if cached and (now - _MARKET_STATE_CACHE.get("ts", 0.0)) < _MARKET_STATE_CACHE_TTL:
+        return cached
+    try:
+        from services.portfolio_fact_layer import _build_market_state
+        state = _build_market_state()
+    except Exception as e:
+        logger.debug(f"[opportunity] _build_market_state 失败: {e}")
+        state = {"regime": "unknown", "sentiment": "neutral", "pe_percentile": None}
+    _MARKET_STATE_CACHE["data"] = state
+    _MARKET_STATE_CACHE["ts"] = now
+    return state
+
+
+def _get_regime_align_score(theme_rule: dict, valuation_pct: float | None) -> tuple[int, str]:
+    """P1-R5：宏观 regime 联动评分（第 15 维）。
+
+    依据市场 regime 与主题属性（进攻/防御）的匹配度给分：
+    - bear + 防御主题 → 加分（资金避险流向防御资产）
+    - bear + 进攻主题 → 扣分（熊市不追高）
+    - bull + 进攻主题 → 加分（牛市进攻主线）
+    - bull + 高估值 → regime gate 惩罚（牛市尾部追高最危险）
+    - sideways → 中性 0
+
+    Returns:
+        (score_delta, regime): score_delta 范围 -8~+5
+    """
+    try:
+        from db.config import get_config, get_config_int
+        state = _get_market_state_cached()
+        regime = state.get("regime", "unknown")
+        if regime == "unknown":
+            return 0, "unknown"
+
+        theme_name = theme_rule.get("theme", "")
+        # 主题分类从 JSON 配置读取
+        import json as _json
+        try:
+            cat_map = _json.loads(get_config("opportunity.regime.theme_category", "{}"))
+        except Exception:
+            cat_map = {}
+        category = cat_map.get(theme_name, "neutral")
+
+        if regime == "bear":
+            if category == "defensive":
+                return get_config_int("opportunity.regime.bear_defensive_bonus", 5), "bear"
+            elif category == "offensive":
+                return get_config_int("opportunity.regime.bear_offensive_penalty", -5), "bear"
+            else:
+                return 0, "bear"
+        elif regime == "bull":
+            # regime gate：牛市 + 高估值 → 强惩罚（追高最危险）
+            if valuation_pct is not None and valuation_pct > 70:
+                return get_config_int("opportunity.regime.bull_high_valuation_penalty", -8), "bull"
+            if category == "offensive":
+                return get_config_int("opportunity.regime.bull_offensive_bonus", 3), "bull"
+            return 0, "bull"
+        else:  # sideways
+            return 0, "sideways"
+    except Exception as e:
+        logger.debug(f"[opportunity] regime 评分失败: {e}")
+        return 0, "unknown"
+
+
+def _calc_fed_model() -> dict:
+    """P1-R5：FED 模型（股债性价比）— 计算沪深300 EP - 10Y 国债收益率。
+
+    EP = 1/PE（沪深300 盈利收益率）
+    YTM = 10 年期国债收益率
+    fed_value = EP - YTM（正值越大，股票相对债券越有吸引力）
+
+    开关 opportunity.macro.fed_model_enabled 默认 false（需外部数据）。
+
+    Returns:
+        {"fed_value": float, "ep": float, "ytm": float, "zscore": float|None}
+        失败返回空 dict
+    """
+    try:
+        from db.config import get_config_bool
+        if not get_config_bool("opportunity.macro.fed_model_enabled", False):
+            return {}
+
+        # 取沪深300 PE
+        from db._conn import _get_conn
+        conn = _get_conn()
+        row = conn.execute(
+            """SELECT percentile, pe_ttm
+               FROM index_valuations
+               WHERE (index_code = '399300.SZ' OR index_code = '000300.SH')
+                 AND metric_type = '市盈率'
+               ORDER BY snapshot_date DESC LIMIT 1"""
+        ).fetchone()
+        conn.close()
+        if not row or not row["pe_ttm"]:
+            return {}
+        pe = float(row["pe_ttm"])
+        ep = 1.0 / pe if pe > 0 else 0.0
+
+        # 取 10Y 国债收益率（通过工具调 akshare）
+        try:
+            from tools import execute_tool
+            result_str = execute_tool("get_bond_yield_curve", {"country": "china"})
+            import json as _json
+            curve = _json.loads(result_str) if isinstance(result_str, str) else result_str
+            summary = curve.get("summary", {}).get("中国", {})
+            ytm = summary.get("10年")
+            if ytm is None:
+                return {}
+            # akshare 返回的收益率是百分数（如 2.5 表示 2.5%），需除以 100
+            ytm = float(ytm) / 100.0
+        except Exception as e:
+            logger.debug(f"[opportunity] FED 模型取国债收益率失败: {e}")
+            return {}
+
+        fed_value = ep - ytm
+        # z-score 简化：fed_value > 0 为股票有吸引力，< 0 为债券有吸引力
+        # 历史均值约 0，标准差约 0.01-0.02，此处用简单阈值
+        zscore = fed_value / 0.015 if abs(fed_value) < 0.05 else (3.0 if fed_value > 0 else -3.0)
+
+        return {
+            "fed_value": round(fed_value, 4),
+            "ep": round(ep, 4),
+            "ytm": round(ytm, 4),
+            "zscore": round(zscore, 2),
+        }
+    except Exception as e:
+        logger.debug(f"[opportunity] FED 模型计算失败: {e}")
+        return {}
 
 
 # Accuracy-Fix（2026-07-27）：成交量缓存（5 分钟 TTL，与技术指标共用窗口）
@@ -1023,22 +1281,50 @@ def _get_theme_thresholds(theme_name: str) -> dict:
         {"can_buy_score": int, "valuation_veto_pct": float, "valuation_block_can_buy_pct": float}
     """
     try:
-        from db.config import get_config_bool
+        from db.config import get_config_bool, get_config_int, get_config_float
         theme_aware = get_config_bool("opportunity.theme_aware_threshold_enabled", True)
     except Exception:
         theme_aware = True
+        get_config_int = None
+        get_config_float = None
+
+    # P0-R2（2026-08-01）：阈值全部走 system_config，禁止硬编码（金融严谨性）。
+    # 配置默认值严格复刻原硬编码行为，配置不可用时回退到原值兜底。
+    def _cfg(key: str, default):
+        try:
+            if isinstance(default, int):
+                return get_config_int(key, default)
+            return get_config_float(key, default)
+        except Exception:
+            return default
 
     if not theme_aware:
-        # 开关关闭：统一阈值（原逻辑）
-        return {"can_buy_score": 75, "valuation_veto_pct": 80, "valuation_block_can_buy_pct": 60}
+        # 开关关闭：统一阈值（原逻辑 {75, 80, 60}）
+        return {
+            "can_buy_score": _cfg("opportunity.threshold.default_can_buy", 75),
+            "valuation_veto_pct": _cfg("opportunity.threshold.default_veto_pct", 80.0),
+            "valuation_block_can_buy_pct": _cfg("opportunity.threshold.default_block_pct", 60.0),
+        }
 
     category = _get_theme_category(theme_name)
     if category == "growth":
-        return {"can_buy_score": 82, "valuation_veto_pct": 60, "valuation_block_can_buy_pct": 60}
+        return {
+            "can_buy_score": _cfg("opportunity.threshold.growth_can_buy", 82),
+            "valuation_veto_pct": _cfg("opportunity.threshold.growth_veto_pct", 60.0),
+            "valuation_block_can_buy_pct": _cfg("opportunity.threshold.growth_block_pct", 60.0),
+        }
     elif category == "cycle":
-        return {"can_buy_score": 78, "valuation_veto_pct": 70, "valuation_block_can_buy_pct": 70}
+        return {
+            "can_buy_score": _cfg("opportunity.threshold.cycle_can_buy", 78),
+            "valuation_veto_pct": _cfg("opportunity.threshold.cycle_veto_pct", 70.0),
+            "valuation_block_can_buy_pct": _cfg("opportunity.threshold.cycle_block_pct", 70.0),
+        }
     else:  # value
-        return {"can_buy_score": 75, "valuation_veto_pct": 80, "valuation_block_can_buy_pct": 80}
+        return {
+            "can_buy_score": _cfg("opportunity.threshold.value_can_buy", 75),
+            "valuation_veto_pct": _cfg("opportunity.threshold.value_veto_pct", 80.0),
+            "valuation_block_can_buy_pct": _cfg("opportunity.threshold.value_block_pct", 80.0),
+        }
 
 
 def _check_signal_cooldown(theme_name: str, trade_date: str) -> int:
@@ -1115,7 +1401,117 @@ def _is_valuation_stale(valuation: dict | None) -> bool:
         return False
 
 
-def _score_theme(theme_rule: dict, news_hits: list[dict], valuation: dict | None, portfolio_fit: dict) -> tuple[int, str, str, str]:
+# ════════════════════════════════════════════════════════════════
+# P1-R4（2026-08-01）：信号 IC 加权置信度
+# ════════════════════════════════════════════════════════════════
+
+def _calc_ic_confidence(dim_scores: dict) -> float | None:
+    """P1-R4：基于 IC 加权的得分置信度（0-1）。
+
+    逻辑：
+    - 开关 opportunity.ic.enabled 关闭 → 返回 None
+    - 各维度 IC 从 db.opportunities.calc_signal_ic 获取（1 小时缓存）
+    - ic_confidence = sum(dim_score × dim_ic_weight) / sum(dim_ic_weight)
+    - 其中 dim_ic_weight = max(ic, 0)（负 IC 维度不参与，避免反向加成）
+    - 样本不足（IC 为 None）→ 返回 None
+
+    Returns:
+        [0, 1] 区间置信度；开关关闭或样本不足返回 None
+    """
+    try:
+        from db.config import get_config_bool, get_config_int, get_config_float
+        if not get_config_bool("opportunity.ic.enabled", False):
+            return None
+        min_samples = get_config_int("opportunity.ic.min_samples", 30)
+        window_days = get_config_int("opportunity.ic.window_days", 90)
+        from db.opportunities import calc_signal_ic
+
+        weighted_sum = 0.0
+        weight_sum = 0.0
+        for dim_name, dim_score in dim_scores.items():
+            ic = calc_signal_ic(dim_name, window_days)
+            if ic is None:
+                continue
+            # 只用正 IC 维度（负 IC 维度信号反向，不应贡献正向置信度）
+            dim_weight = max(ic, 0.0)
+            if dim_weight > 0:
+                weighted_sum += dim_score * dim_weight
+                weight_sum += dim_weight
+
+        if weight_sum == 0:
+            return None
+        # dim_score 范围约 [-20, 15]，归一化到 [0, 1]
+        raw = weighted_sum / weight_sum
+        # 假设最大可能得分 15，最小 -20，映射到 [0, 1]
+        ic_conf = (raw + 20) / 35.0
+        return round(max(0.0, min(1.0, ic_conf)), 3)
+    except Exception as e:
+        logger.debug(f"[opportunity] IC 置信度计算失败: {e}")
+        return None
+
+
+def _apply_ic_feedback() -> dict:
+    """P1-R4：IC 反哺维度权重（慢速精调）。
+
+    规则（每 N 次回测后触发，N = opportunity.ic.refresh_interval_runs，默认 10）：
+    - IC > 0.1 → weight × 1.2（上限 2.0）
+    - IC < 0 → weight × 0.8（下限 0.3）
+    - IC < -0.05 → weight = 0（禁用该维度）
+    - 样本不足（IC = None）→ 保持原权重
+
+    保留原 _apply_hit_rate_feedback 的"3 次 miss 降权"作为快速反馈，
+    本函数作为慢速精调，由 review_opportunity_backtests 按周期触发。
+
+    Returns:
+        {adjusted: int, details: [{dim, old_weight, new_weight, ic}]}
+    """
+    try:
+        from db.config import get_config_bool, get_config_int, get_config, update_config
+        from db.opportunities import calc_signal_ic, log_weight_change
+
+        if not get_config_bool("opportunity.ic.enabled", False):
+            return {"adjusted": 0, "reason": "IC 开关未开启"}
+
+        window_days = get_config_int("opportunity.ic.window_days", 90)
+        dims = ["news", "policy", "basic", "valuation", "holding", "tradability",
+                "tech", "capital", "sentiment", "leading", "volume", "research",
+                "margin", "etf", "regime"]
+
+        adjusted = 0
+        details = []
+        for dim in dims:
+            ic = calc_signal_ic(dim, window_days)
+            if ic is None:
+                continue
+            config_key = f"opportunity.weight.dim_{dim}"
+            old_weight = float(get_config(config_key, "1.0"))
+            new_weight = old_weight
+
+            if ic < -0.05:
+                new_weight = 0.0  # 禁用
+            elif ic < 0:
+                new_weight = max(0.3, old_weight * 0.8)
+            elif ic > 0.1:
+                new_weight = min(2.0, old_weight * 1.2)
+
+            if new_weight != old_weight:
+                update_config(config_key, str(round(new_weight, 2)))
+                log_weight_change("dim_ic", dim, old_weight, new_weight,
+                                  f"ic={round(ic, 3)}", 0)
+                adjusted += 1
+                details.append({
+                    "dim": dim, "old_weight": old_weight,
+                    "new_weight": round(new_weight, 2), "ic": round(ic, 3),
+                })
+                logger.info(f"[opportunity] IC 反哺: {dim} IC={round(ic,3)}, 权重 {old_weight}→{new_weight}")
+
+        return {"adjusted": adjusted, "details": details}
+    except Exception as e:
+        logger.warning(f"[opportunity] IC 反哺失败: {e}")
+        return {"adjusted": 0, "error": str(e)}
+
+
+def _score_theme(theme_rule: dict, news_hits: list[dict], valuation: dict | None, portfolio_fit: dict) -> tuple[int, str, str, str, str, float | None]:
     """主题评分（2026-07-20 系统性修复后）。
 
     评分体系：
@@ -1133,6 +1529,12 @@ def _score_theme(theme_rule: dict, news_hits: list[dict], valuation: dict | None
     - 研报情绪（Accuracy-Boost 新增）：-5~+8 分
     - 融资融券（Accuracy-Boost 新增）：-3~+5 分
     - ETF 申赎（Accuracy-Boost 新增）：-3~+5 分
+    - 宏观 regime 联动（P1-R5 新增）：-8~+5 分
+
+    P1-R4（2026-08-01）：14 维权重字典化 + IC 加权
+    - 每维加分独立追踪到 dim_scores dict
+    - 最终 score = sum(dim_score × weight)，权重走 opportunity.weight.dim_{name}（默认 1.0 等权）
+    - 输出 dim_scores_json（供回测算 IC）+ ic_confidence（IC 加权置信度）
 
     一票否决（P0-A）：
     - 估值 >80% → 强制 avoid
@@ -1143,9 +1545,10 @@ def _score_theme(theme_rule: dict, news_hits: list[dict], valuation: dict | None
     - verdict=can_buy 但 capital_signal=outflow → 降级为 watch（资金流出与看多信号矛盾）
 
     Returns:
-        (score, verdict, capital_signal, volume_signal)
+        (score, verdict, capital_signal, volume_signal, dim_scores_json, ic_confidence)
     """
-    score = 0
+    # P1-R4：15 维分项分追踪（默认权重 1.0，等权）
+    dim_scores: dict[str, float] = {}
 
     # ── 1. 新闻命中（P0-C: 过滤利空新闻）──
     positive_news = [
@@ -1153,14 +1556,16 @@ def _score_theme(theme_rule: dict, news_hits: list[dict], valuation: dict | None
         if not _contains_negative_sentiment(f"{n.get('title','')} {n.get('summary','')}")
     ]
     if positive_news:
-        score += min(15, 8 + len(positive_news) * 3)
+        dim_scores["news"] = min(15, 8 + len(positive_news) * 3)
+    else:
+        dim_scores["news"] = 0
 
     # ── 2. 政策词命中（P0-D: 权重 25→12）──
     policy_text = " ".join(f"{n.get('title','')} {n.get('summary','')}" for n in news_hits)
-    score += 12 if _contains_any(policy_text, theme_rule.get("policy_terms", [])) else 5
+    dim_scores["policy"] = 12 if _contains_any(policy_text, theme_rule.get("policy_terms", [])) else 5
 
     # ── 3. 无条件基础分（P0-E: 12→5）──
-    score += 5
+    dim_scores["basic"] = 5
 
     # ── 4. 估值百分位（P0-B: 修复无估值反加5分bug；>80%倒扣分）──
     # Accuracy-Boost 修复1：估值过期时不加分（保守），与无估值同处理
@@ -1169,17 +1574,20 @@ def _score_theme(theme_rule: dict, news_hits: list[dict], valuation: dict | None
     if valuation_stale:
         # 估值过期：不作为评分依据，后续 verdict 也按"无估值"处理
         logger.debug(f"[opportunity] 估值数据过期 theme={theme_rule.get('theme','')}, snapshot_date={valuation.get('snapshot_date') if valuation else None}")
+        dim_scores["valuation"] = 0
     elif valuation and valuation.get("percentile") is not None:
         pct = valuation["percentile"]
         valuation_pct = pct
         if pct <= 30:
-            score += 15
+            dim_scores["valuation"] = 15
         elif pct <= 60:
-            score += 9
+            dim_scores["valuation"] = 9
         elif pct <= 80:
-            score += 3
+            dim_scores["valuation"] = 3
         else:
-            score -= 5  # P0-B: 估值过高倒扣分（原: +3 错误）
+            dim_scores["valuation"] = -5  # P0-B: 估值过高倒扣分（原: +3 错误）
+    else:
+        dim_scores["valuation"] = 0
     # P0-B 修复：无估值数据不加分（原 bug: score += 5 反而加分）
 
     # ── 5. 持仓重叠风险（Phase 2 增强：感知持仓盈亏）──
@@ -1233,56 +1641,78 @@ def _score_theme(theme_rule: dict, news_hits: list[dict], valuation: dict | None
                 deep_loss_overvalued = True
 
         if deep_loss_undervalued:
-            score += 12  # 深套低估补仓窗口，反转为正分
+            dim_scores["holding"] = 12  # 深套低估补仓窗口，反转为正分
         elif deep_loss_overvalued:
-            score -= 20  # 深套高估勿补，加重扣分
+            dim_scores["holding"] = -20  # 深套高估勿补，加重扣分
         else:
-            score += 15 if overlap == "low" else (8 if overlap == "medium" else 2)
+            dim_scores["holding"] = 15 if overlap == "low" else (8 if overlap == "medium" else 2)
     else:
-        score += 15 if overlap == "low" else (8 if overlap == "medium" else 2)
+        dim_scores["holding"] = 15 if overlap == "low" else (8 if overlap == "medium" else 2)
 
     # ── 6. 短期可交易性 ──
     funds = theme_rule.get("funds", [])
-    score += 10 if any(f.get("short_term_suitable") for f in funds) else 3
+    dim_scores["tradability"] = 10 if any(f.get("short_term_suitable") for f in funds) else 3
 
     # ── 7. 技术指标（P1-K 新增）──
     tech_score, tech_signal = _get_technical_score(theme_rule)
-    score += tech_score
-    if tech_signal == "bear":
-        score -= 5  # 技术看空额外扣分
+    dim_scores["tech"] = tech_score + (-5 if tech_signal == "bear" else 0)
 
     # ── 8. 资金流向（P1-L 新增）──
     capital_score, capital_signal = _get_capital_flow_score(theme_rule)
-    score += capital_score
+    dim_scores["capital"] = capital_score
 
     # ── 9. 情绪指标（P1-M 新增）──
     sentiment_score, _ = _get_sentiment_score()
-    score += sentiment_score
+    dim_scores["sentiment"] = sentiment_score
 
     # ── 10. 领先指标（LI-5 新增，开关默认关闭）──
     trade_date = datetime.now().strftime("%Y-%m-%d")
     leading_score, _ = _get_leading_indicator_score(theme_rule, trade_date)
-    score += leading_score
+    dim_scores["leading"] = leading_score
 
     # ── 11. 成交量确认（Accuracy-Fix 2026-07-27 新增）──
     # 作为第二数据源验证新闻信号真实性，避免"干拔"主题被误判
     volume_score, volume_signal = _get_volume_score(theme_rule)
-    score += volume_score
+    dim_scores["volume"] = volume_score
 
     # ── 12. 研报情绪（Accuracy-Boost 2026-07-30 新增）──
     # 通过研报评级变化判断机构情绪：上调+8/下调-5
     research_score, _ = _get_research_report_score(theme_rule)
-    score += research_score
+    dim_scores["research"] = research_score
 
     # ── 13. 融资融券（Accuracy-Boost 2026-07-30 新增）──
     # 杠杆资金趋势：融资余额上升+5/下降-3
     margin_score, _ = _get_margin_data_score(theme_rule)
-    score += margin_score
+    dim_scores["margin"] = margin_score
 
     # ── 14. ETF 申赎（Accuracy-Boost 2026-07-30 新增）──
     # 资金净流入/流出：净申购+5/净赎回-3
     etf_flow_score, _ = _get_etf_flow_score(theme_rule)
-    score += etf_flow_score
+    dim_scores["etf"] = etf_flow_score
+
+    # ── 15. 宏观 regime 联动（P1-R5 2026-08-01 新增）──
+    # 依据市场 regime 与主题属性（进攻/防御）匹配度给分
+    # bear+防御 +5 / bear+进攻 -5 / bull+进攻 +3 / bull+高估值 -8 / sideways 0
+    regime_score, regime_signal = _get_regime_align_score(theme_rule, valuation_pct)
+    dim_scores["regime"] = regime_score
+
+    # ── P1-R4：应用维度权重（默认 1.0 等权，行为不变）──
+    try:
+        from db.config import get_config_float
+        score = 0
+        for dim_name, dim_score in dim_scores.items():
+            weight = get_config_float(f"opportunity.weight.dim_{dim_name}", 1.0)
+            score += dim_score * weight
+    except Exception:
+        # 兜底：等权求和
+        score = sum(dim_scores.values())
+
+    # ── P1-R4：计算 IC 加权置信度（开关关闭或样本不足返回 None）──
+    ic_confidence = _calc_ic_confidence(dim_scores)
+
+    # 序列化 dim_scores 供回测算 IC（JSON 字符串）
+    import json as _json
+    dim_scores_json = _json.dumps(dim_scores, ensure_ascii=False)
 
     # ── F-4+（2026-07-23）：命中率反哺降权 — 闭环关键 ──
     # 主题连续 miss ≥3 次后降权，使低命中率主题的评分自动降低
@@ -1303,13 +1733,22 @@ def _score_theme(theme_rule: dict, news_hits: list[dict], valuation: dict | None
     veto_pct = thresholds["valuation_veto_pct"]
     block_can_buy_pct = thresholds["valuation_block_can_buy_pct"]
 
+    # P0-R2（2026-08-01）：watch 下限与否决/禁买评分上限走配置（金融严谨性）
+    try:
+        from db.config import get_config_int
+        watch_floor = get_config_int("opportunity.threshold.watch_floor", 50)
+        veto_score_cap = get_config_int("opportunity.threshold.veto_score_cap", 30)
+        block_score_cap = get_config_int("opportunity.threshold.block_score_cap", 60)
+    except Exception:
+        watch_floor, veto_score_cap, block_score_cap = 50, 30, 60
+
     # ── Accuracy-Boost 修复5：信号冷却期 ──
     trade_date_for_cooldown = datetime.now().strftime("%Y-%m-%d")
     cooldown_cap = _check_signal_cooldown(theme_rule.get("theme", ""), trade_date_for_cooldown)
     if cooldown_cap < 100:
         score = min(score, cooldown_cap)
 
-    verdict = "can_buy" if score >= can_buy_score else ("watch" if score >= 50 else "avoid")
+    verdict = "can_buy" if score >= can_buy_score else ("watch" if score >= watch_floor else "avoid")
 
     # ── P0-A + Accuracy-Boost 修复2: 估值过高一票否决（主题差异化阈值）──
     # 问题背景：原逻辑 14 条估值 97-99% 的主题仍判 can_buy
@@ -1318,11 +1757,11 @@ def _score_theme(theme_rule: dict, news_hits: list[dict], valuation: dict | None
     if valuation_pct is not None:
         if valuation_pct > veto_pct:
             verdict = "avoid"
-            score = min(score, 30)
+            score = min(score, veto_score_cap)
         elif valuation_pct > block_can_buy_pct:
             if verdict == "can_buy":
                 verdict = "watch"
-                score = min(score, 60)
+                score = min(score, block_score_cap)
     else:
         # 估值数据缺失或过期 → 不允许 can_buy
         # Accuracy-Boost 修复1：估值过期与无估值同处理（开关 valuation_stale_block_can_buy）
@@ -1355,7 +1794,7 @@ def _score_theme(theme_rule: dict, news_hits: list[dict], valuation: dict | None
         verdict = "watch"
     if funds and not any(f.get("short_term_suitable") for f in funds) and verdict == "can_buy":
         verdict = "watch"
-    return score, verdict, capital_signal, volume_signal
+    return int(score), verdict, capital_signal, volume_signal, dim_scores_json, ic_confidence
 
 
 def _build_matched_funds(theme_rule: dict) -> list[dict]:
@@ -1452,17 +1891,27 @@ def _calc_entry_amount(verdict: str, valuation: dict | None,
     """
     if verdict != "can_buy":
         return 0
+    # P0-R2（2026-08-01）：入场金额乘数走配置（金融严谨性，禁止硬编码）
+    try:
+        from db.config import get_config_float
+        m_deep = get_config_float("opportunity.entry.mult_deep_low", 1.5)
+        m_low = get_config_float("opportunity.entry.mult_low", 1.0)
+        m_mid = get_config_float("opportunity.entry.mult_mid", 0.7)
+        m_high = get_config_float("opportunity.entry.mult_high", 0.4)
+        m_nodata = get_config_float("opportunity.entry.mult_no_data", 0.5)
+    except Exception:
+        m_deep, m_low, m_mid, m_high, m_nodata = 1.5, 1.0, 0.7, 0.4, 0.5
     if not valuation or valuation.get("percentile") is None:
-        return round(base_budget * 0.5, 2)
+        return round(base_budget * m_nodata, 2)
     pct = valuation["percentile"]
     if pct < 20:
-        multiplier = 1.5
+        multiplier = m_deep
     elif pct < 40:
-        multiplier = 1.0
+        multiplier = m_low
     elif pct < 60:
-        multiplier = 0.7
+        multiplier = m_mid
     elif pct < 80:
-        multiplier = 0.4
+        multiplier = m_high
     else:
         return 0  # 高估不应入场
     return round(base_budget * multiplier, 2)
@@ -1488,7 +1937,14 @@ def _build_entry_condition(verdict: str, valuation: dict | None,
 def _build_item(theme_rule: dict, news_hits: list[dict], trade_date: str, user_id: str) -> dict:
     valuation = _latest_valuation_for_theme(theme_rule)
     portfolio_fit = _portfolio_fit(theme_rule, user_id)
-    score, verdict, capital_signal, volume_signal = _score_theme(theme_rule, news_hits, valuation, portfolio_fit)
+    # P0-R1（2026-08-01）：估值信号科学化 — 计算 z-score/均值回归半衰期，选择适配指标
+    zscore_info = _calc_valuation_zscore(
+        valuation.get("index_code") if valuation else None,
+        valuation.get("metric_type") if valuation else None,
+    )
+    valuation_indicator = _select_valuation_indicator(theme_rule.get("theme", ""))
+    # P1-R4：_score_theme 返回值扩展为 6 元组（含 dim_scores_json + ic_confidence）
+    score, verdict, capital_signal, volume_signal, dim_scores_json, ic_confidence = _score_theme(theme_rule, news_hits, valuation, portfolio_fit)
     matched_funds = _build_matched_funds(theme_rule)
     review_date = (datetime.strptime(trade_date, "%Y-%m-%d") + timedelta(days=15)).strftime("%Y-%m-%d")
 
@@ -1504,20 +1960,27 @@ def _build_item(theme_rule: dict, news_hits: list[dict], trade_date: str, user_i
         if llm_policy and isinstance(llm_policy.get("score_adjust"), int):
             score += llm_policy["score_adjust"]
             score = max(0, min(100, score))
-            # 重新计算 verdict（L1 可能改变 verdict）
-            verdict = "can_buy" if score >= 75 else ("watch" if score >= 50 else "avoid")
-            # 重新应用一票否决
+            # P0-R2：重新计算 verdict 与一票否决，阈值复用 _get_theme_thresholds（配置化）
+            _th = _get_theme_thresholds(theme_rule.get("theme", ""))
+            try:
+                from db.config import get_config_int
+                _wf = get_config_int("opportunity.threshold.watch_floor", 50)
+                _vcap = get_config_int("opportunity.threshold.veto_score_cap", 30)
+                _bcap = get_config_int("opportunity.threshold.block_score_cap", 60)
+            except Exception:
+                _wf, _vcap, _bcap = 50, 30, 60
+            verdict = "can_buy" if score >= _th["can_buy_score"] else ("watch" if score >= _wf else "avoid")
             valuation_pct = valuation.get("percentile") if valuation else None
             if valuation_pct is not None:
-                if valuation_pct > 80:
+                if valuation_pct > _th["valuation_veto_pct"]:
                     verdict = "avoid"
-                    score = min(score, 30)
-                elif valuation_pct > 60 and verdict == "can_buy":
+                    score = min(score, _vcap)
+                elif valuation_pct > _th["valuation_block_can_buy_pct"] and verdict == "can_buy":
                     verdict = "watch"
-                    score = min(score, 60)
+                    score = min(score, _bcap)
             elif verdict == "can_buy":
                 verdict = "watch"
-                score = min(score, 60)
+                score = min(score, _bcap)
 
     policy_signal = (
         f"政策/新闻线索命中：{news_hits[0].get('title', theme_rule['theme'])}"
@@ -1529,6 +1992,17 @@ def _build_item(theme_rule: dict, news_hits: list[dict], trade_date: str, user_i
             f"{valuation.get('index_name')} {valuation.get('metric_type', '')}"
             f"百分位约 {valuation.get('percentile')}%，作为安全边际约束"
         )
+        # P0-R1：叠加 z-score 科学信号（偏离均值的标准差 + 均值回归半衰期）
+        if zscore_info and zscore_info.get("zscore") is not None:
+            _lvl_cn = {"deep_low": "深度低估", "low": "偏低估", "neutral": "中性",
+                       "high": "偏高估"}.get(zscore_info.get("level"), "")
+            valuation_role += (
+                f"；z-score≈{zscore_info['zscore']}（{_lvl_cn}，回看{zscore_info.get('window_years')}年）"
+            )
+            if zscore_info.get("half_life_months"):
+                valuation_role += f"，均值回归半衰期约{zscore_info['half_life_months']}个月"
+            if valuation_indicator:
+                valuation_role += f"；该主题更适配的估值口径：{valuation_indicator.upper()}"
 
     # P1-A: 动态生成 summary / risk_note
     summary = _build_summary(theme_rule["theme"], news_hits, valuation, tech_signal, verdict)
@@ -1579,10 +2053,17 @@ def _build_item(theme_rule: dict, news_hits: list[dict], trade_date: str, user_i
         "entry_price": entry_price,
         "entry_amount": entry_amount,
         "valuation_percentile": valuation_percentile,
+        # P0-R1（2026-08-01）：估值科学信号（z-score/均值回归半衰期/适配指标）
+        # 供前端展示与决策流水线引用，是"越来越准"的信号基础之一
+        "valuation_signal": zscore_info,
+        "valuation_indicator": valuation_indicator,
         "review_status": "pending",  # 默认 pending，回测完成后改为 completed
         # Accuracy-Fix（2026-07-27）：入场信号快照（下划线前缀=不入库，仅供 backtest 记录引用）
         "_capital_signal": capital_signal,
         "_volume_signal": volume_signal,
+        # P1-R4（2026-08-01）：15 维分项分快照 + IC 加权置信度（下划线前缀=不入库，供 backtest 引用）
+        "_dim_scores_json": dim_scores_json,
+        "_ic_confidence": ic_confidence,
     }
 
     # ── L1 政策解读结果写入 item ──
@@ -1647,7 +2128,9 @@ def _get_theme_index_current_price(theme_rule: dict) -> float | None:
 
 def _create_opportunity_backtest(opportunity_id: int, theme_rule: dict, trade_date: str, review_date: str,
                                 capital_signal: str | None = None, volume_signal: str | None = None,
-                                entry_percentile: float | None = None) -> None:
+                                entry_percentile: float | None = None,
+                                entry_amount: float | None = None,
+                                dim_scores_json: str | None = None) -> None:
     """P1-N: 在 save_opportunity 后插入回测跟踪记录。
 
     用途：每次生成机会卡时同步插入回测记录，15 个交易日后自动回测命中率。
@@ -1656,6 +2139,7 @@ def _create_opportunity_backtest(opportunity_id: int, theme_rule: dict, trade_da
     Accuracy-Fix（2026-07-27）：新增 capital_signal/volume_signal 字段存储入场时的资金面/量能信号，
     用于后续命中率分维度分析（如资金流入信号的命中率 vs 流出信号的命中率）。
     Accuracy-Boost（2026-07-30）：新增 entry_percentile 字段，补全回测字段写入。
+    P1-R6（2026-08-01）：新增 entry_amount / dim_scores_json 字段（含成本回测 + R4 IC 计算）。
     """
     try:
         from db.opportunities import create_opportunity_backtest
@@ -1691,6 +2175,8 @@ def _create_opportunity_backtest(opportunity_id: int, theme_rule: dict, trade_da
             "capital_signal": capital_signal,
             "volume_signal": volume_signal,
             "entry_percentile": entry_percentile,
+            "entry_amount": entry_amount,
+            "dim_scores_json": dim_scores_json,
         })
     except Exception as e:
         logger.debug(f"[opportunity] 创建回测记录失败: {e}")
@@ -1951,6 +2437,193 @@ def _apply_hit_rate_feedback():
         logger.debug(f"[opportunity] _apply_hit_rate_feedback 失败: {e}")
 
 
+# ════════════════════════════════════════════════════════════════
+# P1-R6（2026-08-01）：含成本 walk-forward 回测
+# ════════════════════════════════════════════════════════════════
+
+def _get_index_closes_between(index_code: str, start_date: str, end_date: str) -> list[float]:
+    """获取指数在 [start_date, end_date] 区间内的日频收盘价序列（升序）。
+
+    优先读本地 index_price_history，无数据则尝试 akshare 兜底。
+    用于回测计算 max_drawdown / sharpe / calmar。
+    """
+    if not index_code or not start_date or not end_date:
+        return []
+    bare_code = index_code.split(".")[0].split(" ")[0]
+    try:
+        from db._conn import _get_conn
+        conn = _get_conn()
+        try:
+            candidates = [bare_code, index_code]
+            if "." not in index_code:
+                candidates.append(f"{index_code}.CSI")
+            placeholders = ",".join("?" * len(candidates))
+            rows = conn.execute(
+                f"""SELECT close FROM index_price_history
+                    WHERE index_code IN ({placeholders})
+                      AND trade_date BETWEEN ? AND ?
+                    ORDER BY trade_date ASC""",
+                (*candidates, start_date, end_date),
+            ).fetchall()
+            closes = [float(r["close"]) for r in rows if r["close"]]
+            if len(closes) >= 2:
+                return closes
+        finally:
+            conn.close()
+    except Exception as e:
+        logger.debug(f"[opportunity] 本地区间价格查询失败 {index_code} [{start_date},{end_date}]: {e}")
+    # akshare 兜底
+    try:
+        import akshare as ak
+        from services.market.leading_indicators.akshare_utils import call_akshare_with_timeout
+        start = start_date.replace("-", "")
+        end = end_date.replace("-", "")
+        df = call_akshare_with_timeout(
+            ak.index_zh_a_hist, symbol=bare_code, period="daily",
+            start_date=start, end_date=end, timeout=20,
+        )
+        if df is None or len(df) == 0:
+            return []
+        if "收盘" in df.columns:
+            return [float(c) for c in df["收盘"].values]
+    except Exception as e:
+        logger.debug(f"[opportunity] akshare 区间价格兜底失败 {index_code}: {e}")
+    return []
+
+
+def _calc_max_drawdown(closes: list[float]) -> float | None:
+    """计算最大回撤（百分比，正值表示回撤幅度）。
+
+    例：回撤 15% 返回 15.0；数据不足返回 None。
+    """
+    if not closes or len(closes) < 2:
+        return None
+    peak = closes[0]
+    max_dd = 0.0
+    for price in closes[1:]:
+        if price > peak:
+            peak = price
+        elif peak > 0:
+            dd = (peak - price) / peak * 100
+            if dd > max_dd:
+                max_dd = dd
+    return round(max_dd, 2) if max_dd > 0 else 0.0
+
+
+def _calc_sharpe(closes: list[float], risk_free_rate: float, holding_days: int) -> float | None:
+    """计算年化夏普比率。
+
+    Args:
+        closes: 日频收盘价序列
+        risk_free_rate: 年化无风险利率（如 0.02）
+        holding_days: 持有天数
+
+    Returns:
+        年化 Sharpe，数据不足返回 None
+    """
+    if not closes or len(closes) < 3 or holding_days <= 0:
+        return None
+    # 日收益率序列
+    daily_returns = []
+    for i in range(1, len(closes)):
+        if closes[i - 1] > 0:
+            daily_returns.append((closes[i] - closes[i - 1]) / closes[i - 1])
+    if len(daily_returns) < 2:
+        return None
+    mean_r = sum(daily_returns) / len(daily_returns)
+    var_r = sum((r - mean_r) ** 2 for r in daily_returns) / (len(daily_returns) - 1)
+    std_r = var_r ** 0.5
+    if std_r == 0:
+        return None
+    # 年化：252 交易日
+    annualized_return = mean_r * 252
+    annualized_vol = std_r * (252 ** 0.5)
+    sharpe = (annualized_return - risk_free_rate) / annualized_vol
+    return round(sharpe, 3)
+
+
+def _calc_calmar(closes: list[float], risk_free_rate: float, holding_days: int) -> float | None:
+    """计算 Calmar 比率 = 年化收益 / 最大回撤。"""
+    if not closes or len(closes) < 2 or holding_days <= 0:
+        return None
+    max_dd = _calc_max_drawdown(closes)
+    if max_dd is None or max_dd == 0:
+        return None
+    total_return = (closes[-1] - closes[0]) / closes[0] if closes[0] > 0 else 0
+    # 年化收益（按持有期折算，252 交易日）
+    annualized_return = ((1 + total_return) ** (252 / max(holding_days, 1)) - 1)
+    calmar = annualized_return / (max_dd / 100)
+    return round(calmar, 3)
+
+
+def _calc_backtest_costs(fee_mode: str, entry_amount: float, holding_days: int,
+                         slippage_bps: float, entry_price: float,
+                         review_price: float,
+                         fund_code: str | None = None) -> dict:
+    """P1-R6：计算回测交易成本（手续费 + 滑点）。
+
+    Args:
+        fee_mode: realistic / relaxed
+        entry_amount: 入场金额（算申购费基数）
+        holding_days: 持有天数
+        slippage_bps: 滑点 bps
+        entry_price / review_price: 入场/出场价格
+        fund_code: 基金代码（P1-S5 新增，可选，传入则用 per-fund 费率）
+
+    Returns:
+        {buy_fee, sell_fee, slippage_cost, buy_fee_pct, sell_fee_pct,
+         slippage_pct, adj_entry_price, adj_review_price, basis}
+    """
+    from services.fee_calculator import calc_buy_fee
+    from db.config import get_config_float
+
+    # 1. 申购费（P1-S5：传入 fund_code 以使用 per-fund 费率）
+    buy_fee, buy_rate, buy_basis = calc_buy_fee(entry_amount, fund_code) if entry_amount else (0.0, 0.0, "金额缺失")
+    # 申购费占入场金额的百分比
+    buy_fee_pct = (buy_fee / entry_amount * 100) if entry_amount else 0.0
+
+    # 2. 赎回费（按持有期阶梯）
+    # relaxed 模式：机会信号回测豁免 lt7d 惩罚，按 lt1y 0.5% 计算
+    if fee_mode == "relaxed":
+        sell_rate = get_config_float("fee.sell_rate_lt1y", 0.005)
+        sell_basis = f"relaxed 模式，赎回费率{sell_rate*100:.2f}%"
+    else:
+        if holding_days < 7:
+            sell_rate = get_config_float("fee.sell_rate_lt7d", 0.015)
+            sell_basis = f"持有{holding_days}天，赎回费1.5%"
+        elif holding_days < 365:
+            sell_rate = get_config_float("fee.sell_rate_lt1y", 0.005)
+            sell_basis = f"持有{holding_days}天，赎回费0.5%"
+        elif holding_days < 730:
+            sell_rate = get_config_float("fee.sell_rate_lt2y", 0.0025)
+            sell_basis = f"持有{holding_days}天，赎回费0.25%"
+        else:
+            sell_rate = get_config_float("fee.sell_rate_ge2y", 0.0)
+            sell_basis = f"持有{holding_days}天，赎回费0%"
+    sell_fee_pct = sell_rate * 100
+    # 赎回费金额（基于出场市值；若无金额则按百分比参与净收益计算）
+    sell_value = (entry_amount or 0) * (review_price / entry_price) if entry_price > 0 else 0
+    sell_fee = round(sell_value * sell_rate, 2) if sell_value else 0.0
+
+    # 3. 滑点（双边各扣 slippage_bps）
+    slippage_pct = slippage_bps * 2 / 100  # bps → 百分比（双边）
+    adj_entry_price = entry_price * (1 + slippage_bps / 10000) if entry_price else entry_price
+    adj_review_price = review_price * (1 - slippage_bps / 10000) if review_price else review_price
+    slippage_cost = round((entry_amount or 0) * slippage_pct / 100, 2) if entry_amount else 0.0
+
+    return {
+        "buy_fee": buy_fee,
+        "sell_fee": sell_fee,
+        "slippage_cost": slippage_cost,
+        "buy_fee_pct": round(buy_fee_pct, 3),
+        "sell_fee_pct": round(sell_fee_pct, 3),
+        "slippage_pct": round(slippage_pct, 3),
+        "adj_entry_price": round(adj_entry_price, 4) if adj_entry_price else None,
+        "adj_review_price": round(adj_review_price, 4) if adj_review_price else None,
+        "basis": f"{buy_basis} | {sell_basis} | 滑点{slippage_bps}bps×2",
+    }
+
+
 def review_opportunity_backtests() -> dict:
     """P1-N: 批量回测已到期的机会记录（review_date <= today AND hit IS NULL）。
 
@@ -1958,13 +2631,24 @@ def review_opportunity_backtests() -> dict:
     - 开关开：超额收益（涨幅 - 沪深300同期涨幅）>= 2% 视为命中
     - 开关关：绝对涨幅 >= 3% 视为命中（原逻辑）
 
+    P1-R6（2026-08-01）：含成本回测
+    - 扣除申购费/赎回费/滑点后计算 net_return
+    - 计算 max_drawdown / sharpe / calmar 风险指标
+    - 命中阈值改用 net_excess_return >= opportunity.backtest.hit_threshold（默认 1.5%）
+    - relaxed 模式豁免 lt7d 惩罚费率（机会信号回测公平性）
+
     Returns:
         {"reviewed": int, "hit": int, "miss": int}
     """
     try:
-        from db.config import get_config_bool
+        from db.config import get_config_bool, get_config_float, get_config
         from db.opportunities import list_pending_backtests, update_opportunity_backtest
         benchmark_enabled = get_config_bool("opportunity.benchmark_backtest_enabled", True)
+        # P1-R6：回测成本参数
+        fee_mode = get_config("opportunity.backtest.fee_mode", "realistic")
+        slippage_bps = get_config_float("opportunity.backtest.slippage_bps", 5.0)
+        risk_free_rate = get_config_float("opportunity.backtest.risk_free_rate", 0.02)
+        hit_threshold = get_config_float("opportunity.backtest.hit_threshold", 1.5)
         pending = list_pending_backtests()
         reviewed = 0
         hit_count = 0
@@ -1985,25 +2669,52 @@ def review_opportunity_backtests() -> dict:
                 if not entry_price or entry_price <= 0:
                     continue
 
+                # P1-R6：计算持有天数（用于阶梯赎回费 + Sharpe 年化）
+                entry_date_str = track.get("entry_date", "")
+                holding_days = 0
+                if entry_date_str and review_date:
+                    try:
+                        ed = datetime.strptime(entry_date_str[:10], "%Y-%m-%d")
+                        rd = datetime.strptime(review_date[:10], "%Y-%m-%d")
+                        holding_days = max((rd - ed).days, 1)
+                    except Exception:
+                        holding_days = 15  # 兜底默认 15 日
+
+                # P1-R6：滑点调整后的价格
+                entry_amount = track.get("entry_amount") or 0
+                costs = _calc_backtest_costs(
+                    fee_mode=fee_mode,
+                    entry_amount=entry_amount,
+                    holding_days=holding_days,
+                    slippage_bps=slippage_bps,
+                    entry_price=entry_price,
+                    review_price=review_price,
+                )
+                adj_entry = costs.get("adj_entry_price") or entry_price
+                adj_review = costs.get("adj_review_price") or review_price
+
+                # 毛收益（用原始价格，与历史口径一致）+ 净收益（扣成本）
                 change_pct = (review_price - entry_price) / entry_price * 100
+                # net_return = 毛收益 - 申购费% - 赎回费% - 滑点%（双边）
+                net_return = change_pct - costs["buy_fee_pct"] - costs["sell_fee_pct"] - costs["slippage_pct"]
 
                 # L3 回测基准化：引入沪深300超额收益
                 benchmark_pct = None
                 excess_return = None
+                net_excess_return = None
                 hit = None
                 if benchmark_enabled:
-                    benchmark_pct = _get_benchmark_return(
-                        track.get("entry_date", ""), review_date
-                    )
+                    benchmark_pct = _get_benchmark_return(entry_date_str, review_date)
                     if benchmark_pct is not None:
                         excess_return = change_pct - benchmark_pct
-                        # 超额收益 >= 2% 视为命中
-                        hit = 1 if excess_return >= 2.0 else 0
+                        net_excess_return = net_return - benchmark_pct
+                        # P1-R6：命中判定改用净超额收益（扣成本后）
+                        hit = 1 if net_excess_return >= hit_threshold else 0
                     else:
-                        # 基准获取失败，回退原逻辑
-                        hit = 1 if change_pct >= 3.0 else 0
+                        # 基准获取失败，回退原逻辑（用净收益对比降低后的阈值）
+                        hit = 1 if net_return >= (hit_threshold + 1.5) else 0
                 else:
-                    # 开关关：原逻辑
+                    # 开关关：原逻辑（绝对涨幅）
                     hit = 1 if change_pct >= 3.0 else 0
 
                 update_fields = {
@@ -2011,11 +2722,33 @@ def review_opportunity_backtests() -> dict:
                     "hit": hit,
                     "change_pct": round(change_pct, 2),
                     "reviewed_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    # P1-R6：成本与净收益字段
+                    "buy_fee": costs["buy_fee"],
+                    "sell_fee": costs["sell_fee"],
+                    "slippage_cost": costs["slippage_cost"],
+                    "net_return": round(net_return, 2),
                 }
                 if benchmark_pct is not None:
                     update_fields["benchmark_pct"] = round(benchmark_pct, 2)
                 if excess_return is not None:
                     update_fields["excess_return"] = round(excess_return, 2)
+
+                # P1-R6：风险指标（max_drawdown / sharpe / calmar）
+                try:
+                    index_code = _get_theme_index_code(theme_rule)
+                    closes = _get_index_closes_between(index_code, entry_date_str, review_date)
+                    if closes and len(closes) >= 2:
+                        max_dd = _calc_max_drawdown(closes)
+                        sharpe = _calc_sharpe(closes, risk_free_rate, holding_days)
+                        calmar = _calc_calmar(closes, risk_free_rate, holding_days)
+                        if max_dd is not None:
+                            update_fields["max_drawdown"] = max_dd
+                        if sharpe is not None:
+                            update_fields["sharpe"] = sharpe
+                        if calmar is not None:
+                            update_fields["calmar"] = calmar
+                except Exception as e:
+                    logger.debug(f"[opportunity] 风险指标计算失败 {track.get('id')}: {e}")
 
                 # F-4（2026-07-23）：拼接 miss_reason 用于反哺分析
                 entry_pct = track.get("entry_percentile")
@@ -2036,10 +2769,10 @@ def review_opportunity_backtests() -> dict:
                         if get_config_bool("opportunity.signal_source_tracking_enabled", True):
                             # 拼接 miss 原因
                             reasons = []
-                            if benchmark_pct is not None:
-                                reasons.append(f"超额收益={excess_return:.1f}%（基准={benchmark_pct:.1f}%）")
+                            if benchmark_pct is not None and net_excess_return is not None:
+                                reasons.append(f"净超额收益={net_excess_return:.1f}%（基准={benchmark_pct:.1f}%）")
                             else:
-                                reasons.append(f"绝对涨幅={change_pct:.1f}%")
+                                reasons.append(f"净收益={net_return:.1f}%")
                             # 查该机会的估值分位
                             opp_val = None
                             try:
@@ -2070,11 +2803,145 @@ def review_opportunity_backtests() -> dict:
         except Exception as e:
             logger.debug(f"[opportunity] 命中率反哺失败: {e}")
 
+        # P1-R4（2026-08-01）：IC 反哺维度权重 — 每 N 次回测触发一次慢速精调
+        try:
+            from db.config import get_config_bool, get_config_int, get_config, update_config
+            if get_config_bool("opportunity.ic.enabled", False):
+                refresh_interval = get_config_int("opportunity.ic.refresh_interval_runs", 10)
+                run_counter = int(get_config("opportunity.ic._run_counter", "0")) + 1
+                update_config("opportunity.ic._run_counter", str(run_counter))
+                if run_counter >= refresh_interval:
+                    ic_result = _apply_ic_feedback()
+                    update_config("opportunity.ic._run_counter", "0")  # 重置计数器
+                    if ic_result.get("adjusted", 0) > 0:
+                        logger.info(f"[opportunity] IC 反哺完成：调整 {ic_result['adjusted']} 个维度权重")
+        except Exception as e:
+            logger.debug(f"[opportunity] IC 反哺触发失败: {e}")
+
         logger.info(f"[opportunity] 回测完成：{reviewed} 条，命中 {hit_count} 条")
         return {"reviewed": reviewed, "hit": hit_count, "miss": reviewed - hit_count}
     except Exception as e:
         logger.warning(f"[opportunity] 回测批量执行失败: {e}")
         return {"reviewed": 0, "hit": 0, "miss": 0, "error": str(e)}
+
+
+def run_walk_forward_backtest(theme: str, start_date: str, end_date: str,
+                               window_days: int | None = None,
+                               step_days: int | None = None) -> dict:
+    """P1-R6（2026-08-01）：walk-forward 滚动回测。
+
+    按 step_days 滚动取 window_days 窗口，每个窗口模拟一次 entry/review 对，
+    聚合算命中率/平均净收益/平均 Sharpe/平均最大回撤。
+
+    Args:
+        theme: 主题名（须在 theme_rules 表中）
+        start_date / end_date: 回测区间
+        window_days: 窗口天数（None 读配置，默认 15）
+        step_days: 步长天数（None 读配置，默认 5）
+
+    Returns:
+        {theme, windows_count, hit_rate, avg_net_return, avg_sharpe,
+         avg_max_drawdown, avg_calmar, window_start, window_end, saved_metric_id}
+    """
+    try:
+        from db.config import get_config_bool, get_config_float, get_config_int, get_config
+        from db.opportunities import save_backtest_metrics
+
+        if not get_config_bool("opportunity.backtest.walk_forward_enabled", False):
+            return {"error": "walk_forward 开关未开启", "enabled": False}
+
+        if window_days is None:
+            window_days = get_config_int("opportunity.backtest.walk_forward_window_days", 15)
+        if step_days is None:
+            step_days = get_config_int("opportunity.backtest.walk_forward_step_days", 5)
+
+        theme_rule = next((r for r in _get_active_theme_rules() if r["theme"] == theme), None)
+        if not theme_rule:
+            return {"error": f"主题 {theme} 不在 active theme_rules 中"}
+
+        index_code = _get_theme_index_code(theme_rule)
+        if not index_code:
+            return {"error": f"主题 {theme} 无 index_code"}
+
+        # 拉取整个区间的价格序列
+        closes = _get_index_closes_between(index_code, start_date, end_date)
+        if len(closes) < window_days + 1:
+            return {"error": f"区间价格不足（{len(closes)} < {window_days + 1}）",
+                    "theme": theme, "windows_count": 0}
+
+        # 滚动窗口
+        fee_mode = get_config("opportunity.backtest.fee_mode", "realistic")
+        slippage_bps = get_config_float("opportunity.backtest.slippage_bps", 5.0)
+        risk_free_rate = get_config_float("opportunity.backtest.risk_free_rate", 0.02)
+        hit_threshold = get_config_float("opportunity.backtest.hit_threshold", 1.5)
+
+        net_returns = []
+        sharpe_list = []
+        max_dd_list = []
+        calmar_list = []
+        hits = 0
+        windows_count = 0
+
+        i = 0
+        while i + window_days < len(closes):
+            window_closes = closes[i:i + window_days + 1]
+            entry_p = window_closes[0]
+            review_p = window_closes[-1]
+            holding_days = window_days
+            change_pct = (review_p - entry_p) / entry_p * 100 if entry_p > 0 else 0
+
+            # 扣成本（entry_amount 缺失则按百分比计算）
+            costs = _calc_backtest_costs(
+                fee_mode=fee_mode, entry_amount=0, holding_days=holding_days,
+                slippage_bps=slippage_bps, entry_price=entry_p, review_price=review_p,
+            )
+            net_return = change_pct - costs["buy_fee_pct"] - costs["sell_fee_pct"] - costs["slippage_pct"]
+            net_returns.append(net_return)
+
+            # 命中判定（无 benchmark，用净收益对比 hit_threshold + 1.5）
+            if net_return >= (hit_threshold + 1.5):
+                hits += 1
+
+            sharpe = _calc_sharpe(window_closes, risk_free_rate, holding_days)
+            max_dd = _calc_max_drawdown(window_closes)
+            calmar = _calc_calmar(window_closes, risk_free_rate, holding_days)
+            if sharpe is not None:
+                sharpe_list.append(sharpe)
+            if max_dd is not None:
+                max_dd_list.append(max_dd)
+            if calmar is not None:
+                calmar_list.append(calmar)
+
+            windows_count += 1
+            i += step_days
+
+        if windows_count == 0:
+            return {"error": "无有效窗口", "theme": theme, "windows_count": 0}
+
+        hit_rate = round(hits / windows_count * 100, 1)
+        avg_net_return = round(sum(net_returns) / len(net_returns), 2) if net_returns else None
+        avg_sharpe = round(sum(sharpe_list) / len(sharpe_list), 3) if sharpe_list else None
+        avg_max_dd = round(sum(max_dd_list) / len(max_dd_list), 2) if max_dd_list else None
+        avg_calmar = round(sum(calmar_list) / len(calmar_list), 3) if calmar_list else None
+
+        metrics = {
+            "theme": theme,
+            "window_start": start_date,
+            "window_end": end_date,
+            "windows_count": windows_count,
+            "hit_rate": hit_rate,
+            "avg_net_return": avg_net_return,
+            "avg_sharpe": avg_sharpe,
+            "avg_max_drawdown": avg_max_dd,
+            "avg_calmar": avg_calmar,
+        }
+        metric_id = save_backtest_metrics(metrics)
+
+        logger.info(f"[opportunity] walk-forward 回测完成 {theme}：{windows_count} 窗口，命中率 {hit_rate}%")
+        return {**metrics, "saved_metric_id": metric_id}
+    except Exception as e:
+        logger.warning(f"[opportunity] walk-forward 回测失败 {theme}: {e}")
+        return {"error": str(e), "theme": theme, "windows_count": 0}
 
 
 def recompute_benchmark_for_reviewed() -> dict:
@@ -2438,6 +3305,79 @@ def _get_preferred_metric_type_local(index_code: str) -> str:
         return "市盈率"
 
 
+def _scan_valuation_channel(active_rules: list[dict], trade_date: str, user_id: str = "default") -> list[dict]:
+    """P0-R3（2026-08-01）：估值驱动独立通道 — 深度低估即使无新闻也生成机会卡。
+
+    金融原理：原引擎"无新闻不出卡"，导致纯低估的左侧定投机会被遗漏。
+    本通道基于估值科学信号（z-score / 百分位）独立触发，捕捉"无催化但已深度低估"
+    的价值机会，与新闻驱动互补。触发阈值/保底分均走 system_config（金融严谨性）。
+
+    与 loss_recovery 卡的去重由 scan_daily_opportunities 的 fund_code 映射统一处理。
+    """
+    try:
+        from db.config import get_config_bool, get_config_float, get_config_int
+        if not get_config_bool("opportunity.valchannel.enabled", True):
+            return []
+        z_threshold = get_config_float("opportunity.valchannel.zscore_threshold", -1.5)
+        pct_threshold = get_config_float("opportunity.valchannel.percentile_threshold", 15)
+        min_score = get_config_float("opportunity.valchannel.min_score", 55)
+        watch_floor = get_config_int("opportunity.threshold.watch_floor", 50)
+    except Exception:
+        return []
+
+    results = []
+    for rule in active_rules:
+        try:
+            valuation = _latest_valuation_for_theme(rule)
+            if not valuation:
+                continue
+            pct = valuation.get("percentile")
+            zinfo = _calc_valuation_zscore(valuation.get("index_code"), valuation.get("metric_type"))
+            z = zinfo.get("zscore") if zinfo else None
+
+            # 触发条件：深度低估（百分位低于阈值 或 z-score 低于阈值）
+            triggered_by_pct = pct is not None and pct < pct_threshold
+            triggered_by_z = z is not None and z < z_threshold
+            if not (triggered_by_pct or triggered_by_z):
+                continue
+
+            # 复用 _build_item（空新闻），再覆写为估值驱动卡
+            item = _build_item(rule, [], trade_date, user_id)
+            item["opportunity_type"] = "valuation_channel"
+            # 保底分：确保深度低估机会至少进入 watch（不低于 min_score）
+            if item.get("opportunity_score", 0) < min_score:
+                item["opportunity_score"] = int(min_score)
+            # 依保底分与主题阈值重算 verdict
+            th = _get_theme_thresholds(rule.get("theme", ""))
+            sc = item["opportunity_score"]
+            item["verdict"] = "can_buy" if sc >= th["can_buy_score"] else ("watch" if sc >= watch_floor else "avoid")
+            # 估值一票否决兜底（深度高估不会进本通道，防御性保留）
+            if pct is not None and pct > th["valuation_veto_pct"]:
+                item["verdict"] = "avoid"
+            # 覆写文案：明确这是估值驱动（无新闻催化）
+            trig_desc = []
+            if triggered_by_pct:
+                trig_desc.append(f"百分位{pct}%低于{pct_threshold:g}%")
+            if triggered_by_z:
+                trig_desc.append(f"z-score {z}低于{z_threshold:g}")
+            item["policy_signal"] = "估值驱动通道：暂无新闻催化，但估值已深度低估（左侧机会）"
+            item["summary"] = (
+                f"{rule.get('theme', '')} 估值深度低估（{'，'.join(trig_desc)}），"
+                f"具备左侧定投价值；建议分批建仓、控制仓位，等待催化或估值修复。"
+            )
+            item.setdefault("evidence", []).insert(0, {
+                "type": "valuation_channel",
+                "summary": f"估值驱动触发：{'，'.join(trig_desc)}",
+                "source": "valuation_engine",
+            })
+            item["_theme_rule"] = rule  # 供 scan 创建回测记录引用，入库前 pop
+            results.append(item)
+        except Exception as e:
+            logger.warning(f"[opportunity] 估值驱动通道处理 {rule.get('theme', '')} 失败: {e}")
+            continue
+    return results
+
+
 def _scan_holdings_loss_recovery(trade_date: str, user_id: str = "default") -> list[dict]:
     """Phase 2：扫描持仓中"亏损严重+对应指数低估"的标的，生成补仓回本机会卡。
 
@@ -2691,11 +3631,44 @@ def scan_daily_opportunities(news_items: list[dict] | None = None,
                 review_date=item.get("exit_plan", {}).get("review_date", ""),
                 capital_signal=item.get("_capital_signal"),
                 volume_signal=item.get("_volume_signal"),
+                # P1-R4/R6：传入决策金额 + 15 维分项分快照（供含成本回测 + IC 计算）
+                entry_amount=item.get("entry_amount"),
+                dim_scores_json=item.get("_dim_scores_json"),
             )
         # 清理内部字段，不暴露给前端 API 响应
         item.pop("_capital_signal", None)
         item.pop("_volume_signal", None)
+        item.pop("_dim_scores_json", None)
+        item.pop("_ic_confidence", None)
         items.append(item)
+
+    # ── P0-R3（2026-08-01）：估值驱动独立通道（深度低估无需新闻也出卡）──
+    # 在新闻驱动扫描后、loss_recovery 合并前接入，使估值驱动卡参与 fund_code 去重
+    val_channel_items = _scan_valuation_channel(active_rules, trade_date, user_id)
+    for vitem in val_channel_items:
+        rule_ref = vitem.pop("_theme_rule", None) or {}
+        try:
+            vitem["id"] = save_opportunity(vitem, user_id=user_id)
+        except Exception as e:
+            logger.warning(f"[opportunity] 估值驱动卡保存失败 {vitem.get('theme', '')}: {e}")
+            continue
+        if vitem.get("verdict") != "avoid":
+            _create_opportunity_backtest(
+                opportunity_id=vitem["id"],
+                theme_rule=rule_ref,
+                trade_date=trade_date,
+                review_date=vitem.get("exit_plan", {}).get("review_date", ""),
+                capital_signal=vitem.get("_capital_signal"),
+                volume_signal=vitem.get("_volume_signal"),
+                # P1-R4/R6：传入决策金额 + 15 维分项分快照
+                entry_amount=vitem.get("entry_amount"),
+                dim_scores_json=vitem.get("_dim_scores_json"),
+            )
+        vitem.pop("_capital_signal", None)
+        vitem.pop("_volume_signal", None)
+        vitem.pop("_dim_scores_json", None)
+        vitem.pop("_ic_confidence", None)
+        items.append(vitem)
 
     # ── Phase 2（2026-07-30）：亏损持仓低估补仓回本扫描 ──
     # 在新闻驱动扫描完成后，调用 _scan_holdings_loss_recovery 并合并到 opportunities 列表

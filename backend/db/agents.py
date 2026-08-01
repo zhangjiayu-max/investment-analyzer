@@ -566,7 +566,9 @@ def _init_wealth_specialists(conn):
             "tools": ["search_knowledge", "query_valuation", "query_online_valuation", "query_portfolio", "yingmi_latest_quotations",
                       "eastmoney_finance_data",
                       # P0-5: 加入穿透工具，避免估值专家看到"债券"名称就下结论（conv 129 根因之二）
-                      "query_fund_info", "ttfund_fund_holding"],
+                      "query_fund_info", "ttfund_fund_holding",
+                      # 三模块联动 P0-A5: 投资决策流水线工具
+                      "run_investment_decision"],
             "system_prompt": None,  # 从同名 preset 行继承
             "knowledge_scope": '{"rag_types": ["valuation", "analysis", "book"], "kyc_dimensions": ["risk_tolerance", "loss_tolerance"]}',
         },
@@ -628,7 +630,9 @@ def _init_wealth_specialists(conn):
                       "yingmi_latest_quotations", "eastmoney_finance_data",
                       "query_earnings_reports", "calculate_metrics",
                       # P0-5: 加入穿透工具，避免风控专家无法穿透验证重仓风险（conv 129 根因之二）
-                      "query_fund_info", "ttfund_fund_holding"],
+                      "query_fund_info", "ttfund_fund_holding",
+                      # 三模块联动 P0-A5: 投资决策流水线工具
+                      "run_investment_decision"],
             "system_prompt": None,  # 从同名 preset 行继承
             "knowledge_scope": '{"rag_types": ["valuation", "analysis", "book"], "kyc_dimensions": ["risk_tolerance", "loss_tolerance", "max_single_position_pct"]}',
         },
@@ -642,7 +646,9 @@ def _init_wealth_specialists(conn):
                       "yingmi_latest_quotations", "eastmoney_finance_data",
                       "get_bond_temperature",
                       # P0-5: 加入穿透工具，避免配置师无法穿透验证债券基金实际持仓（conv 129 根因之二）
-                      "query_fund_info", "ttfund_fund_holding"],
+                      "query_fund_info", "ttfund_fund_holding",
+                      # 三模块联动 P0-A5: 投资决策流水线工具
+                      "run_investment_decision"],
             "system_prompt": None,  # 从同名 preset 行继承
             "knowledge_scope": '{"rag_types": ["valuation", "article", "book"], "kyc_dimensions": ["risk_tolerance", "investment_horizon", "capital_scale", "target_equity_ratio"]}',
         },

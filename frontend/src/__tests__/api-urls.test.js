@@ -77,6 +77,37 @@ describe('API URL 路径正确性', () => {
     await createTransactionDraftFromDecision(42)
     expect(mockPost).toHaveBeenCalledWith('/decisions/42/transaction-draft', {})
   })
+
+  // ── 投资决策流水线 + 统一决策账本（/api/decision/*，三模块联动 P0）──
+  it('decisionAPI.run 调用 /api/decision/run (POST)', async () => {
+    const { decisionAPI } = await import('../api/index.js')
+    await decisionAPI.run('510300')
+    expect(mockPost).toHaveBeenCalledWith('/decision/run', { fund_code: '510300', user_id: 'default' })
+  })
+
+  it('decisionAPI.getLedger 调用 /api/decision/ledger (GET)', async () => {
+    const { decisionAPI } = await import('../api/index.js')
+    await decisionAPI.getLedger()
+    expect(mockGet).toHaveBeenCalledWith('/decision/ledger', { params: {} })
+  })
+
+  it('decisionAPI.getDetail 调用 /api/decision/ledger/{id} (GET)', async () => {
+    const { decisionAPI } = await import('../api/index.js')
+    await decisionAPI.getDetail(42)
+    expect(mockGet).toHaveBeenCalledWith('/decision/ledger/42')
+  })
+
+  it('decisionAPI.getAccuracy 调用 /api/decision/accuracy (GET)', async () => {
+    const { decisionAPI } = await import('../api/index.js')
+    await decisionAPI.getAccuracy()
+    expect(mockGet).toHaveBeenCalledWith('/decision/accuracy', { params: { user_id: 'default', days: 90 } })
+  })
+
+  it('decisionAPI.runBacktest 调用 /api/decision/backtest (POST)', async () => {
+    const { decisionAPI } = await import('../api/index.js')
+    await decisionAPI.runBacktest()
+    expect(mockPost).toHaveBeenCalledWith('/decision/backtest', null, { params: { user_id: 'default' } })
+  })
 })
 
 describe('stream URL 路径正确性', () => {

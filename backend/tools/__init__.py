@@ -359,6 +359,21 @@ TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "run_investment_decision",
+            "description": "对指定基金运行完整投资决策流水线（三模块联动：机会雷达发现→智能补仓sizing→组合风控→置信度融合→止盈计划），并写入统一决策账本。返回决策卡片：结论(可小仓/观察/回避)、置信度、建议金额、估值z-score信号、组合风控(相关性/β)、分批止盈计划、决策依据与风险提示。当用户问'这只基金该不该买/补仓''帮我做个投资决策''分析下XX基金的买卖时机'时调用。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "fund_code": {"type": "string", "description": "基金代码（须为用户持仓），如 510300"},
+                    "user_id": {"type": "string", "description": "用户ID，默认 default"},
+                },
+                "required": ["fund_code"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "generate_portfolio_alert",
             "description": "根据当前持仓状况、市场估值、新闻动态等，生成风险预警或加减仓提醒。当需要提醒用户注意持仓风险或加减仓机会时调用。",
             "parameters": {
@@ -1386,6 +1401,8 @@ def _execute_tool_impl(name: str, arguments: dict, trace_id: str = "",
         return _analyze_portfolio_diversification(arguments)
     elif name == "query_smart_add_plan":
         return _query_smart_add_plan(arguments)
+    elif name == "run_investment_decision":
+        return _run_investment_decision(arguments)
     elif name == "generate_portfolio_alert":
         return _generate_portfolio_alert(arguments)
     elif name == "get_bond_yield_curve":
@@ -3117,6 +3134,45 @@ def _query_smart_add_plan(args: dict) -> str:
         }, ensure_ascii=False, default=str)
     except Exception as e:
         logger.warning(f"[tool] query_smart_add_plan 失败: {e}")
+        return json.dumps({"error": str(e)}, ensure_ascii=False)
+
+
+def _run_investment_decision(args: dict) -> str:
+    """对指定基金运行投资决策流水线（三模块联动 P0-A5），写入决策账本并返回决策卡片。"""
+    fund_code = (args.get("fund_code") or "").strip()
+    user_id = args.get("user_id") or "default"
+    if not fund_code:
+        return json.dumps({"error": "缺少 fund_code 参数"}, ensure_ascii=False)
+    try:
+        from services.advisor.decision_pipeline import run_investment_decision
+        card = run_investment_decision(fund_code, user_id)
+        if card.get("error"):
+            return json.dumps({"error": card["error"]}, ensure_ascii=False)
+        # 精简返回，控制 token（保留决策核心字段）
+        rc = card.get("risk_check") or {}
+        slim = {
+            "fund_code": card.get("fund_code"),
+            "fund_name": card.get("fund_name"),
+            "verdict": card.get("verdict"),
+            "confidence": card.get("confidence"),
+            "confidence_label": card.get("confidence_label"),
+            "suggested_amount": card.get("suggested_amount"),
+            "valuation_percentile": card.get("valuation_percentile"),
+            "valuation_signal": card.get("valuation_signal"),
+            "risk_check": {
+                "max_correlation": rc.get("max_correlation"),
+                "corr_downweight": rc.get("corr_downweight"),
+                "portfolio_beta_proxy": rc.get("portfolio_beta_proxy"),
+                "flags": rc.get("flags"),
+            },
+            "exit_plan": card.get("exit_plan"),
+            "evidence": card.get("evidence"),
+            "decision_id": card.get("decision_id"),
+            "risk_disclaimer": card.get("risk_disclaimer"),
+        }
+        return json.dumps(slim, ensure_ascii=False, default=str)
+    except Exception as e:
+        logger.warning(f"[tool] run_investment_decision 失败: {e}")
         return json.dumps({"error": str(e)}, ensure_ascii=False)
 
 

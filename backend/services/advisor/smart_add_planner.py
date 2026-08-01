@@ -267,12 +267,37 @@ def _calc_avg_cost_after_add(
     total_shares: float,
     add_amount: float,
     current_price: float,
+    fund_code: str | None = None,
 ) -> Optional[float]:
-    """预估补仓后的平均成本价。"""
+    """预估补仓后的平均成本价。
+
+    P1-S5（2026-08-01）：摊薄成本扣手续费。
+    - 开关 `opportunity.constraint.fee_aware_avg_cost_enabled`（默认 true）
+    - 开启时：add_shares 用扣完申购费后的净额计算
+      - buy_fee = calc_buy_fee(add_amount, fund_code)
+      - add_shares = (add_amount - buy_fee) / current_price
+    - 成本仍按总投入算：new_total_cost = total_cost + add_amount
+      （因为申购费已"花掉"，计入成本基数更真实）
+    - 份额按扣费后算：new_total_shares = total_shares + add_shares
+    """
     if not total_shares or not current_price or current_price <= 0:
         return None
-    add_shares = add_amount / current_price
-    new_total_cost = total_cost + add_amount
+
+    # P1-S5：扣申购费后的实际买入份额
+    net_add_amount = float(add_amount or 0)
+    buy_fee = 0.0
+    try:
+        from db.config import get_config_bool
+        if get_config_bool("opportunity.constraint.fee_aware_avg_cost_enabled", True):
+            from services.fee_calculator import calc_buy_fee
+            buy_fee, _, _ = calc_buy_fee(add_amount, fund_code)
+            net_add_amount = max(net_add_amount - buy_fee, 0)
+    except Exception:
+        pass
+
+    add_shares = net_add_amount / current_price
+    # 成本仍按总投入算（申购费已花掉，计入成本基数）
+    new_total_cost = total_cost + float(add_amount or 0)
     new_total_shares = total_shares + add_shares
     if new_total_shares <= 0:
         return None
@@ -937,7 +962,141 @@ def simulate_strategies(
     }
 
 
+# ── P0-S1（2026-08-01）：组合相关性降权 ──────────────────────────
+def _apply_correlation_downweight(plans: list[dict], holdings: list[dict]) -> None:
+    """组合相关性降权：对与现有持仓高度相关的标的降低补仓金额，避免"越补越集中"。
+
+    金融原理：单标的补仓决策若忽略持仓间相关性，可能把资金持续投向与现有持仓
+    高度同涨同跌的品种，使组合实际分散度远低于表面持仓数。本步骤在补仓金额
+    确定后，计算标的与持仓的相关性，对高相关标的乘以降权因子（system_config
+    smartadd.risk.corr_downweight_factor）。评估失败/数据不足时不惩罚（dw=1.0）。
+    """
+    try:
+        from db.config import get_config_bool
+        if not get_config_bool("smartadd.risk.correlation_enabled", True):
+            return
+        from services.advisor.portfolio_risk import assess_add_position_risk
+    except Exception as e:
+        logger.debug(f"[smart_add] 相关性降权加载失败，跳过: {e}")
+        return
+
+    # fund_code → index_code / current_value
+    idx_map = {h.get("fund_code"): h.get("index_code") for h in holdings if h.get("index_code")}
+    val_map = {h.get("fund_code"): (h.get("current_value") or 0) for h in holdings}
+    total_val = sum(val_map.values()) or 1.0
+
+    for p in plans:
+        fc = p.get("fund_code")
+        idx = idx_map.get(fc)
+        amt = p.get("final_suggested_amount", 0) or 0
+        if not idx or amt <= 0:
+            continue
+        other_codes = [c for f, c in idx_map.items() if f != fc]
+        weights = {c: (val_map.get(f, 0) / total_val) for f, c in idx_map.items() if f != fc}
+        try:
+            risk = assess_add_position_risk(
+                target_index_code=idx,
+                holding_index_codes=other_codes,
+                target_weight=val_map.get(fc, 0) / total_val,
+                holding_weights=weights,
+            )
+        except Exception as e:
+            logger.debug(f"[smart_add] 相关性评估失败 {fc}: {e}")
+            continue
+        p["correlation_risk"] = risk
+        dw = risk.get("corr_downweight", 1.0)
+        if dw < 1.0:
+            p["pre_correlation_amount"] = round(amt, 2)
+            p["correlation_downweight"] = dw
+            p["final_suggested_amount"] = round(amt * dw, 2)
+            logger.info(
+                f"[smart_add] {fc} 与持仓高相关（max_corr={risk.get('max_correlation')}），"
+                f"补仓金额 {amt} → {p['final_suggested_amount']}（×{dw}）"
+            )
+
+
 # ── 主入口 ──────────────────────────────────
+
+def _apply_goal_aware_adjustments(user_id: str, total_assets: float, cfg: dict) -> dict:
+    """P1-S4：goal-aware 资金规划调整。
+
+    - S4-4：emergency_fund 校验（< min_emergency_fund_months → 拒绝补仓）
+    - S4-3：goal_buckets 联动资金池（emergency 不计入 / stable × 0.5 / opportunity × 1.0 等）
+
+    开关 `smart_add.goal_aware_enabled`（默认 false）关闭时返回空调整（不影响原逻辑）。
+
+    Returns:
+        {
+            "enabled": bool,
+            "rejected": bool,           # 是否拒绝补仓
+            "reject_reason": str,       # 拒绝原因
+            "adjusted_pool": float|None,# 桶调整后的可用资金池上限
+            "emergency_fund_months": float|None,
+            "buckets": list[dict],      # 桶快照
+        }
+    """
+    info = {
+        "enabled": False,
+        "rejected": False,
+        "reject_reason": "",
+        "adjusted_pool": None,
+        "emergency_fund_months": None,
+        "buckets": [],
+    }
+    try:
+        if not get_config_bool_safe("smart_add.goal_aware_enabled", False):
+            return info
+        info["enabled"] = True
+
+        # S4-4：emergency_fund 校验
+        from db.dashboard import get_user_profile
+        profile = get_user_profile(user_id) or {}
+        em_months = profile.get("emergency_fund_months")
+        info["emergency_fund_months"] = em_months
+        if em_months is not None:
+            min_em = get_config_float_safe("smart_add.goal_aware.min_emergency_fund_months", 3.0)
+            if isinstance(em_months, (int, float)) and em_months < min_em:
+                info["rejected"] = True
+                info["reject_reason"] = (
+                    f"应急金不足：当前约 {em_months:g} 个月（低于阈值 {min_em:g} 个月），"
+                    f"建议先补足 {min_em:g} 个月应急金后再开启补仓。"
+                )
+                return info
+
+        # S4-3：goal_buckets 联动资金池
+        from db.goal_buckets import list_goal_buckets
+        buckets = list_goal_buckets(user_id=user_id, status="active")
+        info["buckets"] = [
+            {
+                "name": b.get("name"),
+                "bucket_type": b.get("bucket_type"),
+                "current_amount": b.get("current_amount"),
+                "target_ratio": b.get("target_ratio"),
+                "priority": b.get("priority"),
+            }
+            for b in buckets
+        ]
+
+        # 按桶类型比例计算可用资金池
+        # emergency 桶不计入；stable × 0.5；opportunity × 1.0；long_term × 1.0；learning × 0.3
+        ratio_map = {
+            "emergency": 0.0,
+            "stable": get_config_float_safe("smart_add.goal_aware.stable_bucket_ratio", 0.5),
+            "opportunity": get_config_float_safe("smart_add.goal_aware.opportunity_bucket_ratio", 1.0),
+            "long_term": get_config_float_safe("smart_add.goal_aware.long_term_bucket_ratio", 1.0),
+            "learning": get_config_float_safe("smart_add.goal_aware.learning_bucket_ratio", 0.3),
+        }
+        adjusted_pool = 0.0
+        for b in buckets:
+            btype = b.get("bucket_type") or "stable"
+            current = b.get("current_amount") or 0
+            ratio = ratio_map.get(btype, 0.5)
+            adjusted_pool += current * ratio
+        info["adjusted_pool"] = round(adjusted_pool, 2)
+    except Exception as e:
+        logger.debug(f"[smart_add] goal_aware 调整失败: {e}")
+    return info
+
 
 def generate_smart_add_plan(user_id: str = "default") -> dict:
     """生成智能补仓计划（双引擎 + 计划表 + 组合视角）。
@@ -962,8 +1121,23 @@ def generate_smart_add_plan(user_id: str = "default") -> dict:
     if not holdings:
         return {"enabled": True, "message": "暂无持仓", "plans": [], "portfolio_view": {}}
 
+    # P1-S4：goal-aware 资金规划（默认关闭，开启后联动 user_profiles + goal_buckets）
+    goal_aware_info = _apply_goal_aware_adjustments(user_id, total_assets, cfg)
+    if goal_aware_info.get("rejected"):
+        return {
+            "enabled": True,
+            "rejected": True,
+            "message": goal_aware_info["reject_reason"],
+            "plans": [],
+            "portfolio_view": {},
+            "goal_aware": goal_aware_info,
+        }
+
     # 资金池
     pool_total = round(total_assets * cfg["pool_pct"] / 100, 2)
+    # P1-S4：goal_aware 开启时，用桶调整后的可用资金池
+    if goal_aware_info.get("adjusted_pool") is not None:
+        pool_total = max(0.0, min(pool_total, goal_aware_info["adjusted_pool"]))
 
     # 基础月投额（年化4% → 月度）
     base_monthly = round(total_assets * cfg["base_dca_pct"] / 100 / 12, 2)
@@ -974,6 +1148,9 @@ def generate_smart_add_plan(user_id: str = "default") -> dict:
         plan = _generate_single_plan(h, cfg, total_assets, pool_total, base_monthly, holdings=holdings)
         if plan:
             plans.append(plan)
+
+    # 2.5 P0-S1（2026-08-01）：组合相关性降权（在组合视角/持久化前调整金额）
+    _apply_correlation_downweight(plans, holdings)
 
     # 3. 组合视角：优先级排序
     deep_loss_plans = [p for p in plans if (p.get("pyramid") or {}).get("triggered_tiers", 0) > 0]
@@ -1144,6 +1321,7 @@ def generate_smart_add_plan(user_id: str = "default") -> dict:
             "pool_remaining": portfolio_view["pool_remaining"],
             "base_monthly": base_monthly,
         },
+        "goal_aware": goal_aware_info,  # P1-S4：goal-aware 调整详情
     }
 
 
@@ -1716,7 +1894,7 @@ def _generate_single_plan(
 
         # 预估摊薄效果（全触发后）
         total_release = sum(t["release_amount"] for t in tiers)
-        avg_cost_after = _calc_avg_cost_after_add(total_cost, shares, total_release, current_price)
+        avg_cost_after = _calc_avg_cost_after_add(total_cost, shares, total_release, current_price, fund_code)
         current_avg_cost = total_cost / shares if shares else 0
         improvement = None
         if avg_cost_after and current_avg_cost:
@@ -1904,7 +2082,7 @@ def _generate_single_plan(
                     _rp_improvement = improvement
                 else:
                     _rp_amount = (signal_c or {}).get("amount", 0)
-                    _rp_new_cost = _calc_avg_cost_after_add(total_cost, shares, _rp_amount, current_price)
+                    _rp_new_cost = _calc_avg_cost_after_add(total_cost, shares, _rp_amount, current_price, fund_code)
                     _rp_improvement = None
                     if _rp_new_cost and shares:
                         _rp_new_profit = (current_price - _rp_new_cost) / _rp_new_cost if _rp_new_cost else 0
@@ -1971,6 +2149,20 @@ def _generate_single_plan(
         logger.debug(f"[smart_add] recovery_path 构建失败 {fund_code}: {e}")
         recovery_path = None
 
+    # P1-S5：最小申购额约束（不足则归零跳过，避免无效小额补仓）
+    min_subscription_note = ""
+    if final_suggested_amount > 0:
+        try:
+            min_sub = get_config_float_safe("opportunity.constraint.min_subscription_amount", 10.0)
+            if 0 < final_suggested_amount < min_sub:
+                min_subscription_note = (
+                    f"建议金额¥{final_suggested_amount:.2f}低于最小申购额¥{min_sub:g}，本次跳过"
+                    f"（可累积到下一档合并执行）"
+                )
+                final_suggested_amount = 0.0
+        except Exception as e:
+            logger.debug(f"[smart_add] 最小申购额校验失败 {fund_code}: {e}")
+
     return {
         "fund_code": fund_code,
         "fund_name": fund_name,
@@ -1995,6 +2187,7 @@ def _generate_single_plan(
         "fund_health": fund_health,  # 基本面健康检查
         "total_suggested": round(total_suggested, 2),  # 信号触发金额汇总（旧字段，向后兼容）
         "final_suggested_amount": round(final_suggested_amount, 2),  # 2026-07-10 新增：多维度最终金额
+        "min_subscription_note": min_subscription_note,  # P1-S5：最小申购额跳过提示
         "has_signal": len([s for s in triggered_signals if s.get("triggered")]) > 0,
         "fund_type": fund_type_info["label"],
         "fund_type_code": fund_type,
@@ -2094,7 +2287,7 @@ def preview_add_scenario(
     simulated_price = round(current_price * (1 + additional_drop_pct / 100), 4)
 
     # 补仓后平均成本
-    new_cost = _calc_avg_cost_after_add(total_cost, shares, add_amount, simulated_price)
+    new_cost = _calc_avg_cost_after_add(total_cost, shares, add_amount, simulated_price, fund_code)
     current_avg_cost = total_cost / shares if shares else 0
 
     current_profit = (current_price - current_avg_cost) / current_avg_cost if current_avg_cost else 0

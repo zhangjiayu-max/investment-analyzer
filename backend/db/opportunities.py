@@ -1,7 +1,7 @@
 """短线主题机会 CRUD 与决策联动。"""
 
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from db._conn import _get_conn
 from db._utils import _add_column_if_not_exists
@@ -110,6 +110,22 @@ def init_opportunity_tables(conn):
     _ensure_column(conn, "theme_opportunity_backtests", "capital_signal", "TEXT")
     _ensure_column(conn, "theme_opportunity_backtests", "volume_signal", "TEXT")
 
+    # P1-R6（2026-08-01）：含成本 walk-forward 回测 — 扩展回测表字段
+    # dim_scores_json: 14 维分项分快照（供 R4 算 IC）
+    # entry_amount: 决策金额（算 Sharpe 用）
+    # buy_fee / sell_fee / slippage_cost: 实际扣费与滑点成本
+    # net_return: 扣成本后净收益（百分比）
+    # max_drawdown / sharpe / calmar: 持有期内风险指标
+    _ensure_column(conn, "theme_opportunity_backtests", "dim_scores_json", "TEXT")
+    _ensure_column(conn, "theme_opportunity_backtests", "entry_amount", "REAL")
+    _ensure_column(conn, "theme_opportunity_backtests", "buy_fee", "REAL")
+    _ensure_column(conn, "theme_opportunity_backtests", "sell_fee", "REAL")
+    _ensure_column(conn, "theme_opportunity_backtests", "slippage_cost", "REAL")
+    _ensure_column(conn, "theme_opportunity_backtests", "net_return", "REAL")
+    _ensure_column(conn, "theme_opportunity_backtests", "max_drawdown", "REAL")
+    _ensure_column(conn, "theme_opportunity_backtests", "sharpe", "REAL")
+    _ensure_column(conn, "theme_opportunity_backtests", "calmar", "REAL")
+
     # Accuracy-Boost（2026-07-30）：降权/恢复日志表 — 记录权重变更历史
     conn.execute("""
         CREATE TABLE IF NOT EXISTS opportunity_weight_log (
@@ -124,6 +140,24 @@ def init_opportunity_tables(conn):
         )
     """)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_weight_log_scope ON opportunity_weight_log(scope, scope_value)")
+
+    # P1-R6（2026-08-01）：walk-forward 滚动回测聚合表（per theme + per window）
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS theme_backtest_metrics (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            theme TEXT,
+            window_start TEXT,
+            window_end TEXT,
+            windows_count INTEGER,
+            hit_rate REAL,
+            avg_net_return REAL,
+            avg_sharpe REAL,
+            avg_max_drawdown REAL,
+            avg_calmar REAL,
+            created_at TEXT DEFAULT (datetime('now','localtime'))
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_backtest_metrics_theme ON theme_backtest_metrics(theme, window_start)")
 
 
 def _ensure_column(conn, table: str, column: str, col_type: str):
@@ -583,7 +617,8 @@ def create_opportunity_backtest(data: dict) -> int:
 
     Args:
         data: {opportunity_id, theme, entry_date, review_date, entry_price,
-               signal_source?, capital_signal?, volume_signal?, entry_percentile?}
+               signal_source?, capital_signal?, volume_signal?, entry_percentile?,
+               entry_amount?, dim_scores_json?}
 
     Returns:
         backtest_id
@@ -593,11 +628,13 @@ def create_opportunity_backtest(data: dict) -> int:
         # LI-6（2026-07-22）：新增 signal_source 字段（默认 'news'）
         # Accuracy-Fix（2026-07-27）：新增 capital_signal/volume_signal 字段
         # Accuracy-Boost（2026-07-30）：新增 entry_percentile 字段（用于 miss_reason 拼接和反哺分析）
+        # P1-R6（2026-08-01）：新增 entry_amount / dim_scores_json 字段（含成本回测 + R4 IC 计算）
         cur = conn.execute("""
             INSERT INTO theme_opportunity_backtests (
                 opportunity_id, theme, entry_date, review_date, entry_price,
-                signal_source, capital_signal, volume_signal, entry_percentile
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                signal_source, capital_signal, volume_signal, entry_percentile,
+                entry_amount, dim_scores_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             data.get("opportunity_id"),
             data.get("theme", ""),
@@ -608,9 +645,105 @@ def create_opportunity_backtest(data: dict) -> int:
             data.get("capital_signal"),
             data.get("volume_signal"),
             data.get("entry_percentile"),
+            data.get("entry_amount"),
+            data.get("dim_scores_json"),
         ))
         conn.commit()
         return cur.lastrowid
+    finally:
+        conn.close()
+
+
+def save_backtest_metrics(metrics: dict) -> int:
+    """P1-R6（2026-08-01）：保存 walk-forward 回测聚合指标。
+
+    Args:
+        metrics: {theme, window_start, window_end, windows_count, hit_rate,
+                  avg_net_return, avg_sharpe, avg_max_drawdown, avg_calmar}
+
+    Returns:
+        metrics_id
+    """
+    conn = _get_conn()
+    try:
+        cur = conn.execute("""
+            INSERT INTO theme_backtest_metrics (
+                theme, window_start, window_end, windows_count,
+                hit_rate, avg_net_return, avg_sharpe, avg_max_drawdown, avg_calmar
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            metrics.get("theme"),
+            metrics.get("window_start"),
+            metrics.get("window_end"),
+            metrics.get("windows_count"),
+            metrics.get("hit_rate"),
+            metrics.get("avg_net_return"),
+            metrics.get("avg_sharpe"),
+            metrics.get("avg_max_drawdown"),
+            metrics.get("avg_calmar"),
+        ))
+        conn.commit()
+        return cur.lastrowid
+    finally:
+        conn.close()
+
+
+def list_backtest_metrics(theme: str | None = None, limit: int = 50) -> list[dict]:
+    """P1-R6：列出 walk-forward 回测聚合指标。"""
+    conn = _get_conn()
+    try:
+        if theme:
+            rows = conn.execute(
+                "SELECT * FROM theme_backtest_metrics WHERE theme = ? ORDER BY created_at DESC LIMIT ?",
+                (theme, limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM theme_backtest_metrics ORDER BY created_at DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+def list_reviewed_backtests_with_dims(theme: str | None = None, days: int = 90) -> list[dict]:
+    """P1-R4（2026-08-01）：列出已回测且含 dim_scores_json 的记录，供 IC 计算。
+
+    Args:
+        theme: 主题过滤（可选）
+        days: 最近多少天
+
+    Returns:
+        [{id, theme, dim_scores_json, net_return, excess_return, hit, entry_date, review_date}, ...]
+    """
+    conn = _get_conn()
+    try:
+        start_date = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+        if theme:
+            rows = conn.execute(
+                """SELECT id, theme, dim_scores_json, net_return, excess_return, hit,
+                          entry_date, review_date, signal_source
+                   FROM theme_opportunity_backtests
+                   WHERE hit IS NOT NULL
+                     AND dim_scores_json IS NOT NULL
+                     AND entry_date >= ?
+                     AND theme = ?
+                   ORDER BY entry_date DESC""",
+                (start_date, theme),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """SELECT id, theme, dim_scores_json, net_return, excess_return, hit,
+                          entry_date, review_date, signal_source
+                   FROM theme_opportunity_backtests
+                   WHERE hit IS NOT NULL
+                     AND dim_scores_json IS NOT NULL
+                     AND entry_date >= ?
+                   ORDER BY entry_date DESC""",
+                (start_date,),
+            ).fetchall()
+        return [dict(r) for r in rows]
     finally:
         conn.close()
 
@@ -631,13 +764,135 @@ def list_pending_backtests() -> list[dict]:
         conn.close()
 
 
+# ── P1-R4（2026-08-01）：信号 IC 计算 ──────────────────────────
+
+# IC 进程级缓存：(dim_name, window_days) → (ic_value, cached_ts)
+_ic_cache: dict[tuple, tuple] = {}
+_IC_CACHE_TTL = 3600.0  # 1 小时
+
+
+def _spearman_rank_correlation(x: list[float], y: list[float]) -> float | None:
+    """纯 Python 实现 Spearman 等级相关系数（无 scipy 依赖）。
+
+    Returns:
+        [-1, 1] 区间相关系数；样本不足返回 None
+    """
+    n = len(x)
+    if n < 3 or n != len(y):
+        return None
+
+    def rank(values: list[float]) -> list[float]:
+        """返回 values 的秩（平均秩处理并列）。"""
+        indexed = sorted(range(n), key=lambda i: values[i])
+        ranks = [0.0] * n
+        i = 0
+        while i < n:
+            j = i
+            # 找到所有与 values[indexed[i]] 相等的元素
+            while j + 1 < n and values[indexed[j + 1]] == values[indexed[i]]:
+                j += 1
+            # 平均秩（1-based）
+            avg_rank = (i + j) / 2.0 + 1
+            for k in range(i, j + 1):
+                ranks[indexed[k]] = avg_rank
+            i = j + 1
+        return ranks
+
+    rx = rank(x)
+    ry = rank(y)
+    # Pearson 相关系数 on ranks = Spearman
+    mean_rx = sum(rx) / n
+    mean_ry = sum(ry) / n
+    num = sum((rx[i] - mean_rx) * (ry[i] - mean_ry) for i in range(n))
+    den_x = (sum((r - mean_rx) ** 2 for r in rx)) ** 0.5
+    den_y = (sum((r - mean_ry) ** 2 for r in ry)) ** 0.5
+    if den_x == 0 or den_y == 0:
+        return None
+    return num / (den_x * den_y)
+
+
+def calc_signal_ic(dim_name: str, window_days: int = 90) -> float | None:
+    """P1-R4：计算某维度信号与净超额收益的 Spearman IC。
+
+    逻辑：
+    - 取最近 window_days 内已 review 且含 dim_scores_json 的回测记录
+    - 对 (dim_score, net_excess_return) 算 Spearman rank correlation
+    - 缓存 1 小时（_ic_cache）
+
+    Args:
+        dim_name: 维度名（如 'news'/'policy'/'valuation'...）
+        window_days: 回看窗口天数
+
+    Returns:
+        IC 值 [-1, 1]；样本不足返回 None
+    """
+    import time as _time
+    cache_key = (dim_name, window_days)
+    cached = _ic_cache.get(cache_key)
+    if cached and (_time.time() - cached[1]) < _IC_CACHE_TTL:
+        return cached[0]
+
+    records = list_reviewed_backtests_with_dims(days=window_days)
+    if len(records) < 10:  # 样本不足（配置 min_samples 默认 30，但底层至少要 10 才能算相关性）
+        _ic_cache[cache_key] = (None, _time.time())
+        return None
+
+    x_scores = []
+    y_returns = []
+    for r in records:
+        dims_json = r.get("dim_scores_json")
+        if not dims_json:
+            continue
+        try:
+            dims = json.loads(dims_json) if isinstance(dims_json, str) else dims_json
+        except (TypeError, json.JSONDecodeError):
+            continue
+        dim_score = dims.get(dim_name)
+        if dim_score is None:
+            continue
+        # 用 net_return（扣成本后净收益）作为信号预测目标
+        net_return = r.get("net_return")
+        if net_return is None:
+            # 回退到 excess_return
+            net_return = r.get("excess_return")
+        if net_return is None:
+            continue
+        x_scores.append(float(dim_score))
+        y_returns.append(float(net_return))
+
+    if len(x_scores) < 10:
+        _ic_cache[cache_key] = (None, _time.time())
+        return None
+
+    ic = _spearman_rank_correlation(x_scores, y_returns)
+    _ic_cache[cache_key] = (ic, _time.time())
+    return ic
+
+
+def get_all_dim_ic(window_days: int = 90, min_samples: int = 30) -> dict[str, float | None]:
+    """P1-R4：批量计算所有维度的 IC 值。
+
+    Returns:
+        {dim_name: ic_value or None}
+    """
+    dims = ["news", "policy", "basic", "valuation", "holding", "tradability",
+            "tech", "capital", "sentiment", "leading", "volume", "research",
+            "margin", "etf", "regime"]
+    result = {}
+    for d in dims:
+        result[d] = calc_signal_ic(d, window_days)
+    return result
+
+
 def update_opportunity_backtest(backtest_id: int, fields: dict) -> bool:
     """更新回测记录（回测后填充 review_price/hit/change_pct）。"""
     if not fields:
         return False
     conn = _get_conn()
     try:
-        allowed = {"review_price", "hit", "change_pct", "reviewed_at", "benchmark_pct", "excess_return", "miss_reason", "entry_percentile", "capital_signal", "volume_signal"}
+        allowed = {"review_price", "hit", "change_pct", "reviewed_at", "benchmark_pct", "excess_return", "miss_reason", "entry_percentile", "capital_signal", "volume_signal",
+                   # P1-R6（2026-08-01）：含成本 walk-forward 回测扩展字段
+                   "dim_scores_json", "entry_amount", "buy_fee", "sell_fee", "slippage_cost", "net_return", "max_drawdown", "sharpe", "calmar"}
         sets = []
         values = []
         for k, v in fields.items():

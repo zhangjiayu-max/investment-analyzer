@@ -497,6 +497,174 @@ DEFAULT_CONFIGS = [
     # 功能使用埋点（默认开启，非 LLM 相关）
     ('tracking.feature_usage_enabled', 'true', '功能使用埋点开关：记录页面/功能访问行为用于热度分析（默认开启）', 'tracking'),
     ('tracking.feature_usage_cleanup_days', '90', '功能使用埋点清理天数：清理 N 天前的埋点数据（默认 90）', 'tracking'),
+
+    # ══════════════════════════════════════════════════════════
+    # 三模块联动优化 P0（2026-08-01）— 见 doc/plans/2026-08-01-三模块联动优化.md
+    # 金融严谨性：以下所有阈值/权重/系数均为可配置项，禁止在代码中硬编码。
+    # ══════════════════════════════════════════════════════════
+
+    # ── [P0-R2] 机会雷达主题阈值配置化（替代 _get_theme_thresholds 硬编码）──
+    # 默认值严格复刻原硬编码行为，确保配置化不改变现有金融判定，仅使其可调。
+    ('opportunity.threshold.value_can_buy', '75', 'value(红利)类主题 can_buy 评分阈值', 'opportunity_threshold'),
+    ('opportunity.threshold.growth_can_buy', '82', 'growth(成长)类主题 can_buy 评分阈值（更严格）', 'opportunity_threshold'),
+    ('opportunity.threshold.cycle_can_buy', '78', 'cycle(周期)类主题 can_buy 评分阈值', 'opportunity_threshold'),
+    ('opportunity.threshold.default_can_buy', '75', '主题差异化关闭时的统一 can_buy 评分阈值', 'opportunity_threshold'),
+    ('opportunity.threshold.value_veto_pct', '80', 'value 类估值一票否决分位（高于此值强制 avoid）', 'opportunity_threshold'),
+    ('opportunity.threshold.growth_veto_pct', '60', 'growth 类估值一票否决分位', 'opportunity_threshold'),
+    ('opportunity.threshold.cycle_veto_pct', '70', 'cycle 类估值一票否决分位', 'opportunity_threshold'),
+    ('opportunity.threshold.default_veto_pct', '80', '主题差异化关闭时的统一估值一票否决分位', 'opportunity_threshold'),
+    ('opportunity.threshold.value_block_pct', '80', 'value 类禁 can_buy 分位（高于此值禁止评为可买）', 'opportunity_threshold'),
+    ('opportunity.threshold.growth_block_pct', '60', 'growth 类禁 can_buy 分位', 'opportunity_threshold'),
+    ('opportunity.threshold.cycle_block_pct', '70', 'cycle 类禁 can_buy 分位', 'opportunity_threshold'),
+    ('opportunity.threshold.default_block_pct', '60', '主题差异化关闭时的统一禁 can_buy 分位', 'opportunity_threshold'),
+    ('opportunity.threshold.watch_floor', '50', 'watch（观察）评分下限（低于此值为 avoid）', 'opportunity_threshold'),
+    ('opportunity.threshold.veto_score_cap', '30', '估值一票否决后的评分上限', 'opportunity_threshold'),
+    ('opportunity.threshold.block_score_cap', '60', '禁 can_buy 后的评分上限', 'opportunity_threshold'),
+    # 入场金额估值分档乘数（替代 _calc_entry_amount 硬编码）
+    ('opportunity.entry.mult_deep_low', '1.5', '深度低估(<20%分位)入场金额乘数', 'opportunity_threshold'),
+    ('opportunity.entry.mult_low', '1.0', '低估(20-40%分位)入场金额乘数', 'opportunity_threshold'),
+    ('opportunity.entry.mult_mid', '0.7', '估值适中(40-60%分位)入场金额乘数', 'opportunity_threshold'),
+    ('opportunity.entry.mult_high', '0.4', '偏高估(60-80%分位)入场金额乘数', 'opportunity_threshold'),
+    ('opportunity.entry.mult_no_data', '0.5', '无估值数据时的保守入场金额乘数', 'opportunity_threshold'),
+    ('opportunity.entry.loss_recovery_pct', '8', '补仓回本卡建议金额占市值比例%', 'opportunity_threshold'),
+
+    # ── [P0-R1] 估值信号科学化（z-score + 均值回归，替代裸百分位）──
+    ('opportunity.valsignal.enabled', 'true', '估值信号科学化开关：用 z-score 辅助裸百分位（非LLM，默认开启）', 'opportunity_valsignal'),
+    ('opportunity.valsignal.zscore_window_years', '10', 'z-score 计算回看窗口（年）', 'opportunity_valsignal'),
+    ('opportunity.valsignal.halflife_enabled', 'true', '均值回归半衰期开关：输出回归速度辅助时机判断', 'opportunity_valsignal'),
+    ('opportunity.valsignal.zscore_deep', '-1.5', '深度低估 z-score 阈值（低于此值视为深度低估）', 'opportunity_valsignal'),
+    ('opportunity.valsignal.zscore_low', '-1.0', '低估 z-score 阈值', 'opportunity_valsignal'),
+    ('opportunity.valsignal.zscore_high', '1.0', '高估 z-score 阈值', 'opportunity_valsignal'),
+    # 按指数类型选择估值指标（周期/银行用PB、成长用PS、红利用股息率）
+    ('opportunity.valsignal.indicator_map', '{"default":"pe","bank":"pb","cycle":"pb","growth":"ps","dividend":"dy"}', '按主题类型选择估值指标（JSON：类型→指标 pe/pb/ps/dy）', 'opportunity_valsignal'),
+
+    # ── [P0-R3] 估值驱动独立通道（深度低估即使无新闻也出卡）──
+    ('opportunity.valchannel.enabled', 'true', '估值驱动独立通道开关：深度低估无需新闻命中也生成机会卡（非LLM，默认开启）', 'opportunity_valchannel'),
+    ('opportunity.valchannel.zscore_threshold', '-1.5', '估值驱动通道 z-score 触发阈值', 'opportunity_valchannel'),
+    ('opportunity.valchannel.percentile_threshold', '15', '估值驱动通道百分位触发阈值（分位低于此值触发）', 'opportunity_valchannel'),
+    ('opportunity.valchannel.min_score', '55', '估值驱动卡的评分下限（保底分）', 'opportunity_valchannel'),
+    ('opportunity.valchannel.merge_loss_recovery', 'true', '估值驱动卡与补仓回本卡合并去重开关', 'opportunity_valchannel'),
+
+    # ── [P0-S1] 相关性 / 组合风险建模（智能补仓）──
+    ('smartadd.risk.correlation_enabled', 'true', '组合相关性风险开关：补仓前计算持仓相关系数矩阵并降权高相关品种（非LLM，默认开启）', 'smartadd_risk'),
+    ('smartadd.risk.corr_lookback_days', '120', '相关系数计算回看天数', 'smartadd_risk'),
+    ('smartadd.risk.corr_high_threshold', '0.7', '高相关阈值（相关系数≥此值视为高相关）', 'smartadd_risk'),
+    ('smartadd.risk.corr_downweight_factor', '0.5', '高相关品种补仓金额降权乘数', 'smartadd_risk'),
+    ('smartadd.risk.max_portfolio_beta', '1.3', '组合 β 上限提示（超过则提示系统性风险偏高）', 'smartadd_risk'),
+    ('smartadd.risk.fractional_kelly', '0.5', '分数凯利系数（默认半凯利，降低估计误差导致的过配）', 'smartadd_risk'),
+    ('smartadd.risk.kelly_cap_pct', '25', '单标的凯利仓位上限%', 'smartadd_risk'),
+    ('smartadd.risk.marginal_risk_enabled', 'true', '边际风险贡献开关：补仓前计算该笔对组合波动率的边际贡献', 'smartadd_risk'),
+    ('smartadd.risk.shrinkage_enabled', 'true', '协方差收缩估计开关：用收缩估计提升小样本协方差矩阵鲁棒性', 'smartadd_risk'),
+
+    # ── [P0-S2] 补仓-止盈闭环状态机 ──
+    ('smartadd.exitloop.enabled', 'true', '补仓-止盈闭环开关：补仓即生成回本路径+分批止盈计划并跟踪（非LLM，默认开启）', 'smartadd_exitloop'),
+    ('smartadd.exitloop.batch_take_profit', 'true', '分批止盈开关（到点分批减仓而非一次性）', 'smartadd_exitloop'),
+    ('smartadd.exitloop.tp_first_pct', '15', '第一批止盈触发涨幅%', 'smartadd_exitloop'),
+    ('smartadd.exitloop.tp_first_ratio', '0.33', '第一批止盈减仓比例', 'smartadd_exitloop'),
+    ('smartadd.exitloop.tp_second_pct', '30', '第二批止盈触发涨幅%', 'smartadd_exitloop'),
+    ('smartadd.exitloop.tp_second_ratio', '0.33', '第二批止盈减仓比例', 'smartadd_exitloop'),
+    ('smartadd.exitloop.breakeven_alert', 'true', '回本提醒开关（亏损标的回到成本价时提醒）', 'smartadd_exitloop'),
+    ('smartadd.exitloop.review_days', '15', '止盈计划复盘周期（天）', 'smartadd_exitloop'),
+
+    # ── [P0] 统一投资决策账本（闭环核心）──
+    ('decision_ledger.enabled', 'true', '统一投资决策账本开关：决策→执行→回测→归因全链路记录（非LLM，默认开启）', 'decision_ledger'),
+    ('decision_ledger.review_days', '15', '决策回测时点（天）', 'decision_ledger'),
+    ('decision_ledger.auto_backtest_enabled', 'true', '账本自动回测开关：到期决策自动计算超额收益并归因（非LLM，默认开启）', 'decision_ledger'),
+    ('decision_ledger.hit_excess_pct', '2', '命中判定超额收益阈值%（涨幅-基准≥此值算命中）', 'decision_ledger'),
+    ('decision_ledger.hit_abs_pct', '3', '命中判定绝对收益阈值%（无基准时绝对涨幅≥此值算命中）', 'decision_ledger'),
+
+    # ── [P0-A5] 投资决策流水线编排 ──
+    ('decision_pipeline.enabled', 'true', '投资决策流水线开关：串联雷达发现→专家辩论→补仓sizing→组合风控→决策卡片', 'decision_pipeline'),
+    ('decision_pipeline.min_confidence', '0.5', '决策卡片最低置信度（低于此值标注低置信）', 'decision_pipeline'),
+    ('decision_pipeline.require_risk_check', 'true', '决策必经组合风控检查开关', 'decision_pipeline'),
+
+    # ── [P0-A3] 评测闭环常态化（规则评测默认开，LLM 评测仍受 llm_cost 门控）──
+    ('eval.rule_eval_enabled', 'true', '规则评测常态化开关：对话/决策结束自动做规则评测（非LLM，默认开启）', 'eval'),
+    ('eval.daily_rule_eval_limit', '100', '每日规则评测上限条数', 'eval'),
+    ('eval.signal_weight_feedback_enabled', 'true', '信号权重反哺开关：账本回测命中率反哺机会雷达信号权重（非LLM，默认开启）', 'eval'),
+
+    # ════════════════════════════════════════════════════════════════
+    # P1 任务（2026-08-01）：R4/R5/R6/S4/S5
+    # ════════════════════════════════════════════════════════════════
+
+    # ── [P1-R5] 宏观 regime 联动 ──
+    ('opportunity.regime.bear_pct', '30', 'regime 判定：沪深300 PE 百分位低于此值→bear（熊市/防御）', 'opportunity_regime'),
+    ('opportunity.regime.bull_pct', '70', 'regime 判定：沪深300 PE 百分位高于此值→bull（牛市/进攻）', 'opportunity_regime'),
+    ('opportunity.regime.theme_category', '{"红利低波":"defensive","人工智能":"offensive","半导体":"offensive","机器人":"offensive","新能源":"offensive"}', '主题分类 JSON：offensive=进攻/defensive=防御/neutral=中性，用于 regime 联动评分', 'opportunity_regime'),
+    ('opportunity.regime.bear_confidence_discount', '0.9', 'bear regime 下决策置信度折扣系数（防御性降置信）', 'opportunity_regime'),
+    ('opportunity.regime.bull_high_valuation_penalty', '-8', 'bull regime + 高估值（百分位>70）的 regime gate 惩罚分', 'opportunity_regime'),
+    ('opportunity.regime.bear_defensive_bonus', '5', 'bear regime + 防御主题加分', 'opportunity_regime'),
+    ('opportunity.regime.bear_offensive_penalty', '-5', 'bear regime + 进攻主题扣分', 'opportunity_regime'),
+    ('opportunity.regime.bull_offensive_bonus', '3', 'bull regime + 进攻主题加分', 'opportunity_regime'),
+    ('opportunity.macro.fed_model_enabled', 'false', 'FED 模型（股债性价比）开关：调用国债收益率工具算 EP-YTM（需外部数据，默认关闭）', 'opportunity_macro'),
+
+    # ── [P1-R6] 含成本 walk-forward 回测 ──
+    ('opportunity.backtest.fee_mode', 'realistic', '回测扣费模式：realistic=按实际阶梯费率 / relaxed=机会信号豁免 lt7d 惩罚按 lt1y 0.5%', 'opportunity_backtest'),
+    ('opportunity.backtest.slippage_bps', '5', '回测滑点（基点 bps，默认 5bps，双边扣 2×）', 'opportunity_backtest'),
+    ('opportunity.backtest.risk_free_rate', '0.02', '回测无风险利率（年化，默认 2%），算 Sharpe 用', 'opportunity_backtest'),
+    ('opportunity.backtest.hit_threshold', '1.5', '扣成本后命中阈值（净超额收益 >= 此值视为命中，默认 1.5%）', 'opportunity_backtest'),
+    ('opportunity.backtest.walk_forward_enabled', 'false', 'walk-forward 滚动回测开关（默认关闭，手动触发）', 'opportunity_backtest'),
+    ('opportunity.backtest.walk_forward_window_days', '15', 'walk-forward 窗口天数（默认 15）', 'opportunity_backtest'),
+    ('opportunity.backtest.walk_forward_step_days', '5', 'walk-forward 步长天数（默认 5）', 'opportunity_backtest'),
+
+    # ── [P1-R4] 信号 IC 加权置信度：14 维权重字典化 ──
+    # 默认 1.0 等权；IC 反哺后由 _apply_ic_feedback 动态调整
+    ('opportunity.weight.dim_news', '1.0', '维度权重：新闻命中', 'opportunity_weight'),
+    ('opportunity.weight.dim_policy', '1.0', '维度权重：政策词命中', 'opportunity_weight'),
+    ('opportunity.weight.dim_basic', '1.0', '维度权重：无条件基础分', 'opportunity_weight'),
+    ('opportunity.weight.dim_valuation', '1.0', '维度权重：估值百分位', 'opportunity_weight'),
+    ('opportunity.weight.dim_holding', '1.0', '维度权重：持仓重叠风险', 'opportunity_weight'),
+    ('opportunity.weight.dim_tradability', '1.0', '维度权重：短期可交易性', 'opportunity_weight'),
+    ('opportunity.weight.dim_tech', '1.0', '维度权重：技术指标', 'opportunity_weight'),
+    ('opportunity.weight.dim_capital', '1.0', '维度权重：资金流向', 'opportunity_weight'),
+    ('opportunity.weight.dim_sentiment', '1.0', '维度权重：情绪指标', 'opportunity_weight'),
+    ('opportunity.weight.dim_leading', '1.0', '维度权重：领先指标', 'opportunity_weight'),
+    ('opportunity.weight.dim_volume', '1.0', '维度权重：成交量确认', 'opportunity_weight'),
+    ('opportunity.weight.dim_research', '1.0', '维度权重：研报情绪', 'opportunity_weight'),
+    ('opportunity.weight.dim_margin', '1.0', '维度权重：融资融券', 'opportunity_weight'),
+    ('opportunity.weight.dim_etf', '1.0', '维度权重：ETF 申赎', 'opportunity_weight'),
+    ('opportunity.weight.dim_regime', '1.0', '维度权重：宏观 regime 联动（P1-R5 新增第15维）', 'opportunity_weight'),
+
+    # ── [P1-R4] IC 计算 + confidence 融合 ──
+    ('opportunity.ic.enabled', 'false', 'IC 加权开关（默认关闭，需积累足够样本后开启）', 'opportunity_ic'),
+    ('opportunity.ic.min_samples', '30', 'IC 计算最少样本数（不足则不计算）', 'opportunity_ic'),
+    ('opportunity.ic.window_days', '90', 'IC 计算回看窗口天数', 'opportunity_ic'),
+    ('opportunity.ic.refresh_interval_runs', '10', '每 N 次回测刷新一次 IC（慢速精调）', 'opportunity_ic'),
+    ('opportunity.confidence.ic_weight', '0.4', 'IC 置信度融合权重（base × 0.6 + ic × 0.4）', 'opportunity_ic'),
+
+    # ════════════════════════════════════════════════════════════════
+    # P1-S5 真实约束建模（2026-08-01）
+    # ════════════════════════════════════════════════════════════════
+    # fee.* 从 fee_calculator 迁移为 DB 配置，便于动态调整
+    ('fee.auto_calc_enabled', 'true', '交易手续费自动计算总开关', 'fee'),
+    ('fee.buy_rate', '0.0015', '申购费率（默认 0.15%）', 'fee'),
+    ('fee.sell_rate_lt7d', '0.015', '赎回费率：<7天 1.5%', 'fee'),
+    ('fee.sell_rate_lt1y', '0.005', '赎回费率：<1年 0.5%', 'fee'),
+    ('fee.sell_rate_lt2y', '0.0025', '赎回费率：<2年 0.25%', 'fee'),
+    ('fee.sell_rate_ge2y', '0.0', '赎回费率：≥2年 0%', 'fee'),
+    ('fee.convert_rate', '0.0', '转换费率（默认 0%）', 'fee'),
+    # 真实约束：最小申购额、份额取整
+    ('opportunity.constraint.min_subscription_amount', '10', '最小申购额（元，不足则合并到下一档或跳过）', 'opportunity_constraint'),
+    ('opportunity.constraint.min_subscription_shares', '0.01', '最小申购份额（场外基金保留 2 位小数）', 'opportunity_constraint'),
+    ('opportunity.constraint.etf_lot_size', '100', '场内 ETF 一手股数（份额按 100 股向下取整）', 'opportunity_constraint'),
+    ('opportunity.constraint.fee_aware_avg_cost_enabled', 'true', '摊薄成本扣手续费开关（默认开启，向后兼容增量）', 'opportunity_constraint'),
+    ('opportunity.constraint.exit_fee_aware_enabled', 'true', '止盈档位扣赎回费开关（默认开启）', 'opportunity_constraint'),
+
+    # ════════════════════════════════════════════════════════════════
+    # P1-S4 goal-based 资金规划（2026-08-01）
+    # ════════════════════════════════════════════════════════════════
+    # 资金池/现金流改读 user_profiles（默认 false，用户显式开启）
+    ('smart_add.goal_aware_enabled', 'false', 'goal-aware 资金规划开关：开启后联动 user_profiles + goal_buckets', 'smart_add_goal_aware'),
+    ('smart_add.goal_aware.min_emergency_fund_months', '3', '应急金最低月数（<此值拒绝补仓，建议先补足应急金）', 'smart_add_goal_aware'),
+    ('smart_add.goal_aware.emergency_bucket_exclude', 'true', 'emergency 桶不计入补仓池', 'smart_add_goal_aware'),
+    ('smart_add.goal_aware.stable_bucket_ratio', '0.5', 'stable 桶按此比例计入补仓池（保守，默认 50%）', 'smart_add_goal_aware'),
+    ('smart_add.goal_aware.opportunity_bucket_ratio', '1.0', 'opportunity 桶全额可用', 'smart_add_goal_aware'),
+    ('smart_add.goal_aware.long_term_bucket_ratio', '1.0', 'long_term 桶全额可用', 'smart_add_goal_aware'),
+    ('smart_add.goal_aware.learning_bucket_ratio', '0.3', 'learning 桶按此比例计入（保守，默认 30%）', 'smart_add_goal_aware'),
+    # investment_horizon 联动目标仓位系数
+    ('smart_add.horizon_scale.short', '0.7', 'short(<1y) 期限目标仓位系数（保守降仓）', 'smart_add_horizon'),
+    ('smart_add.horizon_scale.medium', '1.0', 'medium(1-3y) 期限目标仓位系数（基准）', 'smart_add_horizon'),
+    ('smart_add.horizon_scale.long', '1.2', 'long(>3y) 期限目标仓位系数（进取加仓）', 'smart_add_horizon'),
 ]
 
 

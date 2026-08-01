@@ -213,26 +213,32 @@ def _build_market_state() -> dict:
     """
     推断当前市场状态（regime + sentiment）。
 
-    regime 规则：
-        沪深300 PE 百分位 < 30  → bear
-        沪深300 PE 百分位 > 70  → bull
-        30 ≤ PE 百分位 ≤ 70     → sideways
+    regime 规则（P1-R5 阈值配置化）：
+        沪深300 PE 百分位 < opportunity.regime.bear_pct（默认 30） → bear
+        沪深300 PE 百分位 > opportunity.regime.bull_pct（默认 70） → bull
+        其余 → sideways
 
     sentiment 规则：
         优先从 system_config 读恐贪指数，
         若无则用债市温度推断：温度>70→fear, 温度<30→greed, 否则neutral
 
     Returns:
-        {"regime": "bull"|"bear"|"sideways", "sentiment": "greed"|"fear"|"neutral"}
+        {"regime": "bull"|"bear"|"sideways", "sentiment": "greed"|"fear"|"neutral", "pe_percentile": float|None}
         失败返回默认值
     """
     result = {
         "regime": "unknown",
         "sentiment": "neutral",
+        "pe_percentile": None,
     }
 
     # ── regime: 从 index_valuations 取沪深300 PE 百分位 ──
     try:
+        # P1-R5：阈值走配置（原硬编码 30/70）
+        from db.config import get_config_float
+        bear_pct = get_config_float("opportunity.regime.bear_pct", 30.0)
+        bull_pct = get_config_float("opportunity.regime.bull_pct", 70.0)
+
         c, own = _get_conn_once(None)
         if c is not None:
             row = c.execute(
@@ -248,9 +254,10 @@ def _build_market_state() -> dict:
 
             if row and row["percentile"] is not None:
                 pct = float(row["percentile"])
-                if pct < 30:
+                result["pe_percentile"] = pct
+                if pct < bear_pct:
                     result["regime"] = "bear"
-                elif pct > 70:
+                elif pct > bull_pct:
                     result["regime"] = "bull"
                 else:
                     result["regime"] = "sideways"

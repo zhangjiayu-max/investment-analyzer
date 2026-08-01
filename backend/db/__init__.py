@@ -306,6 +306,12 @@ from db.smart_add_plans import (
     init_smart_add_plans_table, save_smart_add_plan,
     list_smart_add_plans, get_smart_add_plan_detail, get_plan_vs_actual,
 )
+# 三模块联动 P0（2026-08-01）：统一投资决策账本（闭环核心）
+from db.investment_decisions import (
+    init_investment_decisions_table, create_decision, get_decision,
+    list_decisions, update_decision_status, update_exit_state, update_exit_plan,
+    record_review, get_decisions_due_for_review, get_decision_accuracy_stats,
+)
 
 # 功能使用埋点
 from db.feature_usage import (
@@ -793,6 +799,9 @@ def init_db():
 
     # S-1（2026-07-22）：智能补仓计划持久化表（支持历史回溯 + 计划vs实际对比）
     init_smart_add_plans_table(conn)
+
+    # 三模块联动 P0（2026-08-01）：统一投资决策账本（决策→执行→回测→归因闭环核心）
+    init_investment_decisions_table(conn)
 
     # ── 交易操作审计日志 ──
     conn.execute("""

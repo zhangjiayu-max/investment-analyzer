@@ -128,6 +128,8 @@ from routers.analysis import (
 )
 # 理财决策升级 6 项分析路由（accuracy 已在上方 import 块中注册）
 from routers.analysis.attribution import router as attribution_router
+# 三模块联动 P0（2026-08-01）：投资决策流水线 + 统一决策账本
+from routers.analysis.decision import router as decision_router
 from routers.analysis.behavior import router as behavior_router
 from routers.analysis.strategy_backtest import router as strategy_bt_router
 from routers.analysis.optimizer import router as optimizer_router
@@ -207,6 +209,8 @@ app.include_router(analysis_decision_canvas_router)
 app.include_router(analysis_accuracy_router)
 app.include_router(analysis_institutional_flow_router)
 app.include_router(analysis_smart_add_router)
+# 三模块联动 P0（2026-08-01）：投资决策流水线 + 统一决策账本
+app.include_router(decision_router)
 app.include_router(analysis_fund_quality_router)
 app.include_router(analysis_portfolio_intelligence_router)
 app.include_router(analysis_master_backtest_router)
@@ -589,6 +593,20 @@ async def startup():
         logging.info("关注列表信号回测任务已启动（alerts.watchlist_backtest_enabled=true）")
     else:
         logging.info("关注列表信号回测已关闭（alerts.watchlist_backtest_enabled=false）")
+
+    # 三模块联动 P0-A3（2026-08-01）：决策账本每日回测（"越来越准"引擎）
+    if get_config("decision_ledger.auto_backtest_enabled", "true") == "true":
+        asyncio.create_task(_auto_decision_backtest())
+        logging.info("决策账本每日回测任务已启动（decision_ledger.auto_backtest_enabled=true，09:45 触发）")
+    else:
+        logging.info("决策账本每日回测已关闭（decision_ledger.auto_backtest_enabled=false）")
+
+    # 三模块联动 P0-S2（2026-08-01）：止盈闭环定时扫描（每 60 分钟）
+    if get_config("smartadd.exitloop.enabled", "true") == "true":
+        asyncio.create_task(_auto_exit_loop_scan())
+        logging.info("止盈闭环扫描任务已启动（smartadd.exitloop.enabled=true，每 60 分钟）")
+    else:
+        logging.info("止盈闭环扫描已关闭（smartadd.exitloop.enabled=false）")
 
     # O-8（2026-07-21）：启动时一键 backfill 机会雷达与事件雷达历史数据
     # 开关：alerts.auto_backfill_on_startup_enabled（默认 true）
@@ -1251,6 +1269,65 @@ async def _auto_opportunity_backtest():
                 logging.warning(f"[opportunity-backtest] 回测异常: {e}")
     except Exception as e:
         logging.warning(f"机会雷达回测任务异常: {e}")
+
+
+async def _auto_decision_backtest():
+    """三模块联动 P0-A3（2026-08-01）：统一决策账本每日回测 — "越来越准"引擎。
+
+    每日 09:45 自动对到期决策计算超额收益、判定命中、归因入库，
+    并把命中率反哺到机会雷达主题信号权重，形成自我进化闭环。
+    开关：decision_ledger.auto_backtest_enabled（默认 true）
+    """
+    from datetime import datetime, timedelta
+    _SCAN_TIME = (9, 45)
+    try:
+        await asyncio.sleep(200)  # 等启动完成
+        while True:
+            now = datetime.now()
+            target = now.replace(hour=_SCAN_TIME[0], minute=_SCAN_TIME[1], second=0, microsecond=0)
+            if target <= now:
+                target = (now + timedelta(days=1)).replace(
+                    hour=_SCAN_TIME[0], minute=_SCAN_TIME[1], second=0, microsecond=0)
+            await asyncio.sleep((target - now).total_seconds())
+            if get_config("decision_ledger.auto_backtest_enabled", "true") != "true":
+                continue
+            try:
+                from services.advisor.decision_backtest import run_decision_backtest
+                result = run_decision_backtest()
+                logging.info(
+                    f"[decision-backtest] 回测完成: processed={result.get('processed', 0)}, "
+                    f"hits={result.get('hits', 0)}, misses={result.get('misses', 0)}, "
+                    f"weight_changes={len(result.get('weight_changes', []))}"
+                )
+            except Exception as e:
+                logging.warning(f"[decision-backtest] 回测异常: {e}")
+    except Exception as e:
+        logging.warning(f"决策账本回测任务异常: {e}")
+
+
+async def _auto_exit_loop_scan():
+    """三模块联动 P0-S2（2026-08-01）：止盈闭环定时扫描。
+
+    每 60 分钟扫描有止盈计划的在途决策，按状态机触发回本/分批止盈提醒。
+    开关：smartadd.exitloop.enabled（默认 true）
+    """
+    try:
+        await asyncio.sleep(220)  # 等启动完成
+        while True:
+            if get_config("smartadd.exitloop.enabled", "true") == "true":
+                try:
+                    from services.advisor.exit_loop import scan_exit_signals
+                    result = scan_exit_signals()
+                    if result.get("alerts_created", 0) > 0:
+                        logging.info(
+                            f"[exit-loop] 扫描完成: scanned={result.get('scanned', 0)}, "
+                            f"alerts={result.get('alerts_created', 0)}"
+                        )
+                except Exception as e:
+                    logging.warning(f"[exit-loop] 扫描异常: {e}")
+            await asyncio.sleep(3600)  # 每 60 分钟一次
+    except Exception as e:
+        logging.warning(f"止盈闭环扫描任务异常: {e}")
 
 
 async def _auto_daily_opportunity_scan():

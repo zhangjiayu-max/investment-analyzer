@@ -2934,3 +2934,24 @@ export function getNotificationSubscribers() {
 export function getFeatureUsageStats(days = 30) {
   return api.get('/feature-usage/stats', { params: { days } })
 }
+
+// ── 投资决策流水线 + 统一决策账本 API（/api/decision/*，三模块联动 P0）──────
+
+export const decisionAPI = {
+  /** 运行单标的投资决策流水线，返回决策卡片 */
+  run: (fundCode, userId = 'default') =>
+    api.post('/decision/run', { fund_code: fundCode, user_id: userId }).then(r => r.data),
+  /** 查询统一决策账本列表 */
+  getLedger: (params = {}) => api.get('/decision/ledger', { params }).then(r => r.data),
+  /** 查询单条决策详情 */
+  getDetail: (decisionId) => api.get(`/decision/ledger/${decisionId}`).then(r => r.data),
+  /** 决策准确率统计（命中率/超额收益） */
+  getAccuracy: (userId = 'default', days = 90) =>
+    api.get('/decision/accuracy', { params: { user_id: userId, days } }).then(r => r.data),
+  /** 手动触发决策回测（到期决策→命中判定→权重反哺） */
+  runBacktest: (userId = 'default') =>
+    api.post('/decision/backtest', null, { params: { user_id: userId } }).then(r => r.data),
+  /** 手动触发止盈闭环扫描 */
+  runExitScan: (userId = 'default') =>
+    api.post('/decision/exit-scan', null, { params: { user_id: userId } }).then(r => r.data),
+}

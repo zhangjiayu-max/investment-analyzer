@@ -46,6 +46,8 @@ export const navItems = [
     children: [
       { key: 'decisions', label: '决策档案', icon: 'clipboard-list', hot: true,
         desc: '投资决策记录、执行追踪、复盘评分' },
+      { key: 'decision-center', label: '决策中心', icon: 'target', hot: true,
+        desc: '三模块联动决策流水线：机会雷达→补仓sizing→组合风控→账本回测反哺' },
       { key: 'attribution', label: '收益归因', icon: 'chart',
         desc: 'Brinson收益归因：选股效应 vs 择时效应' },
       { key: 'behavior', label: '行为诊断', icon: 'brain',

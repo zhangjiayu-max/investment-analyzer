@@ -49,6 +49,7 @@ const SmartAddPlan = defineAsyncComponent(() => import('../components/finance/Sm
 const EventRadarPage = defineAsyncComponent(() => import('../components/market/EventRadarPage.vue'))
 const HealthDashboardV2 = defineAsyncComponent(() => import('../components/health/HealthDashboardV2.vue'))
 const FeatureUsagePage = defineAsyncComponent(() => import('../components/analysis/FeatureUsagePage.vue'))
+const DecisionCenter = defineAsyncComponent(() => import('../components/decision/DecisionCenter.vue'))
 
 const props = defineProps({
   activePage: String,
@@ -97,6 +98,7 @@ const pageComponents = {
   'smart-add': SmartAddPlan,
   'health-v2': HealthDashboardV2,
   'feature-usage': FeatureUsagePage,
+  'decision-center': DecisionCenter,
 }
 
 if (import.meta.env.DEV) {
