@@ -288,6 +288,9 @@ class ConversationQualityEvaluator:
             details.append("✓ 引用了用户持仓数据")
 
         # 4. 估值数据利用
+        # 修复（2026-07-31 conv#195）：债券/混合型基金本身不跟踪指数估值，
+        # 强制要求 has_valuation_data 会系统性低估这类对话的 data 维度。
+        # 新逻辑：若对话主题是债券/固收+类基金，估值缺失不扣分，改由"资产配置/归因数据"替代。
         has_valuation = False
         for sr in specialist_results:
             analysis = sr.get("analysis", "")
@@ -298,13 +301,45 @@ class ConversationQualityEvaluator:
         if has_valuation:
             details.append("✓ 引用了估值数据")
 
-        # 综合分数
-        score = (
-            rag_rate * 35 +
-            tool_success_rate * 25 +
-            (20 if has_portfolio else 0) +
-            (20 if has_valuation else 0)
+        # 检测对话主题是否为债券/固收+类（这类基金无指数估值属合理）
+        all_text = " ".join([sr.get("analysis", "") for sr in specialist_results])
+        is_bond_topic = any(kw in all_text for kw in [
+            "债券型", "二级债基", "固收+", "纯债", "转债", "混合二级",
+            "中债", "可转债", "债基", "债券基金"
+        ])
+        # 债券类对话用"资产配置/归因数据"替代估值数据
+        has_asset_allocation = any(
+            kw in all_text for kw in ["资产配置", "股票仓位", "权益仓位", "重仓股", "穿透", "归因", "仓位"]
         )
+        metrics["is_bond_topic"] = is_bond_topic
+        metrics["has_asset_allocation_data"] = has_asset_allocation
+        if is_bond_topic and not has_valuation:
+            # 债券类对话：用资产配置/归因数据替代估值数据
+            if has_asset_allocation:
+                details.append("✓ 债券类话题：引用了资产配置/归因数据（替代估值）")
+            else:
+                details.append("△ 债券类话题：无估值数据（合理，但建议补充资产配置归因）")
+        elif not has_valuation:
+            details.append("× 未引用估值数据")
+
+        # 综合分数
+        # 修复：债券类话题时，估值分由资产配置数据替代
+        if is_bond_topic:
+            # 债券类：估值20分 → 由资产配置数据替代
+            valuation_score = 20 if has_asset_allocation else (10 if has_valuation else 0)
+            score = (
+                rag_rate * 35 +
+                tool_success_rate * 25 +
+                (20 if has_portfolio else 0) +
+                valuation_score
+            )
+        else:
+            score = (
+                rag_rate * 35 +
+                tool_success_rate * 25 +
+                (20 if has_portfolio else 0) +
+                (20 if has_valuation else 0)
+            )
 
         return EvalDimension(
             name="data",
@@ -397,16 +432,19 @@ class ConversationQualityEvaluator:
                 details=["无响应消息"],
             )
 
-        content = message.get("content", "")
+        # 主文本：完整 assistant 回答（修复 conv#195：不被仲裁片段替换）
+        content = message.get("content", "") or ""
         specialist_results = metadata.get("specialist_results", [])
 
-        # 使用仲裁结果或最终响应
+        # 补充：仲裁片段仅作风险/置信度检测的补充，不替换 content
+        arbitration_text = ""
         if specialist_results:
-            # 找仲裁结果
             for sr in reversed(specialist_results):
                 if sr.get("is_arbitration"):
-                    content = sr.get("analysis", content)
+                    arbitration_text = sr.get("analysis", "") or ""
                     break
+        # 合并文本用于后续关键词检测（结构化仍以 content 为准）
+        detect_text = content + "\n" + arbitration_text
 
         # 1. 结构化程度
         has_headers = bool(re.search(r'^#{1,3}\s', content, re.MULTILINE))
@@ -446,23 +484,23 @@ class ConversationQualityEvaluator:
         }
         details.append(f"数据引用: {'✓' if has_specific_data else '×'} 具体指标")
 
-        # 3. 风险提示
+        # 3. 风险提示（用 detect_text 覆盖完整回答+仲裁）
         risk_keywords = ["风险", "注意", "谨慎", "可能导致", "不确定性", "风险提示"]
-        has_risk_warning = any(kw in content for kw in risk_keywords)
+        has_risk_warning = any(kw in detect_text for kw in risk_keywords)
         metrics["has_risk_warning"] = has_risk_warning
         if has_risk_warning:
             details.append("✓ 包含风险提示")
 
-        # 4. 可操作性
+        # 4. 可操作性（用 detect_text 覆盖完整回答+仲裁）
         action_keywords = ["建议", "操作", "配置", "调整", "买入", "卖出", "持有", "等待"]
-        action_count = sum(1 for kw in action_keywords if kw in content)
+        action_count = sum(1 for kw in action_keywords if kw in detect_text)
         actionability_score = min(100, action_count * 20)
         metrics["actionability_score"] = actionability_score
         metrics["action_keywords_count"] = action_count
         details.append(f"可操作性: {action_count} 个行动关键词")
 
-        # 5. 置信度声明
-        has_confidence = bool(re.search(r'(置信度|信心|确定性|概率)', content))
+        # 5. 置信度声明（用 detect_text 覆盖完整回答+仲裁）
+        has_confidence = bool(re.search(r'(置信度|信心|确定性|概率)', detect_text))
         metrics["has_confidence_statement"] = has_confidence
         if has_confidence:
             details.append("✓ 包含置信度声明")
@@ -485,7 +523,14 @@ class ConversationQualityEvaluator:
         )
 
     def _detect_duplicate_calls(self, agent_runs: list) -> int:
-        """检测重复的 agent 调用"""
+        """检测重复的 agent 调用
+
+        修复（2026-07-31 conv#195）：
+        - 旧逻辑：同一 agent_key 多次调用即算重复（排除 cross_review）
+        - 新逻辑：补充工具级重复检测——同一基金+同一 detail_type 被多次查询才算重复；
+          同基金不同 detail_type（如 all vs holdings）不算重复（all 已含 holdings 但语义不同）。
+        - 同时检测专家间对同一基金的冗余查询（不同专家查同一只基金同一detail_type）。
+        """
         if not agent_runs:
             return 0
 
@@ -497,7 +542,7 @@ class ConversationQualityEvaluator:
                 calls_by_agent[key] = []
             calls_by_agent[key].append(run)
 
-        # 检测重复（同一 agent 被调用多次）
+        # 检测重复（同一 agent 被调用多次，排除交叉审阅）
         duplicate_count = 0
         for key, runs in calls_by_agent.items():
             if len(runs) > 1:
@@ -505,6 +550,39 @@ class ConversationQualityEvaluator:
                 non_cross_review = [r for r in runs if not r.get("is_cross_review")]
                 if len(non_cross_review) > 1:
                     duplicate_count += len(non_cross_review) - 1
+
+        # 补充：工具级重复检测（同基金+同detail_type 的冗余查询）
+        # 收集所有 agent_runs 的 tool_calls
+        fund_query_set = set()  # (fund_code_or_name, detail_type)
+        tool_dup_count = 0
+        for run in agent_runs:
+            tc_str = run.get("tool_calls", "")
+            if not tc_str:
+                continue
+            try:
+                calls = json.loads(tc_str) if isinstance(tc_str, str) else tc_str
+                if not isinstance(calls, list):
+                    continue
+                for c in calls:
+                    if not isinstance(c, dict):
+                        continue
+                    if c.get("name") != "query_fund_info":
+                        continue
+                    args = c.get("arguments", {}) or {}
+                    fund_key = (args.get("fund_code") or args.get("fund_name") or "").strip()
+                    detail = (args.get("detail_type") or "all").strip()
+                    if not fund_key:
+                        continue
+                    query_key = (fund_key, detail)
+                    if query_key in fund_query_set:
+                        tool_dup_count += 1
+                    else:
+                        fund_query_set.add(query_key)
+            except (json.JSONDecodeError, ValueError, TypeError):
+                continue
+
+        # 工具级重复只扣一半分（避免双重惩罚：agent 级已扣过）
+        duplicate_count += tool_dup_count
 
         return duplicate_count
 
@@ -521,15 +599,18 @@ class ConversationQualityEvaluator:
                 metrics=metrics, details=["无响应消息"],
             )
 
-        content = message.get("content", "")
+        # 主文本：完整 assistant 回答（修复 conv#195：不被仲裁片段替换）
+        content = message.get("content", "") or ""
         specialist_results = metadata.get("specialist_results", [])
 
-        # 使用仲裁结果或最终响应
+        # 补充：仲裁片段仅作补充检测
+        arbitration_text = ""
         if specialist_results:
             for sr in reversed(specialist_results):
                 if sr.get("is_arbitration"):
-                    content = sr.get("analysis", content)
+                    arbitration_text = sr.get("analysis", "") or ""
                     break
+        detect_text = content + "\n" + arbitration_text
 
         # 1. 数据交叉验证：检查多个专家是否引用了相同数据
         data_points = []
@@ -549,8 +630,8 @@ class ConversationQualityEvaluator:
         if cross_validated > 0:
             details.append(f"✓ {cross_validated} 个数据点被多专家交叉引用")
 
-        # 2. 数据来源标注
-        has_source = bool(re.search(r'(根据|来源|数据源|来自|《.*?》)', content))
+        # 2. 数据来源标注（用 detect_text 覆盖完整回答+仲裁）
+        has_source = bool(re.search(r'(根据|来源|数据源|来自|《.*?》)', detect_text))
         metrics["has_source_attribution"] = has_source
         if has_source:
             details.append("✓ 标注了数据来源")
@@ -654,32 +735,36 @@ class ConversationQualityEvaluator:
                 metrics=metrics, details=["无响应消息"],
             )
 
-        content = message.get("content", "")
+        # 主文本：完整 assistant 回答（修复 conv#195：不被仲裁片段替换）
+        content = message.get("content", "") or ""
         specialist_results = metadata.get("specialist_results", [])
 
+        # 补充：仲裁片段仅作补充检测
+        arbitration_text = ""
         if specialist_results:
             for sr in reversed(specialist_results):
                 if sr.get("is_arbitration"):
-                    content = sr.get("analysis", content)
+                    arbitration_text = sr.get("analysis", "") or ""
                     break
+        detect_text = content + "\n" + arbitration_text
 
-        # 检查可操作性指标
+        # 检查可操作性指标（用 detect_text 覆盖完整回答+仲裁）
         actionable_patterns = {
             "具体操作": [r'买入', r'卖出', r'持有', r'加仓', r'减仓', r'定投', r'止盈', r'止损'],
             "具体金额/比例": [r'\d+%?', r'\d+元', r'\d+万', r'仓位.*?\d'],
             "触发条件": [r'当.*?时', r'如果.*?则', r'触发', r'条件', r'信号'],
-            "时间框架": [r'短期', r'中期', r'长期', r'\\d+个月', r'\\d+周'],
+            "时间框架": [r'短期', r'中期', r'长期', r'\d+个月', r'\d+周'],
         }
 
         practicality_score = 0
         for aspect, patterns in actionable_patterns.items():
-            if any(re.search(p, content) for p in patterns):
+            if any(re.search(p, detect_text) for p in patterns):
                 practicality_score += 25
                 details.append(f"✓ 包含：{aspect}")
 
         # 检查是否有模糊表达（扣分）
         vague_patterns = [r'根据自身情况', r'可以考虑', r'适当调整', r'仅供参考', r'建议关注']
-        vague_count = sum(1 for p in vague_patterns if re.search(p, content))
+        vague_count = sum(1 for p in vague_patterns if re.search(p, detect_text))
         metrics["vague_expressions"] = vague_count
         if vague_count > 0:
             details.append(f"⚠ 包含 {vague_count} 个模糊表达")
@@ -766,7 +851,12 @@ class ConversationQualityEvaluator:
         )
 
     def _evaluate_risk_warning(self, message: dict, metadata: dict) -> EvalDimension:
-        """评估风险提示：是否标注了风险"""
+        """评估风险提示：是否标注了风险
+
+        修复（2026-07-31 conv#195）：旧逻辑一旦存在仲裁，就用仲裁短片段替换 content，
+        导致完整回答中的"### 第5段：风险提示与盲点"等风险内容被丢弃，risk_warning 恒低分。
+        新逻辑：以完整 assistant content 为主，仲裁片段仅作补充（合并检测，不替换）。
+        """
         metrics = {}
         details = []
 
@@ -776,32 +866,43 @@ class ConversationQualityEvaluator:
                 metrics=metrics, details=["无响应消息"],
             )
 
-        content = message.get("content", "")
-        specialist_results = metadata.get("specialist_results", [])
+        # 主文本：完整 assistant 回答（包含所有段落，不被子片段替换）
+        full_content = message.get("content", "") or ""
 
+        # 补充：仲裁片段也参与检测（但绝不替换 full_content）
+        arbitration_text = ""
+        specialist_results = metadata.get("specialist_results", [])
         if specialist_results:
             for sr in reversed(specialist_results):
                 if sr.get("is_arbitration"):
-                    content = sr.get("analysis", content)
+                    arbitration_text = sr.get("analysis", "") or ""
                     break
 
-        # 风险关键词检查
+        # 合并检测文本：完整回答 + 仲裁片段
+        detect_text = full_content + "\n" + arbitration_text
+
+        # 风险关键词检查（覆盖金融对话常见风险表述）
         risk_keywords = {
-            "直接风险提示": [r'风险提示', r'风险警示', r'风险因素', r'投资有风险', r'风险自负'],
-            "风险类型": [r'市场风险', r'流动性风险', r'信用风险', r'政策风险', r'操作风险'],
-            "风险量化": [r'最大回撤', r'波动率', r'夏普比率', r'VaR', r'\\d+%.*?风险'],
-            "风险应对": [r'止损', r'对冲', r'分散', r'减仓', r'降低仓位'],
+            "直接风险提示": [r'风险提示', r'风险警示', r'风险因素', r'投资有风险', r'风险自负', r'风险点'],
+            "风险类型": [r'市场风险', r'流动性风险', r'信用风险', r'政策风险', r'操作风险',
+                        r'集中度风险', r'债市调整风险', r'估值风险', r'数据完整性风险'],
+            "风险量化": [r'最大回撤', r'波动率', r'夏普比率', r'VaR', r'\d+%.*?风险',
+                        r'占比.*?[\d.]+%'],
+            "风险应对": [r'止损', r'对冲', r'分散', r'减仓', r'降低仓位',
+                        r'不超过', r'严格控制', r'上限'],
             "免责声明": [r'不构成投资建议', r'仅供参考', r'据此操作.*?后果自负'],
         }
 
         risk_score = 0
         for category, patterns in risk_keywords.items():
-            if any(re.search(p, content) for p in patterns):
+            if any(re.search(p, detect_text) for p in patterns):
                 risk_score += 20
                 details.append(f"✓ 包含：{category}")
 
         metrics["risk_score"] = risk_score
         metrics["has_risk_warning"] = risk_score > 0
+        metrics["full_content_len"] = len(full_content)
+        metrics["arbitration_text_len"] = len(arbitration_text)
 
         if risk_score == 0:
             details.append("⚠ 缺少任何风险提示")

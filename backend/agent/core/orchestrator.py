@@ -3986,6 +3986,14 @@ def orchestrate(query: str, history: list, rag_context: str = "", cancel_event: 
         if bond_holdings_ctx:
             system_content += f"\n\n{bond_holdings_ctx}"
             prebuilt_context += f"{bond_holdings_ctx}\n\n"
+            # P2 优化（conv#195）：强提示专家不要重复查询已预注入的基金数据
+            dedup_hint = (
+                "## ⚠️ 数据复用提示（重要）\n"
+                "上方已预注入持仓基金的底层持仓/资产配置/重仓股数据。"
+                "请优先使用这些预注入数据，**不要重复调用 query_fund_info 查询同一只基金**。"
+                "如需补充数据（如净值历史、业绩基准），可调用其他工具，但禁止对已预注入的基金重复 query_fund_info。\n\n"
+            )
+            prebuilt_context += dedup_hint
     except Exception as e:
         logger.warning(f"注入持仓/估值上下文失败: {e}")
 
@@ -5076,6 +5084,14 @@ def _stream_build_context(refined_query: str, rag_context: str, complexity: str,
         if bond_holdings_ctx:
             system_content += f"\n\n{bond_holdings_ctx}"
             prebuilt_context += f"{bond_holdings_ctx}\n\n"
+            # P2 优化（conv#195）：强提示专家不要重复查询已预注入的基金数据
+            dedup_hint = (
+                "## ⚠️ 数据复用提示（重要）\n"
+                "上方已预注入持仓基金的底层持仓/资产配置/重仓股数据。"
+                "请优先使用这些预注入数据，**不要重复调用 query_fund_info 查询同一只基金**。"
+                "如需补充数据（如净值历史、业绩基准），可调用其他工具，但禁止对已预注入的基金重复 query_fund_info。\n\n"
+            )
+            prebuilt_context += dedup_hint
     except Exception as e:
         logger.warning(f"注入持仓/估值上下文失败: {e}")
 
