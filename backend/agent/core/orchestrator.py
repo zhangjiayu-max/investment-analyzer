@@ -3558,6 +3558,86 @@ def _prequery_valuation_context(query: str, trace_id: str = "") -> str:
     return ""
 
 
+# P5（conv#195）：基金类问题预查询关键词
+_FUND_QUERY_KEYWORDS = ["基金", "持仓", "重仓", "ETF", "联接", "债基", "股票型", "混合型", "指数型"]
+# 6位基金代码正则
+_FUND_CODE_PATTERN = re.compile(r'\b(\d{6})\b')
+
+
+def _prequery_fund_context(query: str, trace_id: str = "") -> str:
+    """基金类问题预查询：检测到基金代码/名称时，强制预调用 query_fund_info 获取数据。
+
+    解决 conv#195 execution 47分问题：4个专家并行各自调 query_fund_info 查同一只基金，
+    导致3次重复调用扣45分。通过编排层预查询注入共享上下文，专家不再各自调用。
+
+    Returns:
+        格式化的基金数据上下文字符串；非基金类问题或查询失败时返回空字符串。
+    """
+    if not query:
+        return ""
+
+    # 1. 检测是否为基金类问题
+    if not any(kw in query for kw in _FUND_QUERY_KEYWORDS):
+        # 也检测是否包含6位基金代码
+        if not _FUND_CODE_PATTERN.search(query):
+            return ""
+
+    # 2. 从查询中提取基金代码（6位数字）
+    fund_codes = list(set(_FUND_CODE_PATTERN.findall(query)))
+
+    # 3. 如果没有基金代码，尝试从持仓表匹配基金名称
+    if not fund_codes:
+        try:
+            from db import list_holdings
+            holdings = list_holdings("default") or []
+            for h in holdings:
+                fname = h.get("fund_name", "")
+                fcode = h.get("fund_code", "")
+                if fname and fcode and fname in query:
+                    fund_codes.append(fcode)
+        except Exception:
+            pass
+
+    if not fund_codes:
+        return ""
+
+    # 4. 调用 query_fund_info 工具预查基金数据（最多5只，避免超时）
+    try:
+        from tools import execute_tool
+        import json as _json
+        fund_results = []
+        for code in fund_codes[:5]:
+            try:
+                raw = execute_tool(
+                    "query_fund_info",
+                    {"fund_code": code, "detail_type": "all"},
+                    trace_id=trace_id,
+                    timeout=15,
+                    agent_name="orchestrator_prequery",
+                    user_query=query,
+                )
+                if isinstance(raw, str):
+                    fund_results.append(f"### 基金 {code}\n{raw[:1500]}")
+                elif isinstance(raw, (dict, list)):
+                    fund_results.append(
+                        f"### 基金 {code}\n{_json.dumps(raw, ensure_ascii=False)[:1500]}"
+                    )
+            except Exception as e:
+                logger.warning(f"[trace:{trace_id}] 基金预查询 {code} 失败: {e}")
+
+        if fund_results:
+            return (
+                "## 基金数据预查询结果（编排层强制调用 query_fund_info 工具获取，"
+                "专家必须引用此数据，禁止凭记忆给数值，"
+                "禁止对已预注入的基金重复调用 query_fund_info）\n"
+                + "\n\n".join(fund_results) + "\n\n"
+            )
+    except Exception as e:
+        logger.warning(f"[trace:{trace_id}] 基金预查询失败（不阻塞主流程）: {e}")
+
+    return ""
+
+
 _SECTOR_KEYWORDS = [
     "白酒", "医药", "医疗", "新能源", "半导体", "芯片", "消费", "科技",
     "金融", "银行", "券商", "房地产", "军工", "周期", "创业板", "科创板",
@@ -4005,6 +4085,15 @@ def orchestrate(query: str, history: list, rag_context: str = "", cancel_event: 
             system_content += f"\n\n{_val_prequery}"
     except Exception as e:
         logger.warning(f"估值预查询注入失败（不阻塞主流程）: {e}")
+
+    # P5（conv#195）：基金数据预查询——避免专家并行重复调用 query_fund_info
+    try:
+        _fund_prequery = _prequery_fund_context(refined_query or query, trace_id=trace_id)
+        if _fund_prequery:
+            prebuilt_context += _fund_prequery
+            system_content += f"\n\n{_fund_prequery}"
+    except Exception as e:
+        logger.warning(f"基金预查询注入失败（不阻塞主流程）: {e}")
 
     # 注入债市数据到 prebuilt_context
     try:
@@ -5103,6 +5192,15 @@ def _stream_build_context(refined_query: str, rag_context: str, complexity: str,
             system_content += f"\n\n{_val_prequery}"
     except Exception as e:
         logger.warning(f"估值预查询注入失败（不阻塞主流程）: {e}")
+
+    # P5（conv#195）：基金数据预查询——避免专家并行重复调用 query_fund_info
+    try:
+        _fund_prequery = _prequery_fund_context(refined_query, trace_id=trace_id)
+        if _fund_prequery:
+            prebuilt_context += _fund_prequery
+            system_content += f"\n\n{_fund_prequery}"
+    except Exception as e:
+        logger.warning(f"基金预查询注入失败（不阻塞主流程）: {e}")
 
     # R2: 注入 DCA 定投规则（从 system_config 读取）
     try:

@@ -938,8 +938,14 @@ class ConversationQualityEvaluator:
                     suggestions.append(f"📚 知识库引用不足（{rag_rate:.0%}），建议增加RAG检索提升数据支撑")
                 if not dim.metrics.get("has_portfolio_data"):
                     suggestions.append("💼 未引用用户持仓数据，建议结合持仓进行个性化分析")
-                if not dim.metrics.get("has_valuation_data"):
-                    suggestions.append("📊 未引用估值数据，建议查询并引用PE/PB等估值指标")
+                # 修复（conv#195）：债券类话题不要求指数估值，改建议资产配置归因
+                is_bond_topic = dim.metrics.get("is_bond_topic", False)
+                if is_bond_topic:
+                    if not dim.metrics.get("has_asset_allocation_data"):
+                        suggestions.append("📊 债券类话题建议补充资产配置/重仓股/归因数据")
+                else:
+                    if not dim.metrics.get("has_valuation_data"):
+                        suggestions.append("📊 未引用估值数据，建议查询并引用PE/PB等估值指标")
 
             elif dim.name == "collaboration":
                 complexity = metadata.get("complexity", "medium")

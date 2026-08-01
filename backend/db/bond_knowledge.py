@@ -6,15 +6,23 @@ import os
 from db._conn import _get_conn
 
 
-def seed_bond_knowledge():
-    """将债券知识写入 skill_documents 表（如尚未写入）。"""
+def seed_bond_knowledge(force_refresh: bool = False):
+    """将债券知识写入 skill_documents 表。
+
+    修复（2026-07-31 conv#195）：旧逻辑一旦已有记录就直接返回，导致 bond_knowledge.md
+    更新后无法重新索引（RAG 检索命中旧内容）。新逻辑支持 force_refresh 强制刷新。
+    """
     conn = _get_conn()
-    existing = conn.execute(
-        "SELECT COUNT(*) FROM skill_documents WHERE doc_type = 'bond_knowledge'"
-    ).fetchone()[0]
-    if existing > 0:
-        conn.close()
-        return False
+    if not force_refresh:
+        existing = conn.execute(
+            "SELECT COUNT(*) FROM skill_documents WHERE doc_type = 'bond_knowledge'"
+        ).fetchone()[0]
+        if existing > 0:
+            conn.close()
+            return False
+    else:
+        # 强制刷新：先删除旧记录
+        conn.execute("DELETE FROM skill_documents WHERE doc_type = 'bond_knowledge'")
     md_path = os.path.join(os.path.dirname(__file__), "..", "docs", "bond_knowledge.md")
     try:
         with open(md_path, "r", encoding="utf-8") as f:
