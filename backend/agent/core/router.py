@@ -151,6 +151,33 @@ _PENETRATION_MANDATORY_KEYWORDS = [
     "到底", "到底了没", "底部", "见底", "回撤原因",
 ]
 
+
+# ── P1 修复（2026-08-02）：主专家判定 ──────────────────
+# 根据用户查询意图确定主专家，综合合成时以主专家 analysis 为主体
+_PRIMARY_SPECIALIST_KEYWORDS = [
+    (["文章", "公众号", "解读", "新闻", "分析这篇文章"], "article_expert"),
+    (["估值", "PE", "PB", "百分位", "分位", "低估", "高估", "便宜", "贵", "能买吗", "值不值得买"], "valuation_expert"),
+    (["风险", "回撤", "止损", "亏损", "最大回撤"], "risk_assessor"),
+    (["配置", "仓位", "股债", "比例", "再平衡"], "allocation_advisor"),
+    (["市场", "大盘", "行情", "走势", "牛市", "熊市"], "market_analyst"),
+    (["基金", "基金经理", "基金分析"], "fund_analyst"),
+]
+
+
+def _determine_primary_specialist(query: str, specialists: list) -> str:
+    """P1 修复：根据查询意图确定主专家。
+
+    优先按关键词匹配；无命中时取 specialists[0]。
+    主专家用于综合合成时确定分析主体（如"解读文章"场景以文章解读专家为主体）。
+    """
+    if not specialists:
+        return ""
+    _q = query or ""
+    for keywords, expert in _PRIMARY_SPECIALIST_KEYWORDS:
+        if any(kw in _q for kw in keywords) and expert in specialists:
+            return expert
+    return specialists[0]
+
 # ── A 方向：复杂度独立判定（不再依赖命中专家数反推） ──────────────────
 # 领域关键词组（用于复杂度判定，与 _KEYWORD_ROUTES 解耦）
 _COMPLEXITY_DOMAIN_GROUPS = [
@@ -521,6 +548,7 @@ class SmartRouter:
             "needs_arbitration": len(specialists_list) >= 2,
             "route_by": "rule",
             "question_type": _classify_question_type(query),
+            "primary_specialist": _determine_primary_specialist(query, specialists_list),
         }
 
     def _declarative_fallback_route(self, query: str) -> Optional[dict]:
@@ -662,6 +690,7 @@ class SmartRouter:
                         "needs_cross_review": True,  # 文章解读常含操作建议，需交叉审阅制衡
                         "article_context_pending": True,  # 文章内容未注入，编排器需二次路由
                         "route_by": "url_detection",
+                        "primary_specialist": "article_expert",  # P1 修复：主专家
                     }
         except Exception:
             pass

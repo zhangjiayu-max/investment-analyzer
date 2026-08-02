@@ -189,11 +189,30 @@ def _build_arbitrator_specialist(arbitration: dict) -> dict | None:
         for piece in arb_reasoning.split(" | "):
             if piece.strip():
                 lines.append(f"- {piece.strip()[:300]}")
+    # P0 修复（2026-08-02）：展示专家 verdict 快照 + 一致性告警
+    expert_verdicts = arbitration.get("expert_verdicts", []) or []
+    if expert_verdicts:
+        lines.append("")
+        lines.append("#### 各专家裁决快照")
+        for ev in expert_verdicts:
+            v = ev.get("verdict", "unknown")
+            c = ev.get("confidence", 0)
+            lines.append(f"- {ev.get('agent','')}: {v} (置信度 {c})")
+    consistency_warning = arbitration.get("consistency_warning", "") or ""
+    if consistency_warning:
+        lines.append("")
+        lines.append(f"⚠️ {consistency_warning}")
     return {
         "agent_key": "arbitrator",
         "agent": "仲裁 Agent",
         "icon": "⚖️",
         "analysis": "\n".join(lines),
+        # P0 修复（2026-08-02）：补全结构化字段，保持 specialist schema 一致
+        # 仲裁 verdict 直接复用 arbitration.verdict（已是中文裁决文案）
+        "verdict": arbitration.get("verdict", "未裁决"),
+        "confidence": arbitration.get("confidence", ""),
+        "is_arbitration": True,
+        "action_signals": [],
     }
 
 
@@ -761,7 +780,7 @@ async def resume_conversation(conv_id: int, request: Request):
                     "execution_status": "completed",
                     "complexity": final_complexity,
                     "specialist_results": [
-                        {"agent_key": s.get("agent_key", ""), "agent": s.get("agent", ""), "icon": s.get("icon", ""), "analysis": s.get("analysis", "")[:3000]}
+                        {"agent_key": s.get("agent_key", ""), "agent": s.get("agent", ""), "icon": s.get("icon", ""), "analysis": s.get("analysis", "")[:3000], "verdict": s.get("verdict", "unknown"), "confidence": s.get("confidence", 0.0)}
                         for s in specialist_results_so_far
                     ],
                     "tool_calls": tool_calls_so_far,
@@ -1160,7 +1179,7 @@ async def send_message_api(conv_id: int, req: SendMessageRequest):
     specialist_results = llm_result.get("specialist_results", [])
     metadata_dict = {
         "specialist_results": [
-            {"agent_key": s.get("agent_key", ""), "agent": s.get("agent", ""), "icon": s.get("icon", ""), "analysis": s.get("analysis", "")[:3000]}
+            {"agent_key": s.get("agent_key", ""), "agent": s.get("agent", ""), "icon": s.get("icon", ""), "analysis": s.get("analysis", "")[:3000], "verdict": s.get("verdict", "unknown"), "confidence": s.get("confidence", 0.0)}
             for s in specialist_results
         ],
         "tool_calls": llm_result.get("tool_calls", []),
@@ -1200,7 +1219,7 @@ async def send_message_api(conv_id: int, req: SendMessageRequest):
     return {
         "answer": answer,
         "specialist_results": [
-            {"agent_key": s.get("agent_key", ""), "agent": s.get("agent", ""), "icon": s.get("icon", ""), "analysis": s.get("analysis", "")}
+            {"agent_key": s.get("agent_key", ""), "agent": s.get("agent", ""), "icon": s.get("icon", ""), "analysis": s.get("analysis", ""), "verdict": s.get("verdict", "unknown"), "confidence": s.get("confidence", 0.0)}
             for s in specialist_results
         ],
         "rag": {
@@ -1664,7 +1683,7 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
                     # 存储回复（更新占位消息）
                     metadata_dict = {
                         "specialist_results": [
-                            {"agent_key": s.get("agent_key", ""), "agent": s.get("agent", ""), "icon": s.get("icon", ""), "analysis": s.get("analysis", "")[:3000]}
+                            {"agent_key": s.get("agent_key", ""), "agent": s.get("agent", ""), "icon": s.get("icon", ""), "analysis": s.get("analysis", "")[:3000], "verdict": s.get("verdict", "unknown"), "confidence": s.get("confidence", 0.0)}
                             for s in specialist_results
                         ],
                         "complexity": complexity,
@@ -1839,18 +1858,35 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
                     content = review["content"]
                 except Exception:
                     pass
-                p1 = [{"agent_key": s["agent_key"], "agent": s.get("agent", ""), "icon": s.get("icon", ""), "analysis": s.get("analysis", "")[:3000]} for s in _prod_spec_results if not s.get("is_cross_review")]
-                p2 = [{"agent_key": s["agent_key"], "agent": s.get("agent", ""), "icon": s.get("icon", ""), "analysis": s.get("analysis", "")[:3000]} for s in _prod_spec_results if s.get("is_cross_review")]
+                p1 = [{"agent_key": s["agent_key"], "agent": s.get("agent", ""), "icon": s.get("icon", ""), "analysis": s.get("analysis", "")[:3000],
+                        # P0 修复（2026-08-02）：持久化结构化 verdict/confidence，消除下游幻觉
+                        "verdict": s.get("verdict", "unknown"), "confidence": s.get("confidence", 0.0)}
+                       for s in _prod_spec_results if not s.get("is_cross_review")]
+                p2 = [{"agent_key": s["agent_key"], "agent": s.get("agent", ""), "icon": s.get("icon", ""), "analysis": s.get("analysis", "")[:3000],
+                        "verdict": s.get("verdict", "unknown"), "confidence": s.get("confidence", 0.0)}
+                       for s in _prod_spec_results if s.get("is_cross_review")]
                 # P2-G 修复 conv#131：Pipeline 路径下 _prod_spec_results 可能未捕获 cross_review_done 事件
                 # 此时使用 EVENT_ANSWER 携带的 cross_review_results 作为兜底
                 if not p2 and cross_review_results:
-                    p2 = [{"agent_key": s.get("agent_key", ""), "agent": s.get("agent", ""), "icon": s.get("icon", ""), "analysis": s.get("analysis", "")[:3000]} for s in cross_review_results if isinstance(s, dict)]
+                    p2 = [{"agent_key": s.get("agent_key", ""), "agent": s.get("agent", ""), "icon": s.get("icon", ""), "analysis": s.get("analysis", "")[:3000],
+                            "verdict": s.get("verdict", "unknown"), "confidence": s.get("confidence", 0.0)}
+                           for s in cross_review_results if isinstance(s, dict)]
                 if stream_msg_id > 0:
+                    # P0 修复（2026-08-02）：tool_calls 字段归一化（tool → name）
+                    _norm_tool_calls = []
+                    for tc in (tool_calls or []):
+                        if isinstance(tc, dict):
+                            _norm_tc = dict(tc)
+                            if "tool" in _norm_tc and "name" not in _norm_tc:
+                                _norm_tc["name"] = _norm_tc.pop("tool")
+                            _norm_tool_calls.append(_norm_tc)
+                        else:
+                            _norm_tool_calls.append(tc)
                     # 构建 metadata（含仲裁结果，让前端可见对话链路完整四阶段）
                     _meta = {
                         "execution_status": "completed", "complexity": complexity,
                         "specialist_results": p1, "cross_review_results": p2,
-                        "tool_calls": tool_calls, "phase_timings": pt, "trace_id": trace_id,
+                        "tool_calls": _norm_tool_calls, "phase_timings": pt, "trace_id": trace_id,
                     }
                     if arbitration:
                         # 截断仲裁摘要避免 metadata 过大
@@ -1859,6 +1895,10 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
                             "confidence": arbitration.get("confidence", ""),
                             "key_conflicts": arbitration.get("key_conflicts", [])[:5],
                             "reasoning": arbitration.get("reasoning", "")[:800],
+                            # P0 修复（2026-08-02）：持久化结构化字段
+                            "expert_verdicts": (arbitration.get("expert_verdicts", []) or [])[:10],
+                            "stance_source": arbitration.get("stance_source", ""),
+                            "consistency_warning": (arbitration.get("consistency_warning", "") or "")[:300],
                         }
                         # 仲裁以独立 specialist 卡片形式追加到列表末尾
                         # 修复 conv 127：原仲裁只写 metadata，前端 specialist_results 列表无仲裁 Agent
@@ -1931,8 +1971,13 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
             def _save_failed(err_msg):
                 if stream_msg_id <= 0:
                     return
-                p1 = [{"agent_key": s["agent_key"], "agent": s.get("agent", ""), "icon": s.get("icon", ""), "analysis": s.get("analysis", "")[:3000]} for s in _prod_spec_results if not s.get("is_cross_review")]
-                p2 = [{"agent_key": s["agent_key"], "agent": s.get("agent", ""), "icon": s.get("icon", ""), "analysis": s.get("analysis", "")[:3000]} for s in _prod_spec_results if s.get("is_cross_review")]
+                # P0 修复（2026-08-02）：失败路径也补全 verdict/confidence，保持 schema 一致
+                p1 = [{"agent_key": s["agent_key"], "agent": s.get("agent", ""), "icon": s.get("icon", ""), "analysis": s.get("analysis", "")[:3000],
+                        "verdict": s.get("verdict", "unknown"), "confidence": s.get("confidence", 0.0)}
+                       for s in _prod_spec_results if not s.get("is_cross_review")]
+                p2 = [{"agent_key": s["agent_key"], "agent": s.get("agent", ""), "icon": s.get("icon", ""), "analysis": s.get("analysis", "")[:3000],
+                        "verdict": s.get("verdict", "unknown"), "confidence": s.get("confidence", 0.0)}
+                       for s in _prod_spec_results if s.get("is_cross_review")]
                 update_message_content_and_metadata(stream_msg_id, f"❌ 执行失败: {err_msg}", {
                     "execution_status": "failed", "complexity": complexity,
                     "specialist_results": p1, "cross_review_results": p2, "trace_id": trace_id,
@@ -2495,8 +2540,10 @@ async def clarify_answer_stream(conv_id: int, request: Request):
                         spec_results = event.get("specialist_results", [])
                         arbitration = event.get("arbitration")
                         try:
+                            # P0 修复（2026-08-02）：持久化结构化 verdict/confidence
                             p1 = [{"agent_key": s.get("agent_key", ""), "agent": s.get("agent", ""),
-                                   "icon": s.get("icon", ""), "analysis": (s.get("analysis", "") or "")[:3000]}
+                                   "icon": s.get("icon", ""), "analysis": (s.get("analysis", "") or "")[:3000],
+                                   "verdict": s.get("verdict", "unknown"), "confidence": s.get("confidence", 0.0)}
                                   for s in spec_results if not s.get("is_cross_review")]
                             _meta = {
                                 "execution_status": "completed",
@@ -2509,6 +2556,10 @@ async def clarify_answer_stream(conv_id: int, request: Request):
                                     "confidence": arbitration.get("confidence", ""),
                                     "key_conflicts": arbitration.get("key_conflicts", [])[:5],
                                     "reasoning": arbitration.get("reasoning", "")[:800],
+                                    # P0 修复（2026-08-02）：持久化结构化字段
+                                    "expert_verdicts": (arbitration.get("expert_verdicts", []) or [])[:10],
+                                    "stance_source": arbitration.get("stance_source", ""),
+                                    "consistency_warning": (arbitration.get("consistency_warning", "") or "")[:300],
                                 }
                                 # 续答路径同样把仲裁追加为独立 specialist 卡片
                                 arb_specialist = _build_arbitrator_specialist(arbitration)

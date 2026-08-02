@@ -1876,13 +1876,21 @@ def _run_react_arbitration(query: str, specialist_results: list, conflicts: dict
         )
     conflict_text = "\n".join(conflict_lines) if conflict_lines else "（冲突详情解析失败）"
 
-    # 构建专家结论摘要
+    # 构建专家结论摘要（P0 修复：注入结构化 verdict + confidence，扩到 800 字）
     expert_lines = []
     for sr in specialist_results:
         if sr.get("is_cross_review"):
             continue
-        analysis = sr.get("analysis", "")[:500]
-        expert_lines.append(f"### {sr.get('agent', sr.get('agent_key',''))}\n{analysis}")
+        agent_name = sr.get('agent', sr.get('agent_key', ''))
+        verdict = sr.get('verdict', 'unknown')
+        confidence = sr.get('confidence', 0.0)
+        analysis = sr.get("analysis", "")[:800]
+        # P0：结构化 verdict 优先展示，让 LLM 仲裁基于结构化字段而非文本提取
+        expert_lines.append(
+            f"### {agent_name}\n"
+            f"**结构化裁决**: verdict={verdict}, confidence={confidence}\n\n"
+            f"{analysis}"
+        )
     expert_text = "\n\n".join(expert_lines)
 
     arb_prompt = f"""你是投资仲裁专家。以下多位专家对同一问题给出了存在冲突的分析结论，请给出明确的仲裁方向。
@@ -1893,25 +1901,28 @@ def _run_react_arbitration(query: str, specialist_results: list, conflicts: dict
 ## 专家冲突点
 {conflict_text}
 
-## 各专家分析结论
+## 各专家分析结论（含结构化裁决）
 {expert_text}
 
 ## 仲裁原则
-1. 必须给出明确方向：BUY / HOLD / SELL（不得模棱两可）
-2. 如有风险否决（risk_assessor 反对），BUY 建议必须降级为 HOLD
-3. 结合用户持仓现状，考虑实际可操作性
-4. 置信度 0-1，反映判断的把握程度
-5. 说明采纳哪位专家观点、否决哪位、为什么
+1. 必须给出明确方向：buy / hold / sell（不得模棱两可）
+2. **优先参考专家的结构化 verdict 字段**，而非从 analysis 文本自行提取方向
+3. 方向应由专家多数 verdict 决定；参考 risk_assessor 的风险提示，但不因风险提示就机械降级 BUY→HOLD
+4. 结合用户持仓现状，考虑实际可操作性
+5. 置信度 0-1，反映判断的把握程度
+6. 说明采纳哪位专家观点、否决哪位、为什么
+7. 若仲裁方向与专家多数 verdict 相反，必须在 reason 中说明充分理由
 
 ## 输出格式（严格 JSON，放在 ```json 代码块中）
 ```json
 {{
-  "direction": "BUY|HOLD|SELL",
+  "verdict": "buy|hold|sell",
   "confidence": 0.75,
-  "reason": "仲裁理由（200字内，说明采纳/否决了哪位专家）",
+  "reasoning": "仲裁理由（200字内，说明采纳/否决了哪位专家）",
   "conditions": "执行条件（如'分批建仓，单次不超过10%'）",
   "adopted_expert": "采纳的专家名",
-  "rejected_expert": "否决的专家名"
+  "rejected_expert": "否决的专家名",
+  "key_conflicts": [{{"type": "buy_vs_sell", "note": "分歧说明"}}]
 }}
 ```
 """
@@ -1934,12 +1945,70 @@ def _run_react_arbitration(query: str, specialist_results: list, conflicts: dict
         json_match = _re.search(r'\{.*\}', content, _re.DOTALL)
         arbitration = _json.loads(json_match.group(0)) if json_match else {}
 
+        # P0 修复（2026-08-02）：统一字段名，LLM 输出 verdict/reasoning，兼容旧 direction/reason
+        arb_verdict = arbitration.get("verdict") or arbitration.get("direction") or "hold"
+        arb_reasoning = arbitration.get("reasoning") or arbitration.get("reason") or ""
+        arb_confidence = arbitration.get("confidence", 0.5)
+        arb_conditions = arbitration.get("conditions", "")
+        arb_key_conflicts = arbitration.get("key_conflicts", [])
+
+        # P0：归一化 verdict 为中文（与轻量仲裁对齐）
+        _verdict_cn_map = {"buy": "建议买入/加仓", "sell": "建议卖出/减仓",
+                           "hold": "建议持有/观望", "watch": "建议观望等待"}
+        arb_verdict_cn = _verdict_cn_map.get(arb_verdict.lower(), arb_verdict)
+
+        # P0：收集专家 verdict 快照
+        expert_verdicts = []
+        for sr in specialist_results:
+            if sr.get("is_cross_review") or sr.get("is_arbitration"):
+                continue
+            expert_verdicts.append({
+                "agent": sr.get("agent", sr.get("agent_key", "")),
+                "agent_key": sr.get("agent_key", ""),
+                "verdict": sr.get("verdict", "unknown"),
+                "confidence": sr.get("confidence", 0.0),
+            })
+
+        # P0：一致性校验
+        consistency_warning = ""
+        expert_stances = [ev["verdict"] for ev in expert_verdicts if ev["verdict"] in ("buy", "sell", "hold", "watch", "avoid")]
+        if expert_stances:
+            from collections import Counter as _C
+            ecounts = _C(expert_stances)
+            majority_stance, majority_count = ecounts.most_common(1)[0]
+            if majority_count > len(expert_stances) / 2:
+                opposite_pairs = {("buy", "sell"), ("sell", "buy"), ("buy", "avoid"), ("avoid", "buy")}
+                if (majority_stance, arb_verdict.lower()) in opposite_pairs or \
+                   (majority_stance == "hold" and arb_verdict.lower() == "sell"):
+                    consistency_warning = (
+                        f"⚠️ 仲裁方向({arb_verdict})与专家多数({majority_stance}, "
+                        f"{majority_count}/{len(expert_stances)})不一致"
+                    )
+
+        # 统一 arbitration dict（与轻量仲裁输出对齐）
+        arbitration_normalized = {
+            "verdict": arb_verdict_cn,
+            "confidence": "high" if arb_confidence >= 0.7 else ("medium" if arb_confidence >= 0.4 else "low"),
+            "key_conflicts": arb_key_conflicts,
+            "reasoning": arb_reasoning + (f"\n{consistency_warning}" if consistency_warning else ""),
+            "arbitration_mode": "conflict",
+            "expert_verdicts": expert_verdicts,
+            "stance_source": "structured",
+            "consistency_warning": consistency_warning,
+            # 保留原字段（向后兼容）
+            "direction": arb_verdict,
+            "reason": arb_reasoning,
+            "conditions": arb_conditions,
+            "adopted_expert": arbitration.get("adopted_expert", ""),
+            "rejected_expert": arbitration.get("rejected_expert", ""),
+        }
+
         # 提取仲裁理由文本（JSON 之外的内容）
         arb_analysis = content
         if json_match:
             arb_analysis = (content[:json_match.start()] + content[json_match.end():]).strip()
         if not arb_analysis:
-            arb_analysis = f"仲裁方向: {arbitration.get('direction','HOLD')} (置信度 {arbitration.get('confidence',0.5)})\n理由: {arbitration.get('reason','')}\n执行条件: {arbitration.get('conditions','')}"
+            arb_analysis = f"仲裁方向: {arb_verdict_cn} (置信度 {arb_confidence})\n理由: {arb_reasoning}\n执行条件: {arb_conditions}"
 
         # 追加为 is_arbitration 专家结果
         arb_result = {
@@ -1949,20 +2018,22 @@ def _run_react_arbitration(query: str, specialist_results: list, conflicts: dict
             "analysis": arb_analysis,
             "status": "completed",
             "is_arbitration": True,
-            "arbitration": arbitration,
+            "arbitration": arbitration_normalized,
+            "verdict": arb_verdict.lower(),   # P0：顶层也带 verdict
+            "confidence": arb_confidence,     # P0：顶层也带 confidence
             "duration_ms": 0,
             "tokens_used": 0,
             "tool_calls": [],
         }
         specialist_results.append(arb_result)
 
-        # 注入 llm_messages 让综合阶段感知仲裁
+        # 注入 llm_messages 让综合阶段感知仲裁（P0：用统一字段）
         llm_messages.append({
             "role": "user",
-            "content": f"## 仲裁专家结论（请优先参考）\n方向: {arbitration.get('direction','HOLD')}\n置信度: {arbitration.get('confidence',0.5)}\n理由: {arbitration.get('reason','')}\n执行条件: {arbitration.get('conditions','')}\n采纳: {arbitration.get('adopted_expert','')} | 否决: {arbitration.get('rejected_expert','')}",
+            "content": f"## 仲裁专家结论（请优先参考）\n方向: {arb_verdict_cn}\n置信度: {arb_confidence}\n理由: {arb_reasoning}\n执行条件: {arb_conditions}\n采纳: {arbitration.get('adopted_expert','')} | 否决: {arbitration.get('rejected_expert','')}",
         })
 
-        logger.info(f"[trace:{trace_id}] ReAct 仲裁完成: direction={arbitration.get('direction','')}, confidence={arbitration.get('confidence','')}")
+        logger.info(f"[trace:{trace_id}] ReAct 仲裁完成: verdict={arb_verdict}, confidence={arb_confidence}, consistency={bool(consistency_warning)}")
         return True, specialist_results
 
     except Exception as e:
@@ -3780,7 +3851,7 @@ def _persist_agent_conclusions(
                 reasoning=analysis[:600],
                 key_variables=_extract_key_points(analysis)[:5] or None,
                 data_basis=None,
-                confidence=0.7,  # 单专家结论默认 0.7
+                confidence=sr.get("confidence", 0.7) if isinstance(sr.get("confidence", 0.7), (int, float)) else 0.7,  # P0 修复：读专家实际 confidence，回退 0.7
                 urgent=0,
                 conversation_id=conversation_id,
                 message_id=message_id,

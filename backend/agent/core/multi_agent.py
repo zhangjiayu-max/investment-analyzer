@@ -920,7 +920,9 @@ def run_specialist(agent_key: str, query: str, context: str = "",
     if _json_match:
         clean_analysis = (answer[:_json_match.start()] + answer[_json_match.end():]).strip()
 
-    return {
+    # P0 修复（2026-08-02）：归一化，保证 verdict/confidence/action_signals 提升到顶层
+    # 消除仲裁层从 structured 嵌套字段提取方向的幻觉
+    _result = {
         "agent_key": agent_key,
         "agent": agent["name"],
         "icon": agent["icon"],
@@ -932,6 +934,12 @@ def run_specialist(agent_key: str, query: str, context: str = "",
         "tokens_used": tokens_used,
         "self_reflection": self_reflection_result,
     }
+    try:
+        from agent.infra.message_protocol import normalize_specialist_result
+        _result = normalize_specialist_result(_result)
+    except Exception:
+        pass
+    return _result
 
 
 def _detect_fund_code_hallucination(tool_calls_log: list, agent: dict) -> str:
@@ -1304,7 +1312,7 @@ def run_specialist_with_context(agent_key: str, query: str, peer_analyses: dict,
         except Exception as log_err:
             logger.warning(f"[cross_review] agent_runs 写入失败 ({agent_key}): {log_err}")
 
-    return {
+    return _normalize_cross_review_result({
         "agent_key": agent_key,
         "agent": agent["name"],
         "icon": agent["icon"],
@@ -1312,7 +1320,25 @@ def run_specialist_with_context(agent_key: str, query: str, peer_analyses: dict,
         "tool_calls": tool_calls_log,
         "duration_ms": duration_ms,
         "is_cross_review": True,
-    }
+    })
+
+
+def _normalize_cross_review_result(result: dict) -> dict:
+    """P0 修复（2026-08-02）：归一化交叉审阅结果，保证 verdict/confidence 字段完整。
+
+    交叉审阅本身不输出独立 verdict（它是对原始分析的评论/修正），
+    但下游 _save_final / _build_arbitrator_specialist 会读 verdict/confidence，
+    缺失时回退到关键词提取会引入幻觉。这里统一填充 "unknown"/0.0 作为防御性默认值。
+    """
+    try:
+        from agent.infra.message_protocol import normalize_specialist_result
+        return normalize_specialist_result(result)
+    except Exception:
+        # 兜底：保证关键字段存在
+        result.setdefault("verdict", "unknown")
+        result.setdefault("confidence", 0.0)
+        result.setdefault("action_signals", [])
+        return result
 
 
 def run_cross_review_opinion(agent_key: str, query: str, self_analysis: str,
@@ -1534,7 +1560,7 @@ def run_cross_review_opinion(agent_key: str, query: str, self_analysis: str,
         except Exception as log_err:
             logger.warning(f"[cross_review] agent_runs 写入失败 ({agent_key}): {log_err}")
 
-    return {
+    return _normalize_cross_review_result({
         "agent_key": agent_key,
         "agent": agent["name"],
         "icon": agent["icon"],
@@ -1543,7 +1569,7 @@ def run_cross_review_opinion(agent_key: str, query: str, self_analysis: str,
         "tool_calls": [],  # 空数组，保持字段兼容
         "duration_ms": duration_ms,
         "is_cross_review": True,
-    }
+    })
 
 
 def _build_portfolio_summary(max_chars: int = 800) -> str:
@@ -1740,7 +1766,7 @@ def run_round_table_discussion(query: str, specialist_results: list,
                 )
                 revised = response.choices[0].message.content or ""
                 if revised and len(revised) > 50:
-                    revision_result = {
+                    revision_result = _normalize_cross_review_result({
                         "agent_key": agent_key,
                         "agent": agent["name"],
                         "icon": agent["icon"],
@@ -1749,7 +1775,7 @@ def run_round_table_discussion(query: str, specialist_results: list,
                         "duration_ms": 0,
                         "is_cross_review": True,
                         "is_phase_c_revision": True,
-                    }
+                    })
                     specialist_results.append(revision_result)
                     logger.info(f"[trace:{trace_id}] Phase C: {agent['name']} 修正结论完成")
             except Exception as e:

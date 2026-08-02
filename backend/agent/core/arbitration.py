@@ -50,18 +50,44 @@ def _detect_stance(text: str) -> str:
 
 
 def arbitrate_results(query: str, specialist_results: list[dict], blackboard=None, plan=None) -> dict:
-    """基于专家结果做轻量仲裁，输出可解释裁决。"""
+    """基于专家结果做轻量仲裁，输出可解释裁决。
+
+    P0 修复（2026-08-02）：优先读专家结构化 verdict 字段，消除从 analysis 文本
+    关键词提取方向的幻觉。verdict 为 unknown/缺失时回退到 _detect_stance。
+    """
     stances = []
     reasons = []
     agent_keys_list = []  # G-2a：与 stances 对齐，用于二次过滤
+    stance_sources = []   # P0：记录 stance 来源（structured / keyword_fallback）
+    expert_verdicts = []  # P0：各专家 verdict 快照（可追溯）
 
     for result in specialist_results or []:
+        # P0 修复（2026-08-02）：仲裁只看原始专家（Phase A）的结构化 verdict
+        # 交叉审阅（Phase B/C）无独立 verdict，回退到关键词提取会引入幻觉
+        # 仲裁 Agent 自身也不参与 stance 统计（避免自引用）
+        if result.get("is_cross_review") or result.get("is_arbitration"):
+            continue
         agent_key = result.get("agent_key", "unknown")
         agent_name = result.get("agent", agent_key)
         analysis = result.get("analysis", "")
-        stance = result.get("stance") or _detect_stance(analysis)
+        # P0 修复：优先读结构化 verdict 字段
+        struct_verdict = result.get("verdict")
+        if struct_verdict and struct_verdict in ("buy", "sell", "hold", "watch", "avoid"):
+            stance = struct_verdict
+            stance_sources.append("structured")
+        else:
+            stance = result.get("stance") or _detect_stance(analysis)
+            stance_sources.append("keyword_fallback")
         stances.append(stance)
         agent_keys_list.append(agent_key)
+        # P0：记录专家 verdict 快照
+        expert_verdicts.append({
+            "agent": agent_name,
+            "agent_key": agent_key,
+            "verdict": stance,
+            "confidence": result.get("confidence", 0.0),
+            "source": stance_sources[-1],
+        })
         if analysis:
             reasons.append(f"{agent_name}: {analysis[:120]}")
 
@@ -120,11 +146,18 @@ def arbitrate_results(query: str, specialist_results: list[dict], blackboard=Non
             shared_evidence["key_data"] = {}
 
     # conv#131 修复：disagreements 只提取明确操作意图（buy/sell），不含 hold
-    # 原逻辑含 hold 导致大量"伪 hold"污染分歧列表
+    # P0 修复（2026-08-02）：优先读结构化 verdict，回退到 _detect_stance
+    # P0 修复（2026-08-02）：过滤交叉审阅/仲裁结果，只统计原始专家的分歧
     disagreements = []
     _seen_disagree_keys = set()
     for result in specialist_results or []:
-        stance = result.get("stance") or _detect_stance(result.get("analysis", ""))
+        if result.get("is_cross_review") or result.get("is_arbitration"):
+            continue
+        struct_v = result.get("verdict")
+        if struct_v and struct_v in ("buy", "sell", "hold", "watch", "avoid"):
+            stance = struct_v
+        else:
+            stance = result.get("stance") or _detect_stance(result.get("analysis", ""))
         if stance in ("buy", "sell"):
             ak = result.get("agent_key", "unknown")
             if ak not in _seen_disagree_keys:
@@ -192,6 +225,21 @@ def arbitrate_results(query: str, specialist_results: list[dict], blackboard=Non
         valuation_gap=valuation_gap,
     )
 
+    # P0 修复（2026-08-02）：仲裁-专家一致性校验
+    # 若仲裁方向与专家多数 verdict 相反，降级置信度 + 标注
+    consistency_warning = _check_consistency(stances, final_stance)
+    if consistency_warning:
+        reasoning = reasoning + "\n" + consistency_warning
+        # 降级置信度：high→medium，medium→low
+        if confidence == "high":
+            confidence = "medium"
+        elif confidence == "medium":
+            confidence = "low"
+
+    # P0：stance 来源统计（structured 占比）
+    structured_count = sum(1 for s in stance_sources if s == "structured")
+    stance_source = "structured" if structured_count > 0 else "keyword_fallback"
+
     summary = {
         # 原字段（向后兼容）
         "query": query,
@@ -209,8 +257,45 @@ def arbitrate_results(query: str, specialist_results: list[dict], blackboard=Non
         # G-2b 新增字段：估值前置检查结果
         "has_valuation_data": has_valuation_data,
         "valuation_gap": valuation_gap,
+        # P0 修复（2026-08-02）新增字段
+        "expert_verdicts": expert_verdicts,           # 各专家 verdict 快照（可追溯）
+        "stance_source": stance_source,               # stance 来源（structured / keyword_fallback）
+        "consistency_warning": consistency_warning,    # 一致性告警（空字符串表示一致）
     }
     return summary
+
+
+def _check_consistency(stances: list, final_stance: str) -> str:
+    """P0 修复（2026-08-02）：仲裁-专家一致性校验。
+
+    若仲裁方向与专家多数 verdict 相反，返回告警字符串；一致则返回空字符串。
+    """
+    if not stances:
+        return ""
+    # 统计明确方向（buy/sell/hold/watch/avoid），排除 unknown
+    valid_stances = [s for s in stances if s in ("buy", "sell", "hold", "watch", "avoid")]
+    if not valid_stances:
+        return ""
+    from collections import Counter as _C
+    counts = _C(valid_stances)
+    majority_stance, majority_count = counts.most_common(1)[0]
+    # 多数需过半才校验
+    if majority_count <= len(valid_stances) / 2:
+        return ""
+    # 方向相反判定：buy vs sell / buy vs avoid / sell vs hold(多数hold但仲裁sell)
+    opposite_pairs = {("buy", "sell"), ("sell", "buy"), ("buy", "avoid"), ("avoid", "buy")}
+    if (majority_stance, final_stance) in opposite_pairs:
+        return (
+            f"⚠️ 仲裁方向({final_stance})与专家多数({majority_stance}, "
+            f"{majority_count}/{len(valid_stances)})不一致，已降级置信度"
+        )
+    # 多数 hold 但仲裁 sell（非估值缺口场景）
+    if majority_stance == "hold" and final_stance == "sell":
+        return (
+            f"⚠️ 仲裁方向(sell)与专家多数(hold, "
+            f"{majority_count}/{len(valid_stances)})不一致，已降级置信度"
+        )
+    return ""
 
 
 def _check_valuation_in_results(specialist_results: list[dict]) -> bool:

@@ -50,6 +50,10 @@ class AgentOutput:
 
     # 分析结论
     conclusion: str = ""                    # 一句话结论（50字以内）
+    # P0 修复（2026-08-02）：新增 verdict 字段，专家 LLM 显式输出操作立场
+    # 取值：buy/hold/sell/watch/avoid/unknown
+    # 仲裁优先读此字段，消除从 analysis 文本关键词提取方向的幻觉
+    verdict: str = "unknown"
     action_signals: list[dict] = field(default_factory=list)
     # 例: [{"type": "BUY", "target": "中证500", "confidence": 0.72, "urgency": "medium"}]
 
@@ -78,6 +82,7 @@ class AgentOutput:
             "agent_role": self.agent_role.value,
             "trace_id": self.trace_id,
             "conclusion": self.conclusion,
+            "verdict": self.verdict,
             "action_signals": self.action_signals,
             "data_references": self.data_references,
             "confidence": self.confidence,
@@ -213,6 +218,7 @@ def parse_agent_output(raw_text: str, agent_key: str, agent_name: str,
         agent_role=AgentRole(agent_role),
         trace_id=trace_id,
         conclusion=structured.get("conclusion", ""),
+        verdict=_normalize_verdict(structured.get("verdict"), structured.get("action_signals", [])),
         action_signals=structured.get("action_signals", []),
         data_references=structured.get("data_references", []),
         confidence=float(structured.get("confidence", 0.0)),
@@ -221,6 +227,45 @@ def parse_agent_output(raw_text: str, agent_key: str, agent_name: str,
         tool_calls=tool_calls,
         duration_ms=duration_ms,
     )
+
+
+# ── P0 修复（2026-08-02）：verdict 归一化 ──────────────────────────────
+
+_VERDICT_NORMALIZE_MAP = {
+    # buy 族
+    "buy": "buy", "BUY": "buy", "Buy": "buy",
+    "add": "buy", "ADD": "buy", "加仓": "buy", "买入": "buy", "建仓": "buy",
+    # sell 族
+    "sell": "sell", "SELL": "sell", "Sell": "sell",
+    "reduce": "sell", "REDUCE": "sell", "减仓": "sell", "卖出": "sell", "清仓": "sell",
+    # hold 族
+    "hold": "hold", "HOLD": "hold", "Hold": "hold",
+    "持有": "hold", "观望": "hold",
+    # watch 族
+    "watch": "watch", "WATCH": "watch", "Watch": "watch",
+    "avoid": "avoid", "AVOID": "avoid", "回避": "avoid",
+}
+
+
+def _normalize_verdict(verdict_raw, action_signals: list) -> str:
+    """归一化 verdict：优先读显式 verdict 字段，回退到 action_signals[0].type。
+
+    消除 LLM 输出格式不一致（BUY/buy/加仓/买入）导致的仲裁方向幻觉。
+    """
+    # 1. 优先读显式 verdict 字段
+    if verdict_raw and isinstance(verdict_raw, str):
+        v = _VERDICT_NORMALIZE_MAP.get(verdict_raw.strip())
+        if v:
+            return v
+    # 2. 回退到 action_signals[0].type
+    if action_signals and isinstance(action_signals, list):
+        for sig in action_signals:
+            if isinstance(sig, dict):
+                sig_type = sig.get("type", "")
+                v = _VERDICT_NORMALIZE_MAP.get(sig_type)
+                if v:
+                    return v
+    return "unknown"
 
 
 def agent_outputs_to_a2a_context(outputs: list[AgentOutput],
@@ -257,6 +302,7 @@ _A2A_OUTPUT_INSTRUCTION = """
 ```json
 {
   "conclusion": "一句话结论（50字以内）",
+  "verdict": "buy|hold|sell|watch|avoid",
   "action_signals": [
     {"type": "BUY|SELL|HOLD|ADD|REDUCE|WATCH", "target": "标的名称", "confidence": 0.0-1.0, "urgency": "high|medium|low"}
   ],
@@ -277,6 +323,13 @@ _A2A_OUTPUT_INSTRUCTION = """
 
 注意：
 - JSON 必须放在代码块 ```json 中
+- verdict 必须明确填写，取值含义：
+  - buy：建议买入/加仓
+  - hold：建议持有/观望（不追加也不减仓）
+  - sell：建议卖出/减仓
+  - watch：建议观察等待（数据不足或信号不明确）
+  - avoid：建议回避（高风险或估值过高）
+- verdict 必须与 action_signals 和详细分析的操作建议一致，不得矛盾
 - 如果某个字段不适用，用空数组 [] 或 0.0
 - 置信度 confidence 不要盲目给高分，有不确定因素时如实降低
 """
@@ -285,3 +338,47 @@ _A2A_OUTPUT_INSTRUCTION = """
 def get_a2a_output_instruction() -> str:
     """获取 A2A 输出格式指令，用于注入 agent system prompt。"""
     return _A2A_OUTPUT_INSTRUCTION
+
+
+# ── P0 修复（2026-08-02）：specialist_results 结构化契约 ──────────────────────────────
+# 消除 schema 因代码路径异导致的字段缺失幻觉
+
+
+def normalize_specialist_result(raw: dict) -> dict:
+    """归一化 specialist_result，保证关键字段完整 + verdict/confidence 提升到顶层。
+
+    消除下游 .get() 防御性访问导致的字段缺失幻觉。
+    向后兼容：原 structured 字段保留，新增顶层 verdict/confidence/action_signals。
+    """
+    if not isinstance(raw, dict):
+        return raw
+
+    # 从 structured 提取 verdict/confidence/action_signals
+    structured = raw.get("structured") or {}
+    inner = structured.get("structured") or structured  # 兼容 {structured:{structured:{...}}} 嵌套
+
+    verdict = raw.get("verdict") or inner.get("verdict") or "unknown"
+    confidence = raw.get("confidence")
+    if confidence is None:
+        confidence = inner.get("confidence", 0.0)
+    action_signals = raw.get("action_signals") or inner.get("action_signals") or []
+
+    # 归一化 verdict
+    verdict = _normalize_verdict(verdict, action_signals) if verdict != "unknown" else "unknown"
+
+    # 填充默认值，保证字段完整
+    return {
+        **raw,  # 保留原所有字段（向后兼容）
+        "verdict": verdict,
+        "confidence": float(confidence or 0.0),
+        "action_signals": action_signals,
+        "agent_key": raw.get("agent_key", "unknown"),
+        "agent": raw.get("agent", raw.get("agent_key", "unknown")),
+        "icon": raw.get("icon", ""),
+        "analysis": raw.get("analysis", ""),
+        "status": raw.get("status", "completed"),
+        "tool_calls": raw.get("tool_calls", []),
+        "duration_ms": raw.get("duration_ms", 0),
+        "is_cross_review": raw.get("is_cross_review", False),
+        "is_arbitration": raw.get("is_arbitration", False),
+    }
