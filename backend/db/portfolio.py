@@ -337,6 +337,8 @@ _HOLDING_ALLOWED_FIELDS = {
     'profit_loss', 'profit_rate', 'buy_date', 'last_update', 'notes',
     'price_updated_at', 'today_change_pct', 'today_profit', 'fund_category',
     'has_base_position', 'last_buy_price', 'last_buy_date', 'updated_at',
+    # 2026-08-03 修复：开放基准成本字段编辑，让用户能补全 base_total_cost 修复历史脏数据
+    'base_shares', 'base_total_cost',
 }
 
 def update_holding(holding_id: int, **fields):
@@ -387,6 +389,11 @@ def update_holding(holding_id: int, **fields):
         conn.commit()
     finally:
         conn.close()
+
+    # 2026-08-03 修复：更新基准成本字段后，触发重算以修正 profit_rate
+    # 用户通过编辑接口补全 base_total_cost 后，需要重算才能让 profit_rate 恢复真实值
+    if any(k in fields for k in ("base_total_cost", "base_shares", "has_base_position")):
+        _recalculate_holding(holding_id)
 
 
 def delete_holding(holding_id: int) -> bool:
@@ -808,10 +815,24 @@ def _recalculate_holding(holding_id: int):
         # 如果持仓有基准数据（直接导入/手动创建的初始持仓），先加入基准
         has_base = holding.get("has_base_position")
         base_shares = holding.get("base_shares") or 0
+        base_total_cost = holding.get("base_total_cost")
         if has_base:
             # 优先使用 base_shares（原始基准），避免被重算覆盖
             total_shares = base_shares if base_shares > 0 else (holding.get("shares") or 0)
-            total_cost = holding.get("total_cost") or 0
+            # 2026-08-03 修复：必须用 base_total_cost 作为稳定起点
+            # 旧逻辑用 holding.total_cost 当起点，但 total_cost 会被卖出持续扣减，
+            # 导致每次重算都从已扣减的值再扣一遍，total_cost 指数级衰减 → profit_rate 虚高
+            if base_total_cost is not None and base_total_cost > 0:
+                total_cost = float(base_total_cost)
+            else:
+                # 防御性降级：base_total_cost 缺失时用 total_cost，但记告警日志
+                # 这种情况会导致 bug 复现，需用户通过编辑接口补全 base_total_cost
+                logger.warning(
+                    f"[portfolio] holding_id={holding_id} fund_code={holding.get('fund_code')} "
+                    f"has_base_position=1 但 base_total_cost 缺失，降级使用 total_cost，"
+                    f"profit_rate 可能虚高，请通过编辑接口补全 base_total_cost"
+                )
+                total_cost = holding.get("total_cost") or 0
 
         current_price = holding.get("current_price") or 0
 

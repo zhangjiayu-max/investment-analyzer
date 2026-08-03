@@ -66,7 +66,7 @@ function getOption(echarts) {
           const pointColor = isBuy ? theme.value.colors.profit : theme.value.colors.loss
           return {
             name: isBuy ? '买入' : '卖出',
-            coord: [p.date, p.price],
+            coord: [p.date, p.yValue != null ? p.yValue : p.price],
             value: p.amount || '',
             symbol: 'triangle',
             symbolRotate: isBuy ? 0 : 180,       // ▲朝上=买入、▼朝下=卖出

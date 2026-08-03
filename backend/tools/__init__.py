@@ -137,6 +137,28 @@ TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "scan_super_value",
+            "description": "扫描所有指数的历史估值数据，按5维度规则评分识别超性价比指数。返回分数≥min_score的候选列表（含百分位/Z-score/连续下跌期数/趋势/数据新鲜度）。当用户想找低估指数、性价比高的标的、定投标的筛选时调用。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "min_score": {
+                        "type": "number",
+                        "description": "最低分数阈值，低于此值的指数不返回（默认40，范围0-100）",
+                        "default": 40,
+                    },
+                    "top_n": {
+                        "type": "integer",
+                        "description": "只返回前N个候选（默认20，按分数降序）",
+                        "default": 20,
+                    },
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "get_author_opinions",
             "description": "获取特定作者的投资观点文章。当用户想了解某位专家对特定话题的看法时调用。",
             "parameters": {
@@ -1381,6 +1403,9 @@ def _execute_tool_impl(name: str, arguments: dict, trace_id: str = "",
         return _get_bond_temperature()
     elif name == "get_valuation_list":
         return _get_valuation_list(arguments)
+    elif name == "scan_super_value":
+        return _scan_super_value_tool(arguments, trace_id=trace_id, conversation_id=conversation_id,
+                                       agent_name=agent_name, user_query=user_query)
     elif name == "get_author_opinions":
         return _get_author_opinions(arguments)
     elif name == "fetch_article":
@@ -2304,6 +2329,35 @@ def _get_valuation_list(args: dict) -> str:
         "filter": filter_type,
         "indexes": results,
     }, ensure_ascii=False)
+
+
+def _scan_super_value_tool(args: dict, trace_id: str = "", conversation_id: int = None,
+                            agent_name: str = "", user_query: str = "") -> str:
+    """扫描超性价比指数（工具实现，委托 routers/market/valuation._scan_super_value_impl）。
+
+    规则评分5维度：百分位30 + 连续跌25 + 跌幅20 + Zscore15 + 趋势10
+    数据源：螺丝钉 > 雷牛牛，同一指数只用一个源。
+    """
+    from routers.market.valuation import _scan_super_value_impl as _scan_impl
+
+    min_score = float(args.get("min_score", 40))
+    top_n = int(args.get("top_n", 20))
+    if top_n <= 0:
+        top_n = 20
+    if top_n > 100:
+        top_n = 100  # 上限保护
+
+    try:
+        result = _scan_impl(min_score=min_score, top_n=top_n)
+    except Exception as e:
+        logger.warning(f"[tool:scan_super_value] 扫描失败: {e}")
+        return json.dumps({
+            "error": f"扫描失败: {e}",
+            "opportunities": [],
+            "total_scanned": 0,
+        }, ensure_ascii=False)
+
+    return json.dumps(result, ensure_ascii=False)
 
 
 def _get_author_opinions(args: dict) -> str:

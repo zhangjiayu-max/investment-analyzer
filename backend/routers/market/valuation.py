@@ -448,25 +448,29 @@ def _pick_best_metric_for_index(conn, index_code: str) -> str | None:
     return candidates[0]["metric_type"]
 
 
-@router.get("/super-value")
-async def get_super_value_indexes():
-    """扫描所有指数的历史估值数据，识别超性价比指数。
+def _scan_super_value_impl(min_score: float = 40, top_n: int | None = None) -> dict:
+    """超性价比扫描核心逻辑（从 get_super_value_indexes 抽取，供工具/HTTP 共用）。
 
-    增强版（2026-07-29）：
-      - 多 metric_type 支持：每个指数按数据时效自动选 PE/PB/PS/股息率（避免白酒 PE 断更被当最新、券商/地产只看 PB 被漏掉）
-      - 数据时效过滤：latest_date 距今 >10 天的指数直接跳过
-      - 标签表述修正：「连续下跌N天」→「连续N期走低（日期窗口）」，避免跨月数据被误读为自然日
-      - 透出 metric_type 字段，前端标注 [PE]/[PB]，让用户知道用什么指标算的
-
-    数据源优先级：螺丝钉(dd_valuations) > 雷牛牛(图片解析)
-    同一指数只用一个数据源，避免混用导致百分位不一致。
-
-    评分维度（不变）：
+    评分维度：
     - 当前估值水位（30分）：percentile 越低越好
     - 连续下跌期数（25分）：连续 N 期 percentile 下降
     - 近期跌幅（20分）：最近 7 期 percentile 降幅
     - Z-score 偏离（15分）：zscore 越低越低估
     - 趋势加速（10分）：近期跌幅 > 前期跌幅
+
+    Args:
+        min_score: 最低分数阈值，低于此值的指数不返回（默认40）
+        top_n: 只返回前 N 个候选（None=全部）
+
+    Returns:
+        {
+            "opportunities": [...],   # 按分数降序
+            "scan_time": "YYYY-MM-DD HH:MM",
+            "total_scanned": int,
+            "skipped_stale": int,
+            "stale_threshold_days": int,
+            "data_range": "date1 ~ date2"
+        }
     """
     from collections import defaultdict
     conn = _get_conn()
@@ -488,6 +492,8 @@ async def get_super_value_indexes():
             "opportunities": [],
             "scan_time": datetime.now().strftime("%Y-%m-%d %H:%M"),
             "total_scanned": 0,
+            "skipped_stale": 0,
+            "stale_threshold_days": SUPER_VALUE_MAX_STALE_DAYS,
             "data_range": "无数据",
         }
 
@@ -512,7 +518,6 @@ async def get_super_value_indexes():
     for r in rows:
         d = dict(r)
         code = d["index_code"]
-        # 只处理挑选出 metric 的指数
         target_metric = index_metric_map.get(code)
         if not target_metric or d["metric_type"] != target_metric:
             continue
@@ -557,8 +562,7 @@ async def get_super_value_indexes():
         if current_pct is None:
             continue
 
-        # 数据时效过滤：latest_date 距今 >10 天直接跳过（_pick_best_metric_for_index 已尽量挑最新，
-        # 这里兜底防止极端情况，例如某指数所有 metric 都很久没更新）
+        # 数据时效过滤：latest_date 距今 >10 天直接跳过
         try:
             latest_dt = datetime.strptime(latest["snapshot_date"], "%Y-%m-%d").date()
             stale_days = (today - latest_dt).days
@@ -589,8 +593,6 @@ async def get_super_value_indexes():
             level = "偏高" if current_pct < 70 else "高估"
 
         # ── 维度 2：连续下跌期数（25分）──
-        # 注意：records 按 snapshot_date 升序，但可能非连续交易日；
-        # 「连续 N 期走低」≠「连续 N 个自然日下跌」，标签和摘要会明确标注。
         consecutive_drop = 0
         for i in range(len(records) - 1, 0, -1):
             if records[i]["percentile"] < records[i - 1]["percentile"]:
@@ -614,7 +616,6 @@ async def get_super_value_indexes():
             score_consecutive = 0
 
         # ── 维度 3：近 7 期跌幅（20分）──
-        # 改为「近 7 期」而非「7 个自然日」，与 records 实际粒度一致
         drop_7d = 0
         if len(records) >= 7:
             pct_7d_ago = records[-7]["percentile"]
@@ -649,7 +650,6 @@ async def get_super_value_indexes():
             score_zscore = 0
 
         # ── 维度 5：趋势加速（10分）──
-        # 比较最近 3 期平均跌幅 vs 最近 7 期平均跌幅
         score_accel = 0
         drop_trend = "平稳"
         if len(records) >= 7:
@@ -670,12 +670,11 @@ async def get_super_value_indexes():
         # ── 总分 ──
         total_score = score_valuation + score_consecutive + score_drop + score_zscore + score_accel
 
-        # 只保留 40 分以上的
-        if total_score < 40:
+        # 只保留达到阈值的
+        if total_score < min_score:
             continue
 
         # 计算「连续走低期数」对应的实际日期窗口
-        # consecutive_drop 期走低，对应 records[-1-consecutive_drop] ~ records[-1]
         window_start_date = None
         window_days = None
         if consecutive_drop > 0:
@@ -732,7 +731,7 @@ async def get_super_value_indexes():
             "current_percentile": round(current_pct, 2),
             "current_value": current_val,
             "zscore": round(zscore, 2) if zscore is not None else None,
-            "consecutive_drop_days": consecutive_drop,  # 保留字段名兼容前端，语义改为「期数」
+            "consecutive_drop_days": consecutive_drop,
             "consecutive_window": {
                 "start_date": window_start_date,
                 "end_date": latest["snapshot_date"],
@@ -754,6 +753,8 @@ async def get_super_value_indexes():
 
     # 按分数降序排列
     opportunities.sort(key=lambda x: x["score"], reverse=True)
+    if top_n is not None:
+        opportunities = opportunities[:top_n]
 
     return {
         "opportunities": opportunities,
@@ -765,7 +766,240 @@ async def get_super_value_indexes():
     }
 
 
+@router.get("/super-value")
+async def get_super_value_indexes():
+    """扫描所有指数的历史估值数据，识别超性价比指数（HTTP 接口，委托 _scan_super_value_impl）。
+
+    增强版（2026-07-29）：
+      - 多 metric_type 支持：每个指数按数据时效自动选 PE/PB/PS/股息率
+      - 数据时效过滤：latest_date 距今 >10 天的指数直接跳过
+      - 透出 metric_type 字段，前端标注 [PE]/[PB]
+
+    数据源优先级：螺丝钉(dd_valuations) > 雷牛牛(图片解析)
+    同一指数只用一个数据源，避免混用导致百分位不一致。
+    """
+    return _scan_super_value_impl()
+
+
 # ── 增强策略分析 ──────────────────────────────────────
+
+
+@router.post("/super-value-deep")
+async def get_super_value_deep():
+    """超性价比深度解读 — 规则筛选 + Agent 编排（在线补数据 + 预测信号 + LLM 综合解读）。
+
+    流程：
+    1. 调 _scan_super_value_impl 获取规则评分候选
+    2. 对 top_n 候选：库内数据过期(>threshold_days) → 调 query_online_valuation 补最新
+    3. 对 top_n 候选：调 query_valuation_forecast 获取均值回归/极值预警信号
+    4. LLM 综合三方数据输出深度解读（真低估/价值陷阱/催化剂/操作建议/置信度）
+
+    开关：agent.valuation_screener_enabled（默认 false）。关闭时降级返回纯规则评分。
+    """
+    from db.config import get_config_bool, get_config_int, get_config_float
+    from services.llm_service import _call_llm, MODEL_AUX
+
+    # 1. 检查开关
+    if not get_config_bool("agent.valuation_screener_enabled", False):
+        # 开关关闭：降级返回纯规则评分（兼容前端）
+        return _scan_super_value_impl()
+
+    start_time = time.time()
+    top_n = get_config_int("agent.valuation_screener_top_n", 10)
+    online_threshold_days = get_config_int("agent.valuation_screener_online_threshold_days", 3)
+    tools_called = ["scan_super_value"]
+    online_counter = {"count": 0}  # 可变容器，供嵌套 async 函数修改
+
+    # 2. 规则评分筛选候选
+    scan_result = _scan_super_value_impl(min_score=40, top_n=top_n)
+    opportunities = scan_result.get("opportunities", [])
+    if not opportunities:
+        return {
+            **scan_result,
+            "deep_analysis": [],
+            "agent_meta": {
+                "agent_name": "估值机会筛选官",
+                "tools_called": tools_called,
+                "online_queries": 0,
+                "duration_ms": int((time.time() - start_time) * 1000),
+                "note": "无候选指数，跳过深度解读",
+            },
+        }
+
+    # 3. 对 top_n 候选补在线数据 + 预测信号（并行）
+    from db.valuations import fetch_online_valuation, normalize_index_code
+    from services.valuation_forecast import mean_reversion_analysis, extreme_warning
+
+    async def _enrich_one(opp: dict) -> dict:
+        """为单个候选补在线数据 + 预测信号。"""
+        code = opp["index_code"]
+        metric_type = opp.get("metric_type", "市盈率")
+        enriched = {**opp}
+
+        # 3a. 在线补数据（仅库内数据过期时）
+        if opp.get("stale_days", 0) > online_threshold_days:
+            try:
+                normalized = normalize_index_code(code)
+                mt_online = "市盈率" if "市盈率" in metric_type else ("市净率" if "市净率" in metric_type else "市盈率")
+                online_data = await asyncio.to_thread(fetch_online_valuation, normalized, mt_online)
+                if online_data and online_data.get("current_value") is not None:
+                    enriched["online_pe"] = online_data.get("current_value")
+                    enriched["online_data_date"] = online_data.get("snapshot_date", "")
+                    enriched["online_source"] = online_data.get("source", "akshare")
+                    online_counter["count"] += 1
+            except Exception as e:
+                logger.debug(f"[super-value-deep] 在线补数据失败 {code}: {e}")
+                enriched["online_pe"] = None
+                enriched["online_data_date"] = ""
+        else:
+            enriched["online_pe"] = None
+            enriched["online_data_date"] = ""
+
+        # 3b. 预测信号
+        try:
+            mr = await asyncio.to_thread(mean_reversion_analysis, code, metric_type)
+            ew = await asyncio.to_thread(extreme_warning, code)
+            enriched["forecast_signal"] = ""
+            if mr and mr.get("signal"):
+                enriched["forecast_signal"] = mr["signal"]
+            elif ew and ew.get("signal"):
+                enriched["forecast_signal"] = ew["signal"]
+            enriched["mean_reversion"] = mr
+            enriched["extreme_warning"] = ew
+        except Exception as e:
+            logger.debug(f"[super-value-deep] 预测信号失败 {code}: {e}")
+            enriched["forecast_signal"] = ""
+            enriched["mean_reversion"] = None
+            enriched["extreme_warning"] = None
+
+        return enriched
+
+    # 并行 enrich（最多 top_n 个）
+    enriched_opps = await asyncio.gather(*[_enrich_one(o) for o in opportunities[:top_n]], return_exceptions=False)
+    tools_called.append("query_online_valuation")
+    tools_called.append("query_valuation_forecast")
+
+    # 4. LLM 综合解读
+    candidate_lines = []
+    for o in enriched_opps:
+        line = (
+            f"- {o['index_name']}({o['index_code']}): 规则评分{o['score']}, "
+            f"百分位{o.get('current_percentile', 'N/A')}%, Z-score{o.get('zscore', 'N/A')}, "
+            f"连续下跌{o.get('consecutive_drop_days', 0)}期, 7期跌幅{o.get('drop_7d', 0)}%, "
+            f"趋势{o.get('drop_trend', '未知')}, 数据源{o.get('data_source', '未知')}, "
+            f"数据新鲜度{o.get('data_freshness', 'unknown')}(距今{o.get('stale_days', 0)}天)"
+        )
+        if o.get("online_pe") is not None:
+            line += f"\n  在线最新: {o.get('metric_type', 'PE')}={o['online_pe']} (日期:{o.get('online_data_date', 'N/A')})"
+        if o.get("forecast_signal"):
+            line += f"\n  预测信号: {o['forecast_signal']}"
+        candidate_lines.append(line)
+    candidate_text = "\n".join(candidate_lines)
+
+    prompt = f"""你是估值机会筛选官，负责对超性价比指数做深度解读。
+
+## 工作流程
+你已收到规则评分候选列表（含在线补数据和预测信号），请综合判断每个指数的：
+1. 机会类型：真低估 / 价值陷阱 / 趋势性下行
+2. 催化剂：什么事件可能触发反弹（政策/业绩/资金轮动）
+3. 操作建议：立即买入 / 分批建仓 / 观望 / 回避
+4. 置信度：high / medium / low
+
+## 红线
+- 不可修改 rule_score（规则评分是客观基础）
+- 不可编造估值数据（在线查询失败时标注"数据缺失"并降低 confidence）
+- 不可对候选列表外的指数做解读
+
+## 输出格式（严格JSON，不要markdown代码块）
+{{
+  "deep_analysis": [
+    {{
+      "index_name": "指数名",
+      "index_code": "代码",
+      "rule_score": 85,
+      "online_pe": 15.2,
+      "online_data_date": "2026-08-03",
+      "forecast_signal": "均值回归",
+      "opportunity_type": "真低估",
+      "catalysts": ["催化剂1", "催化剂2"],
+      "action": "分批建仓",
+      "action_detail": "2-3句操作建议",
+      "confidence": "high"
+    }}
+  ],
+  "overall_summary": "整体市场低估情况概述"
+}}
+
+## 候选指数数据
+{candidate_text}
+
+请基于以上数据给出专业分析。"""
+
+    llm_start = time.time()
+    deep_analysis: list = []
+    overall_summary = ""
+    token_usage = 0
+    response = None
+    try:
+        response = await asyncio.wait_for(
+            asyncio.to_thread(lambda: _call_llm(
+                caller="valuation_screener",
+                model=MODEL_AUX,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=get_config_float("llm.temperature_default", 0.3),
+                max_tokens=get_config_int("llm.max_tokens_report", 8192),
+            )),
+            timeout=120,
+        )
+        content = response.choices[0].message.content or "{}"
+        token_usage = response.usage.total_tokens if response.usage else 0
+        # 提取 JSON
+        json_match = re.search(r'\{.*\}', content, re.DOTALL)
+        if json_match:
+            parsed = json.loads(json_match.group())
+        else:
+            parsed = json.loads(content)
+        deep_analysis = parsed.get("deep_analysis", [])
+        overall_summary = parsed.get("overall_summary", "")
+    except Exception as e:
+        logger.warning(f"[super-value-deep] LLM 解读失败: {e}")
+        deep_analysis = []
+        overall_summary = f"LLM 解读失败: {e}"
+
+    # 5. 记录分析日志
+    try:
+        from db.agent_analysis_log import create_analysis_log, complete_analysis_log
+        _trace_id = f"svd_{uuid.uuid4().hex[:12]}"
+        create_analysis_log(
+            trace_id=_trace_id, agent_id=None, agent_name="估值机会筛选官",
+            analysis_type="super_value_deep", source_table="index_valuations",
+            source_id=None, query=candidate_text[:300],
+            input_summary=f"超性价比深度解读:{len(enriched_opps)}只候选",
+        )
+        complete_analysis_log(
+            trace_id=_trace_id, status="success",
+            result_summary=overall_summary[:200] if overall_summary else f"解读{len(deep_analysis)}只",
+            token_usage=token_usage,
+            duration_ms=int((time.time() - llm_start) * 1000),
+        )
+    except Exception as _e:
+        logger.debug(f"[super-value-deep] 分析日志记录失败: {_e}")
+
+    duration_ms = int((time.time() - start_time) * 1000)
+
+    return {
+        **scan_result,
+        "opportunities": enriched_opps,
+        "deep_analysis": deep_analysis,
+        "overall_summary": overall_summary,
+        "agent_meta": {
+            "agent_name": "估值机会筛选官",
+            "tools_called": tools_called,
+            "online_queries": online_counter["count"],
+            "duration_ms": duration_ms,
+            "llm_duration_ms": int((time.time() - llm_start) * 1000),
+        },
+    }
 
 
 @router.get("/enhanced-strategy")

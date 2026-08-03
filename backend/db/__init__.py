@@ -708,6 +708,9 @@ def init_db():
     _add_column_if_not_exists(conn, "portfolio_holdings", "today_profit", "REAL DEFAULT 0")
     _add_column_if_not_exists(conn, "portfolio_holdings", "fund_category", "TEXT DEFAULT ''")
     _add_column_if_not_exists(conn, "portfolio_holdings", "has_base_position", "INTEGER DEFAULT 0")
+    # 2026-08-03 修复：基准持仓的稳定初始成本，断开 _recalculate_holding 自引用循环
+    # 旧逻辑用 holding.total_cost 当起点，但 total_cost 会被卖出持续扣减，导致每次重算指数级衰减
+    _add_column_if_not_exists(conn, "portfolio_holdings", "base_total_cost", "REAL")
     _add_column_if_not_exists(conn, "portfolio_holdings", "manager_name", "TEXT DEFAULT ''")
     _add_column_if_not_exists(conn, "portfolio_holdings", "manager_company", "TEXT DEFAULT ''")
     _add_column_if_not_exists(conn, "portfolio_holdings", "last_buy_price", "REAL")

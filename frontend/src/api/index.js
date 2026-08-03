@@ -121,6 +121,11 @@ export function getSuperValue() {
   return api.get('/valuation/super-value')
 }
 
+/** 超性价比深度解读（规则筛选 + Agent 编排：在线补数据 + 预测信号 + LLM 解读） */
+export function getSuperValueDeep() {
+  return api.post('/valuation/super-value-deep', {}, { timeout: 150000 })
+}
+
 /** 增强策略分析（LLM 判断机会 vs 陷阱） */
 export function getEnhancedStrategy() {
   return api.get('/valuation/enhanced-strategy', { timeout: 150000 })

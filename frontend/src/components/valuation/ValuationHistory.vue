@@ -5,7 +5,7 @@ async function getEcharts() {
   if (!echartsModule) echartsModule = await import('echarts')
   return echartsModule
 }
-import { listValuationIndexes, getValuationHistory, getIndexInfo, runAnalysis, pollIndexAnalysisStatus, listAnalysisHistory, getAnalysisHistoryDetail, deleteAnalysisHistory, refreshValuationPrices, listDDValuations, getDDValuation, getMarketTemperature, getSuperValue, getEnhancedStrategy, getValuationQueryStats, onlineValuationQuery } from '../../api'
+import { listValuationIndexes, getValuationHistory, getIndexInfo, runAnalysis, pollIndexAnalysisStatus, listAnalysisHistory, getAnalysisHistoryDetail, deleteAnalysisHistory, refreshValuationPrices, listDDValuations, getDDValuation, getMarketTemperature, getSuperValue, getSuperValueDeep, getEnhancedStrategy, getValuationQueryStats, onlineValuationQuery } from '../../api'
 import { useAsyncTask } from '../../composables/useAsyncTask'
 import { renderMarkdown } from '../../composables/useMarkdown'
 import { isDark } from '../../composables/useTheme'
@@ -54,6 +54,8 @@ const analysisHistory = ref([])
 // 超性价比
 const superValueLoading = ref(false)
 const superValueData = ref(null)
+const superValueDeepLoading = ref(false)
+const superValueDeepData = ref(null)  // 深度解读结果（含 deep_analysis + agent_meta）
 const strategyLoading = ref(false)
 const strategyData = ref(null)
 const breakdownLabels = {
@@ -472,6 +474,31 @@ async function loadSuperValue() {
   } finally {
     superValueLoading.value = false
   }
+}
+
+// 超性价比深度解读（规则筛选 + Agent 编排：在线补数据 + 预测信号 + LLM 解读）
+async function loadSuperValueDeep() {
+  superValueDeepLoading.value = true
+  superValueDeepData.value = null
+  try {
+    const { data } = await getSuperValueDeep()
+    superValueDeepData.value = data
+    // 深度解读返回的 opportunities 含在线补数据和预测信号，覆盖原 superValueData
+    if (data?.opportunities?.length) {
+      superValueData.value = data
+    }
+  } catch (e) {
+    console.error('Failed to load super value deep:', e)
+    superValueDeepData.value = { error: e?.message || '深度解读失败' }
+  } finally {
+    superValueDeepLoading.value = false
+  }
+}
+
+// 按 index_code 查找深度解读结果
+function getDeepAnalysis(code) {
+  if (!superValueDeepData.value?.deep_analysis) return null
+  return superValueDeepData.value.deep_analysis.find(d => d.index_code === code) || null
 }
 
 async function loadStrategy() {
@@ -1431,6 +1458,24 @@ defineExpose({ loadHistory })
               <span>·</span>
               <span class="font-jet">{{ superValueData.scan_time }}</span>
             </div>
+            <button class="sv-deep-btn" :disabled="superValueDeepLoading" @click="loadSuperValueDeep">
+              <span v-if="superValueDeepLoading" class="spinner-sm"></span>
+              {{ superValueDeepLoading ? '深度解读中...' : '深度解读' }}
+            </button>
+          </div>
+          <!-- Agent 元信息 -->
+          <div v-if="superValueDeepData?.agent_meta && !superValueDeepData?.error" class="sv-agent-meta">
+            <span class="terminal-label">估值机会筛选官</span>
+            <span>·</span>
+            <span class="terminal-label">工具</span> <span class="font-jet">{{ superValueDeepData.agent_meta.tools_called?.join('→') }}</span>
+            <span>·</span>
+            <span class="terminal-label">在线查询</span> <span class="font-jet">{{ superValueDeepData.agent_meta.online_queries }}</span>次
+            <span>·</span>
+            <span class="terminal-label">耗时</span> <span class="font-jet">{{ superValueDeepData.agent_meta.duration_ms }}</span>ms
+            <span v-if="superValueDeepData.overall_summary" class="sv-agent-summary">· {{ superValueDeepData.overall_summary }}</span>
+          </div>
+          <div v-if="superValueDeepData?.error" class="sv-agent-meta sv-agent-error">
+            <span>深度解读失败：{{ superValueDeepData.error }}</span>
           </div>
           <div v-if="superValueData.opportunities?.length" class="sv-list">
             <div v-for="(item, i) in superValueData.opportunities" :key="item.index_code" class="sv-card editorial-card reveal-stagger">
@@ -1465,6 +1510,42 @@ defineExpose({ loadHistory })
                     <span class="sv-breakdown-score font-jet">{{ dim.score }}/{{ dim.max }}</span>
                     <span class="sv-breakdown-detail">{{ dim.detail }}</span>
                   </div>
+                </div>
+                <!-- Agent 深度解读条（在线补数据 + 预测信号 + LLM 解读） -->
+                <div v-if="item.online_pe != null || item.forecast_signal || getDeepAnalysis(item.index_code)" class="sv-deep-bar">
+                  <!-- 在线补数据 -->
+                  <div v-if="item.online_pe != null" class="sv-deep-row">
+                    <span class="sv-deep-tag sv-tag-online">在线最新</span>
+                    <span class="terminal-label">{{ item.metric_short || 'PE' }}</span>
+                    <b class="font-jet">{{ item.online_pe }}</b>
+                    <span v-if="item.online_data_date" class="terminal-label">({{ item.online_data_date }})</span>
+                  </div>
+                  <!-- 预测信号 -->
+                  <div v-if="item.forecast_signal" class="sv-deep-row">
+                    <span class="sv-deep-tag sv-tag-forecast">预测信号</span>
+                    <span>{{ item.forecast_signal }}</span>
+                  </div>
+                  <!-- LLM 解读 -->
+                  <template v-if="getDeepAnalysis(item.index_code)">
+                    <div class="sv-deep-row sv-deep-llm">
+                      <span class="sv-deep-tag" :class="'sv-tag-' + (getDeepAnalysis(item.index_code).opportunity_type === '真低估' ? 'real' : getDeepAnalysis(item.index_code).opportunity_type === '价值陷阱' ? 'trap' : 'trend')">
+                        {{ getDeepAnalysis(item.index_code).opportunity_type }}
+                      </span>
+                      <span v-if="getDeepAnalysis(item.index_code).action" class="sv-deep-action" :class="'sv-action-' + getDeepAnalysis(item.index_code).action">
+                        {{ getDeepAnalysis(item.index_code).action }}
+                      </span>
+                      <span v-if="getDeepAnalysis(item.index_code).confidence" class="sv-deep-conf" :class="'sv-conf-' + getDeepAnalysis(item.index_code).confidence">
+                        置信度{{ getDeepAnalysis(item.index_code).confidence === 'high' ? '高' : getDeepAnalysis(item.index_code).confidence === 'medium' ? '中' : '低' }}
+                      </span>
+                    </div>
+                    <div v-if="getDeepAnalysis(item.index_code).catalysts?.length" class="sv-deep-row">
+                      <span class="terminal-label">催化剂</span>
+                      <span>{{ getDeepAnalysis(item.index_code).catalysts.join('、') }}</span>
+                    </div>
+                    <div v-if="getDeepAnalysis(item.index_code).action_detail" class="sv-deep-row sv-deep-detail">
+                      {{ getDeepAnalysis(item.index_code).action_detail }}
+                    </div>
+                  </template>
                 </div>
               </div>
             </div>
@@ -3303,6 +3384,138 @@ defineExpose({ loadHistory })
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* ── 超性价比深度解读条 ── */
+.sv-deep-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.4rem 0.9rem;
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--color-primary);
+  background: var(--color-primary-bg);
+  border: 1px solid var(--color-primary-border);
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.15s;
+  white-space: nowrap;
+}
+.sv-deep-btn:hover:not(:disabled) {
+  background: var(--color-primary);
+  color: var(--color-bg);
+}
+.sv-deep-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+.spinner-sm {
+  width: 12px;
+  height: 12px;
+  border: 2px solid currentColor;
+  border-top-color: transparent;
+  border-radius: 50%;
+  animation: spin 0.6s linear infinite;
+}
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+.sv-agent-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem;
+  margin: 0.5rem 0 1rem;
+  padding: 0.6rem 0.9rem;
+  font-size: 0.78rem;
+  color: var(--color-text-muted);
+  background: var(--color-card-bg);
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+}
+.sv-agent-meta .sv-agent-summary {
+  color: var(--color-text);
+  flex-basis: 100%;
+  margin-top: 0.3rem;
+}
+.sv-agent-error {
+  color: var(--color-danger);
+  border-color: var(--color-danger-border);
+  background: var(--color-danger-bg);
+}
+
+.sv-deep-bar {
+  margin-top: 0.6rem;
+  padding: 0.6rem 0.8rem;
+  background: var(--color-card-bg);
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+.sv-deep-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  font-size: 0.8rem;
+}
+.sv-deep-tag {
+  display: inline-block;
+  padding: 1px 6px;
+  font-size: 0.7rem;
+  font-weight: 600;
+  border-radius: 3px;
+  white-space: nowrap;
+}
+.sv-tag-online {
+  color: #2563eb;
+  background: rgba(37, 99, 235, 0.1);
+}
+.sv-tag-forecast {
+  color: #7c3aed;
+  background: rgba(124, 58, 237, 0.1);
+}
+.sv-tag-real {
+  color: #16a34a;
+  background: rgba(22, 163, 74, 0.1);
+}
+.sv-tag-trap {
+  color: #dc2626;
+  background: rgba(220, 38, 38, 0.1);
+}
+.sv-tag-trend {
+  color: #d97706;
+  background: rgba(217, 119, 6, 0.1);
+}
+.sv-deep-action {
+  padding: 1px 6px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  border-radius: 3px;
+}
+.sv-action-立即买入 { color: #fff; background: #dc2626; }
+.sv-action-分批建仓 { color: #fff; background: #ea580c; }
+.sv-action-观望 { color: #475569; background: #e2e8f0; }
+.sv-action-回避 { color: #fff; background: #64748b; }
+.sv-deep-conf {
+  font-size: 0.7rem;
+  font-weight: 600;
+}
+.sv-conf-high { color: #16a34a; }
+.sv-conf-medium { color: #d97706; }
+.sv-conf-low { color: #6b7280; }
+.sv-deep-detail {
+  color: var(--color-text);
+  font-size: 0.78rem;
+  line-height: 1.4;
+}
+.sv-deep-llm {
+  border-bottom: 1px dashed var(--color-border);
+  padding-bottom: 0.3rem;
 }
 
 /* ── 增强策略 ── */

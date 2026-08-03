@@ -131,6 +131,11 @@ DEFAULT_CONFIGS = [
     ('valuation.online_cache_ttl', '3600', '在线兜底结果内存缓存TTL（秒）', 'valuation'),
     ('valuation.monitoring_enabled', 'true', '估值查询监控日志开关', 'valuation'),
 
+    # 超性价比 Agent 编排（LLM相关，默认关闭）
+    ('agent.valuation_screener_enabled', 'false', '估值机会筛选官开关：规则筛选+Agent编排解读超性价比指数（默认关闭，按需开启）', 'agent'),
+    ('agent.valuation_screener_top_n', '10', '估值机会筛选官深度解读的候选数量（只对top N做在线查询+解读，控制成本）', 'agent'),
+    ('agent.valuation_screener_online_threshold_days', '3', '库内数据超过N天则补在线查询（默认3天，平衡时效与成本）', 'agent'),
+
     # 业务常量
     ('portfolio.default_account', '花无缺', '默认账户名', 'portfolio'),
     ('portfolio.default_user_id', 'default', '默认用户ID', 'portfolio'),

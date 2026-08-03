@@ -332,15 +332,16 @@ const showCashModal = ref(false)
 const cashForm = ref({ amount: 0, user_id: '花无缺' })
 const cashMode = ref('add')  // 'add' 存入/支出, 'set' 直接设置
 
-// ECharts 净值曲线数据
+// ECharts 累计涨跌幅曲线数据（2026-08-03：净值改为涨跌幅，视觉变化更明显）
 const navChartData = computed(() => {
   if (!chartData.value?.nav_history?.length) return { dates: [], series: [] }
   const history = chartData.value.nav_history
+  const baseNav = history[0].nav  // 以首日净值为基准计算累计涨跌幅
   return {
     dates: history.map(d => d.date),
     series: [{
-      name: '组合净值',
-      data: history.map(d => d.nav),
+      name: '累计涨跌幅',
+      data: history.map(d => baseNav ? +(((d.nav - baseNav) / baseNav) * 100).toFixed(2) : 0),
       color: isDark.value ? '#d4a853' : '#c9a84c',
     }],
   }
@@ -348,11 +349,14 @@ const navChartData = computed(() => {
 
 const navChartMarkPoints = computed(() => {
   const txs = chartData.value?.transactions
-  if (!txs?.length) return []
+  const history = chartData.value?.nav_history
+  if (!txs?.length || !history?.length) return []
+  const baseNav = history[0].nav  // 与曲线一致的基准净值
   return txs.map(t => ({
     type: t.transaction_type,
     date: t.transaction_date,
-    price: t.price,
+    price: t.price,  // 保留净值用于 tooltip 展示
+    yValue: baseNav ? +(((t.price - baseNav) / baseNav) * 100).toFixed(2) : t.price,  // 涨跌幅用于 Y 轴定位
     shares: t.shares,
     amount: t.amount,
   }))
@@ -426,17 +430,21 @@ const chart5yDates = computed(() => (fundChartData.value || []).map(d => d.date)
 const chart5ySeries = computed(() => {
   const data = fundChartData.value || []
   if (!data.length) return []
+  const baseNav = data[0].nav  // 以首日净值为基准
   return [{
-    name: '净值',
-    data: data.map(d => d.nav),
+    name: '累计涨跌幅',
+    data: data.map(d => baseNav ? +(((d.nav - baseNav) / baseNav) * 100).toFixed(2) : 0),
   }]
 })
 const chart5yMarkPoints = computed(() => {
+  const data = fundChartData.value || []
+  const baseNav = data.length ? data[0].nav : 0
   // 交易点：买入/卖出标记，颜色由 LineChart 组件统一从 useChartTheme 读取
   return (fundChartTransactions.value || []).map(t => ({
     type: t.transaction_type === 'buy' ? 'buy' : 'sell',
     date: t.transaction_date,
-    price: t.price,
+    price: t.price,  // 保留净值用于 tooltip
+    yValue: baseNav ? +(((t.price - baseNav) / baseNav) * 100).toFixed(2) : t.price,  // 涨跌幅用于 Y 轴定位
     amount: t.amount || 0,
     shares: t.shares || 0,
   }))
@@ -4072,7 +4080,7 @@ function txDisplayAmount(tx) {
 
           <!-- 基金走势图 -->
           <div class="analysis-section" style="margin-top:1rem">
-            <h4 style="margin:0 0 0.5rem 0;font-size:0.85rem">基金走势图（选择基金查看买卖点）</h4>
+            <h4 style="margin:0 0 0.5rem 0;font-size:0.85rem">基金累计涨跌幅（选择基金查看买卖点）</h4>
             <div class="chart-fund-selector">
               <select v-model="chartFundCode" class="input-field" @change="loadFundChart(chartFundCode)" style="flex:1;max-width:300px">
                 <option value="">选择基金</option>
@@ -4085,13 +4093,13 @@ function txDisplayAmount(tx) {
                 v-if="navChartData.dates.length"
                 :dates="navChartData.dates"
                 :series="navChartData.series"
-                :y-names="['净值']"
+                :y-names="['累计涨跌幅%']"
                 :area="true"
                 :smooth="true"
                 :mark-points="navChartMarkPoints"
                 height="280px"
               />
-              <div v-else class="chart-empty">暂无净值数据</div>
+              <div v-else class="chart-empty">暂无数据</div>
             </div>
             <div v-else-if="chartFundCode && !chartLoading" class="text-muted" style="font-size:0.85rem;padding:0.5rem 0">暂无净值数据。</div>
           </div>
@@ -6143,6 +6151,7 @@ function txDisplayAmount(tx) {
                 <LineChart
                   :dates="chart5yDates"
                   :series="chart5ySeries"
+                  :y-names="['累计涨跌幅%']"
                   :markPoints="chart5yMarkPoints"
                   :clickLock="true"
                   :zoomable="true"
