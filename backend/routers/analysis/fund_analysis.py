@@ -14,7 +14,7 @@ from db import (
 from db.portfolio import update_analysis_record, compare_funds
 from db.agent_analysis_log import create_analysis_log, complete_analysis_log
 from db.config import get_config_int, get_config_float
-from ._shared import _get_valuation_context, _get_valuation_context_for_fund
+from ._shared import _get_valuation_context, _get_valuation_context_for_fund, build_portfolio_facts_with_check
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["analysis-fund-analysis"])
@@ -107,13 +107,7 @@ async def fund_analysis_api(req: dict):
     valuation_context = _get_valuation_context()
 
     # 组合约束注入
-    facts_block = ""
-    try:
-        from services.portfolio_fact_layer import build_portfolio_facts
-        facts = build_portfolio_facts()
-        facts_block = json.dumps(facts, ensure_ascii=False, indent=2, default=str)
-    except Exception:
-        pass
+    facts_block = build_portfolio_facts_with_check()
 
     user_content = (
         f"## 组合约束（系统注入，优先级最高）\n```json\n{facts_block}\n```\n\n---\n\n"

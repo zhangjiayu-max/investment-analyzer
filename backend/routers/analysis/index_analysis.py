@@ -22,7 +22,7 @@ from services.llm_service import _call_llm, MODEL_ANALYSIS
 from services.rag import build_rag_context_with_details, log_rag_search  # 保留向后兼容
 from models.analysis import AnalysisRunRequest, AnalysisAgentUpdateRequest
 from db.agent_analysis_log import create_analysis_log, complete_analysis_log
-from ._shared import inject_rag_context
+from ._shared import inject_rag_context, build_portfolio_facts_with_check
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["analysis-index-analysis"])
@@ -101,13 +101,7 @@ async def _run_index_analysis_async(history_id: int, req_data: dict, agent: dict
 
     # 4. 用户持仓数据
     portfolio_context = ""
-    facts_block = ""
-    try:
-        from services.portfolio_fact_layer import build_portfolio_facts
-        facts = build_portfolio_facts()
-        facts_block = json.dumps(facts, ensure_ascii=False, indent=2, default=str)
-    except Exception:
-        pass
+    facts_block = build_portfolio_facts_with_check()
 
     try:
         all_holdings = list_holdings()

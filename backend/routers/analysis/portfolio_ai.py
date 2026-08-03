@@ -19,7 +19,7 @@ from db.config import get_config_int, get_config_float
 from db.agent_analysis_log import create_analysis_log, complete_analysis_log
 from services.rag import build_rag_context_with_details, log_rag_search  # 保留向后兼容
 from models.portfolio import PortfolioAiAnalysisRequest, FeedbackRequest
-from ._shared import inject_rag_context
+from ._shared import inject_rag_context, build_portfolio_facts_with_check
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["analysis-portfolio-ai"])
@@ -155,13 +155,7 @@ async def _run_portfolio_ai_analysis_async(record_id: int, user_question: str):
         )
 
     # 组合事实层（snapshot+constraints+market+recent_analyses+market_state+recent_decisions）
-    portfolio_facts_text = ""
-    try:
-        from services.portfolio.portfolio_fact_layer import build_portfolio_facts
-        facts = build_portfolio_facts()
-        portfolio_facts_text = json.dumps(facts, ensure_ascii=False, indent=2, default=str)
-    except Exception as e:
-        logger.warning(f"build_portfolio_facts 失败: {e}")
+    portfolio_facts_text = build_portfolio_facts_with_check()
 
     # 估值摘要
     valuation_text = ""

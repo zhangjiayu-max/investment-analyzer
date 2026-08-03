@@ -20,6 +20,7 @@ from db import (
 )
 from db.agent_analysis_log import create_analysis_log, complete_analysis_log
 from infra.state import track_agent, untrack_agent
+from ._shared import build_portfolio_facts_with_check
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["analysis-bond-recommend"])
@@ -205,13 +206,7 @@ async def _do_bond_recommend():
 
     # 8. 构建 LLM 上下文
     # 组合约束注入
-    facts_block = ""
-    try:
-        from services.portfolio_fact_layer import build_portfolio_facts
-        facts = build_portfolio_facts()
-        facts_block = json_mod.dumps(facts, ensure_ascii=False, indent=2, default=str)
-    except Exception:
-        pass
+    facts_block = build_portfolio_facts_with_check()
 
     context_lines = [
         f"## 债市温度历史（近90天）\n{json_mod.dumps(bond_history, ensure_ascii=False, indent=2)}",

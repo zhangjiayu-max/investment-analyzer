@@ -21,6 +21,7 @@ from db._conn import _get_conn
 from db.agent_analysis_log import create_analysis_log, complete_analysis_log
 from services.llm_service import _call_llm, MODEL_AUX
 from infra.state import track_agent as _track_agent, untrack_agent as _untrack_agent
+from ._shared import build_portfolio_facts_with_check
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["analysis-daily-report"])
@@ -296,18 +297,13 @@ async def _run_regenerate_daily_report_async(task_id: int, agent: dict):
 """
 
         # 注入组合约束
-        try:
-            from services.portfolio_fact_layer import build_portfolio_facts
-            facts = build_portfolio_facts()
-            facts_json = json.dumps(facts, ensure_ascii=False, indent=2, default=str)
-            full_prompt += f"""【组合约束】
+        facts_json = build_portfolio_facts_with_check()
+        full_prompt += f"""【组合约束】
 ```json
 {facts_json}
 ```
 
 """
-        except Exception:
-            pass
 
         full_prompt += f"""
 【今日新闻】

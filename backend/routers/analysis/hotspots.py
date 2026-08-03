@@ -24,6 +24,7 @@ from db.agent_analysis_log import create_analysis_log, complete_analysis_log
 from services.llm_service import _call_llm, MODEL_AUX
 from services.market_data import get_index_current_price
 from infra.state import track_agent as _track_agent, untrack_agent as _untrack_agent, hot_topics_cache as _hot_topics_cache
+from ._shared import build_portfolio_facts_with_check
 from analysis.action_extractor import extract_actions, format_actions_for_response
 
 logger = logging.getLogger(__name__)
@@ -161,19 +162,14 @@ async def _do_hotspots_analysis():
 """
 
     # 注入组合约束
-    try:
-        from services.portfolio_fact_layer import build_portfolio_facts
-        facts = build_portfolio_facts()
-        facts_json = json.dumps(facts, ensure_ascii=False, indent=2, default=str)
-        prompt += f"""```json
+    facts_json = build_portfolio_facts_with_check()
+    prompt += f"""```json
 {facts_json}
 ```
 
 ---
 
 """
-    except Exception:
-        pass
 
     prompt += f"""
 【今日新闻】（重点关注，这是分析的核心线索）

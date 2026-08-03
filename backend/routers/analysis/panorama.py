@@ -20,7 +20,7 @@ from services.rag import build_rag_context_with_details  # 保留向后兼容
 from models.portfolio import PanoramaAnalysisRequest
 from ._shared import (
     _get_mcp_context, _get_holdings_valuation_context, _format_news_section,
-    inject_rag_context,
+    inject_rag_context, build_portfolio_facts_with_check,
 )
 
 logger = logging.getLogger(__name__)
@@ -101,13 +101,7 @@ async def _run_panorama_async(record_id: int, system_prompt: str, holdings: list
             logger.warning(f"RAG 检索失败: {e}")
 
         # 组合约束注入
-        facts_block = ""
-        try:
-            from services.portfolio_fact_layer import build_portfolio_facts
-            facts = build_portfolio_facts()
-            facts_block = json.dumps(facts, ensure_ascii=False, indent=2, default=str)
-        except Exception:
-            pass
+        facts_block = build_portfolio_facts_with_check()
 
         user_content = (
             f"## 组合约束（系统注入，优先级最高）\n```json\n{facts_block}\n```\n\n---\n\n"

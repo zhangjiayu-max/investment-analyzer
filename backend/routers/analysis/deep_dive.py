@@ -63,22 +63,10 @@ async def fund_deep_dive_api(holding_id: int, req: DeepDiveRequest):
             f"价格 {(t.get('price') or 0):.4f}, 状态 {t.get('status') or 'confirmed'}"
         )
 
-    # 2026-08-03 优化（P0）：数据断层标注
+    # 2026-08-03 优化（P0）：数据断层标注 — 统一用 _shared.build_data_gap_section
     # 基准持仓（has_base_position=1）无完整交易记录，需标注覆盖率，避免 LLM 对无记录份额做年化计算
-    data_gap_section = ""
-    total_shares = holding.get("shares", 0) or 0
-    tx_buy_shares = sum(t.get("shares", 0) or 0 for t in txs if t.get("transaction_type") == "buy")
-    coverage = (tx_buy_shares / total_shares * 100) if total_shares > 0 else 0
-    if holding.get("has_base_position") and coverage < 95:
-        data_gap_section = (
-            f"\n\n## ⚠️ 数据断层提示\n"
-            f"该持仓为基准导入（has_base_position=1），交易记录仅覆盖 {coverage:.1f}% 的份额。\n"
-            f"剩余 {100-coverage:.1f}% 的份额为初始导入，无交易明细。\n"
-            f"- 操作质量评估仅覆盖有记录的部分，不代表整体持仓操作质量\n"
-            f"- 年化收益计算仅基于有记录的份额，**不可外推为整体持仓真实年化**\n"
-            f"- 底仓成本为基准导入值，如未补全 base_total_cost 可能存在偏差\n"
-            f"- 报告中涉及底仓部分的结论需标注\"基于导入数据\""
-        )
+    from ._shared import build_data_gap_section
+    data_gap_section = build_data_gap_section(holding, txs)
 
     # 2) 估值历史 — 带趋势
     valuation_section = ""
@@ -176,33 +164,9 @@ async def fund_deep_dive_api(holding_id: int, req: DeepDiveRequest):
         fundamentals_section = f"基本面获取失败: {e}\n"
 
     # 4) 组合事实层 — 统一的组合上下文（替代 portfolio_context + bond_context）
-    facts_context = ""
-    try:
-        from services.portfolio_fact_layer import build_portfolio_facts
-        facts = build_portfolio_facts()
-        facts_context = json.dumps(facts, ensure_ascii=False, indent=2, default=str)
-
-        # 2026-08-03 优化（P2）：组合数据异常校验
-        # 检测组合内收益率异常的基金（如基准持仓 base_total_cost 缺失导致 profit_rate 虚高）
-        # 让 LLM 知道哪些基金的市值/收益数据可能失真，避免基于 bug 数据做组合建议
-        holdings_all = list_holdings()
-        facts_anomaly = []
-        for h in holdings_all:
-            profit_rate = h.get("profit_rate", 0) or 0
-            if abs(profit_rate) > 1.0:
-                facts_anomaly.append(
-                    f"{h.get('fund_name','')}({h.get('fund_code','')}) "
-                    f"收益率{profit_rate*100:.1f}%"
-                )
-        if facts_anomaly:
-            facts_context += (
-                f"\n\n⚠️ 组合数据异常警告："
-                f"{', '.join(facts_anomaly)} 疑似成本数据错误，"
-                f"相关基金的市值占比和盈亏数据可能失真，"
-                f"组合建议中涉及这些基金的部分需谨慎参考。"
-            )
-    except Exception as e:
-        facts_context = f"组合事实获取失败: {e}"
+    # 2026-08-03 优化：统一用 _shared.build_portfolio_facts_with_check，自动附加异常数据警告
+    from ._shared import build_portfolio_facts_with_check
+    facts_context = build_portfolio_facts_with_check()
 
     # 5) 新闻/市场上下文（简版，基于指数名或基金名搜索）
     news_context = ""

@@ -23,7 +23,7 @@ from db.portfolio import update_analysis_record
 from db.agent_analysis_log import create_analysis_log, complete_analysis_log
 from db.config import get_config as _get_config, get_config_int, get_config_float
 from services.rag import build_rag_context_with_details  # 保留向后兼容
-from ._shared import _parse_mcp_pct_pairs, _parse_mcp_correlation, inject_rag_context
+from ._shared import _parse_mcp_pct_pairs, _parse_mcp_correlation, inject_rag_context, build_portfolio_facts_with_check
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["analysis-diversification"])
@@ -369,13 +369,7 @@ async def _run_diversification_ai_summary_async(record_id: int, agent_id: int = 
         valuation_block += "\n\n💡 估值分位<20%为低估区域，可适度容忍集中；>80%为高估区域，宜警惕集中风险。"
 
     # 9. 组合约束注入
-    facts_block = ""
-    try:
-        from services.portfolio_fact_layer import build_portfolio_facts
-        facts = build_portfolio_facts()
-        facts_block = json.dumps(facts, ensure_ascii=False, indent=2, default=str)
-    except Exception:
-        pass
+    facts_block = build_portfolio_facts_with_check()
 
     # 8. 拼装 LLM prompt（预计算分析 + 原始 MCP 数据）
     holdings_text = "\n".join(
