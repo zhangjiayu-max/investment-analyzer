@@ -33,7 +33,6 @@ logger = logging.getLogger(__name__)
 _CACHEABLE_TOOLS = {
     "query_valuation",       # 估值查询
     "search_knowledge",      # 知识库检索
-    # P2-10: 移除 get_portfolio — 盈亏需实时刷新，5分钟缓存会导致数据不准
     "query_fund_info",       # 基金信息查询
     "ttfund_search",         # 基金搜索
     "get_index_valuation",   # 指数估值
@@ -43,12 +42,28 @@ _CACHEABLE_TOOLS = {
     "yingmi_latest_quotations",  # 市场行情解读（日内不变）
     "yingmi_hot_topics",         # 热点话题（5分钟TTL足够）
     "query_institutional_flow", # 机构资金流向（5分钟TTL）
+    # P0 修复（2026-08-02）：query_portfolio summary/detail/by_index 加入缓存
+    # 原 P2-10 移除理由是"盈亏需实时刷新"，但同一对话内多专家重复查 detail
+    # 导致 conv#197 中 query_portfolio 被调用 2 次完全相同参数
+    # 修复：summary/detail/by_index 可缓存（refresh 类型不缓存，在 is_cacheable 内排除）
+    "query_portfolio",
 }
 
 
-def is_cacheable(tool_name: str) -> bool:
-    """判断工具是否可缓存。"""
-    return tool_name in _CACHEABLE_TOOLS
+def is_cacheable(tool_name: str, args: dict = None) -> bool:
+    """判断工具是否可缓存。
+
+    P0 修复（2026-08-02）：query_portfolio 的 refresh 类型不缓存（需实时刷新盈亏），
+    summary/detail/by_index 可缓存（同一对话内多专家共享）。
+    """
+    if tool_name not in _CACHEABLE_TOOLS:
+        return False
+    # query_portfolio 的 refresh 类型不缓存
+    if tool_name == "query_portfolio" and args:
+        query_type = args.get("query_type", "summary")
+        if query_type == "refresh":
+            return False
+    return True
 
 
 def _deep_sort(obj: Any) -> Any:
@@ -112,7 +127,7 @@ class ToolCallCache:
         Returns:
             缓存结果（命中），None（未命中或已过期）
         """
-        if not is_cacheable(tool_name):
+        if not is_cacheable(tool_name, args):
             self._misses += 1
             return None
 
@@ -142,7 +157,7 @@ class ToolCallCache:
 
     def set(self, tool_name: str, args: dict, result: Any) -> None:
         """写入缓存。"""
-        if not is_cacheable(tool_name):
+        if not is_cacheable(tool_name, args):
             return
 
         # 容量保护：超过上限时清理最旧的 20%

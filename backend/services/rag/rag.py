@@ -512,7 +512,7 @@ def _get_jieba():
 
 
 def _load_jieba_custom_dict(jb):
-    """加载基金名 + 指数名到 jieba 自定义词典（高频，避免被切碎）。"""
+    """加载基金名 + 指数名 + 时间表达到 jieba 自定义词典（高频，避免被切碎）。"""
     loaded = 0
     # 基金名
     try:
@@ -536,8 +536,21 @@ def _load_jieba_custom_dict(jb):
                 loaded += 1
     except Exception:
         pass
+    # P0 修复（2026-08-02）：时间表达词典 — 避免jieba在数字-中文边界切分
+    # 问题现象："8月走势" 被切成 ["8","月","走势"]，"8" 被FTS过滤丢弃
+    # 修复后："8月" 作为一个整体token保留
+    for m in range(1, 13):
+        jb.add_word(f"{m}月", freq=2000)
+        jb.add_word(f"{m}月份", freq=2000)
+    for q in range(1, 5):
+        jb.add_word(f"Q{q}", freq=2000)
+        jb.add_word(f"第{q}季度", freq=2000)
+    # 年份表达
+    for y in range(2020, 2028):
+        jb.add_word(f"{y}年", freq=2000)
+    loaded += 12 * 2 + 4 * 2 + 8
     if loaded:
-        logger.info(f"jieba 自定义词典加载 {loaded} 条（基金名+指数名）")
+        logger.info(f"jieba 自定义词典加载 {loaded} 条（基金名+指数名+时间表达）")
 
 
 def _reset_jieba_cache():
@@ -992,7 +1005,10 @@ def _build_fts_query(query: str) -> str:
     cleaned = [_sanitize_fts_token(t) for t in tokens]
     cleaned = [t for t in cleaned if t]
     multi_char = [t for t in cleaned if len(t) >= 2]
-    single_char = [t for t in cleaned if len(t) == 1 and '一' <= t <= '鿿']
+    # P0 修复（2026-08-02）：保留中文字符和数字字符的单字
+    # 原逻辑只保留中文字符（'一' <= t <= '鿿'），导致 "8" 等数字单字被丢弃
+    # 修复后：保留中文字符或数字字符的单字，避免 "8月" 拆分后 "8" 丢失
+    single_char = [t for t in cleaned if len(t) == 1 and ('一' <= t <= '鿿' or t.isdigit())]
 
     if not multi_char and not single_char:
         return ""

@@ -210,6 +210,12 @@ def arbitrate_results(query: str, specialist_results: list[dict], blackboard=Non
             "note": "看多与看空观点存在分歧",
         })
 
+    # P0 修复（2026-08-02）：数据口径冲突检测
+    # conv#197 中"市场温度 30.79 vs 73.06"这类数据冲突未被仲裁捕获
+    # 修复：扫描专家 analysis 中的数值数据，检测同指标不同值的口径冲突
+    data_conflicts = _detect_data_conflicts(specialist_results or [])
+    key_conflicts.extend(data_conflicts)
+
     # 推理摘要：重构为"识别分歧+解决冲突+独立置信度评估"格式
     # conv#130 修复：原实现是拼接每个专家 analysis[:120]，导致 reasoning 是原文片段堆砌
     # 新实现：结构化输出裁决依据，让用户看到仲裁逻辑而非原文复读
@@ -231,6 +237,16 @@ def arbitrate_results(query: str, specialist_results: list[dict], blackboard=Non
     if consistency_warning:
         reasoning = reasoning + "\n" + consistency_warning
         # 降级置信度：high→medium，medium→low
+        if confidence == "high":
+            confidence = "medium"
+        elif confidence == "medium":
+            confidence = "low"
+
+    # P0 修复（2026-08-02）：数据口径冲突也降级置信度
+    # 当存在 data_conflict 时，说明专家引用了不一致的数据源，裁决可信度降低
+    if data_conflicts:
+        data_warning = f"⚠️ 检测到 {len(data_conflicts)} 项数据口径冲突，裁决可信度已降级"
+        reasoning = reasoning + "\n" + data_warning
         if confidence == "high":
             confidence = "medium"
         elif confidence == "medium":
@@ -296,6 +312,82 @@ def _check_consistency(stances: list, final_stance: str) -> str:
             f"{majority_count}/{len(valid_stances)})不一致，已降级置信度"
         )
     return ""
+
+
+# P0 修复（2026-08-02）：数据口径冲突检测
+# 关键指标正则：匹配"温度"、"分位"、"PE"、"PB"等指标 + 数值
+_DATA_METRIC_PATTERNS = [
+    # 市场温度：温度/温度值 + 数值
+    (r'(市场温度|温度值|temperature)[^\d]{0,10}(\d+\.?\d*)', '市场温度'),
+    # 估值分位：分位 + 数值
+    (r'(PE分位|PB分位|估值分位|百分位)[^\d]{0,10}(\d+\.?\d*)', '估值分位'),
+    # PE/PB 绝对值
+    (r'\bPE[^\d]{0,10}(\d+\.?\d*)', 'PE'),
+    (r'\bPB[^\d]{0,10}(\d+\.?\d*)', 'PB'),
+    # 收益率
+    (r'(年化收益|累计收益|收益率)[^\d]{0,10}([+-]?\d+\.?\d*)\s*%', '收益率'),
+]
+
+
+def _detect_data_conflicts(specialist_results: list[dict]) -> list[dict]:
+    """P0 修复（2026-08-02）：检测专家间的数据口径冲突。
+
+    扫描各专家 analysis 中的关键指标数值，当同一指标出现显著不同的值时，
+    标记为数据口径冲突（如"市场温度 30.79 vs 73.06"）。
+
+    Returns:
+        数据冲突列表，每项含 type/data_conflict/metric/values/note
+    """
+    import re
+
+    # 收集各专家的指标数值：{metric: [(agent, value_str, value_float), ...]}
+    metric_values: dict[str, list[tuple[str, str, float]]] = {}
+    for result in specialist_results:
+        if result.get("is_cross_review") or result.get("is_arbitration"):
+            continue
+        agent_name = result.get("agent", result.get("agent_key", "unknown"))
+        analysis = result.get("analysis", "") or ""
+        for pattern, metric_name in _DATA_METRIC_PATTERNS:
+            matches = re.findall(pattern, analysis, re.IGNORECASE)
+            for match in matches:
+                value_str = match[-1] if isinstance(match, tuple) else match
+                try:
+                    value_float = float(value_str)
+                    metric_values.setdefault(metric_name, []).append(
+                        (agent_name, value_str, value_float)
+                    )
+                except (ValueError, TypeError):
+                    continue
+
+    conflicts = []
+    for metric, entries in metric_values.items():
+        if len(entries) < 2:
+            continue
+        # 按专家去重（同一专家可能多次提及同一指标，取第一个）
+        seen_agents = {}
+        for agent, vstr, vfloat in entries:
+            if agent not in seen_agents:
+                seen_agents[agent] = (vstr, vfloat)
+        if len(seen_agents) < 2:
+            continue
+
+        values_list = list(seen_agents.values())
+        floats = [v[1] for v in values_list]
+        v_min, v_max = min(floats), max(floats)
+        # 冲突判定：最大值与最小值差异 > 20% 且绝对差 > 5
+        if v_max - v_min > 5 and (v_max - v_min) / max(v_max, 0.01) > 0.2:
+            conflict_values = [
+                {"agent": agent, "value": vstr}
+                for agent, (vstr, vfloat) in seen_agents.items()
+            ]
+            conflicts.append({
+                "type": "data_conflict",
+                "metric": metric,
+                "values": conflict_values,
+                "note": f"{metric}数据口径不一致：{v_min:.2f} vs {v_max:.2f}，需人工核实数据源",
+            })
+
+    return conflicts
 
 
 def _check_valuation_in_results(specialist_results: list[dict]) -> bool:

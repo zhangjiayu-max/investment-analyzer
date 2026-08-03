@@ -2151,11 +2151,41 @@ def _search_knowledge(args: dict) -> str:
     )
 
     slim_results = []
+    # P0 修复（2026-08-02）：body_preview 回查原表 content，避免显示 FTS 分词空格串
+    # 原逻辑：body_preview = r.get("body", "")[:300]
+    # 问题：FTS5 表存的是 jieba 分词后的空格串（如 "8 月 走势 ..."），非原始正文
+    #       且原 body 为空时 body_preview 也为空，LLM 无法利用正文内容
+    # 修复：按 content_type+reference_id 回查 knowledge_base 原表 content 字段
+    _kb_content_map = {}
+    try:
+        from db._conn import _get_conn as _get_kb_conn
+        _kb_conn = _get_kb_conn()
+        for r in result.get("results", []):
+            ref_id = r.get("reference_id", "")
+            ct = r.get("content_type", "")
+            if not ref_id or not ct:
+                continue
+            # knowledge_base 表用 title 关联回原始 content（reference_id 不直接对应 id）
+            title = r.get("title", "")
+            if title and title not in _kb_content_map:
+                row = _kb_conn.execute(
+                    "SELECT content FROM knowledge_base WHERE title = ? LIMIT 1", (title,)
+                ).fetchone()
+                if row and row[0]:
+                    _kb_content_map[title] = row[0][:300]
+        _kb_conn.close()
+    except Exception:
+        pass
+
     for r in result.get("results", []):
+        body_raw = r.get("body", "") or ""
+        title = r.get("title", "")
+        # 优先用原表 content，其次用 FTS body（分词串），兜底空串
+        body_preview = _kb_content_map.get(title, "") or body_raw[:300]
         slim_results.append({
             "content_type": r.get("content_type"),
-            "title": r.get("title"),
-            "body_preview": r.get("body", "")[:300],
+            "title": title,
+            "body_preview": body_preview,
             "score": round(r.get("_score", 0), 3),
         })
 
