@@ -2211,10 +2211,16 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
         # 注意：producer 运行在独立 event loop，不能调用 request.is_disconnected()
         # （request 绑定到主 loop）。client_disconnected 固定为 False，所有事件无条件 yield，
         # 客户端断开由外层 _relay 中继循环统一处理
+        _last_keepalive = time.time()
         while True:
             try:
                 event = await asyncio.to_thread(lambda: q.get(timeout=0.5))
             except queue.Empty:
+                # SSE 保活 ping：每 15s 发送注释行，防止浏览器/Nginx 因无数据超时断开连接
+                # 案例：conv 198 交叉审阅 LLM 调用 150s 期间无事件产出，浏览器断开 SSE
+                if time.time() - _last_keepalive >= 15:
+                    yield _sse_comment("ping")
+                    _last_keepalive = time.time()
                 continue
 
             if event is None:
