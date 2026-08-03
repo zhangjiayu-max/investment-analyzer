@@ -1,4 +1,4 @@
-const CACHE_NAME = 'ia-v6'
+const CACHE_NAME = 'ia-v7'
 const STATIC_ASSETS = ['/', '/index.html', '/favicon.svg']
 
 self.addEventListener('install', (event) => {

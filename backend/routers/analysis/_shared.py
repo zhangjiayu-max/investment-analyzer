@@ -452,3 +452,99 @@ def inject_rag_context(
     except Exception as e:
         logger.warning(f"[{caller}] RAG 检索失败: {e}")
         return ""
+
+
+# ── 2026-08-03 分析质量优化：统一数据校验/标注共享函数 ──
+# 所有 LLM 分析路由（panorama/deep_dive/diversification/fund_analysis/index_analysis/
+# portfolio_ai/bond_recommend/hotspots/daily_report/trade_review）必须通过以下函数
+# 构建组合事实层/异常校验/数据断层标注，避免每个路由手写导致遗漏（如基准持仓 bug 污染）。
+
+
+def build_portfolio_facts_with_check() -> str:
+    """构建组合事实层 + 异常数据校验（所有分析路由统一入口）。
+
+    替代直接调用 build_portfolio_facts()，自动附加异常数据警告。
+    收益率绝对值 >100% 通常是成本数据 bug（如基准持仓 base_total_cost 缺失），
+    让 LLM 知道哪些基金的市值/收益数据可能失真，避免基于 bug 数据做建议。
+
+    Returns:
+        组合事实 JSON 字符串（含异常警告段，若有）
+    """
+    import json as _json
+    try:
+        from services.portfolio_fact_layer import build_portfolio_facts
+        facts = build_portfolio_facts()
+        facts_context = _json.dumps(facts, ensure_ascii=False, indent=2, default=str)
+
+        # 异常数据校验
+        from db import list_holdings
+        holdings_all = list_holdings()
+        anomaly_list = []
+        for h in holdings_all:
+            profit_rate = h.get("profit_rate", 0) or 0
+            if abs(profit_rate) > 1.0:
+                anomaly_list.append(
+                    f"{h.get('fund_name','')}({h.get('fund_code','')}) "
+                    f"收益率{profit_rate*100:.1f}%"
+                )
+        if anomaly_list:
+            facts_context += (
+                f"\n\n⚠️ 组合数据异常警告："
+                f"{', '.join(anomaly_list)} 疑似成本数据错误，"
+                f"相关基金的市值占比和盈亏数据可能失真，"
+                f"组合建议中涉及这些基金的部分需谨慎参考。"
+            )
+        return facts_context
+    except Exception as e:
+        return f"组合事实获取失败: {e}"
+
+
+def detect_holdings_anomaly(holdings: list) -> list[str]:
+    """检测持仓列表中的异常数据（所有分析路由统一入口）。
+
+    用于在 user_content 的预计算区块加"⚠️ 数据异常警告"，
+    让 LLM 知道哪些基金的成本/收益数据不可信。
+
+    Args:
+        holdings: list_holdings() 返回的持仓列表
+    Returns:
+        异常警告行列表（空列表表示无异常）
+    """
+    anomaly_lines = []
+    for h in holdings:
+        profit_rate = h.get("profit_rate", 0) or 0
+        if abs(profit_rate) > 1.0:
+            anomaly_lines.append(
+                f"- ⚠️ {h.get('fund_name','')}({h.get('fund_code','')}) "
+                f"收益率 {profit_rate*100:.1f}% 异常，疑似成本数据错误，"
+                f"本次分析排除该基金的成本/收益数据，仅参考其市值占比"
+            )
+    return anomaly_lines
+
+
+def build_data_gap_section(holding: dict, txs: list) -> str:
+    """构建数据断层标注段（所有涉及单基金交易记录的分析路由统一入口）。
+
+    基准持仓（has_base_position=1）无完整交易记录，需标注覆盖率，
+    避免 LLM 对无记录份额做年化收益计算（如 deep_dive 出现的"年化35%"误导）。
+
+    Args:
+        holding: get_holding() 返回的单只持仓 dict
+        txs: list_transactions() 返回的交易记录列表
+    Returns:
+        数据断层标注段文本（空字符串表示无断层）
+    """
+    total_shares = holding.get("shares", 0) or 0
+    tx_buy_shares = sum(t.get("shares", 0) or 0 for t in txs if t.get("transaction_type") == "buy")
+    coverage = (tx_buy_shares / total_shares * 100) if total_shares > 0 else 0
+    if holding.get("has_base_position") and coverage < 95:
+        return (
+            f"\n\n## ⚠️ 数据断层提示\n"
+            f"该持仓为基准导入（has_base_position=1），交易记录仅覆盖 {coverage:.1f}% 的份额。\n"
+            f"剩余 {100-coverage:.1f}% 的份额为初始导入，无交易明细。\n"
+            f"- 操作质量评估仅覆盖有记录的部分，不代表整体持仓操作质量\n"
+            f"- 年化收益计算仅基于有记录的份额，**不可外推为整体持仓真实年化**\n"
+            f"- 底仓成本为基准导入值，如未补全 base_total_cost 可能存在偏差\n"
+            f"- 报告中涉及底仓部分的结论需标注\"基于导入数据\""
+        )
+    return ""
