@@ -885,6 +885,18 @@ def _recalculate_holding(holding_id: int):
         profit_loss = (current_value - total_cost) if current_value is not None else None
         profit_rate = (profit_loss / total_cost) if (profit_loss is not None and total_cost > 0) else None
 
+        # 2026-08-03 修复：异常成本价告警 — cost_price 远低于 current_price 通常意味着 base_total_cost 缺失
+        # 触发场景：has_base=1 但 base_total_cost 为空，降级用 total_cost 后被卖出扣减成异常低值
+        if (has_base and total_shares > 0 and current_price > 0
+                and cost_price > 0 and cost_price < current_price * 0.5
+                and profit_rate is not None and profit_rate > 0.5):
+            logger.warning(
+                f"[portfolio] holding_id={holding_id} fund_code={holding.get('fund_code')} "
+                f"异常 profit_rate={profit_rate:.4f}（cost_price={cost_price:.4f} << "
+                f"current_price={current_price:.4f}），疑似 base_total_cost 缺失，"
+                f"请通过编辑接口补全 base_total_cost 修复"
+            )
+
         conn.execute("""
             UPDATE portfolio_holdings SET
                 shares = ?, cost_price = ?, total_cost = ?,

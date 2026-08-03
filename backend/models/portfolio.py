@@ -26,6 +26,12 @@ class UpdateHoldingRequest(BaseModel):
     buy_date: str = None
     notes: str = None
     account: str = None
+    # 2026-08-03 修复：开放基准成本字段编辑，用于修复历史脏数据导致的 profit_rate 虚高
+    # 当持仓 has_base_position=1 但 base_total_cost 缺失时，profit_rate 会被错误放大
+    # 用户可通过编辑接口补全 base_total_cost（= 初始投入本金）+ base_shares（= 初始份额）
+    base_shares: float = None
+    base_total_cost: float = None
+    has_base_position: int = None
 
 
 class CreateTransactionRequest(BaseModel):
