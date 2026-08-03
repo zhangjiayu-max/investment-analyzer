@@ -33,7 +33,7 @@ def _get_eval_model() -> str:
     # 按 provider 选便宜模型
     from config import LLM_PROVIDER
     if LLM_PROVIDER == "qwen":
-        return "qwen3.7-plus"
+        return "qwen3.8-max"
     elif LLM_PROVIDER == "mimo":
         return "mimo-v2.5-pro"
     return MODEL_AUX  # 兜底

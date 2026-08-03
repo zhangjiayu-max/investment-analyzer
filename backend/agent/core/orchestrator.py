@@ -451,22 +451,21 @@ _AGENT_MODEL_MAP_MIMO = {
     "self_reflection": "mimo-v2.5-pro",            # 自我反思，需精确推理
 }
 
-# Qwen 模型映射 — 按任务复杂度分级（阿里云百炼）
-# qwen3.8-max-preview: 最强，用于编排器+仲裁
-# qwen3.7-max: 强，用于核心分析 Agent
-# qwen3.7-plus: 中等，用于辅助分析 Agent
+# Qwen 模型映射 — 统一使用 qwen3.8-max
+# qwen3.8-max-preview: 编排器专用（预览版）
+# qwen3.8-max: 其余所有智能体
 _AGENT_MODEL_MAP_QWEN = {
-    "valuation_expert": "qwen3.7-max",             # 估值专家，需精确数值推理
-    "allocation_advisor": "qwen3.7-plus",          # 配置顾问，组合优化
-    "fund_analyst": "qwen3.7-max",                 # 基金分析，需穿透分析
-    "risk_assessor": "qwen3.7-max",               # 风险评估，需风险判断
-    "market_analyst": "qwen3.7-plus",             # 市场分析，趋势判断
-    "macro_strategist": "qwen3.7-plus",           # 宏观策略
-    "article_expert": "qwen3.7-plus",             # 文章专家，文本摘要
-    "orchestrator": "qwen3.8-max-preview",        # 编排器，最强模型
-    "cross_review": "qwen3.7-plus",               # 交叉审阅
-    "arbitrator": "qwen3.8-max-preview",          # 仲裁，最强模型
-    "self_reflection": "qwen3.7-plus",            # 自我反思
+    "valuation_expert": "qwen3.8-max",             # 估值专家，需精确数值推理
+    "allocation_advisor": "qwen3.8-max",           # 配置顾问，组合优化
+    "fund_analyst": "qwen3.8-max",                 # 基金分析，需穿透分析
+    "risk_assessor": "qwen3.8-max",                # 风险评估，需风险判断
+    "market_analyst": "qwen3.8-max",               # 市场分析，趋势判断
+    "macro_strategist": "qwen3.8-max",             # 宏观策略
+    "article_expert": "qwen3.8-max",               # 文章专家，文本摘要
+    "orchestrator": "qwen3.8-max-preview",         # 编排器，预览版
+    "cross_review": "qwen3.8-max",                 # 交叉审阅
+    "arbitrator": "qwen3.8-max-preview",           # 仲裁，预览版
+    "self_reflection": "qwen3.8-max",              # 自我反思
 }
 
 # 兼容别名
@@ -495,7 +494,7 @@ def _get_model_for_agent(agent_key: str, budget_mode: str = "normal") -> str:
     # conservative 模式：所有 Agent 用同一个省钱模型
     if budget_mode == "conservative":
         if LLM_PROVIDER == "qwen":
-            default_conservative = "qwen3.7-plus"
+            default_conservative = "qwen3.8-max"
         elif LLM_PROVIDER == "mimo":
             default_conservative = "mimo-v2.5-pro"
         else:

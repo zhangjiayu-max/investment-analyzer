@@ -51,14 +51,14 @@ MODEL = _model
 
 # ── 分级模型常量（供独立分析路由使用，避免一律走最强模型浪费 token）────
 # 与 orchestrator._AGENT_MODEL_MAP_* 保持一致：
-#   MODEL_STRONG   : 最强，仅编排器/仲裁使用
-#   MODEL_ANALYSIS : 核心数值分析（max 档），用于估值/基金/风险/分散度/相关性等需精确推理
-#   MODEL_AUX      : 辅助文本/综合（plus 档），用于全景/热点/日报/市场情报等
+#   MODEL_STRONG   : 最强，仅编排器/仲裁使用（qwen3.8-max-preview）
+#   MODEL_ANALYSIS : 核心数值分析，用于估值/基金/风险/分散度/相关性等需精确推理
+#   MODEL_AUX      : 辅助文本/综合，用于全景/热点/日报/市场情报等
 # 注：mimo 仅一档，三档统一为 mimo-v2.5-pro
 if LLM_PROVIDER == "qwen":
     MODEL_STRONG = "qwen3.8-max-preview"
-    MODEL_ANALYSIS = "qwen3.7-max"
-    MODEL_AUX = "qwen3.7-plus"
+    MODEL_ANALYSIS = "qwen3.8-max"
+    MODEL_AUX = "qwen3.8-max"
 elif LLM_PROVIDER == "mimo":
     MODEL_STRONG = "mimo-v2.5-pro"
     MODEL_ANALYSIS = "mimo-v2.5-pro"
@@ -91,7 +91,7 @@ if LLM_PROVIDER == "qwen" and "token-plan" in QWEN_BASE_URL.lower():
         "[模型路由提示] 检测到 QWEN_BASE_URL 使用 Token Plan 订阅端点 "
         f"({QWEN_BASE_URL})。\n"
         "Token Plan 个人版 Lite 档位可能仅支持 qwen3.8-max-preview，"
-        "Standard/Pro 档位才包含 qwen3.7-max/qwen3.7-plus 等分级模型。\n"
+        "Standard/Pro 档位才包含 qwen3.8-max 等分级模型。\n"
         "如果运行时日志频繁出现 '模型静默映射' WARNING，说明当前订阅档位不支持"
         "代码请求的分级模型，被端点降级到 qwen3.8-max-preview。\n"
         "解决方案：\n"
