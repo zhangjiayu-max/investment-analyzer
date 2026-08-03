@@ -4096,6 +4096,7 @@ function txDisplayAmount(tx) {
                 :y-names="['涨跌幅%']"
                 :area="true"
                 :smooth="true"
+                :change-mode="true"
                 :mark-points="navChartMarkPoints"
                 height="280px"
               />
@@ -6152,6 +6153,7 @@ function txDisplayAmount(tx) {
                   :dates="chart5yDates"
                   :series="chart5ySeries"
                   :y-names="['涨跌幅%']"
+                  :change-mode="true"
                   :markPoints="chart5yMarkPoints"
                   :clickLock="true"
                   :zoomable="true"
