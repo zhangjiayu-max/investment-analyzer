@@ -1385,7 +1385,7 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
         # 案例：conv 190 因 Reranker 模型 HF HEAD 校验超时（huggingface.co 被墙）
         # 导致 asyncio.gather 无限等待，连 producer 内的 90s/5min/8min 守卫都
         # 触达不到（RAG 在 orchestrate_stream 之前执行）。
-        rag_timeout_sec = get_config_float("rag.context_build_timeout_sec", 30.0)
+        rag_timeout_sec = get_config_float("rag.context_build_timeout_sec", 60.0)
         try:
             clarification, rag_result = await asyncio.wait_for(
                 asyncio.gather(clarification_task, rag_task),

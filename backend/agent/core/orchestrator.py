@@ -2401,7 +2401,7 @@ def clarify_requirement(query: str, trace_id: str = "") -> dict:
                 {"role": "user", "content": user_content},
             ],
             temperature=get_config_float('llm.temperature_vision', 0.1),
-            max_tokens=get_config_int('llm.max_tokens_orchestrator', 8192),
+            max_tokens=get_config_int('llm.max_tokens_clarify', 2048),
         )
 
         raw = response.choices[0].message.content.strip()
