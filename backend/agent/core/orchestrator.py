@@ -1057,10 +1057,11 @@ def _build_final_synthesis_prompt(specialist_results: list, routed_specialists: 
         pass
 
     # P2-F 综合报告工具结果汇总注入（conv#131 修复）
-    # 开关：agent.synthesis_tool_summary_enabled（默认 false）
+    # 2026-08-04：改为默认注入（与 pipeline.py 对齐），确保综合阶段能看到所有工具查询结果
     try:
         from db.config import get_config_bool as _gcb_toolsum
-        if _gcb_toolsum("agent.synthesis_tool_summary_enabled", False) and blackboard:
+        # 默认 true：估值数据所有 agent 共享，综合阶段必须引用工具结果
+        if _gcb_toolsum("agent.synthesis_tool_summary_enabled", True) and blackboard:
             tool_broadcasts = blackboard.get_tool_broadcasts() if hasattr(blackboard, "get_tool_broadcasts") else []
             if tool_broadcasts:
                 prompt += "\n\n## 工具结果汇总（综合回答必须引用）"

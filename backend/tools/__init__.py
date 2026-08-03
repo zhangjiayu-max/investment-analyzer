@@ -1690,6 +1690,19 @@ _INDEX_PREFIX_TOKENS = ("中证", "国证", "上证", "深证", "沪", "深", "�
 # 通用后缀词（匹配时允许剥离）
 _INDEX_SUFFIX_TOKENS = ("指数", "ETF", "LOF", "全指", "综指", "港股通", "A股", "B股", "港股", "人民币")
 
+# 指数别名映射（query → 库内标准名称）
+# 用于持仓基金跟踪指数名称与库内指数名称不一致时的兜底匹配
+_INDEX_NAME_ALIASES = {
+    "畜牧养殖": ["中证畜牧", "畜牧业"],
+    "生物医药": ["中证生物医药", "医药50", "800医药", "中证医药"],
+    "港股通互联网": ["港股互联网", "中国互联网50", "中证海外互联网"],
+    "互联网": ["港股互联网", "中国互联网50", "中证海外互联网"],
+    "新能源": ["光伏指数", "新能源车"],
+    "军工": ["中证军工", "国防军工"],
+    "半导体": ["中证半导体", "芯片"],
+    "食品饮料": ["中证食品饮料", "主要消费"],
+}
+
 
 def _has_meaningful_mismatch(query: str, name: str) -> bool:
     """检查 query 与 name 是否存在有意义的关键词不匹配（P0 索引名称误匹配修复）。
@@ -1801,6 +1814,18 @@ def _query_valuation(args: dict, trace_id: str = "", conversation_id: int = None
             if r["index_code"] not in seen_codes:
                 seen_codes.add(r["index_code"])
                 matched.append({"code": r["index_code"], "name": r["index_name"]})
+
+    # 别名兜底：持仓基金跟踪指数名称与库内名称不一致时（如"畜牧养殖"→"中证畜牧"）
+    if not matched:
+        aliases = _INDEX_NAME_ALIASES.get(index_name, [])
+        for alias in aliases:
+            for code, name in unique_indexes.items():
+                if code in seen_codes:
+                    continue
+                if _is_index_name_match(alias, name) or alias == name:
+                    seen_codes.add(code)
+                    matched.append({"code": code, "name": name, "via_alias": alias})
+                    break
 
     if not matched:
         # 兜底：尝试天天基金 API

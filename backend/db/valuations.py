@@ -170,25 +170,35 @@ def get_valuation_history(index_code: str, days: int = 30, metric_type: str = No
 
 
 def get_latest_valuation(index_code: str, metric_type: str = None, max_days: int = None) -> dict | None:
-    """获取某指数最新一条估值。max_days 限制只取最近 N 天内的数据。"""
+    """获取某指数最新一条估值。max_days 限制只取最近 N 天内的数据。
+
+    后缀兼容：同时匹配带后缀(.WI/.CSI/.SH/.SZ/.SI)和不带后缀的代码，
+    避免 normalize_index_code 去后缀后查不到带后缀的库内记录。
+    """
     from datetime import datetime, timedelta
     conn = _get_conn()
     date_filter = ""
     if max_days:
         cutoff = (datetime.now() - timedelta(days=max_days)).strftime("%Y-%m-%d")
         date_filter = f" AND snapshot_date >= '{cutoff}'"
+    # 构造候选代码列表：原始code + 带后缀变体（如 882011 → 882011.WI/882011.CSI...）
+    candidates = [index_code]
+    if '.' not in index_code:
+        for suffix in ['.WI', '.CSI', '.SH', '.SZ', '.SI']:
+            candidates.append(f'{index_code}{suffix}')
+    placeholders = ','.join('?' * len(candidates))
     if metric_type:
         row = conn.execute(f"""
             SELECT * FROM index_valuations
-            WHERE index_code = ? AND metric_type = ?{date_filter}
+            WHERE index_code IN ({placeholders}) AND metric_type = ?{date_filter}
             ORDER BY snapshot_date DESC LIMIT 1
-        """, (index_code, metric_type)).fetchone()
+        """, (*candidates, metric_type)).fetchone()
     else:
         row = conn.execute(f"""
             SELECT * FROM index_valuations
-            WHERE index_code = ?{date_filter}
+            WHERE index_code IN ({placeholders}){date_filter}
             ORDER BY snapshot_date DESC LIMIT 1
-        """, (index_code,)).fetchone()
+        """, (*candidates,)).fetchone()
     conn.close()
     # P2-4.1: 读取容错
     return _apply_percentile_normalize(dict(row)) if row else None
