@@ -390,9 +390,65 @@ async def _run_diversification_ai_summary_async(record_id: int, agent_id: int = 
     asset_class_section = f"### 资产大类穿透\n{asset_class_block}" if asset_class_block else ""
     valuation_section = f"### 估值参考（跟踪指数）\n{valuation_block}" if valuation_block else ""
 
+    # 2026-08-03 优化（P0）：删除 MCP 原始数据块，只保留预计算结果
+    # 原始数据（4.5万字符 JSON）既冗余又消耗 token，预计算结果已结构化带阈值，更适合 LLM 使用
+    # 仅在预计算解析失败时注入对应原始数据作为降级
+    mcp_fallback_block = ""
+    if not mcp_parsed["correlation"] and mcp_raw_sections:
+        # 相关性解析失败时注入相关性原始数据
+        for section in mcp_raw_sections:
+            if "相关性" in section:
+                mcp_fallback_block += f"\n### 相关性原始数据（解析失败降级）\n{section}\n"
+    if not mcp_parsed["industry_pcts"] and mcp_raw_sections:
+        # 行业解析失败时注入行业原始数据
+        for section in mcp_raw_sections:
+            if "行业配置" in section:
+                mcp_fallback_block += f"\n### 行业配置原始数据（解析失败降级）\n{section}\n"
+
+    # 2026-08-03 优化（P2）：异常数据检测
+    # 收益率绝对值 >100% 通常是成本数据 bug（如基准持仓 base_total_cost 缺失）
+    anomaly_lines = []
+    for h in holdings:
+        profit_rate = h.get("profit_rate", 0) or 0
+        if abs(profit_rate) > 1.0:
+            anomaly_lines.append(
+                f"- ⚠️ {h.get('fund_name','')}({h.get('fund_code','')}) "
+                f"收益率 {profit_rate*100:.1f}% 异常，疑似成本数据错误，"
+                f"本次分析排除该基金的成本/收益数据，仅参考其市值占比"
+            )
+    anomaly_section = ""
+    if anomaly_lines:
+        anomaly_section = f"""
+### ⚠️ 数据异常警告
+{chr(10).join(anomaly_lines)}
+"""
+
+    # 2026-08-03 优化（P1）：增量分析 — 注入上次分析结论，避免同质化
+    last_analysis_section = ""
+    try:
+        last_records = list_portfolio_analysis_records(analysis_type="diversification_ai", limit=1)
+        if last_records and last_records[0].get("id") != record_id and last_records[0].get("result_data"):
+            last_record = last_records[0]
+            last_date = (last_record.get("created_at") or "")[:16]
+            # 取上次结论的前 400 字符作为摘要（核心评分+主要风险点）
+            last_summary = (last_record.get("result_data") or "")[:400]
+            last_analysis_section = f"""
+## 上次分析结论（{last_date}）
+{last_summary}
+
+## 本次分析要求（对比增量）
+请对比上次分析，重点说明：
+1. 哪些风险已改善（如集中度下降、相关性降低）
+2. 哪些风险新增或加剧
+3. 本次新增的变化点（新持仓、新交易、新估值数据等）
+4. 如果结论与上次相同，说明原因（如"组合未变化"或"风险结构未改变"）
+"""
+    except Exception as e:
+        logger.debug(f"[diversification] 读取上次分析结论失败: {e}")
+
     user_content = f"""## 持仓概览
 持有基金 {result.get('holding_count',0)} 只 | 总投资 {result.get('total_cost',0):.0f}元 | 总市值 {result.get('total_value',0):.0f}元
-
+{last_analysis_section}
 ## 持仓明细
 {holdings_text}
 
@@ -403,7 +459,7 @@ async def _run_diversification_ai_summary_async(record_id: int, agent_id: int = 
 
 ### 基金集中度检验
 {chr(10).join(concentration_items)}
-
+{anomaly_section}
 ### 相关性检验
 {correlation_block}
 
@@ -413,10 +469,7 @@ async def _run_diversification_ai_summary_async(record_id: int, agent_id: int = 
 {asset_class_section}
 
 {valuation_section}
-
-## 📄 MCP 原始数据（供验证和深度参考）
-{mcp_raw_block}
-
+{mcp_fallback_block}
 请对以上持仓分散度进行专业解读。
 
 ## 输出规范（必须严格遵守，违反将导致质量评估严重扣分）
