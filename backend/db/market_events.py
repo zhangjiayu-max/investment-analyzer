@@ -180,6 +180,73 @@ def _title_similarity(a: str, b: str) -> float:
     return ngram_sim
 
 
+def _update_similar_event(
+    conn, event_id: str, detected_date: str, summary: str, direction: str,
+    confidence: float, affected_sectors: list, affected_themes: list,
+    sources: list, time_frame: str, evidence: str,
+    original_confidence: float | None, original_direction: str | None,
+) -> None:
+    """P0 修复（2026-08-03）：相似事件命中时更新已有记录的关键字段。
+
+    原问题：create_market_event 发现相似事件后直接 return，不更新任何字段，
+    导致 detected_date/updated_at/confidence/direction/sources 停留在旧值，
+    前端按 detected_date 排序看不到"新"记录。
+
+    修复：更新 detected_date（让前端排在最前）+ updated_at + confidence + direction +
+    sources + summary + affected_sectors/themes，让重复扫描能刷新已有事件。
+    """
+    # 合并 sources（去重，保留已有 + 新增）
+    try:
+        existing_row = conn.execute(
+            "SELECT sources FROM market_events WHERE event_id = ?", (event_id,)
+        ).fetchone()
+        old_sources = json.loads(existing_row["sources"]) if existing_row and existing_row["sources"] else []
+        merged_sources = old_sources[:]
+        for s in (sources or []):
+            if s not in merged_sources:
+                merged_sources.append(s)
+        # 最多保留 10 条 sources
+        merged_sources = merged_sources[-10:]
+    except Exception:
+        merged_sources = sources or []
+
+    conn.execute("""
+        UPDATE market_events SET
+            detected_date = ?,
+            updated_at = datetime('now','localtime'),
+            summary = ?,
+            direction = ?,
+            confidence = ?,
+            sources = ?,
+            time_frame = ?,
+            evidence = ?,
+            original_confidence = ?,
+            original_direction = ?,
+            affected_sectors = CASE WHEN ? IS NOT NULL THEN ? ELSE affected_sectors END,
+            affected_themes = CASE WHEN ? IS NOT NULL THEN ? ELSE affected_themes END
+        WHERE event_id = ?
+    """, (
+        detected_date,
+        summary,
+        direction,
+        confidence,
+        json.dumps(merged_sources, ensure_ascii=False),
+        time_frame,
+        evidence,
+        original_confidence if original_confidence is not None else confidence,
+        original_direction if original_direction is not None else direction,
+        json.dumps(affected_sectors, ensure_ascii=False) if affected_sectors else None,
+        json.dumps(affected_sectors, ensure_ascii=False) if affected_sectors else None,
+        json.dumps(affected_themes, ensure_ascii=False) if affected_themes else None,
+        json.dumps(affected_themes, ensure_ascii=False) if affected_themes else None,
+        event_id,
+    ))
+    conn.commit()
+    # P0 修复（2026-08-03）：相似事件更新后必须清除列表缓存，
+    # 否则扫描后前端 loadEvents 命中 5 分钟缓存，返回旧数据，用户看不到"新"事件。
+    _clear_events_cache()
+
+
 def create_market_event(
     title: str,
     summary: str,
@@ -239,9 +306,18 @@ def create_market_event(
                 date_diff = 0 if row_date_str == new_date_str else 999
 
             if date_diff <= 3 and _title_similarity(title, row["title"]) >= 0.6:
+                # P0 修复（2026-08-03）：相似事件不再跳过，而是更新已有记录的关键字段
+                # 原问题：相似事件直接 return，导致 detected_date/updated_at/confidence/direction/sources
+                # 都不更新，前端按 detected_date 排序看不到"新"记录，用户感觉"扫描了但没新数据"
+                # 修复：更新 detected_date + updated_at + confidence + direction + sources + summary
                 logger.info(
-                    f"[market_events] 检测到相似事件(日期差{date_diff}天)，跳过创建: "
+                    f"[market_events] 检测到相似事件(日期差{date_diff}天)，更新已有记录: "
                     f"'{title}' -> '{row['title']}'"
+                )
+                _update_similar_event(
+                    conn, row["event_id"], today, summary, direction, confidence,
+                    affected_sectors, affected_themes, sources, time_frame, evidence,
+                    original_confidence, original_direction,
                 )
                 return row["event_id"]
 
@@ -366,7 +442,11 @@ def list_market_events(
         params.append(relevance)
     if conditions:
         sql += " WHERE " + " AND ".join(conditions)
-    sql += " ORDER BY expected_date ASC LIMIT ?"
+    # P0 修复（2026-08-03）：排序从 expected_date ASC 改为 detected_date DESC, expected_date ASC
+    # 原问题：按 expected_date ASC 排序导致顶部全是早期旧事件（如 7 月事件），
+    #         用户扫描后新检测的事件（expected_date 较远）排在列表中间/底部，视觉上"看不到新数据"。
+    # 修复：优先按 detected_date DESC（最新检测的排顶部），相同 detected_date 按 expected_date ASC（近期发生的靠前）。
+    sql += " ORDER BY detected_date DESC, expected_date ASC LIMIT ?"
     params.append(limit)
 
     conn = _get_conn()
