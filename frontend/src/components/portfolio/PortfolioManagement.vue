@@ -332,15 +332,16 @@ const showCashModal = ref(false)
 const cashForm = ref({ amount: 0, user_id: '花无缺' })
 const cashMode = ref('add')  // 'add' 存入/支出, 'set' 直接设置
 
-// ECharts 净值走势曲线数据（2026-08-03：改为展示净值走势，与主流平台一致）
+// ECharts 累计收益率曲线（基准日为数据起点，公式：(nav-基准nav)/基准nav×100）
 const navChartData = computed(() => {
   if (!chartData.value?.nav_history?.length) return { dates: [], series: [] }
   const history = chartData.value.nav_history
+  const baseNav = history[0]?.nav || 1
   return {
     dates: history.map(d => d.date),
     series: [{
-      name: '单位净值',
-      data: history.map(d => d.nav),
+      name: '累计收益',
+      data: history.map(d => +(((d.nav - baseNav) / baseNav) * 100).toFixed(2)),
       color: isDark.value ? '#d4a853' : '#c9a84c',
     }],
   }
@@ -350,13 +351,14 @@ const navChartMarkPoints = computed(() => {
   const txs = chartData.value?.transactions
   const history = chartData.value?.nav_history
   if (!txs?.length || !history?.length) return []
-  // 构建日期→净值映射，用于买卖点 Y 轴定位
-  const dateMap = new Map(history.map(d => [d.date, d.nav]))
+  // 基准净值 + 日期→累计收益映射，用于买卖点 Y 轴定位
+  const baseNav = history[0]?.nav || 1
+  const dateMap = new Map(history.map(d => [d.date, +(((d.nav - baseNav) / baseNav) * 100).toFixed(2)]))
   return txs.map(t => ({
     type: t.transaction_type,
     date: t.transaction_date,
-    price: t.price,  // 保留净值用于 tooltip
-    yValue: dateMap.get(t.transaction_date) ?? t.price,  // 当天净值用于 Y 轴定位
+    price: t.price,
+    yValue: dateMap.get(t.transaction_date) ?? 0,
     shares: t.shares,
     amount: t.amount,
   }))
@@ -430,21 +432,23 @@ const chart5yDates = computed(() => (fundChartData.value || []).map(d => d.date)
 const chart5ySeries = computed(() => {
   const data = fundChartData.value || []
   if (!data.length) return []
+  const baseNav = data[0]?.nav || 1
   return [{
-    name: '单位净值',
-    data: data.map(d => d.nav),
+    name: '累计收益',
+    data: data.map(d => +(((d.nav - baseNav) / baseNav) * 100).toFixed(2)),
   }]
 })
 const chart5yMarkPoints = computed(() => {
   const data = fundChartData.value || []
-  // 构建日期→净值映射
-  const dateMap = new Map(data.map(d => [d.date, d.nav]))
+  const baseNav = data[0]?.nav || 1
+  // 构建日期→累计收益映射
+  const dateMap = new Map(data.map(d => [d.date, +(((d.nav - baseNav) / baseNav) * 100).toFixed(2)]))
   // 交易点：买入/卖出标记，颜色由 LineChart 组件统一从 useChartTheme 读取
   return (fundChartTransactions.value || []).map(t => ({
     type: t.transaction_type === 'buy' ? 'buy' : 'sell',
     date: t.transaction_date,
     price: t.price,  // 保留净值用于 tooltip
-    yValue: dateMap.get(t.transaction_date) ?? t.price,  // 当天净值用于 Y 轴定位
+    yValue: dateMap.get(t.transaction_date) ?? 0,  // 当天累计收益用于 Y 轴定位
     amount: t.amount || 0,
     shares: t.shares || 0,
   }))
@@ -4080,7 +4084,7 @@ function txDisplayAmount(tx) {
 
           <!-- 基金走势图 -->
           <div class="analysis-section" style="margin-top:1rem">
-            <h4 style="margin:0 0 0.5rem 0;font-size:0.85rem">基金净值走势（选择基金查看买卖点）</h4>
+            <h4 style="margin:0 0 0.5rem 0;font-size:0.85rem">基金累计收益（选择基金查看买卖点）</h4>
             <div class="chart-fund-selector">
               <select v-model="chartFundCode" class="input-field" @change="loadFundChart(chartFundCode)" style="flex:1;max-width:300px">
                 <option value="">选择基金</option>
@@ -4093,9 +4097,10 @@ function txDisplayAmount(tx) {
                 v-if="navChartData.dates.length"
                 :dates="navChartData.dates"
                 :series="navChartData.series"
-                :y-names="['净值']"
+                :y-names="['累计收益%']"
                 :area="true"
                 :smooth="true"
+                :change-mode="true"
                 :mark-points="navChartMarkPoints"
                 height="280px"
               />
@@ -6118,7 +6123,7 @@ function txDisplayAmount(tx) {
             <h3 class="modal-title">
               {{ detailFundName }}
               <span style="font-size:0.75rem;font-weight:400;color:var(--color-text-muted);margin-left:0.5rem">
-                {{ chartMode === 'chart5y' ? '近 5 年净值走势 · 点击查看数据点 · 拖拽滑块缩放' : '持仓分析' }}
+                {{ chartMode === 'chart5y' ? '近 5 年累计收益 · 点击查看数据点 · 拖拽滑块缩放' : '持仓分析' }}
               </span>
             </h3>
 
@@ -6151,7 +6156,8 @@ function txDisplayAmount(tx) {
                 <LineChart
                   :dates="chart5yDates"
                   :series="chart5ySeries"
-                  :y-names="['净值']"
+                  :y-names="['累计收益%']"
+                  :change-mode="true"
                   :markPoints="chart5yMarkPoints"
                   :clickLock="true"
                   :zoomable="true"
