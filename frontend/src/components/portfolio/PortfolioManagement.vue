@@ -420,176 +420,26 @@ const fundChartStats = computed(() => {
   }
 })
 
-// ── 5 年走势图 ECharts ──
-const chart5yRef = ref(null)
-let chart5yInstance = null
-
-const chart5yTransactions = computed(() => {
-  return fundChartTransactions.value || []
+// ── 5 年走势图（P0 优化 2026-08-02：改用 <LineChart> 组件，删除 162 行手写 echarts 配置）──
+// 统一颜色/字体/grid/tooltip，修复内存泄漏（LineChart 内部 useLazyChart 自动 dispose）
+const chart5yDates = computed(() => (fundChartData.value || []).map(d => d.date))
+const chart5ySeries = computed(() => {
+  const data = fundChartData.value || []
+  if (!data.length) return []
+  return [{
+    name: '净值',
+    data: data.map(d => d.nav),
+  }]
 })
-
-function renderChart5y() {
-  if (!chart5yRef.value || !fundChartData.value?.length) return
-  // ECharts 6 无 default export，需兼容 v5/v6
-  import('echarts').then(mod => {
-    const echarts = mod.default || mod
-    if (!chart5yRef.value) return
-    if (chart5yInstance) chart5yInstance.dispose()
-    chart5yInstance = echarts.init(chart5yRef.value, isDark.value ? 'dark' : null)
-
-    const data = fundChartData.value
-    const dates = data.map(d => d.date)
-    const navs = data.map(d => d.nav)
-    const firstNav = navs[0]
-    const pcts = navs.map(n => ((n - firstNav) / firstNav * 100))
-
-    const txs = chart5yTransactions.value
-    // 约定：红色▲=买入（朝上）、绿色▼=卖出（朝下）
-    // symbolOffset 让三角形底边贴合净值点，顶点像箭头指向交易位置
-    const labelBg = isDark.value ? 'rgba(13,18,32,0.92)' : 'rgba(255,255,255,0.95)'
-    const buyPoints = txs.filter(t => t.transaction_type === 'buy').map(t => ({
-      name: '买入',
-      coord: [t.transaction_date, t.price],
-      value: t.amount || '',
-      symbol: 'triangle',
-      symbolRotate: 0,            // ▲ 朝上 = 买入
-      symbolSize: 16,             // 从 12 放大到 16，5 年密集图上可见
-      symbolOffset: [0, -8],     // 向上偏移，让底边贴在净值点上
-      itemStyle: {
-        color: '#ef4444',
-        borderColor: '#ffffff',   // 白色描边提升对比度
-        borderWidth: 2,
-      },
-      label: {
-        show: !!t.amount,
-        position: 'top',
-        distance: 4,
-        formatter: `¥${(t.amount || 0).toLocaleString()}`,
-        color: '#ef4444',
-        fontSize: 10,
-        fontWeight: 'bold',
-        backgroundColor: labelBg,
-        borderColor: 'rgba(239,68,68,0.25)',
-        borderWidth: 1,
-        padding: [2, 5],
-        borderRadius: 3,
-      },
-    }))
-    const sellPoints = txs.filter(t => t.transaction_type === 'sell').map(t => ({
-      name: '卖出',
-      coord: [t.transaction_date, t.price],
-      value: t.amount || '',
-      symbol: 'triangle',
-      symbolRotate: 180,          // ▼ 朝下 = 卖出
-      symbolSize: 16,
-      symbolOffset: [0, 8],       // 向下偏移，让底边贴在净值点上
-      itemStyle: {
-        color: '#22c55e',
-        borderColor: '#ffffff',
-        borderWidth: 2,
-      },
-      label: {
-        show: !!t.amount,
-        position: 'bottom',
-        distance: 4,
-        formatter: `¥${(t.amount || 0).toLocaleString()}`,
-        color: '#22c55e',
-        fontSize: 10,
-        fontWeight: 'bold',
-        backgroundColor: labelBg,
-        borderColor: 'rgba(34,197,94,0.25)',
-        borderWidth: 1,
-        padding: [2, 5],
-        borderRadius: 3,
-      },
-    }))
-
-    const bgColor = isDark.value ? '#0a0e1a' : '#ffffff'
-    const textColor = isDark.value ? '#9aa0a6' : '#64748b'
-    const gridColor = isDark.value ? 'rgba(255,255,255,0.06)' : '#f1f5f9'
-
-    chart5yInstance.setOption({
-      backgroundColor: 'transparent',
-      tooltip: {
-        trigger: 'axis',
-        triggerOn: 'click',
-        backgroundColor: isDark.value ? 'rgba(13,18,32,0.95)' : '#ffffff',
-        borderColor: isDark.value ? 'rgba(255,255,255,0.1)' : '#e2e8f0',
-        textStyle: { color: isDark.value ? '#e8eaed' : '#0f172a', fontSize: 12 },
-        formatter: (params) => {
-          const p = Array.isArray(params) ? params[0] : params
-          if (!p) return ''
-          const idx = p.dataIndex
-          const d = data[idx]
-          const pct = pcts[idx]
-          return `<div style="font-size:12px">
-            <div style="margin-bottom:4px">${d.date}</div>
-            <div>净值: <b>${d.nav.toFixed(4)}</b></div>
-            <div style="color:${pct >= 0 ? '#ef4444' : '#22c55e'}">${pct >= 0 ? '+' : ''}${pct.toFixed(2)}%</div>
-          </div>`
-        },
-      },
-      legend: {
-        data: ['净值', ...(buyPoints.length ? ['买入'] : []), ...(sellPoints.length ? ['卖出'] : [])],
-        bottom: 0,
-        textStyle: { color: textColor, fontSize: 11 },
-      },
-      grid: { left: '8%', right: '5%', top: '8%', bottom: '15%' },
-      xAxis: {
-        type: 'category',
-        data: dates,
-        axisLabel: { color: textColor, fontSize: 10, rotate: dates.length > 60 ? 30 : 0 },
-        axisLine: { lineStyle: { color: gridColor } },
-      },
-      yAxis: {
-        type: 'value',
-        name: '净值',
-        nameTextStyle: { color: textColor, fontSize: 10 },
-        splitLine: { lineStyle: { color: gridColor, type: 'dashed' } },
-        axisLabel: { color: textColor, fontSize: 10 },
-        scale: true,
-      },
-      dataZoom: [
-        { type: 'inside', start: 0, end: 100 },
-        { type: 'slider', start: 0, end: 100, height: 20, bottom: 4,
-          borderColor: 'transparent',
-          backgroundColor: isDark.value ? 'rgba(255,255,255,0.04)' : '#f8fafc',
-          fillerColor: 'rgba(201,168,76,0.12)',
-          handleStyle: { color: '#c9a84c' },
-          textStyle: { color: textColor, fontSize: 10 },
-        },
-      ],
-      series: [
-        {
-          name: '净值',
-          type: 'line',
-          data: navs,
-          smooth: true,
-          symbol: 'circle',
-          symbolSize: 3,
-          lineStyle: { width: 2, color: '#c9a84c' },
-          itemStyle: { color: '#c9a84c' },
-          areaStyle: {
-            color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
-              { offset: 0, color: 'rgba(201,168,76,0.2)' },
-              { offset: 1, color: 'rgba(201,168,76,0)' },
-            ]),
-          },
-          markPoint: buyPoints.length || sellPoints.length ? {
-            data: [...buyPoints, ...sellPoints],
-          } : undefined,
-        },
-      ],
-    })
-  })
-}
-
-watch(fundChartData, () => {
-  nextTick(() => renderChart5y())
-})
-
-watch(isDark, () => {
-  nextTick(() => renderChart5y())
+const chart5yMarkPoints = computed(() => {
+  // 交易点：买入/卖出标记，颜色由 LineChart 组件统一从 useChartTheme 读取
+  return (fundChartTransactions.value || []).map(t => ({
+    type: t.transaction_type === 'buy' ? 'buy' : 'sell',
+    date: t.transaction_date,
+    price: t.price,
+    amount: t.amount || 0,
+    shares: t.shares || 0,
+  }))
 })
 
 // Add purchase (追加买入) panel — amount-based
@@ -6290,7 +6140,15 @@ function txDisplayAmount(tx) {
                 <span>加载 5 年净值数据...</span>
               </div>
               <div v-else-if="fundChartData" class="fund-chart-5y">
-                <div ref="chart5yRef" class="chart-5y-canvas" style="height:300px"></div>
+                <LineChart
+                  :dates="chart5yDates"
+                  :series="chart5ySeries"
+                  :markPoints="chart5yMarkPoints"
+                  :clickLock="true"
+                  :zoomable="true"
+                  :zoomThreshold="60"
+                  height="300px"
+                />
                 <!-- 涨跌幅统计 -->
                 <div class="chart-5y-stats" v-if="fundChartStats">
                   <div class="stat-card-stat">

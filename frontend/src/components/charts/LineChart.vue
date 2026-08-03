@@ -54,26 +54,51 @@ function getOption(echarts) {
     }
 
     // 买卖点标记（仅第一条线）
+    // P0 优化（2026-08-02）：统一三角形样式 + 金额标签 + 主题色，消除硬编码
     if (i === 0 && props.markPoints.length) {
+      const labelBg = isDark.value ? 'rgba(13,18,32,0.92)' : 'rgba(255,255,255,0.95)'
       config.markPoint = {
-        symbol: 'pin',
-        symbolSize: 28,
-        label: { show: false },
-        data: props.markPoints.map(p => ({
-          name: p.type === 'buy' ? '买入' : '卖出',
-          coord: [p.date, p.price],
-          value: `¥${(p.amount || 0).toLocaleString()}`,
-          symbol: p.type === 'buy' ? 'arrow' : 'arrow',
-          symbolRotate: p.type === 'buy' ? 180 : 0,  // 买入箭头朝下指向价格线
-          itemStyle: { color: p.type === 'buy' ? '#ef4444' : '#22c55e' },
-          tooltip: {
-            formatter: () => {
-              const shareStr = p.shares ? `${p.shares.toLocaleString()}份` : ''
-              const amtStr = p.amount ? `¥${p.amount.toLocaleString()}` : ''
-              return `${p.type === 'buy' ? '🔴 买入' : '🟢 卖出'}<br/>日期: ${p.date}<br/>价格: ${p.price}<br/>${shareStr}${shareStr && amtStr ? ' | ' : ''}${amtStr}`
+        symbol: 'triangle',
+        symbolSize: 16,
+        data: props.markPoints.map(p => {
+          const isBuy = p.type === 'buy'
+          // 统一主题色：买入=profit红、卖出=loss绿（红涨绿跌中国市场惯例）
+          const pointColor = isBuy ? theme.value.colors.profit : theme.value.colors.loss
+          return {
+            name: isBuy ? '买入' : '卖出',
+            coord: [p.date, p.price],
+            value: p.amount || '',
+            symbol: 'triangle',
+            symbolRotate: isBuy ? 0 : 180,       // ▲朝上=买入、▼朝下=卖出
+            symbolOffset: isBuy ? [0, -8] : [0, 8],
+            itemStyle: {
+              color: pointColor,
+              borderColor: '#ffffff',
+              borderWidth: 2,
             },
-          },
-        })),
+            label: {
+              show: !!p.amount,
+              position: isBuy ? 'top' : 'bottom',
+              distance: 4,
+              formatter: `¥${(p.amount || 0).toLocaleString()}`,
+              color: pointColor,
+              fontSize: 10,
+              fontWeight: 'bold',
+              backgroundColor: labelBg,
+              borderColor: pointColor + '40',
+              borderWidth: 1,
+              padding: [2, 5],
+              borderRadius: 3,
+            },
+            tooltip: {
+              formatter: () => {
+                const shareStr = p.shares ? `${p.shares.toLocaleString()}份` : ''
+                const amtStr = p.amount ? `¥${p.amount.toLocaleString()}` : ''
+                return `${isBuy ? '🔴 买入' : '🟢 卖出'}<br/>日期: ${p.date}<br/>价格: ${p.price}<br/>${shareStr}${shareStr && amtStr ? ' | ' : ''}${amtStr}`
+              },
+            },
+          }
+        }),
       }
     }
 
