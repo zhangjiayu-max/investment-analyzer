@@ -1643,7 +1643,11 @@ def get_fund_nav_history(fund_code: str, user_id: str = "default", days: int = 3
             return None
 
         nav_history = [
-            {"date": r["nav_date"], "nav": r["nav"]}
+            {
+                "date": r["nav_date"],
+                "nav": r["nav"],
+                "change_pct": r.get("change_pct") if r.get("change_pct") is not None else 0,
+            }
             for r in records
             if r.get("nav") is not None
         ]
