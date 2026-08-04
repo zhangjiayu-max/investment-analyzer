@@ -30,6 +30,73 @@ router = APIRouter(tags=["analysis-index-analysis"])
 _background_tasks = set()
 
 
+def _fetch_online_valuation_block(req, latest_local: dict | None) -> str:
+    """检查库内估值新鲜度，超过3天则补查在线最新估值。
+
+    受 tool.online_valuation_query_enabled 开关控制（默认 true）。
+    返回注入 prompt 的字符串块（带日期标注），无需补充则返回空字符串。
+    """
+    from datetime import datetime, timedelta
+    from db.config import get_config_bool, get_config_int
+    try:
+        if not get_config_bool("tool.online_valuation_query_enabled", True):
+            return ""
+    except Exception:
+        return ""
+
+    # 新鲜度判定：库内无数据，或最新 snapshot_date 距今 > N 天
+    stale_days = get_config_int("index_analysis.online_valuation_stale_days", 3)
+    need_online = True
+    days_old = None
+    if latest_local and latest_local.get("snapshot_date"):
+        try:
+            snap = datetime.strptime(latest_local["snapshot_date"], "%Y-%m-%d")
+            days_old = (datetime.now() - snap).days
+            need_online = days_old > stale_days
+        except Exception:
+            pass
+
+    if not need_online:
+        return ""
+
+    # 调用 fetch_online_valuation 补一次最新估值
+    try:
+        from db.valuations import fetch_online_valuation, normalize_index_code
+        # metric_type 取库内最新记录的 metric_type，否则默认市净率
+        primary_metric = (latest_local or {}).get("metric_type") or "市净率"
+        # 兜底指标：akshare 部分指数只提供 PE 或 PB 之一，主指标查不到时尝试另一个
+        fallback_metric = "市盈率" if primary_metric == "市净率" else "市净率"
+        # 优先用带后缀代码（fetch_online_valuation 内部会 normalize）
+        code_to_query = req.index_code or (latest_local or {}).get("index_code", "")
+        if not code_to_query:
+            return ""
+        online = fetch_online_valuation(code_to_query, metric_type=primary_metric, timeout_ms=8000)
+        used_metric = primary_metric
+        if not online and fallback_metric:
+            online = fetch_online_valuation(code_to_query, metric_type=fallback_metric, timeout_ms=8000)
+            used_metric = fallback_metric
+        if not online:
+            return f"\n[在线估值查询] 指数 {req.index_name or code_to_query} 未查到在线估值（库内最新 {latest_local.get('snapshot_date') if latest_local else '无'}，距今 {days_old} 天）。"
+        # 组装提示块
+        snap_date = online.get("snapshot_date") or online.get("date") or datetime.now().strftime("%Y-%m-%d")
+        val = online.get("current_value")
+        pct = online.get("percentile")
+        lines = [
+            f"[在线最新估值] 指数：{req.index_name or code_to_query}",
+            f"日期：{snap_date}（库内最新 {latest_local.get('snapshot_date') if latest_local else '无'}，距今 {days_old} 天，已自动补查在线数据）",
+            f"指标：{used_metric}，当前值：{val}，百分位：{pct}%",
+        ]
+        # 附加其他在线字段
+        for k in ("danger_value", "median", "opportunity_value", "zscore"):
+            if online.get(k) is not None:
+                lines.append(f"{k}: {online.get(k)}")
+        lines.append(f"数据源: {online.get('source', 'akshare_online')}")
+        return "\n".join(lines)
+    except Exception as e:
+        logger.warning(f"[index_analysis] 在线估值补充失败 {req.index_code}: {e}")
+        return ""
+
+
 @router.post("/api/analysis/run")
 async def run_analysis(req: AnalysisRunRequest):
     """触发 AI 指数深度分析（后台异步执行）。"""
@@ -74,7 +141,7 @@ async def _run_index_analysis_async(history_id: int, req_data: dict, agent: dict
     except Exception as _e:
         logger.warning(f"create_analysis_log 失败: {_e}")
 
-    # 2. 获取估值数据
+    # 2. 获取估值数据（库内 + 在线兜底补最新）
     valuation_context = ""
     if req.index_code:
         try:
@@ -84,8 +151,12 @@ async def _run_index_analysis_async(history_id: int, req_data: dict, agent: dict
             history = get_valuation_history(req.index_code, days=60)
             if history:
                 valuation_context += f"\n\n近{len(history)}天估值历史趋势：\n" + json.dumps(history, ensure_ascii=False, indent=2)
-        except Exception:
-            pass
+            # 数据新鲜度检查：库内最新估值超过3天，自动补一次在线最新估值
+            online_block = _fetch_online_valuation_block(req, latest)
+            if online_block:
+                valuation_context = online_block + ("\n\n" + valuation_context if valuation_context else "")
+        except Exception as e:
+            logger.warning(f"估值数据获取失败: {e}")
 
     # 3. RAG 知识库检索
     rag_context = ""

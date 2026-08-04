@@ -181,11 +181,17 @@ def get_latest_valuation(index_code: str, metric_type: str = None, max_days: int
     if max_days:
         cutoff = (datetime.now() - timedelta(days=max_days)).strftime("%Y-%m-%d")
         date_filter = f" AND snapshot_date >= '{cutoff}'"
-    # 构造候选代码列表：原始code + 带后缀变体（如 882011 → 882011.WI/882011.CSI...）
+    # 构造候选代码列表：原始code + 后缀变体（双向兼容）
+    # - 传入不带后缀（H30217）→ 加带后缀变体（H30217.CSI/H30217.WI...）
+    # - 传入带后缀（H30217.CSI）→ 加去后缀变体（H30217）
     candidates = [index_code]
     if '.' not in index_code:
         for suffix in ['.WI', '.CSI', '.SH', '.SZ', '.SI']:
             candidates.append(f'{index_code}{suffix}')
+    else:
+        base = index_code.split('.')[0]
+        if base and base not in candidates:
+            candidates.append(base)
     placeholders = ','.join('?' * len(candidates))
     if metric_type:
         row = conn.execute(f"""
