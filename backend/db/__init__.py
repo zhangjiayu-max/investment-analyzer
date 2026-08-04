@@ -312,6 +312,12 @@ from db.investment_decisions import (
     list_decisions, update_decision_status, update_exit_state, update_exit_plan,
     record_review, get_decisions_due_for_review, get_decision_accuracy_stats,
 )
+# 4%定投法（雷牛牛方法论）：建仓配置 + 触发记录
+from db.dip_investment_plans import (
+    init_dip_investment_tables,
+    create_dip_plan, get_dip_plan, list_dip_plans, update_dip_plan, delete_dip_plan,
+    list_dip_triggers, mark_trigger_executed, count_executed_triggers,
+)
 
 # 功能使用埋点
 from db.feature_usage import (
@@ -805,6 +811,9 @@ def init_db():
 
     # 三模块联动 P0（2026-08-01）：统一投资决策账本（决策→执行→回测→归因闭环核心）
     init_investment_decisions_table(conn)
+
+    # 4%定投法（雷牛牛方法论）：建仓配置 + 触发记录
+    init_dip_investment_tables(conn)
 
     # ── 交易操作审计日志 ──
     conn.execute("""

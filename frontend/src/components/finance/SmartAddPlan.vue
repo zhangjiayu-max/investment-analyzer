@@ -85,7 +85,7 @@ const deepPlans = computed(() =>
 // 信号类型 -> 短标签
 const signalShortLabel = (p) => {
   if (!p.triggered_signals || !p.triggered_signals.length) return ''
-  const map = { pyramid: 'A', trend: 'B', dip: 'C' }
+  const map = { pyramid: 'A', trend: 'B', dip: 'C', va: 'D', grid: 'E', dip_4pct: 'F' }
   return p.triggered_signals
     .filter(s => s.triggered)
     .map(s => map[s.type] || '')
@@ -946,7 +946,7 @@ onMounted(() => {
                   :class="['signal-item', `sig-${sig.type}`, sig.triggered ? 'sig-on' : 'sig-blocked']"
                 >
                   <div class="signal-head">
-                    <span class="signal-tag">{{ { pyramid: 'A', trend: 'B', dip: 'C' }[sig.type] || '?' }}</span>
+                    <span class="signal-tag">{{ { pyramid: 'A', trend: 'B', dip: 'C', va: 'D', grid: 'E', dip_4pct: 'F' }[sig.type] || '?' }}</span>
                     <span class="signal-label">{{ sig.label }}</span>
                     <span v-if="sig.triggered" class="signal-amount font-jet">¥{{ fmtMoney(sig.amount) }}</span>
                     <span v-else class="signal-blocked-tag">已拦截</span>
@@ -961,6 +961,53 @@ onMounted(() => {
                   <div v-if="sig.type === 'trend' && sig.risk_note && sig.triggered" class="risk-warn-box">
                     <Icon name="alert-triangle" size="12" />
                     <span>{{ sig.risk_note }}</span>
+                  </div>
+                  <!-- 信号F（4%定投法）专属展示：进度+下次触发价 -->
+                  <div v-if="sig.type === 'dip_4pct' && sig.total_shares" class="dip-4pct-progress">
+                    <div class="dip-4pct-progress-bar">
+                      <div class="dip-4pct-progress-fill" :style="{ width: ((sig.trigger_num ? (sig.trigger_num - 1) : 0) / sig.total_shares * 100) + '%' }"></div>
+                      <span class="dip-4pct-progress-text">
+                        {{ sig.trigger_num ? (sig.trigger_num > sig.total_shares ? `${sig.total_shares}/${sig.total_shares}` : `${sig.trigger_num - 1}/${sig.total_shares}（待执行第${sig.trigger_num}次）`) : `0/${sig.total_shares}` }}
+                      </span>
+                    </div>
+                    <div class="dip-4pct-stats">
+                      <div class="dip-4pct-stat">
+                        <span class="label">投资上限</span>
+                        <span class="value font-jet">¥{{ fmtMoney(sig.max_amount) }}</span>
+                      </div>
+                      <div class="dip-4pct-stat">
+                        <span class="label">单次金额</span>
+                        <span class="value font-jet">¥{{ fmtMoney(sig.single_amount) }}</span>
+                      </div>
+                      <div class="dip-4pct-stat">
+                        <span class="label">累计投入</span>
+                        <span class="value font-jet">¥{{ fmtMoney(sig.cumulative_invested) }}</span>
+                      </div>
+                      <div class="dip-4pct-stat">
+                        <span class="label">剩余预算</span>
+                        <span class="value font-jet">¥{{ fmtMoney(sig.remaining_budget) }}</span>
+                      </div>
+                      <div class="dip-4pct-stat" v-if="sig.prev_buy_price">
+                        <span class="label">上一买入点</span>
+                        <span class="value font-jet">{{ sig.prev_buy_price.toFixed(4) }}</span>
+                      </div>
+                      <div class="dip-4pct-stat" v-if="sig.actual_dip_pct != null && sig.actual_dip_pct !== 0">
+                        <span class="label">实际跌幅</span>
+                        <span class="value font-jet" :class="sig.actual_dip_pct >= sig.dip_pct_threshold ? 'text-success' : ''">
+                          {{ sig.actual_dip_pct.toFixed(2) }}% / {{ sig.dip_pct_threshold }}%
+                        </span>
+                      </div>
+                      <div class="dip-4pct-stat" v-if="sig.valuation_percentile != null">
+                        <span class="label">估值百分位</span>
+                        <span class="value font-jet" :class="sig.valuation_percentile < sig.valuation_threshold ? 'text-success' : 'text-warning'">
+                          {{ sig.valuation_percentile.toFixed(2) }}% / {{ sig.valuation_threshold }}%
+                        </span>
+                      </div>
+                      <div class="dip-4pct-stat" v-if="sig.next_trigger_price">
+                        <span class="label">下次触发价</span>
+                        <span class="value font-jet text-info">{{ sig.next_trigger_price.toFixed(4) }}</span>
+                      </div>
+                    </div>
                   </div>
                   <!-- 金额计算依据（动态化公式） -->
                   <div v-if="sig.triggered && sig.amount_formula" class="signal-formula">

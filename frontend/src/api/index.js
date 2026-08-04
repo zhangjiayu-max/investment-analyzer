@@ -2777,6 +2777,28 @@ export const smartAddAPI = {
   getIndexExposure: () => api.get('/smart-add/index-exposure').then(r => r.data),
 }
 
+/** 4%定投法 API（雷牛牛方法论：估值锁底+跌幅触发+固定10份） */
+export const dip4PctAPI = {
+  /** 创建4%定投配置（建仓时填写） */
+  createPlan: (data) => api.post('/dip-plan', data).then(r => r.data),
+  /** 查询单个配置 */
+  getPlan: (fundCode) => api.get(`/dip-plan/${fundCode}`).then(r => r.data),
+  /** 列出所有配置 */
+  listPlans: (activeOnly = true) => api.get('/dip-plan/list/all', { params: { active_only: activeOnly } }).then(r => r.data),
+  /** 更新配置 */
+  updatePlan: (planId, data) => api.put(`/dip-plan/${planId}`, data).then(r => r.data),
+  /** 删除配置 */
+  deletePlan: (planId) => api.delete(`/dip-plan/${planId}`).then(r => r.data),
+  /** 手动检查是否触发4%定投 */
+  checkTrigger: (fundCode) => api.get(`/dip-plan/${fundCode}/check`).then(r => r.data),
+  /** 查询4%定投进度（用于前端展示） */
+  getStatus: (fundCode) => api.get(`/dip-plan/${fundCode}/status`).then(r => r.data),
+  /** 查询触发历史 */
+  listTriggers: (fundCode) => api.get(`/dip-plan/${fundCode}/triggers`).then(r => r.data),
+  /** 标记触发为已执行 */
+  executeTrigger: (triggerId) => api.post(`/dip-plan/triggers/${triggerId}/execute`).then(r => r.data),
+}
+
 // ── 交易计划 API ──────────────────────────────────────
 
 export function generateTradePlan(recommendationId) {

@@ -42,6 +42,7 @@ from .decision_canvas import router as decision_canvas_router
 from .accuracy import router as accuracy_router
 from .institutional_flow import router as institutional_flow_router
 from .smart_add import router as smart_add_router
+from .dip_4pct import router as dip_4pct_router
 from .fund_quality import router as fund_quality_router
 from .portfolio_intelligence import router as portfolio_intelligence_router
 from .master_backtest import router as master_backtest_router
@@ -61,6 +62,7 @@ __all__ = [
     "accuracy_router",
     "institutional_flow_router",
     "smart_add_router",
+    "dip_4pct_router",
     "fund_quality_router",
     "portfolio_intelligence_router",
     "master_backtest_router",

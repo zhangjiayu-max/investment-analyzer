@@ -120,6 +120,7 @@ from routers.analysis import (
     accuracy_router as analysis_accuracy_router,
     institutional_flow_router as analysis_institutional_flow_router,
     smart_add_router as analysis_smart_add_router,
+    dip_4pct_router as analysis_dip_4pct_router,
     fund_quality_router as analysis_fund_quality_router,
     portfolio_intelligence_router as analysis_portfolio_intelligence_router,
     master_backtest_router as analysis_master_backtest_router,
@@ -209,6 +210,7 @@ app.include_router(analysis_decision_canvas_router)
 app.include_router(analysis_accuracy_router)
 app.include_router(analysis_institutional_flow_router)
 app.include_router(analysis_smart_add_router)
+app.include_router(analysis_dip_4pct_router)
 # 三模块联动 P0（2026-08-01）：投资决策流水线 + 统一决策账本
 app.include_router(decision_router)
 app.include_router(analysis_fund_quality_router)

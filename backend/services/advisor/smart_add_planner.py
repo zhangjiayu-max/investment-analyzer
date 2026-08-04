@@ -1704,6 +1704,90 @@ def _detect_dip_signal(
     }
 
 
+def _detect_dip_4pct_signal(
+    holding: dict,
+    valuation: Optional[dict],
+) -> Optional[dict]:
+    """信号 F：4%定投法（雷牛牛方法论）— 与信号A/B/C/D/E并列的第四种策略。
+
+    独立于 smart_add 配置，由 dip_4pct.enabled + dip_4pct.scan_enabled 控制。
+
+    触发条件：
+    1. 用户已为该基金配置 dip_investment_plans（建仓时填写）
+    2. 估值百分位 < plan.valuation_threshold（默认20%，绿色线之下）
+    3. 相对上一买入点跌幅 ≥ plan.dip_pct（默认4%，可调3/5）
+    4. 未达总份数上限（默认10份）
+
+    建议金额 = max_amount / total_shares（固定份数，机械纪律）
+    """
+    fund_code = holding.get("fund_code", "")
+    if not fund_code:
+        return None
+
+    # 总开关 + 扫描开关
+    if not get_config_bool("dip_4pct.enabled", False):
+        return None
+    if not get_config_bool("dip_4pct.scan_enabled", True):
+        return None
+
+    try:
+        from services.dip_4pct_strategy import get_dip_4pct_strategy
+        strategy = get_dip_4pct_strategy()
+        if not strategy.is_enabled():
+            return None
+
+        current_price = holding.get("current_price")
+        valuation_percentile = None
+        if valuation and valuation.get("percentile") is not None:
+            valuation_percentile = valuation["percentile"]
+
+        result = strategy.check_trigger(
+            fund_code=fund_code,
+            current_price=current_price,
+            valuation_percentile=valuation_percentile,
+        )
+    except Exception as e:
+        logger.debug(f"[smart_add] 4%定投法检测失败 {fund_code}: {e}")
+        return None
+
+    if not result:
+        return None
+
+    plan = result.get("plan") or {}
+    triggered = result.get("triggered", False)
+
+    # 包装为信号格式（与其他信号一致）
+    signal = {
+        "type": "dip_4pct",
+        "label": "4%定投法",
+        "triggered": triggered,
+        "amount": result.get("suggested_amount", 0) if triggered else 0,
+        "reason": result.get("reason", ""),
+        "tag": "雷牛牛方法论",
+        # 4%定投法专属字段（前端展示用）
+        "trigger_num": result.get("trigger_num"),
+        "total_shares": plan.get("total_shares", 10),
+        "max_amount": plan.get("max_amount", 0),
+        "single_amount": plan.get("max_amount", 0) / plan.get("total_shares", 10) if plan else 0,
+        "prev_buy_price": result.get("prev_buy_price"),
+        "actual_dip_pct": result.get("actual_dip_pct"),
+        "valuation_percentile": result.get("valuation_percentile"),
+        "cumulative_invested": result.get("cumulative_invested", 0),
+        "remaining_budget": result.get("remaining_budget", 0),
+        "next_trigger_price": result.get("next_trigger_price"),
+        "dip_pct_threshold": plan.get("dip_pct", 4.0),
+        "valuation_threshold": plan.get("valuation_threshold", 20.0),
+        "plan_status": plan.get("status"),
+        "raw_result": result,  # 完整结果（含plan详情）
+    }
+
+    if not triggered:
+        # 未触发时金额归零（不参与 total_suggested 汇总）
+        signal["amount"] = 0
+
+    return signal
+
+
 def _generate_single_plan(
     holding: dict,
     cfg: dict,
@@ -1990,6 +2074,12 @@ def _generate_single_plan(
     if signal_e and signal_e.get("triggered"):
         triggered_signals.append(signal_e)
 
+    # 信号 F：4%定投法（雷牛牛方法论）— 第四种策略，与A/B/C/D/E并列
+    # 独立开关 dip_4pct.enabled + dip_4pct.scan_enabled，需用户建仓时主动配置
+    signal_f = _detect_dip_4pct_signal(holding, valuation)
+    if signal_f:
+        triggered_signals.append(signal_f)
+
     # 基本面健康检查
     fund_health = _check_fund_health(fund_code, cfg, holding=holding)
 
@@ -2184,6 +2274,7 @@ def _generate_single_plan(
         "exit_signals": exit_signals,  # 退出信号（止盈/止损/暂停 + 维度5增强）
         "va_result": signal_d,  # 价值平均法结果（含触发/未触发）
         "grid_result": signal_e,  # 网格交易结果（含触发/未触发）
+        "dip_4pct_result": signal_f,  # 4%定投法结果（含触发/未触发/未配置）
         "fund_health": fund_health,  # 基本面健康检查
         "total_suggested": round(total_suggested, 2),  # 信号触发金额汇总（旧字段，向后兼容）
         "final_suggested_amount": round(final_suggested_amount, 2),  # 2026-07-10 新增：多维度最终金额

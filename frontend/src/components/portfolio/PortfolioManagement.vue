@@ -114,6 +114,7 @@ import {
   patrolWatchlist, getBuyScore,
   getWatchlistSignalHistory, getWatchlistResonance, getWatchlistSignalStats,
   dailyAdviceAPI,
+  dip4PctAPI,
 } from '../../api'
 import { useToast } from '../../composables/useToast'
 import ConfirmDialog from '../layout/ConfirmDialog.vue'
@@ -481,6 +482,12 @@ const newBuyForm = ref({
   transaction_time: new Date().toTimeString().slice(0, 5),
   notes: '',
   account: '花无缺',
+  // 4%定投法配置（建仓时可选启用，雷牛牛方法论）
+  dip_4pct_enabled: false,
+  dip_4pct_max_amount: 50000,    // 投资上限（用户填写，根据总额计算占比）
+  dip_4pct_total_shares: 10,    // 总份数（固定10）
+  dip_4pct_dip_pct: 4.0,        // 单次触发跌幅%（可调3/4/5，因不同基金跌幅特性不同）
+  dip_4pct_valuation_threshold: 20,  // 起始估值百分位门槛（默认20%）
 })
 const newBuyLookingUp = ref(false)
 const newBuyLookupResult = ref(null)
@@ -967,6 +974,12 @@ async function openNewBuy() {
     transaction_time: new Date().toTimeString().slice(0, 5),
     notes: '',
     account: '花无缺',
+    // 4%定投法默认配置（建仓时可选启用）
+    dip_4pct_enabled: false,
+    dip_4pct_max_amount: 50000,
+    dip_4pct_total_shares: 10,
+    dip_4pct_dip_pct: 4.0,
+    dip_4pct_valuation_threshold: 20,
   }
   newBuyLookupResult.value = null
   showNewBuy.value = true
@@ -991,6 +1004,15 @@ async function submitNewBuy() {
   const f = newBuyForm.value
   if (!f.fund_code.trim()) { showToast('请输入基金代码', 'error'); return }
   if (f.amount <= 0) { showToast('买入金额必须大于 0', 'error'); return }
+  // 4%定投法配置校验
+  if (f.dip_4pct_enabled) {
+    if (!f.dip_4pct_max_amount || f.dip_4pct_max_amount <= 0) {
+      showToast('请填写4%定投法的投资上限', 'error'); return
+    }
+    if (f.dip_4pct_max_amount < f.amount) {
+      showToast(`4%定投法投资上限(¥${f.dip_4pct_max_amount})应≥本次买入金额(¥${f.amount})`, 'error'); return
+    }
+  }
   // P2-4.2: 检查 pending_tx blocked 状态
   const allowed = await checkBlockedBeforeBuy(f.fund_code.trim(), f.fund_name || f.fund_code.trim())
   if (!allowed) { showToast('已取消买入', 'info'); return }
@@ -1007,7 +1029,24 @@ async function submitNewBuy() {
       submitted_amount: f.amount,
       account: f.account,
     })
-    showToast('已提交买入，待 T+1 确认')
+    // 4%定投法配置：建仓同步创建plan（启用时）
+    if (f.dip_4pct_enabled) {
+      try {
+        await dip4PctAPI.createPlan({
+          fund_code: f.fund_code.trim(),
+          fund_name: f.fund_name || f.fund_code.trim(),
+          max_amount: Number(f.dip_4pct_max_amount),
+          total_shares: Number(f.dip_4pct_total_shares),
+          dip_pct: Number(f.dip_4pct_dip_pct),
+          valuation_threshold: Number(f.dip_4pct_valuation_threshold),
+        })
+        showToast(`已提交买入 + 已启用4%定投法（上限¥${f.dip_4pct_max_amount}/${f.dip_4pct_total_shares}份）`)
+      } catch (e) {
+        showToast(`买入已提交，但4%定投法配置失败: ${e.response?.data?.detail || e.message}`, 'error')
+      }
+    } else {
+      showToast('已提交买入，待 T+1 确认')
+    }
     showNewBuy.value = false
     loadData()
   } catch (e) {
@@ -5714,6 +5753,61 @@ function txDisplayAmount(tx) {
                 <label>备注</label>
                 <input v-model="newBuyForm.notes" class="input-field" placeholder="可选" />
               </div>
+              <!-- 4%定投法配置区（雷牛牛方法论，建仓时可选启用） -->
+              <div class="dip-4pct-config-section">
+                <label class="dip-4pct-toggle">
+                  <input type="checkbox" v-model="newBuyForm.dip_4pct_enabled" />
+                  <span class="dip-4pct-title">🎯 启用4%定投法（雷牛牛方法论）</span>
+                </label>
+                <p class="dip-4pct-desc" v-if="!newBuyForm.dip_4pct_enabled">
+                  估值锁底（百分位&lt;门槛）+ 跌幅触发（相对上一买入点跌≥设定值）+ 固定份数（10份）+ 机械纪律
+                </p>
+                <div v-if="newBuyForm.dip_4pct_enabled" class="dip-4pct-fields">
+                  <div class="form-row">
+                    <div class="form-group">
+                      <label>投资上限（元）</label>
+                      <input v-model.number="newBuyForm.dip_4pct_max_amount" type="number" step="1000" min="0" class="input-field" placeholder="如 50000" />
+                      <span class="field-hint">单个标的建议≤总仓位40%</span>
+                    </div>
+                    <div class="form-group">
+                      <label>总份数</label>
+                      <input v-model.number="newBuyForm.dip_4pct_total_shares" type="number" min="1" max="50" class="input-field" />
+                      <span class="field-hint">雷牛牛建议10份</span>
+                    </div>
+                  </div>
+                  <div class="form-row">
+                    <div class="form-group">
+                      <label>单次触发跌幅（%）</label>
+                      <select v-model.number="newBuyForm.dip_4pct_dip_pct" class="input-field">
+                        <option :value="3">3%（波动小）</option>
+                        <option :value="4">4%（默认，雷牛牛推荐）</option>
+                        <option :value="5">5%（波动大）</option>
+                        <option :value="6">6%（高位品种）</option>
+                      </select>
+                      <span class="field-hint">不同基金跌幅特性不同，可调</span>
+                    </div>
+                    <div class="form-group">
+                      <label>起始估值百分位门槛（%）</label>
+                      <input v-model.number="newBuyForm.dip_4pct_valuation_threshold" type="number" min="0" max="80" class="input-field" />
+                      <span class="field-hint">默认20%（绿色线之下才启动）</span>
+                    </div>
+                  </div>
+                  <div class="dip-4pct-preview">
+                    <div class="dip-4pct-preview-item">
+                      <span class="dip-4pct-preview-label">预计单次金额</span>
+                      <span class="dip-4pct-preview-value font-jet">¥{{ formatMoney(newBuyForm.dip_4pct_max_amount / newBuyForm.dip_4pct_total_shares) }}</span>
+                    </div>
+                    <div class="dip-4pct-preview-item">
+                      <span class="dip-4pct-preview-label">预计占总资产</span>
+                      <span class="dip-4pct-preview-value font-jet">{{ summary.total_value > 0 ? ((newBuyForm.dip_4pct_max_amount / summary.total_value) * 100).toFixed(2) : '—' }}%</span>
+                    </div>
+                    <div class="dip-4pct-preview-item">
+                      <span class="dip-4pct-preview-label">最多触发次数</span>
+                      <span class="dip-4pct-preview-value font-jet">{{ newBuyForm.dip_4pct_total_shares }} 次</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
               <div class="form-actions">
                 <button type="button" class="btn-ghost" @click="showNewBuy = false">取消</button>
                 <button type="submit" class="btn-primary" :disabled="newBuyForm.amount <= 0">提交买入</button>
@@ -6414,6 +6508,65 @@ function txDisplayAmount(tx) {
 @keyframes fadeIn {
   from { opacity: 0; transform: translateY(4px); }
   to { opacity: 1; transform: translateY(0); }
+}
+
+/* 4%定投法配置区（建仓弹窗）— 雷牛牛方法论 */
+.dip-4pct-config-section {
+  margin-top: 0.75rem;
+  padding: 0.85rem;
+  border: 1px solid var(--color-border);
+  border-radius: 0.5rem;
+  background: var(--color-bg-secondary, rgba(0, 0, 0, 0.02));
+}
+.dip-4pct-toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  cursor: pointer;
+  user-select: none;
+}
+.dip-4pct-toggle input[type="checkbox"] {
+  width: 1rem;
+  height: 1rem;
+  cursor: pointer;
+}
+.dip-4pct-title {
+  font-weight: 600;
+  color: var(--color-primary, #4096ff);
+  font-size: 0.92rem;
+}
+.dip-4pct-desc {
+  margin: 0.5rem 0 0 1.5rem;
+  font-size: 0.78rem;
+  color: var(--color-text-tertiary, #999);
+  line-height: 1.5;
+}
+.dip-4pct-fields {
+  margin-top: 0.65rem;
+}
+.dip-4pct-preview {
+  display: flex;
+  gap: 0.75rem;
+  margin-top: 0.65rem;
+  padding: 0.6rem 0.75rem;
+  background: var(--color-bg-tertiary, rgba(64, 150, 255, 0.08));
+  border-radius: 0.4rem;
+  border-left: 3px solid var(--color-primary, #4096ff);
+}
+.dip-4pct-preview-item {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  flex: 1;
+}
+.dip-4pct-preview-label {
+  font-size: 0.7rem;
+  color: var(--color-text-tertiary, #888);
+}
+.dip-4pct-preview-value {
+  font-size: 1rem;
+  font-weight: 600;
+  color: var(--color-primary, #4096ff);
 }
 
 .page-header {

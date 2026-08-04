@@ -391,6 +391,15 @@ DEFAULT_CONFIGS = [
     # 2026-07-30 新增：回本路径结构化输出（conv#194 补强）
     ('smart_add.recovery_path_enabled', 'true', '回本路径结构化输出开关：亏损+低估标的的补仓计划附带回本路径预估（成本下降/修复时间/胜率）', 'smart_add'),
 
+    # 4%定投法（雷牛牛方法论，2026-08-04 新增）— 与信号A/B/C/D/E并列的第四种策略
+    # 估值锁底（百分位<门槛）+ 跌幅触发（相对上一买入点跌≥4%）+ 固定份数（10份）+ 机械纪律
+    # 默认关闭，需用户在建仓弹窗主动启用并填写投资上限
+    ('dip_4pct.enabled', 'false', '4%定投法总开关（雷牛牛方法论：估值锁底+跌幅触发+固定10份）', 'dip_4pct'),
+    ('dip_4pct.default_total_shares', '10', '默认总份数（雷牛牛建议10份）', 'dip_4pct'),
+    ('dip_4pct.default_dip_pct', '4.0', '默认单次触发跌幅%（可调3/4/5，因不同基金跌幅特性不同）', 'dip_4pct'),
+    ('dip_4pct.default_valuation_threshold', '20', '默认起始估值百分位门槛%（绿色线之下才启动）', 'dip_4pct'),
+    ('dip_4pct.scan_enabled', 'true', '是否在智能补仓扫描中包含4%定投法信号（开启后并列展示）', 'dip_4pct'),
+
     # ── Batch1 增强点 1：关注计划退出机制（2026-07-18，默认关闭） ──
     ('watchlist.exit_signal_enabled', 'false', '关注计划退出机制开关：true时巡检计算止盈/止损信号', 'watchlist'),
     ('watchlist.default_target_profit_pct', '30', '默认止盈百分比（用户未设时使用）', 'watchlist'),
