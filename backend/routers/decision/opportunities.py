@@ -5,6 +5,7 @@ from datetime import datetime
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
+from db.opportunities import get_backtest_stats
 from db import (
     add_to_watchlist,
     create_decision_from_opportunity,
@@ -50,6 +51,7 @@ async def opportunity_stats_api(user_id: str = "default", limit: int = 10):
     return {
         "date": today,
         "track_stats": track_stats,
+        "backtest_stats": get_backtest_stats(),
         "summary": {
             "active": len(active),
             "can_buy": sum(1 for item in active if item.get("verdict") == "can_buy"),

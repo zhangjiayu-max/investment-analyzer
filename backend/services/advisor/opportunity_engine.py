@@ -2130,7 +2130,8 @@ def _create_opportunity_backtest(opportunity_id: int, theme_rule: dict, trade_da
                                 capital_signal: str | None = None, volume_signal: str | None = None,
                                 entry_percentile: float | None = None,
                                 entry_amount: float | None = None,
-                                dim_scores_json: str | None = None) -> None:
+                                dim_scores_json: str | None = None,
+                                signal_source: str = "news") -> None:
     """P1-N: 在 save_opportunity 后插入回测跟踪记录。
 
     用途：每次生成机会卡时同步插入回测记录，15 个交易日后自动回测命中率。
@@ -2143,18 +2144,7 @@ def _create_opportunity_backtest(opportunity_id: int, theme_rule: dict, trade_da
     """
     try:
         from db.opportunities import create_opportunity_backtest
-        from db.config import get_config_bool
         entry_price = _get_theme_index_current_price(theme_rule)
-
-        # LI-6（2026-07-22）：标记信号来源
-        signal_source = "news"
-        if get_config_bool("opportunity.signal_source_tracking_enabled", True):
-            # 检查是否有领先指标命中该主题
-            leading_score, _ = _get_leading_indicator_score(theme_rule, trade_date)
-            if leading_score > 0:
-                signal_source = "leading_strong"
-            elif leading_score < 0:
-                signal_source = "leading_medium"
 
         # Accuracy-Boost：若未传入 entry_percentile，从估值表查当前分位
         if entry_percentile is None:
@@ -3617,6 +3607,7 @@ def scan_daily_opportunities(news_items: list[dict] | None = None,
         if not hits:
             continue
         item = _build_item(rule, hits, trade_date, user_id)
+        item["signal_source"] = "news"
         item["id"] = save_opportunity(item, user_id=user_id)
         # ── P1-N: 同步插入回测跟踪记录 ──
         # 用途：15 个交易日后自动回测命中率，让前端"命中率"chip 真正有数据
@@ -3634,6 +3625,7 @@ def scan_daily_opportunities(news_items: list[dict] | None = None,
                 # P1-R4/R6：传入决策金额 + 15 维分项分快照（供含成本回测 + IC 计算）
                 entry_amount=item.get("entry_amount"),
                 dim_scores_json=item.get("_dim_scores_json"),
+                signal_source="news",
             )
         # 清理内部字段，不暴露给前端 API 响应
         item.pop("_capital_signal", None)
@@ -3647,6 +3639,7 @@ def scan_daily_opportunities(news_items: list[dict] | None = None,
     val_channel_items = _scan_valuation_channel(active_rules, trade_date, user_id)
     for vitem in val_channel_items:
         rule_ref = vitem.pop("_theme_rule", None) or {}
+        vitem["signal_source"] = "valuation"
         try:
             vitem["id"] = save_opportunity(vitem, user_id=user_id)
         except Exception as e:
@@ -3663,6 +3656,7 @@ def scan_daily_opportunities(news_items: list[dict] | None = None,
                 # P1-R4/R6：传入决策金额 + 15 维分项分快照
                 entry_amount=vitem.get("entry_amount"),
                 dim_scores_json=vitem.get("_dim_scores_json"),
+                signal_source="valuation",
             )
         vitem.pop("_capital_signal", None)
         vitem.pop("_volume_signal", None)
@@ -3699,12 +3693,27 @@ def scan_daily_opportunities(news_items: list[dict] | None = None,
             if loss_fund and loss_fund in news_fund_best and news_fund_best[loss_fund] >= loss_score:
                 continue
 
-            # 入库保存（loss_recovery 卡片不创建 backtest 记录，因其非新闻驱动主题）
+            # 入库保存，并以独立来源跟踪补仓回本策略表现。
             try:
                 loss_item["id"] = save_opportunity(loss_item, user_id=user_id)
             except Exception as e:
                 logger.warning(f"[opportunity] loss_recovery 保存失败 {loss_fund}: {e}")
                 continue
+            if loss_item.get("verdict") != "avoid":
+                related = loss_item.get("related_holdings") or []
+                related_index_code = related[0].get("index_code", "") if related else ""
+                _create_opportunity_backtest(
+                    opportunity_id=loss_item["id"],
+                    theme_rule={
+                        "theme": loss_item.get("theme", ""),
+                        "index_code": related_index_code,
+                    },
+                    trade_date=trade_date,
+                    review_date=(loss_item.get("exit_plan") or {}).get("review_date", ""),
+                    entry_percentile=loss_item.get("valuation_percentile"),
+                    entry_amount=loss_item.get("entry_amount"),
+                    signal_source="loss_recovery",
+                )
             items.append(loss_item)
 
     items.sort(key=lambda x: x.get("opportunity_score", 0), reverse=True)
@@ -3887,4 +3896,3 @@ def _llm_deep_review(item: dict, valuation: dict | None,
     except Exception as e:
         logger.warning(f"[opportunity] L2 深度评审失败: {e}")
         return None
-

@@ -186,8 +186,10 @@ def calc_target_position(
 
     # 维度6资金余量（软约束：资金不足时约束目标仓位）
     cash_room_pct = cash_constraint.get("position_room_pct")
-    if cash_room_pct is None or cash_room_pct <= 0:
+    if not cash_constraint.get("data_available", False):
         cash_constraint_val = user_max_pct
+    elif cash_room_pct is None or cash_room_pct <= 0:
+        cash_constraint_val = 0.0
     else:
         cash_constraint_val = cash_room_pct
 
@@ -608,11 +610,13 @@ def calc_cash_constraint(
             "monthly_inflow_source": str, # P1-S4：月度现金流来源（user_profiles / global_config）
         }
     """
+    cash_data_available = True
     try:
         cash_info = get_cash_balance(user_id)
         cash = (cash_info or {}).get("balance", 0) or 0
     except Exception:
         cash = 0.0
+        cash_data_available = False
 
     usable_cash = cash * 0.8  # 留 20% 应急
 
@@ -658,6 +662,7 @@ def calc_cash_constraint(
         "monthly_inflow": round(monthly_inflow, 2),
         "total_available_3m": round(total_available_3m, 2),
         "position_room_pct": round(position_room_pct, 2),
+        "data_available": cash_data_available,
         "monthly_inflow_source": monthly_inflow_source,  # P1-S4：来源标记
     }
 

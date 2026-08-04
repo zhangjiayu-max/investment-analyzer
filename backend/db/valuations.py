@@ -149,6 +149,18 @@ def _apply_percentile_normalize(row: dict) -> dict:
     return row
 
 
+def _normalize_valuation_result(result: dict | None) -> dict | None:
+    """确保所有估值查询出口使用 0-100 百分制。"""
+    if result is None:
+        return None
+    result["percentile"] = _normalize_percentile(result.get("percentile"))
+    if "fallback_pb_percentile" in result:
+        result["fallback_pb_percentile"] = _normalize_percentile(
+            result.get("fallback_pb_percentile")
+        )
+    return result
+
+
 def get_valuation_history(index_code: str, days: int = 30, metric_type: str = None) -> list[dict]:
     """查询某指数最近 N 天的估值历史。"""
     conn = _get_conn()
@@ -692,7 +704,7 @@ def get_best_valuation(
                              0, 0, int((datetime.now() - start_ts).total_seconds() * 1000), trace_id, None,
                              conv_id=conv_id, message_id=message_id, agent_name=agent_name,
                              user_query=user_query, cache_hit=cache_hit)
-        return detailed
+        return _normalize_valuation_result(detailed)
 
     # 2. 降级到螺丝钉数据（最近 30 天内）
     dd_data = get_latest_dd_valuation_for_index(index_code, metric_type, max_days=30)
@@ -712,7 +724,7 @@ def get_best_valuation(
                              degraded, 0, int((datetime.now() - start_ts).total_seconds() * 1000), trace_id, None,
                              conv_id=conv_id, message_id=message_id, agent_name=agent_name,
                              user_query=user_query, cache_hit=cache_hit)
-        return dd_data
+        return _normalize_valuation_result(dd_data)
 
     # 3. 使用过期的详细数据（如有）
     detailed_expired = get_latest_valuation(index_code, metric_type, max_days=365)
@@ -732,7 +744,7 @@ def get_best_valuation(
                              0, is_expired, int((datetime.now() - start_ts).total_seconds() * 1000), trace_id, None,
                              conv_id=conv_id, message_id=message_id, agent_name=agent_name,
                              user_query=user_query, cache_hit=cache_hit)
-        return detailed_expired
+        return _normalize_valuation_result(detailed_expired)
 
     # 3.5 metric_type fallback：本地指定 metric_type 查不到时，尝试本地其他 metric_type
     #     场景：alert_scanner 默认查"市盈率"，但持仓中很多指数本地只有"市净率/市销率/股息率"
@@ -762,7 +774,7 @@ def get_best_valuation(
                     f"[valuation] {index_code} metric_type fallback：{metric_type} 无数据，"
                     f"改用 {fallback_type} 命中（query_source={query_source}）"
                 )
-                return fb_data
+                return _normalize_valuation_result(fb_data)
 
     # 4. 在线兜底：akshare → 天天基金（仅在 enable_online=True 时触发）
     if enable_online:
@@ -770,7 +782,7 @@ def get_best_valuation(
                                          conv_id=conv_id, message_id=message_id, agent_name=agent_name,
                                          user_query=user_query, cache_hit=cache_hit)
         if online_result:
-            return online_result
+            return _normalize_valuation_result(online_result)
         # 在线兜底已启用但全部失败 → 真正需要告警
         error_msg = "all sources failed (local + akshare + ttfund)"
         failed_name = _lookup_index_name(index_code)

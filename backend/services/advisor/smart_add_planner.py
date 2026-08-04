@@ -1098,6 +1098,148 @@ def _apply_goal_aware_adjustments(user_id: str, total_assets: float, cfg: dict) 
     return info
 
 
+def _plan_hard_cap(plan: dict, total_assets: float, max_add_mult: float) -> float:
+    """计算退出、基本面、目标仓位和持仓倍数约束后的单标的上限。"""
+    if not (plan.get("safety") or {}).get("can_add", True):
+        return 0.0
+    if any(s.get("triggered") for s in (plan.get("exit_signals") or [])):
+        return 0.0
+    if (plan.get("fund_health") or {}).get("healthy") is False:
+        return 0.0
+
+    effective_base = max(0.0, float(plan.get("effective_base", 0) or 0))
+    safety = plan.get("safety") or {}
+    target = ((plan.get("position_sizing") or {}).get("target_position") or {})
+    target_pct = target.get("target_pct")
+    max_position_pct = safety.get("max_position_pct")
+    position_pct = target_pct if target_pct is not None else max_position_pct
+    if position_pct is None or total_assets <= 0:
+        position_room = float("inf")
+    else:
+        position_room = max(0.0, total_assets * float(position_pct) / 100 - effective_base)
+    position_multiple_room = effective_base * max(0.0, float(max_add_mult or 0))
+    return round(max(0.0, min(position_room, position_multiple_room)), 2)
+
+
+def _allocate_portfolio_budget(
+    plans: list[dict],
+    monthly_budget: float,
+    total_assets: float | None = None,
+    max_add_mult: float | None = None,
+) -> dict:
+    """按原始需求等比分配组合本期可用预算，并执行单标的硬上限。"""
+    monthly_budget = round(max(0.0, float(monthly_budget or 0)), 2)
+    eligible = [
+        p for p in plans
+        if (p.get("safety") or {}).get("can_add", True)
+        and not any(s.get("triggered") for s in (p.get("exit_signals") or []))
+        and (p.get("fund_health") or {}).get("healthy") is not False
+        and (p.get("final_suggested_amount", 0) or 0) > 0
+    ]
+    total_raw = round(sum(float(p.get("final_suggested_amount", 0) or 0) for p in eligible), 2)
+    scale = min(1.0, monthly_budget / total_raw) if total_raw > 0 else 0.0
+
+    allocated = 0.0
+    for plan in plans:
+        raw = round(max(0.0, float(plan.get("final_suggested_amount", 0) or 0)), 2)
+        plan["raw_suggested_amount"] = raw
+        if plan in eligible:
+            amount = round(raw * scale, 2)
+            if total_assets is not None and max_add_mult is not None:
+                amount = min(amount, _plan_hard_cap(plan, total_assets, max_add_mult))
+            remaining = round(max(0.0, monthly_budget - allocated), 2)
+            amount = min(amount, remaining)
+            allocated = round(allocated + amount, 2)
+            plan["budget_scale"] = round(scale, 4)
+            plan["final_suggested_amount"] = amount
+            plan["budget_note"] = (
+                "组合本月预算不足，按需求比例缩减" if scale < 1 else "组合本月预算充足"
+            )
+        else:
+            plan["budget_scale"] = 0.0
+            plan["final_suggested_amount"] = 0.0
+            plan["budget_note"] = "安全阀拦截或无有效需求"
+
+    return {
+        "monthly_budget": monthly_budget,
+        "total_raw_demand": total_raw,
+        "allocated_amount": allocated,
+        "allocation_scale": round(scale, 4),
+        "budget_exhausted": total_raw > monthly_budget,
+        "budget_basis": "cash_plus_monthly_inflow",
+    }
+
+
+def _get_current_month_buy_amount(user_id: str) -> float | None:
+    """统计本月已提交或完成的真实买入；读取失败返回 None 触发保守降级。"""
+    try:
+        from db._conn import _get_conn
+
+        month_start = datetime.now().strftime("%Y-%m-01")
+        conn = _get_conn()
+        try:
+            row = conn.execute(
+                """SELECT COALESCE(SUM(amount), 0) AS amount
+                   FROM portfolio_transactions
+                   WHERE user_id = ? AND transaction_type = 'buy'
+                     AND transaction_date >= ?
+                     AND (status IN ('confirmed', 'settled', 'pending', 'submitted') OR status IS NULL)
+                     AND (is_hypothetical = 0 OR is_hypothetical IS NULL)""",
+                (user_id, month_start),
+            ).fetchone()
+            return round(float(row["amount"] or 0), 2) if row else 0.0
+        finally:
+            conn.close()
+    except Exception as e:
+        logger.warning(f"[smart_add] 本月已用预算读取失败 user={user_id}: {e}")
+        return None
+
+
+def _resolve_monthly_budget(
+    cash_constraint: dict | None,
+    pool_total: float,
+    period_used: float | None,
+) -> dict:
+    """合并现金和资金池约束；任一关键数据不可用时预算归零。"""
+    pool_total = max(0.0, float(pool_total or 0))
+    if period_used is None:
+        return {
+            "monthly_budget": 0.0,
+            "cash_budget": 0.0,
+            "pool_budget": 0.0,
+            "period_used": None,
+            "budget_basis": "period_usage_unavailable",
+        }
+
+    period_used = max(0.0, float(period_used or 0))
+    pool_budget = max(0.0, pool_total - period_used)
+    if not cash_constraint or not cash_constraint.get("data_available", False):
+        return {
+            "monthly_budget": 0.0,
+            "cash_budget": 0.0,
+            "pool_budget": round(pool_budget, 2),
+            "period_used": round(period_used, 2),
+            "budget_basis": "cash_data_unavailable",
+        }
+
+    cash_budget = max(0.0, float(cash_constraint.get("usable_cash", 0) or 0))
+    cash_budget += max(0.0, float(cash_constraint.get("monthly_inflow", 0) or 0))
+    return {
+        "monthly_budget": round(min(pool_budget, cash_budget), 2),
+        "cash_budget": round(cash_budget, 2),
+        "pool_budget": round(pool_budget, 2),
+        "period_used": round(period_used, 2),
+        "budget_basis": "cash_plus_monthly_inflow",
+    }
+
+
+def _get_executable_add_amount(plan: dict) -> float:
+    """返回组合预算和安全阀处理后的唯一可执行金额。"""
+    if not (plan.get("safety") or {}).get("can_add", True):
+        return 0.0
+    return round(max(0.0, float(plan.get("final_suggested_amount", 0) or 0)), 2)
+
+
 def generate_smart_add_plan(user_id: str = "default") -> dict:
     """生成智能补仓计划（双引擎 + 计划表 + 组合视角）。
 
@@ -1145,12 +1287,34 @@ def generate_smart_add_plan(user_id: str = "default") -> dict:
     # 2. 对每个持仓计算计划
     plans = []
     for h in holdings:
-        plan = _generate_single_plan(h, cfg, total_assets, pool_total, base_monthly, holdings=holdings)
+        plan = _generate_single_plan(
+            h, cfg, total_assets, pool_total, base_monthly,
+            holdings=holdings, user_id=user_id,
+        )
         if plan:
             plans.append(plan)
 
     # 2.5 P0-S1（2026-08-01）：组合相关性降权（在组合视角/持久化前调整金额）
     _apply_correlation_downweight(plans, holdings)
+
+    # P0（2026-08-04）：所有标的共享本期真实可用预算。
+    cash_constraint = next(
+        (
+            (p.get("position_sizing") or {}).get("cash_constraint")
+            for p in plans
+            if (p.get("position_sizing") or {}).get("cash_constraint")
+        ),
+        None,
+    )
+    period_used = _get_current_month_buy_amount(user_id)
+    budget_limits = _resolve_monthly_budget(cash_constraint, pool_total, period_used)
+    budget_allocation = _allocate_portfolio_budget(
+        plans,
+        monthly_budget=budget_limits["monthly_budget"],
+        total_assets=total_assets,
+        max_add_mult=cfg["max_add_vs_position_mult"],
+    )
+    budget_allocation.update(budget_limits)
 
     # 3. 组合视角：优先级排序
     deep_loss_plans = [p for p in plans if (p.get("pyramid") or {}).get("triggered_tiers", 0) > 0]
@@ -1194,6 +1358,7 @@ def generate_smart_add_plan(user_id: str = "default") -> dict:
         "pool_total": pool_total,
         "pool_used": round(pool_used, 2),
         "pool_remaining": round(pool_remaining, 2),
+        **budget_allocation,
         "deep_loss_count": len(deep_loss_plans),
         # 全局退出信号：资金池耗尽
         "pool_exit_signals": [
@@ -1236,7 +1401,7 @@ def generate_smart_add_plan(user_id: str = "default") -> dict:
                 # 原逻辑 engine1 月投(recurring)被当作一次性 buy 落库，语义错位且无法验证定投效果
                 pyr = p.get("pyramid") or {}
                 saf = p.get("safety") or {}
-                suggested_amount = pyr.get("released_amount", 0) if pyr else 0
+                suggested_amount = _get_executable_add_amount(p)
                 suggested_tier = None
                 if pyr and pyr.get("triggered_tiers", 0) > 0:
                     # 取已触发档位的描述
@@ -1246,7 +1411,11 @@ def generate_smart_add_plan(user_id: str = "default") -> dict:
                         suggested_tier = f"{t0.get('loss_pct', '?')}%档 ×{t0.get('release_pct', 0)}%"
 
                 # 安全阀拦截时不落库（修复3 配套）
-                if suggested_amount > 0 and saf.get("can_add", True):
+                if (
+                    suggested_amount > 0
+                    and saf.get("can_add", True)
+                    and pyr.get("triggered_tiers", 0) > 0
+                ):
                     val = p.get("valuation") or {}
                     create_snapshot_with_hypothetical(
                         fund_code=p["fund_code"],
@@ -1262,7 +1431,7 @@ def generate_smart_add_plan(user_id: str = "default") -> dict:
                 logger.debug(f"[smart_add] 快照落库失败 {p.get('fund_code')}: {e}")
 
     # 自动将补仓建议转为决策候选（去重：14天内同标的同来源不重复）
-    _plans_to_candidates(plans)
+    _plans_to_candidates(plans, user_id=user_id)
 
     # ── S-1（2026-07-22）：计划持久化到 smart_add_plans 表 ──
     # 用途：历史回溯、计划vs实际对比、所有信号的反事实验证
@@ -1796,6 +1965,7 @@ def _generate_single_plan(
     base_monthly: float,
     deep_loss_count: int = 0,
     holdings: list = None,
+    user_id: str = "default",
 ) -> Optional[dict]:
     """生成单个持仓的补仓计划。
 
@@ -1865,7 +2035,7 @@ def _generate_single_plan(
 
     # L3：半凯利上限（替代 25% 拍脑袋）
     try:
-        kelly = calc_kelly_limit(fund_code, index_code, user_id="default")
+        kelly = calc_kelly_limit(fund_code, index_code, user_id=user_id)
     except Exception as e:
         logger.debug(f"[smart_add] L3 kelly 计算失败 {fund_code}: {e}")
         kelly = {
@@ -2108,7 +2278,7 @@ def _generate_single_plan(
             valuation=valuation,
             fund_type=fund_type,
             type_strategy=type_strategy,
-            user_id="default",
+            user_id=user_id,
         )
         target_driven_monthly = position_sizing.get("target_driven_monthly", 0.0)
 
@@ -2400,7 +2570,7 @@ def preview_add_scenario(
     }
 
 
-def _plans_to_candidates(plans: list[dict]) -> None:
+def _plans_to_candidates(plans: list[dict], user_id: str = "default") -> None:
     """将智能补仓建议自动转为决策候选（去重：14天内同标的同来源不重复）。
 
     复用 smart_add.enabled 配置项，无需新增开关。
@@ -2411,6 +2581,14 @@ def _plans_to_candidates(plans: list[dict]) -> None:
         fund_name = plan.get("fund_name", "")
         if not fund_code:
             continue
+        triggered_buys = [
+            signal for signal in (plan.get("triggered_signals") or [])
+            if signal.get("triggered")
+            and (signal.get("amount", 0) or 0) > 0
+            and signal.get("action") not in ("sell", "reduce", "exit")
+        ]
+        if not triggered_buys:
+            continue
         pyramid = plan.get("pyramid") or {}
         engine1 = plan.get("engine1") or {}
         released = pyramid.get("released_amount", 0) or 0
@@ -2420,7 +2598,9 @@ def _plans_to_candidates(plans: list[dict]) -> None:
         # 安全阀未通过的不创建
         if not (plan.get("safety") or {}).get("can_add", True):
             continue
-        amount = released if released > 0 else monthly
+        amount = _get_executable_add_amount(plan)
+        if amount <= 0:
+            continue
         profit_rate = plan.get("profit_rate_pct", 0) or 0
         val = plan.get("valuation") or {}
         percentile = val.get("percentile", "N/A")
@@ -2445,6 +2625,6 @@ def _plans_to_candidates(plans: list[dict]) -> None:
                     "valuation": val,
                     "safety": plan.get("safety"),
                 },
-            })
+            }, user_id=user_id)
         except Exception as e:
             logger.debug(f"[smart_add] 自动创建决策候选失败 {fund_code}: {e}")

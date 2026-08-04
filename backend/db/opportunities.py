@@ -913,46 +913,115 @@ def update_opportunity_backtest(backtest_id: int, fields: dict) -> bool:
 
 
 def get_backtest_stats() -> dict:
-    """获取回测命中率统计（用于前端展示）。"""
+    """获取原始与持有期去重后的回测统计。"""
     conn = _get_conn()
     try:
-        total = conn.execute(
-            "SELECT COUNT(*) AS n FROM theme_opportunity_backtests"
-        ).fetchone()["n"]
-        reviewed = conn.execute(
-            "SELECT COUNT(*) AS n FROM theme_opportunity_backtests WHERE hit IS NOT NULL"
-        ).fetchone()["n"]
-        hit = conn.execute(
-            "SELECT COUNT(*) AS n FROM theme_opportunity_backtests WHERE hit = 1"
-        ).fetchone()["n"]
-        miss = conn.execute(
-            "SELECT COUNT(*) AS n FROM theme_opportunity_backtests WHERE hit = 0"
-        ).fetchone()["n"]
+        rows = [dict(r) for r in conn.execute(
+            """SELECT b.*, COALESCE(o.verdict, 'unknown') AS verdict
+               FROM theme_opportunity_backtests b
+               LEFT JOIN theme_opportunities o ON o.id = b.opportunity_id
+               ORDER BY b.theme, b.entry_date, b.id"""
+        ).fetchall()]
 
-        # 按主题分组命中率
-        theme_rows = conn.execute(
-            "SELECT theme, "
-            "SUM(CASE WHEN hit IS NOT NULL THEN 1 ELSE 0 END) AS reviewed, "
-            "SUM(CASE WHEN hit = 1 THEN 1 ELSE 0 END) AS hit "
-            "FROM theme_opportunity_backtests GROUP BY theme"
-        ).fetchall()
-        theme_stats = [
-            {
-                "theme": r["theme"],
-                "reviewed": r["reviewed"],
-                "hit": r["hit"],
-                "hit_rate": round(r["hit"] / r["reviewed"] * 100, 1) if r["reviewed"] else None,
+        reviewed_rows = [r for r in rows if r.get("hit") is not None]
+
+        def _aggregate(items: list[dict]) -> dict:
+            reviewed = len(items)
+            hits = sum(1 for item in items if item.get("hit") == 1)
+            net_values = [float(item["net_return"]) for item in items if item.get("net_return") is not None]
+            excess_values = [float(item["excess_return"]) for item in items if item.get("excess_return") is not None]
+            return {
+                "reviewed": reviewed,
+                "hits": hits,
+                "misses": reviewed - hits,
+                "hit_rate": round(hits / reviewed * 100, 1) if reviewed else None,
+                "avg_net_return": round(sum(net_values) / len(net_values), 2) if net_values else None,
+                "avg_excess_return": round(sum(excess_values) / len(excess_values), 2) if excess_values else None,
             }
-            for r in theme_rows
+
+        def _group(items: list[dict], key: str) -> dict:
+            grouped: dict[str, list[dict]] = {}
+            for item in items:
+                value = str(item.get(key) or "unknown")
+                grouped.setdefault(value, []).append(item)
+            return {value: _aggregate(group) for value, group in grouped.items()}
+
+        # 同主题持有窗口重叠的连续信号只保留第一条，避免伪造独立样本量。
+        independent_rows = []
+        last_review_by_theme: dict[str, str] = {}
+        for row in reviewed_rows:
+            theme = row.get("theme") or "unknown"
+            entry_date = str(row.get("entry_date") or "")
+            last_review = last_review_by_theme.get(theme)
+            if last_review and entry_date <= last_review:
+                continue
+            independent_rows.append(row)
+            last_review_by_theme[theme] = str(row.get("review_date") or entry_date)
+
+        raw_stats = _aggregate(reviewed_rows)
+        independent_stats = _aggregate(independent_rows)
+        by_source = _group(independent_rows, "signal_source")
+        by_theme = _group(independent_rows, "theme")
+        by_verdict = _group(independent_rows, "verdict")
+        theme_stats = [
+            {"theme": theme, "hit": values["hits"], **values}
+            for theme, values in by_theme.items()
         ]
+        source_count = len({str(r.get("signal_source") or "news") for r in independent_rows})
+        market_months = len({str(r.get("entry_date") or "")[:7] for r in independent_rows})
+        independent_count = len(independent_rows)
+        dimension_counts: dict[str, int] = {}
+        for row in independent_rows:
+            try:
+                dimensions = json.loads(row.get("dim_scores_json") or "{}")
+            except (TypeError, json.JSONDecodeError):
+                dimensions = {}
+            for name, value in dimensions.items():
+                if value is not None:
+                    dimension_counts[name] = dimension_counts.get(name, 0) + 1
+        expected_dimensions = {
+            "news", "policy", "basic", "valuation", "holding",
+            "tradability", "tech", "capital", "sentiment", "leading",
+            "volume", "research", "margin", "etf", "regime",
+        }
+        dimension_samples = {
+            name: dimension_counts.get(name, 0) for name in sorted(expected_dimensions)
+        }
+        dimensions_ready = all(count >= 30 for count in dimension_samples.values())
 
         return {
-            "total": total,
-            "reviewed": reviewed,
-            "hit": hit,
-            "miss": miss,
-            "hit_rate": round(hit / reviewed * 100, 1) if reviewed else None,
+            "total": len(rows),
+            "reviewed": independent_stats["reviewed"],
+            "hit": independent_stats["hits"],
+            "miss": independent_stats["misses"],
+            "hit_rate": independent_stats["hit_rate"],
+            "raw_reviewed": raw_stats["reviewed"],
+            "raw_hit": raw_stats["hits"],
+            "raw_miss": raw_stats["misses"],
+            "raw_hit_rate": raw_stats["hit_rate"],
+            "independent_sample_count": independent_count,
+            "independent_stats": independent_stats,
             "theme_stats": theme_stats,
+            "by_source": by_source,
+            "by_theme": by_theme,
+            "by_verdict": by_verdict,
+            "raw_by_source": _group(reviewed_rows, "signal_source"),
+            "raw_by_theme": _group(reviewed_rows, "theme"),
+            "raw_by_verdict": _group(reviewed_rows, "verdict"),
+            "learning_readiness": {
+                "ready": (
+                    independent_count >= 100
+                    and source_count >= 2
+                    and market_months >= 3
+                    and dimensions_ready
+                ),
+                "independent_samples": independent_count,
+                "source_count": source_count,
+                "market_months": market_months,
+                "dimension_samples": dimension_samples,
+                "dimensions_ready": dimensions_ready,
+                "minimum_required": 100,
+            },
         }
     finally:
         conn.close()
