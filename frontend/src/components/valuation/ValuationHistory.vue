@@ -519,7 +519,8 @@ async function loadDDIndexList(recordId) {
   try {
     const { data } = await getDDValuation(recordId)
     ddSelectedRecord.value = data
-    ddIndexList.value = data?.parsed_data?.data || []
+    // 后端 /api/valuation/dd/{id} 返回 indexes 字段；兼容旧版 parsed_data.data
+    ddIndexList.value = data?.indexes || data?.parsed_data?.data || []
   } catch (e) {
     console.error('Failed to load DD detail:', e)
     ddIndexList.value = []
