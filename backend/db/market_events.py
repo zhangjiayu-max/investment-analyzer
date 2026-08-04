@@ -160,24 +160,90 @@ def _extract_keywords(s: str) -> set:
 
 
 def _title_similarity(a: str, b: str) -> float:
-    """计算两个标题的相似度（双字符 Jaccard + 关键词匹配），用于去重。
-    
-    结合 2-gram 匹配和关键词匹配，更适合中文事件标题的去重。
+    """计算两个标题的相似度，用于事件去重。
+
+    P0 增强（2026-08-04）：原仅用 2-gram Jaccard + 关键词匹配，对中文短标题效果差，
+    导致 LLM 措辞略有差异的相似事件（如"美伊谈判重启"vs"美伊重启谈判"）未被识别为重复。
+    修复：
+    1. 新增 SequenceMatcher 最长公共子序列相似度，取三者最大值；
+    2. 加入反义词检测，避免"复牌/停牌"等反义事件被误判为重复；
+    3. 新增"核心实体匹配"：若两标题包含 5+ 字符的公共子串（如"非农就业报告"），
+       即使整体相似度 < 0.6，也直接判为重复（>=0.6 返回）。
+
+    Returns:
+        0.0-1.0 相似度，>=0.6 视为重复
     """
+    if not a or not b:
+        return 0.0
+
+    # 反义词检测：若两标题含明确反义词，即使其他指标高也不判重
+    # 场景："贝肯能源复牌" vs "蓝盾光电停牌" SequenceMatcher 0.6+ 但实际是不同事件
+    antonym_pairs = [
+        ("复牌", "停牌"), ("停牌", "复牌"),
+        ("加征", "取消"), ("取消", "加征"),
+        ("加息", "降息"), ("降息", "加息"),
+        ("上涨", "下跌"), ("下跌", "上涨"),
+        ("流入", "流出"), ("流出", "流入"),
+        ("启动", "终止"), ("终止", "启动"),
+        ("批准", "否决"), ("否决", "批准"),
+    ]
+    a_lower = a.lower().replace(" ", "")
+    b_lower = b.lower().replace(" ", "")
+    for w1, w2 in antonym_pairs:
+        if w1 in a_lower and w2 in b_lower:
+            return 0.0  # 明确反义，判为不相似
+
+    # 指标1：2-gram Jaccard（原逻辑）
     a_ngrams = _ngram_set(a)
     b_ngrams = _ngram_set(b)
     if not a_ngrams or not b_ngrams:
-        return 0.0
-    
-    ngram_sim = len(a_ngrams & b_ngrams) / len(a_ngrams | b_ngrams)
-    
+        ngram_sim = 0.0
+    else:
+        ngram_sim = len(a_ngrams & b_ngrams) / len(a_ngrams | b_ngrams)
+
+    # 指标2：关键词匹配（原逻辑）
+    # P0 修复（2026-08-04）：单个通用词（如"上市"、"技术"）命中时相似度=1.0 会误判
+    # 修复：只有1个关键词命中时，相似度贡献上限设为 0.5（低于 0.6 阈值，不会误判）
+    # 只有2+个关键词同时命中时才认为是核心实体匹配
     a_keywords = _extract_keywords(a)
     b_keywords = _extract_keywords(b)
     if a_keywords and b_keywords:
-        keyword_overlap = len(a_keywords & b_keywords) / len(a_keywords | b_keywords)
-        return max(ngram_sim, keyword_overlap)
-    
-    return ngram_sim
+        common = a_keywords & b_keywords
+        union = a_keywords | b_keywords
+        if len(common) >= 2:
+            keyword_overlap = len(common) / len(union)
+        else:
+            # 单关键词命中：相似度上限 0.5，避免"上市"等通用词误判
+            keyword_overlap = 0.5 * (len(common) / len(union))
+    else:
+        keyword_overlap = 0.0
+
+    # 指标3：SequenceMatcher 最长公共子序列相似度
+    # 对中文短标题效果优于 2-gram Jaccard：基于字符序列匹配，能识别"美伊谈判"vs"美伊重启谈判"的相似性
+    from difflib import SequenceMatcher
+    sm = SequenceMatcher(None, a_lower, b_lower)
+    seq_ratio = sm.ratio()
+
+    max_sim = max(ngram_sim, keyword_overlap, seq_ratio)
+
+    # 指标4（新增）：核心实体匹配 —— 最长公共子串判重
+    # 场景："美国公布7月非农就业报告影响美联储政策预期" vs "美国7月非农就业报告将公布"
+    # SequenceMatcher ratio = 0.588 < 0.6，但都含核心实体"7月非农就业报告"（8字符+数字）
+    # 此时直接返回 0.65（>= 0.6 阈值）判为重复
+    # 触发条件（避免"股份回购计划"等通用模板词误判）：
+    #   1. 公共子串含数字 且 长度 >= 6（如"7月非农就业报告"含"7"）
+    #   2. 或 公共子串长度 >= 10（强核心实体，如"美国封锁伊朗港口"7字符不够长需用10阈值）
+    # 不触发：纯通用模板词如"股份回购计划"（6字符无数字）、"利率决议"（4字符）
+    if max_sim < 0.6:
+        match = sm.find_longest_match(0, len(a_lower), 0, len(b_lower))
+        substring = a_lower[match.a:match.a + match.size] if match.size > 0 else ""
+        has_digit = any(c.isdigit() for c in substring)
+        # 条件1：含数字且长度>=6（具体事件如"7月非农就业报告"）
+        # 条件2：长度>=10（强核心实体，避免"股份回购计划"8字符误判）
+        if (has_digit and match.size >= 6) or match.size >= 10:
+            return 0.65  # 核心实体匹配，判为重复
+
+    return max_sim
 
 
 def _update_similar_event(

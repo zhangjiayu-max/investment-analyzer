@@ -673,10 +673,30 @@ def _extract_events_from_news(news_list: list[dict], trace_id: str = "") -> list
 - impact_direction: 影响方向（up=上涨 / down=下跌 / flat=无影响）
 - impact_duration: 影响持续期（short_term=1-3天 / medium_term=1-2周 / long_term=超过2周）"""
 
+    # P0 增强（2026-08-04）：在 prompt 中传入已有事件列表，让 LLM 在提取阶段避免重复
+    # 原问题：LLM 每次扫描独立提取，措辞略有差异就产生重复事件（如"美伊谈判重启"vs"美伊重启谈判"）
+    # 修复：传入最近7天已检测的 upcoming/imminent 事件标题，让 LLM 跳过已提取的相似事件
+    existing_events_prompt = ""
+    try:
+        from db.market_events import list_active_events
+        active_events = list_active_events()
+        if active_events:
+            existing_titles = [ev.get("title", "")[:50] for ev in active_events[:30]]
+            existing_events_prompt = f"""
+【已有事件列表（请避免重复提取以下事件的相似变体）】
+{json.dumps(existing_titles, ensure_ascii=False)}
+
+【去重规则】（重要！）
+7. 若新闻中提取的事件与"已有事件列表"中任一事件描述同一事实（即使措辞不同），请跳过该事件
+8. 同一事件的不同表述（如"美伊谈判重启"与"美伊重启谈判"）视为重复，不要重复提取"""
+    except Exception as e:
+        logger.debug(f"[event_radar:{trace_id}] 获取已有事件列表失败: {e}")
+
     prompt = f"""你是一位资深财经分析师。请从以下新闻列表中提取「即将在未来 {lookforward_days} 天内发生」的市场事件。
 
 【新闻列表】
 {json.dumps(news_for_llm, ensure_ascii=False)}
+{existing_events_prompt}
 
 【输出要求】
 仅输出 JSON 数组，每个事件包含：
