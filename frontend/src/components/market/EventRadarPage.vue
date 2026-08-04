@@ -94,11 +94,16 @@ const filteredEvents = computed(() => {
   } else if (activeStatus.value !== 'all') {
     list = list.filter(e => e.status === activeStatus.value)
   }
-  // 按预期日期升序
+  // 排序：最新检测的排顶部（detected_date DESC），同检测时间下按 expected_date DESC
+  // P0 修复（2026-08-04）：原按 expected_date ASC 排序，扫描后新检测的事件不排在顶部，
+  // 用户感知"扫描没生效"。改为按 detected_date DESC，让扫描后新增事件立即可见。
   return [...list].sort((a, b) => {
-    const da = a.expected_date || ''
-    const db = b.expected_date || ''
-    return da.localeCompare(db)
+    const da = a.detected_date || ''
+    const db = b.detected_date || ''
+    if (da !== db) return db.localeCompare(da)
+    const ea = a.expected_date || ''
+    const eb = b.expected_date || ''
+    return eb.localeCompare(ea)
   })
 })
 

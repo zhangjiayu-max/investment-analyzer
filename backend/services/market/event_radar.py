@@ -993,18 +993,25 @@ def _determine_relevance(
 def _update_event_statuses() -> dict:
     """扫描所有 upcoming/imminent 事件，按日期更新状态。
 
-    规则：
-    - today >= expected_date → materialized
-    - today > expected_date + 7 → expired
-    - today > expected_date - 3 且 status=upcoming → imminent
+    规则（P0 修复 2026-08-04：使用 date 对象比较，避免 datetime 向下取整 bug）：
+    - today > expected_date + 7 → expired（事件应发生但7天未验证）
+    - today > expected_date → materialized（过了预期日期，事件应已发生）
+    - today == expected_date → 保持 imminent（事件日，当天可能发生，不立即标 materialized）
+    - today >= expected_date - 3 且 status=upcoming → imminent（3天内将发生）
+
+    P0 修复背景：原代码 `days_to_event = (exp_dt - today_dt).days` 用 datetime 比较，
+    exp_dt=2026-08-05 00:00:00，today_dt=2026-08-04 13:23，差值约 10.6 小时，
+    timedelta.days 向下取整为 0，触发 `days_to_event <= 0` 条件，
+    导致 8月5号事件在 8月4号下午就被错误标记为 materialized。
+    修复：改用 date 对象比较，纯按日期计算 days 差值。
 
     Returns:
         {"imminent": int, "materialized": int, "expired": int}
     """
     from db.market_events import list_active_events, update_market_event_status
 
-    today = datetime.now().strftime("%Y-%m-%d")
-    today_dt = datetime.now()
+    today_str = datetime.now().strftime("%Y-%m-%d")
+    today_date = datetime.now().date()
     counts = {"imminent": 0, "materialized": 0, "expired": 0}
 
     active = list_active_events()
@@ -1013,12 +1020,13 @@ def _update_event_statuses() -> dict:
         if not exp_date_str:
             continue
         try:
-            exp_dt = datetime.strptime(exp_date_str, "%Y-%m-%d")
+            exp_date = datetime.strptime(exp_date_str, "%Y-%m-%d").date()
         except ValueError:
             continue
 
         status = ev["status"]
-        days_to_event = (exp_dt - today_dt).days
+        # 用 date 对象计算差值，避免 datetime 向下取整 bug
+        days_to_event = (exp_date - today_date).days
 
         # today > expected_date + 7 → expired
         if days_to_event < -7:
@@ -1029,14 +1037,18 @@ def _update_event_statuses() -> dict:
             # 修复：同步写入 expired_date，让 Batch2 时间衰减能正确计算
             try:
                 from db.market_events import update_market_event_fields
-                update_market_event_fields(ev["event_id"], {"expired_date": today})
+                update_market_event_fields(ev["event_id"], {"expired_date": today_str})
             except Exception as e:
                 logger.warning(f"[event_radar] 写入 expired_date 失败 {ev.get('event_id')}: {e}")
             counts["expired"] += 1
-        # today >= expected_date → materialized
-        elif days_to_event <= 0:
+        # today > expected_date → materialized（严格大于，当天不标）
+        elif days_to_event < 0:
             update_market_event_status(ev["event_id"], "materialized")
             counts["materialized"] += 1
+        # today == expected_date 且 status=upcoming → 升级为 imminent（事件日提醒）
+        elif days_to_event == 0 and status == "upcoming":
+            update_market_event_status(ev["event_id"], "imminent")
+            counts["imminent"] += 1
         # today > expected_date - 3 且 status=upcoming → imminent
         elif days_to_event <= 3 and status == "upcoming":
             update_market_event_status(ev["event_id"], "imminent")

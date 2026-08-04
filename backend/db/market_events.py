@@ -442,11 +442,11 @@ def list_market_events(
         params.append(relevance)
     if conditions:
         sql += " WHERE " + " AND ".join(conditions)
-    # P0 修复（2026-08-03）：排序从 expected_date ASC 改为 detected_date DESC, expected_date ASC
-    # 原问题：按 expected_date ASC 排序导致顶部全是早期旧事件（如 7 月事件），
-    #         用户扫描后新检测的事件（expected_date 较远）排在列表中间/底部，视觉上"看不到新数据"。
-    # 修复：优先按 detected_date DESC（最新检测的排顶部），相同 detected_date 按 expected_date ASC（近期发生的靠前）。
-    sql += " ORDER BY detected_date DESC, expected_date ASC LIMIT ?"
+    # P0 修复（2026-08-04）：排序统一为 detected_date DESC, expected_date DESC
+    # 原问题：expected_date ASC 导致扫描后新检测的远期事件排在底部，用户感知"扫描没生效"。
+    # 修复：detected_date DESC（最新检测排顶部）+ expected_date DESC（同检测时间下最新预期事件靠前）。
+    # 前端 filteredEvents 已对齐此排序逻辑。
+    sql += " ORDER BY detected_date DESC, expected_date DESC LIMIT ?"
     params.append(limit)
 
     conn = _get_conn()
