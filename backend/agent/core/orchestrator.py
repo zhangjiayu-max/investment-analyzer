@@ -452,7 +452,7 @@ _AGENT_MODEL_MAP_MIMO = {
 }
 
 # Qwen 模型映射 — 统一使用 qwen3.8-max
-# qwen3.8-max-preview: 编排器专用（预览版）
+# qwen3.8-max: 所有智能体统一模型（预览版 max-preview 已下架）
 # qwen3.8-max: 其余所有智能体
 _AGENT_MODEL_MAP_QWEN = {
     "valuation_expert": "qwen3.8-max",             # 估值专家，需精确数值推理
@@ -462,9 +462,9 @@ _AGENT_MODEL_MAP_QWEN = {
     "market_analyst": "qwen3.8-max",               # 市场分析，趋势判断
     "macro_strategist": "qwen3.8-max",             # 宏观策略
     "article_expert": "qwen3.8-max",               # 文章专家，文本摘要
-    "orchestrator": "qwen3.8-max-preview",         # 编排器，预览版
+    "orchestrator": "qwen3.8-max",                 # 编排器
     "cross_review": "qwen3.8-max",                 # 交叉审阅
-    "arbitrator": "qwen3.8-max-preview",           # 仲裁，预览版
+    "arbitrator": "qwen3.8-max",                   # 仲裁
     "self_reflection": "qwen3.8-max",              # 自我反思
 }
 

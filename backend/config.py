@@ -64,7 +64,7 @@ ARBITRATION_MODEL = os.getenv("ARBITRATION_MODEL", "deepseek-v4-pro")
 # ── Qwen (阿里云百炼) API 配置 ──
 QWEN_API_KEY = os.getenv("QWEN_API_KEY", "")
 QWEN_BASE_URL = os.getenv("QWEN_BASE_URL", "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1")
-QWEN_MODEL = os.getenv("QWEN_MODEL", "qwen3.8-max-preview")
+QWEN_MODEL = os.getenv("QWEN_MODEL", "qwen3.8-max")
 # Qwen 视觉模型（用于估值图片解析）
 # qwen3.7-flash 在百炼实例上不可用，qwen3.7-plus 支持多模态
 QWEN_VISION_API_KEY = os.getenv("QWEN_VISION_API_KEY", QWEN_API_KEY)

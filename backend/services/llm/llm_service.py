@@ -51,12 +51,12 @@ MODEL = _model
 
 # ── 分级模型常量（供独立分析路由使用，避免一律走最强模型浪费 token）────
 # 与 orchestrator._AGENT_MODEL_MAP_* 保持一致：
-#   MODEL_STRONG   : 最强，仅编排器/仲裁使用（qwen3.8-max-preview）
+#   MODEL_STRONG   : 最强，仅编排器/仲裁使用（qwen3.8-max）
 #   MODEL_ANALYSIS : 核心数值分析，用于估值/基金/风险/分散度/相关性等需精确推理
 #   MODEL_AUX      : 辅助文本/综合，用于全景/热点/日报/市场情报等
 # 注：mimo 仅一档，三档统一为 mimo-v2.5-pro
 if LLM_PROVIDER == "qwen":
-    MODEL_STRONG = "qwen3.8-max-preview"
+    MODEL_STRONG = "qwen3.8-max"
     MODEL_ANALYSIS = "qwen3.8-max"
     MODEL_AUX = "qwen3.8-max"
 elif LLM_PROVIDER == "mimo":
@@ -77,7 +77,7 @@ _fallback_model = _fallback_config[2] if _fallback_config else None
 # 根据 LLM_PROVIDER 自动选择仲裁模型
 if LLM_PROVIDER == "qwen" and QWEN_API_KEY:
     _arbitration_client = OpenAI(api_key=QWEN_API_KEY, base_url=QWEN_BASE_URL, timeout=180.0)
-    _arbitration_model = "qwen3.8-max-preview"  # 仲裁用最强 Qwen
+    _arbitration_model = "qwen3.8-max"  # 仲裁用最强 Qwen
 elif ARBITRATION_API_KEY:
     _arbitration_client = OpenAI(api_key=ARBITRATION_API_KEY, base_url=ARBITRATION_BASE_URL, timeout=180.0)
     _arbitration_model = ARBITRATION_MODEL
@@ -90,10 +90,9 @@ if LLM_PROVIDER == "qwen" and "token-plan" in QWEN_BASE_URL.lower():
     logger.info(
         "[模型路由提示] 检测到 QWEN_BASE_URL 使用 Token Plan 订阅端点 "
         f"({QWEN_BASE_URL})。\n"
-        "Token Plan 个人版 Lite 档位可能仅支持 qwen3.8-max-preview，"
+        "Token Plan 个人版 Lite 档位可能仅支持 qwen3.8-max，"
         "Standard/Pro 档位才包含 qwen3.8-max 等分级模型。\n"
-        "如果运行时日志频繁出现 '模型静默映射' WARNING，说明当前订阅档位不支持"
-        "代码请求的分级模型，被端点降级到 qwen3.8-max-preview。\n"
+        "如果运行时日志频繁出现 '模型静默映射' WARNING，说明当前订阅档位不支持代码请求的分级模型，被端点降级到 qwen3.8-max。\n"
         "解决方案：\n"
         "  1. 升级到 Standard/Pro 档位（支持完整 11 款模型）\n"
         "  2. 或切换到按量计费端点: QWEN_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1\n"

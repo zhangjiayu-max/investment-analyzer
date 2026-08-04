@@ -23,7 +23,7 @@ from db.config import get_config_int, get_config_float, get_config
 
 
 def _get_eval_model() -> str:
-    """RAG 评估用便宜模型，避免用最贵的 max-preview。
+    """RAG 评估用便宜模型，避免用最贵的 max。
     
     优先读 system_config 'rag.eval_model'，否则按 provider 选便宜模型。
     """
