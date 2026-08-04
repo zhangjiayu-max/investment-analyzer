@@ -1091,12 +1091,23 @@ def get_analysis_history_status(history_id: int) -> dict | None:
 
 
 def list_analysis_history(index_code: str = None, limit: int = 50) -> list[dict]:
-    """列出分析历史。"""
+    """列出分析历史。
+    
+    index_code 支持带后缀/不带后缀互相匹配：
+    - 传 H30217 可匹配到 H30217.CSI（传入不带后缀，记录带后缀）
+    - 传 H30217.CSI 可匹配到 H30217（传入带后缀，记录不带后缀）
+    """
     conn = _get_conn()
     if index_code:
+        # 去掉后缀作为基础代码，用 LIKE 兼容后缀差异
+        base_code = index_code.split('.')[0]
         rows = conn.execute(
-            "SELECT * FROM analysis_history WHERE index_code = ? ORDER BY created_at DESC LIMIT ?",
-            (index_code, limit)
+            """SELECT * FROM analysis_history
+               WHERE index_code = ?
+                  OR index_code LIKE ? || '.%'
+                  OR (? LIKE index_code || '.%' AND index_code != '')
+               ORDER BY created_at DESC LIMIT ?""",
+            (index_code, base_code, index_code, limit)
         ).fetchall()
     else:
         rows = conn.execute(
