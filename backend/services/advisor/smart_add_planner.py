@@ -1136,6 +1136,7 @@ def _allocate_portfolio_budget(
         and (p.get("fund_health") or {}).get("healthy") is not False
         and (p.get("final_suggested_amount", 0) or 0) > 0
     ]
+    eligible_ids = {id(p) for p in eligible}
     total_raw = round(sum(float(p.get("final_suggested_amount", 0) or 0) for p in eligible), 2)
     scale = min(1.0, monthly_budget / total_raw) if total_raw > 0 else 0.0
 
@@ -1143,7 +1144,7 @@ def _allocate_portfolio_budget(
     for plan in plans:
         raw = round(max(0.0, float(plan.get("final_suggested_amount", 0) or 0)), 2)
         plan["raw_suggested_amount"] = raw
-        if plan in eligible:
+        if id(plan) in eligible_ids:
             amount = round(raw * scale, 2)
             if total_assets is not None and max_add_mult is not None:
                 amount = min(amount, _plan_hard_cap(plan, total_assets, max_add_mult))

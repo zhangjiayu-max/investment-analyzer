@@ -13,33 +13,40 @@ from db._conn import _get_conn
 _TARGETS = {
     "index_valuations": "percentile",
     "smart_add_plans": "valuation_percentile",
+    "theme_opportunities": "valuation_percentile",
+    "theme_opportunity_backtests": "entry_percentile",
 }
 
 
 def migrate_percentile_scale(conn, apply: bool = False) -> dict:
-    """返回迁移审计结果；只有 apply=True 时更新数据。"""
+    """返回迁移审计结果；只有 apply=True 时更新数据。
+
+    每张表独立事务：某张表异常不会影响其他表的迁移进度。
+    """
     result = {}
     for table, column in _TARGETS.items():
         count = conn.execute(
             f"SELECT COUNT(*) AS n FROM {table} WHERE {column} > 0 AND {column} < 1"
         ).fetchone()["n"]
-        result[table] = {"candidates": count, "updated": 0}
+        result[table] = {"candidates": count, "updated": 0, "error": None}
 
     if not apply:
         return result
 
-    conn.execute("BEGIN")
-    try:
-        for table, column in _TARGETS.items():
+    for table, column in _TARGETS.items():
+        if result[table]["candidates"] == 0:
+            continue
+        conn.execute("BEGIN")
+        try:
             cursor = conn.execute(
                 f"UPDATE {table} SET {column} = ROUND({column} * 100, 4) "
                 f"WHERE {column} > 0 AND {column} < 1"
             )
             result[table]["updated"] = cursor.rowcount
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        raise
+            conn.commit()
+        except Exception as exc:  # pragma: no cover - 保留错误信息便于运维排查
+            conn.rollback()
+            result[table]["error"] = str(exc)
     return result
 
 
