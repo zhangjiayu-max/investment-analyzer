@@ -49,6 +49,7 @@ logs/
 # Temporary
 *.tmp
 *.bak
+.worktrees/
 
 .doc/
 # ttskill CLI binary
