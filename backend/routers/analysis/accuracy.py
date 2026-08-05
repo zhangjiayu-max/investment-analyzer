@@ -7,10 +7,12 @@
   - GET  /api/analysis/accuracy/adoption-stats    采纳率 + 采纳 vs 未采纳收益对比
 """
 
+import asyncio
 import logging
 
 from fastapi import APIRouter, Query
 
+from db import get_running_async_task, create_async_task, update_async_task
 from services.decision_accuracy import (
     auto_verify_all,
     get_accuracy_stats,
@@ -47,13 +49,25 @@ def get_stats(
 
 
 @router.post("/auto-verify")
-def trigger_auto_verify():
-    """触发自动验证到期推荐 + 决策回测。"""
-    try:
-        return auto_verify_all()
-    except Exception as e:
-        logger.error(f"自动验证失败: {e}", exc_info=True)
-        return {"verified_count": 0, "decision_backtested": 0, "error": str(e)}
+async def trigger_auto_verify():
+    """触发自动验证到期推荐 + 决策回测（异步执行）。"""
+    # 幂等保护：已有 running 任务时直接返回该 task_id
+    existing = get_running_async_task("accuracy_auto_verify")
+    if existing:
+        return {"task_id": existing["id"], "status": "running", "reused": True}
+
+    task_id = create_async_task("accuracy_auto_verify", caller="accuracy")
+
+    async def _run():
+        try:
+            result = await asyncio.to_thread(auto_verify_all)
+            update_async_task(task_id, status="done", result=result)
+        except Exception as e:
+            logger.error(f"自动验证任务 {task_id} 失败: {e}", exc_info=True)
+            update_async_task(task_id, status="error", error_msg=str(e))
+
+    asyncio.create_task(_run())
+    return {"task_id": task_id, "status": "running"}
 
 
 @router.get("/trend")

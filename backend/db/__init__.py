@@ -228,7 +228,7 @@ from db.fund_holdings_snapshot import (
 from db.async_tasks import (
     init_async_tasks_table, create_async_task, update_async_task,
     get_async_task, list_async_tasks, get_latest_async_task,
-    get_latest_done_task,
+    get_latest_done_task, get_running_async_task,
 )
 
 # SSE 对话事件流持久化

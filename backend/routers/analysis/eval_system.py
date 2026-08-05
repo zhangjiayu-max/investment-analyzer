@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 
 from fastapi import APIRouter, HTTPException
 
-from db import get_config, get_config_int
+from db import get_config, get_config_int, get_running_async_task, create_async_task, update_async_task
 from infra.schemas import PromptActivateRequest
 from db.eval import (
     create_eval_case, list_eval_cases, get_eval_case, update_eval_case, delete_eval_case,
@@ -321,21 +321,29 @@ async def delete_case_api(case_id: int):
 
 @router.post("/run")
 async def run_eval_api(data: EvalRunRequest):
-    result = await _execute_single_eval(data.case_id, run_mode="manual")
-    return {"status": "ok", "result": result}
+    """运行单条评测用例（异步执行）。"""
+    # 幂等保护：已有 running 任务时直接返回该 task_id
+    existing = get_running_async_task("eval_system_run")
+    if existing:
+        return {"task_id": existing["id"], "status": "running", "reused": True}
+
+    task_id = create_async_task("eval_system_run", caller="eval_system")
+    case_id = data.case_id
+
+    async def _run():
+        try:
+            result = await _execute_single_eval(case_id, run_mode="manual")
+            update_async_task(task_id, status="done", result={"status": "ok", "result": result})
+        except Exception as e:
+            logger.error(f"任务 {task_id} 失败: {e}", exc_info=True)
+            update_async_task(task_id, status="error", error_msg=str(e))
+
+    asyncio.create_task(_run())
+    return {"task_id": task_id, "status": "running"}
 
 
-@router.post("/run-batch")
-async def run_batch_eval_api(data: EvalBatchRequest):
-    case_type = data.get("case_type")
-    version_a = data.get("version_a")
-    version_b = data.get("version_b")
-
-    cases = list_eval_cases(analysis_type=case_type)
-    active_cases = [c for c in cases if c.get("is_active")]
-    if not active_cases:
-        raise HTTPException(400, "无可用评测用例")
-
+async def _run_batch_eval(active_cases: list, version_a, version_b) -> dict:
+    """异步：批量执行 A/B 评测并汇总对比结果。"""
     results_a, results_b = [], []
     for case in active_cases[:5]:
         ra = await _execute_single_eval(case["id"], prompt_version=version_a, run_mode="ab_test")
@@ -372,10 +380,56 @@ async def run_batch_eval_api(data: EvalBatchRequest):
     }
 
 
+@router.post("/run-batch")
+async def run_batch_eval_api(data: EvalBatchRequest):
+    """批量 A/B 评测（异步执行）。"""
+    case_type = data.case_type
+    cases = list_eval_cases(analysis_type=case_type)
+    active_cases = [c for c in cases if c.get("is_active")]
+    if not active_cases:
+        raise HTTPException(400, "无可用评测用例")
+
+    # 幂等保护：已有 running 任务时直接返回该 task_id
+    existing = get_running_async_task("eval_system_batch")
+    if existing:
+        return {"task_id": existing["id"], "status": "running", "reused": True}
+
+    task_id = create_async_task("eval_system_batch", caller="eval_system")
+    version_a = data.version_a
+    version_b = data.version_b
+
+    async def _run():
+        try:
+            result = await _run_batch_eval(active_cases, version_a, version_b)
+            update_async_task(task_id, status="done", result=result)
+        except Exception as e:
+            logger.error(f"任务 {task_id} 失败: {e}", exc_info=True)
+            update_async_task(task_id, status="error", error_msg=str(e))
+
+    asyncio.create_task(_run())
+    return {"task_id": task_id, "status": "running"}
+
+
 @router.post("/daily")
 async def trigger_daily_eval_api():
-    result = await run_daily_eval()
-    return {"status": "ok", "report": result}
+    """触发每日评测（异步执行）。"""
+    # 幂等保护：已有 running 任务时直接返回该 task_id
+    existing = get_running_async_task("eval_system_daily")
+    if existing:
+        return {"task_id": existing["id"], "status": "running", "reused": True}
+
+    task_id = create_async_task("eval_system_daily", caller="eval_system")
+
+    async def _run():
+        try:
+            result = await run_daily_eval()
+            update_async_task(task_id, status="done", result={"status": "ok", "report": result})
+        except Exception as e:
+            logger.error(f"任务 {task_id} 失败: {e}", exc_info=True)
+            update_async_task(task_id, status="error", error_msg=str(e))
+
+    asyncio.create_task(_run())
+    return {"task_id": task_id, "status": "running"}
 
 
 @router.get("/results")

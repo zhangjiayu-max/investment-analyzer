@@ -17,7 +17,7 @@ from db import (
     save_recommendation_feedback, list_recommendation_feedback,
     adopt_recommendation,
     get_config_int, get_config_float, get_config,
-    create_async_task, update_async_task,
+    create_async_task, update_async_task, get_running_async_task,
 )
 from db._conn import _get_conn
 from db.agent_analysis_log import create_analysis_log, complete_analysis_log
@@ -36,6 +36,10 @@ _background_tasks = set()
 @router.post("/api/dashboard/hotspots-analysis")
 async def trigger_hotspots_analysis():
     """触发结构化热点分析（异步）。立即返回 task_id，后台执行。"""
+    # 幂等保护:已有 running 任务时直接返回该 task_id,不重复触发
+    existing = get_running_async_task("hotspots_analysis")
+    if existing:
+        return {"task_id": existing["id"], "status": "running", "reused": True}
     task_id = create_async_task("hotspots_analysis", caller="hotspots_analysis")
     task = asyncio.create_task(_run_hotspots_analysis_async(task_id))
     _background_tasks.add(task)
@@ -641,10 +645,25 @@ async def adopt_recommendation_api(rec_id: int, body: dict):
 
 @router.post("/api/recommendations/verify")
 async def trigger_recommendation_verify():
-    """手动触发推荐验证。"""
-    from analysis.recommendation_verifier import verify_all_pending
-    result = verify_all_pending(days_ago=7)
-    return result
+    """手动触发推荐验证（异步执行）。"""
+    # 幂等保护：已有 running 任务时直接返回该 task_id
+    existing = get_running_async_task("recommendations_verify")
+    if existing:
+        return {"task_id": existing["id"], "status": "running", "reused": True}
+
+    task_id = create_async_task("recommendations_verify", caller="hotspots")
+
+    async def _run():
+        try:
+            from analysis.recommendation_verifier import verify_all_pending
+            result = await asyncio.to_thread(verify_all_pending, days_ago=7)
+            update_async_task(task_id, status="done", result=result)
+        except Exception as e:
+            logger.error(f"任务 {task_id} 失败: {e}", exc_info=True)
+            update_async_task(task_id, status="error", error_msg=str(e))
+
+    asyncio.create_task(_run())
+    return {"task_id": task_id, "status": "running"}
 
 
 @router.get("/api/recommendations/stats")

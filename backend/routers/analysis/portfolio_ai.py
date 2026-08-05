@@ -12,7 +12,7 @@ from db import (
     create_portfolio_analysis_record, list_portfolio_analysis_records,
     get_portfolio_analysis_record, delete_portfolio_analysis_record,
     update_analysis_feedback, list_all_bad_cases,
-    create_async_task, update_async_task,
+    create_async_task, update_async_task, get_running_async_task,
 )
 from db.portfolio import update_analysis_record
 from db.config import get_config_int, get_config_float
@@ -42,6 +42,10 @@ async def portfolio_ai_analysis_api(req: PortfolioAiAnalysisRequest):
     if not holdings:
         raise HTTPException(400, "暂无持仓数据")
     user_question = req.question or "请全面分析我的持仓情况，包括资产配置合理性、风险分散度、各基金表现，以及改进建议。"
+    # 幂等保护:已有 running 任务时直接返回该 task_id,不重复触发
+    existing = get_running_async_task("portfolio_ai")
+    if existing:
+        return {"task_id": existing["id"], "status": "running", "reused": True}
     record_id = create_portfolio_analysis_record(
         analysis_type="ai",
         summary=f"AI持仓分析 · {len(holdings)}只基金",

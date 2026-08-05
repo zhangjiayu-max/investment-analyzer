@@ -46,7 +46,7 @@ from db import (
     get_active_rebalance_config, save_rebalance_config,
     list_rebalance_configs, get_rebalance_config_by_id, rollback_rebalance_config,
     set_cash_balance, get_portfolio_penetration,
-    create_async_task, update_async_task, get_async_task,
+    create_async_task, update_async_task, get_async_task, get_running_async_task,
     get_analysis_cache,
 )
 from db.portfolio import update_analysis_record
@@ -349,13 +349,29 @@ async def trigger_proactive_scan_api():
 
 @router.post("/api/portfolio/alerts/scan-watchlist")
 async def trigger_watchlist_scan_api():
-    """P0-C 关注列表信号扫描：单独触发一次关注列表上车信号扫描。
+    """P0-C 关注列表信号扫描：单独触发一次关注列表上车信号扫描（异步执行）。
 
     扫描关注列表基金，触发目标价/估值低分位/单日大跌三类信号。
     开关：alerts.watchlist_signal_enabled（默认 true）。
     """
-    from services.alert_scanner import scan_watchlist_signals
-    return scan_watchlist_signals()
+    # 幂等保护：已有 running 任务时直接返回该 task_id
+    existing = get_running_async_task("watchlist_signal_scan")
+    if existing:
+        return {"task_id": existing["id"], "status": "running", "reused": True}
+
+    task_id = create_async_task("watchlist_signal_scan", caller="portfolio")
+
+    async def _run():
+        try:
+            from services.alert_scanner import scan_watchlist_signals
+            result = await asyncio.to_thread(scan_watchlist_signals)
+            update_async_task(task_id, status="done", result=result)
+        except Exception as e:
+            logger.error(f"任务 {task_id} 失败: {e}", exc_info=True)
+            update_async_task(task_id, status="error", error_msg=str(e))
+
+    asyncio.create_task(_run())
+    return {"task_id": task_id, "status": "running"}
 
 
 @router.post("/api/portfolio/alerts/generate")

@@ -1,5 +1,7 @@
 """主题机会引擎路由 — /api/opportunities/*"""
 
+import asyncio
+import logging
 from datetime import datetime
 
 from fastapi import APIRouter, HTTPException
@@ -9,15 +11,19 @@ from db.opportunities import get_backtest_stats
 from db import (
     add_to_watchlist,
     create_decision_from_opportunity,
+    create_async_task,
     get_opportunity,
     get_opportunity_track_stats,
+    get_running_async_task,
     list_opportunities,
     list_opportunity_tracks,
     mark_opportunity_bought,
+    update_async_task,
     update_opportunity_status,
 )
 from services.opportunity_engine import scan_daily_opportunities
 
+logger = logging.getLogger(__name__)
 router = APIRouter(tags=["opportunities"])
 
 
@@ -75,7 +81,13 @@ async def today_opportunities_api(limit: int = 8):
 
 @router.post("/api/opportunities/daily-scan")
 async def daily_scan_api(req: DailyScanRequest):
-    """生成今日主题机会卡。"""
+    """生成今日主题机会卡（异步执行）。"""
+    # 幂等保护：已有 running 任务时直接返回该 task_id
+    existing = get_running_async_task("opportunity_scan")
+    if existing:
+        return {"task_id": existing["id"], "status": "running", "reused": True}
+
+    # 保留获取新闻的逻辑（可以 await），只把 scan_daily_opportunities 同步调用丢到后台
     news_items = req.news_items
     if news_items is None:
         try:
@@ -84,11 +96,24 @@ async def daily_scan_api(req: DailyScanRequest):
             news_items = hot.get("news", [])
         except Exception:
             news_items = []
-    return scan_daily_opportunities(
-        news_items=news_items,
-        max_items=req.max_items,
-        force_refresh=req.force_refresh,
-    )
+
+    task_id = create_async_task("opportunity_scan", caller="opportunities")
+
+    async def _run():
+        try:
+            result = await asyncio.to_thread(
+                scan_daily_opportunities,
+                news_items=news_items,
+                max_items=req.max_items,
+                force_refresh=req.force_refresh,
+            )
+            update_async_task(task_id, status="done", result=result)
+        except Exception as e:
+            logger.error(f"任务 {task_id} 失败: {e}", exc_info=True)
+            update_async_task(task_id, status="error", error_msg=str(e))
+
+    asyncio.create_task(_run())
+    return {"task_id": task_id, "status": "running"}
 
 
 @router.post("/api/opportunities/{opportunity_id}/create-decision")

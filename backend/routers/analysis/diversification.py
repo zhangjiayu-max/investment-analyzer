@@ -15,7 +15,7 @@ from db import (
     get_transaction_summary,
     get_analysis_agent,
     create_portfolio_analysis_record, list_portfolio_analysis_records,
-    create_async_task, update_async_task,
+    create_async_task, update_async_task, get_running_async_task,
     search_indexes_by_keyword, get_latest_valuation,
     save_analysis_conclusion,
 )
@@ -158,6 +158,10 @@ async def portfolio_diversification_ai_summary(agent_id: int = 2):
         "holdings_detail": holdings_detail,  # 完整持仓明细（基金名/代码/占比/盈亏/跟踪指数）
     }, ensure_ascii=False)
 
+    # 幂等保护:已有 running 任务时直接返回该 task_id,不重复触发
+    existing = get_running_async_task("diversification_ai")
+    if existing:
+        return {"task_id": existing["id"], "status": "running", "reused": True}
     record_id = create_portfolio_analysis_record(
         analysis_type="diversification_ai",
         summary=f"分散度解读 · {result.get('holding_count', len(holdings))}只基金",

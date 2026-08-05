@@ -117,3 +117,20 @@ def get_latest_done_task(task_type: str) -> dict | None:
     if not row:
         return None
     return _row_to_dict(row)
+
+
+def get_running_async_task(task_type: str) -> dict | None:
+    """获取指定类型最近一条 running 状态的任务(幂等保护用)。
+
+    用于:触发新任务前先查是否已有同类型任务在执行,避免重复触发。
+    返回 None 表示无运行中任务,可以触发新任务。
+    """
+    conn = _get_conn()
+    row = conn.execute(
+        "SELECT * FROM async_tasks WHERE task_type = ? AND status = 'running' ORDER BY id DESC LIMIT 1",
+        (task_type,)
+    ).fetchone()
+    conn.close()
+    if not row:
+        return None
+    return _row_to_dict(row)

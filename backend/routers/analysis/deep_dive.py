@@ -14,6 +14,7 @@ from db import (
     create_portfolio_analysis_record,
     save_analysis_conclusion,
     get_related_orchestrator_decisions,
+    create_async_task, update_async_task, get_running_async_task,
 )
 from db.portfolio import update_analysis_record
 from db.agent_analysis_log import create_analysis_log, complete_analysis_log
@@ -228,6 +229,11 @@ async def fund_deep_dive_api(holding_id: int, req: DeepDiveRequest):
         f"{rag_context if rag_context else ''}"
     )
 
+    # 幂等保护:已有 running 任务时直接返回该 task_id,不重复触发
+    existing = get_running_async_task("deep_dive_analysis")
+    if existing:
+        return {"task_id": existing["id"], "status": "running", "reused": True}
+
     # 创建记录（status='running'）
     record_id = create_portfolio_analysis_record(
         analysis_type="deep_dive",
@@ -236,16 +242,18 @@ async def fund_deep_dive_api(holding_id: int, req: DeepDiveRequest):
         status="running",
         agent_id=agent["id"],
     )
+    # 创建 async_task 记录用于通用状态查询
+    async_task_id = create_async_task("deep_dive_analysis", caller="deep_dive")
 
     # 后台执行分析
-    task = asyncio.create_task(_run_deep_dive_async(record_id, agent["system_prompt"], user_content, fund_name, agent["id"], agent["name"]))
+    task = asyncio.create_task(_run_deep_dive_async(async_task_id, record_id, agent["system_prompt"], user_content, fund_name, agent["id"], agent["name"]))
     _background_tasks.add(task)
     task.add_done_callback(_background_tasks.discard)
 
-    return {"ok": True, "id": record_id, "status": "running"}
+    return {"ok": True, "id": record_id, "task_id": async_task_id, "status": "running"}
 
 
-async def _run_deep_dive_async(record_id: int, system_prompt: str, user_content: str, fund_name: str = "", agent_id: int = None, agent_name: str = ""):
+async def _run_deep_dive_async(async_task_id: int, record_id: int, system_prompt: str, user_content: str, fund_name: str = "", agent_id: int = None, agent_name: str = ""):
     """后台执行单基金深度分析。"""
     import uuid
     trace_id = f"log_{uuid.uuid4().hex[:12]}"
@@ -272,6 +280,7 @@ async def _run_deep_dive_async(record_id: int, system_prompt: str, user_content:
         result_text = response.choices[0].message.content or ""
         tokens = response.usage.total_tokens if response.usage else 0
         update_analysis_record(record_id, result_data=result_text, token_usage=tokens, status="done")
+        update_async_task(async_task_id, status="done")
         _elapsed_ms = int((time.time() - _start_ts) * 1000)
         complete_analysis_log(trace_id=trace_id, status="done", duration_ms=_elapsed_ms, token_usage=tokens)
         _extract_candidates_safely(record_id, "deep_dive", result_text)
@@ -326,6 +335,7 @@ async def _run_deep_dive_async(record_id: int, system_prompt: str, user_content:
     except Exception as e:
         logger.error(f"深度分析失败 record_id={record_id}: {e}")
         update_analysis_record(record_id, status="error", error_msg=str(e))
+        update_async_task(async_task_id, status="error", error_msg=str(e))
         _elapsed_ms = int((time.time() - _start_ts) * 1000)
         complete_analysis_log(trace_id=trace_id, status="error", duration_ms=_elapsed_ms, error_msg=str(e))
 

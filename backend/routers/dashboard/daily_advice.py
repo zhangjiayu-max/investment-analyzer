@@ -3,9 +3,11 @@
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from typing import Optional
+import asyncio
 import json
 import logging
 
+from db import get_running_async_task, create_async_task, update_async_task
 from db.daily_advice import (
     get_signal, update_signal_status, list_today_signals,
     list_runs, get_today_run,
@@ -25,13 +27,29 @@ class RunRequest(BaseModel):
 
 @router.post("/api/daily-advice/run")
 async def run_advice(req: RunRequest):
-    """手动触发每日持仓提示。"""
-    result = run_daily_position_advice(
-        user_id=req.user_id,
-        trigger_type=req.trigger_type,
-        force=req.force,
-    )
-    return result
+    """手动触发每日持仓提示（异步执行）。"""
+    # 幂等保护：已有 running 任务时直接返回该 task_id
+    existing = get_running_async_task("daily_advice_run")
+    if existing:
+        return {"task_id": existing["id"], "status": "running", "reused": True}
+
+    task_id = create_async_task("daily_advice_run", caller="daily_advice")
+
+    async def _run():
+        try:
+            result = await asyncio.to_thread(
+                run_daily_position_advice,
+                user_id=req.user_id,
+                trigger_type=req.trigger_type,
+                force=req.force,
+            )
+            update_async_task(task_id, status="done", result=result)
+        except Exception as e:
+            logger.error(f"任务 {task_id} 失败: {e}", exc_info=True)
+            update_async_task(task_id, status="error", error_msg=str(e))
+
+    asyncio.create_task(_run())
+    return {"task_id": task_id, "status": "running"}
 
 
 @router.get("/api/daily-advice/today")
@@ -147,13 +165,8 @@ async def create_candidate(signal_id: int):
     return {"ok": True, "candidate_id": candidate_id}
 
 
-@router.post("/api/daily-advice/signals/{signal_id}/ask-ai")
-async def ask_ai_about_signal(signal_id: int):
-    """根据信号上下文调用 LLM 生成解释。"""
-    signal = get_signal(signal_id)
-    if not signal:
-        raise HTTPException(404, "信号不存在")
-
+def _ask_ai_worker(signal_id: int, signal: dict) -> dict:
+    """同步：根据信号上下文调用 LLM 生成解释。"""
     # 拼接信号上下文
     target_name = signal.get("target_name", "")
     target_code = signal.get("target_code", "")
@@ -210,37 +223,131 @@ async def ask_ai_about_signal(signal_id: int):
 
 请给出你的解释和建议："""
 
-    try:
-        from services.llm_service import _call_llm, MODEL_AUX
-        from db.config import get_config_float, get_config_int
+    from services.llm_service import _call_llm, MODEL_AUX
+    from db.config import get_config_float, get_config_int
 
-        response = _call_llm(
-            caller="daily_advice_ask_ai",
-            model=MODEL_AUX,
-            messages=[
-                {"role": "system", "content": "你是一位专业的投资持仓顾问。请根据数据给出客观、具体的分析和建议，最后加一句风险提示。"},
-                {"role": "user", "content": prompt},
-            ],
-            temperature=get_config_float("llm.temperature_analysis", 0.3),
-            max_tokens=get_config_int("llm.max_tokens_analysis", 8000),
-        )
-        ai_text = response.choices[0].message.content or ""
+    response = _call_llm(
+        caller="daily_advice_ask_ai",
+        model=MODEL_AUX,
+        messages=[
+            {"role": "system", "content": "你是一位专业的投资持仓顾问。请根据数据给出客观、具体的分析和建议，最后加一句风险提示。"},
+            {"role": "user", "content": prompt},
+        ],
+        temperature=get_config_float("llm.temperature_analysis", 0.3),
+        max_tokens=get_config_int("llm.max_tokens_analysis", 8000),
+    )
+    ai_text = response.choices[0].message.content or ""
 
-        return {
-            "ok": True,
-            "signal_id": signal_id,
-            "ai_explanation": ai_text,
-        }
-    except Exception as e:
-        logger.error(f"ask-ai 失败: {e}", exc_info=True)
-        raise HTTPException(500, f"AI 解释生成失败: {e}")
+    return {
+        "ok": True,
+        "signal_id": signal_id,
+        "ai_explanation": ai_text,
+    }
+
+
+@router.post("/api/daily-advice/signals/{signal_id}/ask-ai")
+async def ask_ai_about_signal(signal_id: int):
+    """根据信号上下文调用 LLM 生成解释（异步执行）。"""
+    signal = get_signal(signal_id)
+    if not signal:
+        raise HTTPException(404, "信号不存在")
+
+    # 幂等保护：已有 running 任务时直接返回该 task_id
+    existing = get_running_async_task("daily_advice_ask_ai")
+    if existing:
+        return {"task_id": existing["id"], "status": "running", "reused": True}
+
+    task_id = create_async_task("daily_advice_ask_ai", caller="daily_advice")
+
+    async def _run():
+        try:
+            result = await asyncio.to_thread(_ask_ai_worker, signal_id, signal)
+            update_async_task(task_id, status="done", result=result)
+        except Exception as e:
+            logger.error(f"ask-ai 失败: {e}", exc_info=True)
+            update_async_task(task_id, status="error", error_msg=str(e))
+
+    asyncio.create_task(_run())
+    return {"task_id": task_id, "status": "running"}
 
 
 # ── P1-3.3：AI 综合解读（LLM 默认关闭，用户主动触发） ──
 
+def _interpretation_worker(signals: list, cache_key: str) -> dict:
+    """同步：构建 prompt + RAG + LLM 调用 + 写缓存。"""
+    from services.llm_service import _call_llm, MODEL_AUX
+    from services.rag import build_rag_context_with_details
+    import time
+
+    # 构建 prompt
+    signal_lines = []
+    for s in signals[:15]:  # 最多 15 条
+        signal_lines.append(
+            f"- [{s.get('severity','')}] {s.get('signal_type','')}: {s.get('title','')} "
+            f"(score={s.get('score','?')}, action={s.get('action_type','')}, "
+            f"amount={s.get('suggested_amount','?')})"
+        )
+    signals_text = "\n".join(signal_lines)
+
+    # 注入 RAG 知识库参考（限 2000 字）
+    try:
+        rag_ctx, _ = build_rag_context_with_details("今日持仓信号综合解读操作建议", top_k=3)
+        rag_text = rag_ctx[:2000] if rag_ctx else ""
+    except Exception:
+        rag_text = ""
+
+    system_prompt = (
+        "你是理财决策助手。请根据今日全部持仓信号，给出综合操作建议。\n"
+        "要求：\n"
+        "1. 输出'操作优先级 Top3'（按紧急程度排序）\n"
+        "2. 输出'风险提示'（1-2 条）\n"
+        "3. 限制 500 token 内\n"
+        "4. 用中文，简洁直接，不啰嗦"
+    )
+    user_prompt = f"## 今日信号（{len(signals)} 条）\n{signals_text}\n"
+    if rag_text:
+        user_prompt += f"\n## 知识库参考\n{rag_text}\n"
+    user_prompt += "\n请给出综合操作建议。"
+
+    response = _call_llm(
+        caller="daily_advice_interpretation",
+        trace_id=f"dai-{int(time.time())}",
+        model=MODEL_AUX,
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        temperature=0.3,
+        max_tokens=800,
+    )
+    ai_text = response.choices[0].message.content or ""
+
+    # 写缓存
+    try:
+        from db._conn import _get_conn
+        conn = _get_conn()
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS daily_advice_cache (
+                cache_key TEXT PRIMARY KEY,
+                content TEXT,
+                created_at TEXT DEFAULT (datetime('now','localtime'))
+            )
+        """)
+        conn.execute(
+            "INSERT OR REPLACE INTO daily_advice_cache (cache_key, content, created_at) VALUES (?, ?, datetime('now','localtime'))",
+            (cache_key, ai_text)
+        )
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logger.debug(f"[comprehensive_interpretation] 缓存写入失败: {e}")
+
+    return {"ok": True, "interpretation": ai_text, "cached": False, "signal_count": len(signals)}
+
+
 @router.post("/api/daily-advice/comprehensive-interpretation")
 async def comprehensive_interpretation(user_id: str = "default"):
-    """AI 综合解读今日全部信号（LLM 调用，默认关闭）。
+    """AI 综合解读今日全部信号（LLM 调用，默认关闭，异步执行）。
 
     成本管控：
     - 开关 llm_cost.daily_advice_ai_interpretation 默认 false
@@ -249,9 +356,6 @@ async def comprehensive_interpretation(user_id: str = "default"):
     - Prompt 限制 500 token 输出
     """
     from db.config import get_config
-    from services.llm_service import _call_llm, MODEL_AUX
-    from services.rag import build_rag_context_with_details
-    import time
 
     # 1. 开关检查
     if get_config("llm_cost.daily_advice_ai_interpretation", "false") != "true":
@@ -283,82 +387,29 @@ async def comprehensive_interpretation(user_id: str = "default"):
     except Exception:
         pass  # 缓存表可能不存在，跳过
 
-    # 4. 构建 prompt
-    signal_lines = []
-    for s in signals[:15]:  # 最多 15 条
-        signal_lines.append(
-            f"- [{s.get('severity','')}] {s.get('signal_type','')}: {s.get('title','')} "
-            f"(score={s.get('score','?')}, action={s.get('action_type','')}, "
-            f"amount={s.get('suggested_amount','?')})"
-        )
-    signals_text = "\n".join(signal_lines)
+    # 幂等保护：已有 running 任务时直接返回该 task_id
+    existing = get_running_async_task("daily_advice_interpretation")
+    if existing:
+        return {"task_id": existing["id"], "status": "running", "reused": True}
 
-    # 注入 RAG 知识库参考（限 2000 字）
-    try:
-        rag_ctx, _ = build_rag_context_with_details("今日持仓信号综合解读操作建议", top_k=3)
-        rag_text = rag_ctx[:2000] if rag_ctx else ""
-    except Exception:
-        rag_text = ""
+    task_id = create_async_task("daily_advice_interpretation", caller="daily_advice")
 
-    system_prompt = (
-        "你是理财决策助手。请根据今日全部持仓信号，给出综合操作建议。\n"
-        "要求：\n"
-        "1. 输出'操作优先级 Top3'（按紧急程度排序）\n"
-        "2. 输出'风险提示'（1-2 条）\n"
-        "3. 限制 500 token 内\n"
-        "4. 用中文，简洁直接，不啰嗦"
-    )
-    user_prompt = f"## 今日信号（{len(signals)} 条）\n{signals_text}\n"
-    if rag_text:
-        user_prompt += f"\n## 知识库参考\n{rag_text}\n"
-    user_prompt += "\n请给出综合操作建议。"
+    async def _run():
+        try:
+            result = await asyncio.to_thread(_interpretation_worker, signals, cache_key)
+            update_async_task(task_id, status="done", result=result)
+        except Exception as e:
+            logger.error(f"[comprehensive_interpretation] 任务 {task_id} 失败: {e}", exc_info=True)
+            update_async_task(task_id, status="error", error_msg=str(e))
 
-    # 5. LLM 调用
-    try:
-        response = _call_llm(
-            caller="daily_advice_interpretation",
-            trace_id=f"dai-{int(time.time())}",
-            model=MODEL_AUX,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            temperature=0.3,
-            max_tokens=800,
-        )
-        ai_text = response.choices[0].message.content or ""
-    except Exception as e:
-        logger.error(f"[comprehensive_interpretation] LLM 调用失败: {e}")
-        raise HTTPException(500, f"AI 综合解读失败: {e}")
-
-    # 6. 写缓存
-    try:
-        from db._conn import _get_conn
-        conn = _get_conn()
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS daily_advice_cache (
-                cache_key TEXT PRIMARY KEY,
-                content TEXT,
-                created_at TEXT DEFAULT (datetime('now','localtime'))
-            )
-        """)
-        conn.execute(
-            "INSERT OR REPLACE INTO daily_advice_cache (cache_key, content, created_at) VALUES (?, ?, datetime('now','localtime'))",
-            (cache_key, ai_text)
-        )
-        conn.commit()
-        conn.close()
-    except Exception as e:
-        logger.debug(f"[comprehensive_interpretation] 缓存写入失败: {e}")
-
-    return {"ok": True, "interpretation": ai_text, "cached": False, "signal_count": len(signals)}
+    asyncio.create_task(_run())
+    return {"task_id": task_id, "status": "running"}
 
 
 # ── 周报生成器 ──────────────────────────────────────────
 
-@router.post("/api/daily-advice/weekly-report")
-async def generate_weekly_report(user_id: str = "default"):
-    """Generate weekly investment report from signals, decisions, and thread summaries."""
+def _weekly_report_worker(user_id: str) -> dict:
+    """同步：从信号/决策/对话摘要生成周报。"""
     from datetime import datetime, timedelta
     from db.thread_summaries import list_thread_summaries
     from db._conn import _get_conn
@@ -405,38 +456,56 @@ async def generate_weekly_report(user_id: str = "default"):
 3. 下周关注点
 """
 
-    try:
-        from services.llm_service import _call_llm, MODEL_AUX
-        from db.config import get_config_float, get_config_int
+    from services.llm_service import _call_llm, MODEL_AUX
+    from db.config import get_config_float, get_config_int
 
-        response = _call_llm(
-            caller="weekly_report",
-            model=MODEL_AUX,
-            messages=[
-                {"role": "system", "content": "你是一个专业的投资周报撰写助手。"},
-                {"role": "user", "content": prompt},
-            ],
-            temperature=get_config_float("llm.temperature_analysis", 0.3),
-            max_tokens=get_config_int("llm.max_tokens_analysis", 4096),
-        )
-        report_text = response.choices[0].message.content or ""
+    response = _call_llm(
+        caller="weekly_report",
+        model=MODEL_AUX,
+        messages=[
+            {"role": "system", "content": "你是一个专业的投资周报撰写助手。"},
+            {"role": "user", "content": prompt},
+        ],
+        temperature=get_config_float("llm.temperature_analysis", 0.3),
+        max_tokens=get_config_int("llm.max_tokens_analysis", 4096),
+    )
+    report_text = response.choices[0].message.content or ""
 
-        return {
-            "period": {"from": week_ago, "to": datetime.now().isoformat()},
-            "stats": {
-                "total_signals": len(signals_list),
-                "actionable": actionable_count,
-                "watch": watch_count,
-                "decisions": len(decisions_list),
-                "conversations": len(summaries_week)
-            },
-            "report": report_text,
-            "signals": signals_list[:10],
-            "decisions": decisions_list[:5]
-        }
-    except Exception as e:
-        logger.error(f"周报生成失败: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+    return {
+        "period": {"from": week_ago, "to": datetime.now().isoformat()},
+        "stats": {
+            "total_signals": len(signals_list),
+            "actionable": actionable_count,
+            "watch": watch_count,
+            "decisions": len(decisions_list),
+            "conversations": len(summaries_week)
+        },
+        "report": report_text,
+        "signals": signals_list[:10],
+        "decisions": decisions_list[:5]
+    }
+
+
+@router.post("/api/daily-advice/weekly-report")
+async def generate_weekly_report(user_id: str = "default"):
+    """Generate weekly investment report from signals, decisions, and thread summaries（异步执行）。"""
+    # 幂等保护：已有 running 任务时直接返回该 task_id
+    existing = get_running_async_task("daily_advice_weekly_report")
+    if existing:
+        return {"task_id": existing["id"], "status": "running", "reused": True}
+
+    task_id = create_async_task("daily_advice_weekly_report", caller="daily_advice")
+
+    async def _run():
+        try:
+            result = await asyncio.to_thread(_weekly_report_worker, user_id)
+            update_async_task(task_id, status="done", result=result)
+        except Exception as e:
+            logger.error(f"周报生成失败: {e}", exc_info=True)
+            update_async_task(task_id, status="error", error_msg=str(e))
+
+    asyncio.create_task(_run())
+    return {"task_id": task_id, "status": "running"}
 
 
 # ── 决策标签管理 ──────────────────────────────────────────

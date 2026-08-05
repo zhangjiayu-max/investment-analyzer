@@ -2,6 +2,7 @@
 
 提供资产全景、健康分、四笔钱诊断、行动清单、历史趋势、用户画像等接口。
 """
+import asyncio
 import logging
 from datetime import datetime
 from typing import Optional
@@ -9,6 +10,7 @@ from typing import Optional
 from fastapi import APIRouter, Query
 from pydantic import BaseModel, Field
 
+from db import get_running_async_task, create_async_task, update_async_task
 from services.health.health_v2_service import (
     get_health_v2_dashboard,
     recalculate_health_v2,
@@ -40,14 +42,48 @@ class ActionStatusUpdate(BaseModel):
 
 @router.get("/dashboard")
 async def dashboard(user_id: str = Query("default"), force_refresh: bool = Query(False)):
-    """获取全账户资产健康度诊断仪表盘。"""
-    return get_health_v2_dashboard(user_id=user_id, force_refresh=force_refresh)
+    """获取全账户资产健康度诊断仪表盘（异步执行）。"""
+    # 幂等保护：已有 running 任务时直接返回该 task_id
+    existing = get_running_async_task("health_v2_dashboard")
+    if existing:
+        return {"task_id": existing["id"], "status": "running", "reused": True}
+
+    task_id = create_async_task("health_v2_dashboard", caller="health_v2")
+
+    async def _run():
+        try:
+            result = await asyncio.to_thread(
+                get_health_v2_dashboard, user_id=user_id, force_refresh=force_refresh
+            )
+            update_async_task(task_id, status="done", result=result)
+        except Exception as e:
+            logger.error(f"任务 {task_id} 失败: {e}", exc_info=True)
+            update_async_task(task_id, status="error", error_msg=str(e))
+
+    asyncio.create_task(_run())
+    return {"task_id": task_id, "status": "running"}
 
 
 @router.post("/recalculate")
 async def recalculate(user_id: str = Query("default")):
-    """强制重新计算健康度诊断（清除缓存）。"""
-    return recalculate_health_v2(user_id=user_id)
+    """强制重新计算健康度诊断（清除缓存）（异步执行）。"""
+    # 幂等保护：已有 running 任务时直接返回该 task_id
+    existing = get_running_async_task("health_v2_recalculate")
+    if existing:
+        return {"task_id": existing["id"], "status": "running", "reused": True}
+
+    task_id = create_async_task("health_v2_recalculate", caller="health_v2")
+
+    async def _run():
+        try:
+            result = await asyncio.to_thread(recalculate_health_v2, user_id=user_id)
+            update_async_task(task_id, status="done", result=result)
+        except Exception as e:
+            logger.error(f"任务 {task_id} 失败: {e}", exc_info=True)
+            update_async_task(task_id, status="error", error_msg=str(e))
+
+    asyncio.create_task(_run())
+    return {"task_id": task_id, "status": "running"}
 
 
 @router.get("/profile")

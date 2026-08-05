@@ -19,6 +19,7 @@ from fastapi import APIRouter
 
 from db._conn import _get_conn
 from db.health_score import save_health_score, get_health_score, list_health_scores
+from db import get_running_async_task, create_async_task, update_async_task
 from db.portfolio import list_holdings
 from db.valuations import get_latest_valuation, list_valuation_indexes, get_index_info
 from db.config import get_config, get_config_float
@@ -1114,9 +1115,24 @@ async def calc_fear_greed_index() -> dict:
 
 @router.post("/calculate")
 async def calculate_health_score():
-    """计算并返回健康分。"""
-    result = await calc_health_score()
-    return {"status": "ok", "result": result}
+    """计算并返回健康分（异步执行）。"""
+    # 幂等保护：已有 running 任务时直接返回该 task_id
+    existing = get_running_async_task("health_score_calc")
+    if existing:
+        return {"task_id": existing["id"], "status": "running", "reused": True}
+
+    task_id = create_async_task("health_score_calc", caller="health_score")
+
+    async def _run():
+        try:
+            result = await calc_health_score()
+            update_async_task(task_id, status="done", result=result)
+        except Exception as e:
+            logger.error(f"任务 {task_id} 失败: {e}", exc_info=True)
+            update_async_task(task_id, status="error", error_msg=str(e))
+
+    asyncio.create_task(_run())
+    return {"task_id": task_id, "status": "running"}
 
 
 @router.get("/today")

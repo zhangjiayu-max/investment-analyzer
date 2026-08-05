@@ -19,6 +19,7 @@ from fastapi import APIRouter, HTTPException, Query, Body
 from db.market_events import (
     list_market_events, get_market_event,
 )
+from db import get_running_async_task, create_async_task, update_async_task
 from api.response import ApiResponse
 
 logger = logging.getLogger(__name__)
@@ -174,14 +175,36 @@ async def get_event(event_id: str):
 
 @router.post("/api/alerts/event-radar/verify")
 async def manual_verify():
-    """手动触发事件落地验证（扫描已落地超过 T+N 的事件）。"""
-    try:
-        from services.event_radar import verify_materialized_events
-        result = verify_materialized_events()
-        return ApiResponse.success(data=result)
-    except Exception as e:
-        logger.error(f"手动触发事件验证失败: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"验证失败: {e}")
+    """手动触发事件落地验证（扫描已落地超过 T+N 的事件,异步执行）。
+
+    立即返回 task_id,后台执行验证(可能含多次 LLM 调用)。
+    前端通过 /api/async-tasks/{task_id}/status 查询进度。
+    """
+    # 幂等保护:已有 running 任务时直接复用,不重复触发
+    existing = get_running_async_task("event_radar_verify")
+    if existing:
+        logger.info(f"[event_radar-verify] 已有验证任务在执行 {existing['id']},返回该任务ID(不重复触发)")
+        return ApiResponse.success(data={
+            "task_id": existing["id"],
+            "status": "running",
+            "reused": True,
+        })
+
+    task_id = create_async_task("event_radar_verify", caller="event_radar")
+
+    async def _run():
+        try:
+            from services.event_radar import verify_materialized_events
+            result = await asyncio.to_thread(verify_materialized_events)
+            update_async_task(task_id, status="done", result=result)
+            logger.info(f"[event_radar-verify] 任务 {task_id} 完成: {result}")
+        except Exception as e:
+            logger.error(f"事件验证任务 {task_id} 失败: {e}", exc_info=True)
+            update_async_task(task_id, status="error", error_msg=str(e))
+
+    asyncio.create_task(_run())
+    logger.info(f"[event_radar-verify] 任务 {task_id} 已启动(后台异步执行)")
+    return ApiResponse.success(data={"task_id": task_id, "status": "running"})
 
 
 @router.post("/api/alerts/event-radar/backfill-verify")
@@ -189,7 +212,7 @@ async def backfill_verification(
     max_events: int = Body(200, embed=True, ge=1, le=1000),
     force: bool = Body(False, embed=True, description="True 时忽略 T+3 窗口检查，对所有未验证事件尝试验证"),
 ):
-    """Accuracy-Boost（2026-07-30）：批量补全历史未验证事件。
+    """Accuracy-Boost（2026-07-30）：批量补全历史未验证事件(异步执行)。
 
     与 /verify 的区别：
     1. 独立运行，不依赖 scan_forward_events
@@ -198,14 +221,36 @@ async def backfill_verification(
     4. force=True 可突破 T+3 窗口限制（用于历史数据补全）
 
     场景：77 个 materialized 事件只有 25 个被验证，本接口补全剩余 52 个。
+
+    立即返回 task_id,后台执行,前端通过 /api/async-tasks/{task_id}/status 查询进度。
     """
-    try:
-        from services.market.event_radar import backfill_event_verification
-        result = backfill_event_verification(max_events=max_events, force=force)
-        return ApiResponse.success(data=result)
-    except Exception as e:
-        logger.error(f"backfill 验证失败: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"backfill 验证失败: {e}")
+    # 幂等保护:已有 running 任务时直接复用,不重复触发
+    existing = get_running_async_task("event_radar_backfill_verify")
+    if existing:
+        logger.info(f"[event_radar-backfill-verify] 已有任务在执行 {existing['id']},返回该任务ID(不重复触发)")
+        return ApiResponse.success(data={
+            "task_id": existing["id"],
+            "status": "running",
+            "reused": True,
+        })
+
+    task_id = create_async_task("event_radar_backfill_verify", caller="event_radar")
+
+    async def _run():
+        try:
+            from services.market.event_radar import backfill_event_verification
+            result = await asyncio.to_thread(
+                backfill_event_verification, max_events=max_events, force=force
+            )
+            update_async_task(task_id, status="done", result=result)
+            logger.info(f"[event_radar-backfill-verify] 任务 {task_id} 完成: {result}")
+        except Exception as e:
+            logger.error(f"backfill 验证任务 {task_id} 失败: {e}", exc_info=True)
+            update_async_task(task_id, status="error", error_msg=str(e))
+
+    asyncio.create_task(_run())
+    logger.info(f"[event_radar-backfill-verify] 任务 {task_id} 已启动(后台异步执行)")
+    return ApiResponse.success(data={"task_id": task_id, "status": "running"})
 
 
 @router.get("/api/alerts/event-radar/accuracy")
@@ -222,21 +267,41 @@ async def accuracy_stats():
 
 @router.post("/api/alerts/event-radar/analyze-impact")
 async def analyze_event_impact_api(event_id: str = Body(..., embed=True)):
-    """LLM 深度解读事件影响（结合用户持仓）。
+    """LLM 深度解读事件影响（结合用户持仓,异步执行）。
 
     - 开关：alerts.event_impact_analysis_enabled（默认 false）
     - 缓存：alerts.event_impact_analysis_cache_days（默认 7 天）
-    - 失败时返回 error 字段，HTTP 仍 200，前端按 data.error 判断
+    - 立即返回 task_id,后台执行 LLM 解读,前端通过 /api/async-tasks/{task_id}/status 查询进度
+    - 同一时间只允许一个 analyze-impact 任务,已有运行中任务时复用其 task_id
     """
     if not event_id:
         raise HTTPException(status_code=400, detail="event_id 不能为空")
-    try:
-        from services.event_radar import analyze_event_impact
-        result = analyze_event_impact(event_id)
-        return ApiResponse.success(data=result)
-    except Exception as e:
-        logger.error(f"事件影响分析失败 event_id={event_id}: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"分析失败: {e}")
+
+    # 幂等保护:同一时间只允许一个 analyze-impact 任务(task_type 保持不变)
+    existing = get_running_async_task("event_radar_analyze_impact")
+    if existing:
+        logger.info(f"[event_radar-analyze-impact] 已有任务在执行 {existing['id']},返回该任务ID(不重复触发)")
+        return ApiResponse.success(data={
+            "task_id": existing["id"],
+            "status": "running",
+            "reused": True,
+        })
+
+    task_id = create_async_task("event_radar_analyze_impact", caller="event_radar")
+
+    async def _run():
+        try:
+            from services.event_radar import analyze_event_impact
+            result = await asyncio.to_thread(analyze_event_impact, event_id)
+            update_async_task(task_id, status="done", result=result)
+            logger.info(f"[event_radar-analyze-impact] 任务 {task_id} 完成: event_id={event_id}")
+        except Exception as e:
+            logger.error(f"事件影响分析任务 {task_id} 失败 event_id={event_id}: {e}", exc_info=True)
+            update_async_task(task_id, status="error", error_msg=str(e))
+
+    asyncio.create_task(_run())
+    logger.info(f"[event_radar-analyze-impact] 任务 {task_id} 已启动(后台异步执行) event_id={event_id}")
+    return ApiResponse.success(data={"task_id": task_id, "status": "running"})
 
 
 @router.get("/api/alerts/event-radar/events/{event_id}/impact-amount")
@@ -275,75 +340,101 @@ async def estimate_impact_amount_api(event_id: str):
 
 @router.post("/api/alerts/event-radar/analyze-article")
 async def analyze_article_trends(url: str = Body(..., embed=True)):
-    """抓取文章并提取投资趋势。
+    """抓取文章并提取投资趋势(异步执行)。
 
     流程：
-    1. 调用 services/article_reader.py 的 fetch_generic_article 抓取文章
-    2. 调用 services/event_radar.py 的 _extract_trends_from_articles 提取趋势
+    1. 调用 services/article_reader.py 的 fetch_generic_article 抓取文章(主流程 await)
+    2. 调用 services/event_radar.py 的 _extract_trends_from_articles 提取趋势(后台执行)
     3. 将趋势写入 market_events 表（带 time_frame/evidence 字段）
-    4. 返回提取的趋势列表
+    4. 立即返回 task_id,前端通过 /api/async-tasks/{task_id}/status 查询进度
+
+    注意:文章抓取保留在主流程(保留 await),仅把后续同步 LLM 调用 + 写库丢到后台。
     """
     if not url or not url.strip().startswith(("http://", "https://")):
         raise HTTPException(status_code=400, detail="请提供合法的文章 URL（http/https）")
-    try:
-        from services.article_reader import fetch_generic_article
-        from services.event_radar import _extract_trends_from_articles
-        from db.market_events import create_market_event, get_market_event, _gen_event_id
 
-        # 1. 抓取文章
-        article = await fetch_generic_article(url)
-        content = (article or {}).get("content_text", "") or ""
-        title = (article or {}).get("title", "") or ""
-
-        if len(content) < 500:
-            raise HTTPException(
-                status_code=400,
-                detail=f"文章内容过短或抓取失败（{len(content)} 字符），无法提取趋势。标题：{title or '未知'}",
-            )
-
-        # 2. 提取趋势
-        trends = _extract_trends_from_articles(content, title)
-
-        # 3. 写入 market_events 表（幂等）
-        saved_new = 0
-        for trend in trends:
-            try:
-                eid = _gen_event_id(trend.get("title", ""), "")
-                existing = get_market_event(eid)
-                create_market_event(
-                    title=trend.get("title", ""),
-                    summary=trend.get("summary", ""),
-                    event_type=trend.get("event_type", "theme"),
-                    direction=trend.get("direction", "neutral"),
-                    expected_date="",
-                    affected_sectors=trend.get("affected_sectors", []),
-                    affected_themes=trend.get("affected_themes", []),
-                    confidence=float(trend.get("confidence", 0.5)),
-                    sources=[{"title": title, "url": url}],
-                    time_frame=trend.get("time_frame", ""),
-                    evidence=trend.get("evidence", ""),
-                )
-                if not existing:
-                    saved_new += 1
-            except Exception as e:
-                logger.warning(f"写入趋势事件失败 '{trend.get('title', '')}': {e}")
-
-        logger.info(
-            f"[event_radar] 文章趋势分析完成: url={url}, title={title}, "
-            f"提取 {len(trends)} 个趋势，新增 {saved_new} 个"
-        )
-
+    # 幂等保护:已有 running 任务时直接复用,不重复触发
+    existing = get_running_async_task("event_radar_analyze_article")
+    if existing:
+        logger.info(f"[event_radar-analyze-article] 已有任务在执行 {existing['id']},返回该任务ID(不重复触发)")
         return ApiResponse.success(data={
-            "trends": trends,
-            "total": len(trends),
-            "new": saved_new,
-            "article_title": title,
+            "task_id": existing["id"],
+            "status": "running",
+            "reused": True,
         })
+
+    from services.article_reader import fetch_generic_article
+
+    # 1. 抓取文章(保留 await,在主流程中执行)
+    try:
+        article = await fetch_generic_article(url)
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"分析文章趋势失败: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"分析失败: {e}")
+        logger.error(f"抓取文章失败 url={url}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"抓取文章失败: {e}")
+
+    content = (article or {}).get("content_text", "") or ""
+    title = (article or {}).get("title", "") or ""
+
+    if len(content) < 500:
+        raise HTTPException(
+            status_code=400,
+            detail=f"文章内容过短或抓取失败（{len(content)} 字符），无法提取趋势。标题：{title or '未知'}",
+        )
+
+    task_id = create_async_task("event_radar_analyze_article", caller="event_radar")
+
+    async def _run():
+        try:
+            from services.event_radar import _extract_trends_from_articles
+            from db.market_events import create_market_event, get_market_event, _gen_event_id
+
+            # 2. 提取趋势(同步阻塞调 LLM,丢到线程池)
+            trends = await asyncio.to_thread(_extract_trends_from_articles, content, title)
+
+            # 3. 写入 market_events 表（幂等）
+            saved_new = 0
+            for trend in trends:
+                try:
+                    eid = _gen_event_id(trend.get("title", ""), "")
+                    existing_evt = get_market_event(eid)
+                    create_market_event(
+                        title=trend.get("title", ""),
+                        summary=trend.get("summary", ""),
+                        event_type=trend.get("event_type", "theme"),
+                        direction=trend.get("direction", "neutral"),
+                        expected_date="",
+                        affected_sectors=trend.get("affected_sectors", []),
+                        affected_themes=trend.get("affected_themes", []),
+                        confidence=float(trend.get("confidence", 0.5)),
+                        sources=[{"title": title, "url": url}],
+                        time_frame=trend.get("time_frame", ""),
+                        evidence=trend.get("evidence", ""),
+                    )
+                    if not existing_evt:
+                        saved_new += 1
+                except Exception as e:
+                    logger.warning(f"写入趋势事件失败 '{trend.get('title', '')}': {e}")
+
+            result = {
+                "trends": trends,
+                "total": len(trends),
+                "new": saved_new,
+                "article_title": title,
+            }
+            update_async_task(task_id, status="done", result=result)
+            logger.info(
+                f"[event_radar-analyze-article] 任务 {task_id} 完成: url={url}, title={title}, "
+                f"提取 {len(trends)} 个趋势，新增 {saved_new} 个"
+            )
+        except Exception as e:
+            logger.error(f"分析文章趋势任务 {task_id} 失败: {e}", exc_info=True)
+            update_async_task(task_id, status="error", error_msg=str(e))
+
+    asyncio.create_task(_run())
+    logger.info(f"[event_radar-analyze-article] 任务 {task_id} 已启动(后台异步执行) url={url}")
+    return ApiResponse.success(data={"task_id": task_id, "status": "running"})
 
 
 # ── O-8（2026-07-21）：一键触发历史数据 backfill ──
@@ -353,38 +444,57 @@ async def backfill_history(
     max_events: int = Body(100, embed=True, ge=1, le=500),
     only: Optional[str] = Query(None, description="仅执行指定 backfill 类型：sources/impact/direction/confidence/opportunity/watchlist。空则执行全部"),
 ):
-    """一键触发历史数据 backfill（O-2/O-3/O-4/O-5/O-6/O-7/O-8）。
+    """一键触发历史数据 backfill（O-2/O-3/O-4/O-5/O-6/O-7/O-8,异步执行）。
 
     Args:
         max_events: 每类 backfill 最多处理多少条
         only: 仅执行指定类型（默认全部）
     Returns:
-        各类 backfill 的 processed/updated/skipped 统计
+        立即返回 task_id,后台执行各类 backfill,前端通过 /api/async-tasks/{task_id}/status 查询进度。
+        完成后 result 字段为各类 backfill 的 processed/updated/skipped 统计。
     """
-    try:
-        results = {}
-        if only is None or only == "sources":
-            from services.market.event_radar import backfill_event_sources
-            results["sources"] = backfill_event_sources(max_events=max_events)
-        if only is None or only == "impact":
-            from services.market.event_radar import backfill_event_impact_fields
-            results["impact"] = backfill_event_impact_fields(max_events=max_events)
-        if only is None or only == "direction":
-            from services.market.event_radar import backfill_event_direction
-            results["direction"] = backfill_event_direction(max_events=max_events)
-        if only is None or only == "confidence":
-            from services.market.event_radar import backfill_event_confidence
-            results["confidence"] = backfill_event_confidence(max_events=max_events)
-        if only is None or only == "opportunity":
-            from services.advisor.opportunity_engine import backfill_opportunity_fields
-            results["opportunity"] = backfill_opportunity_fields(max_items=max_events)
-        if only is None or only == "watchlist":
-            from db.watchlist import refresh_watchlist_percentile
-            results["watchlist"] = refresh_watchlist_percentile()
-        return ApiResponse.success(data=results)
-    except Exception as e:
-        logger.error(f"backfill 失败: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"backfill 失败: {e}")
+    # 幂等保护:已有 running 任务时直接复用,不重复触发
+    existing = get_running_async_task("event_radar_backfill")
+    if existing:
+        logger.info(f"[event_radar-backfill] 已有任务在执行 {existing['id']},返回该任务ID(不重复触发)")
+        return ApiResponse.success(data={
+            "task_id": existing["id"],
+            "status": "running",
+            "reused": True,
+        })
+
+    task_id = create_async_task("event_radar_backfill", caller="event_radar")
+
+    async def _run():
+        try:
+            results = {}
+            if only is None or only == "sources":
+                from services.market.event_radar import backfill_event_sources
+                results["sources"] = await asyncio.to_thread(backfill_event_sources, max_events=max_events)
+            if only is None or only == "impact":
+                from services.market.event_radar import backfill_event_impact_fields
+                results["impact"] = await asyncio.to_thread(backfill_event_impact_fields, max_events=max_events)
+            if only is None or only == "direction":
+                from services.market.event_radar import backfill_event_direction
+                results["direction"] = await asyncio.to_thread(backfill_event_direction, max_events=max_events)
+            if only is None or only == "confidence":
+                from services.market.event_radar import backfill_event_confidence
+                results["confidence"] = await asyncio.to_thread(backfill_event_confidence, max_events=max_events)
+            if only is None or only == "opportunity":
+                from services.advisor.opportunity_engine import backfill_opportunity_fields
+                results["opportunity"] = await asyncio.to_thread(backfill_opportunity_fields, max_items=max_events)
+            if only is None or only == "watchlist":
+                from db.watchlist import refresh_watchlist_percentile
+                results["watchlist"] = await asyncio.to_thread(refresh_watchlist_percentile)
+            update_async_task(task_id, status="done", result=results)
+            logger.info(f"[event_radar-backfill] 任务 {task_id} 完成: {results}")
+        except Exception as e:
+            logger.error(f"backfill 任务 {task_id} 失败: {e}", exc_info=True)
+            update_async_task(task_id, status="error", error_msg=str(e))
+
+    asyncio.create_task(_run())
+    logger.info(f"[event_radar-backfill] 任务 {task_id} 已启动(后台异步执行) only={only}")
+    return ApiResponse.success(data={"task_id": task_id, "status": "running"})
 
 
 # ── LI-8（2026-07-22）：领先指标接入层 API ──

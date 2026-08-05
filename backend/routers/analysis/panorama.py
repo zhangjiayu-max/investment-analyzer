@@ -12,6 +12,7 @@ from db import (
     create_portfolio_analysis_record, list_portfolio_analysis_records,
     get_analysis_agent_by_name,
     save_analysis_conclusion,
+    create_async_task, update_async_task, get_running_async_task,
 )
 from db.portfolio import update_analysis_record, get_analysis_record_status
 from db.agent_analysis_log import create_analysis_log, complete_analysis_log
@@ -48,6 +49,11 @@ async def panorama_analysis_api(req: PanoramaAnalysisRequest):
     if not agent:
         raise HTTPException(404, "全景诊断分析师未配置")
 
+    # 幂等保护:已有 running 任务时直接返回该 task_id,不重复触发
+    existing = get_running_async_task("panorama_analysis")
+    if existing:
+        return {"task_id": existing["id"], "status": "running", "reused": True}
+
     record_id = create_portfolio_analysis_record(
         analysis_type="panorama",
         summary=f"全景诊断 · {len(holdings)}只基金",
@@ -56,15 +62,17 @@ async def panorama_analysis_api(req: PanoramaAnalysisRequest):
         status="running",
         agent_id=agent["id"],
     )
+    # 创建 async_task 记录用于通用状态查询
+    async_task_id = create_async_task("panorama_analysis", caller="panorama")
 
-    task = asyncio.create_task(_run_panorama_async(record_id, agent["system_prompt"], holdings, agent["id"], agent["name"]))
+    task = asyncio.create_task(_run_panorama_async(async_task_id, record_id, agent["system_prompt"], holdings, agent["id"], agent["name"]))
     _background_tasks.add(task)
     task.add_done_callback(_background_tasks.discard)
 
-    return {"ok": True, "id": record_id, "status": "running"}
+    return {"ok": True, "id": record_id, "task_id": async_task_id, "status": "running"}
 
 
-async def _run_panorama_async(record_id: int, system_prompt: str, holdings: list, agent_id: int = None, agent_name: str = ""):
+async def _run_panorama_async(async_task_id: int, record_id: int, system_prompt: str, holdings: list, agent_id: int = None, agent_name: str = ""):
     """后台执行全景诊断分析。"""
     uid = f"panorama_{record_id}"
     try:
@@ -141,6 +149,7 @@ async def _run_panorama_async(record_id: int, system_prompt: str, holdings: list
         tokens = response.usage.total_tokens if response.usage else 0
 
         update_analysis_record(record_id, result_data=result_text, token_usage=tokens, status="done")
+        update_async_task(async_task_id, status="done")
         _elapsed_ms = int((time.time() - _start_ts) * 1000)
         complete_analysis_log(trace_id=trace_id, status="done", duration_ms=_elapsed_ms, token_usage=tokens)
         _extract_candidates_safely(record_id, "panorama", result_text)
@@ -181,6 +190,7 @@ async def _run_panorama_async(record_id: int, system_prompt: str, holdings: list
     except Exception as e:
         logger.error(f"全景诊断失败 record_id={record_id}: {e}")
         update_analysis_record(record_id, status="error", error_msg=str(e))
+        update_async_task(async_task_id, status="error", error_msg=str(e))
         _elapsed_ms = int((time.time() - _start_ts) * 1000)
         complete_analysis_log(trace_id=trace_id, status="error", duration_ms=_elapsed_ms, error_msg=str(e))
     finally:

@@ -2,6 +2,7 @@
 
 管理看好但未持有的基金，方便择机买入。"""
 
+import asyncio
 import logging
 import time
 from functools import lru_cache
@@ -16,6 +17,7 @@ from db import (
     batch_add_to_watchlist, refresh_watchlist_navs, get_watchlist_summary,
     lookup_fund_info, fetch_fund_nav,
     get_holding_by_fund,
+    get_running_async_task, create_async_task, update_async_task,
 )
 from db.config import get_config, get_config_bool, get_config_float, get_config_int
 from db.watchlist import update_entry_info, get_watchlist_with_exit_status
@@ -103,7 +105,7 @@ async def watchlist_summary_api():
 
 @router.get("/api/watchlist/patrol")
 async def watchlist_patrol_api():
-    """关注列表巡检 — 刷新净值/估值，计算上车价位与信号灯。
+    """关注列表巡检 — 刷新净值/估值，计算上车价位与信号灯（异步执行）。
 
     2026-07-14 增强：
     - 巡检时强制刷新净值（fetch_fund_nav）
@@ -111,6 +113,18 @@ async def watchlist_patrol_api():
     - 自动推算建议上车价（suggested_buy_price）
     - 响应 all_items 增加 suggested_buy_price/buy_price_source/distance_to_buy
     """
+    # 幂等保护：已有 running 任务时直接返回该 task_id
+    existing = get_running_async_task("watchlist_patrol")
+    if existing:
+        return {"task_id": existing["id"], "status": "running", "reused": True}
+
+    task_id = create_async_task("watchlist_patrol", caller="watchlist")
+    asyncio.create_task(_run_patrol_async(task_id))
+    return {"task_id": task_id, "status": "running"}
+
+
+async def _do_patrol_work() -> dict:
+    """巡检主体逻辑（含 5 分钟缓存）。"""
     global _patrol_cache, _patrol_cache_time
 
     # 5分钟缓存
@@ -742,6 +756,16 @@ async def watchlist_patrol_api():
     _patrol_cache_time = time.time()
 
     return result
+
+
+async def _run_patrol_async(task_id: int):
+    """后台执行关注列表巡检。"""
+    try:
+        result = await _do_patrol_work()
+        update_async_task(task_id, status="done", result=result)
+    except Exception as e:
+        logger.error(f"巡检任务 {task_id} 失败: {e}", exc_info=True)
+        update_async_task(task_id, status="error", error_msg=str(e))
 
 
 def _fetch_valuation_via_akshare(index_name: str) -> dict | None:

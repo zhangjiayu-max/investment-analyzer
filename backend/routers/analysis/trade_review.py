@@ -9,6 +9,7 @@ from fastapi import APIRouter, HTTPException
 from db import (
     list_transactions, get_transaction_tags, get_analysis_agent_by_name,
     create_portfolio_analysis_record,
+    create_async_task, update_async_task, get_running_async_task,
 )
 from db.portfolio import update_analysis_record
 from db.agent_analysis_log import create_analysis_log, complete_analysis_log
@@ -124,6 +125,11 @@ async def trade_review_api(req: TradeReviewRequest):
         f"\n## 交易明细（含交易时点估值）\n" + "\n".join(tx_lines)
     )
 
+    # 幂等保护:已有 running 任务时直接返回该 task_id,不重复触发
+    existing = get_running_async_task("trade_review_analysis")
+    if existing:
+        return {"task_id": existing["id"], "status": "running", "reused": True}
+
     # 创建记录（status='running'）
     record_id = create_portfolio_analysis_record(
         analysis_type="trade_review",
@@ -133,16 +139,18 @@ async def trade_review_api(req: TradeReviewRequest):
         status="running",
         agent_id=agent["id"],
     )
+    # 创建 async_task 记录用于通用状态查询
+    async_task_id = create_async_task("trade_review_analysis", caller="trade_review")
 
     # 后台执行分析
-    task = asyncio.create_task(_run_trade_review_async(record_id, agent["system_prompt"], user_content, agent["id"], agent["name"]))
+    task = asyncio.create_task(_run_trade_review_async(async_task_id, record_id, agent["system_prompt"], user_content, agent["id"], agent["name"]))
     _background_tasks.add(task)
     task.add_done_callback(_background_tasks.discard)
 
-    return {"ok": True, "id": record_id, "status": "running"}
+    return {"ok": True, "id": record_id, "task_id": async_task_id, "status": "running"}
 
 
-async def _run_trade_review_async(record_id: int, system_prompt: str, user_content: str, agent_id: int = None, agent_name: str = ""):
+async def _run_trade_review_async(async_task_id: int, record_id: int, system_prompt: str, user_content: str, agent_id: int = None, agent_name: str = ""):
     """后台执行交易复盘分析。"""
     import uuid
     trace_id = f"log_{uuid.uuid4().hex[:12]}"
@@ -169,6 +177,7 @@ async def _run_trade_review_async(record_id: int, system_prompt: str, user_conte
         result_text = response.choices[0].message.content or ""
         tokens = response.usage.total_tokens if response.usage else 0
         update_analysis_record(record_id, result_data=result_text, token_usage=tokens, status="done")
+        update_async_task(async_task_id, status="done")
         _elapsed_ms = int((time.time() - _start_ts) * 1000)
         complete_analysis_log(trace_id=trace_id, status="done", duration_ms=_elapsed_ms, token_usage=tokens)
         _extract_candidates_safely(record_id, "trade_review", result_text)
@@ -176,6 +185,7 @@ async def _run_trade_review_async(record_id: int, system_prompt: str, user_conte
     except Exception as e:
         logger.error(f"交易复盘失败 record_id={record_id}: {e}")
         update_analysis_record(record_id, status="error", error_msg=str(e))
+        update_async_task(async_task_id, status="error", error_msg=str(e))
         _elapsed_ms = int((time.time() - _start_ts) * 1000)
         complete_analysis_log(trace_id=trace_id, status="error", duration_ms=_elapsed_ms, error_msg=str(e))
 

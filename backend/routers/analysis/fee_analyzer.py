@@ -5,7 +5,7 @@ from datetime import datetime
 
 from fastapi import APIRouter
 
-from db import list_holdings, get_config, get_config_int, create_async_task, update_async_task
+from db import list_holdings, get_config, get_config_int, create_async_task, update_async_task, get_running_async_task
 from db.portfolio import save_analysis_cache, get_analysis_cache
 from services.llm_service import _call_llm, call_llm_async, MODEL_AUX
 
@@ -281,6 +281,11 @@ async def trigger_fee_analysis(user_id: str = "default"):
     active = [h for h in holdings if (h.get("shares") or 0) > 0 and (h.get("current_value") or 0) > 0]
     if not active:
         return {"status": "error", "message": "无有效持仓"}
+
+    # 幂等保护:已有 running 任务时直接返回该 task_id,不重复触发
+    existing = get_running_async_task("fee_analysis")
+    if existing:
+        return {"status": "ok", "task_id": existing["id"], "message": "费率分析已在运行中", "reused": True}
 
     task_id = create_async_task("fee_analysis", user_id)
 

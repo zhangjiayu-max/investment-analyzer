@@ -10,7 +10,7 @@ from datetime import datetime
 from fastapi import APIRouter, HTTPException
 
 from db import list_valuation_indexes, list_holdings, get_analysis_agent_by_name, get_config_float, get_config_int
-from db import create_async_task, update_async_task, get_async_task
+from db import create_async_task, update_async_task, get_async_task, get_running_async_task
 from db.portfolio import save_analysis_cache, get_analysis_cache
 from db.agents import create_agent_run
 from db._conn import _get_conn
@@ -672,6 +672,10 @@ async def get_market_intelligence_overview(force: bool = False):
 @router.post("/overview/trigger")
 async def trigger_market_intelligence():
     """触发市场热点情报分析（异步）。"""
+    # 幂等保护:已有 running 任务时直接返回该 task_id,不重复触发
+    existing = get_running_async_task("market_intelligence")
+    if existing:
+        return {"task_id": existing["id"], "status": "running", "reused": True}
     task_id = create_async_task("market_intelligence", caller="market_intelligence")
     task = asyncio.create_task(_run_market_intelligence_async(task_id))
     _background_tasks.add(task)

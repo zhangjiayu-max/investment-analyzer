@@ -15,7 +15,7 @@ from db import (
     save_prompt_version,
     get_latest_valuation, get_valuation_history,
     list_holdings,
-    create_async_task, update_async_task, get_async_task,
+    create_async_task, update_async_task, get_async_task, get_running_async_task,
     get_config_float, get_config_int,
 )
 from services.llm_service import _call_llm, MODEL_ANALYSIS
@@ -103,6 +103,11 @@ async def run_analysis(req: AnalysisRunRequest):
     agent = get_analysis_agent(req.agent_id)
     if not agent:
         raise HTTPException(404, "分析 Agent 不存在")
+
+    # 幂等保护:已有 running 任务时直接返回该 task_id,不重复触发
+    existing = get_running_async_task("index_analysis")
+    if existing:
+        return {"ok": True, "task_id": existing["id"], "status": "running", "reused": True}
 
     history_id = create_analysis_history(
         index_code=req.index_code,
