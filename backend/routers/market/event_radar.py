@@ -49,8 +49,21 @@ async def manual_scan():
 
     立即返回 task_id,后台执行扫描(含多次 LLM 调用,可能耗时 1-3 分钟)。
     前端通过 /scan/status/{task_id} 轮询进度。
+
+    如果已有扫描任务正在执行,直接返回该任务 ID,避免重复触发浪费 LLM 调用。
     """
     _cleanup_expired_tasks()
+
+    # 幂等保护:已有 running 任务时直接复用,不重复触发
+    for tid, t in _scan_tasks.items():
+        if t.get("status") == "running":
+            logger.info(f"[event_radar-scan] 已有扫描任务在执行 {tid},返回该任务ID(不重复触发)")
+            return ApiResponse.success(data={
+                "task_id": tid,
+                "status": "running",
+                "message": "已有扫描任务在执行,返回该任务ID",
+                "reused": True,
+            })
 
     task_id = f"scan_{datetime.now().strftime('%Y%m%d%H%M%S')}_{uuid.uuid4().hex[:8]}"
     _scan_tasks[task_id] = {
@@ -87,6 +100,7 @@ async def manual_scan():
         "task_id": task_id,
         "status": "running",
         "message": "扫描已启动,请通过 /scan/status/{task_id} 查询进度",
+        "reused": False,
     })
 
 
