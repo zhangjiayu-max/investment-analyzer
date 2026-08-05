@@ -169,6 +169,9 @@ const ddFilteredList = computed(() => {
 const liuyiHasPercentile = computed(() => {
   return liuyiIndexList.value.some(item => item.pe_percentile != null || item.pb_percentile != null)
 })
+const liuyiHasTemperature = computed(() => {
+  return liuyiIndexList.value.some(item => item.index_temperature != null)
+})
 const liuyiFilteredList = computed(() => {
   let list = liuyiIndexList.value
   if (liuyiSearchQuery.value) {
@@ -1597,6 +1600,9 @@ defineExpose({ loadHistory })
                     指数名称 <Icon v-if="liuyiSortKey === 'index_name'" :name="liuyiSortAsc ? 'arrow-up' : 'arrow-down'" size="10" class="sort-icon" />
                   </th>
                   <th>代码</th>
+                  <th v-if="liuyiHasTemperature" @click="liuyiSortBy('index_temperature')" class="sortable">
+                    温度 <Icon v-if="liuyiSortKey === 'index_temperature'" :name="liuyiSortAsc ? 'arrow-up' : 'arrow-down'" size="10" class="sort-icon" />
+                  </th>
                   <th @click="liuyiSortBy('pe')" class="sortable">
                     PE <Icon v-if="liuyiSortKey === 'pe'" :name="liuyiSortAsc ? 'arrow-up' : 'arrow-down'" size="10" class="sort-icon" />
                   </th>
@@ -1618,6 +1624,7 @@ defineExpose({ loadHistory })
                 <tr v-for="(item, idx) in liuyiFilteredList" :key="idx">
                   <td class="td-name">{{ item.index_name || '-' }}</td>
                   <td class="td-code font-jet">{{ item.index_code || '-' }}</td>
+                  <td v-if="liuyiHasTemperature" class="td-val font-jet">{{ item.index_temperature ?? '-' }}</td>
                   <td class="td-val font-jet">{{ item.pe ?? '-' }}</td>
                   <td v-if="liuyiHasPercentile">
                     <div v-if="item.pe_percentile != null" class="pe-percentile-cell">

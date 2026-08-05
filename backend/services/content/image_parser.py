@@ -236,11 +236,11 @@ DD_PARSE_PROMPT_CROP = """读取这张裁剪后的螺丝钉估值表。输出 JS
 
 # 六亿估值表（格式与螺丝钉一致，多指数表格）
 LIUYI_PARSE_PROMPT = """从图片表格读取每个指数，输出 JSON 数组：
-{"更新日期":"(YYYY-MM-DD)","市场温度":null,"数据":[{"指数名称":"","PE":null,"PE百分位":null,"PB":null,"PB百分位":null,"股息率":null,"ROE":null,"估值状态":"(低估/适中/高估)","背景颜色":"(绿色/黄色/红色)"}]}
+{"更新日期":"(YYYY-MM-DD)","市场温度":null,"数据":[{"指数名称":"","指数温度":null,"PE":null,"PE百分位":null,"PB":null,"PB百分位":null,"股息率":null,"最新ROE":null,"估值状态":"(低估/适中/高估)","背景颜色":"(绿色/黄色/红色)"}]}
 估值状态根据行背景色判断：绿色=低估, 黄色=适中, 红色=高估。PE百分位和PB百分位是表格中的百分比数值列（如 25.3% 则输出 25.3）。此为六亿估值表，只输出 JSON。"""
 
 LIUYI_PARSE_PROMPT_CROP = """读取这张裁剪后的六亿估值表。输出 JSON：
-{"数据":[{"指数名称":"","PE":null,"PE百分位":null,"PB":null,"PB百分位":null,"股息率":null,"ROE":null,"背景颜色":"(绿色/橙色/红色)"}]}
+{"数据":[{"指数名称":"","指数温度":null,"PE":null,"PE百分位":null,"PB":null,"PB百分位":null,"股息率":null,"最新ROE":null,"背景颜色":"(绿色/橙色/红色)"}]}
 PE百分位和PB百分位是表格中的百分比数值列（如 25.3% 则输出 25.3）。只输出 JSON。"""
 
 # 普通估值图（key 与 _normalize 对齐）
@@ -536,9 +536,10 @@ class DDImageParser:
         for item in items:
             normalized.append({
                 "index_name": item.get("指数名称"), "index_code": item.get("指数代码"),
+                "index_temperature": self._parse_number(item.get("指数温度")),
                 "pe": self._parse_number(item.get("PE")), "pe_percentile": self._parse_number(item.get("PE百分位")),
                 "pb": self._parse_number(item.get("PB")), "pb_percentile": self._parse_number(item.get("PB百分位")),
-                "dividend_yield": self._parse_number(item.get("股息率")), "roe": self._parse_number(item.get("ROE")),
+                "dividend_yield": self._parse_number(item.get("股息率")), "roe": self._parse_number(item.get("最新ROE") or item.get("ROE")),
                 "valuation_status": item.get("估值状态"), "background_color": item.get("背景颜色"),
             })
         # 有效性检查：过滤掉全空占位项（模型间歇性回吐 prompt 模板的情况）
