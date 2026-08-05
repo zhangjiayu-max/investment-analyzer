@@ -5,7 +5,7 @@ async function getEcharts() {
   if (!echartsModule) echartsModule = await import('echarts')
   return echartsModule
 }
-import { listValuationIndexes, getValuationHistory, getIndexInfo, runAnalysis, pollIndexAnalysisStatus, listAnalysisHistory, getAnalysisHistoryDetail, deleteAnalysisHistory, refreshValuationPrices, listDDValuations, getDDValuation, getMarketTemperature, getSuperValue, getSuperValueDeep, getEnhancedStrategy, getValuationQueryStats, onlineValuationQuery } from '../../api'
+import { listValuationIndexes, getValuationHistory, getIndexInfo, runAnalysis, pollIndexAnalysisStatus, listAnalysisHistory, getAnalysisHistoryDetail, deleteAnalysisHistory, refreshValuationPrices, listDDValuations, getDDValuation, listLiuyiValuations, getLiuyiValuation, getMarketTemperature, getSuperValue, getSuperValueDeep, getEnhancedStrategy, getValuationQueryStats, onlineValuationQuery } from '../../api'
 import { useAsyncTask } from '../../composables/useAsyncTask'
 import { renderMarkdown } from '../../composables/useMarkdown'
 import { isDark } from '../../composables/useTheme'
@@ -28,7 +28,7 @@ const trendChartRef = ref(null)
 let trendChart = null
 
 // ── 外层 Tab ──────────────────────────────────────
-const outerTab = ref('index') // 'index' | 'dd-image'
+const outerTab = ref('index') // 'index' | 'dd-image' | 'liuyi-image'
 
 // ── AI 分析相关 ──────────────────────────────────────
 const activeTab = ref('valuation') // 'valuation' | 'analysis' | 'dd'
@@ -46,6 +46,18 @@ const ddIndexList = ref([])
 const ddSearchQuery = ref('')
 const ddSortKey = ref('')
 const ddSortAsc = ref(true)
+
+// ── 六亿估值相关 ──────────────────────────────────────
+const liuyiRecords = ref([])
+const liuyiLoading = ref(false)
+const liuyiDetailLoading = ref(false)
+const liuyiSelectedRecordId = ref(null)
+const liuyiSelectedRecord = ref(null)
+const liuyiIndexList = ref([])
+const liuyiSearchQuery = ref('')
+const liuyiSortKey = ref('')
+const liuyiSortAsc = ref(true)
+
 // 分析状态：按指数 code 独立存储，支持并发分析多个指数
 const analysisLoadingMap = ref({})   // { [indexCode]: boolean }
 const analysisResultMap = ref({})    // { [indexCode]: {id, result, agent_name, token_usage, created_at} }
@@ -143,6 +155,29 @@ const ddFilteredList = computed(() => {
   if (ddSortKey.value) {
     const key = ddSortKey.value
     const asc = ddSortAsc.value ? 1 : -1
+    list = [...list].sort((a, b) => {
+      const va = a[key] ?? ''
+      const vb = b[key] ?? ''
+      if (typeof va === 'number' && typeof vb === 'number') return (va - vb) * asc
+      return String(va).localeCompare(String(vb)) * asc
+    })
+  }
+  return list
+})
+
+// liuyi image tab computed
+const liuyiFilteredList = computed(() => {
+  let list = liuyiIndexList.value
+  if (liuyiSearchQuery.value) {
+    const q = liuyiSearchQuery.value.toLowerCase()
+    list = list.filter(item =>
+      (item.index_name || '').toLowerCase().includes(q) ||
+      (item.index_code || '').toLowerCase().includes(q)
+    )
+  }
+  if (liuyiSortKey.value) {
+    const key = liuyiSortKey.value
+    const asc = liuyiSortAsc.value ? 1 : -1
     list = [...list].sort((a, b) => {
       const va = a[key] ?? ''
       const vb = b[key] ?? ''
@@ -568,6 +603,51 @@ function ddStatusClass(status) {
   return ''
 }
 
+async function loadLiuyiRecords() {
+  liuyiLoading.value = true
+  try {
+    const { data } = await listLiuyiValuations()
+    liuyiRecords.value = data.records || []
+    if (liuyiRecords.value.length && !liuyiSelectedRecordId.value) {
+      liuyiSelectedRecordId.value = liuyiRecords.value[0].id
+      await loadLiuyiIndexList(liuyiRecords.value[0].id)
+    }
+  } catch (e) {
+    console.error('Failed to load Liuyi valuations:', e)
+  } finally {
+    liuyiLoading.value = false
+  }
+}
+
+async function loadLiuyiIndexList(recordId) {
+  liuyiDetailLoading.value = true
+  try {
+    const { data } = await getLiuyiValuation(recordId)
+    liuyiSelectedRecord.value = data
+    liuyiIndexList.value = data?.indexes || data?.parsed_data?.data || []
+  } catch (e) {
+    console.error('Failed to load Liuyi detail:', e)
+    liuyiIndexList.value = []
+  } finally {
+    liuyiDetailLoading.value = false
+  }
+}
+
+function onLiuyiDateChange() {
+  liuyiSearchQuery.value = ''
+  liuyiSortKey.value = ''
+  loadLiuyiIndexList(liuyiSelectedRecordId.value)
+}
+
+function liuyiSortBy(key) {
+  if (liuyiSortKey.value === key) {
+    liuyiSortAsc.value = !liuyiSortAsc.value
+  } else {
+    liuyiSortKey.value = key
+    liuyiSortAsc.value = true
+  }
+}
+
 async function loadHistory() {
   if (!selectedCode.value || !selectedMetric.value) return
   loading.value = true
@@ -841,6 +921,7 @@ watch(activeTab, (tab) => {
 })
 watch(outerTab, (tab) => {
   if (tab === 'dd-image' && ddRecords.value.length === 0) loadDDRecords()
+  if (tab === 'liuyi-image' && liuyiRecords.value.length === 0) loadLiuyiRecords()
 })
 
 defineExpose({ loadHistory })
@@ -861,6 +942,12 @@ defineExpose({ loadHistory })
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"/>
         </svg>
         螺丝钉图片估值
+      </button>
+      <button :class="['outer-tab-btn', { active: outerTab === 'liuyi-image' }]" @click="outerTab = 'liuyi-image'">
+        <svg width="18" height="18" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"/>
+        </svg>
+        六亿图片估值
       </button>
       <button :class="['outer-tab-btn', { active: outerTab === 'super-value' }]" @click="outerTab = 'super-value'; loadSuperValue()">
         <svg width="18" height="18" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -1446,6 +1533,133 @@ defineExpose({ loadHistory })
         </div>
       </template>
     </template><!-- end outerTab === 'dd-image' -->
+
+    <!-- ════════ 六亿 Image Tab (outerTab === 'liuyi-image') ════════ -->
+    <template v-if="outerTab === 'liuyi-image'">
+      <div v-if="liuyiLoading" class="loading-state">
+        <div class="spinner-lg"></div>
+        <span>加载中...</span>
+      </div>
+
+      <div v-else-if="!liuyiRecords.length" class="empty-state">
+        <EmptyState
+          icon="image"
+          title="暂无六亿图片估值数据"
+          description="请先在「图片浏览 → 六亿估值」中上传并解析图片"
+        />
+      </div>
+
+      <template v-else>
+        <!-- Toolbar: Date Selector + Summary -->
+        <div class="dd-toolbar card editorial-card">
+          <div class="dd-toolbar-left">
+            <div class="dd-toolbar-title editorial-title">六亿指数估值</div>
+            <div class="dd-toolbar-meta">
+              <b class="font-jet">{{ liuyiIndexList.length }}</b> <span class="terminal-label">个指数</span>
+              <span v-if="liuyiSelectedRecord?.market_temperature != null">
+                · <span class="terminal-label">市场温度</span> <span class="num-gold">{{ liuyiSelectedRecord.market_temperature }}</span>
+              </span>
+            </div>
+          </div>
+          <div class="dd-toolbar-right">
+            <select v-model="liuyiSelectedRecordId" class="dd-date-select font-jet" @change="onLiuyiDateChange">
+              <option v-for="r in liuyiRecords" :key="r.id" :value="r.id">
+                {{ r.update_date || r.created_at?.slice(0, 10) }}
+              </option>
+            </select>
+          </div>
+        </div>
+
+        <!-- Search -->
+        <div class="card dd-search-card editorial-card">
+          <input
+            v-model="liuyiSearchQuery"
+            class="input-field"
+            placeholder="搜索指数名称或代码..."
+            style="width:100%"
+          />
+        </div>
+
+        <!-- Index List Table -->
+        <div class="card dd-index-table-card editorial-card">
+          <div v-if="liuyiDetailLoading" class="loading-state" style="padding:2rem">
+            <div class="spinner-sm"></div>
+            <span>加载中...</span>
+          </div>
+          <div v-else class="dd-table-wrap">
+            <table class="data-table dd-index-table">
+              <thead>
+                <tr>
+                  <th @click="liuyiSortBy('index_name')" class="sortable">
+                    指数名称 <Icon v-if="liuyiSortKey === 'index_name'" :name="liuyiSortAsc ? 'arrow-up' : 'arrow-down'" size="10" class="sort-icon" />
+                  </th>
+                  <th>代码</th>
+                  <th @click="liuyiSortBy('pe')" class="sortable">
+                    PE <Icon v-if="liuyiSortKey === 'pe'" :name="liuyiSortAsc ? 'arrow-up' : 'arrow-down'" size="10" class="sort-icon" />
+                  </th>
+                  <th @click="liuyiSortBy('pe_percentile')" class="sortable">
+                    PE% <Icon v-if="liuyiSortKey === 'pe_percentile'" :name="liuyiSortAsc ? 'arrow-up' : 'arrow-down'" size="10" class="sort-icon" />
+                  </th>
+                  <th>PB</th>
+                  <th>PB%</th>
+                  <th>股息率</th>
+                  <th>ROE</th>
+                  <th @click="liuyiSortBy('valuation_status')" class="sortable">
+                    估值 <Icon v-if="liuyiSortKey === 'valuation_status'" :name="liuyiSortAsc ? 'arrow-up' : 'arrow-down'" size="10" class="sort-icon" />
+                  </th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="(item, idx) in liuyiFilteredList" :key="idx">
+                  <td class="td-name">{{ item.index_name || '-' }}</td>
+                  <td class="td-code font-jet">{{ item.index_code || '-' }}</td>
+                  <td class="td-val font-jet">{{ item.pe ?? '-' }}</td>
+                  <td>
+                    <div v-if="item.pe_percentile != null" class="pe-percentile-cell">
+                      <span :class="['badge', ddPercentileClass(item.pe_percentile), 'font-jet']">
+                        {{ item.pe_percentile }}%
+                      </span>
+                      <div class="progress-bar-gradient" :class="ddProgressClass(item.pe_percentile)">
+                        <div class="fill" :style="{ width: item.pe_percentile + '%' }"></div>
+                      </div>
+                    </div>
+                    <span v-else>-</span>
+                  </td>
+                  <td class="td-val font-jet">{{ item.pb ?? '-' }}</td>
+                  <td>
+                    <div v-if="item.pb_percentile != null" class="pe-percentile-cell">
+                      <span :class="['badge', ddPercentileClass(item.pb_percentile), 'font-jet']">
+                        {{ item.pb_percentile }}%
+                      </span>
+                      <div class="progress-bar-gradient" :class="ddProgressClass(item.pb_percentile)">
+                        <div class="fill" :style="{ width: item.pb_percentile + '%' }"></div>
+                      </div>
+                    </div>
+                    <span v-else>-</span>
+                  </td>
+                  <td class="font-jet">{{ item.dividend_yield ?? '-' }}</td>
+                  <td class="font-jet">{{ item.roe ?? '-' }}</td>
+                  <td>
+                    <span v-if="item.valuation_status" :class="['dd-status', ddStatusClass(item.valuation_status)]">
+                      {{ item.valuation_status }}
+                    </span>
+                    <span v-else>-</span>
+                    <span v-if="item.pe_percentile != null && item.pb_percentile != null && Math.abs(item.pe_percentile - item.pb_percentile) > 20"
+                          class="dd-diverge-warn"
+                          :title="`PE%(${item.pe_percentile})与PB%(${item.pb_percentile})差异${Math.abs(item.pe_percentile - item.pb_percentile).toFixed(0)}%，建议参考${item.pb_percentile < item.pe_percentile ? 'PB' : 'PE'}`">
+                      <Icon name="warning" size="12" class="dd-diverge-warn-icon" />
+                    </span>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <div v-if="!liuyiDetailLoading && !liuyiFilteredList.length" class="empty-state" style="padding:2rem">
+            <p>无匹配指数</p>
+          </div>
+        </div>
+      </template>
+    </template><!-- end outerTab === 'liuyi-image' -->
 
     <!-- ════════ Super Value Tab (outerTab === 'super-value') ════════ -->
     <template v-if="outerTab === 'super-value'">

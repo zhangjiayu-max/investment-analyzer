@@ -438,6 +438,68 @@ def get_dd_parsed_image_paths() -> set[str]:
     return {row["image_path"] for row in rows}
 
 
+# ── 六亿估值 CRUD ──────────────────────────────────────
+
+def save_liuyi_valuation(data: dict, image_path: str, image_url: str = None) -> int:
+    """保存六亿估值解析结果，返回 id。同一图片会更新。"""
+    conn = _get_conn()
+    conn.execute("""
+        INSERT INTO liuyi_valuations (image_path, image_url, update_date, market_temperature, index_count, raw_json)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(image_path) DO UPDATE SET
+            image_url=excluded.image_url,
+            update_date=excluded.update_date,
+            market_temperature=excluded.market_temperature,
+            index_count=excluded.index_count,
+            raw_json=excluded.raw_json,
+            created_at=datetime('now','localtime')
+    """, (
+        image_path, image_url,
+        data.get("update_date"),
+        data.get("market_temperature"),
+        data.get("count", len(data.get("data", []))),
+        _json.dumps(data, ensure_ascii=False),
+    ))
+    row = conn.execute("SELECT id FROM liuyi_valuations WHERE image_path = ?", (image_path,)).fetchone()
+    conn.commit()
+    conn.close()
+    return row["id"] if row else 0
+
+
+def list_liuyi_valuations() -> list[dict]:
+    """列出所有六亿估值记录（按时间倒序）。"""
+    conn = _get_conn()
+    rows = conn.execute(
+        "SELECT id, image_path, image_url, update_date, market_temperature, index_count, created_at FROM liuyi_valuations ORDER BY created_at DESC"
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_liuyi_valuation(liuyi_id: int) -> dict | None:
+    """获取单条六亿估值记录详情（含完整指数列表）。"""
+    conn = _get_conn()
+    row = conn.execute("SELECT * FROM liuyi_valuations WHERE id = ?", (liuyi_id,)).fetchone()
+    conn.close()
+    if not row:
+        return None
+    result = dict(row)
+    if result.get("raw_json"):
+        try:
+            result["parsed_data"] = _json.loads(result["raw_json"])
+        except Exception:
+            result["parsed_data"] = None
+    return result
+
+
+def get_liuyi_parsed_image_paths() -> set[str]:
+    """获取所有已解析的六亿估值图片路径集合。"""
+    conn = _get_conn()
+    rows = conn.execute("SELECT image_path FROM liuyi_valuations").fetchall()
+    conn.close()
+    return {row["image_path"] for row in rows}
+
+
 # ── 指数代码映射 CRUD ──────────────────────────────────────
 
 def save_index_code_mapping(index_code: str, index_name: str, aliases: list = None, sina_code: str = None):

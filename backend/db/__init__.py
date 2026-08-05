@@ -21,6 +21,7 @@ from db.valuations import (
     list_valuation_indexes, list_index_freshness, search_indexes_by_keyword,
     get_index_info, save_index_info, get_valuation_by_image,
     save_dd_valuation, list_dd_valuations, get_dd_valuation, get_dd_parsed_image_paths,
+    save_liuyi_valuation, list_liuyi_valuations, get_liuyi_valuation, get_liuyi_parsed_image_paths,
 )
 
 # 任务 CRUD
@@ -382,6 +383,20 @@ def init_db():
     # ── 螺丝钉估值表 ──────────────────────────────────────
     conn.execute("""
         CREATE TABLE IF NOT EXISTS dd_valuations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            image_path TEXT UNIQUE,
+            image_url TEXT,
+            update_date TEXT,
+            market_temperature REAL,
+            index_count INTEGER,
+            raw_json TEXT,
+            created_at TEXT DEFAULT (datetime('now','localtime'))
+        )
+    """)
+
+    # ── 六亿估值表 ──────────────────────────────────────
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS liuyi_valuations (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             image_path TEXT UNIQUE,
             image_url TEXT,

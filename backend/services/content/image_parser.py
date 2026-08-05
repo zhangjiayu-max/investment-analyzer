@@ -234,6 +234,15 @@ DD_PARSE_PROMPT_CROP = """读取这张裁剪后的螺丝钉估值表。输出 JS
 {"数据":[{"指数名称":"","PE":null,"PB":null,"股息率":null,"ROE":null,"背景颜色":"(绿色/橙色/红色)"}]}
 只输出 JSON。"""
 
+# 六亿估值表（格式与螺丝钉一致，多指数表格）
+LIUYI_PARSE_PROMPT = """从图片表格读取每个指数，输出 JSON 数组：
+{"更新日期":"(YYYY-MM-DD)","市场温度":null,"数据":[{"指数名称":"","PE":null,"PB":null,"股息率":null,"ROE":null,"估值状态":"(低估/适中/高估)","背景颜色":"(绿色/黄色/红色)"}]}
+估值状态根据行背景色判断：绿色=低估, 黄色=适中, 红色=高估。此为六亿估值表，只输出 JSON。"""
+
+LIUYI_PARSE_PROMPT_CROP = """读取这张裁剪后的六亿估值表。输出 JSON：
+{"数据":[{"指数名称":"","PE":null,"PB":null,"股息率":null,"ROE":null,"背景颜色":"(绿色/橙色/红色)"}]}
+只输出 JSON。"""
+
 # 普通估值图（key 与 _normalize 对齐）
 PARSE_PROMPT = """从图片读取指数估值数据，输出 JSON：
 {"指数名称":"","指数代码":"","当前点位":null,"涨跌幅":null,"背景颜色":"(绿色/黄色/红色)",
@@ -603,5 +612,70 @@ class DDImageParser:
         return float(m.group(0)) if m else None
 
 
+# ── LiuyiImageParser（六亿估值表）────────────────────
+# 与螺丝钉估值表格式一致，复用 DDImageParser 的解析逻辑，仅换 prompt
+
+class LiuyiImageParser(DDImageParser):
+    """六亿估值表解析器，继承 DDImageParser，仅换 prompt。"""
+
+    def parse(self, image_path: str) -> dict:
+        with open(image_path, "rb") as f:
+            img_b64 = base64.b64encode(f.read()).decode()
+        ext = image_path.rsplit(".", 1)[-1].lower()
+        mime = {"jpg": "jpeg", "jpeg": "jpeg", "png": "png", "gif": "gif", "webp": "webp"}.get(ext, "jpeg")
+        raw = _call_vision(LIUYI_PARSE_PROMPT, img_b64, mime, trace_id=self._trace_id)
+        data = _extract_json(raw)
+        result = self._normalize(data)
+        if not result.get("ok") or result.get("count", 0) == 0:
+            fallback = self._parse_cropped_regions(image_path, mime, crop_prompt=LIUYI_PARSE_PROMPT_CROP)
+            if fallback.get("ok") and fallback.get("count", 0) > 0:
+                result = fallback
+        if result.get("ok"):
+            need_bg = any(not item.get("background_color") for item in result.get("data", []))
+            if need_bg:
+                bg = extract_dominant_color(image_path)
+                if bg:
+                    for item in result.get("data", []):
+                        if not item.get("background_color"):
+                            item["background_color"] = bg
+        return result
+
+    def _parse_cropped_regions(self, image_path: str, mime: str, crop_prompt: str = None) -> dict:
+        """整张长表失败时裁剪上/中/下三段分别解析后合并。支持自定义 prompt。"""
+        effective_prompt = crop_prompt or LIUYI_PARSE_PROMPT_CROP
+        try:
+            from PIL import Image
+        except ImportError:
+            return {"ok": False, "error": "PIL 不可用", "data": [], "count": 0}
+        try:
+            img = Image.open(image_path)
+            w, h = img.size
+            boxes = [
+                (0, 0, w, min(h, int(h * 0.36))),
+                (0, max(0, int(h * 0.34)), w, min(h, int(h * 0.84))),
+                (0, max(0, int(h * 0.82)), w, h),
+            ]
+            import io
+            merged, seen, update_date = [], set(), ""
+            for box in boxes:
+                buf = io.BytesIO()
+                img.crop(box).save(buf, format="PNG" if mime == "png" else "JPEG")
+                crop_b64 = base64.b64encode(buf.getvalue()).decode()
+                raw = _call_vision(effective_prompt, crop_b64, mime, trace_id=self._trace_id)
+                partial = self._normalize(_extract_json(raw))
+                if partial.get("update_date") and not update_date:
+                    update_date = partial["update_date"]
+                for item in partial.get("data", []):
+                    k = item.get("index_name")
+                    if k and k not in seen:
+                        seen.add(k)
+                        merged.append(item)
+            return {"ok": bool(merged), "update_date": update_date, "market_temperature": None,
+                    "data": merged, "count": len(merged), "raw_json": json.dumps({"数据": merged}, ensure_ascii=False)}
+        except Exception as e:
+            return {"ok": False, "error": f"裁剪解析失败: {e}", "data": [], "count": 0}
+
+
 parser = ImageParser()
 dd_parser = DDImageParser()
+liuyi_parser = LiuyiImageParser()

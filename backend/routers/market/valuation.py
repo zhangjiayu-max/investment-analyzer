@@ -12,17 +12,18 @@ from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
 
-from config import IMAGES_DIR, VALUATION_IMAGES_DIR, DD_IMAGES_DIR
+from config import IMAGES_DIR, VALUATION_IMAGES_DIR, DD_IMAGES_DIR, LIUYI_IMAGES_DIR
 from db.valuations import (
     save_valuation, get_valuation_history, get_latest_valuation,
     list_valuation_indexes, list_index_freshness, get_index_info, save_index_info,
     save_dd_valuation, list_dd_valuations, get_dd_valuation,
+    save_liuyi_valuation, list_liuyi_valuations, get_liuyi_valuation,
     get_best_valuation, get_latest_market_temperature, get_latest_dd_valuation_for_index,
     list_index_code_mappings, save_index_code_mapping,
     get_valuation_query_stats,
 )
 from db._conn import _get_conn
-from services.image_parser import DDImageParser
+from services.image_parser import DDImageParser, LiuyiImageParser
 
 logger = logging.getLogger(__name__)
 from models.valuations import ParseAndSaveRequest, ParseBatchRequest, ParseDDRequest, ParseDDBatchRequest
@@ -176,6 +177,158 @@ async def parse_dd_batch_async(req: ParseDDBatchRequest):
         tasks.append({"task_id": task_id, "image_path": str_path, "status": "pending"})
 
     return {"tasks": tasks}
+
+
+# ── 六亿估值 ──────────────────────────────────────
+
+@router.post("/parse-liuyi")
+async def parse_liuyi_image(req: ParseDDRequest):
+    """解析六亿估值表图片（多指数表格数据，格式与螺丝钉一致）。"""
+    img_path = Path(req.path)
+    if not img_path.is_absolute():
+        for base in [LIUYI_IMAGES_DIR, DD_IMAGES_DIR, IMAGES_DIR, VALUATION_IMAGES_DIR]:
+            candidate = base / img_path
+            if candidate.exists():
+                img_path = candidate
+                break
+        else:
+            img_path = LIUYI_IMAGES_DIR / req.path
+    if not req.path or not img_path.exists():
+        raise HTTPException(400, f"图片路径无效: {img_path}")
+
+    liuyi_parser = LiuyiImageParser(model_type=req.model_type)
+    result = liuyi_parser.parse(str(img_path))
+    result["source_path"] = str(img_path)
+
+    if result.get("ok"):
+        try:
+            rel_path = f"data/liuyi_images/{img_path.relative_to(LIUYI_IMAGES_DIR)}"
+        except ValueError:
+            rel_path = f"data/liuyi_images/{req.path}"
+        image_url = f"/static/liuyi_images/{img_path.relative_to(LIUYI_IMAGES_DIR)}"
+        liuyi_id = save_liuyi_valuation(result, rel_path, image_url)
+        result["liuyi_id"] = liuyi_id
+
+    return result
+
+
+@router.post("/parse-liuyi-async")
+async def parse_liuyi_image_async(req: ParseDDRequest):
+    """异步解析六亿估值表图片。立即返回 task_id，后台执行解析。"""
+    img_path = Path(req.path)
+    if not img_path.is_absolute():
+        for base in [LIUYI_IMAGES_DIR, DD_IMAGES_DIR, IMAGES_DIR, VALUATION_IMAGES_DIR]:
+            candidate = base / img_path
+            if candidate.exists():
+                img_path = candidate
+                break
+        else:
+            img_path = LIUYI_IMAGES_DIR / req.path
+    if not req.path or not img_path.exists():
+        raise HTTPException(400, f"图片路径无效: {img_path}")
+
+    str_path = str(img_path)
+
+    from db.dd_tasks import find_running_task, create_dd_parse_task
+    existing = find_running_task(str_path)
+    if existing:
+        return {"task_id": existing["id"], "status": existing["status"], "dedup": True}
+
+    task_id = create_dd_parse_task(str_path, Path(req.path).name, parse_type="liuyi")
+
+    from scripts.dd_parse_worker import run_dd_parse
+    asyncio.create_task(run_dd_parse(task_id, str_path, "liuyi"))
+
+    return {"task_id": task_id, "status": "pending"}
+
+
+@router.post("/parse-liuyi-batch-async")
+async def parse_liuyi_batch_async(req: ParseDDBatchRequest):
+    """批量异步解析六亿估值表图片。"""
+    from db.dd_tasks import find_running_task, create_dd_parse_task
+    from scripts.dd_parse_worker import run_dd_parse
+
+    tasks = []
+    for path in req.paths:
+        img_path = Path(path)
+        if not img_path.is_absolute():
+            for base in [LIUYI_IMAGES_DIR, DD_IMAGES_DIR, IMAGES_DIR, VALUATION_IMAGES_DIR]:
+                candidate = base / img_path
+                if candidate.exists():
+                    img_path = candidate
+                    break
+            else:
+                img_path = LIUYI_IMAGES_DIR / path
+
+        str_path = str(img_path)
+        name = Path(path).name
+
+        existing = find_running_task(str_path)
+        if existing:
+            tasks.append({"task_id": existing["id"], "image_path": str_path, "status": existing["status"], "dedup": True})
+            continue
+
+        if not img_path.exists():
+            tasks.append({"task_id": None, "image_path": str_path, "status": "error", "error": "文件不存在"})
+            continue
+
+        task_id = create_dd_parse_task(str_path, name, parse_type="liuyi")
+        asyncio.create_task(run_dd_parse(task_id, str_path, "liuyi"))
+        tasks.append({"task_id": task_id, "image_path": str_path, "status": "pending"})
+
+    return {"tasks": tasks}
+
+
+@router.get("/liuyi/list")
+async def list_liuyi_valuations_api():
+    """列出所有六亿估值记录。"""
+    return {"records": list_liuyi_valuations()}
+
+
+@router.get("/liuyi/{liuyi_id}")
+async def get_liuyi_valuation_api(liuyi_id: int):
+    """获取单条六亿估值记录详情。"""
+    record = get_liuyi_valuation(liuyi_id)
+    if not record:
+        raise HTTPException(404, "记录不存在")
+    return record
+
+
+@router.get("/liuyi/indexes")
+async def get_liuyi_indexes(liuyi_id: int = None):
+    """获取六亿估值表中的指数列表。
+
+    参数:
+        liuyi_id: 六亿估值记录 ID（可选，默认最新）
+
+    返回:
+        六亿估值表的完整数据，包含市场温度和指数列表
+    """
+    if liuyi_id:
+        record = get_liuyi_valuation(liuyi_id)
+    else:
+        records = list_liuyi_valuations()
+        record = records[0] if records else None
+
+    if not record:
+        raise HTTPException(404, "未找到六亿估值记录")
+
+    parsed_data = None
+    if record.get("raw_json"):
+        try:
+            import json
+            parsed_data = json.loads(record["raw_json"])
+        except Exception:
+            pass
+
+    return {
+        "liuyi_id": record["id"],
+        "update_date": record.get("update_date"),
+        "market_temperature": record.get("market_temperature"),
+        "index_count": record.get("index_count"),
+        "image_url": record.get("image_url"),
+        "indexes": parsed_data.get("data", []) if parsed_data else [],
+    }
 
 
 # ── 指数列表 ──────────────────────────────────────

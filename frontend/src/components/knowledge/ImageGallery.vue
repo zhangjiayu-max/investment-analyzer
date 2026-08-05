@@ -1,6 +1,6 @@
 <script setup>
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
-import { listGalleryRecords, uploadDdImage, listDdImages, listDdImageDates, deleteDdImage, parseAndSaveValuation, parseValuationBatch, parseDDImage, parseDDImageAsync, parseDDBatchAsync, getDDParseTask, pollDDParseTask, uploadValuationImage, listValuationImages, listValuationImageDates, deleteValuationImage, getSystemConfig } from '../../api'
+import { listGalleryRecords, uploadDdImage, listDdImages, listDdImageDates, deleteDdImage, parseAndSaveValuation, parseValuationBatch, parseDDImage, parseDDImageAsync, parseDDBatchAsync, getDDParseTask, pollDDParseTask, uploadValuationImage, listValuationImages, listValuationImageDates, deleteValuationImage, uploadLiuyiImage, listLiuyiImages, listLiuyiImageDates, deleteLiuyiImage, parseLiuyiImage, parseLiuyiImageAsync, parseLiuyiBatchAsync, getLiuyiParseTask, pollLiuyiParseTask, getSystemConfig } from '../../api'
 import ConfirmDialog from '../layout/ConfirmDialog.vue'
 
 // ── 并发限制工具函数 ──
@@ -22,7 +22,7 @@ async function asyncPool(limit, items, fn) {
 }
 
 // ── Tab 切换 ──
-const activeTab = ref('gallery') // 'gallery' | 'dd'
+const activeTab = ref('gallery') // 'gallery' | 'dd' | 'liuyi'
 
 // ── 组件卸载标志 ──
 let isUnmounted = false
@@ -158,9 +158,10 @@ async function handleViUpload(e) {
         if (isUnmounted) break
         try {
           // 自动判断图片类型
+          const isLiuyiImage = img.path.includes('liuyi_images') || img.name.includes('六亿') || img.name.includes('liuyi')
           const isDDImage = img.path.includes('dd_images') || img.name.includes('螺丝钉') || img.name.includes('dd')
           // TODO: DD 图片也应改用 parseDDImageAsync 异步模式
-          const parseFn = isDDImage ? parseDDImage : parseAndSaveValuation
+          const parseFn = isLiuyiImage ? parseLiuyiImage : (isDDImage ? parseDDImage : parseAndSaveValuation)
           await parseFn(img.path)
           successCount++
         } catch (parseErr) {
@@ -225,8 +226,9 @@ function confirmViParseImage(img) {
       viParseResult.value = null
       try {
         // 自动判断图片类型：如果是螺丝钉估值表，调用 DD 解析
+        const isLiuyiImage = img.path.includes('liuyi_images') || img.name.includes('六亿') || img.name.includes('liuyi')
         const isDDImage = img.path.includes('dd_images') || img.name.includes('螺丝钉') || img.name.includes('dd')
-        const parseFn = isDDImage ? parseDDImage : parseAndSaveValuation
+        const parseFn = isLiuyiImage ? parseLiuyiImage : (isDDImage ? parseDDImage : parseAndSaveValuation)
         const { data } = await parseFn(img.path)
         viParseResult.value = { ok: true, data, name: img.name }
         viImages.value = viImages.value.filter(i => i.path !== img.path)
@@ -255,9 +257,10 @@ function confirmViBatchParse(date, items) {
         const responses = await asyncPool(3, items, async (img) => {
           try {
             // 自动判断图片类型：如果是螺丝钉估值表，调用 DD 解析
+            const isLiuyiImage = img.path.includes('liuyi_images') || img.name.includes('六亿') || img.name.includes('liuyi')
             const isDDImage = img.path.includes('dd_images') || img.name.includes('螺丝钉') || img.name.includes('dd')
             // TODO: DD 图片也应改用 parseDDImageAsync 异步模式
-          const parseFn = isDDImage ? parseDDImage : parseAndSaveValuation
+          const parseFn = isLiuyiImage ? parseLiuyiImage : (isDDImage ? parseDDImage : parseAndSaveValuation)
             const result = await parseFn(img.path)
             return result
           } catch (e) {
@@ -331,6 +334,20 @@ const confirm = ref({ visible: false, title: '', message: '', danger: false, onC
 // key: image_path, value: { taskId, status, pollCancel }
 const ddParseTasks = ref({})
 const ddBatchPollCancel = ref(null)
+
+// ── 六亿估值 Tab ──
+const liuyiImages = ref([])
+const liuyiDates = ref([])
+const liuyiSelectedDate = ref('')
+const liuyiLoading = ref(false)
+const liuyiUploading = ref(false)
+const liuyiFileInput = ref(null)
+const liuyiParsingPath = ref('')
+const liuyiParseResult = ref(null)
+const liuyiBatchParsing = ref(false)
+const liuyiBatchProgress = ref({ done: 0, total: 0 })
+const liuyiParseTasks = ref({})
+const liuyiBatchPollCancel = ref(null)
 
 async function loadDdDates() {
   try {
@@ -513,6 +530,180 @@ const ddGroupedImages = computed(() => {
   return Object.entries(groups).sort((a, b) => b[0].localeCompare(a[0]))
 })
 
+// ── 六亿估值函数 ──
+async function loadLiuyiDates() {
+  try {
+    const { data } = await listLiuyiImageDates()
+    liuyiDates.value = data.dates || []
+  } catch (e) {
+    console.error('Failed to load liuyi dates:', e)
+  }
+}
+
+async function loadLiuyiImages() {
+  liuyiLoading.value = true
+  try {
+    const { data } = await listLiuyiImages(liuyiSelectedDate.value || null)
+    liuyiImages.value = data.images || []
+  } catch (e) {
+    console.error('Failed to load liuyi images:', e)
+  } finally {
+    liuyiLoading.value = false
+  }
+}
+
+async function handleLiuyiUpload(e) {
+  const files = e.target.files
+  if (!files || !files.length) return
+  liuyiUploading.value = true
+  try {
+    for (const file of files) {
+      await uploadLiuyiImage(file)
+    }
+    await loadLiuyiDates()
+    liuyiSelectedDate.value = ''
+    await loadLiuyiImages()
+  } catch (e) {
+    console.error('Upload failed:', e)
+    showToast('上传失败: ' + (e.response?.data?.detail || e.message), 'error')
+  } finally {
+    liuyiUploading.value = false
+    if (liuyiFileInput.value) liuyiFileInput.value.value = ''
+  }
+}
+
+function triggerLiuyiUpload() {
+  liuyiFileInput.value?.click()
+}
+
+function confirmDeleteLiuyiImage(img) {
+  confirm.value = {
+    visible: true,
+    title: '删除图片',
+    message: `确定要删除「${img.name}」吗？删除后无法恢复。`,
+    danger: true,
+    onConfirm: async () => {
+      confirm.value.visible = false
+      try {
+        await deleteLiuyiImage(img.path)
+        await loadLiuyiDates()
+        await loadLiuyiImages()
+      } catch (e) {
+        showToast('删除失败: ' + (e.response?.data?.detail || e.message), 'error')
+      }
+    }
+  }
+}
+
+function confirmLiuyiParseImage(img) {
+  confirm.value = {
+    visible: true,
+    title: '解析六亿估值表',
+    message: `将使用 AI 识别「${img.name}」中的多指数估值表格数据，识别结果会自动存入估值库。`,
+    danger: false,
+    onConfirm: async () => {
+      confirm.value.visible = false
+      liuyiParseResult.value = null
+      try {
+        const { data } = await parseLiuyiImageAsync(img.path)
+        const taskId = data.task_id
+        liuyiParseTasks.value = { ...liuyiParseTasks.value, [img.path]: { taskId, status: data.status || 'pending' } }
+        const cancel = pollLiuyiParseTask(taskId, (taskData) => {
+          if (isUnmounted) return
+          liuyiParseTasks.value = { ...liuyiParseTasks.value, [img.path]: { taskId, status: taskData.status } }
+          if (taskData.status === 'done') {
+            const result = taskData.result_json || {}
+            liuyiParseResult.value = { ok: true, data: result, name: img.name }
+            liuyiImages.value = liuyiImages.value.filter(i => i.path !== img.path)
+            loadRecords()
+            const { [img.path]: _, ...rest } = liuyiParseTasks.value
+            liuyiParseTasks.value = rest
+            showToast(`「${img.name}」识别完成`, 'success')
+          } else if (taskData.status === 'error') {
+            liuyiParseResult.value = { ok: false, message: taskData.error_msg || '解析失败', name: img.name }
+            const { [img.path]: _, ...rest } = liuyiParseTasks.value
+            liuyiParseTasks.value = rest
+            showToast(`「${img.name}」识别失败: ${taskData.error_msg || ''}`, 'error')
+          }
+        })
+        liuyiParseTasks.value = { ...liuyiParseTasks.value, [img.path]: { ...liuyiParseTasks.value[img.path], pollCancel: cancel } }
+      } catch (e) {
+        showToast('提交解析任务失败: ' + (e.response?.data?.detail || e.message), 'error')
+      }
+    }
+  }
+}
+
+function confirmLiuyiBatchParse(date, items) {
+  confirm.value = {
+    visible: true,
+    title: '批量识别六亿估值表',
+    message: `将并发识别「${date}」的 ${items.length} 张六亿估值表，是否继续？`,
+    danger: false,
+    onConfirm: async () => {
+      confirm.value.visible = false
+      liuyiBatchParsing.value = true
+      liuyiBatchProgress.value = { done: 0, total: items.length }
+      try {
+        const paths = items.map(img => img.path)
+        const { data } = await parseLiuyiBatchAsync(paths)
+        const taskList = data.tasks || []
+        const validTasks = taskList.filter(t => t.task_id)
+        liuyiBatchProgress.value = { done: 0, total: validTasks.length }
+
+        let completed = 0
+        let okCount = 0
+        let failCount = 0
+        const taskIds = validTasks.map(t => t.task_id)
+
+        const pollAll = () => {
+          if (isUnmounted) return
+          let checked = 0
+          for (const tid of taskIds) {
+            getLiuyiParseTask(tid).then(({ data: taskData }) => {
+              if (taskData.status === 'done' || taskData.status === 'error') {
+                completed++
+                if (taskData.status === 'done') okCount++
+                else failCount++
+                liuyiBatchProgress.value = { ...liuyiBatchProgress.value, done: completed }
+              }
+              checked++
+              if (checked === taskIds.length) {
+                if (completed >= taskIds.length) {
+                  showToast(`批量识别完成：成功 ${okCount} 张${failCount > 0 ? '，失败 ' + failCount + ' 张' : ''}`, okCount > 0 ? 'success' : 'error')
+                  loadLiuyiImages()
+                  liuyiBatchParsing.value = false
+                } else {
+                  liuyiBatchPollCancel.value = setTimeout(pollAll, 3000)
+                }
+              }
+            }).catch(() => {
+              checked++
+              if (checked === taskIds.length && completed < taskIds.length) {
+                liuyiBatchPollCancel.value = setTimeout(pollAll, 3000)
+              }
+            })
+          }
+        }
+        liuyiBatchPollCancel.value = setTimeout(pollAll, 2000)
+      } catch (e) {
+        showToast('批量识别失败: ' + (e.message || e), 'error')
+        liuyiBatchParsing.value = false
+      }
+    }
+  }
+}
+
+const liuyiGroupedImages = computed(() => {
+  const groups = {}
+  for (const img of liuyiImages.value) {
+    const date = img.date || '未知日期'
+    if (!groups[date]) groups[date] = []
+    groups[date].push(img)
+  }
+  return Object.entries(groups).sort((a, b) => b[0].localeCompare(a[0]))
+})
+
 // ── 拖拽上传 ──
 const isDragging = ref(false)
 let dragCounter = 0
@@ -549,13 +740,14 @@ async function handleDrop(e) {
   if (isUnmounted) return
 
   const isGallery = activeTab.value === 'gallery'
-  const uploading = isGallery ? viUploading : ddUploading
+  const isLiuyi = activeTab.value === 'liuyi'
+  const uploading = isLiuyi ? liuyiUploading : (isGallery ? viUploading : ddUploading)
   if (uploading.value) return
 
   uploading.value = true
   showToast(`正在上传 ${files.length} 张图片...`, 'info')
   try {
-    const uploadFn = isGallery ? uploadValuationImage : uploadDdImage
+    const uploadFn = isLiuyi ? uploadLiuyiImage : (isGallery ? uploadValuationImage : uploadDdImage)
     const uploadedPaths = []
     for (const file of files) {
       if (isUnmounted) break
@@ -565,7 +757,11 @@ async function handleDrop(e) {
       }
     }
     if (isUnmounted) return
-    if (isGallery) {
+    if (isLiuyi) {
+      await loadLiuyiDates()
+      liuyiSelectedDate.value = ''
+      await loadLiuyiImages()
+    } else if (isGallery) {
       await loadViDates()
       viSelectedDate.value = ''
       await loadViImages()
@@ -584,9 +780,10 @@ async function handleDrop(e) {
       for (const img of uploadedPaths) {
         if (isUnmounted) break
         try {
+          const isLiuyiImage = img.path.includes('liuyi_images') || img.name.includes('六亿') || img.name.includes('liuyi')
           const isDDImage = img.path.includes('dd_images') || img.name.includes('螺丝钉') || img.name.includes('dd')
           // TODO: DD 图片也应改用 parseDDImageAsync 异步模式
-          const parseFn = isDDImage ? parseDDImage : parseAndSaveValuation
+          const parseFn = isLiuyiImage ? parseLiuyiImage : (isDDImage ? parseDDImage : parseAndSaveValuation)
           await parseFn(img.path)
           successCount++
         } catch (parseErr) {
@@ -636,13 +833,14 @@ async function handlePaste(e) {
   if (isUnmounted) return
 
   const isGallery = activeTab.value === 'gallery'
-  const uploading = isGallery ? viUploading : ddUploading
+  const isLiuyi = activeTab.value === 'liuyi'
+  const uploading = isLiuyi ? liuyiUploading : (isGallery ? viUploading : ddUploading)
   if (uploading.value) return
 
   uploading.value = true
   showToast(`正在粘贴上传 ${imageFiles.length} 张图片...`, 'info')
   try {
-    const uploadFn = isGallery ? uploadValuationImage : uploadDdImage
+    const uploadFn = isLiuyi ? uploadLiuyiImage : (isGallery ? uploadValuationImage : uploadDdImage)
     const uploadedPaths = []
     for (const file of imageFiles) {
       if (isUnmounted) break
@@ -652,7 +850,11 @@ async function handlePaste(e) {
       }
     }
     if (isUnmounted) return
-    if (isGallery) {
+    if (isLiuyi) {
+      await loadLiuyiDates()
+      liuyiSelectedDate.value = ''
+      await loadLiuyiImages()
+    } else if (isGallery) {
       await loadViDates()
       viSelectedDate.value = ''
       await loadViImages()
@@ -671,9 +873,10 @@ async function handlePaste(e) {
       for (const img of uploadedPaths) {
         if (isUnmounted) break
         try {
+          const isLiuyiImage = img.path.includes('liuyi_images') || img.name.includes('六亿') || img.name.includes('liuyi')
           const isDDImage = img.path.includes('dd_images') || img.name.includes('螺丝钉') || img.name.includes('dd')
           // TODO: DD 图片也应改用 parseDDImageAsync 异步模式
-          const parseFn = isDDImage ? parseDDImage : parseAndSaveValuation
+          const parseFn = isLiuyiImage ? parseLiuyiImage : (isDDImage ? parseDDImage : parseAndSaveValuation)
           await parseFn(img.path)
           successCount++
         } catch (parseErr) {
@@ -734,6 +937,8 @@ onMounted(() => {
   loadViImages()
   loadDdDates()
   loadDdImages()
+  loadLiuyiDates()
+  loadLiuyiImages()
   loadVisionProvider()
   document.addEventListener('paste', handlePaste)
 })
@@ -749,6 +954,8 @@ onUnmounted(() => {
   viAutoParsing.value = false
   ddLoading.value = false
   ddUploading.value = false
+  liuyiLoading.value = false
+  liuyiUploading.value = false
   viParsingPath.value = ''
   parsingPath.value = ''
   // 取消所有轮询
@@ -756,6 +963,10 @@ onUnmounted(() => {
     if (task.pollCancel) task.pollCancel()
   }
   if (ddBatchPollCancel.value) clearTimeout(ddBatchPollCancel.value)
+  for (const task of Object.values(liuyiParseTasks.value)) {
+    if (task.pollCancel) task.pollCancel()
+  }
+  if (liuyiBatchPollCancel.value) clearTimeout(liuyiBatchPollCancel.value)
 })
 
 watch(activeTab, (tab) => {
@@ -765,6 +976,9 @@ watch(activeTab, (tab) => {
   } else if (tab === 'dd') {
     loadDdDates()
     loadDdImages()
+  } else if (tab === 'liuyi') {
+    loadLiuyiDates()
+    loadLiuyiImages()
   }
 })
 </script>
@@ -801,6 +1015,10 @@ watch(activeTab, (tab) => {
       <button :class="['tab-btn', { active: activeTab === 'dd' }]" @click="activeTab = 'dd'">
         <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"/></svg>
         螺丝钉估值
+      </button>
+      <button :class="['tab-btn', { active: activeTab === 'liuyi' }]" @click="activeTab = 'liuyi'">
+        <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"/></svg>
+        六亿估值
       </button>
       <div class="vision-switch">
         <span class="vision-label">视觉模型</span>
@@ -1053,6 +1271,84 @@ watch(activeTab, (tab) => {
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/>
                   </svg>
                   {{ ddParseTasks[img.path] ? '识别中...' : '识别估值' }}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </template>
+    </template>
+
+    <!-- ═══ 六亿估值 Tab ═══ -->
+    <template v-if="activeTab === 'liuyi'">
+      <div class="liuyi-toolbar">
+        <div class="liuyi-actions">
+          <input ref="liuyiFileInput" type="file" accept="image/*" multiple @change="handleLiuyiUpload" class="hidden-input" />
+          <button class="btn-upload" @click="triggerLiuyiUpload" :disabled="liuyiUploading">
+            <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"/></svg>
+            {{ liuyiUploading ? '上传中...' : '上传图片' }}
+          </button>
+          <div class="upload-hint">
+            <svg width="12" height="12" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+            拖拽图片到页面 或 Ctrl+V 粘贴
+          </div>
+          <select v-model="liuyiSelectedDate" @change="loadLiuyiImages" class="date-select">
+            <option value="">全部日期</option>
+            <option v-for="d in liuyiDates" :key="d.date" :value="d.date">{{ d.date }} ({{ d.count }})</option>
+          </select>
+        </div>
+        <span class="toolbar-count terminal-label">共 <span class="font-jet">{{ liuyiImages.length }}</span> 张</span>
+      </div>
+
+      <div v-if="liuyiLoading" class="loading-state">
+        <div class="spinner-lg"></div>
+        <span>加载中...</span>
+      </div>
+
+      <div v-else-if="!liuyiImages.length" class="empty-state">
+        <div class="empty-icon-float">
+          <svg width="48" height="48" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"/>
+          </svg>
+        </div>
+        <p>暂无六亿估值图片</p>
+        <p class="empty-sub">点击上方按钮上传，或直接拖拽/粘贴图片</p>
+      </div>
+
+      <template v-else>
+        <div v-for="[date, items] in liuyiGroupedImages" :key="date" class="date-group">
+          <div class="date-header">
+            <span class="date-label font-jet">{{ date }}</span>
+            <span class="date-count terminal-label"><span class="font-jet">{{ items.length }}</span> 张</span>
+            <button class="btn-batch-parse" @click="confirmLiuyiBatchParse(date, items)" :disabled="liuyiBatchParsing" title="批量识别该日期下所有图片">
+              <span v-if="liuyiBatchParsing" class="spinner-sm"></span>
+              <svg v-else width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+              {{ liuyiBatchParsing ? `识别中 ${liuyiBatchProgress.done}/${liuyiBatchProgress.total}...` : '批量识别' }}
+            </button>
+          </div>
+          <div class="gallery-grid">
+            <div v-for="(img, idx) in items" :key="img.path" :class="['gallery-card', 'editorial-card', { parsed: img.parsed }]" :style="{ animationDelay: `${idx * 40}ms` }">
+              <div class="gallery-thumb" @click="openPreview(img.url)">
+                <img :src="img.url" loading="lazy" decoding="async" />
+                <div class="thumb-overlay">
+                  <svg width="20" height="20" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0zM10 7v3m0 0v3m0-3h3m-3 0H7"/></svg>
+                </div>
+                <button class="btn-delete-img" @click.stop="confirmDeleteLiuyiImage(img)" title="删除此图片">
+                  <svg width="12" height="12" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+                </button>
+              </div>
+              <div class="gallery-info">
+                <div class="gallery-index">{{ img.name }}</div>
+                <span v-if="img.parsed" class="parsed-badge">
+                  <svg width="12" height="12" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 13l4 4L19 7"/></svg>
+                  已识别
+                </span>
+                <button v-else class="btn-parse-img" @click.stop="confirmLiuyiParseImage(img)" :disabled="!!liuyiParseTasks[img.path]" title="AI 识别图片中的估值数据并存入数据库">
+                  <span v-if="liuyiParseTasks[img.path]" class="spinner-sm"></span>
+                  <svg v-else width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/>
+                  </svg>
+                  {{ liuyiParseTasks[img.path] ? '识别中...' : '识别估值' }}
                 </button>
               </div>
             </div>
@@ -1419,6 +1715,20 @@ watch(activeTab, (tab) => {
 }
 
 .dd-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.liuyi-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.liuyi-actions {
   display: flex;
   align-items: center;
   gap: 0.75rem;

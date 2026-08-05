@@ -1,7 +1,8 @@
-"""图片管理路由 — /api/dd-images/*, /api/valuation-images/*
+"""图片管理路由 — /api/dd-images/*, /api/liuyi-images/*, /api/valuation-images/*
 
-两类图片：
+三类图片：
   - dd-images: 螺丝钉估值图片
+  - liuyi-images: 六亿估值图片
   - valuation-images: 用户上传的估值截图
 """
 
@@ -9,7 +10,7 @@ from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, UploadFile
 
-from config import DD_IMAGES_DIR, IMAGES_DIR
+from config import DD_IMAGES_DIR, LIUYI_IMAGES_DIR, IMAGES_DIR
 from db._conn import _get_conn
 
 router = APIRouter(tags=["images"])
@@ -107,6 +108,99 @@ async def delete_dd_image(path: str):
         raise HTTPException(status_code=400, detail="无效路径")
     file_path.unlink()
     # 如果日期目录为空则删除
+    parent = file_path.parent
+    if parent.is_dir() and not any(parent.iterdir()):
+        parent.rmdir()
+    return {"ok": True}
+
+
+# ══════════════════════════════════════════════════════
+# 六亿估值图片 API
+# ══════════════════════════════════════════════════════
+
+@router.post("/api/liuyi-images/upload")
+async def upload_liuyi_image(file: UploadFile):
+    """上传六亿估值图片，按日期目录存储。"""
+    ext = Path(file.filename).suffix.lower()
+    if ext not in ('.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp'):
+        raise HTTPException(status_code=400, detail=f"不支持的图片类型: {ext}")
+
+    from datetime import datetime
+    date_dir = datetime.now().strftime("%Y-%m-%d")
+    save_dir = LIUYI_IMAGES_DIR / date_dir
+    save_dir.mkdir(parents=True, exist_ok=True)
+
+    ts = datetime.now().strftime("%H%M%S")
+    safe_name = f"{ts}_{file.filename}"
+    save_path = save_dir / safe_name
+    content = await file.read()
+    save_path.write_bytes(content)
+
+    relative_path = f"{date_dir}/{safe_name}"
+    return {"ok": True, "path": relative_path, "url": f"/static/liuyi_images/{relative_path}"}
+
+
+@router.get("/api/liuyi-images")
+async def list_liuyi_images(date: str = None):
+    """列出六亿估值图片，可按日期筛选。已解析的图片会标注 parsed=true。"""
+    conn = _get_conn()
+    parsed_paths = set()
+    for row in conn.execute("SELECT image_path FROM liuyi_valuations").fetchall():
+        parsed_paths.add(row[0])
+    conn.close()
+
+    images = []
+    if date:
+        date_dir = LIUYI_IMAGES_DIR / date
+        if date_dir.is_dir():
+            for f in sorted(date_dir.iterdir()):
+                if f.suffix.lower() in ('.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp'):
+                    rel_path = f"data/liuyi_images/{date}/{f.name}"
+                    images.append({
+                        "name": f.name,
+                        "date": date,
+                        "url": f"/static/liuyi_images/{date}/{f.name}",
+                        "path": f"{date}/{f.name}",
+                        "parsed": rel_path in parsed_paths,
+                    })
+    else:
+        for d in sorted(LIUYI_IMAGES_DIR.iterdir(), reverse=True):
+            if d.is_dir() and len(d.name) == 10 and d.name[4] == '-' and d.name[7] == '-':
+                for f in sorted(d.iterdir()):
+                    if f.suffix.lower() in ('.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp'):
+                        rel_path = f"data/liuyi_images/{d.name}/{f.name}"
+                        images.append({
+                            "name": f.name,
+                            "date": d.name,
+                            "url": f"/static/liuyi_images/{d.name}/{f.name}",
+                            "path": f"{d.name}/{f.name}",
+                            "parsed": rel_path in parsed_paths,
+                        })
+    return {"images": images}
+
+
+@router.get("/api/liuyi-images/dates")
+async def list_liuyi_image_dates():
+    """列出所有有图片的日期。"""
+    dates = []
+    if LIUYI_IMAGES_DIR.is_dir():
+        for d in sorted(LIUYI_IMAGES_DIR.iterdir(), reverse=True):
+            if d.is_dir() and len(d.name) == 10 and d.name[4] == '-' and d.name[7] == '-':
+                count = sum(1 for f in d.iterdir() if f.suffix.lower() in ('.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp'))
+                if count > 0:
+                    dates.append({"date": d.name, "count": count})
+    return {"dates": dates}
+
+
+@router.delete("/api/liuyi-images/{path:path}")
+async def delete_liuyi_image(path: str):
+    """删除六亿估值图片。path 格式: YYYY-MM-DD/filename.ext"""
+    file_path = LIUYI_IMAGES_DIR / path
+    if not file_path.is_file():
+        raise HTTPException(status_code=404, detail="文件不存在")
+    if not str(file_path.resolve()).startswith(str(LIUYI_IMAGES_DIR.resolve())):
+        raise HTTPException(status_code=400, detail="无效路径")
+    file_path.unlink()
     parent = file_path.parent
     if parent.is_dir() and not any(parent.iterdir()):
         parent.rmdir()

@@ -35,7 +35,7 @@ from fastapi.responses import StreamingResponse, FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from config import STATIC_DIR, IMAGES_DIR, OUTPUT_DIR, UPLOADS_DIR, DD_IMAGES_DIR, VALUATION_IMAGES_DIR, ROOT
+from config import STATIC_DIR, IMAGES_DIR, OUTPUT_DIR, UPLOADS_DIR, DD_IMAGES_DIR, LIUYI_IMAGES_DIR, VALUATION_IMAGES_DIR, ROOT
 
 from db import (
     init_db,
@@ -282,6 +282,7 @@ app.mount("/static/images", StaticFiles(directory=str(IMAGES_DIR)), name="articl
 app.mount("/static/tasks", StaticFiles(directory=str(OUTPUT_DIR)), name="task_images")
 app.mount("/assets", StaticFiles(directory=str(STATIC_DIR / "assets")), name="frontend_assets")
 app.mount("/static/dd_images", StaticFiles(directory=str(DD_IMAGES_DIR)), name="dd_images")
+app.mount("/static/liuyi_images", StaticFiles(directory=str(LIUYI_IMAGES_DIR)), name="liuyi_images")
 app.mount("/static/valuation_images", StaticFiles(directory=str(VALUATION_IMAGES_DIR)), name="valuation_images")
 app.mount("/static/chat_images", StaticFiles(directory=str(CHAT_IMAGES_DIR)), name="chat_images")
 
