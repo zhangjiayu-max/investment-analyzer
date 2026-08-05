@@ -832,9 +832,10 @@ async function handleScan() {
       return
     }
 
-    // 2. 轮询任务状态(每 2 秒一次,最长等待 5 分钟)
-    const POLL_INTERVAL = 2000
-    const MAX_WAIT_MS = 5 * 60 * 1000
+    // 2. 轮询任务状态(每 3 秒一次,最长等待 10 分钟)
+    // LLM 端点响应可能较慢(含重试),给足够时间
+    const POLL_INTERVAL = 3000
+    const MAX_WAIT_MS = 10 * 60 * 1000
     const startedAt = Date.now()
     let finalStatus = null
 
@@ -847,13 +848,28 @@ async function handleScan() {
 
     // 3. 处理最终结果
     if (!finalStatus) {
-      useToast().showToast('扫描超时,请稍后查看事件列表', 'warning')
+      // 超时但任务仍在后台运行,提示用户稍后查看
+      useToast().showToast('扫描仍在后台进行,请稍后刷新事件列表查看结果', 'warning')
     } else if (finalStatus.status === 'done') {
       const r = finalStatus.result || {}
-      useToast().showToast(
-        `扫描完成:提取 ${r.extracted || 0} 个事件,新增 ${r.new || 0} 个`,
-        'success'
-      )
+      const extracted = r.extracted || 0
+      const newCount = r.new || 0
+      if (extracted === 0) {
+        // 扫描成功但无新事件:区分原因
+        const reason = r.reason || ''
+        let msg = '扫描完成,未发现新事件'
+        if (reason === 'no_events') {
+          msg = '扫描完成,当前新闻暂无符合条件的事件(需未来1-2周内具体日期)'
+        } else if (reason === 'no_news') {
+          msg = '扫描完成,但新闻采集失败,请稍后重试'
+        }
+        useToast().showToast(msg, 'warning')
+      } else {
+        useToast().showToast(
+          `扫描完成:提取 ${extracted} 个事件,新增 ${newCount} 个`,
+          'success'
+        )
+      }
       await loadEvents()
     } else {
       useToast().showToast(`扫描失败:${finalStatus.error || '未知错误'}`, 'error')

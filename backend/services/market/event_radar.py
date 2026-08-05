@@ -675,20 +675,21 @@ def _extract_events_from_news(news_list: list[dict], trace_id: str = "") -> list
 
     # P0 增强（2026-08-04）：在 prompt 中传入已有事件列表，让 LLM 在提取阶段避免重复
     # 原问题：LLM 每次扫描独立提取，措辞略有差异就产生重复事件（如"美伊谈判重启"vs"美伊重启谈判"）
-    # 修复：传入最近7天已检测的 upcoming/imminent 事件标题，让 LLM 跳过已提取的相似事件
+    # 修复：传入最近3天已检测的 upcoming/imminent 事件标题，让 LLM 参考避免重复
+    # P1 修复（2026-08-05）：原传30条+强措辞"必须跳过"导致 LLM 把所有事件都判定为重复返回空
+    #        → 减少到10条 + 弱化措辞为"参考" + 保底重试机制(返回空时去掉已有列表重试)
     existing_events_prompt = ""
     try:
         from db.market_events import list_active_events
         active_events = list_active_events()
         if active_events:
-            existing_titles = [ev.get("title", "")[:50] for ev in active_events[:30]]
+            existing_titles = [ev.get("title", "")[:50] for ev in active_events[:10]]
             existing_events_prompt = f"""
-【已有事件列表（请避免重复提取以下事件的相似变体）】
+【已有事件列表（仅供参考,识别完全相同的重复事件）】
 {json.dumps(existing_titles, ensure_ascii=False)}
 
-【去重规则】（重要！）
-7. 若新闻中提取的事件与"已有事件列表"中任一事件描述同一事实（即使措辞不同），请跳过该事件
-8. 同一事件的不同表述（如"美伊谈判重启"与"美伊重启谈判"）视为重复，不要重复提取"""
+注意：若新闻中的事件与上述列表中某条描述同一事实,请跳过该条;
+      但若事件有新的进展、新的日期或新的影响,仍应提取。"""
     except Exception as e:
         logger.debug(f"[event_radar:{trace_id}] 获取已有事件列表失败: {e}")
 
@@ -799,6 +800,52 @@ def _extract_events_from_news(news_list: list[dict], trace_id: str = "") -> list
         f"[event_radar:{trace_id}] LLM 提取 {len(events)} 个事件，"
         f"过滤后 {len(filtered)} 个"
     )
+
+    # P1 保底（2026-08-05）：如果带"已有事件列表"提取结果为空,
+    # 可能是去重措辞导致 LLM 过度跳过。去掉已有列表重试一次。
+    if not filtered and existing_events_prompt:
+        logger.info(f"[event_radar:{trace_id}] 带去重列表提取为空,去掉已有列表重试一次")
+        retry_prompt = prompt.replace(existing_events_prompt, "")
+        try:
+            retry_resp = _call_llm(
+                caller="event_radar_extractor_nodesdup",
+                trace_id=trace_id,
+                model=MODEL_AUX,
+                messages=[{"role": "user", "content": retry_prompt}],
+                temperature=0.1,
+                max_tokens=4000,
+            )
+            raw = (retry_resp.choices[0].message.content or "").strip()
+            if raw.startswith("```"):
+                raw = re.sub(r"^```(?:json)?\s*", "", raw)
+                raw = re.sub(r"\s*```$", "", raw)
+            if not raw.startswith("["):
+                start = raw.find("[")
+                end = raw.rfind("]")
+                if start != -1 and end != -1 and end > start:
+                    raw = raw[start:end + 1]
+            events2 = json.loads(raw)
+            if isinstance(events2, list):
+                filtered2 = []
+                for ev in events2:
+                    if not isinstance(ev, dict):
+                        continue
+                    exp_date = ev.get("expected_date", "")
+                    conf = float(ev.get("confidence", 0))
+                    if not exp_date or exp_date < today or exp_date > future_limit:
+                        continue
+                    if conf < min_confidence:
+                        continue
+                    filtered2.append(ev)
+                logger.info(
+                    f"[event_radar:{trace_id}] 去重列表重试: 提取 {len(events2)} 个, "
+                    f"过滤后 {len(filtered2)} 个"
+                )
+                if filtered2:
+                    return filtered2[:max_events]
+        except Exception as e:
+            logger.warning(f"[event_radar:{trace_id}] 去重列表重试失败: {e}")
+
     return filtered[:max_events]
 
 
