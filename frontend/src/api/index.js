@@ -1802,9 +1802,17 @@ export function acknowledgeAlert(alertId, status) {
 
 // ── 前瞻性事件雷达 ─────────────────────────────────────
 
-/** 手动触发事件雷达扫描（LLM调用较多，给180秒超时） */
+/**
+ * 手动触发事件雷达扫描（异步执行,立即返回 task_id）
+ * 后端实际扫描在后台跑(1-3 分钟),前端用 getEventRadarScanStatus 轮询
+ */
 export function triggerEventRadarScan() {
-  return api.post('/alerts/event-radar/scan', {}, { timeout: 180000 })
+  return api.post('/alerts/event-radar/scan', {})
+}
+
+/** 查询扫描任务状态:status=running/done/failed */
+export function getEventRadarScanStatus(taskId) {
+  return api.get(`/alerts/event-radar/scan/status/${taskId}`)
 }
 
 /** 手动触发事件落地验证 */

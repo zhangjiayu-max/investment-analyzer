@@ -9,7 +9,7 @@
  */
 import { ref, computed, onMounted, watch, nextTick } from 'vue'
 import {
-  listMarketEvents, triggerEventRadarScan, triggerEventRadarVerify, getEventRadarAccuracy,
+  listMarketEvents, triggerEventRadarScan, getEventRadarScanStatus, triggerEventRadarVerify, getEventRadarAccuracy,
   listWatchlist, addToWatchlist, removeWatchlistItem, refreshWatchlistNavs,
   triggerWatchlistScan, patrolWatchlist, updateWatchlistItem, markWatchlistBought, analyzeArticleTrends,
   getBuyScore, getFundQuality, getWatchlistSignalStats,
@@ -824,12 +824,40 @@ async function handleScan() {
   if (scanning.value) return
   scanning.value = true
   try {
-    const { data } = await triggerEventRadarScan()
-    useToast().showToast(
-      `扫描完成：提取 ${data?.extracted || 0} 个事件，新增 ${data?.new || 0} 个`,
-      'success'
-    )
-    await loadEvents()
+    // 1. 触发异步扫描,立即返回 task_id
+    const { data: triggerData } = await triggerEventRadarScan()
+    const taskId = triggerData?.task_id
+    if (!taskId) {
+      useToast().showToast('扫描启动失败:未返回任务ID', 'error')
+      return
+    }
+
+    // 2. 轮询任务状态(每 2 秒一次,最长等待 5 分钟)
+    const POLL_INTERVAL = 2000
+    const MAX_WAIT_MS = 5 * 60 * 1000
+    const startedAt = Date.now()
+    let finalStatus = null
+
+    while (Date.now() - startedAt < MAX_WAIT_MS) {
+      await new Promise(r => setTimeout(r, POLL_INTERVAL))
+      const { data: status } = await getEventRadarScanStatus(taskId)
+      finalStatus = status
+      if (status?.status === 'done' || status?.status === 'failed') break
+    }
+
+    // 3. 处理最终结果
+    if (!finalStatus) {
+      useToast().showToast('扫描超时,请稍后查看事件列表', 'warning')
+    } else if (finalStatus.status === 'done') {
+      const r = finalStatus.result || {}
+      useToast().showToast(
+        `扫描完成:提取 ${r.extracted || 0} 个事件,新增 ${r.new || 0} 个`,
+        'success'
+      )
+      await loadEvents()
+    } else {
+      useToast().showToast(`扫描失败:${finalStatus.error || '未知错误'}`, 'error')
+    }
   } catch (e) {
     useToast().showToast('扫描失败', 'error')
   } finally {

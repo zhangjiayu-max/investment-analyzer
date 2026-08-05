@@ -1,13 +1,17 @@
 """前瞻性事件雷达 — API 端点。
 
-- POST /api/alerts/event-radar/scan：手动触发扫描
+- POST /api/alerts/event-radar/scan：手动触发扫描（异步,立即返回 task_id）
+- GET /api/alerts/event-radar/scan/status/{task_id}：查询扫描任务状态
 - GET /api/alerts/event-radar/events：事件列表（可按 status/relevance 过滤）
 - GET /api/alerts/event-radar/events/{event_id}：事件详情
 - POST /api/alerts/event-radar/verify：手动触发落地验证
 - GET /api/alerts/event-radar/accuracy：准确率统计
 - POST /api/alerts/event-radar/analyze-article：抓取文章并提取投资趋势
 """
+import asyncio
 import logging
+import uuid
+from datetime import datetime
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Query, Body
@@ -21,17 +25,85 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["event-radar"])
 
+# ── 扫描任务状态（内存存储,单进程,任务完成后保留 1 小时）──
+_scan_tasks: dict[str, dict] = {}
+_SCAN_TTL_SECONDS = 3600
+
+
+def _cleanup_expired_tasks() -> None:
+    """清理超过 TTL 的已完成任务,避免内存泄漏。"""
+    now = datetime.now()
+    expired = [
+        tid for tid, t in _scan_tasks.items()
+        if t.get("status") in ("done", "failed")
+        and t.get("finished_at")
+        and (now - datetime.fromisoformat(t["finished_at"])).total_seconds() > _SCAN_TTL_SECONDS
+    ]
+    for tid in expired:
+        _scan_tasks.pop(tid, None)
+
 
 @router.post("/api/alerts/event-radar/scan")
 async def manual_scan():
-    """手动触发前瞻事件雷达扫描。"""
-    try:
-        from services.event_radar import scan_forward_events
-        result = scan_forward_events()
-        return ApiResponse.success(data=result)
-    except Exception as e:
-        logger.error(f"手动触发事件雷达扫描失败: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"扫描失败: {e}")
+    """手动触发前瞻事件雷达扫描(异步执行)。
+
+    立即返回 task_id,后台执行扫描(含多次 LLM 调用,可能耗时 1-3 分钟)。
+    前端通过 /scan/status/{task_id} 轮询进度。
+    """
+    _cleanup_expired_tasks()
+
+    task_id = f"scan_{datetime.now().strftime('%Y%m%d%H%M%S')}_{uuid.uuid4().hex[:8]}"
+    _scan_tasks[task_id] = {
+        "task_id": task_id,
+        "status": "running",
+        "started_at": datetime.now().isoformat(),
+        "finished_at": None,
+        "result": None,
+        "error": None,
+    }
+
+    async def _run_scan():
+        """后台执行扫描,完成后更新任务状态。"""
+        try:
+            from services.event_radar import scan_forward_events
+            # scan_forward_events 是同步阻塞函数(多次 LLM 调用),
+            # 用 asyncio.to_thread 丢到线程池,避免阻塞事件循环
+            result = await asyncio.to_thread(scan_forward_events, "")
+            _scan_tasks[task_id]["status"] = "done"
+            _scan_tasks[task_id]["result"] = result
+            logger.info(f"[event_radar-scan] 任务 {task_id} 完成: {result}")
+        except Exception as e:
+            _scan_tasks[task_id]["status"] = "failed"
+            _scan_tasks[task_id]["error"] = str(e)
+            logger.error(f"[event_radar-scan] 任务 {task_id} 失败: {e}", exc_info=True)
+        finally:
+            _scan_tasks[task_id]["finished_at"] = datetime.now().isoformat()
+
+    # 创建后台任务,不 await
+    asyncio.create_task(_run_scan())
+    logger.info(f"[event_radar-scan] 任务 {task_id} 已启动(后台异步执行)")
+
+    return ApiResponse.success(data={
+        "task_id": task_id,
+        "status": "running",
+        "message": "扫描已启动,请通过 /scan/status/{task_id} 查询进度",
+    })
+
+
+@router.get("/api/alerts/event-radar/scan/status/{task_id}")
+async def scan_status(task_id: str):
+    """查询扫描任务状态。
+
+    返回:
+        - status: running / done / failed
+        - result: 扫描结果(status=done 时)
+        - error: 错误信息(status=failed 时)
+        - started_at / finished_at: 时间戳
+    """
+    task = _scan_tasks.get(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail=f"任务不存在或已过期: {task_id}")
+    return ApiResponse.success(data=task)
 
 
 @router.get("/api/alerts/event-radar/events")
