@@ -6057,6 +6057,15 @@ function txDisplayAmount(tx) {
                 </span>
               </div>
               <p class="dca-rule">{{ dcaSuggestion.suggestion.rule }}</p>
+              <!-- 近期买入记录提示 -->
+              <div v-if="dcaSuggestion.suggestion.recent_buy_amount_30d > 0 || dcaSuggestion.suggestion.recent_buy_amount_7d > 0" class="dca-recent-buys">
+                <span v-if="dcaSuggestion.suggestion.recent_buy_amount_7d > 0" class="recent-buy-tag recent-buy-7d">
+                  近7天已买入 ¥{{ dcaSuggestion.suggestion.recent_buy_amount_7d.toLocaleString() }}（{{ dcaSuggestion.suggestion.recent_add_count_7d }}次）
+                </span>
+                <span v-if="dcaSuggestion.suggestion.recent_buy_amount_30d > 0" class="recent-buy-tag recent-buy-30d">
+                  近30天已买入 ¥{{ dcaSuggestion.suggestion.recent_buy_amount_30d.toLocaleString() }}（{{ dcaSuggestion.suggestion.recent_add_count_30d }}次）
+                </span>
+              </div>
               <div v-if="dcaSuggestion.suggestion.recommended_amount > 0" class="dca-action">
                 <span class="dca-amount">建议金额 ¥{{ dcaSuggestion.suggestion.recommended_amount }}</span>
                 <button type="button" class="btn-sm btn-primary" @click="applyDcaSuggestion">填入建议</button>
@@ -7526,6 +7535,10 @@ function txDisplayAmount(tx) {
 .dca-action { display: flex; justify-content: space-between; align-items: center; margin-top: 8px; }
 .dca-amount { font-weight: 600; color: #2563eb; }
 .dca-warning { font-size: 12px; color: #dc2626; margin-top: 6px; }
+.dca-recent-buys { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.recent-buy-tag { font-size: 11px; padding: 2px 8px; border-radius: 10px; font-weight: 500; }
+.recent-buy-7d { background: #fef3c7; color: #92400e; }
+.recent-buy-30d { background: #e0e7ff; color: #3730a3; }
 
 .modal-form {
   display: flex;

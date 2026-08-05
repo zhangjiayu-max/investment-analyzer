@@ -146,15 +146,49 @@ export function getDDValuation(id) {
   return api.get(`/valuation/dd/${id}`)
 }
 
+/** 获取螺丝钉估值指数列表 */
+export function getDDIndexes(ddId) {
+  return api.get('/valuation/dd/indexes', { params: ddId ? { dd_id: ddId } : {} })
+}
+
+/** ── 六亿估值 ────────────────────────────────────── */
+
+/** 解析六亿估值表图片（同步，多指数表格数据） */
+export function parseLiuyiImage(path, modelType = 'mimo') {
+  return api.post('/valuation/parse-liuyi', { path, model_type: modelType }, { timeout: 300000 })
+}
+
+/** 异步解析六亿估值表图片（推荐，不受页面切换影响） */
+export function parseLiuyiImageAsync(path, modelType = 'mimo') {
+  return api.post('/valuation/parse-liuyi-async', { path, model_type: modelType })
+}
+
+/** 批量异步解析六亿估值表图片 */
+export function parseLiuyiBatchAsync(paths, modelType = 'mimo') {
+  return api.post('/valuation/parse-liuyi-batch-async', { paths, model_type: modelType }, { timeout: 30000 })
+}
+
+/** 查询六亿估值图片解析任务状态（复用 dd parse task 接口） */
+export { getDDParseTask as getLiuyiParseTask, pollDDParseTask as pollLiuyiParseTask }
+
+/** 列出六亿估值记录 */
+export function listLiuyiValuations() {
+  return api.get('/valuation/liuyi/list')
+}
+
+/** 获取六亿估值记录详情 */
+export function getLiuyiValuation(id) {
+  return api.get(`/valuation/liuyi/${id}`)
+}
+
+/** 获取六亿估值指数列表 */
+export function getLiuyiIndexes(liuyiId) {
+  return api.get('/valuation/liuyi/indexes', { params: liuyiId ? { liuyi_id: liuyiId } : {} })
+}
+
 /** 获取最新市场温度 */
 export function getMarketTemperature() {
   return api.get('/valuation/market-temperature')
-}
-
-/** 获取螺丝钉指数列表 */
-export function getDDIndexes(ddId = null) {
-  const params = ddId ? { dd_id: ddId } : {}
-  return api.get('/valuation/dd/indexes', { params })
 }
 
 /** 统一估值查询（智能降级） */
@@ -784,6 +818,34 @@ export function listDdImageDates() {
 /** 删除螺丝钉估值图片 */
 export function deleteDdImage(path) {
   return api.delete(`/dd-images/${path}`)
+}
+
+/** ── 六亿估值图片管理 ────────────────────────────────────── */
+
+/** 上传六亿估值图片 */
+export function uploadLiuyiImage(file) {
+  const form = new FormData()
+  form.append('file', file)
+  return api.post('/liuyi-images/upload', form, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+  })
+}
+
+/** 列出六亿估值图片 */
+export function listLiuyiImages(date = null) {
+  const params = {}
+  if (date) params.date = date
+  return api.get('/liuyi-images', { params })
+}
+
+/** 列出六亿图片日期 */
+export function listLiuyiImageDates() {
+  return api.get('/liuyi-images/dates')
+}
+
+/** 删除六亿估值图片 */
+export function deleteLiuyiImage(path) {
+  return api.delete(`/liuyi-images/${path}`)
 }
 
 /** 上传估值图片（用户上传的估值截图） */

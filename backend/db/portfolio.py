@@ -145,18 +145,37 @@ def get_dca_suggestion(holding_id: int) -> dict:
     fund_code = holding["fund_code"]
     fund_name = holding.get("fund_name", fund_code)
 
-    # 查询近30天加仓次数（用户手动买入，排除系统交易）
+    # 查询近30天加仓次数和金额（用户手动买入，排除系统交易）
     conn = _get_conn()
     try:
         from datetime import datetime, timedelta
-        cutoff = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
-        recent_count = conn.execute("""
-            SELECT COUNT(*) as cnt FROM portfolio_transactions
+        now = datetime.now()
+        cutoff_30d = (now - timedelta(days=30)).strftime("%Y-%m-%d")
+        cutoff_7d = (now - timedelta(days=7)).strftime("%Y-%m-%d")
+        today = now.strftime("%Y-%m-%d")
+
+        # 近30天:次数 + 金额
+        row_30d = conn.execute("""
+            SELECT COUNT(*) as cnt, COALESCE(SUM(submitted_amount), 0) as total
+            FROM portfolio_transactions
             WHERE holding_id = ? AND transaction_type = 'buy'
               AND (is_system IS NULL OR is_system = 0) AND (is_hypothetical IS NULL OR is_hypothetical = 0)
               AND transaction_date >= ?
-        """, (holding_id, cutoff)).fetchone()["cnt"]
-        today = datetime.now().strftime("%Y-%m-%d")
+        """, (holding_id, cutoff_30d)).fetchone()
+        recent_count = row_30d["cnt"]
+        recent_amount_30d = float(row_30d["total"] or 0)
+
+        # 近7天:次数 + 金额(更短周期,提示近期密集买入)
+        row_7d = conn.execute("""
+            SELECT COUNT(*) as cnt, COALESCE(SUM(submitted_amount), 0) as total
+            FROM portfolio_transactions
+            WHERE holding_id = ? AND transaction_type = 'buy'
+              AND (is_system IS NULL OR is_system = 0) AND (is_hypothetical IS NULL OR is_hypothetical = 0)
+              AND transaction_date >= ?
+        """, (holding_id, cutoff_7d)).fetchone()
+        recent_count_7d = row_7d["cnt"]
+        recent_amount_7d = float(row_7d["total"] or 0)
+
         today_count = conn.execute("""
             SELECT COUNT(*) as cnt FROM portfolio_transactions
             WHERE holding_id = ? AND transaction_type = 'buy'
@@ -208,6 +227,9 @@ def get_dca_suggestion(holding_id: int) -> dict:
             "rule": rule,
             "already_added_today": today_count > 0,
             "recent_add_count_30d": recent_count,
+            "recent_buy_amount_30d": recent_amount_30d,
+            "recent_add_count_7d": recent_count_7d,
+            "recent_buy_amount_7d": recent_amount_7d,
         },
         "advice": advice,
     }
