@@ -98,7 +98,7 @@ class LightValidator:
         try:
             response = _call_llm(
                 caller="light_validator",
-                model=MODEL_ANALYSIS,
+                model=MODEL_AUX,  # 工具结果校验用 AUX 降本
                 messages=[{"role": "user", "content": prompt}],
                 temperature=get_config_float("llm.temperature_tool", 0.2),
                 max_tokens=400,
@@ -182,7 +182,7 @@ class LightValidator:
                 try:
                     resp = _call_llm(
                         caller="self_consistency",
-                        model=MODEL_ANALYSIS,
+                        model=MODEL_AUX,  # 自一致性校验用 AUX 降本
                         messages=[{"role": "user", "content": verify_prompt}],
                         temperature=0.5,
                         max_tokens=10,

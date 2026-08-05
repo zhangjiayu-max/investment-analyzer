@@ -613,7 +613,7 @@ class SmartRouter:
         try:
             response = _call_llm(
                 caller="smart_router",
-                model=MODEL,
+                model=MODEL_AUX,  # 路由是简单分类任务,用 AUX 降本
                 messages=[
                     {"role": "system", "content": "你只做路由决策，不输出分析内容。"},
                     {"role": "user", "content": prompt},

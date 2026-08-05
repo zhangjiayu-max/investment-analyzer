@@ -452,20 +452,22 @@ _AGENT_MODEL_MAP_MIMO = {
 }
 
 # Qwen 模型映射 — 统一使用 qwen3.8-max
-# qwen3.8-max: 所有智能体统一模型（预览版 max-preview 已下架）
-# qwen3.8-max: 其余所有智能体
+# qwen 模式分级降本（2026-08-05）：
+#   qwen3.8-max  : 编排器/仲裁 + 核心数值分析(估值/配置/基金/风险) — 需精确推理
+#   qwen3.7-max  : 市场/宏观/文章专家 — 中等重要,趋势判断与文本摘要
+#   qwen3.7-plus : 交叉审阅/自我反思 — 非核心推理,成本降 78%
 _AGENT_MODEL_MAP_QWEN = {
     "valuation_expert": "qwen3.8-max",             # 估值专家，需精确数值推理
     "allocation_advisor": "qwen3.8-max",           # 配置顾问，组合优化
     "fund_analyst": "qwen3.8-max",                 # 基金分析，需穿透分析
     "risk_assessor": "qwen3.8-max",                # 风险评估，需风险判断
-    "market_analyst": "qwen3.8-max",               # 市场分析，趋势判断
-    "macro_strategist": "qwen3.8-max",             # 宏观策略
-    "article_expert": "qwen3.8-max",               # 文章专家，文本摘要
+    "market_analyst": "qwen3.7-max",               # 市场分析，趋势判断
+    "macro_strategist": "qwen3.7-max",             # 宏观策略
+    "article_expert": "qwen3.7-max",               # 文章专家，文本摘要
     "orchestrator": "qwen3.8-max",                 # 编排器
-    "cross_review": "qwen3.8-max",                 # 交叉审阅
+    "cross_review": "qwen3.7-plus",                # 交叉审阅
     "arbitrator": "qwen3.8-max",                   # 仲裁
-    "self_reflection": "qwen3.8-max",              # 自我反思
+    "self_reflection": "qwen3.7-plus",             # 自我反思
 }
 
 # 兼容别名
@@ -494,7 +496,7 @@ def _get_model_for_agent(agent_key: str, budget_mode: str = "normal") -> str:
     # conservative 模式：所有 Agent 用同一个省钱模型
     if budget_mode == "conservative":
         if LLM_PROVIDER == "qwen":
-            default_conservative = "qwen3.8-max"
+            default_conservative = "qwen3.7-plus"  # 保守模式统一用 plus 降本
         elif LLM_PROVIDER == "mimo":
             default_conservative = "mimo-v2.5-pro"
         else:

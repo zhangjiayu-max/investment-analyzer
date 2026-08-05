@@ -33,7 +33,7 @@ def _get_eval_model() -> str:
     # 按 provider 选便宜模型
     from config import LLM_PROVIDER
     if LLM_PROVIDER == "qwen":
-        return "qwen3.8-max"
+        return "qwen3.7-flash"  # RAG 评估用免费 flash 模型,降本 100%
     elif LLM_PROVIDER == "mimo":
         return "mimo-v2.5-pro"
     return MODEL_AUX  # 兜底

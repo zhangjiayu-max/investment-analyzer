@@ -53,12 +53,13 @@ MODEL = _model
 # 与 orchestrator._AGENT_MODEL_MAP_* 保持一致：
 #   MODEL_STRONG   : 最强，仅编排器/仲裁使用（qwen3.8-max）
 #   MODEL_ANALYSIS : 核心数值分析，用于估值/基金/风险/分散度/相关性等需精确推理
-#   MODEL_AUX      : 辅助文本/综合，用于全景/热点/日报/市场情报等
+#   MODEL_AUX      : 辅助文本/综合，用于全景/热点/日报/市场情报等（qwen3.7-plus 降本）
 # 注：mimo 仅一档，三档统一为 mimo-v2.5-pro
+# 注：qwen 模式下 MODEL_AUX 降级为 qwen3.7-plus（成本降 78%），仅核心分析保留 3.8-max
 if LLM_PROVIDER == "qwen":
     MODEL_STRONG = "qwen3.8-max"
     MODEL_ANALYSIS = "qwen3.8-max"
-    MODEL_AUX = "qwen3.8-max"
+    MODEL_AUX = "qwen3.7-plus"
 elif LLM_PROVIDER == "mimo":
     MODEL_STRONG = "mimo-v2.5-pro"
     MODEL_ANALYSIS = "mimo-v2.5-pro"
