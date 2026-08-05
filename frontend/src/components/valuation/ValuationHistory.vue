@@ -166,6 +166,9 @@ const ddFilteredList = computed(() => {
 })
 
 // liuyi image tab computed
+const liuyiHasPercentile = computed(() => {
+  return liuyiIndexList.value.some(item => item.pe_percentile != null || item.pb_percentile != null)
+})
 const liuyiFilteredList = computed(() => {
   let list = liuyiIndexList.value
   if (liuyiSearchQuery.value) {
@@ -1597,11 +1600,13 @@ defineExpose({ loadHistory })
                   <th @click="liuyiSortBy('pe')" class="sortable">
                     PE <Icon v-if="liuyiSortKey === 'pe'" :name="liuyiSortAsc ? 'arrow-up' : 'arrow-down'" size="10" class="sort-icon" />
                   </th>
-                  <th @click="liuyiSortBy('pe_percentile')" class="sortable">
+                  <th v-if="liuyiHasPercentile" @click="liuyiSortBy('pe_percentile')" class="sortable">
                     PE% <Icon v-if="liuyiSortKey === 'pe_percentile'" :name="liuyiSortAsc ? 'arrow-up' : 'arrow-down'" size="10" class="sort-icon" />
                   </th>
-                  <th>PB</th>
-                  <th>PB%</th>
+                  <th @click="liuyiSortBy('pb')" class="sortable">
+                    PB <Icon v-if="liuyiSortKey === 'pb'" :name="liuyiSortAsc ? 'arrow-up' : 'arrow-down'" size="10" class="sort-icon" />
+                  </th>
+                  <th v-if="liuyiHasPercentile">PB%</th>
                   <th>股息率</th>
                   <th>ROE</th>
                   <th @click="liuyiSortBy('valuation_status')" class="sortable">
@@ -1614,7 +1619,7 @@ defineExpose({ loadHistory })
                   <td class="td-name">{{ item.index_name || '-' }}</td>
                   <td class="td-code font-jet">{{ item.index_code || '-' }}</td>
                   <td class="td-val font-jet">{{ item.pe ?? '-' }}</td>
-                  <td>
+                  <td v-if="liuyiHasPercentile">
                     <div v-if="item.pe_percentile != null" class="pe-percentile-cell">
                       <span :class="['badge', ddPercentileClass(item.pe_percentile), 'font-jet']">
                         {{ item.pe_percentile }}%
@@ -1626,7 +1631,7 @@ defineExpose({ loadHistory })
                     <span v-else>-</span>
                   </td>
                   <td class="td-val font-jet">{{ item.pb ?? '-' }}</td>
-                  <td>
+                  <td v-if="liuyiHasPercentile">
                     <div v-if="item.pb_percentile != null" class="pe-percentile-cell">
                       <span :class="['badge', ddPercentileClass(item.pb_percentile), 'font-jet']">
                         {{ item.pb_percentile }}%
@@ -1644,7 +1649,7 @@ defineExpose({ loadHistory })
                       {{ item.valuation_status }}
                     </span>
                     <span v-else>-</span>
-                    <span v-if="item.pe_percentile != null && item.pb_percentile != null && Math.abs(item.pe_percentile - item.pb_percentile) > 20"
+                    <span v-if="liuyiHasPercentile && item.pe_percentile != null && item.pb_percentile != null && Math.abs(item.pe_percentile - item.pb_percentile) > 20"
                           class="dd-diverge-warn"
                           :title="`PE%(${item.pe_percentile})与PB%(${item.pb_percentile})差异${Math.abs(item.pe_percentile - item.pb_percentile).toFixed(0)}%，建议参考${item.pb_percentile < item.pe_percentile ? 'PB' : 'PE'}`">
                       <Icon name="warning" size="12" class="dd-diverge-warn-icon" />

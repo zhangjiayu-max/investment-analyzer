@@ -91,24 +91,7 @@ async def run_dd_parse(task_id: int, image_path: str, parse_type: str = "dd"):
             liuyi_id = save_liuyi_valuation(result, rel_path, image_url)
             result["liuyi_id"] = liuyi_id
 
-            # 更新 analysis_records
-            conn = _get_conn()
-            existing = conn.execute(
-                "SELECT id FROM analysis_records WHERE image_path = ?", (rel_path,)
-            ).fetchone()
-            if existing:
-                conn.execute(
-                    "UPDATE analysis_records SET status='success', updated_at=datetime('now','localtime') WHERE id=?",
-                    (existing[0],),
-                )
-            else:
-                conn.execute(
-                    "INSERT INTO analysis_records (image_path, image_url, status) VALUES (?, ?, 'success')",
-                    (rel_path, image_url),
-                )
-            conn.commit()
-            conn.close()
-
+            # 六亿估值不写入 analysis_records（那是雷牛牛单指数估值的表）
             update_dd_parse_task(
                 task_id,
                 status="done",
