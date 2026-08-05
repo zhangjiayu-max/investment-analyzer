@@ -315,7 +315,7 @@ import { useAsyncTask } from '../../composables/useAsyncTask'
 import Icon from '../ui/Icon.vue'
 import SharedSignalsCard from '../shared/SharedSignalsCard.vue'
 
-const { taskState, taskResult, taskError, start, restore, reset } = useAsyncTask('market_intelligence')
+const { taskState, taskResult, taskError, start, restore, restoreFromServer, reset } = useAsyncTask('market_intelligence')
 const loading = ref(false)
 const data = ref(null)
 const selectedSector = ref(0)
@@ -332,8 +332,19 @@ const activeSector = computed(() => {
   return data.value.sectors[selectedSector.value] || null
 })
 
-onMounted(() => {
-  restore()
+onMounted(async () => {
+  const restored = await restoreFromServer({
+    onComplete: (result) => {
+      data.value = result
+      selectedSector.value = 0
+      loading.value = false
+    },
+    onError: (err) => {
+      console.error('市场情报加载失败:', err)
+      loading.value = false
+    }
+  })
+  if (restored && taskState.value === 'running') loading.value = true
   if (taskState.value === 'idle') loadData()
 })
 

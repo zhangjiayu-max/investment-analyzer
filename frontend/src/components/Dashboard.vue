@@ -28,10 +28,10 @@ import Icon from './ui/Icon.vue'
 const { showToast } = useToast()
 
 // ── 异步任务 composables ──
-const { taskState: hotspotsTaskState, start: startHotspotsTask, restore: restoreHotspotsTask } = useAsyncTask('hotspots_analysis')
-const { taskState: reportTaskState, start: startReportTask, restore: restoreReportTask } = useAsyncTask('daily_report')
-const { taskState: bondTaskState, start: startBondTask, restore: restoreBondTask } = useAsyncTask('bond_recommend')
-const { taskState: rebalanceTaskState, start: startRebalanceTask, restore: restoreRebalanceTask } = useAsyncTask('rebalancing')
+const { taskState: hotspotsTaskState, start: startHotspotsTask, restore: restoreHotspotsTask, restoreFromServer: restoreHotspotsTaskFromServer } = useAsyncTask('hotspots_analysis')
+const { taskState: reportTaskState, start: startReportTask, restore: restoreReportTask, restoreFromServer: restoreReportTaskFromServer } = useAsyncTask('daily_report')
+const { taskState: bondTaskState, start: startBondTask, restore: restoreBondTask, restoreFromServer: restoreBondTaskFromServer } = useAsyncTask('bond_recommend')
+const { taskState: rebalanceTaskState, start: startRebalanceTask, restore: restoreRebalanceTask, restoreFromServer: restoreRebalanceTaskFromServer } = useAsyncTask('rebalancing')
 
 const emit = defineEmits(['navigate'])
 
@@ -190,12 +190,74 @@ function _clearAllTimers() {
 
 // ── 全景诊断 AI 分析 ──
 
+// restoreFromServer 回调（与 start 调用的回调一致，供 onMounted/onActivated 复用）
+const hotspotsTaskCallbacks = {
+  onComplete: async (result) => {
+    hotspotsAnalysis.value = result
+    hotTopicsAnalyzedAt.value = new Date().toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
+    hotTopicsFetchedAt.value = hotTopicsAnalyzedAt.value
+    try {
+      const { data: opp } = await scanDailyOpportunities({ force_refresh: true })
+      opportunities.value = opp.items || []
+    } catch (e) {
+      console.warn('机会引擎刷新失败:', e)
+    }
+    try { autoVerifyRecommendations() } catch (_) {}
+    loadRecHistory()
+  },
+  onError: (err) => {
+    console.error('热点分析失败:', err)
+    hotspotsAnalysis.value = {
+      summary: '分析失败',
+      recommendations: [],
+      analysis_text: err,
+    }
+  }
+}
+const reportTaskCallbacks = {
+  onComplete: async () => {
+    try {
+      const { data: res } = await getDailyReport()
+      if (res?.has_report) dailyReport.value = res.report
+    } catch (e) {
+      console.error('重新加载日报失败:', e)
+    }
+  },
+  onError: (err) => {
+    console.error('重新生成简报失败:', err)
+  }
+}
+const bondTaskCallbacks = {
+  onComplete: (result) => {
+    bondResult.value = result?.result || result
+    bondLoading.value = false
+    loadDashboard()
+  },
+  onError: (err) => {
+    showToast('AI 债券推荐失败：' + err, 'error')
+    bondLoading.value = false
+  }
+}
+const rebalanceTaskCallbacks = {
+  onComplete: (result) => {
+    rebalanceResult.value = result
+    rebalanceLoading.value = false
+  },
+  onError: (err) => {
+    rebalanceResult.value = { error: '分析失败: ' + err }
+    rebalanceLoading.value = false
+  }
+}
+
 onMounted(async () => {
-  // 先恢复异步任务状态（如果页面切换前有运行中任务）
-  const hotspotsRestored = restoreHotspotsTask()
-  const reportRestored = restoreReportTask()
-  restoreBondTask()
-  restoreRebalanceTask()
+  // 先恢复异步任务状态（切页从内存恢复 / 刷新从后端恢复）
+  const hotspotsRestored = await restoreHotspotsTaskFromServer(hotspotsTaskCallbacks)
+  const reportRestored = await restoreReportTaskFromServer(reportTaskCallbacks)
+  await restoreBondTaskFromServer(bondTaskCallbacks)
+  await restoreRebalanceTaskFromServer(rebalanceTaskCallbacks)
+  if (hotspotsRestored && hotspotsTaskState.value === 'running') hotspotsAnalysis.value = null
+  if (bondTaskState.value === 'running') bondLoading.value = true
+  if (rebalanceTaskState.value === 'running') rebalanceLoading.value = true
 
   if (!hotspotsRestored) {
     // 没有运行中的任务，尝试加载已有缓存
@@ -262,10 +324,13 @@ onMounted(async () => {
 })
 
 onActivated(async () => {
-  restoreReportTask()
-  restoreHotspotsTask()
-  restoreBondTask()
-  restoreRebalanceTask()
+  await restoreReportTaskFromServer(reportTaskCallbacks)
+  await restoreHotspotsTaskFromServer(hotspotsTaskCallbacks)
+  await restoreBondTaskFromServer(bondTaskCallbacks)
+  await restoreRebalanceTaskFromServer(rebalanceTaskCallbacks)
+  if (hotspotsTaskState.value === 'running') hotspotsAnalysis.value = null
+  if (bondTaskState.value === 'running') bondLoading.value = true
+  if (rebalanceTaskState.value === 'running') rebalanceLoading.value = true
   // 如果简报没有运行中的任务，检查后端是否有自动生成中的任务
   if (!dailyReportLoading.value) {
     await checkDailyReportTask()

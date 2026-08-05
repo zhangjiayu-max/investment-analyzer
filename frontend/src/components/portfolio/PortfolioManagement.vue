@@ -2401,7 +2401,7 @@ async function loadFundChart(fundCode) {
   }
 }
 
-const { taskState: diverAiTaskState, start: startDiverAiTask, restore: restoreDiverAiTask } = useAsyncTask('diversification_ai')
+const { taskState: diverAiTaskState, start: startDiverAiTask, restore: restoreDiverAiTask, restoreFromServer: restoreDiverAiTaskFromServer } = useAsyncTask('diversification_ai')
 
 async function runDiverAiSummary() {
   if (!holdings.value.length) return
@@ -2527,7 +2527,7 @@ function confirmDcaOptimization() {
   }
 }
 
-const { taskState: portfolioAiTaskState, start: startPortfolioAiTask, restore: restorePortfolioAiTask } = useAsyncTask('portfolio_ai')
+const { taskState: portfolioAiTaskState, start: startPortfolioAiTask, restore: restorePortfolioAiTask, restoreFromServer: restorePortfolioAiTaskFromServer } = useAsyncTask('portfolio_ai')
 
 async function submitAiAnalysis() {
   aiAnalysisLoading.value = true
@@ -2789,10 +2789,34 @@ onActivated(async () => {
     modeLoading.value = false
   }
   // 恢复异步任务状态
-  restoreDiverAiTask()
-  restorePortfolioAiTask()
+  await restoreDiverAiTaskFromServer({
+    onComplete: (result) => {
+      if (result?.record_id) diverAiRecordId.value = result.record_id
+      diverAiResult.value = result?.result || result?.analysis || ''
+      diverAiLoading.value = false
+    },
+    onError: (err) => {
+      diverAiResult.value = 'AI 解读生成失败：' + err
+      diverAiLoading.value = false
+    }
+  })
+  await restorePortfolioAiTaskFromServer({
+    onComplete: (result) => {
+      if (result?.record_id) aiRecordId.value = result.record_id
+      aiAnalysisResult.value = result?.result || result?.analysis || ''
+      aiTokenUsage.value = result?.token_usage || 0
+      aiAnalysisLoading.value = false
+      loadAiAnalysisRecords()
+    },
+    onError: (err) => {
+      aiAnalysisResult.value = '分析失败：' + err
+      aiAnalysisLoading.value = false
+    }
+  })
   diversificationLoading.value = false
   diverAiLoading.value = false
+  if (diverAiTaskState.value === 'running') diverAiLoading.value = true
+  if (portfolioAiTaskState.value === 'running') aiAnalysisLoading.value = true
 
   await loadData()
   loadAlerts()

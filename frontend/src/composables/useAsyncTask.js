@@ -1,14 +1,20 @@
 import { ref, onUnmounted } from 'vue'
-import { getAsyncTaskStatus } from '../api'
+import { getAsyncTaskStatus, listAsyncTasks } from '../api'
 import { useTaskStore } from './useTaskStore'
 
 /**
  * 通用异步任务 composable
  *
  * 用法：
- * const { taskState, taskResult, taskError, start, stopPolling, reset } = useAsyncTask('hotspots_analysis')
+ * const { taskState, taskResult, taskError, start, stopPolling, reset, restore, restoreFromServer } = useAsyncTask('hotspots_analysis')
  *
  * await start(triggerHotspotsAnalysis, {
+ *   onComplete: (result) => { ... },
+ *   onError: (err) => { ... },
+ * })
+ *
+ * // 页面加载时从后端恢复执行中任务(切页/刷新后按钮显示"执行中")
+ * await restoreFromServer({
  *   onComplete: (result) => { ... },
  *   onError: (err) => { ... },
  * })
@@ -22,7 +28,7 @@ export function useAsyncTask(taskType) {
   const taskId = ref(null)
   let pollTimer = null
 
-  // 恢复已有任务状态（页面切回来时）
+  // 恢复已有任务状态（页面切回来时,从内存 store 恢复）
   function restore() {
     const stored = getTask(taskType)
     if (!stored) return false
@@ -37,6 +43,49 @@ export function useAsyncTask(taskType) {
       return true
     }
     return true
+  }
+
+  /**
+   * 从后端恢复执行中任务状态(页面加载/刷新后调用)
+   * 查询 async_tasks 表是否有该 task_type 的 running 任务
+   * 有则恢复 taskState=running 并开始轮询,实现"切页/刷新回来按钮显示执行中"
+   */
+  async function restoreFromServer({ onComplete, onError } = {}) {
+    // 先尝试从内存 store 恢复(切页场景,store 仍在)
+    if (restore()) {
+      // 内存有 running 任务,但 onComplete/onError 可能丢失(组件重建),用新的覆盖
+      if (taskState.value === 'running' && taskId.value) {
+        setTask(taskType, { onComplete, onError })
+        startPolling(onComplete, onError)
+      }
+      return true
+    }
+
+    // 内存无任务,查后端是否有 running 任务(刷新场景)
+    try {
+      const { data } = await listAsyncTasks(taskType, 'running', 1)
+      const runningTask = data?.tasks?.[0]
+      if (runningTask) {
+        taskId.value = runningTask.id
+        taskState.value = 'running'
+        taskResult.value = null
+        taskError.value = ''
+        setTask(taskType, {
+          taskId: runningTask.id,
+          state: 'running',
+          result: null,
+          error: '',
+          onComplete,
+          onError,
+        })
+        startPolling(onComplete, onError)
+        return true
+      }
+    } catch (e) {
+      // 查询失败静默处理,不影响页面正常加载
+      console.warn(`[useAsyncTask] restoreFromServer 查询 ${taskType} running 任务失败:`, e)
+    }
+    return false
   }
 
   async function start(triggerFn, { onComplete, onError } = {}) {
@@ -110,5 +159,5 @@ export function useAsyncTask(taskType) {
     stopPolling()
   })
 
-  return { taskState, taskResult, taskError, taskId, start, stopPolling, reset, restore, hasRunningTask }
+  return { taskState, taskResult, taskError, taskId, start, stopPolling, reset, restore, restoreFromServer, hasRunningTask }
 }

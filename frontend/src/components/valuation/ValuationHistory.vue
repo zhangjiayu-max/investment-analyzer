@@ -271,7 +271,7 @@ const selectedIndexName = computed(() => {
   return idx?.index_name || selectedCode.value
 })
 
-const { taskState: indexAnalysisTaskState, start: startIndexAnalysisTask, restore: restoreIndexAnalysisTask } = useAsyncTask('index_analysis')
+const { taskState: indexAnalysisTaskState, start: startIndexAnalysisTask, restore: restoreIndexAnalysisTask, restoreFromServer: restoreIndexAnalysisTaskFromServer } = useAsyncTask('index_analysis')
 
 async function handleRunAnalysis() {
   if (!selectedCode.value) return
@@ -754,8 +754,11 @@ const sourceImageUrl = computed(() => {
   return null
 })
 
-onMounted(() => {
-  restoreIndexAnalysisTask()
+onMounted(async () => {
+  await restoreIndexAnalysisTaskFromServer({
+    onComplete: () => { loadAnalysisHistory() },
+    onError: (err) => { console.error('指数分析任务失败:', err) }
+  })
   loadIndexes()
   loadMarketTemperature()
   loadQueryStats()
@@ -769,11 +772,14 @@ onUnmounted(() => {
   document.removeEventListener('click', handleOutsideClick)
 })
 // KeepAlive 激活时重新加载数据（切换页面回来时触发）
-onActivated(() => {
+onActivated(async () => {
   // 重新加载市场温度
   loadMarketTemperature()
   // 恢复异步任务状态
-  restoreIndexAnalysisTask()
+  await restoreIndexAnalysisTaskFromServer({
+    onComplete: () => { loadAnalysisHistory() },
+    onError: (err) => { console.error('指数分析任务失败:', err) }
+  })
   // 如果在增强策略 tab，重新加载数据
   if (outerTab.value === 'super-value') {
     loadSuperValue()

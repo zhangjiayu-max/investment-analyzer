@@ -17,7 +17,7 @@ const { showToast } = useToast()
 const confirm = ref({ visible: false, title: '', message: '', danger: false, onConfirm: null })
 
 // 异步任务：评测用例运行
-const { taskState: evalTaskState, taskResult: evalTaskResult, taskError: evalTaskError, start: startEvalTask, restore: restoreEvalTask } = useAsyncTask('eval_case')
+const { taskState: evalTaskState, taskResult: evalTaskResult, taskError: evalTaskError, start: startEvalTask, restore: restoreEvalTask, restoreFromServer: restoreEvalTaskFromServer } = useAsyncTask('eval_case')
 
 const loading = ref(false)
 const runningCases = ref(new Set()) // 正在运行的用例 ID 集合
@@ -426,8 +426,11 @@ function isMarkdown(text) {
 
 const latestRuns = computed(() => runs.value.slice(0, 30))
 
-onMounted(() => {
-  restoreEvalTask()
+onMounted(async () => {
+  await restoreEvalTaskFromServer({
+    onComplete: () => { loadRuns() },
+    onError: (err) => { console.error('评测任务失败:', err) }
+  })
   loadAll()
   loadPrompts()
   mobileMq = window.matchMedia('(max-width: 768px)')
