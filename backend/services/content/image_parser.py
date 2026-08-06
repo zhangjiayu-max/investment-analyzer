@@ -132,10 +132,28 @@ def _openai_chat(prompt: str, img_b64: str, mime: str, model: str,
     raise RuntimeError("模型返回空响应")
 
 
-def _call_vision(prompt: str, img_b64: str, mime: str, model: str = "", trace_id: str = "") -> str:
-    """调用视觉模型（自动路由 Ollama / OpenAI 兼容，运行时从 DB 读取配置）。"""
-    api_key, base_url, db_model, is_ollama = _resolve_vision()
-    effective_model = model or db_model
+def _call_vision(prompt: str, img_b64: str, mime: str, model: str = "", trace_id: str = "",
+                 force_provider: str = "") -> str:
+    """调用视觉模型（自动路由 Ollama / OpenAI 兼容，运行时从 DB 读取配置）。
+
+    force_provider: 强制指定 provider（"ollama" 或 "openai"），为空时从 DB 读取。
+    """
+    if force_provider:
+        if force_provider == "ollama":
+            from config import get_vision_config_db
+            _, _, _ = get_vision_config_db()  # 不关心返回值，只用 ollama 配置
+            # 从 DB 读取 ollama 专用配置
+            is_ollama = True
+            base_url = "http://localhost:11434"
+            api_key = "ollama"
+        else:
+            api_key, base_url, _, is_ollama = _resolve_vision()
+            is_ollama = False
+    else:
+        api_key, base_url, _, is_ollama = _resolve_vision()
+    effective_model = model or ("" if force_provider == "ollama" else _resolve_vision()[2])
+    if force_provider == "ollama" and not effective_model:
+        effective_model = "qwen3-vl:8b"
     logger.info(f"[_call_vision] provider={'ollama' if is_ollama else 'openai'}, model={effective_model}, base_url={base_url}")
     last_err = None
     for attempt in range(3):
@@ -235,12 +253,12 @@ DD_PARSE_PROMPT_CROP = """读取这张裁剪后的螺丝钉估值表。输出 JS
 只输出 JSON。"""
 
 # 六亿估值表（格式与螺丝钉一致，多指数表格）
-LIUYI_PARSE_PROMPT = """从图片表格读取每个指数的完整数据，表格列顺序为：
-指数名称 | 指数温度 | PE | PE百分位(第一个百分位列) | PB | PB百分位(第二个百分位列) | 股息率 | 最新ROE
-注意：表格中有两个"百分位"列，紧接PE后面的是PE百分位，紧接PB后面的是PB百分位。指数温度是紧接指数名称后面的数值列。
-输出 JSON 数组：
-{"更新日期":"(YYYY-MM-DD)","市场温度":null,"数据":[{"指数名称":"","指数温度":null,"PE":null,"PE百分位":null,"PB":null,"PB百分位":null,"股息率":null,"最新ROE":null,"估值状态":"(低估/适中/高估)","背景颜色":"(绿色/黄色/红色)"}]}
-估值状态根据行背景色判断：绿色=低估, 黄色=适中, 红色=高估。PE百分位和PB百分位是百分比数值（如 25.3% 则输出 25.3），指数温度也是数值（如 45.2 则输出 45.2）。必须逐列读取，不要遗漏任何列。此为六亿估值表，只输出 JSON。"""
+LIUYI_PARSE_PROMPT = """从图片表格逐列读取每个指数的完整数据。表格列顺序（从左到右）：
+指数名称 → 指数温度 → PE → PE百分位 → PB → PB百分位 → 股息率 → 最新ROE
+关键：PE百分位是紧接PE后面的窄列，PB百分位是紧接PB后面的窄列，指数温度是紧接指数名称后面的窄列。这三个窄列是百分比数值，必须逐列读取，不得遗漏。
+输出 JSON 对象：
+{"更新日期":"(YYYY-MM-DD)","市场温度":null,"数据":[{"指数名称":"","指数温度":数值,"PE":数值,"PE百分位":数值,"PB":数值,"PB百分位":数值,"股息率":数值,"最新ROE":数值,"估值状态":"(低估/适中/高估)","背景颜色":"(绿色/黄色/红色)"}]}
+估值状态根据行背景色判断：绿色=低估, 黄色=适中, 红色=高估。此为六亿估值表，只输出 JSON。"""
 
 LIUYI_PARSE_PROMPT_CROP = """读取这张裁剪后的六亿估值表。表格列顺序：指数名称 | 指数温度 | PE | PE百分位 | PB | PB百分位 | 股息率 | 最新ROE。
 输出 JSON：
@@ -628,7 +646,7 @@ class LiuyiImageParser(DDImageParser):
             img_b64 = base64.b64encode(f.read()).decode()
         ext = image_path.rsplit(".", 1)[-1].lower()
         mime = {"jpg": "jpeg", "jpeg": "jpeg", "png": "png", "gif": "gif", "webp": "webp"}.get(ext, "jpeg")
-        # 六亿估值表有百分位/温度等窄列，token-plan 端点不支持 qwen-vl 系列，用 qwen3.8-max
+        # 六亿估值表：直接传整图给 qwen3.8-max 识别，按列顺序提取完整数据
         raw = _call_vision(LIUYI_PARSE_PROMPT, img_b64, mime, model="qwen3.8-max", trace_id=self._trace_id)
         data = _extract_json(raw)
         result = self._normalize(data)
