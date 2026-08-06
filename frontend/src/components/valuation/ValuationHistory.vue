@@ -3207,6 +3207,8 @@ defineExpose({ loadHistory })
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
   padding: 1rem 1.25rem;
 }
 
@@ -3229,6 +3231,14 @@ defineExpose({ loadHistory })
 
 .dd-toolbar-meta b {
   color: var(--color-primary-500);
+}
+
+.dd-toolbar-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+  flex-wrap: nowrap;
 }
 
 .dd-date-select {
