@@ -40,6 +40,11 @@ def parse_single_valuation(path: str, model_type: str = "", source_url: str | No
 
     # 自动判断图片类型：如果路径包含 dd_images，使用 DDImageParser
     is_dd_image = 'dd_images' in str(img_path)
+    # 六亿估值图片不应走普通估值流程，避免写入 analysis_records 污染雷牛牛 Tab
+    is_liuyi_image = 'liuyi_images' in str(img_path)
+
+    if is_liuyi_image:
+        return {"ok": False, "error": "六亿估值图片请通过六亿估值上传入口处理", "path": path}
 
     if is_dd_image:
         # 螺丝钉估值表解析

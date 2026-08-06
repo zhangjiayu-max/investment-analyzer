@@ -235,13 +235,17 @@ DD_PARSE_PROMPT_CROP = """读取这张裁剪后的螺丝钉估值表。输出 JS
 只输出 JSON。"""
 
 # 六亿估值表（格式与螺丝钉一致，多指数表格）
-LIUYI_PARSE_PROMPT = """从图片表格读取每个指数，输出 JSON 数组：
+LIUYI_PARSE_PROMPT = """从图片表格读取每个指数的完整数据，表格列顺序为：
+指数名称 | 指数温度 | PE | PE百分位(第一个百分位列) | PB | PB百分位(第二个百分位列) | 股息率 | 最新ROE
+注意：表格中有两个"百分位"列，紧接PE后面的是PE百分位，紧接PB后面的是PB百分位。指数温度是紧接指数名称后面的数值列。
+输出 JSON 数组：
 {"更新日期":"(YYYY-MM-DD)","市场温度":null,"数据":[{"指数名称":"","指数温度":null,"PE":null,"PE百分位":null,"PB":null,"PB百分位":null,"股息率":null,"最新ROE":null,"估值状态":"(低估/适中/高估)","背景颜色":"(绿色/黄色/红色)"}]}
-估值状态根据行背景色判断：绿色=低估, 黄色=适中, 红色=高估。PE百分位和PB百分位是表格中的百分比数值列（如 25.3% 则输出 25.3）。此为六亿估值表，只输出 JSON。"""
+估值状态根据行背景色判断：绿色=低估, 黄色=适中, 红色=高估。PE百分位和PB百分位是百分比数值（如 25.3% 则输出 25.3），指数温度也是数值（如 45.2 则输出 45.2）。必须逐列读取，不要遗漏任何列。此为六亿估值表，只输出 JSON。"""
 
-LIUYI_PARSE_PROMPT_CROP = """读取这张裁剪后的六亿估值表。输出 JSON：
+LIUYI_PARSE_PROMPT_CROP = """读取这张裁剪后的六亿估值表。表格列顺序：指数名称 | 指数温度 | PE | PE百分位 | PB | PB百分位 | 股息率 | 最新ROE。
+输出 JSON：
 {"数据":[{"指数名称":"","指数温度":null,"PE":null,"PE百分位":null,"PB":null,"PB百分位":null,"股息率":null,"最新ROE":null,"背景颜色":"(绿色/橙色/红色)"}]}
-PE百分位和PB百分位是表格中的百分比数值列（如 25.3% 则输出 25.3）。只输出 JSON。"""
+PE百分位和PB百分位是百分比数值（如 25.3% 则输出 25.3），指数温度是数值（如 45.2 则输出 45.2）。必须逐列读取，不要遗漏。只输出 JSON。"""
 
 # 普通估值图（key 与 _normalize 对齐）
 PARSE_PROMPT = """从图片读取指数估值数据，输出 JSON：
@@ -624,7 +628,8 @@ class LiuyiImageParser(DDImageParser):
             img_b64 = base64.b64encode(f.read()).decode()
         ext = image_path.rsplit(".", 1)[-1].lower()
         mime = {"jpg": "jpeg", "jpeg": "jpeg", "png": "png", "gif": "gif", "webp": "webp"}.get(ext, "jpeg")
-        raw = _call_vision(LIUYI_PARSE_PROMPT, img_b64, mime, trace_id=self._trace_id)
+        # 六亿估值表有百分位/温度等窄列，尝试用更强的视觉模型
+        raw = _call_vision(LIUYI_PARSE_PROMPT, img_b64, mime, model="qwen-vl-max", trace_id=self._trace_id)
         data = _extract_json(raw)
         result = self._normalize(data)
         if not result.get("ok") or result.get("count", 0) == 0:
@@ -662,7 +667,7 @@ class LiuyiImageParser(DDImageParser):
                 buf = io.BytesIO()
                 img.crop(box).save(buf, format="PNG" if mime == "png" else "JPEG")
                 crop_b64 = base64.b64encode(buf.getvalue()).decode()
-                raw = _call_vision(effective_prompt, crop_b64, mime, trace_id=self._trace_id)
+                raw = _call_vision(effective_prompt, crop_b64, mime, model="qwen-vl-max", trace_id=self._trace_id)
                 partial = self._normalize(_extract_json(raw))
                 if partial.get("update_date") and not update_date:
                     update_date = partial["update_date"]
