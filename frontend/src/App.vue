@@ -86,6 +86,7 @@ function handleViewResult(convId) {
 
 .app-content {
   flex: 1;
+  min-width: 0; /* 关键：允许 flex 子项收缩至内容宽度以下，避免溢出顶宽 */
   margin-left: var(--sidebar-width);
   display: flex;
   flex-direction: column;
@@ -95,9 +96,10 @@ function handleViewResult(convId) {
 
 .app-main {
   flex: 1;
+  min-width: 0; /* 关键：允许内容收缩，避免被内部宽表格撑爆 */
   padding: 1.25rem 1.75rem;
   transition: padding var(--transition-normal);
-  overflow-x: hidden;
+  overflow-x: auto; /* 内容超出时允许横向滚动，而非裁切隐藏 */
   background: linear-gradient(180deg, var(--color-bg) 0%, var(--color-bg) 100%);
   position: relative;
 }

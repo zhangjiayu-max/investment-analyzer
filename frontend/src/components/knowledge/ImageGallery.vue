@@ -634,6 +634,42 @@ function confirmLiuyiParseImage(img) {
   }
 }
 
+function confirmLiuyiReParse(img) {
+  confirm.value = {
+    visible: true,
+    title: '重新识别六亿估值',
+    message: `将重新使用 AI 识别「${img.name}」，新结果会覆盖已有数据，补全温度/百分位等窄列。`,
+    danger: false,
+    onConfirm: async () => {
+      confirm.value.visible = false
+      liuyiParseResult.value = null
+      try {
+        const { data } = await parseLiuyiImageAsync(img.path)
+        const taskId = data.task_id
+        liuyiParseTasks.value = { ...liuyiParseTasks.value, [img.path]: { taskId, status: data.status || 'pending' } }
+        const cancel = pollLiuyiParseTask(taskId, (taskData) => {
+          if (isUnmounted) return
+          liuyiParseTasks.value = { ...liuyiParseTasks.value, [img.path]: { taskId, status: taskData.status } }
+          if (taskData.status === 'done') {
+            liuyiParseResult.value = { ok: true, data: taskData.result_json || {}, name: img.name }
+            const { [img.path]: _, ...rest } = liuyiParseTasks.value
+            liuyiParseTasks.value = rest
+            showToast(`「${img.name}」重新识别完成`, 'success')
+          } else if (taskData.status === 'error') {
+            liuyiParseResult.value = { ok: false, message: taskData.error_msg || '解析失败', name: img.name }
+            const { [img.path]: _, ...rest } = liuyiParseTasks.value
+            liuyiParseTasks.value = rest
+            showToast(`「${img.name}」重新识别失败: ${taskData.error_msg || ''}`, 'error')
+          }
+        })
+        liuyiParseTasks.value = { ...liuyiParseTasks.value, [img.path]: { ...liuyiParseTasks.value[img.path], pollCancel: cancel } }
+      } catch (e) {
+        showToast('提交重新识别任务失败: ' + (e.response?.data?.detail || e.message), 'error')
+      }
+    }
+  }
+}
+
 function confirmLiuyiBatchParse(date, items) {
   confirm.value = {
     visible: true,
@@ -1343,6 +1379,11 @@ watch(activeTab, (tab) => {
                   <svg width="12" height="12" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 13l4 4L19 7"/></svg>
                   已识别
                 </span>
+                <button v-if="img.parsed" class="btn-reparse" @click.stop="confirmLiuyiReParse(img)" :disabled="!!liuyiParseTasks[img.path]" title="使用最新模型重新识别，补全温度/百分位等窄列数据">
+                  <span v-if="liuyiParseTasks[img.path]" class="spinner-sm"></span>
+                  <svg v-else width="12" height="12" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
+                  {{ liuyiParseTasks[img.path] ? '识别中...' : '重新识别' }}
+                </button>
                 <button v-else class="btn-parse-img" @click.stop="confirmLiuyiParseImage(img)" :disabled="!!liuyiParseTasks[img.path]" title="AI 识别图片中的估值数据并存入数据库">
                   <span v-if="liuyiParseTasks[img.path]" class="spinner-sm"></span>
                   <svg v-else width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24">
