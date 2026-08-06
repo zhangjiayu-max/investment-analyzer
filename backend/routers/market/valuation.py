@@ -184,15 +184,21 @@ async def parse_dd_batch_async(req: ParseDDBatchRequest):
 @router.post("/parse-liuyi")
 async def parse_liuyi_image(req: ParseDDRequest):
     """解析六亿估值表图片（多指数表格数据，格式与螺丝钉一致）。"""
+    from config import ROOT
     img_path = Path(req.path)
     if not img_path.is_absolute():
-        for base in [LIUYI_IMAGES_DIR, DD_IMAGES_DIR, IMAGES_DIR, VALUATION_IMAGES_DIR]:
-            candidate = base / img_path
-            if candidate.exists():
-                img_path = candidate
-                break
+        # 兼容 DB 中存储的 "data/liuyi_images/..." 完整相对路径
+        root_candidate = ROOT / req.path
+        if root_candidate.exists():
+            img_path = root_candidate
         else:
-            img_path = LIUYI_IMAGES_DIR / req.path
+            for base in [LIUYI_IMAGES_DIR, DD_IMAGES_DIR, IMAGES_DIR, VALUATION_IMAGES_DIR]:
+                candidate = base / img_path
+                if candidate.exists():
+                    img_path = candidate
+                    break
+            else:
+                img_path = LIUYI_IMAGES_DIR / req.path
     if not req.path or not img_path.exists():
         raise HTTPException(400, f"图片路径无效: {img_path}")
 

@@ -5,7 +5,7 @@ async function getEcharts() {
   if (!echartsModule) echartsModule = await import('echarts')
   return echartsModule
 }
-import { listValuationIndexes, getValuationHistory, getIndexInfo, runAnalysis, pollIndexAnalysisStatus, listAnalysisHistory, getAnalysisHistoryDetail, deleteAnalysisHistory, refreshValuationPrices, listDDValuations, getDDValuation, listLiuyiValuations, getLiuyiValuation, getMarketTemperature, getSuperValue, getSuperValueDeep, getEnhancedStrategy, getValuationQueryStats, onlineValuationQuery } from '../../api'
+import { listValuationIndexes, getValuationHistory, getIndexInfo, runAnalysis, pollIndexAnalysisStatus, listAnalysisHistory, getAnalysisHistoryDetail, deleteAnalysisHistory, refreshValuationPrices, listDDValuations, getDDValuation, listLiuyiValuations, getLiuyiValuation, parseLiuyiImage, getMarketTemperature, getSuperValue, getSuperValueDeep, getEnhancedStrategy, getValuationQueryStats, onlineValuationQuery } from '../../api'
 import { useAsyncTask } from '../../composables/useAsyncTask'
 import { renderMarkdown } from '../../composables/useMarkdown'
 import { isDark } from '../../composables/useTheme'
@@ -57,6 +57,7 @@ const liuyiIndexList = ref([])
 const liuyiSearchQuery = ref('')
 const liuyiSortKey = ref('')
 const liuyiSortAsc = ref(true)
+const liuyiReparsing = ref(false)
 
 // 分析状态：按指数 code 独立存储，支持并发分析多个指数
 const analysisLoadingMap = ref({})   // { [indexCode]: boolean }
@@ -651,6 +652,30 @@ function liuyiSortBy(key) {
   } else {
     liuyiSortKey.value = key
     liuyiSortAsc.value = true
+  }
+}
+
+function confirmLiuyiReParse() {
+  const record = liuyiSelectedRecord.value
+  if (!record) return
+  confirm.value = {
+    visible: true,
+    title: '重新识别六亿估值',
+    message: `将重新使用 AI 识别「${record.update_date || '当前记录'}」的六亿估值表数据，新结果会覆盖已有数据。`,
+    danger: false,
+    onConfirm: async () => {
+      confirm.value.visible = false
+      liuyiReparsing.value = true
+      try {
+        await parseLiuyiImage(record.image_path)
+        showToast('重新识别完成', 'success')
+        await loadLiuyiIndexList(record.id)
+      } catch (e) {
+        showToast('重新识别失败: ' + (e.response?.data?.detail || e.message), 'error')
+      } finally {
+        liuyiReparsing.value = false
+      }
+    }
   }
 }
 
@@ -1573,6 +1598,10 @@ defineExpose({ loadHistory })
                 {{ r.update_date || r.created_at?.slice(0, 10) }}
               </option>
             </select>
+            <button class="btn-liuyi-reparse" @click="confirmLiuyiReParse" :disabled="liuyiReparsing || !liuyiSelectedRecord" title="使用最新视觉模型重新识别图片，补全温度/百分位等窄列数据">
+              <span v-if="liuyiReparsing" class="spinner-sm"></span>
+              {{ liuyiReparsing ? '识别中...' : '重新识别' }}
+            </button>
           </div>
         </div>
 
@@ -4048,5 +4077,29 @@ defineExpose({ loadHistory })
   .valuation-value {
     font-size: 1.1rem;
   }
+}
+
+/* ── 六亿重新识别按钮 ── */
+.btn-liuyi-reparse {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 12px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: var(--color-bg-elevated);
+  color: var(--color-text-secondary);
+  font-size: 0.8rem;
+  cursor: pointer;
+  transition: all 0.2s;
+  white-space: nowrap;
+}
+.btn-liuyi-reparse:hover:not(:disabled) {
+  border-color: var(--color-primary-500);
+  color: var(--color-primary-500);
+}
+.btn-liuyi-reparse:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 </style>
