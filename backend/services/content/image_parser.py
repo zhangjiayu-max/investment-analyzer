@@ -628,8 +628,8 @@ class LiuyiImageParser(DDImageParser):
             img_b64 = base64.b64encode(f.read()).decode()
         ext = image_path.rsplit(".", 1)[-1].lower()
         mime = {"jpg": "jpeg", "jpeg": "jpeg", "png": "png", "gif": "gif", "webp": "webp"}.get(ext, "jpeg")
-        # 六亿估值表有百分位/温度等窄列，用 qwen3.8-max 更强的视觉识别能力
-        raw = _call_vision(LIUYI_PARSE_PROMPT, img_b64, mime, model="qwen3.8-max", trace_id=self._trace_id)
+        # 六亿估值表有百分位/温度等窄列，必须用视觉专用模型 qwen-vl-plus
+        raw = _call_vision(LIUYI_PARSE_PROMPT, img_b64, mime, model="qwen-vl-plus", trace_id=self._trace_id)
         data = _extract_json(raw)
         result = self._normalize(data)
         if not result.get("ok") or result.get("count", 0) == 0:
@@ -667,7 +667,7 @@ class LiuyiImageParser(DDImageParser):
                 buf = io.BytesIO()
                 img.crop(box).save(buf, format="PNG" if mime == "png" else "JPEG")
                 crop_b64 = base64.b64encode(buf.getvalue()).decode()
-                raw = _call_vision(effective_prompt, crop_b64, mime, model="qwen3.8-max", trace_id=self._trace_id)
+                raw = _call_vision(effective_prompt, crop_b64, mime, model="qwen-vl-plus", trace_id=self._trace_id)
                 partial = self._normalize(_extract_json(raw))
                 if partial.get("update_date") and not update_date:
                     update_date = partial["update_date"]

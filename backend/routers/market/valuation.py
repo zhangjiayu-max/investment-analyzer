@@ -10,7 +10,7 @@ import uuid
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 
 from config import IMAGES_DIR, VALUATION_IMAGES_DIR, DD_IMAGES_DIR, LIUYI_IMAGES_DIR
 from db.valuations import (
@@ -285,17 +285,8 @@ async def list_liuyi_valuations_api():
     return {"records": list_liuyi_valuations()}
 
 
-@router.get("/liuyi/{liuyi_id}")
-async def get_liuyi_valuation_api(liuyi_id: int):
-    """获取单条六亿估值记录详情。"""
-    record = get_liuyi_valuation(liuyi_id)
-    if not record:
-        raise HTTPException(404, "记录不存在")
-    return record
-
-
 @router.get("/liuyi/indexes")
-async def get_liuyi_indexes(liuyi_id: int = None):
+async def get_liuyi_indexes(liuyi_id: int | None = Query(None)):
     """获取六亿估值表中的指数列表。
 
     参数:
@@ -308,18 +299,15 @@ async def get_liuyi_indexes(liuyi_id: int = None):
         record = get_liuyi_valuation(liuyi_id)
     else:
         records = list_liuyi_valuations()
-        record = records[0] if records else None
+        if records:
+            record = get_liuyi_valuation(records[0]["id"])
+        else:
+            record = None
 
     if not record:
         raise HTTPException(404, "未找到六亿估值记录")
 
-    parsed_data = None
-    if record.get("raw_json"):
-        try:
-            import json
-            parsed_data = json.loads(record["raw_json"])
-        except Exception:
-            pass
+    parsed_data = record.get("parsed_data")
 
     return {
         "liuyi_id": record["id"],
@@ -329,6 +317,15 @@ async def get_liuyi_indexes(liuyi_id: int = None):
         "image_url": record.get("image_url"),
         "indexes": parsed_data.get("data", []) if parsed_data else [],
     }
+
+
+@router.get("/liuyi/{liuyi_id}")
+async def get_liuyi_valuation_api(liuyi_id: int):
+    """获取单条六亿估值记录详情。"""
+    record = get_liuyi_valuation(liuyi_id)
+    if not record:
+        raise HTTPException(404, "记录不存在")
+    return record
 
 
 # ── 指数列表 ──────────────────────────────────────
