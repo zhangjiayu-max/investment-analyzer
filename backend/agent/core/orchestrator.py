@@ -451,23 +451,22 @@ _AGENT_MODEL_MAP_MIMO = {
     "self_reflection": "mimo-v2.5-pro",            # 自我反思，需精确推理
 }
 
-# Qwen 模型映射 — 统一使用 qwen3.8-max
-# qwen 模式分级降本（2026-08-05）：
-#   qwen3.8-max  : 编排器/仲裁 + 核心数值分析(估值/配置/基金/风险) — 需精确推理
-#   qwen3.7-max  : 市场/宏观/文章专家 — 中等重要,趋势判断与文本摘要
-#   qwen3.7-plus : 交叉审阅/自我反思 — 非核心推理,成本降 78%
+# Qwen 模型映射 — 除仲裁外统一使用 qwen3.7-max
+# qwen 模式分级（2026-08-07 调整）：
+#   qwen3.8-max  : 仅仲裁使用 — 需最强推理裁决分歧
+#   qwen3.7-max  : 编排器 + 全部专家/分析/对话/交叉审阅/自我反思
 _AGENT_MODEL_MAP_QWEN = {
-    "valuation_expert": "qwen3.8-max",             # 估值专家，需精确数值推理
-    "allocation_advisor": "qwen3.8-max",           # 配置顾问，组合优化
-    "fund_analyst": "qwen3.8-max",                 # 基金分析，需穿透分析
-    "risk_assessor": "qwen3.8-max",                # 风险评估，需风险判断
-    "market_analyst": "qwen3.7-max",               # 市场分析，趋势判断
+    "valuation_expert": "qwen3.7-max",             # 估值专家
+    "allocation_advisor": "qwen3.7-max",           # 配置顾问
+    "fund_analyst": "qwen3.7-max",                 # 基金分析
+    "risk_assessor": "qwen3.7-max",                # 风险评估
+    "market_analyst": "qwen3.7-max",               # 市场分析
     "macro_strategist": "qwen3.7-max",             # 宏观策略
-    "article_expert": "qwen3.7-max",               # 文章专家，文本摘要
-    "orchestrator": "qwen3.8-max",                 # 编排器
-    "cross_review": "qwen3.7-plus",                # 交叉审阅
-    "arbitrator": "qwen3.8-max",                   # 仲裁
-    "self_reflection": "qwen3.7-plus",             # 自我反思
+    "article_expert": "qwen3.7-max",               # 文章专家
+    "orchestrator": "qwen3.7-max",                 # 编排器
+    "cross_review": "qwen3.7-max",                 # 交叉审阅
+    "arbitrator": "qwen3.8-max",                   # 仲裁（保留最强模型）
+    "self_reflection": "qwen3.7-max",              # 自我反思
 }
 
 # 兼容别名
