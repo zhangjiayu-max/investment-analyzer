@@ -1,6 +1,6 @@
 <script setup>
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
-import { listGalleryRecords, uploadDdImage, listDdImages, listDdImageDates, deleteDdImage, parseAndSaveValuation, parseValuationBatch, parseDDImage, parseDDImageAsync, parseDDBatchAsync, getDDParseTask, pollDDParseTask, uploadValuationImage, listValuationImages, listValuationImageDates, deleteValuationImage, uploadLiuyiImage, listLiuyiImages, listLiuyiImageDates, deleteLiuyiImage, parseLiuyiImage, parseLiuyiImageAsync, parseLiuyiBatchAsync, getLiuyiParseTask, pollLiuyiParseTask, getSystemConfig } from '../../api'
+import { listGalleryRecords, uploadDdImage, listDdImages, listDdImageDates, deleteDdImage, parseAndSaveValuation, parseValuationBatch, parseDDImage, parseDDImageAsync, parseDDBatchAsync, getDDParseTask, pollDDParseTask, uploadValuationImage, listValuationImages, listValuationImageDates, deleteValuationImage, uploadLiuyiImage, listLiuyiImages, listLiuyiImageDates, deleteLiuyiImage, parseLiuyiImage, parseLiuyiImageAsync, parseLiuyiBatchAsync, getLiuyiParseTask, pollLiuyiParseTask } from '../../api'
 import ConfirmDialog from '../layout/ConfirmDialog.vue'
 
 // ── 并发限制工具函数 ──
@@ -954,18 +954,6 @@ function showToast(message, type = 'info') {
   }, 3000)
 }
 
-// ── 视觉模型（固定使用 Qwen，不可切换）──
-const visionProvider = ref('qwen')
-
-async function loadVisionProvider() {
-  try {
-    const { data } = await getSystemConfig('vision.provider')
-    visionProvider.value = data.value || 'qwen'
-  } catch (e) {
-    console.error('Failed to load vision provider:', e)
-  }
-}
-
 // ── 生命周期 ──
 onMounted(() => {
   loadRecords()
@@ -975,7 +963,6 @@ onMounted(() => {
   loadDdImages()
   loadLiuyiDates()
   loadLiuyiImages()
-  loadVisionProvider()
   document.addEventListener('paste', handlePaste)
 })
 
@@ -1058,7 +1045,7 @@ watch(activeTab, (tab) => {
       </button>
       <div class="vision-switch">
         <span class="vision-label">视觉模型</span>
-        <span class="vision-btn active" :title="`当前: Qwen (${visionProvider})`">Qwen</span>
+        <span class="vision-btn active" title="当前: MiMo (mimo-v2.6-pro)">MiMo</span>
       </div>
     </div>
 

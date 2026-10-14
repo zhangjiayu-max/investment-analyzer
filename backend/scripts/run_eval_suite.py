@@ -406,7 +406,7 @@ def generate_summary(conv_results, api_results, rag_result, output_dir):
         "# MIMO 评测报告",
         f"",
         f"**执行时间**: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
-        f"**LLM**: mimo-v2.5-pro（禁用 deepseek）",
+        f"**LLM**: mimo-v2.6-pro",
         f"",
         "---",
         "",

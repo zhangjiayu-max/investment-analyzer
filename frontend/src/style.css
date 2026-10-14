@@ -954,11 +954,19 @@ select.input-field {
 .progress-bar-gradient.fill-extreme .fill { background: linear-gradient(90deg, #ef4444, #dc2626); }
 
 /* ══════════════════════════════════════════════════════
-   Mobile Responsive
+   Responsive Breakpoints
    ══════════════════════════════════════════════════════ */
 @media (min-width: 769px) and (max-width: 1024px) {
-  .app-main { padding: 1.25rem !important; }
+  .app-main { padding: 1rem !important; }
   .dash-grid { grid-template-columns: 1fr 1fr !important; gap: 0.75rem !important; }
+}
+
+@media (min-width: 1025px) and (max-width: 1440px) {
+  .app-main { padding: 1.25rem !important; }
+}
+
+@media (min-width: 1441px) {
+  .app-main { padding: 1.5rem 2rem !important; }
 }
 
 @media (max-width: 768px) {

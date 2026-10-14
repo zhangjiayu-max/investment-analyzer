@@ -34,7 +34,7 @@ DEFAULT_CONFIGS = [
     # LLM 参数
     ('llm.temperature_default', '0.3', '默认温度', 'llm'),
     # 仲裁模型配置
-    ('arbitration.model', '', '仲裁模型名（空则使用默认ARBITRATION_MODEL）', 'arbitration'),
+    ('arbitration.model', '', '仲裁模型名（空则使用默认 mimo-v2.6-pro）', 'arbitration'),
     ('llm.temperature_analysis', '0.3', '分析任务温度', 'llm'),
     ('llm.temperature_vision', '0.1', '图片分析温度', 'llm'),
     ('llm.temperature_eval', '0.2', '评测任务温度', 'llm'),
@@ -161,7 +161,7 @@ DEFAULT_CONFIGS = [
     ('index.hs300_code', '000300.SH', '沪深300指数代码', 'index'),
 
     # 成本路由模型映射（增强6）
-    # 注意：值为空时走代码内嵌 _AGENT_MODEL_MAP_* 默认值（按 LLM_PROVIDER 自动选择）
+    # 注意：值为空时走代码内嵌 _AGENT_MODEL_MAP_MIMO 默认值（统一 mimo-v2.6-pro）
     # 这样切换 provider 时无需同步修改 DB 配置，避免遗留不兼容模型名
     ('cost_routing.enabled', 'true', '是否启用成本路由', 'cost_routing'),
     ('cost_routing.conservative_model', '', '保守模式统一模型（空则走代码默认）', 'cost_routing'),
@@ -211,18 +211,10 @@ DEFAULT_CONFIGS = [
     ('validator.max_repair_attempts', '1', 'Validator 最大修复次数', 'validator'),
     ('validator.llm_check_enabled', 'false', '是否启用 LLM 质检（默认关闭以节约成本）', 'validator'),
 
-    # 视觉模型切换（运行时可切换，无需重启）
-    ('vision.provider', 'mimo', '视觉模型提供商（ollama / mimo / qwen）', 'vision'),
-    ('vision.ollama.api_key', 'ollama', 'Ollama API Key', 'vision'),
-    ('vision.ollama.base_url', 'http://localhost:11434/v1', 'Ollama Base URL', 'vision'),
-    ('vision.ollama.model', 'qwen3-vl:8b', 'Ollama 视觉模型名', 'vision'),
+    # 视觉模型配置（2026-10-14 起统一 mimo-v2.6-pro，运行时可改 vision.mimo.* 切换端点/key）
     ('vision.mimo.api_key', 'tp-cztoehx9kc6uqpwm53adzok8agg84zfokfje362cqmfjzprg', 'MiMo API Key', 'vision'),
     ('vision.mimo.base_url', 'https://token-plan-cn.xiaomimimo.com/v1', 'MiMo Base URL', 'vision'),
-    ('vision.mimo.model', 'mimo-v2.5', 'MiMo 视觉模型名', 'vision'),
-    # Qwen 视觉模型（走 OpenAI 兼容接口，默认值从环境变量读取，无需手填即可切换）
-    ('vision.qwen.api_key', os.getenv("QWEN_VISION_API_KEY", os.getenv("QWEN_API_KEY", "")), 'Qwen API Key', 'vision'),
-    ('vision.qwen.base_url', os.getenv("QWEN_VISION_BASE_URL", os.getenv("QWEN_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")), 'Qwen Base URL', 'vision'),
-    ('vision.qwen.model', os.getenv("QWEN_VISION_MODEL", "qwen3.7-plus"), 'Qwen 视觉模型名', 'vision'),
+    ('vision.mimo.model', 'mimo-v2.6-pro', 'MiMo 视觉模型名', 'vision'),
 
     # 专家调度上限
     ('max_specialists.simple', '1', '简单任务最大专家数', 'orchestrator'),
@@ -262,7 +254,7 @@ DEFAULT_CONFIGS = [
 
     # M3/M5/M2/M7 多Agent整体增强开关（2026-07-16 Phase 2/3）
     ('agent.force_devil_advocate_enabled', 'true', '强制魔鬼代言人开关：交叉审阅disagreements为空时二次提示强制反驳，串行最后位专家注入质疑角色', 'agent'),
-    ('agent.devil_advocate_model', 'qwen3.7-plus', '魔鬼代言人使用的轻量模型（控制成本）', 'agent'),
+    ('agent.devil_advocate_model', 'mimo-v2.6-pro', '魔鬼代言人使用的模型', 'agent'),
     ('agent.deep_synthesis_enabled', 'true', '综合报告深度保留开关：5段结构(核心结论/推理链条/分歧反驳/操作建议/风险提示)，结论长度300字，max_tokens提升至3000', 'agent'),
     ('agent.industry_fundamentalist_enabled', 'true', '行业基本面分析师开关：自下而上行业景气度分析（批价/动销/库存/产能），补全估值/风险/配置之外的维度', 'agent'),
     ('agent.behavioral_advisor_enabled', 'true', '行为金融学专家开关：识别追涨杀跌/损失厌恶/处置效应/锚定效应等6大偏差，给行为纠偏建议', 'agent'),

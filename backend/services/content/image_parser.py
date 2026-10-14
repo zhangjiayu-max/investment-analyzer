@@ -50,52 +50,11 @@ def extract_dominant_color(image_path: str) -> str | None:
         return None
 
 
-# ── 配置（运行时从 DB 读取，支持 Ollama/MiMo 切换）──
-def _resolve_vision() -> tuple[str, str, str, bool]:
-    """每次调用时从 DB 读取视觉模型配置，返回 (api_key, base_url, model, is_ollama)。"""
+# ── 配置（运行时从 DB 读取，统一 MiMo mimo-v2.6-pro）──
+def _resolve_vision() -> tuple[str, str, str]:
+    """每次调用时从 DB 读取视觉模型配置，返回 (api_key, base_url, model)。"""
     from config import get_vision_config_db
-    api_key, base_url, model = get_vision_config_db()
-    is_ollama = 'localhost' in base_url.lower() or '11434' in base_url
-    return api_key, base_url, model, is_ollama
-
-
-def _ollama_chat(prompt: str, img_b64: str, model: str, base_url: str, trace_id: str = "") -> str:
-    """Ollama 原生 API（支持 enable_thinking=False）。"""
-    import httpx
-    base = base_url.replace('/v1', '').rstrip('/')
-    resp = httpx.post(
-        f'{base}/api/chat',
-        json={
-            'model': model,
-            'messages': [{'role': 'user', 'content': prompt, 'images': [img_b64]}],
-            'options': {'enable_thinking': False},
-            'stream': False,
-        },
-        timeout=get_config_int('llm.timeout_vision', 120),
-        trust_env=False,
-    )
-    data = resp.json()
-    # 记录 Ollama token 用量
-    prompt_eval = data.get('prompt_eval_count', 0) or 0
-    eval_count = data.get('eval_count', 0) or 0
-    if prompt_eval or eval_count:
-        try:
-            from services.llm_service import _record_token_usage
-            _UsageStub = type('_UsageStub', (), {
-                'prompt_tokens': prompt_eval,
-                'completion_tokens': eval_count,
-                'total_tokens': prompt_eval + eval_count,
-            })
-            _record_token_usage(_UsageStub(), model, "image_parse", trace_id=trace_id)
-        except Exception:
-            pass
-    text = data.get('message', {}).get('content', '') or ''
-    if text.strip():
-        return text.strip()
-    text = data.get('message', {}).get('thinking', '') or ''
-    if text.strip():
-        return text.strip()
-    raise RuntimeError("Ollama 返回空响应")
+    return get_vision_config_db()
 
 
 def _openai_chat(prompt: str, img_b64: str, mime: str, model: str,
@@ -132,34 +91,14 @@ def _openai_chat(prompt: str, img_b64: str, mime: str, model: str,
     raise RuntimeError("模型返回空响应")
 
 
-def _call_vision(prompt: str, img_b64: str, mime: str, model: str = "", trace_id: str = "",
-                 force_provider: str = "") -> str:
-    """调用视觉模型（自动路由 Ollama / OpenAI 兼容，运行时从 DB 读取配置）。
-
-    force_provider: 强制指定 provider（"ollama" 或 "openai"），为空时从 DB 读取。
-    """
-    if force_provider:
-        if force_provider == "ollama":
-            from config import get_vision_config_db
-            _, _, _ = get_vision_config_db()  # 不关心返回值，只用 ollama 配置
-            # 从 DB 读取 ollama 专用配置
-            is_ollama = True
-            base_url = "http://localhost:11434"
-            api_key = "ollama"
-        else:
-            api_key, base_url, _, is_ollama = _resolve_vision()
-            is_ollama = False
-    else:
-        api_key, base_url, _, is_ollama = _resolve_vision()
-    effective_model = model or ("" if force_provider == "ollama" else _resolve_vision()[2])
-    if force_provider == "ollama" and not effective_model:
-        effective_model = "qwen3-vl:8b"
-    logger.info(f"[_call_vision] provider={'ollama' if is_ollama else 'openai'}, model={effective_model}, base_url={base_url}")
+def _call_vision(prompt: str, img_b64: str, mime: str, model: str = "", trace_id: str = "") -> str:
+    """调用视觉模型（OpenAI 兼容接口，运行时从 DB 读取配置，统一 MiMo）。"""
+    api_key, base_url, db_model = _resolve_vision()
+    effective_model = model or db_model
+    logger.info(f"[_call_vision] model={effective_model}, base_url={base_url}")
     last_err = None
     for attempt in range(3):
         try:
-            if is_ollama:
-                return _ollama_chat(prompt, img_b64, effective_model, base_url, trace_id=trace_id)
             return _openai_chat(prompt, img_b64, mime, effective_model, base_url, api_key, trace_id=trace_id)
         except Exception as e:
             last_err = e
@@ -646,7 +585,7 @@ class LiuyiImageParser(DDImageParser):
             img_b64 = base64.b64encode(f.read()).decode()
         ext = image_path.rsplit(".", 1)[-1].lower()
         mime = {"jpg": "jpeg", "jpeg": "jpeg", "png": "png", "gif": "gif", "webp": "webp"}.get(ext, "jpeg")
-        # 六亿估值表：模型统一走 DB vision.qwen.model 配置，按列顺序提取完整数据
+        # 六亿估值表：模型统一走 DB vision.mimo.model 配置，按列顺序提取完整数据
         raw = _call_vision(LIUYI_PARSE_PROMPT, img_b64, mime, trace_id=self._trace_id)
         data = _extract_json(raw)
         result = self._normalize(data)

@@ -99,7 +99,7 @@ function handleViewResult(convId) {
   min-width: 0; /* 关键：允许内容收缩，避免被内部宽表格撑爆 */
   padding: 1.25rem 1.75rem;
   transition: padding var(--transition-normal);
-  overflow-x: auto; /* 内容超出时允许横向滚动，而非裁切隐藏 */
+  overflow-x: hidden; /* 阻止全局横向滚动，内部宽表格用自带 scroll-wrap */
   background: linear-gradient(180deg, var(--color-bg) 0%, var(--color-bg) 100%);
   position: relative;
 }

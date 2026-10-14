@@ -20,28 +20,21 @@ _ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(_ROOT / ".env.keys")
 load_dotenv(_ROOT / ".env")
 
-# 当前使用的模型提供商: "deepseek" / "mimo" / "qwen"
-LLM_PROVIDER = os.getenv("LLM_PROVIDER", "mimo")
-
-# DeepSeek API 配置（OpenAI 兼容接口）
-DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "")
-DEEPSEEK_BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
-DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
-
-# 小米 MIMO API 配置（OpenAI 兼容接口）
+# ── 小米 MIMO API 配置（OpenAI 兼容接口）──
+# 全系统统一使用 mimo-v2.6-pro（文本 + 视觉），2026-10-14 起移除 DeepSeek/Qwen/Ollama
 MIMO_API_KEY = os.getenv("MIMO_API_KEY", "")
 MIMO_BASE_URL = os.getenv("MIMO_BASE_URL", "https://api.xiaomimimo.com/v1")
-MIMO_MODEL = os.getenv("MIMO_MODEL", "mimo-v2.5-pro")
+MIMO_MODEL = os.getenv("MIMO_MODEL", "mimo-v2.6-pro")
 
 # MIMO 套餐 API（对话用，优先级高于普通 API）
 MIMO_PLAN_API_KEY = os.getenv("MIMO_PLAN_API_KEY", "")
 MIMO_PLAN_BASE_URL = os.getenv("MIMO_PLAN_BASE_URL", "https://token-plan-cn.xiaomimimo.com/v1")
-MIMO_PLAN_MODEL = os.getenv("MIMO_PLAN_MODEL", "mimo-v2.5-pro")
+MIMO_PLAN_MODEL = os.getenv("MIMO_PLAN_MODEL", "mimo-v2.6-pro")
 
-# 视觉模型配置（用于图片解析）
+# 视觉模型配置（用于图片解析，统一 mimo-v2.6-pro）
 VISION_API_KEY = os.getenv("VISION_API_KEY", MIMO_API_KEY)
 VISION_BASE_URL = os.getenv("VISION_BASE_URL", MIMO_BASE_URL)
-VISION_MODEL = os.getenv("VISION_MODEL", "mimo-v2.5")
+VISION_MODEL = os.getenv("VISION_MODEL", "mimo-v2.6-pro")
 
 # Embedding 模型配置（用于 ChromaDB 向量检索）
 # 可选: "BAAI/bge-small-zh-v1.5" (512维, 92MB) / "moka-ai/m3e-base" (768维, 400MB) / "BAAI/bge-large-zh-v1.5" (1024维, 1.2GB)
@@ -55,21 +48,6 @@ EASTMONEY_API_KEY = os.getenv("MX_APIKEY", "") or os.getenv("MX_API_KEY", "")
 
 # 天天基金 Skills API
 TTFUND_APIKEY = os.getenv("TTFUND_APIKEY", "")  # 已废弃：ttskill CLI 登录型，不再需要 API Key
-
-# 仲裁 Agent 配置（高级推理模型）
-ARBITRATION_API_KEY = os.getenv("ARBITRATION_API_KEY", "")
-ARBITRATION_BASE_URL = os.getenv("ARBITRATION_BASE_URL", "https://api.deepseek.com")
-ARBITRATION_MODEL = os.getenv("ARBITRATION_MODEL", "deepseek-v4-pro")
-
-# ── Qwen (阿里云百炼) API 配置 ──
-QWEN_API_KEY = os.getenv("QWEN_API_KEY", "")
-QWEN_BASE_URL = os.getenv("QWEN_BASE_URL", "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1")
-QWEN_MODEL = os.getenv("QWEN_MODEL", "qwen3.8-max")
-# Qwen 视觉模型（用于估值图片解析）
-# qwen3.7-flash 在百炼实例上不可用，qwen3.7-plus 支持多模态
-QWEN_VISION_API_KEY = os.getenv("QWEN_VISION_API_KEY", QWEN_API_KEY)
-QWEN_VISION_BASE_URL = os.getenv("QWEN_VISION_BASE_URL", QWEN_BASE_URL)
-QWEN_VISION_MODEL = os.getenv("QWEN_VISION_MODEL", "qwen3.7-plus")
 
 # ── 热点分析政策关键词（可从环境变量覆盖） ─────────────────
 # 逗号分隔，修改 .env 即可生效，无需改代码
@@ -88,67 +66,44 @@ POLICY_KEYWORDS = [
 def get_llm_config() -> tuple[str, str, str]:
     """返回主用 LLM 配置 (api_key, base_url, model)。
 
-    优先级：
-    1. LLM_PROVIDER=deepseek → 直接走 DeepSeek
-    2. LLM_PROVIDER=mimo → 优先 MIMO 套餐 API，再 MIMO 普通 API
-    3. LLM_PROVIDER=qwen → 使用阿里云百炼 Qwen API
+    统一 MIMO：优先套餐 API，无套餐 key 时走普通 API。
     """
-    if LLM_PROVIDER == "deepseek":
-        return DEEPSEEK_API_KEY, DEEPSEEK_BASE_URL, DEEPSEEK_MODEL
-    if LLM_PROVIDER == "qwen":
-        return QWEN_API_KEY, QWEN_BASE_URL, QWEN_MODEL
-    # MIMO 模式（保留代码路径，后续 MIMO 恢复时可切回）
     if MIMO_PLAN_API_KEY:
         return MIMO_PLAN_API_KEY, MIMO_PLAN_BASE_URL, MIMO_PLAN_MODEL
-    if LLM_PROVIDER == "mimo":
-        return MIMO_API_KEY, MIMO_BASE_URL, MIMO_MODEL
-    return DEEPSEEK_API_KEY, DEEPSEEK_BASE_URL, DEEPSEEK_MODEL
+    return MIMO_API_KEY, MIMO_BASE_URL, MIMO_MODEL
 
 
 def get_llm_fallback_config() -> tuple[str, str, str] | None:
     """返回兜底 LLM 配置，主用失败时使用。
 
-    用户要求禁用 deepseek：MIMO 失败直接异常，不 fallback。
+    用户要求禁用 fallback：MIMO 失败直接异常。
     """
     return None
 
 
 def get_vision_config() -> tuple[str, str, str]:
-    """返回视觉模型配置 (api_key, base_url, model)。
-
-    根据 LLM_PROVIDER 自动选择：
-    - qwen → Qwen 视觉模型 (qwen3.7-flash)
-    - mimo → MIMO 多模态
-    - deepseek → 环境变量配置
-    """
-    if LLM_PROVIDER == "qwen":
-        return QWEN_VISION_API_KEY, QWEN_VISION_BASE_URL, QWEN_VISION_MODEL
+    """返回视觉模型配置 (api_key, base_url, model) — 统一 MIMO 多模态。"""
     return VISION_API_KEY, VISION_BASE_URL, VISION_MODEL
 
 
 def get_vision_config_db() -> tuple[str, str, str]:
     """视觉模型配置 — 每次调用从 DB 读取，支持运行时切换。
 
-    优先级：DB system_config > 环境变量 > 默认值
-    切换 vision.provider 后下一次图片解析即生效，无需重启。
+    优先级：DB system_config (vision.mimo.*) > 环境变量 > 默认值
     """
     try:
         from db.config import get_config
-        provider = get_config('vision.provider', '')
-        if provider:
-            prefix = f'vision.{provider}'
-            api_key = get_config(f'{prefix}.api_key', '')
-            base_url = get_config(f'{prefix}.base_url', '')
-            model = get_config(f'{prefix}.model', '')
-            if api_key and base_url and model:
-                return api_key, base_url, model
-        # 无 DB 配置时，按 LLM_PROVIDER 自动选择
+        api_key = get_config('vision.mimo.api_key', '')
+        base_url = get_config('vision.mimo.base_url', '')
+        model = get_config('vision.mimo.model', '')
+        if api_key and base_url and model:
+            return api_key, base_url, model
         return get_vision_config()
     except Exception:
         return get_vision_config()
 
 # 图片解析模型类型标签（仅用于日志/审计区分，实际模型由 get_vision_config 决定）
-IMAGE_PARSER_MODEL_TYPE = os.getenv("IMAGE_PARSER_MODEL_TYPE", "deepseek")
+IMAGE_PARSER_MODEL_TYPE = os.getenv("IMAGE_PARSER_MODEL_TYPE", "mimo")
 
 
 # ── Token 预算配置 ─────────────────────────────────────────

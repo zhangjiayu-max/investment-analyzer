@@ -23,20 +23,11 @@ from db.config import get_config_int, get_config_float, get_config
 
 
 def _get_eval_model() -> str:
-    """RAG 评估用便宜模型，避免用最贵的 max。
-    
-    优先读 system_config 'rag.eval_model'，否则按 provider 选便宜模型。
-    """
+    """RAG 评估模型 — 统一 mimo-v2.6-pro，可用 system_config 'rag.eval_model' 覆盖。"""
     configured = get_config("rag.eval_model", "")
     if configured:
         return configured
-    # 按 provider 选便宜模型
-    from config import LLM_PROVIDER
-    if LLM_PROVIDER == "qwen":
-        return "qwen3.7-flash"  # RAG 评估用免费 flash 模型,降本 100%
-    elif LLM_PROVIDER == "mimo":
-        return "mimo-v2.5-pro"
-    return MODEL_AUX  # 兜底
+    return MODEL_AUX
 
 logger = logging.getLogger(__name__)
 

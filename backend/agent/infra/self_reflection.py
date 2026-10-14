@@ -8,7 +8,7 @@
 - 失败降级：跳过反思，直接返回原 analysis
 
 成本控制：
-- 用 deepseek-v4-flash（轻量模型）
+- 用统一主模型 mimo-v2.6-pro
 - 反思 prompt 控制在 500 tokens 内
 - 开关 agent.self_reflection_enabled 默认 true（质量优先）
 - M7 跨专家盲点检查开关 agent.self_reflection_cross_check_enabled 默认 false

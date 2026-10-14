@@ -1052,7 +1052,7 @@ function handlePanorama() {
   display: flex;
   flex-direction: column;
   gap: 1.25rem;
-  max-width: 1280px;
+  max-width: 100%;
 }
 
 .dash-header {

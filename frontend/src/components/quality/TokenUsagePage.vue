@@ -8,17 +8,10 @@ import {
 } from '../../api'
 import ConfirmDialog from '../layout/ConfirmDialog.vue'
 
-// ── 费用计算（A3 修复：与后端 infra/cost_tracker.py 统一定价） ──
+// ── 费用计算（与后端 infra/cost_tracker.py 统一定价，统一 mimo-v2.6-pro） ──
 const MODEL_PRICING = {
-  'deepseek-chat': { prompt: 0.5, completion: 2.0 },
-  'deepseek-reasoner': { prompt: 1.0, completion: 4.0 },
-  'deepseek-v4-flash': { prompt: 0.5, completion: 2.0 },
-  'deepseek-v4-pro': { prompt: 1.0, completion: 4.0 },
   'mimo': { prompt: 0.3, completion: 1.2 },
-  'mimo-v2.5-pro': { prompt: 0.3, completion: 1.2 },
-  'mimo-v2.5': { prompt: 0.3, completion: 1.2 },
-  'ollama': { prompt: 0.0, completion: 0.0 },
-  'qwen3-vl': { prompt: 0.0, completion: 0.0 },
+  'mimo-v2.6-pro': { prompt: 0.3, completion: 1.2 },
 }
 
 function calcCost(model, promptTokens, completionTokens) {

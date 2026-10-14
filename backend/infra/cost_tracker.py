@@ -21,27 +21,9 @@ logger = logging.getLogger(__name__)
 # ── 模型价格表（每百万 tokens，单位：元）────────────────────
 
 MODEL_PRICES = {
-    # DeepSeek 系列
-    "deepseek-chat": {"input": 0.5, "output": 2.0},
-    "deepseek-reasoner": {"input": 1.0, "output": 4.0},
-    "deepseek-v4-flash": {"input": 0.5, "output": 2.0},
-    "deepseek-v4-pro": {"input": 1.0, "output": 4.0},
-    # MIMO 系列
+    # MIMO 系列（每百万 tokens，单位：元）
     "mimo": {"input": 0.3, "output": 1.2},
-    "mimo-v2.5-pro": {"input": 0.3, "output": 1.2},
-    "mimo-v2.5": {"input": 0.3, "output": 1.2},
-    # Qwen 系列（阿里云百炼，每百万 tokens，单位：元）
-    # 来源：https://help.aliyun.com/zh/model-studio/billing
-    "qwen3.8-max":         {"input": 18.0, "output": 54.0},
-    "qwen3.7-max":         {"input": 12.0, "output": 36.0},
-    "qwen3.7-plus":        {"input": 4.0,  "output": 12.0},
-    "qwen3.7-flash":       {"input": 0.0,  "output": 0.0},  # 免费额度内
-    "qwen-max":            {"input": 12.0, "output": 36.0},
-    "qwen-plus":           {"input": 4.0,  "output": 12.0},
-    "qwen-turbo":          {"input": 2.0,  "output": 6.0},
-    # Ollama 本地模型（零成本）
-    "ollama": {"input": 0.0, "output": 0.0},
-    "qwen3-vl": {"input": 0.0, "output": 0.0},
+    "mimo-v2.6-pro": {"input": 0.3, "output": 1.2},
 }
 
 
@@ -198,7 +180,7 @@ class BudgetController:
     def get_recommended_model(self, agent_key: str, analysis_type: str = "") -> Optional[str]:
         """根据预算状态推荐模型。"""
         if not self.should_use_expensive_model(analysis_type):
-            return get_config("cost_routing.conservative_model", "deepseek-v4-flash")
+            return get_config("cost_routing.conservative_model", "mimo-v2.6-pro")
         return None  # None 表示用默认模型
 
 

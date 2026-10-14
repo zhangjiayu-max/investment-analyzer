@@ -6,7 +6,7 @@ import logging
 from functools import wraps
 from openai import OpenAI, RateLimitError, APIStatusError, APITimeoutError, APIConnectionError
 from tenacity import retry, stop_after_attempt, wait_exponential_jitter, retry_if_exception, before_sleep_log
-from config import get_llm_config, get_llm_fallback_config, ARBITRATION_API_KEY, ARBITRATION_BASE_URL, ARBITRATION_MODEL, LLM_PROVIDER, QWEN_API_KEY, QWEN_BASE_URL, QWEN_MODEL
+from config import get_llm_config, get_llm_fallback_config
 from db.config import get_config_float, get_config_int
 
 logger = logging.getLogger(__name__)
@@ -49,56 +49,20 @@ _api_key, _base_url, _model = get_llm_config()
 client = OpenAI(api_key=_api_key, base_url=_base_url, timeout=180.0)
 MODEL = _model
 
-# ── 分级模型常量（供独立分析路由使用，避免一律走最强模型浪费 token）────
-# 与 orchestrator._AGENT_MODEL_MAP_* 保持一致：
-#   MODEL_STRONG   : 最强，仅仲裁使用（qwen3.8-max）
-#   MODEL_ANALYSIS : 核心数值分析，用于估值/基金/风险/分散度/相关性等 — qwen3.7-max
-#   MODEL_AUX      : 辅助文本/综合，用于全景/热点/日报/市场情报等 — qwen3.7-max
-# 注：mimo 仅一档，三档统一为 mimo-v2.5-pro
-# 注：qwen 模式下除仲裁外统一 qwen3.7-max（2026-08-07 调整）
-if LLM_PROVIDER == "qwen":
-    MODEL_STRONG = "qwen3.8-max"
-    MODEL_ANALYSIS = "qwen3.7-max"
-    MODEL_AUX = "qwen3.7-max"
-elif LLM_PROVIDER == "mimo":
-    MODEL_STRONG = "mimo-v2.5-pro"
-    MODEL_ANALYSIS = "mimo-v2.5-pro"
-    MODEL_AUX = "mimo-v2.5-pro"
-else:  # deepseek
-    MODEL_STRONG = "deepseek-v4-pro"
-    MODEL_ANALYSIS = "deepseek-v4-pro"
-    MODEL_AUX = "deepseek-v4-flash"
+# ── 分级模型常量（供独立分析路由使用）────
+# 2026-10-14 起全系统统一 mimo-v2.6-pro（单一模型，不再分级）
+MODEL_STRONG = MODEL
+MODEL_ANALYSIS = MODEL
+MODEL_AUX = MODEL
 
 # 兜底客户端（主用失败时切换）
 _fallback_config = get_llm_fallback_config()
 _fallback_client = OpenAI(api_key=_fallback_config[0], base_url=_fallback_config[1], timeout=180.0) if _fallback_config else None
 _fallback_model = _fallback_config[2] if _fallback_config else None
 
-# 仲裁 Agent 客户端（高级推理模型）
-# 根据 LLM_PROVIDER 自动选择仲裁模型
-if LLM_PROVIDER == "qwen" and QWEN_API_KEY:
-    _arbitration_client = OpenAI(api_key=QWEN_API_KEY, base_url=QWEN_BASE_URL, timeout=180.0)
-    _arbitration_model = "qwen3.8-max"  # 仲裁用最强 Qwen
-elif ARBITRATION_API_KEY:
-    _arbitration_client = OpenAI(api_key=ARBITRATION_API_KEY, base_url=ARBITRATION_BASE_URL, timeout=180.0)
-    _arbitration_model = ARBITRATION_MODEL
-else:
-    _arbitration_client = None
-    _arbitration_model = None
-
-# P0: 启动时检测 Token Plan 订阅端点（提示检查订阅档位是否支持分级模型）
-if LLM_PROVIDER == "qwen" and "token-plan" in QWEN_BASE_URL.lower():
-    logger.info(
-        "[模型路由提示] 检测到 QWEN_BASE_URL 使用 Token Plan 订阅端点 "
-        f"({QWEN_BASE_URL})。\n"
-        "Token Plan 个人版 Lite 档位可能仅支持 qwen3.8-max，"
-        "Standard/Pro 档位才包含 qwen3.8-max 等分级模型。\n"
-        "如果运行时日志频繁出现 '模型静默映射' WARNING，说明当前订阅档位不支持代码请求的分级模型，被端点降级到 qwen3.8-max。\n"
-        "解决方案：\n"
-        "  1. 升级到 Standard/Pro 档位（支持完整 11 款模型）\n"
-        "  2. 或切换到按量计费端点: QWEN_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1\n"
-        "  3. 或关闭非核心 LLM 开关（reflection/cross_review）减少调用次数降本"
-    )
+# 仲裁 Agent 复用主客户端（统一 mimo-v2.6-pro，可通过 system_config 'arbitration.model' 覆盖模型名）
+_arbitration_client = client
+_arbitration_model = MODEL
 
 SYSTEM_PROMPT = """<role>你是一位专业的投资分析师。请根据提供的微信公众号文章内容和市场数据，给出客观的投资分析。</role>
 
@@ -341,7 +305,7 @@ def _check_model_silent_mapping(requested: str, responded: str, caller: str, tra
     """
     if not requested or not responded:
         return
-    # 归一化比较（去掉版本后缀差异，如 qwen3.7-max vs qwen3.7-max-20240101）
+    # 归一化比较（去掉版本后缀差异，如 mimo-v2.6-pro vs mimo-v2.6-pro-20240101）
     req_norm = requested.lower().split("-20")[0]
     resp_norm = responded.lower().split("-20")[0]
     if req_norm == resp_norm:
@@ -355,8 +319,7 @@ def _check_model_silent_mapping(requested: str, responded: str, caller: str, tra
         logger.warning(
             f"[trace:{trace_id}] ⚠️ 模型静默映射: 请求 '{requested}' → 响应 '{responded}' "
             f"(caller={caller}, 累计 {count} 次)。"
-            f"provider 端点可能不支持请求的模型，成本分级路由失效。"
-            f"请检查 QWEN_BASE_URL 是否为 token-plan 订阅端点（仅支持单一模型）。"
+            f"MIMO 端点可能不支持请求的模型，请检查订阅端点配置。"
         )
 
 
