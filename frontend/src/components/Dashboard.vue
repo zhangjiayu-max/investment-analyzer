@@ -57,6 +57,7 @@ const precheckStates = ref({})
 const decisionReviews = ref([])
 const decisionReviewsLoading = ref(false)
 const sharedSignals = computed(() => data.value?.shared_signals || null)
+const dataFreshness = computed(() => data.value?.data_freshness || { stale_count: 0, stale_indexes: [] })
 
 // ── 市场热点（自动加载+AI增强） ──
 const hotTopics = ref(null)
@@ -890,6 +891,24 @@ function handlePanorama() {
       :signals="sharedSignals"
     />
 
+    <!-- 核心数据新鲜度：避免把过期估值误当作今日信号 -->
+    <section v-if="data && dataFreshness.stale_count > 0" class="data-freshness-banner card">
+      <div class="freshness-title">
+        <Icon name="clock" size="16" />
+        <strong>部分估值数据已过期</strong>
+        <span class="meta">{{ dataFreshness.stale_count }} 个指数超过 10 天未更新</span>
+      </div>
+      <div class="freshness-items">
+        <span v-for="item in dataFreshness.stale_indexes.slice(0, 4)" :key="item.code" class="freshness-item">
+          {{ item.name || item.code }} · {{ item.stale_days }} 天
+        </span>
+      </div>
+      <button class="btn-secondary btn-sm" @click="handleFetchValuations" :disabled="fetchingValuation">
+        <Icon :name="fetchingValuation ? 'spinner' : 'refresh'" size="14" />
+        {{ fetchingValuation ? '更新中...' : '更新估值' }}
+      </button>
+    </section>
+
     <!-- 市场行情总览（环境背景） -->
     <MarketOverviewCard class="reveal-stagger" />
 
@@ -1364,4 +1383,19 @@ function handlePanorama() {
   padding-top: 1rem;
   border-top: 2px solid var(--color-border-light);
 }
+
+.data-freshness-banner {
+  display: flex;
+  align-items: center;
+  gap: .75rem;
+  padding: .7rem 1rem;
+  border-color: var(--color-warning-border);
+  background: var(--color-warning-bg);
+  flex-wrap: wrap;
+}
+.freshness-title { display: flex; align-items: center; gap: .4rem; color: var(--color-warning-text); }
+.freshness-title .meta { color: var(--color-text-secondary); }
+.freshness-items { display: flex; gap: .35rem; flex: 1; flex-wrap: wrap; }
+.freshness-item { color: var(--color-warning-text); font-size: .75rem; padding: .15rem .4rem; border: 1px solid var(--color-warning-border); border-radius: var(--radius-sm); }
+@media (max-width: 680px) { .data-freshness-banner .btn-secondary { width: 100%; } }
 </style>

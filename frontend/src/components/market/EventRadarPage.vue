@@ -7,7 +7,7 @@
  * - 关注机会：关注列表基金卡片，展示目标价/估值分位/上车信号状态
  * - 落地验证：已验证事件 + 板块准确率统计
  */
-import { ref, computed, onMounted, watch, nextTick } from 'vue'
+import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
 import {
   listMarketEvents, triggerEventRadarScan, getEventRadarScanStatus, triggerEventRadarVerify, getEventRadarAccuracy,
   listWatchlist, addToWatchlist, removeWatchlistItem, refreshWatchlistNavs,
@@ -33,6 +33,8 @@ const leadingSignals = ref([])
 const leadingLoading = ref(false)
 const backtestStatsBySource = ref({})
 const scanning = ref(false)
+const scanTaskId = ref(null)
+let scanResumeTimer = null
 const verifying = ref(false)
 const refreshingNavs = ref(false)
 const scanningWatchlist = ref(false)
@@ -832,6 +834,9 @@ async function handleScan() {
       return
     }
 
+    scanTaskId.value = taskId
+    localStorage.setItem('event-radar-scan-task', taskId)
+
     // 2. 轮询任务状态(每 3 秒一次,最长等待 10 分钟)
     // LLM 端点响应可能较慢(含重试),给足够时间
     const POLL_INTERVAL = 3000
@@ -874,6 +879,8 @@ async function handleScan() {
     } else {
       useToast().showToast(`扫描失败:${finalStatus.error || '未知错误'}`, 'error')
     }
+    scanTaskId.value = null
+    localStorage.removeItem('event-radar-scan-task')
   } catch (e) {
     useToast().showToast('扫描失败', 'error')
   } finally {
@@ -897,6 +904,32 @@ async function handleVerify() {
   } finally {
     verifying.value = false
   }
+}
+
+function resumeScanPolling(taskId) {
+  if (scanResumeTimer) clearInterval(scanResumeTimer)
+  scanTaskId.value = taskId
+  scanResumeTimer = setInterval(async () => {
+    try {
+      const { data } = await getEventRadarScanStatus(taskId)
+      if (data?.status === 'running') return
+      clearInterval(scanResumeTimer)
+      scanResumeTimer = null
+      scanTaskId.value = null
+      localStorage.removeItem('event-radar-scan-task')
+      if (data?.status === 'done') {
+        useToast().showToast('后台扫描完成，事件列表已刷新', 'success')
+        await loadEvents()
+      } else {
+        useToast().showToast(`后台扫描失败：${data?.error || '未知错误'}`, 'error')
+      }
+    } catch {
+      clearInterval(scanResumeTimer)
+      scanResumeTimer = null
+      scanTaskId.value = null
+      localStorage.removeItem('event-radar-scan-task')
+    }
+  }, 3000)
 }
 
 /** 判断事件是否为趋势类型（有 time_frame 字段） */
@@ -1694,6 +1727,26 @@ onMounted(() => {
   setTimeout(() => {
     loadWatchlist()
   }, 300)
+
+  // 页面刷新后恢复最近一次扫描的状态，避免长任务只存在于内存。
+  const taskId = localStorage.getItem('event-radar-scan-task')
+  if (taskId) {
+    getEventRadarScanStatus(taskId).then(({ data }) => {
+      if (data?.status === 'running') {
+        resumeScanPolling(taskId)
+        useToast().showToast('检测到后台扫描仍在进行，完成后会自动刷新事件列表', 'info')
+      } else {
+        localStorage.removeItem('event-radar-scan-task')
+        scanTaskId.value = null
+        if (data?.status === 'done') loadEvents()
+      }
+    }).catch(() => localStorage.removeItem('event-radar-scan-task'))
+  }
+})
+
+onUnmounted(() => {
+  if (scanResumeTimer) clearInterval(scanResumeTimer)
+  scanResumeTimer = null
 })
 
 // 事件雷达联动：点击关联关注基金 → 跳转到关注机会 Tab 并滚动到对应卡片

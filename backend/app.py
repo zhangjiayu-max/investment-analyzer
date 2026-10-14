@@ -168,6 +168,7 @@ from routers.portfolio.bucket_routes import router as bucket_routes_router  # /a
 from routers.conversation.memory_routes import router as memory_routes_router  # /api/memory/*
 from routers.dashboard.finance_routes import router as finance_routes_router  # /api/finance/*
 from routers.conversation.notifications import router as notifications_router  # /api/notifications/*
+from routers.expense import router as expense_router  # /api/expense/* (2026-10-14 理财决策重构)
 from services.data_lineage import track_sources, get_lineage  # data lineage tracking
 
 # 注册路由
@@ -266,6 +267,7 @@ app.include_router(bucket_routes_router)
 app.include_router(memory_routes_router)
 app.include_router(finance_routes_router)
 app.include_router(notifications_router)
+app.include_router(expense_router)
 
 # ── 启动初始化 ──
 @app.on_event("startup")

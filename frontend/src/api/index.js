@@ -1596,6 +1596,40 @@ export function getFinanceTrend(months = 12) {
   return api.get('/finance-dashboard/trend', { params: { months } })
 }
 
+// ── 家庭支出 API ──────────────────────────────────────────────────────
+
+export function getExpenses(month) {
+  return api.get('/expense', { params: { month } })
+}
+
+export function createExpense(payload) {
+  return api.post('/expense', payload)
+}
+
+export function updateExpense(expenseId, payload) {
+  return api.put(`/expense/${expenseId}`, payload)
+}
+
+export function deleteExpense(expenseId) {
+  return api.delete(`/expense/${expenseId}`)
+}
+
+export function getExpenseSummary(month) {
+  return api.get('/expense/summary', { params: { month } })
+}
+
+export function getExpenseTrend(months = 6) {
+  return api.get('/expense/trend', { params: { months } })
+}
+
+export function getExpenseCategories() {
+  return api.get('/expense/categories')
+}
+
+export function copyFixedExpenses(fromMonth, toMonth) {
+  return api.post('/expense/copy-fixed', { from_month: fromMonth, to_month: toMonth })
+}
+
 /** 获取策略沙盒预设 */
 export function getBacktestPresets() {
   return api.get('/strategy-sandbox/presets')

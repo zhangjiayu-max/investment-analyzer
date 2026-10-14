@@ -189,6 +189,13 @@ from db.goal_buckets import (
     get_goal_bucket_summary, sync_bucket_from_portfolio,
 )
 
+# 每月支出记录（2026-10-14 理财决策重构）
+from db.expense import (
+    init_expense_tables, create_expense, get_expense, list_expenses,
+    update_expense, delete_expense, get_expense_summary, get_expense_trend,
+    copy_fixed_expenses, get_cashflow, get_expense_categories,
+)
+
 # 回测结果持久化
 from db.backtest_results import (
     init_backtest_tables, save_backtest, list_backtests,
@@ -1556,6 +1563,9 @@ def init_db():
 
     # ── 目标账户 / 资金桶表 ──────────────────────────────────
     init_goal_bucket_tables(conn)
+
+    # ── 每月支出记录表（2026-10-14）──
+    init_expense_tables(conn)
 
     # ── 回测结果持久化表 ──────────────────────────────────
     init_backtest_tables(conn)

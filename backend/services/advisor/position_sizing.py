@@ -629,15 +629,18 @@ def calc_cash_constraint(
         goal_aware = False
 
     if goal_aware:
-        # 优先读 user_profiles.monthly_surplus
+        # 优先读当月现金流；没有实际支出记录时会自动回退画像静态值。
         try:
-            from db.dashboard import get_user_profile
-            profile = get_user_profile(user_id)
-            if profile:
-                ms = profile.get("monthly_surplus")
-                if isinstance(ms, (int, float)) and ms > 0:
-                    monthly_inflow = float(ms)
-                    monthly_inflow_source = "user_profiles.monthly_surplus"
+            from db.expense import get_cashflow
+            cashflow = get_cashflow(user_id)
+            surplus = cashflow.get("monthly_surplus")
+            if isinstance(surplus, (int, float)) and surplus > 0:
+                monthly_inflow = float(surplus)
+                monthly_inflow_source = (
+                    "expense_records"
+                    if cashflow.get("expense_source") == "records"
+                    else "user_profiles.monthly_surplus"
+                )
         except Exception:
             pass
 

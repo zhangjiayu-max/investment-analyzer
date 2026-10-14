@@ -9,6 +9,7 @@ from fastapi import APIRouter
 
 from db import (
     get_cash_balance,
+    get_cashflow,
     get_portfolio_summary,
     get_user_profile,
     list_goal_buckets,
@@ -56,23 +57,28 @@ async def get_finance_dashboard(user_id: str = "default"):
 
     # ── 2. 现金流 ──
     profile = get_user_profile(user_id) or {}
-    monthly_income = profile.get("monthly_income") or 0
-    monthly_expense = profile.get("monthly_expense") or 0
-    monthly_surplus = profile.get("monthly_surplus") or (monthly_income - monthly_expense)
-    surplus_rate = round(monthly_surplus / monthly_income, 4) if monthly_income > 0 else 0
+    cash_flow = get_cashflow(user_id)
+    monthly_income = cash_flow["monthly_income"]
+    monthly_expense = cash_flow["monthly_expense"]
+    monthly_surplus = cash_flow["monthly_surplus"]
+    surplus_rate = cash_flow["surplus_rate"] or 0
     emergency_fund_months = profile.get("emergency_fund_months") or 0
 
-    cash_flow = {
+    cash_flow.update({
         "monthly_income": round(monthly_income, 2),
         "monthly_expense": round(monthly_expense, 2),
         "monthly_surplus": round(monthly_surplus, 2),
         "surplus_rate": surplus_rate,
         "emergency_fund_months": round(emergency_fund_months, 1),
-    }
+    })
 
     # ── 3. 负债 ──
     debt_summary = profile.get("debt_summary") or ""
-    monthly_debt_payment = profile.get("monthly_debt_payment") or 0
+    monthly_debt_payment = (
+        cash_flow["debt_payment"]
+        if cash_flow["expense_source"] == "records"
+        else profile.get("monthly_debt_payment") or 0
+    )
     debt_to_income = round(monthly_debt_payment / monthly_income, 4) if monthly_income > 0 else 0
 
     debt = {

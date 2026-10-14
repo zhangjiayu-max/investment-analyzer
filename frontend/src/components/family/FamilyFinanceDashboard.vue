@@ -4,6 +4,7 @@ import { getFinanceDashboard, getFinanceTrend } from '../../api'
 import { useToast } from '../../composables/useToast'
 import Icon from '../ui/Icon.vue'
 import LineChart from '../charts/LineChart.vue'
+import ExpenseManager from './ExpenseManager.vue'
 
 const { showToast } = useToast()
 
@@ -11,6 +12,7 @@ const loading = ref(false)
 const data = ref(null)
 const trend = ref(null)
 const trendLoading = ref(false)
+const expenseOpen = ref(false)
 
 const nw = computed(() => data.value?.net_worth || {})
 const cf = computed(() => data.value?.cash_flow || {})
@@ -96,6 +98,10 @@ onMounted(load)
         <Icon :name="loading ? 'spinner' : 'refresh'" size="16" />
         刷新
       </button>
+      <button class="btn-primary" @click="expenseOpen = true">
+        <Icon name="wallet" size="16" />
+        记录支出
+      </button>
     </header>
 
     <div v-if="loading && !data" class="empty-panel">
@@ -165,6 +171,7 @@ onMounted(load)
               <div class="metric-item">
                 <span class="terminal-label">月支出</span>
                 <strong class="font-jet">¥{{ money(cf.monthly_expense) }}</strong>
+                <small class="cashflow-source">{{ cf.expense_source === 'records' ? '本月已记录' : '画像估算' }}</small>
               </div>
               <div class="metric-item">
                 <span class="terminal-label">月结余</span>
@@ -350,6 +357,7 @@ onMounted(load)
         </div>
       </section>
     </template>
+    <ExpenseManager v-model:open="expenseOpen" @updated="load" />
   </div>
 </template>
 
@@ -474,6 +482,7 @@ onMounted(load)
   color: var(--color-text-primary);
   font-size: 0.95rem;
 }
+.cashflow-source { color: var(--color-text-muted); font-size: 0.72rem; }
 
 .positive { color: var(--color-success) !important; }
 .negative { color: var(--color-danger) !important; }

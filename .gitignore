@@ -50,6 +50,7 @@ logs/
 *.tmp
 *.bak
 .worktrees/
+.superpowers/
 
 .doc/
 # ttskill CLI binary

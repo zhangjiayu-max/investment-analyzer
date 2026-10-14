@@ -56,7 +56,7 @@ onMounted(() => {
 onUnmounted(() => { clearInterval(tokenTimer) })
 
 const expandedGroups = ref(new Set(
-  navItems.filter(i => i.children).map(i => i.key)
+  navItems.filter(i => i.children && !i.collapsed).map(i => i.key)
 ))
 
 function toggleGroup(key) {

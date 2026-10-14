@@ -13,10 +13,17 @@ describe('navigation config', () => {
     expect(missing).toEqual([])
   })
 
-  it('contains grouped navigation items for knowledge and evolution sections', () => {
+  it('contains grouped navigation items for knowledge and system governance sections', () => {
     const groups = navItems.filter(item => item.children).map(item => item.key)
 
     expect(groups).toContain('group-knowledge')
-    expect(groups).toContain('group-evolution')
+    expect(groups).toContain('group-system')
+  })
+
+  it('keeps RAG debugging pages out of primary navigation', () => {
+    const keys = flatNavItems.map(item => item.key)
+
+    expect(keys).not.toContain('rag')
+    expect(keys).not.toContain('rag-test')
   })
 })

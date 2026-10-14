@@ -72,6 +72,16 @@ describe('API URL 路径正确性', () => {
     expect(mockGet).toHaveBeenCalledWith('/dashboard')
   })
 
+  it('支出 API 使用统一的 expense 路径', async () => {
+    const { getExpenses, createExpense, copyFixedExpenses } = await import('../api/index.js')
+    await getExpenses('2026-10')
+    expect(mockGet).toHaveBeenCalledWith('/expense', { params: { month: '2026-10' } })
+    await createExpense({ month: '2026-10', category: '餐饮', amount: 50 })
+    expect(mockPost).toHaveBeenCalledWith('/expense', { month: '2026-10', category: '餐饮', amount: 50 })
+    await copyFixedExpenses('2026-09', '2026-10')
+    expect(mockPost).toHaveBeenCalledWith('/expense/copy-fixed', { from_month: '2026-09', to_month: '2026-10' })
+  })
+
   it('createTransactionDraftFromDecision 调用 /api/decisions/{id}/transaction-draft', async () => {
     const { createTransactionDraftFromDecision } = await import('../api/index.js')
     await createTransactionDraftFromDecision(42)

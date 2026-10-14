@@ -31,6 +31,9 @@ DEFAULT_CONFIGS = [
     ('cash.ratio_warning', '0.20', '现金比例预警（高于此值）', 'portfolio'),
     ('cash.ratio_low', '0.03', '现金比例过低（低于此值）', 'portfolio'),
 
+    # 支出记录（2026-10-14 理财决策重构）
+    ('expense.auto_fill_profile', 'true', '支出记录自动回填画像 monthly_expense（true/false）', 'expense'),
+
     # LLM 参数
     ('llm.temperature_default', '0.3', '默认温度', 'llm'),
     # 仲裁模型配置

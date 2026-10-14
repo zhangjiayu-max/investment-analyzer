@@ -69,7 +69,7 @@ export const navItems = [
     desc: '家庭财务总览、资金桶管理',
     children: [
       { key: 'family-finance', label: '财务总览', icon: 'wallet',
-        desc: '家庭资产负债、收支流水、财务健康度' },
+        desc: '家庭资产负债、月度支出、现金流与财务健康度' },
       { key: 'goal-buckets', label: '资金桶', icon: 'wallet',
         desc: '按目标分桶管理资金：备用金、定投、增值' },
     ],
@@ -94,17 +94,16 @@ export const navItems = [
         desc: '公众号作者文章采集、管理、蒸馏' },
       { key: 'linked', label: '个人文档', icon: 'link',
         desc: '个人PDF/Markdown文档上传、向量化、检索' },
-      { key: 'rag', label: 'RAG 分析', icon: 'rag',
-        desc: 'RAG检索日志、命中率统计、查询重写测试' },
     ],
   },
 
   // ── 系统与进化 ──
   {
     key: 'group-system',
-    label: '系统与进化',
+    label: '系统治理',
     icon: 'config',
     desc: '系统管理、质量评估、进化闭环、实验功能',
+    collapsed: true,
     children: [
       { key: 'admin-agents', label: 'Agent 管理', icon: 'admin',
         desc: '专家Agent配置、Prompt版本管理、工具注册' },
