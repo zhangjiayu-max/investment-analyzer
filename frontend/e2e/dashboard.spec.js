@@ -4,13 +4,17 @@ import { test, expect } from '@playwright/test'
 
 test.describe('Dashboard 页面', () => {
   test.beforeEach(async ({ page }) => {
+    await page.addInitScript(() => {
+      localStorage.setItem('hasVisited', 'true')
+      localStorage.setItem('activePage', 'dashboard')
+    })
     await page.goto('/')
     // 等待 Dashboard 加载
-    await page.waitForSelector('.dashboard, .dash-header, .page-title', { timeout: 10000 })
+    await page.waitForSelector('.dashboard', { timeout: 10000 })
   })
 
   test('页面加载正常，标题显示', async ({ page }) => {
-    const title = await page.textContent('.page-title')
+    const title = await page.textContent('.dashboard .page-title')
     expect(title).toContain('每日投资决策看板')
   })
 
@@ -22,16 +26,20 @@ test.describe('Dashboard 页面', () => {
 
   test('热点新闻卡片存在', async ({ page }) => {
     // 热点卡片应该存在
-    const newsCard = page.locator('.news-list, .card-empty, .card-loading')
+    const newsCard = page.locator('.dashboard .news-list, .dashboard .card-empty, .dashboard .card-loading')
     await expect(newsCard.first()).toBeVisible({ timeout: 10000 })
   })
 })
 
 test.describe('对话页面', () => {
   test.beforeEach(async ({ page }) => {
+    await page.addInitScript(() => {
+      localStorage.setItem('hasVisited', 'true')
+      localStorage.setItem('activePage', 'dashboard')
+    })
     await page.goto('/')
     // 点击 AI 对话导航
-    await page.click('text=AI 对话')
+    await page.getByRole('button', { name: 'AI 对话', exact: true }).click()
     await page.waitForTimeout(1000)
   })
 
@@ -42,7 +50,7 @@ test.describe('对话页面', () => {
   })
 
   test('新建对话按钮可点击', async ({ page }) => {
-    const newBtn = page.locator('.btn-new-conv, text=新建')
+    const newBtn = page.locator('.btn-new-conv').first()
     await expect(newBtn.first()).toBeVisible()
     await newBtn.first().click()
     // 应该有 toast 提示
@@ -69,20 +77,23 @@ test.describe('对话页面', () => {
 
 test.describe('持仓管理页面', () => {
   test.beforeEach(async ({ page }) => {
+    await page.addInitScript(() => {
+      localStorage.setItem('hasVisited', 'true')
+      localStorage.setItem('activePage', 'dashboard')
+    })
     await page.goto('/')
-    await page.click('text=持仓管理')
+    await page.locator('.nav-child').filter({ hasText: '持仓管理' }).click()
     await page.waitForTimeout(1000)
   })
 
   test('页面加载正常', async ({ page }) => {
     // 持仓页面应该有内容
-    const content = page.locator('.portfolio-page, .holdings-list, .card')
+    const content = page.locator('.portfolio-page')
     await expect(content.first()).toBeVisible({ timeout: 10000 })
   })
 
-  test('风险预警卡片存在', async ({ page }) => {
-    // 预警面板应该存在
-    const alertPanel = page.locator('.alert-panel, text=风险预警')
+  test('风险与提示入口存在', async ({ page }) => {
+    const alertPanel = page.locator('.portfolio-page').getByRole('article', { name: '前往风险与提示中心' })
     await expect(alertPanel.first()).toBeVisible({ timeout: 10000 })
   })
 
@@ -97,13 +108,17 @@ test.describe('持仓管理页面', () => {
 
 test.describe('估值页面', () => {
   test.beforeEach(async ({ page }) => {
+    await page.addInitScript(() => {
+      localStorage.setItem('hasVisited', 'true')
+      localStorage.setItem('activePage', 'dashboard')
+    })
     await page.goto('/')
-    await page.click('text=估值数据')
+    await page.locator('.nav-child').filter({ hasText: '估值数据' }).click()
     await page.waitForTimeout(1000)
   })
 
   test('页面加载正常', async ({ page }) => {
-    const content = page.locator('.valuation-page, .trend-chart, .card')
+    const content = page.locator('.valuation-page, .trend-chart').first()
     await expect(content.first()).toBeVisible({ timeout: 10000 })
   })
 

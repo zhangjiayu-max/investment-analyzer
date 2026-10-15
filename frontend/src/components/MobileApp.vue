@@ -7,6 +7,7 @@ import ChatView from './ChatView.vue'
 import { isDark, toggleDark } from '../composables/useTheme'
 import AlertBell from './task/AlertBell.vue'
 import MobileNotificationCenter from './mobile/MobileNotificationCenter.vue'
+import { mobileMoreGroups, mobileTabs } from '../mobileNavigation.js'
 
 // 懒加载组件：defineAsyncComponent 让 Vite 自动按动态 import 做代码分割
 // 首屏 JS 预计降 40%+，低频页面（系统管理/质量评测等）按需加载
@@ -48,6 +49,8 @@ const DataHealthDashboard = defineAsyncComponent(() => import('./quality/DataHea
 const StrategyBacktest = defineAsyncComponent(() => import('./decision/StrategyBacktest.vue'))
 const AnalysisLogPage = defineAsyncComponent(() => import('./analysis/AnalysisLogPage.vue'))
 const HealthDashboardV2 = defineAsyncComponent(() => import('./health/HealthDashboardV2.vue'))
+const DecisionCenter = defineAsyncComponent(() => import('./decision/DecisionCenter.vue'))
+const FeatureUsagePage = defineAsyncComponent(() => import('./analysis/FeatureUsagePage.vue'))
 
 const activePage = ref(localStorage.getItem('activePage') || 'dashboard')
 const showMoreMenu = ref(false)
@@ -57,83 +60,8 @@ watch(activePage, (val) => {
   localStorage.setItem('activePage', val)
 })
 
-// ── 底部 Tab 栏配置 ──
-const tabs = [
-  { key: 'dashboard', label: '看板', icon: 'dashboard' },
-  { key: 'chat', label: '对话', icon: 'chat' },
-  { key: 'portfolio', label: '持仓', icon: 'portfolio' },
-  { key: 'valuation', label: '估值', icon: 'valuation' },
-  { key: '__more__', label: '更多', icon: 'more' },
-]
-
-// ── 更多菜单项 ──（按新分组结构组织，hot 标记常用功能显示🔥角标）
-const moreGroups = [
-  {
-    label: '市场雷达',
-    items: [
-      { key: 'market-intelligence', label: '市场热点', icon: 'fire', hot: true },
-      { key: 'event-radar', label: '机会雷达', icon: 'satellite', hot: true },
-      { key: 'bond', label: '债市分析', icon: 'bond' },
-    ],
-  },
-  {
-    label: '持仓管理',
-    items: [
-      { key: 'smart-add', label: '智能补仓', icon: 'trending-down' },
-      { key: 'alert-center', label: '风险与提示', icon: 'warning', hot: true },
-    ],
-  },
-  {
-    label: '理财决策',
-    items: [
-      { key: 'decisions', label: '决策档案', icon: 'clipboard', hot: true },
-      { key: 'attribution', label: '收益归因', icon: 'chart' },
-      { key: 'behavior', label: '行为诊断', icon: 'brain' },
-      { key: 'accuracy', label: '决策准确率', icon: 'target' },
-      { key: 'allocation-dashboard', label: '配置偏离', icon: 'pie-chart' },
-      { key: 'strategy-sandbox', label: '策略沙盒', icon: 'bar-chart' },
-    ],
-  },
-  {
-    label: '家庭财务',
-    items: [
-      { key: 'family-finance', label: '财务总览', icon: 'wallet', hot: true },
-      { key: 'goal-buckets', label: '资金桶', icon: 'bucket' },
-    ],
-  },
-  {
-    label: '知识中心',
-    items: [
-      { key: 'articles', label: '文章管理', icon: 'articles' },
-      { key: 'gallery', label: '估值图片', icon: 'gallery' },
-      { key: 'knowledge', label: '蒸馏知识', icon: 'book' },
-      { key: 'author', label: '作者文章', icon: 'author' },
-      { key: 'linked', label: '个人文档', icon: 'link' },
-      { key: 'rag', label: 'RAG 分析', icon: 'rag' },
-    ],
-  },
-  {
-    label: '系统与进化',
-    items: [
-      { key: 'admin-agents', label: 'Agent 管理', icon: 'admin' },
-      { key: 'analysis-log', label: '分析记录', icon: 'clipboard' },
-      { key: 'token-usage', label: 'Token 用量', icon: 'token' },
-      { key: 'system-config', label: '系统配置', icon: 'config' },
-      { key: 'data-health', label: '数据健康', icon: 'shield-check' },
-      { key: 'quality-dashboard', label: '质量仪表盘', icon: 'chart' },
-      { key: 'bad-cases', label: 'Bad Case', icon: 'bug' },
-      { key: 'eval-suite', label: '评测集', icon: 'check' },
-      { key: 'health', label: '健康分', icon: 'health', hot: true },
-      { key: 'health-v2', label: '全账户诊断', icon: 'heart-pulse', hot: true },
-      { key: 'shadow', label: 'Shadow Mode', icon: 'shadow' },
-      { key: 'strategy-backtest', label: '策略回测', icon: 'line-chart' },
-      { key: 'capability-center', label: '能力中心', icon: 'wrench' },
-    ],
-  },
-]
-
 // 扁平化 moreItems（兼容 currentPageLabel 查找）
-const moreItems = moreGroups.flatMap(g => g.items)
+const moreItems = mobileMoreGroups.flatMap(g => g.items)
 
 function navigate(key) {
   if (key === '__more__') {
@@ -183,11 +111,13 @@ const pageComponents = {
   'data-health': DataHealthDashboard,
   'strategy-backtest': StrategyBacktest,
   'health-v2': HealthDashboardV2,
+  'decision-center': DecisionCenter,
+  'feature-usage': FeatureUsagePage,
 }
 
 const pageComponent = computed(() => pageComponents[activePage.value] || null)
 const currentPageLabel = computed(() => {
-  const t = tabs.find(t => t.key === activePage.value)
+  const t = mobileTabs.find(t => t.key === activePage.value)
   if (t) return t.label
   const m = moreItems.find(m => m.key === activePage.value)
   return m?.label || ''
@@ -299,7 +229,7 @@ function onBack() {
             </button>
           </div>
           <div class="mobile-more-grid">
-            <template v-for="group in moreGroups" :key="group.label">
+            <template v-for="group in mobileMoreGroups" :key="group.label">
               <div class="mobile-more-group-label">{{ group.label }}</div>
               <button
                 v-for="item in group.items"
@@ -322,7 +252,7 @@ function onBack() {
     <!-- 底部 Tab 栏 -->
     <nav class="mobile-tabbar">
       <button
-        v-for="tab in tabs"
+        v-for="tab in mobileTabs"
         :key="tab.key"
         @click="navigate(tab.key)"
         :class="['mobile-tab', { active: activePage === tab.key || (tab.key === '__more__' && showMoreMenu) }]"
@@ -427,6 +357,7 @@ function onBack() {
 /* ── 内容区 ── */
 .mobile-content {
   flex: 1;
+  min-height: 0;           /* 允许内容区收缩，避免长看板把底部导航挤出视口 */
   min-width: 0;            /* 关键：覆盖 flex 默认 min-width:auto，防止子元素撑开 */
   width: 100%;
   overflow-y: auto;

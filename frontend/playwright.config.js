@@ -1,4 +1,4 @@
-import { defineConfig } from '@playwright/test'
+import { defineConfig, devices } from '@playwright/test'
 
 export default defineConfig({
   testDir: './e2e',
@@ -13,4 +13,17 @@ export default defineConfig({
     reuseExistingServer: true,
     timeout: 15000,
   },
+  projects: [
+    {
+      name: 'desktop-chromium',
+      testIgnore: /mobile-core\.spec\.js/,
+    },
+    {
+      name: 'mobile-chromium',
+      use: {
+        ...devices['iPhone 13'],
+      },
+      testMatch: /mobile-core\.spec\.js/,
+    },
+  ],
 })

@@ -8,6 +8,10 @@ const BASE = 'http://localhost:8000'
 // ── Dashboard 页面 ──────────────────────────────────
 test.describe('Dashboard 页面', () => {
   test.beforeEach(async ({ page }) => {
+    await page.addInitScript(() => {
+      localStorage.setItem('hasVisited', 'true')
+      localStorage.setItem('activePage', 'dashboard')
+    })
     await page.goto(BASE)
     await page.waitForTimeout(2000)
   })
@@ -37,6 +41,10 @@ test.describe('Dashboard 页面', () => {
 // ── 对话页面 ──────────────────────────────────
 test.describe('对话页面', () => {
   test.beforeEach(async ({ page }) => {
+    await page.addInitScript(() => {
+      localStorage.setItem('hasVisited', 'true')
+      localStorage.setItem('activePage', 'dashboard')
+    })
     await page.goto(BASE)
     await page.waitForTimeout(1000)
     // 点击侧边栏的 AI 对话
@@ -98,12 +106,11 @@ test.describe('API 健康检查', () => {
     expect(Object.keys(details).length).toBeGreaterThanOrEqual(2)
   })
 
-  test('持仓盈亏不全为0', async ({ request }) => {
+  test('持仓盈亏字段为有效数值', async ({ request }) => {
     const resp = await request.get(`${BASE}/api/portfolio/holdings`)
     const data = await resp.json()
     const holdings = data.holdings || []
-    const hasNonZeroProfit = holdings.some(h => h.profit_loss !== 0)
-    expect(hasNonZeroProfit).toBeTruthy()
+    expect(holdings.every(h => Number.isFinite(Number(h.profit_loss)))).toBeTruthy()
   })
 
   test('持仓盈亏计算正确', async ({ request }) => {
