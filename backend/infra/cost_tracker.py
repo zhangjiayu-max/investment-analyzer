@@ -141,7 +141,17 @@ class BudgetController:
     """月度预算控制器。超额时自动降级模型。"""
 
     def __init__(self, monthly_budget: float = 0):
-        self.budget = monthly_budget or get_config_float("cost.monthly_budget", 30.0)
+        # 单例构造发生在 db 导入阶段，此时新库尚未建表。
+        self._monthly_budget = monthly_budget
+
+    @property
+    def budget(self) -> float:
+        """首次使用时才读取配置，也使运行中的预算配置更新立即生效。"""
+        return self._monthly_budget or get_config_float("cost.monthly_budget", 30.0)
+
+    @budget.setter
+    def budget(self, value: float):
+        self._monthly_budget = value
 
     def get_status(self) -> dict:
         """查询当月预算使用情况。"""

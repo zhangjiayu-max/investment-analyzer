@@ -1,163 +1,140 @@
-import { ref, onUnmounted } from 'vue'
+import { ref, onUnmounted, getCurrentInstance } from 'vue'
 import { getAsyncTaskStatus, listAsyncTasks } from '../api'
 import { useTaskStore } from './useTaskStore'
 
-/**
- * 通用异步任务 composable
- *
- * 用法：
- * const { taskState, taskResult, taskError, start, stopPolling, reset, restore, restoreFromServer } = useAsyncTask('hotspots_analysis')
- *
- * await start(triggerHotspotsAnalysis, {
- *   onComplete: (result) => { ... },
- *   onError: (err) => { ... },
- * })
- *
- * // 页面加载时从后端恢复执行中任务(切页/刷新后按钮显示"执行中")
- * await restoreFromServer({
- *   onComplete: (result) => { ... },
- *   onError: (err) => { ... },
- * })
- */
-export function useAsyncTask(taskType) {
-  const { getTask, setTask, updateTask, clearTask, hasRunningTask } = useTaskStore()
+const MAX_POLL_MS = 5 * 60 * 1000
 
-  const taskState = ref('idle')  // idle | submitting | running | done | error
+/** 后台任务轮询：单在途，版本隔离；断网/等待超时保留后台任务凭据。 */
+export function useAsyncTask(taskType) {
+  const { getTask, setTask, clearTask, hasRunningTask } = useTaskStore()
+  const taskState = ref('idle')
   const taskResult = ref(null)
   const taskError = ref('')
   const taskId = ref(null)
   let pollTimer = null
+  let generation = 0
+  let hydratedTerminal = ''
 
-  // 恢复已有任务状态（页面切回来时,从内存 store 恢复）
-  function restore() {
+  function stopPolling() {
+    generation++
+    clearTimeout(pollTimer)
+    pollTimer = null
+  }
+  function persist(callbacks = {}) {
+    setTask(taskType, { taskId: taskId.value, state: taskState.value, result: taskResult.value, error: taskError.value, ...callbacks })
+  }
+  function hydrate(callbacks, restoring = false) {
+    const key = `${taskId.value}:${taskState.value}`
+    if (hydratedTerminal === key) return
+    hydratedTerminal = key
+    if (taskState.value === 'done') (restoring ? callbacks.onRestore || callbacks.onComplete : callbacks.onComplete)?.(taskResult.value)
+    if (taskState.value === 'error') callbacks.onError?.(taskError.value)
+  }
+  function apply(stored, callbacks = {}, restoring = false) {
+    taskId.value = stored.taskId || null
+    taskState.value = stored.state || 'idle'
+    taskResult.value = stored.result ?? null
+    taskError.value = stored.error || ''
+    persist(callbacks)
+    if (taskState.value === 'running' && taskId.value) startPolling(callbacks)
+    else hydrate(callbacks, restoring)
+  }
+  function restore(callbacks = {}) {
     const stored = getTask(taskType)
     if (!stored) return false
-
-    taskState.value = stored.state || 'idle'
-    taskResult.value = stored.result || null
-    taskError.value = stored.error || ''
-    taskId.value = stored.taskId || null
-
-    if (stored.state === 'running' && stored.taskId) {
-      startPolling(stored.onComplete, stored.onError)
-      return true
-    }
+    stopPolling()
+    // 回调属于当前页面，不能复用已卸载页面闭包。
+    apply(stored, callbacks, true)
     return true
   }
-
-  /**
-   * 从后端恢复执行中任务状态(页面加载/刷新后调用)
-   * 查询 async_tasks 表是否有该 task_type 的 running 任务
-   * 有则恢复 taskState=running 并开始轮询,实现"切页/刷新回来按钮显示执行中"
-   */
-  async function restoreFromServer({ onComplete, onError } = {}) {
-    // 先尝试从内存 store 恢复(切页场景,store 仍在)
-    if (restore()) {
-      // 内存有 running 任务,但 onComplete/onError 可能丢失(组件重建),用新的覆盖
-      if (taskState.value === 'running' && taskId.value) {
-        setTask(taskType, { onComplete, onError })
-        startPolling(onComplete, onError)
-      }
-      return true
-    }
-
-    // 内存无任务,查后端是否有 running 任务(刷新场景)
+  async function restoreFromServer(callbacks = {}) {
+    stopPolling()
+    const version = generation
     try {
       const { data } = await listAsyncTasks(taskType, 'running', 1)
-      const runningTask = data?.tasks?.[0]
-      if (runningTask) {
-        taskId.value = runningTask.id
-        taskState.value = 'running'
-        taskResult.value = null
-        taskError.value = ''
-        setTask(taskType, {
-          taskId: runningTask.id,
-          state: 'running',
-          result: null,
-          error: '',
-          onComplete,
-          onError,
-        })
-        startPolling(onComplete, onError)
+      if (version !== generation) return false
+      if (!Array.isArray(data?.tasks)) throw new Error('任务列表响应无效')
+      const running = data.tasks[0]
+      if (running) {
+        apply({ taskId: running.id, state: 'running' }, callbacks, true)
         return true
       }
-    } catch (e) {
-      // 查询失败静默处理,不影响页面正常加载
-      console.warn(`[useAsyncTask] restoreFromServer 查询 ${taskType} running 任务失败:`, e)
+      const { data: latest } = await listAsyncTasks(taskType, '', 1)
+      if (version !== generation) return false
+      if (!Array.isArray(latest?.tasks)) throw new Error('任务列表响应无效')
+      const terminal = latest.tasks[0]
+      if (terminal && ['done', 'error'].includes(terminal.status)) {
+        apply({ taskId: terminal.id, state: terminal.status, result: terminal.result, error: terminal.error_msg || terminal.error }, callbacks, true)
+        return true
+      }
+      reset()
+      return false
+    } catch (_) {
+      if (version !== generation) return false
+      // 本地凭据不因网络故障过期，后端状态才决定任务是否结束。
+      return restore(callbacks)
     }
-    return false
   }
-
-  async function start(triggerFn, { onComplete, onError } = {}) {
+  async function start(triggerFn, callbacks = {}) {
+    stopPolling()
+    const version = generation
+    hydratedTerminal = ''
     taskState.value = 'submitting'
     taskResult.value = null
     taskError.value = ''
+    taskId.value = null
     try {
-      const { data } = await triggerFn()
-      taskId.value = data.task_id
-      taskState.value = 'running'
-      setTask(taskType, {
-        taskId: data.task_id,
-        state: 'running',
-        result: null,
-        error: '',
-        onComplete,
-        onError,
-      })
-      startPolling(onComplete, onError)
+      const response = await triggerFn()
+      if (version !== generation) return
+      const data = response?.data ?? response
+      if (!data?.task_id) throw new Error('未收到后台任务编号')
+      apply({ taskId: data.task_id, state: 'running' }, callbacks)
     } catch (e) {
+      if (version !== generation) return
       taskState.value = 'error'
       taskError.value = e.response?.data?.detail || e.message
-      setTask(taskType, { state: 'error', error: taskError.value })
+      persist(callbacks)
+      hydrate(callbacks)
     }
   }
-
-  function startPolling(onComplete, onError, interval = 3000) {
+  function startPolling(callbacks, interval = 3000) {
     stopPolling()
-    pollTimer = setInterval(async () => {
-      if (!taskId.value) return
+    const version = generation
+    const id = taskId.value
+    const startedAt = Date.now()
+    const current = () => version === generation && taskId.value === id
+    const poll = async () => {
+      if (!current()) return
       try {
-        const { data } = await getAsyncTaskStatus(taskId.value)
-        if (data.status === 'done') {
-          taskState.value = 'done'
-          taskResult.value = data.result
-          updateTask(taskType, { state: 'done', result: data.result })
+        const { data } = await getAsyncTaskStatus(id)
+        if (!current()) return
+        if (['done', 'error'].includes(data.status)) {
+          taskState.value = data.status
+          taskResult.value = data.result ?? null
+          taskError.value = data.error_msg || data.error || (data.status === 'error' ? '分析失败' : '')
+          persist(callbacks)
           stopPolling()
-          onComplete?.(data.result)
-        } else if (data.status === 'error') {
-          taskState.value = 'error'
-          taskError.value = data.error || '分析失败'
-          updateTask(taskType, { state: 'error', error: taskError.value })
-          stopPolling()
-          onError?.(taskError.value)
+          hydrate(callbacks)
+          return
         }
-      } catch (e) {
-        taskState.value = 'error'
-        taskError.value = e.message
-        updateTask(taskType, { state: 'error', error: e.message })
-        stopPolling()
-        onError?.(e.message)
+        taskError.value = Date.now() - startedAt >= MAX_POLL_MS ? '后台仍在执行，等待结果中' : ''
+      } catch (_) {
+        if (!current()) return
+        taskError.value = '网络暂时中断，正在恢复任务状态'
       }
-    }, interval)
+      if (current()) pollTimer = setTimeout(poll, Date.now() - startedAt >= MAX_POLL_MS ? 15000 : interval)
+    }
+    pollTimer = setTimeout(poll, interval)
   }
-
-  function stopPolling() {
-    if (pollTimer) { clearInterval(pollTimer); pollTimer = null }
-  }
-
   function reset() {
     stopPolling()
     taskState.value = 'idle'
     taskResult.value = null
     taskError.value = ''
     taskId.value = null
+    hydratedTerminal = ''
     clearTask(taskType)
   }
-
-  // 组件卸载时自动清理轮询定时器
-  onUnmounted(() => {
-    stopPolling()
-  })
-
+  if (getCurrentInstance()) onUnmounted(stopPolling)
   return { taskState, taskResult, taskError, taskId, start, stopPolling, reset, restore, restoreFromServer, hasRunningTask }
 }

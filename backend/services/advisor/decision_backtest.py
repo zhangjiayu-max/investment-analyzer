@@ -10,7 +10,7 @@
 设计原则：
 - 判定为纯函数（可单测）：judge_hit
 - 命中阈值走 system_config（decision_ledger.hit_excess_pct / hit_abs_pct，金融严谨性）
-- 基准缺失时用绝对收益兜底判定，不因数据缺口漏判
+- 历史标的或同区间基准缺失时保留待复盘，避免错误学习
 - 权重反哺有上下限（降权 min 0.5、升权 max 1.5），避免极端值
 - 优雅降级：无入场价/无现价 → 跳过该决策，标记 skipped
 """
@@ -73,38 +73,56 @@ def adjust_theme_weight(theme: str, is_hit: bool) -> float | None:
 # 基准与数据获取
 # ════════════════════════════════════════════════════════════════
 
-def _benchmark_return_pct(lookback_days: int = 30) -> float | None:
-    """基准（沪深300）近 N 日收益率%。数据不可得返回 None。"""
+def _resolve_review_sample(decision: dict, as_of_date: str) -> dict | None:
+    """同一起止日期的历史样本；无数据或成交日期不明确时保持待复盘。"""
+    import math
+    from db._conn import _get_conn
+    snapshot = decision.get('signal_snapshot') or {}
+    actual_price = decision.get('actual_price')
+    if actual_price:
+        entry_date = snapshot.get('actual_price_date') or snapshot.get('actual_trade_date')
+        entry = actual_price
+    else:
+        entry_date = snapshot.get('entry_date') or snapshot.get('price_date') or decision.get('created_at')
+        entry = snapshot.get('entry_price')
+    if not entry_date or not decision.get('fund_code'):
+        return None
+    entry_date = str(entry_date)[:10]
+    as_of_date = str(as_of_date)[:10]
+    if entry_date >= as_of_date:
+        return None
+    conn = _get_conn()
     try:
+        start = conn.execute("""SELECT nav,nav_date FROM fund_nav_history
+            WHERE fund_code=? AND nav_date<=? ORDER BY nav_date DESC LIMIT 1""",
+            (decision['fund_code'], entry_date)).fetchone()
+        end = conn.execute("""SELECT nav,nav_date FROM fund_nav_history
+            WHERE fund_code=? AND nav_date<=? AND nav_date>? ORDER BY nav_date DESC LIMIT 1""",
+            (decision['fund_code'], as_of_date, entry_date)).fetchone()
+        if not end:
+            return None
+        if not entry:
+            if not start:
+                return None
+            entry, entry_date = start['nav'], start['nav_date']
         from db.config import get_config
-        benchmark_code = get_config("index.hs300_code", "000300.SH")
-        from services.advisor.portfolio_risk import _fetch_closes
-        closes = _fetch_closes(benchmark_code, lookback_days)
-        if len(closes) >= 2 and closes[0]:
-            return round((closes[-1] - closes[0]) / closes[0] * 100, 2)
-    except Exception as e:
-        logger.debug(f"[decision_backtest] 基准收益计算失败: {e}")
-    return None
-
-
-def _resolve_prices(decision: dict, user_id: str) -> tuple[float | None, float | None]:
-    """解析决策的入场价与现价。入场价优先实际成交价，其次信号快照；现价取持仓现价。"""
-    entry = decision.get("actual_price")
-    if not entry:
-        entry = (decision.get("signal_snapshot") or {}).get("entry_price")
-    current = None
-    fund_code = decision.get("fund_code")
-    if fund_code:
-        try:
-            from db.portfolio import get_holding_by_fund
-            holding = get_holding_by_fund(fund_code, user_id)
-            if holding:
-                current = holding.get("current_price")
-        except Exception:
-            current = None
-    if not current:
-        current = (decision.get("signal_snapshot") or {}).get("current_price")
-    return (float(entry) if entry else None, float(current) if current else None)
+        benchmark = get_config('index.hs300_code', '000300.SH')
+        prices = conn.execute("""SELECT trade_date,close FROM index_price_history
+            WHERE index_code=? AND trade_date IN (?,?)""",
+            (benchmark, entry_date, end['nav_date'])).fetchall()
+        benchmark_prices = {r['trade_date']: r['close'] for r in prices}
+        baseline = benchmark_prices.get(entry_date)
+        terminal = benchmark_prices.get(end['nav_date'])
+        if not all(v is not None and math.isfinite(float(v)) and float(v)>0
+                   for v in (entry, end['nav'], baseline, terminal)):
+            return None
+        return {'entry_price':float(entry), 'entry_date':entry_date,
+                'current_price':float(end['nav']), 'price_date':end['nav_date'],
+                'benchmark_pct':round((terminal/baseline-1)*100,2),
+                'benchmark_code':benchmark,
+                'sample_kind':'executed' if actual_price else 'suggestion'}
+    finally:
+        conn.close()
 
 
 # ════════════════════════════════════════════════════════════════
@@ -127,13 +145,12 @@ def run_decision_backtest(user_id: str = "default", as_of_date: str | None = Non
             return summary
         hit_excess = get_config_float("decision_ledger.hit_excess_pct", 2.0)
         hit_abs = get_config_float("decision_ledger.hit_abs_pct", 3.0)
-        review_days = get_config_int("decision_ledger.review_days", 15)
     except Exception as e:
         logger.warning(f"[decision_backtest] 配置读取失败: {e}")
         return summary
 
     try:
-        from db import get_decisions_due_for_review, record_review
+        from db.investment_decisions import get_decisions_due_for_review, record_review
     except Exception as e:
         logger.warning(f"[decision_backtest] 账本依赖加载失败: {e}")
         return summary
@@ -142,27 +159,29 @@ def run_decision_backtest(user_id: str = "default", as_of_date: str | None = Non
         as_of_date = datetime.now().strftime("%Y-%m-%d")
 
     due = get_decisions_due_for_review(user_id, as_of_date)
-    benchmark_pct = _benchmark_return_pct(lookback_days=max(review_days * 2, 30))
 
     for dec in due:
-        entry, current = _resolve_prices(dec, user_id)
-        if not entry or not current or entry <= 0:
+        sample = _resolve_review_sample(dec, as_of_date)
+        if sample is None:
             summary["skipped"] += 1
             summary["details"].append({
                 "decision_id": dec["id"], "fund_code": dec.get("fund_code"),
-                "status": "skipped", "reason": "缺少入场价或现价",
+                "status": "skipped", "reason": "缺少同区间历史价格、基准或实际成交日期",
             })
             continue
 
+        entry, current = sample['entry_price'], sample['current_price']
+        benchmark_pct = sample['benchmark_pct']
         return_pct = round((current - entry) / entry * 100, 2)
         is_hit, excess_pct = judge_hit(return_pct, benchmark_pct, hit_excess, hit_abs)
 
         record_review(
             dec["id"], is_hit=is_hit, excess_return_pct=excess_pct,
             review_result={
+                **sample,
                 "return_pct": return_pct,
                 "benchmark_pct": benchmark_pct,
-                "benchmark_code": "hs300",
+
                 "entry_price": entry,
                 "current_price": current,
                 "as_of_date": as_of_date,

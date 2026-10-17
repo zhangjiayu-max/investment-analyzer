@@ -9,6 +9,7 @@ import concurrent.futures
 import asyncio
 import hashlib
 from datetime import datetime
+from infra.execution_budget import ExecutionCancelled
 
 from services.llm_service import client, MODEL, _call_llm, _parse_tool_args
 from agent.core.multi_agent import run_specialist, run_specialist_with_context, run_cross_review_opinion, _build_portfolio_summary
@@ -3111,26 +3112,20 @@ def _run_specialist_with_timeout(func, timeout_seconds: int, trace_id: str,
         agent_key_for_log: 用于日志和降级结果的 agent_key
         *args, **kwargs: 传给 func 的参数
     """
-    import concurrent.futures as _cf
-    with _cf.ThreadPoolExecutor(max_workers=1) as _pool:
-        future = _pool.submit(func, *args, **kwargs)
-        try:
-            return future.result(timeout=timeout_seconds)
-        except _cf.TimeoutError:
-            future.cancel()
-            logger.warning(
-                f"[trace:{trace_id}] 专家 {agent_key_for_log} 执行超时（{timeout_seconds}秒），"
-                f"返回降级结果，主流程继续"
-            )
-            return {
-                "agent_key": agent_key_for_log,
-                "agent": agent_key_for_log,
-                "icon": "⚠️",
-                "analysis": f"（{agent_key_for_log} 执行超时，已跳过该专家分析）",
-                "tool_calls": [],
-                "duration_ms": timeout_seconds * 1000,
-                "status": "timeout",
-            }
+    from infra.execution_budget import (SPECIALIST_EXECUTOR, execution_budget, wait_result,
+                                         ExecutionCancelled)
+    cancel_event = kwargs.get('cancel_event')
+    try:
+        with execution_budget(timeout_seconds,cancel_event):
+            future = SPECIALIST_EXECUTOR.submit(func,*args,**kwargs)
+            return wait_result(future,timeout_seconds,cancel_event)
+    except ExecutionCancelled as exc:
+        raise CancelledError(str(exc))
+    except TimeoutError:
+        logger.warning('[trace:%s] 专家 %s 等待超时', trace_id, agent_key_for_log)
+        return {'agent_key':agent_key_for_log,'agent':agent_key_for_log,'icon':'⚠️',
+                'analysis':f'（{agent_key_for_log} 执行超时，已跳过该专家分析）',
+                'tool_calls':[],'duration_ms':int(timeout_seconds*1000),'status':'timeout'}
 
 
 def _execute_specialist(tool_name: str, query: str, cancel_event: threading.Event | None = None,
@@ -3138,10 +3133,8 @@ def _execute_specialist(tool_name: str, query: str, cancel_event: threading.Even
                         timeout_seconds: int = 120) -> str:
     """执行专家 Agent 调用,返回 JSON 字符串结果。
 
-    支持超时、自动重试和降级机制：
-    1. 首次调用超时 → 标记 timeout，自动重试 1 次
-    2. 重试仍失败 → 降级为简化模式（不调用工具，直接用已有数据生成分析）
-    3. 降级仍失败 → 返回 unavailable 占位结果
+    专家层只执行一次，超时返回占位结果；网络重试由统一 LLM 入口管理。
+    用户取消直接向上传播，不启动额外专家或降级模型调用。
     """
     agent_key = build_expert_map().get(tool_name)
     if not agent_key:
@@ -3154,96 +3147,15 @@ def _execute_specialist(tool_name: str, query: str, cancel_event: threading.Even
     except Exception:
         pass
 
-    # ── 超时+重试逻辑 ──
-    max_retries = 1  # 失败后自动重试 1 次
-    last_error = None
-
-    for attempt in range(max_retries + 1):
-        try:
-            _check_cancel(cancel_event)
-            # 增强6: 成本路由 - 根据 agent_key 选择模型
-            model = _get_model_for_agent(agent_key, budget_mode) if _is_cost_routing_enabled() else MODEL
-
-            # 超时控制：用线程池 + future 实现超时
-            import concurrent.futures as _cf
-            with _cf.ThreadPoolExecutor(max_workers=1) as _pool:
-                future = _pool.submit(
-                    run_specialist, agent_key, query,
-                    prebuilt_context=prebuilt_context, model=model, trace_id=trace_id
-                )
-                try:
-                    result = future.result(timeout=timeout_seconds)
-                    return json.dumps(result, ensure_ascii=False)
-                except _cf.TimeoutError:
-                    future.cancel()
-                    last_error = TimeoutError(f"专家 {agent_name} 执行超时（{timeout_seconds}秒）")
-                    logger.warning(f"[trace:{trace_id}] 专家 {tool_name} 第{attempt+1}次调用超时（{timeout_seconds}s）")
-                    if attempt < max_retries:
-                        logger.info(f"[trace:{trace_id}] 专家 {tool_name} 准备重试...")
-                        continue
-                    # 超时后不再重试，直接进入降级
-                    break
-        except CancelledError:
-            raise
-        except Exception as e:
-            last_error = e
-            logger.error(f"[trace:{trace_id}] 专家 {tool_name} 第{attempt+1}次执行异常: {e}")
-            if attempt < max_retries:
-                logger.info(f"[trace:{trace_id}] 专家 {tool_name} 准备重试...")
-                continue
-            break
-
-    # ── 降级：简化模式（不调用工具，直接用 system_prompt + query 生成分析）──
-    logger.info(f"[trace:{trace_id}] 专家 {tool_name} 进入降级模式（简化分析，不调用工具）")
-    try:
-        from services.llm_service import _call_llm, MODEL as _MODEL
-        from db.agents import load_specialist_agents as _lsa
-        _agent = _lsa().get(agent_key, {})
-        _sys_prompt = _agent.get("system_prompt", "")
-        if not _sys_prompt:
-            raise ValueError(f"专家 {agent_key} 无 system_prompt")
-
-        _degraded_response = _call_llm(
-            caller=f"specialist_degraded:{agent_key}",
-            trace_id=trace_id,
-            model=_MODEL,
-            messages=[
-                {"role": "system", "content": _sys_prompt + "\n\n注意：本次为降级模式，工具不可用，请基于已有数据和专业知识直接给出分析。"},
-                {"role": "user", "content": query},
-            ],
-            temperature=0.3,
-            max_tokens=4096,
-        )
-        _degraded_text = _degraded_response.choices[0].message.content or ""
-        _degraded_tokens = _degraded_response.usage.total_tokens if _degraded_response.usage else 0
-        logger.info(f"[trace:{trace_id}] 专家 {tool_name} 降级分析完成，tokens={_degraded_tokens}")
-        return json.dumps({
-            "agent_key": agent_key,
-            "agent": agent_name,
-            "icon": _agent.get("icon", "⚠️"),
-            "analysis": _degraded_text,
-            "tool_calls": [],
-            "duration_ms": 0,
-            "status": "degraded",
-        }, ensure_ascii=False)
-    except Exception as degraded_e:
-        logger.error(f"[trace:{trace_id}] 专家 {tool_name} 降级模式也失败: {degraded_e}")
-
-    # ── 最终兜底：unavailable 占位结果 ──
-    _err_msg = f"{type(last_error).__name__}: {last_error}" if last_error else "未知错误"
-    return json.dumps({
-        "agent_key": agent_key,
-        "agent": agent_name,
-        "icon": "⚠️",
-        "analysis": f"[该专家分析暂时不可用：{type(last_error).__name__ if last_error else '未知错误'}]",
-        "tool_calls": [],
-        "duration_ms": 0,
-        "status": "unavailable",
-        "error": _err_msg,
-    }, ensure_ascii=False)
-
-
-# ── 升级二：推理过程可视化（零 LLM 成本，仅格式化已有数据）──
+    # 专家层只负责一次执行；可重试网络错误由统一LLM入口管理。
+    _check_cancel(cancel_event)
+    model = _get_model_for_agent(agent_key,budget_mode) if _is_cost_routing_enabled() else MODEL
+    def run(**_):
+        return run_specialist(agent_key,query,prebuilt_context=prebuilt_context,
+                              model=model,trace_id=trace_id)
+    result = _run_specialist_with_timeout(run,timeout_seconds,trace_id,agent_key,
+                                          cancel_event=cancel_event)
+    return json.dumps(result,ensure_ascii=False)
 
 
 def _extract_conclusion(text: str) -> str:
@@ -4589,7 +4501,7 @@ def orchestrate(query: str, history: list, rag_context: str = "", cancel_event: 
                         idx = future_to_idx[future]
                         try:
                             ordered_results[idx] = future.result()
-                        except CancelledError:
+                        except (CancelledError, ExecutionCancelled):
                             raise
                         except Exception as e:
                             ordered_results[idx] = json.dumps({"error": str(e)}, ensure_ascii=False)
@@ -5515,14 +5427,15 @@ def _stream_handle_no_tool_calls(msg, specialist_results: list, all_tool_calls: 
                 conversation_id=conversation_id, message_id=message_id,
             )
 
-        with concurrent.futures.ThreadPoolExecutor(
-            max_workers=min(len(original_specialists), 5)
-        ) as executor:
-            futures = {executor.submit(_review_single, sr): sr for sr in original_specialists}
-            for future in concurrent.futures.as_completed(futures):
-                sr = futures[future]
+        from infra.execution_budget import SPECIALIST_EXECUTOR
+        from agent.core.pipeline import _phase_futures, _PipelineCancelled
+        tasks = {i: (lambda sr=sr: _review_single(sr)) for i, sr in enumerate(original_specialists)}
+        try:
+            for index, future in _phase_futures(tasks, SPECIALIST_EXECUTOR,
+                                               get_config_int('agent.cross_review_timeout', 120), cancel_event):
+                sr = original_specialists[index]
                 try:
-                    _, cr_result = future.result(timeout=300)
+                    _, cr_result = future.result()
                     cross_review_results.append(cr_result)
                     specialist_results.append(cr_result)
                     all_tool_calls.extend(cr_result.get("tool_calls", []))
@@ -5534,6 +5447,8 @@ def _stream_handle_no_tool_calls(msg, specialist_results: list, all_tool_calls: 
                         "analysis": cr_result["analysis"],
                         "duration_ms": cr_result["duration_ms"],
                     }
+                except (ExecutionCancelled, _PipelineCancelled, CancelledError, TimeoutError):
+                    raise
                 except Exception as e:
                     logger.error(f"交叉审阅 {sr['agent_key']} 失败: {e}")
                     yield {
@@ -5544,6 +5459,8 @@ def _stream_handle_no_tool_calls(msg, specialist_results: list, all_tool_calls: 
                         "analysis": f"交叉审阅失败: {e}",
                         "duration_ms": 0,
                     }
+        except (_PipelineCancelled, ExecutionCancelled) as exc:
+            raise CancelledError(str(exc)) from exc
 
         if cross_review_results:
             _check_cancel(cancel_event)
@@ -5734,21 +5651,25 @@ def _stream_final_synthesis(query: str, refined_query: str, specialists: list,
         })
         final_answer = ""
         try:
+            from contextlib import closing
+            from infra.execution_budget import execution_budget
             from services.llm_service import _call_llm_stream
-            for chunk in _call_llm_stream(
+            with execution_budget(180, cancel_event), closing(_call_llm_stream(
                 caller="orchestrator",
                 trace_id=trace_id,
                 model=MODEL,
                 messages=llm_messages,
                 temperature=get_config_float('llm.temperature_agent', 0.3),
                 max_tokens=get_config_int('llm.max_tokens_orchestrator', 8192),
-            ):
-                if chunk.get("reasoning"):
-                    yield {"type": "reasoning_chunk", "content": chunk["reasoning"], "agent": "orchestrator"}
-                if chunk.get("content"):
-                    final_answer += chunk["content"]
-                    yield {"type": "answer_chunk", "content": chunk["content"]}
-        except CancelledError:
+            )) as chunks:
+                for chunk in chunks:
+                    _check_cancel(cancel_event)
+                    if chunk.get("reasoning"):
+                        yield {"type": "reasoning_chunk", "content": chunk["reasoning"], "agent": "orchestrator"}
+                    if chunk.get("content"):
+                        final_answer += chunk["content"]
+                        yield {"type": "answer_chunk", "content": chunk["content"]}
+        except (CancelledError, ExecutionCancelled, TimeoutError):
             raise
         except Exception as stream_err:
             logger.warning(f"[trace:{trace_id}] 流式生成失败,回退非流式: {stream_err}")
@@ -5764,7 +5685,7 @@ def _stream_final_synthesis(query: str, refined_query: str, specialists: list,
                 final_answer = _filter_absolutism(response.choices[0].message.content or "")
         if not final_answer:
             final_answer = "分析过程较长,请参考以上各专家的分析结果。"
-    except CancelledError:
+    except (CancelledError, ExecutionCancelled, TimeoutError):
         raise
     except Exception:
         final_answer = "分析过程较长,请参考以上各专家的分析结果。"
@@ -5958,7 +5879,8 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
     # 启用后走 6 阶段确定性流水线，失败自动降级到下方 ReAct 逻辑
     try:
         from agent.core.pipeline import is_pipeline_enabled, should_use_pipeline, run_pipeline
-        if is_pipeline_enabled() and should_use_pipeline(query, history):
+        if (not resume_from and not resume_from_checkpoint and not target_specialists
+                and is_pipeline_enabled() and should_use_pipeline(query, history)):
             pipeline_completed = False
             pipeline_degrade = False
             try:
@@ -5969,6 +5891,7 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
                     message_id=message_id,
                     trace_id=trace_id,
                     cancel_event=cancel_event,
+                    prepared_rag_context=rag_context,
                 ):
                     evt_type = evt.get("type", "")
                     # 事件映射：pipeline → orchestrator 兼容格式
@@ -6003,7 +5926,13 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
                         yield evt  # 直接转发最终回答
                     elif evt_type == "terminated":
                         pipeline_completed = True
-                        yield {"type": "status", "message": f"已终止: {evt.get('reason', '')}"}
+                        reason = evt.get('reason', '')
+                        # 终止是本次执行的终态：交给路由持久化 cancelled/failed，
+                        # 不能只发普通 status，否则消息和 channel 会永久保持 running。
+                        if '取消' in reason:
+                            yield {"type": "cancelled", "message": reason}
+                        else:
+                            yield {"type": "error", "message": reason or "执行已终止", "terminal": True}
                         return
                     elif evt_type == "error":
                         logger.warning(f"[orchestrator] Pipeline 失败，降级到 ReAct: {evt.get('error', '')}")
@@ -6017,6 +5946,8 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
                         break
                     else:
                         yield evt  # 未知事件直接转发
+            except (CancelledError, ExecutionCancelled):
+                raise
             except Exception as e:
                 logger.exception(f"[orchestrator] Pipeline 异常，降级到 ReAct: {e}")
                 pipeline_degrade = True
@@ -6278,7 +6209,7 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
                 temperature=get_config_float('llm.temperature_agent', 0.3),
                 max_tokens=get_config_int('llm.max_tokens_orchestrator', 8192),
             )
-        except CancelledError:
+        except (CancelledError, ExecutionCancelled):
             raise
         except Exception as e:
             err_msg = str(e)
@@ -6470,7 +6401,7 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
             """线程回调:专家完成后将结果放入队列。"""
             try:
                 result_str = future.result()
-            except CancelledError:
+            except (CancelledError, ExecutionCancelled):
                 result_str = json.dumps({"error": "cancelled"}, ensure_ascii=False)
             except Exception as e:
                 result_str = json.dumps({"error": str(e)}, ensure_ascii=False)

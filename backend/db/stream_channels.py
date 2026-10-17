@@ -111,7 +111,7 @@ def complete_channel(channel_id: str):
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     conn = _get_conn()
     conn.execute(
-        "UPDATE stream_channels SET status = 'completed', finished_at = ? WHERE channel_id = ?",
+        "UPDATE stream_channels SET status = 'completed', finished_at = ? WHERE channel_id = ? AND status = 'running'",
         (now, channel_id)
     )
     conn.commit()
@@ -123,7 +123,7 @@ def fail_channel(channel_id: str, error_message: str = ""):
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     conn = _get_conn()
     conn.execute(
-        "UPDATE stream_channels SET status = 'failed', finished_at = ?, error_message = ? WHERE channel_id = ?",
+        "UPDATE stream_channels SET status = 'failed', finished_at = ?, error_message = ? WHERE channel_id = ? AND status = 'running'",
         (now, error_message, channel_id)
     )
     conn.commit()
@@ -135,7 +135,7 @@ def cancel_channel(channel_id: str):
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     conn = _get_conn()
     conn.execute(
-        "UPDATE stream_channels SET status = 'cancelled', finished_at = ? WHERE channel_id = ?",
+        "UPDATE stream_channels SET status = 'cancelled', finished_at = ? WHERE channel_id = ? AND status = 'running'",
         (now, channel_id)
     )
     conn.commit()
@@ -147,7 +147,7 @@ def mark_aborted(channel_id: str, reason: str = ""):
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     conn = _get_conn()
     conn.execute(
-        "UPDATE stream_channels SET status = 'aborted', finished_at = ?, abort_reason = ? WHERE channel_id = ?",
+        "UPDATE stream_channels SET status = 'aborted', finished_at = ?, abort_reason = ? WHERE channel_id = ? AND status = 'running'",
         (now, reason, channel_id)
     )
     conn.commit()
@@ -201,12 +201,13 @@ def append_event(channel_id: str, event_type: str, data: dict) -> int:
     data_json = json.dumps(data, ensure_ascii=False)
     conn = _get_conn()
     try:
+        conn.execute('BEGIN IMMEDIATE')
         # 获取当前 last_seq 并 +1
         row = conn.execute(
-            "SELECT last_seq FROM stream_channels WHERE channel_id = ?",
+            "SELECT last_seq, status FROM stream_channels WHERE channel_id = ?",
             (channel_id,)
         ).fetchone()
-        if not row:
+        if not row or row['status'] == 'cancelled':
             conn.close()
             return 0
         next_seq = (row["last_seq"] or 0) + 1

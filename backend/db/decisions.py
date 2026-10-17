@@ -1566,25 +1566,8 @@ def build_decision_precheck(decision_id: int, user_id: str = "default") -> dict:
     if not checklist:
         checklist = ["确认资金用途", "确认仓位上限", "确认数据新鲜度", "确认反方观点"]
 
-    # P1 闭环：交易行为分析 → 决策预检查
-    # 当用户创建买入/卖出决策时，查询历史行为偏差，提示负面操作模式
-    if action_type in ("add", "reduce") and decision_id:
-        try:
-            conn = _get_conn()
-            pattern_rows = conn.execute("""
-                SELECT behavior_pattern, confidence, behavior_type
-                FROM trade_patterns
-                WHERE user_id = ? AND is_negative = 1 AND confidence >= 0.6
-                ORDER BY analyzed_at DESC LIMIT 3
-            """, (user_id,)).fetchall()
-            conn.close()
-            if pattern_rows:
-                pattern_texts = []
-                for r in pattern_rows:
-                    pattern_texts.append(f"{r['behavior_pattern']}（置信度{r['confidence']:.0%}）")
-                warnings.append("行为分析发现以下负面模式，请谨慎决策：" + "；".join(pattern_texts))
-        except Exception:
-            pass
+    # 行为模式由 analyze_trade_patterns 实时计算，并无 trade_patterns 存储表。
+    # 预检查暂不追加该项告警，避免查询不存在的数据源及异常连接泄漏。
 
     # 去重并保留顺序
     def unique(items):

@@ -10,7 +10,6 @@ import logging
 from fastapi import Request, HTTPException
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response
-from starlette.middleware.base import BaseHTTPMiddleware
 
 from .response import ApiResponse, BizError
 
@@ -58,107 +57,55 @@ def register_exception_handlers(app):
         )
 
 
-class ResponseWrapperMiddleware(BaseHTTPMiddleware):
-    """自动将路由返回的裸 dict/list 包装为标准 {code, message, data} 格式。
+def _wrap_payload(data, status):
+    if isinstance(data, dict) and "code" in data and "message" in data:
+        return data, status
+    if status >= 400:
+        message = next((data.get(k) for k in ('detail','message','error','msg') if data.get(k)), '请求失败') if isinstance(data, dict) else '请求失败'
+        return {'code':status,'message':message,'data':None}, status
+    if isinstance(data, dict) and data.get('ok') is False:
+        message = next((data.get(k) for k in ('error','msg','message') if data.get(k)), '操作失败')
+        return {'code':400,'message':message,'data':None}, 400
+    if isinstance(data, dict) and 'ok' in data:
+        data = {k:v for k,v in data.items() if k != 'ok'} or None
+    return {'code':0,'message':'ok','data':data}, status
 
-    排除规则：
-    - 非 application/json 响应（文件下载、HTML、静态资源）
-    - text/event-stream（SSE 流式响应）
-    - 已是标准格式（含 code + message 字段）
-    """
 
-    async def dispatch(self, request: Request, call_next):
-        response = await call_next(request)
+class ResponseWrapperMiddleware:
+    """仅包装业务 JSON；原生 ASGI 直通 SSE 和 OpenAPI，不消费断连接收通道。"""
+    def __init__(self, app):
+        self.app = app
 
-        # P2 修复 conv_190：防御 SSE 端点在 middleware 中返回 None 的情况
-        if response is None:
-            return Response(status_code=204)
-
-        content_type = response.headers.get("content-type", "")
-
-        # 排除非 JSON 响应（文件下载、HTML、SSE 等）
-        if "application/json" not in content_type:
-            return response
-
-        # 排除 SSE 流式响应
-        if "text/event-stream" in content_type:
-            return response
-
-        # 读取响应体
-        try:
-            body = b""
-            async for chunk in response.body_iterator:
-                body += chunk
-        except Exception:
-            return response
-
-        if not body:
-            return response
-
-        # 解析 JSON
-        try:
-            data = json.loads(body)
-        except (json.JSONDecodeError, ValueError):
-            # 非 JSON 内容，原样返回
-            headers = dict(response.headers)
-            headers.pop("content-length", None)
-            return Response(
-                content=body,
-                status_code=response.status_code,
-                media_type=response.media_type,
-                headers=headers,
-            )
-
-        # 已是标准格式（含 code + message 字段），不重复包装
-        if isinstance(data, dict) and "code" in data and "message" in data:
-            # 清除 content-length（可能与 body 不匹配）
-            headers = dict(response.headers)
-            headers.pop("content-length", None)
-            return Response(
-                content=body,
-                status_code=response.status_code,
-                media_type="application/json",
-                headers=headers,
-            )
-
-        # 统一包装
-        if response.status_code >= 400:
-            # 错误响应：提取错误消息（兼容 detail/message/error/msg 四种字段名）
-            message = (
-                data.get("detail")
-                or data.get("message")
-                or data.get("error")
-                or data.get("msg")
-                or "请求失败"
-            ) if isinstance(data, dict) else "请求失败"
-            new_body = {"code": response.status_code, "message": message, "data": None}
-        elif isinstance(data, dict) and data.get("ok") is False:
-            # HTTP 200 但业务失败（ok=False 反模式）→ 转为错误响应
-            message = (
-                data.get("error")
-                or data.get("msg")
-                or data.get("message")
-                or "操作失败"
-            )
-            new_body = {"code": 400, "message": message, "data": None}
-        elif isinstance(data, dict) and "ok" in data:
-            # {"ok": True, ...} 格式：提取非 ok 字段作为 data
-            payload = {k: v for k, v in data.items() if k != "ok"}
-            new_body = {
-                "code": 0,
-                "message": "ok",
-                "data": payload if payload else None,
-            }
-        else:
-            # 裸 dict / 裸 list / 其他格式
-            new_body = {"code": 0, "message": "ok", "data": data}
-
-        # 清除 content-length（新 body 长度已变化）
-        headers = dict(response.headers)
-        headers.pop("content-length", None)
-        return Response(
-            content=json.dumps(new_body, ensure_ascii=False, default=str),
-            status_code=200 if new_body["code"] == 0 else new_body["code"],
-            media_type="application/json",
-            headers=headers,
-        )
+    async def __call__(self, scope, receive, send):
+        if scope['type'] != 'http' or not scope.get('path','').startswith('/api/'):
+            return await self.app(scope, receive, send)
+        response_start = None
+        chunks = []
+        buffering = False
+        async def send_wrapped(message):
+            nonlocal response_start, buffering
+            if message['type'] == 'http.response.start':
+                headers = dict(message.get('headers', []))
+                buffering = (b'application/json' in headers.get(b'content-type', b'')
+                             and not headers.get(b'content-encoding'))
+                if buffering:
+                    response_start = dict(message)
+                    return
+            elif message['type'] == 'http.response.body' and buffering:
+                chunks.append(message.get('body', b''))
+                if message.get('more_body', False):
+                    return
+                body = b''.join(chunks)
+                try:
+                    data, status = _wrap_payload(json.loads(body), response_start['status'])
+                    body = json.dumps(data, ensure_ascii=False, default=str).encode('utf-8')
+                    response_start['status'] = status
+                except (ValueError, TypeError):
+                    pass
+                response_start['headers'] = [(k,v) for k,v in response_start.get('headers', [])
+                                             if k.lower() != b'content-length'] + [(b'content-length',str(len(body)).encode())]
+                await send(response_start)
+                await send({**message,'body':body})
+                return
+            await send(message)
+        await self.app(scope, receive, send_wrapped)

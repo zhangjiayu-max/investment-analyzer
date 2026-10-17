@@ -61,7 +61,7 @@ const items = ref({})
 onMounted(async () => {
   try {
     const res = await getDataHealth()
-    items.value = res.health || {}
+    items.value = res.data?.health || {}
   } catch (e) {
     error.value = e.message || '加载失败'
   } finally {

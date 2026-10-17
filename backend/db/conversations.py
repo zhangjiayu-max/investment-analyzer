@@ -96,7 +96,17 @@ def mark_conversation_cancelled(conv_id: int):
     """持久化取消标记到 DB（不依赖内存 cancel_event，刷新页面后仍生效）。"""
     conn = _get_conn()
     try:
+        conn.execute('BEGIN IMMEDIATE')
         conn.execute("UPDATE conversations SET cancel_requested = 1 WHERE id = ?", (conv_id,))
+        conn.execute("""UPDATE messages SET metadata=json_set(
+            CASE WHEN json_valid(metadata) THEN metadata ELSE '{}' END,'$.execution_status','cancelled')
+            WHERE conversation_id=? AND role='assistant'
+            AND json_extract(CASE WHEN json_valid(metadata) THEN metadata ELSE '{}' END,'$.execution_status')
+                IN ('queued','streaming','resuming')""", (conv_id,))
+        conn.execute("""UPDATE stream_channels SET status='cancelled',finished_at=datetime('now','localtime')
+            WHERE conversation_id=? AND status='running'""", (conv_id,))
+        conn.execute("""UPDATE agent_runs SET status='cancelled',completed_at=datetime('now','localtime')
+            WHERE conversation_id=? AND status IN ('pending','running')""", (conv_id,))
         conn.commit()
     finally:
         conn.close()
@@ -151,24 +161,37 @@ def create_message(conv_id: int, role: str, content: str, metadata: str = None) 
     return msg_id
 
 
-def update_message_metadata(msg_id: int, metadata_dict: dict):
-    """更新消息的 metadata（增量保存执行进度）。"""
-    import json as _json
+def update_message_metadata(msg_id: int, metadata_dict: dict) -> bool:
+    """保存执行进度；取消后迟到的进度不能擦除取消终态。"""
     conn = _get_conn()
-    conn.execute("UPDATE messages SET metadata = ? WHERE id = ?",
-                 (_json.dumps(metadata_dict, ensure_ascii=False), msg_id))
-    conn.commit()
-    conn.close()
+    try:
+        conn.execute('BEGIN IMMEDIATE')
+        row = conn.execute('SELECT metadata FROM messages WHERE id=?',(msg_id,)).fetchone()
+        if row is None:
+            return False
+        meta = _load_metadata(row['metadata'])
+        if meta.get('execution_status') == 'cancelled':
+            return False
+        meta.update(metadata_dict)
+        cur = conn.execute('UPDATE messages SET metadata=? WHERE id=?',(_dump_metadata(meta),msg_id))
+        conn.commit()
+        return cur.rowcount == 1
+    finally:
+        conn.close()
 
 
-def update_message_content_and_metadata(msg_id: int, content: str, metadata_dict: dict):
-    """更新消息的 content 和 metadata（最终保存）。"""
-    import json as _json
+def update_message_content_and_metadata(msg_id: int, content: str, metadata_dict: dict) -> bool:
+    """取消为单向终态；迟到完成不可覆盖已取消消息。"""
     conn = _get_conn()
-    conn.execute("UPDATE messages SET content = ?, metadata = ? WHERE id = ?",
-                 (content, _json.dumps(metadata_dict, ensure_ascii=False), msg_id))
-    conn.commit()
-    conn.close()
+    try:
+        cur = conn.execute("""UPDATE messages SET content=?,metadata=? WHERE id=?
+            AND COALESCE(json_extract(CASE WHEN json_valid(metadata) THEN metadata ELSE '{}' END,
+                                      '$.execution_status'),'') != 'cancelled'""",
+            (content,_dump_metadata(metadata_dict),msg_id))
+        conn.commit()
+        return cur.rowcount == 1
+    finally:
+        conn.close()
 
 
 def create_assistant_placeholder(
@@ -198,10 +221,13 @@ def mark_message_execution_status(
         return False
     conn = _get_conn()
     try:
+        conn.execute('BEGIN IMMEDIATE')
         row = conn.execute("SELECT metadata FROM messages WHERE id = ?", (msg_id,)).fetchone()
         if not row:
             return False
         meta = _load_metadata(row["metadata"])
+        if meta.get('execution_status') == 'cancelled':
+            return False
         meta["execution_status"] = status
         for key, value in metadata_updates.items():
             if value is not None:
@@ -274,7 +300,7 @@ def get_conversation_summary(conversation_id: int) -> dict | None:
     """获取对话的最新摘要。"""
     conn = _get_conn()
     row = conn.execute(
-        "SELECT * FROM conversation_summaries WHERE conversation_id = ? ORDER BY id DESC LIMIT 1",
+        "SELECT * FROM conversation_summaries WHERE conversation_id = ? AND cursor_kind='message_id' ORDER BY id DESC LIMIT 1",
         (conversation_id,)
     ).fetchone()
     conn.close()
@@ -285,7 +311,7 @@ def save_conversation_summary(conversation_id: int, up_to_message_id: int, summa
     """保存对话摘要。"""
     conn = _get_conn()
     cur = conn.execute(
-        "INSERT INTO conversation_summaries (conversation_id, up_to_message_id, summary) VALUES (?, ?, ?)",
+        "INSERT INTO conversation_summaries (conversation_id, up_to_message_id, summary, cursor_kind) VALUES (?, ?, ?, 'message_id')",
         (conversation_id, up_to_message_id, summary)
     )
     conn.commit()

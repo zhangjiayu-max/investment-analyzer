@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { flatNavItems, navItems } from '../navigation.js'
+import { flatNavItems, navItems, getVisibleNavItems } from '../navigation.js'
 import { pageComponentKeys } from '../pageRegistry.js'
 
 describe('navigation config', () => {
@@ -25,5 +25,36 @@ describe('navigation config', () => {
 
     expect(keys).not.toContain('rag')
     expect(keys).not.toContain('rag-test')
+  })
+
+  describe('功能精简可见性 (getVisibleNavItems)', () => {
+    it('hides the devOnly system-governance group by default', () => {
+      const keys = getVisibleNavItems(false).map(g => g.key)
+      expect(keys).not.toContain('group-system')
+    })
+
+    it('hides hidden leaf items by default but keeps hot core pages', () => {
+      const visible = getVisibleNavItems(false)
+      const leafKeys = visible.flatMap(g => g.children || g).map(i => i.key)
+
+      // 下沉页面默认隐藏
+      expect(leafKeys).not.toContain('attribution')
+      expect(leafKeys).not.toContain('gallery')
+      // 核心页面保留
+      expect(leafKeys).toContain('dashboard')
+      expect(leafKeys).toContain('chat')
+      expect(leafKeys).toContain('event-radar')
+      expect(leafKeys).toContain('health-v2')
+    })
+
+    it('shows everything in dev mode', () => {
+      const visible = getVisibleNavItems(true)
+      const keys = visible.map(g => g.key)
+      const leafKeys = visible.flatMap(g => g.children || g).map(i => i.key)
+
+      expect(keys).toContain('group-system')
+      expect(leafKeys).toContain('attribution')
+      expect(leafKeys).toContain('admin-agents')
+    })
   })
 })

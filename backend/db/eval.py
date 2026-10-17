@@ -319,6 +319,7 @@ def init_eval_tables(conn):
             created_at TEXT DEFAULT (datetime('now','localtime'))
         )
     """)
+    _add_column_if_not_exists(conn, 'conversation_summaries', 'cursor_kind', "TEXT DEFAULT 'legacy_count'")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_conv_summaries_cid ON conversation_summaries(conversation_id)")
     conn.execute("""
         CREATE TABLE IF NOT EXISTS rag_feedback (

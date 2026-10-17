@@ -2,21 +2,20 @@
 """测试 DB schema 迁移：cancel_requested 和 run_phase 字段。"""
 import sqlite3
 import pytest
-from db._conn import DB_PATH
 
 
-def test_conversations_has_cancel_requested_column():
+def test_conversations_has_cancel_requested_column(tmp_db):
     """conversations 表应有 cancel_requested 字段（默认 0）。"""
-    conn = sqlite3.connect(str(DB_PATH))
+    conn = sqlite3.connect(str(tmp_db))
     cursor = conn.execute("PRAGMA table_info(conversations)")
     columns = [row[1] for row in cursor.fetchall()]
     conn.close()
     assert "cancel_requested" in columns, f"conversations 缺少 cancel_requested 字段: {columns}"
 
 
-def test_agent_runs_has_run_phase_column():
+def test_agent_runs_has_run_phase_column(tmp_db):
     """agent_runs 表应有 run_phase 字段（默认 'primary'）。"""
-    conn = sqlite3.connect(str(DB_PATH))
+    conn = sqlite3.connect(str(tmp_db))
     cursor = conn.execute("PRAGMA table_info(agent_runs)")
     columns = [row[1] for row in cursor.fetchall()]
     conn.close()

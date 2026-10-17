@@ -1287,10 +1287,11 @@ def generate_smart_add_plan(user_id: str = "default") -> dict:
 
     # 2. 对每个持仓计算计划
     plans = []
+    valuation_snapshot = {}
     for h in holdings:
         plan = _generate_single_plan(
             h, cfg, total_assets, pool_total, base_monthly,
-            holdings=holdings, user_id=user_id,
+            holdings=holdings, user_id=user_id, valuation_snapshot=valuation_snapshot,
         )
         if plan:
             plans.append(plan)
@@ -1967,6 +1968,7 @@ def _generate_single_plan(
     deep_loss_count: int = 0,
     holdings: list = None,
     user_id: str = "default",
+    valuation_snapshot: dict | None = None,
 ) -> Optional[dict]:
     """生成单个持仓的补仓计划。
 
@@ -2005,11 +2007,17 @@ def _generate_single_plan(
     zscore = None
     valuation_level = "未知"
     if index_code:
-        # 先查市盈率，查不到则降级查市净率（部分指数如银行/地产只有 PB 数据）
-        # P2-3: 单标的查询启用在线兜底（非批量场景），避免本地无估值时 valuation=None
-        val = get_best_valuation(index_code, metric_type="市盈率", query_source="smart_add", enable_online=True)
-        if not val:
-            val = get_best_valuation(index_code, metric_type="市净率", query_source="smart_add", enable_online=True)
+        # 全组合循环只用本地快照；相同指数在本次计划中仅查询一次。
+        if valuation_snapshot is not None and index_code in valuation_snapshot:
+            val = valuation_snapshot[index_code]
+        else:
+            val = get_best_valuation(index_code, metric_type="市盈率", query_source="smart_add",
+                                     enable_online=valuation_snapshot is None)
+            if not val:
+                val = get_best_valuation(index_code, metric_type="市净率", query_source="smart_add",
+                                         enable_online=valuation_snapshot is None)
+            if valuation_snapshot is not None:
+                valuation_snapshot[index_code] = val
         if val:
             zscore = val.get("zscore")
             percentile = val.get("percentile")

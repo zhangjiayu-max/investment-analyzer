@@ -654,20 +654,29 @@ function liuyiSortBy(key) {
   }
 }
 
+let historyGeneration = 0
+let historySelection = null
 async function loadHistory() {
+  const version = ++historyGeneration
+  const code = selectedCode.value
+  const metric = selectedMetric.value
+  const selection = `${code}:${metric}`
+  if (historySelection !== selection) { historySelection = selection; history.value = []; latest.value = null; trendChart?.dispose(); trendChart = null }
+  const current = () => version === historyGeneration && selectedCode.value === code && selectedMetric.value === metric
   if (!selectedCode.value || !selectedMetric.value) return
   loading.value = true
   try {
-    const { data } = await getValuationHistory(selectedCode.value, 60, selectedMetric.value)
+    const { data } = await getValuationHistory(code, 60, metric)
+    if (!current()) return
     history.value = data.history || []
     latest.value = data.latest || null
     if (history.value.length > 1) {
-      setTimeout(renderTrendChart, 100)
+      setTimeout(() => { if (current()) renderTrendChart() }, 100)
     }
   } catch (e) {
-    console.error('Failed to load history:', e)
+    if (current()) console.error('Failed to load history:', e)
   } finally {
-    loading.value = false
+    if (current()) loading.value = false
   }
 }
 

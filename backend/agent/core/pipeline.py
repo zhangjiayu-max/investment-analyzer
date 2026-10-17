@@ -23,6 +23,7 @@ from typing import Optional, Any, Generator
 
 from db.config import get_config_bool, get_config_int
 from db.agents import create_agent_run
+from infra.execution_budget import ExecutionCancelled
 
 from agent.state.pipeline_state import PipelineState, PipelinePhase, create_initial_state
 from agent.query_understander import (
@@ -172,6 +173,7 @@ def run_pipeline(
     user_id: str = "default",
     cancel_event=None,
     resumed_state: Optional[dict] = None,
+    prepared_rag_context: str | None = None,
 ) -> Generator[dict, None, None]:
     """Pipeline 主入口 — 6 阶段确定性流水线。
 
@@ -261,7 +263,8 @@ def run_pipeline(
         # ── Phase 1: 信息收集 ──────────────────
         state.transition_to(PipelinePhase.INFO_GATHER)
         yield {"type": EVENT_PHASE_START, "phase": PipelinePhase.INFO_GATHER.value}
-        phase1_result = _phase_info_gather(state, query_info, history, trace_id)
+        phase1_result = _phase_info_gather(state, query_info, history, trace_id, prepared_rag_context=prepared_rag_context,
+                                          cancel_event=cancel_event)
         state.set_phase_result(PipelinePhase.INFO_GATHER.value, phase1_result)
         yield {"type": EVENT_PHASE_END, "phase": PipelinePhase.INFO_GATHER.value,
                "result": {"rag_count": len(phase1_result.get("rag", [])),
@@ -309,8 +312,9 @@ def run_pipeline(
             state.transition_to(PipelinePhase.REFLECTION)
             yield {"type": EVENT_PHASE_START, "phase": PipelinePhase.REFLECTION.value}
             try:
-                reflection_result = _phase_reflection(
-                    state, query, phase3_result, blackboard, trace_id
+                reflection_result = _run_followup_phase(
+                    _phase_reflection, (state, query, phase3_result, blackboard, trace_id),
+                    cancel_event, "pipeline.reflection_timeout"
                 )
                 state.set_phase_result(PipelinePhase.REFLECTION.value, reflection_result)
                 yield {"type": EVENT_REFLECTION_DONE, "result": reflection_result}
@@ -318,7 +322,7 @@ def run_pipeline(
                 # 自纠错循环：低置信度时重跑质量最差的专家
                 rerun_result = _maybe_rerun_specialist(
                     state, query, phase3_result, reflection_result,
-                    blackboard, trace_id,
+                    blackboard, trace_id, cancel_event=cancel_event,
                 )
                 if rerun_result:
                     # 重跑成功：更新 phase3_result 的对应专家分析
@@ -335,6 +339,8 @@ def run_pipeline(
                            "analysis": rerun_result.get("analysis", ""),
                            "duration_ms": rerun_result.get("duration_ms", 0),
                            "rerun": True}
+            except (ExecutionCancelled, _PipelineCancelled, TimeoutError):
+                raise
             except Exception as refl_err:
                 logger.warning(f"[pipeline] Reflection 失败，跳过: {refl_err}")
                 reflection_result = None
@@ -354,11 +360,14 @@ def run_pipeline(
                 state.transition_to(PipelinePhase.DEBATE)
                 yield {"type": EVENT_PHASE_START, "phase": PipelinePhase.DEBATE.value}
                 try:
-                    debate_result = _phase_debate(
-                        state, query, phase3_result, blackboard, trace_id
+                    debate_result = _run_followup_phase(
+                        _phase_debate, (state, query, phase3_result, blackboard, trace_id),
+                        cancel_event, "pipeline.debate_timeout"
                     )
                     state.set_phase_result(PipelinePhase.DEBATE.value, debate_result)
                     yield {"type": EVENT_DEBATE_DONE, "result": debate_result}
+                except (ExecutionCancelled, _PipelineCancelled, TimeoutError):
+                    raise
                 except Exception as debate_err:
                     logger.warning(f"[pipeline] 辩论失败，跳过: {debate_err}")
                     debate_result = None
@@ -368,8 +377,14 @@ def run_pipeline(
 
         # ── Phase 3.8: 交叉审阅（P2-G 修复 conv#131）──────────────
         # 原 Pipeline 路径未触发 run_cross_review_opinion，导致 cross_review_results 恒为空
-        # 此处补全：≥2 个专家时，并行执行交叉审阅，emit cross_review_start/done 事件
+        # 此处补全：并行执行交叉审阅，emit cross_review_start/done 事件
         # 让 conversations.py 通过事件监听器正确写入 metadata.cross_review_results
+        # R2（2026-10-15）：接入 orchestrator 的 should_run_cross_review 统一决策树，
+        # 替换原先「仅专家数 >= 2」的粗判断，两引擎交叉审阅触发条件保持一致。
+        _phase3_specialists_list = phase3_result.get("specialists", []) or []
+        # 过滤掉交叉审阅结果（Phase 3 尚未有 cross_review，安全兜底）
+        _phase3_originals = [sr for sr in _phase3_specialists_list if not sr.get("is_cross_review")]
+        # 先安全初始化配置（保证异常时 else 分支与 except 分支可用）
         try:
             cross_review_enabled_cfg = get_config_bool("cross_review_enabled", True)
         except Exception:
@@ -378,24 +393,41 @@ def run_pipeline(
             cross_review_min_spec = get_config_int("cross_review_min_specialists", 1)
         except Exception:
             cross_review_min_spec = 1
+        _should_cross_review = False
+        try:
+            from agent.core.orchestrator import should_run_cross_review, detect_conflicts
+            # 用关键词匹配版冲突检测构造 {detected, severity} 结构（不耗 LLM）
+            _conflicts = detect_conflicts(_phase3_originals)
+            _should_cross_review = should_run_cross_review(
+                specialist_results=_phase3_originals,
+                complexity=complexity,
+                conflicts=_conflicts,
+                force_skip=False,
+                enabled=cross_review_enabled_cfg,
+                min_specialists=cross_review_min_spec,
+                min_severity="medium",
+                predicted_need_cross_review=False,
+                needs_arbitration=False,
+            )
+        except Exception as _cr_check_err:
+            logger.warning(f"[pipeline] 交叉审阅决策失败，回退专家数判断: {_cr_check_err}")
+            _should_cross_review = cross_review_enabled_cfg and len(_phase3_originals) >= 2
 
-        _phase3_specialists_list = phase3_result.get("specialists", []) or []
-        if (cross_review_enabled_cfg
-                and len(_phase3_specialists_list) >= max(2, cross_review_min_spec)):
+        if _should_cross_review:
             logger.info(
-                f"[pipeline] 触发交叉审阅（{len(_phase3_specialists_list)} 个专家）"
+                f"[pipeline] 触发交叉审阅（{len(_phase3_originals)} 个专家）"
             )
             yield {
                 "type": "status",
-                "message": f"正在进行交叉审阅（{len(_phase3_specialists_list)} 个专家并行互相验证）..."
+                "message": f"正在进行交叉审阅（{len(_phase3_originals)} 个专家并行互相验证）..."
             }
 
-            # 构造 peer 分析字典
+            # 构造 peer 分析字典（对原始专家做交叉审阅）
             _peer_analyses = {
                 sr.get("agent_key", f"agent_{i}"): sr.get("analysis", "")
-                for i, sr in enumerate(_phase3_specialists_list)
+                for i, sr in enumerate(_phase3_originals)
             }
-            _original_specialists = list(_phase3_specialists_list)
+            _original_specialists = list(_phase3_originals)
 
             # 发送所有 cross_review_start 事件
             for sr in _original_specialists:
@@ -407,7 +439,7 @@ def run_pipeline(
                 }
 
             # 并行执行交叉审阅
-            import concurrent.futures as _cf
+            from infra.execution_budget import SPECIALIST_EXECUTOR
             from agent.core.multi_agent import run_cross_review_opinion as _run_cr_op
 
             def _review_single_pipeline(sr):
@@ -421,6 +453,8 @@ def run_pipeline(
                         conversation_id=state.conversation_id,
                         message_id=state.message_id,
                     )
+                except (ExecutionCancelled, _PipelineCancelled, TimeoutError):
+                    raise
                 except Exception as e:
                     logger.warning(
                         f"[pipeline] 交叉审阅失败 {sr.get('agent_key', '')}: {e}"
@@ -439,40 +473,40 @@ def run_pipeline(
 
             _cr_results = []
             try:
-                with _cf.ThreadPoolExecutor(
-                    max_workers=min(len(_original_specialists), 3)
-                ) as executor:
-                    futures = {
-                        executor.submit(_review_single_pipeline, sr): sr
-                        for sr in _original_specialists
-                    }
-                    for future in _cf.as_completed(futures):
-                        sr = futures[future]
-                        try:
-                            _, cr_result = future.result(timeout=300)
-                            _cr_results.append(cr_result)
-                            # 追加到 phase3_result 让综合阶段能看到
-                            phase3_result.setdefault("specialists", []).append(cr_result)
-                            yield {
-                                "type": "cross_review_done",
-                                "agent_key": sr.get("agent_key", ""),
-                                "agent": sr.get("agent", sr.get("agent_key", "")),
-                                "icon": sr.get("icon", "🤖"),
-                                "analysis": cr_result.get("analysis", ""),
-                                "duration_ms": cr_result.get("duration_ms", 0),
-                            }
-                        except Exception as e:
-                            logger.error(
-                                f"[pipeline] 交叉审阅 future 失败 {sr.get('agent_key', '')}: {e}"
-                            )
-                            yield {
-                                "type": "cross_review_done",
-                                "agent_key": sr.get("agent_key", ""),
-                                "agent": sr.get("agent", sr.get("agent_key", "")),
-                                "icon": sr.get("icon", "🤖"),
-                                "analysis": f"交叉审阅失败: {e}",
-                                "duration_ms": 0,
-                            }
+                tasks = {i: (lambda sr=sr: _review_single_pipeline(sr))
+                         for i, sr in enumerate(_original_specialists)}
+                for index, future in _phase_futures(tasks, SPECIALIST_EXECUTOR,
+                                                     get_config_int('agent.cross_review_timeout', 120), cancel_event):
+                    sr = _original_specialists[index]
+                    try:
+                        _, cr_result = future.result()
+                        _cr_results.append(cr_result)
+                        # 追加到 phase3_result 让综合阶段能看到
+                        phase3_result.setdefault("specialists", []).append(cr_result)
+                        yield {
+                            "type": "cross_review_done",
+                            "agent_key": sr.get("agent_key", ""),
+                            "agent": sr.get("agent", sr.get("agent_key", "")),
+                            "icon": sr.get("icon", "🤖"),
+                            "analysis": cr_result.get("analysis", ""),
+                            "duration_ms": cr_result.get("duration_ms", 0),
+                        }
+                    except (ExecutionCancelled, _PipelineCancelled, TimeoutError):
+                        raise
+                    except Exception as e:
+                        logger.error(
+                            f"[pipeline] 交叉审阅 future 失败 {sr.get('agent_key', '')}: {e}"
+                        )
+                        yield {
+                            "type": "cross_review_done",
+                            "agent_key": sr.get("agent_key", ""),
+                            "agent": sr.get("agent", sr.get("agent_key", "")),
+                            "icon": sr.get("icon", "🤖"),
+                            "analysis": f"交叉审阅失败: {e}",
+                            "duration_ms": 0,
+                        }
+            except (ExecutionCancelled, _PipelineCancelled):
+                raise _PipelineCancelled()
             except Exception as cr_phase_err:
                 logger.warning(f"[pipeline] 交叉审阅阶段失败，继续综合: {cr_phase_err}")
 
@@ -483,7 +517,7 @@ def run_pipeline(
         else:
             logger.debug(
                 f"[pipeline] 跳过交叉审阅（enabled={cross_review_enabled_cfg}, "
-                f"specialists={len(_phase3_specialists_list)})"
+                f"specialists={len(_phase3_originals)})"
             )
 
         # ── Phase 4: 综合 ──────────────────
@@ -551,9 +585,14 @@ def run_pipeline(
 
         state.transition_to(PipelinePhase.COMPLETED)
 
-    except _PipelineCancelled:
+    except (_PipelineCancelled, ExecutionCancelled):
         state.transition_to(PipelinePhase.CANCELLED)
         yield {"type": EVENT_TERMINATED, "reason": "用户取消"}
+    except TimeoutError:
+        # 工作线程可能仍在退出，终止本轮，禁止外层 ReAct 重复执行相同专家。
+        state.transition_to(PipelinePhase.FAILED)
+        state.error = "execution_timeout"
+        yield {"type": EVENT_TERMINATED, "reason": "执行超时，请稍后重试"}
     except Exception as e:
         logger.exception(f"[pipeline] 流水线异常: {e}")
         state.transition_to(PipelinePhase.FAILED)
@@ -611,7 +650,7 @@ def run_pipeline_from_checkpoint(
         # 直接进入 Phase 1（跳过 Phase 0 澄清检查）
         state.transition_to(PipelinePhase.INFO_GATHER)
         yield {"type": EVENT_PHASE_START, "phase": PipelinePhase.INFO_GATHER.value}
-        phase1_result = _phase_info_gather(state, query_info, history, trace_id)
+        phase1_result = _phase_info_gather(state, query_info, history, trace_id, cancel_event=cancel_event)
         state.set_phase_result(PipelinePhase.INFO_GATHER.value, phase1_result)
         yield {"type": EVENT_PHASE_END, "phase": PipelinePhase.INFO_GATHER.value,
                "result": {"rag_count": len(phase1_result.get("rag", [])),
@@ -657,15 +696,16 @@ def run_pipeline_from_checkpoint(
             state.transition_to(PipelinePhase.REFLECTION)
             yield {"type": EVENT_PHASE_START, "phase": PipelinePhase.REFLECTION.value}
             try:
-                reflection_result = _phase_reflection(
-                    state, state.refined_query, phase3_result, blackboard, trace_id
+                reflection_result = _run_followup_phase(
+                    _phase_reflection, (state, state.refined_query, phase3_result, blackboard, trace_id),
+                    cancel_event, "pipeline.reflection_timeout"
                 )
                 state.set_phase_result(PipelinePhase.REFLECTION.value, reflection_result)
                 yield {"type": EVENT_REFLECTION_DONE, "result": reflection_result}
 
                 rerun_result = _maybe_rerun_specialist(
                     state, state.refined_query, phase3_result, reflection_result,
-                    blackboard, trace_id,
+                    blackboard, trace_id, cancel_event=cancel_event,
                 )
                 if rerun_result:
                     phase3_result["specialists"] = _replace_specialist_analysis(
@@ -676,6 +716,8 @@ def run_pipeline_from_checkpoint(
                            "agent": rerun_result.get("agent", ""),
                            "result": rerun_result,
                            "rerun": True}
+            except (ExecutionCancelled, _PipelineCancelled, TimeoutError):
+                raise
             except Exception as refl_err:
                 logger.warning(f"[pipeline:{trace_id}] 续答 Reflection 失败，跳过: {refl_err}")
                 reflection_result = None
@@ -695,11 +737,14 @@ def run_pipeline_from_checkpoint(
                 state.transition_to(PipelinePhase.DEBATE)
                 yield {"type": EVENT_PHASE_START, "phase": PipelinePhase.DEBATE.value}
                 try:
-                    debate_result = _phase_debate(
-                        state, state.refined_query, phase3_result, blackboard, trace_id
+                    debate_result = _run_followup_phase(
+                        _phase_debate, (state, state.refined_query, phase3_result, blackboard, trace_id),
+                        cancel_event, "pipeline.debate_timeout"
                     )
                     state.set_phase_result(PipelinePhase.DEBATE.value, debate_result)
                     yield {"type": EVENT_DEBATE_DONE, "result": debate_result}
+                except (ExecutionCancelled, _PipelineCancelled, TimeoutError):
+                    raise
                 except Exception as debate_err:
                     logger.warning(f"[pipeline:{trace_id}] 续答辩论失败，跳过: {debate_err}")
                     debate_result = None
@@ -760,9 +805,13 @@ def run_pipeline_from_checkpoint(
 
         state.transition_to(PipelinePhase.COMPLETED)
 
-    except _PipelineCancelled:
+    except (_PipelineCancelled, ExecutionCancelled):
         state.transition_to(PipelinePhase.CANCELLED)
         yield {"type": EVENT_TERMINATED, "reason": "用户取消"}
+    except TimeoutError:
+        state.transition_to(PipelinePhase.FAILED)
+        state.error = "execution_timeout"
+        yield {"type": EVENT_TERMINATED, "reason": "执行超时，请稍后重试"}
     except Exception as e:
         logger.exception(f"[pipeline] 续答恢复异常: {e}")
         state.transition_to(PipelinePhase.FAILED)
@@ -873,6 +922,8 @@ def _phase_info_gather(
     query_info: dict,
     history: list,
     trace_id: str,
+    prepared_rag_context: str | None = None,
+    cancel_event=None,
 ) -> dict:
     """Phase 1: RAG 检索 + 持仓预取 + 估值预取 + 记忆加载。"""
     results = {
@@ -885,10 +936,12 @@ def _phase_info_gather(
     }
 
     # 并行执行 RAG 检索 + 持仓 + 估值 + 记忆（省 3-5 秒串行等待）
-    from concurrent.futures import ThreadPoolExecutor
+    from infra.execution_budget import DATA_EXECUTOR
 
     def _rag_task():
         """RAG 检索（子查询展开 + intent 驱动 content_types + rag_logs 日志）"""
+        if prepared_rag_context is not None:
+            return {'rag':[], 'rag_context':prepared_rag_context}
         try:
             from services.rag import build_rag_context_with_details, log_rag_search
             enhanced_query = _enhance_rag_query(state.refined_query, query_info)
@@ -1049,20 +1102,15 @@ def _phase_info_gather(
             logger.debug(f"[pipeline] 记忆加载失败: {e}")
             return ""
 
-    with ThreadPoolExecutor(max_workers=4) as pool:
-        rag_future = pool.submit(_rag_task)
-        portfolio_future = pool.submit(_portfolio_task)
-        valuation_future = pool.submit(_valuation_task)
-        memory_future = pool.submit(_memory_task)
-
-        rag_result = rag_future.result()
-        results["rag"] = rag_result["rag"]
-        results["rag_context"] = rag_result["rag_context"]
-        if rag_result.get("rag_low_quality"):
-            results["rag_low_quality"] = True
-        results["portfolio"] = portfolio_future.result()
-        results["valuations"] = valuation_future.result()
-        results["memory"] = memory_future.result()
+    tasks = {'rag': _rag_task, 'portfolio': _portfolio_task,
+             'valuations': _valuation_task, 'memory': _memory_task}
+    for key, future in _phase_futures(tasks, DATA_EXECUTOR,
+                                      get_config_int('pipeline.info_gather_timeout', 60), cancel_event):
+        value = future.result()
+        if key == 'rag':
+            results.update(value)
+        else:
+            results[key] = value
 
     # 5. 信息缺口检测
     needed_info = set(query_info.get("needed_info", []))
@@ -1393,7 +1441,7 @@ def _phase_execution(
         # 执行专家
         step_start = time.time()
         try:
-            result = run_specialist(
+            result = _run_pipeline_specialist(run_specialist, cancel_event,
                 agent_key=agent_key,
                 query=step_query,
                 prebuilt_context=ctx,
@@ -1455,6 +1503,8 @@ def _phase_execution(
                 "duration_ms": duration_ms,
             }
 
+        except (ExecutionCancelled, _PipelineCancelled, TimeoutError):
+            raise
         except Exception as e:
             logger.error(f"[pipeline] 专家 {agent_name} 执行失败: {e}")
             checker.record_failure(str(e))
@@ -1494,6 +1544,64 @@ def _phase_execution(
         "specialists": specialists_result,
         "tool_calls": all_tool_calls,
     }
+
+
+def _completed_with_deadline(future_to_meta, cancel_event, timeout):
+    """没有完成事件时也检查取消与截止，不在退出时等待线程。"""
+    from infra.execution_budget import remaining_seconds
+    import concurrent.futures
+    pending = set(future_to_meta)
+    deadline = time.monotonic()+timeout
+    try:
+        while pending:
+            if cancel_event and cancel_event.is_set():
+                raise _PipelineCancelled()
+            remaining = min(deadline-time.monotonic(),remaining_seconds(timeout))
+            if remaining <= 0:
+                raise TimeoutError('阶段执行超时')
+            done, pending = concurrent.futures.wait(pending,timeout=min(.05,remaining),
+                                                   return_when=concurrent.futures.FIRST_COMPLETED)
+            yield from done
+    except ExecutionCancelled:
+        raise _PipelineCancelled()
+    finally:
+        for future in future_to_meta:
+            future.cancel()
+
+
+def _phase_futures(tasks, executor, timeout, cancel_event):
+    """阶段共用一次截止时间，提交失败/取消/退出均取消尚未开始的工作。"""
+    from infra.execution_budget import execution_budget, remaining_seconds
+    futures = {}
+    try:
+        with execution_budget(timeout, cancel_event):
+            remaining_seconds(timeout)
+            for key, task in tasks.items():
+                remaining_seconds(timeout)
+                futures[executor.submit(task)] = key
+            for future in _completed_with_deadline(futures, cancel_event, timeout):
+                yield futures[future], future
+    except ExecutionCancelled:
+        raise _PipelineCancelled()
+    finally:
+        for future in futures:
+            future.cancel()
+
+
+def _run_pipeline_specialist(func, cancel_event, **kwargs):
+    """顺序及计划降级路径复用同一共享池与预算等待。"""
+    from infra.execution_budget import SPECIALIST_EXECUTOR
+    for _, future in _phase_futures({0: lambda: func(**kwargs)}, SPECIALIST_EXECUTOR,
+                                    get_config_int('agent.specialist_timeout', 300), cancel_event):
+        return future.result()
+
+
+def _run_followup_phase(func, args, cancel_event, config_key):
+    """反思/辩论共用一次阶段预算，传播到连续模型调用。"""
+    from infra.execution_budget import SPECIALIST_EXECUTOR
+    for _, future in _phase_futures({0: lambda: func(*args)}, SPECIALIST_EXECUTOR,
+                                    get_config_int(config_key, 180), cancel_event):
+        return future.result()
 
 
 def _execute_steps_parallel(
@@ -1578,8 +1686,7 @@ def _execute_steps_parallel(
     if not step_ctxs:
         return {"specialists": [], "tool_calls": []}
 
-    # 并行执行（最多 3 个并发，避免 token 突刺）
-    max_workers = min(len(step_ctxs), 3)
+    # 并行工作由共享有界池限制总在途数量。
     specialists_result = []
     all_tool_calls = []
 
@@ -1597,98 +1704,97 @@ def _execute_steps_parallel(
             blackboard=blackboard,
         )
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-        future_to_meta = {
-            executor.submit(_run_one, step, ctx, step.get("agent_key")): (step, agent_config, agent_icon, ctx)
-            for step, agent_config, agent_icon, ctx in step_ctxs
-        }
-        # 按完成顺序处理结果
-        for future in concurrent.futures.as_completed(future_to_meta):
-            if cancel_event and cancel_event.is_set():
-                executor.shutdown(wait=False, cancel_futures=True)
-                raise _PipelineCancelled()
+    from infra.execution_budget import SPECIALIST_EXECUTOR
+    tasks = {i: (lambda step=step, ctx=ctx: _run_one(step, ctx, step.get("agent_key")))
+             for i, (step, _, _, ctx) in enumerate(step_ctxs)}
+    for index, future in _phase_futures(tasks, SPECIALIST_EXECUTOR,
+                                        get_config_int('agent.specialist_timeout', 300), cancel_event):
+        if cancel_event and cancel_event.is_set():
+            raise _PipelineCancelled()
 
-            step, agent_config, agent_icon, _ = future_to_meta[future]
-            agent_key = step.get("agent_key")
-            agent_name = step.get("agent_name", agent_key)
-            step_query = step.get("query", state.refined_query)
-            step_start = time.time()
+        step, agent_config, agent_icon, _ = step_ctxs[index]
+        agent_key = step.get("agent_key")
+        agent_name = step.get("agent_name", agent_key)
+        step_query = step.get("query", state.refined_query)
+        step_start = time.time()
 
+        try:
+            result = future.result()
+            specialists_result.append(result)
+            all_tool_calls.extend(result.get("tool_calls", []))
+
+            # 写黑板（Blackboard.write 已加锁，线程安全）
+            entry = extract_entry_from_result(
+                agent_key=agent_key,
+                agent_name=agent_name,
+                result=result,
+                tokens_used=result.get("tokens_used", 0),
+            )
+            blackboard.write(entry)
+
+            checker.record_success()
+            tokens = result.get("tokens_used", 0)
+            state.record_phase_tokens(PipelinePhase.EXECUTION.value, tokens)
+
+            # P5: 优先使用 result 内部精确计时（run_specialist 记录），
+            # 避免并行场景下 step_start 在 submit 之后才记录导致 duration 偏小
+            duration_ms = result.get("duration_ms") or int((time.time() - step_start) * 1000)
             try:
-                result = future.result(timeout=300)
-                specialists_result.append(result)
-                all_tool_calls.extend(result.get("tool_calls", []))
-
-                # 写黑板（Blackboard.write 已加锁，线程安全）
-                entry = extract_entry_from_result(
+                create_agent_run(
+                    conversation_id=state.conversation_id,
+                    message_id=state.message_id,
                     agent_key=agent_key,
                     agent_name=agent_name,
-                    result=result,
-                    tokens_used=result.get("tokens_used", 0),
+                    query=step_query,
+                    result=result.get("analysis", "")[:16000],
+                    tool_calls=str(result.get("tool_calls", []))[:2000],
+                    duration_ms=duration_ms,
+                    trace_id=trace_id,
+                    status="success",
                 )
-                blackboard.write(entry)
+            except Exception as log_err:
+                logger.warning(f"[pipeline-parallel] agent_runs 写入失败 ({agent_key}): {log_err}")
 
-                checker.record_success()
-                tokens = result.get("tokens_used", 0)
-                state.record_phase_tokens(PipelinePhase.EXECUTION.value, tokens)
-
-                # P5: 优先使用 result 内部精确计时（run_specialist 记录），
-                # 避免并行场景下 step_start 在 submit 之后才记录导致 duration 偏小
-                duration_ms = result.get("duration_ms") or int((time.time() - step_start) * 1000)
-                try:
-                    create_agent_run(
-                        conversation_id=state.conversation_id,
-                        message_id=state.message_id,
-                        agent_key=agent_key,
-                        agent_name=agent_name,
-                        query=step_query,
-                        result=result.get("analysis", "")[:16000],
-                        tool_calls=str(result.get("tool_calls", []))[:2000],
-                        duration_ms=duration_ms,
-                        trace_id=trace_id,
-                        status="success",
-                    )
-                except Exception as log_err:
-                    logger.warning(f"[pipeline-parallel] agent_runs 写入失败 ({agent_key}): {log_err}")
-
-                yield {
-                    "type": EVENT_SPECIALIST_DONE,
-                    "agent_key": agent_key,
-                    "agent": agent_name,
-                    "icon": agent_icon,
-                    "analysis": result.get("analysis", ""),
-                    "status": result.get("status", "success"),
-                    "error": result.get("status") == "failed",
-                    "duration_ms": duration_ms,
-                }
-            except Exception as e:
-                logger.error(f"[pipeline-parallel] 专家 {agent_name} 执行失败: {e}")
-                checker.record_failure(str(e))
-                duration_ms = int((time.time() - step_start) * 1000)
-                try:
-                    create_agent_run(
-                        conversation_id=state.conversation_id,
-                        message_id=state.message_id,
-                        agent_key=agent_key,
-                        agent_name=agent_name,
-                        query=step_query,
-                        result=f"（并行执行失败：{e}）",
-                        duration_ms=duration_ms,
-                        trace_id=trace_id,
-                        status="error",
-                    )
-                except Exception as log_err:
-                    logger.warning(f"[pipeline-parallel] agent_runs 写入失败 ({agent_key}): {log_err}")
-                yield {
-                    "type": EVENT_SPECIALIST_DONE,
-                    "agent_key": agent_key,
-                    "agent": agent_name,
-                    "icon": agent_icon,
-                    "analysis": f"（执行失败：{e}）",
-                    "status": "failed",
-                    "error": True,
-                    "duration_ms": duration_ms,
-                }
+            yield {
+                "type": EVENT_SPECIALIST_DONE,
+                "agent_key": agent_key,
+                "agent": agent_name,
+                "icon": agent_icon,
+                "analysis": result.get("analysis", ""),
+                "status": result.get("status", "success"),
+                "error": result.get("status") == "failed",
+                "duration_ms": duration_ms,
+            }
+        except (ExecutionCancelled, _PipelineCancelled, TimeoutError):
+            raise
+        except Exception as e:
+            logger.error(f"[pipeline-parallel] 专家 {agent_name} 执行失败: {e}")
+            checker.record_failure(str(e))
+            duration_ms = int((time.time() - step_start) * 1000)
+            try:
+                create_agent_run(
+                    conversation_id=state.conversation_id,
+                    message_id=state.message_id,
+                    agent_key=agent_key,
+                    agent_name=agent_name,
+                    query=step_query,
+                    result=f"（并行执行失败：{e}）",
+                    duration_ms=duration_ms,
+                    trace_id=trace_id,
+                    status="error",
+                )
+            except Exception as log_err:
+                logger.warning(f"[pipeline-parallel] agent_runs 写入失败 ({agent_key}): {log_err}")
+            yield {
+                "type": EVENT_SPECIALIST_DONE,
+                "agent_key": agent_key,
+                "agent": agent_name,
+                "icon": agent_icon,
+                "analysis": f"（执行失败：{e}）",
+                "status": "failed",
+                "error": True,
+                "duration_ms": duration_ms,
+            }
 
     return {
         "specialists": specialists_result,
@@ -1759,7 +1865,7 @@ def _fallback_execution(
 
         step_start = time.time()
         try:
-            result = run_specialist(
+            result = _run_pipeline_specialist(run_specialist, cancel_event,
                 agent_key=agent_key, query=query,
                 prebuilt_context=ctx, trace_id=trace_id,
                 from_pipeline=True,
@@ -1807,6 +1913,8 @@ def _fallback_execution(
                 "error": result.get("status") == "failed",
                 "duration_ms": duration_ms,
             }
+        except (ExecutionCancelled, _PipelineCancelled, TimeoutError):
+            raise
         except Exception as e:
             logger.error(f"[pipeline] 降级执行 {agent_name} 失败: {e}")
             duration_ms_for_log = int((time.time() - step_start) * 1000)
@@ -2067,6 +2175,7 @@ def _maybe_rerun_specialist(
     reflection_result: dict,
     blackboard: Blackboard,
     trace_id: str,
+    cancel_event=None,
 ) -> Optional[dict]:
     """Reflection 自纠错：低置信度时重跑质量最差的专家。
 
@@ -2153,7 +2262,7 @@ def _maybe_rerun_specialist(
         enhanced_query = f"{query}{feedback}"
 
         _rerun_model = _get_model_for_agent(agent_key) if _is_cost_routing_enabled() else _ORCH_MODEL
-        result = run_specialist(
+        result = _run_pipeline_specialist(run_specialist, cancel_event,
             agent_key=agent_key,
             query=enhanced_query,
             trace_id=f"{trace_id}#rerun",
@@ -2172,6 +2281,8 @@ def _maybe_rerun_specialist(
                     logger.warning(f"[pipeline:{trace_id}] 重跑结果写黑板失败: {e}")
             logger.info(f"[pipeline:{trace_id}] 自纠错重跑完成: {agent_name}")
             return result
+    except (ExecutionCancelled, _PipelineCancelled, TimeoutError):
+        raise
     except Exception as e:
         logger.warning(f"[pipeline:{trace_id}] 自纠错重跑失败: {e}")
 
@@ -2665,6 +2776,8 @@ def _phase_debate(
             data = _json.loads(json_match.group(0))
             bull_arg = data.get("bull_argument", "")
             bear_arg = data.get("bear_argument", "")
+    except (ExecutionCancelled, _PipelineCancelled, TimeoutError):
+        raise
     except Exception as e:
         logger.warning(f"[pipeline] 辩论论证失败: {e}")
         bull_arg = "（看多方论证生成失败）"
@@ -2721,6 +2834,8 @@ def _phase_debate(
         json_match = _re.search(r'\{.*\}', content, _re.DOTALL)
         if json_match:
             arbitration = _json.loads(json_match.group(0))
+    except (ExecutionCancelled, _PipelineCancelled, TimeoutError):
+        raise
     except Exception as e:
         logger.warning(f"[pipeline] 辩论仲裁失败: {e}")
         arbitration = {

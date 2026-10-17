@@ -388,6 +388,8 @@ def refresh_fund_nav_history(fund_code: str) -> list[dict] | None:
         return None
 
     _save_nav_history(records)
+    # 供应商可能只返回最近一段；刷新后仍以数据库完整历史作为缓存快照。
+    records = get_fund_nav_history_from_cache(fund_code)
     _mc_set(f"nav:{fund_code}", records)
     logger.info(f"已缓存 {fund_code} 净值历史 {len(records)} 条，来源 {source}")
     return records
@@ -442,7 +444,8 @@ def get_or_refresh_fund_nav_history(
     if cached is not None:
         records = cached
     else:
-        records = get_fund_nav_history_from_cache(fund_code, start_date, end_date)
+        # 基金代码缓存始终保存完整序列，不能被某次历史窗口查询截断。
+        records = get_fund_nav_history_from_cache(fund_code)
 
     need_refresh = False
     if not records:
@@ -462,11 +465,15 @@ def get_or_refresh_fund_nav_history(
     if need_refresh:
         fresh = refresh_fund_nav_history(fund_code)
         if fresh:
-            records = get_fund_nav_history_from_cache(fund_code, start_date, end_date, days)
+            records = get_fund_nav_history_from_cache(fund_code)
         elif not records:
             return []
 
     _mc_set(cache_key, records)
+    if start_date:
+        records = [r for r in records if r['nav_date'] >= start_date]
+    if end_date:
+        records = [r for r in records if r['nav_date'] <= end_date]
     if days and len(records) > days:
         records = records[-days:]
     return records

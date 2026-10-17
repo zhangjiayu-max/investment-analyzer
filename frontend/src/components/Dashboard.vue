@@ -5,6 +5,7 @@ import GaugeChart from './charts/GaugeChart.vue'
 import ConfirmDialog from './layout/ConfirmDialog.vue'
 import AppToast from './layout/AppToast.vue'
 import Skeleton from './ui/Skeleton.vue'
+import { usePageRefresh } from '../composables/usePageRefresh'
 import { useToast } from '../composables/useToast'
 import { renderMarkdown } from '../composables/useMarkdown'
 import { getBondTempLabel } from '../composables/useDashboardHelpers'
@@ -193,6 +194,7 @@ function _clearAllTimers() {
 
 // restoreFromServer 回调（与 start 调用的回调一致，供 onMounted/onActivated 复用）
 const hotspotsTaskCallbacks = {
+  onRestore: (result) => { hotspotsAnalysis.value = result },
   onComplete: async (result) => {
     hotspotsAnalysis.value = result
     hotTopicsAnalyzedAt.value = new Date().toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
@@ -229,6 +231,7 @@ const reportTaskCallbacks = {
   }
 }
 const bondTaskCallbacks = {
+  onRestore: (result) => { bondResult.value = result?.result || result; bondLoading.value = false },
   onComplete: (result) => {
     bondResult.value = result?.result || result
     bondLoading.value = false
@@ -250,85 +253,29 @@ const rebalanceTaskCallbacks = {
   }
 }
 
-onMounted(async () => {
-  // 先恢复异步任务状态（切页从内存恢复 / 刷新从后端恢复）
-  const hotspotsRestored = await restoreHotspotsTaskFromServer(hotspotsTaskCallbacks)
-  const reportRestored = await restoreReportTaskFromServer(reportTaskCallbacks)
-  await restoreBondTaskFromServer(bondTaskCallbacks)
-  await restoreRebalanceTaskFromServer(rebalanceTaskCallbacks)
-  if (hotspotsRestored && hotspotsTaskState.value === 'running') hotspotsAnalysis.value = null
-  if (bondTaskState.value === 'running') bondLoading.value = true
-  if (rebalanceTaskState.value === 'running') rebalanceLoading.value = true
-
-  if (!hotspotsRestored) {
-    // 没有运行中的任务，尝试加载已有缓存
-    try {
-      const { data: latest } = await getLatestHotspotsAnalysis()
-      if (!latest?.stale && latest?.recommendations?.length) {
-        hotspotsAnalysis.value = latest
-      }
-    } catch (_) {}
-  }
-
-  try { await autoVerifyRecommendations() } catch (_) {}
-
-  await Promise.all([
-    loadDashboard(),
-    loadTodayDecisions(),
-    loadDailyAdvice(),
-  ])
-
-  // 第二批：延迟 500ms 发送，避免 SQLite 单写锁竞争
-  _safeTimeout(() => {
-    Promise.all([
-      loadDecisionReviews(),
-      loadHotTopics(),
-      loadOpportunities(),
-    ]).catch(() => {})
-  }, 500)
-
-  // 第三批：延迟 1000ms 发送
-  _safeTimeout(() => {
-    Promise.all([
-      loadDailyReport(),
-      loadRecHistory(),
-      loadBondTemperature(),
-    ]).catch(() => {})
-  }, 1000)
-
-  try {
-    const { data: recs } = await listPanoramaRecords(1)
-    if (recs?.records?.length) {
-      panoramaResult.value = recs.records[0]
-    }
-  } catch (e) {
-    console.error('load panorama failed:', e)
-  }
-
-  try {
-    const { data: res } = await getRebalancingSuggestion()
-    if (res && !res.error) {
-      rebalanceResult.value = res
-      showRebalance.value = true
-    }
-  } catch (_) {}
-
-  try {
-    const { data: bondRecs } = await listBondRecommendRecords(1)
-    if (bondRecs?.records?.length) {
-      const rec = bondRecs.records[0]
-      bondResult.value = typeof rec.result_data === 'string' ? JSON.parse(rec.result_data) : rec.result_data
-    }
-  } catch (e) {
-    console.error('load bond recommend failed:', e)
-  }
-})
-
-onActivated(async () => {
-  await restoreReportTaskFromServer(reportTaskCallbacks)
-  await restoreHotspotsTaskFromServer(hotspotsTaskCallbacks)
-  await restoreBondTaskFromServer(bondTaskCallbacks)
-  await restoreRebalanceTaskFromServer(rebalanceTaskCallbacks)
+usePageRefresh(async () => {
+  const core = Promise.all([loadDashboard(), loadTodayDecisions(), loadDailyAdvice()])
+  Promise.allSettled([
+    restoreReportTaskFromServer(reportTaskCallbacks),
+    restoreHotspotsTaskFromServer(hotspotsTaskCallbacks),
+    restoreBondTaskFromServer(bondTaskCallbacks),
+    restoreRebalanceTaskFromServer(rebalanceTaskCallbacks),
+  ]).then(() => {
+    if (hotspotsTaskState.value === 'running') hotspotsAnalysis.value = null
+    if (bondTaskState.value === 'running') bondLoading.value = true
+    if (rebalanceTaskState.value === 'running') rebalanceLoading.value = true
+  })
+  autoVerifyRecommendations().catch(() => {})
+  getLatestHotspotsAnalysis().then(({ data: latest }) => {
+    if (!hotspotsAnalysis.value && hotspotsTaskState.value !== 'running' && !latest?.stale) hotspotsAnalysis.value = latest
+  }).catch(() => {})
+  getRebalancingSuggestion().then(({ data: result }) => {
+    if (result && !result.error && rebalanceTaskState.value !== 'running') { rebalanceResult.value = result; showRebalance.value = true }
+  }).catch(() => {})
+  listBondRecommendRecords(1).then(({ data: records }) => {
+    const record = records?.records?.[0]
+    if (record && bondTaskState.value !== 'running') bondResult.value = typeof record.result_data === 'string' ? JSON.parse(record.result_data) : record.result_data
+  }).catch(() => {})
   if (hotspotsTaskState.value === 'running') hotspotsAnalysis.value = null
   if (bondTaskState.value === 'running') bondLoading.value = true
   if (rebalanceTaskState.value === 'running') rebalanceLoading.value = true
@@ -336,25 +283,20 @@ onActivated(async () => {
   if (!dailyReportLoading.value) {
     await checkDailyReportTask()
   }
-  await Promise.all([
-    loadDashboard(),
-    loadTodayDecisions(),
-    loadDailyAdvice(),
+  Promise.allSettled([
+    loadDecisionReviews(), loadHotTopics(), loadOpportunities(),
+    loadDailyReport(), loadRecHistory(), loadBondTemperature(),
   ])
-  _safeTimeout(() => {
-    Promise.all([
-      loadDecisionReviews(),
-      loadHotTopics(),
-      loadOpportunities(),
-    ]).catch(() => {})
-  }, 500)
-  _safeTimeout(() => {
-    Promise.all([
-      loadDailyReport(),
-      loadRecHistory(),
-      loadBondTemperature(),
-    ]).catch(() => {})
-  }, 1000)
+  restorePanorama()
+  await core
+})
+
+let panoramaRestorePromise = null
+function restorePanorama() {
+  if (!panoramaRestorePromise) panoramaRestorePromise = loadPanoramaRecord().finally(() => { panoramaRestorePromise = null })
+  return panoramaRestorePromise
+}
+async function loadPanoramaRecord() {
   // 恢复全景诊断最近一条结果
   try {
     const { data: recs } = await listPanoramaRecords(1)
@@ -386,8 +328,14 @@ onActivated(async () => {
       }
     }
   } catch (_) {}
-})
+}
 
+let dashboardActivated = false
+onActivated(() => {
+  if (!dashboardActivated) { dashboardActivated = true; return }
+  if (panoramaLoading.value && !_panoramaCancelPoll) restorePanorama()
+  if (dailyReportLoading.value && !_dailyReportPollTimer) checkDailyReportTask()
+})
 onDeactivated(() => {
   _clearAllTimers()
 })

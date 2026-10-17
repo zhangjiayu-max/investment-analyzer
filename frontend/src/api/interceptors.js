@@ -24,7 +24,7 @@ api.interceptors.response.use(
         // 业务失败（HTTP 200 但 code != 0）
         const msg = body.message || '操作失败'
         console.error('[API] Business error:', body.code, msg)
-        return Promise.reject(new Error(msg))
+        return Promise.reject(Object.assign(new Error(msg), { response, status: response.status, code: body.code }))
       }
     }
     return response
@@ -50,12 +50,17 @@ api.interceptors.response.use(
     }
 
     const { status, data } = error.response
+    // 保留 Axios 的 status/response，恢复逻辑需要区分短断与权威 404/410。
+    const rejectWithMessage = (message) => {
+      error.message = message
+      return Promise.reject(error)
+    }
 
     // 标准协议错误：{code, message, data}
     if (data && typeof data === 'object' && 'code' in data) {
       const msg = data.message || `请求失败 (${status})`
       console.error(`[API] ${status} Error:`, msg)
-      return Promise.reject(new Error(msg))
+      return rejectWithMessage(msg)
     }
 
     // 兼容旧格式（过渡期）
@@ -64,29 +69,29 @@ api.interceptors.response.use(
     // 401 未认证
     if (status === 401) {
       console.error('[API] 401 Unauthorized')
-      return Promise.reject(new Error('登录已过期，请重新登录'))
+      return rejectWithMessage('登录已过期，请重新登录')
     }
 
     // 403 无权限
     if (status === 403) {
       console.error('[API] 403 Forbidden:', msg)
-      return Promise.reject(new Error(msg || '没有操作权限'))
+      return rejectWithMessage(msg || '没有操作权限')
     }
 
     // 404
     if (status === 404) {
       console.error('[API] 404 Not Found')
-      return Promise.reject(new Error('请求的资源不存在'))
+      return rejectWithMessage('请求的资源不存在')
     }
 
     // 5xx 服务端错误
     if (status >= 500) {
       console.error(`[API] ${status} Server Error:`, msg)
-      return Promise.reject(new Error(msg))
+      return rejectWithMessage(msg)
     }
 
     // 其他 4xx 错误
-    return Promise.reject(new Error(msg))
+    return rejectWithMessage(msg)
   }
 )
 

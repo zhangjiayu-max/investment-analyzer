@@ -42,9 +42,10 @@ async def get_finance_dashboard(user_id: str = "default"):
     cash_balance = cash.get("balance", 0) if cash else 0
     total_assets = summary.get("total_assets", 0)
     total_cost = summary.get("total_cost", 0)
-    holding_value = summary.get("total_market_value", 0)
-    float_pnl = summary.get("total_float_pnl", 0)
-    total_return = summary.get("total_return_pct", 0)
+    holding_value = summary["total_value"]
+    float_pnl = summary["total_profit"]
+    # 保持持仓汇总的比率单位；前端乘100展示百分比。
+    total_return = summary["profit_rate"]
 
     net_worth = {
         "total_assets": round(total_assets, 2),
@@ -197,6 +198,7 @@ async def get_finance_trend(user_id: str = "default", months: int = 12):
         GROUP BY month, transaction_type
         ORDER BY month
     """, (user_id, f'-{months} months')).fetchall()
+    conn.close()
 
     month_map = {}
     for r in rows:
@@ -220,12 +222,12 @@ async def get_finance_trend(user_id: str = "default", months: int = 12):
 
     # 获取当前净值用于对比
     summary = get_portfolio_summary(user_id=user_id)
-    current_value = summary.get("total_assets", 0)
+    current_value = summary["total_value"]
     total_cost = summary.get("total_cost", 0)
 
     return {
         "trend": trend,
         "current_value": round(current_value, 2),
         "total_cost": round(total_cost, 2),
-        "total_return": round((current_value - total_cost) / total_cost, 4) if total_cost > 0 else 0,
+        "total_return": summary["profit_rate"],
     }

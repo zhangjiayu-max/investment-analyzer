@@ -7,7 +7,7 @@ router = APIRouter()
 
 
 @router.get("/api/data-health")
-async def get_data_health():
+def get_data_health():
     """返回各数据源的健康状态（最后更新时间、记录数、距今天数）"""
     conn = _get_conn()
     health = {}
@@ -127,6 +127,10 @@ async def get_data_health():
     finally:
         conn.close()
 
+    from db.valuations import list_index_freshness
+    health['valuations']['coverage'] = list_index_freshness()
+    health['knowledge']['freshness_kind'] = 'reference_content'
+    health['bond_market']['scope'] = 'local_cache_only'
     return {"health": health}
 
 

@@ -40,10 +40,11 @@ def call_akshare_with_timeout(fn, *args, timeout: int = _AKSHARE_TIMEOUT, **kwar
         fn 的返回值，超时或异常返回 None
     """
     fn_name = getattr(fn, "__name__", str(fn))
-    executor = ThreadPoolExecutor(max_workers=1)
-    future = executor.submit(fn, *args, **kwargs)
+    from infra.execution_budget import DATA_EXECUTOR, execution_budget, wait_result
     try:
-        result = future.result(timeout=timeout)
+        with execution_budget(timeout):
+            future = DATA_EXECUTOR.submit(fn,*args,**kwargs)
+            result = wait_result(future,timeout)
         record_call(fn_name, "success")
         return result
     except FuturesTimeoutError:
@@ -56,6 +57,3 @@ def call_akshare_with_timeout(fn, *args, timeout: int = _AKSHARE_TIMEOUT, **kwar
         logger.warning(f"[akshare] 调用失败 {fn_name}: {e}")
         record_call(fn_name, "failure", err_msg)
         return None
-    finally:
-        # 关键修复：wait=False 不等待 zombie 线程，cancel_futures=True 取消未开始的 future
-        executor.shutdown(wait=False, cancel_futures=True)

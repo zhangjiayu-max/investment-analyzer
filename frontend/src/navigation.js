@@ -48,15 +48,15 @@ export const navItems = [
         desc: '投资决策记录、执行追踪、复盘评分' },
       { key: 'decision-center', label: '决策中心', icon: 'target', hot: true,
         desc: '三模块联动决策流水线：机会雷达→补仓sizing→组合风控→账本回测反哺' },
-      { key: 'attribution', label: '收益归因', icon: 'chart',
+      { key: 'attribution', label: '收益归因', icon: 'chart', hidden: true,
         desc: 'Brinson收益归因：选股效应 vs 择时效应' },
-      { key: 'behavior', label: '行为诊断', icon: 'brain',
+      { key: 'behavior', label: '行为诊断', icon: 'brain', hidden: true,
         desc: '处置效应、锚定效应、羊群效应、过度交易诊断' },
-      { key: 'accuracy', label: '决策准确率', icon: 'target',
+      { key: 'accuracy', label: '决策准确率', icon: 'target', hidden: true,
         desc: '决策方向验证、准确率统计、趋势分析' },
-      { key: 'allocation-dashboard', label: '配置偏离', icon: 'pie-chart',
+      { key: 'allocation-dashboard', label: '配置偏离', icon: 'pie-chart', hidden: true,
         desc: '资产配置偏离度、再平衡建议' },
-      { key: 'strategy-sandbox', label: '策略沙盒', icon: 'bar-chart',
+      { key: 'strategy-sandbox', label: '策略沙盒', icon: 'bar-chart', hidden: true,
         desc: '策略回测验证、参数调优、对比分析' },
     ],
   },
@@ -66,12 +66,14 @@ export const navItems = [
     key: 'group-finance',
     label: '家庭财务',
     icon: 'wallet',
-    desc: '家庭财务总览、资金桶管理',
+    desc: '家庭财务总览、资金桶管理、全账户诊断',
     children: [
       { key: 'family-finance', label: '财务总览', icon: 'wallet',
         desc: '家庭资产负债、月度支出、现金流与财务健康度' },
       { key: 'goal-buckets', label: '资金桶', icon: 'wallet',
         desc: '按目标分桶管理资金：备用金、定投、增值' },
+      { key: 'health-v2', label: '全账户诊断', icon: 'heart-pulse', hot: true,
+        desc: '资产全景、健康分2.0、四笔钱偏离、今日行动清单' },
     ],
   },
 
@@ -86,24 +88,25 @@ export const navItems = [
         desc: '公众号文章采集、图片解析、估值提取' },
       { key: 'valuation', label: '估值数据', icon: 'valuation', hot: true,
         desc: '指数PE/PB估值历史、百分位、AI市场分析' },
-      { key: 'gallery', label: '估值图片', icon: 'gallery',
+      { key: 'gallery', label: '估值图片', icon: 'gallery', hidden: true,
         desc: '估值图片归档、批量识别、日期检索' },
-      { key: 'knowledge', label: '蒸馏知识', icon: 'book',
+      { key: 'knowledge', label: '蒸馏知识', icon: 'book', hidden: true,
         desc: '书籍/文章蒸馏的知识卡片、分类检索' },
-      { key: 'author', label: '作者文章', icon: 'author',
+      { key: 'author', label: '作者文章', icon: 'author', hidden: true,
         desc: '公众号作者文章采集、管理、蒸馏' },
-      { key: 'linked', label: '个人文档', icon: 'link',
+      { key: 'linked', label: '个人文档', icon: 'link', hidden: true,
         desc: '个人PDF/Markdown文档上传、向量化、检索' },
     ],
   },
 
-  // ── 系统与进化 ──
+  // ── 系统与进化（仅开发者模式可见）──
   {
     key: 'group-system',
     label: '系统治理',
     icon: 'config',
     desc: '系统管理、质量评估、进化闭环、实验功能',
     collapsed: true,
+    devOnly: true,
     children: [
       { key: 'admin-agents', label: 'Agent 管理', icon: 'admin',
         desc: '专家Agent配置、Prompt版本管理、工具注册' },
@@ -125,8 +128,6 @@ export const navItems = [
         desc: '评测用例管理、批量回归、Shadow对比' },
       { key: 'health', label: '健康分', icon: 'health',
         desc: '综合理财健康分、股债比例、恐贪指数' },
-      { key: 'health-v2', label: '全账户诊断', icon: 'heart-pulse', hot: true,
-        desc: '资产全景、健康分2.0、四笔钱偏离、今日行动清单' },
       { key: 'shadow', label: 'Shadow Mode', icon: 'shadow',
         desc: 'Prompt变更对比验证、AB测试' },
       { key: 'strategy-backtest', label: '策略回测', icon: 'line-chart',
@@ -138,3 +139,43 @@ export const navItems = [
 ]
 
 export const flatNavItems = navItems.flatMap(item => item.children || item)
+
+// ── 功能精简：开发者模式可见性控制 ──
+// hidden / devOnly 标记的页面默认对普通用户隐藏，仅在「开发者模式」下显示。
+// 开关持久化在 localStorage，完全可逆（删掉开关即恢复默认精简视图）。
+
+const DEV_MODE_STORAGE_KEY = 'investment_dev_mode'
+
+export function isDevMode() {
+  try { return localStorage.getItem(DEV_MODE_STORAGE_KEY) === '1' } catch { return false }
+}
+
+export function setDevMode(enabled) {
+  try {
+    if (enabled) localStorage.setItem(DEV_MODE_STORAGE_KEY, '1')
+    else localStorage.removeItem(DEV_MODE_STORAGE_KEY)
+  } catch { /* localStorage 不可用时忽略 */ }
+}
+
+function isItemVisible(item, devMode) {
+  if (item.devOnly && !devMode) return false
+  if (item.hidden && !devMode) return false
+  return true
+}
+
+/**
+ * 返回过滤后的可见导航项。
+ * 非 devMode 时隐藏 devOnly 分组与 hidden 叶子项；devMode 时全部可见。
+ */
+export function getVisibleNavItems(devMode = isDevMode()) {
+  return navItems
+    .map(group => {
+      // 分组自身的 hidden/devOnly 标记同样生效（如 group-system 标 devOnly）
+      if (!isItemVisible(group, devMode)) return null
+      if (!group.children) return group
+      const children = group.children.filter(c => isItemVisible(c, devMode))
+      if (!children.length) return null
+      return { ...group, children }
+    })
+    .filter(Boolean)
+}

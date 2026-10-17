@@ -87,9 +87,7 @@ def _calc_review_date(signal_date_str: str, trade_days: int = DEFAULT_REVIEW_TRA
 def _get_fund_nav_at_or_before(fund_code: str, target_date: str) -> float | None:
     """获取基金在指定日期（或之前最近一日）的净值。
 
-    优先级：
-    1. 本地 fund_nav_history 表
-    2. fetch_fund_nav 实时拉取（仅当 target_date 是今日或昨日时）
+    仅使用日期不晚于 target_date 的历史净值；缺少历史记录时保持待复盘。
     """
     # 1. 本地 fund_nav_history
     try:
@@ -98,8 +96,8 @@ def _get_fund_nav_at_or_before(fund_code: str, target_date: str) -> float | None
         try:
             row = conn.execute(
                 """SELECT nav FROM fund_nav_history
-                   WHERE fund_code = ? AND trade_date <= ?
-                   ORDER BY trade_date DESC LIMIT 1""",
+                   WHERE fund_code = ? AND nav_date <= ? AND nav > 0
+                   ORDER BY nav_date DESC LIMIT 1""",
                 (fund_code, target_date),
             ).fetchone()
             if row and row["nav"]:
@@ -108,15 +106,6 @@ def _get_fund_nav_at_or_before(fund_code: str, target_date: str) -> float | None
             conn.close()
     except Exception as e:
         logger.debug(f"[wl_backtest] 本地净值查询失败 {fund_code} @ {target_date}: {e}")
-
-    # 2. 实时拉取（仅当 target_date 接近今日时有效）
-    try:
-        from db.portfolio import fetch_fund_nav
-        nav_data = fetch_fund_nav(fund_code)
-        if nav_data and nav_data.get("nav"):
-            return float(nav_data["nav"])
-    except Exception as e:
-        logger.debug(f"[wl_backtest] 实时净值拉取失败 {fund_code}: {e}")
 
     return None
 
@@ -156,7 +145,7 @@ def review_watchlist_signal_backtests() -> dict:
                 change_pct = (review_nav - entry_nav) / entry_nav * 100
                 hit = 1 if change_pct >= HIT_THRESHOLD_PCT else 0
 
-                update_signal_backtest(bt["id"], {
+                update_signal_backtest(bt["id"], **{
                     "review_nav": review_nav,
                     "change_pct": round(change_pct, 2),
                     "hit": hit,

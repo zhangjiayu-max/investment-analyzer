@@ -22,6 +22,23 @@ import {
 import Icon from '../ui/Icon.vue'
 import { useToast } from '../../composables/useToast'
 import { renderMarkdown } from '../../composables/useMarkdown'
+import {
+  FILTERS, STATUS_TABS,
+  BUY_DIMENSION_LABELS, DIMENSION_LABELS, HOLDING_ACTION_LABELS, ACTION_LABELS,
+  SUBDIM_LABELS, STOCK_DIM_LABELS, MASTER_METRIC_LABELS, MASTER_ACCENT_COLORS,
+  MASTER_ICONS, SIGNAL_STATUS_META, TIER_META, VALUATION_META,
+  LEADING_TYPE_LABELS, LEADING_LEVEL_LABELS, LEADING_LEVEL_COLORS,
+  sectorAccuracyColor, scoreColorClass, scoreRatingLabel, ratingColorClass, ratingLabel,
+  masterActionColor, masterActionLabel, masterRatingColor, masterAccentColor, masterIcon,
+  formatMetricValue, formatMetrics, consensusClass, sharpeColorClass, volatilityColorClass,
+  winRateColor, verifyResultMeta,
+  effectiveSignal, signalMeta, confidenceClass, hasMultidimSignal, multidimBadgeClass, multidimLabel,
+  opportunityLabel, opportunityValue, opportunityIsLow, analysisMethodLabel,
+  isTrendEvent, timeFrameLabel, impactDirectionLabel, impactDurationLabel, impactPctText,
+  hasCachedImpactAnalysis, formatAmount, groupBeneficiariesByTier,
+  isAutoSynced, parseVerification, verificationLabel, verificationIcon, relevanceLabel,
+  statusLabel, parseJsonArray, formatDate, directionLabel, formatShortDate, renderNotes,
+} from './eventRadar/helpers.js'
 
 const emit = defineEmits(['navigate'])
 
@@ -71,20 +88,7 @@ const portfolioData = ref(null)
 const portfolioRisk = ref(null)
 const loadingPortfolio = ref(false)
 
-const FILTERS = [
-  { key: 'all', label: '全部', icon: 'satellite' },
-  { key: 'holding_impact', label: '持仓影响', icon: 'alert-triangle' },
-  { key: 'watchlist_impact', label: '关注机会', icon: 'bookmark' },
-  { key: 'opportunity', label: '建仓机会', icon: 'trending-up' },
-  { key: 'market_watch', label: '市场关注', icon: 'info' },
-]
 
-const STATUS_TABS = [
-  { key: 'active', label: '进行中' },
-  { key: 'materialized', label: '已落地' },
-  { key: 'expired', label: '已过期' },
-  { key: 'all', label: '全部' },
-]
 
 const filteredEvents = computed(() => {
   let list = events.value
@@ -124,12 +128,6 @@ const calibratedEvents = computed(() => {
 })
 
 /** 板块准确率颜色（绿→红渐变） */
-function sectorAccuracyColor(acc) {
-  if (acc >= 0.8) return 'rgba(22, 163, 74, 0.18)'
-  if (acc >= 0.6) return 'rgba(34, 197, 94, 0.12)'
-  if (acc >= 0.4) return 'rgba(245, 158, 11, 0.15)'
-  return 'rgba(220, 38, 38, 0.12)'
-}
 
 /** 板块准确率按样本个数降序排序（样本多的板块优先展示，更有统计意义） */
 const sortedSectorAccuracy = computed(() => {
@@ -262,22 +260,6 @@ function toggleWatchlistFilter(key) {
  * 点击切换到事件雷达 Tab。
  * 用 v-html 注入，需先转义其它字符防止 XSS。
  */
-function renderNotes(notes) {
-  if (!notes) return ''
-  // 转义 HTML 特殊字符
-  const escaped = notes
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;')
-  // 将「来自事件「xxx」」中的 xxx 转为链接
-  return escaped.replace(
-    /来自事件「([^」]+)」/g,
-    (match, title) =>
-      `来自事件「<a class="wl-note-event-link" data-event-title="${title}" href="javascript:void(0)">${title}</a>」`
-  )
-}
 
 /** 处理 notes 中事件链接点击：切换到事件雷达 Tab */
 function handleNotesClick(e) {
@@ -287,18 +269,6 @@ function handleNotesClick(e) {
 }
 
 /** 格式化短日期：MM-DD（超过1年显示 MM-DD-YY） */
-function formatShortDate(dateStr) {
-  if (!dateStr) return ''
-  const d = new Date(dateStr)
-  if (isNaN(d.getTime())) return ''
-  const mm = String(d.getMonth() + 1).padStart(2, '0')
-  const dd = String(d.getDate()).padStart(2, '0')
-  const now = new Date()
-  if (d.getFullYear() !== now.getFullYear()) {
-    return `${mm}-${dd}-${String(d.getFullYear()).slice(-2)}`
-  }
-  return `${mm}-${dd}`
-}
 
 async function loadEvents() {
   loading.value = true
@@ -425,216 +395,44 @@ function closeReportDetail() {
 }
 
 /** 买入评分颜色类：>=80绿 / >=60蓝 / >=40橙 / <40红 */
-function scoreColorClass(score) {
-  if (score == null) return ''
-  if (score >= 80) return 'score-excellent'
-  if (score >= 60) return 'score-good'
-  if (score >= 40) return 'score-normal'
-  return 'score-cautious'
-}
 
 /** 买入评级文案 */
-function scoreRatingLabel(score) {
-  if (score == null) return '—'
-  if (score >= 80) return '优秀'
-  if (score >= 60) return '良好'
-  if (score >= 40) return '一般'
-  return '谨慎'
-}
 
 /** 买入评分维度中文名 */
-const BUY_DIMENSION_LABELS = {
-  valuation: '估值维度',
-  price: '净值距目标',
-  correlation: '相关性',
-  concentration: '集中度',
-}
 
 /** 七维体检报告维度中文名 */
-const DIMENSION_LABELS = {
-  quality: '基金质量',
-  drawdown: '回撤恢复',
-  trend: '趋势均线',
-  capital: '资金流向',
-  sentiment: '情绪温度',
-  valuation: '估值水位',
-  fundamental: '基本面',
-}
 
 /** 季度调仓动作标签映射 */
-const HOLDING_ACTION_LABELS = {
-  new: { label: '新进', class: 'hc-action-new' },
-  increase: { label: '增持', class: 'hc-action-increase' },
-  decrease: { label: '减持', class: 'hc-action-decrease' },
-  exit: { label: '退出', class: 'hc-action-exit' },
-}
 
 /** 评级 → CSS 类映射（excellent绿 / good蓝 / fair黄 / poor红） */
-function ratingColorClass(rating) {
-  return {
-    excellent: 'rating-excellent',
-    good: 'rating-good',
-    fair: 'rating-fair',
-    poor: 'rating-poor',
-  }[rating] || ''
-}
 
 /** 评级中文文案 */
-function ratingLabel(rating) {
-  return { excellent: '优秀', good: '良好', fair: '一般', poor: '较差' }[rating] || rating || '—'
-}
 
 /** 操作建议映射 */
-const ACTION_LABELS = {
-  strong_buy: { label: '强烈加仓', class: 'action-strong-buy' },
-  dca: { label: '定投加仓', class: 'action-dca' },
-  hold: { label: '持有', class: 'action-hold' },
-  reduce: { label: '减仓', class: 'action-reduce' },
-  wait: { label: '等待', class: 'action-wait' },
-}
 
 /** 体检报告子项中文名（用于详情弹窗展示各维度细分指标） */
-const SUBDIM_LABELS = {
-  // 基金质量
-  manager_stability: '经理稳定性',
-  tracking_error: '跟踪误差',
-  scale_trend: '规模趋势',
-  fee_competitiveness: '费率竞争',
-  peer_ranking: '同类排名',
-  // 回撤恢复
-  current_drawdown: '当前回撤',
-  drawdown_percentile: '回撤分位',
-  recovery_ability: '恢复能力',
-  drawdown_speed: '回撤速度',
-  bottoming_signal: '底部信号',
-  // 趋势均线
-  ma_arrangement: '均线排列',
-  trend_strength: '趋势强度',
-  ma_deviation: '均线偏离',
-  turning_signal: '转折信号',
-  relative_strength: '相对强弱',
-  // 资金流向
-  margin_trend: '融资趋势',
-  margin_percentile: '融资分位',
-  etf_share_change: 'ETF份额',
-  institutional_flow: '机构动向',
-  sector_flow: '板块资金',
-  // 情绪温度
-  turnover_percentile: '换手率分位',
-  advance_decline: '涨跌家数',
-  volatility_percentile: '波动率',
-  news_sentiment: '新闻情绪',
-  fear_greed: '恐贪指数',
-}
 
 /** 基本面重仓股5维评分中文名 */
-const STOCK_DIM_LABELS = {
-  profitability: '盈利能力',
-  growth: '成长性',
-  solvency: '偿债能力',
-  stability: '稳定性',
-  valuation: '估值',
-}
 
 /** 大师理念矩阵 — key_metrics 字段中文映射 */
-const MASTER_METRIC_LABELS = {
-  has_moat: '护城河',
-  roe_consistent: 'ROE持续性',
-  margin_of_safety: '安全边际',
-  profitability_avg: '盈利能力',
-  stability_avg: '稳定性',
-  peg_estimate: 'PEG',
-  company_type: '公司类型',
-  is_fast_grower: '快速增长',
-  is_low_cost: '低成本',
-  is_indexed: '指数化',
-  cycle_position: '周期位置',
-  is_fearful: '逆向信号',
-  is_well_diversified: '分散化',
-  top10_coverage: 'Top10集中度',
-  business: '生意属性',
-  company: '公司质地',
-  price: '价格评估',
-}
 
 /** 大师左侧色条颜色（6位大师不同标识色） */
-const MASTER_ACCENT_COLORS = {
-  buffett: '#1565c0',
-  lynch: '#2e7d32',
-  bogle: '#ef6c00',
-  marks: '#6a1b9a',
-  dalio: '#00838f',
-  duanyongping: '#c62828',
-}
 
 /** 大师 icon 映射（回测API不返回master_icon，前端补全） */
-const MASTER_ICONS = {
-  buffett: '🏰',
-  lynch: '📈',
-  bogle: '💰',
-  marks: '🔄',
-  dalio: '⚖️',
-  duanyongping: '🎯',
-}
 
 /** 大师 action → 颜色（strong_buy绿/dca蓝/hold灰/reduce橙/wait红） */
-function masterActionColor(action) {
-  return {
-    strong_buy: '#4caf50',
-    dca: '#2196f3',
-    hold: '#9e9e9e',
-    reduce: '#ff9800',
-    wait: '#f44336',
-  }[action] || '#9e9e9e'
-}
 
 /** 大师 action → 中文文案（分布条 tooltip 用） */
-function masterActionLabel(action) {
-  return ACTION_LABELS[action]?.label || action || '—'
-}
 
 /** 大师 rating → 评分颜色（excellent绿/good蓝/fair黄/poor红/null灰） */
-function masterRatingColor(rating) {
-  return {
-    excellent: '#4caf50',
-    good: '#2196f3',
-    fair: '#ff9800',
-    poor: '#f44336',
-  }[rating] || '#9e9e9e'
-}
 
 /** 大师 key → 左侧色条颜色 */
-function masterAccentColor(masterKey) {
-  return MASTER_ACCENT_COLORS[masterKey] || '#6b7280'
-}
 
 /** 格式化单个指标值：布尔→是/否，数字→去除多余小数位 */
-function formatMetricValue(v) {
-  if (v === true) return '是'
-  if (v === false) return '否'
-  if (typeof v === 'number') {
-    return Number.isInteger(v) ? String(v) : v.toFixed(1).replace(/\.0$/, '')
-  }
-  return String(v)
-}
 
 /** 格式化 key_metrics 为可读键值对数组 */
-function formatMetrics(metrics) {
-  if (!metrics) return []
-  return Object.entries(metrics).map(([k, v]) => ({
-    label: MASTER_METRIC_LABELS[k] || k,
-    value: formatMetricValue(v),
-  }))
-}
 
 /** 共识强度 → CSS 类（高度共识绿/多数共识蓝/温和共识橙/意见分歧红） */
-function consensusClass(consensus) {
-  const label = consensus?.agreement_label || ''
-  if (label.includes('高度')) return 'mm-consensus-high'
-  if (label.includes('多数')) return 'mm-consensus-major'
-  if (label.includes('温和')) return 'mm-consensus-mild'
-  return 'mm-consensus-split'
-}
 
 /** 大师卡片展开状态：{ [`${fundCode}:${masterKey}`]: bool } */
 const expandedMasters = ref({})
@@ -663,20 +461,8 @@ function togglePortfolioMaster(masterKey) {
 }
 
 /** 夏普比率颜色：>1绿 / 0-1蓝 / <0红 */
-function sharpeColorClass(v) {
-  if (v == null) return ''
-  if (v > 1) return 'risk-good'
-  if (v >= 0) return 'risk-normal'
-  return 'risk-bad'
-}
 
 /** 波动率颜色：<15%绿 / 15-25%黄 / >25%红 */
-function volatilityColorClass(v) {
-  if (v == null) return ''
-  if (v < 15) return 'risk-good'
-  if (v <= 25) return 'risk-warn'
-  return 'risk-bad'
-}
 
 /** 静默巡检：刷新估值分位，更新 watchlist 数据 */
 async function autoPatrol() {
@@ -719,172 +505,42 @@ async function autoPatrol() {
  *  - 退出信号：profit_target（止盈，蓝）/ stop_loss（止损，红）（来自后端 exit_signal）
  *  - 退出信号优先级高于估值信号，触发时覆盖估值显示
  */
-const SIGNAL_STATUS_META = {
-  green: { label: '可上车', cls: 'sig-hit' },
-  yellow: { label: '接近上车', cls: 'sig-warn' },
-  red: { label: '等待中', cls: 'sig-bad' },
-  gray: { label: '数据不足', cls: 'sig-neutral' },
-  profit_target: { label: '止盈', cls: 'sig-profit' },
-  stop_loss: { label: '止损', cls: 'sig-stop' },
-}
 
 /** 计算有效信号：退出信号优先于估值信号
  *  - item.exit_signal 为 profit_target / stop_loss 时，覆盖估值信号
  *  - 否则使用 item.signal_status（4 档估值信号）
  */
-function effectiveSignal(item) {
-  const exit = item.exit_signal
-  if (exit === 'profit_target' || exit === 'stop_loss') return exit
-  return item.signal_status || 'gray'
-}
 
 /** 取关注基金信号状态元信息（默认 gray，退出信号优先级高） */
-function signalMeta(item) {
-  return SIGNAL_STATUS_META[effectiveSignal(item)] || SIGNAL_STATUS_META.gray
-}
 
 /** P0-1（2026-07-21）信号置信度颜色分级 */
-function confidenceClass(score) {
-  if (score == null) return ''
-  if (score >= 75) return 'conf-high'
-  if (score >= 50) return 'conf-mid'
-  return 'conf-low'
-}
 
 /** P0-1（2026-07-21）是否有多维信号（至少一个非 neutral） */
-function hasMultidimSignal(item) {
-  return (item.tech_signal && item.tech_signal !== 'neutral')
-      || (item.capital_signal && item.capital_signal !== 'neutral')
-      || (item.sentiment_signal && item.sentiment_signal !== 'neutral')
-}
 
 /** P0-1（2026-07-21）多维信号徽章样式 */
-function multidimBadgeClass(dim, signal) {
-  if (dim === 'tech') {
-    if (signal === 'bull') return 'md-bull'
-    if (signal === 'bear') return 'md-bear'
-    return 'md-neutral'
-  }
-  if (dim === 'capital') {
-    if (signal === 'inflow') return 'md-bull'
-    if (signal === 'outflow') return 'md-bear'
-    return 'md-neutral'
-  }
-  if (dim === 'sentiment') {
-    if (signal === 'fear') return 'md-bull'  // 逆向布局机会
-    if (signal === 'greed') return 'md-bear' // 过热风险
-    return 'md-neutral'
-  }
-  return 'md-neutral'
-}
 
 /** P0-1（2026-07-21）多维信号中文标签 */
-function multidimLabel(dim, signal) {
-  const map = {
-    tech: { bull: '多头', bear: '看空', neutral: '中性' },
-    capital: { inflow: '净流入', outflow: '净流出', neutral: '中性' },
-    sentiment: { fear: '恐惧', greed: '贪婪', neutral: '中性' },
-  }
-  return (map[dim] && map[dim][signal]) || signal
-}
 
 /** 机会值分析维度标签（估值分位/回撤分位/净值分位） */
-function opportunityLabel(item) {
-  if (item.current_percentile != null) return '估值分位'
-  if (item.drawdown_percentile != null) return '回撤分位'
-  if (item.nav_percentile != null) return '净值分位'
-  return '机会值'
-}
 
 /** 机会值分析数值（含%），无则 null */
-function opportunityValue(item) {
-  if (item.current_percentile != null) return Number(item.current_percentile).toFixed(0)
-  if (item.drawdown_percentile != null) return Number(item.drawdown_percentile).toFixed(0)
-  if (item.nav_percentile != null) return Number(item.nav_percentile).toFixed(0)
-  return null
-}
 
 /** 机会值是否处于低位/机会区 */
-function opportunityIsLow(item) {
-  if (item.current_percentile != null) return parseFloat(item.current_percentile) <= 20
-  if (item.drawdown_percentile != null) return parseFloat(item.drawdown_percentile) >= 80
-  if (item.nav_percentile != null) return parseFloat(item.nav_percentile) <= 20
-  return false
-}
 
 /** 分析方法描述文案 */
-function analysisMethodLabel(item) {
-  const m = item.analysis_method
-  if (m === 'drawdown') return '基于回撤分位'
-  if (m === 'nav_percentile') return '基于净值分位'
-  if (m === 'yingmi') return '基于盈米诊断'
-  if (m === 'index_valuation') return '基于指数估值'
-  return ''
-}
 
 async function handleScan() {
-  if (scanning.value) return
+  if (scanning.value || scanTaskId.value) return
   scanning.value = true
   try {
-    // 1. 触发异步扫描,立即返回 task_id
-    const { data: triggerData } = await triggerEventRadarScan()
-    const taskId = triggerData?.task_id
-    if (!taskId) {
-      useToast().showToast('扫描启动失败:未返回任务ID', 'error')
-      return
-    }
-
-    scanTaskId.value = taskId
-    localStorage.setItem('event-radar-scan-task', taskId)
-
-    // 2. 轮询任务状态(每 3 秒一次,最长等待 10 分钟)
-    // LLM 端点响应可能较慢(含重试),给足够时间
-    const POLL_INTERVAL = 3000
-    const MAX_WAIT_MS = 10 * 60 * 1000
-    const startedAt = Date.now()
-    let finalStatus = null
-
-    while (Date.now() - startedAt < MAX_WAIT_MS) {
-      await new Promise(r => setTimeout(r, POLL_INTERVAL))
-      const { data: status } = await getEventRadarScanStatus(taskId)
-      finalStatus = status
-      if (status?.status === 'done' || status?.status === 'failed') break
-    }
-
-    // 3. 处理最终结果
-    if (!finalStatus) {
-      // 超时但任务仍在后台运行,提示用户稍后查看
-      useToast().showToast('扫描仍在后台进行,请稍后刷新事件列表查看结果', 'warning')
-    } else if (finalStatus.status === 'done') {
-      const r = finalStatus.result || {}
-      const extracted = r.extracted || 0
-      const newCount = r.new || 0
-      if (extracted === 0) {
-        // 扫描成功但无新事件:区分原因
-        const reason = r.reason || ''
-        let msg = '扫描完成,未发现新事件'
-        if (reason === 'no_events') {
-          msg = '扫描完成,当前新闻暂无符合条件的事件(需未来1-2周内具体日期)'
-        } else if (reason === 'no_news') {
-          msg = '扫描完成,但新闻采集失败,请稍后重试'
-        }
-        useToast().showToast(msg, 'warning')
-      } else {
-        useToast().showToast(
-          `扫描完成:提取 ${extracted} 个事件,新增 ${newCount} 个`,
-          'success'
-        )
-      }
-      await loadEvents()
-    } else {
-      useToast().showToast(`扫描失败:${finalStatus.error || '未知错误'}`, 'error')
-    }
-    scanTaskId.value = null
-    localStorage.removeItem('event-radar-scan-task')
+    const { data } = await triggerEventRadarScan()
+    if (!data?.task_id) throw new Error('未返回任务编号')
+    scanTaskId.value = data.task_id
+    localStorage.setItem('event-radar-scan-task', data.task_id)
+    resumeScanPolling(data.task_id)
   } catch (e) {
-    useToast().showToast('扫描失败', 'error')
-  } finally {
     scanning.value = false
+    useToast().showToast('扫描启动失败：' + e.message, 'error')
   }
 }
 
@@ -906,74 +562,66 @@ async function handleVerify() {
   }
 }
 
+let scanPollGeneration = 0
 function resumeScanPolling(taskId) {
-  if (scanResumeTimer) clearInterval(scanResumeTimer)
+  clearTimeout(scanResumeTimer)
+  const version = ++scanPollGeneration
   scanTaskId.value = taskId
-  scanResumeTimer = setInterval(async () => {
+  scanning.value = true
+  const startedAt = Date.now()
+  let waitingNotice = false
+  const current = () => version === scanPollGeneration && scanTaskId.value === taskId
+  const poll = async () => {
+    if (!current()) return
     try {
       const { data } = await getEventRadarScanStatus(taskId)
-      if (data?.status === 'running') return
-      clearInterval(scanResumeTimer)
-      scanResumeTimer = null
-      scanTaskId.value = null
-      localStorage.removeItem('event-radar-scan-task')
-      if (data?.status === 'done') {
-        useToast().showToast('后台扫描完成，事件列表已刷新', 'success')
-        await loadEvents()
-      } else {
-        useToast().showToast(`后台扫描失败：${data?.error || '未知错误'}`, 'error')
+      if (!current()) return
+      if (['done', 'failed', 'error'].includes(data?.status)) {
+        scanTaskId.value = null
+        scanning.value = false
+        scanResumeTimer = null
+        localStorage.removeItem('event-radar-scan-task')
+        if (data.status === 'done') {
+          useToast().showToast('后台扫描完成，事件列表已刷新', 'success')
+          loadEvents()
+        } else useToast().showToast(`后台扫描失败：${data.error || '未知错误'}`, 'error')
+        return
       }
-    } catch {
-      clearInterval(scanResumeTimer)
-      scanResumeTimer = null
-      scanTaskId.value = null
-      localStorage.removeItem('event-radar-scan-task')
+    } catch (error) {
+      if (!current()) return
+      if ([404, 410].includes(error?.response?.status)) {
+        scanTaskId.value = null
+        scanning.value = false
+        scanResumeTimer = null
+        localStorage.removeItem('event-radar-scan-task')
+        useToast().showToast('扫描任务已过期，可以重新扫描', 'info')
+        return
+      }
+      // 短暂断网不是任务失败，保留 ID 并继续只读轮询。
     }
-  }, 3000)
+    if (!current()) return
+    const slow = Date.now() - startedAt >= 10 * 60 * 1000
+    if (slow && !waitingNotice) {
+      waitingNotice = true
+      useToast().showToast('扫描仍在后台进行，完成后自动刷新', 'info')
+    }
+    scanResumeTimer = setTimeout(poll, slow ? 15000 : 3000)
+  }
+  scanResumeTimer = setTimeout(poll, 3000)
 }
 
 /** 判断事件是否为趋势类型（有 time_frame 字段） */
-function isTrendEvent(evt) {
-  return !!(evt && evt.time_frame)
-}
 
 /** 趋势时间跨度标签 */
-function timeFrameLabel(tf) {
-  return { short: '短期', medium: '中期', long: '长期' }[tf] || tf || ''
-}
 
 // ── Batch1 增强点 3：事件影响量化辅助展示 ──
 /** 影响方向 → {text, cls} */
-function impactDirectionLabel(dir) {
-  return {
-    up: { text: '↑ 利好', cls: 'impact-up' },
-    down: { text: '↓ 利空', cls: 'impact-down' },
-    flat: { text: '→ 中性', cls: 'impact-flat' },
-  }[dir] || { text: dir || '', cls: 'impact-flat' }
-}
 
 /** 影响持续期 → 中文标签 */
-function impactDurationLabel(d) {
-  return { short_term: '1-3天', medium_term: '1-2周', long_term: '>2周' }[d] || d || ''
-}
 
 /** 影响幅度格式化（带正负号） */
-function impactPctText(pct) {
-  if (pct == null || pct === '') return ''
-  const n = parseFloat(pct)
-  if (Number.isNaN(n)) return ''
-  return (n >= 0 ? '+' : '') + n.toFixed(2) + '%'
-}
 
 /** 判断事件是否已有缓存的影响分析（7 天内） */
-function hasCachedImpactAnalysis(evt) {
-  if (!evt.impact_analysis || !evt.impact_analyzed_at) return false
-  try {
-    const dt = new Date(evt.impact_analyzed_at.replace(' ', 'T'))
-    const days = (Date.now() - dt.getTime()) / (1000 * 60 * 60 * 24)
-    return days < 7
-  } catch (_) { return false }
-}
 
 // 事件深度解读状态：{ [event_id]: { loading, analysis, analyzed_at, cached, error } }
 const eventImpactMap = ref({})
@@ -1052,12 +700,6 @@ function toggleImpactAmountExpand(eid) {
 }
 
 /** 格式化金额（千分位） */
-function formatAmount(num) {
-  if (num == null) return '-'
-  const n = Number(num)
-  if (isNaN(n)) return '-'
-  return Math.abs(n).toLocaleString('zh-CN', { minimumFractionDigits: 0, maximumFractionDigits: 0 })
-}
 
 // ── Phase 4：事件驱动受益标的推荐 ─────────────────────────
 // beneficiaryMap: { [event_id]: { loading, data, error } }
@@ -1073,20 +715,7 @@ const recommendationAccuracyLoading = ref(false)
 const recommendationStatsDays = ref(30)
 
 // 分级中文 + 颜色
-const TIER_META = {
-  strong_buy: { label: '强推荐买入', color: '#dc2626', icon: 'star' },
-  watch: { label: '关注', color: '#2563eb', icon: 'bookmark' },
-  add_position: { label: '建议补仓', color: '#16a34a', icon: 'plus' },
-  observe_only: { label: '仅观察', color: '#6b7280', icon: 'eye' },
-}
 // 估值状态中文 + 颜色
-const VALUATION_META = {
-  undervalued: { label: '低估', color: '#16a34a' },
-  fair: { label: '合理', color: '#2563eb' },
-  overvalued: { label: '偏高', color: '#f59e0b' },
-  expensive: { label: '高估', color: '#dc2626' },
-  unknown: { label: '无数据', color: '#6b7280' },
-}
 
 /** 触发受益标的推荐（发现→估值筛选→用户上下文→落库→返回） */
 async function handleGetBeneficiaries(evt) {
@@ -1122,20 +751,6 @@ function toggleBeneficiaryExpand(eid) {
 }
 
 /** 按分级分组受益标的 */
-function groupBeneficiariesByTier(beneficiaries) {
-  if (!Array.isArray(beneficiaries) || !beneficiaries.length) return []
-  const groups = {}
-  for (const b of beneficiaries) {
-    const tier = b.recommendation_tier || 'observe_only'
-    if (!groups[tier]) groups[tier] = []
-    groups[tier].push(b)
-  }
-  // 按 strong_buy → watch → add_position → observe_only 排序
-  const order = ['strong_buy', 'watch', 'add_position', 'observe_only']
-  return order
-    .filter(t => groups[t] && groups[t].length)
-    .map(t => ({ tier: t, items: groups[t] }))
-}
 
 /** 加载推荐统计（分级/估值分布 + 热门标的） */
 async function loadRecommendationStats() {
@@ -1237,17 +852,6 @@ const accuracyOverall = computed(() => {
 
 // ── Batch2 增强点 1：关注计划自动同步徽章判定 ──────────────────────────
 /** 判断关注基金是否在 7 天内被自动同步为 bought */
-function isAutoSynced(item) {
-  if (!item.entry_date) return false
-  try {
-    const d = new Date(item.entry_date)
-    if (isNaN(d.getTime())) return false
-    const days = (Date.now() - d.getTime()) / 86400000
-    return days <= 7
-  } catch {
-    return false
-  }
-}
 
 /** 打开文章分析弹窗 */
 function openArticleDialog() {
@@ -1534,53 +1138,13 @@ async function handleScanWatchlistSignals() {
   }
 }
 
-function parseVerification(str) {
-  try { return JSON.parse(str || '') } catch { return null }
-}
 
-function verificationLabel(status) {
-  return { correct: '验证正确', wrong: '验证偏差', flat: '波动平淡' }[status] || status
-}
 
-function verificationIcon(status) {
-  return { correct: 'check-circle', wrong: 'alert-triangle', flat: 'info' }[status] || 'info'
-}
 
-function relevanceLabel(r) {
-  return {
-    holding_impact: '持仓影响',
-    watchlist_impact: '关注机会',
-    opportunity: '建仓机会',
-    market_watch: '市场关注',
-  }[r] || r
-}
 
-function statusLabel(s) {
-  return { upcoming: '即将到来', imminent: '临近', materialized: '已落地', expired: '已过期' }[s] || s
-}
 
-function parseJsonArray(str) {
-  try { return JSON.parse(str || '[]') } catch { return [] }
-}
 
-function formatDate(dateStr) {
-  if (!dateStr) return ''
-  const d = new Date(dateStr)
-  if (isNaN(d)) return dateStr
-  const today = new Date()
-  today.setHours(0, 0, 0, 0)
-  const diff = Math.round((d - today) / (1000 * 60 * 60 * 24))
-  if (diff === 0) return '今天'
-  if (diff === 1) return '明天'
-  if (diff > 1 && diff <= 7) return `${diff} 天后`
-  return dateStr
-}
 
-function directionLabel(d) {
-  if (d === 'positive') return { text: '利好', class: 'dir-positive' }
-  if (d === 'negative') return { text: '利空', class: 'dir-negative' }
-  return { text: '中性', class: 'dir-neutral' }
-}
 
 /** 加载组合智能数据（7维体检+大师组合版+风险度量） */
 async function loadPortfolioIntelligence() {
@@ -1607,26 +1171,10 @@ const verifyingMasters = ref(false)
 // 历史列表大师筛选
 const masterHistoryFilter = ref('all')
 
-function masterIcon(masterKey) {
-  return MASTER_ICONS[masterKey] || '🎯'
-}
 
 /** 胜率颜色：≥60%绿 / 40-60%黄 / <40%红 / 无数据灰 */
-function winRateColor(rate) {
-  if (rate == null || isNaN(rate)) return '#9e9e9e'
-  if (rate >= 60) return '#4caf50'
-  if (rate >= 40) return '#ff9800'
-  return '#f44336'
-}
 
 /** 验证结果 → {label, icon, color}（correct绿/wrong红/flat灰/待验证橙） */
-function verifyResultMeta(result) {
-  return {
-    correct: { label: '正确', icon: '✓', color: '#4caf50' },
-    wrong: { label: '偏差', icon: '✗', color: '#f44336' },
-    flat: { label: '平淡', icon: '—', color: '#9e9e9e' },
-  }[result] || { label: '待验证', icon: '⏳', color: '#ff9800' }
-}
 
 /** 历史决策可选大师列表（来自统计 per_master） */
 const masterFilterOptions = computed(() => {
@@ -1695,12 +1243,6 @@ function handleTabChange(tab) {
 }
 
 // ── LI-8: 领先指标 Tab ──
-const LEADING_TYPE_LABELS = {
-  policy_draft: '政策草案', capex_announcement: '资本开支', insider_trading: '产业资本',
-  customs_data: '海关数据', pmi_subitem: 'PMI分项',
-}
-const LEADING_LEVEL_LABELS = { strong: '强领先', medium: '中领先', weak: '弱领先' }
-const LEADING_LEVEL_COLORS = { strong: '#ef4444', medium: '#f59e0b', weak: '#9ca3af' }
 
 async function loadLeadingSignals() {
   leadingLoading.value = true
@@ -1728,24 +1270,14 @@ onMounted(() => {
     loadWatchlist()
   }, 300)
 
-  // 页面刷新后恢复最近一次扫描的状态，避免长任务只存在于内存。
+  // 刷新后先恢复本地凭据；查询短断不会删除任务。
   const taskId = localStorage.getItem('event-radar-scan-task')
-  if (taskId) {
-    getEventRadarScanStatus(taskId).then(({ data }) => {
-      if (data?.status === 'running') {
-        resumeScanPolling(taskId)
-        useToast().showToast('检测到后台扫描仍在进行，完成后会自动刷新事件列表', 'info')
-      } else {
-        localStorage.removeItem('event-radar-scan-task')
-        scanTaskId.value = null
-        if (data?.status === 'done') loadEvents()
-      }
-    }).catch(() => localStorage.removeItem('event-radar-scan-task'))
-  }
+  if (taskId) resumeScanPolling(taskId)
 })
 
 onUnmounted(() => {
-  if (scanResumeTimer) clearInterval(scanResumeTimer)
+  scanPollGeneration++
+  if (scanResumeTimer) clearTimeout(scanResumeTimer)
   scanResumeTimer = null
 })
 

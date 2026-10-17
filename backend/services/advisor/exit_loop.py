@@ -170,7 +170,7 @@ def attach_exit_plan_to_decision(decision_id: int, cost_price: float,
     P1-S5：可选传入 shares + buy_date 以启用止盈扣赎回费计算。
     """
     try:
-        from db import update_exit_plan, get_decision
+        from db.investment_decisions import update_exit_plan, get_decision
     except Exception:
         return None
     plan = build_exit_plan(cost_price, fund_category, shares=shares, buy_date=buy_date)
@@ -189,7 +189,7 @@ def scan_exit_signals(user_id: str = "default") -> dict:
         {scanned, alerts_created, details: [{decision_id, fund_code, events}]}
     """
     try:
-        from db import list_decisions, update_exit_state
+        from db.investment_decisions import list_decisions, update_exit_state
         from db.portfolio import get_holding_by_fund, create_alert
     except Exception as e:
         logger.warning(f"[exit_loop] 依赖加载失败: {e}")

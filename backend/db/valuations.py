@@ -1,6 +1,8 @@
 """估值数据 + 指数信息 CRUD。"""
 
 import logging
+import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from datetime import date, datetime, timedelta
 
@@ -17,19 +19,18 @@ def _run_with_safe_timeout(fn, *args, timeout_s: float, timeout_msg: str = ""):
 
     Returns: fn 的返回值，超时或异常返回 None。
     """
-    executor = ThreadPoolExecutor(max_workers=1)
-    fut = executor.submit(fn, *args)
+    from infra.execution_budget import DATA_EXECUTOR, execution_budget, wait_result
     try:
-        return fut.result(timeout=timeout_s)
-    except FuturesTimeoutError:
+        with execution_budget(timeout_s):
+            future = DATA_EXECUTOR.submit(fn,*args)
+            return wait_result(future,timeout_s)
+    except TimeoutError:
         if timeout_msg:
             logger.warning(timeout_msg)
         return None
-    except Exception as e:
-        logger.debug(f"[valuation] _run_with_safe_timeout 调用失败: {e}")
+    except Exception as exc:
+        logger.debug('估值源调用失败: %s',exc)
         return None
-    finally:
-        executor.shutdown(wait=False, cancel_futures=True)
 
 # ── 在线兜底结果内存缓存 ────────────────────────────────────
 _online_cache: dict[str, dict] = {}  # key: f"{index_code}:{metric_type}"
@@ -937,7 +938,37 @@ def get_online_valuation_cached(index_code: str, metric_type: str, max_days: int
         conn.close()
 
 
-def _online_fallback(index_code: str, metric_type: str, start_ts: datetime,
+_ONLINE_LOCKS = [threading.Lock() for _ in range(32)]
+_ONLINE_FAILURES = {}
+
+
+def _online_fallback(index_code, metric_type, start_ts, query_source, trace_id=None, **kwargs):
+    """同key单在途；失败仅缓存30秒，本地新数据仍优先读取。"""
+    from db._conn import DB_PATH
+    key = (str(DB_PATH), index_code, metric_type)
+    lock = _ONLINE_LOCKS[hash(key) % len(_ONLINE_LOCKS)]
+    if not lock.acquire(timeout=1):
+        return None
+    try:
+        now = time.monotonic()
+        if _ONLINE_FAILURES.get(key, 0) > now:
+            return None
+        result = _online_fallback_uncached(index_code, metric_type, start_ts,
+                                           query_source, trace_id, **kwargs)
+        if result is None:
+            if len(_ONLINE_FAILURES) > 1024:
+                for old_key, expiry in list(_ONLINE_FAILURES.items()):
+                    if expiry <= now:
+                        _ONLINE_FAILURES.pop(old_key, None)
+            _ONLINE_FAILURES[key] = time.monotonic() + 30
+        else:
+            _ONLINE_FAILURES.pop(key, None)
+        return result
+    finally:
+        lock.release()
+
+
+def _online_fallback_uncached(index_code: str, metric_type: str, start_ts: datetime,
                      query_source: str, trace_id: str = None,
                      conv_id: int = None, message_id: int = None,
                      agent_name: str = None, user_query: str = None,

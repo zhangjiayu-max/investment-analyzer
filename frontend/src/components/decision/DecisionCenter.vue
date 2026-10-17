@@ -1,6 +1,7 @@
 <script setup>
 import { computed, onMounted, ref } from 'vue'
 import { decisionAPI } from '../../api'
+import { useAsyncTask } from '../../composables/useAsyncTask'
 import { useToast } from '../../composables/useToast'
 import Icon from '../ui/Icon.vue'
 import EmptyState from '../ui/EmptyState.vue'
@@ -48,14 +49,14 @@ function fmtDate(s) { return s ? String(s).slice(0, 16).replace('T', ' ') : '—
 async function loadAccuracy() {
   try {
     const res = await decisionAPI.getAccuracy()
-    accuracy.value = res.data || null
+    accuracy.value = res || null
   } catch (e) { showToast('准确率统计加载失败', 'error') }
 }
 async function loadLedger() {
   loading.value = true
   try {
     const res = await decisionAPI.getLedger({ limit: 100 })
-    ledger.value = res.data || []
+    ledger.value = res || []
   } catch (e) { showToast('决策账本加载失败', 'error') }
   finally { loading.value = false }
 }
@@ -67,7 +68,7 @@ async function openDetail(row) {
   selected.value = row
   try {
     const res = await decisionAPI.getDetail(row.id)
-    if (res.data) selected.value = res.data
+    if (selected.value?.id === row.id && res) selected.value = res
   } catch (e) { /* 用列表行兜底 */ }
   finally { detailLoading.value = false }
 }
@@ -96,32 +97,43 @@ function askExitScan() {
     loading: false,
   }
 }
+const operationMessage = ref('')
+const operations = {
+  run: useAsyncTask('decision_run'),
+  backtest: useAsyncTask('decision_backtest'),
+  exit: useAsyncTask('decision_exit_scan'),
+}
+const operationBusy = computed(() => Object.values(operations).some(task => ['submitting', 'running'].includes(task.taskState.value)))
+function callbacksFor(type) {
+  const describe = (result = {}) => type === 'run'
+    ? `决策已生成：${result.verdict || ''}（置信度 ${result.confidence ?? '—'}）`
+    : type === 'backtest'
+      ? `回测完成：处理 ${result.processed || 0}，命中 ${result.hits || 0}，权重调整 ${(result.weight_changes || []).length}`
+      : `止盈扫描完成：扫描 ${result.scanned || 0}，新增提醒 ${result.alerts_created || 0}`
+  return {
+    onRestore: (result) => { operationMessage.value = describe(result) },
+    onComplete: (result) => { operationMessage.value = describe(result); showToast(operationMessage.value, 'success'); refresh() },
+    onError: (error) => { operationMessage.value = '操作失败：' + error },
+  }
+}
 async function onConfirm() {
   const { type } = confirm.value
+  if (operationBusy.value) return
   confirm.value.loading = true
+  const code = fundCode.value.trim()
+  const triggers = { run: () => decisionAPI.run(code), backtest: () => decisionAPI.runBacktest(), exit: () => decisionAPI.runExitScan() }
   try {
-    if (type === 'run') {
-      const res = await decisionAPI.run(fundCode.value.trim())
-      if (res.code === 0) { showToast(`决策已生成：${res.data?.verdict || ''}（置信度 ${res.data?.confidence ?? '—'}）`, 'success'); await refresh() }
-      else showToast(res.message || '决策生成失败', 'error')
-    } else if (type === 'backtest') {
-      const res = await decisionAPI.runBacktest()
-      const d = res.data || {}
-      showToast(`回测完成：处理 ${d.processed || 0}，命中 ${d.hits || 0}，权重调整 ${(d.weight_changes || []).length}`, 'success')
-      await refresh()
-    } else if (type === 'exit') {
-      const res = await decisionAPI.runExitScan()
-      const d = res.data || {}
-      showToast(`止盈扫描完成：扫描 ${d.scanned || 0}，新增提醒 ${d.alerts_created || 0}`, 'success')
-    }
+    operationMessage.value = '后台任务执行中'
+    await operations[type].start(triggers[type], callbacksFor(type))
     confirm.value.visible = false
-  } catch (e) {
-    showToast('操作失败：' + (e.message || e), 'error')
   } finally { confirm.value.loading = false }
 }
 function onCancel() { confirm.value.visible = false }
 
-onMounted(refresh)
+onMounted(() => {
+  refresh()
+  Object.entries(operations).forEach(([type, task]) => { task.restoreFromServer(callbacksFor(type)) })
+})
 </script>
 
 <template>
@@ -135,12 +147,14 @@ onMounted(refresh)
       <div class="header-actions">
         <div class="run-form">
           <input v-model="fundCode" class="fund-input" placeholder="基金代码 如 510300" @keyup.enter="askRunDecision" />
-          <button class="btn-primary" @click="askRunDecision"><Icon name="target" /> 运行决策</button>
+          <button class="btn-primary" :disabled="operationBusy" @click="askRunDecision"><Icon name="target" /> 运行决策</button>
         </div>
-        <button class="btn-secondary" @click="askBacktest"><Icon name="refresh" /> 回测</button>
-        <button class="btn-secondary" @click="askExitScan"><Icon name="warning" /> 止盈扫描</button>
+        <button class="btn-secondary" :disabled="operationBusy" @click="askBacktest"><Icon name="refresh" /> 回测</button>
+        <button class="btn-secondary" :disabled="operationBusy" @click="askExitScan"><Icon name="warning" /> 止盈扫描</button>
       </div>
     </div>
+
+    <p v-if="operationBusy || operationMessage" role="status">{{ operationBusy ? "后台任务执行中" : operationMessage }}</p>
 
     <!-- 命中率看板 -->
     <div class="stat-grid">

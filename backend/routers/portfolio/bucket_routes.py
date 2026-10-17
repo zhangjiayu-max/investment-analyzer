@@ -9,7 +9,7 @@ from services.bucket_engine import (
     get_bucket_with_holdings,
 )
 
-router = APIRouter(prefix="/buckets", tags=["buckets"])
+router = APIRouter(prefix="/api/buckets", tags=["buckets"])
 
 
 @router.post("/{bucket_id}/sync-holdings")
@@ -30,7 +30,7 @@ async def get_allocation_suggestion():
 async def transfer_bucket(
     from_id: int,
     to_id: int,
-    amount: float = Body(...),
+    amount: float = Body(..., embed=True, gt=0, allow_inf_nan=False),
 ):
     success = transfer_between_buckets(from_id, to_id, amount)
     if not success:
@@ -41,7 +41,7 @@ async def transfer_bucket(
 @router.put("/holdings/{holding_id}/assign")
 async def assign_bucket_to_holding(
     holding_id: int,
-    bucket_id: int = Body(...),
+    bucket_id: int = Body(..., embed=True),
 ):
     success = assign_holding_to_bucket(holding_id, bucket_id)
     if not success:

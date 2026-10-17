@@ -3,13 +3,16 @@
 import base64
 import json
 import logging
+import time
 from functools import wraps
 from openai import OpenAI, RateLimitError, APIStatusError, APITimeoutError, APIConnectionError
 from tenacity import retry, stop_after_attempt, wait_exponential_jitter, retry_if_exception, before_sleep_log
 from config import get_llm_config, get_llm_fallback_config
 from db.config import get_config_float, get_config_int
+from infra.execution_budget import ExecutionCancelled, execution_budget, remaining_seconds
 
 logger = logging.getLogger(__name__)
+_LLM_TOTAL_TIMEOUT = 180.0
 
 
 # ── SSE 活跃连接计数 ──────────────────────────────────────
@@ -36,17 +39,26 @@ def _is_retryable(e):
 # 缺口 10：指数退避重试（修正 + 抖动）
 # - 用 retry_if_exception(predicate) 替代 exception_type，避免误重试 4xx（400/404/422）
 # - wait_exponential_jitter 加随机抖动，避免多并发请求同步重试造成惊群
+def _sleep_retry(seconds):
+    """退避等待也受同一截止和取消约束，避免超时后仍睡满重试间隔。"""
+    wake_at = time.monotonic() + seconds
+    while time.monotonic() < wake_at:
+        remaining = remaining_seconds()
+        time.sleep(max(0, min(.05, wake_at - time.monotonic(), remaining)))
+
+
 _llm_retry = retry(
     retry=retry_if_exception(_is_retryable),
-    stop=stop_after_attempt(4),
+    stop=stop_after_attempt(2),
     wait=wait_exponential_jitter(initial=2, max=30, jitter=2),
     before_sleep=before_sleep_log(logger, logging.WARNING),
+    sleep=_sleep_retry,
     reraise=True,
 )
 
 _api_key, _base_url, _model = get_llm_config()
 # 超时保护：3 分钟，避免 MIMO API hang 住导致 pipeline 死锁（对话 99 案例）
-client = OpenAI(api_key=_api_key, base_url=_base_url, timeout=180.0)
+client = OpenAI(api_key=_api_key, base_url=_base_url, timeout=180.0, max_retries=0)
 MODEL = _model
 
 # ── 分级模型常量（供独立分析路由使用）────
@@ -57,7 +69,7 @@ MODEL_AUX = MODEL
 
 # 兜底客户端（主用失败时切换）
 _fallback_config = get_llm_fallback_config()
-_fallback_client = OpenAI(api_key=_fallback_config[0], base_url=_fallback_config[1], timeout=180.0) if _fallback_config else None
+_fallback_client = OpenAI(api_key=_fallback_config[0], base_url=_fallback_config[1], timeout=180.0, max_retries=0) if _fallback_config else None
 _fallback_model = _fallback_config[2] if _fallback_config else None
 
 # 仲裁 Agent 复用主客户端（统一 mimo-v2.6-pro，可通过 system_config 'arbitration.model' 覆盖模型名）
@@ -130,23 +142,36 @@ def _enforce_token_budget(caller: str = "", trace_id: str = ""):
         )
 
 
+def _create_completion_with_fallback(request_kwargs: dict, trace_id: str):
+    """每次请求复制参数并重算剩余时间，仅使用已配置的兼容兜底。"""
+    def request_kwargs_for(model=None):
+        current = dict(request_kwargs)
+        current['timeout'] = min(float(current.get('timeout') or _LLM_TOTAL_TIMEOUT), remaining_seconds())
+        if model is not None:
+            current['model'] = model
+        return current
+
+    try:
+        return client.chat.completions.create(**request_kwargs_for())
+    except (ExecutionCancelled, TimeoutError):
+        raise
+    except Exception as exc:
+        if not (_fallback_client and _fallback_model):
+            raise
+        fallback_kwargs = request_kwargs_for(_fallback_model)
+        logger.warning('[trace:%s] 主用 LLM 失败 (%s)，使用已配置兜底: %s',
+                       trace_id, exc.__class__.__name__, _fallback_model)
+        return _fallback_client.chat.completions.create(**fallback_kwargs)
+
+
 def _call_llm(caller: str = "", trace_id: str = "", **kwargs):
-    """统一的 LLM 调用入口，带指数退避重试、token 记录和兜底切换。"""
+    """统一 LLM 入口：总预算内至多两次尝试，记录 token，仅使用已配置兜底。"""
     # 全局 token 预算检查：所有 LLM 调用（对话/分析/辅助模块）均受限
     _enforce_token_budget(caller, trace_id)
     requested_model = kwargs.get("model", MODEL)
     @_llm_retry
     def _do_call():
-        try:
-            resp = client.chat.completions.create(**kwargs)
-        except Exception as e:
-            # 主用失败，尝试兜底
-            if _fallback_client and _fallback_model:
-                logger.warning(f"[trace:{trace_id}] 主用 LLM 失败 ({e.__class__.__name__}: {e})，切换到兜底: {_fallback_model}")
-                kwargs["model"] = _fallback_model
-                resp = _fallback_client.chat.completions.create(**kwargs)
-            else:
-                raise
+        resp = _create_completion_with_fallback(kwargs, trace_id)
         # P4: 检测 provider 静默映射（请求模型 ≠ 响应模型）
         _check_model_silent_mapping(requested_model, resp.model, caller, trace_id)
         if resp.usage:
@@ -158,7 +183,8 @@ def _call_llm(caller: str = "", trace_id: str = "", **kwargs):
             _record_token_usage(resp.usage, resp.model, caller, trace_id=trace_id,
                                 requested_model=requested_model)
         return resp
-    return _do_call()
+    with execution_budget(_LLM_TOTAL_TIMEOUT):
+        return _do_call()
 
 
 async def call_llm_async(caller: str = "", **kwargs):
@@ -181,74 +207,73 @@ def _call_llm_stream(caller: str = "", trace_id: str = "", **kwargs):
             if chunk["reasoning"]:  # 思考过程增量
                 ...
     """
-    # 全局 token 预算检查：流式调用同样受限
+    # 整个生成过程共享一次总预算；生成器关闭、异常及正常结束均释放连接。
     _enforce_token_budget(caller, trace_id)
-    kwargs["stream"] = True
-
+    request_kwargs = dict(kwargs, stream=True)
     requested_model = kwargs.get("model", MODEL)
-    used_client = client
-    try:
-        stream = used_client.chat.completions.create(**kwargs)
-    except Exception as e:
-        if _fallback_client and _fallback_model:
-            logger.warning(f"[trace:{trace_id}] 主用 LLM 流式失败 ({e.__class__.__name__}: {e})，切换兜底: {_fallback_model}")
-            kwargs["model"] = _fallback_model
-            used_client = _fallback_client
-            stream = used_client.chat.completions.create(**kwargs)
-        else:
-            raise
-
-    last_usage = None
-    last_model = kwargs.get("model", MODEL)
-    collected_content = []  # 收集所有 content 用于估算
-    for chunk in stream:
-        # 末包可能携带 usage
-        if getattr(chunk, "usage", None):
-            last_usage = chunk.usage
-        if getattr(chunk, "model", None):
-            last_model = chunk.model
-        if not chunk.choices:
-            continue
-        delta = chunk.choices[0].delta
-        content = getattr(delta, "content", None) or ""
-        # reasoning_content 提取（兼容 model_extra，MIMO/DeepSeek thinking mode）
-        reasoning = getattr(delta, "reasoning_content", None)
-        if not reasoning and hasattr(delta, "model_extra") and delta.model_extra:
-            reasoning = delta.model_extra.get("reasoning_content")
-        reasoning = reasoning or ""
-        if content:
-            collected_content.append(content)
-        if content or reasoning:
-            yield {"content": content, "reasoning": reasoning}
-
-    # P4: 检测 provider 静默映射
-    _check_model_silent_mapping(requested_model, last_model, caller, trace_id)
-    # 末包 token 记录（best-effort，部分 provider 流式不返回 usage）
-    if last_usage:
+    with execution_budget(_LLM_TOTAL_TIMEOUT):
+        stream = _create_completion_with_fallback(request_kwargs, trace_id)
         try:
-            _record_token_usage(last_usage, last_model, caller, trace_id=trace_id,
-                                requested_model=requested_model)
-        except Exception:
-            pass
-    else:
-        # 流式 usage 为 None 时，用 tiktoken 估算
-        try:
-            import tiktoken
-            enc = tiktoken.encoding_for_model("gpt-4")
-            msgs = kwargs.get("messages", [])
-            prompt_tokens = sum(len(enc.encode(m.get("content", ""))) for m in msgs if m.get("content"))
-            completion_tokens = sum(len(enc.encode(c)) for c in collected_content)
-            if prompt_tokens or completion_tokens:
-                class _EstUsage:
-                    def __init__(self, p, c):
-                        self.prompt_tokens = p
-                        self.completion_tokens = c
-                        self.total_tokens = p + c
-                last_usage = _EstUsage(prompt_tokens, completion_tokens)
-                _record_token_usage(last_usage, last_model, caller, trace_id=trace_id,
-                                    requested_model=requested_model)
-        except Exception:
-            pass
+            last_usage = None
+            last_model = kwargs.get("model", MODEL)
+            collected_content = []  # 收集所有 content 用于估算
+            iterator = iter(stream)
+            while True:
+                remaining_seconds()
+                try:
+                    chunk = next(iterator)
+                except StopIteration:
+                    break
+                remaining_seconds()
+                # 末包可能携带 usage
+                if getattr(chunk, "usage", None):
+                    last_usage = chunk.usage
+                if getattr(chunk, "model", None):
+                    last_model = chunk.model
+                if not chunk.choices:
+                    continue
+                delta = chunk.choices[0].delta
+                content = getattr(delta, "content", None) or ""
+                # reasoning_content 提取（兼容 model_extra，MIMO/DeepSeek thinking mode）
+                reasoning = getattr(delta, "reasoning_content", None)
+                if not reasoning and hasattr(delta, "model_extra") and delta.model_extra:
+                    reasoning = delta.model_extra.get("reasoning_content")
+                reasoning = reasoning or ""
+                if content:
+                    collected_content.append(content)
+                if content or reasoning:
+                    yield {"content": content, "reasoning": reasoning}
+
+            # P4: 检测 provider 静默映射
+            _check_model_silent_mapping(requested_model, last_model, caller, trace_id)
+            # 末包 token 记录（best-effort，部分 provider 流式不返回 usage）
+            if last_usage:
+                try:
+                    _record_token_usage(last_usage, last_model, caller, trace_id=trace_id,
+                                        requested_model=requested_model)
+                except Exception:
+                    pass
+            else:
+                # 流式 usage 为 None 时，用 tiktoken 估算
+                try:
+                    import tiktoken
+                    enc = tiktoken.encoding_for_model("gpt-4")
+                    msgs = kwargs.get("messages", [])
+                    prompt_tokens = sum(len(enc.encode(m.get("content", ""))) for m in msgs if m.get("content"))
+                    completion_tokens = sum(len(enc.encode(c)) for c in collected_content)
+                    if prompt_tokens or completion_tokens:
+                        class _EstUsage:
+                            def __init__(self, p, c):
+                                self.prompt_tokens = p
+                                self.completion_tokens = c
+                                self.total_tokens = p + c
+                        last_usage = _EstUsage(prompt_tokens, completion_tokens)
+                        _record_token_usage(last_usage, last_model, caller, trace_id=trace_id,
+                                            requested_model=requested_model)
+                except Exception:
+                    pass
+        finally:
+            stream.close()
 
 
 def call_arbitration_llm(trace_id: str = "", **kwargs):

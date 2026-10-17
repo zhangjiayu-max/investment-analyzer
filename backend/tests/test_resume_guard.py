@@ -19,7 +19,7 @@ def test_cancelled_conversation_not_auto_resumed():
         # 刷新页面触发 resume
         resp = client.post(f"/api/conversations/{conv_id}/resume")
         assert resp.status_code == 409, f"已取消的对话不应自动恢复: {resp.status_code} {resp.text}"
-        assert "已取消" in resp.json()["detail"]
+        assert "已取消" in resp.json()["message"]
     finally:
         from db.conversations import delete_conversation
         delete_conversation(conv_id)
@@ -38,7 +38,7 @@ def test_failed_conversation_not_auto_resumed():
         # 刷新页面触发 resume
         resp = client.post(f"/api/conversations/{conv_id}/resume")
         assert resp.status_code == 409, f"失败的对话不应自动恢复: {resp.status_code} {resp.text}"
-        detail = resp.json()["detail"]
+        detail = resp.json()["message"]
         assert "失败" in detail, f"返回 detail 应包含'失败': {detail}"
     finally:
         from db.conversations import delete_conversation
