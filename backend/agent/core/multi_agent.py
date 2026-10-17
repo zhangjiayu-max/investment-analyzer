@@ -24,50 +24,18 @@ def _get_tool_result_max_chars() -> int:
 
 
 def _compress_prior_tool_messages(llm_messages: list):
-    """把已累积的历史 tool 消息合并为一条摘要，保留最新一条原文。
-
-    当 llm_messages 中有 >=2 个 tool 消息时触发：
-    - 保留最后一个 tool 消息原文（最新数据最重要）
-    - 前面的 tool 消息合并为一条摘要消息（每条取前 200 字）
-    - 对应的 assistant tool_calls 消息保留（结构需要）
-    """
+    """逐条压缩旧工具结果，保留每个 tool_call_id 的响应与完整消息结构。"""
     tool_indices = [i for i, m in enumerate(llm_messages) if m.get("role") == "tool"]
     if len(tool_indices) < 2:
         return
 
-    # 收集前面所有 tool 消息的摘要（保留最后一个原文）
-    keep_idx = tool_indices[-1]
-    summaries = []
+    # assistant 的 tool_calls/reasoning_content 和最新工具结果均保持原样。
     for i in tool_indices[:-1]:
         msg = llm_messages[i]
         content = msg.get("content", "") or ""
-        # 尝试从对应的 assistant tool_calls 拿工具名
-        tool_name = "unknown"
-        # 找前一条 assistant 消息中的 tool_call_id 匹配
-        for j in range(i - 1, -1, -1):
-            prev = llm_messages[j]
-            if prev.get("role") == "assistant" and prev.get("tool_calls"):
-                for tc in prev["tool_calls"]:
-                    if tc.get("id") == msg.get("tool_call_id"):
-                        tool_name = tc.get("function", {}).get("name", "unknown")
-                        break
-                break
-        summaries.append(f"[{tool_name}] {content[:200]}...")
-
-    if not summaries:
-        return
-
-    # 用摘要替换最早的那条 tool 消息，删除中间的 tool 消息
-    summary_msg = {
-        "role": "tool",
-        "tool_call_id": llm_messages[tool_indices[0]]["tool_call_id"],
-        "content": f"（历史工具结果摘要，共{len(summaries)}条）\n" + "\n".join(summaries),
-    }
-    llm_messages[tool_indices[0]] = summary_msg
-    # 从后往前删除中间的 tool 消息（不影响索引）
-    for i in reversed(tool_indices[1:-1]):
-        del llm_messages[i]
-    logger.info(f"ReAct 历史压缩：合并 {len(tool_indices) - 1} 条 tool 消息为 1 条摘要")
+        # 固定上限使重复压缩幂等，避免叠加摘要标记。
+        if len(content) > 220:
+            msg["content"] = content[:200] + "\n（历史工具结果已截断）"
 
 
 def _maybe_compress_tool_history(llm_messages: list):
@@ -372,11 +340,13 @@ def _process_text_tool_calls(content_str, llm_messages, tool_calls_log, agent_na
         result = execute_tool(tc['name'], args, trace_id=trace_id,
                              conversation_id=conversation_id, message_id=message_id,
                              agent_name=agent_name, user_query=user_query)
+        full_result = result
         if len(result) > 8000:
             result = result[:8000] + chr(10) + '... (结果过长，已截断)'
         tool_calls_log.append({
             'name': tc['name'],
             'arguments': args,
+            'result': full_result,
             'result_preview': result[:200] if result.strip() else '（无数据返回）',
         })
         llm_messages.append({
@@ -490,10 +460,16 @@ def _check_react_convergence(tool_calls_log: list, llm_messages: list) -> bool:
 
 
 
+def _get_message_reasoning(message):
+    """兼容 SDK 附加字段与属性形式的 MIMO 推理内容。"""
+    extra = getattr(message, "model_extra", None) or {}
+    return extra.get("reasoning_content") or getattr(message, "reasoning_content", None)
+
+
 def run_specialist(agent_key: str, query: str, context: str = "",
                    prebuilt_context: str = "", model: str = None, trace_id: str = "",
                    from_pipeline: bool = False, conversation_id: int = None, message_id: int = None,
-                   blackboard=None) -> dict:
+                   blackboard=None, system_prompt_override: str = None) -> dict:
     """
     运行单个专家 Agent。
 
@@ -515,6 +491,8 @@ def run_specialist(agent_key: str, query: str, context: str = "",
         import uuid as _uuid
         trace_id = f"spec-{_uuid.uuid4().hex[:8]}"
     agent = load_specialist_agents()[agent_key]
+    if system_prompt_override is not None:
+        agent = {**agent, "system_prompt": system_prompt_override}
     start_time = time.time()
     _caller = f"specialist:{agent_key}"
     _model = model or MODEL  # 增强6: 成本路由 — 支持外部传入模型
@@ -602,6 +580,7 @@ def run_specialist(agent_key: str, query: str, context: str = "",
     MAX_TURNS = 3
     tool_calls_log = []
     answer = ""
+    answer_message = None
     # M6: Agentic RAG 硬性限制 — 检索类工具单独计数，超过上限强制进入分析
     # 解决原 max_rounds=2 仅是 prompt 指令、无硬性截断的问题
     _SEARCH_TOOLS = {
@@ -680,6 +659,7 @@ def run_specialist(agent_key: str, query: str, context: str = "",
                     max_tokens=get_config_int('llm.max_tokens_agent', 8000),
                 )
                 answer = response.choices[0].message.content or ""
+                answer_message = response.choices[0].message
                 break
             raise
 
@@ -706,6 +686,7 @@ def run_specialist(agent_key: str, query: str, context: str = "",
                 llm_messages.append({"role": "user", "content": recovery_msg})
                 continue
             answer = raw
+            answer_message = msg
             break
 
         # 有工具调用 → 执行工具
@@ -726,11 +707,7 @@ def run_specialist(agent_key: str, query: str, context: str = "",
         }
 
         # MIMO thinking mode: 传递 reasoning_content
-        reasoning = None
-        if hasattr(msg, "model_extra") and msg.model_extra:
-            reasoning = msg.model_extra.get("reasoning_content")
-        if not reasoning:
-            reasoning = getattr(msg, "reasoning_content", None)
+        reasoning = _get_message_reasoning(msg)
         if reasoning:
             assistant_msg["reasoning_content"] = reasoning
 
@@ -759,6 +736,7 @@ def run_specialist(agent_key: str, query: str, context: str = "",
                                  conversation_id=conversation_id, message_id=message_id,
                                  agent_name=agent['name'], user_query=query)
 
+            full_result = result
             # P3 优化：截断阈值可配置（默认 1500，原 3000）
             _max_chars = _get_tool_result_max_chars()
             if len(result) > _max_chars:
@@ -767,6 +745,7 @@ def run_specialist(agent_key: str, query: str, context: str = "",
             tool_calls_log.append({
                 "name": tc.function.name,
                 "arguments": args,
+                "result": full_result,
                 "result_preview": result[:200] if result.strip() else "（无数据返回）",
             })
 
@@ -810,7 +789,7 @@ def run_specialist(agent_key: str, query: str, context: str = "",
             logger.info(f'[trace:{trace_id}] [{agent["name"]}] answer 为空或过短({len(answer)}字)，触发单次收口')
             try:
                 # L4 防幻觉：收口前检测基金代码幻觉，注入纠正提示
-                _hallucination_hints = _detect_fund_code_hallucination(tool_calls_log, agent)
+                _hallucination_hints = _detect_fund_code_hallucination(tool_calls_log, agent, query=query)
                 if _hallucination_hints:
                     logger.warning(f'[trace:{trace_id}] [{agent["name"]}] 检测到基金代码幻觉，注入纠正提示')
                     llm_messages.append({
@@ -832,13 +811,16 @@ def run_specialist(agent_key: str, query: str, context: str = "",
                 _closure_answer = _closure_resp.choices[0].message.content or ""
                 if len(_closure_answer) >= 200:
                     answer = _closure_answer
+                    answer_message = _closure_resp.choices[0].message
                 else:
                     # 兜底：收口仍 <200 字 → 用工具结果拼接，不再二次调 LLM
                     logger.warning(f'[trace:{trace_id}] [{agent["name"]}] 收口仍 {len(_closure_answer)} 字，用工具结果兜底')
                     answer = _fallback_from_tool_results(tool_calls_log) or _closure_answer or "分析过程遇到问题，请重试。"
+                    answer_message = _closure_resp.choices[0].message if answer == _closure_answer else None
             except Exception as _e:
                 logger.error(f'[trace:{trace_id}] [{agent["name"]}] 收口调用失败: {_e}')
                 answer = _fallback_from_tool_results(tool_calls_log) or "分析过程遇到问题，请重试。"
+                answer_message = None
 
     duration_ms = int((time.time() - start_time) * 1000)
 
@@ -879,11 +861,16 @@ def run_specialist(agent_key: str, query: str, context: str = "",
                     max_retry = get_max_retry()
                     _retry_model = model or MODEL
                     for retry_idx in range(max_retry):
+                        retry_assistant = {"role": "assistant", "content": answer}
+                        reasoning = _get_message_reasoning(answer_message)
+                        if reasoning:
+                            retry_assistant["reasoning_content"] = reasoning
                         retry_messages = llm_messages + [
+                            retry_assistant,
                             {"role": "user", "content": retry_prompt}
                         ]
                         try:
-                            retry_answer = _call_llm(
+                            retry_response = _call_llm(
                                 caller=f"{agent_key}#self_reflection_retry",
                                 trace_id=trace_id,
                                 model=_retry_model,
@@ -891,6 +878,7 @@ def run_specialist(agent_key: str, query: str, context: str = "",
                                 temperature=0.3,
                                 max_tokens=4000,
                             )
+                            retry_answer = retry_response.choices[0].message.content or ""
                         except Exception as retry_err:
                             logger.warning(f"[self_reflection] {agent['name']} 重试调用失败: {retry_err}")
                             retry_answer = None
@@ -942,7 +930,7 @@ def run_specialist(agent_key: str, query: str, context: str = "",
     return _result
 
 
-def _detect_fund_code_hallucination(tool_calls_log: list, agent: dict) -> str:
+def _detect_fund_code_hallucination(tool_calls_log: list, agent: dict, query: str = "") -> str:
     """L4 防幻觉：检测基金分析师是否幻觉了不在持仓中的基金代码。
 
     检查 query_fund_info 调用的 fund_code 是否在用户持仓中存在。
@@ -952,12 +940,20 @@ def _detect_fund_code_hallucination(tool_calls_log: list, agent: dict) -> str:
     """
     if agent.get("agent_key") != "fund_analyst":
         return ""
+    # 只有明确讨论已有持仓时才能以持仓列表纠正代码；显式指定的代码可以是新标的。
+    if not re.search(r"(?:我的?|已有|现有|当前|已买|已购|已持有).*?(?:持仓|基金)|持仓(?:中|里|内|的)", query):
+        return ""
+    if re.search(r"持仓(?:之外|外)|非持仓|未持有|没持有|新基金|新增基金", query):
+        return ""
+    explicit_codes = set(re.findall(r"(?<!\d)\d{6}(?!\d)", query))
     # 收集所有 query_fund_info 调用的 fund_code
     queried_codes = []
     for tc in tool_calls_log:
         if tc.get("name") == "query_fund_info":
             try:
-                args = json.loads(tc.get("arguments", "{}") or "{}")
+                args = tc.get("arguments") or {}
+                if isinstance(args, str):
+                    args = json.loads(args)
                 code = (args.get("fund_code") or "").strip()
                 if code and code.isdigit():
                     queried_codes.append(code)
@@ -972,7 +968,7 @@ def _detect_fund_code_hallucination(tool_calls_log: list, agent: dict) -> str:
         holding_codes = {h.get("fund_code") for h in holdings}
     except Exception:
         return ""
-    wrong_codes = [c for c in queried_codes if c not in holding_codes]
+    wrong_codes = list(dict.fromkeys(c for c in queried_codes if c not in holding_codes and c not in explicit_codes))
     if not wrong_codes:
         return ""
     # 尝试从工具结果中找到查到的基金名称，帮 LLM 对应到正确代码
@@ -982,7 +978,9 @@ def _detect_fund_code_hallucination(tool_calls_log: list, agent: dict) -> str:
             if tc.get("name") != "query_fund_info":
                 continue
             try:
-                args = json.loads(tc.get("arguments", "{}") or "{}")
+                args = tc.get("arguments") or {}
+                if isinstance(args, str):
+                    args = json.loads(args)
                 if (args.get("fund_code") or "").strip() != wc:
                     continue
                 result_raw = tc.get("result", "") or ""
@@ -1001,7 +999,7 @@ def _detect_fund_code_hallucination(tool_calls_log: list, agent: dict) -> str:
         f"{'；'.join(code_suggestions) if code_suggestions else ''}。"
         f"请重新调用 query_portfolio(query_type='detail') 获取持仓列表，"
         f"从中找到用户提到的基金名称对应的正确 fund_code，再调用 query_fund_info。"
-        f"禁止使用持仓列表中不存在的基金代码。"
+        f"不要将不在持仓列表中的代码误认为用户已有持仓；用户明确指定的新基金可正常查询。"
     )
 
 

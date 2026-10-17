@@ -3784,16 +3784,16 @@ def _llm_policy_analysis(theme_rule: dict, news_hits: list[dict]) -> dict | None
 }}"""
 
     try:
-        from services.llm.llm_service import _call_llm
+        from services.llm.llm_service import _call_llm, MODEL
         resp = _call_llm(
             caller="opportunity_policy_analysis",
-            model=None,  # 使用默认 MIMO 模型（禁用 deepseek）
+            model=MODEL,
             messages=[{"role": "user", "content": prompt}],
             temperature=0.2,
             max_tokens=400,
             timeout=15,
         )
-        content = resp.get("content", "") if isinstance(resp, dict) else str(resp)
+        content = resp.get("content", "") if isinstance(resp, dict) else (resp.choices[0].message.content or "")
         import json as _json
         # 容错：提取 JSON
         content = content.strip()
@@ -3873,16 +3873,16 @@ def _llm_deep_review(item: dict, valuation: dict | None,
 }}"""
 
     try:
-        from services.llm.llm_service import _call_llm
+        from services.llm.llm_service import _call_llm, MODEL
         resp = _call_llm(
             caller="opportunity_deep_review",
-            model=None,  # 使用默认 MIMO 模型（禁用 deepseek）
+            model=MODEL,
             messages=[{"role": "user", "content": prompt}],
             temperature=0.2,
             max_tokens=600,
             timeout=20,
         )
-        content = resp.get("content", "") if isinstance(resp, dict) else str(resp)
+        content = resp.get("content", "") if isinstance(resp, dict) else (resp.choices[0].message.content or "")
         import json as _json
         content = content.strip()
         if content.startswith("```"):

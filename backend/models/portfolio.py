@@ -1,6 +1,7 @@
 """持仓管理相关的 Pydantic 模型。"""
 
-from pydantic import BaseModel, Field
+from typing import Literal
+from pydantic import BaseModel, Field, model_validator
 
 
 class CreateHoldingRequest(BaseModel):
@@ -117,9 +118,18 @@ class TradeReviewRequest(BaseModel):
 
 class WhatIfRequest(BaseModel):
     """情景推演请求。"""
-    scenario: str  # 'market_drop' | 'repair_to_median' | 'repair_to_opportunity' | 'rate_cut' | 'rate_hike' | 'policy_stimulus' | 'liquidity_tighten' | 'custom'
-    parameter: float | None = None  # 参数（跌幅百分比/降息幅度等）
+    scenario: Literal['market_drop', 'repair_to_median', 'repair_to_opportunity',
+                      'rate_cut', 'rate_hike', 'policy_stimulus', 'liquidity_tighten', 'custom']
+    parameter: float | None = Field(default=None, gt=0, allow_inf_nan=False)
     custom_scenario: str | None = None  # 自定义情景描述（scenario='custom'时使用）
+
+    @model_validator(mode='after')
+    def validate_scenario(self):
+        if self.scenario == 'custom' and not (self.custom_scenario or '').strip():
+            raise ValueError('请填写自定义情景描述')
+        if self.scenario == 'market_drop' and self.parameter is not None and self.parameter > 100:
+            raise ValueError('市场跌幅不能超过 100%')
+        return self
 
 
 class StressTestRequest(BaseModel):

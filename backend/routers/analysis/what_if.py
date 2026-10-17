@@ -20,6 +20,7 @@ from db import (
 from db.agent_analysis_log import create_analysis_log, complete_analysis_log
 from models.portfolio import WhatIfRequest
 from ._shared import _get_valuation_context
+from ._agent_contract import require_analysis_agent, require_specialist_analysis
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["analysis-what-if"])
@@ -43,6 +44,7 @@ _POLICY_SCENARIOS = {"rate_cut", "rate_hike", "policy_stimulus", "liquidity_tigh
 @router.post("/api/portfolio/analysis/what-if")
 async def what_if_analysis_api(req: WhatIfRequest):
     """模式 4：情景推演 — 独立情景引擎。"""
+    _whatif_agent = require_analysis_agent("情景推演分析师", get_analysis_agent_by_name)
     holdings = list_holdings()
     if not holdings:
         raise HTTPException(400, "暂无持仓数据")
@@ -87,9 +89,8 @@ async def what_if_analysis_api(req: WhatIfRequest):
     )
 
     # 动态查找情景推演分析师（避免硬编码 id 错位）
-    _whatif_agent = get_analysis_agent_by_name("情景推演分析师")
-    _whatif_agent_id = _whatif_agent.get("id") if _whatif_agent else None
-    _whatif_agent_name = _whatif_agent.get("name", "情景推演分析师") if _whatif_agent else "情景推演分析师"
+    _whatif_agent_id = _whatif_agent["id"]
+    _whatif_agent_name = _whatif_agent["name"]
 
     trace_id = f"log_{uuid.uuid4().hex[:12]}"
     _start_ts = time.time()
@@ -112,24 +113,27 @@ async def what_if_analysis_api(req: WhatIfRequest):
         # 政策类情景：宏观专家 + 风险专家双专家协作
         if req.scenario in _POLICY_SCENARIOS:
             macro_result = await asyncio.to_thread(
-                run_specialist, "macro_strategist", user_content
+                run_specialist, "macro_strategist", user_content,
+                system_prompt_override=_whatif_agent["system_prompt"]
             )
-            macro_text = macro_result.get("analysis", "") or ""
+            macro_text = require_specialist_analysis(macro_result)
             # 将宏观分析注入风险专家上下文
             risk_content = user_content + f"\n\n## 宏观策略师的分析（参考）\n{macro_text}"
             risk_result = await asyncio.to_thread(
-                run_specialist, "risk_assessor", risk_content
+                run_specialist, "risk_assessor", risk_content,
+                system_prompt_override=_whatif_agent["system_prompt"]
             )
-            risk_text = risk_result.get("analysis", "") or ""
+            risk_text = require_specialist_analysis(risk_result)
             # 合并结果
             result_text = f"## 宏观策略师分析\n{macro_text}\n\n## 风险评估师分析\n{risk_text}"
             tokens = (macro_result.get("tokens_used", 0) or 0) + (risk_result.get("tokens_used", 0) or 0)
         else:
             # 市场类情景：单专家
             specialist_result = await asyncio.to_thread(
-                run_specialist, primary_expert, user_content
+                run_specialist, primary_expert, user_content,
+                system_prompt_override=_whatif_agent["system_prompt"]
             )
-            result_text = specialist_result.get("analysis", "") or ""
+            result_text = require_specialist_analysis(specialist_result)
             tokens = specialist_result.get("tokens_used", 0) or 0
     except Exception as e:
         logger.error(f"情景推演失败: {e}")
@@ -137,14 +141,21 @@ async def what_if_analysis_api(req: WhatIfRequest):
         complete_analysis_log(trace_id=trace_id, status="error", duration_ms=_elapsed_ms, error_msg=str(e))
         raise HTTPException(500, f"AI 分析失败: {str(e)}")
 
-    record_id = create_portfolio_analysis_record(
-        analysis_type="what_if",
-        summary=f"情景推演 · {scenario_desc}",
-        input_data=json.dumps({"scenario": req.scenario, "parameter": req.parameter, "custom_scenario": req.custom_scenario}, ensure_ascii=False),
-        result_data=result_text,
-        token_usage=tokens,
-        agent_id=_whatif_agent_id,
-    )
+    try:
+        record_id = create_portfolio_analysis_record(
+            analysis_type="what_if",
+            summary=f"情景推演 · {scenario_desc}",
+            input_data=json.dumps({"scenario": req.scenario, "parameter": req.parameter, "custom_scenario": req.custom_scenario}, ensure_ascii=False),
+            result_data=result_text,
+            token_usage=tokens,
+            agent_id=_whatif_agent_id,
+        )
+    except Exception as e:
+        try:
+            complete_analysis_log(trace_id=trace_id, status="error", duration_ms=int((time.time() - _start_ts) * 1000), error_msg=str(e))
+        except Exception:
+            pass
+        raise HTTPException(500, f"分析结果保存失败: {e}") from e
     _elapsed_ms = int((time.time() - _start_ts) * 1000)
     # 更新 source_id 并标记完成（避免重复 INSERT 触发 UNIQUE 冲突）
     try:
@@ -152,7 +163,10 @@ async def what_if_analysis_api(req: WhatIfRequest):
         update_analysis_log_source(trace_id=trace_id, source_id=record_id)
     except Exception:
         pass  # 容错：即使更新失败也不影响主流程
-    complete_analysis_log(trace_id=trace_id, status="done", duration_ms=_elapsed_ms, token_usage=tokens)
+    try:
+        complete_analysis_log(trace_id=trace_id, status="done", duration_ms=_elapsed_ms, token_usage=tokens)
+    except Exception as e:
+        logger.warning("情景推演完成日志写入失败: %s", e)
 
     return {"id": record_id, "result": result_text, "token_usage": tokens, "expert": primary_expert}
 

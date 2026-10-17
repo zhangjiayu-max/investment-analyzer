@@ -57,7 +57,7 @@ async def ttfund_status():
     from mcp.ttfund_client import is_installed, check_login
     if not is_installed():
         return {"installed": False, "logged_in": False}
-    return check_login()
+    return await __import__("asyncio").to_thread(check_login)
 
 
 @router.post("/api/config/ttfund/install")
@@ -65,7 +65,7 @@ async def ttfund_install():
     """安装 ttskill CLI 并同步业务 Skill 包。"""
     from mcp.ttfund_client import install
     try:
-        result = install()
+        result = await __import__("asyncio").to_thread(install)
         return result
     except Exception as e:
         raise HTTPException(500, f"安装失败: {e}")
@@ -75,7 +75,7 @@ async def ttfund_install():
 async def ttfund_login():
     """触发 ttskill 扫码登录。"""
     from mcp.ttfund_client import login
-    result = login()
+    result = await __import__("asyncio").to_thread(login)
     if not result.get("ok"):
         raise HTTPException(400, result.get("error", "登录失败"))
     return result

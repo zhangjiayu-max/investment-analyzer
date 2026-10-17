@@ -34,7 +34,8 @@ ENDPOINTS = {
     "stock_diagnosis": "app-robo-advisor-api/assistant/stock-analysis",
     "fund_diagnosis": "app-robo-advisor-api/assistant/fund-analysis",
     "screener": "b/mcp/tool/selectSecurity",
-    "finance_data": "b/mcp/tool/searchFinanceData",
+    # 官方安装指南所链接 mx-data/mx_data.py 的 MXData.query 契约。
+    "finance_data": "https://mkapi2.dfcfs.com/finskillshub/api/claw/query",
     "macro_data": "b/mcp/tool/searchMacroData",
     "assistant": "app-robo-advisor-api/assistant/ask",
     "comparable": "app-robo-advisor-api/assistant/comparable-company-analysis",
@@ -64,10 +65,11 @@ class EastMoneyClient:
 
     def _post(self, endpoint: str, body: dict) -> dict:
         """发送 POST 请求。"""
-        url = f"{API_BASE}{endpoint}"
+        skill_api = endpoint == ENDPOINTS["finance_data"]
+        url = endpoint if skill_api else f"{API_BASE}{endpoint}"
         headers = {
             "Content-Type": "application/json",
-            "MX_APIKEY": self._api_key,
+            "apikey" if skill_api else "MX_APIKEY": self._api_key,
         }
         resp = httpx.post(url, json=body, headers=headers, timeout=self._timeout)
         resp.raise_for_status()
@@ -134,7 +136,7 @@ class EastMoneyClient:
     def finance_data(self, query: str) -> dict:
         """金融数据查询。"""
         try:
-            return self._post(ENDPOINTS["finance_data"], {"question": query})
+            return self._post(ENDPOINTS["finance_data"], {"toolQuery": query})
         except Exception as e:
             logger.warning(f"东方财富数据查询失败: {e}")
             return {}

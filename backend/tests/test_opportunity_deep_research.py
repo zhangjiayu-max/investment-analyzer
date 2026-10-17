@@ -20,6 +20,30 @@ from services.advisor.opportunity_engine import (
 )
 
 
+@pytest.mark.parametrize("review", [False, True])
+def test_opportunity_analysis_uses_configured_model_and_sdk_content(monkeypatch, review):
+    """真实 ChatCompletion 结构不能用 str(resp) 当作 JSON。"""
+    from openai.types.chat import ChatCompletion
+    from services.llm import llm_service
+    monkeypatch.setattr("db.config.get_config_bool", lambda k, d: True)
+    payload = {"final_verdict": "watch"} if review else {
+        "policy_substance": "strong", "beneficiary_alignment": "high"}
+    completion = ChatCompletion(id="test", created=0, model=llm_service.MODEL,
+        object="chat.completion", choices=[{"index": 0, "finish_reason": "stop",
+        "message": {"role": "assistant", "content": json.dumps(payload)}}])
+    calls = []
+    def call(**kwargs):
+        calls.append(kwargs)
+        assert kwargs["model"] == llm_service.MODEL
+        return completion
+    monkeypatch.setattr(llm_service, "_call_llm", call)
+    result = (_llm_deep_review({"verdict": "can_buy"}, None, "bull", "inflow", "fear")
+              if review else _llm_policy_analysis(THEME_RULES[0], [{"title": "政策"}]))
+    assert len(calls) == 1
+    assert result is not None
+    assert result.get("final_verdict") == "watch" if review else result["score_adjust"] == 8
+
+
 # ── L1 政策解读 ──────────────────────────────────
 
 def test_llm_policy_analysis_disabled(monkeypatch):
@@ -242,6 +266,7 @@ def test_review_opportunity_backtests_benchmark_hit(monkeypatch):
     """L3 基准化：超额收益 >= 2% → hit=1。"""
     # 模拟：entry_price=100, review_price=106 (涨6%), benchmark=3% → 超额3% → hit
     from services.advisor import opportunity_engine
+    monkeypatch.setattr(opportunity_engine, "_get_index_closes_between", lambda *args: [])
     from db.opportunities import update_opportunity_backtest
 
     # mock list_pending_backtests
@@ -274,6 +299,7 @@ def test_review_opportunity_backtests_benchmark_hit(monkeypatch):
 def test_review_opportunity_backtests_benchmark_miss(monkeypatch):
     """L3 基准化：超额收益 < 2% → hit=0（即使绝对涨幅 >= 3%）。"""
     from services.advisor import opportunity_engine
+    monkeypatch.setattr(opportunity_engine, "_get_index_closes_between", lambda *args: [])
 
     fake_pending = [{
         "id": 1, "theme": "人工智能", "review_date": "2026-07-15",
@@ -297,6 +323,7 @@ def test_review_opportunity_backtests_benchmark_miss(monkeypatch):
 def test_review_opportunity_backtests_disabled(monkeypatch):
     """开关关时回退原逻辑：绝对涨幅 >= 3% → hit=1。"""
     from services.advisor import opportunity_engine
+    monkeypatch.setattr(opportunity_engine, "_get_index_closes_between", lambda *args: [])
 
     fake_pending = [{
         "id": 1, "theme": "人工智能", "review_date": "2026-07-15",
@@ -320,6 +347,7 @@ def test_review_opportunity_backtests_disabled(monkeypatch):
 def test_review_opportunity_backtests_benchmark_fallback(monkeypatch):
     """基准获取失败时回退原逻辑。"""
     from services.advisor import opportunity_engine
+    monkeypatch.setattr(opportunity_engine, "_get_index_closes_between", lambda *args: [])
 
     fake_pending = [{
         "id": 1, "theme": "人工智能", "review_date": "2026-07-15",

@@ -70,6 +70,8 @@ async def run_agent_analysis(
     agent = get_analysis_agent(agent_id)
     if not agent:
         raise ValueError(f"Agent ID {agent_id} 不存在")
+    if not agent.get("is_active", True):
+        raise ValueError(f"Agent ID {agent_id} 已禁用")
 
     system_prompt = system_prompt_override or agent.get("system_prompt", "")
     if not system_prompt:
@@ -109,6 +111,27 @@ async def run_agent_analysis(
 
     # 4. 调用 LLM
     start_time = time.time()
+    result_text = ""
+    tokens = 0
+    analysis_error = None
+
+    def record_run(status):
+        """记录最终执行状态，日志失败不覆盖原始分析/保存异常。"""
+        try:
+            from db.agents import create_agent_run
+            create_agent_run(
+                conversation_id=conversation_id,
+                message_id=message_id,
+                agent_key=caller,
+                agent_name=agent.get("name", ""),
+                query=user_question[:2000],
+                result=result_text[:8000],
+                duration_ms=int((time.time() - start_time) * 1000),
+                status=status,
+            )
+        except Exception as exc:
+            logger.warning(f"记录 agent_run 失败 [{caller}]: {exc}")
+
     try:
         response = await asyncio.wait_for(
             asyncio.to_thread(lambda: _call_llm(
@@ -123,46 +146,45 @@ async def run_agent_analysis(
             )),
             timeout=timeout,
         )
-        result_text = response.choices[0].message.content or ""
-        tokens = response.usage.total_tokens if response.usage else 0
-        duration_ms = int((time.time() - start_time) * 1000)
+        result_text = response.choices[0].message.content or "" if response and response.choices else ""
+        tokens = response.usage.total_tokens if response and response.usage else 0
+        if not result_text.strip():
+            raise ValueError("AI 分析返回空响应，请重试")
     except asyncio.TimeoutError:
         logger.error(f"LLM 调用超时 [{caller}]: {timeout}s")
-        raise TimeoutError(f"AI 分析超时（{timeout}秒），请重试")
+        analysis_error = TimeoutError(f"AI 分析超时（{timeout}秒），请重试")
     except Exception as e:
         logger.error(f"LLM 调用失败 [{caller}]: {e}")
-        raise
+        analysis_error = e
 
     # 5. 保存 analysis_history 记录
     record_id = None
     if record_type:
         try:
             record_id = create_analysis_history(
+                index_code=(record_input or {}).get("index_code", ""),
+                index_name=(record_input or {}).get("index_name", ""),
                 agent_id=agent_id,
                 agent_name=agent.get("name", ""),
                 prompt_used=system_prompt[:500],
                 news_context=list(context_parts.values())[0][:500] if context_parts else "",
+                valuation_context=context_parts.get("估值数据", "")[:4000],
                 result=result_text[:8000],
                 token_usage=tokens,
+                status="error" if analysis_error else "done",
+                error_msg=str(analysis_error) if analysis_error else "",
             )
         except Exception as e:
-            logger.warning(f"保存分析记录失败 [{caller}]: {e}")
+            logger.error(f"保存分析记录失败 [{caller}]: {e}")
+            record_run("failed")
+            if analysis_error:
+                raise analysis_error from e
+            raise
 
     # 6. 记录 agent_runs
-    try:
-        from db.agents import create_agent_run
-        create_agent_run(
-            conversation_id=conversation_id,
-            message_id=message_id,
-            agent_key=caller,
-            agent_name=agent.get("name", ""),
-            query=user_question[:2000],
-            result=result_text[:8000],
-            duration_ms=duration_ms,
-            status="success",
-        )
-    except Exception as e:
-        logger.warning(f"记录 agent_run 失败 [{caller}]: {e}")
+    record_run("failed" if analysis_error else "success")
+    if analysis_error:
+        raise analysis_error
 
     return {
         "text": result_text,

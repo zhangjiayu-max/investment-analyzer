@@ -987,6 +987,9 @@ def init_db():
     """)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_par_user ON portfolio_analysis_records(user_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_par_type ON portfolio_analysis_records(analysis_type)")
+    _add_column_if_not_exists(conn, "portfolio_analysis_records", "status", "TEXT DEFAULT 'done'")
+    _add_column_if_not_exists(conn, "portfolio_analysis_records", "error_msg", "TEXT DEFAULT ''")
+    _add_column_if_not_exists(conn, "portfolio_analysis_records", "agent_name", "TEXT DEFAULT ''")
     try:
         conn.execute("ALTER TABLE portfolio_analysis_records ADD COLUMN agent_id INTEGER DEFAULT NULL")
     except Exception:
@@ -1770,6 +1773,9 @@ def init_db():
 
     # ── 功能使用埋点表 ──────────────────────────────────────
     init_feature_usage_table(conn)
+
+    # 恢复长时间中断的分析任务、业务记录与日志，避免重启后永久 running。
+    cleanup_stale_async_tasks(_conn=conn)
 
     conn.commit()
     conn.close()

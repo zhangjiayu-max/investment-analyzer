@@ -66,9 +66,9 @@ def test_replay_aborted_channel_with_stale_heartbeat(tmp_db):
     channel_id = create_channel(conversation_id=conv_id, message_id=100)
     append_event(channel_id, "status", {"message": "理解中"})
 
-    # 手动把心跳设为 20 秒前
+    # 生产阈值为 90 秒，设置足够旧的心跳以立即进入中断路径。
     conn = _get_conn()
-    old_time = (datetime.now() - timedelta(seconds=20)).strftime("%Y-%m-%d %H:%M:%S")
+    old_time = (datetime.now() - timedelta(seconds=120)).strftime("%Y-%m-%d %H:%M:%S")
     conn.execute("UPDATE stream_channels SET heartbeat_at=? WHERE channel_id=?", (old_time, channel_id))
     conn.commit()
     conn.close()
@@ -129,7 +129,7 @@ def test_execution_state_returns_channel_info(tmp_db):
     client = TestClient(app)
     resp = client.get(f"/api/conversations/{conv_id}/execution-state")
     assert resp.status_code == 200
-    data = resp.json()
+    data = resp.json()["data"]
     assert data["has_recoverable"] is True
     item = data["item"]
     assert item["channel_id"] == channel_id
@@ -152,7 +152,7 @@ def test_execution_state_no_channel_returns_null(tmp_db):
     client = TestClient(app)
     resp = client.get(f"/api/conversations/{conv_id}/execution-state")
     assert resp.status_code == 200
-    data = resp.json()
+    data = resp.json()["data"]
     assert data["has_recoverable"] is True
     item = data["item"]
     assert item["channel_id"] is None

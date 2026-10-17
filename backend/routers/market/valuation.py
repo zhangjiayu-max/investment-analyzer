@@ -1171,6 +1171,12 @@ async def get_enhanced_strategy():
     from services.llm_service import _call_llm, MODEL_AUX
     from db import get_config_float, get_config_int
 
+    from db import get_analysis_agent_by_name
+    from routers.analysis._agent_contract import require_analysis_agent, parse_analysis_response
+    agent = require_analysis_agent("增强策略分析师", get_analysis_agent_by_name)
+    agent_id = agent["id"]
+    system_prompt = agent["system_prompt"]
+
     conn = _get_conn()
 
     # 1. 获取所有指数的估值数据
@@ -1371,20 +1377,6 @@ async def get_enhanced_strategy():
     from db import get_analysis_agent_by_name, create_analysis_history
     from db.agents import create_agent_run
 
-    agent = None
-    agent_id = None
-    try:
-        agent = get_analysis_agent_by_name("增强策略分析师")
-        if agent:
-            agent_id = agent.get("id")
-    except Exception:
-        pass
-
-    system_prompt = agent.get("system_prompt") if agent else ""
-    if not system_prompt:
-        from db.analysis import DEFAULT_ENHANCED_STRATEGY_PROMPT
-        system_prompt = DEFAULT_ENHANCED_STRATEGY_PROMPT
-
     full_prompt = system_prompt + "\n\n---\n\n" + prompt
 
     # 6. 调用 LLM
@@ -1415,13 +1407,8 @@ async def get_enhanced_strategy():
             )),
             timeout=120,
         )
-        content = response.choices[0].message.content or "{}"
+        content, parsed = parse_analysis_response(response, "overall_summary", "strategies")
         tokens = response.usage.total_tokens if response.usage else 0
-        json_match = re.search(r'\{.*\}', content, re.DOTALL)
-        if json_match:
-            parsed = json.loads(json_match.group())
-        else:
-            parsed = json.loads(content)
     except Exception as e:
         logger.warning(f"增强策略 LLM 分析失败: {e}")
         parsed = {"strategies": [], "overall_summary": f"分析失败: {e}"}
@@ -1448,6 +1435,12 @@ async def get_enhanced_strategy():
         _es_conn.close()
     except Exception as e:
         logger.warning(f"记录增强策略分析历史失败: {e}")
+        if llm_status == "success":
+            try:
+                complete_analysis_log(trace_id=_es_trace_id, status="error", duration_ms=llm_duration, error_msg=str(e))
+            except Exception:
+                pass
+            raise HTTPException(500, f"增强策略分析历史保存失败: {e}") from e
 
     # 回补 source_id 到统一日志
     if _es_history_id:
@@ -1479,6 +1472,9 @@ async def get_enhanced_strategy():
         )
     except Exception as _e:
         logger.warning(f"complete_analysis_log 失败: {_e}")
+
+    if llm_status == "error":
+        raise HTTPException(500, f"增强策略分析失败: {llm_error_msg}")
 
     # 8. 附加原始数据和风险预警到结果
     strategy_map = {s.get("index_code", ""): s for s in parsed.get("strategies", [])}

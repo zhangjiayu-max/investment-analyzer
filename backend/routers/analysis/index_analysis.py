@@ -8,7 +8,7 @@ import uuid
 from fastapi import APIRouter, HTTPException
 
 from db import (
-    get_analysis_agent, list_analysis_agents, update_analysis_agent,
+    get_analysis_agent, get_analysis_agent_by_name, list_analysis_agents, update_analysis_agent,
     create_analysis_history, list_analysis_history,
     get_analysis_history_item, get_analysis_history_status,
     update_analysis_history, delete_analysis_history,
@@ -23,6 +23,7 @@ from services.rag import build_rag_context_with_details, log_rag_search  # 保�
 from models.analysis import AnalysisRunRequest, AnalysisAgentUpdateRequest
 from db.agent_analysis_log import create_analysis_log, complete_analysis_log
 from ._shared import inject_rag_context, build_portfolio_facts_with_check
+from ._agent_contract import require_analysis_agent
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["analysis-index-analysis"])
@@ -100,42 +101,60 @@ def _fetch_online_valuation_block(req, latest_local: dict | None) -> str:
 @router.post("/api/analysis/run")
 async def run_analysis(req: AnalysisRunRequest):
     """触发 AI 指数深度分析（后台异步执行）。"""
-    agent = get_analysis_agent(req.agent_id)
-    if not agent:
-        raise HTTPException(404, "分析 Agent 不存在")
-
-    # 幂等保护:已有 running 任务时直接返回该 task_id,不重复触发
-    existing = get_running_async_task("index_analysis")
-    if existing:
-        return {"ok": True, "task_id": existing["id"], "status": "running", "reused": True}
-
-    history_id = create_analysis_history(
-        index_code=req.index_code,
-        index_name=req.index_name,
-        agent_id=agent["id"],
-        agent_name=agent["name"],
-        prompt_used=agent.get("system_prompt", "")[:500],
-        news_context="",
-        valuation_context="",
-        result="",
-        token_usage=0,
-        status="running",
+    agent = require_analysis_agent(
+        "指数深度分析师",
+        lambda name: get_analysis_agent(req.agent_id) if req.agent_id is not None else get_analysis_agent_by_name(name),
     )
-    async_task_id = create_async_task("index_analysis", caller="index_deep_analysis")
+
+    from db.async_tasks import start_analysis_task
+    started = start_analysis_task(
+        "index_analysis", "index_deep_analysis",
+        {"index_code": req.index_code.strip(), "index_name": req.index_name.strip(), "agent_id": agent["id"]},
+        "analysis_history", dict(index_code=req.index_code, index_name=req.index_name,
+                                 agent_id=agent["id"], agent_name=agent["name"],
+                                 prompt_used=agent.get("system_prompt", "")[:500],
+                                 news_context="", valuation_context="", result="", token_usage=0))
+    if started["reused"]:
+        return started
+    history_id, async_task_id = started["id"], started["task_id"]
     task = asyncio.create_task(_run_index_analysis_async(history_id, req.dict(), agent, async_task_id))
     _background_tasks.add(task)
     task.add_done_callback(_background_tasks.discard)
-    return {"ok": True, "id": history_id, "task_id": async_task_id, "status": "running"}
+    return started
 
 
 async def _run_index_analysis_async(history_id: int, req_data: dict, agent: dict, async_task_id: int = None):
-    """后台执行指数深度分析。"""
+    """覆盖整个后台流程的异常边界，确保来源记录和任务都能终止。"""
+    trace_id = f"log_{uuid.uuid4().hex[:12]}"
+    start_ts = time.time()
+    try:
+        await _execute_index_analysis(history_id, req_data, agent, async_task_id, trace_id, start_ts)
+    except (Exception, asyncio.CancelledError) as error:
+        error_msg = str(error) or "分析任务已取消"
+        logger.error(f"指数分析后台失败 history_id={history_id}: {error_msg}")
+        updates = [
+            ("analysis_history", lambda: update_analysis_history(history_id, status="error", error_msg=error_msg)),
+            ("analysis_log", lambda: complete_analysis_log(
+                trace_id=trace_id, status="error", duration_ms=int((time.time() - start_ts) * 1000), error_msg=error_msg)),
+        ]
+        if async_task_id is not None:
+            updates.append(("async_task", lambda: update_async_task(async_task_id, status="error", error_msg=error_msg)))
+        for target, update in updates:
+            try:
+                update()
+            except Exception as persistence_error:
+                logger.error(f"指数分析错误状态写入失败 {target}: {persistence_error}")
+        if isinstance(error, asyncio.CancelledError):
+            raise
+
+
+async def _execute_index_analysis(history_id: int, req_data: dict, agent: dict, async_task_id: int,
+                                  trace_id: str, _start_ts: float):
+    """执行分析；估值、新闻等可选数据保留各自降级策略。"""
     req = AnalysisRunRequest(**req_data)
     index_label = req.index_name or req.index_code
 
     # 分析记录埋点（running）
-    trace_id = f"log_{uuid.uuid4().hex[:12]}"
-    _start_ts = time.time()
     try:
         create_analysis_log(
             trace_id=trace_id, agent_id=agent.get("id"), agent_name=agent.get("name", "指数深度分析师"),
@@ -330,6 +349,8 @@ async def _run_index_analysis_async(history_id: int, req_data: dict, agent: dict
             trace_id=trace_id,
         ))
         result_text = response.choices[0].message.content or ""
+        if not result_text.strip():
+            raise ValueError("模型未返回有效分析，请重试")
         token_usage = response.usage.total_tokens if response.usage else 0
     except Exception as e:
         logger.error(f"AI 分析失败: {e}")

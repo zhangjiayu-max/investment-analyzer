@@ -2,6 +2,7 @@
 import { ref, computed, onMounted } from 'vue'
 import { getSystemConfigs, updateSystemConfig, resetSystemConfigs } from '../../api'
 import ConfirmDialog from '../layout/ConfirmDialog.vue'
+import AnalysisDependencyStatus from './AnalysisDependencyStatus.vue'
 
 const loading = ref(true)
 const configs = ref([])
@@ -129,6 +130,8 @@ onMounted(loadConfigs)
       @confirm="confirm.onConfirm"
       @cancel="confirm.visible = false"
     />
+
+    <AnalysisDependencyStatus />
 
     <!-- 筛选栏 -->
     <div class="filter-bar">

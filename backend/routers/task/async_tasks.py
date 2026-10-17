@@ -26,6 +26,8 @@ async def get_async_task_status(task_id: int):
             result = task["result"]
     return {
         "task_id": task_id,
+        "record_id": task.get("source_id"),
+        "source_table": task.get("source_table", ""),
         "status": task.get("status", "running"),
         "result": result,
         "error": task.get("error_msg", ""),

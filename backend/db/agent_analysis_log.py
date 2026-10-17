@@ -75,8 +75,8 @@ def complete_analysis_log(trace_id: str, status: str, duration_ms: int = None,
         UPDATE agent_analysis_log SET
             status = ?, duration_ms = ?, token_usage = ?,
             error_msg = ?, completed_at = datetime('now','localtime')
-        WHERE trace_id = ?
-    """, (status, duration_ms, token_usage, error_msg, trace_id))
+        WHERE trace_id = ? AND (status = 'running' OR status = ?)
+    """, (status, duration_ms, token_usage, error_msg, trace_id, status))
     updated = cur.rowcount > 0
     conn.commit()
     conn.close()

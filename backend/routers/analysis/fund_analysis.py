@@ -17,6 +17,8 @@ from db.agent_analysis_log import create_analysis_log, complete_analysis_log
 from db.config import get_config_int, get_config_float
 from ._shared import _get_valuation_context, _get_valuation_context_for_fund, build_portfolio_facts_with_check
 
+from ._agent_contract import require_analysis_agent
+
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["analysis-fund-analysis"])
 
@@ -68,10 +70,8 @@ async def fund_analysis_api(req: dict):
     if not fund_code:
         raise HTTPException(400, "请输入基金代码")
 
+    agent = require_analysis_agent("指定基金分析师", get_analysis_agent_by_name)
     # 动态查找"指定基金分析师"（不再回退到 agent_id=6，避免取到已废弃的 AI 基金分析师）
-    agent = get_analysis_agent_by_name("指定基金分析师")
-    if not agent:
-        raise HTTPException(404, "指定基金分析师未配置，请在 Agent 管理页面添加")
 
     agent_id = agent.get("id")
     agent_name = agent.get("name", "指定基金分析师")
@@ -122,28 +122,19 @@ async def fund_analysis_api(req: dict):
         f"\n{valuation_context}"
     )
 
-    # 幂等保护:已有 running 任务时直接返回该 task_id,不重复触发
-    existing = get_running_async_task("fund_analysis")
-    if existing:
-        return {"task_id": existing["id"], "status": "running", "reused": True}
+    from db.async_tasks import start_analysis_task
+    started = start_analysis_task(
+        "fund_analysis", "fund_analysis", {"fund_code": fund_code, "agent_id": agent_id},
+        "portfolio_analysis_records", dict(analysis_type="fund_analysis", summary=f"指定基金分析 · {fund_name}({fund_code})", input_data=json.dumps({"fund_code": fund_code, "fund_name": fund_name}, ensure_ascii=False), agent_id=agent_id))
+    if started["reused"]:
+        return started
+    record_id, async_task_id = started["id"], started["task_id"]
 
-    # 创建记录（status='running'）
-    record_id = create_portfolio_analysis_record(
-        analysis_type="fund_analysis",
-        summary=f"指定基金分析 · {fund_name}({fund_code})",
-        input_data=json.dumps({"fund_code": fund_code, "fund_name": fund_name}, ensure_ascii=False),
-        status="running",
-        agent_id=agent_id,
-    )
-    # 创建 async_task 记录用于通用状态查询
-    async_task_id = create_async_task("fund_analysis", caller="fund_analysis")
-
-    # 后台执行分析
     task = asyncio.create_task(_run_fund_analysis_async(async_task_id, record_id, system_prompt, user_content, fund_code, fund_name, agent_id, agent_name))
     _background_tasks.add(task)
     task.add_done_callback(_background_tasks.discard)
 
-    return {"ok": True, "id": record_id, "task_id": async_task_id, "status": "running"}
+    return started
 
 
 async def _run_fund_analysis_async(async_task_id: int, record_id: int, system_prompt: str, user_content: str, fund_code: str = "", fund_name: str = "", agent_id: int = 6, agent_name: str = "指定基金分析师"):
@@ -151,13 +142,13 @@ async def _run_fund_analysis_async(async_task_id: int, record_id: int, system_pr
     import uuid
     trace_id = f"log_{uuid.uuid4().hex[:12]}"
     _start_ts = time.time()
-    create_analysis_log(
-        trace_id=trace_id, agent_id=agent_id, agent_name=agent_name,
-        analysis_type="fund_analysis", source_table="portfolio_analysis_records",
-        source_id=record_id, query=user_content[:300],
-        input_summary=f"基金:{fund_code}({fund_name})",
-    )
     try:
+        create_analysis_log(
+            trace_id=trace_id, agent_id=agent_id, agent_name=agent_name,
+            analysis_type="fund_analysis", source_table="portfolio_analysis_records",
+            source_id=record_id, query=user_content[:300],
+            input_summary=f"基金:{fund_code}({fund_name})",
+        )
         from services.llm_service import _call_llm, MODEL_ANALYSIS
         response = await asyncio.to_thread(lambda: _call_llm(
             caller="portfolio_fund_analysis",
@@ -171,6 +162,8 @@ async def _run_fund_analysis_async(async_task_id: int, record_id: int, system_pr
             max_tokens=get_config_int('llm.max_tokens_analysis', 8192),
         ))
         result_text = response.choices[0].message.content or ""
+        if not result_text.strip():
+            raise ValueError("模型未返回有效分析，请重试")
         tokens = response.usage.total_tokens if response.usage else 0
         update_analysis_record(record_id, result_data=result_text, token_usage=tokens, status="done")
         update_async_task(async_task_id, status="done")

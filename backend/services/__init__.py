@@ -13,6 +13,7 @@ advisor/ market/ strategy/ content/ conversation/ finance/ quality/ index/），
 
 import importlib
 import importlib.util
+from pathlib import Path
 import sys
 
 
@@ -86,11 +87,13 @@ class _AliasLoader:
         self.real_name = real_name
 
     def create_module(self, spec):
-        return importlib.import_module(self.real_name)
+        module = importlib.import_module(self.real_name)
+        self._canonical_spec = module.__spec__
+        return module
 
     def exec_module(self, module):
-        # 真实模块在 create_module 中已完成初始化，无需重复执行
-        pass
+        # importlib 会把别名 spec 写到同一个 module；还原规范路径，避免重载错位。
+        module.__spec__ = self._canonical_spec
 
 
 class _ServicesAliasFinder:
@@ -100,16 +103,28 @@ class _ServicesAliasFinder:
     ``services.rag.rag_enhanced`` 这类新路径的正常导入。
     """
 
+    _services_alias_finder = True
+
     def find_spec(self, fullname, path, target=None):
         if not fullname.startswith("services."):
             return None
         short = fullname[len("services."):]
-        if "." in short or short not in _ALIAS_MAP:
+        if "." in short:
             return None
-        real_name = "services." + _ALIAS_MAP[short]
+        relocated = _ALIAS_MAP.get(short)
+        if relocated is None:
+            # 兼容原 agent finder 覆盖的其余服务，由 services 统一负责。
+            root = Path(__file__).parent
+            if (root / f"{short}.py").exists() or (root / short).is_dir():
+                return None
+            matches = sorted(root.glob(f"*/{short}.py"))
+            if len(matches) != 1:
+                return None
+            relocated = f"{matches[0].parent.name}.{short}"
+        real_name = "services." + relocated
         return importlib.util.spec_from_loader(fullname, _AliasLoader(real_name))
 
 
 # 安装到 meta_path 最前面，确保优先于默认文件查找器
-if not any(isinstance(f, _ServicesAliasFinder) for f in sys.meta_path):
+if not any(getattr(f, "_services_alias_finder", False) for f in sys.meta_path):
     sys.meta_path.insert(0, _ServicesAliasFinder())
